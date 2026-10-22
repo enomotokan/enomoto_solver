@@ -303,6 +303,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_time_max: f64,
     /// 暫定解がない根の RENS (ダイビング式・長めのサブ MIP) を行ったか。
     pub(super) noinc_rens_done: bool,
+    /// 次に別スレッドで解くサブ MIP が `ENOMOTO_MIP_SUBMIP_HL2` の対象か ([`super::heuristics::SUBMIP_HL2`])
+    pub(super) submip_hl2_next: bool,
     /// サブ MIP のノード上限の倍率 (根の RENS のやり直しで一時的に上げる)。
     pub(super) submip_node_mult: f64,
     /// 直近の (旧来の) RENS のサブ MIP がノード上限で止まったか。
@@ -1500,6 +1502,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_time_frac: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_FRAC", 0.07, f64),
         submip_time_max: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_MAX", 6.0, f64),
         noinc_rens_done: false,
+        submip_hl2_next: false,
         submip_node_mult: 1.0,
         rens_node_limited: false,
         force_fix_cap: false,
@@ -1915,6 +1918,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// プールの違反の走査は 1.4-1.9 秒だった (走査は平坦な複製 `pool_idx` で安くした)
     pub(super) fn highs_cutmgmt(&self) -> bool {
         (env_str!("ENOMOTO_MIP_HIGHS_CUTMGMT").is_some() || self.hcm_auto) && !self.params.submip
+    }
+
+    /// `ENOMOTO_MIP_SUBMIP_NO_SB2` (試作、既定では使わない): すべてのサブ MIP で強分岐をしない (`min_reliable = 0` に加えて
+    /// [`Self::select_branch_inner`] の強分岐も止める。既存の `ENOMOTO_MIP_SUBMIP_NO_SB` は前者だけで強分岐は止まらない)。
+    /// HiGHS のサブ MIP は `mip_pscost_minreliable = 0`。physiciansched6-2 の根の RINS の近傍では、サブ MIP の最初の 3 ノードの
+    /// 強分岐に 10 秒、その中の RENS のサブ MIP (480 列) の最初のノードに 4 秒かかった (analysis/submip_hl_20261022.md)
+    pub(super) fn submip_no_sb2(&self) -> bool {
+        self.params.submip
+            && (env_str!("ENOMOTO_MIP_SUBMIP_NO_SB2").is_some()
+                // `ENOMOTO_MIP_SUBMIP_HL2` のサブ MIP の中のサブ MIP (深さ 2 以上。根の RENS) も強分岐をしない
+                || (super::heuristics::SUBMIP_HL2.with(|c| c.get()) && super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) >= 2 && env_str!("ENOMOTO_MIP_SUBMIP_HL2_SB").is_none()))
     }
 
     pub(super) fn time_up(&self) -> bool {
@@ -2578,6 +2592,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_NO_SB").is_some() {
             self.pc.min_reliable = 0;
         }
+        // `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP とその中のサブ MIP も強分岐をしない (`ENOMOTO_MIP_ROOT_SUBMIP_HL_SB` ならする。
+        // [`Self::select_branch_inner`] でも止める)。physiciansched6-2 の根の RINS の近傍 (約 1500 列) では最初のノードの強分岐に 1.4 秒かかった
+        if (self.params.submip && super::heuristics::root_submip_hl_any() && env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL_SB").is_none()) || self.submip_no_sb2() {
+            self.pc.min_reliable = 0;
+        }
         // 木の写しから解く: 写しを作ったときの LP のカットの行とカットプールを入れる
         if let Some(snap) = self.snap.clone() {
             for (c, r) in &snap.pool {
@@ -2661,9 +2680,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let cap = if super::heuristics::fj_feas_extend(&pc) && self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_FJ_FEAS_FRAC", 0.5, f64) * self.params.time_limit } else { cap };
                 // `ENOMOTO_MIP_FJ_P3` (既定、`ENOMOTO_MIP_NO_FJ_P3` で止める): FJ だけ、p5s の前処理の変更をかけ直した問題で探す ([`super::fj_p3_problem`])
                 let fj_p3 = super::fj_p3_on();
+                // `ENOMOTO_MIP_EQUIV2_FJ` (試作): 前処理が `ENOMOTO_MIP_PROBE_EQUIV2` の代入を使った求解では、FJ 用の問題で大きさに依らず
+                // INEQ_SINGLETON を使う ([`super::fj_p3_problem`])
+                let fj_ineq = env_str!("ENOMOTO_MIP_EQUIV2_FJ").is_some() && super::EQUIV2_USED.with(|f| f.get());
                 let h = std::thread::spawn(move || {
                     if fj_p3 {
-                        if let Some((q, post, sc)) = super::fj_p3_problem(&pc) {
+                        if let Some((q, post, sc)) = super::fj_p3_problem(&pc, fj_ineq) {
                             crate::set_fj_p3_force(true);
                             let r = super::heuristics::fj_search(&q, &q.col_lo, &q.col_up, effort, cap, seed, Some(&stop2));
                             crate::set_fj_p3_force(false);
@@ -3082,7 +3104,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // サブ MIP (942 列) では、この 4 つで 2.4 秒使って何も見つけず、入れ子の RENS のサブ MIP でも毎回同じだけかかる
                 // (HiGHS のサブ MIP は根のヒューリスティクスのほとんどを入れ子の RENS に使い、1 回 0.1-1.6 秒で終わる)
                 // (暫定解がない、つまり打ち切り値が無限のサブ MIP だけ。`ENOMOTO_MIP_SUBMIP_NO_SB` と同じ理由)
-                let light = self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some();
+                // `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP とその中のサブ MIP でも同じく使わない (`ENOMOTO_MIP_ROOT_SUBMIP_HL_PUMP` なら
+                // 使う)。HiGHS には Feasibility Pump がなく、サブ MIP の根では RENS の後すぐ木に進む。physiciansched6-2 の根の RINS の近傍では、
+                // 根の LP が最適値 49324 の入れ子の RENS のサブ MIP も、Feasibility Pump で時間を使い切って 0 ノードで止まった
+                let hl_light = self.params.submip && super::heuristics::root_submip_hl_any() && env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL_PUMP").is_none();
+                let light = hl_light || (self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some());
                 // ダイビングの予算: 最初の根の LP の 2 倍に、カットのループを含めた根全体の反復数の一定割合を足す
                 let dive_budget = 2 * root_iters + 1000 + (tunable!("ENOMOTO_T_MIP_ROOT_DIVE_FRAC", 0.0, f64) * self.lp.total_iterations() as f64) as u64;
                 // `ENOMOTO_MIP_PAR_DIVES`: 並列モードで暫定解がなければ、Feasibility Pump と 3 つのダイビングを、今の根の写しから
@@ -5502,7 +5528,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         self.sb_degen_stats[0] += 1;
         self.sb_degen_stats[1] += degenerate as u64;
-        let allow_sb = sb <= maxsb && !degenerate;
+        // `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP とその中のサブ MIP では強分岐をしない (`ENOMOTO_MIP_ROOT_SUBMIP_HL_SB` ならする。
+        // HiGHS のサブ MIP の `mip_pscost_minreliable = 0`。ここの信頼度のしきい値は `min_reliable` を見ないので別に止める)
+        let hl_no_sb = (self.params.submip && super::heuristics::root_submip_hl_any() && env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL_SB").is_none()) || self.submip_no_sb2();
+        let allow_sb = sb <= maxsb && !degenerate && !hl_no_sb;
         // 信頼度のしきい値: 予算の残りに応じて 1..5
         let mut prio = ((maxsb - sb) / (sb + 1.0)).min(1.0);
         prio = prio.max((quot - sb) / (sb + 1.0)).max(0.0);
@@ -8068,10 +8097,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let label = self.heur_label;
         let fix_rate = self.submip_fix_rate.take();
         let basis = self.submip_basis.take();
+        let hl2 = std::mem::take(&mut self.submip_hl2_next);
         self.pending_submips.push_back((
             std::thread::spawn(move || {
                 // 別スレッドで解くサブ MIP も入れ子の深さ 1 として数える ([`super::heuristics::SUBMIP_DEPTH`])
                 super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
+                super::heuristics::SUBMIP_HL2.with(|c| c.set(hl2));
                 if let Some(b) = basis {
                     SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
                 }

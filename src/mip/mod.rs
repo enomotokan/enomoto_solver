@@ -213,8 +213,25 @@ pub fn solve_mip(
     let prev_race = crate::simplex::mip_lp::set_cold_race_threads(params.threads);
     // 根のサブ MIP・Feasibility Jump を別スレッドで回すかなどの判定 ([`solver::mip_threads`]) も、`ENOMOTO_MIP_THREADS` が
     // なければこのスレッド数にする
+    // 診断用 `ENOMOTO_MIP_AS_SUBMIP` (`1` / `hl`): 書き出したサブ MIP (`ENOMOTO_MIP_SUBMIP_DUMP`) を、根のサブ MIP と同じ設定
+    // (サブ MIP の印・1 スレッド・ギャップ 1e-4・ノード上限 500 (`ENOMOTO_MIP_NODE_LIMIT` で変える)・サブ MIP の深さ 1) で解く。
+    // 打ち切り値は `ENOMOTO_MIP_CUTOFF`、時間は引数で与える。`hl` なら `ENOMOTO_MIP_ROOT_SUBMIP_HL`、`hl2` なら `ENOMOTO_MIP_SUBMIP_HL2` の印も立てる
+    let as_sub = env_str!("ENOMOTO_MIP_AS_SUBMIP");
+    let params = if as_sub.is_some() {
+        heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
+        heuristics::ROOT_SUBMIP_HL.with(|c| c.set(as_sub == Some("hl")));
+        heuristics::SUBMIP_HL2.with(|c| c.set(as_sub == Some("hl2")));
+        MipParams { submip: true, threads: 1, rel_gap: params.rel_gap.max(1e-4), abs_gap: params.abs_gap.max(1e-6), node_limit: settings.node_limit.or(env_f64(env_str!("ENOMOTO_MIP_NODE_LIMIT")).map(|v| v as u64)).unwrap_or(500), ..params }
+    } else {
+        params
+    };
     let prev_mt = solver::MIP_THREADS_DEFAULT.swap(params.threads, std::sync::atomic::Ordering::Relaxed);
     let r = if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() { solve_portfolio(&p, params) } else { solve_problem(&p, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()) };
+    if as_sub.is_some() {
+        heuristics::SUBMIP_DEPTH.with(|d| d.set(0));
+        heuristics::ROOT_SUBMIP_HL.with(|c| c.set(false));
+        heuristics::SUBMIP_HL2.with(|c| c.set(false));
+    }
     crate::simplex::mip_lp::set_cold_race_threads(prev_race);
     solver::MIP_THREADS_DEFAULT.store(prev_mt, std::sync::atomic::Ordering::Relaxed);
     if env_str!("ENOMOTO_MIP_XPROF").is_some() {
@@ -2259,9 +2276,12 @@ pub(super) fn fj_p3_on() -> bool {
 /// ([`dual_bound_tightening`])。本体の問題は変えない。前処理は列の番号を保つので、FJ の解は `postsolve` を逆順に当てて尺度を
 /// 戻せば `pc` の空間の解になる ([`fj_p3_solution`])。physiciansched6-2 では FJ が解を見つけるのにこの 3 つと FJ の LP 修復の
 /// 4 つが全部要る (1 つでも外すと 20 秒で解なし) が、p5s として本体の前処理に入れると beasleyC3・uccase12 で証明が遅れる
-pub(super) fn fj_p3_problem(pc: &MipProblem) -> Option<(MipProblem, Vec<crate::presolve::PostsolveStep>, Option<crate::presolve::scaling::Scaling>)> {
+/// `ineq`: 大きさに依らず INEQ_SINGLETON を使う (`ENOMOTO_MIP_EQUIV2_FJ`、[`crate::fj_p3_ineq`])
+pub(super) fn fj_p3_problem(pc: &MipProblem, ineq: bool) -> Option<(MipProblem, Vec<crate::presolve::PostsolveStep>, Option<crate::presolve::scaling::Scaling>)> {
     crate::set_fj_p3_force(true);
+    crate::set_fj_p3_ineq(ineq);
     let r = presolve_mip(pc, false, false, None);
+    crate::set_fj_p3_ineq(false);
     crate::set_fj_p3_force(false);
     let (mut prob, post, sc) = match r {
         Some(Presolved::Reduced { prob, postsolve, scaling }) if prob.n == pc.n => (prob, postsolve, Some(scaling)),

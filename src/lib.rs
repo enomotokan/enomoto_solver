@@ -35,6 +35,18 @@ thread_local! {
     /// Feasibility Jump 用の問題を作る前処理の中か (`ENOMOTO_MIP_FJ_P3`、試作): このスレッドだけで `ENOMOTO_MIP_INEQ_SINGLETON`・
     /// `ENOMOTO_MIP_CS_OBJ_PIVOT`・`ENOMOTO_MIP_FJ_LP_REPAIR` を有効とみなす
     static FJ_P3_FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Feasibility Jump 用の問題の前処理で、問題の大きさに依らず INEQ_SINGLETON を使うか (`ENOMOTO_MIP_EQUIV2_FJ`、試作)
+    static FJ_P3_INEQ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`FJ_P3_INEQ`] が立っているか。
+pub(crate) fn fj_p3_ineq() -> bool {
+    FJ_P3_INEQ.with(|c| c.get())
+}
+
+/// [`FJ_P3_INEQ`] を立てる・下ろす。
+pub(crate) fn set_fj_p3_ineq(on: bool) {
+    FJ_P3_INEQ.with(|c| c.set(on));
 }
 
 /// [`FJ_P3_FORCE`] が立っているか。

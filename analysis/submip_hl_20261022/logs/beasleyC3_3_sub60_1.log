@@ -1,0 +1,21 @@
+MIP: presolve: rows 1461 -> 476, free columns 1143 -> 747, nonzeros 4024 -> 1494, postsolve steps 396
+MIP: probing: 291 of 291 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 0 implications (0.00s)
+MIP: root LP 3.3080975610e3 (330 iters, 0.00s)
+MIP: fixed-integer LP dual check: c x 3.3160000000e3, dual bound 3.3080975610e3 -> solve
+MIP:   global fixed integers 959 of 1250 (newly 0 since the root LP)
+MIP: new incumbent 3.3160000000e3 at node 0 (0.01s) [tree]
+MIP: cut loop done: 0 cuts added, 0 in LP, pool 0 cuts (0 nonzeros), obj 3.3080975610e3 -> 3.3080975610e3
+MIP: the root LP bound 3.3080975610e3 closed the gap to the prune limit 9.3700000000e2 (incumbent Some(3316.0), 0.01s)
+MIP:     0.01s nodes        0 open       0 lb inf ub 3.31600000e3 lp_iters 331 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 0 dive_iters 0 lp_rows 476 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 0, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 0, in pool 0 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: conflict analysis (HiGHS style): calls 0, conflicts 0, added 0, mean length 0.0, max length 475, 0.00s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 0 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 476
+Presolve: 1461 rows, 2500 columns -> 0 rows, 0 columns (0.00s)
+Solving with the slope-intercept dual two-phase method
+{"status": "optimal", "objective": 3316.0, "best_bound": 3316.0, "nodes": 0, "root_bound": null, "first_solution_time": null, "first_solution_objective": null, "time": 0.012912503000052311}

@@ -1,0 +1,62 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option threads to 1
+Set option time_limit to 60
+Set option mip_rel_gap to 0
+MIP e2hl_0 has 8433 rows; 111827 cols; 39826 nonzeros; 109346 integer variables (1313 binary)
+Coefficient ranges:
+  Matrix  [5e-01, 1e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 8e+03]
+  RHS     [1e+00, 8e+02]
+Presolving model
+3084 rows, 1169 cols, 8725 nonzeros 0s
+2483 rows, 1116 cols, 8570 nonzeros 0s
+1948 rows, 1097 cols, 7177 nonzeros 0s
+1619 rows, 965 cols, 6393 nonzeros 0s
+1617 rows, 962 cols, 6385 nonzeros 0s
+Presolve reductions: rows 1617(-6816); columns 962(-110865); nonzeros 6385(-33441) 
+
+Solving MIP model with:
+   1617 rows
+   962 cols (830 binary, 0 integer, 130 implied int., 2 continuous, 0 domain fixed)
+   6385 nonzeros
+   Thread count 1 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   34605.5         inf                  inf        0      0      0         0     0.3s
+         0       0         0   0.00%   49124.5         inf                  inf        0      0      6      1138     0.4s
+ R       0       0         0   0.00%   49424.5         49424.5            0.00%     2440    220    215      3608     1.4s
+         1       0         1 100.00%   49424.5         49424.5            0.00%     2440    220    215      3608     1.4s
+
+Solving report
+  Model             e2hl_0
+  Status            Optimal
+  Primal bound      49424.5
+  Dual bound        49424.5
+  Gap               0%
+  P-D integral      0
+  Solution status   feasible
+                    49424.5 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            1.35
+                    0.23 (Presolve)
+                    1.12 (Solve)
+                    0.00 (Postsolve)
+  Max sub-MIP depth 0
+  Nodes             1
+  Repair LPs        0
+  LP iterations     3608
+                    0 (strong br.)
+                    2470 (separation)
+                    0 (heuristics)

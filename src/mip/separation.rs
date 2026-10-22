@@ -305,10 +305,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // beasleyC3 の根の RENS の近傍 (最適値 763・770) は、通常の求解 (25 ラウンド) なら根の下界が 760〜762 に上がって根で
         // 解けるが、5 ラウンドのサブ MIP は 500 ノードで止まり 773〜779 だった。HiGHS のサブ MIP は通常のカットのループを回し、
         // 同じ形の近傍を 1 ノードで解く (analysis/beasleyC3_r3_20261020.md)
+        // `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP: ラウンド・停滞・時間の上限を `ENOMOTO_T_MIP_ROOT_SUBMIP_HL_CUT_ROUNDS`
+        // (25)・`..._CUT_STALL` (10)・`..._CUT_FRAC` (サブ MIP の時間上限の 0.5) にする
+        let hl_sub = self.params.submip && super::heuristics::root_submip_hl_active();
+        // `ENOMOTO_MIP_SUBMIP_HL2` の対象のサブ MIP (深さ 1): 25 ラウンド・停滞 10・時間上限の 0.5
+        let hl2_sub = self.params.submip && super::heuristics::submip_hl2_active();
+        let mut hl2_obj_stall = 0usize;
         let fc_sub = self.params.submip && self.params.fc_submip;
-        let mut max_rounds = if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS", 25usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_ROUNDS", 5usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
+        let mut max_rounds = if hl_sub {
+            tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_CUT_ROUNDS", 25usize, usize)
+        } else if hl2_sub {
+            tunable!("ENOMOTO_T_MIP_SUBMIP_HL2_CUT_ROUNDS", 25usize, usize)
+        } else if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS", 25usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_ROUNDS", 5usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
         let eq2c = self.equiv2_cuts();
-        let cut_frac = if eq2c { tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC", 0.3, f64) } else { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) };
+        let cut_frac = if hl_sub {
+            tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_CUT_FRAC", 0.5, f64)
+        } else if hl2_sub {
+            tunable!("ENOMOTO_T_MIP_SUBMIP_HL2_CUT_FRAC", 0.5, f64)
+        } else if eq2c {
+            tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC", 0.3, f64)
+        } else if self.params.submip {
+            // `ENOMOTO_T_MIP_SUBMIP_CUT_FRAC` (試作、既定 0.1 = 通常と同じ): サブ MIP の根のカットの時間上限 (サブ MIP の時間上限に対する割合)。
+            // 時間上限 2 秒のサブ MIP では 0.2 秒になり、根の LP (0.3 秒) だけで使い切って 1 本も入らない (physiciansched6-2)
+            tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_FRAC", 0.1, f64)
+        } else {
+            tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64)
+        };
         let mut time_cap = if self.params.time_limit.is_finite() { cut_frac * self.params.time_limit } else { f64::INFINITY };
         // 根のヒューリスティクスの間にカットを強める求解: 止めの合図まで続ける (ラウンド数・時間の上限なし)
         let job = super::solver::CUT_JOB.with(|j| j.borrow().clone()).filter(|_| self.snap.is_some());
@@ -811,6 +833,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // ラウンドは 2 回分と数える (何も進まない問題で長く回さない。分数の列が減っている間は続ける)。
                 let nfrac = self.fractional(&self.lp.col_values()).len();
                 let reldiff = (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0);
+                // `ENOMOTO_MIP_SUBMIP_HL2` のサブ MIP: 目的値が `ENOMOTO_T_MIP_SUBMIP_HL2_OBJ_STALL` (3) ラウンド続けて動かなければ止める
+                // (分数の列の数が減っていても)。neos-960392 の根の RENS の近傍は根の LP がもう最適値 -238 で、カットを続けても時間を使うだけ
+                if hl2_sub {
+                    hl2_obj_stall = if reldiff <= 1e-4 { hl2_obj_stall + 1 } else { 0 };
+                    if hl2_obj_stall >= tunable!("ENOMOTO_T_MIP_SUBMIP_HL2_OBJ_STALL", 3usize, usize) {
+                        break;
+                    }
+                }
                 if phase2 {
                     // 第 2 段階: 目的値だけで停滞を数える
                     if reldiff <= 1e-4 {
@@ -826,7 +856,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 4 ラウンドは下界が動かず、続ければ上がる。HiGHS も止めずに 66 ラウンド回して 154 -> 171)
                     if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 && !saturated && !widen_now {
                         stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened { 2 } else { 1 };
-                        if stall >= if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
+                        if stall >= if hl_sub { tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_CUT_STALL", 10usize, usize) } else if hl2_sub { tunable!("ENOMOTO_T_MIP_SUBMIP_HL2_CUT_STALL", 10usize, usize) } else if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
                             if !phase2_on {
                                 break;
                             }
@@ -2047,10 +2077,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.fc_network && env_str!("ENOMOTO_MIP_FACE_SEP_FC") != Some("on") && self.p.n <= tunable!("ENOMOTO_T_MIP_FACE_SEP_FC_MAXCOLS", 5000usize, usize) {
             return (self.separate(x, light), Vec::new());
         }
+        // `ENOMOTO_MIP_ROOT_SUBMIP_HL_FACE` (試作): `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP (深さ 1) でも面の頂点で分離する。
+        // physiciansched6-2 (同値の代入の後) の根の RINS の近傍を単独で解くと面の頂点の分離ありで 2 ラウンドで 49324 に届くが、
+        // サブ MIP (根の LP のカットの行つき) の中では 1 ラウンド 2.2 秒かかって 49290.7 のまま動かなかったので、既定では使わない
+        let main_like = !self.params.submip || (super::heuristics::root_submip_hl_active() && env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL_FACE").is_some());
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
             Some(m) if m == "off" => return (self.separate(x, light), Vec::new()),
-            Some(m) if !self.params.submip => m,
-            None if !self.params.submip => "int2",
+            Some(m) if main_like => m,
+            None if main_like => "int2",
             _ => return (self.separate(x, light), Vec::new()),
         };
         let p = self.p;
@@ -2503,7 +2537,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (15654 -> 15745)、neos-911970 0.42 -> 0.28 秒 (47.26 のまま)、h80x6320d 2.00 -> 1.84 秒 (5936 -> 5926) だが、
         // 30n20b8 は 2.41 -> 2.08 秒で下界 151 -> 88.5 (fill の予算なしでも 102: 停止規則が密なカットを切り、こちらは
         // mod-k などの代わりに tableau 行の密なカットで下界を得ている)。既定では使わない
-        let tab_rules = env_str!("ENOMOTO_MIP_TAB_HIGHS_RULES").is_some();
+        // `ENOMOTO_MIP_EQUIV2_TAB` (試作): 前処理が `ENOMOTO_MIP_PROBE_EQUIV2` の代入を使った求解 (サブ MIP でない) だけ HiGHS の選び方にする。
+        // physiciansched6-2 の代入後の根のカットは既定の選び方では 48957〜48990 で止まり、HiGHS の選び方で 49050〜49215 まで伸びる
+        // (analysis/physiciansched_r5_20261021.md)
+        let tab_rules = env_str!("ENOMOTO_MIP_TAB_HIGHS_RULES").is_some()
+            || (env_str!("ENOMOTO_MIP_EQUIV2_TAB").is_some() && !self.params.submip && super::EQUIV2_USED.with(|f| f.get()));
         let mut w_cache: Vec<Vec<f64>> = Vec::new();
         if tab_rules {
             // 行の最大係数 (LP 行、スラック列を含まない)

@@ -1,0 +1,46 @@
+MIP: presolve: tightened 1 coefficients (skipped 0 in rows redundant within tolerance), normalized 3 integer rows
+MIP: presolve: merged 4 parallel rows (0 new equations)
+MIP: presolve: rows 10327 -> 3099, free columns 2119 -> 1634, nonzeros 173229 -> 24446, postsolve steps 404
+MIP: probing: 264 of 1541 binaries probed (1 passes), 78 fixed, 112 bounds tightened, 25668 implications (0.06s)
+MIP: root LP -2.1241060606e4 (1272 iters, 0.11s)
+MIP: cut round 0: 30 cuts (of 627, sep 0.03s, LP 95 iters), LP rows 3129 (cut rows mean nnz 2), obj -2.1118434579e4 (0.15s)
+MIP: cut round 1: 20 cuts (of 562, sep 0.03s, LP 210 iters), LP rows 3141 (cut rows mean nnz 25), obj -2.0957821965e4 (0.20s)
+MIP: cut round 2: 18 cuts (of 661, sep 0.04s, LP 226 iters), LP rows 3148 (cut rows mean nnz 36), obj -2.0838277853e4 (0.27s)
+MIP: cut round 3: 21 cuts (of 718, sep 0.05s, LP 219 iters), LP rows 3161 (cut rows mean nnz 61), obj -2.0788262557e4 (0.35s)
+MIP: cut round 4: 20 cuts (of 679, sep 0.05s, LP 183 iters), LP rows 3166 (cut rows mean nnz 69), obj -2.0760383824e4 (0.42s)
+MIP: cut loop done: 109 cuts added, 51 in LP, pool 0 cuts (0 nonzeros), obj -2.1241060606e4 -> -2.0760383824e4
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic trivial: none (0.00s)
+MIP: root heuristic randomized rounding: none (0.00s)
+MIP: root heuristic interior rounding: none (0.00s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP: root heuristic LP face: none (0.00s)
+MIP: root heuristic RENS: none (0.00s)
+MIP: root heuristic RENS (LP before cuts): none (0.00s)
+MIP: root heuristic feasibility pump: none (1.30s)
+MIP:   global fixed integers 10449 of 11717 (newly 0 since the root LP)
+MIP: new incumbent -1.9590000000e4 at node 0 (2.02s) [fractional diving]
+MIP:   dive reached an integral LP at depth 149 (accepted true, objective -19590.00000000002, 0 backtracks)
+MIP: root heuristic fractional diving: found (0.29s)
+MIP: root heuristic locks: none (0.00s)
+MIP: root heuristic clique: none (0.00s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP: root heuristic RINS: none (0.00s)
+MIP: after root heuristics: incumbent Some(-19590.0) (2.02s)
+MIP:     2.02s nodes        1 open       0 lb inf ub -1.95900000e4 lp_iters 10374 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 8168 dive_iters 0 lp_rows 3150 node_cut_secs 0.00
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP:   global fixed integers 10481 of 11717 (newly 32 since the root LP)
+MIP: new incumbent -2.0360000000e4 at node 76 (2.82s) [tree]
+MIP:     3.09s nodes      105 open      83 lb -2.07490208e4 ub -2.03600000e4 lp_iters 16287 sb_iters 0 sb_lps 0 sb_secs 0.01 node_iters 4746 (first 4724, lps 106) heur_iters 10502 dive_iters 1167 lp_rows 3150 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 0, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 0, in pool 0 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: conflict analysis (HiGHS style): calls 0, conflicts 0, added 0, mean length 0.0, max length 3615, 0.00s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 96 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+MIP: sibling backtracks 8; basis restores 24 (basic count mismatch 0), first LP iterations after a restore 1088
+MIP: node diag: nodes 105 node LPs 106 mean rows 3150.0 iters 4746 (44.8/LP) LP secs 0.73 sep rounds 0 added 0 node cut secs 0.00 final rows 3150
+{"status": "node_limit", "objective": -20360.0, "best_bound": -20749.02082466293, "nodes": 105, "root_bound": null, "first_solution_time": null, "first_solution_objective": null, "time": 3.224684259000014}

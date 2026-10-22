@@ -1,0 +1,65 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP phys_e2_0 has 8437 rows; 111827 cols; 39834 nonzeros; 109346 integer variables (1254 binary)
+Coefficient ranges:
+  Matrix  [5e-01, 1e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 8e+03]
+  RHS     [1e+00, 8e+02]
+Presolving model
+3000 rows, 1164 cols, 8896 nonzeros 0s
+2426 rows, 1104 cols, 8670 nonzeros 0s
+1930 rows, 1070 cols, 7346 nonzeros 0s
+1655 rows, 997 cols, 6710 nonzeros 0s
+Presolve reductions: rows 1655(-6782); columns 997(-110830); nonzeros 6710(-33124) 
+Objective function is integral with scale 2
+
+Solving MIP model with:
+   1655 rows
+   997 cols (859 binary, 0 integer, 138 implied int., 0 continuous, 0 domain fixed)
+   6710 nonzeros
+   Thread count 1 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   47924.5         50625.99          10.63%        0      0      0         0     0.3s
+         0       0         0   0.00%   49173.833333    50625.99           8.30%        0      0      7      1149     0.5s
+ L       0       0         0 100.00%   49324           49324              0.00%     1481    230    106      2515     1.4s
+         1       0         1 100.00%   49324           49324              0.00%     1481    230    106      2805     1.4s
+
+Solving report
+  Model             phys_e2_0
+  Status            Optimal
+  Primal bound      49324
+  Dual bound        49324
+  Gap               0% (tolerance: 0.01%)
+  P-D integral      0.0895701716459
+  Solution status   feasible
+                    49324 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            1.43
+                    0.33 (Presolve)
+                        MIP    time [calls] = 0.30 [1]
+                        subMIP time [calls] = 0.03 [1]
+                    1.09 (Solve)
+                        MIP    time [calls] = 1.08 [1]
+                        subMIP time [calls] = 0.01 [1]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [1]
+  Max sub-MIP depth 2
+  Nodes             1
+  Repair LPs        0
+  LP iterations     2805
+                    0 (strong br.)
+                    1366 (separation)
+                    290 (heuristics)
+{"status": "Optimal", "objective": 49324.0, "bound": 49324.0, "nodes": 1, "time": 1.441923293000059}

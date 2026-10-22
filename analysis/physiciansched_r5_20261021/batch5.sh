@@ -1,0 +1,7 @@
+#!/bin/bash
+cd "$(dirname "$0")"
+P=physiciansched6-2
+T="ENOMOTO_MIP_PROBE_EQUIV2=1 ENOMOTO_MIP_EQUIV2_CUTS=1 ENOMOTO_MIP_EQUIV2_FJ=1 ENOMOTO_MIP_TAB_HIGHS_RULES=1"
+./run_cfg.sh $P 60 tab_w200 $T ENOMOTO_T_MIP_CUT_WIDE_MAX=200
+./run_cfg.sh $P 60 tab_w200 $T ENOMOTO_T_MIP_CUT_WIDE_MAX=200
+./run_cfg.sh $P 200 tab200 $T
