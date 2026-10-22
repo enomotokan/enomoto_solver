@@ -9808,6 +9808,15 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 55 問 (10 秒): 代入が主問題で働くのは beavma・graph20-20-1rand・physiciansched6-2・timtab1、in-out が働くのも同じ 4 問 (timtab1 は悪化)。ROOT_SUBMIP_HL は 7 問で働く (nw04 16976 → 36512 など悪化もある)。
 - 不一致 0、"MIP: WARNING" 0。既定にしない (保留)。
 
+## 2026-10-22: 終了判定の修正 (根のカット後の下界・打ち切り値・上限で終わるときの判定) を既定に
+
+- バグ調査 (analysis/term_check_20261022.md): physiciansched6-2 で暫定解 = 下界 = 49324 なのに time_limit で返った。原因は (1) 根の `root_gap_closed` がカット前の LP の値 (cur_lb) と暫定解ありしか見ない、(2) 再スタートで暫定解が前処理に捨てられ打ち切り値だけが渡る、(3) 木の最初の反復の time_up が根のノードを刈る前にある。develop の既定でも当たり、過去の計測の neos-960392 の「暫定解 = 下界 = −238 の時間切れ」11 回はこれ。
+- 修正: 7d0da6e・c10c055 (根でカットの後の下界と打ち切り値も見る、上限で終わるとき下界が打ち切り値に届いていれば最適。戻すとき `ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT`・`ENOMOTO_MIP_NO_LIMIT_GAP_EXIT`)、8763b65 (再スタート後の問題では試作 PROBE_EQUIV2 を使わない。uccase12 で再スタート後の EQUIV2 の代入が正しい解を切ることが見つかったため。原因はバグ調査 inv/equiv2-bug-20261022 で調べている)。乱数の MIP 300 問で HiGHS と突き合わせて誤り 0。
+- cf6d25c (develop e47bbca + 3 つ) で 40 + 16 問、newdef / oldterm (以前の判定) を順番を入れ替えて 2 組。
+- 40 問 (解けた・SGM): TFa oldterm 24・24.12 / newdef 25・23.36、TFb newdef 27・21.05 / oldterm 26・20.96。
+- 16 問: TFa oldterm 9・44.57 / newdef 8・43.87 (neos-911970・beasleyC3 を落とし mc11 を解く)、TFb newdef 11・37.83 / oldterm 10・38.25 (timtab1・beasleyC3 を解く)。
+- 不一致 0、"MIP: WARNING" 0。誤りの修正で、40 問は 2 組とも +1、16 問は合わせて同数、SGM は 3 組で良く 1 組で +0.09 秒なので既定にする。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
