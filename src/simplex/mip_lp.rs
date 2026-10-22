@@ -317,6 +317,17 @@ impl TwoStageLp {
         self.clear_memo();
     }
 
+    /// 行の境界をまとめて変える (標準形の作り直しは 1 回)。
+    pub fn set_row_bounds_many(&mut self, b: &[(usize, f64, f64)]) {
+        for &(i, lo, up) in b {
+            self.row_lo[i] = lo;
+            self.row_up[i] = up;
+        }
+        self.rebuild();
+        self.status = None;
+        self.clear_memo();
+    }
+
     pub fn set_costs(&mut self, c: &[f64]) {
         self.cost.copy_from_slice(c);
         self.std.c[..self.n].copy_from_slice(c);

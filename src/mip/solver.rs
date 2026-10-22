@@ -472,7 +472,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) dbg_on: bool,
     workers: Vec<std::thread::JoinHandle<MipResult>>,
     worker_totals: (u64, u64),
-    pool_stats: [u64; 3],
+    /// 渡したノード・取ったノード・他のスレッドから受け取った大域的な境界・根の被約費用で締めた大域的な境界 (診断用)。
+    pool_stats: [u64; 4],
     /// 診断用 (`ENOMOTO_PROF_TREE_PAR`): 木の探索の内訳と、今のノードの種類 ([`TreeProf::kind_n`])。
     tprof: TreeProf,
     tp_kind: usize,
@@ -678,6 +679,9 @@ pub(crate) struct TreeSnapshot {
     /// 60 秒で従 3 本が木に一度も加わらなかった。analysis/bound_inf_20261021.md §5)。`ENOMOTO_MIP_TREE_NO_SNAP_BASIS` で持たせない
     basis: Option<super::lp::Basis>,
     dse: Option<Vec<(u32, f32)>>,
+    /// 診断用 (`ENOMOTO_MIP_TREE_DIAG`): 写しを作ったときの LP 解 (従の根の LP 解が主の頂点からどれだけ離れたかを測る)。
+    diag_x: Option<Vec<f64>>,
+    diag_rc: Option<Vec<f64>>,
     /// 根で HiGHS 流のカット管理を有効にしたか (`ENOMOTO_MIP_CUT_STRONG_AUTO`)。
     hcm_auto: bool,
     /// 完全オービトープと、対称性の行・固定を加える前の問題 (写しから解く求解も orbitopal fixing をし、ヒューリスティクスの
@@ -883,6 +887,66 @@ fn proof_verify() -> bool {
 
 fn tree_diag() -> bool {
     env_str!("ENOMOTO_MIP_TREE_DIAG").is_some()
+}
+
+/// 従の根で最適面の上を動くときの目的関数の作り方 (`ENOMOTO_MIP_TREE_DIVERSE_VERTEX`)。
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DvDir {
+    /// 整数列に [-1, 1] の乱数。
+    Rand,
+    /// 分数値の整数列を乱数の向き (切り下げ・切り上げ) へ押す (ほかの整数列は小さい乱数)。
+    Frac,
+    /// 整数列を主の頂点の値から離す向きへ押す (下限なら上へ、上限なら下へ、間なら乱数の向き)。
+    Far,
+}
+
+/// `ENOMOTO_MIP_TREE_DIVERSE_VERTEX` の設定。
+#[derive(Clone, Copy, Debug)]
+struct DvMode {
+    /// 主の最適面の上を動く目的関数 (`None` なら主は動かない)。
+    dir: Option<DvDir>,
+    /// 最適面に制限せず、費用に `ε d` を足して解く。
+    lex: bool,
+    /// 双対の側も動かす (退化した基底変数の境界を乱数の幅で締めて解き、戻して解き直す)。
+    dual: bool,
+}
+
+/// `ENOMOTO_MIP_TREE_DIVERSE_VERTEX=<rand|frac|far|none>[,lex][,dual]` (試作、既定では使わない。`1` は `rand`): 木の従は
+/// 写しの基底から根の LP を解いたあと (主と同じ頂点)、根の LP の最適面の上で従ごとに違う目的関数を最適化して別の
+/// 最適頂点へ移り、元の目的関数で解き直した最適基底から木に入る ([`Solver::diverse_vertex`])。`lex` は最適面に制限せず、
+/// 費用に `ε d` を足して解く (`ENOMOTO_T_MIP_DIVERSE_EPS`)。`dual` は双対解も動かす ([`Solver::diverse_dual`])。
+/// 写しには常に基底を持たせる。
+fn diverse_vertex_mode() -> Option<DvMode> {
+    let v = env_str!("ENOMOTO_MIP_TREE_DIVERSE_VERTEX")?;
+    let dir = if v.contains("frac") {
+        Some(DvDir::Frac)
+    } else if v.contains("far") {
+        Some(DvDir::Far)
+    } else if v.contains("none") || v == "dual" {
+        None
+    } else {
+        Some(DvDir::Rand)
+    };
+    Some(DvMode { dir, lex: v.contains("lex"), dual: v.contains("dual") })
+}
+
+/// 診断用: 整数列のうち `a` と `b` で値の違う列の数と L1 距離、`b` の分数値の整数列の数。
+fn int_distance(p: &MipProblem, a: &[f64], b: &[f64]) -> (usize, f64, usize) {
+    let (mut k, mut l1, mut f) = (0, 0.0, 0);
+    for j in 0..p.n {
+        if !p.is_int[j] {
+            continue;
+        }
+        let d = (a[j] - b[j]).abs();
+        if d > 1e-6 {
+            k += 1;
+            l1 += d;
+        }
+        if (b[j] - b[j].round()).abs() > 1e-6 {
+            f += 1;
+        }
+    }
+    (k, l1, f)
 }
 
 /// スレッドの間で共有する学習の記録 (通し番号つき、古いものから捨てる)。
@@ -1598,7 +1662,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool,
         workers: Vec::new(),
         worker_totals: (0, 0),
-        pool_stats: [0; 3],
+        pool_stats: [0; 4],
         tprof: TreeProf::default(),
         tp_kind: 0,
         proof_conflicts: 0,
@@ -2695,7 +2759,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: [snapshot] root LP {root_st:?} ({} iters, {:.2}s)", self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
         }
         if tree_diag() && self.snap.is_some() && self.pool.is_some() {
-            eprintln!("MIP_TREE_DIAG: tid {} root LP {root_st:?} from the snapshot basis {snap_basis_used} (dse {snap_dse_used}): {} iters, {:.2}s ({:.2}s since the thread started), objective {:.10e}, {} rows", self.pool_tid, self.lp.total_iterations(), t_root_lp.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64(), self.lp.objective() + self.p.offset, self.lp.num_rows());
+            eprintln!("MIP_TREE_DIAG: tid {} root LP {root_st:?} from the snapshot basis {snap_basis_used} (dse {snap_dse_used}): {} iters, {:.2}s ({:.2}s since the thread started), objective {:.10e}, {} rows{}", self.pool_tid, self.lp.total_iterations(), t_root_lp.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64(), self.lp.objective() + self.p.offset, self.lp.num_rows(), self.snap_distance_diag());
+        }
+        // `ENOMOTO_MIP_TREE_DIVERSE_VERTEX` (試作): 木の従は写しの基底 (主の頂点) から、根の LP の最適面の上の別の頂点へ移る
+        if root_st == LpStatus::Optimal && snap_basis_used && self.pool.is_some() {
+            if let Some(mode) = diverse_vertex_mode() {
+                let y0 = tree_diag().then(|| (self.lp.row_duals(), self.lp.reduced_costs()));
+                if let Some(dir) = mode.dir {
+                    self.diverse_vertex(dir, mode.lex);
+                }
+                if mode.dual {
+                    self.diverse_dual();
+                }
+                if let Some((y0, d0)) = y0 {
+                    let (y, d) = (self.lp.row_duals(), self.lp.reduced_costs());
+                    let ydiff = y0.iter().zip(&y).filter(|(a, b)| (*a - *b).abs() > 1e-7 * (1.0 + a.abs())).count();
+                    let nz = |v: &[f64]| (0..self.p.n).filter(|&j| self.p.is_int[j] && v[j].abs() > 1e-7).count();
+                    let ddiff = (0..self.p.n).filter(|&j| self.p.is_int[j] && (d0[j] - d[j]).abs() > 1e-7 * (1.0 + d0[j].abs())).count();
+                    eprintln!("MIP_TREE_DIAG: tid {} diverse {mode:?}: duals differ in {ydiff} of {} rows, int reduced costs differ in {ddiff} (nonzero {} -> {}), objective {:.10e}, {:.2}s since the thread started", self.pool_tid, y.len(), nz(&d0), nz(&d), self.lp.objective() + self.p.offset, self.start.elapsed().as_secs_f64());
+                }
+                self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
+            }
         }
         if matches!(root_st, LpStatus::Error | LpStatus::IterationLimit) && !self.time_up() {
             // 結論を出せなかった (数値的な破綻など): 内点法 + クロスオーバーだけで解き直す
@@ -4687,6 +4771,301 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 診断用: 写しを作ったときの LP 解 (主の頂点) と今の LP 解の違い (整数列)。
+    fn snap_distance_diag(&self) -> String {
+        let Some(xr) = self.snap.as_ref().and_then(|s| s.diag_x.as_ref()).filter(|x| x.len() == self.p.n) else { return String::new() };
+        let x = self.lp.col_values();
+        let (k, l1, f) = int_distance(self.p, xr, &x);
+        let f0 = int_distance(self.p, xr, xr).2;
+        let rcd = self.snap.as_ref().and_then(|s| s.diag_rc.as_ref()).filter(|r| r.len() == self.p.n).map_or(0, |r0| {
+            let r = self.lp.reduced_costs();
+            (0..self.p.n).filter(|&j| self.p.is_int[j] && (r0[j] - r[j]).abs() > 1e-7 * (1.0 + r0[j].abs())).count()
+        });
+        format!(", vs the snapshot LP point: {k} int cols differ (L1 {l1:.1}), fractional int cols {f} (snapshot {f0}), int reduced costs differ in {rcd}")
+    }
+
+    /// `ENOMOTO_MIP_TREE_DIVERSE_VERTEX` (試作): 木の従の根の LP (写しの基底から解いた、主と同じ頂点 x0・目的値 z*) から、
+    /// 根の LP の最適面の上の別の頂点へ移る。
+    /// 1. 最適面に制限する: 被約費用が 0 でない非基底の列を今の境界に固定し (相補性から最適面の上では動かない)、
+    ///    `c x <= z* + tol` の行を足す (双対値が 0 でない行が効いたまま。固定した列の分は右辺へ移す)。
+    /// 2. 従ごとの目的関数 d ([`DvDir`]、種はスレッド番号と写しの番号) を最小化する (双対単体法、今の基底から)。
+    /// 3. 行と固定を外し、費用を c に戻して解き直す (着いた点は c に対して最適なので、双対単体法は双対実行可能に
+    ///    するピボットだけで済むはず。最適値は z* のまま)。
+    /// `lex` なら 1 をせず、費用 `c + ε d` で解いてから c で解き直す。どこかで解けなければ元の状態 (x0) に戻す。
+    /// LP は最後に c で最適 (下界・被約費用は根の LP の正しい値)。
+    fn diverse_vertex(&mut self, dir: DvDir, lex: bool) {
+        let t0 = Instant::now();
+        let n = self.p.n;
+        let it0 = self.lp.total_iterations();
+        let saved = self.lp.save_state();
+        let x0 = self.lp.col_values();
+        let b0 = self.lp.basis();
+        let rc = self.lp.reduced_costs();
+        let c = self.lp.costs();
+        let z0 = self.lp.objective();
+        let mut s = 0x9E37_79B9_7F4A_7C15u64 ^ (self.pool_tid as u64 + 1).wrapping_mul(0xD1B5_4A32_D192_ED03) ^ self.snap.as_ref().map_or(0, |sn| sn.serial).wrapping_mul(0x2545_F491_4F6C_DD1D) ^ tunable!("ENOMOTO_T_MIP_DIVERSE_SEED", 0u64, u64);
+        let mut rnd = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let d: Vec<f64> = (0..n)
+            .map(|j| {
+                if !self.p.is_int[j] {
+                    return 0.0;
+                }
+                let (l, u) = self.lp.col_bounds(j);
+                let sign = |r: f64| if r < 0.5 { 1.0 } else { -1.0 };
+                match dir {
+                    DvDir::Rand => 2.0 * rnd() - 1.0,
+                    DvDir::Frac if (x0[j] - x0[j].round()).abs() > 1e-6 => sign(rnd()),
+                    DvDir::Frac => 0.05 * (2.0 * rnd() - 1.0),
+                    DvDir::Far if x0[j] <= l + 1e-6 => -1.0,
+                    DvDir::Far if x0[j] >= u - 1e-6 => 1.0,
+                    DvDir::Far => sign(rnd()),
+                }
+            })
+            .collect();
+        let remaining = self.deadline.map_or(f64::INFINITY, |t| t.saturating_duration_since(Instant::now()).as_secs_f64());
+        let cap_secs = tunable!("ENOMOTO_T_MIP_DIVERSE_SECS", 5.0, f64).min(0.2 * remaining);
+        let lim1 = SolveLimits { iteration_limit: tunable!("ENOMOTO_T_MIP_DIVERSE_ITERS", 50_000u64, u64), deadline: Some(Instant::now() + std::time::Duration::from_secs_f64(cap_secs.max(0.0))), ..Default::default() };
+        let m = self.lp.num_rows();
+        let mut fixed: Vec<(usize, f64, f64)> = Vec::new();
+        let mut obj_row = false;
+        let st1;
+        if lex {
+            let cmax = c.iter().fold(0.0f64, |a, v| a.max(v.abs())).max(1e-9);
+            let eps = tunable!("ENOMOTO_T_MIP_DIVERSE_EPS", 1e-4, f64) * cmax;
+            let cd: Vec<f64> = (0..n).map(|j| c[j] + eps * d[j]).collect();
+            self.lp.set_costs(&cd);
+            st1 = self.lp.solve(&lim1);
+        } else {
+            for j in 0..n {
+                if matches!(b0.col[j], VarStatus::Lower | VarStatus::Upper) && rc[j].abs() > 1e-7 {
+                    fixed.push((j, self.lp.col_bounds(j).0, self.lp.col_bounds(j).1));
+                    self.lp.set_col_bounds(j, x0[j], x0[j]);
+                }
+            }
+            let mut row = Vec::new();
+            let mut rhs = z0;
+            let is_fixed = {
+                let mut v = vec![false; n];
+                fixed.iter().for_each(|&(j, _, _)| v[j] = true);
+                v
+            };
+            for j in 0..n {
+                if c[j] != 0.0 {
+                    if is_fixed[j] {
+                        rhs -= c[j] * x0[j];
+                    } else {
+                        row.push((j, c[j]));
+                    }
+                }
+            }
+            if !row.is_empty() {
+                let tol = tunable!("ENOMOTO_T_MIP_DIVERSE_OBJ_TOL", 1e-9, f64) * (1.0 + z0.abs());
+                self.lp.add_rows(&[(row, f64::NEG_INFINITY, rhs + tol)]);
+                obj_row = true;
+            }
+            self.lp.set_costs(&d);
+            st1 = self.lp.solve(&lim1);
+        }
+        let it1 = self.lp.total_iterations();
+        let x1 = self.lp.col_values();
+        let z1 = self.lp.costs().iter().zip(&x1).map(|(a, b)| a * b).sum::<f64>();
+        let zc1: f64 = c.iter().zip(&x1).map(|(a, b)| a * b).sum();
+        if obj_row {
+            let mut rm = vec![false; m + 1];
+            rm[m] = true;
+            self.lp.delete_rows(&rm);
+        }
+        for &(j, l, u) in &fixed {
+            self.lp.set_col_bounds(j, l, u);
+        }
+        self.lp.set_costs(&c);
+        let mut st2 = LpStatus::Error;
+        if st1 == LpStatus::Optimal {
+            st2 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        }
+        let z2 = self.lp.objective();
+        let ok = st2 == LpStatus::Optimal && (z2 - z0).abs() <= 1e-6 * (1.0 + z0.abs());
+        let it2 = self.lp.total_iterations();
+        if !ok {
+            self.lp.restore_state(&saved);
+            if st2 != LpStatus::TimeLimit {
+                // 元の頂点の基底から解き直す (反復 0 のはず)
+                let _ = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+            }
+        }
+        if tree_diag() {
+            let x2 = self.lp.col_values();
+            let (k0, l0, f0) = int_distance(self.p, &x0, &x0);
+            let _ = (k0, l0);
+            let (k1, l1, f1) = int_distance(self.p, &x0, &x1);
+            let (k2, l2, f2) = int_distance(self.p, &x0, &x2);
+            let (k12, _, _) = int_distance(self.p, &x1, &x2);
+            let b2 = self.lp.basis();
+            let bdiff = (0..n).filter(|&j| (b0.col[j] == VarStatus::Basic) != (b2.col[j] == VarStatus::Basic)).count() + (0..m.min(b2.row.len())).filter(|&i| (b0.row[i] == VarStatus::Basic) != (b2.row[i] == VarStatus::Basic)).count();
+            eprintln!(
+                "MIP_TREE_DIAG: tid {} diverse vertex {dir:?}{}: fixed {} cols, d-solve {st1:?} {} iters (d {z1:.6e}, c {:.10e}), c-solve {st2:?} {} iters, {:.2}s, {}; objective {:.10e} -> {:.10e}; vs x0 (frac int cols {f0}): d-vertex {k1} int cols differ (L1 {l1:.1}, frac {f1}), final {k2} (L1 {l2:.1}, frac {f2}), final vs d-vertex {k12}; basic set differs in {bdiff}{}",
+                self.pool_tid,
+                if lex { " lex" } else { "" },
+                fixed.len(),
+                it1 - it0,
+                zc1 + self.p.offset,
+                it2 - it1,
+                t0.elapsed().as_secs_f64(),
+                if ok { "kept" } else { "fell back to x0" },
+                z0 + self.p.offset,
+                self.lp.objective() + self.p.offset,
+                self.snap_distance_diag()
+            );
+        }
+    }
+
+    /// `ENOMOTO_MIP_TREE_DIVERSE_VERTEX=..,dual` (試作): 根の LP の双対解を、双対の最適面の上の別の点へ動かす。
+    /// 主の退化 (境界にある基底変数) が双対解の多重性なので、右辺・境界を乱数の幅 (`ENOMOTO_T_MIP_DIVERSE_DELTA` ×
+    /// (1 + |境界|) 以下) でずらして解き (費用は同じなので今の基底は双対実行可能、双対単体法が退化した基底変数を出す。
+    /// 幅が小さければ着く双対解は元の LP の双対の最適面の上の、乱数で決まる頂点)、境界を戻して解き直す (双対の
+    /// 最適面の上なので目的値の変わらないピボットだけのはず)。どこかで解けなければ元の状態に戻す。
+    fn diverse_dual(&mut self) {
+        let t0 = Instant::now();
+        let n = self.p.n;
+        let m = self.lp.num_rows();
+        let it0 = self.lp.total_iterations();
+        let saved = self.lp.save_state();
+        let z0 = self.lp.objective();
+        let x = self.lp.col_values();
+        let act = self.lp.row_activities();
+        let b = self.lp.basis();
+        let mut s = 0xA076_1D64_78BD_642Fu64 ^ (self.pool_tid as u64 + 1).wrapping_mul(0xE703_7ED1_A0B4_28DB) ^ tunable!("ENOMOTO_T_MIP_DIVERSE_SEED", 0u64, u64);
+        let mut rnd = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let delta = tunable!("ENOMOTO_T_MIP_DIVERSE_DELTA", 1e-5, f64);
+        let tol = 1e-9;
+        // 動かす境界 (構造列 j < n、行 n + i)、向き (0: 下限を上げる、1: 上限を下げる、2: 下限を下げる、3: 上限を上げる、
+        // 4: 等式の右辺をずらす)、乱数 (選ぶか・幅)。`relax` (既定) は非基底の変数の境界を緩め、等式の右辺をずらす
+        // (緩めた LP は実行可能、双対単体法は退化した基底変数を出して双対解を動かす)。`tight` は境界にある基底変数を締める。
+        // 等式の右辺をずらすのは `eqshift` のときだけ (10teams・beasleyC3 では従属な等式のために実行不能になった)
+        let tight = env_str!("ENOMOTO_MIP_TREE_DIVERSE_VERTEX").is_some_and(|v| v.contains("tight"));
+        let mut cand: Vec<(usize, u8, f64, f64)> = Vec::new();
+        for v in 0..n + m {
+            let (l, u, st, val) = if v < n {
+                let (l, u) = self.lp.col_bounds(v);
+                (l, u, b.col[v], x[v])
+            } else {
+                let (l, u) = self.lp.row_bounds(v - n);
+                (l, u, b.row[v - n], act[v - n])
+            };
+            if l == u {
+                if !tight && v >= n && st != VarStatus::Basic && env_str!("ENOMOTO_MIP_TREE_DIVERSE_VERTEX").is_some_and(|v| v.contains("eqshift")) {
+                    cand.push((v, 4, rnd(), rnd()));
+                }
+                continue;
+            }
+            if tight {
+                if st != VarStatus::Basic {
+                    continue;
+                }
+                if l.is_finite() && (val - l).abs() <= tol * (1.0 + l.abs()) {
+                    cand.push((v, 0, rnd(), rnd()));
+                } else if u.is_finite() && (val - u).abs() <= tol * (1.0 + u.abs()) {
+                    cand.push((v, 1, rnd(), rnd()));
+                }
+            } else {
+                match st {
+                    VarStatus::Lower if l.is_finite() => cand.push((v, 2, rnd(), rnd())),
+                    VarStatus::Upper if u.is_finite() => cand.push((v, 3, rnd(), rnd())),
+                    _ => {}
+                }
+            }
+        }
+        let remaining = self.deadline.map_or(f64::INFINITY, |t| t.saturating_duration_since(Instant::now()).as_secs_f64());
+        let cap_secs = tunable!("ENOMOTO_T_MIP_DIVERSE_SECS", 5.0, f64).min(0.2 * remaining);
+        let t_end = Instant::now() + std::time::Duration::from_secs_f64(cap_secs.max(0.0));
+        // 締めた LP が実行不能なら、締める数を減らしてやり直す (`ENOMOTO_T_MIP_DIVERSE_DUAL_FRAC` から 1/4 ずつ)
+        let mut frac = tunable!("ENOMOTO_T_MIP_DIVERSE_DUAL_FRAC", if tight { 0.2 } else { 1.0 }, f64);
+        let (mut st1, mut st2, mut z1, mut tries, mut ncols, mut nrows, mut it1) = (LpStatus::Error, LpStatus::Error, z0, 0, 0, 0, it0);
+        let mut ok = false;
+        while tries < 4 && !cand.is_empty() {
+            tries += 1;
+            let mut cols: Vec<(usize, f64, f64)> = Vec::new();
+            let mut rows: Vec<(usize, f64, f64)> = Vec::new();
+            let mut new_rows: Vec<(usize, f64, f64)> = Vec::new();
+            for &(v, dirn, r, w) in &cand {
+                if r >= frac {
+                    continue;
+                }
+                let (l, u) = if v < n { self.lp.col_bounds(v) } else { self.lp.row_bounds(v - n) };
+                let (nl, nu) = match dirn {
+                    0 => (l + (delta * w * (1.0 + l.abs())).min(0.5 * (u - l)), u),
+                    1 => (l, u - (delta * w * (1.0 + u.abs())).min(0.5 * (u - l))),
+                    2 => (l - delta * w * (1.0 + l.abs()), u),
+                    3 => (l, u + delta * w * (1.0 + u.abs())),
+                    _ => {
+                        let sh = delta * (2.0 * w - 1.0) * (1.0 + l.abs());
+                        (l + sh, u + sh)
+                    }
+                };
+                if v < n {
+                    cols.push((v, l, u));
+                    self.lp.set_col_bounds(v, nl, nu);
+                } else {
+                    rows.push((v - n, l, u));
+                    new_rows.push((v - n, nl, nu));
+                }
+            }
+            (ncols, nrows) = (cols.len(), rows.len());
+            if !new_rows.is_empty() {
+                self.lp.set_row_bounds_many(&new_rows);
+            }
+            st1 = self.lp.solve(&SolveLimits { iteration_limit: tunable!("ENOMOTO_T_MIP_DIVERSE_ITERS", 50_000u64, u64), deadline: Some(t_end), ..Default::default() });
+            z1 = self.lp.objective();
+            it1 = self.lp.total_iterations();
+            for &(j, l, u) in &cols {
+                self.lp.set_col_bounds(j, l, u);
+            }
+            if !rows.is_empty() {
+                self.lp.set_row_bounds_many(&rows);
+            }
+            if st1 == LpStatus::Optimal {
+                st2 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+                ok = st2 == LpStatus::Optimal && (self.lp.objective() - z0).abs() <= 1e-6 * (1.0 + z0.abs());
+                break;
+            }
+            self.lp.restore_state(&saved);
+            if st1 != LpStatus::Infeasible {
+                break;
+            }
+            frac *= 0.25;
+        }
+        let it2 = self.lp.total_iterations();
+        if !ok {
+            self.lp.restore_state(&saved);
+            if st2 != LpStatus::TimeLimit {
+                let _ = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+            }
+        }
+        if tree_diag() {
+            eprintln!(
+                "MIP_TREE_DIAG: tid {} diverse dual: {} candidates, try {tries} tightened {ncols} cols and {nrows} rows, perturbed solve {st1:?} {} iters (objective {:.10e}), restored solve {st2:?} {} iters, total {} iters, {:.2}s, {}",
+                self.pool_tid,
+                cand.len(),
+                it1.saturating_sub(it0),
+                z1 + self.p.offset,
+                it2.saturating_sub(it1),
+                it2 - it0,
+                t0.elapsed().as_secs_f64(),
+                if ok { "kept" } else { "fell back" }
+            );
+        }
+    }
+
     /// 根の LP の被約費用を保存する。
     fn store_root_redcost(&mut self, root_obj: f64) {
         // 診断用: 根の被約費用を取る LP の状態が `root_obj` の LP と同じか (ヒューリスティクスが費用・境界を変えたまま戻していないと、
@@ -4719,6 +5098,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let Some((z, list)) = self.root_redcost.take() else { return };
         let gap = self.prune_limit() - z;
         if gap.is_finite() && gap >= 0.0 {
+            let before = tree_diag().then(|| (self.dom.global_lo.clone(), self.dom.global_up.clone()));
             for &(j, at_lower, d, bound) in &list {
                 // 根の LP で変数がいた境界 `bound` を基準にする: z(x_j) >= z + d (x_j - bound)
                 if at_lower {
@@ -4726,6 +5106,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else {
                     self.dom.tighten_global(self.p, j, false, bound - gap / (-d));
                 }
+            }
+            if let Some((lo, up)) = before {
+                // 診断用: 根の被約費用で大域的な境界が締まった列の数
+                self.pool_stats[3] += (0..self.p.n).filter(|&j| self.dom.global_lo[j] > lo[j] || self.dom.global_up[j] < up[j]).count() as u64;
             }
         }
         self.root_redcost = Some((z, list));
@@ -8349,9 +8733,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // よる固定が主と従で違い (主が従から大域的な境界を受け取る)、木のヒューリスティクスの近傍も違う。全スレッドが主の
         // 頂点から始めると、この多様性がなくなって 40 + 16 問で 2 組とも解ける数が減った (10teams・noswot・beasleyC3・
         // neos-911970・uccase12。analysis/bound_inf_20261021.md §7)。`ENOMOTO_MIP_TREE_SNAP_BASIS_ALWAYS` なら常に持たせる
-        let heavy_root = self.root_lp_secs >= tunable!("ENOMOTO_T_MIP_SNAP_BASIS_MIN_ROOT_SECS", 1.0, f64) || env_str!("ENOMOTO_MIP_TREE_SNAP_BASIS_ALWAYS").is_some();
+        // `ENOMOTO_MIP_TREE_DIVERSE_VERTEX` (試作) は従が写しの基底から別の最適頂点へ移るので、常に持たせる
+        let heavy_root = self.root_lp_secs >= tunable!("ENOMOTO_T_MIP_SNAP_BASIS_MIN_ROOT_SECS", 1.0, f64) || env_str!("ENOMOTO_MIP_TREE_SNAP_BASIS_ALWAYS").is_some() || diverse_vertex_mode().is_some();
         let (basis, dse) = if env_str!("ENOMOTO_MIP_TREE_NO_SNAP_BASIS").is_none() && heavy_root { (Some(self.lp.basis()), self.lp.dse_snapshot()) } else { (None, None) };
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), basis, dse, hcm_auto: self.hcm_auto, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone() };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), basis, dse, diag_x: tree_diag().then(|| self.lp.col_values()), diag_rc: tree_diag().then(|| self.lp.reduced_costs()), hcm_auto: self.hcm_auto, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone() };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
@@ -9101,6 +9486,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.sym_canon != (0, 0) {
                 eprintln!("MIP: symmetry: {} heuristic solutions mapped to the symmetry-reduced problem, {} could not be", self.sym_canon.0, self.sym_canon.1);
             }
+        }
+        if tree_diag() && self.pool.is_some() && !self.params.submip {
+            eprintln!("MIP_TREE_DIAG: tid {} end: root reduced-cost tightenings {} (candidates {}), global bounds taken from other threads {}, nodes {}", self.pool_tid, self.pool_stats[3], self.root_redcost.as_ref().map_or(0, |(_, l)| l.len()), self.pool_stats[2], self.nodes);
         }
         // `ENOMOTO_MIP_NCA_DIAG`: 木の従のスレッドの分も出す (診断用)
         if !self.params.verbose && !self.params.submip && env_str!("ENOMOTO_MIP_NCA_DIAG").is_some() {
