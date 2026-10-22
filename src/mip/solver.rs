@@ -303,6 +303,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_time_max: f64,
     /// 暫定解がない根の RENS (ダイビング式・長めのサブ MIP) を行ったか。
     pub(super) noinc_rens_done: bool,
+    /// 次に別スレッドで解くサブ MIP が `ENOMOTO_MIP_SUBMIP_HL2` の対象か ([`super::heuristics::SUBMIP_HL2`])
+    pub(super) submip_hl2_next: bool,
     /// サブ MIP のノード上限の倍率 (根の RENS のやり直しで一時的に上げる)。
     pub(super) submip_node_mult: f64,
     /// 直近の (旧来の) RENS のサブ MIP がノード上限で止まったか。
@@ -1500,6 +1502,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_time_frac: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_FRAC", 0.07, f64),
         submip_time_max: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_MAX", 6.0, f64),
         noinc_rens_done: false,
+        submip_hl2_next: false,
         submip_node_mult: 1.0,
         rens_node_limited: false,
         force_fix_cap: false,
@@ -8086,10 +8089,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let label = self.heur_label;
         let fix_rate = self.submip_fix_rate.take();
         let basis = self.submip_basis.take();
+        let hl2 = std::mem::take(&mut self.submip_hl2_next);
         self.pending_submips.push_back((
             std::thread::spawn(move || {
                 // 別スレッドで解くサブ MIP も入れ子の深さ 1 として数える ([`super::heuristics::SUBMIP_DEPTH`])
                 super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
+                super::heuristics::SUBMIP_HL2.with(|c| c.set(hl2));
                 if let Some(b) = basis {
                     SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
                 }

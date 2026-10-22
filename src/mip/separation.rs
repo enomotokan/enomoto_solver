@@ -308,13 +308,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP: ラウンド・停滞・時間の上限を `ENOMOTO_T_MIP_ROOT_SUBMIP_HL_CUT_ROUNDS`
         // (25)・`..._CUT_STALL` (10)・`..._CUT_FRAC` (サブ MIP の時間上限の 0.5) にする
         let hl_sub = self.params.submip && super::heuristics::root_submip_hl_active();
+        // `ENOMOTO_MIP_SUBMIP_HL2` の対象のサブ MIP (深さ 1): 25 ラウンド・停滞 10・時間上限の 0.5
+        let hl2_sub = self.params.submip && super::heuristics::submip_hl2_active();
         let fc_sub = self.params.submip && self.params.fc_submip;
         let mut max_rounds = if hl_sub {
             tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_CUT_ROUNDS", 25usize, usize)
+        } else if hl2_sub {
+            tunable!("ENOMOTO_T_MIP_SUBMIP_HL2_CUT_ROUNDS", 25usize, usize)
         } else if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS", 25usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_ROUNDS", 5usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
         let eq2c = self.equiv2_cuts();
         let cut_frac = if hl_sub {
             tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_CUT_FRAC", 0.5, f64)
+        } else if hl2_sub {
+            tunable!("ENOMOTO_T_MIP_SUBMIP_HL2_CUT_FRAC", 0.5, f64)
         } else if eq2c {
             tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC", 0.3, f64)
         } else if self.params.submip {
@@ -841,7 +847,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 4 ラウンドは下界が動かず、続ければ上がる。HiGHS も止めずに 66 ラウンド回して 154 -> 171)
                     if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 && !saturated && !widen_now {
                         stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened { 2 } else { 1 };
-                        if stall >= if hl_sub { tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_CUT_STALL", 10usize, usize) } else if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
+                        if stall >= if hl_sub { tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_CUT_STALL", 10usize, usize) } else if hl2_sub { tunable!("ENOMOTO_T_MIP_SUBMIP_HL2_CUT_STALL", 10usize, usize) } else if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
                             if !phase2_on {
                                 break;
                             }
