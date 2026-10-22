@@ -9713,6 +9713,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 16 問: SBa newdef 10・36.22 / nosnap 12・35.81、SBb newdef 10・36.56 / nosnap 11・35.94。不一致 0、"MIP: WARNING" 0。
 - 2 組とも 40 問・16 問で解けた数が 1〜2 減り SGM も悪い (10teams・noswot・neos-911970・beasleyC3・uccase12 を落とし、mc11 を得る)。従が早く木に加わること自体が損になっている理由は未解明 (Fable に調査を依頼)。修正のコードは inv/bound-inf-20261021 にあり、develop には入れない。
 
+## 2026-10-22: 一般整数のある問題で再スタートの参照解と背景のカットの後の RINS を働かせる (GR_RESTART) は不採用
+
+- mzzv42z の 4 回目の調査 (analysis/mzzv42z_r4_20261021.md) の試作 `ENOMOTO_MIP_GR_RESTART=1`。0e7cff6 (develop 68941b0 + 不採用の SNAP_BASIS + 試作) で 40 + 16 問を 2 組。
+- 40 問 (解けた・SGM): GRa newdef 26・19.65 / grr 26・20.17、GRb newdef 26・20.01 / grr 26・19.40。
+- 16 問: GRa newdef 12・34.71 / grr 10・35.10 (mc11・roll3000 を落とす)、GRb newdef 9・37.21 / grr 11・33.23 (drayage-25-23・mc11 を得る)。不一致 0、"MIP: WARNING" 0。
+- 一勝一敗で、GRa の 16 問で解けた数が 2 減るので不採用。mzzv42z の暫定解は 2 組とも良い (-20240・-20260 → -20390・-20480) が最適には届かない。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
