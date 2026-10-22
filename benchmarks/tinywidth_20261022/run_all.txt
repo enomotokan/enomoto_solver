@@ -1,0 +1,84 @@
+== verify1
+seed41_fix ... Result: optimal, objective -10.9000003, best bound -10.9000003, gap 0.00%, nodes 0 (0.01s) | bad 0 of 1 time 0.0
+seed41_old ... Result: optimal, objective -9.81000059, best bound -9.81000059, gap 0.00%, nodes 0 (0.01s) | seed 41 highs Optimal -10.90000028464 ours optimal -9.81000058999 | bad 1 of 1 time 0.1
+seed41_default ... Result: optimal, objective -10.9000003, best bound -10.9000003, gap 0.00%, nodes 0 (0.01s) | bad 0 of 1 time 0.0
+e2e_fix {"status": "time_limit", "objective": null, "bound": -Infinity, "root_bound": 11468.553893999662} ['MIP: presolve: fixed 131 columns of width within tolerance (131 before, 0 after the reductions)', 'MIP: presolve: tightened 689 coefficients (skipped 0 in rows redundant within tolerance), normalized 26 integer rows', 'MIP: probing: equivalence pass with implications: 1106 pairs found (0.05s), used', 'MIP: probing: fixed 185 columns of width within tolerance', 'MIP: presolve: fixed 4 columns of width within tolerance (4 before, 0 after the reductions)', 'MIP: presolve: tightened 104 coefficients (skipped 0 in rows redundant within tolerance), normalized 3 integer rows']
+e2e_old {"status": "time_limit", "objective": 12911.696394048346, "bound": 12004.7945152484, "root_bound": 12004.794515193673} ['MIP: presolve: tightened 704 coefficients (skipped 0 in rows redundant within tolerance), normalized 26 integer rows', 'MIP: probing: equivalence pass with implications: 1356 pairs found (0.06s), used', 'MIP: presolve: tightened 126 coefficients (skipped 0 in rows redundant within tolerance), normalized 3 integer rows', 'MIP: probing: equivalence pass with implications: 0 pairs found (0.04s), not used']
+== uccase12 rep (COEF_TIGHTEN_TINY=1)
+{"rep": 0, "status": "time_limit", "objective": 11507.903966559341, "bound": 11507.356604926988, "root_bound": 11507.356604926987, "time": 45.446453695999935, "eq": ["MIP: probing: equivalence pass with implications: 0 pairs found (0.06s), not used", "MIP: probing: equivalence pass with implications: 1350 pairs found (0.05s), used", "MIP: probing: equivalence pass with implications: 0 pairs found (0.04s), not used"]}
+== fuzz default
+bad 0 of 300 time 5.8
+== fuzz eq2r
+bad 0 of 300 time 5.8
+== fuzz_tiny default
+seed 61 highs Optimal -26.50000005229 ours optimal -25.36
+seed 81 highs Optimal -30.36000030836 ours optimal -37.53
+seed 139 highs Optimal 0.0 ours optimal -1.90027e-06
+seed 148 highs Optimal -25.430000239920002 ours optimal -29.700000000000003
+seed 159 highs Optimal -23.36 ours optimal -18.57000007525
+seed 195 highs Optimal -20.53 ours optimal -14.02
+seed 201 highs Optimal 0.0 ours optimal -1.11891e-06
+seed 210 highs Optimal -54.94 ours optimal -45.19
+seed 246 highs Optimal 0.0 ours optimal -1.0485700000000002e-06
+seed 260 highs Optimal -3.11 ours optimal -11.629999999999999
+bad 10 of 300 time 2.6
+== fuzz_tiny_cls default
+{'ours worse / HiGHS-int point viol 2e-09': 4, 'ours better / HiGHS-int point viol 2e-09': 2, 'ours better / HiGHS-int point exactly feasible': 3, 'ours better / HiGHS-int point viol 1e-09': 1}
+== fuzz_mixtiny default
+seed 204 highs Optimal 0.20166038227820982 ours optimal 0.20165573227821337
+bad 1 of 300 time 4.1
+== fuzz_tiny tinyonly
+seed 15 highs Optimal -23.200000000000003 ours optimal -4.75
+seed 61 highs Optimal -26.50000005229 ours optimal -25.36
+seed 73 highs Optimal -28.01 ours optimal -17.17
+seed 81 highs Optimal -30.36000030836 ours optimal -37.53
+seed 119 highs Optimal -23.48 ours optimal -18.03
+seed 139 highs Optimal 0.0 ours optimal -1.90027e-06
+seed 148 highs Optimal -25.430000239920002 ours optimal -29.700000000000003
+seed 159 highs Optimal -23.36 ours optimal -18.57000007525
+seed 195 highs Optimal -20.53 ours optimal -14.02
+seed 201 highs Optimal 0.0 ours optimal -1.11891e-06
+bad 13 of 300 time 2.7
+== fuzz_tiny_cls tinyonly
+{'ours worse / HiGHS-int point viol 1e-09': 2, 'ours worse / HiGHS-int point viol 2e-09': 5, 'ours better / HiGHS-int point viol 2e-09': 2, 'ours better / HiGHS-int point exactly feasible': 3, 'ours better / HiGHS-int point viol 1e-09': 1}
+== fuzz_mixtiny tinyonly
+seed 204 highs Optimal 0.20166038227820982 ours optimal 0.20165573227821337
+bad 1 of 300 time 4.4
+== fuzz_tiny eq2r
+seed 61 highs Optimal -26.50000005229 ours optimal -25.36
+seed 81 highs Optimal -30.36000030836 ours optimal -37.53
+seed 139 highs Optimal 0.0 ours optimal -1.90027e-06
+seed 148 highs Optimal -25.430000239920002 ours optimal -29.700000000000003
+seed 159 highs Optimal -23.36 ours optimal -18.57000007525
+seed 195 highs Optimal -20.53 ours optimal -14.02
+seed 201 highs Optimal 0.0 ours optimal -1.11891e-06
+seed 210 highs Optimal -54.94 ours optimal -45.19
+seed 246 highs Optimal 0.0 ours optimal -1.0485700000000002e-06
+seed 260 highs Optimal -3.11 ours optimal -11.629999999999999
+bad 10 of 300 time 2.7
+== fuzz_tiny_cls eq2r
+{'ours worse / HiGHS-int point viol 2e-09': 4, 'ours better / HiGHS-int point viol 2e-09': 2, 'ours better / HiGHS-int point exactly feasible': 3, 'ours better / HiGHS-int point viol 1e-09': 1}
+== fuzz_mixtiny eq2r
+seed 204 highs Optimal 0.20166038227820982 ours optimal 0.20165573227821337
+bad 1 of 300 time 4.6
+== fuzz_tiny old
+seed 4 highs Optimal -8.65 ours optimal -1.1838e-07
+seed 55 highs Optimal -12.99 ours optimal -7.7817e-07
+seed 61 highs Optimal -26.50000005229 ours optimal -25.36
+seed 81 highs Optimal -30.36000030836 ours optimal -37.53000030853
+seed 139 highs Optimal 0.0 ours optimal -1.90027e-06
+seed 148 highs Optimal -25.430000239920002 ours optimal -29.700000867380002
+seed 159 highs Optimal -23.36 ours optimal -18.57000007525
+seed 195 highs Optimal -20.53 ours optimal -14.02
+seed 201 highs Optimal 0.0 ours optimal -1.11891e-06
+seed 210 highs Optimal -54.94 ours optimal -45.19
+bad 14 of 300 time 2.8
+== fuzz_tiny_cls old
+{'ours worse / HiGHS-int point viol 2e-09': 8, 'ours better / HiGHS-int point viol 2e-09': 2, 'ours better / HiGHS-int point exactly feasible': 3, 'ours better / HiGHS-int point viol 1e-09': 1}
+== fuzz_mixtiny old
+seed 204 highs Optimal 0.20166038227820982 ours optimal 0.20165573227821337
+bad 1 of 300 time 4.7
+== check55
+air03 default optimal 340160.0 340160.0 tiny [] pres ['rows 124 -> 122, free columns 10757 -> 10755, nonzeros 91028 -> 91024, postsolve steps 2'] []
+air03 notiny optimal 340160.0 340160.0 tiny [] pres ['rows 124 -> 122, free columns 10757 -> 10755, nonzeros 91028 -> 91024, postsolve steps 2'] []
+== done
