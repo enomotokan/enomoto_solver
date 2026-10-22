@@ -2616,9 +2616,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let cap = if super::heuristics::fj_feas_extend(&pc) && self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_FJ_FEAS_FRAC", 0.5, f64) * self.params.time_limit } else { cap };
                 // `ENOMOTO_MIP_FJ_P3` (既定、`ENOMOTO_MIP_NO_FJ_P3` で止める): FJ だけ、p5s の前処理の変更をかけ直した問題で探す ([`super::fj_p3_problem`])
                 let fj_p3 = super::fj_p3_on();
+                // `ENOMOTO_MIP_EQUIV2_FJ` (試作): 前処理が `ENOMOTO_MIP_PROBE_EQUIV2` の代入を使った求解では、FJ 用の問題で大きさに依らず
+                // INEQ_SINGLETON を使う ([`super::fj_p3_problem`])
+                let fj_ineq = env_str!("ENOMOTO_MIP_EQUIV2_FJ").is_some() && super::EQUIV2_USED.with(|f| f.get());
                 let h = std::thread::spawn(move || {
                     if fj_p3 {
-                        if let Some((q, post, sc)) = super::fj_p3_problem(&pc) {
+                        if let Some((q, post, sc)) = super::fj_p3_problem(&pc, fj_ineq) {
                             crate::set_fj_p3_force(true);
                             let r = super::heuristics::fj_search(&q, &q.col_lo, &q.col_up, effort, cap, seed, Some(&stop2));
                             crate::set_fj_p3_force(false);
