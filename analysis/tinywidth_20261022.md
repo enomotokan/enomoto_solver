@@ -69,7 +69,7 @@ develop の出口の防御 (53d41e1) に加えて、入口で幅の小さい列�
 
 ## 4. 確かめたこと (0f61380、事実)
 
-`run_all.txt`・`verify1.txt` に全部の出力。
+`benchmarks/tinywidth_20261022/run_all.txt` に全部の出力 (最初の `== verify1` が 4.1 の 2 例)。
 
 ### 4.1 防御を外して固定だけで正しい値になるか (`ENOMOTO_MIP_COEF_TIGHTEN_TINY=1`)
 
