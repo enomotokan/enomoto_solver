@@ -639,7 +639,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // 前処理の LP による固定 ([`lp_probe`]) は最初の求解だけ (サブ MIP・再スタートの後は使わない)
     let lp_probe_secs = (env_str!("ENOMOTO_MIP_NO_LP_PROBE").is_none() && !params.submip && params.restarts == 0)
         .then(|| if params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_LP_PROBE_TIME_FRAC", 0.05, f64) * params.time_limit } else { 10.0 });
+    let prev_rp = RESTART_PRESOLVE.with(|f| f.replace(params.restarts > 0));
     let presolved = if use_presolve { presolve_mip(p, params.verbose, params.submip, lp_probe_secs) } else { None };
+    RESTART_PRESOLVE.with(|f| f.set(prev_rp));
     // `ENOMOTO_MIP_SPARSIFY_LATE`: HiGHS と同じく前処理 (プロービング・同値の代入の後) の最後に 1 回だけ疎化し
     // ([`sparsify_rows_highs`]、`=old` なら [`sparsify_rows`])、書き換えたら前処理をもう一度かける (その中では疎化しない)
     let presolved = match presolved {
@@ -816,6 +818,8 @@ thread_local! {
     static PROBE_EQUIV_FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// この求解の前処理で `ENOMOTO_MIP_PROBE_EQUIV2` の代入を使った (根のカットの `ENOMOTO_MIP_EQUIV2_CUTS` の判定用。最初の求解の始めに戻す)
     pub(crate) static EQUIV2_USED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 再スタート後の求解の前処理の間か ([`probe`] の `ENOMOTO_MIP_PROBE_EQUIV2` を使わない判定)
+    static RESTART_PRESOLVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 thread_local! {
@@ -1758,7 +1762,11 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // `ENOMOTO_MIP_PROBE_CLIQUE=equiv`: 含意は同値な列を見つけるためだけに使う (下の 2 巡目。固定・締め付け・含意の表は変えない)。
     // `ENOMOTO_MIP_PROBE_EQUIV2`: 同じ 2 巡目を回し、見つけた組が候補の `ENOMOTO_T_MIP_PROBE_EQUIV2_MIN_FRAC` (既定 5%) 以上のときだけ使い、
     // そのときは境界を締めていても代入まで進む ([`probe_equiv_fix`])。少なければ捨てる (既定と同じ問題になる)
-    let equiv2 = env_str!("ENOMOTO_MIP_PROBE_EQUIV2").is_some() && !submip;
+    // 再スタート後の問題では使わない (`ENOMOTO_MIP_PROBE_EQUIV2_RESTART` なら使う)。uccase12 では再スタート後の問題でだけ
+    // 組が見つかり (1356 組、元の問題では 0 組)、それを代入した問題の根の LP が 12043.6 と既知の解 11507.41 を越えた
+    // (正しい解を切り落とす。原因は未特定)。根の下界で根を閉じる判定 (analysis/term_check_20261022.md) と合わさると
+    // 誤った最適値 11507.90 を返していた
+    let equiv2 = env_str!("ENOMOTO_MIP_PROBE_EQUIV2").is_some() && !submip && !(RESTART_PRESOLVE.with(|f| f.get()) && env_str!("ENOMOTO_MIP_PROBE_EQUIV2_RESTART").is_none());
     let pclique_equiv = (equiv2 || env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some_and(|v| v == "equiv")) && !submip;
     let want_pclique = env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !pclique_equiv && !submip;
     let mut equiv: Vec<(usize, usize, bool)> = Vec::new();
