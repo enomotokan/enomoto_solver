@@ -9778,6 +9778,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 軽い 4 問 × 4 回 (60 秒): 既定 13/16、dual 12/16、rand,lex,dual 12/16 で揺れの範囲。重い問題は 60 秒では再スタートで木にほぼ入らず測れない。全 119 回で下界 ≤ 最適値。
 - 調査側の判断は既定の候補ではない。決まりに従い、dual を 40 + 16 問の対で測る (inv/dv-a・dv-b-20261022、84642a7)。
 
+## 2026-10-22: 木の従の双対解を双対の最適面の別の点へ動かす (TREE_DIVERSE_VERTEX=dual) は不採用
+
+- 84642a7 (develop + diverse-vertex) で 40 + 16 問、newdef / dvdual (`ENOMOTO_MIP_TREE_DIVERSE_VERTEX=dual`) を順番を入れ替えて 2 組。
+- 40 問 (解けた・SGM): DVa newdef 26・19.95 / dvdual 25・20.11、DVb newdef 26・19.64 / dvdual 26・20.52。2 組とも SGM が悪く、DVa は解けた数が減る。dvdual では DVb の 30n20b8・neos-1456979 が解なしで終わった。
+- 16 問: DVa 10・36.25 / 10・36.47、DVb 10・34.41 / 11・33.41 (mc11 が解けた)。
+- 不一致 0、"MIP: WARNING" 0。40 問で基準を満たさないので既定にしない。試作は 7e0cccc (inv/diverse-vertex-20261022)。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
