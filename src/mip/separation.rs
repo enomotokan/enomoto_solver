@@ -310,6 +310,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let hl_sub = self.params.submip && super::heuristics::root_submip_hl_active();
         // `ENOMOTO_MIP_SUBMIP_HL2` の対象のサブ MIP (深さ 1): 25 ラウンド・停滞 10・時間上限の 0.5
         let hl2_sub = self.params.submip && super::heuristics::submip_hl2_active();
+        let mut hl2_obj_stall = 0usize;
         let fc_sub = self.params.submip && self.params.fc_submip;
         let mut max_rounds = if hl_sub {
             tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_CUT_ROUNDS", 25usize, usize)
@@ -832,6 +833,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // ラウンドは 2 回分と数える (何も進まない問題で長く回さない。分数の列が減っている間は続ける)。
                 let nfrac = self.fractional(&self.lp.col_values()).len();
                 let reldiff = (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0);
+                // `ENOMOTO_MIP_SUBMIP_HL2` のサブ MIP: 目的値が `ENOMOTO_T_MIP_SUBMIP_HL2_OBJ_STALL` (3) ラウンド続けて動かなければ止める
+                // (分数の列の数が減っていても)。neos-960392 の根の RENS の近傍は根の LP がもう最適値 -238 で、カットを続けても時間を使うだけ
+                if hl2_sub {
+                    hl2_obj_stall = if reldiff <= 1e-4 { hl2_obj_stall + 1 } else { 0 };
+                    if hl2_obj_stall >= tunable!("ENOMOTO_T_MIP_SUBMIP_HL2_OBJ_STALL", 3usize, usize) {
+                        break;
+                    }
+                }
                 if phase2 {
                     // 第 2 段階: 目的値だけで停滞を数える
                     if reldiff <= 1e-4 {

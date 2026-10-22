@@ -1925,7 +1925,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// HiGHS のサブ MIP は `mip_pscost_minreliable = 0`。physiciansched6-2 の根の RINS の近傍では、サブ MIP の最初の 3 ノードの
     /// 強分岐に 10 秒、その中の RENS のサブ MIP (480 列) の最初のノードに 4 秒かかった (analysis/submip_hl_20261022.md)
     pub(super) fn submip_no_sb2(&self) -> bool {
-        self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_NO_SB2").is_some()
+        self.params.submip
+            && (env_str!("ENOMOTO_MIP_SUBMIP_NO_SB2").is_some()
+                // `ENOMOTO_MIP_SUBMIP_HL2` のサブ MIP の中のサブ MIP (深さ 2 以上。根の RENS) も強分岐をしない
+                || (super::heuristics::SUBMIP_HL2.with(|c| c.get()) && super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) >= 2 && env_str!("ENOMOTO_MIP_SUBMIP_HL2_SB").is_none()))
     }
 
     pub(super) fn time_up(&self) -> bool {
