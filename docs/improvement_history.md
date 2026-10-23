@@ -9974,3 +9974,18 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 30n20b8: ACS で最初の暫定解が 26 秒前後 (既定は 44〜55 秒の木から) になるが、最終は 553 で既定 (453〜504) より悪い (根で 7 秒使い、木のノードが 1/4 ほど)。Farkas・zero-objective は解を出さない。neos-1456979 はどれも早まらない。
 - LB2 + PROX2 (根は外側の始まりから 10 秒・木は 15 秒たってから・経過時間の 0.1 まで): physiciansched6-2 は 6 回すべて 49625 (既定 51029)、mzzv42z は -20450・-20500 (既定 -20260・-18682)。supportcase26・roll3000 は揺れの範囲。軽い問題 (misc07・10teams・mik-250-20-75-4・qnet1) は既定と同じ時間。
 - lbp (`ENOMOTO_MIP_LB2=1 ENOMOTO_MIP_PROX2=1`) を 40 + 16 問で計測する (inv/lbp-a-20261023・inv/lbp-b-20261023、5ce82be)。Farkas・zero-objective は候補にしない。ACS は木の扱いを見直してから。
+
+## 2026-10-23: Local-MIP + 連鎖の手 (lmc) は既定にしない (保留)
+
+- 2f11d39 (develop 330ca50 + heur-ls) で 40 + 16 問、newdef / lmc (`ENOMOTO_MIP_LOCALMIP=1 ENOMOTO_MIP_LOCALMIP_CHAIN=1`) を順番を入れ替えて 2 組。
+
+| 組 | 集合 | newdef 解けた・SGM | lmc 解けた・SGM |
+|---|---|---|---|
+| LMa (newdef → lmc) | 40 問 | 25・20.38 | 26・20.53 |
+| LMa | 16 問 | 11・32.18 | 12・35.52 |
+| LMb (lmc → newdef) | 40 問 | 26・18.90 | 26・19.64 |
+| LMb | 16 問 | 11・32.53 | 11・31.07 |
+
+- 不一致 0、"MIP: WARNING" 0。解けた数は合わせて 40 問で 1、16 問で 1 増える (lmc だけ解けた: noswot・beasleyC3・roll3000 (LMa)、nursesched-sprint02 (LMb)。newdef だけ解けた: neos-960392 (2 組とも))。
+- 30n20b8 は lmc で 2 組とも最初の暫定解 3.9〜4.6 秒・最終 302 (newdef は暫定解なし / 653)。neos-1456979 も 2.2〜2.5 秒で暫定解、最終 189・223 (newdef 222・228)。physiciansched6-2 は 50425 (newdef 51029・49624)、mzzv42z と timtab1 の最終は newdef より少し悪い。
+- SGM が 4 つの比べのうち 3 つで悪い (最大 +10%) ので既定にしない。別スレッドが木から CPU を取る分と考えられ、スレッド数・時間の制限 (Local-MIP の時間を短くする、暫定解が出たら止める) を足して測り直す候補。
