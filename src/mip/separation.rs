@@ -490,6 +490,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let prog_win = if self.params.submip { 0 } else { tunable!("ENOMOTO_T_MIP_CUT_PROG_WIN", 0usize, usize) };
         let prog_eps = tunable!("ENOMOTO_T_MIP_CUT_PROG_EPS", 0.01, f64);
         let mut obj_hist: Vec<f64> = Vec::new();
+        // `ENOMOTO_MIP_CUT_STRONG_WIN5` (試作、既定では使わない): `obj_hist` は 1 ラウンドに 2 回積まれる (ラウンドの記録の後と
+        // 停滞判定の後) ので、`CUT_STRONG_AUTO` の「直近 5 ラウンド」の伸びは実際には約 2.5 ラウンド分になっている。
+        // これを 1 ラウンドに 1 回だけ積む `round_obj` で本当に 5 ラウンド分の伸びにする。beasleyC3 は 25 ラウンド目でも
+        // 5 ラウンドで 10〜24 伸びている (閾値 4.7) のに、2.5 ラウンド分 (3.7〜9.4) では判定が回ごとに分かれ、
+        // 第 2 段階に入らない回は根の下界が 706〜715 (入る回は 745) で、時間切れの回が出る (analysis/proofvar_20261023.md)
+        let strong_win5 = env_str!("ENOMOTO_MIP_CUT_STRONG_WIN5").is_some();
+        let mut round_obj: Vec<f64> = Vec::new();
         let extend_on = env_str!("ENOMOTO_MIP_CUT_EXTEND").is_some() && !self.params.submip && job.is_none() && self.params.time_limit.is_finite();
         let extend_max = tunable!("ENOMOTO_T_MIP_CUT_EXTEND_MAX", 0.3, f64) * self.params.time_limit;
         CUT_EXTENDED.with(|c| c.set(false));
@@ -518,13 +525,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // timtab1 は 163277 -> 495790 (25 ラウンド目まで毎回伸びる)。40 問で上限に当たるほかの問題の伸びは 1 割未満
                 let strong_env = env_str!("ENOMOTO_MIP_CUT_STRONG_AUTO");
                 let strong_on = strong_env.is_some() || env_str!("ENOMOTO_MIP_NO_CUT_STRONG_AUTO").is_none();
-                let strong = !extend && !phase2 && !self.params.submip && k > 5 && strong_on && {
+                let (hist, kh) = if strong_win5 { (&round_obj, round_obj.len()) } else { (&obj_hist, k) };
+                let strong = !extend && !phase2 && !self.params.submip && kh > 5 && strong_on && {
                     // 大きさは元の問題の目的値 (前処理の定数項を足した値) で測る
-                    let (z0, z1) = (cut_lp0 + p.offset, obj_hist[k - 1] + p.offset);
+                    let (z0, z1) = (cut_lp0 + p.offset, hist[kh - 1] + p.offset);
                     let gain = z1 - z0;
                     z0.is_finite()
                         && gain >= tunable!("ENOMOTO_T_MIP_CUT_STRONG_FRAC", 0.3, f64) * z0.abs().max(z1.abs()).max(1.0)
-                        && obj_hist[k - 1] - obj_hist[k - 6] >= tunable!("ENOMOTO_T_MIP_CUT_STRONG_RECENT", 0.01, f64) * gain
+                        && hist[kh - 1] - hist[kh - 6] >= tunable!("ENOMOTO_T_MIP_CUT_STRONG_RECENT", 0.01, f64) * gain
                 };
                 if strong {
                     if strong_env.is_none_or(|v| v != "cap") {
@@ -893,6 +901,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 );
             }
             obj_hist.push(obj);
+            round_obj.push(obj);
             if prog_win > 0 && obj_hist.len() > prog_win {
                 let total = obj - first_obj;
                 let recent = obj - obj_hist[obj_hist.len() - 1 - prog_win];
