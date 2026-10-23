@@ -7778,71 +7778,84 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let mut new_edges: Vec<(u32, u32)> = Vec::new();
         let mut n_edges = 0usize;
-        for &j in &cands {
-            if self.time_up() || t0.elapsed().as_secs_f64() > tmax || (fixed == 0 && probed >= giveup) {
-                break;
-            }
-            if self.dom.lo[j] == self.dom.up[j] {
-                continue;
-            }
-            probed += 1;
-            let mut bad = [false; 2];
-            for (k, v) in [0.0f64, 1.0].into_iter().enumerate() {
-                let pos = self.dom.stack_len();
-                if v == 0.0 {
-                    self.dom.tighten_upper(p, j, 0.0);
-                } else {
-                    self.dom.tighten_lower(p, j, 1.0);
-                }
-                bad[k] = !(!self.dom.infeasible
-                    && self.dom.propagate(p)
-                    && self.propagate_objective_with(false)
-                    && rc_row.as_ref().is_none_or(|(r, u)| self.propagate_le_row(r, *u, false))
-                    && cut_rows.iter().all(|(r, u)| self.propagate_le_row(r, *u, false)));
-                // 含意 (既定で使う、`ENOMOTO_MIP_ROOT_OBJ_PROBE_NO_IMPL` で使わない): 矛盾しなかった側で固定された 0-1 列を含意 (x_j = v => x_c = w) として
-                // 定義域に足し、後の列の試しの伝播に使う (HiGHS はプロービングの含意をクリーク表に入れる)。打ち切り値を
-                // 使って得た含意なので、打ち切り値より良い解でだけ成り立つ (大域的な固定と同じ)
-                if !bad[k] && learn {
-                    let lj = 2 * j as u32 + if v == 1.0 { 0 } else { 1 };
-                    for (c, upper, val) in self.dom.changes_since(pos + 1) {
-                        if c != j && p.is_int[c] && self.dom.lo[c] == self.dom.up[c] && (val == 0.0 || val == 1.0) && self.dom.global_lo[c] == 0.0 && self.dom.global_up[c] == 1.0 {
-                            // x_c = val (上限を 0 にした / 下限を 1 にした) => 文字 (c = 1 - val) と衝突
-                            let _ = upper;
-                            let lc = 2 * c as u32 + if val == 1.0 { 1 } else { 0 };
-                            new_edges.push((lj, lc));
-                        }
-                    }
-                }
-                self.dom.backtrack_to(p, pos);
-            }
-            if !new_edges.is_empty() {
-                new_edges.sort_unstable();
-                new_edges.dedup();
-                n_edges += new_edges.len();
-                self.dom.add_implications(p.n, &new_edges);
-                new_edges.clear();
-            }
-            match bad {
-                [true, true] => {
-                    // どちらの値でも打ち切り値より良い解はない: 暫定解が最適。ここでは固定せず、根の LP に任せる
-                    both = true;
+        // `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_PASSES` (試作、既定 1): 候補を一回りして、固定が出たのに証明に届かなければ、同じ候補を
+        // もう一回り試す (前の回りの固定と含意が後の回りの伝播に効く)。hypothyroid-k1 では根のカットの組によって、
+        // 1 回りで 351〜482 列を試して両側矛盾で証明する回と、全 2300〜2440 列を試して 17〜37 列を固定するだけで終わり、
+        // 再スタートして 15〜35 秒遅れる回がある
+        let passes = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_PASSES", 1usize, usize).max(1);
+        let mut npass = 0usize;
+        for _ in 0..passes {
+            npass += 1;
+            let fixed0 = fixed;
+            for &j in &cands {
+                if self.time_up() || t0.elapsed().as_secs_f64() > tmax || (fixed == 0 && probed >= giveup) {
                     break;
                 }
-                [true, false] | [false, true] => {
-                    let v = if bad[0] { 1.0 } else { 0.0 };
-                    self.dom.tighten_global(p, j, v == 0.0, v);
+                if self.dom.lo[j] == self.dom.up[j] {
+                    continue;
+                }
+                probed += 1;
+                let mut bad = [false; 2];
+                for (k, v) in [0.0f64, 1.0].into_iter().enumerate() {
+                    let pos = self.dom.stack_len();
                     if v == 0.0 {
                         self.dom.tighten_upper(p, j, 0.0);
                     } else {
                         self.dom.tighten_lower(p, j, 1.0);
                     }
-                    fixed += 1;
-                    if !self.dom.propagate(p) {
+                    bad[k] = !(!self.dom.infeasible
+                        && self.dom.propagate(p)
+                        && self.propagate_objective_with(false)
+                        && rc_row.as_ref().is_none_or(|(r, u)| self.propagate_le_row(r, *u, false))
+                        && cut_rows.iter().all(|(r, u)| self.propagate_le_row(r, *u, false)));
+                    // 含意 (既定で使う、`ENOMOTO_MIP_ROOT_OBJ_PROBE_NO_IMPL` で使わない): 矛盾しなかった側で固定された 0-1 列を含意 (x_j = v => x_c = w) として
+                    // 定義域に足し、後の列の試しの伝播に使う (HiGHS はプロービングの含意をクリーク表に入れる)。打ち切り値を
+                    // 使って得た含意なので、打ち切り値より良い解でだけ成り立つ (大域的な固定と同じ)
+                    if !bad[k] && learn {
+                        let lj = 2 * j as u32 + if v == 1.0 { 0 } else { 1 };
+                        for (c, upper, val) in self.dom.changes_since(pos + 1) {
+                            if c != j && p.is_int[c] && self.dom.lo[c] == self.dom.up[c] && (val == 0.0 || val == 1.0) && self.dom.global_lo[c] == 0.0 && self.dom.global_up[c] == 1.0 {
+                                // x_c = val (上限を 0 にした / 下限を 1 にした) => 文字 (c = 1 - val) と衝突
+                                let _ = upper;
+                                let lc = 2 * c as u32 + if val == 1.0 { 1 } else { 0 };
+                                new_edges.push((lj, lc));
+                            }
+                        }
+                    }
+                    self.dom.backtrack_to(p, pos);
+                }
+                if !new_edges.is_empty() {
+                    new_edges.sort_unstable();
+                    new_edges.dedup();
+                    n_edges += new_edges.len();
+                    self.dom.add_implications(p.n, &new_edges);
+                    new_edges.clear();
+                }
+                match bad {
+                    [true, true] => {
+                        // どちらの値でも打ち切り値より良い解はない: 暫定解が最適。ここでは固定せず、根の LP に任せる
                         both = true;
                         break;
                     }
+                    [true, false] | [false, true] => {
+                        let v = if bad[0] { 1.0 } else { 0.0 };
+                        self.dom.tighten_global(p, j, v == 0.0, v);
+                        if v == 0.0 {
+                            self.dom.tighten_upper(p, j, 0.0);
+                        } else {
+                            self.dom.tighten_lower(p, j, 1.0);
+                        }
+                        fixed += 1;
+                        if !self.dom.propagate(p) {
+                            both = true;
+                            break;
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+            if both || fixed == fixed0 || self.time_up() || t0.elapsed().as_secs_f64() > tmax {
+                break;
             }
         }
         // `ENOMOTO_MIP_ROOT_OBJ_PROBE_GENINT`: 0-1 でない有界の整数列 (幅 2 以上) でも、境界の側ごとに二分探索で試す。
@@ -7923,7 +7936,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.root_obj_probe_stats = [probed as u64, fixed as u64];
         if self.params.verbose || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some()) {
             eprintln!(
-                "MIP: {}root objective probing: gap {:.3e}, {} fractional binaries, {probed} probed, {fixed} fixed, {n_edges} implications{} (cutoff {:.10e}, redcost row {}, {} cut rows, {:.2}s)",
+                "MIP: {}root objective probing: gap {:.3e}, {} fractional binaries, {probed} probed ({npass} passes), {fixed} fixed, {n_edges} implications{} (cutoff {:.10e}, redcost row {}, {} cut rows, {:.2}s)",
                 if self.params.submip { "sub-MIP " } else { "" },
                 rel_gap,
                 cands.len(),
