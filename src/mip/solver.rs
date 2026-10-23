@@ -149,7 +149,13 @@ thread_local! {
     pub(crate) static SUBMIP_BASIS: std::cell::RefCell<Option<Vec<super::lp::VarStatus>>> = const { std::cell::RefCell::new(None) };
     /// 次に始める求解 (サブ MIP でないもの) の根の LP の初めの基底 (列の状態)。前処理の LP による固定
     /// ([`super::lp_probe`]) が解いた LP の基底を渡す (根の LP を解き直す手間を減らす)。
-    pub(crate) static ROOT_BASIS: std::cell::RefCell<Option<Vec<super::lp::VarStatus>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static ROOT_BASIS: std::cell::RefCell<Option<super::lp::Basis>> = const { std::cell::RefCell::new(None) };
+    /// [`ROOT_BASIS`] の DSE 重み (`ENOMOTO_MIP_LP_PROBE_FINISH` のときだけ。番号は構造列 j < n、行 n + i)
+    pub(crate) static ROOT_DSE: std::cell::RefCell<Option<Vec<(u32, f32)>>> = const { std::cell::RefCell::new(None) };
+    /// 再スタートの後の根の LP の初めの基底 (`ENOMOTO_MIP_RESTART_BASIS`、試作)。再スタートの直前の LP の列の状態と、
+    /// 各行 (元の行とカットの行) の中身と論理変数の状態。前処理は列の番号を保つが行は消したり並べ替えたりするので、
+    /// 行の状態は行の中身で照らし合わせて引き継ぐ ([`restart_basis_for`])
+    pub(crate) static RESTART_BASIS: std::cell::RefCell<Option<(Vec<super::lp::VarStatus>, Vec<(Vec<(usize, f64)>, super::lp::VarStatus)>)>> = const { std::cell::RefCell::new(None) };
     /// ヒューリスティクス役のスレッド (`ENOMOTO_MIP_HEUR_ROLE`、[`Solver::heur_role_run`]) の共有の待ち行列。このスレッドで
     /// 解くサブ MIP も、木の探索が終わるか止める合図が立ったら打ち切る ([`Solver::time_up`])。
     static ROLE_POOL: std::cell::RefCell<Option<std::sync::Arc<WorkPool>>> = const { std::cell::RefCell::new(None) };
@@ -728,6 +734,61 @@ pub(crate) struct TreeSnapshot {
 /// [`Solver::root_fail_bound`] に入っているので、inv/mzzv42z-20261023 でここに移したのは基底の受け渡しだけ)
 fn tree_root_basis() -> bool {
     env_str!("ENOMOTO_MIP_TREE_ROOT_BASIS").is_some()
+}
+
+/// `ENOMOTO_MIP_RESTART_BASIS` (試作、既定では使わない): 再スタートの後の根の LP を、再スタートの直前の LP の基底から解き始める
+/// ([`RESTART_BASIS`])。今までは再スタートの後の根の LP を毎回基底なしで解いていた (前処理の LP による固定は最初の求解だけで、
+/// その基底も最初の根で使い切る)
+pub(crate) fn restart_basis_on() -> bool {
+    env_str!("ENOMOTO_MIP_RESTART_BASIS").is_some()
+}
+
+/// 行の中身を照らし合わせるための鍵: 列の番号の順に並べ、最初の係数の絶対値で割り、最初の係数が負なら符号を反転する
+/// (反転したら真を返す。論理変数の下限・上限の状態を入れ替える)。係数は相対 1e-9 で丸める
+fn row_key(r: &[(usize, f64)]) -> Option<(Vec<(usize, i64)>, bool)> {
+    let mut r: Vec<(usize, f64)> = r.iter().copied().filter(|&(_, v)| v != 0.0).collect();
+    if r.is_empty() {
+        return None;
+    }
+    r.sort_by_key(|&(j, _)| j);
+    let a = r[0].1;
+    let flip = a < 0.0;
+    let s = if flip { -1.0 / a.abs() } else { 1.0 / a.abs() };
+    Some((r.iter().map(|&(j, v)| (j, (v * s * 1e9).round() as i64)).collect(), flip))
+}
+
+/// [`RESTART_BASIS`] を今の LP の行に当てはめた基底を作る。列の数が違えば `None`。行の中身が再スタートの直前の LP の
+/// 行と同じなら (正規化して) その論理変数の状態を使い、見つからない行は論理変数を基底に入れる (基底変数の数の過不足は
+/// `set_basis` の修復に任せる)。照らし合わせた行の数も返す
+fn restart_basis_for<L: MipLp>(lp: &L, n: usize, saved: (Vec<super::lp::VarStatus>, Vec<(Vec<(usize, f64)>, super::lp::VarStatus)>)) -> Option<(super::lp::Basis, usize)> {
+    use super::lp::VarStatus;
+    let (col, rows) = saved;
+    if col.len() != n {
+        return None;
+    }
+    let swap = |st: VarStatus, flip: bool| match (st, flip) {
+        (VarStatus::Lower, true) => VarStatus::Upper,
+        (VarStatus::Upper, true) => VarStatus::Lower,
+        (s, _) => s,
+    };
+    let mut map: std::collections::HashMap<Vec<(usize, i64)>, VarStatus> = std::collections::HashMap::new();
+    for (r, st) in &rows {
+        if let Some((k, flip)) = row_key(r) {
+            map.insert(k, swap(*st, flip));
+        }
+    }
+    let m = lp.num_rows();
+    let mut matched = 0usize;
+    let row: Vec<VarStatus> = (0..m)
+        .map(|i| match row_key(&lp.row(i)).and_then(|(k, flip)| map.get(&k).map(|&st| swap(st, flip))) {
+            Some(st) => {
+                matched += 1;
+                st
+            }
+            None => VarStatus::Basic,
+        })
+        .collect();
+    Some((super::lp::Basis { col, row }, matched))
 }
 
 pub(crate) struct SnapNode {
@@ -3066,13 +3127,56 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        let mut root_warm_dse_once = false;
         if !self.params.submip && self.snap.is_none() {
-            if let Some(col) = ROOT_BASIS.with(|s| s.borrow_mut().take()) {
-                if col.len() == self.p.n {
-                    self.lp.set_basis(&super::lp::Basis { col, row: Vec::new() });
+            let rb = ROOT_BASIS.with(|s| s.borrow_mut().take());
+            if self.params.verbose {
+                eprintln!(
+                    "MIP: root LP basis from the presolve LP probing: {}",
+                    match &rb {
+                        Some(b) if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() => "used (with rows)",
+                        Some(b) if b.col.len() == self.p.n && !b.row.is_empty() && b.row.len() < self.lp.num_rows() => "used (with rows; the added rows basic)",
+                        Some(b) if b.col.len() == self.p.n => "used (columns only)",
+                        Some(_) => "size mismatch",
+                        None => "none",
+                    }
+                );
+            }
+            if let Some(mut b) = rb {
+                if b.col.len() == self.p.n {
+                    // 行の状態 (`ENOMOTO_MIP_LP_PROBE_FINISH`。既定は列の状態だけ): 前処理の後に末尾に足した行 (対称性の
+                    // lex-leader の行など) は論理変数を基底に入れる。行が減っていたら使わない
+                    if b.row.len() > self.lp.num_rows() {
+                        b.row.clear();
+                    } else if !b.row.is_empty() {
+                        b.row.resize(self.lp.num_rows(), super::lp::VarStatus::Basic);
+                    }
+                    self.lp.set_basis(&b);
+                    // DSE 重みも引き継ぐ (根の LP の 1 回だけ。重みなしで始めると、カットのループの LP の反復が増えた)
+                    if let Some(w) = ROOT_DSE.with(|s| s.borrow_mut().take()) {
+                        self.lp.set_dse_vars(&w);
+                        root_warm_dse_once = true;
+                    }
                 }
             }
         }
+        ROOT_DSE.with(|s| *s.borrow_mut() = None);
+        // `ENOMOTO_MIP_RESTART_BASIS` (試作): 再スタートの後の根の LP は、再スタートの直前の LP の基底から解き始める
+        let restart_basis_used = if !self.params.submip && self.snap.is_none() && self.params.restarts > 0 {
+            match RESTART_BASIS.with(|s| s.borrow_mut().take()).and_then(|saved| restart_basis_for(&self.lp, self.p.n, saved)) {
+                Some((b, matched)) => {
+                    if self.params.verbose {
+                        eprintln!("MIP: root LP basis from before the restart: {matched} of {} rows matched", self.lp.num_rows());
+                    }
+                    self.lp.set_basis(&b);
+                    true
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        let root_iters0 = self.lp.total_iterations();
         if self.snap.is_some() && (CUT_JOB.with(|j| j.borrow().is_some()) || DIVE_ONLY.with(|d| d.get()).0 == 5) {
             if let Some(b) = BG_ROOT_BASIS.with(|s| s.borrow_mut().take()) {
                 if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
@@ -3088,7 +3192,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        if self.params.verbose && self.snap.is_none() && !self.params.submip {
+            eprintln!("MIP: solving the root LP ({:.2}s)", self.start.elapsed().as_secs_f64());
+        }
+        if root_warm_dse_once {
+            crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        if root_warm_dse_once {
+            crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        if restart_basis_used && self.params.verbose {
+            eprintln!("MIP: root LP after the restart: {root_st:?}, {} iters ({:.2}s)", self.lp.total_iterations() - root_iters0, self.start.elapsed().as_secs_f64());
+        }
         if self.params.verbose && self.snap.is_some() {
             eprintln!("MIP: [snapshot] root LP {root_st:?} ({} iters, {:.2}s)", self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
         }
@@ -3143,6 +3259,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // カットを加える前の根の LP 解 (RENS の 2 つ目の近傍に使う)
         let x_root0 = self.lp.col_values();
+        // `ENOMOTO_MIP_EARLY_RENS` (試作): 暫定解がない (か質の悪い FJ の解だけの) とき、暫定解なし用のダイビング式 RENS を
+        // カットのループの前に (カット前の LP 解で、同じスレッドで) 回す。hypothyroid-k1 ではこの RENS のサブ MIP が
+        // 0.2 秒で最適値 -2851 を見つけるが、既定ではカットのループ (6.7 秒) と根のヒューリスティクスの後になる
+        if env_str!("ENOMOTO_MIP_EARLY_RENS").is_some() && !self.params.submip && self.snap.is_none() && !self.fractional(&x_root0).is_empty() {
+            self.poll_fj_thread();
+            if self.incumbent.is_none() || self.fj_poor() {
+                let t = Instant::now();
+                self.heur_label = "RENS (early)";
+                let found = self.rens(&x_root0);
+                self.heur_label = "";
+                if self.params.verbose {
+                    eprintln!("MIP: early RENS before the root cuts: {} ({:.2}s, incumbent {:?}, {:.2}s)", if found { "found" } else { "none" }, t.elapsed().as_secs_f64(), self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
+                }
+            }
+            // `ENOMOTO_MIP_EARLY_RENS_PROBE` (試作): その直後に打ち切り値つきの根のプロービング ([`Self::root_obj_probe`]) も
+            // カットのループの前に回す (固定は大域的に入り、カットのループの後の 2 回目も回る)
+            if env_str!("ENOMOTO_MIP_EARLY_RENS_PROBE").is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_OBJ_PROBE").is_none() && self.root_obj_probe() {
+                if let Some(z) = self.incumbent.as_ref().map(|(z, _)| *z) {
+                    if self.shared.as_ref().is_none_or(|s| !(s.best() < z)) {
+                        if self.params.verbose {
+                            eprintln!("MIP: early root objective probing proved the incumbent {z:.10e} optimal ({:.2}s)", self.start.elapsed().as_secs_f64());
+                        }
+                        return self.finish(MipStatus::Optimal, z);
+                    }
+                }
+            }
+        }
         // 根の切除平面
         let cut_job = CUT_JOB.with(|j| j.borrow().clone()).filter(|_| self.snap.is_some());
         {
@@ -7885,71 +8028,84 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let mut new_edges: Vec<(u32, u32)> = Vec::new();
         let mut n_edges = 0usize;
-        for &j in &cands {
-            if self.time_up() || t0.elapsed().as_secs_f64() > tmax || (fixed == 0 && probed >= giveup) {
-                break;
-            }
-            if self.dom.lo[j] == self.dom.up[j] {
-                continue;
-            }
-            probed += 1;
-            let mut bad = [false; 2];
-            for (k, v) in [0.0f64, 1.0].into_iter().enumerate() {
-                let pos = self.dom.stack_len();
-                if v == 0.0 {
-                    self.dom.tighten_upper(p, j, 0.0);
-                } else {
-                    self.dom.tighten_lower(p, j, 1.0);
-                }
-                bad[k] = !(!self.dom.infeasible
-                    && self.dom.propagate(p)
-                    && self.propagate_objective_with(false)
-                    && rc_row.as_ref().is_none_or(|(r, u)| self.propagate_le_row(r, *u, false))
-                    && cut_rows.iter().all(|(r, u)| self.propagate_le_row(r, *u, false)));
-                // 含意 (既定で使う、`ENOMOTO_MIP_ROOT_OBJ_PROBE_NO_IMPL` で使わない): 矛盾しなかった側で固定された 0-1 列を含意 (x_j = v => x_c = w) として
-                // 定義域に足し、後の列の試しの伝播に使う (HiGHS はプロービングの含意をクリーク表に入れる)。打ち切り値を
-                // 使って得た含意なので、打ち切り値より良い解でだけ成り立つ (大域的な固定と同じ)
-                if !bad[k] && learn {
-                    let lj = 2 * j as u32 + if v == 1.0 { 0 } else { 1 };
-                    for (c, upper, val) in self.dom.changes_since(pos + 1) {
-                        if c != j && p.is_int[c] && self.dom.lo[c] == self.dom.up[c] && (val == 0.0 || val == 1.0) && self.dom.global_lo[c] == 0.0 && self.dom.global_up[c] == 1.0 {
-                            // x_c = val (上限を 0 にした / 下限を 1 にした) => 文字 (c = 1 - val) と衝突
-                            let _ = upper;
-                            let lc = 2 * c as u32 + if val == 1.0 { 1 } else { 0 };
-                            new_edges.push((lj, lc));
-                        }
-                    }
-                }
-                self.dom.backtrack_to(p, pos);
-            }
-            if !new_edges.is_empty() {
-                new_edges.sort_unstable();
-                new_edges.dedup();
-                n_edges += new_edges.len();
-                self.dom.add_implications(p.n, &new_edges);
-                new_edges.clear();
-            }
-            match bad {
-                [true, true] => {
-                    // どちらの値でも打ち切り値より良い解はない: 暫定解が最適。ここでは固定せず、根の LP に任せる
-                    both = true;
+        // `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_PASSES` (試作、既定 1): 候補を一回りして、固定が出たのに証明に届かなければ、同じ候補を
+        // もう一回り試す (前の回りの固定と含意が後の回りの伝播に効く)。hypothyroid-k1 では根のカットの組によって、
+        // 1 回りで 351〜482 列を試して両側矛盾で証明する回と、全 2300〜2440 列を試して 17〜37 列を固定するだけで終わり、
+        // 再スタートして 15〜35 秒遅れる回がある
+        let passes = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_PASSES", 1usize, usize).max(1);
+        let mut npass = 0usize;
+        for _ in 0..passes {
+            npass += 1;
+            let fixed0 = fixed;
+            for &j in &cands {
+                if self.time_up() || t0.elapsed().as_secs_f64() > tmax || (fixed == 0 && probed >= giveup) {
                     break;
                 }
-                [true, false] | [false, true] => {
-                    let v = if bad[0] { 1.0 } else { 0.0 };
-                    self.dom.tighten_global(p, j, v == 0.0, v);
+                if self.dom.lo[j] == self.dom.up[j] {
+                    continue;
+                }
+                probed += 1;
+                let mut bad = [false; 2];
+                for (k, v) in [0.0f64, 1.0].into_iter().enumerate() {
+                    let pos = self.dom.stack_len();
                     if v == 0.0 {
                         self.dom.tighten_upper(p, j, 0.0);
                     } else {
                         self.dom.tighten_lower(p, j, 1.0);
                     }
-                    fixed += 1;
-                    if !self.dom.propagate(p) {
+                    bad[k] = !(!self.dom.infeasible
+                        && self.dom.propagate(p)
+                        && self.propagate_objective_with(false)
+                        && rc_row.as_ref().is_none_or(|(r, u)| self.propagate_le_row(r, *u, false))
+                        && cut_rows.iter().all(|(r, u)| self.propagate_le_row(r, *u, false)));
+                    // 含意 (既定で使う、`ENOMOTO_MIP_ROOT_OBJ_PROBE_NO_IMPL` で使わない): 矛盾しなかった側で固定された 0-1 列を含意 (x_j = v => x_c = w) として
+                    // 定義域に足し、後の列の試しの伝播に使う (HiGHS はプロービングの含意をクリーク表に入れる)。打ち切り値を
+                    // 使って得た含意なので、打ち切り値より良い解でだけ成り立つ (大域的な固定と同じ)
+                    if !bad[k] && learn {
+                        let lj = 2 * j as u32 + if v == 1.0 { 0 } else { 1 };
+                        for (c, upper, val) in self.dom.changes_since(pos + 1) {
+                            if c != j && p.is_int[c] && self.dom.lo[c] == self.dom.up[c] && (val == 0.0 || val == 1.0) && self.dom.global_lo[c] == 0.0 && self.dom.global_up[c] == 1.0 {
+                                // x_c = val (上限を 0 にした / 下限を 1 にした) => 文字 (c = 1 - val) と衝突
+                                let _ = upper;
+                                let lc = 2 * c as u32 + if val == 1.0 { 1 } else { 0 };
+                                new_edges.push((lj, lc));
+                            }
+                        }
+                    }
+                    self.dom.backtrack_to(p, pos);
+                }
+                if !new_edges.is_empty() {
+                    new_edges.sort_unstable();
+                    new_edges.dedup();
+                    n_edges += new_edges.len();
+                    self.dom.add_implications(p.n, &new_edges);
+                    new_edges.clear();
+                }
+                match bad {
+                    [true, true] => {
+                        // どちらの値でも打ち切り値より良い解はない: 暫定解が最適。ここでは固定せず、根の LP に任せる
                         both = true;
                         break;
                     }
+                    [true, false] | [false, true] => {
+                        let v = if bad[0] { 1.0 } else { 0.0 };
+                        self.dom.tighten_global(p, j, v == 0.0, v);
+                        if v == 0.0 {
+                            self.dom.tighten_upper(p, j, 0.0);
+                        } else {
+                            self.dom.tighten_lower(p, j, 1.0);
+                        }
+                        fixed += 1;
+                        if !self.dom.propagate(p) {
+                            both = true;
+                            break;
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+            if both || fixed == fixed0 || self.time_up() || t0.elapsed().as_secs_f64() > tmax {
+                break;
             }
         }
         // `ENOMOTO_MIP_ROOT_OBJ_PROBE_GENINT`: 0-1 でない有界の整数列 (幅 2 以上) でも、境界の側ごとに二分探索で試す。
@@ -8030,7 +8186,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.root_obj_probe_stats = [probed as u64, fixed as u64];
         if self.params.verbose || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some()) {
             eprintln!(
-                "MIP: {}root objective probing: gap {:.3e}, {} fractional binaries, {probed} probed, {fixed} fixed, {n_edges} implications{} (cutoff {:.10e}, redcost row {}, {} cut rows, {:.2}s)",
+                "MIP: {}root objective probing: gap {:.3e}, {} fractional binaries, {probed} probed ({npass} passes), {fixed} fixed, {n_edges} implications{} (cutoff {:.10e}, redcost row {}, {} cut rows, {:.2}s)",
                 if self.params.submip { "sub-MIP " } else { "" },
                 rel_gap,
                 cands.len(),
@@ -9017,7 +9173,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let ref_x = if self.incumbent.is_none() && super::restart_ref_for(p) { self.ref_sol.clone() } else { None };
             super::RESTART_SOL.with(|s| *s.borrow_mut() = self.incumbent.as_ref().map(|(_, x)| x.clone()).or(ref_x));
         }
+        // `ENOMOTO_MIP_RESTART_BASIS` (試作): 今の LP (根のカットの後) の基底を、再スタートの後の根の LP に渡す
+        if restart_basis_on() {
+            let b = self.lp.basis();
+            let rows: Vec<(Vec<(usize, f64)>, super::lp::VarStatus)> = (0..self.lp.num_rows().min(b.row.len())).map(|i| (self.lp.row(i), b.row[i])).collect();
+            RESTART_BASIS.with(|s| *s.borrow_mut() = Some((b.col, rows)));
+        }
         let r = super::solve_problem(&newp, params, true);
+        RESTART_BASIS.with(|s| *s.borrow_mut() = None);
         super::RESTART_SOL.with(|s| *s.borrow_mut() = None);
         super::RESTART_CUTS.with(|s| *s.borrow_mut() = None);
         let nodes = self.nodes + r.nodes;
