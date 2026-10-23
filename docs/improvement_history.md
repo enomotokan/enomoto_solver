@@ -9967,3 +9967,10 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 試作 (既定は変えない): `ENOMOTO_MIP_LOCALMIP=1` (FJ と並べて別スレッドで Local-MIP 風の局所探索)、`ENOMOTO_MIP_LOCALMIP_CHAIN=1` (違反行を直す手が破る行を次々に直す連鎖の手)、`ENOMOTO_MIP_FJ_CHAIN`・`ENOMOTO_MIP_FJ_SP_BOUNDS`・`ENOMOTO_MIP_LOCALMIP_PAIR`、診断 `ENOMOTO_MIP_FJ_DUMP`。
 - lmc (LOCALMIP + CHAIN) の 4 スレッド・60 秒・2 回: 30n20b8 の最初の暫定解 0.74〜0.82 秒、最終 302 (最適)。neos-1456979 は 1.5〜1.7 秒で暫定解。physiciansched6-2 は 50425、mzzv42z も良くなる。roll3000 は変わらず、timtab1 は最適性の証明を失う。FJ_CHAIN と FJ_SP_BOUNDS は候補にしない。
 - lmc を 40 + 16 問で計測する (inv/lmc-a-20261023・inv/lmc-b-20261023)。
+
+## 2026-10-23: サブ MIP のヒューリスティクス 5 つの試作 (heur-sub) の調査
+
+- 調査 (analysis/heur_sub_20261023.md、inv/heur-sub-20261023 d383599)。どれも既定は変えない: `ENOMOTO_MIP_FARKAS_DIVE` (Farkas ダイビング)、`ENOMOTO_MIP_ZEROOBJ` (目的を 0 にしたサブ MIP)、`ENOMOTO_MIP_ACS` (Alternating Criteria Search、FJ の違反最少の点から)、`ENOMOTO_MIP_LB2` (中心を移す繰り返しの Local Branching)、`ENOMOTO_MIP_PROX2` (中心を移す Proximity Search)。
+- 30n20b8: ACS で最初の暫定解が 26 秒前後 (既定は 44〜55 秒の木から) になるが、最終は 553 で既定 (453〜504) より悪い (根で 7 秒使い、木のノードが 1/4 ほど)。Farkas・zero-objective は解を出さない。neos-1456979 はどれも早まらない。
+- LB2 + PROX2 (根は外側の始まりから 10 秒・木は 15 秒たってから・経過時間の 0.1 まで): physiciansched6-2 は 6 回すべて 49625 (既定 51029)、mzzv42z は -20450・-20500 (既定 -20260・-18682)。supportcase26・roll3000 は揺れの範囲。軽い問題 (misc07・10teams・mik-250-20-75-4・qnet1) は既定と同じ時間。
+- lbp (`ENOMOTO_MIP_LB2=1 ENOMOTO_MIP_PROX2=1`) を 40 + 16 問で計測する (inv/lbp-a-20261023・inv/lbp-b-20261023、5ce82be)。Farkas・zero-objective は候補にしない。ACS は木の扱いを見直してから。
