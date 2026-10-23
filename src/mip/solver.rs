@@ -70,6 +70,16 @@ pub struct MipParams {
     pub fc_submip: bool,
 }
 
+/// 試作の `ENOMOTO_MIP_LB2` / `ENOMOTO_MIP_PROX2` の値: (根で使うか, 木で使うか)。`root`・`tree`、ほかの値は両方。
+pub(super) fn hsub_mode(v: Option<&str>) -> (bool, bool) {
+    match v {
+        None => (false, false),
+        Some("root") => (true, false),
+        Some("tree") => (false, true),
+        Some(_) => (true, true),
+    }
+}
+
 /// 根のヒューリスティクスの名前に対応するビット (再スタートで飛ばすものの印)。暫定解に依る RINS と、
 /// 一覧にないものは 0 (飛ばさない)。
 pub(super) fn heur_bit(name: &str) -> u64 {
@@ -254,6 +264,15 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) lb_k: f64,
     /// ノードで回す改善ヒューリスティクスの順番。
     pub(super) improve_turn: u64,
+    /// 試作のサブ MIP のヒューリスティクス (`heur_sub.rs`) の (呼んだ回数, 解を出した回数):
+    /// zero-objective・ACS・Local Branching 2・Proximity 2・Farkas ダイビング
+    pub(super) hsub_stats: [(u32, u32); 5],
+    /// 繰り返しの Local Branching ([`Solver::local_branching2`]) の近傍の大きさ。
+    pub(super) lb2_k: f64,
+    /// 木の中で Local Branching 2・Proximity 2 を最後に呼んだときの暫定解の値 (これより良い暫定解が出たら呼ぶ)。
+    pub(super) hsub_center_z: f64,
+    /// 木の中で Local Branching 2・Proximity 2 に使った時間 [秒]。
+    pub(super) hsub_secs: f64,
     /// ALNS の腕ごとの報酬の合計と試した回数。
     pub(super) alns_reward: [f64; 6],
     pub(super) alns_count: [u32; 6],
@@ -350,7 +369,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 次に出すサブ MIP が根の RENS のものか (受け取ったときにノード上限で止まっていれば `rens_node_limited` を立てる)。
     pub(super) submip_is_rens: bool,
     /// 別スレッドの Feasibility Jump とその停止の印。
-    fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// 戻り値は (解, FJ の最良の点 ([`super::fj::take_best_inf`]、`ENOMOTO_MIP_ACS` のときだけ))。
+    fj_thread: Option<(std::thread::JoinHandle<(Option<Vec<f64>>, super::fj::BestInf)>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// 別スレッドの FJ が実行可能解なしで終わったときの、違反の行の数が最も少ない点 (ACS の出発点、`ENOMOTO_MIP_ACS`)。
+    pub(super) fj_best_inf: Option<Vec<f64>>,
     /// 根のヒューリスティクスの最初に別スレッドで始めた局所探索 (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`。結果は元の位置で受け取る)。
     pub(super) ls_thread: Option<std::thread::JoinHandle<super::heuristics::LocalSearchResult>>,
     /// 根の解発見スレッド ([`find_thread_on`])。根のヒューリスティクスの後と木の各ノードで、終わっていれば受け取る
@@ -1497,6 +1519,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         last_rins: 0,
         lb_k: 18.0,
         improve_turn: 0,
+        hsub_stats: [(0, 0); 5],
+        lb2_k: tunable!("ENOMOTO_T_MIP_LB2_K", 18.0, f64),
+        hsub_center_z: f64::INFINITY,
+        hsub_secs: 0.0,
         alns_reward: [0.0; 6],
         alns_count: [0; 6],
         sol_pool: Vec::new(),
@@ -1546,6 +1572,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_fix_rate: None,
         submip_is_rens: false,
         fj_thread: None,
+        fj_best_inf: None,
         ls_thread: None,
         find_thread: None,
         find_out: None,
@@ -2737,15 +2764,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_FJ_P3` (既定、`ENOMOTO_MIP_NO_FJ_P3` で止める): FJ だけ、p5s の前処理の変更をかけ直した問題で探す ([`super::fj_p3_problem`])
                 let fj_p3 = super::fj_p3_on();
                 let h = std::thread::spawn(move || {
+                    super::fj::take_best_inf();
                     if fj_p3 {
                         if let Some((q, post, sc)) = super::fj_p3_problem(&pc) {
                             crate::set_fj_p3_force(true);
                             let r = super::heuristics::fj_search(&q, &q.col_lo, &q.col_up, effort, cap, seed, Some(&stop2));
                             crate::set_fj_p3_force(false);
-                            return r.map(|x| super::fj_p3_solution(x, &post, &sc));
+                            let (k, b) = super::fj::take_best_inf();
+                            let b = b.map(|(nv, v, x)| (nv, v, super::fj_p3_solution(x, &post, &sc)));
+                            return (r.map(|x| super::fj_p3_solution(x, &post, &sc)), (k, b));
                         }
                     }
-                    super::heuristics::fj_search(&pc, &lo, &up, effort, cap, seed, Some(&stop2))
+                    let r = super::heuristics::fj_search(&pc, &lo, &up, effort, cap, seed, Some(&stop2));
+                    (r, super::fj::take_best_inf())
                 });
                 self.fj_thread = Some((h, stop));
             } else if !self.params.submip && !proof_only() && self.feasibility_jump(effort, cap) && self.params.verbose {
@@ -3157,7 +3188,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // サブ MIP (942 列) では、この 4 つで 2.4 秒使って何も見つけず、入れ子の RENS のサブ MIP でも毎回同じだけかかる
                 // (HiGHS のサブ MIP は根のヒューリスティクスのほとんどを入れ子の RENS に使い、1 回 0.1-1.6 秒で終わる)
                 // (暫定解がない、つまり打ち切り値が無限のサブ MIP だけ。`ENOMOTO_MIP_SUBMIP_NO_SB` と同じ理由)
-                let light = self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some();
+                let light = self.params.submip && ((self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some()) || super::heur_sub::hsub_light());
                 // ダイビングの予算: 最初の根の LP の 2 倍に、カットのループを含めた根全体の反復数の一定割合を足す
                 let dive_budget = 2 * root_iters + 1000 + (tunable!("ENOMOTO_T_MIP_ROOT_DIVE_FRAC", 0.0, f64) * self.lp.total_iterations() as f64) as u64;
                 // `ENOMOTO_MIP_PAR_DIVES`: 並列モードで暫定解がなければ、Feasibility Pump と 3 つのダイビングを、今の根の写しから
@@ -3208,6 +3239,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         heur!("coefficient diving", self.dive(super::heuristics::DiveKind::Coefficient, dive_budget, f64::INFINITY));
                     }
                 }
+                // `ENOMOTO_MIP_FARKAS_DIVE` (試作): SCIP の farkasdiving の形のダイビング ([`super::heuristics::DiveKind::FarkasScip`])
+                // (`=old` なら以前からある簡略版 [`super::heuristics::DiveKind::Farkas`])
+                if let Some(v) = env_str!("ENOMOTO_MIP_FARKAS_DIVE") {
+                    if self.noinc_like() && !light && !self.params.submip {
+                        let kind = if v == "old" { super::heuristics::DiveKind::Farkas } else { super::heuristics::DiveKind::FarkasScip };
+                        heur!("Farkas diving", self.farkas_dive(kind, dive_budget));
+                    }
+                }
                 // LP を使わない最後の手段 (先に使うと質の悪い解で他の暫定解探しを止めてしまう)
                 if self.noinc_like() && env_str!("ENOMOTO_MIP_NO_SHIFTPROP").is_none() {
                     heur!("shift-and-propagate", self.shift_and_propagate());
@@ -3234,8 +3273,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.noinc_like() && env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() {
                     heur!("local search", self.local_search_heur());
                 }
+                // ACS の出発点 (局所探索の違反最小の点。Repair が持っていくので先に写す)
+                let acs_start = self.repair_start.clone();
                 if self.noinc_like() && env_str!("ENOMOTO_MIP_NO_REPAIR").is_none() {
                     heur!("repair", self.repair(&x));
+                }
+                // `ENOMOTO_MIP_ZEROOBJ` (試作): 暫定解がなければ目的関数 0 のサブ MIP ([`Self::zero_objective`])
+                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_ZEROOBJ").is_some() && !self.params.submip {
+                    heur!("zero objective", self.zero_objective());
+                }
+                // `ENOMOTO_MIP_ACS` (試作): 暫定解がなければ Alternating Criteria Search ([`Self::acs`])。`=2` なら暫定解があっても
+                // (暫定解を出発点に最適性の段から)
+                if let Some(v) = env_str!("ENOMOTO_MIP_ACS") {
+                    if (self.incumbent.is_none() || v == "2") && !self.params.submip {
+                        // 出発点: `ENOMOTO_MIP_ACS_START` = fj (既定、FJ の違反の最も少ない点、なければ局所探索の点) | ls | lp
+                        let st = match env_str!("ENOMOTO_MIP_ACS_START").unwrap_or("fj") {
+                            "lp" => None,
+                            "ls" => acs_start,
+                            _ => self.fj_best_inf.clone().or(acs_start),
+                        };
+                        heur!("ACS", self.acs(&x, st));
+                    }
                 }
                 // 違反量を最小にする補助 MIP (最後の手段、既定では使わない: 30n20b8・neos-1456979 で違反 0 の点が
                 // 見つからず根の時間を 3-5 s 使うだけだった。ENOMOTO_MIP_MINREL=1 で使う)
@@ -3263,6 +3321,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
                 if (self.incumbent.is_some() || self.ref_sol.is_some()) && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
                     heur!("RINS", self.rins(&x));
+                }
+                // `ENOMOTO_MIP_LB2` / `ENOMOTO_MIP_PROX2` = root|1 (試作): 暫定解があれば根で繰り返しの Local Branching・
+                // 中心を移す Proximity Search ([`Self::local_branching2`]・[`Self::proximity2`])
+                if self.incumbent.is_some() && !self.params.submip {
+                    if hsub_mode(env_str!("ENOMOTO_MIP_LB2")).0 {
+                        heur!("local branching 2", self.local_branching2(root_obj, 1.0));
+                    }
+                    if hsub_mode(env_str!("ENOMOTO_MIP_PROX2")).0 {
+                        heur!("proximity 2", self.proximity2(root_obj, 1.0));
+                    }
                 }
                 // 目的関数の台のサブ MIP (`ENOMOTO_MIP_OBJ_SUPPORT`、試作、[`Solver::obj_support`])。暫定解が根の LP の値から
                 // 目的関数の刻み以上離れているときだけ
@@ -4328,6 +4396,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if let Some(pool) = self.pool.as_ref().filter(|p| p.heur_k > 0) {
                         if node.depth > 0 && plunge_depth == 0 && self.nodes % tunable!("ENOMOTO_T_MIP_HEUR_ROLE_LPX_EVERY", 8u64, u64).max(1) == 0 {
                             *pool.lp_x.lock().unwrap() = Some(std::sync::Arc::new(x.clone()));
+                        }
+                    }
+                    // `ENOMOTO_MIP_LB2` / `ENOMOTO_MIP_PROX2` = tree|1 (試作): 木の中で前に呼んだときより良い暫定解があれば、
+                    // 繰り返しの Local Branching・中心を移す Proximity Search を呼ぶ (使う時間は経過時間の
+                    // `ENOMOTO_T_MIP_HSUB_TREE_FRAC` (0.3) 倍まで)
+                    let (lb2_tree, prox2_tree) = (hsub_mode(env_str!("ENOMOTO_MIP_LB2")).1, hsub_mode(env_str!("ENOMOTO_MIP_PROX2")).1);
+                    if (lb2_tree || prox2_tree) && heur_ok && plunge_depth == 0 && !self.params.submip {
+                        let zi = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+                        let budget_ok = self.hsub_secs < tunable!("ENOMOTO_T_MIP_HSUB_TREE_FRAC", 0.3, f64) * self.start.elapsed().as_secs_f64();
+                        if zi < self.hsub_center_z - 1e-9 * zi.abs().max(1.0) && budget_ok {
+                            let t_h = Instant::now();
+                            let lb = self.queue.best_lower_bound().min(node_obj);
+                            if lb2_tree {
+                                self.heur_label = "tree local branching 2";
+                                self.local_branching2(lb, 1.0);
+                            }
+                            if prox2_tree {
+                                self.heur_label = "tree proximity 2";
+                                self.proximity2(lb, 1.0);
+                            }
+                            self.heur_label = "";
+                            self.hsub_center_z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+                            self.hsub_secs += t_h.elapsed().as_secs_f64();
                         }
                     }
                     if heur_ok && node.depth > 0 && plunge_depth == 0 && self.incumbent.is_some() && self.nodes >= self.last_rins + lns_freq && lns_ok {
@@ -8702,12 +8793,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn join_fj_thread(&mut self) {
         if let Some((h, stop)) = self.fj_thread.take() {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            if let Ok(Some(x)) = h.join() {
-                self.heur_label = "feasibility jump (parallel)";
-                let ok = self.try_incumbent(x);
-                self.heur_label = "";
-                if ok && self.params.verbose {
-                    eprintln!("MIP: feasibility jump (parallel) found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
+            if let Ok((x, (_, best))) = h.join() {
+                if let Some(x) = x {
+                    self.heur_label = "feasibility jump (parallel)";
+                    let ok = self.try_incumbent(x);
+                    self.heur_label = "";
+                    if ok && self.params.verbose {
+                        eprintln!("MIP: feasibility jump (parallel) found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
+                    }
+                }
+                if let Some((nv, v, x)) = best {
+                    if self.params.verbose {
+                        eprintln!("MIP: FJ best infeasible point: {nv} violated rows, violation {v:.3e}");
+                    }
+                    if x.len() == self.p.n {
+                        self.fj_best_inf = Some(x);
+                    }
                 }
             }
         }

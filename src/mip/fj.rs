@@ -319,9 +319,33 @@ impl Fj {
     }
 }
 
+/// FJ の最良の点を残すか (`ENOMOTO_MIP_ACS` の出発点に使う。inv/fjrepair-20261023 の FJ_REPAIR から移したもの)。
+pub(super) fn fj_best_inf_on() -> bool {
+    env_str!("ENOMOTO_MIP_ACS").is_some()
+}
+
+/// FJ の点の記録の型: (違反の行の数の最小, 違反の行の数が最小の点 (違反の行の数・違反量の合計・点))。
+pub(super) type BestInf = (usize, Option<(usize, f64, Vec<f64>)>);
+
+thread_local! {
+    /// このスレッドの [`fj2_search`] が通った点のうち、違反の行の数 (等式は 2 本の不等式として数える) が最も少ないもの
+    /// (`ENOMOTO_T_MIP_FJ_REPAIR_KEEP` 行以下、既定 200 のときだけ点を残す)
+    static BEST_INF: std::cell::RefCell<BestInf> = const { std::cell::RefCell::new((usize::MAX, None)) };
+}
+
+/// [`BEST_INF`] を取り出して空にする。
+pub(super) fn take_best_inf() -> BestInf {
+    BEST_INF.with(|b| std::mem::replace(&mut *b.borrow_mut(), (usize::MAX, None)))
+}
+
 /// Feasibility Jump で実行可能な点を探す。`lo`/`up` は列の境界、`time_cap` は秒、`stop` が立ったら止める。
 /// 見つけた実行可能な点のうち目的値の最良のものを返す。
 pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64], time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
+    fj2_search_from(p, lo, up, None, time_cap, seed, stop)
+}
+
+/// [`fj2_search`] を点 `x0` (境界に収めて整数列は丸める) から始める (`None` なら下限に最も近い値から)。
+pub(super) fn fj2_search_from(p: &super::problem::MipProblem, lo: &[f64], up: &[f64], x0: Option<&[f64]>, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
     let n = p.n;
     if n == 0 {
         return None;
@@ -342,7 +366,14 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         lb[j] = l;
         ub[j] = u;
     }
-    let x: Vec<f64> = (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect();
+    let x: Vec<f64> = match x0 {
+        Some(x0) => (0..n).map(|j| {
+            let v = if p.is_int[j] { x0[j].round() } else { x0[j] };
+            let v = v.max(lb[j]).min(ub[j]);
+            if v.is_finite() { v } else if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }
+        }).collect(),
+        None => (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect(),
+    };
     let mut cons: Vec<Cons> = Vec::new();
     let mut vcols: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
     let mut nnz = 0u64;
@@ -408,6 +439,10 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     let repair = (env_str!("ENOMOTO_MIP_FJ_LP_REPAIR").is_some() || crate::fj_p3_force()) && p.is_int.iter().any(|&b| !b);
     let repair_max = tunable!("ENOMOTO_T_MIP_FJ_LP_REPAIR_MAX_VIOL", 50usize, usize);
     let mut best_inf: Option<Vec<f64>> = None;
+    // `ENOMOTO_MIP_FJ_REPAIR` / `ENOMOTO_MIP_FJ_STATS`: 違反の行の数が最も少なかった点を [`BEST_INF`] に残す ([`take_best_inf`])
+    let keep = fj_best_inf_on();
+    let keep_max = tunable!("ENOMOTO_T_MIP_FJ_REPAIR_KEEP", 200usize, usize);
+    let mut kept: Option<(usize, f64, Vec<f64>)> = None;
     let mut effort_last_improve = 0u64;
     let mut effort_last_check = 0u64;
     let t0 = Instant::now();
@@ -420,6 +455,10 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             best_viol = s.violated.len();
             if repair && best_viol > 0 && best_viol <= repair_max {
                 best_inf = Some(s.x.clone());
+            }
+            if keep && best_viol > 0 && best_viol <= keep_max {
+                let sum: f64 = s.violated.iter().map(|&ci| -s.cons[ci as usize].score(s.cons[ci as usize].lhs)).sum();
+                kept = Some((best_viol, sum, s.x.clone()));
             }
         }
         let mut check = s.effort - effort_last_check > 500_000;
@@ -459,6 +498,17 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             *kinds.entry(k).or_insert(0) += 1;
         }
         eprintln!("MIP:   FJ2 violated rows at the end: {kinds:?}");
+    }
+    if keep {
+        BEST_INF.with(|b| {
+            let mut b = b.borrow_mut();
+            b.0 = b.0.min(best_viol);
+            if let Some(k) = kept {
+                if b.1.as_ref().is_none_or(|o| (k.0, k.1) < (o.0, o.1)) {
+                    b.1 = Some(k);
+                }
+            }
+        });
     }
     let mut repaired = "";
     if best_x.is_none() {

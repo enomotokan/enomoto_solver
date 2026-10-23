@@ -20,6 +20,7 @@ pub(crate) mod solver;
 pub(crate) mod fj;
 mod heuristics;
 pub(crate) mod heur_scip;
+mod heur_sub;
 pub(crate) mod heur_ipm;
 pub(crate) mod symmetry;
 pub(crate) mod cuts;

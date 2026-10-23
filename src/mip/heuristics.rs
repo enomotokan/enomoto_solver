@@ -620,6 +620,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let dist = if up { 1.0 - f } else { f };
                         (up, -c.abs() / (1.0 + cmax) + 0.01 * dist + if binary { 0.0 } else { 0.5 })
                     }
+                    DiveKind::FarkasScip => {
+                        let c = p.cost[j];
+                        let ceps = 1e-9 * (1.0 + cmax);
+                        let up = if c < -ceps {
+                            true
+                        } else if c > ceps {
+                            false
+                        } else {
+                            f > 0.5
+                        };
+                        let mut sc = c.abs() + 1e-9 * (self.rand() - 0.5);
+                        // SCIP の scaletype 'i': 上げるなら局所的な下限からの距離、下げるなら上限までの距離を掛ける
+                        sc *= if up { v - self.dom.lo[j] } else { self.dom.up[j] - v };
+                        if !binary {
+                            sc = -1.0 / sc;
+                        }
+                        (up, -sc)
+                    }
                     DiveKind::Conflict => {
                         // 衝突制約の lock の少ない向きへ (同数なら通常の lock、それも同数なら近い側)
                         let (cdl, cul) = clocks[j];
@@ -709,6 +727,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.dom.backtrack_to(p, pos);
         self.sync_lp();
         self.lp.restore_state(&saved);
+        found
+    }
+
+    /// Farkas ダイビング ([`DiveKind::FarkasScip`] か [`DiveKind::Farkas`]) を、SCIP の farkasdiving と同じ条件で使う:
+    /// 費用が 0 でない整数列がなければ、またはその費用の幅 log10(max |c| / min |c|) が 1e-4 未満 (どの列も同じ費用)
+    /// なら使わない (`ENOMOTO_MIP_FARKAS_NO_DYN_CHECK` で幅は見ない)。
+    pub(super) fn farkas_dive(&mut self, kind: DiveKind, budget: u64) -> bool {
+        let p = self.p;
+        let cs: Vec<f64> = (0..p.n).filter(|&j| p.is_int[j] && p.cost[j] != 0.0).map(|j| p.cost[j].abs()).collect();
+        if cs.is_empty() {
+            return false;
+        }
+        let (mn, mx) = cs.iter().fold((f64::INFINITY, 0.0f64), |(a, b), &c| (a.min(c), b.max(c)));
+        if (mx / mn).log10() < 1e-4 && env_str!("ENOMOTO_MIP_FARKAS_NO_DYN_CHECK").is_none() {
+            if self.params.verbose {
+                eprintln!("MIP: hsub Farkas diving: skipped (objective dynamism {:.2e})", (mx / mn).log10());
+            }
+            return false;
+        }
+        let t = Instant::now();
+        let found = self.dive(kind, budget, f64::INFINITY);
+        self.hsub_stats[4].0 += 1;
+        self.hsub_stats[4].1 += found as u32;
+        if self.params.verbose {
+            eprintln!("MIP: hsub Farkas diving: closeness {:.3} -> found {found} ({:.2}s, at {:.2}s)", self.heur_close, t.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
+        }
         found
     }
 
@@ -1314,6 +1358,10 @@ pub enum DiveKind {
     Guided,
     /// Farkas ダイビング (SCIP の farkasdiving の簡略版: 目的値の良くなる向きへ、費用の絶対値の大きい列から)。
     Farkas,
+    /// Farkas ダイビング (SCIP の heur_farkasdiving の形、Witzig & Gleixner): 目的値の良くなる向きへ (費用 0 なら近い側)、
+    /// スコア |c_j| x (丸めた先の側の局所的な境界からの距離) の大きい列から。2 値でない列はどの 2 値列より後
+    /// (スコア -1 / s)。同点は小さな乱数で崩す。
+    FarkasScip,
     /// 衝突ダイビング (SCIP の conflictdiving の簡略版: 衝突制約の lock の少ない向きへ、その lock の少ない列から)。
     Conflict,
 }
@@ -1547,7 +1595,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// ([`SUBMIP_DEPTH`]) が `ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH` (既定 2。深さ 3 のサブ MIP まで作る) 以下のときだけ
     pub(super) fn nested_rens_ok(&self) -> bool {
         let d = SUBMIP_DEPTH.with(|d| d.get());
-        env_str!("ENOMOTO_MIP_SUBMIP_RENS").is_some() && d >= 1 && d as usize <= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH", 2usize, usize)
+        (env_str!("ENOMOTO_MIP_SUBMIP_RENS").is_some() || super::heur_sub::hsub_rens()) && d >= 1 && d as usize <= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH", 2usize, usize)
     }
 
     /// RENS (HiGHS の `HighsPrimalHeuristics::RENS` に倣う): LP 解で整数値の整数列を、残りの自由な列の 1 割ずつ
@@ -1568,7 +1616,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (再スタート後の根は暫定解を打ち切り値としてだけ持つので、打ち切り値が有限なら対象外)。
         // 40 問: 動くのは 30n20b8・flugpl・neos-1456979・timtab1 の 4 問。19 問 27.69 (無効なら 18 問 28.06)、
         // neos-1456979 は解なし -> 285、timtab1 は 1257510 -> 862380
-        if ((self.incumbent.is_none() && self.prune_limit().is_infinite()) || self.fj_poor()) && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
+        // 試作のサブ MIP (`heur_sub.rs`) の中では打ち切り値があっても使う ([`super::heur_sub::hsub_rens`])
+        if ((self.incumbent.is_none() && self.prune_limit().is_infinite()) || self.fj_poor() || (nested && super::heur_sub::hsub_rens())) && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
             // 根の 2 回目の呼び出し (カット前の LP 解) はダイビング式では同じ LP から始めるので、この形は 1 回だけ
             self.noinc_rens_done = true;
             let keep = (self.submip_time_frac, self.submip_time_max, self.submip_node_mult);
