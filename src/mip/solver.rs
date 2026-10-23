@@ -511,6 +511,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 診断用 (`ENOMOTO_PROF_TREE_PAR`): 木の探索の内訳と、今のノードの種類 ([`TreeProf::kind_n`])。
     tprof: TreeProf,
     tp_kind: usize,
+    lbd: LbNodeDiag,
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -837,6 +838,22 @@ enum ProofState {
     Imported,
     /// 捨てたもの (中身は空、右辺は +inf。先頭に来たら取り除く)。
     Dead,
+}
+
+/// 診断用 (`ENOMOTO_MIP_LBNODE_DIAG`): 取り出したノードの種類ごとの数・時間と、取り出したときに探索全体で下界最小だった数。
+/// 種類: 0 = 潜りの子, 1 = 兄弟への戻り, 2 = 自分の待ち行列の下界最小, 3 = 自分の待ち行列の推定値で選んだもの (下界最小でない),
+/// 4 = 共有の待ち行列から
+#[derive(Default)]
+struct LbNodeDiag {
+    n: [u64; 5],
+    at_min: [u64; 5],
+    secs: [f64; 5],
+    last: Option<(usize, Instant)>,
+}
+
+fn lbnode_diag() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_str!("ENOMOTO_MIP_LBNODE_DIAG").is_some())
 }
 
 /// 診断用: 木の探索のスレッドごとの時間・ノードの内訳 (`ENOMOTO_PROF_TREE_PAR` で終わりに表示する)。
@@ -1709,6 +1726,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool_stats: [0; 3],
         tprof: TreeProf::default(),
         tp_kind: 0,
+        lbd: LbNodeDiag::default(),
         proof_conflicts: 0,
         orbitopes: match &snap {
             Some(sn) => Rc::new(sn.orbitopes.clone()),
@@ -4070,6 +4088,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 None
             };
             let from_sibling = sibling.is_some();
+            let from_plunge = plunge.is_some();
+            let mut pre_qlb = f64::NAN;
             self.tp_kind = 0;
             let node = match plunge.take().or(sibling) {
                 Some(n) if !from_sibling => n,
@@ -4122,6 +4142,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     } else {
                         tunable!("ENOMOTO_T_MIP_BB_EVERY", 10u64, u64)
                     };
+                    pre_qlb = self.queue.best_lower_bound();
                     let n = match self.queue.pop(bb_every) {
                         Some(n) => {
                             self.tp_kind = 1;
@@ -4184,6 +4205,38 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             };
             xp("m_pop");
+            if lbnode_diag() {
+                let k = if from_plunge {
+                    0
+                } else if from_sibling {
+                    1
+                } else if self.tp_kind == 2 {
+                    4
+                } else if node.lower_bound <= pre_qlb {
+                    2
+                } else {
+                    3
+                };
+                // 取り出した後の、ほかのノード (自分の待ち行列・共有の待ち行列・ほかのスレッド) の下界の最小
+                let mut other = self.queue.best_lower_bound();
+                if let Some(pool) = &self.pool {
+                    other = other.min(pool.inner.lock().unwrap().nodes.min_lower_bound());
+                    for (i, sl) in pool.slots.iter().enumerate() {
+                        if i != self.pool_tid as usize {
+                            other = other.min(f64::from_bits(sl.lb.load(std::sync::atomic::Ordering::Relaxed)));
+                        }
+                    }
+                }
+                let now = Instant::now();
+                if let Some((pk, t)) = self.lbd.last {
+                    self.lbd.secs[pk] += now.duration_since(t).as_secs_f64();
+                }
+                self.lbd.last = Some((k, now));
+                self.lbd.n[k] += 1;
+                if node.lower_bound <= other + 1e-9 * other.abs().max(1.0) {
+                    self.lbd.at_min[k] += 1;
+                }
+            }
             // 診断用 (`ENOMOTO_T_MIP_TREE_DIAG_WAITING_SLEEP_MS`): 待っている側に数えられたままノードを処理するスレッドを眠らせ、
             // その間にほかのスレッドが探索の終わりを判定する競合を起こしやすくする
             if self.pool.is_some() && !self.pool_busy {
@@ -6184,8 +6237,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         cands.sort_by(|a, b| b.2.total_cmp(&a.2));
         // 予算: ノード LP の反復数 (強分岐を除く) の 0.125 倍 + 25000
-        let quot = tunable!("ENOMOTO_T_MIP_SB_QUOT", 0.125, f64) * self.node_iters as f64;
-        let maxsb = quot + 25_000.0;
+        // `ENOMOTO_MIP_SB_BUDGET_HIGHS` (試作): HiGHS (`HighsSearch::selectBranchingCandidate`) と同じ大きさの予算
+        // 100000 + 0.5 × (強分岐・ヒューリスティクス以外の LP 反復)。既定の 25000 + 0.125 倍では、h80x6320d の木の主のスレッドが
+        // 100 ノードほどで予算に当たり、残りは擬似費用だけで分枝して木が大きくなる (1 スレッドなら 9 ノード、4 スレッドで 200 ノード前後)
+        // サブ MIP (RINS など) では使わない (根のヒューリスティクスのサブ MIP が重くなり、h80x6320d の根が 4 秒ほど延びた)
+        let sb_highs = !self.params.submip && env_str!("ENOMOTO_MIP_SB_BUDGET_HIGHS").is_some();
+        let quot = if sb_highs { tunable!("ENOMOTO_T_MIP_SB_HIGHS_QUOT", 0.5, f64) } else { tunable!("ENOMOTO_T_MIP_SB_QUOT", 0.125, f64) } * self.node_iters as f64;
+        let maxsb = quot + if sb_highs { tunable!("ENOMOTO_T_MIP_SB_HIGHS_BASE", 100_000.0, f64) } else { 25_000.0 };
         let sb = self.sb_iters as f64;
         // 双対退化の強いノードでは強分岐をしない (根以外)
         // `ENOMOTO_MIP_SB_NO_DEGEN_SKIP`: 双対退化でも強分岐を止めない
@@ -8826,7 +8884,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let newly = fixed.saturating_sub(self.root_fixed0);
         // HiGHS と同じく、初回は固定された整数列が 1 本でもあれば、2 回目以降は 2.5% 以上で再スタートする
         let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.0, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
-        if nint == 0 || newly == 0 || (newly as f64) < fac * nint as f64 {
+        // `ENOMOTO_MIP_RESTART_FRAC_FREE` (試作): 割合の分母を、この根の始めに固定されていなかった整数列の数にする (HiGHS の
+        // `percentageInactiveIntegers` は再スタート後の模型の整数列に対する割合)。再スタートの後の問題は前に固定した列を
+        // 固定した列として持ったままなので、分母が全体 (h80x6320d では 6320 本) だと、自由な整数列 (約 1000 本) の 16% 近くを
+        // 固定しないと 2 回目の再スタートが起きない
+        let denom = if env_str!("ENOMOTO_MIP_RESTART_FRAC_FREE").is_some() { nint.saturating_sub(self.root_fixed0) } else { nint };
+        if self.params.verbose && self.params.restarts > 0 {
+            eprintln!("MIP: restart check: newly fixed {newly}, integer columns {nint}, free at the root {}, threshold {:.1}", nint.saturating_sub(self.root_fixed0), fac * denom as f64);
+        }
+        if nint == 0 || newly == 0 || (newly as f64) < fac * denom as f64 {
             return None;
         }
         // 新しい問題: 大域的な境界 + 元の行 + LP に残ったカット (どれも大域的に成り立つ)
@@ -10013,6 +10079,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 self.incumbent = Some((zo, xo));
             }
+        }
+        if lbnode_diag() && !self.params.submip && self.lbd.n.iter().sum::<u64>() > 0 {
+            if let Some((pk, t)) = self.lbd.last.take() {
+                self.lbd.secs[pk] += t.elapsed().as_secs_f64();
+            }
+            let d = &self.lbd;
+            eprintln!(
+                "LBNODE: tid {} restarts {} (kind: nodes/at global min/secs) plunge {}/{}/{:.1} sibling {}/{}/{:.1} queue-min {}/{}/{:.1} queue-est {}/{}/{:.1} pool {}/{}/{:.1}",
+                self.pool_tid, self.params.restarts, d.n[0], d.at_min[0], d.secs[0], d.n[1], d.at_min[1], d.secs[1], d.n[2], d.at_min[2], d.secs[2], d.n[3], d.at_min[3], d.secs[3], d.n[4], d.at_min[4], d.secs[4]
+            );
         }
         // 診断用: 従は自分の内訳を主に渡す (主は従を待った後に表示する)
         if prof_tree_par() {
