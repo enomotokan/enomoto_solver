@@ -434,6 +434,12 @@ fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
         (Some(b), Some(_)) => {
             // 探索を終えたスレッドは、共有の最良値 (= この解以下) より良い解がないことを示した
             let z = b.objective.unwrap();
+            // 共有の最良値の解がどのスレッドの結果にもない (届かなかった) なら、この解を最適とは言えない
+            let sb = shared.best();
+            if sb < z - 1e-9 * z.abs().max(1.0) && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() {
+                eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the best returned solution {z:.10e}; not reporting optimality");
+                return solver::MipResult { status: MipStatus::NotSolved, x: b.x.clone(), objective: Some(z), best_bound: sb, nodes, lp_iterations };
+            }
             solver::MipResult { status: MipStatus::Optimal, x: b.x.clone(), objective: Some(z), best_bound: z, nodes, lp_iterations }
         }
         (None, Some(_)) => {
