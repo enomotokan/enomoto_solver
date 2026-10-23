@@ -216,7 +216,11 @@ pub fn solve_mip(
     // 根のサブ MIP・Feasibility Jump を別スレッドで回すかなどの判定 ([`solver::mip_threads`]) も、`ENOMOTO_MIP_THREADS` が
     // なければこのスレッド数にする
     let prev_mt = solver::MIP_THREADS_DEFAULT.swap(params.threads, std::sync::atomic::Ordering::Relaxed);
+    let t_solve = std::time::Instant::now();
     let r = if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() { solve_portfolio(&p, params) } else { solve_problem(&p, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()) };
+    if solver::end_diag() || params.verbose {
+        eprintln!("MIP: solve returned {:?} after {:.2}s (time limit {:.2}s)", r.status, t_solve.elapsed().as_secs_f64(), params.time_limit);
+    }
     crate::simplex::mip_lp::set_cold_race_threads(prev_race);
     solver::MIP_THREADS_DEFAULT.store(prev_mt, std::sync::atomic::Ordering::Relaxed);
     if env_str!("ENOMOTO_MIP_XPROF").is_some() {
@@ -230,7 +234,13 @@ pub fn solve_mip(
     // 返す解を研磨し、目的値を誤差補償つきの和で計算し直す ([`polish_solution`])
     if r.status != MipStatus::Unbounded {
         if let Some(x) = r.x.as_mut() {
-            let z = polish_solution(variables, objective, constraints, &p, x);
+            // `ENOMOTO_MIP_LATE_NO_RESOLVE`: 時間を使い切っていれば研磨の LP は解かない (整数の丸めと目的値の計算し直しだけ)。
+            // 研磨は元の問題の前処理 + LP で 0.2-0.35 秒かかり、時間の上限の超過の残りの大半だった (uccase12・physiciansched6-2)
+            let late = env_str!("ENOMOTO_MIP_LATE_NO_RESOLVE").is_some() && t_solve.elapsed().as_secs_f64() >= params.time_limit;
+            let z = polish_solution(variables, objective, constraints, &p, x, !late);
+            if solver::end_diag() || params.verbose {
+                eprintln!("MIP: polished the solution ({:.2}s)", t_solve.elapsed().as_secs_f64());
+            }
             if r.status == MipStatus::Optimal {
                 r.best_bound = z;
             } else {
@@ -304,14 +314,14 @@ fn exact_objective(p: &MipProblem, x: &[f64]) -> f64 {
 /// 解き直した解は、元の問題の違反 (境界・行) が増えず目的値が悪くならないとき、または違反が真に減って目的値の悪化が
 /// 相対 1e-6 以下のときに採る。最小化形の目的値を返す
 /// (誤差補償つきの和)。`ENOMOTO_MIP_NO_POLISH` なら丸めと目的値の計算し直しだけ。
-fn polish_solution(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], p: &MipProblem, x: &mut Vec<f64>) -> f64 {
+fn polish_solution(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], p: &MipProblem, x: &mut Vec<f64>, lp: bool) -> f64 {
     for j in 0..p.n {
         if p.is_int[j] {
             x[j] = x[j].round();
         }
     }
     let z = exact_objective(p, x);
-    if p.is_int.iter().all(|&b| b) || env_str!("ENOMOTO_MIP_NO_POLISH").is_some() {
+    if !lp || p.is_int.iter().all(|&b| b) || env_str!("ENOMOTO_MIP_NO_POLISH").is_some() {
         return z;
     }
     let fixed: Vec<VariableData> = variables
@@ -805,6 +815,18 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             // 後処理は縮約後の点についてアフィン) ので、前処理後の問題の下界は元の問題の下界でもある。以前は定数のずれが
             // 分からないとして -inf にしていた (根の下界が分かっているのに -inf を返していた: 暫定解なしの physiciansched6-2、
             // 再スタート後の求解が暫定解なしで終わる mzzv42z。analysis/bound_inf_20261021.md)
+            // `ENOMOTO_MIP_LATE_NO_RESOLVE`: 時間を使い切っていれば前処理なしで解き直さない (解き直しは根の LP を解くだけで時間切れに
+            // なり、時間の上限を 0.3-0.45 秒超えていた: uccase12 の再スタートの後。analysis/overrun_20261023.md)。下界はそのまま
+            if !ok && r.status == MipStatus::TimeLimit && remaining(params).time_limit <= 0.0 && env_str!("ENOMOTO_MIP_LATE_NO_RESOLVE").is_some() {
+                if params.verbose {
+                    eprintln!("MIP: no time left; not re-solving without presolve");
+                }
+                r.objective = None;
+                if let Some(shift) = ref_shift {
+                    r.best_bound += shift;
+                }
+                return r;
+            }
             if ok { r } else { solver::solve(p, remaining(params)) }
         }
         None => solver::solve(p, remaining(params)),

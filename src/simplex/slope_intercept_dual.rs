@@ -911,6 +911,11 @@ fn ext_check(iter_idx: usize, stage_b: bool, bound: impl FnOnce() -> f64) -> boo
                 return true;
             }
         }
+        // 木の探索の従のスレッドで主が止める合図を出した (`ENOMOTO_MIP_WORKER_HALT`): 期限に達したのと同じに止める
+        if crate::cancel::halted() {
+            EXT_STOP.with(|x| x.set(ExtStop::TimeLimit));
+            return true;
+        }
     }
     if stage_b && c.cutoff.is_finite() && iter_idx % 8 == 0 && bound() > c.cutoff {
         EXT_STOP.with(|x| x.set(ExtStop::ObjectiveBound));

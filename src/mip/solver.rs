@@ -752,6 +752,8 @@ pub(crate) struct WorkPool {
     inner: std::sync::Mutex<PoolInner>,
     /// 止める合図 (主が終わるときに立てる)。
     stop: std::sync::atomic::AtomicBool,
+    /// `stop` と同時に立てる合図 (`ENOMOTO_MIP_WORKER_HALT` なら従のスレッドの LP の反復が見る。[`crate::cancel::with_halt`])
+    halt: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// 待っているスレッドの数と、ここにあるノードの数 (錠の外で読む目安。渡すかどうかの判断に使う)。
     idle: std::sync::atomic::AtomicUsize,
     len: std::sync::atomic::AtomicUsize,
@@ -907,6 +909,16 @@ fn proof_verify() -> bool {
 
 fn tree_diag() -> bool {
     env_str!("ENOMOTO_MIP_TREE_DIAG").is_some()
+}
+
+/// `ENOMOTO_MIP_WORKER_HALT`: 主の止める合図を木の探索の従のスレッドの LP の反復にも伝える ([`crate::cancel::with_halt`])
+fn worker_halt() -> bool {
+    env_str!("ENOMOTO_MIP_WORKER_HALT").is_some()
+}
+
+/// 診断用 `ENOMOTO_MIP_END_DIAG`: 終わり際の時刻 (従を待った時間、`finish` の始めと終わり) を `ENOMOTO_MIP_LOG` なしでも出す
+pub(super) fn end_diag() -> bool {
+    env_str!("ENOMOTO_MIP_END_DIAG").is_some()
 }
 
 /// スレッドの間で共有する学習の記録 (通し番号つき、古いものから捨てる)。
@@ -1229,6 +1241,7 @@ impl WorkPool {
             inner: std::sync::Mutex::new(PoolInner { nodes: PoolNodes::new(), busy: threads, done: false }),
             slots: (0..threads).map(|_| ThreadSlot { lb: std::sync::atomic::AtomicU64::new(f64::INFINITY.to_bits()), ..Default::default() }).collect(),
             stop: std::sync::atomic::AtomicBool::new(false),
+            halt: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             idle: std::sync::atomic::AtomicUsize::new(0),
             len: std::sync::atomic::AtomicUsize::new(0),
             unresolved: std::sync::atomic::AtomicBool::new(false),
@@ -5790,6 +5803,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             self.submip_time_max = keep;
             let dt = t.elapsed().as_secs_f64();
+            if end_diag() && self.time_up() {
+                eprintln!("MIP: heuristic role (tid {}): {} call took {dt:.2}s and ended after the stop ({:.2}s)", self.pool_tid, if use_lm { "Local-MIP" } else { "ALNS" }, pool.t0.elapsed().as_secs_f64());
+            }
             if role_lmip_on() {
                 let arm = usize::from(use_lm);
                 self.role_arm_t[arm] += dt;
@@ -9275,20 +9291,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         pool.racing.store(racing, std::sync::atomic::Ordering::Relaxed);
         self.race_done = !racing;
         let snap = if racing { self.make_snapshot(&shared, plunge, true) } else { self.make_snapshot(&shared, &mut None, false) };
-        // 従は主が止める (止める合図)。時間の上限は主より少し後にして、主より先に止まらないようにする
+        // 従は主が止める (止める合図)。時間の上限は主より少し後にして、主より先に止まらないようにする。
+        // 従の LP (ノードの LP、ヒューリスティクス役のサブ MIP の LP) は期限だけを見るので、主が止める合図を出しても期限
+        // (主の 2 秒後) まで解き続けることがあり、主はそれを待つ (時間の上限の超過がほぼ 2.0 秒: physiciansched6-2・mzzv42z。
+        // analysis/overrun_20261023.md)。`ENOMOTO_MIP_WORKER_HALT` なら止める合図を従の LP の反復にも伝える
+        let halt = worker_halt().then(|| pool.halt.clone());
         let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64() + 2.0);
         let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: false, threads: 1, ..self.params };
         let prof = crate::simplex::slope_intercept_dual::mip_profile();
         let dbg = DEBUG_SOL.with(|d| d.borrow().clone());
         for _ in 0..n {
-            let (snap, pool, shared, dbg) = (snap.clone(), pool.clone(), shared.clone(), dbg.clone());
+            let (snap, pool, shared, dbg, halt) = (snap.clone(), pool.clone(), shared.clone(), dbg.clone(), halt.clone());
             let h = std::thread::Builder::new()
                 .stack_size(64 << 20)
                 .spawn(move || {
                     crate::simplex::slope_intercept_dual::set_mip_profile(prof);
                     set_thread_portfolio(Some(shared));
                     DEBUG_SOL.with(|d| *d.borrow_mut() = dbg);
-                    let r = solve_worker(snap, Some(pool), params);
+                    let r = crate::cancel::with_halt(halt, || solve_worker(snap, Some(pool), params));
                     set_thread_portfolio(None);
                     r
                 })
@@ -9707,11 +9727,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return f64::INFINITY;
         }
         pool.stop.store(true, Ordering::Relaxed);
+        pool.halt.store(true, Ordering::Relaxed);
         let mut lb = f64::INFINITY;
         // 従が終わったときの解 (従の問題は主の問題の写しなので、主の解としてそのまま使える)
         let mut ended: Vec<(f64, Option<Vec<f64>>)> = Vec::new();
-        for h in std::mem::take(&mut self.workers) {
-            match h.join() {
+        let t_stop = Instant::now();
+        for (k, h) in std::mem::take(&mut self.workers).into_iter().enumerate() {
+            let jr = h.join();
+            if self.params.verbose || end_diag() {
+                eprintln!("MIP: tree thread {k} joined {:.3}s after the stop signal ({:.2}s)", t_stop.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
+            }
+            match jr {
                 Ok(r) => {
                     if tree_diag() {
                         eprintln!("MIP_TREE_DIAG: worker ended: status {:?} objective {:?} bound {:.10e} nodes {}", r.status, r.objective, r.best_bound, r.nodes);
@@ -9865,6 +9891,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
+        if (self.params.verbose || end_diag()) && !self.params.submip && self.snap.is_none() {
+            eprintln!("MIP: finish start {status:?} ({:.2}s)", self.start.elapsed().as_secs_f64());
+        }
         // `ENOMOTO_MIP_SYM_ORIG_CUT`: 打ち切り値にだけ使った解が暫定解より良ければ、それを答えにする (元の問題で実行可能)
         if let Some((zo, xo)) = self.orig_best.take() {
             if self.incumbent.as_ref().is_none_or(|(z, _)| zo < *z) {
@@ -10026,6 +10055,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             (s, _, _) => (s, best_bound),
         };
+        if (self.params.verbose || end_diag()) && !self.params.submip && self.snap.is_none() {
+            eprintln!("MIP: finish done ({:.2}s)", self.start.elapsed().as_secs_f64());
+        }
         MipResult { status, x, objective, best_bound, nodes: self.nodes + self.worker_totals.0, lp_iterations: self.lp.total_iterations() + self.worker_totals.1 }
     }
 }
