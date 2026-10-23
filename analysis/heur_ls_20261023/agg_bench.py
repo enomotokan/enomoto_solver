@@ -60,11 +60,11 @@ print("\n問題ごと (newdef と比べて 2 組とも同じ向き。主ギャ�
 for c in cfgs[1:]:
     better, worse = [], []
     for k in keys:
-        dg = [pgap(R[(c, s)][k]["objective"], ref[k]) - pgap(R[("newdef", s)][k]["objective"], ref[k]) for s in sets]
-        so = [(R[(c, s)][k]["status"] == "optimal") - (R[("newdef", s)][k]["status"] == "optimal") for s in sets]
-        tt = [(R[(c, s)][k]["time"] + 1) / (R[("newdef", s)][k]["time"] + 1) for s in sets]
-        both_opt = all(R[(c, s)][k]["status"] == "optimal" and R[("newdef", s)][k]["status"] == "optimal" for s in sets)
-        tag = f"{k[1]} (gap {['%.3f' % pgap(R[(c, s)][k]['objective'], ref[k]) for s in sets]} vs {['%.3f' % pgap(R[('newdef', s)][k]['objective'], ref[k]) for s in sets]}, 時間 {['%.1f' % R[(c, s)][k]['time'] for s in sets]} vs {['%.1f' % R[('newdef', s)][k]['time'] for s in sets]})"
+        dg = [pgap(R[(c, s)][k]["objective"], ref[k]) - pgap(R[(cfgs[0], s)][k]["objective"], ref[k]) for s in sets]
+        so = [(R[(c, s)][k]["status"] == "optimal") - (R[(cfgs[0], s)][k]["status"] == "optimal") for s in sets]
+        tt = [(R[(c, s)][k]["time"] + 1) / (R[(cfgs[0], s)][k]["time"] + 1) for s in sets]
+        both_opt = all(R[(c, s)][k]["status"] == "optimal" and R[(cfgs[0], s)][k]["status"] == "optimal" for s in sets)
+        tag = f"{k[1]} (gap {['%.3f' % pgap(R[(c, s)][k]['objective'], ref[k]) for s in sets]} vs {['%.3f' % pgap(R[(cfgs[0], s)][k]['objective'], ref[k]) for s in sets]}, 時間 {['%.1f' % R[(c, s)][k]['time'] for s in sets]} vs {['%.1f' % R[(cfgs[0], s)][k]['time'] for s in sets]})"
         if all(x <= -0.01 for x in dg) or all(x > 0 for x in so) or (both_opt and all(x < 1 / 1.5 for x in tt)):
             better.append(tag)
         elif all(x >= 0.01 for x in dg) or all(x < 0 for x in so) or (both_opt and all(x > 1.5 for x in tt)):
