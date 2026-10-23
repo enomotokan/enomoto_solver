@@ -408,6 +408,10 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     let repair = (env_str!("ENOMOTO_MIP_FJ_LP_REPAIR").is_some() || crate::fj_p3_force()) && p.is_int.iter().any(|&b| !b);
     let repair_max = tunable!("ENOMOTO_T_MIP_FJ_LP_REPAIR_MAX_VIOL", 50usize, usize);
     let mut best_inf: Option<Vec<f64>> = None;
+    // `ENOMOTO_MIP_FJ_DUMP=ディレクトリ` (診断用): 解が見つからなければ、問題 (`prob.mps`、最初の 1 回だけ) と違反の行の数が最も少ない点
+    // (`fj_<回>_<違反行>.txt`) を書き出す
+    let dump = env_str!("ENOMOTO_MIP_FJ_DUMP");
+    let mut best_pt: Option<Vec<f64>> = None;
     let mut effort_last_improve = 0u64;
     let mut effort_last_check = 0u64;
     let t0 = Instant::now();
@@ -420,6 +424,9 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             best_viol = s.violated.len();
             if repair && best_viol > 0 && best_viol <= repair_max {
                 best_inf = Some(s.x.clone());
+            }
+            if dump.is_some() && best_viol <= 200 {
+                best_pt = Some(s.x.clone());
             }
         }
         let mut check = s.effort - effort_last_check > 500_000;
@@ -459,6 +466,17 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             *kinds.entry(k).or_insert(0) += 1;
         }
         eprintln!("MIP:   FJ2 violated rows at the end: {kinds:?}");
+    }
+    if let (Some(dir), None, Some(xb)) = (dump.as_ref(), best_x.as_ref(), best_pt.as_ref()) {
+        static K: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let k = K.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::create_dir_all(dir);
+        let pf = format!("{dir}/prob.mps");
+        if !std::path::Path::new(&pf).exists() {
+            let _ = p.write_mps(&pf);
+        }
+        let body: String = xb.iter().map(|v| format!("{v:.17e}\n")).collect();
+        let _ = std::fs::write(format!("{dir}/fj_{k}_{best_viol}.txt"), body);
     }
     let mut repaired = "";
     if best_x.is_none() {

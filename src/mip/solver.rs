@@ -351,6 +351,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_is_rens: bool,
     /// 別スレッドの Feasibility Jump とその停止の印。
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// `ENOMOTO_MIP_LOCALMIP` の別スレッド (試作)
+    lmip_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// `ENOMOTO_MIP_LOCALMIP` のスレッドが良くなった解を入れる箱
+    lmip_mailbox: Option<std::sync::Arc<std::sync::Mutex<Option<Vec<f64>>>>>,
     /// 根のヒューリスティクスの最初に別スレッドで始めた局所探索 (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`。結果は元の位置で受け取る)。
     pub(super) ls_thread: Option<std::thread::JoinHandle<super::heuristics::LocalSearchResult>>,
     /// 根の解発見スレッド ([`find_thread_on`])。根のヒューリスティクスの後と木の各ノードで、終わっていれば受け取る
@@ -1546,6 +1550,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_fix_rate: None,
         submip_is_rens: false,
         fj_thread: None,
+        lmip_thread: None,
+        lmip_mailbox: None,
         ls_thread: None,
         find_thread: None,
         find_out: None,
@@ -2736,7 +2742,57 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let cap = if super::heuristics::fj_feas_extend(&pc) && self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_FJ_FEAS_FRAC", 0.5, f64) * self.params.time_limit } else { cap };
                 // `ENOMOTO_MIP_FJ_P3` (既定、`ENOMOTO_MIP_NO_FJ_P3` で止める): FJ だけ、p5s の前処理の変更をかけ直した問題で探す ([`super::fj_p3_problem`])
                 let fj_p3 = super::fj_p3_on();
+                // `ENOMOTO_MIP_LOCALMIP` (試作): 1 = FJ と並べて別スレッドで Local-MIP 風の局所探索 ([`super::localmip`]) を回す、
+                // 2 = FJ の代わりに Local-MIP だけ。時間の上限は `ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC` (0.1) × 時間上限、最大 10 秒。
+                // 結果は根のカットのループの各ラウンドと木の各ノードで (待たずに) 受け取る
+                let lmip = env_str!("ENOMOTO_MIP_LOCALMIP").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+                if lmip > 0 {
+                    let lcap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * self.params.time_limit).min(10.0) } else { 10.0 };
+                    let t_start = self.start;
+                    let pl = pc.clone();
+                    let (llo, lup) = (lo.clone(), up.clone());
+                    let lstop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let lstop2 = lstop.clone();
+                    let lseed = seed ^ 0x6A09_E667_F3BC_C909;
+                    let mailbox: std::sync::Arc<std::sync::Mutex<Option<Vec<f64>>>> = Default::default();
+                    let mb2 = mailbox.clone();
+                    self.lmip_mailbox = Some(mailbox);
+                    let hl = std::thread::spawn(move || {
+                        let post_sc = if fj_p3 { super::fj_p3_problem(&pl) } else { None };
+                        let run = |q: &super::problem::MipProblem, lo: &[f64], up: &[f64]| {
+                            let t = std::time::Instant::now();
+                            // 良くなった解はその場で受け渡し箱に入れる (元の問題の空間に戻して)
+                            let on_sol = |x: &[f64]| {
+                                let y = match &post_sc {
+                                    Some((_, post, sc)) => super::fj_p3_solution(x.to_vec(), post, sc),
+                                    None => x.to_vec(),
+                                };
+                                *mb2.lock().unwrap() = Some(y);
+                            };
+                            let lr = super::localmip::local_mip(q, lo, up, lcap, lseed, Some(&lstop2), &on_sol);
+                            eprintln!(
+                                "MIP: Local-MIP: {} steps, least violated rows {}, pair/chain moves {}, found {} (first at {:?}s of {:.2}s), started at {:.2}s",
+                                lr.steps,
+                                lr.least_viol,
+                                lr.pair_moves,
+                                lr.best.as_ref().map_or("none".to_string(), |x| format!("{:.6e}", q.objective(x))),
+                                lr.first_time.map(|v| (v * 100.0).round() / 100.0),
+                                t.elapsed().as_secs_f64(),
+                                (t - t_start).as_secs_f64()
+                            );
+                            lr.best
+                        };
+                        match &post_sc {
+                            Some((q, post, sc)) => run(q, &q.col_lo, &q.col_up).map(|x| super::fj_p3_solution(x, post, sc)),
+                            None => run(&pl, &llo, &lup),
+                        }
+                    });
+                    self.lmip_thread = Some((hl, lstop));
+                }
                 let h = std::thread::spawn(move || {
+                    if lmip == 2 {
+                        return None;
+                    }
                     if fj_p3 {
                         if let Some((q, post, sc)) = super::fj_p3_problem(&pc) {
                             crate::set_fj_p3_force(true);
@@ -3058,6 +3114,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 macro_rules! heur {
                     ($name:expr, $e:expr) => {{
                         let bit = heur_bit($name);
+                        self.poll_lmip_thread();
                         if proof_only() && !self.params.submip {
                             // 証明だけのスレッド: 根のヒューリスティクスは走らせない
                         } else if self.time_up() {
@@ -8693,8 +8750,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 別スレッドの Feasibility Jump が終わっていれば結果を受け取る (`ENOMOTO_MIP_NO_FJ2` でないとき。根のカットのループの各ラウンドで
     /// 呼ぶ。HiGHS 流の FJ は多くの問題で 1 秒以内に終わるので、カットのループの終わりまで待たずに暫定解にする)。
     pub(super) fn poll_fj_thread(&mut self) {
+        self.poll_lmip_thread();
         if self.fj_thread.as_ref().is_some_and(|(h, _)| h.is_finished()) && env_str!("ENOMOTO_MIP_NO_FJ2").is_none() {
             self.join_fj_thread();
+        }
+    }
+
+    /// `ENOMOTO_MIP_LOCALMIP` の別スレッドが終わっていれば結果を受け取る (待たない)。
+    pub(super) fn poll_lmip_thread(&mut self) {
+        let got = self.lmip_mailbox.as_ref().and_then(|mb| mb.lock().unwrap().take());
+        if let Some(x) = got {
+            self.heur_label = "Local-MIP";
+            let ok = self.try_incumbent(x);
+            self.heur_label = "";
+            eprintln!("MIP: Local-MIP solution accepted {ok} ({:.2}s)", self.start.elapsed().as_secs_f64());
+        }
+        if self.lmip_thread.as_ref().is_some_and(|(h, _)| h.is_finished()) {
+            let (h, _) = self.lmip_thread.take().unwrap();
+            if let Ok(Some(x)) = h.join() {
+                self.heur_label = "Local-MIP";
+                let ok = self.try_incumbent(x);
+                self.heur_label = "";
+                eprintln!("MIP: Local-MIP solution accepted {ok} ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
         }
     }
 
@@ -8767,6 +8845,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 値でノードの下界を上げ (64 ノードおき)、写しを求められていれば作る。
     fn snap_sync(&mut self, plunge: &mut Option<OpenNode>) {
         use std::sync::atomic::Ordering;
+        self.poll_lmip_thread();
         let Some(s) = self.shared.clone() else { return };
         self.take_inbox();
         if self.nodes % 64 == 0 && !self.snap_serials.is_empty() {

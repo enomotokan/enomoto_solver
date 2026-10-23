@@ -18,6 +18,7 @@ pub(crate) mod replay;
 pub(crate) mod pseudocost;
 pub(crate) mod solver;
 pub(crate) mod fj;
+pub(crate) mod localmip;
 mod heuristics;
 pub(crate) mod heur_scip;
 pub(crate) mod heur_ipm;
@@ -2270,6 +2271,10 @@ pub(super) fn fj_p3_problem(pc: &MipProblem) -> Option<(MipProblem, Vec<crate::p
         None => (pc.clone(), Vec::new(), None),
     };
     let k = dual_bound_tightening(&mut prob);
+    if env_str!("ENOMOTO_MIP_FJ_SP_BOUNDS").is_some() {
+        let ks = localmip::sp_implied_bounds(&mut prob);
+        eprintln!("MIP: FJ problem: {ks} column bounds tightened by set-partitioning rows (FJ_SP_BOUNDS)");
+    }
     if env_str!("ENOMOTO_MIP_LOG").is_some() {
         eprintln!("MIP: FJ problem (FJ_P3): rows {} -> {}, free columns {} -> {}, {k} continuous bounds tightened", pc.m, prob.m, (0..pc.n).filter(|&j| pc.col_lo[j] < pc.col_up[j]).count(), (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count());
     }

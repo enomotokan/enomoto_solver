@@ -2672,3 +2672,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         false
     }
 }
+
+/// [`ls_obj_step`] を [`super::localmip`] から使う。
+pub(super) fn ls_obj_step_pub(p: &MipProblem, z: f64) -> f64 {
+    ls_obj_step(p, z)
+}
