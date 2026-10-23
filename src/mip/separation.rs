@@ -706,7 +706,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
             } else if fc_relax {
                 select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_FC_MIN_REL", 0.0, f64), tunable!("ENOMOTO_T_CUTSEL_FC_MAXPAR", 0.9, f64))
-            } else if let Some(ctx) = DcdCtx::from_env(&x, self.incumbent.as_ref().map(|(_, v)| v.as_slice()).or(job_inc.as_deref())) {
+            } else if let Some(ctx) = DcdCtx::from_env(&x, self.incumbent.as_ref().map(|(_, v)| v.as_slice()).or(job_inc.as_deref())).filter(|_| !self.params.submip || env_str!("ENOMOTO_MIP_CUTSEL_DCD_SUBMIP").is_some()) {
+                // サブ MIP (RINS など) の中では使わない (`ENOMOTO_MIP_CUTSEL_DCD_SUBMIP` で使う。サブ MIP は暫定解を持つので DCD が働き、
+                // 最初の版では mc11・mik-250 のサブ MIP の選択も変わっていた)
                 // 試作 (`ENOMOTO_MIP_CUTSEL_DCD`・`ENOMOTO_MIP_CUTSEL_NORM`、[`DcdCtx`]): スコアに directed cutoff distance を入れる
                 if dbg_dcd_first {
                     eprintln!("CUTSEL_DCD: round {round} direction {}", if ctx.dir.is_some() { "incumbent" } else { "none (efficacy only)" });
