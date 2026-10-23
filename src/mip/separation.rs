@@ -370,6 +370,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         let n = p.n;
         let mut stall = 0;
+        let mut intobj_stall = 0usize;
+        // 整数値に固定された連続列を整数列と扱って目的値が整数刻みか (`ENOMOTO_MIP_CUT_INTOBJ_STALL` の判定に使う)
+        let intobj_step = env_str!("ENOMOTO_MIP_CUT_INTOBJ_STALL").is_some() && p.objective_step_bounds(Some((&self.dom.lo, &self.dom.up))).is_some();
         let mut prev_obj = self.lp.objective();
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
         let first_obj = prev_obj;
@@ -970,6 +973,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else {
                     // `ENOMOTO_MIP_CUT_STALL_ONE`: まったく進まないラウンドも 1 回分と数える (neos-1456979 では最初の
                     // 4 ラウンドは下界が動かず、続ければ上がる。HiGHS も止めずに 66 ラウンド回して 154 -> 171)
+                    // `ENOMOTO_MIP_CUT_INTOBJ_STALL` (試作、既定では使わない): 目的値が整数刻みの問題で、目的値が一度上がった後に
+                    // まったく動かないラウンドは、分数の列の数が減っていても停滞と数え、`ENOMOTO_T_MIP_CUT_INTOBJ_STALL` 回 (既定 3) で
+                    // 止める。10teams は 0.5 秒 (ラウンド 0) で 917 -> 924 (最適値) になった後、分数の列の数が上下するので停滞と
+                    // 数えられず、14 ラウンド (約 6 秒) 回してから根のヒューリスティクスに進んでいた。最初から動かない
+                    // ラウンド (neos-1456979) は数えない。整数刻みかは整数値に固定された連続列を整数列と扱って判定する (10teams は費用のある固定の連続列
+                    // 225 本のために `obj_step` が無い)
+                    let intobj_flat = intobj_step
+                        && !self.params.submip
+                        && obj - first_obj > 1e-6 * obj.abs().max(1.0)
+                        && (obj - prev_obj).abs() <= 1e-9 * obj.abs().max(1.0)
+                        && env_str!("ENOMOTO_MIP_CUT_INTOBJ_STALL").is_some();
+                    if intobj_flat {
+                        intobj_stall += 1;
+                        if intobj_stall >= tunable!("ENOMOTO_T_MIP_CUT_INTOBJ_STALL", 3usize, usize) {
+                            if self.params.verbose {
+                                eprintln!("MIP: cut loop: integral objective, LP bound unchanged for {intobj_stall} rounds; stop");
+                            }
+                            break;
+                        }
+                    } else {
+                        intobj_stall = 0;
+                    }
                     if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 && !saturated && !widen_now {
                         stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened { 2 } else { 1 };
                         if stall >= if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {

@@ -278,10 +278,17 @@ impl MipProblem {
     /// 目的値が整数刻みしか取らないなら、その刻み (最小の正の値) を返す。
     /// 費用が非零の列がすべて整数で、係数が共通の刻みの整数倍のとき。
     pub fn objective_step(&self) -> Option<f64> {
+        self.objective_step_bounds(None)
+    }
+
+    /// [`Self::objective_step`] の本体。境界 `(lo, up)` を渡せば、そこで整数値に固定された連続列を整数列と同じに扱う。
+    pub fn objective_step_bounds(&self, bounds: Option<(&[f64], &[f64])>) -> Option<f64> {
         let mut coefs: Vec<f64> = Vec::new();
         for j in 0..self.n {
             if self.cost[j] != 0.0 {
-                if !self.is_int[j] {
+                // 整数値に固定された列は整数列と同じに扱う (寄与 c_j v_j は刻みの整数倍)
+                let fixed_int = bounds.is_some_and(|(lo, up)| lo[j] == up[j] && lo[j] == lo[j].round());
+                if !self.is_int[j] && !fixed_int {
                     return None;
                 }
                 coefs.push(self.cost[j].abs());

@@ -1510,6 +1510,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             }
         }
     }
+    // `ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED` (試作、既定では使わない): 整数値に固定された連続列は整数列と同じに扱って
+    // 刻みを判定する (10teams は固定された連続列 225 本が費用を持ち、刻みが無いことになっていた。HiGHS は前処理で消して
+    // 「刻み 1」と見る)
+    let obj_step = if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() { p.objective_step_bounds(Some((&dom.lo, &dom.up))) } else { p.objective_step() };
     let mut s: Solver<L> = Solver {
         p,
         params,
@@ -1518,7 +1522,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         queue: NodeQueue::new(),
         pc: snap.as_ref().map_or_else(|| Pseudocost::new(p.n), |sn| sn.pc.clone()),
         incumbent: None,
-        obj_step: p.objective_step(),
+        obj_step,
         start,
         cpu0: super::cap_clock(),
         sep_par_cpu: 0.0,
