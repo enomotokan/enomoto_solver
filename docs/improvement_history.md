@@ -9960,3 +9960,10 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 | 自由関数 `mat_vec` / `mat_vec_into` / `mat_t_vec` / `mat_t_vec_into` (faer Csr 用) | `csr_mat_vec` / `csr_mat_vec_into` / `csr_mat_t_vec` / `csr_mat_t_vec_into` | sparse.rs / interior_point |
 | `Compressed::group` | `outer_slice` | sparse.rs |
 | interior_point の `dsa` / `dza` / `pk` / `dk` など | `ds_aff` / `dz_aff` / `primal_res_inf` / `dual_res_inf` など | interior_point.rs |
+
+## 2026-10-23: FJ が残す違反行の正体と Local-MIP・連鎖の手の試作 (heur-ls) の調査
+
+- 調査 (analysis/heur_ls_20261023.md、inv/heur-ls-20261023 2f11d39): 30n20b8 で FJ が最後に残す違反行は時刻の定義の等式 (Σ t·y_t − s = 0) で、前処理で y が 0 に固定されても s の下限が締まらず、1 列の手では直せない。最も近い実行可能解まで 28 列を同時に動かす必要がある。
+- 試作 (既定は変えない): `ENOMOTO_MIP_LOCALMIP=1` (FJ と並べて別スレッドで Local-MIP 風の局所探索)、`ENOMOTO_MIP_LOCALMIP_CHAIN=1` (違反行を直す手が破る行を次々に直す連鎖の手)、`ENOMOTO_MIP_FJ_CHAIN`・`ENOMOTO_MIP_FJ_SP_BOUNDS`・`ENOMOTO_MIP_LOCALMIP_PAIR`、診断 `ENOMOTO_MIP_FJ_DUMP`。
+- lmc (LOCALMIP + CHAIN) の 4 スレッド・60 秒・2 回: 30n20b8 の最初の暫定解 0.74〜0.82 秒、最終 302 (最適)。neos-1456979 は 1.5〜1.7 秒で暫定解。physiciansched6-2 は 50425、mzzv42z も良くなる。roll3000 は変わらず、timtab1 は最適性の証明を失う。FJ_CHAIN と FJ_SP_BOUNDS は候補にしない。
+- lmc を 40 + 16 問で計測する (inv/lmc-a-20261023・inv/lmc-b-20261023)。
