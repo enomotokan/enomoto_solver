@@ -373,6 +373,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 基底の復元の回数、そのうち基底の数が行数と合わなかった回数、復元後の最初の LP の反復数 (診断用)
     restore_stats: (u64, u64, u64),
     restored_now: bool,
+    /// 診断用 (`ENOMOTO_MIP_RESTORE_DIAG`): 直前に戻した基底の (保存後に足された行, 消えた行, 基底の数の不一致)
+    restore_diag: (usize, usize, bool),
+    /// 診断用: 共有の待ち行列から受け取ったノードの基底の、基底変数の余り (受け取ったときに数える)
+    pool_excess: i64,
+    /// `ENOMOTO_MIP_TREE_POOL_BASIS` で受け取った基底を使わなかった回数
+    pool_basis_stats: u64,
     /// 直前に戻した基底に、保存した DSE 重みも当てはめたか (次の LP で引き継ぐ)。
     restored_dse: bool,
     node_lps: u64,
@@ -900,6 +906,12 @@ impl TreeProf {
             self.kind_n[0], per(0), pms(0), self.kind_n[1], per(1), pms(1), self.kind_n[2], per(2), pms(2)
         )
     }
+}
+
+/// `ENOMOTO_MIP_TREE_POOL_BASIS` (試作): 共有の待ち行列で渡すノードに非基底だったカットの行の状態も付け
+/// (`ENOMOTO_MIP_TREE_SHARE_CUT_BASIS` と同じ)、受け取った側で基底変数が余るなら今の LP の基底のまま解く ([`Solver::open_from_pool`])。
+fn tree_pool_basis() -> bool {
+    env_str!("ENOMOTO_MIP_TREE_POOL_BASIS").is_some()
 }
 
 fn prof_tree_par() -> bool {
@@ -1616,6 +1628,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         node_iters_first: 0,
         restore_stats: (0, 0, 0),
         restored_now: false,
+        restore_diag: (0, 0, false),
+        pool_excess: 0,
+        pool_basis_stats: 0,
         restored_dse: false,
         node_lps: 0,
         node_lp_secs: 0.0,
@@ -4442,6 +4457,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.tprof.kind_s[k] += t_lp.elapsed().as_secs_f64();
                     if std::mem::take(&mut self.restored_now) {
                         self.restore_stats.2 += self.lp.total_iterations() - it0;
+                        if env_str!("ENOMOTO_MIP_RESTORE_DIAG").is_some() {
+                            let (a, d, mm) = self.restore_diag;
+                            eprintln!("RESTDIAG: tid {} kind {} added {a} deleted {d} mismatch {mm} excess {} rows {} iters {}", self.pool_tid, k, if k == 2 { self.pool_excess } else { 0 }, self.lp.num_rows(), self.lp.total_iterations() - it0);
+                        }
                     }
                 }
                 self.node_lps += 1;
@@ -6632,6 +6651,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 待ち行列のノードの基底を LP に置く (保存した後の行の追加・削除を当てはめる)。
     fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize, dse: Option<&[(u32, f32)]>) {
         let mr = self.lp.num_rows();
+        if env_str!("ENOMOTO_MIP_RESTORE_DIAG").is_some() && epoch <= self.row_log.len() {
+            let (mut a, mut d) = (0usize, 0usize);
+            for e in &self.row_log[epoch..] {
+                match e {
+                    RowEdit::Add(k) => a += *k,
+                    RowEdit::Delete(mask) => d += mask.iter().filter(|&&x| x).count(),
+                }
+            }
+            self.restore_diag = (a, d, false);
+        }
         // 調査用: 保存した基底を使わず、今の LP の基底 (直前のノードの最適基底) のまま解く
         if env_str!("ENOMOTO_MIP_RESTORE_NEVER").is_some() {
             return;
@@ -6693,6 +6722,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let nb = b2.col.iter().chain(b2.row.iter()).filter(|&&s| s == VarStatus::Basic).count();
         if nb != mr {
+            self.restore_diag.2 = true;
             self.restore_stats.1 += 1;
             // 保存した基底で非基底だった (効いていた) カットの行が削除されていると基底変数が多すぎる。既定では
             // set_basis の修復 (構造変数を後ろから外す) に任せる。`ENOMOTO_MIP_RESTORE_KEEP_CURRENT` なら今の LP の
@@ -9507,6 +9537,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     self.cut_basis_stats[1] += hit;
                 }
+                self.pool_excess = col.iter().chain(row.iter()).filter(|&&s| s == VarStatus::Basic).count() as i64 - mr as i64;
+                // `ENOMOTO_MIP_TREE_POOL_BASIS` (試作): 渡した側で非基底だったカットの行がこちらに無く、基底変数が余るときは、
+                // 受け取った基底を使わず今の LP の基底 (直前のノードの最適基底。双対実行可能) から解く。余った基底を
+                // set_basis の修復 (構造変数を後ろから外す) に任せると、最初の LP が根から解くのと同じくらいかかる
+                // (roll3000、4 スレッド・60 秒: 余りが 1 以上の 21 回は 1 回 2000〜5600 反復、余りが 0 なら 54〜198 反復)
+                if self.pool_excess > 0 && tree_pool_basis() {
+                    self.pool_basis_stats += 1;
+                    return n;
+                }
                 n.basis = Some(Rc::new(super::lp::Basis { col, row }));
                 n.basis_epoch = self.row_log.len();
             }
@@ -9521,7 +9560,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return SnapNode::of(n);
         }
         let mut s = SnapNode::of_with_basis(n, self.p.m);
-        if s.basis.is_some() && env_str!("ENOMOTO_MIP_TREE_SHARE_CUT_BASIS").is_some() {
+        if s.basis.is_some() && (env_str!("ENOMOTO_MIP_TREE_SHARE_CUT_BASIS").is_some() || tree_pool_basis()) {
             if let Some(b) = n.basis.clone() {
                 // 保存したときの行を今の行に合わせる (行の追加・削除の記録を当てはめる。[`Self::restore_node_basis`] と同じ)
                 let mut row = b.row.clone();
@@ -9982,7 +10021,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.tprof.end_s = pool.t0.elapsed().as_secs_f64();
             self.tprof.lns_s = self.lns_secs;
             if self.cut_basis_stats[0] + self.cut_basis_stats[1] > 0 {
-                eprintln!("TREEPAR: tid {} cut basis: sent {} matched {} (backtracks to siblings {})", self.pool_tid, self.cut_basis_stats[0], self.cut_basis_stats[1], self.sibling_backtracks);
+                eprintln!("TREEPAR: tid {} cut basis: sent {} matched {} (backtracks to siblings {}), received bases not used {}", self.pool_tid, self.cut_basis_stats[0], self.cut_basis_stats[1], self.sibling_backtracks, self.pool_basis_stats);
             }
             pool.prof.lock().unwrap().push(std::mem::take(&mut self.tprof));
         }
