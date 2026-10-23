@@ -149,7 +149,7 @@ thread_local! {
     pub(crate) static SUBMIP_BASIS: std::cell::RefCell<Option<Vec<super::lp::VarStatus>>> = const { std::cell::RefCell::new(None) };
     /// 次に始める求解 (サブ MIP でないもの) の根の LP の初めの基底 (列の状態)。前処理の LP による固定
     /// ([`super::lp_probe`]) が解いた LP の基底を渡す (根の LP を解き直す手間を減らす)。
-    pub(crate) static ROOT_BASIS: std::cell::RefCell<Option<Vec<super::lp::VarStatus>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static ROOT_BASIS: std::cell::RefCell<Option<super::lp::Basis>> = const { std::cell::RefCell::new(None) };
     /// ヒューリスティクス役のスレッド (`ENOMOTO_MIP_HEUR_ROLE`、[`Solver::heur_role_run`]) の共有の待ち行列。このスレッドで
     /// 解くサブ MIP も、木の探索が終わるか止める合図が立ったら打ち切る ([`Solver::time_up`])。
     static ROLE_POOL: std::cell::RefCell<Option<std::sync::Arc<WorkPool>>> = const { std::cell::RefCell::new(None) };
@@ -2975,9 +2975,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         if !self.params.submip && self.snap.is_none() {
-            if let Some(col) = ROOT_BASIS.with(|s| s.borrow_mut().take()) {
-                if col.len() == self.p.n {
-                    self.lp.set_basis(&super::lp::Basis { col, row: Vec::new() });
+            let rb = ROOT_BASIS.with(|s| s.borrow_mut().take());
+            if self.params.verbose {
+                eprintln!(
+                    "MIP: root LP basis from the presolve LP probing: {}",
+                    match &rb {
+                        Some(b) if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() => "used (with rows)",
+                        Some(b) if b.col.len() == self.p.n && !b.row.is_empty() && b.row.len() < self.lp.num_rows() => "used (with rows; the added rows basic)",
+                        Some(b) if b.col.len() == self.p.n => "used (columns only)",
+                        Some(_) => "size mismatch",
+                        None => "none",
+                    }
+                );
+            }
+            if let Some(mut b) = rb {
+                if b.col.len() == self.p.n {
+                    // 行の状態 (`ENOMOTO_MIP_LP_PROBE_FINISH`。既定は列の状態だけ): 前処理の後に末尾に足した行 (対称性の
+                    // lex-leader の行など) は論理変数を基底に入れる。行が減っていたら使わない
+                    if b.row.len() > self.lp.num_rows() {
+                        b.row.clear();
+                    } else if !b.row.is_empty() {
+                        b.row.resize(self.lp.num_rows(), super::lp::VarStatus::Basic);
+                    }
+                    self.lp.set_basis(&b);
                 }
             }
         }
@@ -2987,6 +3007,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.lp.set_basis(&b);
                 }
             }
+        }
+        if self.params.verbose && self.snap.is_none() && !self.params.submip {
+            eprintln!("MIP: solving the root LP ({:.2}s)", self.start.elapsed().as_secs_f64());
         }
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         if self.params.verbose && self.snap.is_some() {
@@ -3043,6 +3066,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // カットを加える前の根の LP 解 (RENS の 2 つ目の近傍に使う)
         let x_root0 = self.lp.col_values();
+        // `ENOMOTO_MIP_EARLY_RENS` (試作): 暫定解がない (か質の悪い FJ の解だけの) とき、暫定解なし用のダイビング式 RENS を
+        // カットのループの前に (カット前の LP 解で、同じスレッドで) 回す。hypothyroid-k1 ではこの RENS のサブ MIP が
+        // 0.2 秒で最適値 -2851 を見つけるが、既定ではカットのループ (6.7 秒) と根のヒューリスティクスの後になる
+        if env_str!("ENOMOTO_MIP_EARLY_RENS").is_some() && !self.params.submip && self.snap.is_none() && !self.fractional(&x_root0).is_empty() {
+            self.poll_fj_thread();
+            if self.incumbent.is_none() || self.fj_poor() {
+                let t = Instant::now();
+                self.heur_label = "RENS (early)";
+                let found = self.rens(&x_root0);
+                self.heur_label = "";
+                if self.params.verbose {
+                    eprintln!("MIP: early RENS before the root cuts: {} ({:.2}s, incumbent {:?}, {:.2}s)", if found { "found" } else { "none" }, t.elapsed().as_secs_f64(), self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
+                }
+            }
+            // `ENOMOTO_MIP_EARLY_RENS_PROBE` (試作): その直後に打ち切り値つきの根のプロービング ([`Self::root_obj_probe`]) も
+            // カットのループの前に回す (固定は大域的に入り、カットのループの後の 2 回目も回る)
+            if env_str!("ENOMOTO_MIP_EARLY_RENS_PROBE").is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_OBJ_PROBE").is_none() && self.root_obj_probe() {
+                if let Some(z) = self.incumbent.as_ref().map(|(z, _)| *z) {
+                    if self.shared.as_ref().is_none_or(|s| !(s.best() < z)) {
+                        if self.params.verbose {
+                            eprintln!("MIP: early root objective probing proved the incumbent {z:.10e} optimal ({:.2}s)", self.start.elapsed().as_secs_f64());
+                        }
+                        return self.finish(MipStatus::Optimal, z);
+                    }
+                }
+            }
+        }
         // 根の切除平面
         let cut_job = CUT_JOB.with(|j| j.borrow().clone()).filter(|_| self.snap.is_some());
         {

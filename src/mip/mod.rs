@@ -1545,10 +1545,22 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     let t0 = std::time::Instant::now();
     let deadline = Some(t0 + std::time::Duration::from_secs_f64(secs.max(0.0)));
     let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&prob.col_lo, &prob.col_up, &prob.cost, &prob.rows, &prob.row_lo, &prob.row_up);
-    match lp.solve(&SolveLimits { deadline, ..Default::default() }) {
+    // `ENOMOTO_MIP_LP_PROBE_FINISH` (試作): 最初の LP の期限を `secs` の `ENOMOTO_T_MIP_LP_PROBE_FINISH_MULT` 倍 (既定 4) にし、
+    // 渡す基底に行 (論理変数) の状態も入れる (根の LP の行の数が同じときだけ使う)。期限 `secs` を過ぎて解けたときは列の
+    // 固定は試さない (下の `budget_left`) が、基底は根の LP に渡す。hypothyroid-k1 (4 スレッド・60 秒) では最初の LP が
+    // 3.0〜3.1 秒で期限 3 秒に当たって解いた分を捨て、根で同じ LP を基底なしで解き直していた (3067 反復、5〜7 秒)。
+    // 列の状態だけの基底を渡しても、行の状態がないので別の基底になり、根の LP は同じ 3067 反復かかった
+    let finish = env_str!("ENOMOTO_MIP_LP_PROBE_FINISH").is_some();
+    let first_deadline = if finish { Some(t0 + std::time::Duration::from_secs_f64((tunable!("ENOMOTO_T_MIP_LP_PROBE_FINISH_MULT", 4.0, f64) * secs).max(0.0))) } else { deadline };
+    match lp.solve(&SolveLimits { deadline: first_deadline, ..Default::default() }) {
         LpStatus::Optimal => {}
         LpStatus::Infeasible => return None,
-        _ => return Some(0),
+        st => {
+            if verbose {
+                eprintln!("MIP: LP probing: the first LP stopped: {st:?} ({:.2}s, limit {secs:.2}s{})", t0.elapsed().as_secs_f64(), if finish { " x mult" } else { "" });
+            }
+            return Some(0);
+        }
     }
     let z0 = lp.objective() + prob.offset;
     let root_secs = t0.elapsed().as_secs_f64();
@@ -1664,8 +1676,12 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     // 固定したときだけ最後の LP の基底を根の LP に渡す (固定がなければ根の LP は前処理の LP と同じ問題で、基底を渡すと
     // 着く頂点が変わり、カット・探索の経路が変わるだけ: qiu は固定 0 で 40 問の 2 回とも遅くなった)。ただし最初の LP に
     // `ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS` 秒 (既定 1 秒) 以上かかったら、根で解き直す手間を省くために渡す
+    if verbose {
+        eprintln!("MIP: LP probing: root LP {root_secs:.2}s ({root_iters} iters), tried {n_tried}, fixed {n_fixed}, basis passed {}", n_fixed > 0 || root_secs >= tunable!("ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS", 1.0, f64));
+    }
     if n_fixed > 0 || root_secs >= tunable!("ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS", 1.0, f64) {
-        let b = lp.basis().col;
+        let b = lp.basis();
+        let b = if finish { b } else { lp::Basis { col: b.col, row: Vec::new() } };
         solver::ROOT_BASIS.with(|s| *s.borrow_mut() = Some(b));
     }
     Some(n_fixed)
