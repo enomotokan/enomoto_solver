@@ -1567,10 +1567,25 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     let t0 = std::time::Instant::now();
     let deadline = Some(t0 + std::time::Duration::from_secs_f64(secs.max(0.0)));
     let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&prob.col_lo, &prob.col_up, &prob.cost, &prob.rows, &prob.row_lo, &prob.row_up);
-    match lp.solve(&SolveLimits { deadline, ..Default::default() }) {
+    // `ENOMOTO_MIP_LP_PROBE_FIRST_FULL` (試作、既定では使わない): 最初の LP の期限を `secs` の `ENOMOTO_T_MIP_LP_PROBE_FIRST_MULT` 倍
+    // (既定 4 倍) に延ばす (固定を試す手間の上限は `secs` のまま)。最初の LP が `secs` に間に合わないと基底を根に渡せず、根で同じ LP を
+    // もう一度解く (時間の損) うえ、着く頂点が変わる。neos-960392 (60 秒で `secs` = 3.0 秒、最初の LP は 2.8〜3.0 秒) では、
+    // 間に合った回は根の RENS が 0 ノードで -238 (最適値) を出して 29 秒で終わり、間に合わなかった回は別の頂点からの RENS が
+    // -237 で時間切れになり、60 秒で証明できなかった
+    let first_deadline = if env_str!("ENOMOTO_MIP_LP_PROBE_FIRST_FULL").is_some() {
+        Some(t0 + std::time::Duration::from_secs_f64((tunable!("ENOMOTO_T_MIP_LP_PROBE_FIRST_MULT", 4.0, f64) * secs).max(0.0)))
+    } else {
+        deadline
+    };
+    match lp.solve(&SolveLimits { deadline: first_deadline, ..Default::default() }) {
         LpStatus::Optimal => {}
         LpStatus::Infeasible => return None,
-        _ => return Some(0),
+        st => {
+            if verbose {
+                eprintln!("MIP: LP probing: the first LP ended {st:?} ({:.2}s of {secs:.2}s); the root LP is solved again", t0.elapsed().as_secs_f64());
+            }
+            return Some(0);
+        }
     }
     let z0 = lp.objective() + prob.offset;
     let root_secs = t0.elapsed().as_secs_f64();
