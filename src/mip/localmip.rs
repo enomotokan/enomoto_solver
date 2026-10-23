@@ -312,293 +312,355 @@ pub(super) fn local_mip(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, s
     local_mip_opts(p, lo, up, time_cap, seed, stop, on_sol, env_str!("ENOMOTO_MIP_LOCALMIP_CHAIN").is_some())
 }
 
-/// [`local_mip`] で、連鎖の手を使うかを `chain` で決めるもの。
-#[allow(clippy::too_many_arguments)]
-pub(super) fn local_mip_opts(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>, on_sol: &dyn Fn(&[f64]), chain: bool) -> LocalMipResult {
-    let (n, m) = (p.n, p.m);
-    let t0 = Instant::now();
-    let t_end = t0 + Duration::from_secs_f64(time_cap.max(0.0));
-    let mut res = LocalMipResult { best: None, least_viol: usize::MAX, first_time: None, steps: 0, pair_moves: 0, chain_len: 0 };
-    if n == 0 {
-        return res;
-    }
-    let mut lb = lo.to_vec();
-    let mut ub = up.to_vec();
-    for j in 0..n {
-        if p.is_int[j] {
-            lb[j] = (lb[j] - 1e-6).ceil();
-            ub[j] = (ub[j] + 1e-6).floor();
+/// 途中で止めて続きから再開できる Local-MIP の探索 ([`LocalMip::run`])。FJ と時間を分け合うとき (`ENOMOTO_MIP_FJ_LMIP_MIX`) に使う。
+pub(super) struct LocalMip<'a> {
+    s: St<'a>,
+    pub res: LocalMipResult,
+    start: Vec<f64>,
+    lift_order: Vec<usize>,
+    set_of: Vec<Vec<u32>>,
+    cand: Vec<(usize, f64)>,
+    buf: Vec<(usize, f64)>,
+    best_obj: f64,
+    since_improve: u64,
+    round_best: usize,
+    restarts: u64,
+    step: u64,
+    chain_tries: u64,
+    chain: bool,
+    t0: Instant,
+    /// これ以上探さない (解き終えた・続けられない)
+    pub done: bool,
+}
+
+impl<'a> LocalMip<'a> {
+    /// 列の境界 `lo`/`up` で、各列の下限から始める。整数列の境界が空なら `None`
+    pub(super) fn new(p: &'a MipProblem, lo: &[f64], up: &[f64], seed: u64, chain: bool) -> Option<Self> {
+        let (n, m) = (p.n, p.m);
+        if n == 0 {
+            return None;
         }
-        if !(lb[j] <= ub[j]) {
-            return res;
-        }
-    }
-    let start: Vec<f64> = (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect();
-    let obj_cols: Vec<(usize, f64)> = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
-    let mut s = St {
-        p,
-        lo: lb,
-        up: ub,
-        x: start.clone(),
-        act: vec![0.0; m + 1],
-        w: vec![1.0; m + 1],
-        obj_up: f64::INFINITY,
-        vset: Vec::new(),
-        vpos: vec![usize::MAX; m + 1],
-        tabu: vec![[0, 0]; n],
-        rng: seed | 1,
-        obj_cols,
-    };
-    s.reset();
-    let sample_rows = tunable!("ENOMOTO_T_MIP_LOCALMIP_SAMPLE_ROWS", 3usize, usize).max(1);
-    let sample_cols = tunable!("ENOMOTO_T_MIP_LOCALMIP_SAMPLE_COLS", 64usize, usize).max(1);
-    let sp = tunable!("ENOMOTO_T_MIP_LOCALMIP_SP", 0.0003, f64);
-    let restart_after = tunable!("ENOMOTO_T_MIP_LOCALMIP_RESTART", 300_000u64, u64);
-    let pair = env_str!("ENOMOTO_MIP_LOCALMIP_PAIR").is_some();
-    let chain_depth = tunable!("ENOMOTO_T_MIP_LOCALMIP_CHAIN_DEPTH", 32usize, usize);
-    let mut chain_tries = 0u64;
-    let set_of: Vec<Vec<u32>> = if chain {
-        set_rows(p, &s.lo, &s.up)
-    } else {
-        Vec::new()
-    };
-    let pair_cols = tunable!("ENOMOTO_T_MIP_LOCALMIP_PAIR_COLS", 8usize, usize).max(1);
-    let debug = env_str!("ENOMOTO_MIP_LOCALMIP_DEBUG").is_some();
-    let mut lift_order: Vec<usize> = (0..n).filter(|&j| p.cost[j] != 0.0).collect();
-    let mut best_obj = f64::INFINITY;
-    let mut since_improve = 0u64;
-    let mut round_best = usize::MAX;
-    let mut cand: Vec<(usize, f64)> = Vec::new();
-    let mut buf: Vec<(usize, f64)> = Vec::new();
-    let mut restarts = 0u64;
-    let mut step = 0u64;
-    loop {
-        step += 1;
-        if step % 256 == 0 && (Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))) {
-            if debug {
-                eprintln!("MIP:   [localmip] time/stop at step {step}");
+        let mut lb = lo.to_vec();
+        let mut ub = up.to_vec();
+        for j in 0..n {
+            if p.is_int[j] {
+                lb[j] = (lb[j] - 1e-6).ceil();
+                ub[j] = (ub[j] + 1e-6).floor();
             }
-            break;
-        }
-        // 実行可能 (目的の行を除いて違反なし)
-        let nviol = s.vset.len() - usize::from(s.vpos[m] != usize::MAX);
-        if nviol == 0 {
-            // lift move で目的を良くし、良くならなくなったら暫定解として記録して目的の行を締める (breakthrough)
-            while s.lift_sweep(&mut lift_order, step) > 0 {}
-            if s.vset.iter().any(|&r| r < m) {
-                // 丸めの誤差で違反が出た (起きないはず): そのまま探索を続ける
-                continue;
+            if !(lb[j] <= ub[j]) {
+                return None;
             }
-            let z = s.act[m];
-            if !p.is_feasible(&s.x, 1e-6) {
-                // 左辺の誤差で違反を見落とした: 数え直して、それでも違反がなければ止める
-                s.reset();
+        }
+        let start: Vec<f64> = (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect();
+        let obj_cols: Vec<(usize, f64)> = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
+        let mut s = St { p, lo: lb, up: ub, x: start.clone(), act: vec![0.0; m + 1], w: vec![1.0; m + 1], obj_up: f64::INFINITY, vset: Vec::new(), vpos: vec![usize::MAX; m + 1], tabu: vec![[0, 0]; n], rng: seed | 1, obj_cols };
+        s.reset();
+        let set_of = if chain { set_rows(p, &s.lo, &s.up) } else { Vec::new() };
+        Some(LocalMip {
+            s,
+            res: LocalMipResult { best: None, least_viol: usize::MAX, first_time: None, steps: 0, pair_moves: 0, chain_len: 0 },
+            start,
+            lift_order: (0..n).filter(|&j| p.cost[j] != 0.0).collect(),
+            set_of,
+            cand: Vec::new(),
+            buf: Vec::new(),
+            best_obj: f64::INFINITY,
+            since_improve: 0,
+            round_best: usize::MAX,
+            restarts: 0,
+            step: 0,
+            chain_tries: 0,
+            chain,
+            t0: Instant::now(),
+            done: false,
+        })
+    }
+
+    /// 目的値の最良
+    pub(super) fn best_obj(&self) -> f64 {
+        self.best_obj
+    }
+
+    /// 外から来た実行可能解 `x` (FJ の解など) が今の最良より良ければ、それを暫定解として受け取り、そこから探索を続ける
+    /// (lift move で磨き、目的の行を締めて良い解を探す)。受け取ったら真
+    pub(super) fn inject(&mut self, x: &[f64]) -> bool {
+        let p = self.s.p;
+        if x.len() != p.n || !p.is_feasible(x, 1e-6) {
+            return false;
+        }
+        let z = p.objective(x) - p.offset;
+        if self.best_obj.is_finite() && z >= self.best_obj - 1e-9 * self.best_obj.abs().max(1.0) {
+            return false;
+        }
+        self.best_obj = z;
+        self.res.best = Some(x.to_vec());
+        self.s.x = x.iter().enumerate().map(|(j, &v)| v.clamp(self.s.lo[j], self.s.up[j])).collect();
+        self.s.obj_up = f64::INFINITY;
+        self.s.reset();
+        self.since_improve = 0;
+        self.round_best = usize::MAX;
+        self.done = false;
+        true
+    }
+
+    /// `t_end` まで (か `stop` が立つまで) 探す。`on_sol` は実行可能解が良くなるたびに呼ぶ。
+    pub(super) fn run(&mut self, t_end: Instant, stop: Option<&std::sync::atomic::AtomicBool>, on_sol: &dyn Fn(&[f64])) {
+        if self.done {
+            return;
+        }
+        let sample_rows = tunable!("ENOMOTO_T_MIP_LOCALMIP_SAMPLE_ROWS", 3usize, usize).max(1);
+        let sample_cols = tunable!("ENOMOTO_T_MIP_LOCALMIP_SAMPLE_COLS", 64usize, usize).max(1);
+        let sp = tunable!("ENOMOTO_T_MIP_LOCALMIP_SP", 0.0003, f64);
+        let restart_after = tunable!("ENOMOTO_T_MIP_LOCALMIP_RESTART", 300_000u64, u64);
+        let pair = env_str!("ENOMOTO_MIP_LOCALMIP_PAIR").is_some();
+        let chain_depth = tunable!("ENOMOTO_T_MIP_LOCALMIP_CHAIN_DEPTH", 32usize, usize);
+        let pair_cols = tunable!("ENOMOTO_T_MIP_LOCALMIP_PAIR_COLS", 8usize, usize).max(1);
+        let debug = env_str!("ENOMOTO_MIP_LOCALMIP_DEBUG").is_some();
+        let LocalMip { s, res, start, lift_order, set_of, cand, buf, best_obj: best_obj_r, since_improve: since_r, round_best: round_r, restarts: restarts_r, step: step_r, chain_tries: tries_r, chain, t0, done: done_r } = self;
+        let (chain, t0) = (*chain, *t0);
+        let p = s.p;
+        let (n, m) = (p.n, p.m);
+        let (mut best_obj, mut since_improve, mut round_best, mut restarts, mut step, mut chain_tries, mut done) = (*best_obj_r, *since_r, *round_r, *restarts_r, *step_r, *tries_r, false);
+        let (start, lift_order, set_of, cand, buf) = (&*start, lift_order, &*set_of, cand, buf);
+        loop {
+            step += 1;
+            if step % 256 == 0 && (Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))) {
+                break;
+            }
+            // 実行可能 (目的の行を除いて違反なし)
+            let nviol = s.vset.len() - usize::from(s.vpos[m] != usize::MAX);
+            if nviol == 0 {
+                // lift move で目的を良くし、良くならなくなったら暫定解として記録して目的の行を締める (breakthrough)
+                while s.lift_sweep(lift_order, step) > 0 {}
                 if s.vset.iter().any(|&r| r < m) {
+                    // 丸めの誤差で違反が出た (起きないはず): そのまま探索を続ける
                     continue;
                 }
-                if debug {
-                    eprintln!("MIP:   [localmip] a point without violated rows is not feasible: stopped");
-                }
-                break;
-            }
-            if !best_obj.is_finite() || z < best_obj - 1e-9 * best_obj.abs().max(1.0) {
-                best_obj = z;
-                res.best = Some(s.x.clone());
-                on_sol(&s.x);
-                res.first_time.get_or_insert(t0.elapsed().as_secs_f64());
-                since_improve = 0;
-                if debug {
-                    eprintln!("MIP:   [localmip] feasible {z:.6e} at step {step} ({:.2}s)", t0.elapsed().as_secs_f64());
-                }
-            }
-            let ostep = super::heuristics::ls_obj_step_pub(p, best_obj);
-            s.obj_up = best_obj - ostep;
-            if s.obj_cols.is_empty() {
-                break;
-            }
-            s.set_viol(m);
-            if s.vset.is_empty() {
-                if debug {
-                    eprintln!("MIP:   [localmip] objective row not violated after a feasible point (obj_up {:.6e}, z {z:.6e}): stopped", s.obj_up);
-                }
-                break;
-            }
-        }
-        if nviol < res.least_viol {
-            res.least_viol = nviol;
-        }
-        if nviol < round_best {
-            round_best = nviol;
-            since_improve = 0;
-        } else {
-            since_improve += 1;
-        }
-        if since_improve > restart_after {
-            // 再出発: 暫定解 (なければ出発点を乱数で崩した点) から、重みを戻す
-            restarts += 1;
-            s.x = match &res.best {
-                Some(b) => b.clone(),
-                None => {
-                    let mut x = start.clone();
-                    for j in 0..n {
-                        if p.is_int[j] && s.lo[j].is_finite() && s.up[j].is_finite() && s.uniform() < 0.1 {
-                            x[j] = (s.lo[j] + ((s.up[j] - s.lo[j] + 1.0) * s.uniform()).floor()).min(s.up[j]);
-                        }
+                let z = s.act[m];
+                if !p.is_feasible(&s.x, 1e-6) {
+                    // 左辺の誤差で違反を見落とした: 数え直して、それでも違反がなければ止める
+                    s.reset();
+                    if s.vset.iter().any(|&r| r < m) {
+                        continue;
                     }
-                    x
+                    if debug {
+                        eprintln!("MIP:   [localmip] a point without violated rows is not feasible: stopped");
+                    }
+                    done = true;
+                    break;
                 }
-            };
-            s.w.iter_mut().for_each(|w| *w = 1.0);
-            s.tabu.iter_mut().for_each(|t| *t = [0, 0]);
-            s.reset();
-            since_improve = 0;
-            round_best = usize::MAX;
-            continue;
-        }
-        // BMS: 違反行を何本か選び、その行の tight move (タブーでないもの) の最良を選ぶ
-        let mut best: Option<(f64, bool, usize, f64, Option<(usize, f64)>)> = None;
-        for _ in 0..sample_rows.min(s.vset.len()) {
-            let kk = s.below(s.vset.len());
-            let i = s.vset[kk];
-            let len = s.row(i).len();
-            let k = len.min(sample_cols);
-            for t in 0..k {
-                let q = if len <= sample_cols { t } else { s.below(len) };
-                let (j, a) = s.row(i)[q];
-                let Some(v) = s.tight_value(i, j, a) else { continue };
-                let d = v - s.x[j];
-                if !s.tabu_ok(j, d, step) {
-                    continue;
+                if !best_obj.is_finite() || z < best_obj - 1e-9 * best_obj.abs().max(1.0) {
+                    best_obj = z;
+                    res.best = Some(s.x.clone());
+                    on_sol(&s.x);
+                    res.first_time.get_or_insert(t0.elapsed().as_secs_f64());
+                    since_improve = 0;
+                    if debug {
+                        eprintln!("MIP:   [localmip] feasible {z:.6e} at step {step} ({:.2}s)", t0.elapsed().as_secs_f64());
+                    }
                 }
-                let sc = s.score(j, d);
-                let bt = s.breakthrough(j, d);
-                if best.as_ref().is_none_or(|b| sc > b.0 || (sc == b.0 && bt && !b.1)) {
-                    best = Some((sc, bt, j, v, None));
+                let ostep = super::heuristics::ls_obj_step_pub(p, best_obj);
+                s.obj_up = best_obj - ostep;
+                if s.obj_cols.is_empty() {
+                    done = true;
+                    break;
+                }
+                s.set_viol(m);
+                if s.vset.is_empty() {
+                    if debug {
+                        eprintln!("MIP:   [localmip] objective row not violated after a feasible point (obj_up {:.6e}, z {z:.6e}): stopped", s.obj_up);
+                    }
+                    done = true;
+                    break;
                 }
             }
-        }
-        // 連鎖の手: 最良の 1 列の手が正でなければ
-        if chain && best.as_ref().is_none_or(|b| b.0 <= 0.0) && !s.vset.is_empty() {
-            let kk = s.below(s.vset.len());
-            let i = s.vset[kk];
-            chain_tries += 1;
-            if let Some((_, mv)) = s.chain_move(i, chain_depth, sample_cols, &set_of) {
-                for &(k, v) in &mv {
-                    s.apply(k, v, step);
-                }
-                res.pair_moves += 1;
-                res.chain_len += mv.len() as u64;
+            if nviol < res.least_viol {
+                res.least_viol = nviol;
+            }
+            if nviol < round_best {
+                round_best = nviol;
+                since_improve = 0;
+            } else {
+                since_improve += 1;
+            }
+            if since_improve > restart_after {
+                // 再出発: 暫定解 (なければ出発点を乱数で崩した点) から、重みを戻す
+                restarts += 1;
+                s.x = match &res.best {
+                    Some(b) => b.clone(),
+                    None => {
+                        let mut x = start.clone();
+                        for j in 0..n {
+                            if p.is_int[j] && s.lo[j].is_finite() && s.up[j].is_finite() && s.uniform() < 0.1 {
+                                x[j] = (s.lo[j] + ((s.up[j] - s.lo[j] + 1.0) * s.uniform()).floor()).min(s.up[j]);
+                            }
+                        }
+                        x
+                    }
+                };
+                s.w.iter_mut().for_each(|w| *w = 1.0);
+                s.tabu.iter_mut().for_each(|t| *t = [0, 0]);
+                s.reset();
+                since_improve = 0;
+                round_best = usize::MAX;
                 continue;
             }
-        }
-        // 組の手: 最良の 1 列の手が正でなければ、違反行の列の手が新たに破る行を戻す 2 本目の列を探す
-        if pair && best.as_ref().is_none_or(|b| b.0 <= 0.0) && !s.vset.is_empty() {
-            let kk = s.below(s.vset.len());
-            let i = s.vset[kk];
-            cand.clear();
-            let len = s.row(i).len();
-            for t in 0..len.min(sample_cols) {
-                let q = if len <= sample_cols { t } else { s.below(len) };
-                let (j, a) = s.row(i)[q];
-                if let Some(v) = s.tight_value(i, j, a) {
-                    cand.push((j, v));
-                }
-            }
-            for &(j, v) in cand.iter().take(pair_cols) {
-                let d = v - s.x[j];
-                // j を動かして新たに破れる行 (目的の行は除く) を 1 本選ぶ
-                let mut broken: Option<(usize, f64)> = None;
-                for &(r, b) in &p.cols[j] {
-                    if r != i && s.viol_at(r, s.act[r] + b * d) > s.viol_at(r, s.act[r]) + 1e-12 {
-                        broken = Some((r, b));
-                        break;
-                    }
-                }
-                let Some((r, b)) = broken else { continue };
-                let (l, u) = s.bounds(r);
-                let na = s.act[r] + b * d;
-                let target = if na > u { u } else { l };
-                for &(k, c) in p.rows[r].iter() {
-                    if k == j || s.lo[k] == s.up[k] {
+            // BMS: 違反行を何本か選び、その行の tight move (タブーでないもの) の最良を選ぶ
+            let mut best: Option<(f64, bool, usize, f64, Option<(usize, f64)>)> = None;
+            for _ in 0..sample_rows.min(s.vset.len()) {
+                let kk = s.below(s.vset.len());
+                let i = s.vset[kk];
+                let len = s.row(i).len();
+                let k = len.min(sample_cols);
+                for t in 0..k {
+                    let q = if len <= sample_cols { t } else { s.below(len) };
+                    let (j, a) = s.row(i)[q];
+                    let Some(v) = s.tight_value(i, j, a) else { continue };
+                    let d = v - s.x[j];
+                    if !s.tabu_ok(j, d, step) {
                         continue;
                     }
-                    let mut e = (target - na) / c;
-                    if p.is_int[k] {
-                        e = if e > 0.0 { (e - 1e-9).ceil() } else { (e + 1e-9).floor() };
-                    }
-                    let vk = (s.x[k] + e).clamp(s.lo[k], s.up[k]);
-                    let e = vk - s.x[k];
-                    if e.abs() < 1e-12 || !s.tabu_ok(k, e, step) {
-                        continue;
-                    }
-                    let sc = s.score2(j, d, k, e, &mut buf);
-                    if best.as_ref().is_none_or(|bb| sc > bb.0) {
-                        best = Some((sc, false, j, v, Some((k, vk))));
+                    let sc = s.score(j, d);
+                    let bt = s.breakthrough(j, d);
+                    if best.as_ref().is_none_or(|b| sc > b.0 || (sc == b.0 && bt && !b.1)) {
+                        best = Some((sc, bt, j, v, None));
                     }
                 }
             }
-        }
-        match best {
-            Some((sc, _, j, v, second)) if sc > 0.0 => {
-                s.apply(j, v, step);
-                if let Some((k, vk)) = second {
-                    s.apply(k, vk, step);
+            // 連鎖の手: 最良の 1 列の手が正でなければ
+            if chain && best.as_ref().is_none_or(|b| b.0 <= 0.0) && !s.vset.is_empty() {
+                let kk = s.below(s.vset.len());
+                let i = s.vset[kk];
+                chain_tries += 1;
+                if let Some((_, mv)) = s.chain_move(i, chain_depth, sample_cols, &set_of) {
+                    for &(k, v) in &mv {
+                        s.apply(k, v, step);
+                    }
                     res.pair_moves += 1;
-                }
-            }
-            _ => {
-                // 正の手がない: 重みを更新して、違反行 1 本の手の最良を動かす (random walk)
-                if s.uniform() < sp {
-                    for r in 0..=m {
-                        if s.vpos[r] == usize::MAX && s.w[r] > 1.0 {
-                            s.w[r] -= 1.0;
-                        }
-                    }
-                } else {
-                    for q in 0..s.vset.len() {
-                        let r = s.vset[q];
-                        s.w[r] += 1.0;
-                    }
-                }
-                if s.vset.is_empty() {
+                    res.chain_len += mv.len() as u64;
                     continue;
                 }
+            }
+            // 組の手: 最良の 1 列の手が正でなければ、違反行の列の手が新たに破る行を戻す 2 本目の列を探す
+            if pair && best.as_ref().is_none_or(|b| b.0 <= 0.0) && !s.vset.is_empty() {
                 let kk = s.below(s.vset.len());
-            let i = s.vset[kk];
-                let mut bw: Option<(f64, usize, f64)> = None;
+                let i = s.vset[kk];
+                cand.clear();
                 let len = s.row(i).len();
                 for t in 0..len.min(sample_cols) {
                     let q = if len <= sample_cols { t } else { s.below(len) };
                     let (j, a) = s.row(i)[q];
-                    let Some(v) = s.tight_value(i, j, a) else { continue };
-                    let sc = s.score(j, v - s.x[j]);
-                    if bw.is_none_or(|b| sc > b.0) {
-                        bw = Some((sc, j, v));
+                    if let Some(v) = s.tight_value(i, j, a) {
+                        cand.push((j, v));
                     }
                 }
-                if let Some((_, j, v)) = bw {
-                    s.apply(j, v, step);
+                for &(j, v) in cand.iter().take(pair_cols) {
+                    let d = v - s.x[j];
+                    // j を動かして新たに破れる行 (目的の行は除く) を 1 本選ぶ
+                    let mut broken: Option<(usize, f64)> = None;
+                    for &(r, b) in &p.cols[j] {
+                        if r != i && s.viol_at(r, s.act[r] + b * d) > s.viol_at(r, s.act[r]) + 1e-12 {
+                            broken = Some((r, b));
+                            break;
+                        }
+                    }
+                    let Some((r, b)) = broken else { continue };
+                    let (l, u) = s.bounds(r);
+                    let na = s.act[r] + b * d;
+                    let target = if na > u { u } else { l };
+                    for &(k, c) in p.rows[r].iter() {
+                        if k == j || s.lo[k] == s.up[k] {
+                            continue;
+                        }
+                        let mut e = (target - na) / c;
+                        if p.is_int[k] {
+                            e = if e > 0.0 { (e - 1e-9).ceil() } else { (e + 1e-9).floor() };
+                        }
+                        let vk = (s.x[k] + e).clamp(s.lo[k], s.up[k]);
+                        let e = vk - s.x[k];
+                        if e.abs() < 1e-12 || !s.tabu_ok(k, e, step) {
+                            continue;
+                        }
+                        let sc = s.score2(j, d, k, e, buf);
+                        if best.as_ref().is_none_or(|bb| sc > bb.0) {
+                            best = Some((sc, false, j, v, Some((k, vk))));
+                        }
+                    }
                 }
             }
+            match best {
+                Some((sc, _, j, v, second)) if sc > 0.0 => {
+                    s.apply(j, v, step);
+                    if let Some((k, vk)) = second {
+                        s.apply(k, vk, step);
+                        res.pair_moves += 1;
+                    }
+                }
+                _ => {
+                    // 正の手がない: 重みを更新して、違反行 1 本の手の最良を動かす (random walk)
+                    if s.uniform() < sp {
+                        for r in 0..=m {
+                            if s.vpos[r] == usize::MAX && s.w[r] > 1.0 {
+                                s.w[r] -= 1.0;
+                            }
+                        }
+                    } else {
+                        for q in 0..s.vset.len() {
+                            let r = s.vset[q];
+                            s.w[r] += 1.0;
+                        }
+                    }
+                    if s.vset.is_empty() {
+                        continue;
+                    }
+                    let kk = s.below(s.vset.len());
+                let i = s.vset[kk];
+                    let mut bw: Option<(f64, usize, f64)> = None;
+                    let len = s.row(i).len();
+                    for t in 0..len.min(sample_cols) {
+                        let q = if len <= sample_cols { t } else { s.below(len) };
+                        let (j, a) = s.row(i)[q];
+                        let Some(v) = s.tight_value(i, j, a) else { continue };
+                        let sc = s.score(j, v - s.x[j]);
+                        if bw.is_none_or(|b| sc > b.0) {
+                            bw = Some((sc, j, v));
+                        }
+                    }
+                    if let Some((_, j, v)) = bw {
+                        s.apply(j, v, step);
+                    }
+                }
+            }
+            if step % 100_000 == 0 {
+                // 左辺の誤差をためないよう数え直す
+                s.reset();
+            }
         }
-        if step % 100_000 == 0 {
-            // 左辺の誤差をためないよう数え直す
-            s.reset();
+        res.steps = step;
+        (*best_obj_r, *since_r, *round_r, *restarts_r, *step_r, *tries_r, *done_r) = (best_obj, since_improve, round_best, restarts, step, chain_tries, done);
+        if debug && done {
+            eprintln!(
+                "MIP:   [localmip] {step} steps, {restarts} restarts, least violated rows {}, pair/chain moves {} (chain tries {chain_tries}, columns {}), found {} (first {:?}), {:.2}s",
+                res.least_viol,
+                res.pair_moves,
+                res.chain_len,
+                res.best.as_ref().map(|x| p.objective(x)).map_or("none".to_string(), |z| format!("{z:.6e}")),
+                res.first_time,
+                t0.elapsed().as_secs_f64()
+            );
         }
     }
-    res.steps = step;
-    if debug {
-        eprintln!(
-            "MIP:   [localmip] {step} steps, {restarts} restarts, least violated rows {}, pair/chain moves {} (chain tries {chain_tries}, columns {}), found {} (first {:?}), {:.2}s",
-            res.least_viol,
-            res.pair_moves,
-            res.chain_len,
-            res.best.as_ref().map(|x| p.objective(x)).map_or("none".to_string(), |z| format!("{z:.6e}")),
-            res.first_time,
-            t0.elapsed().as_secs_f64()
-        );
-    }
-    res
+}
+
+/// [`local_mip`] で、連鎖の手を使うかを `chain` で決めるもの。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn local_mip_opts(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>, on_sol: &dyn Fn(&[f64]), chain: bool) -> LocalMipResult {
+    let t_end = Instant::now() + Duration::from_secs_f64(time_cap.max(0.0));
+    let Some(mut lm) = LocalMip::new(p, lo, up, seed, chain) else {
+        return LocalMipResult { best: None, least_viol: usize::MAX, first_time: None, steps: 0, pair_moves: 0, chain_len: 0 };
+    };
+    lm.run(t_end, stop, on_sol);
+    lm.res
 }
 
 /// 集合分割の行 (0-1 列の和 = 1) を使った境界の締め (`ENOMOTO_MIP_FJ_SP_BOUNDS`、試作): 0-1 列が全部 1 本の集合分割 (か ≤ 1 の

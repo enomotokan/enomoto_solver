@@ -2833,9 +2833,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // ([`super::heuristics::fj_search_fb`])。Local-MIP は時間の上限 (`ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC` × 時間上限、最大 10 秒) か、
                 // FJ のスレッドを止める合図 (根のカットのループの終わり) まで回り、良くなった解はその場で受け渡し箱に入れる
                 let fjl = env_str!("ENOMOTO_MIP_FJ_LOCALMIP").is_some() && lmip == 0;
+                // `ENOMOTO_MIP_FJ_LMIP_MIX` (試作): FJ のスレッドで FJ と Local-MIP + 連鎖に時間を分け合う ([`super::heuristics::fj_lmip_mix`])。
+                // 時間の上限は Local-MIP と同じ。実行可能性問題 (目的が全部 0) では今までどおり
+                let mix = env_str!("ENOMOTO_MIP_FJ_LMIP_MIX").is_some() && lmip == 0 && !fjl;
                 let fjl_cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * self.params.time_limit).min(10.0) } else { 10.0 };
                 let fjl_box: std::sync::Arc<std::sync::Mutex<Option<Vec<f64>>>> = Default::default();
-                if fjl {
+                if fjl || mix {
                     self.lmip_mailbox = Some(fjl_box.clone());
                 }
                 let t_start = self.start;
@@ -2870,10 +2873,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 fb_run(q2, lo, up, &map)
                             };
                             crate::set_fj_p3_force(true);
+                            if mix && !super::heuristics::fj_feas_extend(&q) {
+                                let on_sol = |x: &[f64]| *fjl_box.lock().unwrap() = Some(map(x.to_vec()));
+                                let r = super::heuristics::fj_lmip_mix(&q, &q.col_lo, &q.col_up, fjl_cap.max(cap), seed, &stop2, &on_sol);
+                                crate::set_fj_p3_force(false);
+                                return r.map(map);
+                            }
                             let r = super::heuristics::fj_search_fb(&q, &q.col_lo, &q.col_up, effort, cap, seed, Some(&stop2), if fjl { Some(&fb) } else { None });
                             crate::set_fj_p3_force(false);
                             return r.map(map);
                         }
+                    }
+                    if mix && !super::heuristics::fj_feas_extend(&pc) {
+                        let on_sol = |x: &[f64]| *fjl_box.lock().unwrap() = Some(x.to_vec());
+                        return super::heuristics::fj_lmip_mix(&pc, &lo, &up, fjl_cap.max(cap), seed, &stop2, &on_sol);
                     }
                     let fb = |q2: &super::problem::MipProblem, lo: &[f64], up: &[f64]| fb_run(q2, lo, up, &|x| x);
                     super::heuristics::fj_search_fb(&pc, &lo, &up, effort, cap, seed, Some(&stop2), if fjl { Some(&fb) } else { None })

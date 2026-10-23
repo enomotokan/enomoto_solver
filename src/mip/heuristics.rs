@@ -2703,3 +2703,82 @@ impl<'a, L: MipLp> Solver<'a, L> {
 pub(super) fn ls_obj_step_pub(p: &MipProblem, z: f64) -> f64 {
     ls_obj_step(p, z)
 }
+
+/// FJ と Local-MIP + 連鎖の手に時間を分け合う探索 (`ENOMOTO_MIP_FJ_LMIP_MIX`、試作。並列の FJ のスレッドで使う)。
+/// - FJ は 1 回 (種を変えた FJ2 を手間の上限まで) を単位、Local-MIP は `ENOMOTO_T_MIP_FJ_MIX_SLICE` (0.2) 秒ずつ続きから回す
+///   ([`super::localmip::LocalMip`])。
+/// - 使った時間の割合で次を決める: どちらも解がないうちは半々、解が出たら最良の解を出した方 (先導) に
+///   `ENOMOTO_T_MIP_FJ_MIX_LEAD` (0.75)、もう一方に残り (探りの分)。もう一方が良い解を出せば先導が入れ替わる。
+/// - FJ の解が Local-MIP の解より良ければ Local-MIP に渡し、そこから磨かせる (lift move と目的の行を締める探索)。
+/// - 良くなった解は `on_sol` に渡す。`cap` 秒か `stop` まで回し、最良の解を返す。
+pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed: u64, stop: &std::sync::atomic::AtomicBool, on_sol: &dyn Fn(&[f64])) -> Option<Vec<f64>> {
+    use std::sync::atomic::Ordering;
+    let t0 = Instant::now();
+    let t_end = t0 + Duration::from_secs_f64(cap.max(0.0));
+    let slice = tunable!("ENOMOTO_T_MIP_FJ_MIX_SLICE", 0.2, f64).max(0.01);
+    let lead = tunable!("ENOMOTO_T_MIP_FJ_MIX_LEAD", 0.75, f64).clamp(0.0, 1.0);
+    let mut lm = super::localmip::LocalMip::new(p, lo, up, seed ^ 0x6A09_E667_F3BC_C909, true);
+    let (mut t_fj, mut t_lm) = (0.0f64, 0.0f64);
+    let mut best: Option<(f64, Vec<f64>)> = None;
+    // 先導: 0 = なし、1 = FJ、2 = Local-MIP
+    let mut leader = 0u8;
+    let (mut n_fj, mut n_lm, mut wins) = (0u64, 0u64, [0u64; 2]);
+    let mut k = 0u64;
+    let mut first: Option<(f64, u8)> = None;
+    while Instant::now() < t_end && !stop.load(Ordering::Relaxed) {
+        let lm_share = match leader {
+            0 => 0.5,
+            2 => lead,
+            _ => 1.0 - lead,
+        };
+        let use_lm = lm.as_ref().is_some_and(|l| !l.done) && t_lm < lm_share * (t_fj + t_lm) - 1e-9;
+        let t = Instant::now();
+        let got: Option<Vec<f64>> = if use_lm {
+            let l = lm.as_mut().unwrap();
+            let before = l.best_obj();
+            l.run((t + Duration::from_secs_f64(slice)).min(t_end), Some(stop), &|_| {});
+            t_lm += t.elapsed().as_secs_f64();
+            n_lm += 1;
+            if l.best_obj() < before { l.res.best.clone() } else { None }
+        } else {
+            let left = t_end.saturating_duration_since(t).as_secs_f64();
+            let r = super::fj::fj2_search(p, lo, up, left, seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15)), Some(stop));
+            k += 1;
+            t_fj += t.elapsed().as_secs_f64();
+            n_fj += 1;
+            r
+        };
+        if let Some(x) = got {
+            let z = p.objective(&x);
+            if best.as_ref().is_none_or(|(bz, _)| z < *bz - 1e-9 * bz.abs().max(1.0)) {
+                let who = if use_lm { 2 } else { 1 };
+                leader = who;
+                wins[(who - 1) as usize] += 1;
+                first.get_or_insert((t0.elapsed().as_secs_f64(), who));
+                on_sol(&x);
+                if !use_lm {
+                    if let Some(l) = lm.as_mut() {
+                        l.inject(&x);
+                    }
+                }
+                best = Some((z, x));
+            }
+        }
+        // 何も回せない (Local-MIP が終わり、FJ の時間も尽きた) なら抜ける
+        if lm.as_ref().is_none_or(|l| l.done) && t_end.saturating_duration_since(Instant::now()).as_secs_f64() < 1e-3 {
+            break;
+        }
+    }
+    if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
+        eprintln!(
+            "MIP:   FJ/Local-MIP mix: FJ {n_fj} runs {t_fj:.2}s ({} improvements), Local-MIP {n_lm} slices {t_lm:.2}s ({} improvements, least violated rows {}), leader {}, first {:?}, best {}",
+            wins[0],
+            wins[1],
+            lm.as_ref().map_or(usize::MAX, |l| l.res.least_viol),
+            ["none", "FJ", "Local-MIP"][leader as usize],
+            first.map(|(t, w)| (format!("{t:.2}s"), ["none", "FJ", "Local-MIP"][w as usize])),
+            best.as_ref().map_or("none".to_string(), |b| format!("{:.6e}", b.0))
+        );
+    }
+    best.map(|b| b.1)
+}
