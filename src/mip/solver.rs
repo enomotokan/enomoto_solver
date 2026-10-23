@@ -3324,11 +3324,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // `ENOMOTO_MIP_LB2` / `ENOMOTO_MIP_PROX2` = root|1 (試作): 暫定解があれば根で繰り返しの Local Branching・
                 // 中心を移す Proximity Search ([`Self::local_branching2`]・[`Self::proximity2`])
-                if self.incumbent.is_some() && !self.params.submip {
+                // 再スタート前の根でだけ、暫定解と根の LP 値の差が相対 `ENOMOTO_T_MIP_HSUB_MIN_GAP` (0.01) を超えるときだけ
+                // (qnet1 は差 0.6% で、再スタートのたびに根で 5〜15 秒使い 3.6 秒 -> 49 秒になった)
+                let hs_gap = |s: &Self, lb: f64| s.incumbent.as_ref().is_some_and(|(z, _)| (z - lb) / z.abs().max(1.0) > tunable!("ENOMOTO_T_MIP_HSUB_MIN_GAP", 0.01, f64));
+                if hs_gap(self, root_obj) && !self.params.submip && self.params.restarts == 0 {
                     if hsub_mode(env_str!("ENOMOTO_MIP_LB2")).0 {
                         heur!("local branching 2", self.local_branching2(root_obj, 1.0));
                     }
-                    if hsub_mode(env_str!("ENOMOTO_MIP_PROX2")).0 {
+                    if hsub_mode(env_str!("ENOMOTO_MIP_PROX2")).0 && hs_gap(self, root_obj) {
                         heur!("proximity 2", self.proximity2(root_obj, 1.0));
                     }
                 }
@@ -4400,14 +4403,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     // `ENOMOTO_MIP_LB2` / `ENOMOTO_MIP_PROX2` = tree|1 (試作): 木の中で前に呼んだときより良い暫定解があれば、
                     // 繰り返しの Local Branching・中心を移す Proximity Search を呼ぶ (使う時間は経過時間の
-                    // `ENOMOTO_T_MIP_HSUB_TREE_FRAC` (0.3) 倍まで)
+                    // `ENOMOTO_T_MIP_HSUB_TREE_FRAC` (0.1) 倍まで。暫定解と下界の差が相対 `ENOMOTO_T_MIP_HSUB_MIN_GAP` を超えるときだけ)
                     let (lb2_tree, prox2_tree) = (hsub_mode(env_str!("ENOMOTO_MIP_LB2")).1, hsub_mode(env_str!("ENOMOTO_MIP_PROX2")).1);
                     if (lb2_tree || prox2_tree) && heur_ok && plunge_depth == 0 && !self.params.submip {
                         let zi = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
-                        let budget_ok = self.hsub_secs < tunable!("ENOMOTO_T_MIP_HSUB_TREE_FRAC", 0.3, f64) * self.start.elapsed().as_secs_f64();
-                        if zi < self.hsub_center_z - 1e-9 * zi.abs().max(1.0) && budget_ok {
+                        let budget_ok = self.hsub_secs < tunable!("ENOMOTO_T_MIP_HSUB_TREE_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64();
+                        let lb = self.queue.best_lower_bound().min(node_obj);
+                        let gap_ok = (zi - lb) / zi.abs().max(1.0) > tunable!("ENOMOTO_T_MIP_HSUB_MIN_GAP", 0.01, f64);
+                        if zi < self.hsub_center_z - 1e-9 * zi.abs().max(1.0) && budget_ok && gap_ok {
                             let t_h = Instant::now();
-                            let lb = self.queue.best_lower_bound().min(node_obj);
                             if lb2_tree {
                                 self.heur_label = "tree local branching 2";
                                 self.local_branching2(lb, 1.0);
