@@ -60,6 +60,45 @@ struct St<'a> {
     obj_cols: Vec<(usize, f64)>,
 }
 
+impl ChainView for St<'_> {
+    fn prob(&self) -> &MipProblem {
+        self.p
+    }
+    fn x(&self, j: usize) -> f64 {
+        self.x[j]
+    }
+    fn lo(&self, j: usize) -> f64 {
+        self.lo[j]
+    }
+    fn up(&self, j: usize) -> f64 {
+        self.up[j]
+    }
+    fn act(&self, r: usize) -> f64 {
+        self.act[r]
+    }
+    fn weight(&self, r: usize) -> f64 {
+        self.w[r]
+    }
+    fn viol_at(&self, r: usize, a: f64) -> f64 {
+        St::viol_at(self, r, a)
+    }
+    fn for_col(&self, j: usize, f: &mut dyn FnMut(usize, f64)) {
+        St::for_col(self, j, |r, b| f(r, b))
+    }
+    fn row(&self, r: usize) -> &[(usize, f64)] {
+        St::row(self, r)
+    }
+    fn tight_value(&self, i: usize, j: usize, a: f64) -> Option<f64> {
+        St::tight_value(self, i, j, a)
+    }
+    fn below(&mut self, k: usize) -> usize {
+        St::below(self, k)
+    }
+    fn magnitude(&self) -> bool {
+        false
+    }
+}
+
 impl St<'_> {
     #[inline]
     fn rand_u64(&mut self) -> u64 {
@@ -225,135 +264,9 @@ impl St<'_> {
         self.tabu[j][if d > 0.0 { 1 } else { 0 }] <= step
     }
 
-    /// 連鎖の手 (`ENOMOTO_MIP_LOCALMIP_CHAIN`、試作): 違反行 `i` の tight move から始め、その手で新たに悪くなった行 (等式を先に) を
-    /// 元に戻す手 (その行の 1 列の tight move か、その行の 0-1 列を集合分割の行の中で入れ替える 2 列の手) を次々に足す
-    /// (ejection chain)。途中で向きのスコアの合計が最良だった所までの手を返す。`set_of` は 0-1 列ごとの集合分割の行。
+    /// 連鎖の手 ([`chain_move`]) を、向きで数えるスコアで作る。
     fn chain_move(&mut self, i: usize, max_depth: usize, max_cand: usize, set_of: &[Vec<u32>]) -> Option<(f64, Vec<(usize, f64)>)> {
-        use std::collections::HashMap;
-        let p = self.p;
-        let mut newv: HashMap<usize, f64> = HashMap::new();
-        let mut dl: HashMap<usize, f64> = HashMap::new();
-        let mut moves: Vec<(usize, f64)> = Vec::new();
-        // 行 r の、手を全部当てた後の向きのスコアへの寄与
-        let contrib = |s: &St, r: usize, d: f64| -> f64 {
-            let before = s.viol_at(r, s.act[r]);
-            let after = s.viol_at(r, s.act[r] + d);
-            if after < before - 1e-12 { s.w[r] } else if after > before + 1e-12 { -s.w[r] } else { 0.0 }
-        };
-        // 列 k を v にしたときのスコアの変化 (今の連鎖に対して)
-        let gain = |s: &St, dl: &HashMap<usize, f64>, newv: &HashMap<usize, f64>, ks: &[(usize, f64)]| -> f64 {
-            let mut loc: HashMap<usize, f64> = HashMap::new();
-            for &(k, v) in ks {
-                let d = v - newv.get(&k).copied().unwrap_or(s.x[k]);
-                s.for_col(k, |r, b| *loc.entry(r).or_insert(0.0) += b * d);
-            }
-            let mut g = 0.0;
-            for (&r, &dd) in &loc {
-                let d0 = dl.get(&r).copied().unwrap_or(0.0);
-                g += contrib(s, r, d0 + dd) - contrib(s, r, d0);
-            }
-            g
-        };
-        let push = |s: &St, dl: &mut HashMap<usize, f64>, newv: &mut HashMap<usize, f64>, moves: &mut Vec<(usize, f64)>, k: usize, v: f64| {
-            let d = v - newv.get(&k).copied().unwrap_or(s.x[k]);
-            s.for_col(k, |r, b| *dl.entry(r).or_insert(0.0) += b * d);
-            newv.insert(k, v);
-            moves.push((k, v));
-        };
-        // 始めの手: 行 i の tight move の最良
-        let mut first: Option<(f64, usize, f64)> = None;
-        let len = self.row(i).len();
-        for t in 0..len.min(max_cand) {
-            let q = if len <= max_cand { t } else { self.below(len) };
-            let (j, a) = self.row(i)[q];
-            if let Some(v) = self.tight_value(i, j, a) {
-                let g = self.score(j, v - self.x[j]);
-                if first.is_none_or(|f| g > f.0) {
-                    first = Some((g, j, v));
-                }
-            }
-        }
-        let (mut score, j0, v0) = first?;
-        push(self, &mut dl, &mut newv, &mut moves, j0, v0);
-        let mut best = (score, moves.len());
-        let mut tried_rows: Vec<usize> = Vec::new();
-        for _ in 0..max_depth {
-            // 新たに悪くなった行 (等式を先、同じなら重みの大きい方)
-            let mut pick: Option<(bool, f64, usize, f64)> = None;
-            for (&r, &d) in &dl {
-                if r == p.m || tried_rows.contains(&r) {
-                    continue;
-                }
-                if self.viol_at(r, self.act[r] + d) > self.viol_at(r, self.act[r]) + 1e-12 {
-                    let eq = p.row_lo[r] == p.row_up[r];
-                    let key = (eq, self.w[r]);
-                    if pick.is_none_or(|pk| (key.0, key.1) > (pk.0, pk.1) || ((key.0, key.1) == (pk.0, pk.1) && r < pk.2)) {
-                        pick = Some((eq, self.w[r], r, d));
-                    }
-                }
-            }
-            let Some((_, _, r, d)) = pick else { break };
-            tried_rows.push(r);
-            let na = self.act[r] + d;
-            let (l, u) = (p.row_lo[r], p.row_up[r]);
-            let need_lo = l - na; // 左辺の変化の範囲 [need_lo, need_up]
-            let need_up = u - na;
-            let mut cands: Vec<Vec<(usize, f64)>> = Vec::new();
-            let rlen = p.rows[r].len();
-            for t in 0..rlen.min(max_cand) {
-                let q = if rlen <= max_cand { t } else { self.below(rlen) };
-                let (k, c) = p.rows[r][q];
-                if newv.contains_key(&k) || self.lo[k] == self.up[k] {
-                    continue;
-                }
-                let xk = self.x[k];
-                // 1 列の tight move
-                let target = if need_lo > 0.0 { need_lo } else { need_up };
-                let mut e = target / c;
-                if p.is_int[k] {
-                    e = if e > 0.0 { (e - 1e-9).ceil() } else { (e + 1e-9).floor() };
-                }
-                let vk = (xk + e).clamp(self.lo[k], self.up[k]);
-                if (vk - xk).abs() > 1e-12 {
-                    cands.push(vec![(k, vk)]);
-                }
-                // 入れ替え: k が 1 の 0-1 列なら、同じ集合分割の行の 0 の列 k2 を 1 にして、行 r の変化が範囲に入るもの
-                if xk == 1.0 && !set_of[k].is_empty() {
-                    for &sr in &set_of[k] {
-                        for &(k2, _) in &p.rows[sr as usize] {
-                            if k2 == k || self.x[k2] != 0.0 || self.up[k2] < 1.0 || newv.contains_key(&k2) {
-                                continue;
-                            }
-                            let c2 = p.rows[r].binary_search_by_key(&k2, |t| t.0).map(|ix| p.rows[r][ix].1).unwrap_or(0.0);
-                            let ch = c2 - c;
-                            if ch >= need_lo - 1e-9 && ch <= need_up + 1e-9 {
-                                cands.push(vec![(k, 0.0), (k2, 1.0)]);
-                            }
-                        }
-                    }
-                }
-            }
-            if cands.is_empty() {
-                break;
-            }
-            let mut bc: Option<(f64, usize)> = None;
-            for (ci, c) in cands.iter().enumerate() {
-                let g = gain(self, &dl, &newv, c);
-                if bc.is_none_or(|b| g > b.0) {
-                    bc = Some((g, ci));
-                }
-            }
-            let (g, ci) = bc.unwrap();
-            for &(k, v) in &cands[ci] {
-                push(self, &mut dl, &mut newv, &mut moves, k, v);
-            }
-            score += g;
-            if score > best.0 {
-                best = (score, moves.len());
-            }
-        }
-        moves.truncate(best.1);
-        (best.0 > 0.0).then_some((best.0, moves))
+        chain_move(self, i, max_depth, max_cand, set_of).map(|(sc, mv, _)| (sc, mv))
     }
 
     /// lift move の掃引: 費用のある列を乱数の順に見て、全部の行を満たしたまま目的が良くなる幅の端まで動かす。動かした数を返す
@@ -439,20 +352,8 @@ pub(super) fn local_mip(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, s
     let chain = env_str!("ENOMOTO_MIP_LOCALMIP_CHAIN").is_some();
     let chain_depth = tunable!("ENOMOTO_T_MIP_LOCALMIP_CHAIN_DEPTH", 32usize, usize);
     let mut chain_tries = 0u64;
-    // 0-1 列ごとの集合分割の行 (係数が全部 1、= 1 か <= 1、0-1 列と 0 固定の列だけ)
     let set_of: Vec<Vec<u32>> = if chain {
-        let fb = |j: usize| p.is_int[j] && lo[j] <= 0.0 && up[j] >= 1.0 && lo[j] >= 0.0 && up[j] <= 1.0;
-        let mut so = vec![Vec::new(); n];
-        for i in 0..m {
-            if p.row_up[i] == 1.0 && p.rows[i].iter().all(|&(j, a)| a == 1.0 && (fb(j) || up[j] <= 0.0)) {
-                for &(j, _) in &p.rows[i] {
-                    if fb(j) {
-                        so[j].push(i as u32);
-                    }
-                }
-            }
-        }
-        so
+        set_rows(p, &s.lo, &s.up)
     } else {
         Vec::new()
     };
@@ -811,4 +712,185 @@ pub(super) fn sp_implied_bounds(p: &mut MipProblem) -> usize {
     p.col_lo = lo;
     p.col_up = up;
     k
+}
+
+/// 連鎖の手を作るのに要る探索の状態 (Local-MIP と FJ で共有する)。行の番号は問題の行 (`0..m`)、Local-MIP では `m` が目的の行。
+pub(super) trait ChainView {
+    fn prob(&self) -> &MipProblem;
+    fn x(&self, j: usize) -> f64;
+    fn lo(&self, j: usize) -> f64;
+    fn up(&self, j: usize) -> f64;
+    /// 行の左辺
+    fn act(&self, r: usize) -> f64;
+    fn weight(&self, r: usize) -> f64;
+    /// 左辺が `a` のときの行 `r` の違反量
+    fn viol_at(&self, r: usize, a: f64) -> f64;
+    /// 列 `j` の (行, 係数)
+    fn for_col(&self, j: usize, f: &mut dyn FnMut(usize, f64));
+    fn row(&self, r: usize) -> &[(usize, f64)];
+    /// 違反行 `i` の列 `j` (係数 `a`) をその行をちょうど満たす値へ動かす値
+    fn tight_value(&self, i: usize, j: usize, a: f64) -> Option<f64>;
+    fn below(&mut self, k: usize) -> usize;
+    /// スコアを違反量の重み付きの減りで数えるか (FJ)。偽なら向き (良くなれば +重み、悪くなれば -重み) で数える (Local-MIP)
+    fn magnitude(&self) -> bool;
+}
+
+/// 連鎖の手 (`ENOMOTO_MIP_LOCALMIP_CHAIN`・`ENOMOTO_MIP_FJ_CHAIN`、試作): 違反行 `i` の tight move から始め、その手で新たに
+/// 悪くなった行 (等式を先に、同じなら重みの大きい方) を元に戻す手 (その行の 1 列の tight move か、その行の 1 の 0-1 列を
+/// 集合分割の行の中の 0 の列と入れ替える 2 列の手) を次々に足す (ejection chain)。途中でスコアの合計が最良だった所までの
+/// 手を返す (正のときだけ)。`set_of` は 0-1 列ごとの集合分割 (パッキング) の行。3 つ目は評価で触った非零の数 (手間)。
+/// 30n20b8 では 1 列ずつの探索が抜けられない「0-1 の時刻の選択と時刻の整数列を結ぶ等式 + precedence」の鎖をこれで直せる
+pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: usize, max_cand: usize, set_of: &[Vec<u32>]) -> Option<(f64, Vec<(usize, f64)>, u64)> {
+    use std::collections::HashMap;
+    let m = v.prob().m;
+    let mag = v.magnitude();
+    let mut effort = 0u64;
+    let mut newv: HashMap<usize, f64> = HashMap::new();
+    let mut dl: HashMap<usize, f64> = HashMap::new();
+    let mut moves: Vec<(usize, f64)> = Vec::new();
+    // 行 r の、左辺の変化 d に対するスコアへの寄与
+    let contrib = |v: &V, r: usize, d: f64| -> f64 {
+        let before = v.viol_at(r, v.act(r));
+        let after = v.viol_at(r, v.act(r) + d);
+        if mag {
+            v.weight(r) * (before - after)
+        } else if after < before - 1e-12 {
+            v.weight(r)
+        } else if after > before + 1e-12 {
+            -v.weight(r)
+        } else {
+            0.0
+        }
+    };
+    // 手 ks を今の連鎖に足したときのスコアの変化
+    let gain = |v: &V, dl: &HashMap<usize, f64>, newv: &HashMap<usize, f64>, ks: &[(usize, f64)], effort: &mut u64| -> f64 {
+        let mut loc: HashMap<usize, f64> = HashMap::new();
+        for &(k, val) in ks {
+            let d = val - newv.get(&k).copied().unwrap_or(v.x(k));
+            v.for_col(k, &mut |r, b| *loc.entry(r).or_insert(0.0) += b * d);
+        }
+        *effort += loc.len() as u64;
+        let mut g = 0.0;
+        for (&r, &dd) in &loc {
+            let d0 = dl.get(&r).copied().unwrap_or(0.0);
+            g += contrib(v, r, d0 + dd) - contrib(v, r, d0);
+        }
+        g
+    };
+    let push = |v: &V, dl: &mut HashMap<usize, f64>, newv: &mut HashMap<usize, f64>, moves: &mut Vec<(usize, f64)>, k: usize, val: f64| {
+        let d = val - newv.get(&k).copied().unwrap_or(v.x(k));
+        v.for_col(k, &mut |r, b| *dl.entry(r).or_insert(0.0) += b * d);
+        newv.insert(k, val);
+        moves.push((k, val));
+    };
+    // 始めの手: 行 i の tight move の最良
+    let mut first: Option<(f64, usize, f64)> = None;
+    let len = v.row(i).len();
+    for t in 0..len.min(max_cand) {
+        let q = if len <= max_cand { t } else { v.below(len) };
+        let (j, a) = v.row(i)[q];
+        if let Some(val) = v.tight_value(i, j, a) {
+            let g = gain(v, &dl, &newv, &[(j, val)], &mut effort);
+            if first.is_none_or(|f| g > f.0) {
+                first = Some((g, j, val));
+            }
+        }
+    }
+    let (mut score, j0, v0) = first?;
+    push(v, &mut dl, &mut newv, &mut moves, j0, v0);
+    let mut best = (score, moves.len());
+    let mut tried_rows: Vec<usize> = Vec::new();
+    for _ in 0..max_depth {
+        let p = v.prob();
+        // 新たに悪くなった行
+        let mut pick: Option<(bool, f64, usize, f64)> = None;
+        for (&r, &d) in &dl {
+            if r >= m || tried_rows.contains(&r) {
+                continue;
+            }
+            if v.viol_at(r, v.act(r) + d) > v.viol_at(r, v.act(r)) + 1e-12 {
+                let eq = p.row_lo[r] == p.row_up[r];
+                let key = (eq, v.weight(r));
+                if pick.is_none_or(|pk| key > (pk.0, pk.1) || (key == (pk.0, pk.1) && r < pk.2)) {
+                    pick = Some((eq, v.weight(r), r, d));
+                }
+            }
+        }
+        let Some((_, _, r, d)) = pick else { break };
+        tried_rows.push(r);
+        let na = v.act(r) + d;
+        let (need_lo, need_up) = (p.row_lo[r] - na, p.row_up[r] - na); // 左辺の変化の範囲
+        let mut cands: Vec<Vec<(usize, f64)>> = Vec::new();
+        let rlen = p.rows[r].len();
+        for t in 0..rlen.min(max_cand) {
+            let q = if rlen <= max_cand { t } else { v.below(rlen) };
+            let p = v.prob();
+            let (k, c) = p.rows[r][q];
+            if newv.contains_key(&k) || v.lo(k) == v.up(k) {
+                continue;
+            }
+            let xk = v.x(k);
+            // 1 列の tight move
+            let target = if need_lo > 0.0 { need_lo } else { need_up };
+            let mut e = target / c;
+            if p.is_int[k] {
+                e = if e > 0.0 { (e - 1e-9).ceil() } else { (e + 1e-9).floor() };
+            }
+            let vk = (xk + e).clamp(v.lo(k), v.up(k));
+            if (vk - xk).abs() > 1e-12 {
+                cands.push(vec![(k, vk)]);
+            }
+            // 入れ替え: k が 1 の 0-1 列なら、同じ集合分割の行の 0 の列 k2 を 1 にして、行 r の変化が範囲に入るもの
+            if xk == 1.0 {
+                for &sr in &set_of[k] {
+                    for &(k2, _) in &p.rows[sr as usize] {
+                        if k2 == k || v.x(k2) != 0.0 || v.up(k2) < 1.0 || newv.contains_key(&k2) {
+                            continue;
+                        }
+                        let c2 = p.rows[r].binary_search_by_key(&k2, |t| t.0).map(|ix| p.rows[r][ix].1).unwrap_or(0.0);
+                        let ch = c2 - c;
+                        if ch >= need_lo - 1e-9 && ch <= need_up + 1e-9 {
+                            cands.push(vec![(k, 0.0), (k2, 1.0)]);
+                        }
+                    }
+                }
+            }
+        }
+        if cands.is_empty() {
+            break;
+        }
+        let mut bc: Option<(f64, usize)> = None;
+        for (ci, c) in cands.iter().enumerate() {
+            let g = gain(v, &dl, &newv, c, &mut effort);
+            if bc.is_none_or(|b| g > b.0) {
+                bc = Some((g, ci));
+            }
+        }
+        let (g, ci) = bc.unwrap();
+        for &(k, val) in &cands[ci] {
+            push(v, &mut dl, &mut newv, &mut moves, k, val);
+        }
+        score += g;
+        if score > best.0 {
+            best = (score, moves.len());
+        }
+    }
+    moves.truncate(best.1);
+    (best.0 > 1e-12).then_some((best.0, moves, effort))
+}
+
+/// 0-1 列ごとの集合分割 (パッキング) の行: 係数が全部 1、上限 1、0-1 列と 0 固定の列だけの行。
+pub(super) fn set_rows(p: &MipProblem, lo: &[f64], up: &[f64]) -> Vec<Vec<u32>> {
+    let fb = |j: usize| p.is_int[j] && lo[j] == 0.0 && up[j] == 1.0;
+    let mut so = vec![Vec::new(); p.n];
+    for i in 0..p.m {
+        if p.row_up[i] == 1.0 && p.rows[i].iter().all(|&(j, a)| a == 1.0 && (fb(j) || up[j] <= 0.0)) {
+            for &(j, _) in &p.rows[i] {
+                if fb(j) {
+                    so[j].push(i as u32);
+                }
+            }
+        }
+    }
+    so
 }

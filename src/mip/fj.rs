@@ -344,6 +344,9 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     }
     let x: Vec<f64> = (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect();
     let mut cons: Vec<Cons> = Vec::new();
+    // 問題の行 → FJ の行 (等式は 2 本)、FJ の行 → 問題の行 (連鎖の手で使う)
+    let mut row_cons: Vec<Vec<u32>> = vec![Vec::new(); p.m];
+    let mut cons_row: Vec<u32> = Vec::new();
     let mut vcols: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
     let mut nnz = 0u64;
     for i in 0..p.m {
@@ -367,6 +370,8 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
                 vcols[j as usize].push((ci, a));
             }
             nnz += row.len() as u64;
+            row_cons[i].push(ci);
+            cons_row.push(i as u32);
             cons.push(Cons { sense, rhs, coeffs: row.clone(), weight: 1.0, lhs: 0.0, viol_idx: -1 });
         }
     }
@@ -417,6 +422,12 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     let t0 = Instant::now();
     let mut why = "select";
     let mut steps = 0u64;
+    // `ENOMOTO_MIP_FJ_CHAIN` (試作): 局所最適 (良い変数がない) で、違反行から連鎖の手 ([`super::localmip::chain_move`]、
+    // スコアは FJ と同じ重み付きの違反量の減り) を試し、正なら当てる
+    let chain = env_str!("ENOMOTO_MIP_FJ_CHAIN").is_some();
+    let chain_depth = tunable!("ENOMOTO_T_MIP_LOCALMIP_CHAIN_DEPTH", 32usize, usize);
+    let set_of = if chain { super::localmip::set_rows(p, &s.lb, &s.ub) } else { Vec::new() };
+    let (mut chain_tries, mut chain_ok, mut chain_cols) = (0u64, 0u64, 0u64);
     loop {
         steps += 1;
         if s.violated.len() < best_viol {
@@ -448,6 +459,23 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             if Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
                 why = "time/stop";
                 break;
+            }
+        }
+        if chain && s.good.is_empty() && !s.violated.is_empty() {
+            let k = (s.next_u64() % s.violated.len() as u64) as usize;
+            let r = cons_row[s.violated[k] as usize] as usize;
+            chain_tries += 1;
+            let mut view = FjView { fj: &mut s, p, row_cons: &row_cons };
+            let res = super::localmip::chain_move(&mut view, r, chain_depth, 64, &set_of);
+            if let Some((_, mv, eff)) = res {
+                s.effort += eff;
+                chain_ok += 1;
+                chain_cols += mv.len() as u64;
+                for (k, val) in mv {
+                    s.moves[k].value = val;
+                    s.do_move(k);
+                }
+                continue;
             }
         }
         let v = s.select_variable();
@@ -487,7 +515,7 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     }
     if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
         eprintln!(
-            "MIP:   FJ2{repaired}: {} rows (as inequalities), {} nonzeros, {steps} steps, effort {} (max {max_total}), least violated rows {best_viol}, found {} (objective {best_obj:.6e}), stopped by {why}, {:.2}s",
+            "MIP:   FJ2{repaired}: {} rows (as inequalities), {} nonzeros, {steps} steps, effort {} (max {max_total}), least violated rows {best_viol}, found {} (objective {best_obj:.6e}), stopped by {why}, chain {chain_ok}/{chain_tries} ({chain_cols} columns), {:.2}s",
             s.cons.len(),
             nnz,
             s.effort,
@@ -553,4 +581,70 @@ fn lp_repair(p: &super::problem::MipProblem, lb: &[f64], ub: &[f64], x: &[f64]) 
         }
     }
     p.is_feasible(&out, 1e-6).then_some(out)
+}
+
+/// 連鎖の手 ([`super::localmip::chain_move`]) に FJ の状態を見せる。行は問題の行、左辺・重みは FJ の行 (等式は 2 本の重みの和) から取る。
+struct FjView<'a> {
+    fj: &'a mut Fj,
+    p: &'a super::problem::MipProblem,
+    row_cons: &'a [Vec<u32>],
+}
+
+impl super::localmip::ChainView for FjView<'_> {
+    fn prob(&self) -> &super::problem::MipProblem {
+        self.p
+    }
+    fn x(&self, j: usize) -> f64 {
+        self.fj.x[j]
+    }
+    fn lo(&self, j: usize) -> f64 {
+        self.fj.lb[j]
+    }
+    fn up(&self, j: usize) -> f64 {
+        self.fj.ub[j]
+    }
+    fn act(&self, r: usize) -> f64 {
+        self.row_cons[r].first().map_or(0.0, |&c| self.fj.cons[c as usize].lhs)
+    }
+    fn weight(&self, r: usize) -> f64 {
+        self.row_cons[r].iter().map(|&c| self.fj.cons[c as usize].weight).sum()
+    }
+    fn viol_at(&self, r: usize, a: f64) -> f64 {
+        if self.row_cons[r].is_empty() {
+            return 0.0;
+        }
+        let (l, u) = (self.p.row_lo[r], self.p.row_up[r]);
+        let v = (l - a).max(a - u).max(0.0);
+        if v > self.fj.viol_tol { v } else { 0.0 }
+    }
+    fn for_col(&self, j: usize, f: &mut dyn FnMut(usize, f64)) {
+        for &(r, b) in &self.p.cols[j] {
+            if b != 0.0 {
+                f(r, b);
+            }
+        }
+    }
+    fn row(&self, r: usize) -> &[(usize, f64)] {
+        &self.p.rows[r]
+    }
+    fn tight_value(&self, i: usize, j: usize, a: f64) -> Option<f64> {
+        if a == 0.0 {
+            return None;
+        }
+        let (l, u) = (self.p.row_lo[i], self.p.row_up[i]);
+        let act = self.act(i);
+        let target = if act > u { u } else if act < l { l } else { return None };
+        let mut d = (target - act) / a;
+        if self.fj.is_int[j] {
+            d = if d > 0.0 { (d - 1e-9).ceil() } else { (d + 1e-9).floor() };
+        }
+        let v = (self.fj.x[j] + d).clamp(self.fj.lb[j], self.fj.ub[j]);
+        (v.is_finite() && (v - self.fj.x[j]).abs() > 1e-12).then_some(v)
+    }
+    fn below(&mut self, k: usize) -> usize {
+        (self.fj.next_u64() % k.max(1) as u64) as usize
+    }
+    fn magnitude(&self) -> bool {
+        true
+    }
 }
