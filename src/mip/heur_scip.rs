@@ -556,8 +556,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
-    /// 木の中の FJ (`ENOMOTO_MIP_TREE_FJ`、試作): ノードの定義域の中で、LP 解 `x` を丸めた点から FJ を回す。
-    pub(super) fn tree_fj(&mut self, x: &[f64]) {
+    /// 木の中の FJ (`ENOMOTO_MIP_TREE_FJ`、試作)。`=1`: ノードの定義域 (伝播で締まったものを含む) の中で、LP 解 `x` を丸めた点から
+    /// FJ2 を 1 回。`=branch`: 根の FJ と同じ問題・境界・出発点 (下限側)・手順 ([`super::heuristics::fj_search`]: FJ2、旧来の局所探索、
+    /// 種を変えた FJ2) で、境界だけ根からこのノードまでの分枝 (`changes`) で締めて回す (時間の上限は根の FJ と同じ、時間上限の 5% か 5 秒)。
+    pub(super) fn tree_fj(&mut self, x: &[f64], changes: &[super::queue::BoundChange]) {
+        if env_str!("ENOMOTO_MIP_TREE_FJ") == Some("branch") {
+            return self.tree_fj_branch(changes);
+        }
         let t0 = std::time::Instant::now();
         let k = self.tree_fj_stats.0;
         self.tree_fj_next = self.nodes + tunable!("ENOMOTO_T_MIP_TREE_FJ_GAP", 50u64, u64) * (1u64 << k.min(10));
@@ -586,6 +591,65 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 "MIP: tree FJ #{k} at node {} (depth fixed {}): found {found}, least violated rows {}, kept {:?} ({secs:.2}s, {:.2}s)",
                 self.nodes,
                 (0..self.p.n).filter(|&j| self.p.is_int[j] && lo[j] == up[j]).count(),
+                if kmin == usize::MAX { -1 } else { kmin as i64 },
+                best.as_ref().map(|(k, v, _)| (*k, *v)),
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+        if !found && self.incumbent.is_none() {
+            if let Some((_, _, y)) = best {
+                self.spawn_fj_repair(y);
+            }
+        }
+    }
+
+    /// [`Self::tree_fj`] の `branch` の形。
+    fn tree_fj_branch(&mut self, changes: &[super::queue::BoundChange]) {
+        let t0 = std::time::Instant::now();
+        let k = self.tree_fj_stats.0;
+        self.tree_fj_next = self.nodes + tunable!("ENOMOTO_T_MIP_TREE_FJ_GAP", 50u64, u64) * (1u64 << k.min(10));
+        let (pc, mut lo, mut up) = match &self.orig {
+            Some(o) => ((**o).clone(), o.col_lo.clone(), o.col_up.clone()),
+            None => (self.p.clone(), self.dom.global_lo.clone(), self.dom.global_up.clone()),
+        };
+        for c in changes {
+            if c.col >= pc.n {
+                continue;
+            }
+            if c.upper {
+                up[c.col] = up[c.col].min(c.value);
+            } else {
+                lo[c.col] = lo[c.col].max(c.value);
+            }
+        }
+        let nbr = changes.iter().map(|c| c.col).collect::<std::collections::HashSet<_>>().len();
+        let cap = if self.params.time_limit.is_finite() { (0.05 * self.params.time_limit).min(5.0) } else { 5.0 };
+        let cap = tunable!("ENOMOTO_T_MIP_TREE_FJ_TIME", cap, f64);
+        let effort = (50 * pc.nnz as u64).clamp(100_000, 50_000_000);
+        let seed = self.rng ^ 0x2545_F491_4F6C_DD1D ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.rand();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        super::fj::take_best_inf();
+        let r = super::heuristics::fj_search(&pc, &lo, &up, effort, cap, seed, Some(&stop));
+        let (kmin, best) = super::fj::take_best_inf();
+        let found = match r {
+            Some(y) => {
+                self.heur_label = "tree FJ";
+                let ok = self.try_incumbent(y);
+                self.heur_label = "";
+                ok
+            }
+            None => false,
+        };
+        let secs = t0.elapsed().as_secs_f64();
+        self.tree_fj_stats.0 += 1;
+        self.tree_fj_stats.1 += found as u32;
+        self.tree_fj_stats.2 += secs;
+        if self.params.verbose || env_str!("ENOMOTO_MIP_FJ_STATS").is_some() {
+            eprintln!(
+                "MIP: tree FJ (branch) #{k} at node {} ({nbr} branched columns, {} changes): found {found}, least violated rows {}, kept {:?} ({secs:.2}s, {:.2}s)",
+                self.nodes,
+                changes.len(),
                 if kmin == usize::MAX { -1 } else { kmin as i64 },
                 best.as_ref().map(|(k, v, _)| (*k, *v)),
                 self.start.elapsed().as_secs_f64()

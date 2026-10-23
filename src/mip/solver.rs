@@ -4424,7 +4424,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // `ENOMOTO_T_MIP_TREE_FJ_GAP` (既定 50) × 2^(回数) ノード後。違反の行の少ない点で終われば FJ 修復
                     // ([`Solver::spawn_fj_repair`]、`ENOMOTO_MIP_FJ_REPAIR` のとき) に回す。木の写しの求解 (従のスレッド) では使わない
                     if heur_ok && self.incumbent.is_none() && node.depth > 0 && plunge_depth == 0 && self.snap.is_none() && !self.params.submip && self.nodes >= self.tree_fj_next && env_str!("ENOMOTO_MIP_TREE_FJ").is_some() {
-                        self.tree_fj(&x);
+                        self.tree_fj(&x, &node.changes);
                     }
                     // `ENOMOTO_MIP_NOINC_BUDGET`: 時間の割合を木の様子で変える。実行不能で刈れた葉の割合が低い
                     // (暫定解がないと限定操作で刈れず、木が進まない) ほど上限 (既定 0.6) に、高いほど下限 (既定 0.15) に寄せる。
