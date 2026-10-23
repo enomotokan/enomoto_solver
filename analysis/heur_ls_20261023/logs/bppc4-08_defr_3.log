@@ -1,0 +1,94 @@
+MIP: presolve: rows 111 -> 111, free columns 1455 -> 1455, nonzeros 23964 -> 23964, postsolve steps 0
+Root LP: the two-phase method finished first (0.05s)
+MIP: LP probing pass 1: 54 candidates, 0 fixings (10 LPs, 1102 iters, 0.17s)
+MIP: LP probing: tried 5 columns, fixed 0, LP 5.1590000000e1 -> 5.1590000000e1 (10 LPs, 1102 iters, 0.17s)
+MIP: probing: 944 of 1454 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 65987 implications (0.26s)
+MIP: probing: 0 equivalent binary pairs
+Presolve: 111 rows, 1455 columns -> 111 rows, 1455 columns (0.44s)
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (53268 edges, 0.01s)
+MIP: symmetry: none (0.01s)
+MIP: fixed-charge check: vb rows 0 of 111, continuous with vb 0 of 1
+Root LP: the two-phase method finished first (0.05s)
+Root LP: objective 5.1590000000e1 (0.05s)
+MIP: root LP 5.1590000000e1 (520 iters, 0.05s)
+MIP: fixed-charge check: vb rows 0 of 111, continuous with vb 0 of 1
+MIP: FJ problem (FJ_P3): rows 111 -> 111, free columns 1455 -> 1455, 1 continuous bounds tightened
+MIP: cut round 0: 5 cuts (of 1058, sep 0.34s, LP 50 iters), LP rows 116 (cut rows mean nnz 140), obj 5.1590000000e1 (0.40s)
+MIP: cut round 1: 5 cuts (of 996, sep 0.38s, LP 1 iters), LP rows 117 (cut rows mean nnz 188), obj 5.1590000000e1 (0.79s)
+MIP: cut round 2: 5 cuts (of 974, sep 0.40s, LP 1 iters), LP rows 117 (cut rows mean nnz 221), obj 5.1590000000e1 (1.19s)
+MIP: cut round 3: 7 cuts (of 1010, sep 0.40s, LP 1 iters), LP rows 119 (cut rows mean nnz 189), obj 5.1590000000e1 (1.60s)
+MIP: cut round 4: 8 cuts (of 928, sep 0.38s, LP 30 iters), LP rows 120 (cut rows mean nnz 192), obj 5.1590000000e1 (1.98s)
+MIP: clique graph: 53268 edges (53268 from rows, probing implications 65987)
+MIP: clique fallback: no violated clique cuts; not used (0.03s)
+Root cuts: objective 5.1590000000e1 -> 5.1590000000e1, 3 cuts in the LP (2.01s)
+MIP: cut loop done: 30 cuts added, 3 in LP, pool 919 cuts (479265 nonzeros), obj 5.1590000000e1 -> 5.1590000000e1
+MIP: fixed-integer LP dual check: c x 9.7000000000e1, dual bound 5.1590000000e1 -> solve
+MIP: fixed-integer LP improved incumbent 9.7000000000e1 -> 9.4000000000e1
+MIP:   global fixed integers 0 of 1454 (newly 0 since the root LP)
+MIP: new incumbent 9.4000000000e1 at node 0 (2.02s) [feasibility jump (parallel)]
+MIP: feasibility jump (parallel) found a solution (2.02s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: fixed-charge check: vb rows 0 of 111, continuous with vb 0 of 1
+MIP: root heuristic randomized rounding: none (0.02s)
+MIP: fixed-charge check: vb rows 0 of 111, continuous with vb 0 of 1
+MIP:   interior rounding: 1 interior points, vertex true (0.09s)
+MIP:   interior rounding: 4 rounded points tried, found false
+MIP: root heuristic interior rounding: none (0.12s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 0 of 1454 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   parallel sub-MIP started (RENS): 64 free columns of 1456
+MIP: root heuristic RENS: none (0.00s)
+MIP:   locks: fixing rate 0.13
+MIP: root heuristic locks: none (0.01s)
+MIP:   clique: fixing rate 1.00
+MIP:   parallel sub-MIP started (clique): 1 free columns of 1456
+MIP: root heuristic clique: none (0.01s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 500, objective Some(62.999999999999964), 0.90s
+MIP: fixed-integer LP dual check: c x 6.3000000000e1, dual bound 5.1590000000e1 -> solve
+MIP:   global fixed integers 0 of 1454 (newly 0 since the root LP)
+MIP: new incumbent 6.3000000000e1 at node 0 (3.07s) [RENS]
+MIP:   parallel sub-MIP (clique): status Optimal, nodes 0, objective Some(92.0), 0.89s
+MIP:   sub-MIP: 64 free columns of 1456, status NodeLimit, nodes 1719, objective Some(62.00000000000021)
+MIP: fixed-integer LP dual check: c x 6.2000000000e1, dual bound 5.1590000000e1 -> solve
+MIP:   global fixed integers 0 of 1454 (newly 0 since the root LP)
+MIP: new incumbent 6.2000000000e1 at node 0 (5.13s) [RENS (more nodes)]
+MIP: root heuristic RENS (more nodes): found (2.06s)
+MIP:   sub-MIP: 64 free columns of 1456, status NodeLimit, nodes 500, objective Some(78.99999999999983)
+MIP: root heuristic RINS: none (0.98s)
+MIP: after root heuristics: incumbent Some(62.00000000000021) (6.11s)
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (6.11s)
+MIP: background cuts: 7 rounds, obj 5.1590000000e1 not above 5.1590000000e1; not used (waited 0.00s)
+MIP: root objective probing: skipped (gap 1.679e-1 (LP 5.1590000000e1, incumbent 6.2000000000e1), 63 fractional binaries)
+     time      nodes      open        best bound         incumbent       gap
+     6.1s          1         0     5.159000000e1     6.200000000e1    16.79%
+MIP:     6.11s nodes        1 open       0 lb inf ub 6.20000000e1 lp_iters 605 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 76331 dive_iters 0 lp_rows 114 node_cut_secs 0.00
+MIP: 1 of 4 tree threads take the heuristic role once a solution exists
+MIP: tree search with 4 threads (7.42s)
+MIP: fixed-charge check: vb rows 0 of 111, continuous with vb 0 of 1
+MIP: fixed-charge check: vb rows 0 of 111, continuous with vb 0 of 1
+MIP: fixed-charge check: vb rows 0 of 111, continuous with vb 0 of 1
+     8.1s        277       270     5.159000000e1     6.200000000e1    16.79%
+MIP:     8.11s nodes      142 open     138 lb 5.15900000e1 ub 6.20000000e1 lp_iters 13279 sb_iters 9940 sb_lps 76 sb_secs 1.31 node_iters 1627 (first 1627, lps 141) heur_iters 78545 dive_iters 1107 lp_rows 112 node_cut_secs 0.00 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 51 free columns of 1456, status NodeLimit, nodes 152, objective Some(67.0)
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP:   sub-MIP: 1455 free columns of 1456, status TimeLimit, nodes 0, objective None
+MIP:   local branching k=18: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+    10.1s       1612      1605     5.159000000e1     6.200000000e1    16.79%
+MIP:    10.12s nodes      495 open     491 lb 5.15900000e1 ub 6.20000000e1 lp_iters 21060 sb_iters 9940 sb_lps 76 sb_secs 1.32 node_iters 9387 (first 9045, lps 499) heur_iters 88296 dive_iters 1128 lp_rows 122 node_cut_secs 0.07 pool_len 0 pool_idle 0
+HEURTRIG: tid 3 start: tree done 0.0000, predicted infs vs left 49.7s, cut fraction 0.000
+    12.7s       2342      2337     5.159000000e1     6.200000000e1    16.79%
+MIP:    12.71s nodes      728 open     724 lb 5.15900000e1 ub 6.20000000e1 lp_iters 41635 sb_iters 16644 sb_lps 186 sb_secs 2.01 node_iters 23195 (first 22515, lps 735) heur_iters 88422 dive_iters 1191 lp_rows 119 node_cut_secs 0.14 pool_len 403 pool_idle 1
+    14.7s       2484      2479     5.159000000e1     6.200000000e1    16.79%
+MIP:    14.72s nodes      834 open     830 lb 5.15900000e1 ub 6.20000000e1 lp_iters 57931 sb_iters 28213 sb_lps 392 sb_secs 3.40 node_iters 27922 (first 27132, lps 844) heur_iters 88422 dive_iters 1191 lp_rows 120 node_cut_secs 0.17 pool_len 403 pool_idle 1
+    16.7s       3099      3094     5.159000000e1     6.200000000e1    16.79%
+MIP:    16.73s nodes     1097 open    1000 lb 5.15900000e1 ub 6.20000000e1 lp_iters 72776 sb_iters 30067 sb_lps 418 sb_secs 3.59 node_iters 40913 (first 38913, lps 1113) heur_iters 88422 dive_iters 1191 lp_rows 138 node_cut_secs 0.30 pool_len 530 pool_idle 1
+MIP: fixed-integer LP dual check: c x 6.0000000000e1, dual bound 5.2193181818e1 -> solve
+MIP:   global fixed integers 0 of 1454 (newly 0 since the root LP)
+MIP: new incumbent 6.0000000000e1 at node 1393 (18.56s) [other thread: tree proximity]
+    18.7s       3870      3865     5.159000000e1     6.000000000e1    14.02%
+MIP:    18.73s nodes     1447 open    1000 lb 5.18366337e1 ub 6.00000000e1 lp_iters 84798 sb_iters 31506 sb_lps 448 sb_secs 3.81 node_iters 51496 (first 49344, lps 1466) heur_iters 88422 dive_iters 1191 lp_rows 120 node_cut_secs 0.36 pool_len 1091 pool_idle 1
