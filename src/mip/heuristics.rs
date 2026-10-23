@@ -2715,6 +2715,7 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
     use std::sync::atomic::Ordering;
     let t0 = Instant::now();
     let t_end = t0 + Duration::from_secs_f64(cap.max(0.0));
+    super::fj::SKIP_REPAIR_ON_STOP.with(|c| c.set(true));
     let slice = tunable!("ENOMOTO_T_MIP_FJ_MIX_SLICE", 0.2, f64).max(0.01);
     let lead = tunable!("ENOMOTO_T_MIP_FJ_MIX_LEAD", 0.75, f64).clamp(0.0, 1.0);
     let mut lm = super::localmip::LocalMip::new(p, lo, up, seed ^ 0x6A09_E667_F3BC_C909, true);
@@ -2780,5 +2781,6 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
             best.as_ref().map_or("none".to_string(), |b| format!("{:.6e}", b.0))
         );
     }
+    super::fj::SKIP_REPAIR_ON_STOP.with(|c| c.set(false));
     best.map(|b| b.1)
 }
