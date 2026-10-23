@@ -9953,6 +9953,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             (MipStatus::Infeasible, Some(_)) => MipStatus::Optimal,
             (s, _) => s,
         };
+        // 最後の守り (全ての終わり方): 共有の最良値が返す解より良ければ、その良い解が主に届いていない。木や根はその値で刈って
+        // いるので、返す解を最適とは言えない (木の探索の終わりの確かめを通らない根で終わる道筋で、h80x6320d が 6387.76 (正しくは
+        // 6382.10) を最適と報告した。analysis/heur_ls_20261023.md 追記 5)。共有の最良値より良い解はないことは示せているので、
+        // 下界はその値にする。`ENOMOTO_MIP_NO_FINAL_SHARED_CHECK` で使わない (診断用)
+        let (status, best_bound) = match (status, objective, self.shared.as_ref().map(|s| s.best())) {
+            (MipStatus::Optimal, Some(z), Some(sb)) if sb < z - 1e-9 * z.abs().max(1.0) && self.snap.is_none() && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() => {
+                eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the returned solution {z:.10e} at the end; not reporting optimality");
+                (MipStatus::NotSolved, sb)
+            }
+            (s, _, _) => (s, best_bound),
+        };
         MipResult { status, x, objective, best_bound, nodes: self.nodes + self.worker_totals.0, lp_iterations: self.lp.total_iterations() + self.worker_totals.1 }
     }
 }
