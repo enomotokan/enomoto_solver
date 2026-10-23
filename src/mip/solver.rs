@@ -2905,10 +2905,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.lmip_mailbox = Some(fjl_box.clone());
                 }
                 let t_start = self.start;
+                // `ENOMOTO_MIP_FJ_NOSOL_EXTEND` (試作): 解が出ない間は、FJ の時間の予算 (5%・5 秒まで) を過ぎても、根のカットのループの
+                // 終わり (止める合図) か `ENOMOTO_T_MIP_FJ_NOSOL_FRAC` (0.25) × 時間上限まで種を変えた FJ2 を続ける
+                let nosol_cap = if env_str!("ENOMOTO_MIP_FJ_NOSOL_EXTEND").is_some() && self.params.time_limit.is_finite() {
+                    tunable!("ENOMOTO_T_MIP_FJ_NOSOL_FRAC", 0.25, f64) * self.params.time_limit - self.start.elapsed().as_secs_f64()
+                } else {
+                    0.0
+                };
                 let h = std::thread::spawn(move || {
                     if lmip == 2 {
                         return None;
                     }
+                    super::heuristics::FJ_NOSOL_CAP.with(|c| c.set(nosol_cap.max(0.0)));
                     // Local-MIP に切り替える探索。`map` で解を `pc` の空間に戻して受け渡し箱に入れる
                     let fb_run = |q: &super::problem::MipProblem, lo: &[f64], up: &[f64], map: &dyn Fn(Vec<f64>) -> Vec<f64>| -> Option<Vec<f64>> {
                         let t = std::time::Instant::now();

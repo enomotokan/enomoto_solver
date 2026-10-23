@@ -33,6 +33,9 @@ pub fn compute_locks(p: &MipProblem) -> Vec<(u32, u32)> {
 thread_local! {
     /// このスレッドで解いているサブ MIP の入れ子の深さ (元の問題は 0。[`Solver::solve_submip_problem`] で 1 つ増やす)。
     pub(super) static SUBMIP_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// `ENOMOTO_MIP_FJ_NOSOL_EXTEND` (試作): 並列の FJ のスレッドで、解がまだ 1 つもなければ時間の予算を過ぎても種を変えた FJ2 を
+    /// この秒数 (FJ を始めてから) まで続ける (0 = 使わない)。止める合図 (根のカットのループの終わり) が来ればそこで止まる
+    pub(super) static FJ_NOSOL_CAP: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
@@ -1169,12 +1172,17 @@ pub(super) fn fj_search_fb(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, 
             let r = fj_search_old(p, lo, up, effort, 0.5 * left(time_cap), seed ^ 0x5851_F42D_4C95_7F2D, stop);
             best = better(&best, r);
         }
-        // 種を変えた FJ2 を時間の上限まで
+        // 種を変えた FJ2 を時間の上限まで (`FJ_NOSOL_CAP` があれば、解がない間はその秒数まで延ばす)
+        let ext = FJ_NOSOL_CAP.with(|c| c.get());
+        let cap_now = |b: &Option<Vec<f64>>| if b.is_none() && ext > time_cap { ext } else { time_cap };
         let mut k = 1u64;
-        while left(time_cap) > 0.05 && !stopped() && k < 64 {
-            let r = super::fj::fj2_search(p, lo, up, left(time_cap), seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15)), stop);
+        while left(cap_now(&best)) > 0.05 && !stopped() && k < if ext > 0.0 { 1024 } else { 64 } {
+            let r = super::fj::fj2_search(p, lo, up, left(cap_now(&best)), seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15)), stop);
             best = better(&best, r);
             k += 1;
+        }
+        if ext > 0.0 && env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
+            eprintln!("MIP:   FJ2 (no-solution extension to {ext:.1}s): {k} seeds, found {} ({:.2}s)", best.is_some(), t0.elapsed().as_secs_f64());
         }
         return best;
     }
@@ -2726,7 +2734,14 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
     let (mut n_fj, mut n_lm, mut wins) = (0u64, 0u64, [0u64; 2]);
     let mut k = 0u64;
     let mut first: Option<(f64, u8)> = None;
-    while Instant::now() < t_end && !stop.load(Ordering::Relaxed) {
+    // `FJ_NOSOL_CAP` があれば、解がない間はその秒数まで続ける
+    let ext = FJ_NOSOL_CAP.with(|c| c.get());
+    let t_ext = t0 + Duration::from_secs_f64(ext.max(cap.max(0.0)));
+    // `ENOMOTO_MIP_FJ_NOSOL_EXTEND=2`: 解があっても同じ秒数まで続ける (Local-MIP の改善を根のカットのループの終わりまで)
+    let ext_all = env_str!("ENOMOTO_MIP_FJ_NOSOL_EXTEND") == Some("2");
+    let end_now = |b: &Option<(f64, Vec<f64>)>| if b.is_none() || ext_all { t_ext } else { t_end };
+    while Instant::now() < end_now(&best) && !stop.load(Ordering::Relaxed) {
+        let t_end = end_now(&best);
         let lm_share = match leader {
             0 => 0.5,
             2 => lead,
