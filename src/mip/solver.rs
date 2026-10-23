@@ -459,6 +459,15 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 根のヒューリスティクスのうち暫定解があるときに呼んだものの (縮めたギャップの割合, 秒) (主解への寄与の事前の値)。
     root_mu_obs: Vec<(f64, f64)>,
     heur_role_stats: [u64; 3],
+    /// ヒューリスティクス役で ALNS と競わせる Local-MIP (`ENOMOTO_MIP_ROLE_LMIP`、試作)。役を離れても状態を持ち越す
+    role_lm: Option<super::localmip::LocalMip<'a>>,
+    /// Local-MIP を作れなかった・続けられない
+    role_lm_off: bool,
+    /// 腕 (0 = ALNS、1 = Local-MIP) ごとの使った秒と、暫定解を良くした回数
+    role_arm_t: [f64; 2],
+    role_arm_wins: [u64; 2],
+    /// 先導 (直近に暫定解を良くした腕): 0 = なし、1 = ALNS、2 = Local-MIP
+    role_leader: u8,
     /// 主: 従を始めた後、ノードを渡し始めるまで待つ期限 (待ち行列のノードが `ENOMOTO_T_MIP_TREE_START_NODES` 個たまるか、
     /// この時刻を過ぎたら渡し始める)。従は先に始めて準備 (写しからの LP・根の LP) を主の探索と並行させる。
     pool_hold: Option<Instant>,
@@ -1109,6 +1118,11 @@ fn cutpool_prop() -> bool {
     env_str!("ENOMOTO_MIP_CUTPOOL_PROP").is_some()
 }
 
+/// ヒューリスティクス役で ALNS と Local-MIP + 連鎖を競わせるか (`ENOMOTO_MIP_ROLE_LMIP`、試作)。
+fn role_lmip_on() -> bool {
+    env_str!("ENOMOTO_MIP_ROLE_LMIP").is_some()
+}
+
 fn heur_role_verbose() -> bool {
     env_str!("ENOMOTO_MIP_HEUR_ROLE_VERBOSE").is_some()
 }
@@ -1609,6 +1623,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         trig_eval_at: None,
         root_mu_obs: Vec::new(),
         heur_role_stats: [0; 3],
+        role_lm: None,
+        role_lm_off: false,
+        role_arm_t: [0.0; 2],
+        role_arm_wins: [0; 2],
+        role_leader: 0,
         pool_hold: None,
         seen_best: f64::INFINITY,
         pc_base: None,
@@ -5597,6 +5616,58 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 外れる)、共有の最良の解と木の探索のスレッドが渡したノードの LP 解から ALNS の大近傍探索を回し続ける。見つけた解は
     /// 通常どおり主に渡す ([`Self::try_incumbent`])。`ENOMOTO_T_MIP_HEUR_ROLE_PATIENCE` = P (既定 20、0 なら戻らない) 回続けて暫定解を良く
     /// できなければ木の探索に戻る (`None`)。木の探索が終わったら `Some(true)`、時間切れ・止める合図なら `Some(false)`。
+    /// ヒューリスティクス役の次の 1 回を Local-MIP にするか (`ENOMOTO_MIP_ROLE_LMIP`)。使った時間の割合で決める: どちらも暫定解を
+    /// 良くしていないうちは半々、良くした腕 (先導) に `ENOMOTO_T_MIP_ROLE_LMIP_LEAD` (0.75)、もう一方に残り。最初は ALNS
+    fn role_pick_lmip(&self) -> bool {
+        if !role_lmip_on() || self.role_lm_off {
+            return false;
+        }
+        let lead = tunable!("ENOMOTO_T_MIP_ROLE_LMIP_LEAD", 0.75, f64).clamp(0.0, 1.0);
+        let share = match self.role_leader {
+            0 => 0.5,
+            2 => lead,
+            _ => 1.0 - lead,
+        };
+        let [ta, tl] = self.role_arm_t;
+        tl < share * (ta + tl) - 1e-9
+    }
+
+    /// Local-MIP を `ENOMOTO_T_MIP_ROLE_LMIP_SLICE` (0.5) 秒だけ続きから回す。暫定解の方が良ければ先に渡して、そこから磨かせる。
+    /// 良い解が出れば暫定解にする
+    fn role_lmip_slice(&mut self) {
+        let p = self.p;
+        if self.role_lm.is_none() {
+            let seed = self.rng ^ 0x6A09_E667_F3BC_C909 ^ u64::from(self.pool_tid);
+            self.role_lm = super::localmip::LocalMip::new(p, &self.dom.global_lo, &self.dom.global_up, seed, true);
+            if self.role_lm.is_none() {
+                self.role_lm_off = true;
+                return;
+            }
+        }
+        if let Some((_, x)) = self.incumbent.clone() {
+            self.role_lm.as_mut().unwrap().inject(&x);
+        }
+        let slice = tunable!("ENOMOTO_T_MIP_ROLE_LMIP_SLICE", 0.5, f64).max(0.01);
+        let mut t_end = Instant::now() + Duration::from_secs_f64(slice);
+        if let Some(d) = self.deadline {
+            t_end = t_end.min(d);
+        }
+        let lm = self.role_lm.as_mut().unwrap();
+        lm.run(t_end, None, &|_| {});
+        if lm.done {
+            self.role_lm_off = true;
+        }
+        let cand = lm.res.best.clone();
+        if let Some(x) = cand {
+            let z = p.objective(&x);
+            if self.incumbent.as_ref().is_none_or(|(zi, _)| z < *zi - 1e-9 * zi.abs().max(1.0)) {
+                self.heur_label = "Local-MIP (heuristic role)";
+                self.try_incumbent(x);
+                self.heur_label = "";
+            }
+        }
+    }
+
     fn heur_role_run(&mut self) -> Option<bool> {
         use std::sync::atomic::Ordering;
         let pool = self.pool.clone()?;
@@ -5666,9 +5737,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let keep = self.submip_time_max;
             self.submip_time_max = keep.min(call_max);
             let t = Instant::now();
-            self.alns(&x);
+            // `ENOMOTO_MIP_ROLE_LMIP` (試作): ALNS と Local-MIP + 連鎖を競わせる ([`Self::role_pick_lmip`])
+            let use_lm = self.role_pick_lmip();
+            if use_lm {
+                self.role_lmip_slice();
+            } else {
+                self.alns(&x);
+            }
             self.submip_time_max = keep;
             let dt = t.elapsed().as_secs_f64();
+            if role_lmip_on() {
+                let arm = usize::from(use_lm);
+                self.role_arm_t[arm] += dt;
+                if self.incumbent.as_ref().is_some_and(|(z, _)| *z < z0) {
+                    self.role_arm_wins[arm] += 1;
+                    self.role_leader = arm as u8 + 1;
+                }
+            }
             if let Some(ev0) = &ev0 {
                 let z1 = self.incumbent.as_ref().map_or(z0, |(z, _)| *z);
                 self.mu_observe(ev0, z0, z1, dt);
@@ -5727,6 +5812,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.heur_role_stats[1],
                 self.heur_role_stats[2],
                 self.alns_count
+            );
+        }
+        if role_lmip_on() && (prof_tree_par() || heur_role_verbose() || env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some()) {
+            eprintln!(
+                "HEURROLE: tid {} ALNS {:.2}s ({} improvements) vs Local-MIP {:.2}s ({} improvements{}), leader {}",
+                self.pool_tid,
+                self.role_arm_t[0],
+                self.role_arm_wins[0],
+                self.role_arm_t[1],
+                self.role_arm_wins[1],
+                if self.role_lm_off { ", stopped" } else { "" },
+                ["none", "ALNS", "Local-MIP"][self.role_leader as usize]
             );
         }
         res
