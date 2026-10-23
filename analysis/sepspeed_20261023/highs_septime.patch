@@ -1,0 +1,121 @@
+diff --git a/highs/mip/HighsSeparation.cpp b/highs/mip/HighsSeparation.cpp
+index a2c144c..5ec42a1 100644
+--- a/highs/mip/HighsSeparation.cpp
++++ b/highs/mip/HighsSeparation.cpp
+@@ -1,3 +1,5 @@
++#include <cstring>
++#include <cstdio>
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -89,9 +91,11 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+     return numBoundChgs;
+   };
+ 
++  double hst_ = lp->getMipSolver().timer_.read();
++  double hst_impl = 0, hst_clq = 0, hst_prop = 0, hst_sep[3] = {0, 0, 0}, hst_pool = 0, hst_x;
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(implBoundClock);
+-  mipdata.implications.separateImpliedBounds(
++  if (!getenv("HIGHS_NO_IMPLB")) mipdata.implications.separateImpliedBounds(
+       *lp, lp->getSolution().col_value, mipworker_.getCutPool(),
+       mipdata.feastol, mipworker_.getGlobalDomain(),
+       mipdata.parallelLockActive());
+@@ -99,15 +103,17 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+     lp->getMipSolver().profiling_->stop(implBoundClock);
+ 
+   HighsInt ncuts = 0;
++  hst_x = lp->getMipSolver().timer_.read(); hst_impl = hst_x - hst_; hst_ = hst_x;
+   HighsInt numboundchgs = propagateAndResolve();
+   if (numboundchgs == -1)
+     return 0;
+   else
+     ncuts += numboundchgs;
+ 
++  hst_x = lp->getMipSolver().timer_.read(); hst_prop += hst_x - hst_; hst_ = hst_x;
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(cliqueClock);
+-  mipdata.cliquetable.separateCliques(
++  if (!getenv("HIGHS_NO_CLQ")) mipdata.cliquetable.separateCliques(
+       lp->getMipSolver(), sol.col_value, mipworker_.getCutPool(),
+       mipdata.feastol,
+       mipdata.parallelLockActive() ? mipworker_.randgen
+@@ -118,11 +124,14 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->stop(cliqueClock);
+ 
++  hst_x = lp->getMipSolver().timer_.read(); hst_clq = hst_x - hst_; hst_ = hst_x;
+   numboundchgs = propagateAndResolve();
+   if (numboundchgs == -1)
+     return 0;
+   else
+     ncuts += numboundchgs;
++  hst_x = lp->getMipSolver().timer_.read(); hst_prop += hst_x - hst_; hst_ = hst_x;
++  fprintf(stderr, "HPROP %d obj %.6f\n", (int)numboundchgs, lp->getObjective());
+ 
+   if (&propdomain != &mipworker_.getGlobalDomain())
+     lp->computeBasicDegenerateDuals(
+@@ -137,20 +146,31 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+   }
+   HighsLpAggregator lpAggregator(*lp);
+ 
++  static int roundNo = 0;
++  ++roundNo;
++  fprintf(stderr, "HSEP round %d obj %.6f", roundNo, lp->getObjective());
++  double hsep_t0 = lp->getMipSolver().timer_.read();
+   for (const std::unique_ptr<HighsSeparator>& separator : separators) {
++    HighsInt before = mipworker_.getCutPool().getNumCuts();
++    { const char* sk = getenv("HIGHS_SKIP_SEP"); int k = (int)(&separator - &separators[0]); if (sk && strchr(sk, '0' + k)) continue; }
++    { double t0_ = lp->getMipSolver().timer_.read();
+     separator->run(*lp, lpAggregator, transLp, mipworker_.getCutPool());
++    int k_ = (int)(&separator - &separators[0]); if (k_ < 3) hst_sep[k_] += lp->getMipSolver().timer_.read() - t0_; }
++    fprintf(stderr, " sep%d=%d", (int)(&separator - &separators[0]), (int)(mipworker_.getCutPool().getNumCuts() - before));
+     if (mipworker_.getGlobalDomain().infeasible()) {
+       status = HighsLpRelaxation::Status::kInfeasible;
+       return 0;
+     }
+   }
+ 
++  fprintf(stderr, " septime %.3f\n", lp->getMipSolver().timer_.read() - hsep_t0);
+   numboundchgs = propagateAndResolve();
+   if (numboundchgs == -1)
+     return 0;
+   else
+     ncuts += numboundchgs;
+ 
++  hst_ = lp->getMipSolver().timer_.read();
+   mipworker_.getCutPool().separate(sol.col_value, propdomain, cutset,
+                                    mipdata.feastol, mipdata.cutpools);
+   // Also separate the global cut pool
+@@ -159,10 +179,31 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+                                   mipdata.feastol, mipdata.cutpools, true);
+   }
+ 
++  hst_pool = lp->getMipSolver().timer_.read() - hst_;
++  if (!lp->getMipSolver().submip)
++    fprintf(stderr, "HSEPT impl %.4f clq %.4f prop %.4f tab %.4f path %.4f modk %.4f poolsel %.4f ncut %d\n", hst_impl, hst_clq, hst_prop, hst_sep[0], hst_sep[1], hst_sep[2], hst_pool, (int)cutset.numCuts());
+   if (cutset.numCuts() > 0) {
+     ncuts += cutset.numCuts();
++    {
++      static int addNo = 0; ++addNo;
++      const char* fn = getenv("HIGHS_ADD_DUMP");
++      if (fn && !lp->getMipSolver().submip && addNo <= 3) {
++        FILE* f = fopen(fn, addNo == 1 ? "w" : "a");
++        const auto& cs = cutset;
++        for (HighsInt c = 0; c < cs.numCuts(); ++c) {
++          fprintf(f, "A %d %.17g %d", addNo, cs.upper_[c], (int)(cs.ARstart_[c + 1] - cs.ARstart_[c]));
++          for (HighsInt k = cs.ARstart_[c]; k < cs.ARstart_[c + 1]; ++k) fprintf(f, " %d %.17g", (int)cs.ARindex_[k], cs.ARvalue_[k]);
++          fprintf(f, "\n");
++        }
++        fclose(f);
++      }
++    }
++    int64_t hadd_it0 = lp->getNumLpIterations();
++    double hadd_t0 = lp->getMipSolver().timer_.read();
++    HighsInt hadd_n = cutset.numCuts();
+     lp->addCuts(cutset);
+     status = lp->resolveLp(&propdomain);
++    fprintf(stderr, "HADD %d obj %.6f lprows %d iters %lld lptime %.3f\n", (int)hadd_n, lp->getObjective(), (int)lp->numRows(), (long long)(lp->getNumLpIterations() - hadd_it0), lp->getMipSolver().timer_.read() - hadd_t0);
+     lp->performAging(true);
+ 
+     // only for the master domain.

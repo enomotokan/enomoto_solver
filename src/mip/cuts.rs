@@ -113,15 +113,38 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
     let mut beta = rhs;
     // 整数変数の係数 (変数上下限の置き換えで増える分を含む)。base の順を保つ。
     let mut int_coef: Vec<(usize, f64)> = Vec::new();
-    // 列 → int_coef の位置 (同じ列が何度現れても線形時間で足し込む)
-    let mut int_pos: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-    let add_int = |k: usize, a: f64, int_coef: &mut Vec<(usize, f64)>, int_pos: &mut std::collections::HashMap<usize, usize>| match int_pos.get(&k) {
-        Some(&p) => int_coef[p].1 += a,
-        None => {
-            int_pos.insert(k, int_coef.len());
+    // 列 → int_coef の位置 + 1 (同じ列が何度現れても線形時間で足し込む)。スレッドごとの密な配列を使い回し、最後に 0 に戻す
+    // (以前は HashMap で、根の分離で generate_cuts の時間の 3 割がここだった)
+    SUBST_POS.with(|cell| {
+        let mut pos = cell.borrow_mut();
+        if pos.len() < vars.lo.len() {
+            pos.resize(vars.lo.len(), 0);
+        }
+        let r = substitute_with(vars, base, &mut terms, &mut beta, &mut int_coef, &mut pos);
+        for &(k, _) in &int_coef {
+            pos[k] = 0;
+        }
+        r
+    })?;
+    substitute_finish(vars, terms, beta, int_coef)
+}
+
+thread_local! {
+    static SUBST_POS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn substitute_with(vars: &CutVars, base: &[(usize, f64)], terms: &mut Vec<Term>, beta: &mut f64, int_coef: &mut Vec<(usize, f64)>, int_pos: &mut [u32]) -> Option<()> {
+    let add_int = |k: usize, a: f64, int_coef: &mut Vec<(usize, f64)>, int_pos: &mut [u32]| {
+        let p = int_pos[k];
+        if p > 0 {
+            int_coef[p as usize - 1].1 += a;
+        } else {
             int_coef.push((k, a));
+            int_pos[k] = int_coef.len() as u32;
         }
     };
+    let beta_ref = beta;
+    let mut beta = *beta_ref;
     for &(k, a) in base {
         if a.abs() < 1e-12 {
             continue;
@@ -132,7 +155,7 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
             continue;
         }
         if vars.is_int[k] {
-            add_int(k, a, &mut int_coef, &mut int_pos);
+            add_int(k, a, int_coef, int_pos);
             continue;
         }
         // 連続変数: 近い方の有限の境界 (単純な上下限) と、変数上下限の余裕を比べる
@@ -174,6 +197,7 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
             }
         }
         if !best.0.is_finite() {
+            *beta_ref = beta;
             return None;
         }
         match best.1 {
@@ -197,7 +221,7 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
             Sub::Vub(y, d, e) => {
                 // x = d y + e - s: a x = a d y + a e - a s
                 beta -= a * e;
-                add_int(y, a * d, &mut int_coef, &mut int_pos);
+                add_int(y, a * d, int_coef, int_pos);
                 if a < 0.0 {
                     continue; // s の係数 -a > 0: 捨てる
                 }
@@ -206,7 +230,7 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
             Sub::Vlb(y, d, e) => {
                 // x = d y + e + s: a x = a d y + a e + a s
                 beta -= a * e;
-                add_int(y, a * d, &mut int_coef, &mut int_pos);
+                add_int(y, a * d, int_coef, int_pos);
                 if a > 0.0 {
                     continue;
                 }
@@ -214,6 +238,11 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
             }
         }
     }
+    *beta_ref = beta;
+    Some(())
+}
+
+fn substitute_finish(vars: &CutVars, mut terms: Vec<Term>, mut beta: f64, int_coef: Vec<(usize, f64)>) -> Option<(Vec<Term>, f64)> {
     for (k, a) in int_coef {
         if a.abs() < 1e-12 {
             continue;
@@ -285,10 +314,174 @@ pub fn cmir(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
     cmir_terms(vars, terms, beta)
 }
 
+fn sep_fast() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_str!("ENOMOTO_MIP_SEP_FAST").is_some())
+}
+
+fn cmir_deltas_highs() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_str!("ENOMOTO_MIP_CMIR_DELTAS_HIGHS").is_some())
+}
+
+/// MIR の効き目を何度も測るための前計算 (`ENOMOTO_MIP_SEP_FAST`、HiGHS の `cmirCutGenerationHeuristic` と同じ形): 連続の項は
+/// δ によらず係数が一律に `1 / (δ (1 - f0))` 倍なので、活動量と 2 乗ノルムの和を先に取り、δ ごとには整数の項だけを回す。
+/// [`mir_efficacy`] と数式は同じ (足す順が違うので丸め誤差の範囲で値が違うことはある)
+struct MirEval {
+    /// 整数の項の (係数, LP 値)
+    int_terms: Vec<(f64, f64)>,
+    /// 項の番号 → int_terms の位置 (整数の項だけ)
+    pos: Vec<usize>,
+    cont_act: f64,
+    cont_sq: f64,
+}
+
+impl MirEval {
+    fn new(terms: &[Term]) -> Self {
+        let mut e = MirEval { int_terms: Vec::with_capacity(terms.len()), pos: vec![usize::MAX; terms.len()], cont_act: 0.0, cont_sq: 0.0 };
+        for (i, t) in terms.iter().enumerate() {
+            if t.int {
+                e.pos[i] = e.int_terms.len();
+                e.int_terms.push((t.a, t.yv));
+            } else {
+                e.cont_act += t.a * t.yv;
+                e.cont_sq += t.a * t.a;
+            }
+        }
+        e
+    }
+
+    fn efficacy(&self, beta: f64, delta: f64) -> Option<f64> {
+        let b = beta / delta;
+        let f0 = b - b.floor();
+        if !(MIN_FRAC..=1.0 - MIN_FRAC).contains(&f0) || b.abs() > MAX_SCALE {
+            return None;
+        }
+        let rb = b.floor();
+        let cs = 1.0 / (delta * (1.0 - f0));
+        let mut act = cs * self.cont_act;
+        let mut norm = cs * cs * self.cont_sq;
+        for &(a, yv) in &self.int_terms {
+            let at = a / delta;
+            let fj = at - at.floor();
+            let cj = at.floor() + (fj - f0).max(0.0) / (1.0 - f0);
+            act += cj * yv;
+            norm += cj * cj;
+        }
+        let viol = act - rb;
+        if viol <= 1e-6 || norm <= 0.0 {
+            return None;
+        }
+        Some(viol / norm.sqrt())
+    }
+}
+
+/// [`cmir_terms`] の速い版 (`ENOMOTO_MIP_SEP_FAST`): 効き目の評価に [`MirEval`] を使う。`ENOMOTO_MIP_CMIR_DELTAS_HIGHS` なら
+/// δ の候補の 1/2・1/4・1/8 は (全ての候補ではなく) 最良の δ についてだけ試す (HiGHS は最良の δ の 2・4・8 倍を試す)
+fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
+    let mut deltas: Vec<f64> = Vec::new();
+    for t in &terms {
+        if t.int && t.yv > 1e-6 && t.yv < t.yu - 1e-6 && t.a.abs() > 1e-6 {
+            let d = t.a.abs();
+            if !deltas.iter().any(|&e| (e - d).abs() <= 1e-9 * d) {
+                deltas.push(d);
+            }
+        }
+        if deltas.len() >= 8 {
+            break;
+        }
+    }
+    if deltas.is_empty() {
+        let m = terms.iter().filter(|t| t.int).map(|t| t.a.abs()).fold(0.0, f64::max);
+        if m > 0.0 {
+            deltas.push(m);
+        }
+    }
+    let highs = cmir_deltas_highs();
+    if !highs {
+        let base_deltas = deltas.clone();
+        for d in base_deltas {
+            for div in [2.0, 4.0, 8.0] {
+                deltas.push(d / div);
+            }
+        }
+    }
+    if cmir_delta1() && !deltas.iter().any(|&e| (e - 1.0).abs() <= 1e-9) {
+        deltas.push(1.0);
+    }
+    let mut ev = MirEval::new(&terms);
+    let mut best: Option<(f64, f64)> = None;
+    for &delta in &deltas {
+        if let Some(eff) = ev.efficacy(beta, delta) {
+            if best.is_none_or(|(_, e)| eff > e) {
+                best = Some((delta, eff));
+            }
+        }
+    }
+    if highs {
+        if let Some((d0, _)) = best {
+            for div in [2.0, 4.0, 8.0] {
+                if let Some(eff) = ev.efficacy(beta, d0 / div) {
+                    if best.is_none_or(|(_, e)| eff > e) {
+                        best = Some((d0 / div, eff));
+                    }
+                }
+            }
+        }
+    }
+    let (delta, mut eff) = best?;
+    // 補変数化の向きの反転 (cmir_build と同じ手順)
+    let mut terms = terms;
+    let mut beta = beta;
+    let mut flips_tried = 0;
+    for idx in 0..terms.len() {
+        let t = terms[idx];
+        if !t.int || !t.yu.is_finite() || t.yv <= 1e-6 {
+            continue;
+        }
+        flips_tried += 1;
+        if flips_tried > 50 {
+            break;
+        }
+        let mut t2 = t;
+        t2.a = -t.a;
+        t2.comp = !t.comp;
+        t2.yv = t.yu - t.yv;
+        let beta2 = beta - t.a * t.yu;
+        let p = ev.pos[idx];
+        let old = ev.int_terms[p];
+        ev.int_terms[p] = (t2.a, t2.yv);
+        match ev.efficacy(beta2, delta) {
+            Some(e) if e > eff + 1e-9 => {
+                eff = e;
+                beta = beta2;
+                terms[idx] = t2;
+            }
+            _ => ev.int_terms[p] = old,
+        }
+    }
+    let (ycoef, ybeta) = mir_coefs(&terms, beta, delta)?;
+    let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(terms.len());
+    let mut r = ybeta;
+    for (t, &c) in terms.iter().zip(&ycoef) {
+        if c == 0.0 {
+            continue;
+        }
+        r += unsubstitute(vars, t, c, &mut coefs);
+    }
+    if coefs.is_empty() {
+        return None;
+    }
+    Some(RawCut { coefs, rhs: r })
+}
+
 /// [`cmir`] の本体 (置き換え済みの項と右辺から)。
 fn cmir_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
     if !terms.iter().any(|t| t.int) {
         return None;
+    }
+    if sep_fast() || cmir_deltas_highs() {
+        return cmir_terms_fast(vars, terms, beta);
     }
     // 2. delta の候補: LP 値が境界の内側にある整数変数の係数
     let mut deltas: Vec<f64> = Vec::new();
@@ -406,10 +599,23 @@ fn mir_coefs(terms: &[Term], beta: f64, delta: f64) -> Option<(Vec<f64>, f64)> {
 
 /// MIR の効き目 (y 空間での違反量 / 係数のノルム)。違反しなければ `None`。
 fn mir_efficacy(terms: &[Term], beta: f64, delta: f64) -> Option<f64> {
-    let (c, rb) = mir_coefs(terms, beta, delta)?;
+    // mir_coefs と同じ計算を、係数の配列を作らずに行う (呼び出しが多いので。結果は同じ)
+    let b = beta / delta;
+    let f0 = b - b.floor();
+    if !(MIN_FRAC..=1.0 - MIN_FRAC).contains(&f0) || b.abs() > MAX_SCALE {
+        return None;
+    }
+    let rb = b.floor();
     let mut act = 0.0;
     let mut norm = 0.0;
-    for (t, &cj) in terms.iter().zip(&c) {
+    for t in terms {
+        let at = t.a / delta;
+        let cj = if t.int {
+            let fj = at - at.floor();
+            at.floor() + (fj - f0).max(0.0) / (1.0 - f0)
+        } else {
+            at / (1.0 - f0)
+        };
         act += cj * t.yv;
         norm += cj * cj;
     }
@@ -480,6 +686,62 @@ mod tests {
             let a: f64 = cut.coefs.iter().map(|&(k, c)| c * pt[k]).sum();
             assert!(a <= cut.rhs + 1e-9, "valid point {pt:?} cut off");
         }
+    }
+
+    /// `cmir_terms_fast` (`ENOMOTO_MIP_SEP_FAST`) が従来の `cmir_terms` と同じカットを作ることを乱数の行で確かめる
+    #[test]
+    fn cmir_fast_matches_old() {
+        let mut seed = 987654321u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (mut same, mut both_none) = (0, 0);
+        for _case in 0..5000 {
+            let n = 2 + (rnd() * 12.0) as usize;
+            let mut lo = vec![0.0; n];
+            let mut up = vec![0.0; n];
+            let mut is_int = vec![false; n];
+            let mut x = vec![0.0; n];
+            let mut base = Vec::new();
+            for k in 0..n {
+                is_int[k] = rnd() < 0.7;
+                up[k] = if is_int[k] { (1.0 + (rnd() * 5.0).floor()).max(1.0) } else { 1.0 + rnd() * 10.0 };
+                lo[k] = if rnd() < 0.3 { -(rnd() * 3.0).floor() } else { 0.0 };
+                x[k] = lo[k] + rnd() * (up[k] - lo[k]);
+                if rnd() < 0.2 {
+                    x[k] = if rnd() < 0.5 { lo[k] } else { up[k] };
+                }
+                let a = (rnd() * 20.0 - 10.0) * if rnd() < 0.5 { 1.0 } else { 0.37 };
+                base.push((k, a));
+            }
+            let act: f64 = base.iter().map(|&(k, a)| a * x[k]).sum();
+            let rhs = act - rnd() * 0.5;
+            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None };
+            let Some((terms, beta)) = substitute(&vars, &base, rhs) else { continue };
+            let old = cmir_terms(&vars, terms.clone(), beta);
+            let fast = if terms.iter().any(|t| t.int) { cmir_terms_fast(&vars, terms, beta) } else { None };
+            match (old, fast) {
+                (None, None) => both_none += 1,
+                (Some(o), Some(f)) => {
+                    // 効き目の同じ δ が複数あると丸め誤差でどちらを選ぶかが変わり、同じカットの定数倍になることがあるので、
+                    // 最大係数で割ってから比べる
+                    assert_eq!(o.coefs.len(), f.coefs.len());
+                    let so = o.coefs.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs()));
+                    let sf = f.coefs.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs()));
+                    for (p, q) in o.coefs.iter().zip(&f.coefs) {
+                        assert_eq!(p.0, q.0);
+                        assert!((p.1 / so - q.1 / sf).abs() <= 1e-9, "{:?} {:?}", o.coefs, f.coefs);
+                    }
+                    assert!((o.rhs / so - f.rhs / sf).abs() <= 1e-9 * (1.0 + (o.rhs / so).abs()));
+                    same += 1;
+                }
+                (o, f) => panic!("old {:?} fast {:?}", o.map(|c| c.coefs), f.map(|c| c.coefs)),
+            }
+        }
+        assert!(same > 500, "same {same} none {both_none}");
     }
 
     /// 乱数の単一行 (変数上限つきフロー・0-1 変数・有界な連続変数) で、lifted flow cover が全ての混合整数
@@ -707,6 +969,11 @@ fn is_binary(vars: &CutVars, k: usize) -> bool {
     vars.is_int[k] && vars.lo[k] == 0.0 && vars.up[k] == 1.0
 }
 
+thread_local! {
+    /// [`snf_relaxation`] の作業用の印 (列ごと。1: 行に現れる、2: 変数上限に使った 0-1 変数)。使った後は 0 に戻す
+    static SNF_MARK: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// 不等式 `sum a_k v_k <= rhs` を 0-1 単一節点フロー緩和 `sum_{N1} f - sum_{N2} f <= b`、`0 <= f_i <= u_i x_i` に
 /// 直す (SCIP `cuts.c` の `constructSNFRelaxation` の簡略版)。
 /// - 連続変数 x (係数 a) は、0-1 変数 y の変数上限 `x <= d y` (y がこの行に現れないもの) があり下限が 0 で、
@@ -715,11 +982,31 @@ fn is_binary(vars: &CutVars, k: usize) -> bool {
 ///   (0-1 変数は定数 1) の項にする。係数が正で上限が無限なら (外しても成り立つので) 下限に固定して外す。
 /// - 0-1 変数 y (変数上限に使われないもの) は `|a| y <= |a| y` の項にする。
 fn snf_relaxation(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<SnfItem>, f64)> {
+    // 以前は呼び出しごとに HashSet を 2 つ作っていた (根の分離で flow cover の時間の多くを占めた)。密な印に替えた (結果は同じ)
+    SNF_MARK.with(|cell| {
+        let mut mark = cell.borrow_mut();
+        if mark.len() < vars.lo.len() {
+            mark.resize(vars.lo.len(), 0);
+        }
+        for &(j, a) in base {
+            if a != 0.0 {
+                mark[j] |= 1;
+            }
+        }
+        let mut used: Vec<usize> = Vec::new();
+        let r = snf_relaxation_with(vars, base, rhs, &mut mark, &mut used);
+        for &(j, _) in base {
+            mark[j] = 0;
+        }
+        for &y in &used {
+            mark[y] = 0;
+        }
+        r
+    })
+}
+
+fn snf_relaxation_with(vars: &CutVars, base: &[(usize, f64)], rhs: f64, mark: &mut [u8], used: &mut Vec<usize>) -> Option<(Vec<SnfItem>, f64)> {
     let mut b = rhs;
-    // 行に現れる変数の係数
-    let row_set: std::collections::HashSet<usize> = base.iter().filter(|&&(_, a)| a != 0.0).map(|&(j, _)| j).collect();
-    let in_row = |k: usize| row_set.contains(&k);
-    let mut used_bin: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut items: Vec<SnfItem> = Vec::with_capacity(base.len());
     // 先に連続変数 (変数上限で 0-1 変数を使うかを決める)
     let mut pending_bin: Vec<(usize, f64)> = Vec::new();
@@ -744,7 +1031,7 @@ fn snf_relaxation(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Ve
                 if k < vb.vub.len() {
                     let simple_slack = if u.is_finite() { u - x } else { f64::INFINITY };
                     for &(y, d, e) in &vb.vub[k] {
-                        if e == 0.0 && d > 0.0 && is_binary(vars, y) && !in_row(y) && !used_bin.contains(&y) {
+                        if e == 0.0 && d > 0.0 && is_binary(vars, y) && mark[y] & 1 == 0 && mark[y] & 2 == 0 {
                             let slack = d * vars.x[y] - x;
                             if slack <= simple_slack && vub.is_none_or(|(y0, d0)| slack < d0 * vars.x[y0] - x) {
                                 vub = Some((y, d));
@@ -755,7 +1042,8 @@ fn snf_relaxation(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Ve
             }
         }
         if let Some((y, d)) = vub {
-            used_bin.insert(y);
+            mark[y] |= 2;
+            used.push(y);
             items.push(SnfItem { sign, u: a.abs() * d, bin: Some(y), xv: vars.x[y], flow: vec![(k, a.abs())], flow_const: 0.0 });
             continue;
         }
@@ -788,7 +1076,7 @@ fn snf_relaxation(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Ve
         }
     }
     for (k, a) in pending_bin {
-        if used_bin.contains(&k) {
+        if mark[k] & 2 != 0 {
             return None; // 行に現れる 0-1 変数は変数上限に使わないので来ないはず
         }
         let sign = if a > 0.0 { 1.0 } else { -1.0 };
@@ -1882,11 +2170,91 @@ mod lifted_cover_tests {
 /// 候補を全て返す (どれが一番強いかは呼び出し側が構造変数の式に直してから効き目で比べ、1 本だけ残す)。
 /// lifted cover は `ENOMOTO_MIP_LIFTED_COVER` のときだけ試す (40 問で入れると 18 -> 16 問 (sgeomean 28.34 -> 29.15)
 /// と悪化した: neos-860300・neos5・neos-911970 が遅くなる)。
+fn gen_fracskip() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_str!("ENOMOTO_MIP_GEN_FRACSKIP").is_some())
+}
+
+thread_local! {
+    /// 診断 (`ENOMOTO_MIP_DEBUG_SEPPROF`): generate_cuts の呼び出し数・入力の非零の合計・置き換えに通った数・生のカットの数と、
+    /// 段階ごとの時間 (置き換え, CMIR, extended cover, flow cover)
+    pub static GEN_PROF: std::cell::RefCell<([usize; 4], [f64; 4])> = const { std::cell::RefCell::new(([0; 4], [0.0; 4])) };
+}
+
 pub fn generate_cuts(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover: bool, ext_cover: bool) -> Vec<RawCut> {
+    if env_str!("ENOMOTO_MIP_DEBUG_SEPPROF").is_some() {
+        return generate_cuts_prof(vars, base, rhs, flow_cover, ext_cover);
+    }
+    generate_cuts_impl(vars, base, rhs, flow_cover, ext_cover, None)
+}
+
+fn generate_cuts_prof(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover: bool, ext_cover: bool) -> Vec<RawCut> {
+    let mut t = [0.0f64; 4];
+    let mut ok = false;
+    let out = generate_cuts_impl(vars, base, rhs, flow_cover, ext_cover, Some((&mut t, &mut ok)));
+    GEN_PROF.with(|g| {
+        let mut g = g.borrow_mut();
+        g.0[0] += 1;
+        g.0[1] += base.len();
+        g.0[2] += ok as usize;
+        g.0[3] += out.len();
+        for k in 0..4 {
+            g.1[k] += t[k];
+        }
+    });
+    out
+}
+
+fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover: bool, ext_cover: bool, mut prof: Option<(&mut [f64; 4], &mut bool)>) -> Vec<RawCut> {
     let mut out = Vec::new();
-    let Some((terms, beta)) = substitute(vars, base, rhs) else {
+    let mut lap = std::time::Instant::now();
+    let mut mark = |k: usize, prof: &mut Option<(&mut [f64; 4], &mut bool)>| {
+        if let Some((t, _)) = prof.as_mut() {
+            let now = std::time::Instant::now();
+            t[k] += (now - lap).as_secs_f64();
+            lap = now;
+        }
+    };
+    let sub = substitute(vars, base, rhs);
+    mark(0, &mut prof);
+    let Some((terms, beta)) = sub else {
         return out;
     };
+    if let Some((_, ok)) = prof.as_mut() {
+        **ok = true;
+    }
+    // `ENOMOTO_MIP_GEN_FRACSKIP` (試作): 置き換えた行の整数の項の LP 値がすべて整数なら、LP の点は (置き換えた) 1 行の混合整数集合に
+    // 入っているので、その集合で妥当な CMIR・cover は LP の点を切らない。作らずに飛ばす (flow cover は変数上下限の相手の 0-1 変数も
+    // 見る: base の整数列と、連続列の変数上下限の相手がすべて整数値なら飛ばす)
+    if gen_fracskip() {
+        let isfrac = |v: f64| (v - v.round()).abs() > 1e-9;
+        let frac_int = terms.iter().any(|t| t.int && isfrac(t.yv));
+        // 置き換えた行が箱 (0 <= y <= yu) の上で常に成り立つ (最大活動量 <= 右辺、HiGHS の `preprocessBaseInequality` と同じ判定) なら、
+        // 1 行の集合の凸包は箱そのものなので、CMIR・cover は LP の点を切らない (残った連続の項は係数が負で最大は 0)
+        let maxact: f64 = terms.iter().filter(|t| t.int && t.a > 0.0).map(|t| t.a * t.yu).sum();
+        let redundant = maxact <= beta + 1e-9 * (1.0 + beta.abs());
+        if !frac_int || redundant {
+            let has_cont = base.iter().any(|&(k, a)| a != 0.0 && !vars.is_int[k] && vars.lo[k] < vars.up[k]);
+            if !(has_cont && flow_cover) {
+                return out;
+            }
+            let fc_frac = base.iter().any(|&(k, a)| {
+                a != 0.0
+                    && if vars.is_int[k] {
+                        isfrac(vars.x[k])
+                    } else {
+                        vars.vb.is_some_and(|vb| k < vb.vub.len() && (vb.vub[k].iter().chain(vb.vlb[k].iter()).any(|&(y, _, _)| isfrac(vars.x[y]))))
+                    }
+            });
+            if !fc_frac {
+                return out;
+            }
+            mark(1, &mut prof);
+            out.extend(lifted_flow_cover(vars, base, rhs));
+            mark(3, &mut prof);
+            return out;
+        }
+    }
     let has_cont = base.iter().any(|&(k, a)| a != 0.0 && !vars.is_int[k] && vars.lo[k] < vars.up[k]);
     // `ENOMOTO_MIP_ROW_LIFTED_COVER`: 元の行 1 本ずつ (`ext_cover` の呼び出し) でだけ lifted cover も試す
     // (集約行・tableau 行では試さない。どれを残すかは呼び出し側がカットの質で決める)
@@ -1903,12 +2271,15 @@ pub fn generate_cuts(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover
     } else {
         out.extend(cmir_terms_multi(vars, terms, beta, tunable!("ENOMOTO_T_CMIR_K", 3usize, usize)));
     }
+    mark(1, &mut prof);
     if ext_cover && !has_cont {
         out.extend(extended_cover(vars, base, rhs));
     }
+    mark(2, &mut prof);
     if has_cont && flow_cover {
         out.extend(lifted_flow_cover(vars, base, rhs));
     }
+    mark(3, &mut prof);
     out
 }
 

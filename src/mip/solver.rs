@@ -189,6 +189,13 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 根の面の頂点の分離 (面の LP とその頂点での分離) に使った時間の合計と、使った面の頂点の数 (`ENOMOTO_MIP_DEBUG_FACETIME`)
     pub(super) face_secs: f64,
     pub(super) face_used: usize,
+    /// `ENOMOTO_MIP_FACE_ADAPT`: このカットのループでは面の頂点の分離をもうしない (面の LP が解けなかった)
+    pub(super) face_off_loop: bool,
+    /// `ENOMOTO_MIP_TAB_BUDGET`: tableau の分離の呼び出し回数と、試した行の数の累計 (HiGHS の `numTries`)
+    pub(super) tab_calls: u64,
+    pub(super) tab_tries: u64,
+    /// 直前のカットのラウンドの LP の時間 (秒、`ENOMOTO_MIP_FACE_ADAPT` で面の LP の時間の上限に使う。未知なら無限大)
+    pub(super) last_cut_lp_secs: f64,
     /// 再スタート前の暫定解 (`START_SOL`) を受け取っている間か ([`Self::try_incumbent`] の `ENOMOTO_MIP_RESTART_REF` の判定を飛ばす)
     accepting_start: bool,
     /// 並列の強分岐 (`ENOMOTO_MIP_PAR_SB`) の [まとめた回数, 並列に解いた候補の数]。
@@ -1451,6 +1458,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         fc_network: false,
         face_secs: 0.0,
         face_used: 0,
+        face_off_loop: false,
+        tab_calls: 0,
+        tab_tries: 0,
+        last_cut_lp_secs: f64::INFINITY,
         accepting_start: false,
         par_sb_stats: [0; 2],
         deadline,
