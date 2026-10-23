@@ -9885,6 +9885,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - dcd で速くなる: neos-911970 (26 → 13 秒、16 問 49 → 22 秒)、10teams (18 → 4 秒、DCb は newdef が時間切れ)、neos-2978193-inde を 1 回解く。遅くなる: mik-250 (5 → 10〜20 秒)、neos-960392・mc11・noswot・timtab1 などを落とす。roll3000 は変わらない (根の最初のループに暫定解がない)。
 - 不一致 0、"MIP: WARNING" 0。2 組とも 40 問で 1 問減り SGM も悪いので既定にしない。DCD の重みの尺度と、暫定解がない間の扱い (analysis/dircutoff_20261022.md の次の手) は未着手。
 
+## 2026-10-23: 根の分離が HiGHS の 5 倍重い原因の調査、結果を変えない高速化を既定に
+
+- 調査 (analysis/sepspeed_20261023.md、inv/sepspeed-20261023 e86dec6、診断 `ENOMOTO_MIP_DEBUG_SEPPROF`): 1 ラウンドの分離 (1 スレッド、ms) は roll3000 97 (経路集約 63・tableau 26。HiGHS 26〜33)、mzzv42z 447 (tableau 321・zerohalf 71。重いのはむしろ LP 430〜990 対 HiGHS 90〜210)、30n20b8 262 (密な tableau 行、HiGHS 80)、neos-911970 59 (面の LP 22・面の頂点の分離 19、HiGHS 6〜8)、physiciansched6-2 3.3 秒のうち面の LP 2.28 秒。
+- 重い理由: generate_cuts が 9 割の呼び出しでカットを作らないのに 1 回が重い (roll3000 で 5444 回/ラウンド・77 ms)。substitute の HashMap、mir_efficacy の δ ごとの Vec、CMIR の δ 最大 32 個を全項で評価 (HiGHS は連続項をまとめる)、snf_relaxation の HashSet。
+- 結果を変えない高速化 (密な配列、Vec をなくす。浮動小数の計算順も同じ、テスト 313 件) を既定に (beba3b8 のマージ): 分離は roll3000 97 → 60、mzzv42z 447 → 322〜355、30n20b8 262 → 180、neos-911970 59 → 43 ms。
+- 試作: `ENOMOTO_MIP_FACE_ADAPT` (面の LP に直前のカット LP の 2 倍の時間上限、解けなければそのループで面の分離をやめる。physiciansched6-2 の 1 ラウンド 3.1 → 1.2 秒、10teams の根のループ 6.3 → 1.2 秒)、`ENOMOTO_MIP_SEP_FAST` (CMIR の評価を HiGHS 形、カットは同じ)。`ENOMOTO_MIP_CMIR_DELTAS_HIGHS` は mc11 の根が下がるので不採用。SEP_FAST + FACE_ADAPT (sq) を 40 + 16 問の対で 2 組測る (inv/sq-a・sq-b-20261023)。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
