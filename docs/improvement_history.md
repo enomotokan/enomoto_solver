@@ -9989,3 +9989,17 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 不一致 0、"MIP: WARNING" 0。解けた数は合わせて 40 問で 1、16 問で 1 増える (lmc だけ解けた: noswot・beasleyC3・roll3000 (LMa)、nursesched-sprint02 (LMb)。newdef だけ解けた: neos-960392 (2 組とも))。
 - 30n20b8 は lmc で 2 組とも最初の暫定解 3.9〜4.6 秒・最終 302 (newdef は暫定解なし / 653)。neos-1456979 も 2.2〜2.5 秒で暫定解、最終 189・223 (newdef 222・228)。physiciansched6-2 は 50425 (newdef 51029・49624)、mzzv42z と timtab1 の最終は newdef より少し悪い。
 - SGM が 4 つの比べのうち 3 つで悪い (最大 +10%) ので既定にしない。別スレッドが木から CPU を取る分と考えられ、スレッド数・時間の制限 (Local-MIP の時間を短くする、暫定解が出たら止める) を足して測り直す候補。
+
+## 2026-10-23: 繰り返しの Local Branching + 中心を移す Proximity Search (lbp) は不採用
+
+- 5ce82be (develop e290e4c + heur-sub) で 40 + 16 問、newdef / lbp (`ENOMOTO_MIP_LB2=1 ENOMOTO_MIP_PROX2=1`) を順番を入れ替えて 2 組。
+
+| 組 | 集合 | newdef 解けた・SGM | lbp 解けた・SGM |
+|---|---|---|---|
+| LBa (newdef → lbp) | 40 問 | 26・20.02 | 24・22.54 |
+| LBa | 16 問 | 11・31.84 | 9・39.14 |
+| LBb (lbp → newdef) | 40 問 | 26・19.97 | 24・21.27 |
+| LBb | 16 問 | 10・37.04 | 10・38.22 |
+
+- 不一致 0、"MIP: WARNING" 0。解けた数が合わせて 40 問で 4、16 問で 2 減り、SGM も 4 つとも悪い。lbp で解けなくなった: noswot・eil33-2・neos-2978193-inde (2 組とも)、beasleyC3 (LBa)。lbp だけ解けた: neos-960392 (LBb)。
+- physiciansched6-2 は 50124・49625 (newdef 50826・51029)、30n20b8 は 402・553 (newdef 653・653) と良くなるが、根・木のサブ MIP が 30〜60 秒で解ける問題の時間を食う。
