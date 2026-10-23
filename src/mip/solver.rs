@@ -2307,7 +2307,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_SYM_LEX_CANON` (試作): lex-leader の行に反する解も生成元で写して使う。9946555 (対称性の検出の近道)
             // で neos-950242 に lex-leader の行 3-4 本が付くようになり、根の局所探索・FJ の解 (4、22 など) が並べ替えられずに
             // 捨てられていた (以前は対称性なしで 4 を見つけていた)
-            if !self.lex_gens.is_empty() && !self.p.is_feasible(&x, FEASTOL) && env_str!("ENOMOTO_MIP_SYM_LEX_CANON").is_some() {
+            // FJ と Local-MIP を混ぜる形 (`ENOMOTO_MIP_FJ_LMIP_MIX`) の解には既定で使う: Local-MIP は対称性の行のない問題で探すので、
+            // neos-950242 では最適解 4 が lex-leader の行に反して拒まれ 5〜8 で止まっていた (並べ替えると 3 回とも根で最適)
+            let lex_canon = env_str!("ENOMOTO_MIP_SYM_LEX_CANON").is_some() || (env_str!("ENOMOTO_MIP_FJ_LMIP_MIX").is_some() && self.heur_label == "Local-MIP");
+            if !self.lex_gens.is_empty() && !self.p.is_feasible(&x, FEASTOL) && lex_canon {
                 super::symmetry::lex_canonicalize(&self.lex_gens, &mut x, 4 * self.lex_gens.len() * 64 + 1000);
             }
             if !self.p.is_feasible(&x, FEASTOL) {
@@ -8945,15 +8948,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッドが終わっていれば結果を受け取る (待たない)。
     pub(super) fn poll_lmip_thread(&mut self) {
-        // 受け渡し箱には良くなった解を全部ためてあり、古い順に試す。最良の解が受け付けられなくても (対称性の行に反するなど。
-        // neos-950242 で最良の解だけを残していたときは全部失った)、前の解が暫定解になれる
+        // 受け渡し箱には良くなった解を全部ためてあり、新しい (良い) 順に試して、受け付けられたらそこで止める。最良の解が受け付け
+        // られなくても (対称性の行に反するなど。neos-950242 で最良の解だけを残していたときは全部失った)、前の解が暫定解になれる。
+        // 古い順に全部試すと、uccase12 では受け付けるたびの oneopt・連続列の解き直しに 1 回 1 秒かかり、根で 20 秒を失った
         let got: Vec<Vec<f64>> = self.lmip_mailbox.as_ref().map(|mb| std::mem::take(&mut *mb.lock().unwrap())).unwrap_or_default();
-        for x in got {
+        for x in got.into_iter().rev() {
             self.heur_label = "Local-MIP";
             let ok = self.try_incumbent(x);
             self.heur_label = "";
             if self.params.verbose || env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
                 eprintln!("MIP: Local-MIP solution accepted {ok} ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+            if ok {
+                break;
             }
         }
         if self.lmip_thread.as_ref().is_some_and(|(h, _)| h.is_finished()) {
