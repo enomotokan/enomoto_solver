@@ -8,13 +8,17 @@ for l in open(subf):
     if t and t[0].isdigit():
         for p in t[1:]:
             sub.setdefault(p, []).append(int(t[0]))
-cfgs, sets = ["newdef", "mix", "mixrole"], ["HLa", "HLb"]
+# 設定と組は引数 (既定は f970f87 の計測): agg_bench.py <dir> <subsets> [SHA 設定,設定 組,組]
+SHA = sys.argv[3] if len(sys.argv) > 3 else "f970f87"
+cfgs = sys.argv[4].split(",") if len(sys.argv) > 4 else ["newdef", "mix", "mixrole"]
+sets = sys.argv[5].split(",") if len(sys.argv) > 5 else ["HLa", "HLb"]
 R = collections.defaultdict(dict)  # (cfg, set) -> {(suite, p): ours}
 HI = {}
 for f in os.listdir(d):
     if not f.endswith(".json"): continue
     suite = "40" if f.startswith("miplib_results") else "16"
-    name = f.split("_f970f87_")[1][:-5]  # e.g. mix_s1_rHLa
+    if f"_{SHA}_" not in f: continue
+    name = f.split(f"_{SHA}_")[1][:-5]  # e.g. mix_s1_rHLa
     cfg, s, r = name.rsplit("_", 2)
     k = int(s[1:]); st = r[1:]
     for p, v in json.load(open(f"{d}/{f}")).items():
@@ -53,7 +57,7 @@ for st in sets:
         print(f"| {c} | {st} | {solved} | {t40:.2f} | {pg:.3f} | {fs:.2f} | {nosol} | {len(wrong)} {wrong if wrong else ''} |")
 # 問題ごと: 主ギャップが 2 組とも同じ向きに 0.01 以上変わった・解けた/解けないが変わった問題
 print("\n問題ごと (newdef と比べて 2 組とも同じ向き。主ギャップ差 >= 0.01、解けた数の差、時間 1.5 倍)")
-for c in ["mix", "mixrole"]:
+for c in cfgs[1:]:
     better, worse = [], []
     for k in keys:
         dg = [pgap(R[(c, s)][k]["objective"], ref[k]) - pgap(R[("newdef", s)][k]["objective"], ref[k]) for s in sets]
