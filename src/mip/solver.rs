@@ -343,7 +343,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 次に出すサブ MIP が根の RENS のものか (受け取ったときにノード上限で止まっていれば `rens_node_limited` を立てる)。
     pub(super) submip_is_rens: bool,
     /// 別スレッドの Feasibility Jump とその停止の印。
-    fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// 戻り値は (解, FJ の最良の点 ([`super::fj::take_best_inf`]、`ENOMOTO_MIP_FJ_REPAIR` / `ENOMOTO_MIP_FJ_STATS` のときだけ))。
+    fj_thread: Option<(std::thread::JoinHandle<(Option<Vec<f64>>, super::fj::BestInf)>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// FJ の最良の点から作ったサブ MIP を解く別スレッド ([`Solver::spawn_fj_repair`]、`ENOMOTO_MIP_FJ_REPAIR`)。戻り値は (解, ログ)
+    pub(super) fjr_thread: Option<std::thread::JoinHandle<(Option<Vec<f64>>, String)>>,
     /// 根のヒューリスティクスの最初に別スレッドで始めた局所探索 (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`。結果は元の位置で受け取る)。
     pub(super) ls_thread: Option<std::thread::JoinHandle<super::heuristics::LocalSearchResult>>,
     /// 根の解発見スレッド ([`find_thread_on`])。根のヒューリスティクスの後と木の各ノードで、終わっていれば受け取る
@@ -1535,6 +1538,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_fix_rate: None,
         submip_is_rens: false,
         fj_thread: None,
+        fjr_thread: None,
         ls_thread: None,
         find_thread: None,
         find_out: None,
@@ -2726,15 +2730,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_FJ_P3` (既定、`ENOMOTO_MIP_NO_FJ_P3` で止める): FJ だけ、p5s の前処理の変更をかけ直した問題で探す ([`super::fj_p3_problem`])
                 let fj_p3 = super::fj_p3_on();
                 let h = std::thread::spawn(move || {
+                    super::fj::take_best_inf();
                     if fj_p3 {
                         if let Some((q, post, sc)) = super::fj_p3_problem(&pc) {
                             crate::set_fj_p3_force(true);
                             let r = super::heuristics::fj_search(&q, &q.col_lo, &q.col_up, effort, cap, seed, Some(&stop2));
                             crate::set_fj_p3_force(false);
-                            return r.map(|x| super::fj_p3_solution(x, &post, &sc));
+                            let (k, b) = super::fj::take_best_inf();
+                            let b = b.map(|(nv, v, x)| (nv, v, super::fj_p3_solution(x, &post, &sc)));
+                            return (r.map(|x| super::fj_p3_solution(x, &post, &sc)), (k, b));
                         }
                     }
-                    super::heuristics::fj_search(&pc, &lo, &up, effort, cap, seed, Some(&stop2))
+                    let r = super::heuristics::fj_search(&pc, &lo, &up, effort, cap, seed, Some(&stop2));
+                    (r, super::fj::take_best_inf())
                 });
                 self.fj_thread = Some((h, stop));
             } else if !self.params.submip && !proof_only() && self.feasibility_jump(effort, cap) && self.params.verbose {
@@ -3219,6 +3227,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.parallel_submips = false;
                 self.join_submips(0);
                 self.poll_find_thread();
+                self.poll_fj_repair(false);
                 // 局所探索と Repair (暫定解がなければ)
                 if self.noinc_like() && env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() {
                     heur!("local search", self.local_search_heur());
@@ -3901,6 +3910,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.tprof.nodes += 1;
             if self.find_thread.is_some() {
                 self.poll_find_thread();
+            }
+            if self.fjr_thread.is_some() {
+                self.poll_fj_repair(false);
             }
             if prof_tree_par() {
                 self.tprof.lbs.push(node.lower_bound);
@@ -8685,18 +8697,55 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.fj_thread.as_ref().is_some_and(|(h, _)| h.is_finished()) && env_str!("ENOMOTO_MIP_NO_FJ2").is_none() {
             self.join_fj_thread();
         }
+        self.poll_fj_repair(false);
+    }
+
+    /// FJ の最良の点のサブ MIP ([`Solver::spawn_fj_repair`]) が終わっていれば (`wait` なら待って) 結果を受け取る。
+    pub(super) fn poll_fj_repair(&mut self, wait: bool) {
+        if !self.fjr_thread.as_ref().is_some_and(|h| wait || h.is_finished()) {
+            return;
+        }
+        let Some(h) = self.fjr_thread.take() else { return };
+        if let Ok((x, log)) = h.join() {
+            let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
+            let label = std::mem::replace(&mut self.heur_label, "FJ repair");
+            let acc = x.is_some_and(|x| self.try_incumbent(x));
+            self.heur_label = label;
+            if self.params.verbose || env_str!("ENOMOTO_MIP_FJ_STATS").is_some() {
+                eprintln!("MIP: FJ repair done: {log}, accepted {acc} (incumbent before {z0:?}) ({:.2}s, node {})", self.start.elapsed().as_secs_f64(), self.nodes);
+            }
+        }
     }
 
     /// 別スレッドの Feasibility Jump を止めて結果を受け取る。
     fn join_fj_thread(&mut self) {
         if let Some((h, stop)) = self.fj_thread.take() {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            if let Ok(Some(x)) = h.join() {
-                self.heur_label = "feasibility jump (parallel)";
-                let ok = self.try_incumbent(x);
-                self.heur_label = "";
-                if ok && self.params.verbose {
-                    eprintln!("MIP: feasibility jump (parallel) found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
+            if let Ok((x, (kmin, best))) = h.join() {
+                let found = x.is_some();
+                if let Some(x) = x {
+                    self.heur_label = "feasibility jump (parallel)";
+                    let ok = self.try_incumbent(x);
+                    self.heur_label = "";
+                    if ok && self.params.verbose {
+                        eprintln!("MIP: feasibility jump (parallel) found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
+                    }
+                }
+                if super::fj::fj_best_inf_on() {
+                    // 診断 (`ENOMOTO_MIP_FJ_STATS`): FJ の最良の点 (違反の行の数は FJ の数え方 (等式は 2 本) と、本体の問題の行で数え直したもの)
+                    let (pc, _, _) = self.fj_problem();
+                    let st = best.as_ref().map(|(_, _, x)| super::heur_scip::viol_stats(&pc, x));
+                    eprintln!(
+                        "MIP: FJ best point: found {found}, least violated rows {}, kept point {:?}, recount {:?}, incumbent {} ({:.2}s)",
+                        if kmin == usize::MAX { -1 } else { kmin as i64 },
+                        best.as_ref().map(|(k, v, _)| (*k, *v)),
+                        st,
+                        self.incumbent.is_some(),
+                        self.start.elapsed().as_secs_f64()
+                    );
+                    if let Some((_, _, x)) = best {
+                        self.spawn_fj_repair(x);
+                    }
                 }
             }
         }
