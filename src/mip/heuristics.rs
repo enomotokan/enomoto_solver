@@ -1594,7 +1594,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (再スタート後の根は暫定解を打ち切り値としてだけ持つので、打ち切り値が有限なら対象外)。
         // 40 問: 動くのは 30n20b8・flugpl・neos-1456979・timtab1 の 4 問。19 問 27.69 (無効なら 18 問 28.06)、
         // neos-1456979 は解なし -> 285、timtab1 は 1257510 -> 862380
-        if ((self.incumbent.is_none() && self.prune_limit().is_infinite()) || self.fj_poor()) && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
+        if ((self.incumbent.is_none() && self.prune_limit_ex(false).is_infinite()) || self.fj_poor()) && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
             // 根の 2 回目の呼び出し (カット前の LP 解) はダイビング式では同じ LP から始めるので、この形は 1 回だけ
             self.noinc_rens_done = true;
             let keep = (self.submip_time_frac, self.submip_time_max, self.submip_node_mult);
