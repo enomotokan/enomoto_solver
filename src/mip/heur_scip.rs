@@ -5,6 +5,21 @@ use super::domain::FEASTOL;
 use super::lp_api::MipLp;
 use super::solver::Solver;
 
+/// 点 `x` で違反している行 (相対 1e-6) の数と違反量の合計。
+pub(super) fn viol_stats(p: &super::problem::MipProblem, x: &[f64]) -> (usize, f64) {
+    let tol = |b: f64| 1e-6 * (1.0 + b.abs());
+    let (mut k, mut v) = (0usize, 0.0f64);
+    for i in 0..p.m {
+        let a: f64 = p.rows[i].iter().map(|&(j, c)| c * x[j]).sum();
+        let d = if a < p.row_lo[i] - tol(p.row_lo[i]) { p.row_lo[i] - a } else if a > p.row_up[i] + tol(p.row_up[i]) { a - p.row_up[i] } else { 0.0 };
+        if d > 0.0 {
+            k += 1;
+            v += d;
+        }
+    }
+    (k, v)
+}
+
 /// 解のプールに保つ解の数。
 const POOL_SIZE: usize = 10;
 
@@ -410,6 +425,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose && self.nodes <= 1 {
                     eprintln!("MIP:   local search (parallel): least violation {v:.3e}");
                 }
+                self.note_point(&x, "local search");
                 self.repair_start = Some(x);
             }
             return match feas {
@@ -429,6 +445,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.params.verbose && self.nodes <= 1 {
                 eprintln!("MIP:   local search: least violation {v:.3e}");
             }
+            self.note_point(&x, "local search");
             self.repair_start = Some(x);
         }
         match feas {
@@ -530,4 +547,223 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ints: Vec<usize> = (0..n).filter(|&j| p.is_int[j]).collect();
         self.fix_and_propagate(&x, &ints)
     }
+
+    /// FJ の問題 (別スレッドの FJ が探した問題: 対称性の行を加える前の問題があればそれ) とその列の境界。
+    pub(super) fn fj_problem(&self) -> (super::problem::MipProblem, Vec<f64>, Vec<f64>) {
+        match &self.orig {
+            Some(o) => ((**o).clone(), o.col_lo.clone(), o.col_up.clone()),
+            None => (self.p.clone(), self.dom.lo.clone(), self.dom.up.clone()),
+        }
+    }
+
+    /// 実行可能でない点 `x` を出どころ `src` の候補として [`Self::inf_pool`] に記録する (`ENOMOTO_MIP_FJ_REPAIR` / `ENOMOTO_MIP_FJ_STATS` のとき、
+    /// 外側の求解の根で暫定解がないときだけ)。出どころごとに違反の行の数 (同じなら違反量の合計) の最も少ない点を残す。
+    pub(super) fn note_point(&mut self, x: &[f64], src: &'static str) {
+        if self.params.submip || self.incumbent.is_some() || self.nodes > 1 || x.len() != self.p.n || !super::fj::fj_best_inf_on() {
+            return;
+        }
+        let src = if src.is_empty() { "other" } else { src };
+        let (k, v) = match &self.orig {
+            Some(o) => viol_stats(o, x),
+            None => viol_stats(self.p, x),
+        };
+        if k == 0 {
+            return;
+        }
+        match self.inf_pool.iter_mut().find(|e| e.0 == src) {
+            Some(e) => {
+                if (k, v) < (e.1, e.2) {
+                    *e = (src, k, v, x.to_vec(), false);
+                }
+            }
+            None => self.inf_pool.push((src, k, v, x.to_vec(), false)),
+        }
+    }
+
+    /// 根のヒューリスティクスの後で暫定解がなければ、[`Self::inf_pool`] のまだ使っていない点のうち違反の行の数が最も少ないものから
+    /// FJ 修復のサブ MIP ([`Self::spawn_fj_repair`]) を始める (前の修復が終わっていれば)。出どころごとの最良の点を出す (診断)。
+    pub(super) fn pool_repair(&mut self) {
+        if self.params.submip || !super::fj::fj_best_inf_on() {
+            return;
+        }
+        if self.params.verbose || env_str!("ENOMOTO_MIP_FJ_STATS").is_some() {
+            let s: Vec<String> = self.inf_pool.iter().map(|e| format!("{}: {} rows {:.3e}{}", e.0, e.1, e.2, if e.4 { " (used)" } else { "" })).collect();
+            eprintln!("MIP: infeasible point pool: incumbent {}, [{}] ({:.2}s)", self.incumbent.is_some(), s.join("; "), self.start.elapsed().as_secs_f64());
+        }
+        if self.incumbent.is_some() || self.fjr_thread.is_some() || env_str!("ENOMOTO_MIP_FJ_REPAIR").is_none() {
+            return;
+        }
+        let Some(k) = (0..self.inf_pool.len()).filter(|&k| !self.inf_pool[k].4).min_by(|&a, &b| (self.inf_pool[a].1, self.inf_pool[a].2).partial_cmp(&(self.inf_pool[b].1, self.inf_pool[b].2)).unwrap()) else { return };
+        self.inf_pool[k].4 = true;
+        let x = self.inf_pool[k].3.clone();
+        if self.params.verbose || env_str!("ENOMOTO_MIP_FJ_STATS").is_some() {
+            eprintln!("MIP: FJ repair from the pool point of {}", self.inf_pool[k].0);
+        }
+        self.spawn_fj_repair(x);
+    }
+
+    /// FJ 修復 (`ENOMOTO_MIP_FJ_REPAIR`、試作・既定では使わない): FJ の最良の点 `x` (違反の行の数が最も少ない点) で違反している行が
+    /// `ENOMOTO_T_MIP_FJ_REPAIR_MAXVIOL` 本以下なら、違反している行に現れる整数列と、それらの列と同じ行に現れる整数列 (1 段、
+    /// 短い行から `ENOMOTO_T_MIP_FJ_REPAIR_MAXFREE` 本まで) を自由にし、ほかの整数列を `x` の値に固定したサブ MIP を、元の目的関数・
+    /// 元の制約で別スレッドで解く ([`Self::poll_fj_repair`] で受け取る)。実行不能なら同じ固定で違反量の合計を最小にする
+    /// ([`Self::repair`] と同じ形)。違反が残れば、その点から段を 1 つ増やし自由にする列の上限を 2 倍にしてやり直す
+    /// (`ENOMOTO_T_MIP_FJ_REPAIR_ROUNDS` 回まで、既定 4)。根のカットは通常の求解と同じラウンド数 (`fc_submip` の設定、
+    /// `ENOMOTO_MIP_FJ_REPAIR_NOCUTS` でサブ MIP の既定)。暫定解があれば使わない (`ENOMOTO_MIP_FJ_REPAIR=2` なら暫定解を打ち切り値にして使う)。
+    pub(super) fn spawn_fj_repair(&mut self, x: Vec<f64>) {
+        let Some(mode) = env_str!("ENOMOTO_MIP_FJ_REPAIR") else { return };
+        if self.params.submip || self.fjr_thread.is_some() || (self.incumbent.is_some() && mode != "2") {
+            return;
+        }
+        let (pc, lo, up) = self.fj_problem();
+        let nviol = viol_stats(&pc, &x).0;
+        let maxviol = tunable!("ENOMOTO_T_MIP_FJ_REPAIR_MAXVIOL", 20usize, usize);
+        let verbose = self.params.verbose || env_str!("ENOMOTO_MIP_FJ_STATS").is_some();
+        if nviol > maxviol {
+            if verbose {
+                eprintln!("MIP: FJ repair: {nviol} violated rows > {maxviol}, not used");
+            }
+            return;
+        }
+        let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(std::time::Instant::now()).as_secs_f64());
+        let tl = (tunable!("ENOMOTO_T_MIP_FJ_REPAIR_TIME_FRAC", 0.25, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_FJ_REPAIR_TIME_MAX", 15.0, f64));
+        let cutoff = if self.incumbent.is_some() { self.prune_limit() } else { f64::INFINITY };
+        let params = super::solver::MipParams {
+            time_limit: tl,
+            node_limit: tunable!("ENOMOTO_T_MIP_FJ_REPAIR_NODES", 2000u64, u64),
+            rel_gap: self.params.rel_gap.max(1e-4),
+            abs_gap: self.params.abs_gap.max(1e-6),
+            verbose: self.params.verbose && env_str!("ENOMOTO_MIP_SUBMIP_VERBOSE").is_some(),
+            submip: true,
+            cutoff,
+            restarts: 0,
+            skip_heurs: 0,
+            threads: 1,
+            distinguish: false,
+            fc_submip: env_str!("ENOMOTO_MIP_FJ_REPAIR_NOCUTS").is_none(),
+        };
+        if verbose {
+            eprintln!("MIP: FJ repair started: {nviol} violated rows, time limit {tl:.1}s ({:.2}s)", self.start.elapsed().as_secs_f64());
+        }
+        let presolve = env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none();
+        let rounds = tunable!("ENOMOTO_T_MIP_FJ_REPAIR_ROUNDS", 4usize, usize).max(1);
+        let maxfree0 = tunable!("ENOMOTO_T_MIP_FJ_REPAIR_MAXFREE", 2000usize, usize);
+        let h = std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
+                let t0 = std::time::Instant::now();
+                let mut x = x;
+                let mut log = String::new();
+                for r in 0..rounds {
+                    let left = params.time_limit - t0.elapsed().as_secs_f64();
+                    if left <= 0.2 {
+                        break;
+                    }
+                    let Some((sub, vsub, info)) = fj_repair_problems(&pc, &lo, &up, &x, r + 1, maxfree0 << r) else {
+                        // 違反なし (丸めた点が実行可能)
+                        return (Some(x), log + "rounded point feasible");
+                    };
+                    log += &format!("[round {r}: {info}] ");
+                    let res = super::solve_problem(&sub, super::solver::MipParams { time_limit: left, ..params }, presolve);
+                    log += &format!("objective sub-MIP {:?} {:?} nodes {} ({:.2}s); ", res.status, res.objective, res.nodes, t0.elapsed().as_secs_f64());
+                    if res.x.is_some() || !cutoff.is_infinite() || res.status != super::solver::MipStatus::Infeasible {
+                        return (res.x, log);
+                    }
+                    let left = (params.time_limit - t0.elapsed().as_secs_f64()).max(0.2);
+                    let p2 = super::solver::MipParams { time_limit: left, rel_gap: 0.0, abs_gap: 1e-9, fc_submip: false, ..params };
+                    let r2 = super::solve_problem(&vsub, p2, presolve);
+                    let n = pc.n;
+                    let v = r2.x.as_ref().map(|xs| xs[n..].iter().sum::<f64>());
+                    log += &format!("violation sub-MIP {:?} remaining {v:?} ({:.2}s); ", r2.status, t0.elapsed().as_secs_f64());
+                    match r2.x {
+                        Some(xs) if v.is_some_and(|v| v <= 1e-9) => return (Some(xs[..n].to_vec()), log),
+                        Some(xs) => x = xs[..n].to_vec(),
+                        None => break,
+                    }
+                }
+                (None, log)
+            })
+            .expect("failed to spawn the FJ repair thread");
+        self.fjr_thread = Some(h);
+    }
+}
+
+/// FJ 修復の 1 回分のサブ MIP ([`Solver::spawn_fj_repair`]): 点 `x` で違反している行の整数列と、そこから `hops` 段までの行の整数列
+/// (段ごとに短い行から、合わせて `maxfree` 本まで) を自由にし、ほかの整数列を `x` に固定した (元の目的関数の問題, 違反量を最小にする問題, ログ)。
+/// 違反している行がなければ `None`。
+fn fj_repair_problems(pc: &super::problem::MipProblem, lo: &[f64], up: &[f64], x: &[f64], hops: usize, maxfree: usize) -> Option<(super::problem::MipProblem, super::problem::MipProblem, String)> {
+    let (n, m) = (pc.n, pc.m);
+    let tol = |b: f64| 1e-6 * (1.0 + b.abs());
+    let xr: Vec<f64> = (0..n).map(|j| if pc.is_int[j] { x[j].round().clamp(lo[j], up[j]) } else { x[j].clamp(lo[j], up[j]) }).collect();
+    let act: Vec<f64> = pc.rows.iter().map(|r| r.iter().map(|&(j, a)| a * xr[j]).sum()).collect();
+    let violated: Vec<bool> = (0..m).map(|i| act[i] < pc.row_lo[i] - tol(pc.row_lo[i]) || act[i] > pc.row_up[i] + tol(pc.row_up[i])).collect();
+    let nviol = violated.iter().filter(|&&v| v).count();
+    if nviol == 0 {
+        return None;
+    }
+    let nint = pc.is_int.iter().filter(|&&b| b).count();
+    let mut free = vec![false; n];
+    let mut used = violated.clone();
+    let mut nfree = 0usize;
+    for i in 0..m {
+        if violated[i] {
+            for &(j, _) in &pc.rows[i] {
+                if pc.is_int[j] && !free[j] {
+                    free[j] = true;
+                    nfree += 1;
+                }
+            }
+        }
+    }
+    let nfree0 = nfree;
+    'hops: for _ in 0..hops {
+        let core = free.clone();
+        let mut near: Vec<usize> = (0..m).filter(|&i| !used[i] && pc.rows[i].iter().any(|&(j, _)| core[j])).collect();
+        near.sort_by_key(|&i| pc.rows[i].len());
+        for i in near {
+            used[i] = true;
+            for &(j, _) in &pc.rows[i] {
+                if nfree >= nfree0.max(maxfree) {
+                    break 'hops;
+                }
+                if pc.is_int[j] && !free[j] {
+                    free[j] = true;
+                    nfree += 1;
+                }
+            }
+        }
+    }
+    let mut col_lo = lo.to_vec();
+    let mut col_up = up.to_vec();
+    for j in 0..n {
+        if pc.is_int[j] && !free[j] {
+            col_lo[j] = xr[j];
+            col_up[j] = xr[j];
+        }
+    }
+    // 違反量の最小化の問題 (違反している行にだけ違反量の列を足す。この固定のままで `x` が実行可能)
+    let mut rows = pc.rows.clone();
+    let (mut vlo, mut vup) = (col_lo.clone(), col_up.clone());
+    let mut cost = vec![0.0; n];
+    let mut is_int = pc.is_int.clone();
+    for (i, r) in rows.iter_mut().enumerate() {
+        if !violated[i] {
+            continue;
+        }
+        let scale = r.iter().fold(0.0f64, |mx, &(_, a)| mx.max(a.abs())).max(1e-9);
+        for (bound, sign) in [(pc.row_lo[i], 1.0), (pc.row_up[i], -1.0)] {
+            if bound.is_finite() {
+                r.push((vlo.len(), sign * scale));
+                vlo.push(0.0);
+                vup.push(f64::INFINITY);
+                cost.push(1.0);
+                is_int.push(false);
+            }
+        }
+    }
+    let vsub = super::problem::MipProblem::from_rows(vlo, vup, cost, 0.0, 1.0, is_int, rows, pc.row_lo.clone(), pc.row_up.clone());
+    let mut sub = pc.clone();
+    sub.col_lo = col_lo;
+    sub.col_up = col_up;
+    Some((sub, vsub, format!("{nviol} violated rows, free integer columns {nfree} of {nint} ({nfree0} in the violated rows)")))
 }
