@@ -72,3 +72,18 @@
   - graph20-20-1rand: mix・mixrole は最初の解が 1.6 秒・-8 (newdef 4.1 秒・-3)、最終値 -9 (newdef・HiGHS は -8)。
   - ran14x18-disj-8: mix・mixrole は 3736 (newdef 3748/3751)。rout: mix・mixrole は最初の解が早い (0.11〜0.14 秒、newdef 0.57〜0.81 秒)。
 - mixrole は mc11 の時間が 2 回とも newdef より遅い (53.8/56.2 秒、newdef 45 秒)。mix は 27/43 秒で揺れが大きい。
+
+## 追加計測: e88bf56 (mix の修正後)
+順番: mix2 HLc → newdef HLc → newdef HLd → mix2 HLd (mix2 = `ENOMOTO_MIP_FJ_LMIP_MIX=1`)。列は上と同じ。
+
+| 問題 | mix2 HLc | newdef HLc | newdef HLd | mix2 HLd |
+|---|---|---|---|---|
+| neos5 | 15 / 最初 0.057 秒 | 15 / 0.049 | 15 / 0.031 | 15 / 0.035 |
+| rout | optimal 10.65 秒 / 最初 0.139 秒 | optimal 11.62 / 0.821 | optimal 10.93 / 0.777 | optimal 10.23 / 0.157 |
+| 30n20b8 | 453 / 最初 9.50 秒 (453) | **解なし** | **解なし** | 302 / 最初 5.02 秒 (453) |
+| ran14x18-disj-8 | 3744 | 3748 | 3736 | 3744 |
+| graph20-20-1rand | -9 / 最初 1.99 秒 (-8) | -8 / 4.35 (-3) | -8 / 4.34 (-3) | -9 / 1.51 (-8) |
+| mc11 | optimal 44.86 秒 | optimal 44.25 | optimal 41.33 | optimal 53.04 |
+
+- 目的値の不一致・異常終了はなし。newdef は 30n20b8 で 2 回とも 60 秒で解なし。
+- 2 組とも同じ向き: 30n20b8 (mix2 だけが解を得る)、graph20-20-1rand (mix2 は -9、newdef は -8、最初の解も早い)、rout (mix2 は最初の解が 0.14〜0.16 秒、newdef は 0.78〜0.82 秒)。ran14x18-disj-8 の f970f87 での mix の利点 (3736) は今回は見えない (mix2 3744、newdef は 3748/3736)。
