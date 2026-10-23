@@ -8948,15 +8948,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッドが終わっていれば結果を受け取る (待たない)。
     pub(super) fn poll_lmip_thread(&mut self) {
-        // 受け渡し箱には良くなった解を全部ためてあり、古い順に試す。最良の解が受け付けられなくても (対称性の行に反するなど。
-        // neos-950242 で最良の解だけを残していたときは全部失った)、前の解が暫定解になれる
+        // 受け渡し箱には良くなった解を全部ためてあり、新しい (良い) 順に試して、受け付けられたらそこで止める。最良の解が受け付け
+        // られなくても (対称性の行に反するなど。neos-950242 で最良の解だけを残していたときは全部失った)、前の解が暫定解になれる。
+        // 古い順に全部試すと、uccase12 では受け付けるたびの oneopt・連続列の解き直しに 1 回 1 秒かかり、根で 20 秒を失った
         let got: Vec<Vec<f64>> = self.lmip_mailbox.as_ref().map(|mb| std::mem::take(&mut *mb.lock().unwrap())).unwrap_or_default();
-        for x in got {
+        for x in got.into_iter().rev() {
             self.heur_label = "Local-MIP";
             let ok = self.try_incumbent(x);
             self.heur_label = "";
             if self.params.verbose || env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
                 eprintln!("MIP: Local-MIP solution accepted {ok} ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+            if ok {
+                break;
             }
         }
         if self.lmip_thread.as_ref().is_some_and(|(h, _)| h.is_finished()) {
