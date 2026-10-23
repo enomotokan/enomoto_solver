@@ -113,6 +113,16 @@ pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize) -> Option<Symmetr
         return None;
     }
     let mut col: Vec<u64> = (0..n).map(|j| mix(mix(fbits(p.cost[j]), fbits(p.col_lo[j])), mix(fbits(p.col_up[j]), p.is_int[j] as u64))).collect();
+    // `ENOMOTO_MIP_SYM_SKIP_FIXED` (試作): 固定された列 (下限 = 上限) は 1 列ずつ別の色にして動かさない。前処理の後も固定列は
+    // 列として残り (timtab1 では 397 列のうち 196 列が固定・空)、互いに入れ替えられるので互換 194 個・lex-leader の行 170 本
+    // (どれも 0 >= 0) と 1x25 のオービトープが出ていた。意味のない対称性で、LP の行と対称性の処理を増やすだけ
+    if env_str!("ENOMOTO_MIP_SYM_SKIP_FIXED").is_some() {
+        for j in 0..n {
+            if p.col_lo[j] == p.col_up[j] {
+                col[j] = mix(col[j], mix(0x5EED_F1CE_D000_0000, j as u64));
+            }
+        }
+    }
     let mut row: Vec<u64> = (0..p.m).map(|i| mix(fbits(p.row_lo[i]), fbits(p.row_up[i]))).collect();
     refine(p, &mut col, &mut row, 50);
     // 同じ色の列の組 (2 列以上)
