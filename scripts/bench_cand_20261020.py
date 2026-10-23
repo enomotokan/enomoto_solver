@@ -19,7 +19,13 @@ name, run = sys.argv[1], sys.argv[2]
 env = dict(os.environ, **dict(a.split('=', 1) for a in sys.argv[3:]))
 logdir = REPO / 'benchmarks' / 'cand_logs'
 logdir.mkdir(parents=True, exist_ok=True)
+# `ENOMOTO_BENCH_ONLY="問題 問題 ..."`: その問題だけ解く (計測を問題ごとに分けて並列のセッションで回すとき)
+ONLY = os.environ.get('ENOMOTO_BENCH_ONLY', '').split()
 for suite, probs, base in (('40', PROBLEMS, 'miplib_results'), ('16', P16, 'highsonly16')):
+    if ONLY:
+        probs = [p for p in probs if p in ONLY]
+        if not probs:
+            continue
     out = REPO / 'benchmarks' / f'{base}_4t_60s_20261020_{SHA}_{name}_r{run}.json'
     if not out.exists():
         shutil.copy(REPO / 'benchmarks' / f'{base}_4t_60s_20261020_bc89ad1_highsgap0.json', out)
