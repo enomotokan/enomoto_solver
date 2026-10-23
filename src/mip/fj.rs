@@ -321,7 +321,7 @@ impl Fj {
 
 /// FJ の最良の点を残すか (`ENOMOTO_MIP_FJ_REPAIR` か診断用の `ENOMOTO_MIP_FJ_STATS`)。
 pub(super) fn fj_best_inf_on() -> bool {
-    env_str!("ENOMOTO_MIP_FJ_REPAIR").is_some() || env_str!("ENOMOTO_MIP_FJ_STATS").is_some()
+    env_str!("ENOMOTO_MIP_FJ_REPAIR").is_some() || env_str!("ENOMOTO_MIP_FJ_STATS").is_some() || env_str!("ENOMOTO_MIP_TREE_FJ").is_some()
 }
 
 /// FJ の点の記録の型: (違反の行の数の最小, 違反の行の数が最小の点 (違反の行の数・違反量の合計・点))。
@@ -341,6 +341,11 @@ pub(super) fn take_best_inf() -> BestInf {
 /// Feasibility Jump で実行可能な点を探す。`lo`/`up` は列の境界、`time_cap` は秒、`stop` が立ったら止める。
 /// 見つけた実行可能な点のうち目的値の最良のものを返す。
 pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64], time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
+    fj2_search_from(p, lo, up, None, time_cap, seed, stop)
+}
+
+/// [`fj2_search`] を点 `x0` (境界に収めて整数列は丸める) から始める (`None` なら下限に最も近い値から)。
+pub(super) fn fj2_search_from(p: &super::problem::MipProblem, lo: &[f64], up: &[f64], x0: Option<&[f64]>, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
     let n = p.n;
     if n == 0 {
         return None;
@@ -361,7 +366,14 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         lb[j] = l;
         ub[j] = u;
     }
-    let x: Vec<f64> = (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect();
+    let x: Vec<f64> = match x0 {
+        Some(x0) => (0..n).map(|j| {
+            let v = if p.is_int[j] { x0[j].round() } else { x0[j] };
+            let v = v.max(lb[j]).min(ub[j]);
+            if v.is_finite() { v } else if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }
+        }).collect(),
+        None => (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect(),
+    };
     let mut cons: Vec<Cons> = Vec::new();
     let mut vcols: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
     let mut nnz = 0u64;

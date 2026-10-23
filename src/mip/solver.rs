@@ -297,6 +297,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     noinc_stall: u32,
     noinc_best_close: f64,
     noinc_next_node: u64,
+    /// 木の中の FJ (`ENOMOTO_MIP_TREE_FJ`) を次に回すノード数と、回した回数・見つけた回数・使った秒
+    pub(super) tree_fj_next: u64,
+    pub(super) tree_fj_stats: (u32, u32, f64),
     /// サブ MIP の時間の上限 (残り時間に対する割合)。
     pub(super) submip_time_frac: f64,
     /// サブ MIP の時間の上限 (秒)。
@@ -1518,6 +1521,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         noinc_stall: 0,
         noinc_best_close: 0.0,
         noinc_next_node: 0,
+        tree_fj_next: 0,
+        tree_fj_stats: (0, 0, 0.0),
         submip_time_frac: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_FRAC", 0.07, f64),
         submip_time_max: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_MAX", 6.0, f64),
         noinc_rens_done: false,
@@ -4414,6 +4419,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 反復まで、根と同じく後戻りあり) を順に回す (RENS・pump は根だけで使っていたもの。深いノードでは固定が
                     // 進み部分問題が小さい)。
                     let noinc = heur_ok && self.incumbent.is_none() && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NOINC_HEUR").is_some();
+                    // `ENOMOTO_MIP_TREE_FJ` (試作、既定では使わない): 暫定解がない間、木のノード (潜りの途中でないもの) で、ノードの定義域の
+                    // 中で LP 解を丸めた点から FJ を回す (1 回 `ENOMOTO_T_MIP_TREE_FJ_TIME` 秒まで、既定 1)。見つからなければ次は
+                    // `ENOMOTO_T_MIP_TREE_FJ_GAP` (既定 50) × 2^(回数) ノード後。違反の行の少ない点で終われば FJ 修復
+                    // ([`Solver::spawn_fj_repair`]、`ENOMOTO_MIP_FJ_REPAIR` のとき) に回す。木の写しの求解 (従のスレッド) では使わない
+                    if heur_ok && self.incumbent.is_none() && node.depth > 0 && plunge_depth == 0 && self.snap.is_none() && !self.params.submip && self.nodes >= self.tree_fj_next && env_str!("ENOMOTO_MIP_TREE_FJ").is_some() {
+                        self.tree_fj(&x);
+                    }
                     // `ENOMOTO_MIP_NOINC_BUDGET`: 時間の割合を木の様子で変える。実行不能で刈れた葉の割合が低い
                     // (暫定解がないと限定操作で刈れず、木が進まない) ほど上限 (既定 0.6) に、高いほど下限 (既定 0.15) に寄せる。
                     // さらに近さ ([`Solver::heur_close`]) の最大値が更新されない回が続くと、呼ぶ間隔を倍々にする (最大 64 ノード)

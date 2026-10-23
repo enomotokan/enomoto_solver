@@ -556,6 +556,48 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 木の中の FJ (`ENOMOTO_MIP_TREE_FJ`、試作): ノードの定義域の中で、LP 解 `x` を丸めた点から FJ を回す。
+    pub(super) fn tree_fj(&mut self, x: &[f64]) {
+        let t0 = std::time::Instant::now();
+        let k = self.tree_fj_stats.0;
+        self.tree_fj_next = self.nodes + tunable!("ENOMOTO_T_MIP_TREE_FJ_GAP", 50u64, u64) * (1u64 << k.min(10));
+        let cap = tunable!("ENOMOTO_T_MIP_TREE_FJ_TIME", 1.0, f64);
+        let seed = self.rng ^ 0x2545_F491_4F6C_DD1D ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.rand();
+        let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
+        super::fj::take_best_inf();
+        let r = super::fj::fj2_search_from(self.p, &lo, &up, Some(x), cap, seed, None);
+        let (kmin, best) = super::fj::take_best_inf();
+        let found = match r {
+            Some(y) => {
+                self.heur_label = "tree FJ";
+                let ok = self.try_incumbent(y);
+                self.heur_label = "";
+                ok
+            }
+            None => false,
+        };
+        let secs = t0.elapsed().as_secs_f64();
+        self.tree_fj_stats.0 += 1;
+        self.tree_fj_stats.1 += found as u32;
+        self.tree_fj_stats.2 += secs;
+        if self.params.verbose || env_str!("ENOMOTO_MIP_FJ_STATS").is_some() {
+            eprintln!(
+                "MIP: tree FJ #{k} at node {} (depth fixed {}): found {found}, least violated rows {}, kept {:?} ({secs:.2}s, {:.2}s)",
+                self.nodes,
+                (0..self.p.n).filter(|&j| self.p.is_int[j] && lo[j] == up[j]).count(),
+                if kmin == usize::MAX { -1 } else { kmin as i64 },
+                best.as_ref().map(|(k, v, _)| (*k, *v)),
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+        if !found && self.incumbent.is_none() {
+            if let Some((_, _, y)) = best {
+                self.spawn_fj_repair(y);
+            }
+        }
+    }
+
     /// 実行可能でない点 `x` を出どころ `src` の候補として [`Self::inf_pool`] に記録する (`ENOMOTO_MIP_FJ_REPAIR` / `ENOMOTO_MIP_FJ_STATS` のとき、
     /// 外側の求解の根で暫定解がないときだけ)。出どころごとに違反の行の数 (同じなら違反量の合計) の最も少ない点を残す。
     pub(super) fn note_point(&mut self, x: &[f64], src: &'static str) {
