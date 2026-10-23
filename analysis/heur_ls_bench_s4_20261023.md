@@ -112,3 +112,32 @@ HiGHS (参考): bppc4-08 は 60 秒で 53 (時間切れ)、mzzv42z は最適 -20
 - **neos-950242 の後退**: mix3 は 2 回とも解なしで時間切れ (e88bf56 の mix2 では最初の解が最適 4 で 8.7/9.0 s)。ログを取って 1 回再現した (`analysis/heur_ls_20261023/logs/neos-950242_mix3s4_1.log`)。`MIP: Local-MIP solution accepted false (5.92s)` で Local-MIP の解が受け入れられず、FJ の解も出ないので、find thread が回らない。根のヒューリスティクスは RENS が 2 本とも Infeasible、feasibility pump が 46 s かかり、57.4 s まで続く。最後に `symmetry: 0 heuristic solutions mapped ..., 2 could not be` が出る。`WARNING` は出ていない。同じ機械の既定 (`logs/neos-950242_def3s4_1.log`) は FJ で 19 (6.3 s)、find thread で 4 (8.8 s) が出て、16.1 s で最適になる。
 - 時間の上限の超過: mix3 は 4 回とも 60.1 s 以内に収まった (直っている)。ただし newdef3 HLf の mzzv42z は 62.05 s (既定でも 2 秒超えることがある)。
 - 他は f970f87・e88bf56 と同じ傾向 (dcmulti・fiber・bppc4-08 は mix3 で最初の解が早く、値は悪い。nw04 は mix3 が 2 組とも少し長い 8.56/7.98 vs 7.60/7.67)。
+
+## 追加 4: 8352106 (mix4 = `ENOMOTO_MIP_FJ_LMIP_MIX=1`、newdef4 = 既定)
+
+順番: mix4 HLg → newdef4 HLg → newdef4 HLh → mix4 HLh。最適と報告した回の目的値の不一致はなし。`WARNING` は cand_logs で 0 件 (JSON に mip_warnings の項目はない)。
+
+| 問題 | 回 | 状態 | 目的値 | 時間 | 最初の解 | ノード |
+|---|---|---|---:|---:|---|---:|
+| gr4x6 | newdef4 HLg / HLh | optimal | 202.35 | 0.05 / 0.02 | 0.018 / 0.009 (229.05) | 0 |
+| | mix4 HLg / HLh | optimal | 202.35 | 0.04 / 0.06 | 0.023 / 0.029 (229.05) | 0 |
+| dcmulti | newdef4 HLg / HLh | optimal | 188182 | 1.07 / 1.07 | 0.436 / 0.447 (194485.1) | 4 |
+| | mix4 HLg / HLh | optimal | 188182 | 1.06 / 1.22 | 0.112 / 0.154 (211471.7) | 4 |
+| fiber | newdef4 HLg / HLh | optimal | 405935.18 | 1.59 / 1.83 | 0.484 / 0.519 (775178.8) | 1 / 3 |
+| | mix4 HLg / HLh | optimal | 405935.18 | 1.52 / 1.49 | 0.142 / 0.162 (1255418.5) | 3 / 1 |
+| nw04 | newdef4 HLg / HLh | optimal | 16862 | 7.68 / 7.92 | 7.497 / 7.772 (52354) | 0 |
+| | mix4 HLg / HLh | optimal | 16862 | 8.20 / 9.74 | 7.453 / 8.949 (53592) | 0 |
+| bppc4-08 | newdef4 HLg / HLh | time_limit | 54 / 54 | 60.05 / 60.05 | 1.564 / 1.789 (94) | 28866 / 26547 |
+| | mix4 HLg / HLh | time_limit | 55 / 55 | 60.31 / 60.08 | 0.634 / 0.603 (108) | 26876 / 29991 |
+| neos-950242 | newdef4 HLg / HLh | optimal | 4 | 13.33 / 15.54 | 8.163 / 8.511 (19) | 1 / 0 |
+| | mix4 HLg / HLh | optimal / **time_limit** | 4 / **7** | 15.62 / **62.12** | 8.784 / 8.673 (24) | 0 / 74 |
+| mzzv42z | newdef4 HLg / HLh | time_limit | -20270 / -19832 | 60.04 / 62.06 | 8.658 / 8.789 (-990) | 0 / 2 |
+| | mix4 HLg / HLh | time_limit | -19832 / -20010 | 62.05 / 60.12 | 6.492 / 7.617 (0) | 2 / 0 |
+
+- **neos-950242**: 解なしは直ったが、mix4 HLh は 7 で時間切れになり、上限を 2 秒超えて 62.12 s で止まった。HLg も 15.62 s で、mix2 (8.7/9.0 s) より遅く newdef4 (13.3/15.5 s) と同じくらい。ログを取って 2 回再現した (`logs/neos-950242_mix4s4_{1,2}.log`、2 回とも時間切れ・62 s、目的値 7 / 5)。
+  - 5.49 s に Local-MIP の解が 24 → 21 → 9 → 8 (または 5) と受け入れられ、最後の 1 つ (最適 4 と思われる) は `accepted false` で拒まれる。
+  - incumbent が質の悪い FJ の解ではなく find thread が回らないので、4 が見つからない。根のサブ MIP (RENS・locks・clique・RINS) はすべて Infeasible。
+  - ログの最後に `symmetry: 0 heuristic solutions mapped ..., 2 could not be` が出る。
+- bppc4-08: mix4 は 2 組とも 55 (newdef4 は 54)。mix3 HLe も 55 だった。
+- 上限の超過: mzzv42z は mix4 HLg と newdef4 HLh で 62 s (既定でも起きる)。
+- nw04 は mix4 が 2 組とも長い (8.20/9.74 vs 7.68/7.92)。他は前と同じ傾向。
