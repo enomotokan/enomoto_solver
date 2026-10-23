@@ -87,3 +87,19 @@
 
 - 目的値の不一致・異常終了はなし。newdef は 30n20b8 で 2 回とも 60 秒で解なし。
 - 2 組とも同じ向き: 30n20b8 (mix2 だけが解を得る)、graph20-20-1rand (mix2 は -9、newdef は -8、最初の解も早い)、rout (mix2 は最初の解が 0.14〜0.16 秒、newdef は 0.78〜0.82 秒)。ran14x18-disj-8 の f970f87 での mix の利点 (3736) は今回は見えない (mix2 3744、newdef は 3748/3736)。
+
+## 追加計測 3: 95a5f4d
+順番: mix3 HLe → newdef3 HLe → newdef3 HLf → mix3 HLf (mix3 = `ENOMOTO_MIP_FJ_LMIP_MIX=1`)。
+
+| 問題 | mix3 HLe | newdef3 HLe | newdef3 HLf | mix3 HLf |
+|---|---|---|---|---|
+| neos5 | 15 / 最初 0.041 秒 | 15 / 0.036 | 15 / 0.036 | 15 / 0.033 |
+| rout | optimal 13.75 秒 / 最初 0.122 秒 | optimal 11.07 / 0.648 | optimal 12.58 / 0.809 | optimal 8.12 / 0.109 |
+| 30n20b8 | 353 / 最初 6.01 秒 (453) | 553 / 55.03 (804) | 553 / 57.13 (553) | 302 / 5.54 (453) |
+| ran14x18-disj-8 | 3748 | 3748 | 3736 | 3748 |
+| graph20-20-1rand | -9 / 最初 1.88 秒 (-8) | -8 / 4.07 (-3) | -9 / 4.12 (-3) | -9 / 1.73 (-8) |
+| mc11 | optimal 42.04 秒 | optimal 38.72 | optimal 56.21 | optimal 44.35 |
+
+- 目的値の不一致・異常終了はなし (optimal はすべて HiGHS と一致)。
+- 結果の .md に警告の列はなく (scripts/bench_cand_20261020.py に警告を出す処理がない)、cand_logs にも "not reporting optimality" は出ていない。
+- 2 組とも同じ向き: 30n20b8 (mix3 は約 6 秒で最初の解、最終 302〜353。newdef3 は 55〜57 秒で最初の解、最終 553)、rout と graph20-20-1rand の最初の解 (mix3 のほうが早く、値も良い)。
