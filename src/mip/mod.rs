@@ -635,6 +635,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
         solver::ROOT_BASIS.with(|t| *t.borrow_mut() = None);
+        solver::ROOT_DSE.with(|t| *t.borrow_mut() = None);
     }
     r
 }
@@ -1683,6 +1684,10 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
         let b = lp.basis();
         let b = if finish { b } else { lp::Basis { col: b.col, row: Vec::new() } };
         solver::ROOT_BASIS.with(|s| *s.borrow_mut() = Some(b));
+        if finish {
+            let w = lp.dse_snapshot();
+            solver::ROOT_DSE.with(|s| *s.borrow_mut() = w);
+        }
     }
     Some(n_fixed)
 }

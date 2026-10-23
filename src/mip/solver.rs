@@ -150,6 +150,8 @@ thread_local! {
     /// 次に始める求解 (サブ MIP でないもの) の根の LP の初めの基底 (列の状態)。前処理の LP による固定
     /// ([`super::lp_probe`]) が解いた LP の基底を渡す (根の LP を解き直す手間を減らす)。
     pub(crate) static ROOT_BASIS: std::cell::RefCell<Option<super::lp::Basis>> = const { std::cell::RefCell::new(None) };
+    /// [`ROOT_BASIS`] の DSE 重み (`ENOMOTO_MIP_LP_PROBE_FINISH` のときだけ。番号は構造列 j < n、行 n + i)
+    pub(crate) static ROOT_DSE: std::cell::RefCell<Option<Vec<(u32, f32)>>> = const { std::cell::RefCell::new(None) };
     /// ヒューリスティクス役のスレッド (`ENOMOTO_MIP_HEUR_ROLE`、[`Solver::heur_role_run`]) の共有の待ち行列。このスレッドで
     /// 解くサブ MIP も、木の探索が終わるか止める合図が立ったら打ち切る ([`Solver::time_up`])。
     static ROLE_POOL: std::cell::RefCell<Option<std::sync::Arc<WorkPool>>> = const { std::cell::RefCell::new(None) };
@@ -2974,6 +2976,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        let mut root_warm_dse_once = false;
         if !self.params.submip && self.snap.is_none() {
             let rb = ROOT_BASIS.with(|s| s.borrow_mut().take());
             if self.params.verbose {
@@ -2998,9 +3001,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         b.row.resize(self.lp.num_rows(), super::lp::VarStatus::Basic);
                     }
                     self.lp.set_basis(&b);
+                    // DSE 重みも引き継ぐ (根の LP の 1 回だけ。重みなしで始めると、カットのループの LP の反復が増えた)
+                    if let Some(w) = ROOT_DSE.with(|s| s.borrow_mut().take()) {
+                        self.lp.set_dse_vars(&w);
+                        root_warm_dse_once = true;
+                    }
                 }
             }
         }
+        ROOT_DSE.with(|s| *s.borrow_mut() = None);
         if self.snap.is_some() && (CUT_JOB.with(|j| j.borrow().is_some()) || DIVE_ONLY.with(|d| d.get()).0 == 5) {
             if let Some(b) = BG_ROOT_BASIS.with(|s| s.borrow_mut().take()) {
                 if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
@@ -3011,7 +3020,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose && self.snap.is_none() && !self.params.submip {
             eprintln!("MIP: solving the root LP ({:.2}s)", self.start.elapsed().as_secs_f64());
         }
+        if root_warm_dse_once {
+            crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        if root_warm_dse_once {
+            crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
         if self.params.verbose && self.snap.is_some() {
             eprintln!("MIP: [snapshot] root LP {root_st:?} ({} iters, {:.2}s)", self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
         }
