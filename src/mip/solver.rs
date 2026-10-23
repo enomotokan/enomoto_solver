@@ -2384,7 +2384,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 根の解発見スレッドの解も FJ の解と同じに扱う (質の悪い解なら、暫定解なし用の RENS・解発見スレッドを続ける)。
             // 局所探索の刻みを直した後、hypothyroid-k1 では解発見スレッドの局所探索が -27 を返し、それで「FJ の解だけ」でなくなって
             // 暫定解なし用の RENS (-2851 = 最適値を出す) が回らなくなった
-            self.inc_only_fj = self.heur_label.starts_with("feasibility jump") || self.heur_label.starts_with("find thread");
+            // FJ のスレッドの Local-MIP (`ENOMOTO_MIP_FJ_LMIP_MIX`・`ENOMOTO_MIP_FJ_LOCALMIP`・`ENOMOTO_MIP_LOCALMIP`) の解も同じに扱う。
+            // そうしないと、混ぜた形では FJ の解も受け渡し箱を通って「Local-MIP」の名で入り、hypothyroid-k1 で RENS が回らず -3 のまま終わった
+            self.inc_only_fj = self.heur_label.starts_with("feasibility jump") || self.heur_label.starts_with("find thread") || self.heur_label == "Local-MIP";
             if !self.proof_first_z.is_finite() {
                 self.proof_first_z = z;
             }
