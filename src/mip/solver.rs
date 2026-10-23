@@ -355,6 +355,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     lmip_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// `ENOMOTO_MIP_LOCALMIP` のスレッドが良くなった解を入れる箱
     lmip_mailbox: Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>,
+    /// `ENOMOTO_MIP_FJ_NOSOL_EXTEND`: 暫定解を持ったら立てて、FJ のスレッドの延長をやめさせる印
+    fj_has_inc: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// 根のヒューリスティクスの最初に別スレッドで始めた局所探索 (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`。結果は元の位置で受け取る)。
     pub(super) ls_thread: Option<std::thread::JoinHandle<super::heuristics::LocalSearchResult>>,
     /// 根の解発見スレッド ([`find_thread_on`])。根のヒューリスティクスの後と木の各ノードで、終わっていれば受け取る
@@ -1570,6 +1572,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         fj_thread: None,
         lmip_thread: None,
         lmip_mailbox: None,
+        fj_has_inc: None,
         ls_thread: None,
         find_thread: None,
         find_out: None,
@@ -2433,6 +2436,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.proof_first_z = z;
             }
             self.incumbent = Some((z, x));
+            // FJ のスレッド (と解発見スレッド) の解だけのうちは立てない (`=2` はその解の改善を続ける)
+            if let Some(f) = self.fj_has_inc.as_ref().filter(|_| !self.inc_only_fj) {
+                f.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             self.root_redcost_fixing();
             let lim = self.prune_limit();
             self.prune_queue(lim);
@@ -2906,17 +2913,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let t_start = self.start;
                 // `ENOMOTO_MIP_FJ_NOSOL_EXTEND` (試作): 解が出ない間は、FJ の時間の予算 (5%・5 秒まで) を過ぎても、根のカットのループの
-                // 終わり (止める合図) か `ENOMOTO_T_MIP_FJ_NOSOL_FRAC` (0.25) × 時間上限まで種を変えた FJ2 を続ける
+                // 終わり (止める合図) か `ENOMOTO_T_MIP_FJ_NOSOL_FRAC` (0.25) × 時間上限まで種を変えた FJ2 を続ける。主のスレッドが
+                // FJ のスレッド以外から暫定解を得たら (`fj_has_inc`) 延長をやめる。`=2` は混ぜる形 (FJ_LMIP_MIX) で、FJ のスレッドの解しか
+                // ない間は解があっても同じ秒数まで続ける (Local-MIP の改善)
                 let nosol_cap = if env_str!("ENOMOTO_MIP_FJ_NOSOL_EXTEND").is_some() && self.params.time_limit.is_finite() {
                     tunable!("ENOMOTO_T_MIP_FJ_NOSOL_FRAC", 0.25, f64) * self.params.time_limit - self.start.elapsed().as_secs_f64()
                 } else {
                     0.0
                 };
+                let has_inc = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(self.incumbent.is_some() && !self.inc_only_fj));
+                if nosol_cap > 0.0 {
+                    self.fj_has_inc = Some(has_inc.clone());
+                }
                 let h = std::thread::spawn(move || {
                     if lmip == 2 {
                         return None;
                     }
                     super::heuristics::FJ_NOSOL_CAP.with(|c| c.set(nosol_cap.max(0.0)));
+                    super::heuristics::FJ_HAS_INC.with(|f| *f.borrow_mut() = Some(has_inc));
                     // Local-MIP に切り替える探索。`map` で解を `pc` の空間に戻して受け渡し箱に入れる
                     let fb_run = |q: &super::problem::MipProblem, lo: &[f64], up: &[f64], map: &dyn Fn(Vec<f64>) -> Vec<f64>| -> Option<Vec<f64>> {
                         let t = std::time::Instant::now();

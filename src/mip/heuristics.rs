@@ -36,6 +36,13 @@ thread_local! {
     /// `ENOMOTO_MIP_FJ_NOSOL_EXTEND` (試作): 並列の FJ のスレッドで、解がまだ 1 つもなければ時間の予算を過ぎても種を変えた FJ2 を
     /// この秒数 (FJ を始めてから) まで続ける (0 = 使わない)。止める合図 (根のカットのループの終わり) が来ればそこで止まる
     pub(super) static FJ_NOSOL_CAP: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    /// 主のスレッドが暫定解を持ったら立つ印 (立てば `FJ_NOSOL_CAP` の延長をやめる)
+    pub(super) static FJ_HAS_INC: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 主のスレッドが暫定解を持っているか (`FJ_HAS_INC`)。
+fn main_has_incumbent() -> bool {
+    FJ_HAS_INC.with(|f| f.borrow().as_ref().is_some_and(|a| a.load(std::sync::atomic::Ordering::Relaxed)))
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
@@ -1174,7 +1181,7 @@ pub(super) fn fj_search_fb(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, 
         }
         // 種を変えた FJ2 を時間の上限まで (`FJ_NOSOL_CAP` があれば、解がない間はその秒数まで延ばす)
         let ext = FJ_NOSOL_CAP.with(|c| c.get());
-        let cap_now = |b: &Option<Vec<f64>>| if b.is_none() && ext > time_cap { ext } else { time_cap };
+        let cap_now = |b: &Option<Vec<f64>>| if b.is_none() && ext > time_cap && !main_has_incumbent() { ext } else { time_cap };
         let mut k = 1u64;
         while left(cap_now(&best)) > 0.05 && !stopped() && k < if ext > 0.0 { 1024 } else { 64 } {
             let r = super::fj::fj2_search(p, lo, up, left(cap_now(&best)), seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15)), stop);
@@ -2737,9 +2744,10 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
     // `FJ_NOSOL_CAP` があれば、解がない間はその秒数まで続ける
     let ext = FJ_NOSOL_CAP.with(|c| c.get());
     let t_ext = t0 + Duration::from_secs_f64(ext.max(cap.max(0.0)));
-    // `ENOMOTO_MIP_FJ_NOSOL_EXTEND=2`: 解があっても同じ秒数まで続ける (Local-MIP の改善を根のカットのループの終わりまで)
+    // `ENOMOTO_MIP_FJ_NOSOL_EXTEND=2`: 主のスレッドの暫定解が FJ のスレッドの解だけなら、解があっても同じ秒数まで続ける
+    // (Local-MIP の改善を根のカットのループの終わりまで)
     let ext_all = env_str!("ENOMOTO_MIP_FJ_NOSOL_EXTEND") == Some("2");
-    let end_now = |b: &Option<(f64, Vec<f64>)>| if b.is_none() || ext_all { t_ext } else { t_end };
+    let end_now = |b: &Option<(f64, Vec<f64>)>| if (b.is_none() || ext_all) && !main_has_incumbent() { t_ext } else { t_end };
     while Instant::now() < end_now(&best) && !stop.load(Ordering::Relaxed) {
         let t_end = end_now(&best);
         let lm_share = match leader {
