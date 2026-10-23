@@ -12,6 +12,11 @@
 
 use std::time::{Duration, Instant};
 
+thread_local! {
+    /// 止める合図が立った FJ2 では LP 修復をしない ([`super::heuristics::fj_lmip_mix`] が立てる)
+    pub(super) static SKIP_REPAIR_ON_STOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Sense {
     Lte,
@@ -507,7 +512,11 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         let _ = std::fs::write(format!("{dir}/fj_{k}_{best_viol}.txt"), body);
     }
     let mut repaired = "";
-    if best_x.is_none() {
+    // FJ と Local-MIP を混ぜる形 ([`super::heuristics::fj_lmip_mix`]) では、止める合図が立っていれば LP 修復はしない。混ぜる形の
+    // FJ のスレッドは根が終わるまで回り、LP は合図を見ないので、大きな問題では止めるのが 2 秒ほど遅れて時間の上限を超えていた
+    // (physiciansched6-2)。既定の FJ は時間の上限 (60 秒なら 3 秒) で終わるので、今までどおり修復する
+    let stopped = stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+    if best_x.is_none() && !(stopped && SKIP_REPAIR_ON_STOP.with(|c| c.get())) {
         if let Some(xi) = best_inf.as_ref() {
             best_x = lp_repair(p, &s.lb, &s.ub, xi);
             repaired = if best_x.is_some() { " (LP repair: found)" } else { " (LP repair: failed)" };

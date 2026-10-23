@@ -354,7 +354,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッド (試作)
     lmip_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// `ENOMOTO_MIP_LOCALMIP` のスレッドが良くなった解を入れる箱
-    lmip_mailbox: Option<std::sync::Arc<std::sync::Mutex<Option<Vec<f64>>>>>,
+    lmip_mailbox: Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>,
     /// 根のヒューリスティクスの最初に別スレッドで始めた局所探索 (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`。結果は元の位置で受け取る)。
     pub(super) ls_thread: Option<std::thread::JoinHandle<super::heuristics::LocalSearchResult>>,
     /// 根の解発見スレッド ([`find_thread_on`])。根のヒューリスティクスの後と木の各ノードで、終わっていれば受け取る
@@ -2815,7 +2815,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lstop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let lstop2 = lstop.clone();
                     let lseed = seed ^ 0x6A09_E667_F3BC_C909;
-                    let mailbox: std::sync::Arc<std::sync::Mutex<Option<Vec<f64>>>> = Default::default();
+                    let mailbox: std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>> = Default::default();
                     let mb2 = mailbox.clone();
                     self.lmip_mailbox = Some(mailbox);
                     let hl = std::thread::spawn(move || {
@@ -2828,7 +2828,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     Some((_, post, sc)) => super::fj_p3_solution(x.to_vec(), post, sc),
                                     None => x.to_vec(),
                                 };
-                                *mb2.lock().unwrap() = Some(y);
+                                mb2.lock().unwrap().push(y);
                             };
                             let lr = super::localmip::local_mip(q, lo, up, lcap, lseed, Some(&lstop2), &on_sol);
                             eprintln!(
@@ -2858,7 +2858,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 時間の上限は Local-MIP と同じ。実行可能性問題 (目的が全部 0) では今までどおり
                 let mix = env_str!("ENOMOTO_MIP_FJ_LMIP_MIX").is_some() && lmip == 0 && !fjl;
                 let fjl_cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * self.params.time_limit).min(10.0) } else { 10.0 };
-                let fjl_box: std::sync::Arc<std::sync::Mutex<Option<Vec<f64>>>> = Default::default();
+                let fjl_box: std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>> = Default::default();
                 if fjl || mix {
                     self.lmip_mailbox = Some(fjl_box.clone());
                 }
@@ -2871,7 +2871,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let fb_run = |q: &super::problem::MipProblem, lo: &[f64], up: &[f64], map: &dyn Fn(Vec<f64>) -> Vec<f64>| -> Option<Vec<f64>> {
                         let t = std::time::Instant::now();
                         let on_sol = |x: &[f64]| {
-                            *fjl_box.lock().unwrap() = Some(map(x.to_vec()));
+                            fjl_box.lock().unwrap().push(map(x.to_vec()));
                         };
                         let lr = super::localmip::local_mip_opts(q, lo, up, fjl_cap, seed ^ 0x6A09_E667_F3BC_C909, Some(&stop2), &on_sol, true);
                         eprintln!(
@@ -2895,7 +2895,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             };
                             crate::set_fj_p3_force(true);
                             if mix && !super::heuristics::fj_feas_extend(&q) {
-                                let on_sol = |x: &[f64]| *fjl_box.lock().unwrap() = Some(map(x.to_vec()));
+                                let on_sol = |x: &[f64]| fjl_box.lock().unwrap().push(map(x.to_vec()));
                                 let r = super::heuristics::fj_lmip_mix(&q, &q.col_lo, &q.col_up, fjl_cap.max(cap), seed, &stop2, &on_sol);
                                 crate::set_fj_p3_force(false);
                                 return r.map(map);
@@ -2906,7 +2906,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     }
                     if mix && !super::heuristics::fj_feas_extend(&pc) {
-                        let on_sol = |x: &[f64]| *fjl_box.lock().unwrap() = Some(x.to_vec());
+                        let on_sol = |x: &[f64]| fjl_box.lock().unwrap().push(x.to_vec());
                         return super::heuristics::fj_lmip_mix(&pc, &lo, &up, fjl_cap.max(cap), seed, &stop2, &on_sol);
                     }
                     let fb = |q2: &super::problem::MipProblem, lo: &[f64], up: &[f64]| fb_run(q2, lo, up, &|x| x);
@@ -8945,12 +8945,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッドが終わっていれば結果を受け取る (待たない)。
     pub(super) fn poll_lmip_thread(&mut self) {
-        let got = self.lmip_mailbox.as_ref().and_then(|mb| mb.lock().unwrap().take());
-        if let Some(x) = got {
+        // 受け渡し箱には良くなった解を全部ためてあり、古い順に試す。最良の解が受け付けられなくても (対称性の行に反するなど。
+        // neos-950242 で最良の解だけを残していたときは全部失った)、前の解が暫定解になれる
+        let got: Vec<Vec<f64>> = self.lmip_mailbox.as_ref().map(|mb| std::mem::take(&mut *mb.lock().unwrap())).unwrap_or_default();
+        for x in got {
             self.heur_label = "Local-MIP";
             let ok = self.try_incumbent(x);
             self.heur_label = "";
-            eprintln!("MIP: Local-MIP solution accepted {ok} ({:.2}s)", self.start.elapsed().as_secs_f64());
+            if self.params.verbose || env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
+                eprintln!("MIP: Local-MIP solution accepted {ok} ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
         }
         if self.lmip_thread.as_ref().is_some_and(|(h, _)| h.is_finished()) {
             let (h, _) = self.lmip_thread.take().unwrap();
@@ -8967,7 +8971,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn join_fj_thread(&mut self) {
         if let Some((h, stop)) = self.fj_thread.take() {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            if let Ok(Some(x)) = h.join() {
+            let r = h.join();
+            // 受け渡し箱に残った解 (FJ のスレッドの Local-MIP) を先に受け取る
+            self.poll_lmip_thread();
+            if let Ok(Some(x)) = r {
                 self.heur_label = "feasibility jump (parallel)";
                 let ok = self.try_incumbent(x);
                 self.heur_label = "";
