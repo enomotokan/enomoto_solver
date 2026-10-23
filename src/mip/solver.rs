@@ -2789,19 +2789,54 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     });
                     self.lmip_thread = Some((hl, lstop));
                 }
+                // `ENOMOTO_MIP_FJ_LOCALMIP` (試作): FJ のスレッドで、FJ2 が続けて解なしなら Local-MIP + 連鎖の手に切り替える
+                // ([`super::heuristics::fj_search_fb`])。Local-MIP は時間の上限 (`ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC` × 時間上限、最大 10 秒) か、
+                // FJ のスレッドを止める合図 (根のカットのループの終わり) まで回り、良くなった解はその場で受け渡し箱に入れる
+                let fjl = env_str!("ENOMOTO_MIP_FJ_LOCALMIP").is_some() && lmip == 0;
+                let fjl_cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * self.params.time_limit).min(10.0) } else { 10.0 };
+                let fjl_box: std::sync::Arc<std::sync::Mutex<Option<Vec<f64>>>> = Default::default();
+                if fjl {
+                    self.lmip_mailbox = Some(fjl_box.clone());
+                }
+                let t_start = self.start;
                 let h = std::thread::spawn(move || {
                     if lmip == 2 {
                         return None;
                     }
+                    // Local-MIP に切り替える探索。`map` で解を `pc` の空間に戻して受け渡し箱に入れる
+                    let fb_run = |q: &super::problem::MipProblem, lo: &[f64], up: &[f64], map: &dyn Fn(Vec<f64>) -> Vec<f64>| -> Option<Vec<f64>> {
+                        let t = std::time::Instant::now();
+                        let on_sol = |x: &[f64]| {
+                            *fjl_box.lock().unwrap() = Some(map(x.to_vec()));
+                        };
+                        let lr = super::localmip::local_mip_opts(q, lo, up, fjl_cap, seed ^ 0x6A09_E667_F3BC_C909, Some(&stop2), &on_sol, true);
+                        eprintln!(
+                            "MIP: Local-MIP (in the FJ thread): {} steps, least violated rows {}, chain moves {}, found {} (first at {:?}s of {:.2}s), started at {:.2}s",
+                            lr.steps,
+                            lr.least_viol,
+                            lr.pair_moves,
+                            lr.best.as_ref().map_or("none".to_string(), |x| format!("{:.6e}", q.objective(x))),
+                            lr.first_time.map(|v| (v * 100.0).round() / 100.0),
+                            t.elapsed().as_secs_f64(),
+                            (t - t_start).as_secs_f64()
+                        );
+                        lr.best
+                    };
                     if fj_p3 {
                         if let Some((q, post, sc)) = super::fj_p3_problem(&pc) {
+                            let map = |x: Vec<f64>| super::fj_p3_solution(x, &post, &sc);
+                            let fb = |q2: &super::problem::MipProblem, lo: &[f64], up: &[f64]| {
+                                crate::set_fj_p3_force(false);
+                                fb_run(q2, lo, up, &map)
+                            };
                             crate::set_fj_p3_force(true);
-                            let r = super::heuristics::fj_search(&q, &q.col_lo, &q.col_up, effort, cap, seed, Some(&stop2));
+                            let r = super::heuristics::fj_search_fb(&q, &q.col_lo, &q.col_up, effort, cap, seed, Some(&stop2), if fjl { Some(&fb) } else { None });
                             crate::set_fj_p3_force(false);
-                            return r.map(|x| super::fj_p3_solution(x, &post, &sc));
+                            return r.map(map);
                         }
                     }
-                    super::heuristics::fj_search(&pc, &lo, &up, effort, cap, seed, Some(&stop2))
+                    let fb = |q2: &super::problem::MipProblem, lo: &[f64], up: &[f64]| fb_run(q2, lo, up, &|x| x);
+                    super::heuristics::fj_search_fb(&pc, &lo, &up, effort, cap, seed, Some(&stop2), if fjl { Some(&fb) } else { None })
                 });
                 self.fj_thread = Some((h, stop));
             } else if !self.params.submip && !proof_only() && self.feasibility_jump(effort, cap) && self.params.verbose {

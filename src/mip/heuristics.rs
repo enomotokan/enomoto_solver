@@ -1097,6 +1097,18 @@ pub(super) fn fj_feas_extend(p: &MipProblem) -> bool {
 /// Feasibility Jump の探索本体 (Solver の状態に依らないので別スレッドでも動かせる)。`lo`/`up` は列の境界、
 /// `seed` は乱数の種、`stop` が立ったら止める。実行可能な点が見つかれば返す。
 pub(super) fn fj_search(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
+    fj_search_fb(p, lo, up, effort, time_cap, seed, stop, None)
+}
+
+/// FJ が解を見つけられないときの代わりの探索 (問題・列の境界を受け取る)。
+pub(super) type FjFallback<'a> = &'a dyn Fn(&MipProblem, &[f64], &[f64]) -> Option<Vec<f64>>;
+
+/// [`fj_search`] に、FJ がうまくいかないときの代わりの探索 `fallback` を付けたもの (`ENOMOTO_MIP_FJ_LOCALMIP`、試作)。
+/// `fallback` があれば (並列の FJ のスレッドで、実行可能性問題でなければ)、種を変えた FJ2 を
+/// `ENOMOTO_T_MIP_FJ_LOCALMIP_FAILS` (2) 回続けて解なしなら、残りを `fallback` (Local-MIP + 連鎖の手) に回す。
+/// 1 回でも解があれば、以後は今までどおり (旧来の局所探索と種を変えた FJ2)
+#[allow(clippy::too_many_arguments)]
+pub(super) fn fj_search_fb(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>, fallback: Option<FjFallback>) -> Option<Vec<f64>> {
     // HiGHS と同じ手順の Feasibility Jump ([`super::fj`]) を使う (`ENOMOTO_MIP_NO_FJ2` なら旧来の局所探索だけ)。旧来のものは
     // comp07-2idx・comp21-2idx・net12 などで解を見つけられず、最初の解が 30〜60 秒になっていた (FJ2 は 0.05〜0.2 秒)。
     // 93 問 (4 スレッド・60 秒・2 回): 主ギャップの和 14.91 -> 13.77、最初の解の時刻の幾何平均 3.88 -> 3.07 秒
@@ -1130,6 +1142,20 @@ pub(super) fn fj_search(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, tim
         // 局所探索を残り時間で回すだけにする
         if stop.is_none() {
             return if best.is_some() { best } else { fj_search_old(p, lo, up, effort, left(time_cap), seed, None) };
+        }
+        if let Some(fb) = fallback {
+            let fails = tunable!("ENOMOTO_T_MIP_FJ_LOCALMIP_FAILS", 2u64, u64).max(1);
+            let mut k = 1u64;
+            while best.is_none() && k < fails && left(time_cap) > 0.05 && !stopped() {
+                best = super::fj::fj2_search(p, lo, up, left(time_cap), seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15)), stop);
+                k += 1;
+            }
+            if best.is_none() && !stopped() {
+                if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
+                    eprintln!("MIP:   FJ2: {k} tries without a solution, switching to Local-MIP ({:.2}s)", t0.elapsed().as_secs_f64());
+                }
+                return fb(p, lo, up);
+            }
         }
         let better = |a: &Option<Vec<f64>>, b: Option<Vec<f64>>| -> Option<Vec<f64>> {
             match (a, b) {

@@ -309,6 +309,12 @@ impl St<'_> {
 /// Local-MIP 風の局所探索で実行可能な点を探す。`lo`/`up` は列の境界、`time_cap` は秒、`stop` が立ったら止める。
 /// `on_sol` は実行可能解が良くなるたびに呼ぶ (別スレッドから本体へ渡す)。
 pub(super) fn local_mip(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>, on_sol: &dyn Fn(&[f64])) -> LocalMipResult {
+    local_mip_opts(p, lo, up, time_cap, seed, stop, on_sol, env_str!("ENOMOTO_MIP_LOCALMIP_CHAIN").is_some())
+}
+
+/// [`local_mip`] で、連鎖の手を使うかを `chain` で決めるもの。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn local_mip_opts(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>, on_sol: &dyn Fn(&[f64]), chain: bool) -> LocalMipResult {
     let (n, m) = (p.n, p.m);
     let t0 = Instant::now();
     let t_end = t0 + Duration::from_secs_f64(time_cap.max(0.0));
@@ -349,7 +355,6 @@ pub(super) fn local_mip(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, s
     let sp = tunable!("ENOMOTO_T_MIP_LOCALMIP_SP", 0.0003, f64);
     let restart_after = tunable!("ENOMOTO_T_MIP_LOCALMIP_RESTART", 300_000u64, u64);
     let pair = env_str!("ENOMOTO_MIP_LOCALMIP_PAIR").is_some();
-    let chain = env_str!("ENOMOTO_MIP_LOCALMIP_CHAIN").is_some();
     let chain_depth = tunable!("ENOMOTO_T_MIP_LOCALMIP_CHAIN_DEPTH", 32usize, usize);
     let mut chain_tries = 0u64;
     let set_of: Vec<Vec<u32>> = if chain {
