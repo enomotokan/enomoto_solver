@@ -983,6 +983,9 @@ struct MuStats {
     /// (`ENOMOTO_MIP_FOCUS` が primal 以外) ではこちらを使う)。
     primal_tree: Option<f64>,
     n_tree: u64,
+    /// 主解への寄与のうち、ヒューリスティクス役のスレッドの観測だけの平均と、その数 (`ENOMOTO_MIP_HEUR_MU_ROLE_OBS`、[`Solver::mu_worth`])。
+    primal_role: Option<f64>,
+    n_role: u64,
 }
 
 impl MuStats {
@@ -998,6 +1001,13 @@ impl MuStats {
             self.primal_tree = Some(self.primal_tree.map_or(primal, |v| l * v + (1.0 - l) * primal));
             self.n_tree += 1;
         }
+    }
+
+    /// ヒューリスティクス役のスレッドの観測 ([`Self::add`] に加えて数える)。
+    fn add_role(&mut self, primal: f64) {
+        let l = tunable!("ENOMOTO_T_MIP_HEUR_MU_LAMBDA", 0.8, f64);
+        self.primal_role = Some(self.primal_role.map_or(primal, |v| l * v + (1.0 - l) * primal));
+        self.n_role += 1;
     }
 }
 
@@ -4596,7 +4606,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.lns_secs += t_lns.elapsed().as_secs_f64();
                         if let Some((ev, z0)) = mu0 {
                             let z1 = self.shared.as_ref().map_or(z0, |s| s.best()).min(self.incumbent.as_ref().map_or(z0, |(z, _)| *z));
-                            self.mu_observe(&ev, z0, z1, t_lns.elapsed().as_secs_f64());
+                            self.mu_observe(&ev, z0, z1, t_lns.elapsed().as_secs_f64(), false);
                         }
                     } else if env_str!("ENOMOTO_MIP_OBJ_BISECT").is_some()
                         && !self.params.submip
@@ -5604,12 +5614,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 大近傍探索 1 回の結果を価値の指数移動平均 ([`MuStats`]) に入れる。`ev` は呼ぶ前の木の状態、`z0`/`z1` は呼ぶ前と後の
     /// 最良値、`dt` はかかった秒数。証明への寄与 = 暫定解の改善で刈れる木の重み / 秒、主解への寄与 = 縮めたギャップの割合 / 秒。
-    fn mu_observe(&self, ev: &TriggerEval, z0: f64, z1: f64, dt: f64) {
+    fn mu_observe(&self, ev: &TriggerEval, z0: f64, z1: f64, dt: f64, role: bool) {
         let Some(pool) = &self.pool else { return };
         let dt = dt.max(1e-3);
         let rel = if ev.gap.is_finite() && ev.gap > 0.0 && z0.is_finite() { ((z0 - z1) / ev.gap).clamp(0.0, 1.0) } else { 0.0 };
         let proof = ev.gap.is_finite().then(|| cut_weight(&ev.wcuts, rel) / dt);
-        pool.mu.lock().unwrap().add(proof, rel / dt);
+        {
+            let mut mu = pool.mu.lock().unwrap();
+            mu.add(proof, rel / dt);
+            if role {
+                mu.add_role(rel / dt);
+            }
+        }
         if env_str!("ENOMOTO_MIP_HEUR_TRIG_DEBUG").is_some() {
             eprintln!("HEURMU: tid {} obs rel {rel:.4} dt {dt:.2} proof {:?} -> {:?}", self.pool_tid, proof, *pool.mu.lock().unwrap());
         }
@@ -5653,6 +5669,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let proof_ok = mu.proof.is_some_and(|v| v > 0.0 && v >= h * tunable!("ENOMOTO_T_MIP_HEUR_MU_KAPPA", 1.0, f64) * vt);
             let stagnant = ev.est >= h * tunable!("ENOMOTO_T_MIP_HEUR_MU_STAGNANT", 4.0, f64) * ev.left;
             let primal_ok = mu.n_tree < tunable!("ENOMOTO_T_MIP_HEUR_MU_MIN_OBS", 3u64, u64) || mu.primal_tree.is_some_and(|v| v >= thr_p);
+            // `ENOMOTO_MIP_HEUR_MU_ROLE_OBS` (試作): 役のスレッド自身の観測が `ENOMOTO_T_MIP_HEUR_MU_ROLE_MIN_OBS` (既定 10) 回に満たないか、
+            // その平均がしきい値以上なら、主解の側も価値ありとする。木のスレッドの大近傍探索は 1 回の時間が短く (最低 0.3 秒)、
+            // 暫定解が最初から良いと失敗が続いて木の側の平均が 0 になり、役が 1 回 (0.01 秒) で退いてそれきり就かない
+            // (bppc4-08 の mixoc は Local-MIP の 55 から。既定は 62 から役の Proximity Search が 1 ずつ下げて 54。analysis/bppc408_20261023.md)
+            let primal_ok = primal_ok
+                || (env_str!("ENOMOTO_MIP_HEUR_MU_ROLE_OBS").is_some()
+                    && (mu.n_role < tunable!("ENOMOTO_T_MIP_HEUR_MU_ROLE_MIN_OBS", 10u64, u64) || mu.primal_role.is_some_and(|v| v >= thr_p)));
             proof_ok || (stagnant && primal_ok)
         }
     }
@@ -5816,7 +5839,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if let Some(ev0) = &ev0 {
                 let z1 = self.incumbent.as_ref().map_or(z0, |(z, _)| *z);
-                self.mu_observe(ev0, z0, z1, dt);
+                self.mu_observe(ev0, z0, z1, dt, true);
             }
             self.lns_secs += dt;
             self.heur_role_stats[0] += 1;
