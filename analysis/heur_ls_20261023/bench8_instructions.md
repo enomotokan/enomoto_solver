@@ -22,7 +22,6 @@
 
 | 組 K | 問題 |
 |---|---|
-| 40 | 16 55 {'neos-911970'} |
 | 1 | gen-ip002 p0201 10teams binkar10_1 h80x6320d nursesched-sprint02 physiciansched6-2 |
 | 2 | gen-ip054 misc07 air03 neos-860300 supportcase26 hypothyroid-k1 uccase12 |
 | 3 | pk1 flugpl blend2 eil33-2 timtab1 ns1116954 neos-2978193-inde |
