@@ -1692,6 +1692,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let nint = ints.len() as f64;
         let rate = |s: &Self| ints.iter().filter(|&&j| s.dom.lo[j] == s.dom.up[j]).count() as f64 / nint;
         let mut backtracks = 0usize;
+        // `ENOMOTO_MIP_RENS_RETRY` (試作、既定では使わない。値は戻った後にやり直す回数の上限、`1` などの 0 以外の数でない値は 4):
+        // 段の LP が実行不能で直前の段に戻ったとき、そこで打ち切らず、LP を解き直し、列の順を混ぜ直し、段の幅 (残りの自由な列のうち
+        // 1 段で固定する割合) を半分にしてやり直す。mzzv42z では 2 段目 (固定率 0.42) の LP が実行不能になると固定率 0.36 で打ち切り、
+        // 6800 列が自由なサブ MIP が 0 ノードのまま 16 秒時間切れになっていた (固定率 0.80 まで進む回は 8〜10 秒で -20270〜-20490。
+        // analysis/mzzv42z_20261023.md)
+        let retry_max = env_str!("ENOMOTO_MIP_RENS_RETRY").map(|v| v.parse::<usize>().unwrap_or(4)).unwrap_or(0);
+        let mut step = 0.1f64;
+        // やり直す分だけ LP の反復の上限を足す
+        let budget = budget * (1 + retry_max) as u64;
         // 段ごとの定義域の記録位置 (LP が実行不能になったら直前の段に戻る)
         let mut stage_pos: Vec<usize> = Vec::new();
         let mut order: Vec<usize> = ints.clone();
@@ -1729,7 +1738,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             let x = self.lp.col_values();
-            let stop_rate = (1.0 - (1.0 - fr) * 0.9).min(target);
+            let stop_rate = (1.0 - (1.0 - fr) * (1.0 - step)).min(target);
             stage_pos.push(self.dom.stack_len());
             let mut branched = 0usize;
             let mut conflict = false;
@@ -1825,7 +1834,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let sp = stage_pos.pop().unwrap();
                 self.dom.backtrack_to(p, sp);
                 self.sync_lp();
-                break;
+                if backtracks > retry_max || self.time_up() {
+                    break;
+                }
+                // `ENOMOTO_MIP_RENS_RETRY`: 戻った段の LP を解き直し、順を混ぜ直して幅を半分にしてやり直す
+                let it0 = self.lp.total_iterations();
+                let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(500);
+                let st = self.lp.solve(&self.limits(lim));
+                self.heur_iters += self.lp.total_iterations() - it0;
+                if st != LpStatus::Optimal {
+                    break;
+                }
+                step *= 0.5;
+                for k in (1..order.len()).rev() {
+                    let r = (self.rand() * (k + 1) as f64) as usize;
+                    order.swap(k, r.min(k));
+                }
             }
         }
         let fr = rate(self);
