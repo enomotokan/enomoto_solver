@@ -498,7 +498,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // これを 1 ラウンドに 1 回だけ積む `round_obj` で本当に 5 ラウンド分の伸びにする。beasleyC3 は 25 ラウンド目でも
         // 5 ラウンドで 10〜24 伸びている (閾値 4.7) のに、2.5 ラウンド分 (3.7〜9.4) では判定が回ごとに分かれ、
         // 第 2 段階に入らない回は根の下界が 706〜715 (入る回は 745) で、時間切れの回が出る (analysis/proofvar_20261023.md)
-        let strong_win5 = env_str!("ENOMOTO_MIP_CUT_STRONG_WIN5").is_some();
+        // 値が `nofc` なら、固定費用のネットワーク (`fc_relax`、カットの選択を緩める問題) では使わない (今までの判定のまま)。
+        // mc11 は WIN5 で強いカットの判定が通って第 2 段階 (0.9 -> 3.4 秒) と HiGHS 流のカット管理に入り、背景のカットの
+        // 後の根の下界が 11637〜11667 -> 11626〜11639 に下がって時間切れになる (analysis/mc11bisect_20261023.md)。
+        // beasleyC3 は最初の根では fc_relax にならない
+        let strong_win5 = match env_str!("ENOMOTO_MIP_CUT_STRONG_WIN5") {
+            Some("nofc") => !fc_relax,
+            v => v.is_some(),
+        };
         let mut round_obj: Vec<f64> = Vec::new();
         let extend_on = env_str!("ENOMOTO_MIP_CUT_EXTEND").is_some() && !self.params.submip && job.is_none() && self.params.time_limit.is_finite();
         let extend_max = tunable!("ENOMOTO_T_MIP_CUT_EXTEND_MAX", 0.3, f64) * self.params.time_limit;
