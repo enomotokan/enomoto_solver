@@ -468,6 +468,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     role_arm_wins: [u64; 2],
     /// 先導 (直近に暫定解を良くした腕): 0 = なし、1 = ALNS、2 = Local-MIP
     role_leader: u8,
+    /// `ENOMOTO_MIP_SYM_ORIG_CUT` (試作): 対称性の行への並べ替えに失敗したが元の問題で実行可能な解のうち最良のもの (目的値, 解)。
+    /// 値は打ち切り値 (刈り込みの上限・共有の最良値) にだけ使い、暫定解 (ヒューリスティクスの近傍の中心・「暫定解なし」の判定) には
+    /// しない。終わるときに暫定解より良ければ答えにする ([`Self::finish`])
+    orig_best: Option<(f64, Vec<f64>)>,
     /// 主: 従を始めた後、ノードを渡し始めるまで待つ期限 (待ち行列のノードが `ENOMOTO_T_MIP_TREE_START_NODES` 個たまるか、
     /// この時刻を過ぎたら渡し始める)。従は先に始めて準備 (写しからの LP・根の LP) を主の探索と並行させる。
     pool_hold: Option<Instant>,
@@ -1628,6 +1632,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         role_arm_t: [0.0; 2],
         role_arm_wins: [0; 2],
         role_leader: 0,
+        orig_best: None,
         pool_hold: None,
         seen_best: f64::INFINITY,
         pc_base: None,
@@ -2239,8 +2244,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     pub(super) fn prune_limit(&self) -> f64 {
+        self.prune_limit_ex(true)
+    }
+
+    /// 刈り込みの上限。`with_orig` が偽なら `orig_best` (`ENOMOTO_MIP_SYM_ORIG_CUT`) を数えない (「暫定解なし」の判定に使う)
+    pub(super) fn prune_limit_ex(&self, with_orig: bool) -> f64 {
         // ポートフォリオ並列: 他のスレッドの解の目的値も打ち切りに使う
-        let own = self.incumbent.as_ref().map(|(z, _)| *z);
+        let inc = self.incumbent.as_ref().map(|(z, _)| *z);
+        let ob = if with_orig { self.orig_best.as_ref().map(|(z, _)| *z) } else { None };
+        let own = match (inc, ob) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let shared = self.shared.as_ref().map(|s| s.best()).filter(|v| v.is_finite());
         let eff = match (own, shared) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -2320,7 +2335,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 解として返せる。対称性の行のある問題で解を磨く手順 (oneopt・連続変数の解き直し・解の溜め) には使わない
                 // 再スタートの後の問題は前処理をかけ直していて (列の代入・固定・目的関数の定数)、`orig` (最初の回の対称性の行を
                 // 加える前の問題) とは解の空間が違うので使わない
-                if env_str!("ENOMOTO_MIP_SYM_ORIG_INC").is_none() || self.params.restarts > 0 || orig.n != self.p.n {
+                if self.params.restarts > 0 || orig.n != self.p.n {
+                    return false;
+                }
+                // `ENOMOTO_MIP_SYM_ORIG_CUT` (試作): 暫定解にはせず、値だけを打ち切り値に使う (ORIG_INC と違い、ヒューリスティクスと
+                // 「暫定解なし」の判定は今までどおり動く)。暫定解より良い解だけを残す
+                if env_str!("ENOMOTO_MIP_SYM_ORIG_CUT").is_some() {
+                    let z = orig.objective(&x);
+                    let cur = self.prune_limit();
+                    if z < cur - 1e-9 * z.abs().max(1.0) && self.orig_best.as_ref().is_none_or(|(b, _)| z < *b) {
+                        if self.params.verbose {
+                            eprintln!("MIP: a solution feasible only without the symmetry rows kept as a cutoff value {z:.10e} [{}]", self.heur_label);
+                        }
+                        self.orig_best = Some((z, x));
+                        if let (None, Some(s)) = (&self.snap, &self.shared) {
+                            s.publish(z);
+                        }
+                        if !self.params.submip {
+                            super::record_incumbent(z);
+                        }
+                        let lim = self.prune_limit();
+                        self.prune_queue(lim);
+                    }
+                    return false;
+                }
+                if env_str!("ENOMOTO_MIP_SYM_ORIG_INC").is_none() {
                     return false;
                 }
                 orig_only = true;
@@ -5106,7 +5145,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 探索し残した部分木がある (最適とは言えない)。また共有の最良値が主の暫定解より良ければ、その解が主に届いていない
         if self.pool.is_some() && self.snap.is_none() {
             let lim = self.prune_limit();
-            let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+            let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z).min(self.orig_best.as_ref().map_or(f64::INFINITY, |(z, _)| *z));
             let sb = self.shared.as_ref().map_or(f64::INFINITY, |s| s.best());
             if tree_diag() {
                 eprintln!("MIP_TREE_DIAG: end of tree search: incumbent {z:.10e} shared best {sb:.10e} prune limit {lim:.10e} workers/pool bound {wlb:.10e} unresolved {}", self.unresolved);
@@ -9826,6 +9865,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
+        // `ENOMOTO_MIP_SYM_ORIG_CUT`: 打ち切り値にだけ使った解が暫定解より良ければ、それを答えにする (元の問題で実行可能)
+        if let Some((zo, xo)) = self.orig_best.take() {
+            if self.incumbent.as_ref().is_none_or(|(z, _)| zo < *z) {
+                if self.params.verbose {
+                    eprintln!("MIP: returning the solution feasible only without the symmetry rows ({zo:.10e})");
+                }
+                self.incumbent = Some((zo, xo));
+            }
+        }
         // 診断用: 従は自分の内訳を主に渡す (主は従を待った後に表示する)
         if prof_tree_par() {
             self.tprof.lits = self.lit_conflicts.stats;
