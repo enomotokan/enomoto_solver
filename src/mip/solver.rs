@@ -150,6 +150,12 @@ thread_local! {
     /// 次に始める求解 (サブ MIP でないもの) の根の LP の初めの基底 (列の状態)。前処理の LP による固定
     /// ([`super::lp_probe`]) が解いた LP の基底を渡す (根の LP を解き直す手間を減らす)。
     pub(crate) static ROOT_BASIS: std::cell::RefCell<Option<Vec<super::lp::VarStatus>>> = const { std::cell::RefCell::new(None) };
+    /// `ENOMOTO_MIP_LP_PROBE_ROW_BASIS` (試作、既定では使わない): [`ROOT_BASIS`] と一緒に渡す行の状態と、それを作った LP の行の
+    /// 指紋 ([`super::rows_fingerprint`])。根の LP の始めの行が同じ (指紋が合う) ときだけ使い、残りの行 (対称性の行など) の
+    /// 論理変数は基底に入れる。列の状態だけだと、基底の残りを行 0, 1, 2, ... の論理変数で埋めることになり
+    /// ([`crate::simplex::mip_lp::TwoStageLp::set_basis`] の修復)、最適基底とは遠い基底から解き直すことになる
+    /// (uccase12 で根の LP が 40 秒終わらなかった。analysis/uccase12_20261023.md)
+    pub(crate) static ROOT_BASIS_ROWS: std::cell::RefCell<Option<(Vec<super::lp::VarStatus>, u64)>> = const { std::cell::RefCell::new(None) };
     /// ヒューリスティクス役のスレッド (`ENOMOTO_MIP_HEUR_ROLE`、[`Solver::heur_role_run`]) の共有の待ち行列。このスレッドで
     /// 解くサブ MIP も、木の探索が終わるか止める合図が立ったら打ち切る ([`Solver::time_up`])。
     static ROLE_POOL: std::cell::RefCell<Option<std::sync::Arc<WorkPool>>> = const { std::cell::RefCell::new(None) };
@@ -3067,9 +3073,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         if !self.params.submip && self.snap.is_none() {
+            let rows = ROOT_BASIS_ROWS.with(|s| s.borrow_mut().take());
             if let Some(col) = ROOT_BASIS.with(|s| s.borrow_mut().take()) {
                 if col.len() == self.p.n {
-                    self.lp.set_basis(&super::lp::Basis { col, row: Vec::new() });
+                    // `ENOMOTO_MIP_LP_PROBE_ROW_BASIS`: 行の状態も渡されていて、始めの行が同じなら使う (残りの行の論理変数は基底に)
+                    let row = match rows {
+                        Some((r, fp)) if r.len() <= self.p.m && r.len() <= self.lp.num_rows() && super::rows_fingerprint(&self.p.rows[..r.len()]) == fp => {
+                            let mut row = r;
+                            row.resize(self.lp.num_rows(), super::lp::VarStatus::Basic);
+                            if self.params.verbose {
+                                eprintln!("MIP: root LP starts from the LP probing basis with the row statuses");
+                            }
+                            row
+                        }
+                        Some(_) => {
+                            if self.params.verbose {
+                                eprintln!("MIP: root LP: the rows changed after LP probing; the row statuses are not used");
+                            }
+                            Vec::new()
+                        }
+                        None => Vec::new(),
+                    };
+                    self.lp.set_basis(&super::lp::Basis { col, row });
                 }
             }
         }
