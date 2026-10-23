@@ -118,3 +118,19 @@
 
 - 目的値の不一致・異常終了はなし。MIP_WARNING は 0 回 (JSON に mip_warnings なし、cand_logs にも "MIP: WARNING" なし)。
 - 2 組とも同じ向き: 30n20b8 (mix4 は約 5 秒で最初の解、最終 302/353。newdef4 は 553 か解なし)、graph20-20-1rand (mix4 は -9、newdef4 は -8、最初の解 1.6 秒 vs 4.4 秒)、rout の最初の解 (mix4 0.11〜0.14 秒、newdef4 0.67〜0.81 秒)。
+
+## 追加計測 5: 9e34b8e
+順番: newdef5 HLi → mix5 HLi → mixoi5 HLi → mixoi5 HLj → mix5 HLj → newdef5 HLj (mix5 = `ENOMOTO_MIP_FJ_LMIP_MIX=1`、mixoi5 = mix5 + `ENOMOTO_MIP_SYM_ORIG_INC=1`)。
+
+| 問題 | newdef5 HLi | mix5 HLi | mixoi5 HLi | mixoi5 HLj | mix5 HLj | newdef5 HLj |
+|---|---|---|---|---|---|---|
+| neos5 | 15 | 15 | 15 | 15 | 15 | 15 |
+| rout | opt 14.03 秒 / 最初 0.714 | opt 9.40 / 0.130 | opt 11.62 / 0.125 | opt 9.73 / 0.124 | opt 9.64 / 0.146 | opt 9.84 / 0.666 |
+| 30n20b8 | 653 / 最初 54.8 秒 | 353 / 5.5 | 353 / 4.8 | 302 / 5.1 | 302 / 4.9 | 604 / 57.6 |
+| ran14x18-disj-8 | 3762 | 3748 | 3736 | 3748 | 3735 | 3748 |
+| graph20-20-1rand | -8 / 最初 3.94 (-3) | -9 / 1.62 (-8) | -9 / 1.56 (-8) | -9 / 1.76 (-8) | -9 / 1.76 (-8) | -8 / 4.02 (-3) |
+| mc11 | opt 53.33 秒 | opt 59.86 | opt 51.58 | opt 44.63 | opt 41.02 | **time_limit** 11689 (限界値 11687.77) |
+
+- 目的値の不一致・異常終了はなし。MIP_WARNING は 0 回 (JSON に mip_warnings なし、cand_logs にも "MIP: WARNING" なし)。newdef5 HLj の mc11 は 60 秒で最適の証明が間に合わなかった (値は正しい)。
+- 2 組とも同じ向き (mix5 と newdef5): 30n20b8 (mix5 は約 5 秒で最初の解、最終 302/353。newdef5 は 55〜58 秒、最終 604/653)、graph20-20-1rand (-9 vs -8)、rout の最初の解 (0.13〜0.15 秒 vs 0.67〜0.71 秒)。
+- mixoi5 と mix5: 2 組とも同じ向きのはっきりした差はなし。
