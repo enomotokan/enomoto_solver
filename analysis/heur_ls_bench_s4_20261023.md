@@ -87,3 +87,28 @@ HiGHS (参考): bppc4-08 は 60 秒で 53 (時間切れ)、mzzv42z は最適 -20
 - 傾向は f970f87 の mix と同じ。neos-950242 は mix2 で 15.4/16.0 s → 8.7/9.0 s (最初の解が最適 4)。dcmulti・fiber・bppc4-08 は最初の解が早いが値は悪く、総時間は揺れの範囲 (dcmulti はやや長い 1.10/1.24 vs 1.06/1.06)。
 - nw04 は mix2 が 2 組とも少し長い (8.21/8.08 vs 7.82/7.23、最初の解が 0.4〜0.8 s 遅い)。f970f87 の 6 回では揃っていなかったので、揺れの可能性あり。
 - mzzv42z は向きが揃わない。mix2 HLd がまた 62 秒で止まった (上限を約 2 秒超過)。
+
+## 追加 3: 最後の版 95a5f4d (mix3 = `ENOMOTO_MIP_FJ_LMIP_MIX=1`、newdef3 = 既定)
+
+順番: mix3 HLe → newdef3 HLe → newdef3 HLf → mix3 HLf。目的値の不一致・異常終了はなし。cand_logs に `WARNING` は 0 件 (結果の .md には警告の列がない)。
+
+| 問題 | 回 | 状態 | 目的値 | 時間 | 最初の解 | ノード |
+|---|---|---|---:|---:|---|---:|
+| gr4x6 | newdef3 HLe / HLf | optimal | 202.35 | 0.05 / 0.04 | 0.016 / 0.014 (229.05) | 0 |
+| | mix3 HLe / HLf | optimal | 202.35 | 0.04 / 0.02 | 0.036 / 0.007 (229.05) | 0 |
+| dcmulti | newdef3 HLe / HLf | optimal | 188182 | 1.16 / 1.02 | 0.402 / 0.460 (194485.1) | 4 |
+| | mix3 HLe / HLf | optimal | 188182 | 1.14 / 1.20 | 0.117 / 0.118 (211471.7) | 4 |
+| fiber | newdef3 HLe / HLf | optimal | 405935.18 | 1.64 / 1.34 | 0.407 (614431.83) / 0.457 (775178.80) | 3 / 1 |
+| | mix3 HLe / HLf | optimal | 405935.18 | 1.51 / 1.37 | 0.135 / 0.137 (1255418.51) | 1 / 1 |
+| nw04 | newdef3 HLe / HLf | optimal | 16862 | 7.60 / 7.67 | 7.470 / 7.520 (52354) | 0 |
+| | mix3 HLe / HLf | optimal | 16862 | 8.56 / 7.98 | 7.911 / 7.239 (53592) | 0 |
+| bppc4-08 | newdef3 HLe / HLf | time_limit | 54 / 54 | 60.04 / 60.05 | 1.693 / 1.543 (94) | 23873 / 26267 |
+| | mix3 HLe / HLf | time_limit | 55 / 54 | 60.09 / 60.04 | 0.920 (55) / 0.732 (108) | 30208 / 29421 |
+| neos-950242 | newdef3 HLe / HLf | optimal | 4 | 15.39 / 12.90 | 8.524 / 8.157 (19) | 0 / 1 |
+| | mix3 HLe / HLf | **time_limit・解なし** | - | 60.20 / 60.25 | なし | 0 |
+| mzzv42z | newdef3 HLe / HLf | time_limit | -20430 / -19800 | 60.05 / 62.05 | 9.991 / 8.965 (-990) | 0 / 6 |
+| | mix3 HLe / HLf | time_limit | -20300 / -20040 | 60.05 / 60.07 | 7.342 / 8.155 (-3620) | 0 |
+
+- **neos-950242 の後退**: mix3 は 2 回とも解なしで時間切れ (e88bf56 の mix2 では最初の解が最適 4 で 8.7/9.0 s)。ログを取って 1 回再現した (`analysis/heur_ls_20261023/logs/neos-950242_mix3s4_1.log`)。`MIP: Local-MIP solution accepted false (5.92s)` で Local-MIP の解が受け入れられず、FJ の解も出ないので、find thread が回らない。根のヒューリスティクスは RENS が 2 本とも Infeasible、feasibility pump が 46 s かかり、57.4 s まで続く。最後に `symmetry: 0 heuristic solutions mapped ..., 2 could not be` が出る。`WARNING` は出ていない。同じ機械の既定 (`logs/neos-950242_def3s4_1.log`) は FJ で 19 (6.3 s)、find thread で 4 (8.8 s) が出て、16.1 s で最適になる。
+- 時間の上限の超過: mix3 は 4 回とも 60.1 s 以内に収まった (直っている)。ただし newdef3 HLf の mzzv42z は 62.05 s (既定でも 2 秒超えることがある)。
+- 他は f970f87・e88bf56 と同じ傾向 (dcmulti・fiber・bppc4-08 は mix3 で最初の解が早く、値は悪い。nw04 は mix3 が 2 組とも少し長い 8.56/7.98 vs 7.60/7.67)。
