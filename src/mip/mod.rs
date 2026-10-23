@@ -124,6 +124,11 @@ pub(crate) fn record_incumbent(z: f64) {
     }
 }
 
+/// 外側の求解の始まりからの経過秒 ([`RUN_STATS`] の時計。再スタートで戻らない。記録がなければ 0)。
+pub(crate) fn run_elapsed() -> f64 {
+    RUN_STATS.lock().ok().and_then(|s| s.t0.map(|t0| t0.elapsed().as_secs_f64())).unwrap_or(0.0)
+}
+
 /// 根の下界の記録 ([`RUN_STATS`])。
 pub(crate) fn record_root_bound(z: f64) {
     if let Ok(mut s) = RUN_STATS.lock() {

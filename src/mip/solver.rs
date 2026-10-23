@@ -3327,7 +3327,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 再スタート前の根でだけ、暫定解と根の LP 値の差が相対 `ENOMOTO_T_MIP_HSUB_MIN_GAP` (0.01) を超えるときだけ
                 // (qnet1 は差 0.6% で、再スタートのたびに根で 5〜15 秒使い 3.6 秒 -> 49 秒になった)
                 let hs_gap = |s: &Self, lb: f64| s.incumbent.as_ref().is_some_and(|(z, _)| (z - lb) / z.abs().max(1.0) > tunable!("ENOMOTO_T_MIP_HSUB_MIN_GAP", 0.01, f64));
-                if hs_gap(self, root_obj) && !self.params.submip && self.params.restarts == 0 {
+                // さらに外側の求解の始まりから `ENOMOTO_T_MIP_HSUB_ROOT_MIN_SECS` (10) 秒たってから (速く解ける問題で使わない。
+                // misc07・mik-250-20-75-4・qnet1 は根で 1 回 5〜15 秒使い、7〜12 秒で解けていたのが 33〜45 秒になった)
+                let hs_late = super::run_elapsed() >= tunable!("ENOMOTO_T_MIP_HSUB_ROOT_MIN_SECS", 10.0, f64);
+                if hs_gap(self, root_obj) && hs_late && !self.params.submip && self.params.restarts == 0 {
                     if hsub_mode(env_str!("ENOMOTO_MIP_LB2")).0 {
                         heur!("local branching 2", self.local_branching2(root_obj, 1.0));
                     }
@@ -4410,7 +4413,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let budget_ok = self.hsub_secs < tunable!("ENOMOTO_T_MIP_HSUB_TREE_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64();
                         let lb = self.queue.best_lower_bound().min(node_obj);
                         let gap_ok = (zi - lb) / zi.abs().max(1.0) > tunable!("ENOMOTO_T_MIP_HSUB_MIN_GAP", 0.01, f64);
-                        if zi < self.hsub_center_z - 1e-9 * zi.abs().max(1.0) && budget_ok && gap_ok {
+                        // 外側の求解の始まりから `ENOMOTO_T_MIP_HSUB_TREE_MIN_SECS` (15) 秒たってから
+                        let late = super::run_elapsed() >= tunable!("ENOMOTO_T_MIP_HSUB_TREE_MIN_SECS", 15.0, f64);
+                        if zi < self.hsub_center_z - 1e-9 * zi.abs().max(1.0) && budget_ok && gap_ok && late {
                             let t_h = Instant::now();
                             if lb2_tree {
                                 self.heur_label = "tree local branching 2";
