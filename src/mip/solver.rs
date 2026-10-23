@@ -215,6 +215,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) sb_lps: u64,
     /// 分枝の選択の回数と、そのうち双対退化で強分岐をしなかった回数 (診断用)。
     pub(super) sb_degen_stats: [u64; 2],
+    /// `ENOMOTO_MIP_SB_AGREE` (試作): 直近の強分岐で、擬似費用の 1 位が強分岐の 1 位と (ほぼ) 一致したか ([`Solver::sb_agree_learned`])
+    sb_agree: std::collections::VecDeque<bool>,
+    /// `ENOMOTO_MIP_SB_AGREE`: 学べたと判断して強分岐を省いたノードの数 (間隔 `ENOMOTO_T_MIP_SB_AGREE_PROBE` ごとに強分岐を続ける)
+    sb_agree_tick: u64,
+    /// `ENOMOTO_MIP_SB_AGREE` の集計: [判定した回, 一致した回, 強分岐を省いたノード]
+    sb_agree_stats: [u64; 3],
     /// 直前の分枝の選択で、選んだ列の強分岐の子の LP 値 (列, 下の子, 上の子)。最適まで解けなかった側は -inf。
     pub(super) last_sb: Option<(usize, f64, f64)>,
     /// clique カット用の 2 値列の衝突グラフ (根で作る)。
@@ -741,6 +747,13 @@ fn tree_root_basis() -> bool {
 /// その基底も最初の根で使い切る)
 pub(crate) fn restart_basis_on() -> bool {
     env_str!("ENOMOTO_MIP_RESTART_BASIS").is_some()
+}
+
+/// `ENOMOTO_MIP_SB_AGREE` (試作、既定では使わない): 強分岐と擬似費用の選び方の一致を見て、十分に学べたら強分岐を省く
+/// ([`Solver::sb_agree_learned`])。h80x6320d・roll3000 は強分岐の予算を増やすと木が小さくなる (`ENOMOTO_MIP_SB_BUDGET_HIGHS`) が、
+/// 10teams・cvs16r128-89 などは予算を増やすと遅くなる。擬似費用で同じ列を選べる問題では強分岐を早く切り上げる
+fn sb_agree_on() -> bool {
+    env_str!("ENOMOTO_MIP_SB_AGREE").is_some()
 }
 
 /// 行の中身を照らし合わせるための鍵: 列の番号の順に並べ、最初の係数の絶対値で割り、最初の係数が負なら符号を反転する
@@ -1621,6 +1634,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_secs: 0.0,
         sb_lps: 0,
         sb_degen_stats: [0; 2],
+        sb_agree: std::collections::VecDeque::new(),
+        sb_agree_tick: 0,
+        sb_agree_stats: [0; 3],
         last_sb: None,
         clique_graph: None,
         clique_auto: None,
@@ -6352,6 +6368,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         );
     }
 
+    /// `ENOMOTO_MIP_SB_AGREE`: 強分岐した候補のうち擬似費用のスコア (強分岐の前の予想) が 1 位の候補が、強分岐のスコアでも
+    /// 1 位か、1 位との差が `ENOMOTO_T_MIP_SB_AGREE_TOL` (0.1) 以内なら「一致」として、直近 `ENOMOTO_T_MIP_SB_AGREE_WIN` (20) 回を覚える。
+    /// 差の小さい組は、どちらを選んでも木がほとんど変わらないので一致に数える
+    fn sb_agree_record(&mut self, ev: &[(f64, f64)]) {
+        let best_sb = ev.iter().map(|e| e.1).fold(f64::NEG_INFINITY, f64::max);
+        let pc_pick = ev.iter().max_by(|a, b| a.0.total_cmp(&b.0)).map_or(f64::NEG_INFINITY, |e| e.1);
+        let tol = tunable!("ENOMOTO_T_MIP_SB_AGREE_TOL", 0.1, f64);
+        let agree = pc_pick >= best_sb - tol * best_sb.abs();
+        let win = tunable!("ENOMOTO_T_MIP_SB_AGREE_WIN", 20usize, usize).max(1);
+        self.sb_agree.push_back(agree);
+        while self.sb_agree.len() > win {
+            self.sb_agree.pop_front();
+        }
+        self.sb_agree_stats[0] += 1;
+        self.sb_agree_stats[1] += agree as u64;
+    }
+
+    /// `ENOMOTO_MIP_SB_AGREE`: 直近の窓が埋まっていて、一致の割合が `ENOMOTO_T_MIP_SB_AGREE_THR` (0.8) 以上か
+    fn sb_agree_learned(&self) -> bool {
+        if !sb_agree_on() {
+            return false;
+        }
+        let win = tunable!("ENOMOTO_T_MIP_SB_AGREE_WIN", 20usize, usize).max(1);
+        self.sb_agree.len() >= win && self.sb_agree.iter().filter(|&&a| a).count() as f64 >= tunable!("ENOMOTO_T_MIP_SB_AGREE_THR", 0.8, f64) * win as f64
+    }
+
     fn select_branch(&mut self, frac: &[(usize, f64)], node_obj: f64, depth: usize) -> BranchAction {
         let t0 = Instant::now();
         self.last_sb = None;
@@ -6396,7 +6438,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         self.sb_degen_stats[0] += 1;
         self.sb_degen_stats[1] += degenerate as u64;
-        let allow_sb = sb <= maxsb && !degenerate;
+        // `ENOMOTO_MIP_SB_AGREE` (試作): 擬似費用の選び方が強分岐と十分に一致するようになったら (根以外)、強分岐を省いて
+        // 擬似費用だけで分枝する。学び続けるため、省いたノードの `ENOMOTO_T_MIP_SB_AGREE_PROBE` 回に 1 回は強分岐する
+        let agree_skip = depth > 0 && self.sb_agree_learned() && {
+            self.sb_agree_tick += 1;
+            self.sb_agree_tick % tunable!("ENOMOTO_T_MIP_SB_AGREE_PROBE", 10u64, u64).max(1) != 0
+        };
+        self.sb_agree_stats[2] += agree_skip as u64;
+        let allow_sb = sb <= maxsb && !degenerate && !agree_skip;
         // 信頼度のしきい値: 予算の残りに応じて 1..5
         let mut prio = ((maxsb - sb) / (sb + 1.0)).min(1.0);
         prio = prio.max((quot - sb) / (sb + 1.0)).max(0.0);
@@ -6427,6 +6476,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             && env_str!("ENOMOTO_MIP_PAR_SB").is_some()
             && self.pool.as_ref().is_none_or(|pl| pl.idle.load(std::sync::atomic::Ordering::Relaxed) + 1 >= pl.threads);
         let mut pre: std::collections::HashMap<usize, [SbSide; 2]> = std::collections::HashMap::new();
+        // このノードで強分岐した候補の (擬似費用のスコア (強分岐の前), 強分岐のスコア)。`ENOMOTO_MIP_SB_AGREE` の一致の判定に使う
+        let mut sb_eval: Vec<(f64, f64)> = Vec::new();
         for (ci, &(j, v, pscore)) in cands.iter().enumerate() {
             let is_reliable = (self.pc.min_observations(j) as f64) >= reliable_thr;
             if is_reliable || !allow_sb || tried >= max_tried || no_improve >= lookahead as f64 || self.time_up() || (self.sb_iters as f64) > maxsb {
@@ -6678,6 +6729,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             let score = if hybrid { self.pc.hybrid_score_with_gains(j, gains[0], gains[1]) } else { gains[0].max(1e-6) * gains[1].max(1e-6) };
+            sb_eval.push((pscore, score));
             if best.is_none_or(|(_, _, s)| score > s) {
                 best = Some((j, v, score));
                 best_sb = Some((j, child_obj[0], child_obj[1]));
@@ -6687,6 +6739,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 no_improve += 1.0;
             }
+        }
+        if sb_agree_on() && sb_eval.len() >= 2 {
+            self.sb_agree_record(&sb_eval);
         }
         if bound_changes > 0 {
             return BranchAction::Resolve;
@@ -10347,6 +10402,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
             }
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
+            if sb_agree_on() {
+                eprintln!("MIP: branching: strong branching vs pseudocost: {} of {} agreed, {} nodes without strong branching", self.sb_agree_stats[1], self.sb_agree_stats[0], self.sb_agree_stats[2]);
+            }
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
             eprintln!("MIP: node diag: nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}", self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows());
             if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() || self.tree_sep {
