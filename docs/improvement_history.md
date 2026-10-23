@@ -9906,6 +9906,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - sq で速い: 10teams (27 → 5 秒)、drayage、h80x6320d、rout。遅い: noswot、qiu、mc11 (SQa)。
 - 不一致 0、"MIP: WARNING" 0。40 問で解けた数が合わせて 1 減るので既定にしない (保留)。試作は develop に入っている (環境変数で有効)。
 
+## 2026-10-23: directed cutoff distance の修正版 (CUTSEL_DCD=1 + DCD_T=1) も不採用
+
+- 前回の計測 (DCa・DCb) の版はサブ MIP の中の根のループでも DCD を使う不具合があった。直した版 (dircutoff 0815ea4、サブ MIP では使わない、t = DCD/‖x*−x‖ を効き目の尺度で足す `ENOMOTO_MIP_CUTSEL_DCD_T`) を 15f5b06 (develop 1dce787 + dircutoff) で 40 + 16 問、newdef / dct を 2 組。
+- 40 問 (解けた・SGM): DTa newdef 26・19.68 / dct 26・19.77、DTb dct 26・19.77 / newdef 26・19.85。
+- 16 問: DTa 11・32.83 / 11・32.06 (dct で mc11 を解き neos-960392 を落とす)、DTb dct 10・33.10 / newdef 12・31.32 (dct で mc11・neos-960392 を落とす)。
+- dct で速い: neos-911970 (DTb 29 → 20 秒)、10teams (17.5 → 7.8 秒)。遅い: mik-250 (5〜8 → 13 秒)。roll3000 は解けない (暫定解は 12890 = 最適値まで届く)。
+- 不一致 0、"MIP: WARNING" 0。16 問で合わせて 2 減るので既定にしない。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
