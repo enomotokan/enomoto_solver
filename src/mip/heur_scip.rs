@@ -425,6 +425,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose && self.nodes <= 1 {
                     eprintln!("MIP:   local search (parallel): least violation {v:.3e}");
                 }
+                self.note_point(&x, "local search");
                 self.repair_start = Some(x);
             }
             return match feas {
@@ -444,6 +445,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.params.verbose && self.nodes <= 1 {
                 eprintln!("MIP:   local search: least violation {v:.3e}");
             }
+            self.note_point(&x, "local search");
             self.repair_start = Some(x);
         }
         match feas {
@@ -552,6 +554,52 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some(o) => ((**o).clone(), o.col_lo.clone(), o.col_up.clone()),
             None => (self.p.clone(), self.dom.lo.clone(), self.dom.up.clone()),
         }
+    }
+
+    /// 実行可能でない点 `x` を出どころ `src` の候補として [`Self::inf_pool`] に記録する (`ENOMOTO_MIP_FJ_REPAIR` / `ENOMOTO_MIP_FJ_STATS` のとき、
+    /// 外側の求解の根で暫定解がないときだけ)。出どころごとに違反の行の数 (同じなら違反量の合計) の最も少ない点を残す。
+    pub(super) fn note_point(&mut self, x: &[f64], src: &'static str) {
+        if self.params.submip || self.incumbent.is_some() || self.nodes > 1 || x.len() != self.p.n || !super::fj::fj_best_inf_on() {
+            return;
+        }
+        let src = if src.is_empty() { "other" } else { src };
+        let (k, v) = match &self.orig {
+            Some(o) => viol_stats(o, x),
+            None => viol_stats(self.p, x),
+        };
+        if k == 0 {
+            return;
+        }
+        match self.inf_pool.iter_mut().find(|e| e.0 == src) {
+            Some(e) => {
+                if (k, v) < (e.1, e.2) {
+                    *e = (src, k, v, x.to_vec(), false);
+                }
+            }
+            None => self.inf_pool.push((src, k, v, x.to_vec(), false)),
+        }
+    }
+
+    /// 根のヒューリスティクスの後で暫定解がなければ、[`Self::inf_pool`] のまだ使っていない点のうち違反の行の数が最も少ないものから
+    /// FJ 修復のサブ MIP ([`Self::spawn_fj_repair`]) を始める (前の修復が終わっていれば)。出どころごとの最良の点を出す (診断)。
+    pub(super) fn pool_repair(&mut self) {
+        if self.params.submip || !super::fj::fj_best_inf_on() {
+            return;
+        }
+        if self.params.verbose || env_str!("ENOMOTO_MIP_FJ_STATS").is_some() {
+            let s: Vec<String> = self.inf_pool.iter().map(|e| format!("{}: {} rows {:.3e}{}", e.0, e.1, e.2, if e.4 { " (used)" } else { "" })).collect();
+            eprintln!("MIP: infeasible point pool: incumbent {}, [{}] ({:.2}s)", self.incumbent.is_some(), s.join("; "), self.start.elapsed().as_secs_f64());
+        }
+        if self.incumbent.is_some() || self.fjr_thread.is_some() || env_str!("ENOMOTO_MIP_FJ_REPAIR").is_none() {
+            return;
+        }
+        let Some(k) = (0..self.inf_pool.len()).filter(|&k| !self.inf_pool[k].4).min_by(|&a, &b| (self.inf_pool[a].1, self.inf_pool[a].2).partial_cmp(&(self.inf_pool[b].1, self.inf_pool[b].2)).unwrap()) else { return };
+        self.inf_pool[k].4 = true;
+        let x = self.inf_pool[k].3.clone();
+        if self.params.verbose || env_str!("ENOMOTO_MIP_FJ_STATS").is_some() {
+            eprintln!("MIP: FJ repair from the pool point of {}", self.inf_pool[k].0);
+        }
+        self.spawn_fj_repair(x);
     }
 
     /// FJ 修復 (`ENOMOTO_MIP_FJ_REPAIR`、試作・既定では使わない): FJ の最良の点 `x` (違反の行の数が最も少ない点) で違反している行が

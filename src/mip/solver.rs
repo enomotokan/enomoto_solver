@@ -346,6 +346,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 戻り値は (解, FJ の最良の点 ([`super::fj::take_best_inf`]、`ENOMOTO_MIP_FJ_REPAIR` / `ENOMOTO_MIP_FJ_STATS` のときだけ))。
     fj_thread: Option<(std::thread::JoinHandle<(Option<Vec<f64>>, super::fj::BestInf)>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// FJ の最良の点から作ったサブ MIP を解く別スレッド ([`Solver::spawn_fj_repair`]、`ENOMOTO_MIP_FJ_REPAIR`)。戻り値は (解, ログ)
+    /// 暫定解がない間に各ヒューリスティクスが作った実行可能でない点のうち、出どころごとに違反の行の数 (同じなら違反量) が最も少ないもの
+    /// (出どころ, 違反の行の数, 違反量, 点, 修復に使ったか)。`ENOMOTO_MIP_FJ_REPAIR` / `ENOMOTO_MIP_FJ_STATS` のとき根でだけ集める ([`Solver::note_point`])
+    pub(super) inf_pool: Vec<(&'static str, usize, f64, Vec<f64>, bool)>,
     pub(super) fjr_thread: Option<std::thread::JoinHandle<(Option<Vec<f64>>, String)>>,
     /// 根のヒューリスティクスの最初に別スレッドで始めた局所探索 (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`。結果は元の位置で受け取る)。
     pub(super) ls_thread: Option<std::thread::JoinHandle<super::heuristics::LocalSearchResult>>,
@@ -1539,6 +1542,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_is_rens: false,
         fj_thread: None,
         fjr_thread: None,
+        inf_pool: Vec::new(),
         ls_thread: None,
         find_thread: None,
         find_out: None,
@@ -2265,8 +2269,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !self.p.is_feasible(&x, FEASTOL) {
             // 対称性の行・固定だけに反する解: 元の問題で実行可能なら、オービトープの列を辞書式の順に並べ替える
             // (対称性で写すので実行可能性と目的値は変わらない)
-            let Some(orig) = self.orig.clone() else { return false };
+            let Some(orig) = self.orig.clone() else {
+                self.note_point(&x, self.heur_label);
+                return false;
+            };
             if !orig.is_feasible(&x, FEASTOL) {
+                self.note_point(&x, self.heur_label);
                 return false;
             }
             for o in self.orbitopes.iter() {
@@ -3232,6 +3240,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.noinc_like() && env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() {
                     heur!("local search", self.local_search_heur());
                 }
+                // FJ 修復 (`ENOMOTO_MIP_FJ_REPAIR`、試作): 暫定解がなければ、各ヒューリスティクスの点のうち違反の最も少ないものから
+                self.poll_fj_repair(false);
+                self.pool_repair();
                 if self.noinc_like() && env_str!("ENOMOTO_MIP_NO_REPAIR").is_none() {
                     heur!("repair", self.repair(&x));
                 }
@@ -8744,6 +8755,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.start.elapsed().as_secs_f64()
                     );
                     if let Some((_, _, x)) = best {
+                        self.note_point(&x, "feasibility jump");
+                        if let Some(e) = self.inf_pool.iter_mut().find(|e| e.0 == "feasibility jump" && env_str!("ENOMOTO_MIP_FJ_REPAIR").is_some() && self.incumbent.is_none()) {
+                            e.4 = true;
+                        }
                         self.spawn_fj_repair(x);
                     }
                 }

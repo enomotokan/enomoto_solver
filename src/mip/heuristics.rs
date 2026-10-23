@@ -387,6 +387,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 };
             }
             let found = self.fix_and_propagate(&target, &order);
+            if !found {
+                self.note_point(&target, "randomized rounding");
+            }
             if env_str!("ENOMOTO_MIP_DEBUG_RR").is_some() {
                 eprintln!("RR try {t}: {:.3}s found {found} prop_work {}", t0.elapsed().as_secs_f64(), self.dom.debug_work());
             }
@@ -811,6 +814,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             r = rp;
+            self.note_point(&r, "feasibility pump");
             // 距離の目的
             let mut c = vec![0.0; n];
             for &j in &ints {
