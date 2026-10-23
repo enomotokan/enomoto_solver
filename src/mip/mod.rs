@@ -696,7 +696,29 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     let mut ref_shift: Option<f64> = None;
     match (&presolved, start) {
         (Some(Presolved::Reduced { prob, scaling, .. }), Some(x)) if x.len() == prob.n => {
-            let xr: Vec<f64> = x.iter().zip(&scaling.d).map(|(v, d)| v / d).collect();
+            let mut xr: Vec<f64> = x.iter().zip(&scaling.d).map(|(v, d)| v / d).collect();
+            // 診断用 (`ENOMOTO_MIP_START_FILE`、最初の求解だけ): 前処理で消された (固定された) 列は、元の問題の解の値の代わりに
+            // 前処理後の固定値にする (代入で消えた列の値は残りの列で決まるので、残りの列の値はそのまま使える)
+            if params.restarts == 0 && env_str!("ENOMOTO_MIP_START_FILE").is_some() {
+                let mut nfix = 0;
+                for j in 0..prob.n {
+                    if prob.col_lo[j] == prob.col_up[j] && xr[j] != prob.col_lo[j] {
+                        xr[j] = prob.col_lo[j];
+                        nfix += 1;
+                    }
+                }
+                if !prob.is_feasible(&xr, 1e-6) {
+                    let bad: Vec<usize> = (0..prob.m)
+                        .filter(|&i| {
+                            let a: f64 = prob.rows[i].iter().map(|&(j, v)| v * xr[j]).sum();
+                            a < prob.row_lo[i] - 1e-6 * (1.0 + prob.row_lo[i].abs()) || a > prob.row_up[i] + 1e-6 * (1.0 + prob.row_up[i].abs())
+                        })
+                        .collect();
+                    eprintln!("MIP_START_FILE: {nfix} presolve-fixed columns reset; {} rows violated (first {:?})", bad.len(), &bad[..bad.len().min(5)]);
+                } else {
+                    eprintln!("MIP_START_FILE: {nfix} presolve-fixed columns reset; feasible in the presolved problem");
+                }
+            }
             if params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_REF").is_some() {
                 ref_shift = Some(p.objective(&x) - prob.objective(&xr));
             }

@@ -12,6 +12,8 @@ use super::lp::{LpStatus, SolveLimits, VarStatus};
 use super::solver::Solver;
 
 thread_local! {
+    /// `ENOMOTO_MIP_INJECT_ROUND=prog` で読んだ各行の HiGHS のラウンド (診断用)
+    static INJ_ROUND: std::cell::RefCell<Vec<i64>> = const { std::cell::RefCell::new(Vec::new()) };
     /// `ENOMOTO_MIP_CLIQUE_CUTS=auto` の、最初の求解 (再スタート前) の判定。再スタートの後の求解が引き継ぐ
     static CLIQUE_AUTO_FIRST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// `ENOMOTO_MIP_CLIQUE_CUTS=fallback` で clique カットを加えて回す 2 回目のループの中か (時間の上限をループの始めから数える)
@@ -81,6 +83,79 @@ fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
     }
     cands.swap(n0, bi);
     cands.truncate(n0 + 1);
+}
+
+/// 診断 (`ENOMOTO_MIP_INJECT_CUTS=ファイル`): HiGHS の計装版 (`HIGHS_LPCUT_DUMP`) が書き出した、根のカットのループの
+/// ラウンドごとの LP のカットの行を読む。`ENOMOTO_MIP_INJECT_ROUND=k` のブロック (`R k ...`、既定はファイルの最後の
+/// ブロック = ループの後の LP) の行を `係数 . x <= 右辺` の形で返す。列の番号は元の問題のもので、前処理なし
+/// (`ENOMOTO_MIP_NO_PRESOLVE`) の求解でだけ使う (列の数が合わなければ空)。
+fn load_injected_cuts(n: usize, var: &str) -> Vec<(Vec<(usize, f64)>, f64)> {
+    let Some(path) = std::env::var(var).ok() else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        eprintln!("INJECT: cannot read {path}");
+        return Vec::new();
+    };
+    let want: Option<i64> = if var == "ENOMOTO_MIP_INJECT_CAND" { None } else { env_str!("ENOMOTO_MIP_INJECT_ROUND").and_then(|v| v.parse().ok()) };
+    let mut blocks: Vec<(i64, Vec<(Vec<(usize, f64)>, f64)>)> = Vec::new();
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        match it.next() {
+            Some("R") => {
+                let k: i64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(-1);
+                blocks.push((k, Vec::new()));
+            }
+            Some("C") => {
+                let Some(b) = blocks.last_mut() else { continue };
+                let lo: f64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(f64::NEG_INFINITY);
+                let up: f64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(f64::INFINITY);
+                let len: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let mut coefs = Vec::with_capacity(len);
+                let mut bad = false;
+                for _ in 0..len {
+                    let j: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+                    let a: f64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                    if j >= n {
+                        bad = true;
+                    }
+                    coefs.push((j, a));
+                }
+                if bad {
+                    continue;
+                }
+                if up < 1e29 {
+                    b.1.push((coefs.clone(), up));
+                }
+                if lo > -1e29 {
+                    b.1.push((coefs.iter().map(|&(j, a)| (j, -a)).collect(), -lo));
+                }
+            }
+            _ => {}
+        }
+    }
+    // `ENOMOTO_MIP_INJECT_ROUND=prog`: 最初のループのブロック (1..999) の行を順に、ブロックの番号を付けて返す ([`Candidate`] に
+    // する側が、こちらのラウンド r ではブロック r+1 までのものだけを使う)
+    if env_str!("ENOMOTO_MIP_INJECT_ROUND") == Some("prog") && var == "ENOMOTO_MIP_INJECT_CUTS" {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (k, b) in blocks.into_iter().filter(|b| b.0 >= 1 && b.0 < 1000) {
+            for (c, r) in b {
+                let key = (c.iter().map(|&(j, a)| (j, a.to_bits())).collect::<Vec<_>>(), r.to_bits());
+                if seen.insert(key) {
+                    INJ_ROUND.with(|v| v.borrow_mut().push(k));
+                    out.push((c, r));
+                }
+            }
+        }
+        eprintln!("INJECT: {} cuts from {path} (progressive)", out.len());
+        return out;
+    }
+    let pick = match want {
+        Some(k) => blocks.into_iter().find(|b| b.0 == k),
+        None => blocks.pop(),
+    };
+    let cuts = pick.map(|b| b.1).unwrap_or_default();
+    eprintln!("INJECT: {} cuts from {path} (round {want:?})", cuts.len());
+    cuts
 }
 
 struct Candidate {
@@ -495,6 +570,45 @@ impl<'a, L: MipLp> Solver<'a, L> {
         CUT_EXTENDED.with(|c| c.set(false));
         // ラウンドごとの目的値 (`ENOMOTO_MIP_CUT_EXTEND` の判定用。最初は根の LP の値)
         let mut ext_hist: Vec<f64> = vec![first_obj];
+        // `ENOMOTO_MIP_CUTSEL_FEEDBACK` (試作): 既定の選択の質の閾値 (最良の `ENOMOTO_T_CUTSEL_MIN_REL` 倍) を、前のラウンドの
+        // 目的値の伸びで変える。伸びが |目的値| の `ENOMOTO_T_CUTSEL_FB_TAU` 倍 (1e-3) 未満なら閾値を半分に (`ENOMOTO_T_CUTSEL_FB_FLOOR`
+        // (0.05) まで)、それ以上なら元に戻す。退化した LP では効き目の大きい疎なカット (roll3000 の x_i - x_j <= 0) が目的値を
+        // 動かさず、それが質の基準になって、効き目は 0.1 程度でも目的値を大きく動かす密なカットが閾値で落ちる
+        // (analysis/cutloop_hl_20261022.md: HiGHS のラウンド 3 の LP で、HiGHS が入れた 22 本のうち閾値で落ちる 13 本に、単独で +193・+100・+30 の
+        // カットがある。閾値なしなら HiGHS と同じ 11648、既定の閾値では 11349)
+        // 値が `main` なら、根のヒューリスティクスの間にカットを強める求解 (裏のカットのループ) では使わない
+        let fb_env = env_str!("ENOMOTO_MIP_CUTSEL_FEEDBACK");
+        let fb_on = !self.params.submip && fb_env.is_some() && !(fb_env.as_deref() == Some("main") && job.is_some());
+        let fb_base = tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64);
+        let mut fb_rel = fb_base;
+        // `ENOMOTO_MIP_CUTSEL_DCD` の方向 (暫定解の有無) をループごとに 1 回だけ書く
+        let mut dbg_dcd_first = !self.params.submip;
+        let mut dbg_dcd_bg = true;
+        // 診断 (`ENOMOTO_MIP_INJECT_CUTS`、[`load_injected_cuts`]): HiGHS の根のカットを、最初の求解の根のループで使う。
+        // `ENOMOTO_MIP_INJECT_MODE=lp` (既定): ループの前に全部 LP に入れて解く (その後は既定のループ)。`cand`: 毎ラウンド、
+        // 今の LP 解を切るものを候補に混ぜて既定の選択に通す (`ENOMOTO_MIP_INJECT_ONLY` ならこちらの分離の候補は捨てる)
+        // `ENOMOTO_MIP_INJECT_CAND=ファイル`: 候補に混ぜるカットを別のファイル (最後のブロック) から読む (`ENOMOTO_MIP_INJECT_CUTS` は LP に入れる方)
+        let inject_ok = !self.params.submip && job.is_none() && self.params.restarts == 0;
+        let inject_on = inject_ok && env_str!("ENOMOTO_MIP_INJECT_CUTS").is_some();
+        let cand_file = inject_ok && env_str!("ENOMOTO_MIP_INJECT_CAND").is_some();
+        let inject_cand = cand_file || (inject_on && env_str!("ENOMOTO_MIP_INJECT_MODE") == Some("cand"));
+        let inject_only = inject_cand && env_str!("ENOMOTO_MIP_INJECT_ONLY").is_some();
+        let lp_cuts = if inject_on && !(inject_cand && !cand_file) { load_injected_cuts(n, "ENOMOTO_MIP_INJECT_CUTS") } else { Vec::new() };
+        let inj_cuts = if cand_file { load_injected_cuts(n, "ENOMOTO_MIP_INJECT_CAND") } else if inject_cand { load_injected_cuts(n, "ENOMOTO_MIP_INJECT_CUTS") } else { Vec::new() };
+        let inj_keys: std::collections::HashSet<(usize, u64, usize)> = inj_cuts.iter().map(|(c, r)| (c.len(), r.to_bits(), c.first().map_or(0, |e| e.0))).collect();
+        if !lp_cuts.is_empty() {
+            let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = lp_cuts.iter().map(|(c, r)| (c.clone(), f64::NEG_INFINITY, *r)).collect();
+            let it0 = self.lp.total_iterations();
+            let t0 = std::time::Instant::now();
+            self.add_cut_rows(&rows);
+            let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+            eprintln!("INJECT: added {} cuts to the root LP: {st:?}, obj {:.10e} ({} iters, {:.2}s)", rows.len(), self.lp.objective() + p.offset, self.lp.total_iterations() - it0, t0.elapsed().as_secs_f64());
+            if st != LpStatus::Optimal {
+                return false;
+            }
+            prev_obj = self.lp.objective();
+            prev_nfrac = self.fractional(&self.lp.col_values()).len();
+        }
         loop {
             self.poll_fj_thread();
             if self.root_gap_closed() {
@@ -638,6 +752,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
                 }
             }
+            let mut inj_in = 0usize;
+            if inject_cand {
+                if inject_only {
+                    cands.clear();
+                    face_cands.clear();
+                }
+                let inj_rounds = INJ_ROUND.with(|v| v.borrow().clone());
+                for (ci, (c, r)) in inj_cuts.iter().enumerate() {
+                    if inj_rounds.get(ci).is_some_and(|&k| k > round as i64 + 1) {
+                        continue;
+                    }
+                    let act: f64 = c.iter().map(|&(j, a)| a * x[j]).sum();
+                    let norm = c.iter().map(|&(_, a)| a * a).sum::<f64>().sqrt();
+                    if act - r > 1e-6 * (1.0 + r.abs()) && norm > 0.0 {
+                        cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: (act - r) / norm, forced: false, src: 0 });
+                        inj_in += 1;
+                    }
+                }
+            }
+            // 診断 (`ENOMOTO_MIP_DEBUG_CAND_DUMP=ファイル`): 各ラウンドの候補 (選択の前) を `R ラウンド` / `C -inf 右辺 長さ 列 係数 ... ` で書き出す
+            if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_CAND_DUMP").filter(|_| !self.params.submip && job.is_none()) {
+                use std::io::Write;
+                if let Ok(mut o) = std::fs::OpenOptions::new().create(true).append(true).open(&f) {
+                    let _ = writeln!(o, "R {round} {} {:.10}", cands.len(), self.lp.objective() + p.offset);
+                    for c in &cands {
+                        let t: Vec<String> = c.coefs.iter().map(|&(j, a)| format!("{j} {a:e}")).collect();
+                        let _ = writeln!(o, "C -inf {:e} {} {} E {:.6} F {}", c.rhs, c.coefs.len(), t.join(" "), c.efficacy, c.forced as u8);
+                    }
+                }
+            }
             let ncands = cands.len() + face_cands.len();
             if ncands == 0 {
                 break;
@@ -668,6 +812,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let max_cuts = tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize).min(p.m.max(50));
             let max_cuts = if adapt_max_cuts > 0 { adapt_max_cuts } else { max_cuts };
             let (forced, cands): (Vec<Candidate>, Vec<Candidate>) = cands.into_iter().partition(|c| c.forced);
+            // カットを強める求解では主の暫定解 (`ENOMOTO_MIP_BG_CUTS_SHARE_INC`) を DCD の向き先に使う
+            let job_inc: Option<Vec<f64>> = job.as_ref().and_then(|j| j.incumbent.lock().unwrap().clone());
+            if job_inc.is_some() && dbg_dcd_bg && self.incumbent.is_none() {
+                eprintln!("CUTSEL_DCD: background round {round}: using the main incumbent");
+                dbg_dcd_bg = false;
+            }
             let chosen = if phase2 {
                 let maxpar = tunable!("ENOMOTO_T_MIP_CUT_PHASE2_MAXPAR", 0.3, f64);
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
@@ -676,6 +826,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
             } else if fc_relax {
                 select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_FC_MIN_REL", 0.0, f64), tunable!("ENOMOTO_T_CUTSEL_FC_MAXPAR", 0.9, f64))
+            } else if let Some(ctx) = DcdCtx::from_env(&x, self.incumbent.as_ref().map(|(_, v)| v.as_slice()).or(job_inc.as_deref())).filter(|_| !self.params.submip || env_str!("ENOMOTO_MIP_CUTSEL_DCD_SUBMIP").is_some()) {
+                // サブ MIP (RINS など) の中では使わない (`ENOMOTO_MIP_CUTSEL_DCD_SUBMIP` で使う。サブ MIP は暫定解を持つので DCD が働き、
+                // 最初の版では mc11・mik-250 のサブ MIP の選択も変わっていた)
+                // 試作 (`ENOMOTO_MIP_CUTSEL_DCD`・`ENOMOTO_MIP_CUTSEL_NORM`、[`DcdCtx`]): スコアに directed cutoff distance を入れる
+                if dbg_dcd_first {
+                    eprintln!("CUTSEL_DCD: round {round} direction {}", if ctx.dir.is_some() { "incumbent" } else { "none (efficacy only)" });
+                    dbg_dcd_first = false;
+                }
+                let rel = if fb_on { fb_rel } else { tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64) };
+                select_cuts_hybrid_dcd(cands, max_cuts, p, rel, tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), anchor, Some(&ctx))
+            } else if fb_on {
+                select_cuts_hybrid_anchor(cands, max_cuts, p, fb_rel, tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), anchor)
             } else if face_anchor >= 1 && env_str!("ENOMOTO_MIP_CUTSEL_OLD").is_none() {
                 select_cuts_hybrid_anchor(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64), tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), anchor)
             } else {
@@ -727,6 +889,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let saturated = adapt_max && chosen.len() >= max_cuts;
             if saturated {
                 adapt_max_cuts = (2 * max_cuts).min(tunable!("ENOMOTO_T_MIP_CUT_ADAPT_MAX_CAP", 500usize, usize)).max(max_cuts);
+            }
+            if inject_cand {
+                let k = chosen.iter().filter(|c| inj_keys.contains(&(c.coefs.len(), c.rhs.to_bits(), c.coefs.first().map_or(0, |e| e.0)))).count();
+                eprintln!("INJECT: round {round}: {inj_in} HiGHS cuts violated (of {ncands} candidates), chosen {k} of {}", chosen.len());
             }
             let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
             total_added += rows.len();
@@ -983,6 +1149,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 prev_nfrac = nfrac;
             }
+            if fb_on {
+                let g = (obj - prev_obj) / obj.abs().max(1.0);
+                fb_rel = if g < tunable!("ENOMOTO_T_CUTSEL_FB_TAU", 1e-3, f64) { (0.5 * fb_rel).max(tunable!("ENOMOTO_T_CUTSEL_FB_FLOOR", 0.05, f64)) } else { fb_base };
+                if self.params.verbose {
+                    eprintln!("MIP: cut round {round}: selection threshold {fb_rel:.3} for the next round (gain {g:.2e})");
+                }
+            }
             prev_obj = obj;
             obj_hist.push(obj);
             ext_hist.push(obj);
@@ -999,7 +1172,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.lp.debug_dse_check(&format!("round {round} after removing {removed} old cuts"));
                 }
             } else if (round + 1) % tunable!("ENOMOTO_T_MIP_CUT_REMOVE_EVERY", 1usize, usize).max(1) == 0 {
-                self.remove_inactive_cuts();
+                self.remove_inactive_cuts_root();
             }
             if dbg_sep {
                 eprintln!("SEP round {round}: removed {} inactive cuts in {:.3}s", rows_before - self.lp.num_rows(), t_rm0.elapsed().as_secs_f64());
@@ -1012,7 +1185,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if prof {
             sepprof::report(&format!("restarts {}", self.params.restarts));
         }
-        self.remove_inactive_cuts();
+        self.remove_inactive_cuts_root();
         if env_str!("ENOMOTO_MIP_DEBUG_FACETIME").is_some() && !self.params.submip {
             eprintln!(
                 "FACETIME {}restarts {} rounds {nrounds}: sep {sep_tot:.2}s (face {:.2}s, {} vertices), LP {lp_tot:.2}s, loop {:.2}s, obj {:.10e}",
@@ -1649,6 +1822,70 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: merged {used} active cuts into one row ({nnz} nonzeros), LP {st:?} obj {:.10e}", self.lp.objective() + self.p.offset);
         }
         true
+    }
+
+    /// 根のカットのループの [`Self::remove_inactive_cuts`]。`ENOMOTO_MIP_CUT_KEEP_DCD=θ` (試作、既定ではなし) なら、暫定解が
+    /// あるとき、外す候補 (緩んでいるカット a·y <= b) のうち、今の LP 解 x から暫定解 x* へ向かう線分の上で超平面に当たる割合
+    /// t = (b - a·x) / (a·d) / |x* - x| (d は単位方向、a·d <= 0 なら当たらない) が θ 以下のものを、t の小さい順に
+    /// `ENOMOTO_T_MIP_CUT_KEEP_DCD_MAX` (50) 本まで残す (LP 解が暫定解の方へ動けば効くカット)
+    fn remove_inactive_cuts_root(&mut self) {
+        let theta = env_str!("ENOMOTO_MIP_CUT_KEEP_DCD").and_then(|v| v.parse::<f64>().ok());
+        let dir = match theta {
+            Some(_) if !self.params.submip => {
+                let x = self.lp.col_values();
+                dcd_direction(&x, self.incumbent.as_ref().map(|(_, v)| v.as_slice())).map(|(d, nd)| (x, d, nd))
+            }
+            _ => None,
+        };
+        let Some((x, d, nd)) = dir else { return self.remove_inactive_cuts() };
+        let theta = theta.unwrap_or(1.0);
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        if mr <= m0 {
+            return;
+        }
+        self.sync_cut_age();
+        let mut cand: Vec<usize> = Vec::new();
+        {
+            let b = self.lp.basis_ref();
+            let act = self.lp.row_activities_ref();
+            for i in m0..mr {
+                if b.row[i] == VarStatus::Basic {
+                    let (_, up) = self.lp.row_bounds(i);
+                    if act[i] < up - 1e-6 * (1.0 + up.abs()) && !self.merged_cuts.contains(&self.cut_ids[i - m0]) {
+                        cand.push(i);
+                    }
+                }
+            }
+        }
+        let mut keep: Vec<(f64, usize)> = Vec::new();
+        for &i in &cand {
+            let row = self.lp.row(i);
+            let (_, up) = self.lp.row_bounds(i);
+            let ad: f64 = row.iter().map(|&(j, v)| v * d[j]).sum();
+            if ad > 1e-9 {
+                let ax: f64 = row.iter().map(|&(j, v)| v * x[j]).sum();
+                let t = (up - ax) / ad / nd;
+                if t <= theta {
+                    keep.push((t, i));
+                }
+            }
+        }
+        keep.sort_by(|a, b| a.0.total_cmp(&b.0));
+        keep.truncate(tunable!("ENOMOTO_T_MIP_CUT_KEEP_DCD_MAX", 50usize, usize));
+        let mut remove = vec![false; mr];
+        for &i in &cand {
+            remove[i] = true;
+        }
+        for &(_, i) in &keep {
+            remove[i] = false;
+        }
+        if env_str!("ENOMOTO_MIP_DEBUG_CUTSEL").is_some() {
+            eprintln!("CUT_KEEP_DCD: {} slack cuts, kept {} (t <= {theta})", cand.len(), keep.len());
+        }
+        if cand.len() > keep.len() {
+            self.delete_lp_rows(&remove);
+        }
     }
 
     /// LP の行のうち、元の行より後ろ (カット) で論理変数が基底にあるものを外す。
@@ -3400,14 +3637,134 @@ fn cut_score(c: &Candidate, p: &MipProblem, cnorm: f64) -> f64 {
     cut_quality(c, p, cnorm) / (c.coefs.len().max(1) as f64).powf(tunable!("ENOMOTO_T_CUTSEL_DENSITY_EXP", 0.0, f64))
 }
 
+/// 選択のスコアに directed cutoff distance を入れる試作の設定 (`ENOMOTO_MIP_CUTSEL_DCD`・`ENOMOTO_MIP_CUTSEL_NORM`、[`DcdCtx::from_env`])。
+pub(super) struct DcdCtx<'x> {
+    /// 今の LP 解 (構造変数)
+    x: &'x [f64],
+    /// 今の LP 解から暫定解へ向かう単位方向 (暫定解がない・同じ点なら `None`)
+    dir: Option<Vec<f64>>,
+    w_eff: f64,
+    w_dcd: f64,
+    norm: bool,
+    /// `ENOMOTO_MIP_CUTSEL_DCD_PROD`: 暫定解があれば積の形のスコア ([`select_cuts_dcd_prod`])
+    prod: bool,
+    /// 暫定解がなければ既定の選択のまま (`ENOMOTO_MIP_CUTSEL_DCD_NOINC_DEF`、`ENOMOTO_MIP_CUTSEL_DCD_T` でも)
+    noinc_def: bool,
+    /// `ENOMOTO_MIP_CUTSEL_DCD_T`: DCD の代わりに t = DCD / |x* - x| (線分のうち切り落とす割合、<= 1) を使う。`1` なら
+    /// t × そのラウンドの最良の効き目 (効き目と同じ尺度)、`raw` なら t そのもの
+    t_mode: Option<bool>,
+    /// |x* - x|
+    dnorm: f64,
+}
+
+impl<'x> DcdCtx<'x> {
+    /// 既定 (どちらの環境変数もない) なら `None`。`ENOMOTO_MIP_CUTSEL_DCD=<重み>` (directed cutoff distance の重み、SCIP の
+    /// `cutselection/hybrid/dircutoffdistweight`)、`ENOMOTO_T_CUTSEL_EFFW` (効き目の重み、1)、`ENOMOTO_MIP_CUTSEL_NORM=1`
+    /// (効き目と directed cutoff distance をそのラウンドの候補の最良で割って 0〜1 にそろえる)。暫定解 `inc` (今の問題の列) の
+    /// 代わりに `ENOMOTO_MIP_CUTSEL_DCD_SOL=ファイル` (1 行 1 値、列の数が合うときだけ。前処理なしの診断用) の点へ向かう方向を使える
+    pub(super) fn from_env(x: &'x [f64], inc: Option<&[f64]>) -> Option<Self> {
+        let w_dcd = env_str!("ENOMOTO_MIP_CUTSEL_DCD").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        let norm = env_str!("ENOMOTO_MIP_CUTSEL_NORM").is_some_and(|v| v != "0");
+        let prod = env_str!("ENOMOTO_MIP_CUTSEL_DCD_PROD").is_some_and(|v| v != "0");
+        let t_mode = match env_str!("ENOMOTO_MIP_CUTSEL_DCD_T") {
+            Some("raw") => Some(false),
+            Some(v) if v != "0" => Some(true),
+            _ => None,
+        };
+        let noinc_def = t_mode.is_some() || env_str!("ENOMOTO_MIP_CUTSEL_DCD_NOINC_DEF").is_some_and(|v| v != "0");
+        if w_dcd <= 0.0 && !norm && !prod {
+            return None;
+        }
+        let (dir, dnorm) = match dcd_direction(x, inc) {
+            Some((d, nd)) => (Some(d), nd),
+            None => (None, 0.0),
+        };
+        Some(DcdCtx { x, dir, w_eff: tunable!("ENOMOTO_T_CUTSEL_EFFW", 1.0, f64), w_dcd, norm, prod, noinc_def, t_mode, dnorm })
+    }
+
+    /// SCIP の `SCIProwGetLPSolCutoffDistance`: 今の LP 解 x から暫定解 x* へ向かう単位方向 d = (x* - x) / |x* - x| に沿った、
+    /// x からカット a·y <= b の超平面までの距離 (a·x - b) / |a·d| (|a·d| < 1e-6 なら 1e-6 で割る)。|a·d| <= |a| なので効き目以上
+    fn distance(&self, c: &Candidate) -> Option<f64> {
+        let d = self.dir.as_ref()?;
+        let act: f64 = c.coefs.iter().map(|&(j, v)| v * self.x[j]).sum();
+        let s: f64 = c.coefs.iter().map(|&(j, v)| v * d[j]).sum();
+        Some((act - c.rhs) / s.abs().max(1e-6))
+    }
+}
+
+/// 今の LP 解 `x` から暫定解 `inc` (`ENOMOTO_MIP_CUTSEL_DCD_SOL=ファイル` があればその点) へ向かう単位方向と、その長さ |x* - x|
+/// (暫定解がない・同じ点なら `None`)
+fn dcd_direction(x: &[f64], inc: Option<&[f64]>) -> Option<(Vec<f64>, f64)> {
+    let file_sol: Option<Vec<f64>> = env_str!("ENOMOTO_MIP_CUTSEL_DCD_SOL")
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .map(|s| s.lines().filter_map(|l| l.trim().parse().ok()).collect::<Vec<f64>>())
+        .filter(|v| v.len() == x.len());
+    let t = file_sol.as_deref().or(inc.filter(|v| v.len() == x.len()))?;
+    let mut d: Vec<f64> = t.iter().zip(x).map(|(a, b)| a - b).collect();
+    let nd = d.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if nd > 0.0 {
+        d.iter_mut().for_each(|v| *v /= nd);
+        Some((d, nd))
+    } else {
+        None
+    }
+}
+
 /// [`select_cuts_hybrid_with`] の、質の閾値の基準のスコアを `anchor` で与えられる版 (`None` なら候補の最良のスコア)。
 fn select_cuts_hybrid_anchor(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem, min_rel: f64, maxpar: f64, anchor: Option<f64>) -> Vec<Candidate> {
+    select_cuts_hybrid_dcd(cands, max_cuts, p, min_rel, maxpar, anchor, None)
+}
+
+/// [`select_cuts_hybrid_anchor`] のスコアの効き目の項を、`dcd` があれば SCIP の `cutsel_hybrid` と同じく
+/// 効き目の重み × 効き目 + DCD の重み × max(directed cutoff distance, 効き目) に替える版 (暫定解がなければ
+/// (効き目の重み + DCD の重み) × 効き目、SCIP と同じ)。`norm` なら効き目・距離をそれぞれそのラウンドの候補の最良で割ってから使う
+/// (このとき `anchor` は使わない)。目的との平行度・整数の割合の項 (0.1 ずつ)、密度の割り算、足切り (最良の `min_rel` 倍) はそのまま
+fn select_cuts_hybrid_dcd(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem, min_rel: f64, maxpar: f64, anchor: Option<f64>, dcd: Option<&DcdCtx>) -> Vec<Candidate> {
+    if dcd.is_some_and(|c| c.dir.is_none() && c.noinc_def && !c.prod) {
+        return select_cuts_hybrid_dcd(cands, max_cuts, p, min_rel, maxpar, anchor, None);
+    }
+    if let Some(ctx) = dcd.filter(|c| c.prod) {
+        // 積の形: 暫定解があれば [`select_cuts_dcd_prod`]、なければ既定と同じ選択
+        return if ctx.dir.is_some() { select_cuts_dcd_prod(cands, max_cuts, min_rel, ctx) } else { select_cuts_hybrid_dcd(cands, max_cuts, p, min_rel, maxpar, anchor, None) };
+    }
     let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
+    let dists: Vec<Option<f64>> = match dcd {
+        Some(ctx) => cands
+            .iter()
+            .map(|c| ctx.distance(c).map(|d| if ctx.t_mode.is_some() { (d / ctx.dnorm).min(1.0) } else { d.max(c.efficacy) }))
+            .collect(),
+        None => vec![None; cands.len()],
+    };
+    let (max_eff, max_dist) = (
+        cands.iter().map(|c| c.efficacy).fold(0.0, f64::max),
+        dists.iter().flatten().copied().fold(0.0, f64::max),
+    );
+    if dcd.is_some() && env_str!("ENOMOTO_MIP_DEBUG_CUTSEL").is_some() {
+        let mut r: Vec<f64> = cands.iter().zip(&dists).filter_map(|(c, d)| d.map(|d| d / c.efficacy.max(1e-300))).collect();
+        r.sort_by(|a, b| a.total_cmp(b));
+        let q = |f: f64| r.get(((r.len() as f64 - 1.0) * f).round() as usize).copied().unwrap_or(f64::NAN);
+        eprintln!("CUTSEL_DCD: {} cands, max eff {max_eff:.4}, max dist {max_dist:.4}, dist/eff quantiles 0/50/90/100% {:.2} {:.2} {:.2} {:.2}", cands.len(), q(0.0), q(0.5), q(0.9), q(1.0));
+    }
+    let anchor = if dcd.is_some_and(|c| c.norm) { None } else { anchor };
     let mut scored: Vec<(f64, f64, Candidate)> = cands
         .into_iter()
-        .map(|c| {
+        .zip(dists)
+        .map(|(c, dist)| {
             let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
-            (cut_score(&c, p, cnorm), nc, c)
+            let score = match dcd {
+                None => cut_score(&c, p, cnorm),
+                Some(ctx) => {
+                    let sc = |v: f64, m: f64| if ctx.norm { if m > 0.0 { v / m } else { 0.0 } } else { v };
+                    let e = sc(c.efficacy, max_eff);
+                    let term = match dist {
+                        Some(t) if ctx.t_mode.is_some() => ctx.w_eff * e + ctx.w_dcd * t * if ctx.t_mode == Some(true) { max_eff } else { 1.0 },
+                        Some(d) => ctx.w_eff * e + ctx.w_dcd * sc(d, max_dist),
+                        None => (ctx.w_eff + ctx.w_dcd) * e,
+                    };
+                    (cut_quality(&c, p, cnorm) - c.efficacy + term) / (c.coefs.len().max(1) as f64).powf(tunable!("ENOMOTO_T_CUTSEL_DENSITY_EXP", 0.0, f64))
+                }
+            };
+            (score, nc, c)
         })
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -3477,6 +3834,64 @@ fn select_cuts_hybrid_anchor(cands: Vec<Candidate>, max_cuts: usize, p: &MipProb
         }
     }
     chosen.into_iter().map(|(_, c)| c).collect()
+}
+
+/// `ENOMOTO_MIP_CUTSEL_DCD_PROD` (試作、暫定解があるときだけ): 基のスコア b = max(directed cutoff distance, 効き目) / 非零の数^α
+/// (α = `ENOMOTO_T_CUTSEL_DCD_DENS_EXP`、0.5) とし、b が最良の `min_rel` 倍未満は捨てる (足切りは平行度の因子をかける前の b で)。
+/// 残りから、b × (1 - 採ったカットとの |cos| の最大) の最も大きいものを 1 本ずつ採る (採るたびに因子を更新する)。
+/// |cos| が `ENOMOTO_T_CUTSEL_DCD_PROD_MAXPAR` (0.7) を超えるものは捨てる。DCD は 1 ラウンドの中では t × |x* - x|
+/// (t = 線分のうち切り落とす割合) で、和の形 ([`select_cuts_hybrid_dcd`]) では効き目・平行度などの項がほとんど効かないため
+fn select_cuts_dcd_prod(cands: Vec<Candidate>, max_cuts: usize, min_rel: f64, ctx: &DcdCtx) -> Vec<Candidate> {
+    let alpha = tunable!("ENOMOTO_T_CUTSEL_DCD_DENS_EXP", 0.5, f64);
+    let hardpar = tunable!("ENOMOTO_T_CUTSEL_DCD_PROD_MAXPAR", 0.7, f64);
+    let mut items: Vec<(f64, f64, Candidate)> = cands
+        .into_iter()
+        .map(|c| {
+            let d = ctx.distance(&c).unwrap_or(c.efficacy).max(c.efficacy);
+            let b = d / (c.coefs.len().max(1) as f64).powf(alpha);
+            let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+            (b, nc, c)
+        })
+        .collect();
+    let best = items.iter().map(|t| t.0).fold(0.0, f64::max);
+    items.retain(|t| t.0 >= min_rel * best && t.0 > 0.0);
+    // 残りの候補ごとの、採ったカットとの |cos| の最大
+    let mut par = vec![0.0f64; items.len()];
+    let mut alive = vec![true; items.len()];
+    let mut chosen_idx: Vec<usize> = Vec::new();
+    while chosen_idx.len() < max_cuts {
+        let mut bi = usize::MAX;
+        let mut bv = 0.0;
+        for i in 0..items.len() {
+            if alive[i] {
+                let v = items[i].0 * (1.0 - par[i]);
+                if v > bv {
+                    bv = v;
+                    bi = i;
+                }
+            }
+        }
+        if bi == usize::MAX {
+            break;
+        }
+        alive[bi] = false;
+        chosen_idx.push(bi);
+        let (nb, cb) = (items[bi].1, &items[bi].2.coefs);
+        for i in 0..items.len() {
+            if alive[i] {
+                let cs = sparse_dot(&items[i].2.coefs, cb).abs() / (items[i].1 * nb).max(1e-300);
+                par[i] = par[i].max(cs);
+                if par[i] > hardpar {
+                    alive[i] = false;
+                }
+            }
+        }
+    }
+    if env_str!("ENOMOTO_MIP_DEBUG_CUTSEL").is_some() {
+        eprintln!("CUTSEL_DCD_PROD: {} above {min_rel} x best {best:.4}, chosen {}", items.len(), chosen_idx.len());
+    }
+    let mut slots: Vec<Option<Candidate>> = items.into_iter().map(|t| Some(t.2)).collect();
+    chosen_idx.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
 fn select_cuts_old(mut cands: Vec<Candidate>, max_cuts: usize) -> Vec<Candidate> {
