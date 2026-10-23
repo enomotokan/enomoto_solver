@@ -2725,6 +2725,46 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 eprintln!("MIP: FJ trials: found {found}/{k}");
             }
+            // 診断用 (`ENOMOTO_MIP_DEBUG_FJ_VS_LMIP=秒`): 根の前に、FJ の問題 (FJ_P3) で FJ と Local-MIP + 連鎖をそれぞれ単独で回し、
+            // 最初の実行可能解の時刻と値、時間内の最良の値を出す (`FJVSLM:` の行。目的値は FJ の問題の空間)
+            if let Some(tl) = env_str!("ENOMOTO_MIP_DEBUG_FJ_VS_LMIP").and_then(|v| v.parse::<f64>().ok()).filter(|_| !self.params.submip && self.snap.is_none()) {
+                let pc = match &self.orig {
+                    Some(o) => (**o).clone(),
+                    None => self.p.clone(),
+                };
+                let q = if super::fj_p3_on() { super::fj_p3_problem(&pc).map(|t| t.0).unwrap_or(pc) } else { pc };
+                let never = std::sync::atomic::AtomicBool::new(false);
+                let seed = self.rng ^ 0x9E37_79B9_7F4A_7C15;
+                let obj = |x: &Option<Vec<f64>>| x.as_ref().map_or("none".to_string(), |x| format!("{:.10e}", q.objective(x)));
+                crate::set_fj_p3_force(super::fj_p3_on());
+                let t = Instant::now();
+                let r1 = super::fj::fj2_search(&q, &q.col_lo, &q.col_up, tl, seed, Some(&never));
+                let t1 = t.elapsed().as_secs_f64();
+                let t = Instant::now();
+                let r2 = super::heuristics::fj_search(&q, &q.col_lo, &q.col_up, effort, tl, seed, Some(&never));
+                let t2 = t.elapsed().as_secs_f64();
+                crate::set_fj_p3_force(false);
+                let first: std::sync::Mutex<Option<(f64, f64)>> = Default::default();
+                let t = Instant::now();
+                let on_sol = |x: &[f64]| {
+                    let mut f = first.lock().unwrap();
+                    if f.is_none() {
+                        *f = Some((t.elapsed().as_secs_f64(), q.objective(x)));
+                    }
+                };
+                let lr = super::localmip::local_mip_opts(&q, &q.col_lo, &q.col_up, tl, seed ^ 0x6A09_E667_F3BC_C909, None, &on_sol, true);
+                let f = *first.lock().unwrap();
+                eprintln!(
+                    "FJVSLM: fj1 found {} t {t1:.3} | fj ({tl}s) best {} t {t2:.3} | lm first {} t {} best {} least_viol {} steps {}",
+                    obj(&r1),
+                    obj(&r2),
+                    f.map_or("none".to_string(), |v| format!("{:.10e}", v.1)),
+                    f.map_or("-".to_string(), |v| format!("{:.3}", v.0)),
+                    obj(&lr.best),
+                    lr.least_viol,
+                    lr.steps
+                );
+            }
             if self.snap.is_some() || env_str!("ENOMOTO_MIP_DEBUG_NO_FJ").is_some() {
                 // 木の写しから解く: 解探しはしない (`ENOMOTO_MIP_DEBUG_NO_FJ` は診断用に FJ を使わない)
             } else if !self.params.submip && !proof_only() && mip_threads() > 1 {
