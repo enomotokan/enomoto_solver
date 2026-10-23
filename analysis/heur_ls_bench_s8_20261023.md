@@ -103,3 +103,18 @@
 - 目的値の不一致・異常終了はなし (optimal はすべて HiGHS と一致)。
 - 結果の .md に警告の列はなく (scripts/bench_cand_20261020.py に警告を出す処理がない)、cand_logs にも "not reporting optimality" は出ていない。
 - 2 組とも同じ向き: 30n20b8 (mix3 は約 6 秒で最初の解、最終 302〜353。newdef3 は 55〜57 秒で最初の解、最終 553)、rout と graph20-20-1rand の最初の解 (mix3 のほうが早く、値も良い)。
+
+## 追加計測 4: 8352106
+順番: mix4 HLg → newdef4 HLg → newdef4 HLh → mix4 HLh (mix4 = `ENOMOTO_MIP_FJ_LMIP_MIX=1`)。
+
+| 問題 | mix4 HLg | newdef4 HLg | newdef4 HLh | mix4 HLh |
+|---|---|---|---|---|
+| neos5 | 15 / 最初 0.065 秒 | 15 / 0.027 | 15 / 0.027 | 15 / 0.043 |
+| rout | optimal 10.21 秒 / 最初 0.110 秒 | optimal 13.18 / 0.668 | optimal 11.05 / 0.809 | optimal 14.54 / 0.141 |
+| 30n20b8 | 302 / 最初 5.53 秒 (453) | 553 / 53.38 (806) | **解なし** | 353 / 4.89 (453) |
+| ran14x18-disj-8 | 3748 | 3736 | 3748 | 3736 |
+| graph20-20-1rand | -9 / 最初 1.60 秒 (-3) | -8 / 4.40 (-3) | -8 / 4.41 (-3) | -9 / 1.60 (-3) |
+| mc11 | optimal 55.56 秒 | optimal 51.94 | optimal 48.55 | optimal 52.79 |
+
+- 目的値の不一致・異常終了はなし。MIP_WARNING は 0 回 (JSON に mip_warnings なし、cand_logs にも "MIP: WARNING" なし)。
+- 2 組とも同じ向き: 30n20b8 (mix4 は約 5 秒で最初の解、最終 302/353。newdef4 は 553 か解なし)、graph20-20-1rand (mix4 は -9、newdef4 は -8、最初の解 1.6 秒 vs 4.4 秒)、rout の最初の解 (mix4 0.11〜0.14 秒、newdef4 0.67〜0.81 秒)。
