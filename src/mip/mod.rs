@@ -20,6 +20,7 @@ pub(crate) mod solver;
 pub(crate) mod fj;
 mod heuristics;
 pub(crate) mod heur_scip;
+mod heur_sub;
 pub(crate) mod heur_ipm;
 pub(crate) mod symmetry;
 pub(crate) mod cuts;
@@ -121,6 +122,11 @@ pub(crate) fn record_incumbent(z: f64) {
             s.first_sol = Some((t, z));
         }
     }
+}
+
+/// 外側の求解の始まりからの経過秒 ([`RUN_STATS`] の時計。再スタートで戻らない。記録がなければ 0)。
+pub(crate) fn run_elapsed() -> f64 {
+    RUN_STATS.lock().ok().and_then(|s| s.t0.map(|t0| t0.elapsed().as_secs_f64())).unwrap_or(0.0)
 }
 
 /// 根の下界の記録 ([`RUN_STATS`])。
