@@ -752,6 +752,22 @@ pub(crate) fn restart_basis_on() -> bool {
 /// `ENOMOTO_MIP_SB_AGREE` (試作、既定では使わない): 強分岐と擬似費用の選び方の一致を見て、十分に学べたら強分岐を省く
 /// ([`Solver::sb_agree_learned`])。h80x6320d・roll3000 は強分岐の予算を増やすと木が小さくなる (`ENOMOTO_MIP_SB_BUDGET_HIGHS`) が、
 /// 10teams・cvs16r128-89 などは予算を増やすと遅くなる。擬似費用で同じ列を選べる問題では強分岐を早く切り上げる
+/// FJ のスレッドで FJ と Local-MIP + 連鎖の手に時間を分け合う ([`super::heuristics::fj_lmip_mix`])。既定で使う
+/// (`ENOMOTO_MIP_NO_FJ_LMIP_MIX` で使わない)。`ENOMOTO_MIP_SYM_ORIG_CUT` ([`sym_orig_cut_on`]) と組で既定にした (mixoc)。
+/// 40 問 + 16 問 (4 スレッド・60 秒、同じ機械で 2 組。ba7f18b・a261791・acaa6fa の 3 回の計測): 40 問の解けた数と
+/// SGM 時間は揺れの範囲で並び、56 問の主ギャップの和は 1.39〜2.20 -> 0.21〜0.47。2 組とも同じ向きの差は、良い方が
+/// neos-950242・30n20b8・cvs16r128-89・graph20-20-1rand など 4〜5 問、悪い方が timtab1 (a261791 の 1 回、偽の対称性の
+/// 行が LP を重くしていた: analysis/timcmp_20261023.md) だけ (analysis/heur_ls_20261023/bench8_results.md)
+pub(crate) fn fj_lmip_mix_on() -> bool {
+    env_str!("ENOMOTO_MIP_NO_FJ_LMIP_MIX").is_none()
+}
+
+/// 対称性の行への並べ替えに失敗した解の値を、打ち切り値にだけ使う (`orig_best`)。既定で使う (`ENOMOTO_MIP_NO_SYM_ORIG_CUT` で
+/// 使わない)。[`fj_lmip_mix_on`] と組で既定にした
+pub(crate) fn sym_orig_cut_on() -> bool {
+    env_str!("ENOMOTO_MIP_NO_SYM_ORIG_CUT").is_none()
+}
+
 fn sb_agree_on() -> bool {
     env_str!("ENOMOTO_MIP_SB_AGREE").is_some()
 }
@@ -2474,7 +2490,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 捨てられていた (以前は対称性なしで 4 を見つけていた)
             // FJ と Local-MIP を混ぜる形 (`ENOMOTO_MIP_FJ_LMIP_MIX`) の解には既定で使う: Local-MIP は対称性の行のない問題で探すので、
             // neos-950242 では最適解 4 が lex-leader の行に反して拒まれ 5〜8 で止まっていた (並べ替えると 3 回とも根で最適)
-            let lex_canon = env_str!("ENOMOTO_MIP_SYM_LEX_CANON").is_some() || (env_str!("ENOMOTO_MIP_FJ_LMIP_MIX").is_some() && self.heur_label == "Local-MIP");
+            let lex_canon = env_str!("ENOMOTO_MIP_SYM_LEX_CANON").is_some() || (fj_lmip_mix_on() && self.heur_label == "Local-MIP");
             if !self.lex_gens.is_empty() && !self.p.is_feasible(&x, FEASTOL) && lex_canon {
                 super::symmetry::lex_canonicalize(&self.lex_gens, &mut x, 4 * self.lex_gens.len() * 64 + 1000);
             }
@@ -2490,7 +2506,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // `ENOMOTO_MIP_SYM_ORIG_CUT` (試作): 暫定解にはせず、値だけを打ち切り値に使う (ORIG_INC と違い、ヒューリスティクスと
                 // 「暫定解なし」の判定は今までどおり動く)。暫定解より良い解だけを残す
-                if env_str!("ENOMOTO_MIP_SYM_ORIG_CUT").is_some() {
+                if sym_orig_cut_on() {
                     let z = orig.objective(&x);
                     let cur = self.prune_limit();
                     if z < cur - 1e-9 * z.abs().max(1.0) && self.orig_best.as_ref().is_none_or(|(b, _)| z < *b) {
@@ -3052,7 +3068,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let fjl = env_str!("ENOMOTO_MIP_FJ_LOCALMIP").is_some() && lmip == 0;
                 // `ENOMOTO_MIP_FJ_LMIP_MIX` (試作): FJ のスレッドで FJ と Local-MIP + 連鎖に時間を分け合う ([`super::heuristics::fj_lmip_mix`])。
                 // 時間の上限は Local-MIP と同じ。実行可能性問題 (目的が全部 0) では今までどおり
-                let mix = env_str!("ENOMOTO_MIP_FJ_LMIP_MIX").is_some() && lmip == 0 && !fjl;
+                let mix = fj_lmip_mix_on() && lmip == 0 && !fjl;
                 let fjl_cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * self.params.time_limit).min(10.0) } else { 10.0 };
                 let fjl_box: std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>> = Default::default();
                 if fjl || mix {
