@@ -1,0 +1,39 @@
+MIP: presolve: tightened 4407 coefficients (skipped 0 in rows redundant within tolerance), normalized 0 integer rows
+MIP: presolve: rows 168336 -> 19480, free columns 110454 -> 9758, nonzeros 480259 -> 61329, postsolve steps 10427
+Root LP: the two-phase method finished first (2.00s)
+MIP: LP probing: the first LP stopped: TimeLimit (2.01s, limit 0.50s x mult)
+MIP: probing: 9018 of 9198 binaries probed (1 passes), 1 fixed, 180 bounds tightened, 238577 implications (0.17s)
+MIP: probing: 3854 equivalent binary pairs
+Presolve: 168336 rows, 110454 columns -> 19480 rows, 9577 columns (2.78s)
+MIP: presolved problem written to sub/pre1_noROW_MERGE.mps (objective offset 0e0)
+MIP: clique extension: 3841 rows extended, 11111 nonzeros added, 0 columns fixed, 0 duplicate and 1394 dominated rows removed (132828 edges, 0.07s)
+MIP: symmetry: 1 full orbitopes (2x4)
+MIP: symmetry: 3 generators, 2 orbits on 8 columns, 0 lex-leader rows (0.31s)
+MIP: fixed-charge check: vb rows 4 of 18086, continuous with vb 4 of 560
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.01s)
+MIP: FJ problem (FJ_P3): rows 18086 -> 10515, free columns 9577 -> 5990, 433 continuous bounds tightened
+Root LP: the two-phase method finished first (6.79s)
+MIP:   global fixed integers 100329 of 109346 (newly 0 since the root LP)
+MIP: new incumbent 4.9824000000e4 at node 0 (6.81s) [Local-MIP]
+MIP: Local-MIP solution accepted true (6.81s)
+MIP: finish start TimeLimit (6.81s)
+     time      nodes      open        best bound         incumbent       gap
+     6.8s          0         0                 -     4.982400000e4         -
+MIP:     6.81s nodes        0 open       0 lb inf ub 4.98240000e4 lp_iters 9377 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 0 dive_iters 0 lp_rows 18086 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 0, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 0, in pool 0 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: proof CMIR cuts: tried 0, added 0, entered the cut pool 0
+MIP: conflict analysis (HiGHS style): calls 0, conflicts 0, added 0, mean length 0.0, max length 32903, 0.00s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 0 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 18086
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 3.6)
+MIP: orbitopes 1: fixed 0 bounds, pruned 0 nodes
+MIP: finish done (6.81s)
+MIP: solve returned TimeLimit after 10.03s (time limit 10.00s)
+MIP: polished the solution (10.03s)
+{"status": "time_limit", "objective": 49824.0, "best_bound": -Infinity, "nodes": 0, "root_bound": null, "first_solution_time": 10.025102357, "first_solution_objective": 49824.0, "time": 10.214048609000201}
