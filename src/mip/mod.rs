@@ -2189,6 +2189,57 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             break;
         }
     }
+    // `ENOMOTO_MIP_ENUM_PRESOLVE` (試作): HiGHS の Enumeration 前処理 ([`enumerate_rows`])。`=impl` ならプロービングの含意も伝播に使う
+    if let Some(mode) = env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").filter(|_| !submip) {
+        let te = std::time::Instant::now();
+        let (f0, t0n, e0) = (fixed, tightened, equiv.len());
+        let mut d2 = if mode == "impl" && !edges.is_empty() {
+            let mut d = dom.clone();
+            d.add_implications(n, &edges);
+            Some(d)
+        } else {
+            None
+        };
+        // `ENOMOTO_MIP_ENUM_EDGES`: 列挙で分かった衝突の組を含意の表 (クリークのグラフ、クリーク行の拡張が使う) に足す
+        let want_edges = env_str!("ENOMOTO_MIP_ENUM_EDGES").is_some();
+        let mut new_edges: Vec<(u32, u32)> = Vec::new();
+        let res = enumerate_rows(prob, d2.as_mut().unwrap_or(&mut dom), &bin0, if want_equiv { Some(&mut equiv) } else { None }, if want_edges { Some(&mut new_edges) } else { None });
+        if want_edges {
+            let have: std::collections::HashSet<(u32, u32)> = edges.iter().map(|&(a, b)| (a.min(b), a.max(b))).collect();
+            new_edges.sort_unstable();
+            new_edges.dedup();
+            new_edges.retain(|e| !have.contains(e));
+            if verbose {
+                eprintln!("MIP: enumeration presolve: {} new conflict pairs", new_edges.len());
+            }
+            edges.extend(new_edges);
+        }
+        let Some((wc, rows_done, sols)) = res else { return Some(false) };
+        // 見つけた境界を元の定義域に入れる (`impl` の写しで見つけたものも大域的に成り立つ)
+        for (k, upper, v) in wc {
+            let was_fixed = dom.lo[k] == dom.up[k];
+            let ch = if upper { dom.tighten_upper(prob, k, v) } else { dom.tighten_lower(prob, k, v) };
+            if ch {
+                if !was_fixed && dom.lo[k] == dom.up[k] {
+                    fixed += 1;
+                } else {
+                    tightened += 1;
+                }
+            }
+        }
+        if !dom.propagate(prob) {
+            return Some(false);
+        }
+        if verbose {
+            eprintln!(
+                "MIP: enumeration presolve: {rows_done} rows, {sols} solutions, {} fixed, {} bounds tightened, {} equivalent pairs ({:.2}s)",
+                fixed - f0,
+                tightened - t0n,
+                equiv.len() - e0,
+                te.elapsed().as_secs_f64()
+            );
+        }
+    }
     // `ENOMOTO_MIP_PROBE_CLIQUE=equiv`: 集めた含意をすべて伝播に入れた写しの定義域で 0-1 列をもう一巡試し、同値な組だけを足す。
     // 行の伝播では `x = 1 => y = 0` の対偶が見えないので、同値な組の多くを見落とす (physiciansched6-2 は 8 組、含意を使うと 1084 組)。
     // `PROBE_CLIQUE` そのものは見つけた含意で固定・締め付け・含意の表 (クリークのグラフ) まで変え、ほかの問題の経路も変える
@@ -2290,6 +2341,201 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         eprintln!("MIP: probing: fixed {tiny} columns of width within tolerance");
     }
     Some(true)
+}
+
+/// HiGHS 1.15.1 の Enumeration 前処理 (`HPresolve::enumerateSolutions`) と同じ規則の行の列挙 (`ENOMOTO_MIP_ENUM_PRESOLVE`、試作)。
+/// 固定されていない列がすべて 0-1 で 2〜8 本の行を選び (列の行の数の平均の大きい順、列の重なりが 5 割を超える行は後ろの方を外し、
+/// 最大 400 行)、行の列のすべての割り当てを伝播つきで列挙する。どの実行可能な割り当てでも締まる境界 (各解の境界の弱い方) を返し、
+/// 行の中でどの解でも同じ値・逆の値の列の組を `equiv` に足す。何も見つからない行が 6 行続いたらやめる (HiGHS と同じ)。
+/// 実行可能な割り当てのない行があれば `None` (問題は実行不能)。返り値は (締める境界、列挙した行の数、解の数の合計)。
+/// physiciansched6-2 では HiGHS の前処理のこの規則を切ると、HiGHS の前処理後の問題に対する ENOMOTO の根の LP が 48974 -> 48374 に下がる
+fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mut equiv: Option<&mut Vec<(usize, usize, bool)>>, mut edges: Option<&mut Vec<(u32, u32)>>) -> Option<(Vec<(usize, bool, f64)>, usize, usize)> {
+    const MAX_ROW: usize = 8;
+    let max_rows = tunable!("ENOMOTO_T_MIP_ENUM_ROWS", 400usize, usize);
+    let max_fails = tunable!("ENOMOTO_T_MIP_ENUM_FAILS", 6usize, usize);
+    let row_vars = |dom: &domain::Domain, i: usize| -> Option<Vec<usize>> {
+        let mut v = Vec::new();
+        for &(j, _) in &prob.rows[i] {
+            if dom.lo[j] == dom.up[j] {
+                continue;
+            }
+            if !bin0[j] || v.len() >= MAX_ROW {
+                return None;
+            }
+            v.push(j);
+        }
+        if v.len() < 2 {
+            return None;
+        }
+        v.sort_unstable();
+        Some(v)
+    };
+    // 候補の行 (HiGHS は列のプロービングの点数の平均で並べる。ここでは列の行の数の平均)
+    let mut rows: Vec<(f64, usize, Vec<usize>)> = (0..prob.m)
+        .filter_map(|i| row_vars(dom, i).map(|v| (v.iter().map(|&j| prob.cols[j].len() as f64).sum::<f64>() / v.len() as f64, i, v)))
+        .collect();
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    // 重なりの多い行を外す
+    let mut keep: Vec<(usize, Vec<usize>)> = Vec::new();
+    let mut removed = vec![false; rows.len()];
+    for a in 0..rows.len() {
+        if removed[a] {
+            continue;
+        }
+        keep.push((rows[a].1, rows[a].2.clone()));
+        if keep.len() >= max_rows {
+            break;
+        }
+        let va = &rows[a].2;
+        for b in a + 1..rows.len() {
+            if removed[b] {
+                continue;
+            }
+            let vb = &rows[b].2;
+            let (mut ia, mut ib, mut ov) = (0, 0, 0);
+            while ia < va.len() && ib < vb.len() {
+                match va[ia].cmp(&vb[ib]) {
+                    std::cmp::Ordering::Less => ia += 1,
+                    std::cmp::Ordering::Greater => ib += 1,
+                    std::cmp::Ordering::Equal => {
+                        ia += 1;
+                        ib += 1;
+                        ov += 1;
+                    }
+                }
+            }
+            if 100 * ov / va.len().min(vb.len()) > 50 {
+                removed[b] = true;
+            }
+        }
+    }
+    // 列挙 (深さ優先、割り当てるたびに伝播)
+    fn rec(prob: &MipProblem, dom: &mut domain::Domain, vars: &[usize], idx: usize, pos0: usize, sols: &mut Vec<u32>, wc: &mut Option<std::collections::HashMap<(usize, bool), f64>>) {
+        let mut i = idx;
+        while i < vars.len() && dom.lo[vars[i]] == dom.up[vars[i]] {
+            i += 1;
+        }
+        if i == vars.len() {
+            let mut mask = 0u32;
+            for (t, &j) in vars.iter().enumerate() {
+                if dom.lo[j] >= 0.5 {
+                    mask |= 1 << t;
+                }
+            }
+            sols.push(mask);
+            // この解で締まった境界 (同じ列の側が何度も変わったら一番締まった値)
+            let mut cur: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
+            for (k, upper, v) in dom.changes_since(pos0) {
+                let e = cur.entry((k, upper)).or_insert(v);
+                *e = if upper { e.min(v) } else { e.max(v) };
+            }
+            match wc {
+                None => *wc = Some(cur),
+                Some(w) => {
+                    w.retain(|key, v| match cur.get(key) {
+                        Some(&c) => {
+                            *v = if key.1 { v.max(c) } else { v.min(c) };
+                            true
+                        }
+                        None => false,
+                    });
+                }
+            }
+            return;
+        }
+        let j = vars[i];
+        for val in [0.0, 1.0] {
+            let pos = dom.stack_len();
+            if val == 0.0 {
+                dom.tighten_upper(prob, j, 0.0);
+            } else {
+                dom.tighten_lower(prob, j, 1.0);
+            }
+            if dom.propagate(prob) {
+                rec(prob, dom, vars, i + 1, pos0, sols, wc);
+            }
+            dom.backtrack_to(prob, pos);
+        }
+    }
+    let mut out: Vec<(usize, bool, f64)> = Vec::new();
+    let (mut fails, mut done, mut nsol) = (0usize, 0usize, 0usize);
+    for (i, _) in &keep {
+        let Some(vars) = row_vars(dom, *i) else { continue };
+        done += 1;
+        let pos0 = dom.stack_len();
+        let mut sols: Vec<u32> = Vec::new();
+        let mut wc: Option<std::collections::HashMap<(usize, bool), f64>> = None;
+        rec(prob, dom, &vars, 0, pos0, &mut sols, &mut wc);
+        if sols.is_empty() {
+            return None;
+        }
+        nsol += sols.len();
+        let mut found = 0usize;
+        // どの解でも締まる境界は、この先の行の列挙にも使う
+        let mut tight: Vec<(usize, bool, f64)> = Vec::new();
+        for ((k, upper), v) in wc.unwrap_or_default() {
+            if (upper && v < dom.up[k] - 1e-9 * (1.0 + v.abs())) || (!upper && v > dom.lo[k] + 1e-9 * (1.0 + v.abs())) {
+                tight.push((k, upper, v));
+            }
+        }
+        for &(k, upper, v) in &tight {
+            if upper {
+                dom.tighten_upper(prob, k, v);
+            } else {
+                dom.tighten_lower(prob, k, v);
+            }
+        }
+        if !tight.is_empty() && !dom.propagate(prob) {
+            return None;
+        }
+        found += tight.len();
+        out.extend(tight);
+        if let Some(eq) = equiv.as_deref_mut() {
+            for a in 0..vars.len() {
+                for b in a + 1..vars.len() {
+                    if dom.lo[vars[a]] == dom.up[vars[a]] || dom.lo[vars[b]] == dom.up[vars[b]] {
+                        continue;
+                    }
+                    let same = sols.iter().all(|&s| ((s >> a) & 1) == ((s >> b) & 1));
+                    let comp = sols.iter().all(|&s| ((s >> a) & 1) != ((s >> b) & 1));
+                    if same || comp {
+                        eq.push((vars[a], vars[b], comp));
+                        found += 1;
+                    }
+                }
+            }
+        }
+        // どの解にも現れない文字の組 (x_a = va かつ x_b = vb) は衝突の組 (HiGHS は列挙で行がクリークになると分かればクリーク表に入れる)。
+        // 文字は 2j (x_j = 1)・2j + 1 (x_j = 0)
+        if let Some(ed) = edges.as_deref_mut() {
+            for a in 0..vars.len() {
+                for b in a + 1..vars.len() {
+                    if dom.lo[vars[a]] == dom.up[vars[a]] || dom.lo[vars[b]] == dom.up[vars[b]] {
+                        continue;
+                    }
+                    for va in 0..2u32 {
+                        for vb in 0..2u32 {
+                            if !sols.iter().any(|&s| ((s >> a) & 1) == va && ((s >> b) & 1) == vb) {
+                                let la = 2 * vars[a] as u32 + (1 - va);
+                                let lb = 2 * vars[b] as u32 + (1 - vb);
+                                ed.push((la.min(lb), la.max(lb)));
+                                found += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if found == 0 {
+            fails += 1;
+            if fails > max_fails {
+                break;
+            }
+        } else {
+            fails = 0;
+        }
+    }
+    Some((out, done, nsol))
 }
 
 /// 幅の極めて小さな列の固定 (既定で使う。`ENOMOTO_MIP_NO_TINY_WIDTH_FIX` で使わない): 幅 `up - lo` が許容誤差

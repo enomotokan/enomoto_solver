@@ -1,0 +1,64 @@
+[   0.00] Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+[   0.00] Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+[   0.00] MIP epre2_e2 has 8421 rows; 111827 cols; 39802 nonzeros; 109346 integer variables (4421 binary)
+[   0.00] Coefficient ranges:
+[   0.00]   Matrix  [5e-01, 1e+03]
+[   0.00]   Cost    [1e+00, 1e+00]
+[   0.00]   Bound   [1e+00, 8e+03]
+[   0.00]   RHS     [1e+00, 8e+02]
+[   0.05] 
+[   0.05] Presolve is switched off
+[   0.07] 
+[   0.07] Solving MIP model with:
+[   0.07]    8421 rows
+[   0.07]    111827 cols (4421 binary, 0 integer, 0 implied int., 560 continuous, 106846 domain fixed)
+[   0.07]    39802 nonzeros
+[   0.07]    Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+[   0.36] 
+[   0.36] Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+[   0.36]      I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+[   0.36]      S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+[   0.36]      Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+[   0.36] 
+[   0.36]         Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+[   0.36] Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+[   0.36]          0       0         0   0.00%   12620.499992    inf                  inf        0      0      0         0     0.4s
+[   2.31]          0       0         0   0.00%   48583.1         inf                  inf        0      0      3      6453     2.3s
+[   7.79]          0       0         0   0.00%   48856.833333    inf                  inf     2528    582     28     13942     7.8s
+[  13.03]          0       0         0   0.00%   49207.333333    inf                  inf     4724   1164    139     21656    13.0s
+[  18.85]          0       0         0   0.00%   49324           inf                  inf     6794   1446    160     29468    18.8s
+[  23.49]  L       0       0         0   0.00%   49324           49524              0.40%     7214   1564    178     33352    23.5s
+[ 160.34] 
+[ 160.34] Symmetry detection completed in 160.0s
+[ 160.34] Found 82 generator(s) and 1 full orbitope(s) acting on 3 columns
+[ 160.34]          0       1         0   0.00%   49324           49524              0.40%     7326    800    178     35270   160.3s
+[ 160.34] 
+[ 160.34] Solving report
+[ 160.34]   Model             epre2_e2
+[ 160.34]   Status            Time limit reached
+[ 160.34]   Primal bound      49524
+[ 160.34]   Dual bound        49324
+[ 160.34]   Gap               0.404%
+[ 160.34]   P-D integral      0.552676372213
+[ 160.34]   Solution status   feasible
+[ 160.34]                     49524 (objective)
+[ 160.34]                     0 (bound viol.)
+[ 160.34]                     0 (int. viol.)
+[ 160.34]                     0 (row viol.)
+[ 160.34]   Timing            160.34
+[ 160.34]                     0.36 (Presolve)
+[ 160.34]                         MIP    time [calls] = 0.05 [1]
+[ 160.34]                         subMIP time [calls] = 0.31 [2]
+[ 160.34]                     159.96 (Solve)
+[ 160.34]                         MIP    time [calls] = 159.35 [1]
+[ 160.34]                         subMIP time [calls] = 0.61 [2]
+[ 160.34]                     0.00 (Postsolve)
+[ 160.34]                         MIP    time [calls] = 0.00 [1]
+[ 160.34]                         subMIP time [calls] = 0.00 [2]
+[ 160.34]   Max sub-MIP depth 4
+[ 160.34]   Nodes             0
+[ 160.34]   Repair LPs        0
+[ 160.34]   LP iterations     35270
+[ 160.34]                     0 (strong br.)
+[ 160.34]                     27771 (separation)
+[ 160.34]                     1046 (heuristics)
