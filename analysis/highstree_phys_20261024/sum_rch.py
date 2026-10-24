@@ -10,7 +10,7 @@ for f in [B + "miplib_results_4t_60s_20261020_bc89ad1_highsgap0.json"] + sorted(
             ref.setdefault(p, h["objective"])
 print("問題 | 形 | 回 | 状態 | 目的値 | 時間 | 根のカット (最初の根: 下界 @ 時刻、ラウンド) | 最終の根の下界 | ノード | HiGHS")
 for p in ["physiciansched6-2", "mzzv42z", "timtab1", "neos-960392", "app1-1", "qiu", "h80x6320d", "nw04", "10teams"]:
-    for n in ["def", "rch", "rch2", "rch2itu", "rchpool", "pool"]:
+    for n in ["def", "rch", "rch2", "rch2itu", "rchpool", "pool", "e2pool"]:
         for f in sorted(glob.glob(f"logs/{p}_{n}_[0-9].log")):
             k = f.rsplit("_", 1)[1][:-4]
             rc = "-"; rounds = 0; d = None

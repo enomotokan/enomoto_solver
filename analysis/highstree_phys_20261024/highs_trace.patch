@@ -475,3 +475,44 @@ index 0000000..bdf1e61
 +    }                                  \
 +  } while (0)
 +#endif
+diff --git a/highs/presolve/HPresolve.cpp b/highs/presolve/HPresolve.cpp
+index 4c20fac..62edc31 100644
+--- a/highs/presolve/HPresolve.cpp
++++ b/highs/presolve/HPresolve.cpp
+@@ -6,6 +6,8 @@
+ /*                                                                       */
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ #include "presolve/HPresolve.h"
++#include "mip/HighsTrace.h"
++#include <cstring>
+ 
+ #include <algorithm>
+ #include <atomic>
+@@ -1542,6 +1544,8 @@ HPresolve::Result HPresolve::finaliseProbing(
+   // add nonzeros from clique lifting before removing fixed variables, since
+   // this might lead to stronger constraint sides
+   auto& extensionvars = cliquetable.getCliqueExtensions();
++  // 計測用: HIGHS_TRACE_NOLIFT なら探りの clique の延長 (持ち上げ) を入れない
++  if (std::getenv("HIGHS_TRACE_NOLIFT") && !mipsolver->submip) extensionvars.clear();
+   liftedNonZeros += static_cast<HighsInt>(extensionvars.size());
+   for (const auto& cliqueextension : extensionvars) {
+     if (rowDeleted[cliqueextension.first]) {
+@@ -2489,6 +2493,18 @@ HPresolve::Result HPresolve::applyConflictGraphSubstitutions(
+     HighsPostsolveStack& postsolve_stack, HighsInt& numDelCol) {
+   HighsCliqueTable& cliquetable = mipsolver->mipdata_->cliquetable;
+   HighsImplications& implications = mipsolver->mipdata_->implications;
++  HTRACE("PROBE_SUBST lvl=%d implication_substs=%d clique_substs=%d\n",
++         int(mipsolver->submip_level), int(implications.substitutions.size()),
++         int(cliquetable.getSubstitutions().size()));
++  // 計測用: HIGHS_TRACE_NOSUBST=impl / clique / all で、探りの代入のうち含意からのもの・clique の表の同値からのものを使わない
++  if (const char* e = std::getenv("HIGHS_TRACE_NOSUBST")) {
++    if (!mipsolver->submip) {
++      if (std::strstr(e, "impl") || std::strstr(e, "all"))
++        implications.substitutions.clear();
++      if (std::strstr(e, "clique") || std::strstr(e, "all"))
++        cliquetable.getSubstitutions().clear();
++    }
++  }
+   for (const auto& substitution : implications.substitutions) {
+     if (colDeleted[substitution.substcol] || colDeleted[substitution.staycol])
+       continue;
