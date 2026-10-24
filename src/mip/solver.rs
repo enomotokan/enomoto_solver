@@ -9133,7 +9133,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `percentageInactiveIntegers` は再スタート後の模型の整数列に対する割合)。再スタートの後の問題は前に固定した列を
         // 固定した列として持ったままなので、分母が全体 (h80x6320d では 6320 本) だと、自由な整数列 (約 1000 本) の 16% 近くを
         // 固定しないと 2 回目の再スタートが起きない
-        let denom = if env_str!("ENOMOTO_MIP_RESTART_FRAC_FREE").is_some() { nint.saturating_sub(self.root_fixed0) } else { nint };
+        // `ENOMOTO_MIP_GR_RESTART=ff` も同じ ([`super::gr_restart_ff_for`])
+        let denom = if env_str!("ENOMOTO_MIP_RESTART_FRAC_FREE").is_some() || super::gr_restart_ff_for(p) { nint.saturating_sub(self.root_fixed0) } else { nint };
         if self.params.verbose && self.params.restarts > 0 {
             eprintln!("MIP: restart check: newly fixed {newly}, integer columns {nint}, free at the root {}, threshold {:.1}", nint.saturating_sub(self.root_fixed0), fac * denom as f64);
         }

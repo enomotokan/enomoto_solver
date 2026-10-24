@@ -1,0 +1,7 @@
+#!/bin/bash
+# 5 回目: HiGHS の前処理後の問題 + 打ち切り値 + GR で、強分枝を広げると証明に近づくか (既存の調整値)
+cd "$(dirname "$0")"
+P=mps/mzzv42z_hpre.mps
+B="ENOMOTO_MIP_CUTOFF=-20539.5 ENOMOTO_MIP_GR_RESTART=1"
+./run_cfg.sh $P 60 cutgrsbw $B ENOMOTO_T_MIP_SB_LOOKAHEAD=1000 ENOMOTO_T_MIP_SB_MAXCAND=1000 ENOMOTO_MIP_SB_BUDGET_HIGHS=1
+./run_cfg.sh $P 60 cutgrsbwi $B ENOMOTO_T_MIP_SB_LOOKAHEAD=1000 ENOMOTO_T_MIP_SB_MAXCAND=1000 ENOMOTO_MIP_SB_BUDGET_HIGHS=1 ENOMOTO_T_MIP_SB_ITERMULT=100
