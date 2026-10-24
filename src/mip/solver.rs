@@ -3627,6 +3627,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let _ = w("_x0.txt", &x_root0);
                     eprintln!("MIP: root LP solution written to {f}_x.txt (objective {:.6e}, {:.2}s)", self.lp.objective() + self.p.offset, self.start.elapsed().as_secs_f64());
                 }
+                // 診断用 (`ENOMOTO_MIP_DEBUG_LMIP_FROM_LP`): Local-MIP (連鎖の手つき) を、LP 解を四捨五入した点から始めたものと、
+                // 既定の出発点 (各列の下限) から始めたものを、種 2 つずつ `ENOMOTO_T_MIP_DEBUG_LMIP_SECS` (20) 秒ずつ回して比べる
+                // (主のスレッドで。見つけた解は使わない)。LP 解は `ENOMOTO_MIP_DEBUG_LMIP_X=<ファイル>` (列の数が合えば) か、今の LP 解
+                if env_str!("ENOMOTO_MIP_DEBUG_LMIP_FROM_LP").is_some() && !self.params.submip {
+                    let secs = tunable!("ENOMOTO_T_MIP_DEBUG_LMIP_SECS", 20.0, f64);
+                    let p = self.p;
+                    let xs: Vec<f64> = env_str!("ENOMOTO_MIP_DEBUG_LMIP_X")
+                        .and_then(|f| std::fs::read_to_string(f).ok())
+                        .map(|s| s.lines().filter_map(|l| l.trim().parse().ok()).collect::<Vec<f64>>())
+                        .filter(|v| v.len() == p.n)
+                        .unwrap_or_else(|| x.clone());
+                    let nfrac = (0..p.n).filter(|&j| p.is_int[j] && (xs[j] - xs[j].round()).abs() > 1e-6).count();
+                    eprintln!("MIP: [lmip from LP] LP solution: objective {:.4}, fractional {nfrac}", p.objective(&xs));
+                    for (mode, k) in [("LP", 0u64), ("LP", 1), ("lower bounds", 0), ("lower bounds", 1)] {
+                        let Some(mut lm) = super::localmip::LocalMip::new(p, &self.dom.lo, &self.dom.up, 12345 + k, true) else { break };
+                        let v0 = if mode == "LP" { lm.set_start(&xs) } else { usize::MAX };
+                        let t = Instant::now();
+                        lm.run(t + std::time::Duration::from_secs_f64(secs), None, &|_| {});
+                        let res = &lm.res;
+                        let (z, d) = match &res.best {
+                            Some(b) => (p.objective(b), (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).map(|j| (b[j] - xs[j]).abs()).sum::<f64>()),
+                            None => (f64::NAN, f64::NAN),
+                        };
+                        eprintln!(
+                            "MIP: [lmip from {mode}] seed {k}: violated rows at the start {}, first feasible {:?}, best objective {z:.1}, L1 to the LP solution {d:.1}, least violated rows {}, steps {}, {:.1}s",
+                            if v0 == usize::MAX { "-".to_string() } else { v0.to_string() },
+                            res.first_time.map(|t| (t * 100.0).round() / 100.0),
+                            res.least_viol,
+                            res.steps,
+                            t.elapsed().as_secs_f64()
+                        );
+                    }
+                }
                 heur!("simple rounding", self.simple_rounding(&x));
                 if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() {
                     heur!("ZI round", self.zi_round(&x));
