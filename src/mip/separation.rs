@@ -357,9 +357,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         !self.params.submip && env_str!("ENOMOTO_MIP_EQUIV2_CUTS").is_some() && super::EQUIV2_USED.with(|f| f.get())
     }
 
+    /// `ENOMOTO_MIP_CUT_AGG` (試作、既定では使わない): 根のカットのループで、集約した行からのカットの枠
+    /// ([`pick_agg_quota`]、`ENOMOTO_T_MIP_CUTSEL_AGG_QUOTA` を指定しなければ 50) を使い、それが回るだけの予算にする:
+    /// 面の頂点での分離をしない、1 回の LP の上限を全体の 5% 以上にする、伸びている間は根のカットの時間の上限を延ばす
+    /// (`ENOMOTO_MIP_CUT_EXTEND` と同じ)、1 ラウンドの上限を 1000 本に広げない (`ENOMOTO_MIP_NO_CUT_WIDEN` と同じ)。
+    /// physiciansched6-2 では HiGHS の根の下界を上げているのが一般係数の tableau・経路集約のカットで、ENOMOTO の候補にも
+    /// 似たものがあるのに、元の行・zerohalf の効き目の大きい 2〜3 非零のカットに質の閾値で負けて 1 本も採られていなかった
+    /// (analysis/physcmp_20261023.md)
+    pub(super) fn cut_agg(&self) -> bool {
+        !self.params.submip && env_str!("ENOMOTO_MIP_CUT_AGG").is_some()
+    }
+
     /// 根のカットのループの 1 回の LP の時間の上限 (全体に対する割合)。
     fn cut_lp_time_frac(&self) -> f64 {
-        if self.equiv2_cuts() {
+        if self.cut_agg() {
+            let f = if self.equiv2_cuts() { tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_LP_TIME_FRAC", 0.05, f64) } else { tunable!("ENOMOTO_T_MIP_CUT_LP_TIME_FRAC", 0.02, f64) };
+            f.max(tunable!("ENOMOTO_T_MIP_CUT_AGG_LP_TIME_FRAC", 0.05, f64))
+        } else if self.equiv2_cuts() {
             tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_LP_TIME_FRAC", 0.05, f64)
         } else {
             tunable!("ENOMOTO_T_MIP_CUT_LP_TIME_FRAC", 0.02, f64)
@@ -480,7 +494,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 毎ラウンド候補が数千本あり、50 本ずつ切っても LP が切られていない別の箱に移るだけで下界が 415.24 から動かず、
         // 停滞判定で 5 ラウンドで止まっていた。下界が上がっている問題では起きないので、上限を一律に広げる
         // (40 問で悪化した) のと違い他の問題は変わらない
-        let widen_on = env_str!("ENOMOTO_MIP_NO_CUT_WIDEN").is_none() && !self.params.submip;
+        let widen_on = env_str!("ENOMOTO_MIP_NO_CUT_WIDEN").is_none() && !self.params.submip && !self.cut_agg();
         let mut widened = false;
         // `ENOMOTO_MIP_CUT_ADAPT_ROUNDS` (実験的): ラウンドの上限に達したとき、直近 5 ラウンドの目的値の伸びがそれまでの伸びの
         // `ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_FRAC` 以上なら上限を 25 ラウンド延ばす (`ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP` まで)
@@ -507,7 +521,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             v => v.is_some(),
         };
         let mut round_obj: Vec<f64> = Vec::new();
-        let extend_on = env_str!("ENOMOTO_MIP_CUT_EXTEND").is_some() && !self.params.submip && job.is_none() && self.params.time_limit.is_finite();
+        let extend_on = (env_str!("ENOMOTO_MIP_CUT_EXTEND").is_some() || self.cut_agg()) && !self.params.submip && job.is_none() && self.params.time_limit.is_finite();
         let extend_max = tunable!("ENOMOTO_T_MIP_CUT_EXTEND_MAX", 0.3, f64) * self.params.time_limit;
         CUT_EXTENDED.with(|c| c.set(false));
         // ラウンドごとの目的値 (`ENOMOTO_MIP_CUT_EXTEND` の判定用。最初は根の LP の値)
@@ -682,10 +696,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 });
             }
             let cand_nnz: usize = cands.iter().map(|c| c.coefs.len()).sum();
+            // 診断 (`ENOMOTO_MIP_DEBUG_DUMP_CANDS=ディレクトリ`): 根のこのラウンドの候補を `<ディレクトリ>/cands_r<ラウンド>.txt` に
+            // 1 行 1 本 (`分離器の番号 効き目 右辺 列:係数 ...`、`sum a x <= 右辺`) で書く。選んだものは `chosen_r<ラウンド>.txt`
+            let dump_cands = env_str!("ENOMOTO_MIP_DEBUG_DUMP_CANDS").filter(|_| !self.params.submip && job.is_none());
+            if let Some(dir) = &dump_cands {
+                let txt: String = cands.iter().chain(face_cands.iter()).map(|c| format!("{} {:.6e} {:.17e} {}\n", c.src, c.efficacy, c.rhs, c.coefs.iter().map(|&(j, a)| format!("{j}:{a:.17e}")).collect::<Vec<_>>().join(" "))).collect();
+                let _ = std::fs::write(format!("{dir}/cands_r{round}.txt"), txt);
+            }
             // 効き目の大きい順に、平行なものを除いて選ぶ
             let max_cuts = tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize).min(p.m.max(50));
             let max_cuts = if adapt_max_cuts > 0 { adapt_max_cuts } else { max_cuts };
             let (forced, cands): (Vec<Candidate>, Vec<Candidate>) = cands.into_iter().partition(|c| c.forced);
+            // `ENOMOTO_T_MIP_CUTSEL_AGG_QUOTA` = q (> 0、試作): 集約した行からのカット (tableau・経路集約) を、分離器ごとに
+            // 質の上位 q 本まで、全体の質の閾値 (最良の `ENOMOTO_T_CUTSEL_MIN_REL` 倍) と関係なく先に採る ([`pick_agg_quota`])
+            let agg_quota = if self.params.submip || phase2 {
+                0
+            } else {
+                let q = tunable!("ENOMOTO_T_MIP_CUTSEL_AGG_QUOTA", 0usize, usize);
+                if q == 0 && self.cut_agg() { 50 } else { q }
+            };
+            let (quota_cuts, cands) = if agg_quota > 0 { pick_agg_quota(cands, agg_quota, p) } else { (Vec::new(), cands) };
             let chosen = if phase2 {
                 let maxpar = tunable!("ENOMOTO_T_MIP_CUT_PHASE2_MAXPAR", 0.3, f64);
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
@@ -713,6 +743,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 chosen
             };
             let mut chosen = chosen;
+            if !quota_cuts.is_empty() {
+                if self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_AGG_QUOTA").is_some() {
+                    eprintln!("MIP: cut round {round}: {} cuts by the aggregation quota, {} by the selection", quota_cuts.len(), chosen.len());
+                }
+                chosen.extend(quota_cuts);
+            }
             // 診断 (`ENOMOTO_MIP_DEBUG_TOPCUTS` = k): 選んだカットの最初の k 本を、列の LP 値・境界・整数かと並べて表示する
             let topk = tunable!("ENOMOTO_MIP_DEBUG_TOPCUTS", 0usize, usize);
             if topk > 0 && !self.params.submip {
@@ -724,6 +760,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 選択の上限まで採ったか (選択を通さないカットは数えない)
             let quota_full = chosen.len() >= max_cuts && ncands >= 2 * max_cuts;
             chosen.extend(forced);
+            if let Some(dir) = &dump_cands {
+                let txt: String = chosen.iter().map(|c| format!("{} {:.6e} {:.17e} {}\n", c.src, c.efficacy, c.rhs, c.coefs.iter().map(|&(j, a)| format!("{j}:{a:.17e}")).collect::<Vec<_>>().join(" "))).collect();
+                let _ = std::fs::write(format!("{dir}/chosen_r{round}.txt"), txt);
+            }
             let sep_secs = t_sep.elapsed().as_secs_f64();
             sep_tot += sep_secs;
             nrounds += 1;
@@ -2236,7 +2276,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (physiciansched6-2 では面の LP 2 回が時間の上限 1.2 秒に当たって使われず、1 ラウンド 3.3 秒のうち 2.3 秒を占めた)。
         // また面の LP の時間の上限を、直前のラウンドのカットの LP の時間の `ENOMOTO_T_MIP_FACE_ADAPT_MULT` 倍 (既定 2、最低 0.05 秒) にする
         let face_adapt = env_str!("ENOMOTO_MIP_FACE_ADAPT").is_some() && !self.params.submip;
-        if face_adapt && self.face_off_loop {
+        if (face_adapt && self.face_off_loop) || self.cut_agg() {
             return (self.separate(x, light), Vec::new());
         }
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
@@ -3518,6 +3558,52 @@ fn select_cuts_hybrid_anchor(cands: Vec<Candidate>, max_cuts: usize, p: &MipProb
         }
     }
     chosen.into_iter().map(|(_, c)| c).collect()
+}
+
+/// 集約した行からのカットの枠 (`ENOMOTO_T_MIP_CUTSEL_AGG_QUOTA`、試作)。tableau・HiGHS 流の経路集約・経路集約の候補を分離器ごとに
+/// [`cut_score`] の順に見て、すでに採ったものとの平行度が `ENOMOTO_T_CUTSEL_MAXPAR` (0.3) 以下なら採り、分離器ごとに `q` 本まで採る。
+/// 返り値は (採ったもの、残り)。physiciansched6-2 では、元の行・zerohalf の 2〜3 非零のカット (効き目 0.5 前後、LP の値はほとんど
+/// 動かない) が質の最良を決め、その 50% を下回る tableau のカット (効き目 0.1〜0.3) が 1 本も採られない。HiGHS が根の下界を上げる
+/// のに使っている一般係数のカット (ENOMOTO の根の LP に 12 本足すと 48984 -> 49266) と余弦 0.8〜0.9 の候補が、その中にある
+fn pick_agg_quota(cands: Vec<Candidate>, q: usize, p: &MipProblem) -> (Vec<Candidate>, Vec<Candidate>) {
+    let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
+    let maxpar = tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64);
+    let fam = |c: &Candidate| -> Option<usize> {
+        match c.src % sepprof::SRC_FACE {
+            sepprof::SRC_PATHH => Some(0),
+            sepprof::SRC_PATH => Some(1),
+            sepprof::SRC_TAB => Some(2),
+            _ => None,
+        }
+    };
+    let mut order: Vec<(f64, usize)> = cands.iter().enumerate().filter(|(_, c)| fam(c).is_some()).map(|(i, c)| (cut_score(c, p, cnorm), i)).collect();
+    order.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut taken = vec![false; cands.len()];
+    let mut picked: Vec<(f64, usize)> = Vec::new(); // (ノルム, 番号)
+    let mut cnt = [0usize; 3];
+    for (_, i) in order {
+        let c = &cands[i];
+        let f = fam(c).unwrap();
+        if cnt[f] >= q {
+            continue;
+        }
+        let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+        if picked.iter().any(|&(nd, k)| sparse_dot(&c.coefs, &cands[k].coefs).abs() > maxpar * nc * nd) {
+            continue;
+        }
+        picked.push((nc, i));
+        taken[i] = true;
+        cnt[f] += 1;
+    }
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    for (i, c) in cands.into_iter().enumerate() {
+        if taken[i] {
+            a.push(c);
+        } else {
+            b.push(c);
+        }
+    }
+    (a, b)
 }
 
 fn select_cuts_old(mut cands: Vec<Candidate>, max_cuts: usize) -> Vec<Candidate> {
