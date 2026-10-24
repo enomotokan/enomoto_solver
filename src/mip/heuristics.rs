@@ -1711,6 +1711,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.submip_time_frac = tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_TIME_FRAC", 0.15, f64);
                 self.submip_time_max = tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_TIME_MAX", 3.0, f64);
             }
+            // `ENOMOTO_MIP_RENS_HIGHS=dive` (試作): 潜り・やり直しまで HiGHS 1.15.1 の `HighsPrimalHeuristics::RENS` に合わせた
+            // [`Self::rens_highs_full`] を使う (時間・ノードの設定は上のまま)
+            if rens_highs && env_str!("ENOMOTO_MIP_RENS_HIGHS") == Some("dive") {
+                let found = self.rens_highs_full(target, tries);
+                (self.submip_time_frac, self.submip_time_max, self.submip_node_mult) = keep;
+                return found;
+            }
             let mut found = false;
             for t in 0..tries {
                 if t > 0 && !nested {
@@ -1901,6 +1908,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
+            if self.params.verbose && self.nodes <= 1 && env_str!("ENOMOTO_MIP_DEBUG_DIVE").is_some() {
+                eprintln!("MIP:   neighbourhood dive stage: branched {branched}, conflict {conflict}, fixing rate {:.4}, LP obj {:.6e}, fractional {}", rate(self), self.lp.objective(), self.fractional(&x).len());
+            }
             if branched == 0 {
                 break;
             }
@@ -1984,6 +1994,236 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             _ => (false, fr),
         }
+    }
+
+    /// `ENOMOTO_MIP_RENS_HIGHS=dive` (試作、既定では使わない): HiGHS 1.15.1 の `HighsPrimalHeuristics::RENS` に合わせた根の RENS。
+    /// neos-960392 では根の LP の頂点しだいで既定の RENS (固定率 0.8) の近傍が当たり外れし、`RENS_HIGHS=1` (固定率 0.6 の
+    /// [`Self::dive_neighbourhood`]) の近傍は最適値 −233 で −238 を含まなかった (analysis/highstree_n960_20261024.md §6)。
+    /// HiGHS との違いを次のように合わせる:
+    /// - 列の順: lock の数の積 ((ε + 上) × (ε + 下)) の大きい順、同点は衝突グラフの次数の積の大きい順、同点は列番号のハッシュ
+    ///   (`setupIntCols`。乱数の順を使わない)。
+    /// - 段: LP 解で整数値の列を 1 つずつ境界の変更 (決定) として固定して伝播し、固定率が残りの 1 割増える (または目標に達する)
+    ///   たびに LP を解き直す。整数値の列がなければ、分数の列を `getFixVal` の向き (根の LP 解からの変化が ±0.4 以上ならその向き、
+    ///   でなければ目的値の悪くなる向き、費用 0 なら近い方) に、丸め幅の小さい順に丸め幅の和 0.5 まで固定する。
+    /// - 伝播の矛盾・LP の実行不能 (打ち切り値を含む) のときは、最後の決定を裏返して続ける (HighsSearch の `backtrack`。
+    ///   戻りは合わせて 10 回まで)。
+    /// - サブ MIP は LP のカットの行を含め、並列にせずその場で解く。サブ MIP が実行不能なら、決定の列を半分の深さまで戻し、
+    ///   目標を達した固定率の半分にして潜り直す (`tries` 回まで、深さが 1 以下ならやめる)。
+    fn rens_highs_full(&mut self, target0: f64, tries: usize) -> bool {
+        let p = self.p;
+        let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
+        if ints.is_empty() {
+            return false;
+        }
+        let nint = ints.len() as f64;
+        let rate = |s: &Self| ints.iter().filter(|&&j| s.dom.lo[j] == s.dom.up[j]).count() as f64 / nint;
+        let hash = |j: usize| (j as u64 ^ 0x9E37_79B9_7F4A_7C15).wrapping_mul(0xD1B5_4A32_D192_ED03).rotate_left(29);
+        let cg = self.clique_graph.clone();
+        let deg = |j: usize, neg: bool| -> f64 {
+            match cg.as_ref() {
+                Some(g) if 2 * j + 1 < 2 * p.n => g.neighbors((2 * j + neg as usize) as u32).len() as f64,
+                _ => 0.0,
+            }
+        };
+        let mut keyed: Vec<(f64, f64, u64, usize)> = ints
+            .iter()
+            .map(|&j| {
+                let (dl, ul) = self.locks[j];
+                ((1e-6 + ul as f64) * (1e-6 + dl as f64), (1e-6 + deg(j, false)) * (1e-6 + deg(j, true)), hash(j), j)
+            })
+            .collect();
+        keyed.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.total_cmp(&a.1)).then(b.2.cmp(&a.2)));
+        let order: Vec<usize> = keyed.into_iter().map(|k| k.3).collect();
+        let saved = self.lp.save_state();
+        let pos0 = self.dom.stack_len();
+        let x_root = self.lp.col_values();
+        let it_start = self.lp.total_iterations();
+        let budget = tunable!("ENOMOTO_T_MIP_RENS_HIGHS_ITERS_MULT", 11u64, u64) * (2 * self.avg_node_iters().max(1000) + 1000);
+        let keep_par = self.parallel_submips;
+        self.parallel_submips = false;
+        // 決定 (列, 下限を上げたか, 値, 裏返したか, 決定の前の定義域の記録位置)
+        let mut dec: Vec<(usize, bool, f64, bool, usize)> = Vec::new();
+        let apply = |s: &mut Self, j: usize, lower: bool, v: f64| -> bool {
+            if lower {
+                s.dom.tighten_lower(p, j, v);
+            } else {
+                s.dom.tighten_upper(p, j, v);
+            }
+            s.dom.propagate(p)
+        };
+        let mut target = target0;
+        let mut nback = 0usize;
+        let mut found = false;
+        let mut conflict = false;
+        for t in 0..tries.max(1) {
+            let mut no_node = false;
+            let mut stages = 0usize;
+            loop {
+                if self.time_up() || self.lp.total_iterations() - it_start > budget {
+                    break;
+                }
+                // ノードの評価 (伝播の矛盾か LP の実行不能なら刈られる)
+                let mut pruned = conflict;
+                if !pruned {
+                    self.sync_lp();
+                    let it0 = self.lp.total_iterations();
+                    let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(500);
+                    let st = self.lp.solve(&self.limits(lim));
+                    self.heur_iters += self.lp.total_iterations() - it0;
+                    pruned = st != LpStatus::Optimal;
+                }
+                conflict = false;
+                if pruned {
+                    // 開いた子の残る一番深い決定を裏返す (裏返しも矛盾ならさらに戻る)
+                    loop {
+                        nback += 1;
+                        while dec.last().is_some_and(|d| d.3) {
+                            dec.pop();
+                        }
+                        let Some(d) = dec.last_mut() else {
+                            no_node = true;
+                            break;
+                        };
+                        let (j, lower, v, pos) = (d.0, d.1, d.2, d.4);
+                        let (nl, nv) = if lower { (false, v - 1.0) } else { (true, v + 1.0) };
+                        *d = (j, nl, nv, true, pos);
+                        self.dom.backtrack_to(p, pos);
+                        if apply(self, j, nl, nv) {
+                            break;
+                        }
+                    }
+                    if no_node || nback >= 10 {
+                        break;
+                    }
+                    continue;
+                }
+                let fr = rate(self);
+                if fr >= target || nback >= 10 {
+                    break;
+                }
+                stages += 1;
+                let x = self.lp.col_values();
+                let stop_rate = (1.0 - (1.0 - fr) * 0.9).min(target);
+                let mut nb = 0usize;
+                'stage: for &j in &order {
+                    if self.dom.lo[j] == self.dom.up[j] {
+                        continue;
+                    }
+                    let down = (x[j] + FEASTOL).floor().min(self.dom.up[j]);
+                    let up = (x[j] - FEASTOL).ceil().max(self.dom.lo[j]);
+                    for (lower, v) in [(true, down), (false, up)] {
+                        let act = if lower { self.dom.lo[j] < v } else { self.dom.up[j] > v };
+                        if act {
+                            nb += 1;
+                            dec.push((j, lower, v, false, self.dom.stack_len()));
+                            if !apply(self, j, lower, v) {
+                                conflict = true;
+                                break 'stage;
+                            }
+                        }
+                    }
+                    if nb > 0 && rate(self) >= stop_rate {
+                        break;
+                    }
+                }
+                if nb == 0 {
+                    let mut fr_cols: Vec<(f64, u64, usize, f64)> = order
+                        .iter()
+                        .filter(|&&j| self.dom.lo[j] < self.dom.up[j] && (x[j] - x[j].round()).abs() > FEASTOL)
+                        .map(|&j| {
+                            let rc = x[j] - x_root[j];
+                            let fv = if rc >= 0.4 {
+                                x[j].ceil()
+                            } else if rc <= -0.4 {
+                                x[j].floor()
+                            } else if p.cost[j] > 0.0 {
+                                x[j].ceil()
+                            } else if p.cost[j] < 0.0 {
+                                x[j].floor()
+                            } else {
+                                x[j].round()
+                            };
+                            let fv = fv.clamp(self.dom.lo[j], self.dom.up[j]);
+                            ((fv - x[j]).abs(), hash(j), j, fv)
+                        })
+                        .collect();
+                    fr_cols.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                    let mut change = 0.0;
+                    'frac: for (d, _, j, fv) in fr_cols {
+                        for lower in [true, false] {
+                            let act = if lower { self.dom.lo[j] < fv } else { self.dom.up[j] > fv };
+                            if act {
+                                nb += 1;
+                                dec.push((j, lower, fv, false, self.dom.stack_len()));
+                                if !apply(self, j, lower, fv) {
+                                    conflict = true;
+                                    break 'frac;
+                                }
+                            }
+                        }
+                        if rate(self) >= target {
+                            break;
+                        }
+                        change += d;
+                        if change >= 0.5 {
+                            break;
+                        }
+                    }
+                }
+                if nb == 0 {
+                    break;
+                }
+            }
+            if conflict {
+                // 段の途中の矛盾のまま止まった: 最後の決定を捨てる
+                if let Some(d) = dec.pop() {
+                    self.dom.backtrack_to(p, d.4);
+                }
+                conflict = false;
+            }
+            let fr = rate(self);
+            if self.params.verbose {
+                eprintln!("MIP:   RENS (HiGHS) try {}: target {target:.2}, fixing rate {fr:.4}, decisions {}, stages {stages}, backtracks {nback}, no node {no_node} ({:.2}s)", t + 1, dec.len(), self.start.elapsed().as_secs_f64());
+            }
+            if no_node || fr < 0.1 {
+                break;
+            }
+            let mut sub = p.clone();
+            sub.col_lo = self.dom.lo.clone();
+            sub.col_up = self.dom.up.clone();
+            let added = self.append_lp_cuts(&mut sub);
+            if self.params.verbose {
+                eprintln!("MIP:   RENS (HiGHS): {added} cuts added to the sub-MIP");
+            }
+            let r = self.solve_submip_problem(sub, 500, None);
+            match r {
+                Some((_, true)) => {
+                    self.rens_succ.0 += fr;
+                    self.rens_succ.1 += 1;
+                    found = true;
+                    break;
+                }
+                Some((super::solver::MipStatus::Infeasible, false)) => {
+                    self.rens_infeas.0 += fr;
+                    self.rens_infeas.1 += 1;
+                }
+                _ => break,
+            }
+            // やり直し: 決定を半分の深さまで戻し、目標を達した固定率の半分にする
+            let td = dec.len() / 2;
+            if td <= 1 || self.time_up() {
+                break;
+            }
+            self.dom.backtrack_to(p, dec[td].4);
+            dec.truncate(td);
+            target = 0.5 * fr;
+            nback += 1;
+        }
+        self.dom.backtrack_to(p, pos0);
+        self.sync_lp();
+        self.lp.restore_state(&saved);
+        self.parallel_submips = keep_par;
+        found
     }
 
     /// LP の元の行の後ろにある行 (切除平面) を `sub` に加える。加えた本数を返す。
