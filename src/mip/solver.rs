@@ -1281,6 +1281,13 @@ fn cutpool_prop() -> bool {
 }
 
 /// ヒューリスティクス役で ALNS と Local-MIP + 連鎖を競わせるか (`ENOMOTO_MIP_ROLE_LMIP`、試作)。
+/// 根のヒューリスティクスの終わりに、暫定解を出発点に Local-MIP + 連鎖の手 ([`super::localmip`]) を回すか
+/// (`ENOMOTO_MIP_ROOT_LMIP`、試作、既定では使わない)。FJ のスレッドの Local-MIP (`fj_lmip_mix`) は FJ 自身の解しか受け取らず、
+/// 根のカットのループの終わりで止まるので、RENS・RINS などのサブ MIP の解からは磨かない
+fn root_lmip_on() -> bool {
+    env_str!("ENOMOTO_MIP_ROOT_LMIP").is_some()
+}
+
 fn role_lmip_on() -> bool {
     env_str!("ENOMOTO_MIP_ROLE_LMIP").is_some()
 }
@@ -3765,6 +3772,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if (self.incumbent.is_some() || self.ref_sol.is_some()) && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
                     heur!("RINS", self.rins(&x));
                 }
+                // `ENOMOTO_MIP_ROOT_LMIP` (試作): 根のヒューリスティクスの暫定解 (RENS・RINS などのサブ MIP の解を含む) を出発点に
+                // Local-MIP を回して磨く ([`Self::root_lmip`])
+                if root_lmip_on() && !self.params.submip && self.incumbent.is_some() {
+                    heur!("root Local-MIP", self.root_lmip());
+                }
                 // 目的関数の台のサブ MIP (`ENOMOTO_MIP_OBJ_SUPPORT`、試作、[`Solver::obj_support`])。暫定解が根の LP の値から
                 // 目的関数の刻み以上離れているときだけ
                 if env_str!("ENOMOTO_MIP_OBJ_SUPPORT").is_some() && self.obj_support_gap(root_obj) {
@@ -6056,6 +6068,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.heur_label = "";
             }
         }
+    }
+
+    /// `ENOMOTO_MIP_ROOT_LMIP`: 暫定解を Local-MIP に渡し、`ENOMOTO_T_MIP_ROOT_LMIP_SECS` (2) 秒と時間上限の
+    /// `ENOMOTO_T_MIP_ROOT_LMIP_FRAC` (0.03) 倍の小さい方だけ回す (lift move と目的の行を締める探索で磨く)。良い解が出れば暫定解にする
+    fn root_lmip(&mut self) -> bool {
+        let p = self.p;
+        let Some((z0, x0)) = self.incumbent.clone() else { return false };
+        let seed = self.rng ^ 0x5851_F42D_4C95_7F2D;
+        let Some(mut lm) = super::localmip::LocalMip::new(p, &self.dom.global_lo, &self.dom.global_up, seed, true) else { return false };
+        if !lm.inject(&x0) {
+            return false;
+        }
+        let mut secs = tunable!("ENOMOTO_T_MIP_ROOT_LMIP_SECS", 2.0, f64);
+        if self.params.time_limit.is_finite() {
+            secs = secs.min(tunable!("ENOMOTO_T_MIP_ROOT_LMIP_FRAC", 0.03, f64) * self.params.time_limit);
+        }
+        let mut t_end = Instant::now() + Duration::from_secs_f64(secs.max(0.0));
+        if let Some(d) = self.deadline {
+            t_end = t_end.min(d);
+        }
+        lm.run(t_end, None, &|_| {});
+        let Some(x) = lm.res.best.clone() else { return false };
+        let z = p.objective(&x);
+        if z < z0 - 1e-9 * z0.abs().max(1.0) {
+            self.try_incumbent(x);
+            return self.incumbent.as_ref().is_some_and(|(zi, _)| *zi < z0 - 1e-9 * z0.abs().max(1.0));
+        }
+        false
     }
 
     fn heur_role_run(&mut self) -> Option<bool> {
