@@ -3615,6 +3615,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if mip_threads() > 1 && !self.params.submip && self.incumbent.is_none() && env_str!("ENOMOTO_MIP_PAR_LOCAL_SEARCH").is_some() && env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() {
                     self.spawn_local_search();
                 }
+                // 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_ROOT_X=<接頭辞>`): 根のヒューリスティクスの前に、この求解の問題を `<接頭辞><k>.mps`、
+                // カットの後の LP 解を `<接頭辞><k>_x.txt`、カットの前の LP 解を `<接頭辞><k>_x0.txt` に書く (列の順に 1 行 1 値。
+                // k は再スタートごとに 0, 1, ...)。LP 解と最適解の離れ方の調査 (analysis/physlpdist_20261024.md)
+                if let Some(pre) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_ROOT_X").filter(|_| !self.params.submip) {
+                    let k = self.params.restarts;
+                    let f = format!("{pre}{k}");
+                    let _ = self.p.write_mps(&format!("{f}.mps"));
+                    let w = |name: &str, v: &[f64]| std::fs::write(format!("{f}{name}"), v.iter().map(|a| format!("{a:.17e}\n")).collect::<String>());
+                    let _ = w("_x.txt", &x);
+                    let _ = w("_x0.txt", &x_root0);
+                    eprintln!("MIP: root LP solution written to {f}_x.txt (objective {:.6e}, {:.2}s)", self.lp.objective() + self.p.offset, self.start.elapsed().as_secs_f64());
+                }
                 heur!("simple rounding", self.simple_rounding(&x));
                 if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() {
                     heur!("ZI round", self.zi_round(&x));
