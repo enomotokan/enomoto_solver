@@ -364,13 +364,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// physiciansched6-2 では HiGHS の根の下界を上げているのが一般係数の tableau・経路集約のカットで、ENOMOTO の候補にも
     /// 似たものがあるのに、元の行・zerohalf の効き目の大きい 2〜3 非零のカットに質の閾値で負けて 1 本も採られていなかった
     /// (analysis/physcmp_20261023.md)
+    /// 値が `1` (など下の文字を含まない値) なら全部。文字の並びなら、その部分だけ: `q` 枠、`l` 1 回の LP の上限、`e` 延長、
+    /// `w` 上限を広げない、`f` 面の頂点の分離をしない (例 `qlw`。analysis/cand9bisect_20261024.md)
     pub(super) fn cut_agg(&self) -> bool {
         !self.params.submip && env_str!("ENOMOTO_MIP_CUT_AGG").is_some()
     }
 
+    /// [`Self::cut_agg`] の部分 `c` を使うか
+    fn cut_agg_has(&self, c: char) -> bool {
+        self.cut_agg()
+            && match env_str!("ENOMOTO_MIP_CUT_AGG") {
+                Some(v) if v.chars().any(|d| "qlewf".contains(d)) => v.contains(c),
+                _ => true,
+            }
+    }
+
     /// 根のカットのループの 1 回の LP の時間の上限 (全体に対する割合)。
     fn cut_lp_time_frac(&self) -> f64 {
-        if self.cut_agg() {
+        if self.cut_agg_has('l') {
             let f = if self.equiv2_cuts() { tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_LP_TIME_FRAC", 0.05, f64) } else { tunable!("ENOMOTO_T_MIP_CUT_LP_TIME_FRAC", 0.02, f64) };
             f.max(tunable!("ENOMOTO_T_MIP_CUT_AGG_LP_TIME_FRAC", 0.05, f64))
         } else if self.equiv2_cuts() {
@@ -494,7 +505,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 毎ラウンド候補が数千本あり、50 本ずつ切っても LP が切られていない別の箱に移るだけで下界が 415.24 から動かず、
         // 停滞判定で 5 ラウンドで止まっていた。下界が上がっている問題では起きないので、上限を一律に広げる
         // (40 問で悪化した) のと違い他の問題は変わらない
-        let widen_on = env_str!("ENOMOTO_MIP_NO_CUT_WIDEN").is_none() && !self.params.submip && !self.cut_agg();
+        let widen_on = env_str!("ENOMOTO_MIP_NO_CUT_WIDEN").is_none() && !self.params.submip && !self.cut_agg_has('w');
         let mut widened = false;
         // `ENOMOTO_MIP_CUT_ADAPT_ROUNDS` (実験的): ラウンドの上限に達したとき、直近 5 ラウンドの目的値の伸びがそれまでの伸びの
         // `ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_FRAC` 以上なら上限を 25 ラウンド延ばす (`ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP` まで)
@@ -521,7 +532,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             v => v.is_some(),
         };
         let mut round_obj: Vec<f64> = Vec::new();
-        let extend_on = (env_str!("ENOMOTO_MIP_CUT_EXTEND").is_some() || self.cut_agg()) && !self.params.submip && job.is_none() && self.params.time_limit.is_finite();
+        let extend_on = (env_str!("ENOMOTO_MIP_CUT_EXTEND").is_some() || self.cut_agg_has('e')) && !self.params.submip && job.is_none() && self.params.time_limit.is_finite();
         let extend_max = tunable!("ENOMOTO_T_MIP_CUT_EXTEND_MAX", 0.3, f64) * self.params.time_limit;
         CUT_EXTENDED.with(|c| c.set(false));
         // ラウンドごとの目的値 (`ENOMOTO_MIP_CUT_EXTEND` の判定用。最初は根の LP の値)
@@ -713,7 +724,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 0
             } else {
                 let q = tunable!("ENOMOTO_T_MIP_CUTSEL_AGG_QUOTA", 0usize, usize);
-                if q == 0 && self.cut_agg() { 50 } else { q }
+                if q == 0 && self.cut_agg_has('q') { 50 } else { q }
             };
             let (quota_cuts, cands) = if agg_quota > 0 { pick_agg_quota(cands, agg_quota, p) } else { (Vec::new(), cands) };
             let chosen = if phase2 {
@@ -2276,7 +2287,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (physiciansched6-2 では面の LP 2 回が時間の上限 1.2 秒に当たって使われず、1 ラウンド 3.3 秒のうち 2.3 秒を占めた)。
         // また面の LP の時間の上限を、直前のラウンドのカットの LP の時間の `ENOMOTO_T_MIP_FACE_ADAPT_MULT` 倍 (既定 2、最低 0.05 秒) にする
         let face_adapt = env_str!("ENOMOTO_MIP_FACE_ADAPT").is_some() && !self.params.submip;
-        if (face_adapt && self.face_off_loop) || self.cut_agg() {
+        // `ENOMOTO_MIP_CUT_AGG` の `f` は、列が行の `ENOMOTO_T_MIP_CUT_AGG_F_MAX_COLS_PER_ROW` 倍 (既定 100) を超える問題では使わない:
+        // nw04 (36 行・87482 列) は面の頂点のカットで根を 4 ラウンドで閉じ (8 秒)、止めると 8 ラウンドで 16776 止まり (22 秒)。
+        // h80x6320d・drayage-100-23・10teams は止めると速くなる (analysis/cand9bisect_20261024.md)
+        let agg_face_off = self.cut_agg_has('f') && (self.p.n as f64) <= tunable!("ENOMOTO_T_MIP_CUT_AGG_F_MAX_COLS_PER_ROW", 100.0, f64) * self.p.m.max(1) as f64;
+        if (face_adapt && self.face_off_loop) || agg_face_off {
             return (self.separate(x, light), Vec::new());
         }
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {

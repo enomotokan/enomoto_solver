@@ -1782,7 +1782,11 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     // 固定は試さない (下の `budget_left`) が、基底は根の LP に渡す。hypothyroid-k1 (4 スレッド・60 秒) では最初の LP が
     // 3.0〜3.1 秒で期限 3 秒に当たって解いた分を捨て、根で同じ LP を基底なしで解き直していた (3067 反復、5〜7 秒)。
     // 列の状態だけの基底を渡しても、行の状態がないので別の基底になり、根の LP は同じ 3067 反復かかった
-    let finish = env_str!("ENOMOTO_MIP_LP_PROBE_FINISH").is_some();
+    // 値が `late` なら、最初の LP が期限 `secs` を過ぎて解けたときだけ (期限の中で解けたときは行の状態・DSE 重みを渡さない)。
+    // neos-960392 は最初の LP が 2.1〜2.3 秒 (期限 3 秒) で解け、重みを引き継いだ根の LP が別の頂点に着くと根の RENS が
+    // 最適値を出さず時間切れになる (analysis/cand9bisect_20261024.md)
+    let mut finish = env_str!("ENOMOTO_MIP_LP_PROBE_FINISH").is_some();
+    let finish_late = env_str!("ENOMOTO_MIP_LP_PROBE_FINISH") == Some("late");
     // `ENOMOTO_MIP_LP_PROBE_FIRST_FULL` (試作、既定では使わない): 最初の LP の期限を `secs` の `ENOMOTO_T_MIP_LP_PROBE_FIRST_MULT` 倍
     // (既定 4 倍) に延ばす (固定を試す手間の上限は `secs` のまま)。最初の LP が `secs` に間に合わないと基底を根に渡せず、根で同じ LP を
     // もう一度解く (時間の損) うえ、着く頂点が変わる。neos-960392 (60 秒で `secs` = 3.0 秒、最初の LP は 2.8〜3.0 秒) では、
@@ -1807,6 +1811,9 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     }
     let z0 = lp.objective() + prob.offset;
     let root_secs = t0.elapsed().as_secs_f64();
+    if finish_late && root_secs < secs {
+        finish = false;
+    }
     let root_iters = lp.total_iterations();
     let iter_budget = (tunable!("ENOMOTO_T_MIP_LP_PROBE_ITER_MULT", 2.0, f64) * root_iters as f64) as u64 + 5000;
     let per_lp = (root_iters / 4).clamp(200, 2000);

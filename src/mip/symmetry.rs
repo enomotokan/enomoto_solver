@@ -116,9 +116,17 @@ pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize) -> Option<Symmetr
     // `ENOMOTO_MIP_SYM_SKIP_FIXED` (試作): 固定された列 (下限 = 上限) は 1 列ずつ別の色にして動かさない。前処理の後も固定列は
     // 列として残り (timtab1 では 397 列のうち 196 列が固定・空)、互いに入れ替えられるので互換 194 個・lex-leader の行 170 本
     // (どれも 0 >= 0) と 1x25 のオービトープが出ていた。意味のない対称性で、LP の行と対称性の処理を増やすだけ
-    if env_str!("ENOMOTO_MIP_SYM_SKIP_FIXED").is_some() {
+    // 値が `empty` なら、行に現れない固定列だけ (misc07 は固定された列が行に残ったまま 79x3 のオービトープの一部で、全部の固定列に
+    // 別の色をつけると対称性が見つからなくなり、orbitopal fixing (8559 本) がなくなって 11 秒 -> 時間切れ。analysis/cand9bisect_20261024.md)
+    if let Some(v) = env_str!("ENOMOTO_MIP_SYM_SKIP_FIXED") {
+        let empty_only = v == "empty";
+        if env_str!("ENOMOTO_MIP_DEBUG_SYM_FIXED").is_some() {
+            let nf = (0..n).filter(|&j| p.col_lo[j] == p.col_up[j]).count();
+            let ne = (0..n).filter(|&j| p.col_lo[j] == p.col_up[j] && p.cols[j].is_empty()).count();
+            eprintln!("MIP: symmetry: fixed columns {nf} of {n}, of which empty {ne}");
+        }
         for j in 0..n {
-            if p.col_lo[j] == p.col_up[j] {
+            if p.col_lo[j] == p.col_up[j] && (!empty_only || p.cols[j].is_empty()) {
                 col[j] = mix(col[j], mix(0x5EED_F1CE_D000_0000, j as u64));
             }
         }
