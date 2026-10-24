@@ -1,0 +1,74 @@
+mip_heuristic_run_rens False HighsStatus.kOk
+mip_heuristic_run_rins False HighsStatus.kOk
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Number of BV entries in BOUNDS section is 109346
+MIP physiciansched6-2 has 168336 rows; 111827 cols; 480259 nonzeros; 109346 integer variables (109346 binary)
+Coefficient ranges:
+  Matrix  [2e-01, 1e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 3e+02]
+Presolving model
+61799 rows, 10875 cols, 100259 nonzeros 0s
+13040 rows, 6143 cols, 53335 nonzeros 0s
+10083 rows, 5765 cols, 41171 nonzeros 1s
+8861 rows, 4608 cols, 40149 nonzeros 1s
+8861 rows, 4608 cols, 40149 nonzeros 2s
+Presolve reductions: rows 8861(-159475); columns 4608(-107219); nonzeros 40149(-440110) 
+
+Solving MIP model with:
+   8861 rows
+   4608 cols (4185 binary, 0 integer, 414 implied int., 9 continuous, 0 domain fixed)
+   40149 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   35707.5         inf                  inf        0      0      0         0     2.4s
+         0       0         0   0.00%   47410.756313    inf                  inf        0      0      5      6633     4.5s
+         0       0         0   0.00%   49324           inf                  inf     2177    400    179     13358     9.6s
+         0       0         0   0.00%   49324           inf                  inf     3170    330    311     27126    16.5s
+
+2.2% inactive integer columns, restarting
+Model after restart has 7266 rows, 4448 cols (4034 bin., 0 int., 405 impl., 9 cont., 0 dom.fix.), and 33328 nonzeros
+
+         0       0         0   0.00%   49324           inf                  inf      263      0      0     27126    17.3s
+         0       0         0   0.00%   49324           inf                  inf      263    155      4     31600    18.9s
+         0       0         0   0.00%   49324           inf                  inf     2660    350    216     36316    24.1s
+        79       0         1   0.00%   49324           inf                  inf     3340    234    359     64879    36.3s
+ B      79       0         1   0.00%   49324           49325              0.00%     3343    234    403     64879    43.0s
+       249     141         6   0.00%   49324           49325              0.00%     3702    240    474     98931    51.8s
+       317     284        11   0.00%   49324           49325              0.00%     4114    261    553    119079    60.0s
+       317     284        11   0.00%   49324           49325              0.00%     4114    261    553    119079    60.0s
+
+Solving report
+  Model             physiciansched6-2
+  Status            Time limit reached
+  Primal bound      49325
+  Dual bound        49324
+  Gap               0.00203%
+  P-D integral      0.000345310360062
+  Solution status   feasible
+                    49325 (objective)
+                    0 (bound viol.)
+                    3.17745829648e-12 (int. viol.)
+                    0 (row viol.)
+  Timing            60.01
+                    2.07 (Presolve)
+                    57.93 (Solve)
+                    0.00 (Postsolve)
+  Max sub-MIP depth 0
+  Nodes             317
+  Repair LPs        0
+  LP iterations     119079
+                    35853 (strong br.)
+                    17294 (separation)
+                    18766 (heuristics)
+RESULT Time limit reached obj 49325.00000000003 bound 49324.000000000015 nodes 317 time 60.0

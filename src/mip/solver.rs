@@ -3640,6 +3640,51 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if mip_threads() > 1 && !self.params.submip && self.incumbent.is_none() && env_str!("ENOMOTO_MIP_PAR_LOCAL_SEARCH").is_some() && env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() {
                     self.spawn_local_search();
                 }
+                // 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_ROOT_X=<接頭辞>`): 根のヒューリスティクスの前に、この求解の問題を `<接頭辞><k>.mps`、
+                // カットの後の LP 解を `<接頭辞><k>_x.txt`、カットの前の LP 解を `<接頭辞><k>_x0.txt` に書く (列の順に 1 行 1 値。
+                // k は再スタートごとに 0, 1, ...)。LP 解と最適解の離れ方の調査 (analysis/physlpdist_20261024.md)
+                if let Some(pre) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_ROOT_X").filter(|_| !self.params.submip) {
+                    let k = self.params.restarts;
+                    let f = format!("{pre}{k}");
+                    let _ = self.p.write_mps(&format!("{f}.mps"));
+                    let w = |name: &str, v: &[f64]| std::fs::write(format!("{f}{name}"), v.iter().map(|a| format!("{a:.17e}\n")).collect::<String>());
+                    let _ = w("_x.txt", &x);
+                    let _ = w("_x0.txt", &x_root0);
+                    eprintln!("MIP: root LP solution written to {f}_x.txt (objective {:.6e}, {:.2}s)", self.lp.objective() + self.p.offset, self.start.elapsed().as_secs_f64());
+                }
+                // 診断用 (`ENOMOTO_MIP_DEBUG_LMIP_FROM_LP`): Local-MIP (連鎖の手つき) を、LP 解を四捨五入した点から始めたものと、
+                // 既定の出発点 (各列の下限) から始めたものを、種 2 つずつ `ENOMOTO_T_MIP_DEBUG_LMIP_SECS` (20) 秒ずつ回して比べる
+                // (主のスレッドで。見つけた解は使わない)。LP 解は `ENOMOTO_MIP_DEBUG_LMIP_X=<ファイル>` (列の数が合えば) か、今の LP 解
+                if env_str!("ENOMOTO_MIP_DEBUG_LMIP_FROM_LP").is_some() && !self.params.submip {
+                    let secs = tunable!("ENOMOTO_T_MIP_DEBUG_LMIP_SECS", 20.0, f64);
+                    let p = self.p;
+                    let xs: Vec<f64> = env_str!("ENOMOTO_MIP_DEBUG_LMIP_X")
+                        .and_then(|f| std::fs::read_to_string(f).ok())
+                        .map(|s| s.lines().filter_map(|l| l.trim().parse().ok()).collect::<Vec<f64>>())
+                        .filter(|v| v.len() == p.n)
+                        .unwrap_or_else(|| x.clone());
+                    let nfrac = (0..p.n).filter(|&j| p.is_int[j] && (xs[j] - xs[j].round()).abs() > 1e-6).count();
+                    eprintln!("MIP: [lmip from LP] LP solution: objective {:.4}, fractional {nfrac}", p.objective(&xs));
+                    for (mode, k) in [("LP", 0u64), ("LP", 1), ("lower bounds", 0), ("lower bounds", 1)] {
+                        let Some(mut lm) = super::localmip::LocalMip::new(p, &self.dom.lo, &self.dom.up, 12345 + k, true) else { break };
+                        let v0 = if mode == "LP" { lm.set_start(&xs) } else { usize::MAX };
+                        let t = Instant::now();
+                        lm.run(t + std::time::Duration::from_secs_f64(secs), None, &|_| {});
+                        let res = &lm.res;
+                        let (z, d) = match &res.best {
+                            Some(b) => (p.objective(b), (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).map(|j| (b[j] - xs[j]).abs()).sum::<f64>()),
+                            None => (f64::NAN, f64::NAN),
+                        };
+                        eprintln!(
+                            "MIP: [lmip from {mode}] seed {k}: violated rows at the start {}, first feasible {:?}, best objective {z:.1}, L1 to the LP solution {d:.1}, least violated rows {}, steps {}, {:.1}s",
+                            if v0 == usize::MAX { "-".to_string() } else { v0.to_string() },
+                            res.first_time.map(|t| (t * 100.0).round() / 100.0),
+                            res.least_viol,
+                            res.steps,
+                            t.elapsed().as_secs_f64()
+                        );
+                    }
+                }
                 heur!("simple rounding", self.simple_rounding(&x));
                 if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() {
                     heur!("ZI round", self.zi_round(&x));
@@ -3665,7 +3710,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // サブ MIP (942 列) では、この 4 つで 2.4 秒使って何も見つけず、入れ子の RENS のサブ MIP でも毎回同じだけかかる
                 // (HiGHS のサブ MIP は根のヒューリスティクスのほとんどを入れ子の RENS に使い、1 回 0.1-1.6 秒で終わる)
                 // (暫定解がない、つまり打ち切り値が無限のサブ MIP だけ。`ENOMOTO_MIP_SUBMIP_NO_SB` と同じ理由)
-                let light = self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some();
+                let light = (self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some()) || self.submip_rens_cutoff();
                 // ダイビングの予算: 最初の根の LP の 2 倍に、カットのループを含めた根全体の反復数の一定割合を足す
                 let dive_budget = 2 * root_iters + 1000 + (tunable!("ENOMOTO_T_MIP_ROOT_DIVE_FRAC", 0.0, f64) * self.lp.total_iterations() as f64) as u64;
                 // `ENOMOTO_MIP_PAR_DIVES`: 並列モードで暫定解がなければ、Feasibility Pump と 3 つのダイビングを、今の根の写しから

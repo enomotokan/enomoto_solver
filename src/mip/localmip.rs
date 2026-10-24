@@ -376,6 +376,17 @@ impl<'a> LocalMip<'a> {
         })
     }
 
+    /// 出発点を `x` (整数列は四捨五入、境界の中に収める) にする。やり直し (restart) もこの点から始める。
+    /// 戻り値は出発点で破られている行の数 (`ENOMOTO_MIP_DEBUG_LMIP_FROM_LP`、LP 解から始める Local-MIP の調査)
+    pub(super) fn set_start(&mut self, x: &[f64]) -> usize {
+        let p = self.s.p;
+        let v: Vec<f64> = (0..p.n).map(|j| if p.is_int[j] { x[j].round() } else { x[j] }.clamp(self.s.lo[j], self.s.up[j])).collect();
+        self.s.x = v.clone();
+        self.start = v;
+        self.s.reset();
+        self.s.vset.len()
+    }
+
     /// 目的値の最良
     pub(super) fn best_obj(&self) -> f64 {
         self.best_obj
