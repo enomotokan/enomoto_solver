@@ -156,6 +156,11 @@ thread_local! {
     /// 各行 (元の行とカットの行) の中身と論理変数の状態。前処理は列の番号を保つが行は消したり並べ替えたりするので、
     /// 行の状態は行の中身で照らし合わせて引き継ぐ ([`restart_basis_for`])
     pub(crate) static RESTART_BASIS: std::cell::RefCell<Option<(Vec<super::lp::VarStatus>, Vec<(Vec<(usize, f64)>, super::lp::VarStatus)>)>> = const { std::cell::RefCell::new(None) };
+    /// `ENOMOTO_MIP_LP_PROBE_ROW_BASIS`・`ENOMOTO_MIP_LP_PROBE_FINISH`: [`ROOT_BASIS`] の行の状態を作った LP の行の指紋
+    /// ([`super::rows_fingerprint`])。根の LP の始めの行が同じ (指紋が合う) ときだけ行の状態を使う。列の状態だけだと、基底の残りを
+    /// 行 0, 1, 2, ... の論理変数で埋めることになり ([`crate::simplex::mip_lp::TwoStageLp::set_basis`] の修復)、最適基底とは遠い基底から
+    /// 解き直す (uccase12 で根の LP が 40 秒終わらなかった。analysis/uccase12_20261023.md)
+    pub(crate) static ROOT_BASIS_ROWS: std::cell::RefCell<Option<u64>> = const { std::cell::RefCell::new(None) };
     /// ヒューリスティクス役のスレッド (`ENOMOTO_MIP_HEUR_ROLE`、[`Solver::heur_role_run`]) の共有の待ち行列。このスレッドで
     /// 解くサブ MIP も、木の探索が終わるか止める合図が立ったら打ち切る ([`Solver::time_up`])。
     static ROLE_POOL: std::cell::RefCell<Option<std::sync::Arc<WorkPool>>> = const { std::cell::RefCell::new(None) };
@@ -3162,6 +3167,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut root_warm_dse_once = false;
         if !self.params.submip && self.snap.is_none() {
             let rb = ROOT_BASIS.with(|s| s.borrow_mut().take());
+            // 行の状態は、前処理の LP の行と根の LP の始めの行が同じ (指紋が合う) ときだけ使う (`ENOMOTO_MIP_LP_PROBE_ROW_BASIS`。
+            // 合わなければ列の状態だけにし、DSE 重みも捨てる)
+            let fp = ROOT_BASIS_ROWS.with(|s| s.borrow_mut().take());
+            let rb = rb.map(|mut b| {
+                if !b.row.is_empty() && (b.row.len() > self.p.m || fp.is_none_or(|f| super::rows_fingerprint(&self.p.rows[..b.row.len()]) != f)) {
+                    if self.params.verbose {
+                        eprintln!("MIP: root LP: the rows changed after LP probing; the row statuses are not used");
+                    }
+                    b.row.clear();
+                    ROOT_DSE.with(|s| *s.borrow_mut() = None);
+                }
+                b
+            });
             if self.params.verbose {
                 eprintln!(
                     "MIP: root LP basis from the presolve LP probing: {}",

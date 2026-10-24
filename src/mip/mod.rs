@@ -671,8 +671,24 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         solver::ROOT_BASIS.with(|t| *t.borrow_mut() = None);
         solver::ROOT_DSE.with(|t| *t.borrow_mut() = None);
         solver::RESTART_BASIS.with(|t| *t.borrow_mut() = None);
+        solver::ROOT_BASIS_ROWS.with(|t| *t.borrow_mut() = None);
     }
     r
+}
+
+/// 行の並び (列番号と係数) の指紋 ([`solver::ROOT_BASIS_ROWS`] で、基底を作った LP と根の LP の行が同じかを見る)。
+pub(crate) fn rows_fingerprint(rows: &[Vec<(usize, f64)>]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    rows.len().hash(&mut h);
+    for r in rows {
+        r.len().hash(&mut h);
+        for &(j, v) in r {
+            j.hash(&mut h);
+            v.to_bits().hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
@@ -832,7 +848,21 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                     if params.verbose {
                         eprintln!("MIP: the postsolved solution is infeasible in the original problem; solving without presolve");
                     }
-                    ok = false;
+                    // 診断用 (`ENOMOTO_MIP_DEBUG_POSTSOLVE`): どの行・列がどれだけ破れるか、破れる行の列を後処理のどの手順が戻したか
+                    if env_str!("ENOMOTO_MIP_DEBUG_POSTSOLVE").is_some() {
+                        postsolve_diag(p, &prob, &xr, &x, &postsolve, &scaling.d, params.restarts);
+                    }
+                    // `ENOMOTO_MIP_POSTSOLVE_REPAIR` (試作、既定では使わない): 整数列を後処理した解の値に固定して `p` の LP を解き、
+                    // 連続列を直す ([`repair_postsolved`])。直れば前処理なしで解き直さない
+                    match repair_postsolved(p, &x, remaining(params)) {
+                        Some(xn) => {
+                            let z_orig = p.objective(&xn);
+                            r.best_bound += z_orig - prob.objective(&xr);
+                            r.objective = Some(z_orig);
+                            r.x = Some(xn);
+                        }
+                        None => ok = false,
+                    }
                 }
             } else if let Some(shift) = ref_shift.filter(|_| r.status != MipStatus::Infeasible) {
                 r.best_bound += shift;
@@ -887,6 +917,160 @@ thread_local! {
     pub(crate) static SYM_ORIG: std::cell::RefCell<Option<std::rc::Rc<MipProblem>>> = const { std::cell::RefCell::new(None) };
     /// lex-leader の行を作った生成元 (`ENOMOTO_MIP_SYM_LEX_CANON` でヒューリスティクスの解を写すのに使う。同じく消す)。
     pub(crate) static SYM_LEX_GENS: std::cell::RefCell<Option<std::rc::Rc<Vec<Vec<usize>>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `ENOMOTO_MIP_POSTSOLVE_REPAIR` (試作、既定では使わない): 後処理した解 `x` が `p` で実行不能なとき、整数列を `x` の値 (丸めた値) に
+/// 固定した `p` の LP を解いて連続列を直す。直った解 (`p` で実行可能) を返す。整数列が境界・整数性を破っていれば試さない。
+/// uccase12 では再スタート後の前処理で代入により消した連続列が、後処理で下限 0 を 1e-5 ほど破り (前処理後の問題の行の
+/// 許容誤差 1e-6 が代入で拡大する。行は破れない)、11507.41 の解が捨てられていた (analysis/uccase12_20261023.md)。
+/// LP の期限は残り時間と `ENOMOTO_T_MIP_POSTSOLVE_REPAIR_SECS` 秒 (既定 2 秒) の大きい方 (時間を使い切った後でも試す)
+fn repair_postsolved(p: &MipProblem, x: &[f64], params: MipParams) -> Option<Vec<f64>> {
+    // `params.time_limit` は残り時間
+    if env_str!("ENOMOTO_MIP_POSTSOLVE_REPAIR").is_none() {
+        return None;
+    }
+    let t0 = std::time::Instant::now();
+    let (mut lo, mut up) = (p.col_lo.clone(), p.col_up.clone());
+    for j in 0..p.n {
+        if p.is_int[j] {
+            let v = x[j].round();
+            if (x[j] - v).abs() > 1e-6 || v < p.col_lo[j] - 1e-6 || v > p.col_up[j] + 1e-6 {
+                return None;
+            }
+            let v = v.clamp(p.col_lo[j], p.col_up[j]);
+            lo[j] = v;
+            up[j] = v;
+        }
+    }
+    let secs = params.time_limit.max(tunable!("ENOMOTO_T_MIP_POSTSOLVE_REPAIR_SECS", 2.0, f64));
+    let deadline = Some(t0 + std::time::Duration::from_secs_f64(secs));
+    // LP の前処理つきで解く (整数列を固定すると大きく縮む。前処理なしの LP は uccase12 の再スタート 1 回目の問題 (8.8 万行) で
+    // 2 秒に収まらなかった。研磨 ([`polish_solution`]) と同じ経路)
+    let vars: Vec<VariableData> = (0..p.n).map(|j| VariableData { vtype: VarType::Continuous, lb: lo[j], ub: up[j] }).collect();
+    let mut cons: Vec<ConstraintRow> = Vec::with_capacity(p.m);
+    for i in 0..p.m {
+        let expr = crate::types::LinearExpr { coeffs: p.rows[i].iter().cloned().collect(), constant: 0.0 };
+        let (rl, ru) = (p.row_lo[i], p.row_up[i]);
+        if rl == ru {
+            cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Eq, rhs: rl });
+        } else {
+            if rl.is_finite() {
+                cons.push(ConstraintRow { expr: expr.clone(), sense: crate::types::RowSense::Ge, rhs: rl });
+            }
+            if ru.is_finite() {
+                cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Le, rhs: ru });
+            }
+        }
+    }
+    let objective = Objective { expr: crate::types::LinearExpr { coeffs: (0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect(), constant: 0.0 }, sense: crate::types::Sense::Minimize };
+    let r = crate::cancel::with_deadline(deadline, || solve_lp(&vars, &objective, &cons, RootSolver::Simplex, LpOptions::default()));
+    let st = r.status;
+    let xn = match (&st, r.x) {
+        (&Status::Optimal, Some(mut xn)) => {
+            for j in 0..p.n {
+                if p.is_int[j] {
+                    xn[j] = lo[j];
+                }
+            }
+            Some(xn).filter(|xn| p.is_feasible(xn, 1e-6))
+        }
+        _ => None,
+    };
+    if params.verbose {
+        eprintln!(
+            "MIP: postsolve repair: fixed-integer LP {st:?}, {} (objective {:.10e} -> {:?}, {:.2}s)",
+            if xn.is_some() { "repaired" } else { "not repaired" },
+            p.objective(x),
+            xn.as_ref().map(|xn| p.objective(xn)),
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    xn
+}
+
+/// 診断用 (`ENOMOTO_MIP_DEBUG_POSTSOLVE`): 後処理した解 `x` が元の問題 `p` で実行不能なとき、前処理後の解 `xr` が前処理後の
+/// 問題 `prob` で実行可能か、`p` で破れる列の境界・行 (破れの大きい順に 8 本) と、破れる行の列を後処理のどの手順が戻したかを出す。
+fn postsolve_diag(p: &MipProblem, prob: &MipProblem, xr: &[f64], x: &[f64], postsolve: &[crate::presolve::PostsolveStep], d: &[f64], restarts: u32) {
+    use crate::presolve::PostsolveStep;
+    // 列ごとに、最後に値を決めた後処理の手順 (S: 代入、P: 平行列の消された列、K: 平行列の残した列、F: 強制列。'-' は前処理後の値のまま)
+    let mut kind = vec!['-'; p.n];
+    // (後処理はログを逆順に当てるので、ログの前の手順ほど後に値を書く)
+    for step in postsolve.iter().rev() {
+        match step {
+            PostsolveStep::Sub(s) => kind[s.var] = 'S',
+            PostsolveStep::ParallelCol(s) => {
+                kind[s.var] = 'P';
+                kind[s.kept] = 'K';
+            }
+            PostsolveStep::Forcing(f) => kind[f.var] = 'F',
+        }
+    }
+    let (nsub, npar, nforce) = postsolve.iter().fold((0, 0, 0), |(a, b, c), s| match s {
+        PostsolveStep::Sub(_) => (a + 1, b, c),
+        PostsolveStep::ParallelCol(_) => (a, b + 1, c),
+        PostsolveStep::Forcing(_) => (a, b, c + 1),
+    });
+    eprintln!(
+        "POSTSOLVE_DIAG level {restarts}: reduced solution feasible in the presolved problem {} (1e-6), {} (1e-9); steps {} (sub {nsub}, parallel {npar}, forcing {nforce})",
+        prob.is_feasible(xr, 1e-6),
+        prob.is_feasible(xr, 1e-9),
+        postsolve.len()
+    );
+    let mut bad_cols: Vec<(f64, usize)> = Vec::new();
+    for j in 0..p.n {
+        let v = x[j];
+        let viol = (p.col_lo[j] - v).max(v - p.col_up[j]).max(if p.is_int[j] { (v - v.round()).abs() } else { 0.0 });
+        if !(viol <= 1e-6) {
+            bad_cols.push((viol, j));
+        }
+    }
+    bad_cols.sort_by(|a, b| b.0.total_cmp(&a.0));
+    eprintln!("POSTSOLVE_DIAG bound/integrality violations {}", bad_cols.len());
+    for &(viol, j) in bad_cols.iter().take(8) {
+        eprintln!("POSTSOLVE_DIAG   col {j} int {} value {:.9e} bounds [{:.6e}, {:.6e}] viol {viol:.3e} step {} scale {:.4e}", p.is_int[j], x[j], p.col_lo[j], p.col_up[j], kind[j], d.get(j).copied().unwrap_or(1.0));
+    }
+    // 破れの大きい 3 列: 代入の式 (前処理の尺度の空間) と、式の各項が前処理後の問題の境界をどれだけ外れているか
+    let mut xs = xr.to_vec();
+    let mut subs: Vec<Option<&crate::presolve::colsingleton::Substitution>> = vec![None; p.n];
+    for step in postsolve.iter().rev() {
+        if let PostsolveStep::Sub(sub) = step {
+            subs[sub.var] = Some(sub);
+        }
+        step.apply(&mut xs);
+    }
+    for &(_, j) in bad_cols.iter().take(3) {
+        let Some(sub) = subs[j] else { continue };
+        let mut amp = 0.0;
+        let mut desc: Vec<String> = Vec::new();
+        for &(k, v) in &sub.terms {
+            // 前処理後の問題に残った列だけ (消した列の前処理後の境界は 0 に固定してある)
+            let out = if kind[k] == '-' { (prob.col_lo[k] - xs[k]).max(xs[k] - prob.col_up[k]).max(0.0) } else { 0.0 };
+            amp += (v / sub.coeff).abs() * out;
+            desc.push(format!("{k}{}:{v:.4}*{:.9}[{:.4},{:.4}]{}", if p.is_int[k] { "i" } else { "" }, xs[k], prob.col_lo[k], prob.col_up[k], kind[k]));
+        }
+        eprintln!(
+            "POSTSOLVE_DIAG   sub col {j}: scaled value {:.9e} = ({:.9e} - sum) / {:.6e}, {} terms, sum of |a_k/coeff| * (bound excess of x_k) {amp:.3e}: {}",
+            xs[j],
+            sub.rhs,
+            sub.coeff,
+            sub.terms.len(),
+            desc.iter().take(16).cloned().collect::<Vec<_>>().join(" ")
+        );
+    }
+    let mut bad_rows: Vec<(f64, usize, f64)> = Vec::new();
+    for i in 0..p.m {
+        let act: f64 = p.rows[i].iter().map(|&(j, a)| a * x[j]).sum();
+        let viol = (p.row_lo[i] - act).max(act - p.row_up[i]);
+        if !(viol <= 1e-6 + 1e-9 * p.row_lo[i].abs().max(p.row_up[i].abs()).min(1e300)) {
+            bad_rows.push((viol, i, act));
+        }
+    }
+    bad_rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    eprintln!("POSTSOLVE_DIAG row violations {}", bad_rows.len());
+    for &(viol, i, act) in bad_rows.iter().take(8) {
+        let cols: Vec<String> = p.rows[i].iter().map(|&(j, a)| format!("{j}{}:{a:.4}*{:.6}[{:.4},{:.4}]{}", if p.is_int[j] { "i" } else { "" }, x[j], p.col_lo[j], p.col_up[j], kind[j])).collect();
+        eprintln!("POSTSOLVE_DIAG   row {i} act {act:.9e} [{:.9e}, {:.9e}] viol {viol:.3e} len {}: {}", p.row_lo[i], p.row_up[i], p.rows[i].len(), cols.iter().take(12).cloned().collect::<Vec<_>>().join(" "));
+    }
 }
 
 /// 対称性を探し、対称性を崩す不等式 `x_i - x_k >= 0` ([`symmetry::lex_leader_pairs`]) を行として加えた問題を返す。
@@ -1740,9 +1924,15 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     }
     if n_fixed > 0 || root_secs >= tunable!("ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS", 1.0, f64) {
         let b = lp.basis();
-        let b = if finish { b } else { lp::Basis { col: b.col, row: Vec::new() } };
+        // 行の状態は `ENOMOTO_MIP_LP_PROBE_FINISH` か `ENOMOTO_MIP_LP_PROBE_ROW_BASIS` のときだけ渡す (既定は列の状態だけ)。行の指紋
+        // ([`rows_fingerprint`]) も渡し、根の LP の始めの行が同じときだけ使う ([`solver::ROOT_BASIS_ROWS`])
+        let with_rows = (finish || env_str!("ENOMOTO_MIP_LP_PROBE_ROW_BASIS").is_some()) && b.row.len() == prob.m;
+        if with_rows {
+            solver::ROOT_BASIS_ROWS.with(|s| *s.borrow_mut() = Some(rows_fingerprint(&prob.rows)));
+        }
+        let b = if with_rows { b } else { lp::Basis { col: b.col, row: Vec::new() } };
         solver::ROOT_BASIS.with(|s| *s.borrow_mut() = Some(b));
-        if finish {
+        if finish && with_rows {
             let w = lp.dse_snapshot();
             solver::ROOT_DSE.with(|s| *s.borrow_mut() = w);
         }
