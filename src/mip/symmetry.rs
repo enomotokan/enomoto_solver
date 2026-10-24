@@ -118,7 +118,7 @@ pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize) -> Option<Symmetr
     // (どれも 0 >= 0) と 1x25 のオービトープが出ていた。意味のない対称性で、LP の行と対称性の処理を増やすだけ
     // 値が `empty` なら、行に現れない固定列だけ (misc07 は固定された列が行に残ったまま 79x3 のオービトープの一部で、全部の固定列に
     // 別の色をつけると対称性が見つからなくなり、orbitopal fixing (8559 本) がなくなって 11 秒 -> 時間切れ。analysis/cand9bisect_20261024.md)
-    if let Some(v) = env_str!("ENOMOTO_MIP_SYM_SKIP_FIXED") {
+    if let Some(v) = env_def!("ENOMOTO_MIP_SYM_SKIP_FIXED", "empty") {
         let empty_only = v == "empty";
         if env_str!("ENOMOTO_MIP_DEBUG_SYM_FIXED").is_some() {
             let nf = (0..n).filter(|&j| p.col_lo[j] == p.col_up[j]).count();

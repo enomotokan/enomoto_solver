@@ -2770,7 +2770,7 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
     let t_ext = t0 + Duration::from_secs_f64(ext.max(cap.max(0.0)));
     // `ENOMOTO_MIP_FJ_NOSOL_EXTEND=2`: 主のスレッドの暫定解が FJ のスレッドの解だけなら、解があっても同じ秒数まで続ける
     // (Local-MIP の改善を根のカットのループの終わりまで)
-    let ext_all = env_str!("ENOMOTO_MIP_FJ_NOSOL_EXTEND") == Some("2");
+    let ext_all = env_def!("ENOMOTO_MIP_FJ_NOSOL_EXTEND", "2") == Some("2");
     let end_now = |b: &Option<(f64, Vec<f64>)>| if (b.is_none() || ext_all) && !main_has_incumbent() { t_ext } else { t_end };
     while Instant::now() < end_now(&best) && !stop.load(Ordering::Relaxed) {
         let t_end = end_now(&best);

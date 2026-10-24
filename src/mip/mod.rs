@@ -87,14 +87,14 @@ pub(crate) fn implbd_genint_for(is_int: &[bool], lo: &[f64], up: &[f64]) -> bool
 /// 当たって根のカットが 1〜2 ラウンドで止まる回) でも背景のカットの後の RINS で -20400 台が出て、再スタートで暫定解を
 /// 捨てて根の LP を解き直す (6〜19 秒) のをやめる (analysis/mzzv42z_r4_20261021.md)
 pub(crate) fn gr_restart_for(p: &MipProblem) -> bool {
-    env_str!("ENOMOTO_MIP_GR_RESTART").is_some() && implbd_genint_for(&p.is_int, &p.col_lo, &p.col_up)
+    env_def!("ENOMOTO_MIP_GR_RESTART", "1").is_some() && implbd_genint_for(&p.is_int, &p.col_lo, &p.col_up)
 }
 
 /// [`gr_restart_for`] で (2) `ENOMOTO_MIP_RESTART_CUTS_READD` も使うか (`ENOMOTO_MIP_GR_RESTART=readd` のときだけ。
 /// カットを問題の行にしないと再スタート後の根のカットが弱くなる問題がある: mik-250-20-75-4 は -53829 -> -53948、7.4〜7.9 秒 -> 9.5〜10.5 秒。
 /// mzzv42z では (2) がなくても再スタート後 12〜13 秒で木に入る (あれば 8〜12 秒))
 pub(crate) fn gr_restart_readd_for(p: &MipProblem) -> bool {
-    env_str!("ENOMOTO_MIP_GR_RESTART") == Some("readd") && gr_restart_for(p)
+    env_def!("ENOMOTO_MIP_GR_RESTART", "1") == Some("readd") && gr_restart_for(p)
 }
 
 /// [`gr_restart_for`] で、2 回目以降の再スタートの割合の分母を根の始めに自由だった整数列の数にするか
@@ -103,7 +103,7 @@ pub(crate) fn gr_restart_readd_for(p: &MipProblem) -> bool {
 /// 下界を上げる (mzzv42z: -20811 -> -20683 -> -20640 -> 1 ノードで証明)。分母が全部の整数列 (11717 本) だと、こちらは再スタート後に
 /// 新たに固定した 287〜304 列が閾値 (293) に届かず 2 回目の再スタートが起きない (analysis/mzzcmp_20261023.md)
 pub(crate) fn gr_restart_ff_for(p: &MipProblem) -> bool {
-    env_str!("ENOMOTO_MIP_GR_RESTART") == Some("ff") && gr_restart_for(p)
+    env_def!("ENOMOTO_MIP_GR_RESTART", "1") == Some("ff") && gr_restart_for(p)
 }
 
 /// `ENOMOTO_MIP_RESTART_REF` か [`gr_restart_for`]
@@ -269,7 +269,7 @@ pub fn solve_mip(
         if let Some(x) = r.x.as_mut() {
             // `ENOMOTO_MIP_LATE_NO_RESOLVE`: 時間を使い切っていれば研磨の LP は解かない (整数の丸めと目的値の計算し直しだけ)。
             // 研磨は元の問題の前処理 + LP で 0.2-0.35 秒かかり、時間の上限の超過の残りの大半だった (uccase12・physiciansched6-2)
-            let late = env_str!("ENOMOTO_MIP_LATE_NO_RESOLVE").is_some() && t_solve.elapsed().as_secs_f64() >= params.time_limit;
+            let late = env_def!("ENOMOTO_MIP_LATE_NO_RESOLVE", "1").is_some() && t_solve.elapsed().as_secs_f64() >= params.time_limit;
             let z = polish_solution(variables, objective, constraints, &p, x, !late);
             if solver::end_diag() || params.verbose {
                 eprintln!("MIP: polished the solution ({:.2}s)", t_solve.elapsed().as_secs_f64());
@@ -882,7 +882,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             // 再スタート後の求解が暫定解なしで終わる mzzv42z。analysis/bound_inf_20261021.md)
             // `ENOMOTO_MIP_LATE_NO_RESOLVE`: 時間を使い切っていれば前処理なしで解き直さない (解き直しは根の LP を解くだけで時間切れに
             // なり、時間の上限を 0.3-0.45 秒超えていた: uccase12 の再スタートの後。analysis/overrun_20261023.md)。下界はそのまま
-            if !ok && r.status == MipStatus::TimeLimit && remaining(params).time_limit <= 0.0 && env_str!("ENOMOTO_MIP_LATE_NO_RESOLVE").is_some() {
+            if !ok && r.status == MipStatus::TimeLimit && remaining(params).time_limit <= 0.0 && env_def!("ENOMOTO_MIP_LATE_NO_RESOLVE", "1").is_some() {
                 if params.verbose {
                     eprintln!("MIP: no time left; not re-solving without presolve");
                 }
@@ -935,7 +935,7 @@ thread_local! {
 /// LP の期限は残り時間と `ENOMOTO_T_MIP_POSTSOLVE_REPAIR_SECS` 秒 (既定 2 秒) の大きい方 (時間を使い切った後でも試す)
 fn repair_postsolved(p: &MipProblem, x: &[f64], params: MipParams) -> Option<Vec<f64>> {
     // `params.time_limit` は残り時間
-    if env_str!("ENOMOTO_MIP_POSTSOLVE_REPAIR").is_none() {
+    if env_def!("ENOMOTO_MIP_POSTSOLVE_REPAIR", "1").is_none() {
         return None;
     }
     let t0 = std::time::Instant::now();
@@ -1821,8 +1821,8 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     // 値が `late` なら、最初の LP が期限 `secs` を過ぎて解けたときだけ (期限の中で解けたときは行の状態・DSE 重みを渡さない)。
     // neos-960392 は最初の LP が 2.1〜2.3 秒 (期限 3 秒) で解け、重みを引き継いだ根の LP が別の頂点に着くと根の RENS が
     // 最適値を出さず時間切れになる (analysis/cand9bisect_20261024.md)
-    let mut finish = env_str!("ENOMOTO_MIP_LP_PROBE_FINISH").is_some();
-    let finish_late = env_str!("ENOMOTO_MIP_LP_PROBE_FINISH") == Some("late");
+    let mut finish = env_def!("ENOMOTO_MIP_LP_PROBE_FINISH", "1").is_some();
+    let finish_late = env_def!("ENOMOTO_MIP_LP_PROBE_FINISH", "1") == Some("late");
     // `ENOMOTO_MIP_LP_PROBE_FIRST_FULL` (試作、既定では使わない): 最初の LP の期限を `secs` の `ENOMOTO_T_MIP_LP_PROBE_FIRST_MULT` 倍
     // (既定 4 倍) に延ばす (固定を試す手間の上限は `secs` のまま)。最初の LP が `secs` に間に合わないと基底を根に渡せず、根で同じ LP を
     // もう一度解く (時間の損) うえ、着く頂点が変わる。neos-960392 (60 秒で `secs` = 3.0 秒、最初の LP は 2.8〜3.0 秒) では、
@@ -1969,7 +1969,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
         let b = lp.basis();
         // 行の状態は `ENOMOTO_MIP_LP_PROBE_FINISH` か `ENOMOTO_MIP_LP_PROBE_ROW_BASIS` のときだけ渡す (既定は列の状態だけ)。行の指紋
         // ([`rows_fingerprint`]) も渡し、根の LP の始めの行が同じときだけ使う ([`solver::ROOT_BASIS_ROWS`])
-        let with_rows = (finish || env_str!("ENOMOTO_MIP_LP_PROBE_ROW_BASIS").is_some()) && b.row.len() == prob.m;
+        let with_rows = (finish || env_def!("ENOMOTO_MIP_LP_PROBE_ROW_BASIS", "1").is_some()) && b.row.len() == prob.m;
         if with_rows {
             solver::ROOT_BASIS_ROWS.with(|s| *s.borrow_mut() = Some(rows_fingerprint(&prob.rows)));
         }

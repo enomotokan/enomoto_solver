@@ -751,7 +751,7 @@ fn tree_root_basis() -> bool {
 /// ([`RESTART_BASIS`])。今までは再スタートの後の根の LP を毎回基底なしで解いていた (前処理の LP による固定は最初の求解だけで、
 /// その基底も最初の根で使い切る)
 pub(crate) fn restart_basis_on() -> bool {
-    env_str!("ENOMOTO_MIP_RESTART_BASIS").is_some()
+    env_def!("ENOMOTO_MIP_RESTART_BASIS", "1").is_some()
 }
 
 /// `ENOMOTO_MIP_SB_AGREE` (試作、既定では使わない): 強分岐と擬似費用の選び方の一致を見て、十分に学べたら強分岐を省く
@@ -1049,7 +1049,7 @@ fn tree_diag() -> bool {
 
 /// `ENOMOTO_MIP_WORKER_HALT`: 主の止める合図を木の探索の従のスレッドの LP の反復にも伝える ([`crate::cancel::with_halt`])
 fn worker_halt() -> bool {
-    env_str!("ENOMOTO_MIP_WORKER_HALT").is_some()
+    env_def!("ENOMOTO_MIP_WORKER_HALT", "1").is_some()
 }
 
 /// 診断用 `ENOMOTO_MIP_END_DIAG`: 終わり際の時刻 (従を待った時間、`finish` の始めと終わり) を `ENOMOTO_MIP_LOG` なしでも出す
@@ -3091,7 +3091,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 終わり (止める合図) か `ENOMOTO_T_MIP_FJ_NOSOL_FRAC` (0.25) × 時間上限まで種を変えた FJ2 を続ける。主のスレッドが
                 // FJ のスレッド以外から暫定解を得たら (`fj_has_inc`) 延長をやめる。`=2` は混ぜる形 (FJ_LMIP_MIX) で、FJ のスレッドの解しか
                 // ない間は解があっても同じ秒数まで続ける (Local-MIP の改善)
-                let nosol_cap = if env_str!("ENOMOTO_MIP_FJ_NOSOL_EXTEND").is_some() && self.params.time_limit.is_finite() {
+                let nosol_cap = if env_def!("ENOMOTO_MIP_FJ_NOSOL_EXTEND", "2").is_some() && self.params.time_limit.is_finite() {
                     tunable!("ENOMOTO_T_MIP_FJ_NOSOL_FRAC", 0.25, f64) * self.params.time_limit - self.start.elapsed().as_secs_f64()
                 } else {
                     0.0
@@ -5996,7 +5996,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 暫定解が最初から良いと失敗が続いて木の側の平均が 0 になり、役が 1 回 (0.01 秒) で退いてそれきり就かない
             // (bppc4-08 の mixoc は Local-MIP の 55 から。既定は 62 から役の Proximity Search が 1 ずつ下げて 54。analysis/bppc408_20261023.md)
             let primal_ok = primal_ok
-                || (env_str!("ENOMOTO_MIP_HEUR_MU_ROLE_OBS").is_some()
+                || (env_def!("ENOMOTO_MIP_HEUR_MU_ROLE_OBS", "1").is_some()
                     && (mu.n_role < tunable!("ENOMOTO_T_MIP_HEUR_MU_ROLE_MIN_OBS", 10u64, u64) || mu.primal_role.is_some_and(|v| v >= thr_p)));
             proof_ok || (stagnant && primal_ok)
         }
@@ -8161,7 +8161,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // もう一回り試す (前の回りの固定と含意が後の回りの伝播に効く)。hypothyroid-k1 では根のカットの組によって、
         // 1 回りで 351〜482 列を試して両側矛盾で証明する回と、全 2300〜2440 列を試して 17〜37 列を固定するだけで終わり、
         // 再スタートして 15〜35 秒遅れる回がある
-        let passes = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_PASSES", 1usize, usize).max(1);
+        let passes = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_PASSES", 3usize, usize).max(1);
         let mut npass = 0usize;
         for _ in 0..passes {
             npass += 1;

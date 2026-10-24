@@ -60,6 +60,21 @@ macro_rules! env_str {
     }};
 }
 
+/// 既定で入っている切り替えの環境変数を読む ([`env_str!`] と同じくキャッシュする)。付けていなければ `$default`、
+/// `0` か `off` なら `None` (切る)、それ以外ならその値。既定にした切り替え (fix9pe、2026-10-24。
+/// analysis/heur_ls_20261023/bench10_results.md) に使う
+macro_rules! env_def {
+    ($name:literal, $default:literal) => {{
+        static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        V.get_or_init(|| match std::env::var($name) {
+            Ok(v) if v == "0" || v == "off" => None,
+            Ok(v) => Some(v),
+            Err(_) => Some($default.to_string()),
+        })
+        .as_deref()
+    }};
+}
+
 /// 利用者向けのログを 1 行出す ([`log::line`]。`Model.solve(log=True)` のときだけ。書式は `format!` と同じ)。
 macro_rules! user_log {
     ($($t:tt)*) => {{

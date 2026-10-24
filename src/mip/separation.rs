@@ -367,13 +367,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 値が `1` (など下の文字を含まない値) なら全部。文字の並びなら、その部分だけ: `q` 枠、`l` 1 回の LP の上限、`e` 延長、
     /// `w` 上限を広げない、`f` 面の頂点の分離をしない (例 `qlw`。analysis/cand9bisect_20261024.md)
     pub(super) fn cut_agg(&self) -> bool {
-        !self.params.submip && env_str!("ENOMOTO_MIP_CUT_AGG").is_some()
+        !self.params.submip && env_def!("ENOMOTO_MIP_CUT_AGG", "f").is_some()
     }
 
     /// [`Self::cut_agg`] の部分 `c` を使うか
     fn cut_agg_has(&self, c: char) -> bool {
         self.cut_agg()
-            && match env_str!("ENOMOTO_MIP_CUT_AGG") {
+            && match env_def!("ENOMOTO_MIP_CUT_AGG", "f") {
                 Some(v) if v.chars().any(|d| "qlewf".contains(d)) => v.contains(c),
                 _ => true,
             }
@@ -397,7 +397,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut stall = 0;
         let mut intobj_stall = 0usize;
         // 整数値に固定された連続列を整数列と扱って目的値が整数刻みか (`ENOMOTO_MIP_CUT_INTOBJ_STALL` の判定に使う)
-        let intobj_step = env_str!("ENOMOTO_MIP_CUT_INTOBJ_STALL").is_some() && p.objective_step_bounds(Some((&self.dom.lo, &self.dom.up))).is_some();
+        let intobj_step = env_def!("ENOMOTO_MIP_CUT_INTOBJ_STALL", "1").is_some() && p.objective_step_bounds(Some((&self.dom.lo, &self.dom.up))).is_some();
         let mut prev_obj = self.lp.objective();
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
         let first_obj = prev_obj;
@@ -527,7 +527,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // mc11 は WIN5 で強いカットの判定が通って第 2 段階 (0.9 -> 3.4 秒) と HiGHS 流のカット管理に入り、背景のカットの
         // 後の根の下界が 11637〜11667 -> 11626〜11639 に下がって時間切れになる (analysis/mc11bisect_20261023.md)。
         // beasleyC3 は最初の根では fc_relax にならない
-        let strong_win5 = match env_str!("ENOMOTO_MIP_CUT_STRONG_WIN5") {
+        let strong_win5 = match env_def!("ENOMOTO_MIP_CUT_STRONG_WIN5", "nofc") {
             Some("nofc") => !fc_relax,
             v => v.is_some(),
         };
@@ -1041,7 +1041,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         && !self.params.submip
                         && obj - first_obj > 1e-6 * obj.abs().max(1.0)
                         && (obj - prev_obj).abs() <= 1e-9 * obj.abs().max(1.0)
-                        && env_str!("ENOMOTO_MIP_CUT_INTOBJ_STALL").is_some();
+                        && env_def!("ENOMOTO_MIP_CUT_INTOBJ_STALL", "1").is_some();
                     if intobj_flat {
                         intobj_stall += 1;
                         if intobj_stall >= tunable!("ENOMOTO_T_MIP_CUT_INTOBJ_STALL", 3usize, usize) {
