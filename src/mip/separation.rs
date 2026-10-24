@@ -390,9 +390,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// physiciansched6-2 では HiGHS の根は tableau のカットを 1 ラウンドに 45〜157 本入れて 5〜8 ラウンドで下界を 49324 にする
     /// (tableau の分離を外すと 13 ラウンドで 47960)。ENOMOTO の既定は前景のカットが時間の上限で 0 ラウンド、上限を外しても 50 本ずつで
     /// 伸びず、広げると 1000 本の LP が 1.2 秒の上限に当たって捨てられていた (analysis/highstree_phys_20261024.md)
+    /// `ENOMOTO_MIP_CUTSEL_HIGHS_GUARD` のもとで固定費用のネットワーク型か: そこでは根のカットのプールの選び直しの部品
+    /// (`ENOMOTO_MIP_ROOT_CUT_HIGHS`・`ENOMOTO_MIP_CUTSEL_HIGHS`・`ENOMOTO_MIP_CUTSEL_HIGHS_POOL`・`ENOMOTO_T_MIP_ROOT_CUT_AGE`) を使わない
+    /// (mc11: 根の下界 11684 -> 11500〜11644)
+    pub(super) fn cutsel_guard_fc(&self) -> bool {
+        self.fc_network && !self.params.submip && env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_GUARD").is_some()
+    }
+
     pub(super) fn root_cut_highs(&self) -> bool {
         // `ENOMOTO_MIP_CUTSEL_HIGHS_GUARD` なら固定費用のネットワーク型では使わない (mc11: 1 ラウンド 1000 本で根のループが 1.2 -> 13 秒)
-        env_str!("ENOMOTO_MIP_ROOT_CUT_HIGHS").is_some() && !self.params.submip && !(self.fc_network && env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_GUARD").is_some())
+        env_str!("ENOMOTO_MIP_ROOT_CUT_HIGHS").is_some() && !self.params.submip && !self.cutsel_guard_fc()
     }
 
     /// 根のカットのループの 1 回の LP の時間の上限 (全体に対する割合)。
@@ -720,7 +727,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 cands.extend(fcands);
             }
             // 再スタート前のカットをプールで引き継いだとき (`ENOMOTO_MIP_RESTART_CUTS_TO_POOL`): プールで違反しているものも候補にする
-            if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some()) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
+            if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || (env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some() && !self.cutsel_guard_fc())) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
                 for (eff, k) in self.pool_violated(&x) {
                     let (c, r, _) = &self.cut_pool[k];
                     cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
@@ -775,7 +782,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let chosen = if phase2 {
                 let maxpar = tunable!("ENOMOTO_T_MIP_CUT_PHASE2_MAXPAR", 0.3, f64);
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
-            } else if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() && !(fc_relax && env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_GUARD").is_some()) {
+            } else if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() && !self.cutsel_guard_fc() {
                 let maxpar = tunable!("ENOMOTO_T_CUTSEL_HIGHS_MAXPAR", 0.1, f64);
                 // `ENOMOTO_MIP_CUTSEL_HIGHS_GUARD` (試作、既定では使わない): HiGHS の点数での選択と既定の選択 (`select_cuts`) の両方を作り、
                 // 和を採る。固定費用のネットワーク型 (`fc_relax`) では HiGHS の点数を使わず、緩めた既定の選択のまま (上の条件。
@@ -784,9 +791,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // (既定は 50 本) 根の下界が -2889.7 -> -2902.2 に下がって再スタートが起き、mc11 では固定費用型の緩めた選択を上書きして
                 // 背景のカットの後の下界が 11668 -> 11500 に下がっていた (analysis/highstree_phys_20261024.md §8)
                 if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_GUARD").is_some_and(|v| v != "fc") {
-                    // 両方の和 (値が `fc` なら和は取らず、固定費用型で外すだけ) (同じ係数のカットは 1 本)。hypothyroid-k1 の根の 0 ラウンド目では既定の選択が密なカット 4 本 (+9.5)、
-                    // HiGHS の点数が 2 非零のカット 6 本 (+0.1) を採る
-                    let mut hy = select_cuts(cands.clone(), max_cuts, p);
+                    // HiGHS の点数での選択に、既定の選択の上位 `ENOMOTO_T_MIP_CUTSEL_HIGHS_GUARD_K` (20) 本を足す (同じ係数のカットは 1 本。
+                    // 値が `fc` なら足さず、固定費用型で外すだけ)。hypothyroid-k1 の根の 0 ラウンド目では既定の選択が密なカット 4 本 (+9.5)、
+                    // HiGHS の点数が 2 非零のカット 6 本 (+0.1) を採る。既定の選択を全部 (最大 1000 本) 足すと physiciansched6-2 で 1 ラウンド
+                    // 300〜460 本になり LP が時間の上限に当たる
+                    let mut hy = select_cuts(cands.clone(), tunable!("ENOMOTO_T_MIP_CUTSEL_HIGHS_GUARD_K", 20usize, usize).min(max_cuts), p);
                     let hs = self.select_cuts_highs(cands, max_cuts, &x, maxpar);
                     for c in hs {
                         if !hy.iter().any(|d| d.coefs == c.coefs && d.rhs == c.rhs) {
@@ -1163,7 +1172,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 効いていないカットを外す (論理変数が基底にあり、行が緩んでいるもの)。`ENOMOTO_T_MIP_CUT_REMOVE_EVERY` ラウンドごと
             // `ENOMOTO_T_MIP_ROOT_CUT_AGE` > 0: HiGHS と同じく、効いていないラウンドが続いたカットだけを外す
             // (HiGHS の mip_lp_age_limit = 10)
-            let root_age = tunable!("ENOMOTO_T_MIP_ROOT_CUT_AGE", 0u32, u32);
+            let root_age = if self.cutsel_guard_fc() { 0 } else { tunable!("ENOMOTO_T_MIP_ROOT_CUT_AGE", 0u32, u32) };
             let t_rm0 = std::time::Instant::now();
             let rows_before = self.lp.num_rows();
             if root_age > 0 {
