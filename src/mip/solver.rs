@@ -366,6 +366,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     other_thread_label: bool,
     /// 次に出すサブ MIP が根の RENS のものか (受け取ったときにノード上限で止まっていれば `rens_node_limited` を立てる)。
     pub(super) submip_is_rens: bool,
+    /// `ENOMOTO_MIP_SUBMIP_HIGHS` の `i`: 根の最初の RINS の LP 解 (HiGHS の `rootlpsol` の代わり。固定の向きを決める)
+    pub(super) rins_root_x: Option<Vec<f64>>,
     /// 別スレッドの Feasibility Jump とその停止の印。
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッド (試作)
@@ -1740,6 +1742,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         other_thread_label: false,
         submip_fix_rate: None,
         submip_is_rens: false,
+        rins_root_x: None,
         fj_thread: None,
         lmip_thread: None,
         lmip_mailbox: None,
@@ -2901,7 +2904,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 30n20b8 の根の RENS のサブ MIP は、最初の 26 ノードで強分岐に 2.2 秒 (250 回の LP) 使う
         // 暫定解がない (打ち切り値が無限の) サブ MIP だけ: すべてのサブ MIP に使うと RINS などの改善のサブ MIP が弱まり、
         // 40 問 (300 秒) で timtab1 の主ギャップ 0.059 -> 0.121、bppc4-08 0.036 -> 0.070、binkar10_1 23.7 -> 35.4 秒
-        if self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_NO_SB").is_some() {
+        if self.params.submip && ((self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_NO_SB").is_some()) || super::submip_highs('s')) {
             self.pc.min_reliable = 0;
         }
         // 木の写しから解く: 写しを作ったときの LP のカットの行とカットプールを入れる
@@ -6568,7 +6571,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 信頼度のしきい値: 予算の残りに応じて 1..5
         let mut prio = ((maxsb - sb) / (sb + 1.0)).min(1.0);
         prio = prio.max((quot - sb) / (sb + 1.0)).max(0.0);
-        let reliable_thr = (1.0 - prio) * 1.0 + prio * 5.0;
+        // `ENOMOTO_MIP_SUBMIP_HIGHS` の `s`: サブ MIP ではどの候補も信頼できるとみなす (HiGHS の `mip_pscost_minreliable = 0`。
+        // `pc.min_reliable` はこの選び方では使われないので、`ENOMOTO_MIP_SUBMIP_NO_SB` だけでは強分岐は止まらない)
+        let reliable_thr = if self.params.submip && super::submip_highs('s') { 0.0 } else { (1.0 - prio) * 1.0 + prio * 5.0 };
         // 強分岐 LP の反復上限 (平均ノード反復の `ENOMOTO_T_MIP_SB_ITERMULT` 倍、10〜500)。倍率 2 -> 4 で 40 問 90 秒の SGM が
         // 5 台のマシン (各 2 回、マシンごとの基準と比較) で -2.7, -1.0, -2.1, +0.2, -2.8% (平均 -1.7%) なので 4 にした
         // (analysis/mip_opt_eval_20261011.md)
@@ -7019,7 +7024,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 係数の小さい列と大域的に固定された列は大域的な境界で右辺に移す。密すぎるものは捨てる。
     pub(super) fn add_dual_proof(&mut self) {
         // サブ MIP では既定で使わない (`ENOMOTO_MIP_SUBMIP_PROOFS` で使う。HiGHS のサブ MIP は本体と同じく使う)
-        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() || env_str!("ENOMOTO_MIP_NO_DUAL_PROOF").is_some() {
+        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() && !super::submip_highs('f') || env_str!("ENOMOTO_MIP_NO_DUAL_PROOF").is_some() {
             return;
         }
         let y = self.lp.row_duals();
@@ -7306,8 +7311,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 境界を決定として使えるよう、その間だけ定義域にも置く (伝播はしない)。
     /// [`Self::sb_child_proof`] と同じだが、子の LP の行の重み `y` (別スレッドで解いたもの) から作る。
     fn sb_child_proof_y(&mut self, j: usize, is_up: bool, v: f64, infeasible: bool, y: &[f64]) {
-        let dual_ok = !(self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() || env_str!("ENOMOTO_MIP_NO_DUAL_PROOF").is_some());
-        let farkas_ok = !(self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() || env_str!("ENOMOTO_MIP_NO_FARKAS").is_some());
+        let dual_ok = !(self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() && !super::submip_highs('f') || env_str!("ENOMOTO_MIP_NO_DUAL_PROOF").is_some());
+        let farkas_ok = !(self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() && !super::submip_highs('f') || env_str!("ENOMOTO_MIP_NO_FARKAS").is_some());
         if env_str!("ENOMOTO_MIP_SB_PROOF_OLD").is_some() {
             if !infeasible && dual_ok {
                 self.add_proof_from(y, true);
@@ -7360,7 +7365,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 行を `y` で足した `y^T A x >= sum_i y_i b_i` (`b_i` は y_i > 0 なら行の下限、y_i < 0 なら上限) はどの `y` でも
     /// 成り立つので、射線の数値誤差は正しさに影響しない (今のノードで破れていなければ捨てる)。符号は両方試す。
     pub(super) fn add_farkas_proof(&mut self) {
-        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() || env_str!("ENOMOTO_MIP_NO_FARKAS").is_some() {
+        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() && !super::submip_highs('f') || env_str!("ENOMOTO_MIP_NO_FARKAS").is_some() {
             return;
         }
         let Some(ray) = self.lp.farkas_ray() else { return };
@@ -7972,7 +7977,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 直前の伝播の矛盾から衝突制約を作ってプールに入れる (定義域を巻き戻す前に呼ぶ)。衝突が 2 値列の固定だけで
     /// できていれば `sum_{x_j=1 の固定} x_j - sum_{x_j=0 の固定} x_j <= |{x_j=1}| - 1` (どれか 1 つは逆の値)。
     pub(super) fn add_conflict(&mut self) {
-        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_CONFLICTS").is_none() && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() || env_str!("ENOMOTO_MIP_NO_CONFLICTS").is_some() {
+        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_CONFLICTS").is_none() && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() && !super::submip_highs('f') || env_str!("ENOMOTO_MIP_NO_CONFLICTS").is_some() {
             return;
         }
         let p = self.p;

@@ -717,7 +717,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     let lp_probe_secs = (env_str!("ENOMOTO_MIP_NO_LP_PROBE").is_none() && !params.submip && params.restarts == 0)
         .then(|| if params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_LP_PROBE_TIME_FRAC", 0.05, f64) * params.time_limit } else { 10.0 });
     let prev_rp = RESTART_PRESOLVE.with(|f| f.replace(params.restarts > 0));
-    let presolved = if use_presolve { presolve_mip(p, params.verbose, params.submip, lp_probe_secs) } else { None };
+    // `ENOMOTO_MIP_SUBMIP_HIGHS` の `p`: サブ MIP でも親と同じ前処理 (HiGHS の `solveSubMip` は親と同じ前処理の設定で解く)
+    let pre_submip = params.submip && !submip_highs('p');
+    let presolved = if use_presolve { presolve_mip(p, params.verbose, pre_submip, lp_probe_secs) } else { None };
     RESTART_PRESOLVE.with(|f| f.set(prev_rp));
     // `ENOMOTO_MIP_SPARSIFY_LATE`: HiGHS と同じく前処理 (プロービング・同値の代入の後) の最後に 1 回だけ疎化し
     // ([`sparsify_rows_highs`]、`=old` なら [`sparsify_rows`])、書き換えたら前処理をもう一度かける (その中では疎化しない)
@@ -737,7 +739,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             } else {
                 let q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
                 SPARSIFY_REPRESOLVING.with(|f| f.set(true));
-                let r = presolve_mip(&q, params.verbose, params.submip, None);
+                let r = presolve_mip(&q, params.verbose, pre_submip, None);
                 SPARSIFY_REPRESOLVING.with(|f| f.set(false));
                 match r {
                     Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
@@ -825,7 +827,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
             }
-            let prob = if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some()) { extend_clique_rows(prob, params.verbose) } else { prob };
+            let prob = if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some() || submip_highs('p')) { extend_clique_rows(prob, params.verbose) } else { prob };
             // 診断用: クリーク行の拡張の後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2=ファイル`)
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
@@ -2823,6 +2825,22 @@ fn normalize_integer_rows(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], ro
 /// 費用が非正なら向きを逆にして下限を締める。physiciansched6-2 の罰則の列 (`100 Σx + 600 z - w <= 600` だけに出る費用 1 の w、
 /// 416 本) は ENOMOTO では [0, ∞) のまま残り、HiGHS の前処理後は [0, 100〜600] になる。上限がないと Feasibility Jump が
 /// 解を見つけられない (同じ問題で上限を入れるだけで 20 回中 0 回 → 19 回)。締めた境界の数を返す (1 回だけ、連鎖しない)。
+/// `ENOMOTO_MIP_SUBMIP_HIGHS` (試作、既定では使わない): サブ MIP の解き方を HiGHS の `HighsPrimalHeuristics::solveSubMip` に寄せる部分 `c`
+/// を使うか (サブ MIP の中かどうかは呼び出し側で見る)。値が `1` (など下の文字を含まない値) なら全部、文字の並びならその部分だけ、
+/// `-` で始まる文字の並びならその部分を除いた全部 (例 `-t`)。部分: `p` 前処理を親と同じにする、`c` 根のカットを親と同じだけ回す
+/// (`CUT_AGG` の枠・25 ラウンド・停滞 10 回)、`s` 擬似費用の信頼の観測を 0 にする (強分岐をしない)、`g` ギャップを親と同じにする、
+/// `t` 時間の上限を残り時間にする、`i` RINS の固定率が足りないときの足し方を HiGHS と同じにする、`h` サブ MIP の中でも RENS を回す、
+/// `f` 双対の証明・衝突を使う (analysis/submip_20261024.md)
+pub(super) fn submip_highs(c: char) -> bool {
+    const ALL: &str = "pcsgtihf";
+    match env_str!("ENOMOTO_MIP_SUBMIP_HIGHS") {
+        None => false,
+        Some(v) if v.starts_with('-') => !v.contains(c),
+        Some(v) if v.chars().any(|d| ALL.contains(d)) => v.contains(c),
+        Some(_) => true,
+    }
+}
+
 /// [`fj_p3_problem`] を使うか (既定で使う。`ENOMOTO_MIP_NO_FJ_P3` で止める。`ENOMOTO_MIP_FJ_P3` を与えたときも使う)。
 pub(super) fn fj_p3_on() -> bool {
     env_str!("ENOMOTO_MIP_FJ_P3").is_some() || env_str!("ENOMOTO_MIP_NO_FJ_P3").is_none()

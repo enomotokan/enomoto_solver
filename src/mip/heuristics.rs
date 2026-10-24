@@ -1441,12 +1441,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
             None => f64::INFINITY,
         };
+        // `ENOMOTO_MIP_SUBMIP_HIGHS` の `t`: 根 (外側の求解) のサブ MIP の時間の上限を残り時間の `ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_FRAC` (1)
+        // 倍、最大 `ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_MAX` (上限なし) にする (HiGHS の `solveSubMip` は残り時間を渡し、ノード数で止める)。
+        // 木の中 (大近傍探索の予算で上限を絞る) とサブ MIP の中のサブ MIP は今のまま
+        let time_highs = super::submip_highs('t') && !self.params.submip && self.nodes <= 1;
+        // `ENOMOTO_MIP_SUBMIP_HIGHS` の `g`: ギャップを親と同じにする (HiGHS は `mip_rel_gap = 0`)
+        let gap_highs = super::submip_highs('g');
         let params = super::solver::MipParams {
-            time_limit: (self.submip_time_frac * remaining).min(self.submip_time_max),
+            time_limit: if time_highs {
+                (tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_FRAC", 1.0, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_MAX", f64::INFINITY, f64))
+            } else {
+                (self.submip_time_frac * remaining).min(self.submip_time_max)
+            },
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
             node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult) as u64,
             // サブ MIP は解を探すためのものなので、ギャップは外側の設定より緩くてよい (外側の既定 0 でも 1e-4 で止める)
-            rel_gap: self.params.rel_gap.max(1e-4),
+            rel_gap: if gap_highs { self.params.rel_gap } else { self.params.rel_gap.max(1e-4) },
             abs_gap: self.params.abs_gap.max(1e-6),
             // 診断用: `ENOMOTO_MIP_SUBMIP_VERBOSE` ならサブ MIP の経過も出す
             verbose: self.params.verbose && env_str!("ENOMOTO_MIP_SUBMIP_VERBOSE").is_some(),
@@ -1479,6 +1489,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if p3 {
             crate::set_fj_p3_force(true);
         }
+        let t_sub = Instant::now();
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         if p3 {
             crate::set_fj_p3_force(false);
@@ -1487,7 +1498,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         SUBMIP_DEPTH.with(|d| d.set(depth));
         if self.params.verbose {
             let nfree = (0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();
-            eprintln!("MIP:   sub-MIP: {nfree} free columns of {}, status {:?}, nodes {}, objective {:?}", p.n, r.status, r.nodes, r.objective);
+            eprintln!("MIP:   sub-MIP: {nfree} free columns of {}, status {:?}, nodes {}, objective {:?}, {:.2}s", p.n, r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64());
         }
         self.heur_iters += r.lp_iterations;
         let acc = match r.x {
@@ -1607,7 +1618,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// ([`SUBMIP_DEPTH`]) が `ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH` (既定 2。深さ 3 のサブ MIP まで作る) 以下のときだけ
     pub(super) fn nested_rens_ok(&self) -> bool {
         let d = SUBMIP_DEPTH.with(|d| d.get());
-        env_str!("ENOMOTO_MIP_SUBMIP_RENS").is_some() && d >= 1 && d as usize <= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH", 2usize, usize)
+        (env_str!("ENOMOTO_MIP_SUBMIP_RENS").is_some() || super::submip_highs('h')) && d >= 1 && d as usize <= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH", 2usize, usize)
     }
 
     /// `ENOMOTO_MIP_SUBMIP_RENS_CUTOFF` (試作、既定では使わない): 打ち切り値が有限の (外側に暫定解がある) 深さ 1 のサブ MIP
@@ -1624,7 +1635,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `ENOMOTO_MIP_SUBMIP_RENS_CUTOFF=old`: [`Self::submip_rens_cutoff`] の旧来の RENS の形。
     pub(super) fn submip_rens_old(&self) -> bool {
-        self.params.submip && self.params.cutoff.is_finite() && SUBMIP_DEPTH.with(|d| d.get()) == 1 && env_str!("ENOMOTO_MIP_SUBMIP_RENS_CUTOFF") == Some("old")
+        // `ENOMOTO_MIP_SUBMIP_HIGHS` の `h` でも使う (HiGHS はサブ MIP の中でもヒューリスティクスの努力量 0.8 で RENS を回す)
+        self.params.submip && self.params.cutoff.is_finite() && SUBMIP_DEPTH.with(|d| d.get()) == 1 && (env_str!("ENOMOTO_MIP_SUBMIP_RENS_CUTOFF") == Some("old") || (super::submip_highs('h') && env_str!("ENOMOTO_MIP_SUBMIP_RENS_CUTOFF").is_none()))
     }
 
     /// RENS (HiGHS の `HighsPrimalHeuristics::RENS` に倣う): LP 解で整数値の整数列を、残りの自由な列の 1 割ずつ
@@ -2211,6 +2223,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // しなかった。timtab1 は根の RINS が 1074786 -> 882815 を見つけ、60 秒の暫定解が 0.204 -> 0.081 (主ギャップ)。
         // 木の中でも足す (`ENOMOTO_MIP_RINS_FILL_TREE`) と、cvs16r128-89 で ALNS の最初の RINS のサブ MIP が 3 秒かかって
         // 大近傍探索の時間の予算を使い切り、2 回とも暫定解が悪くなった (-64 -> -35/-43)。`ENOMOTO_MIP_RINS_NO_FILL` で使わない
+        if super::submip_highs('i') {
+            return self.rins_highs(x, fixes);
+        }
         let fill = env_str!("ENOMOTO_MIP_RINS_NO_FILL").is_none() && (self.nodes <= 1 || env_str!("ENOMOTO_MIP_RINS_FILL_TREE").is_some());
         if (fixes.len() as f64) < 0.5 * nint as f64 {
             if !fill || (fixes.len() as f64) < tunable!("ENOMOTO_T_MIP_RINS_FILL_MIN", 0.2, f64) * nint as f64 {
@@ -2250,6 +2265,73 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return self.solve_submip(lo, up, 500);
         }
         let (lo, up, _) = self.propagated_fixings(&fixes);
+        self.solve_submip(lo, up, 500)
+    }
+
+    /// `ENOMOTO_MIP_SUBMIP_HIGHS` の `i`: HiGHS の `HighsPrimalHeuristics::RINS` と同じ固定の足し方。暫定解と LP 解で一致する列
+    /// (`fixes`) を伝播しながら固定し、固定率 (今の定義域で自由な整数列のうち固定されたもの) が 0.25 未満なら、LP 解で分数の列を
+    /// HiGHS の `getFixVal` の向き (根の LP 解からの変化が 0.4 以上ならその向き、でなければ費用が悪くなる向き、費用 0 なら最も近い
+    /// 整数) で、丸めの幅の小さい順に足す。固定率が 0.1 未満ならサブ MIP にしない (HiGHS はサブ MIP を作らず深さ優先の探索だけ)。
+    fn rins_highs(&mut self, x: &[f64], mut fixes: Vec<(usize, f64, f64)>) -> bool {
+        let p = self.p;
+        if self.nodes <= 1 && self.rins_root_x.is_none() {
+            self.rins_root_x = Some(x.to_vec());
+        }
+        let free: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
+        if free.is_empty() {
+            return false;
+        }
+        fixes.sort_by_key(|&(_, v, _)| (v == 0.0) as u8);
+        let rate = |lo: &[f64], up: &[f64]| free.iter().filter(|&&j| lo[j] >= up[j]).count() as f64 / free.len() as f64;
+        let (mut lo, mut up, _) = self.propagated_fixings(&fixes);
+        let mut fr = rate(&lo, &up);
+        let fr0 = fr;
+        if fr < 0.25 {
+            let root = self.rins_root_x.clone();
+            let fixval = |j: usize, v: f64, lo: &[f64], up: &[f64]| {
+                let rc = root.as_ref().map_or(0.0, |r| v - r[j]);
+                let c = p.cost[j];
+                let f = if rc >= 0.4 {
+                    v.ceil()
+                } else if rc <= -0.4 {
+                    v.floor()
+                } else if c > 0.0 {
+                    v.ceil()
+                } else if c < 0.0 {
+                    v.floor()
+                } else {
+                    (v + 0.5).floor()
+                };
+                f.min(up[j]).max(lo[j])
+            };
+            let mut cands: Vec<(f64, usize, f64)> = free
+                .iter()
+                .filter(|&&j| lo[j] < up[j] && (x[j] - x[j].round()).abs() > FEASTOL)
+                .map(|&j| {
+                    let f = fixval(j, x[j], &lo, &up);
+                    ((f - x[j]).abs(), j, f)
+                })
+                .collect();
+            cands.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let mut used = 0usize;
+            for _ in 0..8 {
+                if fr >= 0.25 || used >= cands.len() {
+                    break;
+                }
+                let want = ((0.25 - fr) * free.len() as f64).ceil() as usize;
+                let k = (used + want.max(1)).min(cands.len());
+                fixes.extend(cands[used..k].iter().map(|&(_, j, f)| (j, f, f)));
+                used = k;
+                (lo, up, _) = self.propagated_fixings(&fixes);
+                fr = rate(&lo, &up);
+            }
+        }
+        if self.params.verbose && self.nodes <= 1 {
+            eprintln!("MIP:   RINS (HiGHS fill): fixing rate {fr0:.2} from agreeing columns, {fr:.2} after fill ({} free integer columns)", free.len());
+        }
+        if fr < 0.1 {
+            return false;
+        }
         self.solve_submip(lo, up, 500)
     }
 

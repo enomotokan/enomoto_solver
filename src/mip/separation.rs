@@ -369,7 +369,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn cut_agg(&self) -> bool {
         // `ENOMOTO_MIP_SUBMIP_CUT_AGG` (試作、既定では使わない): サブ MIP の根のカットのループでも使う (部分は `ENOMOTO_MIP_CUT_AGG` の値から)
         (!self.params.submip && env_def!("ENOMOTO_MIP_CUT_AGG", "f").is_some())
-            || (self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_CUT_AGG").is_some())
+            || (self.params.submip && (env_str!("ENOMOTO_MIP_SUBMIP_CUT_AGG").is_some() || super::submip_highs('c')))
     }
 
     /// [`Self::cut_agg`] の部分 `c` を使うか
@@ -444,7 +444,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 49324 に上がって 1 ノードで解ける (2.8 秒、分離の LP 4019 反復) が、ENOMOTO の既定 (5 ラウンド・時間の 1 割・枠なし) では
         // 49257 で止まって 20 秒でも解なし。枠・25 ラウンド・5 割では 6.4 秒・0 ノードで 49324 (analysis/physprimal_20261024.md)
         let sub_agg = self.params.submip && !fc_sub && self.cut_agg();
-        let mut max_rounds = if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS", 25usize, usize) } else if sub_agg { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_AGG_ROUNDS", 25usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_ROUNDS", 5usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
+        // `ENOMOTO_MIP_SUBMIP_HIGHS` の `c`: 根のカットを親と同じだけ回す (ラウンドの上限 25・停滞 10 回。時間の上限は `sub_agg` と同じ
+        // サブ MIP の時間の 5 割。HiGHS の `solveSubMip` はカットの設定を親から引き継ぐ)
+        let sub_hc = self.params.submip && !fc_sub && super::submip_highs('c');
+        let mut max_rounds = if sub_hc { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) } else if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS", 25usize, usize) } else if sub_agg { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_AGG_ROUNDS", 25usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_ROUNDS", 5usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
         let eq2c = self.equiv2_cuts();
         let cut_frac = if sub_agg { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_AGG_TIME_FRAC", 0.5, f64) } else if eq2c { tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC", 0.3, f64) } else { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) };
         let mut time_cap = if self.params.time_limit.is_finite() { cut_frac * self.params.time_limit } else { f64::INFINITY };
@@ -1083,7 +1086,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 && !saturated && !widen_now {
                         stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened { 2 } else { 1 };
-                        if stall >= if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
+                        if stall >= if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip && !sub_hc { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
                             if !phase2_on {
                                 break;
                             }
