@@ -79,7 +79,7 @@ index c26129c..ead6886 100644
  
    if (mipsolver.options_mip_->mip_heuristic_run_zi_round) {
 diff --git a/highs/mip/HighsPrimalHeuristics.cpp b/highs/mip/HighsPrimalHeuristics.cpp
-index cb6efd3..5876de7 100644
+index cb6efd3..6052076 100644
 --- a/highs/mip/HighsPrimalHeuristics.cpp
 +++ b/highs/mip/HighsPrimalHeuristics.cpp
 @@ -6,6 +6,8 @@
@@ -165,7 +165,21 @@ index cb6efd3..5876de7 100644
  void HighsPrimalHeuristics::RENS(HighsMipWorker& worker,
                                   const std::vector<double>& tmp) {
    // return if domain is infeasible
-@@ -608,6 +662,10 @@ retry:
+@@ -589,6 +643,13 @@ retry:
+       }
+     }
+ 
++    if (trOn() && !mipsolver.submip)
++      trPrint(int(mipsolver.submip_level),
++              "RENS_STAGE depth=%d branched=%d fixrate=%.4f lp_obj=%.6g "
++              "nfrac=%d backtracks=%d",
++              int(heur.getCurrentDepth()), int(numBranched),
++              neighbourhood.getFixingRate(), heurlp.getObjective(),
++              int(heurlp.getFractionalIntegers().size()), int(nbacktracks));
+     if (numBranched == 0) break;
+     heurlp.flushDomain(localdom);
+   }
+@@ -608,6 +669,10 @@ retry:
    if (fixingrate < 0.1 ||
        (mipsolver.submip && mipsolver.mipdata_->numImprovingSols != 0)) {
      // heur.childselrule = ChildSelectionRule::kBestCost;
@@ -176,7 +190,7 @@ index cb6efd3..5876de7 100644
      heur.setMinReliable(0);
      heur.solveDepthFirst(10);
      worker.getHeurLpIterations() += heur.getLocalLpIterations();
-@@ -617,6 +675,17 @@ retry:
+@@ -617,6 +682,17 @@ retry:
      return;
    }
  
@@ -194,7 +208,7 @@ index cb6efd3..5876de7 100644
    heurlp.removeObsoleteRows(false);
    HighsInt node_reduction_factor =
        mipsolver.mipdata_->parallelLockActive()
-@@ -919,6 +988,10 @@ retry:
+@@ -919,6 +995,10 @@ retry:
    if (fixingrate < 0.1 ||
        (mipsolver.submip && mipsolver.mipdata_->numImprovingSols != 0)) {
      // heur.childselrule = ChildSelectionRule::kBestCost;
@@ -205,7 +219,7 @@ index cb6efd3..5876de7 100644
      heur.setMinReliable(0);
      heur.solveDepthFirst(10);
      worker.getHeurLpIterations() += heur.getLocalLpIterations();
-@@ -928,6 +1001,15 @@ retry:
+@@ -928,6 +1008,15 @@ retry:
      return;
    }
  
