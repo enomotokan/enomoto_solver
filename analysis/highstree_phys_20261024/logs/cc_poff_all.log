@@ -1,0 +1,68 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option presolve to "off"
+Set option time_limit to 40
+MIP eno_pre has 10690 rows; 111827 cols; 48883 nonzeros; 109346 integer variables (5443 binary)
+Coefficient ranges:
+  Matrix  [5e-01, 1e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 8e+03]
+  RHS     [1e+00, 8e+02]
+
+Presolve is switched off
+
+Solving MIP model with:
+   10690 rows
+   111827 cols (5443 binary, 0 integer, 0 implied int., 560 continuous, 105824 domain fixed)
+   48883 nonzeros
+   Thread count 2 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   12620.499992    inf                  inf        0      0      0         0     0.4s
+         0       0         0   0.00%   48583.1         inf                  inf        0      0      4      9624     4.4s
+         0       0         0   0.00%   48795.847222    inf                  inf     3287    791     13     17808    10.2s
+         0       0         0   0.00%   49021.759259    inf                  inf     4347   1131    155     22005    15.8s
+ L       0       0         0   0.00%   49112.555556    49324              0.43%     4870   1273    157     24072    25.2s
+
+Symmetry detection completed in 271.2s
+Found 82 generator(s) and 1 full orbitope(s) acting on 3 columns
+
+         0       1         0   0.00%   49195.888889    49324              0.26%     5340    979    157     35563   271.6s
+
+Solving report
+  Model             eno_pre
+  Status            Time limit reached
+  Primal bound      49324
+  Dual bound        49195.8888889
+  Gap               0.26% (tolerance: 0.01%)
+  P-D integral      0.642248799332
+  Solution status   feasible
+                    49324 (objective)
+                    0 (bound viol.)
+                    2.26596519326e-13 (int. viol.)
+                    0 (row viol.)
+  Timing            271.60
+                    1.42 (Presolve)
+                        MIP    time [calls] = 0.04 [1]
+                        subMIP time [calls] = 1.38 [4]
+                    270.15 (Solve)
+                        MIP    time [calls] = 266.18 [1]
+                        subMIP time [calls] = 3.97 [4]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [4]
+  Max sub-MIP depth 4
+  Nodes             0
+  Repair LPs        0
+  LP iterations     35563
+                    0 (strong br.)
+                    15730 (separation)
+                    9946 (heuristics)

@@ -1859,7 +1859,18 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sibling_backtracks: 0,
         orbitope_prunes: 0,
         row_log: Vec::new(),
-        cut_int: if env_str!("ENOMOTO_MIP_NO_IMPLINT").is_some() { p.is_int.clone() } else { p.implied_integers() },
+        cut_int: if env_str!("ENOMOTO_MIP_NO_IMPLINT").is_some() {
+            p.is_int.clone()
+        } else if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() {
+            let b = p.implied_integers();
+            let t = p.implied_integers_tu(&b);
+            if params.verbose && !params.submip {
+                eprintln!("MIP: implied integers: {} by the row rules, {} with the TU rule (ENOMOTO_MIP_IMPLINT_TU)", b.iter().zip(&p.is_int).filter(|(a, i)| **a && !**i).count(), t.iter().zip(&p.is_int).filter(|(a, i)| **a && !**i).count());
+            }
+            t
+        } else {
+            p.implied_integers()
+        },
         cut_pool: Vec::new(),
         dual_proofs: std::collections::VecDeque::new(),
         dual_proof_nnz: 0,

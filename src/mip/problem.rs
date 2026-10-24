@@ -246,6 +246,95 @@ impl MipProblem {
         }
     }
 
+    /// `ENOMOTO_MIP_IMPLINT_TU` (試作、既定では使わない): `base` (整数列と [`Self::implied_integers`] の印) に加えて、連続列の部分が
+    /// 完全単模 (TU) になる連続列の集まりをまとめて暗に整数とする。整数列を整数値に固定すると、残りの連続列の制約は
+    /// 「TU の行列 x_C ∈ 整数の区間」になり、その多面体の頂点は整数なので、整数の最適解がある (カット生成で整数として扱える)。
+    /// 候補は境界が整数か無限の連続列。行ごとに、最初の候補の係数の絶対値で割ると、候補の係数が ±1、(暗に) 整数の列の係数と
+    /// 有限の左辺・右辺が整数 (固定された連続列はその寄与が整数)、候補でない連続列を含まない、でなければその行の候補を外す。
+    /// 行への出現が 3 つ以上の候補も外し、残りで Heller-Tompkins の条件 (同じ符号の 2 つの行は別の組、逆の符号なら同じ組) の
+    /// 2 色塗りに矛盾する列を外す。変化がなくなるまで繰り返す。physiciansched6-2 の前処理後の問題では、罰の列 s_k (自分の行と
+    /// 長い行 Σ s_k − z ≤ 0 の 2 本) と z の 434 本がこれに当たる (1 列ずつの判定では互いを前提にし合って 0 本)。HiGHS は前処理で
+    /// z を消して s_k を 1 行の暗に整数の列にする (424 本) (analysis/highstree_phys_20261024.md)
+    pub fn implied_integers_tu(&self, base: &[bool]) -> Vec<bool> {
+        let integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
+        let n = self.n;
+        let mut cand: Vec<bool> = (0..n)
+            .map(|j| !base[j] && self.col_lo[j] < self.col_up[j] && [self.col_lo[j], self.col_up[j]].iter().all(|&v| !v.is_finite() || integral(v)))
+            .collect();
+        let fixed_cont = |j: usize| !base[j] && self.col_lo[j] == self.col_up[j];
+        loop {
+            let mut changed = false;
+            for i in 0..self.m {
+                let r = &self.rows[i];
+                let Some(&(_, a0)) = r.iter().find(|&&(j, _)| cand[j]) else { continue };
+                let s = 1.0 / a0.abs();
+                let ok = r.iter().all(|&(j, a)| {
+                    if cand[j] {
+                        (a.abs() * s - 1.0).abs() <= 1e-9
+                    } else if base[j] {
+                        integral(a * s)
+                    } else {
+                        fixed_cont(j) && integral(self.col_lo[j] * a * s)
+                    }
+                }) && [self.row_lo[i], self.row_up[i]].iter().all(|&v| !v.is_finite() || integral(v * s));
+                if !ok {
+                    for &(j, _) in r {
+                        if cand[j] {
+                            cand[j] = false;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            for j in 0..n {
+                if cand[j] && self.cols[j].len() > 2 {
+                    cand[j] = false;
+                    changed = true;
+                }
+            }
+            // Heller-Tompkins の 2 色塗り (行が頂点、出現 2 つの候補の列が辺)
+            let mut adj: Vec<Vec<(usize, bool, usize)>> = vec![Vec::new(); self.m];
+            for j in 0..n {
+                if cand[j] && self.cols[j].len() == 2 {
+                    let ((i1, a1), (i2, a2)) = (self.cols[j][0], self.cols[j][1]);
+                    let same = (a1 > 0.0) == (a2 > 0.0);
+                    adj[i1].push((i2, same, j));
+                    adj[i2].push((i1, same, j));
+                }
+            }
+            let mut color: Vec<i8> = vec![-1; self.m];
+            let mut bad: Vec<usize> = Vec::new();
+            for r0 in 0..self.m {
+                if color[r0] >= 0 || adj[r0].is_empty() {
+                    continue;
+                }
+                color[r0] = 0;
+                let mut q = std::collections::VecDeque::from([r0]);
+                while let Some(r) = q.pop_front() {
+                    for &(r2, same, j) in &adj[r] {
+                        let want = color[r] ^ (same as i8);
+                        if color[r2] < 0 {
+                            color[r2] = want;
+                            q.push_back(r2);
+                        } else if color[r2] != want {
+                            bad.push(j);
+                        }
+                    }
+                }
+            }
+            for j in bad {
+                if cand[j] {
+                    cand[j] = false;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        (0..n).map(|j| base[j] || cand[j]).collect()
+    }
+
     /// 点 `x` の目的値 (最小化形、定数項込み)。
     pub fn objective(&self, x: &[f64]) -> f64 {
         self.offset + (0..self.n).map(|j| self.cost[j] * x[j]).sum::<f64>()
@@ -355,5 +444,27 @@ mod tests {
             vec![7.0, 4.0, 1.0],
         );
         assert_eq!(p.implied_integers(), vec![true, true, true, false, true]);
+    }
+
+    #[test]
+    fn implied_integers_tu_penalty_network() {
+        // b0, b1 は 2 値。s0 >= 100 b0 - 200 (行 0)、s1 >= 300 b1 - 100 (行 1)、z >= s0 + s1 (行 2)、z の費用 1。
+        // 1 列ずつの判定では s と z が互いを前提にし合って決まらないが、連続列の部分 (s0, s1, z) は TU なので 3 本とも暗に整数。
+        // 行 3 (b0 + w <= 2.5) の w は右辺が整数でないので外れる
+        let inf = f64::INFINITY;
+        let p = MipProblem::from_rows(
+            vec![0.0; 6],
+            vec![1.0, 1.0, inf, inf, inf, inf],
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            0.0,
+            1.0,
+            vec![true, true, false, false, false, false],
+            vec![vec![(0, 100.0), (2, -1.0)], vec![(1, 300.0), (3, -1.0)], vec![(2, 1.0), (3, 1.0), (4, -1.0)], vec![(0, 1.0), (5, 1.0)]],
+            vec![-inf, -inf, -inf, -inf],
+            vec![200.0, 100.0, 0.0, 2.5],
+        );
+        let b = p.implied_integers();
+        assert_eq!(b, vec![true, true, false, false, false, false]);
+        assert_eq!(p.implied_integers_tu(&b), vec![true, true, true, true, true, false]);
     }
 }

@@ -383,7 +383,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `ENOMOTO_MIP_ROOT_CUT_HIGHS` (試作、既定では使わない): 外側の根のカットのループを HiGHS の回し方に寄せる。
     /// (1) 時間の上限をループの始めから数え、`ENOMOTO_T_MIP_CUT_MIN_ROUNDS` (10) ラウンドまでは時間の上限で止めない
-    /// (`ENOMOTO_MIP_CUT_CAP_FROM_LOOP` と同じ)、(2) 1 ラウンドに採るカットの上限を `ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAX_CUTS` (150)、
+    /// (`ENOMOTO_MIP_CUT_CAP_FROM_LOOP` と同じ)、(2) 1 ラウンドに採るカットの上限を `ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAX_CUTS` (500)・平行度の上限を `..._MAXPAR` (0.9)、
     /// (3) 1 回の LP の時間の上限を全体の `ENOMOTO_T_MIP_ROOT_CUT_HIGHS_LP_TIME_FRAC` (0.1) 以上、上限で止まった LP は解き続ける
     /// (`ENOMOTO_MIP_CUT_LP_CONTINUE` と同じ)、(4) 動かないラウンドで 1 ラウンドの上限を行の数まで広げる規則を使わない。
     /// physiciansched6-2 では HiGHS の根は tableau のカットを 1 ラウンドに 45〜157 本入れて 5〜8 ラウンドで下界を 49324 にする
@@ -756,7 +756,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let _ = std::fs::write(format!("{dir}/cands_r{round}.txt"), txt);
             }
             // 効き目の大きい順に、平行なものを除いて選ぶ
-            let max_cuts = if self.root_cut_highs() { tunable!("ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAX_CUTS", 150usize, usize) } else { tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize) }.min(p.m.max(50));
+            let max_cuts = if self.root_cut_highs() { tunable!("ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAX_CUTS", 500usize, usize) } else { tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize) }.min(p.m.max(50));
             let max_cuts = if adapt_max_cuts > 0 { adapt_max_cuts } else { max_cuts };
             let (forced, cands): (Vec<Candidate>, Vec<Candidate>) = cands.into_iter().partition(|c| c.forced);
             // `ENOMOTO_T_MIP_CUTSEL_AGG_QUOTA` = q (> 0、試作): 集約した行からのカット (tableau・経路集約) を、分離器ごとに
@@ -776,6 +776,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
             } else if fc_relax {
                 select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_FC_MIN_REL", 0.0, f64), tunable!("ENOMOTO_T_CUTSEL_FC_MAXPAR", 0.9, f64))
+            } else if self.root_cut_highs() && job.is_none() {
+                // `ENOMOTO_MIP_ROOT_CUT_HIGHS`: 平行度の上限を `ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAXPAR` (0.9) に緩める。physiciansched6-2 の根の
+                // 1 ラウンド目の候補 (4090 本) を同じ LP に足すと、既定の選択 (150 本・0.3) では 48583 -> 48588、500 本・0.9 なら 48774
+                // (候補全部 48790)。最適面が退化していて、短いカットを少しずつ足しても LP が別の頂点に移るだけ
+                select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64), tunable!("ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAXPAR", 0.9, f64))
             } else if face_anchor >= 1 && env_str!("ENOMOTO_MIP_CUTSEL_OLD").is_none() {
                 select_cuts_hybrid_anchor(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64), tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), anchor)
             } else {

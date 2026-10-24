@@ -1,3 +1,37 @@
+diff --git a/highs/mip/HighsCutPool.cpp b/highs/mip/HighsCutPool.cpp
+index b9011e8..32bdad6 100644
+--- a/highs/mip/HighsCutPool.cpp
++++ b/highs/mip/HighsCutPool.cpp
+@@ -7,6 +7,7 @@
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
+ #include "mip/HighsCutPool.h"
++#include "mip/HighsTrace.h"
+ 
+ #include <cassert>
+ #include <numeric>
+@@ -505,6 +506,21 @@ HighsInt HighsCutPool::addCut(const HighsMipSolver& mipsolver, HighsInt* Rindex,
+                               bool integral, bool propagate,
+                               bool extractCliques, bool isConflict) {
+   mipsolver.mipdata_->debugSolution.checkCut(Rindex, Rvalue, Rlen, rhs);
++  if (htraceCutDumpDir() && !mipsolver.submip && !isConflict &&
++      !htraceSepTag().empty() && htraceSepRound() >= 1 &&
++      htraceSepRound() <= htraceCutDumpRounds()) {
++    std::string f = std::string(htraceCutDumpDir()) + "/h_cuts_r" +
++                    std::to_string(htraceSepRound()) + ".txt";
++    FILE* fp = std::fopen(f.c_str(), "a");
++    if (fp) {
++      std::fprintf(fp, "%s %.17g %d", htraceSepTag().c_str(), rhs,
++                   int(integral));
++      for (HighsInt i = 0; i < Rlen; ++i)
++        std::fprintf(fp, " %d:%.17g", int(Rindex[i]), Rvalue[i]);
++      std::fprintf(fp, "\n");
++      std::fclose(fp);
++    }
++  }
+ 
+   sortBuffer.resize(Rlen);
+ 
 diff --git a/highs/mip/HighsMipSolver.cpp b/highs/mip/HighsMipSolver.cpp
 index 01630b6..bbc7bf5 100644
 --- a/highs/mip/HighsMipSolver.cpp
@@ -75,7 +109,7 @@ index c26129c..8384c02 100644
      maxSepaRounds =
          std::min(HighsInt(2 * std::sqrt(maxTreeSizeLog2)), maxSepaRounds);
 diff --git a/highs/mip/HighsPrimalHeuristics.cpp b/highs/mip/HighsPrimalHeuristics.cpp
-index cb6efd3..0b15ee5 100644
+index cb6efd3..69046fd 100644
 --- a/highs/mip/HighsPrimalHeuristics.cpp
 +++ b/highs/mip/HighsPrimalHeuristics.cpp
 @@ -6,6 +6,8 @@
@@ -87,7 +121,7 @@ index cb6efd3..0b15ee5 100644
  
  #include <numeric>
  #include <unordered_set>
-@@ -74,6 +76,27 @@ void HighsPrimalHeuristics::setupIntCols() {
+@@ -74,6 +76,35 @@ void HighsPrimalHeuristics::setupIntCols() {
    });
  }
  
@@ -103,6 +137,14 @@ index cb6efd3..0b15ee5 100644
 +  static thread_local std::string t;
 +  return t;
 +}
++std::string& htraceSepTag() {
++  static thread_local std::string t;
++  return t;
++}
++int& htraceSepRound() {
++  static thread_local int r = 0;
++  return r;
++}
 +std::string htraceStackStr() {
 +  std::string r;
 +  for (auto& x : htraceTagStack()) {
@@ -115,7 +157,7 @@ index cb6efd3..0b15ee5 100644
  bool HighsPrimalHeuristics::solveSubMip(
      HighsMipWorker& worker, const HighsLp& lp, const HighsBasis& basis,
      double fixingRate, std::vector<double> colLower,
-@@ -107,6 +130,30 @@ bool HighsPrimalHeuristics::solveSubMip(
+@@ -107,6 +138,30 @@ bool HighsPrimalHeuristics::solveSubMip(
    submipoptions.mip_pscost_minreliable = 0;
    submipoptions.time_limit -= mipsolver.timer_.read();
    submipoptions.objective_bound = worker.upper_limit;
@@ -146,7 +188,7 @@ index cb6efd3..0b15ee5 100644
  
    if (!mipsolver.submip) {
      double curr_abs_gap = worker.upper_limit - mipsolver.mipdata_->lower_bound;
-@@ -168,6 +215,20 @@ bool HighsPrimalHeuristics::solveSubMip(
+@@ -168,6 +223,20 @@ bool HighsPrimalHeuristics::solveSubMip(
    // Ensure that sub-solver call time data accumulate in the sub-MIP record
    mipsolver.profiling_->setSubMip(true);
    submipsolver.run();
@@ -167,7 +209,7 @@ index cb6efd3..0b15ee5 100644
    if (mipsolver.profiling_->sub_solver_)
      printf(
          "HighsPrimalHeuristics::solveSubMip After  run() for %sMIP at depth "
-@@ -235,7 +296,9 @@ bool HighsPrimalHeuristics::solveSubMip(
+@@ -235,7 +304,9 @@ bool HighsPrimalHeuristics::solveSubMip(
    double oldUpperLimit = worker.upper_limit;
    if (submipsolver.modelstatus_ != HighsModelStatus::kInfeasible &&
        !submipsolver.solution_.empty()) {
@@ -177,7 +219,7 @@ index cb6efd3..0b15ee5 100644
    }
  
    if (worker.upper_limit < oldUpperLimit) {
-@@ -366,6 +429,16 @@ void HighsPrimalHeuristics::rootReducedCost(HighsMipWorker& worker) {
+@@ -366,6 +437,16 @@ void HighsPrimalHeuristics::rootReducedCost(HighsMipWorker& worker) {
    double fixingRate = neighbourhood.getFixingRate();
    if (fixingRate < 0.3) return;
  
@@ -194,7 +236,7 @@ index cb6efd3..0b15ee5 100644
    solveSubMip(worker, *mipsolver.model_, mipsolver.mipdata_->firstrootbasis,
                fixingRate, localdom.col_lower_, localdom.col_upper_,
                500,  // std::max(50, int(0.05 *
-@@ -624,6 +697,16 @@ retry:
+@@ -624,6 +705,16 @@ retry:
                  HighsInt{1},
                  static_cast<HighsInt>(mipsolver.mipdata_->workers.size()) / 4)
            : 1;
@@ -211,7 +253,7 @@ index cb6efd3..0b15ee5 100644
    const bool solve_sub_mip_return = solveSubMip(
        worker, heurlp.getLp(), heurlp.getLpSolver().getBasis(), fixingrate,
        localdom.col_lower_, localdom.col_upper_,
-@@ -935,6 +1018,16 @@ retry:
+@@ -935,6 +1026,16 @@ retry:
                  HighsInt{1},
                  static_cast<HighsInt>(mipsolver.mipdata_->workers.size()) / 4)
            : 1;
@@ -292,7 +334,7 @@ index 5db0ca0..be0f0a4 100644
    return result;
  }
 diff --git a/highs/mip/HighsSeparation.cpp b/highs/mip/HighsSeparation.cpp
-index a2c144c..ffc2439 100644
+index a2c144c..313a96b 100644
 --- a/highs/mip/HighsSeparation.cpp
 +++ b/highs/mip/HighsSeparation.cpp
 @@ -6,6 +6,8 @@
@@ -318,16 +360,32 @@ index a2c144c..ffc2439 100644
  HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
                                            HighsLpRelaxation::Status& status) {
    const HighsSolution& sol = lp->getLpSolver().getSolution();
-@@ -91,6 +100,8 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+@@ -91,6 +100,24 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
  
    if (!mipdata.parallelLockActive())
      lp->getMipSolver().profiling_->start(implBoundClock);
++  const bool hdump = !lp->getMipSolver().submip;
++  if (hdump) {
++    ++htraceSepRound();
++    if (htraceCutDumpDir() && htraceSepRound() <= htraceCutDumpRounds()) {
++      std::string f = std::string(htraceCutDumpDir()) + "/h_x_r" +
++                      std::to_string(htraceSepRound()) + ".txt";
++      FILE* fp = std::fopen(f.c_str(), "w");
++      if (fp) {
++        std::fprintf(fp, "%.17g\n", lp->getObjective());
++        for (double v : lp->getSolution().col_value)
++          std::fprintf(fp, "%.17g\n", v);
++        std::fclose(fp);
++      }
++    }
++    htraceSepTag() = "impl";
++  }
 +  HighsInt hpool0 = mipworker_.getCutPool().getNumCuts();
 +  if (!htraceSkipSep(lp->getMipSolver(), "impl"))
    mipdata.implications.separateImpliedBounds(
        *lp, lp->getSolution().col_value, mipworker_.getCutPool(),
        mipdata.feastol, mipworker_.getGlobalDomain(),
-@@ -98,6 +109,7 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+@@ -98,6 +125,7 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
    if (!mipdata.parallelLockActive())
      lp->getMipSolver().profiling_->stop(implBoundClock);
  
@@ -335,16 +393,17 @@ index a2c144c..ffc2439 100644
    HighsInt ncuts = 0;
    HighsInt numboundchgs = propagateAndResolve();
    if (numboundchgs == -1)
-@@ -107,6 +119,8 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+@@ -107,6 +135,9 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
  
    if (!mipdata.parallelLockActive())
      lp->getMipSolver().profiling_->start(cliqueClock);
 +  HighsInt hpool2 = mipworker_.getCutPool().getNumCuts();
++  if (hdump) htraceSepTag() = "clique";
 +  if (!htraceSkipSep(lp->getMipSolver(), "clique"))
    mipdata.cliquetable.separateCliques(
        lp->getMipSolver(), sol.col_value, mipworker_.getCutPool(),
        mipdata.feastol,
-@@ -137,8 +151,16 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+@@ -137,8 +168,17 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
    }
    HighsLpAggregator lpAggregator(*lp);
  
@@ -354,6 +413,7 @@ index a2c144c..ffc2439 100644
 +  static const char* hsepname[3] = {"tableau", "path", "modk"};
    for (const std::unique_ptr<HighsSeparator>& separator : separators) {
 +    HighsInt hb = mipworker_.getCutPool().getNumCuts();
++    if (hdump) htraceSepTag() = hsepname[hk < 3 ? hk : 2];
 +    if (!htraceSkipSep(lp->getMipSolver(), hsepname[hk < 3 ? hk : 2]))
      separator->run(*lp, lpAggregator, transLp, mipworker_.getCutPool());
 +    if (hk < 3) hsep[hk] = mipworker_.getCutPool().getNumCuts() - hb;
@@ -361,10 +421,11 @@ index a2c144c..ffc2439 100644
      if (mipworker_.getGlobalDomain().infeasible()) {
        status = HighsLpRelaxation::Status::kInfeasible;
        return 0;
-@@ -153,6 +175,11 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+@@ -153,6 +193,12 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
  
    mipworker_.getCutPool().separate(sol.col_value, propdomain, cutset,
                                     mipdata.feastol, mipdata.cutpools);
++  if (hdump) htraceSepTag().clear();
 +  HTRACE("SEPA lvl=%d impl=%d clique=%d tableau=%d path=%d modk=%d "
 +         "selected=%d lpobj_before=%.6g\n",
 +         int(lp->getMipSolver().submip_level), int(hpool1 - hpool0),
@@ -375,10 +436,10 @@ index a2c144c..ffc2439 100644
      mipdata.getCutPool().separate(sol.col_value, propdomain, cutset,
 diff --git a/highs/mip/HighsTrace.h b/highs/mip/HighsTrace.h
 new file mode 100644
-index 0000000..f69db4d
+index 0000000..bdf1e61
 --- /dev/null
 +++ b/highs/mip/HighsTrace.h
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,35 @@
 +// 計測用の出力 (環境変数 HIGHS_TRACE が設定されたときだけ stderr に "TR " で始まる行を書く)
 +#ifndef HIGHS_MIP_TRACE_H_
 +#define HIGHS_MIP_TRACE_H_
@@ -398,6 +459,14 @@ index 0000000..f69db4d
 +// 終わったばかりのサブ MIP の説明 (その解を親が受け取るときに使う)
 +std::string& htraceLastSubTag();
 +std::string htraceStackStr();
++// 分離のカットの書き出し (HIGHS_TRACE_CUTDUMP=<ディレクトリ>、外側の根の最初の HIGHS_TRACE_CUTDUMP_ROUNDS (1) ラウンド)
++std::string& htraceSepTag();
++int& htraceSepRound();
++inline const char* htraceCutDumpDir() { return std::getenv("HIGHS_TRACE_CUTDUMP"); }
++inline int htraceCutDumpRounds() {
++  const char* e = std::getenv("HIGHS_TRACE_CUTDUMP_ROUNDS");
++  return e ? std::atoi(e) : 1;
++}
 +#define HTRACE(...)                    \
 +  do {                                 \
 +    if (htraceOn()) {                  \
