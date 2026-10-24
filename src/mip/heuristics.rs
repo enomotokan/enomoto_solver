@@ -374,11 +374,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn randomized_rounding(&mut self, x: &[f64], tries: usize) -> bool {
         let p = self.p;
         let mut order: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j]).collect();
-        order.sort_by(|&a, &b| {
-            let fa = (x[a] - x[a].round()).abs();
-            let fb = (x[b] - x[b].round()).abs();
-            fa.total_cmp(&fb)
-        });
+        // `ENOMOTO_MIP_RR_HIGHS=lock` (試作): 丸めて固定する順を HiGHS の `setupIntCols` と同じく lock の数の積
+        // ((ε + 上) × (ε + 下)) の大きい順にする (既定は整数に近い順)。physiciansched6-2 の根の RENS の近傍のサブ MIP は、
+        // HiGHS ならカットの後の LP からこの順の乱択丸めで解が出る (analysis/physhighs_20261024.md)
+        if env_str!("ENOMOTO_MIP_RR_HIGHS") == Some("lock") {
+            let score = |j: usize| {
+                let (dl, ul) = self.locks[j];
+                (1e-6 + ul as f64) * (1e-6 + dl as f64)
+            };
+            order.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
+        } else {
+            order.sort_by(|&a, &b| {
+                let fa = (x[a] - x[a].round()).abs();
+                let fb = (x[b] - x[b].round()).abs();
+                fa.total_cmp(&fb)
+            });
+        }
+        let tries = tunable!("ENOMOTO_T_MIP_RR_TRIES", tries, usize);
         for t in 0..tries {
             let t0 = std::time::Instant::now();
             let mut target = x.to_vec();
