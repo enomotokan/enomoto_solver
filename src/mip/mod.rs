@@ -97,6 +97,15 @@ pub(crate) fn gr_restart_readd_for(p: &MipProblem) -> bool {
     env_str!("ENOMOTO_MIP_GR_RESTART") == Some("readd") && gr_restart_for(p)
 }
 
+/// [`gr_restart_for`] で、2 回目以降の再スタートの割合の分母を根の始めに自由だった整数列の数にするか
+/// (`ENOMOTO_MIP_RESTART_FRAC_FREE` と同じ。`ENOMOTO_MIP_GR_RESTART=ff` のときだけ)。HiGHS の `percentageInactiveIntegers` は
+/// 再スタート後の (前処理で縮んだ) 問題の整数列に対する割合なので、最適解を得た後に 2〜4 回再スタートし、そのたびに根のカットで
+/// 下界を上げる (mzzv42z: -20811 -> -20683 -> -20640 -> 1 ノードで証明)。分母が全部の整数列 (11717 本) だと、こちらは再スタート後に
+/// 新たに固定した 287〜304 列が閾値 (293) に届かず 2 回目の再スタートが起きない (analysis/mzzcmp_20261023.md)
+pub(crate) fn gr_restart_ff_for(p: &MipProblem) -> bool {
+    env_str!("ENOMOTO_MIP_GR_RESTART") == Some("ff") && gr_restart_for(p)
+}
+
 /// `ENOMOTO_MIP_RESTART_REF` か [`gr_restart_for`]
 pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
     env_str!("ENOMOTO_MIP_RESTART_REF").is_some() || gr_restart_for(p)
