@@ -1,0 +1,69 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option time_limit to 600
+Set option random_seed to 1
+Set option solution_file to "logs/h_seed1.sol"
+MIP neos-960392 has 4744 rows; 59376 cols; 189503 nonzeros; 59376 integer variables (59376 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 5e+01]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 1e+02]
+Presolving model
+4744 rows, 59281 cols, 189404 nonzeros 0s
+3169 rows, 56041 cols, 121122 nonzeros 2s
+Presolve reductions: rows 3169(-1575); columns 56041(-3335); nonzeros 121122(-68381) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   3169 rows
+   56041 cols (56041 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   121122 nonzeros
+   Thread count 2 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ z       0       0         0   0.00%   -inf            0                  Large        0      0      0         0     2.5s
+         0       0         0   0.00%   -238            0                  Large        0      0      3      3838     4.1s
+         0       0         0   0.00%   -238            0                  Large      103     15   1081      6276     9.8s
+         0       0         0   0.00%   -238            0                  Large      373     32   1081      9314    15.4s
+ L       0       0         0   0.00%   -238            -238               0.00%      373     33   1081      9993    19.5s
+         1       0         1 100.00%   -238            -238               0.00%      373     33   1081     15059    19.5s
+
+Solving report
+  Model             neos-960392
+  Status            Optimal
+  Primal bound      -238
+  Dual bound        -238
+  Gap               0% (tolerance: 0.01%)
+  P-D integral      0
+  Solution status   feasible
+                    -238 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            19.51
+                    3.09 (Presolve)
+                        MIP    time [calls] = 2.42 [1]
+                        subMIP time [calls] = 0.67 [1]
+                    16.41 (Solve)
+                        MIP    time [calls] = 14.27 [1]
+                        subMIP time [calls] = 2.14 [1]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [1]
+  Max sub-MIP depth 2
+  Nodes             1
+  Repair LPs        0
+  LP iterations     15059
+                    0 (strong br.)
+                    6155 (separation)
+                    5066 (heuristics)
+Writing the solution to logs/h_seed1.sol

@@ -115,6 +115,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 時間切れ、または伝播の手間 (非零数の 20 倍) を使い切ったら諦める
             if cnt % 64 == 0 && (self.time_up() || self.dom.debug_work() - work0 > work_cap) {
                 ok = false;
+                if env_str!("ENOMOTO_MIP_DEBUG_RR").is_some() && rounded.is_none() {
+                    eprintln!("RR gave up at {cnt} of {} integer columns (time up {}, work {} cap {work_cap})", all.len(), self.time_up(), self.dom.debug_work() - work0);
+                }
                 if rounded.is_none() {
                     break;
                 }
@@ -181,6 +184,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if ok {
             if p.is_int.iter().all(|&b| b) {
                 let x: Vec<f64> = self.dom.lo.clone();
+                if env_str!("ENOMOTO_MIP_DEBUG_RR").is_some() && rounded.is_none() {
+                    eprintln!("RR all fixed: objective {:.6} feasible {}", p.objective(&x), p.is_feasible(&x, 1e-6));
+                }
                 found = self.try_incumbent(x);
             } else {
                 let saved = self.lp.save_state();
