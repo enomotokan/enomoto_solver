@@ -291,6 +291,88 @@ index 5db0ca0..be0f0a4 100644
  
    return result;
  }
+diff --git a/highs/mip/HighsSeparation.cpp b/highs/mip/HighsSeparation.cpp
+index a2c144c..ffc2439 100644
+--- a/highs/mip/HighsSeparation.cpp
++++ b/highs/mip/HighsSeparation.cpp
+@@ -6,6 +6,8 @@
+ /*                                                                       */
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ #include "mip/HighsSeparation.h"
++#include "mip/HighsTrace.h"
++#include <cstring>
+ 
+ #include <algorithm>
+ #include <cassert>
+@@ -40,6 +42,13 @@ HighsSeparation::HighsSeparation(HighsMipWorker& mipworker)
+   separators.emplace_back(new HighsModkSeparator(mipsolver));
+ }
+ 
++// 計測用: HIGHS_TRACE_NOSEP にある名前 (impl,clique,tableau,path,modk) の分離を外側の求解で飛ばす
++static bool htraceSkipSep(const HighsMipSolver& m, const char* name) {
++  if (m.submip) return false;
++  const char* e = std::getenv("HIGHS_TRACE_NOSEP");
++  return e && std::strstr(e, name);
++}
++
+ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+                                           HighsLpRelaxation::Status& status) {
+   const HighsSolution& sol = lp->getLpSolver().getSolution();
+@@ -91,6 +100,8 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(implBoundClock);
++  HighsInt hpool0 = mipworker_.getCutPool().getNumCuts();
++  if (!htraceSkipSep(lp->getMipSolver(), "impl"))
+   mipdata.implications.separateImpliedBounds(
+       *lp, lp->getSolution().col_value, mipworker_.getCutPool(),
+       mipdata.feastol, mipworker_.getGlobalDomain(),
+@@ -98,6 +109,7 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->stop(implBoundClock);
+ 
++  HighsInt hpool1 = mipworker_.getCutPool().getNumCuts();
+   HighsInt ncuts = 0;
+   HighsInt numboundchgs = propagateAndResolve();
+   if (numboundchgs == -1)
+@@ -107,6 +119,8 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(cliqueClock);
++  HighsInt hpool2 = mipworker_.getCutPool().getNumCuts();
++  if (!htraceSkipSep(lp->getMipSolver(), "clique"))
+   mipdata.cliquetable.separateCliques(
+       lp->getMipSolver(), sol.col_value, mipworker_.getCutPool(),
+       mipdata.feastol,
+@@ -137,8 +151,16 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+   }
+   HighsLpAggregator lpAggregator(*lp);
+ 
++  HighsInt hpool3 = mipworker_.getCutPool().getNumCuts();
++  HighsInt hsep[3] = {0, 0, 0};
++  int hk = 0;
++  static const char* hsepname[3] = {"tableau", "path", "modk"};
+   for (const std::unique_ptr<HighsSeparator>& separator : separators) {
++    HighsInt hb = mipworker_.getCutPool().getNumCuts();
++    if (!htraceSkipSep(lp->getMipSolver(), hsepname[hk < 3 ? hk : 2]))
+     separator->run(*lp, lpAggregator, transLp, mipworker_.getCutPool());
++    if (hk < 3) hsep[hk] = mipworker_.getCutPool().getNumCuts() - hb;
++    ++hk;
+     if (mipworker_.getGlobalDomain().infeasible()) {
+       status = HighsLpRelaxation::Status::kInfeasible;
+       return 0;
+@@ -153,6 +175,11 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+ 
+   mipworker_.getCutPool().separate(sol.col_value, propdomain, cutset,
+                                    mipdata.feastol, mipdata.cutpools);
++  HTRACE("SEPA lvl=%d impl=%d clique=%d tableau=%d path=%d modk=%d "
++         "selected=%d lpobj_before=%.6g\n",
++         int(lp->getMipSolver().submip_level), int(hpool1 - hpool0),
++         int(hpool3 - hpool2), int(hsep[0]), int(hsep[1]), int(hsep[2]),
++         int(cutset.numCuts()), lp->getObjective());
+   // Also separate the global cut pool
+   if (&mipworker_.getCutPool() != &mipdata.getCutPool()) {
+     mipdata.getCutPool().separate(sol.col_value, propdomain, cutset,
 diff --git a/highs/mip/HighsTrace.h b/highs/mip/HighsTrace.h
 new file mode 100644
 index 0000000..f69db4d
