@@ -212,6 +212,14 @@ pub fn solve_mip(
         cutoff: env_f64(env_str!("ENOMOTO_MIP_CUTOFF")).map_or(d.cutoff, |v| p.sense_sign * v),
         ..d
     };
+    // 診断用 (`ENOMOTO_MIP_DEBUG_AS_SUBMIP`): 書き出したサブ MIP (`ENOMOTO_MIP_SUBMIP_DUMP`) を、根のサブ MIP と同じ形
+    // (入れ子の深さ 1・1 スレッド・ギャップ 1e-4) で解く。打ち切り値は `ENOMOTO_MIP_CUTOFF` で与える
+    let params = if env_str!("ENOMOTO_MIP_DEBUG_AS_SUBMIP").is_some() {
+        heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
+        MipParams { submip: true, threads: 1, rel_gap: params.rel_gap.max(1e-4), abs_gap: params.abs_gap.max(1e-6), ..params }
+    } else {
+        params
+    };
     // 基底のない LP の求解 (根・再スタート後の根) を `threads` 本で同時実行にする (木の探索の従のスレッドを始めたら、
     // またヒューリスティクスのサブ MIP の中では 1)
     // 診断用 (`ENOMOTO_MIP_START_FILE`): 最初の暫定解を与える (元の問題の列の順に 1 行 1 値)。再スタートで暫定解を

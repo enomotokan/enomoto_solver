@@ -365,7 +365,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 似たものがあるのに、元の行・zerohalf の効き目の大きい 2〜3 非零のカットに質の閾値で負けて 1 本も採られていなかった
     /// (analysis/physcmp_20261023.md)
     pub(super) fn cut_agg(&self) -> bool {
-        !self.params.submip && env_str!("ENOMOTO_MIP_CUT_AGG").is_some()
+        // `ENOMOTO_MIP_SUBMIP_CUT_AGG` (試作、既定では使わない): サブ MIP の根のカットのループでも使う (`ENOMOTO_MIP_CUT_AGG` がなくても)
+        (!self.params.submip && env_str!("ENOMOTO_MIP_CUT_AGG").is_some()) || (self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_CUT_AGG").is_some())
     }
 
     /// 根のカットのループの 1 回の LP の時間の上限 (全体に対する割合)。
@@ -426,9 +427,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 解けるが、5 ラウンドのサブ MIP は 500 ノードで止まり 773〜779 だった。HiGHS のサブ MIP は通常のカットのループを回し、
         // 同じ形の近傍を 1 ノードで解く (analysis/beasleyC3_r3_20261020.md)
         let fc_sub = self.params.submip && self.params.fc_submip;
-        let mut max_rounds = if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS", 25usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_ROUNDS", 5usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
+        // `ENOMOTO_MIP_SUBMIP_CUT_AGG` のサブ MIP: ラウンドの上限 `ENOMOTO_T_MIP_SUBMIP_CUT_AGG_ROUNDS` (25)、時間の上限はサブ MIP の時間の
+        // `ENOMOTO_T_MIP_SUBMIP_CUT_AGG_TIME_FRAC` (0.5) 倍。physiciansched6-2 の根の RINS のサブ MIP は、HiGHS ならカットだけで下界が
+        // 49324 に上がって 1 ノードで解ける (2.8 秒、分離の LP 4019 反復) が、ENOMOTO の既定 (5 ラウンド・時間の 1 割・枠なし) では
+        // 49257 で止まって 20 秒でも解なし。枠・25 ラウンド・5 割では 6.4 秒・0 ノードで 49324 (analysis/physprimal_20261024.md)
+        let sub_agg = self.params.submip && !fc_sub && self.cut_agg();
+        let mut max_rounds = if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS", 25usize, usize) } else if sub_agg { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_AGG_ROUNDS", 25usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_ROUNDS", 5usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
         let eq2c = self.equiv2_cuts();
-        let cut_frac = if eq2c { tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC", 0.3, f64) } else { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) };
+        let cut_frac = if sub_agg { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_AGG_TIME_FRAC", 0.5, f64) } else if eq2c { tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC", 0.3, f64) } else { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) };
         let mut time_cap = if self.params.time_limit.is_finite() { cut_frac * self.params.time_limit } else { f64::INFINITY };
         // 根のヒューリスティクスの間にカットを強める求解: 止めの合図まで続ける (ラウンド数・時間の上限なし)
         let job = super::solver::CUT_JOB.with(|j| j.borrow().clone()).filter(|_| self.snap.is_some());
@@ -598,9 +604,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if extend_on && now - cap_base > time_cap && !self.time_up() && !phase2 && !stopped(&job) && time_cap + 1e-9 < extend_max {
                 let k = ext_hist.len();
                 let obj = self.lp.objective();
-                let w = (k.saturating_sub(1)).min(3);
+                // `ENOMOTO_T_MIP_CUT_EXTEND_WIN` (既定 3): 伸びを見るラウンドの数。physiciansched6-2 では 2〜3 ラウンド伸びない平らな所
+                // (48633・48757) の後でまた伸びる (HiGHS も同じ) ので、3 ラウンドでは平らな所で止まる回がある
+                let w = (k.saturating_sub(1)).min(tunable!("ENOMOTO_T_MIP_CUT_EXTEND_WIN", 3usize, usize).max(1));
                 if w >= 1 && ext_hist[k - 1] - ext_hist[k - 1 - w] >= tunable!("ENOMOTO_T_MIP_CUT_EXTEND_MIN_GAIN", 1e-3, f64) * obj.abs().max(1.0) {
-                    time_cap = (time_cap + tunable!("ENOMOTO_T_MIP_CUT_EXTEND_STEP", 0.05, f64) * self.params.time_limit).min(extend_max);
+                    let step = tunable!("ENOMOTO_T_MIP_CUT_EXTEND_STEP", 0.05, f64) * self.params.time_limit;
+                    // `ENOMOTO_MIP_CUT_EXTEND_CATCHUP` (試作、既定では使わない): 延ばした上限が今の経過に届かなければ、経過 + 1 段まで
+                    // 延ばす (上限 `ENOMOTO_T_MIP_CUT_EXTEND_MAX` は同じ)。physiciansched6-2 (`ENOMOTO_MIP_CUT_AGG`) では、ときどき 1 ラウンドの
+                    // LP が 7000 反復・6 秒と重くなり、伸びている判定が通って 1 段 (3 秒) 延ばしても経過がそれを超えたままで、ループが
+                    // 48757 で止まる回があった (延ばさずに続いた回は 49099〜49324。analysis/physprimal_20261024.md)
+                    let catchup = if env_str!("ENOMOTO_MIP_CUT_EXTEND_CATCHUP").is_some() { now - cap_base + step } else { 0.0 };
+                    time_cap = (time_cap + step).max(catchup).min(extend_max);
                     CUT_EXTENDED.with(|c| c.set(true));
                     if self.params.verbose {
                         eprintln!("MIP: cut round {round}: still improving ({:.6e} in {w} rounds); root cut time cap extended to {time_cap:.1}s", ext_hist[k - 1] - ext_hist[k - 1 - w]);
@@ -709,7 +723,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (forced, cands): (Vec<Candidate>, Vec<Candidate>) = cands.into_iter().partition(|c| c.forced);
             // `ENOMOTO_T_MIP_CUTSEL_AGG_QUOTA` = q (> 0、試作): 集約した行からのカット (tableau・経路集約) を、分離器ごとに
             // 質の上位 q 本まで、全体の質の閾値 (最良の `ENOMOTO_T_CUTSEL_MIN_REL` 倍) と関係なく先に採る ([`pick_agg_quota`])
-            let agg_quota = if self.params.submip || phase2 {
+            let agg_quota = if (self.params.submip && !self.cut_agg()) || phase2 {
                 0
             } else {
                 let q = tunable!("ENOMOTO_T_MIP_CUTSEL_AGG_QUOTA", 0usize, usize);

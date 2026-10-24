@@ -1591,6 +1591,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         env_str!("ENOMOTO_MIP_SUBMIP_RENS").is_some() && d >= 1 && d as usize <= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH", 2usize, usize)
     }
 
+    /// `ENOMOTO_MIP_SUBMIP_RENS_CUTOFF` (試作、既定では使わない): 打ち切り値が有限の (外側に暫定解がある) 深さ 1 のサブ MIP
+    /// (RINS など) の根でも、暫定解がない根の RENS (ダイビング式、[`Self::nested_rens_ok`] と同じ小さいやり直し) を回し、
+    /// Feasibility Pump とダイビングを使わない (`ENOMOTO_MIP_SUBMIP_LIGHT_HEUR` と同じ)。physiciansched6-2 の根の RINS の
+    /// サブ MIP (自由な整数列 約 2400) は、HiGHS なら 1 ノード 1.7〜3 秒で 49424・49324 を出すが、ENOMOTO はポンプと
+    /// ダイビングに 14 秒使い、木は強分岐で 1 ノード 2 秒かかって進まない。同じサブ MIP を打ち切り値なしで解くと、
+    /// 入れ子の RENS が 49324 を出す (analysis/physprimal_20261024.md)
+    /// 値が `old` なら、ダイビング式でなく旧来の RENS (LP 解で整数値の列を全部固定) を回し、ポンプとダイビングも使う
+    /// ([`Self::submip_rens_old`])。
+    pub(super) fn submip_rens_cutoff(&self) -> bool {
+        self.params.submip && self.params.cutoff.is_finite() && SUBMIP_DEPTH.with(|d| d.get()) == 1 && env_str!("ENOMOTO_MIP_SUBMIP_RENS_CUTOFF").is_some_and(|v| v != "old")
+    }
+
+    /// `ENOMOTO_MIP_SUBMIP_RENS_CUTOFF=old`: [`Self::submip_rens_cutoff`] の旧来の RENS の形。
+    pub(super) fn submip_rens_old(&self) -> bool {
+        self.params.submip && self.params.cutoff.is_finite() && SUBMIP_DEPTH.with(|d| d.get()) == 1 && env_str!("ENOMOTO_MIP_SUBMIP_RENS_CUTOFF") == Some("old")
+    }
+
     /// RENS (HiGHS の `HighsPrimalHeuristics::RENS` に倣う): LP 解で整数値の整数列を、残りの自由な列の 1 割ずつ
     /// 伝播しながら固定し、そのたびに LP を解き直す (LP が実行不能になったら直前の段に戻る、最大 10 回)。整数値の列が
     /// なくなったら分数の列を丸めて固定する。整数列の固定率が目標 (成功・失敗した固定率から決める、初期 0.6) に
@@ -1598,7 +1615,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn rens(&mut self, _x: &[f64]) -> bool {
         let p = self.p;
         let nested = self.params.submip;
-        if nested && !self.nested_rens_ok() {
+        if self.submip_rens_old() {
+            // 入れ子のサブ MIP に、残り時間の `ENOMOTO_T_MIP_SUBMIP_RENS_OLD_FRAC` (0.3) を与える (既定の 0.07 では 0.5 秒で時間切れ)
+            let keep = self.submip_time_frac;
+            self.submip_time_frac = tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_OLD_FRAC", 0.3, f64);
+            let r = self.rens_old(_x);
+            self.submip_time_frac = keep;
+            return r;
+        }
+        let rens_cut = self.submip_rens_cutoff();
+        if nested && !self.nested_rens_ok() && !rens_cut {
             return false;
         }
         // 既定は旧来の全部固定 (ダイビング式は簡単な問題でサブ MIP に時間を取られ、40 問の幾何平均が
@@ -1609,7 +1635,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (再スタート後の根は暫定解を打ち切り値としてだけ持つので、打ち切り値が有限なら対象外)。
         // 40 問: 動くのは 30n20b8・flugpl・neos-1456979・timtab1 の 4 問。19 問 27.69 (無効なら 18 問 28.06)、
         // neos-1456979 は解なし -> 285、timtab1 は 1257510 -> 862380
-        if ((self.incumbent.is_none() && self.prune_limit_ex(false).is_infinite()) || self.fj_poor()) && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
+        if ((self.incumbent.is_none() && (self.prune_limit_ex(false).is_infinite() || rens_cut)) || self.fj_poor()) && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
             // 根の 2 回目の呼び出し (カット前の LP 解) はダイビング式では同じ LP から始めるので、この形は 1 回だけ
             self.noinc_rens_done = true;
             let keep = (self.submip_time_frac, self.submip_time_max, self.submip_node_mult);
@@ -1692,7 +1718,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// [`Self::rens_dive_with`] (`inc` が `None`) と [`Self::rins_dive`] (`inc` が暫定解) の本体。
     fn dive_neighbourhood(&mut self, target_fixed: Option<f64>, inc: Option<&[f64]>) -> (bool, f64) {
         let p = self.p;
-        if self.params.submip && !self.nested_rens_ok() {
+        if self.params.submip && !self.nested_rens_ok() && !self.submip_rens_cutoff() {
             return (false, 0.0);
         }
         let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
@@ -2114,7 +2140,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 時間の上限を残りの `ENOMOTO_T_MIP_RINS_FJ_BOOST_FRAC` (0.25)、最大 `ENOMOTO_T_MIP_RINS_FJ_BOOST_MAX` (15 秒) にする
         // (既定は 0.07・6 秒)。physiciansched6-2 (P3 + `ENOMOTO_MIP_INC_LP_CAP`) では FJ の解 50926 / 51429 からの RINS
         // (自由な列 約 3000) が 2〜3 秒で根も終わらずに止まる回と、1 ノードで 49624 を出す回があった
-        if env_str!("ENOMOTO_MIP_RINS_FJ_BOOST").is_some() && !self.params.submip && self.nodes <= 1 && self.inc_only_fj {
+        // `ENOMOTO_MIP_RINS_ROOT_BOOST` (試作、既定では使わない): 暫定解の出どころに関係なく、根 (再スタートの後の根で参照解を
+        // 相手にするときも) の RINS に同じ時間を与える。physiciansched6-2 の根の RINS の近傍には 49324・49424 があり、HiGHS は
+        // 1 ノード 2〜3 秒で解くが、ENOMOTO の既定の時間 (0.6〜2.5 秒) では 0 ノードで時間切れになる (analysis/physprimal_20261024.md)
+        let root_boost = env_str!("ENOMOTO_MIP_RINS_ROOT_BOOST").is_some();
+        if ((env_str!("ENOMOTO_MIP_RINS_FJ_BOOST").is_some() && self.inc_only_fj) || root_boost) && !self.params.submip && self.nodes <= 1 {
             let keep = (self.submip_time_frac, self.submip_time_max);
             self.submip_time_frac = tunable!("ENOMOTO_T_MIP_RINS_FJ_BOOST_FRAC", 0.25, f64);
             self.submip_time_max = tunable!("ENOMOTO_T_MIP_RINS_FJ_BOOST_MAX", 15.0, f64);
