@@ -1116,6 +1116,15 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     let n = prob.n;
     let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0).collect();
     let g = clique::CliqueGraph::build_with(n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, &prob.col_lo, &prob.col_up, &prob.conflict_edges);
+    // `ENOMOTO_MIP_CLIQUE_EXTEND_ROWS_FIRST` (試作、既定では使わない): まず行から作る衝突グラフ (プロービングの含意なし) だけで
+    // 文字を足し、その後に含意を含むグラフで足せるだけ足す。含意の辺が多いと (mzzv42z は行から 205346 辺、含意から 1186997 本)、
+    // 番号順の貪欲が LP に効かない文字を先に取り、行から作る辺だけの拡張 (HiGHS の前処理の clique merging に当たる) を塞ぐ。
+    // mzzv42z の根の LP は既定 -21534、プロービングなし -21424 (HiGHS の前処理後の問題と同じ値)
+    // 値 `fix0` は下の 0 に固定された列の扱いだけ使う (切り分け用)
+    let rows_first = env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_ROWS_FIRST");
+    let skip_fixed0 = rows_first.is_some();
+    let g_rows = (rows_first.is_some_and(|v| v != "fix0") && !prob.conflict_edges.is_empty())
+        .then(|| clique::CliqueGraph::build_with(n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, &prob.col_lo, &prob.col_up, &[]));
     let max_add = tunable!("ENOMOTO_T_MIP_CLIQUE_EXTEND_MAX", 1000usize, usize);
     let want_fix = env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_FIX").is_some();
     let MipProblem { mut col_lo, mut col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, conflict_edges, implied_bounds, .. } = prob;
@@ -1136,7 +1145,9 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
             continue;
         };
         let b = if sg > 0.0 { u } else { -l };
-        let r = &rows[i];
+        // `ENOMOTO_MIP_CLIQUE_EXTEND_ROWS_FIRST` では 0 に固定された列 (プロービングの固定は前処理をかけ直すまで行に残る) を
+        // 行にないものとして見る。既定では固定された列を含む行は集合詰め込み行と見ない
+        let r: Vec<(usize, f64)> = if skip_fixed0 { rows[i].iter().copied().filter(|&(j, _)| !(col_lo[j] == 0.0 && col_up[j] == 0.0)).collect() } else { rows[i].clone() };
         if r.len() < 2 || !r.iter().all(|&(j, a)| binary[j] && ((sg * a) - 1.0).abs() <= 1e-12 || binary[j] && ((sg * a) + 1.0).abs() <= 1e-12) {
             continue;
         }
@@ -1146,10 +1157,26 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
             continue;
         }
         let lits: Vec<u32> = r.iter().map(|&(j, a)| if sg * a > 0.0 { 2 * j as u32 } else { 2 * j as u32 + 1 }).collect();
-        // 候補: 隣接の最も少ない文字の隣接から
-        let &l0 = lits.iter().min_by_key(|&&x| g.neighbors(x).len()).unwrap();
         let in_row: std::collections::HashSet<usize> = r.iter().map(|&(j, _)| j).collect();
         let mut add: Vec<u32> = Vec::new();
+        // 行から作るグラフだけで足す (`ENOMOTO_MIP_CLIQUE_EXTEND_ROWS_FIRST`)。足した文字は含意を含むグラフでも互いに隣接する
+        if let Some(g0) = &g_rows {
+            let &l0 = lits.iter().min_by_key(|&&x| g0.neighbors(x).len()).unwrap();
+            for &c in g0.neighbors(l0) {
+                if add.len() >= max_add {
+                    break;
+                }
+                let jc = (c / 2) as usize;
+                if in_row.contains(&jc) || col_lo[jc] == col_up[jc] {
+                    continue;
+                }
+                if lits.iter().all(|&x| x == l0 || g0.adjacent(x, c)) && add.iter().all(|&y| (y / 2) as usize != jc && g0.adjacent(y, c)) {
+                    add.push(c);
+                }
+            }
+        }
+        // 候補: 隣接の最も少ない文字の隣接から
+        let &l0 = lits.iter().min_by_key(|&&x| g.neighbors(x).len()).unwrap();
         for &c in g.neighbors(l0) {
             if add.len() >= max_add {
                 break;

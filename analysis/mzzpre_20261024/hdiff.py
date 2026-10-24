@@ -1,5 +1,5 @@
 """HiGHS の前処理で消えた列とその値を調べる: python hdiff.py <mps> <出力.tsv> [キー=値 ...]
-前処理後の LP 緩和の解を 2 つ (元の目的・目的 0) 後処理で戻し、消えた列の値が 2 つで同じなら「固定」、違えば「代入」とする。
+前処理後の LP 緩和の解を 2 つ (元の目的・乱数の目的 5 個) 後処理で戻し、消えた列の値が 6 つで同じなら「固定」、違えば「代入」とする。
 出力: 列名 種類 値1 値2。最後に元の問題で「固定」だけを当てた LP 緩和の値を出す。"""
 import sys, json
 import numpy as np
@@ -18,15 +18,15 @@ names = list(orig.col_names_)
 h.presolve()
 plp = h.getPresolvedLp()
 pnames = set(plp.col_names_)
+rng = np.random.default_rng(1)
 def solve_relax(lp, zero=False):
     q = highspy.Highs(); q.setOptionValue("output_flag", False); q.setOptionValue("threads", 4)
-    lp = highspy.HighsLp(lp) if hasattr(highspy, "HighsLp") else lp
     lp.integrality_ = []
-    if zero: lp.col_cost_ = np.zeros(lp.num_col_)
+    if zero: lp.col_cost_ = rng.normal(size=lp.num_col_)
     q.passModel(lp); q.run()
     return q.getSolution(), q.getInfo().objective_function_value
 X = []
-for zero in (False, True):
+for zero in (False, True, True, True, True, True):
     s, obj = solve_relax(h.getPresolvedLp(), zero)
     h.postsolve(s)
     X.append(np.array(h.getSolution().col_value))
@@ -35,7 +35,7 @@ kinds = {}
 with open(out, "w") as f:
     for j in removed:
         a, b = X[0][j], X[1][j]
-        k = "fix" if abs(a - b) < 1e-9 else "sub"
+        k = "fix" if max(abs(X[t][j] - a) for t in range(len(X))) < 1e-9 else "sub"
         kinds[j] = k
         f.write(f"{names[j]}\t{k}\t{a:g}\t{b:g}\n")
 # 元の問題で「固定」だけを当てた LP 緩和
