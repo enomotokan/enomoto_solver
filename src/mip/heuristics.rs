@@ -1666,7 +1666,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (再スタート後の根は暫定解を打ち切り値としてだけ持つので、打ち切り値が有限なら対象外)。
         // 40 問: 動くのは 30n20b8・flugpl・neos-1456979・timtab1 の 4 問。19 問 27.69 (無効なら 18 問 28.06)、
         // neos-1456979 は解なし -> 285、timtab1 は 1257510 -> 862380
-        if ((self.incumbent.is_none() && (self.prune_limit_ex(false).is_infinite() || rens_cut)) || self.fj_poor()) && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
+        // `ENOMOTO_MIP_RENS_HIGHS` (試作、既定では使わない): 暫定解の有無に関係なく、外側の根の RENS をこのダイビング式 + やり直しの形に
+        // する (HiGHS の `HighsPrimalHeuristics::RENS`: 目標の固定率 0.6 から、サブ MIP が解を出さなければ達した固定率の半分でやり直す)。
+        // physiciansched6-2 では HiGHS の根の RENS が固定率 0.6・0.33 で実行不能、0.16 (自由な整数列 3795) で 49324 を出す
+        // (根のカットを止めた回)。ENOMOTO は Local-MIP の暫定解が先にあるので、既定ではこの形に入らず、全部固定の RENS が実行不能で終わる
+        // (analysis/highstree_phys_20261024.md)
+        let rens_highs = env_str!("ENOMOTO_MIP_RENS_HIGHS").is_some() && !nested;
+        if (((self.incumbent.is_none() && (self.prune_limit_ex(false).is_infinite() || rens_cut)) || self.fj_poor()) || rens_highs) && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
             // 根の 2 回目の呼び出し (カット前の LP 解) はダイビング式では同じ LP から始めるので、この形は 1 回だけ
             self.noinc_rens_done = true;
             let keep = (self.submip_time_frac, self.submip_time_max, self.submip_node_mult);
@@ -1682,6 +1688,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // (1601 列で 275 ノード、4817 列で 31 ノード、6417 列で 0 ノード、どれも時間切れ)、時間を使うだけだった
             let mut target = tunable!("ENOMOTO_T_MIP_NOINC_RENS_RATE", 0.8, f64);
             let mut tries = tunable!("ENOMOTO_T_MIP_NOINC_RENS_TRIES", 1usize, usize).max(1);
+            if rens_highs {
+                target = tunable!("ENOMOTO_T_MIP_RENS_HIGHS_RATE", 0.6, f64);
+                tries = tunable!("ENOMOTO_T_MIP_RENS_HIGHS_TRIES", 4usize, usize).max(1);
+            }
             if nested {
                 // サブ MIP の中の RENS ([`Self::nested_rens_ok`]): HiGHS と同じく固定率 0.6 から始め、失敗したら半分にして
                 // やり直す。サブ MIP は小さく、失敗はたいてい 0-1 ノードで実行不能と分かって安いので、やり直しを多く
@@ -1705,7 +1715,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let depth = SUBMIP_DEPTH.with(|d| d.get());
                     eprintln!("MIP:   no-incumbent RENS (sub-MIP depth {depth}) try {}: target {target:.2}, fixing rate {fr:.2}, found {ok} ({:.2}s)", t + 1, self.start.elapsed().as_secs_f64());
                 }
-                if ok || self.incumbent.is_some() {
+                if ok || (self.incumbent.is_some() && !rens_highs) {
                     found = ok;
                     break;
                 }
