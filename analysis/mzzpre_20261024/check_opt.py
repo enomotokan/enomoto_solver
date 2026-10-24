@@ -12,7 +12,7 @@ for f in glob.glob(os.path.join(os.path.dirname(__file__), "../../benchmarks/*.j
             ref.setdefault(p, h["objective"])
 for f in sys.argv[1:]:
     p = re.sub(r"_(s_def|s_rf|[a-z0-9]+)_\d+\.log$", "", os.path.basename(f))
-    last = [l for l in open(f, errors="replace") if l.startswith("{")]
+    last = [l for l in open(f, errors="replace") if l.startswith("{\"")]
     if not last: continue
     r = json.loads(last[-1])
     if r.get("status") != "optimal": continue
