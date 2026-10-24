@@ -11,7 +11,8 @@ for d in d1_3 d2_3 av_3; do
       base) e="";; agg) e="ENOMOTO_MIP_SUBMIP_CUT_AGG=1";; h1) e="ENOMOTO_MIP_SUBMIP_HIGHS=1";;
       hp) e="ENOMOTO_MIP_SUBMIP_HIGHS=p";; hc) e="ENOMOTO_MIP_SUBMIP_HIGHS=c";; hs) e="ENOMOTO_MIP_SUBMIP_HIGHS=s";;
       hh) e="ENOMOTO_MIP_SUBMIP_HIGHS=h";; hf) e="ENOMOTO_MIP_SUBMIP_HIGHS=f";; hg) e="ENOMOTO_MIP_SUBMIP_HIGHS=g";;
-      hpc) e="ENOMOTO_MIP_SUBMIP_HIGHS=pc";; hcs) e="ENOMOTO_MIP_SUBMIP_HIGHS=cs";; hch) e="ENOMOTO_MIP_SUBMIP_HIGHS=ch";;
+      hpc) e="ENOMOTO_MIP_SUBMIP_HIGHS=pc";; h1q) e="ENOMOTO_MIP_SUBMIP_HIGHS=1";; hnoq) e="ENOMOTO_MIP_SUBMIP_HIGHS=-q";;
+      hchq) e="ENOMOTO_MIP_SUBMIP_HIGHS=chq";; hq) e="ENOMOTO_MIP_SUBMIP_HIGHS=q";; hnoh) e="ENOMOTO_MIP_SUBMIP_HIGHS=-h";; hnoc) e="ENOMOTO_MIP_SUBMIP_HIGHS=-c";; hcs) e="ENOMOTO_MIP_SUBMIP_HIGHS=cs";; hch) e="ENOMOTO_MIP_SUBMIP_HIGHS=ch";;
     esac
     TH=1 ./run_cfg.sh $S/$d.mps 20 s_$c ENOMOTO_MIP_DEBUG_AS_SUBMIP=1 ENOMOTO_MIP_CUTOFF=${CUT[$d]} $e
   done

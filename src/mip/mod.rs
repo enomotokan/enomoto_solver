@@ -2827,17 +2827,20 @@ fn normalize_integer_rows(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], ro
 /// 解を見つけられない (同じ問題で上限を入れるだけで 20 回中 0 回 → 19 回)。締めた境界の数を返す (1 回だけ、連鎖しない)。
 /// `ENOMOTO_MIP_SUBMIP_HIGHS` (試作、既定では使わない): サブ MIP の解き方を HiGHS の `HighsPrimalHeuristics::solveSubMip` に寄せる部分 `c`
 /// を使うか (サブ MIP の中かどうかは呼び出し側で見る)。値が `1` (など下の文字を含まない値) なら全部、文字の並びならその部分だけ、
-/// `-` で始まる文字の並びならその部分を除いた全部 (例 `-t`)。部分: `p` 前処理を親と同じにする、`c` 根のカットを親と同じだけ回す
-/// (`CUT_AGG` の枠・25 ラウンド・停滞 10 回)、`s` 擬似費用の信頼の観測を 0 にする (強分岐をしない)、`g` ギャップを親と同じにする、
+/// `-` で始まる文字の並びならその部分を除いた全部 (例 `-t`。`q` はまとめに入らない)。部分: `p` 前処理を親と同じにする、`c` 根のカットを親と同じだけ回す
+/// (25 ラウンド・停滞 10 回・時間はサブ MIP の 5 割。部分は親と同じ `ENOMOTO_MIP_CUT_AGG` の値)、`q` サブ MIP の根のカットで集約カットの
+/// 枠 (`CUT_AGG` の `q`、50 本) を使う、`s` 擬似費用の信頼の観測を 0 にする (強分岐をしない)、`g` ギャップを親と同じにする、
 /// `t` 時間の上限を残り時間にする、`i` RINS の固定率が足りないときの足し方を HiGHS と同じにする、`h` サブ MIP の中でも RENS を回す、
 /// `f` 双対の証明・衝突を使う (analysis/submip_20261024.md)
 pub(super) fn submip_highs(c: char) -> bool {
-    const ALL: &str = "pcsgtihf";
+    // `q` は文字で明示したときだけ (まとめ (`1`・`-…`) には入れない: physiciansched6-2 の根の RINS の書き出し 3 つで、`q` を足すと
+    // 20 秒で解けるのが 3 つ → 1 つに減った)
+    const ALL: &str = "pcqsgtihf";
     match env_str!("ENOMOTO_MIP_SUBMIP_HIGHS") {
         None => false,
-        Some(v) if v.starts_with('-') => !v.contains(c),
+        Some(v) if v.starts_with('-') => c != 'q' && !v.contains(c),
         Some(v) if v.chars().any(|d| ALL.contains(d)) => v.contains(c),
-        Some(_) => true,
+        Some(_) => c != 'q',
     }
 }
 

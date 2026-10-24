@@ -742,7 +742,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 0
             } else {
                 let q = tunable!("ENOMOTO_T_MIP_CUTSEL_AGG_QUOTA", 0usize, usize);
-                if q == 0 && self.cut_agg_has('q') { 50 } else { q }
+                if q == 0 && (self.cut_agg_has('q') || (self.params.submip && super::submip_highs('q'))) { 50 } else { q }
             };
             let (quota_cuts, cands) = if agg_quota > 0 { pick_agg_quota(cands, agg_quota, p) } else { (Vec::new(), cands) };
             let chosen = if phase2 {
