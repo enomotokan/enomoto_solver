@@ -167,6 +167,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.dom.backtrack_to(p, before);
             }
             ok = false;
+            if env_str!("ENOMOTO_MIP_DEBUG_RR").is_some() && rounded.is_none() {
+                let nfixed = (0..p.n).filter(|&k| p.is_int[k] && self.dom.lo[k] == self.dom.up[k]).count();
+                eprintln!("RR conflict at column {j} (target {t:.3}), {cnt} of {} integer columns processed, {nfixed} fixed", all.len());
+            }
             if let Some(r) = rounded.as_deref_mut() {
                 r[j] = v.clamp(self.dom.lo[j], self.dom.up[j]);
             } else {
@@ -203,6 +207,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if st == LpStatus::Optimal {
                     let x = self.lp.col_values();
                     found = self.try_incumbent(x);
+                }
+                if env_str!("ENOMOTO_MIP_DEBUG_RR").is_some() {
+                    eprintln!("RR all integer columns fixed; continuous LP {st:?}, objective {:.4}, accepted {found}", self.lp.objective() + p.offset);
                 }
                 self.lp.restore_state(&saved);
             }

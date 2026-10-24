@@ -59,10 +59,36 @@
 - 次に試すなら、(1) サブ MIP の根のカットの各ラウンドの後に乱択丸めを入れる (HiGHS と同じ)、(2) `r_0` で ENOMOTO と HiGHS の丸めを同じ
   LP 解から比べ、どの列の固定で矛盾するかを見る。
 
+## 3. 各ラウンドの乱択丸め (追記、試作 `ENOMOTO_MIP_RR_EACH_ROUND`)
+
+- 中身: サブ MIP の中か暫定解がないとき、根のカットの各ラウンドの LP 解で乱択丸めを `ENOMOTO_T_MIP_RR_EACH_ROUND_TRIES` (1) 回
+  (`src/mip/separation.rs` `root_cut_loop`)。`ENOMOTO_MIP_RR_HIGHS=lock` と合わせて使う (lock の順・1 回目から乱数の閾値)。
+- 書き出した近傍 4 つ (サブ MIP の形・1 スレッド・30 秒・`SUBMIP_CUT_AGG`):
+
+  | 近傍 | 打ち切り値 | なし | `RR_EACH_ROUND` + `RR_HIGHS=lock` | HiGHS |
+  |---|---|---|---|---|
+  | `r_0` | 49525 | 解なし | 解なし | 49424・2.6 秒 |
+  | `av_3` | 49824 | 解なし | 最適 49324・4.8 秒 | 49324・2.0 秒 |
+  | `d1_3` | 50425 | 最適 49424・3.8 秒 | 49624 (時間切れ) | 49424・1.7 秒 |
+  | `d2_3` | 50425 | 最適 49324・6.8 秒 | 解なし | 49324・3.1 秒 |
+
+- **各ラウンドの乱択丸めは 1 回も当たっていない**。解が出た回はどれも Feasibility Pump (`av_3` の 4.4 秒、`d1_3`・`d2_3` の「なし」の回)
+  で、乱数の使い方が変わって Pump の当たり外れが入れ替わっただけ。
+- 失敗の中身 (`r_0`、`ENOMOTO_MIP_DEBUG_RR` に足した出力、`logs/r_0_rr_dbg_1.log`): どのラウンドでも、lock の順に自由な整数列
+  (約 2000) のうち 48〜155 本目で、LP で整数値 (目標 0.000) の列を 0 にしても 1 にしても伝播が矛盾する。
+
+推測:
+
+- 丸めの手順 (順・閾値・伝播) は HiGHS と同じにしたので、違いは丸める LP 解の方にある。ENOMOTO のラウンドの LP 解は、LP で整数値の列の
+  並びが整数解と両立しない (`physlpdist` の「指示の列」と同じ形) ので、どの順で丸めても早く矛盾する。HiGHS の LP 解 (別の前処理・
+  別のカット) はそうなっていないとみる (HiGHS の LP 解は取り出していないので未確認)。
+- 確かめるには、HiGHS のカットプール (`physcmp` の `highs_trace.py DUMP_CUTS=1`) を近傍に足した LP の解を作り、同じ丸めが当たるかを見る。
+
 ## 2. 台本・ログ (`analysis/physhighs_20261024/`)
 
 - `highs_opt.py <mps> <秒> [キー=値 ...]`: HiGHS をオプションつきで解く。`logs/highs_{def,norens,norins,nosub}.log`。
 - `run_cfg.sh`・`eno_run.py`・`sumlog.py`・`highs_sub.py`: 前の調査と同じ。
 - `logs/physiciansched6-2_dive150_1.log`・`dive150dump_1.log`: ENOMOTO の `RENS_DIVE` の回。
 - `r_0.mps.gz`: `dive150dump_1` の根の RENS のサブ MIP。`logs/r_0_*.log` はその解き直し (`as_sub`・`full`・`as_sub_rrh`・`as_sub_rrlock`)。
-- 試作 `ENOMOTO_MIP_RR_HIGHS=lock`・`ENOMOTO_T_MIP_RR_TRIES` (`src/mip/heuristics.rs` `randomized_rounding`、既定は不変)。
+- 試作 `ENOMOTO_MIP_RR_HIGHS=lock`・`ENOMOTO_T_MIP_RR_TRIES` (`src/mip/heuristics.rs` `randomized_rounding`)、`ENOMOTO_MIP_RR_EACH_ROUND`・`ENOMOTO_T_MIP_RR_EACH_ROUND_TRIES` (`separation.rs`)、`ENOMOTO_MIP_DEBUG_RR` の矛盾の位置の出力。どれも既定は不変。
+- §3 のログは `logs/{r_0,av_3,d1_3,d2_3}_rr_{base,each}_1.log`・`logs/r_0_rr_dbg_1.log`。近傍の MPS は `r_0.mps.gz` と `../physprimal_20261024/subgz/`。
