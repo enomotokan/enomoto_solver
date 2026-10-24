@@ -83,6 +83,7 @@ fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
     cands.truncate(n0 + 1);
 }
 
+#[derive(Clone)]
 struct Candidate {
     coefs: Vec<(usize, f64)>,
     rhs: f64,
@@ -390,7 +391,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (tableau の分離を外すと 13 ラウンドで 47960)。ENOMOTO の既定は前景のカットが時間の上限で 0 ラウンド、上限を外しても 50 本ずつで
     /// 伸びず、広げると 1000 本の LP が 1.2 秒の上限に当たって捨てられていた (analysis/highstree_phys_20261024.md)
     pub(super) fn root_cut_highs(&self) -> bool {
-        env_str!("ENOMOTO_MIP_ROOT_CUT_HIGHS").is_some() && !self.params.submip
+        // `ENOMOTO_MIP_CUTSEL_HIGHS_GUARD` なら固定費用のネットワーク型では使わない (mc11: 1 ラウンド 1000 本で根のループが 1.2 -> 13 秒)
+        env_str!("ENOMOTO_MIP_ROOT_CUT_HIGHS").is_some() && !self.params.submip && !(self.fc_network && env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_GUARD").is_some())
     }
 
     /// 根のカットのループの 1 回の LP の時間の上限 (全体に対する割合)。
@@ -412,6 +414,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     pub(super) fn root_cut_loop(&mut self, root_iters: u64) -> bool {
         let p = self.p;
+        // 固定費用のネットワーク型か (`root_cut_highs` がループの初めから使うので先に決める。下でも同じ値を入れ直す)
+        self.fc_network = !self.params.submip && fixed_charge_network(p);
         let n = p.n;
         let mut stall = 0;
         let mut intobj_stall = 0usize;
@@ -771,9 +775,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let chosen = if phase2 {
                 let maxpar = tunable!("ENOMOTO_T_MIP_CUT_PHASE2_MAXPAR", 0.3, f64);
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
-            } else if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() {
+            } else if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() && !(fc_relax && env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_GUARD").is_some()) {
                 let maxpar = tunable!("ENOMOTO_T_CUTSEL_HIGHS_MAXPAR", 0.1, f64);
-                self.select_cuts_highs(cands, max_cuts, &x, maxpar)
+                // `ENOMOTO_MIP_CUTSEL_HIGHS_GUARD` (試作、既定では使わない): HiGHS の点数での選択と既定の選択 (`select_cuts`) の両方を作り、
+                // 和を採る。固定費用のネットワーク型 (`fc_relax`) では HiGHS の点数を使わず、緩めた既定の選択のまま (上の条件。
+                // `ENOMOTO_MIP_ROOT_CUT_HIGHS` の 1 ラウンドの本数・時間の設定もそこでは使わない、[`Solver::root_cut_highs`])。
+                // 根のカットのプールの選び直し (計測 14 の POOL) では、hypothyroid-k1 で HiGHS の点数が 1 ラウンド 5 本しか採らず
+                // (既定は 50 本) 根の下界が -2889.7 -> -2902.2 に下がって再スタートが起き、mc11 では固定費用型の緩めた選択を上書きして
+                // 背景のカットの後の下界が 11668 -> 11500 に下がっていた (analysis/highstree_phys_20261024.md §8)
+                if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_GUARD").is_some_and(|v| v != "fc") {
+                    // 両方の和 (値が `fc` なら和は取らず、固定費用型で外すだけ) (同じ係数のカットは 1 本)。hypothyroid-k1 の根の 0 ラウンド目では既定の選択が密なカット 4 本 (+9.5)、
+                    // HiGHS の点数が 2 非零のカット 6 本 (+0.1) を採る
+                    let mut hy = select_cuts(cands.clone(), max_cuts, p);
+                    let hs = self.select_cuts_highs(cands, max_cuts, &x, maxpar);
+                    for c in hs {
+                        if !hy.iter().any(|d| d.coefs == c.coefs && d.rhs == c.rhs) {
+                            hy.push(c);
+                        }
+                    }
+                    hy
+                } else {
+                    self.select_cuts_highs(cands, max_cuts, &x, maxpar)
+                }
             } else if fc_relax {
                 select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_FC_MIN_REL", 0.0, f64), tunable!("ENOMOTO_T_CUTSEL_FC_MAXPAR", 0.9, f64))
             } else if self.root_cut_highs() && job.is_none() {
