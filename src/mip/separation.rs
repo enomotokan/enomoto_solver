@@ -84,6 +84,18 @@ fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
 }
 
 #[derive(Clone)]
+/// `ENOMOTO_MIP_CUTSEL_PROBE_KEEP` の比べの片側の終わりの状態 (足した行・LP の状態・分離器の状態・回ったラウンド数)
+struct ProbeEnd<S> {
+    rows: Vec<(Vec<(usize, f64)>, f64, f64)>,
+    lp: S,
+    rng: u64,
+    tab: (std::collections::HashMap<usize, u64>, u8, (u64, u64), u64, u64),
+    face: (f64, usize, bool, f64, f64),
+    sel: (f64, f64),
+    iters: u64,
+    rounds: usize,
+}
+
 struct Candidate {
     coefs: Vec<(usize, f64)>,
     rhs: f64,
@@ -501,7 +513,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 2 ラウンド目からはプールで違反しているカットも候補) の選び方で `k` ラウンド (毎ラウンド分離し直す) 回し、下界の伸び・時間・足したカットの本数を返す。終わったら足した行を外し、LP の状態 (基底・LU) と HiGHS の点数の状態を元に戻す。
     /// 戻り値の 1 つ目はラウンドごとの (そこまでの伸び, そこまでの時間)。`stop` が真を返したら (ラウンドの番号, 伸び, 時間)、または
     /// `deadline` を過ぎたら、`k` ラウンドを待たずにやめる。
-    fn probe_cut_mode(&mut self, pool: bool, k: usize, deadline: std::time::Instant, stop: &dyn Fn(usize, f64, f64) -> bool) -> (Vec<(f64, f64)>, usize) {
+    /// `keep` なら終わりの状態 ([`ProbeEnd`]) も返す (`ENOMOTO_MIP_CUTSEL_PROBE_KEEP`)。
+    fn probe_cut_mode(&mut self, pool: bool, k: usize, deadline: std::time::Instant, stop: &dyn Fn(usize, f64, f64) -> bool, keep: bool) -> (Vec<(f64, f64)>, usize, Option<ProbeEnd<L::State>>) {
         let p = self.p;
         let t0 = std::time::Instant::now();
         let obj0 = self.lp.objective();
@@ -518,6 +531,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut gain = 0.0;
         let mut hist: Vec<(f64, f64)> = Vec::new();
         let mut nadd = 0usize;
+        let mut all_rows: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
         let alt_has = |c: char| env_str!("ENOMOTO_MIP_CUTSEL_PROBE_ALT").is_none_or(|v| v.contains(c));
         for r in 0..k {
             if self.time_up() || (r > 0 && std::time::Instant::now() >= deadline) {
@@ -549,6 +563,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             nadd += rows.len();
             let before = self.lp.objective();
             self.lp.add_rows(&rows);
+            if keep {
+                all_rows.extend(rows.iter().cloned());
+            }
             let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap.min(1e6));
             let d = Some(self.deadline.map_or(d, |g| g.min(d)));
             let st = self.lp.solve(&SolveLimits { iteration_limit: 10 * self.avg_node_iters().max(1000) + 10_000, cutoff: f64::INFINITY, deadline: d });
@@ -564,6 +581,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
         }
+        let end = keep.then(|| ProbeEnd {
+            rows: std::mem::take(&mut all_rows),
+            lp: self.lp.save_state(),
+            rng: self.rng,
+            tab: (self.tab_memo.clone(), self.tab_memo_mode, self.tab_memo_stats, self.tab_calls, self.tab_tries),
+            face: (self.face_secs, self.face_used, self.face_off_loop, self.sep_par_cpu, self.last_cut_lp_secs),
+            sel: (self.cutsel_best, self.cutsel_factor),
+            iters: self.lp.total_iterations(),
+            rounds: hist.len(),
+        });
         let mut remove = vec![false; self.lp.num_rows()];
         for rr in remove.iter_mut().skip(m0) {
             *rr = true;
@@ -576,7 +603,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (self.face_secs, self.face_used, self.face_off_loop, self.sep_par_cpu, self.last_cut_lp_secs) = keep_face;
         self.lp.set_total_iterations(keep_iters);
         let _ = gain;
-        (hist, nadd)
+        (hist, nadd, end)
+    }
+
+    /// `ENOMOTO_MIP_CUTSEL_PROBE_KEEP`: 比べの勝った側の終わりの状態に戻す (足した行を LP に入れ直し、LP・分離器の状態をその時のものにする)。
+    /// 行は普通のカットと同じく LP の行の記録 ([`Self::add_cut_rows`]) とプールに入れる
+    fn probe_restore(&mut self, e: ProbeEnd<L::State>) {
+        if !e.rows.is_empty() {
+            for (c, _, r) in &e.rows {
+                self.add_to_pool(c, *r);
+            }
+            self.add_cut_rows(&e.rows);
+        }
+        self.lp.restore_state(&e.lp);
+        self.rng = e.rng;
+        (self.tab_memo, self.tab_memo_mode, self.tab_memo_stats, self.tab_calls, self.tab_tries) = e.tab;
+        (self.face_secs, self.face_used, self.face_off_loop, self.sep_par_cpu, self.last_cut_lp_secs) = e.face;
+        (self.cutsel_best, self.cutsel_factor) = e.sel;
+        self.lp.set_total_iterations(e.iters);
     }
 
     /// `ENOMOTO_MIP_CUTSEL_PROBE` (試作、既定では使わない) で、根の 1 ラウンド目の比べで POOL の選び方が選ばれたか
@@ -891,8 +935,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 };
                 let never = |_: usize, _: f64, _: f64| false;
                 let mut early = "";
-                let (mut hd, mut nd) = self.probe_cut_mode(false, if ratio > 0.0 { 1 } else { k }, deadline, &never);
-                let (mut hp, mut np) = self.probe_cut_mode(true, if ratio > 0.0 { 1 } else { k }, deadline, &never);
+                // `ENOMOTO_MIP_CUTSEL_PROBE_KEEP` (試作、既定では使わない): 比べの両方の側の終わりの状態を取っておき、勝った側の状態 (足したカット・
+                // LP の基底・分離器の状態) からループを続ける (比べで回ったラウンドはラウンドの数と時間の上限の勘定に入れる)。負けた側のカットは
+                // LP には入れず、カットのプールに入れる。最初の 1 ラウンドの比べの後に k ラウンドで比べ直したときは、比べ直しの終わりの状態を使う
+                // (1 ラウンドの比べのカットは両方の側ともプールに入れる)
+                let keep = env_str!("ENOMOTO_MIP_CUTSEL_PROBE_KEEP").is_some();
+                let mut to_pool: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
+                let (mut hd, mut nd, mut ed) = self.probe_cut_mode(false, if ratio > 0.0 { 1 } else { k }, deadline, &never, keep);
+                let (mut hp, mut np, mut ep) = self.probe_cut_mode(true, if ratio > 0.0 { 1 } else { k }, deadline, &never, keep);
                 if ratio > 0.0 && k > 1 {
                     let first_ok = !hd.is_empty() && !hp.is_empty();
                     if first_ok && decisive(hd[0], hp[0]) {
@@ -900,11 +950,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     } else if std::time::Instant::now() >= deadline {
                         early = "time budget";
                     } else {
-                        let (hd2, nd2) = self.probe_cut_mode(false, k, deadline, &never);
+                        let (hd2, nd2, ed2) = self.probe_cut_mode(false, k, deadline, &never, keep);
                         let hd_ref = hd2.clone();
                         let stop = move |r: usize, g: f64, t: f64| r < hd_ref.len() && decisive(hd_ref[r], (g, t));
-                        let (hp2, np2) = self.probe_cut_mode(true, k, deadline, &stop);
-                        (hd, nd, hp, np) = (hd2, nd2, hp2, np2);
+                        let (hp2, np2, ep2) = self.probe_cut_mode(true, k, deadline, &stop, keep);
+                        for e in [ed.take(), ep.take()].into_iter().flatten() {
+                            to_pool.extend(e.rows.into_iter().map(|(c, _, r)| (c, r)));
+                        }
+                        (hd, nd, hp, np, ed, ep) = (hd2, nd2, hp2, np2, ed2, ep2);
                         early = if hp.len() < k { "pool stopped early" } else { "full" };
                     }
                 }
@@ -927,12 +980,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if pick_pool {
                     // 回し方も POOL に合わせる (ループの始めに決めた時間の上限の数え方・最低のラウンド数・広げる規則)
-                    cap_base = t_loop0;
-                    min_rounds = tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", 10usize, usize);
-                    widen_on = false;
+                    // (`ENOMOTO_MIP_CUTSEL_PROBE_ALT` では挙げた部品だけ)
+                    if self.rch_part('T') {
+                        cap_base = t_loop0;
+                        min_rounds = tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", 10usize, usize);
+                    } else {
+                        min_rounds = min_rounds0;
+                        if !keep {
+                            cap_base += super::cap_clock() - c0;
+                        }
+                    }
+                    if self.rch_part('W') {
+                        widen_on = false;
+                    }
                 } else {
                     min_rounds = min_rounds0;
-                    cap_base += super::cap_clock() - c0;
+                    if !keep {
+                        cap_base += super::cap_clock() - c0;
+                    }
+                }
+                if keep {
+                    let (win, lose) = if pick_pool { (ep, ed) } else { (ed, ep) };
+                    if let Some(e) = lose {
+                        to_pool.extend(e.rows.into_iter().map(|(c, _, r)| (c, r)));
+                    }
+                    for (c, r) in &to_pool {
+                        self.add_to_pool(c, *r);
+                    }
+                    if let Some(e) = win {
+                        let (nr, nrows) = (e.rounds, e.rows.len());
+                        self.probe_restore(e);
+                        round_ctr += nr;
+                        if self.params.verbose {
+                            eprintln!("MIP: cut selection probe: kept the {} side ({nr} rounds, {nrows} rows, LP {:.10e}); {} cuts of the other side to the pool", if pick_pool { "pool" } else { "default" }, self.lp.objective(), to_pool.len());
+                        }
+                    }
                 }
             }
             let now = super::cap_clock();
