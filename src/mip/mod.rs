@@ -1112,12 +1112,22 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     SYM_ORIG.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(prob.clone())));
     let time_cap = tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64);
     // `ENOMOTO_MIP_PRESOLVE_WORK` (試作): 時間 (0.3 秒) の代わりに手間 (`ENOMOTO_T_MIP_PRESOLVE_WORK_SYM`、細分化で読んだ非零などの数) で打ち切る
-    let (time_cap, work_cap) = if presolve_work() { (time_cap * presolve_work_safe(), tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_SYM", 2.5e7, f64) as u64) } else { (time_cap, u64::MAX) };
-    let (sw0, vw0) = (symmetry::search_work(), symmetry::verify_work());
-    let (sym, sym_work) = symmetry::detect(&prob, time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), work_cap);
+    // 2 つ目の上限 `ENOMOTO_T_MIP_PRESOLVE_WORK_SYM_LOG` は細分化の並べ替えを L (1 + log2 L) で数えたもの ([`symmetry::log_work`])。
+    // 行が少なく長い問題 (nw04: 36 行で 1 行 1.7 万の非零) では 1 つ目の数え方が細分化を軽く見て、生成元を既定 (1〜2 個) より多く (3 個)
+    // 見つけ、根のカットの経路が変わって遅くなる (1 個 7〜8 秒、2 個 9.5〜10.7 秒、3 個 12.5〜13.4 秒)。0.3 秒に掛かるほかの問題では
+    // 1 つ目が先に効く
+    let (time_cap, work_cap, log_cap) = if presolve_work() {
+        (time_cap * presolve_work_safe(), tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_SYM", 2.5e7, f64) as u64, tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_SYM_LOG", 1.3e8, f64) as u64)
+    } else {
+        (time_cap, u64::MAX, u64::MAX)
+    };
+    let (sw0, vw0, lw0, rt0) = (symmetry::search_work(), symmetry::verify_work(), symmetry::log_work(), symmetry::refine_time());
+    let (sym, sym_work) = symmetry::detect2(&prob, time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), work_cap, log_cap);
+    let td = t0.elapsed().as_secs_f64();
+    let sym_diag = format!("detect {td:.2}s, refine {:.2}s, log work {}", symmetry::refine_time() - rt0, symmetry::log_work() - lw0);
     let Some(sym) = sym else {
         if verbose {
-            eprintln!("MIP: symmetry: none ({:.2}s, work {sym_work}, search {}, verify {})", t0.elapsed().as_secs_f64(), symmetry::search_work() - sw0, symmetry::verify_work() - vw0);
+            eprintln!("MIP: symmetry: none ({:.2}s, work {sym_work}, search {}, verify {}, {sym_diag})", t0.elapsed().as_secs_f64(), symmetry::search_work() - sw0, symmetry::verify_work() - vw0);
         }
         return prob;
     };
@@ -1232,7 +1242,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     }
     if verbose {
         let moved = sym.orbit.iter().filter(|&&o| o != usize::MAX).count();
-        eprintln!("MIP: symmetry: {} generators, {} orbits on {moved} columns, {} lex-leader rows ({:.2}s, work {sym_work}, search {}, verify {})", sym.generators.len(), sym.num_orbits, pairs.len(), t0.elapsed().as_secs_f64(), symmetry::search_work() - sw0, symmetry::verify_work() - vw0);
+        eprintln!("MIP: symmetry: {} generators, {} orbits on {moved} columns, {} lex-leader rows ({:.2}s, work {sym_work}, search {}, verify {}, {sym_diag})", sym.generators.len(), sym.num_orbits, pairs.len(), t0.elapsed().as_secs_f64(), symmetry::search_work() - sw0, symmetry::verify_work() - vw0);
     }
     if pairs.is_empty() || env_str!("ENOMOTO_MIP_SYM_DETECT_ONLY").is_some() {
         return prob;

@@ -43,10 +43,24 @@ thread_local! {
 }
 
 thread_local! {
+    /// 細分化の手間を行・列の長さ L の L (1 + log2 L) で数えたもの ([`refine_unit`])。`ENOMOTO_MIP_PRESOLVE_WORK` の 2 つ目の上限に使う
+    static LWORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// 細分化にかかった時間の合計 (秒、診断用)
+    static RTIME: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     /// [`WORK`] のうち `search` の色ごとの列の表を作る分 (較正用)
     static SWORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// 確かめ (`verify`) の手間 (較正用)
     static VWORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`LWORK`] の値。
+pub fn log_work() -> u64 {
+    LWORK.with(|c| c.get())
+}
+
+/// [`RTIME`] の値。
+pub fn refine_time() -> f64 {
+    RTIME.with(|c| c.get())
 }
 
 /// [`VWORK`] の値。
@@ -67,12 +81,32 @@ fn work() -> u64 {
     WORK.with(|c| c.get())
 }
 
+/// 細分化 1 回の手間: 行・列ごとに並べ替える長さ L の L (1 + log2 L) の和と行・列の数 (長い行の並べ替えが重い: nw04 は 36 行で
+/// 1 行 1.7 万の非零)。問題ごとに 1 回だけ数える (同じ問題で何度も呼ばれる)
+fn refine_unit(p: &MipProblem) -> usize {
+    thread_local! {
+        static CACHE: std::cell::Cell<(usize, usize, usize, usize)> = const { std::cell::Cell::new((usize::MAX, 0, 0, 0)) };
+    }
+    let key = (p.m, p.n, p.nnz);
+    let (m0, n0, z0, u0) = CACHE.with(|c| c.get());
+    if (m0, n0, z0) == key {
+        return u0;
+    }
+    let f = |l: usize| if l == 0 { 0.0 } else { l as f64 * (1.0 + (l as f64).log2()) };
+    let u = (p.rows.iter().map(|r| f(r.len())).sum::<f64>() + p.cols.iter().map(|c| f(c.len())).sum::<f64>()) as usize + p.m + p.n;
+    CACHE.with(|c| c.set((p.m, p.n, p.nnz, u)));
+    u
+}
+
 /// 色の細分化。色の種類の数が増えなくなるまで (最大 `max_iter` 回) 繰り返す。
 fn refine(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize) {
     let mut prev = usize::MAX;
     let mut buf: Vec<u64> = Vec::new();
+    let unit = refine_unit(p);
+    let tr = std::time::Instant::now();
     for _ in 0..max_iter {
         add_work(2 * p.nnz + p.m + p.n);
+        LWORK.with(|c| c.set(c.get() + unit as u64));
         let mut new_row = vec![0u64; p.m];
         for i in 0..p.m {
             buf.clear();
@@ -98,6 +132,7 @@ fn refine(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize) {
         }
         prev = all.len();
     }
+    RTIME.with(|c| c.set(c.get() + tr.elapsed().as_secs_f64()));
 }
 
 /// 行の中身 (境界と (列, 係数) の並び) のハッシュ。
@@ -110,6 +145,7 @@ fn row_hash(lo: f64, up: f64, entries: &mut [(usize, f64)]) -> u64 {
 fn verify(p: &MipProblem, perm: &[usize], row_counts: &std::collections::HashMap<u64, i64>) -> bool {
     add_work(p.nnz + p.m + p.n);
     VWORK.with(|c| c.set(c.get() + (p.nnz + p.m + p.n) as u64));
+    LWORK.with(|c| c.set(c.get() + (p.nnz + p.m + p.n) as u64));
     for j in 0..p.n {
         let k = perm[j];
         if p.cost[j] != p.cost[k] || p.col_lo[j] != p.col_lo[k] || p.col_up[j] != p.col_up[k] || p.is_int[j] != p.is_int[k] {
@@ -141,12 +177,22 @@ fn find(uf: &mut [usize], mut x: usize) -> usize {
 /// 対称性を探す。`time_cap` 秒・`max_tries` 回・手間 `work_cap` ([`WORK`] の増分) で打ち切る。見つからなければ `None`。
 /// 2 つ目の値は使った手間。
 pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64) -> (Option<Symmetry>, u64) {
-    let w0 = work();
-    let r = detect_inner(p, time_cap, max_tries, w0.saturating_add(work_cap));
+    detect2(p, time_cap, max_tries, work_cap, u64::MAX)
+}
+
+/// [`detect`] に 2 つ目の手間の上限 `log_cap` ([`LWORK`] の増分) を足したもの。
+pub fn detect2(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64, log_cap: u64) -> (Option<Symmetry>, u64) {
+    let (w0, l0) = (work(), log_work());
+    let r = detect_inner(p, time_cap, max_tries, (w0.saturating_add(work_cap), l0.saturating_add(log_cap)));
     (r, work() - w0)
 }
 
-fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: u64) -> Option<Symmetry> {
+/// 手間の上限 (`WORK` の終わり, `LWORK` の終わり) を越えたか。
+fn over(end: (u64, u64)) -> bool {
+    work() > end.0 || log_work() > end.1
+}
+
+fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64, u64)) -> Option<Symmetry> {
     let t0 = std::time::Instant::now();
     let n = p.n;
     if n < 2 || p.m == 0 {
@@ -208,7 +254,7 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: u64) 
             if ext > time_cap && t0.elapsed().as_secs_f64() > time_cap && generators.len() >= ext_min.max(1) && generators.len() as f64 >= ext_rate * tries as f64 {
                 time_cap = ext;
             }
-            if tries >= max_tries || t0.elapsed().as_secs_f64() > time_cap || work() > work_end {
+            if tries >= max_tries || t0.elapsed().as_secs_f64() > time_cap || over(work_end) {
                 break 'cells;
             }
             if find(&mut uf, a) == find(&mut uf, b) {
@@ -295,7 +341,7 @@ fn shortcut_perm(n: usize, ma: &std::collections::HashMap<u64, Vec<usize>>, mb: 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: std::time::Instant, time_cap: f64, work_end: u64, row_counts: &std::collections::HashMap<u64, i64>) -> Option<Vec<usize>> {
+fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: std::time::Instant, time_cap: f64, work_end: (u64, u64), row_counts: &std::collections::HashMap<u64, i64>) -> Option<Vec<usize>> {
     let use_shortcut = env_str!("ENOMOTO_MIP_SYM_NO_SHORTCUT").is_none();
     let n = p.n;
     let (mut ca, mut ra) = (col0.to_vec(), row0.to_vec());
@@ -307,11 +353,12 @@ fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: st
     refine(p, &mut ca, &mut ra, 50);
     refine(p, &mut cb, &mut rb, 50);
     for _ in 0..n {
-        if t0.elapsed().as_secs_f64() > time_cap || work() > work_end {
+        if t0.elapsed().as_secs_f64() > time_cap || over(work_end) {
             return None;
         }
         add_work(2 * n);
         SWORK.with(|c| c.set(c.get() + 2 * n as u64));
+        LWORK.with(|c| c.set(c.get() + 2 * n as u64));
         // 色ごとの列 (A と B で同じ大きさでなければ失敗)
         let mut ma: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
         let mut mb: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
