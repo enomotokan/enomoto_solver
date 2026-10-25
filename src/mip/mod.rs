@@ -1865,12 +1865,12 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     let mut finish = env_def!("ENOMOTO_MIP_LP_PROBE_FINISH", "1").is_some();
     let finish_late = env_def!("ENOMOTO_MIP_LP_PROBE_FINISH", "1") == Some("late");
     // `ENOMOTO_MIP_PRESOLVE_WORK` (試作): 時間 `secs` の代わりに LP の手間 (反復の数 x (行 + 列 + 非零)) の上限で打ち切る。
-    // `ENOMOTO_T_MIP_PRESOLVE_WORK_LP` は `secs` (60 秒で 3 秒) に、`_LP_GIVEUP` は 0.1 秒に、`_LP_BASIS` は 1 秒に当たる値。
+    // `ENOMOTO_T_MIP_PRESOLVE_WORK_LP` は `secs` (60 秒で 3 秒) に、`_LP_GIVEUP` は 0.1 秒 (反復 x (行 + 列)) に、`_LP_BASIS` は 1 秒に当たる値。
     // `secs` はここでは安全網 (呼び出し側で大きくしてある)
     let work = presolve_work();
     let size = (prob.m + prob.n + prob.nnz).max(1) as f64;
     let iters_of = |w: f64| (w / size).max(1.0) as u64;
-    let w_lp = tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP", 2.0e9, f64);
+    let w_lp = tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP", 1.25e9, f64);
     let lp_iter_cap = if work { iters_of(w_lp) } else { u64::MAX };
     // `ENOMOTO_MIP_LP_PROBE_FIRST_FULL` (試作、既定では使わない): 最初の LP の期限を `secs` の `ENOMOTO_T_MIP_LP_PROBE_FIRST_MULT` 倍
     // (既定 4 倍) に延ばす (固定を試す手間の上限は `secs` のまま)。最初の LP が `secs` に間に合わないと基底を根に渡せず、根で同じ LP を
@@ -1887,10 +1887,9 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     let first_deadline = if work { deadline } else { first_deadline };
     let first_iters = if !work {
         u64::MAX
-    } else if finish {
-        iters_of(tunable!("ENOMOTO_T_MIP_LP_PROBE_FINISH_MULT", 4.0, f64) * w_lp)
-    } else if env_str!("ENOMOTO_MIP_LP_PROBE_FIRST_FULL").is_some() {
-        iters_of(tunable!("ENOMOTO_T_MIP_LP_PROBE_FIRST_MULT", 4.0, f64) * w_lp)
+    } else if finish || env_str!("ENOMOTO_MIP_LP_PROBE_FIRST_FULL").is_some() {
+        // 最初の LP の上限 (`ENOMOTO_T_MIP_PRESOLVE_WORK_LP_FIRST`、60 秒の期限 12 秒に当たる値。uccase12 は 5.6e9 で 7.6 秒)
+        iters_of(tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_FIRST", 1.0e10, f64))
     } else {
         lp_iter_cap
     };
@@ -1920,7 +1919,12 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     // (子の LP が重い問題: cvs16r128-89 は 5 列で 3 秒、根の LP は 0.9 秒)
     let giveup_secs = tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_secs + 0.1;
     let giveup_secs = if work { f64::INFINITY } else { giveup_secs };
-    let giveup_iters = if work { (tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_iters as f64) as u64 + iters_of(tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_GIVEUP", 3.5e7, f64)) } else { u64::MAX };
+    // あきらめの手間は反復 x (行 + 列) で数える (非零を入れると、反復の安い列の長い問題 (neos-860300) で 1 列目であきらめる)
+    let giveup_iters = if work {
+        (tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_iters as f64) as u64 + (tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_GIVEUP", 5.0e6, f64) / (prob.m + prob.n).max(1) as f64) as u64
+    } else {
+        u64::MAX
+    };
     let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| lp.total_iterations() - root_iters < iter_budget && lp.total_iterations() < lp_iter_cap && t0.elapsed().as_secs_f64() < secs;
     let (mut n_lps, mut n_fixed, mut n_tried) = (0usize, 0usize, 0usize);
     let mut tried: std::collections::HashSet<(usize, i64)> = std::collections::HashSet::new();
@@ -2187,7 +2191,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // ([`presolve_work_caps`])。時間の上限は安全網として `ENOMOTO_T_MIP_PRESOLVE_WORK_SAFE` 倍に延ばす
     let (wcap0, wcap1) = if presolve_work() {
         if adaptive && !submip {
-            (tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE0", 1.0e8, f64) as u64, tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE", 3.0e8, f64) as u64)
+            (tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE0", 2.0e8, f64) as u64, tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE", 3.0e8, f64) as u64)
         } else {
             let w = tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_SUB", 5.0e7, f64) as u64;
             (w, w)
