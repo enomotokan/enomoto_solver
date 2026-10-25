@@ -90,6 +90,14 @@ pub struct Domain {
 
 thread_local! {
     static DEBUG_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// 境界を変える・戻すときに更新した行の活動の数 (列の長さの合計、スレッドごと)。`ENOMOTO_MIP_PRESOLVE_WORK` のプロービングの
+    /// 手間に足す (行の走査だけでは、長い列の固定が連鎖する問題 (neos-860300) の時間を数えきれない)
+    static ACT_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`ACT_WORK`] の値。
+pub fn act_work() -> u64 {
+    ACT_WORK.with(|w| w.get())
 }
 
 impl Domain {
@@ -250,6 +258,7 @@ impl Domain {
 
     /// 列 `j` の境界を `old` から `new` に変えたときの活動量の更新。
     fn update_activity(&mut self, p: &MipProblem, j: usize, upper: bool, old: f64, new: f64) {
+        ACT_WORK.with(|w| w.set(w.get() + p.cols[j].len() as u64 + 1));
         for &(i, a) in &p.cols[j] {
             // a > 0 なら下限は最小活動量、上限は最大活動量に効く (a < 0 なら逆)。
             let affects_min = (a > 0.0) != upper;

@@ -37,11 +37,25 @@ pub struct Symmetry {
     pub num_orbits: usize,
 }
 
+thread_local! {
+    /// 検出の手間 (色の細分化・置換の確かめで読んだ非零と列・行の数の合計、スレッドごと)。`ENOMOTO_MIP_PRESOLVE_WORK` の上限に使う
+    static WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn add_work(w: usize) {
+    WORK.with(|c| c.set(c.get() + w as u64));
+}
+
+fn work() -> u64 {
+    WORK.with(|c| c.get())
+}
+
 /// 色の細分化。色の種類の数が増えなくなるまで (最大 `max_iter` 回) 繰り返す。
 fn refine(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize) {
     let mut prev = usize::MAX;
     let mut buf: Vec<u64> = Vec::new();
     for _ in 0..max_iter {
+        add_work(2 * p.nnz + p.m + p.n);
         let mut new_row = vec![0u64; p.m];
         for i in 0..p.m {
             buf.clear();
@@ -77,6 +91,7 @@ fn row_hash(lo: f64, up: f64, entries: &mut [(usize, f64)]) -> u64 {
 
 /// 置換 `perm` が問題の対称性か確かめる。
 fn verify(p: &MipProblem, perm: &[usize], row_counts: &std::collections::HashMap<u64, i64>) -> bool {
+    add_work(p.nnz + p.m + p.n);
     for j in 0..p.n {
         let k = perm[j];
         if p.cost[j] != p.cost[k] || p.col_lo[j] != p.col_lo[k] || p.col_up[j] != p.col_up[k] || p.is_int[j] != p.is_int[k] {
@@ -105,8 +120,15 @@ fn find(uf: &mut [usize], mut x: usize) -> usize {
     x
 }
 
-/// 対称性を探す。`time_cap` 秒・`max_tries` 回で打ち切る。見つからなければ `None`。
-pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize) -> Option<Symmetry> {
+/// 対称性を探す。`time_cap` 秒・`max_tries` 回・手間 `work_cap` ([`WORK`] の増分) で打ち切る。見つからなければ `None`。
+/// 2 つ目の値は使った手間。
+pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64) -> (Option<Symmetry>, u64) {
+    let w0 = work();
+    let r = detect_inner(p, time_cap, max_tries, w0.saturating_add(work_cap));
+    (r, work() - w0)
+}
+
+fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: u64) -> Option<Symmetry> {
     let t0 = std::time::Instant::now();
     let n = p.n;
     if n < 2 || p.m == 0 {
@@ -168,7 +190,7 @@ pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize) -> Option<Symmetr
             if ext > time_cap && t0.elapsed().as_secs_f64() > time_cap && generators.len() >= ext_min.max(1) && generators.len() as f64 >= ext_rate * tries as f64 {
                 time_cap = ext;
             }
-            if tries >= max_tries || t0.elapsed().as_secs_f64() > time_cap {
+            if tries >= max_tries || t0.elapsed().as_secs_f64() > time_cap || work() > work_end {
                 break 'cells;
             }
             if find(&mut uf, a) == find(&mut uf, b) {
@@ -177,7 +199,7 @@ pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize) -> Option<Symmetr
             tries += 1;
             // 延長するときは 1 回の探索の中の上限も延長後の値にする (`time_cap` をまたいだ探索が打ち切られて、見つかる生成元が
             // 772 / 773 個と回ごとに変わった)
-            if let Some(perm) = search(p, &col, &row, a, b, t0, time_cap.max(ext), &row_counts) {
+            if let Some(perm) = search(p, &col, &row, a, b, t0, time_cap.max(ext), work_end, &row_counts) {
                 if verify(p, &perm, &row_counts) {
                     for j in 0..n {
                         let (x, y) = (find(&mut uf, j), find(&mut uf, perm[j]));
@@ -255,7 +277,7 @@ fn shortcut_perm(n: usize, ma: &std::collections::HashMap<u64, Vec<usize>>, mb: 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: std::time::Instant, time_cap: f64, row_counts: &std::collections::HashMap<u64, i64>) -> Option<Vec<usize>> {
+fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: std::time::Instant, time_cap: f64, work_end: u64, row_counts: &std::collections::HashMap<u64, i64>) -> Option<Vec<usize>> {
     let use_shortcut = env_str!("ENOMOTO_MIP_SYM_NO_SHORTCUT").is_none();
     let n = p.n;
     let (mut ca, mut ra) = (col0.to_vec(), row0.to_vec());
@@ -267,9 +289,10 @@ fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: st
     refine(p, &mut ca, &mut ra, 50);
     refine(p, &mut cb, &mut rb, 50);
     for _ in 0..n {
-        if t0.elapsed().as_secs_f64() > time_cap {
+        if t0.elapsed().as_secs_f64() > time_cap || work() > work_end {
             return None;
         }
+        add_work(2 * n);
         // 色ごとの列 (A と B で同じ大きさでなければ失敗)
         let mut ma: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
         let mut mb: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
@@ -1022,7 +1045,7 @@ mod tests {
         // 各仕事はどれか 1 台: x_{t,0} + x_{t,1} = 1、各機械の容量: 3 x_{0,m} + 2 x_{1,m} <= 4
         let rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(2, 1.0), (3, 1.0)], vec![(0, 3.0), (2, 2.0)], vec![(1, 3.0), (3, 2.0)]];
         let p = MipProblem::from_rows(vec![0.0; 4], vec![1.0; 4], vec![1.0, 1.0, 2.0, 2.0], 0.0, 1.0, vec![true; 4], rows, vec![1.0, 1.0, -inf(), -inf()], vec![1.0, 1.0, 4.0, 4.0]);
-        let sym = detect(&p, 10.0, 100).expect("symmetry");
+        let sym = detect(&p, 10.0, 100, u64::MAX).0.expect("symmetry");
         assert_eq!(sym.generators.len(), 1);
         assert_eq!(sym.generators[0], vec![1, 0, 3, 2]);
         assert_eq!(sym.num_orbits, 2);
@@ -1038,7 +1061,7 @@ mod tests {
             rows.push(vec![(m, 3.0), (3 + m, 2.0)]);
         }
         let p = MipProblem::from_rows(vec![0.0; 6], vec![1.0; 6], vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0], 0.0, 1.0, vec![true; 6], rows, vec![1.0, 1.0, -inf(), -inf(), -inf()], vec![1.0, 1.0, 4.0, 4.0, 4.0]);
-        let sym = detect(&p, 10.0, 100).expect("symmetry");
+        let sym = detect(&p, 10.0, 100, u64::MAX).0.expect("symmetry");
         let (orbs, used) = find_orbitopes(&p, &sym);
         assert_eq!(orbs.len(), 1);
         assert_eq!(orbs[0].vars, vec![vec![0, 1, 2], vec![3, 4, 5]]);
@@ -1073,7 +1096,7 @@ mod tests {
             rows.push(vec![(m, 3.0), (3 + m, 2.0)]);
         }
         let p = MipProblem::from_rows(vec![0.0; 6], vec![1.0; 6], vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0], 0.0, 1.0, vec![true; 6], rows, vec![1.0, 1.0, -inf(), -inf(), -inf()], vec![1.0, 1.0, 4.0, 4.0, 4.0]);
-        let sym = detect(&p, 10.0, 100).unwrap();
+        let sym = detect(&p, 10.0, 100, u64::MAX).0.unwrap();
         let (orbs, _) = find_orbitopes(&p, &sym);
         // 仕事 0 を機械 2、仕事 1 を機械 1 に: 列 (0,0) (0,1) (1,0)
         let mut x = vec![0.0, 0.0, 1.0, 0.0, 1.0, 0.0];
@@ -1215,7 +1238,7 @@ mod tests {
     fn no_symmetry_when_costs_differ() {
         let rows = vec![vec![(0, 1.0), (1, 1.0)]];
         let p = MipProblem::from_rows(vec![0.0; 2], vec![1.0; 2], vec![1.0, 2.0], 0.0, 1.0, vec![true; 2], rows, vec![1.0], vec![1.0]);
-        assert!(detect(&p, 10.0, 100).is_none());
+        assert!(detect(&p, 10.0, 100, u64::MAX).0.is_none());
     }
 
     #[test]
@@ -1224,7 +1247,7 @@ mod tests {
         // 返したなら必ず検証を通っている
         let rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(1, 1.0), (2, 1.0)], vec![(2, 1.0), (3, 1.0)], vec![(3, 1.0), (0, 1.0)]];
         let p = MipProblem::from_rows(vec![0.0; 4], vec![1.0; 4], vec![1.0; 4], 0.0, 1.0, vec![true; 4], rows, vec![-inf(); 4], vec![1.0; 4]);
-        if let Some(sym) = detect(&p, 10.0, 100) {
+        if let Some(sym) = detect(&p, 10.0, 100, u64::MAX).0 {
             let mut counts = std::collections::HashMap::new();
             for i in 0..p.m {
                 let mut r = p.rows[i].clone();

@@ -715,7 +715,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     let remaining = |params: MipParams| MipParams { time_limit: (params.time_limit - t_pre.elapsed().as_secs_f64()).max(0.0), ..params };
     // 前処理の LP による固定 ([`lp_probe`]) は最初の求解だけ (サブ MIP・再スタートの後は使わない)
     let lp_probe_secs = (env_str!("ENOMOTO_MIP_NO_LP_PROBE").is_none() && !params.submip && params.restarts == 0)
-        .then(|| if params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_LP_PROBE_TIME_FRAC", 0.05, f64) * params.time_limit } else { 10.0 });
+        .then(|| if params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_LP_PROBE_TIME_FRAC", 0.05, f64) * params.time_limit } else { 10.0 })
+        // `ENOMOTO_MIP_PRESOLVE_WORK`: 打ち切りは LP の手間で決め ([`lp_probe`])、時間は安全網 (`ENOMOTO_T_MIP_PRESOLVE_WORK_LP_SECS` 秒、
+        // 既定 30 秒。時間制限の半分まで) だけにする (時間制限で前処理の結果が変わらないように)
+        .map(|s| if presolve_work() { tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_SECS", 30.0, f64).min(if params.time_limit.is_finite() { 0.5 * params.time_limit } else { f64::INFINITY }) } else { s });
     let prev_rp = RESTART_PRESOLVE.with(|f| f.replace(params.restarts > 0));
     // `ENOMOTO_MIP_SUBMIP_HIGHS` の `p`: サブ MIP でも親と同じ前処理 (HiGHS の `solveSubMip` は親と同じ前処理の設定で解く)
     let pre_submip = params.submip && !submip_highs('p');
@@ -833,6 +836,16 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 dump_mps(&prob, &f);
             }
             let prob = if !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() { add_symmetry_rows(prob, params.verbose) } else { prob };
+            // 診断用: 対称性の行を加えた後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED3=ファイル`)。`ENOMOTO_MIP_DEBUG_STOP_PRESOLVED` なら
+            // 書き出した後にプロセスを終える (前処理の結果の再現性の確かめ用。前処理の時間は書き出しの前に出す)
+            if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED3").filter(|_| !params.submip && params.restarts == 0) {
+                eprintln!("MIP: presolve finished in {:.3}s (before the dump, offset {})", t_pre.elapsed().as_secs_f64(), prob.offset);
+                dump_mps(&prob, &f);
+                if env_str!("ENOMOTO_MIP_DEBUG_STOP_PRESOLVED").is_some() {
+                    eprintln!("MIP: stopped after the presolve (ENOMOTO_MIP_DEBUG_STOP_PRESOLVED)");
+                    std::process::exit(0);
+                }
+            }
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_SOL").filter(|_| !params.submip) {
                 let x0: Vec<f64> = std::fs::read_to_string(f).unwrap().lines().map(|l| l.trim().parse().unwrap()).collect();
                 let xd: Vec<f64> = (0..prob.n).map(|j| if prob.col_lo[j] == prob.col_up[j] { prob.col_lo[j] } else { x0[j] }).collect();
@@ -1098,9 +1111,12 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     // 対称性の行・固定を加える前の問題 (ヒューリスティクスはこちらで解を探し、並べ替えてから使う)
     SYM_ORIG.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(prob.clone())));
     let time_cap = tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64);
-    let Some(sym) = symmetry::detect(&prob, time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize)) else {
+    // `ENOMOTO_MIP_PRESOLVE_WORK` (試作): 時間 (0.3 秒) の代わりに手間 (`ENOMOTO_T_MIP_PRESOLVE_WORK_SYM`、細分化で読んだ非零などの数) で打ち切る
+    let (time_cap, work_cap) = if presolve_work() { (time_cap * presolve_work_safe(), tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_SYM", 2.5e7, f64) as u64) } else { (time_cap, u64::MAX) };
+    let (sym, sym_work) = symmetry::detect(&prob, time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), work_cap);
+    let Some(sym) = sym else {
         if verbose {
-            eprintln!("MIP: symmetry: none ({:.2}s)", t0.elapsed().as_secs_f64());
+            eprintln!("MIP: symmetry: none ({:.2}s, work {sym_work})", t0.elapsed().as_secs_f64());
         }
         return prob;
     };
@@ -1215,7 +1231,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     }
     if verbose {
         let moved = sym.orbit.iter().filter(|&&o| o != usize::MAX).count();
-        eprintln!("MIP: symmetry: {} generators, {} orbits on {moved} columns, {} lex-leader rows ({:.2}s)", sym.generators.len(), sym.num_orbits, pairs.len(), t0.elapsed().as_secs_f64());
+        eprintln!("MIP: symmetry: {} generators, {} orbits on {moved} columns, {} lex-leader rows ({:.2}s, work {sym_work})", sym.generators.len(), sym.num_orbits, pairs.len(), t0.elapsed().as_secs_f64());
     }
     if pairs.is_empty() || env_str!("ENOMOTO_MIP_SYM_DETECT_ONLY").is_some() {
         return prob;
@@ -1848,6 +1864,14 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     // 最適値を出さず時間切れになる (analysis/cand9bisect_20261024.md)
     let mut finish = env_def!("ENOMOTO_MIP_LP_PROBE_FINISH", "1").is_some();
     let finish_late = env_def!("ENOMOTO_MIP_LP_PROBE_FINISH", "1") == Some("late");
+    // `ENOMOTO_MIP_PRESOLVE_WORK` (試作): 時間 `secs` の代わりに LP の手間 (反復の数 x (行 + 列 + 非零)) の上限で打ち切る。
+    // `ENOMOTO_T_MIP_PRESOLVE_WORK_LP` は `secs` (60 秒で 3 秒) に、`_LP_GIVEUP` は 0.1 秒に、`_LP_BASIS` は 1 秒に当たる値。
+    // `secs` はここでは安全網 (呼び出し側で大きくしてある)
+    let work = presolve_work();
+    let size = (prob.m + prob.n + prob.nnz).max(1) as f64;
+    let iters_of = |w: f64| (w / size).max(1.0) as u64;
+    let w_lp = tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP", 2.0e9, f64);
+    let lp_iter_cap = if work { iters_of(w_lp) } else { u64::MAX };
     // `ENOMOTO_MIP_LP_PROBE_FIRST_FULL` (試作、既定では使わない): 最初の LP の期限を `secs` の `ENOMOTO_T_MIP_LP_PROBE_FIRST_MULT` 倍
     // (既定 4 倍) に延ばす (固定を試す手間の上限は `secs` のまま)。最初の LP が `secs` に間に合わないと基底を根に渡せず、根で同じ LP を
     // もう一度解く (時間の損) うえ、着く頂点が変わる。neos-960392 (60 秒で `secs` = 3.0 秒、最初の LP は 2.8〜3.0 秒) では、
@@ -1860,7 +1884,17 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     } else {
         deadline
     };
-    match lp.solve(&SolveLimits { deadline: first_deadline, ..Default::default() }) {
+    let first_deadline = if work { deadline } else { first_deadline };
+    let first_iters = if !work {
+        u64::MAX
+    } else if finish {
+        iters_of(tunable!("ENOMOTO_T_MIP_LP_PROBE_FINISH_MULT", 4.0, f64) * w_lp)
+    } else if env_str!("ENOMOTO_MIP_LP_PROBE_FIRST_FULL").is_some() {
+        iters_of(tunable!("ENOMOTO_T_MIP_LP_PROBE_FIRST_MULT", 4.0, f64) * w_lp)
+    } else {
+        lp_iter_cap
+    };
+    match lp.solve(&SolveLimits { deadline: first_deadline, iteration_limit: first_iters, ..Default::default() }) {
         LpStatus::Optimal => {}
         LpStatus::Infeasible => return None,
         st => {
@@ -1872,10 +1906,10 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     }
     let z0 = lp.objective() + prob.offset;
     let root_secs = t0.elapsed().as_secs_f64();
-    if finish_late && root_secs < secs {
+    let root_iters = lp.total_iterations();
+    if finish_late && (if work { root_iters < lp_iter_cap } else { root_secs < secs }) {
         finish = false;
     }
-    let root_iters = lp.total_iterations();
     let iter_budget = (tunable!("ENOMOTO_T_MIP_LP_PROBE_ITER_MULT", 2.0, f64) * root_iters as f64) as u64 + 5000;
     let per_lp = (root_iters / 4).clamp(200, 2000);
     let passes = tunable!("ENOMOTO_T_MIP_LP_PROBE_PASSES", 3usize, usize);
@@ -1885,7 +1919,9 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     // 固定が 1 つもないまま、最初の LP の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT` 倍 (+ 0.1 秒) の時間を使ってもやめる
     // (子の LP が重い問題: cvs16r128-89 は 5 列で 3 秒、根の LP は 0.9 秒)
     let giveup_secs = tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_secs + 0.1;
-    let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| lp.total_iterations() - root_iters < iter_budget && t0.elapsed().as_secs_f64() < secs;
+    let giveup_secs = if work { f64::INFINITY } else { giveup_secs };
+    let giveup_iters = if work { (tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_iters as f64) as u64 + iters_of(tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_GIVEUP", 3.5e7, f64)) } else { u64::MAX };
+    let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| lp.total_iterations() - root_iters < iter_budget && lp.total_iterations() < lp_iter_cap && t0.elapsed().as_secs_f64() < secs;
     let (mut n_lps, mut n_fixed, mut n_tried) = (0usize, 0usize, 0usize);
     let mut tried: std::collections::HashSet<(usize, i64)> = std::collections::HashSet::new();
     let mut ok = true;
@@ -1908,7 +1944,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
         // (列, 上限を締めるか, 値)
         let mut fixes: Vec<(usize, bool, f64)> = Vec::new();
         for &(j, v) in &cands {
-            if !budget_left(&lp) || (n_fixed + fixes.len() == 0 && (n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs)) {
+            if !budget_left(&lp) || (n_fixed + fixes.len() == 0 && (n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs || lp.total_iterations() > giveup_iters)) {
                 break;
             }
             tried.insert((j, v.floor() as i64));
@@ -1921,7 +1957,9 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
                 } else {
                     lp.set_col_bounds(j, lo, v.floor());
                 }
-                cut[side] = lp.solve(&SolveLimits { iteration_limit: per_lp, deadline, ..Default::default() }) == LpStatus::Infeasible;
+                // `ENOMOTO_MIP_PRESOLVE_WORK`: 反復の上限 `lp_iter_cap` を越えない (時間の期限で途中で止まる分を手間で決める)
+                let lim = if work { per_lp.min(lp_iter_cap.saturating_sub(lp.total_iterations()).max(1)) } else { per_lp };
+                cut[side] = lp.solve(&SolveLimits { iteration_limit: lim, deadline, ..Default::default() }) == LpStatus::Infeasible;
                 n_lps += 1;
                 lp.restore_state(&saved);
             }
@@ -1960,7 +1998,9 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
             lp.set_col_bounds(j, prob.col_lo[j], prob.col_up[j]);
         }
         n_fixed += fixes.len();
-        match lp.solve(&SolveLimits { deadline, ..Default::default() }) {
+        // 固定した後の解き直しの反復の上限 (`ENOMOTO_MIP_PRESOLVE_WORK` のとき): 残りの手間と最初の LP の反復の大きい方
+        let lim = if work { lp_iter_cap.saturating_sub(lp.total_iterations()).max(root_iters) } else { u64::MAX };
+        match lp.solve(&SolveLimits { iteration_limit: lim, deadline, ..Default::default() }) {
             LpStatus::Optimal => {}
             LpStatus::Infeasible => {
                 ok = false;
@@ -1987,10 +2027,16 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     // 固定したときだけ最後の LP の基底を根の LP に渡す (固定がなければ根の LP は前処理の LP と同じ問題で、基底を渡すと
     // 着く頂点が変わり、カット・探索の経路が変わるだけ: qiu は固定 0 で 40 問の 2 回とも遅くなった)。ただし最初の LP に
     // `ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS` 秒 (既定 1 秒) 以上かかったら、根で解き直す手間を省くために渡す
+    let slow_root = if work { root_iters as f64 * size >= tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_BASIS", 1.5e8, f64) } else { root_secs >= tunable!("ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS", 1.0, f64) };
     if verbose {
-        eprintln!("MIP: LP probing: root LP {root_secs:.2}s ({root_iters} iters), tried {n_tried}, fixed {n_fixed}, basis passed {}", n_fixed > 0 || root_secs >= tunable!("ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS", 1.0, f64));
+        eprintln!(
+            "MIP: LP probing: root LP {root_secs:.2}s ({root_iters} iters, size {size}), tried {n_tried}, fixed {n_fixed}, basis passed {}, total {} iters {:.2}s",
+            n_fixed > 0 || slow_root,
+            lp.total_iterations(),
+            t0.elapsed().as_secs_f64()
+        );
     }
-    if n_fixed > 0 || root_secs >= tunable!("ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS", 1.0, f64) {
+    if n_fixed > 0 || slow_root {
         let b = lp.basis();
         // 行の状態は `ENOMOTO_MIP_LP_PROBE_FINISH` か `ENOMOTO_MIP_LP_PROBE_ROW_BASIS` のときだけ渡す (既定は列の状態だけ)。行の指紋
         // ([`rows_fingerprint`]) も渡し、根の LP の始めの行が同じときだけ使う ([`solver::ROOT_BASIS_ROWS`])
@@ -2006,6 +2052,19 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
         }
     }
     Some(n_fixed)
+}
+
+/// `ENOMOTO_MIP_PRESOLVE_WORK` (試作、既定では使わない): 前処理の中の打ち切り (LP による固定・プロービング・対称性の検出) を
+/// 壁時計・CPU 時間ではなく手間 (LP の反復の数・伝播で走査した行の長さ・色の細分化で読んだ非零の数) の上限で決める。
+/// 前処理の結果が時間の上限・機械の速さ・負荷・回で変わらないようにする。時間の上限は安全網として残す
+/// ([`presolve_work_safe`] 倍)。
+pub(crate) fn presolve_work() -> bool {
+    env_str!("ENOMOTO_MIP_PRESOLVE_WORK").is_some()
+}
+
+/// [`presolve_work`] のとき、元の時間の上限を何倍の安全網にするか (`ENOMOTO_T_MIP_PRESOLVE_WORK_SAFE`、既定 10 倍)。
+pub(crate) fn presolve_work_safe() -> f64 {
+    tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_SAFE", 10.0, f64)
 }
 
 /// プロービング (SCIP・HiGHS の前処理と同じ): 0-1 列 `x_j` を 0 にして伝播した結果と 1 にして伝播した結果を比べる。
@@ -2124,6 +2183,23 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     } else {
         (work_cap, time_cap, time_cap_found)
     };
+    // `ENOMOTO_MIP_PRESOLVE_WORK` (試作): 上の時間の上限 (CPU 時間) を手間 (伝播で走査した行の長さの合計) の上限に置き換える
+    // ([`presolve_work_caps`])。時間の上限は安全網として `ENOMOTO_T_MIP_PRESOLVE_WORK_SAFE` 倍に延ばす
+    let (wcap0, wcap1) = if presolve_work() {
+        if adaptive && !submip {
+            (tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE0", 1.0e8, f64) as u64, tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE", 3.0e8, f64) as u64)
+        } else {
+            let w = tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_SUB", 5.0e7, f64) as u64;
+            (w, w)
+        }
+    } else {
+        (u64::MAX, u64::MAX)
+    };
+    let (time_cap, time_cap_found) = if presolve_work() { (time_cap * presolve_work_safe(), time_cap_found * presolve_work_safe()) } else { (time_cap, time_cap_found) };
+    // 手間: 伝播で走査した行の長さ + 境界の変更で更新した活動の数 + 1 回の試し (両側) ごとに `ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_EACH`
+    let act0 = domain::act_work();
+    let each = tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_EACH", 100.0, f64) as u64;
+    let pwork = |dom: &Domain, probed: usize| (dom.debug_work() - work0) + (domain::act_work() - act0) + each * probed as u64;
     // 予算の初期値は候補の数 (全部を一巡できる)。`ENOMOTO_T_MIP_PROBE_BASE` > 0 ならその回数。HiGHS の 1000 回は含意の多い列
     // から試す順番と組み合わせたもので、行の多い列から試すこちらの順番では、30n20b8 の固定できる列 (3 行の短い列、3161 本)
     // が候補の後ろ (4730 番目以降) に並び、1000 回では 1 本も固定できない (全部を試しても 0.96 秒で 3305 本固定)
@@ -2148,8 +2224,8 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         passes += 1;
         let fixed_pass0 = fixed;
         for (cnt, &j) in cands.iter().enumerate() {
-            let cap = if fixed + tightened > 0 { time_cap_found } else { time_cap };
-            if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || cap_clock() - c0 > cap) {
+            let (cap, wcap) = if fixed + tightened > 0 { (time_cap_found, wcap1) } else { (time_cap, wcap0) };
+            if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || pwork(&dom, probed) > wcap || cap_clock() - c0 > cap) {
                 break 'passes;
             }
             if dom.lo[j] == dom.up[j] {
@@ -2321,10 +2397,18 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         // (行の多い列から 128 列) physiciansched6-2 の組 (行の少ない列) に届かない
         let time_cap2 = tunable!("ENOMOTO_T_MIP_PROBE_EQUIV2_TIME", 0.5, f64);
         let giveup2 = tunable!("ENOMOTO_T_MIP_PROBE_EQUIV2_GIVEUP_TIME", 0.1, f64);
+        // `ENOMOTO_MIP_PRESOLVE_WORK`: 時間の代わりに手間 (0.5 秒・0.1 秒に当たる値) で打ち切る
+        let (time_cap2, giveup2, wcap2, wgive2) = if presolve_work() {
+            let w = tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_EQUIV2", 5.0e7, f64) as u64;
+            (time_cap2 * presolve_work_safe(), giveup2 * presolve_work_safe(), w, w / 5)
+        } else {
+            (time_cap2, giveup2, u64::MAX, u64::MAX)
+        };
         let w0 = d2.debug_work();
         for &j in &cands {
             // 毎列見る (長い列の多い問題では 16 列で 0.7 秒かかる: nw04)
-            if d2.debug_work() - w0 > work_cap || tq.elapsed().as_secs_f64() > time_cap2 || (tq.elapsed().as_secs_f64() > giveup2 && equiv.len() == n0) {
+            let w = d2.debug_work() - w0;
+            if w > work_cap.min(wcap2) || tq.elapsed().as_secs_f64() > time_cap2 || ((tq.elapsed().as_secs_f64() > giveup2 || w > wgive2) && equiv.len() == n0) {
                 break;
             }
             if d2.lo[j] == d2.up[j] {
@@ -2373,7 +2457,15 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     edges.sort_unstable();
     edges.dedup();
     if verbose {
-        eprintln!("MIP: probing: {probed} of {} binaries probed ({passes} passes), {fixed} fixed, {tightened} bounds tightened, {} implications ({:.2}s)", cands.len(), edges.len(), t0.elapsed().as_secs_f64());
+        eprintln!(
+            "MIP: probing: {probed} of {} binaries probed ({passes} passes), {fixed} fixed, {tightened} bounds tightened, {} implications ({:.2}s, cpu {:.2}s, work {}, pwork {})",
+            cands.len(),
+            edges.len(),
+            t0.elapsed().as_secs_f64(),
+            cap_clock() - c0,
+            dom.debug_work() - work0,
+            pwork(&dom, probed)
+        );
     }
     prob.conflict_edges = edges;
     if want_equiv {
