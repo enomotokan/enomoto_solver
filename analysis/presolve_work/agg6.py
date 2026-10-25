@@ -6,7 +6,7 @@ mism = []
 for cfg in sys.argv[1:]:
     for f in sorted(glob.glob(f'../../benchmarks/cand_logs/{cfg}_r*.log')):
         for l in open(f):
-            m = re.match(r'(\S+)\s+highs=\s*(\S+) (\S+) obj=(\S+)\s+ours=\s*(\S+) (\S+) obj=(\S+)', l)
+            m = re.match(r'(\S+)\s+highs=\s*(.+?) (\S+) obj=(\S+)\s+ours=\s*(\S+) (\S+) obj=(\S+)', l)
             if not m:
                 continue
             p, hs, ht, ho, os_, ot, oo = m.groups()
