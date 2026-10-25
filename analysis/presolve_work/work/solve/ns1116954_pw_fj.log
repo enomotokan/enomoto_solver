@@ -1,0 +1,59 @@
+MIP: presolve: rows 131991 -> 131865, free columns 12648 -> 11928, nonzeros 410582 -> 409850, postsolve steps 0
+Root LP: the two-phase method finished first (11.41s)
+MIP: LP probing: root LP 11.44s (3225 iters, size 554363), tried 0, fixed 0, basis passed true, total 3225 iters 11.44s
+MIP: probing: 6080 of 7482 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 2458956 implications (2.97s, cpu 2.95s, work 8910692, pwork 200437050, chg 4942232)
+MIP: probing: 0 equivalent binary pairs
+Presolve: 131991 rows, 12648 columns -> 131865 rows, 11928 columns (14.66s)
+MIP: clique extension: 6882 rows extended, 75900 nonzeros added, 0 columns fixed, 0 duplicate and 4206 dominated rows removed (1493907 edges, 0.55s)
+MIP: symmetry: 1 generators, 1982 orbits on 3964 columns, 1 lex-leader rows (0.31s, work 26122937)
+MIP: fixed-charge check: vb rows 0 of 127660, continuous with vb 0 of 4446
+MIP: root LP: the rows changed after LP probing; the row statuses are not used
+MIP: root LP basis from the presolve LP probing: used (columns only)
+MIP: solving the root LP (0.07s)
+MIP: FJ problem (FJ_P3): rows 127659 -> 127659, free columns 11928 -> 11928, 0 continuous bounds tightened
+MIP:   FJ2 (LP repair: failed): 127894 rows (as inequalities), 436724 nonzeros, 394622 steps, effort 112922307 (max 447205376), least violated rows 1, found false (objective inf), stopped by effort, chain 0/0 (0 columns), 1.09s
+MIP:   FJ2 (LP repair: failed): 127894 rows (as inequalities), 436724 nonzeros, 410642 steps, effort 112924561 (max 447205376), least violated rows 1, found false (objective inf), stopped by effort, chain 0/0 (0 columns), 1.13s
+MIP:   FJ2 (LP repair: failed): 127894 rows (as inequalities), 436724 nonzeros, 399142 steps, effort 112917720 (max 447205376), least violated rows 1, found false (objective inf), stopped by effort, chain 0/0 (0 columns), 1.20s
+MIP:   FJ2 (LP repair: failed): 127894 rows (as inequalities), 436724 nonzeros, 426483 steps, effort 112914642 (max 447205376), least violated rows 1, found false (objective inf), stopped by effort, chain 0/0 (0 columns), 0.97s
+MIP:   FJ2 (LP repair: failed): 127894 rows (as inequalities), 436724 nonzeros, 426989 steps, effort 112918882 (max 447205376), least violated rows 1, found false (objective inf), stopped by effort, chain 0/0 (0 columns), 1.11s
+MIP:   FJ2 (LP repair: failed): 127894 rows (as inequalities), 436724 nonzeros, 399988 steps, effort 112921877 (max 447205376), least violated rows 1, found false (objective inf), stopped by effort, chain 0/0 (0 columns), 1.13s
+Root LP: objective 0.0000000000e0 (11.05s)
+MIP: root LP 0.0000000000e0 (3807 iters, 11.05s)
+MIP: fixed-charge check: vb rows 0 of 127660, continuous with vb 0 of 4446
+MIP: fixed-charge check: vb rows 0 of 127660, continuous with vb 0 of 4446
+MIP:   FJ2 (LP repair: failed): 127894 rows (as inequalities), 436724 nonzeros, 418253 steps, effort 112921329 (max 447205376), least violated rows 1, found false (objective inf), stopped by effort, chain 0/0 (0 columns), 1.06s
+MIP: clique graph: 1493907 edges (210327 from rows, probing implications 2458956)
+MIP:   FJ2 (LP repair: failed): 127894 rows (as inequalities), 436724 nonzeros, 384314 steps, effort 112919769 (max 447205376), least violated rows 1, found false (objective inf), stopped by effort, chain 0/0 (0 columns), 1.11s
+MIP:   FJ2 (LP repair: failed): 127894 rows (as inequalities), 436724 nonzeros, 421177 steps, effort 112915200 (max 447205376), least violated rows 1, found false (objective inf), stopped by effort, chain 0/0 (0 columns), 1.01s
+MIP: clique fallback: 73 cuts, LP 0.0000000000e0 -> 0.0000000000e0 (g_c 0.000e0, g_d 0.000e0 relative), fractional 670 -> 724; not used (3.60s)
+Root cuts: objective 0.0000000000e0 -> 0.0000000000e0, 0 cuts in the LP (14.71s)
+MIP: cut loop done: 0 cuts added, 0 in LP, pool 0 cuts (0 nonzeros), obj 0.0000000000e0 -> 0.0000000000e0
+MIP:   FJ2: 127894 rows (as inequalities), 436724 nonzeros, 536343 steps, effort 154480808 (max 447205376), least violated rows 0, found true (objective 0.000000e0), stopped by time/stop, chain 0/0 (0 columns), 1.26s
+MIP:   FJ2 (feasibility problem): 10 tries, found true (11.37s)
+MIP: fixed-integer LP dual check: c x 0.0000000000e0, dual bound 0.0000000000e0 -> skip
+MIP:   global fixed integers 0 of 7482 (newly 0 since the root LP)
+MIP: new incumbent 0.0000000000e0 at node 0 (14.73s) [feasibility jump (parallel)]
+MIP: feasibility jump (parallel) found a solution (14.73s)
+MIP: the root LP bound 0.0000000000e0 closed the gap to the prune limit -1.0000000000e-9 (incumbent Some(0.0), 14.73s)
+MIP: finish start Optimal (14.73s)
+     time      nodes      open        best bound         incumbent       gap
+    14.7s          0         0     0.000000000e0     0.000000000e0     0.00%
+MIP:    14.73s nodes        0 open       0 lb inf ub 0.00000000e0 lp_iters 4804 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 0 dive_iters 0 lp_rows 127660 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 0, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 0, in pool 0 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: proof CMIR cuts: tried 0, added 0, entered the cut pool 0
+MIP: conflict analysis (HiGHS style): calls 0, conflicts 0, added 0, mean length 0.0, max length 2344, 0.00s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 0 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 127660
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 3.4)
+MIP: finish done (14.73s)
+MIP: solve returned Optimal after 30.29s (time limit 60.00s)
+Presolve: 131991 rows, 12648 columns -> 0 rows, 0 columns (0.06s)
+Solving with the slope-intercept dual two-phase method
+MIP: polished the solution (30.36s)
+RESULT optimal 0.0 0.0 0 30.4 0.0
+CHECK OK rowviol 0.00e+00 bndviol 0.00e+00 intviol 0.00e+00 obj 0.0

@@ -1113,10 +1113,11 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     let time_cap = tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64);
     // `ENOMOTO_MIP_PRESOLVE_WORK` (試作): 時間 (0.3 秒) の代わりに手間 (`ENOMOTO_T_MIP_PRESOLVE_WORK_SYM`、細分化で読んだ非零などの数) で打ち切る
     let (time_cap, work_cap) = if presolve_work() { (time_cap * presolve_work_safe(), tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_SYM", 2.5e7, f64) as u64) } else { (time_cap, u64::MAX) };
+    let (sw0, vw0) = (symmetry::search_work(), symmetry::verify_work());
     let (sym, sym_work) = symmetry::detect(&prob, time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), work_cap);
     let Some(sym) = sym else {
         if verbose {
-            eprintln!("MIP: symmetry: none ({:.2}s, work {sym_work})", t0.elapsed().as_secs_f64());
+            eprintln!("MIP: symmetry: none ({:.2}s, work {sym_work}, search {}, verify {})", t0.elapsed().as_secs_f64(), symmetry::search_work() - sw0, symmetry::verify_work() - vw0);
         }
         return prob;
     };
@@ -1231,7 +1232,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     }
     if verbose {
         let moved = sym.orbit.iter().filter(|&&o| o != usize::MAX).count();
-        eprintln!("MIP: symmetry: {} generators, {} orbits on {moved} columns, {} lex-leader rows ({:.2}s, work {sym_work})", sym.generators.len(), sym.num_orbits, pairs.len(), t0.elapsed().as_secs_f64());
+        eprintln!("MIP: symmetry: {} generators, {} orbits on {moved} columns, {} lex-leader rows ({:.2}s, work {sym_work}, search {}, verify {})", sym.generators.len(), sym.num_orbits, pairs.len(), t0.elapsed().as_secs_f64(), symmetry::search_work() - sw0, symmetry::verify_work() - vw0);
     }
     if pairs.is_empty() || env_str!("ENOMOTO_MIP_SYM_DETECT_ONLY").is_some() {
         return prob;
@@ -1915,13 +1916,17 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     // 最初の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP` 列で 1 つも固定できなければやめる (固定が出る問題では最初からすぐ出る:
     // app1-1 は最初の 24 列で 21 個。40 問で固定が出るのは 5 問で、出ない問題に 1 問平均 0.5 秒、最大 3 秒かかっていた)
     let giveup = tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP", 20usize, usize);
+    // `ENOMOTO_MIP_PRESOLVE_WORK`: 0.1 秒のあきらめ (下の `giveup_secs`) の代わりに、列の数 `ENOMOTO_T_MIP_PRESOLVE_WORK_LP_GIVEUP_COLS`
+    // (既定 8) と反復 (`giveup_iters`) で打ち切る。反復 1 回の重さは問題で 7 倍以上違い (drayage-100-23 は 94 マイクロ秒、cvs16r128-89 は
+    // 380 マイクロ秒)、反復だけでは drayage-100-23 (固定 38 列) と roll3000・cvs16r128-89 (既定は 8 列・1 列であきらめる) を両立できない
+    let giveup = if presolve_work() { giveup.min(tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_GIVEUP_COLS", 8usize, usize)) } else { giveup };
     // 固定が 1 つもないまま、最初の LP の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT` 倍 (+ 0.1 秒) の時間を使ってもやめる
     // (子の LP が重い問題: cvs16r128-89 は 5 列で 3 秒、根の LP は 0.9 秒)
     let giveup_secs = tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_secs + 0.1;
     let giveup_secs = if work { f64::INFINITY } else { giveup_secs };
     // あきらめの手間は反復 x (行 + 列) で数える (非零を入れると、反復の安い列の長い問題 (neos-860300) で 1 列目であきらめる)
     let giveup_iters = if work {
-        (tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_iters as f64) as u64 + (tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_GIVEUP", 5.0e6, f64) / (prob.m + prob.n).max(1) as f64) as u64
+        (tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_iters as f64) as u64 + (tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_GIVEUP", 2.0e7, f64) / (prob.m + prob.n).max(1) as f64) as u64
     } else {
         u64::MAX
     };
@@ -2191,19 +2196,31 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // ([`presolve_work_caps`])。時間の上限は安全網として `ENOMOTO_T_MIP_PRESOLVE_WORK_SAFE` 倍に延ばす
     let (wcap0, wcap1) = if presolve_work() {
         if adaptive && !submip {
-            (tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE0", 2.0e8, f64) as u64, tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE", 3.0e8, f64) as u64)
+            (tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE0", 1.15e9, f64) as u64, tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE", 3.0e9, f64) as u64)
         } else {
-            let w = tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_SUB", 5.0e7, f64) as u64;
+            let w = tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_SUB", 5.0e8, f64) as u64;
             (w, w)
         }
     } else {
         (u64::MAX, u64::MAX)
     };
     let (time_cap, time_cap_found) = if presolve_work() { (time_cap * presolve_work_safe(), time_cap_found * presolve_work_safe()) } else { (time_cap, time_cap_found) };
-    // 手間: 伝播で走査した行の長さ + 境界の変更で更新した活動の数 + 1 回の試し (両側) ごとに `ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_EACH`
+    // 手間 (およそナノ秒): 2.5 x 伝播で走査した行の長さ + 5 x 境界の変更で更新した活動の数 + 68 x 境界の変更の回数 + 190 x 集めた含意の数
+    // (+ 1 回の試しごとに `ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_EACH`、既定 0)。重みは 15 問の CPU 時間への回帰
+    // (analysis/presolve_work/fitprobe.py)。行の長さだけでは 1 秒あたり 3.4e6〜4e8 と散らばった
     let act0 = domain::act_work();
-    let each = tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_EACH", 100.0, f64) as u64;
-    let pwork = |dom: &Domain, probed: usize| (dom.debug_work() - work0) + (domain::act_work() - act0) + each * probed as u64;
+    let chg0 = domain::chg_count();
+    let e_init = edges.len();
+    let each = tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_EACH", 0.0, f64);
+    let (ww, wa, wc, wi) = (
+        tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_W_ROW", 2.5, f64),
+        tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_W_ACT", 5.0, f64),
+        tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_W_CHG", 68.0, f64),
+        tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_W_IMPL", 190.0, f64),
+    );
+    let pwork = |dom: &Domain, probed: usize, n_edges: usize| {
+        (ww * (dom.debug_work() - work0) as f64 + wa * (domain::act_work() - act0) as f64 + wc * (domain::chg_count() - chg0) as f64 + wi * n_edges.saturating_sub(e_init) as f64 + each * probed as f64) as u64
+    };
     // 予算の初期値は候補の数 (全部を一巡できる)。`ENOMOTO_T_MIP_PROBE_BASE` > 0 ならその回数。HiGHS の 1000 回は含意の多い列
     // から試す順番と組み合わせたもので、行の多い列から試すこちらの順番では、30n20b8 の固定できる列 (3 行の短い列、3161 本)
     // が候補の後ろ (4730 番目以降) に並び、1000 回では 1 本も固定できない (全部を試しても 0.96 秒で 3305 本固定)
@@ -2229,7 +2246,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         let fixed_pass0 = fixed;
         for (cnt, &j) in cands.iter().enumerate() {
             let (cap, wcap) = if fixed + tightened > 0 { (time_cap_found, wcap1) } else { (time_cap, wcap0) };
-            if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || pwork(&dom, probed) > wcap || cap_clock() - c0 > cap) {
+            if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || pwork(&dom, probed, edges.len()) > wcap || cap_clock() - c0 > cap) {
                 break 'passes;
             }
             if dom.lo[j] == dom.up[j] {
@@ -2462,13 +2479,14 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     edges.dedup();
     if verbose {
         eprintln!(
-            "MIP: probing: {probed} of {} binaries probed ({passes} passes), {fixed} fixed, {tightened} bounds tightened, {} implications ({:.2}s, cpu {:.2}s, work {}, pwork {})",
+            "MIP: probing: {probed} of {} binaries probed ({passes} passes), {fixed} fixed, {tightened} bounds tightened, {} implications ({:.2}s, cpu {:.2}s, work {}, pwork {}, chg {})",
             cands.len(),
             edges.len(),
             t0.elapsed().as_secs_f64(),
             cap_clock() - c0,
             dom.debug_work() - work0,
-            pwork(&dom, probed)
+            pwork(&dom, probed, edges.len()),
+            domain::chg_count() - chg0
         );
     }
     prob.conflict_edges = edges;

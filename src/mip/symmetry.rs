@@ -42,6 +42,23 @@ thread_local! {
     static WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+thread_local! {
+    /// [`WORK`] のうち `search` の色ごとの列の表を作る分 (較正用)
+    static SWORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// 確かめ (`verify`) の手間 (較正用)
+    static VWORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`VWORK`] の値。
+pub fn verify_work() -> u64 {
+    VWORK.with(|c| c.get())
+}
+
+/// [`SWORK`] の値。
+pub fn search_work() -> u64 {
+    SWORK.with(|c| c.get())
+}
+
 fn add_work(w: usize) {
     WORK.with(|c| c.set(c.get() + w as u64));
 }
@@ -92,6 +109,7 @@ fn row_hash(lo: f64, up: f64, entries: &mut [(usize, f64)]) -> u64 {
 /// 置換 `perm` が問題の対称性か確かめる。
 fn verify(p: &MipProblem, perm: &[usize], row_counts: &std::collections::HashMap<u64, i64>) -> bool {
     add_work(p.nnz + p.m + p.n);
+    VWORK.with(|c| c.set(c.get() + (p.nnz + p.m + p.n) as u64));
     for j in 0..p.n {
         let k = perm[j];
         if p.cost[j] != p.cost[k] || p.col_lo[j] != p.col_lo[k] || p.col_up[j] != p.col_up[k] || p.is_int[j] != p.is_int[k] {
@@ -293,6 +311,7 @@ fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: st
             return None;
         }
         add_work(2 * n);
+        SWORK.with(|c| c.set(c.get() + 2 * n as u64));
         // 色ごとの列 (A と B で同じ大きさでなければ失敗)
         let mut ma: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
         let mut mb: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
