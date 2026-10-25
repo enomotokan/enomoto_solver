@@ -96,6 +96,10 @@ struct Candidate {
 
 /// 診断 (`ENOMOTO_MIP_DEBUG_SEPPROF`): 根のカットのループの 1 ラウンドの時間を段階ごとに集計する (スレッドごと)。
 /// 根のループ (裏のループ・サブ MIP を除く) の終わりに、段階ごとの合計とラウンドあたりの時間、分離器ごとの候補と採った本数を出す
+/// `ENOMOTO_MIP_CUTSEL_PROBE` の根の比べの結果 (0 = まだ、1 = 既定、2 = POOL)。外側の最初の根で決め、背景のカットの求解 (別のスレッド) と
+/// 再スタートの後の根も同じ値を見る
+pub(super) static CUT_PROBE_CHOICE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 pub(super) mod sepprof {
     use std::cell::RefCell;
     pub const SRC_EXTRA: u8 = 0;
@@ -390,16 +394,48 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// physiciansched6-2 では HiGHS の根は tableau のカットを 1 ラウンドに 45〜157 本入れて 5〜8 ラウンドで下界を 49324 にする
     /// (tableau の分離を外すと 13 ラウンドで 47960)。ENOMOTO の既定は前景のカットが時間の上限で 0 ラウンド、上限を外しても 50 本ずつで
     /// 伸びず、広げると 1000 本の LP が 1.2 秒の上限に当たって捨てられていた (analysis/highstree_phys_20261024.md)
+    /// `ENOMOTO_MIP_CUTSEL_PROBE` の比べ: `cuts` (と根の選択を通さない `forced`) を今の LP に足して解き、下界の伸びと時間を返す。
+    /// 解いた後は行を外して LP の状態 (基底・LU) を元に戻す。解けなければ伸び 0。
+    fn probe_cut_gain(&mut self, cuts: &[Candidate], forced: &[Candidate]) -> (f64, f64) {
+        let t0 = std::time::Instant::now();
+        let obj0 = self.lp.objective();
+        let st0 = self.lp.save_state();
+        let m0 = self.lp.num_rows();
+        let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = cuts.iter().chain(forced.iter()).map(|c| (c.coefs.clone(), f64::NEG_INFINITY, c.rhs)).collect();
+        if rows.is_empty() {
+            return (0.0, 0.0);
+        }
+        self.lp.add_rows(&rows);
+        let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
+        let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap.min(1e6));
+        let d = Some(self.deadline.map_or(d, |g| g.min(d)));
+        let st = self.lp.solve(&SolveLimits { iteration_limit: 10 * self.avg_node_iters().max(1000) + 10_000, cutoff: f64::INFINITY, deadline: d });
+        let gain = if st == LpStatus::Optimal { self.lp.objective() - obj0 } else { 0.0 };
+        let mut remove = vec![false; self.lp.num_rows()];
+        for r in remove.iter_mut().skip(m0) {
+            *r = true;
+        }
+        self.lp.delete_rows(&remove);
+        self.lp.restore_state(&st0);
+        (gain, t0.elapsed().as_secs_f64())
+    }
+
+    /// `ENOMOTO_MIP_CUTSEL_PROBE` (試作、既定では使わない) で、根の 1 ラウンド目の比べで POOL の選び方が選ばれたか
+    /// (外側の求解の中だけ。背景のカットの求解と再スタートの後の根も同じ選択に従う)。
+    pub(super) fn probe_pool_on(&self) -> bool {
+        !self.params.submip && env_str!("ENOMOTO_MIP_CUTSEL_PROBE").is_some() && CUT_PROBE_CHOICE.load(std::sync::atomic::Ordering::Relaxed) == 2
+    }
+
     /// `ENOMOTO_MIP_CUTSEL_HIGHS_GUARD` のもとで固定費用のネットワーク型か: そこでは根のカットのプールの選び直しの部品
     /// (`ENOMOTO_MIP_ROOT_CUT_HIGHS`・`ENOMOTO_MIP_CUTSEL_HIGHS`・`ENOMOTO_MIP_CUTSEL_HIGHS_POOL`・`ENOMOTO_T_MIP_ROOT_CUT_AGE`) を使わない
     /// (mc11: 根の下界 11684 -> 11500〜11644)
     pub(super) fn cutsel_guard_fc(&self) -> bool {
-        self.fc_network && !self.params.submip && env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_GUARD").is_some()
+        self.fc_network && !self.params.submip && (env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_GUARD").is_some() || env_str!("ENOMOTO_MIP_CUTSEL_PROBE").is_some())
     }
 
     pub(super) fn root_cut_highs(&self) -> bool {
         // `ENOMOTO_MIP_CUTSEL_HIGHS_GUARD` なら固定費用のネットワーク型では使わない (mc11: 1 ラウンド 1000 本で根のループが 1.2 -> 13 秒)
-        env_str!("ENOMOTO_MIP_ROOT_CUT_HIGHS").is_some() && !self.params.submip && !self.cutsel_guard_fc()
+        (env_str!("ENOMOTO_MIP_ROOT_CUT_HIGHS").is_some() || self.probe_pool_on()) && !self.params.submip && !self.cutsel_guard_fc()
     }
 
     /// 根のカットのループの 1 回の LP の時間の上限 (全体に対する割合)。
@@ -423,6 +459,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         // 固定費用のネットワーク型か (`root_cut_highs` がループの初めから使うので先に決める。下でも同じ値を入れ直す)
         self.fc_network = !self.params.submip && fixed_charge_network(p);
+        // `ENOMOTO_MIP_CUTSEL_PROBE`: 外側の最初の根では前の求解の選択を消す (0 ラウンド目の比べで決め直す)
+        if !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && env_str!("ENOMOTO_MIP_CUTSEL_PROBE").is_some() {
+            CUT_PROBE_CHOICE.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
         let n = p.n;
         let mut stall = 0;
         let mut intobj_stall = 0usize;
@@ -512,8 +552,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // physiciansched6-2 (60 秒) は前処理と根の LP で 6〜7 秒かかり、上限 (開始から全体の 1 割 = 6 秒) を超えていて前景のカットが
         // 0 ラウンドだった。HiGHS は根のカットを 11〜13 ラウンド回して下界を 49324 (最適値) にする (analysis/highstree_phys_20261024.md)
         let cap_from_loop = (env_str!("ENOMOTO_MIP_CUT_CAP_FROM_LOOP").is_some() || self.root_cut_highs()) && !self.params.submip;
-        let min_rounds = if cap_from_loop { tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", if self.root_cut_highs() { 10usize } else { 0 }, usize) } else { 0 };
-        let cap_base = if (CLIQUE_FB_SECOND.with(|c| c.get()) && env_str!("ENOMOTO_MIP_CLIQUE_FB_SHARED_CAP").is_none()) || cap_from_loop { t_loop0 } else { self.cpu0 };
+        let mut min_rounds = if cap_from_loop { tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", if self.root_cut_highs() { 10usize } else { 0 }, usize) } else { 0 };
+        let mut cap_base = if (CLIQUE_FB_SECOND.with(|c| c.get()) && env_str!("ENOMOTO_MIP_CLIQUE_FB_SHARED_CAP").is_none()) || cap_from_loop { t_loop0 } else { self.cpu0 };
         let mut phase2_deadline = f64::INFINITY;
         let mut round_ctr = 0usize;
         // 診断 (`ENOMOTO_MIP_DEBUG_FACETIME`): このループの分離・面の頂点の分離・LP の時間の合計
@@ -549,7 +589,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 毎ラウンド候補が数千本あり、50 本ずつ切っても LP が切られていない別の箱に移るだけで下界が 415.24 から動かず、
         // 停滞判定で 5 ラウンドで止まっていた。下界が上がっている問題では起きないので、上限を一律に広げる
         // (40 問で悪化した) のと違い他の問題は変わらない
-        let widen_on = env_str!("ENOMOTO_MIP_NO_CUT_WIDEN").is_none() && !self.params.submip && !self.cut_agg_has('w') && !self.root_cut_highs();
+        let mut widen_on = env_str!("ENOMOTO_MIP_NO_CUT_WIDEN").is_none() && !self.params.submip && !self.cut_agg_has('w') && !self.root_cut_highs();
         let mut widened = false;
         // `ENOMOTO_MIP_CUT_ADAPT_ROUNDS` (実験的): ラウンドの上限に達したとき、直近 5 ラウンドの目的値の伸びがそれまでの伸びの
         // `ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_FRAC` 以上なら上限を 25 ラウンド延ばす (`ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP` まで)
@@ -727,7 +767,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 cands.extend(fcands);
             }
             // 再スタート前のカットをプールで引き継いだとき (`ENOMOTO_MIP_RESTART_CUTS_TO_POOL`): プールで違反しているものも候補にする
-            if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || (env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some() && !self.cutsel_guard_fc())) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
+            if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || ((env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some() || self.probe_pool_on()) && !self.cutsel_guard_fc())) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", if self.probe_pool_on() { 1000usize } else { 5 }, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
                 for (eff, k) in self.pool_violated(&x) {
                     let (c, r, _) = &self.cut_pool[k];
                     cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
@@ -767,7 +807,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let _ = std::fs::write(format!("{dir}/cands_r{round}.txt"), txt);
             }
             // 効き目の大きい順に、平行なものを除いて選ぶ
-            let max_cuts = if self.root_cut_highs() { tunable!("ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAX_CUTS", 500usize, usize) } else { tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize) }.min(p.m.max(50));
+            let max_cuts = if self.root_cut_highs() { tunable!("ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAX_CUTS", if self.probe_pool_on() { 1000usize } else { 500 }, usize) } else { tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize) }.min(p.m.max(50));
             let max_cuts = if adapt_max_cuts > 0 { adapt_max_cuts } else { max_cuts };
             let (forced, cands): (Vec<Candidate>, Vec<Candidate>) = cands.into_iter().partition(|c| c.forced);
             // `ENOMOTO_T_MIP_CUTSEL_AGG_QUOTA` = q (> 0、試作): 集約した行からのカット (tableau・経路集約) を、分離器ごとに
@@ -779,10 +819,43 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if q == 0 && (self.cut_agg_has('q') || (self.params.submip && super::submip_highs('q'))) { 50 } else { q }
             };
             let (quota_cuts, cands) = if agg_quota > 0 { pick_agg_quota(cands, agg_quota, p) } else { (Vec::new(), cands) };
+            // `ENOMOTO_MIP_CUTSEL_PROBE` (試作、既定では使わない): 外側の最初の根 (再スタートの前) の 0 ラウンド目で、既定の選び方 (50 本) と
+            // POOL の選び方 (HiGHS の点数、1000 本・平行度 0.1) の両方でカットを選び、それぞれを今の LP に足して温かい基底から解いた下界の
+            // 伸びを比べ、伸びの大きい方を以後の回し方 (時間の上限・本数・プールの戻し・年齢) ごと使う ([`Solver::probe_pool_on`])。
+            // 固定費用のネットワーク型では比べない (既定のまま)。計測 15 では POOL が roll3000・h80x6320d・binkar10_1・physiciansched6-2 で得、
+            // noswot・neos-960392・hypothyroid-k1・dcmulti で損で、どちらも同じ機械 4 回で再現した (analysis/highstree_phys_20261024.md §9)
+            let max_cuts = if round == 0 && job.is_none() && self.snap.is_none() && self.params.restarts == 0 && !self.params.submip && !self.fc_network && !phase2 && env_str!("ENOMOTO_MIP_CUTSEL_PROBE").is_some() {
+                let g_def = select_cuts(cands.clone(), tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize).min(p.m.max(50)), p);
+                let g_pool = self.select_cuts_highs(cands.clone(), 1000usize.min(p.m.max(50)), &x, tunable!("ENOMOTO_T_CUTSEL_HIGHS_MAXPAR", 0.1, f64));
+                let (d_def, t_def) = self.probe_cut_gain(&g_def, &forced);
+                let (d_pool, t_pool) = self.probe_cut_gain(&g_pool, &forced);
+                let rule = env_str!("ENOMOTO_MIP_CUTSEL_PROBE").unwrap_or("1");
+                let tol = 1e-6 * self.lp.objective().abs().max(1.0);
+                let pick_pool = match rule {
+                    // 時間あたりの伸び
+                    "rate" => d_pool / t_pool.max(1e-3) > d_def / t_def.max(1e-3) + 1e-12,
+                    _ => d_pool > d_def + tol,
+                };
+                CUT_PROBE_CHOICE.store(if pick_pool { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+                if self.params.verbose {
+                    eprintln!("MIP: cut selection probe: default {} cuts gain {d_def:.6e} ({t_def:.2}s), pool {} cuts gain {d_pool:.6e} ({t_pool:.2}s) -> {} (rule {rule})", g_def.len(), g_pool.len(), if pick_pool { "pool" } else { "default" });
+                }
+                if pick_pool {
+                    // 回し方も POOL に合わせる (ループの始めに決めた時間の上限の数え方・最低のラウンド数・広げる規則)
+                    cap_base = t_loop0;
+                    min_rounds = tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", 10usize, usize);
+                    widen_on = false;
+                    tunable!("ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAX_CUTS", 1000usize, usize).min(p.m.max(50))
+                } else {
+                    max_cuts
+                }
+            } else {
+                max_cuts
+            };
             let chosen = if phase2 {
                 let maxpar = tunable!("ENOMOTO_T_MIP_CUT_PHASE2_MAXPAR", 0.3, f64);
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
-            } else if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() && !self.cutsel_guard_fc() {
+            } else if (env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() || self.probe_pool_on()) && !self.cutsel_guard_fc() {
                 let maxpar = tunable!("ENOMOTO_T_CUTSEL_HIGHS_MAXPAR", 0.1, f64);
                 // `ENOMOTO_MIP_CUTSEL_HIGHS_GUARD` (試作、既定では使わない): HiGHS の点数での選択と既定の選択 (`select_cuts`) の両方を作り、
                 // 和を採る。固定費用のネットワーク型 (`fc_relax`) では HiGHS の点数を使わず、緩めた既定の選択のまま (上の条件。
@@ -1172,7 +1245,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 効いていないカットを外す (論理変数が基底にあり、行が緩んでいるもの)。`ENOMOTO_T_MIP_CUT_REMOVE_EVERY` ラウンドごと
             // `ENOMOTO_T_MIP_ROOT_CUT_AGE` > 0: HiGHS と同じく、効いていないラウンドが続いたカットだけを外す
             // (HiGHS の mip_lp_age_limit = 10)
-            let root_age = if self.cutsel_guard_fc() { 0 } else { tunable!("ENOMOTO_T_MIP_ROOT_CUT_AGE", 0u32, u32) };
+            let root_age = if self.cutsel_guard_fc() { 0 } else { tunable!("ENOMOTO_T_MIP_ROOT_CUT_AGE", if self.probe_pool_on() { 10u32 } else { 0 }, u32) };
             let t_rm0 = std::time::Instant::now();
             let rows_before = self.lp.num_rows();
             if root_age > 0 {
