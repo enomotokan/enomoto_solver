@@ -83,7 +83,6 @@ fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
     cands.truncate(n0 + 1);
 }
 
-#[derive(Clone)]
 /// `ENOMOTO_MIP_CUTSEL_PROBE_KEEP` の比べの片側の終わりの状態 (足した行・LP の状態・分離器の状態・回ったラウンド数)
 struct ProbeEnd<S> {
     rows: Vec<(Vec<(usize, f64)>, f64, f64)>,
@@ -96,6 +95,7 @@ struct ProbeEnd<S> {
     rounds: usize,
 }
 
+#[derive(Clone)]
 struct Candidate {
     coefs: Vec<(usize, f64)>,
     rhs: f64,
