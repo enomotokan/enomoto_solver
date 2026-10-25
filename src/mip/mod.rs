@@ -1519,6 +1519,21 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     let (mut col_lo, mut col_up) = (p.col_lo.clone(), p.col_up.clone());
     let (mut p_row_lo, mut p_row_up) = (p.row_lo.clone(), p.row_up.clone());
     let tiny0 = fix_tiny_width_columns(&p.rows, &mut p_row_lo, &mut p_row_up, &mut col_lo, &mut col_up, &p.is_int);
+    // `ENOMOTO_MIP_DUPCOL` (試作): 同じ列の 0-1 列のうち高い方を 0 に固定する ([`duplicate_binary_fixings`])
+    if env_str!("ENOMOTO_MIP_DUPCOL").is_some() {
+        let t0 = std::time::Instant::now();
+        let k = duplicate_binary_fixings(&p.rows, &p_row_lo, &p_row_up, &p.cols, &p.cost, &p.is_int, &mut col_lo, &mut col_up);
+        if verbose && k > 0 {
+            eprintln!("MIP: presolve: fixed {k} duplicate binary columns (DUPCOL, {:.2}s)", t0.elapsed().as_secs_f64());
+        }
+    }
+    // `ENOMOTO_MIP_DUAL_BOUND2` (試作): 双対の推論による境界の締め付け ([`dual_bound_tightening2`]、整数列も)
+    if env_str!("ENOMOTO_MIP_DUAL_BOUND2").is_some() {
+        let k = dual_bound_tightening2(&p.rows, &p_row_lo, &p_row_up, &p.cols, &p.cost, &p.is_int, &mut col_lo, &mut col_up);
+        if verbose && k > 0 {
+            eprintln!("MIP: presolve: tightened {k} column bounds by dual arguments (DUAL_BOUND2)");
+        }
+    }
     // 元の制約 (境界は丸め済みの MipProblem の値を使う)
     let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: if p.is_int[j] { VarType::Integer } else { VarType::Continuous }, lb: col_lo[j], ub: col_up[j] }).collect();
     let mut cons: Vec<ConstraintRow> = Vec::with_capacity(p.m);
@@ -2886,6 +2901,128 @@ pub(super) fn fj_p3_solution(x: Vec<f64>, post: &[crate::presolve::PostsolveStep
     }
 }
 
+/// 同じ列の 0-1 列の固定 (`ENOMOTO_MIP_DUPCOL`、試作。HiGHS の前処理の dominated columns が air03 で 2202 本、nw04 で
+/// 約 4 万本固定する分): 係数がすべて同じ 0-1 列の群で、群の 2 本を同時に 1 にできない行 (係数 a > 0 で
+/// `最小活動 + 2a > 上限`、または a < 0 で `最大活動 + 2a < 下限`) があれば、群のうち 1 になれるのは 1 本だけ。1 の列を
+/// 費用の最も小さい列と入れ替えても行は変わらず目的は悪くならないので、最も安い列 (同じなら番号の小さい列) を残し、
+/// ほかを 0 に固定する。列はハッシュで群に分ける (組を調べない)。固定した列の数を返す。
+#[allow(clippy::too_many_arguments)]
+fn duplicate_binary_fixings(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], cols: &[Vec<(usize, f64)>], cost: &[f64], is_int: &[bool], col_lo: &mut [f64], col_up: &mut [f64]) -> usize {
+    let binary = |j: usize, lo: &[f64], up: &[f64]| is_int[j] && lo[j] == 0.0 && up[j] == 1.0;
+    let mut groups: std::collections::HashMap<Vec<(usize, u64)>, Vec<usize>> = std::collections::HashMap::new();
+    for j in 0..cols.len() {
+        if binary(j, col_lo, col_up) && !cols[j].is_empty() {
+            let mut key: Vec<(usize, u64)> = cols[j].iter().map(|&(i, a)| (i, a.to_bits())).collect();
+            key.sort_unstable();
+            groups.entry(key).or_default().push(j);
+        }
+    }
+    let m = rows.len();
+    let (mut mn, mut mx) = (vec![0.0f64; m], vec![0.0f64; m]);
+    for (i, r) in rows.iter().enumerate() {
+        for &(j, a) in r {
+            let (l, u) = (col_lo[j], col_up[j]);
+            let (lo_c, up_c) = if a > 0.0 { (a * l, a * u) } else { (a * u, a * l) };
+            mn[i] += lo_c;
+            mx[i] += up_c;
+        }
+    }
+    let mut count = 0;
+    for (_, mut g) in groups.into_iter().filter(|(_, g)| g.len() > 1) {
+        // 群の 2 本 (0-1 列、下限 0 の寄与は 0) を 1 にした行の活動が範囲を外れる行があるか (活動が無限なら外れない)
+        let j0 = g[0];
+        let conflict = cols[j0].iter().any(|&(i, a)| (a > 0.0 && mn[i] + 2.0 * a > row_up[i] + 1e-9) || (a < 0.0 && mx[i] + 2.0 * a < row_lo[i] - 1e-9));
+        if !conflict {
+            continue;
+        }
+        g.sort_by(|&a, &b| cost[a].total_cmp(&cost[b]).then(a.cmp(&b)));
+        for &k in &g[1..] {
+            col_up[k] = 0.0;
+            count += 1;
+        }
+    }
+    count
+}
+
+/// 双対の推論による境界の締め付け (`ENOMOTO_MIP_DUAL_BOUND2`、試作。HiGHS の前処理が gt2 の整数列の上限を 9 -> 4 にする縮約):
+/// 費用が `c_j >= 0` の列 x_j の上限は、x_j を増やすと楽になる行 (の向き) をすべて、ほかの列の最悪の値でも満たす x_j の値
+/// `need` まで下げてよい (x_j > need の解は x_j = need にしても、楽になる行は満たしたまま、苦しくなる行は楽になり、目的は
+/// 悪くならない)。下限も向きを逆にして同じ。整数列は `need` を切り上げる。[`dual_bound_tightening`] は苦しくなる行が
+/// 1 本でもあるとやめるが、その条件は要らない。締めた境界は次の列の最悪の活動に使う (順に、それまでに締めた問題で正しい)。
+/// 締めた境界の数を返す。
+#[allow(clippy::too_many_arguments)]
+fn dual_bound_tightening2(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], cols: &[Vec<(usize, f64)>], cost: &[f64], is_int: &[bool], col_lo: &mut [f64], col_up: &mut [f64]) -> usize {
+    let m = rows.len();
+    let (mut mn, mut mx) = (vec![0.0f64; m], vec![0.0f64; m]);
+    let (mut mn_inf, mut mx_inf) = (vec![0u32; m], vec![0u32; m]);
+    let contrib = |a: f64, l: f64, u: f64| if a > 0.0 { (a * l, a * u) } else { (a * u, a * l) };
+    for (i, r) in rows.iter().enumerate() {
+        for &(j, a) in r {
+            let (lo_c, up_c) = contrib(a, col_lo[j], col_up[j]);
+            if lo_c.is_finite() { mn[i] += lo_c } else { mn_inf[i] += 1 }
+            if up_c.is_finite() { mx[i] += up_c } else { mx_inf[i] += 1 }
+        }
+    }
+    let mut count = 0;
+    for j in 0..cols.len() {
+        if col_lo[j] >= col_up[j] || cols[j].is_empty() {
+            continue;
+        }
+        for d in [1.0f64, -1.0] {
+            if d * cost[j] < 0.0 {
+                continue;
+            }
+            // y = d x_j。cur は y の上限、other は y の下限
+            let cur = if d > 0.0 { col_up[j] } else { -col_lo[j] };
+            let other = if d > 0.0 { col_lo[j] } else { -col_up[j] };
+            if !other.is_finite() {
+                continue;
+            }
+            let mut need = other;
+            let mut ok = true;
+            'rows: for &(i, a) in &cols[j] {
+                for (side, b) in [(1.0f64, row_up[i]), (-1.0, -row_lo[i])] {
+                    // side 向きの行: side * row <= b。y の係数 c。c > 0 の向きは y を減らすと楽になるので見なくてよい
+                    let c = side * d * a;
+                    if !b.is_finite() || c >= 0.0 {
+                        continue;
+                    }
+                    // y を増やすと楽になる向き: c y <= b - (ほかの列の活動)。ほかの列の最悪 = side 向きの最大活動
+                    let (act, inf) = if side > 0.0 { (mx[i], mx_inf[i]) } else { (-mn[i], mn_inf[i]) };
+                    let ax = side * a;
+                    let own = if ax > 0.0 { ax * col_up[j] } else { ax * col_lo[j] };
+                    let own_inf = !own.is_finite();
+                    if inf - own_inf as u32 > 0 {
+                        ok = false;
+                        break 'rows;
+                    }
+                    let rest = if own_inf { act } else { act - own };
+                    need = need.max((rest - b) / (-c));
+                }
+            }
+            if !ok || !need.is_finite() {
+                continue;
+            }
+            let nb = if is_int[j] { (need - 1e-9 * (1.0 + need.abs())).ceil().max(other) } else { need + 1e-9 * (1.0 + need.abs()) };
+            if nb < cur - 1e-6 * (1.0 + cur.abs().min(1e9)) {
+                // 行の活動を新しい境界で更新する
+                let (ol, ou) = (col_lo[j], col_up[j]);
+                if d > 0.0 { col_up[j] = nb } else { col_lo[j] = -nb }
+                for &(i, a) in &cols[j] {
+                    let (l0, u0) = contrib(a, ol, ou);
+                    let (l1, u1) = contrib(a, col_lo[j], col_up[j]);
+                    if l0.is_finite() { mn[i] -= l0 } else { mn_inf[i] -= 1 }
+                    if u0.is_finite() { mx[i] -= u0 } else { mx_inf[i] -= 1 }
+                    if l1.is_finite() { mn[i] += l1 } else { mn_inf[i] += 1 }
+                    if u1.is_finite() { mx[i] += u1 } else { mx_inf[i] += 1 }
+                }
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 fn dual_bound_tightening(prob: &mut MipProblem) -> usize {
     let m = prob.rows.len();
     let (mut mn, mut mx) = (vec![0.0f64; m], vec![0.0f64; m]);
@@ -3751,6 +3888,104 @@ mod tests {
 
     /// 双対の推論による連続列の上限 ([`dual_bound_tightening`]) は最適解を落とさない: 0-1 列 x と罰則の連続列 w
     /// (`a x - w <= b`、費用は正) の問題で、総当たりの最適解 (w = max(0, a x - b) の最小) が締めた境界の中にある
+    /// 同じ列の 0-1 列の固定 ([`duplicate_binary_fixings`]) は最適値を変えない: 列 6 本のうち 2〜3 本を同じ列にした
+    /// 小さな問題で、固定した箱の総当たりの最適値が元の最適値と同じ
+    #[test]
+    fn duplicate_binary_fixings_keep_optimum() {
+        let mut seed = 99u64;
+        let mut rnd = |k: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % k
+        };
+        let mut fixed = 0;
+        for _ in 0..3000 {
+            let n = 6;
+            let m = 1 + rnd(3) as usize;
+            let dup = 2 + rnd(2) as usize; // 列 0..dup を同じ列にする
+            let (mut rows, mut rlo, mut rup) = (Vec::new(), Vec::new(), Vec::new());
+            for _ in 0..m {
+                let a0 = rnd(5) as f64 - 2.0;
+                let r: Vec<(usize, f64)> = (0..n).filter_map(|j| { let a = if j < dup { a0 } else { rnd(5) as f64 - 2.0 }; (a != 0.0).then_some((j, a)) }).collect();
+                if r.is_empty() {
+                    continue;
+                }
+                let b = rnd(5) as f64 - 1.0;
+                match rnd(3) {
+                    0 => { rlo.push(f64::NEG_INFINITY); rup.push(b); }
+                    1 => { rlo.push(b); rup.push(f64::INFINITY); }
+                    _ => { rlo.push(b); rup.push(b); }
+                }
+                rows.push(r);
+            }
+            let cost: Vec<f64> = (0..n).map(|_| rnd(5) as f64 - 2.0).collect();
+            let p = MipProblem::from_rows(vec![0.0; n], vec![1.0; n], cost, 0.0, 1.0, vec![true; n], rows, rlo, rup);
+            let best = |lo: &[f64], up: &[f64]| -> f64 {
+                let mut z = f64::INFINITY;
+                for mask in 0..(1u32 << n) {
+                    let x: Vec<f64> = (0..n).map(|j| ((mask >> j) & 1) as f64).collect();
+                    if (0..n).all(|j| x[j] >= lo[j] && x[j] <= up[j]) && p.is_feasible(&x, 1e-9) {
+                        z = z.min(p.objective(&x));
+                    }
+                }
+                z
+            };
+            let (mut lo, mut up) = (p.col_lo.clone(), p.col_up.clone());
+            fixed += duplicate_binary_fixings(&p.rows, &p.row_lo, &p.row_up, &p.cols, &p.cost, &p.is_int, &mut lo, &mut up);
+            assert_eq!(best(&p.col_lo, &p.col_up), best(&lo, &up), "fixings {up:?} change the optimum: rows {:?} lo {:?} up {:?} cost {:?}", p.rows, p.row_lo, p.row_up, p.cost);
+        }
+        assert!(fixed > 0);
+    }
+
+    /// 双対の推論による境界 ([`dual_bound_tightening2`]、整数列も) は最適値を変えない: 列 4 本 (整数 0..3)、
+    /// 片側・両側の行のある小さな問題で、締めた箱の総当たりの最適値が元の箱の最適値と同じ
+    #[test]
+    fn dual_bound_tightening2_keeps_optimum() {
+        let mut seed = 4242u64;
+        let mut rnd = |k: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % k
+        };
+        let mut tightened = 0;
+        for _ in 0..3000 {
+            let n = 4;
+            let m = 1 + rnd(3) as usize;
+            let (mut rows, mut rlo, mut rup) = (Vec::new(), Vec::new(), Vec::new());
+            for _ in 0..m {
+                let r: Vec<(usize, f64)> = (0..n).filter_map(|j| { let a = rnd(7) as f64 - 3.0; (a != 0.0).then_some((j, a)) }).collect();
+                if r.is_empty() {
+                    continue;
+                }
+                let b = rnd(9) as f64 - 2.0;
+                match rnd(3) {
+                    0 => { rlo.push(f64::NEG_INFINITY); rup.push(b); }
+                    1 => { rlo.push(b); rup.push(f64::INFINITY); }
+                    _ => { rlo.push(b); rup.push(b + rnd(3) as f64); }
+                }
+                rows.push(r);
+            }
+            let cost: Vec<f64> = (0..n).map(|_| rnd(5) as f64 - 2.0).collect();
+            let p = MipProblem::from_rows(vec![0.0; n], vec![3.0; n], cost, 0.0, 1.0, vec![true; n], rows, rlo, rup);
+            let best = |lo: &[f64], up: &[f64]| -> f64 {
+                let mut z = f64::INFINITY;
+                for code in 0..4u32.pow(n as u32) {
+                    let x: Vec<f64> = (0..n).map(|j| ((code / 4u32.pow(j as u32)) % 4) as f64).collect();
+                    if (0..n).all(|j| x[j] >= lo[j] && x[j] <= up[j]) && p.is_feasible(&x, 1e-9) {
+                        z = z.min(p.objective(&x));
+                    }
+                }
+                z
+            };
+            let (mut lo, mut up) = (p.col_lo.clone(), p.col_up.clone());
+            tightened += dual_bound_tightening2(&p.rows, &p.row_lo, &p.row_up, &p.cols, &p.cost, &p.is_int, &mut lo, &mut up);
+            assert_eq!(best(&p.col_lo, &p.col_up), best(&lo, &up), "bounds {lo:?} {up:?} change the optimum: rows {:?} lo {:?} up {:?} cost {:?}", p.rows, p.row_lo, p.row_up, p.cost);
+        }
+        assert!(tightened > 0);
+    }
+
     #[test]
     fn dual_bound_tightening_keeps_optimum() {
         let mut seed = 777u64;
