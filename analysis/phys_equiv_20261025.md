@@ -140,4 +140,30 @@
 候補 pecce = E2 + POOL + CCE (環境変数そのまま: `ENOMOTO_MIP_PROBE_EQUIV2=1 ENOMOTO_MIP_ROOT_CUT_HIGHS=1 ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAX_CUTS=1000
 ENOMOTO_MIP_CUTSEL_HIGHS=1 ENOMOTO_MIP_CUTSEL_HIGHS_POOL=1 ENOMOTO_T_MIP_ROOT_POOL_ROUNDS=1000 ENOMOTO_T_MIP_ROOT_CUT_AGE=10 ENOMOTO_MIP_CUT_CLIQUE_EXTEND=1`)。
 
-RESULTS_PLACEHOLDER
+順: pedef r1 → pecce r1 → pecce r2 → pedef r2 (`logs/batch_pe.out`)。時間は最適の証明まで、TL は時間切れ (暫定解)。
+
+| 問題 | HiGHS | 既定 (pedef) r1・r2 | **pecce** r1・r2 |
+|---|---|---|---|
+| **physiciansched6-2 (4 回)** | 10.8 秒 | (前回まで 4/4 TL) | **最適 21.3・20.6・21.0・45.9 秒 (4/4)** |
+| 10teams | 1.6 | 4.3・13.4 | 12.0・12.7 |
+| noswot | TL | 31.5・27.3 | **TL・TL** |
+| nw04 | 57.9 | 9.0・9.4 | 9.6・10.6 |
+| h80x6320d | 17.4 | 51.4・55.2 | **26.7・27.4** |
+| nursesched-sprint02 | 27.0 | 24.5・24.2 | 27.2・32.7 |
+| hypothyroid-k1 | 12.8 | 25.3・25.2 | **40.7・45.2** |
+| mzzv42z | 50.1 | TL −20470・TL −20450 | TL −20500・TL −20540 |
+| neos-960392 | 13.9 | 35.8・TL −227 | 40.5・41.3 |
+| roll3000 | 46.3 | TL 12916・TL 12902 | **47.6・47.8** |
+
+- physiciansched6-2 は 4 回とも 49324 で最適 (3 回は 21 秒前後、1 回 45.9 秒)。
+- 副作用は POOL のもの (前回 §8: noswot・hypothyroid-k1 の損、h80x6320d・roll3000・neos-960392 の得) とほぼ同じ形。CCE だけの副作用は分けていない
+  (POOL と pecce の比べは今回は回していない)。
+- 目的値の不一致はなし (最適と報告したものはどれも HiGHS の値と同じ: physiciansched6-2 49324、10teams 924、noswot −41、nw04 16862、h80x6320d 6382.09905、
+  nursesched-sprint02 58、hypothyroid-k1 −2851、neos-960392 −238、roll3000 12890)。
+
+推測:
+
+- pecce を既定にするかは、POOL の損 (noswot・hypothyroid-k1) の扱いと同じ問題になる。CCE を POOL なしの既定の根のループで効かせるには、前景の根のカットが
+  時間の上限で 0 ラウンドになる件 (前回 §1.3) を先に直す必要がある。
+- 次の 1 段: (1) CCE を POOL に足した形 (pool vs pecce) を同じ機械で比べて CCE 自体の副作用を分ける、(2) 49324 に着いた後のラウンド (6 ラウンド、約 4 秒) を
+  停滞の判定 (`ENOMOTO_MIP_CUT_STALL_HIGHS`) で切る。
