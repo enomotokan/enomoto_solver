@@ -252,6 +252,109 @@ impl<'a, L: MipLp> Solver<'a, L> {
         chosen.into_iter().map(|(_, c)| c).collect()
     }
 
+    /// `ENOMOTO_MIP_CUT_CLIQUE_EXTEND` (試作、既定では使わない): 根のカットのループで LP に入れるカットのうち集合詰め込みの形
+    /// (0-1 列だけ、係数の絶対値がそろい、文字の和 <= 1) のものを、衝突グラフ ([`Self::clique_graph_get`]、元の行 + プロービングの含意)
+    /// と前のラウンドまでに入れた同じ形のカットの文字の組で、極大なクリークまで延ばす (前処理のクリーク行の拡張
+    /// [`super::extend_clique_rows`] と同じ規則。足す文字は LP 解の値の大きい順)。physiciansched6-2 では根のカットの大半が非零 2 の
+    /// 衝突のカットで、根のループは 49224 で止まるが、再スタートの前処理がそのカットの行を延ばすと (834 行に 1488 非零) 根の LP が
+    /// そのまま 49324 (最適値) になる。延ばした後で同じになったカットは 1 本にする
+    fn extend_clique_cuts(&mut self, chosen: &mut Vec<Candidate>, x: &[f64], round: usize) {
+        let p = self.p;
+        let g = self.clique_graph_get();
+        let max_add = tunable!("ENOMOTO_T_MIP_CUT_CLIQUE_EXTEND_MAX", 1000usize, usize);
+        let is_bin = |j: usize| p.is_int[j] && self.dom.global_lo[j] == 0.0 && self.dom.global_up[j] == 1.0;
+        let val = |l: u32| -> f64 {
+            let j = (l / 2) as usize;
+            if l % 2 == 0 { x[j] } else { 1.0 - x[j] }
+        };
+        let (mut ext, mut added, mut sp) = (0usize, 0usize, 0usize);
+        let mut seen: std::collections::HashSet<Vec<u32>> = std::collections::HashSet::new();
+        let mut keep = vec![true; chosen.len()];
+        for (ci, c) in chosen.iter_mut().enumerate() {
+            if c.coefs.len() < 2 {
+                continue;
+            }
+            let s = c.coefs[0].1.abs();
+            if !(s > 0.0) || !c.coefs.iter().all(|&(j, a)| is_bin(j) && ((a.abs() - s).abs() <= 1e-9 * s)) {
+                continue;
+            }
+            let nneg = c.coefs.iter().filter(|&&(_, a)| a < 0.0).count() as f64;
+            if ((c.rhs / s + nneg) - 1.0).abs() > 1e-9 {
+                continue;
+            }
+            sp += 1;
+            let mut lits: Vec<u32> = c.coefs.iter().map(|&(j, a)| if a > 0.0 { 2 * j as u32 } else { 2 * j as u32 + 1 }).collect();
+            let adj = |a: u32, b: u32| g.adjacent(a, b) || self.cut_clique_adj.get(&a).is_some_and(|v| v.contains(&b));
+            // 候補: 隣接の最も少ない文字の隣接 (グラフ + 前のカット)
+            let &l0 = lits.iter().min_by_key(|&&l| g.neighbors(l).len() + self.cut_clique_adj.get(&l).map_or(0, |v| v.len())).unwrap();
+            let in_cut: std::collections::HashSet<usize> = c.coefs.iter().map(|&(j, _)| j).collect();
+            let mut cands: Vec<u32> = g.neighbors(l0).iter().copied().chain(self.cut_clique_adj.get(&l0).into_iter().flatten().copied()).filter(|&l| {
+                let j = (l / 2) as usize;
+                !in_cut.contains(&j) && is_bin(j)
+            }).collect();
+            cands.sort_unstable();
+            cands.dedup();
+            cands.sort_by(|&a, &b| val(b).total_cmp(&val(a)).then(a.cmp(&b)));
+            let n0 = lits.len();
+            for l in cands {
+                if lits.len() - n0 >= max_add {
+                    break;
+                }
+                if lits.iter().any(|&m| m / 2 == l / 2) {
+                    continue;
+                }
+                if lits.iter().all(|&m| adj(m, l)) {
+                    lits.push(l);
+                }
+            }
+            let mut key = lits.clone();
+            key.sort_unstable();
+            if !seen.insert(key) {
+                keep[ci] = false;
+                continue;
+            }
+            // カットの組を前のカットの辺として覚える (次のラウンドから使う)
+            if lits.len() > n0 {
+                ext += 1;
+                added += lits.len() - n0;
+                let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(lits.len());
+                let mut rhs = 1.0;
+                for &l in &lits {
+                    let j = (l / 2) as usize;
+                    if l % 2 == 0 {
+                        coefs.push((j, 1.0));
+                    } else {
+                        coefs.push((j, -1.0));
+                        rhs -= 1.0;
+                    }
+                }
+                coefs.sort_unstable_by_key(|e| e.0);
+                c.coefs = coefs;
+                c.rhs = rhs;
+            }
+            if lits.len() <= 64 {
+                for a in 0..lits.len() {
+                    for b in 0..lits.len() {
+                        if a != b && !g.adjacent(lits[a], lits[b]) {
+                            let v = self.cut_clique_adj.entry(lits[a]).or_default();
+                            if !v.contains(&lits[b]) {
+                                v.push(lits[b]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut k = 0;
+        chosen.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+        if self.params.verbose {
+            eprintln!("MIP: cut round {round}: clique extension of cuts: {sp} set packing cuts, {ext} extended by {added} literals ({} literals with cut edges)", self.cut_clique_adj.len());
+        }
+    }
+
     /// clique カット用の衝突グラフ (根で一度だけ作って使い回す)。
     fn clique_graph_get(&mut self) -> std::rc::Rc<super::clique::CliqueGraph> {
         let p = self.p;
@@ -874,6 +977,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let saturated = adapt_max && chosen.len() >= max_cuts;
             if saturated {
                 adapt_max_cuts = (2 * max_cuts).min(tunable!("ENOMOTO_T_MIP_CUT_ADAPT_MAX_CAP", 500usize, usize)).max(max_cuts);
+            }
+            if !self.params.submip && env_str!("ENOMOTO_MIP_CUT_CLIQUE_EXTEND").is_some() {
+                self.extend_clique_cuts(&mut chosen, &x, round);
             }
             let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
             total_added += rows.len();

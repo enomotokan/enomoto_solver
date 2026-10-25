@@ -230,6 +230,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) last_sb: Option<(usize, f64, f64)>,
     /// clique カット用の 2 値列の衝突グラフ (根で作る)。
     pub(super) clique_graph: Option<std::rc::Rc<super::clique::CliqueGraph>>,
+    /// `ENOMOTO_MIP_CUT_CLIQUE_EXTEND`: 根のカットのループで LP に入れた集合詰め込みの形のカットの文字の組 (衝突グラフに足す辺。文字 -> 隣の文字)
+    pub(super) cut_clique_adj: std::collections::HashMap<u32, Vec<u32>>,
     /// `ENOMOTO_MIP_CLIQUE_CUTS=auto` の判定 (根で一度だけ試す。`None` は未判定)。
     pub(super) clique_auto: Option<bool>,
     /// ヒューリスティクスに使った LP 反復数。
@@ -1669,6 +1671,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_agree_stats: [0; 3],
         last_sb: None,
         clique_graph: None,
+        cut_clique_adj: std::collections::HashMap::new(),
         clique_auto: None,
         heur_iters: 0,
         heur_iters_root: 0,

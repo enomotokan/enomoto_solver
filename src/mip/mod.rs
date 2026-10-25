@@ -1792,7 +1792,13 @@ fn substitute_probe_equiv(prob: &MipProblem, mut postsolve: Vec<crate::presolve:
     let equiv = PROBE_EQUIV.with(|e| std::mem::take(&mut *e.borrow_mut()));
     let depth = PROBE_EQUIV_DEPTH.with(|d| d.get());
     if !equiv.is_empty() && depth < tunable!("ENOMOTO_T_MIP_PROBE_EQUIV_ROUNDS", 2usize, usize) {
-        let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, .. } = prob.clone();
+        // `ENOMOTO_MIP_EQUIV_EXTEND_FIRST` (試作、既定では使わない): 組の等式を足す前に、プロービングの含意を含む衝突グラフで
+        // クリーク行の拡張 ([`extend_clique_rows`]) をかける (HiGHS の探りは延長 (持ち上げ) を先に入れてから同値の列を代入する)。
+        // physiciansched6-2 では代入を先にすると、その後の延長が弱く (HiGHS の探りでも持ち上げ 1745 -> 140〜580 個)、
+        // HiGHS の根のカットも 49324 に届かない。延長を先にすると HiGHS は 13 ラウンドで 49324 に着く (analysis/phys_equiv_20261025.md)
+        let ext_first = env_str!("ENOMOTO_MIP_EQUIV_EXTEND_FIRST").is_some() && !submip && env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none();
+        let base = if ext_first { extend_clique_rows(prob.clone(), verbose) } else { prob.clone() };
+        let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, .. } = base;
         for &(j, k, neg) in &equiv {
             let (a, b) = (j.min(k), j.max(k));
             rows.push(vec![(a, 1.0), (b, if neg { 1.0 } else { -1.0 })]);

@@ -1,0 +1,146 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option time_limit to 60
+readMPS: Trying to open file dump/def_pre1.mps
+readMPS: Read NAME    OK
+readMPS: Read ROWS    OK
+readMPS: Read COLUMNS OK
+readMPS: Read RHS     OK
+readMPS: Read RANGES  OK
+readMPS: Read BOUNDS  OK
+ MIP      : def_pre1
+Rows      : 12119
+Cols      : 111827
+Nonzeros  : 45274
+Integer   : 109346 (5443 binary)
+Coefficient ranges:
+  Matrix  [5e-01, 1e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 8e+03]
+  RHS     [1e+00, 8e+02]
+Presolving model
+Permitted suppression of presolve rules via presolve_rule_off option:
+   Rule  6 (set bit  6 =    64): Forcing row
+   Rule  7 (set bit  7 =   128): Forcing col
+   Rule  8 (set bit  8 =   256): Free col substitution
+   Rule  9 (set bit  9 =   512): Doubleton equation
+   Rule 10 (set bit 10 =  1024): Dependent equations
+   Rule 11 (set bit 11 =  2048): Dependent free columns
+   Rule 12 (set bit 12 =  4096): Aggregator
+   Rule 13 (set bit 13 =  8192): Parallel rows and columns
+   Rule 14 (set bit 14 = 16384): Sparsify
+   Rule 15 (set bit 15 = 32768): Probing
+   Rule 16 (set bit 16 = 65536): Enumeration
+   Rule 17 (set bit 17 = 131072): Dual fixing
+   Rule 18 (set bit 18 = 262144): Col stuffing
+   Rule 19 (set bit 19 = 524288): Initial sweep
+11892 rows, 5979 cols, 43849 nonzeros 0s
+Sparsify removed 1.6% of nonzeros
+Fixed 3 dominated columns and strengthened 0 bounds
+9600 rows, 5416 cols, 39390 nonzeros 0s
+4782 probing evaluations: 90 deleted rows, 732 deleted columns, 1745 lifted nonzeros
+Sparsify removed 0.1% of nonzeros
+4156 probing evaluations: 0 deleted rows, 30 deleted columns, 0 lifted nonzeros
+Sparsify removed 0.0% of nonzeros
+8863 rows, 4549 cols, 39898 nonzeros 1s
+Presolve reductions: rows 8863(-3256); columns 4549(-107278); nonzeros 39898(-5376) 
+
+Solving MIP model with:
+   8863 rows
+   4549 cols (4126 binary, 0 integer, 414 implied int., 9 continuous, 0 domain fixed)
+   39898 nonzeros
+   Thread count 2 (of 4 threads). Using 1 max workers. Parallel search off
+Feasibility Jump: starting solve. weightUpdateDecay=1, relaxContinuous=0  
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   35707.5         inf                  inf        0      0      0         0     1.3s
+         0       0         0   0.00%   46798.715152    inf                  inf        0      0      5      6710     3.7s
+Fixing 6 columns (6 integers) sitting at bound at analytic center
+         0       0         0   0.00%   49024           inf                  inf     1523    368    322     14010     9.4s
+         0       0         0   0.00%   49324           inf                  inf     3186    503    351     20199    14.8s
+
+HighsPrimalHeuristics::solveSubMip Before run() for     MIP at depth  0 on thread  0
+HighsPrimalHeuristics::solveSubMip After  run() for     MIP at depth  0 on thread  0
+
+ L       0       0         0   0.00%   49324           49324              0.00%     3684    472    368     22219    16.7s
+         1       0         1 100.00%   49324           49324              0.00%     3684    472    368     22386    16.7s
+
+Solving report
+  Model             def_pre1
+  Status            Optimal
+  Primal bound      49324
+  Dual bound        49324
+  Gap               0% (tolerance: 0.01%)
+  P-D integral      0
+  Solution status   feasible
+                    49324 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            16.73
+                    1.28 (Presolve)
+                        MIP    time [calls] = 1.15 [1]
+                        subMIP time [calls] = 0.13 [1]
+                    15.44 (Solve)
+                        MIP    time [calls] = 15.40 [1]
+                        subMIP time [calls] = 0.04 [1]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [1]
+  Max sub-MIP depth 2
+  Nodes             1
+  Repair LPs        0
+  LP iterations     22386
+                    0 (strong br.)
+                    15509 (separation)
+                    167 (heuristics)
+getKktFailures:: cost norm =        1; bound norm =    4e+03
+getKktFailures:                      LP  (abs / rel)         Col (abs / rel)         Row (abs / rel)
+getKktFailures: primal infeasibility        0 /        0            0 /        0            0 /        0
+
+MIP sub-solver profiling: number of threads used = 2
+
+Thread 0
+Solver                    Calls    Time       Time/call      MIP%
+MIP                           1  1.6733e+01  1.6733e+01
+Du simplex (basis)           31  7.6188e+00  2.4577e-01      45.5
+Du simplex (no basis)         1  2.1375e+00  2.1375e+00      12.8
+Sub-MIP                       1  1.7190e-01  1.7190e-01       1.0
+TOTAL                            9.9282e+00                  59.3
+
+Thread 1
+Solver                    Calls    Time       Time/call      MIP%
+IPX (AC)                      1  7.7067e-01  7.7067e-01       4.6
+TOTAL                            7.7067e-01                   4.6
+
+Sub-MIP sub-solver profiling
+
+Thread 0
+Solver                    Calls    Time       Time/call  Sub-MIP%
+Du simplex (basis)            4  1.3092e-02  3.2730e-03       7.6
+TOTAL                            1.3092e-02                   7.6
+
+Percent (sub-)MIP time by thread
+
+MIP sub-solver            0     1
+Du simplex (basis)     45.5      
+Du simplex (no basis)  12.8      
+IPX (AC)                      4.6
+Sub-MIP                 1.0      
+=================================
+Total                  59.3   4.6
+=================================
+
+Sub-MIP sub-solver        0     1
+Du simplex (basis)      7.6      
+=================================
+Total                   7.6      
+=================================
