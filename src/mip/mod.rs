@@ -2073,12 +2073,12 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     Some(n_fixed)
 }
 
-/// `ENOMOTO_MIP_PRESOLVE_WORK` (試作、既定では使わない): 前処理の中の打ち切り (LP による固定・プロービング・対称性の検出) を
+/// `ENOMOTO_MIP_PRESOLVE_WORK` (既定 1、`0` で外す。計測 21 で既定化): 前処理の中の打ち切り (LP による固定・プロービング・対称性の検出) を
 /// 壁時計・CPU 時間ではなく手間 (LP の反復の数・伝播で走査した行の長さ・色の細分化で読んだ非零の数) の上限で決める。
 /// 前処理の結果が時間の上限・機械の速さ・負荷・回で変わらないようにする。時間の上限は安全網として残す
 /// ([`presolve_work_safe`] 倍)。
 pub(crate) fn presolve_work() -> bool {
-    env_str!("ENOMOTO_MIP_PRESOLVE_WORK").is_some()
+    env_def!("ENOMOTO_MIP_PRESOLVE_WORK", "1").is_some()
 }
 
 /// [`presolve_work`] のとき、元の時間の上限を何倍の安全網にするか (`ENOMOTO_T_MIP_PRESOLVE_WORK_SAFE`、既定 10 倍)。
