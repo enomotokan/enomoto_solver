@@ -396,7 +396,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 伸びず、広げると 1000 本の LP が 1.2 秒の上限に当たって捨てられていた (analysis/highstree_phys_20261024.md)
     /// `ENOMOTO_MIP_CUTSEL_PROBE` の比べ: 既定 (`pool` = false: [`select_cuts`]、50 本) または POOL (HiGHS の点数、1000 本・平行度 0.1、
     /// 2 ラウンド目からはプールで違反しているカットも候補) の選び方で `k` ラウンド (毎ラウンド分離し直す) 回し、下界の伸び・時間・足したカットの本数を返す。終わったら足した行を外し、LP の状態 (基底・LU) と HiGHS の点数の状態を元に戻す。
-    fn probe_cut_mode(&mut self, pool: bool, k: usize) -> (f64, f64, usize) {
+    /// 戻り値の 1 つ目はラウンドごとの (そこまでの伸び, そこまでの時間)。`stop` が真を返したら (ラウンドの番号, 伸び, 時間)、または
+    /// `deadline` を過ぎたら、`k` ラウンドを待たずにやめる。
+    fn probe_cut_mode(&mut self, pool: bool, k: usize, deadline: std::time::Instant, stop: &dyn Fn(usize, f64, f64) -> bool) -> (Vec<(f64, f64)>, usize) {
         let p = self.p;
         let t0 = std::time::Instant::now();
         let obj0 = self.lp.objective();
@@ -411,9 +413,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let keep_iters = self.lp.total_iterations();
         let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
         let mut gain = 0.0;
+        let mut hist: Vec<(f64, f64)> = Vec::new();
         let mut nadd = 0usize;
         for r in 0..k {
-            if self.time_up() {
+            if self.time_up() || (r > 0 && std::time::Instant::now() >= deadline) {
                 break;
             }
             let (cands, forced_r): (Vec<Candidate>, Vec<Candidate>) = {
@@ -447,6 +450,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             gain = self.lp.objective() - obj0;
+            hist.push((gain, t0.elapsed().as_secs_f64()));
+            if stop(r, gain, t0.elapsed().as_secs_f64()) {
+                break;
+            }
             if self.lp.objective() <= before + 1e-9 * before.abs().max(1.0) && r > 0 {
                 break;
             }
@@ -462,7 +469,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (self.tab_memo, self.tab_memo_mode, self.tab_memo_stats, self.tab_calls, self.tab_tries) = keep_tab;
         (self.face_secs, self.face_used, self.face_off_loop, self.sep_par_cpu, self.last_cut_lp_secs) = keep_face;
         self.lp.set_total_iterations(keep_iters);
-        (gain, t0.elapsed().as_secs_f64(), nadd)
+        let _ = gain;
+        (hist, nadd)
     }
 
     /// `ENOMOTO_MIP_CUTSEL_PROBE` (試作、既定では使わない) で、根の 1 ラウンド目の比べで POOL の選び方が選ばれたか
@@ -741,15 +749,58 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if round == 0 && probe_pending {
                 let c0 = super::cap_clock();
                 let k = tunable!("ENOMOTO_T_MIP_CUTSEL_PROBE_ROUNDS", 3usize, usize).max(1);
-                let (d_def, t_def, n_def) = self.probe_cut_mode(false, k);
-                let (d_pool, t_pool, n_pool) = self.probe_cut_mode(true, k);
                 let rule = env_str!("ENOMOTO_MIP_CUTSEL_PROBE").unwrap_or("1");
                 let tol = 1e-6 * self.lp.objective().abs().max(1.0);
+                // 早い打ち切り (`rate` のとき): 時間あたりの伸びの比が `ENOMOTO_T_MIP_CUTSEL_PROBE_RATIO` (3) 倍を超えるか、両方とも伸びが 0 なら
+                // 決める。比べの合計時間の上限は全体の `ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC` (0.05)。既定 = 0 で打ち切らない (§10 の形)
+                let ratio = tunable!("ENOMOTO_T_MIP_CUTSEL_PROBE_RATIO", 0.0, f64);
+                let tfrac = tunable!("ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC", if ratio > 0.0 { 0.05 } else { 0.0 }, f64);
+                let budget = if tfrac > 0.0 && self.params.time_limit.is_finite() { tfrac * self.params.time_limit } else { f64::INFINITY };
+                let t_probe0 = std::time::Instant::now();
+                let deadline = t_probe0 + std::time::Duration::from_secs_f64(budget.min(1e6));
+                let rate = |g: f64, t: f64| g.max(0.0) / t.max(1e-3);
+                let decisive = |a: (f64, f64), b: (f64, f64)| -> bool {
+                    if ratio <= 0.0 {
+                        return false;
+                    }
+                    if a.0 <= tol && b.0 <= tol {
+                        return true;
+                    }
+                    let (ra, rb) = (rate(a.0, a.1), rate(b.0, b.1));
+                    ra.max(rb) > ratio * ra.min(rb).max(1e-12)
+                };
+                let never = |_: usize, _: f64, _: f64| false;
+                let mut early = "";
+                let (mut hd, mut nd) = self.probe_cut_mode(false, if ratio > 0.0 { 1 } else { k }, deadline, &never);
+                let (mut hp, mut np) = self.probe_cut_mode(true, if ratio > 0.0 { 1 } else { k }, deadline, &never);
+                if ratio > 0.0 && k > 1 {
+                    let first_ok = !hd.is_empty() && !hp.is_empty();
+                    if first_ok && decisive(hd[0], hp[0]) {
+                        early = "after round 1";
+                    } else if std::time::Instant::now() >= deadline {
+                        early = "time budget";
+                    } else {
+                        let (hd2, nd2) = self.probe_cut_mode(false, k, deadline, &never);
+                        let hd_ref = hd2.clone();
+                        let stop = move |r: usize, g: f64, t: f64| r < hd_ref.len() && decisive(hd_ref[r], (g, t));
+                        let (hp2, np2) = self.probe_cut_mode(true, k, deadline, &stop);
+                        (hd, nd, hp, np) = (hd2, nd2, hp2, np2);
+                        early = if hp.len() < k { "pool stopped early" } else { "full" };
+                    }
+                }
+                // 両方がそろっている同じラウンド数の値で比べる
+                let m = hd.len().min(hp.len());
+                let (d_def, t_def) = if m > 0 { hd[m - 1] } else { (0.0, 0.0) };
+                let (d_pool, t_pool) = if m > 0 { hp[m - 1] } else { (0.0, 0.0) };
+                let (n_def, n_pool) = (nd, np);
                 let pick_pool = match rule {
                     // 時間あたりの伸び
                     "rate" => d_pool / t_pool.max(1e-3) > d_def / t_def.max(1e-3) + 1e-12,
                     _ => d_pool > d_def + tol,
                 };
+                if self.params.verbose && ratio > 0.0 {
+                    eprintln!("MIP: cut selection probe: compared at {m} rounds ({early}), probe wall {:.2}s (budget {budget:.1}s)", t_probe0.elapsed().as_secs_f64());
+                }
                 CUT_PROBE_CHOICE.store(if pick_pool { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
                 if self.params.verbose {
                     eprintln!("MIP: cut selection probe ({k} rounds): default {n_def} cuts gain {d_def:.6e} ({t_def:.2}s), pool {n_pool} cuts gain {d_pool:.6e} ({t_pool:.2}s) -> {} (rule {rule}, probe {:.2}s in total, {:.2}s)", if pick_pool { "pool" } else { "default" }, t_def + t_pool, self.start.elapsed().as_secs_f64());
