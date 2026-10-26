@@ -276,6 +276,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// そのまま 49324 (最適値) になる。延ばした後で同じになったカットは 1 本にする
     fn extend_clique_cuts(&mut self, chosen: &mut Vec<Candidate>, x: &[f64], round: usize) {
         let p = self.p;
+        // 集合詰め込みの形のカットがなければ何もしない (衝突グラフを作らない。作ると後の clique カットの判定が使うグラフが変わり、
+        // drayage-25-23 では延ばすカットが 0 本なのに再スタートが 1 回増えて 10 -> 22 秒になっていた)
+        let any_sp = {
+            let is_bin = |j: usize| p.is_int[j] && self.dom.global_lo[j] == 0.0 && self.dom.global_up[j] == 1.0;
+            let sp_form = |c: &Candidate| {
+                let s = c.coefs.first().map_or(0.0, |e| e.1.abs());
+                c.coefs.len() >= 2
+                    && s > 0.0
+                    && c.coefs.iter().all(|&(j, a)| is_bin(j) && (a.abs() - s).abs() <= 1e-9 * s)
+                    && ((c.rhs / s + c.coefs.iter().filter(|&&(_, a)| a < 0.0).count() as f64) - 1.0).abs() <= 1e-9
+            };
+            chosen.iter().any(sp_form)
+        };
+        if !any_sp {
+            return;
+        }
         let g = self.clique_graph_get();
         let max_add = tunable!("ENOMOTO_T_MIP_CUT_CLIQUE_EXTEND_MAX", 1000usize, usize);
         let is_bin = |j: usize| p.is_int[j] && self.dom.global_lo[j] == 0.0 && self.dom.global_up[j] == 1.0;
@@ -966,11 +982,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let (d_def, t_def) = if m > 0 { hd[m - 1] } else { (0.0, 0.0) };
                 let (d_pool, t_pool) = if m > 0 { hp[m - 1] } else { (0.0, 0.0) };
                 let (n_def, n_pool) = (nd, np);
-                let pick_pool = match rule {
-                    // 時間あたりの伸び
-                    "rate" => d_pool / t_pool.max(1e-3) > d_def / t_def.max(1e-3) + 1e-12,
-                    _ => d_pool > d_def + tol,
-                };
+                // `ENOMOTO_T_MIP_CUTSEL_PROBE_MIN_GAIN` = g (> 0、試作、既定 0 で今まで通り): POOL の伸びが g x max(1, |根の LP|) 以下なら既定を選ぶ
+                // (drayage-25-23 では両方の伸びが ±1.5e-11 で、`rate` が誤差で POOL を選び 10 -> 26 秒 (ALT=NS のとき) になっていた)
+                let min_gain = tunable!("ENOMOTO_T_MIP_CUTSEL_PROBE_MIN_GAIN", 0.0, f64) * self.lp.objective().abs().max(1.0);
+                let pick_pool = d_pool > min_gain
+                    && match rule {
+                        // 時間あたりの伸び
+                        "rate" => d_pool / t_pool.max(1e-3) > d_def / t_def.max(1e-3) + 1e-12,
+                        _ => d_pool > d_def + tol,
+                    };
                 if self.params.verbose && ratio > 0.0 {
                     eprintln!("MIP: cut selection probe: compared at {m} rounds ({early}), probe wall {:.2}s (budget {budget:.1}s)", t_probe0.elapsed().as_secs_f64());
                 }
