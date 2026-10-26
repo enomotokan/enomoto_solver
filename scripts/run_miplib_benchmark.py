@@ -67,6 +67,10 @@ def worker_highs(mps: str, time_limit: float, threads: int) -> None:
     # このクレートの既定 (相対ギャップ 0) にそろえる。HiGHS の既定 1e-4 のままだと、根の LP と最適値の差が 1e-5 しかない
     # uccase12 などで HiGHS だけが 1 ノードで「最適」と打ち切り、比べられない
     h.setOptionValue("mip_rel_gap", 0.0)
+    # `ENOMOTO_BENCH_HIGHS_PARALLEL=on`: HiGHS の並列の分枝限定法を使う (1.15.1 は既定の parallel=choose では threads を
+    # 与えても木の探索が 1 本。on で "Parallel search on" になり、neos-911970 で CPU 時間 / 経過時間 1.04 -> 4.40)
+    if os.environ.get("ENOMOTO_BENCH_HIGHS_PARALLEL"):
+        h.setOptionValue("parallel", os.environ["ENOMOTO_BENCH_HIGHS_PARALLEL"])
     h.readModel(mps)
     t = time.perf_counter()
     h.run()
