@@ -1456,7 +1456,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
             node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult) as u64,
             // サブ MIP は解を探すためのものなので、ギャップは外側の設定より緩くてよい (外側の既定 0 でも 1e-4 で止める)
-            rel_gap: if gap_highs { self.params.rel_gap } else { self.params.rel_gap.max(1e-4) },
+            // `ENOMOTO_T_MIP_SUBMIP_NOINC_GAP` = g (> 0、試作、既定 0 で今まで通り): 外側の求解に暫定解がまだなければ、サブ MIP をギャップ g で
+            // 止めて早く解を返させる (並列のサブ MIP の解は終わるまで外側に渡らない。physiciansched6-2 では Local-MIP が解を出さない回に、
+            // 打ち切り値なしの根の RENS が 49324 を見つけた後もギャップ 0.1% を詰めるのに 42〜44 秒・163〜252 ノードかかり、証明が間に合わなかった)
+            rel_gap: {
+                let g = if gap_highs { self.params.rel_gap } else { self.params.rel_gap.max(1e-4) };
+                let ng = tunable!("ENOMOTO_T_MIP_SUBMIP_NOINC_GAP", 0.0, f64);
+                if ng > 0.0 && !self.params.submip && self.incumbent.is_none() { g.max(ng) } else { g }
+            },
             abs_gap: self.params.abs_gap.max(1e-6),
             // 診断用: `ENOMOTO_MIP_SUBMIP_VERBOSE` ならサブ MIP の経過も出す
             verbose: self.params.verbose && env_str!("ENOMOTO_MIP_SUBMIP_VERBOSE").is_some(),

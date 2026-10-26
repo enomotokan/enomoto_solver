@@ -287,9 +287,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     && c.coefs.iter().all(|&(j, a)| is_bin(j) && (a.abs() - s).abs() <= 1e-9 * s)
                     && ((c.rhs / s + c.coefs.iter().filter(|&&(_, a)| a < 0.0).count() as f64) - 1.0).abs() <= 1e-9
             };
-            chosen.iter().any(sp_form)
+            chosen.iter().filter(|c| sp_form(c)).count()
         };
-        if !any_sp {
+        let (any_sp, any_sp_n) = (any_sp > 0, any_sp);
+        // `ENOMOTO_T_MIP_CUT_CLIQUE_EXTEND_MIN_FRAC` = f (既定 0): 集合詰め込みの形のカットが選んだカットの f 未満のラウンドでは延ばさない
+        // (physiciansched6-2 はほぼ全部 (44/44・266/314)。drayage-25-23 は 100 本中 1〜21 本で、延ばすと再スタートの経路が変わり 10 -> 14〜22 秒)
+        let min_frac = tunable!("ENOMOTO_T_MIP_CUT_CLIQUE_EXTEND_MIN_FRAC", 0.0, f64);
+        if !any_sp || (min_frac > 0.0 && (any_sp_n as f64) < min_frac * chosen.len() as f64) {
             return;
         }
         let g = self.clique_graph_get();
