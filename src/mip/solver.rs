@@ -70,9 +70,19 @@ pub struct MipParams {
     pub fc_submip: bool,
 }
 
-/// SCIP の rounding・shifting・intshifting を使うか (`ENOMOTO_MIP_SHIFT_HEURS`)。
+/// SCIP の rounding・shifting・intshifting を使うか (`ENOMOTO_MIP_SHIFT_HEURS`、`1` か、`root`・`noint` を `,` でつないだもの)。
 pub(super) fn shift_heurs_on() -> bool {
     env_str!("ENOMOTO_MIP_SHIFT_HEURS").is_some_and(|s| s != "0")
+}
+
+/// `ENOMOTO_MIP_SHIFT_HEURS` を木でも使うか (`root` を含めば根だけ)。
+pub(super) fn shift_heurs_tree() -> bool {
+    shift_heurs_on() && !env_str!("ENOMOTO_MIP_SHIFT_HEURS").is_some_and(|s| s.split(',').any(|t| t == "root"))
+}
+
+/// `ENOMOTO_MIP_SHIFT_HEURS` で intshifting を使うか (`noint` を含めば使わない)。
+pub(super) fn shift_heurs_int() -> bool {
+    shift_heurs_on() && !env_str!("ENOMOTO_MIP_SHIFT_HEURS").is_some_and(|s| s.split(',').any(|t| t == "noint"))
 }
 
 /// twoopt を使うか (`ENOMOTO_MIP_TWOOPT`)。
@@ -3745,7 +3755,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if shift_heurs_on() {
                     heur!("rounding", self.lock_rounding(&x));
                     heur!("shifting", self.shifting(&x));
-                    heur!("int shifting", self.int_shifting(&x));
+                    if shift_heurs_int() {
+                        heur!("int shifting", self.int_shifting(&x));
+                    }
                 }
                 if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_TRIVIAL").is_none() {
                     heur!("trivial", self.trivial());
@@ -4975,11 +4987,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.zi_round(&x);
                     }
                     // SCIP と同じく rounding は毎ノード、shifting・intshifting は 10 ノードおき
-                    if shift_heurs_on() {
+                    if shift_heurs_tree() {
                         self.lock_rounding(&x);
                         if self.nodes % 10 == 0 {
                             self.shifting(&x);
-                            self.int_shifting(&x);
+                            if shift_heurs_int() {
+                                self.int_shifting(&x);
+                            }
                         }
                     }
                     self.heur_label = "";
@@ -5009,6 +5023,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // `ENOMOTO_MIP_LB2`・`ENOMOTO_MIP_PROX2` の木の段 ([`super::heur_lns2`]): 前に呼んだときより良い暫定解があれば
                     if heur_ok && plunge_depth == 0 && self.incumbent.is_some() && (super::heur_lns2::lb2_on("tree") || super::heur_lns2::prox2_on("tree")) {
                         let lb = self.global_lower_bound();
+                        self.hsub_note_gap(lb);
                         if self.hsub_tree_ok(lb) {
                             self.hsub_tree(lb);
                         }

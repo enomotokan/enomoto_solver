@@ -14,6 +14,10 @@
 //! 木は前に呼んだときより良い暫定解があり、差が 1% を超え、外側の始まりから `ENOMOTO_T_MIP_HSUB_TREE_MIN_SECS` (15) 秒たち、
 //! 木で使った時間が経過時間の `ENOMOTO_T_MIP_HSUB_TREE_FRAC` (0.1) 倍未満のとき。
 //!
+//! `ENOMOTO_MIP_HSUB_STALL=1` (2026-10-26 の計測の手当て): 時刻だけで呼ぶと 15〜45 秒で解ける問題で最大 20 秒ずつ使い、解き切りが遅れた
+//! (`analysis/heur_shift_lns2_20261026.md`)。根では呼ばず、木では上の条件に加えて「ギャップ (暫定解と下界の差の相対) が直近
+//! `ENOMOTO_T_MIP_HSUB_STALL_SECS` (10) 秒で `ENOMOTO_T_MIP_HSUB_STALL_DROP` (0.1) の割合も縮んでいない」ときだけ呼ぶ。
+//!
 //! 試作との違い: 試作のサブ MIP の根の設定 (カット 25 ラウンド、Pump・ダイビングを使わず入れ子の RENS) は入れていない
 //! (サブ MIP は通常のサブ MIP の設定で解く)。
 
@@ -50,6 +54,13 @@ pub(super) struct HsubState {
     /// 呼んだ回数と暫定解を出した回数 (LB2, PROX2) — 診断用。
     pub calls: [u32; 2],
     pub wins: [u32; 2],
+    /// 木のギャップの記録 (外側の始まりからの秒, ギャップ)。`ENOMOTO_MIP_HSUB_STALL` の停滞の判定に使う。
+    pub gaps: std::collections::VecDeque<(f64, f64)>,
+}
+
+/// 停滞したときだけ呼ぶか (`ENOMOTO_MIP_HSUB_STALL`)。
+pub(super) fn hsub_stall_on() -> bool {
+    env_str!("ENOMOTO_MIP_HSUB_STALL").is_some_and(|s| s != "0")
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
@@ -60,12 +71,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 根で LB2・PROX2 を呼ぶか (`lb` は根の下界、暫定解と同じ単位)。
     pub(super) fn hsub_root_ok(&self, lb: f64) -> bool {
-        !self.params.submip && self.params.restarts == 0 && self.hsub_gap_ok(lb) && outer_elapsed() >= tunable!("ENOMOTO_T_MIP_HSUB_ROOT_MIN_SECS", 10.0, f64)
+        !hsub_stall_on() && !self.params.submip && self.params.restarts == 0 && self.hsub_gap_ok(lb) && outer_elapsed() >= tunable!("ENOMOTO_T_MIP_HSUB_ROOT_MIN_SECS", 10.0, f64)
+    }
+
+    /// 木のギャップを記録する (0.5 秒おき。`ENOMOTO_MIP_HSUB_STALL` のときだけ)。
+    pub(super) fn hsub_note_gap(&mut self, lb: f64) {
+        if !hsub_stall_on() {
+            return;
+        }
+        let Some((z, _)) = self.incumbent.as_ref() else { return };
+        let (t, g) = (outer_elapsed(), ((z - lb) / z.abs().max(1.0)).max(0.0));
+        if self.hsub.gaps.back().is_none_or(|&(t0, _)| t - t0 >= 0.5) {
+            self.hsub.gaps.push_back((t, g));
+        }
+        // 判定に要る分 (窓の 2 倍) より古いものは捨てる
+        let w = tunable!("ENOMOTO_T_MIP_HSUB_STALL_SECS", 10.0, f64);
+        while self.hsub.gaps.len() > 2 && self.hsub.gaps[1].0 < t - 2.0 * w {
+            self.hsub.gaps.pop_front();
+        }
+    }
+
+    /// ギャップが直近の窓で縮んでいないか ([`Self::hsub_note_gap`] の記録で見る)。
+    fn hsub_stalled(&self) -> bool {
+        let w = tunable!("ENOMOTO_T_MIP_HSUB_STALL_SECS", 10.0, f64);
+        let Some(&(t, g)) = self.hsub.gaps.back() else { return false };
+        // 窓の始まりより前の最後の記録
+        let Some(&(_, g0)) = self.hsub.gaps.iter().rev().find(|&&(t0, _)| t0 <= t - w) else { return false };
+        g > (1.0 - tunable!("ENOMOTO_T_MIP_HSUB_STALL_DROP", 0.1, f64)) * g0
     }
 
     /// 木で LB2・PROX2 を呼ぶか。
     pub(super) fn hsub_tree_ok(&self, lb: f64) -> bool {
         if self.params.submip || !self.hsub_gap_ok(lb) {
+            return false;
+        }
+        if hsub_stall_on() && !self.hsub_stalled() {
             return false;
         }
         let z = self.incumbent.as_ref().unwrap().0;
