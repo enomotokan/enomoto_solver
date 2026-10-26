@@ -1,4 +1,4 @@
-"""計測の比較: python cmp.py 名前 ... (benchmarks/*_0d48899_<名前>_r<回>.json を集める)。"""
+"""計測の比較: [BENCH_SHA=<commit 7 桁>] python scripts/bench_cmp_heur_20261026.py 名前 ... (benchmarks/*_<commit>_<名前>[_g<組>]_r<回>.json を集める)。"""
 import json, math, sys, glob, re
 from pathlib import Path
 REPO = Path('/home/user/enomoto_solver')
@@ -7,7 +7,9 @@ for l in open(Path(__file__).parent / 'miplib2017-v31.solu'):
     t = l.split()
     if len(t) >= 3 and t[0] in ('=opt=', '=best='):
         SOLU[t[1]] = float(t[2])
-SHA = '0d48899'
+import os
+# 計測したコードの commit (ファイル名の 7 桁)。`BENCH_SHA` で変える
+SHA = os.environ.get('BENCH_SHA', '0d48899')
 
 def load(name):
     runs = {}
