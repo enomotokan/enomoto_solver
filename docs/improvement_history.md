@@ -9960,3 +9960,46 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 | 自由関数 `mat_vec` / `mat_vec_into` / `mat_t_vec` / `mat_t_vec_into` (faer Csr 用) | `csr_mat_vec` / `csr_mat_vec_into` / `csr_mat_t_vec` / `csr_mat_t_vec_into` | sparse.rs / interior_point |
 | `Compressed::group` | `outer_slice` | sparse.rs |
 | interior_point の `dsa` / `dza` / `pk` / `dk` など | `ds_aff` / `dz_aff` / `primal_res_inf` / `dual_res_inf` など | interior_point.rs |
+
+## 2026-10-23: FJ が残す違反行の正体と Local-MIP・連鎖の手の試作 (heur-ls) の調査
+
+- 調査 (analysis/heur_ls_20261023.md、inv/heur-ls-20261023 2f11d39): 30n20b8 で FJ が最後に残す違反行は時刻の定義の等式 (Σ t·y_t − s = 0) で、前処理で y が 0 に固定されても s の下限が締まらず、1 列の手では直せない。最も近い実行可能解まで 28 列を同時に動かす必要がある。
+- 試作 (既定は変えない): `ENOMOTO_MIP_LOCALMIP=1` (FJ と並べて別スレッドで Local-MIP 風の局所探索)、`ENOMOTO_MIP_LOCALMIP_CHAIN=1` (違反行を直す手が破る行を次々に直す連鎖の手)、`ENOMOTO_MIP_FJ_CHAIN`・`ENOMOTO_MIP_FJ_SP_BOUNDS`・`ENOMOTO_MIP_LOCALMIP_PAIR`、診断 `ENOMOTO_MIP_FJ_DUMP`。
+- lmc (LOCALMIP + CHAIN) の 4 スレッド・60 秒・2 回: 30n20b8 の最初の暫定解 0.74〜0.82 秒、最終 302 (最適)。neos-1456979 は 1.5〜1.7 秒で暫定解。physiciansched6-2 は 50425、mzzv42z も良くなる。roll3000 は変わらず、timtab1 は最適性の証明を失う。FJ_CHAIN と FJ_SP_BOUNDS は候補にしない。
+- lmc を 40 + 16 問で計測する (inv/lmc-a-20261023・inv/lmc-b-20261023)。
+
+## 2026-10-23: サブ MIP のヒューリスティクス 5 つの試作 (heur-sub) の調査
+
+- 調査 (analysis/heur_sub_20261023.md、inv/heur-sub-20261023 d383599)。どれも既定は変えない: `ENOMOTO_MIP_FARKAS_DIVE` (Farkas ダイビング)、`ENOMOTO_MIP_ZEROOBJ` (目的を 0 にしたサブ MIP)、`ENOMOTO_MIP_ACS` (Alternating Criteria Search、FJ の違反最少の点から)、`ENOMOTO_MIP_LB2` (中心を移す繰り返しの Local Branching)、`ENOMOTO_MIP_PROX2` (中心を移す Proximity Search)。
+- 30n20b8: ACS で最初の暫定解が 26 秒前後 (既定は 44〜55 秒の木から) になるが、最終は 553 で既定 (453〜504) より悪い (根で 7 秒使い、木のノードが 1/4 ほど)。Farkas・zero-objective は解を出さない。neos-1456979 はどれも早まらない。
+- LB2 + PROX2 (根は外側の始まりから 10 秒・木は 15 秒たってから・経過時間の 0.1 まで): physiciansched6-2 は 6 回すべて 49625 (既定 51029)、mzzv42z は -20450・-20500 (既定 -20260・-18682)。supportcase26・roll3000 は揺れの範囲。軽い問題 (misc07・10teams・mik-250-20-75-4・qnet1) は既定と同じ時間。
+- lbp (`ENOMOTO_MIP_LB2=1 ENOMOTO_MIP_PROX2=1`) を 40 + 16 問で計測する (inv/lbp-a-20261023・inv/lbp-b-20261023、5ce82be)。Farkas・zero-objective は候補にしない。ACS は木の扱いを見直してから。
+
+## 2026-10-23: Local-MIP + 連鎖の手 (lmc) は既定にしない (保留)
+
+- 2f11d39 (develop 330ca50 + heur-ls) で 40 + 16 問、newdef / lmc (`ENOMOTO_MIP_LOCALMIP=1 ENOMOTO_MIP_LOCALMIP_CHAIN=1`) を順番を入れ替えて 2 組。
+
+| 組 | 集合 | newdef 解けた・SGM | lmc 解けた・SGM |
+|---|---|---|---|
+| LMa (newdef → lmc) | 40 問 | 25・20.38 | 26・20.53 |
+| LMa | 16 問 | 11・32.18 | 12・35.52 |
+| LMb (lmc → newdef) | 40 問 | 26・18.90 | 26・19.64 |
+| LMb | 16 問 | 11・32.53 | 11・31.07 |
+
+- 不一致 0、"MIP: WARNING" 0。解けた数は合わせて 40 問で 1、16 問で 1 増える (lmc だけ解けた: noswot・beasleyC3・roll3000 (LMa)、nursesched-sprint02 (LMb)。newdef だけ解けた: neos-960392 (2 組とも))。
+- 30n20b8 は lmc で 2 組とも最初の暫定解 3.9〜4.6 秒・最終 302 (newdef は暫定解なし / 653)。neos-1456979 も 2.2〜2.5 秒で暫定解、最終 189・223 (newdef 222・228)。physiciansched6-2 は 50425 (newdef 51029・49624)、mzzv42z と timtab1 の最終は newdef より少し悪い。
+- SGM が 4 つの比べのうち 3 つで悪い (最大 +10%) ので既定にしない。別スレッドが木から CPU を取る分と考えられ、スレッド数・時間の制限 (Local-MIP の時間を短くする、暫定解が出たら止める) を足して測り直す候補。
+
+## 2026-10-23: 繰り返しの Local Branching + 中心を移す Proximity Search (lbp) は不採用
+
+- 5ce82be (develop e290e4c + heur-sub) で 40 + 16 問、newdef / lbp (`ENOMOTO_MIP_LB2=1 ENOMOTO_MIP_PROX2=1`) を順番を入れ替えて 2 組。
+
+| 組 | 集合 | newdef 解けた・SGM | lbp 解けた・SGM |
+|---|---|---|---|
+| LBa (newdef → lbp) | 40 問 | 26・20.02 | 24・22.54 |
+| LBa | 16 問 | 11・31.84 | 9・39.14 |
+| LBb (lbp → newdef) | 40 問 | 26・19.97 | 24・21.27 |
+| LBb | 16 問 | 10・37.04 | 10・38.22 |
+
+- 不一致 0、"MIP: WARNING" 0。解けた数が合わせて 40 問で 4、16 問で 2 減り、SGM も 4 つとも悪い。lbp で解けなくなった: noswot・eil33-2・neos-2978193-inde (2 組とも)、beasleyC3 (LBa)。lbp だけ解けた: neos-960392 (LBb)。
+- physiciansched6-2 は 50124・49625 (newdef 50826・51029)、30n20b8 は 402・553 (newdef 653・653) と良くなるが、根・木のサブ MIP が 30〜60 秒で解ける問題の時間を食う。
