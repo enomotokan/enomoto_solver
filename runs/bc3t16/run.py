@@ -1,5 +1,5 @@
 """問題 (PROB、既定 beasleyC3) を 1 回解き、全ログを runs/bc3t16/logs/<名前>_<回>.log に保存する (スレッド数は TH、既定 16)。
-使い方: python runs/bc3r3/run.py <名前> <回> <秒> [ENV=VAL ...]"""
+使い方: python runs/bc3t16/run.py <名前> <回> <秒> [ENV=VAL ...]"""
 import os, subprocess, sys, json
 from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
