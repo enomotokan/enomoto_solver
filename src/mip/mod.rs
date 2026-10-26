@@ -2246,13 +2246,13 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let want_equiv = env_str!("ENOMOTO_MIP_NO_PROBE_EQUIV").is_none() && !submip;
     // `ENOMOTO_MIP_PROBE_CLIQUE`: 見つけた含意を後の列のプロービングの伝播に使う ([`domain::Domain::add_implications`])
     // `ENOMOTO_MIP_PROBE_CLIQUE=equiv`: 含意は同値な列を見つけるためだけに使う (下の 2 巡目。固定・締め付け・含意の表は変えない)。
-    // `ENOMOTO_MIP_PROBE_EQUIV2`: 同じ 2 巡目を回し、見つけた組が候補の `ENOMOTO_T_MIP_PROBE_EQUIV2_MIN_FRAC` (既定 5%) 以上のときだけ使い、
+    // `ENOMOTO_MIP_PROBE_EQUIV2` (既定 1、`0` で外す。計測 23 で既定化): 同じ 2 巡目を回し、見つけた組が候補の `ENOMOTO_T_MIP_PROBE_EQUIV2_MIN_FRAC` (既定 5%) 以上のときだけ使い、
     // そのときは境界を締めていても代入まで進む ([`probe_equiv_fix`])。少なければ捨てる (既定と同じ問題になる)
     // 再スタート後の問題では使わない (`ENOMOTO_MIP_PROBE_EQUIV2_RESTART` なら使う)。uccase12 では再スタート後の問題でだけ
     // 組が見つかり (1356 組、元の問題では 0 組)、それを代入した問題の根の LP が 12043.6 と既知の解 11507.41 を越えた
     // (正しい解を切り落とす。原因は未特定)。根の下界で根を閉じる判定 (analysis/term_check_20261022.md) と合わさると
     // 誤った最適値 11507.90 を返していた
-    let equiv2 = env_str!("ENOMOTO_MIP_PROBE_EQUIV2").is_some() && !submip && !(RESTART_PRESOLVE.with(|f| f.get()) && env_str!("ENOMOTO_MIP_PROBE_EQUIV2_RESTART").is_none());
+    let equiv2 = env_def!("ENOMOTO_MIP_PROBE_EQUIV2", "1").is_some() && !submip && !(RESTART_PRESOLVE.with(|f| f.get()) && env_str!("ENOMOTO_MIP_PROBE_EQUIV2_RESTART").is_none());
     let pclique_equiv = (equiv2 || env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some_and(|v| v == "equiv")) && !submip;
     let want_pclique = env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !pclique_equiv && !submip;
     let mut equiv: Vec<(usize, usize, bool)> = Vec::new();
