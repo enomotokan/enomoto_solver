@@ -4987,7 +4987,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.zi_round(&x);
                     }
                     // rounding は毎ノード、shifting・intshifting は 10 ノードおき (SCIP の頻度は rounding 1・shifting 5・intshifting 10。
-                    // SCIP はさらに LP を解くたび (根のカットのラウンドごと) に呼び、成功の少ないものは呼ぶ間隔を広げる)
+                    // SCIP は rounding・shifting を LP を解くたび (根のカットのラウンドごと) に呼び、成功の少ないものは呼ぶ間隔を広げる)
                     if shift_heurs_tree() {
                         self.lock_rounding(&x);
                         if self.nodes % 10 == 0 {
