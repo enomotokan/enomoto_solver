@@ -1391,7 +1391,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 加工したサブ MIP (`sub`: 列は元と同じ並び) を解き、見つかった解を元の問題の暫定解の候補にする。
     /// `cutoff` はサブ MIP の目的値の打ち切り値 (`None` なら元の打ち切り値。目的関数を変えたサブ MIP では指定する)。
     /// 戻り値は (サブ MIP の状態, 解を受け入れたか)。
-    fn solve_submip_problem(&mut self, mut sub: super::problem::MipProblem, node_limit: u64, cutoff: Option<f64>) -> Option<(super::solver::MipStatus, bool)> {
+    pub(super) fn solve_submip_problem(&mut self, mut sub: super::problem::MipProblem, node_limit: u64, cutoff: Option<f64>) -> Option<(super::solver::MipStatus, bool)> {
         let p = self.p;
         let (lo, up) = (std::mem::take(&mut sub.col_lo), std::mem::take(&mut sub.col_up));
         // 伝播の丸め誤差で下限 > 上限 (ごくわずか) になった列は 1 点に固定する
@@ -1459,7 +1459,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_T_MIP_SUBMIP_NOINC_GAP` = g (> 0、試作、既定 0 で今まで通り): 外側の求解に暫定解がまだなければ、サブ MIP をギャップ g で
             // 止めて早く解を返させる (並列のサブ MIP の解は終わるまで外側に渡らない。physiciansched6-2 では Local-MIP が解を出さない回に、
             // 打ち切り値なしの根の RENS が 49324 を見つけた後もギャップ 0.1% を詰めるのに 42〜44 秒・163〜252 ノードかかり、証明が間に合わなかった)
-            rel_gap: {
+            // LB2・PROX2 ([`super::heur_lns2`]) が一時的に決める相対ギャップ (PROX2 は最初の解で止める)
+            rel_gap: if let Some(g) = self.submip_gap { g } else {
                 let g = if gap_highs { self.params.rel_gap } else { self.params.rel_gap.max(1e-4) };
                 let ng = tunable!("ENOMOTO_T_MIP_SUBMIP_NOINC_GAP", 0.0, f64);
                 if ng > 0.0 && !self.params.submip && self.incumbent.is_none() { g.max(ng) } else { g }
@@ -2550,7 +2551,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 暫定解の 2 値列を何個変えたか (Hamming 距離) の行: `sum_{inc=0} x_j - sum_{inc=1} x_j` と、その定数
     /// (`|{inc=1}|`)。距離 = 行の値 + 定数。2 値列 (大域的な境界が [0, 1]) だけを数える。
-    fn hamming_row(&self, inc: &[f64]) -> (Vec<(usize, f64)>, f64) {
+    pub(super) fn hamming_row(&self, inc: &[f64]) -> (Vec<(usize, f64)>, f64) {
         let p = self.p;
         let mut row = Vec::new();
         let mut ones = 0.0;

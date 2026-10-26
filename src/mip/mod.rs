@@ -22,6 +22,8 @@ pub(crate) mod localmip;
 mod heuristics;
 pub(crate) mod heur_scip;
 pub(crate) mod heur_ipm;
+pub(crate) mod heur_shift;
+pub(crate) mod heur_lns2;
 pub(crate) mod symmetry;
 pub(crate) mod cuts;
 pub(crate) mod separation;
