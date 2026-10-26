@@ -21,6 +21,22 @@ use std::time::Instant;
 thread_local! {
     static TOKEN: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
     static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+    static HALT: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// このスレッドの「止める合図」が立ったか ([`with_halt`])。MIP の LP の反復の確認 (`slope_intercept_dual::ext_check`) が
+/// 期限に達したのと同じに扱う (状態は `TimeLimit`)。トークン ([`is_cancelled`]) と違い、同時実行の負けの扱いにはならない。
+#[inline]
+pub fn halted() -> bool {
+    HALT.with(|h| h.borrow().as_ref().is_some_and(|a| a.load(Ordering::Relaxed)))
+}
+
+/// `flag` をこのスレッドの止める合図にして `f` を実行し、元に戻す (木の探索の従のスレッドが主の止める合図を LP にも伝えるのに使う)。
+pub fn with_halt<R>(flag: Option<Arc<AtomicBool>>, f: impl FnOnce() -> R) -> R {
+    let prev = HALT.with(|h| std::mem::replace(&mut *h.borrow_mut(), flag));
+    let r = f();
+    HALT.with(|h| *h.borrow_mut() = prev);
+    r
 }
 
 /// このスレッドの求解が打ち切りを求められているか (トークンが立った、または期限を過ぎた)。

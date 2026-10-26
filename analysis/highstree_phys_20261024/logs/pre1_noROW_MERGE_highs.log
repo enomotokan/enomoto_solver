@@ -1,0 +1,60 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option time_limit to 25
+MIP pre1_noROW_MERGE has 19480 rows; 111827 cols; 61329 nonzeros; 109346 integer variables (9017 binary)
+Coefficient ranges:
+  Matrix  [5e-01, 1e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 8e+03]
+  RHS     [1e+00, 8e+02]
+Presolving model
+12173 rows, 5980 cols, 45715 nonzeros 0s
+9680 rows, 5456 cols, 39802 nonzeros 0s
+9264 rows, 5439 cols, 39603 nonzeros 0s
+Presolve reductions: rows 9264(-10216); columns 5439(-106388); nonzeros 39603(-21726) 
+
+Solving MIP model with:
+   9264 rows
+   5439 cols (5016 binary, 0 integer, 414 implied int., 9 continuous, 0 domain fixed)
+   39603 nonzeros
+   Thread count 2 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   35707.5         inf                  inf        0      0      0         0     1.0s
+         0       0         0   0.00%   46621.240741    inf                  inf        0      0      8      9093     4.1s
+         0       0         0   0.00%   46622.75        inf                  inf     2443    833    280     17023    10.2s
+         0       0         0   0.00%   46622.75        inf                  inf     2451    833    413     46767    25.0s
+
+Solving report
+  Model             pre1_noROW_MERGE
+  Status            Time limit reached
+  Primal bound      inf
+  Dual bound        46622.75
+  Gap               inf
+  P-D integral      0
+  Solution status   -
+  Timing            25.00
+                    1.84 (Presolve)
+                        MIP    time [calls] = 0.75 [1]
+                        subMIP time [calls] = 1.09 [3]
+                    23.16 (Solve)
+                        MIP    time [calls] = 22.70 [1]
+                        subMIP time [calls] = 0.46 [1]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [3]
+  Max sub-MIP depth 2
+  Nodes             0
+  Repair LPs        0
+  LP iterations     46767
+                    0 (strong br.)
+                    7930 (separation)
+                    29744 (heuristics)

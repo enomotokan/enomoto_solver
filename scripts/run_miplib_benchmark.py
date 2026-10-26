@@ -3,7 +3,8 @@
 問題は https://miplib.zib.de/WebData/instances/<name>.mps.gz から `<repo>/.miplib_cache/` に取得する
 (一度だけ。キャッシュは .gitignore 済み)。各問題を両ソルバーでそれぞれ別のサブプロセスで解く:
 
-- HiGHS: 既定の設定 + `time_limit`。`Highs.run()` の時間を測る。
+- HiGHS: 既定の設定 + `time_limit` + `mip_rel_gap = 0` (このクレートの既定の相対ギャップ 0 にそろえる。2026-10-20 から。
+  それより前の結果は HiGHS の既定 1e-4)。`Highs.run()` の時間を測る。
 - このクレート: MPS は HiGHS で読み、`benchmark_highs._build_our_model` でモデルを作る (整数性も渡す)。
   `model.solve(time_limit=...)` の時間だけを測る。親プロセスは時間上限 + 余裕で打ち切る。
 
@@ -63,6 +64,13 @@ def worker_highs(mps: str, time_limit: float, threads: int) -> None:
     h.setOptionValue("output_flag", False)
     h.setOptionValue("time_limit", time_limit)
     h.setOptionValue("threads", threads)
+    # このクレートの既定 (相対ギャップ 0) にそろえる。HiGHS の既定 1e-4 のままだと、根の LP と最適値の差が 1e-5 しかない
+    # uccase12 などで HiGHS だけが 1 ノードで「最適」と打ち切り、比べられない
+    h.setOptionValue("mip_rel_gap", 0.0)
+    # `ENOMOTO_BENCH_HIGHS_PARALLEL=on`: HiGHS の並列の分枝限定法を使う (1.15.1 は既定の parallel=choose では threads を
+    # 与えても木の探索が 1 本。on で "Parallel search on" になり、neos-911970 で CPU 時間 / 経過時間 1.04 -> 4.40)
+    if os.environ.get("ENOMOTO_BENCH_HIGHS_PARALLEL"):
+        h.setOptionValue("parallel", os.environ["ENOMOTO_BENCH_HIGHS_PARALLEL"])
     h.readModel(mps)
     t = time.perf_counter()
     h.run()
@@ -117,9 +125,17 @@ def run_worker(kind: str, mps: Path, time_limit: float, threads: int) -> dict:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=time_limit * 1.5 + 60, env=env)
     except subprocess.TimeoutExpired:
         return {"status": "killed", "objective": None, "bound": None, "nodes": None, "time": None}
+    # ソルバーの警告 (部分木を失った疑いなど) は stderr にしか出ないので、件数を結果に残す
+    n_warn = p.stderr.count("MIP: WARNING")
     for line in reversed(p.stdout.splitlines()):
         if line.startswith("{"):
-            return json.loads(line)
+            r = json.loads(line)
+            if n_warn:
+                r["mip_warnings"] = n_warn
+                # 本文 (重複を除いて最初の 5 種類) も残す。件数だけでは何の警告か分からない
+                texts = list(dict.fromkeys(l.strip() for l in p.stderr.splitlines() if "MIP: WARNING" in l))
+                r["mip_warning_text"] = texts[:5]
+            return r
     return {"status": f"crash rc={p.returncode}", "objective": None, "bound": None, "nodes": None, "time": None,
             "stderr": p.stderr[-2000:]}
 
@@ -170,7 +186,7 @@ def make_table(results: dict, time_limit: float, threads: int) -> str:
         "",
         f"- 実行日時: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         f"- 時間上限 {time_limit:g} 秒、スレッド数 {threads} (HiGHS は threads、enomoto は木の探索 threads と "
-        f"ENOMOTO_MIP_THREADS)、既定の相対ギャップ (HiGHS 1e-4、enomoto 0)",
+        f"ENOMOTO_MIP_THREADS)、相対ギャップは両方 0 (HiGHS は mip_rel_gap = 0)",
         "- 時間は求解のみ (MPS 読み込み・モデル構築を除く)。`t` = 時間上限",
         "",
         "| 指標 | HiGHS | enomoto |",
@@ -198,6 +214,7 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=1, help="両ソルバーに与えるスレッド数")
     ap.add_argument("--table", action="store_true")
     ap.add_argument("--rerun-ours", action="store_true", help="HiGHS の結果は再利用し、このクレートだけ解き直す")
+    ap.add_argument("--rerun-highs", action="store_true", help="このクレートの結果は再利用し、HiGHS だけ解き直す")
     ap.add_argument("--worker-highs")
     ap.add_argument("--worker-ours")
     a = ap.parse_args()
@@ -210,16 +227,19 @@ def main() -> None:
     if not a.table:
         names = a.only or PROBLEMS
         for n in names:
-            if n in results and not a.rerun_ours:
+            if n in results and not (a.rerun_ours or a.rerun_highs):
                 continue
             mps = fetch(n, a.cache_dir)
             h = results.get(n, {}).get("highs") if a.rerun_ours else None
             if h is None:
                 h = run_worker("highs", mps, a.time_limit, a.threads)
-            o = run_worker("ours", mps, a.time_limit, a.threads)
+            o = results.get(n, {}).get("ours") if a.rerun_highs else None
+            if o is None:
+                o = run_worker("ours", mps, a.time_limit, a.threads)
             results[n] = {"highs": h, "ours": o}
             print(f"{n:24s} highs={h['status']:>10s} {h['time'] if h['time'] is not None else '-':>8} obj={h['objective']}  "
-                  f"ours={o['status']:>10s} {o['time'] if o['time'] is not None else '-':>8} obj={o['objective']}", flush=True)
+                  f"ours={o['status']:>10s} {o['time'] if o['time'] is not None else '-':>8} obj={o['objective']}"
+                  + (f" MIP_WARNING={o['mip_warnings']}" if o.get('mip_warnings') else ""), flush=True)
             a.out.parent.mkdir(parents=True, exist_ok=True)
             a.out.write_text(json.dumps(results, indent=1), encoding="utf-8")
     md = make_table(results, a.time_limit, a.threads)

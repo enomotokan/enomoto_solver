@@ -1,0 +1,72 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option time_limit to 40
+MIP eno_pre has 10690 rows; 111827 cols; 48883 nonzeros; 109346 integer variables (5443 binary)
+Coefficient ranges:
+  Matrix  [5e-01, 1e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 8e+03]
+  RHS     [1e+00, 8e+02]
+Presolving model
+10463 rows, 5979 cols, 47458 nonzeros 0s
+8409 rows, 4910 cols, 39547 nonzeros 0s
+8409 rows, 4910 cols, 39549 nonzeros 0s
+Presolve reductions: rows 8409(-2281); columns 4910(-106917); nonzeros 39549(-9334) 
+
+Solving MIP model with:
+   8409 rows
+   4910 cols (4477 binary, 0 integer, 424 implied int., 9 continuous, 0 domain fixed)
+   39549 nonzeros
+   Thread count 2 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   35707.5         inf                  inf        0      0      0         0     1.1s
+         0       0         0   0.00%   48583.1         inf                  inf        0      0      6      6994     3.4s
+ L       0       0         0   0.00%   49134           49524              0.79%     2822    466    230     14632    14.6s
+
+5.7% inactive integer columns, restarting
+Model after restart has 7427 rows, 4445 cols (4068 bin., 0 int., 375 impl., 2 cont., 0 dom.fix.), and 35096 nonzeros
+
+         0       0         0   0.00%   49134           49524              0.79%      306      0      0     27358    15.5s
+         0       0         0   0.00%   49174           49524              0.71%      306    236      4     33228    17.5s
+        32       1         1   0.00%   49324           49524              0.40%     3863    407     21     43730    23.1s
+ L     112       0         4 100.00%   49324           49324              0.00%     4096    435     61     49856    33.1s
+       113       0         4 100.00%   49324           49324              0.00%     4096    435     61     65101    33.1s
+
+Solving report
+  Model             eno_pre
+  Status            Optimal
+  Primal bound      49324
+  Dual bound        49324
+  Gap               0% (tolerance: 0.01%)
+  P-D integral      0.09120293777
+  Solution status   feasible
+                    49324 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            33.06
+                    2.14 (Presolve)
+                        MIP    time [calls] = 0.91 [1]
+                        subMIP time [calls] = 1.23 [4]
+                    30.91 (Solve)
+                        MIP    time [calls] = 24.66 [1]
+                        subMIP time [calls] = 6.25 [4]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [4]
+  Max sub-MIP depth 4
+  Nodes             113
+  Repair LPs        0
+  LP iterations     65101
+                    0 (strong br.)
+                    15702 (separation)
+                    26207 (heuristics)

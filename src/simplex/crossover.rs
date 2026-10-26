@@ -2381,7 +2381,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         }
         r
     } else {
-        polish_with_true_bounds(std, &mut basis, &mut basis_pos, &mut nb_status, lu)
+        polish_with_true_bounds(std, &mut basis, &mut basis_pos, &mut nb_status, lu, None)
     };
     crate::phase_timing::mark("cleanup_end");
     if xo.given_point.is_some() {

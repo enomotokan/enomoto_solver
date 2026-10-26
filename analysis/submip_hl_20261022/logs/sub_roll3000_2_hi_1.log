@@ -1,0 +1,66 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP roll3000_2 has 1642 rows; 1166 cols; 26869 nonzeros; 738 integer variables (128 binary)
+Coefficient ranges:
+  Matrix  [2e-01, 3e+02]
+  Cost    [1e+00, 1e+00]
+  Bound   [6e-01, 7e+03]
+  RHS     [2e-01, 1e+03]
+Presolving model
+888 rows, 264 cols, 4682 nonzeros 0s
+528 rows, 242 cols, 2956 nonzeros 0s
+444 rows, 195 cols, 2547 nonzeros 0s
+312 rows, 138 cols, 1864 nonzeros 0s
+265 rows, 121 cols, 1597 nonzeros 0s
+Presolve reductions: rows 265(-1377); columns 121(-1045); nonzeros 1597(-25272) 
+
+Solving MIP model with:
+   265 rows
+   121 cols (52 binary, 5 integer, 7 implied int., 57 continuous, 0 domain fixed)
+   1597 nonzeros
+   Thread count 1 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   8209.999999     1e+30                inf        0      0      0         0     0.1s
+         0       0         0   0.00%   13203.465944    1e+30                inf        0      0      2       116     0.1s
+ R       0       0         0   0.00%   13765.448697    16198.999999      15.02%      217     21      9       156     0.1s
+ L       0       0         0   0.00%   13951.999999    13951.999999       0.00%      513     33     31       190     0.2s
+         1       0         1 100.00%   13951.999999    13951.999999       0.00%      513     33     31       190     0.2s
+
+Solving report
+  Model             roll3000_2
+  Status            Optimal
+  Primal bound      13951.999999
+  Dual bound        13951.999999
+  Gap               0% (tolerance: 0.01%)
+  P-D integral      0.00989290730751
+  Solution status   feasible
+                    13951.999999 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            0.19
+                    0.09 (Presolve)
+                        MIP    time [calls] = 0.08 [1]
+                        subMIP time [calls] = 0.01 [1]
+                    0.10 (Solve)
+                        MIP    time [calls] = 0.09 [1]
+                        subMIP time [calls] = 0.01 [1]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [1]
+  Max sub-MIP depth 2
+  Nodes             1
+  Repair LPs        0
+  LP iterations     190
+                    0 (strong br.)
+                    74 (separation)
+                    0 (heuristics)
+{"status": "Optimal", "objective": 13951.999999044, "bound": 13951.999999044, "nodes": 1, "time": 0.19500740299997688}

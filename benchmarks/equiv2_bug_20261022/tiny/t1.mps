@@ -1,0 +1,26 @@
+NAME t1
+ROWS
+ N OBJ
+ L R0
+ L R1
+COLUMNS
+    M0 'MARKER' 'INTORG'
+    X OBJ -1
+    X R0 1
+    X2 OBJ -1
+    X2 R1 1
+    M1 'MARKER' 'INTEND'
+    Y1 OBJ -1
+    Y1 R0 1
+    Y2 OBJ -1
+    Y2 R0 1
+    Y2 R1 1
+RHS
+    RHS R0 1
+    RHS R1 1
+BOUNDS
+ UP BND X 1
+ UP BND X2 1
+ UP BND Y1 1e-9
+ UP BND Y2 1e-9
+ENDATA

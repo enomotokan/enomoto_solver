@@ -1,0 +1,48 @@
+MIP: presolve: tightened 1442 coefficients (skipped 0 in rows redundant within tolerance), normalized 0 integer rows
+MIP: presolve: merged 881 parallel rows (702 new equations)
+MIP: presolve: rows 10764 -> 3972, free columns 3023 -> 2490, nonzeros 50335 -> 12864, postsolve steps 97
+MIP: presolve: tightened 1 coefficients (skipped 0 in rows redundant within tolerance), normalized 0 integer rows
+MIP: presolve: merged 59 parallel rows (0 new equations)
+MIP: presolve: rows 3972 -> 2956, free columns 2490 -> 1780, nonzeros 12864 -> 10655, postsolve steps 702
+MIP: probing: 1713 of 1550 binaries probed (2 passes), 59 fixed, 104 bounds tightened, 9000 implications (0.02s)
+MIP: probing: 171 equivalent binary pairs
+MIP: clique extension: 169 rows extended, 227 nonzeros added, 0 columns fixed, 0 duplicate and 78 dominated rows removed (5380 edges, 0.01s)
+MIP: root LP 4.9323999999e4 (1976 iters, 0.44s)
+MIP: cut round 0: 50 cuts (of 1445, sep 0.11s, LP 384 iters), LP rows 2928 (cut rows mean nnz 2), obj 4.9323999999e4 (0.68s)
+MIP: cut round 1: 50 cuts (of 1372, sep 0.10s, LP 265 iters), LP rows 2976 (cut rows mean nnz 2), obj 4.9324000000e4 (0.87s)
+MIP: cut round 2: 50 cuts (of 1370, sep 0.13s, LP 286 iters), LP rows 3026 (cut rows mean nnz 2), obj 4.9324000000e4 (1.10s)
+MIP: cut round 3: 37 cuts (of 1243, sep 0.19s, LP 410 iters), LP rows 3054 (cut rows mean nnz 2), obj 4.9324000000e4 (1.48s)
+MIP: cut round 4: 27 cuts (of 1231, sep 0.17s, LP 241 iters), LP rows 3075 (cut rows mean nnz 3), obj 4.9324000000e4 (1.75s)
+MIP: cut round 5: 33 cuts (of 1250, sep 0.16s, LP 197 iters), LP rows 3099 (cut rows mean nnz 3), obj 4.9324000000e4 (2.02s)
+MIP: cut round 6: 29 cuts (of 1189, sep 0.17s, LP 248 iters), LP rows 3119 (cut rows mean nnz 3), obj 4.9324000000e4 (2.30s)
+MIP: cut loop done: 276 cuts added, 226 in LP, pool 0 cuts (0 nonzeros), obj 4.9323999999e4 -> 4.9324000000e4
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic trivial: none (0.01s)
+MIP: root heuristic randomized rounding: none (0.03s)
+MIP: root heuristic interior rounding: none (0.00s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP: root heuristic LP face: none (0.00s)
+MIP:   sub-MIP: 882 free columns of 111827, status Optimal, nodes 0, objective Some(49324.0), 0.93s
+MIP: fixed-integer LP dual check: c x 4.9324000000e4, dual bound 4.9324000000e4 -> skip
+MIP:   global fixed integers 107966 of 109346 (newly 0 since the root LP)
+MIP: new incumbent 4.9324000000e4 at node 0 (3.30s) [RENS]
+MIP: root heuristic RENS: found (0.93s)
+MIP: after root heuristics: incumbent Some(49324.0) (3.30s)
+MIP: the root LP bound after cuts and heuristics 4.9324000000e4 closed the gap to the prune limit 4.9319067600e4 (incumbent Some(49324.0), 3.30s)
+MIP:     3.30s nodes        0 open       0 lb inf ub 4.93240000e4 lp_iters 4008 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 1416 dive_iters 0 lp_rows 3104 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 11, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 38, in pool 38 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: proof CMIR cuts: tried 0, added 0, entered the cut pool 0
+MIP: conflict analysis (HiGHS style): calls 11, conflicts 45, added 38, mean length 11.3, max length 32903, 0.01s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 0 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 3104
+MIP: solve returned Optimal after 3.68s (time limit 20.00s)
+Presolve: 10764 rows, 111827 columns -> 9 rows, 9 columns (0.14s)
+Solving with the slope-intercept dual two-phase method
+MIP: polished the solution (3.82s)
+{"status": "optimal", "objective": 49323.99999999999, "best_bound": 49323.99999999999, "nodes": 0, "root_bound": null, "first_solution_time": null, "first_solution_objective": null, "time": 3.8476219449999007}

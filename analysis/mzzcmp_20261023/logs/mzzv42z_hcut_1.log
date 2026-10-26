@@ -1,0 +1,78 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP mzzv42z has 10460 rows; 11717 cols; 151261 nonzeros; 11717 integer variables (11482 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+03]
+  Cost    [8e+00, 1e+03]
+  Bound   [1e+00, 1e+02]
+  RHS     [1e+00, 1e+00]
+Presolving model
+10460 rows, 11717 cols, 151261 nonzeros 0s
+8948 rows, 9795 cols, 124089 nonzeros 7s
+7286 rows, 7767 cols, 90279 nonzeros 13s
+6139 rows, 6980 cols, 80276 nonzeros 28s
+Presolve reductions: rows 6139(-4321); columns 6980(-4737); nonzeros 80276(-70985) 
+Objective function is integral with scale 0.5
+
+Solving MIP model with:
+   6139 rows
+   6980 cols (6745 binary, 235 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   80276 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   -22278          -20539.5           Large        0      0      0         0    29.2s
+         0       0         0   0.00%   -21414.23133    -20539.5           Large        0      0      8      4783    29.8s
+         0       0         0   0.00%   -20771.322498   -20539.5          24.36%     3924    217    729     10485    35.1s
+
+13.7% inactive integer columns, restarting
+Model after restart has 4853 rows, 5785 cols (5568 bin., 217 int., 0 impl., 0 cont., 0 dom.fix.), and 61370 nonzeros
+
+         0       0         0   0.00%   -20771.322498   -20539.5          24.36%      213      0      0     10485    42.3s
+         0       0         0   0.00%   -20769.360825   -20539.5          24.35%      213    151      7     17433    43.3s
+ L       0       0         0   0.00%   -20688.817175   -20540             0.72%     3450    252      7     20325    49.6s
+
+5.7% inactive integer columns, restarting
+Model after restart has 4111 rows, 5075 cols (4892 bin., 183 int., 0 impl., 0 cont., 0 dom.fix.), and 48968 nonzeros
+
+         0       0         0   0.00%   -20675.608866   -20540             0.66%      187      0      0     23074    59.0s
+         0       0         0   0.00%   -20675.608866   -20540             0.66%      187    104      3     30244    60.0s
+         0       0         0   0.00%   -20675.608866   -20540             0.66%      187    104      3     30244    60.0s
+
+Solving report
+  Model             mzzv42z
+  Status            Time limit reached
+  Primal bound      -20540
+  Dual bound        -20674
+  Gap               0.652%
+  P-D integral      3.78058804384
+  Solution status   feasible
+                    -20540 (objective)
+                    0 (bound viol.)
+                    7.1054273576e-14 (int. viol.)
+                    0 (row viol.)
+  Timing            60.01
+                    30.86 (Presolve)
+                        MIP    time [calls] = 28.86 [1]
+                        subMIP time [calls] = 2.00 [6]
+                    29.14 (Solve)
+                        MIP    time [calls] = 26.98 [1]
+                        subMIP time [calls] = 2.17 [6]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [6]
+  Max sub-MIP depth 4
+  Nodes             0
+  Repair LPs        0
+  LP iterations     30244
+                    0 (strong br.)
+                    7750 (separation)
+                    3590 (heuristics)
+{"status": "Time limit reached", "objective": -20540.0, "bound": -20674.0, "nodes": 0, "time": 60.04581801199993}

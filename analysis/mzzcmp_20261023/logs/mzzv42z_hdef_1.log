@@ -1,0 +1,76 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP mzzv42z has 10460 rows; 11717 cols; 151261 nonzeros; 11717 integer variables (11482 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+03]
+  Cost    [8e+00, 1e+03]
+  Bound   [1e+00, 1e+02]
+  RHS     [1e+00, 1e+00]
+Presolving model
+10460 rows, 11717 cols, 151261 nonzeros 0s
+8948 rows, 9795 cols, 124089 nonzeros 7s
+7286 rows, 7767 cols, 90279 nonzeros 14s
+6139 rows, 6980 cols, 80276 nonzeros 29s
+Presolve reductions: rows 6139(-4321); columns 6980(-4737); nonzeros 80276(-70985) 
+Objective function is integral with scale 0.5
+
+Solving MIP model with:
+   6139 rows
+   6980 cols (6745 binary, 235 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   80276 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            0                  Large        0      0      0         0    29.8s
+         0       0         0   0.00%   -21414.23133    0                  Large        0      0      6      4783    30.4s
+         0       0         0   0.00%   -20765.898058   0                  Large     5304    490    366     10348    35.4s
+ L       0       0         0   0.00%   -20737.693926   -20540             0.96%     5719    373    366     12413    38.6s
+
+14.6% inactive integer columns, restarting
+Model after restart has 4994 rows, 5715 cols (5505 bin., 210 int., 0 impl., 0 cont., 0 dom.fix.), and 60799 nonzeros
+
+         0       0         0   0.00%   -20728.719673   -20540             0.92%      226      0      0     14723    47.7s
+         0       0         0   0.00%   -20728.422495   -20540             0.92%      226    162      5     24159    49.4s
+ L       0       0         0   0.00%   -20674.388369   -20540             0.65%     2748    245      5     26756    56.8s
+
+4.3% inactive integer columns, restarting
+Time limit reached in probing: consider not using probing by setting option presolve_rule_off to 2^15 = 32768
+         0       0         0   0.00%   -20674.388369   -20540             0.65%      173    790      0     29731    60.8s
+
+Solving report
+  Model             mzzv42z
+  Status            Time limit reached
+  Primal bound      -20540
+  Dual bound        -20674.3883688
+  Gap               0.654%
+  P-D integral      0.180197813119
+  Solution status   feasible
+                    -20540 (objective)
+                    0 (bound viol.)
+                    5.15143483426e-14 (int. viol.)
+                    0 (row viol.)
+  Timing            60.78
+                    33.86 (Presolve)
+                        MIP    time [calls] = 29.41 [1]
+                        subMIP time [calls] = 4.45 [10]
+                    26.91 (Solve)
+                        MIP    time [calls] = 23.85 [1]
+                        subMIP time [calls] = 3.06 [10]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [10]
+  Max sub-MIP depth 4
+  Nodes             0
+  Repair LPs        0
+  LP iterations     29731
+                    0 (strong br.)
+                    10447 (separation)
+                    4986 (heuristics)
+{"status": "Time limit reached", "objective": -20540.0, "bound": -20674.388368777927, "nodes": 0, "time": 60.81655421800002}

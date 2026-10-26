@@ -103,7 +103,12 @@ impl CliqueGraph {
         self.adj.iter().map(|a| a.len()).sum::<usize>() / 2
     }
 
-    fn adjacent(&self, u: u32, v: u32) -> bool {
+    /// 文字 `u` に隣接する文字 (昇順)。
+    pub fn neighbors(&self, u: u32) -> &[u32] {
+        &self.adj[u as usize]
+    }
+
+    pub fn adjacent(&self, u: u32, v: u32) -> bool {
         self.adj[u as usize].binary_search(&v).is_ok()
     }
 

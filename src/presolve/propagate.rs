@@ -158,6 +158,24 @@ pub fn bounds_inconsistent(n: usize, lb: &[f64], ub: &[f64]) -> bool {
     (0..n).any(|j| lb[j] > ub[j] + PROPAGATE_EPS && lb[j] > ub[j] + crossing_tol(lb[j], ub[j]))
 }
 
+/// 交差した境界 (`lb > ub`) を処理する: 許容誤差 ([`crossing_tol`]) 以内なら列を `ub` に固定し (`lb = ub`。伝播の
+/// [`propagate`] と同じ)、それを越える交差があれば `true` (実行不能) を返す。伝播の外で境界を締める縮約 (代入で 1 変数に
+/// 縮んだ行の取り込みなど) は交差をそろえないので、その後と前処理の結果を返す前に呼ぶ
+/// (h80x6320d のサブ MIP で連続列が下限 12.000000000000014、上限 12.0 のまま残り、MIP の `x.clamp(lo, up)` が panic した)。
+pub fn fix_crossed_bounds(lb: &mut [f64], ub: &[f64]) -> bool {
+    let mut bad = false;
+    for j in 0..lb.len() {
+        if lb[j] > ub[j] {
+            if lb[j] > ub[j] + PROPAGATE_EPS && lb[j] > ub[j] + crossing_tol(lb[j], ub[j]) {
+                bad = true;
+            } else {
+                lb[j] = ub[j];
+            }
+        }
+    }
+    bad
+}
+
 /// 許容誤差内の交差のうち、従来の絶対 `PROPAGATE_EPS` を超えるもの (相対形のときだけ残る) は 1 点に揃える
 /// (`propagate_equalities` と同じ)。`PROPAGATE_EPS` 以内の交差は従来どおり残す (出力を変えないため)。
 /// 呼び出し側の主ループのコード生成を乱さないよう別関数にする。

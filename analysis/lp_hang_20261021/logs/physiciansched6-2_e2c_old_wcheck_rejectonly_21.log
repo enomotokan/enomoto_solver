@@ -1,0 +1,973 @@
+MIP: presolve: tightened 4407 coefficients, normalized 0 integer rows
+MIP: presolve: merged 3588 parallel rows (3528 new equations)
+MIP: presolve: rows 168336 -> 15892, free columns 110454 -> 9758, nonzeros 480259 -> 52849, postsolve steps 10427
+MIP: presolve: tightened 12 coefficients, normalized 0 integer rows
+MIP: presolve: merged 60 parallel rows (0 new equations)
+MIP: presolve: rows 15892 -> 12119, free columns 9758 -> 6183, nonzeros 52849 -> 45274, postsolve steps 3529
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: initial fresh_d skipped (c_B = 0)
+DEBUG_EXT: DSE weights: unit (warm_started=false, passed=none, warm_dse_on=false, once=false)
+DEBUG_EXT: warm start from a given basis (cost shifts 1171, hint agree 0 differ 0 unknown 0, primal infeasible basics 4159)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: unit (warm_started=true, passed=none, warm_dse_on=false, once=false)
+TSLP solve st=TimeLimit iters=4993 polish=0 us=2986495 warm=false dse_cache=false lu_cache=false
+Root LP: the two-phase method finished first (2.99s)
+MIP: probing: equivalence pass with implications: 2168 pairs found (0.07s), used
+MIP: probing: 5444 of 5623 binaries probed (1 passes), 1 fixed, 180 bounds tightened, 77450 implications (0.14s)
+MIP: probing: 1084 equivalent binary pairs
+MIP: presolve: tightened 4 coefficients, normalized 0 integer rows
+MIP: presolve: merged 60 parallel rows (0 new equations)
+MIP: presolve: rows 13203 -> 9872, free columns 6003 -> 4981, nonzeros 47442 -> 36318, postsolve steps 1022
+MIP: probing: equivalence pass with implications: 0 pairs found (0.04s), not used
+MIP: probing: 4421 of 4421 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 56700 implications (0.08s)
+MIP: probing: 0 equivalent binary pairs
+Presolve: 168336 rows, 110454 columns -> 9872 rows, 4981 columns (4.18s)
+MIP: clique extension: 3644 rows extended, 10857 nonzeros added, 0 columns fixed, 0 duplicate and 1451 dominated rows removed (30379 edges, 0.04s)
+MIP: symmetry: 9 generators, 1 orbits on 10 columns, 9 lex-leader rows (0.32s)
+MIP: fixed-charge check: vb rows 4 of 8430, continuous with vb 4 of 560
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: initial fresh_d skipped (c_B = 0)
+DEBUG_EXT: DSE weights: unit (warm_started=false, passed=none, warm_dse_on=true, once=false)
+MIP: FJ problem (FJ_P3): rows 8421 -> 8357, free columns 4981 -> 4980, 3 continuous bounds tightened
+DEBUG_EXT: warm start from a given basis (cost shifts 532, hint agree 0 differ 0 unknown 0, primal infeasible basics 3700)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: unit (warm_started=true, passed=none, warm_dse_on=false, once=false)
+DEBUG_EXT: main_loop_iters=6528 bland_mode=false
+DEBUG_EXT: degenerate_pivots=24 max_run=2 cost_shifts=0 shifted_cols=0 xb_mismatch=4.778e-15@3483
+DEBUG_EXT: dse_weight_check: checked=6528 deviated=0 rejected=0 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=8.658e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(35962.60000790999,0) z0_base=35962.60000790999
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=0
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=35962.60000790999
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=6530 polish=1 us=3513686 warm=true dse_cache=true lu_cache=true
+Root LP: the two-phase method finished first (3.52s)
+Root LP: objective 4.8583100000e4 (3.53s)
+MIP: root LP 4.8583100000e4 (6530 iters, 3.53s)
+MIP: fixed-charge check: vb rows 4 of 8430, continuous with vb 4 of 560
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 50)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (8480 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=699 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=3867 xb_mismatch=4.659e-17@539
+DEBUG_EXT: dse_weight_check: checked=699 deviated=24 rejected=24 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=2.720e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(35966.891674576706,0) z0_base=35966.891674576706
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1026
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=35966.891674576706
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=10981 dual_infeasible_cols=2 primal_handoff_iters=6
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=35966.89167457659
+TSLP solve st=Optimal iters=708 polish=2 us=376101 warm=true dse_cache=true lu_cache=true
+MIP: cut round 0: 50 cuts did not move the objective; up to 1000 cuts per round from now
+MIP: cut round 0: 50 cuts (of 3180, sep 0.46s, LP 708 iters), LP rows 8480 (cut rows mean nnz 2), obj 4.8587391667e4 (4.37s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 335)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (8812 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1890 bland_mode=false
+DEBUG_EXT: degenerate_pivots=13 max_run=10 cost_shifts=1 shifted_cols=3824 xb_mismatch=1.132e-16@659
+DEBUG_EXT: dse_weight_check: checked=1890 deviated=156 rejected=151 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.038e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36013.00000791,0) z0_base=36013.00000791
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1205
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36013.00000791
+TSLP solve st=Optimal iters=1892 polish=1 us=1203530 warm=true dse_cache=true lu_cache=true
+MIP: cut round 1: 335 cuts (of 2953, sep 0.56s, LP 1892 iters), LP rows 8812 (cut rows mean nnz 2), obj 4.8633500000e4 (6.15s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 234)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (8989 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1850 bland_mode=false
+DEBUG_EXT: degenerate_pivots=14 max_run=10 cost_shifts=1 shifted_cols=3868 xb_mismatch=2.027e-16@1829
+DEBUG_EXT: dse_weight_check: checked=1850 deviated=74 rejected=70 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=2.076e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36091.71627775127,0) z0_base=36091.71627775127
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1258
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36091.71627775127
+TSLP solve st=Optimal iters=1852 polish=1 us=1167035 warm=true dse_cache=true lu_cache=true
+MIP: cut round 2: 234 cuts (of 2753, sep 0.40s, LP 1852 iters), LP rows 8989 (cut rows mean nnz 3), obj 4.8712216270e4 (7.73s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 144)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9069 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1551 bland_mode=false
+DEBUG_EXT: degenerate_pivots=16 max_run=10 cost_shifts=1 shifted_cols=3844 xb_mismatch=2.760e-16@1253
+DEBUG_EXT: dse_weight_check: checked=1551 deviated=55 rejected=54 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=4.791e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36175.72223013221,0) z0_base=36175.72223013221
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1245
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36175.72223013221
+TSLP solve st=Optimal iters=1553 polish=1 us=1098186 warm=true dse_cache=true lu_cache=true
+MIP: cut round 3: 144 cuts (of 2296, sep 0.44s, LP 1553 iters), LP rows 9069 (cut rows mean nnz 3), obj 4.8796222222e4 (9.28s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 104)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9120 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1289 bland_mode=false
+DEBUG_EXT: degenerate_pivots=13 max_run=10 cost_shifts=1 shifted_cols=3870 xb_mismatch=1.714e-16@1249
+DEBUG_EXT: dse_weight_check: checked=1289 deviated=48 rejected=48 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=2.756e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36175.72223013219,0) z0_base=36175.72223013219
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1362
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36175.72223013219
+TSLP solve st=Optimal iters=1291 polish=1 us=824539 warm=true dse_cache=true lu_cache=true
+MIP: cut round 4: 104 cuts (of 2815, sep 0.52s, LP 1291 iters), LP rows 9120 (cut rows mean nnz 3), obj 4.8796222222e4 (10.64s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 55)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9139 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1323 bland_mode=false
+DEBUG_EXT: degenerate_pivots=44 max_run=10 cost_shifts=1 shifted_cols=3871 xb_mismatch=3.826e-16@984
+DEBUG_EXT: dse_weight_check: checked=1323 deviated=29 rejected=27 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.707e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36223.48148939148,0) z0_base=36223.48148939148
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1329
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36223.48148939148
+TSLP solve st=Optimal iters=1325 polish=1 us=916624 warm=true dse_cache=true lu_cache=true
+MIP: cut round 5: 55 cuts (of 1850, sep 0.62s, LP 1325 iters), LP rows 9139 (cut rows mean nnz 3), obj 4.8843981481e4 (12.19s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 101)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9205 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1378 bland_mode=false
+DEBUG_EXT: degenerate_pivots=11 max_run=10 cost_shifts=1 shifted_cols=3868 xb_mismatch=2.220e-16@1
+DEBUG_EXT: dse_weight_check: checked=1378 deviated=46 rejected=46 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.613e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36374.57143648144,0) z0_base=36374.57143648144
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1466
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36374.57143648144
+TSLP solve st=Optimal iters=1380 polish=1 us=1029298 warm=true dse_cache=true lu_cache=true
+MIP: cut round 6: 101 cuts (of 1973, sep 0.49s, LP 1380 iters), LP rows 9205 (cut rows mean nnz 5), obj 4.8995071429e4 (13.72s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 82)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9221 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1505 bland_mode=false
+DEBUG_EXT: degenerate_pivots=33 max_run=10 cost_shifts=1 shifted_cols=3885 xb_mismatch=5.737e-17@1065
+DEBUG_EXT: dse_weight_check: checked=1505 deviated=51 rejected=51 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=3.968e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36437.50000791083,0) z0_base=36437.50000791083
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1445
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36437.50000791083
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=171397 dual_infeasible_cols=248 primal_handoff_iters=117
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=36437.50000791
+TSLP solve st=Optimal iters=1625 polish=2 us=1178494 warm=true dse_cache=true lu_cache=true
+MIP: cut round 7: 82 cuts (of 2580, sep 0.73s, LP 1625 iters), LP rows 9221 (cut rows mean nnz 8), obj 4.9058000000e4 (15.64s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 92)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9237 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=2950 bland_mode=false
+DEBUG_EXT: degenerate_pivots=12 max_run=10 cost_shifts=1 shifted_cols=3883 xb_mismatch=1.077e-16@2300
+DEBUG_EXT: dse_weight_check: checked=2950 deviated=1494 rejected=1487 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=3.763e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36456.27778568777,0) z0_base=36456.27778568777
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1554
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36456.27778568777
+TSLP solve st=Optimal iters=2952 polish=1 us=1231916 warm=true dse_cache=true lu_cache=true
+MIP: cut round 8: 92 cuts (of 1799, sep 0.72s, LP 2952 iters), LP rows 9237 (cut rows mean nnz 3), obj 4.9076777778e4 (17.60s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 39)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9218 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1769 bland_mode=false
+DEBUG_EXT: degenerate_pivots=46 max_run=10 cost_shifts=1 shifted_cols=3883 xb_mismatch=2.811e-16@562
+DEBUG_EXT: dse_weight_check: checked=1769 deviated=55 rejected=43 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=6.823e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.57408198638,0) z0_base=36477.57408198638
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1498
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.57408198638
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=158909 dual_infeasible_cols=621 primal_handoff_iters=128
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=36477.57408198407
+TSLP solve st=Optimal iters=1900 polish=2 us=1517065 warm=true dse_cache=true lu_cache=true
+MIP: cut round 9: 39 cuts (of 1432, sep 0.58s, LP 1900 iters), LP rows 9218 (cut rows mean nnz 3), obj 4.9098074074e4 (19.71s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 46)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9211 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1855 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=3881 xb_mismatch=2.191e-16@958
+DEBUG_EXT: dse_weight_check: checked=1855 deviated=858 rejected=846 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.746e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.57408198407,0) z0_base=36477.57408198407
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1426
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.57408198407
+TSLP solve st=Optimal iters=1857 polish=1 us=736621 warm=true dse_cache=true lu_cache=true
+MIP: cut round 10: 46 cuts (of 1647, sep 0.70s, LP 1857 iters), LP rows 9211 (cut rows mean nnz 3), obj 4.9098074074e4 (21.16s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 60)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9230 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=2802 bland_mode=false
+DEBUG_EXT: degenerate_pivots=40 max_run=10 cost_shifts=1 shifted_cols=3881 xb_mismatch=1.459e-16@1340
+DEBUG_EXT: dse_weight_check: checked=2802 deviated=130 rejected=90 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=2.284e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.57408198507,0) z0_base=36477.57408198507
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1524
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.57408198507
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=43276 dual_infeasible_cols=896 primal_handoff_iters=33
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=36477.57408198408
+TSLP solve st=Optimal iters=2838 polish=2 us=1873514 warm=true dse_cache=true lu_cache=true
+MIP: cut round 11: 60 cuts (of 1527, sep 0.72s, LP 2838 iters), LP rows 9230 (cut rows mean nnz 3), obj 4.9098074074e4 (23.76s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 0)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=0 bland_mode=false
+DEBUG_EXT: degenerate_pivots=0 max_run=0 cost_shifts=0 shifted_cols=0 xb_mismatch=0.000e0@0
+DEBUG_EXT: dse_weight_check: checked=0 deviated=0 rejected=0 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=0.000e0 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+TSLP solve st=Optimal iters=1 polish=0 us=24047 warm=true dse_cache=true lu_cache=true
+MIP: clique graph: 30379 edges (23611 from rows, probing implications 56700)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 100)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9278 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=2178 bland_mode=false
+DEBUG_EXT: degenerate_pivots=24 max_run=10 cost_shifts=1 shifted_cols=3881 xb_mismatch=1.315e-16@1675
+DEBUG_EXT: dse_weight_check: checked=2178 deviated=466 rejected=447 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.081e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.574081994855,0) z0_base=36477.574081994855
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1623
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.574081994855
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=107550 dual_infeasible_cols=532 primal_handoff_iters=72
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=36477.57408198407
+TSLP solve st=Optimal iters=2253 polish=2 us=1418961 warm=true dse_cache=true lu_cache=true
+MIP: clique fallback: 100 cuts, LP 4.9098074074e4 -> 4.9098074074e4 (g_c 0.000e0, g_d 1.049e-2 relative), fractional 1262 -> 1036; not used (1.46s)
+Root cuts: objective 4.8583100000e4 -> 4.9098074074e4, 748 cuts in the LP (25.26s)
+MIP: cut loop done: 1342 cuts added, 748 in LP, pool 1582 cuts (796400 nonzeros), obj 4.8583100000e4 -> 4.9098074074e4
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic trivial: none (0.01s)
+MIP: fixed-charge check: vb rows 4 of 8430, continuous with vb 4 of 560
+MIP: root heuristic randomized rounding: none (0.03s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 99319 differ 21 unknown 12487, primal infeasible basics 2092)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: unit (warm_started=true, passed=none, warm_dse_on=true, once=false)
+DEBUG_EXT: main_loop_iters=4717 bland_mode=false
+DEBUG_EXT: degenerate_pivots=26 max_run=10 cost_shifts=1 shifted_cols=3881 xb_mismatch=2.273e-16@4598
+DEBUG_EXT: dse_weight_check: checked=4717 deviated=3143 rejected=3142 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.145e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.57408198407,0) z0_base=36477.57408198407
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1502
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.57408198407
+TSLP solve st=Optimal iters=4719 polish=1 us=1504409 warm=true dse_cache=true lu_cache=true
+MIP: fixed-charge check: vb rows 4 of 8430, continuous with vb 4 of 560
+DEBUG_EXT: warm start from a given basis (cost shifts 757, hint agree 110748 differ 1079 unknown 0, primal infeasible basics 3468)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+MIP:   interior rounding: 1 interior points, vertex true (2.17s)
+MIP:   interior rounding: 6 rounded points tried, found false
+MIP: root heuristic interior rounding: none (2.26s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 122 of 4421 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111691 differ 136 unknown 0, primal infeasible basics 2)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=724 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=3635 xb_mismatch=3.715e-17@0
+DEBUG_EXT: dse_weight_check: checked=724 deviated=278 rejected=271 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=3.268e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.57408198363,0) z0_base=36477.57408198363
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1506
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.57408198363
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=24275 dual_infeasible_cols=1 primal_handoff_iters=5
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=36477.5740819841
+TSLP solve st=Optimal iters=732 polish=2 us=436053 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111689 differ 138 unknown 0, primal infeasible basics 0)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=0 bland_mode=false
+DEBUG_EXT: degenerate_pivots=0 max_run=0 cost_shifts=0 shifted_cols=0 xb_mismatch=0.000e0@0
+DEBUG_EXT: dse_weight_check: checked=0 deviated=0 rejected=0 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=0.000e0 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+TSLP solve st=Optimal iters=1 polish=0 us=31723 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111685 differ 142 unknown 0, primal infeasible basics 1)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+TSLP solve st=TimeLimit iters=1857 polish=0 us=1007420 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 764, hint agree 110694 differ 1133 unknown 0, primal infeasible basics 3626)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=3 z1=0
+TSLP solve st=TimeLimit iters=1953 polish=0 us=1001156 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 50)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9228 rows, 0 unknown)
+TSLP solve st=IterationLimit iters=2268 polish=0 us=1436491 warm=true dse_cache=false lu_cache=false
+MIP:   RENS: fixing rate 0.20 (target 0.80, 1 backtracks)
+MIP:   parallel sub-MIP started (RENS): 4100 free columns of 111827
+MIP:   no-incumbent RENS (sub-MIP depth 0) try 1: target 0.80, fixing rate 0.20, found false (29.51s)
+MIP: root heuristic RENS: none (1.91s)
+MIP:   parallel sub-MIP started (RENS (LP before cuts)): 1412 free columns of 111827
+MIP: root heuristic RENS (LP before cuts): none (0.01s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 0)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=0 bland_mode=false
+DEBUG_EXT: degenerate_pivots=0 max_run=0 cost_shifts=0 shifted_cols=0 xb_mismatch=0.000e0@0
+DEBUG_EXT: dse_weight_check: checked=0 deviated=0 rejected=0 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=0.000e0 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+TSLP solve st=Optimal iters=1 polish=0 us=20759 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 882, hint agree 110696 differ 1131 unknown 0, primal infeasible basics 3674)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=1 z1=0
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: initial fresh_d skipped (c_B = 0)
+DEBUG_EXT: DSE weights: unit (warm_started=false, passed=none, warm_dse_on=true, once=false)
+DEBUG_EXT: main_loop_iters=731 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=3881 xb_mismatch=1.184e-16@0
+DEBUG_EXT: dse_weight_check: checked=731 deviated=43 rejected=43 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.355e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.5740819841,0) z0_base=36477.5740819841
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1710
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.5740819841
+TSLP solve st=Optimal iters=733 polish=1 us=433535 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 741, hint agree 110763 differ 1064 unknown 0, primal infeasible basics 3381)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=4144 bland_mode=false
+DEBUG_EXT: degenerate_pivots=25 max_run=1 cost_shifts=0 shifted_cols=0 xb_mismatch=3.631e-16@2378
+DEBUG_EXT: dse_weight_check: checked=4144 deviated=0 rejected=0 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.310e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(35503.12500000001,0) z0_base=35503.12500000001
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=0
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=35503.12500000001
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=4146 polish=1 us=1581670 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111782 differ 45 unknown 0, primal infeasible basics 0)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=0 bland_mode=false
+DEBUG_EXT: degenerate_pivots=0 max_run=0 cost_shifts=0 shifted_cols=0 xb_mismatch=0.000e0@0
+DEBUG_EXT: dse_weight_check: checked=0 deviated=0 rejected=0 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=0.000e0 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+TSLP solve st=Optimal iters=1 polish=0 us=23569 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111782 differ 45 unknown 0, primal infeasible basics 0)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=0 bland_mode=false
+DEBUG_EXT: degenerate_pivots=0 max_run=0 cost_shifts=0 shifted_cols=0 xb_mismatch=0.000e0@0
+DEBUG_EXT: dse_weight_check: checked=0 deviated=0 rejected=0 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=0.000e0 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+TSLP solve st=Optimal iters=1 polish=0 us=19111 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 340, hint agree 110922 differ 905 unknown 0, primal infeasible basics 2369)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+TSLP solve st=TimeLimit iters=1697 polish=0 us=1003610 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 840, hint agree 110644 differ 1183 unknown 0, primal infeasible basics 3779)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=1 z1=0
+DEBUG_EXT: main_loop_iters=1668 bland_mode=false
+DEBUG_EXT: degenerate_pivots=11 max_run=10 cost_shifts=1 shifted_cols=584 xb_mismatch=3.435e-16@120
+DEBUG_EXT: dse_weight_check: checked=1668 deviated=0 rejected=0 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.910e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(928649.2560806844,0) z0_base=928666.7561075995
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=441
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=928649.2560806843
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+TSLP solve st=TimeLimit iters=1889 polish=0 us=1014174 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 42)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9220 rows, 0 unknown)
+DEBUG_EXT: primal_handoff_us=621396 dual_infeasible_cols=354 primal_handoff_iters=1005
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=928644.8586233462
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=2676 polish=2 us=1342225 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 212, hint agree 111369 differ 458 unknown 0, primal infeasible basics 1351)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=5803 bland_mode=false
+DEBUG_EXT: degenerate_pivots=14 max_run=10 cost_shifts=1 shifted_cols=1004 xb_mismatch=4.266e-15@390
+DEBUG_EXT: dse_weight_check: checked=5802 deviated=754 rejected=704 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=2.349e5 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(1091371.0780082538,0) z0_base=1091390.1779990688
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=960
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=1091371.0780082536
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: main_loop_iters=673 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=3881 xb_mismatch=2.079e-16@310
+DEBUG_EXT: dse_weight_check: checked=673 deviated=53 rejected=53 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=3.309e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.57408198407,0) z0_base=36477.57408198407
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1568
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.57408198407
+TSLP solve st=Optimal iters=675 polish=1 us=470088 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: main_loop_iters=1095 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=424 xb_mismatch=1.650e-16@907
+DEBUG_EXT: dse_weight_check: checked=1095 deviated=474 rejected=461 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=3.164e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(835718.5438258365,0) z0_base=835757.6839317435
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=192
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=835718.5438258369
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=228743 dual_infeasible_cols=175 primal_handoff_iters=678
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=835711.6610190892
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=1440 polish=2 us=534712 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 206, hint agree 111098 differ 729 unknown 0, primal infeasible basics 1771)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=107 z1=0
+DEBUG_EXT: main_loop_iters=1505 bland_mode=false
+DEBUG_EXT: degenerate_pivots=14 max_run=10 cost_shifts=1 shifted_cols=334 xb_mismatch=7.666e-15@445
+DEBUG_EXT: dse_weight_check: checked=1504 deviated=601 rejected=588 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=6.433e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(752073.3197970578,0) z0_base=752132.12676608
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=205
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=752073.3197970558
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: warm start from a given basis (cost shifts 717, hint agree 110789 differ 1038 unknown 0, primal infeasible basics 3417)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9177 rows, 0 unknown)
+DEBUG_EXT: primal_handoff_us=232923 dual_infeasible_cols=200 primal_handoff_iters=613
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=752070.5638628132
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=1891 polish=2 us=766025 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 217, hint agree 111268 differ 559 unknown 0, primal infeasible basics 1586)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=939 bland_mode=false
+DEBUG_EXT: degenerate_pivots=21 max_run=3 cost_shifts=0 shifted_cols=0 xb_mismatch=4.791e-17@809
+DEBUG_EXT: dse_weight_check: checked=939 deviated=306 rejected=294 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=6.217e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(676786.7614637805,0) z0_base=676865.1706444751
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=193
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=676786.7614637804
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=248831 dual_infeasible_cols=176 primal_handoff_iters=635
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=676773.4922337254
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=1293 polish=2 us=532025 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 201, hint agree 111000 differ 827 unknown 0, primal infeasible basics 1875)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+TSLP solve st=TimeLimit iters=1665 polish=0 us=1000496 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 836, hint agree 110614 differ 1213 unknown 0, primal infeasible basics 3819)
+DEBUG_EXT: DSE weights: inherited (9177 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=5 z1=0
+DEBUG_EXT: main_loop_iters=1714 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=270 xb_mismatch=7.983e-18@1710
+DEBUG_EXT: dse_weight_check: checked=1714 deviated=344 rejected=323 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=3.081e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(609013.0851975115,0) z0_base=609114.2342788479
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=433
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=609013.0851975118
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=423254 dual_infeasible_cols=438 primal_handoff_iters=1186
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=609003.386613842
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=2350 polish=2 us=1140886 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 205, hint agree 111050 differ 777 unknown 0, primal infeasible basics 1939)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+TSLP solve st=TimeLimit iters=1633 polish=0 us=1006534 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 30)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9207 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1529 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=231 xb_mismatch=1.769e-15@270
+DEBUG_EXT: dse_weight_check: checked=1529 deviated=397 rejected=379 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.789e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(548016.9367274103,0) z0_base=548129.8596584862
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=147
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=548016.9367274102
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=3606807 dual_infeasible_cols=888 primal_handoff_iters=6282
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=1091366.2740087304
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=10264 polish=2 us=6924698 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 447, hint agree 110806 differ 1021 unknown 0, primal infeasible basics 2937)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=713 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=3881 xb_mismatch=8.728e-17@560
+DEBUG_EXT: dse_weight_check: checked=713 deviated=32 rejected=31 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.815e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.574081984065,0) z0_base=36477.574081984065
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1575
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.574081984065
+TSLP solve st=Optimal iters=715 polish=1 us=476484 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: primal_handoff_us=408500 dual_infeasible_cols=130 primal_handoff_iters=702
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=548012.2826540853
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=2130 polish=2 us=947906 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 161, hint agree 111048 differ 779 unknown 0, primal infeasible basics 1865)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1064 bland_mode=false
+DEBUG_EXT: degenerate_pivots=21 max_run=10 cost_shifts=1 shifted_cols=258 xb_mismatch=4.811e-16@287
+DEBUG_EXT: dse_weight_check: checked=1064 deviated=363 rejected=348 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=7.068e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(493127.81847904995,0) z0_base=493254.0703117096
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=145
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=493127.81847905
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: warm start from a given basis (cost shifts 704, hint agree 110748 differ 1079 unknown 0, primal infeasible basics 3562)
+DEBUG_EXT: DSE weights: inherited (9173 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=1 z1=0
+DEBUG_EXT: primal_handoff_us=327792 dual_infeasible_cols=144 primal_handoff_iters=387
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=493127.11853648635
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=1454 polish=2 us=850474 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 152, hint agree 111373 differ 454 unknown 0, primal infeasible basics 1641)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=26 z1=0
+DEBUG_EXT: main_loop_iters=774 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=185 xb_mismatch=1.377e-16@705
+DEBUG_EXT: dse_weight_check: checked=773 deviated=284 rejected=271 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.335e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(443731.6803596991,0) z0_base=443873.49391286017
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=104
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=443731.68035969895
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=290500 dual_infeasible_cols=102 primal_handoff_iters=310
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=443730.96844638145
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=1087 polish=2 us=641434 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 76, hint agree 111569 differ 258 unknown 0, primal infeasible basics 1023)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=3256 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=785 xb_mismatch=3.513e-14@499
+DEBUG_EXT: dse_weight_check: checked=3256 deviated=613 rejected=563 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=5.598e5 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(982136.2649020551,0) z0_base=982181.4849539304
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=466
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=982136.2649020543
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: main_loop_iters=304 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=104 xb_mismatch=0.000e0@0
+DEBUG_EXT: dse_weight_check: checked=304 deviated=94 rejected=83 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=7.120e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(399278.7566108004,0) z0_base=399435.5773535178
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=150
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=399278.7566108002
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=57613 dual_infeasible_cols=142 primal_handoff_iters=172
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=399278.74639177776
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=408 polish=2 us=135947 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 146, hint agree 110954 differ 873 unknown 0, primal infeasible basics 2095)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=23 z1=0
+TSLP solve st=TimeLimit iters=1569 polish=0 us=1016904 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 818, hint agree 110648 differ 1179 unknown 0, primal infeasible basics 3652)
+DEBUG_EXT: DSE weights: inherited (9173 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=4 z1=0
+DEBUG_EXT: main_loop_iters=440 bland_mode=false
+DEBUG_EXT: degenerate_pivots=3 max_run=2 cost_shifts=0 shifted_cols=0 xb_mismatch=0.000e0@0
+DEBUG_EXT: dse_weight_check: checked=439 deviated=219 rejected=201 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=6.233e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(359274.39798625227,0) z0_base=359435.9258149364
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=44
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=359274.39798625256
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=136801 dual_infeasible_cols=30 primal_handoff_iters=444
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=359273.8769030821
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=694 polish=2 us=234450 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 136, hint agree 111130 differ 697 unknown 0, primal infeasible basics 1656)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=20 z1=0
+DEBUG_EXT: main_loop_iters=621 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=169 xb_mismatch=3.334e-15@135
+DEBUG_EXT: dse_weight_check: checked=620 deviated=221 rejected=207 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.247e7 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(323264.0298162202,0) z0_base=323433.51896025153
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=172
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=323264.02981622075
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=151154 dual_infeasible_cols=172 primal_handoff_iters=377
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=323264.0298162198
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=804 polish=2 us=309865 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 16, hint agree 111633 differ 194 unknown 0, primal infeasible basics 95)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=30 bland_mode=false
+DEBUG_EXT: degenerate_pivots=1 max_run=1 cost_shifts=0 shifted_cols=0 xb_mismatch=0.000e0@0
+DEBUG_EXT: dse_weight_check: checked=30 deviated=9 rejected=7 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.068e1 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(290856.6255238268,0) z0_base=291033.1480738546
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=10
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=290856.6255238269
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=29226 dual_infeasible_cols=12 primal_handoff_iters=71
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=290856.11593779986
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=65 polish=2 us=69536 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 26, hint agree 111635 differ 192 unknown 0, primal infeasible basics 162)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=33 z1=0
+DEBUG_EXT: main_loop_iters=174 bland_mode=false
+DEBUG_EXT: degenerate_pivots=4 max_run=2 cost_shifts=0 shifted_cols=0 xb_mismatch=0.000e0@0
+DEBUG_EXT: dse_weight_check: checked=173 deviated=54 rejected=49 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=2.210e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(261692.67560916214,0) z0_base=261873.16212240746
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=18
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=261692.67560916228
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=73744 dual_infeasible_cols=13 primal_handoff_iters=162
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=261692.07893514103
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=251 polish=2 us=152485 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 89, hint agree 111405 differ 422 unknown 0, primal infeasible basics 1201)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=252 bland_mode=false
+DEBUG_EXT: degenerate_pivots=9 max_run=6 cost_shifts=0 shifted_cols=0 xb_mismatch=0.000e0@0
+DEBUG_EXT: dse_weight_check: checked=252 deviated=129 rejected=124 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=7.287e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(235440.03588178355,0) z0_base=235625.13163335712
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=192
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=235440.0358817835
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+TSLP solve st=TimeLimit iters=1633 polish=0 us=1020700 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 34)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9207 rows, 0 unknown)
+DEBUG_EXT: primal_handoff_us=215690 dual_infeasible_cols=195 primal_handoff_iters=507
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=235440.0358817835
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=476 polish=2 us=304454 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 197, hint agree 111322 differ 505 unknown 0, primal infeasible basics 1699)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (6221 rows, 0 unknown)
+TSLP solve st=TimeLimit iters=609 polish=0 us=249286 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: main_loop_iters=704 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=3881 xb_mismatch=1.110e-16@0
+DEBUG_EXT: dse_weight_check: checked=704 deviated=27 rejected=26 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=6.042e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.57408198404,0) z0_base=36477.57408198404
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1604
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.57408198404
+TSLP solve st=Optimal iters=706 polish=1 us=461527 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 709, hint agree 110695 differ 1132 unknown 0, primal infeasible basics 3453)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9179 rows, 0 unknown)
+DEBUG_EXT: primal_handoff_us=2714487 dual_infeasible_cols=436 primal_handoff_iters=4135
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=982128.2076998336
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=6535 polish=2 us=4618268 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 449, hint agree 110999 differ 828 unknown 0, primal infeasible basics 2857)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+TSLP solve st=TimeLimit iters=1409 polish=0 us=1005971 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 783, hint agree 110709 differ 1118 unknown 0, primal infeasible basics 3448)
+DEBUG_EXT: DSE weights: inherited (9179 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=1 z1=0
+DEBUG_EXT: main_loop_iters=2234 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=567 xb_mismatch=6.720e-16@539
+DEBUG_EXT: dse_weight_check: checked=2234 deviated=605 rejected=561 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=3.056e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(883811.4720744573,0) z0_base=883869.4662661073
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=713
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=883811.4720744574
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+TSLP solve st=TimeLimit iters=1313 polish=0 us=1021409 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 38)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9217 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=685 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=3881 xb_mismatch=9.069e-17@280
+DEBUG_EXT: dse_weight_check: checked=685 deviated=32 rejected=32 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.527e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.57408198408,0) z0_base=36477.57408198408
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1620
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.57408198408
+TSLP solve st=Optimal iters=687 polish=1 us=513098 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 682, hint agree 110679 differ 1148 unknown 0, primal infeasible basics 3628)
+DEBUG_EXT: DSE weights: inherited (9173 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=1 z1=0
+DEBUG_EXT: primal_handoff_us=1899744 dual_infeasible_cols=693 primal_handoff_iters=2078
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=883806.6580201456
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=4315 polish=2 us=3180610 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 364, hint agree 110927 differ 900 unknown 0, primal infeasible basics 2828)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+TSLP solve st=TimeLimit iters=1601 polish=0 us=1029048 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 793, hint agree 110683 differ 1144 unknown 0, primal infeasible basics 3368)
+DEBUG_EXT: DSE weights: inherited (9173 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=4 z1=0
+DEBUG_EXT: main_loop_iters=2166 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=470 xb_mismatch=1.184e-15@1564
+DEBUG_EXT: dse_weight_check: checked=2166 deviated=531 rejected=487 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=3.878e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(795321.1397252213,0) z0_base=795401.9563451792
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=272
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=795321.1397252204
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+TSLP solve st=TimeLimit iters=1633 polish=0 us=1018843 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 24)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9197 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=582 bland_mode=false
+DEBUG_EXT: degenerate_pivots=10 max_run=10 cost_shifts=1 shifted_cols=3881 xb_mismatch=2.103e-16@298
+DEBUG_EXT: dse_weight_check: checked=582 deviated=30 rejected=30 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.955e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.57408198407,0) z0_base=36477.57408198407
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1628
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.57408198407
+TSLP solve st=Optimal iters=584 polish=1 us=388969 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: primal_handoff_us=1846040 dual_infeasible_cols=261 primal_handoff_iters=2081
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=795319.1754258025
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=4250 polish=2 us=2927829 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 99, hint agree 111411 differ 416 unknown 0, primal infeasible basics 1570)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: warm start from a given basis (cost shifts 696, hint agree 110617 differ 1210 unknown 0, primal infeasible basics 3666)
+DEBUG_EXT: DSE weights: inherited (9177 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=5 z1=0
+DEBUG_EXT: main_loop_iters=1171 bland_mode=false
+DEBUG_EXT: degenerate_pivots=22 max_run=7 cost_shifts=0 shifted_cols=0 xb_mismatch=5.872e-16@808
+DEBUG_EXT: dse_weight_check: checked=1171 deviated=259 rejected=215 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.728e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(715685.4516470226,0) z0_base=715787.8294266574
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=204
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=715685.451647024
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal_handoff_us=513761 dual_infeasible_cols=172 primal_handoff_iters=645
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=715684.702025477
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=1819 polish=2 us=1136466 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 237, hint agree 111214 differ 613 unknown 0, primal infeasible basics 2377)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+TSLP solve st=TimeLimit iters=1665 polish=0 us=1006570 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 784, hint agree 110732 differ 1095 unknown 0, primal infeasible basics 3422)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9177 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1630 bland_mode=false
+DEBUG_EXT: degenerate_pivots=13 max_run=10 cost_shifts=1 shifted_cols=365 xb_mismatch=7.602e-16@472
+DEBUG_EXT: dse_weight_check: checked=1630 deviated=590 rejected=553 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=4.011e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(644010.6041904393,0) z0_base=644127.7439891818
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=316
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=644010.6041904395
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+TSLP solve st=TimeLimit iters=1409 polish=0 us=1032243 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 56)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9233 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1296 bland_mode=false
+DEBUG_EXT: degenerate_pivots=30 max_run=10 cost_shifts=1 shifted_cols=3881 xb_mismatch=1.872e-16@805
+DEBUG_EXT: dse_weight_check: checked=1296 deviated=65 rejected=65 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=2.043e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.574081984254,0) z0_base=36477.574081984254
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1493
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.574081984254
+TSLP solve st=Optimal iters=1298 polish=1 us=953969 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: primal_handoff_us=1462781 dual_infeasible_cols=296 primal_handoff_iters=1407
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=644008.4774570325
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=3040 polish=2 us=2175391 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 232, hint agree 111301 differ 526 unknown 0, primal infeasible basics 2130)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1168 bland_mode=false
+DEBUG_EXT: degenerate_pivots=15 max_run=10 cost_shifts=1 shifted_cols=385 xb_mismatch=2.883e-16@253
+DEBUG_EXT: dse_weight_check: checked=1168 deviated=398 rejected=371 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=1.146e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(579506.5708452477,0) z0_base=579636.9963596443
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=513
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=579506.5708452488
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: warm start from a given basis (cost shifts 716, hint agree 110637 differ 1190 unknown 0, primal infeasible basics 3678)
+DEBUG_EXT: DSE weights: inherited (9197 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=1 z1=0
+DEBUG_EXT: primal_handoff_us=1014824 dual_infeasible_cols=478 primal_handoff_iters=1159
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=579506.1839283927
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=2330 polish=2 us=1426785 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 72, hint agree 111375 differ 452 unknown 0, primal infeasible basics 1706)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=742 bland_mode=false
+DEBUG_EXT: degenerate_pivots=11 max_run=10 cost_shifts=1 shifted_cols=204 xb_mismatch=0.000e0@0
+DEBUG_EXT: dse_weight_check: checked=742 deviated=263 rejected=226 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=9.001e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(521456.7439026714,0) z0_base=521601.405217571
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=267
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=521456.7439026715
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+TSLP solve st=TimeLimit iters=1697 polish=0 us=1011447 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 751, hint agree 110752 differ 1075 unknown 0, primal infeasible basics 3523)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9197 rows, 0 unknown)
+DEBUG_EXT: primal_handoff_us=352926 dual_infeasible_cols=236 primal_handoff_iters=431
+DEBUG_EXT: handoff round 1 snapped; infeasible rows after x_B recompute = 0
+DEBUG_EXT: polish_iters=1 bland_mode=false obj=521456.596768779
+DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)
+TSLP solve st=Optimal iters=1176 polish=2 us=616993 warm=true dse_cache=true lu_cache=true
+MIP: root heuristic feasibility pump: none (23.17s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 1)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=2 bland_mode=false
+DEBUG_EXT: degenerate_pivots=1 max_run=1 cost_shifts=0 shifted_cols=0 xb_mismatch=2.098e-17@1
+DEBUG_EXT: dse_weight_check: checked=2 deviated=1 rejected=1 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=2.966e1 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+TSLP solve st=Optimal iters=3 polish=0 us=17356 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 1)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1 bland_mode=false
+DEBUG_EXT: degenerate_pivots=1 max_run=1 cost_shifts=0 shifted_cols=0 xb_mismatch=0.000e0@0
+DEBUG_EXT: dse_weight_check: checked=1 deviated=0 rejected=0 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=2.693e1 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+TSLP solve st=Optimal iters=2 polish=0 us=15670 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 3)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+TSLP solve st=TimeLimit iters=1729 polish=0 us=1019034 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 17)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9214 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=1762 bland_mode=false
+DEBUG_EXT: degenerate_pivots=64 max_run=10 cost_shifts=1 shifted_cols=3875 xb_mismatch=1.574e-16@1362
+DEBUG_EXT: dse_weight_check: checked=1762 deviated=425 rejected=402 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=2.687e4 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.57408198404,0) z0_base=36477.57408198404
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1590
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.57408198404
+TSLP solve st=Optimal iters=1764 polish=1 us=1061128 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 3)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+DEBUG_EXT: main_loop_iters=950 bland_mode=false
+DEBUG_EXT: degenerate_pivots=11 max_run=10 cost_shifts=1 shifted_cols=3880 xb_mismatch=6.160e-17@527
+DEBUG_EXT: dse_weight_check: checked=950 deviated=29 rejected=29 recomputed=0
+DEBUG_EXT: noise max_pick_sqrt_w=9.236e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(36477.57408198405,0) z0_base=36477.57408198405
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1732
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=36477.57408198405
+TSLP solve st=Optimal iters=952 polish=1 us=679245 warm=true dse_cache=true lu_cache=true
+DEBUG_EXT: warm start from a given basis (cost shifts 699, hint agree 110594 differ 1233 unknown 0, primal infeasible basics 3832)
+DEBUG_EXT: DSE weights: inherited (9192 rows, 0 unknown)
+DEBUG_EXT: stage_a_iters=2 z1=0
+TSLP solve st=TimeLimit iters=577 polish=0 us=344276 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 751, hint agree 110783 differ 1044 unknown 0, primal infeasible basics 3435)
+DEBUG_EXT: stage A skipped (S empty)
+TSLP solve st=TimeLimit iters=5025 polish=0 us=1686056 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: DSE weights: inherited (9192 rows, 0 unknown)
+TSLP solve st=TimeLimit iters=1 polish=0 us=19675 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 7)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: unit (warm_started=true, passed=none, warm_dse_on=true, once=false)
+TSLP solve st=TimeLimit iters=1 polish=0 us=24103 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 1)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: unit (warm_started=true, passed=none, warm_dse_on=true, once=false)
+TSLP solve st=TimeLimit iters=1 polish=0 us=26230 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 32)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111693 differ 133 unknown 1, primal infeasible basics 477)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9224 rows, 0 unknown)
+DEBUG_EXT: DSE weights: unit (warm_started=true, passed=none, warm_dse_on=true, once=false)
+TSLP solve st=TimeLimit iters=1 polish=0 us=19548 warm=true dse_cache=false lu_cache=false
+TSLP solve st=TimeLimit iters=1 polish=0 us=20212 warm=true dse_cache=false lu_cache=false
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 0)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111693 differ 133 unknown 1, primal infeasible basics 93)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: unit (warm_started=true, passed=none, warm_dse_on=true, once=false)
+TSLP solve st=TimeLimit iters=1 polish=0 us=23306 warm=true dse_cache=false lu_cache=false
+MIP:   dive exhausted (3 backtracks)
+DEBUG_EXT: DSE weights: unit (warm_started=true, passed=none, warm_dse_on=true, once=false)
+MIP: root heuristic fractional diving: none (2.88s)
+TSLP solve st=TimeLimit iters=1 polish=0 us=20735 warm=true dse_cache=false lu_cache=false
+MIP:   parallel sub-MIP (RENS): status TimeLimit, nodes 0, objective None, 26.06s
+MIP:   parallel sub-MIP (RENS (LP before cuts)): status Infeasible, nodes 0, objective None, 26.05s
+MIP: after root heuristics: incumbent None (55.57s)
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111694 differ 133 unknown 0, primal infeasible basics 0)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: inherited (9178 rows, 0 unknown)
+TSLP solve st=TimeLimit iters=1 polish=0 us=13459 warm=true dse_cache=false lu_cache=false
+MIP: background cuts: root LP re-solved before replacing the cuts: TimeLimit, 1 iters (55.59s)
+MIP: background cuts: no result (waited 0.01s)
+     time      nodes      open        best bound         incumbent       gap
+    55.6s          0         0     4.909807407e4                 -         -
+MIP:    55.59s nodes        0 open       1 lb 4.90980741e4 ub inf lp_iters 73487 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 65305 dive_iters 0 lp_rows 9178 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds)
+MIP: propagation conflicts: analysed 40, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 151, in pool 151 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: conflict analysis (HiGHS style): calls 40, conflicts 208, added 151, mean length 26.7, max length 32903, 0.02s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 0 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 9178
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 4.7)
+{"status": "time_limit", "objective": null, "best_bound": -Infinity, "nodes": 0, "root_bound": 49098.07407407407, "first_solution_time": null, "first_solution_objective": null, "time": 60.31776519499908}

@@ -70,6 +70,8 @@ pub struct Domain {
     low_water: usize,
     /// 根に戻ったときに適用する大域的な境界の締め付け (列, 上限か, 値)。
     pending_global: Vec<(usize, bool, f64)>,
+    /// 診断用: デバッグ解 (含意の伝播がデバッグ解を切ったら表示する)。
+    pub dbg_sol: Option<std::sync::Arc<Vec<f64>>>,
     /// 根に戻った回数 (活動量の誤差の蓄積を防ぐための定期的な再計算に使う)。
     resets: u64,
     /// 大域的な境界 (根で確定したものと、その後の大域的な締め付けを反映したもの)。
@@ -88,6 +90,21 @@ pub struct Domain {
 
 thread_local! {
     static DEBUG_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// 境界を変える・戻すときに更新した行の活動の数 (列の長さの合計、スレッドごと)。`ENOMOTO_MIP_PRESOLVE_WORK` のプロービングの
+    /// 手間に足す (行の走査だけでは、長い列の固定が連鎖する問題 (neos-860300) の時間を数えきれない)
+    static ACT_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// 境界を変える・戻した回数 (スレッドごと、`ENOMOTO_MIP_PRESOLVE_WORK` の較正用)
+    static CHG_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`CHG_COUNT`] の値。
+pub fn chg_count() -> u64 {
+    CHG_COUNT.with(|w| w.get())
+}
+
+/// [`ACT_WORK`] の値。
+pub fn act_work() -> u64 {
+    ACT_WORK.with(|w| w.get())
 }
 
 impl Domain {
@@ -117,6 +134,7 @@ impl Domain {
             cur_reason: -1,
             low_water: 0,
             pending_global: Vec::new(),
+            dbg_sol: None,
             resets: 0,
             global_lo: p.col_lo.clone(),
             global_up: p.col_up.clone(),
@@ -133,6 +151,14 @@ impl Domain {
             impl_queue: Vec::new(),
             row_cap: if env_str!("ENOMOTO_MIP_NO_ROWCAP").is_some() { vec![f64::INFINITY; p.m] } else { p.rows.iter().map(|r| r.iter().map(|&(j, a)| a.abs() * (p.col_up[j] - p.col_lo[j])).fold(0.0f64, f64::max)).collect() },
         };
+        // 問題の境界が許容誤差の範囲で交差していたら (前処理の丸め。h80x6320d で下限 21.0、上限 20.999999999999932)
+        // 上限を下限にそろえる (`set_bound` と同じ。交差したままだと `x.clamp(lo, up)` が panic する)
+        for j in 0..p.n {
+            if d.lo[j] > d.up[j] && d.lo[j] <= d.up[j] + bound_tol(d.lo[j]) {
+                d.up[j] = d.lo[j];
+                d.global_up[j] = d.lo[j];
+            }
+        }
         d.recompute_activities(p);
         for i in 0..p.m {
             d.mark_row(i);
@@ -170,6 +196,11 @@ impl Domain {
 
     /// 変更の記録の長さ (巻き戻し位置として使う)。
     /// 記録の位置 `pos` より後の境界の変更 (列, 上限か, 変更後の値)。同じ列・側が何度も変わったら最後のものが後に来る。
+    /// 診断用: 列 `j` の側 `upper` の境界を最後に変えた記録 (位置, 理由, 変更前, 変更後)。記録になければ `None` (根の状態の境界)。
+    pub fn last_change_of(&self, j: usize, upper: bool) -> Option<(usize, i64, f64, f64)> {
+        self.stack.iter().enumerate().rev().find(|(_, c)| c.col == j && c.upper == upper).map(|(k, c)| (k, c.reason as i64, c.old, c.new))
+    }
+
     pub fn changes_since(&self, pos: usize) -> impl Iterator<Item = (usize, bool, f64)> + '_ {
         self.stack[pos.min(self.stack.len())..].iter().map(|c| (c.col, c.upper, c.new))
     }
@@ -234,6 +265,8 @@ impl Domain {
 
     /// 列 `j` の境界を `old` から `new` に変えたときの活動量の更新。
     fn update_activity(&mut self, p: &MipProblem, j: usize, upper: bool, old: f64, new: f64) {
+        ACT_WORK.with(|w| w.set(w.get() + p.cols[j].len() as u64 + 1));
+        CHG_COUNT.with(|w| w.set(w.get() + 1));
         for &(i, a) in &p.cols[j] {
             // a > 0 なら下限は最小活動量、上限は最大活動量に効く (a < 0 なら逆)。
             let affects_min = (a > 0.0) != upper;
@@ -266,6 +299,16 @@ impl Domain {
     }
 
     fn set_bound(&mut self, p: &MipProblem, j: usize, upper: bool, v: f64, record: bool) {
+        // 反対側の境界を許容誤差の範囲で越えるだけなら、反対側の境界にそろえる (下限 > 上限のまま残すと、
+        // `x.clamp(lo, up)` が panic する。h80x6320d で下限 12.000000000000014、上限 12.0 になった)。
+        // 許容誤差を越えるものは下で矛盾とする
+        let v = if upper {
+            if v < self.lo[j] && self.lo[j] <= v + bound_tol(self.lo[j]) { self.lo[j] } else { v }
+        } else if v > self.up[j] && v <= self.up[j] + bound_tol(v) {
+            self.up[j]
+        } else {
+            v
+        };
         let old = if upper { self.up[j] } else { self.lo[j] };
         if old == v {
             return;
@@ -310,6 +353,22 @@ impl Domain {
             true
         } else {
             false
+        }
+    }
+
+    /// 含意による伝播に衝突の組 (文字の組) を足す (含意の伝播を使っていなければ使い始める)。プロービング
+    /// (`ENOMOTO_MIP_PROBE_CLIQUE`) が見つけた含意を、後の列のプロービングの伝播に使う (HiGHS はプロービングで見つけた含意を
+    /// クリーク表に入れ、クリーク表で伝播する。行の伝播では `x = 1 => y = 0` の対偶 `y = 1 => x = 0` が見えないことがある)。
+    /// 足す前に固定されていた列の含意は伝播しないので、根で呼ぶこと。
+    pub fn add_implications(&mut self, n: usize, edges: &[(u32, u32)]) {
+        if edges.is_empty() {
+            return;
+        }
+        let arc = self.impl_adj.get_or_insert_with(|| std::sync::Arc::new(vec![Vec::new(); 2 * n]));
+        let adj = std::sync::Arc::make_mut(arc);
+        for &(a, b) in edges {
+            adj[a as usize].push(b);
+            adj[b as usize].push(a);
         }
     }
 
@@ -365,9 +424,12 @@ impl Domain {
         } else {
             v
         };
+        // 反対側の大域的な境界を許容誤差の範囲で越えるだけなら、そろえる (`set_bound` と同じ)
         if upper {
+            let v = if v < self.global_lo[j] && self.global_lo[j] <= v + bound_tol(self.global_lo[j]) { self.global_lo[j] } else { v };
             self.global_up[j] = self.global_up[j].min(v);
         } else {
+            let v = if v > self.global_up[j] && v <= self.global_up[j] + bound_tol(v) { self.global_up[j] } else { v };
             self.global_lo[j] = self.global_lo[j].max(v);
         }
         if self.stack.is_empty() {
@@ -405,8 +467,21 @@ impl Domain {
                     }
                     let lit = 2 * j + if self.lo[j] == 1.0 { 0 } else { 1 };
                     work += adj[lit].len();
+                    // 診断用 (`ENOMOTO_MIP_DEBUG_IMPL_TAG`): 含意による変更の理由を -9 にして出どころを区別する (衝突解析の段の区切りが
+                    // 変わるので診断のときだけ)
+                    let saved_reason = self.cur_reason;
+                    if env_str!("ENOMOTO_MIP_DEBUG_IMPL_TAG").is_some() {
+                        self.cur_reason = -9;
+                    }
                     for &c in &adj[lit] {
                         let k = (c / 2) as usize;
+                        // 診断用: 含意 (x_j = lo_j => x_k = w) がデバッグ解で成り立たなければ、含意が誤り
+                        if let Some(x) = &self.dbg_sol {
+                            let w = if c % 2 == 0 { 0.0 } else { 1.0 };
+                            if (x[j] - self.lo[j]).abs() <= 1e-6 && (x[k] - w).abs() > 1e-6 {
+                                eprintln!("MIP_DEBUG_SOL: implication x{j} = {} => x{k} = {w} is violated by the debug solution (x{j} {}, x{k} {})", self.lo[j], x[j], x[k]);
+                            }
+                        }
                         if c % 2 == 0 {
                             if self.up[k] > 0.0 {
                                 self.set_bound(p, k, true, 0.0, true);
@@ -418,6 +493,7 @@ impl Domain {
                             break;
                         }
                     }
+                    self.cur_reason = saved_reason;
                     if self.infeasible {
                         break;
                     }
@@ -620,6 +696,66 @@ impl Domain {
         self.cur_reason = if on { -2 } else { -1 };
     }
 
+    /// 診断用: 外から来た変更の出どころを理由の値で区別する (`-2 - tag`。衝突解析は `< 0` / `== -1` しか見ないので動作は同じ)。
+    /// tag: 1 被約費用による局所的な固定、2 強分枝の子の打ち切りによる固定、3 オービトープの固定、4 双対証明の締め付け、
+    /// 5 リテラルの衝突、6 目的関数の伝播。
+    pub fn set_external_tag(&mut self, tag: i32) {
+        self.cur_reason = -2 - tag;
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_REPLAY_LOG`): 変更の記録にある整数列の境界の変更を理由ごとに数える
+    /// (B 決定 (分枝・含意を含む -1)、R 行の伝播、L 被約費用の局所的な固定、S 強分岐、O オービトープ、P 双対証明、
+    /// F リテラルの衝突、J 目的関数の伝播、E その他の外からの変更、C カットプールの伝播 (`ENOMOTO_MIP_CUTPOOL_PROP`)、
+    /// ただし C は `ENOMOTO_MIP_DEBUG_IMPL_TAG` の含意 (-9) と同じ値)。
+    pub fn reason_counts_int(&self, p: &MipProblem) -> String {
+        let mut c = [0u32; 10];
+        for ch in &self.stack {
+            if !p.is_int[ch.col] {
+                continue;
+            }
+            let k = match ch.reason {
+                -1 => 0,
+                r if r >= 0 => 1,
+                -3 => 2,
+                -4 => 3,
+                -5 => 4,
+                -6 => 5,
+                -7 => 6,
+                -8 => 7,
+                -9 => 9,
+                _ => 8,
+            };
+            c[k] += 1;
+        }
+        format!("#B{},R{},L{},S{},O{},P{},F{},J{},E{},C{}", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9])
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_REPLAY_DETAIL`): 変更の記録にある整数列の境界の変更 `列{u|d}値{理由}` (理由の文字は
+    /// [`Self::reason_counts_int`] と同じ)。
+    pub fn int_changes_str(&self, p: &MipProblem) -> String {
+        let nm = ['B', 'R', 'L', 'S', 'O', 'P', 'F', 'J', 'E', 'C'];
+        let mut out = String::new();
+        for ch in &self.stack {
+            if !p.is_int[ch.col] {
+                continue;
+            }
+            let k = match ch.reason {
+                -1 => 0,
+                r if r >= 0 => 1,
+                -3 => 2,
+                -4 => 3,
+                -5 => 4,
+                -6 => 5,
+                -7 => 6,
+                -8 => 7,
+                -9 => 9,
+                _ => 8,
+            };
+            out.push_str(&format!(" {}{}{}{}", ch.col, if ch.upper { 'd' } else { 'u' }, ch.new, nm[k]));
+        }
+        out
+    }
+
     /// HiGHS 式の衝突解析 (`HighsDomain::ConflictSet::conflictAnalysis`)。矛盾 (`start`) を、
     /// (1) 必要な分だけの境界の変更で説明し (`resolveLinearLeq`: 大域的な境界からの寄与の大きい変更から、矛盾を示すのに
     /// 足りるまで選ぶ)、(2) 分枝の深さの段ごとに、その段の変更が 1 つ (UIP) になるまで理由で置き換えて衝突を作り
@@ -627,6 +763,13 @@ impl Domain {
     /// 置き換えた組と UIP の否定から「再収束」の衝突も作る。各衝突は同時には成り立たない境界のリテラルの組
     /// (列, 上限か, 値)。長さ `max_len` を超える衝突は作らない。
     pub fn analyze_multi(&self, p: &MipProblem, start: ConflictStart, max_len: usize, reconv: bool) -> Vec<Vec<(usize, bool, f64)>> {
+        self.analyze_multi_bumps(p, start, max_len, reconv, None)
+    }
+
+    /// [`Self::analyze_multi`] と同じだが、`bumps` があれば HiGHS が衝突スコアを上げる境界の変更 (列, 上限か) を足す:
+    /// 矛盾の最初の説明に使った変更全部 (長さの上限を調べる前) と、段ごとの置き換えで新しく加わった変更
+    /// (HiGHS `conflictAnalysis` と `resolveDepth(.., increaseConflictScore = true)`。再収束の衝突の分は数えない)。
+    pub fn analyze_multi_bumps(&self, p: &MipProblem, start: ConflictStart, max_len: usize, reconv: bool, mut bumps: Option<&mut Vec<(usize, bool)>>) -> Vec<Vec<(usize, bool, f64)>> {
         let end = self.stack.len();
         let dec: Vec<usize> = (0..end).filter(|&k| self.stack[k].reason == -1).collect();
         if dec.is_empty() {
@@ -756,6 +899,9 @@ impl Domain {
                 }
             }
         };
+        if let Some(b) = bumps.as_deref_mut() {
+            b.extend(init.iter().map(|&k| (self.stack[k].col, self.stack[k].upper)));
+        }
         if init.is_empty() || init.len() > max_len {
             return Vec::new();
         }
@@ -791,7 +937,13 @@ impl Domain {
                 set.remove(&k);
                 cnt -= 1;
                 for e in ex {
-                    if set.insert(e) && e >= lo && e < hi {
+                    let new = set.insert(e);
+                    if new {
+                        if let Some(b) = bumps.as_deref_mut() {
+                            b.push((self.stack[e].col, self.stack[e].upper));
+                        }
+                    }
+                    if new && e >= lo && e < hi {
                         cnt += 1;
                     }
                 }
@@ -973,6 +1125,24 @@ fn row_tol(rhs: f64, act: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 足した含意は対偶の向きにも伝播する: `x0 = 1 => x2 = 0` (文字 0 と 4 の衝突) を足すと、x2 = 1 で x0 = 0
+    #[test]
+    fn add_implications_propagates_contrapositive() {
+        // x0 + x1 + x2 <= 3 (何も伝播しない)
+        let p = MipProblem::from_rows(vec![0.0; 3], vec![1.0; 3], vec![-1.0; 3], 0.0, 1.0, vec![true; 3], vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![f64::NEG_INFINITY], vec![3.0]);
+        let mut d = Domain::new(&p);
+        assert!(d.propagate(&p));
+        d.add_implications(p.n, &[(0, 4)]);
+        let pos = d.stack_len();
+        d.tighten_lower(&p, 2, 1.0);
+        assert!(d.propagate(&p));
+        assert_eq!(d.up[0], 0.0);
+        d.backtrack_to(&p, pos);
+        d.tighten_lower(&p, 0, 1.0);
+        assert!(d.propagate(&p));
+        assert_eq!(d.up[2], 0.0);
+    }
 
     fn knap() -> MipProblem {
         // 3x0 + 4x1 + 5x2 <= 7, x 0/1 整数; x0 + x1 >= 1

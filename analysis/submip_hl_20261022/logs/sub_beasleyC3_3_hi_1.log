@@ -1,0 +1,41 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP beasleyC3_3 has 1461 rows; 2500 cols; 4024 nonzeros; 1250 integer variables (291 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 8e+01]
+  Cost    [1e+00, 1e+01]
+  Bound   [1e+00, 8e+01]
+  RHS     [1e+00, 8e+01]
+Presolving model
+592 rows, 1143 cols, 2286 nonzeros 0s
+547 rows, 818 cols, 1636 nonzeros 0s
+476 rows, 747 cols, 1494 nonzeros 0s
+Presolve reductions: rows 476(-985); columns 747(-1753); nonzeros 1494(-2530) 
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0 100.00%   inf             937                  inf        0      0      0         0     0.0s
+
+Solving report
+  Model             beasleyC3_3
+  Status            Infeasible
+  Primal bound      inf
+  Dual bound        inf
+  Gap               inf
+  P-D integral      0
+  Solution status   -
+  Timing            0.01
+                    0.01 (Presolve)
+                    0.00 (Solve)
+                    0.00 (Postsolve)
+  Max sub-MIP depth 0
+  Nodes             0
+  Repair LPs        0
+  LP iterations     0
+{"status": "Infeasible", "objective": Infinity, "bound": Infinity, "nodes": 0, "time": 0.009909073000017088}

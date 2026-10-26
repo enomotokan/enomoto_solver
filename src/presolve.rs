@@ -696,10 +696,26 @@ pub fn run_extended(
             }
         }
 
+        // `ENOMOTO_MIP_DUALPROP`: 整数最適化の前処理で、連続列から作る双対の箱による固定 ([`dualpropagate::mip_dual_fixings`])
+        if let Some(mask) = int_mask().filter(|_| env_str!("ENOMOTO_MIP_DUALPROP").is_some() && !dbg_skip("mipdualprop")) {
+            let fx = timed_step!("mipdualprop", dualpropagate::mip_dual_fixings(n, &a, &cur_real_rows, &cur_real_rhs, &b, &c, &lb, &ub, &mask, prop_passes));
+            if env_str!("ENOMOTO_DEBUG_DUALPROPAGATE").is_some() {
+                eprintln!("DEBUG_MIP_DUALPROP: round={round_idx} fixed_columns={} (integer {})", fx.len(), fx.iter().filter(|&&(j, _)| mask[j]).count());
+            }
+            for &(j, value) in &fx {
+                lb[j] = value;
+                ub[j] = value;
+            }
+        }
+
         // 不等式行の列シングルトン (`ineqsingleton`、大きな問題か `ENOMOTO_INEQ_SINGLETON` 設定時):
         // 列を上下限に固定するか、その行を等式に変えて後段の colsingleton に消去させる。
-        if ineq_singleton_on && int_mask().is_none() {
-            let isr = timed_step!("ineqsingleton", ineqsingleton::resolve_inequality_singletons(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub));
+        // 整数最適化の前処理では使わない (`ENOMOTO_MIP_INEQ_SINGLETON` で使う。整数列は固定だけ、連続列は等式化も。
+        // physiciansched6-2 では目的の費用が `y >= Σ 罰則の列` の形の連続列 (この行だけに出る) にあり、これを消さないと
+        // 罰則の列が費用のない鎖のまま残って Feasibility Jump が解を見つけられない)
+        let mip_mask = int_mask();
+        if ineq_singleton_on && (mip_mask.is_none() || env_str!("ENOMOTO_MIP_INEQ_SINGLETON").is_some() || crate::fj_p3_force()) {
+            let isr = timed_step!("ineqsingleton", ineqsingleton::resolve_inequality_singletons_int(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub, mip_mask.as_deref().map(|v| v.as_slice())));
             if env_str!("ENOMOTO_DEBUG_INEQ_SINGLETON").is_some() {
                 eprintln!("DEBUG_INEQ_SINGLETON: fixes={} implied_equalities={}", isr.fixes.len(), isr.implied_equalities.len());
             }
@@ -931,6 +947,8 @@ pub fn run_extended(
                     lb[j] = lb[j].max(refreshed_lb[j]);
                     ub[j] = ub[j].min(refreshed_ub[j]);
                 }
+                // 許容誤差以内の交差は固定し、越えるものは後の矛盾の判定 (`bounds_inconsistent`) に任せる
+                let _ = propagate::fix_crossed_bounds(&mut lb, &ub);
                 cur_real_rows = refreshed_real_rows;
                 cur_real_rhs = refreshed_real_rhs;
             }
@@ -1204,6 +1222,11 @@ pub fn run_extended(
             lb[sub.var] = 0.0;
             ub[sub.var] = 0.0;
         }
+    }
+
+    // 結果の境界に交差を残さない (許容誤差以内なら固定、越えれば実行不能)
+    if propagate::fix_crossed_bounds(&mut lb, &ub) {
+        return extended_infeasible(sc, a, b, c, n);
     }
 
     if env_str!("ENOMOTO_DEBUG_PRESOLVE_HASH").is_some() {

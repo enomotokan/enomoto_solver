@@ -142,8 +142,15 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
 
     // 整数最適化の前処理中は整数列を消さない (復元値が整数になる保証がないため)。
     let int_mask = crate::presolve::int_mask();
+    // `ENOMOTO_MIP_KEEP_BOUNDED_SLACK` (試作): 整数最適化の前処理で、上下限が両方とも有限の連続列は消さない (等式を範囲制約に
+    // 変えない)。timtab1 は 171 本の等式すべてに有界の連続のスラック (目的の費用つき) があり、消すと等式が範囲制約になる
+    // (HiGHS は残す: 161 行 360 列)
+    let keep_bounded = int_mask.is_some() && env_str!("ENOMOTO_MIP_KEEP_BOUNDED_SLACK").is_some();
     for j in 0..n {
         if appearances[j] != 1 || int_mask.as_ref().is_some_and(|m| m[j]) {
+            continue;
+        }
+        if keep_bounded && lb[j].is_finite() && ub[j].is_finite() {
             continue;
         }
         let Some(i) = owning_a_row[j] else { continue }; // 唯一の出現が G 側
@@ -163,7 +170,16 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
         // ただし整数最適化の前処理で、行の他の列がすべて整数列なら、復元に使う値は整数 (丸め済み) なので誤差は
         // 増幅されない。この場合は判定しない (qnet1: 目的値を定義する連続列 `s = 132.55 y1 + 934.75 y2` を消せる)
         let others_int = int_mask.as_ref().is_some_and(|m| row.iter().all(|&(k, _)| k == j || m[k])) && env_str!("ENOMOTO_MIP_CS_PIVOT_ALWAYS").is_none();
-        if !others_int && coeff.abs() < tunable!("ENOMOTO_T_CS_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
+        // `ENOMOTO_MIP_CS_OBJ_PIVOT` (既定では使わない): 整数最適化の前処理で、費用のある連続列 (目的を定める列) は比の下限を
+        // `ENOMOTO_T_MIP_CS_OBJ_PIVOT_RATIO` (既定 1e-6) まで下げる。physiciansched6-2 は目的の費用を 1 本の連続列
+        // (`0.000999 y = Σ (罰則の列) + …` の 37 列の等式、行の最大係数 1) が持ち、この列が残ると Feasibility Jump が解を
+        // 見つけられない (HiGHS は Free col substitution で消し、費用を行の列に配る)。復元の誤差は 1/0.000999 倍程度
+        let ratio = if int_mask.is_some() && new_c[j] != 0.0 && (env_str!("ENOMOTO_MIP_CS_OBJ_PIVOT").is_some() || crate::fj_p3_force()) {
+            tunable!("ENOMOTO_T_MIP_CS_OBJ_PIVOT_RATIO", 1e-6, f64)
+        } else {
+            tunable!("ENOMOTO_T_CS_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64)
+        };
+        if !others_int && coeff.abs() < ratio * row_max {
             continue;
         }
         // x_j 以外の項。

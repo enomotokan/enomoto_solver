@@ -1,0 +1,60 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option time_limit to 1
+readMPS: Trying to open file dump/e2_pre2.mps
+readMPS: Read NAME    OK
+readMPS: Read ROWS    OK
+readMPS: Read COLUMNS OK
+readMPS: Read RHS     OK
+readMPS: Read RANGES  OK
+readMPS: Read BOUNDS  OK
+ MIP      : e2_pre2
+Rows      : 8421
+Cols      : 111827
+Nonzeros  : 39802
+Integer   : 109346 (4421 binary)
+Coefficient ranges:
+  Matrix  [5e-01, 1e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 8e+03]
+  RHS     [1e+00, 8e+02]
+Running with 2 thread(s)
+Solving model: e2_pre2
+Presolving model
+Permitted suppression of presolve rules via presolve_rule_off option:
+   Rule  6 (set bit  6 =    64): Forcing row
+   Rule  7 (set bit  7 =   128): Forcing col
+   Rule  8 (set bit  8 =   256): Free col substitution
+   Rule  9 (set bit  9 =   512): Doubleton equation
+   Rule 10 (set bit 10 =  1024): Dependent equations
+   Rule 11 (set bit 11 =  2048): Dependent free columns
+   Rule 12 (set bit 12 =  4096): Aggregator
+   Rule 13 (set bit 13 =  8192): Parallel rows and columns
+   Rule 14 (set bit 14 = 16384): Sparsify
+   Rule 15 (set bit 15 = 32768): Probing
+   Rule 16 (set bit 16 = 65536): Enumeration
+   Rule 17 (set bit 17 = 131072): Dual fixing
+   Rule 18 (set bit 18 = 262144): Col stuffing
+   Rule 19 (set bit 19 = 524288): Initial sweep
+8397 rows, 4957 cols, 39299 nonzeros 0s
+Sparsify removed 2.1% of nonzeros
+Fixed 17 dominated columns and strengthened 0 bounds
+1001 probing evaluations: 0 deleted rows, 0 deleted columns, 0 lifted nonzeros
+7939 rows, 4674 cols, 37206 nonzeros 0s
+Presolve reductions: rows 7939(-482); columns 4674(-107153); nonzeros 37206(-2596) 
+
+Solving MIP model with:
+   7939 rows
+   4674 cols (4241 binary, 0 integer, 424 implied int., 9 continuous, 0 domain fixed)
+   37206 nonzeros
+   Thread count 2 (of 4 threads). Using 1 max workers. Parallel search off
+Feasibility Jump: starting solve. weightUpdateDecay=1, relaxContinuous=0  
+Feasibility Jump:        step  violations     good    bumps       effort (per step)          Objective
+          0         333     2429        0        88172         0                 300
+Feasibility Jump: Reached a local minimum.
+Feasibility Jump: Reached a local minimum.
+Feasibility Jump: Reached a local minimum.
+Feasibility Jump: Reached a local minimum.
+Feasibility Jump: Reached a local minimum.
+Feasibility Jump: Reached a local minimum.
