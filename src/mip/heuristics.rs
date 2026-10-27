@@ -1502,7 +1502,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             crate::set_fj_p3_force(true);
         }
         let t_sub = Instant::now();
+        // `ENOMOTO_MIP_SUBMIP_OUTCOME_STOP` (試作): 根の (主のスレッドで解く) サブ MIP も成果で打ち切る ([`super::solver::submip_outcome_stop`])
+        if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
+            let c = std::sync::Arc::new(super::solver::SubmipCtl::new(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)));
+            super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(c));
+        }
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = None);
         if p3 {
             crate::set_fj_p3_force(false);
         }
