@@ -19,11 +19,12 @@ ap.add_argument("--env", nargs="*", default=[])
 ap.add_argument("--log-dir")
 ap.add_argument("--time-limit", type=float, default=60.0)
 ap.add_argument("--threads", type=int, default=4)
+ap.add_argument("--rep-start", type=int, default=0)  # 設定を交互に 1 回ずつ回すとき、記録する回の番号の始まり
 a = ap.parse_args()
 extra = dict(e.split("=", 1) for e in a.env)
 env = dict(os.environ, ENOMOTO_MIP_THREADS=str(a.threads), **extra)
 with open(a.out, "a") as out:
-    for rep in range(a.reps):
+    for rep in range(a.rep_start, a.rep_start + a.reps):
         for n in a.problems:
             mps = rb.fetch(n, repo / ".miplib_cache")
             cmd = [sys.executable, str(repo / "scripts" / "run_miplib_benchmark.py"), "--worker-ours", str(mps),
