@@ -372,3 +372,9 @@ p200x1188c ((d)、2.3 秒):
   (4 スレッドの 3 節の確かめは p200x1188c・exp-1-500-5-5・neos-911970 で差 6.7e-16 以下)。
 - `ENOMOTO_MIP_DEBUG_RESTART_CUT_USE` の根の LP の行 (`after restart N root LP`) は、再スタート後の根で 2 回出る
   (最初の根の LP と、根のカットの後)。`restart_paths.tsv` では前者を「後」、後者を `root_lp_after_end` にした。
+
+## 6. 採用 (2026-10-28)
+
+(d) を既定にした。修正 1・2 は `ENOMOTO_MIP_NO_RESTART_CUTS_FIX`、代入で写すのは `ENOMOTO_MIP_NO_RESTART_CUTS_SUBST` で止める。
+修正 3 は `ENOMOTO_MIP_RESTART_CUTS_ROWS` (既定では使わない) に分けた。以前の `ENOMOTO_MIP_RESTART_CUTS_FIX`・
+`ENOMOTO_MIP_RESTART_CUTS_SUBST` は効かない (この文書の (a)〜(e) の名前は当時のもの)。

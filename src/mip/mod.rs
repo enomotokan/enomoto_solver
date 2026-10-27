@@ -86,13 +86,22 @@ pub(crate) fn implbd_genint_for(is_int: &[bool], lo: &[f64], up: &[f64]) -> bool
 /// mzzv42z (4 スレッド・60 秒) では、根の RENS が固定率 0.35〜0.43 に崩れる回 (根のカットの 1 ラウンド目の LP が時間の上限に
 /// 当たって根のカットが 1〜2 ラウンドで止まる回) でも背景のカットの後の RINS で -20400 台が出て、再スタートで暫定解を
 /// 捨てて根の LP を解き直す (6〜19 秒) のをやめる (analysis/mzzv42z_r4_20261021.md)
-/// `ENOMOTO_MIP_RESTART_CUTS_FIX` (試作): 再スタートで持ち込むカットの扱いを直す。(1) 前の求解が readd と決めたら新しい求解でも
-/// 根の LP の前にカットの行として戻す (以前はカットプールに入るだけで、exp-1-500-5-5 では根の LP が毎周 2.87e4 から作り直していた)、
-/// (2) プールの経路のカットは、大域的に固定された列を代入してから持ち込む (以前は前処理で固定された列を含むカットを捨てていて、
-/// p200x1188c では持ち込んだ 67 本が全部捨てられていた)、(3) 再スタートで新たに固定される整数列が多い (`ENOMOTO_T_MIP_RESTART_CUTS_ROWS_FRAC`)
-/// ときは readd でも問題の行として持ち込む
+/// 再スタートで持ち込むカットの扱いの修正 (既定で使う。`ENOMOTO_MIP_NO_RESTART_CUTS_FIX` で使わない)。(1) 前の求解が readd と
+/// 決めたら新しい求解でも根の LP の前にカットの行として戻す (以前はカットプールに入るだけで、exp-1-500-5-5 では根の LP が毎周
+/// 2.87e4 から作り直していた)、(2) プールの経路のカットは、大域的に固定された列を代入してから持ち込む (以前は前処理で固定された
+/// 列を含むカットを捨てていて、p200x1188c では持ち込んだ 67 本が全部捨てられていた)。
+/// 手元 16 スレッド・60 秒 ([`restart_cuts_subst`] と合わせて): exp-1-500-5-5 10.4 -> 4.3 秒、p200x1188c 3.0 -> 2.5 秒
+/// (analysis/restart_cuts_fix_20261028.md)
 pub(crate) fn restart_cuts_fix() -> bool {
-    env_str!("ENOMOTO_MIP_RESTART_CUTS_FIX").is_some()
+    env_str!("ENOMOTO_MIP_NO_RESTART_CUTS_FIX").is_none()
+}
+
+/// `ENOMOTO_MIP_RESTART_CUTS_ROWS` (試作、既定では使わない。以前の `ENOMOTO_MIP_RESTART_CUTS_FIX` の修正 3): 再スタートで新たに
+/// 固定される整数列が多い (`ENOMOTO_T_MIP_RESTART_CUTS_ROWS_FRAC`) ときは readd でも問題の行として持ち込む。前処理がカットの行の
+/// 列を消せなくなり、p200x1188c では前処理後 266 行 -> 947 行になって遅くなりうる (手元 16 スレッドで 3.4 -> 4.8 秒の回)。
+/// [`restart_cuts_subst`] で写せば要らない
+pub(crate) fn restart_cuts_rows() -> bool {
+    env_str!("ENOMOTO_MIP_RESTART_CUTS_ROWS").is_some()
 }
 
 /// `ENOMOTO_MIP_RESTART_HCM_KEEP` (試作): 再スタート前の求解が HiGHS 流のカット管理を自動で選んでいたら、再スタート後の求解でも
@@ -102,11 +111,11 @@ pub(crate) fn restart_hcm_keep() -> bool {
     env_str!("ENOMOTO_MIP_RESTART_HCM_KEEP").is_some()
 }
 
-/// `ENOMOTO_MIP_RESTART_CUTS_SUBST` (試作): 再スタート前のカットを前処理後の空間に写すとき、前処理で消された列を含むカットを
-/// 捨てずに、後処理の手順を代入して写す ([`map_restart_cut_subst`])。p200x1188c は再スタートの前処理が列を別の列で
-/// 置き換える (代入 47 手) ので、持ち込んだ 67 本が全部捨てられていた
+/// 再スタートのカットを代入で写す (既定で使う。`ENOMOTO_MIP_NO_RESTART_CUTS_SUBST` で使わない): 再スタート前のカットを前処理後の
+/// 空間に写すとき、前処理で消された列を含むカットを捨てずに、後処理の手順を代入して写す ([`map_restart_cut_subst`])。
+/// p200x1188c は再スタートの前処理が列を別の列で置き換える (代入 47 手) ので、持ち込んだ 61〜67 本が全部捨てられていた (今は全部写す)
 pub(crate) fn restart_cuts_subst() -> bool {
-    env_str!("ENOMOTO_MIP_RESTART_CUTS_SUBST").is_some()
+    env_str!("ENOMOTO_MIP_NO_RESTART_CUTS_SUBST").is_none()
 }
 
 /// 再スタート前のカット `c x <= r` (前処理前の空間) を、前処理後の問題 `prob` の列だけのカットに写す。尺度 (`x = d x'`) を
@@ -771,7 +780,7 @@ thread_local! {
     /// 再スタート前のカット (`係数 x <= 右辺`)。再スタートが [`solve_problem`] に渡す問題の空間で置き、前処理後の空間に
     /// 移して置き直し、求解の開始時にカットプールに入れる (static TLS の領域が足りないので 1 つで済ませる)。
     pub(crate) static RESTART_CUTS: std::cell::RefCell<Option<Vec<(Vec<(usize, f64)>, f64)>>> = const { std::cell::RefCell::new(None) };
-    /// `ENOMOTO_MIP_RESTART_CUTS_FIX` (試作): 再スタート前の求解が [`RESTART_CUTS`] を「根の LP の前にカットの行として戻す」(readd) と
+    /// [`super::restart_cuts_fix`] の (1): 再スタート前の求解が [`RESTART_CUTS`] を「根の LP の前にカットの行として戻す」(readd) と
     /// 決めたか。新しい求解は HiGHS 流のカット管理をまだ判定していないので、この印で戻す
     pub(crate) static RESTART_CUTS_READD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `ENOMOTO_MIP_RESTART_HCM_KEEP` (試作): 再スタート前の求解が HiGHS 流のカット管理を自動で選んだ (`hcm_auto`) か。新しい求解は
@@ -909,7 +918,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // 固定された (消された・代入された) 列を含むカットは捨てる (代入された列の値は前処理後の境界からは分からない)
     let cuts = RESTART_CUTS.with(|s| s.borrow_mut().take());
     match (&presolved, cuts) {
-        // `ENOMOTO_MIP_RESTART_CUTS_SUBST` (試作): 捨てずに後処理の手順を代入して写す ([`map_restart_cut_subst`])
+        // 捨てずに後処理の手順を代入して写す (`ENOMOTO_MIP_NO_RESTART_CUTS_SUBST` で使わない) ([`map_restart_cut_subst`])
         (Some(Presolved::Reduced { prob, scaling, postsolve }), Some(cuts)) if prob.n == p.n && restart_cuts_subst() => {
             let n0 = cuts.len();
             let pairs: Vec<(usize, (Vec<(usize, f64)>, f64))> = cuts.iter().enumerate().filter_map(|(i, (c, r))| map_restart_cut_subst(c, *r, p, prob, postsolve, &scaling.d).map(|m| (i, m))).collect();

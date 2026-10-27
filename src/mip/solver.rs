@@ -9437,10 +9437,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // neos-911970 (60 秒) では暫定解 56.23 -> 54.83 (最適値 54.76)・下界 53.69 -> 53.62 で解けるには至らず、再スタート後の
         // カットのループが進まなくなる (47.26 のまま。カットの行の上に作る次のカットが変わる) ので既定では使わない
         let readd = (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt() || super::gr_restart_readd_for(p)) && !keep_all;
-        // `ENOMOTO_MIP_RESTART_CUTS_FIX` (試作): 再スタートで新たに固定される整数列が、根の始めに自由だった整数列の
+        // `ENOMOTO_MIP_RESTART_CUTS_ROWS` (試作、既定では使わない): 再スタートで新たに固定される整数列が、根の始めに自由だった整数列の
         // `ENOMOTO_T_MIP_RESTART_CUTS_ROWS_FRAC` (0.3) 以上なら、readd でも問題の行として持ち込む (前処理が列を別の列で置き換えると、
-        // プールの経路ではその列を含むカットを写せずに捨てる。p200x1188c は 767 / 1188 列の固定で持ち込んだ 67 本が全部捨てられた)
-        let big_restart = super::restart_cuts_fix()
+        // カットを写せずに捨てていた頃の回避。今は [`super::restart_cuts_subst`] で写すので要らず、前処理が効かなくなる分遅くなりうる)
+        let big_restart = super::restart_cuts_rows()
             && self.newly_fixed_ints() as f64 >= tunable!("ENOMOTO_T_MIP_RESTART_CUTS_ROWS_FRAC", 0.3, f64) * p.nint.saturating_sub(self.root_fixed0) as f64;
         let switched_to_rows = readd && big_restart;
         let readd = readd && !big_restart;
@@ -9482,7 +9482,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 幅が許容誤差以下になった列 (伝播は連続列の境界を誤差の分だけ緩めて締める) も 1 点に固定する ([`super::fix_tiny_width_columns`])
         let tiny = super::fix_tiny_width_columns(&rows, &mut row_lo, &mut row_up, &mut glo, &mut gup, &p.is_int);
-        // `ENOMOTO_MIP_RESTART_CUTS_FIX` (試作): プールの経路のカットは、大域的に固定された列を代入して右辺に移す (前処理で固定された
+        // [`super::restart_cuts_fix`] の (2) (`ENOMOTO_MIP_NO_RESTART_CUTS_FIX` で使わない): プールの経路のカットは、大域的に固定された列を代入して右辺に移す (前処理で固定された
         // 列を含むカットは写すときに捨てられるので)。代入して項が無くなったカットは捨てる
         if super::restart_cuts_fix() && !cuts_as_rows {
             let before = carry.len();
