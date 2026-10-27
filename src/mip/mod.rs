@@ -86,17 +86,92 @@ pub(crate) fn implbd_genint_for(is_int: &[bool], lo: &[f64], up: &[f64]) -> bool
 /// mzzv42z (4 スレッド・60 秒) では、根の RENS が固定率 0.35〜0.43 に崩れる回 (根のカットの 1 ラウンド目の LP が時間の上限に
 /// 当たって根のカットが 1〜2 ラウンドで止まる回) でも背景のカットの後の RINS で -20400 台が出て、再スタートで暫定解を
 /// 捨てて根の LP を解き直す (6〜19 秒) のをやめる (analysis/mzzv42z_r4_20261021.md)
-/// 根の被約費用の早めの記録 (既定で使う。`ENOMOTO_MIP_NO_EARLY_REDCOST` で使わない): 根のヒューリスティクスの前 (根のカットの後) と
-/// 背景のカットで LP を置き換えた後にも根の被約費用を記録して固定する。以前は根のヒューリスティクスと背景のカットの後にしか
-/// 記録しなかったので、根の途中で見つかった解 (FJ・Local-MIP・ヒューリスティクス) で被約費用による固定が進まなかった
 /// `ENOMOTO_MIP_RESTART_CUTS_FIX` (試作): 再スタートで持ち込むカットの扱いを直す。(1) 前の求解が readd と決めたら新しい求解でも
 /// 根の LP の前にカットの行として戻す (以前はカットプールに入るだけで、exp-1-500-5-5 では根の LP が毎周 2.87e4 から作り直していた)、
 /// (2) プールの経路のカットは、大域的に固定された列を代入してから持ち込む (以前は前処理で固定された列を含むカットを捨てていて、
-/// p200x1188c では持ち込んだ 67 本が全部捨てられていた)
+/// p200x1188c では持ち込んだ 67 本が全部捨てられていた)、(3) 再スタートで新たに固定される整数列が多い (`ENOMOTO_T_MIP_RESTART_CUTS_ROWS_FRAC`)
+/// ときは readd でも問題の行として持ち込む
 pub(crate) fn restart_cuts_fix() -> bool {
     env_str!("ENOMOTO_MIP_RESTART_CUTS_FIX").is_some()
 }
 
+/// `ENOMOTO_MIP_RESTART_HCM_KEEP` (試作): 再スタート前の求解が HiGHS 流のカット管理を自動で選んでいたら、再スタート後の求解でも
+/// 最初から使う ([`RESTART_HCM`])。以前は新しい求解でその判定が立たず、exp-1-500-5-5 では 1 回目の再スタートだけが readd の
+/// 経路で、2 回目からはカットを問題の行として持ち込み (行が 550 -> 893)、木のカットの扱いも既定に戻っていた
+pub(crate) fn restart_hcm_keep() -> bool {
+    env_str!("ENOMOTO_MIP_RESTART_HCM_KEEP").is_some()
+}
+
+/// `ENOMOTO_MIP_RESTART_CUTS_SUBST` (試作): 再スタート前のカットを前処理後の空間に写すとき、前処理で消された列を含むカットを
+/// 捨てずに、後処理の手順を代入して写す ([`map_restart_cut_subst`])。p200x1188c は再スタートの前処理が列を別の列で
+/// 置き換える (代入 47 手) ので、持ち込んだ 67 本が全部捨てられていた
+pub(crate) fn restart_cuts_subst() -> bool {
+    env_str!("ENOMOTO_MIP_RESTART_CUTS_SUBST").is_some()
+}
+
+/// 再スタート前のカット `c x <= r` (前処理前の空間) を、前処理後の問題 `prob` の列だけのカットに写す。尺度 (`x = d x'`) を
+/// 掛けた後、後処理の手順をログの順に代入する (後処理は逆順に当てるので、前の手順の式に出てくる列は後の手順で決まる):
+/// 代入 (`Sub`) は線形の式で置き換え、平行列の併合は `x_kept + s x_var` の形 (消した列の係数が残した列の係数の `s` 倍) の
+/// ときだけ残した列に移す。強制列と、形の合わない平行列を含むカットは捨てる。最後に前処理後の問題で固定された列を右辺に移す
+fn map_restart_cut_subst(c: &[(usize, f64)], r: f64, p: &MipProblem, prob: &MipProblem, post: &[crate::presolve::PostsolveStep], d: &[f64]) -> Option<(Vec<(usize, f64)>, f64)> {
+    use crate::presolve::PostsolveStep;
+    let mut coef: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+    for &(j, v) in c {
+        if j >= p.n {
+            return None;
+        }
+        *coef.entry(j).or_insert(0.0) += v * d.get(j).copied().unwrap_or(1.0);
+    }
+    let mut rhs = r;
+    for step in post {
+        match step {
+            PostsolveStep::Sub(s) => {
+                let Some(a) = coef.remove(&s.var).filter(|&a| a != 0.0) else { continue };
+                let f = a / s.coeff;
+                rhs -= f * s.rhs;
+                for &(k, v) in &s.terms {
+                    *coef.entry(k).or_insert(0.0) -= f * v;
+                }
+            }
+            PostsolveStep::ParallelCol(s) => {
+                let av = coef.get(&s.var).copied().unwrap_or(0.0);
+                if av == 0.0 {
+                    continue;
+                }
+                let ak = coef.get(&s.kept).copied().unwrap_or(0.0);
+                if (av - s.s * ak).abs() > 1e-9 * (1.0 + av.abs()) {
+                    return None;
+                }
+                coef.remove(&s.var);
+            }
+            PostsolveStep::Forcing(fc) => {
+                if coef.get(&fc.var).is_some_and(|&a| a != 0.0) {
+                    return None;
+                }
+            }
+        }
+    }
+    let mut out: Vec<(usize, f64)> = Vec::new();
+    for (j, a) in coef {
+        if a.abs() <= 1e-12 {
+            continue;
+        }
+        if prob.col_lo[j] < prob.col_up[j] {
+            out.push((j, a));
+        } else {
+            rhs -= a * prob.col_lo[j];
+        }
+    }
+    if out.is_empty() || !rhs.is_finite() {
+        return None;
+    }
+    out.sort_unstable_by_key(|&(j, _)| j);
+    Some((out, rhs))
+}
+
+/// 根の被約費用の早めの記録 (既定で使う。`ENOMOTO_MIP_NO_EARLY_REDCOST` で使わない): 根のヒューリスティクスの前 (根のカットの後) と
+/// 背景のカットで LP を置き換えた後にも根の被約費用を記録して固定する。以前は根のヒューリスティクスと背景のカットの後にしか
+/// 記録しなかったので、根の途中で見つかった解 (FJ・Local-MIP・ヒューリスティクス) で被約費用による固定が進まなかった
 pub(crate) fn early_redcost_on() -> bool {
     env_str!("ENOMOTO_MIP_NO_EARLY_REDCOST").is_none()
 }
@@ -699,6 +774,9 @@ thread_local! {
     /// `ENOMOTO_MIP_RESTART_CUTS_FIX` (試作): 再スタート前の求解が [`RESTART_CUTS`] を「根の LP の前にカットの行として戻す」(readd) と
     /// 決めたか。新しい求解は HiGHS 流のカット管理をまだ判定していないので、この印で戻す
     pub(crate) static RESTART_CUTS_READD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// `ENOMOTO_MIP_RESTART_HCM_KEEP` (試作): 再スタート前の求解が HiGHS 流のカット管理を自動で選んだ (`hcm_auto`) か。新しい求解は
+    /// 根の LP がカット込みの値から始まるので、強いカットの判定 (カットが根の LP を 3 割以上上げる) がまず立たない
+    pub(crate) static RESTART_HCM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
@@ -831,6 +909,37 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // 固定された (消された・代入された) 列を含むカットは捨てる (代入された列の値は前処理後の境界からは分からない)
     let cuts = RESTART_CUTS.with(|s| s.borrow_mut().take());
     match (&presolved, cuts) {
+        // `ENOMOTO_MIP_RESTART_CUTS_SUBST` (試作): 捨てずに後処理の手順を代入して写す ([`map_restart_cut_subst`])
+        (Some(Presolved::Reduced { prob, scaling, postsolve }), Some(cuts)) if prob.n == p.n && restart_cuts_subst() => {
+            let n0 = cuts.len();
+            let pairs: Vec<(usize, (Vec<(usize, f64)>, f64))> = cuts.iter().enumerate().filter_map(|(i, (c, r))| map_restart_cut_subst(c, *r, p, prob, postsolve, &scaling.d).map(|m| (i, m))).collect();
+            // 診断用 (`ENOMOTO_MIP_DEBUG_RESTART_CUT_USE`): 写したカットの確かめ。前処理後の暫定解 x' での写したカットの余裕と、
+            // 後処理で戻した解での元のカットの余裕は (代入が線形なので) 一致するはず
+            if env_str!("ENOMOTO_MIP_DEBUG_RESTART_CUT_USE").is_some() {
+                if let Some(xr) = solver::START_SOL.with(|s| s.borrow().clone()) {
+                    let mut x = xr.clone();
+                    for step in postsolve.iter().rev() {
+                        step.apply(&mut x);
+                    }
+                    let x = crate::presolve::scaling::unscale_x(scaling, &x);
+                    let (mut maxdiff, mut viol) = (0.0f64, 0usize);
+                    for (i, (m, mr)) in &pairs {
+                        let (c, r) = &cuts[*i];
+                        let s0 = r - c.iter().map(|&(j, v)| v * x[j]).sum::<f64>();
+                        let s1 = mr - m.iter().map(|&(j, v)| v * xr[j]).sum::<f64>();
+                        maxdiff = maxdiff.max((s0 - s1).abs() / (1.0 + r.abs()));
+                        viol += (s1 < -1e-6 * (1.0 + mr.abs())) as usize;
+                    }
+                    eprintln!("RESTART_CUT_USE: substitution check at the start solution: max slack difference {maxdiff:.3e}, mapped cuts violated {viol} of {}", pairs.len());
+                }
+            }
+            let mapped: Vec<(Vec<(usize, f64)>, f64)> = pairs.into_iter().map(|(_, m)| m).collect();
+            if params.verbose {
+                let old = cuts.iter().filter(|(c, _)| c.iter().all(|&(j, _)| j < p.n && (p.col_lo[j] == p.col_up[j] || prob.col_lo[j] < prob.col_up[j]))).count();
+                eprintln!("MIP: restart cuts mapped through the presolve by substitution: {} of {n0} kept (without substitution {old})", mapped.len());
+            }
+            RESTART_CUTS.with(|s| *s.borrow_mut() = Some(mapped));
+        }
         (Some(Presolved::Reduced { prob, scaling, .. }), Some(cuts)) if prob.n == p.n => {
             let mapped: Vec<(Vec<(usize, f64)>, f64)> = cuts
                 .into_iter()

@@ -2961,6 +2961,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.add_cut_rows(&snap.rows);
             }
         }
+        // `ENOMOTO_MIP_RESTART_HCM_KEEP` (試作): 再スタート前の求解が選んだ HiGHS 流のカット管理を引き継ぐ (下の readd の判定にも効く)
+        if super::RESTART_HCM.with(|f| f.replace(false)) && !self.params.submip {
+            self.hcm_auto = true;
+            if self.params.verbose {
+                eprintln!("MIP: HiGHS cut management kept from before the restart");
+            }
+        }
         // 再スタート前の暫定解 (実行可能性は try_incumbent が確かめる)
         if let Some(cuts) = super::RESTART_CUTS.with(|s| s.borrow_mut().take()) {
             let n0 = self.cut_pool.len();
@@ -9435,6 +9442,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // プールの経路ではその列を含むカットを写せずに捨てる。p200x1188c は 767 / 1188 列の固定で持ち込んだ 67 本が全部捨てられた)
         let big_restart = super::restart_cuts_fix()
             && self.newly_fixed_ints() as f64 >= tunable!("ENOMOTO_T_MIP_RESTART_CUTS_ROWS_FRAC", 0.3, f64) * p.nint.saturating_sub(self.root_fixed0) as f64;
+        let switched_to_rows = readd && big_restart;
         let readd = readd && !big_restart;
         let cuts_as_rows = (env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_none() && !readd) || keep_all;
         let mut carry: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
@@ -9493,7 +9501,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 診断用 (`ENOMOTO_MIP_DEBUG_RESTART_CUT_USE`): 持ち込むカットの経路と数、新しい大域的な境界の下で完全に冗長になったものの数、
         // 固定された列を含むものの数
         if env_str!("ENOMOTO_MIP_DEBUG_RESTART_CUT_USE").is_some() {
-            let path = if cuts_as_rows { "rows" } else if readd { "readd (pool + cut rows)" } else { "pool" };
+            let path = if switched_to_rows { "rows (readd switched by the large restart)" } else if cuts_as_rows { "rows" } else if readd { "readd (pool + cut rows)" } else { "pool" };
             let cuts: Vec<(Vec<(usize, f64)>, f64)> = if cuts_as_rows {
                 (p.m..rows.len()).flat_map(|i| {
                     let mut v = Vec::new();
@@ -9596,7 +9604,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let rows: Vec<(Vec<(usize, f64)>, super::lp::VarStatus)> = (0..self.lp.num_rows().min(b.row.len())).map(|i| (self.lp.row(i), b.row[i])).collect();
             RESTART_BASIS.with(|s| *s.borrow_mut() = Some((b.col, rows)));
         }
+        super::RESTART_HCM.with(|f| f.set(self.hcm_auto && super::restart_hcm_keep()));
         let r = super::solve_problem(&newp, params, true);
+        super::RESTART_HCM.with(|f| f.set(false));
+        super::RESTART_CUTS_READD.with(|f| f.set(false));
         RESTART_BASIS.with(|s| *s.borrow_mut() = None);
         super::RESTART_SOL.with(|s| *s.borrow_mut() = None);
         super::RESTART_CUTS.with(|s| *s.borrow_mut() = None);
