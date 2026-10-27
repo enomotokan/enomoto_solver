@@ -1571,7 +1571,7 @@ pub(crate) fn thread_budget_on() -> bool {
 ///   (最小 `ENOMOTO_T_MIP_SUBMIP_OUTCOME_MIN_NODES`、既定 50) に達したら止める (見つけるのにかかった分だけ続けて見込みがなければやめる)。
 ///   解を 1 つも見つけていないサブ MIP は今まで通り (時間とノードの上限まで)。10teams の根の被約費用のサブ MIP は 248 ノード目に初めて
 ///   最適解を見つけるので、時間で一律に絞る `ENOMOTO_MIP_ROOT_SUBMIP_REL` はそれを切っていた
-/// - 並列のサブ MIP には外側の暫定解 (ほかのサブ MIP・主のスレッドが見つけたもの) を打ち切り値として渡し続ける ([`SubmipCtl::outer_best`])
+/// - 並列のサブ MIP には外側の刈り込みの上限 (ほかのサブ MIP・主のスレッドが見つけた解による) を打ち切り値として渡し続ける ([`SubmipCtl::outer_best`])
 /// - 並列のサブ MIP は終わった順に受け取る (`ENOMOTO_MIP_SUBMIP_FIRST_DONE` と同じ)
 pub(crate) fn submip_outcome_stop() -> bool {
     env_str!("ENOMOTO_MIP_SUBMIP_OUTCOME_STOP").is_some()
@@ -1579,7 +1579,7 @@ pub(crate) fn submip_outcome_stop() -> bool {
 
 /// 根のサブ MIP と外側の求解の間で共有する情報 ([`submip_outcome_stop`])。
 pub(crate) struct SubmipCtl {
-    /// 外側の暫定解の目的値 (f64 のビット。なければ +inf)。サブ MIP の刈り込みの上限に使う
+    /// 外側の刈り込みの上限 (`prune_limit`、f64 のビット。なければ +inf)。サブ MIP の打ち切り値に使う
     pub(crate) outer_best: std::sync::atomic::AtomicU64,
 }
 
@@ -2520,16 +2520,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             (a, b) => a.or(b),
         };
         let shared = self.shared.as_ref().map(|s| s.best()).filter(|v| v.is_finite());
-        // 根のサブ MIP: 外側の暫定解も打ち切りに使う ([`submip_outcome_stop`])
-        let shared = match (shared, self.root_submip.as_ref().map(|c| c.best()).filter(|v| v.is_finite())) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        // 根のサブ MIP: 外側の刈り込みの上限も打ち切り値として使う ([`submip_outcome_stop`])。外側が計算した上限をそのまま使う
+        // (暫定解の目的値として入れると、サブ MIP の相対ギャップ (1e-4 以上) で外側の暫定解から 1e-4 も離れた所で刈り込み、
+        // neos-827175 では根の RINS が外側の暫定解 112.002 より 4.3e-6 だけ良い最適解 112.00152 を捨てていた)
+        let outer = self.root_submip.as_ref().map_or(f64::INFINITY, |c| c.best());
         let eff = match (own, shared) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        match eff.as_ref() {
+        let lim = match eff.as_ref() {
             None => self.params.cutoff,
             Some(z) => {
                 let strict = match self.obj_step {
@@ -2539,7 +2538,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let gap = z - (self.params.rel_gap * z.abs().max(1.0)).max(self.params.abs_gap);
                 strict.min(gap).min(self.params.cutoff)
             }
-        }
+        };
+        lim.min(outer)
     }
 
     /// 暫定解があり、その値が下界 `lb` (の切り上げ) より目的関数の刻み (なければ相対 1e-6) 以上悪いか
@@ -9620,7 +9620,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let label = self.heur_label;
         let fix_rate = self.submip_fix_rate.take();
         let basis = self.submip_basis.take();
-        let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| std::sync::Arc::new(SubmipCtl::new(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z))));
+        let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| std::sync::Arc::new(SubmipCtl::new(self.prune_limit())));
         let ctl2 = ctl.clone();
         self.pending_submips.push_back((
             std::thread::spawn(move || {
@@ -9651,11 +9651,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_SUBMIP_FIRST_DONE").is_some() || submip_outcome_stop() {
             // 終わったものから受け取る (どれも終わっていなければ 1 ms 待って見直す)。受け取って良くなった暫定解は残りのサブ MIP に渡す
             while self.pending_submips.len() > keep {
-                if let Some(z) = self.incumbent.as_ref().map(|(z, _)| *z) {
-                    for it in &self.pending_submips {
-                        if let Some(c) = &it.5 {
-                            c.offer(z);
-                        }
+                let z = self.prune_limit();
+                for it in &self.pending_submips {
+                    if let Some(c) = &it.5 {
+                        c.offer(z);
                     }
                 }
                 match self.pending_submips.iter().position(|it| it.0.is_finished()) {
