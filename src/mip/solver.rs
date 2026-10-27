@@ -320,6 +320,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     noinc_tree_win: Option<(f64, f64, usize)>,
     /// 根のヒューリスティクスを始めるときの LP 解の分数の列の数 (「木を進める」腕の近さの基準)。
     noinc_root_frac: usize,
+    /// 早めの再スタート ([`super::early_restart_on`]): 根のヒューリスティクスの途中で再スタートの判定が通った (残りの根のヒューリスティクスを飛ばす)。
+    early_restart: bool,
+    /// `ENOMOTO_MIP_TREE_RESTART` (試作): 木の中で暫定解が良くなった (木のループの頭で再スタートを判定する)。
+    tree_restart_check: bool,
     noinc_stall: u32,
     noinc_best_close: f64,
     noinc_next_node: u64,
@@ -1372,7 +1376,15 @@ fn heur_role_count(threads: usize) -> usize {
     if env_str!("ENOMOTO_MIP_NO_HEUR_ROLE").is_some() || threads < tunable!("ENOMOTO_T_MIP_HEUR_ROLE_MIN_THREADS", 4usize, usize).max(2) {
         return 0;
     }
-    ((threads as f64 * tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64)).floor() as usize).clamp(1, threads - 1)
+    let k = ((threads as f64 * tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64)).floor() as usize).clamp(1, threads - 1);
+    // `ENOMOTO_MIP_TREE_PHYS_CAP` (試作): ノードを処理する木のスレッドを物理コア数までにし、残り (スレッド数 - 物理コア数) は
+    // ヒューリスティクス役 (大近傍探索・Local-MIP) に回す。8 物理コア・16 論理の機械で 16 スレッドを指定すると、木の 16 本が
+    // 1 コアに 2 本ずつ載り、1 本あたりが遅くなる (beasleyC3・mc11 は 8 スレッドが最速のことが多い)
+    if env_str!("ENOMOTO_MIP_TREE_PHYS_CAP").is_some() {
+        let phys = tunable!("ENOMOTO_T_MIP_PHYS_CORES", num_cpus::get_physical(), usize).max(1);
+        return k.max(threads.saturating_sub(phys)).clamp(1, threads - 1);
+    }
+    k
 }
 
 impl WorkPool {
@@ -1537,6 +1549,20 @@ fn thread_watch() -> Option<(f64, f64)> {
 pub(crate) fn mip_threads() -> usize {
     let env = tunable!("ENOMOTO_MIP_THREADS", 0usize, usize);
     if env > 0 { env } else { MIP_THREADS_DEFAULT.load(std::sync::atomic::Ordering::Relaxed).max(1) }
+}
+
+/// `ENOMOTO_MIP_THREAD_BUDGET` (試作): 同時に動く計算のスレッドの合計を、指定のスレッド数 T (論理スレッド数で頭打ち済み) 以下に
+/// 配る。根の LP の同時実行と根の分離は FJ のスレッドの分を引き、同時に走らせるサブ MIP は max(1, (T - 1) / 4) 本まで、
+/// 解探索のスレッドは T >= 4 のときだけ、背景のカットは残り (0 なら回さない)、木は解探索のスレッドが生きている間 1 本減らす。
+/// 論理スレッドの少ない計算機 (T = 1・2・4) でも合計が T を超えない
+pub(crate) fn thread_budget_on() -> bool {
+    env_str!("ENOMOTO_MIP_THREAD_BUDGET").is_some()
+}
+
+/// 同時に走らせる別スレッドのサブ MIP の本数の上限。
+pub(crate) fn submip_par_limit() -> usize {
+    let t = mip_threads();
+    if thread_budget_on() { (t.saturating_sub(1) / 4).max(1) } else { t.saturating_sub(1).max(1) }
 }
 
 /// [`mip_threads`] の既定 (`ENOMOTO_MIP_THREADS` がないとき)。[`super::solve_mip`] が求解の間だけ木の探索のスレッド数にする。
@@ -1722,6 +1748,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         noinc_prior: [None; NOINC_ARMS],
         noinc_tree_win: None,
         noinc_root_frac: 0,
+        early_restart: false,
+        tree_restart_check: false,
         noinc_stall: 0,
         noinc_best_close: 0.0,
         noinc_next_node: 0,
@@ -2635,6 +2663,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 f.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             self.root_redcost_fixing();
+            self.tree_restart_check = true;
             let lim = self.prune_limit();
             self.prune_queue(lim);
             if self.params.verbose {
@@ -3035,6 +3064,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 並列モード: 別スレッドで根の LP・切除平面と同時に回す (根のヒューリスティクスの前に受け取る)
                 // 対称性の行・固定を加える前の問題で探す (見つけた解は try_incumbent で並べ替える)
                 let (pc, lo, up) = match &self.orig {
+                    // `ENOMOTO_MIP_FJ_RESTART_BOUNDS` (試作): 再スタートの後は、FJ・Local-MIP の問題 (対称性の行を足す前の、最初の求解の問題で、
+                    // 再スタートでは作り直さない) の列の境界を、今の大域的な境界 (再スタートで固定・締めた境界) と重ねて狭める。前処理は列の
+                    // 番号を保つので列は同じ。重ねると空になる列はそのまま (対称性の固定などで食い違うときのため)
+                    Some(o) if self.params.restarts > 0 && o.n == self.p.n && env_str!("ENOMOTO_MIP_FJ_RESTART_BOUNDS").is_some() => {
+                        let mut q = (**o).clone();
+                        let mut k = 0usize;
+                        for j in 0..q.n {
+                            let (l, u) = (q.col_lo[j].max(self.dom.global_lo[j]), q.col_up[j].min(self.dom.global_up[j]));
+                            if l <= u && (l > q.col_lo[j] || u < q.col_up[j]) {
+                                q.col_lo[j] = l;
+                                q.col_up[j] = u;
+                                k += 1;
+                            }
+                        }
+                        if self.params.verbose {
+                            eprintln!("MIP: FJ problem after the restart: {k} column bounds tightened to the global bounds, free columns {}", (0..q.n).filter(|&j| q.col_lo[j] < q.col_up[j]).count());
+                        }
+                        let (lo, up) = (q.col_lo.clone(), q.col_up.clone());
+                        (std::sync::Arc::new(q), lo, up)
+                    }
                     Some(o) => (std::sync::Arc::new((**o).clone()), o.col_lo.clone(), o.col_up.clone()),
                     None => (std::sync::Arc::new(self.p.clone()), self.dom.lo.clone(), self.dom.up.clone()),
                 };
@@ -3429,7 +3478,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 20.60・11.95%。根の下界は h80x6320d 5947 -> 6051、qnet1 15714 -> 15787、binkar10_1 6710.6 -> 6719.9 (heavy は
         // 停滞する問題でさらに上がる: timtab1 465655 -> 571329 だが、カットが増えて木が重くなり全体は同じ)
         let mut find_spawned = false;
-        if find_thread_on() && self.snap.is_none() && !self.params.submip && self.params.threads > 2 && self.fj_poor() && !self.fractional(&self.lp.col_values()).is_empty() {
+        let light_root = self.params.restarts > 0 && self.params.cutoff.is_finite() && env_str!("ENOMOTO_MIP_LIGHT_RESTART_ROOT").is_some();
+        if find_thread_on() && !light_root && self.snap.is_none() && !self.params.submip && self.params.threads > if thread_budget_on() { 3 } else { 2 } && self.fj_poor() && !self.fractional(&self.lp.col_values()).is_empty() {
             let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
             let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
             let budget = (tunable!("ENOMOTO_T_MIP_FIND_THREAD_FRAC", 0.3, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_FIND_THREAD_MAX", 20.0, f64));
@@ -3471,7 +3521,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if find_spawned && threads > 1 {
                     threads -= 1;
                 }
-                if fj_poor_bg_rens() && self.fj_poor() && threads > 1 {
+                if thread_budget_on() {
+                    // 主 1・同時のサブ MIP・解探索のスレッド・暫定解なし用の RENS を引いた残り
+                    let used = 1 + submip_par_limit() + find_spawned as usize + (fj_poor_bg_rens() && self.fj_poor()) as usize;
+                    threads = self.params.threads.saturating_sub(used).max(1);
+                }
+                if !thread_budget_on() && fj_poor_bg_rens() && self.fj_poor() && threads > 1 {
                     threads -= 1;
                     if self.params.verbose {
                         eprintln!("MIP: the incumbent is a poor feasibility jump solution; background cuts use {threads} threads");
@@ -3504,6 +3559,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             #[allow(unused_mut)]
             let mut x = self.lp.col_values();
             self.noinc_root_frac = self.fractional(&x).len();
+            // 根の被約費用の早めの記録 (既定で使う。`ENOMOTO_MIP_NO_EARLY_REDCOST` で使わない): 根の被約費用を、根のヒューリスティクスの前 (LP が根のカットの後の最適な状態のうち) に
+            // 記録して固定する。既定では根のヒューリスティクスと裏のカットの後にしか記録しないので、根の途中で見つかった解
+            // (FJ・Local-MIP・ヒューリスティクス) で被約費用による固定が進まない (根の終わりに 1 回だけ)。カットの後の LP も緩和なので固定は正しい
+            if super::early_redcost_on() && !self.params.submip && self.snap.is_none() {
+                self.store_root_redcost(root_obj);
+                self.root_redcost_fixing();
+                if self.params.verbose {
+                    eprintln!("MIP: early root reduced costs stored ({} newly fixed integer columns, {:.2}s)", self.newly_fixed_ints(), self.start.elapsed().as_secs_f64());
+                }
+            }
             // 並列モード: サブ MIP を使うヒューリスティクスは別スレッドで解かせる
             self.parallel_submips = mip_threads() > 1 && !self.params.submip;
             if self.fractional(&x).is_empty() {
@@ -3595,6 +3660,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (root heuristic time budget)", $name);
                             }
+                        } else if self.early_restart {
+                            if self.params.verbose {
+                                eprintln!("MIP: root heuristic {}: skipped (early restart)", $name);
+                            }
+                        } else if self.params.restarts > 0 && self.params.cutoff.is_finite() && env_str!("ENOMOTO_MIP_LIGHT_RESTART_ROOT").is_some()
+                            && !matches!($name, "trivial" | "simple rounding" | "ZI round" | "randomized rounding" | "shift-and-propagate")
+                        {
+                            // 安い丸め (と自明な解・shift-and-propagate) は残し、サブ MIP・ダイビング・局所探索など重いものだけ飛ばす
+                            if self.params.verbose {
+                                eprintln!("MIP: root heuristic {}: skipped (light root after a restart)", $name);
+                            }
                         } else if self.params.skip_heurs & bit != 0 && env_str!("ENOMOTO_MIP_RESTART_ALL_HEURS").is_none() {
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (no solution before the restart)", $name);
@@ -3626,6 +3702,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let found = $e;
                             self.heur_stop = None;
                             self.heur_label = "";
+                            // 早めの再スタート (既定で使う。`ENOMOTO_MIP_NO_EARLY_RESTART` で使わない): このヒューリスティクスで暫定解が良くなり、根の被約費用による固定で
+                            // 新たに固定された整数列が `ENOMOTO_T_MIP_EARLY_RESTART_FRAC` (0.025) 以上なら、残りの根のヒューリスティクスを飛ばして再スタートへ進む
+                            if super::early_restart_on() && self.incumbent.as_ref().map(|(z, _)| *z) != z_before
+                                && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_EARLY_RESTART_FRAC", 0.025, f64))
+                            {
+                                self.early_restart = true;
+                                if self.params.verbose {
+                                    eprintln!("MIP: early restart: {} newly fixed integer columns after {} ({:.2}s)", self.newly_fixed_ints(), $name, self.start.elapsed().as_secs_f64());
+                                }
+                            }
                             // `ENOMOTO_MIP_POLL_SUBMIPS`: 別スレッドのサブ MIP のうち終わったものの結果をすぐ受け取る (以前は根の
                             // ヒューリスティクスを一通り回し終えてから受け取ったので、見つかった解が後のヒューリスティクスに使われなかった)
                             if env_str!("ENOMOTO_MIP_POLL_SUBMIPS").is_some() {
@@ -3939,6 +4025,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             eprintln!("MIP: background cuts: {} rounds, {} cut rows (was {}), obj {:.10e} -> {:.10e} (waited {:.2}s, {:.2}s)", rounds, rows.len(), saved.len(), cur, new, wait, self.start.elapsed().as_secs_f64());
                         }
                         root_obj = new;
+                        // 根の被約費用の早めの記録 (`ENOMOTO_MIP_NO_EARLY_REDCOST` で使わない): 裏のカットで強くなった LP の被約費用を記録し直して固定する
+                        if super::early_redcost_on() && !self.params.submip && self.snap.is_none() {
+                            self.store_root_redcost(root_obj);
+                            self.root_redcost_fixing();
+                            if self.params.verbose {
+                                eprintln!("MIP: root reduced costs re-stored after the background cuts ({} newly fixed integer columns)", self.newly_fixed_ints());
+                            }
+                        }
                         if !self.params.submip {
                             super::record_root_bound(new);
                         }
@@ -4163,7 +4257,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // [なぞったノード, ファイルにないノード, 指定の列で分枝, 自前で分枝, 指定の列が固定済み]
         let mut rp_stats = [0u64; 5];
+        // `ENOMOTO_MIP_TREE_RESTART` (試作): 木に入る前の暫定解の印は消しておく (木の中で良くなったときだけ判定する)
+        self.tree_restart_check = false;
         loop {
+            // `ENOMOTO_MIP_TREE_RESTART` (試作): 木の中で暫定解が良くなり、根の被約費用で新たに固定された整数列が
+            // `ENOMOTO_T_MIP_TREE_RESTART_FRAC` (0.05) 以上、主のノード数が `ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES` (2000) 以下、
+            // 残り時間が時間上限の `ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT` (0.1) 以上なら、従を止めて再スタートする
+            if std::mem::take(&mut self.tree_restart_check) && env_str!("ENOMOTO_MIP_TREE_RESTART").is_some() && self.watch.is_none() {
+                let left_ok = match self.deadline {
+                    Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT", 0.1, f64) * self.params.time_limit,
+                    None => true,
+                };
+                if left_ok && self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64)) {
+                    if self.params.verbose {
+                        eprintln!("MIP: tree restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
+                    }
+                    self.join_workers();
+                    // 従を止める合図は `time_up` にも効くので、合流させた後は下ろす (下ろさないと再スタートが期限切れとして断られる)
+                    if let Some(pool) = self.pool.as_ref() {
+                        pool.stop.store(false, std::sync::atomic::Ordering::Relaxed);
+                        pool.halt.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if let Some(r) = self.maybe_restart() {
+                        return r;
+                    }
+                    // 判定は通したので普通はここに来ない。従は止めたので、主だけで続ける
+                }
+            }
             // ポートフォリオ並列: 下界を知らせる (二分探索のスレッドが目標値を決めるのに使う)
             // 二分探索のスレッドの求解の下界は打ち切り値で絞った問題のものなので、木の写しを使う形では知らせない
             if self.nodes % 64 == 0 && (self.watch.is_none() || env_str!("ENOMOTO_MIP_BISECT_SNAPSHOT").is_none()) {
@@ -9222,6 +9342,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
         changed
     }
 
+    /// 根の LP を解く前から新たに大域固定された整数列の数 ([`Self::maybe_restart`] の判定と同じ数え方)。
+    fn newly_fixed_ints(&self) -> usize {
+        let p = self.p;
+        let fixed = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
+        fixed.saturating_sub(self.root_fixed0)
+    }
+
+    /// 早めの再スタート ([`super::early_restart_on`])・木の中の再スタート (`ENOMOTO_MIP_TREE_RESTART`、試作) の判定: 新たな固定が、根の始めに固定されて
+    /// いなかった整数列の `frac` 以上 (かつ [`Self::maybe_restart`] の判定 (2 回目以降 2.5%) も通る) で、再スタートの回数と時間が残っているか。
+    fn proto_restart_ok(&self, frac: f64) -> bool {
+        if self.params.submip || self.snap.is_some() || self.time_up() || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() {
+            return false;
+        }
+        if self.params.restarts >= tunable!("ENOMOTO_T_MIP_MAX_RESTARTS", 4u32, u32) {
+            return false;
+        }
+        let nint = self.p.nint;
+        let free = nint.saturating_sub(self.root_fixed0);
+        let newly = self.newly_fixed_ints();
+        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.0, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
+        newly > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * nint as f64
+    }
+
     /// 根での再スタート (SCIP の `restartfac`): 根の処理で新たに大域固定された整数列が全体の 2.5% を超えたら、
     /// 大域的な境界と LP に残ったカットを持って前処理からやり直す。暫定解は打ち切り値として渡し、
     /// やり直しで良い解が見つからなければそれを返す。最大 2 回。
@@ -9408,7 +9551,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 別スレッドでサブ MIP を解き始める (同時に走らせるのはスレッド数 - 1 本まで。超えたら古いものを待つ)。
     pub(super) fn spawn_submip(&mut self, sub: MipProblem, params: MipParams) {
-        let lim = mip_threads().saturating_sub(1).max(1);
+        let lim = submip_par_limit();
         if self.pending_submips.len() >= lim {
             self.join_submips(lim - 1);
         }
@@ -9774,7 +9917,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 木を分け合う従のスレッドを始める (根の処理を終えて木の探索に入るところで、主が呼ぶ)。従は根の後の写し (ノードなし)
     /// から始め、共有の待ち行列からノードを取る。見つけた解は主に渡す。
     fn start_workers(&mut self, plunge: &mut Option<OpenNode>) {
-        let n = self.params.threads - 1;
+        // `ENOMOTO_MIP_THREAD_BUDGET`: 解探索のスレッドが生きている間は、木のスレッドを 1 本減らす
+        let tt = if thread_budget_on() && self.find_out.is_some() && self.params.threads > 2 { self.params.threads - 1 } else { self.params.threads };
+        let n = tt - 1;
         // 以後は木の探索が全てのスレッドを使うので、このスレッドの基底のない求解は同時実行にしない
         crate::simplex::mip_lp::set_cold_race_threads(1);
         let shared = match &self.shared {
@@ -9788,7 +9933,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 s
             }
         };
-        let pool = std::sync::Arc::new(WorkPool::new(self.params.threads, self.dom.global_lo.clone(), self.dom.global_up.clone(), self.pc.clone()));
+        let pool = std::sync::Arc::new(WorkPool::new(tt, self.dom.global_lo.clone(), self.dom.global_up.clone(), self.pc.clone()));
         if let Some((z, x)) = &self.incumbent {
             *pool.best_x.lock().unwrap() = Some((*z, std::sync::Arc::new(x.clone())));
             pool.has_x.store(true, std::sync::atomic::Ordering::Release);
@@ -9843,7 +9988,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.workers.push(h);
         }
         if self.params.verbose {
-            eprintln!("MIP: tree search with {} threads ({:.2}s)", self.params.threads, self.start.elapsed().as_secs_f64());
+            eprintln!("MIP: tree search with {} threads ({:.2}s)", tt, self.start.elapsed().as_secs_f64());
         }
     }
 

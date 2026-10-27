@@ -18,6 +18,8 @@ faer = { version = "0.20.2", default-features = false, features = ["std", "linal
 faer24 = { package = "faer", version = "0.24", default-features = false, features = ["std", "rayon"] }
 pyo3 = { version = "0.22", features = ["extension-module"] }
 rayon = "1.10"
+# 物理コア数 (`ENOMOTO_MIP_TREE_PHYS_CAP` の試作。すでに private-gemm-x86 の依存として入っている版)
+num_cpus = "1.17"
 mimalloc = { version = "0.1", default-features = false }
 metis-sys = "0.3.2"
 libloading = "0.8"

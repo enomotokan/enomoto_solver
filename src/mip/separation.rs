@@ -3263,7 +3263,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);
                     let bases = self.path_collect.take().unwrap_or_default();
                     let inc = self.incumbent.as_ref().map(|(_, v)| v.as_slice());
-                    let (by_row, cpu) = gen_cuts_parallel(&bases, sep_threads(self.params.threads), &vars, use_flow_cover(), n, &lp_rows, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, inc, self.p);
+                    let (by_row, cpu) = gen_cuts_parallel(&bases, sep_threads(self.sep_budget_threads()), &vars, use_flow_cover(), n, &lp_rows, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, inc, self.p);
                     self.sep_par_cpu += cpu;
                     for cs in by_row {
                         cands.extend(cs);
@@ -3382,7 +3382,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 根の分離 (木を分け合う前、サブ MIP でない) で既定の行の選び方なら、tableau 行のカットの生成と仕上げ (分離の時間の
         // 大半: 30n20b8・blp-ar98・graph20-20-1rand で 8 割) を複数のスレッドで行う (`ENOMOTO_MIP_SEP_SEQ` で逐次)。
         // 行の選択と集約は逐次で今までと同じ順に行い、行ごとの候補 (keep_best 後) を同じ順につなぐので結果は逐次と同じ
-        let par_threads = sep_threads(self.params.threads);
+        let par_threads = sep_threads(self.sep_budget_threads());
         let par = par_threads > 1
             && !light
             && !self.params.submip
@@ -4154,6 +4154,13 @@ fn select_cuts_old(mut cands: Vec<Candidate>, max_cuts: usize) -> Vec<Candidate>
 
 /// 根のカットの生成を並列にするスレッドの数。`ENOMOTO_MIP_SEP_THREADS_M1` (試作) ならスレッド数 − 1 (FJ のスレッドの分を空ける。
 /// 生成の間は生成のスレッドと FJ のスレッドが同時に動き、4 スレッドなら 5 本が 4 CPU を取り合う)
+impl<'a, L: MipLp> Solver<'a, L> {
+    /// 分離に使うスレッド数の元 (`ENOMOTO_MIP_THREAD_BUDGET` では、根 (写しでない・サブ MIP でない) では FJ のスレッドの分を 1 本引く)。
+    fn sep_budget_threads(&self) -> usize {
+        if super::solver::thread_budget_on() && self.snap.is_none() && !self.params.submip && self.params.threads > 1 { self.params.threads - 1 } else { self.params.threads }
+    }
+}
+
 fn sep_threads(threads: usize) -> usize {
     if env_str!("ENOMOTO_MIP_SEP_THREADS_M1").is_some() { threads.saturating_sub(1).max(1) } else { threads.max(1) }
 }

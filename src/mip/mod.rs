@@ -86,6 +86,22 @@ pub(crate) fn implbd_genint_for(is_int: &[bool], lo: &[f64], up: &[f64]) -> bool
 /// mzzv42z (4 スレッド・60 秒) では、根の RENS が固定率 0.35〜0.43 に崩れる回 (根のカットの 1 ラウンド目の LP が時間の上限に
 /// 当たって根のカットが 1〜2 ラウンドで止まる回) でも背景のカットの後の RINS で -20400 台が出て、再スタートで暫定解を
 /// 捨てて根の LP を解き直す (6〜19 秒) のをやめる (analysis/mzzv42z_r4_20261021.md)
+/// 根の被約費用の早めの記録 (既定で使う。`ENOMOTO_MIP_NO_EARLY_REDCOST` で使わない): 根のヒューリスティクスの前 (根のカットの後) と
+/// 背景のカットで LP を置き換えた後にも根の被約費用を記録して固定する。以前は根のヒューリスティクスと背景のカットの後にしか
+/// 記録しなかったので、根の途中で見つかった解 (FJ・Local-MIP・ヒューリスティクス) で被約費用による固定が進まなかった
+pub(crate) fn early_redcost_on() -> bool {
+    env_str!("ENOMOTO_MIP_NO_EARLY_REDCOST").is_none()
+}
+
+/// 早めの再スタート (既定で使う。`ENOMOTO_MIP_NO_EARLY_RESTART` で使わない): 根のヒューリスティクスで暫定解が良くなり、
+/// 新たに固定された整数列が根の始めに自由だった整数列の `ENOMOTO_T_MIP_EARLY_RESTART_FRAC` (0.025) 以上なら、残りの根の
+/// ヒューリスティクスを飛ばして再スタートする。[`early_redcost_on`] と組んで効く (固定が根の途中で進むため)。
+/// 負けている 21 問 (16 スレッド・60 秒・2 回): 解けた回数 35 -> 37、SGM 21.99 -> 20.89 秒
+/// (p200x1188c 6.5 -> 3.4 秒、h80x6320d 52 -> 43 秒、exp-1-500-5-5 15.4 -> 12.6 秒、swath1 23.5 -> 31.1 秒)
+pub(crate) fn early_restart_on() -> bool {
+    env_str!("ENOMOTO_MIP_NO_EARLY_RESTART").is_none()
+}
+
 pub(crate) fn gr_restart_for(p: &MipProblem) -> bool {
     env_def!("ENOMOTO_MIP_GR_RESTART", "1").is_some() && implbd_genint_for(&p.is_int, &p.col_lo, &p.col_up)
 }
@@ -253,7 +269,9 @@ pub fn solve_mip(
             Err(e) => eprintln!("MIP_START_FILE: cannot read {f}: {e}"),
         }
     }
-    let prev_race = crate::simplex::mip_lp::set_cold_race_threads(params.threads);
+    // `ENOMOTO_MIP_THREAD_BUDGET`: 根の LP の同時実行は FJ のスレッドの分を 1 本引く
+    let race_threads = if solver::thread_budget_on() && params.threads > 1 { params.threads - 1 } else { params.threads };
+    let prev_race = crate::simplex::mip_lp::set_cold_race_threads(race_threads);
     // 根のサブ MIP・Feasibility Jump を別スレッドで回すかなどの判定 ([`solver::mip_threads`]) も、`ENOMOTO_MIP_THREADS` が
     // なければこのスレッド数にする
     let prev_mt = solver::MIP_THREADS_DEFAULT.swap(params.threads, std::sync::atomic::Ordering::Relaxed);
