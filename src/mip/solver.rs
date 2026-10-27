@@ -3638,6 +3638,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_T_MIP_ROOT_HEUR_TIME_FRAC` = f (> 0): 根のヒューリスティクス全体の時間の予算を時間上限の f 倍
                 // (暫定解がなければ `ENOMOTO_T_MIP_ROOT_HEUR_TIME_FRAC_NOINC` 倍) にし、超えたら残りは飛ばす
                 let rh_t0 = Instant::now();
+                if !self.params.submip && self.params.restarts == 0 {
+                    super::record_root_heur_start();
+                }
                 let rh_frac = tunable!("ENOMOTO_T_MIP_ROOT_HEUR_TIME_FRAC", 0.0, f64);
                 let rh_frac_noinc = tunable!("ENOMOTO_T_MIP_ROOT_HEUR_TIME_FRAC_NOINC", 0.5, f64);
                 let rh_over = |s: &Self| {
@@ -9553,6 +9556,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn spawn_submip(&mut self, sub: MipProblem, params: MipParams) {
         let lim = submip_par_limit();
         if self.pending_submips.len() >= lim {
+            // `ENOMOTO_MIP_SUBMIP_FIRST_DONE` (試作): 空きを待つとき、出した順 (いちばん古いもの) ではなく先に終わったものから受け取る
+            // ([`Self::join_submips`])。nu25-pr12 では LP face のサブ MIP が 0.7 秒で最適解を見つけて終わっていたのに、古い根の被約費用の
+            // サブ MIP (時間上限 4.1 秒) を待つ間、その解を 3 秒以上受け取れなかった
             self.join_submips(lim - 1);
         }
         let presolve = env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none();
@@ -9586,6 +9592,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 別スレッドのサブ MIP を、残りが `keep` 本になるまで出した順に待って結果を受け取る。
     pub(super) fn join_submips(&mut self, keep: usize) {
+        if env_str!("ENOMOTO_MIP_SUBMIP_FIRST_DONE").is_some() {
+            // 終わったものから受け取る (どれも終わっていなければ 1 ms 待って見直す)
+            while self.pending_submips.len() > keep {
+                match self.pending_submips.iter().position(|it| it.0.is_finished()) {
+                    Some(k) => {
+                        let item = self.pending_submips.remove(k).unwrap();
+                        self.take_submip(item);
+                    }
+                    None => std::thread::sleep(std::time::Duration::from_millis(1)),
+                }
+            }
+            return;
+        }
         while self.pending_submips.len() > keep {
             let item = self.pending_submips.pop_front().unwrap();
             self.take_submip(item);

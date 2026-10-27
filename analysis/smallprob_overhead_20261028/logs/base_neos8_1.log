@@ -1,0 +1,53 @@
+[   0.000] @@SOLVE_START
+[   0.367] MIP: presolve: tightened 2324 coefficients (skipped 0 in rows redundant within tolerance), normalized 56 integer rows
+[   0.428] MIP: presolve: merged 56 parallel rows (56 new equations)
+[   0.428] MIP: presolve: rows 46324 -> 46156, free columns 23228 -> 23116, nonzeros 313180 -> 312788, postsolve steps 0
+[   0.744] MIP: presolve: rows 46156 -> 46100, free columns 23116 -> 23060, nonzeros 312788 -> 312613, postsolve steps 56
+[   5.528] MIP: LP probing pass 1: 132 candidates, 21 fixings (80 LPs, 2778 iters, 4.77s)
+[   5.630] MIP: LP probing: tried 40 columns, fixed 21, LP -3.7733919694e3 -> -3.7494668972e3 (80 LPs, 2902 iters, 4.87s)
+[   5.630] MIP: LP probing: root LP 0.38s (495 iters, size 381941), tried 40, fixed 21, basis passed true, total 3397 iters 4.87s
+[   5.823] MIP: presolve: rows 46100 -> 46070, free columns 23039 -> 23039, nonzeros 312613 -> 312472, postsolve steps 0
+[  16.188] MIP: probing: equivalence pass with implications: 1913 pairs found (1.25s), not used
+[  16.275] MIP: probing: 1296 of 23035 binaries probed (1 passes), 0 fixed, 21379 bounds tightened, 1954124 implications (10.45s, cpu 10.24s, work 322542681, pwork 3588532668, chg 5260307)
+[  16.276] MIP: probing: 0 equivalent binary pairs
+[  16.905] MIP: clique extension: 12 rows extended, 144 nonzeros added, 0 columns fixed, 0 duplicate and 12 dominated rows removed (1184494 edges, 0.61s)
+[  17.502] MIP: symmetry: 2 full orbitopes (1x3, 1x3)
+[  17.502] MIP: symmetry: 5 generators, 3 orbits on 8 columns, 1 lex-leader rows (0.59s, work 23486716, search 232280, verify 3817340, detect 0.59s, refine 0.39s, log work 136976652)
+[  17.579] MIP: root LP: the rows changed after LP probing; the row statuses are not used
+[  17.579] MIP: root LP basis from the presolve LP probing: used (columns only)
+[  17.579] MIP: solving the root LP (0.07s)
+[  17.675] MIP: root LP -3.7250000000e3 (98 iters, 0.17s)
+[  18.978] MIP: cut selection probe: compared at 1 rounds (pool stopped early), probe wall 1.30s (budget 2.1s)
+[  18.978] MIP: cut selection probe (6 rounds): default 5 cuts gain 6.000000e0 (0.25s), pool 7 cuts gain 5.500000e0 (0.18s) -> pool (rule rate, probe 0.43s in total, 1.47s)
+[  19.268] MIP: cut round 0: 3 cuts (of 217, sep 0.11s, LP 43 iters), LP rows 46062 (cut rows mean nnz 70), obj -3.7195000000e3 (1.76s)
+[  20.136] MIP: clique graph: 1184494 edges (3990 from rows, probing implications 1954124)
+[  20.136] MIP: cut round 1: clique extension of cuts: 3 set packing cuts, 3 extended by 24 literals (0 literals with cut edges)
+[  20.199] MIP: cut round 1: 4 cuts (of 255, sep 0.23s, LP 2 iters), LP rows 46066 (cut rows mean nnz 37), obj -3.7190000000e3 (2.69s)
+[  20.216] MIP: clique fallback: no violated clique cuts; not used (0.00s)
+[  20.216] MIP: cut loop done: 7 cuts added, 7 in LP, pool 291 cuts (23146 nonzeros), obj -3.7250000000e3 -> -3.7190000000e3
+[  23.663] MIP: FJ problem (FJ_P3): rows 46058 -> 5862, free columns 1660 -> 1128, 0 continuous bounds tightened
+[  23.677] MIP: early root reduced costs stored (0 newly fixed integer columns, 6.17s)
+[  23.680] MIP:   global fixed integers 21568 of 23228 (newly 0 since the root LP)
+[  23.680] MIP: new incumbent -3.7190000000e3 at node 0 (6.17s) [tree]
+[  23.680] MIP: the root LP bound after cuts and heuristics -3.7190000000e3 closed the gap to the prune limit -3.7199962810e3 (incumbent Some(-3719.0), 6.17s)
+[  23.680] MIP: finish start Optimal (6.17s)
+[  23.680] TREEPAR: total 6.17s tree start 0.00s workers start 0.00s threads 4 status Optimal obj Some(-3719.0) bound -3.7190000000e3
+[  23.680] TREEPAR: balance 0/0 shared 0 proofs own/imp: live 0/0 eval 0/0 prune 0/0 tight 0/0 absorb 0/0; lits own/imp: live 0/0 eval 0/0 prune 0/0 tight 0/0 aged 0/0 | tid 0 ready 0.00s end 0.00s idle 0.00s (0 waits, lock 0.00s sleep 0.00s, pool mean 0.0) lns 0.00s tail 0.00s sync 0.000s nodes 0 (lb>=opt 0) first LP [dive 0 0.0it 0.00ms | queue 0 0.0it 0.00ms | pool 0 0.0it 0.00ms]
+[  23.680] MIP:     6.17s nodes        0 open       0 lb inf ub -3.71900000e3 lp_iters 144 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 0 dive_iters 0 lp_rows 46066 node_cut_secs 0.00
+[  23.680] MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+[  23.680] MIP: propagation conflicts: analysed 0, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+[  23.680] MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+[  23.680] MIP: literal conflicts: added 0, in pool 0 (aged out 0), pruned 0 nodes, tightened 0 bounds
+[  23.680] MIP: proof CMIR cuts: tried 0, added 0, entered the cut pool 0
+[  23.680] MIP: conflict analysis (HiGHS style): calls 0, conflicts 0, added 0, mean length 0.0, max length 7068, 0.00s
+[  23.680] MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+[  23.680] MIP: branching: 0 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+[  23.680] MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+[  23.680] MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 46066
+[  23.680] MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 6.8)
+[  23.680] MIP: orbitopes 2: fixed 0 bounds, pruned 0 nodes
+[  23.680] MIP: finish done (6.17s)
+[  23.702] MIP: solve returned Optimal after 23.65s (time limit 60.00s)
+[  23.703] MIP: polished the solution (23.65s)
+[  23.709] @@SOLVE_END
+@@RESULT {"status": "optimal", "objective": -3719.0, "bound": -3719.0, "nodes": 0, "time": 23.70851028300001}
