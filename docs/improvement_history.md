@@ -10003,3 +10003,16 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 
 - 不一致 0、"MIP: WARNING" 0。解けた数が合わせて 40 問で 4、16 問で 2 減り、SGM も 4 つとも悪い。lbp で解けなくなった: noswot・eil33-2・neos-2978193-inde (2 組とも)、beasleyC3 (LBa)。lbp だけ解けた: neos-960392 (LBb)。
 - physiciansched6-2 は 50124・49625 (newdef 50826・51029)、30n20b8 は 402・553 (newdef 653・653) と良くなるが、根・木のサブ MIP が 30〜60 秒で解ける問題の時間を食う。
+
+## 2026-10-27: Windows では全部 mimalloc に割り当てる (MIP の木のスレッドがヒープの錠で並んでいた) (採用)
+
+手元 (Windows 11、Ryzen 7 5700U、物理 8 / 論理 16) で app1-1 は 4・8 スレッドなら解けるが 16 スレッドでは 2 回とも時間切れだった。
+- 16 スレッドで木のスレッドの CPU 使用率の合計は 1.3 コア (各 4〜13%)。潜りのノードの LP は 1 反復 15〜28 ms (4 スレッドは 0.55 ms)。
+  待ち行列の錠・待ち (`ENOMOTO_PROF_TREE_PAR` の lock・sleep)・rayon のグローバルプール (`RAYON_NUM_THREADS=1` でも同じ) は原因でなかった。
+- 原因は `SplitAlloc` (lib.rs): 4KB 以上のブロックをシステムアロケータ (Windows ではプロセスの既定のヒープ) に回していて、
+  ノードの LP の作業配列 (3000 行で 25KB) の確保・解放ごとに全スレッドがヒープの錠に並んでいた。4KB で分けたのは Linux (glibc) での計測による。
+- `params::alloc::MIMALLOC_SIZE_LIMIT` を Windows だけ `usize::MAX` にした (Linux は 4KB のまま)。app1-1 (16 スレッド) は CPU 14.1 コア・1 反復 2 ms、
+  40.7 秒で最適。Netlib 93 問 (Windows) は合計 6.46 -> 6.11 秒・シフト付き幾何平均 0.0194 -> 0.0182 秒で、悪くなる問題なし。
+- Mittelmann MIP 186 問 (16 スレッド・60 秒、HiGHS は parallel=on の 10/26 の結果): 解けた数 38 -> 39、SGM 47.69 -> 47.27 秒、不一致 0
+  (HiGHS 36・47.88 秒)。新しく解けたのは app1-1・beasleyC3、落としたのは mc11 (どちらも 60 秒の際で揺れる問題)。nu25-pr12 の 8.7 -> 18.0 秒は
+  3 回の解き直しで 8.2〜9.0 秒の揺れ。結果は `benchmarks/mittmip_16t_60s_20261027_mimalloc_highspar.*`。cargo test 316 件通過。

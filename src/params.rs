@@ -1246,7 +1246,16 @@ pub(crate) mod mip {
 /// メモリアロケータ (src/lib.rs)
 pub(crate) mod alloc {
     /// このバイト数未満のメモリブロックは mimalloc に、以上はシステムアロケータに割り当てる。
+    #[cfg(not(windows))]
     pub(crate) const MIMALLOC_SIZE_LIMIT: usize = 4 * 1024;
+    /// Windows では全部 mimalloc に割り当てる。システムアロケータ (プロセスの既定のヒープ) は大きいブロックを錠の中で扱うので、
+    /// MIP の木のスレッドがノードの LP の作業用の配列 (行数 3000 で 25KB) を確保・解放するたびに並ぶ。app1-1 を 16 スレッドで
+    /// 解くと木のスレッドの CPU 使用率の合計が 1.3 コア (各 4〜13%)、潜りの LP が 1 反復 15〜28 ms (4 スレッドは 0.55 ms) で、
+    /// 全部 mimalloc にすると 14.1 コア・2 ms になり 60 秒で解ける (以前は時間切れ)。4KB で分けたのは Linux (glibc) での計測
+    /// (全部 mimalloc では単体法の主ループが中規模の問題で 20〜80% 遅い) によるもので、Windows の Netlib 93 問は全部 mimalloc で
+    /// 合計 6.46 -> 6.11 秒 (シフト付き幾何平均 0.0194 -> 0.0182 秒、悪くなる問題なし)
+    #[cfg(windows)]
+    pub(crate) const MIMALLOC_SIZE_LIMIT: usize = usize::MAX;
 }
 
 /// 内点法 + クロスオーバー (`simplex::crossover`) の既定値 (第 64 回以降の追加分。以前の値は `crossover.rs` の `prm`)。
