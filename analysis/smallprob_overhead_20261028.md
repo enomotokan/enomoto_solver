@@ -202,7 +202,30 @@ all 19.80 / 19.93、s2 base 20.16 / 18.79・epr 18.26 / 20.25・all 18.41 / 20.3
 暫定解が最適値でも根のカットとヒューリスティクスを全部回すこと (hypothyroid-k1。既存の `ENOMOTO_MIP_EARLY_RENS` で 32.7 → 26.9 秒)、
 根のサブ MIP が成果と関係なく時間の上限まで回ること (neos17・nubu・nu25-pr12)。
 
+## 7. 成果連動のサブ MIP の打ち切り (`ENOMOTO_MIP_SUBMIP_OUTCOME_STOP`、作り直し)
+
+3 の `ROOT_SUBMIP_REL` が時間で一律に絞って 10teams の必要なサブ MIP (248 ノード目に初めて最適解) を切っていたので、成果で止める形に作り直した
+(0e9300d、既定では使わない)。
+- 根のサブ MIP (並列・主のスレッドの両方) は、外側の暫定解より良い解を見つけた後、最後に良くなってからのノード数がそこまでのノード数
+  (最小 `ENOMOTO_T_MIP_SUBMIP_OUTCOME_MIN_NODES` = 50) に達したら止める。解を 1 つも見つけていないサブ MIP は今まで通り。
+- 並列のサブ MIP には外側の暫定解を打ち切り値として渡し続け (`SubmipCtl`)、終わった順に受け取る。
+
+計測: 対象の 10 問 + MIPLIB 40 問の 50 問を 10 問ずつ 5 つのコンテナ (各 CPU 4) に分け、base・ostop (この試作)・eprostop (+ 早めのかけ直し) を
+各 2 回 (`os_s0〜4.jsonl`、集計 `os_summary.md`)。不一致 0、"MIP: WARNING" 0。
+
+| 集合 | base 解けた・SGM (1 回目 / 2 回目) | ostop | eprostop |
+|---|---|---|---|
+| 対象の 10 問 | 10・10.69 / 10・9.55 | 10・8.99 / 10・9.00 | 10・8.08 / 10・8.18 |
+| MIPLIB 40 問 | 25・19.98 / 26・18.74 | 26・19.19 / 26・18.74 | 26・18.56 / 26・18.38 |
+
+- 速くなった問題 (2 回とも): neos17 15.2 → 9.9 秒、neos-3083819-nubu 12.0 → 8.8、binkar10_1 13.2 → 7.1、mas76 16.9 → 13.1、pk1 34.2 → 26.6
+  (eprostop 20.4)、eil33-2 45.6 → 39.6、nu25-pr12 は既定の 34.8・9.5 の揺れが 10.1・10.6 に収まる。10teams は 4.8 → 4.4 で悪化しない。
+- 悪くなった問題: **neos-827175 6.0・6.1 → 8.6〜8.8 秒 (ostop・eprostop の 4 回とも)**。原因は未確認 (根のサブ MIP が早く止まり、根で見つかって
+  いた最適解 (既定は RINS) が遅れたと推測)。neos-911970 は 53.8・17.8 (既定 12.1・10.2、eprostop は 14.0・16.3) で揺れの大きい問題。
+- 既定にする候補: **eprostop (早めのかけ直し + 成果連動の打ち切り)**。対象の 10 問で SGM −20%、40 問で解けた数は同じか +1、SGM −2〜7%。
+  neos-827175 の悪化の理由を確かめてから、手元の Mittelmann 186 問で採否を決めるのがよい。
+
 ## コミット
 
-- 試作と診断: `ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE`・`ENOMOTO_MIP_RESTART_CUTS_FIXED`・`ENOMOTO_MIP_ROOT_SUBMIP_REL`・`ENOMOTO_MIP_SUBMIP_FIRST_DONE`・
+- 試作と診断: `ENOMOTO_MIP_SUBMIP_OUTCOME_STOP` (0e9300d)・`ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE`・`ENOMOTO_MIP_RESTART_CUTS_FIXED`・`ENOMOTO_MIP_ROOT_SUBMIP_REL`・`ENOMOTO_MIP_SUBMIP_FIRST_DONE`・
   `ENOMOTO_MIP_DEBUG_PROBE_PROGRESS` (`src/mip/mod.rs`・`src/mip/solver.rs`・`src/mip/heuristics.rs`)。
