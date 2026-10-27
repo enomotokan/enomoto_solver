@@ -89,6 +89,14 @@ pub(crate) fn implbd_genint_for(is_int: &[bool], lo: &[f64], up: &[f64]) -> bool
 /// 根の被約費用の早めの記録 (既定で使う。`ENOMOTO_MIP_NO_EARLY_REDCOST` で使わない): 根のヒューリスティクスの前 (根のカットの後) と
 /// 背景のカットで LP を置き換えた後にも根の被約費用を記録して固定する。以前は根のヒューリスティクスと背景のカットの後にしか
 /// 記録しなかったので、根の途中で見つかった解 (FJ・Local-MIP・ヒューリスティクス) で被約費用による固定が進まなかった
+/// `ENOMOTO_MIP_RESTART_CUTS_FIX` (試作): 再スタートで持ち込むカットの扱いを直す。(1) 前の求解が readd と決めたら新しい求解でも
+/// 根の LP の前にカットの行として戻す (以前はカットプールに入るだけで、exp-1-500-5-5 では根の LP が毎周 2.87e4 から作り直していた)、
+/// (2) プールの経路のカットは、大域的に固定された列を代入してから持ち込む (以前は前処理で固定された列を含むカットを捨てていて、
+/// p200x1188c では持ち込んだ 67 本が全部捨てられていた)
+pub(crate) fn restart_cuts_fix() -> bool {
+    env_str!("ENOMOTO_MIP_RESTART_CUTS_FIX").is_some()
+}
+
 pub(crate) fn early_redcost_on() -> bool {
     env_str!("ENOMOTO_MIP_NO_EARLY_REDCOST").is_none()
 }
@@ -688,6 +696,9 @@ thread_local! {
     /// 再スタート前のカット (`係数 x <= 右辺`)。再スタートが [`solve_problem`] に渡す問題の空間で置き、前処理後の空間に
     /// 移して置き直し、求解の開始時にカットプールに入れる (static TLS の領域が足りないので 1 つで済ませる)。
     pub(crate) static RESTART_CUTS: std::cell::RefCell<Option<Vec<(Vec<(usize, f64)>, f64)>>> = const { std::cell::RefCell::new(None) };
+    /// `ENOMOTO_MIP_RESTART_CUTS_FIX` (試作): 再スタート前の求解が [`RESTART_CUTS`] を「根の LP の前にカットの行として戻す」(readd) と
+    /// 決めたか。新しい求解は HiGHS 流のカット管理をまだ判定していないので、この印で戻す
+    pub(crate) static RESTART_CUTS_READD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {

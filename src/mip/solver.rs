@@ -2971,7 +2971,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // `ENOMOTO_MIP_RESTART_CUTS_READD`: 再スタート前に効いていたカットを、根の LP を解く前にカットの行として加える
             // (問題の行ではないので木の中で年齢により外せる。プールにもあるので外れても違反すれば戻る)
-            if (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt() || self.watch.is_some() || super::gr_restart_readd_for(self.p)) && !self.params.submip {
+            let readd_mark = super::RESTART_CUTS_READD.with(|f| f.replace(false));
+            if (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt() || self.watch.is_some() || super::gr_restart_readd_for(self.p) || readd_mark) && !self.params.submip {
                 let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = cuts.iter().filter(|(c, _)| c.iter().all(|&(j, _)| j < self.p.n)).map(|(c, r)| (c.clone(), f64::NEG_INFINITY, *r)).collect();
                 if !rows.is_empty() {
                     self.add_cut_rows(&rows);
@@ -3329,6 +3330,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if restart_basis_used && self.params.verbose {
             eprintln!("MIP: root LP after the restart: {root_st:?}, {} iters ({:.2}s)", self.lp.total_iterations() - root_iters0, self.start.elapsed().as_secs_f64());
+        }
+        // 診断用 (`ENOMOTO_MIP_DEBUG_RESTART_CUT_USE`): 再スタートの後の根の LP 解で、カットプールのカットと LP のカットの行が
+        // 破られている・等号で効いている・緩んでいる数
+        if self.params.restarts > 0 && env_str!("ENOMOTO_MIP_DEBUG_RESTART_CUT_USE").is_some() && root_st == LpStatus::Optimal {
+            let x = self.lp.col_values();
+            let (mut viol, mut tight, mut slack) = (0usize, 0usize, 0usize);
+            for (c, r, _) in self.cut_pool.iter() {
+                let a: f64 = c.iter().map(|&(j, v)| if j < x.len() { v * x[j] } else { 0.0 }).sum();
+                let tol = 1e-6 * (1.0 + r.abs());
+                if a > r + tol { viol += 1 } else if a >= r - tol { tight += 1 } else { slack += 1 }
+            }
+            let act = self.lp.row_activities();
+            let (mut rt, mut rs) = (0usize, 0usize);
+            for i in self.p.m..self.lp.num_rows() {
+                let (l, u) = self.lp.row_bounds(i);
+                let t = (u.is_finite() && act[i] >= u - 1e-6 * (1.0 + u.abs())) || (l.is_finite() && act[i] <= l + 1e-6 * (1.0 + l.abs()));
+                if t { rt += 1 } else { rs += 1 }
+            }
+            eprintln!(
+                "RESTART_CUT_USE: after restart {} root LP {:.10e}: cut pool {} (violated {viol}, tight {tight}, slack {slack}); LP cut rows {} (tight {rt}, slack {rs}); problem rows {}",
+                self.params.restarts, self.lp.objective() + self.p.offset, self.cut_pool.len(), rt + rs, self.p.m
+            );
         }
         if self.params.verbose && self.snap.is_some() {
             eprintln!("MIP: [snapshot] root LP {root_st:?} ({} iters, {:.2}s)", self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
@@ -9407,6 +9430,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // neos-911970 (60 秒) では暫定解 56.23 -> 54.83 (最適値 54.76)・下界 53.69 -> 53.62 で解けるには至らず、再スタート後の
         // カットのループが進まなくなる (47.26 のまま。カットの行の上に作る次のカットが変わる) ので既定では使わない
         let readd = (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt() || super::gr_restart_readd_for(p)) && !keep_all;
+        // `ENOMOTO_MIP_RESTART_CUTS_FIX` (試作): 再スタートで新たに固定される整数列が、根の始めに自由だった整数列の
+        // `ENOMOTO_T_MIP_RESTART_CUTS_ROWS_FRAC` (0.3) 以上なら、readd でも問題の行として持ち込む (前処理が列を別の列で置き換えると、
+        // プールの経路ではその列を含むカットを写せずに捨てる。p200x1188c は 767 / 1188 列の固定で持ち込んだ 67 本が全部捨てられた)
+        let big_restart = super::restart_cuts_fix()
+            && self.newly_fixed_ints() as f64 >= tunable!("ENOMOTO_T_MIP_RESTART_CUTS_ROWS_FRAC", 0.3, f64) * p.nint.saturating_sub(self.root_fixed0) as f64;
+        let readd = readd && !big_restart;
         let cuts_as_rows = (env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_none() && !readd) || keep_all;
         let mut carry: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
         let act = self.lp.row_activities();
@@ -9445,6 +9474,54 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 幅が許容誤差以下になった列 (伝播は連続列の境界を誤差の分だけ緩めて締める) も 1 点に固定する ([`super::fix_tiny_width_columns`])
         let tiny = super::fix_tiny_width_columns(&rows, &mut row_lo, &mut row_up, &mut glo, &mut gup, &p.is_int);
+        // `ENOMOTO_MIP_RESTART_CUTS_FIX` (試作): プールの経路のカットは、大域的に固定された列を代入して右辺に移す (前処理で固定された
+        // 列を含むカットは写すときに捨てられるので)。代入して項が無くなったカットは捨てる
+        if super::restart_cuts_fix() && !cuts_as_rows {
+            let before = carry.len();
+            carry = carry
+                .into_iter()
+                .filter_map(|(c, r)| {
+                    let mut rr = r;
+                    let cc: Vec<(usize, f64)> = c.into_iter().filter(|&(j, v)| if glo[j] == gup[j] { rr -= v * glo[j]; false } else { true }).collect();
+                    (!cc.is_empty()).then_some((cc, rr))
+                })
+                .collect();
+            if self.params.verbose {
+                eprintln!("MIP: restart: substituted the fixed columns into the carried cuts ({} -> {} cuts)", before, carry.len());
+            }
+        }
+        // 診断用 (`ENOMOTO_MIP_DEBUG_RESTART_CUT_USE`): 持ち込むカットの経路と数、新しい大域的な境界の下で完全に冗長になったものの数、
+        // 固定された列を含むものの数
+        if env_str!("ENOMOTO_MIP_DEBUG_RESTART_CUT_USE").is_some() {
+            let path = if cuts_as_rows { "rows" } else if readd { "readd (pool + cut rows)" } else { "pool" };
+            let cuts: Vec<(Vec<(usize, f64)>, f64)> = if cuts_as_rows {
+                (p.m..rows.len()).flat_map(|i| {
+                    let mut v = Vec::new();
+                    if row_up[i].is_finite() { v.push((rows[i].clone(), row_up[i])); }
+                    if row_lo[i].is_finite() { v.push((rows[i].iter().map(|&(j, a)| (j, -a)).collect(), -row_lo[i])); }
+                    v
+                }).collect()
+            } else {
+                carry.clone()
+            };
+            let (mut redundant, mut with_fixed, mut fixed_terms, mut terms) = (0usize, 0usize, 0usize, 0usize);
+            for (c, r) in &cuts {
+                let maxact: f64 = c.iter().map(|&(j, a)| if a > 0.0 { a * gup[j] } else { a * glo[j] }).sum();
+                if maxact <= r + 1e-9 * (1.0 + r.abs()) {
+                    redundant += 1;
+                }
+                let nf = c.iter().filter(|&&(j, _)| glo[j] == gup[j]).count();
+                if nf > 0 {
+                    with_fixed += 1;
+                }
+                fixed_terms += nf;
+                terms += c.len();
+            }
+            eprintln!(
+                "RESTART_CUT_USE: restart {} path {path}: carried {} (cut pool {}), redundant under the new global bounds {redundant}, with fixed columns {with_fixed} (fixed terms {fixed_terms} of {terms})",
+                self.params.restarts + 1, cuts.len(), self.cut_pool.len()
+            );
+        }
         if self.params.verbose && tiny > 0 {
             eprintln!("MIP: restart: fixed {tiny} columns of width within tolerance");
         }
@@ -9504,6 +9581,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 carry.extend(self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)));
             }
             super::RESTART_CUTS.with(|s| *s.borrow_mut() = Some(carry));
+            super::RESTART_CUTS_READD.with(|f| f.set(readd && super::restart_cuts_fix()));
         }
         // 暫定解を引き継ぐ (新しい問題は列が同じ)
         if env_str!("ENOMOTO_MIP_RESTART_NO_INCUMBENT").is_none() {
