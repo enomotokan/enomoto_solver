@@ -1155,6 +1155,120 @@ impl OrbitalGens {
         }
     }
 
+    /// 動かす列の数 (`cols` の長さ。[`Self::base_perms`] などの置換はこの位置の上のもの)。
+    pub fn support_len(&self) -> usize {
+        self.cols.len()
+    }
+
+    /// 列 `j` の `cols` の中の位置 (どの生成元も動かさなければ `None`)。
+    pub fn position(&self, j: usize) -> Option<u32> {
+        self.cols.binary_search(&j).ok().map(|q| q as u32)
+    }
+
+    /// 生成元を `cols` の位置の上の置換にしたもの。
+    pub fn base_perms(&self) -> Vec<std::rc::Rc<Vec<u32>>> {
+        self.moves
+            .iter()
+            .map(|mv| {
+                let mut g: Vec<u32> = (0..self.cols.len() as u32).collect();
+                for &(a, b) in mv {
+                    g[a as usize] = b;
+                }
+                std::rc::Rc::new(g)
+            })
+            .collect()
+    }
+
+    /// 群 `h` (位置の上の置換の生成元) で位置 `q` を固定する部分群の生成元 (Schreier 生成元
+    /// `u_{s(x)}^{-1} s u_x`、`u_x` は `q` を軌道の点 `x` に写す元)。軌道が `max_orbit` を超えるときは、`q` を動かさない生成元だけ
+    /// (HiGHS と同じ、固定群の部分群)。多くても `max_gens` 本 (`q` を動かさない生成元を先に入れる)。どれも固定群の元なので、
+    /// 本数を打ち切っても部分群の生成元として正しい。
+    pub fn schreier_stabilizer(h: &[std::rc::Rc<Vec<u32>>], q: u32, max_orbit: usize, max_gens: usize) -> Vec<std::rc::Rc<Vec<u32>>> {
+        let mut out: Vec<std::rc::Rc<Vec<u32>>> = h.iter().filter(|g| g[q as usize] == q).take(max_gens).cloned().collect();
+        if h.iter().all(|g| g[q as usize] == q) || out.len() >= max_gens {
+            return out;
+        }
+        let m = h[0].len();
+        // 軌道と、各点への写し u_x (q -> x) を幅優先で作る
+        let mut u: std::collections::HashMap<u32, std::rc::Rc<Vec<u32>>> = std::collections::HashMap::new();
+        let id: std::rc::Rc<Vec<u32>> = std::rc::Rc::new((0..m as u32).collect());
+        u.insert(q, id);
+        let mut order = vec![q];
+        let mut head = 0;
+        while head < order.len() {
+            let x = order[head];
+            head += 1;
+            let ux = u[&x].clone();
+            for g in h {
+                let y = g[x as usize];
+                if !u.contains_key(&y) {
+                    if u.len() >= max_orbit {
+                        return out;
+                    }
+                    // u_y = g ∘ u_x
+                    let uy: Vec<u32> = ux.iter().map(|&t| g[t as usize]).collect();
+                    u.insert(y, std::rc::Rc::new(uy));
+                    order.push(y);
+                }
+            }
+        }
+        let mut seen: std::collections::HashSet<std::rc::Rc<Vec<u32>>> = out.iter().cloned().collect();
+        let mut inv = vec![0u32; m];
+        for &x in &order {
+            let ux = u[&x].clone();
+            for s in h {
+                let y = s[x as usize];
+                if x == q && y == q {
+                    continue; // q を動かさない生成元はもう入れた
+                }
+                let uy = &u[&y];
+                for (i, &t) in uy.iter().enumerate() {
+                    inv[t as usize] = i as u32;
+                }
+                // g = u_y^{-1} ∘ s ∘ u_x
+                let g: Vec<u32> = ux.iter().map(|&t| inv[s[t as usize] as usize]).collect();
+                debug_assert_eq!(g[q as usize], q);
+                if g.iter().enumerate().all(|(i, &t)| i as u32 == t) {
+                    continue;
+                }
+                let g = std::rc::Rc::new(g);
+                if seen.insert(g.clone()) {
+                    out.push(g);
+                    if out.len() >= max_gens {
+                        return out;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 位置の上の置換 `perms` の軌道のうち、`keep` を満たす列が 2 本以上あるもの (`keep` の列だけ)。
+    pub fn orbits_of(&self, perms: &[std::rc::Rc<Vec<u32>>], keep: impl Fn(usize) -> bool) -> Vec<Vec<usize>> {
+        let m = self.cols.len();
+        let mut uf: Vec<usize> = (0..m).collect();
+        for g in perms {
+            for (a, &b) in g.iter().enumerate() {
+                if a as u32 != b {
+                    let (x, y) = (find(&mut uf, a), find(&mut uf, b as usize));
+                    if x != y {
+                        uf[x] = y;
+                    }
+                }
+            }
+        }
+        let mut by_root: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+        for q in 0..m {
+            let j = self.cols[q];
+            if keep(j) {
+                by_root.entry(find(&mut uf, q)).or_default().push(j);
+            }
+        }
+        let mut out: Vec<Vec<usize>> = by_root.into_values().filter(|o| o.len() >= 2).collect();
+        out.sort_unstable_by_key(|o| o[0]);
+        out
+    }
+
     /// 生成元 `excluded` (昇順) を除いた生成元の軌道のうち、`keep` を満たす列が 2 本以上あるもの (`keep` の列だけ)。
     pub fn orbits(&self, excluded: &[u32], keep: impl Fn(usize) -> bool) -> Vec<Vec<usize>> {
         let m = self.cols.len();
@@ -1204,6 +1318,47 @@ mod tests {
         assert_eq!(of.orbits(&[], keep), vec![vec![0, 1], vec![2, 3]]);
         assert_eq!(of.orbits(&[0], keep), vec![vec![2, 3]]);
         assert!(of.orbits(&[0, 1], keep).is_empty());
+    }
+
+    #[test]
+    fn schreier_stabilizer_generates_point_stabilizer() {
+        use std::collections::HashSet;
+        use std::rc::Rc;
+        // 群の全ての元を生成元から作る (小さい群だけ)
+        fn closure(gens: &[Rc<Vec<u32>>], m: usize) -> HashSet<Vec<u32>> {
+            let id: Vec<u32> = (0..m as u32).collect();
+            let mut all: HashSet<Vec<u32>> = HashSet::from([id.clone()]);
+            let mut queue = vec![id];
+            while let Some(a) = queue.pop() {
+                for g in gens {
+                    let b: Vec<u32> = a.iter().map(|&t| g[t as usize]).collect();
+                    if all.insert(b.clone()) {
+                        queue.push(b);
+                    }
+                }
+            }
+            all
+        }
+        let p = |v: Vec<u32>| Rc::new(v);
+        // S4 = <(0 1), (0 1 2 3)>、二面体群 D5 = <(0 1 2 3 4), (1 4)(2 3)>、巡回群 C6、S3 x S3 の直積
+        let cases: Vec<(Vec<Rc<Vec<u32>>>, usize)> = vec![
+            (vec![p(vec![1, 0, 2, 3]), p(vec![1, 2, 3, 0])], 4),
+            (vec![p(vec![1, 2, 3, 4, 0]), p(vec![0, 4, 3, 2, 1])], 5),
+            (vec![p(vec![1, 2, 3, 4, 5, 0])], 6),
+            (vec![p(vec![1, 0, 2, 3, 4, 5]), p(vec![1, 2, 0, 3, 4, 5]), p(vec![0, 1, 2, 4, 3, 5]), p(vec![0, 1, 2, 4, 5, 3])], 6),
+        ];
+        for (gens, m) in cases {
+            let group = closure(&gens, m);
+            for q in 0..m as u32 {
+                let st = OrbitalGens::schreier_stabilizer(&gens, q, 1000, 1000);
+                assert!(st.iter().all(|g| g[q as usize] == q));
+                let want: HashSet<Vec<u32>> = group.iter().filter(|g| g[q as usize] == q).cloned().collect();
+                assert_eq!(closure(&st, m), want, "q = {q}");
+            }
+        }
+        // 軌道の上限を超えたら q を動かさない生成元だけ (S3 x S3 で q = 0: 後ろの S3 の 2 本)
+        let gens = vec![p(vec![1, 0, 2, 3, 4, 5]), p(vec![1, 2, 0, 3, 4, 5]), p(vec![0, 1, 2, 4, 3, 5]), p(vec![0, 1, 2, 4, 5, 3])];
+        assert_eq!(OrbitalGens::schreier_stabilizer(&gens, 0, 2, 1000).len(), 2);
     }
 
     #[test]

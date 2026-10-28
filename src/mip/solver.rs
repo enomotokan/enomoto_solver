@@ -573,6 +573,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     of_gens: Rc<super::symmetry::OrbitalGens>,
     /// orbital fixing の軌道の控え (除いた生成元, 軌道)。同じ生成元を除くノードが続く (潜る) 間は作り直さない。
     of_cache: (Vec<u32>, Rc<Vec<Vec<usize>>>),
+    /// `ENOMOTO_MIP_SYM_OF_SCHREIER`: 固定する列 (`OrbitalGens` の位置、昇順) の先頭の部分ごとの、その列を全て固定する部分群の
+    /// 生成元 (Schreier 生成元)。
+    of_stab_memo: std::collections::HashMap<Vec<u32>, Rc<Vec<Rc<Vec<u32>>>>>,
     /// 今のノードで orbital fixing が固定した境界 (子の分枝の列に `sym` の印を付けて足す)。
     of_node_fixes: Vec<BoundChange>,
     /// orbital fixing の集計: 固定した境界の数、固定したノードの数、矛盾で刈ったノードの数。
@@ -1319,6 +1322,12 @@ fn prop_fixpoint() -> bool {
 }
 
 /// ノードでカットプールを伝播するか (`ENOMOTO_MIP_CUTPOOL_PROP`、試作。サブ MIP でも使う)。
+/// `ENOMOTO_MIP_SYM_OF_SCHREIER` (試作): orbital fixing ([`super::sym_of`]) の固定群を、分枝した列を動かす生成元を捨てる代わりに
+/// Schreier 生成元で作る (分枝した列を全て固定する元を多く残し、軌道が細かくなりにくい)。
+fn of_schreier() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_OF_SCHREIER").is_some()
+}
+
 fn cutpool_prop() -> bool {
     env_str!("ENOMOTO_MIP_CUTPOOL_PROP").is_some()
 }
@@ -1953,6 +1962,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             None => super::SYM_OF_GENS.with(|t| t.borrow().as_ref().map(|g| (**g).clone())).unwrap_or_default(),
         })),
         of_cache: (vec![u32::MAX], Rc::new(Vec::new())),
+        of_stab_memo: std::collections::HashMap::new(),
         of_node_fixes: Vec::new(),
         of_stats: [0; 3],
         orig: match &snap {
@@ -7596,23 +7606,57 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let of = self.of_gens.clone();
         let p = self.p;
         let binary = |j: usize| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0;
-        let mut excl: Vec<u32> = Vec::new();
-        for c in changes {
-            if c.sym {
-                continue;
+        if of_schreier() {
+            // 固定する列 (位置、昇順) の固定群の生成元を、先頭の部分ごとに 1 列ずつ固定して作る (控えを使い回す)
+            let mut stab: Vec<u32> = changes.iter().filter(|c| !c.sym && (!c.upper || !binary(c.col))).filter_map(|c| of.position(c.col)).collect();
+            stab.sort_unstable();
+            stab.dedup();
+            if self.of_cache.0 != stab {
+                if self.of_stab_memo.len() > tunable!("ENOMOTO_T_MIP_SYM_OF_SCHREIER_MEMO", 20000usize, usize) {
+                    self.of_stab_memo.clear();
+                }
+                let max_orbit = tunable!("ENOMOTO_T_MIP_SYM_OF_SCHREIER_ORBIT", 256usize, usize);
+                let max_gens = tunable!("ENOMOTO_T_MIP_SYM_OF_SCHREIER_GENS", 64usize, usize).max(of.gens.len());
+                let mut h: Rc<Vec<Rc<Vec<u32>>>> = self.of_stab_memo.entry(Vec::new()).or_insert_with(|| Rc::new(of.base_perms())).clone();
+                for i in 0..stab.len() {
+                    if h.is_empty() {
+                        break;
+                    }
+                    let key = stab[..=i].to_vec();
+                    h = match self.of_stab_memo.get(&key) {
+                        Some(g) => g.clone(),
+                        None => {
+                            let g = Rc::new(super::symmetry::OrbitalGens::schreier_stabilizer(&h, stab[i], max_orbit, max_gens));
+                            self.of_stab_memo.insert(key, g.clone());
+                            g
+                        }
+                    };
+                }
+                let orbits = if h.is_empty() { Vec::new() } else { of.orbits_of(&h, binary) };
+                self.of_cache = (stab, Rc::new(orbits));
             }
-            if !c.upper || !binary(c.col) {
-                excl.extend_from_slice(of.gens_moving(c.col));
+            if self.of_cache.1.is_empty() {
+                return true;
             }
-        }
-        excl.sort_unstable();
-        excl.dedup();
-        if excl.len() == of.gens.len() {
-            return true;
-        }
-        if self.of_cache.0 != excl {
-            let orbits = of.orbits(&excl, binary);
-            self.of_cache = (excl, Rc::new(orbits));
+        } else {
+            let mut excl: Vec<u32> = Vec::new();
+            for c in changes {
+                if c.sym {
+                    continue;
+                }
+                if !c.upper || !binary(c.col) {
+                    excl.extend_from_slice(of.gens_moving(c.col));
+                }
+            }
+            excl.sort_unstable();
+            excl.dedup();
+            if excl.len() == of.gens.len() {
+                return true;
+            }
+            if self.of_cache.0 != excl {
+                let orbits = of.orbits(&excl, binary);
+                self.of_cache = (excl, Rc::new(orbits));
+            }
         }
         let orbits = self.of_cache.1.clone();
         let mut node_fixed = false;
