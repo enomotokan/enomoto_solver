@@ -17,7 +17,7 @@ $py = "$wt\.venv\Scripts\python.exe"
 $run = "$wt\analysis\restart_cuts_fix_20261028\run.py"
 $L = @("sp150x300d","exp-1-500-5-5","neos-911970","p200x1188c","neos17","nu25-pr12","neos-3083819-nubu","roll3000","h80x6320d","swath1","drayage-25-23","drayage-100-23","neos-827175","mzzv42z","neos-960392","neos8","neos-860300","ns1116954","hypothyroid-k1","physiciansched6-2","mc11")
 $M = (& $py -c "import sys;sys.path.insert(0,'scripts');import run_miplib_benchmark as r;print(' '.join(r.PROBLEMS))").Split(' ')
-function R($out, $cfg, $k, $probs, $envs, $extra = @()) {
+function Invoke-Bench($out, $cfg, $k, $probs, $envs, $extra = @()) {
     $a = @($run, $out, $cfg, "1") + $probs + @("--threads", "16", "--rep-start", "$k", "--skip-done") + $extra
     if ($envs.Count -gt 0) { $a += @("--env") + $envs }
     & $py @a 2>&1 | Out-File -Append -Encoding utf8 "$here\queue_runs.log"
@@ -40,30 +40,32 @@ Log "no other measurement running"
 & maturin develop --release 2>&1 | Select-String "^error|Installed" | Out-File -Append -Encoding utf8 $log
 Log "build done"
 
-$C = [ordered]@{
+# 設定の一覧 (PowerShell の変数名は大文字と小文字を区別しないので、ループの変数と同じ名前にしない)
+$Cfgs = [ordered]@{
     base     = @()
     parfound = @("ENOMOTO_MIP_PAR_HEUR_FOUND=1")
     light    = @("ENOMOTO_MIP_RESTART_LIGHT_HEURS=1")
     both     = @("ENOMOTO_MIP_PAR_HEUR_FOUND=1", "ENOMOTO_MIP_RESTART_LIGHT_HEURS=1")
 }
+$names = @($Cfgs.Keys)
 
 # 3. 診断ログつきの確かめ (再スタートする 6 問 x 4 設定、各 1 回)
 $D = @("p200x1188c","exp-1-500-5-5","h80x6320d","neos-860300","swath1","neos17")
-foreach ($c in $C.Keys) {
-    R "$here\diag.jsonl" $c 0 $D ($C[$c] + @("ENOMOTO_MIP_LOG=1")) @("--log-dir", "$wt\runs\heurfix_diag")
+foreach ($name in $names) {
+    Invoke-Bench "$here\diag.jsonl" $name 0 $D (@($Cfgs[$name]) + @("ENOMOTO_MIP_LOG=1")) @("--log-dir", "$wt\runs\heurfix_diag")
 }
 Log "diag done"
 
 # 4. 負けている 21 問、4 設定を交互に各 2 回
 foreach ($k in 0, 1) {
-    foreach ($c in $C.Keys) { R "benchmarks\heurfix_loss21_16t_20261028.jsonl" $c $k $L $C[$c] }
+    foreach ($name in $names) { Invoke-Bench "benchmarks\heurfix_loss21_16t_20261028.jsonl" $name $k $L @($Cfgs[$name]) }
 }
 Log "loss21 done"
 
 # 5. MIPLIB 40 問、既定と both を交互に各 2 回
 foreach ($k in 0, 1) {
-    R "benchmarks\heurfix_miplib40_16t_20261028.jsonl" base $k $M @()
-    R "benchmarks\heurfix_miplib40_16t_20261028.jsonl" both $k $M $C["both"]
+    Invoke-Bench "benchmarks\heurfix_miplib40_16t_20261028.jsonl" base $k $M @()
+    Invoke-Bench "benchmarks\heurfix_miplib40_16t_20261028.jsonl" both $k $M @($Cfgs["both"])
 }
 Log "miplib40 done"
 "done" | Out-File -Encoding utf8 "$here\queue.done"
