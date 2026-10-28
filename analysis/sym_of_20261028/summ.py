@@ -3,6 +3,7 @@ sol={}
 for l in open('miplib.solu'):
     p=l.split()
     if len(p)>=3 and p[0] in('=opt=','=best='): sol[p[1]]=float(p[2])
+CF=sys.argv[2].split(',') if len(sys.argv)>2 else ['base','of']
 R=collections.defaultdict(dict)
 for l in open(sys.argv[1]):
     d=json.loads(l); R[d['problem']][(d['cfg'],d['rep'])]=d['result']
@@ -11,10 +12,10 @@ def gap(o):
     ob,bd=o.get('objective'),o.get('best_bound')
     if ob is None or bd is None: return 1.0
     return abs(ob-bd)/max(abs(ob),abs(bd),1e-9)
-bad=0; sg={'base':[], 'of':[]}
+bad=0; sg=collections.defaultdict(list)
 for p,m in R.items():
     row=[]
-    for c in('base','of'):
+    for c in CF:
         for r in(0,1):
             o=m.get((c,r),{}); sg[c].append(t(o))
             if o.get('status')=='optimal' and p in sol and abs(o['objective']-sol[p])>1e-6*max(1,abs(sol[p])): bad+=1; print('MISMATCH',p,c,o['objective'],sol[p])

@@ -10108,3 +10108,12 @@ inv/smallprob-overhead-20261028 の調査 (`analysis/smallprob_overhead_20261028
   sp150x300d が速い。lex-leader の行が根の LP を強めていた qiu・physiciansched6-2 は下界が悪くなる (qiu は 1 スレッドで大きく悪い)。
 - 対称性の乱数問題 (`scripts/mip_fuzz_symmetric.py`、頂点推移的なグラフの安定集合など) で HiGHS との不一致 0。
 - 16 スレッドで確かめていないので既定にはしない。記録は `analysis/sym_of_20261028.md`、結果は `analysis/sym_of_20261028/`。
+
+## 2026-10-28: Schreier 生成元・整数の平行列の併合・双子の検出の試作 (どれも既定では使わない)
+
+- `ENOMOTO_MIP_SYM_OF_SCHREIER`: orbital fixing の固定群を Schreier 生成元で作る。20 問・4 スレッドで SYM_OF 20.61 -> 20.32 秒
+  (解けた回数 28 -> 30 / 40)、揺れの範囲 (`analysis/sym_of_20261028.md`)。
+- `ENOMOTO_PRESOLVE_PARALLEL_INT`: 前処理の平行列の併合を、比 ±1・整数の境界の整数列にも広げる。nw04 3427 列などを併合。時間は未計測。
+- `ENOMOTO_MIP_SYM_TWINS`: 対称性の検出の前に同じ列 (双子) を列のハッシュで見つけ (nw04 は 4327 組を 0.024 秒)、生成元が動かさない
+  組は併合、動かす組は入れ替えを生成元にする。双子のある 8 問・4 スレッドで SGM 18.28 -> 22.27 秒と遅い (nw04 12 -> 29 秒。
+  解の見つかり方が変わる)。不一致 0 (`analysis/parint_20261028.md`)。
