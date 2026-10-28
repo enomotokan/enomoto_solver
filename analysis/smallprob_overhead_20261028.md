@@ -225,7 +225,31 @@ all 19.80 / 19.93、s2 base 20.16 / 18.79・epr 18.26 / 20.25・all 18.41 / 20.3
 - 既定にする候補: **eprostop (早めのかけ直し + 成果連動の打ち切り)**。対象の 10 問で SGM −20%、40 問で解けた数は同じか +1、SGM −2〜7%。
   neos-827175 の悪化の理由を確かめてから、手元の Mittelmann 186 問で採否を決めるのがよい。
 
+## 8. neos-827175 の悪化の原因と修正 (ab932b8)
+
+- 原因 (事実、`logs/why827_*.log`): 既定では根の RINS のサブ MIP (自由な列 11212 本) が 0.07 秒で最適解 112.00152 を見つけて根を閉じる。
+  ostop では同じサブ MIP が「実行不能」で返り、最適解は木の 1 ノード目 (7.3 秒) まで遅れた。外側の暫定解の目的値 112.002 をサブ MIP に
+  共有の暫定解として渡していたため、サブ MIP が自分の相対ギャップ (1e-4 以上) を掛けて 112.002 x (1 − 1e-4) ≈ 111.991 より良い解しか
+  探さず、112.002 より相対 4.3e-6 だけ良い 112.00152 を刈り込んでいた。
+- 修正: 外側が計算した刈り込みの上限 (`prune_limit`、外側の相対ギャップ 0 で計算したもの) をそのまま打ち切り値としてサブ MIP に渡し、
+  サブ MIP の側では最小を取るだけにした。
+
+修正後の 50 問 (5 つのコンテナ、各 2 回、`os2_s0〜4.jsonl`、集計 `os2_summary.md`)。不一致 0、"MIP: WARNING" 0。
+
+| 集合 | base 解けた・SGM (1 回目 / 2 回目) | ostop | eprostop |
+|---|---|---|---|
+| 対象の 10 問 | 10・10.02 / 10・9.53 | 10・9.17 / 10・9.26 | 10・7.65 / 10・8.07 |
+| MIPLIB 40 問 | 25・20.79 / 25・20.05 | 25・19.41 / 26・19.42 | 26・18.69 / 26・19.38 |
+
+- neos-827175: 6.5・5.9 (既定) → 5.8・5.5 (ostop)、6.0・5.5 (eprostop)。悪化は消えた。
+- 2 回とも速い: neos17 16.1 → 11.3 秒、binkar10_1 13.1 → 9.9 (eprostop 7.4)、mas76 15.3 → 11.2、eil33-2 40.3 → 34.1、neos8 18.0 → 8.1 (eprostop)、
+  drayage-100-23 9.1・5.7 → 3.0 (eprostop)。10teams は既定の 1 回が時間切れ (もう 1 回 20.9 秒)、ostop・eprostop は 3.6〜4.0 秒。
+- 揺れの大きいもの: noswot は ostop で時間切れ・56.4 秒 (既定 25.2・36.2、前の計測の ostop は 14.5・31.5、eprostop は 36.2・33.7)、
+  neos-911970 は ostop 18.1・34.6 (既定 18.4・11.4)。どちらも既定でも 2 倍以上揺れる問題で、ostop で一貫して悪いとは言えない。
+- **既定にする候補: eprostop (`ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE=1 ENOMOTO_MIP_SUBMIP_OUTCOME_STOP=1`)**。修正前・修正後の 2 組の計測とも、
+  対象の 10 問で SGM −15〜24%、40 問で解けた数は同じか +1、SGM −3〜10%、不一致 0。手元の Mittelmann 186 問で確かめてから採否を決めるのがよい。
+
 ## コミット
 
-- 試作と診断: `ENOMOTO_MIP_SUBMIP_OUTCOME_STOP` (0e9300d)・`ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE`・`ENOMOTO_MIP_RESTART_CUTS_FIXED`・`ENOMOTO_MIP_ROOT_SUBMIP_REL`・`ENOMOTO_MIP_SUBMIP_FIRST_DONE`・
+- 試作と診断: `ENOMOTO_MIP_SUBMIP_OUTCOME_STOP` (0e9300d、打ち切り値の修正 ab932b8)・`ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE`・`ENOMOTO_MIP_RESTART_CUTS_FIXED`・`ENOMOTO_MIP_ROOT_SUBMIP_REL`・`ENOMOTO_MIP_SUBMIP_FIRST_DONE`・
   `ENOMOTO_MIP_DEBUG_PROBE_PROGRESS` (`src/mip/mod.rs`・`src/mip/solver.rs`・`src/mip/heuristics.rs`)。
