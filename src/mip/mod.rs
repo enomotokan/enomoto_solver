@@ -1889,7 +1889,17 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     if verbose {
         let nnz0 = p.nnz;
         let nnz1: usize = rows.iter().map(|r| r.len()).sum();
-        eprintln!("MIP: presolve: rows {} -> {}, free columns {} -> {}, nonzeros {nnz0} -> {nnz1}, postsolve steps {}", p.m, rows.len(), (0..n).filter(|&j| p.col_lo[j] < p.col_up[j]).count(), n - fixed, pre.postsolve_log.len());
+        let par = |int: bool| pre.postsolve_log.iter().filter(|s| matches!(s, crate::presolve::PostsolveStep::ParallelCol(c) if p.is_int[c.var] == int)).count();
+        eprintln!(
+            "MIP: presolve: rows {} -> {}, free columns {} -> {}, nonzeros {nnz0} -> {nnz1}, postsolve steps {} (parallel columns merged: {} integer, {} continuous)",
+            p.m,
+            rows.len(),
+            (0..n).filter(|&j| p.col_lo[j] < p.col_up[j]).count(),
+            n - fixed,
+            pre.postsolve_log.len(),
+            par(true),
+            par(false)
+        );
     }
     // 代入消去で目的関数に生じた定数を offset に入れる (後処理は縮約後の点について
     // アフィンなので、任意の 1 点で元の目的値との差を測ればよい)。定数が抜けていると
