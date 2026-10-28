@@ -589,6 +589,12 @@ impl Orbitope {
     }
 }
 
+/// `ENOMOTO_MIP_ORBITOPE_TWO_COL` (試作): 生成元 1 本の 2 列の入れ替えもオービトープにする ([`find_orbitopes`])。
+/// (検出 1 回に 1 度しか呼ばないので値を控えない。単体テストで切り替える)
+pub(crate) fn orbitope_two_col() -> bool {
+    std::env::var_os("ENOMOTO_MIP_ORBITOPE_TWO_COL").is_some()
+}
+
 /// 生成元のうち、0-1 列の 2-巡回だけからなるもの (列の入れ替え) をまとめて完全オービトープを作る。
 /// 戻り値は (オービトープ、オービトープに使った生成元の印)。
 ///
@@ -690,6 +696,26 @@ pub fn find_orbitopes(p: &MipProblem, sym: &Symmetry) -> (Vec<Orbitope>, Vec<boo
                 }
                 continue 'cl;
             }
+        }
+        // 2 列のオービトープ (`ENOMOTO_MIP_ORBITOPE_TWO_COL`、試作): 生成元 1 本が各行の 2 列を入れ替えるだけなら、群は {恒等, g}
+        // で、2 列の入れ替えはどの行のどちらを列 0 に置いても g そのもの。下の「動かす生成元の組」では 2 列が同じ組になって区別
+        // できず捨てていた (双子の 1x2 と、同じ機械が 2 台の kx2: ns1116954 は 1982x2 が lex-leader の行 1 本だけだった)。
+        // 各行を [j, g(j)] と並べる。0-1 でない整数列の組も同じ形で行に加える (下の通常の形と同じ理由)
+        if s == 2 && gens.len() == 1 && orbitope_two_col() {
+            let k = gens[0];
+            let g = &sym.generators[k];
+            let mut mat: Vec<Vec<usize>> = rows.iter().map(|r| vec![r[0], g[r[0]]]).collect();
+            if env_str!("ENOMOTO_MIP_ORBITOPE_NO_INT_ROWS").is_none() {
+                for j in 0..n {
+                    if g[j] != j && j < g[j] && p.is_int[j] && !binary(j) {
+                        mat.push(vec![j, g[j]]);
+                    }
+                }
+            }
+            used[k] = true;
+            let nrows = mat.len();
+            out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps: vec![(0, 1, std::sync::Arc::new(g.clone()))] });
+            continue;
         }
         // 列 c (1 行目の c 番目) を動かす生成元の組
         let sig = |j: usize| -> Vec<usize> { gens.iter().copied().filter(|&k| sym.generators[k][j] != j).collect() };
@@ -1504,6 +1530,26 @@ mod tests {
         assert_eq!(orbs.len(), 1);
         assert_eq!(orbs[0].vars, vec![vec![0, 1, 2], vec![3, 4, 5]]);
         assert!(used.iter().all(|&u| u));
+    }
+
+    #[test]
+    fn two_column_orbitope_for_two_identical_machines() {
+        // 2 台の同じ機械 m に 3 つの仕事 t: 列 2t+m。生成元は 1 本 (0 1)(2 3)(4 5) で、列を区別する生成元の組が同じになる
+        let mut rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(2, 1.0), (3, 1.0)], vec![(4, 1.0), (5, 1.0)]];
+        for m in 0..2 {
+            rows.push(vec![(m, 3.0), (2 + m, 2.0), (4 + m, 4.0)]);
+        }
+        let p = MipProblem::from_rows(vec![0.0; 6], vec![1.0; 6], vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0], 0.0, 1.0, vec![true; 6], rows, vec![1.0, 1.0, 1.0, -inf(), -inf()], vec![1.0, 1.0, 1.0, 6.0, 6.0]);
+        let sym = detect(&p, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_eq!(sym.generators.len(), 1);
+        std::env::remove_var("ENOMOTO_MIP_ORBITOPE_TWO_COL");
+        assert!(find_orbitopes(&p, &sym).0.is_empty());
+        std::env::set_var("ENOMOTO_MIP_ORBITOPE_TWO_COL", "1");
+        let (orbs, used) = find_orbitopes(&p, &sym);
+        std::env::remove_var("ENOMOTO_MIP_ORBITOPE_TWO_COL");
+        assert_eq!(orbs.len(), 1);
+        assert_eq!(orbs[0].vars, vec![vec![0, 1], vec![2, 3], vec![4, 5]]);
+        assert!(used[0]);
     }
 
     #[test]
