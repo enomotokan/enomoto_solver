@@ -10097,3 +10097,14 @@ inv/smallprob-overhead-20261028 の調査 (`analysis/smallprob_overhead_20261028
   hypothyroid-k1 23.5 -> 26.6 秒は少し遅い (`analysis/heurfix_20261028.md`)。
 - 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_COMPONENTS` (サブ MIP の連結成分) を足した。21 問のサブ MIP 300 本のうち分かれるのは 56 本で、多くは
   大きい 1 つ + 小さいもの (`analysis/submip_components_20261028.md`)。
+
+## 2026-10-28: orbital fixing の試作 (`ENOMOTO_MIP_SYM_OF`、既定では使わない)
+
+オービトープにならない対称性を、lex-leader の行の代わりに探索中の orbital fixing (HiGHS の `StabilizerOrbits::orbitalFixing`) で扱う。
+分枝で 1 にした 0-1 列・分枝した一般整数列を動かす生成元を除いた生成元の軌道で、固定された列があれば軌道の 0-1 列を同じ値に固定する。
+固定は子の分枝の列に `sym` の印を付けて渡し、再スタートの後は生成元を確かめ直す (`symmetry::verify_generators`)。
+- 対象は lex-leader の行を足す 20 問。4 スレッド・60 秒・交互に各 2 回で SGM 20.13 -> 19.84 秒 (解けた回数 29 -> 30 / 40)、
+  1 スレッド・4 並列で 29.79 -> 28.10 秒、MIPLIB の最適値との不一致 0。neos5 は時間切れ -> 49〜51 秒、drayage-25-23・nw04・
+  sp150x300d が速い。lex-leader の行が根の LP を強めていた qiu・physiciansched6-2 は下界が悪くなる (qiu は 1 スレッドで大きく悪い)。
+- 対称性の乱数問題 (`scripts/mip_fuzz_symmetric.py`、頂点推移的なグラフの安定集合など) で HiGHS との不一致 0。
+- 16 スレッドで確かめていないので既定にはしない。記録は `analysis/sym_of_20261028.md`、結果は `analysis/sym_of_20261028/`。
