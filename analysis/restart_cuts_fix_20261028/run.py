@@ -20,12 +20,21 @@ ap.add_argument("--log-dir")
 ap.add_argument("--time-limit", type=float, default=60.0)
 ap.add_argument("--threads", type=int, default=4)
 ap.add_argument("--rep-start", type=int, default=0)  # 設定を交互に 1 回ずつ回すとき、記録する回の番号の始まり
+ap.add_argument("--skip-done", action="store_true")  # 出力に同じ (問題, 設定, 回) がもうあれば解かない (止まった計測の続きから)
 a = ap.parse_args()
+done = set()
+if a.skip_done and Path(a.out).exists():
+    for l in open(a.out, encoding="utf-8"):
+        if l.strip():
+            r = json.loads(l)
+            done.add((r["problem"], r["cfg"], r["rep"]))
 extra = dict(e.split("=", 1) for e in a.env)
 env = dict(os.environ, ENOMOTO_MIP_THREADS=str(a.threads), **extra)
 with open(a.out, "a") as out:
     for rep in range(a.rep_start, a.rep_start + a.reps):
         for n in a.problems:
+            if (n, a.cfg, rep) in done:
+                continue
             mps = rb.fetch(n, repo / ".miplib_cache")
             cmd = [sys.executable, str(repo / "scripts" / "run_miplib_benchmark.py"), "--worker-ours", str(mps),
                    "--time-limit", str(a.time_limit), "--threads", str(a.threads)]

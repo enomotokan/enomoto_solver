@@ -81,6 +81,23 @@ pub(super) fn heur_bit(name: &str) -> u64 {
     NAMES.iter().position(|&n| n == name).map_or(0, |k| 1u64 << k)
 }
 
+/// `ENOMOTO_MIP_PAR_HEUR_FOUND` (試作、既定では使わない): 並列のサブ MIP の解を受け入れたら、そのヒューリスティクスの「解なし」の印を外す
+/// ([`Solver::take_submip`])。
+fn par_heur_found() -> bool {
+    env_str!("ENOMOTO_MIP_PAR_HEUR_FOUND").is_some()
+}
+
+/// `ENOMOTO_MIP_RESTART_LIGHT_HEURS` (試作、既定では使わない): 再スタートの後の根で、前に解を見つけなかったヒューリスティクスでも
+/// 軽いもの ([`light_root_heur`]) は飛ばさない。再スタートで固定が増え、カットで LP 解も変わるので、丸めで解が出うる
+fn restart_light_heurs() -> bool {
+    env_str!("ENOMOTO_MIP_RESTART_LIGHT_HEURS").is_some()
+}
+
+/// 安い根のヒューリスティクス (LP 解の丸めと自明な解・shift-and-propagate。サブ MIP・ダイビング・局所探索・内点法を使わないもの)。
+fn light_root_heur(name: &str) -> bool {
+    matches!(name, "trivial" | "simple rounding" | "ZI round" | "randomized rounding" | "shift-and-propagate")
+}
+
 impl Default for MipParams {
     fn default() -> Self {
         MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 0.0, abs_gap: 0.0, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0, threads: 1, distinguish: false, fc_submip: false }
@@ -1566,7 +1583,8 @@ pub(crate) fn thread_budget_on() -> bool {
     env_str!("ENOMOTO_MIP_THREAD_BUDGET").is_some()
 }
 
-/// `ENOMOTO_MIP_SUBMIP_OUTCOME_STOP` (試作、既定では使わない): 根のサブ MIP を時間ではなく成果で打ち切る。
+/// 根のサブ MIP の成果連動の打ち切り (既定で使う。`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP` で使わない。以前の試作名は
+/// `ENOMOTO_MIP_SUBMIP_OUTCOME_STOP`): 根のサブ MIP を時間ではなく成果で打ち切る。
 /// - サブ MIP が外側の暫定解より良い解を見つけた後、最後に良くなってからのノード数が、そこまでのノード数
 ///   (最小 `ENOMOTO_T_MIP_SUBMIP_OUTCOME_MIN_NODES`、既定 50) に達したら止める (見つけるのにかかった分だけ続けて見込みがなければやめる)。
 ///   解を 1 つも見つけていないサブ MIP は今まで通り (時間とノードの上限まで)。10teams の根の被約費用のサブ MIP は 248 ノード目に初めて
@@ -1574,7 +1592,7 @@ pub(crate) fn thread_budget_on() -> bool {
 /// - 並列のサブ MIP には外側の刈り込みの上限 (ほかのサブ MIP・主のスレッドが見つけた解による) を打ち切り値として渡し続ける ([`SubmipCtl::outer_best`])
 /// - 並列のサブ MIP は終わった順に受け取る (`ENOMOTO_MIP_SUBMIP_FIRST_DONE` と同じ)
 pub(crate) fn submip_outcome_stop() -> bool {
-    env_str!("ENOMOTO_MIP_SUBMIP_OUTCOME_STOP").is_some()
+    env_str!("ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP").is_none()
 }
 
 /// 根のサブ MIP と外側の求解の間で共有する情報 ([`submip_outcome_stop`])。
@@ -3742,13 +3760,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 eprintln!("MIP: root heuristic {}: skipped (early restart)", $name);
                             }
                         } else if self.params.restarts > 0 && self.params.cutoff.is_finite() && env_str!("ENOMOTO_MIP_LIGHT_RESTART_ROOT").is_some()
-                            && !matches!($name, "trivial" | "simple rounding" | "ZI round" | "randomized rounding" | "shift-and-propagate")
+                            && !light_root_heur($name)
                         {
                             // 安い丸め (と自明な解・shift-and-propagate) は残し、サブ MIP・ダイビング・局所探索など重いものだけ飛ばす
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (light root after a restart)", $name);
                             }
-                        } else if self.params.skip_heurs & bit != 0 && env_str!("ENOMOTO_MIP_RESTART_ALL_HEURS").is_none() {
+                        } else if self.params.skip_heurs & bit != 0 && env_str!("ENOMOTO_MIP_RESTART_ALL_HEURS").is_none() && !(restart_light_heurs() && light_root_heur($name)) {
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (no solution before the restart)", $name);
                             }
@@ -4615,7 +4633,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             // `ENOMOTO_T_MIP_SUBMIP_STALL` (サブ MIP の中だけ、既定 12、0 なら使わない): 暫定解があり、待ち行列から取ったノードの
                             // 推定値が打ち切り値以上のことが続けてこの回数あれば止める (HiGHS の `mip_max_stall_nodes`、サブ MIP では 12。
                             // 改善の見込みのないサブ MIP を早く切り、1 回の時間の上限を短くしなくて済むようにする)
-                            // `ENOMOTO_MIP_SUBMIP_OUTCOME_STOP` (試作): 根のサブ MIP は、解を見つけてから見つけるまでと同じだけ進めて良くならなければ止める
+                            // 成果連動の打ち切り ([`submip_outcome_stop`]): 根のサブ MIP は、解を見つけてから見つけるまでと同じだけ進めて良くならなければ止める
                             if let (Some(_), Some(k)) = (self.root_submip.as_ref(), self.last_improve_node) {
                                 if self.nodes.saturating_sub(k) >= k.max(tunable!("ENOMOTO_T_MIP_SUBMIP_OUTCOME_MIN_NODES", 50u64, u64)) {
                                     return self.finish_limit(MipStatus::NodeLimit, Some(&n));
@@ -9796,6 +9814,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let keep = std::mem::replace(&mut self.heur_label, label);
                     acc = self.try_incumbent(x);
                     self.heur_label = keep;
+                }
+                // `ENOMOTO_MIP_PAR_HEUR_FOUND` (試作): 並列のサブ MIP は出しただけで `heur!` に「解なし」と返るので、再スタートで飛ばす印
+                // ([`Self::failed_heurs`]) が付く。ここで解を受け入れたら印を外す (逐次のときの「見つけた」と同じ)。p200x1188c は並列の RENS・
+                // LP face のサブ MIP が 0.01 秒で最適値 15078 を見つけていたのに、再スタートの後はどちらも飛ばされていた
+                if acc && par_heur_found() {
+                    self.failed_heurs &= !heur_bit(label);
                 }
                 if let Some(fr) = fix_rate {
                     self.note_fix_rate(fr, infeasible, acc);

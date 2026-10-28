@@ -980,26 +980,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             RESTART_CUTS.with(|s| *s.borrow_mut() = Some(mapped));
         }
         // 代入で写さないとき (`ENOMOTO_MIP_NO_RESTART_CUTS_SUBST`)
-        (Some(Presolved::Reduced { prob, scaling, postsolve }), Some(cuts)) if prob.n == p.n => {
-            // `ENOMOTO_MIP_RESTART_CUTS_FIXED` (試作、既定では使わない): 前処理で固定された列でも、後処理が値を書き換えない列
-            // (代入・平行列の併合・強制列の消去の対象でない列。値は前処理後の境界のまま) を含むカットは残す。p200x1188c は再スタートで
-            // 固定費用の 0-1 列が 0 に固定され、その連続列も前処理で 0 に固定されるので、再スタート前のカットが全部捨てられ
-            // (`0 cuts from before the restart put in the cut pool`)、根の LP が 13396 から 5679 に戻ってカットのループをやり直していた
-            let determined: Option<Vec<bool>> = env_str!("ENOMOTO_MIP_RESTART_CUTS_FIXED").map(|_| {
-                let mut d = vec![false; p.n];
-                for st in postsolve {
-                    match st {
-                        crate::presolve::PostsolveStep::Sub(sb) => d[sb.var] = true,
-                        crate::presolve::PostsolveStep::ParallelCol(sb) => {
-                            d[sb.var] = true;
-                            d[sb.kept] = true;
-                        }
-                        crate::presolve::PostsolveStep::Forcing(fc) => d[fc.var] = true,
-                    }
-                }
-                d
-            });
-            let keep_col = |j: usize| p.col_lo[j] == p.col_up[j] || prob.col_lo[j] < prob.col_up[j] || determined.as_ref().is_some_and(|d| !d[j] && prob.col_lo[j] == prob.col_up[j]);
+        // 前処理で新たに固定された列を含むカットは捨てる。(試作だった `ENOMOTO_MIP_RESTART_CUTS_FIXED` (後処理が値を書き換えない固定列を
+        // 含むカットは残す) は、代入で写す方がその範囲を全部含む (p200x1188c で 43/65 本 対 全部) ので消した)
+        (Some(Presolved::Reduced { prob, scaling, .. }), Some(cuts)) if prob.n == p.n => {
+            let keep_col = |j: usize| p.col_lo[j] == p.col_up[j] || prob.col_lo[j] < prob.col_up[j];
             let mapped: Vec<(Vec<(usize, f64)>, f64)> = cuts
                 .into_iter()
                 .filter(|(c, _)| c.iter().all(|&(j, _)| j < p.n && keep_col(j)))
@@ -1119,7 +1103,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
 }
 
 thread_local! {
-    /// [`quick_probe_fixings`] の後の前処理のかけ直しの中か (`ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE`。かけ直しの中では行わない)。
+    /// [`quick_probe_fixings`] の後の前処理のかけ直しの中か (早めのプロービング。かけ直しの中では行わない)。
     static QUICK_PROBE_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`presolve_mip`] の 行をまとめた後のかけ直し (`ENOMOTO_MIP_NO_MERGE_REPRESOLVE` で使わない) の 2 回目の前処理の中か。
     static MERGE_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1892,9 +1876,11 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             _ => {}
         }
     }
-    // `ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE` (試作、既定では使わない): LP による固定の前に、少しだけプロービングし ([`quick_probe_fixings`])、
-    // 列の多くが固定されたらその境界で前処理をかけ直す (LP による固定・プロービングは小さくなった問題で行う)
-    if lp_probe_secs.is_some() && !submip && env_str!("ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE").is_some() && !QUICK_PROBE_ACTIVE.with(|f| f.get()) {
+    // 早めのプロービングとかけ直し (既定で使う。`ENOMOTO_MIP_NO_PROBE_EARLY_REPRESOLVE` で使わない。以前の試作名は
+    // `ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE`): LP による固定の前に、少しだけプロービングし ([`quick_probe_fixings`])、
+    // 列の多くが固定されたらその境界で前処理をかけ直す (LP による固定・プロービングは小さくなった問題で行う)。
+    // 手元 16 スレッド・60 秒: neos8 16.2 -> 6.6 秒、drayage-100-23 5.9 -> 3.0 秒 (analysis/eprostop_16t_20261028.md)
+    if lp_probe_secs.is_some() && !submip && env_str!("ENOMOTO_MIP_NO_PROBE_EARLY_REPRESOLVE").is_none() && !QUICK_PROBE_ACTIVE.with(|f| f.get()) {
         match quick_probe_fixings(&mut prob, verbose) {
             None => return Some(Presolved::Infeasible),
             Some(k) if k > 0 => {
@@ -2768,7 +2754,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     Some(true)
 }
 
-/// `ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE` (試作) の短いプロービング: 行の多い 0-1 列から `ENOMOTO_T_MIP_PROBE_EARLY_CANDS` 本 (既定 64)
+/// 早めのプロービングとかけ直し (`ENOMOTO_MIP_NO_PROBE_EARLY_REPRESOLVE` で使わない) の短いプロービング: 行の多い 0-1 列から `ENOMOTO_T_MIP_PROBE_EARLY_CANDS` 本 (既定 64)
 /// だけ [`probe`] と同じ規則 (片方が矛盾すれば固定、両方の結果の弱い方まで境界を締める) で試し、新たに固定された列が自由な列の
 /// `ENOMOTO_T_MIP_PROBE_EARLY_FRAC` (既定 0.1) 以上なら、締めた境界を `prob` に入れてその数を返す (少なければ `prob` は変えず 0)。
 /// 含意は集めない。実行不能と分かれば `None`。
