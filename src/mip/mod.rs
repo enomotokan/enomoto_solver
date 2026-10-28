@@ -1455,7 +1455,49 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
                 }
             }
         }
-        let mergeable = |c: &Vec<usize>| c.iter().all(|&j| prob.col_lo[j].is_finite() && (!prob.is_int[j] || (prob.col_lo[j].fract() == 0.0 && (prob.col_up[j] == f64::INFINITY || prob.col_up[j].fract() == 0.0))));
+        // 整数列の組は、併合した列の上限が行から組の列の上限まで締まる (0-1 列なら 0-1 のまま) ときだけ併合する。締まらないと
+        // 一般整数列になり、0-1 列向けの手法・ヒューリスティクスが弱まる (swath1: 費用 0 で 1 行だけの 0-1 列 28 本が [0, 28] の
+        // 1 列になり、根の RINS の解が 395 -> 517 と悪く、再スタートの固定が 1114 -> 1 列に減った)。行の最小活動量 (無限の項の数つき)
+        // を 1 回作り、組の列の分を引いて求める
+        let act_min: Vec<(f64, usize)> = (0..prob.m)
+            .map(|i| {
+                let (mut v, mut inf) = (0.0, 0usize);
+                for &(j, a) in &prob.rows[i] {
+                    let b = if a > 0.0 { prob.col_lo[j] } else { prob.col_up[j] };
+                    if b.is_finite() { v += a * b } else { inf += 1 }
+                }
+                (v, inf)
+            })
+            .collect();
+        let act_max: Vec<(f64, usize)> = (0..prob.m)
+            .map(|i| {
+                let (mut v, mut inf) = (0.0, 0usize);
+                for &(j, a) in &prob.rows[i] {
+                    let b = if a > 0.0 { prob.col_up[j] } else { prob.col_lo[j] };
+                    if b.is_finite() { v += a * b } else { inf += 1 }
+                }
+                (v, inf)
+            })
+            .collect();
+        let sum_ub = |c: &Vec<usize>| -> f64 {
+            // z = 組の列の和。a > 0 の行: a z <= row_up - (組の外の最小活動量)。a < 0 の行: a z >= row_lo - (組の外の最大活動量)
+            let lo = prob.col_lo[c[0]];
+            let k = c.len() as f64;
+            let mut ub: f64 = c.iter().map(|&j| prob.col_up[j]).sum();
+            for &(i, a) in &prob.cols[c[0]] {
+                // 組の列は最小活動量 (a > 0) にも最大活動量 (a < 0) にも下限で入っている
+                let (bound, (v, inf)) = if a > 0.0 { (prob.row_up[i], act_min[i]) } else { (prob.row_lo[i], act_max[i]) };
+                if !bound.is_finite() || !lo.is_finite() || inf > 0 {
+                    continue;
+                }
+                ub = ub.min((bound - (v - a * lo * k)) / a + 1e-9);
+            }
+            ub.floor()
+        };
+        let mergeable = |c: &Vec<usize>| {
+            c.iter().all(|&j| prob.col_lo[j].is_finite())
+                && (!prob.is_int[c[0]] || (c.iter().all(|&j| prob.col_lo[j].fract() == 0.0 && prob.col_up[j].fract() == 0.0) && sum_ub(c) <= prob.col_up[c[0]]))
+        };
         let cap = tunable!("ENOMOTO_T_MIP_SYM_TWIN_GENS", 500usize, usize).min((2e7 / n.max(1) as f64) as usize);
         let (mut merge, mut keep): (Vec<Vec<usize>>, Vec<Vec<usize>>) = (Vec::new(), Vec::new());
         for c in twins {
@@ -1490,6 +1532,13 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
                 keep.len(),
                 if dropped > 0 { format!(", {dropped} dropped by the cap") } else { String::new() }
             );
+        }
+        // 診断用 (`ENOMOTO_MIP_DEBUG_TWINS`): 組ごとの大きさ・整数性・境界・費用・列の非零の数・併合するか
+        if env_str!("ENOMOTO_MIP_DEBUG_TWINS").is_some() {
+            for (c, m) in merge.iter().map(|c| (c, true)).chain(keep.iter().map(|c| (c, false))).take(40) {
+                let j = c[0];
+                eprintln!("TWINS: {} cols, int {}, bounds [{}, {}], cost {}, nnz {}, merge {m}, first {:?}", c.len(), prob.is_int[j], prob.col_lo[j], prob.col_up[j], prob.cost[j], prob.cols[j].len(), &c[..c.len().min(4)]);
+            }
         }
         let prob = if merge.is_empty() { prob } else { merge_twin_classes(prob, &merge, postsolve) };
         (symmetry::Symmetry::from_generators(n, gens), prob)
