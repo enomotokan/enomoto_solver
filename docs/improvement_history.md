@@ -10097,3 +10097,17 @@ inv/smallprob-overhead-20261028 の調査 (`analysis/smallprob_overhead_20261028
   hypothyroid-k1 23.5 -> 26.6 秒は少し遅い (`analysis/heurfix_20261028.md`)。
 - 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_COMPONENTS` (サブ MIP の連結成分) を足した。21 問のサブ MIP 300 本のうち分かれるのは 56 本で、多くは
   大きい 1 つ + 小さいもの (`analysis/submip_components_20261028.md`)。
+
+## 2026-10-28: カットプールの伝播とノードの伝播の不動点を既定にする (採用)
+
+試作だったカットプールの伝播 (HiGHS の `CutpoolPropagation`) を、HiGHS と同じ差分評価に作り直して既定にした。
+- 遅くなっていた原因は伝播の手間 (毎ノードでプールを全走査。1 スレッド 60 秒で timtab1 23 秒、neos-860300 は締めた境界 0 で 6 秒)。
+  カットの最小活動量を境界の変更の差分で持ち、変わった列を含み余裕が capacity 未満のカットだけを見直すようにした
+  (`propagate_cut_pool_incr`。timtab1 23 -> 3.5 秒、neos-860300 6 -> 0.18 秒)。以前の版は `ENOMOTO_MIP_CUTPOOL_PROP_FULL`。
+- 1000 回呼んで「締めた境界 + 刈ったノード × 10」が呼び出しの 1% 未満なら、その求解では止める (pk1 は 1 本も締めずに時間の 7 割)。
+- 既定にしたもの: カットプールの伝播 (`ENOMOTO_MIP_NO_CUTPOOL_PROP` で止める)、ノードの伝播を不動点まで回し直す
+  (`ENOMOTO_MIP_NO_PROP_FIXPOINT` で止める)。
+- 計測 (このコンテナ 4 スレッド・60 秒、以前の既定と交互に各 2 回): MIPLIB 40 問 SGM 20.45 / 20.57 -> 18.90 / 19.61 秒
+  (解けた数 25 / 26 -> 26 / 26)、負けている 21 問 18.63 / 15.78 -> 17.18 / 15.97 秒 (18 / 19 -> 20 / 19)、不一致 0。
+  noswot・mik-250・mas76・rout が速く、eil33-2・neos8 が少し遅い。`cargo test --release --lib` 316 件、fuzz 3 種 各 1500 問 不一致 0。
+  記録は `analysis/cutpool_prop_20261028.md`、結果は `benchmarks/cutpool_prop_{3cfg,default}_20261028.jsonl`。
