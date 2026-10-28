@@ -111,6 +111,8 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
     // 回さずに消す。整数列と連続列は併合しない
     let par_int = std::env::var_os("ENOMOTO_PRESOLVE_PARALLEL_INT").is_some();
     let int_bounds = |j: usize| lb[j] == lb[j].round() && (ub[j] == f64::INFINITY || ub[j] == ub[j].round());
+    // 診断用 (`ENOMOTO_DEBUG_PARALLELCOLS_COL=j`): 列 j が候補になるか、どの群に入り、併合でどう扱われたか
+    let dbg_col: Option<usize> = std::env::var("ENOMOTO_DEBUG_PARALLELCOLS_COL").ok().and_then(|v| v.parse().ok());
 
     // この呼び出し内だけの通し行番号: `a` の行が 0..n_a_rows、`real_rows` がその後。
     // 圧縮列形式へ直接流し込む。行順に出力するので各列は行番号昇順になる (署名計算の前提)。
@@ -150,6 +152,9 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
     let mut heads: std::collections::HashMap<u64, usize, std::hash::BuildHasherDefault<crate::presolve::redundancy::IdentityU64Hasher>> = std::collections::HashMap::default();
     for j in 0..n {
         let col = columns.col(j);
+        if dbg_col == Some(j) {
+            eprintln!("DEBUG_PARALLELCOLS_COL {j}: nnz {} lb {} ub {} int {} c {} col {:?}", col.len(), lb[j], ub[j], crate::presolve::is_int_col(j), c[j], &col[..col.len().min(6)]);
+        }
         // 候補条件: 実制約行に現れる、下限が有限 (上限は `+inf` でもよい)、固定されていない。
         if col.is_empty() || !lb[j].is_finite() || (ub[j] - lb[j]).abs() < TOL || (crate::presolve::is_int_col(j) && !(par_int && int_bounds(j))) {
             continue;
@@ -168,6 +173,9 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
                 break;
             }
             gid = group_next[gid];
+        }
+        if dbg_col == Some(j) {
+            eprintln!("DEBUG_PARALLELCOLS_COL {j}: candidate, group {:?} (size {})", found, found.map_or(0, |g| group_members[g].len()));
         }
         match found {
             Some(gid) => group_members[gid].push(j),
@@ -192,62 +200,81 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
     // 消去された列の集合
     let mut eliminated: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
 
+    // `ENOMOTO_PRESOLVE_PARALLEL_ALL_KEPT` (試作): 群の先頭の列と併合できない列 (費用の比が違う、整数性が違う) があっても、
+    // 残りの列の中で併合先を選び直して続ける。以前は先頭の列だけを併合先にしたので、先頭が費用の違う列だと群全体が併合されな
+    // かった (swath1: 行 0 の費用 0 の同じ連続列 54 本が、係数の比が -1116.57 で費用 1 の列 0 と同じ群に入り、1 本も併合されない)。
+    // 併合先の選び直しは群ごとに `ENOMOTO_T_PRESOLVE_PARALLEL_KEPT_TRIES` 回 (既定 64) まで
+    let all_kept = std::env::var_os("ENOMOTO_PRESOLVE_PARALLEL_ALL_KEPT").is_some();
+    let kept_tries = if all_kept { std::env::var("ENOMOTO_T_PRESOLVE_PARALLEL_KEPT_TRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(64usize) } else { 1 };
     for members in groups_by_first {
         if members.len() < 2 {
             continue;
         }
         let mut members = members.clone();
         members.sort_unstable();
-        let kept = members[0];
-        if used[kept] {
-            continue;
-        }
-        // kept_lead: 併合先の先頭係数 / cur_lb, cur_ub: 併合を重ねた時点での z の範囲
-        let kept_lead = columns.col(kept)[0].1;
-        let mut cur_lb = new_lb[kept];
-        let mut cur_ub = new_ub[kept];
-        let mut any_merged = false;
-        for &var in &members[1..] {
-            if used[var] {
-                continue;
+        let mut tries = 0usize;
+        for ki in 0..members.len() - 1 {
+            let kept = members[ki];
+            if dbg_col.is_some_and(|d| members.contains(&d)) {
+                eprintln!("DEBUG_PARALLELCOLS_COL: group of {} members, kept {kept} (used {}), first {:?}", members.len(), used[kept], &members[..members.len().min(6)]);
             }
-            let var_lead = columns.col(var)[0].1;
-            let mut s = var_lead / kept_lead;
-            let (int_kept, int_var) = (crate::presolve::is_int_col(kept), crate::presolve::is_int_col(var));
-            if int_kept != int_var {
-                continue;
-            }
-            if int_kept {
-                if (s.abs() - 1.0).abs() > 1e-12 {
+            if used[kept] {
+                if all_kept {
                     continue;
                 }
-                s = s.signum();
+                break;
             }
-            // 比例コスト条件 c_var == s * c_kept を相対許容誤差で判定
-            let predicted_c_var = s * new_c[kept];
-            let tol = TOL * (1.0 + new_c[var].abs().max(predicted_c_var.abs()));
-            if (new_c[var] - predicted_c_var).abs() > tol {
-                continue;
+            if tries >= kept_tries {
+                break;
             }
-            // s * x_var の取りうる範囲 (z の範囲の増分)。符号で向きを決める (min/max で並べ替えると
-            // 矛盾した境界 lb > ub が正常な区間に化けて実行不能性が失われる)。
-            let (lo, hi) = if s >= 0.0 { (s * new_lb[var], s * new_ub[var]) } else { (s * new_ub[var], s * new_lb[var]) };
-            // 負の s と `var` の上限 `+inf` の組では lo = -inf となり、併合先が自由列になってしまう。
-            // その形は下流で非常に退化しやすいため、この併合は行わず `var` を未併合のまま残す (経緯は履歴メモ参照)。
-            if lo == f64::NEG_INFINITY {
-                continue;
+            tries += 1;
+            // kept_lead: 併合先の先頭係数 / cur_lb, cur_ub: 併合を重ねた時点での z の範囲
+            let kept_lead = columns.col(kept)[0].1;
+            let mut cur_lb = new_lb[kept];
+            let mut cur_ub = new_ub[kept];
+            let mut any_merged = false;
+            for &var in &members[ki + 1..] {
+                if used[var] {
+                    continue;
+                }
+                let var_lead = columns.col(var)[0].1;
+                let mut s = var_lead / kept_lead;
+                let (int_kept, int_var) = (crate::presolve::is_int_col(kept), crate::presolve::is_int_col(var));
+                if int_kept != int_var {
+                    continue;
+                }
+                if int_kept {
+                    if (s.abs() - 1.0).abs() > 1e-12 {
+                        continue;
+                    }
+                    s = s.signum();
+                }
+                // 比例コスト条件 c_var == s * c_kept を相対許容誤差で判定
+                let predicted_c_var = s * new_c[kept];
+                let tol = TOL * (1.0 + new_c[var].abs().max(predicted_c_var.abs()));
+                if (new_c[var] - predicted_c_var).abs() > tol {
+                    continue;
+                }
+                // s * x_var の取りうる範囲 (z の範囲の増分)。符号で向きを決める (min/max で並べ替えると
+                // 矛盾した境界 lb > ub が正常な区間に化けて実行不能性が失われる)。
+                let (lo, hi) = if s >= 0.0 { (s * new_lb[var], s * new_ub[var]) } else { (s * new_ub[var], s * new_lb[var]) };
+                // 負の s と `var` の上限 `+inf` の組では lo = -inf となり、併合先が自由列になってしまう。
+                // その形は下流で非常に退化しやすいため、この併合は行わず `var` を未併合のまま残す (経緯は履歴メモ参照)。
+                if lo == f64::NEG_INFINITY {
+                    continue;
+                }
+                substitutions.push(Substitution { var, kept, s, var_lb: new_lb[var], var_ub: new_ub[var], kept_lb: cur_lb });
+                cur_lb += lo;
+                cur_ub += hi;
+                used[var] = true;
+                any_merged = true;
+                eliminated.insert(var);
             }
-            substitutions.push(Substitution { var, kept, s, var_lb: new_lb[var], var_ub: new_ub[var], kept_lb: cur_lb });
-            cur_lb += lo;
-            cur_ub += hi;
-            used[var] = true;
-            any_merged = true;
-            eliminated.insert(var);
-        }
-        if any_merged {
-            new_lb[kept] = cur_lb;
-            new_ub[kept] = cur_ub;
-            used[kept] = true;
+            if any_merged {
+                new_lb[kept] = cur_lb;
+                new_ub[kept] = cur_ub;
+                used[kept] = true;
+            }
         }
     }
 
@@ -273,6 +300,24 @@ mod tests {
     use super::*;
     use crate::sparse::csr_from_rows;
     use crate::sparse::csr_row_vec;
+
+    #[test]
+    fn picks_another_kept_column_when_the_first_has_a_different_cost() {
+        // 列 0 は列 1, 2, 3 に平行 (比 -2) だが費用の比が合わない。列 1, 2, 3 は同じ列で費用 0。
+        // ENOMOTO_PRESOLVE_PARALLEL_ALL_KEPT では列 1 を併合先に選び直し、2 と 3 を併合する (以前は群全体を併合しなかった)
+        let a = csr_from_rows(&[vec![(0, 1.0), (1, -2.0), (2, -2.0), (3, -2.0)]], 4);
+        let c = vec![1.0, 0.0, 0.0, 0.0];
+        let lb = vec![0.0; 4];
+        let ub = vec![10.0, 1.0, 1.0, 1.0];
+        assert!(merge_parallel_columns(4, &a, &[], &c, &lb, &ub).substitutions.is_empty());
+        std::env::set_var("ENOMOTO_PRESOLVE_PARALLEL_ALL_KEPT", "1");
+        let r = merge_parallel_columns(4, &a, &[], &c, &lb, &ub);
+        std::env::remove_var("ENOMOTO_PRESOLVE_PARALLEL_ALL_KEPT");
+        let merged: Vec<(usize, usize)> = r.substitutions.iter().map(|s| (s.kept, s.var)).collect();
+        assert_eq!(merged, vec![(1, 2), (1, 3)]);
+        assert_eq!((r.lb[1], r.ub[1]), (0.0, 3.0));
+        assert_eq!(r.ub[0], 10.0);
+    }
 
     #[test]
     fn merges_integer_columns_only_with_unit_scale() {
