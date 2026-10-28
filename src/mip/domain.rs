@@ -57,6 +57,10 @@ pub struct Domain {
     /// 前回 [`Self::take_changed`] から境界が変わった列。
     changed: Vec<usize>,
     changed_mark: Vec<bool>,
+    /// 前回 [`Self::take_changed_for_cutpool`] から境界が変わった列 (カットプールの伝播の活動量の差分更新用。
+    /// [`Self::track_cutpool`] を呼ぶまでは数えない)。
+    changed_c: Vec<usize>,
+    changed_c_mark: Vec<bool>,
     /// 伝播を待つ行。
     queue: Vec<usize>,
     in_queue: Vec<bool>,
@@ -127,6 +131,8 @@ impl Domain {
             changed_p_mark: vec![false; p.n],
             changed: Vec::new(),
             changed_mark: vec![false; p.n],
+            changed_c: Vec::new(),
+            changed_c_mark: Vec::new(),
             queue: Vec::new(),
             in_queue: vec![false; p.m],
             infeasible: false,
@@ -246,6 +252,26 @@ impl Domain {
             self.changed_p_mark[j] = true;
             self.changed_p.push(j);
         }
+        if !self.changed_c_mark.is_empty() && !self.changed_c_mark[j] {
+            self.changed_c_mark[j] = true;
+            self.changed_c.push(j);
+        }
+    }
+
+    /// 境界が変わった列をカットプールの伝播のためにも数え始める ([`Self::take_changed_for_cutpool`])。
+    pub fn track_cutpool(&mut self, n: usize) {
+        if self.changed_c_mark.is_empty() {
+            self.changed_c_mark = vec![false; n];
+            self.changed_c.clear();
+        }
+    }
+
+    /// 前回呼んでから境界が変わった列を取り出す (カットプールの伝播の差分評価用)。
+    pub fn take_changed_for_cutpool(&mut self) -> Vec<usize> {
+        for &j in &self.changed_c {
+            self.changed_c_mark[j] = false;
+        }
+        std::mem::take(&mut self.changed_c)
     }
 
     /// 前回呼んでから境界が変わった列を取り出す (双対証明の差分評価用)。

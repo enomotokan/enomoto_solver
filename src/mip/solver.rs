@@ -652,6 +652,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     obj_prop_stats: [u64; 2],
     /// カットプールの伝播 (`ENOMOTO_MIP_CUTPOOL_PROP`): 呼び出し回数、枝刈りしたノード数、締めた境界の数、時間 (ナノ秒)。
     cutpool_prop_stats: [u64; 4],
+    /// カットプールの伝播の差分評価の状態 ([`CutPropState`])。
+    pub(super) cpp: CutPropState,
     /// 根のカットのループが HiGHS 流のカット管理を有効にしたか (`ENOMOTO_MIP_CUT_STRONG_AUTO`、[`Self::highs_cutmgmt`])。
     pub(super) hcm_auto: bool,
     /// [`Self::root_obj_probe`] の (試した列, 固定した列)
@@ -1312,6 +1314,36 @@ fn prop_fixpoint() -> bool {
 /// ノードでカットプールを伝播するか (`ENOMOTO_MIP_CUTPOOL_PROP`、試作。サブ MIP でも使う)。
 fn cutpool_prop() -> bool {
     env_str!("ENOMOTO_MIP_CUTPOOL_PROP").is_some()
+}
+
+/// カットプールの伝播 ([`Solver::propagate_cut_pool`]) の差分評価の状態 (HiGHS の `CutpoolPropagation` の
+/// `activitycuts_`・`capacityThreshold_`・`propagatecutinds_` に当たる)。`valid` が偽なら次の呼び出しで作り直す
+/// (プールの追い出し [`Solver::evict_pool`] で番号が変わったとき)。
+#[derive(Default)]
+pub(super) struct CutPropState {
+    pub(super) valid: bool,
+    /// 取り込んだカットの数 (プールの先頭から)
+    ncuts: usize,
+    /// 作り直してからの呼び出し回数 (誤差の蓄積を防ぐため定期的に作り直す)
+    calls: u64,
+    /// 列ごとの (カットの番号, 係数)
+    cols: Vec<Vec<(u32, f64)>>,
+    /// 活動量に入れた列の境界 (定義域の今の境界とは、前回からの変更の分だけずれる)
+    lo: Vec<f64>,
+    up: Vec<f64>,
+    /// カットごとの最小活動量の有限部分と `-inf` の項の数 (`lo`・`up` で)
+    min: Vec<f64>,
+    ninf: Vec<u32>,
+    /// カットごとの `max_j |a_j| (u_j - l_j)` (取り込んだときの大域的な境界で。連続列は締める下限の幅を引く)。
+    /// 余裕 `rhs - min` がこれ以上なら、そのカットからはどの境界も締まらない
+    cap: Vec<f64>,
+    /// 活動量が変わって見直しを待つカット
+    mark: Vec<bool>,
+    touched: Vec<u32>,
+    /// 前回 [`Solver::cpp_apply_changes`] の後に境界を締めたカット
+    fired: Vec<u32>,
+    /// 手間の内訳 (診断用): 差分で直した項の数、見直したカットの数、その非零の数、作り直した回数
+    pub(super) work: [u64; 4],
 }
 
 /// ヒューリスティクス役で ALNS と Local-MIP + 連鎖を競わせるか (`ENOMOTO_MIP_ROLE_LMIP`、試作)。
@@ -1997,6 +2029,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         obj_cols: None,
         obj_prop_stats: [0; 2],
         cutpool_prop_stats: [0; 4],
+        cpp: CutPropState::default(),
         hcm_auto: snap.as_ref().is_some_and(|sn| sn.hcm_auto),
         root_obj_probe_stats: [0; 2],
         sb_prop_stats: [0; 2],
@@ -8719,9 +8752,321 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// timtab1 はカットが短く (非零 2-4) 一般整数 (0-5) を含み、HiGHS は 7k ノードで証明するがこちらは 5 万ノードでも閉じない
     fn propagate_cut_pool(&mut self) -> bool {
         self.dom.set_external_tag(7);
-        let r = self.propagate_cut_pool_inner();
+        let r = if env_str!("ENOMOTO_MIP_CUTPOOL_PROP_FULL").is_some() { self.propagate_cut_pool_inner() } else { self.propagate_cut_pool_incr() };
         self.dom.set_external(false);
         r
+    }
+
+    /// [`Self::propagate_cut_pool`] の差分評価版 (既定。`ENOMOTO_MIP_CUTPOOL_PROP_FULL` なら毎回プールを全部走査する以前の版)。
+    /// HiGHS の `CutpoolPropagation` と同じく、カットの最小活動量を境界の変更の差分で持ち ([`CutPropState`])、前回から境界が
+    /// 変わった列を含み、余裕が `cap` 未満 (またはちょうど 1 項が無限) のカットだけを見直す。プール全体の走査は timtab1
+    /// (1 万本) で 60 秒中 23 秒、neos-860300 (3926 本、締めた境界 0) で 343 回 6 秒かかっていた
+    fn propagate_cut_pool_incr(&mut self) -> bool {
+        let p = self.p;
+        let t0 = Instant::now();
+        self.cutpool_prop_stats[0] += 1;
+        let passes = tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_PASSES", 2usize, usize);
+        let cont_frac = tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_CONT", 0.1, f64);
+        let refresh = tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_REFRESH", 512u64, u64);
+        self.cpp_sync(cont_frac, refresh);
+        let mut cand: Vec<u32> = Vec::new();
+        let mut ok = true;
+        for _ in 0..passes {
+            self.cpp_apply_changes();
+            cand.clear();
+            {
+                let st = &mut self.cpp;
+                for &k in &st.touched {
+                    let k = k as usize;
+                    st.mark[k] = false;
+                    let rhs = self.cut_pool[k].1;
+                    let (mn, ni) = (st.min[k], st.ninf[k]);
+                    if ni >= 2 {
+                        continue;
+                    }
+                    // 差分の誤差の分だけ広めに拾う (拾ったカットは今の境界で計算し直す)
+                    if ni == 1 || rhs - mn < st.cap[k] + 1e-6 * (1.0 + rhs.abs() + mn.abs()) {
+                        cand.push(k as u32);
+                    }
+                }
+                st.touched.clear();
+            }
+            if env_str!("ENOMOTO_MIP_DEBUG_CPP_CHECK").is_some() {
+                self.cpp_check(&cand, cont_frac);
+            }
+            let mut changed = false;
+            let mut bad = None;
+            self.cpp.work[1] += cand.len() as u64;
+            for (i, &k) in cand.iter().enumerate() {
+                self.cpp.work[2] += (self.pool_start[k as usize + 1] - self.pool_start[k as usize]) as u64;
+                match self.cutpool_prop_cut(k as usize, cont_frac) {
+                    Ok(c) => {
+                        if c {
+                            self.cpp.fired.push(k);
+                        }
+                        changed |= c
+                    }
+                    Err(()) => {
+                        // このカットと見直していないカットは印を戻す (列が変わらなければ次の呼び出しで拾えなくなる)
+                        self.cpp.fired.push(k);
+                        for &k2 in &cand[i + 1..] {
+                            if !self.cpp.mark[k2 as usize] {
+                                self.cpp.mark[k2 as usize] = true;
+                                self.cpp.touched.push(k2);
+                            }
+                        }
+                        bad = Some(k as usize);
+                        break;
+                    }
+                }
+            }
+            if let Some(k) = bad {
+                self.cutpool_prop_stats[1] += 1;
+                if self.dom.infeasible {
+                    if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
+                        self.add_conflict();
+                    }
+                } else if env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() && !self.params.submip {
+                    let (coefs, rhs) = (self.cut_pool[k].0.clone(), self.cut_pool[k].1);
+                    self.add_conflicts_multi(super::domain::ConflictStart::Proof(&coefs, rhs));
+                }
+                ok = false;
+                break;
+            }
+            if !changed {
+                break;
+            }
+            let pr = self.dom.propagate(p);
+            self.dom.set_external_tag(7);
+            if !pr {
+                self.cutpool_prop_stats[1] += 1;
+                if env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
+                    self.add_conflict();
+                }
+                ok = false;
+                break;
+            }
+        }
+        self.cutpool_prop_stats[3] += t0.elapsed().as_nanos() as u64;
+        ok
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_DEBUG_CPP_CHECK`): 差分で持つ活動量が計算し直したものと合うか、候補にしなかったカットで
+    /// 締まる境界や矛盾がないかを確かめ、食い違いを表示する。
+    fn cpp_check(&self, cand: &[u32], cont_frac: f64) {
+        let st = &self.cpp;
+        let in_cand: std::collections::HashSet<u32> = cand.iter().copied().collect();
+        let (mut bad_act, mut missed) = (0usize, 0usize);
+        for j in 0..self.p.n {
+            if st.lo[j] != self.dom.lo[j] || st.up[j] != self.dom.up[j] {
+                eprintln!("CPPCHK col {j} applied [{}, {}] domain [{}, {}]", st.lo[j], st.up[j], self.dom.lo[j], self.dom.up[j]);
+            }
+        }
+        for k in 0..self.cut_pool.len() {
+            let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
+            let rhs = self.cut_pool[k].1;
+            let (mut mn, mut ni, mut sc) = (0.0f64, 0u32, 1.0f64);
+            for t in s0..e0 {
+                let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
+                let b = if c > 0.0 { self.dom.lo[j] } else { self.dom.up[j] };
+                if b.is_finite() {
+                    mn += c * b;
+                    sc += (c * b).abs();
+                } else {
+                    ni += 1;
+                }
+            }
+            if ni != st.ninf[k] || (ni == 0 && (mn - st.min[k]).abs() > 1e-7 * sc) {
+                bad_act += 1;
+            }
+            if in_cand.contains(&(k as u32)) || ni >= 2 {
+                continue;
+            }
+            // 候補でないのに締まる・矛盾するか
+            let gap = rhs - mn;
+            let mut m = ni == 0 && mn > rhs + 1e-6 * (1.0 + rhs.abs());
+            for t in s0..e0 {
+                let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
+                let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+                if ni == 1 || c.abs() * (up - lo) <= gap + 1e-9 * (1.0 + gap.abs()) {
+                    continue;
+                }
+                let need = if self.p.is_int[j] { 1.0 - 1e-6 } else { cont_frac * (up - lo) };
+                if c.abs() * (up - lo) - gap > need * c.abs() + 1e-6 {
+                    m = true;
+                }
+            }
+            if m {
+                missed += 1;
+                if missed <= 2 {
+                    let terms: Vec<_> = (s0..e0).map(|t| { let j = self.pool_idx[t] as usize; (j, self.pool_val[t], self.dom.lo[j], self.dom.up[j], self.dom.global_lo[j], self.dom.global_up[j], self.p.is_int[j]) }).collect();
+                    eprintln!("CPPCHK miss cut {k} rhs {rhs} min {mn} ninf {ni} cap {} mark {} terms {terms:?}", st.cap[k], st.mark[k]);
+                }
+            }
+        }
+        if bad_act > 0 || missed > 0 {
+            eprintln!("CPPCHK call {} cuts {} activity mismatches {bad_act}, missed cuts {missed}", self.cutpool_prop_stats[0], self.cut_pool.len());
+        }
+    }
+
+    /// [`CutPropState`] をプールと定義域に合わせる: 無効か `refresh` 回ごとに作り直し、増えたカットを取り込む。
+    fn cpp_sync(&mut self, cont_frac: f64, refresh: u64) {
+        let p = self.p;
+        let st = &mut self.cpp;
+        st.calls += 1;
+        if !st.valid || st.calls > refresh || st.ncuts > self.cut_pool.len() {
+            self.dom.track_cutpool(p.n);
+            self.dom.take_changed_for_cutpool();
+            st.valid = true;
+            st.calls = 1;
+            st.work[3] += 1;
+            st.ncuts = 0;
+            st.cols = vec![Vec::new(); p.n];
+            st.lo.clone_from(&self.dom.lo);
+            st.up.clone_from(&self.dom.up);
+            st.min.clear();
+            st.ninf.clear();
+            st.cap.clear();
+            st.mark.clear();
+            st.touched.clear();
+            st.fired.clear();
+        }
+        let (gl, gu) = (&self.dom.global_lo, &self.dom.global_up);
+        for k in st.ncuts..self.cut_pool.len() {
+            let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
+            let (mut mn, mut ni, mut cap) = (0.0f64, 0u32, 0.0f64);
+            for t in s0..e0 {
+                let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
+                st.cols[j].push((k as u32, c));
+                let b = if c > 0.0 { st.lo[j] } else { st.up[j] };
+                if b.is_finite() {
+                    mn += c * b;
+                } else {
+                    ni += 1;
+                }
+                let w = gu[j] - gl[j];
+                let w = if p.is_int[j] { w } else { w * (1.0 - cont_frac) };
+                cap = cap.max(c.abs() * w);
+            }
+            st.min.push(mn);
+            st.ninf.push(ni);
+            st.cap.push(cap);
+            st.mark.push(true);
+            st.touched.push(k as u32);
+        }
+        st.ncuts = self.cut_pool.len();
+    }
+
+    /// 前回から境界が変わった列の分だけカットの最小活動量を直し、変わったカットに印を付ける。
+    fn cpp_apply_changes(&mut self) {
+        let chg = self.dom.take_changed_for_cutpool();
+        let st = &mut self.cpp;
+        // 前回の後に境界を締めたカットは見直す (締めた境界が巻き戻されていれば、列の境界は前回と同じでも締め直せる)
+        for k in std::mem::take(&mut st.fired) {
+            if !st.mark[k as usize] {
+                st.mark[k as usize] = true;
+                st.touched.push(k);
+            }
+        }
+        // 最小活動量の項 `c b` を境界 `o` から `v` に取り替える
+        fn upd(mn: &mut f64, ni: &mut u32, c: f64, o: f64, v: f64) {
+            if o.is_finite() {
+                *mn -= c * o;
+            } else {
+                *ni -= 1;
+            }
+            if v.is_finite() {
+                *mn += c * v;
+            } else {
+                *ni += 1;
+            }
+        }
+        for j in chg {
+            let (nl, nu) = (self.dom.lo[j], self.dom.up[j]);
+            let (ol, ou) = (st.lo[j], st.up[j]);
+            // 前回と同じ境界に戻っただけなら活動量も含意も前回と同じ (間でカットが締めて巻き戻された分は `fired` で拾う)
+            if nl == ol && nu == ou {
+                continue;
+            }
+            // 活動量に効かない側の境界が変わったカットにも印を付ける (そのカットが締めた境界が巻き戻されたとき。
+            // HiGHS は巻き戻した変更の理由のカットに印を付け直す)
+            st.work[0] += st.cols[j].len() as u64;
+            for &(k, c) in &st.cols[j] {
+                let ku = k as usize;
+                if c > 0.0 {
+                    if nl != ol {
+                        upd(&mut st.min[ku], &mut st.ninf[ku], c, ol, nl);
+                    }
+                } else if nu != ou {
+                    upd(&mut st.min[ku], &mut st.ninf[ku], c, ou, nu);
+                }
+                if !st.mark[ku] {
+                    st.mark[ku] = true;
+                    st.touched.push(k);
+                }
+            }
+            st.lo[j] = nl;
+            st.up[j] = nu;
+        }
+    }
+
+    /// プールのカット `k` を今の定義域で伝播する。締めたら `Ok(true)`、矛盾 (活動量が右辺を越える、締めて定義域が空) なら `Err`。
+    fn cutpool_prop_cut(&mut self, k: usize, cont_frac: f64) -> Result<bool, ()> {
+        let p = self.p;
+        let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
+        let rhs = self.cut_pool[k].1;
+        let mut minact = 0.0f64;
+        let mut ninf = 0usize;
+        let mut infj = usize::MAX;
+        for t in s0..e0 {
+            let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
+            let b = if c > 0.0 { self.dom.lo[j] } else { self.dom.up[j] };
+            if b.is_finite() {
+                minact += c * b;
+            } else {
+                ninf += 1;
+                infj = j;
+            }
+        }
+        if ninf >= 2 {
+            return Ok(false);
+        }
+        if ninf == 0 && minact > rhs + 1e-6 * (1.0 + rhs.abs()) {
+            return Err(());
+        }
+        let gap = rhs - minact;
+        let mut changed = false;
+        for t in s0..e0 {
+            let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
+            if ninf == 1 && j != infj {
+                continue;
+            }
+            let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+            if ninf == 0 && c.abs() * (up - lo) <= gap + 1e-9 * (1.0 + gap.abs()) {
+                continue;
+            }
+            let tight = if c > 0.0 {
+                let v = if ninf == 0 { lo + gap / c } else { gap / c };
+                let need = if p.is_int[j] { 1e-6 * (1.0 + up.abs().min(1e6)) } else { (cont_frac * (up - lo)).max(1e-6 * (1.0 + up.abs().min(1e6))) };
+                v < up - need && self.dom.tighten_upper(p, j, v)
+            } else {
+                let v = if ninf == 0 { up + gap / c } else { gap / c };
+                let need = if p.is_int[j] { 1e-6 * (1.0 + lo.abs().min(1e6)) } else { (cont_frac * (up - lo)).max(1e-6 * (1.0 + lo.abs().min(1e6))) };
+                v > lo + need && self.dom.tighten_lower(p, j, v)
+            };
+            if tight {
+                changed = true;
+                self.cutpool_prop_stats[2] += 1;
+            }
+            if self.dom.infeasible {
+                return Err(());
+            }
+        }
+        if changed {
+            // HiGHS と同じく、境界を締めたカットは使われたとして年齢を戻す
+            self.pool_age[k] = 0;
+        }
+        Ok(changed)
     }
 
     fn propagate_cut_pool_inner(&mut self) -> bool {
@@ -10880,7 +11225,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             eprintln!("MIP: propagation conflicts: analysed {}, no 1-UIP {}, 1-UIP not a row {}, no decision set {}, decision set not a row {}; not a row because continuous {}, general integer {}, both sides {}", self.conf_stats[0], self.conf_stats[1], self.conf_stats[2], self.conf_stats[3], self.conf_stats[4], self.conf_stats[5], self.conf_stats[6], self.conf_stats[7]);
             if cutpool_prop() {
-                eprintln!("MIP: cut pool propagation: calls {}, pruned {} nodes, tightened {} bounds, {:.2}s, pool {} cuts", self.cutpool_prop_stats[0], self.cutpool_prop_stats[1], self.cutpool_prop_stats[2], self.cutpool_prop_stats[3] as f64 * 1e-9, self.cut_pool.len());
+                eprintln!("MIP: cut pool propagation: calls {}, pruned {} nodes, tightened {} bounds, {:.2}s, pool {} cuts ({} nonzeros); updated terms {}, candidates {} ({} nonzeros), rebuilds {}", self.cutpool_prop_stats[0], self.cutpool_prop_stats[1], self.cutpool_prop_stats[2], self.cutpool_prop_stats[3] as f64 * 1e-9, self.cut_pool.len(), self.cut_pool_nnz, self.cpp.work[0], self.cpp.work[1], self.cpp.work[2], self.cpp.work[3]);
             }
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
             eprintln!("MIP: literal conflicts: added {}, in pool {} (aged out {}), pruned {} nodes, tightened {} bounds", self.lit_stats[0], self.lit_conflicts.len(), self.lit_conflicts.removed, self.lit_stats[1], self.lit_stats[2]);

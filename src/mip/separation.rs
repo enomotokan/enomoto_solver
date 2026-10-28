@@ -1722,6 +1722,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !drop.iter().any(|&d| d) {
             return;
         }
+        // カットの番号が変わるので、カットプールの伝播の差分評価を作り直させる
+        self.cpp.valid = false;
         let old = std::mem::take(&mut self.cut_pool);
         let (hash, age) = (std::mem::take(&mut self.pool_hash), std::mem::take(&mut self.pool_age));
         self.cut_pool_keys.clear();
