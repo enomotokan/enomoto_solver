@@ -1,0 +1,81 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP neos-3083819-nubu has 4725 rows; 8644 cols; 24048 nonzeros; 8644 integer variables (0 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 3e+03]
+  Cost    [3e+04, 1e+05]
+  Bound   [2e+00, 3e+02]
+  RHS     [1e+01, 1e+04]
+Presolving model
+510 rows, 4429 cols, 15526 nonzeros 0s
+388 rows, 2510 cols, 7427 nonzeros 0s
+Presolve reductions: rows 388(-4337); columns 2510(-6134); nonzeros 7427(-16621) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   388 rows
+   2510 cols (69 binary, 2441 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   7427 nonzeros
+   Thread count 4 (of 4 threads). Using 7 max workers. Parallel search on
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     0.2s
+         0       0         0   0.00%   6290575.552807  inf                  inf        0      0      3       453     0.2s
+ L       0       0         0   0.00%   6301337.850576  6307996            0.11%       61     20    258       579     1.6s
+
+65.1% inactive integer columns, restarting
+Model after restart has 187 rows, 699 cols (382 bin., 317 int., 0 impl., 0 cont., 0 dom.fix.), and 2213 nonzeros
+
+         0       0         0   0.00%   6301442.476663  6307996            0.10%       13      0      0      1706     1.8s
+         0       0         0   0.00%   6301442.476663  6307996            0.10%       13     11      2      1897     1.8s
+
+2.9% inactive integer columns, restarting
+Model after restart has 173 rows, 660 cols (373 bin., 287 int., 0 impl., 0 cont., 0 dom.fix.), and 2078 nonzeros
+
+         0       0         0   0.00%   6301764.505666  6307996            0.10%       16      0      0      3358     2.7s
+         0       0         0   0.00%   6301764.505666  6307996            0.10%       16     15      3      3462     2.7s
+
+Restarting search from the root node
+Model after restart has 29 rows, 59 cols (36 bin., 23 int., 0 impl., 0 cont., 0 dom.fix.), and 188 nonzeros
+
+       458       0         0   0.00%   6307078.812615  6307996            0.01%       38      0      0     49536     7.0s
+       458       0         0   0.00%   6307078.812615  6307996            0.01%       38     11      2     49573     7.0s
+       459       0         1 100.00%   6307996         6307996            0.00%      150     16     41     49632     7.0s
+
+Solving report
+  Model             neos-3083819-nubu
+  Status            Optimal
+  Primal bound      6307996
+  Dual bound        6307996
+  Gap               0%
+  P-D integral      0.0042414430269
+  Solution status   feasible
+                    6307996 (objective)
+                    0 (bound viol.)
+                    7.01660951563e-14 (int. viol.)
+                    0 (row viol.)
+  Timing            7.03
+                    0.35 (Presolve)
+                        MIP    time [calls] = 0.11 [1]
+                        subMIP time [calls] = 0.24 [73]
+                    6.66 (Solve)
+                        MIP    time [calls] = 3.75 [1]
+                        subMIP time [calls] = 2.91 [69]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [73]
+  Max sub-MIP depth 12
+  Nodes             459
+  Repair LPs        0
+  LP iterations     49632
+                    34731 (strong br.)
+                    1747 (separation)
+                    4753 (heuristics)
+@@RESULT {"status": "Optimal", "objective": 6307996.000000009, "bound": 6307996.000000009, "nodes": 459, "time": 7.039984594999964}

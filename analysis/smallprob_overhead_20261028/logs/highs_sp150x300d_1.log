@@ -1,0 +1,65 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Number of BV entries in BOUNDS section is 300
+MIP sp150x300d has 450 rows; 600 cols; 1200 nonzeros; 300 integer variables (300 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 3e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 3e+03]
+  RHS     [1e+00, 2e+03]
+Presolving model
+343 rows, 493 cols, 986 nonzeros 0s
+329 rows, 476 cols, 969 nonzeros 0s
+Presolve reductions: rows 329(-121); columns 476(-124); nonzeros 969(-231) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   329 rows
+   476 cols (271 binary, 0 integer, 0 implied int., 205 continuous, 0 domain fixed)
+   969 nonzeros
+   Thread count 4 (of 4 threads). Using 7 max workers. Parallel search on
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   29              inf                  inf        0      0      0         0     0.0s
+ S       0       0         0   0.00%   29              71                59.15%        0      0      0         0     0.0s
+         0       0         0   0.00%   34.13643818     71                51.92%        0      0      2        38     0.0s
+ L       0       0         0   0.00%   68.7029216      69                 0.43%      790    108      4       181     0.1s
+         1       0         1 100.00%   68.7029216      69                 0.43%      790    108      4       246     0.1s
+
+Solving report
+  Model             sp150x300d
+  Status            Optimal
+  Primal bound      69
+  Dual bound        69
+  Gap               0%
+  P-D integral      0.00585822039139
+  Solution status   feasible
+                    69 (objective)
+                    0 (bound viol.)
+                    1.55431223448e-15 (int. viol.)
+                    0 (row viol.)
+  Timing            0.09
+                    0.01 (Presolve)
+                        MIP    time [calls] = 0.01 [1]
+                        subMIP time [calls] = 0.00 [1]
+                    0.08 (Solve)
+                        MIP    time [calls] = 0.06 [1]
+                        subMIP time [calls] = 0.01 [1]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [1]
+  Max sub-MIP depth 2
+  Nodes             1
+  Repair LPs        0
+  LP iterations     246
+                    0 (strong br.)
+                    143 (separation)
+                    65 (heuristics)
+@@RESULT {"status": "Optimal", "objective": 69.0, "bound": 69.0, "nodes": 1, "time": 0.08601877900002819}

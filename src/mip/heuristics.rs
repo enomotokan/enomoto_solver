@@ -1451,7 +1451,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             time_limit: if time_highs {
                 (tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_FRAC", 1.0, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_MAX", f64::INFINITY, f64))
             } else {
-                (self.submip_time_frac * remaining).min(self.submip_time_max)
+                let t = (self.submip_time_frac * remaining).min(self.submip_time_max);
+                // `ENOMOTO_MIP_ROOT_SUBMIP_REL` (試作): 根のサブ MIP は外側の求解の経過秒の k 倍まで ([`super::root_submip_rel`])
+                match super::root_submip_rel().filter(|_| !self.params.submip && self.snap.is_none() && self.nodes <= 1 && self.incumbent.is_some()) {
+                    Some(k) => t.min((k * super::root_submip_ref_secs().unwrap_or(f64::INFINITY)).max(tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_REL_MIN", 0.5, f64))),
+                    None => t,
+                }
             },
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
             node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult) as u64,
@@ -1497,7 +1502,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             crate::set_fj_p3_force(true);
         }
         let t_sub = Instant::now();
+        // `ENOMOTO_MIP_SUBMIP_OUTCOME_STOP` (試作): 根の (主のスレッドで解く) サブ MIP も成果で打ち切る ([`super::solver::submip_outcome_stop`])
+        if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
+            let c = std::sync::Arc::new(super::solver::SubmipCtl::new(self.prune_limit()));
+            super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(c));
+        }
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = None);
         if p3 {
             crate::set_fj_p3_force(false);
         }
