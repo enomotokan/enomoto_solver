@@ -81,16 +81,18 @@ pub(super) fn heur_bit(name: &str) -> u64 {
     NAMES.iter().position(|&n| n == name).map_or(0, |k| 1u64 << k)
 }
 
-/// `ENOMOTO_MIP_PAR_HEUR_FOUND` (試作、既定では使わない): 並列のサブ MIP の解を受け入れたら、そのヒューリスティクスの「解なし」の印を外す
-/// ([`Solver::take_submip`])。
+/// 並列のサブ MIP の解を受け入れたら、そのヒューリスティクスの「解なし」の印を外す ([`Solver::take_submip`]。既定で使う。
+/// `ENOMOTO_MIP_NO_PAR_HEUR_FOUND` で使わない。以前の試作名は `ENOMOTO_MIP_PAR_HEUR_FOUND`)。
 fn par_heur_found() -> bool {
-    env_str!("ENOMOTO_MIP_PAR_HEUR_FOUND").is_some()
+    env_str!("ENOMOTO_MIP_NO_PAR_HEUR_FOUND").is_none()
 }
 
-/// `ENOMOTO_MIP_RESTART_LIGHT_HEURS` (試作、既定では使わない): 再スタートの後の根で、前に解を見つけなかったヒューリスティクスでも
-/// 軽いもの ([`light_root_heur`]) は飛ばさない。再スタートで固定が増え、カットで LP 解も変わるので、丸めで解が出うる
+/// 再スタートの後の根で、前に解を見つけなかったヒューリスティクスでも軽いもの ([`light_root_heur`]) は飛ばさない (既定で使う。
+/// `ENOMOTO_MIP_NO_RESTART_LIGHT_HEURS` で使わない。以前の試作名は `ENOMOTO_MIP_RESTART_LIGHT_HEURS`)。再スタートで固定が増え、
+/// カットで LP 解も変わるので、丸めで解が出うる。[`par_heur_found`] と合わせて手元 16 スレッド・60 秒で h80x6320d 43〜59 -> 27〜30 秒、
+/// neos-860300 40〜44 -> 31〜36 秒 (analysis/heurfix_20261028.md)
 fn restart_light_heurs() -> bool {
-    env_str!("ENOMOTO_MIP_RESTART_LIGHT_HEURS").is_some()
+    env_str!("ENOMOTO_MIP_NO_RESTART_LIGHT_HEURS").is_none()
 }
 
 /// 安い根のヒューリスティクス (LP 解の丸めと自明な解・shift-and-propagate。サブ MIP・ダイビング・局所探索・内点法を使わないもの)。
@@ -9828,7 +9830,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     acc = self.try_incumbent(x);
                     self.heur_label = keep;
                 }
-                // `ENOMOTO_MIP_PAR_HEUR_FOUND` (試作): 並列のサブ MIP は出しただけで `heur!` に「解なし」と返るので、再スタートで飛ばす印
+                // [`par_heur_found`] (`ENOMOTO_MIP_NO_PAR_HEUR_FOUND` で使わない): 並列のサブ MIP は出しただけで `heur!` に「解なし」と返るので、再スタートで飛ばす印
                 // ([`Self::failed_heurs`]) が付く。ここで解を受け入れたら印を外す (逐次のときの「見つけた」と同じ)。p200x1188c は並列の RENS・
                 // LP face のサブ MIP が 0.01 秒で最適値 15078 を見つけていたのに、再スタートの後はどちらも飛ばされていた
                 if acc && par_heur_found() {

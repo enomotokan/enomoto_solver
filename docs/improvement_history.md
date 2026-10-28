@@ -10084,3 +10084,16 @@ inv/smallprob-overhead-20261028 の調査 (`analysis/smallprob_overhead_20261028
   2 つの試作が直接変える所ではない (`analysis/eprostop_16t_20261028.md`)。
 - 試作 `ENOMOTO_MIP_RESTART_CUTS_FIXED` (再スタートで後処理が値を変えない固定列を含むカットを残す) は、既定の代入で写す方がその範囲を
   全部含むので消した。
+
+## 2026-10-28: 再スタートの後の根のヒューリスティクスの扱いを直す (採用)
+
+再スタートの後の根では、前の求解の根で解を見つけなかったヒューリスティクスを飛ばす。既定ではそのため再スタートの後はほぼ RINS だけが走っていた。
+- 並列のサブ MIP の解を受け入れたら「解なし」の印を外す (`ENOMOTO_MIP_NO_PAR_HEUR_FOUND` で止める)。並列モードのサブ MIP は出しただけで
+  `heur!` に「解なし」と返り、見つけていても飛ばす印が付いていた (p200x1188c の RENS・LP face は 0.01 秒で最適値を見つけていた)。
+- 再スタートの後でも軽いもの (trivial・simple rounding・ZI round・randomized rounding・shift-and-propagate) は飛ばさない
+  (`ENOMOTO_MIP_NO_RESTART_LIGHT_HEURS` で止める)。
+- 計測 (手元 16 スレッド・60 秒、交互に各 2 回): 負けている 21 問 SGM 22.05 / 21.38 -> 21.90 / 21.48 秒、MIPLIB 40 問 19.84 / 18.39 ->
+  18.64 / 18.12 秒、不一致 0。h80x6320d 43〜59 -> 27〜30 秒 (5 回中 4 回)、neos-860300 40〜44 -> 31〜36 秒。drayage-100-23 3.1 -> 5.1 秒、
+  hypothyroid-k1 23.5 -> 26.6 秒は少し遅い (`analysis/heurfix_20261028.md`)。
+- 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_COMPONENTS` (サブ MIP の連結成分) を足した。21 問のサブ MIP 300 本のうち分かれるのは 56 本で、多くは
+  大きい 1 つ + 小さいもの (`analysis/submip_components_20261028.md`)。
