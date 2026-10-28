@@ -158,6 +158,11 @@ fn map_restart_cut_subst(c: &[(usize, f64)], r: f64, p: &MipProblem, prob: &MipP
                     return None;
                 }
             }
+            PostsolveStep::Slack(sc) => {
+                if coef.get(&sc.var).is_some_and(|&a| a != 0.0) {
+                    return None;
+                }
+            }
         }
     }
     let mut out: Vec<(usize, f64)> = Vec::new();
@@ -1254,12 +1259,13 @@ fn postsolve_diag(p: &MipProblem, prob: &MipProblem, xr: &[f64], x: &[f64], post
                 kind[s.kept] = 'K';
             }
             PostsolveStep::Forcing(f) => kind[f.var] = 'F',
+            PostsolveStep::Slack(s) => kind[s.var] = 'L',
         }
     }
     let (nsub, npar, nforce) = postsolve.iter().fold((0, 0, 0), |(a, b, c), s| match s {
         PostsolveStep::Sub(_) => (a + 1, b, c),
         PostsolveStep::ParallelCol(_) => (a, b + 1, c),
-        PostsolveStep::Forcing(_) => (a, b, c + 1),
+        PostsolveStep::Forcing(_) | PostsolveStep::Slack(_) => (a, b, c + 1),
     });
     eprintln!(
         "POSTSOLVE_DIAG level {restarts}: reduced solution feasible in the presolved problem {} (1e-6), {} (1e-9); steps {} (sub {nsub}, parallel {npar}, forcing {nforce})",
