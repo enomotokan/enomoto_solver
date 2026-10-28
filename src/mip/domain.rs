@@ -731,7 +731,7 @@ impl Domain {
 
     /// 診断用 (`ENOMOTO_MIP_REPLAY_LOG`): 変更の記録にある整数列の境界の変更を理由ごとに数える
     /// (B 決定 (分枝・含意を含む -1)、R 行の伝播、L 被約費用の局所的な固定、S 強分岐、O オービトープ、P 双対証明、
-    /// F リテラルの衝突、J 目的関数の伝播、E その他の外からの変更、C カットプールの伝播 (`ENOMOTO_MIP_CUTPOOL_PROP`)、
+    /// F リテラルの衝突、J 目的関数の伝播、E その他の外からの変更、C カットプールの伝播、
     /// ただし C は `ENOMOTO_MIP_DEBUG_IMPL_TAG` の含意 (-9) と同じ値)。
     pub fn reason_counts_int(&self, p: &MipProblem) -> String {
         let mut c = [0u32; 10];

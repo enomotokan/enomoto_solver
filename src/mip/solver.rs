@@ -650,7 +650,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     obj_cols: Option<std::rc::Rc<Vec<(usize, f64)>>>,
     /// 目的関数の伝播 [刈ったノード, 締めた境界]、強分岐の子の伝播 [矛盾した子, 子の LP に渡した境界]
     obj_prop_stats: [u64; 2],
-    /// カットプールの伝播 (`ENOMOTO_MIP_CUTPOOL_PROP`): 呼び出し回数、枝刈りしたノード数、締めた境界の数、時間 (ナノ秒)。
+    /// カットプールの伝播 ([`Self::propagate_cut_pool`]): 呼び出し回数、枝刈りしたノード数、締めた境界の数、時間 (ナノ秒)。
     cutpool_prop_stats: [u64; 4],
     /// カットプールの伝播の差分評価の状態 ([`CutPropState`])。
     pub(super) cpp: CutPropState,
@@ -1307,13 +1307,15 @@ fn proof_keep_int() -> bool {
     env_str!("ENOMOTO_MIP_NO_PROOF_KEEP_INT").is_none()
 }
 
+/// ノードの伝播を不動点まで回し直すか (既定。`ENOMOTO_MIP_NO_PROP_FIXPOINT` で各段を 1 回ずつ。analysis/cutpool_prop_20261028.md)
 fn prop_fixpoint() -> bool {
-    env_str!("ENOMOTO_MIP_PROP_FIXPOINT").is_some()
+    env_str!("ENOMOTO_MIP_NO_PROP_FIXPOINT").is_none()
 }
 
-/// ノードでカットプールを伝播するか (`ENOMOTO_MIP_CUTPOOL_PROP`、試作。サブ MIP でも使う)。
+/// ノードでカットプールを伝播するか (既定。`ENOMOTO_MIP_NO_CUTPOOL_PROP` で止める。サブ MIP でも使う。
+/// analysis/cutpool_prop_20261028.md)。
 fn cutpool_prop() -> bool {
-    env_str!("ENOMOTO_MIP_CUTPOOL_PROP").is_some()
+    env_str!("ENOMOTO_MIP_NO_CUTPOOL_PROP").is_none()
 }
 
 /// カットプールの伝播 ([`Solver::propagate_cut_pool`]) の差分評価の状態 (HiGHS の `CutpoolPropagation` の
@@ -1322,6 +1324,8 @@ fn cutpool_prop() -> bool {
 #[derive(Default)]
 pub(super) struct CutPropState {
     pub(super) valid: bool,
+    /// 効き目が小さいので止めた ([`Solver::propagate_cut_pool`])
+    off: bool,
     /// 取り込んだカットの数 (プールの先頭から)
     ncuts: usize,
     /// 作り直してからの呼び出し回数 (誤差の蓄積を防ぐため定期的に作り直す)
@@ -4362,7 +4366,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.queue.prio_only = true;
         }
         // 診断用 (`ENOMOTO_MIP_ORACLE_CUTS=ファイル`): 他のソルバーが作ったカット (HiGHS の計装の `HCC 右辺 長さ 列:係数 ...` 行、
-        // 列は元の問題の番号) を木の前にカットのプールに入れる (`ENOMOTO_MIP_CUTPOOL_PROP` と合わせてノードで伝播する)
+        // 列は元の問題の番号) を木の前にカットのプールに入れる (ノードでカットプールの伝播に使う)
         if let Some(f) = env_str!("ENOMOTO_MIP_ORACLE_CUTS").filter(|_| !self.params.submip && self.snap.is_none()) {
             let s = std::fs::read_to_string(f).unwrap_or_default();
             let mut k = 0;
@@ -4886,7 +4890,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             };
-            // カットプールの伝播 (`ENOMOTO_MIP_CUTPOOL_PROP`、[`Self::propagate_cut_pool`])
+            // カットプールの伝播 (`ENOMOTO_MIP_NO_CUTPOOL_PROP` で止める、[`Self::propagate_cut_pool`])
             if !prop_ok && rp_stage.is_empty() {
                 rp_stage = "p_lit";
             }
@@ -4911,7 +4915,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !prop_ok && rp_stage.is_empty() {
                 rp_stage = "p_orb";
             }
-            // `ENOMOTO_MIP_PROP_FIXPOINT` (試作): オービトープの固定などで境界が変わったら、行・目的関数・双対証明・リテラルの衝突・
+            // 不動点まで回し直す (既定、`ENOMOTO_MIP_NO_PROP_FIXPOINT` で止める): オービトープの固定などで境界が変わったら、行・目的関数・双対証明・リテラルの衝突・
             // カットプール・オービトープの伝播を、境界が変わらなくなるまで (最大 `ENOMOTO_T_MIP_PROP_FIXPOINT_PASSES` 回) 回し直す
             // (HiGHS は対称性の固定・行・カットプール・衝突プールを 1 つの伝播の不動点まで回す。こちらは各段を 1 回ずつ順に回すので、
             // 後の段 (オービトープ) で締まった境界が前の段 (カットプール・証明) に戻らない)
@@ -8745,7 +8749,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
-    /// カットプールの伝播 (`ENOMOTO_MIP_CUTPOOL_PROP`、試作): プールのカット (大域的に成り立つ `sum a x <= rhs`) を
+    /// カットプールの伝播 (既定、`ENOMOTO_MIP_NO_CUTPOOL_PROP` で止める): プールのカット (大域的に成り立つ `sum a x <= rhs`) を
     /// ノードの定義域で伝播する (HiGHS は `HighsDomain::CutpoolPropagation` で全ノードでプールを伝播する)。整数列は丸めて
     /// 締め、連続列は幅の `ENOMOTO_T_MIP_CUTPOOL_PROP_CONT` (既定 0.1) 倍以上縮むときだけ締める。境界が変わったら行の伝播を
     /// 挟んで最大 `ENOMOTO_T_MIP_CUTPOOL_PROP_PASSES` (既定 2) 回まで繰り返す。矛盾ならそのカットから衝突を作って偽。
@@ -8763,6 +8767,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (1 万本) で 60 秒中 23 秒、neos-860300 (3926 本、締めた境界 0) で 343 回 6 秒かかっていた
     fn propagate_cut_pool_incr(&mut self) -> bool {
         let p = self.p;
+        // 効き目で止める: `ENOMOTO_T_MIP_CUTPOOL_PROP_TRIAL` (既定 1000) 回呼んで、締めた境界と刈ったノード (10 倍に数える) が
+        // 呼び出しの `ENOMOTO_T_MIP_CUTPOOL_PROP_MIN_RATE` (既定 0.01) 倍未満なら、この求解ではもう呼ばない。pk1 は候補が毎回
+        // プールの半分 (2 千本) になり、1 スレッド 120 秒中 81 秒かけて 1 本も締めなかった
+        if self.cpp.off {
+            return true;
+        }
+        let trial = tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_TRIAL", 1000u64, u64);
+        let calls = self.cutpool_prop_stats[0];
+        if calls >= trial && calls % trial == 0 {
+            let useful = self.cutpool_prop_stats[2] + 10 * self.cutpool_prop_stats[1];
+            if (useful as f64) < tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_MIN_RATE", 0.01, f64) * calls as f64 {
+                self.cpp.off = true;
+                if self.params.verbose {
+                    eprintln!("MIP: cut pool propagation stopped after {calls} calls (tightened {}, pruned {})", self.cutpool_prop_stats[2], self.cutpool_prop_stats[1]);
+                }
+                return true;
+            }
+        }
         let t0 = Instant::now();
         self.cutpool_prop_stats[0] += 1;
         let passes = tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_PASSES", 2usize, usize);
