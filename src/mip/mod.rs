@@ -26,6 +26,7 @@ pub(crate) mod symmetry;
 pub(crate) mod cuts;
 pub(crate) mod separation;
 pub(crate) mod zerohalf;
+pub(crate) mod mcf;
 pub(crate) mod clique;
 
 use crate::solver::solve_lp;

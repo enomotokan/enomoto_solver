@@ -645,6 +645,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cutsel_factor: f64,
     /// 経路集約の始点の行の開始位置 (ラウンドごとにずらす)
     pub(super) path_offset: usize,
+    /// 多品種フローの網 (`ENOMOTO_MIP_SEPA_MCF`、[`super::mcf`]。最初に使うときに探す)
+    pub(super) mcf_nets: Option<std::rc::Rc<Vec<super::mcf::McfNetwork>>>,
+    pub(super) mcf_fc: Option<bool>,
     pub(super) debug_x_done: bool,
     /// 目的関数の非零の係数 (目的関数の伝播用、最初に使うときに作る)
     obj_cols: Option<std::rc::Rc<Vec<(usize, f64)>>>,
@@ -2029,6 +2032,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         cutsel_best: 0.0,
         cutsel_factor: 0.9,
         path_offset: 0,
+        mcf_nets: None,
+        mcf_fc: None,
         debug_x_done: false,
         obj_cols: None,
         obj_prop_stats: [0; 2],

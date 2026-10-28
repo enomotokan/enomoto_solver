@@ -123,9 +123,10 @@ pub(super) mod sepprof {
     pub const SRC_PATH: u8 = 6;
     pub const SRC_TAB: u8 = 7;
     pub const SRC_POOL: u8 = 8;
-    pub const NSRC: usize = 9;
+    pub const SRC_MCF: u8 = 9;
+    pub const NSRC: usize = 10;
     pub const SRC_FACE: u8 = 16;
-    pub const SRC_NAMES: [&str; NSRC] = ["extra", "rows", "zerohalf", "clique", "implbd", "path_highs", "path", "tableau", "pool"];
+    pub const SRC_NAMES: [&str; NSRC] = ["extra", "rows", "zerohalf", "clique", "implbd", "path_highs", "path", "tableau", "pool", "mcf"];
     /// 段階 (時間)。separate() の中の段階は今の頂点 (0..) と面の頂点 (+ NSEP) を分ける
     pub const T_SETUP: usize = 0;
     pub const T_ROWS: usize = 1;
@@ -137,8 +138,9 @@ pub(super) mod sepprof {
     pub const T_TABSEL: usize = 7;
     pub const T_TABAGG: usize = 8;
     pub const T_TABGEN: usize = 9;
-    pub const T_FINISH: usize = 10;
-    pub const NSEP: usize = 11;
+    pub const T_MCF: usize = 10;
+    pub const T_FINISH: usize = 11;
+    pub const NSEP: usize = 12;
     pub const T_FACE_PREP: usize = 2 * NSEP;
     pub const T_FACE_LP: usize = 2 * NSEP + 1;
     pub const T_POOL: usize = 2 * NSEP + 2;
@@ -148,7 +150,7 @@ pub(super) mod sepprof {
     pub const T_REMOVE: usize = 2 * NSEP + 6;
     pub const T_ROUND: usize = 2 * NSEP + 7;
     pub const NT: usize = 2 * NSEP + 8;
-    pub const SEP_NAMES: [&str; NSEP] = ["setup", "rows", "zerohalf", "clique", "implbd", "path_highs", "path", "tab_select", "tab_btran_agg", "tab_gen", "finish(in)"];
+    pub const SEP_NAMES: [&str; NSEP] = ["setup", "rows", "zerohalf", "clique", "implbd", "path_highs", "path", "tab_select", "tab_btran_agg", "tab_gen", "mcf", "finish(in)"];
     #[derive(Default)]
     pub struct Prof {
         pub t: [f64; NT],
@@ -2952,6 +2954,43 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (cands, fcands)
     }
 
+    /// [`fixed_charge_network`] の判定 (`ENOMOTO_MIP_SEPA_MCF=auto` 用。問題ごとに一度だけ数える)
+    fn mcf_fc_network(&mut self) -> bool {
+        *self.mcf_fc.get_or_insert_with(|| fixed_charge_network(self.p))
+    }
+
+    /// 多品種フローの網 ([`super::mcf::extract`]、最初に呼ばれたときに一度だけ探す)。`ENOMOTO_MIP_DEBUG_MCF` で検出の結果を出す
+    pub(super) fn mcf_networks(&mut self) -> std::rc::Rc<Vec<super::mcf::McfNetwork>> {
+        if let Some(nets) = &self.mcf_nets {
+            return nets.clone();
+        }
+        let t0 = std::time::Instant::now();
+        let (nets, st) = super::mcf::extract(self.p);
+        if env_str!("ENOMOTO_MIP_DEBUG_MCF").is_some() || env_str!("ENOMOTO_MIP_LOG").is_some() {
+            let desc: Vec<String> = nets.iter().map(|g| format!("{}n/{}a({}uncap)/{}k{}", g.nnodes, g.narcs(), g.nuncap, g.ncom, if g.directed { "" } else { "/undir" })).collect();
+            eprintln!(
+                "MCF detect: rows {} cols {} | flow cands {} flow rows {} commodities {} cap cands {} arcs {} nodes {} incons {:.2} {} | fail '{}' | networks [{}] fc_network {} | {:.3}s",
+                self.p.m,
+                self.p.n,
+                st.flowcands,
+                st.flowrows,
+                st.commodities,
+                st.capcands,
+                st.arcs,
+                st.nodes,
+                st.inconsistencies,
+                if st.directed { "directed" } else { "undirected" },
+                st.fail,
+                desc.join(" "),
+                fixed_charge_network(self.p),
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        let nets = std::rc::Rc::new(nets);
+        self.mcf_nets = Some(nets.clone());
+        nets
+    }
+
     /// 現在の LP 解 `x` を切る候補を作る。
     /// `light` (ノード用) なら経路集約の始点と tableau 行の数を絞る。
     fn separate(&mut self, x: &[f64], light: bool) -> Vec<Candidate> {
@@ -3281,6 +3320,68 @@ impl<'a, L: MipLp> Solver<'a, L> {
         tag(&mut cands[nsrc0..], sepprof::SRC_PATH);
         nsrc0 = cands.len();
         sepprof::lap(sepprof::T_PATH, &mut lap);
+        // 多品種フローの cut-set の集約 (SCIP の `sepa_mcf.c` の移植、[`super::mcf`]、試作)。`ENOMOTO_MIP_SEPA_MCF=1` (`root`) で根だけ、
+        // `nodes` でノードの分離でも使う。`auto` (`auto-nodes`) は固定費用ネットワーク型 ([`fixed_charge_network`]) でない問題でだけ使う
+        // (VUB の行が大半の 1 品種の網 mc11・n3700 系などでは、1 節点の cut-set は経路集約と flow cover のカットとほぼ同じで、
+        // 根の下界は揺れの範囲でしか変わらない。analysis/mcf_cuts_20261028.md)。網は最初に呼ばれたときに元の行から一度だけ探す
+        let mcf_mode = env_str!("ENOMOTO_MIP_SEPA_MCF").filter(|&m| m != "0" && m != "off");
+        let mcf_on = mcf_mode.is_some_and(|m| !light || m.ends_with("nodes"))
+            && (!mcf_mode.is_some_and(|m| m.starts_with("auto")) || !self.mcf_fc_network())
+            && !self.params.submip
+            && mr >= p.m;
+        if mcf_on {
+            let nets = self.mcf_networks();
+            if !nets.is_empty() {
+                let t0 = std::time::Instant::now();
+                let rlo = &lo[n..];
+                let rup = &up[n..];
+                let duals = self.lp.row_duals();
+                let max_aggs = tunable!("ENOMOTO_T_MIP_MCF_MAX_AGGS", 400usize, usize);
+                let single = env_str!("ENOMOTO_MIP_MCF_NO_SINGLE").is_none();
+                let aggs = super::mcf::aggregations(&nets, &lp_rows, &act, rlo, rup, &duals, tunable!("ENOMOTO_T_MIP_MCF_CLUSTERS", 5usize, usize), max_aggs, single);
+                let max_cuts = tunable!("ENOMOTO_T_MIP_MCF_MAX_CUTS", 200usize, usize);
+                let mut agg = vec![0.0f64; n];
+                let mut in_agg = vec![false; n];
+                let mut touched: Vec<usize> = Vec::new();
+                let n_start = cands.len();
+                for wts in &aggs {
+                    if cands.len() - n_start >= max_cuts || self.time_up() {
+                        break;
+                    }
+                    for &j in &touched {
+                        agg[j] = 0.0;
+                        in_agg[j] = false;
+                    }
+                    touched.clear();
+                    for &(i, w) in wts {
+                        for &(j, a) in &lp_rows[i] {
+                            if !in_agg[j] {
+                                in_agg[j] = true;
+                                touched.push(j);
+                            }
+                            agg[j] += w * a;
+                        }
+                    }
+                    touched.sort_unstable();
+                    let amax = touched.iter().fold(0.0f64, |mx, &j| mx.max(agg[j].abs()));
+                    let mut base: Vec<(usize, f64)> = touched.iter().filter(|&&j| agg[j].abs() > 1e-9 * amax.max(1.0)).map(|&j| (j, agg[j])).collect();
+                    let mut slk: Vec<(usize, f64)> = wts.iter().map(|&(i, w)| (n + i, -w)).collect();
+                    slk.sort_unstable_by_key(|&(k, _)| k);
+                    base.extend(slk);
+                    let n0 = cands.len();
+                    for c in generate_cuts(&vars, &base, 0.0, use_flow_cover(), true) {
+                        push(Some(c), &mut cands, self);
+                    }
+                    keep_best(&mut cands, n0, self.p);
+                }
+                if env_str!("ENOMOTO_MIP_DEBUG_MCF").is_some() {
+                    eprintln!("MCF sep: {} aggregations, {} cands, {:.3}s", aggs.len(), cands.len() - n_start, t0.elapsed().as_secs_f64());
+                }
+            }
+        }
+        tag(&mut cands[nsrc0..], sepprof::SRC_MCF);
+        nsrc0 = cands.len();
+        sepprof::lap(sepprof::T_MCF, &mut lap);
         // tableau 行 (診断用 `ENOMOTO_MIP_DEBUG_NO_TAB_CUTS`: 使わない)
         let mut basics: Vec<(usize, f64)> = Vec::new();
         let tab_mr = if env_str!("ENOMOTO_MIP_DEBUG_NO_TAB_CUTS").is_some() { 0 } else { mr };
