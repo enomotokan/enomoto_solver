@@ -1161,11 +1161,11 @@ thread_local! {
     pub(crate) static SYM_OF_GENS: std::cell::RefCell<Option<std::rc::Rc<Vec<Vec<usize>>>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// `ENOMOTO_MIP_SYM_OF` (試作): オービトープにならない対称性を、lex-leader の行 (`x_i - x_k >= 0`) の代わりに探索中の
+/// 既定 (2026-10-29、`ENOMOTO_MIP_NO_SYM_OF` で以前の lex-leader の行): オービトープにならない対称性を、lex-leader の行 (`x_i - x_k >= 0`) の代わりに探索中の
 /// orbital fixing (HiGHS の `StabilizerOrbits::orbitalFixing`) で扱う。行を足さないので LP が重くならず、ヒューリスティクスの
 /// 解が対称性の行に反して捨てられることもない。
 pub(crate) fn sym_of() -> bool {
-    env_str!("ENOMOTO_MIP_SYM_OF").is_some()
+    env_str!("ENOMOTO_MIP_NO_SYM_OF").is_none()
 }
 
 /// [`sym_of`] で、再スタートの後の問題 `p` で前の求解の生成元を確かめ直し、成り立つものだけを残す。

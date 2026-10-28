@@ -10155,3 +10155,16 @@ SCIP の `sepa_mcf.c` (Achterberg & Raack 2010) を `src/mip/mcf.rs` に移植�
 - `ENOMOTO_PRESOLVE_SLACK_COL` (`presolve/slackcol.rs`): 費用 0・有界の連続列が不等式の 1 行 (範囲制約の 2 行) にだけ現れるとき、
   列を消して行を緩める。64 問で効くのは swath1・timtab1 だけで時間は変わらない。乱数問題で不一致 0。
 - 記録は `analysis/slackcol_20261028.md`。
+
+## 2026-10-29: 全ブランチの取り込みと試作の既定化 (採用)
+
+main・develop 以外のブランチ (inv/cutpool-prop・inv/mcf-cuts・ccr-e9c2168a・ccr-91f8d3bb・ccr-146937e4) を develop に取り込み、
+試作を 16 スレッド・60 秒で測り直した (負けている 21 問 + MIPLIB 40 問、3 設定を交互に 2 回)。
+- 既定にした: MCF の cut-set カット (`ENOMOTO_MIP_SEPA_MCF` の既定 `auto`、`0` で止める)、orbital fixing (`ENOMOTO_MIP_NO_SYM_OF`)、
+  Schreier 生成元 (`ENOMOTO_MIP_NO_SYM_OF_SCHREIER`)、平行列の併合先の選び直し (`ENOMOTO_PRESOLVE_NO_PARALLEL_ALL_KEPT`)、
+  費用 0 のスラック列の消去 (`ENOMOTO_PRESOLVE_NO_SLACK_COL`)、twoopt (`ENOMOTO_MIP_TWOOPT=0`)、rounding・shifting・intshifting を根だけ
+  (`ENOMOTO_MIP_SHIFT_HEURS` の既定 `root`、`0` で止める)。21 問 SGM 18.71 / 19.72 -> 18.97 / 19.82、40 問 18.01 / 18.13 -> 17.53 / 17.97、
+  Netlib 93 問 +0.15%、食い違い 0。
+- 既定にしない: `SYM_TWINS`・`PRESOLVE_PARALLEL_INT` (nw04 10 -> 30 秒、neos-960392 が時間切れ)、`LB2`・`PROX2`・`HSUB_STALL`
+  (良くなる問題がなく、悪くなった 10 問で SGM +12%)。
+- 記録は `analysis/mergeall_20261028.md`。

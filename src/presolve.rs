@@ -654,9 +654,9 @@ pub fn run_extended(
             }
         }
 
-        // 費用 0 のスラック列 (`slackcol`、`ENOMOTO_PRESOLVE_SLACK_COL`、試作): 1 行 (範囲制約なら反転した 2 行) にだけ現れる
+        // 費用 0 のスラック列 (`slackcol`、既定 2026-10-29、`ENOMOTO_PRESOLVE_NO_SLACK_COL` で止める): 1 行 (範囲制約なら反転した 2 行) にだけ現れる
         // 費用 0・有界の連続列を消し、行をその項の値域だけ緩める。消去した列は `[0, 0]` に固定する。
-        if env_str!("ENOMOTO_PRESOLVE_SLACK_COL").is_some() && !dbg_skip("slackcol") {
+        if env_str!("ENOMOTO_PRESOLVE_NO_SLACK_COL").is_none() && !dbg_skip("slackcol") {
             let mut in_eq = vec![false; n];
             for i in 0..a.nrows() {
                 for (j, v) in crate::sparse::csr_row_iter(&a, i) {

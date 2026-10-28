@@ -3320,11 +3320,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         tag(&mut cands[nsrc0..], sepprof::SRC_PATH);
         nsrc0 = cands.len();
         sepprof::lap(sepprof::T_PATH, &mut lap);
-        // 多品種フローの cut-set の集約 (SCIP の `sepa_mcf.c` の移植、[`super::mcf`]、試作)。`ENOMOTO_MIP_SEPA_MCF=1` (`root`) で根だけ、
+        // 多品種フローの cut-set の集約 (SCIP の `sepa_mcf.c` の移植、[`super::mcf`])。既定は `auto` (2026-10-29、analysis/mergeall_20261028.md)。
+        // `ENOMOTO_MIP_SEPA_MCF=0` (`off`) で使わない。`ENOMOTO_MIP_SEPA_MCF=1` (`root`) で根だけ、
         // `nodes` でノードの分離でも使う。`auto` (`auto-nodes`) は固定費用ネットワーク型 ([`fixed_charge_network`]) でない問題でだけ使う
         // (VUB の行が大半の 1 品種の網 mc11・n3700 系などでは、1 節点の cut-set は経路集約と flow cover のカットとほぼ同じで、
         // 根の下界は揺れの範囲でしか変わらない。analysis/mcf_cuts_20261028.md)。網は最初に呼ばれたときに元の行から一度だけ探す
-        let mcf_mode = env_str!("ENOMOTO_MIP_SEPA_MCF").filter(|&m| m != "0" && m != "off");
+        let mcf_mode = Some(env_str!("ENOMOTO_MIP_SEPA_MCF").unwrap_or("auto")).filter(|&m| m != "0" && m != "off");
         let mcf_on = mcf_mode.is_some_and(|m| !light || m.ends_with("nodes"))
             && (!mcf_mode.is_some_and(|m| m.starts_with("auto")) || !self.mcf_fc_network())
             && !self.params.submip

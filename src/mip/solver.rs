@@ -70,24 +70,30 @@ pub struct MipParams {
     pub fc_submip: bool,
 }
 
-/// SCIP の rounding・shifting・intshifting を使うか (`ENOMOTO_MIP_SHIFT_HEURS`、`1` か、`root`・`noint` を `,` でつないだもの)。
+/// `ENOMOTO_MIP_SHIFT_HEURS` の値。既定は `root` (根だけ、2026-10-29、analysis/mergeall_20261028.md)。
+fn shift_heurs_mode() -> &'static str {
+    env_str!("ENOMOTO_MIP_SHIFT_HEURS").unwrap_or("root")
+}
+
+/// SCIP の rounding・shifting・intshifting を使うか (`ENOMOTO_MIP_SHIFT_HEURS`、`0` で使わない。`1` (根と木) か、
+/// `root`・`noint` を `,` でつないだもの)。
 pub(super) fn shift_heurs_on() -> bool {
-    env_str!("ENOMOTO_MIP_SHIFT_HEURS").is_some_and(|s| s != "0")
+    shift_heurs_mode() != "0"
 }
 
 /// `ENOMOTO_MIP_SHIFT_HEURS` を木でも使うか (`root` を含めば根だけ)。
 pub(super) fn shift_heurs_tree() -> bool {
-    shift_heurs_on() && !env_str!("ENOMOTO_MIP_SHIFT_HEURS").is_some_and(|s| s.split(',').any(|t| t == "root"))
+    shift_heurs_on() && !shift_heurs_mode().split(',').any(|t| t == "root")
 }
 
 /// `ENOMOTO_MIP_SHIFT_HEURS` で intshifting を使うか (`noint` を含めば使わない)。
 pub(super) fn shift_heurs_int() -> bool {
-    shift_heurs_on() && !env_str!("ENOMOTO_MIP_SHIFT_HEURS").is_some_and(|s| s.split(',').any(|t| t == "noint"))
+    shift_heurs_on() && !shift_heurs_mode().split(',').any(|t| t == "noint")
 }
 
-/// twoopt を使うか (`ENOMOTO_MIP_TWOOPT`)。
+/// twoopt を使うか (既定、2026-10-29。`ENOMOTO_MIP_TWOOPT=0` で使わない)。
 pub(super) fn twoopt_on() -> bool {
-    env_str!("ENOMOTO_MIP_TWOOPT").is_some_and(|s| s != "0")
+    env_str!("ENOMOTO_MIP_TWOOPT") != Some("0")
 }
 
 /// 根のヒューリスティクスの名前に対応するビット (再スタートで飛ばすものの印)。暫定解に依る RINS と、
@@ -1351,10 +1357,10 @@ fn prop_fixpoint() -> bool {
     env_str!("ENOMOTO_MIP_NO_PROP_FIXPOINT").is_none()
 }
 
-/// `ENOMOTO_MIP_SYM_OF_SCHREIER` (試作): orbital fixing ([`super::sym_of`]) の固定群を、分枝した列を動かす生成元を捨てる代わりに
+/// 既定 (2026-10-29、`ENOMOTO_MIP_NO_SYM_OF_SCHREIER` で止める): orbital fixing ([`super::sym_of`]) の固定群を、分枝した列を動かす生成元を捨てる代わりに
 /// Schreier 生成元で作る (分枝した列を全て固定する元を多く残し、軌道が細かくなりにくい)。
 fn of_schreier() -> bool {
-    env_str!("ENOMOTO_MIP_SYM_OF_SCHREIER").is_some()
+    env_str!("ENOMOTO_MIP_NO_SYM_OF_SCHREIER").is_none()
 }
 
 /// ノードでカットプールを伝播するか (既定。`ENOMOTO_MIP_NO_CUTPOOL_PROP` で止める。サブ MIP でも使う。
