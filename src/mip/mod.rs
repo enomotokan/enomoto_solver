@@ -1340,6 +1340,13 @@ pub(crate) fn sym_twins() -> bool {
     env_str!("ENOMOTO_MIP_SYM_TWINS").is_some()
 }
 
+/// `ENOMOTO_MIP_SYM_TWIN_ORBITOPE` (試作): 双子の組 ([`symmetry::twin_classes`]) を併合せず、探索で見つけた生成元が動かさない
+/// 整数列の組を、生成元を作らずに 1xk のオービトープ (`local`、列の入れ替えが組の中だけ) として直接扱う。0-1 列のまま
+/// 残り、LP の行も足さない。生成元が動かす組は [`sym_twins`] と同じく入れ替えを生成元に足す。
+pub(crate) fn sym_twin_orbitope() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_TWIN_ORBITOPE").is_some()
+}
+
 /// 双子の組 `classes` をそれぞれ先頭の列に併合した問題を返し、後処理の手順を `postsolve` に足す (`parallelcols` と同じ
 /// `z = x_kept + x_var`)。併合した列は境界 [0, 0]・費用 0 にして全ての行から除く。併合した列を含むプロービングの含意は捨てる。
 /// [`solver::START_SOL`]・[`solver::DEBUG_SOL`] があれば同じ写しで移す。
@@ -1432,7 +1439,10 @@ fn merge_twin_classes(prob: MipProblem, classes: &[Vec<usize>], postsolve: &mut 
 /// [`sym_twins`] で双子を併合したときは後処理の手順を `postsolve` に足す。
 fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate::presolve::PostsolveStep>) -> MipProblem {
     let t0 = std::time::Instant::now();
-    let twins = if sym_twins() { symmetry::twin_classes(&prob) } else { Vec::new() };
+    let twin_orb = sym_twin_orbitope();
+    let twins = if sym_twins() || twin_orb { symmetry::twin_classes(&prob) } else { Vec::new() };
+    // `ENOMOTO_MIP_SYM_TWIN_ORBITOPE` で、生成元が動かさない整数列の双子の組から作る 1xk のオービトープ
+    let mut twin_orbs: Vec<symmetry::Orbitope> = Vec::new();
     let t_twins = t0.elapsed().as_secs_f64();
     let time_cap = tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64);
     // `ENOMOTO_MIP_PRESOLVE_WORK` (試作): 時間 (0.3 秒) の代わりに手間 (`ENOMOTO_T_MIP_PRESOLVE_WORK_SYM`、細分化で読んだ非零などの数) で打ち切る
@@ -1510,11 +1520,21 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         let cap = tunable!("ENOMOTO_T_MIP_SYM_TWIN_GENS", 500usize, usize).min((2e7 / n.max(1) as f64) as usize);
         let (mut merge, mut keep): (Vec<Vec<usize>>, Vec<Vec<usize>>) = (Vec::new(), Vec::new());
         for c in twins {
-            if !c.iter().any(|&j| moved[j]) && mergeable(&c) {
+            if twin_orb {
+                // 併合せず、生成元が動かさない整数列の組は 1xk のオービトープ (連続列の組は分枝しないので扱わない)
+                if c.iter().any(|&j| moved[j]) {
+                    keep.push(c);
+                } else if prob.is_int[c[0]] {
+                    twin_orbs.push(symmetry::Orbitope { vars: vec![c.clone()], packing: false, row_packing: vec![false], swaps: Vec::new(), local: true });
+                }
+            } else if !c.iter().any(|&j| moved[j]) && mergeable(&c) {
                 merge.push(c);
             } else {
                 keep.push(c);
             }
+        }
+        if verbose && twin_orb {
+            eprintln!("MIP: symmetry: twins as orbitopes: {} classes ({} columns)", twin_orbs.len(), twin_orbs.iter().map(|o| o.vars[0].len()).sum::<usize>());
         }
         let mut gens = sym.map(|s| s.generators).unwrap_or_default();
         let mut added = 0usize;
@@ -1556,6 +1576,8 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     SYM_ORIG.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(prob.clone())));
     let td = t0.elapsed().as_secs_f64();
     let sym_diag = format!("detect {td:.2}s, refine {:.2}s, log work {}", symmetry::refine_time() - rt0, symmetry::log_work() - lw0);
+    // 双子のオービトープだけのとき (探索で生成元が見つからない) も、下でオービトープを置くため空の対称性で続ける
+    let sym = if sym.is_none() && !twin_orbs.is_empty() { Some(symmetry::Symmetry { generators: Vec::new(), orbit: vec![usize::MAX; prob.n], num_orbits: 0 }) } else { sym };
     let Some(sym) = sym else {
         if verbose {
             eprintln!("MIP: symmetry: none ({:.2}s, work {sym_work}, search {}, verify {}, {sym_diag})", t0.elapsed().as_secs_f64(), symmetry::search_work() - sw0, symmetry::verify_work() - vw0);
@@ -1563,7 +1585,8 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         return prob;
     };
     // 完全オービトープは探索中の固定 (orbitopal fixing) で扱い、残りの生成元だけ lex-leader の行にする
-    let (orbs, used) = if env_str!("ENOMOTO_MIP_NO_ORBITOPE").is_none() { symmetry::find_orbitopes(&prob, &sym) } else { (Vec::new(), vec![false; sym.generators.len()]) };
+    let (mut orbs, used) = if env_str!("ENOMOTO_MIP_NO_ORBITOPE").is_none() { symmetry::find_orbitopes(&prob, &sym) } else { (Vec::new(), vec![false; sym.generators.len()]) };
+    orbs.extend(twin_orbs);
     let mut in_orb = vec![false; prob.n];
     for o in &orbs {
         for line in &o.vars {
