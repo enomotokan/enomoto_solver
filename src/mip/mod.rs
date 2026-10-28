@@ -1359,9 +1359,53 @@ fn merge_twin_classes(prob: MipProblem, classes: &[Vec<usize>], postsolve: &mut 
         col_up[kept] = cur_ub;
     }
     let rows: Vec<Vec<(usize, f64)>> = rows.into_iter().map(|r| r.into_iter().filter(|&(j, _)| !removed[j]).collect()).collect();
+    // 併合した整数列の上限を行から締める (前処理はこの後に走らないので、集合分割の行の 0-1 列の双子が [0, 2] のまま残り、
+    // 0-1 列向けの手法 (クリーク・衝突の辺) から外れていた。nw04)。行の最小・最大活動量 (無限の項の数つき) を 1 回作り、
+    // 併合先の列ごとに他の項の活動量から上限を求める
+    let act = |i: usize, upper: bool| -> (f64, usize) {
+        let (mut v, mut inf) = (0.0, 0usize);
+        for &(j, a) in &rows[i] {
+            let b = if (a > 0.0) == upper { col_up[j] } else { col_lo[j] };
+            if b.is_finite() { v += a * b } else { inf += 1 }
+        }
+        (v, inf)
+    };
+    let (minact, maxact): (Vec<(f64, usize)>, Vec<(f64, usize)>) = ((0..rows.len()).map(|i| act(i, false)).collect(), (0..rows.len()).map(|i| act(i, true)).collect());
+    let mut kept_cols: Vec<usize> = classes.iter().map(|c| c[0]).collect();
+    kept_cols.sort_unstable();
+    let mut col_rows: std::collections::HashMap<usize, Vec<(usize, f64)>> = kept_cols.iter().map(|&k| (k, Vec::new())).collect();
+    for (i, r) in rows.iter().enumerate() {
+        for &(j, a) in r {
+            if let Some(v) = col_rows.get_mut(&j) {
+                v.push((i, a));
+            }
+        }
+    }
+    for &k in &kept_cols {
+        if !is_int[k] {
+            continue;
+        }
+        let mut ub = col_up[k];
+        for &(i, a) in &col_rows[&k] {
+            // a > 0: a z <= row_up - (他の項の最小活動量)。a < 0: a z >= row_lo - (他の項の最大活動量)
+            let (bound, (v, inf), own) = if a > 0.0 { (row_up[i], minact[i], col_lo[k]) } else { (row_lo[i], maxact[i], col_lo[k]) };
+            if !bound.is_finite() || !own.is_finite() || inf > 0 {
+                continue;
+            }
+            let others = v - a * own;
+            ub = ub.min(((bound - others) / a + 1e-9).floor());
+        }
+        if ub < col_up[k] && ub >= col_lo[k] {
+            col_up[k] = ub;
+        }
+    }
+    // プロービングの含意: 消した列のものは捨てる。併合先は 0-1 に戻れば残す (双子のどちらが 1 でも、もう一方と同じ含意が
+    // 成り立つ)。一般整数のままなら捨てる
+    let drop = |j: usize| removed[j] || (touched[j] && !(col_lo[j] == 0.0 && col_up[j] == 1.0));
+    let drop: Vec<bool> = (0..removed.len()).map(drop).collect();
     let mut q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
-    q.conflict_edges = conflict_edges.into_iter().filter(|&(a, b)| !touched[(a / 2) as usize] && !touched[(b / 2) as usize]).collect();
-    q.implied_bounds = implied_bounds.into_iter().filter(|&(j, _, k, _, _)| !touched[j as usize] && !touched[k as usize]).collect();
+    q.conflict_edges = conflict_edges.into_iter().filter(|&(a, b)| !drop[(a / 2) as usize] && !drop[(b / 2) as usize]).collect();
+    q.implied_bounds = implied_bounds.into_iter().filter(|&(j, _, k, _, _)| !drop[j as usize] && !drop[k as usize]).collect();
     let shift = |x: &mut Vec<f64>| {
         if x.len() == removed.len() {
             for &(var, kept) in &moves {
