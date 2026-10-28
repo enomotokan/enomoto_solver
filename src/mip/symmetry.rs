@@ -1097,12 +1097,125 @@ pub fn lex_leader_pairs(sym: &Symmetry) -> Vec<(usize, usize)> {
     pairs
 }
 
+/// 生成元 `gens` のうち、`p` の対称性であるものだけを返す (再スタートの後の問題で orbital fixing の生成元を確かめ直す。
+/// 前処理が対称性を崩していれば (片方の列だけを固定・代入、対称でないカットの行など) その生成元は落とす)。
+pub fn verify_generators(p: &MipProblem, gens: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    if gens.iter().any(|g| g.len() != p.n) {
+        return Vec::new();
+    }
+    let mut row_counts: std::collections::HashMap<u64, i64> = std::collections::HashMap::new();
+    let mut tmp: Vec<(usize, f64)> = Vec::new();
+    for i in 0..p.m {
+        tmp.clear();
+        tmp.extend_from_slice(&p.rows[i]);
+        *row_counts.entry(row_hash(p.row_lo[i], p.row_up[i], &mut tmp)).or_insert(0) += 1;
+    }
+    gens.iter().filter(|g| verify(p, g, &row_counts)).cloned().collect()
+}
+
+/// orbital fixing (`ENOMOTO_MIP_SYM_OF`、HiGHS の `StabilizerOrbits::orbitalFixing`) に使う生成元と前計算。
+/// ノードでは、分枝で 1 にした 0-1 列と分枝した一般整数列を動かさない生成元 (固定群の部分群) の軌道を求め、
+/// 軌道のどれかの列が固定されていれば軌道の 0-1 列を全て同じ値に固定する。
+pub struct OrbitalGens {
+    /// 生成元 (問題全体の置換 `perm[j] = σ(j)`)。
+    pub gens: Vec<Vec<usize>>,
+    /// どれかの生成元が動かす列 (昇順)。
+    cols: Vec<usize>,
+    /// 生成元ごとに、動かす列の (`cols` の中の位置, 行き先の位置)。
+    moves: Vec<Vec<(u32, u32)>>,
+    /// `cols` の位置ごとに、その列を動かす生成元。
+    col_gens: Vec<Vec<u32>>,
+}
+
+impl OrbitalGens {
+    pub fn new(gens: Vec<Vec<usize>>) -> Self {
+        let mut cols: Vec<usize> = gens.iter().flat_map(|g| (0..g.len()).filter(move |&j| g[j] != j)).collect();
+        cols.sort_unstable();
+        cols.dedup();
+        let pos = |j: usize| cols.binary_search(&j).unwrap() as u32;
+        let moves: Vec<Vec<(u32, u32)>> = gens.iter().map(|g| (0..g.len()).filter(|&j| g[j] != j).map(|j| (pos(j), pos(g[j]))).collect()).collect();
+        let mut col_gens: Vec<Vec<u32>> = vec![Vec::new(); cols.len()];
+        for (k, mv) in moves.iter().enumerate() {
+            for &(a, _) in mv {
+                col_gens[a as usize].push(k as u32);
+            }
+        }
+        OrbitalGens { gens, cols, moves, col_gens }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.gens.is_empty()
+    }
+
+    /// 列 `j` を動かす生成元 (動かすものがなければ空)。
+    pub fn gens_moving(&self, j: usize) -> &[u32] {
+        match self.cols.binary_search(&j) {
+            Ok(q) => &self.col_gens[q],
+            Err(_) => &[],
+        }
+    }
+
+    /// 生成元 `excluded` (昇順) を除いた生成元の軌道のうち、`keep` を満たす列が 2 本以上あるもの (`keep` の列だけ)。
+    pub fn orbits(&self, excluded: &[u32], keep: impl Fn(usize) -> bool) -> Vec<Vec<usize>> {
+        let m = self.cols.len();
+        let mut uf: Vec<usize> = (0..m).collect();
+        for (k, mv) in self.moves.iter().enumerate() {
+            if excluded.binary_search(&(k as u32)).is_ok() {
+                continue;
+            }
+            for &(a, b) in mv {
+                let (x, y) = (find(&mut uf, a as usize), find(&mut uf, b as usize));
+                if x != y {
+                    uf[x] = y;
+                }
+            }
+        }
+        let mut by_root: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+        for q in 0..m {
+            let j = self.cols[q];
+            if keep(j) {
+                by_root.entry(find(&mut uf, q)).or_default().push(j);
+            }
+        }
+        let mut out: Vec<Vec<usize>> = by_root.into_values().filter(|o| o.len() >= 2).collect();
+        out.sort_unstable_by_key(|o| o[0]);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn inf() -> f64 {
         f64::INFINITY
+    }
+
+    #[test]
+    fn orbital_gens_orbits_without_excluded() {
+        // 生成元 0: (0 1)(4 5)、生成元 1: (2 3)。列 4, 5 は 0-1 でないとして軌道から外す
+        let g0 = vec![1, 0, 2, 3, 5, 4];
+        let g1 = vec![0, 1, 3, 2, 4, 5];
+        let of = OrbitalGens::new(vec![g0, g1]);
+        assert_eq!(of.gens_moving(4), &[0]);
+        assert_eq!(of.gens_moving(2), &[1]);
+        assert!(of.gens_moving(6).is_empty());
+        let keep = |j: usize| j < 4;
+        assert_eq!(of.orbits(&[], keep), vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(of.orbits(&[0], keep), vec![vec![2, 3]]);
+        assert!(of.orbits(&[0, 1], keep).is_empty());
+    }
+
+    #[test]
+    fn verify_generators_drops_broken_symmetry() {
+        // x0 + x1 <= 1, x2 + x3 <= 1: (0 1) と (2 3) は対称性。x0 の上限を 0 にすると (0 1) は崩れる
+        let rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(2, 1.0), (3, 1.0)]];
+        let mk = |up0: f64| MipProblem::from_rows(vec![0.0; 4], vec![up0, 1.0, 1.0, 1.0], vec![-1.0; 4], 0.0, 1.0, vec![true; 4], rows.clone(), vec![-inf(); 2], vec![1.0; 2]);
+        let gens = vec![vec![1, 0, 2, 3], vec![0, 1, 3, 2]];
+        assert_eq!(verify_generators(&mk(1.0), &gens).len(), 2);
+        assert_eq!(verify_generators(&mk(0.0), &gens), vec![vec![0, 1, 3, 2]]);
+        // 列の数が違う生成元は使えない
+        assert!(verify_generators(&mk(1.0), &[vec![1, 0, 2]]).is_empty());
     }
 
     #[test]
