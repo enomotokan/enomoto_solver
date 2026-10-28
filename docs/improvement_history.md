@@ -10161,10 +10161,18 @@ SCIP の `sepa_mcf.c` (Achterberg & Raack 2010) を `src/mip/mcf.rs` に移植�
 main・develop 以外のブランチ (inv/cutpool-prop・inv/mcf-cuts・ccr-e9c2168a・ccr-91f8d3bb・ccr-146937e4) を develop に取り込み、
 試作を 16 スレッド・60 秒で測り直した (負けている 21 問 + MIPLIB 40 問、3 設定を交互に 2 回)。
 - 既定にした: MCF の cut-set カット (`ENOMOTO_MIP_SEPA_MCF` の既定 `auto`、`0` で止める)、orbital fixing (`ENOMOTO_MIP_NO_SYM_OF`)、
-  Schreier 生成元 (`ENOMOTO_MIP_NO_SYM_OF_SCHREIER`)、平行列の併合先の選び直し (`ENOMOTO_PRESOLVE_NO_PARALLEL_ALL_KEPT`)、
+  Schreier 生成元 (`ENOMOTO_MIP_NO_SYM_OF_SCHREIER`)、平行列の併合先の選び直し (`ENOMOTO_PRESOLVE_PARALLEL_NO_ALL_KEPT`)、
   費用 0 のスラック列の消去 (`ENOMOTO_PRESOLVE_NO_SLACK_COL`)、twoopt (`ENOMOTO_MIP_TWOOPT=0`)、rounding・shifting・intshifting を根だけ
   (`ENOMOTO_MIP_SHIFT_HEURS` の既定 `root`、`0` で止める)。21 問 SGM 18.71 / 19.72 -> 18.97 / 19.82、40 問 18.01 / 18.13 -> 17.53 / 17.97、
   Netlib 93 問 +0.15%、食い違い 0。
 - 既定にしない: `SYM_TWINS`・`PRESOLVE_PARALLEL_INT` (nw04 10 -> 30 秒、neos-960392 が時間切れ)、`LB2`・`PROX2`・`HSUB_STALL`
   (良くなる問題がなく、悪くなった 10 問で SGM +12%)。
 - 記録は `analysis/mergeall_20261028.md`。
+
+## 2026-10-28: 平行列の併合先の選び直しを既定にする (採用)
+
+`parallelcols` で群の先頭の列に併合できない列があっても、残りの列から併合先を選び直す (`ENOMOTO_PRESOLVE_PARALLEL_NO_ALL_KEPT` で
+以前の形)。以前は先頭の列だけを併合先にしたので、先頭の費用の比が違うと群全体が併合されなかった。
+- MIPLIB 40 問・負けている 21 問 (4 スレッド・60 秒・交互に各 2 回): 40 問 SGM 19.53 / 21.66 -> 20.84 / 20.10 秒 (解けた数 26 / 25 ->
+  25 / 26)、21 問 19.39 / 20.92 -> 21.51 / 19.17 秒 (18 / 19 -> 17 / 19)、不一致 0。前処理が変わるのは 3 問で、mik-250-20-75-4
+  11.3 -> 6.3 秒、swath1・physiciansched6-2 は揺れの範囲 (`analysis/slackcol_20261028.md`)。
