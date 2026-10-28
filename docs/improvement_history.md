@@ -10097,3 +10097,19 @@ inv/smallprob-overhead-20261028 の調査 (`analysis/smallprob_overhead_20261028
   hypothyroid-k1 23.5 -> 26.6 秒は少し遅い (`analysis/heurfix_20261028.md`)。
 - 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_COMPONENTS` (サブ MIP の連結成分) を足した。21 問のサブ MIP 300 本のうち分かれるのは 56 本で、多くは
   大きい 1 つ + 小さいもの (`analysis/submip_components_20261028.md`)。
+
+## 2026-10-28: 多品種フロー (MCF) の cut-set カットの試作 (既定では使わない)
+
+SCIP の `sepa_mcf.c` (Achterberg & Raack 2010) を `src/mip/mcf.rs` に移植した。元の行から流量保存の行 (係数の絶対値がそろう行) を品種に
+まとめ、容量の行を弧に、品種どうしで弧を共有する行を節点にまとめて網を作り (検出は根で 1 回、数 ms)、節点の集合 S (1 節点ずつと、
+弧の余裕・双対値で縮めた 5 つの塊の部分集合) について S の流量保存の行と T -> S の弧の容量の行を足した行を CMIR (`cuts::generate_cuts`) に
+通す。`ENOMOTO_MIP_SEPA_MCF=1` (根)、`nodes` (ノードでも)、`auto` (固定費用ネットワーク型でない問題でだけ)。
+- 検出: PROBLEMS 40 問 + ネットワーク設計型 31 問の 71 問中 27 問で網が見つかり、23 問でカットの候補が出る (PROBLEMS では 7 問・4 問)。
+- 正しさ: `cargo test --release --lib` 317 件、新しい `scripts/mip_fuzz_mcf.py` (多品種ネットワーク設計) で 1 / nodes / auto 計 700 件と
+  `scripts/mip_fuzz_fixed_charge.py` 500 件で HiGHS と不一致 0。
+- 計測 (手元 4 コア、1 スレッド x 4 並列・120 秒、既定と交互に各 2 回): 品種の多い網・VUB 型でない網で根の下界が上がる
+  (ta2-UUE は 4 回とも時間切れ -> 70〜77 秒で解ける、neos-4387871-tavua 最後のギャップ 38% -> 28%、fiber・beavma は根のギャップの
+  60%・100% を閉じる)。固定費用ネットワーク型 (mc11・n3700 系・h80x6320d など) では経路集約・flow cover とほぼ同じカットで揺れの範囲
+  (h80x6320d は再スタートの経路が変わり 52 -> 110 秒)。網のある 24 問で解けた回 11 -> 12 (全部) / 13 (`auto`)、SGM 74.66 -> 75.34 / 73.03 秒。
+- 保留: `auto` を既定にするには網のある問題をもっと集めて確かめる。記録は `analysis/mcf_cuts_20261028.md`、結果は
+  `analysis/mcf_cuts_20261028/`。
