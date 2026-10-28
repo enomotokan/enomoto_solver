@@ -200,11 +200,11 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
     // 消去された列の集合
     let mut eliminated: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
 
-    // `ENOMOTO_PRESOLVE_PARALLEL_ALL_KEPT` (試作): 群の先頭の列と併合できない列 (費用の比が違う、整数性が違う) があっても、
+    // 併合先の選び直し (既定で使う。`ENOMOTO_PRESOLVE_PARALLEL_NO_ALL_KEPT` で使わない): 群の先頭の列と併合できない列 (費用の比が違う、整数性が違う) があっても、
     // 残りの列の中で併合先を選び直して続ける。以前は先頭の列だけを併合先にしたので、先頭が費用の違う列だと群全体が併合されな
     // かった (swath1: 行 0 の費用 0 の同じ連続列 54 本が、係数の比が -1116.57 で費用 1 の列 0 と同じ群に入り、1 本も併合されない)。
     // 併合先の選び直しは群ごとに `ENOMOTO_T_PRESOLVE_PARALLEL_KEPT_TRIES` 回 (既定 64) まで
-    let all_kept = std::env::var_os("ENOMOTO_PRESOLVE_PARALLEL_ALL_KEPT").is_some();
+    let all_kept = std::env::var_os("ENOMOTO_PRESOLVE_PARALLEL_NO_ALL_KEPT").is_none();
     let kept_tries = if all_kept { std::env::var("ENOMOTO_T_PRESOLVE_PARALLEL_KEPT_TRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(64usize) } else { 1 };
     for members in groups_by_first {
         if members.len() < 2 {
@@ -304,15 +304,16 @@ mod tests {
     #[test]
     fn picks_another_kept_column_when_the_first_has_a_different_cost() {
         // 列 0 は列 1, 2, 3 に平行 (比 -2) だが費用の比が合わない。列 1, 2, 3 は同じ列で費用 0。
-        // ENOMOTO_PRESOLVE_PARALLEL_ALL_KEPT では列 1 を併合先に選び直し、2 と 3 を併合する (以前は群全体を併合しなかった)
+        // 既定では列 1 を併合先に選び直し、2 と 3 を併合する (ENOMOTO_PRESOLVE_PARALLEL_NO_ALL_KEPT の以前の形では群全体を併合しない)
         let a = csr_from_rows(&[vec![(0, 1.0), (1, -2.0), (2, -2.0), (3, -2.0)]], 4);
         let c = vec![1.0, 0.0, 0.0, 0.0];
         let lb = vec![0.0; 4];
         let ub = vec![10.0, 1.0, 1.0, 1.0];
-        assert!(merge_parallel_columns(4, &a, &[], &c, &lb, &ub).substitutions.is_empty());
-        std::env::set_var("ENOMOTO_PRESOLVE_PARALLEL_ALL_KEPT", "1");
+        std::env::set_var("ENOMOTO_PRESOLVE_PARALLEL_NO_ALL_KEPT", "1");
+        let old = merge_parallel_columns(4, &a, &[], &c, &lb, &ub);
+        std::env::remove_var("ENOMOTO_PRESOLVE_PARALLEL_NO_ALL_KEPT");
+        assert!(old.substitutions.is_empty());
         let r = merge_parallel_columns(4, &a, &[], &c, &lb, &ub);
-        std::env::remove_var("ENOMOTO_PRESOLVE_PARALLEL_ALL_KEPT");
         let merged: Vec<(usize, usize)> = r.substitutions.iter().map(|s| (s.kept, s.var)).collect();
         assert_eq!(merged, vec![(1, 2), (1, 3)]);
         assert_eq!((r.lb[1], r.ub[1]), (0.0, 3.0));
