@@ -159,6 +159,11 @@ fn map_restart_cut_subst(c: &[(usize, f64)], r: f64, p: &MipProblem, prob: &MipP
                     return None;
                 }
             }
+            PostsolveStep::Slack(sc) => {
+                if coef.get(&sc.var).is_some_and(|&a| a != 0.0) {
+                    return None;
+                }
+            }
         }
     }
     let mut out: Vec<(usize, f64)> = Vec::new();
@@ -825,6 +830,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
+        SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
         EQUIV2_USED.with(|f| f.set(false));
     }
     let r = solve_problem_inner(p, params, use_presolve);
@@ -832,6 +838,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
+        SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
         solver::ROOT_BASIS.with(|t| *t.borrow_mut() = None);
         solver::ROOT_DSE.with(|t| *t.borrow_mut() = None);
         solver::RESTART_BASIS.with(|t| *t.borrow_mut() = None);
@@ -1002,7 +1009,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             RESTART_CUTS.with(|s| *s.borrow_mut() = None);
             solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 }
         }
-        Some(Presolved::Reduced { mut prob, postsolve, scaling }) => {
+        Some(Presolved::Reduced { mut prob, mut postsolve, scaling }) => {
             if params.submip && debug_submip_components() && heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1 {
                 report_submip_components(&prob, "after presolve");
             }
@@ -1020,7 +1027,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
             }
-            let prob = if !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() { add_symmetry_rows(prob, params.verbose) } else { prob };
+            let prob = if !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() { add_symmetry_rows(prob, params.verbose, &mut postsolve) } else { prob };
+            if !params.submip && params.restarts > 0 {
+                sym_of_reverify(&prob, params.verbose);
+            }
             // 診断用: 対称性の行を加えた後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED3=ファイル`)。`ENOMOTO_MIP_DEBUG_STOP_PRESOLVED` なら
             // 書き出した後にプロセスを終える (前処理の結果の再現性の確かめ用。前処理の時間は書き出しの前に出す)
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED3").filter(|_| !params.submip && params.restarts == 0) {
@@ -1106,6 +1116,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if params.submip && debug_submip_components() && heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1 {
                 report_submip_components(p, "after presolve (no reduction)");
             }
+            if !params.submip && params.restarts > 0 {
+                sym_of_reverify(p, params.verbose);
+            }
             solver::solve(p, remaining(params))
         }
     }
@@ -1141,6 +1154,26 @@ thread_local! {
     pub(crate) static SYM_ORIG: std::cell::RefCell<Option<std::rc::Rc<MipProblem>>> = const { std::cell::RefCell::new(None) };
     /// lex-leader の行を作った生成元 (`ENOMOTO_MIP_SYM_LEX_CANON` でヒューリスティクスの解を写すのに使う。同じく消す)。
     pub(crate) static SYM_LEX_GENS: std::cell::RefCell<Option<std::rc::Rc<Vec<Vec<usize>>>>> = const { std::cell::RefCell::new(None) };
+    /// orbital fixing の生成元 ([`sym_of`]。lex-leader の行の代わり。再スタートの後は [`symmetry::verify_generators`] で
+    /// 確かめ直したものに置き換える。同じく消す)。
+    pub(crate) static SYM_OF_GENS: std::cell::RefCell<Option<std::rc::Rc<Vec<Vec<usize>>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `ENOMOTO_MIP_SYM_OF` (試作): オービトープにならない対称性を、lex-leader の行 (`x_i - x_k >= 0`) の代わりに探索中の
+/// orbital fixing (HiGHS の `StabilizerOrbits::orbitalFixing`) で扱う。行を足さないので LP が重くならず、ヒューリスティクスの
+/// 解が対称性の行に反して捨てられることもない。
+pub(crate) fn sym_of() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_OF").is_some()
+}
+
+/// [`sym_of`] で、再スタートの後の問題 `p` で前の求解の生成元を確かめ直し、成り立つものだけを残す。
+fn sym_of_reverify(p: &MipProblem, verbose: bool) {
+    let Some(gens) = SYM_OF_GENS.with(|t| t.borrow().clone()) else { return };
+    let kept = symmetry::verify_generators(p, &gens);
+    if verbose {
+        eprintln!("MIP: symmetry: orbital fixing after the restart keeps {} of {} generators", kept.len(), gens.len());
+    }
+    SYM_OF_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(kept)));
 }
 
 /// `ENOMOTO_MIP_POSTSOLVE_REPAIR` (試作、既定では使わない): 後処理した解 `x` が `p` で実行不能なとき、整数列を `x` の値 (丸めた値) に
@@ -1227,12 +1260,13 @@ fn postsolve_diag(p: &MipProblem, prob: &MipProblem, xr: &[f64], x: &[f64], post
                 kind[s.kept] = 'K';
             }
             PostsolveStep::Forcing(f) => kind[f.var] = 'F',
+            PostsolveStep::Slack(s) => kind[s.var] = 'L',
         }
     }
     let (nsub, npar, nforce) = postsolve.iter().fold((0, 0, 0), |(a, b, c), s| match s {
         PostsolveStep::Sub(_) => (a + 1, b, c),
         PostsolveStep::ParallelCol(_) => (a, b + 1, c),
-        PostsolveStep::Forcing(_) => (a, b, c + 1),
+        PostsolveStep::Forcing(_) | PostsolveStep::Slack(_) => (a, b, c + 1),
     });
     eprintln!(
         "POSTSOLVE_DIAG level {restarts}: reduced solution feasible in the presolved problem {} (1e-6), {} (1e-9); steps {} (sub {nsub}, parallel {npar}, forcing {nforce})",
@@ -1297,11 +1331,107 @@ fn postsolve_diag(p: &MipProblem, prob: &MipProblem, xr: &[f64], x: &[f64], post
     }
 }
 
+/// `ENOMOTO_MIP_SYM_TWINS` (試作): 対称性の検出の前に同じ列 (双子、[`symmetry::twin_classes`]) を列のハッシュで見つけ、
+/// 探索ではその組を探さない。探索で見つけた生成元が動かさない双子の組は 1 列に併合し (後処理の `ParallelCol`)、動かす組
+/// (より大きな対称性の一部) は隣どうしの入れ替えを生成元に足して対称性の扱いに回す。
+pub(crate) fn sym_twins() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_TWINS").is_some()
+}
+
+/// 双子の組 `classes` をそれぞれ先頭の列に併合した問題を返し、後処理の手順を `postsolve` に足す (`parallelcols` と同じ
+/// `z = x_kept + x_var`)。併合した列は境界 [0, 0]・費用 0 にして全ての行から除く。併合した列を含むプロービングの含意は捨てる。
+/// [`solver::START_SOL`]・[`solver::DEBUG_SOL`] があれば同じ写しで移す。
+fn merge_twin_classes(prob: MipProblem, classes: &[Vec<usize>], postsolve: &mut Vec<crate::presolve::PostsolveStep>) -> MipProblem {
+    let MipProblem { mut col_lo, mut col_up, mut cost, offset, sense_sign, is_int, rows, row_lo, row_up, conflict_edges, implied_bounds, .. } = prob;
+    let mut removed = vec![false; col_lo.len()];
+    let mut touched = vec![false; col_lo.len()];
+    let mut moves: Vec<(usize, usize)> = Vec::new();
+    for c in classes {
+        let kept = c[0];
+        touched[kept] = true;
+        let mut cur_lb = col_lo[kept];
+        let mut cur_ub = col_up[kept];
+        for &var in &c[1..] {
+            postsolve.push(crate::presolve::PostsolveStep::ParallelCol(crate::presolve::parallelcols::Substitution { var, kept, s: 1.0, var_lb: col_lo[var], var_ub: col_up[var], kept_lb: cur_lb }));
+            cur_lb += col_lo[var];
+            cur_ub += col_up[var];
+            removed[var] = true;
+            touched[var] = true;
+            col_lo[var] = 0.0;
+            col_up[var] = 0.0;
+            cost[var] = 0.0;
+            moves.push((var, kept));
+        }
+        col_lo[kept] = cur_lb;
+        col_up[kept] = cur_ub;
+    }
+    let rows: Vec<Vec<(usize, f64)>> = rows.into_iter().map(|r| r.into_iter().filter(|&(j, _)| !removed[j]).collect()).collect();
+    // 併合した整数列の上限を行から締める (前処理はこの後に走らないので、集合分割の行の 0-1 列の双子が [0, 2] のまま残り、
+    // 0-1 列向けの手法 (クリーク・衝突の辺) から外れていた。nw04)。行の最小・最大活動量 (無限の項の数つき) を 1 回作り、
+    // 併合先の列ごとに他の項の活動量から上限を求める
+    let act = |i: usize, upper: bool| -> (f64, usize) {
+        let (mut v, mut inf) = (0.0, 0usize);
+        for &(j, a) in &rows[i] {
+            let b = if (a > 0.0) == upper { col_up[j] } else { col_lo[j] };
+            if b.is_finite() { v += a * b } else { inf += 1 }
+        }
+        (v, inf)
+    };
+    let (minact, maxact): (Vec<(f64, usize)>, Vec<(f64, usize)>) = ((0..rows.len()).map(|i| act(i, false)).collect(), (0..rows.len()).map(|i| act(i, true)).collect());
+    let mut kept_cols: Vec<usize> = classes.iter().map(|c| c[0]).collect();
+    kept_cols.sort_unstable();
+    let mut col_rows: std::collections::HashMap<usize, Vec<(usize, f64)>> = kept_cols.iter().map(|&k| (k, Vec::new())).collect();
+    for (i, r) in rows.iter().enumerate() {
+        for &(j, a) in r {
+            if let Some(v) = col_rows.get_mut(&j) {
+                v.push((i, a));
+            }
+        }
+    }
+    for &k in &kept_cols {
+        if !is_int[k] {
+            continue;
+        }
+        let mut ub = col_up[k];
+        for &(i, a) in &col_rows[&k] {
+            // a > 0: a z <= row_up - (他の項の最小活動量)。a < 0: a z >= row_lo - (他の項の最大活動量)
+            let (bound, (v, inf), own) = if a > 0.0 { (row_up[i], minact[i], col_lo[k]) } else { (row_lo[i], maxact[i], col_lo[k]) };
+            if !bound.is_finite() || !own.is_finite() || inf > 0 {
+                continue;
+            }
+            let others = v - a * own;
+            ub = ub.min(((bound - others) / a + 1e-9).floor());
+        }
+        if ub < col_up[k] && ub >= col_lo[k] {
+            col_up[k] = ub;
+        }
+    }
+    // プロービングの含意: 消した列のものは捨てる。併合先は 0-1 に戻れば残す (双子のどちらが 1 でも、もう一方と同じ含意が
+    // 成り立つ)。一般整数のままなら捨てる
+    let drop = |j: usize| removed[j] || (touched[j] && !(col_lo[j] == 0.0 && col_up[j] == 1.0));
+    let drop: Vec<bool> = (0..removed.len()).map(drop).collect();
+    let mut q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
+    q.conflict_edges = conflict_edges.into_iter().filter(|&(a, b)| !drop[(a / 2) as usize] && !drop[(b / 2) as usize]).collect();
+    q.implied_bounds = implied_bounds.into_iter().filter(|&(j, _, k, _, _)| !drop[j as usize] && !drop[k as usize]).collect();
+    let shift = |x: &mut Vec<f64>| {
+        if x.len() == removed.len() {
+            for &(var, kept) in &moves {
+                x[kept] += x[var];
+                x[var] = 0.0;
+            }
+        }
+    };
+    solver::START_SOL.with(|t| t.borrow_mut().as_mut().map(shift));
+    solver::DEBUG_SOL.with(|t| t.borrow_mut().as_mut().map(shift));
+    q
+}
+
 /// 対称性を探し、対称性を崩す不等式 `x_i - x_k >= 0` ([`symmetry::lex_leader_pairs`]) を行として加えた問題を返す。
-fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
+/// [`sym_twins`] で双子を併合したときは後処理の手順を `postsolve` に足す。
+fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate::presolve::PostsolveStep>) -> MipProblem {
     let t0 = std::time::Instant::now();
-    // 対称性の行・固定を加える前の問題 (ヒューリスティクスはこちらで解を探し、並べ替えてから使う)
-    SYM_ORIG.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(prob.clone())));
+    let twins = if sym_twins() { symmetry::twin_classes(&prob) } else { Vec::new() };
+    let t_twins = t0.elapsed().as_secs_f64();
     let time_cap = tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64);
     // `ENOMOTO_MIP_PRESOLVE_WORK` (試作): 時間 (0.3 秒) の代わりに手間 (`ENOMOTO_T_MIP_PRESOLVE_WORK_SYM`、細分化で読んだ非零などの数) で打ち切る
     // 2 つ目の上限 `ENOMOTO_T_MIP_PRESOLVE_WORK_SYM_LOG` は細分化の並べ替えを L (1 + log2 L) で数えたもの ([`symmetry::log_work`])。
@@ -1314,7 +1444,114 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
         (time_cap, u64::MAX, u64::MAX)
     };
     let (sw0, vw0, lw0, rt0) = (symmetry::search_work(), symmetry::verify_work(), symmetry::log_work(), symmetry::refine_time());
-    let (sym, sym_work) = symmetry::detect2(&prob, time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), work_cap, log_cap);
+    let (sym, sym_work) = symmetry::detect_skip_twins(&prob, time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), work_cap, log_cap, &twins);
+    // 双子の組の扱い: 探索で見つけた生成元が動かす組は入れ替えを生成元に足し (対称性で扱う)、ほかは併合する (併合できないもの
+    // (下限が無限、整数列で境界が整数でない) も入れ替えを足す)。足す入れ替えは `ENOMOTO_T_MIP_SYM_TWIN_GENS` 個 (既定 500) と、
+    // 生成元の大きさ (列の数) の合計 2e7 までに抑える
+    let (sym, prob) = if twins.is_empty() {
+        (sym, prob)
+    } else {
+        let n = prob.n;
+        let mut moved = vec![false; n];
+        if let Some(s) = &sym {
+            for g in &s.generators {
+                for j in 0..n {
+                    if g[j] != j {
+                        moved[j] = true;
+                    }
+                }
+            }
+        }
+        // 整数列の組は、併合した列の上限が行から組の列の上限まで締まる (0-1 列なら 0-1 のまま) ときだけ併合する。締まらないと
+        // 一般整数列になり、0-1 列向けの手法・ヒューリスティクスが弱まる (swath1: 費用 0 で 1 行だけの 0-1 列 28 本が [0, 28] の
+        // 1 列になり、根の RINS の解が 395 -> 517 と悪く、再スタートの固定が 1114 -> 1 列に減った)。行の最小活動量 (無限の項の数つき)
+        // を 1 回作り、組の列の分を引いて求める
+        let act_min: Vec<(f64, usize)> = (0..prob.m)
+            .map(|i| {
+                let (mut v, mut inf) = (0.0, 0usize);
+                for &(j, a) in &prob.rows[i] {
+                    let b = if a > 0.0 { prob.col_lo[j] } else { prob.col_up[j] };
+                    if b.is_finite() { v += a * b } else { inf += 1 }
+                }
+                (v, inf)
+            })
+            .collect();
+        let act_max: Vec<(f64, usize)> = (0..prob.m)
+            .map(|i| {
+                let (mut v, mut inf) = (0.0, 0usize);
+                for &(j, a) in &prob.rows[i] {
+                    let b = if a > 0.0 { prob.col_up[j] } else { prob.col_lo[j] };
+                    if b.is_finite() { v += a * b } else { inf += 1 }
+                }
+                (v, inf)
+            })
+            .collect();
+        let sum_ub = |c: &Vec<usize>| -> f64 {
+            // z = 組の列の和。a > 0 の行: a z <= row_up - (組の外の最小活動量)。a < 0 の行: a z >= row_lo - (組の外の最大活動量)
+            let lo = prob.col_lo[c[0]];
+            let k = c.len() as f64;
+            let mut ub: f64 = c.iter().map(|&j| prob.col_up[j]).sum();
+            for &(i, a) in &prob.cols[c[0]] {
+                // 組の列は最小活動量 (a > 0) にも最大活動量 (a < 0) にも下限で入っている
+                let (bound, (v, inf)) = if a > 0.0 { (prob.row_up[i], act_min[i]) } else { (prob.row_lo[i], act_max[i]) };
+                if !bound.is_finite() || !lo.is_finite() || inf > 0 {
+                    continue;
+                }
+                ub = ub.min((bound - (v - a * lo * k)) / a + 1e-9);
+            }
+            ub.floor()
+        };
+        let mergeable = |c: &Vec<usize>| {
+            c.iter().all(|&j| prob.col_lo[j].is_finite())
+                && (!prob.is_int[c[0]] || (c.iter().all(|&j| prob.col_lo[j].fract() == 0.0 && prob.col_up[j].fract() == 0.0) && sum_ub(c) <= prob.col_up[c[0]]))
+        };
+        let cap = tunable!("ENOMOTO_T_MIP_SYM_TWIN_GENS", 500usize, usize).min((2e7 / n.max(1) as f64) as usize);
+        let (mut merge, mut keep): (Vec<Vec<usize>>, Vec<Vec<usize>>) = (Vec::new(), Vec::new());
+        for c in twins {
+            if !c.iter().any(|&j| moved[j]) && mergeable(&c) {
+                merge.push(c);
+            } else {
+                keep.push(c);
+            }
+        }
+        let mut gens = sym.map(|s| s.generators).unwrap_or_default();
+        let mut added = 0usize;
+        let mut dropped = 0usize;
+        for c in &keep {
+            for w in c.windows(2) {
+                if added >= cap {
+                    dropped += 1;
+                    continue;
+                }
+                let mut g: Vec<usize> = (0..n).collect();
+                g.swap(w[0], w[1]);
+                gens.push(g);
+                added += 1;
+            }
+        }
+        let merged_cols: usize = merge.iter().map(|c| c.len() - 1).sum();
+        if verbose {
+            eprintln!(
+                "MIP: symmetry: twins {} classes ({:.3}s): merged {} classes ({merged_cols} columns), {} classes left to the symmetry handling ({added} swaps as generators{})",
+                merge.len() + keep.len(),
+                t_twins,
+                merge.len(),
+                keep.len(),
+                if dropped > 0 { format!(", {dropped} dropped by the cap") } else { String::new() }
+            );
+        }
+        // 診断用 (`ENOMOTO_MIP_DEBUG_TWINS`): 組ごとの大きさ・整数性・境界・費用・列の非零の数・併合するか
+        if env_str!("ENOMOTO_MIP_DEBUG_TWINS").is_some() {
+            for (c, m) in merge.iter().map(|c| (c, true)).chain(keep.iter().map(|c| (c, false))).take(40) {
+                let j = c[0];
+                eprintln!("TWINS: {} cols, int {}, bounds [{}, {}], cost {}, nnz {}, merge {m}, first {:?}", c.len(), prob.is_int[j], prob.col_lo[j], prob.col_up[j], prob.cost[j], prob.cols[j].len(), &c[..c.len().min(4)]);
+            }
+        }
+        let prob = if merge.is_empty() { prob } else { merge_twin_classes(prob, &merge, postsolve) };
+        (symmetry::Symmetry::from_generators(n, gens), prob)
+    };
+    // 対称性の行・固定を加える前の問題 (ヒューリスティクスはこちらで解を探し、並べ替えてから使う)
+    SYM_ORIG.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(prob.clone())));
     let td = t0.elapsed().as_secs_f64();
     let sym_diag = format!("detect {td:.2}s, refine {:.2}s, log work {}", symmetry::refine_time() - rt0, symmetry::log_work() - lw0);
     let Some(sym) = sym else {
@@ -1333,8 +1570,29 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
             }
         }
     }
-    let pairs = symmetry::lex_leader_pairs_except(&sym, &used, &in_orb);
-    SYM_LEX_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(symmetry::lex_leader_generators_except(&sym, &used, &in_orb))));
+    let of = sym_of();
+    let pairs = if of { Vec::new() } else { symmetry::lex_leader_pairs_except(&sym, &used, &in_orb) };
+    if of {
+        // オービトープの生成元が動かす列 (オービトープの外の列を含む) を動かす生成元は使わない (群が直積に分かれる
+        // ときだけ、オービトープの固定と orbital fixing を混ぜてよい。HiGHS もオービトープの成分の置換を落とす)
+        let mut orb_moved = in_orb.clone();
+        for o in &orbs {
+            for (_, _, perm) in &o.swaps {
+                for (j, &t) in perm.iter().enumerate() {
+                    if t != j {
+                        orb_moved[j] = true;
+                    }
+                }
+            }
+        }
+        let gens = symmetry::lex_leader_generators_except(&sym, &used, &orb_moved);
+        if verbose {
+            eprintln!("MIP: symmetry: orbital fixing with {} of {} generators", gens.len(), sym.generators.len());
+        }
+        SYM_OF_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(gens)));
+    } else {
+        SYM_LEX_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(symmetry::lex_leader_generators_except(&sym, &used, &in_orb))));
+    }
     // パッキング・分割の行 (係数が全て 1、右辺 <= 1) に含まれるオービトープの行だけで作ったオービトープに置き換える
     // (列の入れ替えは全体の対称性なので、その部分行列の列を辞書式に並べた解が必ずある)。パッキングの行が半分以上の
     // ときだけ。すると列 c の最初の 1 は行 c 以降なので、x_{i,c} = 0 (c > i) を根で固定できる
@@ -1841,7 +2099,17 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     if verbose {
         let nnz0 = p.nnz;
         let nnz1: usize = rows.iter().map(|r| r.len()).sum();
-        eprintln!("MIP: presolve: rows {} -> {}, free columns {} -> {}, nonzeros {nnz0} -> {nnz1}, postsolve steps {}", p.m, rows.len(), (0..n).filter(|&j| p.col_lo[j] < p.col_up[j]).count(), n - fixed, pre.postsolve_log.len());
+        let par = |int: bool| pre.postsolve_log.iter().filter(|s| matches!(s, crate::presolve::PostsolveStep::ParallelCol(c) if p.is_int[c.var] == int)).count();
+        eprintln!(
+            "MIP: presolve: rows {} -> {}, free columns {} -> {}, nonzeros {nnz0} -> {nnz1}, postsolve steps {} (parallel columns merged: {} integer, {} continuous)",
+            p.m,
+            rows.len(),
+            (0..n).filter(|&j| p.col_lo[j] < p.col_up[j]).count(),
+            n - fixed,
+            pre.postsolve_log.len(),
+            par(true),
+            par(false)
+        );
     }
     // 代入消去で目的関数に生じた定数を offset に入れる (後処理は縮約後の点について
     // アフィンなので、任意の 1 点で元の目的値との差を測ればよい)。定数が抜けていると

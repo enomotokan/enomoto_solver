@@ -569,6 +569,17 @@ pub(super) struct Solver<'a, L: MipLp> {
     orbitopes: Rc<Vec<super::symmetry::Orbitope>>,
     /// lex-leader の行を作った生成元 ([`super::SYM_LEX_GENS`]。`ENOMOTO_MIP_SYM_LEX_CANON` で使う)
     lex_gens: Rc<Vec<Vec<usize>>>,
+    /// orbital fixing の生成元 ([`super::sym_of`]、[`super::SYM_OF_GENS`])。空なら使わない。
+    of_gens: Rc<super::symmetry::OrbitalGens>,
+    /// orbital fixing の軌道の控え (除いた生成元, 軌道)。同じ生成元を除くノードが続く (潜る) 間は作り直さない。
+    of_cache: (Vec<u32>, Rc<Vec<Vec<usize>>>),
+    /// `ENOMOTO_MIP_SYM_OF_SCHREIER`: 固定する列 (`OrbitalGens` の位置、昇順) の先頭の部分ごとの、その列を全て固定する部分群の
+    /// 生成元 (Schreier 生成元)。
+    of_stab_memo: std::collections::HashMap<Vec<u32>, Rc<Vec<Rc<Vec<u32>>>>>,
+    /// 今のノードで orbital fixing が固定した境界 (子の分枝の列に `sym` の印を付けて足す)。
+    of_node_fixes: Vec<BoundChange>,
+    /// orbital fixing の集計: 固定した境界の数、固定したノードの数、矛盾で刈ったノードの数。
+    of_stats: [u64; 3],
     /// 対称性の行・固定を加える前の問題 (なければ `None`)。ヒューリスティクスの解の判定・局所探索に使う。
     pub(super) orig: Option<Rc<MipProblem>>,
     /// オービトープの列 -> (オービトープの番号, 行)。
@@ -774,6 +785,7 @@ pub(crate) struct TreeSnapshot {
     orbitopes: Vec<super::symmetry::Orbitope>,
     orig: Option<std::sync::Arc<MipProblem>>,
     lex_gens: Vec<Vec<usize>>,
+    of_gens: Vec<Vec<usize>>,
     /// 写しを作ったときの LP の基底 (`ENOMOTO_MIP_TREE_ROOT_BASIS`、試作。列と、元の行 + `rows` の行)
     root_basis: Option<super::lp::Basis>,
 }
@@ -1313,6 +1325,12 @@ fn proof_keep_int() -> bool {
 /// ノードの伝播を不動点まで回し直すか (既定。`ENOMOTO_MIP_NO_PROP_FIXPOINT` で各段を 1 回ずつ。analysis/cutpool_prop_20261028.md)
 fn prop_fixpoint() -> bool {
     env_str!("ENOMOTO_MIP_NO_PROP_FIXPOINT").is_none()
+}
+
+/// `ENOMOTO_MIP_SYM_OF_SCHREIER` (試作): orbital fixing ([`super::sym_of`]) の固定群を、分枝した列を動かす生成元を捨てる代わりに
+/// Schreier 生成元で作る (分枝した列を全て固定する元を多く残し、軌道が細かくなりにくい)。
+fn of_schreier() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_OF_SCHREIER").is_some()
 }
 
 /// ノードでカットプールを伝播するか (既定。`ENOMOTO_MIP_NO_CUTPOOL_PROP` で止める。サブ MIP でも使う。
@@ -1977,6 +1995,15 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             None if params.submip => Rc::new(Vec::new()),
             None => super::SYM_LEX_GENS.with(|t| t.borrow().clone()).unwrap_or_default(),
         },
+        of_gens: Rc::new(super::symmetry::OrbitalGens::new(match &snap {
+            Some(sn) => sn.of_gens.clone(),
+            None if params.submip => Vec::new(),
+            None => super::SYM_OF_GENS.with(|t| t.borrow().as_ref().map(|g| (**g).clone())).unwrap_or_default(),
+        })),
+        of_cache: (vec![u32::MAX], Rc::new(Vec::new())),
+        of_stab_memo: std::collections::HashMap::new(),
+        of_node_fixes: Vec::new(),
+        of_stats: [0; 3],
         orig: match &snap {
             Some(sn) => sn.orig.as_ref().map(|o| Rc::new((**o).clone())),
             None if params.submip || env_str!("ENOMOTO_MIP_SYM_NO_ORIG").is_some() => None,
@@ -4920,6 +4947,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !prop_ok && rp_stage.is_empty() {
                 rp_stage = "p_orb";
             }
+            // orbital fixing (`ENOMOTO_MIP_SYM_OF`): 子に渡す固定はこのノードで新たに数え直す
+            self.of_node_fixes.clear();
+            let prop_ok = prop_ok && self.orbital_fixing_checked(&node.changes);
+            if !prop_ok && rp_stage.is_empty() {
+                rp_stage = "p_of";
+            }
             // 不動点まで回し直す (既定、`ENOMOTO_MIP_NO_PROP_FIXPOINT` で止める): オービトープの固定などで境界が変わったら、行・目的関数・双対証明・リテラルの衝突・
             // カットプール・オービトープの伝播を、境界が変わらなくなるまで (最大 `ENOMOTO_T_MIP_PROP_FIXPOINT_PASSES` 回) 回し直す
             // (HiGHS は対称性の固定・行・カットプール・衝突プールを 1 つの伝播の不動点まで回す。こちらは各段を 1 回ずつ順に回すので、
@@ -5707,8 +5740,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let est_gain: f64 = frac.iter().map(|&(j, v)| self.pc.estimate_gain(j, v - v.floor())).sum();
             let estimate = node_obj + est_gain;
             let f = value - value.floor();
-            let down = BoundChange { col, upper: true, value: value.floor() };
-            let up = BoundChange { col, upper: false, value: value.ceil() };
+            let down = BoundChange { col, upper: true, value: value.floor(), sym: false };
+            let up = BoundChange { col, upper: false, value: value.ceil(), sym: false };
             let prefer_up = {
                 let cu = self.pc.cost_up(col) * (1.0 - f);
                 let cd = self.pc.cost_down(col) * f;
@@ -5743,8 +5776,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let prot = self.basis_protected_cuts();
             // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
             let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
+            let of_fixes = std::mem::take(&mut self.of_node_fixes);
             let mk = |c: BoundChange| {
                 let mut ch = node.changes.clone();
+                ch.extend_from_slice(&of_fixes);
                 ch.push(c);
                 let child_lb = match sb_bounds {
                     Some((_, dn, upb)) => node_obj.max(if c.upper { dn } else { upb }),
@@ -7587,6 +7622,134 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
+    /// [`Self::orbital_fixing`] を呼び、矛盾なら衝突を作って刈った数を数える。
+    fn orbital_fixing_checked(&mut self, changes: &[BoundChange]) -> bool {
+        if self.of_gens.is_empty() {
+            return true;
+        }
+        let ok = self.orbital_fixing(changes);
+        if !ok {
+            if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
+                self.add_conflict();
+            }
+            self.of_stats[2] += 1;
+        }
+        self.dbg_trace("after orbital fixing");
+        ok
+    }
+
+    /// orbital fixing ([`super::sym_of`]、HiGHS の `StabilizerOrbits::orbitalFixing`)。`changes` はこのノードまでの分枝
+    /// (根から順)。分枝で 1 にした 0-1 列 (上向きの分枝) と分枝した一般整数列 (向きによらず) を動かす生成元を除いた
+    /// 生成元 (その列を固定する群の部分群) の軌道ごとに、軌道の 0-1 列のどれかが固定されていれば軌道の 0-1 列を全て
+    /// 同じ値に固定する (0 に下げた分枝の部分木には、軌道の列を 1 にした解の像が兄弟の部分木にあるので要らない)。
+    /// 親が固定したもの (`sym` の印) は分枝に数えない。固定のあと行を伝播し、伝播で新たに固定されたら軌道を見直す。
+    /// 固定はこのノードの部分木で成り立つので、[`Self::of_node_fixes`] に入れて子の分枝の列に足す。矛盾なら偽。
+    fn orbital_fixing(&mut self, changes: &[BoundChange]) -> bool {
+        let of = self.of_gens.clone();
+        let p = self.p;
+        let binary = |j: usize| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0;
+        if of_schreier() {
+            // 固定する列 (位置、昇順) の固定群の生成元を、先頭の部分ごとに 1 列ずつ固定して作る (控えを使い回す)
+            let mut stab: Vec<u32> = changes.iter().filter(|c| !c.sym && (!c.upper || !binary(c.col))).filter_map(|c| of.position(c.col)).collect();
+            stab.sort_unstable();
+            stab.dedup();
+            if self.of_cache.0 != stab {
+                if self.of_stab_memo.len() > tunable!("ENOMOTO_T_MIP_SYM_OF_SCHREIER_MEMO", 20000usize, usize) {
+                    self.of_stab_memo.clear();
+                }
+                let max_orbit = tunable!("ENOMOTO_T_MIP_SYM_OF_SCHREIER_ORBIT", 256usize, usize);
+                let max_gens = tunable!("ENOMOTO_T_MIP_SYM_OF_SCHREIER_GENS", 64usize, usize).max(of.gens.len());
+                let mut h: Rc<Vec<Rc<Vec<u32>>>> = self.of_stab_memo.entry(Vec::new()).or_insert_with(|| Rc::new(of.base_perms())).clone();
+                for i in 0..stab.len() {
+                    if h.is_empty() {
+                        break;
+                    }
+                    let key = stab[..=i].to_vec();
+                    h = match self.of_stab_memo.get(&key) {
+                        Some(g) => g.clone(),
+                        None => {
+                            let g = Rc::new(super::symmetry::OrbitalGens::schreier_stabilizer(&h, stab[i], max_orbit, max_gens));
+                            self.of_stab_memo.insert(key, g.clone());
+                            g
+                        }
+                    };
+                }
+                let orbits = if h.is_empty() { Vec::new() } else { of.orbits_of(&h, binary) };
+                self.of_cache = (stab, Rc::new(orbits));
+            }
+            if self.of_cache.1.is_empty() {
+                return true;
+            }
+        } else {
+            let mut excl: Vec<u32> = Vec::new();
+            for c in changes {
+                if c.sym {
+                    continue;
+                }
+                if !c.upper || !binary(c.col) {
+                    excl.extend_from_slice(of.gens_moving(c.col));
+                }
+            }
+            excl.sort_unstable();
+            excl.dedup();
+            if excl.len() == of.gens.len() {
+                return true;
+            }
+            if self.of_cache.0 != excl {
+                let orbits = of.orbits(&excl, binary);
+                self.of_cache = (excl, Rc::new(orbits));
+            }
+        }
+        let orbits = self.of_cache.1.clone();
+        let mut node_fixed = false;
+        loop {
+            let s0 = self.dom.stack_len();
+            let mut fixed = 0usize;
+            for orb in orbits.iter() {
+                let Some(&f) = orb.iter().find(|&&j| self.dom.lo[j] == self.dom.up[j]) else { continue };
+                let one = self.dom.lo[f] >= 0.5;
+                for &j in orb {
+                    let changed = if one {
+                        self.dom.lo[j] < 1.0 && {
+                            self.dom.set_external_tag(3);
+                            let r = self.dom.tighten_lower(p, j, 1.0);
+                            self.dom.set_external(false);
+                            r
+                        }
+                    } else {
+                        self.dom.up[j] > 0.0 && {
+                            self.dom.set_external_tag(3);
+                            let r = self.dom.tighten_upper(p, j, 0.0);
+                            self.dom.set_external(false);
+                            r
+                        }
+                    };
+                    if changed {
+                        fixed += 1;
+                        self.of_node_fixes.push(BoundChange { col: j, upper: !one, value: if one { 1.0 } else { 0.0 }, sym: true });
+                    }
+                    if self.dom.infeasible {
+                        return false;
+                    }
+                }
+            }
+            if fixed == 0 {
+                return true;
+            }
+            self.of_stats[0] += fixed as u64;
+            if !node_fixed {
+                node_fixed = true;
+                self.of_stats[1] += 1;
+            }
+            if !self.dom.propagate(p) {
+                return false;
+            }
+            if self.dom.stack_len() - s0 == fixed {
+                return true;
+            }
+        }
+    }
+
     /// 強分岐の子 (列 `j` を `v` の上/下に分けた側) が打ち切られたときの証明 (`infeasible` なら Farkas、そうでなければ
     /// 双対証明)。強分岐は子の境界を LP にだけ置くので、証明が今の定義域で破れているかを正しく調べ、衝突解析がその
     /// 境界を決定として使えるよう、その間だけ定義域にも置く (伝播はしない)。
@@ -8745,6 +8908,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.add_conflict();
                 }
                 self.orbitope_prunes += 1;
+                return false;
+            }
+            if !self.orbital_fixing_checked(changes) {
                 return false;
             }
             if self.dom.stack_len() == s0 {
@@ -10482,7 +10648,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new((**o).clone()));
         let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), root_basis };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), root_basis };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
@@ -11276,6 +11442,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: node diag: nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}", self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows());
             if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() || self.tree_sep {
                 eprintln!("MIP: adaptive node cuts: rounds {} effective {} skipped {} (rate {:.3}), node cut secs {:.2}, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 {:?}, cut nnz {:?} (rows mean {:.1})", self.nca_stats[0], self.nca_stats[1], self.nca_stats[2], self.nca_ema, self.node_cut_secs, self.nca_hist, self.nca_cut_nnz, self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / self.p.m.max(1) as f64);
+            }
+            if !self.of_gens.is_empty() {
+                eprintln!("MIP: orbital fixing ({} generators): fixed {} bounds at {} nodes, pruned {} nodes", self.of_gens.gens.len(), self.of_stats[0], self.of_stats[1], self.of_stats[2]);
             }
             if !self.orbitopes.is_empty() {
                 eprintln!("MIP: orbitopes {}: fixed {} bounds, pruned {} nodes", self.orbitopes.len(), self.orbitope_fixings, self.orbitope_prunes);

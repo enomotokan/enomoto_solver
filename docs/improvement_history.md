@@ -10127,3 +10127,31 @@ SCIP の `sepa_mcf.c` (Achterberg & Raack 2010) を `src/mip/mcf.rs` に移植�
   (h80x6320d は再スタートの経路が変わり 52 -> 110 秒)。網のある 24 問で解けた回 11 -> 12 (全部) / 13 (`auto`)、SGM 74.66 -> 75.34 / 73.03 秒。
 - 保留: `auto` を既定にするには網のある問題をもっと集めて確かめる。記録は `analysis/mcf_cuts_20261028.md`、結果は
   `analysis/mcf_cuts_20261028/`。
+
+## 2026-10-28: orbital fixing の試作 (`ENOMOTO_MIP_SYM_OF`、既定では使わない)
+
+オービトープにならない対称性を、lex-leader の行の代わりに探索中の orbital fixing (HiGHS の `StabilizerOrbits::orbitalFixing`) で扱う。
+分枝で 1 にした 0-1 列・分枝した一般整数列を動かす生成元を除いた生成元の軌道で、固定された列があれば軌道の 0-1 列を同じ値に固定する。
+固定は子の分枝の列に `sym` の印を付けて渡し、再スタートの後は生成元を確かめ直す (`symmetry::verify_generators`)。
+- 対象は lex-leader の行を足す 20 問。4 スレッド・60 秒・交互に各 2 回で SGM 20.13 -> 19.84 秒 (解けた回数 29 -> 30 / 40)、
+  1 スレッド・4 並列で 29.79 -> 28.10 秒、MIPLIB の最適値との不一致 0。neos5 は時間切れ -> 49〜51 秒、drayage-25-23・nw04・
+  sp150x300d が速い。lex-leader の行が根の LP を強めていた qiu・physiciansched6-2 は下界が悪くなる (qiu は 1 スレッドで大きく悪い)。
+- 対称性の乱数問題 (`scripts/mip_fuzz_symmetric.py`、頂点推移的なグラフの安定集合など) で HiGHS との不一致 0。
+- 16 スレッドで確かめていないので既定にはしない。記録は `analysis/sym_of_20261028.md`、結果は `analysis/sym_of_20261028/`。
+
+## 2026-10-28: Schreier 生成元・整数の平行列の併合・双子の検出の試作 (どれも既定では使わない)
+
+- `ENOMOTO_MIP_SYM_OF_SCHREIER`: orbital fixing の固定群を Schreier 生成元で作る。20 問・4 スレッドで SYM_OF 20.61 -> 20.32 秒
+  (解けた回数 28 -> 30 / 40)、揺れの範囲 (`analysis/sym_of_20261028.md`)。
+- `ENOMOTO_PRESOLVE_PARALLEL_INT`: 前処理の平行列の併合を、比 ±1・整数の境界の整数列にも広げる。nw04 3427 列などを併合。時間は未計測。
+- `ENOMOTO_MIP_SYM_TWINS`: 対称性の検出の前に同じ列 (双子) を列のハッシュで見つけ (nw04 は 4327 組を 0.024 秒)、生成元が動かさない
+  組は併合、動かす組は入れ替えを生成元にする。双子のある 8 問・4 スレッドで SGM 18.28 -> 22.27 秒と遅い (nw04 12 -> 29 秒。
+  解の見つかり方が変わる)。不一致 0 (`analysis/parint_20261028.md`)。
+
+## 2026-10-28: 平行列の併合先の選び直し・費用 0 のスラック列の消去の試作 (どちらも既定では使わない)
+
+- `ENOMOTO_PRESOLVE_PARALLEL_ALL_KEPT`: `parallelcols` が群の先頭の列だけを併合先にしていたので、先頭の費用の比が違うと群全体が
+  併合されなかった (swath1 の費用 0 の同じ連続列 54 本)。併合先を選び直す。64 問で効くのは 3 問、mik-250-20-75-4 9.8〜12.9 -> 6.3〜7.1 秒。
+- `ENOMOTO_PRESOLVE_SLACK_COL` (`presolve/slackcol.rs`): 費用 0・有界の連続列が不等式の 1 行 (範囲制約の 2 行) にだけ現れるとき、
+  列を消して行を緩める。64 問で効くのは swath1・timtab1 だけで時間は変わらない。乱数問題で不一致 0。
+- 記録は `analysis/slackcol_20261028.md`。
