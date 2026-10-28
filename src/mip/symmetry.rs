@@ -502,6 +502,9 @@ pub struct Orbitope {
     pub row_packing: Vec<bool>,
     /// 列の入れ替えの生成元 (列 a, 列 b, 問題全体の置換 `perm[j] = σ(j)`。0-1 でない列も一緒に動かす)。
     pub swaps: Vec<(usize, usize, std::sync::Arc<Vec<usize>>)>,
+    /// 列の入れ替えがオービトープの変数だけを動かす (双子の組から作った 1xk、`ENOMOTO_MIP_SYM_TWIN_ORBITOPE`)。`swaps` は
+    /// 持たず、[`Self::canonicalize`] は値を直接入れ替える。
+    pub local: bool,
 }
 
 /// 置換 `perm` (`perm[j] = σ(j)`) で解を写す: `y[σ(j)] = x[j]`。
@@ -521,6 +524,7 @@ impl Orbitope {
             packing: rows.iter().all(|&i| self.row_packing[i]),
             row_packing: rows.iter().map(|&i| self.row_packing[i]).collect(),
             swaps: Vec::new(),
+            local: self.local,
         }
     }
 
@@ -581,6 +585,12 @@ impl Orbitope {
                 }
             }
             if best != pos {
+                if self.local {
+                    for line in &self.vars {
+                        x.swap(line[pos], line[best]);
+                    }
+                    continue;
+                }
                 let Some(t) = self.transposition(pos, best) else { return false };
                 apply_perm(&t, x);
             }
@@ -714,7 +724,7 @@ pub fn find_orbitopes(p: &MipProblem, sym: &Symmetry) -> (Vec<Orbitope>, Vec<boo
             }
             used[k] = true;
             let nrows = mat.len();
-            out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps: vec![(0, 1, std::sync::Arc::new(g.clone()))] });
+            out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps: vec![(0, 1, std::sync::Arc::new(g.clone()))], local: false });
             continue;
         }
         // 列 c (1 行目の c 番目) を動かす生成元の組
@@ -826,7 +836,7 @@ pub fn find_orbitopes(p: &MipProblem, sym: &Symmetry) -> (Vec<Orbitope>, Vec<boo
                 eprintln!("SYM orbitope other row: {} cols {:?} int {:?} col positions {:?}", v.len(), v, v.iter().map(|&j| p.is_int[j]).collect::<Vec<_>>(), sigs);
             }
         }
-        out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps });
+        out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps, local: false });
     }
     (out, used)
 }
@@ -1533,6 +1543,23 @@ mod tests {
     }
 
     #[test]
+    fn local_orbitope_canonicalize_sorts_twins_in_place() {
+        // 双子の組 {1, 3, 4} の 1x3 のオービトープ: 値を降順に並べ替え、組の外の列は動かさない
+        let orb = Orbitope { vars: vec![vec![1, 3, 4]], packing: false, row_packing: vec![false], swaps: Vec::new(), local: true };
+        let mut x = vec![7.0, 0.0, 9.0, 1.0, 1.0];
+        assert!(orb.canonicalize(&mut x));
+        assert_eq!(x, vec![7.0, 1.0, 9.0, 1.0, 0.0]);
+        // orbitopal fixing: 先頭の列を 0 にすると、組の残りも 0 に固定される
+        let lo = vec![0.0; 5];
+        let mut up = vec![1.0; 5];
+        up[1] = 0.0;
+        let fixes = orbitopal_fixing(&orb, &lo, &up).expect("feasible");
+        let mut fixed: Vec<usize> = fixes.iter().filter(|f| f.1 == 0.0).map(|f| f.0).collect();
+        fixed.sort_unstable();
+        assert_eq!(fixed, vec![3, 4]);
+    }
+
+    #[test]
     fn two_column_orbitope_for_two_identical_machines() {
         // 2 台の同じ機械 m に 3 つの仕事 t: 列 2t+m。生成元は 1 本 (0 1)(2 3)(4 5) で、列を区別する生成元の組が同じになる
         let mut rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(2, 1.0), (3, 1.0)], vec![(4, 1.0), (5, 1.0)]];
@@ -1594,7 +1621,7 @@ mod tests {
     #[test]
     fn orbitopal_fixing_small_cases() {
         // 2 行 3 列。何も固定がなければ: 最大 [11,11,11]、最小 [00,00,00] で固定なし
-        let orb = Orbitope { vars: vec![vec![0, 1, 2], vec![3, 4, 5]], packing: false, row_packing: vec![false; 2], swaps: Vec::new() };
+        let orb = Orbitope { vars: vec![vec![0, 1, 2], vec![3, 4, 5]], packing: false, row_packing: vec![false; 2], swaps: Vec::new(), local: false };
         let (lo, up) = (vec![0.0; 6], vec![1.0; 6]);
         assert_eq!(orbitopal_fixing(&orb, &lo, &up), Some(vec![]));
         // x_{0,1} = 1 (列 1 の 1 行目): 列 0 >=_lex 列 1 なので x_{0,0} = 1 に固定される
@@ -1623,7 +1650,7 @@ mod tests {
             let r = 1 + (rnd() * 3.0) as usize;
             let s = 2 + (rnd() * 2.0) as usize;
             let vars: Vec<Vec<usize>> = (0..r).map(|i| (0..s).map(|c| i * s + c).collect()).collect();
-            let orb = Orbitope { vars: vars.clone(), packing: false, row_packing: vec![false; r], swaps: Vec::new() };
+            let orb = Orbitope { vars: vars.clone(), packing: false, row_packing: vec![false; r], swaps: Vec::new(), local: false };
             let nv = r * s;
             let mut lo = vec![0.0; nv];
             let mut up = vec![1.0; nv];
@@ -1677,7 +1704,7 @@ mod tests {
             let r = 1 + (rnd() * 4.0) as usize;
             let s = 2 + (rnd() * 2.0) as usize;
             let vars: Vec<Vec<usize>> = (0..r).map(|i| (0..s).map(|c| i * s + c).collect()).collect();
-            let orb = Orbitope { vars: vars.clone(), packing: true, row_packing: vec![true; r], swaps: Vec::new() };
+            let orb = Orbitope { vars: vars.clone(), packing: true, row_packing: vec![true; r], swaps: Vec::new(), local: false };
             let nv = r * s;
             let mut lo = vec![0.0; nv];
             let mut up = vec![1.0; nv];
