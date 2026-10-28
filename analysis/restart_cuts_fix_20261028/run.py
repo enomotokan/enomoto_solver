@@ -22,6 +22,7 @@ ap.add_argument("--threads", type=int, default=4)
 ap.add_argument("--rep-start", type=int, default=0)  # 設定を交互に 1 回ずつ回すとき、記録する回の番号の始まり
 ap.add_argument("--skip-done", action="store_true")  # 出力に同じ (問題, 設定, 回) がもうあれば解かない (止まった計測の続きから)
 a = ap.parse_args()
+Path(a.out).parent.mkdir(parents=True, exist_ok=True)
 done = set()
 if a.skip_done and Path(a.out).exists():
     for l in open(a.out, encoding="utf-8"):

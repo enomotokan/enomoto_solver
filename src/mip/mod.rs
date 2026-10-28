@@ -1002,6 +1002,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 }
         }
         Some(Presolved::Reduced { mut prob, postsolve, scaling }) => {
+            if params.submip && debug_submip_components() && heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1 {
+                report_submip_components(&prob, "after presolve");
+            }
             if (env_str!("ENOMOTO_MIP_DUAL_UB").is_some() && !params.submip) || crate::fj_p3_force() {
                 let k = dual_bound_tightening(&mut prob);
                 if params.verbose {
@@ -1098,7 +1101,12 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             }
             if ok { r } else { solver::solve(p, remaining(params)) }
         }
-        None => solver::solve(p, remaining(params)),
+        None => {
+            if params.submip && debug_submip_components() && heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1 {
+                report_submip_components(p, "after presolve (no reduction)");
+            }
+            solver::solve(p, remaining(params))
+        }
     }
 }
 
@@ -2752,6 +2760,83 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         eprintln!("MIP: probing: fixed {tiny} columns of width within tolerance");
     }
     Some(true)
+}
+
+thread_local! {
+    /// 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_COMPONENTS` 用: このスレッドで解いているサブ MIP を出したヒューリスティクスの名前
+    pub(crate) static SUBMIP_LABEL: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+}
+
+/// 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_COMPONENTS` か。
+pub(crate) fn debug_submip_components() -> bool {
+    env_str!("ENOMOTO_MIP_DEBUG_SUBMIP_COMPONENTS").is_some()
+}
+
+/// 自由な列 (下限 < 上限) だけで見た連結成分の大きさ (列の数、大きい順)。行は自由な列を 2 本以上含むものだけがつなぐ。
+/// `drop` が真の列はつながりから外す (分枝で固定したと思った列。成分の数にも数えない)。
+fn free_column_components(p: &MipProblem, drop: &[bool]) -> Vec<usize> {
+    let n = p.n;
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(par: &mut [usize], mut x: usize) -> usize {
+        while par[x] != x {
+            par[x] = par[par[x]];
+            x = par[x];
+        }
+        x
+    }
+    let free = |j: usize| p.col_lo[j] < p.col_up[j] && !drop[j];
+    for row in &p.rows {
+        let mut first: Option<usize> = None;
+        for &(j, _) in row {
+            if !free(j) {
+                continue;
+            }
+            match first {
+                None => first = Some(j),
+                Some(f) => {
+                    let (a, b) = (find(&mut parent, f), find(&mut parent, j));
+                    if a != b {
+                        parent[a] = b;
+                    }
+                }
+            }
+        }
+    }
+    let mut size = vec![0usize; n];
+    for j in 0..n {
+        if free(j) {
+            let r = find(&mut parent, j);
+            size[r] += 1;
+        }
+    }
+    let mut s: Vec<usize> = size.into_iter().filter(|&k| k > 0).collect();
+    s.sort_unstable_by(|a, b| b.cmp(a));
+    s
+}
+
+/// 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_COMPONENTS` (既定では使わない): サブ MIP `p` の自由な列の連結成分を 1 行出す。そのまま (`as is`) と、
+/// 自由な整数列のうち行の数の多い上位 1%・5% をつながりから外したとき (分枝で先に固定すれば分かれるか)。`stage` は前処理の前か後か
+pub(crate) fn report_submip_components(p: &MipProblem, stage: &str) {
+    let fmt = |s: &[usize]| {
+        let top: Vec<String> = s.iter().take(5).map(|k| k.to_string()).collect();
+        let single = s.iter().filter(|&&k| k == 1).count();
+        format!("{} components (largest {}, singletons {single}, top [{}])", s.len(), s.first().copied().unwrap_or(0), top.join(","))
+    };
+    let none = vec![false; p.n];
+    let base = free_column_components(p, &none);
+    let nfree: usize = base.iter().sum();
+    let mut ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && p.col_lo[j] < p.col_up[j]).collect();
+    ints.sort_by_key(|&j| std::cmp::Reverse(p.cols[j].len()));
+    let mut parts = vec![format!("as is {}", fmt(&base))];
+    for pct in [1usize, 5] {
+        let k = (ints.len() * pct).div_ceil(100);
+        let mut drop = vec![false; p.n];
+        for &j in ints.iter().take(k) {
+            drop[j] = true;
+        }
+        parts.push(format!("top {pct}% ({k} int cols) dropped {}", fmt(&free_column_components(p, &drop))));
+    }
+    eprintln!("SUBMIP_COMP: {} {stage}: rows {}, free cols {nfree} (int {}); {}", SUBMIP_LABEL.with(|l| l.get()), p.m, ints.len(), parts.join("; "));
 }
 
 /// 早めのプロービングとかけ直し (`ENOMOTO_MIP_NO_PROBE_EARLY_REPRESOLVE` で使わない) の短いプロービング: 行の多い 0-1 列から `ENOMOTO_T_MIP_PROBE_EARLY_CANDS` 本 (既定 64)

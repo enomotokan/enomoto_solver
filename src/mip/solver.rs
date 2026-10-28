@@ -9725,6 +9725,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP:   parallel sub-MIP started ({}): {nfree} free columns of {}", self.heur_label, sub.n);
         }
         let label = self.heur_label;
+        // 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_COMPONENTS`: 自由な列の連結成分 (前処理の前。後はサブ MIP のスレッドの `solve_problem` の中で出す)
+        let comp_diag = super::debug_submip_components() && !self.params.submip;
+        if comp_diag {
+            super::SUBMIP_LABEL.with(|l| l.set(label));
+            super::report_submip_components(&sub, "before presolve");
+            super::SUBMIP_LABEL.with(|l| l.set(""));
+        }
         let fix_rate = self.submip_fix_rate.take();
         let basis = self.submip_basis.take();
         let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| std::sync::Arc::new(SubmipCtl::new(self.prune_limit())));
@@ -9733,6 +9740,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             std::thread::spawn(move || {
                 // 別スレッドで解くサブ MIP も入れ子の深さ 1 として数える ([`super::heuristics::SUBMIP_DEPTH`])
                 super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
+                if comp_diag {
+                    super::SUBMIP_LABEL.with(|l| l.set(label));
+                }
                 if let Some(c) = ctl2 {
                     ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(c));
                 }
@@ -9807,6 +9817,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if self.params.verbose {
                     eprintln!("MIP:   parallel sub-MIP ({label}): status {:?}, nodes {}, objective {:?}, {:.2}s", r.status, r.nodes, r.objective, t0.elapsed().as_secs_f64());
+                }
+                if super::debug_submip_components() && !self.params.submip {
+                    eprintln!("SUBMIP_COMP: {label} result: status {:?}, nodes {}, {:.2}s", r.status, r.nodes, t0.elapsed().as_secs_f64());
                 }
                 let mut acc = false;
                 let infeasible = r.status == MipStatus::Infeasible;

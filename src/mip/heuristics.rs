@@ -1502,6 +1502,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             crate::set_fj_p3_force(true);
         }
         let t_sub = Instant::now();
+        // 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_COMPONENTS`: 外側の根から出したサブ MIP の自由な列の連結成分 (前処理の前。後は `solve_problem` の中で出す)
+        let comp_diag = super::debug_submip_components() && depth == 0;
+        if comp_diag {
+            super::SUBMIP_LABEL.with(|l| l.set(self.heur_label));
+            super::report_submip_components(&sub, "before presolve");
+        }
         // 成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP` で使わない): 根の (主のスレッドで解く) サブ MIP も成果で打ち切る ([`super::solver::submip_outcome_stop`])
         if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
             let c = std::sync::Arc::new(super::solver::SubmipCtl::new(self.prune_limit()));
@@ -1517,6 +1523,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose {
             let nfree = (0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();
             eprintln!("MIP:   sub-MIP: {nfree} free columns of {}, status {:?}, nodes {}, objective {:?}, {:.2}s", p.n, r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64());
+        }
+        if comp_diag {
+            eprintln!("SUBMIP_COMP: {} result: status {:?}, nodes {}, {:.2}s", self.heur_label, r.status, r.nodes, t_sub.elapsed().as_secs_f64());
+            super::SUBMIP_LABEL.with(|l| l.set(""));
         }
         self.heur_iters += r.lp_iterations;
         let acc = match r.x {
