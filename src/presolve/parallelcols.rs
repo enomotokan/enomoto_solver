@@ -106,6 +106,11 @@ pub fn merge_parallel_columns(n: usize, a: &FaerCsr, real_rows: &[Vec<(usize, f6
 pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> Option<ParallelColsResult> {
     let ar = a.as_ref();
     let n_a_rows = ar.nrows();
+    // `ENOMOTO_PRESOLVE_PARALLEL_INT` (試作): 整数列どうしも、比 s = ±1 で境界が整数なら併合する (HiGHS の前処理は整数の平行列も
+    // 併合する)。z = x_k ± x_j の整数値はどれも整数の x_k, x_j に分けられる。同じ列 (対称性の 2 列の入れ替え) を対称性の扱いに
+    // 回さずに消す。整数列と連続列は併合しない
+    let par_int = std::env::var_os("ENOMOTO_PRESOLVE_PARALLEL_INT").is_some();
+    let int_bounds = |j: usize| lb[j] == lb[j].round() && (ub[j] == f64::INFINITY || ub[j] == ub[j].round());
 
     // この呼び出し内だけの通し行番号: `a` の行が 0..n_a_rows、`real_rows` がその後。
     // 圧縮列形式へ直接流し込む。行順に出力するので各列は行番号昇順になる (署名計算の前提)。
@@ -146,7 +151,7 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
     for j in 0..n {
         let col = columns.col(j);
         // 候補条件: 実制約行に現れる、下限が有限 (上限は `+inf` でもよい)、固定されていない。
-        if col.is_empty() || !lb[j].is_finite() || (ub[j] - lb[j]).abs() < TOL || crate::presolve::is_int_col(j) {
+        if col.is_empty() || !lb[j].is_finite() || (ub[j] - lb[j]).abs() < TOL || (crate::presolve::is_int_col(j) && !(par_int && int_bounds(j))) {
             continue;
         }
         // 先頭係数の逆数 (正規化用)
@@ -207,7 +212,17 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
                 continue;
             }
             let var_lead = columns.col(var)[0].1;
-            let s = var_lead / kept_lead;
+            let mut s = var_lead / kept_lead;
+            let (int_kept, int_var) = (crate::presolve::is_int_col(kept), crate::presolve::is_int_col(var));
+            if int_kept != int_var {
+                continue;
+            }
+            if int_kept {
+                if (s.abs() - 1.0).abs() > 1e-12 {
+                    continue;
+                }
+                s = s.signum();
+            }
             // 比例コスト条件 c_var == s * c_kept を相対許容誤差で判定
             let predicted_c_var = s * new_c[kept];
             let tol = TOL * (1.0 + new_c[var].abs().max(predicted_c_var.abs()));
@@ -258,6 +273,32 @@ mod tests {
     use super::*;
     use crate::sparse::csr_from_rows;
     use crate::sparse::csr_row_vec;
+
+    #[test]
+    fn merges_integer_columns_only_with_unit_scale() {
+        // 整数列 0, 1 は同じ列 (s = 1)、整数列 2 は列 0 の 2 倍 (s = 2)、連続列 3 は列 0 と同じ。
+        // ENOMOTO_PRESOLVE_PARALLEL_INT では 0 と 1 だけを併合する (2 は s が 1 でない、3 は整数列と連続列)。
+        std::env::set_var("ENOMOTO_PRESOLVE_PARALLEL_INT", "1");
+        crate::presolve::INT_MASK.with(|m| *m.borrow_mut() = Some(std::rc::Rc::new(vec![true, true, true, false])));
+        let a = csr_from_rows(&[vec![(0, 1.0), (1, 1.0), (2, 2.0), (3, 1.0)], vec![(0, 3.0), (1, 3.0), (2, 6.0), (3, 3.0)]], 4);
+        let c = vec![2.0, 2.0, 4.0, 2.0];
+        let lb = vec![0.0; 4];
+        let ub = vec![1.0, 1.0, 1.0, 1.0];
+        let r = merge_parallel_columns(4, &a, &[], &c, &lb, &ub);
+        crate::presolve::INT_MASK.with(|m| *m.borrow_mut() = None);
+        std::env::remove_var("ENOMOTO_PRESOLVE_PARALLEL_INT");
+        assert_eq!(r.substitutions.len(), 1);
+        let sub = &r.substitutions[0];
+        assert_eq!((sub.kept, sub.var, sub.s), (0, 1, 1.0));
+        assert_eq!((r.lb[0], r.ub[0]), (0.0, 2.0));
+        // z の整数値はどれも整数の x0, x1 に分かれる
+        for z in 0..=2 {
+            let mut x = vec![z as f64, 0.0, 0.0, 0.0];
+            sub.apply(&mut x);
+            assert_eq!(x[0] + x[1], z as f64);
+            assert!(x[..2].iter().all(|v| v.fract() == 0.0 && (0.0..=1.0).contains(v)));
+        }
+    }
 
     #[test]
     fn merges_two_identical_columns_with_equal_cost() {
