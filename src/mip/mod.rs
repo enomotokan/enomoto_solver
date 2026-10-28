@@ -1003,7 +1003,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             RESTART_CUTS.with(|s| *s.borrow_mut() = None);
             solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 }
         }
-        Some(Presolved::Reduced { mut prob, postsolve, scaling }) => {
+        Some(Presolved::Reduced { mut prob, mut postsolve, scaling }) => {
             if params.submip && debug_submip_components() && heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1 {
                 report_submip_components(&prob, "after presolve");
             }
@@ -1021,7 +1021,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
             }
-            let prob = if !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() { add_symmetry_rows(prob, params.verbose) } else { prob };
+            let prob = if !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() { add_symmetry_rows(prob, params.verbose, &mut postsolve) } else { prob };
             if !params.submip && params.restarts > 0 {
                 sym_of_reverify(&prob, params.verbose);
             }
@@ -1324,11 +1324,63 @@ fn postsolve_diag(p: &MipProblem, prob: &MipProblem, xr: &[f64], x: &[f64], post
     }
 }
 
+/// `ENOMOTO_MIP_SYM_TWINS` (試作): 対称性の検出の前に同じ列 (双子、[`symmetry::twin_classes`]) を列のハッシュで見つけ、
+/// 探索ではその組を探さない。探索で見つけた生成元が動かさない双子の組は 1 列に併合し (後処理の `ParallelCol`)、動かす組
+/// (より大きな対称性の一部) は隣どうしの入れ替えを生成元に足して対称性の扱いに回す。
+pub(crate) fn sym_twins() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_TWINS").is_some()
+}
+
+/// 双子の組 `classes` をそれぞれ先頭の列に併合した問題を返し、後処理の手順を `postsolve` に足す (`parallelcols` と同じ
+/// `z = x_kept + x_var`)。併合した列は境界 [0, 0]・費用 0 にして全ての行から除く。併合した列を含むプロービングの含意は捨てる。
+/// [`solver::START_SOL`]・[`solver::DEBUG_SOL`] があれば同じ写しで移す。
+fn merge_twin_classes(prob: MipProblem, classes: &[Vec<usize>], postsolve: &mut Vec<crate::presolve::PostsolveStep>) -> MipProblem {
+    let MipProblem { mut col_lo, mut col_up, mut cost, offset, sense_sign, is_int, rows, row_lo, row_up, conflict_edges, implied_bounds, .. } = prob;
+    let mut removed = vec![false; col_lo.len()];
+    let mut touched = vec![false; col_lo.len()];
+    let mut moves: Vec<(usize, usize)> = Vec::new();
+    for c in classes {
+        let kept = c[0];
+        touched[kept] = true;
+        let mut cur_lb = col_lo[kept];
+        let mut cur_ub = col_up[kept];
+        for &var in &c[1..] {
+            postsolve.push(crate::presolve::PostsolveStep::ParallelCol(crate::presolve::parallelcols::Substitution { var, kept, s: 1.0, var_lb: col_lo[var], var_ub: col_up[var], kept_lb: cur_lb }));
+            cur_lb += col_lo[var];
+            cur_ub += col_up[var];
+            removed[var] = true;
+            touched[var] = true;
+            col_lo[var] = 0.0;
+            col_up[var] = 0.0;
+            cost[var] = 0.0;
+            moves.push((var, kept));
+        }
+        col_lo[kept] = cur_lb;
+        col_up[kept] = cur_ub;
+    }
+    let rows: Vec<Vec<(usize, f64)>> = rows.into_iter().map(|r| r.into_iter().filter(|&(j, _)| !removed[j]).collect()).collect();
+    let mut q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
+    q.conflict_edges = conflict_edges.into_iter().filter(|&(a, b)| !touched[(a / 2) as usize] && !touched[(b / 2) as usize]).collect();
+    q.implied_bounds = implied_bounds.into_iter().filter(|&(j, _, k, _, _)| !touched[j as usize] && !touched[k as usize]).collect();
+    let shift = |x: &mut Vec<f64>| {
+        if x.len() == removed.len() {
+            for &(var, kept) in &moves {
+                x[kept] += x[var];
+                x[var] = 0.0;
+            }
+        }
+    };
+    solver::START_SOL.with(|t| t.borrow_mut().as_mut().map(shift));
+    solver::DEBUG_SOL.with(|t| t.borrow_mut().as_mut().map(shift));
+    q
+}
+
 /// 対称性を探し、対称性を崩す不等式 `x_i - x_k >= 0` ([`symmetry::lex_leader_pairs`]) を行として加えた問題を返す。
-fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
+/// [`sym_twins`] で双子を併合したときは後処理の手順を `postsolve` に足す。
+fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate::presolve::PostsolveStep>) -> MipProblem {
     let t0 = std::time::Instant::now();
-    // 対称性の行・固定を加える前の問題 (ヒューリスティクスはこちらで解を探し、並べ替えてから使う)
-    SYM_ORIG.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(prob.clone())));
+    let twins = if sym_twins() { symmetry::twin_classes(&prob) } else { Vec::new() };
+    let t_twins = t0.elapsed().as_secs_f64();
     let time_cap = tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64);
     // `ENOMOTO_MIP_PRESOLVE_WORK` (試作): 時間 (0.3 秒) の代わりに手間 (`ENOMOTO_T_MIP_PRESOLVE_WORK_SYM`、細分化で読んだ非零などの数) で打ち切る
     // 2 つ目の上限 `ENOMOTO_T_MIP_PRESOLVE_WORK_SYM_LOG` は細分化の並べ替えを L (1 + log2 L) で数えたもの ([`symmetry::log_work`])。
@@ -1341,7 +1393,65 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
         (time_cap, u64::MAX, u64::MAX)
     };
     let (sw0, vw0, lw0, rt0) = (symmetry::search_work(), symmetry::verify_work(), symmetry::log_work(), symmetry::refine_time());
-    let (sym, sym_work) = symmetry::detect2(&prob, time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), work_cap, log_cap);
+    let (sym, sym_work) = symmetry::detect_skip_twins(&prob, time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), work_cap, log_cap, &twins);
+    // 双子の組の扱い: 探索で見つけた生成元が動かす組は入れ替えを生成元に足し (対称性で扱う)、ほかは併合する (併合できないもの
+    // (下限が無限、整数列で境界が整数でない) も入れ替えを足す)。足す入れ替えは `ENOMOTO_T_MIP_SYM_TWIN_GENS` 個 (既定 500) と、
+    // 生成元の大きさ (列の数) の合計 2e7 までに抑える
+    let (sym, prob) = if twins.is_empty() {
+        (sym, prob)
+    } else {
+        let n = prob.n;
+        let mut moved = vec![false; n];
+        if let Some(s) = &sym {
+            for g in &s.generators {
+                for j in 0..n {
+                    if g[j] != j {
+                        moved[j] = true;
+                    }
+                }
+            }
+        }
+        let mergeable = |c: &Vec<usize>| c.iter().all(|&j| prob.col_lo[j].is_finite() && (!prob.is_int[j] || (prob.col_lo[j].fract() == 0.0 && (prob.col_up[j] == f64::INFINITY || prob.col_up[j].fract() == 0.0))));
+        let cap = tunable!("ENOMOTO_T_MIP_SYM_TWIN_GENS", 500usize, usize).min((2e7 / n.max(1) as f64) as usize);
+        let (mut merge, mut keep): (Vec<Vec<usize>>, Vec<Vec<usize>>) = (Vec::new(), Vec::new());
+        for c in twins {
+            if !c.iter().any(|&j| moved[j]) && mergeable(&c) {
+                merge.push(c);
+            } else {
+                keep.push(c);
+            }
+        }
+        let mut gens = sym.map(|s| s.generators).unwrap_or_default();
+        let mut added = 0usize;
+        let mut dropped = 0usize;
+        for c in &keep {
+            for w in c.windows(2) {
+                if added >= cap {
+                    dropped += 1;
+                    continue;
+                }
+                let mut g: Vec<usize> = (0..n).collect();
+                g.swap(w[0], w[1]);
+                gens.push(g);
+                added += 1;
+            }
+        }
+        let merged_cols: usize = merge.iter().map(|c| c.len() - 1).sum();
+        if verbose {
+            eprintln!(
+                "MIP: symmetry: twins {} classes ({:.3}s): merged {} classes ({merged_cols} columns), {} classes left to the symmetry handling ({added} swaps as generators{})",
+                merge.len() + keep.len(),
+                t_twins,
+                merge.len(),
+                keep.len(),
+                if dropped > 0 { format!(", {dropped} dropped by the cap") } else { String::new() }
+            );
+        }
+        let prob = if merge.is_empty() { prob } else { merge_twin_classes(prob, &merge, postsolve) };
+        (symmetry::Symmetry::from_generators(n, gens), prob)
+    };
+    // 対称性の行・固定を加える前の問題 (ヒューリスティクスはこちらで解を探し、並べ替えてから使う)
+    SYM_ORIG.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(prob.clone())));
     let td = t0.elapsed().as_secs_f64();
     let sym_diag = format!("detect {td:.2}s, refine {:.2}s, log work {}", symmetry::refine_time() - rt0, symmetry::log_work() - lw0);
     let Some(sym) = sym else {

@@ -182,9 +182,80 @@ pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64) ->
 
 /// [`detect`] に 2 つ目の手間の上限 `log_cap` ([`LWORK`] の増分) を足したもの。
 pub fn detect2(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64, log_cap: u64) -> (Option<Symmetry>, u64) {
+    detect_skip_twins(p, time_cap, max_tries, work_cap, log_cap, &[])
+}
+
+/// [`detect2`] で、同じ列の組 `twins` ([`twin_classes`]) を始めから同じ軌道として扱い、その中の組は探さないもの。
+/// 返す生成元は探索で見つけたものだけ (`twins` の入れ替えは含まない。軌道も生成元だけから作る)。
+pub fn detect_skip_twins(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64, log_cap: u64, twins: &[Vec<usize>]) -> (Option<Symmetry>, u64) {
     let (w0, l0) = (work(), log_work());
-    let r = detect_inner(p, time_cap, max_tries, (w0.saturating_add(work_cap), l0.saturating_add(log_cap)));
+    let r = detect_inner(p, time_cap, max_tries, (w0.saturating_add(work_cap), l0.saturating_add(log_cap)), twins);
     (r, work() - w0)
+}
+
+/// 同じ列 (双子) の組: 境界・整数性・費用と、全ての行の (行, 係数) が一致する列 (2 列以上の組だけ、各組は番号の昇順、
+/// 組は先頭の番号の順)。組の中の 2 列の入れ替えは確かめなくても問題の対称性。固定された列と行に現れない列は除く。
+/// 列ごとのハッシュで分けてから中身を比べるので O(非零の数)。
+pub fn twin_classes(p: &MipProblem) -> Vec<Vec<usize>> {
+    let key = |j: usize| -> u64 {
+        let mut h = mix(mix(fbits(p.cost[j]), fbits(p.col_lo[j])), mix(fbits(p.col_up[j]), p.is_int[j] as u64));
+        for &(i, a) in &p.cols[j] {
+            h = mix(mix(h, i as u64), fbits(a));
+        }
+        h
+    };
+    let same = |a: usize, b: usize| {
+        p.cost[a] == p.cost[b] && p.col_lo[a] == p.col_lo[b] && p.col_up[a] == p.col_up[b] && p.is_int[a] == p.is_int[b] && p.cols[a] == p.cols[b]
+    };
+    let mut buckets: std::collections::HashMap<u64, Vec<Vec<usize>>> = std::collections::HashMap::new();
+    for j in 0..p.n {
+        if p.col_lo[j] == p.col_up[j] || p.cols[j].is_empty() {
+            continue;
+        }
+        let groups = buckets.entry(key(j)).or_default();
+        match groups.iter_mut().find(|g| same(g[0], j)) {
+            Some(g) => g.push(j),
+            None => groups.push(vec![j]),
+        }
+    }
+    let mut out: Vec<Vec<usize>> = buckets.into_values().flatten().filter(|g| g.len() >= 2).collect();
+    out.sort_unstable_by_key(|g| g[0]);
+    out
+}
+
+impl Symmetry {
+    /// 生成元から軌道を作る (2 列以上の軌道だけ番号を付ける)。生成元がなければ `None`。
+    pub fn from_generators(n: usize, generators: Vec<Vec<usize>>) -> Option<Symmetry> {
+        if generators.is_empty() {
+            return None;
+        }
+        let mut uf: Vec<usize> = (0..n).collect();
+        for g in &generators {
+            for j in 0..n {
+                let (x, y) = (find(&mut uf, j), find(&mut uf, g[j]));
+                if x != y {
+                    uf[x] = y;
+                }
+            }
+        }
+        let mut size = vec![0usize; n];
+        for j in 0..n {
+            let r = find(&mut uf, j);
+            size[r] += 1;
+        }
+        let (mut id, mut num, mut orbit) = (vec![usize::MAX; n], 0, vec![usize::MAX; n]);
+        for j in 0..n {
+            let r = find(&mut uf, j);
+            if size[r] >= 2 {
+                if id[r] == usize::MAX {
+                    id[r] = num;
+                    num += 1;
+                }
+                orbit[j] = id[r];
+            }
+        }
+        Some(Symmetry { generators, orbit, num_orbits: num })
+    }
 }
 
 /// 手間の上限 (`WORK` の終わり, `LWORK` の終わり) を越えたか。
@@ -192,7 +263,7 @@ fn over(end: (u64, u64)) -> bool {
     work() > end.0 || log_work() > end.1
 }
 
-fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64, u64)) -> Option<Symmetry> {
+fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64, u64), twins: &[Vec<usize>]) -> Option<Symmetry> {
     let t0 = std::time::Instant::now();
     let n = p.n;
     if n < 2 || p.m == 0 {
@@ -237,6 +308,15 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64,
         *row_counts.entry(row_hash(p.row_lo[i], p.row_up[i], &mut tmp)).or_insert(0) += 1;
     }
     let mut uf: Vec<usize> = (0..n).collect();
+    // 双子は始めから同じ軌道にしておき、その組は探さない (生成元にはしない。呼び出し側が扱う)
+    for t in twins {
+        for &j in &t[1..] {
+            let (x, y) = (find(&mut uf, t[0]), find(&mut uf, j));
+            if x != y {
+                uf[x] = y;
+            }
+        }
+    }
     let mut generators: Vec<Vec<usize>> = Vec::new();
     let mut tries = 0usize;
     // `ENOMOTO_T_MIP_SYM_TIME_EXT` = e (> `time_cap`、試作。既定 0 で使わない): 上限 `time_cap` に達した時点で、生成元が
@@ -278,6 +358,9 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64,
     }
     if generators.is_empty() {
         return None;
+    }
+    if !twins.is_empty() {
+        return Symmetry::from_generators(n, generators);
     }
     // 軌道 (2 列以上)
     let mut size = vec![0usize; n];
@@ -1359,6 +1442,27 @@ mod tests {
         // 軌道の上限を超えたら q を動かさない生成元だけ (S3 x S3 で q = 0: 後ろの S3 の 2 本)
         let gens = vec![p(vec![1, 0, 2, 3, 4, 5]), p(vec![1, 2, 0, 3, 4, 5]), p(vec![0, 1, 2, 4, 3, 5]), p(vec![0, 1, 2, 4, 5, 3])];
         assert_eq!(OrbitalGens::schreier_stabilizer(&gens, 0, 2, 1000).len(), 2);
+    }
+
+    #[test]
+    fn twin_classes_needs_same_rows_bounds_and_cost() {
+        // 列 0, 1, 3 は同じ (行 0 と 1 に係数 2, 1)。列 2 は係数が違う、列 4 は費用が違う、列 5 は同じ形だが固定、列 6 は行に現れない
+        let rows = vec![
+            vec![(0, 2.0), (1, 2.0), (2, 3.0), (3, 2.0), (4, 2.0), (5, 2.0)],
+            vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0), (4, 1.0), (5, 1.0)],
+        ];
+        let p = MipProblem::from_rows(
+            vec![0.0; 7],
+            vec![1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0],
+            vec![1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0],
+            0.0,
+            1.0,
+            vec![true; 7],
+            rows,
+            vec![-inf(); 2],
+            vec![3.0, 2.0],
+        );
+        assert_eq!(twin_classes(&p), vec![vec![0, 1, 3]]);
     }
 
     #[test]
