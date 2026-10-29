@@ -13,7 +13,7 @@ use super::lp::{LpStatus, SolveLimits, VarStatus};
 use super::lp_api::MipLp;
 use super::problem::MipProblem;
 use super::pseudocost::Pseudocost;
-use super::queue::{BoundChange, NodeQueue, OpenNode};
+use super::queue::{BoundChange, NodeQueue, OpenNode, SbInherit, SbLine};
 use std::rc::Rc;
 
 /// 証明 `sum a_j x_j` の境界 `lo`/`up` での最小活動量 (有限部分, 無限の項の数) と `max_j |a_j| (u_j - l_j)`
@@ -715,6 +715,13 @@ pub(super) struct Solver<'a, L: MipLp> {
     sb_tighten_count: u64,
     /// 強分岐の下の子で軌道に沿って 0 にした列の数 (`ENOMOTO_MIP_SB_OF`)
     sb_of_count: u64,
+    /// 処理中のノードが親から引き継いだもの ([`OpenNode::sb`])
+    sb_cur: Option<Rc<SbInherit>>,
+    /// このノードの強分岐で得た固定・締め付け (`ENOMOTO_MIP_SB_TIGHTEN_INHERIT`) と凸性の直線 (`ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR`)
+    sb_node_fixes: Vec<BoundChange>,
+    sb_node_lines: Vec<SbLine>,
+    /// 引き継いだ境界を当てた数、凸性の直線で締めた数
+    sb_inherit_stats: [u64; 2],
     /// 木の ZI round の (呼んだ回数, 成功した回数, `ENOMOTO_MIP_ZIROUND_ADAPT` で省いた回数)
     zi_stats: [u64; 3],
     /// 費用を持つ整数列を先に分枝するか (`ENOMOTO_MIP_COST_PRIORITY`)
@@ -959,7 +966,7 @@ impl SnapNode {
         s
     }
     fn into_open(self) -> OpenNode {
-        OpenNode { changes: self.changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None }
+        OpenNode { changes: self.changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None }
     }
 }
 
@@ -2151,6 +2158,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_prop_stats: [0; 2],
         sb_tighten_count: 0,
         sb_of_count: 0,
+        sb_cur: None,
+        sb_node_fixes: Vec::new(),
+        sb_node_lines: Vec::new(),
+        sb_inherit_stats: [0; 2],
         zi_stats: [0; 3],
         cost_prio: !params.submip && env_str!("ENOMOTO_MIP_COST_PRIORITY").is_some() && {
             // CBC の条件: 費用を持つ連続列がなく、費用を持つ整数列が 100 本以下で整数列の 1/5 未満、行が 100 を超える
@@ -4538,12 +4549,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(snap) = self.snap.clone() {
             for (k, n) in snap.nodes.iter().enumerate() {
                 let tags = Some(Rc::new(vec![snap.serial << 32 | k as u64]));
-                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags });
+                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None });
             }
             self.snap_alive = vec![true; snap.nodes.len()];
             first = false;
         } else {
-            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot, tags: None });
+            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot, tags: None, sb: None });
         }
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         // 木を分け合う従のスレッドは、未処理のノードが 2 つ以上になってから (根を分枝してから) 始める (根で解ける問題では
@@ -5005,6 +5016,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             self.dbg_trace("after replaying the branches");
+            // 強分岐で得た部分木の境界と凸性の直線を当てる (`ENOMOTO_MIP_SB_TIGHTEN_INHERIT`・`ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR`)
+            self.sb_cur = node.sb.clone();
+            self.sb_node_fixes.clear();
+            self.sb_node_lines.clear();
+            if !self.apply_sb_inherit() {
+                if tree_log() && !self.params.submip {
+                    eprintln!("ENODE d={} r=sbinherit rows={}", node.depth, self.lp.num_rows());
+                }
+                continue;
+            }
             let stack_before_prop = self.dom.stack_len();
             if dn && !self.dbg_contains() {
                 self.dbg_lost("domain excludes the debug solution before node propagation", dn);
@@ -5973,6 +5994,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
             let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
             let of_fixes = std::mem::take(&mut self.of_node_fixes);
+            let sb_child = self.sb_child_inherit(&node);
             let mk = |c: BoundChange| {
                 let mut ch = node.changes.clone();
                 ch.extend_from_slice(&of_fixes);
@@ -5992,6 +6014,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     branch: Some((col, !c.upper, value, lp_obj)),
                     prot: prot.clone(),
                     tags: node.tags.clone(),
+                    sb: sb_child.clone(),
                 }
             };
             let mut sec = mk(second_c);
@@ -7371,6 +7394,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if had && !self.dbg_contains() {
                         self.dbg_lost(&format!("strong branching fixing x{j} >= {}", v.ceil()), true);
                     }
+                    if sb_inherit() {
+                        self.sb_node_fixes.push(BoundChange { col: j, upper: false, value: v.ceil(), sym: true });
+                    }
                     bound_changes += 1;
                 }
                 (false, true) => {
@@ -7381,6 +7407,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if had && !self.dbg_contains() {
                         self.dbg_lost(&format!("strong branching fixing x{j} <= {}", v.floor()), true);
                     }
+                    if sb_inherit() {
+                        self.sb_node_fixes.push(BoundChange { col: j, upper: true, value: v.floor(), sym: true });
+                    }
                     bound_changes += 1;
                 }
                 _ => {
@@ -7388,20 +7417,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // (CBC の `CBCNODE_TIGHTEN_BOUNDS`、CbcNode.cpp)。LP の値は x_j の境界の凸関数なので、下の子の値 o_d から
                     // 1 単位あたりの増分 (o_d − z)/(v − ⌊v⌋) を取ると、x_j <= t の値は z + (v − t)·増分 以上。これが打ち切り値を
                     // 超える t は除ける。今の LP 解は新しい境界の内側にあるので、解き直しは要らない
-                    if env_str!("ENOMOTO_MIP_SB_TIGHTEN").is_some() && self.dom.up[j] - self.dom.lo[j] > 1.5 {
+                    if (env_str!("ENOMOTO_MIP_SB_TIGHTEN").is_some() || sb_ancestor()) && self.dom.up[j] - self.dom.lo[j] > 1.5 {
                         let cutoff = self.prune_limit();
-                        if cutoff.is_finite() {
-                            for (side, is_up) in [(0usize, false), (1usize, true)] {
-                                let o = child_obj[side];
-                                let change = o - node_obj;
-                                if !o.is_finite() || change <= 1e-5 {
-                                    continue;
-                                }
-                                let dist0 = if is_up { v.ceil() - v } else { v - v.floor() };
-                                if dist0 <= 1e-3 {
-                                    continue;
-                                }
-                                let per = change / (dist0 + 1e-7);
+                        for (side, is_up) in [(0usize, false), (1usize, true)] {
+                            let o = child_obj[side];
+                            let change = o - node_obj;
+                            if !o.is_finite() || change <= 1e-5 {
+                                continue;
+                            }
+                            let dist0 = if is_up { v.ceil() - v } else { v - v.floor() };
+                            if dist0 <= 1e-3 {
+                                continue;
+                            }
+                            let per = change / (dist0 + 1e-7);
+                            if sb_ancestor() {
+                                self.sb_node_lines.push(SbLine { col: j as u32, up: is_up, z: node_obj, v, per });
+                            }
+                            if env_str!("ENOMOTO_MIP_SB_TIGHTEN").is_none() || !cutoff.is_finite() {
+                                continue;
+                            }
+                            {
                                 let distance = (cutoff - node_obj) / per + 1e-3;
                                 if distance >= 5.0 {
                                     continue;
@@ -7412,12 +7447,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     if nu < self.dom.up[j] {
                                         self.dom.tighten_upper(self.p, j, nu);
                                         self.sb_tighten_count += 1;
+                                        if sb_inherit() {
+                                            self.sb_node_fixes.push(BoundChange { col: j, upper: true, value: nu, sym: true });
+                                        }
                                     }
                                 } else {
                                     let nl = (v - distance).ceil();
                                     if nl > self.dom.lo[j] {
                                         self.dom.tighten_lower(self.p, j, nl);
                                         self.sb_tighten_count += 1;
+                                        if sb_inherit() {
+                                            self.sb_node_fixes.push(BoundChange { col: j, upper: false, value: nl, sym: true });
+                                        }
                                     }
                                 }
                                 self.dom.set_external(false);
@@ -7954,6 +7995,69 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let Some(orb) = orbits.iter().find(|o| o.contains(&j)) else { return Vec::new() };
         orb.iter().copied().filter(|&k| k != j && self.dom.up[k] > 0.0 && self.dom.lo[k] < self.dom.up[k]).collect()
+    }
+
+    /// 親から引き継いだ強分岐の境界 ([`SbInherit::fixes`]) と凸性の直線 ([`SbInherit::lines`]) を定義域に当てる。
+    /// 直線は今の打ち切り値で締め直す: 下の子の直線なら x_j <= t の値は z + (v − t)·per 以上なので、打ち切り値 U に届く
+    /// t <= v − (U − z)/per は除ける (x_j >= ⌈v − distance⌉)。上の子なら x_j <= ⌊v + distance⌋。矛盾したら偽 (ノードを刈る)
+    fn apply_sb_inherit(&mut self) -> bool {
+        let Some(sb) = self.sb_cur.clone() else { return true };
+        let p = self.p;
+        self.dom.set_external_tag(2);
+        for c in &sb.fixes {
+            let changed = if c.upper { c.value < self.dom.up[c.col] && self.dom.tighten_upper(p, c.col, c.value) } else { c.value > self.dom.lo[c.col] && self.dom.tighten_lower(p, c.col, c.value) };
+            self.sb_inherit_stats[0] += changed as u64;
+            if self.dom.infeasible {
+                self.dom.set_external(false);
+                return false;
+            }
+        }
+        let u = self.prune_limit();
+        if u.is_finite() {
+            for l in &sb.lines {
+                let j = l.col as usize;
+                let distance = (u - l.z) / l.per + 1e-3;
+                if !(distance.is_finite() && distance > 0.0) {
+                    continue;
+                }
+                let changed = if l.up {
+                    let nu = (l.v + distance).floor();
+                    nu < self.dom.up[j] && self.dom.tighten_upper(p, j, nu)
+                } else {
+                    let nl = (l.v - distance).ceil();
+                    nl > self.dom.lo[j] && self.dom.tighten_lower(p, j, nl)
+                };
+                self.sb_inherit_stats[1] += changed as u64;
+                if self.dom.infeasible {
+                    self.dom.set_external(false);
+                    return false;
+                }
+            }
+        }
+        self.dom.set_external(false);
+        true
+    }
+
+    /// 子に引き継ぐもの: 親から引き継いだものに、このノードの強分岐で得たものを足す (直線は新しいものから最大
+    /// `ENOMOTO_T_MIP_SB_LINES_MAX` 本)。何もなければ `None`
+    fn sb_child_inherit(&mut self, _node: &OpenNode) -> Option<Rc<SbInherit>> {
+        if !sb_inherit() && !sb_ancestor() {
+            return None;
+        }
+        let fixes = std::mem::take(&mut self.sb_node_fixes);
+        let lines = std::mem::take(&mut self.sb_node_lines);
+        if fixes.is_empty() && lines.is_empty() {
+            return self.sb_cur.clone();
+        }
+        let mut out = self.sb_cur.as_deref().cloned().unwrap_or_default();
+        out.fixes.extend(fixes);
+        out.lines.extend(lines);
+        let max = tunable!("ENOMOTO_T_MIP_SB_LINES_MAX", 64usize, usize);
+        if out.lines.len() > max {
+            let k = out.lines.len() - max;
+            out.lines.drain(..k);
+        }
+        Some(Rc::new(out))
     }
 
     /// [`Self::orbital_fixing`] を呼び、矛盾なら衝突を作って刈った数を数える。
@@ -11775,6 +11879,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.sb_fix_resolve_count > 0 {
                 eprintln!("MIP: strong branching: resolved the node LP {} times after fixings (ENOMOTO_MIP_SB_FIX_RESOLVE)", self.sb_fix_resolve_count);
             }
+            if self.sb_inherit_stats != [0; 2] {
+                eprintln!("MIP: strong branching: inherited bounds applied {}, ancestor convexity tightenings {} (ENOMOTO_MIP_SB_TIGHTEN_INHERIT / ANCESTOR)", self.sb_inherit_stats[0], self.sb_inherit_stats[1]);
+            }
             if self.sb_of_count > 0 {
                 eprintln!("MIP: strong branching: fixed {} orbit columns to 0 in down children (ENOMOTO_MIP_SB_OF)", self.sb_of_count);
             }
@@ -11869,4 +11976,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
 /// 刈り込みの上限を、暫定解より厳密に小さい最大の格子の点で取るか (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`)。
 fn obj_step_lattice() -> bool {
     env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some()
+}
+
+/// `ENOMOTO_MIP_SB_TIGHTEN_INHERIT` (試作、既定では使わない): 強分岐で得た境界 (片側の打ち切りによる固定と凸性による締め付け、
+/// `ENOMOTO_MIP_SB_TIGHTEN`) を両方の子に引き継ぐ。既定では定義域にだけ置くので、潜る子にしか残らず、兄弟や待ち行列から取り出した
+/// ノードでは (根から分枝だけを積み直すので) 失われる
+fn sb_inherit() -> bool {
+    env_str!("ENOMOTO_MIP_SB_TIGHTEN_INHERIT").is_some()
+}
+
+/// `ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR` (試作、既定では使わない): 強分岐の子の LP 値から得た凸性の直線 ([`SbLine`]) を子孫に引き継ぎ、
+/// 子孫のノードの始めにその時の打ち切り値で締め直す (暫定解が良くなるほど強く締まる。CBC は強分岐したノードでしか使わない)
+fn sb_ancestor() -> bool {
+    env_str!("ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR").is_some()
 }

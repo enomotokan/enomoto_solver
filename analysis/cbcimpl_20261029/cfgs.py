@@ -25,4 +25,8 @@ CFGS = {
     "ineq_all": {"ENOMOTO_MIP_INEQ_SINGLETON_ALL": "1"},
     "vubs": {"ENOMOTO_MIP_TIGHTEN_VUBS": "1"},
     "node_perturb": {"ENOMOTO_NODE_PERTURB": "1"},
+    # 強分岐の境界の引き継ぎ (2 段目の計測)
+    "sb_inh": {"ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1"},
+    "sbt_a": {"ENOMOTO_MIP_SB_TIGHTEN": "1", "ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1"},
+    "sbt_ab": {"ENOMOTO_MIP_SB_TIGHTEN": "1", "ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1", "ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR": "1"},
 }

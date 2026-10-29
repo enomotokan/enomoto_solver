@@ -58,6 +58,30 @@ pub struct OpenNode {
     /// 中のノードの番号)。子は親のものを引き継ぐ。二分探索のスレッドが「この祖先の部分木には t 未満の解がない」と示したら、
     /// 下界を t に上げる。
     pub tags: Option<Rc<Vec<u64>>>,
+    /// 強分岐で得た、部分木で成り立つ境界 (`ENOMOTO_MIP_SB_TIGHTEN_INHERIT`) と凸性の直線 (`ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR`)。
+    /// 親から子へ引き継ぎ、ノードの処理の始めに定義域に当てる ([`super::solver`] の `apply_sb_inherit`)
+    pub sb: Option<Rc<SbInherit>>,
+}
+
+/// 強分岐の子の LP 値から得た凸性の直線 (列 `col` の上の子 (`up`) か下の子)。祖先のノードの LP 値 `z`・列の値 `v`・1 単位あたりの
+/// 増分 `per` から、x_j <= t (下) の LP の値は z + (v − t)·per 以上 (上なら x_j >= t で z + (t − v)·per 以上)。子孫のノードの LP は
+/// 祖先より制約が多いので、子孫でもこの下界は成り立つ
+#[derive(Clone, Copy, Debug)]
+pub struct SbLine {
+    pub col: u32,
+    pub up: bool,
+    pub z: f64,
+    pub v: f64,
+    pub per: f64,
+}
+
+/// 強分岐で得て子に引き継ぐもの ([`OpenNode::sb`])。
+#[derive(Clone, Debug, Default)]
+pub struct SbInherit {
+    /// 強分岐の片側の打ち切りによる固定と凸性による締め付け (このノードの部分木で成り立つ)
+    pub fixes: Vec<BoundChange>,
+    /// 凸性の直線 (祖先のものも含む。新しいものが後ろ)
+    pub lines: Vec<SbLine>,
 }
 
 /// 待ち行列。
