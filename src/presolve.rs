@@ -96,7 +96,8 @@ fn round_int_bounds(lb: &mut [f64], ub: &mut [f64]) -> bool {
 
 /// 整数最適化用の前処理: 整数列の印 `is_int` を付けて [`run_extended`] を実行する。スケーリングはしない
 /// (整数列の列スケールは 1 でなければならないため)。双対の議論に基づく縮約 (dualpropagate、
-/// ineqsingleton、forcingcol) は整数最適化では正しくないので行わない。
+/// ineqsingleton、forcingcol) は整数最適化では正しくないので行わない (forcingcol は主問題の議論なので
+/// `ENOMOTO_MIP_FORCING_COL` で使える。ineqsingleton は `ENOMOTO_MIP_INEQ_SINGLETON`・`ENOMOTO_MIP_INEQ_SINGLETON_ALL` で使える)。
 #[allow(clippy::too_many_arguments)]
 pub fn run_extended_mip(n: usize, a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], c: &[f64], is_int: &[bool], prop_passes: usize, rounds: usize, inner_rounds: usize) -> ExtendedPresolveResult {
     INT_MASK.with(|m| *m.borrow_mut() = Some(std::rc::Rc::new(is_int.to_vec())));
@@ -193,6 +194,73 @@ fn build_a_g_direct(variables: &[VariableData], constraints: &[ConstraintRow]) -
         if v.lb.is_finite() {
             g.push_singleton(j, -1.0);
             h.push(-v.lb);
+        }
+    }
+    Some((a.finish(), b, g.finish(), h))
+}
+
+/// 整数最適化の前処理 (`mip::presolve_mip_depth`) 用: 行 `rows` (列番号の昇順) と行の範囲 `[row_lo, row_up]`、列の境界
+/// `lb`/`ub` から、[`build_a_g`] に「`lo == up` なら等式、そうでなければ有限な `lo` の `>=` 行、有限な `up` の `<=` 行の順の
+/// 制約 (定数項 0)」を渡したときと同じ `(A, b, G, h)` を作る (`LinearExpr` の BTreeMap への詰め直しと範囲制約の行の複製を
+/// 省く)。各行の列番号が狭義の昇順なら BTreeMap の走査順と同じ項の並びになり、右辺も `rhs - 0.0` と同じ計算をするので、
+/// 結果はビット単位で同じ。昇順でない行があるか、[`build_a_g_direct`] と同じく行が拒否されたら `None`
+/// (呼び出し側が従来の経路で作る)。
+pub fn build_a_g_from_ranged_rows(lb: &[f64], ub: &[f64], rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]) -> Option<(FaerCsr, Vec<f64>, FaerCsr, Vec<f64>)> {
+    let n = lb.len();
+    let (mut nnz_a, mut nnz_g, mut rows_a, mut rows_gc) = (0usize, 0usize, 0usize, 0usize);
+    for (i, r) in rows.iter().enumerate() {
+        if !r.windows(2).all(|w| w[0].0 < w[1].0) {
+            return None;
+        }
+        let (lo, up) = (row_lo[i], row_up[i]);
+        if lo == up {
+            nnz_a += r.len();
+            rows_a += 1;
+        } else {
+            let k = lo.is_finite() as usize + up.is_finite() as usize;
+            nnz_g += k * r.len();
+            rows_gc += k;
+        }
+    }
+    let n_bounds = (0..n).map(|j| ub[j].is_finite() as usize + lb[j].is_finite() as usize).sum::<usize>();
+    let rows_g = rows_gc + n_bounds;
+    let mut a = CsrRowBuilder::with_capacity(n, rows_a, nnz_a);
+    let mut g = CsrRowBuilder::with_capacity(n, rows_g, nnz_g + n_bounds);
+    let mut b: Vec<f64> = Vec::with_capacity(rows_a);
+    let mut h: Vec<f64> = Vec::with_capacity(rows_g);
+    let mut buf: Vec<(usize, f64)> = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
+        let (lo, up) = (row_lo[i], row_up[i]);
+        if lo == up {
+            if !a.push_row(r) {
+                return None;
+            }
+            b.push(lo - 0.0);
+        } else {
+            if lo.is_finite() {
+                buf.clear();
+                buf.extend(r.iter().map(|&(j, v)| (j, -v)));
+                if !g.push_row(&buf) {
+                    return None;
+                }
+                h.push(-(lo - 0.0));
+            }
+            if up.is_finite() {
+                if !g.push_row(r) {
+                    return None;
+                }
+                h.push(up - 0.0);
+            }
+        }
+    }
+    for j in 0..n {
+        if ub[j].is_finite() {
+            g.push_singleton(j, 1.0);
+            h.push(ub[j]);
+        }
+        if lb[j].is_finite() {
+            g.push_singleton(j, -1.0);
+            h.push(-lb[j]);
         }
     }
     Some((a.finish(), b, g.finish(), h))
@@ -477,6 +545,12 @@ pub fn run_extended(
         Some(v) => v != "0",
         None => large && tunable!("ENOMOTO_T_INEQ_SINGLETON_LARGE", INEQ_SINGLETON_LARGE, usize) != 0,
     };
+    // `ENOMOTO_MIP_INEQ_SINGLETON_ALL` (試作、既定では使わない): 整数最適化の前処理で、不等式行の列シングルトン (`ineqsingleton`) を
+    // 問題の大きさ (`LARGE_PRESOLVE_MIN_ROWS` 以上) によらず使う (`ENOMOTO_MIP_INEQ_SINGLETON` と同じ扱い: 整数列は固定だけ、
+    // 連続列は固定と等式化)。CBC の前処理 (CoinPresolve の `slack_singleton_action`・`implied_free` が不等式行の列シングルトンを
+    // 大きさによらず扱う) にならう。`ENOMOTO_INEQ_SINGLETON=0` を付けたときは使わない
+    let mip_ineq_all = int_mask().is_some() && env_str!("ENOMOTO_MIP_INEQ_SINGLETON_ALL").is_some() && env_str!("ENOMOTO_INEQ_SINGLETON") != Some("0");
+    let ineq_singleton_on = ineq_singleton_on || mip_ineq_all;
 
     // 全消去ステップの時系列ログ。
     let mut postsolve_log: Vec<PostsolveStep> = Vec::new();
@@ -642,7 +716,16 @@ pub fn run_extended(
 
         // 強制列 (`forcingcol`): 費用 0 で、現れるすべての不等式行を緩める向きに無限に動ける列を、
         // その行ごと取り除く (値は後処理で決める)。消去した列は `[0, 0]` に固定する。
-        if tunable!("ENOMOTO_T_FORCING_COL", crate::params::presolve::FORCING_COL, usize) != 0 && int_mask().is_none() && !dbg_skip("forcingcol") {
+        // `ENOMOTO_MIP_FORCING_COL` (試作、既定では使わない): 整数最適化の前処理でも使う。強制列は主問題の議論 (費用 0 の列を
+        // 行が緩む向きに動かせば、他の列の値によらず行を満たせる) なので整数最適化でも正しい。整数列を消したときは
+        // 後処理で値を整数に丸める ([`forcingcol::ForcingCol::apply`])。CBC の前処理 (CoinPresolve の `do_tighten_action`、
+        // CoinPresolveTighten.cpp。整数列にも使い、後処理で丸める) にならう。LP の既定 (`ENOMOTO_T_FORCING_COL=0`) とは別に切り替える
+        let forcing_on = if int_mask().is_none() {
+            tunable!("ENOMOTO_T_FORCING_COL", crate::params::presolve::FORCING_COL, usize) != 0
+        } else {
+            env_str!("ENOMOTO_MIP_FORCING_COL").is_some()
+        };
+        if forcing_on && !dbg_skip("forcingcol") {
             let forced = timed_step!("forcingcol", forcingcol::eliminate_forcing_columns(n, &a, &mut cur_real_rows, &mut cur_real_rhs, &c, &lb, &ub));
             if env_str!("ENOMOTO_DEBUG_FORCING_COL").is_some() && !forced.is_empty() {
                 eprintln!("DEBUG_FORCING_COL: round={round_idx} columns={} rows={}", forced.len(), forced.iter().map(|f| f.rows.len()).sum::<usize>());
@@ -740,7 +823,7 @@ pub fn run_extended(
         // physiciansched6-2 では目的の費用が `y >= Σ 罰則の列` の形の連続列 (この行だけに出る) にあり、これを消さないと
         // 罰則の列が費用のない鎖のまま残って Feasibility Jump が解を見つけられない)
         let mip_mask = int_mask();
-        if ineq_singleton_on && (mip_mask.is_none() || env_str!("ENOMOTO_MIP_INEQ_SINGLETON").is_some() || crate::fj_p3_force()) {
+        if ineq_singleton_on && (mip_mask.is_none() || env_str!("ENOMOTO_MIP_INEQ_SINGLETON").is_some() || crate::fj_p3_force() || mip_ineq_all) {
             let isr = timed_step!("ineqsingleton", ineqsingleton::resolve_inequality_singletons_int(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub, mip_mask.as_deref().map(|v| v.as_slice())));
             if env_str!("ENOMOTO_DEBUG_INEQ_SINGLETON").is_some() {
                 eprintln!("DEBUG_INEQ_SINGLETON: fixes={} implied_equalities={}", isr.fixes.len(), isr.implied_equalities.len());
@@ -1255,6 +1338,15 @@ pub fn run_extended(
         return extended_infeasible(sc, a, b, c, n);
     }
 
+    // `ENOMOTO_PRESOLVE_LOOSE_IMPLIED` (試作、既定では使わない。LP のみ): 前処理が締めた列の境界のうち、残った行と
+    // ほかの列の境界から導ける (冗長な) ものを元の境界に戻して単体法に渡す ([`loosen_implied_bounds`])
+    if int_mask().is_none() && env_str!("ENOMOTO_PRESOLVE_LOOSE_IMPLIED").is_some() {
+        let (k, tried) = loosen_implied_bounds(&mut lb, &mut ub, &orig_lb, &orig_ub, &a, &b, &free.real_rows, &free.real_rhs, env_str!("ENOMOTO_PRESOLVE_LOOSE_IMPLIED") == Some("clp"));
+        if env_str!("ENOMOTO_DEBUG_LOOSE_IMPLIED").is_some() {
+            eprintln!("DEBUG_LOOSE_IMPLIED: loosened {k} of {tried} tightened bounds");
+        }
+    }
+
     if env_str!("ENOMOTO_DEBUG_PRESOLVE_HASH").is_some() {
         let (g, h) = propagate::rebuild_g_ref(n, &free.real_rows, &free.real_rhs, &lb, &ub);
         // 等式行の非零数・多変数の不等式行の本数と非零数 (前処理後の問題の形の比較用)。
@@ -1276,6 +1368,105 @@ pub fn run_extended(
         unbounded: false,
         postsolve_log,
     }
+}
+
+/// `ENOMOTO_PRESOLVE_LOOSE_IMPLIED` (試作、LP のみ): 前処理で元の境界 (`orig_lb`/`orig_ub`、伝播の前) より締まった列の境界の
+/// うち、残った行 (等式 `a x = b` と多変数の不等式 `rows x <= rhs`) とほかの列の今の境界から導けるものを緩める。
+/// `(緩めた本数, 調べた本数)` を返す。
+///
+/// CLP の `ClpSimplex::tightenPrimalBounds` (ClpSimplex.cpp 5568-5630) は含意境界で締めた後、元の境界が無限で締めた値も
+/// 大きい (1e10 超) ものは無限に戻し、ほかも 0.1 だけ (元の境界を越えない範囲で) 緩めて単体法に渡す。含意境界をそのまま
+/// 箱制約にすると、退化と幅の狭い箱で単体法が進みにくい (improvement_history の「(D) 含意境界と元の箱制約を分ける」)。
+///
+/// 正しさ: 前処理は締めた境界を使って行を消し (冗長行・強制行)、消去した列の境界を残った列に移す (doubleton など) ので、
+/// 締めた境界をそのまま元に戻すと実行可能領域が広がりうる。ここでは各境界を、今の行と今の境界 (それまでに緩めたものを含む)
+/// から導けるとき (許容誤差 `1e-9 (1 + |境界|)` 以内) だけ緩める。導ける境界は冗長なので、外しても実行可能領域は変わらない
+/// (1 本ずつ順に、緩めた後の境界で判定するので、互いを根拠にする 2 本を両方外すことはない)。固定された列 (`lb == ub`) は
+/// 触らない。緩める先は、既定では元の境界 (元が無限なら無限)。`clp` なら CLP の形 (元が無限で締めた値の絶対値が 1e10 を
+/// 超えるなら無限、それ以外は 0.1 だけ元の境界の方へ)。手間は非零数の 20 倍 + 列数までで打ち切る (残りは締めたまま)。
+#[allow(clippy::too_many_arguments)]
+fn loosen_implied_bounds(lb: &mut [f64], ub: &mut [f64], orig_lb: &[f64], orig_ub: &[f64], a: &FaerCsr, b: &[f64], rows: &[Vec<(usize, f64)>], rhs: &[f64], clp: bool) -> (usize, usize) {
+    let n = lb.len();
+    let m_a = a.nrows();
+    // 行の番号: 0..m_a は等式、m_a.. は不等式
+    let a_rows: Vec<Vec<(usize, f64)>> = (0..m_a).map(|i| crate::sparse::csr_row_iter(a, i).filter(|&(_, v)| v != 0.0).collect()).collect();
+    let mut col_rows: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
+    for (i, r) in a_rows.iter().chain(rows.iter()).enumerate() {
+        for &(j, v) in r {
+            if v != 0.0 {
+                col_rows[j].push((i as u32, v));
+            }
+        }
+    }
+    let nnz: usize = col_rows.iter().map(|c| c.len()).sum();
+    let budget = 20 * nnz + n;
+    let mut work = 0usize;
+    let (mut loosened, mut tried) = (0usize, 0usize);
+    // 行 `i` の列 `j` 以外の項の (最小, 最大) 活動 (無限の項があればその側は無限)
+    let others = |i: usize, j: usize, lb: &[f64], ub: &[f64], work: &mut usize| -> (f64, f64) {
+        let r = if i < m_a { &a_rows[i] } else { &rows[i - m_a] };
+        *work += r.len();
+        let (mut lo, mut hi) = (0.0f64, 0.0f64);
+        for &(k, v) in r {
+            if k == j {
+                continue;
+            }
+            let (p, q) = if v > 0.0 { (v * lb[k], v * ub[k]) } else { (v * ub[k], v * lb[k]) };
+            lo += p;
+            hi += q;
+        }
+        (if lo.is_nan() { f64::NEG_INFINITY } else { lo }, if hi.is_nan() { f64::INFINITY } else { hi })
+    };
+    for j in 0..n {
+        if work > budget {
+            break;
+        }
+        if !(lb[j] < ub[j]) {
+            continue;
+        }
+        for upper in [false, true] {
+            let cur = if upper { ub[j] } else { lb[j] };
+            let orig = if upper { orig_ub[j] } else { orig_lb[j] };
+            if !(if upper { cur < orig } else { cur > orig }) || !cur.is_finite() {
+                continue;
+            }
+            tried += 1;
+            let tol = 1e-9 * (1.0 + cur.abs());
+            let mut implied = false;
+            for &(i, v) in &col_rows[j] {
+                let i = i as usize;
+                let (lo, hi) = others(i, j, lb, ub, &mut work);
+                // 等式なら両側、不等式 (`<=`) なら片側: v x_j <= rhs - lo、(等式なら) v x_j >= rhs - hi
+                let r = if i < m_a { b[i] } else { rhs[i - m_a] };
+                let from_le = (r - lo) / v; // v > 0 なら上限、v < 0 なら下限
+                let from_ge = if i < m_a { (r - hi) / v } else { f64::NAN }; // v > 0 なら下限、v < 0 なら上限
+                let derived = if upper == (v > 0.0) { from_le } else { from_ge };
+                if derived.is_finite() && (if upper { derived <= cur + tol } else { derived >= cur - tol }) {
+                    implied = true;
+                    break;
+                }
+            }
+            if !implied {
+                continue;
+            }
+            let v = if !clp {
+                orig
+            } else if !orig.is_finite() && cur.abs() > 1e10 {
+                orig
+            } else if upper {
+                (cur + 0.1).min(orig)
+            } else {
+                (cur - 0.1).max(orig)
+            };
+            if upper {
+                ub[j] = v;
+            } else {
+                lb[j] = v;
+            }
+            loosened += 1;
+        }
+    }
+    (loosened, tried)
 }
 
 /// 縮小後の問題のビットパターンに対する FNV-1a ハッシュ (`ENOMOTO_DEBUG_PRESOLVE_HASH`)。
