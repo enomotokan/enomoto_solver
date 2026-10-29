@@ -502,7 +502,7 @@ pub struct Orbitope {
     pub row_packing: Vec<bool>,
     /// 列の入れ替えの生成元 (列 a, 列 b, 問題全体の置換 `perm[j] = σ(j)`。0-1 でない列も一緒に動かす)。
     pub swaps: Vec<(usize, usize, std::sync::Arc<Vec<usize>>)>,
-    /// 列の入れ替えがオービトープの変数だけを動かす (双子の組から作った 1xk、`ENOMOTO_MIP_SYM_TWIN_ORBITOPE`)。`swaps` は
+    /// 列の入れ替えがオービトープの変数だけを動かす (双子の組から作った 1xk、既定、`ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE` で止める)。`swaps` は
     /// 持たず、[`Self::canonicalize`] は値を直接入れ替える。
     pub local: bool,
 }
@@ -599,10 +599,10 @@ impl Orbitope {
     }
 }
 
-/// `ENOMOTO_MIP_ORBITOPE_TWO_COL` (試作): 生成元 1 本の 2 列の入れ替えもオービトープにする ([`find_orbitopes`])。
+/// 既定 (2026-10-29、`ENOMOTO_MIP_NO_ORBITOPE_TWO_COL` で止める): 生成元 1 本の 2 列の入れ替えもオービトープにする ([`find_orbitopes`])。
 /// (検出 1 回に 1 度しか呼ばないので値を控えない。単体テストで切り替える)
 pub(crate) fn orbitope_two_col() -> bool {
-    std::env::var_os("ENOMOTO_MIP_ORBITOPE_TWO_COL").is_some()
+    std::env::var_os("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL").is_none()
 }
 
 /// 生成元のうち、0-1 列の 2-巡回だけからなるもの (列の入れ替え) をまとめて完全オービトープを作る。
@@ -707,7 +707,7 @@ pub fn find_orbitopes(p: &MipProblem, sym: &Symmetry) -> (Vec<Orbitope>, Vec<boo
                 continue 'cl;
             }
         }
-        // 2 列のオービトープ (`ENOMOTO_MIP_ORBITOPE_TWO_COL`、試作): 生成元 1 本が各行の 2 列を入れ替えるだけなら、群は {恒等, g}
+        // 2 列のオービトープ (既定、`ENOMOTO_MIP_NO_ORBITOPE_TWO_COL` で止める): 生成元 1 本が各行の 2 列を入れ替えるだけなら、群は {恒等, g}
         // で、2 列の入れ替えはどの行のどちらを列 0 に置いても g そのもの。下の「動かす生成元の組」では 2 列が同じ組になって区別
         // できず捨てていた (双子の 1x2 と、同じ機械が 2 台の kx2: ns1116954 は 1982x2 が lex-leader の行 1 本だけだった)。
         // 各行を [j, g(j)] と並べる。0-1 でない整数列の組も同じ形で行に加える (下の通常の形と同じ理由)
@@ -1569,11 +1569,10 @@ mod tests {
         let p = MipProblem::from_rows(vec![0.0; 6], vec![1.0; 6], vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0], 0.0, 1.0, vec![true; 6], rows, vec![1.0, 1.0, 1.0, -inf(), -inf()], vec![1.0, 1.0, 1.0, 6.0, 6.0]);
         let sym = detect(&p, 10.0, 100, u64::MAX).0.expect("symmetry");
         assert_eq!(sym.generators.len(), 1);
-        std::env::remove_var("ENOMOTO_MIP_ORBITOPE_TWO_COL");
+        std::env::set_var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL", "1");
         assert!(find_orbitopes(&p, &sym).0.is_empty());
-        std::env::set_var("ENOMOTO_MIP_ORBITOPE_TWO_COL", "1");
+        std::env::remove_var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL");
         let (orbs, used) = find_orbitopes(&p, &sym);
-        std::env::remove_var("ENOMOTO_MIP_ORBITOPE_TWO_COL");
         assert_eq!(orbs.len(), 1);
         assert_eq!(orbs[0].vars, vec![vec![0, 1], vec![2, 3], vec![4, 5]]);
         assert!(used[0]);

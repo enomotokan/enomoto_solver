@@ -10156,6 +10156,13 @@ SCIP の `sepa_mcf.c` (Achterberg & Raack 2010) を `src/mip/mcf.rs` に移植�
   列を消して行を緩める。64 問で効くのは swath1・timtab1 だけで時間は変わらない。乱数問題で不一致 0。
 - 記録は `analysis/slackcol_20261028.md`。
 
+## 2026-10-29: 2 列のオービトープと双子のオービトープを既定にする (採用)
+
+ccr-e9c2168a の 2 つの試作を既定にした (`ENOMOTO_MIP_NO_ORBITOPE_TWO_COL`・`ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE` で止める)。
+16 スレッド・60 秒・交互に 2 回で、止めた形との差は SGM 1〜2% (21 問 18.99 / 19.50 対 18.88 / 19.06、40 問 18.40 / 18.50 対
+17.95 / 18.11) と揺れの範囲、解けた数は既定化したほうが 1 問ずつ多い。食い違い 0。shift なしも同時に測ったが、既定は保留
+(`analysis/sym_shift_20261029.md`)。
+
 ## 2026-10-29: 全ブランチの取り込みと試作の既定化 (採用)
 
 main・develop 以外のブランチ (inv/cutpool-prop・inv/mcf-cuts・ccr-e9c2168a・ccr-91f8d3bb・ccr-146937e4) を develop に取り込み、

@@ -1340,11 +1340,11 @@ pub(crate) fn sym_twins() -> bool {
     env_str!("ENOMOTO_MIP_SYM_TWINS").is_some()
 }
 
-/// `ENOMOTO_MIP_SYM_TWIN_ORBITOPE` (試作): 双子の組 ([`symmetry::twin_classes`]) を併合せず、探索で見つけた生成元が動かさない
+/// 既定 (2026-10-29、`ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE` で止める): 双子の組 ([`symmetry::twin_classes`]) を併合せず、探索で見つけた生成元が動かさない
 /// 整数列の組を、生成元を作らずに 1xk のオービトープ (`local`、列の入れ替えが組の中だけ) として直接扱う。0-1 列のまま
 /// 残り、LP の行も足さない。生成元が動かす組は [`sym_twins`] と同じく入れ替えを生成元に足す。
 pub(crate) fn sym_twin_orbitope() -> bool {
-    env_str!("ENOMOTO_MIP_SYM_TWIN_ORBITOPE").is_some()
+    env_str!("ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE").is_none()
 }
 
 /// 双子の組 `classes` をそれぞれ先頭の列に併合した問題を返し、後処理の手順を `postsolve` に足す (`parallelcols` と同じ
@@ -1441,7 +1441,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     let t0 = std::time::Instant::now();
     let twin_orb = sym_twin_orbitope();
     let twins = if sym_twins() || twin_orb { symmetry::twin_classes(&prob) } else { Vec::new() };
-    // `ENOMOTO_MIP_SYM_TWIN_ORBITOPE` で、生成元が動かさない整数列の双子の組から作る 1xk のオービトープ
+    // 既定 (`ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE` で止める) で、生成元が動かさない整数列の双子の組から作る 1xk のオービトープ
     let mut twin_orbs: Vec<symmetry::Orbitope> = Vec::new();
     let t_twins = t0.elapsed().as_secs_f64();
     let time_cap = tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64);
