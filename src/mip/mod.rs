@@ -1129,6 +1129,8 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
 thread_local! {
     /// [`quick_probe_fixings`] の後の前処理のかけ直しの中か (早めのプロービング。かけ直しの中では行わない)。
     static QUICK_PROBE_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// [`tighten_vubs`] の後の前処理のかけ直しの中か (`ENOMOTO_MIP_TIGHTEN_VUBS`、かけ直しの中ではもう締めない)
+    static VUBS_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`presolve_mip`] の 行をまとめた後のかけ直し (`ENOMOTO_MIP_NO_MERGE_REPRESOLVE` で使わない) の 2 回目の前処理の中か。
     static MERGE_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`presolve_mip`] の `ENOMOTO_MIP_DOMCOL` のかけ直しの中か。
@@ -2036,24 +2038,43 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             eprintln!("MIP: presolve: tightened {k} column bounds by dual arguments (DUAL_BOUND2)");
         }
     }
-    // 元の制約 (境界は丸め済みの MipProblem の値を使う)
-    let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: if p.is_int[j] { VarType::Integer } else { VarType::Continuous }, lb: col_lo[j], ub: col_up[j] }).collect();
-    let mut cons: Vec<ConstraintRow> = Vec::with_capacity(p.m);
-    for i in 0..p.m {
-        let expr = crate::types::LinearExpr { coeffs: p.rows[i].iter().cloned().collect(), constant: 0.0 };
-        let (lo, up) = (p_row_lo[i], p_row_up[i]);
-        if lo == up {
-            cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Eq, rhs: lo });
-        } else {
-            if lo.is_finite() {
-                cons.push(ConstraintRow { expr: expr.clone(), sense: crate::types::RowSense::Ge, rhs: lo });
+    // 元の制約 (境界は丸め済みの MipProblem の値を使う)。行を `LinearExpr` (BTreeMap) に詰め直して範囲制約を 2 本に分けてから
+    // `build_a_g` に渡す代わりに、行から直接作る ([`crate::presolve::build_a_g_from_ranged_rows`]、結果はビット単位で同じ)。
+    // 行の列番号が狭義の昇順でないなどで作れなければ従来の経路で作る
+    // 診断用 (`ENOMOTO_MIP_DEBUG_FASTPACK_CHECK`): 両方の経路で作り、ビット単位で同じかを確かめる
+    let fastpack_check = env_str!("ENOMOTO_MIP_DEBUG_FASTPACK_CHECK").is_some();
+    let fast = crate::presolve::build_a_g_from_ranged_rows(&col_lo, &col_up, &p.rows, &p_row_lo, &p_row_up);
+    let fast_ok = fast.is_some();
+    let (a, b, g, h) = match fast.filter(|_| !fastpack_check) {
+        Some(r) => r,
+        None => {
+            let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: if p.is_int[j] { VarType::Integer } else { VarType::Continuous }, lb: col_lo[j], ub: col_up[j] }).collect();
+            let mut cons: Vec<ConstraintRow> = Vec::with_capacity(p.m);
+            for i in 0..p.m {
+                let expr = crate::types::LinearExpr { coeffs: p.rows[i].iter().cloned().collect(), constant: 0.0 };
+                let (lo, up) = (p_row_lo[i], p_row_up[i]);
+                if lo == up {
+                    cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Eq, rhs: lo });
+                } else {
+                    if lo.is_finite() {
+                        cons.push(ConstraintRow { expr: expr.clone(), sense: crate::types::RowSense::Ge, rhs: lo });
+                    }
+                    if up.is_finite() {
+                        cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Le, rhs: up });
+                    }
+                }
             }
-            if up.is_finite() {
-                cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Le, rhs: up });
+            let r = crate::presolve::build_a_g(&vars, &cons);
+            if fastpack_check && fast_ok {
+                let f = crate::presolve::build_a_g_from_ranged_rows(&col_lo, &col_up, &p.rows, &p_row_lo, &p_row_up).unwrap();
+                let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+                let mat = |m: &crate::sparse::FaerCsr| (m.nrows(), m.ncols(), crate::sparse::csr_rows(m).into_iter().map(|r| r.into_iter().map(|(j, v)| (j, v.to_bits())).collect::<Vec<_>>()).collect::<Vec<_>>());
+                let same = mat(&f.0) == mat(&r.0) && bits(&f.1) == bits(&r.1) && mat(&f.2) == mat(&r.2) && bits(&f.3) == bits(&r.3);
+                eprintln!("MIP: presolve: FASTPACK_CHECK {} (rows {}, eq {}, ineq {})", if same { "same" } else { "DIFFERENT" }, p.m, r.0.nrows(), r.2.nrows());
             }
+            r
         }
-    }
-    let (a, b, g, h) = crate::presolve::build_a_g(&vars, &cons);
+    };
     let mut pre = crate::presolve::run_extended_mip(n, &a, &b, &g, &h, &p.cost, &p.is_int, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS);
     if pre.infeasible {
         return Some(Presolved::Infeasible);
@@ -2176,6 +2197,29 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             }
             // 何も減らない (または尺度が掛かった): このまま続ける
             _ => {}
+        }
+    }
+    // `ENOMOTO_MIP_TIGHTEN_VUBS` (試作、既定では使わない): VUB の行の連続列の境界を LP で締め ([`tighten_vubs`])、締めたら
+    // 前処理をかけ直す (係数の強化が `x <= M y` の `M` を締めた境界まで縮める)。根の問題で 1 回だけ (再スタートでは使わない)
+    if lp_probe_secs.is_some() && !submip && env_str!("ENOMOTO_MIP_TIGHTEN_VUBS").is_some() && !VUBS_ACTIVE.with(|f| f.get()) && !RESTART_PRESOLVE.with(|f| f.get()) {
+        match tighten_vubs(&mut prob, verbose) {
+            None => return Some(Presolved::Infeasible),
+            Some(k) if k > 0 => {
+                let mut postsolve = pre.postsolve_log;
+                VUBS_ACTIVE.with(|f| f.set(true));
+                let r = presolve_mip_depth(&prob, verbose, submip, lp_probe_secs, depth);
+                VUBS_ACTIVE.with(|f| f.set(false));
+                return match r {
+                    Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+                    Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) => {
+                        debug_assert!(sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0));
+                        postsolve.extend(post2);
+                        Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling })
+                    }
+                    None => Some(Presolved::Reduced { prob, postsolve, scaling: pre.scaling }),
+                };
+            }
+            Some(_) => {}
         }
     }
     // 早めのプロービングとかけ直し (既定で使う。`ENOMOTO_MIP_NO_PROBE_EARLY_REPRESOLVE` で使わない。以前の試作名は
@@ -2377,6 +2421,94 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
 /// −20.96 → −3.98 (目的関数は整数なので下界 −3 = 最適値) になる。HiGHS は経路集約・tableau のカットで根を −4 にし、こちらは
 /// 根のカットのループで −7〜−8.6 にしかならず、木の根の強分枝で初めて −3.99 に届いていた。
 /// 固定した列の数を返す。実行不能と分かったら `None`。
+/// `ENOMOTO_MIP_TIGHTEN_VUBS` (試作): CBC の `CbcModel::tightenVubs` (CbcModel.cpp 15861-16130) にならい、VUB の行
+/// (固定されていない列が連続列 1 本と 0-1 列 1 本だけの行、`x <= M y` など) の連続列について、LP で `x` を最小化・最大化して
+/// 境界を締める。LP の解の値は LP の緩和の実行可能領域の端なので、整数解の集合は変わらない。CBC と同じく、締めるのは
+/// 改善が 1e-4 を超えるときだけで、`1e-8 (1 + |境界|)` だけ緩めて置く。候補は `ENOMOTO_T_MIP_TIGHTEN_VUBS_MAX` 本
+/// (既定 200、行の多い列から)、時間は `ENOMOTO_T_MIP_TIGHTEN_VUBS_TIME` 秒 (既定 1 秒) まで。締めた境界の本数を返す
+/// (最初の LP が実行不能なら `None`)。
+fn tighten_vubs(prob: &mut MipProblem, verbose: bool) -> Option<usize> {
+    use lp::{LpStatus, SolveLimits};
+    let t0 = std::time::Instant::now();
+    let n = prob.n;
+    let free = |j: usize| prob.col_up[j] - prob.col_lo[j] > 1e-8;
+    let binary = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0;
+    let mut cand = vec![false; n];
+    for r in &prob.rows {
+        let (mut nb, mut nc, mut cont) = (0usize, 0usize, usize::MAX);
+        for &(j, _) in r {
+            if !free(j) {
+                continue;
+            }
+            if binary(j) {
+                nb += 1;
+            } else {
+                nc += 1;
+                cont = j;
+            }
+        }
+        if nc == 1 && nb == 1 && !prob.is_int[cont] {
+            cand[cont] = true;
+        }
+    }
+    let mut list: Vec<usize> = (0..n).filter(|&j| cand[j]).collect();
+    if list.is_empty() {
+        return Some(0);
+    }
+    list.sort_by_key(|&j| std::cmp::Reverse(prob.cols[j].len()));
+    list.truncate(tunable!("ENOMOTO_T_MIP_TIGHTEN_VUBS_MAX", 200usize, usize));
+    let deadline = t0 + std::time::Duration::from_secs_f64(tunable!("ENOMOTO_T_MIP_TIGHTEN_VUBS_TIME", 1.0, f64));
+    let mut c = vec![0.0; n];
+    let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&prob.col_lo, &prob.col_up, &c, &prob.rows, &prob.row_lo, &prob.row_up);
+    match lp.solve(&SolveLimits { deadline: Some(deadline), ..Default::default() }) {
+        LpStatus::Optimal => {}
+        LpStatus::Infeasible => return None,
+        _ => return Some(0),
+    }
+    let (mut k, mut solved) = (0usize, 0usize);
+    'cols: for &j in &list {
+        for up in [false, true] {
+            if std::time::Instant::now() > deadline {
+                break 'cols;
+            }
+            c[j] = if up { -1.0 } else { 1.0 };
+            lp.set_costs(&c);
+            let st = lp.solve(&SolveLimits { deadline: Some(deadline), ..Default::default() });
+            c[j] = 0.0;
+            solved += 1;
+            if st != LpStatus::Optimal {
+                if st == LpStatus::Infeasible {
+                    return None;
+                }
+                continue;
+            }
+            let v = lp.col_value(j);
+            let (lo, hi) = (prob.col_lo[j], prob.col_up[j]);
+            if up && v < hi - 1e-4 {
+                let mut nv = hi.min(v + 1e-8 * (hi.abs() + 1.0));
+                if nv - lo < 1e-7 {
+                    nv = lo;
+                }
+                prob.col_up[j] = nv;
+                lp.set_col_bounds(j, lo, nv);
+                k += 1;
+            } else if !up && v > lo + 1e-4 {
+                let mut nv = lo.max(v - 1e-8 * (lo.abs() + 1.0));
+                if hi - nv < 1e-7 {
+                    nv = hi;
+                }
+                prob.col_lo[j] = nv;
+                lp.set_col_bounds(j, nv, hi);
+                k += 1;
+            }
+        }
+    }
+    if verbose {
+        eprintln!("MIP: presolve: tightened {k} bounds of {} VUB columns by {solved} LPs (TIGHTEN_VUBS, {:.2}s)", list.len(), t0.elapsed().as_secs_f64());
+    }
+    Some(k)
+}
+
 fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     use lp::{LpStatus, SolveLimits};
     let t0 = std::time::Instant::now();
@@ -2767,6 +2899,17 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let pclique_equiv = (equiv2 || env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some_and(|v| v == "equiv")) && !submip;
     let want_pclique = env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !pclique_equiv && !submip;
     let mut equiv: Vec<(usize, usize, bool)> = Vec::new();
+    // `ENOMOTO_MIP_PROBE_STRENGTHEN` (試作、既定では使わない。サブ MIP では使わない): プロービングによる行の係数の強化
+    // ([`probe_strengthen_collect`])。CBC の前処理 (CglPreProcess が CglProbing を `setRowCuts(3)` で使い、`strengthenRow`
+    // に行の置き換えを集める。CglPreProcess.cpp 110-130、CglProbing.cpp 5893-6060・6677-6772) にならう。候補は行ごとに
+    // 新しい行の係数の絶対値の和が最小の 1 本だけ残し (CglProbing と同じ)、プロービングの後でまとめて行を置き換える
+    let want_strengthen = env_str!("ENOMOTO_MIP_PROBE_STRENGTHEN").is_some() && !submip;
+    let mut st_mark: Vec<bool> = if want_strengthen { vec![false; prob.m] } else { Vec::new() };
+    let mut st_touched: Vec<usize> = Vec::new();
+    // x_j = 0 と x_j = 1 で見つけた候補 (行, 列 j の係数の増分, 下限の増分, 上限の増分)
+    let (mut st_c0, mut st_c1): (Vec<(usize, f64, f64, f64)>, Vec<(usize, f64, f64, f64)>) = (Vec::new(), Vec::new());
+    // 行 -> (新しい行の係数の絶対値の和, 列 j, 係数の増分, 下限の増分, 上限の増分)
+    let mut st_best: std::collections::HashMap<usize, (f64, usize, f64, f64, f64)> = std::collections::HashMap::new();
     let mut passes = 0usize;
     'passes: for _pass in 0..max_pass {
         passes += 1;
@@ -2793,11 +2936,19 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             dom.tighten_upper(prob, j, 0.0);
             let ok0 = dom.propagate(prob);
             let ch0: Vec<_> = if ok0 { dom.changes_since(pos).collect() } else { Vec::new() };
+            st_c0.clear();
+            if want_strengthen && ok0 {
+                probe_strengthen_collect(prob, &dom.lo, &dom.up, j, false, &ch0, &mut st_mark, &mut st_touched, &mut st_c0);
+            }
             dom.backtrack_to(prob, pos);
             // x_j = 1
             dom.tighten_lower(prob, j, 1.0);
             let ok1 = dom.propagate(prob);
             let ch1: Vec<_> = if ok1 { dom.changes_since(pos).collect() } else { Vec::new() };
+            st_c1.clear();
+            if want_strengthen && ok1 {
+                probe_strengthen_collect(prob, &dom.lo, &dom.up, j, true, &ch1, &mut st_mark, &mut st_touched, &mut st_c1);
+            }
             dom.backtrack_to(prob, pos);
             match (ok0, ok1) {
                 (false, false) => return Some(false),
@@ -2814,6 +2965,15 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     }
                 }
                 (true, true) => {
+                    for &(i, dc, dl, du) in st_c0.iter().chain(&st_c1) {
+                        // 新しい行の係数の絶対値の和 (CglProbing と同じく小さいものを残す)
+                        let aj = prob.rows[i].binary_search_by_key(&j, |t| t.0).map_or(0.0, |q| prob.rows[i][q].1);
+                        let score = prob.rows[i].iter().map(|t| t.1.abs()).sum::<f64>() - aj.abs() + (aj + dc).abs();
+                        let e = st_best.entry(i).or_insert((f64::INFINITY, 0, 0.0, 0.0, 0.0));
+                        if score < e.0 {
+                            *e = (score, j, dc, dl, du);
+                        }
+                    }
                     if want_impl {
                         let e0 = edges.len();
                         add_edges(j, 0, &ch0, &mut edges);
@@ -3036,6 +3196,45 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // 固定した列を含む含意は捨てる
     implied.retain(|&(j, _, k, _, _)| dom.lo[j as usize] < dom.up[j as usize] && dom.lo[k as usize] < dom.up[k as usize]);
     prob.implied_bounds = implied;
+    // `ENOMOTO_MIP_PROBE_STRENGTHEN`: 集めた行の置き換えを当てる (列 j が固定された行は飛ばす。固定で行から消える)
+    if want_strengthen && !st_best.is_empty() {
+        let mut rows_sorted: Vec<(usize, (f64, usize, f64, f64, f64))> = st_best.into_iter().collect();
+        rows_sorted.sort_unstable_by_key(|t| t.0);
+        let mut k = 0usize;
+        for (i, (_, j, dc, dl, du)) in rows_sorted {
+            if dom.lo[j] == dom.up[j] {
+                continue;
+            }
+            let row = &mut prob.rows[i];
+            match row.binary_search_by_key(&j, |t| t.0) {
+                Ok(q) => {
+                    let v = row[q].1 + dc;
+                    if v.abs() <= 1e-12 {
+                        row.remove(q);
+                    } else {
+                        row[q].1 = v;
+                    }
+                }
+                Err(q) => row.insert(q, (j, dc)),
+            }
+            prob.row_lo[i] += dl;
+            prob.row_up[i] += du;
+            k += 1;
+        }
+        if k > 0 {
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+            for (i, r) in prob.rows.iter().enumerate() {
+                for &(j, v) in r {
+                    cols[j].push((i, v));
+                }
+            }
+            prob.cols = cols;
+            prob.nnz = prob.rows.iter().map(|r| r.len()).sum();
+        }
+        if verbose {
+            eprintln!("MIP: probing: strengthened {k} rows (PROBE_STRENGTHEN)");
+        }
+    }
     if fixed == 0 && tightened == 0 {
         return None;
     }
@@ -3054,6 +3253,66 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         eprintln!("MIP: probing: fixed {tiny} columns of width within tolerance");
     }
     Some(true)
+}
+
+/// `ENOMOTO_MIP_PROBE_STRENGTHEN` (試作): プロービングで 0-1 列 `x_j` を `one` の側に固定して伝播した後の境界 `lo`/`up` で、
+/// 境界が変わった列 (`ch`) を含む片側の行 (等式・範囲制約の行は除く) の最大 (最小) 活動を求め、右辺との間に隙間 `gap > 0`
+/// があれば行の置き換えの候補を `out` に足す (CglProbing の `strengthenRow`、CglProbing.cpp 5893-6060・6677-6772)。
+///
+/// `Σ a x <= U` で、`x_j = 0` のとき最大活動 `maxR` が `U - gap` なら `Σ a x - gap x_j <= U - gap`、`x_j = 1` のときなら
+/// `Σ a x + gap x_j <= U` に置き換える (`>=` の行は向きを逆にして同じ)。`x_j` が 0 と 1 のどちらでも、新しい行は
+/// 元の行 (と、`x_j` をその側に固定したとき伝播が示した `Σ a x <= maxR`) と同値なので整数解の集合は変わらず、
+/// `x_j ∈ [0, 1]` で新しい行は元の行より強い (LP の緩和が締まる)。伝播の結論は整数解すべてで成り立つので、
+/// 別の行の置き換えと組み合わせても正しいが、同じ行を 2 回置き換えると (隙間を元の行で測っているので) 正しくないので、
+/// 呼び出し側で行ごとに 1 本だけ残す。候補は `(行, x_j の係数の増分, 下限の増分, 上限の増分)`。
+#[allow(clippy::too_many_arguments)]
+fn probe_strengthen_collect(prob: &MipProblem, lo: &[f64], up: &[f64], j: usize, one: bool, ch: &[(usize, bool, f64)], mark: &mut [bool], touched: &mut Vec<usize>, out: &mut Vec<(usize, f64, f64, f64)>) {
+    // 隙間の下限 (CglProbing は主の許容誤差 1e-7)
+    let tol = tunable!("ENOMOTO_T_MIP_PROBE_STRENGTHEN_TOL", 1e-6, f64);
+    touched.clear();
+    for k in std::iter::once(j).chain(ch.iter().map(|t| t.0)) {
+        for &(i, _) in &prob.cols[k] {
+            if !mark[i] {
+                mark[i] = true;
+                touched.push(i);
+            }
+        }
+    }
+    for &i in touched.iter() {
+        mark[i] = false;
+        let (l, u) = (prob.row_lo[i], prob.row_up[i]);
+        let le = l == f64::NEG_INFINITY && u.is_finite();
+        let ge = u == f64::INFINITY && l.is_finite();
+        if !le && !ge {
+            continue;
+        }
+        // 片側の活動 (`<=` の行は最大、`>=` の行は最小)。無限の項があれば候補にしない
+        let mut act = 0.0f64;
+        let mut finite = true;
+        for &(k, a) in &prob.rows[i] {
+            let b = if (a > 0.0) == le { up[k] } else { lo[k] };
+            if !b.is_finite() {
+                finite = false;
+                break;
+            }
+            act += a * b;
+        }
+        if !finite {
+            continue;
+        }
+        let gap = if le { u - act } else { act - l };
+        if !(gap > tol * (1.0 + if le { u.abs() } else { l.abs() }) && gap < 1e8) {
+            continue;
+        }
+        // (係数の増分, 下限の増分, 上限の増分)
+        let (dc, dl, du) = match (le, one) {
+            (true, false) => (-gap, 0.0, -gap),
+            (true, true) => (gap, 0.0, 0.0),
+            (false, false) => (gap, gap, 0.0),
+            (false, true) => (-gap, 0.0, 0.0),
+        };
+        out.push((i, dc, dl, du));
+    }
 }
 
 thread_local! {
