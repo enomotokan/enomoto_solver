@@ -603,6 +603,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     of_gens: Rc<super::symmetry::OrbitalGens>,
     /// orbital fixing の軌道の控え (除いた生成元, 軌道)。同じ生成元を除くノードが続く (潜る) 間は作り直さない。
     of_cache: (Vec<u32>, Rc<Vec<Vec<usize>>>),
+    /// このノードの orbital fixing で使った軌道 (`ENOMOTO_MIP_SB_OF` で強分岐の下の子に使う)。ノードの始めに `None` に戻す
+    of_node_orbits: Option<Rc<Vec<Vec<usize>>>>,
     /// `ENOMOTO_MIP_SYM_OF_SCHREIER`: 固定する列 (`OrbitalGens` の位置、昇順) の先頭の部分ごとの、その列を全て固定する部分群の
     /// 生成元 (Schreier 生成元)。
     of_stab_memo: std::collections::HashMap<Vec<u32>, Rc<Vec<Rc<Vec<u32>>>>>,
@@ -703,6 +705,20 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// [`Self::root_obj_probe`] の (試した列, 固定した列)
     root_obj_probe_stats: [u64; 2],
     sb_prop_stats: [u64; 2],
+    /// 強分岐の子の LP 値から凸性で締めた一般整数の境界の数 (`ENOMOTO_MIP_SB_TIGHTEN`)
+    sb_tighten_count: u64,
+    /// 強分岐の下の子で軌道に沿って 0 にした列の数 (`ENOMOTO_MIP_SB_OF`)
+    sb_of_count: u64,
+    /// 木の ZI round の (呼んだ回数, 成功した回数, `ENOMOTO_MIP_ZIROUND_ADAPT` で省いた回数)
+    zi_stats: [u64; 3],
+    /// 費用を持つ整数列を先に分枝するか (`ENOMOTO_MIP_COST_PRIORITY`)
+    cost_prio: bool,
+    /// ダイビングの被約費用による固定の数 (`ENOMOTO_MIP_DIVE_RCFIX`)
+    pub(super) dive_rcfix_count: u64,
+    /// 強分岐の固定のあとの、その場での LP の解き直しの回数 (`ENOMOTO_MIP_SB_FIX_RESOLVE`)
+    sb_fix_resolve_count: u64,
+    /// `ENOMOTO_MIP_SB_FIX_RESOLVE` で強分岐の中で LP を解き直したときの (LP の値, 分数の列)。呼び出し側がノードの値に使う
+    sb_new_node: Option<(f64, Vec<(usize, f64)>)>,
     /// 行にできない衝突 (連続列・一般整数列を含む) を境界リテラルのまま持つプール
     lit_conflicts: super::conflict_pool::LitConflictPool,
     /// [加えた数, 刈ったノード, 締めた境界]
@@ -1805,7 +1821,24 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     // `ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED` (試作、既定では使わない): 整数値に固定された連続列は整数列と同じに扱って
     // 刻みを判定する (10teams は固定された連続列 225 本が費用を持ち、刻みが無いことになっていた。HiGHS は前処理で消して
     // 「刻み 1」と見る)
-    let obj_step = if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() { p.objective_step_bounds(Some((&dom.lo, &dom.up))) } else { p.objective_step() };
+    // `ENOMOTO_MIP_OBJ_STEP_IMPLINT` (試作、既定では使わない): 暗黙の整数列 ([`MipProblem::implied_integers`]) も整数列と
+    // 同じに扱って刻みを判定する (CBC の `CbcModel::analyzeObjective` は、連続列がネットワーク・被覆の形なら整数とみなして
+    // `CbcCutoffIncrement` を付ける)。双対側の暗黙の整数は「最適解では整数」なので、暫定解の値が刻みの格子に乗るとは限らない。
+    // そのため刈り込みの上限は、暫定解より厳密に小さい最大の格子の点で取る ([`Self::prune_limit`])
+    let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some();
+    let obj_step = if obj_step_implint {
+        let mask = p.implied_integers();
+        let b = if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() { Some((&dom.lo[..], &dom.up[..])) } else { None };
+        let st = p.objective_step_mask(&mask, b);
+        if params.verbose && !params.submip {
+            eprintln!("MIP: objective step with implied integers: {:?} (without: {:?})", st, p.objective_step());
+        }
+        st
+    } else if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() {
+        p.objective_step_bounds(Some((&dom.lo, &dom.up)))
+    } else {
+        p.objective_step()
+    };
     let mut s: Solver<L> = Solver {
         p,
         params,
@@ -2033,6 +2066,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             None => super::SYM_OF_GENS.with(|t| t.borrow().as_ref().map(|g| (**g).clone())).unwrap_or_default(),
         })),
         of_cache: (vec![u32::MAX], Rc::new(Vec::new())),
+        of_node_orbits: None,
         of_stab_memo: std::collections::HashMap::new(),
         of_node_fixes: Vec::new(),
         of_stats: [0; 3],
@@ -2101,6 +2135,23 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         hcm_auto: snap.as_ref().is_some_and(|sn| sn.hcm_auto),
         root_obj_probe_stats: [0; 2],
         sb_prop_stats: [0; 2],
+        sb_tighten_count: 0,
+        sb_of_count: 0,
+        zi_stats: [0; 3],
+        cost_prio: !params.submip && env_str!("ENOMOTO_MIP_COST_PRIORITY").is_some() && {
+            // CBC の条件: 費用を持つ連続列がなく、費用を持つ整数列が 100 本以下で整数列の 1/5 未満、行が 100 を超える
+            let n_cont_obj = (0..p.n).filter(|&j| !p.is_int[j] && p.cost[j] != 0.0 && p.col_lo[j] < p.col_up[j]).count();
+            let n_int_obj = (0..p.n).filter(|&j| p.is_int[j] && p.cost[j] != 0.0 && p.col_lo[j] < p.col_up[j]).count();
+            let n_int = p.is_int.iter().filter(|&&b| b).count();
+            let on = n_cont_obj == 0 && n_int_obj > 0 && n_int_obj <= 100 && n_int_obj * 5 < n_int && p.m > 100;
+            if on && params.verbose {
+                eprintln!("MIP: branching priority on {n_int_obj} costed integer columns of {n_int} (ENOMOTO_MIP_COST_PRIORITY)");
+            }
+            on
+        },
+        dive_rcfix_count: 0,
+        sb_fix_resolve_count: 0,
+        sb_new_node: None,
         lit_conflicts: super::conflict_pool::LitConflictPool::new(p.n, tunable!("ENOMOTO_T_MIP_LIT_CONFLICT_POOL", 5000usize, usize)),
         lit_stats: [0; 3],
         lit_pos: 0,
@@ -2653,6 +2704,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => self.params.cutoff,
             Some(z) => {
                 let strict = match self.obj_step {
+                    // 暫定解より厳密に小さい最大の格子の点 (暫定解が格子の上なら z - step)。暗黙の整数列で刻みを取ったとき
+                    // (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`) は暫定解が格子に乗るとは限らない
+                    Some(step) if obj_step_lattice() => {
+                        let off = self.p.offset;
+                        let k = ((z - off) / step - 1e-6).ceil() - 1.0;
+                        off + k * step + (1e-6 * z.abs().max(1.0)).min(0.5 * step)
+                    }
                     Some(step) => z - step + (1e-6 * z.abs().max(1.0)).min(0.5 * step),
                     None => z - 1e-9 * z.abs().max(1.0),
                 };
@@ -2666,6 +2724,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 暫定解があり、その値が下界 `lb` (の切り上げ) より目的関数の刻み (なければ相対 1e-6) 以上悪いか
     /// ([`Self::obj_support`] を呼ぶ条件)。
     pub(super) fn obj_support_gap(&self, lb: f64) -> bool {
+        if obj_step_lattice() && self.obj_step.is_some() {
+            // 暫定解が格子に乗らないときも、格子の点で比べる
+            let Some((z, _)) = self.incumbent.as_ref() else { return false };
+            let step = self.obj_step.unwrap();
+            return *z - self.p.offset - step * ((lb - self.p.offset) / step - 1e-6).ceil() > 1e-6 * z.abs().max(1.0);
+        }
         let Some((z, _)) = self.incumbent.as_ref() else { return false };
         match self.obj_step {
             Some(step) => *z - step * ((lb - self.p.offset) / step - 1e-6).ceil() - self.p.offset >= step - 1e-9,
@@ -5022,6 +5086,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // orbital fixing (`ENOMOTO_MIP_SYM_OF`): 子に渡す固定はこのノードで新たに数え直す
             self.of_node_fixes.clear();
+            self.of_node_orbits = None;
             let prop_ok = prop_ok && self.orbital_fixing_checked(&node.changes);
             if !prop_ok && rp_stage.is_empty() {
                 rp_stage = "p_of";
@@ -5291,8 +5356,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if resolves == 0 && !(tree_heur_off() && !self.params.submip) {
                     self.heur_label = "tree rounding";
                     self.simple_rounding(&x);
-                    if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() {
-                        self.zi_round(&x);
+                    // `ENOMOTO_MIP_ZIROUND_ADAPT` (試作、既定では使わない): 木の ZI round は 1 回ごとに全行の活動量を作り直す O(nnz) の
+                    // 処理なので、SCIP の zirounding (`minstopncalls` 1000、`stoppercentage` 0.02) と同じく、1000 回呼んで成功が 2% 未満なら
+                    // 止める (CBC の `CbcHeuristic::shouldHeurRun_randomChoice` も失敗が続くと呼ぶ間隔を広げる)
+                    let zi_adapt = env_str!("ENOMOTO_MIP_ZIROUND_ADAPT").is_some();
+                    let zi_stopped = zi_adapt
+                        && self.zi_stats[0] >= tunable!("ENOMOTO_T_MIP_ZIROUND_MIN_CALLS", 1000u64, u64)
+                        && (self.zi_stats[1] as f64) < tunable!("ENOMOTO_T_MIP_ZIROUND_STOP_RATE", 0.02, f64) * self.zi_stats[0] as f64;
+                    if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() && !zi_stopped {
+                        let ok = self.zi_round(&x);
+                        self.zi_stats[0] += 1;
+                        self.zi_stats[1] += ok as u64;
+                    } else if zi_stopped {
+                        self.zi_stats[2] += 1;
                     }
                     // rounding は毎ノード、shifting・intshifting は 10 ノードおき (SCIP の頻度は rounding 1・shifting 5・intshifting 10。
                     // SCIP は rounding・shifting を LP を解くたび (根のカットのラウンドごと) に呼び、成功の少ないものは呼ぶ間隔を広げる)
@@ -5803,6 +5879,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         break None;
                     }
                     BranchAction::Branch { col, value } => {
+                        let (node_obj, frac) = match self.sb_new_node.take() {
+                            Some((o, f)) if rp_force.is_none() => (o, f),
+                            _ => (node_obj, frac),
+                        };
                         let (col, value) = if rp_force.is_some() { (col, value) } else { self.orbitope_branching_column(col, value) };
                         if tree_log() && !self.params.submip {
                             eprintln!("EBR d={} col={col} val={value} lp={node_obj} rows={} resolves={resolves}", node.depth, self.lp.num_rows());
@@ -6936,6 +7016,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_SB_OLD").is_some() {
             return self.select_branch_old(frac, node_obj);
         }
+        let mut node_obj = node_obj;
+        // `ENOMOTO_MIP_COST_PRIORITY` (試作、既定では使わない): 費用を持つ整数列が少ない問題では、分数の値の費用を持つ整数列が
+        // あればそれだけを候補にする (CBC の `CbcModel::analyzeObjective` の `iType`: 費用のある整数列の優先度を上げる)
+        let prio_frac: Vec<(usize, f64)>;
+        let frac = if self.cost_prio && frac.iter().any(|&(j, _)| self.p.cost[j] != 0.0) {
+            prio_frac = frac.iter().copied().filter(|&(j, _)| self.p.cost[j] != 0.0).collect();
+            &prio_frac[..]
+        } else {
+            frac
+        };
+        // `ENOMOTO_MIP_SB_FIX_RESOLVE` (試作、既定では使わない): 強分岐で片側が打ち切られて列を固定したら、その場でノードの LP を
+        // 解き直し、新しい LP 解で残りの候補の強分岐を続ける (CBC の CbcNode.cpp の `chooseDynamicBranch` と HiGHS)。既定では
+        // 固定を定義域にだけ置き、残りの候補は固定を含まない LP で強分岐し、固定が 5 個たまったら `Resolve` で強分岐を全部やり直す。
+        // 解き直した LP の値と分数の列は [`Self::sb_new_node`] で呼び出し側に返す
+        let sb_fix_resolve = env_str!("ENOMOTO_MIP_SB_FIX_RESOLVE").is_some();
+        self.sb_new_node = None;
         // SCIP の relpscost に倣った強分岐 (branch_relpscost.c `branchExecRelpscost`)。
         let hybrid = env_str!("ENOMOTO_MIP_NO_HYBRID_SCORE").is_none();
         let score_of = |s: &Self, j: usize, v: f64| if hybrid { s.pc.hybrid_score(j, v - v.floor()) } else { s.pc.score(j, v - v.floor()) };
@@ -7010,7 +7106,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut pre: std::collections::HashMap<usize, [SbSide; 2]> = std::collections::HashMap::new();
         // このノードで強分岐した候補の (擬似費用のスコア (強分岐の前), 強分岐のスコア)。`ENOMOTO_MIP_SB_AGREE` の一致の判定に使う
         let mut sb_eval: Vec<(f64, f64)> = Vec::new();
-        for (ci, &(j, v, pscore)) in cands.iter().enumerate() {
+        let mut ci = 0usize;
+        while ci < cands.len() {
+            let (j, v, pscore) = cands[ci];
+            ci += 1;
             let is_reliable = (self.pc.min_observations(j) as f64) >= reliable_thr;
             if is_reliable || !allow_sb || tried >= max_tried || no_improve >= lookahead as f64 || self.time_up() || (self.sb_iters as f64) > maxsb {
                 if best.is_none_or(|(_, _, s)| pscore > s) {
@@ -7040,7 +7139,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // この候補から、強分岐するはずの候補 (信頼できないもの) をスレッド数まで集めて並列に解く
                 let nth = self.params.threads;
                 let mut batch: Vec<(usize, f64, f64, f64)> = vec![(j, v, lo, up)];
-                for &(j2, v2, _) in &cands[ci + 1..] {
+                for &(j2, v2, _) in &cands[ci..] {
                     if batch.len() >= nth || tried + batch.len() > max_tried {
                         break;
                     }
@@ -7050,6 +7149,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let lim = self.limits(sb_iter_limit);
                 let offset = self.p.offset;
+                let orbs: Vec<Vec<usize>> = batch.iter().map(|&(jj, ..)| self.sb_down_orbit(jj)).collect();
+                let orbs_ref = &orbs;
                 let lp0 = &self.lp;
                 let saved0 = saved;
                 let batch_ref = &batch;
@@ -7070,6 +7171,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                             lpc.set_col_bounds(jj, vv.ceil(), u0);
                                         } else {
                                             lpc.set_col_bounds(jj, l0, vv.floor());
+                                            for &kk in &orbs_ref[k] {
+                                                lpc.set_col_bounds(kk, 0.0, 0.0);
+                                            }
                                         }
                                         let it0 = lpc.total_iterations();
                                         let st = lpc.solve(&lim_c);
@@ -7184,6 +7288,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.lp.set_col_bounds(j, v.ceil(), up);
                 } else {
                     self.lp.set_col_bounds(j, lo, v.floor());
+                    for k in self.sb_down_orbit(j) {
+                        self.lp.set_col_bounds(k, 0.0, 0.0);
+                        self.sb_of_count += 1;
+                    }
                 }
                 let it0 = self.lp.total_iterations();
                 let st = self.lp.solve(&self.limits(sb_iter_limit));
@@ -7251,7 +7359,100 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     bound_changes += 1;
                 }
-                _ => {}
+                _ => {
+                    // `ENOMOTO_MIP_SB_TIGHTEN` (試作、既定では使わない): 一般整数列で、子の LP 値から凸性で境界を締める
+                    // (CBC の `CBCNODE_TIGHTEN_BOUNDS`、CbcNode.cpp)。LP の値は x_j の境界の凸関数なので、下の子の値 o_d から
+                    // 1 単位あたりの増分 (o_d − z)/(v − ⌊v⌋) を取ると、x_j <= t の値は z + (v − t)·増分 以上。これが打ち切り値を
+                    // 超える t は除ける。今の LP 解は新しい境界の内側にあるので、解き直しは要らない
+                    if env_str!("ENOMOTO_MIP_SB_TIGHTEN").is_some() && self.dom.up[j] - self.dom.lo[j] > 1.5 {
+                        let cutoff = self.prune_limit();
+                        if cutoff.is_finite() {
+                            for (side, is_up) in [(0usize, false), (1usize, true)] {
+                                let o = child_obj[side];
+                                let change = o - node_obj;
+                                if !o.is_finite() || change <= 1e-5 {
+                                    continue;
+                                }
+                                let dist0 = if is_up { v.ceil() - v } else { v - v.floor() };
+                                if dist0 <= 1e-3 {
+                                    continue;
+                                }
+                                let per = change / (dist0 + 1e-7);
+                                let distance = (cutoff - node_obj) / per + 1e-3;
+                                if distance >= 5.0 {
+                                    continue;
+                                }
+                                self.dom.set_external_tag(2);
+                                if is_up {
+                                    let nu = (v + distance).floor();
+                                    if nu < self.dom.up[j] {
+                                        self.dom.tighten_upper(self.p, j, nu);
+                                        self.sb_tighten_count += 1;
+                                    }
+                                } else {
+                                    let nl = (v - distance).ceil();
+                                    if nl > self.dom.lo[j] {
+                                        self.dom.tighten_lower(self.p, j, nl);
+                                        self.sb_tighten_count += 1;
+                                    }
+                                }
+                                self.dom.set_external(false);
+                            }
+                        }
+                    }
+                }
+            }
+            if sb_fix_resolve && bound_changes > 0 {
+                self.sync_lp();
+                let it0 = self.lp.total_iterations();
+                let st = self.lp.solve(&self.limits((10 * self.avg_node_iters()).max(20_000)));
+                self.node_iters += self.lp.total_iterations() - it0;
+                self.sb_fix_resolve_count += 1;
+                match st {
+                    LpStatus::Optimal => {
+                        let o = self.lp.objective() + self.p.offset;
+                        if o >= self.prune_limit() {
+                            self.add_dual_proof();
+                            return BranchAction::Prune;
+                        }
+                        let x = self.lp.col_values();
+                        let nf = self.fractional(&x);
+                        if nf.is_empty() {
+                            // 整数の LP 解は呼び出し側で扱う
+                            return BranchAction::Resolve;
+                        }
+                        node_obj = o;
+                        bound_changes = 0;
+                        pre.clear();
+                        sb_saved = Some(self.lp.save_state());
+                        // 今までの最良の候補は、まだ分数で、分ける値の整数部分が同じなら残す (子の LP の値は、境界が締まった
+                        // LP では下がらないので、下界として使ってよい)
+                        if let Some((bj, bv, bs)) = best {
+                            match nf.iter().find(|&&(k, _)| k == bj) {
+                                Some(&(_, nv)) if nv.floor() == bv.floor() => best = Some((bj, nv, bs)),
+                                _ => {
+                                    best = None;
+                                    best_sb = None;
+                                }
+                            }
+                        }
+                        // 残りの候補を新しい LP 解で作り直す (調べた候補は除く)
+                        let done: std::collections::HashSet<usize> = cands[..ci].iter().map(|c| c.0).collect();
+                        let mut rest: Vec<(usize, f64, f64)> = nf.iter().filter(|c| !done.contains(&c.0)).map(|&(k, vk)| (k, vk, score_of(self, k, vk))).collect();
+                        rest.sort_by(|a, b| b.2.total_cmp(&a.2));
+                        cands.truncate(ci);
+                        cands.extend(rest);
+                        self.sb_new_node = Some((o, nf));
+                        continue;
+                    }
+                    LpStatus::Infeasible | LpStatus::ObjectiveBound => {
+                        if st == LpStatus::Infeasible {
+                            self.add_farkas_proof();
+                        }
+                        return BranchAction::Prune;
+                    }
+                    _ => return BranchAction::Resolve,
+                }
             }
             // 境界の変更は最大 5 個まとめてから解き直す
             if bound_changes >= 5 {
@@ -7714,6 +7915,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
+    /// `ENOMOTO_MIP_SB_OF` (試作、既定では使わない): 強分岐の下の子 (0-1 列 `j` を 0 にする側) で、本当の子の
+    /// orbital fixing と同じく `j` の軌道の 0-1 列も 0 にする (CBC の CbcNode.cpp の強分岐は、下の子を解く前に軌道の
+    /// 列を全部 0 にする)。下に分けても固定群は変わらないので、このノードの軌道 ([`Self::of_node_orbits`]) をそのまま使う。
+    /// 0 にする列 (`j` を除く、まだ 0 に固定されていない列) を返す。
+    fn sb_down_orbit(&self, j: usize) -> Vec<usize> {
+        if env_str!("ENOMOTO_MIP_SB_OF").is_none() || self.of_gens.is_empty() {
+            return Vec::new();
+        }
+        let Some(orbits) = self.of_node_orbits.as_ref() else { return Vec::new() };
+        let p = self.p;
+        if !(p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0) {
+            return Vec::new();
+        }
+        let Some(orb) = orbits.iter().find(|o| o.contains(&j)) else { return Vec::new() };
+        orb.iter().copied().filter(|&k| k != j && self.dom.up[k] > 0.0 && self.dom.lo[k] < self.dom.up[k]).collect()
+    }
+
     /// [`Self::orbital_fixing`] を呼び、矛盾なら衝突を作って刈った数を数える。
     fn orbital_fixing_checked(&mut self, changes: &[BoundChange]) -> bool {
         if self.of_gens.is_empty() {
@@ -7770,6 +7988,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.of_cache = (stab, Rc::new(orbits));
             }
             if self.of_cache.1.is_empty() {
+                self.of_node_orbits = Some(self.of_cache.1.clone());
                 return true;
             }
         } else {
@@ -7785,6 +8004,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             excl.sort_unstable();
             excl.dedup();
             if excl.len() == of.gens.len() {
+                self.of_node_orbits = Some(Rc::new(Vec::new()));
                 return true;
             }
             if self.of_cache.0 != excl {
@@ -7793,6 +8013,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let orbits = self.of_cache.1.clone();
+        self.of_node_orbits = Some(orbits.clone());
         let mut node_fixed = false;
         loop {
             let s0 = self.dom.stack_len();
@@ -7856,10 +8077,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         let pos = self.dom.stack_len();
+        let orb = if is_up { Vec::new() } else { self.sb_down_orbit(j) };
         if is_up {
             self.dom.tighten_lower(self.p, j, v.ceil());
         } else {
             self.dom.tighten_upper(self.p, j, v.floor());
+            for k in orb {
+                self.dom.tighten_upper(self.p, k, 0.0);
+            }
         }
         if !self.dom.infeasible {
             if infeasible {
@@ -7882,10 +8107,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         let pos = self.dom.stack_len();
+        let orb = if is_up { Vec::new() } else { self.sb_down_orbit(j) };
         if is_up {
             self.dom.tighten_lower(self.p, j, v.ceil());
         } else {
             self.dom.tighten_upper(self.p, j, v.floor());
+            for k in orb {
+                self.dom.tighten_upper(self.p, k, 0.0);
+            }
         }
         if !self.dom.infeasible {
             if infeasible {
@@ -11513,6 +11742,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: cut pool propagation: calls {}, pruned {} nodes, tightened {} bounds, {:.2}s, pool {} cuts ({} nonzeros); updated terms {}, candidates {} ({} nonzeros), rebuilds {}", self.cutpool_prop_stats[0], self.cutpool_prop_stats[1], self.cutpool_prop_stats[2], self.cutpool_prop_stats[3] as f64 * 1e-9, self.cut_pool.len(), self.cut_pool_nnz, self.cpp.work[0], self.cpp.work[1], self.cpp.work[2], self.cpp.work[3]);
             }
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
+            if self.dive_rcfix_count > 0 {
+                eprintln!("MIP: dives: fixed {} columns by reduced costs (ENOMOTO_MIP_DIVE_RCFIX)", self.dive_rcfix_count);
+            }
+            if self.zi_stats[2] > 0 {
+                eprintln!("MIP: tree ZI round: calls {}, successes {}, skipped {} (ENOMOTO_MIP_ZIROUND_ADAPT)", self.zi_stats[0], self.zi_stats[1], self.zi_stats[2]);
+            }
+            if self.sb_fix_resolve_count > 0 {
+                eprintln!("MIP: strong branching: resolved the node LP {} times after fixings (ENOMOTO_MIP_SB_FIX_RESOLVE)", self.sb_fix_resolve_count);
+            }
+            if self.sb_of_count > 0 {
+                eprintln!("MIP: strong branching: fixed {} orbit columns to 0 in down children (ENOMOTO_MIP_SB_OF)", self.sb_of_count);
+            }
+            if self.sb_tighten_count > 0 {
+                eprintln!("MIP: strong branching: tightened {} general integer bounds by convexity (ENOMOTO_MIP_SB_TIGHTEN)", self.sb_tighten_count);
+            }
             eprintln!("MIP: literal conflicts: added {}, in pool {} (aged out {}), pruned {} nodes, tightened {} bounds", self.lit_stats[0], self.lit_conflicts.len(), self.lit_conflicts.removed, self.lit_stats[1], self.lit_stats[2]);
             if proof_cmir() {
                 eprintln!("MIP: proof CMIR cuts: tried {}, added {}, entered the cut pool {}", self.proof_cmir_stats[0], self.proof_cmir_stats[1], self.proof_cmir_stats[2]);
@@ -11596,4 +11840,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         MipResult { status, x, objective, best_bound, nodes: self.nodes + self.worker_totals.0, lp_iterations: self.lp.total_iterations() + self.worker_totals.1 }
     }
+}
+
+/// 刈り込みの上限を、暫定解より厳密に小さい最大の格子の点で取るか (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`)。
+fn obj_step_lattice() -> bool {
+    env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some()
 }
