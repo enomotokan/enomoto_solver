@@ -721,7 +721,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     sb_node_fixes: Vec<BoundChange>,
     sb_node_lines: Vec<SbLine>,
     /// 引き継いだ境界を当てた数、凸性の直線で締めた数
-    sb_inherit_stats: [u64; 2],
+    sb_inherit_stats: [u64; 3],
+    /// このノードの LP が最適まで解けているか (`ENOMOTO_MIP_SB_POLY_RC` で被約費用を使う条件)
+    node_lp_opt: bool,
     /// 木の ZI round の (呼んだ回数, 成功した回数, `ENOMOTO_MIP_ZIROUND_ADAPT` で省いた回数)
     zi_stats: [u64; 3],
     /// 費用を持つ整数列を先に分枝するか (`ENOMOTO_MIP_COST_PRIORITY`)
@@ -2161,7 +2163,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_cur: None,
         sb_node_fixes: Vec::new(),
         sb_node_lines: Vec::new(),
-        sb_inherit_stats: [0; 2],
+        sb_inherit_stats: [0; 3],
+        node_lp_opt: false,
         zi_stats: [0; 3],
         cost_prio: !params.submip && env_str!("ENOMOTO_MIP_COST_PRIORITY").is_some() && {
             // CBC の条件: 費用を持つ連続列がなく、費用を持つ整数列が 100 本以下で整数列の 1/5 未満、行が 100 を超える
@@ -5020,6 +5023,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.sb_cur = node.sb.clone();
             self.sb_node_fixes.clear();
             self.sb_node_lines.clear();
+            self.node_lp_opt = false;
             if !self.apply_sb_inherit() {
                 if tree_log() && !self.params.submip {
                     eprintln!("ENODE d={} r=sbinherit rows={}", node.depth, self.lp.num_rows());
@@ -5310,6 +5314,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 xp("m_lpstat");
+                self.node_lp_opt = true;
                 node_obj = self.lp.objective() + self.p.offset;
                 rp_obj = node_obj;
                 if resolves == 0 {
@@ -8014,7 +8019,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let u = self.prune_limit();
         if u.is_finite() {
-            for l in &sb.lines {
+            for l in sb.polys.values().flatten() {
                 let j = l.col as usize;
                 let distance = (u - l.z) / l.per + 1e-3;
                 if !(distance.is_finite() && distance > 0.0) {
@@ -8038,24 +8043,51 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
-    /// 子に引き継ぐもの: 親から引き継いだものに、このノードの強分岐で得たものを足す (直線は新しいものから最大
-    /// `ENOMOTO_T_MIP_SB_LINES_MAX` 本)。何もなければ `None`
+    /// 子に引き継ぐもの: 親から引き継いだものに、このノードの強分岐で得たもの (固定と凸性の直線) を足す。何もなければ `None`。
+    /// `ENOMOTO_MIP_SB_POLY_RC` (試作、既定では使わない) なら、折れ線を持つ列 (一度でも強分岐した一般整数列) のうち、このノードの LP
+    /// (分枝の直前の最適解) で境界にある非基底の列の被約費用 d_j からも直線を足す: x_j が上限 u にあり d_j < 0 なら、このノードの
+    /// 部分木で 目的値 >= o + |d_j|·(u − x_j) (o は LP の値。LP の双対性によるので、カットや伝播で LP が親と違っていても成り立ち、
+    /// 凸性から強分岐の直線と同じか強い)。下限 l で d_j > 0 なら 目的値 >= o + d_j·(x_j − l)。片側の子の LP だけを解いた後でも
+    /// 折れ線を更新できる
     fn sb_child_inherit(&mut self, _node: &OpenNode) -> Option<Rc<SbInherit>> {
         if !sb_inherit() && !sb_ancestor() {
             return None;
         }
         let fixes = std::mem::take(&mut self.sb_node_fixes);
-        let lines = std::mem::take(&mut self.sb_node_lines);
+        let mut lines = std::mem::take(&mut self.sb_node_lines);
+        if sb_ancestor() && env_str!("ENOMOTO_MIP_SB_POLY_RC").is_some() && self.node_lp_opt {
+            let mut cols: Vec<u32> = self.sb_cur.as_ref().map_or_else(Vec::new, |sb| sb.polys.keys().map(|k| k.0).collect());
+            cols.extend(lines.iter().map(|l| l.col));
+            cols.sort_unstable();
+            cols.dedup();
+            if !cols.is_empty() {
+                let o = self.lp.objective() + self.p.offset;
+                let rc = self.lp.reduced_costs_ref();
+                for &c in &cols {
+                    let j = c as usize;
+                    let (lo, up) = self.lp.col_bounds(j);
+                    let (x, d) = (self.lp.col_value(j), rc[j]);
+                    if d < -1e-7 && up.is_finite() && x >= up - 1e-9 {
+                        lines.push(SbLine { col: c, up: false, z: o, v: up, per: -d });
+                    } else if d > 1e-7 && lo.is_finite() && x <= lo + 1e-9 {
+                        lines.push(SbLine { col: c, up: true, z: o, v: lo, per: d });
+                    }
+                }
+                self.sb_inherit_stats[2] += 1;
+            }
+        }
         if fixes.is_empty() && lines.is_empty() {
             return self.sb_cur.clone();
         }
         let mut out = self.sb_cur.as_deref().cloned().unwrap_or_default();
         out.fixes.extend(fixes);
-        out.lines.extend(lines);
-        let max = tunable!("ENOMOTO_T_MIP_SB_LINES_MAX", 64usize, usize);
-        if out.lines.len() > max {
-            let k = out.lines.len() - max;
-            out.lines.drain(..k);
+        let max = tunable!("ENOMOTO_T_MIP_SB_POLY_MAX", 8usize, usize);
+        let mut changed = false;
+        for l in lines {
+            changed |= out.insert(l, max);
+        }
+        if !changed && out.fixes.len() == self.sb_cur.as_ref().map_or(0, |s| s.fixes.len()) {
+            return self.sb_cur.clone();
         }
         Some(Rc::new(out))
     }
@@ -11879,8 +11911,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.sb_fix_resolve_count > 0 {
                 eprintln!("MIP: strong branching: resolved the node LP {} times after fixings (ENOMOTO_MIP_SB_FIX_RESOLVE)", self.sb_fix_resolve_count);
             }
-            if self.sb_inherit_stats != [0; 2] {
-                eprintln!("MIP: strong branching: inherited bounds applied {}, ancestor convexity tightenings {} (ENOMOTO_MIP_SB_TIGHTEN_INHERIT / ANCESTOR)", self.sb_inherit_stats[0], self.sb_inherit_stats[1]);
+            if self.sb_inherit_stats != [0; 3] {
+                eprintln!("MIP: strong branching: inherited bounds applied {}, ancestor convexity tightenings {}, reduced cost updates at {} nodes (ENOMOTO_MIP_SB_TIGHTEN_INHERIT / ANCESTOR / SB_POLY_RC)", self.sb_inherit_stats[0], self.sb_inherit_stats[1], self.sb_inherit_stats[2]);
             }
             if self.sb_of_count > 0 {
                 eprintln!("MIP: strong branching: fixed {} orbit columns to 0 in down children (ENOMOTO_MIP_SB_OF)", self.sb_of_count);
@@ -11985,8 +12017,9 @@ fn sb_inherit() -> bool {
     env_str!("ENOMOTO_MIP_SB_TIGHTEN_INHERIT").is_some()
 }
 
-/// `ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR` (試作、既定では使わない): 強分岐の子の LP 値から得た凸性の直線 ([`SbLine`]) を子孫に引き継ぎ、
-/// 子孫のノードの始めにその時の打ち切り値で締め直す (暫定解が良くなるほど強く締まる。CBC は強分岐したノードでしか使わない)
+/// `ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR` (試作、既定では使わない): 強分岐の子の LP 値から得た凸性の直線 ([`SbLine`]) を、列と向きごとの
+/// 折れ線 ([`SbInherit::polys`]) にして子孫に引き継ぎ、子孫のノードの始めにその時の打ち切り値で締め直す (暫定解が良くなるほど
+/// 強く締まる。CBC は強分岐したノードでしか使わない)
 fn sb_ancestor() -> bool {
     env_str!("ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR").is_some()
 }

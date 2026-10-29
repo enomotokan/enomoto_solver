@@ -75,13 +75,49 @@ pub struct SbLine {
     pub per: f64,
 }
 
+impl SbLine {
+    /// 直線が下界として成り立つ端 (下の子の直線なら t <= ⌊v⌋、上なら t >= ⌈v⌉)
+    fn end(&self) -> f64 {
+        if self.up { self.v.ceil() } else { self.v.floor() }
+    }
+
+    /// 端 `t` での値
+    fn at(&self, t: f64) -> f64 {
+        if self.up { self.z + (t - self.v) * self.per } else { self.z + (self.v - t) * self.per }
+    }
+
+    /// `self` が `o` を支配するか (`o` が成り立つ範囲の全体で `self` も成り立ち、値が `o` 以上): その範囲は半直線なので、
+    /// 端が `o` 以上に広く、傾きが `o` 以上で、`o` の端での値が `o` 以上なら足りる
+    fn dominates(&self, o: &SbLine) -> bool {
+        let wider = if self.up { self.end() <= o.end() } else { self.end() >= o.end() };
+        wider && self.per >= o.per && self.at(o.end()) >= o.at(o.end()) - 1e-9 * (1.0 + o.at(o.end()).abs())
+    }
+}
+
 /// 強分岐で得て子に引き継ぐもの ([`OpenNode::sb`])。
 #[derive(Clone, Debug, Default)]
 pub struct SbInherit {
     /// 強分岐の片側の打ち切りによる固定と凸性による締め付け (このノードの部分木で成り立つ)
     pub fixes: Vec<BoundChange>,
-    /// 凸性の直線 (祖先のものも含む。新しいものが後ろ)
-    pub lines: Vec<SbLine>,
+    /// 列と向きごとの直線の最大 (凸な折れ線、祖先のものも含む)。支配された直線は持たず、1 本の折れ線は最大
+    /// `ENOMOTO_T_MIP_SB_POLY_MAX` 本の直線 (超えたら古いものから捨てる)。折れ線の数は列の数 × 2 以下
+    pub polys: std::collections::BTreeMap<(u32, bool), Vec<SbLine>>,
+}
+
+impl SbInherit {
+    /// 直線を折れ線に足す (支配されていれば足さない、足した直線が支配するものは消す)。足したら真
+    pub fn insert(&mut self, l: SbLine, max: usize) -> bool {
+        let poly = self.polys.entry((l.col, l.up)).or_default();
+        if poly.iter().any(|o| o.dominates(&l)) {
+            return false;
+        }
+        poly.retain(|o| !l.dominates(o));
+        poly.push(l);
+        if poly.len() > max {
+            poly.remove(0);
+        }
+        true
+    }
 }
 
 /// 待ち行列。
