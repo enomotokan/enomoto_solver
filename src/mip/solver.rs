@@ -3919,7 +3919,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.heur_label = "";
                             // 早めの再スタート (既定で使う。`ENOMOTO_MIP_NO_EARLY_RESTART` で使わない): このヒューリスティクスで暫定解が良くなり、根の被約費用による固定で
                             // 新たに固定された整数列が `ENOMOTO_T_MIP_EARLY_RESTART_FRAC` (0.025) 以上なら、残りの根のヒューリスティクスを飛ばして再スタートへ進む
+                            // `ENOMOTO_MIP_EARLY_RESTART_SKIP_LIGHT` (試作): 軽い丸め (と rounding・shifting・int shifting) の解では
+                            // 早めの再スタートをせず、後ろのヒューリスティクス (LP face・サブ MIP など) まで回す (2026-10-29 の 58 問で既定と同じか少し遅い)
                             if super::early_restart_on() && self.incumbent.as_ref().map(|(z, _)| *z) != z_before
+                                && !(env_str!("ENOMOTO_MIP_EARLY_RESTART_SKIP_LIGHT").is_some()
+                                    && (light_root_heur($name) || matches!($name, "rounding" | "shifting" | "int shifting")))
                                 && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_EARLY_RESTART_FRAC", 0.025, f64))
                             {
                                 self.early_restart = true;

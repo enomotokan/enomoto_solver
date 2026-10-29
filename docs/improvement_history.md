@@ -10156,6 +10156,14 @@ SCIP の `sepa_mcf.c` (Achterberg & Raack 2010) を `src/mip/mcf.rs` に移植�
   列を消して行を緩める。64 問で効くのは swath1・timtab1 だけで時間は変わらない。乱数問題で不一致 0。
 - 記録は `analysis/slackcol_20261028.md`。
 
+## 2026-10-29: 軽いヒューリスティクスの解で早めの再スタートをしない形・閾値 0.05 (却下)
+
+h80x6320d が shift で遅くなる理由を調べた。shift は解を見つけておらず、早めの再スタートは randomized rounding の解で起きていた。
+軽い丸め (と rounding・shifting・int shifting) の解では早めの再スタートをしない試作 (`ENOMOTO_MIP_EARLY_RESTART_SKIP_LIGHT`) と
+閾値 `ENOMOTO_T_MIP_EARLY_RESTART_FRAC=0.05` を 16 スレッド・60 秒・交互に 2 回で比べた。21 問 SGM 21.00 / 21.09 に対し 21.07 / 21.14・
+21.15 / 21.17、40 問 18.08 / 18.24 に対し 18.29 / 18.36・18.13 / 18.58 で、解けた数も減るので既定にしない。shift も既定のまま
+(`analysis/skiplight_20261029.md`)。
+
 ## 2026-10-29: 2 列のオービトープと双子のオービトープを既定にする (採用)
 
 ccr-e9c2168a の 2 つの試作を既定にした (`ENOMOTO_MIP_NO_ORBITOPE_TWO_COL`・`ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE` で止める)。
