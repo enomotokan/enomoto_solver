@@ -29,7 +29,7 @@ CFGS = {
     "sb_inh": {"ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1"},
     "sbt_a": {"ENOMOTO_MIP_SB_TIGHTEN": "1", "ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1"},
     "sbt_ab": {"ENOMOTO_MIP_SB_TIGHTEN": "1", "ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1", "ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR": "1"},
-    # 3 段目: (b) を列ごとの折れ線に作り直したもの (コミット 7c 以降のビルド)。sbt_abp は 2 段目の sbt_ab と同じ環境変数だが中身が違う
+    # 3 段目: (b) を列ごとの折れ線に作り直したもの (コミット ac8cfc08 以降のビルド)。sbt_abp は 2 段目の sbt_ab と同じ環境変数だが中身が違う
     "sbt_abp": {"ENOMOTO_MIP_SB_TIGHTEN": "1", "ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1", "ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR": "1"},
     "sbt_abpr": {"ENOMOTO_MIP_SB_TIGHTEN": "1", "ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1", "ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR": "1", "ENOMOTO_MIP_SB_POLY_RC": "1"},
 }
