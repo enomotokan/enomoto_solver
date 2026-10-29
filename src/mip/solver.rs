@@ -1827,11 +1827,14 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     // そのため刈り込みの上限は、暫定解より厳密に小さい最大の格子の点で取る ([`Self::prune_limit`])
     let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some();
     let obj_step = if obj_step_implint {
-        let mask = p.implied_integers();
+        // `ENOMOTO_MIP_IMPLINT_TU` も付けていれば TU の規則の暗黙の整数も使う (整数を固定すると連続列の部分に整数の最適解が
+        // あるので、どの部分木でも暫定解より良い解があれば格子の点の値の解もある)
+        let mask = if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() { p.implied_integers_tu(&p.implied_integers()) } else { p.implied_integers() };
         let b = if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() { Some((&dom.lo[..], &dom.up[..])) } else { None };
         let st = p.objective_step_mask(&mask, b);
         if params.verbose && !params.submip {
-            eprintln!("MIP: objective step with implied integers: {:?} (without: {:?})", st, p.objective_step());
+            let miss: Vec<usize> = (0..p.n).filter(|&j| p.cost[j] != 0.0 && !mask[j] && !(dom.lo[j] == dom.up[j])).collect();
+            eprintln!("MIP: objective step with implied integers: {:?} (without: {:?}); costed non-integer columns {} (e.g. {:?})", st, p.objective_step(), miss.len(), miss.iter().take(5).map(|&j| (j, p.cost[j], p.col_lo[j], p.col_up[j], p.cols[j].len())).collect::<Vec<_>>());
         }
         st
     } else if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() {
