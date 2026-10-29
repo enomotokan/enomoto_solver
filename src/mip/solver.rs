@@ -715,6 +715,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     sb_tighten_count: u64,
     /// 強分岐の下の子で軌道に沿って 0 にした列の数 (`ENOMOTO_MIP_SB_OF`)
     sb_of_count: u64,
+    /// 強分岐の子の被約費用で直線を作った数 (`ENOMOTO_MIP_SB_RC`)
+    sb_rc_count: u64,
     /// 処理中のノードが親から引き継いだもの ([`OpenNode::sb`])
     sb_cur: Option<Rc<SbInherit>>,
     /// このノードの強分岐で得た固定・締め付け (`ENOMOTO_MIP_SB_TIGHTEN_INHERIT`) と凸性の直線 (`ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR`)
@@ -1033,6 +1035,8 @@ struct SbSide {
     x: Option<Vec<f64>>,
     /// 証明に使う行の重み (実行不能なら Farkas の射線、それ以外は双対)。
     y: Option<Vec<f64>>,
+    /// 最適なら、分けた列の被約費用 (その列が分けた境界にあるときだけ。なければ 0)。`ENOMOTO_MIP_SB_RC` で使う
+    rc: f64,
 }
 
 /// 双対証明・衝突制約のプールの行の状態。
@@ -2160,6 +2164,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_prop_stats: [0; 2],
         sb_tighten_count: 0,
         sb_of_count: 0,
+        sb_rc_count: 0,
         sb_cur: None,
         sb_node_fixes: Vec::new(),
         sb_node_lines: Vec::new(),
@@ -7186,6 +7191,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
             let mut gains = [0.0f64; 2];
             let mut child_obj = [f64::NEG_INFINITY; 2];
+            // 子の LP での x_j の被約費用 (`ENOMOTO_MIP_SB_RC`。分けた境界にないか使わなければ 0)
+            let mut child_rc = [0.0f64; 2];
             let mut cut = [false; 2];
             if par_sb && !pre.contains_key(&j) {
                 // この候補から、強分岐するはずの候補 (信頼できないもの) をスレッド数まで集めて並列に解く
@@ -7237,7 +7244,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                             LpStatus::Optimal | LpStatus::ObjectiveBound => Some(lpc.row_duals()),
                                             _ => None,
                                         };
-                                        sides.push(SbSide { st, obj, iters, x, y });
+                                        let rc = if st == LpStatus::Optimal && sb_rc() { sb_child_rc(&lpc, jj, is_up) } else { 0.0 };
+                                        sides.push(SbSide { st, obj, iters, x, y, rc });
                                         lpc.restore_state(&saved_c);
                                     }
                                     let up_side = sides.pop().unwrap();
@@ -7268,6 +7276,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let o = r.obj;
                             gains[side] = (o - node_obj).max(0.0);
                             child_obj[side] = o;
+                            child_rc[side] = r.rc;
                             let delta = if is_up { v.ceil() - v } else { v - v.floor() };
                             self.pc.add_observation(j, is_up, delta, gains[side]);
                             if o >= self.prune_limit() {
@@ -7354,6 +7363,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let o = self.lp.objective() + self.p.offset;
                         gains[side] = (o - node_obj).max(0.0);
                         child_obj[side] = o;
+                        if sb_rc() {
+                            child_rc[side] = sb_child_rc(&self.lp, j, is_up);
+                        }
                         let delta = if is_up { v.ceil() - v } else { v - v.floor() };
                         self.pc.add_observation(j, is_up, delta, gains[side]);
                         if o >= self.prune_limit() {
@@ -7426,23 +7438,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let cutoff = self.prune_limit();
                         for (side, is_up) in [(0usize, false), (1usize, true)] {
                             let o = child_obj[side];
-                            let change = o - node_obj;
-                            if !o.is_finite() || change <= 1e-5 {
+                            if !o.is_finite() {
                                 continue;
                             }
-                            let dist0 = if is_up { v.ceil() - v } else { v - v.floor() };
-                            if dist0 <= 1e-3 {
-                                continue;
-                            }
-                            let per = change / (dist0 + 1e-7);
+                            // 直線 (z, v, per): 割線は (今の LP 値, v) を通り傾きは子の値との差から。`ENOMOTO_MIP_SB_RC` で子の LP の
+                            // 被約費用 d が使えるなら、(子の値, 分けた境界) を通り傾き |d| の直線 (LP の双対性による。凸性から割線と
+                            // 同じか急で、同じ点を通るので割線を支配する)
+                            let bound = if is_up { v.ceil() } else { v.floor() };
+                            let rc = child_rc[side].abs();
+                            let line = if rc > 1e-7 {
+                                self.sb_rc_count += 1;
+                                SbLine { col: j as u32, up: is_up, z: o, v: bound, per: rc }
+                            } else {
+                                let change = o - node_obj;
+                                let dist0 = if is_up { v.ceil() - v } else { v - v.floor() };
+                                if change <= 1e-5 || dist0 <= 1e-3 {
+                                    continue;
+                                }
+                                SbLine { col: j as u32, up: is_up, z: node_obj, v, per: change / (dist0 + 1e-7) }
+                            };
+                            let (lz, lv, per) = (line.z, line.v, line.per);
                             if sb_ancestor() {
-                                self.sb_node_lines.push(SbLine { col: j as u32, up: is_up, z: node_obj, v, per });
+                                self.sb_node_lines.push(line);
                             }
                             if env_str!("ENOMOTO_MIP_SB_TIGHTEN").is_none() || !cutoff.is_finite() {
                                 continue;
                             }
                             {
-                                let distance = (cutoff - node_obj) / per + 1e-3;
+                                let v = lv;
+                                let distance = (cutoff - lz) / per + 1e-3;
                                 if distance >= 5.0 {
                                     continue;
                                 }
@@ -11914,6 +11938,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.sb_inherit_stats != [0; 3] {
                 eprintln!("MIP: strong branching: inherited bounds applied {}, ancestor convexity tightenings {}, reduced cost updates at {} nodes (ENOMOTO_MIP_SB_TIGHTEN_INHERIT / ANCESTOR / SB_POLY_RC)", self.sb_inherit_stats[0], self.sb_inherit_stats[1], self.sb_inherit_stats[2]);
             }
+            if self.sb_rc_count > 0 {
+                eprintln!("MIP: strong branching: lines from child reduced costs {} (ENOMOTO_MIP_SB_RC)", self.sb_rc_count);
+            }
             if self.sb_of_count > 0 {
                 eprintln!("MIP: strong branching: fixed {} orbit columns to 0 in down children (ENOMOTO_MIP_SB_OF)", self.sb_of_count);
             }
@@ -12022,4 +12049,24 @@ fn sb_inherit() -> bool {
 /// 強く締まる。CBC は強分岐したノードでしか使わない)
 fn sb_ancestor() -> bool {
     env_str!("ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR").is_some()
+}
+
+/// `ENOMOTO_MIP_SB_RC` (試作、既定では使わない): 強分岐の凸性の締め付けと折れ線の直線に、割線の代わりに子の LP の被約費用を使う
+/// (子の LP は今の LP に境界を 1 つ足しただけで、x_j がその境界にあり被約費用が d なら、子の部分では 目的値 >= 子の値 + |d|·(境界からの距離))
+fn sb_rc() -> bool {
+    env_str!("ENOMOTO_MIP_SB_RC").is_some()
+}
+
+/// 強分岐の子の LP (最適) での列 `j` の被約費用。下の子なら上限に、上の子なら下限にあって、向きの合うものだけ (なければ 0)
+fn sb_child_rc<L: MipLp>(lp: &L, j: usize, is_up: bool) -> f64 {
+    let (lo, up) = lp.col_bounds(j);
+    let x = lp.col_value(j);
+    let d = lp.reduced_costs_ref()[j];
+    if !is_up && d < -1e-7 && x >= up - 1e-9 {
+        d
+    } else if is_up && d > 1e-7 && x <= lo + 1e-9 {
+        d
+    } else {
+        0.0
+    }
 }
