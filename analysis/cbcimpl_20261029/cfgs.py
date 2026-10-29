@@ -37,4 +37,9 @@ CFGS = {
     # 5 段目 (確かめ): 1 段目で両方の組で良い側に出たものの組み合わせ
     "combo": {"ENOMOTO_MIP_TAB_NNZ_CBC": "1", "ENOMOTO_MIP_NODE_CUT_MAXLEN": "1", "ENOMOTO_MIP_DIVE_RCFIX": "1", "ENOMOTO_MIP_ZH_PRE": "1",
               "ENOMOTO_MIP_ORIGROW_TIGHT": "1", "ENOMOTO_MIP_COST_PRIORITY": "1"},
+    # 6 段目: 折れ線を分枝のスコアに使う (ENOMOTO_MIP_SB_POLY_SCORE)
+    "sbt_abpr_ps": {"ENOMOTO_MIP_SB_TIGHTEN": "1", "ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1", "ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR": "1", "ENOMOTO_MIP_SB_POLY_RC": "1",
+                    "ENOMOTO_MIP_SB_POLY_SCORE": "1"},
+    "sbt_full_ps": {"ENOMOTO_MIP_SB_TIGHTEN": "1", "ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1", "ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR": "1", "ENOMOTO_MIP_SB_POLY_RC": "1",
+                    "ENOMOTO_MIP_SB_RC": "1", "ENOMOTO_MIP_SB_POLY_SCORE": "1"},
 }

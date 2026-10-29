@@ -7095,8 +7095,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let tighten0 = self.sb_tighten_count;
         // SCIP の relpscost に倣った強分岐 (branch_relpscost.c `branchExecRelpscost`)。
         let hybrid = env_str!("ENOMOTO_MIP_NO_HYBRID_SCORE").is_none();
-        let score_of = |s: &Self, j: usize, v: f64| if hybrid { s.pc.hybrid_score(j, v - v.floor()) } else { s.pc.score(j, v - v.floor()) };
-        let mut cands: Vec<(usize, f64, f64)> = frac.iter().map(|&(j, v)| (j, v, score_of(self, j, v))).collect();
+        // `ENOMOTO_MIP_SB_POLY_SCORE` (試作、既定では使わない): 列が強分岐の折れ線 ([`SbInherit::polys`]) を持てば、折れ線から得る子の
+        // LP の値の下界 (下の子は g_下(⌊v⌋)、上の子は g_上(⌈v⌉)) とノードの値の差を、擬似費用の見積もりの下限として使う
+        // (折れ線の直線は子孫のノードの LP の値の下界なので、子の値の正しい下界)
+        let poly_score = env_str!("ENOMOTO_MIP_SB_POLY_SCORE").is_some();
+        let score_of = |s: &Self, j: usize, v: f64, z: f64| {
+            let f = v - v.floor();
+            if poly_score {
+                if let Some((gd, gu)) = s.poly_child_gains(j, v, z) {
+                    let (pd, pu) = (s.pc.cost_down(j) * f, s.pc.cost_up(j) * (1.0 - f));
+                    let (d, u) = (pd.max(gd), pu.max(gu));
+                    return if hybrid { s.pc.hybrid_score_with_gains(j, d, u) } else { d.max(1e-6) * u.max(1e-6) };
+                }
+            }
+            if hybrid { s.pc.hybrid_score(j, f) } else { s.pc.score(j, f) }
+        };
+        let mut cands: Vec<(usize, f64, f64)> = frac.iter().map(|&(j, v)| (j, v, score_of(self, j, v, node_obj))).collect();
         // racing ramp-up の多様化: 擬似費用のスコアに ±10% の揺らぎを加える
         if self.race_div & 2 == 2 && !self.race_done {
             for c in cands.iter_mut() {
@@ -7536,7 +7550,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         // 残りの候補を新しい LP 解で作り直す (調べた候補は除く)
                         let done: std::collections::HashSet<usize> = cands[..ci].iter().map(|c| c.0).collect();
-                        let mut rest: Vec<(usize, f64, f64)> = nf.iter().filter(|c| !done.contains(&c.0)).map(|&(k, vk)| (k, vk, score_of(self, k, vk))).collect();
+                        let mut rest: Vec<(usize, f64, f64)> = nf.iter().filter(|c| !done.contains(&c.0)).map(|&(k, vk)| (k, vk, score_of(self, k, vk, node_obj))).collect();
                         rest.sort_by(|a, b| b.2.total_cmp(&a.2));
                         cands.truncate(ci);
                         cands.extend(rest);
@@ -8136,6 +8150,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return self.sb_cur.clone();
         }
         Some(Rc::new(out))
+    }
+
+    /// 列 `j` (LP の値 `v`) の強分岐の折れ線から得る、子の LP の値の増分の下界 (下の子, 上の子)。`z` はノードの LP の値。
+    /// 折れ線がなければ `None`
+    fn poly_child_gains(&self, j: usize, v: f64, z: f64) -> Option<(f64, f64)> {
+        let sb = self.sb_cur.as_ref()?;
+        let c = j as u32;
+        let (dn, up) = (sb.polys.get(&(c, false)), sb.polys.get(&(c, true)));
+        if dn.is_none() && up.is_none() {
+            return None;
+        }
+        let (tf, tc) = (v.floor(), v.ceil());
+        let gd = dn.map_or(0.0, |ls| ls.iter().filter(|l| l.end() >= tf).map(|l| l.at(tf) - z).fold(0.0f64, f64::max));
+        let gu = up.map_or(0.0, |ls| ls.iter().filter(|l| l.end() <= tc).map(|l| l.at(tc) - z).fold(0.0f64, f64::max));
+        Some((gd, gu))
     }
 
     /// [`Self::orbital_fixing`] を呼び、矛盾なら衝突を作って刈った数を数える。

@@ -77,12 +77,12 @@ pub struct SbLine {
 
 impl SbLine {
     /// 直線が下界として成り立つ端 (下の子の直線なら t <= ⌊v⌋、上なら t >= ⌈v⌉)
-    fn end(&self) -> f64 {
+    pub fn end(&self) -> f64 {
         if self.up { self.v.ceil() } else { self.v.floor() }
     }
 
     /// 端 `t` での値
-    fn at(&self, t: f64) -> f64 {
+    pub fn at(&self, t: f64) -> f64 {
         if self.up { self.z + (t - self.v) * self.per } else { self.z + (self.v - t) * self.per }
     }
 
