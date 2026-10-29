@@ -28,6 +28,8 @@ pub struct BoundChange {
     pub col: usize,
     pub upper: bool,
     pub value: f64,
+    /// 分枝ではなく、親で orbital fixing ([`super::sym_of`]) が固定したもの (子の固定群を決める分枝に数えない)。
+    pub sym: bool,
 }
 
 /// 未処理のノード。

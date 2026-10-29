@@ -1391,7 +1391,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 加工したサブ MIP (`sub`: 列は元と同じ並び) を解き、見つかった解を元の問題の暫定解の候補にする。
     /// `cutoff` はサブ MIP の目的値の打ち切り値 (`None` なら元の打ち切り値。目的関数を変えたサブ MIP では指定する)。
     /// 戻り値は (サブ MIP の状態, 解を受け入れたか)。
-    fn solve_submip_problem(&mut self, mut sub: super::problem::MipProblem, node_limit: u64, cutoff: Option<f64>) -> Option<(super::solver::MipStatus, bool)> {
+    pub(super) fn solve_submip_problem(&mut self, mut sub: super::problem::MipProblem, node_limit: u64, cutoff: Option<f64>) -> Option<(super::solver::MipStatus, bool)> {
         let p = self.p;
         let (lo, up) = (std::mem::take(&mut sub.col_lo), std::mem::take(&mut sub.col_up));
         // 伝播の丸め誤差で下限 > 上限 (ごくわずか) になった列は 1 点に固定する
@@ -1451,7 +1451,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             time_limit: if time_highs {
                 (tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_FRAC", 1.0, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_MAX", f64::INFINITY, f64))
             } else {
-                (self.submip_time_frac * remaining).min(self.submip_time_max)
+                let t = (self.submip_time_frac * remaining).min(self.submip_time_max);
+                // `ENOMOTO_MIP_ROOT_SUBMIP_REL` (試作): 根のサブ MIP は外側の求解の経過秒の k 倍まで ([`super::root_submip_rel`])
+                match super::root_submip_rel().filter(|_| !self.params.submip && self.snap.is_none() && self.nodes <= 1 && self.incumbent.is_some()) {
+                    Some(k) => t.min((k * super::root_submip_ref_secs().unwrap_or(f64::INFINITY)).max(tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_REL_MIN", 0.5, f64))),
+                    None => t,
+                }
             },
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
             node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult) as u64,
@@ -1459,7 +1464,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_T_MIP_SUBMIP_NOINC_GAP` = g (> 0、試作、既定 0 で今まで通り): 外側の求解に暫定解がまだなければ、サブ MIP をギャップ g で
             // 止めて早く解を返させる (並列のサブ MIP の解は終わるまで外側に渡らない。physiciansched6-2 では Local-MIP が解を出さない回に、
             // 打ち切り値なしの根の RENS が 49324 を見つけた後もギャップ 0.1% を詰めるのに 42〜44 秒・163〜252 ノードかかり、証明が間に合わなかった)
-            rel_gap: {
+            // LB2・PROX2 ([`super::heur_lns2`]) が一時的に決める相対ギャップ (PROX2 は最初の解で止める)
+            rel_gap: if let Some(g) = self.submip_gap { g } else {
                 let g = if gap_highs { self.params.rel_gap } else { self.params.rel_gap.max(1e-4) };
                 let ng = tunable!("ENOMOTO_T_MIP_SUBMIP_NOINC_GAP", 0.0, f64);
                 if ng > 0.0 && !self.params.submip && self.incumbent.is_none() { g.max(ng) } else { g }
@@ -1497,7 +1503,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             crate::set_fj_p3_force(true);
         }
         let t_sub = Instant::now();
+        // 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_COMPONENTS`: 外側の根から出したサブ MIP の自由な列の連結成分 (前処理の前。後は `solve_problem` の中で出す)
+        let comp_diag = super::debug_submip_components() && depth == 0;
+        if comp_diag {
+            super::SUBMIP_LABEL.with(|l| l.set(self.heur_label));
+            super::report_submip_components(&sub, "before presolve");
+        }
+        // 成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP` で使わない): 根の (主のスレッドで解く) サブ MIP も成果で打ち切る ([`super::solver::submip_outcome_stop`])
+        if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
+            let c = std::sync::Arc::new(super::solver::SubmipCtl::new(self.prune_limit()));
+            super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(c));
+        }
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = None);
         if p3 {
             crate::set_fj_p3_force(false);
         }
@@ -1506,6 +1524,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose {
             let nfree = (0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();
             eprintln!("MIP:   sub-MIP: {nfree} free columns of {}, status {:?}, nodes {}, objective {:?}, {:.2}s", p.n, r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64());
+        }
+        if comp_diag {
+            eprintln!("SUBMIP_COMP: {} result: status {:?}, nodes {}, {:.2}s", self.heur_label, r.status, r.nodes, t_sub.elapsed().as_secs_f64());
+            super::SUBMIP_LABEL.with(|l| l.set(""));
         }
         self.heur_iters += r.lp_iterations;
         let acc = match r.x {
@@ -2550,7 +2572,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 暫定解の 2 値列を何個変えたか (Hamming 距離) の行: `sum_{inc=0} x_j - sum_{inc=1} x_j` と、その定数
     /// (`|{inc=1}|`)。距離 = 行の値 + 定数。2 値列 (大域的な境界が [0, 1]) だけを数える。
-    fn hamming_row(&self, inc: &[f64]) -> (Vec<(usize, f64)>, f64) {
+    pub(super) fn hamming_row(&self, inc: &[f64]) -> (Vec<(usize, f64)>, f64) {
         let p = self.p;
         let mut row = Vec::new();
         let mut ones = 0.0;

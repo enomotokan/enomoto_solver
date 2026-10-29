@@ -182,9 +182,80 @@ pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64) ->
 
 /// [`detect`] に 2 つ目の手間の上限 `log_cap` ([`LWORK`] の増分) を足したもの。
 pub fn detect2(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64, log_cap: u64) -> (Option<Symmetry>, u64) {
+    detect_skip_twins(p, time_cap, max_tries, work_cap, log_cap, &[])
+}
+
+/// [`detect2`] で、同じ列の組 `twins` ([`twin_classes`]) を始めから同じ軌道として扱い、その中の組は探さないもの。
+/// 返す生成元は探索で見つけたものだけ (`twins` の入れ替えは含まない。軌道も生成元だけから作る)。
+pub fn detect_skip_twins(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64, log_cap: u64, twins: &[Vec<usize>]) -> (Option<Symmetry>, u64) {
     let (w0, l0) = (work(), log_work());
-    let r = detect_inner(p, time_cap, max_tries, (w0.saturating_add(work_cap), l0.saturating_add(log_cap)));
+    let r = detect_inner(p, time_cap, max_tries, (w0.saturating_add(work_cap), l0.saturating_add(log_cap)), twins);
     (r, work() - w0)
+}
+
+/// 同じ列 (双子) の組: 境界・整数性・費用と、全ての行の (行, 係数) が一致する列 (2 列以上の組だけ、各組は番号の昇順、
+/// 組は先頭の番号の順)。組の中の 2 列の入れ替えは確かめなくても問題の対称性。固定された列と行に現れない列は除く。
+/// 列ごとのハッシュで分けてから中身を比べるので O(非零の数)。
+pub fn twin_classes(p: &MipProblem) -> Vec<Vec<usize>> {
+    let key = |j: usize| -> u64 {
+        let mut h = mix(mix(fbits(p.cost[j]), fbits(p.col_lo[j])), mix(fbits(p.col_up[j]), p.is_int[j] as u64));
+        for &(i, a) in &p.cols[j] {
+            h = mix(mix(h, i as u64), fbits(a));
+        }
+        h
+    };
+    let same = |a: usize, b: usize| {
+        p.cost[a] == p.cost[b] && p.col_lo[a] == p.col_lo[b] && p.col_up[a] == p.col_up[b] && p.is_int[a] == p.is_int[b] && p.cols[a] == p.cols[b]
+    };
+    let mut buckets: std::collections::HashMap<u64, Vec<Vec<usize>>> = std::collections::HashMap::new();
+    for j in 0..p.n {
+        if p.col_lo[j] == p.col_up[j] || p.cols[j].is_empty() {
+            continue;
+        }
+        let groups = buckets.entry(key(j)).or_default();
+        match groups.iter_mut().find(|g| same(g[0], j)) {
+            Some(g) => g.push(j),
+            None => groups.push(vec![j]),
+        }
+    }
+    let mut out: Vec<Vec<usize>> = buckets.into_values().flatten().filter(|g| g.len() >= 2).collect();
+    out.sort_unstable_by_key(|g| g[0]);
+    out
+}
+
+impl Symmetry {
+    /// 生成元から軌道を作る (2 列以上の軌道だけ番号を付ける)。生成元がなければ `None`。
+    pub fn from_generators(n: usize, generators: Vec<Vec<usize>>) -> Option<Symmetry> {
+        if generators.is_empty() {
+            return None;
+        }
+        let mut uf: Vec<usize> = (0..n).collect();
+        for g in &generators {
+            for j in 0..n {
+                let (x, y) = (find(&mut uf, j), find(&mut uf, g[j]));
+                if x != y {
+                    uf[x] = y;
+                }
+            }
+        }
+        let mut size = vec![0usize; n];
+        for j in 0..n {
+            let r = find(&mut uf, j);
+            size[r] += 1;
+        }
+        let (mut id, mut num, mut orbit) = (vec![usize::MAX; n], 0, vec![usize::MAX; n]);
+        for j in 0..n {
+            let r = find(&mut uf, j);
+            if size[r] >= 2 {
+                if id[r] == usize::MAX {
+                    id[r] = num;
+                    num += 1;
+                }
+                orbit[j] = id[r];
+            }
+        }
+        Some(Symmetry { generators, orbit, num_orbits: num })
+    }
 }
 
 /// 手間の上限 (`WORK` の終わり, `LWORK` の終わり) を越えたか。
@@ -192,7 +263,7 @@ fn over(end: (u64, u64)) -> bool {
     work() > end.0 || log_work() > end.1
 }
 
-fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64, u64)) -> Option<Symmetry> {
+fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64, u64), twins: &[Vec<usize>]) -> Option<Symmetry> {
     let t0 = std::time::Instant::now();
     let n = p.n;
     if n < 2 || p.m == 0 {
@@ -237,6 +308,15 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64,
         *row_counts.entry(row_hash(p.row_lo[i], p.row_up[i], &mut tmp)).or_insert(0) += 1;
     }
     let mut uf: Vec<usize> = (0..n).collect();
+    // 双子は始めから同じ軌道にしておき、その組は探さない (生成元にはしない。呼び出し側が扱う)
+    for t in twins {
+        for &j in &t[1..] {
+            let (x, y) = (find(&mut uf, t[0]), find(&mut uf, j));
+            if x != y {
+                uf[x] = y;
+            }
+        }
+    }
     let mut generators: Vec<Vec<usize>> = Vec::new();
     let mut tries = 0usize;
     // `ENOMOTO_T_MIP_SYM_TIME_EXT` = e (> `time_cap`、試作。既定 0 で使わない): 上限 `time_cap` に達した時点で、生成元が
@@ -278,6 +358,9 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64,
     }
     if generators.is_empty() {
         return None;
+    }
+    if !twins.is_empty() {
+        return Symmetry::from_generators(n, generators);
     }
     // 軌道 (2 列以上)
     let mut size = vec![0usize; n];
@@ -419,6 +502,9 @@ pub struct Orbitope {
     pub row_packing: Vec<bool>,
     /// 列の入れ替えの生成元 (列 a, 列 b, 問題全体の置換 `perm[j] = σ(j)`。0-1 でない列も一緒に動かす)。
     pub swaps: Vec<(usize, usize, std::sync::Arc<Vec<usize>>)>,
+    /// 列の入れ替えがオービトープの変数だけを動かす (双子の組から作った 1xk、既定、`ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE` で止める)。`swaps` は
+    /// 持たず、[`Self::canonicalize`] は値を直接入れ替える。
+    pub local: bool,
 }
 
 /// 置換 `perm` (`perm[j] = σ(j)`) で解を写す: `y[σ(j)] = x[j]`。
@@ -438,6 +524,7 @@ impl Orbitope {
             packing: rows.iter().all(|&i| self.row_packing[i]),
             row_packing: rows.iter().map(|&i| self.row_packing[i]).collect(),
             swaps: Vec::new(),
+            local: self.local,
         }
     }
 
@@ -498,12 +585,24 @@ impl Orbitope {
                 }
             }
             if best != pos {
+                if self.local {
+                    for line in &self.vars {
+                        x.swap(line[pos], line[best]);
+                    }
+                    continue;
+                }
                 let Some(t) = self.transposition(pos, best) else { return false };
                 apply_perm(&t, x);
             }
         }
         true
     }
+}
+
+/// 既定 (2026-10-29、`ENOMOTO_MIP_NO_ORBITOPE_TWO_COL` で止める): 生成元 1 本の 2 列の入れ替えもオービトープにする ([`find_orbitopes`])。
+/// (検出 1 回に 1 度しか呼ばないので値を控えない。単体テストで切り替える)
+pub(crate) fn orbitope_two_col() -> bool {
+    std::env::var_os("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL").is_none()
 }
 
 /// 生成元のうち、0-1 列の 2-巡回だけからなるもの (列の入れ替え) をまとめて完全オービトープを作る。
@@ -607,6 +706,26 @@ pub fn find_orbitopes(p: &MipProblem, sym: &Symmetry) -> (Vec<Orbitope>, Vec<boo
                 }
                 continue 'cl;
             }
+        }
+        // 2 列のオービトープ (既定、`ENOMOTO_MIP_NO_ORBITOPE_TWO_COL` で止める): 生成元 1 本が各行の 2 列を入れ替えるだけなら、群は {恒等, g}
+        // で、2 列の入れ替えはどの行のどちらを列 0 に置いても g そのもの。下の「動かす生成元の組」では 2 列が同じ組になって区別
+        // できず捨てていた (双子の 1x2 と、同じ機械が 2 台の kx2: ns1116954 は 1982x2 が lex-leader の行 1 本だけだった)。
+        // 各行を [j, g(j)] と並べる。0-1 でない整数列の組も同じ形で行に加える (下の通常の形と同じ理由)
+        if s == 2 && gens.len() == 1 && orbitope_two_col() {
+            let k = gens[0];
+            let g = &sym.generators[k];
+            let mut mat: Vec<Vec<usize>> = rows.iter().map(|r| vec![r[0], g[r[0]]]).collect();
+            if env_str!("ENOMOTO_MIP_ORBITOPE_NO_INT_ROWS").is_none() {
+                for j in 0..n {
+                    if g[j] != j && j < g[j] && p.is_int[j] && !binary(j) {
+                        mat.push(vec![j, g[j]]);
+                    }
+                }
+            }
+            used[k] = true;
+            let nrows = mat.len();
+            out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps: vec![(0, 1, std::sync::Arc::new(g.clone()))], local: false });
+            continue;
         }
         // 列 c (1 行目の c 番目) を動かす生成元の組
         let sig = |j: usize| -> Vec<usize> { gens.iter().copied().filter(|&k| sym.generators[k][j] != j).collect() };
@@ -717,7 +836,7 @@ pub fn find_orbitopes(p: &MipProblem, sym: &Symmetry) -> (Vec<Orbitope>, Vec<boo
                 eprintln!("SYM orbitope other row: {} cols {:?} int {:?} col positions {:?}", v.len(), v, v.iter().map(|&j| p.is_int[j]).collect::<Vec<_>>(), sigs);
             }
         }
-        out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps });
+        out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps, local: false });
     }
     (out, used)
 }
@@ -1097,12 +1216,301 @@ pub fn lex_leader_pairs(sym: &Symmetry) -> Vec<(usize, usize)> {
     pairs
 }
 
+/// 生成元 `gens` のうち、`p` の対称性であるものだけを返す (再スタートの後の問題で orbital fixing の生成元を確かめ直す。
+/// 前処理が対称性を崩していれば (片方の列だけを固定・代入、対称でないカットの行など) その生成元は落とす)。
+pub fn verify_generators(p: &MipProblem, gens: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    if gens.iter().any(|g| g.len() != p.n) {
+        return Vec::new();
+    }
+    let mut row_counts: std::collections::HashMap<u64, i64> = std::collections::HashMap::new();
+    let mut tmp: Vec<(usize, f64)> = Vec::new();
+    for i in 0..p.m {
+        tmp.clear();
+        tmp.extend_from_slice(&p.rows[i]);
+        *row_counts.entry(row_hash(p.row_lo[i], p.row_up[i], &mut tmp)).or_insert(0) += 1;
+    }
+    gens.iter().filter(|g| verify(p, g, &row_counts)).cloned().collect()
+}
+
+/// orbital fixing (`ENOMOTO_MIP_SYM_OF`、HiGHS の `StabilizerOrbits::orbitalFixing`) に使う生成元と前計算。
+/// ノードでは、分枝で 1 にした 0-1 列と分枝した一般整数列を動かさない生成元 (固定群の部分群) の軌道を求め、
+/// 軌道のどれかの列が固定されていれば軌道の 0-1 列を全て同じ値に固定する。
+pub struct OrbitalGens {
+    /// 生成元 (問題全体の置換 `perm[j] = σ(j)`)。
+    pub gens: Vec<Vec<usize>>,
+    /// どれかの生成元が動かす列 (昇順)。
+    cols: Vec<usize>,
+    /// 生成元ごとに、動かす列の (`cols` の中の位置, 行き先の位置)。
+    moves: Vec<Vec<(u32, u32)>>,
+    /// `cols` の位置ごとに、その列を動かす生成元。
+    col_gens: Vec<Vec<u32>>,
+}
+
+impl OrbitalGens {
+    pub fn new(gens: Vec<Vec<usize>>) -> Self {
+        let mut cols: Vec<usize> = gens.iter().flat_map(|g| (0..g.len()).filter(move |&j| g[j] != j)).collect();
+        cols.sort_unstable();
+        cols.dedup();
+        let pos = |j: usize| cols.binary_search(&j).unwrap() as u32;
+        let moves: Vec<Vec<(u32, u32)>> = gens.iter().map(|g| (0..g.len()).filter(|&j| g[j] != j).map(|j| (pos(j), pos(g[j]))).collect()).collect();
+        let mut col_gens: Vec<Vec<u32>> = vec![Vec::new(); cols.len()];
+        for (k, mv) in moves.iter().enumerate() {
+            for &(a, _) in mv {
+                col_gens[a as usize].push(k as u32);
+            }
+        }
+        OrbitalGens { gens, cols, moves, col_gens }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.gens.is_empty()
+    }
+
+    /// 列 `j` を動かす生成元 (動かすものがなければ空)。
+    pub fn gens_moving(&self, j: usize) -> &[u32] {
+        match self.cols.binary_search(&j) {
+            Ok(q) => &self.col_gens[q],
+            Err(_) => &[],
+        }
+    }
+
+    /// 動かす列の数 (`cols` の長さ。[`Self::base_perms`] などの置換はこの位置の上のもの)。
+    pub fn support_len(&self) -> usize {
+        self.cols.len()
+    }
+
+    /// 列 `j` の `cols` の中の位置 (どの生成元も動かさなければ `None`)。
+    pub fn position(&self, j: usize) -> Option<u32> {
+        self.cols.binary_search(&j).ok().map(|q| q as u32)
+    }
+
+    /// 生成元を `cols` の位置の上の置換にしたもの。
+    pub fn base_perms(&self) -> Vec<std::rc::Rc<Vec<u32>>> {
+        self.moves
+            .iter()
+            .map(|mv| {
+                let mut g: Vec<u32> = (0..self.cols.len() as u32).collect();
+                for &(a, b) in mv {
+                    g[a as usize] = b;
+                }
+                std::rc::Rc::new(g)
+            })
+            .collect()
+    }
+
+    /// 群 `h` (位置の上の置換の生成元) で位置 `q` を固定する部分群の生成元 (Schreier 生成元
+    /// `u_{s(x)}^{-1} s u_x`、`u_x` は `q` を軌道の点 `x` に写す元)。軌道が `max_orbit` を超えるときは、`q` を動かさない生成元だけ
+    /// (HiGHS と同じ、固定群の部分群)。多くても `max_gens` 本 (`q` を動かさない生成元を先に入れる)。どれも固定群の元なので、
+    /// 本数を打ち切っても部分群の生成元として正しい。
+    pub fn schreier_stabilizer(h: &[std::rc::Rc<Vec<u32>>], q: u32, max_orbit: usize, max_gens: usize) -> Vec<std::rc::Rc<Vec<u32>>> {
+        let mut out: Vec<std::rc::Rc<Vec<u32>>> = h.iter().filter(|g| g[q as usize] == q).take(max_gens).cloned().collect();
+        if h.iter().all(|g| g[q as usize] == q) || out.len() >= max_gens {
+            return out;
+        }
+        let m = h[0].len();
+        // 軌道と、各点への写し u_x (q -> x) を幅優先で作る
+        let mut u: std::collections::HashMap<u32, std::rc::Rc<Vec<u32>>> = std::collections::HashMap::new();
+        let id: std::rc::Rc<Vec<u32>> = std::rc::Rc::new((0..m as u32).collect());
+        u.insert(q, id);
+        let mut order = vec![q];
+        let mut head = 0;
+        while head < order.len() {
+            let x = order[head];
+            head += 1;
+            let ux = u[&x].clone();
+            for g in h {
+                let y = g[x as usize];
+                if !u.contains_key(&y) {
+                    if u.len() >= max_orbit {
+                        return out;
+                    }
+                    // u_y = g ∘ u_x
+                    let uy: Vec<u32> = ux.iter().map(|&t| g[t as usize]).collect();
+                    u.insert(y, std::rc::Rc::new(uy));
+                    order.push(y);
+                }
+            }
+        }
+        let mut seen: std::collections::HashSet<std::rc::Rc<Vec<u32>>> = out.iter().cloned().collect();
+        let mut inv = vec![0u32; m];
+        for &x in &order {
+            let ux = u[&x].clone();
+            for s in h {
+                let y = s[x as usize];
+                if x == q && y == q {
+                    continue; // q を動かさない生成元はもう入れた
+                }
+                let uy = &u[&y];
+                for (i, &t) in uy.iter().enumerate() {
+                    inv[t as usize] = i as u32;
+                }
+                // g = u_y^{-1} ∘ s ∘ u_x
+                let g: Vec<u32> = ux.iter().map(|&t| inv[s[t as usize] as usize]).collect();
+                debug_assert_eq!(g[q as usize], q);
+                if g.iter().enumerate().all(|(i, &t)| i as u32 == t) {
+                    continue;
+                }
+                let g = std::rc::Rc::new(g);
+                if seen.insert(g.clone()) {
+                    out.push(g);
+                    if out.len() >= max_gens {
+                        return out;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 位置の上の置換 `perms` の軌道のうち、`keep` を満たす列が 2 本以上あるもの (`keep` の列だけ)。
+    pub fn orbits_of(&self, perms: &[std::rc::Rc<Vec<u32>>], keep: impl Fn(usize) -> bool) -> Vec<Vec<usize>> {
+        let m = self.cols.len();
+        let mut uf: Vec<usize> = (0..m).collect();
+        for g in perms {
+            for (a, &b) in g.iter().enumerate() {
+                if a as u32 != b {
+                    let (x, y) = (find(&mut uf, a), find(&mut uf, b as usize));
+                    if x != y {
+                        uf[x] = y;
+                    }
+                }
+            }
+        }
+        let mut by_root: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+        for q in 0..m {
+            let j = self.cols[q];
+            if keep(j) {
+                by_root.entry(find(&mut uf, q)).or_default().push(j);
+            }
+        }
+        let mut out: Vec<Vec<usize>> = by_root.into_values().filter(|o| o.len() >= 2).collect();
+        out.sort_unstable_by_key(|o| o[0]);
+        out
+    }
+
+    /// 生成元 `excluded` (昇順) を除いた生成元の軌道のうち、`keep` を満たす列が 2 本以上あるもの (`keep` の列だけ)。
+    pub fn orbits(&self, excluded: &[u32], keep: impl Fn(usize) -> bool) -> Vec<Vec<usize>> {
+        let m = self.cols.len();
+        let mut uf: Vec<usize> = (0..m).collect();
+        for (k, mv) in self.moves.iter().enumerate() {
+            if excluded.binary_search(&(k as u32)).is_ok() {
+                continue;
+            }
+            for &(a, b) in mv {
+                let (x, y) = (find(&mut uf, a as usize), find(&mut uf, b as usize));
+                if x != y {
+                    uf[x] = y;
+                }
+            }
+        }
+        let mut by_root: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+        for q in 0..m {
+            let j = self.cols[q];
+            if keep(j) {
+                by_root.entry(find(&mut uf, q)).or_default().push(j);
+            }
+        }
+        let mut out: Vec<Vec<usize>> = by_root.into_values().filter(|o| o.len() >= 2).collect();
+        out.sort_unstable_by_key(|o| o[0]);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn inf() -> f64 {
         f64::INFINITY
+    }
+
+    #[test]
+    fn orbital_gens_orbits_without_excluded() {
+        // 生成元 0: (0 1)(4 5)、生成元 1: (2 3)。列 4, 5 は 0-1 でないとして軌道から外す
+        let g0 = vec![1, 0, 2, 3, 5, 4];
+        let g1 = vec![0, 1, 3, 2, 4, 5];
+        let of = OrbitalGens::new(vec![g0, g1]);
+        assert_eq!(of.gens_moving(4), &[0]);
+        assert_eq!(of.gens_moving(2), &[1]);
+        assert!(of.gens_moving(6).is_empty());
+        let keep = |j: usize| j < 4;
+        assert_eq!(of.orbits(&[], keep), vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(of.orbits(&[0], keep), vec![vec![2, 3]]);
+        assert!(of.orbits(&[0, 1], keep).is_empty());
+    }
+
+    #[test]
+    fn schreier_stabilizer_generates_point_stabilizer() {
+        use std::collections::HashSet;
+        use std::rc::Rc;
+        // 群の全ての元を生成元から作る (小さい群だけ)
+        fn closure(gens: &[Rc<Vec<u32>>], m: usize) -> HashSet<Vec<u32>> {
+            let id: Vec<u32> = (0..m as u32).collect();
+            let mut all: HashSet<Vec<u32>> = HashSet::from([id.clone()]);
+            let mut queue = vec![id];
+            while let Some(a) = queue.pop() {
+                for g in gens {
+                    let b: Vec<u32> = a.iter().map(|&t| g[t as usize]).collect();
+                    if all.insert(b.clone()) {
+                        queue.push(b);
+                    }
+                }
+            }
+            all
+        }
+        let p = |v: Vec<u32>| Rc::new(v);
+        // S4 = <(0 1), (0 1 2 3)>、二面体群 D5 = <(0 1 2 3 4), (1 4)(2 3)>、巡回群 C6、S3 x S3 の直積
+        let cases: Vec<(Vec<Rc<Vec<u32>>>, usize)> = vec![
+            (vec![p(vec![1, 0, 2, 3]), p(vec![1, 2, 3, 0])], 4),
+            (vec![p(vec![1, 2, 3, 4, 0]), p(vec![0, 4, 3, 2, 1])], 5),
+            (vec![p(vec![1, 2, 3, 4, 5, 0])], 6),
+            (vec![p(vec![1, 0, 2, 3, 4, 5]), p(vec![1, 2, 0, 3, 4, 5]), p(vec![0, 1, 2, 4, 3, 5]), p(vec![0, 1, 2, 4, 5, 3])], 6),
+        ];
+        for (gens, m) in cases {
+            let group = closure(&gens, m);
+            for q in 0..m as u32 {
+                let st = OrbitalGens::schreier_stabilizer(&gens, q, 1000, 1000);
+                assert!(st.iter().all(|g| g[q as usize] == q));
+                let want: HashSet<Vec<u32>> = group.iter().filter(|g| g[q as usize] == q).cloned().collect();
+                assert_eq!(closure(&st, m), want, "q = {q}");
+            }
+        }
+        // 軌道の上限を超えたら q を動かさない生成元だけ (S3 x S3 で q = 0: 後ろの S3 の 2 本)
+        let gens = vec![p(vec![1, 0, 2, 3, 4, 5]), p(vec![1, 2, 0, 3, 4, 5]), p(vec![0, 1, 2, 4, 3, 5]), p(vec![0, 1, 2, 4, 5, 3])];
+        assert_eq!(OrbitalGens::schreier_stabilizer(&gens, 0, 2, 1000).len(), 2);
+    }
+
+    #[test]
+    fn twin_classes_needs_same_rows_bounds_and_cost() {
+        // 列 0, 1, 3 は同じ (行 0 と 1 に係数 2, 1)。列 2 は係数が違う、列 4 は費用が違う、列 5 は同じ形だが固定、列 6 は行に現れない
+        let rows = vec![
+            vec![(0, 2.0), (1, 2.0), (2, 3.0), (3, 2.0), (4, 2.0), (5, 2.0)],
+            vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0), (4, 1.0), (5, 1.0)],
+        ];
+        let p = MipProblem::from_rows(
+            vec![0.0; 7],
+            vec![1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0],
+            vec![1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0],
+            0.0,
+            1.0,
+            vec![true; 7],
+            rows,
+            vec![-inf(); 2],
+            vec![3.0, 2.0],
+        );
+        assert_eq!(twin_classes(&p), vec![vec![0, 1, 3]]);
+    }
+
+    #[test]
+    fn verify_generators_drops_broken_symmetry() {
+        // x0 + x1 <= 1, x2 + x3 <= 1: (0 1) と (2 3) は対称性。x0 の上限を 0 にすると (0 1) は崩れる
+        let rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(2, 1.0), (3, 1.0)]];
+        let mk = |up0: f64| MipProblem::from_rows(vec![0.0; 4], vec![up0, 1.0, 1.0, 1.0], vec![-1.0; 4], 0.0, 1.0, vec![true; 4], rows.clone(), vec![-inf(); 2], vec![1.0; 2]);
+        let gens = vec![vec![1, 0, 2, 3], vec![0, 1, 3, 2]];
+        assert_eq!(verify_generators(&mk(1.0), &gens).len(), 2);
+        assert_eq!(verify_generators(&mk(0.0), &gens), vec![vec![0, 1, 3, 2]]);
+        // 列の数が違う生成元は使えない
+        assert!(verify_generators(&mk(1.0), &[vec![1, 0, 2]]).is_empty());
     }
 
     #[test]
@@ -1132,6 +1540,42 @@ mod tests {
         assert_eq!(orbs.len(), 1);
         assert_eq!(orbs[0].vars, vec![vec![0, 1, 2], vec![3, 4, 5]]);
         assert!(used.iter().all(|&u| u));
+    }
+
+    #[test]
+    fn local_orbitope_canonicalize_sorts_twins_in_place() {
+        // 双子の組 {1, 3, 4} の 1x3 のオービトープ: 値を降順に並べ替え、組の外の列は動かさない
+        let orb = Orbitope { vars: vec![vec![1, 3, 4]], packing: false, row_packing: vec![false], swaps: Vec::new(), local: true };
+        let mut x = vec![7.0, 0.0, 9.0, 1.0, 1.0];
+        assert!(orb.canonicalize(&mut x));
+        assert_eq!(x, vec![7.0, 1.0, 9.0, 1.0, 0.0]);
+        // orbitopal fixing: 先頭の列を 0 にすると、組の残りも 0 に固定される
+        let lo = vec![0.0; 5];
+        let mut up = vec![1.0; 5];
+        up[1] = 0.0;
+        let fixes = orbitopal_fixing(&orb, &lo, &up).expect("feasible");
+        let mut fixed: Vec<usize> = fixes.iter().filter(|f| f.1 == 0.0).map(|f| f.0).collect();
+        fixed.sort_unstable();
+        assert_eq!(fixed, vec![3, 4]);
+    }
+
+    #[test]
+    fn two_column_orbitope_for_two_identical_machines() {
+        // 2 台の同じ機械 m に 3 つの仕事 t: 列 2t+m。生成元は 1 本 (0 1)(2 3)(4 5) で、列を区別する生成元の組が同じになる
+        let mut rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(2, 1.0), (3, 1.0)], vec![(4, 1.0), (5, 1.0)]];
+        for m in 0..2 {
+            rows.push(vec![(m, 3.0), (2 + m, 2.0), (4 + m, 4.0)]);
+        }
+        let p = MipProblem::from_rows(vec![0.0; 6], vec![1.0; 6], vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0], 0.0, 1.0, vec![true; 6], rows, vec![1.0, 1.0, 1.0, -inf(), -inf()], vec![1.0, 1.0, 1.0, 6.0, 6.0]);
+        let sym = detect(&p, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_eq!(sym.generators.len(), 1);
+        std::env::set_var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL", "1");
+        assert!(find_orbitopes(&p, &sym).0.is_empty());
+        std::env::remove_var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL");
+        let (orbs, used) = find_orbitopes(&p, &sym);
+        assert_eq!(orbs.len(), 1);
+        assert_eq!(orbs[0].vars, vec![vec![0, 1], vec![2, 3], vec![4, 5]]);
+        assert!(used[0]);
     }
 
     #[test]
@@ -1176,7 +1620,7 @@ mod tests {
     #[test]
     fn orbitopal_fixing_small_cases() {
         // 2 行 3 列。何も固定がなければ: 最大 [11,11,11]、最小 [00,00,00] で固定なし
-        let orb = Orbitope { vars: vec![vec![0, 1, 2], vec![3, 4, 5]], packing: false, row_packing: vec![false; 2], swaps: Vec::new() };
+        let orb = Orbitope { vars: vec![vec![0, 1, 2], vec![3, 4, 5]], packing: false, row_packing: vec![false; 2], swaps: Vec::new(), local: false };
         let (lo, up) = (vec![0.0; 6], vec![1.0; 6]);
         assert_eq!(orbitopal_fixing(&orb, &lo, &up), Some(vec![]));
         // x_{0,1} = 1 (列 1 の 1 行目): 列 0 >=_lex 列 1 なので x_{0,0} = 1 に固定される
@@ -1205,7 +1649,7 @@ mod tests {
             let r = 1 + (rnd() * 3.0) as usize;
             let s = 2 + (rnd() * 2.0) as usize;
             let vars: Vec<Vec<usize>> = (0..r).map(|i| (0..s).map(|c| i * s + c).collect()).collect();
-            let orb = Orbitope { vars: vars.clone(), packing: false, row_packing: vec![false; r], swaps: Vec::new() };
+            let orb = Orbitope { vars: vars.clone(), packing: false, row_packing: vec![false; r], swaps: Vec::new(), local: false };
             let nv = r * s;
             let mut lo = vec![0.0; nv];
             let mut up = vec![1.0; nv];
@@ -1259,7 +1703,7 @@ mod tests {
             let r = 1 + (rnd() * 4.0) as usize;
             let s = 2 + (rnd() * 2.0) as usize;
             let vars: Vec<Vec<usize>> = (0..r).map(|i| (0..s).map(|c| i * s + c).collect()).collect();
-            let orb = Orbitope { vars: vars.clone(), packing: true, row_packing: vec![true; r], swaps: Vec::new() };
+            let orb = Orbitope { vars: vars.clone(), packing: true, row_packing: vec![true; r], swaps: Vec::new(), local: false };
             let nv = r * s;
             let mut lo = vec![0.0; nv];
             let mut up = vec![1.0; nv];

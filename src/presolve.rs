@@ -30,6 +30,7 @@ pub mod dualfix;
 pub mod dualpropagate;
 pub mod foldfixed;
 pub mod forcingcol;
+pub mod slackcol;
 pub mod freevar;
 pub mod ineqsingleton;
 pub mod parallelcols;
@@ -295,6 +296,8 @@ pub enum PostsolveStep {
     ParallelCol(parallelcols::Substitution),
     /// 強制列の消去 (取り除いた行を満たす範囲の端に置く。[`forcingcol::ForcingCol::apply`])。
     Forcing(forcingcol::ForcingCol),
+    /// 費用 0 のスラック列の消去 (元の行を満たす区間の中に置く。[`slackcol::SlackCol::apply`])。
+    Slack(slackcol::SlackCol),
 }
 
 impl PostsolveStep {
@@ -304,6 +307,7 @@ impl PostsolveStep {
             PostsolveStep::Sub(sub) => x[sub.var] = sub.value(x),
             PostsolveStep::ParallelCol(sub) => sub.apply(x),
             PostsolveStep::Forcing(fc) => fc.apply(x),
+            PostsolveStep::Slack(sc) => sc.apply(x),
         }
     }
 }
@@ -647,6 +651,28 @@ pub fn run_extended(
                 lb[f.var] = 0.0;
                 ub[f.var] = 0.0;
                 postsolve_log.push(PostsolveStep::Forcing(f));
+            }
+        }
+
+        // 費用 0 のスラック列 (`slackcol`、既定 2026-10-29、`ENOMOTO_PRESOLVE_NO_SLACK_COL` で止める): 1 行 (範囲制約なら反転した 2 行) にだけ現れる
+        // 費用 0・有界の連続列を消し、行をその項の値域だけ緩める。消去した列は `[0, 0]` に固定する。
+        if env_str!("ENOMOTO_PRESOLVE_NO_SLACK_COL").is_none() && !dbg_skip("slackcol") {
+            let mut in_eq = vec![false; n];
+            for i in 0..a.nrows() {
+                for (j, v) in crate::sparse::csr_row_iter(&a, i) {
+                    if v != 0.0 {
+                        in_eq[j] = true;
+                    }
+                }
+            }
+            let slack = timed_step!("slackcol", slackcol::eliminate_slack_columns(n, &in_eq, &mut cur_real_rows, &mut cur_real_rhs, &c, &lb, &ub, &|j| is_int_col(j)));
+            if env_str!("ENOMOTO_DEBUG_SLACK_COL").is_some() && !slack.is_empty() {
+                eprintln!("DEBUG_SLACK_COL: round={round_idx} columns={}", slack.len());
+            }
+            for s in slack {
+                lb[s.var] = 0.0;
+                ub[s.var] = 0.0;
+                postsolve_log.push(PostsolveStep::Slack(s));
             }
         }
 
