@@ -6,7 +6,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from probs import SETS  # noqa: E402
 from cfgs import CFGS  # noqa: E402
-names = sys.argv[1:] or [c for c in CFGS if c not in ("sb_inh", "sbt_a", "sbt_ab")]
+STAGE1 = ["base", "base2", "sb_tighten", "sb_of", "sb_fixres", "zi_adapt", "pc_cutoff", "dive_rcfix", "cost_prio", "keep_lu", "sep_adapt",
+          "origrow", "sep_inv", "zh_pre", "tab_nnz", "pool_sel", "node_maxlen", "fail_restore", "probe_str", "ineq_all", "vubs", "node_perturb"]
+names = sys.argv[1:] or STAGE1
 R = {}
 for fn in [HERE / "ab_r1.jsonl"] + sorted(HERE.glob("ab_s[0-9].jsonl")):
     for l in open(fn, encoding="utf-8"):
