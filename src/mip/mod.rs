@@ -1129,6 +1129,8 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
 thread_local! {
     /// [`quick_probe_fixings`] の後の前処理のかけ直しの中か (早めのプロービング。かけ直しの中では行わない)。
     static QUICK_PROBE_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// [`tighten_vubs`] の後の前処理のかけ直しの中か (`ENOMOTO_MIP_TIGHTEN_VUBS`、かけ直しの中ではもう締めない)
+    static VUBS_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`presolve_mip`] の 行をまとめた後のかけ直し (`ENOMOTO_MIP_NO_MERGE_REPRESOLVE` で使わない) の 2 回目の前処理の中か。
     static MERGE_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`presolve_mip`] の `ENOMOTO_MIP_DOMCOL` のかけ直しの中か。
@@ -2197,6 +2199,29 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             _ => {}
         }
     }
+    // `ENOMOTO_MIP_TIGHTEN_VUBS` (試作、既定では使わない): VUB の行の連続列の境界を LP で締め ([`tighten_vubs`])、締めたら
+    // 前処理をかけ直す (係数の強化が `x <= M y` の `M` を締めた境界まで縮める)。根の問題で 1 回だけ (再スタートでは使わない)
+    if lp_probe_secs.is_some() && !submip && env_str!("ENOMOTO_MIP_TIGHTEN_VUBS").is_some() && !VUBS_ACTIVE.with(|f| f.get()) && !RESTART_PRESOLVE.with(|f| f.get()) {
+        match tighten_vubs(&mut prob, verbose) {
+            None => return Some(Presolved::Infeasible),
+            Some(k) if k > 0 => {
+                let mut postsolve = pre.postsolve_log;
+                VUBS_ACTIVE.with(|f| f.set(true));
+                let r = presolve_mip_depth(&prob, verbose, submip, lp_probe_secs, depth);
+                VUBS_ACTIVE.with(|f| f.set(false));
+                return match r {
+                    Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+                    Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) => {
+                        debug_assert!(sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0));
+                        postsolve.extend(post2);
+                        Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling })
+                    }
+                    None => Some(Presolved::Reduced { prob, postsolve, scaling: pre.scaling }),
+                };
+            }
+            Some(_) => {}
+        }
+    }
     // 早めのプロービングとかけ直し (既定で使う。`ENOMOTO_MIP_NO_PROBE_EARLY_REPRESOLVE` で使わない。以前の試作名は
     // `ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE`): LP による固定の前に、少しだけプロービングし ([`quick_probe_fixings`])、
     // 列の多くが固定されたらその境界で前処理をかけ直す (LP による固定・プロービングは小さくなった問題で行う)。
@@ -2396,6 +2421,94 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
 /// −20.96 → −3.98 (目的関数は整数なので下界 −3 = 最適値) になる。HiGHS は経路集約・tableau のカットで根を −4 にし、こちらは
 /// 根のカットのループで −7〜−8.6 にしかならず、木の根の強分枝で初めて −3.99 に届いていた。
 /// 固定した列の数を返す。実行不能と分かったら `None`。
+/// `ENOMOTO_MIP_TIGHTEN_VUBS` (試作): CBC の `CbcModel::tightenVubs` (CbcModel.cpp 15861-16130) にならい、VUB の行
+/// (固定されていない列が連続列 1 本と 0-1 列 1 本だけの行、`x <= M y` など) の連続列について、LP で `x` を最小化・最大化して
+/// 境界を締める。LP の解の値は LP の緩和の実行可能領域の端なので、整数解の集合は変わらない。CBC と同じく、締めるのは
+/// 改善が 1e-4 を超えるときだけで、`1e-8 (1 + |境界|)` だけ緩めて置く。候補は `ENOMOTO_T_MIP_TIGHTEN_VUBS_MAX` 本
+/// (既定 200、行の多い列から)、時間は `ENOMOTO_T_MIP_TIGHTEN_VUBS_TIME` 秒 (既定 1 秒) まで。締めた境界の本数を返す
+/// (最初の LP が実行不能なら `None`)。
+fn tighten_vubs(prob: &mut MipProblem, verbose: bool) -> Option<usize> {
+    use lp::{LpStatus, SolveLimits};
+    let t0 = std::time::Instant::now();
+    let n = prob.n;
+    let free = |j: usize| prob.col_up[j] - prob.col_lo[j] > 1e-8;
+    let binary = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0;
+    let mut cand = vec![false; n];
+    for r in &prob.rows {
+        let (mut nb, mut nc, mut cont) = (0usize, 0usize, usize::MAX);
+        for &(j, _) in r {
+            if !free(j) {
+                continue;
+            }
+            if binary(j) {
+                nb += 1;
+            } else {
+                nc += 1;
+                cont = j;
+            }
+        }
+        if nc == 1 && nb == 1 && !prob.is_int[cont] {
+            cand[cont] = true;
+        }
+    }
+    let mut list: Vec<usize> = (0..n).filter(|&j| cand[j]).collect();
+    if list.is_empty() {
+        return Some(0);
+    }
+    list.sort_by_key(|&j| std::cmp::Reverse(prob.cols[j].len()));
+    list.truncate(tunable!("ENOMOTO_T_MIP_TIGHTEN_VUBS_MAX", 200usize, usize));
+    let deadline = t0 + std::time::Duration::from_secs_f64(tunable!("ENOMOTO_T_MIP_TIGHTEN_VUBS_TIME", 1.0, f64));
+    let mut c = vec![0.0; n];
+    let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&prob.col_lo, &prob.col_up, &c, &prob.rows, &prob.row_lo, &prob.row_up);
+    match lp.solve(&SolveLimits { deadline: Some(deadline), ..Default::default() }) {
+        LpStatus::Optimal => {}
+        LpStatus::Infeasible => return None,
+        _ => return Some(0),
+    }
+    let (mut k, mut solved) = (0usize, 0usize);
+    'cols: for &j in &list {
+        for up in [false, true] {
+            if std::time::Instant::now() > deadline {
+                break 'cols;
+            }
+            c[j] = if up { -1.0 } else { 1.0 };
+            lp.set_costs(&c);
+            let st = lp.solve(&SolveLimits { deadline: Some(deadline), ..Default::default() });
+            c[j] = 0.0;
+            solved += 1;
+            if st != LpStatus::Optimal {
+                if st == LpStatus::Infeasible {
+                    return None;
+                }
+                continue;
+            }
+            let v = lp.col_value(j);
+            let (lo, hi) = (prob.col_lo[j], prob.col_up[j]);
+            if up && v < hi - 1e-4 {
+                let mut nv = hi.min(v + 1e-8 * (hi.abs() + 1.0));
+                if nv - lo < 1e-7 {
+                    nv = lo;
+                }
+                prob.col_up[j] = nv;
+                lp.set_col_bounds(j, lo, nv);
+                k += 1;
+            } else if !up && v > lo + 1e-4 {
+                let mut nv = lo.max(v - 1e-8 * (lo.abs() + 1.0));
+                if hi - nv < 1e-7 {
+                    nv = hi;
+                }
+                prob.col_lo[j] = nv;
+                lp.set_col_bounds(j, nv, hi);
+                k += 1;
+            }
+        }
+    }
+    if verbose {
+        eprintln!("MIP: presolve: tightened {k} bounds of {} VUB columns by {solved} LPs (TIGHTEN_VUBS, {:.2}s)", list.len(), t0.elapsed().as_secs_f64());
+    }
+    Some(k)
+}
+
 fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     use lp::{LpStatus, SolveLimits};
     let t0 = std::time::Instant::now();
