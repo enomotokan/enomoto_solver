@@ -339,6 +339,13 @@ impl TwoStageLp {
     /// (analysis/lp_hang_20261021.md)
     pub fn add_rows(&mut self, new_rows: &[(Vec<(usize, f64)>, f64, f64)]) {
         sid::xprof("lp_pre_add");
+        self.add_rows_inner(new_rows, true);
+        sid::xprof("lp_add_rows");
+    }
+
+    /// [`Self::add_rows`] の本体。`rebuild` が偽なら標準形を作り直さない (呼び出し側が後で 1 回だけ作り直す、
+    /// [`Self::delete_and_add_rows`])。
+    fn add_rows_inner(&mut self, new_rows: &[(Vec<(usize, f64)>, f64, f64)], rebuild: bool) {
         let m0 = self.rows.len();
         let new_w = if env_str!("ENOMOTO_MIP_ROWS_DSE_EXACT").is_some() { f64::NAN } else { 1.0 };
         for (r, l, u) in new_rows {
@@ -348,7 +355,9 @@ impl TwoStageLp {
             self.row_lo.push(*l);
             self.row_up.push(*u);
         }
-        self.rebuild();
+        if rebuild {
+            self.rebuild();
+        }
         // 新しい行のスラックを基底に入れる (スラックの番号は n + i なので、既存の基底は番号が変わらない)
         let same = matches!((&self.basis, self.dse_cache.as_deref()), (Some(b), Some((cb, _))) if b == cb);
         if let Some(b) = self.basis.as_mut() {
@@ -369,11 +378,32 @@ impl TwoStageLp {
         self.y.resize(self.rows.len(), 0.0);
         self.status = None;
         self.clear_memo();
-        sid::xprof("lp_add_rows");
     }
 
     pub fn delete_rows(&mut self, remove: &[bool]) {
         sid::xprof("lp_pre_del");
+        self.delete_rows_inner(remove, true);
+        sid::xprof("lp_del_rows");
+    }
+
+    /// 行を消してから行を加える ([`Self::delete_rows`] の後に [`Self::add_rows`] と同じ結果)。標準形の作り直し
+    /// (`rebuild`) は最後に 1 回だけ行う (`ENOMOTO_MIP_CUT_KEEP_LU`: 根のカットのループで効いていないカットを外すのと
+    /// 新しいカットを加えるのを 1 回にまとめる)。
+    pub fn delete_and_add_rows(&mut self, remove: &[bool], new_rows: &[(Vec<(usize, f64)>, f64, f64)]) {
+        sid::xprof("lp_pre_del");
+        self.delete_rows_inner(remove, false);
+        self.add_rows_inner(new_rows, true);
+        sid::xprof("lp_del_add_rows");
+    }
+
+    /// 行列 (行の集合) の識別子 ([`Self::price_key`]。行の追加・削除・行の境界の変更で変わる。写しは同じ値を持つ)。
+    pub fn matrix_key(&self) -> u64 {
+        self.price_key
+    }
+
+    /// [`Self::delete_rows`] の本体。`rebuild` が偽なら標準形を作り直さない (直後に [`Self::add_rows_inner`] が作り直す)。
+    /// 基底の修復 ([`Self::repair_basis`]) は標準形を見ないので、作り直しの前に行ってよい。
+    fn delete_rows_inner(&mut self, remove: &[bool], rebuild: bool) {
         let m = self.rows.len();
         let mut new_index = vec![usize::MAX; m];
         let mut k = 0;
@@ -422,7 +452,9 @@ impl TwoStageLp {
             }
             self.basis = Some(nb);
         }
-        self.rebuild();
+        if rebuild {
+            self.rebuild();
+        }
         self.repair_basis();
         // 基底を直したら重みは使わない
         if !matches!((&self.basis, self.dse_cache.as_deref()), (Some(b), Some((cb, _))) if b == cb) {
@@ -430,7 +462,6 @@ impl TwoStageLp {
         }
         self.status = None;
         self.clear_memo();
-        sid::xprof("lp_del_rows");
     }
 
     /// 基底列の数を行数に合わせる (多ければ構造列を外し、足りなければ非基底の行のスラックを入れる)。

@@ -243,6 +243,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) path_collect: Option<Vec<Vec<(usize, f64)>>>,
     /// カットを強める求解で回したラウンド数
     pub(super) bg_cut_rounds: usize,
+    /// 分離器ごとの適応的な飛ばしの状態 (`ENOMOTO_MIP_SEP_ADAPTIVE`、[`super::separation::SepAdapt`])
+    pub(super) sep_adapt: super::separation::SepAdapt,
+    /// 根のカットのループの今のラウンド (`ENOMOTO_MIP_TAB_NNZ_CBC` の最初のラウンドの判定用。ループの始めに 0)
+    pub(super) sep_pass: usize,
+    /// 分離に使う LP の行の写し (`ENOMOTO_MIP_SEP_NO_ROWCLONE`、[`super::separation::SepRowsCache`])
+    pub(super) sep_rows_cache: Option<super::separation::SepRowsCache>,
     /// 根のカットのループで固定費用ネットワーク型と判定したか (`ENOMOTO_MIP_FACE_SEP_FC`、試作)
     pub(super) fc_network: bool,
     /// 根の面の頂点の分離 (面の LP とその頂点での分離) に使った時間の合計と、使った面の頂点の数 (`ENOMOTO_MIP_DEBUG_FACETIME`)
@@ -826,6 +832,8 @@ pub(crate) struct TreeSnapshot {
     pub(crate) valid_below: f64,
     /// 根で HiGHS 流のカット管理を有効にしたか (`ENOMOTO_MIP_CUT_STRONG_AUTO`)。
     hcm_auto: bool,
+    /// 根で 1 本も採られなかったのでノードで使わない分離器 (`ENOMOTO_MIP_SEP_ADAPTIVE`、[`super::separation::SepAdapt::node_off`])。
+    sep_node_off: u16,
     /// 完全オービトープと、対称性の行・固定を加える前の問題 (写しから解く求解も orbitopal fixing をし、ヒューリスティクスの
     /// 解を並べ替えて使えるように)。
     orbitopes: Vec<super::symmetry::Orbitope>,
@@ -1856,6 +1864,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sep_par_cpu: 0.0,
         path_collect: None,
         bg_cut_rounds: 0,
+        sep_adapt: super::separation::SepAdapt::with_node_off(snap.as_ref().map_or(0, |sn| sn.sep_node_off)),
+        sep_pass: 0,
+        sep_rows_cache: None,
         fc_network: false,
         face_secs: 0.0,
         face_used: 0,
@@ -4308,6 +4319,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     for r in remove.iter_mut().skip(m0) {
                         *r = true;
                     }
+                    // `ENOMOTO_MIP_CUT_FAIL_RESTORE` (試作、既定では使わない): 置き換える前の LP の状態 (最適基底・LU・DSE 重み) を取っておき、
+                    // 戻すときに使う (戻した LP は置き換える前と同じ行なので、解き直しはほぼ 0 反復)
+                    let saved_state = env_str!("ENOMOTO_MIP_CUT_FAIL_RESTORE").is_some().then(|| self.lp.save_state());
                     self.delete_lp_rows(&remove);
                     self.add_cut_rows(&rows);
                     if let Some(b) = bg.job.basis.lock().unwrap().take() {
@@ -4374,7 +4388,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         self.delete_lp_rows(&remove);
                         self.add_cut_rows(&saved);
+                        if let Some(ss) = &saved_state {
+                            self.lp.restore_state(ss);
+                        }
+                        let it2 = self.lp.total_iterations();
                         let st2 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+                        if saved_state.is_some() && self.params.verbose {
+                            eprintln!("MIP: background cuts: re-solve from the saved state: {} iters", self.lp.total_iterations() - it2);
+                        }
                         if self.params.verbose {
                             eprintln!("MIP: background cuts: LP {st:?} / obj {new:.10e} < {cur:.10e}; restored ({st2:?})");
                         }
@@ -10972,7 +10993,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new((**o).clone()));
         let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), root_basis };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), root_basis };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
