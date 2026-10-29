@@ -717,6 +717,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     sb_of_count: u64,
     /// 強分岐の子の被約費用で直線を作った数 (`ENOMOTO_MIP_SB_RC`)
     sb_rc_count: u64,
+    /// `ENOMOTO_MIP_SB_TIGHTEN_PROP`: (伝播した回数, 矛盾で刈った回数, LP 解が外れて解き直した回数)
+    sb_tprop_stats: [u64; 3],
     /// 処理中のノードが親から引き継いだもの ([`OpenNode::sb`])
     sb_cur: Option<Rc<SbInherit>>,
     /// このノードの強分岐で得た固定・締め付け (`ENOMOTO_MIP_SB_TIGHTEN_INHERIT`) と凸性の直線 (`ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR`)
@@ -2165,6 +2167,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_tighten_count: 0,
         sb_of_count: 0,
         sb_rc_count: 0,
+        sb_tprop_stats: [0; 3],
         sb_cur: None,
         sb_node_fixes: Vec::new(),
         sb_node_lines: Vec::new(),
@@ -7089,6 +7092,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 解き直した LP の値と分数の列は [`Self::sb_new_node`] で呼び出し側に返す
         let sb_fix_resolve = env_str!("ENOMOTO_MIP_SB_FIX_RESOLVE").is_some();
         self.sb_new_node = None;
+        let tighten0 = self.sb_tighten_count;
         // SCIP の relpscost に倣った強分岐 (branch_relpscost.c `branchExecRelpscost`)。
         let hybrid = env_str!("ENOMOTO_MIP_NO_HYBRID_SCORE").is_none();
         let score_of = |s: &Self, j: usize, v: f64| if hybrid { s.pc.hybrid_score(j, v - v.floor()) } else { s.pc.score(j, v - v.floor()) };
@@ -7569,6 +7573,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if sb_agree_on() && sb_eval.len() >= 2 {
             self.sb_agree_record(&sb_eval);
+        }
+        // `ENOMOTO_MIP_SB_TIGHTEN_PROP` (試作、既定では使わない): 凸性で境界を締めたら、その場で伝播する。矛盾ならノードを刈り、
+        // 締まった境界から今の LP 解が外れたら解き直す (`Resolve`)。そうでなければそのまま分枝する (伝播の結果は子が受け継ぐ)。
+        // 既定では締めた境界は定義域に置くだけで、このノードでは伝播も解き直しもしない
+        if bound_changes == 0 && self.sb_tighten_count > tighten0 && env_str!("ENOMOTO_MIP_SB_TIGHTEN_PROP").is_some() {
+            self.sb_tprop_stats[0] += 1;
+            if !self.dom.propagate(self.p) {
+                if self.dom.conflict.is_some() {
+                    self.add_conflict();
+                }
+                self.sb_tprop_stats[1] += 1;
+                return BranchAction::Prune;
+            }
+            let x = self.lp.col_values();
+            if (0..self.p.n).any(|k| self.p.is_int[k] && (x[k] < self.dom.lo[k] - FEASTOL || x[k] > self.dom.up[k] + FEASTOL)) {
+                self.sb_tprop_stats[2] += 1;
+                return BranchAction::Resolve;
+            }
         }
         if bound_changes > 0 {
             return BranchAction::Resolve;
@@ -11937,6 +11959,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.sb_inherit_stats != [0; 3] {
                 eprintln!("MIP: strong branching: inherited bounds applied {}, ancestor convexity tightenings {}, reduced cost updates at {} nodes (ENOMOTO_MIP_SB_TIGHTEN_INHERIT / ANCESTOR / SB_POLY_RC)", self.sb_inherit_stats[0], self.sb_inherit_stats[1], self.sb_inherit_stats[2]);
+            }
+            if self.sb_tprop_stats[0] > 0 {
+                eprintln!("MIP: strong branching: propagation after convexity tightenings {}, pruned {}, resolved {} (ENOMOTO_MIP_SB_TIGHTEN_PROP)", self.sb_tprop_stats[0], self.sb_tprop_stats[1], self.sb_tprop_stats[2]);
             }
             if self.sb_rc_count > 0 {
                 eprintln!("MIP: strong branching: lines from child reduced costs {} (ENOMOTO_MIP_SB_RC)", self.sb_rc_count);
