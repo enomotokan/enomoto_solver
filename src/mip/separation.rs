@@ -213,7 +213,121 @@ pub(super) mod sepprof {
     }
 }
 
+/// `ENOMOTO_MIP_SEP_ADAPTIVE` (試作、既定では使わない): 分離器ごとの適応的な飛ばし (CBC の `CbcModel::serialCuts` と
+/// `CbcCutAdaptiveSkipSettings` (CbcModel.hpp) の移植)。根で、3 ラウンド以上試して 3 回続けて外れた (その分離器の候補が
+/// 1 本も選択に残らなかった) 分離器は 5 ラウンド飛ばし、飛ばした後にまた外れたら飛ばす長さを倍にする (最大 20)。採られたら
+/// 元に戻す。tableau 行 (Gomory) の分離器には使わない (選択の質の閾値で落ちるラウンドがあっても効く。
+/// analysis/cutloop_hl_20261022.md §1)。また根で 1 本も採られなかった分離器はノードの分離で使わない (`node_off`)。
+/// 列が 500 本未満の問題では使わない
+#[derive(Default, Clone)]
+pub(super) struct SepAdapt {
+    /// 分離器 ([`sepprof`] の `SRC_*`) ごとの [試したラウンド数, 続けて外れた回数, 残りの飛ばすラウンド数, 今の飛ばす長さ, 根で採られた本数の合計]
+    st: [[u32; 5]; sepprof::NSRC],
+    /// このラウンドに動いた分離器 (ビット)
+    ran: u16,
+    /// 根で一度は試して 1 本も採られなかったので、ノードの分離で使わない分離器 (ビット。根のループの終わりに決め、写しで木の
+    /// 探索のスレッドへ引き継ぐ)
+    pub(super) node_off: u16,
+}
+
+impl SepAdapt {
+    /// ノードで使わない分離器 `node_off` (写しから引き継いだもの) だけを持つ初めの状態
+    pub(super) fn with_node_off(node_off: u16) -> Self {
+        SepAdapt { node_off, ..Default::default() }
+    }
+}
+
+/// 適応的な飛ばしを使う分離器 (tableau 行・一時的な行・プールは使わない)
+const SEP_ADAPT_SRCS: [u8; 7] = [sepprof::SRC_ROWS, sepprof::SRC_ZH, sepprof::SRC_CLIQUE, sepprof::SRC_IMPLBD, sepprof::SRC_PATHH, sepprof::SRC_PATH, sepprof::SRC_MCF];
+
+/// `ENOMOTO_MIP_SEP_NO_ROWCLONE` (試作、既定では使わない): [`Solver::separate`] で使う LP の行の写しと、行ごとの「整数の行か」
+/// (係数と列がすべて整数) を、LP の行列の識別子 ([`MipLp::matrix_key`]) が同じ間は使い回す (毎回すべての行を複製し、整数の行かを
+/// 数え直していた)。整数の行かは `cut_int` にもよるので、それが同じときだけ使う
+pub(super) struct SepRowsCache {
+    key: u64,
+    rows: std::rc::Rc<Vec<Vec<(usize, f64)>>>,
+    cut_int: Vec<bool>,
+    integral: std::rc::Rc<Vec<bool>>,
+}
+
 impl<'a, L: MipLp> Solver<'a, L> {
+    /// `ENOMOTO_MIP_SEP_ADAPTIVE` を使うか (根の外側の求解・背景のカットの求解。サブ MIP と 500 列未満の問題では使わない)
+    fn sep_adapt_on(&self) -> bool {
+        env_str!("ENOMOTO_MIP_SEP_ADAPTIVE").is_some() && !self.params.submip && self.p.n >= 500
+    }
+
+    /// 分離器 `src` をこの呼び出しで使うか (`ENOMOTO_MIP_SEP_ADAPTIVE`。根では飛ばしている間は使わず、ノード (`light`) では
+    /// `node_off` なら使わない)。使うなら、このラウンドに動いた印を付ける
+    fn sep_src_on(&mut self, src: u8, light: bool) -> bool {
+        if self.sep_src_skipped(src, light) {
+            return false;
+        }
+        if !light && self.sep_adapt_on() && SEP_ADAPT_SRCS.contains(&src) {
+            self.sep_adapt.ran |= 1 << src;
+        }
+        true
+    }
+
+    /// [`Self::sep_src_on`] の判定だけ (印を付けない)。飛ばしているなら真
+    fn sep_src_skipped(&self, src: u8, light: bool) -> bool {
+        if !self.sep_adapt_on() || !SEP_ADAPT_SRCS.contains(&src) {
+            return false;
+        }
+        let k = src as usize;
+        if light { self.sep_adapt.node_off & (1 << k) != 0 } else { self.sep_adapt.st[k][2] > 0 }
+    }
+
+    /// 根のラウンドの選択の後に、分離器ごとの採られた本数 `acc` で飛ばしの状態を進める (`ENOMOTO_MIP_SEP_ADAPTIVE`)
+    fn sep_adapt_update(&mut self, acc: &[usize; sepprof::NSRC], round: usize) {
+        if !self.sep_adapt_on() {
+            return;
+        }
+        let ran = std::mem::take(&mut self.sep_adapt.ran);
+        for &s in &SEP_ADAPT_SRCS {
+            let k = s as usize;
+            let e = &mut self.sep_adapt.st[k];
+            if ran & (1 << k) != 0 {
+                e[0] += 1;
+                e[4] += acc[k] as u32;
+                if acc[k] > 0 {
+                    e[1] = 0;
+                    e[3] = 0;
+                } else {
+                    e[1] += 1;
+                    if e[0] >= 3 && e[1] >= 3 {
+                        e[3] = if e[3] == 0 { 5 } else { (2 * e[3]).min(20) };
+                        e[2] = e[3];
+                        if self.params.verbose {
+                            eprintln!("MIP: cut round {round}: separator {} missed {} rounds in a row; skipped for {} rounds", sepprof::SRC_NAMES[k], e[1], e[3]);
+                        }
+                    }
+                }
+            } else if e[2] > 0 {
+                e[2] -= 1;
+            }
+        }
+    }
+
+    /// 根のカットのループの終わりに、一度は試して 1 本も採られなかった分離器をノードで使わないことにする (`ENOMOTO_MIP_SEP_ADAPTIVE`)
+    fn sep_adapt_finish_root(&mut self) {
+        if !self.sep_adapt_on() {
+            return;
+        }
+        let mut off = 0u16;
+        for &s in &SEP_ADAPT_SRCS {
+            let e = &self.sep_adapt.st[s as usize];
+            if e[0] > 0 && e[4] == 0 {
+                off |= 1 << s;
+            }
+        }
+        self.sep_adapt.node_off = off;
+        if self.params.verbose {
+            let names: Vec<&str> = SEP_ADAPT_SRCS.iter().filter(|&&s| off & (1 << s) != 0).map(|&s| sepprof::SRC_NAMES[s as usize]).collect();
+            let stats: Vec<String> = SEP_ADAPT_SRCS.iter().map(|&s| format!("{} {}/{}", sepprof::SRC_NAMES[s as usize], self.sep_adapt.st[s as usize][4], self.sep_adapt.st[s as usize][0])).collect();
+            eprintln!("MIP: adaptive separators: accepted/tried rounds at the root: {}; not used at nodes: {:?}", stats.join(", "), names);
+        }
+    }
+
     /// HiGHS のカット選択 (`HighsCutPool::separate`): スコア = 違反量 / (効いている非零の数 x 効いている列だけのノルム)
     /// (効いている = LP 解が境界から離れている列)。これまでに見た最良のスコアの `min_factor` 倍以上を残し
     /// (残りが少なすぎれば上位半分、全部残れば係数を下げる)、採ったカットとの平行度が 0.1 を超えるものは捨てる。
@@ -864,6 +978,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
         CUT_EXTENDED.with(|c| c.set(false));
         // ラウンドごとの目的値 (`ENOMOTO_MIP_CUT_EXTEND` の判定用。最初は根の LP の値)
         let mut ext_hist: Vec<f64> = vec![first_obj];
+        self.sep_pass = 0;
+        // `ENOMOTO_MIP_CUT_KEEP_LU` (試作、既定では使わない): ラウンドの終わりに効いていないカットを外す
+        // ([`Self::remove_inactive_cuts`]) のをやめ、次のラウンドの分離の後、新しいカットを加えるときに一緒に外す
+        // ([`MipLp::delete_and_add_rows`]、標準形の作り直しは 1 回)。行を消すと標準形を作り直して最適基底の LU を捨てるので、
+        // 次のラウンドの tableau 行の分離 (`basis_inverse_row`) が基底を分解し直していた (カットを加えた後の LP でもう一度分解する)。
+        // 外す行は論理変数が基底にあるので、基底逆行列の行のその行の重みは 0 で、tableau 行の集約は外す前と同じ (経路集約の始点にも
+        // ならない)。CBC (`CbcModel::solveWithCuts`) も効いていないカットを外すのは新しいカットを加えるときにまとめて行う
+        let keep_lu = env_str!("ENOMOTO_MIP_CUT_KEEP_LU").is_some();
+        let mut keep_lu_pending = false;
+        // `ENOMOTO_MIP_CUT_FAIL_RESTORE` (試作、既定では使わない): カットを加えた LP が最適に解けなかったとき (1 回の LP の時間の上限など)、
+        // カットを外した後に、加える前の LP の状態 (最適基底・その LU・DSE 重み、[`MipLp::save_state`]) を戻してから解き直す
+        // (今までは基底を加える前のものに戻すだけで LU と DSE 重みを捨て、解き直しが基底の分解からになっていた)
+        let fail_restore = env_str!("ENOMOTO_MIP_CUT_FAIL_RESTORE").is_some();
+        // `ENOMOTO_MIP_ROOT_CUT_CUTOFF` (試作、既定では使わない): 根のカットの LP に打ち切り値 (刈り込みの上限 - 定数項) を渡し
+        // (今までは +inf)、LP の下界が打ち切り値に届いたら (`ObjectiveBound`) 根を閉じたものとしてループを終える
+        // ([`Solver::root_gap_closed`] で閉じられるときだけ渡す。外側の求解だけ、背景のカットの求解では使わない)。CBC も根の
+        // カットの LP を打ち切り値つきで解く
+        let root_cutoff = env_str!("ENOMOTO_MIP_ROOT_CUT_CUTOFF").is_some() && !self.params.submip && job.is_none() && self.snap.is_none();
+        let mut closed_by_cutoff = false;
         loop {
             self.poll_fj_thread();
             if self.root_gap_closed() {
@@ -1099,6 +1232,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 競わせない)。0 なら同じ枠で選ぶ。40 問: 0 (既定) 19 問 27.70、10 は 17 問 28.14、25 は 17 問 27.83 (rout・neos5 が
             // 時間切れ、mik-250 47.9 -> 33-40 秒)。既定では使わない
             let face_quota = tunable!("ENOMOTO_T_MIP_FACE_MAX_CUTS", 0usize, usize);
+            self.sep_pass = round;
+            self.sep_adapt.ran = 0;
             let (mut cands, mut fcands) = self.separate_face_split(&x, false);
             // `ENOMOTO_MIP_CUTSEL_FACE_ANCHOR` (実験的): 面の頂点からのカットの効き目はその頂点で測ったもので、今の LP 解は
             // 切らないことがある。それが最良のスコアになると、質の閾値 (最良の 50%) で今の頂点を切るカットが全部落ち、
@@ -1250,6 +1385,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 選択の上限まで採ったか (選択を通さないカットは数えない)
             let quota_full = chosen.len() >= max_cuts && ncands >= 2 * max_cuts;
             chosen.extend(forced);
+            if self.sep_adapt_on() {
+                let mut acc = [0usize; sepprof::NSRC];
+                for c in &chosen {
+                    acc[(c.src % sepprof::SRC_FACE) as usize] += 1;
+                }
+                self.sep_adapt_update(&acc, round);
+            }
             if let Some(dir) = &dump_cands {
                 let txt: String = chosen.iter().map(|c| format!("{} {:.6e} {:.17e} {}\n", c.src, c.efficacy, c.rhs, c.coefs.iter().map(|&(j, a)| format!("{j}:{a:.17e}")).collect::<Vec<_>>().join(" "))).collect();
                 let _ = std::fs::write(format!("{dir}/chosen_r{round}.txt"), txt);
@@ -1287,13 +1429,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.add_to_pool(c, *r);
                 }
             }
-            let saved_rows = self.lp.num_rows();
+            // `ENOMOTO_MIP_CUT_KEEP_LU`: 前のラウンドで外さなかった効いていないカットを、ここで新しいカットと一緒に外す
+            // (`ENOMOTO_MIP_CUT_FAIL_RESTORE` も使うときは、加える前の状態を取っておくために先に外す)
+            let keep_lu_remove = if std::mem::take(&mut keep_lu_pending) { self.inactive_cut_mask() } else { None };
+            let keep_lu_remove = match keep_lu_remove {
+                Some(rm) if fail_restore => {
+                    self.delete_lp_rows(&rm);
+                    None
+                }
+                r => r,
+            };
+            let saved_rows = self.lp.num_rows() - keep_lu_remove.as_ref().map_or(0, |rm| rm.iter().filter(|&&r| r).count());
+            let saved_state = fail_restore.then(|| self.lp.save_state());
             let t_add0 = std::time::Instant::now();
             let dse_check = env_str!("ENOMOTO_MIP_DEBUG_DSE_CHECK").is_some() && !self.params.submip;
             if dse_check {
                 self.lp.debug_dse_check(&format!("round {round} before add_rows"));
             }
-            self.add_cut_rows(&rows);
+            if let Some(rm) = &keep_lu_remove {
+                if dbg_sep {
+                    eprintln!("SEP round {round}: removed {} inactive cuts together with the new cuts", rm.iter().filter(|&&r| r).count());
+                }
+                self.replace_cut_rows(rm, &rows);
+            } else {
+                self.add_cut_rows(&rows);
+            }
             if dse_check {
                 self.lp.debug_dse_check(&format!("round {round} after add_rows ({} rows)", rows.len()));
             }
@@ -1324,7 +1484,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if cut_dse_exact {
                 crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            let mut st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: lp_deadline });
+            // `ENOMOTO_MIP_ROOT_CUT_CUTOFF`: 打ち切り値 (根を閉じられるときだけ)
+            let cut_cutoff = if root_cutoff && self.root_gap_closed_at(f64::INFINITY) { self.prune_limit() - p.offset } else { f64::INFINITY };
+            let mut st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: cut_cutoff, deadline: lp_deadline });
             crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
             if let Some(dir) = &dump_dir {
                 let prefix = format!("{dir}/cutlp_r{round}_{st:?}");
@@ -1349,7 +1511,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
                     let d = Some(self.deadline.map_or(d, |g| g.min(d)));
-                    st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: d });
+                    st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: cut_cutoff, deadline: d });
                     if self.params.verbose {
                         eprintln!("MIP: cut round {round}: LP continued after the time limit: {st:?}");
                     }
@@ -1370,7 +1532,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if st == LpStatus::TimeLimit && retry > 0.0 && cap.is_finite() && !self.time_up() {
                 let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(retry * cap);
                 let d = Some(self.deadline.map_or(d, |g| g.min(d)));
-                st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: d });
+                st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: cut_cutoff, deadline: d });
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: LP hit the time cap; continued for up to {:.2}s more: {st:?}", retry * cap);
                 }
@@ -1382,6 +1544,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 sepprof::add(sepprof::T_LP, t_lp0.elapsed().as_secs_f64());
             }
             let _ = it0;
+            // `ENOMOTO_MIP_ROOT_CUT_CUTOFF`: LP の下界が打ち切り値に届いた (カットは大域的に成り立つので問題全体の下界)。根を閉じて終える
+            if st == LpStatus::ObjectiveBound && cut_cutoff.is_finite() {
+                self.root_cut_lb = self.root_cut_lb.max(cut_cutoff + p.offset);
+                if self.root_gap_closed() {
+                    if self.params.verbose {
+                        eprintln!("MIP: cut round {round}: the cut LP reached the cutoff {:.10e}; root closed", cut_cutoff + p.offset);
+                    }
+                    closed_by_cutoff = true;
+                    break;
+                }
+            }
             if st != LpStatus::Optimal {
                 // 数値的に困ったら今回のカットを外して戻す
                 let mut remove = vec![false; self.lp.num_rows()];
@@ -1389,7 +1562,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     *r = true;
                 }
                 self.delete_lp_rows(&remove);
+                // `ENOMOTO_MIP_CUT_FAIL_RESTORE`: 加える前の最適基底・LU・DSE 重みを戻す (行は加える前と同じ)
+                if let Some(ss) = &saved_state {
+                    self.lp.restore_state(ss);
+                }
+                let it2 = self.lp.total_iterations();
                 let st2 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+                if self.params.verbose && saved_state.is_some() {
+                    eprintln!("MIP: cut round {round}: re-solve from the saved state: {} iters", self.lp.total_iterations() - it2);
+                }
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: LP status {st:?}, removed the cuts ({st2:?})");
                 }
@@ -1586,7 +1767,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.lp.debug_dse_check(&format!("round {round} after removing {removed} old cuts"));
                 }
             } else if (round + 1) % tunable!("ENOMOTO_T_MIP_CUT_REMOVE_EVERY", 1usize, usize).max(1) == 0 {
-                self.remove_inactive_cuts();
+                if keep_lu {
+                    // `ENOMOTO_MIP_CUT_KEEP_LU`: 次のラウンドでカットを加えるときに外す (ループを出たら下で外す)
+                    keep_lu_pending = true;
+                } else {
+                    self.remove_inactive_cuts();
+                }
             }
             if dbg_sep {
                 eprintln!("SEP round {round}: removed {} inactive cuts in {:.3}s", rows_before - self.lp.num_rows(), t_rm0.elapsed().as_secs_f64());
@@ -1598,6 +1784,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if prof {
             sepprof::report(&format!("restarts {}", self.params.restarts));
+        }
+        if job.is_none() {
+            self.sep_adapt_finish_root();
+        }
+        if closed_by_cutoff {
+            // `ENOMOTO_MIP_ROOT_CUT_CUTOFF`: 根を閉じた (呼び出し側が [`Solver::root_gap_closed`] で終える)。LP は最適ではないが、
+            // 終わった後に LP を使わない
+            user_log!("Root cuts: the cut LP reached the cutoff ({:.2}s)", self.start.elapsed().as_secs_f64());
+            return true;
         }
         self.remove_inactive_cuts();
         if env_str!("ENOMOTO_MIP_DEBUG_FACETIME").is_some() && !self.params.submip {
@@ -1817,7 +2012,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_NODE_FACE_SEP`: ノードでも最適面の頂点で分離する ([`Self::separate_face`])
         // 40 問: 使わない 18 問 27.20、使う 18 問 27.36 (neos5 時間切れ -> 59.7 秒、neos-860300 54.2 秒 -> 時間切れ。木での分離の
         // 時間はもともと小さく、差はほぼない)。既定では使わない
-        let cands = if env_str!("ENOMOTO_MIP_NODE_FACE_SEP").is_some() { self.separate_face(x, true) } else { self.separate(x, true) };
+        let mut cands = if env_str!("ENOMOTO_MIP_NODE_FACE_SEP").is_some() { self.separate_face(x, true) } else { self.separate(x, true) };
+        self.node_cut_maxlen(&mut cands);
         if cands.is_empty() {
             return false;
         }
@@ -1854,6 +2050,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `fresh` でなければプールのカットだけ (安価。年齢で外れた根のカットを戻すのが主な役目)
         crate::simplex::slope_intercept_dual::xprof("hcm_pre");
         let mut cands = if fresh { self.separate(x, true) } else { Vec::new() };
+        self.node_cut_maxlen(&mut cands);
         crate::simplex::slope_intercept_dual::xprof("hcm_sep");
         for (eff, k) in self.pool_violated(x) {
             let (c, r, _) = &self.cut_pool[k];
@@ -1879,8 +2076,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
+    /// `ENOMOTO_MIP_NODE_CUT_MAXLEN` (試作、既定では使わない): ノードの分離で作ったカットのうち、非零の数が max(50, 列 / 40) を
+    /// 超えるものを捨てる (CglGomory の `dynamicLimitInTree_`。プールから戻すカットは捨てない)。加えるカットの非零の平均
+    /// (ノードの分離を続けるかの密度の判定 [`Solver::nca_dense`] が見る `nca_cut_nnz`) は残ったカットで数える
+    fn node_cut_maxlen(&self, cands: &mut Vec<Candidate>) {
+        if env_str!("ENOMOTO_MIP_NODE_CUT_MAXLEN").is_none() {
+            return;
+        }
+        let maxlen = tunable!("ENOMOTO_T_MIP_NODE_CUT_MAXLEN_MIN", 50usize, usize).max(self.p.n / tunable!("ENOMOTO_T_MIP_NODE_CUT_MAXLEN_DIV", 40usize, usize).max(1));
+        cands.retain(|c| c.coefs.len() <= maxlen);
+    }
+
     /// LP にカットの行を加える (年齢 0)。
     pub(super) fn add_cut_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]) {
+        self.debug_check_cut_rows(rows);
+        self.sync_cut_age();
+        self.lp.add_rows(rows);
+        self.cut_age.extend(std::iter::repeat_n(0, rows.len()));
+        for _ in 0..rows.len() {
+            self.cut_ids.push(self.next_cut_id);
+            self.next_cut_id += 1;
+        }
+        self.row_log.push(super::solver::RowEdit::Add(rows.len()));
+    }
+
+    /// 診断用 (デバッグ解): LP に加えるカットの行がデバッグ解を切っていれば表示する ([`Self::add_cut_rows`])。
+    fn debug_check_cut_rows(&self, rows: &[(Vec<(usize, f64)>, f64, f64)]) {
         // 診断用 (デバッグ解): どのスレッドでも、LP に加えるカットの行がデバッグ解を切っていれば表示する (打ち切り値より良いときだけ)
         if self.dbg_on {
             super::solver::DEBUG_SOL.with(|d| {
@@ -1897,8 +2118,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             });
         }
+    }
+
+    /// LP の行 `remove` を消してからカットの行 `rows` を加える ([`Self::delete_lp_rows`] の後に [`Self::add_cut_rows`] と同じ。
+    /// LP の標準形の作り直しは 1 回、[`MipLp::delete_and_add_rows`]。`ENOMOTO_MIP_CUT_KEEP_LU`)。
+    fn replace_cut_rows(&mut self, remove: &[bool], rows: &[(Vec<(usize, f64)>, f64, f64)]) {
+        self.debug_check_cut_rows(rows);
         self.sync_cut_age();
-        self.lp.add_rows(rows);
+        let m0 = self.p.m;
+        let mut k = m0;
+        self.cut_age.retain(|_| {
+            let keep = !remove[k];
+            k += 1;
+            keep
+        });
+        let mut k = m0;
+        self.cut_ids.retain(|_| {
+            let keep = !remove[k];
+            k += 1;
+            keep
+        });
+        self.row_log.push(super::solver::RowEdit::Delete(remove.to_vec()));
+        self.lp.delete_and_add_rows(remove, rows);
         self.cut_age.extend(std::iter::repeat_n(0, rows.len()));
         for _ in 0..rows.len() {
             self.cut_ids.push(self.next_cut_id);
@@ -2242,10 +2483,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// LP の行のうち、元の行より後ろ (カット) で論理変数が基底にあるものを外す。
     pub(super) fn remove_inactive_cuts(&mut self) {
+        if let Some(remove) = self.inactive_cut_mask() {
+            self.delete_lp_rows(&remove);
+        }
+    }
+
+    /// [`Self::remove_inactive_cuts`] で外す行の印 (外す行がなければ `None`)。
+    fn inactive_cut_mask(&mut self) -> Option<Vec<bool>> {
         let m0 = self.p.m;
         let mr = self.lp.num_rows();
         if mr <= m0 {
-            return;
+            return None;
         }
         self.sync_cut_age();
         let b = self.lp.basis_ref();
@@ -2261,9 +2509,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
-        if any {
-            self.delete_lp_rows(&remove);
-        }
+        any.then_some(remove)
     }
 
     /// HiGHS の `HighsPathSeparator` (path mixing cut を除く) の移植。
@@ -2280,72 +2526,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         const MAX_PATH_LEN: usize = 6;
         let n = self.p.n;
         let m = lp_rows.len();
-        let feastol = 1e-6;
-        let bound_dist = |j: usize| -> f64 {
-            let xj = vars.x[j];
-            let mut blo = vars.lo[j];
-            let mut bup = vars.up[j];
-            if let Some(vb) = vars.vb {
-                for &(y, a, e) in &vb.vub[j] {
-                    bup = bup.min(a * vars.x[y] + e);
-                }
-                for &(y, a, e) in &vb.vlb[j] {
-                    blo = blo.max(a * vars.x[y] + e);
-                }
-            }
-            let mut dl = xj - blo;
-            let mut du = bup - xj;
-            if dl <= feastol {
-                dl = 0.0;
-            }
-            if du <= feastol {
-                du = 0.0;
-            }
-            dl.min(du)
-        };
-        // 行の型: 0 使わない, 1 <=, -1 >=, 2 等式
-        let mut rtype = vec![0i8; m];
-        for i in 0..m {
-            let (l, u) = (vars.lo[n + i], vars.up[n + i]);
-            if l == u {
-                rtype[i] = 2;
-                continue;
-            }
-            let r = vars.x[n + i];
-            let ls = if l.is_finite() { r - l } else { f64::INFINITY };
-            let us = if u.is_finite() { u - r } else { f64::INFINITY };
-            rtype[i] = if ls > feastol && us > feastol {
-                0
-            } else if ls < us {
-                -1
-            } else {
-                1
-            };
-        }
-        let cont: Vec<bool> = (0..n).map(|j| !vars.is_int[j] && bound_dist(j) > 0.0).collect();
-        let mut num_cont = vec![0usize; m];
-        let mut col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-        for i in 0..m {
-            for &(j, a) in &lp_rows[i] {
-                if cont[j] {
-                    num_cont[i] += 1;
-                    col_rows[j].push((i, a));
-                }
-            }
-        }
-        // 代入用の等式 (連続変数が 1 つだけ)
-        let mut subst: Vec<Option<(usize, f64)>> = vec![None; n];
-        for i in 0..m {
-            if rtype[i] != 2 || num_cont[i] != 1 {
-                continue;
-            }
-            let Some(&(j, a)) = lp_rows[i].iter().find(|&&(j, _)| cont[j]) else { continue };
-            if subst[j].is_some() {
-                continue;
-            }
-            subst[j] = Some((i, a));
-            rtype[i] = 0;
-        }
+        let feastol = PATHH_FEASTOL;
+        let bound_dist = |j: usize| -> f64 { pathh_bound_dist(vars, j) };
+        let (rtype, cont, col_rows, subst) = pathh_row_types(vars, lp_rows, n);
         // 連続変数ごとの入る行・出る行
         let mut in_arcs: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
         let mut out_arcs: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
@@ -2993,6 +3176,56 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 現在の LP 解 `x` を切る候補を作る。
     /// `light` (ノード用) なら経路集約の始点と tableau 行の数を絞る。
+    /// `ENOMOTO_MIP_ORIGROW_TIGHT`: 元の行 1 本ずつの分離で、行 `i` の (`<=` 側, `>=` 側) それぞれに試すもの (0 = 試さない,
+    /// 1 = 全部 (`generate_cuts`), 2 = extended cover だけ)。`None` なら全部試す (既定と同じ)。
+    /// - 根 (HiGHS の経路集約 [`Self::path_aggregation_highs`] を使うとき): 経路集約の始点になる行 (LP で効いている行と等式、
+    ///   [`pathh_row_types`] の型が 0 でない行) は、経路集約が最初の段で同じ 1 行 (その行と符号を反転したもの) から CMIR・
+    ///   flow cover を作るので、ここでは extended cover だけ試す (経路集約は extended cover を作らない)。それ以外の行は全部試す
+    /// - ノード (`light`): 余裕 / 係数の 2 ノルム が `ENOMOTO_T_MIP_ORIGROW_NODE_SLACK` (既定 0.1) 未満の向きだけ試す
+    ///   (CglKnapsackCover も効いている行だけを使う。ノードでは経路集約を使わない)
+    fn orig_row_modes(&self, vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], act: &[f64], light: bool) -> Option<Vec<[u8; 2]>> {
+        let p = self.p;
+        if light {
+            let thr = tunable!("ENOMOTO_T_MIP_ORIGROW_NODE_SLACK", 0.1, f64);
+            return Some(
+                (0..p.m)
+                    .map(|i| {
+                        let norm = p.rows[i].iter().map(|&(_, a)| a * a).sum::<f64>().sqrt().max(1e-12);
+                        let a = act[i];
+                        [((p.row_up[i] - a) / norm < thr) as u8, ((a - p.row_lo[i]) / norm < thr) as u8]
+                    })
+                    .collect(),
+            );
+        }
+        // HiGHS の経路集約を使うか ([`Self::separate`] の経路集約の条件。根では `old_only` は `ENOMOTO_MIP_PATH_OLD` だけ)
+        let pathh_runs = env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() && env_str!("ENOMOTO_MIP_PATH_OLD").is_none() && !self.sep_src_skipped(sepprof::SRC_PATHH, light);
+        if !pathh_runs {
+            return None;
+        }
+        let (rtype, _, _, _) = pathh_row_types(vars, lp_rows, p.n);
+        Some((0..p.m).map(|i| if rtype[i] != 0 { [2, 2] } else { [1, 1] }).collect())
+    }
+
+    /// [`Self::separate`] で使う LP の行の写しと、(`ENOMOTO_MIP_SEP_NO_ROWCLONE` なら) 行ごとの整数の行の印。既定では毎回
+    /// すべての行を複製し、印は `None` (呼び出し側が数える)
+    fn sep_lp_rows(&mut self) -> (std::rc::Rc<Vec<Vec<(usize, f64)>>>, Option<std::rc::Rc<Vec<bool>>>) {
+        let mr = self.lp.num_rows();
+        let key = if env_str!("ENOMOTO_MIP_SEP_NO_ROWCLONE").is_some() { self.lp.matrix_key() } else { None };
+        let Some(key) = key else {
+            return (std::rc::Rc::new((0..mr).map(|i| self.lp.row(i)).collect()), None);
+        };
+        if let Some(c) = &self.sep_rows_cache {
+            if c.key == key && c.rows.len() == mr && c.cut_int == self.cut_int {
+                return (c.rows.clone(), Some(c.integral.clone()));
+            }
+        }
+        let rows: Vec<Vec<(usize, f64)>> = (0..mr).map(|i| self.lp.row(i)).collect();
+        let integral: Vec<bool> = rows.iter().map(|r| r.iter().all(|&(j, a)| self.cut_int[j] && (a - a.round()).abs() <= 1e-9)).collect();
+        let (rows, integral) = (std::rc::Rc::new(rows), std::rc::Rc::new(integral));
+        self.sep_rows_cache = Some(SepRowsCache { key, rows: rows.clone(), cut_int: self.cut_int.clone(), integral: integral.clone() });
+        (rows, Some(integral))
+    }
+
     fn separate(&mut self, x: &[f64], light: bool) -> Vec<Candidate> {
         let mut lap = std::time::Instant::now();
         let fidx = if sepprof::AT_FACE.with(|c| c.get()) { 1 } else { 0 };
@@ -3006,7 +3239,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let n = p.n;
         let mr = self.lp.num_rows();
         // 変数: 構造変数 0..n と、LP 行の活動量 n..n+mr
-        let lp_rows: Vec<Vec<(usize, f64)>> = (0..mr).map(|i| self.lp.row(i)).collect();
+        // `ENOMOTO_MIP_SEP_NO_ROWCLONE`: 行の写しと整数の行の印を使い回す ([`SepRowsCache`])
+        let (lp_rows_rc, row_integral) = self.sep_lp_rows();
+        let lp_rows: &[Vec<(usize, f64)>] = &lp_rows_rc;
         let act = self.lp.row_activities();
         // カットは木全体で有効にするため、大域的な境界から作る
         let mut lo = self.dom.global_lo.clone();
@@ -3022,7 +3257,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut xv = x.to_vec();
         for i in 0..mr {
             let (l, u) = self.lp.row_bounds(i);
-            let integral = lp_rows[i].iter().all(|&(j, a)| self.cut_int[j] && (a - a.round()).abs() <= 1e-9);
+            let integral = match &row_integral {
+                Some(v) => v[i],
+                None => lp_rows[i].iter().all(|&(j, a)| self.cut_int[j] && (a - a.round()).abs() <= 1e-9),
+            };
             let (l, u) = if integral { ((l - FEASTOL).ceil(), (u + FEASTOL).floor()) } else { (l, u) };
             lo.push(l);
             up.push(u);
@@ -3042,7 +3280,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let xh: Vec<f64> = std::fs::read_to_string(&f).unwrap().lines().filter(|l| l.starts_with("C ")).map(|l| l.split_whitespace().nth(4).unwrap().parse().unwrap()).collect();
                 if xh.len() == n {
                     let mut xvh = xh.clone();
-                    for row in &lp_rows {
+                    for row in lp_rows {
                         xvh.push(row.iter().map(|&(j, a)| a * xh[j]).sum());
                     }
                     let vars_h = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xvh, vb: vb.as_deref() };
@@ -3050,15 +3288,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let mut scratch_h = vec![0.0f64; n];
                     let mut push_h = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
                         if let Some(raw) = raw {
-                            if let Some(c) = finish_cut(raw, n, &lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, &xh, None, &mut scratch_h) {
+                            if let Some(c) = finish_cut(raw, n, lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, &xh, None, &mut scratch_h) {
                                 cands.push(c);
                             }
                         }
                     };
                     if env_str!("ENOMOTO_MIP_PATH_OLD").is_none() {
-                        self.path_aggregation_highs(&vars_h, &lp_rows, &mut ch, &mut push_h);
+                        self.path_aggregation_highs(&vars_h, lp_rows, &mut ch, &mut push_h);
                     } else {
-                        self.path_aggregation(&vars_h, &lp_rows, &mut ch, &mut push_h, usize::MAX);
+                        self.path_aggregation(&vars_h, lp_rows, &mut ch, &mut push_h, usize::MAX);
                     }
                     let mut e: Vec<f64> = ch.iter().map(|c| c.efficacy).collect();
                     e.sort_by(|a, b| b.total_cmp(a));
@@ -3086,7 +3324,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(raw) = raw {
                 let t0 = std::time::Instant::now();
                 n_raw.set(n_raw.get() + 1);
-                if let Some(c) = finish_cut(raw, n, &lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice()), &mut finish_scratch) {
+                if let Some(c) = finish_cut(raw, n, lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice()), &mut finish_scratch) {
                     cands.push(c);
                     n_fin.set(n_fin.get() + 1);
                 }
@@ -3111,7 +3349,50 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut nsrc0 = cands.len();
         // 元の行 1 本ずつ (診断用 `ENOMOTO_MIP_DEBUG_NO_ROW_CUTS`: 使わない)
         let row_cuts_m = if env_str!("ENOMOTO_MIP_DEBUG_NO_ROW_CUTS").is_some() { 0 } else { p.m };
-        for i in 0..row_cuts_m {
+        // `ENOMOTO_MIP_SEP_ADAPTIVE`: 飛ばしている分離器は使わない ([`SepAdapt`])
+        let row_cuts_m = if row_cuts_m > 0 && !self.sep_src_on(sepprof::SRC_ROWS, light) { 0 } else { row_cuts_m };
+        // `ENOMOTO_MIP_ORIGROW_TIGHT` (試作、既定では使わない): 元の行 1 本ずつの分離で、行の向きごとに試すものを絞る
+        // ([`orig_row_modes`]。0 = 試さない, 1 = 全部 (`generate_cuts`), 2 = extended cover だけ)。既定は毎ラウンド・毎ノード、
+        // 余裕と関係なくすべての行の両側を試していた
+        let row_modes = if row_cuts_m > 0 && env_str!("ENOMOTO_MIP_ORIGROW_TIGHT").is_some() && !gen_old() && mr >= p.m { self.orig_row_modes(&vars, lp_rows, &act, light) } else { None };
+        let zh_on = env_str!("ENOMOTO_MIP_NO_ZEROHALF").is_none() && self.sep_src_on(sepprof::SRC_ZH, light);
+        // clique カットの使い方は下の説明を参照
+        let clique_on = clique_cuts_mode().is_some_and(|m| !(light && (m == "root" || (m == "fallback" && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && ((m != "auto" && m != "fallback") || self.clique_auto == Some(true)));
+        let clique_on = clique_on && self.sep_src_on(sepprof::SRC_CLIQUE, light);
+        // `ENOMOTO_MIP_SEP_PARALLEL` (試作、既定では使わない): 根の分離 (木を分け合う前、サブ MIP でない) で、元の行 1 本ずつ・zerohalf・
+        // clique の分離を複数のスレッドで行う ([`sep_parallel_parts`])。行は連続した塊に分けて塊の順に、zerohalf・clique はそれぞれ
+        // 1 つの仕事にし、結果を逐次と同じ順につなぐので候補は逐次と同じ (時間切れで止まったときだけ違う)。implied bound の分離は
+        // 含意の表を 1 回なめるだけで軽いので逐次のまま。tableau 行 (`gen_cuts_parallel` と同じ形の並列) や経路集約の並列と同じく
+        // スレッド数は [`Self::sep_budget_threads`]
+        let par_sep = env_str!("ENOMOTO_MIP_SEP_PARALLEL").is_some()
+            && self.params.threads > 1
+            && !light
+            && !self.params.submip
+            && self.pool.is_none()
+            && !gen_old()
+            && env_str!("ENOMOTO_MIP_SEP_SEQ").is_none();
+        let mut par_parts: Option<SepParts> = None;
+        if par_sep {
+            let g = if clique_on { Some(self.clique_graph_get()) } else { None };
+            let inc = self.incumbent.as_ref().map(|(_, v)| v.as_slice());
+            let parts = sep_parallel_parts(
+                &SepParCtx { vars: &vars, p, lp_rows, cut_int: &self.cut_int, glo: &self.dom.global_lo, gup: &self.dom.global_up, x, inc, deadline: self.deadline },
+                row_cuts_m,
+                row_modes.as_deref(),
+                zh_on,
+                g.as_deref(),
+                sep_threads(self.sep_budget_threads()),
+            );
+            self.sep_par_cpu += parts.cpu;
+            par_parts = Some(parts);
+        }
+        if let Some(pp) = par_parts.as_mut() {
+            cands.append(&mut pp.rows);
+            if pp.timed_out || self.time_up() {
+                return cands;
+            }
+        }
+        for i in 0..if par_parts.is_some() { 0 } else { row_cuts_m } {
             if i % 64 == 0 && self.time_up() {
                 return cands;
             }
@@ -3121,11 +3402,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if !gen_old() {
                 let neg: Vec<(usize, f64)> = row.iter().map(|&(j, a)| (j, -a)).collect();
-                for (b, r) in [(row.as_slice(), p.row_up[i]), (neg.as_slice(), -p.row_lo[i])] {
-                    if r.is_finite() {
+                for (side, (b, r)) in [(row.as_slice(), p.row_up[i]), (neg.as_slice(), -p.row_lo[i])].into_iter().enumerate() {
+                    let md = row_modes.as_ref().map_or(1, |rm| rm[i][side]);
+                    if r.is_finite() && md != 0 {
                         let n0 = cands.len();
-                        for c in generate_cuts(&vars, b, r, use_flow_cover(), true) {
-                            push(Some(c), &mut cands, self);
+                        if md == 1 {
+                            for c in generate_cuts(&vars, b, r, use_flow_cover(), true) {
+                                push(Some(c), &mut cands, self);
+                            }
+                        } else if !has_cont_col(&vars, b) {
+                            push(extended_cover(&vars, b, r), &mut cands, self);
                         }
                         keep_best(&mut cands, n0, self.p);
                     }
@@ -3165,7 +3451,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         nsrc0 = cands.len();
         sepprof::lap(sepprof::T_ROWS, &mut lap);
         // zerohalf ({0, 1/2}-CG) カット (元の行から)
-        if env_str!("ENOMOTO_MIP_NO_ZEROHALF").is_none() {
+        if let Some(pp) = par_parts.as_mut() {
+            cands.append(&mut pp.zh);
+        } else if zh_on {
             let zh = super::zerohalf::zerohalf_cuts(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, 100);
             for raw in zh {
                 push(Some(raw), &mut cands, self);
@@ -3185,11 +3473,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 下界は 1 ラウンド目で 99718.79 -> 100121.99 (HiGHS と同じ。HiGHS も clique と implied bound の分離を止めると根で動かない)
         // `ENOMOTO_MIP_CLIQUE_CUTS=auto` (試作): 根で一度だけ clique カットだけを入れた LP を解き、下界が上がる問題でだけ使う
         // ([`Self::clique_trial`])
-        let clique_mode = clique_cuts_mode();
         // `ENOMOTO_MIP_CLIQUE_CUTS=fallback` (既定、[`clique_cuts_mode`]): 根のループを clique なしで回し、ほかのカットで伸びず clique カットで伸びる問題でだけ
         // 根の続きのラウンドで使う ([`Self::clique_fallback_trial`])。ノードでは使わない (`ENOMOTO_MIP_CLIQUE_FB_NODES` で使う)
-        let fb_nodes = env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_some();
-        if clique_mode.is_some_and(|m| !(light && (m == "root" || (m == "fallback" && !fb_nodes))) && ((m != "auto" && m != "fallback") || self.clique_auto == Some(true))) {
+        // (判定は上の `clique_on`)
+        if let Some(pp) = par_parts.as_mut() {
+            cands.append(&mut pp.clique);
+        } else if clique_on {
             let g = self.clique_graph_get();
             for raw in g.separate(x, tunable!("ENOMOTO_T_MIP_CLIQUE_MAX", 100usize, usize)) {
                 push(Some(raw), &mut cands, self);
@@ -3219,7 +3508,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ib_gen_auto = ib_gen_mode.is_none() && !light && super::gr_auto() && super::implbd_genint_for(&p.is_int, &p.col_lo, &p.col_up);
         let ib_gen = !ib_all && ((ib_gen_mode.is_some() && (!light || ib_gen_mode == Some("nodes"))) || ib_gen_auto);
         let ib_cont = ib_cont || ib_gen;
-        if (ib_all || ib_cont) && !p.implied_bounds.is_empty() {
+        if (ib_all || ib_cont) && !p.implied_bounds.is_empty() && self.sep_src_on(sepprof::SRC_IMPLBD, light) {
             let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
             let max_ib = tunable!("ENOMOTO_T_MIP_IMPLBD_MAX", 5000usize, usize);
             let mut viol: Vec<(f64, RawCut)> = Vec::new();
@@ -3282,13 +3571,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let node_highs = light && self.fc_node_sep && env_str!("ENOMOTO_MIP_FC_NODE_PATH_HIGHS").is_some();
             let old_only = env_str!("ENOMOTO_MIP_PATH_OLD").is_some() || (light && !node_highs);
             let highs_only = env_str!("ENOMOTO_MIP_PATH_HIGHS_ONLY").is_some();
-            if !old_only {
-                self.path_aggregation_highs(&vars, &lp_rows, &mut cands, &mut push);
+            if !old_only && self.sep_src_on(sepprof::SRC_PATHH, light) {
+                self.path_aggregation_highs(&vars, lp_rows, &mut cands, &mut push);
             }
             tag(&mut cands[nsrc0..], sepprof::SRC_PATHH);
             nsrc0 = cands.len();
             sepprof::lap(sepprof::T_PATHH, &mut lap);
-            if !highs_only || old_only {
+            if (!highs_only || old_only) && self.sep_src_on(sepprof::SRC_PATH, light) {
                 // 根で並列の分離なら、集約した行を順に集めてからカットの生成と仕上げを並列に行う (集約は逐次と同じ順で、
                 // カットの有無で経路を変えないので結果は逐次と同じ。`ENOMOTO_MIP_PATH_STOP_ON_CUT` では逐次)
                 let par_path = self.params.threads > 1
@@ -3301,16 +3590,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     && env_str!("ENOMOTO_MIP_PATH_SEQ").is_none();
                 if par_path {
                     self.path_collect = Some(Vec::new());
-                    self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);
+                    self.path_aggregation(&vars, lp_rows, &mut cands, &mut push, max_starts);
                     let bases = self.path_collect.take().unwrap_or_default();
                     let inc = self.incumbent.as_ref().map(|(_, v)| v.as_slice());
-                    let (by_row, cpu) = gen_cuts_parallel(&bases, sep_threads(self.sep_budget_threads()), &vars, use_flow_cover(), n, &lp_rows, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, inc, self.p);
+                    let (by_row, cpu) = gen_cuts_parallel(&bases, sep_threads(self.sep_budget_threads()), &vars, use_flow_cover(), n, lp_rows, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, inc, self.p);
                     self.sep_par_cpu += cpu;
                     for cs in by_row {
                         cands.extend(cs);
                     }
                 } else {
-                    self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);
+                    self.path_aggregation(&vars, lp_rows, &mut cands, &mut push, max_starts);
                 }
             }
         }
@@ -3330,7 +3619,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             && (!mcf_mode.is_some_and(|m| m.starts_with("auto")) || !self.mcf_fc_network())
             && !self.params.submip
             && mr >= p.m;
-        if mcf_on {
+        if mcf_on && self.sep_src_on(sepprof::SRC_MCF, light) {
             let nets = self.mcf_networks();
             if !nets.is_empty() {
                 let t0 = std::time::Instant::now();
@@ -3339,7 +3628,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let duals = self.lp.row_duals();
                 let max_aggs = tunable!("ENOMOTO_T_MIP_MCF_MAX_AGGS", 400usize, usize);
                 let single = env_str!("ENOMOTO_MIP_MCF_NO_SINGLE").is_none();
-                let aggs = super::mcf::aggregations(&nets, &lp_rows, &act, rlo, rup, &duals, tunable!("ENOMOTO_T_MIP_MCF_CLUSTERS", 5usize, usize), max_aggs, single);
+                let aggs = super::mcf::aggregations(&nets, lp_rows, &act, rlo, rup, &duals, tunable!("ENOMOTO_T_MIP_MCF_CLUSTERS", 5usize, usize), max_aggs, single);
                 let max_cuts = tunable!("ENOMOTO_T_MIP_MCF_MAX_CUTS", 200usize, usize);
                 let mut agg = vec![0.0f64; n];
                 let mut in_agg = vec![false; n];
@@ -3460,6 +3749,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let nnz_budget = if nnz_budget_mult > 0.0 { nnz_budget_mult * (n + lp_nnz) as f64 } else { f64::INFINITY };
         let mut work_used = 0.0f64;
         let mut n_budget_skip = 0usize;
+        // `ENOMOTO_MIP_TAB_NNZ_CBC` (試作、既定では使わない): CglGomory (CglGomory.cpp の `nReasonable`) と同じく、行をスコアの順に試し、
+        // 作ったカットの非零の数の合計が予算に届いたら止める (届いた行のカットは入れる。密な行を飛ばして後ろの行で埋めることはしない)。
+        // 予算は根で max(5n, nnz/8 + min(10000, nnz + 2m)) (最初のラウンドは min を取らず 10000、さらに + nnz/2)、ノード (`light`) で
+        // max(2n, nnz/8 + 200) (n は列、m は LP の行、nnz は LP の非零)。`ENOMOTO_T_MIP_TAB_NNZ_BUDGET`・`ENOMOTO_MIP_TAB_HIGHS_RULES`
+        // と一緒には使わない。以前の似た試み (その 2 つ) は 30n20b8 の根の下界を下げた
+        let mut tab_cbc_left: Option<i64> = if env_str!("ENOMOTO_MIP_TAB_NNZ_CBC").is_some() && !tab_rules && !nnz_budget.is_finite() {
+            let (nz, nn, mm) = (lp_nnz as i64, n as i64, mr as i64);
+            Some(if light {
+                (2 * nn).max(nz / 8 + 200)
+            } else {
+                let first = self.sep_pass == 0;
+                let add = if first { 10_000 } else { 10_000i64.min(nz + 2 * mm) };
+                (5 * nn).max(nz / 8 + add) + if first { nz / 2 } else { 0 }
+            })
+        } else {
+            None
+        };
         if !tab_rules {
             basics.truncate(if nnz_budget.is_finite() { 3 * limit } else { limit });
         }
@@ -3570,7 +3876,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let t0 = std::time::Instant::now();
             let (cut_int, glo, gup) = (&self.cut_int[..], &self.dom.global_lo[..], &self.dom.global_up[..]);
             let inc = self.incumbent.as_ref().map(|(_, v)| v.as_slice());
-            let (pp, lp_rows_ref, vars_ref, bases_ref) = (self.p, &lp_rows, &vars, &bases);
+            let (pp, lp_rows_ref, vars_ref, bases_ref) = (self.p, lp_rows, &vars, &bases);
             let nb = bases.len();
             let nth = par_threads.min(nb.max(1));
             // 行をスレッドに交互に割り当てる (行はスコア順で、重さが偏らないように)
@@ -3612,6 +3918,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             for cs in by_row {
+                // `ENOMOTO_MIP_TAB_NNZ_CBC`: 逐次と同じく、予算に届いたらそれより後ろの行のカットは入れない
+                if let Some(left) = tab_cbc_left.as_mut() {
+                    if *left <= 0 {
+                        break;
+                    }
+                    *left -= cs.iter().map(|c| c.coefs.len() as i64).sum::<i64>();
+                }
                 cands.extend(cs);
             }
             if dbg_sep {
@@ -3630,6 +3943,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if n_rows_used >= limit {
+                    break;
+                }
+                if tab_cbc_left.is_some_and(|left| left <= 0) {
                     break;
                 }
                 let t0 = std::time::Instant::now();
@@ -3741,6 +4057,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         keep_best(&mut cands, n0, self.p);
                     }
+                    if let Some(left) = tab_cbc_left.as_mut() {
+                        *left -= cands[n_before..].iter().map(|c| c.coefs.len() as i64).sum::<i64>();
+                    }
                     if dbg_sep {
                         t_gen += t0.elapsed().as_secs_f64();
                     }
@@ -3799,6 +4118,214 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         cands
     }
+}
+
+/// 集約行 `base` に連続列 (境界が幅を持つもの) があるか ([`generate_cuts`] が extended cover を試さない条件)
+fn has_cont_col(vars: &CutVars, base: &[(usize, f64)]) -> bool {
+    base.iter().any(|&(k, a)| a != 0.0 && !vars.is_int[k] && vars.lo[k] < vars.up[k])
+}
+
+/// [`sep_parallel_parts`] に渡す分離の入力
+struct SepParCtx<'a> {
+    vars: &'a CutVars<'a>,
+    p: &'a MipProblem,
+    lp_rows: &'a [Vec<(usize, f64)>],
+    cut_int: &'a [bool],
+    glo: &'a [f64],
+    gup: &'a [f64],
+    x: &'a [f64],
+    inc: Option<&'a [f64]>,
+    deadline: Option<std::time::Instant>,
+}
+
+/// [`sep_parallel_parts`] の結果 (分離器ごとの候補 (逐次と同じ順)、時間切れで止まったか、スレッドの CPU 時間の合計)
+struct SepParts {
+    rows: Vec<Candidate>,
+    zh: Vec<Candidate>,
+    clique: Vec<Candidate>,
+    timed_out: bool,
+    cpu: f64,
+}
+
+/// `ENOMOTO_MIP_SEP_PARALLEL`: 元の行 1 本ずつ (最初の `row_m` 行、向きごとの `modes` は [`Solver::orig_row_modes`])・zerohalf
+/// (`zh_on`)・clique (`clique`) の分離を `nth` 本のスレッドで行う。仕事は zerohalf・clique・行の連続した塊 (スレッド数の 8 倍まで)
+/// で、空いたスレッドが次の仕事を取り、結果は仕事の順に並べるので逐次 ([`Solver::separate`]) と同じ候補になる
+fn sep_parallel_parts(c: &SepParCtx, row_m: usize, modes: Option<&[[u8; 2]]>, zh_on: bool, clique: Option<&super::clique::CliqueGraph>, nth: usize) -> SepParts {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let p = c.p;
+    let n = p.n;
+    let nchunks = if row_m == 0 { 0 } else { (8 * nth).min(row_m) };
+    let chunk = if nchunks == 0 { 0 } else { row_m.div_ceil(nchunks) };
+    let ntask = 2 + nchunks;
+    let next = AtomicUsize::new(0);
+    let timed = AtomicBool::new(false);
+    let nth = nth.clamp(1, ntask);
+    let parts: Vec<(Vec<(usize, Vec<Candidate>)>, f64)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..nth)
+            .map(|_| {
+                sc.spawn(|| {
+                    let c0 = super::cap_clock();
+                    let mut scratch = vec![0.0f64; n];
+                    let mut out: Vec<(usize, Vec<Candidate>)> = Vec::new();
+                    loop {
+                        let t = next.fetch_add(1, Ordering::Relaxed);
+                        if t >= ntask {
+                            break;
+                        }
+                        let mut cs: Vec<Candidate> = Vec::new();
+                        let mut fin = |raw: RawCut, cs: &mut Vec<Candidate>| {
+                            if let Some(cd) = finish_cut(raw, n, c.lp_rows, c.cut_int, c.glo, c.gup, c.x, c.inc, &mut scratch) {
+                                cs.push(cd);
+                            }
+                        };
+                        match t {
+                            0 => {
+                                if zh_on {
+                                    for raw in super::zerohalf::zerohalf_cuts(&p.rows, &p.row_lo, &p.row_up, c.cut_int, c.glo, c.gup, c.x, 100) {
+                                        fin(raw, &mut cs);
+                                    }
+                                }
+                            }
+                            1 => {
+                                if let Some(g) = clique {
+                                    for raw in g.separate(c.x, tunable!("ENOMOTO_T_MIP_CLIQUE_MAX", 100usize, usize)) {
+                                        fin(raw, &mut cs);
+                                    }
+                                }
+                            }
+                            _ => {
+                                let k = t - 2;
+                                for i in k * chunk..((k + 1) * chunk).min(row_m) {
+                                    if i % 64 == 0 && (timed.load(Ordering::Relaxed) || c.deadline.is_some_and(|d| std::time::Instant::now() >= d)) {
+                                        timed.store(true, Ordering::Relaxed);
+                                        break;
+                                    }
+                                    let row = &p.rows[i];
+                                    if row.len() < 2 {
+                                        continue;
+                                    }
+                                    let neg: Vec<(usize, f64)> = row.iter().map(|&(j, a)| (j, -a)).collect();
+                                    for (side, (b, r)) in [(row.as_slice(), p.row_up[i]), (neg.as_slice(), -p.row_lo[i])].into_iter().enumerate() {
+                                        let md = modes.map_or(1, |rm| rm[i][side]);
+                                        if r.is_finite() && md != 0 {
+                                            let n0 = cs.len();
+                                            if md == 1 {
+                                                for raw in generate_cuts(c.vars, b, r, use_flow_cover(), true) {
+                                                    fin(raw, &mut cs);
+                                                }
+                                            } else if !has_cont_col(c.vars, b) {
+                                                if let Some(raw) = extended_cover(c.vars, b, r) {
+                                                    fin(raw, &mut cs);
+                                                }
+                                            }
+                                            keep_best(&mut cs, n0, p);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        out.push((t, cs));
+                    }
+                    (out, super::cap_clock() - c0)
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut by_task: Vec<Vec<Candidate>> = (0..ntask).map(|_| Vec::new()).collect();
+    let mut cpu = 0.0;
+    for (part, t) in parts {
+        cpu += t;
+        for (k, cs) in part {
+            by_task[k] = cs;
+        }
+    }
+    let mut it = by_task.into_iter();
+    let zh = it.next().unwrap_or_default();
+    let clique = it.next().unwrap_or_default();
+    let rows: Vec<Candidate> = it.flatten().collect();
+    SepParts { rows, zh, clique, timed_out: timed.load(Ordering::Relaxed), cpu }
+}
+
+/// [`Solver::path_aggregation_highs`] の許容誤差
+const PATHH_FEASTOL: f64 = 1e-6;
+
+/// [`Solver::path_aggregation_highs`] の、列 `j` の LP 値の境界 (変数上下限を含む) からの距離 (許容誤差以下は 0)
+fn pathh_bound_dist(vars: &CutVars, j: usize) -> f64 {
+    let feastol = PATHH_FEASTOL;
+    let xj = vars.x[j];
+    let mut blo = vars.lo[j];
+    let mut bup = vars.up[j];
+    if let Some(vb) = vars.vb {
+        for &(y, a, e) in &vb.vub[j] {
+            bup = bup.min(a * vars.x[y] + e);
+        }
+        for &(y, a, e) in &vb.vlb[j] {
+            blo = blo.max(a * vars.x[y] + e);
+        }
+    }
+    let mut dl = xj - blo;
+    let mut du = bup - xj;
+    if dl <= feastol {
+        dl = 0.0;
+    }
+    if du <= feastol {
+        du = 0.0;
+    }
+    dl.min(du)
+}
+
+/// [`Solver::path_aggregation_highs`] の行の型 (0 使わない, 1 `<=`, -1 `>=`, 2 等式。代入用の等式は 0)、連続変数か
+/// (境界から離れているもの)、連続変数ごとの行、代入用の等式 (連続変数ごとの (行, 係数))。型が 0 でない行が経路の始点になる
+#[allow(clippy::type_complexity)]
+fn pathh_row_types(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize) -> (Vec<i8>, Vec<bool>, Vec<Vec<(usize, f64)>>, Vec<Option<(usize, f64)>>) {
+    let m = lp_rows.len();
+    let feastol = PATHH_FEASTOL;
+    let bound_dist = |j: usize| -> f64 { pathh_bound_dist(vars, j) };
+    // 行の型: 0 使わない, 1 <=, -1 >=, 2 等式
+    let mut rtype = vec![0i8; m];
+    for i in 0..m {
+        let (l, u) = (vars.lo[n + i], vars.up[n + i]);
+        if l == u {
+            rtype[i] = 2;
+            continue;
+        }
+        let r = vars.x[n + i];
+        let ls = if l.is_finite() { r - l } else { f64::INFINITY };
+        let us = if u.is_finite() { u - r } else { f64::INFINITY };
+        rtype[i] = if ls > feastol && us > feastol {
+            0
+        } else if ls < us {
+            -1
+        } else {
+            1
+        };
+    }
+    let cont: Vec<bool> = (0..n).map(|j| !vars.is_int[j] && bound_dist(j) > 0.0).collect();
+    let mut num_cont = vec![0usize; m];
+    let mut col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for i in 0..m {
+        for &(j, a) in &lp_rows[i] {
+            if cont[j] {
+                num_cont[i] += 1;
+                col_rows[j].push((i, a));
+            }
+        }
+    }
+    // 代入用の等式 (連続変数が 1 つだけ)
+    let mut subst: Vec<Option<(usize, f64)>> = vec![None; n];
+    for i in 0..m {
+        if rtype[i] != 2 || num_cont[i] != 1 {
+            continue;
+        }
+        let Some(&(j, a)) = lp_rows[i].iter().find(|&&(j, _)| cont[j]) else { continue };
+        if subst[j].is_some() {
+            continue;
+        }
+        subst[j] = Some((i, a));
+        rtype[i] = 0;
+    }
+    (rtype, cont, col_rows, subst)
 }
 
 /// 集約した行 `bases` ごとに (その行と符号を反転した行から) カットを作って仕上げ、行ごとに keep_best で絞った候補を
