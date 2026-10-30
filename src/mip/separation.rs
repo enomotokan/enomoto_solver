@@ -3753,8 +3753,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 作ったカットの非零の数の合計が予算に届いたら止める (届いた行のカットは入れる。密な行を飛ばして後ろの行で埋めることはしない)。
         // 予算は根で max(5n, nnz/8 + min(10000, nnz + 2m)) (最初のラウンドは min を取らず 10000、さらに + nnz/2)、ノード (`light`) で
         // max(2n, nnz/8 + 200) (n は列、m は LP の行、nnz は LP の非零)。`ENOMOTO_T_MIP_TAB_NNZ_BUDGET`・`ENOMOTO_MIP_TAB_HIGHS_RULES`
-        // と一緒には使わない。以前の似た試み (その 2 つ) は 30n20b8 の根の下界を下げた
-        let mut tab_cbc_left: Option<i64> = if env_str!("ENOMOTO_MIP_TAB_NNZ_CBC").is_some() && !tab_rules && !nnz_budget.is_finite() {
+        // と一緒には使わない。以前の似た試み (その 2 つ) は 30n20b8 の根の下界を下げた。
+        // 値が `root` なら根だけ、`node` ならノードだけに予算をかける (切り分け用)
+        let tab_cbc_mode = env_str!("ENOMOTO_MIP_TAB_NNZ_CBC");
+        let tab_cbc_on = match tab_cbc_mode {
+            None => false,
+            Some("root") => !light,
+            Some("node") => light,
+            Some(_) => true,
+        };
+        let mut tab_cbc_left: Option<i64> = if tab_cbc_on && !tab_rules && !nnz_budget.is_finite() {
             let (nz, nn, mm) = (lp_nnz as i64, n as i64, mr as i64);
             Some(if light {
                 (2 * nn).max(nz / 8 + 200)
@@ -3766,6 +3774,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             None
         };
+        let tab_cbc_init = tab_cbc_left;
         if !tab_rules {
             basics.truncate(if nnz_budget.is_finite() { 3 * limit } else { limit });
         }
@@ -4083,6 +4092,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     push(lifted_flow_cover(&vars, &neg, 0.0), &mut cands, self);
                 }
             }
+        }
+        if dbg_sep && tab_cbc_init.is_some() {
+            eprintln!("SEP tableau CBC budget {:?} left {:?} light {} cands {}", tab_cbc_init, tab_cbc_left, light, cands.len() - cands_before_tab);
         }
         if dbg_sep {
             eprintln!(

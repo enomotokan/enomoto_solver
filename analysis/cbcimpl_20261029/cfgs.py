@@ -47,4 +47,7 @@ CFGS = {
                  "ENOMOTO_MIP_SB_POLY_RC": "1"},
     "tab_fullps": {"ENOMOTO_MIP_TAB_NNZ_CBC": "1", "ENOMOTO_MIP_SB_TIGHTEN": "1", "ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1", "ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR": "1",
                    "ENOMOTO_MIP_SB_POLY_RC": "1", "ENOMOTO_MIP_SB_RC": "1", "ENOMOTO_MIP_SB_POLY_SCORE": "1"},
+    # tab_nnz の切り分け (mc11・ns1208400 の悪化の調査): 予算を根だけ / ノードだけにかける
+    "tab_root": {"ENOMOTO_MIP_TAB_NNZ_CBC": "root"},
+    "tab_node": {"ENOMOTO_MIP_TAB_NNZ_CBC": "node"},
 }
