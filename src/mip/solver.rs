@@ -247,6 +247,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) sep_adapt: super::separation::SepAdapt,
     /// 根のカットのループの今のラウンド (`ENOMOTO_MIP_TAB_NNZ_CBC` の最初のラウンドの判定用。ループの始めに 0)
     pub(super) sep_pass: usize,
+    /// 根のカットのループの直前のラウンドの目的値の相対的な伸び (`ENOMOTO_T_MIP_TAB_NNZ_GAIN` の判定用。ループの始めに無限大)
+    pub(super) sep_last_gain: f64,
     /// 分離に使う LP の行の写し (`ENOMOTO_MIP_SEP_NO_ROWCLONE`、[`super::separation::SepRowsCache`])
     pub(super) sep_rows_cache: Option<super::separation::SepRowsCache>,
     /// 根のカットのループで固定費用ネットワーク型と判定したか (`ENOMOTO_MIP_FACE_SEP_FC`、試作)
@@ -1881,6 +1883,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         bg_cut_rounds: 0,
         sep_adapt: super::separation::SepAdapt::with_node_off(snap.as_ref().map_or(0, |sn| sn.sep_node_off)),
         sep_pass: 0,
+        sep_last_gain: f64::INFINITY,
         sep_rows_cache: None,
         fc_network: false,
         face_secs: 0.0,

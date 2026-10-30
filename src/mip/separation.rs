@@ -979,6 +979,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // ラウンドごとの目的値 (`ENOMOTO_MIP_CUT_EXTEND` の判定用。最初は根の LP の値)
         let mut ext_hist: Vec<f64> = vec![first_obj];
         self.sep_pass = 0;
+        self.sep_last_gain = f64::INFINITY;
         // `ENOMOTO_MIP_CUT_KEEP_LU` (試作、既定では使わない): ラウンドの終わりに効いていないカットを外す
         // ([`Self::remove_inactive_cuts`]) のをやめ、次のラウンドの分離の後、新しいカットを加えるときに一緒に外す
         // ([`MipLp::delete_and_add_rows`]、標準形の作り直しは 1 回)。行を消すと標準形を作り直して最適基底の LU を捨てるので、
@@ -1751,6 +1752,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 prev_nfrac = nfrac;
             }
+            self.sep_last_gain = (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0);
             prev_obj = obj;
             obj_hist.push(obj);
             ext_hist.push(obj);
@@ -3774,6 +3776,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             None
         };
+        // 根の予算の効きすぎ (mc11・ns1208400 で解けなくなる) を抑える試作 (どれも既定では使わない、0 で無効):
+        // - `ENOMOTO_T_MIP_TAB_NNZ_LATE` = R: 根のループの R ラウンド目からは予算をかけない (mc11 は後半のラウンドで候補が 3〜5 割減り、下界が止まる)
+        // - `ENOMOTO_T_MIP_TAB_NNZ_GAIN` = tol: 根で直前のラウンドの目的値の相対的な伸びが tol を超える (最初のラウンドを含む) あいだは予算をかけない
+        // - `ENOMOTO_T_MIP_TAB_NNZ_CUTCAP` = k: カット 1 本が予算から引く非零を 予算 / k までにする (ns1208400 は 1 本約 1500 非零で、
+        //   予算で 1 ラウンド約 13 行しか使えない)
+        if !light && tab_cbc_left.is_some() {
+            let late = tunable!("ENOMOTO_T_MIP_TAB_NNZ_LATE", 0usize, usize);
+            let gain_tol = tunable!("ENOMOTO_T_MIP_TAB_NNZ_GAIN", 0.0, f64);
+            if (late > 0 && self.sep_pass >= late) || (gain_tol > 0.0 && self.sep_last_gain > gain_tol) {
+                tab_cbc_left = None;
+            }
+        }
+        let tab_cut_cap: i64 = {
+            let k = tunable!("ENOMOTO_T_MIP_TAB_NNZ_CUTCAP", 0.0, f64);
+            match tab_cbc_left {
+                Some(b) if k > 0.0 => ((b as f64 / k).ceil() as i64).max(1),
+                _ => i64::MAX,
+            }
+        };
         let tab_cbc_init = tab_cbc_left;
         if !tab_rules {
             basics.truncate(if nnz_budget.is_finite() { 3 * limit } else { limit });
@@ -3932,7 +3953,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if *left <= 0 {
                         break;
                     }
-                    *left -= cs.iter().map(|c| c.coefs.len() as i64).sum::<i64>();
+                    *left -= cs.iter().map(|c| (c.coefs.len() as i64).min(tab_cut_cap)).sum::<i64>();
                 }
                 cands.extend(cs);
             }
@@ -4067,7 +4088,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         keep_best(&mut cands, n0, self.p);
                     }
                     if let Some(left) = tab_cbc_left.as_mut() {
-                        *left -= cands[n_before..].iter().map(|c| c.coefs.len() as i64).sum::<i64>();
+                        *left -= cands[n_before..].iter().map(|c| (c.coefs.len() as i64).min(tab_cut_cap)).sum::<i64>();
                     }
                     if dbg_sep {
                         t_gen += t0.elapsed().as_secs_f64();

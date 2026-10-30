@@ -50,4 +50,10 @@ CFGS = {
     # tab_nnz の切り分け (mc11・ns1208400 の悪化の調査): 予算を根だけ / ノードだけにかける
     "tab_root": {"ENOMOTO_MIP_TAB_NNZ_CBC": "root"},
     "tab_node": {"ENOMOTO_MIP_TAB_NNZ_CBC": "node"},
+    # tab_nnz の根の予算の効きすぎを抑える 3 案 (2026-10-30)
+    "tab_late": {"ENOMOTO_MIP_TAB_NNZ_CBC": "1", "ENOMOTO_T_MIP_TAB_NNZ_LATE": "10"},
+    "tab_gain": {"ENOMOTO_MIP_TAB_NNZ_CBC": "1", "ENOMOTO_T_MIP_TAB_NNZ_GAIN": "1e-4"},
+    "tab_cap": {"ENOMOTO_MIP_TAB_NNZ_CBC": "1", "ENOMOTO_T_MIP_TAB_NNZ_CUTCAP": "200"},
+    "tab_all3": {"ENOMOTO_MIP_TAB_NNZ_CBC": "1", "ENOMOTO_T_MIP_TAB_NNZ_LATE": "10", "ENOMOTO_T_MIP_TAB_NNZ_GAIN": "1e-4",
+                 "ENOMOTO_T_MIP_TAB_NNZ_CUTCAP": "200"},
 }
