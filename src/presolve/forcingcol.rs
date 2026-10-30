@@ -24,6 +24,9 @@ pub struct ForcingCol {
     pub ub: f64,
     /// 取り除いた行: `(他の項, 右辺, x_j の係数)`、行は `Σ 他の項 + coeff * x_j <= rhs`。
     pub rows: Vec<(Vec<(usize, f64)>, f64, f64)>,
+    /// 整数列か (整数最適化の前処理で `ENOMOTO_MIP_FORCING_COL` のときだけ真になりうる)。真なら後処理で求めた値を
+    /// 行が緩む向きの整数に丸める (CoinPresolveTighten の `do_tighten_action::postsolve` と同じ)。
+    pub int: bool,
 }
 
 impl ForcingCol {
@@ -52,6 +55,19 @@ impl ForcingCol {
             if !v.is_finite() {
                 v = 0.0;
             }
+        }
+        if self.int {
+            // 整数列: 増やす向きなら切り上げ、減らす向きなら切り捨てる (増やす (減らす) ほど行は緩むので、端から
+            // 離れる向きの丸めは実行可能性を保つ。費用 0 なので目的値も変わらない)。丸め誤差で整数をわずかに外れた値は
+            // その整数にする
+            let r = v.round();
+            v = if (v - r).abs() <= 1e-9 * (1.0 + r.abs()) {
+                r
+            } else if increase {
+                v.ceil()
+            } else {
+                v.floor()
+            };
         }
         x[self.var] = v;
     }
@@ -151,7 +167,7 @@ pub fn eliminate_forcing_columns(
         if rows.is_empty() {
             continue;
         }
-        out.push(ForcingCol { var: j, lb: lb[j], ub: ub[j], rows });
+        out.push(ForcingCol { var: j, lb: lb[j], ub: ub[j], rows, int: super::is_int_col(j) });
     }
     if !out.is_empty() {
         let mut k = 0usize;
@@ -196,6 +212,24 @@ mod tests {
         let mut x = vec![0.0, 4.0, 0.0];
         steps[0].apply(&mut x);
         assert_eq!(x[2], 0.0);
+    }
+
+    #[test]
+    fn integer_forcing_column_is_rounded_away_from_the_rows() {
+        // 行 0: x0 - 2 x1 <= 0 (x1 >= x0 / 2)、x1 は整数・費用 0・上限 +inf (増やす向き)。
+        let fc = ForcingCol { var: 1, lb: 0.0, ub: f64::INFINITY, rows: vec![(vec![(0, 1.0)], 0.0, -2.0)], int: true };
+        let mut x = vec![3.0, 0.0];
+        fc.apply(&mut x);
+        assert_eq!(x[1], 2.0);
+        // 丸め誤差で整数をわずかに越えた値はその整数にする
+        let mut x = vec![4.0 + 1e-12, 0.0];
+        fc.apply(&mut x);
+        assert_eq!(x[1], 2.0);
+        // 減らす向き: 行 0: x0 + 2 x1 >= 1 (-x0 - 2 x1 <= -1) の逆 (係数が正で下限 -inf)。x0 + 2 x1 <= 5、x1 <= (5 - x0) / 2
+        let fc = ForcingCol { var: 1, lb: f64::NEG_INFINITY, ub: 10.0, rows: vec![(vec![(0, 1.0)], 5.0, 2.0)], int: true };
+        let mut x = vec![2.0, 0.0];
+        fc.apply(&mut x);
+        assert_eq!(x[1], 1.0);
     }
 
     #[test]

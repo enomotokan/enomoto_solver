@@ -21,6 +21,15 @@ pub trait MipLp: Clone + Send {
     fn costs(&self) -> Vec<f64>;
     fn add_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]);
     fn delete_rows(&mut self, remove: &[bool]);
+    /// 行を消してから行を加える ([`TwoStageLp::delete_and_add_rows`]、標準形の作り直しを 1 回にまとめる)。既定は順に呼ぶ。
+    fn delete_and_add_rows(&mut self, remove: &[bool], rows: &[(Vec<(usize, f64)>, f64, f64)]) {
+        self.delete_rows(remove);
+        self.add_rows(rows);
+    }
+    /// 行列 (行の集合) の識別子 ([`TwoStageLp::matrix_key`]。行が変わると変わる)。対応しない実装は `None`。
+    fn matrix_key(&self) -> Option<u64> {
+        None
+    }
     fn basis(&self) -> Basis;
     fn set_basis(&mut self, b: &Basis);
     fn basic_var(&self, s: usize) -> usize;
@@ -181,5 +190,11 @@ forward_impl!(
     },
     fn adopt_lu_snapshot(&mut self, s: &LuSnapshot) -> bool {
         TwoStageLp::adopt_lu_snapshot(self, s)
+    },
+    fn delete_and_add_rows(&mut self, remove: &[bool], rows: &[(Vec<(usize, f64)>, f64, f64)]) {
+        TwoStageLp::delete_and_add_rows(self, remove, rows)
+    },
+    fn matrix_key(&self) -> Option<u64> {
+        Some(TwoStageLp::matrix_key(self))
     }
 );

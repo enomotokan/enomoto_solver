@@ -205,11 +205,17 @@ impl Pseudocost {
 
     /// 両側とも十分観測されているか。
     pub fn is_reliable(&self, j: usize) -> bool {
-        self.n_up[j] >= self.min_reliable && self.n_down[j] >= self.min_reliable
+        self.min_observations(j) >= self.min_reliable
     }
 
     /// 両側の観測回数の少ない方。
+    /// `ENOMOTO_MIP_PC_COUNT_CUTOFF` (試作、既定では使わない): 子が実行不能・打ち切りになった回数も観測に数える (CBC の
+    /// CbcSimpleIntegerDynamicPseudoCost.cpp の `INFEAS == 1` は実行不能の子も `numberTimesDown_` に数える)。子がよく切れる列が
+    /// 強分岐の対象に残り続けないようにする
     pub fn min_observations(&self, j: usize) -> u32 {
+        if env_str!("ENOMOTO_MIP_PC_COUNT_CUTOFF").is_some() {
+            return (self.n_up[j] + self.cutoff_up[j]).min(self.n_down[j] + self.cutoff_down[j]);
+        }
         self.n_up[j].min(self.n_down[j])
     }
 

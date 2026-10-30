@@ -372,12 +372,17 @@ impl MipProblem {
 
     /// [`Self::objective_step`] の本体。境界 `(lo, up)` を渡せば、そこで整数値に固定された連続列を整数列と同じに扱う。
     pub fn objective_step_bounds(&self, bounds: Option<(&[f64], &[f64])>) -> Option<f64> {
+        self.objective_step_mask(&self.is_int, bounds)
+    }
+
+    /// [`Self::objective_step_bounds`] の整数列の印を `int_mask` に替えたもの (暗黙の整数列を整数として扱うときに使う)。
+    pub fn objective_step_mask(&self, int_mask: &[bool], bounds: Option<(&[f64], &[f64])>) -> Option<f64> {
         let mut coefs: Vec<f64> = Vec::new();
         for j in 0..self.n {
             if self.cost[j] != 0.0 {
                 // 整数値に固定された列は整数列と同じに扱う (寄与 c_j v_j は刻みの整数倍)
                 let fixed_int = bounds.is_some_and(|(lo, up)| lo[j] == up[j] && lo[j] == lo[j].round());
-                if !self.is_int[j] && !fixed_int {
+                if !int_mask[j] && !fixed_int {
                     return None;
                 }
                 coefs.push(self.cost[j].abs());

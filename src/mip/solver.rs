@@ -13,7 +13,7 @@ use super::lp::{LpStatus, SolveLimits, VarStatus};
 use super::lp_api::MipLp;
 use super::problem::MipProblem;
 use super::pseudocost::Pseudocost;
-use super::queue::{BoundChange, NodeQueue, OpenNode};
+use super::queue::{BoundChange, NodeQueue, OpenNode, SbInherit, SbLine};
 use std::rc::Rc;
 
 /// 証明 `sum a_j x_j` の境界 `lo`/`up` での最小活動量 (有限部分, 無限の項の数) と `max_j |a_j| (u_j - l_j)`
@@ -243,6 +243,14 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) path_collect: Option<Vec<Vec<(usize, f64)>>>,
     /// カットを強める求解で回したラウンド数
     pub(super) bg_cut_rounds: usize,
+    /// 分離器ごとの適応的な飛ばしの状態 (`ENOMOTO_MIP_SEP_ADAPTIVE`、[`super::separation::SepAdapt`])
+    pub(super) sep_adapt: super::separation::SepAdapt,
+    /// 根のカットのループの今のラウンド (`ENOMOTO_MIP_TAB_NNZ_CBC` の最初のラウンドの判定用。ループの始めに 0)
+    pub(super) sep_pass: usize,
+    /// 根のカットのループの直前のラウンドの目的値の相対的な伸び (`ENOMOTO_T_MIP_TAB_NNZ_GAIN` の判定用。ループの始めに無限大)
+    pub(super) sep_last_gain: f64,
+    /// 分離に使う LP の行の写し (`ENOMOTO_MIP_SEP_NO_ROWCLONE`、[`super::separation::SepRowsCache`])
+    pub(super) sep_rows_cache: Option<super::separation::SepRowsCache>,
     /// 根のカットのループで固定費用ネットワーク型と判定したか (`ENOMOTO_MIP_FACE_SEP_FC`、試作)
     pub(super) fc_network: bool,
     /// 根の面の頂点の分離 (面の LP とその頂点での分離) に使った時間の合計と、使った面の頂点の数 (`ENOMOTO_MIP_DEBUG_FACETIME`)
@@ -603,6 +611,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     of_gens: Rc<super::symmetry::OrbitalGens>,
     /// orbital fixing の軌道の控え (除いた生成元, 軌道)。同じ生成元を除くノードが続く (潜る) 間は作り直さない。
     of_cache: (Vec<u32>, Rc<Vec<Vec<usize>>>),
+    /// このノードの orbital fixing で使った軌道 (`ENOMOTO_MIP_SB_OF` で強分岐の下の子に使う)。ノードの始めに `None` に戻す
+    of_node_orbits: Option<Rc<Vec<Vec<usize>>>>,
     /// `ENOMOTO_MIP_SYM_OF_SCHREIER`: 固定する列 (`OrbitalGens` の位置、昇順) の先頭の部分ごとの、その列を全て固定する部分群の
     /// 生成元 (Schreier 生成元)。
     of_stab_memo: std::collections::HashMap<Vec<u32>, Rc<Vec<Rc<Vec<u32>>>>>,
@@ -703,6 +713,43 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// [`Self::root_obj_probe`] の (試した列, 固定した列)
     root_obj_probe_stats: [u64; 2],
     sb_prop_stats: [u64; 2],
+    /// 強分岐の子の LP 値から凸性で締めた一般整数の境界の数 (`ENOMOTO_MIP_SB_TIGHTEN`)
+    sb_tighten_count: u64,
+    /// 強分岐の下の子で軌道に沿って 0 にした列の数 (`ENOMOTO_MIP_SB_OF`)
+    sb_of_count: u64,
+    /// 強分岐の子の被約費用で直線を作った数 (`ENOMOTO_MIP_SB_RC`)
+    sb_rc_count: u64,
+    /// `ENOMOTO_MIP_SB_TIGHTEN_PROP`: (伝播した回数, 矛盾で刈った回数, LP 解が外れて解き直した回数)
+    sb_tprop_stats: [u64; 3],
+    /// 処理中のノードが親から引き継いだもの ([`OpenNode::sb`])
+    sb_cur: Option<Rc<SbInherit>>,
+    /// このノードの強分岐で得た固定・締め付け (`ENOMOTO_MIP_SB_TIGHTEN_INHERIT`) と凸性の直線 (`ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR`)
+    sb_node_fixes: Vec<BoundChange>,
+    sb_node_lines: Vec<SbLine>,
+    /// 引き継いだ境界を当てた数、凸性の直線で締めた数
+    sb_inherit_stats: [u64; 3],
+    /// 診断 (`ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR` のとき。`ENOMOTO_MIP_SB_POLY_SCORE` を使わなくても数える): 折れ線のスコアの効き方。
+    /// [折れ線を持つ候補がいた選択, 折れ線を持つ候補, 折れ線が擬似費用の見積もりを引き上げた候補, 引き上げで擬似費用のスコアの
+    /// 1 位が変わった選択, 分枝した列が引き上げられた列, 分枝した列が折れ線を持つ, 分枝の数, 引き上げられた列を強分岐なしで選んだ,
+    /// 折れ線を持つ候補のうち下界が両側とも擬似費用以下 (引き上げなし) のもの]
+    poly_diag: [u64; 9],
+    /// 診断: 引き上げの倍率の対数の和 (引き上げた側ごと)、引き上げた側の数、折れ線の下界 / 擬似費用の見積もりの対数の和 (折れ線の
+    /// ある側ごと、引き上げの有無によらず)、その数
+    poly_diag_f: [f64; 4],
+    /// 診断: このノードの選択で折れ線が引き上げた列
+    poly_diag_raised: Vec<usize>,
+    /// このノードの LP が最適まで解けているか (`ENOMOTO_MIP_SB_POLY_RC` で被約費用を使う条件)
+    node_lp_opt: bool,
+    /// 木の ZI round の (呼んだ回数, 成功した回数, `ENOMOTO_MIP_ZIROUND_ADAPT` で省いた回数)
+    zi_stats: [u64; 3],
+    /// 費用を持つ整数列を先に分枝するか (`ENOMOTO_MIP_COST_PRIORITY`)
+    cost_prio: bool,
+    /// ダイビングの被約費用による固定の数 (`ENOMOTO_MIP_DIVE_RCFIX`)
+    pub(super) dive_rcfix_count: u64,
+    /// 強分岐の固定のあとの、その場での LP の解き直しの回数 (`ENOMOTO_MIP_SB_FIX_RESOLVE`)
+    sb_fix_resolve_count: u64,
+    /// `ENOMOTO_MIP_SB_FIX_RESOLVE` で強分岐の中で LP を解き直したときの (LP の値, 分数の列)。呼び出し側がノードの値に使う
+    sb_new_node: Option<(f64, Vec<(usize, f64)>)>,
     /// 行にできない衝突 (連続列・一般整数列を含む) を境界リテラルのまま持つプール
     lit_conflicts: super::conflict_pool::LitConflictPool,
     /// [加えた数, 刈ったノード, 締めた境界]
@@ -810,6 +857,8 @@ pub(crate) struct TreeSnapshot {
     pub(crate) valid_below: f64,
     /// 根で HiGHS 流のカット管理を有効にしたか (`ENOMOTO_MIP_CUT_STRONG_AUTO`)。
     hcm_auto: bool,
+    /// 根で 1 本も採られなかったのでノードで使わない分離器 (`ENOMOTO_MIP_SEP_ADAPTIVE`、[`super::separation::SepAdapt::node_off`])。
+    sep_node_off: u16,
     /// 完全オービトープと、対称性の行・固定を加える前の問題 (写しから解く求解も orbitopal fixing をし、ヒューリスティクスの
     /// 解を並べ替えて使えるように)。
     orbitopes: Vec<super::symmetry::Orbitope>,
@@ -935,7 +984,7 @@ impl SnapNode {
         s
     }
     fn into_open(self) -> OpenNode {
-        OpenNode { changes: self.changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None }
+        OpenNode { changes: self.changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None }
     }
 }
 
@@ -1000,6 +1049,8 @@ struct SbSide {
     x: Option<Vec<f64>>,
     /// 証明に使う行の重み (実行不能なら Farkas の射線、それ以外は双対)。
     y: Option<Vec<f64>>,
+    /// 最適なら、分けた列の被約費用 (その列が分けた境界にあるときだけ。なければ 0)。`ENOMOTO_MIP_SB_RC` で使う
+    rc: f64,
 }
 
 /// 双対証明・衝突制約のプールの行の状態。
@@ -1805,7 +1856,27 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     // `ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED` (試作、既定では使わない): 整数値に固定された連続列は整数列と同じに扱って
     // 刻みを判定する (10teams は固定された連続列 225 本が費用を持ち、刻みが無いことになっていた。HiGHS は前処理で消して
     // 「刻み 1」と見る)
-    let obj_step = if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() { p.objective_step_bounds(Some((&dom.lo, &dom.up))) } else { p.objective_step() };
+    // `ENOMOTO_MIP_OBJ_STEP_IMPLINT` (試作、既定では使わない): 暗黙の整数列 ([`MipProblem::implied_integers`]) も整数列と
+    // 同じに扱って刻みを判定する (CBC の `CbcModel::analyzeObjective` は、連続列がネットワーク・被覆の形なら整数とみなして
+    // `CbcCutoffIncrement` を付ける)。双対側の暗黙の整数は「最適解では整数」なので、暫定解の値が刻みの格子に乗るとは限らない。
+    // そのため刈り込みの上限は、暫定解より厳密に小さい最大の格子の点で取る ([`Self::prune_limit`])
+    let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some();
+    let obj_step = if obj_step_implint {
+        // `ENOMOTO_MIP_IMPLINT_TU` も付けていれば TU の規則の暗黙の整数も使う (整数を固定すると連続列の部分に整数の最適解が
+        // あるので、どの部分木でも暫定解より良い解があれば格子の点の値の解もある)
+        let mask = if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() { p.implied_integers_tu(&p.implied_integers()) } else { p.implied_integers() };
+        let b = if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() { Some((&dom.lo[..], &dom.up[..])) } else { None };
+        let st = p.objective_step_mask(&mask, b);
+        if params.verbose && !params.submip {
+            let miss: Vec<usize> = (0..p.n).filter(|&j| p.cost[j] != 0.0 && !mask[j] && !(dom.lo[j] == dom.up[j])).collect();
+            eprintln!("MIP: objective step with implied integers: {:?} (without: {:?}); costed non-integer columns {} (e.g. {:?})", st, p.objective_step(), miss.len(), miss.iter().take(5).map(|&j| (j, p.cost[j], p.col_lo[j], p.col_up[j], p.cols[j].len())).collect::<Vec<_>>());
+        }
+        st
+    } else if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() {
+        p.objective_step_bounds(Some((&dom.lo, &dom.up)))
+    } else {
+        p.objective_step()
+    };
     let mut s: Solver<L> = Solver {
         p,
         params,
@@ -1820,6 +1891,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sep_par_cpu: 0.0,
         path_collect: None,
         bg_cut_rounds: 0,
+        sep_adapt: super::separation::SepAdapt::with_node_off(snap.as_ref().map_or(0, |sn| sn.sep_node_off)),
+        sep_pass: 0,
+        sep_last_gain: f64::INFINITY,
+        sep_rows_cache: None,
         fc_network: false,
         face_secs: 0.0,
         face_used: 0,
@@ -2033,6 +2108,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             None => super::SYM_OF_GENS.with(|t| t.borrow().as_ref().map(|g| (**g).clone())).unwrap_or_default(),
         })),
         of_cache: (vec![u32::MAX], Rc::new(Vec::new())),
+        of_node_orbits: None,
         of_stab_memo: std::collections::HashMap::new(),
         of_node_fixes: Vec::new(),
         of_stats: [0; 3],
@@ -2101,6 +2177,33 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         hcm_auto: snap.as_ref().is_some_and(|sn| sn.hcm_auto),
         root_obj_probe_stats: [0; 2],
         sb_prop_stats: [0; 2],
+        sb_tighten_count: 0,
+        sb_of_count: 0,
+        sb_rc_count: 0,
+        sb_tprop_stats: [0; 3],
+        sb_cur: None,
+        sb_node_fixes: Vec::new(),
+        sb_node_lines: Vec::new(),
+        sb_inherit_stats: [0; 3],
+        poly_diag: [0; 9],
+        poly_diag_f: [0.0; 4],
+        poly_diag_raised: Vec::new(),
+        node_lp_opt: false,
+        zi_stats: [0; 3],
+        cost_prio: !params.submip && env_str!("ENOMOTO_MIP_COST_PRIORITY").is_some() && {
+            // CBC の条件: 費用を持つ連続列がなく、費用を持つ整数列が 100 本以下で整数列の 1/5 未満、行が 100 を超える
+            let n_cont_obj = (0..p.n).filter(|&j| !p.is_int[j] && p.cost[j] != 0.0 && p.col_lo[j] < p.col_up[j]).count();
+            let n_int_obj = (0..p.n).filter(|&j| p.is_int[j] && p.cost[j] != 0.0 && p.col_lo[j] < p.col_up[j]).count();
+            let n_int = p.is_int.iter().filter(|&&b| b).count();
+            let on = n_cont_obj == 0 && n_int_obj > 0 && n_int_obj <= 100 && n_int_obj * 5 < n_int && p.m > 100;
+            if on && params.verbose {
+                eprintln!("MIP: branching priority on {n_int_obj} costed integer columns of {n_int} (ENOMOTO_MIP_COST_PRIORITY)");
+            }
+            on
+        },
+        dive_rcfix_count: 0,
+        sb_fix_resolve_count: 0,
+        sb_new_node: None,
         lit_conflicts: super::conflict_pool::LitConflictPool::new(p.n, tunable!("ENOMOTO_T_MIP_LIT_CONFLICT_POOL", 5000usize, usize)),
         lit_stats: [0; 3],
         lit_pos: 0,
@@ -2653,6 +2756,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => self.params.cutoff,
             Some(z) => {
                 let strict = match self.obj_step {
+                    // 暫定解より厳密に小さい最大の格子の点 (暫定解が格子の上なら z - step)。暗黙の整数列で刻みを取ったとき
+                    // (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`) は暫定解が格子に乗るとは限らない
+                    Some(step) if obj_step_lattice() => {
+                        let off = self.p.offset;
+                        let k = ((z - off) / step - 1e-6).ceil() - 1.0;
+                        off + k * step + (1e-6 * z.abs().max(1.0)).min(0.5 * step)
+                    }
                     Some(step) => z - step + (1e-6 * z.abs().max(1.0)).min(0.5 * step),
                     None => z - 1e-9 * z.abs().max(1.0),
                 };
@@ -2666,6 +2776,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 暫定解があり、その値が下界 `lb` (の切り上げ) より目的関数の刻み (なければ相対 1e-6) 以上悪いか
     /// ([`Self::obj_support`] を呼ぶ条件)。
     pub(super) fn obj_support_gap(&self, lb: f64) -> bool {
+        if obj_step_lattice() && self.obj_step.is_some() {
+            // 暫定解が格子に乗らないときも、格子の点で比べる
+            let Some((z, _)) = self.incumbent.as_ref() else { return false };
+            let step = self.obj_step.unwrap();
+            return *z - self.p.offset - step * ((lb - self.p.offset) / step - 1e-6).ceil() > 1e-6 * z.abs().max(1.0);
+        }
         let Some((z, _)) = self.incumbent.as_ref() else { return false };
         match self.obj_step {
             Some(step) => *z - step * ((lb - self.p.offset) / step - 1e-6).ceil() - self.p.offset >= step - 1e-9,
@@ -4241,6 +4357,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     for r in remove.iter_mut().skip(m0) {
                         *r = true;
                     }
+                    // `ENOMOTO_MIP_CUT_FAIL_RESTORE` (試作、既定では使わない): 置き換える前の LP の状態 (最適基底・LU・DSE 重み) を取っておき、
+                    // 戻すときに使う (戻した LP は置き換える前と同じ行なので、解き直しはほぼ 0 反復)
+                    let saved_state = env_str!("ENOMOTO_MIP_CUT_FAIL_RESTORE").is_some().then(|| self.lp.save_state());
                     self.delete_lp_rows(&remove);
                     self.add_cut_rows(&rows);
                     if let Some(b) = bg.job.basis.lock().unwrap().take() {
@@ -4307,7 +4426,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         self.delete_lp_rows(&remove);
                         self.add_cut_rows(&saved);
+                        if let Some(ss) = &saved_state {
+                            self.lp.restore_state(ss);
+                        }
+                        let it2 = self.lp.total_iterations();
                         let st2 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+                        if saved_state.is_some() && self.params.verbose {
+                            eprintln!("MIP: background cuts: re-solve from the saved state: {} iters", self.lp.total_iterations() - it2);
+                        }
                         if self.params.verbose {
                             eprintln!("MIP: background cuts: LP {st:?} / obj {new:.10e} < {cur:.10e}; restored ({st2:?})");
                         }
@@ -4450,12 +4576,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(snap) = self.snap.clone() {
             for (k, n) in snap.nodes.iter().enumerate() {
                 let tags = Some(Rc::new(vec![snap.serial << 32 | k as u64]));
-                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags });
+                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None });
             }
             self.snap_alive = vec![true; snap.nodes.len()];
             first = false;
         } else {
-            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot, tags: None });
+            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot, tags: None, sb: None });
         }
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         // 木を分け合う従のスレッドは、未処理のノードが 2 つ以上になってから (根を分枝してから) 始める (根で解ける問題では
@@ -4917,6 +5043,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             self.dbg_trace("after replaying the branches");
+            // 強分岐で得た部分木の境界と凸性の直線を当てる (`ENOMOTO_MIP_SB_TIGHTEN_INHERIT`・`ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR`)
+            self.sb_cur = node.sb.clone();
+            self.sb_node_fixes.clear();
+            self.sb_node_lines.clear();
+            self.node_lp_opt = false;
+            if !self.apply_sb_inherit() {
+                if tree_log() && !self.params.submip {
+                    eprintln!("ENODE d={} r=sbinherit rows={}", node.depth, self.lp.num_rows());
+                }
+                continue;
+            }
             let stack_before_prop = self.dom.stack_len();
             if dn && !self.dbg_contains() {
                 self.dbg_lost("domain excludes the debug solution before node propagation", dn);
@@ -5022,6 +5159,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // orbital fixing (`ENOMOTO_MIP_SYM_OF`): 子に渡す固定はこのノードで新たに数え直す
             self.of_node_fixes.clear();
+            self.of_node_orbits = None;
             let prop_ok = prop_ok && self.orbital_fixing_checked(&node.changes);
             if !prop_ok && rp_stage.is_empty() {
                 rp_stage = "p_of";
@@ -5200,6 +5338,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 xp("m_lpstat");
+                self.node_lp_opt = true;
                 node_obj = self.lp.objective() + self.p.offset;
                 rp_obj = node_obj;
                 if resolves == 0 {
@@ -5291,8 +5430,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if resolves == 0 && !(tree_heur_off() && !self.params.submip) {
                     self.heur_label = "tree rounding";
                     self.simple_rounding(&x);
-                    if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() {
-                        self.zi_round(&x);
+                    // `ENOMOTO_MIP_ZIROUND_ADAPT` (試作、既定では使わない): 木の ZI round は 1 回ごとに全行の活動量を作り直す O(nnz) の
+                    // 処理なので、SCIP の zirounding (`minstopncalls` 1000、`stoppercentage` 0.02) と同じく、1000 回呼んで成功が 2% 未満なら
+                    // 止める (CBC の `CbcHeuristic::shouldHeurRun_randomChoice` も失敗が続くと呼ぶ間隔を広げる)
+                    let zi_adapt = env_str!("ENOMOTO_MIP_ZIROUND_ADAPT").is_some();
+                    let zi_stopped = zi_adapt
+                        && self.zi_stats[0] >= tunable!("ENOMOTO_T_MIP_ZIROUND_MIN_CALLS", 1000u64, u64)
+                        && (self.zi_stats[1] as f64) < tunable!("ENOMOTO_T_MIP_ZIROUND_STOP_RATE", 0.02, f64) * self.zi_stats[0] as f64;
+                    if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() && !zi_stopped {
+                        let ok = self.zi_round(&x);
+                        self.zi_stats[0] += 1;
+                        self.zi_stats[1] += ok as u64;
+                    } else if zi_stopped {
+                        self.zi_stats[2] += 1;
                     }
                     // rounding は毎ノード、shifting・intshifting は 10 ノードおき (SCIP の頻度は rounding 1・shifting 5・intshifting 10。
                     // SCIP は rounding・shifting を LP を解くたび (根のカットのラウンドごと) に呼び、成功の少ないものは呼ぶ間隔を広げる)
@@ -5803,6 +5953,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         break None;
                     }
                     BranchAction::Branch { col, value } => {
+                        let (node_obj, frac) = match self.sb_new_node.take() {
+                            Some((o, f)) if rp_force.is_none() => (o, f),
+                            _ => (node_obj, frac),
+                        };
                         let (col, value) = if rp_force.is_some() { (col, value) } else { self.orbitope_branching_column(col, value) };
                         if tree_log() && !self.params.submip {
                             eprintln!("EBR d={} col={col} val={value} lp={node_obj} rows={} resolves={resolves}", node.depth, self.lp.num_rows());
@@ -5869,6 +6023,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
             let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
             let of_fixes = std::mem::take(&mut self.of_node_fixes);
+            let sb_child = self.sb_child_inherit(&node);
             let mk = |c: BoundChange| {
                 let mut ch = node.changes.clone();
                 ch.extend_from_slice(&of_fixes);
@@ -5888,6 +6043,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     branch: Some((col, !c.upper, value, lp_obj)),
                     prot: prot.clone(),
                     tags: node.tags.clone(),
+                    sb: sb_child.clone(),
                 }
             };
             let mut sec = mk(second_c);
@@ -6927,8 +7083,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn select_branch(&mut self, frac: &[(usize, f64)], node_obj: f64, depth: usize) -> BranchAction {
         let t0 = Instant::now();
         self.last_sb = None;
+        self.poly_diag_raised.clear();
         let r = self.select_branch_inner(frac, node_obj, depth);
         self.sb_secs += t0.elapsed().as_secs_f64();
+        if sb_ancestor() {
+            if let BranchAction::Branch { col, .. } = r {
+                self.poly_diag[6] += 1;
+                if self.poly_diag_raised.contains(&col) {
+                    self.poly_diag[4] += 1;
+                    self.poly_diag[7] += self.last_sb.is_none() as u64;
+                }
+                let c = col as u32;
+                self.poly_diag[5] += self.sb_cur.as_ref().is_some_and(|s| s.polys.contains_key(&(c, false)) || s.polys.contains_key(&(c, true))) as u64;
+            }
+        }
         r
     }
 
@@ -6936,10 +7104,83 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_SB_OLD").is_some() {
             return self.select_branch_old(frac, node_obj);
         }
+        let mut node_obj = node_obj;
+        // `ENOMOTO_MIP_COST_PRIORITY` (試作、既定では使わない): 費用を持つ整数列が少ない問題では、分数の値の費用を持つ整数列が
+        // あればそれだけを候補にする (CBC の `CbcModel::analyzeObjective` の `iType`: 費用のある整数列の優先度を上げる)
+        let prio_frac: Vec<(usize, f64)>;
+        let frac = if self.cost_prio && frac.iter().any(|&(j, _)| self.p.cost[j] != 0.0) {
+            prio_frac = frac.iter().copied().filter(|&(j, _)| self.p.cost[j] != 0.0).collect();
+            &prio_frac[..]
+        } else {
+            frac
+        };
+        // `ENOMOTO_MIP_SB_FIX_RESOLVE` (試作、既定では使わない): 強分岐で片側が打ち切られて列を固定したら、その場でノードの LP を
+        // 解き直し、新しい LP 解で残りの候補の強分岐を続ける (CBC の CbcNode.cpp の `chooseDynamicBranch` と HiGHS)。既定では
+        // 固定を定義域にだけ置き、残りの候補は固定を含まない LP で強分岐し、固定が 5 個たまったら `Resolve` で強分岐を全部やり直す。
+        // 解き直した LP の値と分数の列は [`Self::sb_new_node`] で呼び出し側に返す
+        let sb_fix_resolve = env_str!("ENOMOTO_MIP_SB_FIX_RESOLVE").is_some();
+        self.sb_new_node = None;
+        let tighten0 = self.sb_tighten_count;
         // SCIP の relpscost に倣った強分岐 (branch_relpscost.c `branchExecRelpscost`)。
         let hybrid = env_str!("ENOMOTO_MIP_NO_HYBRID_SCORE").is_none();
-        let score_of = |s: &Self, j: usize, v: f64| if hybrid { s.pc.hybrid_score(j, v - v.floor()) } else { s.pc.score(j, v - v.floor()) };
-        let mut cands: Vec<(usize, f64, f64)> = frac.iter().map(|&(j, v)| (j, v, score_of(self, j, v))).collect();
+        // `ENOMOTO_MIP_SB_POLY_SCORE` (試作、既定では使わない): 列が強分岐の折れ線 ([`SbInherit::polys`]) を持てば、折れ線から得る子の
+        // LP の値の下界 (下の子は g_下(⌊v⌋)、上の子は g_上(⌈v⌉)) とノードの値の差を、擬似費用の見積もりの下限として使う
+        // (折れ線の直線は子孫のノードの LP の値の下界なので、子の値の正しい下界)
+        let poly_score = env_str!("ENOMOTO_MIP_SB_POLY_SCORE").is_some();
+        let score_of = |s: &Self, j: usize, v: f64, z: f64| {
+            let f = v - v.floor();
+            if poly_score {
+                if let Some((gd, gu)) = s.poly_child_gains(j, v, z) {
+                    let (pd, pu) = (s.pc.cost_down(j) * f, s.pc.cost_up(j) * (1.0 - f));
+                    let (d, u) = (pd.max(gd), pu.max(gu));
+                    return if hybrid { s.pc.hybrid_score_with_gains(j, d, u) } else { d.max(1e-6) * u.max(1e-6) };
+                }
+            }
+            if hybrid { s.pc.hybrid_score(j, f) } else { s.pc.score(j, f) }
+        };
+        let mut cands: Vec<(usize, f64, f64)> = frac.iter().map(|&(j, v)| (j, v, score_of(self, j, v, node_obj))).collect();
+        // 診断 (`poly_diag`): 折れ線がどれだけ擬似費用の見積もりを引き上げ、スコアの 1 位を変えるか (選び方には使わない)
+        if sb_ancestor() && self.sb_cur.as_ref().is_some_and(|s| !s.polys.is_empty()) {
+            let (mut any, mut bp, mut bq) = (false, (usize::MAX, f64::MIN), (usize::MAX, f64::MIN));
+            for &(j, v) in frac {
+                let f = v - v.floor();
+                let plain = if hybrid { self.pc.hybrid_score(j, f) } else { self.pc.score(j, f) };
+                let mut with = plain;
+                if let Some((gd, gu)) = self.poly_child_gains(j, v, node_obj) {
+                    any = true;
+                    self.poly_diag[1] += 1;
+                    let (pd, pu) = (self.pc.cost_down(j) * f, self.pc.cost_up(j) * (1.0 - f));
+                    for (g, q) in [(gd, pd), (gu, pu)] {
+                        if g > 0.0 && q > 0.0 {
+                            self.poly_diag_f[2] += (g / q).ln();
+                            self.poly_diag_f[3] += 1.0;
+                        }
+                        if g > q && q > 0.0 {
+                            self.poly_diag_f[0] += (g / q).ln();
+                            self.poly_diag_f[1] += 1.0;
+                        }
+                    }
+                    if gd > pd || gu > pu {
+                        self.poly_diag[2] += 1;
+                        self.poly_diag_raised.push(j);
+                        let (d, u) = (pd.max(gd), pu.max(gu));
+                        with = if hybrid { self.pc.hybrid_score_with_gains(j, d, u) } else { d.max(1e-6) * u.max(1e-6) };
+                    } else {
+                        self.poly_diag[8] += 1;
+                    }
+                }
+                if plain > bp.1 {
+                    bp = (j, plain);
+                }
+                if with > bq.1 {
+                    bq = (j, with);
+                }
+            }
+            if any {
+                self.poly_diag[0] += 1;
+                self.poly_diag[3] += (bp.0 != bq.0) as u64;
+            }
+        }
         // racing ramp-up の多様化: 擬似費用のスコアに ±10% の揺らぎを加える
         if self.race_div & 2 == 2 && !self.race_done {
             for c in cands.iter_mut() {
@@ -7010,7 +7251,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut pre: std::collections::HashMap<usize, [SbSide; 2]> = std::collections::HashMap::new();
         // このノードで強分岐した候補の (擬似費用のスコア (強分岐の前), 強分岐のスコア)。`ENOMOTO_MIP_SB_AGREE` の一致の判定に使う
         let mut sb_eval: Vec<(f64, f64)> = Vec::new();
-        for (ci, &(j, v, pscore)) in cands.iter().enumerate() {
+        let mut ci = 0usize;
+        while ci < cands.len() {
+            let (j, v, pscore) = cands[ci];
+            ci += 1;
             let is_reliable = (self.pc.min_observations(j) as f64) >= reliable_thr;
             if is_reliable || !allow_sb || tried >= max_tried || no_improve >= lookahead as f64 || self.time_up() || (self.sb_iters as f64) > maxsb {
                 if best.is_none_or(|(_, _, s)| pscore > s) {
@@ -7035,12 +7279,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
             let mut gains = [0.0f64; 2];
             let mut child_obj = [f64::NEG_INFINITY; 2];
+            // 子の LP での x_j の被約費用 (`ENOMOTO_MIP_SB_RC`。分けた境界にないか使わなければ 0)
+            let mut child_rc = [0.0f64; 2];
             let mut cut = [false; 2];
             if par_sb && !pre.contains_key(&j) {
                 // この候補から、強分岐するはずの候補 (信頼できないもの) をスレッド数まで集めて並列に解く
                 let nth = self.params.threads;
                 let mut batch: Vec<(usize, f64, f64, f64)> = vec![(j, v, lo, up)];
-                for &(j2, v2, _) in &cands[ci + 1..] {
+                for &(j2, v2, _) in &cands[ci..] {
                     if batch.len() >= nth || tried + batch.len() > max_tried {
                         break;
                     }
@@ -7050,6 +7296,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let lim = self.limits(sb_iter_limit);
                 let offset = self.p.offset;
+                let orbs: Vec<Vec<usize>> = batch.iter().map(|&(jj, ..)| self.sb_down_orbit(jj)).collect();
+                let orbs_ref = &orbs;
                 let lp0 = &self.lp;
                 let saved0 = saved;
                 let batch_ref = &batch;
@@ -7070,6 +7318,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                             lpc.set_col_bounds(jj, vv.ceil(), u0);
                                         } else {
                                             lpc.set_col_bounds(jj, l0, vv.floor());
+                                            for &kk in &orbs_ref[k] {
+                                                lpc.set_col_bounds(kk, 0.0, 0.0);
+                                            }
                                         }
                                         let it0 = lpc.total_iterations();
                                         let st = lpc.solve(&lim_c);
@@ -7081,7 +7332,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                             LpStatus::Optimal | LpStatus::ObjectiveBound => Some(lpc.row_duals()),
                                             _ => None,
                                         };
-                                        sides.push(SbSide { st, obj, iters, x, y });
+                                        let rc = if st == LpStatus::Optimal && sb_rc() { sb_child_rc(&lpc, jj, is_up) } else { 0.0 };
+                                        sides.push(SbSide { st, obj, iters, x, y, rc });
                                         lpc.restore_state(&saved_c);
                                     }
                                     let up_side = sides.pop().unwrap();
@@ -7112,6 +7364,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let o = r.obj;
                             gains[side] = (o - node_obj).max(0.0);
                             child_obj[side] = o;
+                            child_rc[side] = r.rc;
                             let delta = if is_up { v.ceil() - v } else { v - v.floor() };
                             self.pc.add_observation(j, is_up, delta, gains[side]);
                             if o >= self.prune_limit() {
@@ -7184,6 +7437,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.lp.set_col_bounds(j, v.ceil(), up);
                 } else {
                     self.lp.set_col_bounds(j, lo, v.floor());
+                    for k in self.sb_down_orbit(j) {
+                        self.lp.set_col_bounds(k, 0.0, 0.0);
+                        self.sb_of_count += 1;
+                    }
                 }
                 let it0 = self.lp.total_iterations();
                 let st = self.lp.solve(&self.limits(sb_iter_limit));
@@ -7194,6 +7451,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let o = self.lp.objective() + self.p.offset;
                         gains[side] = (o - node_obj).max(0.0);
                         child_obj[side] = o;
+                        if sb_rc() {
+                            child_rc[side] = sb_child_rc(&self.lp, j, is_up);
+                        }
                         let delta = if is_up { v.ceil() - v } else { v - v.floor() };
                         self.pc.add_observation(j, is_up, delta, gains[side]);
                         if o >= self.prune_limit() {
@@ -7239,6 +7499,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if had && !self.dbg_contains() {
                         self.dbg_lost(&format!("strong branching fixing x{j} >= {}", v.ceil()), true);
                     }
+                    if sb_inherit() {
+                        self.sb_node_fixes.push(BoundChange { col: j, upper: false, value: v.ceil(), sym: true });
+                    }
                     bound_changes += 1;
                 }
                 (false, true) => {
@@ -7249,9 +7512,129 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if had && !self.dbg_contains() {
                         self.dbg_lost(&format!("strong branching fixing x{j} <= {}", v.floor()), true);
                     }
+                    if sb_inherit() {
+                        self.sb_node_fixes.push(BoundChange { col: j, upper: true, value: v.floor(), sym: true });
+                    }
                     bound_changes += 1;
                 }
-                _ => {}
+                _ => {
+                    // `ENOMOTO_MIP_SB_TIGHTEN` (試作、既定では使わない): 一般整数列で、子の LP 値から凸性で境界を締める
+                    // (CBC の `CBCNODE_TIGHTEN_BOUNDS`、CbcNode.cpp)。LP の値は x_j の境界の凸関数なので、下の子の値 o_d から
+                    // 1 単位あたりの増分 (o_d − z)/(v − ⌊v⌋) を取ると、x_j <= t の値は z + (v − t)·増分 以上。これが打ち切り値を
+                    // 超える t は除ける。今の LP 解は新しい境界の内側にあるので、解き直しは要らない
+                    if (env_str!("ENOMOTO_MIP_SB_TIGHTEN").is_some() || sb_ancestor()) && self.dom.up[j] - self.dom.lo[j] > 1.5 {
+                        let cutoff = self.prune_limit();
+                        for (side, is_up) in [(0usize, false), (1usize, true)] {
+                            let o = child_obj[side];
+                            if !o.is_finite() {
+                                continue;
+                            }
+                            // 直線 (z, v, per): 割線は (今の LP 値, v) を通り傾きは子の値との差から。`ENOMOTO_MIP_SB_RC` で子の LP の
+                            // 被約費用 d が使えるなら、(子の値, 分けた境界) を通り傾き |d| の直線 (LP の双対性による。凸性から割線と
+                            // 同じか急で、同じ点を通るので割線を支配する)
+                            let bound = if is_up { v.ceil() } else { v.floor() };
+                            let rc = child_rc[side].abs();
+                            let line = if rc > 1e-7 {
+                                self.sb_rc_count += 1;
+                                SbLine { col: j as u32, up: is_up, z: o, v: bound, per: rc }
+                            } else {
+                                let change = o - node_obj;
+                                let dist0 = if is_up { v.ceil() - v } else { v - v.floor() };
+                                if change <= 1e-5 || dist0 <= 1e-3 {
+                                    continue;
+                                }
+                                SbLine { col: j as u32, up: is_up, z: node_obj, v, per: change / (dist0 + 1e-7) }
+                            };
+                            let (lz, lv, per) = (line.z, line.v, line.per);
+                            if sb_ancestor() {
+                                self.sb_node_lines.push(line);
+                            }
+                            if env_str!("ENOMOTO_MIP_SB_TIGHTEN").is_none() || !cutoff.is_finite() {
+                                continue;
+                            }
+                            {
+                                let v = lv;
+                                let distance = (cutoff - lz) / per + 1e-3;
+                                if distance >= 5.0 {
+                                    continue;
+                                }
+                                self.dom.set_external_tag(2);
+                                if is_up {
+                                    let nu = (v + distance).floor();
+                                    if nu < self.dom.up[j] {
+                                        self.dom.tighten_upper(self.p, j, nu);
+                                        self.sb_tighten_count += 1;
+                                        if sb_inherit() {
+                                            self.sb_node_fixes.push(BoundChange { col: j, upper: true, value: nu, sym: true });
+                                        }
+                                    }
+                                } else {
+                                    let nl = (v - distance).ceil();
+                                    if nl > self.dom.lo[j] {
+                                        self.dom.tighten_lower(self.p, j, nl);
+                                        self.sb_tighten_count += 1;
+                                        if sb_inherit() {
+                                            self.sb_node_fixes.push(BoundChange { col: j, upper: false, value: nl, sym: true });
+                                        }
+                                    }
+                                }
+                                self.dom.set_external(false);
+                            }
+                        }
+                    }
+                }
+            }
+            if sb_fix_resolve && bound_changes > 0 {
+                self.sync_lp();
+                let it0 = self.lp.total_iterations();
+                let st = self.lp.solve(&self.limits((10 * self.avg_node_iters()).max(20_000)));
+                self.node_iters += self.lp.total_iterations() - it0;
+                self.sb_fix_resolve_count += 1;
+                match st {
+                    LpStatus::Optimal => {
+                        let o = self.lp.objective() + self.p.offset;
+                        if o >= self.prune_limit() {
+                            self.add_dual_proof();
+                            return BranchAction::Prune;
+                        }
+                        let x = self.lp.col_values();
+                        let nf = self.fractional(&x);
+                        if nf.is_empty() {
+                            // 整数の LP 解は呼び出し側で扱う
+                            return BranchAction::Resolve;
+                        }
+                        node_obj = o;
+                        bound_changes = 0;
+                        pre.clear();
+                        sb_saved = Some(self.lp.save_state());
+                        // 今までの最良の候補は、まだ分数で、分ける値の整数部分が同じなら残す (子の LP の値は、境界が締まった
+                        // LP では下がらないので、下界として使ってよい)
+                        if let Some((bj, bv, bs)) = best {
+                            match nf.iter().find(|&&(k, _)| k == bj) {
+                                Some(&(_, nv)) if nv.floor() == bv.floor() => best = Some((bj, nv, bs)),
+                                _ => {
+                                    best = None;
+                                    best_sb = None;
+                                }
+                            }
+                        }
+                        // 残りの候補を新しい LP 解で作り直す (調べた候補は除く)
+                        let done: std::collections::HashSet<usize> = cands[..ci].iter().map(|c| c.0).collect();
+                        let mut rest: Vec<(usize, f64, f64)> = nf.iter().filter(|c| !done.contains(&c.0)).map(|&(k, vk)| (k, vk, score_of(self, k, vk, node_obj))).collect();
+                        rest.sort_by(|a, b| b.2.total_cmp(&a.2));
+                        cands.truncate(ci);
+                        cands.extend(rest);
+                        self.sb_new_node = Some((o, nf));
+                        continue;
+                    }
+                    LpStatus::Infeasible | LpStatus::ObjectiveBound => {
+                        if st == LpStatus::Infeasible {
+                            self.add_farkas_proof();
+                        }
+                        return BranchAction::Prune;
+                    }
+                    _ => return BranchAction::Resolve,
+                }
             }
             // 境界の変更は最大 5 個まとめてから解き直す
             if bound_changes >= 5 {
@@ -7274,6 +7657,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if sb_agree_on() && sb_eval.len() >= 2 {
             self.sb_agree_record(&sb_eval);
+        }
+        // `ENOMOTO_MIP_SB_TIGHTEN_PROP` (試作、既定では使わない): 凸性で境界を締めたら、その場で伝播する。矛盾ならノードを刈り、
+        // 締まった境界から今の LP 解が外れたら解き直す (`Resolve`)。そうでなければそのまま分枝する (伝播の結果は子が受け継ぐ)。
+        // 既定では締めた境界は定義域に置くだけで、このノードでは伝播も解き直しもしない
+        if bound_changes == 0 && self.sb_tighten_count > tighten0 && env_str!("ENOMOTO_MIP_SB_TIGHTEN_PROP").is_some() {
+            self.sb_tprop_stats[0] += 1;
+            if !self.dom.propagate(self.p) {
+                if self.dom.conflict.is_some() {
+                    self.add_conflict();
+                }
+                self.sb_tprop_stats[1] += 1;
+                return BranchAction::Prune;
+            }
+            let x = self.lp.col_values();
+            if (0..self.p.n).any(|k| self.p.is_int[k] && (x[k] < self.dom.lo[k] - FEASTOL || x[k] > self.dom.up[k] + FEASTOL)) {
+                self.sb_tprop_stats[2] += 1;
+                return BranchAction::Resolve;
+            }
         }
         if bound_changes > 0 {
             return BranchAction::Resolve;
@@ -7714,6 +8115,128 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
+    /// `ENOMOTO_MIP_SB_OF` (試作、既定では使わない): 強分岐の下の子 (0-1 列 `j` を 0 にする側) で、本当の子の
+    /// orbital fixing と同じく `j` の軌道の 0-1 列も 0 にする (CBC の CbcNode.cpp の強分岐は、下の子を解く前に軌道の
+    /// 列を全部 0 にする)。下に分けても固定群は変わらないので、このノードの軌道 ([`Self::of_node_orbits`]) をそのまま使う。
+    /// 0 にする列 (`j` を除く、まだ 0 に固定されていない列) を返す。
+    fn sb_down_orbit(&self, j: usize) -> Vec<usize> {
+        if env_str!("ENOMOTO_MIP_SB_OF").is_none() || self.of_gens.is_empty() {
+            return Vec::new();
+        }
+        let Some(orbits) = self.of_node_orbits.as_ref() else { return Vec::new() };
+        let p = self.p;
+        if !(p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0) {
+            return Vec::new();
+        }
+        let Some(orb) = orbits.iter().find(|o| o.contains(&j)) else { return Vec::new() };
+        orb.iter().copied().filter(|&k| k != j && self.dom.up[k] > 0.0 && self.dom.lo[k] < self.dom.up[k]).collect()
+    }
+
+    /// 親から引き継いだ強分岐の境界 ([`SbInherit::fixes`]) と凸性の直線 ([`SbInherit::lines`]) を定義域に当てる。
+    /// 直線は今の打ち切り値で締め直す: 下の子の直線なら x_j <= t の値は z + (v − t)·per 以上なので、打ち切り値 U に届く
+    /// t <= v − (U − z)/per は除ける (x_j >= ⌈v − distance⌉)。上の子なら x_j <= ⌊v + distance⌋。矛盾したら偽 (ノードを刈る)
+    fn apply_sb_inherit(&mut self) -> bool {
+        let Some(sb) = self.sb_cur.clone() else { return true };
+        let p = self.p;
+        self.dom.set_external_tag(2);
+        for c in &sb.fixes {
+            let changed = if c.upper { c.value < self.dom.up[c.col] && self.dom.tighten_upper(p, c.col, c.value) } else { c.value > self.dom.lo[c.col] && self.dom.tighten_lower(p, c.col, c.value) };
+            self.sb_inherit_stats[0] += changed as u64;
+            if self.dom.infeasible {
+                self.dom.set_external(false);
+                return false;
+            }
+        }
+        let u = self.prune_limit();
+        if u.is_finite() {
+            for l in sb.polys.values().flatten() {
+                let j = l.col as usize;
+                let distance = (u - l.z) / l.per + 1e-3;
+                if !(distance.is_finite() && distance > 0.0) {
+                    continue;
+                }
+                let changed = if l.up {
+                    let nu = (l.v + distance).floor();
+                    nu < self.dom.up[j] && self.dom.tighten_upper(p, j, nu)
+                } else {
+                    let nl = (l.v - distance).ceil();
+                    nl > self.dom.lo[j] && self.dom.tighten_lower(p, j, nl)
+                };
+                self.sb_inherit_stats[1] += changed as u64;
+                if self.dom.infeasible {
+                    self.dom.set_external(false);
+                    return false;
+                }
+            }
+        }
+        self.dom.set_external(false);
+        true
+    }
+
+    /// 子に引き継ぐもの: 親から引き継いだものに、このノードの強分岐で得たもの (固定と凸性の直線) を足す。何もなければ `None`。
+    /// `ENOMOTO_MIP_SB_POLY_RC` (試作、既定では使わない) なら、折れ線を持つ列 (一度でも強分岐した一般整数列) のうち、このノードの LP
+    /// (分枝の直前の最適解) で境界にある非基底の列の被約費用 d_j からも直線を足す: x_j が上限 u にあり d_j < 0 なら、このノードの
+    /// 部分木で 目的値 >= o + |d_j|·(u − x_j) (o は LP の値。LP の双対性によるので、カットや伝播で LP が親と違っていても成り立ち、
+    /// 凸性から強分岐の直線と同じか強い)。下限 l で d_j > 0 なら 目的値 >= o + d_j·(x_j − l)。片側の子の LP だけを解いた後でも
+    /// 折れ線を更新できる
+    fn sb_child_inherit(&mut self, _node: &OpenNode) -> Option<Rc<SbInherit>> {
+        if !sb_inherit() && !sb_ancestor() {
+            return None;
+        }
+        let fixes = std::mem::take(&mut self.sb_node_fixes);
+        let mut lines = std::mem::take(&mut self.sb_node_lines);
+        if sb_ancestor() && env_str!("ENOMOTO_MIP_SB_POLY_RC").is_some() && self.node_lp_opt {
+            let mut cols: Vec<u32> = self.sb_cur.as_ref().map_or_else(Vec::new, |sb| sb.polys.keys().map(|k| k.0).collect());
+            cols.extend(lines.iter().map(|l| l.col));
+            cols.sort_unstable();
+            cols.dedup();
+            if !cols.is_empty() {
+                let o = self.lp.objective() + self.p.offset;
+                let rc = self.lp.reduced_costs_ref();
+                for &c in &cols {
+                    let j = c as usize;
+                    let (lo, up) = self.lp.col_bounds(j);
+                    let (x, d) = (self.lp.col_value(j), rc[j]);
+                    if d < -1e-7 && up.is_finite() && x >= up - 1e-9 {
+                        lines.push(SbLine { col: c, up: false, z: o, v: up, per: -d });
+                    } else if d > 1e-7 && lo.is_finite() && x <= lo + 1e-9 {
+                        lines.push(SbLine { col: c, up: true, z: o, v: lo, per: d });
+                    }
+                }
+                self.sb_inherit_stats[2] += 1;
+            }
+        }
+        if fixes.is_empty() && lines.is_empty() {
+            return self.sb_cur.clone();
+        }
+        let mut out = self.sb_cur.as_deref().cloned().unwrap_or_default();
+        out.fixes.extend(fixes);
+        let max = tunable!("ENOMOTO_T_MIP_SB_POLY_MAX", 8usize, usize);
+        let mut changed = false;
+        for l in lines {
+            changed |= out.insert(l, max);
+        }
+        if !changed && out.fixes.len() == self.sb_cur.as_ref().map_or(0, |s| s.fixes.len()) {
+            return self.sb_cur.clone();
+        }
+        Some(Rc::new(out))
+    }
+
+    /// 列 `j` (LP の値 `v`) の強分岐の折れ線から得る、子の LP の値の増分の下界 (下の子, 上の子)。`z` はノードの LP の値。
+    /// 折れ線がなければ `None`
+    fn poly_child_gains(&self, j: usize, v: f64, z: f64) -> Option<(f64, f64)> {
+        let sb = self.sb_cur.as_ref()?;
+        let c = j as u32;
+        let (dn, up) = (sb.polys.get(&(c, false)), sb.polys.get(&(c, true)));
+        if dn.is_none() && up.is_none() {
+            return None;
+        }
+        let (tf, tc) = (v.floor(), v.ceil());
+        let gd = dn.map_or(0.0, |ls| ls.iter().filter(|l| l.end() >= tf).map(|l| l.at(tf) - z).fold(0.0f64, f64::max));
+        let gu = up.map_or(0.0, |ls| ls.iter().filter(|l| l.end() <= tc).map(|l| l.at(tc) - z).fold(0.0f64, f64::max));
+        Some((gd, gu))
+    }
+
     /// [`Self::orbital_fixing`] を呼び、矛盾なら衝突を作って刈った数を数える。
     fn orbital_fixing_checked(&mut self, changes: &[BoundChange]) -> bool {
         if self.of_gens.is_empty() {
@@ -7770,6 +8293,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.of_cache = (stab, Rc::new(orbits));
             }
             if self.of_cache.1.is_empty() {
+                self.of_node_orbits = Some(self.of_cache.1.clone());
                 return true;
             }
         } else {
@@ -7785,6 +8309,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             excl.sort_unstable();
             excl.dedup();
             if excl.len() == of.gens.len() {
+                self.of_node_orbits = Some(Rc::new(Vec::new()));
                 return true;
             }
             if self.of_cache.0 != excl {
@@ -7793,6 +8318,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let orbits = self.of_cache.1.clone();
+        self.of_node_orbits = Some(orbits.clone());
         let mut node_fixed = false;
         loop {
             let s0 = self.dom.stack_len();
@@ -7856,10 +8382,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         let pos = self.dom.stack_len();
+        let orb = if is_up { Vec::new() } else { self.sb_down_orbit(j) };
         if is_up {
             self.dom.tighten_lower(self.p, j, v.ceil());
         } else {
             self.dom.tighten_upper(self.p, j, v.floor());
+            for k in orb {
+                self.dom.tighten_upper(self.p, k, 0.0);
+            }
         }
         if !self.dom.infeasible {
             if infeasible {
@@ -7882,10 +8412,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         let pos = self.dom.stack_len();
+        let orb = if is_up { Vec::new() } else { self.sb_down_orbit(j) };
         if is_up {
             self.dom.tighten_lower(self.p, j, v.ceil());
         } else {
             self.dom.tighten_upper(self.p, j, v.floor());
+            for k in orb {
+                self.dom.tighten_upper(self.p, k, 0.0);
+            }
         }
         if !self.dom.infeasible {
             if infeasible {
@@ -10740,7 +11274,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new((**o).clone()));
         let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), root_basis };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), root_basis };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
@@ -11513,6 +12047,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: cut pool propagation: calls {}, pruned {} nodes, tightened {} bounds, {:.2}s, pool {} cuts ({} nonzeros); updated terms {}, candidates {} ({} nonzeros), rebuilds {}", self.cutpool_prop_stats[0], self.cutpool_prop_stats[1], self.cutpool_prop_stats[2], self.cutpool_prop_stats[3] as f64 * 1e-9, self.cut_pool.len(), self.cut_pool_nnz, self.cpp.work[0], self.cpp.work[1], self.cpp.work[2], self.cpp.work[3]);
             }
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
+            if self.dive_rcfix_count > 0 {
+                eprintln!("MIP: dives: fixed {} columns by reduced costs (ENOMOTO_MIP_DIVE_RCFIX)", self.dive_rcfix_count);
+            }
+            if self.zi_stats[2] > 0 {
+                eprintln!("MIP: tree ZI round: calls {}, successes {}, skipped {} (ENOMOTO_MIP_ZIROUND_ADAPT)", self.zi_stats[0], self.zi_stats[1], self.zi_stats[2]);
+            }
+            if self.sb_fix_resolve_count > 0 {
+                eprintln!("MIP: strong branching: resolved the node LP {} times after fixings (ENOMOTO_MIP_SB_FIX_RESOLVE)", self.sb_fix_resolve_count);
+            }
+            if self.sb_inherit_stats != [0; 3] {
+                eprintln!("MIP: strong branching: inherited bounds applied {}, ancestor convexity tightenings {}, reduced cost updates at {} nodes (ENOMOTO_MIP_SB_TIGHTEN_INHERIT / ANCESTOR / SB_POLY_RC)", self.sb_inherit_stats[0], self.sb_inherit_stats[1], self.sb_inherit_stats[2]);
+            }
+            if self.sb_tprop_stats[0] > 0 {
+                eprintln!("MIP: strong branching: propagation after convexity tightenings {}, pruned {}, resolved {} (ENOMOTO_MIP_SB_TIGHTEN_PROP)", self.sb_tprop_stats[0], self.sb_tprop_stats[1], self.sb_tprop_stats[2]);
+            }
+            let (wd, wf) = POLY_DIAG_WORKERS.lock().map(|g| *g).unwrap_or(([0; 9], [0.0; 4]));
+            if self.poly_diag[0] + wd[0] > 0 {
+                let d: Vec<u64> = (0..9).map(|k| self.poly_diag[k] + wd[k]).collect();
+                let f: Vec<f64> = (0..4).map(|k| self.poly_diag_f[k] + wf[k]).collect();
+                eprintln!("MIP: strong branching poly diag (all tree threads): selections with polys {}, candidates with polys {} (raised {}, not raised {}), top changed {}; branches {} (on raised {}, raised without sb {}, on cols with polys {}); mean raise x{:.3} over {} sides, mean poly/pc x{:.3} over {} sides", d[0], d[1], d[2], d[8], d[3], d[6], d[4], d[7], d[5], (f[0] / f[1].max(1.0)).exp(), f[1], (f[2] / f[3].max(1.0)).exp(), f[3]);
+            }
+            if self.sb_rc_count > 0 {
+                eprintln!("MIP: strong branching: lines from child reduced costs {} (ENOMOTO_MIP_SB_RC)", self.sb_rc_count);
+            }
+            if self.sb_of_count > 0 {
+                eprintln!("MIP: strong branching: fixed {} orbit columns to 0 in down children (ENOMOTO_MIP_SB_OF)", self.sb_of_count);
+            }
+            if self.sb_tighten_count > 0 {
+                eprintln!("MIP: strong branching: tightened {} general integer bounds by convexity (ENOMOTO_MIP_SB_TIGHTEN)", self.sb_tighten_count);
+            }
             eprintln!("MIP: literal conflicts: added {}, in pool {} (aged out {}), pruned {} nodes, tightened {} bounds", self.lit_stats[0], self.lit_conflicts.len(), self.lit_conflicts.removed, self.lit_stats[1], self.lit_stats[2]);
             if proof_cmir() {
                 eprintln!("MIP: proof CMIR cuts: tried {}, added {}, entered the cut pool {}", self.proof_cmir_stats[0], self.proof_cmir_stats[1], self.proof_cmir_stats[2]);
@@ -11591,9 +12155,62 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             (s, _, _) => (s, best_bound),
         };
+        // 診断 (`poly_diag`): 木の従のスレッドの数を主に渡す
+        if !self.params.submip && self.snap.is_some() && self.poly_diag[0] > 0 {
+            if let Ok(mut g) = POLY_DIAG_WORKERS.lock() {
+                for k in 0..9 {
+                    g.0[k] += self.poly_diag[k];
+                }
+                for k in 0..4 {
+                    g.1[k] += self.poly_diag_f[k];
+                }
+            }
+        }
         if (self.params.verbose || end_diag()) && !self.params.submip && self.snap.is_none() {
             eprintln!("MIP: finish done ({:.2}s)", self.start.elapsed().as_secs_f64());
         }
         MipResult { status, x, objective, best_bound, nodes: self.nodes + self.worker_totals.0, lp_iterations: self.lp.total_iterations() + self.worker_totals.1 }
+    }
+}
+
+/// 刈り込みの上限を、暫定解より厳密に小さい最大の格子の点で取るか (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`)。
+fn obj_step_lattice() -> bool {
+    env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some()
+}
+
+/// `ENOMOTO_MIP_SB_TIGHTEN_INHERIT` (試作、既定では使わない): 強分岐で得た境界 (片側の打ち切りによる固定と凸性による締め付け、
+/// `ENOMOTO_MIP_SB_TIGHTEN`) を両方の子に引き継ぐ。既定では定義域にだけ置くので、潜る子にしか残らず、兄弟や待ち行列から取り出した
+/// ノードでは (根から分枝だけを積み直すので) 失われる
+fn sb_inherit() -> bool {
+    env_str!("ENOMOTO_MIP_SB_TIGHTEN_INHERIT").is_some()
+}
+
+/// 診断: 木の従のスレッドの `poly_diag`・`poly_diag_f` の和 (終わるときに足し、主が出力する)
+static POLY_DIAG_WORKERS: std::sync::Mutex<([u64; 9], [f64; 4])> = std::sync::Mutex::new(([0; 9], [0.0; 4]));
+
+/// `ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR` (試作、既定では使わない): 強分岐の子の LP 値から得た凸性の直線 ([`SbLine`]) を、列と向きごとの
+/// 折れ線 ([`SbInherit::polys`]) にして子孫に引き継ぎ、子孫のノードの始めにその時の打ち切り値で締め直す (暫定解が良くなるほど
+/// 強く締まる。CBC は強分岐したノードでしか使わない)
+fn sb_ancestor() -> bool {
+    env_str!("ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR").is_some()
+}
+
+/// `ENOMOTO_MIP_SB_RC` (試作、既定では使わない): 強分岐の凸性の締め付けと折れ線の直線に、割線の代わりに子の LP の被約費用を使う
+/// (子の LP は今の LP に境界を 1 つ足しただけで、x_j がその境界にあり被約費用が d なら、子の部分では 目的値 >= 子の値 + |d|·(境界からの距離))
+fn sb_rc() -> bool {
+    env_str!("ENOMOTO_MIP_SB_RC").is_some()
+}
+
+/// 強分岐の子の LP (最適) での列 `j` の被約費用。下の子なら上限に、上の子なら下限にあって、向きの合うものだけ (なければ 0)
+fn sb_child_rc<L: MipLp>(lp: &L, j: usize, is_up: bool) -> f64 {
+    let (lo, up) = lp.col_bounds(j);
+    let x = lp.col_value(j);
+    let d = lp.reduced_costs_ref()[j];
+    if !is_up && d < -1e-7 && x >= up - 1e-9 {
+        d
+    } else if is_up && d > 1e-7 && x <= lo + 1e-9 {
+        d
+    } else {
+        0.0
     }
 }
