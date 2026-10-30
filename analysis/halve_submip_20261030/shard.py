@@ -17,9 +17,12 @@ done = set()
 if OUT.exists():
     for l in OUT.read_text().splitlines():
         r = json.loads(l); done.add((r["problem"], r["cfg"], r["rep"]))
-for p, rep in S["shards"][k]:
+for job in S["shards"][k]:
+    # 1 つの仕事は [問題, 回] か [問題, 回, 設定の並び] (設定を省けば分担表全体の "cfgs")
+    p, rep = job[0], job[1]
+    base = job[2] if len(job) > 2 else S["cfgs"]
     mps = rb.fetch(p, WT / ".miplib_cache")
-    cfgs = S["cfgs"] if rep % 2 == 0 else S["cfgs"][::-1]
+    cfgs = base if rep % 2 == 0 else base[::-1]
     for c in cfgs:
         if (p, c, rep) in done:
             continue
