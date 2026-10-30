@@ -1793,6 +1793,18 @@ pub(super) struct CutJob {
     pub(super) latest_x: std::sync::Mutex<Option<Vec<f64>>>,
     /// 結果の LP の最後の基底 (既定で返す。`ENOMOTO_MIP_NO_BG_CUTS_BASIS` で返さない。主がカットの行を置き換えた後の LP に入れる)
     pub(super) basis: std::sync::Mutex<Option<super::lp::Basis>>,
+    /// 各ラウンドの後の LP の目的値 (offset 込み)。`ENOMOTO_MIP_BG_CUTS_WAIT` で、主が止めの合図を出す前にまだ上がっているかを見る
+    pub(super) prog: std::sync::Mutex<Vec<f64>>,
+}
+
+/// `ENOMOTO_MIP_BG_CUTS_WAIT` (試作、既定では使わない): 根のヒューリスティクスが終わった時点で裏のカットがまだ下界を上げているなら、
+/// 停滞するか待ちの上限まで止めの合図を待つ ([`BgCuts::wait_progress`])。待ちの上限は、残り時間の `ENOMOTO_T_MIP_BG_CUTS_WAIT_FRAC`
+/// (既定 0.1) 倍と、主の根のカットのループの時間の `ENOMOTO_T_MIP_BG_CUTS_WAIT_MULT` (既定 5、0 以下なら使わない) 倍の小さいほう。
+/// mc11 は裏のカットの下界で解けるかどうかが決まり、根のサブ MIP が早く終わる設定 (`ENOMOTO_MIP_SUBMIP_HIGHS` の `s`) では
+/// 裏のカットが 1 ラウンドに 20 ほど上がっている途中 (16〜29 ラウンド) で止められ、根の下界が 11668〜11684 から 11375〜11590 に
+/// 落ちて解けなくなっていた (analysis/mc11_h1_20261030.md)
+pub(crate) fn bg_cuts_wait_on() -> bool {
+    env_str!("ENOMOTO_MIP_BG_CUTS_WAIT").is_some()
 }
 
 /// カットを強める求解のスレッド。落とすと止めの合図を出して終わりを待つ (主が途中で戻っても残らないように)。
@@ -1802,6 +1814,43 @@ struct BgCuts {
 }
 
 impl BgCuts {
+    /// `ENOMOTO_MIP_BG_CUTS_WAIT` ([`bg_cuts_wait_on`]): 止めの合図を出す前に、裏のカットがまだ下界を上げている間は待つ。
+    /// 直近 `ENOMOTO_T_MIP_BG_CUTS_WAIT_WIN` ラウンド (既定 5) の目的値の上がり幅が相対 `ENOMOTO_T_MIP_BG_CUTS_WAIT_EPS` (既定 1e-4。
+    /// ラウンドがまだ窓より少なければ、そのラウンド数の割合に縮める) 以下になる (停滞)、裏のスレッドが自分で終わる、目的値が `cutoff`
+    /// (暫定解) に届く、待ちが `cap` 秒に達する、のどれかでやめる。戻り値は (待った秒数, 待ち終えた理由)
+    fn wait_progress(&self, cap: f64, cutoff: f64) -> (f64, &'static str) {
+        let t0 = Instant::now();
+        let win = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_WIN", 5usize, usize).max(1);
+        let eps = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_EPS", 1e-4, f64);
+        let why = loop {
+            if self.handle.as_ref().is_none_or(|h| h.is_finished()) {
+                break "done";
+            }
+            let rising = {
+                let h = self.job.prog.lock().unwrap();
+                let k = h.len();
+                if k < 2 {
+                    false
+                } else {
+                    let w = win.min(k - 1);
+                    let (a, b) = (h[k - 1 - w], h[k - 1]);
+                    if b >= cutoff - 1e-9 * cutoff.abs().max(1.0) {
+                        break "cutoff";
+                    }
+                    (b - a) / b.abs().max(1.0) > eps * w as f64 / win as f64
+                }
+            };
+            if !rising {
+                break "stalled";
+            }
+            if t0.elapsed().as_secs_f64() >= cap {
+                break "cap";
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        (t0.elapsed().as_secs_f64(), why)
+    }
+
     fn finish(&mut self) -> Option<(Vec<(Vec<(usize, f64)>, f64, f64)>, f64, usize)> {
         self.job.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
@@ -3740,6 +3789,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         // 根の切除平面
+        // 主の根のカットのループの時間 (`ENOMOTO_MIP_BG_CUTS_WAIT` の待ちの上限に使う)
+        let mut root_cut_secs = 0.0f64;
         let cut_job = CUT_JOB.with(|j| j.borrow().clone()).filter(|_| self.snap.is_some());
         {
             let x = self.lp.col_values();
@@ -3755,7 +3806,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if root_warm_dse {
                     crate::simplex::slope_intercept_dual::WARM_DSE_ON.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
+                let t_cut = Instant::now();
                 let cut_ok = env_str!("ENOMOTO_MIP_NO_CUTS").is_some() || self.root_cut_loop(root_iters);
+                root_cut_secs = t_cut.elapsed().as_secs_f64();
                 if root_warm_dse {
                     crate::simplex::slope_intercept_dual::WARM_DSE_ON.store(warm_prev, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -3840,7 +3893,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
             let bg_mode = env_str!("ENOMOTO_MIP_BG_CUTS").or(if env_str!("ENOMOTO_MIP_NO_BG_CUTS").is_none() { Some("1") } else { None });
             if let Some(mode) = bg_mode {
-                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None), basis: std::sync::Mutex::new(None) });
+                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None), basis: std::sync::Mutex::new(None), prog: std::sync::Mutex::new(Vec::new()) });
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let mut threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
@@ -4334,6 +4387,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // カットを強める求解を止め、その LP のカットで根の LP のカットを置き換える
         if let Some(mut bg) = bg_cuts.take() {
             let t0 = Instant::now();
+            if bg_cuts_wait_on() {
+                let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                let mult = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MULT", 5.0, f64);
+                let mut cap = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_FRAC", 0.1, f64) * remaining;
+                if mult > 0.0 {
+                    cap = cap.min(mult * root_cut_secs);
+                }
+                let cutoff = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+                let (w, why) = bg.wait_progress(cap, cutoff);
+                if self.params.verbose {
+                    let h = bg.job.prog.lock().unwrap();
+                    eprintln!("MIP: background cuts: waited {w:.2}s for progress (cap {cap:.2}s, {why}), {} rounds, obj {:?} ({:.2}s)", h.len(), h.last(), self.start.elapsed().as_secs_f64());
+                }
+            }
             let res = bg.finish();
             let wait = t0.elapsed().as_secs_f64();
             // 根の LP を解き直しておく (ヒューリスティクスの後で状態が戻っていることを確かめる)

@@ -1697,6 +1697,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if let Some(j) = &job {
                 *j.latest_x.lock().unwrap() = Some(self.lp.col_values());
+                j.prog.lock().unwrap().push(obj + p.offset);
             }
             if dbg_sep {
                 eprintln!(
