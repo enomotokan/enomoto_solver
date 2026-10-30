@@ -874,6 +874,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut time_cap = if self.params.time_limit.is_finite() { cut_frac * self.params.time_limit } else { f64::INFINITY };
         // 根のヒューリスティクスの間にカットを強める求解: 止めの合図まで続ける (ラウンド数・時間の上限なし)
         let job = super::solver::CUT_JOB.with(|j| j.borrow().clone()).filter(|_| self.snap.is_some());
+        // `ENOMOTO_MIP_SYM_CUTS` ([`super::sym_cuts`]): 根のカットの像を作る生成元と、列ごとにその列を動かす生成元の番号
+        let sym_gens = if !self.params.submip && self.params.restarts == 0 && self.snap.is_none() && job.is_none() {
+            super::SYM_CUT_GENS.with(|t| t.borrow().clone()).filter(|g| g.iter().all(|perm| perm.len() == n))
+        } else {
+            None
+        };
+        let sym_moving: Vec<Vec<u32>> = match &sym_gens {
+            Some(gens) => {
+                let mut m = vec![Vec::new(); n];
+                for (k, g) in gens.iter().enumerate() {
+                    for j in 0..n {
+                        if g[j] != j {
+                            m[j].push(k as u32);
+                        }
+                    }
+                }
+                m
+            }
+            None => Vec::new(),
+        };
+        let sym_cap = tunable!("ENOMOTO_T_MIP_SYM_CUTS_MAX", 5000usize, usize);
+        let mut sym_images = 0usize;
+        // 像として新たにプールに入ったカットの番号 (候補に戻すのはこれだけ。ほかのプールのカットは今まで通り)
+        let mut sym_pool: std::collections::HashSet<usize> = std::collections::HashSet::new();
         if job.is_some() {
             max_rounds = tunable!("ENOMOTO_T_MIP_BG_CUTS_MAX_ROUNDS", 1000usize, usize);
             time_cap = f64::INFINITY;
@@ -1278,6 +1302,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 cands.extend(fcands);
             }
             // 再スタート前のカットをプールで引き継いだとき (`ENOMOTO_MIP_RESTART_CUTS_TO_POOL`): プールで違反しているものも候補にする
+            // `ENOMOTO_MIP_SYM_CUTS`: 前のラウンドのカットの像 (プールにある) で違反しているものも候補にする
+            if !sym_pool.is_empty() {
+                for (eff, k) in self.pool_violated(&x) {
+                    if !sym_pool.contains(&k) {
+                        continue;
+                    }
+                    let (c, r, _) = &self.cut_pool[k];
+                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
+                }
+            }
             if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || ((env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some() || self.pool_part('P')) && !self.cutsel_guard_fc())) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", if self.pool_part('P') { 1000usize } else { 5 }, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
                 for (eff, k) in self.pool_violated(&x) {
                     let (c, r, _) = &self.cut_pool[k];
@@ -1443,6 +1477,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !self.params.submip {
                 for (c, _, r) in &rows {
                     self.add_to_pool(c, *r);
+                }
+                // `ENOMOTO_MIP_SYM_CUTS`: 選んだカットを、その列を動かす生成元で写した像もプールに入れる (上限 `ENOMOTO_T_MIP_SYM_CUTS_MAX` 本)
+                if let Some(gens) = &sym_gens {
+                    let before = sym_images;
+                    let mut ks: Vec<u32> = Vec::new();
+                    'rows: for (c, _, r) in &rows {
+                        ks.clear();
+                        for &(j, _) in c {
+                            ks.extend_from_slice(&sym_moving[j]);
+                        }
+                        ks.sort_unstable();
+                        ks.dedup();
+                        for &k in &ks {
+                            if sym_images >= sym_cap {
+                                break 'rows;
+                            }
+                            let g = &gens[k as usize];
+                            let mut img: Vec<(usize, f64)> = c.iter().map(|&(j, a)| (g[j], a)).collect();
+                            img.sort_unstable_by_key(|e| e.0);
+                            let len0 = self.cut_pool.len();
+                            self.add_to_pool(&img, *r);
+                            if self.cut_pool.len() > len0 {
+                                sym_pool.insert(len0);
+                            }
+                            sym_images += 1;
+                        }
+                    }
+                    if self.params.verbose && sym_images > before {
+                        eprintln!("MIP: cut round {round}: {} symmetric images of the chosen cuts put in the pool", sym_images - before);
+                    }
                 }
             }
             // `ENOMOTO_MIP_CUT_KEEP_LU`: 前のラウンドで外さなかった効いていないカットを、ここで新しいカットと一緒に外す
