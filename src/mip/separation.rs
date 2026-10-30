@@ -940,6 +940,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 毎ラウンド候補が数千本あり、50 本ずつでは LP が切られていない別のブロックに移るだけで下界が動かない
         let adapt_max = env_str!("ENOMOTO_MIP_CUT_ADAPT_MAX").is_some() && !self.params.submip;
         let mut adapt_max_cuts = 0usize;
+        // `ENOMOTO_MIP_CUT_LP_HALVE` (試作): カットを足した LP が 1 回の LP の時間の上限に当たったら、そのラウンドのカットは今まで通り
+        // 外すが、失敗と数えずに、以後のラウンドの本数の上限をそのラウンドの本数の半分にする (`ENOMOTO_T_MIP_CUT_LP_HALVE_MIN` 本 (既定 20)
+        // 以下で当たったときだけ失敗と数える)。physiciansched6-2 (4 コアの機械) では、目的値が動かず 1 ラウンド 1000 本までに広げた後の
+        // 247 本ほどのカットを足した LP が上限 (60 秒の 2% = 1.2 秒) に当たり、2 回続けて全部外してループが終わり、根の下界が 48724 で
+        // 止まっていた (1 回の LP の上限を 6 秒にすると 5 ラウンドで 49324 に届く。analysis/hl4_20261030.md)
+        let lp_halve = env_str!("ENOMOTO_MIP_CUT_LP_HALVE").is_some() && !self.params.submip;
+        let lp_halve_min = tunable!("ENOMOTO_T_MIP_CUT_LP_HALVE_MIN", 20usize, usize);
+        let mut lp_cap_cuts = usize::MAX;
+        // `ENOMOTO_T_MIP_CUT_LP_CAP_MULT` = m (> 0、試作、既定 0 で使わない): 1 回の LP の時間の上限を、このループで最適まで解けた
+        // カットの LP の時間の最大の m 倍より短くしない。physiciansched6-2 (4 コアの機械) では、カット 77 本でも LP が 1〜1.5 秒かかり、
+        // 上限 1.2 秒 (60 秒の 2%) に当たり続けた (根の LP 自体が 3.4 秒。上限は LP の大きさに合っていない)
+        let lp_cap_mult = if self.params.submip { 0.0 } else { tunable!("ENOMOTO_T_MIP_CUT_LP_CAP_MULT", 0.0, f64) };
+        let mut ok_lp_secs = 0.0f64;
         // 上限まで採っても目的値が動かないラウンドが来たら、1 ラウンドの上限を行の数 (`ENOMOTO_T_MIP_CUT_WIDE_MAX` 本まで) に
         // 広げ、ラウンドの上限を `ENOMOTO_T_MIP_CUT_WIDE_ROUNDS` 以上にし、それ以降はまったく進まないラウンドも停滞 1 回と数える
         // (`ENOMOTO_MIP_NO_CUT_WIDEN` で無効)。同じ形のブロックが多数ある問題 (neos-3381206-awhea: 容量 100 の箱 475 個) では
@@ -948,6 +961,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (40 問で悪化した) のと違い他の問題は変わらない
         let mut widen_on = env_str!("ENOMOTO_MIP_NO_CUT_WIDEN").is_none() && !self.params.submip && !self.cut_agg_has('w') && !self.rch_part('W');
         let mut widened = false;
+        let widen_double_on = env_str!("ENOMOTO_MIP_CUT_WIDEN_DOUBLE").is_some();
         // `ENOMOTO_MIP_CUT_ADAPT_ROUNDS` (実験的): ラウンドの上限に達したとき、直近 5 ラウンドの目的値の伸びがそれまでの伸びの
         // `ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_FRAC` 以上なら上限を 25 ラウンド延ばす (`ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP` まで)
         let adapt_rounds = env_str!("ENOMOTO_MIP_CUT_ADAPT_ROUNDS").is_some() && !self.params.submip;
@@ -1306,6 +1320,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 効き目の大きい順に、平行なものを除いて選ぶ
             let max_cuts = if self.rch_part('N') { tunable!("ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAX_CUTS", if self.pool_part('N') { 1000usize } else { 500 }, usize) } else { tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize) }.min(p.m.max(50));
             let max_cuts = if adapt_max_cuts > 0 { adapt_max_cuts } else { max_cuts };
+            let max_cuts = max_cuts.min(lp_cap_cuts);
             let (forced, cands): (Vec<Candidate>, Vec<Candidate>) = cands.into_iter().partition(|c| c.forced);
             // `ENOMOTO_T_MIP_CUTSEL_AGG_QUOTA` = q (> 0、試作): 集約した行からのカット (tableau・経路集約) を、分離器ごとに
             // 質の上位 q 本まで、全体の質の閾値 (最良の `ENOMOTO_T_CUTSEL_MIN_REL` 倍) と関係なく先に採る ([`pick_agg_quota`])
@@ -1467,6 +1482,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let lim = 10 * root_iters.max(100) + 10_000;
             // 1 回の LP の時間の上限 (全体の 2%、最低 1 秒): 数値的に悪条件の LP が残り時間を使い切るのを防ぐ
             let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
+            let cap = cap.max(lp_cap_mult * ok_lp_secs);
             let lp_deadline = if cap.is_finite() {
                 let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
                 Some(self.deadline.map_or(d, |g| g.min(d)))
@@ -1575,6 +1591,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: LP status {st:?}, removed the cuts ({st2:?})");
                 }
+                // `ENOMOTO_MIP_CUT_LP_HALVE`: 時間の上限に当たっただけなら、本数を半分にして続ける
+                if lp_halve && st == LpStatus::TimeLimit && st2 == LpStatus::Optimal && rows.len() > lp_halve_min && !self.time_up() {
+                    lp_cap_cuts = (rows.len() / 2).max(lp_halve_min);
+                    if self.params.verbose {
+                        eprintln!("MIP: cut round {round}: the LP with {} cuts hit the time cap; up to {lp_cap_cuts} cuts per round from now", rows.len());
+                    }
+                    continue;
+                }
                 // 1 回の失敗ではやめない (そのラウンドのカットだけ捨てて続ける。2 回目でやめる)
                 lp_failures += 1;
                 // `ENOMOTO_MIP_EQUIV2_CUTS` では `ENOMOTO_T_MIP_EQUIV2_CUT_LP_FAILS` 回目 (既定 2) でやめる
@@ -1584,16 +1608,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 continue;
             }
+            ok_lp_secs = ok_lp_secs.max(t_lp0.elapsed().as_secs_f64());
             let obj = self.lp.objective();
             // 最適に解けたカットの LP の値は問題全体の下界 (根を閉じる判定 [`Solver::root_gap_closed`] に使う)
             if job.is_none() && self.snap.is_none() {
                 self.root_cut_lb = self.root_cut_lb.max(obj + p.offset);
             }
-            let widen_now = widen_on && !widened && quota_full && (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0) <= 1e-4;
+            // `ENOMOTO_MIP_CUT_WIDEN_DOUBLE` (試作): 一気に行の数 (1000 本まで) に広げるのでなく、採り切っても動かないラウンドのたびに
+            // 2 倍にする (50 -> 100 -> 200 -> ... -> 1000)。physiciansched6-2 では 50 本から一気に広げたラウンドで 247〜308 本が入り、
+            // LP が 1 回の時間の上限に当たって全部外されていた (`ENOMOTO_MIP_CUT_LP_HALVE` の半分化と対になる)
+            let widen_now = widen_on && (!widened || widen_double_on) && quota_full && (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0) <= 1e-4;
             if widen_now {
+                let wide_max = p.m.min(tunable!("ENOMOTO_T_MIP_CUT_WIDE_MAX", 1000usize, usize));
+                if !widened {
+                    max_rounds = max_rounds.max(round_ctr + tunable!("ENOMOTO_T_MIP_CUT_WIDE_ROUNDS", 100usize, usize));
+                }
                 widened = true;
-                adapt_max_cuts = p.m.min(tunable!("ENOMOTO_T_MIP_CUT_WIDE_MAX", 1000usize, usize)).max(max_cuts);
-                max_rounds = max_rounds.max(round_ctr + tunable!("ENOMOTO_T_MIP_CUT_WIDE_ROUNDS", 100usize, usize));
+                adapt_max_cuts = if widen_double_on { (2 * max_cuts).min(wide_max) } else { wide_max }.max(max_cuts);
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: {max_cuts} cuts did not move the objective; up to {adapt_max_cuts} cuts per round from now");
                 }
