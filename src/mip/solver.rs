@@ -728,6 +728,16 @@ pub(super) struct Solver<'a, L: MipLp> {
     sb_node_lines: Vec<SbLine>,
     /// 引き継いだ境界を当てた数、凸性の直線で締めた数
     sb_inherit_stats: [u64; 3],
+    /// 診断 (`ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR` のとき。`ENOMOTO_MIP_SB_POLY_SCORE` を使わなくても数える): 折れ線のスコアの効き方。
+    /// [折れ線を持つ候補がいた選択, 折れ線を持つ候補, 折れ線が擬似費用の見積もりを引き上げた候補, 引き上げで擬似費用のスコアの
+    /// 1 位が変わった選択, 分枝した列が引き上げられた列, 分枝した列が折れ線を持つ, 分枝の数, 引き上げられた列を強分岐なしで選んだ,
+    /// 折れ線を持つ候補のうち下界が両側とも擬似費用以下 (引き上げなし) のもの]
+    poly_diag: [u64; 9],
+    /// 診断: 引き上げの倍率の対数の和 (引き上げた側ごと)、引き上げた側の数、折れ線の下界 / 擬似費用の見積もりの対数の和 (折れ線の
+    /// ある側ごと、引き上げの有無によらず)、その数
+    poly_diag_f: [f64; 4],
+    /// 診断: このノードの選択で折れ線が引き上げた列
+    poly_diag_raised: Vec<usize>,
     /// このノードの LP が最適まで解けているか (`ENOMOTO_MIP_SB_POLY_RC` で被約費用を使う条件)
     node_lp_opt: bool,
     /// 木の ZI round の (呼んだ回数, 成功した回数, `ENOMOTO_MIP_ZIROUND_ADAPT` で省いた回数)
@@ -2175,6 +2185,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_node_fixes: Vec::new(),
         sb_node_lines: Vec::new(),
         sb_inherit_stats: [0; 3],
+        poly_diag: [0; 9],
+        poly_diag_f: [0.0; 4],
+        poly_diag_raised: Vec::new(),
         node_lp_opt: false,
         zi_stats: [0; 3],
         cost_prio: !params.submip && env_str!("ENOMOTO_MIP_COST_PRIORITY").is_some() && {
@@ -7070,8 +7083,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn select_branch(&mut self, frac: &[(usize, f64)], node_obj: f64, depth: usize) -> BranchAction {
         let t0 = Instant::now();
         self.last_sb = None;
+        self.poly_diag_raised.clear();
         let r = self.select_branch_inner(frac, node_obj, depth);
         self.sb_secs += t0.elapsed().as_secs_f64();
+        if sb_ancestor() {
+            if let BranchAction::Branch { col, .. } = r {
+                self.poly_diag[6] += 1;
+                if self.poly_diag_raised.contains(&col) {
+                    self.poly_diag[4] += 1;
+                    self.poly_diag[7] += self.last_sb.is_none() as u64;
+                }
+                let c = col as u32;
+                self.poly_diag[5] += self.sb_cur.as_ref().is_some_and(|s| s.polys.contains_key(&(c, false)) || s.polys.contains_key(&(c, true))) as u64;
+            }
+        }
         r
     }
 
@@ -7114,6 +7139,48 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if hybrid { s.pc.hybrid_score(j, f) } else { s.pc.score(j, f) }
         };
         let mut cands: Vec<(usize, f64, f64)> = frac.iter().map(|&(j, v)| (j, v, score_of(self, j, v, node_obj))).collect();
+        // 診断 (`poly_diag`): 折れ線がどれだけ擬似費用の見積もりを引き上げ、スコアの 1 位を変えるか (選び方には使わない)
+        if sb_ancestor() && self.sb_cur.as_ref().is_some_and(|s| !s.polys.is_empty()) {
+            let (mut any, mut bp, mut bq) = (false, (usize::MAX, f64::MIN), (usize::MAX, f64::MIN));
+            for &(j, v) in frac {
+                let f = v - v.floor();
+                let plain = if hybrid { self.pc.hybrid_score(j, f) } else { self.pc.score(j, f) };
+                let mut with = plain;
+                if let Some((gd, gu)) = self.poly_child_gains(j, v, node_obj) {
+                    any = true;
+                    self.poly_diag[1] += 1;
+                    let (pd, pu) = (self.pc.cost_down(j) * f, self.pc.cost_up(j) * (1.0 - f));
+                    for (g, q) in [(gd, pd), (gu, pu)] {
+                        if g > 0.0 && q > 0.0 {
+                            self.poly_diag_f[2] += (g / q).ln();
+                            self.poly_diag_f[3] += 1.0;
+                        }
+                        if g > q && q > 0.0 {
+                            self.poly_diag_f[0] += (g / q).ln();
+                            self.poly_diag_f[1] += 1.0;
+                        }
+                    }
+                    if gd > pd || gu > pu {
+                        self.poly_diag[2] += 1;
+                        self.poly_diag_raised.push(j);
+                        let (d, u) = (pd.max(gd), pu.max(gu));
+                        with = if hybrid { self.pc.hybrid_score_with_gains(j, d, u) } else { d.max(1e-6) * u.max(1e-6) };
+                    } else {
+                        self.poly_diag[8] += 1;
+                    }
+                }
+                if plain > bp.1 {
+                    bp = (j, plain);
+                }
+                if with > bq.1 {
+                    bq = (j, with);
+                }
+            }
+            if any {
+                self.poly_diag[0] += 1;
+                self.poly_diag[3] += (bp.0 != bq.0) as u64;
+            }
+        }
         // racing ramp-up の多様化: 擬似費用のスコアに ±10% の揺らぎを加える
         if self.race_div & 2 == 2 && !self.race_done {
             for c in cands.iter_mut() {
@@ -11995,6 +12062,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.sb_tprop_stats[0] > 0 {
                 eprintln!("MIP: strong branching: propagation after convexity tightenings {}, pruned {}, resolved {} (ENOMOTO_MIP_SB_TIGHTEN_PROP)", self.sb_tprop_stats[0], self.sb_tprop_stats[1], self.sb_tprop_stats[2]);
             }
+            let (wd, wf) = POLY_DIAG_WORKERS.lock().map(|g| *g).unwrap_or(([0; 9], [0.0; 4]));
+            if self.poly_diag[0] + wd[0] > 0 {
+                let d: Vec<u64> = (0..9).map(|k| self.poly_diag[k] + wd[k]).collect();
+                let f: Vec<f64> = (0..4).map(|k| self.poly_diag_f[k] + wf[k]).collect();
+                eprintln!("MIP: strong branching poly diag (all tree threads): selections with polys {}, candidates with polys {} (raised {}, not raised {}), top changed {}; branches {} (on raised {}, raised without sb {}, on cols with polys {}); mean raise x{:.3} over {} sides, mean poly/pc x{:.3} over {} sides", d[0], d[1], d[2], d[8], d[3], d[6], d[4], d[7], d[5], (f[0] / f[1].max(1.0)).exp(), f[1], (f[2] / f[3].max(1.0)).exp(), f[3]);
+            }
             if self.sb_rc_count > 0 {
                 eprintln!("MIP: strong branching: lines from child reduced costs {} (ENOMOTO_MIP_SB_RC)", self.sb_rc_count);
             }
@@ -12082,6 +12155,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             (s, _, _) => (s, best_bound),
         };
+        // 診断 (`poly_diag`): 木の従のスレッドの数を主に渡す
+        if !self.params.submip && self.snap.is_some() && self.poly_diag[0] > 0 {
+            if let Ok(mut g) = POLY_DIAG_WORKERS.lock() {
+                for k in 0..9 {
+                    g.0[k] += self.poly_diag[k];
+                }
+                for k in 0..4 {
+                    g.1[k] += self.poly_diag_f[k];
+                }
+            }
+        }
         if (self.params.verbose || end_diag()) && !self.params.submip && self.snap.is_none() {
             eprintln!("MIP: finish done ({:.2}s)", self.start.elapsed().as_secs_f64());
         }
@@ -12100,6 +12184,9 @@ fn obj_step_lattice() -> bool {
 fn sb_inherit() -> bool {
     env_str!("ENOMOTO_MIP_SB_TIGHTEN_INHERIT").is_some()
 }
+
+/// 診断: 木の従のスレッドの `poly_diag`・`poly_diag_f` の和 (終わるときに足し、主が出力する)
+static POLY_DIAG_WORKERS: std::sync::Mutex<([u64; 9], [f64; 4])> = std::sync::Mutex::new(([0; 9], [0.0; 4]));
 
 /// `ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR` (試作、既定では使わない): 強分岐の子の LP 値から得た凸性の直線 ([`SbLine`]) を、列と向きごとの
 /// 折れ線 ([`SbInherit::polys`]) にして子孫に引き継ぎ、子孫のノードの始めにその時の打ち切り値で締め直す (暫定解が良くなるほど
