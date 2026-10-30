@@ -3751,13 +3751,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let nnz_budget = if nnz_budget_mult > 0.0 { nnz_budget_mult * (n + lp_nnz) as f64 } else { f64::INFINITY };
         let mut work_used = 0.0f64;
         let mut n_budget_skip = 0usize;
-        // `ENOMOTO_MIP_TAB_NNZ_CBC` (試作、既定では使わない): CglGomory (CglGomory.cpp の `nReasonable`) と同じく、行をスコアの順に試し、
+        // `ENOMOTO_MIP_TAB_NNZ_CBC` (既定で使う、2026-10-30、analysis/cbcimpl_20261029.md。`0` か `off` で使わない): CglGomory (CglGomory.cpp の `nReasonable`) と同じく、行をスコアの順に試し、
         // 作ったカットの非零の数の合計が予算に届いたら止める (届いた行のカットは入れる。密な行を飛ばして後ろの行で埋めることはしない)。
         // 予算は根で max(5n, nnz/8 + min(10000, nnz + 2m)) (最初のラウンドは min を取らず 10000、さらに + nnz/2)、ノード (`light`) で
         // max(2n, nnz/8 + 200) (n は列、m は LP の行、nnz は LP の非零)。`ENOMOTO_T_MIP_TAB_NNZ_BUDGET`・`ENOMOTO_MIP_TAB_HIGHS_RULES`
         // と一緒には使わない。以前の似た試み (その 2 つ) は 30n20b8 の根の下界を下げた。
         // 値が `root` なら根だけ、`node` ならノードだけに予算をかける (切り分け用)
-        let tab_cbc_mode = env_str!("ENOMOTO_MIP_TAB_NNZ_CBC");
+        let tab_cbc_mode = Some(env_str!("ENOMOTO_MIP_TAB_NNZ_CBC").unwrap_or("1")).filter(|&m| m != "0" && m != "off");
         let tab_cbc_on = match tab_cbc_mode {
             None => false,
             Some("root") => !light,
@@ -3776,14 +3776,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             None
         };
-        // 根の予算の効きすぎ (mc11・ns1208400 で解けなくなる) を抑える試作 (どれも既定では使わない、0 で無効):
-        // - `ENOMOTO_T_MIP_TAB_NNZ_LATE` = R: 根のループの R ラウンド目からは予算をかけない (mc11 は後半のラウンドで候補が 3〜5 割減り、下界が止まる)
-        // - `ENOMOTO_T_MIP_TAB_NNZ_GAIN` = tol: 根で直前のラウンドの目的値の相対的な伸びが tol を超える (最初のラウンドを含む) あいだは予算をかけない
-        // - `ENOMOTO_T_MIP_TAB_NNZ_CUTCAP` = k: カット 1 本が予算から引く非零を 予算 / k までにする (ns1208400 は 1 本約 1500 非零で、
+        // 根の予算の効きすぎ (mc11・ns1208400 で解けなくなる) を抑える (0 で無効):
+        // - `ENOMOTO_T_MIP_TAB_NNZ_GAIN` = tol (既定 1e-4、2026-10-30): 根で直前のラウンドの目的値の相対的な伸びが tol を超える (最初のラウンドを含む)
+        //   あいだは予算をかけない。下界が止まってから予算をかける。58 問・Mittelmann で既定 (予算なし) とほぼ同じ (SGM +1.4%・−0.2%、
+        //   解けた数 ±0・+1)。予算だけ (0) では mc11・ns1208400 が解けなくなる
+        // - `ENOMOTO_T_MIP_TAB_NNZ_LATE` = R (試作、既定 0): 根のループの R ラウンド目からは予算をかけない (mc11 は後半のラウンドで候補が 3〜5 割減り、下界が止まる)
+        // - `ENOMOTO_T_MIP_TAB_NNZ_CUTCAP` = k (試作、既定 0): カット 1 本が予算から引く非零を 予算 / k までにする (ns1208400 は 1 本約 1500 非零で、
         //   予算で 1 ラウンド約 13 行しか使えない)
         if !light && tab_cbc_left.is_some() {
             let late = tunable!("ENOMOTO_T_MIP_TAB_NNZ_LATE", 0usize, usize);
-            let gain_tol = tunable!("ENOMOTO_T_MIP_TAB_NNZ_GAIN", 0.0, f64);
+            let gain_tol = tunable!("ENOMOTO_T_MIP_TAB_NNZ_GAIN", 1e-4, f64);
             if (late > 0 && self.sep_pass >= late) || (gain_tol > 0.0 && self.sep_last_gain > gain_tol) {
                 tab_cbc_left = None;
             }
