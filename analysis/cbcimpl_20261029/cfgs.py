@@ -42,4 +42,9 @@ CFGS = {
                     "ENOMOTO_MIP_SB_POLY_SCORE": "1"},
     "sbt_full_ps": {"ENOMOTO_MIP_SB_TIGHTEN": "1", "ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1", "ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR": "1", "ENOMOTO_MIP_SB_POLY_RC": "1",
                     "ENOMOTO_MIP_SB_RC": "1", "ENOMOTO_MIP_SB_POLY_SCORE": "1"},
+    # Mittelmann の MIP (186 問) の計測: tab_nnz と強分岐の引き継ぎの組み合わせ
+    "tab_abpr": {"ENOMOTO_MIP_TAB_NNZ_CBC": "1", "ENOMOTO_MIP_SB_TIGHTEN": "1", "ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1", "ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR": "1",
+                 "ENOMOTO_MIP_SB_POLY_RC": "1"},
+    "tab_fullps": {"ENOMOTO_MIP_TAB_NNZ_CBC": "1", "ENOMOTO_MIP_SB_TIGHTEN": "1", "ENOMOTO_MIP_SB_TIGHTEN_INHERIT": "1", "ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR": "1",
+                   "ENOMOTO_MIP_SB_POLY_RC": "1", "ENOMOTO_MIP_SB_RC": "1", "ENOMOTO_MIP_SB_POLY_SCORE": "1"},
 }
