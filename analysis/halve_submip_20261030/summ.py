@@ -7,9 +7,10 @@ here = Path(__file__).resolve().parent
 sys.path.insert(0, str(here.parents[0] / "cbcimpl_20261029"))
 from probs import LOSS, PROBS, SETS  # noqa: E402
 R = defaultdict(dict)
-for l in open(here / "bench.jsonl"):
-    r = json.loads(l); R[(r["problem"], r["rep"])][r["cfg"]] = r["result"]
-cfgs = sys.argv[1].split(",") if len(sys.argv) > 1 else ["def", "hm3_cfl", "h1", "hm3_cfl_h1"]
+for f in [here / "bench.jsonl", *sorted(here.glob("bench_s*.jsonl"))]:
+    for l in open(f):
+        r = json.loads(l); R[(r["problem"], r["rep"])][r["cfg"]] = r["result"]
+cfgs = sys.argv[1].split(",") if len(sys.argv) > 1 else ["def", "h1", "hm3_cfl_h1"]
 def t(res): return res.get("time", 60) if res.get("status") == "optimal" else 60.0
 reps = sorted({k[1] for k in R})
 sets = {"loss21": LOSS, "miplib40": SETS["miplib40"], "all58": PROBS}
