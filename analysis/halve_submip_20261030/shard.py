@@ -1,5 +1,5 @@
 """分担表 (shards.json) の k 番目を解き、bench_s<k>.jsonl に足す (2026-10-30。別のクラウドセッションで並列に回す)。
-使い方: python analysis/halve_submip_20261030/shard.py <k>。問題は MIPLIB から .miplib_cache/ に取得する。
+使い方: python analysis/halve_submip_20261030/shard.py <k> [<名前>] (<名前> を与えると <名前>.json の分担表を使い <名前>_s<k>.jsonl に書く。既定は shards / bench)。問題は MIPLIB から .miplib_cache/ に取得する。
 設定は run.py の CFGS (4 スレッド・60 秒)。問題ごとに設定の順を回で逆にする。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
@@ -10,8 +10,9 @@ sys.path.insert(0, str(D))
 import run_miplib_benchmark as rb  # noqa: E402
 from run import CFGS  # noqa: E402
 k = int(sys.argv[1])
-S = json.loads((D / "shards.json").read_text())
-OUT = D / f"bench_s{k}.jsonl"
+name = sys.argv[2] if len(sys.argv) > 2 else None
+S = json.loads((D / f"{name or 'shards'}.json").read_text())
+OUT = D / f"{name or 'bench'}_s{k}.jsonl"
 done = set()
 if OUT.exists():
     for l in OUT.read_text().splitlines():
