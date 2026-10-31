@@ -59,6 +59,11 @@ impl Pseudocost {
         }
     }
 
+    /// 列の数。
+    pub fn len(&self) -> usize {
+        self.n_up.len()
+    }
+
     /// スレッドの間での共有: 前回の共有の時点の自分 `base` から増えた観測を共有の `shared` に足し、自分を `shared` の
     /// 観測に揃える (`base` も揃えた後の値にする)。衝突スコア (古いものほど軽くする重み) はスレッドごとのまま。
     pub fn merge_shared(&mut self, base: &mut Pseudocost, shared: &mut Pseudocost) {

@@ -1542,9 +1542,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 使わない)。停滞による打ち切り (`ENOMOTO_T_MIP_SUBMIP_STALL`) と合わせて 93 問 (4 スレッド・60 秒、2 回): 主ギャップの和
         // 13.77 -> 12.99、SGM 38.29 -> 37.66 秒 (analysis/mip_primal_weakness_20261016.md)
         let basis = if env_str!("ENOMOTO_MIP_NO_SUBMIP_BASIS").is_none() && sub.n == p.n && self.lp.num_rows() >= p.m { Some(self.lp.basis().col) } else { None };
+        // `ENOMOTO_MIP_SUBMIP_PC_INHERIT` (試作): 今の pseudocost をサブ MIP の初めの pseudocost にする (HiGHS の `pscostinit`)。
+        // サブ MIP は空の pseudocost から始めるので、強分岐を減らす (`ENOMOTO_T_MIP_SUBMIP_RELIABLE`・`ENOMOTO_MIP_SUBMIP_HIGHS` の `s`) と分枝の見積りが全体の平均だけになる
+        let sub_pc = (env_str!("ENOMOTO_MIP_SUBMIP_PC_INHERIT").is_some() && sub.n == p.n).then(|| self.pc.clone());
         // 並列モード (根のヒューリスティクスの間): 別スレッドで解き始め、結果は後で受け取る
         if self.parallel_submips {
             self.submip_basis = basis;
+            self.submip_pc = sub_pc;
             self.spawn_submip(sub, params);
             return Some((super::solver::MipStatus::NotSolved, false));
         }
@@ -1553,6 +1557,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         SUBMIP_DEPTH.with(|d| d.set(depth + 1));
         if let Some(b) = basis {
             super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
+        }
+        if let Some(pc) = sub_pc {
+            super::solver::SUBMIP_PC.with(|s| *s.borrow_mut() = Some(pc));
         }
         // `ENOMOTO_MIP_FJ_P3=submip` (試作): サブ MIP の前処理でも p5s の前処理の変更を有効にする ([`super::fj_p3_problem`]。本体の問題は変えない)
         let p3 = env_str!("ENOMOTO_MIP_FJ_P3") == Some("submip") && !crate::fj_p3_force();
@@ -1577,6 +1584,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             crate::set_fj_p3_force(false);
         }
         super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = None);
+        super::solver::SUBMIP_PC.with(|s| *s.borrow_mut() = None);
         SUBMIP_DEPTH.with(|d| d.set(depth));
         if self.params.verbose {
             let nfree = (0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();

@@ -192,6 +192,9 @@ thread_local! {
     /// 次に始めるサブ MIP の根の LP の初めの基底 (列の状態。`ENOMOTO_MIP_NO_SUBMIP_BASIS` でなければ)。呼び出し側の LP の基底を渡す
     /// (HiGHS のサブ MIP の `rootbasis`)。前処理は列の番号を保つので列の状態はそのまま使え、行は論理変数で埋めて修復する。
     pub(crate) static SUBMIP_BASIS: std::cell::RefCell<Option<Vec<super::lp::VarStatus>>> = const { std::cell::RefCell::new(None) };
+    /// 次に始めるサブ MIP の初めの pseudocost (`ENOMOTO_MIP_SUBMIP_PC_INHERIT`、試作)。呼び出し側の pseudocost を渡す (HiGHS のサブ MIP の
+    /// `pscostinit`)。前処理は列の番号を保つので、列ごとの値をそのまま使う
+    pub(crate) static SUBMIP_PC: std::cell::RefCell<Option<Pseudocost>> = const { std::cell::RefCell::new(None) };
     /// 次に始めるサブ MIP が根のサブ MIP なら、その成果連動の打ち切りの情報 ([`SubmipCtl`]、`ENOMOTO_MIP_SUBMIP_OUTCOME_STOP`)。
     /// サブ MIP の最初の求解が取り出す (入れ子のサブ MIP には渡らない)
     pub(crate) static ROOT_SUBMIP_CTL: std::cell::RefCell<Option<std::sync::Arc<SubmipCtl>>> = const { std::cell::RefCell::new(None) };
@@ -430,6 +433,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     last_improve_node: Option<u64>,
     /// 次に別スレッドで出すサブ MIP の根の LP の初めの基底 ([`SUBMIP_BASIS`])
     pub(super) submip_basis: Option<Vec<super::lp::VarStatus>>,
+    /// 次に別スレッドで出すサブ MIP の初めの pseudocost ([`SUBMIP_PC`])
+    pub(super) submip_pc: Option<Pseudocost>,
     /// ヒューリスティクス役を務めている間か (ログで暫定解の出どころを示すため)
     pub(super) in_heur_role: bool,
     /// 受け取った解が別のスレッドのヒューリスティクスのものか (ログの表示用)
@@ -2042,6 +2047,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         root_submip: if params.submip { ROOT_SUBMIP_CTL.with(|c| c.borrow_mut().take()) } else { None },
         last_improve_node: None,
         submip_basis: None,
+        submip_pc: None,
         in_heur_role: false,
         other_thread_label: false,
         submip_fix_rate: None,
@@ -3292,6 +3298,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn run(&mut self) -> MipResult {
+        // `ENOMOTO_MIP_SUBMIP_PC_INHERIT` (試作): 呼び出し側の pseudocost から始める (信頼の閾値などこの求解の設定は今のまま)
+        if self.params.submip {
+            if let Some(pc) = SUBMIP_PC.with(|s| s.borrow_mut().take()) {
+                if pc.len() == self.p.n {
+                    let min_reliable = self.pc.min_reliable;
+                    self.pc = pc;
+                    self.pc.min_reliable = min_reliable;
+                }
+            }
+        }
         // `ENOMOTO_MIP_SUBMIP_NO_SB`: サブ MIP では強分岐をしない (HiGHS のサブ MIP の `mip_pscost_minreliable = 0` と同じ)。
         // 30n20b8 の根の RENS のサブ MIP は、最初の 26 ノードで強分岐に 2.2 秒 (250 回の LP) 使う
         // 暫定解がない (打ち切り値が無限の) サブ MIP だけ: すべてのサブ MIP に使うと RINS などの改善のサブ MIP が弱まり、
@@ -7289,7 +7305,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         prio = prio.max((quot - sb) / (sb + 1.0)).max(0.0);
         // `ENOMOTO_MIP_SUBMIP_HIGHS` の `s`: サブ MIP ではどの候補も信頼できるとみなす (HiGHS の `mip_pscost_minreliable = 0`。
         // `pc.min_reliable` はこの選び方では使われないので、`ENOMOTO_MIP_SUBMIP_NO_SB` だけでは強分岐は止まらない)
-        let reliable_thr = if self.params.submip && super::submip_highs('s') { 0.0 } else { (1.0 - prio) * 1.0 + prio * 5.0 };
+        // `ENOMOTO_T_MIP_SUBMIP_RELIABLE` = r (>= 0、試作): サブ MIP では観測が r 回に満たない候補だけを強分岐で評価する (親は 1〜5 回、
+        // `s` は 0 回。その間で強分岐を減らす)。`s` があればそちらを使う
+        let sub_rel = if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_RELIABLE", -1.0, f64) } else { -1.0 };
+        let reliable_thr = if self.params.submip && super::submip_highs('s') {
+            0.0
+        } else if sub_rel >= 0.0 {
+            sub_rel
+        } else {
+            (1.0 - prio) * 1.0 + prio * 5.0
+        };
         // 強分岐 LP の反復上限 (平均ノード反復の `ENOMOTO_T_MIP_SB_ITERMULT` 倍、10〜500)。倍率 2 -> 4 で 40 問 90 秒の SGM が
         // 5 台のマシン (各 2 回、マシンごとの基準と比較) で -2.7, -1.0, -2.1, +0.2, -2.8% (平均 -1.7%) なので 4 にした
         // (analysis/mip_opt_eval_20261011.md)
@@ -10967,6 +10992,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let fix_rate = self.submip_fix_rate.take();
         let basis = self.submip_basis.take();
+        let sub_pc = self.submip_pc.take();
         let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| std::sync::Arc::new(SubmipCtl::new(self.prune_limit())));
         let ctl2 = ctl.clone();
         self.pending_submips.push_back((
@@ -10981,6 +11007,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if let Some(b) = basis {
                     SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
+                }
+                if let Some(pc) = sub_pc {
+                    SUBMIP_PC.with(|s| *s.borrow_mut() = Some(pc));
                 }
                 // `ENOMOTO_MIP_FJ_P3=submip` (試作): サブ MIP の前処理でも p5s の前処理の変更を有効にする
                 if env_str!("ENOMOTO_MIP_FJ_P3") == Some("submip") {
