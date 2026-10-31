@@ -824,6 +824,16 @@ thread_local! {
     /// `ENOMOTO_MIP_RESTART_HCM_KEEP` (試作): 再スタート前の求解が HiGHS 流のカット管理を自動で選んだ (`hcm_auto`) か。新しい求解は
     /// 根の LP がカット込みの値から始まるので、強いカットの判定 (カットが根の LP を 3 割以上上げる) がまず立たない
     pub(crate) static RESTART_HCM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// `ENOMOTO_MIP_RESTART_PC` (試作): 再スタート前の pseudocost。再スタートが [`solve_problem`] に渡す問題の空間で置き、前処理後の空間に
+    /// 写して置き直し ([`pseudocost::Pseudocost::remap_for_restart`])、再スタート後の求解の開始時に取り出す (static TLS の領域のため Box)
+    pub(crate) static RESTART_PC: std::cell::RefCell<Option<Box<pseudocost::Pseudocost>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `ENOMOTO_MIP_RESTART_PC` (試作、既定では使わない): 外側の求解の再スタートで、再スタート前の pseudocost を前処理の後の問題の列へ写し、
+/// 新しい求解の初めの pseudocost にする (再スタートを繰り返しても続けて写す)。既定では再スタート後の求解は空の pseudocost から始まり、
+/// `ENOMOTO_MIP_SUBMIP_PC_INHERIT` でも再スタート後の根のサブ MIP に引き継ぐ観測がない (analysis/restart_pc_20261031.md)
+pub(crate) fn restart_pc_on() -> bool {
+    env_str!("ENOMOTO_MIP_RESTART_PC").is_some()
 }
 
 pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
@@ -1013,6 +1023,23 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         }
         (None, Some(cuts)) => RESTART_CUTS.with(|s| *s.borrow_mut() = Some(cuts)),
         _ => {}
+    }
+    // `ENOMOTO_MIP_RESTART_PC`: 再スタート前の pseudocost を前処理の後の列へ写す (列の番号は同じ。前処理で消えた・固定された列の観測は捨てる)
+    if let Some(mut pc) = RESTART_PC.with(|s| s.borrow_mut().take()) {
+        let mapped = match &presolved {
+            Some(Presolved::Reduced { prob, scaling, .. }) if prob.n == p.n && pc.len() == p.n => {
+                let keep: Vec<bool> = (0..p.n).map(|j| prob.col_lo[j] < prob.col_up[j]).collect();
+                pc.remap_for_restart(&keep, &scaling.d);
+                Some(pc)
+            }
+            None if pc.len() == p.n => {
+                let keep: Vec<bool> = (0..p.n).map(|j| p.col_lo[j] < p.col_up[j]).collect();
+                pc.remap_for_restart(&keep, &[]);
+                Some(pc)
+            }
+            _ => None,
+        };
+        RESTART_PC.with(|s| *s.borrow_mut() = mapped);
     }
     match presolved {
         Some(Presolved::Infeasible) => {

@@ -36,6 +36,9 @@ thread_local! {
     /// このスレッドで解いているサブ MIP では使わない `ENOMOTO_MIP_SUBMIP_HIGHS` の文字の印 ([`super::submip_hs_bit`] の和。
     /// `ENOMOTO_MIP_SUBMIP_HIGHS_TRIM`・`ENOMOTO_MIP_SUBMIP_HIGHS_RESTART`、[`Solver::hs_drop`])
     pub(super) static SUBMIP_HS_DROP: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+    /// このスレッドで解いているサブ MIP は外側の求解の再スタート後の根で作ったものか (`ENOMOTO_MIP_SUBMIP_RELIABLE_RESTART_ONLY`、
+    /// [`Solver::submip_r0_on`])
+    pub(super) static SUBMIP_R0: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `ENOMOTO_MIP_FJ_NOSOL_EXTEND` (試作): 並列の FJ のスレッドで、解がまだ 1 つもなければ時間の予算を過ぎても種を変えた FJ2 を
     /// この秒数 (FJ を始めてから) まで続ける (0 = 使わない)。止める合図 (根のカットのループの終わり) が来ればそこで止まる
     pub(super) static FJ_NOSOL_CAP: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
@@ -1508,6 +1511,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let hs_drop = self.hs_drop();
         let hs_on = |c: char| super::submip_highs(c) && hs_drop & super::submip_hs_bit(c) == 0;
         let time_highs = hs_on('t') && !self.params.submip && self.nodes <= 1;
+        let r0 = self.submip_r0_on();
         // `ENOMOTO_MIP_SUBMIP_HIGHS` の `g`: ギャップを親と同じにする (HiGHS は `mip_rel_gap = 0`)
         let gap_highs = hs_on('g');
         let params = super::solver::MipParams {
@@ -1556,6 +1560,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.submip_basis = basis;
             self.submip_pc = sub_pc;
             self.submip_hs_drop = hs_drop;
+            self.submip_r0 = r0;
             self.spawn_submip(sub, params);
             return Some((super::solver::MipStatus::NotSolved, false));
         }
@@ -1563,6 +1568,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let depth = SUBMIP_DEPTH.with(|d| d.get());
         SUBMIP_DEPTH.with(|d| d.set(depth + 1));
         let hs_drop_prev = SUBMIP_HS_DROP.with(|f| f.replace(hs_drop));
+        let r0_prev = SUBMIP_R0.with(|f| f.replace(r0));
         if let Some(b) = basis {
             super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
         }
@@ -1595,6 +1601,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         super::solver::SUBMIP_PC.with(|s| *s.borrow_mut() = None);
         SUBMIP_DEPTH.with(|d| d.set(depth));
         SUBMIP_HS_DROP.with(|f| f.set(hs_drop_prev));
+        SUBMIP_R0.with(|f| f.set(r0_prev));
         if self.params.verbose {
             let nfree = (0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();
             eprintln!("MIP:   sub-MIP: {nfree} free columns of {}, status {:?}, nodes {}, objective {:?}, {:.2}s", p.n, r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64());
@@ -1747,6 +1754,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         m
+    }
+
+    /// `ENOMOTO_MIP_SUBMIP_RELIABLE_RESTART_ONLY` (試作、既定では使わない) で、これから作るサブ MIP (と中の入れ子) に
+    /// `ENOMOTO_T_MIP_SUBMIP_RELIABLE` を効かせるか: 外側の求解の再スタート後の根で作るサブ MIP だけ。最初の根のサブ MIP は強分岐ありのまま
+    /// (h80x6320d・physiciansched6-2 の得は最初の根の hs のサブ MIP から来る。analysis/restart_pc_20261031.md)
+    pub(super) fn submip_r0_on(&self) -> bool {
+        SUBMIP_R0.with(|f| f.get()) || (!self.params.submip && self.params.restarts > 0 && self.nodes <= 1)
     }
 
     /// 暫定解がないサブ MIP の中でも、暫定解がない根の RENS を使ってよいか (`ENOMOTO_MIP_SUBMIP_RENS`)。

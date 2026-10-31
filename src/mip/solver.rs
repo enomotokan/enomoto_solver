@@ -437,6 +437,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_pc: Option<Pseudocost>,
     /// 次に別スレッドで解くサブ MIP で使わない `ENOMOTO_MIP_SUBMIP_HIGHS` の文字の印 ([`Self::hs_drop`])
     pub(super) submip_hs_drop: u16,
+    /// 次に別スレッドで解くサブ MIP が再スタート後の根のものか ([`Self::submip_r0_on`])
+    pub(super) submip_r0: bool,
     /// `ENOMOTO_MIP_SUBMIP_RELIABLE_INHERITED` (試作): 親から引き継いだ pseudocost の列ごとの観測の数 (サブ MIP の側、[`SUBMIP_PC`])
     inherited_obs: Option<Vec<u32>>,
     /// ヒューリスティクス役を務めている間か (ログで暫定解の出どころを示すため)
@@ -2054,6 +2056,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_basis: None,
         submip_pc: None,
         submip_hs_drop: 0,
+        submip_r0: false,
         inherited_obs: None,
         in_heur_role: false,
         other_thread_label: false,
@@ -3305,6 +3308,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn run(&mut self) -> MipResult {
+        // `ENOMOTO_MIP_RESTART_PC` (試作): 再スタート前の pseudocost (前処理の後の列へ写したもの) から始める
+        if !self.params.submip && self.params.restarts > 0 && self.snap.is_none() {
+            if let Some(pc) = super::RESTART_PC.with(|s| s.borrow_mut().take()) {
+                if pc.len() == self.p.n {
+                    let min_reliable = self.pc.min_reliable;
+                    self.pc = *pc;
+                    self.pc.min_reliable = min_reliable;
+                    if self.params.verbose {
+                        let (up, down, both, su, sd) = self.pc.observation_counts();
+                        eprintln!("MIP: restart {}: started from the mapped pseudocost: columns up {up}, down {down}, both {both}; observations up {su}, down {sd}", self.params.restarts);
+                    }
+                }
+            }
+        }
         // `ENOMOTO_MIP_SUBMIP_PC_INHERIT` (試作): 呼び出し側の pseudocost から始める (信頼の閾値などこの求解の設定は今のまま)
         if self.params.submip {
             if let Some(pc) = SUBMIP_PC.with(|s| s.borrow_mut().take()) {
@@ -7334,7 +7351,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `pc.min_reliable` はこの選び方では使われないので、`ENOMOTO_MIP_SUBMIP_NO_SB` だけでは強分岐は止まらない)
         // `ENOMOTO_T_MIP_SUBMIP_RELIABLE` = r (>= 0、試作): サブ MIP では観測が r 回に満たない候補だけを強分岐で評価する (親は 1〜5 回、
         // `s` は 0 回。その間で強分岐を減らす)。`s` があればそちらを使う
-        let sub_rel = if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_RELIABLE", -1.0, f64) } else { -1.0 };
+        // `ENOMOTO_MIP_SUBMIP_RELIABLE_RESTART_ONLY` (試作): r は外側の求解の再スタート後の根で作ったサブ MIP (と中の入れ子) だけに使う
+        // ([`Self::submip_r0_on`])。ほかのサブ MIP は親と同じ閾値
+        let rel_here = env_str!("ENOMOTO_MIP_SUBMIP_RELIABLE_RESTART_ONLY").is_none() || super::heuristics::SUBMIP_R0.with(|f| f.get());
+        let sub_rel = if self.params.submip && rel_here { tunable!("ENOMOTO_T_MIP_SUBMIP_RELIABLE", -1.0, f64) } else { -1.0 };
         let base_thr = (1.0 - prio) * 1.0 + prio * 5.0;
         let reliable_thr = if self.params.submip && super::submip_highs('s') {
             0.0
@@ -10985,8 +11005,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let rows: Vec<(Vec<(usize, f64)>, super::lp::VarStatus)> = (0..self.lp.num_rows().min(b.row.len())).map(|i| (self.lp.row(i), b.row[i])).collect();
             RESTART_BASIS.with(|s| *s.borrow_mut() = Some((b.col, rows)));
         }
+        // 診断: 再スタートの時点の pseudocost の観測 (観測のある列の数と観測の総数、analysis/restart_pc_20261031.md)
+        if self.params.verbose {
+            let (up, down, both, su, sd) = self.pc.observation_counts();
+            let free = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] < self.dom.global_up[j]).count();
+            eprintln!("MIP: restart {}: pseudocost observations: columns up {up}, down {down}, both {both} (free integer columns {free}); observations up {su}, down {sd}; nodes {}", params.restarts, self.nodes);
+        }
+        // `ENOMOTO_MIP_RESTART_PC` (試作、既定では使わない): 今の pseudocost を再スタート後の求解の初めの pseudocost にする
+        // (前処理の後の列へ写すのは [`super::solve_problem`] の中、受け取りは [`Self::run`])
+        if super::restart_pc_on() {
+            super::RESTART_PC.with(|s| *s.borrow_mut() = Some(Box::new(self.pc.clone())));
+        }
         super::RESTART_HCM.with(|f| f.set(self.hcm_auto && super::restart_hcm_keep()));
         let r = super::solve_problem(&newp, params, true);
+        super::RESTART_PC.with(|s| *s.borrow_mut() = None);
         super::RESTART_HCM.with(|f| f.set(false));
         super::RESTART_CUTS_READD.with(|f| f.set(false));
         RESTART_BASIS.with(|s| *s.borrow_mut() = None);
@@ -11046,6 +11078,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let basis = self.submip_basis.take();
         let sub_pc = self.submip_pc.take();
         let hs_drop = std::mem::take(&mut self.submip_hs_drop);
+        let r0 = std::mem::take(&mut self.submip_r0);
         let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| std::sync::Arc::new(SubmipCtl::new(self.prune_limit())));
         let ctl2 = ctl.clone();
         self.pending_submips.push_back((
@@ -11053,6 +11086,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 別スレッドで解くサブ MIP も入れ子の深さ 1 として数える ([`super::heuristics::SUBMIP_DEPTH`])
                 super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
                 super::heuristics::SUBMIP_HS_DROP.with(|f| f.set(hs_drop));
+                super::heuristics::SUBMIP_R0.with(|f| f.set(r0));
                 if comp_diag {
                     super::SUBMIP_LABEL.with(|l| l.set(label));
                 }

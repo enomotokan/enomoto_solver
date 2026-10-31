@@ -64,6 +64,47 @@ impl Pseudocost {
         self.n_up.len()
     }
 
+    /// 観測の量 (診断用): (上向きの観測のある列, 下向きの観測のある列, 両向きのある列, 上向きの観測の総数, 下向きの観測の総数)。
+    pub fn observation_counts(&self) -> (usize, usize, usize, u64, u64) {
+        let up = self.n_up.iter().filter(|&&k| k > 0).count();
+        let down = self.n_down.iter().filter(|&&k| k > 0).count();
+        let both = self.n_up.iter().zip(&self.n_down).filter(|&(&u, &d)| u > 0 && d > 0).count();
+        let su: u64 = self.n_up.iter().map(|&k| k as u64).sum();
+        let sd: u64 = self.n_down.iter().map(|&k| k as u64).sum();
+        (up, down, both, su, sd)
+    }
+
+    /// `ENOMOTO_MIP_RESTART_PC` (試作): 再スタートの前処理の後の問題へ写す。前処理は列の番号を保ち、尺度 `d` を掛ける (x = d x')
+    /// ので、残った列 (`keep`) は単位あたりの値に d を掛けて観測の数ごと写し、消えた列は観測を捨てる。全体の平均は残った列から数え直す
+    pub fn remap_for_restart(&mut self, keep: &[bool], d: &[f64]) {
+        for j in 0..self.len().min(keep.len()) {
+            if keep[j] {
+                let s = d.get(j).copied().unwrap_or(1.0);
+                self.sum_up[j] *= s;
+                self.sum_down[j] *= s;
+            } else {
+                self.sum_up[j] = 0.0;
+                self.n_up[j] = 0;
+                self.sum_down[j] = 0.0;
+                self.n_down[j] = 0;
+                self.cutoff_up[j] = 0;
+                self.cutoff_down[j] = 0;
+                for k in 0..2 {
+                    self.inf_sum[k][j] = 0.0;
+                    self.inf_n[k][j] = 0;
+                    self.conflict[k][j] = 0.0;
+                }
+            }
+        }
+        self.total_up = self.sum_up.iter().sum();
+        self.total_n_up = self.n_up.iter().map(|&k| k as u64).sum();
+        self.total_down = self.sum_down.iter().sum();
+        self.total_n_down = self.n_down.iter().map(|&k| k as u64).sum();
+        self.inf_total = self.inf_sum.iter().flatten().sum();
+        self.inf_total_n = self.inf_n.iter().flatten().map(|&k| k as u64).sum();
+        self.conflict_total = self.conflict.iter().flatten().sum();
+    }
+
     /// スレッドの間での共有: 前回の共有の時点の自分 `base` から増えた観測を共有の `shared` に足し、自分を `shared` の
     /// 観測に揃える (`base` も揃えた後の値にする)。衝突スコア (古いものほど軽くする重み) はスレッドごとのまま。
     pub fn merge_shared(&mut self, base: &mut Pseudocost, shared: &mut Pseudocost) {
