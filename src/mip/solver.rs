@@ -417,6 +417,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) heur_label: &'static str,
     /// 根のヒューリスティクス 1 回の時間の上限 (`ENOMOTO_T_MIP_ROOT_DIVE_TIME_FRAC`。[`Solver::time_up`] が見る)
     pub(super) heur_stop: Option<Instant>,
+    /// `ENOMOTO_MIP_BG_CUTS_PROOF_STOP` (試作): 根のヒューリスティクスの間に見る裏のカットの求解 ([`Solver::bg_proved`])
+    bg_watch: Option<std::sync::Arc<CutJob>>,
+    /// 裏のカットの下界が刈り込みの上限に届いたのを見た印 ([`Solver::bg_proved`]、一度立てば戻さない)
+    bg_proved_seen: std::cell::Cell<bool>,
     /// 最初の根の LP の反復数 (丸め系のヒューリスティクスの連続部分の LP の反復上限に使う)
     pub(super) root_lp_iters: u64,
     /// 暫定解が Feasibility Jump で見つけたものだけか (`ENOMOTO_MIP_FJ2_KEEP_NOINC` の判定に使う)
@@ -2046,6 +2050,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_cmir_stats: [0; 3],
         heur_label: "",
         heur_stop: None,
+        bg_watch: None,
+        bg_proved_seen: std::cell::Cell::new(false),
         root_lp_iters: 0,
         inc_only_fj: false,
         ref_sol: None,
@@ -2564,9 +2570,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (env_str!("ENOMOTO_MIP_HIGHS_CUTMGMT").is_some() || self.hcm_auto) && !self.params.submip
     }
 
+    /// `ENOMOTO_MIP_BG_CUTS_PROOF_STOP` (試作、既定では使わない): 根のヒューリスティクスの間に、裏のカットの LP の目的値が刈り込みの上限
+    /// (暫定解、再スタートの後なら外側の打ち切り値) に届いたか。届けば根の下界で最適が証明できるので、[`Self::time_up`] を真にして
+    /// Feasibility Pump・ダイビングなどを止め、残りの根のヒューリスティクスも飛ばし、裏のカットの結果を取り込みに進む。
+    /// physiciansched6-2 では、再スタートで最適解 49324 が打ち切り値で捨てられた後の根で、主のスレッドが Feasibility Pump に 15〜25 秒使う間に
+    /// 裏のカットが 49324 に届いていたのに、受け取るのが根のヒューリスティクスの後なので時間が残らず使われなかった (16 回中 8 回。
+    /// analysis/bg_proof_stop_20261031.md)。サブ MIP の側 ([`Self::root_submip`] があるとき) は、外側が `-inf` を渡したら止まる
+    pub(super) fn bg_proved(&self) -> bool {
+        if self.bg_proved_seen.get() {
+            return true;
+        }
+        if let Some(c) = &self.root_submip {
+            if c.best() == f64::NEG_INFINITY {
+                self.bg_proved_seen.set(true);
+                return true;
+            }
+        }
+        let Some(j) = &self.bg_watch else { return false };
+        let Some(&obj) = j.prog.lock().unwrap().last() else { return false };
+        let z = self.prune_limit();
+        if z.is_finite() && obj >= z - 1e-9 * z.abs().max(1.0) {
+            self.bg_proved_seen.set(true);
+            if self.params.verbose {
+                eprintln!("MIP: background cuts reached the prune limit {z:.10e} (obj {obj:.10e}) during the root heuristics; stopping them ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+            return true;
+        }
+        false
+    }
+
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || self.heur_stop.is_some_and(|d| Instant::now() >= d)
+            || ((self.bg_watch.is_some() || self.root_submip.is_some()) && self.bg_proved())
             || (self.snap.is_some() && FIND_STOP.with(|f| f.borrow().as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))))
             || self.pool.as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed))
             || ROLE_POOL.with(|r| r.borrow().as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed) || p.fin.load(std::sync::atomic::Ordering::Relaxed)))
@@ -3972,6 +4008,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let _ = solve_worker(snap, None, params);
                     })
                     .expect("failed to spawn the cut thread");
+                if env_str!("ENOMOTO_MIP_BG_CUTS_PROOF_STOP").is_some() {
+                    self.bg_watch = Some(job.clone());
+                }
                 bg_cuts = Some(BgCuts { job, handle: Some(handle) });
             }
         }
@@ -4426,6 +4465,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 並列モードは根のヒューリスティクスの間だけ (LP 解が整数で途中を飛ばした場合も戻す)
         self.parallel_submips = false;
+        // `ENOMOTO_MIP_BG_CUTS_PROOF_STOP`: 裏のカットで証明できたなら、別スレッドのサブ MIP にも `-inf` を渡して止める ([`Self::bg_proved`])
+        let bg_proof = self.bg_watch.is_some() && self.bg_proved();
+        if bg_proof {
+            for it in &self.pending_submips {
+                if let Some(c) = &it.5 {
+                    c.offer(f64::NEG_INFINITY);
+                }
+            }
+        }
+        self.bg_watch = None;
+        self.bg_proved_seen.set(false);
         self.join_submips(0);
         // カットを強める求解を止め、その LP のカットで根の LP のカットを置き換える
         if let Some(mut bg) = bg_cuts.take() {
@@ -4437,7 +4487,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if mult > 0.0 {
                     cap = cap.min(mult * root_cut_secs);
                 }
-                let cutoff = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+                // `ENOMOTO_MIP_BG_CUTS_PROOF_STOP`: 再スタートの後で暫定解がなくても、外側の打ち切り値に届いたら待ちをやめる
+                let cutoff = if env_str!("ENOMOTO_MIP_BG_CUTS_PROOF_STOP").is_some() { self.prune_limit() } else { self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z) };
                 // 待った後の残り時間が時間の上限の `ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT` (既定 0.05) 倍を切るなら待たない
                 // (残りが少ないと、置き換えた LP の解き直しや木を始めるための時間がなくなる)
                 let min_left = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT", 0.05, f64) * self.params.time_limit;
