@@ -4384,8 +4384,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // 並列モード: 別スレッドのサブ MIP の結果を出した順に受け取る
                 self.parallel_submips = false;
+                let z_join0 = self.incumbent.as_ref().map(|(z, _)| *z);
                 self.join_submips(0);
                 self.poll_find_thread();
+                // `ENOMOTO_MIP_EARLY_RESTART_JOIN` (試作、既定では使わない): 別スレッドのサブ MIP (RENS など)・解探しのスレッドの解を
+                // ここで受け取って暫定解が良くなり、早めの再スタートの判定が通れば、残りの根のヒューリスティクス (RENS のやり直し・RINS)
+                // を飛ばす (逐次のヒューリスティクスの後と同じ扱い)。neos-2978193-inde では乱択丸めが最適解を出せなかった回に並列の RENS が
+                // 最適解を出して整数列 8/64 本が固定されても、RENS のやり直しと RINS (各 50 ノード) を回し、hs の形のサブ MIP では
+                // 1 本 3〜5 秒になり最初の根が 11〜15 秒かかっていた (analysis/cand_slow_neos-2978193-inde_20261031.md)
+                if env_str!("ENOMOTO_MIP_EARLY_RESTART_JOIN").is_some()
+                    && super::early_restart_on()
+                    && !self.early_restart
+                    && self.incumbent.as_ref().map(|(z, _)| *z) != z_join0
+                    && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_EARLY_RESTART_FRAC", 0.025, f64))
+                {
+                    self.early_restart = true;
+                    if self.params.verbose {
+                        eprintln!("MIP: early restart: {} newly fixed integer columns after the parallel sub-MIPs ({:.2}s)", self.newly_fixed_ints(), self.start.elapsed().as_secs_f64());
+                    }
+                }
                 // 局所探索と Repair (暫定解がなければ)
                 if self.noinc_like() && env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() {
                     heur!("local search", self.local_search_heur());
