@@ -216,3 +216,29 @@ ENOMOTO の既定は今回の計測の 7〜9 回分。
   既定にはしない。時間の上限の超過の直し (サブ MIP の前処理の止め) は既定に入っている。
 - 次: neos17・pk1 で擬似コストの引き継ぎが遅くする理由 (引き継いだ値が分枝の向きを悪くするのか、信頼の閾値 0 が強分枝を減らしすぎるのか) と、
   binkar10_1・swath1 で `s` が遅くする理由を見て、効く問題の側 (h80x6320d・qiu) を残せる形を探す。
+
+## bench7: 既定にする候補 cand を 58 問 2 回 (回 8・9) と Mittelmann 186 問で確かめる (2026-10-31)
+
+- cand = hs_pi0_bgw_r (`ENOMOTO_MIP_SUBMIP_HIGHS=-s ENOMOTO_MIP_SUBMIP_PC_INHERIT=1 ENOMOTO_T_MIP_SUBMIP_RELIABLE=0 ENOMOTO_MIP_BG_CUTS_WAIT=1 ENOMOTO_MIP_SUBMIP_HIGHS_TRIM=r`)
+  + `ENOMOTO_T_MIP_RESTART_FIRST_FAC=0.01` (`restart_thr_20261031.md`) + `ENOMOTO_MIP_BG_CUTS_PROOF_STOP=1` (`bg_proof_stop_20261031.md`)。
+- 分担は `bench7.json` (20 個、`fa5113ee` のコード)。集計は `summ7.py`、出力は `summ7/summ7.txt`。60 秒を超えて返った回は時間切れとして数える。
+
+| 範囲 | def (SGM / 解けた数) | cand | 比 |
+|---|---|---|---|
+| 58 問 回 8 | 19.09 / 43 | 17.97 / 43 | −5.9% |
+| 58 問 回 9 | 19.49 / 40 | 18.25 / 42 | −6.3% |
+| 58 問 2 回の合計 (116) | 19.29 / 83 | **18.11 / 85** | **−6.1%** |
+| Mittelmann 186 問 (1 回) | 46.04 / 44 | **44.72 / 49** | **−2.9%** |
+| Mittelmann の片方以上解けた 49 問 | 20.08 / 44 | 17.49 / 49 | −12.9% |
+
+- 片方だけ解けた回は 7 回で、**全部 cand だけ**: cbs-cta (4.8 秒)・neos-1171737・neos-957323・neos-960392 (Mittelmann)、h80x6320d (回 9)、physiciansched6-2 (回 9・Mittelmann)。
+  bench6 で def だけ解けた n5-3・neos-1582420・neos-2978193-inde は、今回は両方とも解けた (ただし cand が遅い、下)。
+- 差が 3 秒かつ 20% 以上: cand が速い 28 回、遅い 10 回。
+  - 速い: mc11 (3 回とも)・h80x6320d・qiu (回 8)・misc07・nu25-pr12・neos-911970・neos-3083819-nubu・pg・piperout-27・app1-1・enlight_hard・nursesched-sprint02・mas76 など。
+  - 遅い: n5-3 (26.8 → 54.9)・neos-1582420 (26.1 → 59.3)・neos-2978193-inde (33.1 → 50.2)・qiu (回 9、25.2 → 48.9)・eil33-2 (回 8)・neos-860300・neos5・ns1208400・pk1・neos17。
+    n5-3・neos-1582420・neos-2978193-inde は bench6 でも hs_pi0_bgw で遅かった (def だけ解けた) ので、揺れではなく形の差とみる。
+- 最適値の食い違い・crash はない (neos859080 は両方とも infeasible で、正しい)。
+- 時間の上限の超過: cand の rmatr200-p5 が 91.7 秒 (def は 60.1 秒)。最初の解が 60.03 秒で、上限の後にも何かが走っている。
+  ほかに cand の neos-4763324-toguru 63.0・rail507 61.3・unitcal_7 64.8 秒 (def と両方の cryptanalysiskb128n5obj16・sorrell3 も 61〜68 秒)。
+- 判断: 58 問・Mittelmann の両方で SGM が下がり、解けた数が増え (+2・+5)、def だけ解けた回がない。**既定にしてよい**。
+  ただし既定にする前に、rmatr200-p5 の 31 秒の超過を直す。遅くなる 3 問 (n5-3・neos-1582420・neos-2978193-inde) は既定にした後の課題として調べる。
