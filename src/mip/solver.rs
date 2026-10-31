@@ -437,6 +437,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_pc: Option<Pseudocost>,
     /// 次に別スレッドで解くサブ MIP を `ENOMOTO_MIP_SUBMIP_HIGHS` の形にしない印 ([`Self::hs_trim_off`])
     pub(super) submip_hs_off: bool,
+    /// `ENOMOTO_MIP_SUBMIP_RELIABLE_INHERITED` (試作): 親から引き継いだ pseudocost の列ごとの観測の数 (サブ MIP の側、[`SUBMIP_PC`])
+    inherited_obs: Option<Vec<u32>>,
     /// ヒューリスティクス役を務めている間か (ログで暫定解の出どころを示すため)
     pub(super) in_heur_role: bool,
     /// 受け取った解が別のスレッドのヒューリスティクスのものか (ログの表示用)
@@ -2052,6 +2054,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_basis: None,
         submip_pc: None,
         submip_hs_off: false,
+        inherited_obs: None,
         in_heur_role: false,
         other_thread_label: false,
         submip_fix_rate: None,
@@ -3307,6 +3310,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(pc) = SUBMIP_PC.with(|s| s.borrow_mut().take()) {
                 if pc.len() == self.p.n {
                     let min_reliable = self.pc.min_reliable;
+                    if env_str!("ENOMOTO_MIP_SUBMIP_RELIABLE_INHERITED").is_some() {
+                        self.inherited_obs = Some((0..self.p.n).map(|j| pc.min_observations(j)).collect());
+                    }
                     self.pc = pc;
                     self.pc.min_reliable = min_reliable;
                 }
@@ -4896,6 +4902,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return self.finish_limit(MipStatus::TimeLimit, plunge.as_ref());
             }
             if self.nodes >= self.params.node_limit {
+                self.dbg_submip_stop("node limit");
                 return self.finish_limit(MipStatus::NodeLimit, plunge.as_ref());
             }
             // 潜りが枝刈りで終わったら、潜った道の兄弟ノード (新しいものから) に戻る (HiGHS の backtrackPlunge)。
@@ -5002,6 +5009,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             // 成果連動の打ち切り ([`submip_outcome_stop`]): 根のサブ MIP は、解を見つけてから見つけるまでと同じだけ進めて良くならなければ止める
                             if let (Some(_), Some(k)) = (self.root_submip.as_ref(), self.last_improve_node) {
                                 if self.nodes.saturating_sub(k) >= k.max(tunable!("ENOMOTO_T_MIP_SUBMIP_OUTCOME_MIN_NODES", 50u64, u64)) {
+                                    self.dbg_submip_stop("outcome");
                                     return self.finish_limit(MipStatus::NodeLimit, Some(&n));
                                 }
                             }
@@ -5010,6 +5018,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 if n.estimate >= self.prune_limit() {
                                     self.submip_stall += 1;
                                     if self.submip_stall >= stall_lim {
+                                        self.dbg_submip_stop("stall");
                                         return self.finish_limit(MipStatus::NodeLimit, Some(&n));
                                     }
                                 } else {
@@ -7312,7 +7321,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.sb_agree_tick % tunable!("ENOMOTO_T_MIP_SB_AGREE_PROBE", 10u64, u64).max(1) != 0
         };
         self.sb_agree_stats[2] += agree_skip as u64;
-        let allow_sb = sb <= maxsb && !degenerate && !agree_skip;
+        // `ENOMOTO_T_MIP_SUBMIP_SB_TIME_FRAC` = f (> 0、試作、既定 0 で使わない): サブ MIP では、強分岐に使った時間がサブ MIP の経過時間の
+        // f 倍を超えたら強分岐しない (反復の予算 25000 + 0.125 倍は大きな問題のサブ MIP では重い: h80x6320d の根の root reduced cost の
+        // サブ MIP は 50 ノードに強分岐の LP 990 回・10 秒かかり、何も見つけない。analysis/diag_pi0_20261031.md)
+        let sb_frac = if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_SB_TIME_FRAC", 0.0, f64) } else { 0.0 };
+        let sb_time_ok = sb_frac <= 0.0 || self.sb_secs <= sb_frac * self.start.elapsed().as_secs_f64();
+        let allow_sb = sb <= maxsb && !degenerate && !agree_skip && sb_time_ok;
         // 信頼度のしきい値: 予算の残りに応じて 1..5
         let mut prio = ((maxsb - sb) / (sb + 1.0)).min(1.0);
         prio = prio.max((quot - sb) / (sb + 1.0)).max(0.0);
@@ -7321,18 +7335,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_T_MIP_SUBMIP_RELIABLE` = r (>= 0、試作): サブ MIP では観測が r 回に満たない候補だけを強分岐で評価する (親は 1〜5 回、
         // `s` は 0 回。その間で強分岐を減らす)。`s` があればそちらを使う
         let sub_rel = if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_RELIABLE", -1.0, f64) } else { -1.0 };
+        let base_thr = (1.0 - prio) * 1.0 + prio * 5.0;
         let reliable_thr = if self.params.submip && super::submip_highs('s') {
             0.0
         } else if sub_rel >= 0.0 {
             sub_rel
         } else {
-            (1.0 - prio) * 1.0 + prio * 5.0
+            base_thr
         };
+        // `ENOMOTO_MIP_SUBMIP_RELIABLE_INHERITED` (試作): サブ MIP の閾値 (`s`・`ENOMOTO_T_MIP_SUBMIP_RELIABLE`) は、親から引き継いだ
+        // pseudocost に観測のある列だけに使い、観測のない列は親と同じ閾値 (1〜5) にする。根のサブ MIP は親の pseudocost がほぼ空のうちに
+        // 出るので、閾値 0 だと分枝の見積りが全体の平均だけになる (neos17 の根の RENS は 54 ノードで成果連動の打ち切りに掛かり、
+        // 強分岐ありなら 63 ノード目で見つける最適解を逃す。analysis/diag_pi0_20261031.md)
+        let inh = self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_RELIABLE_INHERITED").is_some();
+        let thr_of = |s: &Self, j: usize| if !inh || s.inherited_obs.as_ref().is_some_and(|o| o[j] > 0) { reliable_thr } else { base_thr };
         // 強分岐 LP の反復上限 (平均ノード反復の `ENOMOTO_T_MIP_SB_ITERMULT` 倍、10〜500)。倍率 2 -> 4 で 40 問 90 秒の SGM が
         // 5 台のマシン (各 2 回、マシンごとの基準と比較) で -2.7, -1.0, -2.1, +0.2, -2.8% (平均 -1.7%) なので 4 にした
         // (analysis/mip_opt_eval_20261011.md)
         let sb_iter_limit = ((tunable!("ENOMOTO_T_MIP_SB_ITERMULT", 4.0, f64) * self.avg_node_iters() as f64 * (1.0 + 20.0 / self.nodes.max(1) as f64)) as u64).clamp(10, 500);
-        let unreliable: usize = cands.iter().filter(|&&(j, _, _)| (self.pc.min_observations(j) as f64) < reliable_thr).count();
+        let unreliable: usize = cands.iter().filter(|&&(j, _, _)| (self.pc.min_observations(j) as f64) < thr_of(self, j)).count();
         let lookahead = (tunable!("ENOMOTO_T_MIP_SB_LOOKAHEAD", 9.0, f64) * (1.0 + unreliable as f64 / cands.len().max(1) as f64)) as usize;
         let max_tried = tunable!("ENOMOTO_T_MIP_SB_MAXCAND", 100usize, usize);
         let mut best: Option<(usize, f64, f64)> = None; // (列, 値, スコア)
@@ -7360,7 +7381,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         while ci < cands.len() {
             let (j, v, pscore) = cands[ci];
             ci += 1;
-            let is_reliable = (self.pc.min_observations(j) as f64) >= reliable_thr;
+            let is_reliable = (self.pc.min_observations(j) as f64) >= thr_of(self, j);
             if is_reliable || !allow_sb || tried >= max_tried || no_improve >= lookahead as f64 || self.time_up() || (self.sb_iters as f64) > maxsb {
                 if best.is_none_or(|(_, _, s)| pscore > s) {
                     best = Some((j, v, pscore));
@@ -7395,7 +7416,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if batch.len() >= nth || tried + batch.len() > max_tried {
                         break;
                     }
-                    if (self.pc.min_observations(j2) as f64) < reliable_thr {
+                    if (self.pc.min_observations(j2) as f64) < thr_of(self, j2) {
                         batch.push((j2, v2, self.dom.lo[j2], self.dom.up[j2]));
                     }
                 }
@@ -7900,6 +7921,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// [`Self::finish`] が `root_lb` で抑える)。
     fn root_fail_bound(&self) -> f64 {
         if self.pool.is_some() && self.snap.is_some() { f64::INFINITY } else { f64::NEG_INFINITY }
+    }
+
+    /// 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_STOP`: サブ MIP がノードの上限・停滞・成果連動のどれで止まったかと、そこまでのノード・強分岐の LP・暫定解
+    fn dbg_submip_stop(&self, why: &str) {
+        if self.params.submip && env_str!("ENOMOTO_MIP_DEBUG_SUBMIP_STOP").is_some() {
+            eprintln!(
+                "MIP:   sub-MIP stop ({why}): nodes {} (limit {}), sb LPs {} ({} iters, {:.2}s), node iters {}, last improvement at node {:?}, incumbent {:?}, {:.2}s",
+                self.nodes,
+                self.params.node_limit,
+                self.sb_lps,
+                self.sb_iters,
+                self.sb_secs,
+                self.node_iters,
+                self.last_improve_node,
+                self.incumbent.as_ref().map(|s| s.0),
+                self.start.elapsed().as_secs_f64()
+            );
+        }
     }
 
     fn finish_limit(&mut self, status: MipStatus, current: Option<&OpenNode>) -> MipResult {
