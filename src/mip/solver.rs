@@ -192,7 +192,7 @@ thread_local! {
     /// 次に始めるサブ MIP の根の LP の初めの基底 (列の状態。`ENOMOTO_MIP_NO_SUBMIP_BASIS` でなければ)。呼び出し側の LP の基底を渡す
     /// (HiGHS のサブ MIP の `rootbasis`)。前処理は列の番号を保つので列の状態はそのまま使え、行は論理変数で埋めて修復する。
     pub(crate) static SUBMIP_BASIS: std::cell::RefCell<Option<Vec<super::lp::VarStatus>>> = const { std::cell::RefCell::new(None) };
-    /// 次に始めるサブ MIP の初めの pseudocost (`ENOMOTO_MIP_SUBMIP_PC_INHERIT`、試作)。呼び出し側の pseudocost を渡す (HiGHS のサブ MIP の
+    /// 次に始めるサブ MIP の初めの pseudocost (`ENOMOTO_MIP_SUBMIP_PC_INHERIT`、既定で使う。`0` で止める)。呼び出し側の pseudocost を渡す (HiGHS のサブ MIP の
     /// `pscostinit`)。前処理は列の番号を保つので、列ごとの値をそのまま使う
     pub(crate) static SUBMIP_PC: std::cell::RefCell<Option<Pseudocost>> = const { std::cell::RefCell::new(None) };
     /// 次に始めるサブ MIP が根のサブ MIP なら、その成果連動の打ち切りの情報 ([`SubmipCtl`]、`ENOMOTO_MIP_SUBMIP_OUTCOME_STOP`)。
@@ -417,7 +417,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) heur_label: &'static str,
     /// 根のヒューリスティクス 1 回の時間の上限 (`ENOMOTO_T_MIP_ROOT_DIVE_TIME_FRAC`。[`Solver::time_up`] が見る)
     pub(super) heur_stop: Option<Instant>,
-    /// `ENOMOTO_MIP_BG_CUTS_PROOF_STOP` (試作): 根のヒューリスティクスの間に見る裏のカットの求解 ([`Solver::bg_proved`])
+    /// `ENOMOTO_MIP_BG_CUTS_PROOF_STOP` (既定で使う。`0` で止める): 根のヒューリスティクスの間に見る裏のカットの求解 ([`Solver::bg_proved`])
     bg_watch: Option<std::sync::Arc<CutJob>>,
     /// 裏のカットの下界が刈り込みの上限に届いたのを見た印 ([`Solver::bg_proved`]、一度立てば戻さない)
     bg_proved_seen: std::cell::Cell<bool>,
@@ -1814,7 +1814,7 @@ pub(super) struct CutJob {
     pub(super) prog: std::sync::Mutex<Vec<f64>>,
 }
 
-/// `ENOMOTO_MIP_BG_CUTS_WAIT` (試作、既定では使わない): 根のヒューリスティクスが終わった時点で裏のカットがまだ下界を上げているなら、
+/// `ENOMOTO_MIP_BG_CUTS_WAIT` (既定で使う。`0` で止める。analysis/cand_default_20261031.md): 根のヒューリスティクスが終わった時点で裏のカットがまだ下界を上げているなら、
 /// 停滞するか待ちの上限まで止めの合図を待つ ([`BgCuts::wait_progress`])。待ちの上限は、残り時間の `ENOMOTO_T_MIP_BG_CUTS_WAIT_FRAC`
 /// (既定 0.1) 倍と、主の根のカットのループの時間の `ENOMOTO_T_MIP_BG_CUTS_WAIT_MULT` (既定 5、0 以下なら使わない) 倍の小さいほう。
 /// 待った後の残り時間が時間の上限の `ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT` (既定 0.05) 倍を切るなら待たない。
@@ -1822,7 +1822,7 @@ pub(super) struct CutJob {
 /// 裏のカットが 1 ラウンドに 20 ほど上がっている途中 (16〜29 ラウンド) で止められ、根の下界が 11668〜11684 から 11375〜11590 に
 /// 落ちて解けなくなっていた (analysis/mc11_h1_20261030.md)
 pub(crate) fn bg_cuts_wait_on() -> bool {
-    env_str!("ENOMOTO_MIP_BG_CUTS_WAIT").is_some()
+    env_def!("ENOMOTO_MIP_BG_CUTS_WAIT", "1").is_some()
 }
 
 /// カットを強める求解のスレッド。落とすと止めの合図を出して終わりを待つ (主が途中で戻っても残らないように)。
@@ -2573,7 +2573,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (env_str!("ENOMOTO_MIP_HIGHS_CUTMGMT").is_some() || self.hcm_auto) && !self.params.submip
     }
 
-    /// `ENOMOTO_MIP_BG_CUTS_PROOF_STOP` (試作、既定では使わない): 根のヒューリスティクスの間に、裏のカットの LP の目的値が刈り込みの上限
+    /// `ENOMOTO_MIP_BG_CUTS_PROOF_STOP` (既定で使う。`0` で止める。analysis/cand_default_20261031.md): 根のヒューリスティクスの間に、裏のカットの LP の目的値が刈り込みの上限
     /// (暫定解、再スタートの後なら外側の打ち切り値) に届いたか。届けば根の下界で最適が証明できるので、[`Self::time_up`] を真にして
     /// Feasibility Pump・ダイビングなどを止め、残りの根のヒューリスティクスも飛ばし、裏のカットの結果を取り込みに進む。
     /// physiciansched6-2 では、再スタートで最適解 49324 が打ち切り値で捨てられた後の根で、主のスレッドが Feasibility Pump に 15〜25 秒使う間に
@@ -3361,7 +3361,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
-        // `ENOMOTO_MIP_SUBMIP_PC_INHERIT` (試作): 呼び出し側の pseudocost から始める (信頼の閾値などこの求解の設定は今のまま)
+        // `ENOMOTO_MIP_SUBMIP_PC_INHERIT` (既定で使う。`0` で止める): 呼び出し側の pseudocost から始める (信頼の閾値などこの求解の設定は今のまま)
         if self.params.submip {
             if let Some(pc) = SUBMIP_PC.with(|s| s.borrow_mut().take()) {
                 if pc.len() == self.p.n {
@@ -4013,7 +4013,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let _ = solve_worker(snap, None, params);
                     })
                     .expect("failed to spawn the cut thread");
-                if env_str!("ENOMOTO_MIP_BG_CUTS_PROOF_STOP").is_some() {
+                if env_def!("ENOMOTO_MIP_BG_CUTS_PROOF_STOP", "1").is_some() {
                     self.bg_watch = Some(job.clone());
                 }
                 bg_cuts = Some(BgCuts { job, handle: Some(handle) });
@@ -4493,7 +4493,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     cap = cap.min(mult * root_cut_secs);
                 }
                 // `ENOMOTO_MIP_BG_CUTS_PROOF_STOP`: 再スタートの後で暫定解がなくても、外側の打ち切り値に届いたら待ちをやめる
-                let cutoff = if env_str!("ENOMOTO_MIP_BG_CUTS_PROOF_STOP").is_some() { self.prune_limit() } else { self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z) };
+                let cutoff = if env_def!("ENOMOTO_MIP_BG_CUTS_PROOF_STOP", "1").is_some() { self.prune_limit() } else { self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z) };
                 // 待った後の残り時間が時間の上限の `ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT` (既定 0.05) 倍を切るなら待たない
                 // (残りが少ないと、置き換えた LP の解き直しや木を始めるための時間がなくなる)
                 let min_left = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT", 0.05, f64) * self.params.time_limit;
@@ -7405,12 +7405,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         prio = prio.max((quot - sb) / (sb + 1.0)).max(0.0);
         // `ENOMOTO_MIP_SUBMIP_HIGHS` の `s`: サブ MIP ではどの候補も信頼できるとみなす (HiGHS の `mip_pscost_minreliable = 0`。
         // `pc.min_reliable` はこの選び方では使われないので、`ENOMOTO_MIP_SUBMIP_NO_SB` だけでは強分岐は止まらない)
-        // `ENOMOTO_T_MIP_SUBMIP_RELIABLE` = r (>= 0、試作): サブ MIP では観測が r 回に満たない候補だけを強分岐で評価する (親は 1〜5 回、
-        // `s` は 0 回。その間で強分岐を減らす)。`s` があればそちらを使う
+        // `ENOMOTO_T_MIP_SUBMIP_RELIABLE` = r (>= 0、既定 0。負の値 (-1) で使わず親と同じ閾値): サブ MIP では観測が r 回に満たない候補だけを
+        // 強分岐で評価する (親は 1〜5 回、`s` は 0 回。その間で強分岐を減らす)。`s` があればそちらを使う (既定の `SUBMIP_HIGHS=-s` では
+        // `s` を抜いたサブ MIP (`SUBMIP_HIGHS_TRIM=r` の再スタート後の根のサブ MIP) だけで効く)
         // `ENOMOTO_MIP_SUBMIP_RELIABLE_RESTART_ONLY` (試作): r は外側の求解の再スタート後の根で作ったサブ MIP (と中の入れ子) だけに使う
         // ([`Self::submip_r0_on`])。ほかのサブ MIP は親と同じ閾値
         let rel_here = env_str!("ENOMOTO_MIP_SUBMIP_RELIABLE_RESTART_ONLY").is_none() || super::heuristics::SUBMIP_R0.with(|f| f.get());
-        let sub_rel = if self.params.submip && rel_here { tunable!("ENOMOTO_T_MIP_SUBMIP_RELIABLE", -1.0, f64) } else { -1.0 };
+        let sub_rel = if self.params.submip && rel_here { tunable!("ENOMOTO_T_MIP_SUBMIP_RELIABLE", 0.0, f64) } else { -1.0 };
         let base_thr = (1.0 - prio) * 1.0 + prio * 5.0;
         let reliable_thr = if self.params.submip && super::submip_highs('s') {
             0.0
@@ -10837,7 +10838,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 早めの再スタート ([`super::early_restart_on`])・木の中の再スタート (`ENOMOTO_MIP_TREE_RESTART`、試作) の判定: 新たな固定が、根の始めに固定されて
-    /// いなかった整数列の `frac` 以上 (かつ [`Self::maybe_restart`] の判定 (2 回目以降 2.5%) も通る) で、再スタートの回数と時間が残っているか。
+    /// いなかった整数列の `frac` 以上 (かつ [`Self::maybe_restart`] の判定 (全部の整数列の、初回 `ENOMOTO_T_MIP_RESTART_FIRST_FAC` (既定 1%)、
+    /// 2 回目以降 2.5%) も通る) で、再スタートの回数と時間が残っているか。HiGHS の数え方 (前処理の後の自由な整数列に対する割合) とは
+    /// 分母が違う ([`Self::maybe_restart`] のコメント)。
     fn proto_restart_ok(&self, frac: f64) -> bool {
         if self.params.submip || self.snap.is_some() || self.time_up() || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() {
             return false;
@@ -10848,13 +10851,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let nint = self.p.nint;
         let free = nint.saturating_sub(self.root_fixed0);
         let newly = self.newly_fixed_ints();
-        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.0, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
+        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
         newly > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * nint as f64
     }
 
-    /// 根での再スタート (SCIP の `restartfac`): 根の処理で新たに大域固定された整数列が全体の 2.5% を超えたら、
-    /// 大域的な境界と LP に残ったカットを持って前処理からやり直す。暫定解は打ち切り値として渡し、
-    /// やり直しで良い解が見つからなければそれを返す。最大 2 回。
+    /// 根での再スタート (SCIP の `restartfac`): 根の処理で新たに大域固定された整数列が全体の 1% (初回、`ENOMOTO_T_MIP_RESTART_FIRST_FAC`)・
+    /// 2.5% (2 回目以降、`ENOMOTO_T_MIP_RESTART_FAC`) 以上なら、大域的な境界と LP に残ったカットを持って前処理からやり直す。
+    /// 暫定解は打ち切り値として渡し、やり直しで良い解が見つからなければそれを返す。最大 `ENOMOTO_T_MIP_MAX_RESTARTS` (4) 回。
     fn maybe_restart(&mut self) -> Option<MipResult> {
         let p = self.p;
         if self.params.submip || self.params.restarts >= tunable!("ENOMOTO_T_MIP_MAX_RESTARTS", 4u32, u32) || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() || self.time_up() {
@@ -10863,8 +10866,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let nint = p.nint;
         let fixed = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
         let newly = fixed.saturating_sub(self.root_fixed0);
-        // HiGHS と同じく、初回は固定された整数列が 1 本でもあれば、2 回目以降は 2.5% 以上で再スタートする
-        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.0, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
+        // 初回は新たな固定が整数列 (`p.nint`、固定済みの列も含む全部) の `ENOMOTO_T_MIP_RESTART_FIRST_FAC` (既定 0.01、`0` で以前と同じく
+        // 1 本でもあれば) 以上、2 回目以降は `ENOMOTO_T_MIP_RESTART_FAC` (0.025) 以上で再スタートする。HiGHS (`evaluateRootNode` の根の最後) は
+        // 初回は固定が 1 本でもあれば、2 回目以降は 2.5% 以上だが、その割合 (`percentageInactiveIntegers`) は前処理の後の模型の (自由な)
+        // 整数列に対するもので、クリーク表の代入も数える。こちらは分母に根の始めに固定済みの列も入るので、同じ割合でも HiGHS の
+        // 数え方より多くの固定が要る (physiciansched6-2 は整数列 109346 本のうち根の始めに自由なのは 4421 本。analysis/restart_thr_20261031.md の 1 節)
+        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
         // `ENOMOTO_MIP_RESTART_FRAC_FREE` (試作): 割合の分母を、この根の始めに固定されていなかった整数列の数にする (HiGHS の
         // `percentageInactiveIntegers` は再スタート後の模型の整数列に対する割合)。再スタートの後の問題は前に固定した列を
         // 固定した列として持ったままなので、分母が全体 (h80x6320d では 6320 本) だと、自由な整数列 (約 1000 本) の 16% 近くを
@@ -11122,13 +11129,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 別スレッドでサブ MIP を解き始める (同時に走らせるのはスレッド数 - 1 本まで。超えたら古いものを待つ)。
-    pub(super) fn spawn_submip(&mut self, sub: MipProblem, params: MipParams) {
+    pub(super) fn spawn_submip(&mut self, sub: MipProblem, mut params: MipParams) {
         let lim = submip_par_limit();
         if self.pending_submips.len() >= lim {
             // `ENOMOTO_MIP_SUBMIP_FIRST_DONE` (試作): 空きを待つとき、出した順 (いちばん古いもの) ではなく先に終わったものから受け取る
             // ([`Self::join_submips`])。nu25-pr12 では LP face のサブ MIP が 0.7 秒で最適解を見つけて終わっていたのに、古い根の被約費用の
             // サブ MIP (時間上限 4.1 秒) を待つ間、その解を 3 秒以上受け取れなかった
             self.join_submips(lim - 1);
+        }
+        // サブ MIP の時間の上限 (`params.time_limit`) は呼び出し側がサブ MIP を作った時点の残り時間から決めているので、上で空きを
+        // 待った分だけ外側の期限を越えうる。いま残っている時間で頭を押さえ、残りがなければ出さない (`ENOMOTO_MIP_NO_SUBMIP_SPAWN_CLAMP` で
+        // 押さえない (切り分け用))。rmatr200-p5 (`SUBMIP_HIGHS` の `t` で上限が残り時間そのまま) では、残り 38 秒で作った RENS (カットの前の LP)
+        // のサブ MIP が LP face のサブ MIP を 29 秒待ってから 38 秒の上限で走り、60 秒の上限に対して 89〜92 秒で返った
+        // (analysis/cand_default_20261031.md)
+        if let Some(d) = self.deadline.filter(|_| env_str!("ENOMOTO_MIP_NO_SUBMIP_SPAWN_CLAMP").is_none()) {
+            let left = d.saturating_duration_since(Instant::now()).as_secs_f64();
+            if left < params.time_limit {
+                if self.params.verbose && left < params.time_limit - 0.01 {
+                    eprintln!("MIP:   parallel sub-MIP ({}): time limit {:.2}s cut to the remaining {left:.2}s", self.heur_label, params.time_limit);
+                }
+                params.time_limit = left;
+            }
+            if left <= 0.0 {
+                if self.params.verbose {
+                    eprintln!("MIP:   parallel sub-MIP ({}): not started (no time left)", self.heur_label);
+                }
+                self.submip_is_rens = false;
+                self.submip_fix_rate = None;
+                self.submip_basis = None;
+                self.submip_pc = None;
+                self.submip_hs_drop = 0;
+                self.submip_r0 = false;
+                return;
+            }
         }
         let presolve = env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none();
         let is_rens = std::mem::take(&mut self.submip_is_rens);

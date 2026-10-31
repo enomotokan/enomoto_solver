@@ -265,8 +265,8 @@ impl St<'_> {
     }
 
     /// 連鎖の手 ([`chain_move`]) を、向きで数えるスコアで作る。
-    fn chain_move(&mut self, i: usize, max_depth: usize, max_cand: usize, set_of: &[Vec<u32>]) -> Option<(f64, Vec<(usize, f64)>)> {
-        chain_move(self, i, max_depth, max_cand, set_of).map(|(sc, mv, _)| (sc, mv))
+    fn chain_move(&mut self, i: usize, max_depth: usize, max_cand: usize, set_of: &[Vec<u32>], abort: &dyn Fn() -> bool) -> Option<(f64, Vec<(usize, f64)>)> {
+        chain_move(self, i, max_depth, max_cand, set_of, abort).map(|(sc, mv, _)| (sc, mv))
     }
 
     /// lift move の掃引: 費用のある列を乱数の順に見て、全部の行を満たしたまま目的が良くなる幅の端まで動かす。動かした数を返す
@@ -544,7 +544,8 @@ impl<'a> LocalMip<'a> {
                 let kk = s.below(s.vset.len());
                 let i = s.vset[kk];
                 chain_tries += 1;
-                if let Some((_, mv)) = s.chain_move(i, chain_depth, sample_cols, &set_of) {
+                let abort = || Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+                if let Some((_, mv)) = s.chain_move(i, chain_depth, sample_cols, &set_of, &abort) {
                     for &(k, v) in &mv {
                         s.apply(k, v, step);
                     }
@@ -819,11 +820,22 @@ pub(super) trait ChainView {
 /// 集合分割の行の中の 0 の列と入れ替える 2 列の手) を次々に足す (ejection chain)。途中でスコアの合計が最良だった所までの
 /// 手を返す (正のときだけ)。`set_of` は 0-1 列ごとの集合分割 (パッキング) の行。3 つ目は評価で触った非零の数 (手間)。
 /// 30n20b8 では 1 列ずつの探索が抜けられない「0-1 の時刻の選択と時刻の整数列を結ぶ等式 + precedence」の鎖をこれで直せる
-pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: usize, max_cand: usize, set_of: &[Vec<u32>]) -> Option<(f64, Vec<(usize, f64)>, u64)> {
+///
+/// `abort` は手の評価 32 回ごと (と深さごと) に見て、真なら手を返さずに止める (時間の上限・止めの合図)。列が多くの行に出る問題
+/// (sorrell3: 前処理のクリーク行の拡張で非零が 700 万増え、0-1 列 1024 本がそれぞれ数千行に出る) では、入れ替えの候補の評価だけで
+/// 1 回の連鎖に数秒かかり、呼び出し側が 16 手ごとに時間を見るのでは時間の上限を 50 秒以上超えた (analysis/cand_default_20261031.md)
+pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: usize, max_cand: usize, set_of: &[Vec<u32>], abort: &dyn Fn() -> bool) -> Option<(f64, Vec<(usize, f64)>, u64)> {
     use std::collections::HashMap;
     let m = v.prob().m;
     let mag = v.magnitude();
     let mut effort = 0u64;
+    // 手の評価の回数 (`abort` を見る間隔に使う)
+    let mut evals = 0u32;
+    let use_abort = env_str!("ENOMOTO_MIP_NO_CHAIN_ABORT").is_none();
+    let aborted = |evals: &mut u32| {
+        *evals += 1;
+        use_abort && *evals % 32 == 0 && abort()
+    };
     let mut newv: HashMap<usize, f64> = HashMap::new();
     let mut dl: HashMap<usize, f64> = HashMap::new();
     let mut moves: Vec<(usize, f64)> = Vec::new();
@@ -862,6 +874,9 @@ pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: 
         newv.insert(k, val);
         moves.push((k, val));
     };
+    if use_abort && abort() {
+        return None;
+    }
     // 始めの手: 行 i の tight move の最良
     let mut first: Option<(f64, usize, f64)> = None;
     let len = v.row(i).len();
@@ -873,6 +888,9 @@ pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: 
             if first.is_none_or(|f| g > f.0) {
                 first = Some((g, j, val));
             }
+            if aborted(&mut evals) {
+                return None;
+            }
         }
     }
     let (mut score, j0, v0) = first?;
@@ -880,6 +898,9 @@ pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: 
     let mut best = (score, moves.len());
     let mut tried_rows: Vec<usize> = Vec::new();
     for _ in 0..max_depth {
+        if use_abort && abort() {
+            return None;
+        }
         let p = v.prob();
         // 新たに悪くなった行
         let mut pick: Option<(bool, f64, usize, f64)> = None;
@@ -943,6 +964,9 @@ pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: 
             let g = gain(v, &dl, &newv, c, &mut effort);
             if bc.is_none_or(|b| g > b.0) {
                 bc = Some((g, ci));
+            }
+            if aborted(&mut evals) {
+                return None;
             }
         }
         let (g, ci) = bc.unwrap();

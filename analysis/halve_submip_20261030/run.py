@@ -6,7 +6,10 @@ D = Path(__file__).resolve().parent
 WT = D.parents[1]
 C = WT / ".miplib_cache"
 CFGS = {
+    # 2026-10-31 (`analysis/cand_default_20261031.md`) から、"def" (環境変数なし) は下の "cand" と同じ形 (cand の 7 つの設定が既定)。
+    # それより前の計測の "def" は旧既定で、新しいビルドで旧既定を回すには "olddef" を使う
     "def": {},
+    "olddef": {"ENOMOTO_MIP_SUBMIP_HIGHS": "0", "ENOMOTO_MIP_SUBMIP_PC_INHERIT": "0", "ENOMOTO_T_MIP_SUBMIP_RELIABLE": "-1", "ENOMOTO_MIP_BG_CUTS_WAIT": "0", "ENOMOTO_MIP_SUBMIP_HIGHS_TRIM": "0", "ENOMOTO_T_MIP_RESTART_FIRST_FAC": "0", "ENOMOTO_MIP_BG_CUTS_PROOF_STOP": "0"},
     "halve": {"ENOMOTO_MIP_CUT_LP_HALVE": "1"},
     "hnt": {"ENOMOTO_MIP_SUBMIP_HIGHS": "-t"},
     "h1": {"ENOMOTO_MIP_SUBMIP_HIGHS": "1"},

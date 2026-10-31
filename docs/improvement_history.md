@@ -10218,3 +10218,18 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 同じ計測で、LP が時間の上限に当たったら以後の本数を半分にする形 (`ENOMOTO_MIP_CUT_LP_HALVE` + `ENOMOTO_T_MIP_CUT_LP_CAP_MULT=3` +
   `ENOMOTO_MIP_CUT_CAP_FROM_LOOP`) は SGM −1.0%・−1.0% だったが、2 倍ずつ広げる形と重ねると得が消えるので既定にしない。
 - 記録は `analysis/halve_submip_20261030.md`。
+
+## 2026-10-31: 時間の上限の超過を 2 つ直し、HiGHS 風のサブ MIP などの 7 つの設定 (cand) を既定にする (採用)
+
+- 超過の直し方 (どちらも既定で使う):
+  - 根の並列サブ MIP を出すとき (`Solver::spawn_submip`)、空きを待った後に時間の上限を外側の期限までの残りで押さえ、残りがなければ出さない
+    (`ENOMOTO_MIP_NO_SUBMIP_SPAWN_CLAMP` で押さえない)。rmatr200-p5 (cand) は、残り 38 秒で作ったサブ MIP が別のサブ MIP を 29 秒待ってから
+    38 秒の上限で走り、60 秒の上限に対して 89〜92 秒で返っていた -> 60.1 秒。
+  - Local-MIP・FJ の連鎖の手 (`localmip::chain_move`) の中でも時間の上限・止めの合図を見る (`ENOMOTO_MIP_NO_CHAIN_ABORT` で見ない)。
+    sorrell3 (旧既定でも) は 1 回の連鎖の手に数秒かかり、FJ のスレッドの終わりを待つ主が 117.5 秒で返った回があった -> 60.6〜60.9 秒。
+- 既定にした (それぞれ戻し方): `ENOMOTO_MIP_SUBMIP_HIGHS` の既定 `-s` (`0` で使わない)、`ENOMOTO_MIP_SUBMIP_PC_INHERIT` (`0`)、
+  `ENOMOTO_T_MIP_SUBMIP_RELIABLE` の既定 0 (`-1`)、`ENOMOTO_MIP_BG_CUTS_WAIT` (`0`)、`ENOMOTO_MIP_SUBMIP_HIGHS_TRIM` の既定 `r` (`0`)、
+  `ENOMOTO_T_MIP_RESTART_FIRST_FAC` の既定 0.01 (`0`)、`ENOMOTO_MIP_BG_CUTS_PROOF_STOP` (`0`)。
+- bench7 (`analysis/halve_submip_20261030.md`): 58 問 × 2 回 SGM −6.1%・解けた数 83 -> 85、Mittelmann 186 問 −2.9%・44 -> 49。
+  片方だけ解けた 7 回は全部 cand だけ。遅くなる n5-3・neos-1582420・neos-2978193-inde は残りの課題。
+- 新ビルドの既定が旧ビルド + cand の環境変数と同じ振る舞いになることを 5 問のログで確かめた。記録は `analysis/cand_default_20261031.md`。

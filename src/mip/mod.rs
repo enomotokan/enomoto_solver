@@ -4002,7 +4002,7 @@ fn normalize_integer_rows(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], ro
 /// 費用が非正なら向きを逆にして下限を締める。physiciansched6-2 の罰則の列 (`100 Σx + 600 z - w <= 600` だけに出る費用 1 の w、
 /// 416 本) は ENOMOTO では [0, ∞) のまま残り、HiGHS の前処理後は [0, 100〜600] になる。上限がないと Feasibility Jump が
 /// 解を見つけられない (同じ問題で上限を入れるだけで 20 回中 0 回 → 19 回)。締めた境界の数を返す (1 回だけ、連鎖しない)。
-/// `ENOMOTO_MIP_SUBMIP_HIGHS` (試作、既定では使わない): サブ MIP の解き方を HiGHS の `HighsPrimalHeuristics::solveSubMip` に寄せる部分 `c`
+/// `ENOMOTO_MIP_SUBMIP_HIGHS` (既定 `-s`、`0` か `off` で使わない (2026-10-31 より前の既定)。analysis/cand_default_20261031.md): サブ MIP の解き方を HiGHS の `HighsPrimalHeuristics::solveSubMip` に寄せる部分 `c`
 /// を使うか (サブ MIP の中かどうかは呼び出し側で見る)。値が `1` (など下の文字を含まない値) なら全部、文字の並びならその部分だけ、
 /// `-` で始まる文字の並びならその部分を除いた全部 (例 `-t`。`q` はまとめに入らない)。部分: `p` 前処理を親と同じにする、`c` 根のカットを親と同じだけ回す
 /// (25 ラウンド・停滞 10 回・時間はサブ MIP の 5 割。部分は親と同じ `ENOMOTO_MIP_CUT_AGG` の値)、`q` サブ MIP の根のカットで集約カットの
@@ -4017,7 +4017,7 @@ pub(super) fn submip_highs(c: char) -> bool {
     if heuristics::SUBMIP_HS_DROP.with(|f| f.get()) & submip_hs_bit(c) != 0 {
         return false;
     }
-    match env_str!("ENOMOTO_MIP_SUBMIP_HIGHS") {
+    match env_def!("ENOMOTO_MIP_SUBMIP_HIGHS", "-s") {
         None => false,
         Some(v) if v.starts_with('-') => c != 'q' && !v.contains(c),
         Some(v) if v.chars().any(|d| ALL.contains(d)) => v.contains(c),

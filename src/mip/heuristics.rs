@@ -1552,9 +1552,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 使わない)。停滞による打ち切り (`ENOMOTO_T_MIP_SUBMIP_STALL`) と合わせて 93 問 (4 スレッド・60 秒、2 回): 主ギャップの和
         // 13.77 -> 12.99、SGM 38.29 -> 37.66 秒 (analysis/mip_primal_weakness_20261016.md)
         let basis = if env_str!("ENOMOTO_MIP_NO_SUBMIP_BASIS").is_none() && sub.n == p.n && self.lp.num_rows() >= p.m { Some(self.lp.basis().col) } else { None };
-        // `ENOMOTO_MIP_SUBMIP_PC_INHERIT` (試作): 今の pseudocost をサブ MIP の初めの pseudocost にする (HiGHS の `pscostinit`)。
+        // `ENOMOTO_MIP_SUBMIP_PC_INHERIT` (既定で使う。`0` で止める): 今の pseudocost をサブ MIP の初めの pseudocost にする (HiGHS の `pscostinit`)。
         // サブ MIP は空の pseudocost から始めるので、強分岐を減らす (`ENOMOTO_T_MIP_SUBMIP_RELIABLE`・`ENOMOTO_MIP_SUBMIP_HIGHS` の `s`) と分枝の見積りが全体の平均だけになる
-        let sub_pc = (env_str!("ENOMOTO_MIP_SUBMIP_PC_INHERIT").is_some() && sub.n == p.n).then(|| self.pc.clone());
+        let sub_pc = (env_def!("ENOMOTO_MIP_SUBMIP_PC_INHERIT", "1").is_some() && sub.n == p.n).then(|| self.pc.clone());
         // 並列モード (根のヒューリスティクスの間): 別スレッドで解き始め、結果は後で受け取る
         if self.parallel_submips {
             self.submip_basis = basis;
@@ -1722,7 +1722,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (lo, up, applied)
     }
 
-    /// `ENOMOTO_MIP_SUBMIP_HIGHS_TRIM` (試作、既定では使わない): これから作るサブ MIP を `ENOMOTO_MIP_SUBMIP_HIGHS` の形にせず、既定の形で
+    /// `ENOMOTO_MIP_SUBMIP_HIGHS_TRIM` (既定 `r`。`0` で止める): これから作るサブ MIP を `ENOMOTO_MIP_SUBMIP_HIGHS` の形にせず、既定の形で
     /// 解くか (そのサブ MIP の中の入れ子のサブ MIP も同じ。印は [`SUBMIP_HS_DROP`])。値の文字: `r` 外側の求解の再スタートの後の根のサブ MIP、
     /// `d` 深さ 2 以上のサブ MIP (サブ MIP の中で作るもの)。どちらの文字も含まない値なら両方。HiGHS 風のサブ MIP (hs、`-s`) は根のカット 25 ラウンド・
     /// サブ MIP の中の RENS で 1 本が重く、binkar10_1 では良い解で再スタートが 3 回起きるたびに根のヒューリスティクスを回し直し (5.9 → 25 秒)、
@@ -1739,7 +1739,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let inherited = SUBMIP_HS_DROP.with(|f| f.get());
         let restart_root = !self.params.submip && self.params.restarts > 0 && self.nodes <= 1;
         let mut m = inherited;
-        if let Some(v) = env_str!("ENOMOTO_MIP_SUBMIP_HIGHS_TRIM") {
+        if let Some(v) = env_def!("ENOMOTO_MIP_SUBMIP_HIGHS_TRIM", "r") {
             let all = !v.contains('r') && !v.contains('d');
             if ((all || v.contains('r')) && restart_root) || ((all || v.contains('d')) && SUBMIP_DEPTH.with(|d| d.get()) >= 1) {
                 m = u16::MAX;
