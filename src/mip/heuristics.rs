@@ -1514,16 +1514,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let r0 = self.submip_r0_on();
         // `ENOMOTO_MIP_SUBMIP_HIGHS` の `g`: ギャップを親と同じにする (HiGHS は `mip_rel_gap = 0`)
         let gap_highs = hs_on('g');
+        // `t` がないときの時間の上限
+        let t_plain = {
+            let t = (self.submip_time_frac * remaining).min(self.submip_time_max);
+            // `ENOMOTO_MIP_ROOT_SUBMIP_REL` (試作): 根のサブ MIP は外側の求解の経過秒の k 倍まで ([`super::root_submip_rel`])
+            match super::root_submip_rel().filter(|_| !self.params.submip && self.snap.is_none() && self.nodes <= 1 && self.incumbent.is_some()) {
+                Some(k) => t.min((k * super::root_submip_ref_secs().unwrap_or(f64::INFINITY)).max(tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_REL_MIN", 0.5, f64))),
+                None => t,
+            }
+        };
+        // `ENOMOTO_MIP_SUBMIP_HIGHS_NOSOL` (試作、既定では使わない): `t` で時間の上限を延ばした根のサブ MIP も、解を 1 つも見つけないうちは
+        // `t` がないときの上限の `ENOMOTO_T_MIP_SUBMIP_HIGHS_NOSOL_MULT` (1) 倍で止める ([`super::solver::SubmipCtl::nosol_deadline`])
+        let nosol = (time_highs && env_str!("ENOMOTO_MIP_SUBMIP_HIGHS_NOSOL").is_some()).then(|| tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_NOSOL_MULT", 1.0, f64) * t_plain);
         let params = super::solver::MipParams {
             time_limit: if time_highs {
                 (tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_FRAC", 1.0, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_MAX", f64::INFINITY, f64))
             } else {
-                let t = (self.submip_time_frac * remaining).min(self.submip_time_max);
-                // `ENOMOTO_MIP_ROOT_SUBMIP_REL` (試作): 根のサブ MIP は外側の求解の経過秒の k 倍まで ([`super::root_submip_rel`])
-                match super::root_submip_rel().filter(|_| !self.params.submip && self.snap.is_none() && self.nodes <= 1 && self.incumbent.is_some()) {
-                    Some(k) => t.min((k * super::root_submip_ref_secs().unwrap_or(f64::INFINITY)).max(tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_REL_MIN", 0.5, f64))),
-                    None => t,
-                }
+                t_plain
             },
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
             node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult) as u64,
@@ -1561,6 +1568,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.submip_pc = sub_pc;
             self.submip_hs_drop = hs_drop;
             self.submip_r0 = r0;
+            self.submip_nosol = nosol;
             self.spawn_submip(sub, params);
             return Some((super::solver::MipStatus::NotSolved, false));
         }
@@ -1589,7 +1597,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP` で使わない): 根の (主のスレッドで解く) サブ MIP も成果で打ち切る ([`super::solver::submip_outcome_stop`])
         if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
-            let c = std::sync::Arc::new(super::solver::SubmipCtl::new(self.prune_limit()));
+            let c = std::sync::Arc::new(super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol));
             super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(c));
         }
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());

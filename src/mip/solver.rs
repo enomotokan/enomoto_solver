@@ -445,6 +445,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_hs_drop: u16,
     /// 次に別スレッドで解くサブ MIP が再スタート後の根のものか ([`Self::submip_r0_on`])
     pub(super) submip_r0: bool,
+    /// 次に別スレッドで解くサブ MIP の、解のないうちの時間の上限 (秒、[`SubmipCtl::nosol_deadline`]、`ENOMOTO_MIP_SUBMIP_HIGHS_NOSOL`)
+    pub(super) submip_nosol: Option<f64>,
     /// `ENOMOTO_MIP_SUBMIP_RELIABLE_INHERITED` (試作): 親から引き継いだ pseudocost の列ごとの観測の数 (サブ MIP の側、[`SUBMIP_PC`])
     inherited_obs: Option<Vec<u32>>,
     /// ヒューリスティクス役を務めている間か (ログで暫定解の出どころを示すため)
@@ -1756,11 +1758,22 @@ pub(crate) fn submip_outcome_stop() -> bool {
 pub(crate) struct SubmipCtl {
     /// 外側の刈り込みの上限 (`prune_limit`、f64 のビット。なければ +inf)。サブ MIP の打ち切り値に使う
     pub(crate) outer_best: std::sync::atomic::AtomicU64,
+    /// `ENOMOTO_MIP_SUBMIP_HIGHS_NOSOL` (試作、既定では使わない): この時刻までにサブ MIP が解を 1 つも見つけていなければ止める
+    /// ([`Solver::time_up`])。`ENOMOTO_MIP_SUBMIP_HIGHS` の `t` で時間の上限を残り時間にした根のサブ MIP に、`t` がないときの
+    /// 時間の上限を「解のないうちの上限」として残す。解を見つけたサブ MIP は今まで通り残り時間まで (成果連動の打ち切りで止まる)。
+    /// neos-1582420 では、`c`・`h` で 1 ノードが重いサブ MIP が `t` で 500 ノードまで何も見つけずに走り、根のヒューリスティクスが
+    /// 13 秒から 30〜35 秒に延びていた (analysis/cand_slow_neos-1582420_20261031.md)
+    pub(crate) nosol_deadline: Option<Instant>,
 }
 
 impl SubmipCtl {
     pub(crate) fn new(z: f64) -> Self {
-        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()) }
+        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None }
+    }
+    /// 解のないうちの時間の上限 ([`Self::nosol_deadline`]) を今から `secs` 秒にする (`None` なら付けない)。
+    pub(crate) fn with_nosol(mut self, secs: Option<f64>) -> Self {
+        self.nosol_deadline = secs.filter(|s| s.is_finite() && *s >= 0.0).map(|s| Instant::now() + std::time::Duration::from_secs_f64(s));
+        self
     }
     pub(crate) fn best(&self) -> f64 {
         f64::from_bits(self.outer_best.load(std::sync::atomic::Ordering::Relaxed))
@@ -2066,6 +2079,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_pc: None,
         submip_hs_drop: 0,
         submip_r0: false,
+        submip_nosol: None,
         inherited_obs: None,
         in_heur_role: false,
         other_thread_label: false,
@@ -2606,6 +2620,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || self.heur_stop.is_some_and(|d| Instant::now() >= d)
             || ((self.bg_watch.is_some() || self.root_submip.is_some()) && self.bg_proved())
+            || (self.incumbent.is_none() && self.root_submip.as_ref().is_some_and(|c| c.nosol_deadline.is_some_and(|d| Instant::now() >= d)))
             || (self.snap.is_some() && FIND_STOP.with(|f| f.borrow().as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))))
             || self.pool.as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed))
             || ROLE_POOL.with(|r| r.borrow().as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed) || p.fin.load(std::sync::atomic::Ordering::Relaxed)))
@@ -11182,7 +11197,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let sub_pc = self.submip_pc.take();
         let hs_drop = std::mem::take(&mut self.submip_hs_drop);
         let r0 = std::mem::take(&mut self.submip_r0);
-        let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| std::sync::Arc::new(SubmipCtl::new(self.prune_limit())));
+        let nosol = self.submip_nosol.take();
+        let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| std::sync::Arc::new(SubmipCtl::new(self.prune_limit()).with_nosol(nosol)));
         let ctl2 = ctl.clone();
         self.pending_submips.push_back((
             std::thread::spawn(move || {
