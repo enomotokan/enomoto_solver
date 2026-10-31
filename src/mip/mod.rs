@@ -3986,8 +3986,8 @@ pub(super) fn submip_highs(c: char) -> bool {
     // `q` は文字で明示したときだけ (まとめ (`1`・`-…`) には入れない: physiciansched6-2 の根の RINS の書き出し 3 つで、`q` を足すと
     // 20 秒で解けるのが 3 つ → 1 つに減った)
     const ALL: &str = "pcqsgtihf";
-    // `ENOMOTO_MIP_SUBMIP_HIGHS_TRIM` で既定の形に戻したサブ MIP の中 ([`heuristics::SUBMIP_HS_OFF`])
-    if heuristics::SUBMIP_HS_OFF.with(|f| f.get()) {
+    // `ENOMOTO_MIP_SUBMIP_HIGHS_TRIM`・`ENOMOTO_MIP_SUBMIP_HIGHS_RESTART` で文字を抜いたサブ MIP の中 ([`heuristics::SUBMIP_HS_DROP`])
+    if heuristics::SUBMIP_HS_DROP.with(|f| f.get()) & submip_hs_bit(c) != 0 {
         return false;
     }
     match env_str!("ENOMOTO_MIP_SUBMIP_HIGHS") {
@@ -3996,6 +3996,16 @@ pub(super) fn submip_highs(c: char) -> bool {
         Some(v) if v.chars().any(|d| ALL.contains(d)) => v.contains(c),
         Some(_) => c != 'q',
     }
+}
+
+/// [`submip_highs`] の文字の並び (`pcqsgtihf`) での `c` の位置の印 (知らない文字は 0)。[`heuristics::SUBMIP_HS_DROP`] で使う
+pub(super) fn submip_hs_bit(c: char) -> u16 {
+    "pcqsgtihf".find(c).map_or(0, |i| 1 << i)
+}
+
+/// 文字の並び `v` の [`submip_hs_bit`] の和
+pub(super) fn submip_hs_mask(v: &str) -> u16 {
+    v.chars().fold(0, |m, c| m | submip_hs_bit(c))
 }
 
 /// [`fj_p3_problem`] を使うか (既定で使う。`ENOMOTO_MIP_NO_FJ_P3` で止める。`ENOMOTO_MIP_FJ_P3` を与えたときも使う)。
