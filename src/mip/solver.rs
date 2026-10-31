@@ -435,6 +435,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_basis: Option<Vec<super::lp::VarStatus>>,
     /// 次に別スレッドで出すサブ MIP の初めの pseudocost ([`SUBMIP_PC`])
     pub(super) submip_pc: Option<Pseudocost>,
+    /// 次に別スレッドで解くサブ MIP を `ENOMOTO_MIP_SUBMIP_HIGHS` の形にしない印 ([`Self::hs_trim_off`])
+    pub(super) submip_hs_off: bool,
     /// ヒューリスティクス役を務めている間か (ログで暫定解の出どころを示すため)
     pub(super) in_heur_role: bool,
     /// 受け取った解が別のスレッドのヒューリスティクスのものか (ログの表示用)
@@ -2049,6 +2051,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         last_improve_node: None,
         submip_basis: None,
         submip_pc: None,
+        submip_hs_off: false,
         in_heur_role: false,
         other_thread_label: false,
         submip_fix_rate: None,
@@ -11003,12 +11006,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let fix_rate = self.submip_fix_rate.take();
         let basis = self.submip_basis.take();
         let sub_pc = self.submip_pc.take();
+        let hs_off = std::mem::take(&mut self.submip_hs_off);
         let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| std::sync::Arc::new(SubmipCtl::new(self.prune_limit())));
         let ctl2 = ctl.clone();
         self.pending_submips.push_back((
             std::thread::spawn(move || {
                 // 別スレッドで解くサブ MIP も入れ子の深さ 1 として数える ([`super::heuristics::SUBMIP_DEPTH`])
                 super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
+                super::heuristics::SUBMIP_HS_OFF.with(|f| f.set(hs_off));
                 if comp_diag {
                     super::SUBMIP_LABEL.with(|l| l.set(label));
                 }

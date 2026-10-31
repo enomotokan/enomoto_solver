@@ -3986,6 +3986,10 @@ pub(super) fn submip_highs(c: char) -> bool {
     // `q` は文字で明示したときだけ (まとめ (`1`・`-…`) には入れない: physiciansched6-2 の根の RINS の書き出し 3 つで、`q` を足すと
     // 20 秒で解けるのが 3 つ → 1 つに減った)
     const ALL: &str = "pcqsgtihf";
+    // `ENOMOTO_MIP_SUBMIP_HIGHS_TRIM` で既定の形に戻したサブ MIP の中 ([`heuristics::SUBMIP_HS_OFF`])
+    if heuristics::SUBMIP_HS_OFF.with(|f| f.get()) {
+        return false;
+    }
     match env_str!("ENOMOTO_MIP_SUBMIP_HIGHS") {
         None => false,
         Some(v) if v.starts_with('-') => c != 'q' && !v.contains(c),
