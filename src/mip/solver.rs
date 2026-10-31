@@ -423,6 +423,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     bg_proved_seen: std::cell::Cell<bool>,
     /// 最初の根の LP の反復数 (丸め系のヒューリスティクスの連続部分の LP の反復上限に使う)
     pub(super) root_lp_iters: u64,
+    /// 根の LP (カットの前) を解くのにかかった秒 (再スタートの判定 `ENOMOTO_MIP_RESTART_FIRST_LPW` に使う)
+    root_lp_secs: f64,
     /// 暫定解が Feasibility Jump で見つけたものだけか (`ENOMOTO_MIP_FJ2_KEEP_NOINC` の判定に使う)
     pub(super) inc_only_fj: bool,
     /// 暫定解がないときに RINS の相手に使う参照解 ([`REF_SOL`]、`ENOMOTO_MIP_RESTART_REF`)
@@ -2053,6 +2055,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         bg_watch: None,
         bg_proved_seen: std::cell::Cell::new(false),
         root_lp_iters: 0,
+        root_lp_secs: 0.0,
         inc_only_fj: false,
         ref_sol: None,
         fj_poor_lb: f64::NEG_INFINITY,
@@ -3757,6 +3760,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if root_warm_dse_once {
             crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        let t_root_lp = Instant::now();
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         if root_warm_dse_once {
             crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -3835,6 +3839,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let root_iters = self.lp.total_iterations();
         self.root_lp_iters = root_iters;
+        self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
         if self.params.verbose {
             eprintln!("MIP: root LP {:.10e} ({} iters, {:.2}s)", root_obj, self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
         }
@@ -10866,11 +10871,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 固定しないと 2 回目の再スタートが起きない
         // `ENOMOTO_MIP_GR_RESTART=ff` も同じ ([`super::gr_restart_ff_for`])
         let denom = if env_str!("ENOMOTO_MIP_RESTART_FRAC_FREE").is_some() || super::gr_restart_ff_for(p) { nint.saturating_sub(self.root_fixed0) } else { nint };
-        if self.params.verbose && self.params.restarts > 0 {
-            eprintln!("MIP: restart check: newly fixed {newly}, integer columns {nint}, free at the root {}, threshold {:.1}", nint.saturating_sub(self.root_fixed0), fac * denom as f64);
+        if self.params.verbose {
+            eprintln!("MIP: restart check: newly fixed {newly}, integer columns {nint}, free at the root {}, threshold {:.1}, root LP {:.2}s", nint.saturating_sub(self.root_fixed0), fac * denom as f64, self.root_lp_secs);
         }
         if nint == 0 || newly == 0 || (newly as f64) < fac * denom as f64 {
             return None;
+        }
+        // `ENOMOTO_MIP_RESTART_FIRST_LPW` (試作、既定では使わない): 初回の再スタートで、新たな固定が整数列の
+        // `ENOMOTO_T_MIP_RESTART_FIRST_LPW_FAC` (0.01) 未満で、根の LP (カットの前) を解くのに `ENOMOTO_T_MIP_RESTART_FIRST_LPW_SECS` (2 秒)
+        // 以上かかったときは再スタートしない。固定がわずかなのに根の LP の解き直しが重い (physiciansched6-2: 109346 列中 46〜56 列の固定で
+        // 根の LP の解き直しに 14.8 秒) 再スタートを避ける
+        if self.params.restarts == 0 && env_str!("ENOMOTO_MIP_RESTART_FIRST_LPW").is_some() {
+            let small = (newly as f64) < tunable!("ENOMOTO_T_MIP_RESTART_FIRST_LPW_FAC", 0.01, f64) * nint as f64;
+            let heavy = self.root_lp_secs >= tunable!("ENOMOTO_T_MIP_RESTART_FIRST_LPW_SECS", 2.0, f64);
+            if small && heavy {
+                if self.params.verbose {
+                    eprintln!("MIP: first restart skipped (few fixings, heavy root LP)");
+                }
+                return None;
+            }
         }
         // 新しい問題: 大域的な境界 + 元の行 + LP に残ったカット (どれも大域的に成り立つ)
         let mut rows = p.rows.clone();
