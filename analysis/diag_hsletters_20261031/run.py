@@ -10,6 +10,9 @@ for ch in "pcgtihf":
     CFGS[f"hs-{ch}"] = {"ENOMOTO_MIP_SUBMIP_HIGHS": f"-s{ch}"}
 for k, v in {"hs_trim": "1", "hs_trim_r": "r", "hs_trim_d": "d"}.items():  # 試作 `ENOMOTO_MIP_SUBMIP_HIGHS_TRIM`
     CFGS[k] = {"ENOMOTO_MIP_SUBMIP_HIGHS": "-s", "ENOMOTO_MIP_SUBMIP_HIGHS_TRIM": v}
+PI0_BGW = {"ENOMOTO_MIP_SUBMIP_HIGHS": "-s", "ENOMOTO_MIP_SUBMIP_PC_INHERIT": "1", "ENOMOTO_T_MIP_SUBMIP_RELIABLE": "0", "ENOMOTO_MIP_BG_CUTS_WAIT": "1"}
+CFGS["hs_pi0_bgw"] = PI0_BGW
+CFGS["hs_pi0_bgw_r"] = dict(PI0_BGW, ENOMOTO_MIP_SUBMIP_HIGHS_TRIM="r")
 EXTRA = json.loads(os.environ.get("DIAG_EXTRA_CFGS", "{}"))  # 試作の設定 {"名前": {環境変数}}
 CFGS.update(EXTRA)
 if __name__ == "__main__":
