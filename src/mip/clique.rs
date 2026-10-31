@@ -24,8 +24,17 @@ impl CliqueGraph {
     /// [`Self::build`] に、行以外から分かった衝突の組 (`extra`、文字の組) を加える。
     #[allow(clippy::too_many_arguments)]
     pub fn build_with(n: usize, rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], binary: &[bool], lo: &[f64], up: &[f64], extra: &[(u32, u32)]) -> Self {
+        Self::build_with_stop(n, rows, row_lo, row_up, binary, lo, up, extra, &|| false).unwrap()
+    }
+
+    /// [`Self::build_with`] を、`stop` が真を返したら途中でやめる (`None`) 形で作る (`extra` の 65536 組ごと・行の 64 本ごとに見る)。
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_with_stop(n: usize, rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], binary: &[bool], lo: &[f64], up: &[f64], extra: &[(u32, u32)], stop: &dyn Fn() -> bool) -> Option<Self> {
         let mut adj: Vec<HashSet<u32>> = vec![HashSet::new(); 2 * n];
-        for &(a, b) in extra {
+        for (k, &(a, b)) in extra.iter().enumerate() {
+            if k % 65536 == 0 && stop() {
+                return None;
+            }
             let (ja, jb) = ((a / 2) as usize, (b / 2) as usize);
             if ja == jb || ja >= n || jb >= n || !binary[ja] || !binary[jb] || lo[ja] == up[ja] || lo[jb] == up[jb] {
                 continue;
@@ -34,6 +43,9 @@ impl CliqueGraph {
             adj[b as usize].insert(a);
         }
         for (i, r) in rows.iter().enumerate() {
+            if i % 64 == 0 && stop() {
+                return None;
+            }
             // `sum a x <= b` の形 (>= は符号を反転) ごとに
             for (sign, b) in [(1.0, row_up[i]), (-1.0, -row_lo[i])] {
                 if !b.is_finite() {
@@ -95,7 +107,7 @@ impl CliqueGraph {
                 v
             })
             .collect();
-        CliqueGraph { adj }
+        Some(CliqueGraph { adj })
     }
 
     /// 辺があるか。

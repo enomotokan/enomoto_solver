@@ -869,6 +869,14 @@ pub(crate) fn rows_fingerprint(rows: &[Vec<(usize, f64)>]) -> u64 {
 fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
     let start = RESTART_SOL.with(|s| s.borrow_mut().take());
     let t_pre = std::time::Instant::now();
+    // 前処理の重い手順の期限 ([`presolve_stop`]): この求解の時間の上限。戻るときに前の値 (外側の求解のもの) に戻す
+    struct RestoreDeadline(Option<std::time::Instant>);
+    impl Drop for RestoreDeadline {
+        fn drop(&mut self) {
+            PRESOLVE_DEADLINE.with(|d| d.set(self.0));
+        }
+    }
+    let _restore = RestoreDeadline(PRESOLVE_DEADLINE.with(|d| d.replace(params.time_limit.is_finite().then(|| t_pre + std::time::Duration::from_secs_f64(params.time_limit.max(0.0))))));
     // 時間上限は前処理・対称性の検出の時間も含める (分枝限定法の時計は `solver::solve` の開始から測るので、渡す前に引く)
     let remaining = |params: MipParams| MipParams { time_limit: (params.time_limit - t_pre.elapsed().as_secs_f64()).max(0.0), ..params };
     // 前処理の LP による固定 ([`lp_probe`]) は最初の求解だけ (サブ MIP・再スタートの後は使わない)
@@ -1820,6 +1828,20 @@ pub(crate) fn dump_mps(p: &MipProblem, f: &str) {
     eprintln!("MIP: presolved problem written to {f} (objective offset {:e})", p.offset);
 }
 
+thread_local! {
+    /// この求解の前処理の期限 ([`presolve_stop`])。[`solve_problem_inner`] が前処理の間だけ置く
+    static PRESOLVE_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// 前処理の重い手順 (クリーク行の拡張 ([`extend_clique_rows`])・プロービング) を打ち切るか: このスレッドの止めの合図
+/// ([`crate::cancel::halted`]、木の探索の従のスレッド) が立った、またはこの求解の時間の上限 (前処理の始めから数える) を過ぎた。
+/// 木のヒューリスティクス役の従が出したサブ MIP (`ENOMOTO_MIP_SUBMIP_HIGHS` の `p` で親と同じ前処理) のクリーク行の拡張が、
+/// 主の止めの合図の後も 4.8 秒回り、主がその従を待つ間に時間の上限を 2.7 秒過ぎていた (neos-960392、analysis/bgw_overrun_20261031.md)。
+/// `ENOMOTO_MIP_NO_PRESOLVE_STOP` で使わない (切り分け用)
+pub(super) fn presolve_stop() -> bool {
+    (crate::cancel::halted() || PRESOLVE_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d)) && env_str!("ENOMOTO_MIP_NO_PRESOLVE_STOP").is_none()
+}
+
 /// クリーク行の拡張 (既定で使う。`ENOMOTO_MIP_NO_CLIQUE_EXTEND` で使わない。HiGHS の前処理の probing の "lifted nonzeros" に当たる):
 /// 0-1 列だけで「文字の和 <= 1」の形の片側の行 (集合詰め込み行、`1 - x` の文字を含む) について、行のすべての文字と衝突する
 /// (衝突グラフ = 行から作る組 + プロービングの含意 [`MipProblem::conflict_edges`]) 文字を行に加える。加えた文字どうしも
@@ -1830,7 +1852,13 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     let t0 = std::time::Instant::now();
     let n = prob.n;
     let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0).collect();
-    let g = clique::CliqueGraph::build_with(n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, &prob.col_lo, &prob.col_up, &prob.conflict_edges);
+    // 時間の上限・止めの合図 ([`presolve_stop`]) で衝突グラフを作り切れなければ拡張しない
+    let Some(g) = clique::CliqueGraph::build_with_stop(n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, &prob.col_lo, &prob.col_up, &prob.conflict_edges, &presolve_stop) else {
+        if verbose {
+            eprintln!("MIP: clique extension: stopped while building the conflict graph (time limit or stop signal, {:.2}s); not used", t0.elapsed().as_secs_f64());
+        }
+        return prob;
+    };
     // `ENOMOTO_MIP_CLIQUE_EXTEND_ROWS_FIRST` (試作、既定では使わない): まず行から作る衝突グラフ (プロービングの含意なし) だけで
     // 文字を足し、その後に含意を含むグラフで足せるだけ足す。含意の辺が多いと (mzzv42z は行から 205346 辺、含意から 1186997 本)、
     // 番号順の貪欲が LP に効かない文字を先に取り、行から作る辺だけの拡張 (HiGHS の前処理の clique merging に当たる) を塞ぐ。
@@ -1848,7 +1876,13 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     // 片側の集合詰め込み行の文字の集合 (拡張の後)。ほかの片側の集合詰め込み行に含まれる行は冗長なので消す
     // (`ENOMOTO_MIP_CLIQUE_EXTEND_KEEP_DOMINATED` で消さない)。HiGHS のクリークの統合も含まれるクリークを消す
     let mut clique_rows: Vec<(usize, Vec<u32>)> = Vec::new();
+    // 途中で止めたか ([`presolve_stop`])。そこまでに足した文字はどれも衝突グラフの辺によるので正しい。支配された行の除去はしない
+    let mut stopped = false;
     for i in 0..rows.len() {
+        if i % 64 == 0 && presolve_stop() {
+            stopped = true;
+            break;
+        }
         let (l, u) = (row_lo[i], row_up[i]);
         let eq = l == u;
         // sg * row <= b の向き (等式は <= の向きで見る)
@@ -1955,7 +1989,7 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     let mut keep = vec![true; rows.len()];
     let mut dup = 0usize;
     let mut dominated = 0usize;
-    if env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_KEEP_DOMINATED").is_none() {
+    if !stopped && env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_KEEP_DOMINATED").is_none() {
         // 文字 -> それを含むクリーク行 (clique_rows の添字)
         let mut by_lit: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
         for (c, (_, ls)) in clique_rows.iter().enumerate() {
@@ -2011,7 +2045,7 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
         });
     }
     if verbose {
-        eprintln!("MIP: clique extension: {ext_rows} rows extended, {added} nonzeros added, {fixed} columns fixed, {dup} duplicate and {dominated} dominated rows removed ({} edges, {:.2}s)", g.num_edges(), t0.elapsed().as_secs_f64());
+        eprintln!("MIP: clique extension: {ext_rows} rows extended, {added} nonzeros added, {fixed} columns fixed, {dup} duplicate and {dominated} dominated rows removed ({} edges, {:.2}s){}", g.num_edges(), t0.elapsed().as_secs_f64(), if stopped { " (stopped by the time limit or the stop signal)" } else { "" });
     }
     let mut q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
     q.conflict_edges = conflict_edges;
@@ -2937,7 +2971,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             if cnt % 16 == 0 && verbose && env_str!("ENOMOTO_MIP_DEBUG_PROBE_PROGRESS").is_some() {
                 eprintln!("MIP:   probing progress: candidate {cnt} (pass {passes}), probed {probed}, fixed {fixed}, tightened {tightened}, implications {}, cpu {:.3}s", edges.len(), cap_clock() - c0);
             }
-            if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || pwork(&dom, probed, edges.len()) > wcap || cap_clock() - c0 > cap) {
+            if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || pwork(&dom, probed, edges.len()) > wcap || cap_clock() - c0 > cap || presolve_stop()) {
                 break 'passes;
             }
             if dom.lo[j] == dom.up[j] {
@@ -4777,6 +4811,21 @@ mod tests {
             let orig_ok = [x[0] + x[1], x[0] + x[2], x[1] + x[2], x[1] + x[3], x[4] + x[6]].iter().all(|&v| v <= 1.0) && x[4] - x[5] <= 0.0 && x[6] - x[5] <= 0.0;
             assert_eq!(orig_ok, q.is_feasible(&x, 1e-9), "{x:?}");
         }
+    }
+
+    /// クリーク行の拡張は、このスレッドの止めの合図 ([`presolve_stop`]) が立っていれば何も変えずに戻る
+    /// (木の従のスレッドのサブ MIP の前処理が、主の止めの合図の後も回り続けないように)
+    #[test]
+    fn extend_clique_rows_stops_on_halt() {
+        let rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(0, 1.0), (2, 1.0)], vec![(1, 1.0), (2, 1.0)]];
+        let m = rows.len();
+        let p = MipProblem::from_rows(vec![0.0; 3], vec![1.0; 3], vec![-1.0; 3], 0.0, 1.0, vec![true; 3], rows, vec![f64::NEG_INFINITY; m], vec![1.0; m]);
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let q = crate::cancel::with_halt(Some(flag), || extend_clique_rows(p.clone(), false));
+        assert_eq!(q.rows, p.rows);
+        assert_eq!(q.m, 3);
+        // 合図がなければ拡張する
+        assert_eq!(extend_clique_rows(p, false).m, 1);
     }
 
     /// 上限側と下限側 (符号の逆の倍) の行が範囲制約 1 本にまとまること

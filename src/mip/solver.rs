@@ -1805,6 +1805,7 @@ pub(super) struct CutJob {
 /// `ENOMOTO_MIP_BG_CUTS_WAIT` (試作、既定では使わない): 根のヒューリスティクスが終わった時点で裏のカットがまだ下界を上げているなら、
 /// 停滞するか待ちの上限まで止めの合図を待つ ([`BgCuts::wait_progress`])。待ちの上限は、残り時間の `ENOMOTO_T_MIP_BG_CUTS_WAIT_FRAC`
 /// (既定 0.1) 倍と、主の根のカットのループの時間の `ENOMOTO_T_MIP_BG_CUTS_WAIT_MULT` (既定 5、0 以下なら使わない) 倍の小さいほう。
+/// 待った後の残り時間が時間の上限の `ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT` (既定 0.05) 倍を切るなら待たない。
 /// mc11 は裏のカットの下界で解けるかどうかが決まり、根のサブ MIP が早く終わる設定 (`ENOMOTO_MIP_SUBMIP_HIGHS` の `s`) では
 /// 裏のカットが 1 ラウンドに 20 ほど上がっている途中 (16〜29 ラウンド) で止められ、根の下界が 11668〜11684 から 11375〜11590 に
 /// 落ちて解けなくなっていた (analysis/mc11_h1_20261030.md)
@@ -4411,10 +4412,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     cap = cap.min(mult * root_cut_secs);
                 }
                 let cutoff = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
-                let (w, why) = bg.wait_progress(cap, cutoff);
-                if self.params.verbose {
-                    let h = bg.job.prog.lock().unwrap();
-                    eprintln!("MIP: background cuts: waited {w:.2}s for progress (cap {cap:.2}s, {why}), {} rounds, obj {:?} ({:.2}s)", h.len(), h.last(), self.start.elapsed().as_secs_f64());
+                // 待った後の残り時間が時間の上限の `ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT` (既定 0.05) 倍を切るなら待たない
+                // (残りが少ないと、置き換えた LP の解き直しや木を始めるための時間がなくなる)
+                let min_left = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT", 0.05, f64) * self.params.time_limit;
+                if remaining - cap < min_left {
+                    if self.params.verbose {
+                        eprintln!("MIP: background cuts: not waiting (remaining {remaining:.2}s, cap {cap:.2}s, minimum left {min_left:.2}s, {:.2}s)", self.start.elapsed().as_secs_f64());
+                    }
+                } else {
+                    let (w, why) = bg.wait_progress(cap, cutoff);
+                    if self.params.verbose {
+                        let h = bg.job.prog.lock().unwrap();
+                        eprintln!("MIP: background cuts: waited {w:.2}s for progress (cap {cap:.2}s, {why}), {} rounds, obj {:?} ({:.2}s)", h.len(), h.last(), self.start.elapsed().as_secs_f64());
+                    }
                 }
             }
             let res = bg.finish();
