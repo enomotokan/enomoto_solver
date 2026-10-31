@@ -14,7 +14,8 @@ neos-2978193-inde で def 33.1 秒 → 50.2 秒と遅かった (bench6 でも hs
   - `summ.py [問題] [設定,...]`: 全体の秒・最初の根の長さ (再スタートの時刻)・早めの再スタートの有無・最初の根のサブ MIP の秒・木の秒。`summ.txt` に全部。
   - `subroot.py`: 最初の根の RENS・RENS (more nodes)・RINS のサブ MIP 1 本ごとの秒とノード。`stat.py`: 1 回ごとの時間の配分 (`stat.txt`)。
 - 表の数字は秒。T は時間切れ (60 として平均)。最適値の食い違い・crash はない。
-- `cargo test --release --lib` (`CARGO_TARGET_DIR=target/test-py RUSTFLAGS="-C link-arg=-lpython3.13"`): 330 passed。
+- `cargo test --release --lib` (`CARGO_TARGET_DIR=target/test-py RUSTFLAGS="-C link-arg=-lpython3.13"`): 330 passed (`f50a7f4` 以降の変更に rebase した後も同じ)。
+- 注意: rebase した先 (`f50a7f4`) では cand が既定になっている。この記録の def は `6bfcc89d` の既定 (cand の前) を指す。
 
 ## 1. 結論
 
