@@ -833,6 +833,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
         SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
+        SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
         EQUIV2_USED.with(|f| f.set(false));
     }
     let r = solve_problem_inner(p, params, use_presolve);
@@ -841,6 +842,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
         SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
+        SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
         solver::ROOT_BASIS.with(|t| *t.borrow_mut() = None);
         solver::ROOT_DSE.with(|t| *t.borrow_mut() = None);
         solver::RESTART_BASIS.with(|t| *t.borrow_mut() = None);
@@ -1161,6 +1163,18 @@ thread_local! {
     /// orbital fixing の生成元 ([`sym_of`]。lex-leader の行の代わり。再スタートの後は [`symmetry::verify_generators`] で
     /// 確かめ直したものに置き換える。同じく消す)。
     pub(crate) static SYM_OF_GENS: std::cell::RefCell<Option<std::rc::Rc<Vec<Vec<usize>>>>> = const { std::cell::RefCell::new(None) };
+    /// 根のカットの像を作る生成元 ([`sym_cuts`]。根の時点で対称性を崩す処理がないときだけ置く。同じく消す)。
+    pub(crate) static SYM_CUT_GENS: std::cell::RefCell<Option<std::rc::Rc<Vec<Vec<usize>>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `ENOMOTO_MIP_SYM_CUTS` (試作、既定では使わない): 再スタート前の根のカットを、検出した対称性の生成元で写した像もカットプールに入れ、
+/// 違反していれば次のラウンドの候補にする。同じ形のブロック (箱・機械) が多数ある問題では、50 本ずつ切っても LP が切られていない
+/// 別のブロックに移るだけで下界が動かないことがある (neos-3381206-awhea)。像が正しいのは、カットが対称な問題 (行・目的関数が生成元で
+/// 不変) の改善解の集合で成り立つとき: 根の時点で対称性を崩す処理 (lex-leader の行・静的なオービトープの固定) が入っていなければ、
+/// 根のカット (打ち切り値・被約費用による固定を使ったものも、改善解の集合が生成元で閉じているので) の像は正しい。動的な
+/// orbitopal fixing・orbital fixing は分枝で固定した列から始めるので根では何も固定しない
+pub(crate) fn sym_cuts() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_CUTS").is_some()
 }
 
 /// 既定 (2026-10-29、`ENOMOTO_MIP_NO_SYM_OF` で以前の lex-leader の行): オービトープにならない対称性を、lex-leader の行 (`x_i - x_k >= 0`) の代わりに探索中の
@@ -1599,6 +1613,9 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     }
     let of = sym_of();
     let pairs = if of { Vec::new() } else { symmetry::lex_leader_pairs_except(&sym, &used, &in_orb) };
+    if sym_cuts() && pairs.is_empty() && env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_none() && !sym.generators.is_empty() {
+        SYM_CUT_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(sym.generators.clone())));
+    }
     if of {
         // オービトープの生成元が動かす列 (オービトープの外の列を含む) を動かす生成元は使わない (群が直積に分かれる
         // ときだけ、オービトープの固定と orbital fixing を混ぜてよい。HiGHS もオービトープの成分の置換を落とす)
