@@ -2048,6 +2048,8 @@ pub(super) struct CutJob {
     pub(super) basis: std::sync::Mutex<Option<super::lp::Basis>>,
     /// 各ラウンドの後の LP の目的値 (offset 込み)。`ENOMOTO_MIP_BG_CUTS_WAIT` で、主が止めの合図を出す前にまだ上がっているかを見る
     pub(super) prog: std::sync::Mutex<Vec<f64>>,
+    /// `prog` の各ラウンドを記録した時刻 (ログで、主の待ちの判定とラウンドの進み方を並べるため)
+    pub(super) prog_at: std::sync::Mutex<Vec<Instant>>,
 }
 
 /// `ENOMOTO_MIP_BG_CUTS_WAIT` (既定で使う。`0` で止める。analysis/cand_default_20261031.md): 根のヒューリスティクスが終わった時点で裏のカットがまだ下界を上げているなら、
@@ -2076,6 +2078,12 @@ impl BgCuts {
         let t0 = Instant::now();
         let win = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_WIN", 5usize, usize).max(1);
         let eps = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_EPS", 1e-4, f64);
+        // `ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_ROUNDS` = r (試作、既定 0 で使わない): 裏のカットのラウンドが r 個そろうまでは停滞とみなさず、
+        // 待ちの上限まで待つ。既定では 2 ラウンドそろう前は上がり幅を測れないので、すぐ「停滞」として止めの合図を出す。
+        // physiciansched6-2 では、裏のカットの 1 ラウンド目 (49057) の後、2〜3 ラウンド目で 49224 → 49324 (最適値) に届くのに、
+        // 根のヒューリスティクスが早く終わった回は 0〜1 ラウンドで止められ、根の下界が 49224 以下のまま木に入って時間切れになる
+        // (analysis/phys6_20261101.md の 1 節)
+        let min_rounds = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_ROUNDS", 0usize, usize);
         let why = loop {
             if self.handle.as_ref().is_none_or(|h| h.is_finished()) {
                 break "done";
@@ -2084,7 +2092,7 @@ impl BgCuts {
                 let h = self.job.prog.lock().unwrap();
                 let k = h.len();
                 if k < 2 {
-                    false
+                    k < min_rounds
                 } else {
                     let w = win.min(k - 1);
                     let (a, b) = (h[k - 1 - w], h[k - 1]);
@@ -4246,7 +4254,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
             let bg_mode = env_str!("ENOMOTO_MIP_BG_CUTS").or(if env_str!("ENOMOTO_MIP_NO_BG_CUTS").is_none() { Some("1") } else { None });
             if let Some(mode) = bg_mode {
-                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None), basis: std::sync::Mutex::new(None), prog: std::sync::Mutex::new(Vec::new()) });
+                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None), basis: std::sync::Mutex::new(None), prog: std::sync::Mutex::new(Vec::new()), prog_at: std::sync::Mutex::new(Vec::new()) });
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let mut threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
@@ -4814,6 +4822,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.params.verbose {
                         let h = bg.job.prog.lock().unwrap();
                         eprintln!("MIP: background cuts: waited {w:.2}s for progress (cap {cap:.2}s, {why}), {} rounds, obj {:?} ({:.2}s)", h.len(), h.last(), self.start.elapsed().as_secs_f64());
+                        let at = bg.job.prog_at.lock().unwrap();
+                        let rounds: Vec<String> = h.iter().zip(at.iter()).map(|(o, t)| format!("{o:.1} at {:.2}s", t.saturating_duration_since(self.start).as_secs_f64())).collect();
+                        eprintln!("MIP: background cuts: rounds so far [{}]", rounds.join(", "));
                     }
                 }
             }
