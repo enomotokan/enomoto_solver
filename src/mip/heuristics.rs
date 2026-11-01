@@ -1579,7 +1579,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let params = super::solver::MipParams {
             time_limit,
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
-            node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult) as u64,
+            // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT_ROOT`・`_TREE`・`_DEEP` (試作、既定 1): さらに、外側の根のサブ MIP・外側の木の中のサブ MIP・
+            // サブ MIP の中のサブ MIP (入れ子) だけに掛ける倍率 (analysis/submip_nodes_20261101.md)
+            node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult * if self.params.submip {
+                tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT_DEEP", 1.0, f64)
+            } else if self.nodes <= 1 {
+                tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT_ROOT", 1.0, f64)
+            } else {
+                tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT_TREE", 1.0, f64)
+            }) as u64,
             // サブ MIP は解を探すためのものなので、ギャップは外側の設定より緩くてよい (外側の既定 0 でも 1e-4 で止める)
             // `ENOMOTO_T_MIP_SUBMIP_NOINC_GAP` = g (> 0、試作、既定 0 で今まで通り): 外側の求解に暫定解がまだなければ、サブ MIP をギャップ g で
             // 止めて早く解を返させる (並列のサブ MIP の解は終わるまで外側に渡らない。physiciansched6-2 では Local-MIP が解を出さない回に、

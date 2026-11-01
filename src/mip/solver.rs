@@ -203,6 +203,8 @@ thread_local! {
     pub(crate) static RESUME_LINK: std::cell::RefCell<Option<ResumeChild>> = const { std::cell::RefCell::new(None) };
     /// 次に作る求解 (サブ MIP) の一時停止の手続き ([`Solver::resume_pause`])。求解を作るときに取り出す
     pub(crate) static RESUME_HOOK: std::cell::RefCell<Option<ResumeHook>> = const { std::cell::RefCell::new(None) };
+    /// 別スレッドで解く (並列の) サブ MIP のスレッドか ([`Solver::spawn_submip`] が立てる。`ENOMOTO_MIP_SUBMIP_NOSOL_CAP_SERIAL` に使う)
+    pub(crate) static SUBMIP_IN_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 次に始める求解 (サブ MIP でないもの) の根の LP の初めの基底 (列の状態)。前処理の LP による固定
     /// ([`super::lp_probe`]) が解いた LP の基底を渡す (根の LP を解き直す手間を減らす)。
     pub(crate) static ROOT_BASIS: std::cell::RefCell<Option<super::lp::Basis>> = const { std::cell::RefCell::new(None) };
@@ -5281,6 +5283,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.submip_nosol_stop() {
                 self.dbg_submip_stop("no solution");
                 return self.finish_limit(MipStatus::TimeLimit, plunge.as_ref());
+            }
+            // `ENOMOTO_T_MIP_SUBMIP_NOSOL_CAP` = K (試作、既定 0 = 使わない。上の `ENOMOTO_MIP_SUBMIP_NOSOL_STOP` とは別の試作): サブ MIP が
+            // 解 (打ち切り値より良いもの) を 1 つも見つけないまま K ノード進んだら止める (解を見つけたサブ MIP はノード上限と成果連動の
+            // 打ち切りのまま。外側に暫定解のないサブ MIP も止める)。`ENOMOTO_MIP_SUBMIP_NOSOL_CAP_ROOT` なら外側の根のサブ MIP
+            // ([`submip_outcome_stop`] の対象) だけ、`ENOMOTO_MIP_SUBMIP_NOSOL_CAP_SERIAL` なら別スレッドで解く並列のサブ MIP (とその中の入れ子) を除く。
+            // 状態は `NodeLimit` で返すが、ノード上限には届いていないので `ENOMOTO_MIP_RENS_MORE_NODES_REAL` ではやり直さない
+            // (analysis/submip_nodes_20261101.md。計測のときの名前は `ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES`・`ENOMOTO_MIP_SUBMIP_NOSOL_NODES_ROOT`・
+            // `_SERIAL` で、上の試作の調整値と重なったので改名した)
+            if self.params.submip && self.last_improve_node.is_none() {
+                let k = tunable!("ENOMOTO_T_MIP_SUBMIP_NOSOL_CAP", 0u64, u64);
+                if k > 0
+                    && self.nodes >= k
+                    && (self.root_submip.is_some() || env_str!("ENOMOTO_MIP_SUBMIP_NOSOL_CAP_ROOT").is_none())
+                    && !(SUBMIP_IN_THREAD.with(|f| f.get()) && env_str!("ENOMOTO_MIP_SUBMIP_NOSOL_CAP_SERIAL").is_some())
+                {
+                    self.dbg_submip_stop("no solution");
+                    return self.finish_limit(MipStatus::NodeLimit, plunge.as_ref());
+                }
             }
             // 潜りが枝刈りで終わったら、潜った道の兄弟ノード (新しいものから) に戻る (HiGHS の backtrackPlunge)。
             // 潜りの打ち切りの条件 (下界が 全体の下界 + q (打ち切り値 - 全体の下界) 以下) を満たすものだけ
@@ -11610,6 +11630,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
                 super::heuristics::SUBMIP_HS_DROP.with(|f| f.set(hs_drop));
                 super::heuristics::SUBMIP_R0.with(|f| f.set(r0));
+                SUBMIP_IN_THREAD.with(|f| f.set(true));
                 if comp_diag {
                     super::SUBMIP_LABEL.with(|l| l.set(label));
                 }
