@@ -260,3 +260,26 @@ ENOMOTO の既定は今回の計測の 7〜9 回分。
   - 速くなる: neos-3083819-nubu (nm01 で 22〜30 → 11〜17 秒)、neos17、exp-1-500-5-5。
 - 判断: 一律にノード上限を下げるのは採らない。`submip_where_20261101.md` のとおり、無駄の大部分は「解を 1 つも見つけないサブ MIP」で、
   成功するサブ MIP の改善は 233・320 ノード目にもある。
+
+## bench9: サブ MIP の無駄を削る試作 (real・d2lp1・trim3) を 58 問 2 回 (回 12・13) と Mittelmann 186 問 (回 103) で比べる (2026-11-01)
+
+- def は今の既定 (cand)。real = `ENOMOTO_MIP_RENS_MORE_NODES_REAL=1` (`rens_more_real_20261101.md`)、d2lp1 = `ENOMOTO_MIP_RENS_MAX_DEPTH=2 ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH=1`
+  (`rens_depth3_20261101.md`)、trim3 = real + d2lp1 + `ENOMOTO_MIP_RENS_RESUME=1` (`rens_resume_20261101.md`)。
+- 分担は `bench9.json` (30 個、`db2cb031` のコード。**前処理の誤った実行不能の判定の直し `fb1002d2` より前**)。集計は `summ9.py` (`B=<設定>`)、出力は `summ9.txt`。
+
+| 範囲 | def | real | d2lp1 | trim3 |
+|---|---|---|---|---|
+| 58 問 回 12 | 18.50 / 41 | 18.19 / 42 | 18.46 / 43 | 17.69 / 42 |
+| 58 問 回 13 | 18.65 / 42 | 17.65 / 42 | 17.87 / 42 | 17.62 / 44 |
+| 58 問 2 回 (116) | 18.57 / 83 | 17.91 / 84 (−3.5%) | 18.16 / 85 (−2.2%) | **17.66 / 86 (−4.9%)** |
+| Mittelmann 186 問 | 44.28 / 46 | 44.35 / 48 (+0.2%) | 44.49 / 45 (+0.5%) | **44.01 / 46 (−0.6%)** |
+
+- 片方だけ解けた回 (def に対して):
+  - real: 試作だけ neos-960392・neos5・physiciansched6-2 ×2、def だけ h80x6320d (回 13、55.4 秒)。
+  - d2lp1: 試作だけ neos5・physiciansched6-2・qiu、def だけ h80x6320d (回 13)・n5-3 (Mittelmann、58.0 秒)。
+  - trim3: 試作だけ neos-960392・physiciansched6-2 ×2・qiu、def だけ neos-1171448 (Mittelmann、46.2 秒)。
+- 最適値の食い違い・crash は 0 件 (1208 行)。h80x6320d の「最適」も全部 6382.09905 (前処理の誤りは表に出なかった)。
+- 時間の上限の超過: cryptanalysiskb128n5obj14 が **4 つの形とも 74〜82 秒** (def 74.1)。ほかは 61〜62 秒。
+- 判断: trim3 が 58 問・Mittelmann とも一番良い (58 問 −4.9%・解けた数 +3、Mittelmann −0.6%)。効きの大部分は real から来る。
+  ただしこの計測は前処理の直しの前のコードで、h80x6320d の速い回は誤った近道に乗っていた (`presolve_infeasible_20261101.md` の 1 節 6 項)。
+  既定にする前に、直しの入ったコードで def・trim3・trim3 + 解なしの打ち切り (t20、`submip_nosol_stop_20261101.md`) を確かめ直す。
