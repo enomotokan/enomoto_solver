@@ -898,7 +898,15 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     let prev_rp = RESTART_PRESOLVE.with(|f| f.replace(params.restarts > 0));
     // `ENOMOTO_MIP_SUBMIP_HIGHS` の `p`: サブ MIP でも親と同じ前処理 (HiGHS の `solveSubMip` は親と同じ前処理の設定で解く)
     let pre_submip = params.submip && !submip_highs('p');
+    FEAS_FJ_SOL.with(|s| *s.borrow_mut() = None);
+    FEAS_FJ_EARLY.with(|c| {
+        c.set((feas_fj_early_on() && lp_probe_secs.is_some()).then(|| {
+            let cap = if params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_FEAS_FJ_EARLY_FRAC", 0.1, f64) * params.time_limit } else { 10.0 };
+            (params.threads.max(1), cap)
+        }))
+    });
     let presolved = if use_presolve { presolve_mip(p, params.verbose, pre_submip, lp_probe_secs) } else { None };
+    FEAS_FJ_EARLY.with(|c| c.set(None));
     RESTART_PRESOLVE.with(|f| f.set(prev_rp));
     // `ENOMOTO_MIP_SPARSIFY_LATE`: HiGHS と同じく前処理 (プロービング・同値の代入の後) の最後に 1 回だけ疎化し
     // ([`sparsify_rows_highs`]、`=old` なら [`sparsify_rows`])、書き換えたら前処理をもう一度かける (その中では疎化しない)
@@ -1061,7 +1069,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
             }
-            let prob = if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some() || submip_highs('p')) { extend_clique_rows(prob, params.verbose) } else { prob };
+            // `ENOMOTO_MIP_FEAS_FJ_EARLY`: 前処理の中の早めの FJ が解を見つけていれば、クリーク行の拡張・対称性・木を飛ばす
+            let early = FEAS_FJ_SOL.with(|s| s.borrow_mut().take()).filter(|x| x.len() == prob.n && prob.is_feasible(x, 1e-6));
+            let early_sol = early.is_some();
+            let prob = if early_sol { prob } else if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some() || submip_highs('p')) { extend_clique_rows(prob, params.verbose) } else { prob };
             // 診断用: クリーク行の拡張の後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2=ファイル`)
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
@@ -1072,7 +1083,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if sym_late && params.verbose {
                 eprintln!("MIP: symmetry: skipped (the presolve passed the time limit, {:.2}s)", t_pre.elapsed().as_secs_f64());
             }
-            let prob = if !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() && !sym_late { add_symmetry_rows(prob, params.verbose, &mut postsolve) } else { prob };
+            let prob = if !early_sol && !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() && !sym_late { add_symmetry_rows(prob, params.verbose, &mut postsolve) } else { prob };
             if !params.submip && params.restarts > 0 {
                 sym_of_reverify(&prob, params.verbose);
             }
@@ -1099,7 +1110,17 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             // `ENOMOTO_MIP_RENS_RESUME`: 一時停止できるサブ MIP なら、一時停止のときの結果を元の問題の空間に戻す手続きを置く
             let ps = std::rc::Rc::new((postsolve, scaling));
             install_resume_hook(p, params, Some(ps.clone()));
-            let mut r = solver::solve(&prob, remaining(params));
+            let mut r = match early {
+                // 目的関数が全部 0 なので、どの実行可能解も最適 (下界 = 目的値 = 定数)
+                Some(xr) => {
+                    let z = prob.objective(&xr);
+                    if params.verbose {
+                        eprintln!("MIP: the early FJ solution is optimal (objective {z:e}, feasibility problem); no tree search ({:.2}s)", t_pre.elapsed().as_secs_f64());
+                    }
+                    solver::MipResult { status: MipStatus::Optimal, x: Some(xr), objective: Some(z), best_bound: z, nodes: 0, lp_iterations: 0 }
+                }
+                None => solver::solve(&prob, remaining(params)),
+            };
             solver::RESUME_HOOK.with(|s| *s.borrow_mut() = None);
             let (postsolve, scaling) = (&ps.0, &ps.1);
             if outer_level {
@@ -1208,6 +1229,74 @@ fn install_resume_hook(p: &MipProblem, params: MipParams, ps: Option<std::rc::Rc
         link.pause(r)
     });
     solver::RESUME_HOOK.with(|s| *s.borrow_mut() = Some(hook));
+}
+
+thread_local! {
+    /// `ENOMOTO_MIP_FEAS_FJ_EARLY` ([`feas_fj_early_on`]): 前処理の中の早めの FJ の (スレッドの数, 時間の上限 (秒))。最初の求解の
+    /// 前処理の前に置き、前処理の後に消す (サブ MIP・再スタートでは置かない)
+    static FEAS_FJ_EARLY: std::cell::Cell<Option<(usize, f64)>> = const { std::cell::Cell::new(None) };
+    /// 早めの FJ が見つけた解 (その時点の前処理後の問題の空間)。[`solve_problem_inner`] が取り出し、木を解かずに最適で終える
+    static FEAS_FJ_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `ENOMOTO_MIP_FEAS_FJ_EARLY` (試作、既定では使わない): 実行可能性問題 (前処理後の目的関数が全部 0) では、前処理の LP による固定
+/// ([`lp_probe`]) の前に、種を変えた FJ2 をスレッドの数だけ並べて回す ([`feas_fj_early`])。見つかればどの実行可能解も最適なので、
+/// 残りの前処理 (LP による固定・プロービング・クリーク行の拡張・対称性) も根の LP も飛ばして最適で終える。
+/// ns1116954 (4 スレッド・60 秒) は既定で 27〜33 秒のうち、前処理の LP による固定が 11〜13 秒 (固定 0)、根の LP の解き直しが 12 秒で、
+/// FJ のスレッドは根の LP の途中で解を見つけているのに主が根の LP の終わりまで受け取らない (analysis/ns1116954_20261101.md)
+pub(crate) fn feas_fj_early_on() -> bool {
+    env_str!("ENOMOTO_MIP_FEAS_FJ_EARLY").is_some()
+}
+
+/// 早めの FJ ([`feas_fj_early_on`]) の本体: `threads` 本のスレッドで種を変えた FJ2 を `cap` 秒まで繰り返し、どれかが実行可能解を
+/// 見つけたら全部止めて返す。種は FJ のスレッド ([`heuristics::fj_search`]) と重ならないようにずらす
+fn feas_fj_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> Option<Vec<f64>> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let t0 = std::time::Instant::now();
+    let stop = AtomicBool::new(false);
+    let tries = AtomicU64::new(0);
+    let found: std::sync::Mutex<Option<Vec<f64>>> = std::sync::Mutex::new(None);
+    // 前処理の期限 ([`presolve_stop`]) はスレッド局所なので、ここで読んで渡す
+    let deadline = PRESOLVE_DEADLINE.with(|d| d.get());
+    let base = tunable!("ENOMOTO_T_MIP_FEAS_FJ_EARLY_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03) ^ 0x2545_F491_4F6C_DD1D;
+    std::thread::scope(|s| {
+        for t in 0..threads.max(1) {
+            let (stop, tries, found) = (&stop, &tries, &found);
+            s.spawn(move || {
+                let mut k = 0u64;
+                loop {
+                    let left = cap - t0.elapsed().as_secs_f64();
+                    if stop.load(Ordering::Relaxed) || left <= 0.05 || deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        break;
+                    }
+                    let seed = base.wrapping_add((t as u64 + k * threads.max(1) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                    tries.fetch_add(1, Ordering::Relaxed);
+                    if let Some(x) = fj::fj2_search(prob, &prob.col_lo, &prob.col_up, left, seed, Some(stop)) {
+                        if prob.is_feasible(&x, 1e-6) {
+                            let mut g = found.lock().unwrap();
+                            if g.is_none() {
+                                *g = Some(x);
+                            }
+                            stop.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    k += 1;
+                }
+            });
+        }
+    });
+    let r = found.into_inner().unwrap();
+    if verbose {
+        eprintln!(
+            "MIP: presolve: early FJ for the feasibility problem: {} threads, {} tries, found {} ({:.2}s, cap {cap:.2}s)",
+            threads.max(1),
+            tries.load(Ordering::Relaxed),
+            r.is_some(),
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    r
 }
 
 thread_local! {
@@ -2401,6 +2490,14 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // LP による固定は含意を集めるプロービングの前に行う (固定をプロービングの伝播に使い、固定した列の含意を作らない)。
     // 固定したら前処理をもう一度かける (固定した列と、それで冗長になった行を消し、縮約を続ける。プロービングもそちらで行う)。
     // 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
+    if lp_probe_secs.is_some() && !submip && heuristics::fj_feas_extend(&prob) {
+        if let Some((threads, cap)) = FEAS_FJ_EARLY.with(|c| c.take()) {
+            if let Some(x) = feas_fj_early(&prob, threads, cap, verbose) {
+                FEAS_FJ_SOL.with(|s| *s.borrow_mut() = Some(x));
+                return Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling });
+            }
+        }
+    }
     if let Some(secs) = lp_probe_secs {
         match lp_probe(&mut prob, verbose, secs) {
             None => return Some(Presolved::Infeasible),
