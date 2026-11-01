@@ -1,0 +1,30 @@
+diff --git a/src/mip/solver.rs b/src/mip/solver.rs
+index 633b6d4d..fe16e2d9 100644
+--- a/src/mip/solver.rs
++++ b/src/mip/solver.rs
+@@ -4007,7 +4007,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
+         let root_iters0 = self.lp.total_iterations();
+         if self.snap.is_some() && (CUT_JOB.with(|j| j.borrow().is_some()) || DIVE_ONLY.with(|d| d.get()).0 == 5) {
+             if let Some(b) = BG_ROOT_BASIS.with(|s| s.borrow_mut().take()) {
+-                if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
++                let fits = b.col.len() == self.p.n && b.row.len() == self.lp.num_rows();
++                // 診断の表示 (`ENOMOTO_MIP_BG_CUTS_LOG` などで写しの求解の表示を出したとき): 主の基底の大きさが写しの LP と合うか
++                if self.params.verbose {
++                    eprintln!(
++                        "MIP: [snapshot] root basis from the main solve: columns {} / {}, rows {} / {} (problem rows {}), basic {} (columns {}, cut rows {}), nonbasic at the upper bound {} (the basis passes only the basic set), {}",
++                        b.col.len(),
++                        self.p.n,
++                        b.row.len(),
++                        self.lp.num_rows(),
++                        self.p.m,
++                        b.col.iter().chain(b.row.iter()).filter(|s| matches!(s, super::lp::VarStatus::Basic)).count(),
++                        b.col.iter().filter(|s| matches!(s, super::lp::VarStatus::Basic)).count(),
++                        b.row.iter().skip(self.p.m).filter(|s| matches!(s, super::lp::VarStatus::Basic)).count(),
++                        b.col.iter().chain(b.row.iter()).filter(|s| matches!(s, super::lp::VarStatus::Upper)).count(),
++                        if fits { "used" } else { "not used (size mismatch)" }
++                    );
++                }
++                if fits {
+                     self.lp.set_basis(&b);
+                 }
+             }
