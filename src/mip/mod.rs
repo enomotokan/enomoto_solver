@@ -1910,6 +1910,26 @@ pub(super) fn presolve_stop() -> bool {
     (crate::cancel::halted() || PRESOLVE_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d)) && env_str!("ENOMOTO_MIP_NO_PRESOLVE_STOP").is_none()
 }
 
+/// このスレッドの前処理の期限 ([`presolve_stop`]) を `deadline` にして `f` を実行し、元に戻す。
+/// [`solve_problem_inner`] を通らずに前処理 ([`presolve_mip`]) を回す別スレッド (FJ・Local-MIP のスレッドの [`fj_p3_problem`]) が、
+/// 外側の求解の期限を過ぎたらプロービングなどを打ち切るのに使う。FJ のスレッドは `std::thread::spawn` で作るので期限が付いておらず、
+/// 主が根の LP を時間の上限で打ち切って `join_fj_thread` で待つ間も FJ_P3 の前処理のプロービングを回し続け、
+/// cryptanalysiskb128n5obj14・16 で時間の上限を 3〜22 秒過ぎていた (analysis/overrun_crypt_20261101.md)。
+/// `ENOMOTO_MIP_NO_FJ_P3_DEADLINE` で期限を置かない (切り分け用、直す前と同じ)
+pub(super) fn with_presolve_deadline<R>(deadline: Option<std::time::Instant>, f: impl FnOnce() -> R) -> R {
+    if env_str!("ENOMOTO_MIP_NO_FJ_P3_DEADLINE").is_some() {
+        return f();
+    }
+    struct Restore(Option<std::time::Instant>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PRESOLVE_DEADLINE.with(|d| d.set(self.0));
+        }
+    }
+    let _restore = Restore(PRESOLVE_DEADLINE.with(|d| d.replace(deadline)));
+    f()
+}
+
 /// クリーク行の拡張 (既定で使う。`ENOMOTO_MIP_NO_CLIQUE_EXTEND` で使わない。HiGHS の前処理の probing の "lifted nonzeros" に当たる):
 /// 0-1 列だけで「文字の和 <= 1」の形の片側の行 (集合詰め込み行、`1 - x` の文字を含む) について、行のすべての文字と衝突する
 /// (衝突グラフ = 行から作る組 + プロービングの含意 [`MipProblem::conflict_edges`]) 文字を行に加える。加えた文字どうしも
@@ -2465,7 +2485,9 @@ fn substitute_probe_equiv(prob: &MipProblem, mut postsolve: Vec<crate::presolve:
     // 前処理をもう一度かける (二項等式の消去が列を代入で消す)。かけ直しは `ENOMOTO_T_MIP_PROBE_EQUIV_ROUNDS` 回まで (既定 2)
     let equiv = PROBE_EQUIV.with(|e| std::mem::take(&mut *e.borrow_mut()));
     let depth = PROBE_EQUIV_DEPTH.with(|d| d.get());
-    if !equiv.is_empty() && depth < tunable!("ENOMOTO_T_MIP_PROBE_EQUIV_ROUNDS", 2usize, usize) {
+    // 時間の上限・止めの合図 ([`presolve_stop`]) を過ぎていれば、代入せずに (前処理をかけ直さずに) 返す (代入しない問題も正しい)。
+    // FJ のスレッドの FJ_P3 の前処理が期限の後にかけ直しを 1 回 (遅い機械で 0.5〜1 秒) 回していた (analysis/overrun_crypt_20261101.md)
+    if !equiv.is_empty() && depth < tunable!("ENOMOTO_T_MIP_PROBE_EQUIV_ROUNDS", 2usize, usize) && !presolve_stop() {
         // `ENOMOTO_MIP_EQUIV_EXTEND_FIRST` (試作、既定では使わない): 組の等式を足す前に、プロービングの含意を含む衝突グラフで
         // クリーク行の拡張 ([`extend_clique_rows`]) をかける (HiGHS の探りは延長 (持ち上げ) を先に入れてから同値の列を代入する)。
         // physiciansched6-2 では代入を先にすると、その後の延長が弱く (HiGHS の探りでも持ち上げ 1745 -> 140〜580 個)、
@@ -3236,10 +3258,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             (time_cap2, giveup2, u64::MAX, u64::MAX)
         };
         let w0 = d2.debug_work();
-        for &j in &cands {
-            // 毎列見る (長い列の多い問題では 16 列で 0.7 秒かかる: nw04)
+        for (ci, &j) in cands.iter().enumerate() {
+            // 毎列見る (長い列の多い問題では 16 列で 0.7 秒かかる: nw04)。時間の上限・止めの合図 ([`presolve_stop`]) は 16 列ごと
             let w = d2.debug_work() - w0;
-            if w > work_cap.min(wcap2) || tq.elapsed().as_secs_f64() > time_cap2 || ((tq.elapsed().as_secs_f64() > giveup2 || w > wgive2) && equiv.len() == n0) {
+            if w > work_cap.min(wcap2) || tq.elapsed().as_secs_f64() > time_cap2 || ((tq.elapsed().as_secs_f64() > giveup2 || w > wgive2) && equiv.len() == n0) || (ci % 16 == 0 && presolve_stop()) {
                 break;
             }
             if d2.lo[j] == d2.up[j] {
@@ -4087,6 +4109,7 @@ pub(super) fn fj_p3_on() -> bool {
 /// 戻せば `pc` の空間の解になる ([`fj_p3_solution`])。physiciansched6-2 では FJ が解を見つけるのにこの 3 つと FJ の LP 修復の
 /// 4 つが全部要る (1 つでも外すと 20 秒で解なし) が、p5s として本体の前処理に入れると beasleyC3・uccase12 で証明が遅れる
 pub(super) fn fj_p3_problem(pc: &MipProblem) -> Option<(MipProblem, Vec<crate::presolve::PostsolveStep>, Option<crate::presolve::scaling::Scaling>)> {
+    let t0 = std::time::Instant::now();
     crate::set_fj_p3_force(true);
     let r = presolve_mip(pc, false, false, None);
     crate::set_fj_p3_force(false);
@@ -4101,7 +4124,7 @@ pub(super) fn fj_p3_problem(pc: &MipProblem) -> Option<(MipProblem, Vec<crate::p
         eprintln!("MIP: FJ problem: {ks} column bounds tightened by set-partitioning rows (FJ_SP_BOUNDS)");
     }
     if env_str!("ENOMOTO_MIP_LOG").is_some() {
-        eprintln!("MIP: FJ problem (FJ_P3): rows {} -> {}, free columns {} -> {}, {k} continuous bounds tightened", pc.m, prob.m, (0..pc.n).filter(|&j| pc.col_lo[j] < pc.col_up[j]).count(), (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count());
+        eprintln!("MIP: FJ problem (FJ_P3): rows {} -> {}, free columns {} -> {}, {k} continuous bounds tightened ({:.2}s{})", pc.m, prob.m, (0..pc.n).filter(|&j| pc.col_lo[j] < pc.col_up[j]).count(), (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count(), t0.elapsed().as_secs_f64(), if presolve_stop() { ", past the deadline" } else { "" });
     }
     Some((prob, post, sc))
 }

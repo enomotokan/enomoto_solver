@@ -3785,6 +3785,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let cap = if super::heuristics::fj_feas_extend(&pc) && self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_FJ_FEAS_FRAC", 0.5, f64) * self.params.time_limit } else { cap };
                 // `ENOMOTO_MIP_FJ_P3` (既定、`ENOMOTO_MIP_NO_FJ_P3` で止める): FJ だけ、p5s の前処理の変更をかけ直した問題で探す ([`super::fj_p3_problem`])
                 let fj_p3 = super::fj_p3_on();
+                // FJ・Local-MIP のスレッドの FJ_P3 の前処理 ([`super::fj_p3_problem`]) の期限: この求解の時間の上限
+                // ([`super::with_presolve_deadline`]。過ぎたらプロービングなどを打ち切る。時間内の動きは変わらない)
+                let fj_deadline = self.deadline;
                 // `ENOMOTO_MIP_LOCALMIP` (試作): 1 = FJ と並べて別スレッドで Local-MIP 風の局所探索 ([`super::localmip`]) を回す、
                 // 2 = FJ の代わりに Local-MIP だけ。時間の上限は `ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC` (0.1) × 時間上限、最大 10 秒。
                 // 結果は根のカットのループの各ラウンドと木の各ノードで (待たずに) 受け取る
@@ -3801,7 +3804,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let mb2 = mailbox.clone();
                     self.lmip_mailbox = Some(mailbox);
                     let hl = std::thread::spawn(move || {
-                        let post_sc = if fj_p3 { super::fj_p3_problem(&pl) } else { None };
+                        let post_sc = if fj_p3 { super::with_presolve_deadline(fj_deadline, || super::fj_p3_problem(&pl)) } else { None };
                         let run = |q: &super::problem::MipProblem, lo: &[f64], up: &[f64]| {
                             let t = std::time::Instant::now();
                             // 良くなった解はその場で受け渡し箱に入れる (元の問題の空間に戻して)
@@ -3884,7 +3887,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         lr.best
                     };
                     if fj_p3 {
-                        if let Some((q, post, sc)) = super::fj_p3_problem(&pc) {
+                        if let Some((q, post, sc)) = super::with_presolve_deadline(fj_deadline, || super::fj_p3_problem(&pc)) {
                             let map = |x: Vec<f64>| super::fj_p3_solution(x, &post, &sc);
                             let fb = |q2: &super::problem::MipProblem, lo: &[f64], up: &[f64]| {
                                 crate::set_fj_p3_force(false);
