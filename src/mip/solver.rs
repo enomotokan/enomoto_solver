@@ -8081,40 +8081,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_STOP`: サブ MIP がノードの上限・停滞・成果連動のどれで止まったかと、そこまでのノード・強分岐の LP・暫定解
     /// `ENOMOTO_MIP_SUBMIP_NOSOL_STOP` (試作、既定では使わない): サブ MIP の木のループで、まだ解を 1 つも見つけていなければ、
-    /// 次のどれかで止める (根 (ノード 0) のカットのループと根のヒューリスティクスは止めない。サブ MIP の解の多くはノード 0 で出る、
+    /// ノード数と経過秒の両方が閾値を超えたら止める (片方を 0 にすればもう片方だけで止める。両方 0 なら止めない)。
+    /// 根 (ノード 0) のカットのループと根のヒューリスティクスは止めない (サブ MIP の解の多くはノード 0 で出る、
     /// analysis/submip_where_20261101.md の 2 節)。
-    /// - ノード数が `ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES` (深さ 1、既定 100) / `ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES_DEEP` (深さ 2 以上、
-    ///   既定は深さ 1 と同じ) 以上。0 ならノード数では止めない
-    /// - 経過秒がサブ MIP の時間の上限の `ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC` (既定 0 = 使わない) 倍以上、
-    ///   または `ENOMOTO_T_MIP_SUBMIP_NOSOL_SECS` (既定 0 = 使わない) 秒以上
+    /// - 深さ 1: ノード数 `ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES` (既定 100)、経過秒がサブ MIP の時間の上限の
+    ///   `ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC` (既定 0) 倍
+    /// - 深さ 2 以上: `ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES_DEEP`・`ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC_DEEP` (既定は深さ 1 と同じ)
+    /// - 刈り込みの上限が無限 (外側にも呼び出し側にも暫定解がなく、解を見つけること自体が目的のとき): ノード数
+    ///   `ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES_NOINC` (既定 0 = 止めない) だけ
     ///
-    /// 刈り込みの上限が無限 (外側にも呼び出し側にも暫定解がなく、解を見つけること自体が目的のとき) は、ノード数の代わりに
-    /// `ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES_NOINC` (既定 0 = 止めない) を使い、時間でも止めない
-    /// (physiciansched6-2 は打ち切り値なしの根の RENS が 49324 を見つける回がある。analysis/submip_nosol_stop_20261101.md)
+    /// ノード数だけで止めると 10teams の根のサブ MIP (233 ノード・4 秒で初めて最適解) を切る。時間の条件を重ねて、1 ノードの
+    /// 重いサブ MIP (30n20b8・supportcase26 などの 500 ノード・10〜30 秒の解なし) だけを切る (analysis/submip_nosol_stop_20261101.md)
     fn submip_nosol_stop(&self) -> bool {
         if !self.params.submip || self.incumbent.is_some() || env_str!("ENOMOTO_MIP_SUBMIP_NOSOL_STOP").is_none() {
             return false;
         }
         let deep = super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) >= 2;
-        let has_outer = self.prune_limit().is_finite();
         let n1 = tunable!("ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES", 100u64, u64);
-        let nodes = if !has_outer {
-            tunable!("ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES_NOINC", 0u64, u64)
+        let f1 = tunable!("ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC", 0.0, f64);
+        let (nodes, frac) = if !self.prune_limit().is_finite() {
+            (tunable!("ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES_NOINC", 0u64, u64), 0.0)
         } else if deep {
-            tunable!("ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES_DEEP", n1, u64)
+            (tunable!("ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES_DEEP", n1, u64), tunable!("ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC_DEEP", f1, f64))
         } else {
-            n1
+            (n1, f1)
         };
-        if nodes > 0 && self.nodes >= nodes {
-            return true;
-        }
-        if !has_outer {
+        let frac_on = frac > 0.0 && self.params.time_limit.is_finite();
+        if nodes == 0 && !frac_on {
             return false;
         }
-        let t = self.start.elapsed().as_secs_f64();
-        let frac = tunable!("ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC", 0.0, f64);
-        let secs = tunable!("ENOMOTO_T_MIP_SUBMIP_NOSOL_SECS", 0.0, f64);
-        (frac > 0.0 && self.params.time_limit.is_finite() && t >= frac * self.params.time_limit) || (secs > 0.0 && t >= secs)
+        (nodes == 0 || self.nodes >= nodes) && (!frac_on || self.start.elapsed().as_secs_f64() >= frac * self.params.time_limit)
     }
 
     fn dbg_submip_stop(&self, why: &str) {

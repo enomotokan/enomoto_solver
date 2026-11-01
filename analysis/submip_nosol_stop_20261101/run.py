@@ -14,12 +14,15 @@ CFGS = {
     "n200": dict(ON, ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES="200"),
     "n100": dict(ON, ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES="100"),
     "n50": dict(ON, ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES="50"),
+    # 2 回目のビルド (ノード数と時間の両方で止める形): 100 ノード以上かつサブ MIP の時間の上限の 10%・20% 以上
+    "t10": dict(ON, ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES="100", ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC="0.1"),
+    "t20": dict(ON, ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES="100", ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC="0.2"),
 }
 
 if __name__ == "__main__":
     reps = int(sys.argv[1]) if len(sys.argv) > 1 else 3
     probs = sys.argv[2].split(",") if len(sys.argv) > 2 else PROBS
-    cfgs = sys.argv[3].split(",") if len(sys.argv) > 3 else list(CFGS)
+    cfgs = sys.argv[3].split(",") if len(sys.argv) > 3 else ["def", "n200", "n100", "n50"]
     base = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
     for r in range(1, reps + 1):
         for p in probs:
