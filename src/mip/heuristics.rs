@@ -1576,6 +1576,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SUBMIP_HIGHS` の `g`: ギャップを親と同じにする (HiGHS は `mip_rel_gap = 0`)
         let gap_highs = super::submip_highs('g') && hs_drop & super::submip_hs_bit('g') == 0;
         let (time_limit, nosol) = self.submip_time_limit();
+        // `ENOMOTO_MIP_SUBMIP_NESTED` ([`Self::submip_nested`]) で深さ 1 のサブ MIP の中から作るサブ MIP は小さく
+        let nested_budget = self.nested_budget();
+        let (time_limit, node_limit) = match nested_budget {
+            Some((n, t)) => (time_limit.min(t), node_limit.min(n)),
+            None => (time_limit, node_limit),
+        };
         let params = super::solver::MipParams {
             time_limit,
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
@@ -1957,6 +1963,40 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn nested_rens_ok(&self) -> bool {
         let d = SUBMIP_DEPTH.with(|d| d.get());
         (env_str!("ENOMOTO_MIP_SUBMIP_RENS").is_some() || super::submip_highs('h')) && d >= 1 && d as usize <= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH", 2usize, usize)
+    }
+
+    /// `ENOMOTO_MIP_SUBMIP_NESTED=<文字の並び>` (試作、既定では使わない): 深さ 1 のサブ MIP (外側の根・木から作ったサブ MIP) の根でも、
+    /// 文字で選んだサブ MIP のヒューリスティクスを回す (作るサブ MIP は深さ 2。深さ 2 以上のサブ MIP の中では作らない)。
+    /// 文字: `l` locks、`c` clique、`v` vbounds (緩める側・締める側)、`i` RINS、`x` 根の被約費用。普通の MIP ではどれも `params.submip` で止めている。
+    /// neos-960392 の根の RENS の近傍 (11702 列) は、普通の MIP として解くと clique のサブ MIP (深さ 1) が 0 ノードで −238 を出すが、
+    /// 根のサブ MIP の形では clique を回さず 473 ノードかかる (analysis/neos960392_nested_20261101.md)。
+    /// 作るサブ MIP は小さくする: ノード上限 `ENOMOTO_T_MIP_SUBMIP_NESTED_NODES` (既定 100)、時間は残りの
+    /// `ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_FRAC` (既定 0.1) 倍で最大 `ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_MAX` (既定 2 秒) ([`Self::nested_budget`])
+    pub(super) fn submip_nested(&self, c: char) -> bool {
+        self.params.submip && SUBMIP_DEPTH.with(|d| d.get()) == 1 && env_str!("ENOMOTO_MIP_SUBMIP_NESTED").is_some_and(|v| v.contains(c))
+    }
+
+    /// [`Self::submip_nested`] のサブ MIP のヒューリスティクスの名 (`heur!` の名) に当たる文字
+    fn nested_letter(label: &str) -> Option<char> {
+        match label {
+            "locks" => Some('l'),
+            "clique" => Some('c'),
+            "vbounds (loose)" | "vbounds (tight)" => Some('v'),
+            "RINS" => Some('i'),
+            "root reduced cost" => Some('x'),
+            _ => None,
+        }
+    }
+
+    /// [`Self::submip_nested`] で作る深さ 2 のサブ MIP の (ノード上限, 時間の上限)。対象でなければ `None`
+    fn nested_budget(&self) -> Option<(u64, f64)> {
+        let c = Self::nested_letter(self.heur_label)?;
+        if !self.submip_nested(c) {
+            return None;
+        }
+        let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+        let t = (tunable!("ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_FRAC", 0.1, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_MAX", 2.0, f64));
+        Some((tunable!("ENOMOTO_T_MIP_SUBMIP_NESTED_NODES", 100u64, u64), t))
     }
 
     /// `ENOMOTO_MIP_RENS_MAX_DEPTH` (既定 2、2026-11-01 に trim3 として既定化。大きな値 (例 `1000`) で上限なし = 元の振る舞い): これから作る RENS のサブ MIP の入れ子の深さ
@@ -2556,7 +2596,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     fn rins_inner(&mut self, x: &[f64]) -> bool {
         let p = self.p;
-        if self.params.submip {
+        if self.params.submip && !self.submip_nested('i') {
             return false;
         }
         if env_str!("ENOMOTO_MIP_RINS_DIVE").is_some() {
@@ -3067,7 +3107,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// サブ MIP として解く。LP は根の最適解の状態で呼ぶ。
     pub(super) fn root_reduced_cost(&mut self) -> bool {
         let p = self.p;
-        if self.params.submip {
+        if self.params.submip && !self.submip_nested('x') {
             return false;
         }
         let b = self.lp.basis();
