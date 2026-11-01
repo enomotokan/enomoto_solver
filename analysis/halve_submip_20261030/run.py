@@ -41,6 +41,10 @@ CFGS = {
     # サブ MIP のノード上限 (多くは 500) を下げる (2026-11-01、新しい既定の上で)
     "nm02": {"ENOMOTO_T_MIP_SUBMIP_NODES_MULT": "0.2"},
     "nm01": {"ENOMOTO_T_MIP_SUBMIP_NODES_MULT": "0.1"},
+    # サブ MIP の無駄を削る試作 (2026-11-01、新しい既定の上で。analysis/rens_more_real・rens_depth3・rens_resume_20261101.md)
+    "real": {"ENOMOTO_MIP_RENS_MORE_NODES_REAL": "1"},
+    "d2lp1": {"ENOMOTO_MIP_RENS_MAX_DEPTH": "2", "ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH": "1"},
+    "trim3": {"ENOMOTO_MIP_RENS_MORE_NODES_REAL": "1", "ENOMOTO_MIP_RENS_RESUME": "1", "ENOMOTO_MIP_RENS_MAX_DEPTH": "2", "ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH": "1"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
