@@ -22,7 +22,7 @@
 //! 開発経緯・並列化を見送った理由などは改良履歴メモを参照。
 
 use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
-use crate::params::presolve::{EQPROP_RELTOL, PROPAGATE_EPS, PROP_CANCEL_GUARD, PROP_RELTOL};
+use crate::params::presolve::{EQPROP_RELTOL, FORCING_SLACK_REL, PROPAGATE_EPS, PROP_CANCEL_GUARD, PROP_RELTOL};
 use super::infeas_tol;
 
 /// 伝播のパスの打ち切り条件 ([`propagate_split`]・[`propagate_equalities`])。
@@ -209,6 +209,24 @@ fn crossing_tol(lb: f64, ub: f64) -> f64 {
 #[inline(never)]
 fn violation_exceeds_tol(violation: f64, b: f64, row: impl Iterator<Item = (usize, f64)>, lb: &[f64], ub: &[f64], upper: bool) -> bool {
     violation > infeas_tol(PROPAGATE_EPS, abs_activity(row, lb, ub, upper).max(b.abs()))
+}
+
+/// 強制行の判定: 最小活動度 (`upper == false`、上側の強制なら最大活動度 `upper == true`) が右辺に届いているか。`slack` は
+/// 右辺までの残りの余裕 (下側なら `b - 最小活動度`、上側なら `最大活動度 - b`) で、呼び出し側は `slack <= PROPAGATE_EPS` を
+/// 確かめてから呼ぶ。余裕が丸め誤差の大きさ (`FORCING_SLACK_REL * (1 + max(Σ|項|, |b|))`) 以下のときだけ真
+/// (`ENOMOTO_T_FORCING_SLACK_REL=0` で従来どおり常に真)。余裕が残る行を強制行とみなして全項を端に固定すると、
+/// 係数の小さい項を δ/|a_j| も動かしてしまい、それが別の行にたまって実行可能な問題を実行不能と判定する ([`FORCING_SLACK_REL`])。
+/// 読む境界はすべて有限であること。
+#[inline]
+fn forcing_reaches(slack: f64, b: f64, row: impl Iterator<Item = (usize, f64)>, lb: &[f64], ub: &[f64], upper: bool) -> bool {
+    if slack <= 0.0 {
+        return true;
+    }
+    let rel = tunable!("ENOMOTO_T_FORCING_SLACK_REL", FORCING_SLACK_REL, f64);
+    if rel <= 0.0 {
+        return true;
+    }
+    slack <= rel * (1.0 + abs_activity(row, lb, ub, upper).max(b.abs()))
 }
 
 /// 行の最小活動度 (`upper == false`) または最大活動度 (`upper == true`) の各項の絶対値の和 `Σ|a_j x_j|`
@@ -429,7 +447,8 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
             // 読む境界はすべて有限。上の判定を通っているので `finite_sum_inf > b + PROPAGATE_EPS` は
             // 許容誤差内の違反 (相対形のときだけ起こる) で、これも強制行とみなす (従来の `|finite_sum_inf - b| <= EPS` と、
             // 絶対形のときは同値)。
-            if inf_unbounded_count == 0 && finite_sum_inf >= b - PROPAGATE_EPS {
+            // 余裕 `b - finite_sum_inf` が丸め誤差を越えて残る行は強制行ではないので固定しない ([`forcing_reaches`])。
+            if inf_unbounded_count == 0 && finite_sum_inf >= b - PROPAGATE_EPS && forcing_reaches(b - finite_sum_inf, b, row.iter().copied(), &lb, &ub, false) {
                 for &(j, v) in &row {
                     if v > 0.0 {
                         ub[j] = lb[j];
@@ -644,6 +663,37 @@ mod tests {
         assert!(result.real_rows.is_empty(), "real_rows={:?}", result.real_rows);
     }
 
+    /// 余裕の残る行を強制行とみなさない (h80x6320d の再スタート 2 の問題で前処理が実行可能な問題を実行不能とした形)。
+    /// x0, x1 in [0, 384]、z0, z1 in [0, 1]、行 `x0 + x1 <= 2e-9`・`-0.1 x0 + z0 <= 0`・`-0.1 x1 + z1 <= 0`。
+    /// 1 本目で x の上限が 2e-9 になり、2・3 本目の最小活動度は -2e-10 (右辺 0 まで余裕 2e-10)。従来はこれを強制行として
+    /// x を上限 2e-9 に固定し、1 本目の最小活動度 4e-9 > 2e-9 + 1e-9 で実行不能とした。x = z = 0 は実行可能。
+    #[test]
+    fn row_with_slack_is_not_a_forcing_row() {
+        let g = csr_from_rows(
+            &[
+                vec![(0, 1.0)],
+                vec![(0, -1.0)],
+                vec![(1, 1.0)],
+                vec![(1, -1.0)],
+                vec![(2, 1.0)],
+                vec![(2, -1.0)],
+                vec![(3, 1.0)],
+                vec![(3, -1.0)],
+                vec![(0, 1.0), (1, 1.0)],
+                vec![(0, -0.1), (2, 1.0)],
+                vec![(1, -0.1), (3, 1.0)],
+            ],
+            4,
+        );
+        let h = vec![384.0, 0.0, 384.0, 0.0, 1.0, 0.0, 1.0, 0.0, 2e-9, 0.0, 0.0];
+        let result = propagate(4, &g, &h, 10);
+        assert!(!result.infeasible);
+        // x の下限は 0 のまま (0 は実行可能な値)
+        assert_eq!((result.lb[0], result.lb[1]), (0.0, 0.0), "lb={:?}", result.lb);
+        // z の上限は境界の強化で 0.1 * 2e-9 まで締まる
+        assert!(result.ub[2] <= 2e-10 * (1.0 + 1e-12) && result.ub[3] <= 2e-10 * (1.0 + 1e-12), "ub={:?}", result.ub);
+    }
+
     /// 係数の符号が混在する強制行で、項ごとに対応する側の境界に固定されることを確認。
     #[test]
     fn forcing_row_with_mixed_signs_uses_the_matching_bound_per_term() {
@@ -783,7 +833,8 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
             // 下側の強制: 全項が最小活動度側の境界にあるときだけ b に届く。上の判定を通っているので
             // `finite_sum_inf > bi + PROPAGATE_EPS` は許容誤差内の違反 (相対形のときだけ起こる) で、これも強制とみなす
             // (絶対形のときは従来の `|finite_sum_inf - bi| <= EPS` と同値)。上側も対称。
-            if inf_unbounded.is_empty() && finite_sum_inf >= bi - PROPAGATE_EPS {
+            // 余裕が丸め誤差を越えて残る行は強制ではない ([`forcing_reaches`])。上側も同じ。
+            if inf_unbounded.is_empty() && finite_sum_inf >= bi - PROPAGATE_EPS && forcing_reaches(bi - finite_sum_inf, bi, csr_row_iter(a, i), lb, ub, false) {
                 if !forcing_seen[i] {
                     forcing_seen[i] = true;
                     res.forcing_rows += 1;
@@ -806,7 +857,7 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 continue;
             }
             // 上側の強制: 対称に、全項が最大活動度側の境界。
-            if sup_unbounded.is_empty() && finite_sum_sup <= bi + PROPAGATE_EPS {
+            if sup_unbounded.is_empty() && finite_sum_sup <= bi + PROPAGATE_EPS && forcing_reaches(finite_sum_sup - bi, bi, csr_row_iter(a, i), lb, ub, true) {
                 if !forcing_seen[i] {
                     forcing_seen[i] = true;
                     res.forcing_rows += 1;
@@ -991,6 +1042,24 @@ mod eqprop_tests {
         let naive = -(finite_sum - a0 * ub0) / a0;
         assert!((naive - exact).abs() > 1e-7 * exact.abs(), "naive={naive} exact={exact}");
         assert_eq!(lb[0], exact);
+    }
+
+    /// 余裕の残る等式行を強制とみなさない ([`forcing_reaches`]): x0 in [0, 2e-9]、x1 in [0, 1]、行 `-0.1 x0 + x1 = 0`。
+    /// 最小活動度 -2e-10 は右辺 0 に余裕 2e-10 で届かないので強制ではない (従来は x0 を 2e-9 に固定していた。x = 0 は実行可能)。
+    /// 上側も対称 (`0.1 x0 - x1 = 0`)。
+    #[test]
+    fn equality_row_with_slack_is_not_forcing() {
+        for sign in [1.0, -1.0] {
+            let a = csr_from_rows(&[vec![(0, -0.1 * sign), (1, sign)]], 2);
+            let b = vec![0.0];
+            let mut lb = vec![0.0, 0.0];
+            let mut ub = vec![2e-9, 1.0];
+            let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 5);
+            assert!(!res.infeasible);
+            assert_eq!(res.forcing_rows, 0);
+            assert_eq!(lb[0], 0.0, "sign={sign} lb={lb:?} ub={ub:?}");
+            assert!(ub[1] <= 2e-10 * (1.0 + 1e-12), "sign={sign} ub={ub:?}");
+        }
     }
 
     /// 相対形の実行不能判定: スケール後の大きな量 (1e8) で、活動度が右辺を丸め程度 (相対 1e-15) だけ

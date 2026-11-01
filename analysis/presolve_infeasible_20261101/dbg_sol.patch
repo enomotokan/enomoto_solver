@@ -1,0 +1,256 @@
+diff --git a/src/presolve.rs b/src/presolve.rs
+index 98614f0..e47a91f 100644
+--- a/src/presolve.rs
++++ b/src/presolve.rs
+@@ -101,6 +101,7 @@ fn round_int_bounds(lb: &mut [f64], ub: &mut [f64]) -> bool {
+ #[allow(clippy::too_many_arguments)]
+ pub fn run_extended_mip(n: usize, a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], c: &[f64], is_int: &[bool], prop_passes: usize, rounds: usize, inner_rounds: usize) -> ExtendedPresolveResult {
+     INT_MASK.with(|m| *m.borrow_mut() = Some(std::rc::Rc::new(is_int.to_vec())));
++    dbg_sol_load(n);
+     let r = run_extended(n, a, b, g, h, c, 0, prop_passes, rounds, inner_rounds, false);
+     INT_MASK.with(|m| *m.borrow_mut() = None);
+     r
+@@ -616,7 +617,7 @@ pub fn run_extended(
+             }
+         );
+         if prop.infeasible {
+-            return extended_infeasible(sc, a, b, c, n);
++            { if std::env::var("ENOMOTO_DBG_INF").is_ok() { eprintln!("DBG_INF site=1 line=619"); } return extended_infeasible(sc, a, b, c, n); }
+         }
+         work_used = work_used.saturating_add(prop.work);
+         // 表示用: この回の伝播のパス数と、変化のないパスで止まったか。
+@@ -626,11 +627,12 @@ pub fn run_extended(
+         let mut lb = prop.lb;
+         let mut ub = prop.ub;
+         if round_int_bounds(&mut lb, &mut ub) {
+-            return extended_infeasible(sc, a, b, c, n);
++            { if std::env::var("ENOMOTO_DBG_INF").is_ok() { eprintln!("DBG_INF site=2 line=629"); } return extended_infeasible(sc, a, b, c, n); }
+         }
+         // 現在の G の多変数行とその右辺。代入による行の書き換えを反映して随時更新する。
+         let mut cur_real_rows = prop.real_rows;
+         let mut cur_real_rhs = prop.real_rhs;
++        dbg_check("after-prop", &lb, &ub, &a, &b, &cur_real_rows, &cur_real_rhs, &postsolve_log);
+         // `true` の間、G は分離形式 `(cur_real_rows, cur_real_rhs, lb, ub)` でのみ保持され、
+         // 変数 `g`/`h` は古い。
+         let mut g_split = false;
+@@ -667,7 +669,7 @@ pub fn run_extended(
+             let eq_limit = if tunable!("ENOMOTO_T_EQPROP_FIXPOINT", EQPROP_FIXPOINT, usize) != 0 { pass_limit(prop_passes, work_used) } else { propagate::PassLimit::fixed(prop_passes) };
+             let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, eq_limit));
+             if eq.infeasible || round_int_bounds(&mut lb, &mut ub) {
+-                return extended_infeasible(sc, a, b, c, n);
++                { if std::env::var("ENOMOTO_DBG_INF").is_ok() { eprintln!("DBG_INF site=3 line=670"); } return extended_infeasible(sc, a, b, c, n); }
+             }
+             work_used = work_used.saturating_add(eq.work);
+             dbg_eq_converged = Some(eq.converged);
+@@ -713,6 +715,7 @@ pub fn run_extended(
+             lb[j] = value;
+             ub[j] = value;
+         }
++        dbg_check("after-dualfix", &lb, &ub, &a, &b, &cur_real_rows, &cur_real_rhs, &postsolve_log);
+ 
+         // 強制列 (`forcingcol`): 費用 0 で、現れるすべての不等式行を緩める向きに無限に動ける列を、
+         // その行ごと取り除く (値は後処理で決める)。消去した列は `[0, 0]` に固定する。
+@@ -871,7 +874,7 @@ pub fn run_extended(
+             let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
+             let fold_a = timed_step!("foldfixed(A)", foldfixed::fold_fixed_columns(&a_rows, &b, &lb, &ub, RowSense::Eq));
+             if fold_a.infeasible {
+-                return extended_infeasible(sc, a, b, c, n);
++                { if std::env::var("ENOMOTO_DBG_INF").is_ok() { eprintln!("DBG_INF site=4 line=874"); } return extended_infeasible(sc, a, b, c, n); }
+             }
+             a = csr_from_rows(&fold_a.rows, n);
+             b = fold_a.rhs;
+@@ -882,11 +885,12 @@ pub fn run_extended(
+         if !g_noop {
+             let fold_g = timed_step!("foldfixed(G)", foldfixed::fold_fixed_columns(&cur_real_rows, &cur_real_rhs, &lb, &ub, RowSense::Le));
+             if fold_g.infeasible {
+-                return extended_infeasible(sc, a, b, c, n);
++                { if std::env::var("ENOMOTO_DBG_INF").is_ok() { eprintln!("DBG_INF site=5 line=885"); } return extended_infeasible(sc, a, b, c, n); }
+             }
+             cur_real_rows = fold_g.rows;
+             cur_real_rhs = fold_g.rhs;
+         }
++        dbg_check("after-foldfixed", &lb, &ub, &a, &b, &cur_real_rows, &cur_real_rhs, &postsolve_log);
+ 
+         // 内側ループ: rowsingleton → (最初のパスのみ doubleton) → colsingleton を最大
+         // `inner_rounds` 回繰り返す。一方の消去が他方の新しい候補を生むため。
+@@ -895,16 +899,17 @@ pub fn run_extended(
+         let mut inner_prev_signature: Option<(usize, usize)> = None;
+         for inner_idx in 0..inner_rounds.max(1) {
+             // 行シングルトン: 1 変数だけの等式行からその変数を固定する。
++            dbg_check("before-rowsingleton", &lb, &ub, &a, &b, &cur_real_rows, &cur_real_rhs, &postsolve_log);
+             let rs = timed_step!("rowsingleton", rowsingleton::fix_singleton_equalities(n, &a, &b, &lb, &ub));
+             if rs.infeasible {
+-                return extended_infeasible(sc, a, b, c, n);
++                { if std::env::var("ENOMOTO_DBG_INF").is_ok() { eprintln!("DBG_INF site=6 line=900"); } return extended_infeasible(sc, a, b, c, n); }
+             }
+             for &(j, value) in &rs.fixes {
+                 lb[j] = value;
+                 ub[j] = value;
+             }
+             if round_int_bounds(&mut lb, &mut ub) {
+-                return extended_infeasible(sc, a, b, c, n);
++                { if std::env::var("ENOMOTO_DBG_INF").is_ok() { eprintln!("DBG_INF site=7 line=907"); } return extended_infeasible(sc, a, b, c, n); }
+             }
+             a = rs.a;
+             b = rs.b;
+@@ -1037,6 +1042,7 @@ pub fn run_extended(
+                 }
+             }
+             postsolve_log.extend(cs.substitutions.into_iter().map(PostsolveStep::Sub));
++            dbg_check("after-colsingleton", &lb, &ub, &a, &b, &cur_real_rows, &cur_real_rhs, &postsolve_log);
+ 
+             // 内側ループの不動点判定。
+             let inner_signature = (a.nrows(), g_view!().nrows());
+@@ -1100,6 +1106,7 @@ pub fn run_extended(
+                 set_g_from_split!("rebuild_g(agg)");
+             }
+         }
++        dbg_check("after-agg", &lb, &ub, &a, &b, &cur_real_rows, &cur_real_rhs, &postsolve_log);
+ 
+         // 平行列の併合 (`parallelcols`)。aggregator の直後に置く (HiGHS と同様)。
+         // `PARALLELCOLS_STRIKES` 回連続で空振りすると以降停止する。
+@@ -1124,6 +1131,7 @@ pub fn run_extended(
+                 postsolve_log.extend(pc.substitutions.into_iter().map(PostsolveStep::ParallelCol));
+                 // aggregator と同じ理由で G を再設定する。
+                 set_g_from_split!("rebuild_g(pc)");
++                dbg_check("after-pc", &lb, &ub, &a, &b, &cur_real_rows, &cur_real_rhs, &postsolve_log);
+             } else {
+                 parallelcols_empty_streak += 1;
+                 if parallelcols_empty_streak >= tunable!("ENOMOTO_T_PARALLELCOLS_STRIKES", PARALLELCOLS_STRIKES, usize) {
+@@ -1206,6 +1214,7 @@ pub fn run_extended(
+             );
+         }
+         let signature = (a.nrows(), g_view!().nrows(), lb.clone(), ub.clone());
++        dbg_check("end-round", &lb, &ub, &a, &b, &cur_real_rows, &cur_real_rhs, &postsolve_log);
+         if g_split {
+             carry = Some((cur_real_rows, cur_real_rhs, lb, ub));
+         }
+@@ -1264,6 +1273,7 @@ pub fn run_extended(
+         );
+     }
+     if prop.infeasible {
++        if std::env::var("ENOMOTO_DBG_INF").is_ok() { eprintln!("DBG_INF site=9 final-prop"); }
+         return ExtendedPresolveResult {
+             scaling: sc,
+             a,
+@@ -1335,7 +1345,7 @@ pub fn run_extended(
+ 
+     // 結果の境界に交差を残さない (許容誤差以内なら固定、越えれば実行不能)
+     if propagate::fix_crossed_bounds(&mut lb, &ub) {
+-        return extended_infeasible(sc, a, b, c, n);
++        { if std::env::var("ENOMOTO_DBG_INF").is_ok() { eprintln!("DBG_INF site=8 line=1338"); } return extended_infeasible(sc, a, b, c, n); }
+     }
+ 
+     // `ENOMOTO_PRESOLVE_LOOSE_IMPLIED` (試作、既定では使わない。LP のみ): 前処理が締めた列の境界のうち、残った行と
+@@ -1501,3 +1511,51 @@ fn presolve_output_hash(a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], c: &[f64
+     }
+     hash
+ }
++
++// ---- 一時的な診断 (DBG_SOL) ----
++thread_local! {
++    static DBG_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
++}
++pub(crate) fn dbg_sol_load(n: usize) -> bool {
++    let Ok(path) = std::env::var("ENOMOTO_DBG_PRESOLVE_SOL") else { return false };
++    let v: Vec<f64> = std::fs::read_to_string(path).unwrap().lines().map(|l| l.trim().parse().unwrap()).collect();
++    if v.len() != n { return false; }
++    DBG_SOL.with(|s| *s.borrow_mut() = Some(v));
++    true
++}
++pub(crate) fn dbg_check(label: &str, lb: &[f64], ub: &[f64], a: &FaerCsr, b: &[f64], rows: &[Vec<(usize, f64)>], rhs: &[f64], log: &[PostsolveStep]) {
++    DBG_SOL.with(|s| {
++        let s = s.borrow();
++        let Some(x) = s.as_ref() else { return };
++        let mut elim = vec![false; x.len()];
++        for st in log {
++            match st { PostsolveStep::Sub(q) => elim[q.var] = true, PostsolveStep::Forcing(f) => elim[f.var] = true, PostsolveStep::Slack(q) => elim[q.var] = true, PostsolveStep::ParallelCol(_) => {} }
++        }
++        let mut nv = 0;
++        for j in 0..x.len().min(lb.len()) {
++            if elim[j] { continue; }
++            if x[j] < lb[j] - 1e-6 || x[j] > ub[j] + 1e-6 {
++                if nv < 5 { eprintln!("DBG_SOL {label}: col {j} x={} not in [{}, {}]", x[j], lb[j], ub[j]); }
++                nv += 1;
++            }
++        }
++        for i in 0..a.nrows() {
++            let act: f64 = crate::sparse::csr_row_iter(a, i).filter(|(j, _)| !elim[*j]).map(|(j, v)| v * x[j]).sum();
++            if (act - b[i]).abs() > 1e-6 * (1.0 + b[i].abs()) {
++                if nv < 10 { eprintln!("DBG_SOL {label}: eq row {i} act={act} b={}", b[i]); }
++                nv += 1;
++            }
++        }
++        for (i, r) in rows.iter().enumerate() {
++            let act: f64 = r.iter().filter(|(j, _)| !elim[*j]).map(|&(j, v)| v * x[j]).sum();
++            if act > rhs[i] + 1e-6 * (1.0 + rhs[i].abs()) {
++                if nv < 15 { eprintln!("DBG_SOL {label}: le row {i} act={act} rhs={} row={:?}", rhs[i], r); }
++                nv += 1;
++            }
++        }
++        eprintln!("DBG_SOL {label}: violations={nv}");
++    });
++}
++pub(crate) fn dbg_x() -> Option<Vec<f64>> {
++    DBG_SOL.with(|s| s.borrow().clone())
++}
+diff --git a/src/presolve/propagate.rs b/src/presolve/propagate.rs
+index d7e16de..e0cd66d 100644
+--- a/src/presolve/propagate.rs
++++ b/src/presolve/propagate.rs
+@@ -338,7 +338,15 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
+     // 桁落ち回避の閾値 (`ENOMOTO_T_PROP_CANCEL_GUARD`、0 で無効)
+     let cancel_guard = tunable!("ENOMOTO_T_PROP_CANCEL_GUARD", PROP_CANCEL_GUARD, f64);
+ 
++    let dbgx = crate::presolve::dbg_x();
++    if let Some(x) = &dbgx {
++        let mut nv = 0;
++        for j in 0..n { if x[j] < lb[j] - 1e-6 || x[j] > ub[j] + 1e-6 { if nv < 5 { eprintln!("DBGP entry col {j} x={} [{}, {}]", x[j], lb[j], ub[j]); } nv += 1; } }
++        for (i, r) in rows.iter().enumerate() { let act: f64 = r.iter().map(|&(j, v)| v * x[j]).sum(); if act > rhs[i] + 1e-6 * (1.0 + rhs[i].abs()) { if nv < 10 { eprintln!("DBGP entry row {i} act={act} rhs={} len={}", rhs[i], r.len()); } nv += 1; } }
++        eprintln!("DBGP entry violations={nv} rows={}", rows.len());
++    }
+     if bounds_inconsistent(n, &lb, &ub) {
++        if dbgx.is_some() { eprintln!("DBGP inconsistent at entry"); }
+         return PropagateSplit::infeasible();
+     }
+ 
+@@ -415,6 +423,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
+             // 絶対 `PROPAGATE_EPS` を超えるがこの範囲に収まる違反は、下の強制行として扱う。
+             // Σ|項| は絶対の判定を超えたとき (まれ) だけ行を走査し直して求める (主ループの積算に足すと fit2d などの長い行で目に見えて遅い)。
+             if min_activity > b + PROPAGATE_EPS && violation_exceeds_tol(min_activity - b, b, row.iter().copied(), &lb, &ub, false) {
++                if dbgx.is_some() { eprintln!("DBGP infeasible row pass={passes_used} min_act={min_activity} b={b} row={:?} bounds={:?}", row, row.iter().map(|&(j, _)| (lb[j], ub[j], dbgx.as_ref().unwrap()[j])).collect::<Vec<_>>()); }
+                 infeasible = true;
+                 break;
+             }
+@@ -430,6 +439,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
+             // 許容誤差内の違反 (相対形のときだけ起こる) で、これも強制行とみなす (従来の `|finite_sum_inf - b| <= EPS` と、
+             // 絶対形のときは同値)。
+             if inf_unbounded_count == 0 && finite_sum_inf >= b - PROPAGATE_EPS {
++                if let Some(x) = &dbgx { for &(j, v) in &row { let t = if v > 0.0 { lb[j] } else { ub[j] }; if (x[j] - t).abs() > 1e-12 && [4041usize,4043,4048,4051,4054,4082,4084,4090,4097,7555].contains(&j) { eprintln!("DBGP forcing row cuts col {j} x={} -> {t} pass={passes_used} b={b} fsi={finite_sum_inf} row={:?}", x[j], row); break; } } }
+                 for &(j, v) in &row {
+                     if v > 0.0 {
+                         ub[j] = lb[j];
+@@ -466,6 +476,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
+                     if tightens_ub(ub[k], candidate) {
+                         let candidate = refine_candidate(candidate, b, aik, bound_abs, coeff, || activity_excluding(row.iter().copied(), k, &lb, &ub, false));
+                         if tightens_ub(ub[k], candidate) {
++                            if let Some(x) = &dbgx { if x[k] > candidate + 1e-12 && [4041usize,4043,4048,4051,4054,4082,4084,4090,4097,7555].contains(&k) { eprintln!("DBGP ub cut col {k} x={} old={} new={candidate} pass={passes_used} b={b} row={:?} bnds={:?}", x[k], ub[k], row, row.iter().map(|&(j, _)| (lb[j], ub[j], x[j])).collect::<Vec<_>>()); } }
+                             significant |= significant_change(ub[k], candidate, limit.sig_reltol);
+                             ub[k] = candidate;
+                             changed = true;
+@@ -476,6 +487,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
+                     if tightens_lb(lb[k], candidate) {
+                         let candidate = refine_candidate(candidate, b, aik, bound_abs, coeff, || activity_excluding(row.iter().copied(), k, &lb, &ub, false));
+                         if tightens_lb(lb[k], candidate) {
++                            if let Some(x) = &dbgx { if x[k] < candidate - 1e-12 && [4041usize,4043,4048,4051,4054,4082,4084,4090,4097,7555].contains(&k) { eprintln!("DBGP lb cut col {k} x={} old={} new={candidate} pass={passes_used} b={b} row={:?} bnds={:?}", x[k], lb[k], row, row.iter().map(|&(j, _)| (lb[j], ub[j], x[j])).collect::<Vec<_>>()); } }
+                             significant |= significant_change(lb[k], candidate, limit.sig_reltol);
+                             lb[k] = candidate;
+                             changed = true;
+@@ -506,6 +518,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
+     // 行ごとの判定では検出されなくても、別々の行が lb/ub を互いに逆側へ
+     // 押して交差させることがあるので、全パス後にもう一度確認する。
+     if !infeasible && bounds_inconsistent(n, &lb, &ub) {
++        if dbgx.is_some() { eprintln!("DBGP inconsistent after passes"); }
+         infeasible = true;
+     }
+     if !infeasible {

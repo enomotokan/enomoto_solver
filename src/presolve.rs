@@ -1501,3 +1501,49 @@ fn presolve_output_hash(a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], c: &[f64
     }
     hash
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 整数最適化の前処理の入口 ([`run_extended_mip`]) が、余裕の残る行を強制行とみなして実行可能な問題を実行不能と
+    /// しない (h80x6320d の再スタート 2 の問題と同じ形、`analysis/presolve_infeasible_20261101.md`)。
+    /// 列: x0, x1 (連続、[0, 384])、y (整数、0 に固定)、z0, z1 (整数、[0, 1])。
+    /// 行: `x0 + x1 - 384 y <= 2e-9` (カットの右辺を少し緩めた行)、`-0.1 x0 + z0 <= 0`、`-0.1 x1 + z1 <= 0`、`z0 + z1 + x0 + x1 >= 0`。
+    /// 最適解は x = z = 0 (目的 0)。
+    #[test]
+    fn mip_presolve_keeps_feasible_problem_with_slack_rows() {
+        let n = 5;
+        let lb = vec![0.0, 0.0, 0.0, 0.0, 0.0];
+        let ub = vec![384.0, 384.0, 0.0, 1.0, 1.0];
+        let rows = vec![
+            vec![(0, 1.0), (1, 1.0), (2, -384.0)],
+            vec![(0, -0.1), (3, 1.0)],
+            vec![(1, -0.1), (4, 1.0)],
+            vec![(0, 1.0), (1, 1.0), (3, 1.0), (4, 1.0)],
+        ];
+        let row_lo = vec![f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0];
+        let row_up = vec![2e-9, 0.0, 0.0, f64::INFINITY];
+        let (a, b, g, h) = build_a_g_from_ranged_rows(&lb, &ub, &rows, &row_lo, &row_up).unwrap();
+        let c = vec![2.8, 2.8, 70.0, -1.0, -1.0];
+        let is_int = vec![false, false, true, true, true];
+        let pre = run_extended_mip(n, &a, &b, &g, &h, &c, &is_int, 10, 5, 5);
+        assert!(!pre.infeasible);
+        assert!(!pre.unbounded);
+        // 解 x = z = 0 は前処理後の境界の中にある (消去した列は後処理で決まるので見ない)
+        let mut elim = vec![false; n];
+        for st in &pre.postsolve_log {
+            match st {
+                PostsolveStep::Sub(s) => elim[s.var] = true,
+                PostsolveStep::Forcing(f) => elim[f.var] = true,
+                PostsolveStep::Slack(s) => elim[s.var] = true,
+                PostsolveStep::ParallelCol(_) => {}
+            }
+        }
+        for j in 0..n {
+            if !elim[j] {
+                assert!(pre.lb[j] <= 0.0 && 0.0 <= pre.ub[j], "col {j}: [{}, {}]", pre.lb[j], pre.ub[j]);
+            }
+        }
+    }
+}
