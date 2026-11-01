@@ -1770,13 +1770,14 @@ pub(crate) fn submip_outcome_stop() -> bool {
     env_str!("ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP").is_none()
 }
 
-/// `ENOMOTO_MIP_RENS_MORE_NODES_REAL` (試作、既定では使わない): RENS のサブ MIP のノード上限を 4 倍にしたやり直し (`RENS (more nodes)`) を、
+/// `ENOMOTO_MIP_RENS_MORE_NODES_REAL` (既定で使う。`0` で止める。2026-11-01 に trim3 として既定化、analysis/halve_submip_20261030.md の bench9・bench10):
+/// RENS のサブ MIP のノード上限を 4 倍にしたやり直し (`RENS (more nodes)`) を、
 /// RENS のサブ MIP が本当にノード上限まで進んだときだけ行う。停滞 (`ENOMOTO_T_MIP_SUBMIP_STALL`)・成果連動 ([`submip_outcome_stop`]) の
 /// 打ち切りも状態は `NodeLimit` で返るが、上限を 4 倍にしても同じノードで同じように止まり、同じ解を返す (n5-3 の cand では外側の根で
 /// 55 ノード → 55 ノード・10.8 秒、深さ 1 のサブ MIP の中で 189 ノード → 189 ノード・3.3 秒。analysis/cand_slow_n5-3_20261031.md)
-/// `ENOMOTO_MIP_RENS_RESUME` ([`rens_resume_on`]) もこの場合分けを含む。
+/// `ENOMOTO_MIP_RENS_RESUME` ([`rens_resume_on`]) もこの場合分けを含むので、元の振る舞いに戻すには両方を `0` にする。
 pub(crate) fn rens_more_nodes_real() -> bool {
-    env_str!("ENOMOTO_MIP_RENS_MORE_NODES_REAL").is_some() || rens_resume_on()
+    env_def!("ENOMOTO_MIP_RENS_MORE_NODES_REAL", "1").is_some() || rens_resume_on()
 }
 
 /// 根のサブ MIP と外側の求解の間で共有する情報 ([`submip_outcome_stop`])。
@@ -1808,7 +1809,7 @@ impl SubmipCtl {
     }
 }
 
-/// `ENOMOTO_MIP_RENS_RESUME` (試作、既定では使わない): RENS のやり直し (`RENS (more nodes)`) を、同じ問題を最初から解き直すのではなく、
+/// `ENOMOTO_MIP_RENS_RESUME` (既定で使う。`0` で止める。2026-11-01 に trim3 として既定化): RENS のやり直し (`RENS (more nodes)`) を、同じ問題を最初から解き直すのではなく、
 /// 1 回目のサブ MIP の求解の続きから行う。
 /// - 根の RENS のサブ MIP (逐次・並列とも、深さ 2 以上も) を専用のスレッドで解き、本当にノード上限まで進んだら、その時点の結果を
 ///   呼び出し側に渡してスレッドの中で止まって待つ (木・カットのプール・擬似コスト・暫定解・LP はスレッドのスタックにそのまま残る)。
@@ -1819,7 +1820,7 @@ impl SubmipCtl {
 ///   やり直しの判定の直後、次の RENS を始めるとき、求解が終わるときのどれでも捨てる)
 /// - 停滞・成果連動の打ち切りで止まったサブ MIP はやり直さない ([`rens_more_nodes_real`] と同じ。このとき一時停止もしない)
 pub(crate) fn rens_resume_on() -> bool {
-    env_str!("ENOMOTO_MIP_RENS_RESUME").is_some()
+    env_def!("ENOMOTO_MIP_RENS_RESUME", "1").is_some()
 }
 
 /// 一時停止したサブ MIP への継続の合図 ([`rens_resume_on`])。
@@ -4559,11 +4560,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     heur!("LP face", self.lp_face());
                 }
                 heur!("RENS", self.rens(&x));
-                // `ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH` (試作、既定では使わない = 上限なし): `RENS (LP before cuts)` のサブ MIP の入れ子の深さ
+                // `ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH` (既定 1、2026-11-01 に trim3 として既定化。大きな値 (例 `1000`) で上限なし = 元の振る舞い): `RENS (LP before cuts)` のサブ MIP の入れ子の深さ
                 // (今の深さ + 1、`SMT begin` の `depth` と同じ) がこの値を超えるなら呼ばない。`1` で深さ 1 のサブ MIP の中の
                 // `RENS (LP before cuts)` (深さ 2) を止める。今の既定では深さ 2 の `RENS (LP before cuts)` は 58 問で 41 本・16.4 秒、
                 // 外側に届いた解なし (analysis/submip_where_20261101.md・analysis/rens_depth3_20261101.md)
-                let lpbc_depth_ok = (super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) as usize) < tunable!("ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH", usize::MAX, usize);
+                let lpbc_depth_ok = (super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) as usize) < tunable!("ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH", 1, usize);
                 if self.incumbent.is_none() && self.ref_sol.is_none() && lpbc_depth_ok && !self.fractional(&x_root0).is_empty() {
                     heur!("RENS (LP before cuts)", self.rens(&x_root0));
                 }
