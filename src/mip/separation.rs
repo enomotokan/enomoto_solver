@@ -927,11 +927,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let t_loop0 = super::cap_clock();
         // fallback の 2 回目のループ: 1 回目で根のカットの時間の上限 (`ENOMOTO_T_MIP_CUT_TIME_FRAC`) を使い切っていても回るよう、
         // 上限をこのループの始めから数える (drayage-25-23 では 1 回目に 6.9 秒かかり、2 回目が 1 ラウンドも回らなかった)
-        // `ENOMOTO_MIP_CUT_CAP_FROM_LOOP` (試作、既定では使わない): 外側の根のカットの時間の上限を、求解の開始からではなくこのループの
+        // `ENOMOTO_MIP_CUT_CAP_FROM_LOOP` (既定で使う。`0` で止める。2026-11-01 に cs2 として既定化、analysis/halve_submip_20261030.md の bench12・
+        // analysis/cs2_check_20261101.md): 外側の根のカットの時間の上限を、求解の開始からではなくこのループの
         // 始めから数える。また `ENOMOTO_T_MIP_CUT_MIN_ROUNDS` (既定 0) ラウンドまでは時間の上限で止めない (全体の時間切れでは止める)。
         // physiciansched6-2 (60 秒) は前処理と根の LP で 6〜7 秒かかり、上限 (開始から全体の 1 割 = 6 秒) を超えていて前景のカットが
         // 0 ラウンドだった。HiGHS は根のカットを 11〜13 ラウンド回して下界を 49324 (最適値) にする (analysis/highstree_phys_20261024.md)
-        let cap_from_loop = (env_str!("ENOMOTO_MIP_CUT_CAP_FROM_LOOP").is_some() || self.rch_part('T')) && !self.params.submip;
+        let cap_from_loop = (env_def!("ENOMOTO_MIP_CUT_CAP_FROM_LOOP", "1").is_some() || self.rch_part('T')) && !self.params.submip;
         let mut min_rounds = if cap_from_loop { tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", if self.rch_part('T') { 10usize } else { 0 }, usize) } else { 0 };
         // `ENOMOTO_MIP_CUTSEL_PROBE`: 比べを 0 ラウンド目の始めに行う (時間の上限の判定より前なので、既定では前景のカットが 0 ラウンドの
         // physiciansched6-2 でも比べる)
@@ -1047,12 +1048,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // - `ENOMOTO_T_MIP_CUT_FLAT_STOP` = k (> 0): 根の LP の値から (相対 `ENOMOTO_T_MIP_CUT_FLAT_EPS`、既定 1e-9 以下しか) 動かない
         //   ラウンドが最初から k 回続いたら止める (一度動いたら数えない。LP を外したラウンドも動かないラウンドと数える。
         //   `ENOMOTO_MIP_CUT_FLAT_NO_FAIL` で数えない)。`intobj_stall` は「一度上がった後に動かない」側を受け持つ
-        // - `ENOMOTO_MIP_CUT_LP_CAP_STOP`: カットを足した LP が 1 回の LP の上限 (時間・反復) に当たって外したら、そこで止める
+        // - `ENOMOTO_MIP_CUT_LP_CAP_STOP` (既定 `flat`、2026-11-01 に cs2 として既定化。`0` で止める): カットを足した LP が 1 回の LP の上限 (時間・反復) に当たって外したら、そこで止める
         //   (2 回目を待たない)。値が `flat` なら、そこまで根の LP の値から動いていないときだけ
         // - `ENOMOTO_T_MIP_CUT_WORK_CAP` = w (> 0): 根のカットの上限を時間ではなく手間 (このループの LP の反復の合計 / 根の LP の反復
         //   + ラウンドの数 x `ENOMOTO_T_MIP_CUT_WORK_ROUND` (既定 0.05)) で測り、w を超えたら止める。時間の上限は
         //   `ENOMOTO_T_MIP_CUT_WORK_TIME_MULT` 倍 (既定 2) にして安全網として残す
-        // - `ENOMOTO_T_MIP_CUT_LP_WORK` = m (> 0): 1 回の LP の上限を反復 (m x 根の LP の反復、最低 1000) で決める。時間の上限は
+        // - `ENOMOTO_T_MIP_CUT_LP_WORK` = m (> 0、既定 0.1、2026-11-01 に cs2 として既定化。`0` で使わない): 1 回の LP の上限を反復 (m x 根の LP の反復、最低 1000) で決める。時間の上限は
         //   `ENOMOTO_T_MIP_CUT_LP_WORK_TIME_MULT` 倍 (既定 5) にして安全網として残す (下の `ENOMOTO_T_MIP_CUT_LP_WORK_PREV` も見る)
         let cs_outer = !self.params.submip && job.is_none();
         let flat_stop = if cs_outer { tunable!("ENOMOTO_T_MIP_CUT_FLAT_STOP", 0usize, usize) } else { 0 };
@@ -1060,17 +1061,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let flat_fail = env_str!("ENOMOTO_MIP_CUT_FLAT_NO_FAIL").is_none();
         let mut flat_rounds = 0usize;
         let mut moved = false;
-        let lpcap_stop = if cs_outer { env_str!("ENOMOTO_MIP_CUT_LP_CAP_STOP").filter(|v| *v != "0") } else { None };
+        let lpcap_stop = if cs_outer { env_def!("ENOMOTO_MIP_CUT_LP_CAP_STOP", "flat").filter(|v| *v != "0") } else { None };
         let work_cap = if cs_outer { tunable!("ENOMOTO_T_MIP_CUT_WORK_CAP", 0.0, f64) } else { 0.0 };
         let work_round = tunable!("ENOMOTO_T_MIP_CUT_WORK_ROUND", 0.05, f64);
         if work_cap > 0.0 {
             time_cap *= tunable!("ENOMOTO_T_MIP_CUT_WORK_TIME_MULT", 2.0, f64);
         }
-        let lp_work = if cs_outer { tunable!("ENOMOTO_T_MIP_CUT_LP_WORK", 0.0, f64) } else { 0.0 };
-        // `ENOMOTO_T_MIP_CUT_LP_WORK_PREV` = q (> 0): `ENOMOTO_T_MIP_CUT_LP_WORK` の反復の上限を、このループで最適まで解けたカットの LP の
+        let lp_work = if cs_outer { tunable!("ENOMOTO_T_MIP_CUT_LP_WORK", 0.1, f64) } else { 0.0 };
+        // `ENOMOTO_T_MIP_CUT_LP_WORK_PREV` = q (> 0、既定 5、2026-11-01 に cs2 として既定化。`0` で使わない): `ENOMOTO_T_MIP_CUT_LP_WORK` の反復の上限を、このループで最適まで解けたカットの LP の
         // 反復の最大の q 倍より小さくしない (physiciansched6-2 は 0・1 ラウンドの LP が 900・808 反復で、2 ラウンド目の 1166 反復を
         // 上限 1000 で外していた。neos-960392 は 133・126 反復で、2 ラウンド目の密なカットの LP は 3447 反復)
-        let lp_work_prev = tunable!("ENOMOTO_T_MIP_CUT_LP_WORK_PREV", 0.0, f64);
+        let lp_work_prev = tunable!("ENOMOTO_T_MIP_CUT_LP_WORK_PREV", 5.0, f64);
         let mut ok_lp_iters = 0u64;
         let mut loop_iters = 0u64;
         let mut work_rounds = 0usize;

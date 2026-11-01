@@ -10245,3 +10245,13 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   bench9・bench10 (`analysis/halve_submip_20261030.md`): 58 問 4 回 SGM −2.4%・解けた数 168 -> 173、Mittelmann 2 回 差なし (92 -> 91)。
   neos-1171448 は REAL の道の入れ替わりで時間切れの率が上がる (`analysis/neos1171448_20261101.md`)。
 - 記録は `analysis/trim3_default_20261101.md`。
+
+## 2026-11-01: 根のカットのループの止め方 cs2 を既定にする (採用)
+
+- 既定にした (それぞれ戻し方): `ENOMOTO_T_MIP_CUT_LP_WORK` の既定 0.1 (外側の根のカットの 1 回の LP の上限を反復で決める、`0`)、
+  `ENOMOTO_T_MIP_CUT_LP_WORK_PREV` の既定 5 (`0`)、`ENOMOTO_MIP_CUT_LP_CAP_STOP` の既定 `flat` (根の LP から動いていないループでは
+  1 回外したら止める、`0`)、`ENOMOTO_MIP_CUT_CAP_FROM_LOOP` (根のカットの時間の上限をループの始めから数える、`0`)。
+- 根拠: neos-960392 は根のカットのループが 3 ラウンド目に入るかを CPU 時間の際で決めていて、入ると根の RENS の近傍が最適解を含まない
+  (`analysis/neos960392_20261101.md`・`neos960392_cutstop_20261101.md`)。bench12 (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −3.5%・
+  解けた数 83 -> 87、Mittelmann −0.6%・46 -> 46、neos-960392 0/3 -> 3/3。既定だけが解けた 2 問は揺れ (`analysis/cs2_check_20261101.md`)。
+- 記録は `analysis/cs2_default_20261101.md`。
