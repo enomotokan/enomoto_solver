@@ -411,7 +411,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) parallel_submips: bool,
     /// 別スレッドで解いているサブ MIP (出した順)。
     /// 並列モードで別スレッドに出したサブ MIP と、それが根の RENS のものか ([`Self::submip_is_rens`] を出すときに写す)。
-    pub(super) pending_submips: std::collections::VecDeque<(std::thread::JoinHandle<MipResult>, bool, &'static str, std::time::Instant, Option<f64>, Option<std::sync::Arc<SubmipCtl>>)>,
+    pub(super) pending_submips: std::collections::VecDeque<(std::thread::JoinHandle<MipResult>, bool, &'static str, std::time::Instant, Option<f64>, Option<std::sync::Arc<SubmipCtl>>, u64)>,
     /// [`Self::add_proof_cmir`] の作業領域 (丸めの基準の点) と、試した数・足した数。
     proof_cmir_x: Option<Vec<f64>>,
     pub(super) proof_cmir_stats: [u64; 3],
@@ -3104,6 +3104,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let gfix = (0..self.p.n).filter(|&j| self.p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
                 eprintln!("MIP:   global fixed integers {gfix} of {} (newly {} since the root LP)", self.p.nint, gfix.saturating_sub(self.root_fixed0));
                 eprintln!("MIP: new incumbent {:.10e} at node {} ({:.2}s) [{other}{}]", z, self.nodes, self.start.elapsed().as_secs_f64(), if self.heur_label.is_empty() { "tree" } else { self.heur_label });
+                // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): どのサブ MIP の中の暫定解か (道筋 `tag`)、サブ MIP の解なら `child` にその番号
+                if super::heuristics::submip_trace() {
+                    let tag = super::heuristics::SUBMIP_TAG.with(|t| t.borrow().clone());
+                    let child = super::heuristics::SUBMIP_CHILD.with(|c| c.get());
+                    eprintln!(
+                        "MIP: SMT inc tag={tag} z={z:.10e} node={} src=[{other}{}] child={child} t={:.3} T={:.3}",
+                        self.nodes,
+                        if self.heur_label.is_empty() { "tree" } else { self.heur_label },
+                        self.start.elapsed().as_secs_f64(),
+                        super::heuristics::submip_trace_secs()
+                    );
+                }
             }
         }
         better
@@ -11234,8 +11246,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let nosol = self.submip_nosol.take();
         let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| std::sync::Arc::new(SubmipCtl::new(self.prune_limit()).with_nosol(nosol)));
         let ctl2 = ctl.clone();
+        // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 番号を振ってサブ MIP の始めを出す (スレッドの中で道筋を受け継ぐ)
+        let (trace_id, trace_tag) = if self.params.verbose && super::heuristics::submip_trace() {
+            let parent = super::heuristics::SUBMIP_TAG.with(|t| t.borrow().clone());
+            let nfree = (0..sub.n).filter(|&j| sub.is_int[j] && sub.col_lo[j] < sub.col_up[j]).count();
+            let (id, prev) = super::heuristics::submip_trace_begin(&parent, label, self.nodes, nfree, sub.is_int.iter().filter(|&&b| b).count(), params.node_limit, params.time_limit, true);
+            let mine = super::heuristics::SUBMIP_TAG.with(|t| t.replace(prev));
+            (id, Some(mine))
+        } else {
+            (0, None)
+        };
         self.pending_submips.push_back((
             std::thread::spawn(move || {
+                let t_thread = Instant::now();
+                if let Some(t) = &trace_tag {
+                    super::heuristics::SUBMIP_TAG.with(|s| *s.borrow_mut() = t.clone());
+                }
                 // 別スレッドで解くサブ MIP も入れ子の深さ 1 として数える ([`super::heuristics::SUBMIP_DEPTH`])
                 super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
                 super::heuristics::SUBMIP_HS_DROP.with(|f| f.set(hs_drop));
@@ -11256,13 +11282,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if env_str!("ENOMOTO_MIP_FJ_P3") == Some("submip") {
                     crate::set_fj_p3_force(true);
                 }
-                super::solve_problem(&sub, params, presolve)
+                let r = super::solve_problem(&sub, params, presolve);
+                if trace_tag.is_some() {
+                    eprintln!("MIP: SMT end id={trace_id} status={:?} nodes={} objective={:?} secs={:.3} T={:.3}", r.status, r.nodes, r.objective, t_thread.elapsed().as_secs_f64(), super::heuristics::submip_trace_secs());
+                }
+                r
             }),
             is_rens,
             label,
             Instant::now(),
             fix_rate,
             ctl,
+            trace_id,
         ));
     }
 
@@ -11307,8 +11338,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 別スレッドのサブ MIP 1 本の結果を受け取る。
-    fn take_submip(&mut self, item: (std::thread::JoinHandle<MipResult>, bool, &'static str, std::time::Instant, Option<f64>, Option<std::sync::Arc<SubmipCtl>>)) {
-        let (h, is_rens, label, t0, fix_rate, _) = item;
+    fn take_submip(&mut self, item: (std::thread::JoinHandle<MipResult>, bool, &'static str, std::time::Instant, Option<f64>, Option<std::sync::Arc<SubmipCtl>>, u64)) {
+        let (h, is_rens, label, t0, fix_rate, _, trace_id) = item;
         {
             if let Ok(r) = h.join() {
                 self.heur_iters += r.lp_iterations;
@@ -11328,8 +11359,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let infeasible = r.status == MipStatus::Infeasible;
                 if let Some(x) = r.x {
                     let keep = std::mem::replace(&mut self.heur_label, label);
+                    let child = super::heuristics::SUBMIP_CHILD.with(|c| c.replace(trace_id));
                     acc = self.try_incumbent(x);
+                    super::heuristics::SUBMIP_CHILD.with(|c| c.set(child));
                     self.heur_label = keep;
+                }
+                if trace_id > 0 {
+                    eprintln!("MIP: SMT acc id={trace_id} accepted={} T={:.3}", acc as u8, super::heuristics::submip_trace_secs());
                 }
                 // [`par_heur_found`] (`ENOMOTO_MIP_NO_PAR_HEUR_FOUND` で使わない): 並列のサブ MIP は出しただけで `heur!` に「解なし」と返るので、再スタートで飛ばす印
                 // ([`Self::failed_heurs`]) が付く。ここで解を受け入れたら印を外す (逐次のときの「見つけた」と同じ)。p200x1188c は並列の RENS・

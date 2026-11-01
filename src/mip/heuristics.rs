@@ -30,7 +30,37 @@ pub fn compute_locks(p: &MipProblem) -> Vec<(u32, u32)> {
     locks
 }
 
+/// 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): サブ MIP の入れ子を区別するログ `SMT ...` を出すか (振る舞いは変えない)。
+pub(super) fn submip_trace() -> bool {
+    env_str!("ENOMOTO_MIP_SUBMIP_VERBOSE").is_some()
+}
+
+/// 診断用: `SMT` のログの時刻 (このプロセスで最初に呼んだときから数えた秒)。
+pub(super) fn submip_trace_secs() -> f64 {
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    T0.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
+/// 診断用: サブ MIP を解き始める印。番号を振り、このスレッドの道筋 ([`SUBMIP_TAG`]) を `parent/番号` にして、元の道筋を返す。
+pub(super) fn submip_trace_begin(parent: &str, kind: &str, caller_node: u64, nfree: usize, n: usize, node_limit: u64, time_limit: f64, parallel: bool) -> (u64, String) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let depth = parent.matches('/').count() + 1;
+    eprintln!(
+        "MIP: SMT begin id={id} parent={parent} depth={depth} kind=[{kind}] caller_node={caller_node} free={nfree}/{n} node_limit={node_limit} time_limit={time_limit:.2} parallel={} T={:.3}",
+        parallel as u8,
+        submip_trace_secs()
+    );
+    let prev = SUBMIP_TAG.with(|t| t.replace(format!("{parent}/{id}")));
+    (id, prev)
+}
+
 thread_local! {
+    /// 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE` のログ `SMT ...`): このスレッドで解いているサブ MIP の番号の道筋 (`M` は外側の求解、
+    /// `M/3/7` は 3 番のサブ MIP の中の 7 番)。並列のサブ MIP のスレッドは出した側の道筋を受け継ぐ
+    pub(super) static SUBMIP_TAG: std::cell::RefCell<String> = std::cell::RefCell::new(String::from("M"));
+    /// 診断用: サブ MIP の解を暫定解の候補にしている間だけ、そのサブ MIP の番号 (0 = サブ MIP の解でない)
+    pub(super) static SUBMIP_CHILD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// このスレッドで解いているサブ MIP の入れ子の深さ (元の問題は 0。[`Solver::solve_submip_problem`] で 1 つ増やす)。
     pub(super) static SUBMIP_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// このスレッドで解いているサブ MIP では使わない `ENOMOTO_MIP_SUBMIP_HIGHS` の文字の印 ([`super::submip_hs_bit`] の和。
@@ -1601,7 +1631,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(c));
         }
         let node_limit = params.node_limit;
+        // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): サブ MIP の始め・終わり・受け入れを番号付きで出す
+        let trace = (self.params.verbose && submip_trace()).then(|| {
+            let parent = SUBMIP_TAG.with(|t| t.borrow().clone());
+            let nfree = (0..sub.n).filter(|&j| sub.is_int[j] && sub.col_lo[j] < sub.col_up[j]).count();
+            submip_trace_begin(&parent, self.heur_label, self.nodes, nfree, sub.is_int.iter().filter(|&&b| b).count(), node_limit, params.time_limit, false)
+        });
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        if let Some((id, prev)) = &trace {
+            SUBMIP_TAG.with(|t| *t.borrow_mut() = prev.clone());
+            eprintln!("MIP: SMT end id={id} status={:?} nodes={} objective={:?} secs={:.3} T={:.3}", r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64(), submip_trace_secs());
+        }
         self.submip_full_nodes = r.nodes >= node_limit;
         super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = None);
         if p3 {
@@ -1622,9 +1662,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.heur_iters += r.lp_iterations;
         let acc = match r.x {
-            Some(x) => self.try_incumbent(x),
+            Some(x) => {
+                let child = SUBMIP_CHILD.with(|c| c.replace(trace.as_ref().map_or(0, |t| t.0)));
+                let a = self.try_incumbent(x);
+                SUBMIP_CHILD.with(|c| c.set(child));
+                a
+            }
             None => false,
         };
+        if let Some((id, _)) = &trace {
+            eprintln!("MIP: SMT acc id={id} accepted={} T={:.3}", acc as u8, submip_trace_secs());
+        }
         if let Some(fr) = fix_rate {
             self.note_fix_rate(fr, r.status == super::solver::MipStatus::Infeasible, acc);
         }
