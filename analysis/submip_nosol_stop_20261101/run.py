@@ -14,7 +14,9 @@ CFGS = {
     "n200": dict(ON, ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES="200"),
     "n100": dict(ON, ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES="100"),
     "n50": dict(ON, ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES="50"),
-    # 2 回目のビルド (ノード数と時間の両方で止める形): 100 ノード以上かつサブ MIP の時間の上限の 10%・20% 以上
+    # 2 回目のビルド (別のセッションの RENS の試作のコミットを取り込んだ木。既定の振る舞いは変わらないはずだが、同じビルドの既定 def2 も回す)
+    "def2": {},
+    # (ノード数と時間の両方で止める形): 100 ノード以上かつサブ MIP の時間の上限の 10%・20% 以上
     "t10": dict(ON, ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES="100", ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC="0.1"),
     "t20": dict(ON, ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES="100", ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC="0.2"),
 }
