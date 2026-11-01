@@ -23,7 +23,7 @@ CFGS = {
 
 if __name__ == "__main__":
     reps = int(sys.argv[1]) if len(sys.argv) > 1 else 3
-    probs = sys.argv[2].split(",") if len(sys.argv) > 2 else PROBS
+    probs = sys.argv[2].split(",") if len(sys.argv) > 2 and sys.argv[2] else PROBS
     cfgs = sys.argv[3].split(",") if len(sys.argv) > 3 else ["def", "n200", "n100", "n50"]
     base = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
     for r in range(1, reps + 1):
