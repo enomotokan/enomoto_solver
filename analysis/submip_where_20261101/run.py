@@ -12,7 +12,7 @@ sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
 from probs import PROBS
 
 if __name__ == "__main__":
-    probs = sys.argv[1].split(",") if len(sys.argv) > 1 else PROBS
+    probs = sys.argv[1].split(",") if len(sys.argv) > 1 and sys.argv[1] else PROBS  # 空の引数も 58 問全部 (analysis/rens_resume_20261101.md 5 節)
     if len(sys.argv) > 2:
         L = D / sys.argv[2]
     extra = dict(a.split("=", 1) for a in sys.argv[3:])
