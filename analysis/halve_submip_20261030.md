@@ -327,3 +327,27 @@ ENOMOTO の既定は今回の計測の 7〜9 回分。
 - 最適値の食い違い・crash は 0 件。60 秒超えは 61〜65 秒の小さなものだけ。
 - 判断: どの形も SGM は悪くなる (+0.3〜3.5%)。解けた数は 58 問で +2 だが Mittelmann で −1〜−2。neos-960392 も 3 回中 1 回で、毎回は解けない。
   **lock の順は既定にしない**。neos-960392 の手当ては、近傍の中で −238 を見つける力 (サブ MIP の中のサブ MIP) の側を見る (`neos960392_20261101.md` の 2.5 節)。
+
+## bench12: neos-960392 の対策 (cs1・cs2・nesti) を 58 問 2 回 (回 18・19) と Mittelmann 186 問 (回 106) で比べる (2026-11-01)
+
+- def は今の既定 (trim3 入り、`b2c41506`)。cs1 = `ENOMOTO_T_MIP_CUT_LP_WORK=0.1 ENOMOTO_T_MIP_CUT_LP_WORK_PREV=5 ENOMOTO_MIP_CUT_LP_CAP_STOP=flat`
+  (根のカットの 1 回の LP の上限を反復で決め、根の LP から動いていないループでは 1 回外したら止める)、cs2 = cs1 + `ENOMOTO_MIP_CUT_CAP_FROM_LOOP=1`
+  (根のカットの時間の上限をループの始めから数える)、nesti = `ENOMOTO_MIP_SUBMIP_NESTED=i ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_MAX=0.5 ENOMOTO_T_MIP_SUBMIP_NESTED_NODES=50`
+  (`neos960392_cutstop_20261101.md`・`neos960392_nested_20261101.md`)。分担は `bench12.json` (30 個)。集計は `summ12.py` (`B=<設定>`)、出力は `summ12.txt`。
+
+| 範囲 | def | cs1 | cs2 | nesti |
+|---|---|---|---|---|
+| 58 問 回 18 | 17.97 / 43 | 18.29 / 42 | 17.61 / 44 | 18.19 / 42 |
+| 58 問 回 19 | 18.92 / 40 | 18.62 / 40 | 17.99 / 43 | 19.17 / 42 |
+| 58 問 2 回 (116) | 18.44 / 83 | 18.46 / 82 (+0.1%) | **17.80 / 87 (−3.5%)** | 18.68 / 84 (+1.3%) |
+| Mittelmann 186 問 | 44.64 / 46 | 44.35 / 46 (−0.6%) | **44.38 / 46 (−0.6%)** | 44.68 / 44 (+0.1%) |
+
+- neos-960392 (3 回): def 0/3、cs1 2/3、**cs2 3/3 (25〜40 秒)**、nesti 1/3。
+- physiciansched6-2 (3 回): def 1/3、cs1 0/3、cs2 2/3、nesti 0/3。h80x6320d・10teams はどの形も def と同じくらい。
+- 片方だけ解けた回:
+  - cs2: 試作だけ neos-960392 ×3・physiciansched6-2・drayage-25-23・neos5 (Mittelmann)。def だけ neos-1171448 (Mittelmann、47.7 秒)・neos-1171737 (Mittelmann、38.3 秒)。
+  - cs1: qiu を 2 回とも失う (def 20・27 秒)、physiciansched6-2・roll3000・neos-1171737 も失う。
+  - nesti: neos-1171448・neos-1171737・neos5・physiciansched6-2 を失い、得は neos-960392・drayage-25-23・timtab1 の 1 回ずつ。
+- 最適値の食い違い・crash は 0 件。60 秒超えは 61〜62 秒の小さなものだけ。
+- 判断: **cs2 を既定にする候補**。58 問 −3.5%・解けた数 +4、Mittelmann −0.6%・解けた数 ±0、neos-960392 は 3/3。cs1 (時間の上限を求解の開始から数えたまま) は qiu を失うので採らない。nesti は採らない。
+  ただし 1 回の計測なので、neos-1171448・neos-1171737 の損は既定にする前か後に確かめる。
