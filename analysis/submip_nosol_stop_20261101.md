@@ -16,11 +16,12 @@
   - `run.py [回数] [問題,...] [設定,...]`: 1 本ずつ解いて `logs/<設定>/<問題>_r<回>.log.gz`、結果の行を `results.jsonl` に足す。設定は `CFGS`。
     親の `ENOMOTO_` の環境変数は全部外してから設定を入れる。経過は `run.out` (1 回目のビルド)・`run2.out` (2 回目)。
   - `summ.py`: 下の表 (`summ.txt`)。平均の表は `avg.txt`。
-- `cargo test --release --lib` (`CARGO_TARGET_DIR=target/test-py RUSTFLAGS="-C link-arg=-lpython3.13"`): 330 件通過 (18 件は ignored)。
+- `cargo test --release --lib` (`CARGO_TARGET_DIR=target/test-py RUSTFLAGS="-C link-arg=-lpython3.13"`): 試作を入れた木で 330 件通過 (18 件は ignored)。前処理の直し `fb1002d` などを取り込んだ後の木では 333 件通過 (別のセッションが足したテストを含む)。
 - **最適値の食い違いはない**: 231 回のうち「最適」で終わった回の目的値は問題ごとに 1 つ (h80x6320d は全部 6382.09905)。
   別のセッションの ns250s (`submip_nodes_20261101.md` の 3.4 節) で出た h80x6320d の 6386.09905 (再スタート 2 の前処理の誤った実行不能の判定) は、
   ここの 7 設定 × 3 回では一度も出なかった。ただし同じ道 (LP face が 6386 を出し、続くサブ MIP が解なしで切られ、暫定解 6386 で
-  再スタート 2 に入る) はこの試作でも開きうるので、前処理の誤り (`presolve_infeasible_20261101.md`) が直るまでは既定にしない。
+  再スタート 2 に入る) はこの試作でも開きうる。前処理の誤りは別のセッションが `fb1002d` で直した (`presolve_infeasible_20261101.md`)。
+  ここの計測はどちらのビルドもその直しの前。58 問は直しの入った木で回す。
 
 ## 1. 試作 (既定では使わない)
 
@@ -145,4 +146,4 @@ ENOMOTO_MIP_SUBMIP_NOSOL_STOP=1 ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES=100 ENOMOTO_T_M
   例えば def2 の 10teams の 39 秒の回は、根の被約費用・LP face のサブ MIP がそもそも出ない道 (Local-MIP の解の時刻の違い) で、試作とは関係ない。
 - `summ.txt` の「うち解なしの打ち切り (TimeLimit)」の列は、状態が `TimeLimit` でノード上限より前に終わった解なしのサブ MIP の数で、
   本当の時間の上限 (深さ 3 の RENS など、既定でも出る) を含む。試作が止めた本数そのものではない。
-- 前処理の誤った実行不能の判定 (`presolve_infeasible_20261101.md`) が直るまでは、どの解なしの打ち切りも既定にしない (0 項)。
+- 計測は前処理の誤った実行不能の判定の直し (`fb1002d`) より前のビルド。h80x6320d の誤った最適値は出なかったが、58 問では直しの入った木で確かめる。
