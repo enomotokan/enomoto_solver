@@ -283,3 +283,27 @@ ENOMOTO の既定は今回の計測の 7〜9 回分。
 - 判断: trim3 が 58 問・Mittelmann とも一番良い (58 問 −4.9%・解けた数 +3、Mittelmann −0.6%)。効きの大部分は real から来る。
   ただしこの計測は前処理の直しの前のコードで、h80x6320d の速い回は誤った近道に乗っていた (`presolve_infeasible_20261101.md` の 1 節 6 項)。
   既定にする前に、直しの入ったコードで def・trim3・trim3 + 解なしの打ち切り (t20、`submip_nosol_stop_20261101.md`) を確かめ直す。
+
+## bench10: 前処理の直し (fb1002d2) の入ったコードで、今の既定・trim3・trim3t20 を 58 問 2 回 (回 14・15) と Mittelmann 186 問 (回 104) で比べる (2026-11-01)
+
+- trim3 は bench9 と同じ。trim3t20 = trim3 + `ENOMOTO_MIP_SUBMIP_NOSOL_STOP=1 ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES=100 ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC=0.2`
+  (`submip_nosol_stop_20261101.md`)。分担は `bench10.json` (24 個、`01b82bd0` のコード)。集計は `summ10.py` (`B=<設定>`)、出力は `summ10.txt`。
+
+| 範囲 | def | trim3 | trim3t20 |
+|---|---|---|---|
+| 58 問 回 14 | 18.94 / 41 | 18.68 / 43 | 18.98 / 40 |
+| 58 問 回 15 | 17.85 / 44 | 18.12 / 44 | 18.26 / 41 |
+| 58 問 2 回 (116) | 18.39 / 85 | 18.40 / 87 (±0.0%) | 18.62 / 81 (+1.2%) |
+| Mittelmann 186 問 | 45.19 / 46 | 45.53 / 45 (+0.7%) | 45.16 / 46 (−0.1%) |
+
+- bench9 と合わせると (同じ trim3、前処理の直しの前後): 58 問 4 回 (232) で def 18.48 / 168 → trim3 18.03 / 173 (−2.4%・+5)、Mittelmann 2 回 (372) で 44.73 / 92 → 44.76 / 91。
+  bench9 の trim3 の得 (−4.9%) の一部は、前処理の誤りの近道 (h80x6320d) に乗っていた。
+- 片方だけ解けた回:
+  - trim3: 試作だけ n5-3 (Mittelmann)・neos-960392 (回 14)・pk1 (回 14)。def だけ neos-1171448 (Mittelmann、49.2 秒。bench9 でも trim3 だけ時間切れ)・
+    neos-3381206-awhea (Mittelmann、def 2.8 秒。trim3 は根の下界が 445.7 (def 452.25) で止まった回。bench9 の trim3 は 2.2 秒で解いており、根のカットの道の揺れとみる)。
+  - trim3t20: def だけ physiciansched6-2 ×2・neos-960392・neos5・ns1116954・neos-1171448。**解なしの打ち切り (t20) は physiciansched6-2 などの解を失う**。
+- 最適値の食い違い・crash は 0 件。60 秒超えは 61〜65 秒 (cryptanalysiskb128n5obj16 が 63〜65 秒)。
+- 判断:
+  - trim3t20 は採らない (58 問で解けた数 −4)。
+  - trim3 は、前処理の直しの後では 58 問 2 回で差がなく、bench9 と合わせて 58 問 −2.4%・+5、Mittelmann ±0。損の小さい「無駄を削る」変更として既定にしてよいが、得は小さい。
+  - neos-1171448 は trim3 で 2 回とも時間切れ (def は 46・49 秒) なので、既定にするなら RESUME の関与をログで確かめる。
