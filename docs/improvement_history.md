@@ -10233,3 +10233,15 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - bench7 (`analysis/halve_submip_20261030.md`): 58 問 × 2 回 SGM −6.1%・解けた数 83 -> 85、Mittelmann 186 問 −2.9%・44 -> 49。
   片方だけ解けた 7 回は全部 cand だけ。遅くなる n5-3・neos-1582420・neos-2978193-inde は残りの課題。
 - 新ビルドの既定が旧ビルド + cand の環境変数と同じ振る舞いになることを 5 問のログで確かめた。記録は `analysis/cand_default_20261031.md`。
+
+## 2026-11-01: サブ MIP の無駄を削る trim3 を既定にする (採用)
+
+- 既定にした (それぞれ戻し方): `ENOMOTO_MIP_RENS_MORE_NODES_REAL` (RENS のやり直しを本当にノード上限まで進んだときだけにする、`0`)、
+  `ENOMOTO_MIP_RENS_RESUME` (やり直しを最初からでなく続きから行う、`0`。REAL の場合分けも含むので両方 `0` で元通り)、
+  `ENOMOTO_MIP_RENS_MAX_DEPTH` の既定 2 (深さ 3 の RENS をやめる、`1000`)、`ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH` の既定 1
+  (深さ 2 の `RENS (LP before cuts)` をやめる、`1000`)。
+- 根拠: 停滞・成果連動で止まった RENS のやり直しは 12 問 3 回で 17 本・89.7 秒・解 0 本、深さ 3 の RENS は 58 問で 135 本中 1 本しか解を出さない
+  (`analysis/submip_where_20261101.md`・`rens_more_real_20261101.md`・`rens_depth3_20261101.md`・`rens_resume_20261101.md`)。
+  bench9・bench10 (`analysis/halve_submip_20261030.md`): 58 問 4 回 SGM −2.4%・解けた数 168 -> 173、Mittelmann 2 回 差なし (92 -> 91)。
+  neos-1171448 は REAL の道の入れ替わりで時間切れの率が上がる (`analysis/neos1171448_20261101.md`)。
+- 記録は `analysis/trim3_default_20261101.md`。
