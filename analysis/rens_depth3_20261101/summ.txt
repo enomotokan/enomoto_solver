@@ -1,0 +1,224 @@
+# 問題・形ごとの 3 回の平均 (秒は run_miplib_benchmark.py の time。T は時間切れの回数。sub は深さ 1 のサブ MIP の秒の和 (入れ子を含む)、
+# rh は外側の最初の根のヒューリスティクスの秒 (rh+ は再スタート後の根も含む)、d3 は深さ 3 の RENS の本数/秒、lpbc は深さ 2 の RENS (LP before cuts) の本数/秒)
+
+| 問題 | 形 | 秒 | T | 目的値 (3 回) | 最終解の時刻 | sub | rh | rh+ | d2 RENS 本/秒 | d3 本/秒 | lpbc 本/秒 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| drayage-100-23 | def | 3.1 | 0 | 103334/103334/103334 | 2.3 | 0.3 | 0.28 | 0.28 | 0.0/0.0 | 0.0/0.00 | 0.0/0.00 |
+| drayage-100-23 | d2 | 2.6 | 0 | 103334/103334/103334 | 1.8 | 0.2 | 0.29 | 0.29 | 0.3/0.0 | 0.0/0.00 | 0.0/0.00 |
+| drayage-100-23 | lp1 | 2.1 | 0 | 103334/103334/103334 | 0.5 | 0.2 | 0.32 | 0.33 | 0.3/0.0 | 0.0/0.00 | 0.0/0.00 |
+| drayage-100-23 | d2lp1 | 2.6 | 0 | 103334/103334/103334 | 1.8 | 0.2 | 0.29 | 0.29 | 0.3/0.0 | 0.0/0.00 | 0.0/0.00 |
+| physiciansched6-2 | def | 47.9 | 2 | 49424/49324/49324 | 12.0 | 1.6 | 3.15 | 3.15 | 0.7/0.4 | 0.0/0.00 | 0.0/0.00 |
+| physiciansched6-2 | d2 | 20.6 | 0 | 49324/49324/49324 | 14.2 | 2.3 | 3.88 | 3.88 | 1.0/0.8 | 0.0/0.00 | 0.0/0.00 |
+| physiciansched6-2 | lp1 | 47.5 | 2 | 49324/-/49424 | 14.0 | 1.8 | 18.04 | 18.04 | 0.7/0.6 | 0.0/0.00 | 0.0/0.00 |
+| physiciansched6-2 | d2lp1 | 33.9 | 1 | 49324/49324/49324 | 11.7 | 1.9 | 3.39 | 3.39 | 0.7/0.7 | 0.0/0.00 | 0.0/0.00 |
+| mas76 | def | 8.5 | 0 | 40005.1/40005.1/40005.1 | 0.0 | 0.8 | 0.18 | 0.22 | 9.7/0.3 | 5.3/0.01 | 0.0/0.00 |
+| mas76 | d2 | 9.6 | 0 | 40005.1/40005.1/40005.1 | 0.0 | 0.9 | 0.17 | 0.24 | 11.3/0.4 | 0.0/0.00 | 0.0/0.00 |
+| mas76 | lp1 | 8.6 | 0 | 40005.1/40005.1/40005.1 | 0.0 | 0.7 | 0.16 | 0.22 | 9.0/0.3 | 0.0/0.00 | 0.0/0.00 |
+| mas76 | d2lp1 | 10.5 | 0 | 40005.1/40005.1/40005.1 | 0.0 | 0.8 | 0.18 | 0.23 | 11.0/0.4 | 0.0/0.00 | 0.0/0.00 |
+| blp-ar98 | def | 60.1 | 3 | 6536.37/6536.37/6536.37 | 0.0 | 29.7 | 23.62 | 25.40 | 10.0/9.5 | 0.0/0.00 | 1.0/0.02 |
+| blp-ar98 | d2 | 60.1 | 3 | 6493.7/6536.37/6389.17 | 0.0 | 34.4 | 24.12 | 26.61 | 10.0/12.4 | 0.0/0.00 | 2.0/0.03 |
+| blp-ar98 | lp1 | 60.1 | 3 | 6536.37/6536.37/6493.7 | 0.0 | 32.2 | 24.30 | 26.39 | 9.0/12.0 | 0.0/0.00 | 0.0/0.00 |
+| blp-ar98 | d2lp1 | 60.1 | 3 | 6493.7/6389.17/6536.37 | 0.0 | 34.6 | 24.78 | 26.96 | 8.3/12.9 | 0.0/0.00 | 0.0/0.00 |
+| dcmulti | def | 2.1 | 0 | 188182/188182/188182 | 1.8 | 2.1 | 1.57 | 1.57 | 3.0/0.7 | 0.0/0.00 | 0.0/0.00 |
+| dcmulti | d2 | 2.1 | 0 | 188182/188182/188182 | 1.8 | 2.0 | 1.53 | 1.53 | 3.0/0.7 | 0.0/0.00 | 0.0/0.00 |
+| dcmulti | lp1 | 2.1 | 0 | 188182/188182/188182 | 1.8 | 2.1 | 1.58 | 1.58 | 3.0/0.7 | 0.0/0.00 | 0.0/0.00 |
+| dcmulti | d2lp1 | 2.1 | 0 | 188182/188182/188182 | 1.9 | 2.0 | 1.60 | 1.60 | 3.0/0.7 | 0.0/0.00 | 0.0/0.00 |
+| n5-3 | def | 45.6 | 0 | 8105/8105/8105 | 43.8 | 35.9 | 21.42 | 21.42 | 11.0/25.0 | 0.0/0.00 | 0.0/0.00 |
+| n5-3 | d2 | 42.4 | 0 | 8105/8105/8105 | 40.8 | 31.1 | 18.79 | 18.79 | 9.3/21.9 | 0.0/0.00 | 0.0/0.00 |
+| n5-3 | lp1 | 50.4 | 0 | 8105/8105/8105 | 48.1 | 43.0 | 25.34 | 25.34 | 12.7/31.2 | 0.0/0.00 | 0.0/0.00 |
+| n5-3 | d2lp1 | 47.1 | 0 | 8105/8105/8105 | 45.2 | 37.1 | 21.84 | 21.84 | 11.0/26.4 | 0.0/0.00 | 0.0/0.00 |
+| neos-1582420 | def | 35.0 | 0 | 91/91/91 | 21.3 | 31.7 | 14.90 | 17.52 | 11.3/11.1 | 0.0/0.00 | 4.3/1.13 |
+| neos-1582420 | d2 | 33.4 | 0 | 91/91/91 | 20.6 | 31.1 | 13.57 | 16.23 | 12.0/10.5 | 0.0/0.00 | 4.7/1.06 |
+| neos-1582420 | lp1 | 29.4 | 0 | 91/91/91 | 11.2 | 26.4 | 10.43 | 14.31 | 7.0/8.9 | 0.0/0.00 | 0.0/0.00 |
+| neos-1582420 | d2lp1 | 30.8 | 0 | 91/91/91 | 24.3 | 28.9 | 13.11 | 14.50 | 7.3/9.0 | 0.0/0.00 | 0.0/0.00 |
+| neos-2978193-inde | def | 42.4 | 0 | -2.38806/-2.38806/-2.38806 | 0.4 | 14.5 | 9.40 | 13.40 | 4.7/4.5 | 0.0/0.00 | 0.0/0.00 |
+| neos-2978193-inde | d2 | 28.3 | 0 | -2.38806/-2.38806/-2.38806 | 0.4 | 7.3 | 4.08 | 6.88 | 2.3/1.4 | 0.0/0.00 | 0.0/0.00 |
+| neos-2978193-inde | lp1 | 38.2 | 0 | -2.38806/-2.38806/-2.38806 | 0.4 | 12.2 | 7.50 | 11.18 | 4.3/4.1 | 0.0/0.00 | 0.0/0.00 |
+| neos-2978193-inde | d2lp1 | 37.4 | 0 | -2.38806/-2.38806/-2.38806 | 0.0 | 13.3 | 9.03 | 12.50 | 4.7/4.2 | 0.0/0.00 | 0.0/0.00 |
+| h80x6320d | def | 21.4 | 0 | 6382.1/6382.1/6382.1 | 3.4 | 15.6 | 7.53 | 10.02 | 5.0/1.8 | 0.0/0.00 | 1.0/0.03 |
+| h80x6320d | d2 | 21.4 | 0 | 6382.1/6382.1/6382.1 | 2.9 | 15.2 | 7.57 | 9.45 | 5.0/1.9 | 0.0/0.00 | 1.0/0.03 |
+| h80x6320d | lp1 | 21.0 | 0 | 6382.1/6382.1/6382.1 | 2.1 | 14.3 | 7.60 | 8.88 | 4.0/1.7 | 0.0/0.00 | 0.0/0.00 |
+| h80x6320d | d2lp1 | 21.6 | 0 | 6382.1/6382.1/6382.1 | 2.6 | 15.8 | 7.82 | 9.60 | 4.0/2.0 | 0.0/0.00 | 0.0/0.00 |
+| qiu | def | 42.1 | 1 | -132.873/-132.873/-132.873 | 14.1 | 6.4 | 5.18 | 5.18 | 5.3/0.6 | 3.0/0.01 | 0.0/0.00 |
+| qiu | d2 | 31.2 | 0 | -132.873/-132.873/-132.873 | 13.4 | 5.8 | 4.96 | 4.96 | 3.0/0.5 | 0.0/0.00 | 0.0/0.00 |
+| qiu | lp1 | 54.8 | 1 | -132.873/-132.873/-132.873 | 14.7 | 7.0 | 5.41 | 5.41 | 8.0/0.7 | 11.3/0.02 | 0.0/0.00 |
+| qiu | d2lp1 | 39.7 | 0 | -132.873/-132.873/-132.873 | 12.6 | 6.4 | 5.01 | 5.01 | 5.0/0.5 | 0.0/0.00 | 0.0/0.00 |
+| mc11 | def | 23.6 | 0 | 11689/11689/11689 | 20.3 | 3.1 | 1.63 | 1.63 | 6.0/0.6 | 0.0/0.00 | 0.0/0.00 |
+| mc11 | d2 | 22.2 | 0 | 11689/11689/11689 | 17.6 | 2.9 | 1.55 | 1.55 | 6.0/0.6 | 0.0/0.00 | 0.0/0.00 |
+| mc11 | lp1 | 23.8 | 0 | 11689/11689/11689 | 19.9 | 3.0 | 1.53 | 1.53 | 6.3/0.5 | 0.0/0.00 | 0.0/0.00 |
+| mc11 | d2lp1 | 26.0 | 0 | 11689/11689/11689 | 24.2 | 3.3 | 1.60 | 1.60 | 6.3/0.6 | 0.0/0.00 | 0.0/0.00 |
+| (追加の 2 問。下の 11 問の和には入れない) |||||||||||
+| supportcase26 | def | 60.0 | 3 | 1806.48/1807.49/1848.9 | 55.4 | 49.2 | 47.16 | 47.16 | 14.7/26.4 | 10.0/0.07 | 4.7/14.39 |
+| supportcase26 | d2 | 60.0 | 3 | 1802.23/1844.65/1797.99 | 56.0 | 48.5 | 46.37 | 46.37 | 13.7/26.0 | 0.0/0.00 | 4.3/14.11 |
+| supportcase26 | lp1 | 60.0 | 3 | 1802.23/1814.97/1810.73 | 57.1 | 34.9 | 32.70 | 32.70 | 8.7/11.9 | 8.7/0.03 | 0.0/0.00 |
+| supportcase26 | d2lp1 | 60.0 | 3 | 1776.76/1768.26/1776.76 | 55.1 | 28.8 | 26.74 | 26.74 | 8.0/10.4 | 0.0/0.00 | 0.0/0.00 |
+| neos-1456979 | def | 60.2 | 3 | 189/196/240 | 52.2 | 24.4 | 19.07 | 19.07 | 6.0/13.9 | 16.0/3.81 | 0.0/0.00 |
+| neos-1456979 | d2 | 60.1 | 3 | 231/-/263 | 52.5 | 21.2 | 17.70 | 17.70 | 6.0/11.3 | 0.0/0.00 | 0.0/0.00 |
+| neos-1456979 | lp1 | 60.1 | 3 | -/-/238 | 56.0 | 23.4 | 18.99 | 18.99 | 6.0/13.6 | 16.0/3.78 | 0.0/0.00 |
+| neos-1456979 | d2lp1 | 60.1 | 3 | 215/318/234 | 51.3 | 20.7 | 17.36 | 17.36 | 6.0/11.1 | 0.0/0.00 | 0.0/0.00 |
+
+# 11 問の和 (3 回の平均の和)
+| 形 | 秒 | sub | rh | rh+ | d2 RENS 本/秒 | d3 RENS 本/秒/解あり | lpbc 本/秒/acc |
+|---|---|---|---|---|---|---|---|
+| def | 331.8 | 141.7 | 88.84 | 99.80 | 66.7/54.5 | 8.3/0.02/0.0 | 6.3/1.19/0.0 |
+| d2 | 273.8 | 133.2 | 80.51 | 90.40 | 63.3/50.9 | 0.0/0.00/0.0 | 7.7/1.12/0.0 |
+| lp1 | 337.9 | 142.9 | 102.21 | 113.22 | 64.3/60.8 | 11.3/0.02/0.0 | 0.0/0.00/0.0 |
+| d2lp1 | 311.8 | 144.4 | 88.65 | 97.51 | 61.7/57.3 | 0.0/0.00/0.0 | 0.0/0.00/0.0 |
+
+# 回ごとの最終解の出どころ (最終の目的値を外側が最初に持った事象。入れ子は > でたどる、@ は葉のノード)
+drayage-100-23 def 0: optimal time=3.0 obj=103333.87407302856 t_final=2.1 main tree: tree randomized rounding
+drayage-100-23 def 1: optimal time=3.5 obj=103333.87407302856 t_final=2.8 main tree: other thread (tree)
+drayage-100-23 def 2: optimal time=2.9 obj=103333.87407302856 t_final=2.1 main tree: tree
+drayage-100-23 d2 0: optimal time=1.4 obj=103333.87407302856 t_final=0.6 RENS(d1) > RENS(d2) > tree@0
+drayage-100-23 d2 1: optimal time=3.5 obj=103333.87407302856 t_final=2.7 main tree: other thread (tree)
+drayage-100-23 d2 2: optimal time=2.8 obj=103333.87407302856 t_final=2.2 tree RINS(d1) > tree@0
+drayage-100-23 lp1 0: optimal time=2.3 obj=103333.87407302856 t_final=0.4 main root: randomized rounding
+drayage-100-23 lp1 1: optimal time=2.3 obj=103333.87407302856 t_final=0.4 main root: randomized rounding
+drayage-100-23 lp1 2: optimal time=1.6 obj=103333.87407302856 t_final=0.7 RENS(d1) > RENS(d2) > tree@0
+drayage-100-23 d2lp1 0: optimal time=3.3 obj=103333.87407302856 t_final=2.5 main tree: tree randomized rounding
+drayage-100-23 d2lp1 1: optimal time=3.0 obj=103333.87407302856 t_final=2.1 main tree: other thread (tree)
+drayage-100-23 d2lp1 2: optimal time=1.6 obj=103333.87407302856 t_final=0.7 RENS(d1) > RENS(d2) > tree@0
+physiciansched6-2 def 0: time_limit time=60.2 obj=49424.0 t_final=13.5 RINS(d1) > RENS(d2) > feasibility pump@0
+physiciansched6-2 def 1: optimal time=23.1 obj=49323.99999999999 t_final=14.9 RINS(d1) > RENS(d2) > feasibility pump@0
+physiciansched6-2 def 2: time_limit time=60.2 obj=49324.0 t_final=7.6 main root: Local-MIP
+physiciansched6-2 d2 0: optimal time=20.3 obj=49323.99999999999 t_final=13.7 RINS(d1) > RENS(d2) > feasibility pump@0
+physiciansched6-2 d2 1: optimal time=21.2 obj=49323.99999999999 t_final=14.8 RINS(d1) > RENS(d2) > feasibility pump@0
+physiciansched6-2 d2 2: optimal time=20.2 obj=49323.99999999999 t_final=14.1 RINS(d1) > RENS(d2) > feasibility pump@0
+physiciansched6-2 lp1 0: optimal time=21.2 obj=49323.99999999999 t_final=14.2 RINS(d1) > RENS(d2) > feasibility pump@0
+physiciansched6-2 lp1 1: time_limit time=61.3 obj=None t_final=- -
+physiciansched6-2 lp1 2: time_limit time=60.1 obj=49424.0 t_final=13.9 RINS(d1) > RENS(d2) > feasibility pump@0
+physiciansched6-2 d2lp1 0: optimal time=20.0 obj=49323.99999999999 t_final=13.5 RINS(d1) > RENS(d2) > randomized rounding@0
+physiciansched6-2 d2lp1 1: time_limit time=60.1 obj=49324.00000000002 t_final=6.2 main root: Local-MIP
+physiciansched6-2 d2lp1 2: optimal time=21.7 obj=49323.99999999999 t_final=15.4 RINS(d1) > RENS(d2) > vector length diving@0
+mas76 def 0: optimal time=10.0 obj=40005.05414200001 t_final=0.0 main root: tree
+mas76 def 1: optimal time=8.1 obj=40005.05414200001 t_final=0.0 main root: tree
+mas76 def 2: optimal time=7.4 obj=40005.05414200001 t_final=0.0 main root: tree
+mas76 d2 0: optimal time=10.1 obj=40005.05414200001 t_final=0.0 main root: tree
+mas76 d2 1: optimal time=9.1 obj=40005.05414200001 t_final=0.0 main root: tree
+mas76 d2 2: optimal time=9.7 obj=40005.05414200001 t_final=0.0 main root: tree
+mas76 lp1 0: optimal time=8.6 obj=40005.05414200001 t_final=0.0 main root: tree
+mas76 lp1 1: optimal time=8.9 obj=40005.05414200001 t_final=0.0 main root: tree
+mas76 lp1 2: optimal time=8.3 obj=40005.05414200001 t_final=0.0 main root: tree
+mas76 d2lp1 0: optimal time=9.9 obj=40005.05414200001 t_final=0.0 main root: tree
+mas76 d2lp1 1: optimal time=13.3 obj=40005.05414200001 t_final=0.0 main root: tree
+mas76 d2lp1 2: optimal time=8.2 obj=40005.05414200001 t_final=0.0 main root: tree
+blp-ar98 def 0: time_limit time=60.1 obj=6536.369270400003 t_final=0.0 main root: tree
+blp-ar98 def 1: time_limit time=60.1 obj=6536.369270400003 t_final=0.0 main root: tree
+blp-ar98 def 2: time_limit time=60.1 obj=6536.369270400003 t_final=0.0 main root: tree
+blp-ar98 d2 0: time_limit time=60.1 obj=6493.701827200001 t_final=0.0 main root: tree
+blp-ar98 d2 1: time_limit time=60.1 obj=6536.369270400003 t_final=0.0 main root: tree
+blp-ar98 d2 2: time_limit time=60.1 obj=6389.173708800003 t_final=0.0 main root: tree
+blp-ar98 lp1 0: time_limit time=60.1 obj=6536.369270400003 t_final=0.0 main root: tree
+blp-ar98 lp1 1: time_limit time=60.1 obj=6536.369270400003 t_final=0.0 main root: tree
+blp-ar98 lp1 2: time_limit time=60.1 obj=6493.701827200001 t_final=0.0 main root: tree
+blp-ar98 d2lp1 0: time_limit time=60.1 obj=6493.701827200001 t_final=0.0 main root: tree
+blp-ar98 d2lp1 1: time_limit time=60.1 obj=6389.173708800003 t_final=0.0 main root: tree
+blp-ar98 d2lp1 2: time_limit time=60.1 obj=6536.369270400003 t_final=0.0 main root: tree
+dcmulti def 0: optimal time=2.1 obj=188182.00000000003 t_final=1.8 RINS(d1) > RENS(d2) > tree@20
+dcmulti def 1: optimal time=1.9 obj=188182.00000000003 t_final=1.7 RINS(d1) > RENS(d2) > tree@20
+dcmulti def 2: optimal time=2.2 obj=188182.00000000003 t_final=1.9 RINS(d1) > RENS(d2) > tree@20
+dcmulti d2 0: optimal time=2.1 obj=188182.00000000003 t_final=1.9 RINS(d1) > RENS(d2) > tree@20
+dcmulti d2 1: optimal time=2.0 obj=188182.00000000003 t_final=1.7 RINS(d1) > RENS(d2) > tree@20
+dcmulti d2 2: optimal time=2.1 obj=188182.00000000003 t_final=1.8 RINS(d1) > RENS(d2) > tree@20
+dcmulti lp1 0: optimal time=2.2 obj=188182.00000000003 t_final=2.0 RINS(d1) > RENS(d2) > tree@20
+dcmulti lp1 1: optimal time=1.9 obj=188182.00000000003 t_final=1.7 RINS(d1) > RENS(d2) > tree@20
+dcmulti lp1 2: optimal time=2.0 obj=188182.00000000003 t_final=1.8 RINS(d1) > RENS(d2) > tree@20
+dcmulti d2lp1 0: optimal time=2.3 obj=188182.00000000003 t_final=1.9 RINS(d1) > RENS(d2) > tree@20
+dcmulti d2lp1 1: optimal time=2.1 obj=188182.00000000003 t_final=1.8 RINS(d1) > RENS(d2) > tree@20
+dcmulti d2lp1 2: optimal time=2.1 obj=188182.00000000003 t_final=1.9 RINS(d1) > RENS(d2) > tree@20
+n5-3 def 0: optimal time=50.4 obj=8105.0 t_final=47.8 main tree: tree randomized rounding
+n5-3 def 1: optimal time=38.0 obj=8105.0 t_final=37.1 main tree: tree randomized rounding
+n5-3 def 2: optimal time=48.4 obj=8105.0 t_final=46.4 main tree: tree randomized rounding
+n5-3 d2 0: optimal time=40.4 obj=8105.0 t_final=39.7 main tree: tree randomized rounding
+n5-3 d2 1: optimal time=46.6 obj=8105.0 t_final=44.1 main tree: tree randomized rounding
+n5-3 d2 2: optimal time=40.1 obj=8105.0 t_final=38.5 main tree: tree randomized rounding
+n5-3 lp1 0: optimal time=51.0 obj=8105.0 t_final=48.4 main tree: tree randomized rounding
+n5-3 lp1 1: optimal time=52.1 obj=8105.0 t_final=50.6 main tree: tree randomized rounding
+n5-3 lp1 2: optimal time=48.1 obj=8105.0 t_final=45.4 main tree: tree randomized rounding
+n5-3 d2lp1 0: optimal time=49.5 obj=8105.0 t_final=46.7 main tree: tree randomized rounding
+n5-3 d2lp1 1: optimal time=49.7 obj=8105.0 t_final=47.8 main tree: tree randomized rounding
+n5-3 d2lp1 2: optimal time=42.0 obj=8105.0 t_final=41.2 main tree: tree randomized rounding
+neos-1582420 def 0: optimal time=42.3 obj=91.0 t_final=41.8 main tree: tree randomized rounding
+neos-1582420 def 1: optimal time=29.4 obj=91.0 t_final=11.6 main tree: other thread (tree)
+neos-1582420 def 2: optimal time=33.2 obj=91.0 t_final=10.5 main tree: tree rounding
+neos-1582420 d2 0: optimal time=29.9 obj=91.0 t_final=11.6 main tree: other thread (tree)
+neos-1582420 d2 1: optimal time=30.3 obj=91.0 t_final=11.0 main tree: other thread (tree)
+neos-1582420 d2 2: optimal time=40.0 obj=91.0 t_final=39.2 main tree: other thread (tree)
+neos-1582420 lp1 0: optimal time=29.6 obj=91.0 t_final=12.3 main tree: other thread (tree)
+neos-1582420 lp1 1: optimal time=30.6 obj=91.0 t_final=11.4 main tree: tree
+neos-1582420 lp1 2: optimal time=28.0 obj=91.0 t_final=9.9 main tree: tree randomized rounding
+neos-1582420 d2lp1 0: optimal time=40.0 obj=91.0 t_final=39.4 main tree: tree rounding
+neos-1582420 d2lp1 1: optimal time=29.5 obj=91.0 t_final=10.9 main tree: tree randomized rounding
+neos-1582420 d2lp1 2: optimal time=23.0 obj=91.0 t_final=22.5 main tree: tree randomized rounding
+neos-2978193-inde def 0: optimal time=47.9 obj=-2.388061686 t_final=0.0 main root: tree
+neos-2978193-inde def 1: optimal time=39.2 obj=-2.388061686 t_final=1.3 main root: randomized rounding
+neos-2978193-inde def 2: optimal time=40.2 obj=-2.388061686 t_final=0.0 main root: tree
+neos-2978193-inde d2 0: optimal time=32.3 obj=-2.388061686 t_final=0.0 main root: tree
+neos-2978193-inde d2 1: optimal time=24.2 obj=-2.388061686 t_final=1.1 main root: randomized rounding
+neos-2978193-inde d2 2: optimal time=28.5 obj=-2.388061686 t_final=0.0 main root: tree
+neos-2978193-inde lp1 0: optimal time=44.4 obj=-2.388061686 t_final=0.0 main root: tree
+neos-2978193-inde lp1 1: optimal time=29.9 obj=-2.388061686 t_final=1.2 main root: randomized rounding
+neos-2978193-inde lp1 2: optimal time=40.2 obj=-2.388061686 t_final=0.0 main root: tree
+neos-2978193-inde d2lp1 0: optimal time=32.1 obj=-2.388061686 t_final=0.0 main root: tree
+neos-2978193-inde d2lp1 1: optimal time=37.8 obj=-2.388061686 t_final=0.0 main root: tree
+neos-2978193-inde d2lp1 2: optimal time=42.3 obj=-2.388061686 t_final=0.0 main root: tree
+h80x6320d def 0: optimal time=22.3 obj=6382.09905 t_final=4.3 RINS(d1) > tree@295
+h80x6320d def 1: optimal time=20.1 obj=6382.09905 t_final=1.9 LP face(d1) > tree randomized rounding@24
+h80x6320d def 2: optimal time=21.8 obj=6382.09905 t_final=4.0 RINS(d1) > tree@295
+h80x6320d d2 0: optimal time=21.0 obj=6382.09905 t_final=2.1 LP face(d1) > feasibility pump@0
+h80x6320d d2 1: optimal time=21.8 obj=6382.09905 t_final=4.1 RINS(d1) > tree@295
+h80x6320d d2 2: optimal time=21.3 obj=6382.09905 t_final=2.3 LP face(d1) > feasibility pump@0
+h80x6320d lp1 0: optimal time=21.6 obj=6382.09905 t_final=2.1 LP face(d1) > feasibility pump@0
+h80x6320d lp1 1: optimal time=21.9 obj=6382.09905 t_final=2.4 LP face(d1) > feasibility pump@0
+h80x6320d lp1 2: optimal time=19.4 obj=6382.09905 t_final=1.9 LP face(d1) > tree randomized rounding@24
+h80x6320d d2lp1 0: optimal time=21.3 obj=6382.09905 t_final=2.1 LP face(d1) > feasibility pump@0
+h80x6320d d2lp1 1: optimal time=21.5 obj=6382.09905 t_final=2.2 LP face(d1) > feasibility pump@0
+h80x6320d d2lp1 2: optimal time=22.0 obj=6382.09905 t_final=3.7 RINS(d1) > tree@295
+qiu def 0: optimal time=19.4 obj=-132.87313694699992 t_final=15.3 main tree: other thread (tree)
+qiu def 1: time_limit time=60.0 obj=-132.87313723651096 t_final=13.2 main tree: tree rounding
+qiu def 2: optimal time=46.8 obj=-132.8731369469999 t_final=13.9 main tree: tree randomized rounding
+qiu d2 0: optimal time=18.7 obj=-132.87313694699992 t_final=12.3 main tree: other thread (tree)
+qiu d2 1: optimal time=19.0 obj=-132.87313694699995 t_final=13.4 main tree: tree randomized rounding
+qiu d2 2: optimal time=55.8 obj=-132.87313694699995 t_final=14.5 main tree: tree randomized rounding
+qiu lp1 0: time_limit time=60.0 obj=-132.87313714693403 t_final=12.4 main tree: tree randomized rounding
+qiu lp1 1: optimal time=52.8 obj=-132.8731369469999 t_final=18.1 main tree: other thread (tree)
+qiu lp1 2: optimal time=51.8 obj=-132.8731369469999 t_final=13.8 main tree: tree randomized rounding
+qiu d2lp1 0: optimal time=19.6 obj=-132.87313694699992 t_final=12.8 main tree: tree randomized rounding
+qiu d2lp1 1: optimal time=52.1 obj=-132.8731369469999 t_final=10.8 main tree: tree randomized rounding
+qiu d2lp1 2: optimal time=47.3 obj=-132.8731369469999 t_final=14.2 main tree: tree randomized rounding
+mc11 def 0: optimal time=25.3 obj=11689.0 t_final=21.3 main tree: tree RINS
+mc11 def 1: optimal time=19.5 obj=11689.0 t_final=17.4 main tree: tree randomized rounding
+mc11 def 2: optimal time=26.1 obj=11689.0 t_final=22.2 main tree: tree randomized rounding
+mc11 d2 0: optimal time=21.3 obj=11689.0 t_final=15.9 main tree: other thread (tree)
+mc11 d2 1: optimal time=26.7 obj=11689.0 t_final=20.1 main tree: tree DINS
+mc11 d2 2: optimal time=18.7 obj=11689.0 t_final=16.8 main tree: tree randomized rounding
+mc11 lp1 0: optimal time=23.9 obj=11689.0 t_final=20.2 main tree: other thread (tree)
+mc11 lp1 1: optimal time=19.4 obj=11689.0 t_final=17.3 main tree: other thread (tree)
+mc11 lp1 2: optimal time=28.2 obj=11689.0 t_final=22.2 main tree: tree randomized rounding
+mc11 d2lp1 0: optimal time=31.8 obj=11689.0 t_final=31.4 main tree: other thread (tree)
+mc11 d2lp1 1: optimal time=20.9 obj=11689.0 t_final=19.0 main tree: tree randomized rounding
+mc11 d2lp1 2: optimal time=25.1 obj=11689.0 t_final=22.1 main tree: tree randomized rounding
+supportcase26 def 0: time_limit time=60.0 obj=1806.4799868579087 t_final=54.6 main tree: tree rounding
+supportcase26 def 1: time_limit time=60.0 obj=1807.4934808804196 t_final=53.8 main tree: other thread (tree)
+supportcase26 def 2: time_limit time=60.0 obj=1848.8989032441214 t_final=57.8 main tree: other thread (tree)
+supportcase26 d2 0: time_limit time=60.0 obj=1802.2337756067302 t_final=59.5 main tree: tree randomized rounding
+supportcase26 d2 1: time_limit time=60.0 obj=1844.652691992899 t_final=57.4 main tree: tree proximity
+supportcase26 d2 2: time_limit time=60.0 obj=1797.987564355476 t_final=51.2 main tree: tree rounding
+supportcase26 lp1 0: time_limit time=60.0 obj=1802.2337587718869 t_final=56.4 main tree: tree proximity
+supportcase26 lp1 1: time_limit time=60.0 obj=1814.972404253721 t_final=57.6 main tree: tree proximity
+supportcase26 lp1 2: time_limit time=60.0 obj=1810.726198081973 t_final=57.3 main tree: other thread (tree)
+supportcase26 d2lp1 0: time_limit time=60.0 obj=1776.7564984585451 t_final=53.8 main tree: tree proximity
+supportcase26 d2lp1 1: time_limit time=60.0 obj=1768.2640851765705 t_final=57.7 main tree: tree
+supportcase26 d2lp1 2: time_limit time=60.0 obj=1776.7565080992656 t_final=53.8 tree proximity(d1) > tree diving@6
+neos-1456979 def 0: time_limit time=60.1 obj=189.0 t_final=47.9 main tree: tree randomized rounding
+neos-1456979 def 1: time_limit time=60.3 obj=196.0 t_final=57.1 main tree: other thread (tree)
+neos-1456979 def 2: time_limit time=60.1 obj=240.0 t_final=51.7 main tree: other thread (tree)
+neos-1456979 d2 0: time_limit time=60.1 obj=231.0 t_final=48.3 main tree: tree
+neos-1456979 d2 1: time_limit time=60.1 obj=None t_final=- -
+neos-1456979 d2 2: time_limit time=60.1 obj=263.0 t_final=56.8 main tree: other thread (tree)
+neos-1456979 lp1 0: time_limit time=60.1 obj=None t_final=- -
+neos-1456979 lp1 1: time_limit time=60.1 obj=None t_final=- -
+neos-1456979 lp1 2: time_limit time=60.1 obj=238.0 t_final=56.0 main tree: other thread (tree)
+neos-1456979 d2lp1 0: time_limit time=60.1 obj=215.0 t_final=52.0 main tree: other thread (tree)
+neos-1456979 d2lp1 1: time_limit time=60.1 obj=318.0 t_final=52.1 main tree: other thread (tree)
+neos-1456979 d2lp1 2: time_limit time=60.1 obj=234.0 t_final=49.8 main tree: other thread (tree)

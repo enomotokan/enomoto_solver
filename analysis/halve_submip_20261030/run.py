@@ -6,7 +6,10 @@ D = Path(__file__).resolve().parent
 WT = D.parents[1]
 C = WT / ".miplib_cache"
 CFGS = {
+    # 2026-10-31 (`analysis/cand_default_20261031.md`) から、"def" (環境変数なし) は下の "cand" と同じ形 (cand の 7 つの設定が既定)。
+    # それより前の計測の "def" は旧既定で、新しいビルドで旧既定を回すには "olddef" を使う
     "def": {},
+    "olddef": {"ENOMOTO_MIP_SUBMIP_HIGHS": "0", "ENOMOTO_MIP_SUBMIP_PC_INHERIT": "0", "ENOMOTO_T_MIP_SUBMIP_RELIABLE": "-1", "ENOMOTO_MIP_BG_CUTS_WAIT": "0", "ENOMOTO_MIP_SUBMIP_HIGHS_TRIM": "0", "ENOMOTO_T_MIP_RESTART_FIRST_FAC": "0", "ENOMOTO_MIP_BG_CUTS_PROOF_STOP": "0"},
     "halve": {"ENOMOTO_MIP_CUT_LP_HALVE": "1"},
     "hnt": {"ENOMOTO_MIP_SUBMIP_HIGHS": "-t"},
     "h1": {"ENOMOTO_MIP_SUBMIP_HIGHS": "1"},
@@ -28,6 +31,34 @@ CFGS = {
     "bgw": {"ENOMOTO_MIP_BG_CUTS_WAIT": "1"},
     "bgw05": {"ENOMOTO_MIP_BG_CUTS_WAIT": "1", "ENOMOTO_T_MIP_BG_CUTS_WAIT_FRAC": "0.05"},
     "hm3_cfl_hs_bgw": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_T_MIP_CUT_LP_CAP_MULT": "3", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1", "ENOMOTO_MIP_SUBMIP_HIGHS": "-s", "ENOMOTO_MIP_BG_CUTS_WAIT": "1"},
+    "hs_r1": {"ENOMOTO_MIP_SUBMIP_HIGHS": "-s", "ENOMOTO_T_MIP_SUBMIP_RELIABLE": "1"},
+    "hs_pi0": {"ENOMOTO_MIP_SUBMIP_HIGHS": "-s", "ENOMOTO_MIP_SUBMIP_PC_INHERIT": "1", "ENOMOTO_T_MIP_SUBMIP_RELIABLE": "0"},
+    "hs_pi1": {"ENOMOTO_MIP_SUBMIP_HIGHS": "-s", "ENOMOTO_MIP_SUBMIP_PC_INHERIT": "1", "ENOMOTO_T_MIP_SUBMIP_RELIABLE": "1"},
+    "hs_pi0_bgw": {"ENOMOTO_MIP_SUBMIP_HIGHS": "-s", "ENOMOTO_MIP_SUBMIP_PC_INHERIT": "1", "ENOMOTO_T_MIP_SUBMIP_RELIABLE": "0", "ENOMOTO_MIP_BG_CUTS_WAIT": "1"},
+    "hs_pi0_bgw_r": {"ENOMOTO_MIP_SUBMIP_HIGHS": "-s", "ENOMOTO_MIP_SUBMIP_PC_INHERIT": "1", "ENOMOTO_T_MIP_SUBMIP_RELIABLE": "0", "ENOMOTO_MIP_BG_CUTS_WAIT": "1", "ENOMOTO_MIP_SUBMIP_HIGHS_TRIM": "r"},
+    # 既定にする候補 (2026-10-31): hs_pi0_bgw_r + 初回の再スタートの閾値 1% + 裏のカットの証明で根のヒューリスティクスを止める
+    "cand": {"ENOMOTO_MIP_SUBMIP_HIGHS": "-s", "ENOMOTO_MIP_SUBMIP_PC_INHERIT": "1", "ENOMOTO_T_MIP_SUBMIP_RELIABLE": "0", "ENOMOTO_MIP_BG_CUTS_WAIT": "1", "ENOMOTO_MIP_SUBMIP_HIGHS_TRIM": "r", "ENOMOTO_T_MIP_RESTART_FIRST_FAC": "0.01", "ENOMOTO_MIP_BG_CUTS_PROOF_STOP": "1"},
+    # サブ MIP のノード上限 (多くは 500) を下げる (2026-11-01、新しい既定の上で)
+    "nm02": {"ENOMOTO_T_MIP_SUBMIP_NODES_MULT": "0.2"},
+    "nm01": {"ENOMOTO_T_MIP_SUBMIP_NODES_MULT": "0.1"},
+    # サブ MIP の無駄を削る試作 (2026-11-01、新しい既定の上で。analysis/rens_more_real・rens_depth3・rens_resume_20261101.md)
+    "real": {"ENOMOTO_MIP_RENS_MORE_NODES_REAL": "1"},
+    "d2lp1": {"ENOMOTO_MIP_RENS_MAX_DEPTH": "2", "ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH": "1"},
+    "trim3": {"ENOMOTO_MIP_RENS_MORE_NODES_REAL": "1", "ENOMOTO_MIP_RENS_RESUME": "1", "ENOMOTO_MIP_RENS_MAX_DEPTH": "2", "ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH": "1"},
+    # trim3 + 解なしのサブ MIP を止める (t20、analysis/submip_nosol_stop_20261101.md)
+    "trim3t20": {"ENOMOTO_MIP_RENS_MORE_NODES_REAL": "1", "ENOMOTO_MIP_RENS_RESUME": "1", "ENOMOTO_MIP_RENS_MAX_DEPTH": "2", "ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH": "1", "ENOMOTO_MIP_SUBMIP_NOSOL_STOP": "1", "ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES": "100", "ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC": "0.2"},
+    # trim3 の既定化 (2026-11-01、analysis/trim3_default_20261101.md) の後は "def" が trim3 を指す。それより前の既定 (cand) は "pretrim3"
+    "pretrim3": {"ENOMOTO_MIP_RENS_MORE_NODES_REAL": "0", "ENOMOTO_MIP_RENS_RESUME": "0", "ENOMOTO_MIP_RENS_MAX_DEPTH": "1000", "ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH": "1000"},
+    # RENS の固定の順を HiGHS と同じ lock の順にする (2026-11-01、trim3 の既定化の後。analysis/neos960392_20261101.md の 2 節)
+    "lock": {"ENOMOTO_MIP_DIVE_LOCK_ORDER": "1"},
+    "lock06": {"ENOMOTO_MIP_DIVE_LOCK_ORDER": "1", "ENOMOTO_T_MIP_NOINC_RENS_RATE": "0.6"},
+    "rhlock": {"ENOMOTO_MIP_DIVE_LOCK_ORDER": "1", "ENOMOTO_MIP_RENS_HIGHS": "1"},
+    # neos-960392 の対策 (2026-11-01、analysis/neos960392_cutstop_20261101.md・neos960392_nested_20261101.md)
+    "cs1": {"ENOMOTO_T_MIP_CUT_LP_WORK": "0.1", "ENOMOTO_T_MIP_CUT_LP_WORK_PREV": "5", "ENOMOTO_MIP_CUT_LP_CAP_STOP": "flat"},
+    "cs2": {"ENOMOTO_T_MIP_CUT_LP_WORK": "0.1", "ENOMOTO_T_MIP_CUT_LP_WORK_PREV": "5", "ENOMOTO_MIP_CUT_LP_CAP_STOP": "flat", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
+    "nesti": {"ENOMOTO_MIP_SUBMIP_NESTED": "i", "ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_MAX": "0.5", "ENOMOTO_T_MIP_SUBMIP_NESTED_NODES": "50"},
+    # cs2 の既定化 (2026-11-01、analysis/cs2_default_20261101.md) の後は "def" が cs2 を含む。それより前の既定は "precs2"
+    "precs2": {"ENOMOTO_T_MIP_CUT_LP_WORK": "0", "ENOMOTO_T_MIP_CUT_LP_WORK_PREV": "0", "ENOMOTO_MIP_CUT_LP_CAP_STOP": "0", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "0"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }

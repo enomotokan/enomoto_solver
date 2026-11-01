@@ -165,3 +165,189 @@ ENOMOTO の既定は今回の計測の 7〜9 回分。
 - HiGHS が解け、ENOMOTO の既定が一度も解けないのは mzzv42z だけ (HiGHS 59.0 秒、既定 0/8 回、試作のどれでも解けない)。
 - HiGHS が解け、既定が一部の回だけ解けたもの: neos-960392 (1/8)・physiciansched6-2 (1/8)・roll3000 (5/8)・h80x6320d・hypothyroid-k1・neos-911970 (7/8)・ns1116954 (7/9)。
 - ENOMOTO の既定だけが解けた (HiGHS は時間切れ) もの: mc11・pk1・markshare_4_0・mas76・noswot・nw04 (8/8)、eil33-2 (7/8)、neos5 (4/8)、qiu (3/8)。
+
+## 追記: サブ MIP の強分枝を減らす形と親の pseudocost の引き継ぎ (2026-10-31、20 か所で分担、`bench5.json`・`bench5_s0`〜`s19.jsonl`)
+
+- 新しい試作 (`2f5ab2e4`、既定では使わない):
+  - `ENOMOTO_T_MIP_SUBMIP_RELIABLE` = r: サブ MIP では観測が r 回に満たない候補だけを強分枝で評価する (親は 1〜5 回、`SUBMIP_HIGHS` の `s` は 0 回)。
+  - `ENOMOTO_MIP_SUBMIP_PC_INHERIT`: サブ MIP を親の pseudocost から始める (HiGHS の `pscostinit`)。ENOMOTO のサブ MIP は空の pseudocost から
+    始めるので、`s` (強分枝なし) では分枝の見積りが全体の平均だけになっていた。
+- 58 問 × 2 回 (回 4・5)、4 スレッド・60 秒。hs は `SUBMIP_HIGHS=-s`、r1 は閾値 1、pi0・pi1 は引き継ぎ + 閾値 0・1、bgw は `ENOMOTO_MIP_BG_CUTS_WAIT`。
+
+| 回 | 既定 | hs | hs_r1 | hs_pi0 | hs_pi1 | hs_pi0_bgw |
+|---|---|---|---|---|---|---|
+| 4 | 19.28 (39) | 19.51 (41) | 20.01 (39) | 19.07 (40) | 18.91 (41) | **18.98 (42)** |
+| 5 | 19.54 (40) | 19.47 (40) | 19.34 (42) | 20.09 (41) | 19.54 (40) | **19.51 (41)** |
+
+- 最適値の食い違い・crash は 0 件。時間の上限の超過は hs_pi0_bgw の neos-960392 (回 4、63.5 秒。裏のカットの待ちの分) の 1 回。
+- **hs_pi0_bgw**: 解けた数 +3・+1、SGM −1.6%・−0.2%。
+  - 解けた: neos-960392 (2 回とも、63.5・36 秒。1 回は上限超過)・physiciansched6-2 (回 4)・qiu (2 回とも)。解けなくなった: physiciansched6-2 (回 5) だけ。
+  - h80x6320d は 2 回とも速い (45・56 → 26・35 秒)。mc11 は既定並み (22・29 → 24・23 秒)。
+- **hs_pi0** (bgw なし): mc11 (回 4) と h80x6320d (回 5) を落とす。強分枝を 0 にしてサブ MIP が速く終わると、mc11 の調査どおり裏のカットが
+  途中で止められる損が出る。bgw を足すとこの損が消える。
+- **hs_r1**: 解けた数 ±0・+2 だが、mc11・noswot (回 4) を落とす。
+- **hs**: 解けた数 +2・±0、SGM +1.2%・−0.4%。前の計測 (bench3) と同じく得とも損とも言えない。
+- 判断: hs_pi0_bgw が今までで一番よい (負けている問題の neos-960392・physiciansched6-2 に効き、損は 1 回だけ)。ただし 2 回だけで、
+  bgw の待ちが時間の上限を超えうる。既定にする前に、回数を足すのと Mittelmann での確かめ、待ちを時間の上限の手前で打ち切る手当てが要る。
+
+## bench6: hs_pi0_bgw を 58 問であと 2 回 (回 6・7) と Mittelmann 186 問で確かめる (2026-10-31)
+
+- 分担は `bench6.json` (20 個、`262d4694` のコード、時間の上限の超過を直す前)。集計は `summ6.py` (bench5 の回 4・5 も含める)。
+  60 秒を超えて返った回は時間切れとして数える。
+
+| 範囲 | def (SGM / 解けた数) | hs_pi0_bgw | 比 |
+|---|---|---|---|
+| 58 問 回 4 | 19.28 / 39 | 18.96 / 41 | −1.6% |
+| 58 問 回 5 | 19.54 / 40 | 19.51 / 41 | −0.1% |
+| 58 問 回 6 | 18.38 / 41 | 18.06 / 44 | −1.7% |
+| 58 問 回 7 | 17.74 / 42 | 19.09 / 43 | +7.6% |
+| 58 問 4 回の合計 (232) | 18.73 / 162 | 18.90 / 169 | +0.9% |
+| Mittelmann 186 問 (1 回) | 44.85 / 45 | 45.02 / 44 | +0.4% |
+
+- 片方だけ解けた回:
+  - hs_pi0_bgw だけ: physiciansched6-2 (回 4・6・7・Mittelmann)、qiu (回 4・5・6)、neos-960392 (回 5)、timtab1 (回 6)、cbs-cta (Mittelmann)。
+  - def だけ: physiciansched6-2 (回 5)、n5-3・neos-1582420・neos-2978193-inde (Mittelmann)。
+  - neos-960392 は回 4・7 で hs_pi0_bgw が 63.5・63.2 秒で最適 (時間切れとして数えた)。これは `bgw_overrun_20261031.md` で直した超過。
+- 遅くなる問題は回をまたいで決まっていて、揺れではない。過去の計測の hs・hs_pi0 と並べると、原因の手当てが分かれる:
+  - `s` (サブ MIP で強分枝しない) で遅くなる: binkar10_1 (def 6〜8 秒 → hs 22〜26、hs_pi0_bgw 9〜11)、swath1 (23〜30 → 31〜54)、dcmulti (1 → 2〜3)、mik-250-20-75-4。
+  - 擬似コストの引き継ぎ (pi0) で遅くなる: neos17 (def 9〜15 秒、hs 12〜14 → hs_pi0・hs_pi0_bgw 16〜24)、pk1、qnet1・exp-1-500-5-5 (1〜3 秒ずつ)。
+  - 速くなる: h80x6320d (def 33〜60 → 23〜35)、qiu、misc07、nu25-pr12、mas76、physiciansched6-2。
+- 判断: 解けた数は 58 問で 4 回とも増える (計 +7) が、SGM は合計で +0.9%、Mittelmann でも解けた数 −1・SGM +0.4% で、既定にする根拠が足りない。
+  既定にはしない。時間の上限の超過の直し (サブ MIP の前処理の止め) は既定に入っている。
+- 次: neos17・pk1 で擬似コストの引き継ぎが遅くする理由 (引き継いだ値が分枝の向きを悪くするのか、信頼の閾値 0 が強分枝を減らしすぎるのか) と、
+  binkar10_1・swath1 で `s` が遅くする理由を見て、効く問題の側 (h80x6320d・qiu) を残せる形を探す。
+
+## bench7: 既定にする候補 cand を 58 問 2 回 (回 8・9) と Mittelmann 186 問で確かめる (2026-10-31)
+
+- cand = hs_pi0_bgw_r (`ENOMOTO_MIP_SUBMIP_HIGHS=-s ENOMOTO_MIP_SUBMIP_PC_INHERIT=1 ENOMOTO_T_MIP_SUBMIP_RELIABLE=0 ENOMOTO_MIP_BG_CUTS_WAIT=1 ENOMOTO_MIP_SUBMIP_HIGHS_TRIM=r`)
+  + `ENOMOTO_T_MIP_RESTART_FIRST_FAC=0.01` (`restart_thr_20261031.md`) + `ENOMOTO_MIP_BG_CUTS_PROOF_STOP=1` (`bg_proof_stop_20261031.md`)。
+- 分担は `bench7.json` (20 個、`fa5113ee` のコード)。集計は `summ7.py`、出力は `summ7/summ7.txt`。60 秒を超えて返った回は時間切れとして数える。
+
+| 範囲 | def (SGM / 解けた数) | cand | 比 |
+|---|---|---|---|
+| 58 問 回 8 | 19.09 / 43 | 17.97 / 43 | −5.9% |
+| 58 問 回 9 | 19.49 / 40 | 18.25 / 42 | −6.3% |
+| 58 問 2 回の合計 (116) | 19.29 / 83 | **18.11 / 85** | **−6.1%** |
+| Mittelmann 186 問 (1 回) | 46.04 / 44 | **44.72 / 49** | **−2.9%** |
+| Mittelmann の片方以上解けた 49 問 | 20.08 / 44 | 17.49 / 49 | −12.9% |
+
+- 片方だけ解けた回は 7 回で、**全部 cand だけ**: cbs-cta (4.8 秒)・neos-1171737・neos-957323・neos-960392 (Mittelmann)、h80x6320d (回 9)、physiciansched6-2 (回 9・Mittelmann)。
+  bench6 で def だけ解けた n5-3・neos-1582420・neos-2978193-inde は、今回は両方とも解けた (ただし cand が遅い、下)。
+- 差が 3 秒かつ 20% 以上: cand が速い 28 回、遅い 10 回。
+  - 速い: mc11 (3 回とも)・h80x6320d・qiu (回 8)・misc07・nu25-pr12・neos-911970・neos-3083819-nubu・pg・piperout-27・app1-1・enlight_hard・nursesched-sprint02・mas76 など。
+  - 遅い: n5-3 (26.8 → 54.9)・neos-1582420 (26.1 → 59.3)・neos-2978193-inde (33.1 → 50.2)・qiu (回 9、25.2 → 48.9)・eil33-2 (回 8)・neos-860300・neos5・ns1208400・pk1・neos17。
+    n5-3・neos-1582420・neos-2978193-inde は bench6 でも hs_pi0_bgw で遅かった (def だけ解けた) ので、揺れではなく形の差とみる。
+- 最適値の食い違い・crash はない (neos859080 は両方とも infeasible で、正しい)。
+- 時間の上限の超過: cand の rmatr200-p5 が 91.7 秒 (def は 60.1 秒)。最初の解が 60.03 秒で、上限の後にも何かが走っている。
+  ほかに cand の neos-4763324-toguru 63.0・rail507 61.3・unitcal_7 64.8 秒 (def と両方の cryptanalysiskb128n5obj16・sorrell3 も 61〜68 秒)。
+- 判断: 58 問・Mittelmann の両方で SGM が下がり、解けた数が増え (+2・+5)、def だけ解けた回がない。**既定にしてよい**。
+  ただし既定にする前に、rmatr200-p5 の 31 秒の超過を直す。遅くなる 3 問 (n5-3・neos-1582420・neos-2978193-inde) は既定にした後の課題として調べる。
+
+## bench8: サブ MIP のノード上限を下げる形 (nm02 = 100、nm01 = 50) を新しい既定と 58 問 2 回 (回 10・11) で比べる (2026-11-01)
+
+- def は新しい既定 (= bench7 の cand、`analysis/cand_default_20261031.md`)。nm02・nm01 は `ENOMOTO_T_MIP_SUBMIP_NODES_MULT=0.2`・`0.1` (全部のサブ MIP のノード上限の倍率)。
+- 分担は `bench8.json` (6 個、`6289ec03` のコード)。集計は `summ8.txt` (60 秒を超えた回・最適値の食い違い・crash は 0 件)。
+
+| 範囲 | def (SGM / 解けた数) | nm02 | nm01 |
+|---|---|---|---|
+| 回 10 | 18.32 / 42 | 18.79 / 42 | 18.45 / 43 |
+| 回 11 | 17.45 / 43 | 18.35 / 43 | 17.86 / 43 |
+| 2 回の合計 (116) | **17.88 / 85** | 18.57 / 85 (+3.9%) | 18.15 / 86 (+1.5%) |
+
+- 2 回とも向きが同じ差:
+  - 遅くなる: 10teams (5 → 28〜36 秒、最適解は根の被約費用のサブ MIP の 233 ノード目、`submip_where_20261101.md` の 4 節)、
+    h80x6320d (25〜33 → 44〜60 秒)、noswot、roll3000 (nm01)、swath1 (回 11)。
+  - 速くなる: neos-3083819-nubu (nm01 で 22〜30 → 11〜17 秒)、neos17、exp-1-500-5-5。
+- 判断: 一律にノード上限を下げるのは採らない。`submip_where_20261101.md` のとおり、無駄の大部分は「解を 1 つも見つけないサブ MIP」で、
+  成功するサブ MIP の改善は 233・320 ノード目にもある。
+
+## bench9: サブ MIP の無駄を削る試作 (real・d2lp1・trim3) を 58 問 2 回 (回 12・13) と Mittelmann 186 問 (回 103) で比べる (2026-11-01)
+
+- def は今の既定 (cand)。real = `ENOMOTO_MIP_RENS_MORE_NODES_REAL=1` (`rens_more_real_20261101.md`)、d2lp1 = `ENOMOTO_MIP_RENS_MAX_DEPTH=2 ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH=1`
+  (`rens_depth3_20261101.md`)、trim3 = real + d2lp1 + `ENOMOTO_MIP_RENS_RESUME=1` (`rens_resume_20261101.md`)。
+- 分担は `bench9.json` (30 個、`db2cb031` のコード。**前処理の誤った実行不能の判定の直し `fb1002d2` より前**)。集計は `summ9.py` (`B=<設定>`)、出力は `summ9.txt`。
+
+| 範囲 | def | real | d2lp1 | trim3 |
+|---|---|---|---|---|
+| 58 問 回 12 | 18.50 / 41 | 18.19 / 42 | 18.46 / 43 | 17.69 / 42 |
+| 58 問 回 13 | 18.65 / 42 | 17.65 / 42 | 17.87 / 42 | 17.62 / 44 |
+| 58 問 2 回 (116) | 18.57 / 83 | 17.91 / 84 (−3.5%) | 18.16 / 85 (−2.2%) | **17.66 / 86 (−4.9%)** |
+| Mittelmann 186 問 | 44.28 / 46 | 44.35 / 48 (+0.2%) | 44.49 / 45 (+0.5%) | **44.01 / 46 (−0.6%)** |
+
+- 片方だけ解けた回 (def に対して):
+  - real: 試作だけ neos-960392・neos5・physiciansched6-2 ×2、def だけ h80x6320d (回 13、55.4 秒)。
+  - d2lp1: 試作だけ neos5・physiciansched6-2・qiu、def だけ h80x6320d (回 13)・n5-3 (Mittelmann、58.0 秒)。
+  - trim3: 試作だけ neos-960392・physiciansched6-2 ×2・qiu、def だけ neos-1171448 (Mittelmann、46.2 秒)。
+- 最適値の食い違い・crash は 0 件 (1208 行)。h80x6320d の「最適」も全部 6382.09905 (前処理の誤りは表に出なかった)。
+- 時間の上限の超過: cryptanalysiskb128n5obj14 が **4 つの形とも 74〜82 秒** (def 74.1)。ほかは 61〜62 秒。
+- 判断: trim3 が 58 問・Mittelmann とも一番良い (58 問 −4.9%・解けた数 +3、Mittelmann −0.6%)。効きの大部分は real から来る。
+  ただしこの計測は前処理の直しの前のコードで、h80x6320d の速い回は誤った近道に乗っていた (`presolve_infeasible_20261101.md` の 1 節 6 項)。
+  既定にする前に、直しの入ったコードで def・trim3・trim3 + 解なしの打ち切り (t20、`submip_nosol_stop_20261101.md`) を確かめ直す。
+
+## bench10: 前処理の直し (fb1002d2) の入ったコードで、今の既定・trim3・trim3t20 を 58 問 2 回 (回 14・15) と Mittelmann 186 問 (回 104) で比べる (2026-11-01)
+
+- trim3 は bench9 と同じ。trim3t20 = trim3 + `ENOMOTO_MIP_SUBMIP_NOSOL_STOP=1 ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES=100 ENOMOTO_T_MIP_SUBMIP_NOSOL_TIME_FRAC=0.2`
+  (`submip_nosol_stop_20261101.md`)。分担は `bench10.json` (24 個、`01b82bd0` のコード)。集計は `summ10.py` (`B=<設定>`)、出力は `summ10.txt`。
+
+| 範囲 | def | trim3 | trim3t20 |
+|---|---|---|---|
+| 58 問 回 14 | 18.94 / 41 | 18.68 / 43 | 18.98 / 40 |
+| 58 問 回 15 | 17.85 / 44 | 18.12 / 44 | 18.26 / 41 |
+| 58 問 2 回 (116) | 18.39 / 85 | 18.40 / 87 (±0.0%) | 18.62 / 81 (+1.2%) |
+| Mittelmann 186 問 | 45.19 / 46 | 45.53 / 45 (+0.7%) | 45.16 / 46 (−0.1%) |
+
+- bench9 と合わせると (同じ trim3、前処理の直しの前後): 58 問 4 回 (232) で def 18.48 / 168 → trim3 18.03 / 173 (−2.4%・+5)、Mittelmann 2 回 (372) で 44.73 / 92 → 44.76 / 91。
+  bench9 の trim3 の得 (−4.9%) の一部は、前処理の誤りの近道 (h80x6320d) に乗っていた。
+- 片方だけ解けた回:
+  - trim3: 試作だけ n5-3 (Mittelmann)・neos-960392 (回 14)・pk1 (回 14)。def だけ neos-1171448 (Mittelmann、49.2 秒。bench9 でも trim3 だけ時間切れ)・
+    neos-3381206-awhea (Mittelmann、def 2.8 秒。trim3 は根の下界が 445.7 (def 452.25) で止まった回。bench9 の trim3 は 2.2 秒で解いており、根のカットの道の揺れとみる)。
+  - trim3t20: def だけ physiciansched6-2 ×2・neos-960392・neos5・ns1116954・neos-1171448。**解なしの打ち切り (t20) は physiciansched6-2 などの解を失う**。
+- 最適値の食い違い・crash は 0 件。60 秒超えは 61〜65 秒 (cryptanalysiskb128n5obj16 が 63〜65 秒)。
+- 判断:
+  - trim3t20 は採らない (58 問で解けた数 −4)。
+  - trim3 は、前処理の直しの後では 58 問 2 回で差がなく、bench9 と合わせて 58 問 −2.4%・+5、Mittelmann ±0。損の小さい「無駄を削る」変更として既定にしてよいが、得は小さい。
+  - neos-1171448 は trim3 で 2 回とも時間切れ (def は 46・49 秒) なので、既定にするなら RESUME の関与をログで確かめる。
+
+## bench11: RENS の固定を lock の順にする形 (lock・lock06・rhlock) を 58 問 2 回 (回 16・17) と Mittelmann 186 問 (回 105) で比べる (2026-11-01)
+
+- def は trim3 を既定にした後の既定 (`ee771746`)。lock = `ENOMOTO_MIP_DIVE_LOCK_ORDER=1`、lock06 = lock + `ENOMOTO_T_MIP_NOINC_RENS_RATE=0.6`、
+  rhlock = lock + `ENOMOTO_MIP_RENS_HIGHS=1` (外側の根の RENS を常にダイビング式・固定率 0.6・やり直しありにする)。
+  分担は `bench11.json` (30 個)。集計は `summ11.py` (`B=<設定>`)、出力は `summ11.txt`。
+
+| 範囲 | def | lock | lock06 | rhlock |
+|---|---|---|---|---|
+| 58 問 回 16 | 17.98 / 42 | 17.98 / 42 | 18.77 / 42 | 18.95 / 43 |
+| 58 問 回 17 | 18.37 / 40 | 18.62 / 42 | 18.56 / 42 | 18.69 / 41 |
+| 58 問 2 回 (116) | **18.18 / 82** | 18.30 / 84 (+0.7%) | 18.66 / 84 (+2.7%) | 18.82 / 84 (+3.5%) |
+| Mittelmann 186 問 | **45.15 / 47** | 45.29 / 46 (+0.3%) | 45.21 / 46 (+0.1%) | 45.73 / 45 (+1.3%) |
+
+- neos-960392 (3 回): def 0/3、lock 1/3 (57 秒)、lock06 1/3 (59 秒)、rhlock 1/3 (52 秒)。どれも毎回は解けない。
+- physiciansched6-2 (3 回): def 3/3 (25〜28 秒)、lock 3/3、lock06 2/3、rhlock 1/3。rhlock・lock06 は physiciansched6-2・neos5 (Mittelmann) を失う。
+- ほかの片方だけ解けた回: lock は neos-1171448 (Mittelmann) を失い neos5 (回 17) を得る。rhlock は qap10・roll3000・neos5 (回 17) を得て、neos-1171448・neos5 (Mittelmann) を失う。
+- 最適値の食い違い・crash は 0 件。60 秒超えは 61〜65 秒の小さなものだけ。
+- 判断: どの形も SGM は悪くなる (+0.3〜3.5%)。解けた数は 58 問で +2 だが Mittelmann で −1〜−2。neos-960392 も 3 回中 1 回で、毎回は解けない。
+  **lock の順は既定にしない**。neos-960392 の手当ては、近傍の中で −238 を見つける力 (サブ MIP の中のサブ MIP) の側を見る (`neos960392_20261101.md` の 2.5 節)。
+
+## bench12: neos-960392 の対策 (cs1・cs2・nesti) を 58 問 2 回 (回 18・19) と Mittelmann 186 問 (回 106) で比べる (2026-11-01)
+
+- def は今の既定 (trim3 入り、`b2c41506`)。cs1 = `ENOMOTO_T_MIP_CUT_LP_WORK=0.1 ENOMOTO_T_MIP_CUT_LP_WORK_PREV=5 ENOMOTO_MIP_CUT_LP_CAP_STOP=flat`
+  (根のカットの 1 回の LP の上限を反復で決め、根の LP から動いていないループでは 1 回外したら止める)、cs2 = cs1 + `ENOMOTO_MIP_CUT_CAP_FROM_LOOP=1`
+  (根のカットの時間の上限をループの始めから数える)、nesti = `ENOMOTO_MIP_SUBMIP_NESTED=i ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_MAX=0.5 ENOMOTO_T_MIP_SUBMIP_NESTED_NODES=50`
+  (`neos960392_cutstop_20261101.md`・`neos960392_nested_20261101.md`)。分担は `bench12.json` (30 個)。集計は `summ12.py` (`B=<設定>`)、出力は `summ12.txt`。
+
+| 範囲 | def | cs1 | cs2 | nesti |
+|---|---|---|---|---|
+| 58 問 回 18 | 17.97 / 43 | 18.29 / 42 | 17.61 / 44 | 18.19 / 42 |
+| 58 問 回 19 | 18.92 / 40 | 18.62 / 40 | 17.99 / 43 | 19.17 / 42 |
+| 58 問 2 回 (116) | 18.44 / 83 | 18.46 / 82 (+0.1%) | **17.80 / 87 (−3.5%)** | 18.68 / 84 (+1.3%) |
+| Mittelmann 186 問 | 44.64 / 46 | 44.35 / 46 (−0.6%) | **44.38 / 46 (−0.6%)** | 44.68 / 44 (+0.1%) |
+
+- neos-960392 (3 回): def 0/3、cs1 2/3、**cs2 3/3 (25〜40 秒)**、nesti 1/3。
+- physiciansched6-2 (3 回): def 1/3、cs1 0/3、cs2 2/3、nesti 0/3。h80x6320d・10teams はどの形も def と同じくらい。
+- 片方だけ解けた回:
+  - cs2: 試作だけ neos-960392 ×3・physiciansched6-2・drayage-25-23・neos5 (Mittelmann)。def だけ neos-1171448 (Mittelmann、47.7 秒)・neos-1171737 (Mittelmann、38.3 秒)。
+  - cs1: qiu を 2 回とも失う (def 20・27 秒)、physiciansched6-2・roll3000・neos-1171737 も失う。
+  - nesti: neos-1171448・neos-1171737・neos5・physiciansched6-2 を失い、得は neos-960392・drayage-25-23・timtab1 の 1 回ずつ。
+- 最適値の食い違い・crash は 0 件。60 秒超えは 61〜62 秒の小さなものだけ。
+- 判断: **cs2 を既定にする候補**。58 問 −3.5%・解けた数 +4、Mittelmann −0.6%・解けた数 ±0、neos-960392 は 3/3。cs1 (時間の上限を求解の開始から数えたまま) は qiu を失うので採らない。nesti は採らない。
+  ただし 1 回の計測なので、neos-1171448・neos-1171737 の損は既定にする前か後に確かめる。
