@@ -3888,6 +3888,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     };
                     if fj_p3 {
                         if let Some((q, post, sc)) = super::with_presolve_deadline(fj_deadline, || super::fj_p3_problem(&pc)) {
+                            // 前処理の間に求解の期限を過ぎていれば FJ を始めない (FJ の初期化 (`reset_moves`、全列) と最初の確認までの手は
+                            // 止めの合図を見ず、遅い機械で 0.5 秒ほど主の join を待たせていた。期限の後に見つかる解は時間内の解ではない)
+                            if super::past_presolve_deadline(fj_deadline) {
+                                return None;
+                            }
                             let map = |x: Vec<f64>| super::fj_p3_solution(x, &post, &sc);
                             let fb = |q2: &super::problem::MipProblem, lo: &[f64], up: &[f64]| {
                                 crate::set_fj_p3_force(false);

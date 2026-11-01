@@ -1910,6 +1910,11 @@ pub(super) fn presolve_stop() -> bool {
     (crate::cancel::halted() || PRESOLVE_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d)) && env_str!("ENOMOTO_MIP_NO_PRESOLVE_STOP").is_none()
 }
 
+/// `deadline` を過ぎたか ([`with_presolve_deadline`] と同じく `ENOMOTO_MIP_NO_FJ_P3_DEADLINE` なら常に偽)。
+pub(super) fn past_presolve_deadline(deadline: Option<std::time::Instant>) -> bool {
+    env_str!("ENOMOTO_MIP_NO_FJ_P3_DEADLINE").is_none() && deadline.is_some_and(|d| std::time::Instant::now() >= d)
+}
+
 /// このスレッドの前処理の期限 ([`presolve_stop`]) を `deadline` にして `f` を実行し、元に戻す。
 /// [`solve_problem_inner`] を通らずに前処理 ([`presolve_mip`]) を回す別スレッド (FJ・Local-MIP のスレッドの [`fj_p3_problem`]) が、
 /// 外側の求解の期限を過ぎたらプロービングなどを打ち切るのに使う。FJ のスレッドは `std::thread::spawn` で作るので期限が付いておらず、
