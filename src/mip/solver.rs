@@ -400,6 +400,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_node_mult: f64,
     /// 直近の (旧来の) RENS のサブ MIP がノード上限で止まったか。
     pub(super) rens_node_limited: bool,
+    /// 直近に主のスレッドで解いたサブ MIP が、ノード上限まで進んだか (停滞・成果連動の打ち切りでなく。[`rens_more_nodes_real`])
+    pub(super) submip_full_nodes: bool,
+    /// 別スレッドに出した直近の根の RENS のサブ MIP のノード上限 ([`rens_more_nodes_real`])
+    pub(super) rens_spawn_node_limit: u64,
     /// RENS・RINS の固定を目標の固定率で止める (`ENOMOTO_MIP_FIX_CAP` と同じ) のを一時的に強制する
     /// (根の広い近傍のサブ MIP (`ENOMOTO_MIP_ROOT_WIDE_SUBMIP`) の広い近傍のやり直しの間だけ真)。
     pub(super) force_fix_cap: bool,
@@ -1754,6 +1758,14 @@ pub(crate) fn submip_outcome_stop() -> bool {
     env_str!("ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP").is_none()
 }
 
+/// `ENOMOTO_MIP_RENS_MORE_NODES_REAL` (試作、既定では使わない): RENS のサブ MIP のノード上限を 4 倍にしたやり直し (`RENS (more nodes)`) を、
+/// RENS のサブ MIP が本当にノード上限まで進んだときだけ行う。停滞 (`ENOMOTO_T_MIP_SUBMIP_STALL`)・成果連動 ([`submip_outcome_stop`]) の
+/// 打ち切りも状態は `NodeLimit` で返るが、上限を 4 倍にしても同じノードで同じように止まり、同じ解を返す (n5-3 の cand では外側の根で
+/// 55 ノード → 55 ノード・10.8 秒、深さ 1 のサブ MIP の中で 189 ノード → 189 ノード・3.3 秒。analysis/cand_slow_n5-3_20261031.md)
+pub(crate) fn rens_more_nodes_real() -> bool {
+    env_str!("ENOMOTO_MIP_RENS_MORE_NODES_REAL").is_some()
+}
+
 /// 根のサブ MIP と外側の求解の間で共有する情報 ([`submip_outcome_stop`])。
 pub(crate) struct SubmipCtl {
     /// 外側の刈り込みの上限 (`prune_limit`、f64 のビット。なければ +inf)。サブ MIP の打ち切り値に使う
@@ -2058,6 +2070,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         noinc_rens_done: false,
         submip_node_mult: 1.0,
         rens_node_limited: false,
+        submip_full_nodes: false,
+        rens_spawn_node_limit: 0,
         force_fix_cap: false,
         parallel_submips: false,
         pending_submips: std::collections::VecDeque::new(),
@@ -11197,6 +11211,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let presolve = env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none();
         let is_rens = std::mem::take(&mut self.submip_is_rens);
+        if is_rens {
+            self.rens_spawn_node_limit = params.node_limit;
+        }
         if self.params.verbose {
             let nfree = (0..sub.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();
             eprintln!("MIP:   parallel sub-MIP started ({}): {nfree} free columns of {}", self.heur_label, sub.n);
@@ -11298,7 +11315,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 根の RENS がノード上限で止まったら、ノード上限を増やしてやり直す判断に使う (逐次のときは rens が立てる。
                 // 並列モードでは結果をここで受け取るので、ここで立てないとやり直しが行われない: binkar10_1 で 4 スレッドが
                 // 6754.85 を見つけられず、木が 1 スレッドの 10 倍に増えていた)
-                if is_rens && r.status == MipStatus::NodeLimit && env_str!("ENOMOTO_MIP_NO_PARALLEL_RENS_RETRY").is_none() {
+                if is_rens && r.status == MipStatus::NodeLimit && env_str!("ENOMOTO_MIP_NO_PARALLEL_RENS_RETRY").is_none() && (!rens_more_nodes_real() || r.nodes >= self.rens_spawn_node_limit) {
                     self.rens_node_limited = true;
                 }
                 if self.params.verbose {

@@ -1600,7 +1600,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let c = std::sync::Arc::new(super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol));
             super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(c));
         }
+        let node_limit = params.node_limit;
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        self.submip_full_nodes = r.nodes >= node_limit;
         super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = None);
         if p3 {
             crate::set_fj_p3_force(false);
@@ -1742,6 +1744,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `TRIM=r` は全部の文字を抜くのと同じ。`ENOMOTO_T_MIP_SUBMIP_RELIABLE`・`ENOMOTO_MIP_SUBMIP_PC_INHERIT` は文字ではないので変わらない
     /// (analysis/restart_letters_20261031.md)
     ///
+    /// `ENOMOTO_MIP_SUBMIP_HIGHS_DEEP` (試作、既定では使わない): 深さ 2 以上のサブ MIP (サブ MIP の中で作るもの) で使う文字。書き方は
+    /// `_RESTART` と同じ (`-c` なら `c` だけ抜く)。`TRIM=d` は全部の文字を抜くのと同じ。n5-3 の cand では、深さ 1 のサブ MIP の中の
+    /// RENS (深さ 2) も根のカットを 25 ラウンド回し、1 本 2 秒かかっていた (analysis/cand_slow_n5-3_20261031.md)
+    ///
     /// 返すのは、これから作るサブ MIP で抜く文字の印 ([`super::submip_hs_bit`] の和。今のスレッドの印も含む)
     pub(super) fn hs_drop(&self) -> u16 {
         let inherited = SUBMIP_HS_DROP.with(|f| f.get());
@@ -1751,6 +1757,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let all = !v.contains('r') && !v.contains('d');
             if ((all || v.contains('r')) && restart_root) || ((all || v.contains('d')) && SUBMIP_DEPTH.with(|d| d.get()) >= 1) {
                 m = u16::MAX;
+            }
+        }
+        if SUBMIP_DEPTH.with(|d| d.get()) >= 1 {
+            if let Some(v) = env_str!("ENOMOTO_MIP_SUBMIP_HIGHS_DEEP") {
+                m |= match v.strip_prefix('-') {
+                    Some(d) => super::submip_hs_mask(d),
+                    None => !super::submip_hs_mask(v),
+                };
             }
         }
         if restart_root {
@@ -2321,7 +2335,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.submip_fix_rate = Some(fr);
             let r = self.solve_submip_problem(sub, 500, None);
             self.submip_is_rens = false;
-            self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _)));
+            self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _))) && (!super::solver::rens_more_nodes_real() || self.submip_full_nodes);
             return r.is_some_and(|r| r.1);
         }
         let mut sub = p.clone();
@@ -2330,7 +2344,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.submip_is_rens = true;
         let r = self.solve_submip_problem(sub, 500, None);
         self.submip_is_rens = false;
-        self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _)));
+        // `ENOMOTO_MIP_RENS_MORE_NODES_REAL`: 停滞・成果連動の打ち切りで止まったサブ MIP はやり直さない ([`super::solver::rens_more_nodes_real`])
+        self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _))) && (!super::solver::rens_more_nodes_real() || self.submip_full_nodes);
         r.is_some_and(|r| r.1)
     }
 
