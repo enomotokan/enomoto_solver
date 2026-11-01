@@ -4072,6 +4072,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return self.finish(st, f64::NEG_INFINITY);
             }
             LpStatus::TimeLimit => {
+                if self.params.verbose {
+                    eprintln!("MIP: root LP stopped at the time limit ({:.2}s, {:.2}s past the deadline)", self.start.elapsed().as_secs_f64(), self.deadline.map_or(0.0, |d| Instant::now().saturating_duration_since(d).as_secs_f64()));
+                }
                 self.join_fj_thread();
                 return self.finish(MipStatus::TimeLimit, self.root_fail_bound());
             }
@@ -11850,7 +11853,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn join_fj_thread(&mut self) {
         if let Some((h, stop)) = self.fj_thread.take() {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let tj = Instant::now();
             let r = h.join();
+            // 待ちが長いときだけ出す (時間の上限の超過の切り分け、analysis/overrun_crypt_20261101.md)
+            if self.params.verbose && tj.elapsed().as_secs_f64() >= 0.05 {
+                eprintln!("MIP: FJ thread joined {:.2}s after the stop signal ({:.2}s)", tj.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
+            }
             // 受け渡し箱に残った解 (FJ のスレッドの Local-MIP) を先に受け取る
             self.poll_lmip_thread();
             if let Ok(Some(x)) = r {
