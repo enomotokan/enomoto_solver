@@ -12,6 +12,9 @@ L = D / "logs"
 PROBS = ["drayage-100-23", "physiciansched6-2", "mas76", "blp-ar98", "dcmulti",  # 深さ 2 の RENS が最終解を出した 5 問
          "n5-3", "neos-1582420", "neos-2978193-inde",  # 損の問題
          "h80x6320d", "qiu", "mc11"]  # 得の問題
+# 追加の 2 問 (python run.py 3 def,d2,lp1,d2lp1 supportcase26,neos-1456979): 前回の 58 問で深さ 2 の RENS (LP before cuts) の
+# 16.4 秒のうち 14.8 秒が supportcase26、深さ 3 の RENS の 4.4 秒のうち 3.3 秒が neos-1456979 (analysis/submip_where_20261101/logs)
+EXTRA = ["supportcase26", "neos-1456979"]
 CFGS = {
     "def": {},
     "d2": {"ENOMOTO_MIP_RENS_MAX_DEPTH": "2"},

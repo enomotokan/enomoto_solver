@@ -12,7 +12,7 @@ from pathlib import Path
 
 D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D))
-from run import PROBS, CFGS
+from run import PROBS, CFGS, EXTRA
 
 KV = re.compile(r"(\w+)=(\[[^\]]*\]|\S+)")
 
@@ -119,7 +119,9 @@ def main():
     print("| 問題 | 形 | 秒 | T | 目的値 (3 回) | 最終解の時刻 | sub | rh | rh+ | d2 RENS 本/秒 | d3 本/秒 | lpbc 本/秒 |")
     print("|---|---|---|---|---|---|---|---|---|---|---|---|")
     tot = defaultdict(lambda: defaultdict(float))
-    for p in PROBS:
+    for p in PROBS + EXTRA:
+        if p in EXTRA and p == EXTRA[0]:
+            print('| (追加の 2 問。下の 11 問の和には入れない) |||||||||||')
         for c in cfgs:
             rs = [r for _, r in sorted(runs.get((p, c), []))]
             if not rs:
@@ -129,6 +131,8 @@ def main():
             objs = "/".join("-" if r["obj"] is None else f"{r['obj']:.6g}" for r in rs)
             print(f"| {p} | {c} | {fmt(m('time'))} | {nT} | {objs} | {fmt(m('t_final'))} | {fmt(m('sub_secs'))} | {fmt(m('rooth0'), 2)} | {fmt(m('rooth'), 2)} | "
                   f"{m('d2rens_n'):.1f}/{m('d2rens_s'):.1f} | {m('d3rens_n'):.1f}/{m('d3rens_s'):.2f} | {m('d2lpbc_n'):.1f}/{m('d2lpbc_s'):.2f} |")
+            if p in EXTRA:
+                continue
             for k in ("time", "sub_secs", "rooth0", "rooth", "d3rens_n", "d3rens_s", "d3rens_sol", "d2lpbc_n", "d2lpbc_s", "d2lpbc_acc", "d2rens_n", "d2rens_s"):
                 tot[c][k] += m(k) or 0.0
     print()
@@ -141,7 +145,7 @@ def main():
               f"{t['d3rens_n']:.1f}/{t['d3rens_s']:.2f}/{t['d3rens_sol']:.1f} | {t['d2lpbc_n']:.1f}/{t['d2lpbc_s']:.2f}/{t['d2lpbc_acc']:.1f} |")
     print()
     print("# 回ごとの最終解の出どころ (最終の目的値を外側が最初に持った事象。入れ子は > でたどる、@ は葉のノード)")
-    for p in PROBS:
+    for p in PROBS + EXTRA:
         for c in cfgs:
             for k, r in sorted(runs.get((p, c), [])):
                 print(f"{p} {c} {k}: {r['status']} time={fmt(r['time'])} obj={r['obj']} t_final={fmt(r['t_final'])} {r['final']}")
