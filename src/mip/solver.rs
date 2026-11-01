@@ -2066,6 +2066,9 @@ pub(super) struct CutJob {
 /// 写しの LP の初めの値から決まる。退化の強い physiciansched6-2 では、主の最適基底から始めても写しの根の LP に 11030 反復・5.7 秒
 /// かかり、裏のカットの 1 ラウンド目が出るのは始めてから 6〜7 秒後になる。根のヒューリスティクスが 17〜18 秒で終わる回は、その前に
 /// 「0 ラウンド = 停滞」として止められ、根の下界が 49224 のまま (最適値 49324) 木に入って時間切れになる (analysis/phys6_20261101.md の 1 節)
+/// ただし mc11 (根の LP 0.03〜0.05 秒) では、写しが主と同じ頂点から始まると裏のカットの道が変わり、根の下界が 11666〜11683 から
+/// 11527 に落ちて 4 回とも時間切れになる (既定は 4 回とも最適)。`lpw` は根の LP が重い問題 (根の LP の時間 `root_lp_secs` が
+/// `ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS` (既定 1 秒) 以上) だけで渡す
 pub(crate) fn bg_cuts_basis_x_on() -> bool {
     env_str!("ENOMOTO_MIP_BG_CUTS_BASIS_X").is_some()
 }
@@ -4306,7 +4309,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 写しの根の LP は基底なしで解き直しになり、uccase12 (88600 行) では 38 秒たっても終わらず、主がその終わりを
                 // 待って 23〜27 秒止まっていた (LP は止めの合図を見ない)
                 let bg_basis = if env_str!("ENOMOTO_MIP_NO_BG_CUTS_BASIS").is_none() { Some(self.lp.basis()) } else { None };
-                let bg_x = if bg_basis.is_some() && bg_cuts_basis_x_on() { self.lp.basis_cols().map(|c| (c, self.lp.col_values())) } else { None };
+                // `lpw` なら、根の LP (カットの前) を解くのに `ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS` (既定 1 秒) 以上かかった問題だけ
+                let bx = bg_cuts_basis_x_on() && (env_str!("ENOMOTO_MIP_BG_CUTS_BASIS_X") != Some("lpw") || self.root_lp_secs >= tunable!("ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS", 1.0, f64));
+                if bg_cuts_basis_x_on() && self.params.verbose {
+                    eprintln!("MIP: background cuts: basis with the column values {} (root LP {:.2}s)", if bx { "passed" } else { "not passed" }, self.root_lp_secs);
+                }
+                let bg_x = if bg_basis.is_some() && bx { self.lp.basis_cols().map(|c| (c, self.lp.col_values())) } else { None };
                 // 診断 (`ENOMOTO_MIP_BG_CUTS_LOG`): 主の LP の列の境界と大域的な境界 (写しの LP の境界) の食い違い
                 if env_str!("ENOMOTO_MIP_BG_CUTS_LOG").is_some() {
                     let (mut tighter, mut looser, mut moved_basic, mut moved_nb) = (0usize, 0usize, 0usize, 0usize);

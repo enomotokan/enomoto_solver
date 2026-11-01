@@ -22,6 +22,8 @@ for f in sorted(D.glob("logs/physiciansched6-2_*.log"), key=lambda f: (f.stem.rs
     first = f"{float(inc[0][0]):.0f} {float(inc[0][1]):.1f} {inc[0][2]}" if inc else "-"
     m = re.search(r"cut loop done: .* -> ([\d.e]+)", s)
     main = f"{float(m.group(1)):.0f}" if m else "-"
+    m = re.search(r"cut selection probe \(.*\) -> (\w+)", s)
+    main = f"{main} ({m.group(1) if m else '?'})"
     m = re.search(r"background cuts: waited ([\d.]+)s for progress \(cap ([\d.]+)s, (\w+)\), (\d+) rounds", s)
     wait = f"{m.group(1)}/{m.group(2)} {m.group(3)} {m.group(4)}" if m else ("not waiting" if "background cuts: not waiting" in s else "-")
     m = re.search(r"background cuts: rounds so far \[([^\]]*)\]", s)
@@ -46,7 +48,7 @@ for f in sorted(D.glob("logs/physiciansched6-2_*.log"), key=lambda f: (f.stem.rs
     fin = f"{res.get('objective') or 0:.0f}/{res.get('bound') or 0:.0f}" if st == "T" else ""
     closed = "閉" if "closed the gap to the prune limit" in s else ""
     rows.append((cfg, rep, st, first, opt, main, wait, rs, rep_, closed, rst_s, tree, tlb, fin))
-hdr = ("設定", "回", "結果", "最初の解", "49324 (秒 出どころ)", "主カット後", "裏の待ち (秒/上限 理由 ラウンド)", "裏の各ラウンド (値@秒)", "置き換え後", "根閉", "再スタート固定", "木の開始", "木の下界", "最後 (解/下界)")
+hdr = ("設定", "回", "結果", "最初の解", "49324 (秒 出どころ)", "主カット後 (選択)", "裏の待ち (秒/上限 理由 ラウンド)", "裏の各ラウンド (値@秒)", "置き換え後", "根閉", "再スタート固定", "木の開始", "木の下界", "最後 (解/下界)")
 out = ["| " + " | ".join(hdr) + " |", "|" + "---|" * len(hdr)]
 out += ["| " + " | ".join(r) + " |" for r in rows]
 txt = "\n".join(out)
