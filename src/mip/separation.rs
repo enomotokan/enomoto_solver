@@ -1245,6 +1245,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
+            // 診断のログ (振る舞いは変えない): 根のカットの時間の上限の判定に使う時計 (このスレッドの CPU 時間) と上限。
+            // neos-960392 では 2 ラウンド目の後の判定が 6.0 秒の上限の際にあり、3 ラウンド目を回すかどうかが回ごとに変わって、
+            // 根の RENS の出発点の頂点 (最適値を出すか) を分けていた (analysis/neos960392_20261101.md の 1 節)
+            if self.params.verbose && !self.params.submip && job.is_none() && round > 0 {
+                eprintln!(
+                    "MIP: cut round {round}: root cut time cap check: clock {:.3}s of cap {time_cap:.2}s (min rounds {min_rounds}){}",
+                    now - cap_base,
+                    if now - cap_base > time_cap && round >= min_rounds { " -> stop" } else { "" }
+                );
+            }
             if self.time_up() || (now - cap_base > time_cap && round >= min_rounds) || (phase2 && now - t_loop0 > phase2_deadline && !heavy) || stopped(&job) {
                 break;
             }
