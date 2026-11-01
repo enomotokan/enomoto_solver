@@ -3887,6 +3887,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         lr.best
                     };
                     if fj_p3 {
+                        // 求解の期限を過ぎてから始まったなら (主の前処理が期限を過ぎた) 何もしない
+                        if super::past_presolve_deadline(fj_deadline) {
+                            return None;
+                        }
                         if let Some((q, post, sc)) = super::with_presolve_deadline(fj_deadline, || super::fj_p3_problem(&pc)) {
                             // 前処理の間に求解の期限を過ぎていれば FJ を始めない (FJ の初期化 (`reset_moves`、全列) と最初の確認までの手は
                             // 止めの合図を見ず、遅い機械で 0.5 秒ほど主の join を待たせていた。期限の後に見つかる解は時間内の解ではない)

@@ -1066,7 +1066,13 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
             }
-            let prob = if !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() { add_symmetry_rows(prob, params.verbose, &mut postsolve) } else { prob };
+            // 前処理が時間の上限を過ぎていれば ([`presolve_stop`]) 対称性を探さない (止めを見ず、遅い機械で 3 秒ほどかかっていた:
+            // cryptanalysiskb128n5obj14、analysis/overrun_crypt_20261101.md。残り時間がないので求解はすぐ時間切れで終わる)
+            let sym_late = presolve_stop();
+            if sym_late && params.verbose {
+                eprintln!("MIP: symmetry: skipped (the presolve passed the time limit, {:.2}s)", t_pre.elapsed().as_secs_f64());
+            }
+            let prob = if !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() && !sym_late { add_symmetry_rows(prob, params.verbose, &mut postsolve) } else { prob };
             if !params.submip && params.restarts > 0 {
                 sym_of_reverify(&prob, params.verbose);
             }
