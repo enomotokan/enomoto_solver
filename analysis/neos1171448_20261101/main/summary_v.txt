@@ -1,0 +1,542 @@
+def_r1    opt   50.2s obj  -309.00 lb  -309.00 nodes  1270 | rootLP 1.16s cuts~ 5.08 heur 14.15 (inc Some(-307.5)) tree 19.99 restarts 0 | first 2.33 | -309 at 47.37s [other thread: tree crossover]
+     inc   2.33s   -284.06 [Local-MIP]
+     inc   3.92s   -307.50 [Local-MIP]
+     inc  47.37s   -308.50 [other thread: tree mutation]
+     inc  47.37s   -309.00 [other thread: tree crossover]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 57, objective Some(-258.0), 2.77s
+     MIP:   RINS (HiGHS fill): fixing rate 0.80 from agreeing columns, 0.80 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2953 free columns of 4914, status NodeLimit, nodes 119, objective Some(-239.00000060200003), 3.09s
+     MIP: root heuristic RINS: none (3.14s)
+     MIP:   sub-MIP: 2926 free columns of 4914, status TimeLimit, nodes 80, objective Some(-268.00000095800004), 1.40s
+trim3_r1  opt   46.1s obj  -309.00 lb  -309.00 nodes  1217 | rootLP 1.26s cuts~ 6.54 heur 14.60 (inc Some(-308.00000175799994)) tree 19.96 restarts 0 | first 2.42 | -309 at 43.29s [other thread: tree mutation]
+     inc   2.42s   -295.99 [Local-MIP]
+     inc   4.08s   -297.71 [Local-MIP]
+     inc   5.56s   -297.74 [Local-MIP]
+     inc  13.38s   -307.00 [RENS]
+     inc  14.60s   -308.00 [RINS]
+     inc  43.29s   -309.00 [other thread: tree mutation]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.05s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 45.73s cut to the remaining 45.70s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 45.70s cut to the remaining 45.68s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.16s
+     MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at 57 of 500 nodes
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 57, objective Some(-307.0000000008001), 0.70s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-308.00000175799994), 0.75s
+     MIP: root heuristic RINS: found (1.23s)
+     MIP:   sub-MIP: 2658 free columns of 4914, status TimeLimit, nodes 249, objective Some(-262.000000892), 1.42s
+def_r2    opt   46.0s obj  -309.00 lb  -309.00 nodes  1122 | rootLP 1.08s cuts~ 4.88 heur 16.07 (inc Some(-307.50000000066666)) tree 21.37 restarts 0 | first 2.24 | -309 at 43.19s [other thread: tree mutation]
+     inc   2.24s   -285.05 [Local-MIP]
+     inc   3.80s   -295.48 [Local-MIP]
+     inc  13.01s   -307.50 [RENS]
+     inc  41.12s   -307.50 [other thread: tree RINS]
+     inc  43.19s   -309.00 [other thread: tree mutation]
+     inc  43.53s   -309.00 [other thread: tree RINS]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.04s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 47.35s cut to the remaining 47.32s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 47.31s cut to the remaining 47.30s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.17s
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 71, objective Some(-307.50000000066666), 1.73s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-307.0000013923333), 3.06s
+     MIP: root heuristic RINS: none (3.06s)
+     MIP:   sub-MIP: 2690 free columns of 4914, status TimeLimit, nodes 288, objective Some(-227.000000941), 1.47s
+trim3_r2  opt   43.4s obj  -309.00 lb  -309.00 nodes  1080 | rootLP 1.24s cuts~ 3.98 heur 12.90 (inc Some(-308.00000175799994)) tree 18.20 restarts 0 | first 2.41 | -309 at 39.37s [other thread: tree mutation]
+     inc   2.41s   -292.93 [Local-MIP]
+     inc  11.46s   -307.00 [RENS]
+     inc  12.90s   -308.00 [RINS]
+     inc  39.37s   -309.00 [other thread: tree mutation]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.03s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 47.95s cut to the remaining 47.94s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 47.93s cut to the remaining 47.92s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.13s
+     MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at 57 of 500 nodes
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 57, objective Some(-307.0000000008001), 0.81s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-308.00000175799994), 0.83s
+     MIP: root heuristic RINS: found (1.44s)
+def_r3    opt   51.4s obj  -309.00 lb  -309.00 nodes  1267 | rootLP 1.21s cuts~ 5.16 heur 17.44 (inc Some(-307.50000000066666)) tree 23.01 restarts 0 | first 2.36 | -309 at 48.75s [other thread: tree crossover]
+     inc   2.36s   -286.07 [Local-MIP]
+     inc   4.01s   -290.35 [Local-MIP]
+     inc   6.33s   -293.82 [Local-MIP]
+     inc  14.47s   -307.50 [RENS]
+     inc  41.03s   -307.50 [other thread: tree RINS]
+     inc  45.90s   -308.00 [other thread: tree crossover]
+     inc  47.16s   -308.00 [other thread: tree RINS]
+     inc  48.75s   -309.00 [other thread: tree crossover]
+     inc  48.76s   -309.00 [other thread: tree RINS]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.03s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 45.69s cut to the remaining 45.67s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 45.66s cut to the remaining 45.65s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.16s
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 71, objective Some(-307.50000000066666), 1.63s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-307.0000013923333), 2.96s
+     MIP: root heuristic RINS: none (2.97s)
+trim3_r3  opt   43.5s obj  -309.00 lb  -309.00 nodes  1167 | rootLP 1.29s cuts~ 5.35 heur 13.12 (inc Some(-308.0000000008001)) tree 17.92 restarts 0 | first 2.44 | -309 at 40.24s [other thread: tree mutation]
+     inc   2.44s   -288.03 [Local-MIP]
+     inc   4.14s   -289.06 [Local-MIP]
+     inc  12.41s   -308.00 [RENS]
+     inc  37.66s   -308.00 [other thread: tree RINS]
+     inc  40.24s   -309.00 [other thread: tree mutation]
+     inc  40.82s   -309.00 [other thread: tree RINS]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.04s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 47.11s cut to the remaining 47.09s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 47.08s cut to the remaining 47.07s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.15s
+     MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at 70 of 500 nodes
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 70, objective Some(-308.0000000008001), 1.10s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-272.00000108500006), 0.70s
+     MIP: root heuristic RINS: none (0.71s)
+def_r4    opt   46.7s obj  -309.00 lb  -309.00 nodes  1116 | rootLP 1.18s cuts~ 5.57 heur 17.09 (inc Some(-307.50000000066666)) tree 22.64 restarts 0 | first 2.35 | -309 at 43.98s [other thread: tree mutation]
+     inc   2.35s   -287.22 [Local-MIP]
+     inc   4.10s   -292.59 [Local-MIP]
+     inc  13.89s   -307.50 [RENS]
+     inc  42.18s   -307.50 [other thread: tree RINS]
+     inc  43.98s   -309.00 [other thread: tree mutation]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.04s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 46.36s cut to the remaining 46.33s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 46.32s cut to the remaining 46.31s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.16s
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 62, objective Some(-307.50000000066666), 1.79s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-307.0000013923333), 3.20s
+     MIP: root heuristic RINS: none (3.20s)
+     MIP:   sub-MIP: 2649 free columns of 4914, status TimeLimit, nodes 278, objective Some(-270.00000140500003), 1.37s
+trim3_r4  opt   46.7s obj  -309.00 lb  -309.00 nodes  1310 | rootLP 1.17s cuts~ 5.13 heur 13.92 (inc Some(-308.00000175799994)) tree 19.03 restarts 0 | first 2.33 | -309 at 44.10s [other thread: tree mutation]
+     inc   2.33s   -282.12 [Local-MIP]
+     inc   4.00s   -293.15 [Local-MIP]
+     inc  12.48s   -307.00 [RENS]
+     inc  13.92s   -308.00 [RINS]
+     inc  44.10s   -308.50 [other thread: tree mutation]
+     inc  44.10s   -309.00 [other thread: tree mutation]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.03s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 47.07s cut to the remaining 47.05s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 47.04s cut to the remaining 47.03s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.17s
+     MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at 57 of 500 nodes
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 57, objective Some(-307.0000000008001), 0.87s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-308.00000175799994), 0.87s
+     MIP: root heuristic RINS: found (1.44s)
+def_r5    opt   44.4s obj  -309.00 lb  -309.00 nodes  1197 | rootLP 1.11s cuts~ 4.10 heur 13.38 (inc Some(-308.0000000008001)) tree 18.59 restarts 0 | first 2.27 | -309 at 41.53s [other thread: tree mutation]
+     inc   2.27s   -287.03 [Local-MIP]
+     inc  12.43s   -308.00 [RENS]
+     inc  39.16s   -308.00 [other thread: tree RINS]
+     inc  41.53s   -309.00 [other thread: tree mutation]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.03s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 47.19s cut to the remaining 47.17s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.15s
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 70, objective Some(-308.0000000008001), 1.15s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-272.00000108500006), 0.94s
+     MIP: root heuristic RINS: none (0.95s)
+     MIP:   sub-MIP: 2709 free columns of 4914, status TimeLimit, nodes 108, objective Some(-248.00000087500004), 1.54s
+trim3_r5  opt   49.1s obj  -309.00 lb  -309.00 nodes  1236 | rootLP 1.09s cuts~ 5.28 heur 15.20 (inc Some(-308.0000000008001)) tree 20.73 restarts 0 | first 2.26 | -309 at 46.29s [other thread: tree mutation]
+     inc   2.26s   -286.04 [Local-MIP]
+     inc   3.94s   -288.89 [Local-MIP]
+     inc   6.46s   -289.37 [Local-MIP]
+     inc  14.47s   -308.00 [RENS]
+     inc  44.67s   -308.00 [other thread: tree RINS]
+     inc  46.29s   -309.00 [other thread: tree mutation]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.06s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 45.14s cut to the remaining 45.09s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 45.08s cut to the remaining 45.07s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.20s
+     MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at 70 of 500 nodes
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 70, objective Some(-308.0000000008001), 1.16s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-272.00000108500006), 0.72s
+     MIP: root heuristic RINS: none (0.73s)
+     MIP:   sub-MIP: 2715 free columns of 4914, status TimeLimit, nodes 124, objective Some(-277.000001573), 1.33s
+def_r6    opt   46.9s obj  -309.00 lb  -309.00 nodes  1096 | rootLP 1.12s cuts~ 5.18 heur 16.97 (inc Some(-307.50000000066666)) tree 21.97 restarts 0 | first 2.27 | -309 at 43.93s [other thread: tree mutation]
+     inc   2.27s   -279.08 [Local-MIP]
+     inc   3.89s   -294.37 [Local-MIP]
+     inc  14.10s   -307.50 [RENS]
+     inc  41.97s   -307.50 [other thread: tree RINS]
+     inc  43.93s   -309.00 [other thread: tree mutation]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.05s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 45.84s cut to the remaining 45.81s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.17s
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 71, objective Some(-307.50000000066666), 1.67s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-307.0000013923333), 2.87s
+     MIP: root heuristic RINS: none (2.88s)
+     MIP:   sub-MIP: 2681 free columns of 4914, status TimeLimit, nodes 278, objective Some(-276.000001394), 1.30s
+trim3_r6  opt   45.0s obj  -309.00 lb  -309.00 nodes  1183 | rootLP 1.06s cuts~ 4.90 heur 12.59 (inc Some(-308.00000175799994)) tree 18.26 restarts 0 | first 2.22 | -309 at 42.40s [other thread: tree mutation]
+     inc   2.22s   -289.01 [Local-MIP]
+     inc   3.64s   -303.00 [Local-MIP]
+     inc  11.22s   -307.00 [RENS]
+     inc  12.59s   -308.00 [RINS]
+     inc  42.40s   -308.50 [other thread: tree mutation]
+     inc  42.40s   -309.00 [other thread: tree mutation]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.04s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 48.36s cut to the remaining 48.34s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.13s
+     MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at 57 of 500 nodes
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 57, objective Some(-307.0000000008001), 0.91s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-308.00000175799994), 0.88s
+     MIP: root heuristic RINS: found (1.37s)
+def_r7    opt   46.3s obj  -309.00 lb  -309.00 nodes  1101 | rootLP 1.17s cuts~ 3.83 heur 13.28 (inc Some(-307.50000000066666)) tree 19.19 restarts 0 | first 2.16 | -309 at 42.94s [other thread: tree mutation]
+     inc   2.16s   -302.00 [Local-MIP]
+     inc  10.31s   -307.50 [RENS]
+     inc  39.26s   -307.50 [tree RINS]
+     inc  42.94s   -309.00 [other thread: tree mutation]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.04s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 49.53s cut to the remaining 49.50s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 49.49s cut to the remaining 49.48s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.16s
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 71, objective Some(-307.50000000066666), 1.97s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-307.0000013923333), 2.95s
+     MIP: root heuristic RINS: none (2.97s)
+     MIP:   sub-MIP: 2693 free columns of 4914, status TimeLimit, nodes 243, objective Some(-307.5000014698331), 1.41s
+trim3_r7  opt   47.2s obj  -309.00 lb  -309.00 nodes  1131 | rootLP 1.10s cuts~ 5.13 heur 13.48 (inc Some(-308.00000175799994)) tree 18.95 restarts 0 | first 2.27 | -309 at 44.00s [other thread: tree mutation]
+     inc   2.27s   -285.04 [Local-MIP]
+     inc   3.89s   -295.87 [Local-MIP]
+     inc  11.84s   -307.00 [RENS]
+     inc  13.48s   -308.00 [RINS]
+     inc  44.00s   -309.00 [other thread: tree mutation]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.04s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 47.45s cut to the remaining 47.42s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 47.42s cut to the remaining 47.41s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.16s
+     MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at 57 of 500 nodes
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 57, objective Some(-307.0000000008001), 0.82s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-308.00000175799994), 0.89s
+     MIP: root heuristic RINS: found (1.64s)
+     MIP:   sub-MIP: 2738 free columns of 4914, status TimeLimit, nodes 82, objective Some(-250.00000082900007), 1.37s
+def_r8    opt   38.8s obj  -309.00 lb  -309.00 nodes   700 | rootLP 1.12s cuts~ 5.23 heur 15.50 (inc Some(-307.50000000066666)) tree 21.13 restarts 0 | first 2.29 | -309 at 36.05s [tree RINS]
+     inc   2.29s   -291.06 [Local-MIP]
+     inc   3.92s   -292.03 [Local-MIP]
+     inc  12.54s   -307.50 [RENS]
+     inc  36.05s   -309.00 [tree RINS]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.04s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 47.28s cut to the remaining 47.24s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.03s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 47.23s cut to the remaining 47.21s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.15s
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 62, objective Some(-307.50000000066666), 1.46s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-307.0000013923333), 2.95s
+     MIP: root heuristic RINS: none (2.96s)
+     MIP:   sub-MIP: 2662 free columns of 4914, status Optimal, nodes 0, objective Some(-309.00000171199997), 0.35s
+trim3_r8  opt   52.4s obj  -309.00 lb  -309.00 nodes  1430 | rootLP 1.13s cuts~ 6.43 heur 15.12 (inc Some(-308.00000175799994)) tree 20.49 restarts 0 | first 2.31 | -309 at 49.78s [other thread: tree crossover]
+     inc   2.31s   -291.87 [Local-MIP]
+     inc   3.99s   -293.53 [Local-MIP]
+     inc   6.07s   -293.56 [Local-MIP]
+     inc  13.64s   -307.00 [RENS]
+     inc  15.12s   -308.00 [RINS]
+     inc  44.99s   -308.37 [other thread: tree mutation]
+     inc  49.16s   -308.37 [other thread: tree RINS]
+     inc  49.78s   -309.00 [other thread: tree crossover]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.04s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 45.77s cut to the remaining 45.75s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.15s
+     MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at 57 of 500 nodes
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 57, objective Some(-307.0000000008001), 0.71s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-308.00000175799994), 0.90s
+     MIP: root heuristic RINS: found (1.49s)
+def_r9    opt   45.8s obj  -309.00 lb  -309.00 nodes  1032 | rootLP 1.34s cuts~ 5.28 heur 18.52 (inc Some(-307.50000000066666)) tree 23.61 restarts 0 | first 2.49 | -309 at 42.34s [other thread: tree mutation]
+     inc   2.49s   -289.99 [Local-MIP]
+     inc   4.06s   -291.81 [Local-MIP]
+     inc   6.47s   -291.81 [Local-MIP]
+     inc  15.18s   -307.50 [RENS]
+     inc  40.09s   -307.50 [other thread: tree RINS]
+     inc  42.34s   -309.00 [other thread: tree mutation]
+     inc  42.92s   -309.00 [other thread: tree RINS]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.03s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 44.57s cut to the remaining 44.56s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.16s
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 62, objective Some(-307.50000000066666), 1.58s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-307.0000013923333), 3.33s
+     MIP: root heuristic RINS: none (3.34s)
+trim3_r9  opt   41.0s obj  -309.00 lb  -309.00 nodes   759 | rootLP 1.17s cuts~ 5.38 heur 15.99 (inc Some(-308.0000000008001)) tree 20.92 restarts 0 | first 2.35 | -309 at 38.27s [tree RINS]
+     inc   2.35s   -279.13 [Local-MIP]
+     inc   3.99s   -286.74 [Local-MIP]
+     inc  15.12s   -308.00 [RENS]
+     inc  38.27s   -309.00 [tree RINS]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.05s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 44.84s cut to the remaining 44.83s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 44.82s cut to the remaining 44.81s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.22s
+     MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at 70 of 500 nodes
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 70, objective Some(-308.0000000008001), 1.28s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-272.00000108500006), 0.86s
+     MIP: root heuristic RINS: none (0.87s)
+     MIP:   sub-MIP: 2688 free columns of 4914, status Optimal, nodes 0, objective Some(-309.0000017539998), 0.40s
+def_r10   opt   49.3s obj  -309.00 lb  -309.00 nodes  1117 | rootLP 1.27s cuts~ 5.44 heur 18.19 (inc Some(-307.50000000066666)) tree 24.97 restarts 0 | first 2.44 | -309 at 46.82s [other thread: tree crossover]
+     inc   2.44s   -290.69 [Local-MIP]
+     inc   4.04s   -291.93 [Local-MIP]
+     inc   6.68s   -292.02 [Local-MIP]
+     inc  15.40s   -307.50 [RENS]
+     inc  42.08s   -307.50 [other thread: tree RINS]
+     inc  46.82s   -308.00 [other thread: tree mutation]
+     inc  46.82s   -309.00 [other thread: tree crossover]
+     inc  46.82s   -309.00 [other thread: tree RINS]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.04s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 44.92s cut to the remaining 44.90s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.03s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 44.90s cut to the remaining 44.87s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.11s
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 62, objective Some(-307.50000000066666), 1.62s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-307.0000013923333), 2.79s
+     MIP: root heuristic RINS: none (2.80s)
+trim3_r10 TL    60.2s obj  -308.00 lb  -309.00 nodes  1388 | rootLP 0.87s cuts~ 5.03 heur 14.54 (inc Some(-308.00000175799994)) tree 20.33 restarts 0 | first 2.03 | -309 at -
+     inc   2.03s   -283.06 [Local-MIP]
+     inc   3.67s   -290.02 [Local-MIP]
+     inc  12.87s   -307.00 [RENS]
+     inc  14.54s   -308.00 [RINS]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.04s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 46.36s cut to the remaining 46.33s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.24s
+     MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at 57 of 500 nodes
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 57, objective Some(-307.0000000008001), 0.79s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-308.00000175799994), 0.90s
+     MIP: root heuristic RINS: found (1.68s)
+def_r11   opt   46.5s obj  -309.00 lb  -309.00 nodes  1063 | rootLP 1.14s cuts~ 6.18 heur 18.58 (inc Some(-307.50000000066666)) tree 23.61 restarts 0 | first 2.3 | -309 at 43.70s [other thread: tree mutation]
+     inc   2.30s   -279.08 [Local-MIP]
+     inc   3.85s   -285.05 [Local-MIP]
+     inc   5.23s   -286.88 [Local-MIP]
+     inc   7.36s   -291.22 [Local-MIP]
+     inc  15.77s   -307.50 [RENS]
+     inc  41.85s   -307.50 [other thread: tree RINS]
+     inc  43.70s   -309.00 [other thread: tree mutation]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.03s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 44.14s cut to the remaining 44.11s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 44.11s cut to the remaining 44.10s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.15s
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 62, objective Some(-307.50000000066666), 1.49s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-307.0000013923333), 2.80s
+     MIP: root heuristic RINS: none (2.80s)
+trim3_r11 opt   43.6s obj  -309.00 lb  -309.00 nodes  1032 | rootLP 1.35s cuts~ 5.57 heur 13.86 (inc Some(-308.00000175799994)) tree 19.73 restarts 0 | first 2.5 | -309 at 41.15s [other thread: tree mutation]
+     inc   2.50s   -280.07 [Local-MIP]
+     inc   4.09s   -295.07 [Local-MIP]
+     inc  12.41s   -307.00 [RENS]
+     inc  13.86s   -308.00 [RINS]
+     inc  41.15s   -309.00 [other thread: tree mutation]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.06s
+     MIP:   parallel sub-MIP (vbounds (loose)): time limit 47.20s cut to the remaining 47.16s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 47.15s cut to the remaining 47.14s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.20s
+     MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at 57 of 500 nodes
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 57, objective Some(-307.0000000008001), 0.88s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-308.00000175799994), 0.91s
+     MIP: root heuristic RINS: found (1.45s)
+     MIP:   sub-MIP: 2735 free columns of 4914, status TimeLimit, nodes 193, objective Some(-247.00000085800002), 1.50s
+def_r12   opt   20.7s obj  -309.00 lb  -309.00 nodes     0 | rootLP 1.32s cuts~ 5.88 heur 18.24 (inc Some(-309.0000014569999)) tree  0.00 restarts 0 | first 2.49 | -309 at 18.24s [RINS]
+     inc   2.49s   -287.97 [Local-MIP]
+     inc   4.17s   -294.01 [Local-MIP]
+     inc   5.53s   -297.30 [Local-MIP]
+     inc   6.94s   -307.00 [Local-MIP]
+     inc  18.24s   -309.00 [RINS]
+     MIP:   parallel sub-MIP started (RENS): 2600 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 58, objective Some(-249.5), 0.84s
+     MIP:   sub-MIP: 2600 free columns of 4914, status NodeLimit, nodes 58, objective Some(-249.5), 0.84s
+     MIP: root heuristic RENS (more nodes): none (0.84s)
+     MIP:   RINS (HiGHS fill): fixing rate 0.78 from agreeing columns, 0.78 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2997 free columns of 4914, status Optimal, nodes 0, objective Some(-309.0000014569999), 6.28s
+     MIP: root heuristic RINS: found (6.29s)
+trim3_r12 TL    60.2s obj  -308.00 lb  -309.00 nodes  1778 | rootLP 1.15s cuts~ 6.38 heur 16.25 (inc Some(-308.00000175799994)) tree 21.98 restarts 0 | first 2.33 | -309 at -
+     inc   2.33s   -288.07 [Local-MIP]
+     inc   4.03s   -290.78 [Local-MIP]
+     inc   5.39s   -290.78 [Local-MIP]
+     inc   7.58s   -290.93 [Local-MIP]
+     inc  14.82s   -307.00 [RENS]
+     inc  16.25s   -308.00 [RINS]
+     MIP:   parallel sub-MIP started (RENS): 2618 free columns of 4914
+     MIP: root heuristic RENS: none (0.00s)
+     MIP:   parallel sub-MIP started (locks): 3313 free columns of 4914
+     MIP:   parallel sub-MIP started (clique): 2613 free columns of 4914
+     MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.04s
+     MIP:   parallel sub-MIP started (vbounds (loose)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.02s
+     MIP:   parallel sub-MIP (vbounds (tight)): time limit 44.29s cut to the remaining 44.27s
+     MIP:   parallel sub-MIP started (vbounds (tight)): 2457 free columns of 4914
+     MIP:   parallel sub-MIP (vbounds (tight)): status Infeasible, nodes 0, objective None, 0.01s
+     MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.11s
+     MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at 57 of 500 nodes
+     MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 57, objective Some(-307.0000000008001), 0.74s
+     MIP:   RINS (HiGHS fill): fixing rate 0.93 from agreeing columns, 0.93 after fill (2457 free integer columns)
+     MIP:   sub-MIP: 2618 free columns of 4914, status NodeLimit, nodes 50, objective Some(-308.00000175799994), 0.87s
+     MIP: root heuristic RINS: found (1.43s)
+     MIP:   sub-MIP: 2805 free columns of 4914, status TimeLimit, nodes 2, objective Some(-234.0000007099999), 0.24s
