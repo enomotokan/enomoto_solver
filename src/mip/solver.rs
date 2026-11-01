@@ -198,6 +198,11 @@ thread_local! {
     /// 次に始めるサブ MIP が根のサブ MIP なら、その成果連動の打ち切りの情報 ([`SubmipCtl`]、`ENOMOTO_MIP_SUBMIP_OUTCOME_STOP`)。
     /// サブ MIP の最初の求解が取り出す (入れ子のサブ MIP には渡らない)
     pub(crate) static ROOT_SUBMIP_CTL: std::cell::RefCell<Option<std::sync::Arc<SubmipCtl>>> = const { std::cell::RefCell::new(None) };
+    /// `ENOMOTO_MIP_RENS_RESUME` (試作): このスレッドで次に解くサブ MIP を、ノード上限で一時停止できるものにする合図 ([`ResumeChild`])。
+    /// サブ MIP のスレッドの [`super::solve_problem`] が取り出し、後処理を付けた一時停止の手続き ([`RESUME_HOOK`]) にする
+    pub(crate) static RESUME_LINK: std::cell::RefCell<Option<ResumeChild>> = const { std::cell::RefCell::new(None) };
+    /// 次に作る求解 (サブ MIP) の一時停止の手続き ([`Solver::resume_pause`])。求解を作るときに取り出す
+    pub(crate) static RESUME_HOOK: std::cell::RefCell<Option<ResumeHook>> = const { std::cell::RefCell::new(None) };
     /// 次に始める求解 (サブ MIP でないもの) の根の LP の初めの基底 (列の状態)。前処理の LP による固定
     /// ([`super::lp_probe`]) が解いた LP の基底を渡す (根の LP を解き直す手間を減らす)。
     pub(crate) static ROOT_BASIS: std::cell::RefCell<Option<super::lp::Basis>> = const { std::cell::RefCell::new(None) };
@@ -404,6 +409,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_full_nodes: bool,
     /// 別スレッドに出した直近の根の RENS のサブ MIP のノード上限 ([`rens_more_nodes_real`])
     pub(super) rens_spawn_node_limit: u64,
+    /// `ENOMOTO_MIP_RENS_RESUME` ([`rens_resume_on`]): ノード上限で一時停止している直近の根の RENS のサブ MIP (呼び出し側)
+    pub(super) rens_paused: Option<PausedSubmip>,
+    /// `ENOMOTO_MIP_RENS_RESUME`: この求解 (サブ MIP) がノード上限で呼ぶ一時停止の手続き ([`RESUME_HOOK`]、サブ MIP の側)
+    resume_hook: Option<ResumeHook>,
     /// RENS・RINS の固定を目標の固定率で止める (`ENOMOTO_MIP_FIX_CAP` と同じ) のを一時的に強制する
     /// (根の広い近傍のサブ MIP (`ENOMOTO_MIP_ROOT_WIDE_SUBMIP`) の広い近傍のやり直しの間だけ真)。
     pub(super) force_fix_cap: bool,
@@ -411,7 +420,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) parallel_submips: bool,
     /// 別スレッドで解いているサブ MIP (出した順)。
     /// 並列モードで別スレッドに出したサブ MIP と、それが根の RENS のものか ([`Self::submip_is_rens`] を出すときに写す)。
-    pub(super) pending_submips: std::collections::VecDeque<(std::thread::JoinHandle<MipResult>, bool, &'static str, std::time::Instant, Option<f64>, Option<std::sync::Arc<SubmipCtl>>, u64)>,
+    /// 8 番目は一時停止できるサブ MIP ([`rens_resume_on`]) の受け渡し。
+    pub(super) pending_submips: std::collections::VecDeque<(std::thread::JoinHandle<MipResult>, bool, &'static str, std::time::Instant, Option<f64>, Option<std::sync::Arc<SubmipCtl>>, u64, Option<ResumeParent>)>,
     /// [`Self::add_proof_cmir`] の作業領域 (丸めの基準の点) と、試した数・足した数。
     proof_cmir_x: Option<Vec<f64>>,
     pub(super) proof_cmir_stats: [u64; 3],
@@ -1762,8 +1772,9 @@ pub(crate) fn submip_outcome_stop() -> bool {
 /// RENS のサブ MIP が本当にノード上限まで進んだときだけ行う。停滞 (`ENOMOTO_T_MIP_SUBMIP_STALL`)・成果連動 ([`submip_outcome_stop`]) の
 /// 打ち切りも状態は `NodeLimit` で返るが、上限を 4 倍にしても同じノードで同じように止まり、同じ解を返す (n5-3 の cand では外側の根で
 /// 55 ノード → 55 ノード・10.8 秒、深さ 1 のサブ MIP の中で 189 ノード → 189 ノード・3.3 秒。analysis/cand_slow_n5-3_20261031.md)
+/// `ENOMOTO_MIP_RENS_RESUME` ([`rens_resume_on`]) もこの場合分けを含む。
 pub(crate) fn rens_more_nodes_real() -> bool {
-    env_str!("ENOMOTO_MIP_RENS_MORE_NODES_REAL").is_some()
+    env_str!("ENOMOTO_MIP_RENS_MORE_NODES_REAL").is_some() || rens_resume_on()
 }
 
 /// 根のサブ MIP と外側の求解の間で共有する情報 ([`submip_outcome_stop`])。
@@ -1793,6 +1804,203 @@ impl SubmipCtl {
     pub(crate) fn offer(&self, z: f64) {
         let _ = self.outer_best.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |b| (z < f64::from_bits(b)).then_some(z.to_bits()));
     }
+}
+
+/// `ENOMOTO_MIP_RENS_RESUME` (試作、既定では使わない): RENS のやり直し (`RENS (more nodes)`) を、同じ問題を最初から解き直すのではなく、
+/// 1 回目のサブ MIP の求解の続きから行う。
+/// - 根の RENS のサブ MIP (逐次・並列とも、深さ 2 以上も) を専用のスレッドで解き、本当にノード上限まで進んだら、その時点の結果を
+///   呼び出し側に渡してスレッドの中で止まって待つ (木・カットのプール・擬似コスト・暫定解・LP はスレッドのスタックにそのまま残る)。
+///   呼び出し側はその結果を 1 回目の結果として受け取る ([`ResumeParent`]・[`PausedSubmip`])
+/// - やり直しの判定 (差が大きい) が通れば、継続の合図 ([`ResumeCmd`]: ノード上限を 1 回目の上限の
+///   `ENOMOTO_T_MIP_RENS_MORE_NODES_MULT` 倍に、時間の上限を今の残り時間から新しいサブ MIP と同じ決め方で、打ち切り値を外側の今の
+///   刈り込みの上限に) を送り、終わるのを待つ。通らなければ止めの合図を送ってスレッドを終わらせる (根のヒューリスティクスの
+///   やり直しの判定の直後、次の RENS を始めるとき、求解が終わるときのどれでも捨てる)
+/// - 停滞・成果連動の打ち切りで止まったサブ MIP はやり直さない ([`rens_more_nodes_real`] と同じ。このとき一時停止もしない)
+pub(crate) fn rens_resume_on() -> bool {
+    env_str!("ENOMOTO_MIP_RENS_RESUME").is_some()
+}
+
+/// 一時停止したサブ MIP への継続の合図 ([`rens_resume_on`])。
+pub(crate) struct ResumeCmd {
+    /// 新しいノード上限 (1 回目からの通算)
+    pub(crate) node_limit: u64,
+    /// 今からの時間の上限 (秒)
+    pub(crate) secs: f64,
+    /// 新しい打ち切り値 (外側の刈り込みの上限)
+    pub(crate) cutoff: f64,
+    /// 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 継続の間のこのスレッドの道筋 ([`super::heuristics::SUBMIP_TAG`])
+    pub(crate) tag: Option<String>,
+}
+
+/// サブ MIP の求解がノード上限で呼ぶ一時停止の手続き: その時点の結果 (元の問題の空間に戻したもの) を渡し、継続の合図を待つ
+/// (`None` なら止める)。
+pub(crate) type ResumeHook = Box<dyn FnMut(MipResult) -> Option<ResumeCmd>>;
+
+/// 一時停止の受け渡しのサブ MIP の側。
+pub(crate) struct ResumeChild {
+    tx: std::sync::mpsc::Sender<MipResult>,
+    rx: std::sync::mpsc::Receiver<ResumeCmd>,
+}
+
+impl ResumeChild {
+    /// 結果を渡して合図を待つ (呼び出し側が消えた・止めの合図なら `None`)。
+    pub(crate) fn pause(&self, r: MipResult) -> Option<ResumeCmd> {
+        self.tx.send(r).ok()?;
+        self.rx.recv().ok()
+    }
+}
+
+/// 一時停止の受け渡しの呼び出し側。
+pub(crate) struct ResumeParent {
+    cmd: Option<std::sync::mpsc::Sender<ResumeCmd>>,
+    rx: std::sync::mpsc::Receiver<MipResult>,
+    got: std::cell::RefCell<Option<MipResult>>,
+    /// 診断用のログ: サブ MIP の自由な整数列の数・整数列の数
+    pub(crate) info: (usize, usize),
+}
+
+/// 一時停止の受け渡しの組を作る。
+pub(crate) fn resume_link() -> (ResumeChild, ResumeParent) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (ctx, crx) = std::sync::mpsc::channel();
+    (ResumeChild { tx, rx: crx }, ResumeParent { cmd: Some(ctx), rx, got: std::cell::RefCell::new(None), info: (0, 0) })
+}
+
+impl ResumeParent {
+    /// 一時停止の結果が届いているか (待たない。届いていれば取っておく)。
+    pub(crate) fn paused(&self) -> bool {
+        if self.got.borrow().is_some() {
+            return true;
+        }
+        match self.rx.try_recv() {
+            Ok(r) => {
+                *self.got.borrow_mut() = Some(r);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+    /// 一時停止か終わりまで待つ。一時停止ならその結果、サブ MIP が終わった (送り手が消えた) なら `None`。
+    pub(crate) fn wait(&self) -> Option<MipResult> {
+        if let Some(r) = self.got.borrow_mut().take() {
+            return Some(r);
+        }
+        self.rx.recv().ok()
+    }
+}
+
+/// 一時停止しているサブ MIP ([`rens_resume_on`])。スレッドは継続か止めの合図を待っている。落とすと止めの合図を出し、
+/// スレッドが終わる (サブ MIP の状態を捨てる) のを待つ。
+pub(crate) struct PausedSubmip {
+    pub(crate) handle: Option<std::thread::JoinHandle<MipResult>>,
+    pub(crate) link: ResumeParent,
+    /// 根のサブ MIP の成果連動の打ち切りの情報 (あれば継続のときに新しい打ち切り値を渡す)
+    pub(crate) ctl: Option<std::sync::Arc<SubmipCtl>>,
+    /// 1 回目のノード上限
+    pub(crate) node_limit: u64,
+    /// 一時停止したときのノード数・LP の反復回数・目的値
+    pub(crate) nodes: u64,
+    pub(crate) iters: u64,
+    pub(crate) objective: Option<f64>,
+    /// 自由な整数列の数・整数列の数 (診断用のログ)
+    pub(crate) nfree: usize,
+    pub(crate) nint: usize,
+    /// 一時停止した時刻
+    pub(crate) at: Instant,
+    /// 別スレッドに出したサブ MIP (並列) だったか
+    pub(crate) parallel: bool,
+}
+
+impl PausedSubmip {
+    /// 続きを解く: 合図を送り、サブ MIP が終わるのを待って結果を返す (継続の後は一時停止しない)。
+    pub(crate) fn resume(mut self, cmd: ResumeCmd) -> Option<MipResult> {
+        if let Some(c) = &self.ctl {
+            c.offer(cmd.cutoff);
+        }
+        let tx = self.link.cmd.take()?;
+        let sent = tx.send(cmd).is_ok();
+        drop(tx);
+        // 継続の後のサブ MIP は一時停止しない (合図を受けたら一時停止の手続きを捨てる) ので、送り手が消えるまで待てば終わり
+        while self.link.rx.recv().is_ok() {}
+        let r = self.handle.take()?.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+        sent.then_some(r)
+    }
+}
+
+impl Drop for PausedSubmip {
+    fn drop(&mut self) {
+        // 止めの合図 (送り手を落とす): サブ MIP はノード上限で止まったものとして終わる
+        self.link.cmd = None;
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// サブ MIP を解くスレッドに受け継ぐスレッド局所の設定 (逐次のサブ MIP を [`rens_resume_on`] で別スレッドで解くとき。
+/// 呼び出し側のスレッドで [`super::heuristics::Solver::solve_submip_problem`] が置いた値を写す)。
+pub(crate) struct SubmipTls {
+    depth: u32,
+    hs_drop: u16,
+    r0: bool,
+    tag: String,
+    label: &'static str,
+    basis: Option<Vec<super::lp::VarStatus>>,
+    pc: Option<Pseudocost>,
+    ctl: Option<std::sync::Arc<SubmipCtl>>,
+    fj_p3: bool,
+    fj_nosol_cap: f64,
+    fj_has_inc: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl SubmipTls {
+    /// 今のスレッドの値を取る (サブ MIP の最初の求解が取り出すもの (基底・pseudocost・成果連動の打ち切り) はここで取り出す)。
+    pub(crate) fn take() -> Self {
+        use super::heuristics as h;
+        SubmipTls {
+            depth: h::SUBMIP_DEPTH.with(|d| d.get()),
+            hs_drop: h::SUBMIP_HS_DROP.with(|f| f.get()),
+            r0: h::SUBMIP_R0.with(|f| f.get()),
+            tag: h::SUBMIP_TAG.with(|t| t.borrow().clone()),
+            label: super::SUBMIP_LABEL.with(|l| l.get()),
+            basis: SUBMIP_BASIS.with(|s| s.borrow_mut().take()),
+            pc: SUBMIP_PC.with(|s| s.borrow_mut().take()),
+            ctl: ROOT_SUBMIP_CTL.with(|s| s.borrow_mut().take()),
+            fj_p3: crate::fj_p3_force(),
+            fj_nosol_cap: h::FJ_NOSOL_CAP.with(|c| c.get()),
+            fj_has_inc: h::FJ_HAS_INC.with(|f| f.borrow().clone()),
+        }
+    }
+    /// 今のスレッド (サブ MIP のスレッド) に置く。
+    pub(crate) fn install(self) {
+        use super::heuristics as h;
+        h::SUBMIP_DEPTH.with(|d| d.set(self.depth));
+        h::SUBMIP_HS_DROP.with(|f| f.set(self.hs_drop));
+        h::SUBMIP_R0.with(|f| f.set(self.r0));
+        h::SUBMIP_TAG.with(|t| *t.borrow_mut() = self.tag);
+        super::SUBMIP_LABEL.with(|l| l.set(self.label));
+        SUBMIP_BASIS.with(|s| *s.borrow_mut() = self.basis);
+        SUBMIP_PC.with(|s| *s.borrow_mut() = self.pc);
+        ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = self.ctl);
+        crate::set_fj_p3_force(self.fj_p3);
+        h::FJ_NOSOL_CAP.with(|c| c.set(self.fj_nosol_cap));
+        h::FJ_HAS_INC.with(|f| *f.borrow_mut() = self.fj_has_inc);
+    }
+}
+
+/// 逐次のサブ MIP を、一時停止できる形 ([`rens_resume_on`]) で別スレッドで解き始める (呼び出し側はすぐ [`ResumeParent::wait`] で待つ)。
+pub(crate) fn spawn_resumable_submip(sub: MipProblem, params: MipParams, presolve: bool) -> (std::thread::JoinHandle<MipResult>, ResumeParent) {
+    let tls = SubmipTls::take();
+    let (child, parent) = resume_link();
+    let h = std::thread::spawn(move || {
+        tls.install();
+        RESUME_LINK.with(|s| *s.borrow_mut() = Some(child));
+        let r = super::solve_problem(&sub, params, presolve);
+        // 取り出されなかった合図 (前処理で実行不能など) を落とし、呼び出し側の待ちを終わらせる
+        RESUME_LINK.with(|s| *s.borrow_mut() = None);
+        r
+    });
+    (h, parent)
 }
 
 /// 同時に走らせる別スレッドのサブ MIP の本数の上限。
@@ -2072,6 +2280,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         rens_node_limited: false,
         submip_full_nodes: false,
         rens_spawn_node_limit: 0,
+        rens_paused: None,
+        resume_hook: if params.submip && snap.is_none() && pool.is_none() { RESUME_HOOK.with(|s| s.borrow_mut().take()) } else { None },
         force_fix_cap: false,
         parallel_submips: false,
         pending_submips: std::collections::VecDeque::new(),
@@ -4463,11 +4673,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if gap > tunable!("ENOMOTO_T_MIP_RENS_MORE_NODES_GAP", 0.005, f64) {
                             let mult = tunable!("ENOMOTO_T_MIP_RENS_MORE_NODES_MULT", 4.0, f64);
                             self.submip_node_mult = if self.params.submip { tunable!("ENOMOTO_T_MIP_RENS_MORE_NODES_SUB_MULT", mult, f64) } else { mult };
-                            heur!("RENS (more nodes)", self.rens(&x));
+                            // `ENOMOTO_MIP_RENS_RESUME` ([`rens_resume_on`]): 一時停止している 1 回目のサブ MIP があれば、最初から解き直さずに続きから
+                            if rens_resume_on() && self.rens_paused.is_some() {
+                                heur!("RENS (more nodes)", self.rens_resume());
+                            } else {
+                                heur!("RENS (more nodes)", self.rens(&x));
+                            }
                             self.submip_node_mult = 1.0;
                         }
                     }
                 }
+                // 使わなかった一時停止のサブ MIP は、ここで止めの合図を出して捨てる (スレッドとその状態を残さない)
+                self.drop_rens_paused("not resumed");
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
                 if (self.incumbent.is_some() || self.ref_sol.is_some()) && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
                     heur!("RINS", self.rins(&x));
@@ -4831,6 +5048,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot, tags: None, sb: None });
         }
+        // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 木の始まり (根の前処理・LP・カット・ヒューリスティクスの終わり) を道筋つきで出す
+        // (サブ MIP の時間のうち根の割合を見る。analysis/rens_resume_20261101.md)
+        if self.params.verbose && super::heuristics::submip_trace() && self.snap.is_none() {
+            let tag = super::heuristics::SUBMIP_TAG.with(|t| t.borrow().clone());
+            eprintln!("MIP: SMT tree tag={tag} restarts={} secs={:.3} T={:.3}", self.params.restarts, self.start.elapsed().as_secs_f64(), super::heuristics::submip_trace_secs());
+        }
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         // 木を分け合う従のスレッドは、未処理のノードが 2 つ以上になってから (根を分枝してから) 始める (根で解ける問題では
         // 始めない。nw04: 根で閉じるのに、従の準備 (8.7 万列の定義域・LP と根の LP) を待って 4 本で 2-3 秒遅かった)
@@ -5047,7 +5270,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.time_up() {
                 return self.finish_limit(MipStatus::TimeLimit, plunge.as_ref());
             }
-            if self.nodes >= self.params.node_limit {
+            // `ENOMOTO_MIP_RENS_RESUME` ([`rens_resume_on`]): 一時停止できるサブ MIP は、ここで結果を渡して継続の合図を待つ
+            // ([`Self::resume_pause`])。継続ならノード上限・時間の上限・打ち切り値を改めてそのまま木を進める
+            if self.nodes >= self.params.node_limit && !(self.resume_hook.is_some() && self.resume_pause(plunge.as_ref())) {
                 self.dbg_submip_stop("node limit");
                 return self.finish_limit(MipStatus::NodeLimit, plunge.as_ref());
             }
@@ -8128,6 +8353,62 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.start.elapsed().as_secs_f64()
             );
         }
+    }
+
+    /// `ENOMOTO_MIP_RENS_RESUME` ([`rens_resume_on`]): ノード上限に達したサブ MIP の一時停止。今の結果 (暫定解・下界・ノード数) を
+    /// 一時停止の手続き ([`Self::resume_hook`]) に渡し、継続の合図を待つ。継続なら上限・打ち切り値を改めて真を返す (呼び出し側は
+    /// そのまま木を進める)。止めの合図・下界が打ち切り値に届いている (探索し残しがない) なら偽 (呼び出し側はいつものように終わる)。
+    /// 一時停止は 1 回だけ (継続の後は手続きを捨てる)
+    fn resume_pause(&mut self, current: Option<&OpenNode>) -> bool {
+        let mut hook = match self.resume_hook.take() {
+            Some(h) => h,
+            None => return false,
+        };
+        let mut lb = self.queue.best_lower_bound();
+        if let Some(n) = current {
+            lb = lb.min(n.lower_bound);
+        }
+        if let Some((z, _)) = &self.incumbent {
+            lb = lb.min(*z);
+        }
+        if self.unresolved || lb >= self.prune_limit() {
+            return false;
+        }
+        let (x, objective) = match &self.incumbent {
+            Some((z, x)) => (Some(x.clone()), Some(*z)),
+            None => (None, None),
+        };
+        let open = self.queue.len() + current.is_some() as usize;
+        if self.params.verbose {
+            eprintln!("MIP: sub-MIP paused at the node limit: nodes {}, open nodes {open}, lower bound {lb:.10e}, incumbent {objective:?}, cut pool {}, LP rows {} ({:.2}s)", self.nodes, self.cut_pool.len(), self.lp.num_rows(), self.start.elapsed().as_secs_f64());
+        }
+        let r = MipResult { status: MipStatus::NodeLimit, x, objective, best_bound: lb, nodes: self.nodes, lp_iterations: self.lp.total_iterations() };
+        let t0 = Instant::now();
+        let cmd = hook(r);
+        drop(hook);
+        let Some(c) = cmd else { return false };
+        self.params.node_limit = c.node_limit;
+        let secs = c.secs.max(0.0);
+        self.deadline = secs.is_finite().then(|| Instant::now() + Duration::from_secs_f64(secs));
+        self.params.time_limit = self.start.elapsed().as_secs_f64() + secs;
+        if c.cutoff < self.params.cutoff {
+            self.params.cutoff = c.cutoff;
+        }
+        if let Some(tag) = c.tag {
+            super::heuristics::SUBMIP_TAG.with(|t| *t.borrow_mut() = tag);
+        }
+        if self.params.verbose {
+            eprintln!(
+                "MIP: sub-MIP resumed after {:.2}s: nodes {}, open nodes {}, node limit {}, time limit {secs:.2}s, cutoff {:.10e}, incumbent {:?}",
+                t0.elapsed().as_secs_f64(),
+                self.nodes,
+                self.queue.len() + current.is_some() as usize,
+                self.params.node_limit,
+                self.params.cutoff,
+                self.incumbent.as_ref().map(|(z, _)| *z)
+            );
+        }
+        true
     }
 
     fn finish_limit(&mut self, status: MipStatus, current: Option<&OpenNode>) -> MipResult {
@@ -11280,6 +11561,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if is_rens {
             self.rens_spawn_node_limit = params.node_limit;
         }
+        // `ENOMOTO_MIP_RENS_RESUME` ([`rens_resume_on`]): 根の RENS はノード上限で一時停止できる形で解く (前の一時停止は捨てる)
+        let (resume_child, resume_parent) = if is_rens && rens_resume_on() && self.nodes <= 1 {
+            self.rens_paused = None;
+            let (c, mut p) = resume_link();
+            p.info = ((0..sub.n).filter(|&j| sub.is_int[j] && sub.col_lo[j] < sub.col_up[j]).count(), sub.is_int.iter().filter(|&&b| b).count());
+            (Some(c), Some(p))
+        } else {
+            (None, None)
+        };
         if self.params.verbose {
             let nfree = (0..sub.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();
             eprintln!("MIP:   parallel sub-MIP started ({}): {nfree} free columns of {}", self.heur_label, sub.n);
@@ -11336,8 +11626,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if env_str!("ENOMOTO_MIP_FJ_P3") == Some("submip") {
                     crate::set_fj_p3_force(true);
                 }
+                let resumable = resume_child.is_some();
+                if let Some(c) = resume_child {
+                    RESUME_LINK.with(|s| *s.borrow_mut() = Some(c));
+                }
                 let r = super::solve_problem(&sub, params, presolve);
-                if trace_tag.is_some() {
+                RESUME_LINK.with(|s| *s.borrow_mut() = None);
+                // 一時停止の後に継続したサブ MIP は、呼び出し側が継続の分の終わりを出す (道筋が継続の番号に変わっている)
+                let resumed = resumable && trace_tag.as_ref().is_some_and(|t| super::heuristics::SUBMIP_TAG.with(|s| *s.borrow() != *t));
+                if trace_tag.is_some() && !resumed {
                     eprintln!("MIP: SMT end id={trace_id} status={:?} nodes={} objective={:?} secs={:.3} T={:.3}", r.status, r.nodes, r.objective, t_thread.elapsed().as_secs_f64(), super::heuristics::submip_trace_secs());
                 }
                 r
@@ -11348,6 +11645,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             fix_rate,
             ctl,
             trace_id,
+            resume_parent,
         ));
     }
 
@@ -11362,7 +11660,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         c.offer(z);
                     }
                 }
-                match self.pending_submips.iter().position(|it| it.0.is_finished()) {
+                match self.pending_submips.iter().position(|it| it.0.is_finished() || it.7.as_ref().is_some_and(|l| l.paused())) {
                     Some(k) => {
                         let item = self.pending_submips.remove(k).unwrap();
                         self.take_submip(item);
@@ -11382,7 +11680,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn poll_submips(&mut self) {
         let mut k = 0;
         while k < self.pending_submips.len() {
-            if self.pending_submips[k].0.is_finished() {
+            if self.pending_submips[k].0.is_finished() || self.pending_submips[k].7.as_ref().is_some_and(|l| l.paused()) {
                 let item = self.pending_submips.remove(k).unwrap();
                 self.take_submip(item);
             } else {
@@ -11392,10 +11690,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 別スレッドのサブ MIP 1 本の結果を受け取る。
-    fn take_submip(&mut self, item: (std::thread::JoinHandle<MipResult>, bool, &'static str, std::time::Instant, Option<f64>, Option<std::sync::Arc<SubmipCtl>>, u64)) {
-        let (h, is_rens, label, t0, fix_rate, _, trace_id) = item;
+    fn take_submip(&mut self, item: (std::thread::JoinHandle<MipResult>, bool, &'static str, std::time::Instant, Option<f64>, Option<std::sync::Arc<SubmipCtl>>, u64, Option<ResumeParent>)) {
+        let (h, is_rens, label, t0, fix_rate, ctl, trace_id, link) = item;
         {
-            if let Ok(r) = h.join() {
+            // `ENOMOTO_MIP_RENS_RESUME` ([`rens_resume_on`]): ノード上限で一時停止したサブ MIP は、その時点の結果を受け取り、スレッドは
+            // 一時停止のまま取っておく ([`Self::rens_paused`])
+            let mut paused = None;
+            let res = match link {
+                Some(l) => match l.wait() {
+                    Some(r) => {
+                        paused = Some((h, l, ctl, r.nodes, r.lp_iterations, r.objective));
+                        Ok(r)
+                    }
+                    None => h.join(),
+                },
+                None => h.join(),
+            };
+            if let Some((h, l, ctl, nodes, iters, objective)) = paused {
+                if self.params.verbose {
+                    eprintln!("MIP:   parallel sub-MIP ({label}): paused at the node limit ({nodes} nodes, objective {objective:?})");
+                }
+                if trace_id > 0 {
+                    eprintln!("MIP: SMT end id={trace_id} status=NodeLimit nodes={nodes} objective={objective:?} secs={:.3} T={:.3} paused=1", t0.elapsed().as_secs_f64(), super::heuristics::submip_trace_secs());
+                }
+                let (nfree, nint) = l.info;
+                self.rens_paused = Some(PausedSubmip { handle: Some(h), link: l, ctl, node_limit: self.rens_spawn_node_limit, nodes, iters, objective, nfree, nint, at: Instant::now(), parallel: true });
+            }
+            if let Ok(r) = res {
                 self.heur_iters += r.lp_iterations;
                 // 根の RENS がノード上限で止まったら、ノード上限を増やしてやり直す判断に使う (逐次のときは rens が立てる。
                 // 並列モードでは結果をここで受け取るので、ここで立てないとやり直しが行われない: binkar10_1 で 4 スレッドが

@@ -1090,7 +1090,12 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if outer_level {
                 solver::set_thread_scale(Some(scaling.d.clone()));
             }
+            // `ENOMOTO_MIP_RENS_RESUME`: 一時停止できるサブ MIP なら、一時停止のときの結果を元の問題の空間に戻す手続きを置く
+            let ps = std::rc::Rc::new((postsolve, scaling));
+            install_resume_hook(p, params, Some(ps.clone()));
             let mut r = solver::solve(&prob, remaining(params));
+            solver::RESUME_HOOK.with(|s| *s.borrow_mut() = None);
+            let (postsolve, scaling) = (&ps.0, &ps.1);
             if outer_level {
                 solver::set_thread_scale(None);
             }
@@ -1158,9 +1163,45 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if !params.submip && params.restarts > 0 {
                 sym_of_reverify(p, params.verbose);
             }
-            solver::solve(p, remaining(params))
+            install_resume_hook(p, params, None);
+            let r = solver::solve(p, remaining(params));
+            solver::RESUME_HOOK.with(|s| *s.borrow_mut() = None);
+            r
         }
     }
+}
+
+/// `ENOMOTO_MIP_RENS_RESUME` ([`solver::rens_resume_on`]): このスレッドに一時停止の合図 ([`solver::RESUME_LINK`]) があれば取り出し、
+/// 一時停止のときの結果 (前処理の後の問題の解) を後処理で元の問題 `p` の空間に戻してから渡す手続きを [`solver::RESUME_HOOK`] に置く
+/// (次に作る求解が取り出す)。後処理した解が `p` で実行不能なら解なしとして渡す (終わりの後処理の、前処理なしの解き直しはしない)。
+fn install_resume_hook(p: &MipProblem, params: MipParams, ps: Option<std::rc::Rc<(Vec<crate::presolve::PostsolveStep>, crate::presolve::scaling::Scaling)>>) {
+    if !params.submip {
+        return;
+    }
+    let Some(link) = solver::RESUME_LINK.with(|s| s.borrow_mut().take()) else { return };
+    let p = p.clone();
+    let hook: solver::ResumeHook = Box::new(move |mut r: solver::MipResult| {
+        if let Some(xr) = r.x.take() {
+            let x = match &ps {
+                Some(ps) => {
+                    let mut x = xr;
+                    for step in ps.0.iter().rev() {
+                        step.apply(&mut x);
+                    }
+                    crate::presolve::scaling::unscale_x(&ps.1, &x)
+                }
+                None => xr,
+            };
+            if p.is_feasible(&x, 1e-6) {
+                r.objective = Some(p.objective(&x));
+                r.x = Some(x);
+            } else {
+                r.objective = None;
+            }
+        }
+        link.pause(r)
+    });
+    solver::RESUME_HOOK.with(|s| *s.borrow_mut() = Some(hook));
 }
 
 thread_local! {
