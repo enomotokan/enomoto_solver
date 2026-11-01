@@ -1286,6 +1286,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.sep_pass = round;
             self.sep_adapt.ran = 0;
             let (mut cands, mut fcands) = self.separate_face_split(&x, false);
+            // 分離の間に求解の期限を過ぎたら、このラウンドを捨てて抜ける (ラウンドの頭の `time_up` で抜けるのと同じ状態)。
+            // 裏のカットの求解のラウンド (rail507 で 1 回 3〜9 秒) の候補のプールへの追加・選択が期限の後も回り、主がその終わりを
+            // 待って時間の上限を 5 秒過ぎていた (analysis/overrun_crypt_20261101.md)
+            if sep_deadline(self.deadline).is_some_and(|d| std::time::Instant::now() >= d) {
+                if self.params.verbose {
+                    eprintln!("MIP: cut round {round}: the time limit passed during the separation ({:.2}s); round dropped", t_sep.elapsed().as_secs_f64());
+                }
+                break;
+            }
             // `ENOMOTO_MIP_CUTSEL_FACE_ANCHOR` (実験的): 面の頂点からのカットの効き目はその頂点で測ったもので、今の LP 解は
             // 切らないことがある。それが最良のスコアになると、質の閾値 (最良の 50%) で今の頂点を切るカットが全部落ち、
             // 選んだ面のカットを足しても LP が動かず (効いていないので外され、次のラウンドでまた選ばれる) 停滞判定で止まる
@@ -3703,7 +3712,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.path_aggregation(&vars, lp_rows, &mut cands, &mut push, max_starts);
                     let bases = self.path_collect.take().unwrap_or_default();
                     let inc = self.incumbent.as_ref().map(|(_, v)| v.as_slice());
-                    let (by_row, cpu) = gen_cuts_parallel(&bases, sep_threads(self.sep_budget_threads()), &vars, use_flow_cover(), n, lp_rows, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, inc, self.p);
+                    let (by_row, cpu) = gen_cuts_parallel(&bases, sep_threads(self.sep_budget_threads()), &vars, use_flow_cover(), n, lp_rows, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, inc, self.p, sep_deadline(self.deadline));
                     self.sep_par_cpu += cpu;
                     for cs in by_row {
                         cands.extend(cs);
@@ -4019,6 +4028,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (pp, lp_rows_ref, vars_ref, bases_ref) = (self.p, lp_rows, &vars, &bases);
             let nb = bases.len();
             let nth = par_threads.min(nb.max(1));
+            let deadline = sep_deadline(self.deadline);
             // 行をスレッドに交互に割り当てる (行はスコア順で、重さが偏らないように)
             let parts: Vec<(Vec<(usize, Vec<Candidate>)>, f64)> = std::thread::scope(|sc| {
                 let hs: Vec<_> = (0..nth)
@@ -4028,7 +4038,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let mut scratch = vec![0.0f64; n];
                             let mut out = Vec::new();
                             let mut k = t;
-                            while k < nb {
+                            // 求解の期限 ([`sep_deadline`]) を過ぎたら残りの行は作らない (逐次の形は行ごとに `time_up` を見る)
+                            while k < nb && !deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                                 let base = &bases_ref[k];
                                 let neg: Vec<(usize, f64)> = base.iter().map(|&(j, a)| (j, -a)).collect();
                                 let mut cs: Vec<Candidate> = Vec::new();
@@ -4471,6 +4482,16 @@ fn pathh_row_types(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize) -> (
     (rtype, cont, col_rows, subst)
 }
 
+/// 分離を期限で打ち切るときの期限 (求解の期限 `deadline` そのもの)。`ENOMOTO_MIP_NO_SEP_DEADLINE` なら `None` (切り分け用、直す前と同じ)。
+/// 期限を過ぎた後だけ効くので、時間内の分離は変わらない
+fn sep_deadline(deadline: Option<std::time::Instant>) -> Option<std::time::Instant> {
+    if env_str!("ENOMOTO_MIP_NO_SEP_DEADLINE").is_some() {
+        None
+    } else {
+        deadline
+    }
+}
+
 /// 集約した行 `bases` ごとに (その行と符号を反転した行から) カットを作って仕上げ、行ごとに keep_best で絞った候補を
 /// 行の順に返す (`nth` 本のスレッドに交互に割り当てる。結果は逐次と同じ)。2 つ目の戻り値はスレッドの CPU 時間の合計。
 #[allow(clippy::too_many_arguments)]
@@ -4487,6 +4508,7 @@ fn gen_cuts_parallel(
     x: &[f64],
     inc: Option<&[f64]>,
     p: &MipProblem,
+    deadline: Option<std::time::Instant>,
 ) -> (Vec<Vec<Candidate>>, f64) {
     let nb = bases.len();
     let nth = nth.min(nb.max(1));
@@ -4498,7 +4520,8 @@ fn gen_cuts_parallel(
                     let mut scratch = vec![0.0f64; n];
                     let mut out = Vec::new();
                     let mut k = t;
-                    while k < nb {
+                    // 求解の期限 ([`sep_deadline`]) を過ぎたら残りの行は作らない
+                    while k < nb && !deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                         let base = &bases[k];
                         let neg: Vec<(usize, f64)> = base.iter().map(|&(j, a)| (j, -a)).collect();
                         let mut cs: Vec<Candidate> = Vec::new();
