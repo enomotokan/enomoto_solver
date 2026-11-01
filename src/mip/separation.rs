@@ -1041,6 +1041,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // カットの LP を打ち切り値つきで解く
         let root_cutoff = env_str!("ENOMOTO_MIP_ROOT_CUT_CUTOFF").is_some() && !self.params.submip && job.is_none() && self.snap.is_none();
         let mut closed_by_cutoff = false;
+        // 際どい時間の判定に頼らない止め方の試作 (外側の根だけ、既定では使わない。analysis/neos960392_cutstop_20261101.md)。
+        // neos-960392 は根の LP の値が最初から最適値で、カットは下界を動かさないのに、3 ラウンド目に入るかどうかが根のカットの
+        // 時間の上限 (CPU 時間) の際で決まり、根の頂点 (根の RENS の出発点) が回ごとに変わっていた。
+        // - `ENOMOTO_T_MIP_CUT_FLAT_STOP` = k (> 0): 根の LP の値から (相対 `ENOMOTO_T_MIP_CUT_FLAT_EPS`、既定 1e-9 以下しか) 動かない
+        //   ラウンドが最初から k 回続いたら止める (一度動いたら数えない。LP を外したラウンドも動かないラウンドと数える。
+        //   `ENOMOTO_MIP_CUT_FLAT_NO_FAIL` で数えない)。`intobj_stall` は「一度上がった後に動かない」側を受け持つ
+        // - `ENOMOTO_MIP_CUT_LP_CAP_STOP`: カットを足した LP が 1 回の LP の上限 (時間・反復) に当たって外したら、そこで止める
+        //   (2 回目を待たない)。値が `flat` なら、そこまで根の LP の値から動いていないときだけ
+        // - `ENOMOTO_T_MIP_CUT_WORK_CAP` = w (> 0): 根のカットの上限を時間ではなく手間 (このループの LP の反復の合計 / 根の LP の反復
+        //   + ラウンドの数 x `ENOMOTO_T_MIP_CUT_WORK_ROUND` (既定 0.05)) で測り、w を超えたら止める。時間の上限は
+        //   `ENOMOTO_T_MIP_CUT_WORK_TIME_MULT` 倍 (既定 2) にして安全網として残す
+        // - `ENOMOTO_T_MIP_CUT_LP_WORK` = m (> 0): 1 回の LP の上限を反復 (m x 根の LP の反復、最低 1000) で決める。時間の上限は
+        //   `ENOMOTO_T_MIP_CUT_LP_WORK_TIME_MULT` 倍 (既定 5) にして安全網として残す (下の `ENOMOTO_T_MIP_CUT_LP_WORK_PREV` も見る)
+        let cs_outer = !self.params.submip && job.is_none();
+        let flat_stop = if cs_outer { tunable!("ENOMOTO_T_MIP_CUT_FLAT_STOP", 0usize, usize) } else { 0 };
+        let flat_eps = tunable!("ENOMOTO_T_MIP_CUT_FLAT_EPS", 1e-9, f64);
+        let flat_fail = env_str!("ENOMOTO_MIP_CUT_FLAT_NO_FAIL").is_none();
+        let mut flat_rounds = 0usize;
+        let mut moved = false;
+        let lpcap_stop = if cs_outer { env_str!("ENOMOTO_MIP_CUT_LP_CAP_STOP").filter(|v| *v != "0") } else { None };
+        let work_cap = if cs_outer { tunable!("ENOMOTO_T_MIP_CUT_WORK_CAP", 0.0, f64) } else { 0.0 };
+        let work_round = tunable!("ENOMOTO_T_MIP_CUT_WORK_ROUND", 0.05, f64);
+        if work_cap > 0.0 {
+            time_cap *= tunable!("ENOMOTO_T_MIP_CUT_WORK_TIME_MULT", 2.0, f64);
+        }
+        let lp_work = if cs_outer { tunable!("ENOMOTO_T_MIP_CUT_LP_WORK", 0.0, f64) } else { 0.0 };
+        // `ENOMOTO_T_MIP_CUT_LP_WORK_PREV` = q (> 0): `ENOMOTO_T_MIP_CUT_LP_WORK` の反復の上限を、このループで最適まで解けたカットの LP の
+        // 反復の最大の q 倍より小さくしない (physiciansched6-2 は 0・1 ラウンドの LP が 900・808 反復で、2 ラウンド目の 1166 反復を
+        // 上限 1000 で外していた。neos-960392 は 133・126 反復で、2 ラウンド目の密なカットの LP は 3447 反復)
+        let lp_work_prev = tunable!("ENOMOTO_T_MIP_CUT_LP_WORK_PREV", 0.0, f64);
+        let mut ok_lp_iters = 0u64;
+        let mut loop_iters = 0u64;
+        let mut work_rounds = 0usize;
         loop {
             self.poll_fj_thread();
             if self.root_gap_closed() {
@@ -1260,6 +1293,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.time_up() || (now - cap_base > time_cap && round >= min_rounds) || (phase2 && now - t_loop0 > phase2_deadline && !heavy) || stopped(&job) {
                 break;
+            }
+            // `ENOMOTO_T_MIP_CUT_WORK_CAP`: 手間の上限
+            if work_cap > 0.0 && round >= min_rounds {
+                let work = loop_iters as f64 / root_iters.max(1) as f64 + work_round * work_rounds as f64;
+                if self.params.verbose && round > 0 {
+                    eprintln!("MIP: cut round {round}: root cut work cap check: work {work:.3} ({loop_iters} LP iters, {work_rounds} rounds) of cap {work_cap:.3}{}", if work > work_cap { " -> stop" } else { "" });
+                }
+                if work > work_cap {
+                    break;
+                }
             }
             self.bg_cut_rounds = round_ctr;
             // `ENOMOTO_T_MIP_CLIQUE_FB_EARLY` = k (> 0): fallback の判定を、k ラウンド回っても目的値がまったく動かないときは
@@ -1567,10 +1610,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let t_lp0 = std::time::Instant::now();
             let it0 = self.lp.total_iterations();
-            let lim = 10 * root_iters.max(100) + 10_000;
+            // `ENOMOTO_T_MIP_CUT_LP_WORK`: 1 回の LP の上限を反復で決める (時間の上限は安全網)
+            let lim = if lp_work > 0.0 { ((lp_work * root_iters.max(100) as f64) as u64).max(1000).max((lp_work_prev * ok_lp_iters as f64) as u64) } else { 10 * root_iters.max(100) + 10_000 };
             // 1 回の LP の時間の上限 (全体の 2%、最低 1 秒): 数値的に悪条件の LP が残り時間を使い切るのを防ぐ
             let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
             let cap = cap.max(lp_cap_mult * ok_lp_secs);
+            let cap = if lp_work > 0.0 { cap * tunable!("ENOMOTO_T_MIP_CUT_LP_WORK_TIME_MULT", 5.0, f64) } else { cap };
+            work_rounds += 1;
             let lp_deadline = if cap.is_finite() {
                 let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
                 Some(self.deadline.map_or(d, |g| g.min(d)))
@@ -1643,6 +1689,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             self.sb_iters += 0;
+            loop_iters += self.lp.total_iterations() - it0;
             lp_tot += t_lp0.elapsed().as_secs_f64();
             self.last_cut_lp_secs = t_lp0.elapsed().as_secs_f64();
             if prof {
@@ -1687,6 +1734,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     continue;
                 }
+                loop_iters += self.lp.total_iterations() - it2;
+                // `ENOMOTO_MIP_CUT_LP_CAP_STOP`: 1 回の LP の上限に当たったら止める (`flat` なら根の LP の値から動いていないときだけ)
+                let capped = matches!(st, LpStatus::TimeLimit | LpStatus::IterationLimit);
+                if capped && st2 == LpStatus::Optimal && lpcap_stop.is_some_and(|v| v != "flat" || !moved) {
+                    if self.params.verbose {
+                        eprintln!("MIP: cut round {round}: the cut LP hit the per-LP cap ({st:?}); stop (ENOMOTO_MIP_CUT_LP_CAP_STOP)");
+                    }
+                    break;
+                }
+                // `ENOMOTO_T_MIP_CUT_FLAT_STOP`: 外したラウンドも動かないラウンドと数える
+                if flat_stop > 0 && !moved && flat_fail && st2 == LpStatus::Optimal {
+                    flat_rounds += 1;
+                    if flat_rounds >= flat_stop {
+                        if self.params.verbose {
+                            eprintln!("MIP: cut loop: LP bound unchanged from the root LP for {flat_rounds} rounds (incl. a dropped round); stop (ENOMOTO_T_MIP_CUT_FLAT_STOP)");
+                        }
+                        break;
+                    }
+                }
                 // 1 回の失敗ではやめない (そのラウンドのカットだけ捨てて続ける。2 回目でやめる)
                 lp_failures += 1;
                 // `ENOMOTO_MIP_EQUIV2_CUTS` では `ENOMOTO_T_MIP_EQUIV2_CUT_LP_FAILS` 回目 (既定 2) でやめる
@@ -1697,6 +1763,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             ok_lp_secs = ok_lp_secs.max(t_lp0.elapsed().as_secs_f64());
+            ok_lp_iters = ok_lp_iters.max(self.lp.total_iterations() - it0);
             let obj = self.lp.objective();
             // 最適に解けたカットの LP の値は問題全体の下界 (根を閉じる判定 [`Solver::root_gap_closed`] に使う)
             if job.is_none() && self.snap.is_none() {
@@ -1760,6 +1827,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             obj_hist.push(obj);
             round_obj.push(obj);
+            // `ENOMOTO_T_MIP_CUT_FLAT_STOP`: 根の LP の値から動かないラウンドが最初から k 回続いたら止める
+            // (`moved` は `ENOMOTO_MIP_CUT_LP_CAP_STOP=flat` も使う)
+            if !moved && obj - first_obj > flat_eps * first_obj.abs().max(1.0) {
+                moved = true;
+            }
+            if flat_stop > 0 && !moved {
+                flat_rounds += 1;
+                if flat_rounds >= flat_stop {
+                    if self.params.verbose {
+                        eprintln!("MIP: cut loop: LP bound unchanged from the root LP for {flat_rounds} rounds; stop (ENOMOTO_T_MIP_CUT_FLAT_STOP)");
+                    }
+                    break;
+                }
+            }
             if prog_win > 0 && obj_hist.len() > prog_win {
                 let total = obj - first_obj;
                 let recent = obj - obj_hist[obj_hist.len() - 1 - prog_win];
