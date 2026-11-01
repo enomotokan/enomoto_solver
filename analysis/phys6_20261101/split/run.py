@@ -11,6 +11,8 @@ CFGS = {
     "def": {},
     # 試作: 裏のカットの待ちで、ラウンドが 2 つそろうまでは「停滞」とみなさない
     "mr2": {"ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_ROUNDS": "2"},
+    # 試作: 裏のカットの写しの根の LP に、主の基底の列番号と列の値を渡す
+    "bx": {"ENOMOTO_MIP_BG_CUTS_BASIS_X": "1"},
 }
 def cfg(name):
     if name in CFGS:

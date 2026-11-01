@@ -180,6 +180,8 @@ thread_local! {
     pub(super) static CUT_JOB: std::cell::RefCell<Option<std::sync::Arc<CutJob>>> = const { std::cell::RefCell::new(None) };
     /// カットを強める求解の根の LP の初めの基底 (主の根の LP の最後の基底。既定で渡す。`ENOMOTO_MIP_NO_BG_CUTS_BASIS` で渡さない)
     static BG_ROOT_BASIS: std::cell::RefCell<Option<super::lp::Basis>> = const { std::cell::RefCell::new(None) };
+    /// `ENOMOTO_MIP_BG_CUTS_BASIS_X` ([`bg_cuts_basis_x_on`]): 裏のカットの写しに渡す主の根の LP の基底の列番号と列の値
+    static BG_ROOT_X: std::cell::RefCell<Option<(Vec<usize>, Vec<f64>)>> = const { std::cell::RefCell::new(None) };
     /// 診断用: 既知の最適解 (縮約後の空間、`ENOMOTO_MIP_DEBUG_SOL`)。この解を含むノードが
     /// 枝刈りされたら理由を表示する (SCIP の debug solution と同様)。
     pub(crate) static DEBUG_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
@@ -2059,6 +2061,15 @@ pub(super) struct CutJob {
 /// mc11 は裏のカットの下界で解けるかどうかが決まり、根のサブ MIP が早く終わる設定 (`ENOMOTO_MIP_SUBMIP_HIGHS` の `s`) では
 /// 裏のカットが 1 ラウンドに 20 ほど上がっている途中 (16〜29 ラウンド) で止められ、根の下界が 11668〜11684 から 11375〜11590 に
 /// 落ちて解けなくなっていた (analysis/mc11_h1_20261030.md)
+/// `ENOMOTO_MIP_BG_CUTS_BASIS_X` (試作、既定では使わない): 裏のカットの写しの根の LP に、主の基底の列番号と一緒に列の値も渡す。
+/// 既定の [`super::lp::Basis`] を `set_basis` で入れる形では、基底に入る列しか引き継がれず、非基底の列の置き場所 (上限・下限) は
+/// 写しの LP の初めの値から決まる。退化の強い physiciansched6-2 では、主の最適基底から始めても写しの根の LP に 11030 反復・5.7 秒
+/// かかり、裏のカットの 1 ラウンド目が出るのは始めてから 6〜7 秒後になる。根のヒューリスティクスが 17〜18 秒で終わる回は、その前に
+/// 「0 ラウンド = 停滞」として止められ、根の下界が 49224 のまま (最適値 49324) 木に入って時間切れになる (analysis/phys6_20261101.md の 1 節)
+pub(crate) fn bg_cuts_basis_x_on() -> bool {
+    env_str!("ENOMOTO_MIP_BG_CUTS_BASIS_X").is_some()
+}
+
 pub(crate) fn bg_cuts_wait_on() -> bool {
     env_def!("ENOMOTO_MIP_BG_CUTS_WAIT", "1").is_some()
 }
@@ -4015,8 +4026,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let root_iters0 = self.lp.total_iterations();
         if self.snap.is_some() && (CUT_JOB.with(|j| j.borrow().is_some()) || DIVE_ONLY.with(|d| d.get()).0 == 5) {
             if let Some(b) = BG_ROOT_BASIS.with(|s| s.borrow_mut().take()) {
+                if self.params.verbose {
+                    let bc = b.col.iter().filter(|v| **v == super::lp::VarStatus::Basic).count();
+                    let br = b.row.iter().filter(|v| **v == super::lp::VarStatus::Basic).count();
+                    eprintln!("MIP: [snapshot] root basis from the main thread: columns {} / {}, rows {} / {} (basic columns {bc}, basic rows {br})", b.col.len(), self.p.n, b.row.len(), self.lp.num_rows());
+                }
                 if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
                     self.lp.set_basis(&b);
+                }
+            }
+            // `ENOMOTO_MIP_BG_CUTS_BASIS_X`: 基底の列番号に加えて主の LP の列の値も入れ、非基底の列を主と同じ側 (上限・下限) に置いて解き始める
+            if let Some((cols, x)) = BG_ROOT_X.with(|s| s.borrow_mut().take()) {
+                if cols.len() == self.lp.num_rows() && x.len() == self.p.n {
+                    self.lp.set_basis_cols(&cols, Some(&x));
+                    if self.params.verbose {
+                        eprintln!("MIP: [snapshot] root basis with the column values of the main thread");
+                    }
                 }
             }
         }
@@ -4281,12 +4306,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 写しの根の LP は基底なしで解き直しになり、uccase12 (88600 行) では 38 秒たっても終わらず、主がその終わりを
                 // 待って 23〜27 秒止まっていた (LP は止めの合図を見ない)
                 let bg_basis = if env_str!("ENOMOTO_MIP_NO_BG_CUTS_BASIS").is_none() { Some(self.lp.basis()) } else { None };
+                let bg_x = if bg_basis.is_some() && bg_cuts_basis_x_on() { self.lp.basis_cols().map(|c| (c, self.lp.col_values())) } else { None };
+                // 診断 (`ENOMOTO_MIP_BG_CUTS_LOG`): 主の LP の列の境界と大域的な境界 (写しの LP の境界) の食い違い
+                if env_str!("ENOMOTO_MIP_BG_CUTS_LOG").is_some() {
+                    let (mut tighter, mut looser, mut moved_basic, mut moved_nb) = (0usize, 0usize, 0usize, 0usize);
+                    let x = self.lp.col_values();
+                    for j in 0..self.p.n {
+                        let (l, u) = self.lp.col_bounds(j);
+                        let (gl, gu) = (self.dom.global_lo[j], self.dom.global_up[j]);
+                        if gl > l + 1e-9 || gu < u - 1e-9 {
+                            tighter += 1;
+                            if x[j] < gl - 1e-9 || x[j] > gu + 1e-9 {
+                                if bg_basis.as_ref().is_some_and(|b| b.col[j] == super::lp::VarStatus::Basic) { moved_basic += 1 } else { moved_nb += 1 }
+                            }
+                        }
+                        if gl < l - 1e-9 || gu > u + 1e-9 {
+                            looser += 1;
+                        }
+                    }
+                    eprintln!("MIP: background cuts: columns with global bounds tighter than the main LP {tighter} (LP value outside: basic {moved_basic}, nonbasic {moved_nb}), looser {looser}");
+                }
                 let handle = std::thread::Builder::new()
                     .stack_size(64 << 20)
                     .spawn(move || {
                         CUT_JOB.with(|j| *j.borrow_mut() = Some(j2));
                         BG_ROOT_ITERS.with(|c| c.set(ri));
                         BG_ROOT_BASIS.with(|b| *b.borrow_mut() = bg_basis);
+                        BG_ROOT_X.with(|b| *b.borrow_mut() = bg_x);
                         let _ = solve_worker(snap, None, params);
                     })
                     .expect("failed to spawn the cut thread");
