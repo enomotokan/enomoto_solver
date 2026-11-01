@@ -1481,6 +1481,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.solve_submip_problem(sub, node_limit, None).is_some_and(|r| r.1)
     }
 
+    /// `ENOMOTO_MIP_RENS_MORE_NODES_REAL` で RENS のやり直しを省いたときのログ (診断用、振る舞いは変えない)
+    fn log_rens_retry_skip(&self, r: &Option<(super::solver::MipStatus, bool)>) {
+        if self.params.verbose && super::solver::rens_more_nodes_real() && matches!(r, Some((super::solver::MipStatus::NodeLimit, _))) && !self.submip_full_nodes {
+            eprintln!("MIP:   RENS (more nodes) skipped: the sub-MIP stopped before its node limit");
+        }
+    }
+
     /// 加工したサブ MIP (`sub`: 列は元と同じ並び) を解き、見つかった解を元の問題の暫定解の候補にする。
     /// `cutoff` はサブ MIP の目的値の打ち切り値 (`None` なら元の打ち切り値。目的関数を変えたサブ MIP では指定する)。
     /// 戻り値は (サブ MIP の状態, 解を受け入れたか)。
@@ -2384,6 +2391,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let r = self.solve_submip_problem(sub, 500, None);
             self.submip_is_rens = false;
             self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _))) && (!super::solver::rens_more_nodes_real() || self.submip_full_nodes);
+            self.log_rens_retry_skip(&r);
             return r.is_some_and(|r| r.1);
         }
         let mut sub = p.clone();
@@ -2394,6 +2402,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.submip_is_rens = false;
         // `ENOMOTO_MIP_RENS_MORE_NODES_REAL`: 停滞・成果連動の打ち切りで止まったサブ MIP はやり直さない ([`super::solver::rens_more_nodes_real`])
         self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _))) && (!super::solver::rens_more_nodes_real() || self.submip_full_nodes);
+        self.log_rens_retry_skip(&r);
         r.is_some_and(|r| r.1)
     }
 

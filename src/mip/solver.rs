@@ -4449,11 +4449,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // ノード上限を 4 倍にして RENS をやり直す (`ENOMOTO_MIP_NO_RENS_MORE_NODES` で無効)。binkar10_1 は 500 ノードの
                 // RENS が 7182 で止まり、根の暫定解 6822.81 から木が 60 秒進まない (被約費用固定が効かず再スタートもしない)。
                 // 約 1600 ノードで RENS が 6754.85 を見つけ、再スタートして最適値 6742.2 に届く
-                if self.rens_node_limited && env_str!("ENOMOTO_MIP_NO_RENS_MORE_NODES").is_none() {
+                // サブ MIP の中 (深さ 2 以上) のやり直しは `ENOMOTO_MIP_RENS_MORE_NODES_SUB=0` で行わない、
+                // `ENOMOTO_T_MIP_RENS_MORE_NODES_SUB_MULT` でノード上限の倍率を外側と別にする (試作、既定は外側と同じ。analysis/rens_more_real_20261101.md)
+                let sub_off = self.params.submip && env_str!("ENOMOTO_MIP_RENS_MORE_NODES_SUB") == Some("0");
+                if self.rens_node_limited && !sub_off && env_str!("ENOMOTO_MIP_NO_RENS_MORE_NODES").is_none() {
                     let gap = self.incumbent.as_ref().map(|(z, _)| (z - (self.lp.objective() + self.p.offset)) / z.abs().max(1.0));
                     if let Some(gap) = gap {
                         if gap > tunable!("ENOMOTO_T_MIP_RENS_MORE_NODES_GAP", 0.005, f64) {
-                            self.submip_node_mult = tunable!("ENOMOTO_T_MIP_RENS_MORE_NODES_MULT", 4.0, f64);
+                            let mult = tunable!("ENOMOTO_T_MIP_RENS_MORE_NODES_MULT", 4.0, f64);
+                            self.submip_node_mult = if self.params.submip { tunable!("ENOMOTO_T_MIP_RENS_MORE_NODES_SUB_MULT", mult, f64) } else { mult };
                             heur!("RENS (more nodes)", self.rens(&x));
                             self.submip_node_mult = 1.0;
                         }
@@ -11391,6 +11395,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 6754.85 を見つけられず、木が 1 スレッドの 10 倍に増えていた)
                 if is_rens && r.status == MipStatus::NodeLimit && env_str!("ENOMOTO_MIP_NO_PARALLEL_RENS_RETRY").is_none() && (!rens_more_nodes_real() || r.nodes >= self.rens_spawn_node_limit) {
                     self.rens_node_limited = true;
+                }
+                if is_rens && r.status == MipStatus::NodeLimit && rens_more_nodes_real() && r.nodes < self.rens_spawn_node_limit && self.params.verbose {
+                    eprintln!("MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at {} of {} nodes", r.nodes, self.rens_spawn_node_limit);
                 }
                 if self.params.verbose {
                     eprintln!("MIP:   parallel sub-MIP ({label}): status {:?}, nodes {}, objective {:?}, {:.2}s", r.status, r.nodes, r.objective, t0.elapsed().as_secs_f64());
