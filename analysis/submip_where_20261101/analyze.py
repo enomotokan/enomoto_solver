@@ -64,7 +64,7 @@ def parse(path):
 
 def kind_of(s):
     """サブ MIP の種類の名 (木の中のサブ MIP は呼び出し側のノード > 0 で区別する)。"""
-    k = s["kind"] or "(no label)"
+    k = s["kind"] or "RINS (bg cuts, no label)"
     if s["caller_node"] > 0 and not k.startswith("tree"):
         k = "tree:" + k
     return k
@@ -77,8 +77,8 @@ def where(e, subs, by, chain=()):
         ce = by.get(e["child"], [])
         if c is None or not ce:
             return ("submip?", f"sub-MIP #{e['child']} (no inc)", None)
-        cls, desc, _ = where(ce[-1], subs, by, chain + (e["child"],))
-        return ("nested", f"{kind_of(c)}(d{c['depth']}) > {desc}", ce[-1]["node"])
+        cls, desc, leaf = where(ce[-1], subs, by, chain + (e["child"],))
+        return ("nested", f"{kind_of(c)}(d{c['depth']}) > {desc}", leaf)
     src = e["src"].replace("other thread: ", "")
     if e["node"] == 0:
         if src == "tree":
@@ -98,6 +98,7 @@ def main():
     nb = defaultdict(lambda: defaultdict(int))  # 分類 -> ノードの区分 -> 本数
     waste = defaultdict(lambda: [0, 0, 0.0, 0.0])  # (kind,depth) -> [本数, 最後の改善の後のノード, その後の秒, 全体の秒]
     waste_all = [0, 0, 0.0, 0.0]
+    z0 = defaultdict(lambda: [0, 0.0])  # 最後の改善がノード 0 の深さ 1 のサブ MIP: 全体のノード数の区分 -> [本数, 最後の改善の後の秒]
     final_src = []
     per_prob = []
     for f in files:
@@ -148,6 +149,9 @@ def main():
                 if s["depth"] == 1:
                     leaf_cnt[(cls, lcls, ldesc if lcls in ("root heuristic", "tree heuristic") else "")] += 1
                     nb[cls if cls != "nested" else "nested(at node 0 of this sub-MIP)"][nbin(last["node"])] += 1
+                if s["end"] and s["depth"] == 1 and last["node"] == 0:
+                    z0[nbin(s["end"]["nodes"])][0] += 1
+                    z0[nbin(s["end"]["nodes"])][1] += max(0.0, s["end"]["T"] - last["T"])
                 if s["end"]:
                     w = waste[key]
                     w[0] += 1
@@ -176,7 +180,10 @@ def main():
             else:
                 src = first["src"].replace("other thread: ", "")
                 who = "main tree: " + ("LP integral" if src == "tree" else src)
-            fs = dict(prob=prob, who=who, desc=desc, node=first["node"], t=first["T"], leaf_node=leaf)
+            e = first
+            while e["child"] > 0 and by.get(e["child"]):
+                e = by[e["child"]][-1]
+            fs = dict(prob=prob, who=who, desc=desc, node=first["node"], t=first["T"], leaf_node=leaf, leaf_cls=where(e, subs, by)[0])
             final_src.append(fs)
         st = res["status"] if res else "?"
         per_prob.append((prob, st, res.get("time") if res else None, len(subs), sum(1 for s in subs.values() if s["depth"] == 1), nacc1, tsub, fs))
@@ -214,6 +221,23 @@ def main():
         w = waste[key]
         print(f"| {key[0]} | {key[1]} | {w[0]} | {w[1]} | {w[2]:.1f} | {w[3]:.1f} |")
     print(f"| (深さ 1 の計) | 1 | {waste_all[0]} | {waste_all[1]} | {waste_all[2]:.1f} | {waste_all[3]:.1f} |")
+    print()
+    print("# 深さ 1 で外側の暫定解を良くし、最後の改善がノード 0 だったサブ MIP: 回した全ノード数の分布と、最後の改善の後の秒")
+    print("| 全ノード数 | 本数 | 最後の改善の後の秒 |")
+    print("|---|---|---|")
+    for b in BINS:
+        if b[2] in z0:
+            print(f"| {b[2]} | {z0[b[2]][0]} | {z0[b[2]][1]:.1f} |")
+    print()
+    print("# 最終的な暫定解をサブ MIP が最初に出した問題: その解の葉 (入れ子をたどった最後) の出どころ")
+    lc = defaultdict(list)
+    for fs in final_src:
+        if fs["who"].startswith("sub-MIP"):
+            lc[fs["leaf_cls"]].append(f"{fs['prob']}({fs['leaf_node']})")
+    print("| 葉の出どころ | 問題数 | 問題 (葉のノード) |")
+    print("|---|---|---|")
+    for k, v in sorted(lc.items(), key=lambda kv: -len(kv[1])):
+        print(f"| {k} | {len(v)} | {', '.join(v)} |")
     print()
     print("# 最終的な暫定解 (最適解または最後の暫定解) を最初に出したもの")
     cnt = defaultdict(int)
