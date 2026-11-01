@@ -1,0 +1,125 @@
+# サブ MIP の種類と深さごと (本数・解いた秒の和・呼び出し側の暫定解を良くした本数 acc・外側 (主) の暫定解に届いた本数 toM・解なし)
+| 種類 | 深さ | 本数 | 秒の和 | ノードの和 | acc | toM | 解なしの本数 | 解なしの秒 |
+|---|---|---|---|---|---|---|---|---|
+| root reduced cost | 1 | 13 | 32.5 | 1430 | 5 | 5 | 3 | 6.7 |
+| RENS | 1 | 21 | 28.1 | 737 | 10 | 10 | 8 | 1.4 |
+| RENS (more nodes) | 1 | 1 | 20.6 | 2000 | 0 | 0 | 1 | 20.6 |
+| RINS | 1 | 22 | 11.3 | 1133 | 7 | 7 | 4 | 4.5 |
+| LP face | 1 | 15 | 11.3 | 787 | 6 | 6 | 3 | 4.1 |
+| locks | 1 | 15 | 5.1 | 9 | 2 | 2 | 13 | 2.8 |
+| tree local branching | 1 | 6 | 2.4 | 892 | 0 | 0 | 3 | 1.5 |
+| tree proximity | 1 | 5 | 1.6 | 783 | 0 | 0 | 5 | 1.6 |
+| tree RINS | 1 | 6 | 0.9 | 600 | 0 | 0 | 4 | 0.6 |
+| RINS (bg cuts, no label) | 1 | 5 | 0.7 | 239 | 2 | 2 | 1 | 0.0 |
+| clique | 1 | 7 | 0.4 | 20 | 1 | 1 | 6 | 0.3 |
+| tree crossover | 1 | 2 | 0.2 | 230 | 0 | 0 | 1 | 0.0 |
+| vbounds (tight) | 1 | 3 | 0.2 | 19 | 0 | 0 | 2 | 0.0 |
+| vbounds (loose) | 1 | 4 | 0.1 | 5 | 0 | 0 | 3 | 0.0 |
+| RENS (LP before cuts) | 1 | 2 | 0.0 | 0 | 0 | 0 | 1 | 0.0 |
+| tree mutation | 1 | 3 | 0.0 | 7 | 0 | 0 | 1 | 0.0 |
+| tree DINS | 1 | 2 | 0.0 | 0 | 0 | 0 | 1 | 0.0 |
+| RENS | 2 | 55 | 11.6 | 2109 | 17 | 5 | 38 | 4.8 |
+| RENS (more nodes) | 2 | 8 | 5.6 | 981 | 2 | 1 | 1 | 2.1 |
+| RENS (LP before cuts) | 2 | 13 | 1.5 | 17 | 0 | 0 | 13 | 1.5 |
+| RENS | 3 | 49 | 0.2 | 33 | 0 | 0 | 49 | 0.2 |
+
+# 呼び出し側の暫定解を良くしたサブ MIP の、最後の改善の出どころ (種類・深さごと)
+| 種類 | 深さ | root LP integral | root heuristic | nested | tree heuristic | tree LP integral | submip? |
+|---|---|---|---|---|---|---|---|
+| LP face | 1 | 0 | 0 | 2 | 4 | 0 | 0 |
+| RENS | 1 | 5 | 0 | 1 | 3 | 1 | 0 |
+| RINS | 1 | 1 | 3 | 0 | 2 | 1 | 0 |
+| RINS (bg cuts, no label) | 1 | 0 | 1 | 0 | 1 | 0 | 0 |
+| clique | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
+| locks | 1 | 0 | 1 | 0 | 1 | 0 | 0 |
+| root reduced cost | 1 | 0 | 1 | 2 | 1 | 1 | 0 |
+| RENS | 2 | 1 | 1 | 0 | 15 | 0 | 0 |
+| RENS (more nodes) | 2 | 0 | 0 | 0 | 2 | 0 | 0 |
+
+# 深さ 1 で外側の暫定解を良くしたサブ MIP: 出どころ (入れ子なら中の葉) の内訳
+| 出どころ | 葉 | 葉の名 | 本数 |
+|---|---|---|---|
+| root LP integral | root LP integral |  | 6 |
+| tree heuristic | tree heuristic | tree diving | 6 |
+| tree heuristic | tree heuristic | tree randomized rounding | 6 |
+| tree LP integral | tree LP integral |  | 3 |
+| nested | tree heuristic | tree randomized rounding | 3 |
+| root heuristic | root heuristic | vector length diving | 3 |
+| nested | tree heuristic | tree diving | 2 |
+| root heuristic | root heuristic | int shifting | 1 |
+| root heuristic | root heuristic | randomized rounding | 1 |
+| nested | root LP integral |  | 1 |
+| root heuristic | root heuristic | fractional diving | 1 |
+
+# 深さ 1 で外側の暫定解を良くしたサブ MIP: 最後の改善のノード番号の分布 (出どころごと)
+| 出どころ | 0 | 1-10 | 11-50 | 51-100 | 101-500 | >500 |
+|---|---|---|---|---|---|---|
+| nested(at node 0 of this sub-MIP) | 6 | 0 | 0 | 0 | 0 | 0 |
+| root LP integral | 6 | 0 | 0 | 0 | 0 | 0 |
+| root heuristic | 6 | 0 | 0 | 0 | 0 | 0 |
+| tree LP integral | 0 | 0 | 1 | 0 | 2 | 0 |
+| tree heuristic | 0 | 6 | 3 | 2 | 1 | 0 |
+
+# 呼び出し側の暫定解を良くしたサブ MIP の、最後の改善の後に回したノードと秒 (無駄の量)
+| 種類 | 深さ | 本数 | 最後の改善の後のノード | その後の秒 | 全体の秒 |
+|---|---|---|---|---|---|
+| root reduced cost | 1 | 5 | 185 | 3.1 | 15.6 |
+| RINS | 1 | 7 | 195 | 2.1 | 4.6 |
+| RENS | 1 | 10 | 326 | 1.2 | 25.5 |
+| LP face | 1 | 6 | 211 | 0.9 | 1.9 |
+| RINS (bg cuts, no label) | 1 | 2 | 19 | 0.0 | 0.3 |
+| clique | 1 | 1 | 20 | 0.0 | 0.1 |
+| locks | 1 | 2 | 5 | 0.0 | 2.3 |
+| RENS | 2 | 17 | 1169 | 3.8 | 6.8 |
+| RENS (more nodes) | 2 | 2 | 22 | 0.2 | 3.4 |
+| (深さ 1 の計) | 1 | 33 | 961 | 7.3 | 50.3 |
+
+# 深さ 1 で外側の暫定解を良くし、最後の改善がノード 0 だったサブ MIP: 回した全ノード数の分布と、最後の改善の後の秒
+| 全ノード数 | 本数 | 最後の改善の後の秒 |
+|---|---|---|
+| 0 | 7 | 0.0 |
+| 1-10 | 2 | 0.1 |
+| 11-50 | 2 | 0.0 |
+| 51-100 | 7 | 5.8 |
+
+# 最終的な暫定解をサブ MIP が最初に出した問題: その解の葉 (入れ子をたどった最後) の出どころ
+| 葉の出どころ | 問題数 | 問題 (葉のノード) |
+|---|---|---|
+| tree heuristic | 6 | blp-ar98(76), dcmulti(18), fiber(52), mas76(13), neos-3083819-nubu(54), neos5(4) |
+| tree LP integral | 3 | 10teams(215), neos-960392(148), nu25-pr12(15) |
+| root LP integral | 3 | beavma(0), hypothyroid-k1(0), p200x1188c(0) |
+| root heuristic | 3 | flugpl(0), h80x6320d(0), mzzv42z(0) |
+
+# 最終的な暫定解 (最適解または最後の暫定解) を最初に出したもの
+| 出したもの | 問題数 |
+|---|---|
+| sub-MIP RENS | 5 |
+| sub-MIP root reduced cost | 3 |
+| sub-MIP RINS | 3 |
+| sub-MIP RINS (bg cuts, no label) | 2 |
+| sub-MIP clique | 1 |
+| main tree: tree local branching | 1 |
+| sub-MIP locks | 1 |
+| main tree: tree randomized rounding | 1 |
+
+# 問題ごと (状態・秒・サブ MIP の本数 (全部 / 深さ 1)・深さ 1 で受け入れた本数・深さ 1 の秒の和・最終的な暫定解の出どころ)
+| 問題 | 状態 | 秒 | サブ MIP | 深さ 1 | acc | 深さ 1 の秒 | 最終解を最初に出したもの | その中の出どころ | ノード | 時刻 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 10teams | optimal | 4.7 | 9 | 5 | 1 | 6.1 | sub-MIP root reduced cost | root reduced cost(d1) > tree LP integral | 215 | 3.5 |
+| beavma | optimal | 0.5 | 2 | 2 | 1 | 0.0 | sub-MIP RENS | RENS(d1) > node 0 LP integral | 0 | 0.2 |
+| blp-ar98 | time_limit | 60.2 | 19 | 9 | 1 | 43.2 | sub-MIP RENS | RENS(d1) > RENS (more nodes)(d2) > tree randomized rounding | 76 | 14.3 |
+| dcmulti | optimal | 1.1 | 8 | 5 | 1 | 0.5 | sub-MIP clique | clique(d1) > RENS(d2) > tree randomized rounding | 18 | 0.5 |
+| drayage-100-23 | optimal | 7.8 | 7 | 6 | 2 | 1.8 | main tree: tree local branching | tree local branching | 708 | 5.8 |
+| fiber | optimal | 1.5 | 8 | 8 | 2 | 0.2 | sub-MIP root reduced cost | root reduced cost(d1) > tree randomized rounding | 52 | 1.1 |
+| flugpl | optimal | 0.1 | 7 | 4 | 1 | 0.0 | sub-MIP locks | locks(d1) > int shifting | 0 | 0.0 |
+| h80x6320d | optimal | 49.3 | 16 | 12 | 3 | 10.7 | sub-MIP RINS | RINS(d1) > vector length diving | 0 | 25.7 |
+| hypothyroid-k1 | optimal | 34.1 | 3 | 3 | 1 | 0.8 | sub-MIP RENS | RENS(d1) > node 0 LP integral | 0 | 8.1 |
+| mas76 | optimal | 10.4 | 39 | 10 | 2 | 0.9 | sub-MIP root reduced cost | root reduced cost(d1) > RENS(d2) > tree diving | 13 | 0.2 |
+| mzzv42z | time_limit | 60.1 | 15 | 10 | 4 | 18.8 | sub-MIP RINS (bg cuts, no label) | RINS (bg cuts, no label)(d1) > randomized rounding | 0 | 22.8 |
+| neos-3083819-nubu | optimal | 24.4 | 25 | 16 | 3 | 3.0 | sub-MIP RINS (bg cuts, no label) | RINS (bg cuts, no label)(d1) > tree randomized rounding | 54 | 2.4 |
+| neos-960392 | optimal | 36.9 | 5 | 3 | 1 | 15.7 | sub-MIP RENS | RENS(d1) > tree LP integral | 148 | 23.7 |
+| neos5 | time_limit | 60.0 | 56 | 12 | 1 | 1.8 | sub-MIP RINS | RINS(d1) > tree diving | 4 | 0.4 |
+| nu25-pr12 | optimal | 4.3 | 11 | 8 | 4 | 1.5 | sub-MIP RINS | RINS(d1) > tree LP integral | 15 | 1.0 |
+| p200x1188c | optimal | 5.0 | 9 | 9 | 2 | 0.2 | sub-MIP RENS | RENS(d1) > node 0 LP integral | 0 | 2.2 |
+| physiciansched6-2 | time_limit | 60.3 | 2 | 2 | 0 | 0.5 | (解なし) | | | |
+| swath1 | optimal | 40.4 | 16 | 8 | 3 | 9.9 | main tree: tree randomized rounding | tree randomized rounding | 1129 | 30.4 |

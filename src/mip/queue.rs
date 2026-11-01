@@ -58,6 +58,66 @@ pub struct OpenNode {
     /// 中のノードの番号)。子は親のものを引き継ぐ。二分探索のスレッドが「この祖先の部分木には t 未満の解がない」と示したら、
     /// 下界を t に上げる。
     pub tags: Option<Rc<Vec<u64>>>,
+    /// 強分岐で得た、部分木で成り立つ境界 (`ENOMOTO_MIP_SB_TIGHTEN_INHERIT`) と凸性の直線 (`ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR`)。
+    /// 親から子へ引き継ぎ、ノードの処理の始めに定義域に当てる ([`super::solver`] の `apply_sb_inherit`)
+    pub sb: Option<Rc<SbInherit>>,
+}
+
+/// 強分岐の子の LP 値から得た凸性の直線 (列 `col` の上の子 (`up`) か下の子)。祖先のノードの LP 値 `z`・列の値 `v`・1 単位あたりの
+/// 増分 `per` から、x_j <= t (下) の LP の値は z + (v − t)·per 以上 (上なら x_j >= t で z + (t − v)·per 以上)。子孫のノードの LP は
+/// 祖先より制約が多いので、子孫でもこの下界は成り立つ
+#[derive(Clone, Copy, Debug)]
+pub struct SbLine {
+    pub col: u32,
+    pub up: bool,
+    pub z: f64,
+    pub v: f64,
+    pub per: f64,
+}
+
+impl SbLine {
+    /// 直線が下界として成り立つ端 (下の子の直線なら t <= ⌊v⌋、上なら t >= ⌈v⌉)
+    pub fn end(&self) -> f64 {
+        if self.up { self.v.ceil() } else { self.v.floor() }
+    }
+
+    /// 端 `t` での値
+    pub fn at(&self, t: f64) -> f64 {
+        if self.up { self.z + (t - self.v) * self.per } else { self.z + (self.v - t) * self.per }
+    }
+
+    /// `self` が `o` を支配するか (`o` が成り立つ範囲の全体で `self` も成り立ち、値が `o` 以上): その範囲は半直線なので、
+    /// 端が `o` 以上に広く、傾きが `o` 以上で、`o` の端での値が `o` 以上なら足りる
+    fn dominates(&self, o: &SbLine) -> bool {
+        let wider = if self.up { self.end() <= o.end() } else { self.end() >= o.end() };
+        wider && self.per >= o.per && self.at(o.end()) >= o.at(o.end()) - 1e-9 * (1.0 + o.at(o.end()).abs())
+    }
+}
+
+/// 強分岐で得て子に引き継ぐもの ([`OpenNode::sb`])。
+#[derive(Clone, Debug, Default)]
+pub struct SbInherit {
+    /// 強分岐の片側の打ち切りによる固定と凸性による締め付け (このノードの部分木で成り立つ)
+    pub fixes: Vec<BoundChange>,
+    /// 列と向きごとの直線の最大 (凸な折れ線、祖先のものも含む)。支配された直線は持たず、1 本の折れ線は最大
+    /// `ENOMOTO_T_MIP_SB_POLY_MAX` 本の直線 (超えたら古いものから捨てる)。折れ線の数は列の数 × 2 以下
+    pub polys: std::collections::BTreeMap<(u32, bool), Vec<SbLine>>,
+}
+
+impl SbInherit {
+    /// 直線を折れ線に足す (支配されていれば足さない、足した直線が支配するものは消す)。足したら真
+    pub fn insert(&mut self, l: SbLine, max: usize) -> bool {
+        let poly = self.polys.entry((l.col, l.up)).or_default();
+        if poly.iter().any(|o| o.dominates(&l)) {
+            return false;
+        }
+        poly.retain(|o| !l.dominates(o));
+        poly.push(l);
+        if poly.len() > max {
+            poly.remove(0);
+        }
+        true
+    }
 }
 
 /// 待ち行列。

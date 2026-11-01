@@ -176,7 +176,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// サブ MIP を解く。
     pub(super) fn locks_heur(&mut self) -> bool {
         let p = self.p;
-        if self.params.submip {
+        // `ENOMOTO_MIP_SUBMIP_NESTED` の `l` なら深さ 1 のサブ MIP の中でも ([`Self::submip_nested`])
+        if self.params.submip && !self.submip_nested('l') {
             return false;
         }
         let mut order: Vec<(u32, usize)> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).map(|j| (self.locks[j].0 + self.locks[j].1, j)).collect();
@@ -199,7 +200,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 固定率が 3 割以上ならサブ MIP を解く。`x` は根の LP 解。
     pub(super) fn clique_heur(&mut self, x: &[f64]) -> bool {
         let p = self.p;
-        if self.params.submip {
+        // `ENOMOTO_MIP_SUBMIP_NESTED` の `c` なら深さ 1 のサブ MIP の中でも ([`Self::submip_nested`])
+        if self.params.submip && !self.submip_nested('c') {
             return false;
         }
         let binary = |j: usize| p.is_int[j] && self.dom.global_lo[j] == 0.0 && self.dom.global_up[j] == 1.0;
@@ -237,7 +239,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 固定率が 3 割以上ならサブ MIP を解く。
     pub(super) fn vbounds_heur(&mut self, loose: bool) -> bool {
         let p = self.p;
-        if self.params.submip {
+        // `ENOMOTO_MIP_SUBMIP_NESTED` の `v` なら深さ 1 のサブ MIP の中でも ([`Self::submip_nested`])
+        if self.params.submip && !self.submip_nested('v') {
             return false;
         }
         let vb = VarBounds::from_rows(p.n, &p.is_int, &p.rows, &p.row_lo, &p.row_up);

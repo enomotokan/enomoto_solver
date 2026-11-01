@@ -10191,3 +10191,67 @@ main・develop 以外のブランチ (inv/cutpool-prop・inv/mcf-cuts・ccr-e9c2
 - MIPLIB 40 問・負けている 21 問 (4 スレッド・60 秒・交互に各 2 回): 40 問 SGM 19.53 / 21.66 -> 20.84 / 20.10 秒 (解けた数 26 / 25 ->
   25 / 26)、21 問 19.39 / 20.92 -> 21.51 / 19.17 秒 (18 / 19 -> 17 / 19)、不一致 0。前処理が変わるのは 3 問で、mik-250-20-75-4
   11.3 -> 6.3 秒、swath1・physiciansched6-2 は揺れの範囲 (`analysis/slackcol_20261028.md`)。
+
+## 2026-10-30: tableau のカットの非零の予算 (CglGomory の nReasonable) を、根の下界が止まってからかける形で既定にする (採用)
+
+CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作をブランチ claude/enomoto-cbc-comparison-25e0k5 で測り、develop に取り込んだ。
+試作はどれも環境変数で入れる形のままで、既定にしたのは次の 1 つだけ。
+- `ENOMOTO_MIP_TAB_NNZ_CBC` (既定で使う。`0` で止める): tableau 行をスコアの順に試し、作ったカットの非零の合計が予算に届いたら止める。
+  予算は根で max(5n, nnz/8 + min(10000, nnz + 2m))、ノードで max(2n, nnz/8 + 200)。
+- `ENOMOTO_T_MIP_TAB_NNZ_GAIN` (既定 1e-4。`0` で、根でも常に予算をかける): 根で直前のラウンドの目的値の相対的な伸びが 1e-4 を超えるあいだ
+  (最初のラウンドを含む) は、予算をかけない。
+- 予算を根で常にかける形では、mc11 (後半のラウンドで候補が減り、根の下界 11668 -> 11625) と ns1208400 (密なカットで 1 ラウンド約 13 行)
+  が解けなくなった。下界が止まってから予算をかける形にすると、どちらも解ける。
+- 58 問 × 2 回: SGM +1.4%、解けた数 80 -> 80。Mittelmann 186 問 × 1 回: SGM −0.2%、解けた数 43 -> 44 (neos-3004026-krka・neos-911970・
+  roll3000 が解け、air05・neos-957323 が時間切れ)。どちらも揺れの範囲で、最適値の食い違いは 0。
+- qiu は、根の LP の同時実行 (双対単体法と内点法 + クロスオーバー) のどちらが勝つかで頂点が変わり、解けるかどうかが変わる。予算とは関係しない。
+- 記録は `analysis/cbcimpl_20261029.md`。
+
+## 2026-10-30: 根のカットの 1 ラウンドの上限を 2 倍ずつ広げる形を既定にする (採用)
+
+- `ENOMOTO_MIP_CUT_WIDEN_DOUBLE` (既定で使う。`0` で止める): 上限 (50 本) まで採っても目的値が動かないラウンドが来たとき、1 ラウンドの上限を
+  一気に行の数 (1000 本まで) に広げるのでなく、そういうラウンドのたびに 2 倍にする (50 -> 100 -> 200 -> ... -> 1000)。
+- きっかけ: physiciansched6-2 (4 コアの機械) では、50 本から一気に広げたラウンドで 247〜308 本が入り、カットの LP が 1 回の時間の上限
+  (60 秒の 2%) に当たってそのラウンドのカットを全部外し、2 回でループが終わって根の下界が 48724 で止まっていた (`analysis/hl4_20261030.md`)。
+- 58 問 × 2 回 (4 スレッド・60 秒、12 か所で分担): SGM −2.0%・−4.5%、解けた数 42 -> 42・41 -> 43 (physiciansched6-2・qiu)。
+  解けなくなった問題はなく、最適値の食い違いは 0。neos-3381206-awhea (以前の一気に広げる形のきっかけ) は 8.8 -> 7.8 秒。
+- 同じ計測で、LP が時間の上限に当たったら以後の本数を半分にする形 (`ENOMOTO_MIP_CUT_LP_HALVE` + `ENOMOTO_T_MIP_CUT_LP_CAP_MULT=3` +
+  `ENOMOTO_MIP_CUT_CAP_FROM_LOOP`) は SGM −1.0%・−1.0% だったが、2 倍ずつ広げる形と重ねると得が消えるので既定にしない。
+- 記録は `analysis/halve_submip_20261030.md`。
+
+## 2026-10-31: 時間の上限の超過を 2 つ直し、HiGHS 風のサブ MIP などの 7 つの設定 (cand) を既定にする (採用)
+
+- 超過の直し方 (どちらも既定で使う):
+  - 根の並列サブ MIP を出すとき (`Solver::spawn_submip`)、空きを待った後に時間の上限を外側の期限までの残りで押さえ、残りがなければ出さない
+    (`ENOMOTO_MIP_NO_SUBMIP_SPAWN_CLAMP` で押さえない)。rmatr200-p5 (cand) は、残り 38 秒で作ったサブ MIP が別のサブ MIP を 29 秒待ってから
+    38 秒の上限で走り、60 秒の上限に対して 89〜92 秒で返っていた -> 60.1 秒。
+  - Local-MIP・FJ の連鎖の手 (`localmip::chain_move`) の中でも時間の上限・止めの合図を見る (`ENOMOTO_MIP_NO_CHAIN_ABORT` で見ない)。
+    sorrell3 (旧既定でも) は 1 回の連鎖の手に数秒かかり、FJ のスレッドの終わりを待つ主が 117.5 秒で返った回があった -> 60.6〜60.9 秒。
+- 既定にした (それぞれ戻し方): `ENOMOTO_MIP_SUBMIP_HIGHS` の既定 `-s` (`0` で使わない)、`ENOMOTO_MIP_SUBMIP_PC_INHERIT` (`0`)、
+  `ENOMOTO_T_MIP_SUBMIP_RELIABLE` の既定 0 (`-1`)、`ENOMOTO_MIP_BG_CUTS_WAIT` (`0`)、`ENOMOTO_MIP_SUBMIP_HIGHS_TRIM` の既定 `r` (`0`)、
+  `ENOMOTO_T_MIP_RESTART_FIRST_FAC` の既定 0.01 (`0`)、`ENOMOTO_MIP_BG_CUTS_PROOF_STOP` (`0`)。
+- bench7 (`analysis/halve_submip_20261030.md`): 58 問 × 2 回 SGM −6.1%・解けた数 83 -> 85、Mittelmann 186 問 −2.9%・44 -> 49。
+  片方だけ解けた 7 回は全部 cand だけ。遅くなる n5-3・neos-1582420・neos-2978193-inde は残りの課題。
+- 新ビルドの既定が旧ビルド + cand の環境変数と同じ振る舞いになることを 5 問のログで確かめた。記録は `analysis/cand_default_20261031.md`。
+
+## 2026-11-01: サブ MIP の無駄を削る trim3 を既定にする (採用)
+
+- 既定にした (それぞれ戻し方): `ENOMOTO_MIP_RENS_MORE_NODES_REAL` (RENS のやり直しを本当にノード上限まで進んだときだけにする、`0`)、
+  `ENOMOTO_MIP_RENS_RESUME` (やり直しを最初からでなく続きから行う、`0`。REAL の場合分けも含むので両方 `0` で元通り)、
+  `ENOMOTO_MIP_RENS_MAX_DEPTH` の既定 2 (深さ 3 の RENS をやめる、`1000`)、`ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH` の既定 1
+  (深さ 2 の `RENS (LP before cuts)` をやめる、`1000`)。
+- 根拠: 停滞・成果連動で止まった RENS のやり直しは 12 問 3 回で 17 本・89.7 秒・解 0 本、深さ 3 の RENS は 58 問で 135 本中 1 本しか解を出さない
+  (`analysis/submip_where_20261101.md`・`rens_more_real_20261101.md`・`rens_depth3_20261101.md`・`rens_resume_20261101.md`)。
+  bench9・bench10 (`analysis/halve_submip_20261030.md`): 58 問 4 回 SGM −2.4%・解けた数 168 -> 173、Mittelmann 2 回 差なし (92 -> 91)。
+  neos-1171448 は REAL の道の入れ替わりで時間切れの率が上がる (`analysis/neos1171448_20261101.md`)。
+- 記録は `analysis/trim3_default_20261101.md`。
+
+## 2026-11-01: 根のカットのループの止め方 cs2 を既定にする (採用)
+
+- 既定にした (それぞれ戻し方): `ENOMOTO_T_MIP_CUT_LP_WORK` の既定 0.1 (外側の根のカットの 1 回の LP の上限を反復で決める、`0`)、
+  `ENOMOTO_T_MIP_CUT_LP_WORK_PREV` の既定 5 (`0`)、`ENOMOTO_MIP_CUT_LP_CAP_STOP` の既定 `flat` (根の LP から動いていないループでは
+  1 回外したら止める、`0`)、`ENOMOTO_MIP_CUT_CAP_FROM_LOOP` (根のカットの時間の上限をループの始めから数える、`0`)。
+- 根拠: neos-960392 は根のカットのループが 3 ラウンド目に入るかを CPU 時間の際で決めていて、入ると根の RENS の近傍が最適解を含まない
+  (`analysis/neos960392_20261101.md`・`neos960392_cutstop_20261101.md`)。bench12 (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −3.5%・
+  解けた数 83 -> 87、Mittelmann −0.6%・46 -> 46、neos-960392 0/3 -> 3/3。既定だけが解けた 2 問は揺れ (`analysis/cs2_check_20261101.md`)。
+- 記録は `analysis/cs2_default_20261101.md`。

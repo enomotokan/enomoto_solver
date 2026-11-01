@@ -849,6 +849,18 @@ pub(crate) mod presolve {
     /// 上下限伝播の絶対許容誤差 (上下限の更新幅・矛盾判定・行の冗長判定に使う)。
     pub(crate) const PROPAGATE_EPS: f64 = 1e-9;
 
+    /// 強制行の判定 (`propagate_split`・`propagate_equalities`) で、最小活動度 (上側の強制なら最大活動度) が右辺に届いていると
+    /// みなす残りの余裕 `b - 最小活動度` の上限の相対値 (`ENOMOTO_T_FORCING_SLACK_REL`)。余裕が
+    /// `FORCING_SLACK_REL * (1 + max(Σ|項|, |b|))` (丸め誤差の大きさ) 以下のときだけ全項を端に固定する。0 で従来の判定
+    /// (余裕が絶対 `PROPAGATE_EPS` 以下なら固定)。
+    ///
+    /// 余裕 δ が残る行は強制行ではない: 各項 j は端から δ/|a_j| まで動ける。従来はこれを端に固定しており、|a_j| が小さいと
+    /// 動かした量 δ/|a_j| が `PROPAGATE_EPS` を大きく越え、それが別の行にたまって実行不能と判定した (h80x6320d の再スタート 2 の
+    /// 問題: `-0.1 x + y <= 0`、x ∈ [0, 2e-9] の余裕 2e-10 の行で x を 2e-9 に固定し、`Σx - 384 y <= 2e-9` (y = 0) に 2 本分たまって
+    /// 4e-9 > 2e-9 + 1e-9。実行可能な問題を実行不能とし、誤った最適値を返した。`analysis/presolve_infeasible_20261101.md`)。
+    /// 余裕のある行は境界の強化 (候補は正確) に任せる。
+    pub(crate) const FORCING_SLACK_REL: f64 = 1e-12;
+
     /// 不等式伝播 (`propagate_split`) の相対改善閾値 (`ENOMOTO_T_PROP_RELTOL`)。
     /// 有限の境界は改善幅が `reltol * (1 + |bound|)` を超えるときだけ更新する。
     /// 0 で無効 (絶対閾値 `PROPAGATE_EPS` のみ)。

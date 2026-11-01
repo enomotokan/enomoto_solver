@@ -3386,6 +3386,31 @@ fn dual_active_costs(std: &StdForm) -> Vec<f64> {
     active_cost
 }
 
+thread_local! {
+    /// [`node_perturb_criterion`] の結果のキャッシュ (行列の識別子 [`set_price_key`]、構造列の数、結果)。
+    static NODE_PERTURB_CACHE: std::cell::Cell<Option<(u64, usize, bool)>> = const { std::cell::Cell::new(None) };
+}
+
+/// `ENOMOTO_NODE_PERTURB` の判定: 構造列の費用の絶対値の種類の数 (0 を含む) の 4 倍が構造列の数以下か
+/// (CLP `ClpSimplexDual::perturb` の「number * 4 > numberColumns なら摂動しない」)。行列の識別子 `key` があれば
+/// 同じ識別子の間は結果を使い回す (分枝限定法の LP は行列を作り直すまで費用も同じ)。
+fn node_perturb_criterion(std: &StdForm, key: Option<u64>) -> bool {
+    let n_orig = std.n_total - std.n_rows;
+    if let (Some(k), Some((ck, cn, r))) = (key, NODE_PERTURB_CACHE.with(|c| c.get())) {
+        if k == ck && cn == n_orig {
+            return r;
+        }
+    }
+    let mut v: Vec<u64> = std.c[..n_orig].iter().map(|c| c.abs().to_bits()).collect();
+    v.sort_unstable();
+    v.dedup();
+    let r = v.len() * 4 <= n_orig;
+    if let Some(k) = key {
+        NODE_PERTURB_CACHE.with(|c| c.set(Some((k, n_orig, r))));
+    }
+    r
+}
+
 /// PRICE 専用の `A` の行優先コピー (列添字 `u32` の SoA 形式)。
 ///
 /// HiGHS の行方向分割 PRICE 行列と同じく、各行の価格付けする要素 (非基底で固定でない列) を
@@ -3930,6 +3955,26 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 基底行ごとの境界のキャッシュ([`RowBounds`])。
     let mut row_bounds = RowBounds::new(&cache, &basis, &noise_feasible);
     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
+    // `ENOMOTO_NODE_PERTURB` (試作、既定では使わない): 再最適化の近道 (分枝限定法の warm start) でも、主実行不能な行があり、
+    // 構造列の費用の絶対値の種類が少なければ (種類の数 x 4 <= 構造列の数) 費用を摂動する。CLP の双対単体法
+    // (ClpSimplexDual.cpp 336-365 の startupSolve: CBC の中では主実行不能なときだけ `perturb()`、6650-6662 の判定) にならう。
+    // 費用の種類が少ない問題 (0-1 の組合せ問題など) は双対退化が強く、真の費用のままだと退化ピボットが続く。
+    // 摂動した費用では `fast_finish` を使わず、通常の `finish` (真の費用に戻す cleanup) を通る。warm start が既にずらした
+    // 費用 (`active_cost - std.c`) は保ち、摂動の分を足す。摂動で被約費用の符号が置いた側と合わなくなった非基底列は、
+    // warm start と同じく費用をずらして被約費用を 0 にする (主の値は変えない)
+    let node_perturbed = fast_reopt
+        && warm_started
+        && !infeasible_rows.rows.is_empty()
+        && env_str!("ENOMOTO_NODE_PERTURB").is_some()
+        && node_perturb_criterion(std, PRICE_KEY.with(|k| k.get()));
+    if node_perturbed {
+        let pert = dual_active_costs(std);
+        for j in 0..n_total {
+            active_cost[j] += pert[j] - std.c[j];
+        }
+        // warm start の被約費用は真の費用のものなので使わない
+        warm_d.clear();
+    }
     // S14: 全スラック開始では基底コストがすべて `+0.0` なので `y = B^-T c_B` も正確に `+0.0` で、
     // `fresh_d_into` は `d = active_cost` を再現する。[`fresh_d_into_zero_y`] はそれを直接書き、
     // BTRAN の合成クロック tick だけを再現する(CLOCK トリガとピボット経路はビット単位で不変)。
@@ -3944,6 +3989,26 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }
     } else {
         fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut d);
+    }
+    if node_perturbed {
+        // 摂動で双対実行不能になった非基底列の費用をずらす (warm start と同じ扱い)
+        let mut shifted = 0usize;
+        for j in 0..n_total {
+            let bad = std.lb[j] != std.ub[j] && match nb_status[j] {
+                Some(NbStatus::Lower) => d[j] < -TOL,
+                Some(NbStatus::Upper) => d[j] > TOL,
+                Some(NbStatus::Zero) => d[j].abs() > TOL,
+                None => false,
+            };
+            if bad {
+                active_cost[j] -= d[j];
+                d[j] = 0.0;
+                shifted += 1;
+            }
+        }
+        if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+            eprintln!("DEBUG_EXT: node perturbation: {} infeasible rows, {shifted} columns shifted back", infeasible_rows.rows.len());
+        }
     }
 
     xprof("s_fresh_d");

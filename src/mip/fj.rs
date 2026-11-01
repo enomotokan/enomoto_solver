@@ -471,7 +471,8 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             let r = cons_row[s.violated[k] as usize] as usize;
             chain_tries += 1;
             let mut view = FjView { fj: &mut s, p, row_cons: &row_cons };
-            let res = super::localmip::chain_move(&mut view, r, chain_depth, 64, &set_of);
+            let abort = || Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+            let res = super::localmip::chain_move(&mut view, r, chain_depth, 64, &set_of, &abort);
             if let Some((_, mv, eff)) = res {
                 s.effort += eff;
                 chain_ok += 1;

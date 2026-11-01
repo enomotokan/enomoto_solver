@@ -30,9 +30,45 @@ pub fn compute_locks(p: &MipProblem) -> Vec<(u32, u32)> {
     locks
 }
 
+/// 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): サブ MIP の入れ子を区別するログ `SMT ...` を出すか (振る舞いは変えない)。
+pub(super) fn submip_trace() -> bool {
+    env_str!("ENOMOTO_MIP_SUBMIP_VERBOSE").is_some()
+}
+
+/// 診断用: `SMT` のログの時刻 (このプロセスで最初に呼んだときから数えた秒)。
+pub(super) fn submip_trace_secs() -> f64 {
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    T0.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
+/// 診断用: サブ MIP を解き始める印。番号を振り、このスレッドの道筋 ([`SUBMIP_TAG`]) を `parent/番号` にして、元の道筋を返す。
+pub(super) fn submip_trace_begin(parent: &str, kind: &str, caller_node: u64, nfree: usize, n: usize, node_limit: u64, time_limit: f64, parallel: bool) -> (u64, String) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let depth = parent.matches('/').count() + 1;
+    eprintln!(
+        "MIP: SMT begin id={id} parent={parent} depth={depth} kind=[{kind}] caller_node={caller_node} free={nfree}/{n} node_limit={node_limit} time_limit={time_limit:.2} parallel={} T={:.3}",
+        parallel as u8,
+        submip_trace_secs()
+    );
+    let prev = SUBMIP_TAG.with(|t| t.replace(format!("{parent}/{id}")));
+    (id, prev)
+}
+
 thread_local! {
+    /// 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE` のログ `SMT ...`): このスレッドで解いているサブ MIP の番号の道筋 (`M` は外側の求解、
+    /// `M/3/7` は 3 番のサブ MIP の中の 7 番)。並列のサブ MIP のスレッドは出した側の道筋を受け継ぐ
+    pub(super) static SUBMIP_TAG: std::cell::RefCell<String> = std::cell::RefCell::new(String::from("M"));
+    /// 診断用: サブ MIP の解を暫定解の候補にしている間だけ、そのサブ MIP の番号 (0 = サブ MIP の解でない)
+    pub(super) static SUBMIP_CHILD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// このスレッドで解いているサブ MIP の入れ子の深さ (元の問題は 0。[`Solver::solve_submip_problem`] で 1 つ増やす)。
     pub(super) static SUBMIP_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// このスレッドで解いているサブ MIP では使わない `ENOMOTO_MIP_SUBMIP_HIGHS` の文字の印 ([`super::submip_hs_bit`] の和。
+    /// `ENOMOTO_MIP_SUBMIP_HIGHS_TRIM`・`ENOMOTO_MIP_SUBMIP_HIGHS_RESTART`、[`Solver::hs_drop`])
+    pub(super) static SUBMIP_HS_DROP: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+    /// このスレッドで解いているサブ MIP は外側の求解の再スタート後の根で作ったものか (`ENOMOTO_MIP_SUBMIP_RELIABLE_RESTART_ONLY`、
+    /// [`Solver::submip_r0_on`])
+    pub(super) static SUBMIP_R0: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `ENOMOTO_MIP_FJ_NOSOL_EXTEND` (試作): 並列の FJ のスレッドで、解がまだ 1 つもなければ時間の予算を過ぎても種を変えた FJ2 を
     /// この秒数 (FJ を始めてから) まで続ける (0 = 使わない)。止める合図 (根のカットのループの終わり) が来ればそこで止まる
     pub(super) static FJ_NOSOL_CAP: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
@@ -582,6 +618,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 break;
             }
+            if dive_rcfix() {
+                self.dive_rc_fix(&x, steps == 1);
+            }
             // 丸める列と最初に試す向きを選ぶ (スコアの小さいもの)
             let mut pick: Option<(usize, f64, bool, f64)> = None; // (列, 値, 上へ, スコア)
             let multi = if multi_div > 0 && !no_multi && frac.len() >= multi_min { frac.len() / multi_div } else { 1 };
@@ -739,6 +778,60 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.sync_lp();
         self.lp.restore_state(&saved);
         found
+    }
+
+    /// `ENOMOTO_MIP_DIVE_RCFIX` (試作、既定では使わない): ダイビングの各段で、CBC の `CbcHeuristicDive` と同じく
+    /// (1) 被約費用による固定 (`reducedCostFix`): 暫定解があれば、境界にある非基底の整数列で、被約費用 × 動かす幅が
+    /// 打ち切り値までの余裕を超える側を締める。
+    /// (2) 最初の段だけ、整数値で境界にある整数列を |被約費用| の大きい順に整数列の 20% まで今の値に固定する
+    /// (`fixOtherVariables`。LP の最適性は崩れない)。
+    /// 固定は定義域にだけ置く (次の決定の `sync_lp` で LP に渡る)。ダイビングの終わりに戻す
+    fn dive_rc_fix(&mut self, x: &[f64], first: bool) {
+        let p = self.p;
+        let rc = self.lp.reduced_costs_ref().into_owned();
+        let lp_obj = self.lp.objective() + p.offset;
+        let lim = self.prune_limit();
+        let gap = lim - lp_obj;
+        let mut n_fix = 0usize;
+        if gap.is_finite() && gap > 0.0 {
+            for j in 0..p.n {
+                if !p.is_int[j] || self.dom.lo[j] >= self.dom.up[j] {
+                    continue;
+                }
+                let d = rc[j];
+                if d > 1e-7 && x[j] <= self.dom.lo[j] + 1e-9 {
+                    let nu = self.dom.lo[j] + (gap / d + 1e-6).floor();
+                    if nu < self.dom.up[j] {
+                        self.dom.tighten_upper(p, j, nu);
+                        n_fix += 1;
+                    }
+                } else if d < -1e-7 && x[j] >= self.dom.up[j] - 1e-9 {
+                    let nl = self.dom.up[j] - (gap / (-d) + 1e-6).floor();
+                    if nl > self.dom.lo[j] {
+                        self.dom.tighten_lower(p, j, nl);
+                        n_fix += 1;
+                    }
+                }
+            }
+        }
+        if first {
+            let nint = p.is_int.iter().filter(|&&b| b).count();
+            let mut c: Vec<(f64, usize)> = (0..p.n)
+                .filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j] && rc[j].abs() > 1e-7)
+                .filter(|&j| (rc[j] > 0.0 && x[j] <= self.dom.lo[j] + 1e-9) || (rc[j] < 0.0 && x[j] >= self.dom.up[j] - 1e-9))
+                .map(|j| (-rc[j].abs(), j))
+                .collect();
+            c.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            for &(_, j) in c.iter().take(nint / 5) {
+                if rc[j] > 0.0 {
+                    self.dom.tighten_upper(p, j, self.dom.lo[j]);
+                } else {
+                    self.dom.tighten_lower(p, j, self.dom.up[j]);
+                }
+                n_fix += 1;
+            }
+        }
+        self.dive_rcfix_count += n_fix as u64;
     }
 
     /// ダイビングの 1 つの決定: 列 `j` を `v` の上 (下) の整数に締め、伝播して LP を解く。LP が最適で目的値が
@@ -1388,6 +1481,47 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.solve_submip_problem(sub, node_limit, None).is_some_and(|r| r.1)
     }
 
+    /// `ENOMOTO_MIP_RENS_MORE_NODES_REAL` で RENS のやり直しを省いたときのログ (診断用、振る舞いは変えない)
+    fn log_rens_retry_skip(&self, r: &Option<(super::solver::MipStatus, bool)>) {
+        if self.params.verbose && super::solver::rens_more_nodes_real() && matches!(r, Some((super::solver::MipStatus::NodeLimit, _))) && !self.submip_full_nodes {
+            eprintln!("MIP:   RENS (more nodes) skipped: the sub-MIP stopped before its node limit");
+        }
+    }
+
+    /// 今からサブ MIP を始めるときの時間の上限と、解のないうちの上限 (`ENOMOTO_MIP_SUBMIP_HIGHS_NOSOL`) ([`Self::solve_submip_problem`]。
+    /// `ENOMOTO_MIP_RENS_RESUME` の継続も同じ決め方で今の残り時間から決め直す)。
+    pub(super) fn submip_time_limit(&self) -> (f64, Option<f64>) {
+        let remaining = match self.deadline {
+            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
+            None => f64::INFINITY,
+        };
+        // `ENOMOTO_MIP_SUBMIP_HIGHS` の `t`: 根 (外側の求解) のサブ MIP の時間の上限を残り時間の `ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_FRAC` (1)
+        // 倍、最大 `ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_MAX` (上限なし) にする (HiGHS の `solveSubMip` は残り時間を渡し、ノード数で止める)。
+        // 木の中 (大近傍探索の予算で上限を絞る) とサブ MIP の中のサブ MIP は今のまま
+        // `ENOMOTO_MIP_SUBMIP_HIGHS_TRIM`・`_RESTART` で文字を抜くサブ MIP ([`Self::hs_drop`]) は、抜いた `t`・`g` も使わない
+        let hs_drop = self.hs_drop();
+        let hs_on = |c: char| super::submip_highs(c) && hs_drop & super::submip_hs_bit(c) == 0;
+        let time_highs = hs_on('t') && !self.params.submip && self.nodes <= 1;
+        // `t` がないときの時間の上限
+        let t_plain = {
+            let t = (self.submip_time_frac * remaining).min(self.submip_time_max);
+            // `ENOMOTO_MIP_ROOT_SUBMIP_REL` (試作): 根のサブ MIP は外側の求解の経過秒の k 倍まで ([`super::root_submip_rel`])
+            match super::root_submip_rel().filter(|_| !self.params.submip && self.snap.is_none() && self.nodes <= 1 && self.incumbent.is_some()) {
+                Some(k) => t.min((k * super::root_submip_ref_secs().unwrap_or(f64::INFINITY)).max(tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_REL_MIN", 0.5, f64))),
+                None => t,
+            }
+        };
+        // `ENOMOTO_MIP_SUBMIP_HIGHS_NOSOL` (試作、既定では使わない): `t` で時間の上限を延ばした根のサブ MIP も、解を 1 つも見つけないうちは
+        // `t` がないときの上限の `ENOMOTO_T_MIP_SUBMIP_HIGHS_NOSOL_MULT` (1) 倍で止める ([`super::solver::SubmipCtl::nosol_deadline`])
+        let nosol = (time_highs && env_str!("ENOMOTO_MIP_SUBMIP_HIGHS_NOSOL").is_some()).then(|| tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_NOSOL_MULT", 1.0, f64) * t_plain);
+        let time_limit = if time_highs {
+            (tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_FRAC", 1.0, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_MAX", f64::INFINITY, f64))
+        } else {
+            t_plain
+        };
+        (time_limit, nosol)
+    }
+
     /// 加工したサブ MIP (`sub`: 列は元と同じ並び) を解き、見つかった解を元の問題の暫定解の候補にする。
     /// `cutoff` はサブ MIP の目的値の打ち切り値 (`None` なら元の打ち切り値。目的関数を変えたサブ MIP では指定する)。
     /// 戻り値は (サブ MIP の状態, 解を受け入れたか)。
@@ -1437,29 +1571,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP:   sub-MIP dump {f}: rows {}, free integer columns {nfree} of {} (cutoff {:.6e}, {:.2}s)", sub.m, sub.is_int.iter().filter(|&&b| b).count(), cutoff.unwrap_or_else(|| self.prune_limit()), self.start.elapsed().as_secs_f64());
             }
         }
-        let remaining = match self.deadline {
-            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
-            None => f64::INFINITY,
-        };
-        // `ENOMOTO_MIP_SUBMIP_HIGHS` の `t`: 根 (外側の求解) のサブ MIP の時間の上限を残り時間の `ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_FRAC` (1)
-        // 倍、最大 `ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_MAX` (上限なし) にする (HiGHS の `solveSubMip` は残り時間を渡し、ノード数で止める)。
-        // 木の中 (大近傍探索の予算で上限を絞る) とサブ MIP の中のサブ MIP は今のまま
-        let time_highs = super::submip_highs('t') && !self.params.submip && self.nodes <= 1;
+        let hs_drop = self.hs_drop();
+        let r0 = self.submip_r0_on();
         // `ENOMOTO_MIP_SUBMIP_HIGHS` の `g`: ギャップを親と同じにする (HiGHS は `mip_rel_gap = 0`)
-        let gap_highs = super::submip_highs('g');
+        let gap_highs = super::submip_highs('g') && hs_drop & super::submip_hs_bit('g') == 0;
+        let (time_limit, nosol) = self.submip_time_limit();
+        // `ENOMOTO_MIP_SUBMIP_NESTED` ([`Self::submip_nested`]) で深さ 1 のサブ MIP の中から作るサブ MIP は小さく
+        let nested_budget = self.nested_budget();
+        let (time_limit, node_limit) = match nested_budget {
+            Some((n, t)) => (time_limit.min(t), node_limit.min(n)),
+            None => (time_limit, node_limit),
+        };
         let params = super::solver::MipParams {
-            time_limit: if time_highs {
-                (tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_FRAC", 1.0, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_MAX", f64::INFINITY, f64))
-            } else {
-                let t = (self.submip_time_frac * remaining).min(self.submip_time_max);
-                // `ENOMOTO_MIP_ROOT_SUBMIP_REL` (試作): 根のサブ MIP は外側の求解の経過秒の k 倍まで ([`super::root_submip_rel`])
-                match super::root_submip_rel().filter(|_| !self.params.submip && self.snap.is_none() && self.nodes <= 1 && self.incumbent.is_some()) {
-                    Some(k) => t.min((k * super::root_submip_ref_secs().unwrap_or(f64::INFINITY)).max(tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_REL_MIN", 0.5, f64))),
-                    None => t,
-                }
-            },
+            time_limit,
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
-            node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult) as u64,
+            // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT_ROOT`・`_TREE`・`_DEEP` (試作、既定 1): さらに、外側の根のサブ MIP・外側の木の中のサブ MIP・
+            // サブ MIP の中のサブ MIP (入れ子) だけに掛ける倍率 (analysis/submip_nodes_20261101.md)
+            node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult * if self.params.submip {
+                tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT_DEEP", 1.0, f64)
+            } else if self.nodes <= 1 {
+                tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT_ROOT", 1.0, f64)
+            } else {
+                tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT_TREE", 1.0, f64)
+            }) as u64,
             // サブ MIP は解を探すためのものなので、ギャップは外側の設定より緩くてよい (外側の既定 0 でも 1e-4 で止める)
             // `ENOMOTO_T_MIP_SUBMIP_NOINC_GAP` = g (> 0、試作、既定 0 で今まで通り): 外側の求解に暫定解がまだなければ、サブ MIP をギャップ g で
             // 止めて早く解を返させる (並列のサブ MIP の解は終わるまで外側に渡らない。physiciansched6-2 では Local-MIP が解を出さない回に、
@@ -1485,17 +1619,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 使わない)。停滞による打ち切り (`ENOMOTO_T_MIP_SUBMIP_STALL`) と合わせて 93 問 (4 スレッド・60 秒、2 回): 主ギャップの和
         // 13.77 -> 12.99、SGM 38.29 -> 37.66 秒 (analysis/mip_primal_weakness_20261016.md)
         let basis = if env_str!("ENOMOTO_MIP_NO_SUBMIP_BASIS").is_none() && sub.n == p.n && self.lp.num_rows() >= p.m { Some(self.lp.basis().col) } else { None };
+        // `ENOMOTO_MIP_SUBMIP_PC_INHERIT` (既定で使う。`0` で止める): 今の pseudocost をサブ MIP の初めの pseudocost にする (HiGHS の `pscostinit`)。
+        // サブ MIP は空の pseudocost から始めるので、強分岐を減らす (`ENOMOTO_T_MIP_SUBMIP_RELIABLE`・`ENOMOTO_MIP_SUBMIP_HIGHS` の `s`) と分枝の見積りが全体の平均だけになる
+        let sub_pc = (env_def!("ENOMOTO_MIP_SUBMIP_PC_INHERIT", "1").is_some() && sub.n == p.n).then(|| self.pc.clone());
         // 並列モード (根のヒューリスティクスの間): 別スレッドで解き始め、結果は後で受け取る
         if self.parallel_submips {
             self.submip_basis = basis;
+            self.submip_pc = sub_pc;
+            self.submip_hs_drop = hs_drop;
+            self.submip_r0 = r0;
+            self.submip_nosol = nosol;
             self.spawn_submip(sub, params);
             return Some((super::solver::MipStatus::NotSolved, false));
         }
         let fix_rate = self.submip_fix_rate.take();
         let depth = SUBMIP_DEPTH.with(|d| d.get());
         SUBMIP_DEPTH.with(|d| d.set(depth + 1));
+        let hs_drop_prev = SUBMIP_HS_DROP.with(|f| f.replace(hs_drop));
+        let r0_prev = SUBMIP_R0.with(|f| f.replace(r0));
         if let Some(b) = basis {
             super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
+        }
+        if let Some(pc) = sub_pc {
+            super::solver::SUBMIP_PC.with(|s| *s.borrow_mut() = Some(pc));
         }
         // `ENOMOTO_MIP_FJ_P3=submip` (試作): サブ MIP の前処理でも p5s の前処理の変更を有効にする ([`super::fj_p3_problem`]。本体の問題は変えない)
         let p3 = env_str!("ENOMOTO_MIP_FJ_P3") == Some("submip") && !crate::fj_p3_force();
@@ -1511,19 +1657,53 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP` で使わない): 根の (主のスレッドで解く) サブ MIP も成果で打ち切る ([`super::solver::submip_outcome_stop`])
         if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
-            let c = std::sync::Arc::new(super::solver::SubmipCtl::new(self.prune_limit()));
+            let c = std::sync::Arc::new(super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol));
             super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(c));
         }
-        let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        let node_limit = params.node_limit;
+        // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): サブ MIP の始め・終わり・受け入れを番号付きで出す
+        let trace = (self.params.verbose && submip_trace()).then(|| {
+            let parent = SUBMIP_TAG.with(|t| t.borrow().clone());
+            let nfree = (0..sub.n).filter(|&j| sub.is_int[j] && sub.col_lo[j] < sub.col_up[j]).count();
+            submip_trace_begin(&parent, self.heur_label, self.nodes, nfree, sub.is_int.iter().filter(|&&b| b).count(), node_limit, params.time_limit, false)
+        });
+        // `ENOMOTO_MIP_RENS_RESUME` ([`super::solver::rens_resume_on`]): 根の RENS は専用のスレッドで解き、ノード上限まで進んだら
+        // その時点の結果を受け取ってスレッドを一時停止のまま取っておく (やり直しはその続きから。[`Self::rens_resume`])
+        let resumable = self.submip_is_rens && super::solver::rens_resume_on() && self.nodes <= 1;
+        let mut paused = None;
+        let (nfree_all, nint_all) = ((0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count(), sub.is_int.iter().filter(|&&b| b).count());
+        let nfree_int = (0..sub.n).filter(|&j| sub.is_int[j] && sub.col_lo[j] < sub.col_up[j]).count();
+        let r = if resumable {
+            // 前の一時停止は捨てる (同時に取っておくのは 1 本だけ)
+            self.drop_rens_paused("a new RENS");
+            let ctl = super::solver::ROOT_SUBMIP_CTL.with(|s| s.borrow().clone());
+            let (h, link) = super::solver::spawn_resumable_submip(sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+            match link.wait() {
+                Some(r) => {
+                    paused = Some(super::solver::PausedSubmip { handle: Some(h), link, ctl, node_limit, nodes: r.nodes, iters: r.lp_iterations, objective: r.objective, nfree: nfree_int, nint: nint_all, at: Instant::now(), parallel: false });
+                    r
+                }
+                None => h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)),
+            }
+        } else {
+            super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none())
+        };
+        if let Some((id, prev)) = &trace {
+            SUBMIP_TAG.with(|t| *t.borrow_mut() = prev.clone());
+            eprintln!("MIP: SMT end id={id} status={:?} nodes={} objective={:?} secs={:.3} T={:.3}{}", r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64(), submip_trace_secs(), if paused.is_some() { " paused=1" } else { "" });
+        }
+        self.submip_full_nodes = r.nodes >= node_limit;
         super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = None);
         if p3 {
             crate::set_fj_p3_force(false);
         }
         super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = None);
+        super::solver::SUBMIP_PC.with(|s| *s.borrow_mut() = None);
         SUBMIP_DEPTH.with(|d| d.set(depth));
+        SUBMIP_HS_DROP.with(|f| f.set(hs_drop_prev));
+        SUBMIP_R0.with(|f| f.set(r0_prev));
         if self.params.verbose {
-            let nfree = (0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();
-            eprintln!("MIP:   sub-MIP: {nfree} free columns of {}, status {:?}, nodes {}, objective {:?}, {:.2}s", p.n, r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64());
+            eprintln!("MIP:   sub-MIP: {nfree_all} free columns of {}, status {:?}, nodes {}, objective {:?}, {:.2}s{}", p.n, r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64(), if paused.is_some() { " (paused at the node limit)" } else { "" });
         }
         if comp_diag {
             eprintln!("SUBMIP_COMP: {} result: status {:?}, nodes {}, {:.2}s", self.heur_label, r.status, r.nodes, t_sub.elapsed().as_secs_f64());
@@ -1531,13 +1711,95 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.heur_iters += r.lp_iterations;
         let acc = match r.x {
-            Some(x) => self.try_incumbent(x),
+            Some(x) => {
+                let child = SUBMIP_CHILD.with(|c| c.replace(trace.as_ref().map_or(0, |t| t.0)));
+                let a = self.try_incumbent(x);
+                SUBMIP_CHILD.with(|c| c.set(child));
+                a
+            }
             None => false,
         };
+        if let Some((id, _)) = &trace {
+            eprintln!("MIP: SMT acc id={id} accepted={} T={:.3}", acc as u8, submip_trace_secs());
+        }
         if let Some(fr) = fix_rate {
             self.note_fix_rate(fr, r.status == super::solver::MipStatus::Infeasible, acc);
         }
+        if paused.is_some() {
+            self.rens_paused = paused;
+        }
         Some((r.status, acc))
+    }
+
+    /// `ENOMOTO_MIP_RENS_RESUME`: 一時停止している RENS のサブ MIP ([`Self::rens_paused`]) を捨てる (止めの合図を出してスレッドの終わりを待つ)。
+    pub(super) fn drop_rens_paused(&mut self, why: &str) {
+        if let Some(ps) = self.rens_paused.take() {
+            let t0 = Instant::now();
+            let (nodes, held) = (ps.nodes, ps.at.elapsed().as_secs_f64());
+            drop(ps);
+            if self.params.verbose {
+                eprintln!("MIP:   RENS (more nodes): paused sub-MIP ({nodes} nodes, held {held:.2}s) dropped ({why}), {:.3}s to stop", t0.elapsed().as_secs_f64());
+            }
+        }
+    }
+
+    /// `ENOMOTO_MIP_RENS_RESUME` ([`super::solver::rens_resume_on`]): ノード上限で一時停止している RENS のサブ MIP を、ノード上限を
+    /// 1 回目の上限の `submip_node_mult` 倍 (通算) に、時間の上限を今の残り時間から新しいサブ MIP と同じ決め方 ([`Self::submip_time_limit`])
+    /// で、打ち切り値を今の刈り込みの上限にして続きから解く。見つけた解を受け入れたら真。
+    pub(super) fn rens_resume(&mut self) -> bool {
+        let Some(ps) = self.rens_paused.take() else { return false };
+        let node_limit = ((ps.node_limit as f64) * self.submip_node_mult) as u64;
+        let (secs, _) = self.submip_time_limit();
+        let cutoff = self.prune_limit();
+        if secs <= 0.0 || node_limit <= ps.nodes {
+            drop(ps);
+            return false;
+        }
+        let (nodes0, iters0, held, par) = (ps.nodes, ps.iters, ps.at.elapsed().as_secs_f64(), ps.parallel);
+        let trace = (self.params.verbose && submip_trace()).then(|| {
+            let parent = SUBMIP_TAG.with(|t| t.borrow().clone());
+            let (id, prev) = submip_trace_begin(&parent, self.heur_label, self.nodes, ps.nfree, ps.nint, node_limit, secs, false);
+            let mine = SUBMIP_TAG.with(|t| t.replace(prev));
+            eprintln!("MIP: SMT resume id={id} from_nodes={nodes0} T={:.3}", submip_trace_secs());
+            (id, mine)
+        });
+        if self.params.verbose {
+            eprintln!(
+                "MIP:   RENS (more nodes): resuming the paused {} sub-MIP at {nodes0} nodes (objective {:?}, held {held:.2}s): node limit {} -> {node_limit}, time limit {secs:.2}s, cutoff {cutoff:.10e}",
+                if par { "parallel" } else { "sequential" },
+                ps.objective,
+                ps.node_limit
+            );
+        }
+        let t0 = Instant::now();
+        let r = ps.resume(super::solver::ResumeCmd { node_limit, secs, cutoff, tag: trace.as_ref().map(|t| t.1.clone()) });
+        let Some(r) = r else {
+            if let Some((id, _)) = &trace {
+                eprintln!("MIP: SMT end id={id} status=NotSolved nodes={nodes0} objective=None secs={:.3} T={:.3}", t0.elapsed().as_secs_f64(), submip_trace_secs());
+            }
+            return false;
+        };
+        if let Some((id, _)) = &trace {
+            eprintln!("MIP: SMT end id={id} status={:?} nodes={} objective={:?} secs={:.3} T={:.3}", r.status, r.nodes, r.objective, t0.elapsed().as_secs_f64(), submip_trace_secs());
+        }
+        self.submip_full_nodes = r.nodes >= node_limit;
+        self.heur_iters += r.lp_iterations.saturating_sub(iters0);
+        if self.params.verbose {
+            eprintln!("MIP:   sub-MIP (resumed): status {:?}, nodes {} ({} after the pause), objective {:?}, {:.2}s", r.status, r.nodes, r.nodes.saturating_sub(nodes0), r.objective, t0.elapsed().as_secs_f64());
+        }
+        let acc = match r.x {
+            Some(x) => {
+                let child = SUBMIP_CHILD.with(|c| c.replace(trace.as_ref().map_or(0, |t| t.0)));
+                let a = self.try_incumbent(x);
+                SUBMIP_CHILD.with(|c| c.set(child));
+                a
+            }
+            None => false,
+        };
+        if let Some((id, _)) = &trace {
+            eprintln!("MIP: SMT acc id={id} accepted={} T={:.3}", acc as u8, submip_trace_secs());
+        }
+        acc
     }
 
     /// 今の LP のカットの行 (問題の行より後ろ) のうち、LP 解で上限か下限に (相対 1e-6 で) 接しているもの。
@@ -1641,6 +1903,59 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (lo, up, applied)
     }
 
+    /// `ENOMOTO_MIP_SUBMIP_HIGHS_TRIM` (既定 `r`。`0` で止める): これから作るサブ MIP を `ENOMOTO_MIP_SUBMIP_HIGHS` の形にせず、既定の形で
+    /// 解くか (そのサブ MIP の中の入れ子のサブ MIP も同じ。印は [`SUBMIP_HS_DROP`])。値の文字: `r` 外側の求解の再スタートの後の根のサブ MIP、
+    /// `d` 深さ 2 以上のサブ MIP (サブ MIP の中で作るもの)。どちらの文字も含まない値なら両方。HiGHS 風のサブ MIP (hs、`-s`) は根のカット 25 ラウンド・
+    /// サブ MIP の中の RENS で 1 本が重く、binkar10_1 では良い解で再スタートが 3 回起きるたびに根のヒューリスティクスを回し直し (5.9 → 25 秒)、
+    /// dcmulti では入れ子の RENS のサブ MIP も 25 ラウンドのカットを回していた。一方、h80x6320d の得は最初の根のサブ MIP (LP face) が
+    /// 7 秒で最適解を出すことから来る (analysis/diag_hsletters_20261031.md)
+    ///
+    /// `ENOMOTO_MIP_SUBMIP_HIGHS_RESTART` (試作、既定では使わない): 外側の求解の再スタートの後の根で作るサブ MIP (と中の入れ子) で使う文字。
+    /// `-` で始まる並びならその文字を抜き (例 `-cht`)、そうでなければその文字だけを残す (`SUBMIP_HIGHS` にない文字は足さない)。
+    /// `TRIM=r` は全部の文字を抜くのと同じ。`ENOMOTO_T_MIP_SUBMIP_RELIABLE`・`ENOMOTO_MIP_SUBMIP_PC_INHERIT` は文字ではないので変わらない
+    /// (analysis/restart_letters_20261031.md)
+    ///
+    /// `ENOMOTO_MIP_SUBMIP_HIGHS_DEEP` (試作、既定では使わない): 深さ 2 以上のサブ MIP (サブ MIP の中で作るもの) で使う文字。書き方は
+    /// `_RESTART` と同じ (`-c` なら `c` だけ抜く)。`TRIM=d` は全部の文字を抜くのと同じ。n5-3 の cand では、深さ 1 のサブ MIP の中の
+    /// RENS (深さ 2) も根のカットを 25 ラウンド回し、1 本 2 秒かかっていた (analysis/cand_slow_n5-3_20261031.md)
+    ///
+    /// 返すのは、これから作るサブ MIP で抜く文字の印 ([`super::submip_hs_bit`] の和。今のスレッドの印も含む)
+    pub(super) fn hs_drop(&self) -> u16 {
+        let inherited = SUBMIP_HS_DROP.with(|f| f.get());
+        let restart_root = !self.params.submip && self.params.restarts > 0 && self.nodes <= 1;
+        let mut m = inherited;
+        if let Some(v) = env_def!("ENOMOTO_MIP_SUBMIP_HIGHS_TRIM", "r") {
+            let all = !v.contains('r') && !v.contains('d');
+            if ((all || v.contains('r')) && restart_root) || ((all || v.contains('d')) && SUBMIP_DEPTH.with(|d| d.get()) >= 1) {
+                m = u16::MAX;
+            }
+        }
+        if SUBMIP_DEPTH.with(|d| d.get()) >= 1 {
+            if let Some(v) = env_str!("ENOMOTO_MIP_SUBMIP_HIGHS_DEEP") {
+                m |= match v.strip_prefix('-') {
+                    Some(d) => super::submip_hs_mask(d),
+                    None => !super::submip_hs_mask(v),
+                };
+            }
+        }
+        if restart_root {
+            if let Some(v) = env_str!("ENOMOTO_MIP_SUBMIP_HIGHS_RESTART") {
+                m |= match v.strip_prefix('-') {
+                    Some(d) => super::submip_hs_mask(d),
+                    None => !super::submip_hs_mask(v),
+                };
+            }
+        }
+        m
+    }
+
+    /// `ENOMOTO_MIP_SUBMIP_RELIABLE_RESTART_ONLY` (試作、既定では使わない) で、これから作るサブ MIP (と中の入れ子) に
+    /// `ENOMOTO_T_MIP_SUBMIP_RELIABLE` を効かせるか: 外側の求解の再スタート後の根で作るサブ MIP だけ。最初の根のサブ MIP は強分岐ありのまま
+    /// (h80x6320d・physiciansched6-2 の得は最初の根の hs のサブ MIP から来る。analysis/restart_pc_20261031.md)
+    pub(super) fn submip_r0_on(&self) -> bool {
+        SUBMIP_R0.with(|f| f.get()) || (!self.params.submip && self.params.restarts > 0 && self.nodes <= 1)
+    }
+
     /// 暫定解がないサブ MIP の中でも、暫定解がない根の RENS を使ってよいか (`ENOMOTO_MIP_SUBMIP_RENS`)。
     /// HiGHS はサブ MIP の中でも RENS を回し (ヒューリスティクスの努力量 0.8)、30n20b8 の最初の解 553 は、根の RENS の
     /// サブ MIP の中の RENS のサブ MIP の中の RENS (深さ 3) のランダム丸めで見つけている。サブ MIP の入れ子の深さ
@@ -1648,6 +1963,51 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn nested_rens_ok(&self) -> bool {
         let d = SUBMIP_DEPTH.with(|d| d.get());
         (env_str!("ENOMOTO_MIP_SUBMIP_RENS").is_some() || super::submip_highs('h')) && d >= 1 && d as usize <= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH", 2usize, usize)
+    }
+
+    /// `ENOMOTO_MIP_SUBMIP_NESTED=<文字の並び>` (試作、既定では使わない): 深さ 1 のサブ MIP (外側の根・木から作ったサブ MIP) の根でも、
+    /// 文字で選んだサブ MIP のヒューリスティクスを回す (作るサブ MIP は深さ 2。深さ 2 以上のサブ MIP の中では作らない)。
+    /// 文字: `l` locks、`c` clique、`v` vbounds (緩める側・締める側)、`i` RINS、`x` 根の被約費用。普通の MIP ではどれも `params.submip` で止めている。
+    /// neos-960392 の根の RENS の近傍 (11702 列) は、普通の MIP として解くと clique のサブ MIP (深さ 1) が 0 ノードで −238 を出すが、
+    /// 根のサブ MIP の形では clique を回さず 473 ノードかかる (analysis/neos960392_nested_20261101.md)。
+    /// 作るサブ MIP は小さくする: ノード上限 `ENOMOTO_T_MIP_SUBMIP_NESTED_NODES` (既定 100)、時間は残りの
+    /// `ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_FRAC` (既定 0.1) 倍で最大 `ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_MAX` (既定 2 秒) ([`Self::nested_budget`])
+    pub(super) fn submip_nested(&self, c: char) -> bool {
+        self.params.submip && SUBMIP_DEPTH.with(|d| d.get()) == 1 && env_str!("ENOMOTO_MIP_SUBMIP_NESTED").is_some_and(|v| v.contains(c))
+    }
+
+    /// [`Self::submip_nested`] のサブ MIP のヒューリスティクスの名 (`heur!` の名) に当たる文字
+    fn nested_letter(label: &str) -> Option<char> {
+        match label {
+            "locks" => Some('l'),
+            "clique" => Some('c'),
+            "vbounds (loose)" | "vbounds (tight)" => Some('v'),
+            "RINS" => Some('i'),
+            "root reduced cost" => Some('x'),
+            _ => None,
+        }
+    }
+
+    /// [`Self::submip_nested`] で作る深さ 2 のサブ MIP の (ノード上限, 時間の上限)。対象でなければ `None`
+    fn nested_budget(&self) -> Option<(u64, f64)> {
+        let c = Self::nested_letter(self.heur_label)?;
+        if !self.submip_nested(c) {
+            return None;
+        }
+        let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+        let t = (tunable!("ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_FRAC", 0.1, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_MAX", 2.0, f64));
+        Some((tunable!("ENOMOTO_T_MIP_SUBMIP_NESTED_NODES", 100u64, u64), t))
+    }
+
+    /// `ENOMOTO_MIP_RENS_MAX_DEPTH` (既定 2、2026-11-01 に trim3 として既定化。大きな値 (例 `1000`) で上限なし = 元の振る舞い): これから作る RENS のサブ MIP の入れ子の深さ
+    /// (今の [`SUBMIP_DEPTH`] + 1。外側の根の RENS が深さ 1、`SMT begin` の `depth` と同じ数え方) がこの値を超えるなら RENS を呼ばない。
+    /// 旧来の RENS (`h` の [`Self::submip_rens_old`])・暫定解なしの RENS ([`Self::nested_rens_ok`])・`RENS (LP before cuts)`・
+    /// `RENS (more nodes)` のどの道も [`Self::rens`] の入口で止める。`2` で深さ 3 の RENS を作らない (今の既定では深さ 3 の RENS は
+    /// 58 問で 135 本のうち 134 本が解なし、analysis/submip_where_20261101.md)、`1` で入れ子の RENS を全部止める
+    /// (analysis/rens_depth3_20261101.md)
+    pub(super) fn rens_depth_ok(&self) -> bool {
+        let max = tunable!("ENOMOTO_MIP_RENS_MAX_DEPTH", 2, usize);
+        (SUBMIP_DEPTH.with(|d| d.get()) as usize) < max
     }
 
     /// `ENOMOTO_MIP_SUBMIP_RENS_CUTOFF` (試作、既定では使わない): 打ち切り値が有限の (外側に暫定解がある) 深さ 1 のサブ MIP
@@ -1675,6 +2035,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn rens(&mut self, _x: &[f64]) -> bool {
         let p = self.p;
         let nested = self.params.submip;
+        if !self.rens_depth_ok() {
+            return false;
+        }
         if self.submip_rens_old() {
             // 入れ子のサブ MIP に、残り時間の `ENOMOTO_T_MIP_SUBMIP_RENS_OLD_FRAC` (0.3) を与える (既定の 0.07 では 0.5 秒で時間切れ)
             let keep = self.submip_time_frac;
@@ -2191,7 +2554,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.submip_fix_rate = Some(fr);
             let r = self.solve_submip_problem(sub, 500, None);
             self.submip_is_rens = false;
-            self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _)));
+            self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _))) && (!super::solver::rens_more_nodes_real() || self.submip_full_nodes);
+            self.log_rens_retry_skip(&r);
             return r.is_some_and(|r| r.1);
         }
         let mut sub = p.clone();
@@ -2200,7 +2564,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.submip_is_rens = true;
         let r = self.solve_submip_problem(sub, 500, None);
         self.submip_is_rens = false;
-        self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _)));
+        // `ENOMOTO_MIP_RENS_MORE_NODES_REAL`: 停滞・成果連動の打ち切りで止まったサブ MIP はやり直さない ([`super::solver::rens_more_nodes_real`])
+        self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _))) && (!super::solver::rens_more_nodes_real() || self.submip_full_nodes);
+        self.log_rens_retry_skip(&r);
         r.is_some_and(|r| r.1)
     }
 
@@ -2230,7 +2596,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     fn rins_inner(&mut self, x: &[f64]) -> bool {
         let p = self.p;
-        if self.params.submip {
+        if self.params.submip && !self.submip_nested('i') {
             return false;
         }
         if env_str!("ENOMOTO_MIP_RINS_DIVE").is_some() {
@@ -2262,7 +2628,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // しなかった。timtab1 は根の RINS が 1074786 -> 882815 を見つけ、60 秒の暫定解が 0.204 -> 0.081 (主ギャップ)。
         // 木の中でも足す (`ENOMOTO_MIP_RINS_FILL_TREE`) と、cvs16r128-89 で ALNS の最初の RINS のサブ MIP が 3 秒かかって
         // 大近傍探索の時間の予算を使い切り、2 回とも暫定解が悪くなった (-64 -> -35/-43)。`ENOMOTO_MIP_RINS_NO_FILL` で使わない
-        if super::submip_highs('i') {
+        if super::submip_highs('i') && self.hs_drop() & super::submip_hs_bit('i') == 0 {
             return self.rins_highs(x, fixes);
         }
         let fill = env_str!("ENOMOTO_MIP_RINS_NO_FILL").is_none() && (self.nodes <= 1 || env_str!("ENOMOTO_MIP_RINS_FILL_TREE").is_some());
@@ -2741,7 +3107,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// サブ MIP として解く。LP は根の最適解の状態で呼ぶ。
     pub(super) fn root_reduced_cost(&mut self) -> bool {
         let p = self.p;
-        if self.params.submip {
+        if self.params.submip && !self.submip_nested('x') {
             return false;
         }
         let b = self.lp.basis();
@@ -3000,4 +3366,9 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
     }
     super::fj::SKIP_REPAIR_ON_STOP.with(|c| c.set(false));
     best.map(|b| b.1)
+}
+
+/// [`Solver::dive_rc_fix`] を使うか (`ENOMOTO_MIP_DIVE_RCFIX`)。
+fn dive_rcfix() -> bool {
+    env_str!("ENOMOTO_MIP_DIVE_RCFIX").is_some()
 }
