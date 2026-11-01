@@ -1849,6 +1849,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (env_str!("ENOMOTO_MIP_SUBMIP_RENS").is_some() || super::submip_highs('h')) && d >= 1 && d as usize <= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH", 2usize, usize)
     }
 
+    /// `ENOMOTO_MIP_RENS_MAX_DEPTH` (試作、既定では使わない = 上限なし): これから作る RENS のサブ MIP の入れ子の深さ
+    /// (今の [`SUBMIP_DEPTH`] + 1。外側の根の RENS が深さ 1、`SMT begin` の `depth` と同じ数え方) がこの値を超えるなら RENS を呼ばない。
+    /// 旧来の RENS (`h` の [`Self::submip_rens_old`])・暫定解なしの RENS ([`Self::nested_rens_ok`])・`RENS (LP before cuts)`・
+    /// `RENS (more nodes)` のどの道も [`Self::rens`] の入口で止める。`2` で深さ 3 の RENS を作らない (今の既定では深さ 3 の RENS は
+    /// 58 問で 135 本のうち 134 本が解なし、analysis/submip_where_20261101.md)、`1` で入れ子の RENS を全部止める
+    /// (analysis/rens_depth3_20261101.md)
+    pub(super) fn rens_depth_ok(&self) -> bool {
+        let max = tunable!("ENOMOTO_MIP_RENS_MAX_DEPTH", usize::MAX, usize);
+        (SUBMIP_DEPTH.with(|d| d.get()) as usize) < max
+    }
+
     /// `ENOMOTO_MIP_SUBMIP_RENS_CUTOFF` (試作、既定では使わない): 打ち切り値が有限の (外側に暫定解がある) 深さ 1 のサブ MIP
     /// (RINS など) の根でも、暫定解がない根の RENS (ダイビング式、[`Self::nested_rens_ok`] と同じ小さいやり直し) を回し、
     /// Feasibility Pump とダイビングを使わない (`ENOMOTO_MIP_SUBMIP_LIGHT_HEUR` と同じ)。physiciansched6-2 の根の RINS の
@@ -1874,6 +1885,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn rens(&mut self, _x: &[f64]) -> bool {
         let p = self.p;
         let nested = self.params.submip;
+        if !self.rens_depth_ok() {
+            return false;
+        }
         if self.submip_rens_old() {
             // 入れ子のサブ MIP に、残り時間の `ENOMOTO_T_MIP_SUBMIP_RENS_OLD_FRAC` (0.3) を与える (既定の 0.07 では 0.5 秒で時間切れ)
             let keep = self.submip_time_frac;
