@@ -59,6 +59,10 @@ CFGS = {
     "nesti": {"ENOMOTO_MIP_SUBMIP_NESTED": "i", "ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_MAX": "0.5", "ENOMOTO_T_MIP_SUBMIP_NESTED_NODES": "50"},
     # cs2 の既定化 (2026-11-01、analysis/cs2_default_20261101.md) の後は "def" が cs2 を含む。それより前の既定は "precs2"
     "precs2": {"ENOMOTO_T_MIP_CUT_LP_WORK": "0", "ENOMOTO_T_MIP_CUT_LP_WORK_PREV": "0", "ENOMOTO_MIP_CUT_LP_CAP_STOP": "0", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "0"},
+    # ns1116954・physiciansched6-2 の手当て (2026-11-02、analysis/ns1116954_20261101.md・phys6_20261101.md)
+    "fjearly": {"ENOMOTO_MIP_FEAS_FJ_EARLY": "1"},
+    "bgx": {"ENOMOTO_MIP_BG_CUTS_BASIS_X": "lpw"},
+    "fjbgx": {"ENOMOTO_MIP_FEAS_FJ_EARLY": "1", "ENOMOTO_MIP_BG_CUTS_BASIS_X": "lpw"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
