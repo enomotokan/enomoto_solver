@@ -69,10 +69,32 @@ pub struct TwoStageLp {
     /// 打ち切られた求解の続きを解くときの非基底列の置き場所 (`ENOMOTO_MIP_LP_RESUME`、[`Self::solve_inner`])。
     /// 行・境界・基底が変わったら捨てる ([`Self::clear_memo`])。
     resume_nb: Option<Vec<i8>>,
+    /// 試作 (`ENOMOTO_MIP_BASIS_NB`、[`Self::set_basis_nb`]): 保存した [`Basis`] の上限・下限から作った、次の求解の非基底列の
+    /// 置き場所の希望 (標準形の列ごとに -1 下限、+1 上限、0 は今の推し量り [`Self::nb_hint`] のまま)。次の求解で使い切る。
+    /// 行・解が変わったら捨てる ([`Self::clear_memo`])。列の境界の変更では捨てず、求解のときに今の境界と照らす
+    basis_nb: Option<Vec<i8>>,
     /// 直近の解 `x` についての [`Self::row_activities`] の結果 (行と `x` にだけよるので、`x` か行を変えたら捨てる。
     /// 列の境界・基底を変えただけなら残し、次の求解の [`Self::nb_hint`] でも使う)。
     act_memo: OnceCell<Vec<f64>>,
 }
+
+/// 試作 `ENOMOTO_MIP_BASIS_NB` ([`TwoStageLp::set_basis_nb`]) を、場所 `site` (`t` 木のノードの基底の復元、`s` サブ MIP の根、
+/// `b` 裏のカットの写しの根、`r` 再スタートの後の根) で使うか。`1` なら全部、`t,s` のようにカンマ区切りで場所を選ぶ
+pub fn basis_nb_on(site: char) -> bool {
+    match env_str!("ENOMOTO_MIP_BASIS_NB") {
+        None | Some("0") | Some("off") => false,
+        Some("1") => true,
+        Some(v) => v.split(',').any(|s| s.trim().starts_with(site)),
+    }
+}
+
+/// [`basis_nb_on`] のどれかの場所で使うか。
+pub fn basis_nb_any() -> bool {
+    matches!(env_str!("ENOMOTO_MIP_BASIS_NB"), Some(v) if v != "0" && v != "off")
+}
+
+/// 診断: [`TwoStageLp::set_basis_nb`] の希望を使った求解の数、今の境界で有効だった希望の数、推し量りから変えた数。
+pub static BASIS_NB_STATS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
 /// [`TwoStageLp::price_key`] の発行元。
 static NEXT_PRICE_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -183,6 +205,7 @@ impl TwoStageLp {
             rc_memo: OnceCell::new(),
             act_memo: OnceCell::new(),
             resume_nb: None,
+            basis_nb: None,
         }
     }
 
@@ -197,6 +220,7 @@ impl TwoStageLp {
         self.clear_state_memo();
         self.act_memo.take();
         self.resume_nb = None;
+        self.basis_nb = None;
     }
 
     /// 標準形を作る。戻り値は (標準形, 行の符号)。
@@ -528,11 +552,22 @@ impl TwoStageLp {
                 VarStatus::Upper
             };
         }
+        // `ENOMOTO_MIP_BASIS_NB` (試作) を使うときは、範囲行でスラックが上限 (行の幅) にある行を反対の側 (σ = +1 なら下限) とする
+        // (既定はスラックの位置を見ずに、スラック 0 の側とする)
+        let ranged_side = basis_nb_any();
         for i in 0..m {
             // スラック 0 は σ = +1 なら行が上限、σ = -1 なら下限にある
+            let at_su = ranged_side && !is_basic[n + i] && {
+                let su = self.std.ub[n + i];
+                su.is_finite() && su > 0.0 && {
+                    let act = self.row_activities_ref()[i];
+                    let sl = if self.sigma[i] > 0.0 { self.row_up[i] - act } else { act - self.row_lo[i] };
+                    (sl - su).abs() <= 1e-9 * (1.0 + su.abs())
+                }
+            };
             row[i] = if is_basic[n + i] {
                 VarStatus::Basic
-            } else if self.sigma[i] > 0.0 {
+            } else if (self.sigma[i] > 0.0) != at_su {
                 VarStatus::Upper
             } else {
                 VarStatus::Lower
@@ -549,7 +584,77 @@ impl TwoStageLp {
         self.repair_basis();
         self.lu = None;
         self.status = None;
+        self.basis_nb = None;
         self.clear_state_memo();
+    }
+
+    /// 試作 (`ENOMOTO_MIP_BASIS_NB`): [`Self::set_basis`] に加えて、`b` の非基底の列・行の上限・下限 (Upper / Lower) を次の
+    /// 求解の非基底列の置き場所の希望 ([`sid::set_warm_nb`]、[`Self::resume_nb`] と同じ -1 / +1) として渡す。既定の
+    /// [`Self::set_basis`] は基底に入る列の集合だけを使い、置き場所は直前に解いた点 `x` からの推し量り ([`Self::nb_hint`]) で決める。
+    /// `skip` の列 (分枝で固定・締めた列など、保存のときから境界の変わった列) と、Basic の列 (修復で基底から外れた列を含む)、
+    /// 求解のときに指す側の境界が無限・固定 (下限 = 上限) の列は 0 (推し量りのまま) にする
+    pub fn set_basis_nb(&mut self, b: &Basis, skip: &[usize]) {
+        self.set_basis(b);
+        self.resume_nb = None;
+        let n = self.n;
+        let m = self.rows.len();
+        let mut h = vec![0i8; n + m];
+        for j in 0..n.min(b.col.len()) {
+            h[j] = match b.col[j] {
+                VarStatus::Lower => -1,
+                VarStatus::Upper => 1,
+                _ => 0,
+            };
+        }
+        for &j in skip {
+            if j < n {
+                h[j] = 0;
+            }
+        }
+        // 行: σ = +1 ならスラック 0 (下限) は行が上限、σ = -1 なら行が下限
+        for i in 0..m.min(b.row.len()) {
+            let pos = self.sigma[i] > 0.0;
+            h[n + i] = match (b.row[i], pos) {
+                (VarStatus::Upper, true) | (VarStatus::Lower, false) => -1,
+                (VarStatus::Lower, true) | (VarStatus::Upper, false) => 1,
+                _ => 0,
+            };
+        }
+        if let Some(bs) = &self.basis {
+            for &v in bs {
+                h[v] = 0;
+            }
+        }
+        self.basis_nb = Some(h);
+    }
+
+    /// [`Self::basis_nb`] の希望を今の境界と照らして推し量り `h` に重ねる。変えた数を数える ([`BASIS_NB_STATS`])。
+    fn apply_basis_nb(&self, h: &mut [i8], w: &[i8]) {
+        let n = self.n;
+        let (mut given, mut changed) = (0u64, 0u64);
+        for k in 0..h.len().min(w.len()) {
+            if w[k] == 0 {
+                continue;
+            }
+            let (lo, up) = (self.std.lb[k], self.std.ub[k]);
+            let ok = if k < n {
+                lo < up && if w[k] < 0 { lo.is_finite() } else { up.is_finite() }
+            } else {
+                // スラックの下限は 0。等式行 (上限 0) は置き場所が意味を持たない
+                up > 0.0 && (w[k] < 0 || up.is_finite())
+            };
+            if ok {
+                given += 1;
+                if h[k] != w[k] {
+                    changed += 1;
+                    h[k] = w[k];
+                }
+            }
+        }
+        use std::sync::atomic::Ordering::Relaxed;
+        BASIS_NB_STATS[0].fetch_add(1, Relaxed);
+        BASIS_NB_STATS[1].fetch_add(given, Relaxed);
+        BASIS_NB_STATS[2].fetch_add(changed, Relaxed);
     }
 
     /// 今の LP (行・列の境界・費用) を内点法で解いた点 (元の空間の構造列の値) を返す。`zero_cost` なら費用 0
@@ -1059,7 +1164,12 @@ impl TwoStageLp {
                 if let Some(h) = self.resume_nb.take() {
                     sid::set_warm_nb(Some(h));
                 } else if env_str!("ENOMOTO_MIP_NO_NB_HINT").is_none() {
-                    sid::set_warm_nb(Some(self.nb_hint()));
+                    let mut h = self.nb_hint();
+                    // 試作 `ENOMOTO_MIP_BASIS_NB`: 保存した基底の上限・下限の置き場所を重ねる
+                    if let Some(w) = self.basis_nb.take() {
+                        self.apply_basis_nb(&mut h, &w);
+                    }
+                    sid::set_warm_nb(Some(h));
                 }
                 // 前回の最後の DSE 重み (同じ基底のとき)
                 if let Some((cb, w)) = self.dse_cache.as_deref() {

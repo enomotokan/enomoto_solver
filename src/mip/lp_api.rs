@@ -32,6 +32,11 @@ pub trait MipLp: Clone + Send {
     }
     fn basis(&self) -> Basis;
     fn set_basis(&mut self, b: &Basis);
+    /// 試作 (`ENOMOTO_MIP_BASIS_NB`): 基底と一緒に非基底の上限・下限の置き場所も次の求解に渡す ([`TwoStageLp::set_basis_nb`])。
+    /// 対応しない実装は [`Self::set_basis`] と同じ。
+    fn set_basis_nb(&mut self, b: &Basis, _skip: &[usize]) {
+        self.set_basis(b)
+    }
     fn basic_var(&self, s: usize) -> usize;
     fn dse_weight(&self, s: usize) -> f64;
     fn save_state(&self) -> Self::State;
@@ -160,6 +165,9 @@ forward_impl!(
     },
     fn set_basis_cols(&mut self, b: &[usize], x: Option<&[f64]>) {
         TwoStageLp::set_basis_cols(self, b, x)
+    },
+    fn set_basis_nb(&mut self, b: &Basis, skip: &[usize]) {
+        TwoStageLp::set_basis_nb(self, b, skip)
     },
     fn basis_cols(&self) -> Option<Vec<usize>> {
         TwoStageLp::basis_cols(self)

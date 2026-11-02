@@ -914,6 +914,26 @@ fn tree_root_basis() -> bool {
     env_str!("ENOMOTO_MIP_TREE_ROOT_BASIS").is_some()
 }
 
+/// 診断 (試作 `ENOMOTO_MIP_BASIS_NB` の計測): 根の LP の種類ごと (0 サブ MIP、1 裏のカットの写し、2 解探索のスレッド、
+/// 3 再スタートの後の主、4 最初の主) の (回数、反復、マイクロ秒)。プロセス全体で数える
+pub(crate) static BASIS_NB_ROOT: [std::sync::atomic::AtomicU64; 15] = [const { std::sync::atomic::AtomicU64::new(0) }; 15];
+/// 診断: 木 (サブ MIP の外) のノードの最初の LP の (基底を復元した直後の回数、反復、それ以外の回数、反復)。プロセス全体で数える
+pub(crate) static BASIS_NB_TREE: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+fn print_basis_nb_diag() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let r: Vec<u64> = BASIS_NB_ROOT.iter().map(|a| a.load(Relaxed)).collect();
+    let t: Vec<u64> = BASIS_NB_TREE.iter().map(|a| a.load(Relaxed)).collect();
+    let s: Vec<u64> = crate::simplex::mip_lp::BASIS_NB_STATS.iter().map(|a| a.load(Relaxed)).collect();
+    let per = |n: u64, it: u64| if n > 0 { it as f64 / n as f64 } else { 0.0 };
+    let names = ["submip", "bgcopy", "find", "restart", "main"];
+    let roots: Vec<String> = (0..5).map(|k| format!("{} {} lps {} iters ({:.1}/LP) {:.2}s", names[k], r[3 * k], r[3 * k + 1], per(r[3 * k], r[3 * k + 1]), r[3 * k + 2] as f64 * 1e-6)).collect();
+    eprintln!(
+        "MIP: basis nb diag: tree first LPs restored {} iters {} ({:.1}/LP), others {} iters {} ({:.1}/LP); root LPs: {}; nb hints applied {} solves, {} given, {} changed",
+        t[0], t[1], per(t[0], t[1]), t[2], t[3], per(t[2], t[3]), roots.join(", "), s[0], s[1], s[2]
+    );
+}
+
 /// `ENOMOTO_MIP_RESTART_BASIS` (試作、既定では使わない): 再スタートの後の根の LP を、再スタートの直前の LP の基底から解き始める
 /// ([`RESTART_BASIS`])。今までは再スタートの後の根の LP を毎回基底なしで解いていた (前処理の LP による固定は最初の求解だけで、
 /// その基底も最初の根で使い切る)
@@ -3960,7 +3980,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.submip {
             if let Some(col) = SUBMIP_BASIS.with(|s| s.borrow_mut().take()) {
                 if col.len() == self.p.n {
-                    self.lp.set_basis(&super::lp::Basis { col, row: Vec::new() });
+                    let b = super::lp::Basis { col, row: Vec::new() };
+                    // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `s`): 列の上限・下限の置き場所も渡す (サブ MIP で固定した列は推し量りのまま)
+                    if crate::simplex::mip_lp::basis_nb_on('s') {
+                        self.lp.set_basis_nb(&b, &[]);
+                    } else {
+                        self.lp.set_basis(&b);
+                    }
                 }
             }
         }
@@ -4018,7 +4044,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.params.verbose {
                         eprintln!("MIP: root LP basis from before the restart: {matched} of {} rows matched", self.lp.num_rows());
                     }
-                    self.lp.set_basis(&b);
+                    // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `r`): 上限・下限の置き場所も渡す
+                    if crate::simplex::mip_lp::basis_nb_on('r') {
+                        self.lp.set_basis_nb(&b, &[]);
+                    } else {
+                        self.lp.set_basis(&b);
+                    }
                     true
                 }
                 None => false,
@@ -4035,7 +4066,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: [snapshot] root basis from the main thread: columns {} / {}, rows {} / {} (basic columns {bc}, basic rows {br})", b.col.len(), self.p.n, b.row.len(), self.lp.num_rows());
                 }
                 if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
-                    self.lp.set_basis(&b);
+                    // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `b`、解探索のスレッドも): 上限・下限の置き場所も渡す
+                    if crate::simplex::mip_lp::basis_nb_on('b') {
+                        self.lp.set_basis_nb(&b, &[]);
+                    } else {
+                        self.lp.set_basis(&b);
+                    }
                 }
             }
             // `ENOMOTO_MIP_BG_CUTS_BASIS_X`: 基底の列番号に加えて主の LP の列の値も入れ、非基底の列を主と同じ側 (上限・下限) に置いて解き始める
@@ -4063,7 +4099,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
             crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         let t_root_lp = Instant::now();
+        // 診断 ([`BASIS_NB_ROOT`]): 根の LP の種類 (0 サブ MIP、1 裏のカットの写し、2 解探索のスレッド、3 再スタートの後の主、4 最初の主)
+        let root_kind = if self.params.submip {
+            Some(0)
+        } else if self.snap.is_some() && CUT_JOB.with(|j| j.borrow().is_some()) {
+            Some(1)
+        } else if self.snap.is_some() && DIVE_ONLY.with(|d| d.get()).0 == 5 {
+            Some(2)
+        } else if self.snap.is_none() && self.params.restarts > 0 {
+            Some(3)
+        } else if self.snap.is_none() {
+            Some(4)
+        } else {
+            None
+        };
+        let root_it0 = self.lp.total_iterations();
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        if let Some(k) = root_kind {
+            use std::sync::atomic::Ordering::Relaxed;
+            BASIS_NB_ROOT[3 * k].fetch_add(1, Relaxed);
+            BASIS_NB_ROOT[3 * k + 1].fetch_add(self.lp.total_iterations() - root_it0, Relaxed);
+            BASIS_NB_ROOT[3 * k + 2].fetch_add(t_root_lp.elapsed().as_micros() as u64, Relaxed);
+        }
         if root_warm_dse_once {
             crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
         }
@@ -5452,7 +5509,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     if let Some(b) = &n.basis {
-                        self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()));
+                        self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()), &n.changes);
                         // 置いた基底が親の LP の最適基底のままなら、その LU を使う (行が変わっていれば使わない)
                         if let Some(s) = &sib_lu {
                             if n.basis_epoch == self.row_log.len() {
@@ -5532,7 +5589,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if ok {
                             if let Some(b) = &n.basis {
-                                self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()));
+                                self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()), &n.changes);
                             }
                         }
                         if !ok {
@@ -5873,6 +5930,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.tprof.kind_n[k] += 1;
                     self.tprof.kind_it[k] += self.lp.total_iterations() - it0;
                     self.tprof.kind_s[k] += t_lp.elapsed().as_secs_f64();
+                    if !self.params.submip {
+                        // 診断 ([`BASIS_NB_TREE`]): 基底を復元した直後の LP とそれ以外 (潜りの子など) の最初の LP
+                        use std::sync::atomic::Ordering::Relaxed;
+                        let r = if self.restored_now { 0 } else { 2 };
+                        BASIS_NB_TREE[r].fetch_add(1, Relaxed);
+                        BASIS_NB_TREE[r + 1].fetch_add(self.lp.total_iterations() - it0, Relaxed);
+                    }
                     if std::mem::take(&mut self.restored_now) {
                         self.restore_stats.2 += self.lp.total_iterations() - it0;
                         if env_str!("ENOMOTO_MIP_RESTORE_DIAG").is_some() {
@@ -8557,8 +8621,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 完全オービトープの固定と伝播を、固定が出なくなるまで (最大 10 回) 繰り返す。矛盾したら偽。
     /// 待ち行列のノードの基底を LP に置く (保存した後の行の追加・削除を当てはめる)。
-    fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize, dse: Option<&[(u32, f32)]>) {
+    fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize, dse: Option<&[(u32, f32)]>, changes: &[BoundChange]) {
         let mr = self.lp.num_rows();
+        // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `t`): 保存した基底の上限・下限の置き場所も渡す。根からの分枝で締めた列は推し量りのまま
+        let nb_skip: Option<Vec<usize>> = crate::simplex::mip_lp::basis_nb_on('t').then(|| changes.iter().map(|c| c.col).collect());
         if env_str!("ENOMOTO_MIP_RESTORE_DIAG").is_some() && epoch <= self.row_log.len() {
             let (mut a, mut d) = (0usize, 0usize);
             for e in &self.row_log[epoch..] {
@@ -8576,7 +8642,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if epoch == self.row_log.len() && b.row.len() == mr {
             self.restore_stats.0 += 1;
             self.restored_now = true;
-            self.lp.set_basis(b);
+            match &nb_skip {
+                Some(sk) => self.lp.set_basis_nb(b, sk),
+                None => self.lp.set_basis(b),
+            }
             if let Some(w) = dse {
                 self.lp.set_dse_vars(w);
                 self.restored_dse = true;
@@ -8648,7 +8717,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.restored_now = true;
-        self.lp.set_basis(&b2);
+        match &nb_skip {
+            Some(sk) => self.lp.set_basis_nb(&b2, sk),
+            None => self.lp.set_basis(&b2),
+        }
         if let Some(w) = dse {
             // 保存したときの行の番号を今の行の番号に直す (行の追加・削除の記録を当てはめる)
             let n = b.col.len();
@@ -12953,6 +13025,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: branching: strong branching vs pseudocost: {} of {} agreed, {} nodes without strong branching", self.sb_agree_stats[1], self.sb_agree_stats[0], self.sb_agree_stats[2]);
             }
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
+            if self.snap.is_none() && !self.params.submip {
+                print_basis_nb_diag();
+            }
             eprintln!("MIP: node diag: nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}", self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows());
             if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() || self.tree_sep {
                 eprintln!("MIP: adaptive node cuts: rounds {} effective {} skipped {} (rate {:.3}), node cut secs {:.2}, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 {:?}, cut nnz {:?} (rows mean {:.1})", self.nca_stats[0], self.nca_stats[1], self.nca_stats[2], self.nca_ema, self.node_cut_secs, self.nca_hist, self.nca_cut_nnz, self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / self.p.m.max(1) as f64);
