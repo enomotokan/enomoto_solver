@@ -1107,6 +1107,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 反復の最大の q 倍より小さくしない (physiciansched6-2 は 0・1 ラウンドの LP が 900・808 反復で、2 ラウンド目の 1166 反復を
         // 上限 1000 で外していた。neos-960392 は 133・126 反復で、2 ラウンド目の密なカットの LP は 3447 反復)
         let lp_work_prev = tunable!("ENOMOTO_T_MIP_CUT_LP_WORK_PREV", 5.0, f64);
+        // 試作 `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` = 文字の並び [`:m` | `:b`] (既定では使わない。analysis/robust_cap_20261102.md): 根のカットのループの
+        // カットの LP 1 回の反復の上限 (上の `lim`) を、道の変化に強い形にする。上限は「このループで最適まで解けたカットの LP の反復の最大の
+        // `ENOMOTO_T_MIP_CUT_LP_WORK_PREV` 倍」より小さくしないので、道が少し変わって短い LP が続いた後に長めの LP が来ると外れる
+        // (mc11 で裏のカットの根の LP を厳密な DSE 重みにすると (`ENOMOTO_MIP_BG_CUTS_DSE=g`) 写しのカットの LP が 100〜240 反復で続き、
+        // 32・33 ラウンド目が上限 2000 に当たって外され、写しは 32 ラウンドで止まる。analysis/bgdse_grow_20261102.md)。
+        // - `s`: 問題の大きさの下限。上限を `ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_ROWS` (既定 2) x 今の LP の行の数と
+        //   `ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_ROOT` (既定 2) x 根の LP の反復 (写しでは主の根の LP の反復) より小さくしない
+        // - `d`: 上限に当たったら、外さずに止まったところから上限を倍にしてもう 1 回だけ続ける (外すのは 2 回目)
+        // - `p`: 上限に達した後も、`ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_WIN` (既定 0.25) x 上限 (最低 50) 反復ごとに双対の目的値を見て、
+        //   直近の窓の伸びが出発の目的値からの伸びの `ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_FRAC` (既定 0.01) 倍未満になるまで続ける
+        //   (安全網の上限は `ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_HARD` (既定 10) x 上限)
+        // 末尾の `:m` は主のカットのループだけ、`:b` は裏のカットのスレッド (写し) だけ (既定は両方)。時間の上限 (安全網) は変えない
+        let robust = env_str!("ENOMOTO_MIP_CUT_LP_CAP_ROBUST").filter(|_| !self.params.submip).and_then(|v| {
+            let (letters, scope) = v.split_once(':').unwrap_or((v, ""));
+            let on = match scope {
+                "m" => job.is_none(),
+                "b" => job.is_some(),
+                _ => true,
+            };
+            on.then(|| (letters.contains('s'), letters.contains('d'), letters.contains('p')))
+        });
+        let (rob_s, rob_d, rob_p) = robust.unwrap_or((false, false, false));
+        if robust.is_some() && self.params.verbose {
+            eprintln!("MIP: robust cut LP cap{}: size {rob_s}, double {rob_d}, progress {rob_p}", if job.is_some() { " (background)" } else { "" });
+        }
+        let rob_root = if job.is_some() { super::solver::BG_ROOT_ITERS.with(|c| c.get()) } else { root_iters };
         let mut ok_lp_iters = 0u64;
         let mut loop_iters = 0u64;
         let mut work_rounds = 0usize;
@@ -1630,6 +1656,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             let saved_rows = self.lp.num_rows() - keep_lu_remove.as_ref().map_or(0, |rm| rm.iter().filter(|&&r| r).count());
             let saved_state = fail_restore.then(|| self.lp.save_state());
+            // 試作 `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` の `d`: 外すときに戻す加える前の状態 (止まった基底を残させるので)
+            let rob_saved = (rob_d && !fail_restore && keep_lu_remove.is_none()).then(|| self.lp.save_state());
             let t_add0 = std::time::Instant::now();
             let dse_check = env_str!("ENOMOTO_MIP_DEBUG_DSE_CHECK").is_some() && !self.params.submip;
             if dse_check {
@@ -1656,6 +1684,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let lim = if bg_work.is_some() {
                 bg_work_lim0.max((lp_work_prev * ok_lp_iters as f64) as u64)
             } else if lp_work > 0.0 { ((lp_work * root_iters.max(100) as f64) as u64).max(1000).max((lp_work_prev * ok_lp_iters as f64) as u64) } else { 10 * root_iters.max(100) + 10_000 };
+            // 試作 `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` の `s`: 問題の大きさの下限
+            let lim = if rob_s {
+                let a = tunable!("ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_ROWS", 2.0, f64) * self.lp.num_rows() as f64;
+                let b = tunable!("ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_ROOT", 2.0, f64) * rob_root as f64;
+                lim.max(a.max(b) as u64)
+            } else {
+                lim
+            };
             // 1 回の LP の時間の上限 (全体の 2%、最低 1 秒): 数値的に悪条件の LP が残り時間を使い切るのを防ぐ
             let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
             let cap = cap.max(lp_cap_mult * ok_lp_secs);
@@ -1720,7 +1756,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // `ENOMOTO_MIP_ROOT_CUT_CUTOFF`: 打ち切り値 (根を閉じられるときだけ)
             let cut_cutoff = if root_cutoff && self.root_gap_closed_at(f64::INFINITY) { self.prune_limit() - p.offset } else { f64::INFINITY };
-            let mut st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: cut_cutoff, deadline: lp_deadline });
+            // 試作 `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` の `d`・`p`: `d` は止まったところから続けるので、止まった基底を残させ、外すときのために
+            // 加える前の状態を取っておく。`p` は上限の後を目的値の進みで打ち切る (反復の上限は安全網)
+            let prev_lp_obj = self.lp.objective();
+            let solve_lim = if rob_p {
+                let w = ((tunable!("ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_WIN", 0.25, f64) * lim as f64) as usize).max(50);
+                let frac = tunable!("ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_FRAC", 0.01, f64);
+                crate::simplex::mip_lp::PROGRESS_STOP_ONCE.with(|c| c.set(Some((lim as usize, w, frac, prev_lp_obj))));
+                ((tunable!("ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_HARD", 10.0, f64) * lim as f64) as u64).max(lim)
+            } else {
+                lim
+            };
+            if rob_d {
+                crate::simplex::mip_lp::FORCE_RESUME_ONCE.with(|c| c.set(true));
+            }
+            let mut st = self.lp.solve(&SolveLimits { iteration_limit: solve_lim, cutoff: cut_cutoff, deadline: lp_deadline });
+            crate::simplex::mip_lp::FORCE_RESUME_ONCE.with(|c| c.set(false));
+            crate::simplex::mip_lp::PROGRESS_STOP_ONCE.with(|c| c.set(None));
+            if rob_p && self.params.verbose {
+                if let Some((it, gain, total)) = crate::simplex::slope_intercept_dual::ext_progress_stopped() {
+                    eprintln!("MIP: cut round {round}: cut LP stopped by the progress check at iter {it} (cap {lim}): window gain {gain:.3e}, gain from the start {total:.3e} ({} iters)", self.lp.total_iterations() - it0);
+                } else if self.lp.total_iterations() - it0 > lim {
+                    eprintln!("MIP: cut round {round}: cut LP went past the cap {lim} on progress: {st:?} after {} iters", self.lp.total_iterations() - it0);
+                }
+            }
+            // `d`: 上限 (反復・時間) に当たったら、上限を倍にして止まったところからもう 1 回だけ続ける
+            if rob_d && matches!(st, LpStatus::IterationLimit | LpStatus::TimeLimit) && !self.time_up() && !stopped(&job) {
+                let it1 = self.lp.total_iterations();
+                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(2.0 * cap);
+                let d = if cap.is_finite() { Some(self.deadline.map_or(d, |g| g.min(d))) } else { self.deadline };
+                let st0 = st;
+                st = self.lp.solve(&SolveLimits { iteration_limit: 2 * solve_lim, cutoff: cut_cutoff, deadline: d });
+                if self.params.verbose {
+                    eprintln!("MIP: cut round {round}: cut LP hit the cap ({st0:?}, {} iters); continued with twice the cap {}: {st:?} after {} more iters", it1 - it0, 2 * solve_lim, self.lp.total_iterations() - it1);
+                }
+            }
             crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
             if bg_dse_sample {
                 crate::simplex::slope_intercept_dual::DSE_SAMPLE_ONCE.with(|c| c.set(None));
@@ -1814,6 +1884,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_CUT_FAIL_RESTORE`: 加える前の最適基底・LU・DSE 重みを戻す (行は加える前と同じ)
                 if let Some(ss) = &saved_state {
                     self.lp.restore_state(ss);
+                }
+                // 試作 `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` の `d`: 止まった基底からの解き直しにせず、加える前の最適基底に戻す
+                if let Some(ss) = &rob_saved {
+                    if self.lp.num_rows() == saved_rows {
+                        self.lp.restore_state(ss);
+                    }
                 }
                 let it2 = self.lp.total_iterations();
                 let t_re = std::time::Instant::now();

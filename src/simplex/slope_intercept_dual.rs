@@ -897,12 +897,75 @@ fn ext_cutoff() -> f64 {
     EXT_CTRL.with(|x| x.get()).map_or(f64::INFINITY, |c| c.cutoff)
 }
 
+/// 試作 `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` の `p` (根のカットの LP、[`set_ext_progress`]): 反復が `from` に達した後は、`window` 反復ごとに
+/// 段階 B の双対の目的値 (下界、`ExtControl::cutoff` と同じ標準形の費用) を見て、直近の窓の伸びがこの求解の出発の値 `start` からの
+/// 伸びの `frac` 倍未満なら反復の上限と同じに打ち切る (`ExtControl::iteration_limit` は安全網の上限)。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ExtProgress {
+    pub from: usize,
+    pub window: usize,
+    pub frac: f64,
+    pub start: f64,
+}
+
+thread_local! {
+    /// [`ExtProgress`] と、直近の見た時点の下界 (`None` はまだ見ていない)。
+    static EXT_PROG: std::cell::Cell<Option<(ExtProgress, Option<f64>)>> = const { std::cell::Cell::new(None) };
+    /// 直近の求解で [`ExtProgress`] が打ち切ったか (表示用)。
+    static EXT_PROG_STOPPED: std::cell::Cell<Option<(usize, f64, f64)>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`ExtProgress`] を設定する (`None` で解除)。打ち切りの記録を消す。
+pub(crate) fn set_ext_progress(p: Option<ExtProgress>) {
+    EXT_PROG.with(|x| x.set(p.map(|p| (p, None))));
+    EXT_PROG_STOPPED.with(|x| x.set(None));
+}
+
+/// [`ExtProgress`] を解除する (打ち切りの記録は残す)。
+pub(crate) fn clear_ext_progress() {
+    EXT_PROG.with(|x| x.set(None));
+}
+
+/// 直近の求解で [`ExtProgress`] が打ち切ったなら (反復, 窓の伸び, 出発からの伸び)。
+pub(crate) fn ext_progress_stopped() -> Option<(usize, f64, f64)> {
+    EXT_PROG_STOPPED.with(|x| x.get())
+}
+
 fn ext_check(iter_idx: usize, stage_b: bool, bound: impl FnOnce() -> f64) -> bool {
     EXT_ITERS.with(|x| x.set(x.get() + 1));
     let Some(c) = EXT_CTRL.with(|x| x.get()) else { return false };
     if iter_idx >= c.iteration_limit {
         EXT_STOP.with(|x| x.set(ExtStop::IterationLimit));
         return true;
+    }
+    let mut bound = Some(bound);
+    let mut bval: Option<f64> = None;
+    if let Some((pr, last)) = EXT_PROG.with(|x| x.get()) {
+        if iter_idx >= pr.from && (iter_idx - pr.from) % pr.window.max(1) == 0 {
+            // 段階 B でなければ双対の目的値が下界にならないので、そこで打ち切る (今までの反復の上限と同じ)
+            if !stage_b {
+                EXT_STOP.with(|x| x.set(ExtStop::IterationLimit));
+                EXT_PROG_STOPPED.with(|x| x.set(Some((iter_idx, f64::NAN, f64::NAN))));
+                return true;
+            }
+            let b = (bound.take().unwrap())();
+            bval = Some(b);
+            // 下界が求まらない (双対実行可能でない基底などで -inf) ときは、この回は見送る (前の値も残す)
+            if !b.is_finite() {
+                bval = None;
+            } else if let Some(l) = last {
+                let gain = b - l;
+                let total = b - pr.start;
+                if !(gain >= pr.frac * total.max(0.0)) || gain <= 1e-12 * b.abs().max(1.0) {
+                    EXT_STOP.with(|x| x.set(ExtStop::IterationLimit));
+                    EXT_PROG_STOPPED.with(|x| x.set(Some((iter_idx, gain, total))));
+                    return true;
+                }
+            }
+            if b.is_finite() {
+                EXT_PROG.with(|x| x.set(Some((pr, Some(b)))));
+            }
+        }
     }
     if iter_idx & 31 == 0 {
         if let Some(d) = c.deadline {
@@ -917,9 +980,16 @@ fn ext_check(iter_idx: usize, stage_b: bool, bound: impl FnOnce() -> f64) -> boo
             return true;
         }
     }
-    if stage_b && c.cutoff.is_finite() && iter_idx % 8 == 0 && bound() > c.cutoff {
-        EXT_STOP.with(|x| x.set(ExtStop::ObjectiveBound));
-        return true;
+    if stage_b && c.cutoff.is_finite() && (iter_idx % 8 == 0 || bval.is_some()) {
+        let b = match (bval, bound.take()) {
+            (Some(b), _) => b,
+            (None, Some(f)) => f(),
+            (None, None) => f64::NEG_INFINITY,
+        };
+        if b > c.cutoff {
+            EXT_STOP.with(|x| x.set(ExtStop::ObjectiveBound));
+            return true;
+        }
     }
     false
 }

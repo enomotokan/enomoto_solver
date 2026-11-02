@@ -109,6 +109,11 @@ fn new_price_key() -> u64 {
 }
 
 thread_local! {
+    /// 試作 `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` (根のカットのループ、`crate::mip::separation`): 次の 1 回の求解だけ、時間・反復の上限で
+    /// 止まったら止まった基底・DSE 重み・置き場所を残す (`ENOMOTO_MIP_LP_RESUME` と同じ。`d` で上限を倍にして続けるため)
+    pub(crate) static FORCE_RESUME_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 同じく `p`: 次の 1 回の求解だけ、反復が `from` に達した後は双対の目的値の進みで打ち切る ((from, window, frac, 出発の目的値 (元の座標)))
+    pub(crate) static PROGRESS_STOP_ONCE: std::cell::Cell<Option<(usize, usize, f64, f64)>> = const { std::cell::Cell::new(None) };
     /// このスレッドの基底のない求解を同時実行にするときのスレッド数 ([`TwoStageLp::solve`]。1 なら同時実行しない)。
     static COLD_RACE_THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
 }
@@ -1164,8 +1169,9 @@ impl TwoStageLp {
         // 置き場所を残し、次の求解をそこから始める (続きを解く)。従来は打ち切られた求解の進みを捨て、次の求解は前の最適
         // 基底から単位重みでやり直していた (根のカットのループの「LP を続ける」がやり直しになっていた、
         // analysis/lp_hang_20261021.md)
-        let resume_on = env_str!("ENOMOTO_MIP_LP_RESUME").is_some();
+        let resume_on = env_str!("ENOMOTO_MIP_LP_RESUME").is_some() || FORCE_RESUME_ONCE.with(|c| c.replace(false));
         sid::request_stop_state(resume_on);
+        sid::set_ext_progress(PROGRESS_STOP_ONCE.with(|c| c.take()).map(|(from, window, frac, start)| sid::ExtProgress { from, window, frac, start: start - const_obj }));
         sid::set_fast_reopt(env_str!("ENOMOTO_MIP_NO_FAST_REOPT").is_none());
         sid::request_duals(true);
         sid::request_lu(true);
@@ -1246,6 +1252,7 @@ impl TwoStageLp {
         sid::set_price_key(None);
         let stop = sid::ext_stop();
         sid::set_ext_control(None);
+        sid::clear_ext_progress();
         sid::set_fast_reopt(false);
         let duals = sid::take_duals();
         sid::request_duals(false);
