@@ -1248,6 +1248,11 @@ pub(crate) fn feas_fj_early_on() -> bool {
     env_str!("ENOMOTO_MIP_FEAS_FJ_EARLY").is_some()
 }
 
+/// `ENOMOTO_MIP_FEAS_FJ_EARLY=fl` (試作): 早めの探索で FJ2 と Local-MIP を並べる ([`feas_fj_lmip_early`])。ほかの値 (`=1`) は FJ2 だけ
+fn feas_fj_early_lmip() -> bool {
+    env_str!("ENOMOTO_MIP_FEAS_FJ_EARLY") == Some("fl")
+}
+
 /// 早めの FJ ([`feas_fj_early_on`]) の本体: `threads` 本のスレッドで種を変えた FJ2 を `cap` 秒まで繰り返し、どれかが実行可能解を
 /// 見つけたら全部止めて返す。種は FJ のスレッド ([`heuristics::fj_search`]) と重ならないようにずらす
 fn feas_fj_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> Option<Vec<f64>> {
@@ -1297,6 +1302,118 @@ fn feas_fj_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> 
         );
     }
     r
+}
+
+/// 早めの探索の FJ2 と Local-MIP を並べる形 (`ENOMOTO_MIP_FEAS_FJ_EARLY=fl`、[`feas_fj_early_on`])。FJ が苦手で Local-MIP が得意な
+/// 実行可能性問題もあるので、`threads` 本のうち前の半分 (切り上げ) で種を変えた FJ2 を繰り返し、残りで種を変えた Local-MIP
+/// (連鎖の手あり、[`localmip::LocalMip`]) を回す。どれかが実行可能解を見つけたら止めの合図で全部止めて返す。
+/// - スレッドが 1 本なら 1 本の中で交互に回す: FJ2 を 1 回、Local-MIP を `ENOMOTO_T_MIP_FEAS_EARLY_LMIP_SLICE` (0.2) 秒ずつ続きから。
+/// - 時間の上限は `cap` 秒と前処理の期限 ([`PRESOLVE_DEADLINE`]) の早い方。Local-MIP は 16 手ごとにそれと止めの合図を見る。
+///   Local-MIP の初期化 (行の左辺の計算・集合の行の表) は止めを見ないので、始める前に一度見る。
+/// - FJ2 は止めの合図が立った後に LP 修復をしない (`fj::SKIP_REPAIR_ON_STOP`、[`heuristics::fj_lmip_mix`] と同じ)。
+/// - 問題は `=1` と同じ (前処理後、LP による固定の前。FJ_P3 の前処理はかけない)。
+fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> Option<Vec<f64>> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let threads = threads.max(1);
+    let n_fj = if threads == 1 { 1 } else { threads.div_ceil(2) };
+    let stop = AtomicBool::new(false);
+    let (fj_tries, lm_steps) = (AtomicU64::new(0), AtomicU64::new(0));
+    // 見つけた解と、見つけた方 (1 = FJ、2 = Local-MIP) と時刻
+    let found: std::sync::Mutex<Option<(Vec<f64>, u8, f64)>> = std::sync::Mutex::new(None);
+    let deadline = PRESOLVE_DEADLINE.with(|d| d.get());
+    let t_end = deadline.map_or(t0 + Duration::from_secs_f64(cap.max(0.0)), |d| d.min(t0 + Duration::from_secs_f64(cap.max(0.0))));
+    let slice = tunable!("ENOMOTO_T_MIP_FEAS_EARLY_LMIP_SLICE", 0.2, f64).max(0.01);
+    let base = tunable!("ENOMOTO_T_MIP_FEAS_FJ_EARLY_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03) ^ 0x2545_F491_4F6C_DD1D;
+    let done = |x: Vec<f64>, who: u8| {
+        let mut g = found.lock().unwrap();
+        if g.is_none() {
+            *g = Some((x, who, t0.elapsed().as_secs_f64()));
+        }
+        stop.store(true, Ordering::Relaxed);
+    };
+    let over = || stop.load(Ordering::Relaxed) || Instant::now() + Duration::from_millis(50) >= t_end;
+    std::thread::scope(|s| {
+        for t in 0..threads {
+            let (fj_tries, lm_steps, done, over, stop) = (&fj_tries, &lm_steps, &done, &over, &stop);
+            s.spawn(move || {
+                fj::SKIP_REPAIR_ON_STOP.with(|c| c.set(true));
+                let fj_seed = |k: u64| base.wrapping_add((t as u64 + k * n_fj as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                let fj_once = |k: u64| -> bool {
+                    let left = t_end.saturating_duration_since(Instant::now()).as_secs_f64();
+                    fj_tries.fetch_add(1, Ordering::Relaxed);
+                    match fj::fj2_search(prob, &prob.col_lo, &prob.col_up, left, fj_seed(k), Some(stop)) {
+                        Some(x) if prob.is_feasible(&x, 1e-6) => {
+                            done(x, 1);
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                let lm_seed = base ^ 0x6A09_E667_F3BC_C909 ^ ((t as u64 + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9));
+                let lm_new = || if over() { None } else { localmip::LocalMip::new(prob, &prob.col_lo, &prob.col_up, lm_seed, true) };
+                // Local-MIP を `until` まで続きから回す。見つけたら真
+                let lm_run = |lm: &mut localmip::LocalMip, until: Instant| -> bool {
+                    let before = lm.res.steps;
+                    lm.run(until.min(t_end), Some(stop), &|_| {});
+                    lm_steps.fetch_add(lm.res.steps.saturating_sub(before), Ordering::Relaxed);
+                    match lm.res.best.take() {
+                        Some(x) if prob.is_feasible(&x, 1e-6) => {
+                            done(x, 2);
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if threads == 1 {
+                    // 1 本: FJ2 を 1 回と Local-MIP の 1 切れを交互に
+                    let mut lm = lm_new();
+                    let mut k = 0u64;
+                    while !over() {
+                        if fj_once(k) {
+                            break;
+                        }
+                        k += 1;
+                        if let Some(l) = lm.as_mut().filter(|l| !l.done) {
+                            if !over() && lm_run(l, Instant::now() + Duration::from_secs_f64(slice)) {
+                                break;
+                            }
+                        }
+                    }
+                } else if t < n_fj {
+                    let mut k = 0u64;
+                    while !over() {
+                        if fj_once(k) {
+                            break;
+                        }
+                        k += 1;
+                    }
+                } else if let Some(mut lm) = lm_new() {
+                    // Local-MIP は中でやり直し (restart) をするので、上限まで 1 本を回し続ける
+                    while !over() && !lm.done {
+                        if lm_run(&mut lm, t_end) {
+                            break;
+                        }
+                    }
+                }
+                fj::SKIP_REPAIR_ON_STOP.with(|c| c.set(false));
+            });
+        }
+    });
+    let r = found.into_inner().unwrap();
+    if verbose {
+        eprintln!(
+            "MIP: presolve: early FJ/Local-MIP for the feasibility problem: {threads} threads (FJ {n_fj}, Local-MIP {}), FJ {} tries, Local-MIP {} steps, found {} by {} ({:.2}s, cap {cap:.2}s)",
+            if threads == 1 { 1 } else { threads - n_fj },
+            fj_tries.load(Ordering::Relaxed),
+            lm_steps.load(Ordering::Relaxed),
+            r.is_some(),
+            r.as_ref().map_or("none", |f| ["none", "FJ", "Local-MIP"][f.1 as usize]),
+            r.as_ref().map_or(t0.elapsed().as_secs_f64(), |f| f.2),
+        );
+    }
+    r.map(|f| f.0)
 }
 
 thread_local! {
@@ -2492,7 +2609,8 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
     if lp_probe_secs.is_some() && !submip && heuristics::fj_feas_extend(&prob) {
         if let Some((threads, cap)) = FEAS_FJ_EARLY.with(|c| c.take()) {
-            if let Some(x) = feas_fj_early(&prob, threads, cap, verbose) {
+            let r = if feas_fj_early_lmip() { feas_fj_lmip_early(&prob, threads, cap, verbose) } else { feas_fj_early(&prob, threads, cap, verbose) };
+            if let Some(x) = r {
                 FEAS_FJ_SOL.with(|s| *s.borrow_mut() = Some(x));
                 return Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling });
             }
