@@ -4468,6 +4468,18 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // `discard_banned_cols`: 禁止中の列。
     let ban_discarded_candidates = true;
     let mut discard_row: Option<usize> = None;
+    // 確定したピボットを挟まずに続いた破棄の回数と、その最大値 (診断用)。禁止は 1 行分しか覚えないので、2 行以上の間で
+    // 破棄が巡ると同じ候補を選び直し続ける (pilotnov のクロスオーバーの仕上げ: 行 573 の 3 列と行 89 の 1 列で 4 反復の周期、
+    // 6 万反復)。`ENOMOTO_T_DISCARD_CYCLE_LIMIT` 回 (既定 50、0 で無効) 続いたら巡回とみなして打ち切り、解き直しに任せる
+    // ([`solve_slope_intercept_dual`]: 1 回目なら同じ基底から安全モードで、2 回目ならスラックの基底から)。通常の求解での
+    // 連続の最大は Netlib 91 問で 1、MIPLIB 40 問 (各 60 秒) の全求解で 6 なので、既定の上限は経路を変えない。
+    let mut discards_since_pivot: usize = 0;
+    let mut discards_since_pivot_max: usize = 0;
+    let discard_cycle_limit = tunable!("ENOMOTO_T_DISCARD_CYCLE_LIMIT", 50usize, usize);
+    // 試験用 (`ENOMOTO_T_DISCARD_BAN_MULTI=1`): 破棄した `(行, 列)` を、確定したピボットを挟むまで行ごとに覚えておく
+    // (別の行の破棄で禁止を消さない)。
+    let discard_ban_multi = tunable!("ENOMOTO_T_DISCARD_BAN_MULTI", 0u8, u8) != 0;
+    let mut discard_bans: Vec<(usize, usize)> = Vec::new();
     let mut discard_banned_cols: Vec<usize> = Vec::new();
     // 診断: 前反復の実行不能行プールの大きさ(増減の集計用)。
     let mut prev_pool_len: Option<usize> = None;
@@ -5089,6 +5101,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 eprintln!("DEBUG_EXT: main_loop_iters={iter_idx} bland_mode={bland_mode}");
             }
+            if env_str!("ENOMOTO_DEBUG_DISCARD_MAX").is_some() {
+                eprintln!("DISCARD_MAX {discards_since_pivot_max} iters={iter_idx} m={m}");
+            }
             if debug_delta0 {
                 match delta0_iter {
                     Some(k) => eprintln!(
@@ -5348,6 +5363,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         timed!(profile_phases, prof_phases::CHUZC1, {
             candidates.clear();
             // この行 `r` について破棄済み候補の禁止が有効か。
+            if discard_ban_multi && discard_row != Some(r) && discard_bans.iter().any(|&(br, _)| br == r) {
+                discard_row = Some(r);
+                discard_banned_cols.clear();
+                discard_banned_cols.extend(discard_bans.iter().filter(|&&(br, _)| br == r).map(|&(_, bq)| bq));
+            }
             let ban_active = ban_discarded_candidates && discard_row == Some(r);
             // 分岐なしの候補フィルタ: 触れた列をすべて次の枠に書き込み、3 条件(非基底、
             // `|alpha_j| > TOL`(NaN を同様に扱うため `<=` の否定形)、比率テストの符号条件)を
@@ -6144,11 +6164,23 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             if env_str!("ENOMOTO_DEBUG_D_DRIFT_EXT").is_some() {
                 eprintln!("DEBUG_D_DRIFT: VERIFY_FAIL at iter={iter_idx} q={q} r={r} alpha_q={alpha_q} alpha_full_r={}", alpha_full[r]);
             }
+            discards_since_pivot += 1;
+            discards_since_pivot_max = discards_since_pivot_max.max(discards_since_pivot);
+            if discard_cycle_limit > 0 && discards_since_pivot >= discard_cycle_limit {
+                RESTART_BAILOUT.with(|f| f.set(true));
+                if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                    eprintln!("DEBUG_EXT_BAILOUT: {discards_since_pivot} discarded pivots in a row without a confirmed pivot at iter={iter_idx} (last r={r} q={q}) -> retry");
+                }
+                return None;
+            }
             if stuck_row == Some(r) {
                 stuck_row_streak += 1;
             } else {
                 stuck_row = Some(r);
                 stuck_row_streak = 1;
+            }
+            if discard_ban_multi && !discard_bans.contains(&(r, q)) {
+                discard_bans.push((r, q));
             }
             if ban_discarded_candidates {
                 if discard_row == Some(r) {
@@ -6219,6 +6251,12 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             resolved_m[q] = true;
             remaining_m_side -= 1;
             iters_since_m_progress = 0;
+        }
+        discards_since_pivot = 0;
+        if discard_ban_multi && !discard_bans.is_empty() {
+            discard_bans.clear();
+            discard_row = None;
+            discard_banned_cols.clear();
         }
         // ここに来たのは行 `r` のピボットが確定したとき(破棄分岐は必ず `continue`)なので、
         // この行について追跡していた連続破棄と禁止リストを解除する。
@@ -6895,6 +6933,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     }
     if profile_phases {
         prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
+    }
+    if env_str!("ENOMOTO_DEBUG_DISCARD_MAX").is_some() {
+        eprintln!("DISCARD_MAX {discards_since_pivot_max} iters={max_iters} m={m} exhausted");
     }
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         eprintln!(
