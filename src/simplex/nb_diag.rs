@@ -43,6 +43,8 @@ thread_local! {
     static SAVED: std::cell::RefCell<Option<Vec<i8>>> = const { std::cell::RefCell::new(None) };
     /// 求解の始めの比較の結果 (eff, fix)
     static EFF: Cell<Option<(u32, u32)>> = const { Cell::new(None) };
+    /// この求解の warm start で、渡した基底が特異で差し替えた列の数 (`ENOMOTO_SIMPLEX_WARM_SING_REPAIR`。0 なら差し替えなし)
+    static REP: Cell<u32> = const { Cell::new(0) };
 }
 
 /// 次の `set_basis` の場所の印を付ける (その `set_basis` が読んで消す)
@@ -138,6 +140,13 @@ pub(crate) fn set_eff(eff: u32, fix: u32) {
     EFF.with(|e| e.set(Some((eff, fix))));
 }
 
+/// warm start で渡した基底が特異で `k` 列をスラックに差し替えた (`ENOMOTO_SIMPLEX_WARM_SING_REPAIR`)
+pub(crate) fn set_repaired(k: u32) {
+    if on() {
+        REP.with(|r| r.set(k));
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 struct Stat {
     n: u64,
@@ -147,6 +156,14 @@ struct Stat {
     /// 比べたが、求解の始めの置き場所を数えられなかった LP (warm start の初期化を通らなかった。ほとんどは渡した基底の
     /// LU 分解が特異で、warm start をやめて crash (全スラック基底) から解いたもの)
     n_noeff: u64,
+    /// `n_noeff` の LP の反復・時間の和
+    it_noeff: u64,
+    t_noeff: f64,
+    /// warm start で特異な基底を差し替えて使った LP の数・差し替えた列の和・反復・時間の和 (`ENOMOTO_SIMPLEX_WARM_SING_REPAIR`)
+    n_rep: u64,
+    sum_rep: u64,
+    it_rep: u64,
+    t_rep: f64,
     sum_cmp: u64,
     sum_opp: u64,
     sum_unk: u64,
@@ -174,6 +191,7 @@ pub(crate) fn record(p: Option<Pending>, iters: u64, secs: f64) {
     let sub = IN_SUB.with(|s| s.get());
     let site = p.as_ref().map_or(NO_SET, |p| p.site) as usize;
     let eff = EFF.with(|e| e.take());
+    let rep = REP.with(|r| r.replace(0));
     SAVED.with(|x| *x.borrow_mut() = None);
     let Ok(mut st) = STATS.lock() else { return };
     if st.len() != 2 * NSITE {
@@ -190,6 +208,8 @@ pub(crate) fn record(p: Option<Pending>, iters: u64, secs: f64) {
             s.sum_unk += p.unk as u64;
             if eff.is_none() {
                 s.n_noeff += 1;
+                s.it_noeff += iters;
+                s.t_noeff += secs;
             }
             let (e, f) = eff.unwrap_or((0, 0));
             s.sum_eff += e as u64;
@@ -198,6 +218,12 @@ pub(crate) fn record(p: Option<Pending>, iters: u64, secs: f64) {
         }
         _ => (false, false),
     };
+    if rep > 0 {
+        s.n_rep += 1;
+        s.sum_rep += rep as u64;
+        s.it_rep += iters;
+        s.t_rep += secs;
+    }
     if mis {
         s.n_mis += 1;
         s.it_mis += iters;
@@ -223,7 +249,7 @@ pub(crate) fn print(total: f64) {
         }
         let (sub, site) = (k >= NSITE, NAMES[k % NSITE]);
         eprintln!(
-            "NB_DIAG {} {site} n={} n_cmp={} n_mis={} n_fix={} n_noeff={} sum_cmp={} sum_opp={} sum_unk={} sum_eff={} sum_fix={} it_mis={} it_ok={} t_mis={:.4} t_ok={:.4} it_fix={} t_fix={:.4} max_it={}",
+            "NB_DIAG {} {site} n={} n_cmp={} n_mis={} n_fix={} n_noeff={} sum_cmp={} sum_opp={} sum_unk={} sum_eff={} sum_fix={} it_mis={} it_ok={} t_mis={:.4} t_ok={:.4} it_fix={} t_fix={:.4} max_it={} it_noeff={} t_noeff={:.4} n_rep={} sum_rep={} it_rep={} t_rep={:.4}",
             if sub { "sub" } else { "main" },
             s.n,
             s.n_cmp,
@@ -241,7 +267,13 @@ pub(crate) fn print(total: f64) {
             s.t_ok,
             s.it_fix,
             s.t_fix,
-            s.max_it
+            s.max_it,
+            s.it_noeff,
+            s.t_noeff,
+            s.n_rep,
+            s.sum_rep,
+            s.it_rep,
+            s.t_rep
         );
     }
 }

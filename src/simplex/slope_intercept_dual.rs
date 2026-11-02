@@ -1270,6 +1270,12 @@ pub(super) fn solve_slope_intercept_dual_from_basis(std: &StdForm, opts: &crate:
     r
 }
 
+/// 試作 `ENOMOTO_SIMPLEX_WARM_SING_REPAIR=1` (既定オフ): warm start で渡した基底の LU が特異なら、特異の原因の基底列だけを
+/// スラックに差し替えて残りの基底で warm start する ([`warm_start_basis`])。オフなら今まで通り全スラック基底から解く。
+fn warm_sing_repair() -> bool {
+    env_str!("ENOMOTO_SIMPLEX_WARM_SING_REPAIR").is_some_and(|v| v != "0")
+}
+
 /// [`solve_slope_intercept_dual_from_basis`] の開始状態を作る。成功したら真。
 fn warm_start_basis(
     std: &StdForm,
@@ -1294,8 +1300,36 @@ fn warm_start_basis(
         }
         pos[j] = Some(k);
     }
+    // 特異の修復で差し替えた基底 (`ENOMOTO_SIMPLEX_WARM_SING_REPAIR`)。差し替えたら以下は `wb` の代わりにこれを使う。
+    let repaired_wb: Vec<usize>;
+    let mut wb = wb;
     let lu = match WARM_LU.with(|w| w.borrow_mut().take()) {
         Some(l) if warm_lu_matches(std, wb, &l) => *l,
+        _ if warm_sing_repair() => {
+            // 試作 (既定オフ): 渡した基底の LU が特異なら丸ごと捨てず、ピボットの取れなかった基底列だけを残りの行の
+            // スラックに差し替える (HiGHS の rank deficiency の扱い、[`super::basis_kernel::factorize_basis_repair`])。
+            // 外れた列は非基底になり、下の規則 (被約費用の符号の側、希望があればその側) で置かれる。
+            // 正則な基底では `refactorize(std, &pos, None)` と同じ分解 (経路も同じ) で、何も変えない。
+            let mut b = wb.to_vec();
+            match super::basis_kernel::factorize_basis_repair(std, &mut b, &mut pos, None) {
+                Some((l, replaced)) => {
+                    if !replaced.is_empty() {
+                        super::nb_diag::set_repaired(replaced.len() as u32);
+                        if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                            eprintln!("DEBUG_EXT: warm start basis was singular, replaced {} columns by slacks", replaced.len());
+                        }
+                        repaired_wb = b;
+                        wb = &repaired_wb;
+                    }
+                    l
+                }
+                None => {
+                    // 修復もできない: 今まで通り warm start をやめる (`refactorize` と同じく印を立てる)
+                    SINGULAR_BAILOUT.with(|f| f.set(true));
+                    return false;
+                }
+            }
+        }
         _ => {
             let Some(l) = refactorize(std, &pos, None) else {
                 return false;
