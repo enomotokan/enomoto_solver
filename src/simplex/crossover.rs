@@ -796,14 +796,35 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
 
     // ---- 1. 内点法 (固定列 lb == ub を除いた問題) ----
     let Reduced { free_cols, a: a_j, b: b_j, l: l_j, u: u_j } = reduce_fixed(std);
-    let c_j: Vec<f64> = free_cols.iter().map(|&j| std.c[j]).collect();
+    let mut c_j: Vec<f64> = free_cols.iter().map(|&j| std.c[j]).collect();
+    // 試験用 (`ENOMOTO_T_IPM_COST_PERTURB=δ`、0 でしない): 内点法だけを費用を微小にずらした問題で解く (双対退化を崩して
+    // 主の最適解を 1 つの頂点にし、内点法の終点を頂点に近づける)。クロスオーバー (検出・押し出し・頂点の判定・仕上げ) は
+    // 元の費用のまま。ずらし幅は `δ (|c_j| + ‖c‖∞) (0.5 + 0.5 r_j)` で、向きは下限だけの列は +、上限だけの列は −
+    // (後退方向に沿って目的が下がらない向き)、箱型は乱数、自由列はずらさない。
+    let cost_perturb = if xo.given_point.is_none() { tunable!("ENOMOTO_T_IPM_COST_PERTURB", 0.0f64, f64) } else { 0.0 };
+    if cost_perturb > 0.0 {
+        let cmax = c_j.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+        let cref = if cmax > 0.0 { cmax } else { 1.0 };
+        for (k, &j) in free_cols.iter().enumerate() {
+            let (l, u) = (std.lb[j], std.ub[j]);
+            let r = rnd(j, 0x5eed);
+            let sign = match (l.is_finite(), u.is_finite()) {
+                (true, false) => 1.0,
+                (false, true) => -1.0,
+                (true, true) => if rnd(j, 0x51de) < 0.5 { -1.0 } else { 1.0 },
+                (false, false) => 0.0,
+            };
+            c_j[k] += sign * cost_perturb * (c_j[k].abs() + cref) * (0.5 + 0.5 * r);
+        }
+    }
     let max_iters = tunable!("ENOMOTO_T_IPM_MAX_ITERS", 200usize, usize);
     // 試験用 (`ENOMOTO_T_XO_PDLP`): 先に PDLP で近似解を求め、
     //   1: 内点法の近接中心にする、2: 近接中心と初期点にする、3: 内点法を飛ばしてそのままクロスオーバーに渡す。
     let pdlp_mode = tunable!("ENOMOTO_T_XO_PDLP", 0u8, u8);
     // 同時実行の二段解法が共有する下界 (元の問題の単位) を、固定列の分を引いて内点法の問題の単位にする
     // (`ENOMOTO_T_XO_BOUND_GAP`、既定 1e-6 は第 11 回の比較で決めた。0 で使わない)。
-    let bound_gap = tunable!("ENOMOTO_T_XO_BOUND_GAP", 1e-6f64, f64);
+    // 費用をずらしたとき (`ENOMOTO_T_IPM_COST_PERTURB`) は元の費用の下界と比べられないので使わない。
+    let bound_gap = if cost_perturb > 0.0 { 0.0 } else { tunable!("ENOMOTO_T_XO_BOUND_GAP", 1e-6f64, f64) };
     let shared = crate::cancel::bound().filter(|sb| bound_gap > 0.0 && sb.n_total == std.n_total && sb.n_rows == std.n_rows);
     let fixed_obj: f64 = (0..std.n_total).filter(|&j| !(std.lb[j] < std.ub[j])).map(|j| std.c[j] * std.lb[j]).sum();
     let lb_fn = move || shared.as_ref().map_or(f64::NEG_INFINITY, |sb| sb.get() - fixed_obj);
