@@ -81,7 +81,7 @@ pub struct TwoStageLp {
 }
 
 /// 試作 `ENOMOTO_MIP_BASIS_NB` ([`TwoStageLp::set_basis_nb`]) を、場所 `site` (`t` 木のノードの基底の復元、`s` サブ MIP の根、
-/// `b` 裏のカットの写しの根、`r` 再スタートの後の根) で使うか。`1` なら全部、`t,s` のようにカンマ区切りで場所を選ぶ
+/// `b` 裏のカットの写しの根 (と解探索のスレッドの根)、`w` 主の根の LP が 1 秒以上の問題の裏のカットの写しの根だけ、`r` 再スタートの後の根) で使うか。`1` なら全部、`t,s` のようにカンマ区切りで場所を選ぶ
 pub fn basis_nb_on(site: char) -> bool {
     match env_str!("ENOMOTO_MIP_BASIS_NB") {
         None | Some("0") | Some("off") => false,

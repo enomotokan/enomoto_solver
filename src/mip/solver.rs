@@ -177,6 +177,9 @@ thread_local! {
     /// ループだけを行い、止めの合図まで続けて、最後の LP に残ったカットの行と目的値を返す。
     /// カットを強める求解の、主の根の LP の反復数 (カットの LP の反復上限に使う)
     pub(super) static BG_ROOT_ITERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// 試作 `ENOMOTO_MIP_BASIS_NB` の場所 `w`: 主の根の LP が `ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS` (1 秒) 以上かかったので、
+    /// 裏のカットの写しの根の LP に上限・下限の置き場所も渡す
+    static BG_ROOT_NB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static CUT_JOB: std::cell::RefCell<Option<std::sync::Arc<CutJob>>> = const { std::cell::RefCell::new(None) };
     /// カットを強める求解の根の LP の初めの基底 (主の根の LP の最後の基底。既定で渡す。`ENOMOTO_MIP_NO_BG_CUTS_BASIS` で渡さない)
     static BG_ROOT_BASIS: std::cell::RefCell<Option<super::lp::Basis>> = const { std::cell::RefCell::new(None) };
@@ -4072,8 +4075,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
                     crate::simplex::nb_diag::tag(crate::simplex::nb_diag::BG_COPY);
-                    // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `b`、解探索のスレッドも): 上限・下限の置き場所も渡す
-                    if crate::simplex::mip_lp::basis_nb_on('b') {
+                    // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `b`、解探索のスレッドも): 上限・下限の置き場所も渡す。
+                    // 場所 `w` は、主の根の LP が 1 秒以上の問題の裏のカットの写しだけ (`ENOMOTO_MIP_BG_CUTS_BASIS_X=lpw` と同じ条件)
+                    if crate::simplex::mip_lp::basis_nb_on('b') || BG_ROOT_NB.with(|c| c.get()) {
                         self.lp.set_basis_nb(&b, &[]);
                     } else {
                         self.lp.set_basis(&b);
@@ -4373,6 +4377,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 写しの根の LP は基底なしで解き直しになり、uccase12 (88600 行) では 38 秒たっても終わらず、主がその終わりを
                 // 待って 23〜27 秒止まっていた (LP は止めの合図を見ない)
                 let bg_basis = if env_str!("ENOMOTO_MIP_NO_BG_CUTS_BASIS").is_none() { Some(self.lp.basis()) } else { None };
+                let bg_nb = crate::simplex::mip_lp::basis_nb_on('w') && self.root_lp_secs >= tunable!("ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS", 1.0, f64);
                 // `lpw` なら、根の LP (カットの前) を解くのに `ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS` (既定 1 秒) 以上かかった問題だけ
                 let bx = bg_cuts_basis_x_on() && (env_str!("ENOMOTO_MIP_BG_CUTS_BASIS_X") != Some("lpw") || self.root_lp_secs >= tunable!("ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS", 1.0, f64));
                 if bg_cuts_basis_x_on() && self.params.verbose {
@@ -4403,6 +4408,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     .spawn(move || {
                         CUT_JOB.with(|j| *j.borrow_mut() = Some(j2));
                         BG_ROOT_ITERS.with(|c| c.set(ri));
+                        BG_ROOT_NB.with(|c| c.set(bg_nb));
                         BG_ROOT_BASIS.with(|b| *b.borrow_mut() = bg_basis);
                         BG_ROOT_X.with(|b| *b.borrow_mut() = bg_x);
                         let _ = solve_worker(snap, None, params);
