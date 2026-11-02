@@ -406,9 +406,16 @@ pub fn solve_mip(
     // なければこのスレッド数にする
     let prev_mt = solver::MIP_THREADS_DEFAULT.swap(params.threads, std::sync::atomic::Ordering::Relaxed);
     let t_solve = std::time::Instant::now();
+    // 診断用 (`ENOMOTO_MIP_NB_DIAG`): `set_basis` の置き場所と `nb_hint` の食い違いの集計 (analysis/basis_nb_diag_20261102.md)
+    if crate::simplex::nb_diag::on() {
+        crate::simplex::nb_diag::reset();
+    }
     let r = if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() { solve_portfolio(&p, params) } else { solve_problem(&p, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()) };
     if solver::end_diag() || params.verbose {
         eprintln!("MIP: solve returned {:?} after {:.2}s (time limit {:.2}s)", r.status, t_solve.elapsed().as_secs_f64(), params.time_limit);
+    }
+    if crate::simplex::nb_diag::on() {
+        crate::simplex::nb_diag::print(t_solve.elapsed().as_secs_f64());
     }
     crate::simplex::mip_lp::set_cold_race_threads(prev_race);
     solver::MIP_THREADS_DEFAULT.store(prev_mt, std::sync::atomic::Ordering::Relaxed);

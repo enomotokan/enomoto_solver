@@ -2607,7 +2607,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     } else if sub_off {
         warm.store(false, Ordering::Relaxed);
     }
+    let prev_sub = crate::simplex::nb_diag::set_in_sub(s.params.submip);
     let r = s.run();
+    crate::simplex::nb_diag::set_in_sub(prev_sub);
     warm.store(prev, Ordering::Relaxed);
     r
 }
@@ -3980,6 +3982,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.submip {
             if let Some(col) = SUBMIP_BASIS.with(|s| s.borrow_mut().take()) {
                 if col.len() == self.p.n {
+                    crate::simplex::nb_diag::tag(crate::simplex::nb_diag::SUBMIP_ROOT);
                     let b = super::lp::Basis { col, row: Vec::new() };
                     // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `s`): 列の上限・下限の置き場所も渡す (サブ MIP で固定した列は推し量りのまま)
                     if crate::simplex::mip_lp::basis_nb_on('s') {
@@ -4027,6 +4030,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     } else if !b.row.is_empty() {
                         b.row.resize(self.lp.num_rows(), super::lp::VarStatus::Basic);
                     }
+                    crate::simplex::nb_diag::tag(crate::simplex::nb_diag::ROOT_PROBE);
                     self.lp.set_basis(&b);
                     // DSE 重みも引き継ぐ (根の LP の 1 回だけ。重みなしで始めると、カットのループの LP の反復が増えた)
                     if let Some(w) = ROOT_DSE.with(|s| s.borrow_mut().take()) {
@@ -4044,6 +4048,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.params.verbose {
                         eprintln!("MIP: root LP basis from before the restart: {matched} of {} rows matched", self.lp.num_rows());
                     }
+                    crate::simplex::nb_diag::tag(crate::simplex::nb_diag::RESTART);
                     // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `r`): 上限・下限の置き場所も渡す
                     if crate::simplex::mip_lp::basis_nb_on('r') {
                         self.lp.set_basis_nb(&b, &[]);
@@ -4066,6 +4071,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: [snapshot] root basis from the main thread: columns {} / {}, rows {} / {} (basic columns {bc}, basic rows {br})", b.col.len(), self.p.n, b.row.len(), self.lp.num_rows());
                 }
                 if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
+                    crate::simplex::nb_diag::tag(crate::simplex::nb_diag::BG_COPY);
                     // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `b`、解探索のスレッドも): 上限・下限の置き場所も渡す
                     if crate::simplex::mip_lp::basis_nb_on('b') {
                         self.lp.set_basis_nb(&b, &[]);
@@ -4088,6 +4094,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.pool.is_some() && tree_root_basis() {
             if let Some(b) = self.snap.as_ref().and_then(|s| s.root_basis.clone()) {
                 if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
+                    crate::simplex::nb_diag::tag(crate::simplex::nb_diag::TREE_ROOT);
                     self.lp.set_basis(&b);
                 }
             }
@@ -4969,6 +4976,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.add_cut_rows(&rows);
                     if let Some(b) = bg.job.basis.lock().unwrap().take() {
                         if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
+                            crate::simplex::nb_diag::tag(crate::simplex::nb_diag::BG_RETURN);
                             self.lp.set_basis(&b);
                         }
                     }
@@ -5889,6 +5897,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 全論理変数基底から解き直してみる
                     let b = self.lp.basis();
                     let slack = super::lp::Basis { col: b.col.iter().map(|_| VarStatus::Lower).collect(), row: vec![VarStatus::Basic; b.row.len()] };
+                    crate::simplex::nb_diag::tag(crate::simplex::nb_diag::SLACK_RETRY);
                     self.lp.set_basis(&slack);
                     st = self.lp.solve(&capped(self, u64::MAX));
                     if st == LpStatus::TimeLimit && !self.time_up() {
@@ -8642,6 +8651,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if epoch == self.row_log.len() && b.row.len() == mr {
             self.restore_stats.0 += 1;
             self.restored_now = true;
+            crate::simplex::nb_diag::tag(match self.tp_kind { 0 => crate::simplex::nb_diag::TREE_SIBLING, 1 => crate::simplex::nb_diag::TREE_QUEUE, _ => crate::simplex::nb_diag::TREE_POOL });
             match &nb_skip {
                 Some(sk) => self.lp.set_basis_nb(b, sk),
                 None => self.lp.set_basis(b),
@@ -8717,6 +8727,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.restored_now = true;
+        crate::simplex::nb_diag::tag(match self.tp_kind { 0 => crate::simplex::nb_diag::TREE_SIBLING, 1 => crate::simplex::nb_diag::TREE_QUEUE, _ => crate::simplex::nb_diag::TREE_POOL });
         match &nb_skip {
             Some(sk) => self.lp.set_basis_nb(&b2, sk),
             None => self.lp.set_basis(&b2),

@@ -1408,6 +1408,36 @@ fn warm_start_basis(
         });
     }
     xprof("w_d");
+    // 診断用 (`ENOMOTO_MIP_NB_DIAG`): `set_basis` に渡された置き場所 (保存した側) と実際に置いた側の食い違いと、そのうち
+    // 保存した側を希望に渡せばその側に置かれた数 (上の希望の判定と同じ条件) を数える (振る舞いは変えない)
+    if let Some(saved) = super::nb_diag::take_saved().filter(|s| s.len() == n_total && hint.is_some()) {
+        let (mut eff, mut fix) = (0u32, 0u32);
+        for j in 0..n_total {
+            let s = saved[j];
+            if s == 0 || pos[j].is_some() {
+                continue;
+            }
+            let placed = match st[j] {
+                Some(NbStatus::Lower) => -1,
+                Some(NbStatus::Upper) => 1,
+                _ => 0,
+            };
+            if placed == s {
+                continue;
+            }
+            eff += 1;
+            let mut dt = std.c[j];
+            for &(i, a) in std.cols.col(j) {
+                dt -= a * y_true[i];
+            }
+            let small = hint_tol * (1.0 + std.c[j].abs());
+            let (lo, hi) = (std.lb[j], std.ub[j]);
+            if (s < 0 && lo.is_finite() && dt >= -small) || (s > 0 && hi.is_finite() && dt <= small) {
+                fix += 1;
+            }
+        }
+        super::nb_diag::set_eff(eff, fix);
+    }
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         let (mut agree, mut differ, mut unknown) = (0, 0, 0);
         if let Some(h) = &hint {

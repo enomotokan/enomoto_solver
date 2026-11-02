@@ -73,6 +73,8 @@ pub struct TwoStageLp {
     /// 置き場所の希望 (標準形の列ごとに -1 下限、+1 上限、0 は今の推し量り [`Self::nb_hint`] のまま)。次の求解で使い切る。
     /// 行・解が変わったら捨てる ([`Self::clear_memo`])。列の境界の変更では捨てず、求解のときに今の境界と照らす
     basis_nb: Option<Vec<i8>>,
+    /// 診断用 (`ENOMOTO_MIP_NB_DIAG`): 直前の [`Self::set_basis`] に渡された置き場所 (次の求解で `nb_hint` と比べる)
+    nb_diag: Option<Box<super::nb_diag::Pending>>,
     /// 直近の解 `x` についての [`Self::row_activities`] の結果 (行と `x` にだけよるので、`x` か行を変えたら捨てる。
     /// 列の境界・基底を変えただけなら残し、次の求解の [`Self::nb_hint`] でも使う)。
     act_memo: OnceCell<Vec<f64>>,
@@ -206,6 +208,7 @@ impl TwoStageLp {
             act_memo: OnceCell::new(),
             resume_nb: None,
             basis_nb: None,
+            nb_diag: None,
         }
     }
 
@@ -586,6 +589,9 @@ impl TwoStageLp {
         self.status = None;
         self.basis_nb = None;
         self.clear_state_memo();
+        if super::nb_diag::on() {
+            self.nb_diag = Some(Box::new(super::nb_diag::Pending::new(&b.col, &b.row, &self.sigma, n, self.rows.len())));
+        }
     }
 
     /// 試作 (`ENOMOTO_MIP_BASIS_NB`): [`Self::set_basis`] に加えて、`b` の非基底の列・行の上限・下限 (Upper / Lower) を次の
@@ -849,6 +855,9 @@ impl TwoStageLp {
         let it0 = self.iters;
         let pol0 = sid::ext_polish_iterations();
         let st = self.solve_inner(lim);
+        if super::nb_diag::on() {
+            super::nb_diag::record(self.nb_diag.take().map(|p| *p), self.iters - it0, t0.elapsed().as_secs_f64());
+        }
         if env_str!("ENOMOTO_MIP_DEBUG_LP").is_some() {
             eprintln!("TSLP solve st={st:?} iters={} polish={} us={} warm={} dse_cache={} lu_cache={}", self.iters - it0, sid::ext_polish_iterations() - pol0, t0.elapsed().as_micros(), self.basis.is_some(), self.dse_cache.is_some(), self.lu_cache.is_some());
         }
@@ -1165,6 +1174,9 @@ impl TwoStageLp {
                     sid::set_warm_nb(Some(h));
                 } else if env_str!("ENOMOTO_MIP_NO_NB_HINT").is_none() {
                     let mut h = self.nb_hint();
+                    if let Some(p) = self.nb_diag.as_deref_mut() {
+                        p.compare(&h, &b, &self.std.lb, &self.std.ub);
+                    }
                     // 試作 `ENOMOTO_MIP_BASIS_NB`: 保存した基底の上限・下限の置き場所を重ねる
                     if let Some(w) = self.basis_nb.take() {
                         self.apply_basis_nb(&mut h, &w);
