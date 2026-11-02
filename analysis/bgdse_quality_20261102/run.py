@@ -17,7 +17,10 @@ CFGS = {
     "w1_rw": {**W1, "ENOMOTO_MIP_BG_CUTS_DSE": "rw"},
     "w1_q": {**W1, "ENOMOTO_MIP_BG_CUTS_DSE": "q"},
     "w1_1q": {**W1, "ENOMOTO_MIP_BG_CUTS_DSE": "1q"},
+    "w1_qa": {**W1, "ENOMOTO_MIP_BG_CUTS_DSE": "qa"},
+    "w1_1qa": {**W1, "ENOMOTO_MIP_BG_CUTS_DSE": "1qa"},
     # 閾値を決めるための両端 (標本のずれは測るが、常に厳密・決して厳密にしない)
+    # (計測 1・2 は判定の統計が今と違う: 計測 1 は全体の |ln| の中央値・閾値 0 / 1e9、計測 2 は主実行不能な行のばらつき・閾値 1e9。どちらも両端なので判定は同じ)
     "w1_q0": {**W1, "ENOMOTO_MIP_BG_CUTS_DSE": "q", "ENOMOTO_T_MIP_BG_CUTS_DSE_DEV": "0"},
     "w1_qinf": {**W1, "ENOMOTO_MIP_BG_CUTS_DSE": "q", "ENOMOTO_T_MIP_BG_CUTS_DSE_DEV": "1e9"},
 }

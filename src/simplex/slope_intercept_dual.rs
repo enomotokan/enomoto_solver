@@ -1190,8 +1190,8 @@ thread_local! {
     /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q` (既定では使わない): 次の 1 回の warm start の求解だけ、始めの DSE 重み (引き継いだもの・
     /// 単位重み) を基底の行から `k` 行の標本で厳密な値と比べ、ずれ (`|ln(厳密 / 今)|` の中央値) が `dev` を超えたときだけ
     /// 全部の行の厳密な重みを計算する (`(k, dev, 統計)`。統計は 0 = 全体の `|ln|` の中央値、1 = 全体のばらつき、
-    /// 2 = 主実行不能な行のばらつき ([`DseSampleStat`])。求解の始めに下ろす。期限・取り消し・[`DSE_EXACT_STOP`] を 32 行ごとに見る)
-    pub(crate) static DSE_SAMPLE_ONCE: std::cell::Cell<Option<(usize, f64, u8)>> = const { std::cell::Cell::new(None) };
+    /// 2 = 主実行不能な行のばらつき ([`DseSampleStat`])。最後は確かめる反復 (0 = 求解の始め、`n` = `n` 反復を超えて続いたとき)。求解の始めに下ろす。期限・取り消し・[`DSE_EXACT_STOP`] を 32 行ごとに見る)
+    pub(crate) static DSE_SAMPLE_ONCE: std::cell::Cell<Option<(usize, f64, u8, usize)>> = const { std::cell::Cell::new(None) };
     /// [`DSE_SAMPLE_ONCE`] の結果 (呼び出し側が表示に取り出す)
     pub(crate) static DSE_SAMPLE_RESULT: std::cell::Cell<Option<DseSampleResult>> = const { std::cell::Cell::new(None) };
 }
@@ -1224,12 +1224,49 @@ pub(crate) struct DseSampleResult {
     pub inf: DseSampleStat,
     /// 判定に使った統計の値
     pub value: f64,
+    /// 確かめた時点の反復 (0 = 求解の始め)
+    pub iter: usize,
     /// 標本の計算の時間 (秒)
     pub sample_secs: f64,
     /// 全部の行の厳密な重みを計算したか (0 しない、1 した、2 期限・止めの合図でやめた)
     pub full: u8,
     /// 全部の行の計算の時間 (秒)
     pub full_secs: f64,
+}
+
+/// [`DSE_SAMPLE_ONCE`] の確かめの本体: 全体と主実行不能な行 (`inf`) から `k` 行ずつ標本を取り、`stat` の統計が `dev` を超えたら
+/// 全部の行の厳密な重みを計算して `dse` を置き換える (32 行ごとに期限・取り消し・[`DSE_EXACT_STOP`] を見て、当たったらやめて今の重みのまま)
+#[allow(clippy::too_many_arguments)]
+fn dse_sample_check(lu: &sparse_lu::FtLu, dse: &mut super::DseState, inf: &[usize], k: usize, dev: f64, stat: u8, iter: usize) -> DseSampleResult {
+    let m = dse.w.len();
+    let t0 = std::time::Instant::now();
+    let all_rows: Vec<usize> = (0..m).collect();
+    let all = dse_sample_deviation(lu, &dse.w, &all_rows, k, 0x9e37_79b9_7f4a_7c15);
+    // 主実行不能な行 (集合の並びは順不同なので並べてから選ぶ)
+    let mut inf_rows = inf.to_vec();
+    inf_rows.sort_unstable();
+    let infs = dse_sample_deviation(lu, &dse.w, &inf_rows, k, 0x5851_f42d_4c95_7f2d);
+    let (value, kk) = match stat {
+        1 => (all.spread, all.n),
+        2 => (infs.spread, infs.n),
+        _ => (all.med_abs, all.n),
+    };
+    let sample_secs = t0.elapsed().as_secs_f64();
+    let (mut full, mut full_secs) = (0u8, 0.0);
+    if kk > 0 && value > dev {
+        let t1 = std::time::Instant::now();
+        let dl = ext_control().and_then(|c| c.deadline);
+        let stop = || dl.is_some_and(|d| std::time::Instant::now() >= d) || crate::cancel::is_cancelled() || DSE_EXACT_STOP.with(|h| h.borrow().as_ref().is_some_and(|f| f()));
+        match super::DseState::from_basis_stoppable(m, lu, &stop) {
+            Some(s) => {
+                *dse = s;
+                full = 1;
+            }
+            None => full = 2,
+        }
+        full_secs = t1.elapsed().as_secs_f64();
+    }
+    DseSampleResult { m, n_inf: inf.len(), all, inf: infs, value, iter, sample_secs, full, full_secs }
 }
 
 /// [`DSE_SAMPLE_ONCE`] の標本の確かめ: `cand` (行の候補) から `k` 行を決まった種の乱数で選び、厳密な重み (BTRAN の 2 乗ノルム) と
@@ -4416,39 +4453,19 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }
     };
 
-    // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q` ([`DSE_SAMPLE_ONCE`]): 始めの重みを標本の行で厳密な値と比べ、ずれが大きいときだけ
-    // 全部の行の厳密な重みを計算する (止めの合図・期限でやめたら始めの重みのまま)
-    if let Some((k, dev, stat)) = DSE_SAMPLE_ONCE.with(|c| c.take()) {
-        if warm_started {
-            let t0 = std::time::Instant::now();
-            let all_rows: Vec<usize> = (0..m).collect();
-            let all = dse_sample_deviation(&lu, &dse.w, &all_rows, k, 0x9e37_79b9_7f4a_7c15);
-            // 主実行不能な行 (集合の並びは順不同なので並べてから選ぶ)
-            let mut inf_rows = infeasible_rows.rows.clone();
-            inf_rows.sort_unstable();
-            let inf = dse_sample_deviation(&lu, &dse.w, &inf_rows, k, 0x5851_f42d_4c95_7f2d);
-            let (value, kk) = match stat {
-                1 => (all.spread, all.n),
-                2 => (inf.spread, inf.n),
-                _ => (all.med_abs, all.n),
-            };
-            let med = value;
-            let sample_secs = t0.elapsed().as_secs_f64();
-            let (mut full, mut full_secs) = (0u8, 0.0);
-            if kk > 0 && med > dev {
-                let t1 = std::time::Instant::now();
-                let dl = ext_control().and_then(|c| c.deadline);
-                let stop = || dl.is_some_and(|d| std::time::Instant::now() >= d) || crate::cancel::is_cancelled() || DSE_EXACT_STOP.with(|h| h.borrow().as_ref().is_some_and(|f| f()));
-                match super::DseState::from_basis_stoppable(m, &lu, &stop) {
-                    Some(s) => {
-                        dse = s;
-                        full = 1;
-                    }
-                    None => full = 2,
-                }
-                full_secs = t1.elapsed().as_secs_f64();
+    // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q` ([`DSE_SAMPLE_ONCE`]): 重みを標本の行で厳密な値と比べ、ずれが大きいときだけ
+    // 全部の行の厳密な重みを計算する (止めの合図・期限でやめたら今の重みのまま)。`after == 0` なら始めに、そうでなければ
+    // この求解が `after` 反復を超えて続いたときに (下のループの始め)
+    let mut dse_sample_late: Option<(usize, f64, u8, usize)> = None;
+    if let Some((k, dev, stat, after)) = DSE_SAMPLE_ONCE.with(|c| c.take()) {
+        if warm_started && after == 0 {
+            let r = dse_sample_check(&lu, &mut dse, &infeasible_rows.rows, k, dev, stat, 0);
+            if r.full == 1 {
+                dse_age0 = 0;
             }
-            DSE_SAMPLE_RESULT.with(|c| c.set(Some(DseSampleResult { m, n_inf: infeasible_rows.rows.len(), all, inf, value, sample_secs, full, full_secs })));
+            DSE_SAMPLE_RESULT.with(|c| c.set(Some(r)));
+        } else if warm_started {
+            dse_sample_late = Some((k, dev, stat, after));
         }
     }
 
@@ -4983,6 +5000,20 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     eprintln!("  DBG prev row has {sumabs} entries with |a_p|>1e3");
                 }
                 dual_violation_reported = true;
+            }
+        }
+        // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=qa` ([`DSE_SAMPLE_ONCE`] の 4 つ目): この求解が決めた反復を超えて続いたときだけ、重みの
+        // ずれを標本で確かめる (短い LP は引き継いだ重みのまま、既定と同じ道を通る)
+        if let Some((k, dev, stat, after)) = dse_sample_late {
+            if iter_idx >= after {
+                dse_sample_late = None;
+                let r = dse_sample_check(&lu, &mut dse, &infeasible_rows.rows, k, dev, stat, iter_idx);
+                if r.full == 1 {
+                    dse_age0 = 0;
+                    shortlist_valid = false;
+                    chuzr_heap_valid = false;
+                }
+                DSE_SAMPLE_RESULT.with(|c| c.set(Some(r)));
             }
         }
         // (a')(b')(論文 6.1 節): 主実行可能性の確認と離基行の選択。DSE 重み付き(5.4 節 Step 2(b) の一般化、

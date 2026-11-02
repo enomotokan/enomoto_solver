@@ -1693,14 +1693,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let cut_dse_exact = (env_str!("ENOMOTO_MIP_CUT_DSE_EXACT").is_some() && !self.params.submip) || bg_dse_exact;
             // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q`・`=1q`: 写しの最初のカットの LP の始めの重みを `ENOMOTO_T_MIP_BG_CUTS_DSE_SAMPLE` (既定 32) 行の
             // 標本で厳密な値と比べ、`|ln(厳密 / 今)|` の中央値が `ENOMOTO_T_MIP_BG_CUTS_DSE_DEV` を超えたときだけ全部の行を厳密に (analysis/bgdse_quality_20261102.md)
-            let bg_dse_sample = job.is_some() && !cut_dse_exact && super::solver::BG_DSE_SAMPLE_FIRST.with(|c| c.replace(false));
+            let bg_dse_sample_mode = if job.is_some() && !cut_dse_exact { super::solver::BG_DSE_SAMPLE_FIRST.with(|c| c.replace(0)) } else { 0 };
+            let bg_dse_sample = bg_dse_sample_mode > 0;
             if bg_dse_sample {
                 let k = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_SAMPLE", 32usize, usize);
-                let dev = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_DEV", 1.0, f64);
+                let dev = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_DEV", 0.3, f64);
                 // 判定に使う統計 (`ENOMOTO_T_MIP_BG_CUTS_DSE_STAT`): 0 = 全体の |ln| の中央値、1 = 全体のばらつき、2 = 主実行不能な行のばらつき
-                let stat = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_STAT", 2u8, u8);
+                let stat = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_STAT", 1u8, u8);
                 crate::simplex::slope_intercept_dual::DSE_SAMPLE_RESULT.with(|c| c.set(None));
-                crate::simplex::slope_intercept_dual::DSE_SAMPLE_ONCE.with(|c| c.set(Some((k, dev, stat))));
+                let after = if bg_dse_sample_mode == 2 { tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_AFTER", 500usize, usize).max(1) } else { 0 };
+                crate::simplex::slope_intercept_dual::DSE_SAMPLE_ONCE.with(|c| c.set(Some((k, dev, stat, after))));
             }
             if cut_dse_exact {
                 crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1714,11 +1716,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose {
                     match crate::simplex::slope_intercept_dual::DSE_SAMPLE_RESULT.with(|c| c.take()) {
                         Some(r) => eprintln!(
-                            "MIP: cut round {round}: background DSE sample: {} / {} rows, median |ln(exact/cur)| {:.3}, mean ln {:.3}, max {:.3}, spread {:.3}; infeasible {} / {} rows, median |ln| {:.3}, mean ln {:.3}, spread {:.3}; value {:.3} ({:.3}s); exact weights {} ({:.3}s)",
-                            r.all.n, r.m, r.all.med_abs, r.all.mean, r.all.max_abs, r.all.spread, r.inf.n, r.n_inf, r.inf.med_abs, r.inf.mean, r.inf.spread, r.value, r.sample_secs,
+                            "MIP: cut round {round}: background DSE sample: {} / {} rows, median |ln(exact/cur)| {:.3}, mean ln {:.3}, max {:.3}, spread {:.3}; infeasible {} / {} rows, median |ln| {:.3}, mean ln {:.3}, spread {:.3}; value {:.3} at iter {} ({:.3}s); exact weights {} ({:.3}s)",
+                            r.all.n, r.m, r.all.med_abs, r.all.mean, r.all.max_abs, r.all.spread, r.inf.n, r.n_inf, r.inf.med_abs, r.inf.mean, r.inf.spread, r.value, r.iter, r.sample_secs,
                             match r.full { 1 => "computed", 2 => "stopped", _ => "not computed" }, r.full_secs
                         ),
-                        None => eprintln!("MIP: cut round {round}: background DSE sample: not taken (not a warm start)"),
+                        None => eprintln!("MIP: cut round {round}: background DSE sample: not taken (LP finished before the check, {} iters, or not a warm start)", self.lp.total_iterations() - it0),
                     }
                 }
             }

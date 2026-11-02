@@ -34,17 +34,19 @@ def parse(log):
         m = re.search(r"background DSE sample: (\d+) / (\d+) rows, median \|ln\(exact/cur\)\| ([\d.]+), mean ln (-?[\d.]+), max ([\d.]+), spread ([\d.]+); infeasible (\d+) / (\d+) rows, median \|ln\| ([\d.]+), mean ln (-?[\d.]+), spread ([\d.]+); value ([\d.]+) \(([\d.]+)s\); exact weights ([\w ]+) \(([\d.]+)s\)", l)
         if m:
             g = m.groups()
-            d = dict(k=int(g[0]), m=int(g[1]), med=float(g[2]), mean=float(g[3]), max=float(g[4]), spread=float(g[5]), ki=int(g[6]), ninf=int(g[7]), imed=float(g[8]), imean=float(g[9]), ispread=float(g[10]), value=float(g[11]), secs=float(g[12]), full=g[13], full_secs=float(g[14]))
+            d = dict(k=int(g[0]), m=int(g[1]), med=float(g[2]), mean=float(g[3]), max=float(g[4]), spread=float(g[5]), ki=int(g[6]), ninf=int(g[7]), imed=float(g[8]), imean=float(g[9]), ispread=float(g[10]), value=float(g[11]), iter=int(g[12] or 0), secs=float(g[13]), full=g[14], full_secs=float(g[15]))
         else:
             m = re.search(r"background DSE sample: (\d+) / (\d+) rows, median \|ln\(exact/cur\)\| ([\d.]+), mean ln (-?[\d.]+), max ([\d.]+) \(([\d.]+)s\); exact weights ([\w ]+) \(([\d.]+)s\)", l)
             if not m:
                 continue
             g = m.groups()
-            d = dict(k=int(g[0]), m=int(g[1]), med=float(g[2]), mean=float(g[3]), max=float(g[4]), spread=None, ki=None, ninf=None, imed=None, imean=None, ispread=None, value=float(g[2]), secs=float(g[5]), full=g[6], full_secs=float(g[7]))
+            d = dict(k=int(g[0]), m=int(g[1]), med=float(g[2]), mean=float(g[3]), max=float(g[4]), spread=None, ki=None, ninf=None, imed=None, imean=None, ispread=None, value=float(g[2]), iter=0, secs=float(g[5]), full=g[6], full_secs=float(g[7]))
         d["full"] = {"computed": "厳密", "stopped": "中止", "not computed": "そのまま"}[d["full"]]
         o["sampd"] = d
-        o["samp"] = f"{d['value']:.3f} ({d['k']}+{d['ki'] or 0} 行, {d['secs']}s) → {d['full']}" + (f" {d['full_secs']}s" if d["full"] != "そのまま" else "")
+        o["samp"] = f"{d['value']:.3f}" + (f" @{d['iter']}" if d["iter"] else "") + f" ({d['k']}+{d['ki'] or 0} 行, {d['secs']}s) → {d['full']}" + (f" {d['full_secs']}s" if d["full"] != "そのまま" else "")
         break
+    if o["sampd"] is None and any("background DSE sample: not taken" in l for l in w):
+        o["samp"] = "確かめる前に LP が終わる"
     for l in w:
         if re.search(r"cut round \d+: the LP with \d+ cuts hit the time cap", l):
             halves += 1
