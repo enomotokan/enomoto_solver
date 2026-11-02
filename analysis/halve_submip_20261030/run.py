@@ -77,6 +77,10 @@ CFGS = {
     # DSE 重みの受け渡し (2026-11-02、analysis/pool_dse_20261102.md・bg_return_dse_20261102.md)
     "pooldse": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1", "ENOMOTO_MIP_POOL_DSE": "1"},
     "bgret": {"ENOMOTO_MIP_BG_RETURN_DSE": "1"},
+    # 既定の候補と裏のカットの運を除く試作・LP による固定の順番 (2026-11-02、bench18。analysis/bg_determ_20261102.md・bg_lp_work_20261102.md・lp_probe_after_ext_20261102.md・small_overhead2_20261102.md)
+    "cand": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1", "ENOMOTO_MIP_POOL_DSE": "1", "ENOMOTO_MIP_SMALL2_FJSTOP": "1"},
+    "canddet": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1", "ENOMOTO_MIP_POOL_DSE": "1", "ENOMOTO_MIP_SMALL2_FJSTOP": "1", "ENOMOTO_MIP_BG_CUTS_LP_WORK": "1", "ENOMOTO_MIP_BG_CUTS_DETERM": "c"},
+    "canddetext": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1", "ENOMOTO_MIP_POOL_DSE": "1", "ENOMOTO_MIP_SMALL2_FJSTOP": "1", "ENOMOTO_MIP_BG_CUTS_LP_WORK": "1", "ENOMOTO_MIP_BG_CUTS_DETERM": "c", "ENOMOTO_MIP_LP_PROBE_AFTER_EXT": "1"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
