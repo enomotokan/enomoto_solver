@@ -2371,6 +2371,52 @@ pub(super) struct CutJob {
     pub(super) self_stop: std::sync::Mutex<Option<&'static str>>,
     /// [`BgDeterm`] の窓の判定を始める `prog` の位置 (判定を保留したラウンドの次)
     pub(super) win_from: std::sync::atomic::AtomicUsize,
+    /// 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` ([`BgRobust`]): 裏のカットを始めたときの主の LP の値 (offset 込み、f64 のビット。`d` の差の割合の基準)
+    pub(super) start_bits: std::sync::atomic::AtomicU64,
+    /// [`BgRobust`] の `l`: 窓の判定 (と `a` の割合の判定) が続けて当たったラウンドの数
+    pub(super) flat_run: std::sync::atomic::AtomicUsize,
+    /// [`BgRobust`] の `o`: 直近のラウンドの後、試作の判定で停滞と言えるか (ループの今までの停滞の判定を通すかを決める)
+    pub(super) robust_stalled: std::sync::atomic::AtomicBool,
+    /// [`BgRobust`] の `o`: ループの今までの停滞の判定を止めずに続けさせた回数 (ログ用)
+    pub(super) vetoes: std::sync::atomic::AtomicUsize,
+}
+
+/// 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` (既定では使わない。[`BgDeterm`] が働くときだけ。analysis/robust_stall_20261102.md): 裏のカットの停滞の判定を
+/// 道の途中の平らな所 (数ラウンド伸びないが、その後また伸びる) で当たりにくくし、待ちすぎの費用も減らす。値に含む文字で選ぶ:
+/// - `a`: 窓の判定に「窓の伸び ≤ `ENOMOTO_T_MIP_BG_DETERM_RATIO` (既定 0.01) × 初めからの伸び」も要る (伸びが全体に比べて小さいときだけ停滞)。
+/// - `l`: 窓の判定 (`a` があれば割合の判定も) が続けて `ENOMOTO_T_MIP_BG_DETERM_LEN` (既定 = 窓) + 1 ラウンド当たるまで止めない
+///   (平らな所の長さが窓の 2 倍になるまで)。
+/// - `o`: ループの今までの停滞の判定 (SCIP 流の分数の列の数を見る判定。第 2 段階の停滞も) で止まるところで、直近のラウンドの後に
+///   試作の判定 (`a`・`l`。どちらもなければ窓の判定) が停滞と言わないなら止めずに続ける (roll3000 の `DSE=g` は 18 ラウンドでこれで止まる)。
+/// - `p`: 裏のカットのループの第 2 段階 (HiGHS のスコア) を、重い設定でなくても使う (ループの停滞で止まる前にカットの選び方を変える。
+///   第 1 段階の間は窓の判定を保留する [`CutJob::record_round`] の `hold`)。
+/// - `d`: 主の待ちで、裏のカットの下界と暫定解の差が、裏のカットを始めたときの差の `ENOMOTO_T_MIP_BG_DETERM_GAP` (既定 0.05) 倍以下になったら
+///   停滞を待たずに受け取る (`gap`)。
+/// - `w`: 主の待ちの上限を、安全網 (残りの 0.3 倍) と主の根のカットのループの時間の `ENOMOTO_T_MIP_BG_DETERM_WAIT_MULT` (既定 5) 倍の
+///   小さい方にする (今までの `ENOMOTO_MIP_BG_CUTS_WAIT` と同じ形。時間で決まるので運を除く狙いとは逆向き。1 ラウンドが重い
+///   hypothyroid-k1 (1 ラウンド 約 1 秒) の待ちの費用を見るため)。
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct BgRobust {
+    pub(super) ratio: f64,
+    pub(super) len: usize,
+    pub(super) own: bool,
+    pub(super) phase2: bool,
+    pub(super) gap: f64,
+    pub(super) wait_mult: f64,
+}
+
+impl BgRobust {
+    fn new(win: usize) -> Option<Self> {
+        let v = env_str!("ENOMOTO_MIP_BG_DETERM_ROBUST").filter(|v| *v != "0")?;
+        Some(BgRobust {
+            ratio: if v.contains('a') { tunable!("ENOMOTO_T_MIP_BG_DETERM_RATIO", 0.01, f64) } else { 0.0 },
+            len: if v.contains('l') { tunable!("ENOMOTO_T_MIP_BG_DETERM_LEN", win, usize) } else { 0 },
+            own: v.contains('o'),
+            phase2: v.contains('p'),
+            gap: if v.contains('d') { tunable!("ENOMOTO_T_MIP_BG_DETERM_GAP", 0.05, f64) } else { 0.0 },
+            wait_mult: if v.contains('w') { tunable!("ENOMOTO_T_MIP_BG_DETERM_WAIT_MULT", 5.0, f64) } else { 0.0 },
+        })
+    }
 }
 
 /// `ENOMOTO_MIP_BG_CUTS_DETERM` (既定 `c`、`=0` で使わない。bench18 の canddet として既定にした: analysis/canddet_default_20261102.md。analysis/bg_determ_20261102.md): 裏のカットの止め方を、
@@ -2397,6 +2443,8 @@ pub(super) struct BgDeterm {
     pub(super) rate: f64,
     /// `c`: 手間の上限で終わったら主が続ける
     pub(super) cont: bool,
+    /// 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` ([`BgRobust`])
+    pub(super) robust: Option<BgRobust>,
 }
 
 pub(crate) fn bg_determ_mode() -> Option<&'static str> {
@@ -2407,13 +2455,15 @@ impl BgDeterm {
     fn new(root_iters: u64) -> Option<Self> {
         let v = bg_determ_mode()?;
         let unit = root_iters.max(tunable!("ENOMOTO_T_MIP_BG_DETERM_MIN_ITERS", 1000u64, u64)).max(1);
+        let win = tunable!("ENOMOTO_T_MIP_BG_DETERM_WIN", 5usize, usize).max(1);
         Some(BgDeterm {
-            win: tunable!("ENOMOTO_T_MIP_BG_DETERM_WIN", 5usize, usize).max(1),
+            win,
             eps: tunable!("ENOMOTO_T_MIP_BG_DETERM_EPS", 1e-4, f64),
             unit,
             work_iters: (tunable!("ENOMOTO_T_MIP_BG_DETERM_WORK", 20.0, f64) * unit as f64) as u64,
             rate: if v.contains('r') { tunable!("ENOMOTO_T_MIP_BG_DETERM_RATE", 0.01, f64) } else { 0.0 },
             cont: v.contains('c'),
+            robust: BgRobust::new(win),
         })
     }
 }
@@ -2429,7 +2479,7 @@ pub(super) fn window_stalled(hist: &[f64], win: usize, eps: f64) -> bool {
 }
 
 impl CutJob {
-    pub(super) fn new(heavy: bool, determ: Option<BgDeterm>, cutoff: f64) -> Self {
+    pub(super) fn new(heavy: bool, determ: Option<BgDeterm>, cutoff: f64, start: f64) -> Self {
         CutJob {
             stop: std::sync::atomic::AtomicBool::new(false),
             heavy,
@@ -2444,7 +2494,56 @@ impl CutJob {
             cutoff_bits: std::sync::atomic::AtomicU64::new(cutoff.to_bits()),
             self_stop: std::sync::Mutex::new(None),
             win_from: std::sync::atomic::AtomicUsize::new(0),
+            start_bits: std::sync::atomic::AtomicU64::new(start.to_bits()),
+            flat_run: std::sync::atomic::AtomicUsize::new(0),
+            robust_stalled: std::sync::atomic::AtomicBool::new(false),
+            vetoes: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` の `p`: 裏のカットのループで第 2 段階 (HiGHS のスコア) を使うか
+    pub(super) fn robust_phase2(&self) -> bool {
+        self.determ.and_then(|d| d.robust).is_some_and(|r| r.phase2)
+    }
+
+    /// 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` の `o`: ループの今までの停滞の判定で止まるところで呼ぶ。直近のラウンドの後に試作の判定が
+    /// 停滞と言わないなら真 (止めずに続ける)
+    pub(super) fn veto_own_stall(&self) -> bool {
+        let on = self.determ.and_then(|d| d.robust).is_some_and(|r| r.own);
+        if on && !self.robust_stalled.load(std::sync::atomic::Ordering::Relaxed) {
+            self.vetoes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// [`BgDeterm`] の窓の判定 (`h` は窓を数え直した後の目的値の並び、`all` は初めからの並び)。[`BgRobust`] があればその判定
+    fn determ_stalled(&self, d: &BgDeterm, h: &[f64], all: &[f64]) -> bool {
+        let base = window_stalled(h, d.win, d.eps);
+        let Some(r) = d.robust else {
+            return base;
+        };
+        // `a`: 窓の伸びが初めからの伸びの `ratio` 倍以下 (初め = 裏のカットを始めたときの主の LP の値)
+        let now = if base && r.ratio > 0.0 {
+            let k = all.len();
+            let s0 = f64::from_bits(self.start_bits.load(std::sync::atomic::Ordering::Relaxed));
+            let first = if s0.is_finite() { s0.min(all[0]) } else { all[0] };
+            let total = (all[k - 1] - first).max(0.0);
+            let recent = h[h.len() - 1] - h[h.len() - 1 - d.win];
+            recent <= r.ratio * total
+        } else {
+            base
+        };
+        if r.len == 0 {
+            return now;
+        }
+        // `l`: 続けて `len` + 1 ラウンド当たるまで止めない
+        let run = if now { self.flat_run.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 } else {
+            self.flat_run.store(0, std::sync::atomic::Ordering::Relaxed);
+            0
+        };
+        run > r.len
     }
 
     /// 止めの合図か、[`BgDeterm`] で自分で終わると決めたか
@@ -2466,13 +2565,17 @@ impl CutJob {
         let d = self.determ?;
         if hold {
             self.win_from.store(h.len(), std::sync::atomic::Ordering::Relaxed);
+            self.flat_run.store(0, std::sync::atomic::Ordering::Relaxed);
         }
         let w0 = self.win_from.load(std::sync::atomic::Ordering::Relaxed).min(h.len());
+        // 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST`: 窓の判定 (と `o` に渡す停滞の判定)
+        let stall_now = !hold && self.determ_stalled(&d, &h[w0..], &h);
+        self.robust_stalled.store(stall_now, std::sync::atomic::Ordering::Relaxed);
         let why = if iters >= d.work_iters {
             Some("work")
         } else if hold {
             None
-        } else if window_stalled(&h[w0..], d.win, d.eps) {
+        } else if stall_now {
             Some("stalled")
         } else {
             let z = f64::from_bits(self.cutoff_bits.load(std::sync::atomic::Ordering::Relaxed));
@@ -2592,8 +2695,11 @@ impl BgCuts {
 
     /// 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` ([`BgDeterm`]): 裏のカットが自分で終わる (停滞・手間の上限・伸びが遅い、または今までの停滞の判定) まで待つ。
     /// 目的値が `cutoff` に届くか、待ちが安全網の `cap` 秒に達したらやめる。戻り値は (待った秒数, 待ち終えた理由)
-    fn wait_determ(&self, cap: f64, cutoff: f64) -> (f64, &'static str) {
+    /// 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` の `d` ([`BgRobust`]): 裏のカットの下界と暫定解 `inc` の差が、始めたときの差の `gap` 倍以下なら待たない (`gap`)
+    fn wait_determ(&self, cap: f64, cutoff: f64, inc: f64) -> (f64, &'static str) {
         let t0 = Instant::now();
+        let gap = self.job.determ.and_then(|d| d.robust).map_or(0.0, |r| r.gap);
+        let s0 = f64::from_bits(self.job.start_bits.load(std::sync::atomic::Ordering::Relaxed));
         let why = loop {
             if self.handle.as_ref().is_none_or(|h| h.is_finished()) {
                 break "done";
@@ -2601,6 +2707,9 @@ impl BgCuts {
             if let Some(&b) = self.job.prog.lock().unwrap().last() {
                 if b >= cutoff - 1e-9 * cutoff.abs().max(1.0) {
                     break "cutoff";
+                }
+                if gap > 0.0 && inc.is_finite() && s0.is_finite() && inc > s0 && inc - b <= gap * (inc - s0) {
+                    break "gap";
                 }
             }
             if t0.elapsed().as_secs_f64() >= cap {
@@ -4960,7 +5069,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         eprintln!("MIP: background cuts: determ {d:?} (root LP {root_iters} iters)");
                     }
                 }
-                let job = std::sync::Arc::new(CutJob::new(mode == "heavy", determ, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)));
+                let job = std::sync::Arc::new(CutJob::new(mode == "heavy", determ, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z), self.lp.objective() + self.p.offset));
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let mut threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
@@ -5597,11 +5706,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM`: 裏のカットが自分で終わるまで待つ (時間の上限は安全網)
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let min_left = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT", 0.05, f64) * self.params.time_limit;
-                let cap = (tunable!("ENOMOTO_T_MIP_BG_DETERM_SAFE_FRAC", 0.3, f64) * remaining).min((remaining - min_left).max(0.0));
+                let mut cap = (tunable!("ENOMOTO_T_MIP_BG_DETERM_SAFE_FRAC", 0.3, f64) * remaining).min((remaining - min_left).max(0.0));
+                // 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` の `w` ([`BgRobust`]): 主の根のカットのループの時間の倍数でも待ちを切る
+                if let Some(r) = d.robust.filter(|r| r.wait_mult > 0.0) {
+                    cap = cap.min(r.wait_mult * root_cut_secs);
+                }
                 let cutoff = if env_def!("ENOMOTO_MIP_BG_CUTS_PROOF_STOP", "1").is_some() { self.prune_limit() } else { self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z) };
                 let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
                 bg.job.cutoff_bits.store(z.to_bits(), std::sync::atomic::Ordering::Relaxed);
-                let (w, why) = bg.wait_determ(cap, cutoff);
+                let (w, why) = bg.wait_determ(cap, cutoff, z);
                 if self.params.verbose {
                     let h = bg.job.prog.lock().unwrap();
                     let hi = bg.job.prog_it.lock().unwrap();
@@ -5617,6 +5730,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         h.last(),
                         self.start.elapsed().as_secs_f64()
                     );
+                    if let Some(r) = d.robust {
+                        eprintln!("MIP: background cuts: robust {r:?}: own stall vetoed {} times", bg.job.vetoes.load(std::sync::atomic::Ordering::Relaxed));
+                    }
                     let at = bg.job.prog_at.lock().unwrap();
                     let rounds: Vec<String> = h.iter().zip(at.iter()).map(|(o, t)| format!("{o:.1} at {:.2}s", t.saturating_duration_since(self.start).as_secs_f64())).collect();
                     eprintln!("MIP: background cuts: rounds so far [{}]", rounds.join(", "));
