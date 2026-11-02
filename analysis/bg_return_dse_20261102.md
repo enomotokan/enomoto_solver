@@ -53,3 +53,7 @@ cd analysis/bg_return_dse_20261102
 python run.py def,rd 3 0            # 7 問 × 2 設定 × 3 回、logs/<問題>_<設定>_<回>.log と res.jsonl
 python agg.py > table.md            # 回ごとの表 (run 99 は動作確認の回で除く)
 ```
+
+テスト: `cargo test --release --lib` は 333 通過 (18 無視)。この環境ではそのままだと pyo3 の extension-module で libpython が
+リンクされず失敗するので、`RUSTFLAGS="-C link-arg=-L/usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib` を付けて走らせた
+(今回の変更とは無関係)。
