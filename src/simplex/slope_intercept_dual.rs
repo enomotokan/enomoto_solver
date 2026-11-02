@@ -1192,6 +1192,9 @@ thread_local! {
     /// 全部の行の厳密な重みを計算する (`(k, dev, 統計)`。統計は 0 = 全体の `|ln|` の中央値、1 = 全体のばらつき、
     /// 2 = 主実行不能な行のばらつき、3 = 全体の 4 倍を超えてずれた行の割合、4 = 主実行不能な行の同じ割合 ([`DseSampleStat`])。最後は確かめる反復 (0 = 求解の始め、`n` = `n` 反復を超えて続いたとき)。求解の始めに下ろす。期限・取り消し・[`DSE_EXACT_STOP`] を 32 行ごとに見る)
     pub(crate) static DSE_SAMPLE_ONCE: std::cell::Cell<Option<(usize, f64, u8, usize)>> = const { std::cell::Cell::new(None) };
+    /// [`DSE_SAMPLE_ONCE`] の確かめを遅らせるとき (`after > 0`): `(k, dev, 統計, 求解の始めの EXT_ITERS の値, after)`。1 回の LP の求解が
+    /// この関数を何度か呼ぶ (atlanta-ip: 2814 反復の LP で確かめが抜けた) ので、呼び出しをまたいで持つ。呼び出し側が求解の後に下ろす
+    pub(crate) static DSE_SAMPLE_LATE: std::cell::Cell<Option<(usize, f64, u8, u64, usize)>> = const { std::cell::Cell::new(None) };
     /// [`DSE_SAMPLE_ONCE`] の結果 (呼び出し側が表示に取り出す)
     pub(crate) static DSE_SAMPLE_RESULT: std::cell::Cell<Option<DseSampleResult>> = const { std::cell::Cell::new(None) };
 }
@@ -4462,7 +4465,6 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q` ([`DSE_SAMPLE_ONCE`]): 重みを標本の行で厳密な値と比べ、ずれが大きいときだけ
     // 全部の行の厳密な重みを計算する (止めの合図・期限でやめたら今の重みのまま)。`after == 0` なら始めに、そうでなければ
     // この求解が `after` 反復を超えて続いたときに (下のループの始め)
-    let mut dse_sample_late: Option<(usize, f64, u8, usize)> = None;
     if let Some((k, dev, stat, after)) = DSE_SAMPLE_ONCE.with(|c| c.take()) {
         if warm_started && after == 0 {
             let r = dse_sample_check(&lu, &mut dse, &infeasible_rows.rows, k, dev, stat, 0);
@@ -4471,9 +4473,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             }
             DSE_SAMPLE_RESULT.with(|c| c.set(Some(r)));
         } else if warm_started {
-            dse_sample_late = Some((k, dev, stat, after));
+            DSE_SAMPLE_LATE.with(|c| c.set(Some((k, dev, stat, ext_iterations(), after))));
         }
     }
+    let mut dse_sample_late = DSE_SAMPLE_LATE.with(|c| c.get());
+    let dse_sample_it0 = ext_iterations();
 
     // `ENOMOTO_DSE_WEIGHT_CHECK` (試作、既定では使わない): 選んだ行の保持している DSE 重みと `‖rho‖^2` (真の値) を比べる
     // (HiGHS `HEkkDual::chooseRow`・`acceptDualSteepestEdgeWeight` と同じ): 真の値で上書きし、保持値が真の値の
@@ -5010,10 +5014,12 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }
         // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=qa` ([`DSE_SAMPLE_ONCE`] の 4 つ目): この求解が決めた反復を超えて続いたときだけ、重みの
         // ずれを標本で確かめる (短い LP は引き継いだ重みのまま、既定と同じ道を通る)
-        if let Some((k, dev, stat, after)) = dse_sample_late {
-            if iter_idx >= after {
+        if let Some((k, dev, stat, it_start, after)) = dse_sample_late {
+            let done = (dse_sample_it0 + iter_idx as u64).saturating_sub(it_start) as usize;
+            if done >= after {
                 dse_sample_late = None;
-                let r = dse_sample_check(&lu, &mut dse, &infeasible_rows.rows, k, dev, stat, iter_idx);
+                DSE_SAMPLE_LATE.with(|c| c.set(None));
+                let r = dse_sample_check(&lu, &mut dse, &infeasible_rows.rows, k, dev, stat, done);
                 if r.full == 1 {
                     dse_age0 = 0;
                     shortlist_valid = false;

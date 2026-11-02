@@ -1697,7 +1697,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let bg_dse_sample = bg_dse_sample_mode > 0;
             if bg_dse_sample {
                 let k = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_SAMPLE", 32usize, usize);
-                let dev = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_DEV", 0.3, f64);
+                let dev = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_DEV", 0.1, f64);
                 // 判定に使う統計 (`ENOMOTO_T_MIP_BG_CUTS_DSE_STAT`): 0 = 全体の |ln| の中央値、1 = 全体のばらつき、2 = 主実行不能な行のばらつき、
                 // 3 = 全体の 4 倍を超えてずれた行の割合 (既定)、4 = 主実行不能な行の同じ割合
                 let stat = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_STAT", 3u8, u8);
@@ -1714,6 +1714,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
             if bg_dse_sample {
                 crate::simplex::slope_intercept_dual::DSE_SAMPLE_ONCE.with(|c| c.set(None));
+                crate::simplex::slope_intercept_dual::DSE_SAMPLE_LATE.with(|c| c.set(None));
                 if self.params.verbose {
                     match crate::simplex::slope_intercept_dual::DSE_SAMPLE_RESULT.with(|c| c.take()) {
                         Some(r) => eprintln!(
