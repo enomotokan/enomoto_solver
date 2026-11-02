@@ -70,6 +70,10 @@ CFGS = {
     # 特異基底の修正 C (2026-11-02、analysis/singular_fix_c_20261102.md): 根・再スタートの後の根に特異でない基底を渡す。rbfs は再スタートの後の根だけ
     "rbf": {"ENOMOTO_MIP_ROOT_BASIS_FIX": "1"},
     "rbfs": {"ENOMOTO_MIP_ROOT_BASIS_FIX": "s"},
+    # 裏のカットのスレッドの LP の上限と DSE 重み・共有の待ち行列のノードの基底 (2026-11-02、analysis/bgx_check1_20261102.md・bgdse_20261102.md・singular_fix_b_20261102.md)
+    "bgcap": {"ENOMOTO_MIP_BG_CUTS_LP_CAP": "1"},
+    "bgdsecap": {"ENOMOTO_MIP_BG_CUTS_DSE": "r", "ENOMOTO_MIP_BG_CUTS_LP_CAP": "1"},
+    "poolfix": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
