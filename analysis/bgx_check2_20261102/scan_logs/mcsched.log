@@ -1,0 +1,43 @@
+MIP: presolve: rows 2107 -> 1859, free columns 1733 -> 1501, nonzeros 8088 -> 4519, postsolve steps 168 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 0 of 1501 free columns fixed (0.00s), not used
+MIP: LP probing pass 1: 1264 candidates, 0 fixings (16 LPs, 2032 iters, 0.41s)
+MIP: LP probing: tried 8 columns, fixed 0, LP 1.9377475371e5 -> 1.9377475371e5 (16 LPs, 2032 iters, 0.41s)
+MIP: LP probing: root LP 0.15s (1856 iters, size 8125), tried 8, fixed 0, basis passed false, total 3888 iters 0.41s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.02s), not used
+MIP: probing: 1501 of 1501 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 55190 implications (0.05s, cpu 0.05s, work 1078884, pwork 56146886, chg 485152)
+MIP: probing: 0 equivalent binary pairs
+MIP: clique extension: 12 rows extended, 28 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (42547 edges, 0.01s)
+MIP: symmetry: orbital fixing with 0 of 15 generators
+MIP: symmetry: 15 full orbitopes (3x2, 3x2, 3x2, 3x2, 3x2, 3x2, 3x2, 3x2, 3x2, 3x2, 3x2, 3x2, 3x2, 3x2, 3x2)
+MIP: symmetry: 15 generators, 45 orbits on 90 columns, 0 lex-leader rows (0.03s, work 1490800, search 52410, verify 244590, detect 0.03s, refine 0.02s, log work 3019052)
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.00s)
+MIP: FJ problem (FJ_P3): rows 1859 -> 1859, free columns 1501 -> 1501, 0 continuous bounds tightened (0.06s)
+MIP: root LP 1.9377524816e5 (2176 iters, 0.15s)
+MIP: oneopt improved 4.7568500000e5 -> 2.6607200000e5
+MIP: fixed-integer LP dual check: c x -2.0892800000e5, dual bound -2.8107942609e5 -> solve
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.6607200000e5 at node 0 (0.17s) [Local-MIP]
+MIP: Local-MIP solution accepted true (0.17s)
+MCF detect: rows 1859 cols 1747 | flow cands 1859 flow rows 282 commodities 5 cap cands 1162 arcs 136 nodes 114 incons 2.92 directed | fail 'inconsistent' | networks [] fc_network false | 0.000s
+MIP: cut selection probe: compared at 1 rounds (after round 1), probe wall 0.10s (budget 3.0s)
+MIP: cut selection probe (6 rounds): default 5 cuts gain 6.522283e0 (0.05s), pool 1 cuts gain 8.336811e-1 (0.05s) -> default (rule rate, probe 0.10s in total, 0.28s)
+MIP: cut round 0: 5 cuts (of 848, sep 0.04s, LP 119 iters), LP rows 1864 (cut rows mean nnz 350), obj 1.9378177044e5 (0.34s)
+MIP: twoopt improved 2.4374200000e5 -> 2.4371300000e5
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.4371300000e5 at node 0 (0.36s) [Local-MIP]
+MIP: Local-MIP solution accepted true (0.36s)
+MIP: cut round 1: root cut time cap check: clock 0.092s of cap 5.95s (min rounds 0)
+MIP: cut round 1: 10 cuts (of 126, sep 0.05s, LP 115 iters), LP rows 1873 (cut rows mean nnz 157), obj 1.9379242254e5 (0.43s)
+MIP: cut round 2: root cut time cap check: clock 0.147s of cap 5.95s (min rounds 0)
+MIP: cut round 2: 4 cuts (of 124, sep 0.04s, LP 53 iters), LP rows 1873 (cut rows mean nnz 93), obj 1.9379609329e5 (0.49s)
+MIP: cut round 3: root cut time cap check: clock 0.182s of cap 5.95s (min rounds 0)
+MIP: cut round 3: 7 cuts (of 122, sep 0.05s, LP 55 iters), LP rows 1878 (cut rows mean nnz 85), obj 1.9379912130e5 (0.54s)
+MIP: cut round 4: root cut time cap check: clock 0.214s of cap 5.95s (min rounds 0)
+MIP: cut round 4: 8 cuts (of 122, sep 0.05s, LP 51 iters), LP rows 1885 (cut rows mean nnz 76), obj 1.9380258652e5 (0.60s)
+MIP: cut round 5: root cut time cap check: clock 0.247s of cap 5.95s (min rounds 0)
+MIP: cut round 5: 5 cuts (of 102, sep 0.05s, LP 62 iters), LP rows 1883 (cut rows mean nnz 79), obj 1.9380519870e5 (0.65s)
+MIP: clique graph: 42547 edges (3525 from rows, probing implications 55190)
+MIP: clique fallback: no violated clique cuts; not used (0.01s)
+MIP: cut loop done: 39 cuts added, 19 in LP, pool 293 cuts (54494 nonzeros), obj 1.9377524816e5 -> 1.9380519870e5
+MIP: background cuts: basis with the column values not passed (root LP 0.15s)
