@@ -774,6 +774,14 @@ Mittelmann (4 コア、`threads=4`、1 回、900 秒。変更前は `mitt.jsonl`
 (neos-5251015 の `ipm_crossover` 単独は押し出しの時間の上限で二段解法へ戻り、変更前後とも 900 秒で時間切れ。
 neos3・savsched1 の auto の変更後は neos3 が順 1 + y_B なし、savsched1 が既定。)
 
+
+### 内点法の段階だけ費用をずらす案 (2026-11-02、不採用)
+
+内点法だけを費用を微小にずらした問題で解き、双対退化を崩して終点を頂点に近づける案 (試験用 `ENOMOTO_T_IPM_COST_PERTURB=δ`、
+既定 0)。Netlib 91 問で、δ = 1e-6・1e-4 なら超基底は 6,630 → 3,568・2,168 本に減るが、内点法の y が元の費用で双対実行不能に
+なって頂点の受理が 89 → 43・15 問に落ち、仕上げの単体法が走るので合計 8.4 → 12.8・20.9 秒と遅くなる。δ = 1e-8 では超基底は
+減らない。詳細は `analysis/ipm_cost_perturb_20261102.md`。
+
 ## 計測
 
 `scripts/crossover_bench/run.py` (計測) と `report.py` (集計)。結果は `benchmarks/crossover/`。
