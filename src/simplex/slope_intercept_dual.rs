@@ -1273,7 +1273,86 @@ pub(super) fn solve_slope_intercept_dual_from_basis(std: &StdForm, opts: &crate:
 /// 試作 `ENOMOTO_SIMPLEX_WARM_SING_REPAIR=1` (既定オフ): warm start で渡した基底の LU が特異なら、特異の原因の基底列だけを
 /// スラックに差し替えて残りの基底で warm start する ([`warm_start_basis`])。オフなら今まで通り全スラック基底から解く。
 fn warm_sing_repair() -> bool {
+    if let Some(v) = SING_REPAIR_OVERRIDE.with(|o| o.get()) {
+        return v;
+    }
     env_str!("ENOMOTO_SIMPLEX_WARM_SING_REPAIR").is_some_and(|v| v != "0")
+}
+
+/// `ENOMOTO_SIMPLEX_WARM_SING_REPAIR=2`: 差し替えた基底で非基底列を置いたとき費用のずらしが 1 列でも要るなら、差し替えを諦めて
+/// 今まで通り全スラック基底から解く (差し替えた基底が双対実行可能なときだけ使う)。
+fn warm_sing_repair_strict() -> bool {
+    env_str!("ENOMOTO_SIMPLEX_WARM_SING_REPAIR") == Some("2")
+}
+
+thread_local! {
+    /// 診断 `ENOMOTO_SIMPLEX_WARM_SING_AB` の間だけ、[`warm_sing_repair`] の答えを上書きする。
+    static SING_REPAIR_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// 直近の warm start の (費用をずらした列の数, 主実行不能な基底変数の数) (診断 `ENOMOTO_SIMPLEX_WARM_SING_AB` 用)
+    static LAST_WARM_INFO: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// 診断 `ENOMOTO_SIMPLEX_WARM_SING_AB=1` (振る舞いは `ENOMOTO_SIMPLEX_WARM_SING_REPAIR=1` と同じ、時間は余計にかかる):
+/// 渡した基底が特異な求解を、全スラック基底から (今の既定) と差し替えた基底からの 2 通りで解き、反復・時間・目的関数値を
+/// `SING_AB` の行で stderr に出す。返すのは差し替えた側の結果 (後に解くので、スレッドローカルの出力もそちらのもの)。
+/// 特異でなければ何もせず `None`。
+fn sing_ab(std: &StdForm, opts: &crate::types::LpOptions) -> Option<Option<SimplexResult>> {
+    if !env_str!("ENOMOTO_SIMPLEX_WARM_SING_AB").is_some_and(|v| v != "0") || SING_REPAIR_OVERRIDE.with(|o| o.get()).is_some() {
+        return None;
+    }
+    let wb = WARM_BASIS.with(|w| w.borrow().clone())?;
+    let m = std.n_rows;
+    if wb.len() != m || m == 0 {
+        return None;
+    }
+    let mut pos: Vec<Option<usize>> = vec![None; std.n_total];
+    for (k, &j) in wb.iter().enumerate() {
+        if j >= std.n_total || pos[j].is_some() {
+            return None;
+        }
+        pos[j] = Some(k);
+    }
+    if super::basis_kernel::factorize_basis(std, &pos, None).is_some() {
+        return None;
+    }
+    let (nb, d, dse) = (WARM_NB.with(|w| w.borrow().clone()), WARM_D.with(|w| w.borrow().clone()), WARM_DSE.with(|w| w.borrow().clone()));
+    let lu = WARM_LU.with(|w| w.borrow().clone());
+    let obj = |r: &Option<SimplexResult>| match r {
+        Some(SimplexResult { status: Status::Optimal, x: Some(x) }) => x.iter().zip(&std.c).map(|(a, b)| a * b).sum::<f64>(),
+        _ => f64::NAN,
+    };
+    let st = |r: &Option<SimplexResult>| r.as_ref().map_or("none".to_string(), |r| format!("{:?}", r.status));
+    let run = |repair: bool| {
+        WARM_BASIS.with(|w| *w.borrow_mut() = Some(wb.clone()));
+        WARM_NB.with(|w| *w.borrow_mut() = nb.clone());
+        WARM_D.with(|w| *w.borrow_mut() = d.clone());
+        WARM_DSE.with(|w| *w.borrow_mut() = dse.clone());
+        WARM_LU.with(|w| *w.borrow_mut() = lu.clone());
+        SING_REPAIR_OVERRIDE.with(|o| o.set(Some(repair)));
+        let (it0, t0) = (ext_iterations(), std::time::Instant::now());
+        let r = solve_slope_intercept_dual(std, opts);
+        SING_REPAIR_OVERRIDE.with(|o| o.set(None));
+        (ext_iterations() - it0, t0.elapsed().as_secs_f64(), r)
+    };
+    let (it_c, t_c, r_c) = run(false);
+    let k = super::nb_diag::peek_repaired_reset();
+    LAST_WARM_INFO.with(|x| x.set((usize::MAX, usize::MAX)));
+    let (it_r, t_r, r_r) = run(true);
+    let (shifted, infeas) = LAST_WARM_INFO.with(|x| x.get());
+    let k = super::nb_diag::peek_repaired_reset().max(k);
+    eprintln!(
+        "SING_AB m={m} n={} rep={k} shifted={} pinf={} it_crash={it_c} it_rep={it_r} t_crash={t_c:.5} t_rep={t_r:.5} st_crash={} st_rep={} obj_crash={:.9e} obj_rep={:.9e}",
+        std.n_total - m,
+        shifted as i64,
+        infeas as i64,
+        st(&r_c),
+        st(&r_r),
+        obj(&r_c),
+        obj(&r_r)
+    );
+    super::nb_diag::set_repaired(k);
+    WARM_BASIS.with(|w| *w.borrow_mut() = None);
+    Some(r_r)
 }
 
 /// [`solve_slope_intercept_dual_from_basis`] の開始状態を作る。成功したら真。
@@ -1302,6 +1381,7 @@ fn warm_start_basis(
     }
     // 特異の修復で差し替えた基底 (`ENOMOTO_SIMPLEX_WARM_SING_REPAIR`)。差し替えたら以下は `wb` の代わりにこれを使う。
     let repaired_wb: Vec<usize>;
+    let mut repaired_wb_used = false;
     let mut wb = wb;
     let lu = match WARM_LU.with(|w| w.borrow_mut().take()) {
         Some(l) if warm_lu_matches(std, wb, &l) => *l,
@@ -1320,6 +1400,7 @@ fn warm_start_basis(
                         }
                         repaired_wb = b;
                         wb = &repaired_wb;
+                        repaired_wb_used = true;
                     }
                     l
                 }
@@ -1366,6 +1447,8 @@ fn warm_start_basis(
         Vec::new()
     };
     let hint_tol = tunable!("ENOMOTO_T_WARM_NB_TOL", 1e-7, f64);
+    // `ENOMOTO_SIMPLEX_WARM_SING_REPAIR=2` で差し替えを諦めるときに戻す費用
+    let cost_backup: Option<Vec<f64>> = (repaired_wb_used && warm_sing_repair_strict()).then(|| active_cost.to_vec());
     for j in 0..n_total {
         if pos[j].is_some() {
             continue;
@@ -1442,6 +1525,15 @@ fn warm_start_basis(
         });
     }
     xprof("w_d");
+    if shifted > 0 && repaired_wb_used && warm_sing_repair_strict() {
+        // 差し替えた基底は双対実行可能でない: 今まで通り warm start をやめる
+        super::nb_diag::set_repaired(0);
+        if let Some(c) = cost_backup {
+            active_cost.copy_from_slice(&c);
+        }
+        SINGULAR_BAILOUT.with(|f| f.set(true));
+        return false;
+    }
     // 診断用 (`ENOMOTO_MIP_NB_DIAG`): `set_basis` に渡された置き場所 (保存した側) と実際に置いた側の食い違いと、そのうち
     // 保存した側を希望に渡せばその側に置かれた数 (上の希望の判定と同じ条件) を数える (振る舞いは変えない)
     if let Some(saved) = super::nb_diag::take_saved().filter(|s| s.len() == n_total && hint.is_some()) {
@@ -1503,6 +1595,26 @@ fn warm_start_basis(
         lu.solve_into(&rhs, &mut scratch2, &mut xb);
         let infeas = wb.iter().zip(&xb).filter(|&(&j, &v)| v < std.lb[j] - 1e-7 || v > std.ub[j] + 1e-7).count();
         eprintln!("DEBUG_EXT: warm start from a given basis (cost shifts {shifted}, hint agree {agree} differ {differ} unknown {unknown}, primal infeasible basics {infeas})");
+    }
+    if env_str!("ENOMOTO_SIMPLEX_WARM_SING_AB").is_some() {
+        // 主実行不能な基底変数の数 (非基底列を選んだ側に置いたときの x_B)
+        let mut rhs = std.b.clone();
+        for j in 0..n_total {
+            let v = match st[j] {
+                Some(NbStatus::Lower) if std.lb[j].is_finite() => std.lb[j],
+                Some(NbStatus::Upper) if std.ub[j].is_finite() => std.ub[j],
+                _ => 0.0,
+            };
+            if v != 0.0 {
+                for &(i, a) in std.cols.col(j) {
+                    rhs[i] -= a * v;
+                }
+            }
+        }
+        let mut xb = vec![0.0; m];
+        lu.solve_into(&rhs, &mut scratch, &mut xb);
+        let infeas = wb.iter().zip(&xb).filter(|&(&j, &v)| v < std.lb[j] - 1e-7 || v > std.ub[j] + 1e-7).count();
+        LAST_WARM_INFO.with(|x| x.set((shifted, infeas)));
     }
     *basis = wb.to_vec();
     *basis_pos = pos;
@@ -3366,6 +3478,9 @@ impl ColCache {
 /// 1 回だけ解き直す(`STUCK_ROW_MIN_PIVOT` 参照)。通常の求解が成功する問題では
 /// 経路は変わらず、数値的に破綻した求解だけを救済する。
 pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
+    if let Some(r) = sing_ab(std, opts) {
+        return r;
+    }
     // 解き直しの印と費用摂動の設定はスレッドローカル。成分を並列に解くと、外側の求解が印を立ててから読むまでの間に
     // 同じスレッドが別の成分の求解を丸ごと実行 (rayon の仕事の盗み) し、その入口で印が消える。入口の値を出口で戻す。
     let saved = (SINGULAR_BAILOUT.with(|f| f.get()), RESTART_BAILOUT.with(|f| f.get()), super::full_cost_perturbation());

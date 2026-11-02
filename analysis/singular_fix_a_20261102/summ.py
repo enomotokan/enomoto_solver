@@ -38,13 +38,14 @@ def sgm(xs, s=10):
     return math.exp(sum(math.log(x + s) for x in xs) / len(xs)) - s
 
 
-cfgs = ["base", "rep"]
+cfgs = ["base"] + sorted({c for d in R.values() for c in d} - {"base"})
 probs = []
 for (p, _), d in R.items():
     if p not in probs:
         probs.append(p)
-print("| 問題 | 回数 | 時間 base | 時間 rep | 反復 base | 反復 rep | 特異で捨てた LP base | rep | 差し替えた LP rep (列の平均) | 解けた base/rep |")
-print("|---|---|---|---|---|---|---|---|---|---|")
+print("| 問題 | 回数 | " + " | ".join(f"時間 {c}" for c in cfgs) + " | " + " | ".join(f"反復 {c}" for c in cfgs) + " | "
+      + " | ".join(f"特異で捨てた LP {c}" for c in cfgs) + " | " + " | ".join(f"差し替えた LP {c} (列の平均)" for c in cfgs[1:]) + " | 解けた |")
+print("|---|---|" + "---|" * (4 * len(cfgs) - 1 + 1))
 allk = []
 for p in probs:
     ks = [k for k in R if k[0] == p and all(c in R[k] for c in cfgs)]
@@ -59,13 +60,20 @@ for p in probs:
         row[c] = dict(t=ts, it=sum(it) / len(it), noeff=sum(d["n_noeff"] for d in ds) / len(ds), rep=sum(d["n_rep"] for d in ds) / len(ds),
                       srep=sum(d["sum_rep"] for d in ds), nrep=sum(d["n_rep"] for d in ds),
                       ok=sum(R[k][c]["result"].get("status") == "optimal" for k in ks))
-    b, q = row["base"], row["rep"]
     fmt = lambda ts: " / ".join(f"{x:.1f}" for x in ts)
-    print(f"| {p} | {len(ks)} | {fmt(b['t'])} | {fmt(q['t'])} | {b['it']:.0f} | {q['it']:.0f} | {b['noeff']:.0f} | {q['noeff']:.0f} | "
-          f"{q['rep']:.0f} ({q['srep'] / q['nrep'] if q['nrep'] else 0:.1f}) | {b['ok']}/{q['ok']} |")
+    print(f"| {p} | {len(ks)} | " + " | ".join(fmt(row[c]["t"]) for c in cfgs) + " | " + " | ".join(f"{row[c]['it']:.0f}" for c in cfgs) + " | "
+          + " | ".join(f"{row[c]['noeff']:.0f}" for c in cfgs) + " | "
+          + " | ".join(f"{row[c]['rep']:.0f} ({row[c]['srep'] / row[c]['nrep'] if row[c]['nrep'] else 0:.1f})" for c in cfgs[1:]) + " | "
+          + "/".join(str(row[c]["ok"]) for c in cfgs) + " |")
 if allk:
-    sb, sr = sgm([t(R[k]["base"]) for k in allk]), sgm([t(R[k]["rep"]) for k in allk])
-    print(f"\nSGM (shift 10 秒、{len(allk)} 組): base {sb:.2f} 秒、rep {sr:.2f} 秒 ({(sr / sb - 1) * 100:+.1f}%)")
+    sb = sgm([t(R[k]["base"]) for k in allk])
+    print(f"\nSGM (shift 10 秒、{len(allk)} 組): " + "、".join(f"{c} {sgm([t(R[k][c]) for k in allk]):.2f} 秒 ({(sgm([t(R[k][c]) for k in allk]) / sb - 1) * 100:+.1f}%)" for c in cfgs))
+    solved = {c: sum(R[k][c]["result"].get("status") == "optimal" for k in allk) for c in cfgs}
+    print("解けた数: " + "、".join(f"{c} {v}" for c, v in solved.items()))
+    for c in cfgs[1:]:
+        gain = sorted({k[0] for k in allk if R[k][c]["result"].get("status") == "optimal" and R[k]["base"]["result"].get("status") != "optimal"})
+        lost = sorted({k[0] for k in allk if R[k][c]["result"].get("status") != "optimal" and R[k]["base"]["result"].get("status") == "optimal"})
+        print(f"{c}: 既定が解けず→解けた {gain}、既定が解けた→解けず {lost}")
     objs = defaultdict(set)
     for k in allk:
         for c in cfgs:
@@ -75,17 +83,16 @@ if allk:
     print("最適値の食い違い:", [p for p, v in objs.items() if len(v) > 1])
     print("異常終了:", [(k, c, R[k][c]["result"].get("status")) for k in allk for c in cfgs if R[k][c]["result"].get("status") not in ("optimal", "time_limit")])
 # 場所ごとの特異で捨てた LP・差し替えた LP (全回の和)
-print("\n| 場所 | 特異で捨てた LP base (反復/時間) | 特異で捨てた LP rep | 差し替えた LP rep (列の和、反復/時間) |")
-print("|---|---|---|---|")
+print("\n| 場所 | " + " | ".join(f"特異で捨てた LP {c} (反復 / 時間)" for c in cfgs) + " | " + " | ".join(f"差し替えた LP {c} (列の和、反復 / 時間)" for c in cfgs[1:]) + " |")
+print("|---|" + "---|" * (2 * len(cfgs) - 1))
 S = {c: defaultdict(lambda: defaultdict(float)) for c in cfgs}
 for k in allk:
     for c in cfgs:
-        for s, kv in diag(R[k][c])[1].items():
+        for s_, kv in diag(R[k][c])[1].items():
             for kk, v in kv.items():
-                S[c][s][kk] += v
-for s in sorted(set(S["base"]) | set(S["rep"])):
-    b, q = S["base"][s], S["rep"][s]
-    if not (b["n_noeff"] or q["n_noeff"] or q["n_rep"]):
+                S[c][s_][kk] += v
+for s_ in sorted(set().union(*[set(S[c]) for c in cfgs])):
+    if not any(S[c][s_]["n_noeff"] or S[c][s_]["n_rep"] for c in cfgs):
         continue
-    print(f"| {s} | {b['n_noeff']:.0f} ({b['it_noeff']:.0f} / {b['t_noeff']:.1f} 秒) | {q['n_noeff']:.0f} ({q['it_noeff']:.0f} / {q['t_noeff']:.1f} 秒) | "
-          f"{q['n_rep']:.0f} ({q['sum_rep']:.0f}、{q['it_rep']:.0f} / {q['t_rep']:.1f} 秒) |")
+    print(f"| {s_} | " + " | ".join(f"{S[c][s_]['n_noeff']:.0f} ({S[c][s_]['it_noeff']:.0f} / {S[c][s_]['t_noeff']:.1f} 秒)" for c in cfgs) + " | "
+          + " | ".join(f"{S[c][s_]['n_rep']:.0f} ({S[c][s_]['sum_rep']:.0f}、{S[c][s_]['it_rep']:.0f} / {S[c][s_]['t_rep']:.1f} 秒)" for c in cfgs[1:]) + " |")

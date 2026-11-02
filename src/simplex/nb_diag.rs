@@ -142,9 +142,12 @@ pub(crate) fn set_eff(eff: u32, fix: u32) {
 
 /// warm start で渡した基底が特異で `k` 列をスラックに差し替えた (`ENOMOTO_SIMPLEX_WARM_SING_REPAIR`)
 pub(crate) fn set_repaired(k: u32) {
-    if on() {
-        REP.with(|r| r.set(k));
-    }
+    REP.with(|r| r.set(k));
+}
+
+/// [`set_repaired`] の値を読んで 0 に戻す (診断 `ENOMOTO_SIMPLEX_WARM_SING_AB` 用)
+pub(crate) fn peek_repaired_reset() -> u32 {
+    REP.with(|r| r.replace(0))
 }
 
 #[derive(Default, Clone, Copy)]
