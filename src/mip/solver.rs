@@ -2376,6 +2376,23 @@ pub(crate) fn bg_return_dse_on() -> bool {
     env_str!("ENOMOTO_MIP_BG_RETURN_DSE") == Some("1")
 }
 
+/// `ENOMOTO_MIP_SMALL1` (試作、既定では使わない。analysis/small_overhead1_20261102.md): 小さい問題 (非零が
+/// `ENOMOTO_T_MIP_SMALL1_NNZ` (既定 20000) 以下) で、値に含む文字の手順を軽くする。`w`: 根のヒューリスティクスの後に裏のカットの
+/// 求解の進みを待たない (止めてその時点のカットで置き換えるのは同じ)、`W`: 待たないのは再スタートの後だけ、`r`: 再スタートの回数の上限を
+/// `ENOMOTO_T_MIP_SMALL1_RESTARTS` (既定 10) にする。p200x1188c・qnet1 は HiGHS が 1 秒未満で解くが、こちらは根の処理 (カットのループ・
+/// ヒューリスティクス・裏のカットの待ち) を再スタートごとに 1〜2 秒かけ直して 3〜5 秒かかる
+pub(crate) fn small1(p: &MipProblem, c: char) -> bool {
+    env_str!("ENOMOTO_MIP_SMALL1").is_some_and(|v| v.contains(c)) && p.nnz <= tunable!("ENOMOTO_T_MIP_SMALL1_NNZ", 20000usize, usize)
+}
+
+/// 再スタートの回数の上限 (`ENOMOTO_T_MIP_MAX_RESTARTS`、既定 4。[`small1`] の `r` なら `ENOMOTO_T_MIP_SMALL1_RESTARTS`)。
+fn max_restarts(p: &MipProblem) -> u32 {
+    if small1(p, 'r') {
+        return tunable!("ENOMOTO_T_MIP_SMALL1_RESTARTS", 10u32, u32);
+    }
+    tunable!("ENOMOTO_T_MIP_MAX_RESTARTS", 4u32, u32)
+}
+
 pub(crate) fn bg_cuts_wait_on() -> bool {
     env_def!("ENOMOTO_MIP_BG_CUTS_WAIT", "1").is_some()
 }
@@ -5337,7 +5354,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // カットを強める求解を止め、その LP のカットで根の LP のカットを置き換える
         if let Some(mut bg) = bg_cuts.take() {
             let t0 = Instant::now();
-            if bg_cuts_wait_on() {
+            let small_nowait = small1(self.p, 'w') || (self.params.restarts > 0 && small1(self.p, 'W'));
+            if small_nowait && self.params.verbose {
+                eprintln!("MIP: background cuts: not waiting (ENOMOTO_MIP_SMALL1, nnz {}, {:.2}s)", self.p.nnz, self.start.elapsed().as_secs_f64());
+            }
+            if bg_cuts_wait_on() && !small_nowait {
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let mult = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MULT", 5.0, f64);
                 let mut cap = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_FRAC", 0.1, f64) * remaining;
@@ -11921,7 +11942,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.submip || self.snap.is_some() || self.time_up() || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() {
             return false;
         }
-        if self.params.restarts >= tunable!("ENOMOTO_T_MIP_MAX_RESTARTS", 4u32, u32) {
+        if self.params.restarts >= max_restarts(self.p) {
             return false;
         }
         let nint = self.p.nint;
@@ -11936,7 +11957,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 暫定解は打ち切り値として渡し、やり直しで良い解が見つからなければそれを返す。最大 `ENOMOTO_T_MIP_MAX_RESTARTS` (4) 回。
     fn maybe_restart(&mut self) -> Option<MipResult> {
         let p = self.p;
-        if self.params.submip || self.params.restarts >= tunable!("ENOMOTO_T_MIP_MAX_RESTARTS", 4u32, u32) || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() || self.time_up() {
+        if self.params.submip || self.params.restarts >= max_restarts(self.p) || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() || self.time_up() {
             return None;
         }
         let nint = p.nint;
