@@ -84,6 +84,9 @@ CFGS = {
     "cand": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1", "ENOMOTO_MIP_POOL_DSE": "1", "ENOMOTO_MIP_SMALL2_FJSTOP": "1"},
     "canddet": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1", "ENOMOTO_MIP_POOL_DSE": "1", "ENOMOTO_MIP_SMALL2_FJSTOP": "1", "ENOMOTO_MIP_BG_CUTS_LP_WORK": "1", "ENOMOTO_MIP_BG_CUTS_DETERM": "c"},
     "canddetext": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1", "ENOMOTO_MIP_POOL_DSE": "1", "ENOMOTO_MIP_SMALL2_FJSTOP": "1", "ENOMOTO_MIP_BG_CUTS_LP_WORK": "1", "ENOMOTO_MIP_BG_CUTS_DETERM": "c", "ENOMOTO_MIP_LP_PROBE_AFTER_EXT": "1"},
+    # canddet の既定化の後に厳密な DSE 重みを 58 問・Mittelmann で測り直す (2026-11-02、bench19。analysis/bgdse_grow_20261102.md・bg_lp_work_20261102.md)
+    "dserw": {"ENOMOTO_MIP_BG_CUTS_DSE": "rw"},
+    "dseg": {"ENOMOTO_MIP_BG_CUTS_DSE": "g"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
