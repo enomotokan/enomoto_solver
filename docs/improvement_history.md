@@ -10255,3 +10255,13 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   (`analysis/neos960392_20261101.md`・`neos960392_cutstop_20261101.md`)。bench12 (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −3.5%・
   解けた数 83 -> 87、Mittelmann −0.6%・46 -> 46、neos-960392 0/3 -> 3/3。既定だけが解けた 2 問は揺れ (`analysis/cs2_check_20261101.md`)。
 - 記録は `analysis/cs2_default_20261101.md`。
+
+## 2026-11-02: 目的関数 0 の早めの探索と裏のカットの写しの列の値 (flbgx) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方): `ENOMOTO_MIP_FEAS_FJ_EARLY` の既定 `fl` (実行可能性問題で前処理の LP による固定の前に FJ2 と
+  Local-MIP を 3 対 1 のスレッドで並べ、見つかれば最適で終える、`0`)、`ENOMOTO_MIP_BG_CUTS_BASIS_X` の既定 `lpw` (根の LP が 1 秒以上の
+  問題で、裏のカットの写しの根の LP に主の列の値も渡す、`0`)。
+- 根拠: ns1116954 (`analysis/ns1116954_20261101.md`・`feas_early_lmip_20261102.md`)、physiciansched6-2 (`analysis/phys6_20261101.md`)。
+  bench14 (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −4.0%・解けた数 82 -> 88、Mittelmann −2.4%・47 -> 49、片方だけ解けた回は
+  flbgx 側だけ (ns1116954・physiciansched6-2 3/3・fhnw-binpack4-48 など)。
+- 記録は `analysis/flbgx_default_20261102.md`。

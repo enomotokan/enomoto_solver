@@ -1246,18 +1246,18 @@ thread_local! {
     static FEAS_FJ_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// `ENOMOTO_MIP_FEAS_FJ_EARLY` (試作、既定では使わない): 実行可能性問題 (前処理後の目的関数が全部 0) では、前処理の LP による固定
+/// `ENOMOTO_MIP_FEAS_FJ_EARLY` (既定 `fl`、`=0` で使わない。flbgx として既定にした: analysis/flbgx_default_20261102.md): 実行可能性問題 (前処理後の目的関数が全部 0) では、前処理の LP による固定
 /// ([`lp_probe`]) の前に、種を変えた FJ2 をスレッドの数だけ並べて回す ([`feas_fj_early`])。見つかればどの実行可能解も最適なので、
 /// 残りの前処理 (LP による固定・プロービング・クリーク行の拡張・対称性) も根の LP も飛ばして最適で終える。
 /// ns1116954 (4 スレッド・60 秒) は既定で 27〜33 秒のうち、前処理の LP による固定が 11〜13 秒 (固定 0)、根の LP の解き直しが 12 秒で、
 /// FJ のスレッドは根の LP の途中で解を見つけているのに主が根の LP の終わりまで受け取らない (analysis/ns1116954_20261101.md)
 pub(crate) fn feas_fj_early_on() -> bool {
-    env_str!("ENOMOTO_MIP_FEAS_FJ_EARLY").is_some()
+    env_def!("ENOMOTO_MIP_FEAS_FJ_EARLY", "fl").is_some()
 }
 
-/// `ENOMOTO_MIP_FEAS_FJ_EARLY=fl` (試作): 早めの探索で FJ2 と Local-MIP を並べる ([`feas_fj_lmip_early`])。ほかの値 (`=1`) は FJ2 だけ
+/// `ENOMOTO_MIP_FEAS_FJ_EARLY=fl` (既定): 早めの探索で FJ2 と Local-MIP を並べる ([`feas_fj_lmip_early`])。ほかの値 (`=1`) は FJ2 だけ
 fn feas_fj_early_lmip() -> bool {
-    env_str!("ENOMOTO_MIP_FEAS_FJ_EARLY") == Some("fl")
+    env_def!("ENOMOTO_MIP_FEAS_FJ_EARLY", "fl") == Some("fl")
 }
 
 /// 早めの FJ ([`feas_fj_early_on`]) の本体: `threads` 本のスレッドで種を変えた FJ2 を `cap` 秒まで繰り返し、どれかが実行可能解を

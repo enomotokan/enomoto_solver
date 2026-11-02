@@ -2098,7 +2098,7 @@ pub(super) struct CutJob {
 /// mc11 は裏のカットの下界で解けるかどうかが決まり、根のサブ MIP が早く終わる設定 (`ENOMOTO_MIP_SUBMIP_HIGHS` の `s`) では
 /// 裏のカットが 1 ラウンドに 20 ほど上がっている途中 (16〜29 ラウンド) で止められ、根の下界が 11668〜11684 から 11375〜11590 に
 /// 落ちて解けなくなっていた (analysis/mc11_h1_20261030.md)
-/// `ENOMOTO_MIP_BG_CUTS_BASIS_X` (試作、既定では使わない): 裏のカットの写しの根の LP に、主の基底の列番号と一緒に列の値も渡す。
+/// `ENOMOTO_MIP_BG_CUTS_BASIS_X` (既定 `lpw`、`=0` で使わない。flbgx として既定にした: analysis/flbgx_default_20261102.md): 裏のカットの写しの根の LP に、主の基底の列番号と一緒に列の値も渡す。
 /// 既定の [`super::lp::Basis`] を `set_basis` で入れる形では、基底に入る列しか引き継がれず、非基底の列の置き場所 (上限・下限) は
 /// 写しの LP の初めの値から決まる。退化の強い physiciansched6-2 では、主の最適基底から始めても写しの根の LP に 11030 反復・5.7 秒
 /// かかり、裏のカットの 1 ラウンド目が出るのは始めてから 6〜7 秒後になる。根のヒューリスティクスが 17〜18 秒で終わる回は、その前に
@@ -2107,7 +2107,7 @@ pub(super) struct CutJob {
 /// 11527 に落ちて 4 回とも時間切れになる (既定は 4 回とも最適)。`lpw` は根の LP が重い問題 (根の LP の時間 `root_lp_secs` が
 /// `ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS` (既定 1 秒) 以上) だけで渡す
 pub(crate) fn bg_cuts_basis_x_on() -> bool {
-    env_str!("ENOMOTO_MIP_BG_CUTS_BASIS_X").is_some()
+    env_def!("ENOMOTO_MIP_BG_CUTS_BASIS_X", "lpw").is_some()
 }
 
 pub(crate) fn bg_cuts_wait_on() -> bool {
@@ -4395,7 +4395,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let bg_basis = if env_str!("ENOMOTO_MIP_NO_BG_CUTS_BASIS").is_none() { Some(self.lp.basis()) } else { None };
                 let bg_nb = crate::simplex::mip_lp::basis_nb_on('w') && self.root_lp_secs >= tunable!("ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS", 1.0, f64);
                 // `lpw` なら、根の LP (カットの前) を解くのに `ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS` (既定 1 秒) 以上かかった問題だけ
-                let bx = bg_cuts_basis_x_on() && (env_str!("ENOMOTO_MIP_BG_CUTS_BASIS_X") != Some("lpw") || self.root_lp_secs >= tunable!("ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS", 1.0, f64));
+                let bx = bg_cuts_basis_x_on() && (env_def!("ENOMOTO_MIP_BG_CUTS_BASIS_X", "lpw") != Some("lpw") || self.root_lp_secs >= tunable!("ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS", 1.0, f64));
                 if bg_cuts_basis_x_on() && self.params.verbose {
                     eprintln!("MIP: background cuts: basis with the column values {} (root LP {:.2}s)", if bx { "passed" } else { "not passed" }, self.root_lp_secs);
                 }
