@@ -46,3 +46,14 @@ for p in probs:
         rs = sorted(by[(p, m)], key=lambda r: r["run"])
         cells.append(" / ".join(early(p, m, r["run"]) for r in rs))
     print(f"| {p} | " + " | ".join(cells) + " |")
+print()
+print("時間切れの回のノード数 (見つからないときの損の目安。早めの探索の 6 秒は木の時間を減らす)")
+print("| 問題 | " + " | ".join(modes) + " |")
+print("|---|" + "---|" * len(modes))
+for p in probs:
+    cells = []
+    for m in modes:
+        rs = sorted(by[(p, m)], key=lambda r: r["run"])
+        cells.append(" / ".join(str(r.get("nodes")) for r in rs if r.get("status") == "time_limit"))
+    if any(cells):
+        print(f"| {p} | " + " | ".join(cells) + " |")
