@@ -16,6 +16,10 @@ CFGS = {
     "s": {"ENOMOTO_MIP_BASIS_NB": "s"},
     "b": {"ENOMOTO_MIP_BASIS_NB": "b"},
     "r": {"ENOMOTO_MIP_BASIS_NB": "r"},
+    # b を主の根の LP が 1 秒以上の問題だけに (`ENOMOTO_MIP_BG_CUTS_BASIS_X=lpw` と同じ条件)
+    "w": {"ENOMOTO_MIP_BASIS_NB": "w"},
+    # t と w
+    "tw": {"ENOMOTO_MIP_BASIS_NB": "t,w"},
 }
 def cfg(name):
     if name in CFGS:
