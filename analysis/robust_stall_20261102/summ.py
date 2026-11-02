@@ -24,8 +24,8 @@ def parse(log):
     if m:
         d["bg_obj"] = float(m.group(2))
     d["vetoes"] = sum(int(x) for x in re.findall(r"own stall vetoed (\d+) times", t)[:1])
-    d["lpcap"] = len(re.findall(r"LP status IterationLimit, removed the cuts", t[:t.find("background cuts: determ")] if "background cuts: determ" in t else ""))
-    d["p2"] = "phase 2" in (t[:t.find("background cuts: determ")] if "background cuts: determ" in t else "") and t.count("cut loop phase 2") > 0
+    d["lpcap"] = len(re.findall(r"LP status IterationLimit, removed the cuts", t[:t.find("background cuts: determ: waited")] if "background cuts: determ: waited" in t else ""))
+    d["p2"] = "phase 2" in (t[:t.find("background cuts: determ: waited")] if "background cuts: determ: waited" in t else "") and t.count("cut loop phase 2") > 0
     m = re.search(r"continued in the main cut loop: obj \S+ -> (\S+), (\d+) LP iters", t)
     if m:
         d["cont"] = float(m.group(1))
