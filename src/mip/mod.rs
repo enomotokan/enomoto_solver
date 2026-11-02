@@ -1312,7 +1312,8 @@ fn feas_fj_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> 
 }
 
 /// 早めの探索の FJ2 と Local-MIP を並べる形 (`ENOMOTO_MIP_FEAS_FJ_EARLY=fl`、[`feas_fj_early_on`])。FJ が苦手で Local-MIP が得意な
-/// 実行可能性問題もあるので、`threads` 本のうち前の半分 (切り上げ) で種を変えた FJ2 を繰り返し、残りで種を変えた Local-MIP
+/// 実行可能性問題もあるので、`threads` 本を FJ 3 対 Local-MIP 1 に分け (Local-MIP は 4 分の 1 の切り捨て、少なくとも 1 本。
+/// 4 本なら FJ 3 + Local-MIP 1、8 本なら 6 + 2)、FJ 側で種を変えた FJ2 を繰り返し、残りで種を変えた Local-MIP
 /// (連鎖の手あり、[`localmip::LocalMip`]) を回す。どれかが実行可能解を見つけたら止めの合図で全部止めて返す。
 /// - スレッドが 1 本なら 1 本の中で交互に回す: FJ2 を 1 回、Local-MIP を `ENOMOTO_T_MIP_FEAS_EARLY_LMIP_SLICE` (0.2) 秒ずつ続きから。
 /// - 時間の上限は `cap` 秒と前処理の期限 ([`PRESOLVE_DEADLINE`]) の早い方。Local-MIP は 16 手ごとにそれと止めの合図を見る。
@@ -1324,8 +1325,10 @@ fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool
     use std::time::{Duration, Instant};
     let t0 = Instant::now();
     let threads = threads.max(1);
-    // `ENOMOTO_T_MIP_FEAS_EARLY_LMIP_THREADS`: Local-MIP のスレッドの数 (既定は半分 (切り捨て)、診断用。スレッドが 1 本なら交互)
-    let n_fj = if threads == 1 { 1 } else { threads - tunable!("ENOMOTO_T_MIP_FEAS_EARLY_LMIP_THREADS", threads / 2, usize).min(threads) };
+    // `ENOMOTO_T_MIP_FEAS_EARLY_LMIP_THREADS`: Local-MIP のスレッドの数 (既定は 4 分の 1 の切り捨てで少なくとも 1 本 = FJ 3 対
+    // Local-MIP 1。半分ずつ (4 本で 2 + 2) は ns1116954 で 58 秒、3 + 1 は 6 秒 (analysis/feas_early_lmip_20261102.md)。
+    // スレッドが 1 本なら交互)
+    let n_fj = if threads == 1 { 1 } else { threads - tunable!("ENOMOTO_T_MIP_FEAS_EARLY_LMIP_THREADS", (threads / 4).max(1), usize).min(threads) };
     let stop = AtomicBool::new(false);
     let (fj_tries, lm_steps) = (AtomicU64::new(0), AtomicU64::new(0));
     // 見つけた解と、見つけた方 (1 = FJ、2 = Local-MIP) と時刻
