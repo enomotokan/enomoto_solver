@@ -434,3 +434,21 @@ ENOMOTO の既定は今回の計測の 7〜9 回分。
 - bgcap・poolfix: 片方だけ解けた回は両側に散らばり (physiciansched6-2・roll3000・neos5)、SGM は ±2% で揺れの範囲。
 - 判断: **3 つとも採らない**。bgdsecap は害がはっきりしている。bgcap・poolfix は得が見えない。裏のカットのスレッドのカットの LP の失敗
   (bgx の調査 1・2) は、60 秒の結果には効いていない。
+
+## bench17: 共有の待ち行列のノードの基底の直しと DSE 重み (pooldse)・裏のカットのスレッドから主に DSE 重みを返す (bgret) (2026-11-02)
+
+- pooldse = `ENOMOTO_MIP_POOL_BASIS_FIX=1 ENOMOTO_MIP_POOL_DSE=1` (analysis/pool_dse_20261102.md)、bgret = `ENOMOTO_MIP_BG_RETURN_DSE=1`
+  (analysis/bg_return_dse_20261102.md)。土台 df494007。58 問 × 2 回 (回 28・29) + Mittelmann 186 問 (回 111)、30 分担。集計 `summ17.txt`。crash なし。
+
+| 組 | def | pooldse | 比 | bgret | 比 |
+|---|---|---|---|---|---|
+| 58 問 回 28 | 17.94 秒 (42) | 17.52 秒 (43) | −2.4% | 18.52 秒 (42) | +3.2% |
+| 58 問 回 29 | 17.41 秒 (44) | 17.48 秒 (44) | +0.4% | 18.68 秒 (42) | +7.3% |
+| 58 問 全回 | 17.68 秒 (86) | 17.50 秒 (87) | −1.0% (+1) | 18.60 秒 (84) | +5.2% (−2) |
+| Mittelmann | 43.78 秒 (47) | 43.62 秒 (47) | −0.4% | 43.58 秒 (48) | −0.5% (+1) |
+
+- pooldse: 片方だけ解けた回は両側に散らばる (pooldse だけ: eil33-2・neos-1171737・physiciansched6-2・timtab1、def だけ: neos5・noswot・physiciansched6-2)。
+  木の問題 (noswot・roll3000・mc11・neos-911970・swath1・misc07) の時間も回ごとに上下し、揺れの範囲。
+- bgret: 58 問は 2 回とも遅い (+3.2%・+7.3%) が、def だけが解けた回は ns1116954 (早めの探索で解く問題で、裏のカットに関わらない)・qiu・
+  physiciansched6-2 で、Mittelmann は −0.5%。seymour1 の暫定解は今回 bgret 411.096 (def 411.124) で、bg_return_dse_20261102.md の悪化は再現しない。
+- 判断: **どちらも採らない** (得が揺れを超えない)。bench16 の bgcap・poolfix と合わせ、DSE 重み・基底の受け渡しの手当ては 60 秒の結果に効いていない。
