@@ -274,6 +274,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) path_collect: Option<Vec<Vec<(usize, f64)>>>,
     /// カットを強める求解で回したラウンド数
     pub(super) bg_cut_rounds: usize,
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` の `c` ([`BgDeterm`]): 裏のカットが手間の上限で止まった後、主が根のカットのループを続けるときの
+    /// 手間の上限 (このループの LP の反復の合計の上限) と停滞の判定 (窓のラウンド数, 相対の伸び)。`Some` の間は [`Self::root_cut_loop`] が
+    /// カットの選び方の比べをせず、この手間の上限と停滞の判定で止まる
+    pub(super) cut_cont: Option<(u64, usize, f64)>,
     /// 分離器ごとの適応的な飛ばしの状態 (`ENOMOTO_MIP_SEP_ADAPTIVE`、[`super::separation::SepAdapt`])
     pub(super) sep_adapt: super::separation::SepAdapt,
     /// 根のカットのループの今のラウンド (`ENOMOTO_MIP_TAB_NNZ_CBC` の最初のラウンドの判定用。ループの始めに 0)
@@ -2348,6 +2352,125 @@ pub(super) struct CutJob {
     pub(super) prog: std::sync::Mutex<Vec<f64>>,
     /// `prog` の各ラウンドを記録した時刻 (ログで、主の待ちの判定とラウンドの進み方を並べるため)
     pub(super) prog_at: std::sync::Mutex<Vec<Instant>>,
+    /// `prog` の各ラウンドの時点の、裏のカットのスレッドの LP の反復の合計 (写しの根の LP を含む)
+    pub(super) prog_it: std::sync::Mutex<Vec<u64>>,
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` ([`BgDeterm`]): 裏のカットが自分の進み具合で終わる判定。`None` なら今まで通り
+    pub(super) determ: Option<BgDeterm>,
+    /// [`BgDeterm`] の `r` の判定に使う暫定解の値 (f64 のビット。主が裏のカットを始めるときと待ちを始めるときに入れる。無限大なら判定しない)
+    pub(super) cutoff_bits: std::sync::atomic::AtomicU64,
+    /// [`BgDeterm`] で裏のカットが自分で終わると決めた (次のラウンドの始めでループを抜ける) ときの理由
+    pub(super) self_stop: std::sync::Mutex<Option<&'static str>>,
+}
+
+/// 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` (既定では使わない。`0` でも使わない。analysis/bg_determ_20261102.md): 裏のカットの止め方を、
+/// 主の根のヒューリスティクスの長さ (時間) ではなく裏のカット自身の進み具合と手間で決める。
+/// - 裏のカットのスレッドは、直近 `ENOMOTO_T_MIP_BG_DETERM_WIN` ラウンド (既定 5) の目的値の伸び (相対) が
+///   `ENOMOTO_T_MIP_BG_DETERM_EPS` (既定 1e-4) 以下になったら停滞として自分で終わる (`stalled`)。今までの停滞の判定 (分数の列の数を見る) もそのまま。
+/// - 手間の上限: このスレッドの LP の反復の合計が、主の根の LP の反復 (最低 `ENOMOTO_T_MIP_BG_DETERM_MIN_ITERS`、既定 1000) の
+///   `ENOMOTO_T_MIP_BG_DETERM_WORK` 倍 (既定 20) を超えたら終わる (`work`)。
+/// - 主は根のヒューリスティクスが終わった後、裏のカットが自分で終わるまで待つ。時間の上限 (残り時間の `ENOMOTO_T_MIP_BG_DETERM_SAFE_FRAC`
+///   倍、既定 0.3) は安全網としてだけ残す。暫定解に届いたら待たない (今まで通り)。
+/// - 値に `c` を含むと、手間の上限で終わったとき (まだ停滞していない)、主がそのカットの行と基底を受け取った後、主のカットのループとして
+///   停滞まで続ける (手間の上限は同じ `WORK` 倍。[`Solver::cut_cont`])。
+/// - 値に `r` を含むと、暫定解があるとき、直近の窓の「暫定解との差を詰めた割合 / 手間 (主の根の LP の反復を 1 とする)」が
+///   `ENOMOTO_T_MIP_BG_DETERM_RATE` (既定 0.01) を下回ったら、伸びが遅いとして終わる (`slow`)。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BgDeterm {
+    pub(super) win: usize,
+    pub(super) eps: f64,
+    /// 手間の単位 (主の根の LP の反復)
+    pub(super) unit: u64,
+    /// 手間の上限 (反復)
+    pub(super) work_iters: u64,
+    /// `r` の判定の下限 (0 なら使わない)
+    pub(super) rate: f64,
+    /// `c`: 手間の上限で終わったら主が続ける
+    pub(super) cont: bool,
+}
+
+pub(crate) fn bg_determ_mode() -> Option<&'static str> {
+    env_str!("ENOMOTO_MIP_BG_CUTS_DETERM").filter(|v| *v != "0")
+}
+
+impl BgDeterm {
+    fn new(root_iters: u64) -> Option<Self> {
+        let v = bg_determ_mode()?;
+        let unit = root_iters.max(tunable!("ENOMOTO_T_MIP_BG_DETERM_MIN_ITERS", 1000u64, u64)).max(1);
+        Some(BgDeterm {
+            win: tunable!("ENOMOTO_T_MIP_BG_DETERM_WIN", 5usize, usize).max(1),
+            eps: tunable!("ENOMOTO_T_MIP_BG_DETERM_EPS", 1e-4, f64),
+            unit,
+            work_iters: (tunable!("ENOMOTO_T_MIP_BG_DETERM_WORK", 20.0, f64) * unit as f64) as u64,
+            rate: if v.contains('r') { tunable!("ENOMOTO_T_MIP_BG_DETERM_RATE", 0.01, f64) } else { 0.0 },
+            cont: v.contains('c'),
+        })
+    }
+}
+
+/// 直近 `win` ラウンドの目的値の伸び (相対) が `eps` 以下か (`hist` は各ラウンドの後の目的値。`win` + 1 個そろうまでは偽)
+pub(super) fn window_stalled(hist: &[f64], win: usize, eps: f64) -> bool {
+    let k = hist.len();
+    if k < win + 1 {
+        return false;
+    }
+    let (a, b) = (hist[k - 1 - win], hist[k - 1]);
+    (b - a) / b.abs().max(a.abs()).max(1.0) <= eps
+}
+
+impl CutJob {
+    pub(super) fn new(heavy: bool, determ: Option<BgDeterm>, cutoff: f64) -> Self {
+        CutJob {
+            stop: std::sync::atomic::AtomicBool::new(false),
+            heavy,
+            out: std::sync::Mutex::new(None),
+            latest_x: std::sync::Mutex::new(None),
+            basis: std::sync::Mutex::new(None),
+            dse: std::sync::Mutex::new(None),
+            prog: std::sync::Mutex::new(Vec::new()),
+            prog_at: std::sync::Mutex::new(Vec::new()),
+            prog_it: std::sync::Mutex::new(Vec::new()),
+            determ,
+            cutoff_bits: std::sync::atomic::AtomicU64::new(cutoff.to_bits()),
+            self_stop: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// 止めの合図か、[`BgDeterm`] で自分で終わると決めたか
+    pub(super) fn stopped(&self) -> bool {
+        self.stop.load(std::sync::atomic::Ordering::Relaxed) || self.self_stop.lock().unwrap().is_some()
+    }
+
+    /// 裏のカットのスレッドが 1 ラウンドの後に呼ぶ: 目的値 (offset 込み)・LP 解・この LP の反復の合計を記録し、[`BgDeterm`] なら
+    /// 自分で終わるかを決める (終わるなら理由を返す。ループは次のラウンドの始めで抜ける)
+    pub(super) fn record_round(&self, obj: f64, x: Vec<f64>, iters: u64) -> Option<&'static str> {
+        *self.latest_x.lock().unwrap() = Some(x);
+        let mut h = self.prog.lock().unwrap();
+        h.push(obj);
+        self.prog_at.lock().unwrap().push(Instant::now());
+        let mut hi = self.prog_it.lock().unwrap();
+        hi.push(iters);
+        let d = self.determ?;
+        let why = if window_stalled(&h, d.win, d.eps) {
+            Some("stalled")
+        } else if iters >= d.work_iters {
+            Some("work")
+        } else {
+            let z = f64::from_bits(self.cutoff_bits.load(std::sync::atomic::Ordering::Relaxed));
+            let k = h.len();
+            if d.rate > 0.0 && z.is_finite() && k > d.win {
+                let (a, b) = (h[k - 1 - d.win], h[k - 1]);
+                let gap = (z - a).max(1e-9 * z.abs().max(1.0));
+                let work = (hi[k - 1] - hi[k - 1 - d.win]).max(1) as f64 / d.unit as f64;
+                if (b - a) / gap / work < d.rate { Some("slow") } else { None }
+            } else {
+                None
+            }
+        };
+        if why.is_some() {
+            *self.self_stop.lock().unwrap() = why;
+        }
+        why
+    }
 }
 
 /// `ENOMOTO_MIP_BG_CUTS_WAIT` (既定で使う。`0` で止める。analysis/cand_default_20261031.md): 根のヒューリスティクスが終わった時点で裏のカットがまだ下界を上げているなら、
@@ -2447,6 +2570,27 @@ impl BgCuts {
         (t0.elapsed().as_secs_f64(), why)
     }
 
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` ([`BgDeterm`]): 裏のカットが自分で終わる (停滞・手間の上限・伸びが遅い、または今までの停滞の判定) まで待つ。
+    /// 目的値が `cutoff` に届くか、待ちが安全網の `cap` 秒に達したらやめる。戻り値は (待った秒数, 待ち終えた理由)
+    fn wait_determ(&self, cap: f64, cutoff: f64) -> (f64, &'static str) {
+        let t0 = Instant::now();
+        let why = loop {
+            if self.handle.as_ref().is_none_or(|h| h.is_finished()) {
+                break "done";
+            }
+            if let Some(&b) = self.job.prog.lock().unwrap().last() {
+                if b >= cutoff - 1e-9 * cutoff.abs().max(1.0) {
+                    break "cutoff";
+                }
+            }
+            if t0.elapsed().as_secs_f64() >= cap {
+                break "cap";
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        (t0.elapsed().as_secs_f64(), why)
+    }
+
     fn finish(&mut self) -> Option<(Vec<(Vec<(usize, f64)>, f64, f64)>, f64, usize)> {
         self.job.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
@@ -2536,6 +2680,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sep_par_cpu: 0.0,
         path_collect: None,
         bg_cut_rounds: 0,
+        cut_cont: None,
         sep_adapt: super::separation::SepAdapt::with_node_off(snap.as_ref().map_or(0, |sn| sn.sep_node_off)),
         sep_pass: 0,
         sep_last_gain: f64::INFINITY,
@@ -4752,7 +4897,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
             let bg_mode = env_str!("ENOMOTO_MIP_BG_CUTS").or(if env_str!("ENOMOTO_MIP_NO_BG_CUTS").is_none() { Some("1") } else { None });
             if let Some(mode) = bg_mode {
-                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None), basis: std::sync::Mutex::new(None), dse: std::sync::Mutex::new(None), prog: std::sync::Mutex::new(Vec::new()), prog_at: std::sync::Mutex::new(Vec::new()) });
+                let determ = BgDeterm::new(root_iters);
+                if let Some(d) = &determ {
+                    if self.params.verbose {
+                        eprintln!("MIP: background cuts: determ {d:?} (root LP {root_iters} iters)");
+                    }
+                }
+                let job = std::sync::Arc::new(CutJob::new(mode == "heavy", determ, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)));
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let mut threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
@@ -5371,7 +5522,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if small_nowait && self.params.verbose {
                 eprintln!("MIP: background cuts: not waiting (ENOMOTO_MIP_SMALL1, nnz {}, {:.2}s)", self.p.nnz, self.start.elapsed().as_secs_f64());
             }
-            if bg_cuts_wait_on() && !small_nowait {
+            let determ = bg.job.determ;
+            if let Some(d) = determ {
+                // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM`: 裏のカットが自分で終わるまで待つ (時間の上限は安全網)
+                let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                let min_left = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT", 0.05, f64) * self.params.time_limit;
+                let cap = (tunable!("ENOMOTO_T_MIP_BG_DETERM_SAFE_FRAC", 0.3, f64) * remaining).min((remaining - min_left).max(0.0));
+                let cutoff = if env_def!("ENOMOTO_MIP_BG_CUTS_PROOF_STOP", "1").is_some() { self.prune_limit() } else { self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z) };
+                let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+                bg.job.cutoff_bits.store(z.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                let (w, why) = bg.wait_determ(cap, cutoff);
+                if self.params.verbose {
+                    let h = bg.job.prog.lock().unwrap();
+                    let hi = bg.job.prog_it.lock().unwrap();
+                    let own = *bg.job.self_stop.lock().unwrap();
+                    eprintln!(
+                        "MIP: background cuts: determ: waited {w:.2}s (safety cap {cap:.2}s, {why}, background end {}), {} rounds, {} LP iters ({:.2} x {} of cap {}), obj {:?} ({:.2}s)",
+                        own.unwrap_or(if why == "done" { "own stall" } else { "-" }),
+                        h.len(),
+                        hi.last().copied().unwrap_or(0),
+                        hi.last().copied().unwrap_or(0) as f64 / d.unit as f64,
+                        d.unit,
+                        d.work_iters,
+                        h.last(),
+                        self.start.elapsed().as_secs_f64()
+                    );
+                    let at = bg.job.prog_at.lock().unwrap();
+                    let rounds: Vec<String> = h.iter().zip(at.iter()).map(|(o, t)| format!("{o:.1} at {:.2}s", t.saturating_duration_since(self.start).as_secs_f64())).collect();
+                    eprintln!("MIP: background cuts: rounds so far [{}]", rounds.join(", "));
+                }
+            } else if bg_cuts_wait_on() && !small_nowait {
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let mult = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MULT", 5.0, f64);
                 let mut cap = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_FRAC", 0.1, f64) * remaining;
@@ -5399,6 +5579,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             let res = bg.finish();
+            let bg_end = *bg.job.self_stop.lock().unwrap();
             let wait = t0.elapsed().as_secs_f64();
             // 根の LP を解き直しておく (ヒューリスティクスの後で状態が戻っていることを確かめる)
             let it0 = self.lp.total_iterations();
@@ -5476,6 +5657,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             eprintln!("MIP: background cuts: {} rounds, {} cut rows (was {}), obj {:.10e} -> {:.10e} (waited {:.2}s, {:.2}s)", rounds, rows.len(), saved.len(), cur, new, wait, self.start.elapsed().as_secs_f64());
                         }
                         root_obj = new;
+                        // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` の `c`: 裏のカットが手間の上限で終わった (まだ停滞していない) なら、主のカットの
+                        // ループとして停滞まで (同じ手間の上限で) 続ける
+                        if let Some(d) = determ.filter(|d| d.cont && bg_end == Some("work") && !self.time_up()) {
+                            let t2 = Instant::now();
+                            let it2 = self.lp.total_iterations();
+                            self.cut_cont = Some((d.work_iters, d.win, d.eps));
+                            let ok = self.root_cut_loop(root_iters);
+                            self.cut_cont = None;
+                            if !ok {
+                                self.join_fj_thread();
+                                let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
+                                return self.finish(st, root_obj);
+                            }
+                            let new2 = self.lp.objective() + self.p.offset;
+                            if self.params.verbose {
+                                eprintln!("MIP: background cuts: determ: continued in the main cut loop: obj {new:.10e} -> {new2:.10e}, {} LP iters, {} cut rows ({:.2}s, {:.2}s)", self.lp.total_iterations() - it2, self.lp.num_rows() - self.p.m, t2.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
+                            }
+                            root_obj = root_obj.max(new2);
+                        }
                         // 根の被約費用の早めの記録 (`ENOMOTO_MIP_NO_EARLY_REDCOST` で使わない): 裏のカットで強くなった LP の被約費用を記録し直して固定する
                         if super::early_redcost_on() && !self.params.submip && self.snap.is_none() {
                             self.store_root_redcost(root_obj);
@@ -5485,7 +5685,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                         }
                         if !self.params.submip {
-                            super::record_root_bound(new);
+                            super::record_root_bound(root_obj);
                         }
                         // `ENOMOTO_MIP_BG_CUTS_REHEUR`: 置き換えた LP の解で軽いヒューリスティクスをもう一度回す (`1`: 丸めだけ、
                         // `rins`: 丸めと、暫定解があれば RINS も、`rens` (試作): 丸めと RENS と RINS)。`rens` は beasleyC3 のため:

@@ -813,7 +813,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 固定費用のネットワーク型か (`root_cut_highs` がループの初めから使うので先に決める。下でも同じ値を入れ直す)
         self.fc_network = !self.params.submip && fixed_charge_network(p);
         // `ENOMOTO_MIP_CUTSEL_PROBE`: 外側の最初の根では前の求解の選択を消す (0 ラウンド目の比べで決め直す)
-        if !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && env_def!("ENOMOTO_MIP_CUTSEL_PROBE", "rate").is_some() {
+        if !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && self.cut_cont.is_none() && env_def!("ENOMOTO_MIP_CUTSEL_PROBE", "rate").is_some() {
             CUT_PROBE_CHOICE.store(0, std::sync::atomic::Ordering::Relaxed);
         }
         let n = p.n;
@@ -906,7 +906,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             time_cap = f64::INFINITY;
         }
         let heavy = job.as_ref().is_some_and(|j| j.heavy);
-        let stopped = |j: &Option<std::sync::Arc<super::solver::CutJob>>| j.as_ref().is_some_and(|j| j.stop.load(std::sync::atomic::Ordering::Relaxed));
+        // 止めの合図か、試作 `ENOMOTO_MIP_BG_CUTS_DETERM` で裏のカットが自分で終わると決めた ([`super::solver::CutJob::stopped`])
+        let stopped = |j: &Option<std::sync::Arc<super::solver::CutJob>>| j.as_ref().is_some_and(|j| j.stopped());
         let mut total_added = 0usize;
         let mut lp_failures = 0usize;
         // `ENOMOTO_MIP_CUT_PHASE2`: 既定の選択 (`select_cuts_hybrid`: 質が最良の 50% 未満のカットは採らない) で停滞して
@@ -937,7 +938,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_CUTSEL_PROBE`: 比べを 0 ラウンド目の始めに行う (時間の上限の判定より前なので、既定では前景のカットが 0 ラウンドの
         // physiciansched6-2 でも比べる)
         let min_rounds0 = min_rounds;
-        let probe_pending = !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !self.fc_network && env_def!("ENOMOTO_MIP_CUTSEL_PROBE", "rate").is_some();
+        let probe_pending = !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && self.cut_cont.is_none() && !self.fc_network && env_def!("ENOMOTO_MIP_CUTSEL_PROBE", "rate").is_some();
         let mut cap_base = if (CLIQUE_FB_SECOND.with(|c| c.get()) && env_str!("ENOMOTO_MIP_CLIQUE_FB_SHARED_CAP").is_none()) || cap_from_loop { t_loop0 } else { self.cpu0 };
         let mut phase2_deadline = f64::INFINITY;
         let mut round_ctr = 0usize;
@@ -1084,8 +1085,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut flat_rounds = 0usize;
         let mut moved = false;
         let lpcap_stop = if cs_outer { env_def!("ENOMOTO_MIP_CUT_LP_CAP_STOP", "flat").filter(|v| *v != "0") } else { None };
-        let work_cap = if cs_outer { tunable!("ENOMOTO_T_MIP_CUT_WORK_CAP", 0.0, f64) } else { 0.0 };
-        let work_round = tunable!("ENOMOTO_T_MIP_CUT_WORK_ROUND", 0.05, f64);
+        let mut work_cap = if cs_outer { tunable!("ENOMOTO_T_MIP_CUT_WORK_CAP", 0.0, f64) } else { 0.0 };
+        let mut work_round = tunable!("ENOMOTO_T_MIP_CUT_WORK_ROUND", 0.05, f64);
+        // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` の `c`: 手間の上限は LP の反復だけで数える ([`Solver::cut_cont`])
+        let mut obj_cont: Vec<f64> = Vec::new();
+        let mut cont_stop = false;
+        if let Some((w, _, _)) = self.cut_cont {
+            work_cap = w as f64 / root_iters.max(1) as f64;
+            work_round = 0.0;
+        }
         if work_cap > 0.0 {
             time_cap *= tunable!("ENOMOTO_T_MIP_CUT_WORK_TIME_MULT", 2.0, f64);
         }
@@ -1314,7 +1322,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if now - cap_base > time_cap && round >= min_rounds { " -> stop" } else { "" }
                 );
             }
-            if self.time_up() || (now - cap_base > time_cap && round >= min_rounds) || (phase2 && now - t_loop0 > phase2_deadline && !heavy) || stopped(&job) {
+            if self.time_up() || (now - cap_base > time_cap && round >= min_rounds) || (phase2 && now - t_loop0 > phase2_deadline && !heavy) || stopped(&job) || cont_stop {
                 break;
             }
             // `ENOMOTO_T_MIP_CUT_WORK_CAP`: 手間の上限
@@ -1844,9 +1852,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             if let Some(j) = &job {
-                *j.latest_x.lock().unwrap() = Some(self.lp.col_values());
-                j.prog.lock().unwrap().push(obj + p.offset);
-                j.prog_at.lock().unwrap().push(std::time::Instant::now());
+                if let Some(why) = j.record_round(obj + p.offset, self.lp.col_values(), self.lp.total_iterations()) {
+                    if self.params.verbose {
+                        eprintln!("MIP: cut round {round}: background cuts stop by themselves ({why}, {} LP iters, obj {:.10e})", self.lp.total_iterations(), obj + p.offset);
+                    }
+                }
+            }
+            // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` の `c` (主が裏のカットの続きを回す): 直近の窓の伸びで停滞を決める
+            if let Some((_, win, eps)) = self.cut_cont {
+                obj_cont.push(obj + p.offset);
+                if super::solver::window_stalled(&obj_cont, win, eps) {
+                    if self.params.verbose {
+                        eprintln!("MIP: cut round {round}: continued background cuts stalled (obj {:.10e})", obj + p.offset);
+                    }
+                    cont_stop = true;
+                }
             }
             if dbg_sep {
                 eprintln!(
