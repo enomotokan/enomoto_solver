@@ -10265,3 +10265,12 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   bench14 (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −4.0%・解けた数 82 -> 88、Mittelmann −2.4%・47 -> 49、片方だけ解けた回は
   flbgx 側だけ (ns1116954・physiciansched6-2 3/3・fhnw-binpack4-48 など)。
 - 記録は `analysis/flbgx_default_20261102.md`。
+
+## 2026-11-02: 共有の待ち行列のノードの基底の直しと DSE 重み・FJSTOP・裏のカットの止め方 (canddet) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方 `=0`): `ENOMOTO_MIP_POOL_BASIS_FIX` (受け取ったノードの基底を正則に直す)、`ENOMOTO_MIP_POOL_DSE` (DSE 重みも渡す)、
+  `ENOMOTO_MIP_SMALL2_FJSTOP` (FJ_P3 の前処理にも止めの合図)、`ENOMOTO_MIP_BG_CUTS_LP_WORK=1` (裏のカットのカットの LP の上限を反復で)、
+  `ENOMOTO_MIP_BG_CUTS_DETERM=c` (裏のカットを自分の停滞・手間の上限で止め、主は停滞まで待つ)。
+- 根拠: bench18 (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −0.4%・解けた数 85 -> 86、Mittelmann −0.6%・45 -> 46。揺れの範囲だが害はなく、
+  裏のカットの結果を機械の速さ・根のヒューリスティクスの長さから切り離す (mc11 の遅い機械の真似で 1/3 -> 3/3)。速い機械では mc11・hypothyroid-k1 が待ちの分遅い。
+- 記録は `analysis/canddet_default_20261102.md`。

@@ -78,6 +78,9 @@ CFGS = {
     "pooldse": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1", "ENOMOTO_MIP_POOL_DSE": "1"},
     "bgret": {"ENOMOTO_MIP_BG_RETURN_DSE": "1"},
     # 既定の候補と裏のカットの運を除く試作・LP による固定の順番 (2026-11-02、bench18。analysis/bg_determ_20261102.md・bg_lp_work_20261102.md・lp_probe_after_ext_20261102.md・small_overhead2_20261102.md)
+    # canddet の既定化 (2026-11-02、analysis/canddet_default_20261102.md) の後は "def" が canddet を含む。それより前の既定は "precanddet"。
+    # 注: 下の "cand" は 40 行目の 2026-10-31 の "cand" と同じ名前で、辞書では後ろのこちらが使われる (bench18 はこちらで測った)
+    "precanddet": {"ENOMOTO_MIP_POOL_BASIS_FIX": "0", "ENOMOTO_MIP_POOL_DSE": "0", "ENOMOTO_MIP_SMALL2_FJSTOP": "0", "ENOMOTO_MIP_BG_CUTS_LP_WORK": "0", "ENOMOTO_MIP_BG_CUTS_DETERM": "0"},
     "cand": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1", "ENOMOTO_MIP_POOL_DSE": "1", "ENOMOTO_MIP_SMALL2_FJSTOP": "1"},
     "canddet": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1", "ENOMOTO_MIP_POOL_DSE": "1", "ENOMOTO_MIP_SMALL2_FJSTOP": "1", "ENOMOTO_MIP_BG_CUTS_LP_WORK": "1", "ENOMOTO_MIP_BG_CUTS_DETERM": "c"},
     "canddetext": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1", "ENOMOTO_MIP_POOL_DSE": "1", "ENOMOTO_MIP_SMALL2_FJSTOP": "1", "ENOMOTO_MIP_BG_CUTS_LP_WORK": "1", "ENOMOTO_MIP_BG_CUTS_DETERM": "c", "ENOMOTO_MIP_LP_PROBE_AFTER_EXT": "1"},

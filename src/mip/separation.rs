@@ -975,7 +975,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 247 本ほどのカットを足した LP が上限 (60 秒の 2% = 1.2 秒) に当たり、2 回続けて全部外してループが終わり、根の下界が 48724 で
         // 止まっていた (1 回の LP の上限を 6 秒にすると 5 ラウンドで 49324 に届く。analysis/hl4_20261030.md)
         let lp_halve = env_str!("ENOMOTO_MIP_CUT_LP_HALVE").is_some() && !self.params.submip;
-        // `ENOMOTO_MIP_BG_CUTS_LP_WORK` = f[h] (試作、既定では使わない。analysis/bg_lp_work_20261102.md): 裏のカットの写しでは、カットの LP 1 回の
+        // `ENOMOTO_MIP_BG_CUTS_LP_WORK` = f[h] (既定 `1`、`=0` で使わない。bench18 の canddet として既定にした: analysis/canddet_default_20261102.md。analysis/bg_lp_work_20261102.md): 裏のカットの写しでは、カットの LP 1 回の
         // 上限を秒ではなく反復 (主の根の LP の反復 (`BG_ROOT_ITERS`) の f 倍、少なくとも `ENOMOTO_T_MIP_BG_CUTS_LP_WORK_MIN` (既定 2000)、
         // 最適まで解けたカットの LP の反復の最大の `ENOMOTO_T_MIP_CUT_LP_WORK_PREV` 倍) で決める。時間の上限は今の上限の
         // `ENOMOTO_T_MIP_BG_CUTS_LP_WORK_TIME_MULT` 倍 (既定 5) にして安全網としてだけ残す。写しの 1 回の LP の上限は
@@ -984,7 +984,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 値の末尾に `h` を付ける (`h` だけなら f = 1) と、写しのカットの LP が上限 (反復・時間) に当たったとき、失敗と数えずに
         // カットを外して以後の本数の上限を半分にして続ける (`ENOMOTO_MIP_CUT_LP_HALVE` と同じ形、`ENOMOTO_T_MIP_CUT_LP_HALVE_MIN` 本以下で当たったら失敗と数える)
         let bg_work: Option<(f64, bool)> = if job.is_some() {
-            env_str!("ENOMOTO_MIP_BG_CUTS_LP_WORK").filter(|v| *v != "0").map(|v| {
+            env_def!("ENOMOTO_MIP_BG_CUTS_LP_WORK", "1").map(|v| {
                 let h = v.ends_with('h');
                 let f = v.trim_end_matches('h').parse::<f64>().ok().filter(|f| *f > 0.0).unwrap_or(1.0);
                 (f, h)

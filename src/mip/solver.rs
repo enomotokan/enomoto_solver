@@ -1479,26 +1479,26 @@ fn tree_pool_basis() -> bool {
     env_str!("ENOMOTO_MIP_TREE_POOL_BASIS").is_some()
 }
 
-/// `ENOMOTO_MIP_POOL_BASIS_FIX` (試作、既定は切): 共有の待ち行列から受け取ったノードの基底を、戻すときに非特異になるように
+/// `ENOMOTO_MIP_POOL_BASIS_FIX` (既定で使う。`=0` で使わない。bench18 の canddet として既定にした: analysis/canddet_default_20261102.md): 共有の待ち行列から受け取ったノードの基底を、戻すときに非特異になるように
 /// 直す ([`Solver::fix_pool_basis`])。渡す側 ([`Solver::snap_of`]) は列と元の行の状態だけを渡し、受け取る側はカットの行を
 /// 全て基底にするので、渡した側で効いていた (非基底だった) カットの数だけ基底変数が余る。既定はその余りを `set_basis` の
 /// 修復 (構造列を後ろから外す) に任せていて、ほとんどの基底が特異になり全スラック基底から解き直している
 /// (analysis/singular_fix_b_20261102.md)
 fn pool_basis_fix() -> bool {
-    env_str!("ENOMOTO_MIP_POOL_BASIS_FIX").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_POOL_BASIS_FIX", "1").is_some()
 }
 
-/// `ENOMOTO_MIP_POOL_DSE` (試作、既定は切): 共有の待ち行列に出すノード ([`SnapNode`]) に、親の LP の DSE 重みのうち列と元の行の
+/// `ENOMOTO_MIP_POOL_DSE` (既定で使う。`=0` で使わない。bench18 の canddet として既定にした: analysis/canddet_default_20261102.md): 共有の待ち行列に出すノード ([`SnapNode`]) に、親の LP の DSE 重みのうち列と元の行の
 /// 基底変数の分も付け、受け取った側で基底を戻した後 (`ENOMOTO_MIP_POOL_BASIS_FIX` なら直した後) に当てはめて最初の LP で
 /// 引き継ぐ。既定は重みを渡さず、受け取った側は単位重みから解く。重みのない基底変数 (直しで入った列、カットの行のスラック) は
 /// 値 `1` (既定) なら 1、値 `n` なら `NaN` (求解の始めにその行だけ BTRAN で厳密な値を埋める)
 /// (analysis/pool_dse_20261102.md)
 fn pool_dse() -> bool {
-    env_str!("ENOMOTO_MIP_POOL_DSE").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_POOL_DSE", "1").is_some()
 }
 
 fn pool_dse_nan() -> bool {
-    env_str!("ENOMOTO_MIP_POOL_DSE").is_some_and(|v| v.contains('n'))
+    env_def!("ENOMOTO_MIP_POOL_DSE", "1").is_some_and(|v| v.contains('n'))
 }
 
 fn prof_tree_par() -> bool {
@@ -2373,7 +2373,7 @@ pub(super) struct CutJob {
     pub(super) win_from: std::sync::atomic::AtomicUsize,
 }
 
-/// 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` (既定では使わない。`0` でも使わない。analysis/bg_determ_20261102.md): 裏のカットの止め方を、
+/// `ENOMOTO_MIP_BG_CUTS_DETERM` (既定 `c`、`=0` で使わない。bench18 の canddet として既定にした: analysis/canddet_default_20261102.md。analysis/bg_determ_20261102.md): 裏のカットの止め方を、
 /// 主の根のヒューリスティクスの長さ (時間) ではなく裏のカット自身の進み具合と手間で決める。
 /// - 裏のカットのスレッドは、直近 `ENOMOTO_T_MIP_BG_DETERM_WIN` ラウンド (既定 5) の目的値の伸び (相対) が
 ///   `ENOMOTO_T_MIP_BG_DETERM_EPS` (既定 1e-4) 以下になったら停滞として自分で終わる (`stalled`)。今までの停滞の判定 (分数の列の数を見る) もそのまま。
@@ -2400,7 +2400,7 @@ pub(super) struct BgDeterm {
 }
 
 pub(crate) fn bg_determ_mode() -> Option<&'static str> {
-    env_str!("ENOMOTO_MIP_BG_CUTS_DETERM").filter(|v| *v != "0")
+    env_def!("ENOMOTO_MIP_BG_CUTS_DETERM", "c")
 }
 
 impl BgDeterm {
@@ -4404,11 +4404,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if super::past_presolve_deadline(fj_deadline) {
                             return None;
                         }
-                        // `ENOMOTO_MIP_SMALL2_FJSTOP` (試作、既定では使わない): FJ_P3 の前処理 (プロービングなど) にも FJ のスレッドの止める合図
+                        // `ENOMOTO_MIP_SMALL2_FJSTOP` (既定で使う。`=0` で使わない。bench18 の canddet として既定にした: analysis/canddet_default_20261102.md): FJ_P3 の前処理 (プロービングなど) にも FJ のスレッドの止める合図
                         // (`stop2`、主の `join_fj_thread`) を渡し ([`crate::cancel::with_halt`] → [`super::presolve_stop`])、合図が立っていたら
                         // FJ を始めずに抜ける。air03・neos8 では根のカットの後に LP の解が最適解になっていたのに、主が FJ_P3 の前処理
                         // (1.5 秒) の終わりを 0.7〜1.4 秒待っていた (analysis/small_overhead2_20261102.md)
-                        let fjstop = env_str!("ENOMOTO_MIP_SMALL2_FJSTOP").is_some();
+                        let fjstop = env_def!("ENOMOTO_MIP_SMALL2_FJSTOP", "1").is_some();
                         let halt = fjstop.then(|| stop2.clone());
                         if let Some((q, post, sc)) = crate::cancel::with_halt(halt, || super::with_presolve_deadline(fj_deadline, || super::fj_p3_problem(&pc))) {
                             // 前処理の間に求解の期限を過ぎていれば FJ を始めない (FJ の初期化 (`reset_moves`、全列) と最初の確認までの手は
