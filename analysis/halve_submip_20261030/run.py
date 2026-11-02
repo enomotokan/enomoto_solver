@@ -74,6 +74,9 @@ CFGS = {
     "bgcap": {"ENOMOTO_MIP_BG_CUTS_LP_CAP": "1"},
     "bgdsecap": {"ENOMOTO_MIP_BG_CUTS_DSE": "r", "ENOMOTO_MIP_BG_CUTS_LP_CAP": "1"},
     "poolfix": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1"},
+    # DSE 重みの受け渡し (2026-11-02、analysis/pool_dse_20261102.md・bg_return_dse_20261102.md)
+    "pooldse": {"ENOMOTO_MIP_POOL_BASIS_FIX": "1", "ENOMOTO_MIP_POOL_DSE": "1"},
+    "bgret": {"ENOMOTO_MIP_BG_RETURN_DSE": "1"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
