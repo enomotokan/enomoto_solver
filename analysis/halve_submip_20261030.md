@@ -452,3 +452,20 @@ ENOMOTO の既定は今回の計測の 7〜9 回分。
 - bgret: 58 問は 2 回とも遅い (+3.2%・+7.3%) が、def だけが解けた回は ns1116954 (早めの探索で解く問題で、裏のカットに関わらない)・qiu・
   physiciansched6-2 で、Mittelmann は −0.5%。seymour1 の暫定解は今回 bgret 411.096 (def 411.124) で、bg_return_dse_20261102.md の悪化は再現しない。
 - 判断: **どちらも採らない** (得が揺れを超えない)。bench16 の bgcap・poolfix と合わせ、DSE 重み・基底の受け渡しの手当ては 60 秒の結果に効いていない。
+
+## bench18: cand (pooldse + FJSTOP)・canddet (+ 裏のカットの運を除く試作)・canddetext (+ LP による固定を拡張の後に) (2026-11-02)
+
+- cand = `ENOMOTO_MIP_POOL_BASIS_FIX=1 ENOMOTO_MIP_POOL_DSE=1 ENOMOTO_MIP_SMALL2_FJSTOP=1`、canddet = cand + `ENOMOTO_MIP_BG_CUTS_LP_WORK=1 ENOMOTO_MIP_BG_CUTS_DETERM=c`
+  (analysis/bg_lp_work_20261102.md・bg_determ_20261102.md)、canddetext = canddet + `ENOMOTO_MIP_LP_PROBE_AFTER_EXT=1` (analysis/lp_probe_after_ext_20261102.md)。
+  土台 8fd13a20。58 問 × 2 回 (回 30・31) + Mittelmann 186 問 (回 112)、40 分担。集計 `summ18.txt`。crash・60 秒超えなし。
+
+| 組 | def | cand | 比 | canddet | 比 | canddetext | 比 |
+|---|---|---|---|---|---|---|---|
+| 58 問 全回 | 17.82 秒 (85) | 18.07 秒 (84) | +1.4% (−1) | 17.74 秒 (86) | −0.4% (+1) | 20.00 秒 (81) | **+12.2% (−4)** |
+| Mittelmann | 44.25 秒 (45) | 44.59 秒 (44) | +0.8% (−1) | 44.01 秒 (46) | −0.6% (+1) | 44.65 秒 (44) | +0.9% (−1) |
+
+- cand: 片方だけ解けた回は def 側の 2 回 (eil33-2・h80x6320d、どちらも 53〜57 秒の境目)。差は揺れの範囲で、得もない。
+- canddet: 片方だけ解けた回は canddet 側 4 回 (neos5 ×2・n5-3・physiciansched6-2)・def 側 2 回 (eil33-2・roll3000)。−0.4%・−0.6% で揺れの範囲。
+- canddetext: **drayage-25-23 が 3 回とも時間切れ** (def 7.7〜10.6 秒)、physiciansched6-2 2 回・mc11・h80x6320d・neos-2978193-inde・ns1208400 が def だけ解ける。
+  裏のカットの運を除いても、LP による固定を拡張の後に移すと根の頂点が変わる損は残る (drayage-25-23 は裏のカットと関係のない再スタート・サブ MIP の道)。
+- 判断: canddetext は採らない。cand・canddet は害は見えないが、得も揺れの範囲を出ない。
