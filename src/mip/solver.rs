@@ -1038,7 +1038,7 @@ pub(crate) fn root_basis_fix_on() -> bool {
 /// `ENOMOTO_MIP_ROOT_BASIS_FIX` の値に文字 `c` が入っているか (試す形の切り替え。`f`: 固定の列も基底から外す、
 /// `a`: 照らし合わせられない行は活動を見ずに論理変数を基底にする、`n`: 非基底の上限・下限の置き場所も渡す、
 /// `k`: 前の行の中身をそのまま照らし合わせる (今の LP に現れない列を除かない)、`r`: 再スタートの後の根に、照らし合わせの
-/// 割合によらず作った基底を渡す)
+/// 割合によらず作った基底を渡す、`s`: 再スタートの後の根だけに使う (root_probe は今まで通り。bench15))
 pub(crate) fn root_basis_fix_has(c: char) -> bool {
     env_str!("ENOMOTO_MIP_ROOT_BASIS_FIX").is_some_and(|v| v.contains(c))
 }

@@ -67,6 +67,9 @@ CFGS = {
     # flbgx の既定化 (2026-11-02、analysis/flbgx_default_20261102.md) の後は "def" が flbgx を含む。それより前の既定は "preflbgx"
     "preflbgx": {"ENOMOTO_MIP_FEAS_FJ_EARLY": "0", "ENOMOTO_MIP_BG_CUTS_BASIS_X": "0"},
     "flbgx": {"ENOMOTO_MIP_FEAS_FJ_EARLY": "fl", "ENOMOTO_T_MIP_FEAS_EARLY_LMIP_THREADS": "1", "ENOMOTO_MIP_BG_CUTS_BASIS_X": "lpw"},
+    # 特異基底の修正 C (2026-11-02、analysis/singular_fix_c_20261102.md): 根・再スタートの後の根に特異でない基底を渡す。rbfs は再スタートの後の根だけ
+    "rbf": {"ENOMOTO_MIP_ROOT_BASIS_FIX": "1"},
+    "rbfs": {"ENOMOTO_MIP_ROOT_BASIS_FIX": "s"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }

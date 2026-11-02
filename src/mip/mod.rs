@@ -3115,7 +3115,8 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
             solver::ROOT_BASIS_ROWS.with(|s| *s.borrow_mut() = Some(rows_fingerprint(&prob.rows)));
         }
         // `ENOMOTO_MIP_ROOT_BASIS_FIX` (試作): 行の中身と状態・解も渡す (根の LP の行が変わっていたら中身で照らし合わせて基底を作る)
-        if solver::root_basis_fix_on() && b.row.len() == prob.m {
+        // 文字 `s` (再スタートの後の根だけ) なら置かない (root_probe は今まで通り)
+        if solver::root_basis_fix_on() && !solver::root_basis_fix_has('s') && b.row.len() == prob.m {
             let rows: Vec<(Vec<(usize, f64)>, lp::VarStatus)> = prob.rows.iter().cloned().zip(b.row.iter().copied()).collect();
             solver::ROOT_BASIS_SAVED.with(|s| *s.borrow_mut() = Some((rows, lp.col_values())));
         }
