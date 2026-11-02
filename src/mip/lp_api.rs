@@ -96,6 +96,14 @@ pub trait MipLp: Clone + Send {
     fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>>;
     /// DSE 重みを今の基底に当てはめる ([`TwoStageLp::set_dse_vars`])。
     fn set_dse_vars(&mut self, w: &[(u32, f32)]);
+    /// 今の基底の DSE 重みの育ち具合 ([`TwoStageLp::dse_age`])。対応しない実装は `None`。
+    fn dse_age(&self) -> Option<u64> {
+        None
+    }
+    /// 今の基底の厳密な DSE 重みを計算し直す ([`TwoStageLp::recompute_dse_exact`])。対応しない実装は `None`。
+    fn recompute_dse_exact(&mut self, _stop: &dyn Fn() -> bool) -> Option<bool> {
+        None
+    }
     /// 今の基底の LU キャッシュを取り出す ([`TwoStageLp::lu_snapshot`])。対応しない実装は `None`。
     fn lu_snapshot(&self) -> Option<LuSnapshot> {
         None
@@ -192,6 +200,12 @@ forward_impl!(
     },
     fn set_dse_vars(&mut self, w: &[(u32, f32)]) {
         TwoStageLp::set_dse_vars(self, w)
+    },
+    fn dse_age(&self) -> Option<u64> {
+        TwoStageLp::dse_age(self)
+    },
+    fn recompute_dse_exact(&mut self, stop: &dyn Fn() -> bool) -> Option<bool> {
+        TwoStageLp::recompute_dse_exact(self, stop)
     },
     fn lu_snapshot(&self) -> Option<LuSnapshot> {
         TwoStageLp::lu_snapshot(self)

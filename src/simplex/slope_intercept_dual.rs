@@ -1099,6 +1099,22 @@ thread_local! {
     static WARM_DSE: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
     /// 直近の求解の最後の DSE 重み (`request_lu` のとき)。
     static LAST_DSE: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+    /// [`WARM_DSE`] の重みの「育ち具合」: 重みを初期化 (単位・厳密) してからの反復の数。厳密な値で初期化した重みは
+    /// `u64::MAX` (育ちきった扱い)。呼び出し側が [`WARM_DSE`] と一緒に渡す (渡さなければ 0)。
+    static WARM_DSE_AGE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// 直近の求解の最後の DSE 重み ([`LAST_DSE`]・[`LAST_STOP_STATE`] の重み) の育ち具合 ([`WARM_DSE_AGE`] と同じ数え方)。
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=g` (裏のカットの写しの根の LP の後に厳密な重みを計算し直すか) が見る
+    static LAST_DSE_AGE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 次の warm start に渡す DSE 重み ([`set_warm_dse`]) の育ち具合 ([`WARM_DSE_AGE`])。
+pub(crate) fn set_warm_dse_age(a: u64) {
+    WARM_DSE_AGE.with(|c| c.set(a));
+}
+
+/// 直近の求解の最後の DSE 重みの育ち具合 ([`LAST_DSE_AGE`])。
+pub(crate) fn last_dse_age() -> u64 {
+    LAST_DSE_AGE.with(|c| c.get())
 }
 
 /// 次の warm start に使う被約費用を渡す ([`set_warm_lu`] と同じ基底のもの)。
@@ -4302,6 +4318,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 厳密 DSE を使う。全スラックの `B0` は符号付き単位行列なので `DseState::new` の単位重みは正確。
     let exact_once = DSE_EXACT_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed);
     let warm_once = WARM_DSE_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed);
+    // 重みの育ち具合 ([`LAST_DSE_AGE`]): 初期化のときの値 (下の各枝で決める) に、この求解の反復 (仕上げを含む) を足して残す
+    let warm_dse_age = WARM_DSE_AGE.with(|c| c.replace(0));
+    let dse_age_it0 = ext_iterations();
+    let mut dse_age0: u64 = u64::MAX;
     let mut dse = match WARM_DSE.with(|w| w.borrow_mut().take()) {
         // 呼び出し側が「この 1 回は厳密な重みから」と求めたとき ([`DSE_EXACT_ONCE`]) は、引き継いだ重みがあってもそれを使う
         _ if warm_started && exact_once && DSE_EXACT_STOP.with(|h| h.borrow().is_some()) => {
@@ -4313,6 +4333,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             match super::DseState::from_basis_stoppable(m, &lu, &stop) {
                 Some(s) => s,
                 None => {
+                    dse_age0 = 0;
                     if DSE_EXACT_STOP_LOG.with(|c| c.get()) {
                         eprintln!("MIP: [snapshot] exact DSE weights stopped by the deadline or the stop signal after {:.2}s ({m} rows); unit weights", t0.elapsed().as_secs_f64());
                     }
@@ -4330,8 +4351,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 木が大きくなった (40 問: 18 -> 17 問)
         Some(w) if warm_started && w.len() == m && (warm_once || env_str!("ENOMOTO_WARM_DSE").is_some() || WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed)) => {
             let mut s = super::DseState::from_weights(w);
+            dse_age0 = warm_dse_age;
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
-                eprintln!("DEBUG_EXT: DSE weights: inherited ({} rows, {} unknown)", s.w.len(), s.w.iter().filter(|v| v.is_nan()).count());
+                eprintln!("DEBUG_EXT: DSE weights: inherited ({} rows, {} unknown, age {})", s.w.len(), s.w.iter().filter(|v| v.is_nan()).count(), if warm_dse_age == u64::MAX { "exact".to_string() } else { warm_dse_age.to_string() });
             }
             // 重みが `NaN` の行 (MIP で加えた直後の行、`ENOMOTO_MIP_ROWS_DSE_EXACT`) は、この基底の厳密な値を BTRAN で埋める
             if s.w.iter().any(|v| v.is_nan()) {
@@ -4359,6 +4381,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         w => {
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 eprintln!("DEBUG_EXT: DSE weights: unit (warm_started={warm_started}, passed={}, warm_dse_on={}, once={warm_once})", w.as_ref().map_or("none".to_string(), |w| w.len().to_string()), WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed));
+            }
+            // 全スラックの基底 (warm start でない) では単位重みが厳密な値。warm start の単位重みは育っていない (0 から数える)
+            if warm_started {
+                dse_age0 = 0;
             }
             super::DseState::new(m)
         }
@@ -4830,6 +4856,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             if WANT_STOP_STATE.with(|w| w.get()) && matches!(ext_stop(), ExtStop::TimeLimit | ExtStop::IterationLimit) {
                 let hint: Vec<i8> = nb_status.iter().map(|s| match s { Some(NbStatus::Lower) => -1, Some(NbStatus::Upper) => 1, _ => 0 }).collect();
                 LAST_STOP_STATE.with(|l| *l.borrow_mut() = Some((basis.clone(), dse.w.clone(), hint)));
+                LAST_DSE_AGE.with(|c| c.set(dse_age0.saturating_add(ext_iterations() - dse_age_it0)));
             }
             return None; // 外部の打ち切り条件 (分枝限定法の LP)
         }
@@ -5249,6 +5276,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             };
             if want_dse {
                 LAST_DSE.with(|l| *l.borrow_mut() = Some(dse.w.clone()));
+                LAST_DSE_AGE.with(|c| c.set(dse_age0.saturating_add(ext_iterations() - dse_age_it0)));
             }
             return res;
         };
@@ -5292,6 +5320,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 dse_err_idx += 1;
                 if dse_recompute_on && dse_err_idx >= dse_err_window && dse_err_cnt as f64 >= dse_err_frac * dse_err_window as f64 {
                     dse = super::DseState::from_basis(m, &lu);
+                    dse_age0 = u64::MAX;
                     diag_dse_recomputes += 1;
                     dse_err_ring.iter_mut().for_each(|v| *v = false);
                     dse_err_cnt = 0;
@@ -5646,6 +5675,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut d);
                     if dse_refresh_on_refactor {
                         dse = super::DseState::from_basis(m, &lu);
+                        dse_age0 = u64::MAX;
                     }
                 });
                 continue;
@@ -5866,6 +5896,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut d);
                     if dse_refresh_on_refactor {
                         dse = super::DseState::from_basis(m, &lu);
+                        dse_age0 = u64::MAX;
                     }
                 });
                 continue;
@@ -6321,6 +6352,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut d);
                 if dse_refresh_on_refactor {
                     dse = super::DseState::from_basis(m, &lu);
+                    dse_age0 = u64::MAX;
                 }
             });
             for &j in &touched_cols {
@@ -7028,6 +7060,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut d);
                 if dse_refresh_on_refactor {
                     dse = super::DseState::from_basis(m, &lu);
+                    dse_age0 = u64::MAX;
                 }
             });
         }

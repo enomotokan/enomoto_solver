@@ -1,0 +1,72 @@
+MIP: presolve: rows 12047 -> 8084, free columns 31762 -> 8232, nonzeros 180618 -> 48330, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 0 of 8232 free columns fixed (0.01s), not used
+MIP: LP probing pass 1: 1088 candidates, 0 fixings (2 LPs, 2591 iters, 11.66s)
+MIP: LP probing: tried 1 columns, fixed 0, LP 3.1800000000e2 -> 3.1800000000e2 (2 LPs, 2591 iters, 11.66s)
+MIP: LP probing: root LP 9.13s (11586 iters, size 88176), tried 1, fixed 0, basis passed true, total 14177 iters 11.66s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.12s), not used
+MIP: probing: 7432 of 7432 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 311260 implications (0.30s, cpu 0.29s, work 21383151, pwork 251512649, chg 1298114)
+MIP: probing: 0 equivalent binary pairs
+MIP: clique extension: 1602 rows extended, 6760 nonzeros added, 0 columns fixed, 0 duplicate and 930 dominated rows removed (155630 edges, 0.07s)
+MIP: symmetry: orbital fixing with 6 of 12 generators
+MIP: symmetry: 4 full orbitopes (388x3, 388x2, 130x3, 130x2)
+MIP: symmetry: 12 generators, 1709 orbits on 7837 columns, 0 lex-leader rows (0.70s, work 19470912, search 762288, verify 1987128, detect 0.69s, refine 0.39s, log work 52701780)
+MIP: fixed-charge check: vb rows 0 of 7154, continuous with vb 0 of 800
+MIP: root LP: the rows changed after LP probing; the row statuses are not used
+MIP: root LP basis from the presolve LP probing: used (columns only)
+MIP: solving the root LP (0.02s)
+MIP: FJ problem (FJ_P3): rows 7154 -> 7154, free columns 8232 -> 8232, 800 continuous bounds tightened (0.62s)
+MIP: root LP 3.1800000000e2 (11443 iters, 8.10s)
+MIP: fixed-charge check: vb rows 0 of 7154, continuous with vb 0 of 800
+MIP: fixed-charge check: vb rows 0 of 7154, continuous with vb 0 of 800
+MIP: fixed-integer LP dual check: c x 3.6806200000e5, dual bound 3.1900000000e2 -> solve
+MIP: fixed-integer LP: TimeLimit (1825 iters)
+MIP:   global fixed integers 20550 of 27982 (newly 0 since the root LP)
+MIP: new incumbent 3.6806200000e5 at node 0 (9.11s) [Local-MIP]
+MIP: Local-MIP solution accepted true (9.11s)
+MIP: fixed-charge check: vb rows 0 of 7154, continuous with vb 0 of 800
+MIP: fixed-charge check: vb rows 0 of 7154, continuous with vb 0 of 800
+MCF detect: rows 7154 cols 31762 | flow cands 7154 flow rows 2602 commodities 1 cap cands 4139 arcs 2322 nodes 2602 incons 46.50 undirected | fail 'inconsistent' | networks [] fc_network false | 0.012s
+MIP: cut selection probe: compared at 1 rounds (after round 1), probe wall 3.82s (budget 2.4s)
+MIP: cut selection probe (6 rounds): default 10 cuts gain 3.410605e-13 (1.87s), pool 8 cuts gain 2.842171e-13 (1.94s) -> default (rule rate, probe 3.82s in total, 12.94s)
+MIP: cut round 0: 10 cuts (of 1898, sep 1.38s, LP 502 iters), LP rows 7164 (cut rows mean nnz 803), obj 3.1800000000e2 (14.69s)
+MIP: fixed-integer LP dual check: c x 3.5507000000e5, dual bound 3.2200000000e2 -> solve
+MIP: fixed-integer LP: TimeLimit (1985 iters)
+MIP:   global fixed integers 20550 of 27982 (newly 0 since the root LP)
+MIP: new incumbent 3.5507000000e5 at node 0 (15.71s) [Local-MIP]
+MIP: Local-MIP solution accepted true (15.71s)
+MIP: cut round 1: root cut time cap check: clock 3.101s of cap 4.72s (min rounds 0)
+MIP: cut round 1: 9 cuts (of 158, sep 0.91s, LP 512 iters), LP rows 7170 (cut rows mean nnz 603), obj 3.1800000000e2 (17.07s)
+MIP: cut round 2: root cut time cap check: clock 3.867s of cap 4.72s (min rounds 0)
+MIP: cut round 2: 10 cuts (of 128, sep 1.17s, LP 728 iters), LP rows 7177 (cut rows mean nnz 517), obj 3.1800000000e2 (18.81s)
+MIP: cut round 3: root cut time cap check: clock 4.943s of cap 4.72s (min rounds 0) -> stop
+MIP: clique graph: 155630 edges (92606 from rows, probing implications 311260)
+MIP: clique fallback: 5 cuts, LP 3.1800000000e2 -> 3.1800000000e2 (g_c -1.430e-15, g_d 1.788e-16 relative), fractional 1187 -> 1135; not used (0.73s)
+MIP: cut loop done: 29 cuts added, 18 in LP, pool 257 cuts (877620 nonzeros), obj 3.1800000000e2 -> 3.1800000000e2
+MIP: find thread started (budget 8.3s, 19.58s)
+MIP: fixed-charge check: vb rows 0 of 7154, continuous with vb 0 of 800
+MIP: the incumbent is a poor feasibility jump solution; background cuts use 1 threads
+MIP: background cuts: basis with the column values passed (root LP 8.08s)
+MIP: background cuts: columns with global bounds tighter than the main LP 0 (LP value outside: basic 0, nonbasic 0), looser 0
+MIP: early root reduced costs stored (0 newly fixed integer columns, 19.59s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+MIP: oneopt improved 1.5731915915e5 -> 1.5729515915e5
+MIP: fixed-charge check: vb rows 0 of 7154, continuous with vb 0 of 800
+MIP: fixed-integer LP dual check: c x 1.5729515915e5, dual bound 3.1800000000e2 -> solve
+MIP: [snapshot] root basis from the main thread: columns 31762 / 31762, rows 7172 / 7172 (basic columns 3146, basic rows 4026)
+MIP: [snapshot] root basis with the column values of the main thread
+MIP: [snapshot] DSE weights grown after the root LP (1 iters; age 1 >= 0 x 7172 rows); kept
+MIP: [snapshot] root LP Optimal (1 iters, 0.12s)
+MIP: root LP 3.1800000000e2 (1 iters, 0.12s)
+MIP: fixed-charge check: vb rows 0 of 7154, continuous with vb 0 of 800
+MIP: fixed-charge check: vb rows 0 of 7154, continuous with vb 0 of 800
+MIP: background cut LP work cap: 11443 iters (f 1, main root LP 11443 iters)
+MIP: fixed-charge check: vb rows 0 of 7154, continuous with vb 0 of 800
+MIP: fixed-charge check: vb rows 0 of 7154, continuous with vb 0 of 800
+MCF detect: rows 7154 cols 31762 | flow cands 7154 flow rows 2602 commodities 1 cap cands 4139 arcs 2322 nodes 2602 incons 46.50 undirected | fail 'inconsistent' | networks [] fc_network false | 0.008s
+MIP: fixed-integer LP: TimeLimit (1825 iters)
+MIP:   global fixed integers 20550 of 27982 (newly 0 since the root LP)
+MIP: new incumbent 1.5729515915e5 at node 0 (20.60s) [shifting]
+MIP: root heuristic shifting: found (1.01s)
+MIP: find thread asked to stop (incumbent Some(157295.1591459076), 20.60s)

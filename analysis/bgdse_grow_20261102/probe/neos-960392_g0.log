@@ -1,0 +1,49 @@
+MIP: presolve: tightened 0 coefficients (skipped 0 in rows redundant within tolerance), normalized 86 integer rows
+MIP: presolve: rows 4744 -> 4229, free columns 59376 -> 59285, nonzeros 189503 -> 187238, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 585 of 59285 free columns fixed (0.02s), not used
+MIP: LP probing: root LP 4.42s (7614 iters, size 250843), tried 0, fixed 0, basis passed true, total 7614 iters 4.42s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.48s), not used
+MIP: probing: 24784 of 59285 binaries probed (1 passes), 4 fixed, 720 bounds tightened, 1878699 implications (5.75s, cpu 5.66s, work 50121855, pwork 3414221773, chg 33078412)
+MIP: probing: 0 equivalent binary pairs
+MIP: clique extension: 961 rows extended, 2664 nonzeros added, 0 columns fixed, 0 duplicate and 137 dominated rows removed (9881252 edges, 3.57s)
+MIP: symmetry: orbital fixing with 0 of 7 generators
+MIP: symmetry: 1 full orbitopes (493x8)
+MIP: symmetry: 7 generators, 493 orbits on 3944 columns, 0 lex-leader rows (0.61s, work 25112328, search 831264, verify 3534230, detect 0.60s, refine 0.38s, log work 100488954)
+MIP: root LP: the rows changed after LP probing; the row statuses are not used
+MIP: root LP basis from the presolve LP probing: used (columns only)
+MIP: solving the root LP (0.08s)
+MIP: FJ problem (FJ_P3): rows 4092 -> 3924, free columns 58529 -> 58507, 0 continuous bounds tightened (2.33s)
+MIP: root LP -2.3800000000e2 (7447 iters, 4.33s)
+MIP:   global fixed integers 847 of 59376 (newly 0 since the root LP)
+MIP: new incumbent -3.5000000000e1 at node 0 (4.34s) [Local-MIP]
+MIP: Local-MIP solution accepted true (4.34s)
+MCF detect: rows 4092 cols 59376 | flow cands 3715 flow rows 1071 commodities 62 cap cands 1870 arcs 308 nodes 33 incons 6.47 undirected | fail 'inconsistent' | networks [] fc_network false | 0.019s
+MIP: cut selection probe: compared at 1 rounds (after round 1), probe wall 1.71s (budget 2.3s)
+MIP: cut selection probe (6 rounds): default 7 cuts gain -3.410605e-13 (0.82s), pool 14 cuts gain -6.821210e-13 (0.88s) -> default (rule rate, probe 1.69s in total, 6.06s)
+MIP: cut round 0: 7 cuts (of 551, sep 0.82s, LP 133 iters), LP rows 4099 (cut rows mean nnz 8), obj -2.3800000000e2 (7.04s)
+MIP: cut round 1: root cut time cap check: clock 0.512s of cap 4.55s (min rounds 0)
+MIP: cut round 1: 3 cuts (of 134, sep 0.84s, LP 126 iters), LP rows 4102 (cut rows mean nnz 8), obj -2.3800000000e2 (8.02s)
+MIP: cut round 2: root cut time cap check: clock 0.867s of cap 4.55s (min rounds 0)
+MIP: cut round 2: LP status IterationLimit, removed the cuts (Optimal; cut LP 1001 iters 1.01s, re-solve 1 iters 0.03s, 10.66s)
+MIP: cut round 2: the cut LP hit the per-LP cap (IterationLimit); stop (ENOMOTO_MIP_CUT_LP_CAP_STOP)
+MIP: clique graph: 9873420 edges (9126709 from rows, probing implications 1878699)
+MIP: clique fallback: 15 cuts, LP -2.3800000000e2 -> -2.3800000000e2 (g_c -2.388e-16, g_d -1.075e-15 relative), fractional 333 -> 328; not used (6.47s)
+MIP: cut loop done: 17 cuts added, 10 in LP, pool 466 cuts (3779536 nonzeros), obj -2.3800000000e2 -> -2.3800000000e2
+MIP: find thread started (budget 8.4s, 17.30s)
+MIP: the incumbent is a poor feasibility jump solution; background cuts use 1 threads
+MIP: background cuts: basis with the column values passed (root LP 4.24s)
+MIP: background cuts: columns with global bounds tighter than the main LP 0 (LP value outside: basic 0, nonbasic 0), looser 0
+MIP: early root reduced costs stored (0 newly fixed integer columns, 17.42s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+MIP: root heuristic shifting: none (0.00s)
+MIP: root heuristic int shifting: none (0.00s)
+MIP: root heuristic randomized rounding: none (0.10s)
+MIP: [snapshot] root basis from the main thread: columns 59376 / 59376, rows 4102 / 4102 (basic columns 2109, basic rows 1993)
+MIP: [snapshot] root basis with the column values of the main thread
+MIP: [snapshot] DSE weights grown after the root LP (1 iters; age 1 >= 0 x 4102 rows); kept
+MIP: [snapshot] root LP Optimal (1 iters, 0.38s)
+MIP: root LP -2.3800000000e2 (1 iters, 0.38s)
+MIP: background cut LP work cap: 7447 iters (f 1, main root LP 7447 iters)
+MCF detect: rows 4092 cols 59376 | flow cands 3715 flow rows 1071 commodities 62 cap cands 1870 arcs 308 nodes 33 incons 6.47 undirected | fail 'inconsistent' | networks [] fc_network false | 0.034s

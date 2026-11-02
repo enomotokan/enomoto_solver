@@ -3545,3 +3545,9 @@ mod tests {
         }
     }
 }
+
+/// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=g` ([`mip_lp::TwoStageLp::recompute_dse_exact`]): 基底 (LU) の厳密な DSE 重み
+/// (基底位置順)。`stop` が真を返したら途中でやめて `None` (32 行ごとに見る)。
+pub(crate) fn exact_dse_weights_stoppable(m: usize, lu: &sparse_lu::FtLu, stop: &dyn Fn() -> bool) -> Option<Vec<f64>> {
+    DseState::from_basis_stoppable(m, lu, stop).map(|s| s.w)
+}

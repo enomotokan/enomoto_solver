@@ -31,6 +31,9 @@ pub struct TwoStageLp {
     /// 直近の求解の最後の DSE 重み (基底位置順) と、そのときの基底。次の求解の基底が同じなら引き継ぐ
     /// (行を加えたら新しい行の重みを 1 で足す)。状態の保存と共有する。
     dse_cache: Option<Arc<(Vec<usize>, Vec<f64>)>>,
+    /// [`Self::dse_cache`] の重みの育ち具合 (重みを初期化してからの反復の数、厳密な値で初期化したら `u64::MAX`。
+    /// [`sid::last_dse_age`])。外から当てはめた重み ([`Self::set_dse_vars`]・[`Self::adopt_lu_snapshot`]) は分からないので 0
+    dse_age: u64,
     n: usize,
     /// 元の行 (列番号の昇順) と行の境界。
     rows: Vec<Vec<(usize, f64)>>,
@@ -136,6 +139,7 @@ pub struct TwoStageState {
     status: Option<LpStatus>,
     lu_cache: Option<Arc<LuCache>>,
     dse_cache: Option<Arc<(Vec<usize>, Vec<f64>)>>,
+    dse_age: u64,
 }
 
 /// 取り出した LU キャッシュと DSE 重み ([`TwoStageLp::lu_snapshot`]。どちらも `Arc` の共有)。分枝で潜らない側の
@@ -199,6 +203,7 @@ impl TwoStageLp {
             lu: None,
             lu_cache: None,
             dse_cache: None,
+            dse_age: 0,
             iters: 0,
             price_key: new_price_key(),
             ray: None,
@@ -746,6 +751,35 @@ impl TwoStageLp {
         }
         let ws: Vec<f64> = b.iter().map(|&v| if map[v].is_infinite() { 1.0 } else if map[v].is_nan() { f64::NAN } else { (map[v] as f64).max(1e-8) }).collect();
         self.dse_cache = Some(Arc::new((b.clone(), ws)));
+        self.dse_age = 0;
+    }
+
+    /// 今の基底の DSE 重み ([`Self::dse_cache`]) の育ち具合 (重みを初期化してからの反復の数、厳密な値なら `u64::MAX`)。
+    /// 重みがない (次の求解は単位重みから始まる) なら `None`。
+    pub fn dse_age(&self) -> Option<u64> {
+        match (&self.basis, self.dse_cache.as_deref()) {
+            (Some(b), Some((cb, w))) if b == cb && w.len() == b.len() => Some(self.dse_age),
+            _ => None,
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=g`: 今の基底 (直前の最適基底) の厳密な DSE 重みを、手元の LU キャッシュから行ごとの
+    /// BTRAN で計算し、次の求解に引き継ぐ重みにする。`stop` は 32 行ごとに見て、真ならやめて今の重みを残す。
+    /// 計算したら `Some(true)`、やめたら `Some(false)`、同じ基底の LU がなければ `None`。
+    pub fn recompute_dse_exact(&mut self, stop: &dyn Fn() -> bool) -> Option<bool> {
+        let b = self.basis.as_ref()?;
+        let c = self.lu_cache.as_ref()?;
+        if c.basis != *b || b.len() != self.rows.len() {
+            return None;
+        }
+        match super::exact_dse_weights_stoppable(b.len(), &c.lu, stop) {
+            Some(w) => {
+                self.dse_cache = Some(Arc::new((b.clone(), w)));
+                self.dse_age = u64::MAX;
+                Some(true)
+            }
+            None => Some(false),
+        }
     }
 
     /// 今の基底の LU キャッシュ (直前の最適基底のもので、基底がそのままなら) を DSE 重みと一緒に取り出す。
@@ -795,6 +829,7 @@ impl TwoStageLp {
         sid::xcount("n_sib_lu");
         self.basis = Some(cb.clone());
         self.dse_cache = dse;
+        self.dse_age = 0;
         self.lu_cache = Some(s.lu.clone());
         self.lu = None;
         self.status = None;
@@ -812,7 +847,7 @@ impl TwoStageLp {
 
     /// LU と DSE 重みは `Arc` の共有 (複製しない)。
     pub fn save_state(&self) -> TwoStageState {
-        TwoStageState { lo: self.lo.clone(), up: self.up.clone(), basis: self.basis.clone(), x: self.x.clone(), y: self.y.clone(), status: self.status, lu_cache: self.lu_cache.clone(), dse_cache: self.dse_cache.clone() }
+        TwoStageState { lo: self.lo.clone(), up: self.up.clone(), basis: self.basis.clone(), x: self.x.clone(), y: self.y.clone(), status: self.status, lu_cache: self.lu_cache.clone(), dse_cache: self.dse_cache.clone(), dse_age: self.dse_age }
     }
 
     pub fn restore_state(&mut self, s: &TwoStageState) {
@@ -827,6 +862,7 @@ impl TwoStageLp {
         self.basis = s.basis.clone();
         self.lu_cache = s.lu_cache.clone();
         self.dse_cache = s.dse_cache.clone();
+        self.dse_age = s.dse_age;
         self.x.clone_from(&s.x);
         self.y.clone_from(&s.y);
         self.status = s.status;
@@ -1187,6 +1223,7 @@ impl TwoStageLp {
                 if let Some((cb, w)) = self.dse_cache.as_deref() {
                     if *cb == b && w.len() == b.len() {
                         sid::set_warm_dse(Some(w.clone()));
+                        sid::set_warm_dse_age(self.dse_age);
                     } else if env_str!("ENOMOTO_MIP_DEBUG_LP").is_some() {
                         eprintln!("TSLP solve: dse_cache basis differs (len {} vs {})", cb.len(), b.len());
                     }
@@ -1202,7 +1239,9 @@ impl TwoStageLp {
         sid::set_warm_d(None);
         sid::set_warm_nb(None);
         sid::set_warm_dse(None);
+        sid::set_warm_dse_age(0);
         let last_dse = sid::take_last_dse();
+        let last_dse_age = sid::last_dse_age();
         self.dse_cache = None;
         sid::set_price_key(None);
         let stop = sid::ext_stop();
@@ -1248,6 +1287,7 @@ impl TwoStageLp {
                             }
                             if let Some(w) = last_dse.filter(|w| w.len() == b.len()) {
                                 self.dse_cache = Some(Arc::new((b.clone(), w)));
+                                self.dse_age = last_dse_age;
                             }
                             self.basis = Some(b);
                             if env_str!("ENOMOTO_MIP_DEBUG_DSE_CHECK").is_some() {
@@ -1284,6 +1324,7 @@ impl TwoStageLp {
                             }
                             self.basis = Some(b.clone());
                             self.dse_cache = Some(Arc::new((b, w)));
+                            self.dse_age = last_dse_age;
                             self.resume_nb = Some(h);
                         }
                     }

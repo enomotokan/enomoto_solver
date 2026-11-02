@@ -199,6 +199,10 @@ thread_local! {
     /// 厳密な値と比べ、ずれが大きいときだけ全部の行の厳密な重みを計算する。根のカットのループが最初のカットの LP の前に下ろす
     /// (analysis/bgdse_quality_20261102.md)
     pub(super) static BG_DSE_SAMPLE_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=g` (既定では使わない): 写しの根の LP が終わった時点で DSE 重みが育っていなければ
+    /// (重みを初期化してからの反復が行数の `ENOMOTO_T_MIP_BG_CUTS_DSE_GROW` 倍未満)、最初のカットの LP の前に厳密な重みを
+    /// 計算し直す (根の LP の後に下ろす)
+    static BG_DSE_GROW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 診断用: 既知の最適解 (縮約後の空間、`ENOMOTO_MIP_DEBUG_SOL`)。この解を含むノードが
     /// 枝刈りされたら理由を表示する (SCIP の debug solution と同様)。
     pub(crate) static DEBUG_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
@@ -4694,6 +4698,43 @@ impl<'a, L: MipLp> Solver<'a, L> {
             crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
         }
         crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+        // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=g` (既定では使わない): 裏のカットの写しの根の LP の最後の DSE 重みが育っていなければ
+        // (重みを初期化してから、引き継いだ分も含めて数えた反復が行数 m の α 倍未満。重みがない・warm start で単位重みから
+        // 始めたなら 0 から数え、厳密な値で初期化した重みは育ちきった扱い)、最初のカットの LP の前に今の基底の厳密な重みを
+        // 計算し直す。列の値を渡したか (`=rw` の条件) によらない。計算は 32 行ごとに期限・取り消し・主の止めの合図を見て
+        // やめる (やめたら今の重みのまま)。カットの LP の上限の外で計算するので `=x` のように上限に食い込まない
+        if BG_DSE_GROW.with(|c| c.replace(false)) && self.snap.is_some() && root_st == LpStatus::Optimal {
+            if let Some(job) = CUT_JOB.with(|j| j.borrow().clone()) {
+                let alpha: f64 = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_GROW", 1.0, f64);
+                let m = self.lp.num_rows();
+                let age = self.lp.dse_age();
+                let grown = age.is_some_and(|a| a as f64 >= alpha * m as f64);
+                let age_s = match age {
+                    None => "none".to_string(),
+                    Some(u64::MAX) => "exact".to_string(),
+                    Some(a) => a.to_string(),
+                };
+                let root_iters = self.lp.total_iterations() - root_it0;
+                if grown {
+                    if self.params.verbose {
+                        eprintln!("MIP: [snapshot] DSE weights grown after the root LP ({root_iters} iters; age {age_s} >= {alpha} x {m} rows); kept");
+                    }
+                } else {
+                    let t0 = Instant::now();
+                    let dl = self.deadline;
+                    let stop = || dl.is_some_and(|d| Instant::now() >= d) || crate::cancel::is_cancelled() || job.stop.load(std::sync::atomic::Ordering::Relaxed);
+                    let r = self.lp.recompute_dse_exact(&stop);
+                    if self.params.verbose {
+                        let what = match r {
+                            Some(true) => "recomputed",
+                            Some(false) => "stopped by the deadline or the stop signal",
+                            None => "not recomputed (no LU of the basis)",
+                        };
+                        eprintln!("MIP: [snapshot] DSE weights not grown after the root LP ({root_iters} iters; age {age_s} < {alpha} x {m} rows); exact weights {what} ({:.2}s)", t0.elapsed().as_secs_f64());
+                    }
+                }
+            }
+        }
         if restart_basis_used && self.params.verbose {
             eprintln!("MIP: root LP after the restart: {root_st:?}, {} iters ({:.2}s)", self.lp.total_iterations() - root_iters0, self.start.elapsed().as_secs_f64());
         }
@@ -4966,6 +5007,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 行の多い uccase12 などで時間の上限を大きく超えた。analysis/halve_submip_20261030.md の bench16)
                 let bg_dse_rw = bg_dse_mode == Some("rw") && bg_x.is_some();
                 let bg_dse_root_exact = bg_dse_mode == Some("r") || bg_dse_rw;
+                // `g` (試作): 写しの根の LP の後、DSE 重みの育ち具合で厳密な重みを計算し直すか決める ([`BG_DSE_GROW`])
+                let bg_dse_grow = bg_dse_mode == Some("g");
                 if bg_dse_mode == Some("rw") && self.params.verbose {
                     eprintln!("MIP: background cuts: exact DSE weights for the root LP of the copy {}", if bg_dse_rw { "on" } else { "off (column values not passed)" });
                 }
@@ -5005,6 +5048,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         BG_DSE_EXACT_FIRST.with(|c| c.set(bg_dse_exact));
                         BG_DSE_ROOT_EXACT.with(|c| c.set(bg_dse_root_exact));
                         BG_DSE_SAMPLE_FIRST.with(|c| c.set(bg_dse_sample));
+                        BG_DSE_GROW.with(|c| c.set(bg_dse_grow));
                         if bg_dse_rw || bg_dse_sample {
                             let verbose = params.verbose;
                             crate::simplex::slope_intercept_dual::DSE_EXACT_STOP.with(|h| *h.borrow_mut() = Some(Box::new(move || j3.stop.load(std::sync::atomic::Ordering::Relaxed))));
