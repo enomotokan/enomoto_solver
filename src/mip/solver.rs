@@ -4220,10 +4220,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if super::past_presolve_deadline(fj_deadline) {
                             return None;
                         }
-                        if let Some((q, post, sc)) = super::with_presolve_deadline(fj_deadline, || super::fj_p3_problem(&pc)) {
+                        // `ENOMOTO_MIP_SMALL2_FJSTOP` (試作、既定では使わない): FJ_P3 の前処理 (プロービングなど) にも FJ のスレッドの止める合図
+                        // (`stop2`、主の `join_fj_thread`) を渡し ([`crate::cancel::with_halt`] → [`super::presolve_stop`])、合図が立っていたら
+                        // FJ を始めずに抜ける。air03・neos8 では根のカットの後に LP の解が最適解になっていたのに、主が FJ_P3 の前処理
+                        // (1.5 秒) の終わりを 0.7〜1.4 秒待っていた (analysis/small_overhead2_20261102.md)
+                        let fjstop = env_str!("ENOMOTO_MIP_SMALL2_FJSTOP").is_some();
+                        let halt = fjstop.then(|| stop2.clone());
+                        if let Some((q, post, sc)) = crate::cancel::with_halt(halt, || super::with_presolve_deadline(fj_deadline, || super::fj_p3_problem(&pc))) {
                             // 前処理の間に求解の期限を過ぎていれば FJ を始めない (FJ の初期化 (`reset_moves`、全列) と最初の確認までの手は
                             // 止めの合図を見ず、遅い機械で 0.5 秒ほど主の join を待たせていた。期限の後に見つかる解は時間内の解ではない)
-                            if super::past_presolve_deadline(fj_deadline) {
+                            if super::past_presolve_deadline(fj_deadline) || (fjstop && stop2.load(std::sync::atomic::Ordering::Relaxed)) {
                                 return None;
                             }
                             let map = |x: Vec<f64>| super::fj_p3_solution(x, &post, &sc);
@@ -5089,7 +5095,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let small3_light = self.params.submip
                     && self.params.cutoff.is_finite()
                     && env_str!("ENOMOTO_MIP_SMALL3_SUBMIP_LIGHT").is_some_and(|v| v == "all" || (v == "1" && super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1));
-                let light = (self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some()) || self.submip_rens_cutoff() || small3_light;
+                // `ENOMOTO_MIP_SMALL2_SUBLIGHT` (試作、既定では使わない): 打ち切り値によらず、どの深さのサブ MIP でも同じく軽くする
+                // (上の `SMALL3_SUBMIP_LIGHT=all` に打ち切り値が無限の場合を足したもの。別の調査で同じ手順に行き着いた)。drayage-25-23 の根の
+                // 被約費用・LP face のサブ MIP (5272 列) は、根の分数ダイビング (深さ 595)・係数ダイビングなどで 1.2 秒使って何も見つけず、主は
+                // 2 本の終わりを 2.2 秒待っていた (analysis/small_overhead2_20261102.md)
+                let light = (self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some()) || self.submip_rens_cutoff()
+                    || small3_light
+                    || (self.params.submip && env_str!("ENOMOTO_MIP_SMALL2_SUBLIGHT").is_some());
                 // ダイビングの予算: 最初の根の LP の 2 倍に、カットのループを含めた根全体の反復数の一定割合を足す
                 let dive_budget = 2 * root_iters + 1000 + (tunable!("ENOMOTO_T_MIP_ROOT_DIVE_FRAC", 0.0, f64) * self.lp.total_iterations() as f64) as u64;
                 // `ENOMOTO_MIP_PAR_DIVES`: 並列モードで暫定解がなければ、Feasibility Pump と 3 つのダイビングを、今の根の写しから
