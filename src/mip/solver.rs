@@ -508,6 +508,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     pool_excess: i64,
     /// `ENOMOTO_MIP_TREE_POOL_BASIS` で受け取った基底を使わなかった回数
     pool_basis_stats: u64,
+    /// `ENOMOTO_MIP_POOL_BASIS_FIX` (試作): 共有の待ち行列から受け取った基底 (`Rc` の中の [`super::lp::Basis`] の番地)。
+    /// [`Self::restore_node_basis`] で戻すときに [`Self::fix_pool_basis`] で直す目印
+    pool_fix_ptrs: std::collections::HashSet<usize>,
+    /// 同: (直した回数, 外した構造列の数, 基底に入れたスラックの数, 核が大きく諦めた回数, 直すのにかかった秒)
+    pool_fix_stats: (u64, u64, u64, u64, f64),
     /// 直前に戻した基底に、保存した DSE 重みも当てはめたか (次の LP で引き継ぐ)。
     restored_dse: bool,
     node_lps: u64,
@@ -1216,6 +1221,15 @@ impl TreeProf {
 /// (`ENOMOTO_MIP_TREE_SHARE_CUT_BASIS` と同じ)、受け取った側で基底変数が余るなら今の LP の基底のまま解く ([`Solver::open_from_pool`])。
 fn tree_pool_basis() -> bool {
     env_str!("ENOMOTO_MIP_TREE_POOL_BASIS").is_some()
+}
+
+/// `ENOMOTO_MIP_POOL_BASIS_FIX` (試作、既定は切): 共有の待ち行列から受け取ったノードの基底を、戻すときに非特異になるように
+/// 直す ([`Solver::fix_pool_basis`])。渡す側 ([`Solver::snap_of`]) は列と元の行の状態だけを渡し、受け取る側はカットの行を
+/// 全て基底にするので、渡した側で効いていた (非基底だった) カットの数だけ基底変数が余る。既定はその余りを `set_basis` の
+/// 修復 (構造列を後ろから外す) に任せていて、ほとんどの基底が特異になり全スラック基底から解き直している
+/// (analysis/singular_fix_b_20261102.md)
+fn pool_basis_fix() -> bool {
+    env_str!("ENOMOTO_MIP_POOL_BASIS_FIX").is_some_and(|v| v != "0")
 }
 
 fn prof_tree_par() -> bool {
@@ -2375,6 +2389,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         restore_diag: (0, 0, false),
         pool_excess: 0,
         pool_basis_stats: 0,
+        pool_fix_ptrs: std::collections::HashSet::new(),
+        pool_fix_stats: (0, 0, 0, 0, 0.0),
         restored_dse: false,
         node_lps: 0,
         node_lp_secs: 0.0,
@@ -8654,8 +8670,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_RESTORE_NEVER").is_some() {
             return;
         }
+        // `ENOMOTO_MIP_POOL_BASIS_FIX` (試作): 共有の待ち行列から受け取った基底なら、set_basis の前に非特異になるように直す
+        let pool_fix = !self.pool_fix_ptrs.is_empty() && self.pool_fix_ptrs.remove(&(b as *const super::lp::Basis as usize));
         if epoch == self.row_log.len() && b.row.len() == mr {
             self.restore_stats.0 += 1;
+            if pool_fix {
+                let mut b2 = b.clone();
+                if !self.fix_pool_basis(&mut b2) {
+                    return;
+                }
+                self.restored_now = true;
+                crate::simplex::nb_diag::tag(match self.tp_kind { 0 => crate::simplex::nb_diag::TREE_SIBLING, 1 => crate::simplex::nb_diag::TREE_QUEUE, _ => crate::simplex::nb_diag::TREE_POOL });
+                match &nb_skip {
+                    Some(sk) => self.lp.set_basis_nb(&b2, sk),
+                    None => self.lp.set_basis(&b2),
+                }
+                return;
+            }
             self.restored_now = true;
             crate::simplex::nb_diag::tag(match self.tp_kind { 0 => crate::simplex::nb_diag::TREE_SIBLING, 1 => crate::simplex::nb_diag::TREE_QUEUE, _ => crate::simplex::nb_diag::TREE_POOL });
             match &nb_skip {
@@ -8731,6 +8762,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if env_str!("ENOMOTO_MIP_RESTORE_KEEP_CURRENT").is_some() || (self.highs_cutmgmt() && !hcm_repair) || fc2_keep {
                 return;
             }
+        }
+        if pool_fix {
+            if !self.fix_pool_basis(&mut b2) {
+                return;
+            }
+            self.restored_now = true;
+            crate::simplex::nb_diag::tag(match self.tp_kind { 0 => crate::simplex::nb_diag::TREE_SIBLING, 1 => crate::simplex::nb_diag::TREE_QUEUE, _ => crate::simplex::nb_diag::TREE_POOL });
+            match &nb_skip {
+                Some(sk) => self.lp.set_basis_nb(&b2, sk),
+                None => self.lp.set_basis(&b2),
+            }
+            return;
         }
         self.restored_now = true;
         crate::simplex::nb_diag::tag(match self.tp_kind { 0 => crate::simplex::nb_diag::TREE_SIBLING, 1 => crate::simplex::nb_diag::TREE_QUEUE, _ => crate::simplex::nb_diag::TREE_POOL });
@@ -12440,11 +12483,238 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.pool_basis_stats += 1;
                     return n;
                 }
-                n.basis = Some(Rc::new(super::lp::Basis { col, row }));
+                let rc = Rc::new(super::lp::Basis { col, row });
+                if pool_basis_fix() {
+                    if self.pool_fix_ptrs.len() > 100_000 {
+                        // 戻さずに刈られたノードの目印が溜まりすぎたら捨てる (直さないだけで誤りにはならない)
+                        self.pool_fix_ptrs.clear();
+                    }
+                    self.pool_fix_ptrs.insert(Rc::as_ptr(&rc) as usize);
+                }
+                n.basis = Some(rc);
                 n.basis_epoch = self.row_log.len();
             }
         }
         n
+    }
+
+    /// `ENOMOTO_MIP_POOL_BASIS_FIX` (試作): 共有の待ち行列から受け取った基底 `b` (行は今の LP に合わせたもの) の基底変数から、
+    /// 今の LP で非特異になる組を選び直す。基底のスラックはそのまま残し (その行はスラックで消せる)、スラックが非基底の行 R に
+    /// ついて、基底の構造列の中から A[R, ·] が正則になる |R| 本を選ぶ。選ぶ順は、今の LP の基底 (直前のノードの最適基底) でも
+    /// 基底の列を先、残りを後 (余った分は今の基底になかった列から外す)。外した列は非基底 (今の LP での側、なければ有限の境界) にし、
+    /// どの列でも消せない行 (階数の不足) はスラックを基底に入れる。行の特異点 (1 本の列しか当たらない行: その列は必ず要る) と
+    /// 列の特異点 (1 本の行にしか当たらない列) を先に消し、残りの核を密な消去 (列の順に部分ピボット) で選ぶ。
+    /// 核が大きすぎるときは諦めて偽を返す (呼び出し元は今の LP の基底のまま解く)。
+    fn fix_pool_basis(&mut self, b: &mut super::lp::Basis) -> bool {
+        let t0 = Instant::now();
+        let n = self.p.n;
+        let mr = self.lp.num_rows();
+        if b.col.len() != n || b.row.len() != mr {
+            return false;
+        }
+        let cur = self.lp.basis();
+        let rows: Vec<usize> = (0..mr).filter(|&i| b.row[i] != VarStatus::Basic).collect();
+        let nr = rows.len();
+        // 候補の列 (受け取った基底の構造列)。今の基底でも基底の列を先に (安定な並べ替え)
+        let mut cand: Vec<usize> = (0..n).filter(|&j| b.col[j] == VarStatus::Basic).collect();
+        cand.sort_by_key(|&j| (cur.col.get(j) != Some(&VarStatus::Basic)) as u8);
+        let nc = cand.len();
+        let mut cloc = vec![usize::MAX; n];
+        for (k, &j) in cand.iter().enumerate() {
+            cloc[j] = k;
+        }
+        // A[R, cand] の疎な行・列 (局所の番号)
+        let mut rent: Vec<Vec<(usize, f64)>> = Vec::with_capacity(nr);
+        let mut cent: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nc];
+        for (r, &i) in rows.iter().enumerate() {
+            let mut e = Vec::new();
+            for (j, v) in self.lp.row(i) {
+                if j < n && cloc[j] != usize::MAX && v.abs() > 1e-12 {
+                    e.push((cloc[j], v));
+                    cent[cloc[j]].push((r, v));
+                }
+            }
+            rent.push(e);
+        }
+        let colmax: Vec<f64> = cent.iter().map(|e| e.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs()))).collect();
+        const PIV_REL: f64 = 1e-7;
+        let mut rc: Vec<usize> = rent.iter().map(|e| e.len()).collect();
+        let mut cc: Vec<usize> = cent.iter().map(|e| e.len()).collect();
+        // 行: 0 未処理、1 列で消した、2 スラックを入れる。列: 0 未処理、1 残す、2 外す
+        let mut rst = vec![0u8; nr];
+        let mut cst = vec![0u8; nc];
+        let mut rstack: Vec<usize> = (0..nr).filter(|&r| rc[r] <= 1).collect();
+        let mut cstack: Vec<usize> = (0..nc).rev().filter(|&c| cc[c] <= 1).collect();
+        // 行 r を外す (その行に当たる未処理の列の数を減らす)
+        macro_rules! drop_row {
+            ($r:expr) => {
+                for &(c, _) in &rent[$r] {
+                    if cst[c] == 0 {
+                        cc[c] -= 1;
+                        if cc[c] == 1 {
+                            cstack.push(c);
+                        }
+                    }
+                }
+            };
+        }
+        macro_rules! drop_col {
+            ($c:expr) => {
+                for &(r, _) in &cent[$c] {
+                    if rst[r] == 0 {
+                        rc[r] -= 1;
+                        if rc[r] <= 1 {
+                            rstack.push(r);
+                        }
+                    }
+                }
+            };
+        }
+        loop {
+            if let Some(r) = rstack.pop() {
+                if rst[r] != 0 || rc[r] > 1 {
+                    continue;
+                }
+                let hit = rent[r].iter().find(|&&(c, _)| cst[c] == 0).copied();
+                match hit {
+                    Some((c, v)) if v.abs() >= PIV_REL * colmax[c] => {
+                        // 行の特異点: 列 c は必ず要る
+                        rst[r] = 1;
+                        cst[c] = 1;
+                        drop_col!(c);
+                        drop_row!(r);
+                    }
+                    _ => {
+                        // どの列でも消せない (か、ピボットが小さすぎる): スラックを入れる
+                        rst[r] = 2;
+                        drop_row!(r);
+                    }
+                }
+                continue;
+            }
+            if let Some(c) = cstack.pop() {
+                if cst[c] != 0 {
+                    continue;
+                }
+                if cc[c] == 0 {
+                    cst[c] = 2;
+                    continue;
+                }
+                if cc[c] > 1 {
+                    continue;
+                }
+                let (r, v) = cent[c].iter().find(|&&(r, _)| rst[r] == 0).copied().unwrap();
+                if v.abs() < PIV_REL * colmax[c] {
+                    continue;
+                }
+                // 列の特異点: 行 r をこの列で消す
+                rst[r] = 1;
+                cst[c] = 1;
+                drop_row!(r);
+                drop_col!(c);
+                continue;
+            }
+            break;
+        }
+        // 残りの核を密な消去で選ぶ
+        let core_r: Vec<usize> = (0..nr).filter(|&r| rst[r] == 0).collect();
+        let core_c: Vec<usize> = (0..nc).filter(|&c| cst[c] == 0).collect();
+        let lim = tunable!("ENOMOTO_T_MIP_POOL_BASIS_FIX_CORE", 4_000_000usize, usize);
+        if !core_r.is_empty() {
+            if core_r.len().saturating_mul(core_c.len()) > lim {
+                self.pool_fix_stats.3 += 1;
+                self.pool_fix_stats.4 += t0.elapsed().as_secs_f64();
+                return false;
+            }
+            let nrc = core_r.len();
+            let mut rloc = vec![usize::MAX; nr];
+            for (k, &r) in core_r.iter().enumerate() {
+                rloc[r] = k;
+            }
+            let mut mat: Vec<Vec<f64>> = core_c
+                .iter()
+                .map(|&c| {
+                    let mut v = vec![0.0; nrc];
+                    for &(r, x) in &cent[c] {
+                        if rloc[r] != usize::MAX {
+                            v[rloc[r]] = x;
+                        }
+                    }
+                    v
+                })
+                .collect();
+            let mut piv = vec![false; nrc];
+            let mut npiv = 0;
+            for k in 0..core_c.len() {
+                let c = core_c[k];
+                if npiv == nrc {
+                    cst[c] = 2;
+                    continue;
+                }
+                let col = std::mem::take(&mut mat[k]);
+                let (mut br, mut bv) = (usize::MAX, 0.0f64);
+                for (r, &x) in col.iter().enumerate() {
+                    if !piv[r] && x.abs() > bv {
+                        (br, bv) = (r, x.abs());
+                    }
+                }
+                if br == usize::MAX || bv < PIV_REL * colmax[c] || bv < 1e-11 {
+                    cst[c] = 2;
+                    continue;
+                }
+                cst[c] = 1;
+                piv[br] = true;
+                npiv += 1;
+                rst[core_r[br]] = 1;
+                let nz: Vec<usize> = (0..nrc).filter(|&r| !piv[r] && col[r] != 0.0).collect();
+                if nz.is_empty() {
+                    continue;
+                }
+                for m2 in mat[k + 1..].iter_mut() {
+                    let a = m2[br];
+                    if a == 0.0 {
+                        continue;
+                    }
+                    let f = a / col[br];
+                    for &r in &nz {
+                        m2[r] -= f * col[r];
+                    }
+                }
+            }
+            for &r in &core_r {
+                if rst[r] == 0 {
+                    rst[r] = 2;
+                }
+            }
+        }
+        // 基底を作り直す
+        let (mut dropped, mut slacks) = (0u64, 0u64);
+        for c in 0..nc {
+            if cst[c] != 1 {
+                let j = cand[c];
+                let (lo, up) = self.lp.col_bounds(j);
+                b.col[j] = match cur.col.get(j) {
+                    Some(&s) if s != VarStatus::Basic => s,
+                    _ if lo.is_finite() => VarStatus::Lower,
+                    _ if up.is_finite() => VarStatus::Upper,
+                    _ => VarStatus::Zero,
+                };
+                dropped += 1;
+            }
+        }
+        for r in 0..nr {
+            if rst[r] == 2 {
+                b.row[rows[r]] = VarStatus::Basic;
+                slacks += 1;
+            }
+        }
+        debug_assert_eq!(b.col.iter().chain(b.row.iter()).filter(|&&s| s == VarStatus::Basic).count(), mr);
+        let f = &mut self.pool_fix_stats;
+        f.0 += 1;
+        f.1 += dropped;
+        f.2 += slacks;
+        f.4 += t0.elapsed().as_secs_f64();
+        true
     }
 
     /// 共有の待ち行列に出すノード ([`SnapNode`])。親の基底の列と元の行 (`ENOMOTO_MIP_TREE_NO_PASS_BASIS` でなければ) と、
@@ -12919,6 +13189,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.tprof.lits = self.lit_conflicts.stats;
             self.tprof.lits_live = self.lit_conflicts.live_by_origin();
             self.tprof.proof_live = [self.proof_fifo[0].len(), self.proof_fifo[1].len()];
+        }
+        if self.pool_fix_stats.0 + self.pool_fix_stats.3 > 0 && (crate::simplex::nb_diag::on() || prof_tree_par()) {
+            let f = self.pool_fix_stats;
+            eprintln!("POOL_BASIS_FIX: tid {} fixed {} dropped {} slacks {} gave_up {} secs {:.3}", self.pool_tid, f.0, f.1, f.2, f.3, f.4);
         }
         if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some() && prof_tree_par()) {
             self.tprof.tid = self.pool_tid;
