@@ -1089,6 +1089,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut work_round = tunable!("ENOMOTO_T_MIP_CUT_WORK_ROUND", 0.05, f64);
         // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` の `c`: 手間の上限は LP の反復だけで数える ([`Solver::cut_cont`])
         let mut obj_cont: Vec<f64> = Vec::new();
+        // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` の裏のカットのスレッドでは、第 2 段階の時間の上限 (CPU 時間) で止めない (手間の上限で止まる)
+        let determ_job = job.as_ref().is_some_and(|j| j.determ.is_some());
         let mut cont_stop = false;
         if let Some((w, _, _)) = self.cut_cont {
             work_cap = w as f64 / root_iters.max(1) as f64;
@@ -1322,7 +1324,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if now - cap_base > time_cap && round >= min_rounds { " -> stop" } else { "" }
                 );
             }
-            if self.time_up() || (now - cap_base > time_cap && round >= min_rounds) || (phase2 && now - t_loop0 > phase2_deadline && !heavy) || stopped(&job) || cont_stop {
+            if self.time_up() || (now - cap_base > time_cap && round >= min_rounds) || (phase2 && now - t_loop0 > phase2_deadline && !heavy && !determ_job) || stopped(&job) || cont_stop {
                 break;
             }
             // `ENOMOTO_T_MIP_CUT_WORK_CAP`: 手間の上限
@@ -1852,7 +1854,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             if let Some(j) = &job {
-                if let Some(why) = j.record_round(obj + p.offset, self.lp.col_values(), self.lp.total_iterations()) {
+                if let Some(why) = j.record_round(obj + p.offset, self.lp.col_values(), self.lp.total_iterations(), phase2_on && !phase2) {
                     if self.params.verbose {
                         eprintln!("MIP: cut round {round}: background cuts stop by themselves ({why}, {} LP iters, obj {:.10e})", self.lp.total_iterations(), obj + p.offset);
                     }

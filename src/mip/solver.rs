@@ -2360,6 +2360,8 @@ pub(super) struct CutJob {
     pub(super) cutoff_bits: std::sync::atomic::AtomicU64,
     /// [`BgDeterm`] で裏のカットが自分で終わると決めた (次のラウンドの始めでループを抜ける) ときの理由
     pub(super) self_stop: std::sync::Mutex<Option<&'static str>>,
+    /// [`BgDeterm`] の窓の判定を始める `prog` の位置 (判定を保留したラウンドの次)
+    pub(super) win_from: std::sync::atomic::AtomicUsize,
 }
 
 /// 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` (既定では使わない。`0` でも使わない。analysis/bg_determ_20261102.md): 裏のカットの止め方を、
@@ -2432,6 +2434,7 @@ impl CutJob {
             determ,
             cutoff_bits: std::sync::atomic::AtomicU64::new(cutoff.to_bits()),
             self_stop: std::sync::Mutex::new(None),
+            win_from: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -2441,8 +2444,10 @@ impl CutJob {
     }
 
     /// 裏のカットのスレッドが 1 ラウンドの後に呼ぶ: 目的値 (offset 込み)・LP 解・この LP の反復の合計を記録し、[`BgDeterm`] なら
-    /// 自分で終わるかを決める (終わるなら理由を返す。ループは次のラウンドの始めで抜ける)
-    pub(super) fn record_round(&self, obj: f64, x: Vec<f64>, iters: u64) -> Option<&'static str> {
+    /// 自分で終わるかを決める (終わるなら理由を返す。ループは次のラウンドの始めで抜ける)。`hold` (ループが停滞したら第 2 段階
+    /// (HiGHS のスコア) に移る間) なら窓の判定 (停滞・伸びが遅い) をせず、窓を次のラウンドから数え直す (neos-911970 は第 1 段階の
+    /// 6 ラウンドは 47.26 のまま動かず、第 2 段階で 51.7 まで上がる。窓の判定が第 2 段階に移る前に当たって止めていた)
+    pub(super) fn record_round(&self, obj: f64, x: Vec<f64>, iters: u64, hold: bool) -> Option<&'static str> {
         *self.latest_x.lock().unwrap() = Some(x);
         let mut h = self.prog.lock().unwrap();
         h.push(obj);
@@ -2450,14 +2455,20 @@ impl CutJob {
         let mut hi = self.prog_it.lock().unwrap();
         hi.push(iters);
         let d = self.determ?;
-        let why = if window_stalled(&h, d.win, d.eps) {
-            Some("stalled")
-        } else if iters >= d.work_iters {
+        if hold {
+            self.win_from.store(h.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+        let w0 = self.win_from.load(std::sync::atomic::Ordering::Relaxed).min(h.len());
+        let why = if iters >= d.work_iters {
             Some("work")
+        } else if hold {
+            None
+        } else if window_stalled(&h[w0..], d.win, d.eps) {
+            Some("stalled")
         } else {
             let z = f64::from_bits(self.cutoff_bits.load(std::sync::atomic::Ordering::Relaxed));
             let k = h.len();
-            if d.rate > 0.0 && z.is_finite() && k > d.win {
+            if d.rate > 0.0 && z.is_finite() && k > w0 + d.win {
                 let (a, b) = (h[k - 1 - d.win], h[k - 1]);
                 let gap = (z - a).max(1e-9 * z.abs().max(1.0));
                 let work = (hi[k - 1] - hi[k - 1 - d.win]).max(1) as f64 / d.unit as f64;
