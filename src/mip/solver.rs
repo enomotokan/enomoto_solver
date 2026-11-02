@@ -2313,6 +2313,9 @@ pub(super) struct CutJob {
     pub(super) latest_x: std::sync::Mutex<Option<Vec<f64>>>,
     /// 結果の LP の最後の基底 (既定で返す。`ENOMOTO_MIP_NO_BG_CUTS_BASIS` で返さない。主がカットの行を置き換えた後の LP に入れる)
     pub(super) basis: std::sync::Mutex<Option<super::lp::Basis>>,
+    /// 試作 `ENOMOTO_MIP_BG_RETURN_DSE=1` ([`bg_return_dse_on`]): 結果の LP の最後の基底の DSE 重み (基底変数の番号との組、
+    /// [`super::lp_api::MipLp::dse_snapshot`])。主がカットの行を置き換えて基底を入れた後に当てはめる (analysis/bg_return_dse_20261102.md)
+    pub(super) dse: std::sync::Mutex<Option<Vec<(u32, f32)>>>,
     /// 各ラウンドの後の LP の目的値 (offset 込み)。`ENOMOTO_MIP_BG_CUTS_WAIT` で、主が止めの合図を出す前にまだ上がっているかを見る
     pub(super) prog: std::sync::Mutex<Vec<f64>>,
     /// `prog` の各ラウンドを記録した時刻 (ログで、主の待ちの判定とラウンドの進み方を並べるため)
@@ -2336,6 +2339,13 @@ pub(super) struct CutJob {
 /// `ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS` (既定 1 秒) 以上) だけで渡す
 pub(crate) fn bg_cuts_basis_x_on() -> bool {
     env_def!("ENOMOTO_MIP_BG_CUTS_BASIS_X", "lpw").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_BG_RETURN_DSE=1` (既定では使わない): 裏のカットのスレッドが終わるとき、最終基底と一緒にその LP の DSE 重みも返し、
+/// 主がカットの行を置き換えて基底を入れた後の LP の解き直しで引き継ぐ (`WARM_DSE_ONCE`)。今までは単位に近い重みから解き直していた
+/// (physiciansched6-2 で 1212 反復の回がある)。analysis/bg_return_dse_20261102.md
+pub(crate) fn bg_return_dse_on() -> bool {
+    env_str!("ENOMOTO_MIP_BG_RETURN_DSE") == Some("1")
 }
 
 pub(crate) fn bg_cuts_wait_on() -> bool {
@@ -4624,6 +4634,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             {
                 if env_str!("ENOMOTO_MIP_NO_BG_CUTS_BASIS").is_none() {
                     *job.basis.lock().unwrap() = Some(self.lp.basis());
+                    if bg_return_dse_on() {
+                        *job.dse.lock().unwrap() = self.lp.dse_snapshot();
+                    }
                 }
                 *job.out.lock().unwrap() = Some((rows, self.lp.objective() + self.p.offset, self.bg_cut_rounds));
             }
@@ -4676,7 +4689,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
             let bg_mode = env_str!("ENOMOTO_MIP_BG_CUTS").or(if env_str!("ENOMOTO_MIP_NO_BG_CUTS").is_none() { Some("1") } else { None });
             if let Some(mode) = bg_mode {
-                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None), basis: std::sync::Mutex::new(None), prog: std::sync::Mutex::new(Vec::new()), prog_at: std::sync::Mutex::new(Vec::new()) });
+                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None), basis: std::sync::Mutex::new(None), dse: std::sync::Mutex::new(None), prog: std::sync::Mutex::new(Vec::new()), prog_at: std::sync::Mutex::new(Vec::new()) });
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let mut threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
@@ -5325,10 +5338,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let saved_state = env_str!("ENOMOTO_MIP_CUT_FAIL_RESTORE").is_some().then(|| self.lp.save_state());
                     self.delete_lp_rows(&remove);
                     self.add_cut_rows(&rows);
+                    let mut ret_dse = false;
                     if let Some(b) = bg.job.basis.lock().unwrap().take() {
                         if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
                             crate::simplex::nb_diag::tag(crate::simplex::nb_diag::BG_RETURN);
                             self.lp.set_basis(&b);
+                            // 試作 `ENOMOTO_MIP_BG_RETURN_DSE=1`: 裏のカットのスレッドの LP の DSE 重みも当てはめる。写しの LP は主と同じ
+                            // 元の行 (0..m) の後にカットの行が並び、主は自分のカットの行を消してから返されたカットの行を同じ順で末尾に
+                            // 足すので、行の数が合えば変数番号 (列 j、行 n + i) はそのまま主の LP の番号になる
+                            if let Some(w) = bg.job.dse.lock().unwrap().take() {
+                                let lim = (self.p.n + self.lp.num_rows()) as u32;
+                                if w.len() == self.lp.num_rows() && w.iter().all(|p| p.0 < lim) {
+                                    self.lp.set_dse_vars(&w);
+                                    ret_dse = true;
+                                }
+                                if self.params.verbose {
+                                    let hit = self.lp.dse_snapshot().map_or(0, |v| {
+                                        let m: std::collections::HashSet<u32> = w.iter().map(|p| p.0).collect();
+                                        v.iter().filter(|p| m.contains(&p.0)).count()
+                                    });
+                                    eprintln!("MIP: background cuts: returned DSE weights {} ({} weights, {hit} / {} basic variables matched)", if ret_dse { "applied" } else { "not applied" }, w.len(), self.lp.num_rows());
+                                }
+                            } else if bg_return_dse_on() && self.params.verbose {
+                                eprintln!("MIP: background cuts: returned DSE weights not available");
+                            }
                         }
                     }
                     for (c, l, u) in &rows {
@@ -5337,9 +5370,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     }
                     let it1 = self.lp.total_iterations();
+                    let t1 = Instant::now();
+                    if ret_dse {
+                        crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                     let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+                    if ret_dse {
+                        crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
                     let new = self.lp.objective() + self.p.offset;
                     if self.params.verbose {
+                        eprintln!("MIP: background cuts: LP solve time with the replaced cuts {:.3}s (returned DSE {})", t1.elapsed().as_secs_f64(), if ret_dse { "used" } else { "not used" });
                         eprintln!("MIP: background cuts: LP with the replaced cuts: {st:?}, {} iters ({:.2}s)", self.lp.total_iterations() - it1, self.start.elapsed().as_secs_f64());
                     }
                     if st == LpStatus::Optimal && new >= cur - 1e-9 * cur.abs().max(1.0) {
