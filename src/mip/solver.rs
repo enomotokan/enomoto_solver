@@ -5042,7 +5042,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // サブ MIP (942 列) では、この 4 つで 2.4 秒使って何も見つけず、入れ子の RENS のサブ MIP でも毎回同じだけかかる
                 // (HiGHS のサブ MIP は根のヒューリスティクスのほとんどを入れ子の RENS に使い、1 回 0.1-1.6 秒で終わる)
                 // (暫定解がない、つまり打ち切り値が無限のサブ MIP だけ。`ENOMOTO_MIP_SUBMIP_NO_SB` と同じ理由)
-                let light = (self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some()) || self.submip_rens_cutoff();
+                // `ENOMOTO_MIP_SMALL3_SUBMIP_LIGHT` (試作、既定では使わない): 打ち切り値が有限の (外側に暫定解がある) サブ MIP の根でも
+                // Feasibility Pump とダイビングを使わない (入れ子の RENS は足さない)。10teams の LP face のサブ MIP (自由な列 1065) は、根で
+                // ポンプとダイビング 4 つに約 1.0 秒使って何も見つけず、その後の木の 233 ノード目で 924 (最適値) を出す
+                // (analysis/small_overhead3_20261102.md)。値 `1` は深さ 1 のサブ MIP だけ、`all` は入れ子も
+                let small3_light = self.params.submip
+                    && self.params.cutoff.is_finite()
+                    && env_str!("ENOMOTO_MIP_SMALL3_SUBMIP_LIGHT").is_some_and(|v| v == "all" || (v == "1" && super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1));
+                let light = (self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some()) || self.submip_rens_cutoff() || small3_light;
                 // ダイビングの予算: 最初の根の LP の 2 倍に、カットのループを含めた根全体の反復数の一定割合を足す
                 let dive_budget = 2 * root_iters + 1000 + (tunable!("ENOMOTO_T_MIP_ROOT_DIVE_FRAC", 0.0, f64) * self.lp.total_iterations() as f64) as u64;
                 // `ENOMOTO_MIP_PAR_DIVES`: 並列モードで暫定解がなければ、Feasibility Pump と 3 つのダイビングを、今の根の写しから
