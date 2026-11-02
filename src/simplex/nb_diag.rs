@@ -45,6 +45,13 @@ thread_local! {
     static EFF: Cell<Option<(u32, u32)>> = const { Cell::new(None) };
     /// この求解の warm start で、渡した基底が特異で差し替えた列の数 (`ENOMOTO_SIMPLEX_WARM_SING_REPAIR`。0 なら差し替えなし)
     static REP: Cell<u32> = const { Cell::new(0) };
+    /// 今の求解の場所 (`set_basis` の後の最初の求解のとき。それ以外は `NO_SET`)。診断 `ENOMOTO_SIMPLEX_WARM_SING_AB` の行に出す
+    static CUR_SITE: Cell<u8> = const { Cell::new(NO_SET) };
+}
+
+/// 今の求解の場所の名前 (`ENOMOTO_MIP_NB_DIAG` のときだけ意味がある)
+pub(crate) fn cur_site_name() -> &'static str {
+    NAMES[CUR_SITE.with(|c| c.get()) as usize % NSITE]
 }
 
 /// 次の `set_basis` の場所の印を付ける (その `set_basis` が読んで消す)
@@ -59,6 +66,10 @@ pub(crate) fn take_tag() -> u8 {
 }
 
 /// このスレッドがサブ MIP を解いている間 `true` (戻り値の値に戻すこと)
+pub(crate) fn in_sub() -> bool {
+    IN_SUB.with(|s| s.get())
+}
+
 pub(crate) fn set_in_sub(v: bool) -> bool {
     IN_SUB.with(|s| s.replace(v))
 }
@@ -126,6 +137,7 @@ impl Pending {
             }
         }
         self.compared = true;
+        CUR_SITE.with(|c| c.set(self.site));
         SAVED.with(|x| *x.borrow_mut() = Some(sv));
         EFF.with(|e| e.set(None));
     }
@@ -195,6 +207,7 @@ pub(crate) fn record(p: Option<Pending>, iters: u64, secs: f64) {
     let site = p.as_ref().map_or(NO_SET, |p| p.site) as usize;
     let eff = EFF.with(|e| e.take());
     let rep = REP.with(|r| r.replace(0));
+    CUR_SITE.with(|c| c.set(NO_SET));
     SAVED.with(|x| *x.borrow_mut() = None);
     let Ok(mut st) = STATS.lock() else { return };
     if st.len() != 2 * NSITE {

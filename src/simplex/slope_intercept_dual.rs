@@ -1285,6 +1285,13 @@ fn warm_sing_repair_strict() -> bool {
     env_str!("ENOMOTO_SIMPLEX_WARM_SING_REPAIR") == Some("2")
 }
 
+/// `ENOMOTO_SIMPLEX_WARM_SING_REPAIR=3`: 差し替える列が `ENOMOTO_T_WARM_SING_REPAIR_MAX` (既定 100) 列を超えるなら、差し替えを諦めて
+/// 今まで通り全スラック基底から解く (一次従属な列が多い基底は全体が今の問題に合っておらず、差し替えても全スラック基底より遠い。
+/// 前処理の LP の基底からの根で数百〜数千列。木のノード・再スタートの根は数十列以下。analysis/singular_fix_a_20261102.md)。
+fn warm_sing_repair_max() -> Option<usize> {
+    (env_str!("ENOMOTO_SIMPLEX_WARM_SING_REPAIR") == Some("3")).then(|| tunable!("ENOMOTO_T_WARM_SING_REPAIR_MAX", 100usize, usize))
+}
+
 thread_local! {
     /// 診断 `ENOMOTO_SIMPLEX_WARM_SING_AB` の間だけ、[`warm_sing_repair`] の答えを上書きする。
     static SING_REPAIR_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
@@ -1341,7 +1348,9 @@ fn sing_ab(std: &StdForm, opts: &crate::types::LpOptions) -> Option<Option<Simpl
     let (shifted, infeas) = LAST_WARM_INFO.with(|x| x.get());
     let k = super::nb_diag::peek_repaired_reset().max(k);
     eprintln!(
-        "SING_AB m={m} n={} rep={k} shifted={} pinf={} it_crash={it_c} it_rep={it_r} t_crash={t_c:.5} t_rep={t_r:.5} st_crash={} st_rep={} obj_crash={:.9e} obj_rep={:.9e}",
+        "SING_AB site={}{} m={m} n={} rep={k} shifted={} pinf={} it_crash={it_c} it_rep={it_r} t_crash={t_c:.5} t_rep={t_r:.5} st_crash={} st_rep={} obj_crash={:.9e} obj_rep={:.9e}",
+        if super::nb_diag::in_sub() { "sub_" } else { "" },
+        super::nb_diag::cur_site_name(),
         std.n_total - m,
         shifted as i64,
         infeas as i64,
@@ -1392,6 +1401,11 @@ fn warm_start_basis(
             // 正則な基底では `refactorize(std, &pos, None)` と同じ分解 (経路も同じ) で、何も変えない。
             let mut b = wb.to_vec();
             match super::basis_kernel::factorize_basis_repair(std, &mut b, &mut pos, None) {
+                Some((_, replaced)) if warm_sing_repair_max().is_some_and(|mx| replaced.len() > mx) => {
+                    // 差し替えが多すぎる: 今まで通り warm start をやめる
+                    SINGULAR_BAILOUT.with(|f| f.set(true));
+                    return false;
+                }
                 Some((l, replaced)) => {
                     if !replaced.is_empty() {
                         super::nb_diag::set_repaired(replaced.len() as u32);

@@ -1,4 +1,4 @@
-"""試作 ENOMOTO_SIMPLEX_WARM_SING_REPAIR=1 (rep)・=2 (rep2) を既定 (base) と比べる (2026-11-02)。
+"""試作 ENOMOTO_SIMPLEX_WARM_SING_REPAIR=1 (rep)・=2 (rep2)・=3 (rep3) を既定 (base) と比べる (2026-11-02)。
 
 4 スレッド・60 秒、ソルバーは同時に 1 つ。問題ごとに設定を順に回し、回ごとに順を逆にする。どちらの設定も
 ENOMOTO_MIP_NB_DIAG=1 を付け、NB_DIAG の行 (場所ごとの LP 数・反復・特異で捨てた LP・差し替えた LP) を結果と一緒に jsonl に書く。
@@ -21,7 +21,7 @@ sys.path.insert(0, str(WT / "scripts"))
 import probs as P  # noqa: E402
 import run_miplib_benchmark as rb  # noqa: E402
 
-CFGS = {"base": {}, "rep": {"ENOMOTO_SIMPLEX_WARM_SING_REPAIR": "1"}, "rep2": {"ENOMOTO_SIMPLEX_WARM_SING_REPAIR": "2"}}
+CFGS = {"base": {}, "rep": {"ENOMOTO_SIMPLEX_WARM_SING_REPAIR": "1"}, "rep2": {"ENOMOTO_SIMPLEX_WARM_SING_REPAIR": "2"}, "rep3": {"ENOMOTO_SIMPLEX_WARM_SING_REPAIR": "3"}}
 SEL10 = ["ns1116954", "mzzv42z", "neos5", "misc07", "noswot", "neos-911970", "neos-960392", "physiciansched6-2", "neos-827175", "swath1"]
 
 ap = argparse.ArgumentParser()
