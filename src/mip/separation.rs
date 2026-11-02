@@ -1617,6 +1617,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
             let cap = cap.max(lp_cap_mult * ok_lp_secs);
             let cap = if lp_work > 0.0 { cap * tunable!("ENOMOTO_T_MIP_CUT_LP_WORK_TIME_MULT", 5.0, f64) } else { cap };
+            // 裏のカットの写しの 1 回の LP の上限 (analysis/bgx_check1_20261102.md)。写しの `time_limit` は主の残り時間なので、
+            // 上限は主 (60 秒の 2% = 1.2 秒) より短い 1.0 秒 (最低値) になる。physiciansched6-2 の遅い機械では、写しのカットの LP
+            // (主と同じ頂点から 1200〜1700 反復) がこれに当たって 2 ラウンド続けてカットを全部外し、失敗 2 回でループを抜けていた
+            // (ラウンドの記録 0、下界は上がらない)。
+            // `ENOMOTO_MIP_BG_CUTS_LP_CAP` = m (試作、既定では使わない): 写しでは上限を主の根の LP の時間の m 倍より短くしない。
+            // `ENOMOTO_T_MIP_BG_CUTS_LP_CAP_SECS` = s (診断、既定 0 で使わない): 写しの上限を s 秒にする (遅い機械の真似)
+            let cap = if job.is_some() {
+                let s = tunable!("ENOMOTO_T_MIP_BG_CUTS_LP_CAP_SECS", 0.0, f64);
+                let m = env_str!("ENOMOTO_MIP_BG_CUTS_LP_CAP").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+                let c = if s > 0.0 { s } else { cap };
+                c.max(m * super::solver::BG_ROOT_LP_SECS.with(|c| c.get()))
+            } else {
+                cap
+            };
+            if job.is_some() && self.params.verbose && round <= 1 {
+                eprintln!("MIP: cut round {round}: background cut LP time cap {cap:.2}s");
+            }
             work_rounds += 1;
             let lp_deadline = if cap.is_finite() {
                 let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
@@ -1720,12 +1737,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.lp.restore_state(ss);
                 }
                 let it2 = self.lp.total_iterations();
+                let t_re = std::time::Instant::now();
+                let lp_secs_failed = t_lp0.elapsed().as_secs_f64();
                 let st2 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
                 if self.params.verbose && saved_state.is_some() {
                     eprintln!("MIP: cut round {round}: re-solve from the saved state: {} iters", self.lp.total_iterations() - it2);
                 }
                 if self.params.verbose {
-                    eprintln!("MIP: cut round {round}: LP status {st:?}, removed the cuts ({st2:?})");
+                    eprintln!(
+                        "MIP: cut round {round}: LP status {st:?}, removed the cuts ({st2:?}; cut LP {} iters {lp_secs_failed:.2}s, re-solve {} iters {:.2}s, {:.2}s)",
+                        it2 - it0,
+                        self.lp.total_iterations() - it2,
+                        t_re.elapsed().as_secs_f64(),
+                        self.start.elapsed().as_secs_f64()
+                    );
                 }
                 // `ENOMOTO_MIP_CUT_LP_HALVE`: 時間の上限に当たっただけなら、本数を半分にして続ける
                 if lp_halve && st == LpStatus::TimeLimit && st2 == LpStatus::Optimal && rows.len() > lp_halve_min && !self.time_up() {

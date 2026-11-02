@@ -177,6 +177,8 @@ thread_local! {
     /// ループだけを行い、止めの合図まで続けて、最後の LP に残ったカットの行と目的値を返す。
     /// カットを強める求解の、主の根の LP の反復数 (カットの LP の反復上限に使う)
     pub(super) static BG_ROOT_ITERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// 裏のカットの写しに渡す、主の根の LP (カットの前) の時間 (`ENOMOTO_MIP_BG_CUTS_LP_CAP` の 1 回の LP の上限に使う)
+    pub(super) static BG_ROOT_LP_SECS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     /// 試作 `ENOMOTO_MIP_BASIS_NB` の場所 `w`: 主の根の LP が `ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS` (1 秒) 以上かかったので、
     /// 裏のカットの写しの根の LP に上限・下限の置き場所も渡す
     static BG_ROOT_NB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -4668,6 +4670,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: env_str!("ENOMOTO_MIP_BG_CUTS_LOG").is_some(), threads, ..self.params };
                 let j2 = job.clone();
                 let ri = root_iters;
+                let rls = self.root_lp_secs;
                 // 既定で (`ENOMOTO_MIP_NO_BG_CUTS_BASIS` で渡さない) 主の根の LP の最後の基底 (写しの問題の行 + カットの行と同じ並び) を渡す。渡さないと
                 // 写しの根の LP は基底なしで解き直しになり、uccase12 (88600 行) では 38 秒たっても終わらず、主がその終わりを
                 // 待って 23〜27 秒止まっていた (LP は止めの合図を見ない)
@@ -4703,6 +4706,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     .spawn(move || {
                         CUT_JOB.with(|j| *j.borrow_mut() = Some(j2));
                         BG_ROOT_ITERS.with(|c| c.set(ri));
+                        BG_ROOT_LP_SECS.with(|c| c.set(rls));
                         BG_ROOT_NB.with(|c| c.set(bg_nb));
                         BG_ROOT_BASIS.with(|b| *b.borrow_mut() = bg_basis);
                         BG_ROOT_X.with(|b| *b.borrow_mut() = bg_x);
