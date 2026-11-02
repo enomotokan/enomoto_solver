@@ -527,6 +527,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pool_fix_ptrs: std::collections::HashSet<usize>,
     /// 同: (直した回数, 外した構造列の数, 基底に入れたスラックの数, 核が大きく諦めた回数, 直すのにかかった秒)
     pool_fix_stats: (u64, u64, u64, u64, f64),
+    /// `ENOMOTO_MIP_POOL_DSE` (試作): (DSE 重みを付けて出したノード, 付けた重みの数, 重み付きで受け取ったノード, 戻すときに当てはめた回数,
+    /// 当てはめた基底変数のうち重みがあった数, 重みがなかった数)
+    pool_dse_stats: [u64; 6],
     /// 直前に戻した基底に、保存した DSE 重みも当てはめたか (次の LP で引き継ぐ)。
     restored_dse: bool,
     node_lps: u64,
@@ -1260,11 +1263,14 @@ pub(crate) struct SnapNode {
     /// 親の LP の基底で非基底だったカットの行の (カットのハッシュ, 状態) (`ENOMOTO_MIP_TREE_SHARE_CUT_BASIS`)。受け取った側は同じ
     /// カットの行があればその状態にする ([`Solver::open_from_pool`])。
     cut_basis: Option<Vec<(u64, VarStatus)>>,
+    /// `ENOMOTO_MIP_POOL_DSE` (試作): 親の LP の DSE 重みのうち、列と元の行の基底変数の分 (変数番号 j < n、行 n + i (i < m), 重み)。
+    /// カットの行の分はスレッドごとに違うので渡さない
+    dse: Option<Vec<(u32, f32)>>,
 }
 
 impl SnapNode {
     fn of(n: &OpenNode) -> Self {
-        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None }
+        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None }
     }
     /// [`Self::of`] に、親の LP の基底の列と最初の `m` 行 (元の行) を付ける。
     fn of_with_basis(n: &OpenNode, m: usize) -> Self {
@@ -1272,6 +1278,13 @@ impl SnapNode {
         if let Some(b) = &n.basis {
             if b.row.len() >= m {
                 s.basis = Some((b.col.clone(), b.row[..m].to_vec()));
+                // `ENOMOTO_MIP_POOL_DSE` (試作): 列と元の行の基底変数の DSE 重みも渡す (元の行の番号は行の追加・削除で変わらない)
+                if pool_dse() {
+                    if let Some(w) = &n.dse {
+                        let lim = (b.col.len() + m) as u32;
+                        s.dse = Some(w.iter().copied().filter(|&(v, _)| v < lim).collect());
+                    }
+                }
             }
         }
         s
@@ -1458,6 +1471,19 @@ fn tree_pool_basis() -> bool {
 /// (analysis/singular_fix_b_20261102.md)
 fn pool_basis_fix() -> bool {
     env_str!("ENOMOTO_MIP_POOL_BASIS_FIX").is_some_and(|v| v != "0")
+}
+
+/// `ENOMOTO_MIP_POOL_DSE` (試作、既定は切): 共有の待ち行列に出すノード ([`SnapNode`]) に、親の LP の DSE 重みのうち列と元の行の
+/// 基底変数の分も付け、受け取った側で基底を戻した後 (`ENOMOTO_MIP_POOL_BASIS_FIX` なら直した後) に当てはめて最初の LP で
+/// 引き継ぐ。既定は重みを渡さず、受け取った側は単位重みから解く。重みのない基底変数 (直しで入った列、カットの行のスラック) は
+/// 値 `1` (既定) なら 1、値 `n` なら `NaN` (求解の始めにその行だけ BTRAN で厳密な値を埋める)
+/// (analysis/pool_dse_20261102.md)
+fn pool_dse() -> bool {
+    env_str!("ENOMOTO_MIP_POOL_DSE").is_some_and(|v| v != "0")
+}
+
+fn pool_dse_nan() -> bool {
+    env_str!("ENOMOTO_MIP_POOL_DSE").is_some_and(|v| v.contains('n'))
 }
 
 fn prof_tree_par() -> bool {
@@ -2629,6 +2655,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool_basis_stats: 0,
         pool_fix_ptrs: std::collections::HashSet::new(),
         pool_fix_stats: (0, 0, 0, 0, 0.0),
+        pool_dse_stats: [0; 6],
         restored_dse: false,
         node_lps: 0,
         node_lp_secs: 0.0,
@@ -9055,6 +9082,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     Some(sk) => self.lp.set_basis_nb(&b2, sk),
                     None => self.lp.set_basis(&b2),
                 }
+                // `ENOMOTO_MIP_POOL_DSE` (試作): 直した基底にも渡された重みを当てはめる (外した列の重みは捨て、入れた列は 1 か NaN)
+                if let Some(w) = dse {
+                    self.set_restored_dse(w);
+                }
                 return;
             }
             self.restored_now = true;
@@ -9064,8 +9095,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 None => self.lp.set_basis(b),
             }
             if let Some(w) = dse {
-                self.lp.set_dse_vars(w);
-                self.restored_dse = true;
+                self.set_restored_dse(w);
             }
             return;
         }
@@ -9137,13 +9167,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !self.fix_pool_basis(&mut b2) {
                 return;
             }
-            self.restored_now = true;
-            crate::simplex::nb_diag::tag(match self.tp_kind { 0 => crate::simplex::nb_diag::TREE_SIBLING, 1 => crate::simplex::nb_diag::TREE_QUEUE, _ => crate::simplex::nb_diag::TREE_POOL });
-            match &nb_skip {
-                Some(sk) => self.lp.set_basis_nb(&b2, sk),
-                None => self.lp.set_basis(&b2),
-            }
-            return;
+            // 直した基底を置いた後は下の既定と同じ (`ENOMOTO_MIP_POOL_DSE` なら渡された重みも当てはめる)
         }
         self.restored_now = true;
         crate::simplex::nb_diag::tag(match self.tp_kind { 0 => crate::simplex::nb_diag::TREE_SIBLING, 1 => crate::simplex::nb_diag::TREE_QUEUE, _ => crate::simplex::nb_diag::TREE_POOL });
@@ -9189,10 +9213,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     })
                     .collect();
-                self.lp.set_dse_vars(&mapped);
-                self.restored_dse = true;
+                self.set_restored_dse(&mapped);
             }
         }
+    }
+
+    /// 戻した基底に保存した DSE 重み `w` (番号は今の LP の行に合わせたもの) を当てはめ、次の LP で引き継ぐ印を立てる。
+    /// 共有の待ち行列から受け取ったノード (`ENOMOTO_MIP_POOL_DSE`) では数を数え、値 `n` なら重みのない基底変数を `NaN`
+    /// (求解の始めに厳密な値を埋める) にする。
+    fn set_restored_dse(&mut self, w: &[(u32, f32)]) {
+        if self.tp_kind == 2 && pool_dse() {
+            let b = self.lp.basis();
+            let n = b.col.len();
+            let mut has = vec![false; n + b.row.len()];
+            for &(v, _) in w {
+                if (v as usize) < has.len() {
+                    has[v as usize] = true;
+                }
+            }
+            let basic: Vec<usize> = b.col.iter().enumerate().filter(|(_, &s)| s == VarStatus::Basic).map(|(j, _)| j).chain(b.row.iter().enumerate().filter(|(_, &s)| s == VarStatus::Basic).map(|(i, _)| n + i)).collect();
+            let hit = basic.iter().filter(|&&v| has[v]).count();
+            self.pool_dse_stats[3] += 1;
+            self.pool_dse_stats[4] += hit as u64;
+            self.pool_dse_stats[5] += (basic.len() - hit) as u64;
+            if pool_dse_nan() {
+                let mut w2 = w.to_vec();
+                w2.extend(basic.iter().filter(|&&v| !has[v]).map(|&v| (v as u32, f32::NAN)));
+                self.lp.set_dse_vars(&w2);
+                self.restored_dse = true;
+                return;
+            }
+        }
+        self.lp.set_dse_vars(w);
+        self.restored_dse = true;
     }
 
     /// 分枝する列がパッキング・オービトープの行にあれば、その行で最も左の固定されていない列で分枝する
@@ -12616,14 +12669,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         for n in nodes.iter_mut() {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None });
         }
         for n in nodes {
             self.queue.push(n);
         }
         if let Some(n) = plunge.as_mut().filter(|_| with_nodes) {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None });
         }
         if with_nodes {
             self.dive_stack.clear();
@@ -12829,6 +12882,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn open_from_pool(&mut self, mut sn: SnapNode) -> OpenNode {
         let basis = sn.basis.take();
         let cut_basis = sn.cut_basis.take();
+        let sdse = sn.dse.take();
         let mut n = sn.into_open();
         if let Some((col, mut row)) = basis {
             let mr = self.lp.num_rows();
@@ -12867,6 +12921,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 n.basis = Some(rc);
                 n.basis_epoch = self.row_log.len();
+                if let Some(w) = sdse {
+                    self.pool_dse_stats[2] += 1;
+                    n.dse = Some(Rc::new(w));
+                }
             }
         }
         n
@@ -13098,6 +13156,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return SnapNode::of(n);
         }
         let mut s = SnapNode::of_with_basis(n, self.p.m);
+        if let Some(w) = &s.dse {
+            self.pool_dse_stats[0] += 1;
+            self.pool_dse_stats[1] += w.len() as u64;
+        }
         if s.basis.is_some() && (env_str!("ENOMOTO_MIP_TREE_SHARE_CUT_BASIS").is_some() || tree_pool_basis()) {
             if let Some(b) = n.basis.clone() {
                 // 保存したときの行を今の行に合わせる (行の追加・削除の記録を当てはめる。[`Self::restore_node_basis`] と同じ)
@@ -13567,6 +13629,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.pool_fix_stats.0 + self.pool_fix_stats.3 > 0 && (crate::simplex::nb_diag::on() || prof_tree_par()) {
             let f = self.pool_fix_stats;
             eprintln!("POOL_BASIS_FIX: tid {} fixed {} dropped {} slacks {} gave_up {} secs {:.3}", self.pool_tid, f.0, f.1, f.2, f.3, f.4);
+        }
+        if self.pool_dse_stats.iter().any(|&x| x > 0) && (crate::simplex::nb_diag::on() || prof_tree_par()) {
+            let d = self.pool_dse_stats;
+            eprintln!("POOL_DSE: tid {} sent {} nodes {} weights ({:.1} KB) received {} applied {} basic with weight {} without {}", self.pool_tid, d[0], d[1], d[1] as f64 * 8.0 / 1024.0, d[2], d[3], d[4], d[5]);
         }
         if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some() && prof_tree_par()) {
             self.tprof.tid = self.pool_tid;
