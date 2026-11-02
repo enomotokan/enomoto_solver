@@ -41,7 +41,7 @@ names = a.only or (SIX if a.set == "six" else probs.PROBS)
 for rep in range(1, a.reps + 1):
     for p in names:
         for c in a.configs:
-            d = HERE / "logs" / c
+            d = HERE / ("logs" if a.set == "six" else "logs58") / c
             d.mkdir(parents=True, exist_ok=True)
             out = d / f"{p}.r{rep}.log"
             if out.exists():

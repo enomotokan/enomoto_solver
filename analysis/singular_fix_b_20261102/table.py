@@ -66,7 +66,7 @@ names = SIX if a.set == "six" else probs.PROBS
 runs = defaultdict(list)  # (config, prob) -> [stats]
 for c in a.configs:
     for p in names:
-        for f in sorted((HERE / "logs" / c).glob(f"{p}.r*.log")):
+        for f in sorted((HERE / ("logs" if a.set == "six" else "logs58") / c).glob(f"{p}.r*.log")):
             runs[(c, p)].append(stats(parse(f)))
 
 if a.set == "six":
@@ -102,3 +102,19 @@ else:
         t0, t1 = rs[0]["time"], rs[-1]["time"]
         if rs[0]["solved"] != rs[-1]["solved"] or abs(t1 - t0) >= max(1.0, 0.05 * t0) or rs[0]["pool_n"] > 0:
             print(f"| {p} | " + " | ".join(f"{x['time']:.1f}{'' if x['solved'] else ' (未)'} | {x['nodes']} | {x['pool_sing']:.0f}/{x['pool_n']:.0f}" for x in rs) + " |")
+
+if a.set == "six":
+    print("\n### 平均 (時間は解けなかった回を 60 秒として)\n")
+    print("| 問題 | " + " | ".join(f"{c} 時間 (解けた) | {c} 木の反復 | {c} 木で特異" for c in a.configs) + " |")
+    print("|---|" + "---|---|---|" * len(a.configs))
+    for p in names:
+        row = [p]
+        for c in a.configs:
+            rs = runs.get((c, p), [])
+            if not rs:
+                row += ["–"] * 3
+                continue
+            row.append(f"{sum(x['time'] for x in rs) / len(rs):.1f} ({sum(x['solved'] for x in rs)}/{len(rs)})")
+            row.append(f"{sum(x['tree_it'] for x in rs) / len(rs) / 1000:.0f}k")
+            row.append(f"{sum(x['tree_sing'] for x in rs) / len(rs):.0f}")
+        print("| " + " | ".join(row) + " |")
