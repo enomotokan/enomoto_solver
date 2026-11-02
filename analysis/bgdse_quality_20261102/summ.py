@@ -28,14 +28,23 @@ def parse(log):
     m = next((m for m in (re.search(r"background cut LP time cap ([\d.]+)s", l) for l in w) if m), None)
     o["tcap"] = m.group(1) if m else "-"
     o["dsestop"] = any("exact DSE weights stopped" in l for l in w)
-    m = next((m for m in (re.search(r"background DSE sample: (\d+) / (\d+) rows, median \|ln\(exact/cur\)\| ([\d.]+), mean ln (-?[\d.]+), max ([\d.]+) \(([\d.]+)s\); exact weights ([\w ]+) \(([\d.]+)s\)", l) for l in w) if m), None)
-    if m:
-        how = {"computed": "厳密", "stopped": "中止", "not computed": "そのまま"}[m.group(7)]
-        o["samp"] = f"{m.group(3)} (k {m.group(1)}/{m.group(2)}, {m.group(6)}s) → {how}" + (f" {m.group(8)}s" if how != "そのまま" else "")
-        o["sampd"] = dict(k=int(m.group(1)), m=int(m.group(2)), med=float(m.group(3)), mean=float(m.group(4)), max=float(m.group(5)), secs=float(m.group(6)), full=how, full_secs=float(m.group(8)))
-    else:
-        o["samp"] = "-"
-        o["sampd"] = None
+    # 標本の行: 新しい形 (全体と主実行不能な行) と、計測 1 の古い形 (全体の |ln| だけ)
+    o["samp"], o["sampd"] = "-", None
+    for l in w:
+        m = re.search(r"background DSE sample: (\d+) / (\d+) rows, median \|ln\(exact/cur\)\| ([\d.]+), mean ln (-?[\d.]+), max ([\d.]+), spread ([\d.]+); infeasible (\d+) / (\d+) rows, median \|ln\| ([\d.]+), mean ln (-?[\d.]+), spread ([\d.]+); value ([\d.]+) \(([\d.]+)s\); exact weights ([\w ]+) \(([\d.]+)s\)", l)
+        if m:
+            g = m.groups()
+            d = dict(k=int(g[0]), m=int(g[1]), med=float(g[2]), mean=float(g[3]), max=float(g[4]), spread=float(g[5]), ki=int(g[6]), ninf=int(g[7]), imed=float(g[8]), imean=float(g[9]), ispread=float(g[10]), value=float(g[11]), secs=float(g[12]), full=g[13], full_secs=float(g[14]))
+        else:
+            m = re.search(r"background DSE sample: (\d+) / (\d+) rows, median \|ln\(exact/cur\)\| ([\d.]+), mean ln (-?[\d.]+), max ([\d.]+) \(([\d.]+)s\); exact weights ([\w ]+) \(([\d.]+)s\)", l)
+            if not m:
+                continue
+            g = m.groups()
+            d = dict(k=int(g[0]), m=int(g[1]), med=float(g[2]), mean=float(g[3]), max=float(g[4]), spread=None, ki=None, ninf=None, imed=None, imean=None, ispread=None, value=float(g[2]), secs=float(g[5]), full=g[6], full_secs=float(g[7]))
+        d["full"] = {"computed": "厳密", "stopped": "中止", "not computed": "そのまま"}[d["full"]]
+        o["sampd"] = d
+        o["samp"] = f"{d['value']:.3f} ({d['k']}+{d['ki'] or 0} 行, {d['secs']}s) → {d['full']}" + (f" {d['full_secs']}s" if d["full"] != "そのまま" else "")
+        break
     for l in w:
         if re.search(r"cut round \d+: the LP with \d+ cuts hit the time cap", l):
             halves += 1
@@ -68,7 +77,7 @@ def parse(log):
     return o
 
 
-print("| 問題 | 設定 | 回 | 結果 | 時間 | 写しの根の LP | 重み | 標本のずれ (中央値 |ln|) → | 上限 (反復・秒) | 写しのカットの LP の反復 (✗ = 外した) | 通った LP | 失敗 | 半分化 | 止めの合図の時点の記録 | 写しの終わり |")
+print("| 問題 | 設定 | 回 | 結果 | 時間 | 写しの根の LP | 重み | 標本の判定値 → | 上限 (反復・秒) | 写しのカットの LP の反復 (✗ = 外した) | 通った LP | 失敗 | 半分化 | 止めの合図の時点の記録 | 写しの終わり |")
 print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 for r in rows:
     if probs and r["prob"] not in probs or cfgs and r["cfg"] not in cfgs:

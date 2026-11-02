@@ -1697,8 +1697,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if bg_dse_sample {
                 let k = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_SAMPLE", 32usize, usize);
                 let dev = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_DEV", 1.0, f64);
+                // 判定に使う統計 (`ENOMOTO_T_MIP_BG_CUTS_DSE_STAT`): 0 = 全体の |ln| の中央値、1 = 全体のばらつき、2 = 主実行不能な行のばらつき
+                let stat = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_STAT", 2u8, u8);
                 crate::simplex::slope_intercept_dual::DSE_SAMPLE_RESULT.with(|c| c.set(None));
-                crate::simplex::slope_intercept_dual::DSE_SAMPLE_ONCE.with(|c| c.set(Some((k, dev))));
+                crate::simplex::slope_intercept_dual::DSE_SAMPLE_ONCE.with(|c| c.set(Some((k, dev, stat))));
             }
             if cut_dse_exact {
                 crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1712,8 +1714,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose {
                     match crate::simplex::slope_intercept_dual::DSE_SAMPLE_RESULT.with(|c| c.take()) {
                         Some(r) => eprintln!(
-                            "MIP: cut round {round}: background DSE sample: {} / {} rows, median |ln(exact/cur)| {:.3}, mean ln {:.3}, max {:.3} ({:.3}s); exact weights {} ({:.3}s)",
-                            r.k, r.m, r.med_abs_log, r.mean_log, r.max_abs_log, r.sample_secs,
+                            "MIP: cut round {round}: background DSE sample: {} / {} rows, median |ln(exact/cur)| {:.3}, mean ln {:.3}, max {:.3}, spread {:.3}; infeasible {} / {} rows, median |ln| {:.3}, mean ln {:.3}, spread {:.3}; value {:.3} ({:.3}s); exact weights {} ({:.3}s)",
+                            r.all.n, r.m, r.all.med_abs, r.all.mean, r.all.max_abs, r.all.spread, r.inf.n, r.n_inf, r.inf.med_abs, r.inf.mean, r.inf.spread, r.value, r.sample_secs,
                             match r.full { 1 => "computed", 2 => "stopped", _ => "not computed" }, r.full_secs
                         ),
                         None => eprintln!("MIP: cut round {round}: background DSE sample: not taken (not a warm start)"),

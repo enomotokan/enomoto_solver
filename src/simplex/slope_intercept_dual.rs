@@ -1189,10 +1189,26 @@ thread_local! {
     pub(crate) static DSE_EXACT_STOP_LOG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q` (既定では使わない): 次の 1 回の warm start の求解だけ、始めの DSE 重み (引き継いだもの・
     /// 単位重み) を基底の行から `k` 行の標本で厳密な値と比べ、ずれ (`|ln(厳密 / 今)|` の中央値) が `dev` を超えたときだけ
-    /// 全部の行の厳密な重みを計算する (`(k, dev)`。求解の始めに下ろす。期限・取り消し・[`DSE_EXACT_STOP`] を 32 行ごとに見る)
-    pub(crate) static DSE_SAMPLE_ONCE: std::cell::Cell<Option<(usize, f64)>> = const { std::cell::Cell::new(None) };
+    /// 全部の行の厳密な重みを計算する (`(k, dev, 統計)`。統計は 0 = 全体の `|ln|` の中央値、1 = 全体のばらつき、
+    /// 2 = 主実行不能な行のばらつき ([`DseSampleStat`])。求解の始めに下ろす。期限・取り消し・[`DSE_EXACT_STOP`] を 32 行ごとに見る)
+    pub(crate) static DSE_SAMPLE_ONCE: std::cell::Cell<Option<(usize, f64, u8)>> = const { std::cell::Cell::new(None) };
     /// [`DSE_SAMPLE_ONCE`] の結果 (呼び出し側が表示に取り出す)
     pub(crate) static DSE_SAMPLE_RESULT: std::cell::Cell<Option<DseSampleResult>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`DSE_SAMPLE_ONCE`] の標本の 1 組の統計 (`r = ln(厳密 / 今)`)。
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DseSampleStat {
+    /// 標本の行の数 (BTRAN の回数)
+    pub n: usize,
+    /// `|r|` の中央値 (重みの大きさのずれ)
+    pub med_abs: f64,
+    /// `r` の平均 (比の幾何平均の対数)
+    pub mean: f64,
+    /// `|r|` の最大
+    pub max_abs: f64,
+    /// `|r - median(r)|` の中央値 (尺度によらないばらつき。重み全体の定数倍は価格付けを変えないので、効くのはこちら)
+    pub spread: f64,
 }
 
 /// [`DSE_SAMPLE_ONCE`] の標本の確かめの結果。
@@ -1200,14 +1216,14 @@ thread_local! {
 pub(crate) struct DseSampleResult {
     /// 基底の行の数
     pub m: usize,
-    /// 標本の行の数 (BTRAN の回数)
-    pub k: usize,
-    /// `|ln(厳密 / 今)|` の中央値
-    pub med_abs_log: f64,
-    /// `ln(厳密 / 今)` の平均 (比の幾何平均の対数)
-    pub mean_log: f64,
-    /// `|ln(厳密 / 今)|` の最大
-    pub max_abs_log: f64,
+    /// 主実行不能な行の数
+    pub n_inf: usize,
+    /// 基底の行全体からの標本
+    pub all: DseSampleStat,
+    /// 主実行不能な行 (価格付けで競う行) からの標本
+    pub inf: DseSampleStat,
+    /// 判定に使った統計の値
+    pub value: f64,
     /// 標本の計算の時間 (秒)
     pub sample_secs: f64,
     /// 全部の行の厳密な重みを計算したか (0 しない、1 した、2 期限・止めの合図でやめた)
@@ -1216,19 +1232,20 @@ pub(crate) struct DseSampleResult {
     pub full_secs: f64,
 }
 
-/// [`DSE_SAMPLE_ONCE`] の標本の確かめ: 基底の行から `k` 行を決まった種の乱数で選び、厳密な重み (BTRAN の 2 乗ノルム) と
-/// `cur` の重みの比のずれを測る。`(|ln 比| の中央値, ln 比の平均, |ln 比| の最大, 標本の数)`
-fn dse_sample_deviation(lu: &sparse_lu::FtLu, cur: &[f64], k: usize) -> (f64, f64, f64, usize) {
+/// [`DSE_SAMPLE_ONCE`] の標本の確かめ: `cand` (行の候補) から `k` 行を決まった種の乱数で選び、厳密な重み (BTRAN の 2 乗ノルム) と
+/// `cur` の重みの比のずれを測る
+fn dse_sample_deviation(lu: &sparse_lu::FtLu, cur: &[f64], cand: &[usize], k: usize, seed: u64) -> DseSampleStat {
     let m = cur.len();
-    if m == 0 || k == 0 {
-        return (0.0, 0.0, 0.0, 0);
+    let c = cand.len();
+    if c == 0 || k == 0 {
+        return DseSampleStat::default();
     }
     let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
-    // 決まった種の乱数 (splitmix64) で k 行を重複なしに選ぶ (k >= m なら全部の行)
-    let rows: Vec<usize> = if k >= m {
-        (0..m).collect()
+    // 決まった種の乱数 (splitmix64) で k 行を重複なしに選ぶ (k >= 候補の数なら全部)
+    let rows: Vec<usize> = if k >= c {
+        cand.to_vec()
     } else {
-        let mut st: u64 = 0x9e37_79b9_7f4a_7c15 ^ (m as u64);
+        let mut st: u64 = seed ^ (c as u64);
         let mut next = || {
             st = st.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = st;
@@ -1239,7 +1256,7 @@ fn dse_sample_deviation(lu: &sparse_lu::FtLu, cur: &[f64], k: usize) -> (f64, f6
         let mut seen = std::collections::HashSet::with_capacity(2 * k);
         let mut v = Vec::with_capacity(k);
         while v.len() < k {
-            let i = (next() % m as u64) as usize;
+            let i = cand[(next() % c as u64) as usize];
             if seen.insert(i) {
                 v.push(i);
             }
@@ -1263,14 +1280,23 @@ fn dse_sample_deviation(lu: &sparse_lu::FtLu, cur: &[f64], k: usize) -> (f64, f6
         logs.push((ex / cur[i].max(floor)).ln());
     }
     if logs.is_empty() {
-        return (0.0, 0.0, 0.0, 0);
+        return DseSampleStat::default();
     }
-    let mean = logs.iter().sum::<f64>() / logs.len() as f64;
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        let n = v.len();
+        if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) }
+    };
+    let n = logs.len();
+    let mean = logs.iter().sum::<f64>() / n as f64;
     let mut a: Vec<f64> = logs.iter().map(|v| v.abs()).collect();
-    a.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-    let n = a.len();
-    let med = if n % 2 == 1 { a[n / 2] } else { 0.5 * (a[n / 2 - 1] + a[n / 2]) };
-    (med, mean, a[n - 1], n)
+    let med_abs = median(&mut a);
+    let max_abs = a[n - 1];
+    let mut l = logs.clone();
+    let mid = median(&mut l);
+    let mut d: Vec<f64> = logs.iter().map(|v| (v - mid).abs()).collect();
+    let spread = median(&mut d);
+    DseSampleStat { n, med_abs, mean, max_abs, spread }
 }
 
 pub(crate) fn set_warm_dse(w: Option<Vec<f64>>) {
@@ -4392,10 +4418,21 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
 
     // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q` ([`DSE_SAMPLE_ONCE`]): 始めの重みを標本の行で厳密な値と比べ、ずれが大きいときだけ
     // 全部の行の厳密な重みを計算する (止めの合図・期限でやめたら始めの重みのまま)
-    if let Some((k, dev)) = DSE_SAMPLE_ONCE.with(|c| c.take()) {
+    if let Some((k, dev, stat)) = DSE_SAMPLE_ONCE.with(|c| c.take()) {
         if warm_started {
             let t0 = std::time::Instant::now();
-            let (med, mean, mx, kk) = dse_sample_deviation(&lu, &dse.w, k);
+            let all_rows: Vec<usize> = (0..m).collect();
+            let all = dse_sample_deviation(&lu, &dse.w, &all_rows, k, 0x9e37_79b9_7f4a_7c15);
+            // 主実行不能な行 (集合の並びは順不同なので並べてから選ぶ)
+            let mut inf_rows = infeasible_rows.rows.clone();
+            inf_rows.sort_unstable();
+            let inf = dse_sample_deviation(&lu, &dse.w, &inf_rows, k, 0x5851_f42d_4c95_7f2d);
+            let (value, kk) = match stat {
+                1 => (all.spread, all.n),
+                2 => (inf.spread, inf.n),
+                _ => (all.med_abs, all.n),
+            };
+            let med = value;
             let sample_secs = t0.elapsed().as_secs_f64();
             let (mut full, mut full_secs) = (0u8, 0.0);
             if kk > 0 && med > dev {
@@ -4411,7 +4448,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 }
                 full_secs = t1.elapsed().as_secs_f64();
             }
-            DSE_SAMPLE_RESULT.with(|c| c.set(Some(DseSampleResult { m, k: kk, med_abs_log: med, mean_log: mean, max_abs_log: mx, sample_secs, full, full_secs })));
+            DSE_SAMPLE_RESULT.with(|c| c.set(Some(DseSampleResult { m, n_inf: infeasible_rows.rows.len(), all, inf, value, sample_secs, full, full_secs })));
         }
     }
 
