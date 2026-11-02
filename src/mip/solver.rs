@@ -224,6 +224,12 @@ thread_local! {
     /// 行 0, 1, 2, ... の論理変数で埋めることになり ([`crate::simplex::mip_lp::TwoStageLp::set_basis`] の修復)、最適基底とは遠い基底から
     /// 解き直す (uccase12 で根の LP が 40 秒終わらなかった。analysis/uccase12_20261023.md)
     pub(crate) static ROOT_BASIS_ROWS: std::cell::RefCell<Option<u64>> = const { std::cell::RefCell::new(None) };
+    /// `ENOMOTO_MIP_ROOT_BASIS_FIX` (試作): [`ROOT_BASIS`] を作った前処理の LP の行の中身と論理変数の状態、その LP の解 (列の値)。
+    /// 根の LP の行が前処理の LP の行と違う (指紋が合わない) とき、行を中身で照らし合わせ、合わない行は解での行の活動から
+    /// 論理変数の状態を決めて、特異でない基底を作る ([`root_basis_rebuild`])
+    pub(crate) static ROOT_BASIS_SAVED: std::cell::RefCell<Option<(Vec<(Vec<(usize, f64)>, super::lp::VarStatus)>, Vec<f64>)>> = const { std::cell::RefCell::new(None) };
+    /// `ENOMOTO_MIP_ROOT_BASIS_FIX` (試作): [`RESTART_BASIS`] を作った再スタートの直前の LP の解 (列の値)
+    pub(crate) static RESTART_X: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
     /// ヒューリスティクス役のスレッド (`ENOMOTO_MIP_HEUR_ROLE`、[`Solver::heur_role_run`]) の共有の待ち行列。このスレッドで
     /// 解くサブ MIP も、木の探索が終わるか止める合図が立ったら打ち切る ([`Solver::time_up`])。
     static ROLE_POOL: std::cell::RefCell<Option<std::sync::Arc<WorkPool>>> = const { std::cell::RefCell::new(None) };
@@ -1018,6 +1024,220 @@ fn restart_basis_for<L: MipLp>(lp: &L, n: usize, saved: (Vec<super::lp::VarStatu
         })
         .collect();
     Some((super::lp::Basis { col, row }, matched))
+}
+
+/// `ENOMOTO_MIP_ROOT_BASIS_FIX` (試作、既定では使わない): 前処理の LP の基底からの根 (root_probe) と再スタートの後の根 (restart) に、
+/// 特異でない基底を渡す ([`root_basis_rebuild`])。既定では、root_probe は前処理の LP の後に行が変わると (クリーク行の拡張・
+/// 支配される行の削除など) 列の状態だけを渡し、`set_basis` の修復が行 0, 1, 2, ... の論理変数で基底を埋める。restart は
+/// 中身の合わない行の論理変数をすべて基底に入れ、多すぎる分を修復が構造列から外す。どちらも基底が特異になりやすく
+/// (58 問で root_probe の 69%、restart の 89%)、全スラック基底から解き直していた (analysis/basis_nb_diag_20261102.md の 3 節)
+pub(crate) fn root_basis_fix_on() -> bool {
+    env_str!("ENOMOTO_MIP_ROOT_BASIS_FIX").is_some()
+}
+
+/// `ENOMOTO_MIP_ROOT_BASIS_FIX` の値に文字 `c` が入っているか (試す形の切り替え。`f`: 固定の列も基底から外す、
+/// `a`: 照らし合わせられない行は活動を見ずに論理変数を基底にする、`n`: 非基底の上限・下限の置き場所も渡す、
+/// `k`: 前の行の中身をそのまま照らし合わせる (今の LP に現れない列を除かない)、`r`: 再スタートの後の根に、照らし合わせの
+/// 割合によらず作った基底を渡す)
+pub(crate) fn root_basis_fix_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_ROOT_BASIS_FIX").is_some_and(|v| v.contains(c))
+}
+
+/// [`root_basis_rebuild`] が作った基底の内訳 (ログ用)
+#[derive(Default, Debug)]
+pub(crate) struct RootBasisFixStats {
+    /// 中身で照らし合わせた行
+    pub matched: usize,
+    /// 照らし合わせられず、解での行の活動が境界にあって論理変数を非基底にした行
+    pub tight: usize,
+    /// 照らし合わせられず、論理変数を基底にした行
+    pub loose: usize,
+    /// 基底だったが、空の列 (今の LP の行に現れない) か固定の列なので外した構造列
+    pub dropped: usize,
+    /// 基底変数が多すぎて外した数 / 足りなくて論理変数を足した数
+    pub trimmed: usize,
+    pub padded: usize,
+    /// LU で一次従属だったので論理変数に差し替えた数
+    pub swapped: usize,
+    /// 差し替えても分解できなかった (基底は作ったが特異の見込み)
+    pub singular: bool,
+}
+
+/// `ENOMOTO_MIP_ROOT_BASIS_FIX`: 前の LP の列の状態 `col`・行 (中身と論理変数の状態) `rows`・解 `x` から、今の LP `lp` の
+/// 特異でない基底 (基底変数がちょうど行の数) を作る。
+/// 1. 構造列: 基底だった列のうち、今の LP の行に現れない (前処理で消えた) 列と固定の列は外す (非基底は解の値に近い側)。
+/// 2. 行: 中身が前の LP の行と同じなら ([`row_key`]) その状態。合わない行 (拡張したクリーク行・固定した列を消した行・新しい行) は、
+///    前の解 `x` での行の活動がどちらかの境界にあれば非基底 (その側)、なければ論理変数を基底にする。
+/// 3. 基底変数の数を行の数に合わせる (多ければ、照らし合わせられなかった行の論理変数・照らし合わせた行の論理変数・構造列の順に
+///    後ろから外し、少なければ非基底の行の論理変数を、照らし合わせられなかった行から足す)。
+/// 4. 疎な LU ([`crate::simplex::lu::rank_deficient_remainder`]) でピボットの取れない列を、残りの行の論理変数に差し替える
+///    (数回まで)。
+/// 列の数が違えば `None`
+pub(crate) fn root_basis_rebuild<L: MipLp>(lp: &L, n: usize, col: &[super::lp::VarStatus], rows: &[(Vec<(usize, f64)>, super::lp::VarStatus)], x: &[f64]) -> Option<(super::lp::Basis, RootBasisFixStats)> {
+    use super::lp::VarStatus;
+    if col.len() != n || x.len() != n {
+        return None;
+    }
+    let m = lp.num_rows();
+    let mut st = RootBasisFixStats::default();
+    let cur: Vec<Vec<(usize, f64)>> = (0..m).map(|i| lp.row(i)).collect();
+    let mut col_nnz = vec![0usize; n];
+    for r in &cur {
+        for &(j, v) in r {
+            if j < n && v != 0.0 {
+                col_nnz[j] += 1;
+            }
+        }
+    }
+    let near = |a: f64, b: f64| b.is_finite() && (a - b).abs() <= 1e-7 * (1.0 + b.abs());
+    let side_of = |j: usize| -> VarStatus {
+        let (lo, up) = lp.col_bounds(j);
+        if near(x[j], up) && !near(x[j], lo) {
+            VarStatus::Upper
+        } else if lo.is_finite() {
+            VarStatus::Lower
+        } else if up.is_finite() {
+            VarStatus::Upper
+        } else {
+            VarStatus::Zero
+        }
+    };
+    // 1. 構造列 (固定の列は既定では基底に残す: 双対実行可能なまま、双対単体法が外す)
+    let drop_fixed = root_basis_fix_has('f');
+    let all_basic = root_basis_fix_has('a');
+    let mut cst: Vec<VarStatus> = col.to_vec();
+    for j in 0..n {
+        let (lo, up) = lp.col_bounds(j);
+        if cst[j] == VarStatus::Basic && (col_nnz[j] == 0 || (drop_fixed && lo >= up)) {
+            cst[j] = side_of(j);
+            st.dropped += 1;
+        }
+    }
+    // 2. 行
+    let swap = |s: VarStatus, flip: bool| match (s, flip) {
+        (VarStatus::Lower, true) => VarStatus::Upper,
+        (VarStatus::Upper, true) => VarStatus::Lower,
+        (s, _) => s,
+    };
+    // 前の行から今の LP に現れない列 (前処理で固定して消した列) を除いてから照らし合わせる (再スタートの後の前処理は固定した列を
+    // 行から消すので、そのままでは中身が合わない)。`k` を含む値なら除かない
+    let keep_all = root_basis_fix_has('k');
+    let mut map: std::collections::HashMap<Vec<(usize, i64)>, VarStatus> = std::collections::HashMap::with_capacity(rows.len());
+    for (r, s) in rows {
+        let key = if keep_all {
+            row_key(r)
+        } else {
+            let rr: Vec<(usize, f64)> = r.iter().copied().filter(|&(j, _)| j < n && col_nnz[j] > 0).collect();
+            row_key(&rr)
+        };
+        if let Some((k, flip)) = key {
+            map.insert(k, swap(*s, flip));
+        }
+    }
+    let mut rst: Vec<VarStatus> = Vec::with_capacity(m);
+    let mut matched = vec![false; m];
+    for i in 0..m {
+        match row_key(&cur[i]).and_then(|(k, flip)| map.get(&k).map(|&s| swap(s, flip))) {
+            Some(s) => {
+                st.matched += 1;
+                matched[i] = true;
+                rst.push(s);
+            }
+            None => {
+                let act: f64 = cur[i].iter().map(|&(j, v)| if j < n { v * x[j] } else { 0.0 }).sum();
+                let (lo, up) = lp.row_bounds(i);
+                let s = if all_basic {
+                    VarStatus::Basic
+                } else if near(act, up) {
+                    VarStatus::Upper
+                } else if near(act, lo) {
+                    VarStatus::Lower
+                } else {
+                    VarStatus::Basic
+                };
+                if s == VarStatus::Basic {
+                    st.loose += 1;
+                } else {
+                    st.tight += 1;
+                }
+                rst.push(s);
+            }
+        }
+    }
+    // 3. 基底変数の数 (標準形の番号: 構造列 j < n、行 n + i)
+    let mut basis: Vec<usize> = (0..n).filter(|&j| cst[j] == VarStatus::Basic).collect();
+    basis.extend((0..m).filter(|&i| matched[i] && rst[i] == VarStatus::Basic).map(|i| n + i));
+    basis.extend((0..m).filter(|&i| !matched[i] && rst[i] == VarStatus::Basic).map(|i| n + i));
+    let row_nb = |i: usize, act_x: &[f64]| -> VarStatus {
+        let act: f64 = cur[i].iter().map(|&(j, v)| if j < n { v * act_x[j] } else { 0.0 }).sum();
+        let (lo, up) = lp.row_bounds(i);
+        if near(act, up) && !near(act, lo) {
+            VarStatus::Upper
+        } else if lo.is_finite() {
+            VarStatus::Lower
+        } else {
+            VarStatus::Upper
+        }
+    };
+    while basis.len() > m {
+        let v = basis.pop().unwrap();
+        st.trimmed += 1;
+        if v < n {
+            cst[v] = side_of(v);
+        } else {
+            rst[v - n] = row_nb(v - n, x);
+        }
+    }
+    if basis.len() < m {
+        let need = m - basis.len();
+        let cand: Vec<usize> = (0..m).filter(|&i| !matched[i] && rst[i] != VarStatus::Basic).chain((0..m).filter(|&i| matched[i] && rst[i] != VarStatus::Basic)).take(need).collect();
+        for i in cand {
+            rst[i] = VarStatus::Basic;
+            basis.push(n + i);
+            st.padded += 1;
+        }
+    }
+    // 4. 一次従属な列を論理変数に差し替える
+    let mut ok = false;
+    for round in 0..4 {
+        let mut pos_of = vec![usize::MAX; n + m];
+        for (p, &v) in basis.iter().enumerate() {
+            pos_of[v] = p;
+        }
+        let mat: Vec<Vec<(usize, f64)>> = (0..m)
+            .map(|i| {
+                let mut r: Vec<(usize, f64)> = cur[i].iter().filter(|&&(j, v)| j < n && v != 0.0 && pos_of[j] != usize::MAX).map(|&(j, v)| (pos_of[j], v)).collect();
+                if pos_of[n + i] != usize::MAX {
+                    r.push((pos_of[n + i], 1.0));
+                }
+                r
+            })
+            .collect();
+        let Some((cols, free_rows)) = crate::simplex::lu::rank_deficient_remainder(m, &mat) else {
+            ok = true;
+            break;
+        };
+        if round == 3 {
+            break;
+        }
+        for (&p, &r) in cols.iter().zip(&free_rows) {
+            let old = basis[p];
+            if pos_of[n + r] != usize::MAX {
+                continue;
+            }
+            if old < n {
+                cst[old] = side_of(old);
+            } else {
+                rst[old - n] = row_nb(old - n, x);
+            }
+            basis[p] = n + r;
+            pos_of[n + r] = p;
+            rst[r] = VarStatus::Basic;
+            st.swapped += 1;
+        }
+    }
+    st.singular = !ok;
+    Some((super::lp::Basis { col: cst, row: rst }, st))
 }
 
 pub(crate) struct SnapNode {
@@ -4018,8 +4238,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 行の状態は、前処理の LP の行と根の LP の始めの行が同じ (指紋が合う) ときだけ使う (`ENOMOTO_MIP_LP_PROBE_ROW_BASIS`。
             // 合わなければ列の状態だけにし、DSE 重みも捨てる)
             let fp = ROOT_BASIS_ROWS.with(|s| s.borrow_mut().take());
+            let saved = ROOT_BASIS_SAVED.with(|s| s.borrow_mut().take());
+            // `ENOMOTO_MIP_ROOT_BASIS_FIX` (試作): 行が変わっていたら (指紋が合わない・行の状態がない)、行を中身で照らし合わせ、
+            // 一次従属な列を論理変数に替えた特異でない基底にする ([`root_basis_rebuild`])。DSE 重みは使わない
+            let rows_same = |b: &super::lp::Basis| !b.row.is_empty() && b.row.len() <= self.p.m && fp.is_some_and(|f| super::rows_fingerprint(&self.p.rows[..b.row.len()]) == f);
+            let mut rebuilt = false;
+            let rb = match (rb, saved) {
+                (Some(b), Some((rows, x))) if root_basis_fix_on() && b.col.len() == self.p.n && !rows_same(&b) => {
+                    let t0 = std::time::Instant::now();
+                    match root_basis_rebuild(&self.lp, self.p.n, &b.col, &rows, &x) {
+                        Some((nb, st)) => {
+                            if self.params.verbose {
+                                eprintln!("MIP: root LP basis fix (presolve LP probing): {} rows, {st:?} ({:.2}s)", self.lp.num_rows(), t0.elapsed().as_secs_f64());
+                            }
+                            ROOT_DSE.with(|s| *s.borrow_mut() = None);
+                            rebuilt = true;
+                            Some(nb)
+                        }
+                        None => Some(b),
+                    }
+                }
+                (rb, _) => rb,
+            };
             let rb = rb.map(|mut b| {
-                if !b.row.is_empty() && (b.row.len() > self.p.m || fp.is_none_or(|f| super::rows_fingerprint(&self.p.rows[..b.row.len()]) != f)) {
+                if !rebuilt && !b.row.is_empty() && (b.row.len() > self.p.m || fp.is_none_or(|f| super::rows_fingerprint(&self.p.rows[..b.row.len()]) != f)) {
                     if self.params.verbose {
                         eprintln!("MIP: root LP: the rows changed after LP probing; the row statuses are not used");
                     }
@@ -4050,7 +4292,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         b.row.resize(self.lp.num_rows(), super::lp::VarStatus::Basic);
                     }
                     crate::simplex::nb_diag::tag(crate::simplex::nb_diag::ROOT_PROBE);
-                    self.lp.set_basis(&b);
+                    if rebuilt && root_basis_fix_has('n') {
+                        self.lp.set_basis_nb(&b, &[]);
+                    } else {
+                        self.lp.set_basis(&b);
+                    }
                     // DSE 重みも引き継ぐ (根の LP の 1 回だけ。重みなしで始めると、カットのループの LP の反復が増えた)
                     if let Some(w) = ROOT_DSE.with(|s| s.borrow_mut().take()) {
                         self.lp.set_dse_vars(&w);
@@ -4062,14 +4308,47 @@ impl<'a, L: MipLp> Solver<'a, L> {
         ROOT_DSE.with(|s| *s.borrow_mut() = None);
         // `ENOMOTO_MIP_RESTART_BASIS` (試作): 再スタートの後の根の LP は、再スタートの直前の LP の基底から解き始める
         let restart_basis_used = if !self.params.submip && self.snap.is_none() && self.params.restarts > 0 {
-            match RESTART_BASIS.with(|s| s.borrow_mut().take()).and_then(|saved| restart_basis_for(&self.lp, self.p.n, saved)) {
+            let rx = RESTART_X.with(|s| s.borrow_mut().take());
+            let mut skip_restart_basis = false;
+            let saved = RESTART_BASIS.with(|s| s.borrow_mut().take());
+            // `ENOMOTO_MIP_ROOT_BASIS_FIX` (試作): 特異でない基底を作る ([`root_basis_rebuild`])。合わない行は前の解の行の活動で決める
+            let built = match (&saved, &rx) {
+                (Some((col, rows)), Some(x)) if root_basis_fix_on() => {
+                    let t0 = std::time::Instant::now();
+                    let m = self.lp.num_rows();
+                    match root_basis_rebuild(&self.lp, self.p.n, col, rows, x) {
+                        Some((b, st)) => {
+                            // 照らし合わせた行が `ENOMOTO_T_MIP_ROOT_BASIS_FIX_MATCH` (既定 0.9) 未満の割合か、外した列が行の数の
+                            // `ENOMOTO_T_MIP_ROOT_BASIS_FIX_DROP` (既定 0.02) より多ければ、基底を渡さない (全スラック基底から解く)。
+                            // mzzv42z は再スタートの前処理で列を 650 本ほど固定して消し、行の 75% しか合わず、作った基底は特異では
+                            // ないが主実行不能な基底変数が 4580 個あり、双対単体法が 1 万反復 20 秒で終わらなかった (既定の全スラック
+                            // 基底からは 2.9 万反復 15 秒)。`r` を含む値なら常に渡す
+                            let good = root_basis_fix_has('r')
+                                || (st.matched as f64 >= tunable!("ENOMOTO_T_MIP_ROOT_BASIS_FIX_MATCH", 0.9, f64) * m as f64
+                                    && st.dropped as f64 <= tunable!("ENOMOTO_T_MIP_ROOT_BASIS_FIX_DROP", 0.02, f64) * m as f64);
+                            if self.params.verbose {
+                                eprintln!("MIP: root LP basis fix (before the restart): {m} rows, {st:?}, {} ({:.2}s)", if good { "used" } else { "not used" }, t0.elapsed().as_secs_f64());
+                            }
+                            if good {
+                                Some((b, st.matched))
+                            } else {
+                                skip_restart_basis = true;
+                                None
+                            }
+                        }
+                        None => None,
+                    }
+                }
+                _ => None,
+            };
+            match built.or_else(|| if skip_restart_basis { None } else { saved.and_then(|saved| restart_basis_for(&self.lp, self.p.n, saved)) }) {
                 Some((b, matched)) => {
                     if self.params.verbose {
                         eprintln!("MIP: root LP basis from before the restart: {matched} of {} rows matched", self.lp.num_rows());
                     }
                     crate::simplex::nb_diag::tag(crate::simplex::nb_diag::RESTART);
                     // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `r`): 上限・下限の置き場所も渡す
-                    if crate::simplex::mip_lp::basis_nb_on('r') {
+                    if crate::simplex::mip_lp::basis_nb_on('r') || (root_basis_fix_on() && root_basis_fix_has('n')) {
                         self.lp.set_basis_nb(&b, &[]);
                     } else {
                         self.lp.set_basis(&b);
@@ -11707,6 +11986,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let b = self.lp.basis();
             let rows: Vec<(Vec<(usize, f64)>, super::lp::VarStatus)> = (0..self.lp.num_rows().min(b.row.len())).map(|i| (self.lp.row(i), b.row[i])).collect();
             RESTART_BASIS.with(|s| *s.borrow_mut() = Some((b.col, rows)));
+            if root_basis_fix_on() {
+                RESTART_X.with(|s| *s.borrow_mut() = Some(self.lp.col_values()));
+            }
         }
         // 診断: 再スタートの時点の pseudocost の観測 (観測のある列の数と観測の総数、analysis/restart_pc_20261031.md)
         if self.params.verbose {
@@ -11725,6 +12007,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         super::RESTART_HCM.with(|f| f.set(false));
         super::RESTART_CUTS_READD.with(|f| f.set(false));
         RESTART_BASIS.with(|s| *s.borrow_mut() = None);
+        RESTART_X.with(|s| *s.borrow_mut() = None);
         super::RESTART_SOL.with(|s| *s.borrow_mut() = None);
         super::RESTART_CUTS.with(|s| *s.borrow_mut() = None);
         let nodes = self.nodes + r.nodes;

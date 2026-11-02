@@ -864,6 +864,8 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         solver::ROOT_DSE.with(|t| *t.borrow_mut() = None);
         solver::RESTART_BASIS.with(|t| *t.borrow_mut() = None);
         solver::ROOT_BASIS_ROWS.with(|t| *t.borrow_mut() = None);
+        solver::ROOT_BASIS_SAVED.with(|t| *t.borrow_mut() = None);
+        solver::RESTART_X.with(|t| *t.borrow_mut() = None);
     }
     r
 }
@@ -3111,6 +3113,11 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
         let with_rows = (finish || env_def!("ENOMOTO_MIP_LP_PROBE_ROW_BASIS", "1").is_some()) && b.row.len() == prob.m;
         if with_rows {
             solver::ROOT_BASIS_ROWS.with(|s| *s.borrow_mut() = Some(rows_fingerprint(&prob.rows)));
+        }
+        // `ENOMOTO_MIP_ROOT_BASIS_FIX` (試作): 行の中身と状態・解も渡す (根の LP の行が変わっていたら中身で照らし合わせて基底を作る)
+        if solver::root_basis_fix_on() && b.row.len() == prob.m {
+            let rows: Vec<(Vec<(usize, f64)>, lp::VarStatus)> = prob.rows.iter().cloned().zip(b.row.iter().copied()).collect();
+            solver::ROOT_BASIS_SAVED.with(|s| *s.borrow_mut() = Some((rows, lp.col_values())));
         }
         let b = if with_rows { b } else { lp::Basis { col: b.col, row: Vec::new() } };
         solver::ROOT_BASIS.with(|s| *s.borrow_mut() = Some(b));
