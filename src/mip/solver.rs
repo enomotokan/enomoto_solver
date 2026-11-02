@@ -195,6 +195,10 @@ thread_local! {
     pub(super) static BG_DSE_EXACT_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=r` (既定では使わない): 写しの根の LP を厳密な DSE 重みから解く (根の LP の前に下ろす)
     static BG_DSE_ROOT_EXACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q`・`=1q` (既定では使わない): 写しの最初のカットの LP の前に、始めの DSE 重みを基底の行の標本で
+    /// 厳密な値と比べ、ずれが大きいときだけ全部の行の厳密な重みを計算する。根のカットのループが最初のカットの LP の前に下ろす
+    /// (analysis/bgdse_quality_20261102.md)
+    pub(super) static BG_DSE_SAMPLE_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 診断用: 既知の最適解 (縮約後の空間、`ENOMOTO_MIP_DEBUG_SOL`)。この解を含むノードが
     /// 枝刈りされたら理由を表示する (SCIP の debug solution と同様)。
     pub(crate) static DEBUG_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
@@ -4952,7 +4956,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 試作 `ENOMOTO_MIP_BG_CUTS_DSE` (既定では使わない): `1` は主の根の LP の最終基底の DSE 重みも渡し、`x` は写しの
                 // 最初のカットの LP だけ、`r` は写しの根の LP を厳密な重みから解く (analysis/bgdse_20261102.md)
                 let bg_dse_mode = env_str!("ENOMOTO_MIP_BG_CUTS_DSE");
-                let bg_dse = if bg_dse_mode == Some("1") && bg_basis.is_some() { self.lp.dse_snapshot() } else { None };
+                // `q`・`1q` (試作、analysis/bgdse_quality_20261102.md): 写しの最初のカットの LP の前に、始めの重みを基底の行の標本で厳密な値と
+                // 比べ、ずれが閾値を超えたときだけ全部の行の厳密な重みを計算する (`1q` は主の重みも渡す)。列の値の有無によらずかける
+                let bg_dse_sample = matches!(bg_dse_mode, Some("q") | Some("1q"));
+                let bg_dse = if matches!(bg_dse_mode, Some("1") | Some("1q")) && bg_basis.is_some() { self.lp.dse_snapshot() } else { None };
                 let bg_dse_exact = bg_dse_mode == Some("x");
                 // `rw` (試作、analysis/bg_lp_work_20261102.md): `r` を列の値を渡す問題 (`lpw` が働く問題) だけに絞り、厳密な重みの計算
                 // (行ごとの BTRAN) の途中で主の止めの合図と期限を見る (`r` は列の値の有無によらずかかって mc11・roll3000 で裏のカットの道を変え、
@@ -4963,7 +4970,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: background cuts: exact DSE weights for the root LP of the copy {}", if bg_dse_rw { "on" } else { "off (column values not passed)" });
                 }
                 let j3 = job.clone();
-                if bg_dse_mode == Some("1") && self.params.verbose {
+                if matches!(bg_dse_mode, Some("1") | Some("1q")) && self.params.verbose {
                     eprintln!("MIP: background cuts: DSE weights {}", bg_dse.as_ref().map_or("not available".to_string(), |w| format!("passed ({} rows)", w.len())));
                 }
                 // 診断 (`ENOMOTO_MIP_BG_CUTS_LOG`): 主の LP の列の境界と大域的な境界 (写しの LP の境界) の食い違い
@@ -4997,7 +5004,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         BG_ROOT_DSE.with(|b| *b.borrow_mut() = bg_dse);
                         BG_DSE_EXACT_FIRST.with(|c| c.set(bg_dse_exact));
                         BG_DSE_ROOT_EXACT.with(|c| c.set(bg_dse_root_exact));
-                        if bg_dse_rw {
+                        BG_DSE_SAMPLE_FIRST.with(|c| c.set(bg_dse_sample));
+                        if bg_dse_rw || bg_dse_sample {
                             let verbose = params.verbose;
                             crate::simplex::slope_intercept_dual::DSE_EXACT_STOP.with(|h| *h.borrow_mut() = Some(Box::new(move || j3.stop.load(std::sync::atomic::Ordering::Relaxed))));
                             crate::simplex::slope_intercept_dual::DSE_EXACT_STOP_LOG.with(|c| c.set(verbose));

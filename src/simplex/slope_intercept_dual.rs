@@ -1171,6 +1171,90 @@ thread_local! {
     pub(crate) static DSE_EXACT_STOP: std::cell::RefCell<Option<Box<dyn Fn() -> bool>>> = const { std::cell::RefCell::new(None) };
     /// [`DSE_EXACT_STOP`] で計算をやめたときに表示する
     pub(crate) static DSE_EXACT_STOP_LOG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q` (既定では使わない): 次の 1 回の warm start の求解だけ、始めの DSE 重み (引き継いだもの・
+    /// 単位重み) を基底の行から `k` 行の標本で厳密な値と比べ、ずれ (`|ln(厳密 / 今)|` の中央値) が `dev` を超えたときだけ
+    /// 全部の行の厳密な重みを計算する (`(k, dev)`。求解の始めに下ろす。期限・取り消し・[`DSE_EXACT_STOP`] を 32 行ごとに見る)
+    pub(crate) static DSE_SAMPLE_ONCE: std::cell::Cell<Option<(usize, f64)>> = const { std::cell::Cell::new(None) };
+    /// [`DSE_SAMPLE_ONCE`] の結果 (呼び出し側が表示に取り出す)
+    pub(crate) static DSE_SAMPLE_RESULT: std::cell::Cell<Option<DseSampleResult>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`DSE_SAMPLE_ONCE`] の標本の確かめの結果。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DseSampleResult {
+    /// 基底の行の数
+    pub m: usize,
+    /// 標本の行の数 (BTRAN の回数)
+    pub k: usize,
+    /// `|ln(厳密 / 今)|` の中央値
+    pub med_abs_log: f64,
+    /// `ln(厳密 / 今)` の平均 (比の幾何平均の対数)
+    pub mean_log: f64,
+    /// `|ln(厳密 / 今)|` の最大
+    pub max_abs_log: f64,
+    /// 標本の計算の時間 (秒)
+    pub sample_secs: f64,
+    /// 全部の行の厳密な重みを計算したか (0 しない、1 した、2 期限・止めの合図でやめた)
+    pub full: u8,
+    /// 全部の行の計算の時間 (秒)
+    pub full_secs: f64,
+}
+
+/// [`DSE_SAMPLE_ONCE`] の標本の確かめ: 基底の行から `k` 行を決まった種の乱数で選び、厳密な重み (BTRAN の 2 乗ノルム) と
+/// `cur` の重みの比のずれを測る。`(|ln 比| の中央値, ln 比の平均, |ln 比| の最大, 標本の数)`
+fn dse_sample_deviation(lu: &sparse_lu::FtLu, cur: &[f64], k: usize) -> (f64, f64, f64, usize) {
+    let m = cur.len();
+    if m == 0 || k == 0 {
+        return (0.0, 0.0, 0.0, 0);
+    }
+    let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+    // 決まった種の乱数 (splitmix64) で k 行を重複なしに選ぶ (k >= m なら全部の行)
+    let rows: Vec<usize> = if k >= m {
+        (0..m).collect()
+    } else {
+        let mut st: u64 = 0x9e37_79b9_7f4a_7c15 ^ (m as u64);
+        let mut next = || {
+            st = st.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = st;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        let mut seen = std::collections::HashSet::with_capacity(2 * k);
+        let mut v = Vec::with_capacity(k);
+        while v.len() < k {
+            let i = (next() % m as u64) as usize;
+            if seen.insert(i) {
+                v.push(i);
+            }
+        }
+        v
+    };
+    let mut scratch = vec![0.0; m];
+    let mut z = vec![0.0; m];
+    let fresh = lu.update_count() == 0;
+    let mut logs = Vec::with_capacity(rows.len());
+    for &i in &rows {
+        if !cur[i].is_finite() || cur[i] <= 0.0 {
+            continue;
+        }
+        if fresh {
+            lu.solve_transpose_unit_into(i, &mut scratch, &mut z);
+        } else {
+            lu.solve_transpose_unit(i, &mut scratch, &mut z);
+        }
+        let ex: f64 = z.iter().map(|&v| v * v).sum::<f64>().max(floor);
+        logs.push((ex / cur[i].max(floor)).ln());
+    }
+    if logs.is_empty() {
+        return (0.0, 0.0, 0.0, 0);
+    }
+    let mean = logs.iter().sum::<f64>() / logs.len() as f64;
+    let mut a: Vec<f64> = logs.iter().map(|v| v.abs()).collect();
+    a.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    let n = a.len();
+    let med = if n % 2 == 1 { a[n / 2] } else { 0.5 * (a[n / 2 - 1] + a[n / 2]) };
+    (med, mean, a[n - 1], n)
 }
 
 pub(crate) fn set_warm_dse(w: Option<Vec<f64>>) {
@@ -4279,6 +4363,31 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             super::DseState::new(m)
         }
     };
+
+    // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q` ([`DSE_SAMPLE_ONCE`]): 始めの重みを標本の行で厳密な値と比べ、ずれが大きいときだけ
+    // 全部の行の厳密な重みを計算する (止めの合図・期限でやめたら始めの重みのまま)
+    if let Some((k, dev)) = DSE_SAMPLE_ONCE.with(|c| c.take()) {
+        if warm_started {
+            let t0 = std::time::Instant::now();
+            let (med, mean, mx, kk) = dse_sample_deviation(&lu, &dse.w, k);
+            let sample_secs = t0.elapsed().as_secs_f64();
+            let (mut full, mut full_secs) = (0u8, 0.0);
+            if kk > 0 && med > dev {
+                let t1 = std::time::Instant::now();
+                let dl = ext_control().and_then(|c| c.deadline);
+                let stop = || dl.is_some_and(|d| std::time::Instant::now() >= d) || crate::cancel::is_cancelled() || DSE_EXACT_STOP.with(|h| h.borrow().as_ref().is_some_and(|f| f()));
+                match super::DseState::from_basis_stoppable(m, &lu, &stop) {
+                    Some(s) => {
+                        dse = s;
+                        full = 1;
+                    }
+                    None => full = 2,
+                }
+                full_secs = t1.elapsed().as_secs_f64();
+            }
+            DSE_SAMPLE_RESULT.with(|c| c.set(Some(DseSampleResult { m, k: kk, med_abs_log: med, mean_log: mean, max_abs_log: mx, sample_secs, full, full_secs })));
+        }
+    }
 
     // `ENOMOTO_DSE_WEIGHT_CHECK` (試作、既定では使わない): 選んだ行の保持している DSE 重みと `‖rho‖^2` (真の値) を比べる
     // (HiGHS `HEkkDual::chooseRow`・`acceptDualSteepestEdgeWeight` と同じ): 真の値で上書きし、保持値が真の値の

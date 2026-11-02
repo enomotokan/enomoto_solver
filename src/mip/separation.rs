@@ -1691,6 +1691,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: cut round {round}: background cut LP from the exact DSE weights");
             }
             let cut_dse_exact = (env_str!("ENOMOTO_MIP_CUT_DSE_EXACT").is_some() && !self.params.submip) || bg_dse_exact;
+            // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q`・`=1q`: 写しの最初のカットの LP の始めの重みを `ENOMOTO_T_MIP_BG_CUTS_DSE_SAMPLE` (既定 32) 行の
+            // 標本で厳密な値と比べ、`|ln(厳密 / 今)|` の中央値が `ENOMOTO_T_MIP_BG_CUTS_DSE_DEV` を超えたときだけ全部の行を厳密に (analysis/bgdse_quality_20261102.md)
+            let bg_dse_sample = job.is_some() && !cut_dse_exact && super::solver::BG_DSE_SAMPLE_FIRST.with(|c| c.replace(false));
+            if bg_dse_sample {
+                let k = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_SAMPLE", 32usize, usize);
+                let dev = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_DEV", 1.0, f64);
+                crate::simplex::slope_intercept_dual::DSE_SAMPLE_RESULT.with(|c| c.set(None));
+                crate::simplex::slope_intercept_dual::DSE_SAMPLE_ONCE.with(|c| c.set(Some((k, dev))));
+            }
             if cut_dse_exact {
                 crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
             }
@@ -1698,6 +1707,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let cut_cutoff = if root_cutoff && self.root_gap_closed_at(f64::INFINITY) { self.prune_limit() - p.offset } else { f64::INFINITY };
             let mut st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: cut_cutoff, deadline: lp_deadline });
             crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+            if bg_dse_sample {
+                crate::simplex::slope_intercept_dual::DSE_SAMPLE_ONCE.with(|c| c.set(None));
+                if self.params.verbose {
+                    match crate::simplex::slope_intercept_dual::DSE_SAMPLE_RESULT.with(|c| c.take()) {
+                        Some(r) => eprintln!(
+                            "MIP: cut round {round}: background DSE sample: {} / {} rows, median |ln(exact/cur)| {:.3}, mean ln {:.3}, max {:.3} ({:.3}s); exact weights {} ({:.3}s)",
+                            r.k, r.m, r.med_abs_log, r.mean_log, r.max_abs_log, r.sample_secs,
+                            match r.full { 1 => "computed", 2 => "stopped", _ => "not computed" }, r.full_secs
+                        ),
+                        None => eprintln!("MIP: cut round {round}: background DSE sample: not taken (not a warm start)"),
+                    }
+                }
+            }
             if let Some(dir) = &dump_dir {
                 let prefix = format!("{dir}/cutlp_r{round}_{st:?}");
                 let (b, w) = dump_basis.as_ref().unwrap();
