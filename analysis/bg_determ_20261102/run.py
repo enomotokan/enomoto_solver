@@ -18,6 +18,9 @@ CFGS = {
     "detc_s": {"ENOMOTO_MIP_BG_CUTS_DETERM": "c", **S},
     "detrc_s": {"ENOMOTO_MIP_BG_CUTS_DETERM": "rc", **S},
     "lw": LW,
+    "def_m1": {"ENOMOTO_T_MIP_BG_CUTS_WAIT_MULT": "1"},
+    "def_s_m1": {"ENOMOTO_T_MIP_BG_CUTS_WAIT_MULT": "1", **S},
+    "detc_s_m1": {"ENOMOTO_MIP_BG_CUTS_DETERM": "c", "ENOMOTO_T_MIP_BG_CUTS_WAIT_MULT": "1", **S},
     "detc_lw": {"ENOMOTO_MIP_BG_CUTS_DETERM": "c", **LW},
 }
 for k, v in json.loads(os.environ.get("BGD_EXTRA_CFGS", "{}")).items():
