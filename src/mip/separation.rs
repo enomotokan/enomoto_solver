@@ -1691,8 +1691,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: cut round {round}: background cut LP from the exact DSE weights");
             }
             let cut_dse_exact = (env_str!("ENOMOTO_MIP_CUT_DSE_EXACT").is_some() && !self.params.submip) || bg_dse_exact;
-            // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q`・`=1q`: 写しの最初のカットの LP の始めの重みを `ENOMOTO_T_MIP_BG_CUTS_DSE_SAMPLE` (既定 32) 行の
-            // 標本で厳密な値と比べ、`|ln(厳密 / 今)|` の中央値が `ENOMOTO_T_MIP_BG_CUTS_DSE_DEV` を超えたときだけ全部の行を厳密に (analysis/bgdse_quality_20261102.md)
+            // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q`・`=1q` (LP の始め)・`=qa`・`=1qa` (`ENOMOTO_T_MIP_BG_CUTS_DSE_AFTER` 反復目): 写しの最初のカットの LP の
+            // 重みを `ENOMOTO_T_MIP_BG_CUTS_DSE_SAMPLE` (既定 32) 行の標本で厳密な値と比べ、判定値 (既定は 4 倍を超えてずれた行の割合) が
+            // `ENOMOTO_T_MIP_BG_CUTS_DSE_DEV` (既定 0.1) を超えたときだけ全部の行を厳密に。既定の道筋には入れていない (analysis/bgdse_quality_20261102.md)
             let bg_dse_sample_mode = if job.is_some() && !cut_dse_exact { super::solver::BG_DSE_SAMPLE_FIRST.with(|c| c.replace(0)) } else { 0 };
             let bg_dse_sample = bg_dse_sample_mode > 0;
             if bg_dse_sample {
