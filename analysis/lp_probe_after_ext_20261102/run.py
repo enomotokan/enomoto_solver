@@ -22,7 +22,8 @@ sys.path.insert(0, str(WT / "scripts"))
 import probs  # noqa: E402
 import run_miplib_benchmark as rb  # noqa: E402
 
-CFGS = {"base": {}, "ext": {"ENOMOTO_MIP_LP_PROBE_AFTER_EXT": "1"}, "extr": {"ENOMOTO_MIP_LP_PROBE_AFTER_EXT": "r"},
+CFGS = {"base": {}, "ext": {"ENOMOTO_MIP_LP_PROBE_AFTER_EXT": "1"}, "extr": {"ENOMOTO_MIP_LP_PROBE_AFTER_EXT": "r"}, "extk": {"ENOMOTO_MIP_LP_PROBE_AFTER_EXT": "1k"},
+        "extk_nofj": {"ENOMOTO_MIP_FEAS_FJ_EARLY": "0", "ENOMOTO_MIP_LP_PROBE_AFTER_EXT": "1k"},
         "base_nofj": {"ENOMOTO_MIP_FEAS_FJ_EARLY": "0"}, "ext_nofj": {"ENOMOTO_MIP_FEAS_FJ_EARLY": "0", "ENOMOTO_MIP_LP_PROBE_AFTER_EXT": "1"},
         "extr_nofj": {"ENOMOTO_MIP_FEAS_FJ_EARLY": "0", "ENOMOTO_MIP_LP_PROBE_AFTER_EXT": "r"}}
 KEEP = ("NB_DIAG", "MIP: root LP", "MIP: LP probing", "MIP: restart ", "MIP: clique extension", "Presolve:", "MIP: presolve: rows")

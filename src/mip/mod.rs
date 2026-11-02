@@ -2984,13 +2984,14 @@ fn tighten_vubs(prob: &mut MipProblem, verbose: bool) -> Option<usize> {
 /// ([`lp_probe`]) を前処理の中ではなく、クリーク行の拡張 ([`extend_clique_rows`]) の後 (対称性の行を足す前) に行う。締めた後の LP を
 /// 一度だけ解き、その基底 (列と行の状態) を根の LP でそのまま使う (前処理の LP の後に拡張が行を書き換え、根で行の状態を捨てて
 /// 特異な基底から全スラック基底に戻っていた: analysis/singular_fix_c_20261102.md)。早めのプロービング・目的関数 0 の早めの探索は
-/// 今の場所のまま。固定が出ても前処理はかけ直さず、境界を固定するだけ (値 `r` なら前処理をかけ直してもう一度拡張する)
+/// 今の場所のまま。固定が出ても前処理はかけ直さず、境界を固定するだけ (値 `r` なら前処理をかけ直してもう一度拡張する)。
+/// 根では非基底の列・行の上限・下限の置き場所も渡す (`set_basis_nb`。値 `k` なら今まで通り解からの推し量り)
 pub(crate) fn lp_probe_after_ext() -> bool {
     env_str!("ENOMOTO_MIP_LP_PROBE_AFTER_EXT").is_some()
 }
 
 /// [`lp_probe_after_ext`] の値に文字 `c` を含むか。
-fn lp_probe_after_ext_has(c: char) -> bool {
+pub(crate) fn lp_probe_after_ext_has(c: char) -> bool {
     env_str!("ENOMOTO_MIP_LP_PROBE_AFTER_EXT").is_some_and(|v| v.contains(c))
 }
 

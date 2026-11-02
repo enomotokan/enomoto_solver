@@ -1,27 +1,29 @@
 MIP: presolve: rows 10460 -> 10460, free columns 11717 -> 11717, nonzeros 151261 -> 151261, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
-MIP: clique extension: 1270 rows extended, 27579 nonzeros added, 0 columns fixed, 0 duplicate and 139 dominated rows removed (968163 edges, 0.50s)
-MIP: LP probing: root LP 3.48s (7553 iters, size 195255), tried 0, fixed 0, basis passed true, total 7553 iters 3.48s
-MIP: LP probing after the clique extension: fixed 0 (10693 -> 10693 free columns, 10321 rows, 3.48s)
+MIP: clique extension: 1270 rows extended, 27579 nonzeros added, 0 columns fixed, 0 duplicate and 139 dominated rows removed (968163 edges, 0.29s)
+MIP: LP probing: root LP 2.41s (7553 iters, size 195255), tried 0, fixed 0, basis passed true, total 7553 iters 2.41s
+MIP: LP probing after the clique extension: fixed 0 (10693 -> 10693 free columns, 10321 rows, 2.41s)
 MIP: root LP basis from the presolve LP probing: used (with rows)
 MIP: root LP -2.1533831815e4 (1 iters, 0.04s)
-MIP: restart check: newly fixed 383, integer columns 11717, free at the root 10693, threshold 117.2, root LP 0.03s
-MIP: restart 1 (383 of 11717 integer columns newly fixed at the root, 506 cuts kept) (25.26s)
-MIP: restart 1: pseudocost observations: columns up 0, down 0, both 0 (free integer columns 10310); observations up 0, down 0; nodes 0
-MIP: presolve: rows 10827 -> 9749, free columns 10310 -> 9561, nonzeros 222779 -> 179862, postsolve steps 177 (parallel columns merged: 0 integer, 0 continuous)
-MIP: clique extension: 1646 rows extended, 21021 nonzeros added, 0 columns fixed, 0 duplicate and 392 dominated rows removed (765623 edges, 0.35s)
+MIP: restart check: newly fixed 623, integer columns 11717, free at the root 10693, threshold 117.2, root LP 0.03s
+MIP: restart 1 (623 of 11717 integer columns newly fixed at the root, 514 cuts kept) (29.42s)
+MIP: restart 1: pseudocost observations: columns up 0, down 0, both 0 (free integer columns 10070); observations up 0, down 0; nodes 0
+MIP: presolve: rows 10835 -> 9315, free columns 10070 -> 9187, nonzeros 196344 -> 135496, postsolve steps 175 (parallel columns merged: 0 integer, 0 continuous)
+MIP: clique extension: 1623 rows extended, 22568 nonzeros added, 0 columns fixed, 0 duplicate and 414 dominated rows removed (702670 edges, 0.24s)
 MIP: root LP basis from the presolve LP probing: none
-MIP: root LP basis from before the restart: 4067 of 9357 rows matched
-MIP: root LP after the restart: Optimal, 17652 iters (9.04s)
-MIP: root LP -2.0762474629e4 (17652 iters, 9.04s)
-MIP: restart check: newly fixed 215, integer columns 11717, free at the root 8648, threshold 292.9, root LP 8.97s
-NB_DIAG total 60.051
-NB_DIAG main bg_copy n=3 n_cmp=3 n_mis=2 n_fix=0 n_noeff=0 sum_cmp=19373 sum_opp=80 sum_unk=212 sum_eff=0 sum_fix=0 it_mis=2 it_ok=1 t_mis=0.0512 t_ok=0.0254 it_fix=0 t_fix=0.0000 max_it=1 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
-NB_DIAG main bg_return n=2 n_cmp=2 n_mis=2 n_fix=2 n_noeff=0 sum_cmp=11886 sum_opp=8 sum_unk=431 sum_eff=10 sum_fix=10 it_mis=858 it_ok=0 t_mis=0.6252 t_ok=0.0000 it_fix=858 t_fix=0.6252 max_it=796 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
-NB_DIAG main restart n=1 n_cmp=1 n_mis=1 n_fix=0 n_noeff=1 sum_cmp=4929 sum_opp=24 sum_unk=21 sum_eff=0 sum_fix=0 it_mis=17652 it_ok=0 t_mis=8.9743 t_ok=0.0000 it_fix=0 t_fix=0.0000 max_it=17652 it_noeff=17652 t_noeff=8.9743 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
-NB_DIAG main root_probe n=1 n_cmp=1 n_mis=1 n_fix=0 n_noeff=0 sum_cmp=7082 sum_opp=40 sum_unk=106 sum_eff=0 sum_fix=0 it_mis=1 it_ok=0 t_mis=0.0251 t_ok=0.0000 it_fix=0 t_fix=0.0000 max_it=1 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
-NB_DIAG main no_set_basis n=282 n_cmp=0 n_mis=0 n_fix=0 n_noeff=0 sum_cmp=0 sum_opp=0 sum_unk=0 sum_eff=0 sum_fix=0 it_mis=0 it_ok=107413 t_mis=0.0000 t_ok=55.8352 it_fix=0 t_fix=0.0000 max_it=15297 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
-NB_DIAG sub tree_sibling n=1 n_cmp=1 n_mis=1 n_fix=0 n_noeff=0 sum_cmp=2348 sum_opp=0 sum_unk=6 sum_eff=0 sum_fix=0 it_mis=2 it_ok=0 t_mis=0.0036 t_ok=0.0000 it_fix=0 t_fix=0.0000 max_it=2 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
-NB_DIAG sub tree_queue n=51 n_cmp=51 n_mis=47 n_fix=5 n_noeff=0 sum_cmp=38044 sum_opp=8 sum_unk=745 sum_eff=13 sum_fix=6 it_mis=1914 it_ok=40 t_mis=0.4682 t_ok=0.0152 it_fix=549 t_fix=0.1622 max_it=279 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
-NB_DIAG sub submip_root n=7 n_cmp=7 n_mis=7 n_fix=0 n_noeff=7 sum_cmp=6173 sum_opp=74 sum_unk=6 sum_eff=0 sum_fix=0 it_mis=5306 it_ok=0 t_mis=0.2462 t_ok=0.0000 it_fix=0 t_fix=0.0000 max_it=2444 it_noeff=5306 t_noeff=0.2462 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
-NB_DIAG sub no_set_basis n=297 n_cmp=0 n_mis=0 n_fix=0 n_noeff=0 sum_cmp=0 sum_opp=0 sum_unk=0 sum_eff=0 sum_fix=0 it_mis=0 it_ok=17419 t_mis=0.0000 t_ok=3.5442 it_fix=0 t_fix=0.0000 max_it=3791 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
-RESULT {"status": "time_limit", "objective": -20490.0, "bound": -20748.91874422022, "nodes": 2, "time": 60.06002498199996, "root_bound": -20748.91874422022, "first_solution_time": 15.833135698, "first_solution_objective": -3800.0}
+MIP: root LP basis from before the restart: 3696 of 8901 rows matched
+MIP: root LP after the restart: Optimal, 11243 iters (4.40s)
+MIP: root LP -2.0761556927e4 (11243 iters, 4.41s)
+MIP: restart check: newly fixed 116, integer columns 11717, free at the root 8342, threshold 292.9, root LP 4.36s
+NB_DIAG total 60.046
+NB_DIAG main tree_queue n=5 n_cmp=5 n_mis=5 n_fix=4 n_noeff=0 sum_cmp=23700 sum_opp=36 sum_unk=435 sum_eff=37 sum_fix=37 it_mis=2617 it_ok=0 t_mis=1.2082 t_ok=0.0000 it_fix=2259 t_fix=1.0358 max_it=868 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
+NB_DIAG main tree_pool n=3 n_cmp=3 n_mis=2 n_fix=0 n_noeff=0 sum_cmp=14741 sum_opp=0 sum_unk=51 sum_eff=2 sum_fix=0 it_mis=1505 it_ok=87 t_mis=0.7357 t_ok=0.0544 it_fix=0 t_fix=0.0000 max_it=990 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
+NB_DIAG main bg_copy n=3 n_cmp=3 n_mis=2 n_fix=0 n_noeff=0 sum_cmp=19260 sum_opp=80 sum_unk=212 sum_eff=0 sum_fix=0 it_mis=2 it_ok=1 t_mis=0.0470 t_ok=0.0246 it_fix=0 t_fix=0.0000 max_it=1 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
+NB_DIAG main bg_return n=1 n_cmp=1 n_mis=1 n_fix=1 n_noeff=0 sum_cmp=6685 sum_opp=3 sum_unk=379 sum_eff=4 sum_fix=4 it_mis=1711 it_ok=0 t_mis=0.9012 t_ok=0.0000 it_fix=1711 t_fix=0.9012 max_it=1711 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
+NB_DIAG main restart n=1 n_cmp=1 n_mis=1 n_fix=0 n_noeff=1 sum_cmp=4742 sum_opp=19 sum_unk=23 sum_eff=0 sum_fix=0 it_mis=11243 it_ok=0 t_mis=4.3633 t_ok=0.0000 it_fix=0 t_fix=0.0000 max_it=11243 it_noeff=11243 t_noeff=4.3633 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
+NB_DIAG main root_probe n=1 n_cmp=1 n_mis=1 n_fix=0 n_noeff=0 sum_cmp=7082 sum_opp=40 sum_unk=106 sum_eff=0 sum_fix=0 it_mis=1 it_ok=0 t_mis=0.0276 t_ok=0.0000 it_fix=0 t_fix=0.0000 max_it=1 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
+NB_DIAG main slack_retry n=1 n_cmp=1 n_mis=1 n_fix=1 n_noeff=0 sum_cmp=8075 sum_opp=92 sum_unk=725 sum_eff=98 sum_fix=80 it_mis=2593 it_ok=0 t_mis=0.5131 t_ok=0.0000 it_fix=2593 t_fix=0.5131 max_it=2593 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
+NB_DIAG main no_set_basis n=682 n_cmp=0 n_mis=0 n_fix=0 n_noeff=0 sum_cmp=0 sum_opp=0 sum_unk=0 sum_eff=0 sum_fix=0 it_mis=0 it_ok=161627 t_mis=0.0000 t_ok=73.7907 it_fix=0 t_fix=0.0000 max_it=12577 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
+NB_DIAG sub tree_queue n=6 n_cmp=6 n_mis=6 n_fix=2 n_noeff=0 sum_cmp=15614 sum_opp=18 sum_unk=179 sum_eff=10 sum_fix=10 it_mis=433 it_ok=0 t_mis=0.1376 t_ok=0.0000 it_fix=71 t_fix=0.0331 max_it=173 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
+NB_DIAG sub submip_root n=5 n_cmp=5 n_mis=5 n_fix=0 n_noeff=5 sum_cmp=4845 sum_opp=52 sum_unk=3 sum_eff=0 sum_fix=0 it_mis=4542 it_ok=0 t_mis=0.2112 t_ok=0.0000 it_fix=0 t_fix=0.0000 max_it=2444 it_noeff=4542 t_noeff=0.2112 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
+NB_DIAG sub no_set_basis n=204 n_cmp=0 n_mis=0 n_fix=0 n_noeff=0 sum_cmp=0 sum_opp=0 sum_unk=0 sum_eff=0 sum_fix=0 it_mis=0 it_ok=18431 t_mis=0.0000 t_ok=4.1951 it_fix=0 t_fix=0.0000 max_it=4539 it_noeff=0 t_noeff=0.0000 n_rep=0 sum_rep=0 it_rep=0 t_rep=0.0000
+RESULT {"status": "time_limit", "objective": -20530.0, "bound": -20756.4893115338, "nodes": 40, "time": 60.06138894500009, "root_bound": -20761.55692660502, "first_solution_time": 13.039105297, "first_solution_objective": -6480.0}

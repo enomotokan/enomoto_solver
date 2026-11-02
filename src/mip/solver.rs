@@ -4300,7 +4300,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         b.row.resize(self.lp.num_rows(), super::lp::VarStatus::Basic);
                     }
                     crate::simplex::nb_diag::tag(crate::simplex::nb_diag::ROOT_PROBE);
-                    if rebuilt && root_basis_fix_has('n') {
+                    // 試作 `ENOMOTO_MIP_BASIS_NB` の場所 `p`: 前処理の LP の非基底の列・行の上限・下限の置き場所も渡す
+                    // (`ENOMOTO_MIP_LP_PROBE_AFTER_EXT` で前処理の LP と根の LP が同じとき、置き場所の推し量りが外れて反復していた)
+                    // `ENOMOTO_MIP_LP_PROBE_AFTER_EXT` でも渡す (値に `k` を含めば推し量りのまま)
+                    if (rebuilt && root_basis_fix_has('n')) || crate::simplex::mip_lp::basis_nb_on('p') || (super::lp_probe_after_ext() && !super::lp_probe_after_ext_has('k')) {
                         self.lp.set_basis_nb(&b, &[]);
                     } else {
                         self.lp.set_basis(&b);

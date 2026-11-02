@@ -13,7 +13,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "analysis" / "cbcimpl_20261029"))
 import probs  # noqa: E402
 
-CFGS = ["base", "ext", "extr", "base_nofj", "ext_nofj", "extr_nofj"]
+CFGS = ["base", "ext", "extk", "extr", "base_nofj", "ext_nofj", "extk_nofj", "extr_nofj"]
 TARGETS = ["ns1116954", "mzzv42z", "neos-960392", "physiciansched6-2", "neos-827175", "hypothyroid-k1"]
 TL = 60.0
 REPS58 = (10, 11)
@@ -40,7 +40,7 @@ def parse(path):
             # 前処理の LP (最初の LP) の時間・反復 (再スタートの後はない)
             d["lp_probe"] = (float(m[1]), int(m[2]))
         elif l.startswith("MIP: root LP basis from the presolve LP probing: ") and d["basis"] is None:
-            d["basis"] = l.split(": ", 1)[1]
+            d["basis"] = l.rsplit(": ", 1)[1]
         elif d["ext"] is None and (m := re.match(r"MIP: clique extension: (\d+) rows extended, (\d+) nonzeros added, \d+ columns fixed, (\d+) duplicate and (\d+) dominated", l)):
             d["ext"] = (int(m[1]), int(m[2]), int(m[3]) + int(m[4]))
     return d
