@@ -144,7 +144,8 @@ struct Stat {
     n_cmp: u64,
     n_mis: u64,
     n_fix: u64,
-    /// 比べたが、求解の始めの置き場所を数えられなかった LP (warm start の初期化を通らなかった)
+    /// 比べたが、求解の始めの置き場所を数えられなかった LP (warm start の初期化を通らなかった。ほとんどは渡した基底の
+    /// LU 分解が特異で、warm start をやめて crash (全スラック基底) から解いたもの)
     n_noeff: u64,
     sum_cmp: u64,
     sum_opp: u64,

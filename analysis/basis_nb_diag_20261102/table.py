@@ -44,18 +44,19 @@ def agg(rows):
 
 def fmt_site(s):
     n, nm, nc = s["n"], s["n_mis"], s["n_cmp"]
+    ne = nc - s.get("n_noeff", 0)  # 実際に置いた側を数えた LP
     n_ok = n - nm
     it_mis = s["it_mis"] / nm if nm else float("nan")
     it_ok = s["it_ok"] / n_ok if n_ok else float("nan")
     return (f"{int(n)} | {100 * nm / n:.0f}% | {s['sum_cmp'] / nc if nc else 0:.0f} | {(s['sum_opp'] + s['sum_unk']) / nc if nc else 0:.1f} "
-            f"({s['sum_opp'] / nc if nc else 0:.1f}/{s['sum_unk'] / nc if nc else 0:.1f}) | {s['sum_eff'] / nc if nc else 0:.1f} | {s['sum_fix'] / nc if nc else 0:.2f} | "
+            f"({s['sum_opp'] / nc if nc else 0:.1f}/{s['sum_unk'] / nc if nc else 0:.1f}) | {s['sum_eff'] / ne if ne else 0:.1f} | {s['sum_fix'] / ne if ne else 0:.2f} | "
             f"{100 * s['n_fix'] / n:.0f}% | {it_mis:.0f} | {it_ok:.0f} | {s['it_fix'] / s['n_fix'] if s['n_fix'] else float('nan'):.0f} | "
-            f"{s['t_mis'] + s['t_ok']:.2f} | {s['t_fix']:.2f} | {int(s['max_it'])}")
+            f"{s['t_mis'] + s['t_ok']:.2f} | {s['t_fix']:.2f} | {int(s['max_it'])} | {int(s.get('n_noeff', 0))} |")
 
 
 HDR = ("| LP 数 | 食い違いのある LP | 比べた列・行 (平均) | 食い違い 平均 (反対/不明) | 実際に置いた側の食い違い 平均 | うち保存した側に置けた 平均 | "
-       "置けた列のある LP | 反復 平均 (食い違いあり) | 反復 平均 (なし) | 反復 平均 (置けた列あり) | 時間 計 (秒) | 時間 計 (置けた列あり) | 最大反復 |")
-SEP = "|" + "---|" * 15
+       "置けた列のある LP | 反復 平均 (食い違いあり) | 反復 平均 (なし) | 反復 平均 (置けた列あり) | 時間 計 (秒) | 時間 計 (置けた列あり) | 最大反復 | 特異で捨てた LP |")
+SEP = "|" + "---|" * 16
 
 
 def main():
@@ -70,7 +71,7 @@ def main():
         for site in SITES:
             rows = [d["s"][(lvl, site)] for d in data.values() if (lvl, site) in d["s"]]
             if rows:
-                print(f"| {lvl} {site} | " + fmt_site(agg(rows)) + " |")
+                print(f"| {lvl} {site} | " + fmt_site(agg(rows)))
     # 2. 問題ごとの要約 (main の木 = tree_*、sub の全部、写し・サブ MIP の根)
     print("\n## 問題ごとの要約\n")
     print("木 = main の tree_sibling + tree_queue + tree_pool。LP 時間 = main の全 LP の時間の和 (スレッドの和なので経過時間を超えうる)。"
@@ -112,7 +113,7 @@ def main():
                 if site == "no_set_basis":
                     continue
                 if (lvl, site) in d["s"]:
-                    print(f"| {p} | {lvl} {site} | " + fmt_site(d["s"][(lvl, site)]) + " |")
+                    print(f"| {p} | {lvl} {site} | " + fmt_site(d["s"][(lvl, site)]))
 
 
 main()
