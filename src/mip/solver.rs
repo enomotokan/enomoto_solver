@@ -4792,7 +4792,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let bg_dse_mode = env_str!("ENOMOTO_MIP_BG_CUTS_DSE");
                 let bg_dse = if bg_dse_mode == Some("1") && bg_basis.is_some() { self.lp.dse_snapshot() } else { None };
                 let bg_dse_exact = bg_dse_mode == Some("x");
-                let bg_dse_root_exact = bg_dse_mode == Some("r");
+                // `rw` (試作、analysis/bg_lp_work_20261102.md): `r` を列の値を渡す問題 (`lpw` が働く問題) だけに絞り、厳密な重みの計算
+                // (行ごとの BTRAN) の途中で主の止めの合図と期限を見る (`r` は列の値の有無によらずかかって mc11・roll3000 で裏のカットの道を変え、
+                // 行の多い uccase12 などで時間の上限を大きく超えた。analysis/halve_submip_20261030.md の bench16)
+                let bg_dse_rw = bg_dse_mode == Some("rw") && bg_x.is_some();
+                let bg_dse_root_exact = bg_dse_mode == Some("r") || bg_dse_rw;
+                if bg_dse_mode == Some("rw") && self.params.verbose {
+                    eprintln!("MIP: background cuts: exact DSE weights for the root LP of the copy {}", if bg_dse_rw { "on" } else { "off (column values not passed)" });
+                }
+                let j3 = job.clone();
                 if bg_dse_mode == Some("1") && self.params.verbose {
                     eprintln!("MIP: background cuts: DSE weights {}", bg_dse.as_ref().map_or("not available".to_string(), |w| format!("passed ({} rows)", w.len())));
                 }
@@ -4827,6 +4835,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         BG_ROOT_DSE.with(|b| *b.borrow_mut() = bg_dse);
                         BG_DSE_EXACT_FIRST.with(|c| c.set(bg_dse_exact));
                         BG_DSE_ROOT_EXACT.with(|c| c.set(bg_dse_root_exact));
+                        if bg_dse_rw {
+                            let verbose = params.verbose;
+                            crate::simplex::slope_intercept_dual::DSE_EXACT_STOP.with(|h| *h.borrow_mut() = Some(Box::new(move || j3.stop.load(std::sync::atomic::Ordering::Relaxed))));
+                            crate::simplex::slope_intercept_dual::DSE_EXACT_STOP_LOG.with(|c| c.set(verbose));
+                        }
                         let _ = solve_worker(snap, None, params);
                     })
                     .expect("failed to spawn the cut thread");

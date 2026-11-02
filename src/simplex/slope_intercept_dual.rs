@@ -1165,6 +1165,14 @@ pub(crate) fn set_tl_flags(v: u8) {
 pub(crate) static WARM_DSE_ONCE: TlFlag = TlFlag(2);
 pub(crate) static DSE_EXACT_ONCE: TlFlag = TlFlag(4);
 
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=rw` (既定では使わない): [`DSE_EXACT_ONCE`] の厳密な重みの計算 (行ごとの BTRAN) の途中で見る
+    /// 止めの合図 (裏のカットの写しのスレッドで、主の止めの合図を見る)。あるときだけ、期限と合わせて見る
+    pub(crate) static DSE_EXACT_STOP: std::cell::RefCell<Option<Box<dyn Fn() -> bool>>> = const { std::cell::RefCell::new(None) };
+    /// [`DSE_EXACT_STOP`] で計算をやめたときに表示する
+    pub(crate) static DSE_EXACT_STOP_LOG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub(crate) fn set_warm_dse(w: Option<Vec<f64>>) {
     WARM_DSE.with(|x| *x.borrow_mut() = w);
 }
@@ -4212,6 +4220,22 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let warm_once = WARM_DSE_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed);
     let mut dse = match WARM_DSE.with(|w| w.borrow_mut().take()) {
         // 呼び出し側が「この 1 回は厳密な重みから」と求めたとき ([`DSE_EXACT_ONCE`]) は、引き継いだ重みがあってもそれを使う
+        _ if warm_started && exact_once && DSE_EXACT_STOP.with(|h| h.borrow().is_some()) => {
+            // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=rw`: 行ごとの BTRAN の途中で期限・止めの合図を見る。やめたら単位重み
+            // (続く反復の確認 [`ext_check`] が期限で止める)
+            let dl = ext_control().and_then(|c| c.deadline);
+            let t0 = std::time::Instant::now();
+            let stop = || dl.is_some_and(|d| std::time::Instant::now() >= d) || crate::cancel::is_cancelled() || DSE_EXACT_STOP.with(|h| h.borrow().as_ref().is_some_and(|f| f()));
+            match super::DseState::from_basis_stoppable(m, &lu, &stop) {
+                Some(s) => s,
+                None => {
+                    if DSE_EXACT_STOP_LOG.with(|c| c.get()) {
+                        eprintln!("MIP: [snapshot] exact DSE weights stopped by the deadline or the stop signal after {:.2}s ({m} rows); unit weights", t0.elapsed().as_secs_f64());
+                    }
+                    super::DseState::new(m)
+                }
+            }
+        }
         _ if warm_started && exact_once => {
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 eprintln!("DEBUG_EXT: DSE weights: exact for the whole basis (requested once)");

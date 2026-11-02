@@ -974,6 +974,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 247 本ほどのカットを足した LP が上限 (60 秒の 2% = 1.2 秒) に当たり、2 回続けて全部外してループが終わり、根の下界が 48724 で
         // 止まっていた (1 回の LP の上限を 6 秒にすると 5 ラウンドで 49324 に届く。analysis/hl4_20261030.md)
         let lp_halve = env_str!("ENOMOTO_MIP_CUT_LP_HALVE").is_some() && !self.params.submip;
+        // `ENOMOTO_MIP_BG_CUTS_LP_WORK` = f[h] (試作、既定では使わない。analysis/bg_lp_work_20261102.md): 裏のカットの写しでは、カットの LP 1 回の
+        // 上限を秒ではなく反復 (主の根の LP の反復 (`BG_ROOT_ITERS`) の f 倍、少なくとも `ENOMOTO_T_MIP_BG_CUTS_LP_WORK_MIN` (既定 2000)、
+        // 最適まで解けたカットの LP の反復の最大の `ENOMOTO_T_MIP_CUT_LP_WORK_PREV` 倍) で決める。時間の上限は今の上限の
+        // `ENOMOTO_T_MIP_BG_CUTS_LP_WORK_TIME_MULT` 倍 (既定 5) にして安全網としてだけ残す。写しの 1 回の LP の上限は
+        // `max(0.02 x time_limit, 1.0)` 秒で、機械の速さや重みの質で当たり方が変わり、2 回当たると写しのループを抜けていた
+        // (遅い機械の physiciansched6-2 で写しが 0 ラウンド、単位重みの neos-960392・neos-933966。analysis/bgx_check1_20261102.md・bgx_check2_20261102.md)。
+        // 値の末尾に `h` を付ける (`h` だけなら f = 1) と、写しのカットの LP が上限 (反復・時間) に当たったとき、失敗と数えずに
+        // カットを外して以後の本数の上限を半分にして続ける (`ENOMOTO_MIP_CUT_LP_HALVE` と同じ形、`ENOMOTO_T_MIP_CUT_LP_HALVE_MIN` 本以下で当たったら失敗と数える)
+        let bg_work: Option<(f64, bool)> = if job.is_some() {
+            env_str!("ENOMOTO_MIP_BG_CUTS_LP_WORK").filter(|v| *v != "0").map(|v| {
+                let h = v.ends_with('h');
+                let f = v.trim_end_matches('h').parse::<f64>().ok().filter(|f| *f > 0.0).unwrap_or(1.0);
+                (f, h)
+            })
+        } else {
+            None
+        };
+        let bg_work_lim0 = bg_work.map_or(0u64, |(f, _)| ((f * super::solver::BG_ROOT_ITERS.with(|c| c.get()).max(100) as f64) as u64).max(tunable!("ENOMOTO_T_MIP_BG_CUTS_LP_WORK_MIN", 2000u64, u64)));
+        let bg_halve = bg_work.is_some_and(|w| w.1);
+        if let (Some((f, h)), true) = (bg_work, self.params.verbose) {
+            eprintln!("MIP: background cut LP work cap: {bg_work_lim0} iters (f {f}, main root LP {} iters){}", super::solver::BG_ROOT_ITERS.with(|c| c.get()), if h { ", halve on cap" } else { "" });
+        }
         let lp_halve_min = tunable!("ENOMOTO_T_MIP_CUT_LP_HALVE_MIN", 20usize, usize);
         let mut lp_cap_cuts = usize::MAX;
         // `ENOMOTO_T_MIP_CUT_LP_CAP_MULT` = m (> 0、試作、既定 0 で使わない): 1 回の LP の時間の上限を、このループで最適まで解けた
@@ -1612,7 +1634,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let t_lp0 = std::time::Instant::now();
             let it0 = self.lp.total_iterations();
             // `ENOMOTO_T_MIP_CUT_LP_WORK`: 1 回の LP の上限を反復で決める (時間の上限は安全網)
-            let lim = if lp_work > 0.0 { ((lp_work * root_iters.max(100) as f64) as u64).max(1000).max((lp_work_prev * ok_lp_iters as f64) as u64) } else { 10 * root_iters.max(100) + 10_000 };
+            let lim = if bg_work.is_some() {
+                bg_work_lim0.max((lp_work_prev * ok_lp_iters as f64) as u64)
+            } else if lp_work > 0.0 { ((lp_work * root_iters.max(100) as f64) as u64).max(1000).max((lp_work_prev * ok_lp_iters as f64) as u64) } else { 10 * root_iters.max(100) + 10_000 };
             // 1 回の LP の時間の上限 (全体の 2%、最低 1 秒): 数値的に悪条件の LP が残り時間を使い切るのを防ぐ
             let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
             let cap = cap.max(lp_cap_mult * ok_lp_secs);
@@ -1627,12 +1651,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let s = tunable!("ENOMOTO_T_MIP_BG_CUTS_LP_CAP_SECS", 0.0, f64);
                 let m = env_str!("ENOMOTO_MIP_BG_CUTS_LP_CAP").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
                 let c = if s > 0.0 { s } else { cap };
-                c.max(m * super::solver::BG_ROOT_LP_SECS.with(|c| c.get()))
+                let c = c.max(m * super::solver::BG_ROOT_LP_SECS.with(|c| c.get()));
+                // `ENOMOTO_MIP_BG_CUTS_LP_WORK`: 時間の上限は安全網 (上の反復の上限が本来の上限)
+                if bg_work.is_some() { c * tunable!("ENOMOTO_T_MIP_BG_CUTS_LP_WORK_TIME_MULT", 5.0, f64) } else { c }
             } else {
                 cap
             };
             if job.is_some() && self.params.verbose && round <= 1 {
-                eprintln!("MIP: cut round {round}: background cut LP time cap {cap:.2}s");
+                eprintln!("MIP: cut round {round}: background cut LP time cap {cap:.2}s{}", if bg_work.is_some() { format!(", iteration cap {lim}") } else { String::new() });
             }
             work_rounds += 1;
             let lp_deadline = if cap.is_finite() {
@@ -1757,17 +1783,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.start.elapsed().as_secs_f64()
                     );
                 }
+                let capped = matches!(st, LpStatus::TimeLimit | LpStatus::IterationLimit);
                 // `ENOMOTO_MIP_CUT_LP_HALVE`: 時間の上限に当たっただけなら、本数を半分にして続ける
-                if lp_halve && st == LpStatus::TimeLimit && st2 == LpStatus::Optimal && rows.len() > lp_halve_min && !self.time_up() {
+                // (`ENOMOTO_MIP_BG_CUTS_LP_WORK=..h`: 写しでは反復の上限に当たったときも)
+                let halve_now = (lp_halve && st == LpStatus::TimeLimit) || (bg_halve && capped);
+                if halve_now && st2 == LpStatus::Optimal && rows.len() > lp_halve_min && !self.time_up() && !stopped(&job) {
                     lp_cap_cuts = (rows.len() / 2).max(lp_halve_min);
                     if self.params.verbose {
-                        eprintln!("MIP: cut round {round}: the LP with {} cuts hit the time cap; up to {lp_cap_cuts} cuts per round from now", rows.len());
+                        eprintln!("MIP: cut round {round}: the LP with {} cuts hit the time cap ({st:?}); up to {lp_cap_cuts} cuts per round from now", rows.len());
                     }
                     continue;
                 }
                 loop_iters += self.lp.total_iterations() - it2;
                 // `ENOMOTO_MIP_CUT_LP_CAP_STOP`: 1 回の LP の上限に当たったら止める (`flat` なら根の LP の値から動いていないときだけ)
-                let capped = matches!(st, LpStatus::TimeLimit | LpStatus::IterationLimit);
                 if capped && st2 == LpStatus::Optimal && lpcap_stop.is_some_and(|v| v != "flat" || !moved) {
                     if self.params.verbose {
                         eprintln!("MIP: cut round {round}: the cut LP hit the per-LP cap ({st:?}); stop (ENOMOTO_MIP_CUT_LP_CAP_STOP)");

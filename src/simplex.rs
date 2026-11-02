@@ -2106,6 +2106,30 @@ impl DseState {
         DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD }
     }
 
+    /// [`Self::from_basis`] と同じだが、`stop` が真を返したら途中でやめて `None` を返す (32 行ごとに見る)。
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=rw` (裏のカットの写しの根の LP): 行の多い問題 (uccase12・neos-4763324-toguru) では
+    /// 行ごとの BTRAN だけで数十秒かかり、止めの合図・期限を見ないので時間の上限を大きく超えていた (analysis/bg_lp_work_20261102.md)
+    fn from_basis_stoppable(m: usize, lu: &sparse_lu::FtLu, stop: &dyn Fn() -> bool) -> Option<Self> {
+        let mut w = vec![1.0; m];
+        let mut scratch = vec![0.0; m];
+        let mut z = vec![0.0; m];
+        let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+        let fresh = lu.update_count() == 0;
+        for i in 0..m {
+            if i & 31 == 0 && stop() {
+                return None;
+            }
+            if fresh {
+                lu.solve_transpose_unit_into(i, &mut scratch, &mut z);
+            } else {
+                lu.solve_transpose_unit(i, &mut scratch, &mut z);
+            }
+            let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
+            w[i] = norm_sq.max(floor);
+        }
+        Some(DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD })
+    }
+
     /// 重みが `NaN` (未知) の行だけ、[`Self::from_basis`] と同じ BTRAN でその基底の厳密な値にする。MIP で行 (カット) を
     /// 加えた直後の warm start 用: 古い行の引き継いだ重みはそのまま正しく (`B^-1` の行が変わらない)、新しい行の重みだけ
     /// 分からない。埋めた行数を返す。
