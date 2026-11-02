@@ -1649,7 +1649,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 厳密な重み (行ごとに BTRAN 1 回) から解く。引き継いだ重みは求解をまたいで更新を重ねるうちに厳密な値から大きく
             // 外れ (physiciansched6-2 では 1e8〜1e9 の重みが数百行)、カットを足した LP の反復が数倍〜十数倍に増えることがある
             // (analysis/lp_hang_20261021.md)
-            let cut_dse_exact = env_str!("ENOMOTO_MIP_CUT_DSE_EXACT").is_some() && !self.params.submip;
+            // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=x`: 裏のカットの写しの最初のカットの LP だけ同じく厳密な重みから (analysis/bgdse_20261102.md)
+            let bg_dse_exact = job.is_some() && super::solver::BG_DSE_EXACT_FIRST.with(|c| c.replace(false));
+            if bg_dse_exact && self.params.verbose {
+                eprintln!("MIP: cut round {round}: background cut LP from the exact DSE weights");
+            }
+            let cut_dse_exact = (env_str!("ENOMOTO_MIP_CUT_DSE_EXACT").is_some() && !self.params.submip) || bg_dse_exact;
             if cut_dse_exact {
                 crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
             }

@@ -187,6 +187,12 @@ thread_local! {
     static BG_ROOT_BASIS: std::cell::RefCell<Option<super::lp::Basis>> = const { std::cell::RefCell::new(None) };
     /// `ENOMOTO_MIP_BG_CUTS_BASIS_X` ([`bg_cuts_basis_x_on`]): 裏のカットの写しに渡す主の根の LP の基底の列番号と列の値
     static BG_ROOT_X: std::cell::RefCell<Option<(Vec<usize>, Vec<f64>)>> = const { std::cell::RefCell::new(None) };
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=1` (既定では使わない): 裏のカットの写しに渡す主の根の LP の最終基底の DSE 重み
+    /// (基底変数の番号との組、[`super::lp_api::MipLp::dse_snapshot`])。写しの根の LP の前に当てはめる (analysis/bgdse_20261102.md)
+    static BG_ROOT_DSE: std::cell::RefCell<Option<Vec<(u32, f32)>>> = const { std::cell::RefCell::new(None) };
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=x` (既定では使わない): 写しの最初のカットの LP だけ出発の基底の厳密な DSE 重みから解く
+    /// (`DSE_EXACT_ONCE` を写しのスレッドでだけ立てる)。根のカットのループが最初のカットの LP の前に下ろす
+    pub(super) static BG_DSE_EXACT_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 診断用: 既知の最適解 (縮約後の空間、`ENOMOTO_MIP_DEBUG_SOL`)。この解を含むノードが
     /// 枝刈りされたら理由を表示する (SCIP の debug solution と同様)。
     pub(crate) static DEBUG_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
@@ -4390,6 +4396,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
+            // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=1`: 主の根の LP の最終基底の DSE 重みも当てはめる。列の値を渡すと写しの根の LP は
+            // 1 反復ほどで終わり、重みが単位のまま最初のカットの LP に入って価格付けが悪く、1 回の LP の上限に当たっていた
+            // (analysis/bgx_check2_20261102.md)。写しの LP の列・行は主と同じ並び (上の基底の大きさの確かめと同じ)。
+            // 基底の変数番号で当てはめるので、主の基底にない変数の重みは捨て、主の重みのない基底変数は 1
+            if let Some(w) = BG_ROOT_DSE.with(|s| s.borrow_mut().take()) {
+                let nb = self.lp.basis_cols().map_or(0, |c| c.len());
+                if nb == self.lp.num_rows() {
+                    self.lp.set_dse_vars(&w);
+                    root_warm_dse_once = true;
+                    if self.params.verbose {
+                        let hit = self.lp.dse_snapshot().map_or(0, |v| {
+                            let m: std::collections::HashSet<u32> = w.iter().map(|p| p.0).collect();
+                            v.iter().filter(|p| m.contains(&p.0)).count()
+                        });
+                        eprintln!("MIP: [snapshot] root DSE weights of the main thread applied ({} weights, {hit} / {nb} basic variables matched)", w.len());
+                    }
+                } else if self.params.verbose {
+                    eprintln!("MIP: [snapshot] root DSE weights of the main thread not applied (no basis)");
+                }
+            }
         }
         // `ENOMOTO_MIP_TREE_ROOT_BASIS` (試作): 木を分け合う従は主の LP の基底から解き始める
         if self.pool.is_some() && tree_root_basis() {
@@ -4682,6 +4708,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: background cuts: basis with the column values {} (root LP {:.2}s)", if bx { "passed" } else { "not passed" }, self.root_lp_secs);
                 }
                 let bg_x = if bg_basis.is_some() && bx { self.lp.basis_cols().map(|c| (c, self.lp.col_values())) } else { None };
+                // 試作 `ENOMOTO_MIP_BG_CUTS_DSE` (既定では使わない): `1` は主の根の LP の最終基底の DSE 重みも渡し、`x` は写しの
+                // 最初のカットの LP だけ厳密な重みから解く (analysis/bgdse_20261102.md)
+                let bg_dse_mode = env_str!("ENOMOTO_MIP_BG_CUTS_DSE");
+                let bg_dse = if bg_dse_mode == Some("1") && bg_basis.is_some() { self.lp.dse_snapshot() } else { None };
+                let bg_dse_exact = bg_dse_mode == Some("x");
+                if bg_dse_mode == Some("1") && self.params.verbose {
+                    eprintln!("MIP: background cuts: DSE weights {}", bg_dse.as_ref().map_or("not available".to_string(), |w| format!("passed ({} rows)", w.len())));
+                }
                 // 診断 (`ENOMOTO_MIP_BG_CUTS_LOG`): 主の LP の列の境界と大域的な境界 (写しの LP の境界) の食い違い
                 if env_str!("ENOMOTO_MIP_BG_CUTS_LOG").is_some() {
                     let (mut tighter, mut looser, mut moved_basic, mut moved_nb) = (0usize, 0usize, 0usize, 0usize);
@@ -4710,6 +4744,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         BG_ROOT_NB.with(|c| c.set(bg_nb));
                         BG_ROOT_BASIS.with(|b| *b.borrow_mut() = bg_basis);
                         BG_ROOT_X.with(|b| *b.borrow_mut() = bg_x);
+                        BG_ROOT_DSE.with(|b| *b.borrow_mut() = bg_dse);
+                        BG_DSE_EXACT_FIRST.with(|c| c.set(bg_dse_exact));
                         let _ = solve_worker(snap, None, params);
                     })
                     .expect("failed to spawn the cut thread");
