@@ -13,7 +13,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "analysis" / "cbcimpl_20261029"))
 import probs  # noqa: E402
 
-CFGS = ["base", "ext", "extk", "extr", "base_nofj", "ext_nofj", "extk_nofj", "extr_nofj"]
+CFGS = ["base", "ext", "exts", "extk", "extr", "base_nofj", "ext_nofj", "extk_nofj", "extr_nofj"]
 TARGETS = ["ns1116954", "mzzv42z", "neos-960392", "physiciansched6-2", "neos-827175", "hypothyroid-k1"]
 TL = 60.0
 REPS58 = (10, 11)

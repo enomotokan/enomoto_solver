@@ -3191,8 +3191,10 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
             t0.elapsed().as_secs_f64()
         );
     }
-    // `ENOMOTO_MIP_LP_PROBE_AFTER_EXT`: クリーク行の拡張の後に解いた LP は根の LP と同じ (対称性の行は末尾に足す) なので、常に渡す
-    if n_fixed > 0 || slow_root || lp_probe_after_ext() {
+    // `ENOMOTO_MIP_LP_PROBE_AFTER_EXT`: クリーク行の拡張の後に解いた LP は根の LP と同じ (対称性の行は末尾に足す) なので、常に渡す。
+    // 値に `s` を含めば既定と同じ条件 (固定が出たか最初の LP が重い) のときだけ渡す (常に渡すと根の LP が 0.1 秒もない問題でも
+    // 着く頂点が変わり、58 問で SGM +9.4%・解けた数 87 → 80 だった: analysis/lp_probe_after_ext_20261102.md)
+    if n_fixed > 0 || slow_root || (lp_probe_after_ext() && !lp_probe_after_ext_has('s')) {
         let b = lp.basis();
         // 行の状態は `ENOMOTO_MIP_LP_PROBE_FINISH` か `ENOMOTO_MIP_LP_PROBE_ROW_BASIS` のときだけ渡す (既定は列の状態だけ)。行の指紋
         // ([`rows_fingerprint`]) も渡し、根の LP の始めの行が同じときだけ使う ([`solver::ROOT_BASIS_ROWS`])
