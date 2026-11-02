@@ -193,6 +193,8 @@ thread_local! {
     /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=x` (既定では使わない): 写しの最初のカットの LP だけ出発の基底の厳密な DSE 重みから解く
     /// (`DSE_EXACT_ONCE` を写しのスレッドでだけ立てる)。根のカットのループが最初のカットの LP の前に下ろす
     pub(super) static BG_DSE_EXACT_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=r` (既定では使わない): 写しの根の LP を厳密な DSE 重みから解く (根の LP の前に下ろす)
+    static BG_DSE_ROOT_EXACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 診断用: 既知の最適解 (縮約後の空間、`ENOMOTO_MIP_DEBUG_SOL`)。この解を含むノードが
     /// 枝刈りされたら理由を表示する (SCIP の debug solution と同様)。
     pub(crate) static DEBUG_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
@@ -4478,6 +4480,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if root_warm_dse_once {
             crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=r` (既定では使わない): 裏のカットの写しの根の LP を、出発の基底の厳密な DSE 重みから解く
+        // (重みは続く最初のカットの LP に引き継がれる)。`=x` (最初のカットの LP で厳密な重み) は、行の多い問題 (atlanta-ip) で
+        // 厳密な重みの計算 (行ごとに BTRAN 1 回) だけで写しの 1 回の LP の上限に当たったので、上限のない根の LP で計算する
+        let bg_dse_root_exact = BG_DSE_ROOT_EXACT.with(|c| c.replace(false)) && self.snap.is_some() && CUT_JOB.with(|j| j.borrow().is_some());
+        if bg_dse_root_exact {
+            crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+            if self.params.verbose {
+                eprintln!("MIP: [snapshot] root LP from the exact DSE weights");
+            }
+        }
         let t_root_lp = Instant::now();
         // 診断 ([`BASIS_NB_ROOT`]): 根の LP の種類 (0 サブ MIP、1 裏のカットの写し、2 解探索のスレッド、3 再スタートの後の主、4 最初の主)
         let root_kind = if self.params.submip {
@@ -4504,6 +4516,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if root_warm_dse_once {
             crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
         }
+        crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
         if restart_basis_used && self.params.verbose {
             eprintln!("MIP: root LP after the restart: {root_st:?}, {} iters ({:.2}s)", self.lp.total_iterations() - root_iters0, self.start.elapsed().as_secs_f64());
         }
@@ -4758,10 +4771,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let bg_x = if bg_basis.is_some() && bx { self.lp.basis_cols().map(|c| (c, self.lp.col_values())) } else { None };
                 // 試作 `ENOMOTO_MIP_BG_CUTS_DSE` (既定では使わない): `1` は主の根の LP の最終基底の DSE 重みも渡し、`x` は写しの
-                // 最初のカットの LP だけ厳密な重みから解く (analysis/bgdse_20261102.md)
+                // 最初のカットの LP だけ、`r` は写しの根の LP を厳密な重みから解く (analysis/bgdse_20261102.md)
                 let bg_dse_mode = env_str!("ENOMOTO_MIP_BG_CUTS_DSE");
                 let bg_dse = if bg_dse_mode == Some("1") && bg_basis.is_some() { self.lp.dse_snapshot() } else { None };
                 let bg_dse_exact = bg_dse_mode == Some("x");
+                let bg_dse_root_exact = bg_dse_mode == Some("r");
                 if bg_dse_mode == Some("1") && self.params.verbose {
                     eprintln!("MIP: background cuts: DSE weights {}", bg_dse.as_ref().map_or("not available".to_string(), |w| format!("passed ({} rows)", w.len())));
                 }
@@ -4795,6 +4809,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         BG_ROOT_X.with(|b| *b.borrow_mut() = bg_x);
                         BG_ROOT_DSE.with(|b| *b.borrow_mut() = bg_dse);
                         BG_DSE_EXACT_FIRST.with(|c| c.set(bg_dse_exact));
+                        BG_DSE_ROOT_EXACT.with(|c| c.set(bg_dse_root_exact));
                         let _ = solve_worker(snap, None, params);
                     })
                     .expect("failed to spawn the cut thread");
