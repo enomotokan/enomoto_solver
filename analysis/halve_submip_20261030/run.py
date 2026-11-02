@@ -63,6 +63,8 @@ CFGS = {
     "fjearly": {"ENOMOTO_MIP_FEAS_FJ_EARLY": "1"},
     "bgx": {"ENOMOTO_MIP_BG_CUTS_BASIS_X": "lpw"},
     "fjbgx": {"ENOMOTO_MIP_FEAS_FJ_EARLY": "1", "ENOMOTO_MIP_BG_CUTS_BASIS_X": "lpw"},
+    # 目的関数 0 の早めの探索を FJ 3 本 + Local-MIP 1 本にし、裏のカットの写しに列の値を渡す (2026-11-02、analysis/feas_early_lmip_20261102.md・phys6_20261101.md)
+    "flbgx": {"ENOMOTO_MIP_FEAS_FJ_EARLY": "fl", "ENOMOTO_T_MIP_FEAS_EARLY_LMIP_THREADS": "1", "ENOMOTO_MIP_BG_CUTS_BASIS_X": "lpw"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
