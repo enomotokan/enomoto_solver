@@ -1317,7 +1317,8 @@ fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool
     use std::time::{Duration, Instant};
     let t0 = Instant::now();
     let threads = threads.max(1);
-    let n_fj = if threads == 1 { 1 } else { threads.div_ceil(2) };
+    // `ENOMOTO_T_MIP_FEAS_EARLY_LMIP_THREADS`: Local-MIP のスレッドの数 (既定は半分 (切り捨て)、診断用。スレッドが 1 本なら交互)
+    let n_fj = if threads == 1 { 1 } else { threads - tunable!("ENOMOTO_T_MIP_FEAS_EARLY_LMIP_THREADS", threads / 2, usize).min(threads) };
     let stop = AtomicBool::new(false);
     let (fj_tries, lm_steps) = (AtomicU64::new(0), AtomicU64::new(0));
     // 見つけた解と、見つけた方 (1 = FJ、2 = Local-MIP) と時刻
@@ -1352,7 +1353,19 @@ fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool
                     }
                 };
                 let lm_seed = base ^ 0x6A09_E667_F3BC_C909 ^ ((t as u64 + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9));
-                let lm_new = || if over() { None } else { localmip::LocalMip::new(prob, &prob.col_lo, &prob.col_up, lm_seed, true) };
+                // `ENOMOTO_MIP_FEAS_EARLY_LMIP_NO_CHAIN` (診断用): 連鎖の手を使わない
+                let chain = env_str!("ENOMOTO_MIP_FEAS_EARLY_LMIP_NO_CHAIN").is_none();
+                let lm_new = || {
+                    if over() {
+                        return None;
+                    }
+                    let ti = Instant::now();
+                    let r = localmip::LocalMip::new(prob, &prob.col_lo, &prob.col_up, lm_seed, chain);
+                    if verbose {
+                        eprintln!("MIP:   early Local-MIP thread {t}: initialized in {:.2}s", ti.elapsed().as_secs_f64());
+                    }
+                    r
+                };
                 // Local-MIP を `until` まで続きから回す。見つけたら真
                 let lm_run = |lm: &mut localmip::LocalMip, until: Instant| -> bool {
                     let before = lm.res.steps;
@@ -1395,6 +1408,16 @@ fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool
                         if lm_run(&mut lm, t_end) {
                             break;
                         }
+                    }
+                    if verbose {
+                        eprintln!(
+                            "MIP:   early Local-MIP thread {t}: {} steps, least violated rows {}, chain moves {} (mean length {:.1}), {:.2}s",
+                            lm.res.steps,
+                            lm.res.least_viol,
+                            lm.res.pair_moves,
+                            lm.res.chain_len as f64 / lm.res.pair_moves.max(1) as f64,
+                            t0.elapsed().as_secs_f64()
+                        );
                     }
                 }
                 fj::SKIP_REPAIR_ON_STOP.with(|c| c.set(false));
