@@ -1190,7 +1190,7 @@ thread_local! {
     /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q` (既定では使わない): 次の 1 回の warm start の求解だけ、始めの DSE 重み (引き継いだもの・
     /// 単位重み) を基底の行から `k` 行の標本で厳密な値と比べ、ずれ (`|ln(厳密 / 今)|` の中央値) が `dev` を超えたときだけ
     /// 全部の行の厳密な重みを計算する (`(k, dev, 統計)`。統計は 0 = 全体の `|ln|` の中央値、1 = 全体のばらつき、
-    /// 2 = 主実行不能な行のばらつき ([`DseSampleStat`])。最後は確かめる反復 (0 = 求解の始め、`n` = `n` 反復を超えて続いたとき)。求解の始めに下ろす。期限・取り消し・[`DSE_EXACT_STOP`] を 32 行ごとに見る)
+    /// 2 = 主実行不能な行のばらつき、3 = 全体の 4 倍を超えてずれた行の割合、4 = 主実行不能な行の同じ割合 ([`DseSampleStat`])。最後は確かめる反復 (0 = 求解の始め、`n` = `n` 反復を超えて続いたとき)。求解の始めに下ろす。期限・取り消し・[`DSE_EXACT_STOP`] を 32 行ごとに見る)
     pub(crate) static DSE_SAMPLE_ONCE: std::cell::Cell<Option<(usize, f64, u8, usize)>> = const { std::cell::Cell::new(None) };
     /// [`DSE_SAMPLE_ONCE`] の結果 (呼び出し側が表示に取り出す)
     pub(crate) static DSE_SAMPLE_RESULT: std::cell::Cell<Option<DseSampleResult>> = const { std::cell::Cell::new(None) };
@@ -1209,6 +1209,9 @@ pub(crate) struct DseSampleStat {
     pub max_abs: f64,
     /// `|r - median(r)|` の中央値 (尺度によらないばらつき。重み全体の定数倍は価格付けを変えないので、効くのはこちら)
     pub spread: f64,
+    /// `|r| > ln 4` (4 倍を超えてずれた) 行の割合。ずれは少数の行に桁違いに出ることが多く (neos-960392 の 500 反復目:
+    /// 中央値 0.17・最大 24)、中央値の統計では拾えない。4 倍は `ENOMOTO_DSE_WEIGHT_CHECK` (`ENOMOTO_T_DSE_ERR_RATIO`) と同じ目安
+    pub frac: f64,
 }
 
 /// [`DSE_SAMPLE_ONCE`] の標本の確かめの結果。
@@ -1249,6 +1252,8 @@ fn dse_sample_check(lu: &sparse_lu::FtLu, dse: &mut super::DseState, inf: &[usiz
     let (value, kk) = match stat {
         1 => (all.spread, all.n),
         2 => (infs.spread, infs.n),
+        3 => (all.frac, all.n),
+        4 => (infs.frac, infs.n),
         _ => (all.med_abs, all.n),
     };
     let sample_secs = t0.elapsed().as_secs_f64();
@@ -1333,7 +1338,8 @@ fn dse_sample_deviation(lu: &sparse_lu::FtLu, cur: &[f64], cand: &[usize], k: us
     let mid = median(&mut l);
     let mut d: Vec<f64> = logs.iter().map(|v| (v - mid).abs()).collect();
     let spread = median(&mut d);
-    DseSampleStat { n, med_abs, mean, max_abs, spread }
+    let frac = logs.iter().filter(|v| v.abs() > 4f64.ln()).count() as f64 / n as f64;
+    DseSampleStat { n, med_abs, mean, max_abs, spread, frac }
 }
 
 pub(crate) fn set_warm_dse(w: Option<Vec<f64>>) {

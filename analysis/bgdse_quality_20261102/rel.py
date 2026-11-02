@@ -13,8 +13,8 @@ _argv = sys.argv; sys.argv = [sys.argv[0]]
 exec(compile(src, "summ.py", "exec"), ns)
 sys.argv = _argv
 rows = [json.loads(l) for l in open(D / "res.jsonl")]
-print("| 問題 | 設定 | 回 | 写しの根の LP | 全体 中央値 \\|ln\\| | 平均 ln | ばらつき | 実行不能 行数 | 実行不能 中央値 \\|ln\\| | 実行不能 ばらつき | 標本 (秒) | 厳密 (秒) | 最初のカットの LP | 2〜4 本目 | 失敗 | 写しの終わり |")
-print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+print("| 問題 | 設定 | 回 | 写しの根の LP | 全体 中央値 \\|ln\\| | 平均 ln | ばらつき | 4 倍超の割合 | 実行不能 行数 | 実行不能 中央値 \\|ln\\| | 実行不能 ばらつき | 実行不能 4 倍超 | 確かめた反復 | 標本 (秒) | 厳密 (秒) | 最初のカットの LP | 2〜4 本目 | 失敗 | 写しの終わり |")
+print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 out = []
 f = lambda v: "-" if v is None else f"{v:.3f}"
 for r in sorted(rows, key=lambda r: (r["prob"], r["cfg"], r["run"])):
@@ -28,6 +28,6 @@ for r in sorted(rows, key=lambda r: (r["prob"], r["cfg"], r["run"])):
     first = lps[0] if lps else "-"
     rest = " ".join(lps[1:4])
     if s:
-        print(f"| {r['prob']} | {r['cfg']} | {r['run']} | {o['root']} ({o['passed']}) | {s['med']:.3f} | {s['mean']:.3f} | {f(s['spread'])} | {s['ninf'] if s['ninf'] is not None else '-'} | {f(s['imed'])} | {f(s['ispread'])} | {s['secs']:.3f} | {s['full']} {s['full_secs']:.3f} | {first} | {rest} | {o['fails']} | {o['end']} |")
+        print(f"| {r['prob']} | {r['cfg']} | {r['run']} | {o['root']} ({o['passed']}) | {s['med']:.3f} | {s['mean']:.3f} | {f(s['spread'])} | {f(s['frac'])} | {s['ninf'] if s['ninf'] is not None else '-'} | {f(s['imed'])} | {f(s['ispread'])} | {f(s['ifrac'])} | {s['iter']} | {s['secs']:.3f} | {s['full']} {s['full_secs']:.3f} | {first} | {rest} | {o['fails']} | {o['end']} |")
     else:
-        print(f"| {r['prob']} | {r['cfg']} | {r['run']} | {o['root']} ({o['passed']}) | - | - | - | - | - | - | - | {o['dse'] or '-'} | {first} | {rest} | {o['fails']} | {o['end']} |")
+        print(f"| {r['prob']} | {r['cfg']} | {r['run']} | {o['root']} ({o['passed']}) | - | - | - | - | - | - | - | - | - | - | {o['dse'] or '-'} | {first} | {rest} | {o['fails']} | {o['end']} |")

@@ -1698,8 +1698,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if bg_dse_sample {
                 let k = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_SAMPLE", 32usize, usize);
                 let dev = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_DEV", 0.3, f64);
-                // 判定に使う統計 (`ENOMOTO_T_MIP_BG_CUTS_DSE_STAT`): 0 = 全体の |ln| の中央値、1 = 全体のばらつき、2 = 主実行不能な行のばらつき
-                let stat = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_STAT", 1u8, u8);
+                // 判定に使う統計 (`ENOMOTO_T_MIP_BG_CUTS_DSE_STAT`): 0 = 全体の |ln| の中央値、1 = 全体のばらつき、2 = 主実行不能な行のばらつき、
+                // 3 = 全体の 4 倍を超えてずれた行の割合 (既定)、4 = 主実行不能な行の同じ割合
+                let stat = tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_STAT", 3u8, u8);
                 crate::simplex::slope_intercept_dual::DSE_SAMPLE_RESULT.with(|c| c.set(None));
                 let after = if bg_dse_sample_mode == 2 { tunable!("ENOMOTO_T_MIP_BG_CUTS_DSE_AFTER", 500usize, usize).max(1) } else { 0 };
                 crate::simplex::slope_intercept_dual::DSE_SAMPLE_ONCE.with(|c| c.set(Some((k, dev, stat, after))));
@@ -1716,8 +1717,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose {
                     match crate::simplex::slope_intercept_dual::DSE_SAMPLE_RESULT.with(|c| c.take()) {
                         Some(r) => eprintln!(
-                            "MIP: cut round {round}: background DSE sample: {} / {} rows, median |ln(exact/cur)| {:.3}, mean ln {:.3}, max {:.3}, spread {:.3}; infeasible {} / {} rows, median |ln| {:.3}, mean ln {:.3}, spread {:.3}; value {:.3} at iter {} ({:.3}s); exact weights {} ({:.3}s)",
-                            r.all.n, r.m, r.all.med_abs, r.all.mean, r.all.max_abs, r.all.spread, r.inf.n, r.n_inf, r.inf.med_abs, r.inf.mean, r.inf.spread, r.value, r.iter, r.sample_secs,
+                            "MIP: cut round {round}: background DSE sample: {} / {} rows, median |ln(exact/cur)| {:.3}, mean ln {:.3}, max {:.3}, spread {:.3}, frac>4x {:.3}; infeasible {} / {} rows, median |ln| {:.3}, mean ln {:.3}, spread {:.3}, frac>4x {:.3}; value {:.3} at iter {} ({:.3}s); exact weights {} ({:.3}s)",
+                            r.all.n, r.m, r.all.med_abs, r.all.mean, r.all.max_abs, r.all.spread, r.all.frac, r.inf.n, r.n_inf, r.inf.med_abs, r.inf.mean, r.inf.spread, r.inf.frac, r.value, r.iter, r.sample_secs,
                             match r.full { 1 => "computed", 2 => "stopped", _ => "not computed" }, r.full_secs
                         ),
                         None => eprintln!("MIP: cut round {round}: background DSE sample: not taken (LP finished before the check, {} iters, or not a warm start)", self.lp.total_iterations() - it0),

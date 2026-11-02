@@ -23,6 +23,8 @@ CFGS = {
     # (計測 1・2 は判定の統計が今と違う: 計測 1 は全体の |ln| の中央値・閾値 0 / 1e9、計測 2 は主実行不能な行のばらつき・閾値 1e9。どちらも両端なので判定は同じ)
     "w1_q0": {**W1, "ENOMOTO_MIP_BG_CUTS_DSE": "q", "ENOMOTO_T_MIP_BG_CUTS_DSE_DEV": "0"},
     "w1_qinf": {**W1, "ENOMOTO_MIP_BG_CUTS_DSE": "q", "ENOMOTO_T_MIP_BG_CUTS_DSE_DEV": "1e9"},
+    "w1_qainf": {**W1, "ENOMOTO_MIP_BG_CUTS_DSE": "qa", "ENOMOTO_T_MIP_BG_CUTS_DSE_DEV": "1e9"},
+    "w1_1qinf": {**W1, "ENOMOTO_MIP_BG_CUTS_DSE": "1q", "ENOMOTO_T_MIP_BG_CUTS_DSE_DEV": "1e9"},
 }
 for k, v in json.loads(os.environ.get("BGX_EXTRA_CFGS", "{}")).items():
     CFGS[k] = v

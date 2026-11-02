@@ -31,16 +31,17 @@ def parse(log):
     # 標本の行: 新しい形 (全体と主実行不能な行) と、計測 1 の古い形 (全体の |ln| だけ)
     o["samp"], o["sampd"] = "-", None
     for l in w:
-        m = re.search(r"background DSE sample: (\d+) / (\d+) rows, median \|ln\(exact/cur\)\| ([\d.]+), mean ln (-?[\d.]+), max ([\d.]+), spread ([\d.]+); infeasible (\d+) / (\d+) rows, median \|ln\| ([\d.]+), mean ln (-?[\d.]+), spread ([\d.]+); value ([\d.]+) \(([\d.]+)s\); exact weights ([\w ]+) \(([\d.]+)s\)", l)
+        m = re.search(r"background DSE sample: (\d+) / (\d+) rows, median \|ln\(exact/cur\)\| ([\d.]+), mean ln (-?[\d.]+), max ([\d.]+), spread ([\d.]+)(?:, frac>4x ([\d.]+))?; infeasible (\d+) / (\d+) rows, median \|ln\| ([\d.]+), mean ln (-?[\d.]+), spread ([\d.]+)(?:, frac>4x ([\d.]+))?; value ([\d.]+)(?: at iter (\d+))? \(([\d.]+)s\); exact weights ([\w ]+) \(([\d.]+)s\)", l)
         if m:
             g = m.groups()
-            d = dict(k=int(g[0]), m=int(g[1]), med=float(g[2]), mean=float(g[3]), max=float(g[4]), spread=float(g[5]), ki=int(g[6]), ninf=int(g[7]), imed=float(g[8]), imean=float(g[9]), ispread=float(g[10]), value=float(g[11]), iter=int(g[12] or 0), secs=float(g[13]), full=g[14], full_secs=float(g[15]))
+            fl = lambda x: None if x is None else float(x)
+            d = dict(k=int(g[0]), m=int(g[1]), med=float(g[2]), mean=float(g[3]), max=float(g[4]), spread=float(g[5]), frac=fl(g[6]), ki=int(g[7]), ninf=int(g[8]), imed=float(g[9]), imean=float(g[10]), ispread=float(g[11]), ifrac=fl(g[12]), value=float(g[13]), iter=int(g[14] or 0), secs=float(g[15]), full=g[16], full_secs=float(g[17]))
         else:
             m = re.search(r"background DSE sample: (\d+) / (\d+) rows, median \|ln\(exact/cur\)\| ([\d.]+), mean ln (-?[\d.]+), max ([\d.]+) \(([\d.]+)s\); exact weights ([\w ]+) \(([\d.]+)s\)", l)
             if not m:
                 continue
             g = m.groups()
-            d = dict(k=int(g[0]), m=int(g[1]), med=float(g[2]), mean=float(g[3]), max=float(g[4]), spread=None, ki=None, ninf=None, imed=None, imean=None, ispread=None, value=float(g[2]), iter=0, secs=float(g[5]), full=g[6], full_secs=float(g[7]))
+            d = dict(k=int(g[0]), m=int(g[1]), med=float(g[2]), mean=float(g[3]), max=float(g[4]), spread=None, ki=None, ninf=None, imed=None, imean=None, ispread=None, frac=None, ifrac=None, value=float(g[2]), iter=0, secs=float(g[5]), full=g[6], full_secs=float(g[7]))
         d["full"] = {"computed": "厳密", "stopped": "中止", "not computed": "そのまま"}[d["full"]]
         o["sampd"] = d
         o["samp"] = f"{d['value']:.3f}" + (f" @{d['iter']}" if d["iter"] else "") + f" ({d['k']}+{d['ki'] or 0} 行, {d['secs']}s) → {d['full']}" + (f" {d['full_secs']}s" if d["full"] != "そのまま" else "")
