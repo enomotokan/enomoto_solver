@@ -48,7 +48,7 @@ pub struct OpenNode {
     /// 基底に当てはめる。
     pub basis_epoch: usize,
     /// `basis` の DSE 重み (基底変数の番号との組、`basis_epoch` のときの行の番号)。`ENOMOTO_MIP_NODE_DSE` で保存する。
-    pub dse: Option<Rc<Vec<(u32, f32)>>>,
+    pub dse: Option<Rc<NodeDse>>,
     /// このノードを作った分枝 (列, 上向きか, 親の LP 値, 親の LP 目的値)。pseudocost の更新に使う。
     pub branch: Option<(usize, bool, f64, f64)>,
     /// `basis` で効いている (論理変数が非基底の) カットの番号 (`Solver::cut_ids`)。待ち行列にある間、このカットは
@@ -61,6 +61,76 @@ pub struct OpenNode {
     /// 強分岐で得た、部分木で成り立つ境界 (`ENOMOTO_MIP_SB_TIGHTEN_INHERIT`) と凸性の直線 (`ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR`)。
     /// 親から子へ引き継ぎ、ノードの処理の始めに定義域に当てる ([`super::solver`] の `apply_sb_inherit`)
     pub sb: Option<Rc<SbInherit>>,
+}
+
+/// 待ち行列のノードに保存する DSE 重み ([`OpenNode::dse`])。
+#[derive(Clone, Debug)]
+pub enum NodeDse {
+    /// (基底変数の番号, 重み) の組 (既定)。
+    Pairs(Vec<(u32, f32)>),
+    /// `ENOMOTO_MIP_MEM2` の `p` (試作): 重みだけを、一緒に保存した基底 ([`Basis`]) の基底変数の番号 (構造列 j、行 n + i) の
+    /// 昇順に並べたもの。番号は基底の状態から戻す ([`Self::pairs`])。組の半分の大きさ。
+    Packed(Vec<f32>),
+}
+
+impl NodeDse {
+    /// 持ち物の大きさ [バイト] (目安)。
+    pub fn bytes(&self) -> usize {
+        match self {
+            NodeDse::Pairs(v) => v.len() * 8 + 24,
+            NodeDse::Packed(v) => v.len() * 4 + 24,
+        }
+    }
+
+    /// `Pairs` を `Packed` にする (基底 `b` の基底変数と重みの番号がちょうど合うときだけ。合わなければ `None`)。
+    pub fn pack(w: &[(u32, f32)], b: &Basis) -> Option<NodeDse> {
+        let n = b.col.len();
+        let nt = n + b.row.len();
+        let mut map = vec![f32::NAN; nt];
+        let mut seen = vec![false; nt];
+        for &(v, x) in w {
+            let v = v as usize;
+            if v >= nt || seen[v] {
+                return None;
+            }
+            seen[v] = true;
+            map[v] = x;
+        }
+        let mut out = Vec::with_capacity(w.len());
+        for (j, s) in b.col.iter().chain(b.row.iter()).enumerate() {
+            if *s == super::lp::VarStatus::Basic {
+                if !seen[j] {
+                    return None;
+                }
+                out.push(map[j]);
+            }
+        }
+        (out.len() == w.len()).then_some(NodeDse::Packed(out))
+    }
+
+    /// (基底変数の番号, 重み) の組。`Packed` なら基底 `b` (保存した基底。共有の待ち行列から受け取ったものは、行の後ろに
+    /// カットの行の分が足されていてもよい: 重みのない後ろの基底変数は渡さない) から番号を戻す。
+    pub fn pairs<'a>(&'a self, b: &Basis) -> std::borrow::Cow<'a, [(u32, f32)]> {
+        match self {
+            NodeDse::Pairs(v) => std::borrow::Cow::Borrowed(v.as_slice()),
+            NodeDse::Packed(w) => {
+                let it = b.col.iter().chain(b.row.iter()).enumerate().filter(|(_, s)| **s == super::lp::VarStatus::Basic).map(|(j, _)| j as u32);
+                std::borrow::Cow::Owned(it.zip(w.iter().copied()).collect())
+            }
+        }
+    }
+
+    /// 構造列と最初の `m` 行の基底変数の分だけにする (共有の待ち行列に出すとき。`b` は保存した基底)。
+    pub fn restrict(&self, b: &Basis, m: usize) -> NodeDse {
+        let lim = (b.col.len() + m) as u32;
+        match self {
+            NodeDse::Pairs(w) => NodeDse::Pairs(w.iter().copied().filter(|&(v, _)| v < lim).collect()),
+            NodeDse::Packed(w) => {
+                let k = b.col.iter().chain(b.row.iter().take(m)).filter(|s| **s == super::lp::VarStatus::Basic).count();
+                NodeDse::Packed(w[..k.min(w.len())].to_vec())
+            }
+        }
+    }
 }
 
 /// 強分岐の子の LP 値から得た凸性の直線 (列 `col` の上の子 (`up`) か下の子)。祖先のノードの LP 値 `z`・列の値 `v`・1 単位あたりの
@@ -275,6 +345,46 @@ impl NodeQueue {
         }
     }
 
+    /// `ENOMOTO_MIP_MEM2` (試作): 待ち行列のノードの持ち物 (基底・DSE 重み・効くカットの番号・境界の変更) の大きさの目安 [バイト]。
+    /// 兄弟で共有しているもの (`Rc`) は共有の数で割る。
+    pub fn mem_bytes(&self) -> usize {
+        self.nodes.iter().flatten().map(node_bytes).sum()
+    }
+
+    /// `ENOMOTO_MIP_MEM2` (試作): 持ち物を減らす。深いノード (同じ深さなら下界の大きいもの) から、`dse` なら DSE 重みを、
+    /// `basis` なら基底 (と効くカットの番号) も捨て、減った大きさの目安が `target` に届いたらやめる。`keep` の (枠, 世代)
+    /// (潜りの兄弟) は捨てない。減った大きさの目安を返す。
+    pub fn strip(&mut self, target: usize, basis: bool, keep: &[(usize, u64)]) -> usize {
+        let mut ids: Vec<(usize, usize, f64)> = Vec::new();
+        for (id, n) in self.nodes.iter().enumerate() {
+            if let Some(n) = n {
+                if (n.dse.is_some() || (basis && n.basis.is_some())) && !keep.iter().any(|&(k, g)| k == id && self.gen[id] == g) {
+                    ids.push((id, n.depth, n.lower_bound));
+                }
+            }
+        }
+        ids.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.total_cmp(&a.2)));
+        let mut freed = 0usize;
+        for (id, _, _) in ids {
+            if freed >= target {
+                break;
+            }
+            let n = self.nodes[id].as_mut().unwrap();
+            let before = node_bytes(n);
+            n.dse = None;
+            let mut pr = None;
+            if basis {
+                n.basis = None;
+                pr = n.prot.take();
+            }
+            freed += before.saturating_sub(node_bytes(self.nodes[id].as_ref().unwrap()));
+            if let Some(pr) = pr {
+                self.unprotect(&pr);
+            }
+        }
+        freed
+    }
+
     fn unprotect(&mut self, pr: &[u64]) {
         for c in pr {
             if let Some(k) = self.protect.get_mut(*c as usize) {
@@ -287,4 +397,19 @@ impl NodeQueue {
     pub fn is_protected(&self, c: u64) -> bool {
         self.protect.get(c as usize).is_some_and(|&k| k > 0)
     }
+}
+
+/// `ENOMOTO_MIP_MEM2` (試作): ノード 1 つの持ち物の大きさの目安 [バイト] (`Rc` で共有しているものは共有の数で割る)。
+pub fn node_bytes(n: &OpenNode) -> usize {
+    let mut b = std::mem::size_of::<OpenNode>() + n.changes.capacity() * std::mem::size_of::<BoundChange>();
+    if let Some(x) = &n.basis {
+        b += (x.col.len() + x.row.len()) / Rc::strong_count(x);
+    }
+    if let Some(x) = &n.dse {
+        b += x.bytes() / Rc::strong_count(x);
+    }
+    if let Some(x) = &n.prot {
+        b += x.len() * 8 / Rc::strong_count(x);
+    }
+    b
 }

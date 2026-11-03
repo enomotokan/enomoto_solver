@@ -13,7 +13,7 @@ use super::lp::{LpStatus, SolveLimits, VarStatus};
 use super::lp_api::MipLp;
 use super::problem::MipProblem;
 use super::pseudocost::Pseudocost;
-use super::queue::{BoundChange, NodeQueue, OpenNode, SbInherit, SbLine};
+use super::queue::{BoundChange, NodeDse, NodeQueue, OpenNode, SbInherit, SbLine};
 use std::rc::Rc;
 
 /// 証明 `sum a_j x_j` の境界 `lo`/`up` での最小活動量 (有限部分, 無限の項の数) と `max_j |a_j| (u_j - l_j)`
@@ -574,6 +574,16 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_POOL_DSE` (試作): (DSE 重みを付けて出したノード, 付けた重みの数, 重み付きで受け取ったノード, 戻すときに当てはめた回数,
     /// 当てはめた基底変数のうち重みがあった数, 重みがなかった数)
     pool_dse_stats: [u64; 6],
+    /// `ENOMOTO_MIP_MEM2` (試作): 次に持ち物を数えるノード数、新しいノードに DSE 重み・基底を保存するか、
+    /// 統計 (数えた回数, DSE を捨てた大きさ, 基底を捨てた大きさ, 持ち物の最大, 上限を超えた回数, 保存しなかった DSE, 保存しなかった基底)。
+    mem2_next: u64,
+    mem2_keep: (bool, bool),
+    /// `ENOMOTO_MIP_MEM2` の `d`: 持ち物の合計が上限の 1/2 を超えている (深さ優先に寄せる)
+    mem2_press: bool,
+    mem2_stats: [u64; 7],
+    /// `ENOMOTO_MIP_MEM2` の `s`: 共有の待ち行列に出した基底・DSE 重みを、同じ親の兄弟で共有するための覚え (親の基底の `Rc` の番地と
+    /// 生きているかの確かめ、渡した写し)。
+    mem2_share: Vec<(usize, std::rc::Weak<super::lp::Basis>, std::sync::Arc<(Vec<VarStatus>, Vec<VarStatus>)>, Option<std::sync::Arc<NodeDse>>)>,
     /// 直前に戻した基底に、保存した DSE 重みも当てはめたか (次の LP で引き継ぐ)。
     restored_dse: bool,
     node_lps: u64,
@@ -1303,30 +1313,32 @@ pub(crate) struct SnapNode {
     branch: Option<(usize, bool, f64, f64)>,
     /// 共有の待ち行列で渡すノードの親の LP の最適基底の、列と元の行の部分 (`ENOMOTO_MIP_TREE_NO_PASS_BASIS` でなければ)。カットの行は
     /// スレッドごとに違うので渡さない (受け取った側では基底にする)。
-    basis: Option<(Vec<VarStatus>, Vec<VarStatus>)>,
+    /// `ENOMOTO_MIP_MEM2` の `s` (試作) なら、同じ親の兄弟のノードで共有する ([`Solver::snap_of`])。
+    basis: Option<std::sync::Arc<(Vec<VarStatus>, Vec<VarStatus>)>>,
     /// 親の LP の基底で非基底だったカットの行の (カットのハッシュ, 状態) (`ENOMOTO_MIP_TREE_SHARE_CUT_BASIS`)。受け取った側は同じ
     /// カットの行があればその状態にする ([`Solver::open_from_pool`])。
     cut_basis: Option<Vec<(u64, VarStatus)>>,
     /// `ENOMOTO_MIP_POOL_DSE` (試作): 親の LP の DSE 重みのうち、列と元の行の基底変数の分 (変数番号 j < n、行 n + i (i < m), 重み)。
     /// カットの行の分はスレッドごとに違うので渡さない
-    dse: Option<Vec<(u32, f32)>>,
+    dse: Option<std::sync::Arc<NodeDse>>,
+    /// `ENOMOTO_MIP_MEM2` (試作): 共有の待ち行列に入れたときの持ち物の大きさの目安 [バイト] ([`PoolNodes::bytes`] に足す)
+    mem: usize,
 }
 
 impl SnapNode {
     fn of(n: &OpenNode) -> Self {
-        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None }
+        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0 }
     }
     /// [`Self::of`] に、親の LP の基底の列と最初の `m` 行 (元の行) を付ける。
     fn of_with_basis(n: &OpenNode, m: usize) -> Self {
         let mut s = Self::of(n);
         if let Some(b) = &n.basis {
             if b.row.len() >= m {
-                s.basis = Some((b.col.clone(), b.row[..m].to_vec()));
+                s.basis = Some(std::sync::Arc::new((b.col.clone(), b.row[..m].to_vec())));
                 // `ENOMOTO_MIP_POOL_DSE` (試作): 列と元の行の基底変数の DSE 重みも渡す (元の行の番号は行の追加・削除で変わらない)
                 if pool_dse() {
                     if let Some(w) = &n.dse {
-                        let lim = (b.col.len() + m) as u32;
-                        s.dse = Some(w.iter().copied().filter(|&(v, _)| v < lim).collect());
+                        s.dse = Some(std::sync::Arc::new(w.restrict(b, m)));
                     }
                 }
             }
@@ -1526,6 +1538,64 @@ fn pool_dse() -> bool {
     env_def!("ENOMOTO_MIP_POOL_DSE", "1").is_some()
 }
 
+/// `ENOMOTO_MIP_MEM2` (試作、既定では使わない): 開いたノードの持ち物を減らし、メモリに上限を置く (analysis/uccase12_mem2_20261103.md)。
+/// 値 `1` で全て、または次の文字の組み合わせ:
+/// - `p`: ノードに保存する DSE 重みを番号なしの f32 の並び ([`NodeDse::Packed`]、番号は保存した基底から戻す) にする。
+/// - `s`: 共有の待ち行列に出すノード ([`SnapNode`]) の基底・DSE 重みを、同じ親の兄弟で `Arc` で共有する。
+/// - `b`: 開いたノード (各スレッドの待ち行列と共有の待ち行列) の持ち物の合計の目安が上限 ([`mem2_budget`]) を超えたら、深いノード
+///   (同じ深さなら下界の大きいもの) から DSE 重みを、それでも足りなければ基底を捨て、新しいノードには保存しない ([`Solver::mem2_check`])。
+/// - `d`: 上限の 1/2 を超えたら深さ優先に寄せる (潜りのノード数の上限と兄弟へ戻る下界の条件を外す)。
+/// - `l`: 潜りの兄弟に持たせる親の LP の LU (`dive_stack`) を、新しい `ENOMOTO_T_MIP_MEM2_LU_KEEP` (既定 8) 個までにする。
+fn mem2(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_MEM2").is_some_and(|v| v == "1" || v.contains(c))
+}
+
+/// `ENOMOTO_MIP_MEM2` の `b` の上限 [バイト]: `ENOMOTO_T_MIP_MEM2_BUDGET_MB` (> 0) があればその値、なければ使えるメモリ (cgroup の
+/// 上限 − 今の使用量 と /proc/meminfo の MemAvailable の小さい方、最初に呼んだときの値) × `ENOMOTO_T_MIP_MEM2_FRAC` (既定 0.3)。
+/// どちらも読めなければ 4 GB × `ENOMOTO_T_MIP_MEM2_FRAC` / 0.3。
+pub(super) fn mem2_budget() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        let mb = tunable!("ENOMOTO_T_MIP_MEM2_BUDGET_MB", 0.0, f64);
+        if mb > 0.0 {
+            return (mb * 1048576.0) as usize;
+        }
+        let frac = tunable!("ENOMOTO_T_MIP_MEM2_FRAC", 0.3, f64);
+        let read = |p: &str| std::fs::read_to_string(p).ok().and_then(|t| t.trim().parse::<f64>().ok());
+        let cg = match (read("/sys/fs/cgroup/memory.max"), read("/sys/fs/cgroup/memory.current")) {
+            (Some(mx), Some(cur)) => Some(mx - cur),
+            (Some(mx), None) => Some(mx),
+            _ => read("/sys/fs/cgroup/memory/memory.limit_in_bytes").map(|mx| mx - read("/sys/fs/cgroup/memory/memory.usage_in_bytes").unwrap_or(0.0)),
+        };
+        let avail = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|t| t.lines().find(|l| l.starts_with("MemAvailable:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<f64>().ok()))
+            .map(|kb| kb * 1024.0);
+        let a = match (cg, avail) {
+            (Some(c), Some(v)) => c.min(v),
+            (Some(c), None) => c,
+            (None, Some(v)) => v,
+            (None, None) => 4.0 * 1073741824.0,
+        };
+        (a.max(256.0 * 1048576.0) * frac) as usize
+    })
+}
+
+/// `ENOMOTO_MIP_MEM2` (試作): 共有の待ち行列のノード 1 つの持ち物の大きさの目安 [バイト] (`Arc` で共有しているものは共有の数で割る)。
+fn snap_bytes(n: &SnapNode) -> usize {
+    let mut b = std::mem::size_of::<SnapNode>() + n.changes.capacity() * std::mem::size_of::<BoundChange>();
+    if let Some(x) = &n.basis {
+        b += (x.0.len() + x.1.len()) / std::sync::Arc::strong_count(x);
+    }
+    if let Some(x) = &n.dse {
+        b += x.bytes() / std::sync::Arc::strong_count(x);
+    }
+    if let Some(x) = &n.cut_basis {
+        b += x.len() * 16;
+    }
+    b
+}
+
 fn pool_dse_nan() -> bool {
     env_def!("ENOMOTO_MIP_POOL_DSE", "1").is_some_and(|v| v.contains('n'))
 }
@@ -1592,6 +1662,8 @@ struct ThreadSlot {
     wopen: std::sync::atomic::AtomicU64,
     /// 下界が「最良値 - δ_i (最良値 - 全体の下界)」以上のノードの重みの和 (δ_i は [`TRIG_DELTAS`])。
     wcuts: [std::sync::atomic::AtomicU64; 8],
+    /// `ENOMOTO_MIP_MEM2` (試作): 自分の待ち行列のノードの持ち物の大きさの目安 [バイト] ([`Solver::mem2_check`])。
+    mem: std::sync::atomic::AtomicUsize,
 }
 
 /// 刈れる重みの分布 ([`ThreadSlot::wcuts`]) の境の位置 (ギャップに対する割合)。
@@ -1667,11 +1739,41 @@ struct PoolNodes {
     by_lb: std::collections::BTreeSet<(super::queue::Key, usize)>,
     by_est: std::collections::BTreeSet<(super::queue::Key, super::queue::Key, usize)>,
     pops: u64,
+    /// `ENOMOTO_MIP_MEM2` (試作): ノードの持ち物の大きさの目安の和 ([`SnapNode::mem`])。
+    bytes: usize,
 }
 
 impl PoolNodes {
     fn new() -> Self {
-        PoolNodes { v: Vec::new(), free: Vec::new(), by_lb: std::collections::BTreeSet::new(), by_est: std::collections::BTreeSet::new(), pops: 0 }
+        PoolNodes { v: Vec::new(), free: Vec::new(), by_lb: std::collections::BTreeSet::new(), by_est: std::collections::BTreeSet::new(), pops: 0, bytes: 0 }
+    }
+    /// `ENOMOTO_MIP_MEM2` (試作): 持ち物を減らす。深いノード (同じ深さなら下界の大きいもの) から DSE 重みを (`basis` なら基底も)
+    /// 捨て、減った大きさの目安が `target` に届いたらやめる。減った大きさの目安を返す。
+    fn strip(&mut self, target: usize, basis: bool) -> usize {
+        let mut ids: Vec<(usize, usize, f64)> = self
+            .v
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| n.as_ref().filter(|n| n.dse.is_some() || (basis && n.basis.is_some())).map(|n| (i, n.depth, n.lower_bound)))
+            .collect();
+        ids.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.total_cmp(&a.2)));
+        let mut freed = 0usize;
+        for (i, _, _) in ids {
+            if freed >= target {
+                break;
+            }
+            let n = self.v[i].as_mut().unwrap();
+            n.dse = None;
+            if basis {
+                n.basis = None;
+                n.cut_basis = None;
+            }
+            let m = snap_bytes(n);
+            freed += n.mem.saturating_sub(m);
+            self.bytes = self.bytes.saturating_sub(n.mem.saturating_sub(m));
+            n.mem = m;
+        }
+        freed
     }
     fn len(&self) -> usize {
         self.by_lb.len()
@@ -1686,6 +1788,7 @@ impl PoolNodes {
         (super::queue::Key(0.5 * n.lower_bound + 0.5 * n.estimate), super::queue::Key(-(n.depth as f64)))
     }
     fn push(&mut self, n: SnapNode) {
+        self.bytes += n.mem;
         let lb = super::queue::Key(n.lower_bound);
         let (e, d) = Self::est_key(&n);
         let id = match self.free.pop() {
@@ -1708,6 +1811,7 @@ impl PoolNodes {
     }
     fn remove(&mut self, id: usize) -> SnapNode {
         let n = self.v[id].take().unwrap();
+        self.bytes = self.bytes.saturating_sub(n.mem);
         let (e, d) = Self::est_key(&n);
         self.by_lb.remove(&(super::queue::Key(n.lower_bound), id));
         self.by_est.remove(&(e, d, id));
@@ -3065,6 +3169,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool_fix_ptrs: std::collections::HashSet::new(),
         pool_fix_stats: (0, 0, 0, 0, 0.0),
         pool_dse_stats: [0; 6],
+        mem2_next: 0,
+        mem2_keep: (true, true),
+        mem2_press: false,
+        mem2_stats: [0; 7],
+        mem2_share: Vec::new(),
         restored_dse: false,
         node_lps: 0,
         node_lp_secs: 0.0,
@@ -6351,7 +6460,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.snap_alive = vec![true; snap.nodes.len()];
             first = false;
         } else {
-            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot, tags: None, sb: None });
+            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None });
         }
         // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 木の始まり (根の前処理・LP・カット・ヒューリスティクスの終わり) を道筋つきで出す
         // (サブ MIP の時間のうち根の割合を見る。analysis/rens_resume_20261101.md)
@@ -6543,6 +6652,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 self.tprof.sync_s += t_sync.elapsed().as_secs_f64();
             }
+            // `ENOMOTO_MIP_MEM2` の `b` (試作): 開いたノードの持ち物を数え、上限に近ければ捨てる
+            if mem2('b') && !self.params.submip {
+                self.mem2_check();
+            }
             // ヒューリスティクス役 (`ENOMOTO_MIP_HEUR_ROLE`): 番号の大きい従は、解ができたら木を離れて大近傍探索を回し続ける
             if plunge.is_none() && !first && self.heur_role_mine() {
                 match self.heur_role_run() {
@@ -6627,11 +6740,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // HiGHS 流のカット管理では HiGHS の processNodes の plungeLimit と同じ `ENOMOTO_T_MIP_HCM_PLUNGE_NODES` (既定 100):
                 // 分離は待ち行列から取り出したノードでしか行わないので、潜りが 1000 ノード続くと分離がほとんど起きない
                 // (neos-911970: 14000 ノード中、待ち行列からの取り出しは 70 回)
-                && self.nodes - plunge_start < if self.highs_cutmgmt() { tunable!("ENOMOTO_T_MIP_HCM_PLUNGE_NODES", 100u64, u64) } else { (self.nodes / tunable!("ENOMOTO_T_MIP_PLUNGE_NODES_DIV", 10u64, u64)).min(1000) }
+                // `ENOMOTO_MIP_MEM2` の `d` (試作): 持ち物が上限の 1/2 を超えていたら、潜りのノード数の上限を外す (深さ優先に寄せる)
+                && (self.nodes - plunge_start < if self.highs_cutmgmt() { tunable!("ENOMOTO_T_MIP_HCM_PLUNGE_NODES", 100u64, u64) } else { (self.nodes / tunable!("ENOMOTO_T_MIP_PLUNGE_NODES_DIV", 10u64, u64)).min(1000) }
+                    || (self.mem2_press && mem2('d')))
             {
                 let cutoff = self.prune_limit();
                 let glb = self.queue.best_lower_bound();
                 let limit = if cutoff.is_finite() { glb + tunable!("ENOMOTO_T_MIP_SIBLING_QUOT", 0.25, f64) * (cutoff - glb) } else { f64::INFINITY };
+                // `ENOMOTO_MIP_MEM2` の `d`: 兄弟へ戻る下界の条件も外す (打ち切り値未満なら戻る)
+                let limit = if self.mem2_press && mem2('d') { f64::INFINITY } else { limit };
                 let mut got = None;
                 while let Some((id, gen, lu)) = self.dive_stack.pop() {
                     if let Some(n) = self.queue.take(id, gen, limit.min(cutoff)) {
@@ -6674,7 +6791,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     if let Some(b) = &n.basis {
-                        self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()), &n.changes);
+                        self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &n.changes);
                         // 置いた基底が親の LP の最適基底のままなら、その LU を使う (行が変わっていれば使わない)
                         if let Some(s) = &sib_lu {
                             if n.basis_epoch == self.row_log.len() {
@@ -6754,7 +6871,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if ok {
                             if let Some(b) = &n.basis {
-                                self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()), &n.changes);
+                                self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &n.changes);
                             }
                         }
                         if !ok {
@@ -7830,9 +7947,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (first_c, second_c) = if prefer_up { (up, down) } else { (down, up) };
             let basis = Rc::new(self.lp.basis());
             let basis_epoch = self.row_log.len();
+            // `ENOMOTO_MIP_MEM2` の `b` (試作): 開いたノードの持ち物が上限に近ければ、DSE 重み・基底を保存しない
+            let (keep_dse, keep_basis) = if mem2('b') { self.mem2_keep } else { (true, true) };
+            self.mem2_stats[5] += !keep_dse as u64;
+            self.mem2_stats[6] += !keep_basis as u64;
             // `ENOMOTO_MIP_NODE_DSE`: 基底と一緒に DSE 重みも保存し、取り出したノードの最初の LP で使う
-            let dse = if env_str!("ENOMOTO_MIP_NODE_DSE").is_some() || dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None };
-            let prot = self.basis_protected_cuts();
+            let dse = if (env_str!("ENOMOTO_MIP_NODE_DSE").is_some() || dse_all()) && keep_dse && keep_basis {
+                // `ENOMOTO_MIP_MEM2` の `p` (試作): 番号なしの f32 の並びにする
+                self.lp.dse_snapshot().map(|w| Rc::new(if mem2('p') { NodeDse::pack(&w, &basis).unwrap_or(NodeDse::Pairs(w)) } else { NodeDse::Pairs(w) }))
+            } else {
+                None
+            };
+            let basis = keep_basis.then_some(basis);
+            let prot = if keep_basis { self.basis_protected_cuts() } else { None };
             // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
             let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
             let of_fixes = std::mem::take(&mut self.of_node_fixes);
@@ -7850,7 +7977,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     lower_bound: child_lb,
                     estimate,
                     depth: node.depth + 1,
-                    basis: Some(basis.clone()),
+                    basis: basis.clone(),
                     basis_epoch,
                     dse: dse.clone(),
                     branch: Some((col, !c.upper, value, lp_obj)),
@@ -7867,6 +7994,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 兄弟へ戻ったときのために親の LP の LU を一緒に持つ (共有なので写さない)
             let sib_lu = if env_str!("ENOMOTO_MIP_NO_SIBLING_LU").is_none() { self.lp.lu_snapshot() } else { None };
             self.dive_stack.push((sib.0, sib.1, sib_lu));
+            // `ENOMOTO_MIP_MEM2` の `l` (試作): 潜りの兄弟に持たせる LU を新しい K 個までにする (古いものから捨てる)
+            if mem2('l') {
+                let k = tunable!("ENOMOTO_T_MIP_MEM2_LU_KEEP", 8usize, usize);
+                let n = self.dive_stack.len();
+                if n > k {
+                    if let Some(e) = self.dive_stack.get_mut(n - k - 1) {
+                        e.2 = None;
+                    }
+                }
+            }
             let mut child = mk(first_c);
             if replay.is_some() {
                 child.estimate = rp_prio(first_c);
@@ -13537,14 +13674,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         for n in nodes.iter_mut() {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0 });
         }
         for n in nodes {
             self.queue.push(n);
         }
         if let Some(n) = plunge.as_mut().filter(|_| with_nodes) {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0 });
         }
         if with_nodes {
             self.dive_stack.clear();
@@ -13752,6 +13889,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let cut_basis = sn.cut_basis.take();
         let sdse = sn.dse.take();
         let mut n = sn.into_open();
+        let basis = basis.map(|a| std::sync::Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()));
         if let Some((col, mut row)) = basis {
             let mr = self.lp.num_rows();
             if col.len() == self.p.n && row.len() <= mr {
@@ -13791,7 +13929,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 n.basis_epoch = self.row_log.len();
                 if let Some(w) = sdse {
                     self.pool_dse_stats[2] += 1;
-                    n.dse = Some(Rc::new(w));
+                    n.dse = Some(Rc::new(std::sync::Arc::try_unwrap(w).unwrap_or_else(|a| (*a).clone())));
                 }
             }
         }
@@ -14023,10 +14161,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_TREE_NO_PASS_BASIS").is_some() {
             return SnapNode::of(n);
         }
-        let mut s = SnapNode::of_with_basis(n, self.p.m);
+        let mut s = if mem2('s') { self.mem2_snap_shared(n) } else { SnapNode::of_with_basis(n, self.p.m) };
         if let Some(w) = &s.dse {
             self.pool_dse_stats[0] += 1;
-            self.pool_dse_stats[1] += w.len() as u64;
+            self.pool_dse_stats[1] += match &**w {
+                NodeDse::Pairs(v) => v.len(),
+                NodeDse::Packed(v) => v.len(),
+            } as u64;
         }
         if s.basis.is_some() && (env_str!("ENOMOTO_MIP_TREE_SHARE_CUT_BASIS").is_some() || tree_pool_basis()) {
             if let Some(b) = n.basis.clone() {
@@ -14056,7 +14197,103 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        if env_str!("ENOMOTO_MIP_MEM2").is_some() {
+            s.mem = snap_bytes(&s);
+        }
         s
+    }
+
+    /// `ENOMOTO_MIP_MEM2` の `s` (試作): [`SnapNode::of_with_basis`] と同じだが、同じ親の基底 (`Rc` が同じ) を持つ兄弟を続けて出すときは、
+    /// 写した基底・DSE 重みを `Arc` で共有する。
+    fn mem2_snap_shared(&mut self, n: &OpenNode) -> SnapNode {
+        let Some(b) = &n.basis else { return SnapNode::of(n) };
+        let key = Rc::as_ptr(b) as usize;
+        if let Some(e) = self.mem2_share.iter().find(|e| e.0 == key && e.1.upgrade().is_some_and(|x| Rc::ptr_eq(&x, b))) {
+            let mut s = SnapNode::of(n);
+            s.basis = Some(e.2.clone());
+            if n.dse.is_some() {
+                s.dse = e.3.clone();
+            }
+            return s;
+        }
+        let s = SnapNode::of_with_basis(n, self.p.m);
+        if let Some(sb) = &s.basis {
+            self.mem2_share.retain(|e| e.1.strong_count() > 0);
+            self.mem2_share.push((key, Rc::downgrade(b), sb.clone(), s.dse.clone()));
+            if self.mem2_share.len() > 16 {
+                self.mem2_share.remove(0);
+            }
+        }
+        s
+    }
+
+    /// `ENOMOTO_MIP_MEM2` の `b` (試作): 開いたノードの持ち物の合計の目安 (自分の待ち行列 + ほかのスレッドが知らせた分 + 共有の待ち行列) を
+    /// 数え、上限 ([`mem2_budget`]) の 0.9 倍を超えたら、自分の待ち行列と共有の待ち行列から合計の 0.7 倍まで (自分の分の割合で) 深い
+    /// ノードの DSE 重みを、足りなければ基底を捨てる。合計が上限の 0.5 倍を超えたら新しいノードに DSE 重みを、0.9 倍を超えたら (捨てた後で)
+    /// 基底も保存しない。待ち行列の長さの 1/8 (32 以上) ノードおきに呼ぶ。
+    fn mem2_check(&mut self) {
+        use std::sync::atomic::Ordering;
+        if self.nodes < self.mem2_next {
+            return;
+        }
+        self.mem2_next = self.nodes + (self.queue.len() as u64 / 8).max(32);
+        self.mem2_stats[0] += 1;
+        let budget = mem2_budget();
+        let mut local = self.queue.mem_bytes();
+        let pool = self.pool.clone();
+        let (others, mut pbytes) = match &pool {
+            Some(p) => {
+                let t = self.pool_tid as usize;
+                let o: usize = p.slots.iter().enumerate().filter(|&(i, _)| i != t).map(|(_, sl)| sl.mem.load(Ordering::Relaxed)).sum();
+                (o, p.inner.lock().unwrap().nodes.bytes)
+            }
+            None => (0, 0),
+        };
+        let mut total = local + others + pbytes;
+        self.mem2_stats[3] = self.mem2_stats[3].max(total as u64);
+        if total as f64 > 0.9 * budget as f64 {
+            self.mem2_stats[4] += 1;
+            let goal = 0.7 * budget as f64;
+            let excess = total as f64 - goal;
+            let keep: Vec<(usize, u64)> = self.dive_stack.iter().map(|&(id, gen, _)| (id, gen)).collect();
+            // 自分の待ち行列: 合計に占める割合の分
+            let my = (excess * local as f64 / total as f64) as usize;
+            let mut f = self.queue.strip(my, false, &keep);
+            self.mem2_stats[1] += f as u64;
+            if f < my {
+                let f2 = self.queue.strip(my - f, true, &keep);
+                self.mem2_stats[2] += f2 as u64;
+                f += f2;
+            }
+            local = local.saturating_sub(f);
+            // 共有の待ち行列: 合計に占める割合の分 (錠が取れなければ次の回)
+            if let Some(p) = &pool {
+                if let Ok(mut g) = p.inner.try_lock() {
+                    let want = (excess * g.nodes.bytes as f64 / total as f64) as usize;
+                    let mut f = g.nodes.strip(want, false);
+                    self.mem2_stats[1] += f as u64;
+                    if f < want {
+                        let f2 = g.nodes.strip(want - f, true);
+                        self.mem2_stats[2] += f2 as u64;
+                        f += f2;
+                    }
+                    let _ = f;
+                    pbytes = g.nodes.bytes;
+                }
+            }
+            total = local + others + pbytes;
+            // 捨てても上限の 0.9 倍を下回らない (捨てるものがほぼ残っていない) なら、しばらく数えない (走査と錠の空回りを避ける)
+            if total as f64 > 0.9 * budget as f64 {
+                self.mem2_next = self.nodes + 1000;
+            }
+        }
+        if let Some(p) = &pool {
+            if let Some(sl) = p.slots.get(self.pool_tid as usize) {
+                sl.mem.store(local, Ordering::Relaxed);
+            }
+        }
+        self.mem2_keep = (total as f64 <= 0.5 * budget as f64, total as f64 <= 0.9 * budget as f64);
+        self.mem2_press = total as f64 > 0.5 * budget as f64;
     }
 
     /// LP のカットの行のハッシュ (係数と右辺を最大の係数で割って丸めたもの) と、ハッシュから行への表を、行が変わっていれば作り直す。
@@ -14497,6 +14734,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.pool_fix_stats.0 + self.pool_fix_stats.3 > 0 && (crate::simplex::nb_diag::on() || prof_tree_par()) {
             let f = self.pool_fix_stats;
             eprintln!("POOL_BASIS_FIX: tid {} fixed {} dropped {} slacks {} gave_up {} secs {:.3}", self.pool_tid, f.0, f.1, f.2, f.3, f.4);
+        }
+        if mem2('b') && self.params.verbose && !self.params.submip {
+            let m = self.mem2_stats;
+            eprintln!(
+                "MIP: MEM2: tid {} checks {} over {} peak {:.1} MB (budget {:.1} MB) stripped dse {:.1} MB basis {:.1} MB, nodes without dse {} without basis {}",
+                self.pool_tid, m[0], m[4], m[3] as f64 / 1048576.0, mem2_budget() as f64 / 1048576.0, m[1] as f64 / 1048576.0, m[2] as f64 / 1048576.0, m[5], m[6]
+            );
         }
         if self.pool_dse_stats.iter().any(|&x| x > 0) && (crate::simplex::nb_diag::on() || prof_tree_par()) {
             let d = self.pool_dse_stats;
