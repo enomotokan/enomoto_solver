@@ -1142,10 +1142,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut ok_lp_iters = 0u64;
         let mut loop_iters = 0u64;
         let mut work_rounds = 0usize;
+        // `ENOMOTO_MIP_LOSE6_3_CUTRESTART` (試作、既定では使わない): 主の根のカットのループで、`ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_MIN` (既定 3)
+        // ラウンド目以降、暫定解による被約費用の固定が再スタートの判定を通るなら ([`Solver::lose6_3_cut_restart_due`])、ループを抜けて
+        // 根のヒューリスティクスを飛ばし早めの再スタートへ進む (HiGHS は根の分離のラウンドごとに被約費用で固定し、再スタートを判定する)。
+        // 値の文字: `h` = 根のヒューリスティクスは飛ばさない、`w` = 抜けた後に裏のカットを待たない
+        let l63_cut = !self.params.submip && job.is_none() && self.snap.is_none() && env_str!("ENOMOTO_MIP_LOSE6_3_CUTRESTART").is_some() && super::early_restart_on();
+        let l63_min = tunable!("ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_MIN", 3usize, usize);
         loop {
             self.poll_fj_thread();
             if self.root_gap_closed() {
                 break;
+            }
+            if l63_cut && round_ctr >= l63_min && !self.early_restart {
+                if let Some(w) = self.lose6_3_cut_restart_due() {
+                    // 値に `h` があれば根のヒューリスティクスは飛ばさない (その中の早めの再スタートの判定に任せる)
+                    if !env_str!("ENOMOTO_MIP_LOSE6_3_CUTRESTART").is_some_and(|v| v.contains('h')) {
+                        self.early_restart = true;
+                    }
+                    self.l63_cut_left = true;
+                    if self.params.verbose {
+                        eprintln!(
+                            "MIP: early restart: {w} integer columns fixable by reduced costs at cut round {round_ctr} (newly fixed {}), leaving the cut loop (ENOMOTO_MIP_LOSE6_3_CUTRESTART, {:.2}s)",
+                            self.newly_fixed_ints(),
+                            self.start.elapsed().as_secs_f64()
+                        );
+                    }
+                    break;
+                }
             }
             if round_ctr >= max_rounds && cont_p2 > 0 {
                 break;

@@ -448,7 +448,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 根のヒューリスティクスを始めるときの LP 解の分数の列の数 (「木を進める」腕の近さの基準)。
     noinc_root_frac: usize,
     /// 早めの再スタート ([`super::early_restart_on`]): 根のヒューリスティクスの途中で再スタートの判定が通った (残りの根のヒューリスティクスを飛ばす)。
-    early_restart: bool,
+    pub(super) early_restart: bool,
+    /// `ENOMOTO_MIP_LOSE6_3_CUTRESTART` (試作): 根のカットのループを再スタートの判定で抜けた
+    pub(super) l63_cut_left: bool,
     /// `ENOMOTO_MIP_TREE_RESTART` (試作): 木の中で暫定解が良くなった (木のループの頭で再スタートを判定する)。
     tree_restart_check: bool,
     noinc_stall: u32,
@@ -2949,6 +2951,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         noinc_tree_win: None,
         noinc_root_frac: 0,
         early_restart: false,
+        l63_cut_left: false,
         tree_restart_check: false,
         noinc_stall: 0,
         noinc_best_close: 0.0,
@@ -5773,6 +5776,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let min_left = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT", 0.05, f64) * self.params.time_limit;
                 let mut cap = (tunable!("ENOMOTO_T_MIP_BG_DETERM_SAFE_FRAC", 0.3, f64) * remaining).min((remaining - min_left).max(0.0));
+                // `ENOMOTO_MIP_LOSE6_3_CUTRESTART` の `w` (試作): 根のカットのループを再スタートの判定で抜けたなら、裏のカットを待たない
+                // (その時点の結果は今まで通り取り込む)
+                if self.l63_cut_left && env_str!("ENOMOTO_MIP_LOSE6_3_CUTRESTART").is_some_and(|v| v.contains('w')) {
+                    cap = 0.0;
+                }
                 // 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` の `w` ([`BgRobust`]): 主の根のカットのループの時間の倍数でも待ちを切る
                 if let Some(r) = d.robust.filter(|r| r.wait_mult > 0.0) {
                     cap = cap.min(r.wait_mult * root_cut_secs);
@@ -12452,7 +12460,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 根の LP を解く前から新たに大域固定された整数列の数 ([`Self::maybe_restart`] の判定と同じ数え方)。
-    fn newly_fixed_ints(&self) -> usize {
+    pub(super) fn newly_fixed_ints(&self) -> usize {
         let p = self.p;
         let fixed = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
         fixed.saturating_sub(self.root_fixed0)
@@ -12474,6 +12482,50 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let newly = self.newly_fixed_ints();
         let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
         newly > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * nint as f64
+    }
+
+    /// `ENOMOTO_MIP_LOSE6_3_CUTRESTART` (試作、既定では使わない。analysis/lose6_3_20261103.md): 根のカットのループの途中で、今の LP
+    /// (カットは大域的に成り立つので緩和) の被約費用と打ち切り値から被約費用による固定を数え、すでにある新たな固定と合わせて
+    /// 早めの再スタートの判定 ([`Self::proto_restart_ok`] と同じ形、割合は `ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_FRAC` (既定 0.1)) を通るなら、
+    /// 固定できる列の数を返す (固定はしない。ループを抜けた後の早めの被約費用の記録で固定される)。p200x1188c では Local-MIP が
+    /// カットのループの途中 (25 ラウンド目の前後) で最適解を出しても、強いカットの延長で 85 ラウンドまで回してから再スタートしていた
+    pub(super) fn lose6_3_cut_restart_due(&self) -> Option<usize> {
+        if self.params.submip || self.snap.is_some() || self.incumbent.is_none() || self.time_up() || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() {
+            return None;
+        }
+        if self.params.restarts >= max_restarts(self.p) {
+            return None;
+        }
+        let p = self.p;
+        let gap = self.prune_limit() - (self.lp.objective() + p.offset);
+        if !gap.is_finite() || gap < 0.0 {
+            return None;
+        }
+        let b = self.lp.basis_ref();
+        let d = self.lp.reduced_costs_ref();
+        let mut would = 0usize;
+        for j in 0..p.n {
+            if !p.is_int[j] || self.dom.global_lo[j] >= self.dom.global_up[j] {
+                continue;
+            }
+            let (lo, up) = (self.dom.global_lo[j], self.dom.global_up[j]);
+            // 根の LP で下限 (上限) にいる列は、上限 (下限) まで動かすと目的値が |d| (up - lo) 以上増える。差を超えるなら固定できる
+            // (整数列なので境界の幅が 1 未満に締まれば固定と数える)
+            let fixes = match b.col[j] {
+                VarStatus::Lower if d[j] > 1e-7 => (gap / d[j]).floor() < 1.0 && up - lo >= 1.0,
+                VarStatus::Upper if d[j] < -1e-7 => (gap / -d[j]).floor() < 1.0 && up - lo >= 1.0,
+                _ => false,
+            };
+            if fixes {
+                would += 1;
+            }
+        }
+        let nint = p.nint;
+        let free = nint.saturating_sub(self.root_fixed0);
+        let newly = self.newly_fixed_ints() + would;
+        let frac = tunable!("ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_FRAC", 0.1, f64);
+        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
+        (would > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * nint as f64).then_some(would)
     }
 
     /// 根での再スタート (SCIP の `restartfac`): 根の処理で新たに大域固定された整数列が全体の 1% (初回、`ENOMOTO_T_MIP_RESTART_FIRST_FAC`)・
@@ -12897,11 +12949,46 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn join_submips(&mut self, keep: usize) {
         if env_str!("ENOMOTO_MIP_SUBMIP_FIRST_DONE").is_some() || submip_outcome_stop() {
             // 終わったものから受け取る (どれも終わっていなければ 1 ms 待って見直す)。受け取って良くなった暫定解は残りのサブ MIP に渡す
+            // `ENOMOTO_MIP_LOSE6_3_JOINSTOP` (試作、既定では使わない。analysis/lose6_3_20261103.md): 外側の根で全部を待つとき、待ち始めてから
+            // max(`ENOMOTO_T_MIP_LOSE6_3_JOINSTOP_MIN` (0.1 秒), `ENOMOTO_T_MIP_LOSE6_3_JOINSTOP_MULT` (0.25) x 根の始めから待ち始めまでの秒) 過ぎても
+            // 終わらず、再スタートの判定 ([`Self::maybe_restart`] の固定の数の条件) がもう通るなら、残りのサブ MIP (一時停止できる RENS は除く) を
+            // 止め (外側の打ち切り値に -inf を渡す)、早めの再スタートにする (残りの根のヒューリスティクスを飛ばす)。drayage-25-23 では
+            // 根の被約費用と LP face のサブ MIP (自由な列 5272) を 2.0〜2.2 秒待ち、どちらも何も見つけずに 184 列の固定で再スタートしていた
+            let l63 = keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && env_str!("ENOMOTO_MIP_LOSE6_3_JOINSTOP").is_some() && super::early_restart_on();
+            let l63_t0 = Instant::now();
+            let l63_wait = tunable!("ENOMOTO_T_MIP_LOSE6_3_JOINSTOP_MIN", 0.1, f64).max(tunable!("ENOMOTO_T_MIP_LOSE6_3_JOINSTOP_MULT", 0.25, f64) * self.start.elapsed().as_secs_f64());
+            let mut l63_stopped = false;
             while self.pending_submips.len() > keep {
-                let z = self.prune_limit();
+                if l63 && !l63_stopped && l63_t0.elapsed().as_secs_f64() >= l63_wait && self.proto_restart_ok(0.0) {
+                    l63_stopped = true;
+                    let mut n = 0usize;
+                    for it in &self.pending_submips {
+                        if let (Some(c), None) = (&it.5, &it.7) {
+                            if !it.0.is_finished() {
+                                c.offer(f64::NEG_INFINITY);
+                                n += 1;
+                            }
+                        }
+                    }
+                    if n > 0 {
+                        self.early_restart = true;
+                    }
+                    if self.params.verbose {
+                        eprintln!(
+                            "MIP: early restart: {} newly fixed integer columns while waiting {:.2}s for the parallel sub-MIPs; stopping {n} of {} (ENOMOTO_MIP_LOSE6_3_JOINSTOP, {:.2}s)",
+                            self.newly_fixed_ints(),
+                            l63_t0.elapsed().as_secs_f64(),
+                            self.pending_submips.len(),
+                            self.start.elapsed().as_secs_f64()
+                        );
+                    }
+                }
+                let z = if l63_stopped { f64::NEG_INFINITY } else { self.prune_limit() };
                 for it in &self.pending_submips {
                     if let Some(c) = &it.5 {
-                        c.offer(z);
+                        if z.is_finite() || it.7.is_none() {
+                            c.offer(z);
+                        }
                     }
                 }
                 match self.pending_submips.iter().position(|it| it.0.is_finished() || it.7.as_ref().is_some_and(|l| l.paused())) {
