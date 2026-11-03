@@ -150,7 +150,7 @@ def check_one(p: str, solu: dict, highs: dict, mps: Path) -> dict:
     from enomoto_solver import benchmark_highs as bh
     with tempfile.TemporaryDirectory() as td:
         xp = os.path.join(td, "x.npy")
-        env = dict(os.environ, PYTHONPATH=str(WT / "python"), **({"ENOMOTO_MIP_THREADS": str(TH)} if TH > 1 else {}))
+        env = dict(os.environ, **({"ENOMOTO_MIP_THREADS": str(TH)} if TH > 1 else {}))
         t0 = time.time()
         try:
             r = subprocess.run([sys.executable, __file__, "--worker", str(mps), xp], cwd=WT, env=env, capture_output=True, text=True,
