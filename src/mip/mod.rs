@@ -1233,7 +1233,27 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                     match repair_postsolved(p, &x, remaining(params)) {
                         Some(xn) => {
                             let z_orig = p.objective(&xn);
-                            r.best_bound += z_orig - prob.objective(&xr);
+                            // 下界のずれは前処理後の問題と元の問題の目的値の定数の差で、後処理した (直す前の) 解 `x` で測る。
+                            // 以前の式 (既定) は直した解 `xn` で測り、修復で目的値が上がった分まで下界を上げていた (根拠がなく、
+                            // 木が閉じていると下界が最適値を越えうる)。`ENOMOTO_MIP_FZ3_REPAIR_BOUND=1` (試作、既定では使わない) で
+                            // `x` で測る (analysis/fuzz_tiny_classify_20261103.md)
+                            let shift = if env_str!("ENOMOTO_MIP_FZ3_REPAIR_BOUND").is_some_and(|v| v != "0") {
+                                p.objective(&x) - prob.objective(&xr)
+                            } else {
+                                z_orig - prob.objective(&xr)
+                            };
+                            if params.verbose {
+                                eprintln!(
+                                    "MIP: postsolve repair: bound shift {shift:e} (at the postsolved point {:e}, at the repaired point {:e})",
+                                    p.objective(&x) - prob.objective(&xr),
+                                    z_orig - prob.objective(&xr)
+                                );
+                            }
+                            r.best_bound += shift;
+                            if env_str!("ENOMOTO_MIP_FZ3_REPAIR_BOUND").is_some_and(|v| v != "0") {
+                                // 直した解は元の問題で実行可能なので、最適値はその値以下 (下界がそれを越えたら抑える)
+                                r.best_bound = r.best_bound.min(z_orig);
+                            }
                             r.objective = Some(z_orig);
                             r.x = Some(xn);
                         }
@@ -1719,7 +1739,13 @@ fn repair_postsolved(p: &MipProblem, x: &[f64], params: MipParams) -> Option<Vec
         }
     }
     let secs = params.time_limit.max(tunable!("ENOMOTO_T_MIP_POSTSOLVE_REPAIR_SECS", 2.0, f64));
-    let deadline = Some(t0 + std::time::Duration::from_secs_f64(secs));
+    // 時間の上限なし (`time_limit` が inf) だと `from_secs_f64` が panic する (fuzz_mixtiny の seed 58・189・230、
+    // analysis/fuzz_tiny_classify_20261103.md)。`ENOMOTO_MIP_FZ3_REPAIR_BOUND=1` (試作) では期限なしにする
+    let deadline = if env_str!("ENOMOTO_MIP_FZ3_REPAIR_BOUND").is_some_and(|v| v != "0") {
+        std::time::Duration::try_from_secs_f64(secs).ok().and_then(|d| t0.checked_add(d))
+    } else {
+        Some(t0 + std::time::Duration::from_secs_f64(secs))
+    };
     // LP の前処理つきで解く (整数列を固定すると大きく縮む。前処理なしの LP は uccase12 の再スタート 1 回目の問題 (8.8 万行) で
     // 2 秒に収まらなかった。研磨 ([`polish_solution`]) と同じ経路)
     let vars: Vec<VariableData> = (0..p.n).map(|j| VariableData { vtype: VarType::Continuous, lb: lo[j], ub: up[j] }).collect();
