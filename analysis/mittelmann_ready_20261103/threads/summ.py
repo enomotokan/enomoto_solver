@@ -25,7 +25,7 @@ for l in open(WT / "analysis" / "highs58_20261030" / "highs.jsonl"):
 def ok(res): return res.get("status") == "optimal" and res.get("time", 99) <= 60.0
 def t(res): return res["time"] if ok(res) else 60.0
 def sgm(xs): return math.exp(sum(math.log(x + 10) for x in xs) / len(xs)) - 10
-CF = [c for c in ["t1", "t2", "t4r34", "t4r35", "t4g", "t8", "t16", "t8r", "t12"] if any(c in R[p] for p in PROBS)]
+CF = [c for c in ["t1", "t2", "t4", "t4r34", "t4r35", "t4g", "t8", "t16", "t8r", "t12"] if any(c in R[p] for p in PROBS)]
 print("| 設定 | 問題数 | 解けた | SGM (秒) | crash | 60 秒超え (61 秒超) | 最大スレッド数 (中央値/最大) | 最大 RSS MB (中央値/最大) |")
 print("|---|---|---|---|---|---|---|---|")
 for c in CF:
