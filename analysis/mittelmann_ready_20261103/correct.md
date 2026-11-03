@@ -10,12 +10,12 @@
 - 解き手はサブプロセスで、`m.solve(...)` の `x` (元の列の順の解) を受け取る。
 - 検算: 元の MPS を highspy で読んだ問題 (前処理の前) に x を代入し、行・境界の違反 (1e-6 x max(1, |右辺 / 境界|) を超えたら NG)、
   整数性 (|x - round(x)| > 1e-6 で NG)、目的値 (c x + 定数) を計算し直して報告の値と比べる (相対 1e-6)。参考に 1e-9 を超えた数も残す。
-- 既知の値: scripts/miplib2017-v31.solu (203 問すべてにある。=opt= 198 問相当、=inf= 5 問: bnatt500・cryptanalysiskb128n5obj14・fhnw-binpack4-4・neos-3988577-wolgan・neos859080)。
+- 既知の値: scripts/miplib2017-v31.solu (203 問すべてにある。=opt= 198 問、=inf= 5 問: bnatt500・cryptanalysiskb128n5obj14・fhnw-binpack4-4・neos-3988577-wolgan・neos859080)。
   最適と答えたら =opt= と相対 1e-6 で一致すること、実行不能と答えたら =inf= の問題であること、暫定解が既知の最適値より良くないこと、
   限界値が既知の最適値を越えていないこと (bound_invalid)、=inf= の問題で解を返していないこと。HiGHS の結果 (highs_mitt_20261103・highs_vs_20261101) とも突き合わせる。
 - 注意: 元の問題の読み込みも highspy なので、MPS の読み違い (ソルバーにも同じものを渡している) はこの検算では見つからない。
   半連続の列 (integrality 2・3) は 203 問にはなかった (あれば check の semi_cols に出る)。
-- 初版 (cbc2cdb 前後) は限界値の判定の向きが逆で、時間切れの問題の多くに bound_invalid が誤って付いた。直した版で `--rejudge` をかければ直る。
+- 46bca09a より前の版は限界値の判定の向きが逆で、時間切れの問題の多くに bound_invalid が誤って付いた。直した版で `--rejudge` をかければ直る。
   分担 1〜5 で直す前の台本で回した結果があれば `python analysis/mittelmann_ready_20261103/check_sol.py --rejudge analysis/mittelmann_ready_20261103/check_s*.jsonl` をかける。
 
 ## 分担 0 の結果 (34 問)
