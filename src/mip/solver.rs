@@ -4094,6 +4094,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !self.proof_first_z.is_finite() {
                 self.proof_first_z = z;
             }
+            // 診断用 (`ENOMOTO_MIP_MEM3_DEBUG_INC`、一時): 暫定解を各段の後処理で元の問題まで戻し、段ごとの違反を出す
+            if !self.params.submip && self.snap.is_none() && super::mem3_debug_inc_on() {
+                super::mem3_debug_inc(self.p, &x, z, if self.heur_label.is_empty() { "tree" } else { self.heur_label }, self.nodes);
+            }
             self.incumbent = Some((z, x));
             self.last_improve_node = Some(self.nodes);
             // FJ のスレッド (と解発見スレッド) の解だけのうちは立てない (`=2` はその解の改善を続ける)

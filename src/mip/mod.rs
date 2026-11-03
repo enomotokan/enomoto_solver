@@ -1187,6 +1187,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             // `ENOMOTO_MIP_RENS_RESUME`: 一時停止できるサブ MIP なら、一時停止のときの結果を元の問題の空間に戻す手続きを置く
             let ps = std::rc::Rc::new((postsolve, scaling));
             install_resume_hook(p, params, Some(ps.clone()));
+            let _mem3 = Mem3Level::push(p, &params, Some(ps.clone()));
             let mut r = match early {
                 // 目的関数が全部 0 なので、どの実行可能解も最適 (下界 = 目的値 = 定数)
                 Some(xr) => {
@@ -1268,10 +1269,119 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 sym_of_reverify(p, params.verbose);
             }
             install_resume_hook(p, params, None);
+            let _mem3 = Mem3Level::push(p, &params, None);
             let r = solver::solve(p, remaining(params));
             solver::RESUME_HOOK.with(|s| *s.borrow_mut() = None);
             r
         }
+    }
+}
+
+type Mem3Ps = std::rc::Rc<(Vec<crate::presolve::PostsolveStep>, crate::presolve::scaling::Scaling)>;
+thread_local! {
+    /// 診断用 (`ENOMOTO_MIP_MEM3_DEBUG_INC`、一時): 入れ子の求解 (最初の求解・再スタートの後の求解) ごとの (その段の前処理前の問題,
+    /// 前処理の後処理の手順と尺度, 再スタートの回数)。外側から内側の順
+    static MEM3_CHAIN: std::cell::RefCell<Vec<(std::rc::Rc<MipProblem>, Option<Mem3Ps>, u32)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// 元の問題で書き出した暫定解の数
+    static MEM3_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn mem3_debug_inc_on() -> bool {
+    env_str!("ENOMOTO_MIP_MEM3_DEBUG_INC").is_some()
+}
+
+/// [`MEM3_CHAIN`] に段を積み、落ちるときに降ろす
+struct Mem3Level(bool);
+impl Mem3Level {
+    fn push(p: &MipProblem, params: &MipParams, ps: Option<Mem3Ps>) -> Mem3Level {
+        if params.submip || !mem3_debug_inc_on() {
+            return Mem3Level(false);
+        }
+        MEM3_CHAIN.with(|c| c.borrow_mut().push((std::rc::Rc::new(p.clone()), ps, params.restarts)));
+        Mem3Level(true)
+    }
+}
+impl Drop for Mem3Level {
+    fn drop(&mut self) {
+        if self.0 {
+            MEM3_CHAIN.with(|c| c.borrow_mut().pop());
+        }
+    }
+}
+
+/// 点 `x` の `q` での違反の要約: (最大の違反, その場所, 1e-6 (`is_feasible` と同じ許容誤差) を超える行の数, 列の境界の数, 整数性の数,
+/// 違反の大きい行の上位 (行, 違反, 行の長さ))
+fn mem3_viol(q: &MipProblem, x: &[f64]) -> (f64, String, usize, usize, usize, Vec<(usize, f64, usize)>) {
+    let tol = |b: f64| 1e-6 + 1e-9 * b.abs();
+    let (mut v, mut at) = (0.0f64, String::from("-"));
+    let (mut nr, mut nc, mut ni) = (0, 0, 0);
+    for j in 0..q.n {
+        let e = (q.col_lo[j] - x[j]).max(x[j] - q.col_up[j]);
+        if e > v {
+            v = e;
+            at = format!("col {j} [{}, {}] x {:.12e} int {}", q.col_lo[j], q.col_up[j], x[j], q.is_int[j]);
+        }
+        nc += (x[j] < q.col_lo[j] - tol(q.col_lo[j]) || x[j] > q.col_up[j] + tol(q.col_up[j])) as usize;
+        ni += (q.is_int[j] && (x[j] - x[j].round()).abs() > 1e-6) as usize;
+    }
+    let mut top = Vec::new();
+    for (i, row) in q.rows.iter().enumerate() {
+        let a = exact_sum(row.iter().map(|&(j, c)| c * x[j]));
+        let e = (q.row_lo[i] - a).max(a - q.row_up[i]);
+        if e > v {
+            v = e;
+            at = format!("row {i} [{}, {}] act {:.12e} len {}", q.row_lo[i], q.row_up[i], a, row.len());
+        }
+        if a < q.row_lo[i] - tol(q.row_lo[i]) || a > q.row_up[i] + tol(q.row_up[i]) {
+            nr += 1;
+        }
+        if e > 1e-7 {
+            top.push((i, e, row.len()));
+        }
+    }
+    top.sort_by(|a, b| b.1.total_cmp(&a.1));
+    top.truncate(5);
+    (v, at, nr, nc, ni, top)
+}
+
+/// 診断用 (`ENOMOTO_MIP_MEM3_DEBUG_INC`、一時): 木の求解 (サブ MIP でない) が暫定解 `x` (問題 `tp` の空間、目的値 `z`) を受け取ったとき、
+/// 内側の段から順に後処理の手順と尺度で戻し、各段の前処理前の問題での違反と目的値を出す。元の問題まで戻した解は、値が
+/// `1` でなければ `<値>_<番号>.txt` に 1 行 1 値で書く (元の問題の列の順。目的は最小化形のまま)
+pub(crate) fn mem3_debug_inc(tp: &MipProblem, x: &[f64], z: f64, label: &str, nodes: u64) {
+    let chain = MEM3_CHAIN.with(|c| c.borrow().clone());
+    if chain.is_empty() {
+        return;
+    }
+    let k = MEM3_COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    let t = outer_elapsed().unwrap_or(f64::NAN);
+    let (v, at, nr, nc, ni, top) = mem3_viol(tp, x);
+    eprintln!("MEM3_INC #{k} [{label}] node {nodes} t {t:.2}: tree problem (restarts {}): z {z:.10e} obj {:.10e} maxviol {v:.3e} at {at}; viol rows {nr} cols {nc} int {ni}; top {top:?}", chain.last().unwrap().2, exact_objective(tp, x));
+    let mut x = x.to_vec();
+    for (p, ps, r) in chain.iter().rev() {
+        if let Some(ps) = ps {
+            for step in ps.0.iter().rev() {
+                step.apply(&mut x);
+            }
+            x = crate::presolve::scaling::unscale_x(&ps.1, &x);
+        }
+        if x.len() != p.n {
+            eprintln!("MEM3_INC #{k}:   level restarts {r}: length {} != n {}", x.len(), p.n);
+            return;
+        }
+        let (v, at, nr, nc, ni, top) = mem3_viol(p, &x);
+        eprintln!(
+            "MEM3_INC #{k}:   level restarts {r} (before its presolve, {} rows): obj {:.10e} maxviol {v:.3e} at {at}; viol rows {nr} cols {nc} int {ni}; feasible {}; top {top:?}",
+            p.m,
+            exact_objective(p, &x),
+            p.is_feasible(&x, 1e-6)
+        );
+    }
+    if let Some(f) = env_str!("ENOMOTO_MIP_MEM3_DEBUG_INC").filter(|v| *v != "1") {
+        let s: String = x.iter().map(|v| format!("{v:.17e}\n")).collect();
+        let _ = std::fs::write(format!("{f}_{k}.txt"), s);
     }
 }
 
@@ -4263,11 +4373,26 @@ pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f
     }
     // 緩める量には前処理の丸めの余裕 1e-9 (1 + |b|) を足す: 右辺 1 - 2e-9 を 1e-9 だけ緩めた 0.9999999989999999 は、整数の行の
     // 正規化 ([`normalize_integer_rows`] の `floor(b + 1e-9)`) の境目のわずかに下で 0 に丸められる (fuzz_tiny の seed 21)
+    // `ENOMOTO_MIP_MEM3_TINY_MARGIN` (試作、既定では使わない): 丸めの余裕を 1e-9 (1 + min(|b|, 1)) + 4 eps |b| にする (右辺の大きい行を
+    // 1e-9 |b| (右辺 5590 で 5.6e-6、許容誤差 1e-6 の数倍) 緩めない)。正規化の floor(b + 1e-9) の境目の心配は |b| ≤ 1 の行と同じに残る。
+    // uccase12 では再スタートの後の前処理のプロービングがこの余裕で右辺 5000 前後の行を 5.6e-6 ずつ緩め、木の暫定解が元の問題で
+    // 連続列の下限 0 を 1.1e-5 破っていた (analysis/uccase12_mem3_20261103.md)
+    let small = env_str!("ENOMOTO_MIP_MEM3_TINY_MARGIN").is_some();
+    let margin = |b: f64| if small { 1e-9 * (1.0 + b.abs().min(1.0)) + 4.0 * f64::EPSILON * b.abs() } else { 1e-9 * (1.0 + b.abs()) };
+    let (mut nrel, mut wmax, mut mmax) = (0usize, 0.0f64, 0.0f64);
     for (i, &w) in used.iter().enumerate() {
         if w > 0.0 && row_lo[i] < row_up[i] {
-            row_lo[i] -= w + 1e-9 * (1.0 + row_lo[i].abs());
-            row_up[i] += w + 1e-9 * (1.0 + row_up[i].abs());
+            let (ml, mu) = (margin(row_lo[i]), margin(row_up[i]));
+            nrel += 1;
+            wmax = wmax.max(w);
+            mmax = mmax.max(if row_up[i].is_finite() { mu } else { 0.0 }).max(if row_lo[i].is_finite() { ml } else { 0.0 });
+            row_lo[i] -= w + ml;
+            row_up[i] += w + mu;
         }
+    }
+    // 診断用 (`ENOMOTO_MIP_MEM3_DEBUG_INC`、一時): 緩めた行の数、固定でずれた分の最大、丸めの余裕の最大
+    if mem3_debug_inc_on() && fixed > 0 {
+        eprintln!("MEM3_TINY: fixed {fixed} columns; relaxed {nrel} rows, max shift {wmax:.3e}, max margin {mmax:.3e} (small margin {small})");
     }
     fixed
 }
