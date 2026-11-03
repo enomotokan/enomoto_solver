@@ -287,6 +287,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 手間の上限 (このループの LP の反復の合計の上限) と停滞の判定 (窓のラウンド数, 相対の伸び)。`Some` の間は [`Self::root_cut_loop`] が
     /// カットの選び方の比べをせず、この手間の上限と停滞の判定で止まる
     pub(super) cut_cont: Option<(u64, usize, f64)>,
+    /// 試作 `ENOMOTO_MIP_MC11FIX2` の `c` ([`mc11fix2`]): `cut_cont` で主が続けるループを、初めから第 2 段階 (HiGHS のスコア) で
+    /// このラウンド数だけ回す (0 なら使わない)
+    pub(super) cut_cont_p2: usize,
     /// 分離器ごとの適応的な飛ばしの状態 (`ENOMOTO_MIP_SEP_ADAPTIVE`、[`super::separation::SepAdapt`])
     pub(super) sep_adapt: super::separation::SepAdapt,
     /// 根のカットのループの今のラウンド (`ENOMOTO_MIP_TAB_NNZ_CBC` の最初のラウンドの判定用。ループの始めに 0)
@@ -2445,6 +2448,23 @@ pub(super) struct BgDeterm {
     pub(super) cont: bool,
     /// 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` ([`BgRobust`])
     pub(super) robust: Option<BgRobust>,
+    /// 試作 `ENOMOTO_MIP_MC11FIX2` の `b` ([`mc11fix2`]): 窓の判定を「窓の伸び ≤ この値 × 暫定解との差」にする (0 なら使わない)
+    pub(super) gap_eps: f64,
+}
+
+/// 試作 `ENOMOTO_MIP_MC11FIX2` (既定では使わない。`0` でも使わない。[`BgDeterm`] が働くときだけ。analysis/mc11_wait2_20261103.md):
+/// 裏のカットの止め方・主の引き継ぎで根の下界を上げる。mc11 は canddet の既定化で裏のカットの終わりの下界が 11683 → 11666 に下がり
+/// (最適値 11689)、13〜27 秒から 23〜40 秒に遅くなった。値に含む文字で選ぶ:
+/// - `a`: 裏のカットが停滞 (窓の判定・今までの停滞の判定) で終わったとき、暫定解との差 (相対、`ENOMOTO_T_MIP_MC11FIX2_GAP`、既定 1e-3)
+///   がまだ大きければ、主がそのカットの行と基底を受け取った後、主のカットのループとして続ける (`c` の手間の上限で終わったときと同じ形。
+///   停滞の判定は同じ窓、手間の上限は同じ `WORK` 倍)。今の `c` は手間の上限で終わったときだけ続ける。
+/// - `b`: 裏のカットの窓の判定を「直近の窓の伸び ≤ `ENOMOTO_T_MIP_MC11FIX2_GAP_EPS` (既定 0.01) × 暫定解との差」にする
+///   (差が小さいほど少しの伸びでも続ける)。暫定解がなければ既定の判定。暫定解は主が裏のカットを始めるときと待ちを始めるときに渡す
+///   ([`CutJob::cutoff_bits`])。
+/// - `c`: `a` と同じ条件で、主の続きを初めから第 2 段階 (HiGHS のスコア) で `ENOMOTO_T_MIP_MC11FIX2_P2_ROUNDS` (既定 5) ラウンドだけ回す
+///   (`a` と両方あれば、第 1 段階の続きの後に第 2 段階を回す)。
+pub(crate) fn mc11fix2() -> Option<&'static str> {
+    env_str!("ENOMOTO_MIP_MC11FIX2").filter(|v| *v != "0")
 }
 
 pub(crate) fn bg_determ_mode() -> Option<&'static str> {
@@ -2464,6 +2484,7 @@ impl BgDeterm {
             rate: if v.contains('r') { tunable!("ENOMOTO_T_MIP_BG_DETERM_RATE", 0.01, f64) } else { 0.0 },
             cont: v.contains('c'),
             robust: BgRobust::new(win),
+            gap_eps: if mc11fix2().is_some_and(|m| m.contains('b')) { tunable!("ENOMOTO_T_MIP_MC11FIX2_GAP_EPS", 0.01, f64) } else { 0.0 },
         })
     }
 }
@@ -2569,7 +2590,15 @@ impl CutJob {
         }
         let w0 = self.win_from.load(std::sync::atomic::Ordering::Relaxed).min(h.len());
         // 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST`: 窓の判定 (と `o` に渡す停滞の判定)
-        let stall_now = !hold && self.determ_stalled(&d, &h[w0..], &h);
+        // 試作 `ENOMOTO_MIP_MC11FIX2` の `b`: 暫定解があれば窓の伸びを暫定解との差で測る
+        let zc = f64::from_bits(self.cutoff_bits.load(std::sync::atomic::Ordering::Relaxed));
+        let stall_now = !hold
+            && if d.gap_eps > 0.0 && zc.is_finite() {
+                let k = h.len();
+                k >= w0 + d.win + 1 && h[k - 1] - h[k - 1 - d.win] <= d.gap_eps * (zc - h[k - 1]).max(0.0)
+            } else {
+                self.determ_stalled(&d, &h[w0..], &h)
+            };
         self.robust_stalled.store(stall_now, std::sync::atomic::Ordering::Relaxed);
         let why = if iters >= d.work_iters {
             Some("work")
@@ -2810,6 +2839,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         path_collect: None,
         bg_cut_rounds: 0,
         cut_cont: None,
+        cut_cont_p2: 0,
         sep_adapt: super::separation::SepAdapt::with_node_off(snap.as_ref().map_or(0, |sn| sn.sep_node_off)),
         sep_pass: 0,
         sep_last_gain: f64::INFINITY,
@@ -5702,6 +5732,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: background cuts: not waiting (ENOMOTO_MIP_SMALL1, nnz {}, {:.2}s)", self.p.nnz, self.start.elapsed().as_secs_f64());
             }
             let determ = bg.job.determ;
+            let mut wait_why = "";
             if let Some(d) = determ {
                 // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM`: 裏のカットが自分で終わるまで待つ (時間の上限は安全網)
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
@@ -5715,6 +5746,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
                 bg.job.cutoff_bits.store(z.to_bits(), std::sync::atomic::Ordering::Relaxed);
                 let (w, why) = bg.wait_determ(cap, cutoff, z);
+                wait_why = why;
                 if self.params.verbose {
                     let h = bg.job.prog.lock().unwrap();
                     let hi = bg.job.prog_it.lock().unwrap();
@@ -5861,6 +5893,59 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 eprintln!("MIP: background cuts: determ: continued in the main cut loop: obj {new:.10e} -> {new2:.10e}, {} LP iters, {} cut rows ({:.2}s, {:.2}s)", self.lp.total_iterations() - it2, self.lp.num_rows() - self.p.m, t2.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
                             }
                             root_obj = root_obj.max(new2);
+                        }
+                        // 試作 `ENOMOTO_MIP_MC11FIX2` の `a`・`c` ([`mc11fix2`]): 裏のカットが停滞で終わった (待ちが `done`) のに暫定解との差が
+                        // まだ大きければ、主のカットのループとして続ける (`a`: 第 1 段階を停滞まで、`c`: 第 2 段階を決まったラウンド数)
+                        let fix2 = mc11fix2().unwrap_or("");
+                        if let Some(d) = determ.filter(|_| (fix2.contains('a') || fix2.contains('c')) && wait_why == "done" && bg_end != Some("work") && !self.time_up()) {
+                            let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+                            let cur2 = self.lp.objective() + self.p.offset;
+                            let gap = (z - cur2) / z.abs().max(1.0);
+                            let gmin = tunable!("ENOMOTO_T_MIP_MC11FIX2_GAP", 1e-3, f64);
+                            if self.params.verbose {
+                                eprintln!("MIP: MC11FIX2: background end {}, incumbent {z:.6e}, LP {cur2:.6e}, gap {gap:.3e} (min {gmin:.1e}) -> {}", bg_end.unwrap_or("own stall"), if gap > gmin { "continue" } else { "skip" });
+                            }
+                            if gap > gmin {
+                                let mut stages: Vec<usize> = Vec::new();
+                                if fix2.contains('a') {
+                                    stages.push(0);
+                                }
+                                if fix2.contains('c') {
+                                    stages.push(tunable!("ENOMOTO_T_MIP_MC11FIX2_P2_ROUNDS", 5usize, usize).max(1));
+                                }
+                                let eps = tunable!("ENOMOTO_T_MIP_MC11FIX2_EPS", d.eps, f64);
+                                for p2 in stages {
+                                    if self.time_up() {
+                                        break;
+                                    }
+                                    let t2 = Instant::now();
+                                    let it2 = self.lp.total_iterations();
+                                    let o1 = self.lp.objective() + self.p.offset;
+                                    self.cut_cont = Some((d.work_iters, d.win, eps));
+                                    self.cut_cont_p2 = p2;
+                                    let ok = self.root_cut_loop(root_iters);
+                                    self.cut_cont = None;
+                                    self.cut_cont_p2 = 0;
+                                    if !ok {
+                                        self.join_fj_thread();
+                                        let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
+                                        return self.finish(st, root_obj);
+                                    }
+                                    let new2 = self.lp.objective() + self.p.offset;
+                                    if self.params.verbose {
+                                        eprintln!(
+                                            "MIP: MC11FIX2: continued in the main cut loop ({}): obj {o1:.10e} -> {new2:.10e}, {} rounds, {} LP iters, {} cut rows ({:.2}s, {:.2}s)",
+                                            if p2 > 0 { "phase 2" } else { "phase 1" },
+                                            self.bg_cut_rounds,
+                                            self.lp.total_iterations() - it2,
+                                            self.lp.num_rows() - self.p.m,
+                                            t2.elapsed().as_secs_f64(),
+                                            self.start.elapsed().as_secs_f64()
+                                        );
+                                    }
+                                    root_obj = root_obj.max(new2);
+                                }
+                            }
                         }
                         // 根の被約費用の早めの記録 (`ENOMOTO_MIP_NO_EARLY_REDCOST` で使わない): 裏のカットで強くなった LP の被約費用を記録し直して固定する
                         if super::early_redcost_on() && !self.params.submip && self.snap.is_none() {

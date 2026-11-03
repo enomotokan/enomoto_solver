@@ -925,6 +925,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` の `o` ([`super::solver::CutJob::veto_own_stall`]): 今までの停滞の判定で止まるところで、試作の判定が停滞と言わなければ続ける
         let veto_own = |j: &Option<std::sync::Arc<super::solver::CutJob>>| j.as_ref().is_some_and(|j| j.veto_own_stall());
         let mut phase2 = false;
+        // 試作 `ENOMOTO_MIP_MC11FIX2` の `c` ([`super::solver::mc11fix2`]、[`Solver::cut_cont_p2`]): 主が続けるループを初めから第 2 段階で決まったラウンド数だけ回す
+        let cont_p2 = if self.cut_cont.is_some() { self.cut_cont_p2 } else { 0 };
+        if cont_p2 > 0 {
+            phase2 = true;
+            max_rounds = cont_p2;
+        }
         // 第 2 段階の時間の上限 (第 1 段階に使った時間の `ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT` 倍。qnet1 では再スタート後の
         // 第 2 段階が 88 ラウンド回って根が 6 秒伸び、9.2 秒 -> 17.2 秒になった)
         // 上限はこのスレッドの CPU 時間で測る ([`super::cap_clock`]。求解の開始からの分は `cpu0` から)
@@ -1139,6 +1145,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         loop {
             self.poll_fj_thread();
             if self.root_gap_closed() {
+                break;
+            }
+            if round_ctr >= max_rounds && cont_p2 > 0 {
                 break;
             }
             if round_ctr >= max_rounds {
