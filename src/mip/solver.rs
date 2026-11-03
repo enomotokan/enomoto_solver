@@ -3304,6 +3304,14 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     let r = s.run();
     crate::simplex::nb_diag::set_in_sub(prev_sub);
     warm.store(prev, Ordering::Relaxed);
+    // `ENOMOTO_MIP_OVERRUN3` の `d` (試作、analysis/mittelmann_ready_20261103/overrun.md): 木を分け合う待ち行列 (`WorkPool`、開いたノードの写し
+    // `SnapNode`) の片付けを裏のスレッドに回す。radiationm40-10-02 を 300 秒で解くと待ち行列が数 GB になり、求解が終わった後のこの解放
+    // (`free`・`munmap`) に 5 秒かかって、その分だけ時間の上限を越えて返っていた。従のスレッドは合流済みで、最後の参照はここにある
+    if super::zerohalf::overrun3('d') && !s.params.submip {
+        if let Some(pl) = s.pool.take() {
+            std::thread::spawn(move || drop(pl));
+        }
+    }
     r
 }
 
@@ -4007,7 +4015,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if orig_only && self.params.verbose {
                 eprintln!("MIP: accepting a solution feasible in the problem without the symmetry rows ({z:.10e})");
             }
-            if !orig_only && env_str!("ENOMOTO_MIP_NO_ONEOPT").is_none() && self.one_opt(&mut x) {
+            // `ENOMOTO_MIP_OVERRUN3` の `i` (試作): 期限を過ぎてから受け取った解は twoopt・連続変数の解き直し・被約費用の固定をしない
+            // (`o` は oneopt もしない)。sorrell3 では根の LP が期限で止まった後、FJ のスレッドを待つ間に受け取った Local-MIP の解の
+            // oneopt に 0.5 秒、twoopt (期限を見ない) に数秒かかっていた。oneopt はその解を -1 から -11 にする
+            let past = self.deadline.is_some_and(|d| Instant::now() >= d);
+            let late = super::zerohalf::overrun3('i') && past;
+            let late_o = super::zerohalf::overrun3('o') && past;
+            let trace = super::zerohalf::overrun3('t');
+            let mut tt = Instant::now();
+            let mut lap = |what: &str, tt: &mut Instant| {
+                if trace {
+                    eprintln!("MIP: OVERRUN3 trace: try_incumbent {what} {:.3}s", tt.elapsed().as_secs_f64());
+                    *tt = Instant::now();
+                }
+            };
+            if !late_o && !orig_only && env_str!("ENOMOTO_MIP_NO_ONEOPT").is_none() && self.one_opt(&mut x) {
                 let z2 = self.p.objective(&x);
                 if z2 < z && self.p.is_feasible(&x, FEASTOL) {
                     if self.params.verbose {
@@ -4017,7 +4039,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             // `ENOMOTO_MIP_TWOOPT`: twoopt (SCIP の heur_twoopt、[`Self::two_opt`]) で 2 列を同時に動かし、動いたら oneopt をもう一度
-            if !orig_only && twoopt_on() {
+            lap("oneopt", &mut tt);
+            if !late && !late_o && !orig_only && twoopt_on() {
                 let mut y = x.clone();
                 if self.two_opt(&mut y) {
                     if env_str!("ENOMOTO_MIP_NO_ONEOPT").is_none() {
@@ -4033,10 +4056,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
-            if !orig_only {
+            lap("twoopt", &mut tt);
+            if !orig_only && !late && !late_o {
                 self.resolve_continuous(&mut x, &mut z);
                 self.pool_add(z, &x);
             }
+            lap("resolve_continuous", &mut tt);
             if let (Some(snap), Some(s)) = (&self.snap, &self.shared) {
                 // 木の写しから解く求解の解は写しの問題の空間なので、写しを作ったスレッドに渡す (共有の最良値はそのスレッドが
                 // 受け取ったときに更新する。解を持たないまま最良値だけ下げると、その解を誰も返せないことがある)
@@ -4075,10 +4100,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(f) = self.fj_has_inc.as_ref().filter(|_| !self.inc_only_fj) {
                 f.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            self.root_redcost_fixing();
+            if !late && !late_o {
+                self.root_redcost_fixing();
+            }
+            lap("root_redcost_fixing", &mut tt);
             self.tree_restart_check = true;
             let lim = self.prune_limit();
             self.prune_queue(lim);
+            lap("prune_queue", &mut tt);
             if self.params.verbose {
                 let other = if std::mem::take(&mut self.other_thread_label) { "other thread: " } else { "" };
                 // 被約費用による大域的な固定の後に固定されている整数列の数 (根の LP を解く前に固定されていた数との差も)。
@@ -12660,6 +12689,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         if self.params.submip || self.params.restarts >= max_restarts(self.p) || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() || self.time_up() {
             return None;
+        }
+        // `ENOMOTO_MIP_OVERRUN3` の `r` (試作、analysis/mittelmann_ready_20261103/overrun.md): 期限までの残りが max(1 秒, 根の LP の 2 倍) 未満なら
+        // 再スタートしない。uccase12 は期限の直前に再スタートを始め、やり直しの前処理と根の LP の準備 (基底の照合・LU 分解) で 1.2 秒越えていた
+        if super::zerohalf::overrun3('r') {
+            if let Some(d) = self.deadline {
+                let rem = d.saturating_duration_since(Instant::now()).as_secs_f64();
+                if rem < (2.0 * self.root_lp_secs).max(1.0) {
+                    if self.params.verbose {
+                        eprintln!("MIP: OVERRUN3: restart skipped ({rem:.2}s left before the deadline, root LP {:.2}s)", self.root_lp_secs);
+                    }
+                    return None;
+                }
+            }
         }
         let nint = p.nint;
         let fixed = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();

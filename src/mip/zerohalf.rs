@@ -62,6 +62,34 @@ fn coef_gcd(r: &[(usize, f64)]) -> f64 {
 /// 右辺が奇数ならそれだけで zerohalf カットになるので残す)。(3) 列の奇偶の並びと右辺の奇偶が同じ行は、余裕の最も小さい 1 本だけ
 /// 残す (ハッシュで集める)。(4) 消去で、列ごとにその列を持つ行の一覧を持ち (足し合わせで増えた列は一覧に足す)、列ごとに
 /// 全部の行をなめない ((4) だけなら結果は変わらない)
+thread_local! {
+    /// このスレッドの zerohalf の分離の期限 ([`with_zh_deadline`])。過ぎたら消去の途中でやめ、カットを返さない
+    static ZH_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// `ENOMOTO_MIP_OVERRUN3` の `z` (試作、analysis/mittelmann_ready_20261103/overrun.md): `deadline` をこのスレッドの zerohalf の分離の期限にして
+/// `f` を実行する。mod 2 の消去は大きな問題で 1 回 数秒かかり (radiationm40-10-02 の裏のカットのスレッド)、止めの合図・期限を見ないので、
+/// 主が `BgCuts::finish` で期限の後も待っていた。期限を過ぎた後だけ効く (その回のカットを捨てる。ラウンドも期限で捨てられる)
+pub(crate) fn with_zh_deadline<R>(deadline: Option<std::time::Instant>, f: impl FnOnce() -> R) -> R {
+    let prev = ZH_DEADLINE.with(|d| d.replace(deadline));
+    let r = f();
+    ZH_DEADLINE.with(|d| d.set(prev));
+    r
+}
+
+/// `ENOMOTO_MIP_OVERRUN3` (試作、既定では使わない。analysis/mittelmann_ready_20261103/overrun.md): 時間の上限の超過を減らす直しを文字で選ぶ。
+/// `z`: zerohalf の分離が期限を見る ([`with_zh_deadline`])。`i`: 期限を過ぎた後に受け取った解の twoopt などをしない (`o` は oneopt も)。
+/// `l`: 双対単体法の破綻の後の解き直しを期限の後にしない。`h`: 根の局所探索の時間の枠を期限までの残りで頭打ちにする。
+/// `d`: 求解の後の木の待ち行列の片付けを裏のスレッドに回す。`r`: 期限の直前 (残りが max(1 秒, 根の LP の 2 倍) 未満) には再スタートしない。
+/// `t`: 解の受け取りの各手順の時間をログに出す (診断用)
+pub(crate) fn overrun3(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_OVERRUN3").is_some_and(|v| v.contains(c))
+}
+
+fn zh_past_deadline() -> bool {
+    ZH_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d)
+}
+
 pub fn zerohalf_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], is_int: &[bool], lo: &[f64], up: &[f64], x: &[f64], max_cuts: usize) -> Vec<RawCut> {
     zerohalf_cuts_with(rows, row_lo, row_up, is_int, lo, up, x, max_cuts, env_str!("ENOMOTO_MIP_ZH_PRE").is_some())
 }
@@ -194,7 +222,11 @@ fn zerohalf_cuts_with(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]
             }
         }
     }
+    let check = ZH_DEADLINE.with(|d| d.get()).is_some();
     for &c in &order {
+        if check && zh_past_deadline() {
+            return Vec::new();
+        }
         if pre {
             // 一覧を番号の順に並べ、今この列を持つ行だけにする (軸は今までと同じく番号の最も小さい行)
             let mut lst = std::mem::take(&mut col_rows[c]);
@@ -268,6 +300,9 @@ fn zerohalf_cuts_with(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]
     for (_, combo) in cands {
         if out.len() >= max_cuts {
             break;
+        }
+        if check && zh_past_deadline() {
+            return Vec::new();
         }
         if seen.contains(&combo) {
             continue;

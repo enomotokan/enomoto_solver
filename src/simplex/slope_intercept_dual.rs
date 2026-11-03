@@ -3768,6 +3768,23 @@ fn solve_slope_intercept_dual_retrying(std: &StdForm, opts: &crate::types::LpOpt
     if res.is_some() || !(singular || uncertified) {
         return res;
     }
+    // `ENOMOTO_MIP_OVERRUN3` の `l` (試作、analysis/mittelmann_ready_20261103/overrun.md): 1 回目の後で期限 (`ExtControl` の時刻の上限、
+    // スレッドの期限) を過ぎているか止めの合図が立っていれば解き直さない (結論なしで返す。呼び出し側は期限で止まったのと同じに扱う)。
+    // sorrell3 の根の LP は期限の後にこの解き直しを始め、最初の LU 分解 (`warm_start_basis`) に数秒かかっていた
+    if env_str!("ENOMOTO_MIP_OVERRUN3").is_some_and(|v| v.contains('l')) {
+        let past = EXT_CTRL.with(|x| x.get()).and_then(|c| c.deadline).is_some_and(|d| std::time::Instant::now() >= d)
+            || crate::cancel::deadline_passed()
+            || crate::cancel::halted();
+        if past {
+            if EXT_CTRL.with(|x| x.get()).is_some() {
+                EXT_STOP.with(|x| x.set(ExtStop::TimeLimit));
+            }
+            if env_str!("ENOMOTO_MIP_LOG").is_some() {
+                eprintln!("MIP: OVERRUN3: dual simplex {} bailout after the deadline; not retrying", if uncertified { "broken-basis/max-iters" } else { "singular-basis" });
+            }
+            return res;
+        }
+    }
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         eprintln!("DEBUG_EXT: {} bailout, retrying with safe_pivot and full cost perturbation", if uncertified { "broken-basis/max-iters" } else { "singular-basis" });
     }

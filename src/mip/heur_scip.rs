@@ -390,7 +390,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 局所探索を別スレッドで始める (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`)。引数は [`Self::local_search_heur`] と同じ。
     pub(super) fn spawn_local_search(&mut self) {
         let p = self.p;
-        let cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LS_TIME_FRAC", 0.05, f64) * self.params.time_limit).min(5.0) } else { 5.0 };
+        let cap = self.ls_time_cap();
         let nnz: u64 = p.rows.iter().map(|r| r.len() as u64).sum();
         let seed = self.rng ^ 0xD1B5_4A32_D192_ED03;
         self.rand();
@@ -400,6 +400,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let steps = (200 * nnz).clamp(200_000, 100_000_000);
         self.ls_thread = Some(std::thread::spawn(move || super::heuristics::local_search(&q, &lo, &up, cap, steps, seed)));
+    }
+
+    /// 局所探索の時間の枠 (上限の `ENOMOTO_T_MIP_LS_TIME_FRAC` (0.05) 倍、最大 5 秒)。`ENOMOTO_MIP_OVERRUN3` の `h` (試作): 期限までの残りで
+    /// 頭打ちにする (app1-2 では期限の 1 秒前に始めた局所探索が 3 秒の枠を使い切り、期限を 2 秒過ぎていた)
+    fn ls_time_cap(&self) -> f64 {
+        let cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LS_TIME_FRAC", 0.05, f64) * self.params.time_limit).min(5.0) } else { 5.0 };
+        match self.deadline.filter(|_| super::zerohalf::overrun3('h')) {
+            Some(d) => cap.min(d.saturating_duration_since(std::time::Instant::now()).as_secs_f64()),
+            None => cap,
+        }
     }
 
     pub(super) fn local_search_heur(&mut self) -> bool {
@@ -420,7 +430,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 None => false,
             };
         }
-        let cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LS_TIME_FRAC", 0.05, f64) * self.params.time_limit).min(5.0) } else { 5.0 };
+        let cap = self.ls_time_cap();
         let nnz: u64 = p.rows.iter().map(|r| r.len() as u64).sum();
         let seed = self.rng ^ 0xD1B5_4A32_D192_ED03;
         self.rand();
