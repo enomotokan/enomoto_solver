@@ -1,6 +1,6 @@
 """threads/bench.jsonl の集計 (スレッド数 1・2・8・16 と、4 スレッド = bench20 の設定 p の回 34・35)。
 解けた = status optimal かつ 60 秒以内 (summ8.py と同じ)。SGM はずらし 10 秒、解けない回は 60 秒。
-使い方: python summ.py [bench の名前 (既定 bench)]"""
+使い方: python summ.py [bench の名前 (コンマ区切り、既定 bench)]。門ありの 4 スレッドは python summ.py bench,gate"""
 import json, math, sys
 from collections import defaultdict
 from pathlib import Path
@@ -8,10 +8,10 @@ D = Path(__file__).resolve().parent
 WT = D.parents[2]
 sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
-name = sys.argv[1] if len(sys.argv) > 1 else "bench"
+names = sys.argv[1].split(",") if len(sys.argv) > 1 else ["bench"]
 R = defaultdict(dict)   # 問題 -> 設定 -> 結果
 X = defaultdict(dict)   # 問題 -> 設定 -> 行全体 (壁時計・スレッド・RSS)
-for l in open(D / f"{name}.jsonl"):
+for l in (l for n in names for l in open(D / f"{n}.jsonl")):
     r = json.loads(l)
     R[r["problem"]][r["cfg"]] = r["result"]; X[r["problem"]][r["cfg"]] = r
 for f in (WT / "analysis" / "halve_submip_20261030").glob("bench20_s*.jsonl"):
@@ -25,7 +25,7 @@ for l in open(WT / "analysis" / "highs58_20261030" / "highs.jsonl"):
 def ok(res): return res.get("status") == "optimal" and res.get("time", 99) <= 60.0
 def t(res): return res["time"] if ok(res) else 60.0
 def sgm(xs): return math.exp(sum(math.log(x + 10) for x in xs) / len(xs)) - 10
-CF = [c for c in ["t1", "t2", "t4r34", "t4r35", "t8", "t16", "t8r", "t12"] if any(c in R[p] for p in PROBS)]
+CF = [c for c in ["t1", "t2", "t4r34", "t4r35", "t4g", "t8", "t16", "t8r", "t12"] if any(c in R[p] for p in PROBS)]
 print("| 設定 | 問題数 | 解けた | SGM (秒) | crash | 60 秒超え (61 秒超) | 最大スレッド数 (中央値/最大) | 最大 RSS MB (中央値/最大) |")
 print("|---|---|---|---|---|---|---|---|")
 for c in CF:
