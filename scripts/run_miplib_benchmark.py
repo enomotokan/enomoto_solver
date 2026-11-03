@@ -61,7 +61,8 @@ def worker_highs(mps: str, time_limit: float, threads: int) -> None:
     import highspy
 
     h = highspy.Highs()
-    h.setOptionValue("output_flag", False)
+    # `ENOMOTO_BENCH_HIGHS_LOG=1`: HiGHS のログを出す (調べるとき用。結果の JSON は最後の行なのでそのまま読める)
+    h.setOptionValue("output_flag", bool(os.environ.get("ENOMOTO_BENCH_HIGHS_LOG")))
     h.setOptionValue("time_limit", time_limit)
     h.setOptionValue("threads", threads)
     # このクレートの既定 (相対ギャップ 0) にそろえる。HiGHS の既定 1e-4 のままだと、根の LP と最適値の差が 1e-5 しかない

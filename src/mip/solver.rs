@@ -104,7 +104,27 @@ pub(super) fn heur_bit(name: &str) -> u64 {
         "RENS (LP before cuts)", "feasibility pump", "fractional diving", "vector length diving", "coefficient diving", "shift-and-propagate",
         "locks", "clique", "vbounds (loose)", "vbounds (tight)", "min relaxation", "repair", "rounding", "shifting", "int shifting",
     ];
+    // `ENOMOTO_MIP_LOSE6_1_RINS` (試作、[`lose6_1_rins`]): RINS にも印を付け、再スタートの前に解を出さなかったら再スタートの後の根で飛ばす
+    if name == "RINS" && (lose6_1_rins() || lose6_1_light().is_some()) {
+        return 1u64 << NAMES.len();
+    }
     NAMES.iter().position(|&n| n == name).map_or(0, |k| 1u64 << k)
+}
+
+/// `ENOMOTO_MIP_LOSE6_1_LIGHT` = f (試作、既定では使わない): 再スタートで新たに固定された整数列が整数列の f 未満 (問題がほとんど変わらない) なら、
+/// 再スタートの後の根では軽いヒューリスティクス (丸め・shift-and-propagate) だけを回し、サブ MIP (RENS・RINS など)・ダイビング・局所探索は回さない。
+/// neos-2978193-inde は 64 本中 8 本の固定で再スタートし、再スタートの後の根で RENS (並列、2.5 秒)・RINS (2 秒) をもう一度回して何も見つけない
+/// (analysis/lose6_1_20261103.md)
+pub(crate) fn lose6_1_light() -> Option<f64> {
+    env_str!("ENOMOTO_MIP_LOSE6_1_LIGHT").and_then(|v| v.parse::<f64>().ok()).filter(|&f| f > 0.0)
+}
+
+/// `ENOMOTO_MIP_LOSE6_1_RINS` (試作、既定では使わない): 根の RINS が再スタートの前に解を出さなかったら、再スタートの後の根では回さない
+/// (ほかのヒューリスティクスと同じ「解なし」の印 [`Solver::failed_heurs`] を付ける。既定では RINS には印がなく毎回回る)。
+/// neos-2978193-inde では再スタートで 64 本中 8 本しか固定されず、カットも根の下界を動かさないのに、再スタートの後の根で RINS (50 ノード) を
+/// もう一度 2 秒回して何も見つけない (analysis/lose6_1_20261103.md)
+pub(crate) fn lose6_1_rins() -> bool {
+    env_str!("ENOMOTO_MIP_LOSE6_1_RINS").is_some_and(|v| v != "0")
 }
 
 /// 並列のサブ MIP の解を受け入れたら、そのヒューリスティクスの「解なし」の印を外す ([`Solver::take_submip`]。既定で使う。
@@ -2101,11 +2121,22 @@ pub(crate) struct SubmipCtl {
     /// neos-1582420 では、`c`・`h` で 1 ノードが重いサブ MIP が `t` で 500 ノードまで何も見つけずに走り、根のヒューリスティクスが
     /// 13 秒から 30〜35 秒に延びていた (analysis/cand_slow_neos-1582420_20261031.md)
     pub(crate) nosol_deadline: Option<Instant>,
+    /// `ENOMOTO_MIP_LOSE6_1_STOP` (試作、既定では使わない。[`lose6_1_stop`]): 外側が早めの再スタートを決めた後、まだ走っているサブ MIP を
+    /// 止める合図 (サブ MIP の [`Solver::time_up`] が真になり、時間切れとしてその時点の解を返す)
+    pub(crate) abort: std::sync::atomic::AtomicBool,
+}
+
+/// `ENOMOTO_MIP_LOSE6_1_STOP` (試作、既定では使わない): 根のヒューリスティクスで早めの再スタートが決まったら、並列のサブ MIP の終わりを
+/// 待つ前に `ENOMOTO_T_MIP_LOSE6_1_GRACE` 秒 (既定 0.5) だけ待ち、まだ走っているものに止めの合図 ([`SubmipCtl::abort`]) を送る。
+/// h80x6320d では 11 秒で早めの再スタートが決まった後、解を出さない RENS・根の被約費用のサブ MIP (各 500 ノード、13〜23 秒) の終わりを
+/// 30 秒過ぎまで待っていた (analysis/lose6_1_20261103.md)
+pub(crate) fn lose6_1_stop() -> bool {
+    env_str!("ENOMOTO_MIP_LOSE6_1_STOP").is_some_and(|v| v != "0")
 }
 
 impl SubmipCtl {
     pub(crate) fn new(z: f64) -> Self {
-        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None }
+        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::atomic::AtomicBool::new(false) }
     }
     /// 解のないうちの時間の上限 ([`Self::nosol_deadline`]) を今から `secs` 秒にする (`None` なら付けない)。
     pub(crate) fn with_nosol(mut self, secs: Option<f64>) -> Self {
@@ -3499,6 +3530,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             || self.heur_stop.is_some_and(|d| Instant::now() >= d)
             || ((self.bg_watch.is_some() || self.root_submip.is_some()) && self.bg_proved())
             || (self.incumbent.is_none() && self.root_submip.as_ref().is_some_and(|c| c.nosol_deadline.is_some_and(|d| Instant::now() >= d)))
+            || self.root_submip.as_ref().is_some_and(|c| c.abort.load(std::sync::atomic::Ordering::Relaxed))
             || (self.snap.is_some() && FIND_STOP.with(|f| f.borrow().as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))))
             || self.pool.as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed))
             || ROLE_POOL.with(|r| r.borrow().as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed) || p.fin.load(std::sync::atomic::Ordering::Relaxed)))
@@ -5578,6 +5610,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 並列モード: 別スレッドのサブ MIP の結果を出した順に受け取る
                 self.parallel_submips = false;
                 let z_join0 = self.incumbent.as_ref().map(|(z, _)| *z);
+                if self.early_restart && lose6_1_stop() {
+                    self.abort_submips_after_grace();
+                }
                 self.join_submips(0);
                 self.poll_find_thread();
                 // `ENOMOTO_MIP_EARLY_RESTART_JOIN` (試作、既定では使わない): 別スレッドのサブ MIP (RENS など)・解探しのスレッドの解を
@@ -5741,6 +5776,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` の `w` ([`BgRobust`]): 主の根のカットのループの時間の倍数でも待ちを切る
                 if let Some(r) = d.robust.filter(|r| r.wait_mult > 0.0) {
                     cap = cap.min(r.wait_mult * root_cut_secs);
+                }
+                // 試作 `ENOMOTO_MIP_LOSE6_1_STOP=w` ([`lose6_1_stop`]): 早めの再スタートが決まった根では、裏のカットを待つのを
+                // `ENOMOTO_T_MIP_LOSE6_1_BGWAIT` 秒 (既定 2) までにする (再スタートの後の小さい問題でカットを回し直す)
+                if self.early_restart && env_str!("ENOMOTO_MIP_LOSE6_1_STOP").is_some_and(|v| v.contains('w')) {
+                    cap = cap.min(tunable!("ENOMOTO_T_MIP_LOSE6_1_BGWAIT", 2.0, f64));
                 }
                 let cutoff = if env_def!("ENOMOTO_MIP_BG_CUTS_PROOF_STOP", "1").is_some() { self.prune_limit() } else { self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z) };
                 let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
@@ -12632,6 +12672,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             skip_heurs: if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_RESTART_NOINC_HEURS").is_some() { 0 } else { self.params.skip_heurs | self.failed_heurs },
             ..self.params
         };
+        // `ENOMOTO_MIP_LOSE6_1_LIGHT` = f (試作、既定では使わない。[`lose6_1_light`]): 暫定解があり、この再スタートで新たに固定された整数列が
+        // 整数列の f 未満なら、再スタートの後の根では軽いヒューリスティクス ([`light_root_heur`]) だけを回す
+        let mut params = params;
+        if let Some(f) = lose6_1_light().filter(|_| self.incumbent.is_some() && !self.params.submip) {
+            if (newly as f64) < f * nint as f64 {
+                params.skip_heurs = u64::MAX;
+                if self.params.verbose {
+                    eprintln!("MIP: ENOMOTO_MIP_LOSE6_1_LIGHT: {newly} of {nint} newly fixed (< {f}); only light root heuristics after the restart");
+                }
+            }
+        }
         user_log!("Restart {}: {} of {} integer columns newly fixed at the root ({:.2}s)", params.restarts, newly, nint, self.start.elapsed().as_secs_f64());
         if self.params.verbose {
             eprintln!(
@@ -12866,6 +12917,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
         while self.pending_submips.len() > keep {
             let item = self.pending_submips.pop_front().unwrap();
             self.take_submip(item);
+        }
+    }
+
+    /// [`lose6_1_stop`]: 別スレッドのサブ MIP を `ENOMOTO_T_MIP_LOSE6_1_GRACE` 秒まで待ち (終わったものは受け取る)、残りに止めの合図を送る。
+    /// 受け取りは呼び出し側の [`Self::join_submips`] で行う。
+    fn abort_submips_after_grace(&mut self) {
+        let t0 = Instant::now();
+        let grace = tunable!("ENOMOTO_T_MIP_LOSE6_1_GRACE", 0.5, f64);
+        while !self.pending_submips.is_empty() && t0.elapsed().as_secs_f64() < grace && !self.time_up() {
+            self.poll_submips();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let mut n = 0;
+        for it in &self.pending_submips {
+            if let Some(c) = &it.5 {
+                c.abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                n += 1;
+            }
+        }
+        if self.params.verbose && !self.pending_submips.is_empty() {
+            eprintln!("MIP: ENOMOTO_MIP_LOSE6_1_STOP: stopping {n} of {} running parallel sub-MIPs after the early restart ({:.2}s)", self.pending_submips.len(), self.start.elapsed().as_secs_f64());
         }
     }
 
