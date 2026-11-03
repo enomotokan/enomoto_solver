@@ -7,7 +7,7 @@ WT = D.parents[1]
 sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
 CFGS = {"def": {}}
-for v in ["ao", "alo", "aow", "alow"]:
+for v in ["o", "ao", "alo", "aow", "alow"]:
     CFGS["r_" + v] = {"ENOMOTO_MIP_BG_DETERM_ROBUST": v}
 OUT = D / "bench58.jsonl"
 cfgs, rep = sys.argv[1].split(","), int(sys.argv[2])
