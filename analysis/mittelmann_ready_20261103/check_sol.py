@@ -12,7 +12,7 @@
     =inf= なら opt_on_infeasible。
   - infeasible: =opt=/=best= の問題なら wrong_infeasible。
   - 時間切れ等の暫定解: =opt=/=best= より良ければ better_than_known (解の違反を疑う)。
-  - 限界値 (best_bound): 既知の最良値より (最小化なら) 大きければ bound_invalid。
+  - 限界値 (best_bound): =opt= より (最小化なら) 大きければ bound_invalid (2026-11-03 の初版は向きが逆だった。--rejudge で直る)。
   - HiGHS の結果 (analysis/highs_mitt_20261103/highs_s*.jsonl・analysis/highs_vs_20261101/highs.jsonl) も参考に並べ、
     両方 optimal で目的値が食い違えば highs_mismatch、片方だけ実行不能なら highs_inf_mismatch。
 - 各行の "issues" が空なら合格。crash・killed・解なしの optimal も issues に入れる。
@@ -23,6 +23,7 @@
     python analysis/mittelmann_ready_20261103/check_sol.py K 6      # K = 0..5 (分担)。結果は同じ場所の check_sK.jsonl
     python analysis/mittelmann_ready_20261103/check_sol.py --only P1 P2 --out x.jsonl   # 問題を指名して解き直す (再現の確かめ)
     python analysis/mittelmann_ready_20261103/check_sol.py --check-only K 6 # 解き直さずに一覧 (並び) を見るだけ
+    python analysis/mittelmann_ready_20261103/check_sol.py --rejudge check_s*.jsonl  # 解き直さずに判定 (issues) だけやり直す
 環境変数 CHECK_TL (既定 60)・CHECK_TH (既定 4) で時間の上限・スレッド数を変えられる (ベンチマークの条件は既定のまま)。
 解き手はサブプロセス (このファイルの --worker) で、x は一時ファイル (.npy) で受け取る。
 """
@@ -165,17 +166,23 @@ def check_one(p: str, solu: dict, highs: dict, mps: Path) -> dict:
             res = {"status": "killed"}
         wall = time.time() - t0
         x = np.load(xp) if os.path.exists(xp) else None
-    rec = {"problem": p, "result": res, "wall": wall}
+    _, lp = bh._load_lp(mps)
+    rec = {"problem": p, "result": res, "wall": wall, "maximize": "kMaximize" in str(lp.sense_)}
+    if x is not None:
+        rec["check"] = check_x(lp, x)
+    return judge(rec, solu, highs)
+
+
+def judge(rec: dict, solu: dict, highs: dict) -> dict:
+    """記録 (result・check・maximize) から参照値・HiGHS と比べて issues を決める (--rejudge で解き直さずにやり直せる)。"""
+    p, res, maximize = rec["problem"], rec.get("result", {}), rec.get("maximize", False)
     issues = []
     st = res.get("status")
     if st not in ("optimal", "infeasible", "time_limit", "node_limit", "not_solved", "unbounded", "infeasible_or_unbounded"):
         issues.append(f"bad_status:{st}")
-    _, lp = bh._load_lp(mps)
-    maximize = "kMaximize" in str(lp.sense_)
-    rec["maximize"] = maximize
-    if x is not None:
-        chk = check_x(lp, x)
-        rec["check"] = chk
+    chk = rec.get("check")
+    has_x = chk is not None
+    if has_x:
         if "len_mismatch" in chk:
             issues.append("x_len_mismatch")
         else:
@@ -190,7 +197,8 @@ def check_one(p: str, solu: dict, highs: dict, mps: Path) -> dict:
         issues.append("optimal_without_x")
     kind, val = solu.get(p, ("unknown", None))
     rec["ref"] = [kind, val]
-    obj = rec.get("check", {}).get("obj_recomputed", res.get("objective"))
+    rec.pop("note", None)
+    obj = (chk or {}).get("obj_recomputed", res.get("objective"))
     if kind in ("opt", "best") and val is not None:
         tol = TOL * max(1.0, abs(val))
         if st == "optimal" and obj is not None:
@@ -206,11 +214,12 @@ def check_one(p: str, solu: dict, highs: dict, mps: Path) -> dict:
             issues.append("wrong_infeasible")
         if st == "unbounded":
             issues.append("wrong_unbounded")
+        # 限界値は最適値より悪い側 (最小化なら下) にあるはず。既知の値 (=best= は最適値以上) より良い側に越えていなければよい
         b = res.get("bound")
-        if b is not None and math.isfinite(b) and better(b, val, maximize, tol):
+        if kind == "opt" and b is not None and math.isfinite(b) and better(val, b, maximize, tol):
             issues.append("bound_invalid")
     elif kind == "inf":
-        if st == "optimal" or x is not None:
+        if st == "optimal" or has_x:
             issues.append("solution_on_infeasible")
     # HiGHS との突き合わせ (参考)
     hs = highs.get(p, [])
@@ -229,6 +238,16 @@ def main() -> None:
     a = sys.argv[1:]
     if a and a[0] == "--worker":
         return worker(a[1], a[2])
+    if a and a[0] == "--rejudge":
+        solu, highs = load_solu(), load_highs()
+        for fn in a[1:]:
+            recs = [json.loads(l) for l in Path(fn).read_text().splitlines() if l.strip()]
+            recs = [judge(r, solu, highs) if "result" in r and r.get("issues") != ["fetch_error"] else r for r in recs]
+            Path(fn).write_text("".join(json.dumps(r) + "\n" for r in recs))
+            for r in recs:
+                if r.get("issues"):
+                    print(fn, r["problem"], r.get("result", {}).get("status"), r["issues"])
+        return
     import run_miplib_benchmark as rb  # noqa: E402
     probs = all_problems()
     if a and a[0] == "--only":
