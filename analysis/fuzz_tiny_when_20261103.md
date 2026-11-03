@@ -121,7 +121,7 @@ HiGHS を許容誤差 1e-10 (`primal_feasibility_tolerance`・`mip_feasibility_t
 
 ```sh
 D=analysis/fuzz_tiny_when_20261103
-# bt.sh・bis.sh の中の S (作業場所) を自分の場所に直して:
+export S=/tmp/fz   # 作業場所 (worktree・ビルド・結果を置く)
 $D/bt.sh 6b614f69                        # ビルドして 400 問、$S/out/6b614f69.seeds
 $D/bis.sh 5c40603b 12a5d64a 195          # seed 195 の二分探索
 TAG=_TN ENVS="ENOMOTO_MIP_COEF_TIGHTEN_TINY=1 ENOMOTO_MIP_NO_TINY_WIDTH_FIX=1" $D/bis_env.sh e364c132 HEAD 61
