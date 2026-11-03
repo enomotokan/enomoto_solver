@@ -13,3 +13,14 @@
 | `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` (`src/mip/separation.rs`) | `p` (`env_def!`、サブ MIP では働かない) | `=0` |
 
 - 戻す並びは `analysis/halve_submip_20261030/run.py` の `"prep"`。これからの記録の `"def"` は p を含む新しい既定。
+
+## 確かめ (`robust_cap_default_20261103/check.py`、新しいビルドで 1 回ずつ。出力 `check.out`、ログ `logs/`)
+
+| 問題 | 環境変数なし | `=p` を明示 | 元に戻す形 (`=0`) |
+|---|---|---|---|
+| neos-960392 | 最適 29.8 秒 (2 ラウンド目の LP を進みの判定で 1250 反復で打ち切り) | 最適 29.7 秒 (同じ) | 最適 29.2 秒 |
+| neos-911970 | 最適 10.0 秒 | 最適 9.7 秒 | 最適 12.5 秒 |
+
+- 環境変数なしで `MIP: robust cut LP cap: ... progress true` が出て、明示した形と同じ振る舞い。既定が入った。neos-960392 は cs2 の止め方
+  (伸びていない 2 ラウンド目の LP を外す) を保って最適。
+- `cargo build --release` 通過。
