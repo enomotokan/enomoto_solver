@@ -32,6 +32,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if budget <= 0.01 {
             return false;
         }
+        // `ENOMOTO_MIP_IPM_HEUR_LPGATE` (試作、既定では使わない): 根の LP (単体法) に `ENOMOTO_T_MIP_IPM_HEUR_LPGATE_MULT` (既定 1) × 予算
+        // より長くかかった問題では内点法を始めない。内点法の準備 (KKT の AMD・METIS の順序付け、多前線法の記号分解・最初の分解) は
+        // 止めの合図を見ないので、大きい問題では予算を大きく超える: ns1116954 (13 万行) の 1 スレッドで予算 0.85 秒に対し 11〜16 秒かかり、
+        // 時間の上限を 10〜11 秒超えた (AMD と METIS は `rayon::join` で並ぶので 1 スレッドで最も長い。
+        // analysis/mittelmann_ready_20261103/threads.md)
+        if env_str!("ENOMOTO_MIP_IPM_HEUR_LPGATE").is_some() && self.root_lp_secs > tunable!("ENOMOTO_T_MIP_IPM_HEUR_LPGATE_MULT", 1.0, f64) * budget {
+            if self.params.verbose {
+                eprintln!("MIP:   interior rounding: skipped (root LP {:.2}s > budget {budget:.2}s)", self.root_lp_secs);
+            }
+            return false;
+        }
         let deadline = Instant::now() + Duration::from_secs_f64(budget);
         // 0: 費用つき (最適面の中心付近) + クロスオーバーの頂点、1: 費用 0 (実行可能領域の中心付近、頂点なし)、2: 両方
         let mode = tunable!("ENOMOTO_T_MIP_IPM_MODE", 0u8, u8);

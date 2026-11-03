@@ -15,7 +15,7 @@ import run_miplib_benchmark as rb  # noqa: E402
 from probs import PROBS  # noqa: E402
 HW = {"ENOMOTO_MIP_DIAG_HW_THREADS": "16"}
 CFGS = {  # (スレッド数, 足す環境変数)
-    "t1": (1, {}), "t2": (2, {}), "t4": (4, {}), "t8": (8, HW), "t16": (16, HW), "t8r": (8, {}), "t12": (12, HW),
+    "t1": (1, {}), "t1g": (1, {"ENOMOTO_MIP_IPM_HEUR_LPGATE": "1"}), "t4g": (4, {"ENOMOTO_MIP_IPM_HEUR_LPGATE": "1"}), "t16g": (16, dict(HW, ENOMOTO_MIP_IPM_HEUR_LPGATE="1")), "t2": (2, {}), "t4": (4, {}), "t8": (8, HW), "t16": (16, HW), "t8r": (8, {}), "t12": (12, HW),
 }
 
 
