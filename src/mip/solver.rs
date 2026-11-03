@@ -3492,6 +3492,36 @@ fn tree_log() -> bool {
     env_str!("ENOMOTO_MIP_TREE_LOG").is_some()
 }
 
+/// `ENOMOTO_MIP_MEM1_SIBLU=K` (試作、既定では使わない。analysis/uccase12_mem1_20261103.md): 潜りの兄弟の一覧 (`dive_stack`) で
+/// 親の LP の LU キャッシュ ([`crate::simplex::mip_lp::LuSnapshot`]) を持つのを新しい方から K 個までにする (K = 0 なら持たない、
+/// `ENOMOTO_MIP_NO_SIBLING_LU` と同じ)。LU キャッシュは子の LP の Forrest-Tomlin の更新で写しが作られるので、兄弟ごとに別の
+/// 分解 (uccase12 の 6.8 万行で 1 つ数十 MB) を潜りの深さの数だけ持つ。兄弟へは新しい方から戻るので、古い兄弟の LU はほとんど使わない
+fn mem1_siblu_keep() -> Option<usize> {
+    static V: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_MEM1_SIBLU").and_then(|v| v.parse().ok()))
+}
+
+/// `ENOMOTO_MIP_MEM1_SIBLU` の数え上げ (全スレッドの和): [LU を持つ兄弟の数の最大 (スレッドごとの最大の最大), LU 付きで積んだ数,
+/// 捨てた LU の数, 兄弟へ戻って LU を使えた数]
+pub(crate) static MEM1_SIBLU_STATS: [std::sync::atomic::AtomicU64; 4] =
+    [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+
+/// [`mem1_siblu_keep`]: `stack` の LU を新しい方から `keep` 個だけ残して捨てる (この後に 1 つ積む)。数え上げも更新する
+fn mem1_siblu_trim(stack: &mut [(usize, u64, Option<crate::simplex::mip_lp::LuSnapshot>)], keep: usize, pushing: bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let len = stack.len();
+    let mut dropped = 0;
+    for e in stack[..len.saturating_sub(keep)].iter_mut() {
+        if e.2.take().is_some() {
+            dropped += 1;
+        }
+    }
+    let held = stack.iter().filter(|e| e.2.is_some()).count() as u64 + pushing as u64;
+    MEM1_SIBLU_STATS[0].fetch_max(held, Relaxed);
+    MEM1_SIBLU_STATS[1].fetch_add(pushing as u64, Relaxed);
+    MEM1_SIBLU_STATS[2].fetch_add(dropped, Relaxed);
+}
+
 /// DSE 重みを全ての LP で引き継ぎ、待ち行列のノードに保存するか (既定で真、`ENOMOTO_MIP_NO_DSE_ALL` で偽)。
 fn dse_all() -> bool {
     env_str!("ENOMOTO_MIP_NO_DSE_ALL").is_none() && crate::simplex::slope_intercept_dual::mip_profile() != 1
@@ -6795,7 +6825,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // 置いた基底が親の LP の最適基底のままなら、その LU を使う (行が変わっていれば使わない)
                         if let Some(s) = &sib_lu {
                             if n.basis_epoch == self.row_log.len() {
-                                self.lp.adopt_lu_snapshot(s);
+                                let ok = self.lp.adopt_lu_snapshot(s);
+                                if ok && mem1_siblu_keep().is_some() {
+                                    MEM1_SIBLU_STATS[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
                             }
                         }
                     }
@@ -7993,6 +8026,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let sib = self.queue.push(sec);
             // 兄弟へ戻ったときのために親の LP の LU を一緒に持つ (共有なので写さない)
             let sib_lu = if env_str!("ENOMOTO_MIP_NO_SIBLING_LU").is_none() { self.lp.lu_snapshot() } else { None };
+            // `ENOMOTO_MIP_MEM1_SIBLU=K` (試作、既定では使わない): LU を持つのは新しい方から K 個の兄弟だけにする
+            // `ENOMOTO_MIP_MEM1_SIBLU_ROWS=R` (既定 0): LP の行が R 以上のときだけ間引く (小さい LP の LU は安く、古い兄弟へも戻る)
+            if let Some(k) = mem1_siblu_keep().filter(|_| self.lp.num_rows() >= tunable!("ENOMOTO_MIP_MEM1_SIBLU_ROWS", 0usize, usize)) {
+                mem1_siblu_trim(&mut self.dive_stack, k.saturating_sub(1), sib_lu.is_some());
+            }
             self.dive_stack.push((sib.0, sib.1, sib_lu));
             // `ENOMOTO_MIP_MEM2` の `l` (試作): 潜りの兄弟に持たせる LU を新しい K 個までにする (古いものから捨てる)
             if mem2('l') {
@@ -14868,6 +14906,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: branching: strong branching vs pseudocost: {} of {} agreed, {} nodes without strong branching", self.sb_agree_stats[1], self.sb_agree_stats[0], self.sb_agree_stats[2]);
             }
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
+            if mem1_siblu_keep().is_some() {
+                let st: Vec<u64> = MEM1_SIBLU_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: mem1 sibling LU (all threads): held at most {}, pushed {}, dropped {}, adopted {}", st[0], st[1], st[2], st[3]);
+            }
             if self.snap.is_none() && !self.params.submip {
                 print_basis_nb_diag();
             }

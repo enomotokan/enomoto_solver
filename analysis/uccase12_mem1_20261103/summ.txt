@@ -1,0 +1,21 @@
+問題数 58
+
+| 設定 | 解けた | SGM (秒) | crash | HiGHS の最適値との食い違い | 最大 RSS MB (中央値/最大) |
+|---|---|---|---|---|---|
+| def | 44 | 16.78 | 0 | 0 | 235 / 2264 |
+| siblu1 | 43 | 16.74 | 0 | 0 | 234 / 2517 |
+
+解けたかが違う問題・時間が 1.5 倍以上違う問題 (どちらかが 5 秒以上)・最大 RSS が 200 MB 以上違う問題:
+
+| 問題 | def | siblu1 | def RSS MB | siblu1 RSS MB |
+|---|---|---|---|---|
+| drayage-25-23 | optimal 8.6s | optimal 3.3s | 331 | 222 |
+| h80x6320d | optimal 45.6s | time_limit 60.1s (6382.099049999327) | 482 | 466 |
+| mc11 | optimal 29.6s | optimal 22.9s | 484 | 247 |
+| neos-860300 | optimal 28.7s | optimal 30.1s | 1688 | 1463 |
+| roll3000 | optimal 52.4s | optimal 40.8s | 559 | 352 |
+| pk1 | optimal 20.6s | optimal 35.2s | 139 | 171 |
+| blp-ar98 | time_limit 60.1s (6434.408072000001) | time_limit 60.1s (6410.1096144) | 2264 | 2517 |
+| cvs16r128-89 | time_limit 60.0s (-91.0) | time_limit 60.1s (-91.0) | 620 | 289 |
+| neos-1456979 | time_limit 60.1s (None) | time_limit 60.0s (194.0) | 2117 | 734 |
+| graph20-20-1rand | time_limit 60.1s (-9.0) | time_limit 60.0s (-9.0) | 1031 | 362 |
