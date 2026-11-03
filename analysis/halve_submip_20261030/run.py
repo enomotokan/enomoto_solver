@@ -87,6 +87,10 @@ CFGS = {
     # canddet の既定化の後に厳密な DSE 重みを 58 問・Mittelmann で測り直す (2026-11-02、bench19。analysis/bgdse_grow_20261102.md・bg_lp_work_20261102.md)
     "dserw": {"ENOMOTO_MIP_BG_CUTS_DSE": "rw"},
     "dseg": {"ENOMOTO_MIP_BG_CUTS_DSE": "g"},
+    # 道の変化に強くする試作 (2026-11-03、bench20。analysis/robust_cap_20261102.md・robust_stall_20261102.md)
+    "p": {"ENOMOTO_MIP_CUT_LP_CAP_ROBUST": "p"},
+    "po": {"ENOMOTO_MIP_CUT_LP_CAP_ROBUST": "p", "ENOMOTO_MIP_BG_DETERM_ROBUST": "o"},
+    "pog": {"ENOMOTO_MIP_CUT_LP_CAP_ROBUST": "p", "ENOMOTO_MIP_BG_DETERM_ROBUST": "o", "ENOMOTO_MIP_BG_CUTS_DSE": "g"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
