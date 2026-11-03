@@ -1926,7 +1926,7 @@ fn merge_twin_classes(prob: MipProblem, classes: &[Vec<usize>], postsolve: &mut 
                 continue;
             }
             let others = v - a * own;
-            ub = ub.min(((bound - others) / a + 1e-9).floor());
+            ub = ub.min(((bound - others) / a + if fz2_fix('m') { 1e-6 } else { 1e-9 }).floor());
         }
         if ub < col_up[k] && ub >= col_lo[k] {
             col_up[k] = ub;
@@ -4506,6 +4506,13 @@ fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_
     count
 }
 
+/// `ENOMOTO_MIP_FZ2_FIX` (試作、既定では使わない): 前処理の整数への丸めの余裕を許容誤差 (1e-6) に揃える
+/// (analysis/fuzz_tiny_worse_20261103.md)
+/// 値が `1` なら全部、文字の並びならその部分だけ: `n` 整数行の正規化 ([`normalize_integer_rows`])、`m` 併合した整数列の上限
+pub(crate) fn fz2_fix(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_FZ2_FIX").is_some_and(|v| v == "1" || v.contains(c))
+}
+
 /// 整数列だけで係数が整数の片側の行を係数の最大公約数で割り、右辺を整数に丸める (`<=` は切り下げ、`>=` は切り上げ。
 /// 整数解では左辺が整数なので成り立つ)。例: `2 y0 + 2 y1 >= 2` -> `y0 + y1 >= 1`。割った (または丸めた) 行の数を返す。
 fn normalize_integer_rows(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], is_int: &[bool]) -> usize {
@@ -4525,7 +4532,11 @@ fn normalize_integer_rows(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], ro
         if g < 1.0 {
             continue;
         }
-        let (nl, nu) = if u.is_finite() { (l, (u / g + 1e-9).floor()) } else { ((l / g - 1e-9).ceil(), u) };
+        // `ENOMOTO_MIP_FZ2_FIX` (試作、既定では使わない): 丸めの余裕を 1e-9 でなく整数の許容誤差 1e-6 にする。1e-9 だと右辺
+        // `1 - 2e-9` が 0 に切り下がり、許容誤差の内 (違反 2e-9) で実行可能な点を厳密に切る (右辺 `1 - 1e-9` は 1 に残るので、
+        // 違反 1e-9 は通し 2e-9 は切る不揃いになる。analysis/fuzz_tiny_worse_20261103.md)
+        let rt = if fz2_fix('n') { 1e-6 } else { 1e-9 };
+        let (nl, nu) = if u.is_finite() { (l, (u / g + rt).floor()) } else { ((l / g - rt).ceil(), u) };
         if g > 1.0 || (u.is_finite() && nu != u) || (l.is_finite() && nl != l) {
             for e in rows[i].iter_mut() {
                 e.1 = (e.1 / g).round();
