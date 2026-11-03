@@ -18,6 +18,12 @@ CFGS = {
 for v in ["o", "ao", "lo", "alo", "p", "po", "apo", "d", "aod", "alod", "w", "aow", "alow", "dw"]:
     CFGS["r_" + v] = {"ENOMOTO_MIP_BG_DETERM_ROBUST": v}
     CFGS["g_" + v] = {**G, "ENOMOTO_MIP_BG_DETERM_ROBUST": v}
+# もう 1 つのセッションの試作 (カットの LP の反復の上限を目的値の進みで、analysis/robust_cap_20261102.md) と合わせた形
+CP = {"ENOMOTO_MIP_CUT_LP_CAP_ROBUST": "p"}
+CFGS["g_cp"] = {**G, **CP}
+CFGS["g_o_cp"] = {**G, **CP, "ENOMOTO_MIP_BG_DETERM_ROBUST": "o"}
+CFGS["r_o_cp"] = {**CP, "ENOMOTO_MIP_BG_DETERM_ROBUST": "o"}
+CFGS["cp"] = CP
 for k, v in json.loads(os.environ.get("RS_EXTRA_CFGS", "{}")).items():
     CFGS[k] = v
 probs = sys.argv[1].split(",")
