@@ -664,6 +664,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let keep_face = (self.face_secs, self.face_used, self.face_off_loop, self.sep_par_cpu, self.last_cut_lp_secs);
         let keep_iters = self.lp.total_iterations();
         let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
+        // 試作 `ENOMOTO_MIP_LOSE6_2_TIE`: 同点の比べ直しでは 1 回の LP の上限も `ENOMOTO_T_MIP_LOSE6_2_TIE_BUDGET` 倍にする
+        let cap = cap * LOSE6_2_PROBE_CAP_MULT.with(|c| c.get());
         let mut gain = 0.0;
         let mut hist: Vec<(f64, f64)> = Vec::new();
         let mut nadd = 0usize;
@@ -1275,6 +1277,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         early = "after round 1";
                     } else if std::time::Instant::now() >= deadline {
                         early = "time budget";
+                    } else if first_ok && lose6_2_tie() && (hd[0].0 - hp[0].0).abs() <= tol + 1e-9 * hd[0].0.abs().max(hp[0].0.abs()) {
+                        // 試作 `ENOMOTO_MIP_LOSE6_2_TIE` ([`lose6_2_tie`]): 1 ラウンド目の伸びが同じなら、両方を同じラウンド数
+                        // (`ENOMOTO_T_MIP_LOSE6_2_TIE_ROUNDS`、既定 2) だけ回して比べ直す (時間の予算は比べの始めから元の
+                        // `ENOMOTO_T_MIP_LOSE6_2_TIE_BUDGET` (既定 4) 倍)
+                        let r2 = tunable!("ENOMOTO_T_MIP_LOSE6_2_TIE_ROUNDS", 2usize, usize).clamp(2, k);
+                        let bmult = tunable!("ENOMOTO_T_MIP_LOSE6_2_TIE_BUDGET", 4.0, f64).max(1.0);
+                        let dl2 = t_probe0 + std::time::Duration::from_secs_f64((bmult * budget).min(1e6));
+                        LOSE6_2_PROBE_CAP_MULT.with(|c| c.set(bmult));
+                        let (hd2, nd2, ed2) = self.probe_cut_mode(false, r2, dl2, &never, keep);
+                        let (hp2, np2, ep2) = self.probe_cut_mode(true, r2, dl2, &never, keep);
+                        LOSE6_2_PROBE_CAP_MULT.with(|c| c.set(1.0));
+                        for e in [ed.take(), ep.take()].into_iter().flatten() {
+                            to_pool.extend(e.rows.into_iter().map(|(c, _, r)| (c, r)));
+                        }
+                        (hd, nd, hp, np, ed, ep) = (hd2, nd2, hp2, np2, ed2, ep2);
+                        early = if hd.len().min(hp.len()) < r2 { "tie, stopped early" } else { "tie" };
                     } else {
                         let (hd2, nd2, ed2) = self.probe_cut_mode(false, k, deadline, &never, keep);
                         let hd_ref = hd2.clone();
@@ -5285,4 +5303,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
 fn sep_threads(threads: usize) -> usize {
     if env_str!("ENOMOTO_MIP_SEP_THREADS_M1").is_some() { threads.saturating_sub(1).max(1) } else { threads.max(1) }
+}
+
+/// 試作 `ENOMOTO_MIP_LOSE6_2_TIE` (既定では使わない。`0` でも使わない。analysis/lose6_2_20261103.md): カット選択の試し (`ENOMOTO_MIP_CUTSEL_PROBE`) で、
+/// 1 ラウンド目の伸びが既定の選び方と POOL で同じ (差が許容誤差以内) なら、比べ直しを「既定 6 ラウンド・POOL は予算の残りまで」ではなく、両方を同じ
+/// `ENOMOTO_T_MIP_LOSE6_2_TIE_ROUNDS` (既定 2) ラウンドだけ回す形にする。physiciansched6-2 では 1 ラウンド目の伸びが両方 4.291667 で並び、
+/// 比べ直しの予算を既定の 6 ラウンドが使い切って POOL が 1 ラウンドで打ち切られ、1 ラウンドの時間の揺れで既定を選んでいた
+/// (POOL は 2 ラウンドで伸び 117、既定は 4.29。analysis/phys6_20261101.md の 2 節の 4)。
+pub(crate) fn lose6_2_tie() -> bool {
+    env_str!("ENOMOTO_MIP_LOSE6_2_TIE").is_some_and(|v| v != "0")
+}
+
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_LOSE6_2_TIE` ([`lose6_2_tie`]): 同点の比べ直しの間だけ、比べの 1 回の LP の上限に掛ける倍率
+    static LOSE6_2_PROBE_CAP_MULT: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
 }

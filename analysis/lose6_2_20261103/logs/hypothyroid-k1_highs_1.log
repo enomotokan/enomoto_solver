@@ -1,0 +1,62 @@
+[   0.00] Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+[   0.00] Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+[   0.00] MIP hypothyroid-k1 has 5195 rows; 2602 cols; 433884 nonzeros; 2602 integer variables (2598 binary)
+[   0.00] Coefficient ranges:
+[   0.00]   Matrix  [1e+00, 3e+03]
+[   0.00]   Cost    [1e+00, 1e+00]
+[   0.00]   Bound   [1e+00, 3e+03]
+[   0.00]   RHS     [1e+00, 3e+03]
+[   0.08] Presolving model
+[   0.43] 5192 rows, 2596 cols, 431376 nonzeros 0s
+[   4.17] 5189 rows, 2595 cols, 431326 nonzeros 4s
+[   4.22] Presolve reductions: rows 5189(-6); columns 2595(-7); nonzeros 431326(-2558) 
+[   4.40] Objective function is integral with scale 1
+[   4.40] 
+[   4.40] Solving MIP model with:
+[   4.40]    5189 rows
+[   4.40]    2595 cols (2595 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+[   4.40]    431326 nonzeros
+[   4.40]    Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+[   5.38] 
+[   5.38] Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+[   5.38]      I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+[   5.38]      S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+[   5.38]      Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+[   5.38] 
+[   5.38]         Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+[   5.38] Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+[   5.38]  J       0       0         0   0.00%   -inf            -1                 Large        0      0      0         0     5.4s
+[  11.22]  R       0       0         0   0.00%   -2902.852586    -2692              7.83%        0      0      0      2690    11.2s
+[  24.98]          0       0         0   0.00%   -2851           -2692              5.91%     1057      8    121      3004    25.0s
+[  25.33]  L       0       0         0 100.00%   -2851           -2851              0.00%     1057      8    121      3004    25.3s
+[  25.33]          1       0         1 100.00%   -2851           -2851              0.00%     1057      8    121      3008    25.3s
+[  25.33] 
+[  25.33] Solving report
+[  25.33]   Model             hypothyroid-k1
+[  25.33]   Status            Optimal
+[  25.33]   Primal bound      -2851
+[  25.33]   Dual bound        -2851
+[  25.33]   Gap               0%
+[  25.33]   P-D integral      16849.8766863
+[  25.33]   Solution status   feasible
+[  25.33]                     -2851 (objective)
+[  25.33]                     0 (bound viol.)
+[  25.33]                     1.7763568394e-15 (int. viol.)
+[  25.33]                     0 (row viol.)
+[  25.33]   Timing            25.33
+[  25.33]                     4.50 (Presolve)
+[  25.33]                         MIP    time [calls] = 4.22 [1]
+[  25.33]                         subMIP time [calls] = 0.28 [1]
+[  25.33]                     20.83 (Solve)
+[  25.33]                         MIP    time [calls] = 20.82 [1]
+[  25.33]                         subMIP time [calls] = 0.01 [1]
+[  25.33]                     0.00 (Postsolve)
+[  25.33]                         MIP    time [calls] = 0.00 [1]
+[  25.33]                         subMIP time [calls] = 0.00 [1]
+[  25.33]   Max sub-MIP depth 2
+[  25.33]   Nodes             1
+[  25.33]   Repair LPs        0
+[  25.33]   LP iterations     3008
+[  25.33]                     0 (strong br.)
+[  25.33]                     314 (separation)
+[  25.33]                     4 (heuristics)

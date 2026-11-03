@@ -1629,6 +1629,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.submip_hs_drop = hs_drop;
             self.submip_r0 = r0;
             self.submip_nosol = nosol;
+            self.submip_same_obj = cutoff.is_none();
             self.spawn_submip(sub, params);
             return Some((super::solver::MipStatus::NotSolved, false));
         }
@@ -1657,8 +1658,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP` で使わない): 根の (主のスレッドで解く) サブ MIP も成果で打ち切る ([`super::solver::submip_outcome_stop`])
         if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
-            let c = std::sync::Arc::new(super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol));
-            super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(c));
+            let c = super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol);
+            // 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 目的関数を変えないサブ MIP に外側の下界を渡す
+            let c = if super::solver::lose6_2_sublb() && cutoff.is_none() { c.with_outer_lb(self.root_lb_now(), self.bg_watch_job()) } else { c };
+            super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(std::sync::Arc::new(c)));
         }
         let node_limit = params.node_limit;
         // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): サブ MIP の始め・終わり・受け入れを番号付きで出す

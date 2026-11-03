@@ -496,6 +496,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     bg_watch: Option<std::sync::Arc<CutJob>>,
     /// 裏のカットの下界が刈り込みの上限に届いたのを見た印 ([`Solver::bg_proved`]、一度立てば戻さない)
     bg_proved_seen: std::cell::Cell<bool>,
+    /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB` ([`Solver::sublb_reached`]): サブ MIP の暫定解が外側の下界に届いたのを見た
+    sublb_seen: std::cell::Cell<bool>,
+    /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 次に別スレッドで始めるサブ MIP が目的関数を変えないものか ([`Self::spawn_submip`] に渡す)
+    pub(super) submip_same_obj: bool,
     /// 最初の根の LP の反復数 (丸め系のヒューリスティクスの連続部分の LP の反復上限に使う)
     pub(super) root_lp_iters: u64,
     /// 根の LP (カットの前) を解くのにかかった秒 (再スタートの判定 `ENOMOTO_MIP_RESTART_FIRST_LPW` に使う)
@@ -2126,6 +2130,9 @@ pub(crate) struct SubmipCtl {
     /// `ENOMOTO_MIP_LOSE6_1_STOP` (試作、既定では使わない。[`lose6_1_stop`]): 外側が早めの再スタートを決めた後、まだ走っているサブ MIP を
     /// 止める合図 (サブ MIP の [`Solver::time_up`] が真になり、時間切れとしてその時点の解を返す)
     pub(crate) abort: std::sync::atomic::AtomicBool,
+    /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB` ([`lose6_2_sublb`]): 外側の大域的な下界 (作った時点の根の下界と、外側の裏のカットの LP の値)。
+    /// 目的関数を変えないサブ MIP だけに付ける
+    pub(super) outer_lb: Option<(f64, Option<std::sync::Arc<CutJob>>)>,
 }
 
 /// `ENOMOTO_MIP_LOSE6_1_STOP` (試作、既定では使わない): 根のヒューリスティクスで早めの再スタートが決まったら、並列のサブ MIP の終わりを
@@ -2138,7 +2145,25 @@ pub(crate) fn lose6_1_stop() -> bool {
 
 impl SubmipCtl {
     pub(crate) fn new(z: f64) -> Self {
-        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::atomic::AtomicBool::new(false) }
+        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::atomic::AtomicBool::new(false), outer_lb: None }
+    }
+    /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 外側の下界を付ける (`lb0` は今の根の下界、`job` は回っている裏のカット)
+    pub(super) fn with_outer_lb(mut self, lb0: f64, job: Option<std::sync::Arc<CutJob>>) -> Self {
+        if lb0.is_finite() || job.is_some() {
+            self.outer_lb = Some((lb0, job));
+        }
+        self
+    }
+    /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: サブ MIP の暫定解の目的値 `z` (外側と同じ目的関数・定数項) が外側の下界に届いたか
+    pub(crate) fn lb_reached(&self, z: f64) -> bool {
+        let Some((lb0, job)) = &self.outer_lb else { return false };
+        let mut lb = *lb0;
+        if let Some(j) = job {
+            if let Some(&b) = j.prog.lock().unwrap().last() {
+                lb = lb.max(b);
+            }
+        }
+        lb.is_finite() && z <= lb + 1e-9 * z.abs().max(1.0)
     }
     /// 解のないうちの時間の上限 ([`Self::nosol_deadline`]) を今から `secs` 秒にする (`None` なら付けない)。
     pub(crate) fn with_nosol(mut self, secs: Option<f64>) -> Self {
@@ -2498,6 +2523,31 @@ pub(super) struct BgDeterm {
 ///   (`a` と両方あれば、第 1 段階の続きの後に第 2 段階を回す)。
 pub(crate) fn mc11fix2() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_MC11FIX2").filter(|v| *v != "0")
+}
+
+/// 試作 `ENOMOTO_MIP_LOSE6_2_PROBE_WAIT` (既定では使わない。`0` でも使わない。analysis/lose6_2_20261103.md): 根のヒューリスティクスの後、
+/// 裏のカット ([`BgDeterm`]) の終わりを待つ前に、暫定解があり裏のカットがまだ回っていれば、主のスレッドで根の目的値のプロービング
+/// ([`Solver::root_obj_probe`]) を先に回す (待ちの間に主が遊ばない)。証明できれば裏のカットを止めて最適で終える。できなければ今まで通り待ち、
+/// 置き換えの後のプロービングも回す (2 回目)。hypothyroid-k1 では最適値 -2851 の解が根の RENS で出た後、裏のカットを安全網 (約 9.5 秒) まで
+/// 待って下界を -2890.7 → -2882.6 にしか上げず (最適値まで 31.6 残る)、証明は置き換えの後のプロービング (6 秒、両側とも矛盾する列) だった。
+pub(crate) fn lose6_2_probe_wait() -> bool {
+    env_str!("ENOMOTO_MIP_LOSE6_2_PROBE_WAIT").is_some_and(|v| v != "0")
+}
+
+/// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB` (既定では使わない。`0` でも使わない。analysis/lose6_2_20261103.md): 外側の根のサブ MIP (目的関数を変えない
+/// もの) に外側の大域的な下界 (根の LP の値と、回っている裏のカットの LP の値 ([`CutJob::prog`]) の大きいほう) を渡し、サブ MIP の暫定解が
+/// その下界に届いたら (外側の最適解なので) サブ MIP を止める ([`SubmipCtl::lb_reached`])。physiciansched6-2 では、裏のカットが 26.5 秒に
+/// 下界 49324 に着いた後も、根の RINS のサブ MIP が 49324 の解を持って 372 ノード・28.7 秒 (46.9 秒まで) 回っていた。
+/// 試作 `ENOMOTO_MIP_LOSE6_2_BGPROOF` (既定では使わない。`0` でも使わない。analysis/lose6_2_20261103.md): 根のヒューリスティクスの後の裏のカットの
+/// 待ちの終わりに、裏のカットの LP の値 (最適に解けたラウンドの値、[`CutJob::prog`]) が刈り込みの上限 (暫定解) に届いていれば、カットの行を主の LP に
+/// 置き換えて解き直さずに、暫定解を最適として終える (裏のカットの LP は大域的な境界と大域的に成り立つカットの緩和なので、その値は下界)。
+/// physiciansched6-2 では、待ちが `cutoff` (裏の LP 49324 = 暫定解) で終わった後の置き換えの LP の解き直しに 2.3〜5.4 秒 (2698〜6482 反復) かかっていた。
+pub(crate) fn lose6_2_bgproof() -> bool {
+    env_str!("ENOMOTO_MIP_LOSE6_2_BGPROOF").is_some_and(|v| v != "0")
+}
+
+pub(crate) fn lose6_2_sublb() -> bool {
+    env_str!("ENOMOTO_MIP_LOSE6_2_SUBLB").is_some_and(|v| v != "0")
 }
 
 pub(crate) fn bg_determ_mode() -> Option<&'static str> {
@@ -2974,6 +3024,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         heur_stop: None,
         bg_watch: None,
         bg_proved_seen: std::cell::Cell::new(false),
+        sublb_seen: std::cell::Cell::new(false),
+        submip_same_obj: false,
         root_lp_iters: 0,
         root_lp_secs: 0.0,
         inc_only_fj: false,
@@ -3528,12 +3580,43 @@ impl<'a, L: MipLp> Solver<'a, L> {
         false
     }
 
+    /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB` (外側): 今の根の下界 (根の LP の値・根のカットのループの LP の値の大きいほう)
+    pub(super) fn root_lb_now(&self) -> f64 {
+        self.root_lb.max(self.root_cut_lb)
+    }
+    /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB` (外側): 根のヒューリスティクスの間に回っている裏のカット
+    pub(super) fn bg_watch_job(&self) -> Option<std::sync::Arc<CutJob>> {
+        self.bg_watch.clone()
+    }
+
+    /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB` (サブ MIP の側): 自分の暫定解が外側の大域的な下界に届いたか ([`SubmipCtl::lb_reached`])。
+    /// 一度届いたら覚える (`bg_proved_seen` とは別の印)
+    fn sublb_reached(&self) -> bool {
+        if self.sublb_seen.get() {
+            return true;
+        }
+        let Some(c) = &self.root_submip else { return false };
+        if c.outer_lb.is_none() {
+            return false;
+        }
+        let Some(z) = self.incumbent.as_ref().map(|(z, _)| *z) else { return false };
+        if c.lb_reached(z) {
+            self.sublb_seen.set(true);
+            if self.params.verbose || env_str!("ENOMOTO_MIP_LOSE6_2_LOG").is_some() {
+                eprintln!("MIP: LOSE6_2_SUBLB: the sub-MIP incumbent {z:.10e} reached the outer lower bound; stopping the sub-MIP (nodes {})", self.nodes);
+            }
+            return true;
+        }
+        false
+    }
+
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || self.heur_stop.is_some_and(|d| Instant::now() >= d)
             || ((self.bg_watch.is_some() || self.root_submip.is_some()) && self.bg_proved())
             || (self.incumbent.is_none() && self.root_submip.as_ref().is_some_and(|c| c.nosol_deadline.is_some_and(|d| Instant::now() >= d)))
             || self.root_submip.as_ref().is_some_and(|c| c.abort.load(std::sync::atomic::Ordering::Relaxed))
+            || self.sublb_reached()
             || (self.snap.is_some() && FIND_STOP.with(|f| f.borrow().as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))))
             || self.pool.as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed))
             || ROLE_POOL.with(|r| r.borrow().as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed) || p.fin.load(std::sync::atomic::Ordering::Relaxed)))
@@ -5772,6 +5855,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let determ = bg.job.determ;
             let mut wait_why = "";
             if let Some(d) = determ {
+                // 試作 `ENOMOTO_MIP_LOSE6_2_PROBE_WAIT` ([`lose6_2_probe_wait`]): 待つ前に、裏のカットが回っている間に根の目的値のプロービングを回す
+                if lose6_2_probe_wait()
+                    && self.incumbent.is_some()
+                    && bg.handle.as_ref().is_some_and(|h| !h.is_finished())
+                    && env_str!("ENOMOTO_MIP_NO_ROOT_OBJ_PROBE").is_none()
+                    && !self.time_up()
+                {
+                    let t0 = Instant::now();
+                    let proved = self.root_obj_probe();
+                    let nr = bg.job.prog.lock().unwrap().len();
+                    if self.params.verbose {
+                        eprintln!(
+                            "MIP: LOSE6_2_PROBE_WAIT: root objective probing while the background cuts run: {} ({:.2}s, background rounds {nr}, {:.2}s)",
+                            if proved { "proved" } else { "not proved" },
+                            t0.elapsed().as_secs_f64(),
+                            self.start.elapsed().as_secs_f64()
+                        );
+                    }
+                    if proved {
+                        if let Some(z) = self.incumbent.as_ref().map(|(z, _)| *z) {
+                            if self.shared.as_ref().is_none_or(|s| !(s.best() < z)) {
+                                drop(bg);
+                                if self.params.verbose {
+                                    eprintln!("MIP: root objective probing proved the incumbent {z:.10e} optimal ({:.2}s)", self.start.elapsed().as_secs_f64());
+                                }
+                                return self.finish(MipStatus::Optimal, z);
+                            }
+                        }
+                    }
+                }
                 // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM`: 裏のカットが自分で終わるまで待つ (時間の上限は安全網)
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let min_left = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT", 0.05, f64) * self.params.time_limit;
@@ -5841,6 +5954,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let at = bg.job.prog_at.lock().unwrap();
                         let rounds: Vec<String> = h.iter().zip(at.iter()).map(|(o, t)| format!("{o:.1} at {:.2}s", t.saturating_duration_since(self.start).as_secs_f64())).collect();
                         eprintln!("MIP: background cuts: rounds so far [{}]", rounds.join(", "));
+                    }
+                }
+            }
+            // 試作 `ENOMOTO_MIP_LOSE6_2_BGPROOF` ([`lose6_2_bgproof`]): 裏のカットの LP の値が刈り込みの上限に届いていれば、カットを置き換えて
+            // 主の LP を解き直さずに最適で終える
+            if lose6_2_bgproof() && !self.params.submip {
+                let b = bg.job.prog.lock().unwrap().last().copied();
+                let z = self.prune_limit();
+                if let (Some(b), Some(zi)) = (b, self.incumbent.as_ref().map(|(z, _)| *z)) {
+                    if z.is_finite() && b >= z - 1e-9 * z.abs().max(1.0) && self.shared.as_ref().is_none_or(|s| !(s.best() < zi)) {
+                        drop(bg);
+                        return self.finish_root_gap("background cut LP bound (LOSE6_2_BGPROOF)", b);
                     }
                 }
             }
@@ -12883,7 +13008,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let hs_drop = std::mem::take(&mut self.submip_hs_drop);
         let r0 = std::mem::take(&mut self.submip_r0);
         let nosol = self.submip_nosol.take();
-        let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| std::sync::Arc::new(SubmipCtl::new(self.prune_limit()).with_nosol(nosol)));
+        let same_obj = std::mem::take(&mut self.submip_same_obj);
+        let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| {
+            let c = SubmipCtl::new(self.prune_limit()).with_nosol(nosol);
+            // 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 目的関数を変えないサブ MIP に外側の下界を渡す
+            let c = if lose6_2_sublb() && same_obj { c.with_outer_lb(self.root_lb_now(), self.bg_watch.clone()) } else { c };
+            std::sync::Arc::new(c)
+        });
         let ctl2 = ctl.clone();
         // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 番号を振ってサブ MIP の始めを出す (スレッドの中で道筋を受け継ぐ)
         let (trace_id, trace_tag) = if self.params.verbose && super::heuristics::submip_trace() {
