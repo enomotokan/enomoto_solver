@@ -89,6 +89,8 @@ CFGS = {
     "dseg": {"ENOMOTO_MIP_BG_CUTS_DSE": "g"},
     # 道の変化に強くする試作 (2026-11-03、bench20。analysis/robust_cap_20261102.md・robust_stall_20261102.md)
     "p": {"ENOMOTO_MIP_CUT_LP_CAP_ROBUST": "p"},
+    # p の既定化 (2026-11-03、analysis/robust_cap_default_20261103.md) の後は "def" が p を含む。それより前の既定は "prep"
+    "prep": {"ENOMOTO_MIP_CUT_LP_CAP_ROBUST": "0"},
     "po": {"ENOMOTO_MIP_CUT_LP_CAP_ROBUST": "p", "ENOMOTO_MIP_BG_DETERM_ROBUST": "o"},
     "pog": {"ENOMOTO_MIP_CUT_LP_CAP_ROBUST": "p", "ENOMOTO_MIP_BG_DETERM_ROBUST": "o", "ENOMOTO_MIP_BG_CUTS_DSE": "g"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},

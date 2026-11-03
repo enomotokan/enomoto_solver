@@ -10274,3 +10274,10 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 根拠: bench18 (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −0.4%・解けた数 85 -> 86、Mittelmann −0.6%・45 -> 46。揺れの範囲だが害はなく、
   裏のカットの結果を機械の速さ・根のヒューリスティクスの長さから切り離す (mc11 の遅い機械の真似で 1/3 -> 3/3)。速い機械では mc11・hypothyroid-k1 が待ちの分遅い。
 - 記録は `analysis/canddet_default_20261102.md`。
+
+## 2026-11-03: 根のカットのループのカットの LP を、伸びている間は反復の上限で外さない形 (p) を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_CUT_LP_CAP_ROBUST=p` (戻し方 `=0`)。上限に達した後も双対の目的値の窓ごとの伸びを見て、伸びていれば続ける。
+- 根拠: 上限が「それまでの最大の 5 倍」に引きずられ、道が変わって長めの LP が来ると外れていた (analysis/robust_cap_20261102.md)。bench20
+  (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −2.3%・88 -> 88、Mittelmann +0.7%・49 -> 50、def だけが解けた回なし。
+- 記録は `analysis/robust_cap_default_20261103.md`。

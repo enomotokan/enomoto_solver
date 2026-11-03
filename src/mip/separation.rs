@@ -1107,7 +1107,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 反復の最大の q 倍より小さくしない (physiciansched6-2 は 0・1 ラウンドの LP が 900・808 反復で、2 ラウンド目の 1166 反復を
         // 上限 1000 で外していた。neos-960392 は 133・126 反復で、2 ラウンド目の密なカットの LP は 3447 反復)
         let lp_work_prev = tunable!("ENOMOTO_T_MIP_CUT_LP_WORK_PREV", 5.0, f64);
-        // 試作 `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` = 文字の並び [`:m` | `:b`] (既定では使わない。analysis/robust_cap_20261102.md): 根のカットのループの
+        // `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` = 文字の並び [`:m` | `:b`] (既定 `p`、`=0` で使わない。bench20 で既定にした: analysis/robust_cap_default_20261103.md。analysis/robust_cap_20261102.md): 根のカットのループの
         // カットの LP 1 回の反復の上限 (上の `lim`) を、道の変化に強い形にする。上限は「このループで最適まで解けたカットの LP の反復の最大の
         // `ENOMOTO_T_MIP_CUT_LP_WORK_PREV` 倍」より小さくしないので、道が少し変わって短い LP が続いた後に長めの LP が来ると外れる
         // (mc11 で裏のカットの根の LP を厳密な DSE 重みにすると (`ENOMOTO_MIP_BG_CUTS_DSE=g`) 写しのカットの LP が 100〜240 反復で続き、
@@ -1119,7 +1119,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         //   直近の窓の伸びが出発の目的値からの伸びの `ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_FRAC` (既定 0.01) 倍未満になるまで続ける
         //   (安全網の上限は `ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_HARD` (既定 10) x 上限)
         // 末尾の `:m` は主のカットのループだけ、`:b` は裏のカットのスレッド (写し) だけ (既定は両方)。時間の上限 (安全網) は変えない
-        let robust = env_str!("ENOMOTO_MIP_CUT_LP_CAP_ROBUST").filter(|_| !self.params.submip).and_then(|v| {
+        let robust = env_def!("ENOMOTO_MIP_CUT_LP_CAP_ROBUST", "p").filter(|_| !self.params.submip).and_then(|v| {
             let (letters, scope) = v.split_once(':').unwrap_or((v, ""));
             let on = match scope {
                 "m" => job.is_none(),
