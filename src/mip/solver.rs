@@ -4676,7 +4676,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 暫定解があり、その値が下界 `lb` (の切り上げ) より目的関数の刻み (なければ相対 1e-6) 以上悪いか
     /// ([`Self::obj_support`] を呼ぶ条件)。
-    /// `ENOMOTO_MIP_BOUND_STEP` (試作、既定では使わない): 目的値が刻み `obj_step` の格子 (`offset + k * step`) にしか乗らないとき、
+    /// `ENOMOTO_MIP_BOUND_STEP` (2026-11-04 から既定、`=0` で使わない): 目的値が刻み `obj_step` の格子 (`offset + k * step`) にしか乗らないとき、
     /// 利用者に返す下界 (と経過の行の下界) を格子の点に切り上げる ([`round_lb_to_step`])。暫定解があればその値で上から抑える。
     /// 本体の求解 (サブ MIP でなく、木の従でもない) だけで使う。暗黙の整数列で刻みを取ったとき (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`) も、
     /// 最適解のどれかは格子に乗るので、最適値は格子の点で、切り上げた下界は最適値を越えない
@@ -16801,9 +16801,9 @@ fn pool3_taken() -> bool {
     env_str!("ENOMOTO_MIP_POOL3_TAKEN").is_some()
 }
 
-/// `ENOMOTO_MIP_BOUND_STEP` (試作、既定では使わない): 報告の下界を目的値の刻みで切り上げる ([`Solver::step_lb`])。
+/// `ENOMOTO_MIP_BOUND_STEP` (2026-11-04 から既定、`=0` で切り上げない。analysis/bound_step_20261104.md): 報告の下界を目的値の刻みで切り上げる ([`Solver::step_lb`])。
 pub(super) fn bound_step_on() -> bool {
-    env_str!("ENOMOTO_MIP_BOUND_STEP").is_some()
+    env_def!("ENOMOTO_MIP_BOUND_STEP", "1").is_some()
 }
 
 /// 目的値が `offset + k * step` (k は整数) しか取らないとき、下界 `lb` を最も近い上の格子の点に切り上げる (最小化の向き)。

@@ -10302,3 +10302,8 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 根拠: bench25 (60 秒) で 4 設定とも害なし (58 問 −1.0〜−5.3%、Mittelmann all4 49 → 50)。mem3 は 600 秒でメモリ不足の 6 問を含む 9 問が 1200 秒を
   最大 RSS 1.3〜5.0 GB で走り切る (`analysis/mitt600_20261103.md`)。
 - 記録は `analysis/mem3_default_20261104.md`。
+
+## 2026-11-04: 報告の下界を目的値の刻みで切り上げる (BOUND_STEP) を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_BOUND_STEP` (戻し方 `=0`)。報告だけの変更 (探索は変えない)。supportcase18 で 47.187 → 48 (HiGHS と同じ)、58 問・fuzz で
+  最適値を越える下界・食い違い 0。記録は `analysis/bound_step_default_20261104.md`。
