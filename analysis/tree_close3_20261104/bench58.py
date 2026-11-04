@@ -32,9 +32,10 @@ for p in PROBS:
             res["t3_rb"] = r.stderr.count("ENOMOTO_MIP_TREE3_RBASIS")
             res["t3_cc"] = r.stderr.count("ENOMOTO_MIP_TREE3_CLIQUECAP")
             res["t3_bg"] = r.stderr.count("ENOMOTO_MIP_TREE3_BGCAP")
+            res["t3_dv"] = r.stderr.count("ENOMOTO_MIP_TREE3_DIVECAP")
             res["restarts"] = sum(1 for l in r.stderr.splitlines() if l.startswith("MIP: restart ") and " (" in l and l.split()[2].isdigit())
         except Exception as e:  # noqa: BLE001
             res = {"status": "crash", "error": str(e)[:300]}
         with open(OUT, "a") as f:
             f.write(json.dumps({"problem": p, "cfg": c, "rep": rep, "env": CFGS[c], "result": res, "at": time.strftime("%H:%M:%S")}) + "\n")
-        print(p, c, rep, res.get("status"), res.get("time"), res.get("t3_jc"), res.get("t3_rb"), res.get("t3_cc"), res.get("t3_bg"), res.get("restarts"), flush=True)
+        print(p, c, rep, res.get("status"), res.get("time"), res.get("t3_jc"), res.get("t3_rb"), res.get("t3_cc"), res.get("t3_bg"), res.get("t3_dv"), res.get("restarts"), flush=True)

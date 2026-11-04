@@ -33,5 +33,5 @@ for p in sys.argv[4:]:
     except Exception:  # noqa: BLE001
         res = {"status": "crash", "returncode": pr.returncode}
     with open(D / "res.jsonl", "a") as f:
-        f.write(json.dumps({"problem": p, "solver": solver, "cfg": cfg, "tl": tl, "wall": round(time.time() - t0, 1), "result": res}) + "\n")
+        f.write(json.dumps({"problem": p, "solver": solver, "cfg": cfg, "tl": tl, "env": CFGS.get(cfg, {}), "wall": round(time.time() - t0, 1), "result": res}) + "\n")
     print(p, solver, cfg, res.get("status"), res.get("time"), res.get("nodes"), flush=True)
