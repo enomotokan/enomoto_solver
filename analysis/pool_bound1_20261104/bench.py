@@ -15,6 +15,8 @@ HW = {"ENOMOTO_MIP_DIAG_HW_THREADS": "16"}
 CFGS = {"def": (4, {})}  # (スレッド数, 足す環境変数)
 for _m in ["worst", "est", "deep", "shallow", "alt"]:
     CFGS[_m] = (4, {"ENOMOTO_MIP_POOL1_DONATE": _m})
+CFGS["def_memc"] = (4, {"ENOMOTO_MIP_MEMC": "1"})
+CFGS["worst_memc"] = (4, {"ENOMOTO_MIP_MEMC": "1", "ENOMOTO_MIP_POOL1_DONATE": "worst"})
 TL = 60
 
 
@@ -66,6 +68,10 @@ def run_one(p, c, log=False):
 
 
 if __name__ == "__main__":
+    try:  # 親 (この計測) がメモリ不足で殺されないようにする (fiball で殺された)
+        open("/proc/self/oom_score_adj", "w").write("-1000")
+    except OSError:
+        pass
     cfgs = sys.argv[1].split(",")
     probs = sys.argv[2].split(",") if len(sys.argv) > 2 and sys.argv[2] else PROBS
     name = sys.argv[3] if len(sys.argv) > 3 else "bench"
