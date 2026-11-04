@@ -4503,6 +4503,8 @@ pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f
     // 既定 (`m`、2026-11-04) は外側の求解 (再スタートを含む) だけで小さい余裕にし、サブ MIP では以前の余裕のまま (サブ MIP の解は元の問題で
     // 確かめてから使う。qiu はサブ MIP でも小さい余裕にすると系統的に遅くなった (仕組みは未確認)、
     // analysis/halve_submip_20261030.md の bench24)。`=1` でサブ MIP でも小さい余裕
+    // 注意: 既定の `ENOMOTO_MIP_SUBMIP_HIGHS` (`p` を含む) ではサブ MIP の前処理にも `submip = false` が渡るので、`m` でもサブ MIP の前処理は小さい余裕になる
+    // (qiu の遅れの本当の仕組みは根の解発見スレッドを止める時刻、uccase12 はサブ MIP の小さい余裕にも頼っている。analysis/qiu_margin_20261104.md)
     // `ENOMOTO_MIP_QIU_MARGIN_DEPTH` (試作、既定では使わない、analysis/qiu_margin_20261104.md): `m` のサブ MIP の判定に `SUBMIP_DEPTH` も使う。
     // 既定の `ENOMOTO_MIP_SUBMIP_HIGHS` (`p` を含む) ではサブ MIP の前処理にも `submip = false` が渡るので、`m` でもサブ MIP の前処理は小さい余裕になっていた
     let in_sub = submip || (env_str!("ENOMOTO_MIP_QIU_MARGIN_DEPTH").is_some() && heuristics::SUBMIP_DEPTH.with(|d| d.get()) > 0);
