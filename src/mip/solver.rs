@@ -1025,6 +1025,36 @@ pub(super) struct Solver<'a, L: MipLp> {
     cut_basis_stats: [u64; 2],
     /// 最後に待ち行列の半分を共有の待ち行列へ出した時刻 (`ENOMOTO_T_MIP_TREE_DONATE_HALF_SECS`)。
     donate_half_at: Option<Instant>,
+    /// 診断用 (`ENOMOTO_MIP_POOL1_DIAG`): 最後に出した時刻、出したノードの下界の分布 (全体の下界との差、[`POOL1_BUCKETS`] の区切り)、
+    /// 出した数・`pool_balance` で取った数・`pool_acquire` で取った数 (前回の行から)。
+    pool1_diag_at: Option<Instant>,
+    pool1_hist: [u64; 7],
+    pool1_cnt: [u64; 3],
+    /// `ENOMOTO_MIP_POOL1_DONATE` の `alt` (試作): 次に出すノードを下界最小にするか
+    pool1_alt: bool,
+}
+
+/// 診断用 (`ENOMOTO_MIP_POOL1_DIAG` = 秒、既定 0 = 出さない)。
+fn pool1_diag_secs() -> f64 {
+    tunable!("ENOMOTO_MIP_POOL1_DIAG", 0.0, f64)
+}
+
+/// 診断用 (`ENOMOTO_MIP_POOL1_DIAG`): 出したノードの下界と全体の下界の差の区切り (最後の欄はそれ以上)。
+const POOL1_BUCKETS: [f64; 6] = [1e-6, 0.01, 0.1, 0.3, 1.0, 3.0];
+
+/// `ENOMOTO_MIP_POOL1_DONATE` (試作、既定では使わない): 手元の待ち行列の上限 (`ENOMOTO_T_MIP_TREE_LOCAL_CAP`) を超えた分を
+/// 共有の待ち行列へ出すときに、どのノードを出すか。`best` (= 既定、下界最小)・`worst` (下界最大)・`est` (下界と推定値の平均が最大)・
+/// `deep` (最も深い)・`shallow` (最も浅い)・`alt` (下界最小と最大を交互)。返り値は [`super::queue::NodeQueue::pop_for_donate`] の
+/// mode (alt は 5)。
+fn pool1_donate_mode() -> u8 {
+    match env_str!("ENOMOTO_MIP_POOL1_DONATE") {
+        Some("worst") => 1,
+        Some("est") => 2,
+        Some("deep") => 3,
+        Some("shallow") => 4,
+        Some("alt") => 5,
+        _ => 0,
+    }
 }
 
 /// 分枝限定法で解く。
@@ -3763,6 +3793,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         row_hash_epoch: None,
         cut_basis_stats: [0; 2],
         donate_half_at: None,
+        pool1_diag_at: None,
+        pool1_hist: [0; 7],
+        pool1_cnt: [0; 3],
+        pool1_alt: true,
     };
     // DSE 重みは既定で全ての LP で引き継ぐ (根のカットのループ、潜りの子、強分岐、待ち行列のノードは基底と一緒に保存した
     // 重みを戻す)。`ENOMOTO_MIP_NO_DSE_ALL` で以前の形 (毎回 1 から) に戻す。サブ MIP の中から呼ばれても、終わったら元に戻す
@@ -7235,6 +7269,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let cap = tunable!("ENOMOTO_T_MIP_TREE_LOCAL_CAP", 1000usize, usize);
                 if cap > 0 && self.race_done && self.queue.len() > cap && self.pool_hold.is_none() {
                     self.pool_donate_n(self.queue.len() - cap);
+                }
+                if pool1_diag_secs() > 0.0 {
+                    self.pool1_diag_line();
                 }
                 if !tree_shared_queue() && !tree_keep_siblings() && env_str!("ENOMOTO_MIP_TREE_NO_BALANCE").is_none() && self.nodes % tunable!("ENOMOTO_T_MIP_TREE_BALANCE_EVERY", 32u64, u64) == 0 {
                     self.pool_balance();
@@ -14532,19 +14569,91 @@ impl<'a, L: MipLp> Solver<'a, L> {
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
     }
 
+    /// 診断用 (`ENOMOTO_MIP_POOL1_DIAG` = 秒): その秒数おきに、このスレッドの手元の待ち行列の最小の下界と数・全体の下界に並ぶ
+    /// (差 1e-6 未満の) 手元のノードの数・共有の待ち行列の最小の下界と数・全体の下界・前回から出したノードの下界の分布と取り込んだ数を出す。
+    fn pool1_diag_line(&mut self) {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone() else { return };
+        if self.pool1_diag_at.is_some_and(|t| t.elapsed().as_secs_f64() < pool1_diag_secs()) {
+            return;
+        }
+        self.pool1_diag_at = Some(Instant::now());
+        let (pmin, plen, pfront) = {
+            let g = pool.inner.lock().unwrap();
+            let m = g.nodes.min_lower_bound();
+            let front = g.nodes.iter().filter(|n| n.lower_bound < m + 1e-6).count();
+            (m, g.nodes.len(), front)
+        };
+        let mut gl = pmin.min(self.queue.best_lower_bound()).min(self.cur_lb);
+        for sl in &pool.slots {
+            gl = gl.min(f64::from_bits(sl.lb.load(Ordering::Relaxed)));
+        }
+        let lmin = self.queue.best_lower_bound();
+        let lfront = self.queue.iter().filter(|n| n.lower_bound < gl + 1e-6).count();
+        let ldepth = {
+            let v: Vec<usize> = self.queue.iter().map(|n| n.depth).collect();
+            if v.is_empty() { 0.0 } else { v.iter().sum::<usize>() as f64 / v.len() as f64 }
+        };
+        eprintln!(
+            "POOL1D {:7.1}s tid {} nodes {} local {:.6}/{} (at_global {}, mean_depth {:.1}) cur {:.6} pool {:.6}/{} (at_min {}) global {:.6} cutoff {:.6} donated {} hist[<1e-6,<.01,<.1,<.3,<1,<3,>=3] {:?} took_balance {} took_acquire {}",
+            self.start.elapsed().as_secs_f64(),
+            self.pool_tid,
+            self.nodes,
+            lmin,
+            self.queue.len(),
+            lfront,
+            ldepth,
+            self.cur_lb,
+            pmin,
+            plen,
+            pfront,
+            gl,
+            self.prune_limit(),
+            self.pool1_cnt[0],
+            self.pool1_hist,
+            self.pool1_cnt[1],
+            self.pool1_cnt[2]
+        );
+        self.pool1_hist = [0; 7];
+        self.pool1_cnt = [0; 3];
+    }
+
     /// 自分の待ち行列から下界の小さい順に `k` ノードを共有の待ち行列に出す (`ENOMOTO_T_MIP_TREE_LOCAL_CAP`)。
+    /// `ENOMOTO_MIP_POOL1_DONATE` (試作) で出すノードの選び方を変える ([`pool1_donate_mode`])。
     fn pool_donate_n(&mut self, k: usize) {
         use std::sync::atomic::Ordering;
         let Some(pool) = self.pool.clone() else { return };
+        let mode = pool1_donate_mode();
         let mut out = Vec::with_capacity(k);
         for _ in 0..k {
-            match self.queue.pop_best() {
+            let got = match mode {
+                0 => self.queue.pop_best(),
+                5 => {
+                    self.pool1_alt = !self.pool1_alt;
+                    self.queue.pop_for_donate(if self.pool1_alt { 0 } else { 1 })
+                }
+                m => self.queue.pop_for_donate(m),
+            };
+            match got {
                 Some(n) => out.push(self.snap_of(&n)),
                 None => break,
             }
         }
         self.pool_stats[0] += out.len() as u64;
         let mut g = pool.inner.lock().unwrap();
+        if pool1_diag_secs() > 0.0 {
+            // 診断: 出したノードの下界と全体の下界 (共有の待ち行列と各スレッドの下界の最小) の差の分布
+            let mut gl = g.nodes.min_lower_bound().min(self.queue.best_lower_bound()).min(self.cur_lb);
+            for sl in &pool.slots {
+                gl = gl.min(f64::from_bits(sl.lb.load(Ordering::Relaxed)));
+            }
+            for n in &out {
+                let d = n.lower_bound - gl;
+                let b = POOL1_BUCKETS.iter().position(|&x| d < x).unwrap_or(POOL1_BUCKETS.len());
+                self.pool1_hist[b] += 1;
+            }
+            self.pool1_cnt[0] += out.len() as u64;
+        }
         g.nodes.extend(out);
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
     }
@@ -15239,6 +15348,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.queue.push(n);
             self.pool_stats[1] += 1;
             self.tprof.balance[0] += 1;
+            self.pool1_cnt[1] += 1;
             return;
         }
         let few = g.nodes.len() < pool.threads;
@@ -15295,6 +15405,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.pool_busy = true;
                     }
                     self.pool_stats[1] += 1;
+                    self.pool1_cnt[2] += 1;
                     let n = self.open_from_pool(sn);
                     self.tprof.lock_s += t_lock.elapsed().as_secs_f64();
                     break Ok(Some(n));
