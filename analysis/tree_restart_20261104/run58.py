@@ -11,6 +11,7 @@ from probs import PROBS  # noqa: E402
 CFGS = {
     "def": {},
     "tr": {"ENOMOTO_MIP_TREE_RESTART": "1"},
+    "tr2": {"ENOMOTO_MIP_TREE_RESTART": "1"},  # 2 版 (ヒューリスティクス役の起動の判定の重みと分けた後)
     "trp": {"ENOMOTO_MIP_TREE_RESTART": "1", "ENOMOTO_MIP_TREE1_POOL": "1", "ENOMOTO_MIP_RESTART_PC": "1"},
 }
 import subprocess  # noqa: E402

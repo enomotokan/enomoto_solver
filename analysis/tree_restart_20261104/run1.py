@@ -9,6 +9,7 @@ import run_miplib_benchmark as rb  # noqa: E402
 CFGS = {
     "def": {},
     "tr": {"ENOMOTO_MIP_TREE_RESTART": "1"},
+    "tr2": {"ENOMOTO_MIP_TREE_RESTART": "1"},  # 2 版 (ヒューリスティクス役の起動の判定の重みと分けた後)
     "trf": {"ENOMOTO_MIP_TREE_RESTART": "force"},
     "trp": {"ENOMOTO_MIP_TREE_RESTART": "1", "ENOMOTO_MIP_TREE1_POOL": "1", "ENOMOTO_MIP_RESTART_PC": "1"},
     "trpf": {"ENOMOTO_MIP_TREE_RESTART": "force", "ENOMOTO_MIP_TREE1_POOL": "1", "ENOMOTO_MIP_RESTART_PC": "1"},

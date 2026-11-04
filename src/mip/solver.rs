@@ -2117,6 +2117,9 @@ struct ThreadSlot {
     /// ヒューリスティクス役の起動の判定 (`ENOMOTO_MIP_HEUR_ROLE_TRIGGER`) 用: 自分の未処理のノードの重み (深さ d のノードは
     /// 2^-d) の和と、そのうち下界が「最良値 - δ (最良値 - 全体の下界)」以上のものの和 (f64 のビット。64 ノードおきに書く)。
     wopen: std::sync::atomic::AtomicU64,
+    /// `ENOMOTO_MIP_TREE_RESTART` (試作) 用の同じ重み。64 ノードおきに `wopen` と同じ値を書き、加えて共有の待ち行列との受け渡しのたびに
+    /// 動かす ([`WorkPool::wtree_shift`])。`wopen` (ヒューリスティクス役の起動の判定が読む) と分けて、試作が起動の判定を変えないようにする
+    wtree: std::sync::atomic::AtomicU64,
     /// 下界が「最良値 - δ_i (最良値 - 全体の下界)」以上のノードの重みの和 (δ_i は [`TRIG_DELTAS`])。
     wcuts: [std::sync::atomic::AtomicU64; 8],
     /// `ENOMOTO_MIP_MEM2` (試作): 自分の待ち行列のノードの持ち物の大きさの目安 [バイト] ([`Solver::mem2_check`])。
@@ -2595,29 +2598,29 @@ fn heur_role_count(threads: usize) -> usize {
 
 impl WorkPool {
     /// `ENOMOTO_MIP_TREE_RESTART` (試作): スレッド `tid` が共有の待ち行列とノードを受け渡したとき、そのスレッドが知らせた未処理の
-    /// ノードの重み (`wopen`、64 ノードおきに [`Solver::publish_tree_weight`] で書く) を `dw` だけ動かす。共有の待ち行列の錠の中で
+    /// ノードの重み (`wtree`、64 ノードおきに [`Solver::publish_tree_weight`] で書く) を `dw` だけ動かす。共有の待ち行列の錠の中で
     /// 呼ぶ。動かさないと、出したノードを共有の待ち行列と出した側の古い重みの両方で数え、取ったノードはどちらにも数えない
-    /// ([`Solver::tree_restart_due`] の木の重みの見積もり)。既定の動き (ヒューリスティクス役の起動の判定も `wopen` を読む) を変えない
-    /// よう、試作を使うときだけ動かす
-    fn wopen_shift(&self, tid: u32, dw: f64) {
+    /// ([`Solver::tree_restart_due`] の木の重みの見積もり)。ヒューリスティクス役の起動の判定が読む `wopen` は動かさない
+    /// (直すと起動の判定が変わる。最初の版は `wopen` を動かしていて、58 問で再スタートのない問題の結果も変わった)
+    fn wtree_shift(&self, tid: u32, dw: f64) {
         use std::sync::atomic::Ordering;
         if dw == 0.0 || !tree_restart_on() {
             return;
         }
         if let Some(sl) = self.slots.get(tid as usize) {
-            let v = f64::from_bits(sl.wopen.load(Ordering::Relaxed)) + dw;
-            sl.wopen.store(v.to_bits(), Ordering::Relaxed);
+            let v = f64::from_bits(sl.wtree.load(Ordering::Relaxed)) + dw;
+            sl.wtree.store(v.to_bits(), Ordering::Relaxed);
         }
     }
 
-    /// 自分の待ち行列が空になったスレッドの知らせた重みを 0 にする ([`Self::wopen_shift`] と同じく試作を使うときだけ)。
-    fn wopen_clear(&self, tid: u32) {
+    /// 自分の待ち行列が空になったスレッドの知らせた重みを 0 にする ([`Self::wtree_shift`] と同じく試作を使うときだけ)。
+    fn wtree_clear(&self, tid: u32) {
         use std::sync::atomic::Ordering;
         if !tree_restart_on() {
             return;
         }
         if let Some(sl) = self.slots.get(tid as usize) {
-            sl.wopen.store(0f64.to_bits(), Ordering::Relaxed);
+            sl.wtree.store(0f64.to_bits(), Ordering::Relaxed);
         }
     }
     fn new(threads: usize, lo: Vec<f64>, up: Vec<f64>, pc: Pseudocost) -> Self {
@@ -9504,6 +9507,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if let Some(sl) = pool.slots.get(self.pool_tid as usize) {
             sl.wopen.store(w.to_bits(), Ordering::Relaxed);
+            sl.wtree.store(w.to_bits(), Ordering::Relaxed);
             for i in 0..8 {
                 sl.wcuts[i].store(wc[i].to_bits(), Ordering::Relaxed);
             }
@@ -15068,7 +15072,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.pool_stats[0] += out.len() as u64;
         let mut g = pool.inner.lock().unwrap();
-        pool.wopen_shift(self.pool_tid, -snap_weight(&out));
+        pool.wtree_shift(self.pool_tid, -snap_weight(&out));
         g.nodes.extend(out);
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
     }
@@ -15181,7 +15185,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             self.pool1_cnt[0] += out.len() as u64;
         }
-        pool.wopen_shift(self.pool_tid, -snap_weight(&out));
+        pool.wtree_shift(self.pool_tid, -snap_weight(&out));
         g.nodes.extend(out);
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
     }
@@ -15198,7 +15202,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let out: Vec<SnapNode> = nodes.iter().map(|n| self.snap_of(n)).collect();
         self.pool_stats[0] += out.len() as u64;
         let mut g = pool.inner.lock().unwrap();
-        pool.wopen_shift(self.pool_tid, -snap_weight(&out));
+        pool.wtree_shift(self.pool_tid, -snap_weight(&out));
         g.nodes.extend(out);
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
     }
@@ -15213,7 +15217,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.pool_stats[0] += out.len() as u64;
         let mut g = pool.inner.lock().unwrap();
-        pool.wopen_shift(self.pool_tid, -snap_weight(&out));
+        pool.wtree_shift(self.pool_tid, -snap_weight(&out));
         g.nodes.extend(out);
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
     }
@@ -15886,7 +15890,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let Some(sn) = g.nodes.pop_best() else { break };
             pool.len.store(g.nodes.len(), Ordering::Relaxed);
-            pool.wopen_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
+            pool.wtree_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
             if !self.pool_busy && env_str!("ENOMOTO_MIP_TREE_NO_BALANCE_BUSY_FIX").is_none() {
                 g.busy += 1;
                 pool.idle.fetch_sub(1, Ordering::Relaxed);
@@ -15983,7 +15987,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if pool_min.is_finite() && pool_min <= me && pool_min <= other.0 {
             let sn = g.nodes.pop_best().unwrap();
             pool.len.store(g.nodes.len(), Ordering::Relaxed);
-            pool.wopen_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
+            pool.wtree_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
             // [`Self::pool_balance`] と同じく、待っている側に数えられたままなら待っていない側に戻す
             if !self.pool_busy {
                 g.busy += 1;
@@ -16052,7 +16056,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if let Some(sn) = if pool_min < me - thr { g.nodes.pop_best() } else { None } {
             pool.len.store(g.nodes.len(), Ordering::Relaxed);
-            pool.wopen_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
+            pool.wtree_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
             // 待っている側に数えられたまま (ヒューリスティクス役から木に戻った直後) ノードを取るときは、待っていない側に戻す
             // ([`Self::pool_acquire`] と同じ)。戻さないと、このスレッドがノードを持っている間にほかのスレッドが「全員が待っていて
             // 共有の待ち行列も空」と判定して探索を終え、このスレッドの部分木が失われる (mc11 で 11712 を最適と誤って報告した
@@ -16132,7 +16136,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.tr_next = done + tunable!("ENOMOTO_T_MIP_TREE_RESTART_EVERY", 100u64, u64);
         // 未処理のノードの重み: 自分の待ち行列と潜りの子、共有の待ち行列、ほかのスレッドが知らせた重み。ほかのスレッドの重みは
-        // 共有の待ち行列との受け渡しのたびに同じ錠の中で動かす ([`WorkPool::wopen_shift`]) ので、錠を持って一緒に読めば、
+        // 共有の待ち行列との受け渡しのたびに同じ錠の中で動かす ([`WorkPool::wtree_shift`]、`wtree`) ので、錠を持って一緒に読めば、
         // 受け渡しの間のノードを二重に数えたり落としたりしない (残る誤差は知らせた後 64 ノードまでの分枝・処理の分だけ)
         let wt = |d: usize| 0.5f64.powi(d.min(2000) as i32);
         let mut w: f64 = self.queue.iter().chain(plunge).map(|n| wt(n.depth)).sum();
@@ -16144,7 +16148,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             wparts[1] = g.nodes.iter().map(|n| wt(n.depth)).sum::<f64>();
             for (i, sl) in pool.slots.iter().enumerate() {
                 if i != t {
-                    wparts[2] += f64::from_bits(sl.wopen.load(Ordering::Relaxed)).max(0.0);
+                    wparts[2] += f64::from_bits(sl.wtree.load(Ordering::Relaxed)).max(0.0);
                 }
             }
             w += wparts[1] + wparts[2];
@@ -16218,7 +16222,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let sn = g.nodes.pop_best()?;
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
-        pool.wopen_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
+        pool.wtree_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
         // 取ったノードの下界を同じ錠の中で書く ([`Self::pool_acquire`] と同じ)。待っている側に数えられていれば戻す ([`Self::pool_balance`] と同じ)
         if let Some(sl) = pool.slots.get(self.pool_tid as usize) {
             sl.lb.store(mine.min(sn.lower_bound).to_bits(), Ordering::Relaxed);
@@ -16263,11 +16267,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if let Some(sl) = sl {
                     sl.open.store(0, Ordering::Relaxed);
                 }
-                // 手元の待ち行列は空 (潜りの子もない) なので、知らせた重みは 0 (`ENOMOTO_MIP_TREE_RESTART`、[`WorkPool::wopen_shift`])
-                pool.wopen_clear(self.pool_tid);
+                // 手元の待ち行列は空 (潜りの子もない) なので、知らせた重みは 0 (`ENOMOTO_MIP_TREE_RESTART`、[`WorkPool::wtree_shift`])
+                pool.wtree_clear(self.pool_tid);
                 let got = if shared_sel { g.nodes.pop_hybrid(bb_every) } else { g.nodes.pop_best() };
                 if let Some(sn) = got {
-                    pool.wopen_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
+                    pool.wtree_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
                     // 受け取ったノードの下界を同じ錠の中で書く (共有の待ち行列から消えた後も全体の下界に入るように)
                     if let Some(sl) = sl {
                         sl.lb.store(sn.lower_bound.to_bits(), Ordering::Relaxed);
