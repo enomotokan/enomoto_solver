@@ -10,8 +10,11 @@ sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
 TL = int(os.environ.get("MITT600_TL", "600"))  # 確かめ用に短くできる
 k = int(sys.argv[1])
-mine = json.loads((D / "shards.json").read_text())["shards"][k]
-OUT = D / f"res_s{k}.jsonl"
+# MITT600_SHARDS (分担表のファイル名、既定 shards.json)・MITT600_TAG (結果の名前の頭、既定 res)・MITT600_SOLVERS (既定 ours,highs) で、
+# 既定を変えた後に ENOMOTO だけを測り直す回 (2026-11-04 の res2、shards2.json) にも使う
+mine = json.loads((D / os.environ.get("MITT600_SHARDS", "shards.json")).read_text())["shards"][k]
+OUT = D / f"{os.environ.get('MITT600_TAG', 'res')}_s{k}.jsonl"
+SOLVERS = os.environ.get("MITT600_SOLVERS", "ours,highs").split(",")
 done = set()
 if OUT.exists():
     for l in OUT.read_text().splitlines():
@@ -55,7 +58,7 @@ for i, p in enumerate(mine):
         with open(OUT, "a") as f:
             f.write(json.dumps({"problem": p, "solver": "fetch", "result": {"status": "fetch_error", "error": str(err)[:200]}}) + "\n")
         continue
-    order = ["ours", "highs"] if i % 2 == 0 else ["highs", "ours"]
+    order = [x for x in (["ours", "highs"] if i % 2 == 0 else ["highs", "ours"]) if x in SOLVERS]
     for s in order:
         if (p, s) in done: continue
         res, peak, wall = run(s, mps)
