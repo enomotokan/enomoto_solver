@@ -188,6 +188,11 @@ pub fn resolve_inequality_singletons_int(n: usize, a: &FaerCsr, real_rows: &[Vec
         if is_int.is_some_and(|m| m[j]) || !side.is_finite() || !residual.is_finite() {
             continue;
         }
+        // 下側が上側を超える (逆転した) 範囲制約の組はそれだけで実行不能。等式化すると反対側を
+        // 冗長として捨ててしまい実行不能が消えるので、等式化しない (判定は伝播かソルバーに任せる)。
+        if lower > upper + tol(upper) {
+            continue;
+        }
         // 上側なら a x_j <= S - r_lo、下側なら a x_j >= S - r_hi から得られる x_j の含意値。
         let implied = (side_rhs - residual) / aj;
         let implies_target = if d > 0.0 { implied <= target + tol(target) } else { implied >= target - tol(target) };
@@ -244,6 +249,15 @@ mod tests {
         // x1 = 1, and the row only implies x0 <= 2.5 > 2 — no reduction.
         let r = resolve_inequality_singletons(2, &empty_a(2), &[vec![(0, 1.0), (1, 1.0)]], &[2.5], &[-1.0, 0.0], &[0.0, 0.0], &[2.0, 1.0]);
         assert!(r.fixes.is_empty() && r.implied_equalities.is_empty());
+    }
+
+    #[test]
+    fn inverted_ranged_pair_is_not_made_an_equality() {
+        // min x1, 2 <= -x1 + 2*x0 <= 0 (下側 > 上側で実行不能), x1 >= 0, x0 in [0,3]:
+        // 等式化すると下側の行が捨てられて実行不能が消えるので、何もしない。
+        let rows = vec![vec![(0, 2.0), (1, -1.0)], vec![(0, -2.0), (1, 1.0)]];
+        let r = resolve_inequality_singletons(2, &empty_a(2), &rows, &[0.0, -2.0], &[0.0, 2.0], &[0.0, 0.0], &[3.0, f64::INFINITY]);
+        assert!(r.implied_equalities.is_empty(), "{:?}", r.implied_equalities);
     }
 
     #[test]
