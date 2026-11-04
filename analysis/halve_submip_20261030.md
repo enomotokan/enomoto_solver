@@ -616,3 +616,9 @@ ENOMOTO の既定は今回の計測の 7〜9 回分。
   - qiu (親の環境、6 回): 6/6・27.8 / 53.2 / 28.6 / 25.5 / 27.3 / 28.1 (中央値 28.0。直し前の def は 3/6・59.2、nomargin 6/6・25.1)。
   - `cargo test --release --lib` 333 件通過 (`fix_tiny_width_columns_fixes_within_tolerance` は、ae1497cc で既定を変えたときに以前の余裕を
     前提にしたまま落ちていたので、サブ MIP の扱いで確かめる形に直した)。
+
+- **訂正 (2026-11-04、`analysis/qiu_margin_20261104.md`)**: 既定 `m` はサブ MIP の前処理で以前の余裕になっていなかった (既定の `ENOMOTO_MIP_SUBMIP_HIGHS` の `p` で
+  サブ MIP の前処理に `submip = false` が渡る)。86f8b130 の後の qiu 6/6 は運で、同じ機械の既定は 4/6。qiu の遅れの仕組みは「サブ MIP の余裕が根の RENS の
+  時間を変え、解発見スレッドを止める時刻との競争で木の始めの暫定解が −115.25 か −27.65 に分かれる」で、余裕が LP を締めるのではない。
+  サブ MIP を本当に以前の余裕にする形 (`ENOMOTO_MIP_QIU_MARGIN_DEPTH=1`) は uccase12 の誤った暫定解を戻すので使わない。直すのは解発見スレッドの止め方
+  (試作 `ENOMOTO_MIP_QIU_FIND_STOP_GAP=1`、qiu 6/6・21.7 秒、uccase12 も正しい)。
