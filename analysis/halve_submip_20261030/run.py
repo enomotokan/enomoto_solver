@@ -105,6 +105,8 @@ CFGS = {
     "memall": {"ENOMOTO_MIP_MEM1_SIBLU": "1", "ENOMOTO_MIP_MEM1_SIBLU_ROWS": "1000", "ENOMOTO_MIP_MEM2": "p", "ENOMOTO_MIP_MEM3_TINY_MARGIN": "1"},
     # メモリの試作の既定化 (2026-11-04、analysis/mem_default_20261104.md) の後は "def" が memall と FZ3_REPAIR_BOUND を含む。それより前の既定は "prememall"
     "prememall": {"ENOMOTO_MIP_MEM1_SIBLU": "0", "ENOMOTO_MIP_MEM2": "0", "ENOMOTO_MIP_MEM3_TINY_MARGIN": "0", "ENOMOTO_MIP_FZ3_REPAIR_BOUND": "0"},
+    # RSS を見て開いたノードの持ち物を捨てる試作 (2026-11-04、analysis/memcap_a_20261104.md)
+    "memcap": {"ENOMOTO_MIP_MEMCAP": "1"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }

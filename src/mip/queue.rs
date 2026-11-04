@@ -385,6 +385,40 @@ impl NodeQueue {
         freed
     }
 
+    /// `ENOMOTO_MIP_MEMCAP` (試作): 持ち物を数でなく割合で減らす。`basis` でなければ DSE 重みを持つノード、`basis` なら DSE 重みか
+    /// 基底を持つノードのうち、深いもの (同じ深さなら下界の大きいもの) から `frac` の割合 (切り上げ) の持ち物を捨てる。`keep` の
+    /// (枠, 世代) (潜りの兄弟) は捨てない。(持ち物を捨てたノードの数, 捨てる前に対象だったノードの数) を返す。
+    pub fn strip_frac(&mut self, frac: f64, basis: bool, keep: &[(usize, u64)]) -> (usize, usize) {
+        let mut ids: Vec<(usize, usize, f64)> = Vec::new();
+        for (id, n) in self.nodes.iter().enumerate() {
+            if let Some(n) = n {
+                if (n.dse.is_some() || (basis && n.basis.is_some())) && !keep.iter().any(|&(k, g)| k == id && self.gen[id] == g) {
+                    ids.push((id, n.depth, n.lower_bound));
+                }
+            }
+        }
+        let total = ids.len();
+        let want = ((total as f64 * frac).ceil() as usize).min(total);
+        if want < total {
+            ids.select_nth_unstable_by(want, |a, b| b.1.cmp(&a.1).then(b.2.total_cmp(&a.2)));
+        }
+        let mut prs = Vec::new();
+        for &(id, _, _) in &ids[..want] {
+            let n = self.nodes[id].as_mut().unwrap();
+            n.dse = None;
+            if basis {
+                n.basis = None;
+                if let Some(pr) = n.prot.take() {
+                    prs.push(pr);
+                }
+            }
+        }
+        for pr in prs {
+            self.unprotect(&pr);
+        }
+        (want, total)
+    }
+
     fn unprotect(&mut self, pr: &[u64]) {
         for c in pr {
             if let Some(k) = self.protect.get_mut(*c as usize) {

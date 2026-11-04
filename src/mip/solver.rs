@@ -584,6 +584,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_MEM2` の `s`: 共有の待ち行列に出した基底・DSE 重みを、同じ親の兄弟で共有するための覚え (親の基底の `Rc` の番地と
     /// 生きているかの確かめ、渡した写し)。
     mem2_share: Vec<(usize, std::rc::Weak<super::lp::Basis>, std::sync::Arc<(Vec<VarStatus>, Vec<VarStatus>)>, Option<std::sync::Arc<NodeDse>>)>,
+    /// `ENOMOTO_MIP_MEMCAP` (試作): 最後に捨てる処理をした RSS の読みの回 ([`MEMCAP_SEQ`])。
+    memcap_seen: u64,
+    /// `ENOMOTO_MIP_MEMCAP` の記録: [捨てる処理の回数, 自分の待ち行列で DSE 重みを捨てたノード, 基底を捨てたノード, 共有の待ち行列で DSE, 基底, 兄弟の LU を捨てた数]。
+    memcap_stats: [u64; 6],
     /// 直前に戻した基底に、保存した DSE 重みも当てはめたか (次の LP で引き継ぐ)。
     restored_dse: bool,
     node_lps: u64,
@@ -1581,6 +1585,133 @@ pub(super) fn mem2_budget() -> usize {
     })
 }
 
+/// `ENOMOTO_MIP_MEMCAP` (試作、既定では使わない。analysis/memcap_a_20261104.md): 自分のプロセスの RSS (`/proc/self/statm`) を
+/// 見張りのスレッドが `ENOMOTO_T_MIP_MEMCAP_SECS` (既定 0.5) 秒ごとに読み、使えるメモリ ([`memcap_limit`]) に対する割合で段階
+/// ([`MEMCAP_LEVEL`]) を決める。全スレッドがこの 1 つの段階を見る:
+/// - 1 (`ENOMOTO_T_MIP_MEMCAP_FRAC`、既定 0.7 を超えた): 新しいノードに DSE 重みを保存しない。読むたびに、開いたノード (各スレッドの
+///   待ち行列と共有の待ち行列) の DSE 重みを深いものから 1/4 ずつ捨て、DSE 重みが残っていなければ基底を 1/4 ずつ捨てる。
+/// - 2 (`ENOMOTO_T_MIP_MEMCAP_FRAC2`、既定 0.8): 新しいノードに基底も保存しない。開いたノードの DSE 重み・基底を全部捨て、潜りの
+///   兄弟の LU を持たず、深さ優先に寄せる (`ENOMOTO_MIP_MEM2` の `d` と同じ)。
+/// - 3 (`ENOMOTO_T_MIP_MEMCAP_FRAC3`、既定 0.9): 求解を止める (時間切れとして暫定解を返す。[`Solver::time_up`])。
+pub(super) fn memcap() -> bool {
+    env_str!("ENOMOTO_MIP_MEMCAP").is_some_and(|v| v != "0")
+}
+
+/// `ENOMOTO_MIP_MEMCAP` の今の段階 (0〜3)。見張りのスレッドが書く。
+pub(super) static MEMCAP_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// `ENOMOTO_MIP_MEMCAP` の RSS を読んだ回数 (各スレッドは、増えたときだけ捨てる処理をする)。
+static MEMCAP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// `ENOMOTO_MIP_MEMCAP` の、共有の待ち行列を最後に減らした回 ([`MEMCAP_SEQ`] の値。1 回の読みで 1 スレッドだけが減らす)。
+static MEMCAP_POOL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// `ENOMOTO_MIP_MEMCAP` の記録: [最大 RSS [バイト], 段階 1 以上で読んだ回数, 段階 2 以上, 段階 3, 初めて段階 1・2・3 になった時刻 [ms] × 3]。
+static MEMCAP_STATS: [std::sync::atomic::AtomicU64; 7] = [const { std::sync::atomic::AtomicU64::new(0) }; 7];
+
+/// 自分のプロセスの RSS [バイト] (`/proc/self/statm` の 2 つ目 × ページの大きさ 4096)。
+fn rss_bytes() -> Option<u64> {
+    let t = std::fs::read_to_string("/proc/self/statm").ok()?;
+    t.split_whitespace().nth(1)?.parse::<u64>().ok().map(|p| p * 4096)
+}
+
+/// 自分の属する cgroup の (メモリの上限, 使用量) [バイト] (v1 は /proc/self/cgroup の memory の階層と、その親の上限の最小。v2 は memory.max)。
+fn cgroup_mem() -> Option<(f64, f64)> {
+    let read = |p: &str| std::fs::read_to_string(p).ok().and_then(|t| t.trim().parse::<f64>().ok());
+    let cg = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    for l in cg.lines() {
+        let mut it = l.splitn(3, ':');
+        let (_, ctl, path) = (it.next()?, it.next()?, it.next()?);
+        if ctl.split(',').any(|c| c == "memory") {
+            // v1: 階層を上へたどって上限の最小を取る
+            let mut p = std::path::PathBuf::from(format!("/sys/fs/cgroup/memory{}", path));
+            let usage = read(&format!("{}/memory.usage_in_bytes", p.display()));
+            let mut lim = f64::INFINITY;
+            loop {
+                if let Some(x) = read(&format!("{}/memory.limit_in_bytes", p.display())) {
+                    lim = lim.min(x);
+                }
+                if p.as_os_str() == "/sys/fs/cgroup/memory" || !p.pop() {
+                    break;
+                }
+            }
+            if lim.is_finite() && lim < 1e18 {
+                return Some((lim, usage.unwrap_or(0.0)));
+            }
+        } else if ctl.is_empty() {
+            let base = format!("/sys/fs/cgroup{}", path);
+            if let (Some(mx), cur) = (read(&format!("{}/memory.max", base)), read(&format!("{}/memory.current", base))) {
+                return Some((mx, cur.unwrap_or(0.0)));
+            }
+        }
+    }
+    None
+}
+
+/// `ENOMOTO_MIP_MEMCAP` の使えるメモリ [バイト]: `ENOMOTO_T_MIP_MEMCAP_MB` (> 0) があればその値、なければ最初に呼んだときの
+/// (cgroup の上限 − 使用量 と MemAvailable の小さい方) + 自分の RSS (自分の今の持ち物も使える分に数える)。
+pub(super) fn memcap_limit() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        let mb = tunable!("ENOMOTO_T_MIP_MEMCAP_MB", 0.0, f64);
+        if mb > 0.0 {
+            return (mb * 1048576.0) as u64;
+        }
+        let avail = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|t| t.lines().find(|l| l.starts_with("MemAvailable:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<f64>().ok()))
+            .map(|kb| kb * 1024.0);
+        let cg = cgroup_mem().map(|(mx, cur)| mx - cur);
+        let a = match (cg, avail) {
+            (Some(c), Some(v)) => c.min(v),
+            (Some(c), None) => c,
+            (None, Some(v)) => v,
+            (None, None) => 4.0 * 1073741824.0,
+        };
+        (a.max(256.0 * 1048576.0) + rss_bytes().unwrap_or(0) as f64) as u64
+    })
+}
+
+/// `ENOMOTO_MIP_MEMCAP` の見張りのスレッドを (まだなら) 立てる。プロセスが終わるまで回る。
+pub(super) fn memcap_start() {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    STARTED.get_or_init(|| {
+        let limit = memcap_limit() as f64;
+        let fr = [
+            tunable!("ENOMOTO_T_MIP_MEMCAP_FRAC", 0.7, f64),
+            tunable!("ENOMOTO_T_MIP_MEMCAP_FRAC2", 0.8, f64),
+            tunable!("ENOMOTO_T_MIP_MEMCAP_FRAC3", 0.9, f64),
+        ];
+        let secs = tunable!("ENOMOTO_T_MIP_MEMCAP_SECS", 0.5, f64).max(0.01);
+        let t0 = Instant::now();
+        let _ = std::thread::Builder::new().name("memcap".into()).spawn(move || {
+            use std::sync::atomic::Ordering;
+            loop {
+                if let Some(rss) = rss_bytes() {
+                    let r = rss as f64 / limit;
+                    let lv = fr.iter().filter(|&&f| r > f).count() as u8;
+                    MEMCAP_LEVEL.store(lv, Ordering::Relaxed);
+                    MEMCAP_STATS[0].fetch_max(rss, Ordering::Relaxed);
+                    for k in 1..=lv as usize {
+                        MEMCAP_STATS[k].fetch_add(1, Ordering::Relaxed);
+                        if MEMCAP_STATS[3 + k].load(Ordering::Relaxed) == 0 {
+                            MEMCAP_STATS[3 + k].store(t0.elapsed().as_millis().max(1) as u64, Ordering::Relaxed);
+                        }
+                    }
+                    MEMCAP_SEQ.fetch_add(1, Ordering::Relaxed);
+                }
+                std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+            }
+        });
+    });
+}
+
+/// `ENOMOTO_MIP_MEMCAP` の今の段階 (使わないなら 0)。
+pub(super) fn memcap_level() -> u8 {
+    if memcap() {
+        MEMCAP_LEVEL.load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
 /// `ENOMOTO_MIP_MEM2` (試作): 共有の待ち行列のノード 1 つの持ち物の大きさの目安 [バイト] (`Arc` で共有しているものは共有の数で割る)。
 fn snap_bytes(n: &SnapNode) -> usize {
     let mut b = std::mem::size_of::<SnapNode>() + n.changes.capacity() * std::mem::size_of::<BoundChange>();
@@ -1774,6 +1905,32 @@ impl PoolNodes {
             n.mem = m;
         }
         freed
+    }
+    /// `ENOMOTO_MIP_MEMCAP` (試作): [`super::queue::NodeQueue::strip_frac`] と同じく、深いノードから `frac` の割合の持ち物を捨てる。
+    fn strip_frac(&mut self, frac: f64, basis: bool) -> (usize, usize) {
+        let mut ids: Vec<(usize, usize, f64)> = self
+            .v
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| n.as_ref().filter(|n| n.dse.is_some() || (basis && n.basis.is_some())).map(|n| (i, n.depth, n.lower_bound)))
+            .collect();
+        let total = ids.len();
+        let want = ((total as f64 * frac).ceil() as usize).min(total);
+        if want < total {
+            ids.select_nth_unstable_by(want, |a, b| b.1.cmp(&a.1).then(b.2.total_cmp(&a.2)));
+        }
+        for &(i, _, _) in &ids[..want] {
+            let n = self.v[i].as_mut().unwrap();
+            n.dse = None;
+            if basis {
+                n.basis = None;
+                n.cut_basis = None;
+            }
+            let m = snap_bytes(n);
+            self.bytes = self.bytes.saturating_sub(n.mem.saturating_sub(m));
+            n.mem = m.min(n.mem);
+        }
+        (want, total)
     }
     fn len(&self) -> usize {
         self.by_lb.len()
@@ -3174,6 +3331,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         mem2_press: false,
         mem2_stats: [0; 7],
         mem2_share: Vec::new(),
+        memcap_seen: 0,
+        memcap_stats: [0; 6],
         restored_dse: false,
         node_lps: 0,
         node_lp_secs: 0.0,
@@ -3764,6 +3923,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             || (self.incumbent.is_none() && self.root_submip.as_ref().is_some_and(|c| c.nosol_deadline.is_some_and(|d| Instant::now() >= d)))
             || self.root_submip.as_ref().is_some_and(|c| c.abort.load(std::sync::atomic::Ordering::Relaxed))
             || self.sublb_reached()
+            || memcap_level() >= 3
             || (self.snap.is_some() && FIND_STOP.with(|f| f.borrow().as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))))
             || self.pool.as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed))
             || ROLE_POOL.with(|r| r.borrow().as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed) || p.fin.load(std::sync::atomic::Ordering::Relaxed)))
@@ -6686,6 +6846,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if mem2('b') && !self.params.submip {
                 self.mem2_check();
             }
+            // `ENOMOTO_MIP_MEMCAP` (試作): RSS が使えるメモリの割合を超えていれば、開いたノードの持ち物を捨てる
+            if memcap() && !self.params.submip {
+                self.memcap_check();
+            }
             // ヒューリスティクス役 (`ENOMOTO_MIP_HEUR_ROLE`): 番号の大きい従は、解ができたら木を離れて大近傍探索を回し続ける
             if plunge.is_none() && !first && self.heur_role_mine() {
                 match self.heur_role_run() {
@@ -6772,13 +6936,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // (neos-911970: 14000 ノード中、待ち行列からの取り出しは 70 回)
                 // `ENOMOTO_MIP_MEM2` の `d` (試作): 持ち物が上限の 1/2 を超えていたら、潜りのノード数の上限を外す (深さ優先に寄せる)
                 && (self.nodes - plunge_start < if self.highs_cutmgmt() { tunable!("ENOMOTO_T_MIP_HCM_PLUNGE_NODES", 100u64, u64) } else { (self.nodes / tunable!("ENOMOTO_T_MIP_PLUNGE_NODES_DIV", 10u64, u64)).min(1000) }
-                    || (self.mem2_press && mem2('d')))
+                    || (self.mem2_press && mem2('d'))
+                    || memcap_level() >= 2)
             {
                 let cutoff = self.prune_limit();
                 let glb = self.queue.best_lower_bound();
                 let limit = if cutoff.is_finite() { glb + tunable!("ENOMOTO_T_MIP_SIBLING_QUOT", 0.25, f64) * (cutoff - glb) } else { f64::INFINITY };
                 // `ENOMOTO_MIP_MEM2` の `d`: 兄弟へ戻る下界の条件も外す (打ち切り値未満なら戻る)
-                let limit = if self.mem2_press && mem2('d') { f64::INFINITY } else { limit };
+                let limit = if (self.mem2_press && mem2('d')) || memcap_level() >= 2 { f64::INFINITY } else { limit };
                 let mut got = None;
                 while let Some((id, gen, lu)) = self.dive_stack.pop() {
                     if let Some(n) = self.queue.take(id, gen, limit.min(cutoff)) {
@@ -7982,6 +8147,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let basis_epoch = self.row_log.len();
             // `ENOMOTO_MIP_MEM2` の `b` (試作): 開いたノードの持ち物が上限に近ければ、DSE 重み・基底を保存しない
             let (keep_dse, keep_basis) = if mem2('b') { self.mem2_keep } else { (true, true) };
+            // `ENOMOTO_MIP_MEMCAP` (試作): 段階 1 から DSE 重みを、段階 2 から基底も保存しない
+            let mcl = memcap_level();
+            let (keep_dse, keep_basis) = (keep_dse && mcl < 1, keep_basis && mcl < 2);
             self.mem2_stats[5] += !keep_dse as u64;
             self.mem2_stats[6] += !keep_basis as u64;
             // `ENOMOTO_MIP_NODE_DSE`: 基底と一緒に DSE 重みも保存し、取り出したノードの最初の LP で使う
@@ -8025,7 +8193,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let sib = self.queue.push(sec);
             // 兄弟へ戻ったときのために親の LP の LU を一緒に持つ (共有なので写さない)
-            let sib_lu = if env_str!("ENOMOTO_MIP_NO_SIBLING_LU").is_none() { self.lp.lu_snapshot() } else { None };
+            // `ENOMOTO_MIP_MEMCAP` の段階 2 からは持たない
+            let sib_lu = if env_str!("ENOMOTO_MIP_NO_SIBLING_LU").is_none() && mcl < 2 { self.lp.lu_snapshot() } else { None };
             // `ENOMOTO_MIP_MEM1_SIBLU=K` (既定 1): LU を持つのは新しい方から K 個の兄弟だけにする
             // `ENOMOTO_MIP_MEM1_SIBLU_ROWS=R` (既定 1000): LP の行が R 以上のときだけ間引く (小さい LP の LU は安く、古い兄弟へも戻る)
             if let Some(k) = mem1_siblu_keep().filter(|_| self.lp.num_rows() >= tunable!("ENOMOTO_MIP_MEM1_SIBLU_ROWS", 1000usize, usize)) {
@@ -14265,6 +14434,49 @@ impl<'a, L: MipLp> Solver<'a, L> {
         s
     }
 
+    /// `ENOMOTO_MIP_MEMCAP` (試作、[`memcap`]): 見張りのスレッドが RSS を新しく読んでいて段階が 1 以上なら、自分の待ち行列と
+    /// (1 回の読みで 1 スレッドだけ) 共有の待ち行列の持ち物を捨てる。段階 1 は DSE 重みを深いノードから 1/4 (残っていなければ基底を 1/4)、
+    /// 段階 2 は全部と潜りの兄弟の LU。
+    fn memcap_check(&mut self) {
+        use std::sync::atomic::Ordering;
+        memcap_start();
+        let seq = MEMCAP_SEQ.load(Ordering::Relaxed);
+        if seq == self.memcap_seen {
+            return;
+        }
+        self.memcap_seen = seq;
+        let lv = MEMCAP_LEVEL.load(Ordering::Relaxed);
+        if lv == 0 {
+            return;
+        }
+        self.memcap_stats[0] += 1;
+        let frac = if lv >= 2 { 1.0 } else { tunable!("ENOMOTO_T_MIP_MEMCAP_STRIP", 0.25, f64) };
+        let keep: Vec<(usize, u64)> = self.dive_stack.iter().map(|&(id, gen, _)| (id, gen)).collect();
+        let (f, tot) = self.queue.strip_frac(frac, false, &keep);
+        self.memcap_stats[1] += f as u64;
+        if tot == 0 || lv >= 2 {
+            let (f, _) = self.queue.strip_frac(frac, true, &keep);
+            self.memcap_stats[2] += f as u64;
+        }
+        if lv >= 2 {
+            for e in self.dive_stack.iter_mut() {
+                self.memcap_stats[5] += e.2.take().is_some() as u64;
+            }
+        }
+        if let Some(p) = self.pool.clone() {
+            let last = MEMCAP_POOL_SEQ.load(Ordering::Relaxed);
+            if last != seq && MEMCAP_POOL_SEQ.compare_exchange(last, seq, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                let mut g = p.inner.lock().unwrap();
+                let (f, tot) = g.nodes.strip_frac(frac, false);
+                self.memcap_stats[3] += f as u64;
+                if tot == 0 || lv >= 2 {
+                    let (f, _) = g.nodes.strip_frac(frac, true);
+                    self.memcap_stats[4] += f as u64;
+                }
+            }
+        }
+    }
+
     /// `ENOMOTO_MIP_MEM2` の `b` (試作): 開いたノードの持ち物の合計の目安 (自分の待ち行列 + ほかのスレッドが知らせた分 + 共有の待ち行列) を
     /// 数え、上限 ([`mem2_budget`]) の 0.9 倍を超えたら、自分の待ち行列と共有の待ち行列から合計の 0.7 倍まで (自分の分の割合で) 深い
     /// ノードの DSE 重みを、足りなければ基底を捨てる。合計が上限の 0.5 倍を超えたら新しいノードに DSE 重みを、0.9 倍を超えたら (捨てた後で)
@@ -14772,6 +14984,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.pool_fix_stats.0 + self.pool_fix_stats.3 > 0 && (crate::simplex::nb_diag::on() || prof_tree_par()) {
             let f = self.pool_fix_stats;
             eprintln!("POOL_BASIS_FIX: tid {} fixed {} dropped {} slacks {} gave_up {} secs {:.3}", self.pool_tid, f.0, f.1, f.2, f.3, f.4);
+        }
+        if memcap() && !self.params.submip {
+            use std::sync::atomic::Ordering;
+            let g: Vec<u64> = MEMCAP_STATS.iter().map(|x| x.load(Ordering::Relaxed)).collect();
+            let m = self.memcap_stats;
+            eprintln!(
+                "MIP: MEMCAP: tid {} limit {:.0} MB peak rss {:.0} MB level-reads {}/{}/{} first-at {:.1}/{:.1}/{:.1} s; strips {} local dse {} basis {} pool dse {} basis {} siblu {}",
+                self.pool_tid,
+                memcap_limit() as f64 / 1048576.0,
+                g[0] as f64 / 1048576.0,
+                g[1],
+                g[2],
+                g[3],
+                g[4] as f64 / 1e3,
+                g[5] as f64 / 1e3,
+                g[6] as f64 / 1e3,
+                m[0],
+                m[1],
+                m[2],
+                m[3],
+                m[4],
+                m[5]
+            );
         }
         if mem2('b') && self.params.verbose && !self.params.submip {
             let m = self.mem2_stats;
