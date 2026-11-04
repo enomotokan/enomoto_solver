@@ -1,0 +1,469 @@
+MIP: presolve: rows 3707 -> 2387, free columns 34219 -> 32899, nonzeros 104792 -> 101452, postsolve steps 592 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 0 of 32899 free columns fixed (0.00s), not used
+MIP: LP probing pass 1: 268 candidates, 0 fixings (16 LPs, 269 iters, 0.36s)
+MIP: LP probing: tried 8 columns, fixed 0, LP 1.3706916764e2 -> 1.3706916764e2 (16 LPs, 269 iters, 0.36s)
+MIP: LP probing: root LP 0.17s (2507 iters, size 138058), tried 8, fixed 0, basis passed true, total 2776 iters 0.36s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.12s), not used
+MIP: probing: 32640 of 32640 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 803436 implications (0.36s, cpu 0.36s, work 4605088, pwork 473694472, chg 3514464)
+MIP: probing: 0 equivalent binary pairs
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (401718 edges, 0.06s)
+MIP: symmetry: twins as orbitopes: 94 classes (491 columns)
+MIP: symmetry: twins 0 classes (0.006s): merged 0 classes (0 columns), 0 classes left to the symmetry handling (0 swaps as generators)
+MIP: symmetry: orbital fixing with 0 of 18 generators
+MIP: symmetry: 97 full orbitopes (18x2, 14x3, 11x16, 1x6, 1x2, 1x2, 1x2, 1x12, 1x12, 1x4, 1x3, 1x3, 1x4, 1x4, 1x2, 1x26, 1x4, 1x6, 1x8, 1x7, 1x6, 1x7, 1x6, 1x6, 1x6, 1x2, 1x2, 1x2, 1x2, 1x2, 1x2, 1x2, 1x2, 1x18, 1x4, 1x35, 1x4, 1x4, 1x15, 1x7, 1x19, 1x3, 1x2, 1x3, 1x3, 1x2, 1x5, 1x3, 1x3, 1x2, 1x3, 1x2, 1x4, 1x3, 1x2, 1x4, 1x2, 1x11, 1x17, 1x6, 1x6, 1x2, 1x21, 1x4, 1x14, 1x4, 1x2, 1x3, 1x3, 1x3, 1x3, 1x4, 1x6, 1x4, 1x4, 1x2, 1x2, 1x2, 1x2, 1x2, 1x2, 1x2, 1x4, 1x3, 1x3, 1x5, 1x3, 1x4, 1x4, 1x3, 1x4, 1x4, 1x4, 1x4, 1x4, 1x2, 1x3)
+MIP: symmetry: 18 generators, 43 orbits on 254 columns, 0 lex-leader rows (0.37s, work 25123262, search 1231884, verify 4970088, detect 0.37s, refine 0.23s, log work 99025550)
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP: root LP basis from the presolve LP probing: used (with rows)
+MIP: solving the root LP (0.03s)
+MIP: root LP 1.3706916764e2 (31 iters, 0.06s)
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP: robust cut LP cap: size false, double false, progress true
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MCF detect: rows 2387 cols 34219 | flow cands 2127 flow rows 216 commodities 1 cap cands 263 arcs 87 nodes 216 incons 1.75 undirected | fail 'inconsistent' | networks [] fc_network false | 0.003s
+MIP: FJ problem (FJ_P3): rows 2387 -> 2387, free columns 32899 -> 32899, 0 continuous bounds tightened (0.39s)
+MIP: cut selection probe: compared at 2 rounds (pool stopped early), probe wall 0.85s (budget 29.9s)
+MIP: cut selection probe (6 rounds): default 40 cuts gain 9.308324e-1 (0.28s), pool 64 cuts gain 9.308324e-1 (0.30s) -> default (rule rate, probe 0.57s in total, 0.91s)
+MIP: cut round 0: 20 cuts (of 649, sep 0.11s, LP 85 iters), LP rows 2407 (cut rows mean nnz 14), obj 1.3800000000e2 (1.04s)
+MIP: cut round 1: root cut time cap check: clock 0.087s of cap 59.88s (min rounds 0)
+MIP: cut round 1: 20 cuts (of 645, sep 0.14s, LP 71 iters), LP rows 2427 (cut rows mean nnz 32), obj 1.3800000000e2 (1.20s)
+MIP: cut round 2: root cut time cap check: clock 0.186s of cap 59.88s (min rounds 0)
+MIP: cut round 2: 7 cuts (of 200, sep 0.12s, LP 42 iters), LP rows 2432 (cut rows mean nnz 30), obj 1.3800000000e2 (1.34s)
+MIP: fixed-integer LP dual check: c x 3.1100000000e2, dual bound 1.3800000000e2 -> solve
+MIP:   global fixed integers 1320 of 34218 (newly 0 since the root LP)
+MIP: new incumbent 3.1100000000e2 at node 0 (1.38s) [Local-MIP]
+MIP: Local-MIP solution accepted true (1.38s)
+MIP: cut round 3: root cut time cap check: clock 0.304s of cap 59.88s (min rounds 0)
+MIP: cut round 3: 8 cuts (of 158, sep 0.15s, LP 26 iters), LP rows 2437 (cut rows mean nnz 28), obj 1.3800000000e2 (1.55s)
+MIP: cut round 4: root cut time cap check: clock 0.391s of cap 59.88s (min rounds 0)
+MIP: cut round 4: 6 cuts (of 149, sep 0.14s, LP 27 iters), LP rows 2442 (cut rows mean nnz 25), obj 1.3800000000e2 (1.72s)
+MIP: cut round 5: root cut time cap check: clock 0.492s of cap 59.88s (min rounds 0)
+MIP: cut round 5: 3 cuts (of 106, sep 0.15s, LP 19 iters), LP rows 2442 (cut rows mean nnz 25), obj 1.3800000000e2 (1.89s)
+MIP: clique graph: 401718 edges (401718 from rows, probing implications 803436)
+MIP: clique fallback: no violated clique cuts; not used (0.11s)
+MIP: cut loop done: 64 cuts added, 54 in LP, pool 678 cuts (1043460 nonzeros), obj 1.3706916764e2 -> 1.3800000000e2
+MIP: find thread started (budget 20.0s, 2.06s)
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1000, work_iters: 20000, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 31 iters)
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP: the incumbent is a poor feasibility jump solution; background cuts use 1 threads
+MIP: background cuts: basis with the column values not passed (root LP 0.03s)
+MIP: early root reduced costs stored (0 newly fixed integer columns, 2.10s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+MIP: root heuristic shifting: none (0.00s)
+MIP: root heuristic int shifting: none (0.00s)
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP: root heuristic randomized rounding: none (0.03s)
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MCF detect: rows 2387 cols 34219 | flow cands 2127 flow rows 216 commodities 1 cap cands 263 arcs 87 nodes 216 incons 1.75 undirected | fail 'inconsistent' | networks [] fc_network false | 0.003s
+MIP:   interior rounding: 1 interior points, vertex true (0.80s)
+MIP: fixed-integer LP dual check: c x 1.7500000000e2, dual bound 1.7500000000e2 -> skip
+MIP:   global fixed integers 1320 of 34218 (newly 0 since the root LP)
+MIP: new incumbent 1.7500000000e2 at node 0 (3.12s) [interior rounding]
+MIP:   interior rounding: 6 rounded points tried, found true
+MIP: root heuristic interior rounding: found (0.99s)
+MIP: find thread asked to stop (incumbent Some(175.00000000000003), 3.12s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 0 of 32898 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   parallel sub-MIP started (RENS): 334 free columns of 34219
+MIP: root heuristic RENS: none (0.01s)
+MIP:   locks: fixing rate 0.65
+MIP:   parallel sub-MIP started (locks): 11506 free columns of 34219
+MIP: root heuristic locks: none (0.04s)
+MIP: fixed-integer LP dual check: c x 1.4900000000e2, dual bound 1.3800000000e2 -> solve
+MIP:   global fixed integers 1320 of 34218 (newly 0 since the root LP)
+MIP: new incumbent 1.4900000000e2 at node 0 (3.20s) [find thread]
+MIP: find thread solution: accepted true (incumbent Some(175.00000000000003)) (3.20s, node 0)
+MIP: find thread done: objective Some(149.0), accepted false (incumbent Some(149.0)) (3.20s, node 0)
+MIP:   clique: fixing rate 0.97
+MIP:   parallel sub-MIP started (clique): 851 free columns of 34219
+MIP: root heuristic clique: none (0.02s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   parallel sub-MIP (RENS): status Infeasible, nodes 0, objective None, 0.09s
+MIP: fixed-charge check: vb rows 0 of 308, continuous with vb 0 of 1
+MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.12s
+MIP:   parallel sub-MIP (clique): status NodeLimit, nodes 125, objective Some(146.9999999999996), 1.52s
+MIP: fixed-integer LP dual check: c x 1.4700000000e2, dual bound 1.3800000000e2 -> solve
+MIP:   global fixed integers 1320 of 34218 (newly 0 since the root LP)
+MIP: new incumbent 1.4700000000e2 at node 0 (4.78s) [clique]
+MIP:   RINS (HiGHS fill): fixing rate 0.98 from agreeing columns, 0.98 after fill (32898 free integer columns)
+MIP: fixed-charge check: vb rows 0 of 324, continuous with vb 0 of 1
+MIP: fixed-charge check: vb rows 0 of 124, continuous with vb 0 of 1
+MIP:   sub-MIP: 514 free columns of 34219, status NodeLimit, nodes 70, objective Some(144.0), 2.37s
+MIP: fixed-integer LP dual check: c x 1.4400000000e2, dual bound 1.3800000000e2 -> solve
+MIP:   global fixed integers 1320 of 34218 (newly 0 since the root LP)
+MIP: new incumbent 1.4400000000e2 at node 0 (7.18s) [RINS]
+MIP: root heuristic RINS: found (2.41s)
+MIP: after root heuristics: incumbent Some(144.0) (7.18s)
+MIP: background cuts: determ: waited 0.00s (safety cap 177.48s, done, background end stalled), 6 rounds, 310 LP iters (0.31 x 1000 of cap 20000), obj Some(138.0) (7.18s)
+MIP: background cuts: rounds so far [138.0 at 2.48s, 138.0 at 2.62s, 138.0 at 2.72s, 138.0 at 2.83s, 138.0 at 2.93s, 138.0 at 3.02s]
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (7.19s)
+MIP: background cuts: 6 rounds, obj 1.3800000000e2 not above 1.3800000000e2; not used (waited 0.00s)
+MIP: root objective probing: skipped (gap 4.167e-2 (LP 1.3800000000e2, incumbent 1.4400000000e2), 97 fractional binaries)
+MIP: restart check: newly fixed 0, integer columns 34218, free at the root 32898, threshold 342.2, root LP 0.03s
+MIP:     7.20s nodes        1 open       0 lb inf ub 1.44000000e2 lp_iters 447 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 5723 dive_iters 0 lp_rows 2441 node_cut_secs 0.00
+MIP: 1 of 4 tree threads take the heuristic role once a solution exists
+MIP: tree search with 4 threads (7.69s)
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP:     9.20s nodes        9 open       5 lb 1.38000000e2 ub 1.44000000e2 lp_iters 2591 sb_iters 1075 sb_lps 74 sb_secs 0.43 node_iters 43 (first 43, lps 8) heur_iters 7775 dive_iters 1026 lp_rows 2441 node_cut_secs 0.00 pool_len 0 pool_idle 0
+MIP: fixed-charge check: vb rows 0 of 314, continuous with vb 0 of 1
+MIP: fixed-charge check: vb rows 0 of 106, continuous with vb 0 of 1
+MIP:   sub-MIP: 437 free columns of 34219, status TimeLimit, nodes 37, objective Some(1451.0), 1.26s
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP:    11.81s nodes      203 open     199 lb 1.38000000e2 ub 1.44000000e2 lp_iters 3318 sb_iters 1075 sb_lps 74 sb_secs 0.46 node_iters 770 (first 672, lps 205) heur_iters 10974 dive_iters 1026 lp_rows 2465 node_cut_secs 0.05 pool_len 0 pool_idle 0
+TREER: t 12.1 nodes 1117 q 0.0000 (last 0.0000 at 1001) est 116000001001 r 1.000 gap_red 1.0000 huge 1 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 12.3 nodes 1219 q 0.0000 (last 0.0000 at 1001) est 218000001001 r 1.000 gap_red 1.0000 huge 2 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 12.5 nodes 1322 q 0.0000 (last 0.0000 at 1001) est 321000001001 r 1.000 gap_red 1.0000 huge 3 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 12.7 nodes 1424 q 0.0000 (last 0.0000 at 1001) est 423000001001 r 1.000 gap_red 1.0000 huge 4 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 12.8 nodes 1525 q 0.0000 (last 0.0000 at 1001) est 524000001001 r 1.000 gap_red 1.0000 huge 5 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 13.3 nodes 1734 q 0.0000 (last 0.0000 at 1001) est 733000001001 r 1.000 gap_red 1.0000 huge 6 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 13.5 nodes 1834 q 0.0000 (last 0.0000 at 1001) est 833000001001 r 1.000 gap_red 1.0000 huge 7 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 13.6 nodes 1936 q 0.0000 (last 0.0000 at 1001) est 935000001001 r 1.000 gap_red 1.0000 huge 8 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+MIP:    13.81s nodes      496 open     490 lb 1.38000000e2 ub 1.44000000e2 lp_iters 4464 sb_iters 1075 sb_lps 74 sb_secs 0.50 node_iters 1884 (first 1715, lps 500) heur_iters 11011 dive_iters 1031 lp_rows 2479 node_cut_secs 0.23 pool_len 0 pool_idle 0
+TREER: t 13.8 nodes 2037 q 0.0000 (last 0.0000 at 1001) est 1036000001001 r 1.000 gap_red 1.0000 huge 9 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+MIP: cut pool propagation stopped after 1000 calls (tightened 0, pruned 0)
+TREER: t 14.0 nodes 2138 q 0.0000 (last 0.0000 at 1001) est 1137000001001 r 1.000 gap_red 1.0000 huge 10 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 14.2 nodes 2239 q 0.0000 (last 0.0000 at 1001) est 1238000001001 r 1.000 gap_red 1.0000 huge 11 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 14.2 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 14.4 nodes 2340 q 0.0000 (last 0.0000 at 2239) est 101000002239 r 1.000 gap_red 1.0000 huge 1 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 14.6 nodes 2452 q 0.0000 (last 0.0000 at 2239) est 213000002239 r 1.000 gap_red 1.0000 huge 2 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 14.8 nodes 2554 q 0.0000 (last 0.0000 at 2239) est 315000002239 r 1.000 gap_red 1.0000 huge 3 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 15.0 nodes 2657 q 0.0000 (last 0.0000 at 2239) est 418000002239 r 1.000 gap_red 1.0000 huge 4 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 15.2 nodes 2762 q 0.0000 (last 0.0000 at 2239) est 523000002239 r 1.000 gap_red 1.0000 huge 5 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 15.4 nodes 2863 q 0.0000 (last 0.0000 at 2239) est 624000002239 r 1.000 gap_red 1.0000 huge 6 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 15.6 nodes 2966 q 0.0000 (last 0.0000 at 2239) est 727000002239 r 1.000 gap_red 1.0000 huge 7 need 11 newly 0/32898 w 0.2188/-0.0000/0.7812
+MIP:    15.81s nodes      767 open     761 lb 1.38000000e2 ub 1.44000000e2 lp_iters 6015 sb_iters 1075 sb_lps 74 sb_secs 0.54 node_iters 3406 (first 3147, lps 774) heur_iters 11042 dive_iters 1033 lp_rows 2465 node_cut_secs 0.28 pool_len 0 pool_idle 0
+TREER: t 15.8 nodes 3069 q 0.0000 (last 0.0000 at 2239) est 830000002239 r 1.000 gap_red 1.0000 huge 8 need 12 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 16.0 nodes 3172 q 0.0000 (last 0.0000 at 2239) est 933000002239 r 1.000 gap_red 1.0000 huge 9 need 12 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 16.3 nodes 3273 q 0.0000 (last 0.0000 at 2239) est 1034000002239 r 1.000 gap_red 1.0000 huge 10 need 12 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 16.5 nodes 3376 q 0.0000 (last 0.0000 at 2239) est 1137000002239 r 1.000 gap_red 1.0000 huge 11 need 12 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 16.7 nodes 3479 q 0.0000 (last 0.0000 at 2239) est 1240000002239 r 1.000 gap_red 1.0000 huge 12 need 12 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 16.7 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 16.8 nodes 3580 q 0.0000 (last 0.0000 at 3479) est 101000003479 r 1.000 gap_red 1.0000 huge 1 need 12 newly 0/32898 w 0.2188/-0.0000/0.7812
+TREER: t 17.1 nodes 3680 q 0.0000 (last 0.0000 at 3479) est 201000003479 r 1.000 gap_red 1.0000 huge 2 need 12 newly 0/32898 w 0.2188/0.1328/0.6484
+TREER: t 17.2 nodes 3782 q 0.0000 (last 0.0000 at 3479) est 303000003479 r 1.000 gap_red 1.0000 huge 3 need 12 newly 0/32898 w 0.2188/0.1328/0.6484
+TREER: t 17.4 nodes 3882 q 0.0000 (last 0.0000 at 3479) est 403000003479 r 1.000 gap_red 1.0000 huge 4 need 12 newly 0/32898 w 0.2188/0.1328/0.6484
+TREER: t 17.7 nodes 3982 q 0.0000 (last 0.0000 at 3479) est 503000003479 r 1.000 gap_red 1.0000 huge 5 need 12 newly 0/32898 w 0.2188/0.1406/0.6406
+MIP:    17.84s nodes     1008 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 7678 sb_iters 1075 sb_lps 74 sb_secs 0.58 node_iters 5020 (first 4680, lps 1020) heur_iters 11095 dive_iters 1037 lp_rows 2483 node_cut_secs 0.50 pool_len 235 pool_idle 0
+TREER: t 17.9 nodes 4082 q 0.0000 (last 0.0000 at 3479) est 603000003479 r 1.000 gap_red 1.0000 huge 6 need 12 newly 0/32898 w 0.1992/0.1602/0.6406
+TREER: t 18.2 nodes 4184 q 0.0000 (last 0.0000 at 3479) est 705000003479 r 1.000 gap_red 1.0000 huge 7 need 12 newly 0/32898 w 0.1992/0.1602/0.6406
+TREER: t 18.4 nodes 4286 q 0.0000 (last 0.0000 at 3479) est 807000003479 r 1.000 gap_red 1.0000 huge 8 need 12 newly 0/32898 w 0.1992/0.1602/0.6406
+TREER: t 18.7 nodes 4389 q 0.0000 (last 0.0000 at 3479) est 910000003479 r 1.000 gap_red 1.0000 huge 9 need 12 newly 0/32898 w 0.1992/0.1602/0.6406
+TREER: t 19.0 nodes 4498 q 0.0000 (last 0.0000 at 3479) est 1019000003479 r 1.000 gap_red 1.0000 huge 10 need 12 newly 0/32898 w 0.1992/0.1602/0.6406
+TREER: t 19.2 nodes 4601 q 0.0000 (last 0.0000 at 3479) est 1122000003479 r 1.000 gap_red 1.0000 huge 11 need 12 newly 0/32898 w 0.1992/0.1602/0.6406
+TREER: t 19.5 nodes 4701 q 0.0000 (last 0.0000 at 3479) est 1222000003479 r 1.000 gap_red 1.0000 huge 12 need 12 newly 0/32898 w 0.1992/0.1621/0.6387
+TREER: t 19.5 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 19.9 nodes 4841 q 0.0000 (last 0.0000 at 4701) est 140000004701 r 1.000 gap_red 1.0000 huge 1 need 12 newly 0/32898 w 0.1992/0.2246/0.5762
+MIP:    19.86s nodes     1209 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 10238 sb_iters 1075 sb_lps 74 sb_secs 0.60 node_iters 7546 (first 7144, lps 1223) heur_iters 11136 dive_iters 1044 lp_rows 2465 node_cut_secs 0.60 pool_len 848 pool_idle 0
+TREER: t 20.1 nodes 4941 q 0.0000 (last 0.0000 at 4701) est 240000004701 r 1.000 gap_red 1.0000 huge 2 need 12 newly 0/32898 w 0.1992/0.2246/0.5762
+TREER: t 20.3 nodes 5043 q 0.0000 (last 0.0000 at 4701) est 342000004701 r 1.000 gap_red 1.0000 huge 3 need 13 newly 0/32898 w 0.1992/0.2246/0.5762
+TREER: t 20.5 nodes 5143 q 0.0000 (last 0.0000 at 4701) est 442000004701 r 1.000 gap_red 1.0000 huge 4 need 13 newly 0/32898 w 0.1992/0.5996/0.2012
+TREER: t 20.8 nodes 5244 q 0.0000 (last 0.0000 at 4701) est 543000004701 r 1.000 gap_red 1.0000 huge 5 need 13 newly 0/32898 w 0.1992/0.5996/0.2012
+TREER: t 21.0 nodes 5345 q 0.0000 (last 0.0000 at 4701) est 644000004701 r 1.000 gap_red 1.0000 huge 6 need 13 newly 0/32898 w 0.1992/0.5996/0.2012
+TREER: t 21.4 nodes 5445 q 0.0000 (last 0.0000 at 4701) est 744000004701 r 1.000 gap_red 1.0000 huge 7 need 13 newly 0/32898 w 0.1992/0.5996/0.2012
+TREER: t 21.8 nodes 5584 q 0.0000 (last 0.0000 at 4701) est 883000004701 r 1.000 gap_red 1.0000 huge 8 need 13 newly 0/32898 w 0.1992/0.5996/0.2012
+MIP:    21.86s nodes     1417 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 12433 sb_iters 1075 sb_lps 74 sb_secs 0.63 node_iters 9717 (first 9241, lps 1434) heur_iters 11166 dive_iters 1050 lp_rows 2481 node_cut_secs 0.69 pool_len 1594 pool_idle 0
+TREER: t 22.0 nodes 5687 q 0.0000 (last 0.0000 at 4701) est 986000004701 r 1.000 gap_red 1.0000 huge 9 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 22.2 nodes 5789 q 0.0000 (last 0.0000 at 4701) est 1088000004701 r 1.000 gap_red 1.0000 huge 10 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 22.5 nodes 5891 q 0.0000 (last 0.0000 at 4701) est 1190000004701 r 1.000 gap_red 1.0000 huge 11 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 22.7 nodes 5993 q 0.0000 (last 0.0000 at 4701) est 1292000004701 r 1.000 gap_red 1.0000 huge 12 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 23.0 nodes 6094 q 0.0000 (last 0.0000 at 4701) est 1393000004701 r 1.000 gap_red 1.0000 huge 13 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 23.0 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 23.3 nodes 6197 q 0.0000 (last 0.0000 at 6094) est 103000006094 r 1.000 gap_red 1.0000 huge 1 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 23.6 nodes 6297 q 0.0000 (last 0.0000 at 6094) est 203000006094 r 1.000 gap_red 1.0000 huge 2 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 23.8 nodes 6398 q 0.0000 (last 0.0000 at 6094) est 304000006094 r 1.000 gap_red 1.0000 huge 3 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+MIP:    24.03s nodes     1611 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 15532 sb_iters 1075 sb_lps 74 sb_secs 0.66 node_iters 12807 (first 12302, lps 1629) heur_iters 11184 dive_iters 1059 lp_rows 2464 node_cut_secs 0.80 pool_len 2443 pool_idle 0
+TREER: t 24.1 nodes 6504 q 0.0000 (last 0.0000 at 6094) est 410000006094 r 1.000 gap_red 1.0000 huge 4 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 24.3 nodes 6605 q 0.0000 (last 0.0000 at 6094) est 511000006094 r 1.000 gap_red 1.0000 huge 5 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 24.5 nodes 6706 q 0.0000 (last 0.0000 at 6094) est 612000006094 r 1.000 gap_red 1.0000 huge 6 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 24.7 nodes 6806 q 0.0000 (last 0.0000 at 6094) est 712000006094 r 1.000 gap_red 1.0000 huge 7 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 25.0 nodes 6910 q 0.0000 (last 0.0000 at 6094) est 816000006094 r 1.000 gap_red 1.0000 huge 8 need 13 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 25.2 nodes 7010 q 0.0000 (last 0.0000 at 6094) est 916000006094 r 1.000 gap_red 1.0000 huge 9 need 14 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 25.4 nodes 7111 q 0.0000 (last 0.0000 at 6094) est 1017000006094 r 1.000 gap_red 1.0000 huge 10 need 14 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 25.7 nodes 7211 q 0.0000 (last 0.0000 at 6094) est 1117000006094 r 1.000 gap_red 1.0000 huge 11 need 14 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 25.9 nodes 7323 q 0.0000 (last 0.0000 at 6094) est 1229000006094 r 1.000 gap_red 1.0000 huge 12 need 14 newly 0/32898 w 0.1367/0.6621/0.2012
+MIP:    26.03s nodes     1823 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 18048 sb_iters 1075 sb_lps 74 sb_secs 0.70 node_iters 15316 (first 14761, lps 1841) heur_iters 11198 dive_iters 1066 lp_rows 2448 node_cut_secs 0.87 pool_len 3338 pool_idle 0
+TREER: t 26.1 nodes 7424 q 0.0000 (last 0.0000 at 6094) est 1330000006094 r 1.000 gap_red 1.0000 huge 13 need 14 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 26.3 nodes 7525 q 0.0000 (last 0.0000 at 6094) est 1431000006094 r 1.000 gap_red 1.0000 huge 14 need 14 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 26.3 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 26.6 nodes 7625 q 0.0000 (last 0.0000 at 7525) est 100000007525 r 1.000 gap_red 1.0000 huge 1 need 14 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 26.9 nodes 7725 q 0.0000 (last 0.0000 at 7525) est 200000007525 r 1.000 gap_red 1.0000 huge 2 need 14 newly 0/32898 w 0.1367/0.6621/0.2012
+TREER: t 27.1 nodes 7826 q 0.0000 (last 0.0000 at 7525) est 301000007525 r 1.000 gap_red 1.0000 huge 3 need 14 newly 0/32898 w 0.1367/0.6631/0.2002
+TREER: t 27.4 nodes 7926 q 0.0000 (last 0.0000 at 7525) est 401000007525 r 1.000 gap_red 1.0000 huge 4 need 14 newly 0/32898 w 0.1367/0.6631/0.2002
+TREER: t 27.6 nodes 8027 q 0.0000 (last 0.0000 at 7525) est 502000007525 r 1.000 gap_red 1.0000 huge 5 need 14 newly 0/32898 w 0.1367/0.6631/0.2002
+MIP:   sub-MIP: 32899 free columns of 34219, status TimeLimit, nodes 0, objective None, 0.39s
+MIP:   local branching k=18: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+TREER: t 28.1 nodes 8207 q 0.0000 (last 0.0000 at 7525) est 682000007525 r 1.000 gap_red 1.0000 huge 6 need 14 newly 0/32898 w 0.1367/0.6631/0.2002
+MIP:    28.14s nodes     2014 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 20218 sb_iters 1075 sb_lps 74 sb_secs 0.72 node_iters 17486 (first 16894, lps 2034) heur_iters 11201 dive_iters 1066 lp_rows 2435 node_cut_secs 0.95 pool_len 4163 pool_idle 0
+TREER: t 28.4 nodes 8307 q 0.0000 (last 0.0000 at 7525) est 782000007525 r 1.000 gap_red 1.0000 huge 7 need 14 newly 0/32898 w 0.1367/0.6631/0.2002
+TREER: t 28.7 nodes 8409 q 0.0000 (last 0.0000 at 7525) est 884000007525 r 1.000 gap_red 1.0000 huge 8 need 14 newly 0/32898 w 0.1367/0.6631/0.2002
+TREER: t 29.0 nodes 8511 q 0.0000 (last 0.0000 at 7525) est 986000007525 r 1.000 gap_red 1.0000 huge 9 need 14 newly 0/32898 w 0.1367/0.6631/0.2002
+TREER: t 29.3 nodes 8615 q 0.0000 (last 0.0000 at 7525) est 1090000007525 r 1.000 gap_red 1.0000 huge 10 need 14 newly 0/32898 w 0.1367/0.6641/0.1992
+TREER: t 29.6 nodes 8715 q 0.0000 (last 0.0000 at 7525) est 1190000007525 r 1.000 gap_red 1.0000 huge 11 need 14 newly 0/32898 w 0.1367/0.6675/0.1958
+TREER: t 29.8 nodes 8816 q 0.0000 (last 0.0000 at 7525) est 1291000007525 r 1.000 gap_red 1.0000 huge 12 need 14 newly 0/32898 w 0.0742/0.7300/0.1958
+TREER: t 30.2 nodes 8943 q 0.0000 (last 0.0000 at 7525) est 1418000007525 r 1.000 gap_red 1.0000 huge 13 need 14 newly 0/32898 w 0.0039/0.8003/0.1958
+MIP:    30.22s nodes     2237 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 23060 sb_iters 1075 sb_lps 74 sb_secs 0.76 node_iters 20323 (first 19652, lps 2260) heur_iters 11211 dive_iters 1071 lp_rows 2445 node_cut_secs 1.01 pool_len 4892 pool_idle 0
+TREER: t 30.5 nodes 9045 q 0.0000 (last 0.0000 at 7525) est 1520000006950 r 1.000 gap_red 1.0000 huge 14 need 15 newly 0/32898 w 0.0039/0.8003/0.1958
+TREER: t 30.7 nodes 9145 q 0.0000 (last 0.0000 at 7525) est 1620000006912 r 1.000 gap_red 1.0000 huge 15 need 15 newly 0/32898 w 0.0039/0.8003/0.1958
+TREER: t 30.7 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 30.9 nodes 9246 q 0.0000 (last 0.0000 at 9145) est 101000009107 r 1.000 gap_red 1.0000 huge 1 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 31.1 nodes 9347 q 0.0000 (last 0.0000 at 9145) est 202000009069 r 1.000 gap_red 1.0000 huge 2 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 31.6 nodes 9449 q 0.0000 (last 0.0000 at 9145) est 304000009030 r 1.000 gap_red 1.0000 huge 3 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 31.9 nodes 9551 q 0.0000 (last 0.0000 at 9145) est 406000008991 r 1.000 gap_red 1.0000 huge 4 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+MIP:    32.23s nodes     2447 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 26023 sb_iters 1075 sb_lps 74 sb_secs 0.79 node_iters 23282 (first 22611, lps 2465) heur_iters 11219 dive_iters 1075 lp_rows 2441 node_cut_secs 1.01 pool_len 5579 pool_idle 0
+TREER: t 32.3 nodes 9653 q 0.0000 (last 0.0000 at 9145) est 508000008953 r 1.000 gap_red 1.0000 huge 5 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 32.6 nodes 9756 q 0.0000 (last 0.0000 at 9145) est 611000008914 r 1.000 gap_red 1.0000 huge 6 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 32.9 nodes 9856 q 0.0000 (last 0.0000 at 9145) est 711000008876 r 1.000 gap_red 1.0000 huge 7 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 33.1 nodes 9957 q 0.0000 (last 0.0000 at 9145) est 812000008838 r 1.000 gap_red 1.0000 huge 8 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 33.4 nodes 10061 q 0.0000 (last 0.0000 at 9145) est 916000008798 r 1.000 gap_red 1.0000 huge 9 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 33.6 nodes 10170 q 0.0000 (last 0.0000 at 9145) est 1025000008757 r 1.000 gap_red 1.0000 huge 10 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 33.9 nodes 10272 q 0.0000 (last 0.0000 at 9145) est 1127000008719 r 1.000 gap_red 1.0000 huge 11 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 34.1 nodes 10376 q 0.0000 (last 0.0000 at 9145) est 1231000008679 r 1.000 gap_red 1.0000 huge 12 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+MIP:    34.24s nodes     2642 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 28694 sb_iters 1075 sb_lps 74 sb_secs 0.82 node_iters 25933 (first 25208, lps 2662) heur_iters 11241 dive_iters 1077 lp_rows 2443 node_cut_secs 1.09 pool_len 6357 pool_idle 0
+TREER: t 34.4 nodes 10477 q 0.0000 (last 0.0000 at 9145) est 1332000008641 r 1.000 gap_red 1.0000 huge 13 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 34.7 nodes 10577 q 0.0000 (last 0.0000 at 9145) est 1432000008603 r 1.000 gap_red 1.0000 huge 14 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 34.9 nodes 10677 q 0.0000 (last 0.0000 at 9145) est 1532000008565 r 1.000 gap_red 1.0000 huge 15 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 34.9 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 35.4 nodes 10798 q 0.0000 (last 0.0000 at 10677) est 121000010631 r 1.000 gap_red 1.0000 huge 1 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 35.8 nodes 10902 q 0.0000 (last 0.0000 at 10677) est 225000010592 r 1.000 gap_red 1.0000 huge 2 need 15 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 36.0 nodes 11007 q 0.0000 (last 0.0000 at 10677) est 330000010552 r 1.000 gap_red 1.0000 huge 3 need 16 newly 0/32898 w 0.0039/0.8008/0.1953
+MIP:    36.24s nodes     2860 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 31248 sb_iters 1075 sb_lps 74 sb_secs 0.86 node_iters 28465 (first 27691, lps 2882) heur_iters 11267 dive_iters 1081 lp_rows 2455 node_cut_secs 1.17 pool_len 7036 pool_idle 0
+TREER: t 36.3 nodes 11109 q 0.0000 (last 0.0000 at 10677) est 432000010514 r 1.000 gap_red 1.0000 huge 4 need 16 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 36.6 nodes 11209 q 0.0000 (last 0.0000 at 10677) est 532000010476 r 1.000 gap_red 1.0000 huge 5 need 16 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 36.9 nodes 11310 q 0.0000 (last 0.0000 at 10677) est 633000010438 r 1.000 gap_red 1.0000 huge 6 need 16 newly 0/32898 w 0.0039/0.8008/0.1953
+TREER: t 37.2 nodes 11412 q 0.0000 (last 0.0000 at 10677) est 735000010399 r 1.000 gap_red 1.0000 huge 7 need 16 newly 0/32898 w 0.0039/0.8008/0.1953
+MIP: fixed-charge check: vb rows 0 of 408, continuous with vb 0 of 1
+TREER: t 37.5 nodes 11514 q 0.0000 (last 0.0000 at 10677) est 837000010677 r 1.000 gap_red 1.0000 huge 8 need 16 newly 0/32898 w 0.0039/0.8633/0.1953
+MIP: fixed-charge check: vb rows 0 of 177, continuous with vb 0 of 1
+TREER: t 37.9 nodes 11615 q 0.0000 (last 0.0000 at 10677) est 938000010677 r 1.000 gap_red 1.0000 huge 9 need 16 newly 0/32898 w 0.0039/0.8633/0.1953
+MIP:    38.24s nodes     3040 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 33678 sb_iters 1075 sb_lps 74 sb_secs 0.90 node_iters 30874 (first 30100, lps 3062) heur_iters 11309 dive_iters 1102 lp_rows 2449 node_cut_secs 1.17 pool_len 8628 pool_idle 1
+TREER: t 38.3 nodes 11715 q 0.0000 (last 0.0000 at 10677) est 1038000010677 r 1.000 gap_red 1.0000 huge 10 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 38.9 nodes 11816 q 0.0000 (last 0.0000 at 10677) est 1139000010677 r 1.000 gap_red 1.0000 huge 11 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 39.4 nodes 11916 q 0.0000 (last 0.0000 at 10677) est 1239000010677 r 1.000 gap_red 1.0000 huge 12 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 39.8 nodes 12016 q 0.0000 (last 0.0000 at 10677) est 1339000010677 r 1.000 gap_red 1.0000 huge 13 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 40.1 nodes 12116 q 0.0000 (last 0.0000 at 10677) est 1439000010677 r 1.000 gap_red 1.0000 huge 14 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+MIP:    40.24s nodes     3245 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 35867 sb_iters 1075 sb_lps 74 sb_secs 0.93 node_iters 33063 (first 32239, lps 3269) heur_iters 11309 dive_iters 1102 lp_rows 2442 node_cut_secs 1.27 pool_len 9086 pool_idle 1
+TREER: t 40.4 nodes 12217 q 0.0000 (last 0.0000 at 10677) est 1540000010677 r 1.000 gap_red 1.0000 huge 15 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 40.9 nodes 12324 q 0.0000 (last 0.0000 at 10677) est 1647000010677 r 1.000 gap_red 1.0000 huge 16 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 40.9 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 41.5 nodes 12427 q 0.0000 (last 0.0000 at 12324) est 103000012324 r 1.000 gap_red 1.0000 huge 1 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+MIP: fixed-charge check: vb rows 0 of 2388, continuous with vb 0 of 1
+TREER: t 42.0 nodes 12527 q 0.0000 (last 0.0000 at 12324) est 203000012324 r 1.000 gap_red 1.0000 huge 2 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+MIP:    42.25s nodes     3389 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 38244 sb_iters 1075 sb_lps 74 sb_secs 0.95 node_iters 35440 (first 34616, lps 3413) heur_iters 11309 dive_iters 1102 lp_rows 2433 node_cut_secs 1.27 pool_len 9498 pool_idle 1
+TREER: t 42.7 nodes 12628 q 0.0000 (last 0.0000 at 12324) est 304000012324 r 1.000 gap_red 1.0000 huge 3 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 43.1 nodes 12729 q 0.0000 (last 0.0000 at 12324) est 405000012324 r 1.000 gap_red 1.0000 huge 4 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+MIP: fixed-charge check: vb rows 0 of 74, continuous with vb 0 of 1
+TREER: t 43.7 nodes 12832 q 0.0000 (last 0.0000 at 12324) est 508000012324 r 1.000 gap_red 1.0000 huge 5 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 44.2 nodes 12934 q 0.0000 (last 0.0000 at 12324) est 610000012324 r 1.000 gap_red 1.0000 huge 6 need 16 newly 0/32898 w 0.0039/0.9883/0.0703
+MIP:    44.25s nodes     3546 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 41653 sb_iters 1075 sb_lps 74 sb_secs 0.98 node_iters 38849 (first 37953, lps 3572) heur_iters 11309 dive_iters 1102 lp_rows 2451 node_cut_secs 1.34 pool_len 9878 pool_idle 1
+TREER: t 44.7 nodes 13034 q 0.0000 (last 0.0000 at 12324) est 710000012324 r 1.000 gap_red 1.0000 huge 7 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 45.4 nodes 13134 q 0.0000 (last 0.0000 at 12324) est 810000012324 r 1.000 gap_red 1.0000 huge 8 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 46.0 nodes 13235 q 0.0000 (last 0.0000 at 12324) est 911000012324 r 1.000 gap_red 1.0000 huge 9 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+MIP:    46.26s nodes     3696 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 45242 sb_iters 1075 sb_lps 74 sb_secs 1.03 node_iters 42438 (first 41542, lps 3722) heur_iters 11309 dive_iters 1102 lp_rows 2443 node_cut_secs 1.34 pool_len 10203 pool_idle 1
+TREER: t 46.5 nodes 13335 q 0.0000 (last 0.0000 at 12324) est 1011000012324 r 1.000 gap_red 1.0000 huge 10 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+TREER: t 46.9 nodes 13435 q 0.0000 (last 0.0000 at 12324) est 1111000012324 r 1.000 gap_red 1.0000 huge 11 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 47.4 nodes 13536 q 0.0000 (last 0.0000 at 12324) est 1212000012324 r 1.000 gap_red 1.0000 huge 12 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 48.1 nodes 13650 q 0.0000 (last 0.0000 at 12324) est 1326000012324 r 1.000 gap_red 1.0000 huge 13 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+MIP: fixed-charge check: vb rows 0 of 1327, continuous with vb 0 of 1
+MIP:    48.26s nodes     3798 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 48972 sb_iters 1075 sb_lps 74 sb_secs 1.08 node_iters 46168 (first 45184, lps 3827) heur_iters 11309 dive_iters 1102 lp_rows 2448 node_cut_secs 1.46 pool_len 10625 pool_idle 1
+TREER: t 48.5 nodes 13751 q 0.0000 (last 0.0000 at 12324) est 1427000012324 r 1.000 gap_red 1.0000 huge 14 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 48.9 nodes 13854 q 0.0000 (last 0.0000 at 12324) est 1530000012324 r 1.000 gap_red 1.0000 huge 15 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+MIP: fixed-charge check: vb rows 0 of 1940, continuous with vb 0 of 1
+TREER: t 49.3 nodes 13957 q 0.0000 (last 0.0000 at 12324) est 1633000012324 r 1.000 gap_red 1.0000 huge 16 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 49.7 nodes 14058 q 0.0000 (last 0.0000 at 12324) est 1734000012324 r 1.000 gap_red 1.0000 huge 17 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 49.7 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 50.2 nodes 14159 q 0.0000 (last 0.0000 at 14058) est 101000014058 r 1.000 gap_red 1.0000 huge 1 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+MIP:    50.27s nodes     3973 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 52017 sb_iters 1075 sb_lps 74 sb_secs 1.11 node_iters 49213 (first 48229, lps 4002) heur_iters 11309 dive_iters 1102 lp_rows 2433 node_cut_secs 1.46 pool_len 11096 pool_idle 1
+TREER: t 50.9 nodes 14260 q 0.0000 (last 0.0000 at 14058) est 202000014058 r 1.000 gap_red 1.0000 huge 2 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 51.3 nodes 14367 q 0.0000 (last 0.0000 at 14058) est 309000014058 r 1.000 gap_red 1.0000 huge 3 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+MIP: fixed-charge check: vb rows 0 of 218, continuous with vb 0 of 1
+TREER: t 51.8 nodes 14474 q 0.0000 (last 0.0000 at 14058) est 416000014058 r 1.000 gap_red 1.0000 huge 4 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 52.2 nodes 14575 q 0.0000 (last 0.0000 at 14058) est 517000014058 r 1.000 gap_red 1.0000 huge 5 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+MIP:    52.28s nodes     4108 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 55028 sb_iters 1075 sb_lps 74 sb_secs 1.14 node_iters 52224 (first 51240, lps 4137) heur_iters 11309 dive_iters 1102 lp_rows 2425 node_cut_secs 1.46 pool_len 11514 pool_idle 1
+TREER: t 52.7 nodes 14675 q 0.0000 (last 0.0000 at 14058) est 617000014058 r 1.000 gap_red 1.0000 huge 6 need 17 newly 0/32898 w 0.0039/0.9883/0.0703
+TREER: t 53.2 nodes 14775 q 0.0000 (last 0.0000 at 14058) est 717000014058 r 1.000 gap_red 1.0000 huge 7 need 17 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 53.9 nodes 14876 q 0.0000 (last 0.0000 at 14058) est 818000014058 r 1.000 gap_red 1.0000 huge 8 need 17 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP:    54.29s nodes     4242 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 58164 sb_iters 1075 sb_lps 74 sb_secs 1.17 node_iters 55360 (first 54285, lps 4274) heur_iters 11309 dive_iters 1102 lp_rows 2444 node_cut_secs 1.60 pool_len 11898 pool_idle 1
+TREER: t 54.3 nodes 14976 q 0.0000 (last 0.0000 at 14058) est 918000014058 r 1.000 gap_red 1.0000 huge 9 need 17 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 54.7 nodes 15079 q 0.0000 (last 0.0000 at 14058) est 1021000014058 r 1.000 gap_red 1.0000 huge 10 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP: fixed-charge check: vb rows 0 of 265, continuous with vb 0 of 1
+TREER: t 55.1 nodes 15179 q 0.0000 (last 0.0000 at 14058) est 1121000014058 r 1.000 gap_red 1.0000 huge 11 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 55.6 nodes 15279 q 0.0000 (last 0.0000 at 14058) est 1221000014058 r 1.000 gap_red 1.0000 huge 12 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP:    56.30s nodes     4398 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 61341 sb_iters 1075 sb_lps 74 sb_secs 1.19 node_iters 58537 (first 57462, lps 4430) heur_iters 11309 dive_iters 1102 lp_rows 2437 node_cut_secs 1.60 pool_len 12304 pool_idle 1
+TREER: t 56.3 nodes 15381 q 0.0000 (last 0.0000 at 14058) est 1323000014058 r 1.000 gap_red 1.0000 huge 13 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 57.1 nodes 15481 q 0.0000 (last 0.0000 at 14058) est 1423000014058 r 1.000 gap_red 1.0000 huge 14 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 57.7 nodes 15583 q 0.0000 (last 0.0000 at 14058) est 1525000014058 r 1.000 gap_red 1.0000 huge 15 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 58.1 nodes 15683 q 0.0000 (last 0.0000 at 14058) est 1625000014058 r 1.000 gap_red 1.0000 huge 16 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP:    58.30s nodes     4528 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 64924 sb_iters 1075 sb_lps 74 sb_secs 1.22 node_iters 62120 (first 61045, lps 4560) heur_iters 11309 dive_iters 1102 lp_rows 2427 node_cut_secs 1.60 pool_len 12651 pool_idle 1
+TREER: t 58.7 nodes 15785 q 0.0000 (last 0.0000 at 14058) est 1727000014058 r 1.000 gap_red 1.0000 huge 17 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 59.2 nodes 15885 q 0.0000 (last 0.0000 at 14058) est 1827000014058 r 1.000 gap_red 1.0000 huge 18 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 59.2 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 59.8 nodes 15985 q 0.0000 (last 0.0000 at 15885) est 100000015885 r 1.000 gap_red 1.0000 huge 1 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP: fixed-charge check: vb rows 0 of 257, continuous with vb 0 of 1
+TREER: t 60.1 nodes 16085 q 0.0000 (last 0.0000 at 15885) est 200000015885 r 1.000 gap_red 1.0000 huge 2 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP:    60.31s nodes     4672 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 68200 sb_iters 1075 sb_lps 74 sb_secs 1.26 node_iters 65369 (first 64227, lps 4706) heur_iters 11336 dive_iters 1102 lp_rows 2438 node_cut_secs 1.74 pool_len 13067 pool_idle 1
+TREER: t 60.5 nodes 16187 q 0.0000 (last 0.0000 at 15885) est 302000015885 r 1.000 gap_red 1.0000 huge 3 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 60.9 nodes 16288 q 0.0000 (last 0.0000 at 15885) est 403000015885 r 1.000 gap_red 1.0000 huge 4 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 61.2 nodes 16388 q 0.0000 (last 0.0000 at 15885) est 503000015885 r 1.000 gap_red 1.0000 huge 5 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 61.6 nodes 16488 q 0.0000 (last 0.0000 at 15885) est 603000015885 r 1.000 gap_red 1.0000 huge 6 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 62.2 nodes 16589 q 0.0000 (last 0.0000 at 15885) est 704000015885 r 1.000 gap_red 1.0000 huge 7 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP:    62.32s nodes     4835 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 71163 sb_iters 1075 sb_lps 74 sb_secs 1.29 node_iters 68332 (first 67190, lps 4869) heur_iters 11336 dive_iters 1102 lp_rows 2425 node_cut_secs 1.74 pool_len 13523 pool_idle 1
+TREER: t 62.9 nodes 16692 q 0.0000 (last 0.0000 at 15885) est 807000015885 r 1.000 gap_red 1.0000 huge 8 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 63.4 nodes 16794 q 0.0000 (last 0.0000 at 15885) est 909000015885 r 1.000 gap_red 1.0000 huge 9 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 63.8 nodes 16895 q 0.0000 (last 0.0000 at 15885) est 1010000015885 r 1.000 gap_red 1.0000 huge 10 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP: fixed-charge check: vb rows 0 of 420, continuous with vb 0 of 1
+TREER: t 64.3 nodes 16995 q 0.0000 (last 0.0000 at 15885) est 1110000015885 r 1.000 gap_red 1.0000 huge 11 need 18 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP:    64.34s nodes     4978 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 74167 sb_iters 1075 sb_lps 74 sb_secs 1.36 node_iters 71336 (first 70194, lps 5012) heur_iters 11336 dive_iters 1102 lp_rows 2420 node_cut_secs 1.74 pool_len 13930 pool_idle 1
+MIP: fixed-charge check: vb rows 0 of 153, continuous with vb 0 of 1
+TREER: t 64.8 nodes 17096 q 0.0000 (last 0.0000 at 15885) est 1211000015885 r 1.000 gap_red 1.0000 huge 12 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 65.3 nodes 17196 q 0.0000 (last 0.0000 at 15885) est 1311000015885 r 1.000 gap_red 1.0000 huge 13 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 65.9 nodes 17296 q 0.0000 (last 0.0000 at 15885) est 1411000015885 r 1.000 gap_red 1.0000 huge 14 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP:    66.54s nodes     5119 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 77729 sb_iters 1075 sb_lps 74 sb_secs 1.43 node_iters 74898 (first 73664, lps 5156) heur_iters 11336 dive_iters 1102 lp_rows 2439 node_cut_secs 1.82 pool_len 14291 pool_idle 1
+TREER: t 66.6 nodes 17396 q 0.0000 (last 0.0000 at 15885) est 1511000015885 r 1.000 gap_red 1.0000 huge 15 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 67.1 nodes 17498 q 0.0000 (last 0.0000 at 15885) est 1613000015885 r 1.000 gap_red 1.0000 huge 16 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 67.6 nodes 17598 q 0.0000 (last 0.0000 at 15885) est 1713000015885 r 1.000 gap_red 1.0000 huge 17 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP: fixed-charge check: vb rows 0 of 580, continuous with vb 0 of 1
+TREER: t 68.3 nodes 17702 q 0.0000 (last 0.0000 at 15885) est 1817000015885 r 1.000 gap_red 1.0000 huge 18 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP:    68.56s nodes     5252 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 80011 sb_iters 1075 sb_lps 74 sb_secs 1.46 node_iters 77180 (first 75946, lps 5288) heur_iters 11336 dive_iters 1102 lp_rows 2429 node_cut_secs 1.82 pool_len 14687 pool_idle 1
+TREER: t 68.7 nodes 17803 q 0.0000 (last 0.0000 at 15885) est 1918000015885 r 1.000 gap_red 1.0000 huge 19 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 68.7 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+TREER: t 69.3 nodes 17904 q 0.0000 (last 0.0000 at 17803) est 101000017803 r 1.000 gap_red 1.0000 huge 1 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 69.8 nodes 18004 q 0.0000 (last 0.0000 at 17803) est 201000017803 r 1.000 gap_red 1.0000 huge 2 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP: fixed-charge check: vb rows 0 of 1327, continuous with vb 0 of 1
+TREER: t 70.5 nodes 18117 q 0.0000 (last 0.0000 at 17803) est 314000017803 r 1.000 gap_red 1.0000 huge 3 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP:    70.56s nodes     5380 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 83757 sb_iters 1075 sb_lps 74 sb_secs 1.48 node_iters 80908 (first 79594, lps 5419) heur_iters 11354 dive_iters 1102 lp_rows 2443 node_cut_secs 1.93 pool_len 15044 pool_idle 1
+TREER: t 70.9 nodes 18217 q 0.0000 (last 0.0000 at 17803) est 414000017803 r 1.000 gap_red 1.0000 huge 4 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP: fixed-charge check: vb rows 0 of 1940, continuous with vb 0 of 1
+TREER: t 71.6 nodes 18319 q 0.0000 (last 0.0000 at 17803) est 516000017803 r 1.000 gap_red 1.0000 huge 5 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 71.9 nodes 18419 q 0.0000 (last 0.0000 at 17803) est 616000017803 r 1.000 gap_red 1.0000 huge 6 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 72.2 nodes 18519 q 0.0000 (last 0.0000 at 17803) est 716000017803 r 1.000 gap_red 1.0000 huge 7 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+MIP:    72.57s nodes     5552 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 85431 sb_iters 1075 sb_lps 74 sb_secs 1.51 node_iters 82582 (first 81268, lps 5591) heur_iters 11354 dive_iters 1102 lp_rows 2433 node_cut_secs 1.93 pool_len 15519 pool_idle 1
+TREER: t 72.7 nodes 18620 q 0.0000 (last 0.0000 at 17803) est 817000017803 r 1.000 gap_red 1.0000 huge 8 need 19 newly 0/32898 w 0.0039/0.9961/0.0625
+TREER: t 73.3 nodes 18720 q 0.0000 (last 0.0000 at 17803) est 917000017456 r 1.000 gap_red 1.0000 huge 9 need 19 newly 0/32898 w 0.0039/0.9883/0.0078
+TREER: t 73.9 nodes 18822 q 0.0000 (last 0.0000 at 17803) est 1019000017417 r 1.000 gap_red 1.0000 huge 10 need 19 newly 0/32898 w 0.0039/0.9883/0.0078
+TREER: t 74.4 nodes 18924 q 0.0000 (last 0.0000 at 17803) est 1121000017379 r 1.000 gap_red 1.0000 huge 11 need 19 newly 0/32898 w 0.0039/0.9883/0.0078
+MIP:    74.62s nodes     5683 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 88949 sb_iters 1075 sb_lps 74 sb_secs 1.54 node_iters 85981 (first 84667, lps 5722) heur_iters 11592 dive_iters 1221 lp_rows 2431 node_cut_secs 1.93 pool_len 15824 pool_idle 0
+TREER: t 74.9 nodes 19024 q 0.0000 (last 0.0000 at 17803) est 1221000017341 r 1.000 gap_red 1.0000 huge 12 need 20 newly 0/32898 w 0.0039/0.9883/0.0078
+TREER: t 75.3 nodes 19133 q 0.0000 (last 0.0000 at 17803) est 1330000017300 r 1.000 gap_red 1.0000 huge 13 need 20 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 75.6 nodes 19239 q 0.0000 (last 0.0000 at 17803) est 1436000017260 r 1.000 gap_red 1.0000 huge 14 need 20 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 76.0 nodes 19339 q 0.0000 (last 0.0000 at 17803) est 1536000017222 r 1.000 gap_red 1.0000 huge 15 need 20 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 76.4 nodes 19441 q 0.0000 (last 0.0000 at 17803) est 1638000017183 r 1.000 gap_red 1.0000 huge 16 need 20 newly 0/32898 w 0.0000/0.9922/0.0078
+MIP:    76.63s nodes     5804 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 91533 sb_iters 1075 sb_lps 74 sb_secs 1.61 node_iters 88565 (first 87251, lps 5843) heur_iters 11592 dive_iters 1221 lp_rows 2429 node_cut_secs 1.93 pool_len 16209 pool_idle 0
+TREER: t 76.9 nodes 19542 q 0.0000 (last 0.0000 at 17803) est 1739000017145 r 1.000 gap_red 1.0000 huge 17 need 20 newly 0/32898 w 0.0000/0.9922/0.0078
+MIP: fixed-charge check: vb rows 0 of 2387, continuous with vb 0 of 1
+MIP:   sub-MIP: 32899 free columns of 34219, status TimeLimit, nodes 0, objective None, 2.84s
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 1, 0, 0, 0])
+TREER: t 80.1 nodes 20313 q 0.0000 (last 0.0000 at 17803) est 2510000016853 r 1.000 gap_red 1.0000 huge 18 need 20 newly 0/32898 w 0.0000/0.9922/0.0078
+MIP:    80.06s nodes     5822 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 92322 sb_iters 1075 sb_lps 74 sb_secs 1.62 node_iters 89354 (first 87983, lps 5863) heur_iters 12582 dive_iters 1221 lp_rows 2440 node_cut_secs 2.07 pool_len 16760 pool_idle 0
+TREER: t 80.3 nodes 20415 q 0.0000 (last 0.0000 at 17803) est 2612000016815 r 1.000 gap_red 1.0000 huge 19 need 20 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 80.6 nodes 20515 q 0.0000 (last 0.0000 at 17803) est 2712000016777 r 1.000 gap_red 1.0000 huge 20 need 20 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 80.6 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 80.9 nodes 20616 q 0.0000 (last 0.0000 at 20515) est 101000020477 r 1.000 gap_red 1.0000 huge 1 need 20 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 81.3 nodes 20716 q 0.0000 (last 0.0000 at 20515) est 201000020439 r 1.000 gap_red 1.0000 huge 2 need 20 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 81.7 nodes 20816 q 0.0000 (last 0.0000 at 20515) est 301000020401 r 1.000 gap_red 1.0000 huge 3 need 20 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 82.0 nodes 20916 q 0.0000 (last 0.0000 at 20515) est 401000020363 r 1.000 gap_red 1.0000 huge 4 need 20 newly 0/32898 w 0.0000/0.9922/0.0078
+MIP:    82.06s nodes     6003 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 95093 sb_iters 1075 sb_lps 74 sb_secs 1.65 node_iters 92122 (first 90751, lps 6044) heur_iters 12588 dive_iters 1224 lp_rows 2430 node_cut_secs 2.07 pool_len 17240 pool_idle 0
+TREER: t 82.4 nodes 21016 q 0.0000 (last 0.0000 at 20515) est 501000020325 r 1.000 gap_red 1.0000 huge 5 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 82.7 nodes 21116 q 0.0000 (last 0.0000 at 20515) est 601000020288 r 1.000 gap_red 1.0000 huge 6 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 83.0 nodes 21220 q 0.0000 (last 0.0000 at 20515) est 705000020248 r 1.000 gap_red 1.0000 huge 7 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 83.4 nodes 21322 q 0.0000 (last 0.0000 at 20515) est 807000020210 r 1.000 gap_red 1.0000 huge 8 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 83.9 nodes 21424 q 0.0000 (last 0.0000 at 20515) est 909000020171 r 1.000 gap_red 1.0000 huge 9 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+MIP:    84.07s nodes     6136 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 98341 sb_iters 1075 sb_lps 74 sb_secs 1.70 node_iters 95367 (first 93996, lps 6177) heur_iters 12594 dive_iters 1227 lp_rows 2424 node_cut_secs 2.07 pool_len 17660 pool_idle 0
+TREER: t 84.3 nodes 21525 q 0.0000 (last 0.0000 at 20515) est 1010000020133 r 1.000 gap_red 1.0000 huge 10 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 84.6 nodes 21625 q 0.0000 (last 0.0000 at 20515) est 1110000020095 r 1.000 gap_red 1.0000 huge 11 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 84.9 nodes 21733 q 0.0000 (last 0.0000 at 20515) est 1218000020054 r 1.000 gap_red 1.0000 huge 12 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 85.1 nodes 21833 q 0.0000 (last 0.0000 at 20515) est 1318000020016 r 1.000 gap_red 1.0000 huge 13 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 85.4 nodes 21933 q 0.0000 (last 0.0000 at 20515) est 1418000019978 r 1.000 gap_red 1.0000 huge 14 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 85.7 nodes 22033 q 0.0000 (last 0.0000 at 20515) est 1518000019941 r 1.000 gap_red 1.0000 huge 15 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 86.1 nodes 22136 q 0.0000 (last 0.0000 at 20515) est 1621000019902 r 1.000 gap_red 1.0000 huge 16 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+MIP:    86.07s nodes     6301 open     999 lb 1.38000000e2 ub 1.44000000e2 lp_iters 101135 sb_iters 1075 sb_lps 74 sb_secs 1.77 node_iters 98161 (first 96790, lps 6342) heur_iters 12594 dive_iters 1227 lp_rows 2420 node_cut_secs 2.07 pool_len 18158 pool_idle 0
+TREER: t 86.5 nodes 22239 q 0.0000 (last 0.0000 at 20515) est 1724000019863 r 1.000 gap_red 1.0000 huge 17 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 86.8 nodes 22340 q 0.0000 (last 0.0000 at 20515) est 1825000019825 r 1.000 gap_red 1.0000 huge 18 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 87.1 nodes 22440 q 0.0000 (last 0.0000 at 20515) est 1925000019787 r 1.000 gap_red 1.0000 huge 19 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 87.4 nodes 22543 q 0.0000 (last 0.0000 at 20515) est 2028000019748 r 1.000 gap_red 1.0000 huge 20 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 87.6 nodes 22643 q 0.0000 (last 0.0000 at 20515) est 2128000019710 r 1.000 gap_red 1.0000 huge 21 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 87.6 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 87.9 nodes 22744 q 0.0000 (last 0.0000 at 22643) est 101000022605 r 1.000 gap_red 1.0000 huge 1 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+MIP:    88.08s nodes     6463 open    1000 lb 1.38000000e2 ub 1.44000000e2 lp_iters 104635 sb_iters 1075 sb_lps 74 sb_secs 1.80 node_iters 101640 (first 100212, lps 6506) heur_iters 12618 dive_iters 1230 lp_rows 2421 node_cut_secs 2.19 pool_len 18723 pool_idle 0
+TREER: t 88.2 nodes 22845 q 0.0000 (last 0.0000 at 22643) est 202000022567 r 1.000 gap_red 1.0000 huge 2 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 88.5 nodes 22946 q 0.0000 (last 0.0000 at 22643) est 303000022528 r 1.000 gap_red 1.0000 huge 3 need 21 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 89.0 nodes 23048 q 0.0000 (last 0.0000 at 22643) est 405000022490 r 1.000 gap_red 1.0000 huge 4 need 22 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 89.3 nodes 23148 q 0.0000 (last 0.0000 at 22643) est 505000022452 r 1.000 gap_red 1.0000 huge 5 need 22 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 89.6 nodes 23254 q 0.0000 (last 0.0000 at 22643) est 611000022412 r 1.000 gap_red 1.0000 huge 6 need 22 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 90.0 nodes 23359 q 0.0000 (last 0.0000 at 22643) est 716000022372 r 1.000 gap_red 1.0000 huge 7 need 22 newly 0/32898 w 0.0000/0.9922/0.0078
+MIP:    90.10s nodes     6614 open     999 lb 1.38136680e2 ub 1.44000000e2 lp_iters 108073 sb_iters 1075 sb_lps 74 sb_secs 1.84 node_iters 105078 (first 103650, lps 6657) heur_iters 12618 dive_iters 1230 lp_rows 2419 node_cut_secs 2.19 pool_len 19312 pool_idle 0
+TREER: t 90.4 nodes 23463 q 0.0000 (last 0.0000 at 22643) est 820000022333 r 1.000 gap_red 1.0000 huge 8 need 22 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 90.8 nodes 23575 q 0.0000 (last 0.0000 at 22643) est 932000022290 r 1.000 gap_red 1.0000 huge 9 need 22 newly 0/32898 w 0.0000/0.9922/0.0078
+TREER: t 91.2 nodes 23679 q 0.0000 (last 0.0000 at 22643) est 1036000022251 r 1.000 gap_red 1.0000 huge 10 need 22 newly 0/32898 w 0.0000/0.9923/0.0077
+TREER: t 91.6 nodes 23780 q 0.0000 (last 0.0000 at 22643) est 1137000022213 r 1.000 gap_red 1.0000 huge 11 need 22 newly 0/32898 w 0.0000/0.9923/0.0077
+TREER: t 92.3 nodes 23928 q 0.0000 (last 0.0000 at 22643) est 1285000022157 r 1.000 gap_red 1.0000 huge 12 need 22 newly 0/32898 w 0.0000/0.9923/0.0077
+MIP:    92.30s nodes     6709 open    1000 lb 1.38136680e2 ub 1.44000000e2 lp_iters 112104 sb_iters 1075 sb_lps 74 sb_secs 1.89 node_iters 108988 (first 107444, lps 6755) heur_iters 12842 dive_iters 1333 lp_rows 2431 node_cut_secs 2.35 pool_len 19839 pool_idle 0
+TREER: t 92.7 nodes 24028 q 0.0000 (last 0.0000 at 22643) est 1385000022119 r 1.000 gap_red 1.0000 huge 13 need 22 newly 0/32898 w 0.0000/0.9924/0.0076
+TREER: t 93.1 nodes 24129 q 0.0000 (last 0.0000 at 22643) est 1486000022081 r 1.000 gap_red 1.0000 huge 14 need 22 newly 0/32898 w 0.0000/0.9924/0.0076
+TREER: t 93.6 nodes 24229 q 0.0000 (last 0.0000 at 22643) est 1586000022043 r 1.000 gap_red 1.0000 huge 15 need 22 newly 0/32898 w 0.0000/0.9924/0.0076
+TREER: t 94.1 nodes 24330 q 0.0000 (last 0.0000 at 22643) est 1687000022005 r 1.000 gap_red 1.0000 huge 16 need 22 newly 0/32898 w 0.0000/0.9924/0.0076
+MIP:    94.31s nodes     6901 open    1000 lb 1.38228541e2 ub 1.44000000e2 lp_iters 114461 sb_iters 1075 sb_lps 74 sb_secs 1.95 node_iters 111345 (first 109801, lps 6947) heur_iters 12842 dive_iters 1333 lp_rows 2426 node_cut_secs 2.35 pool_len 20310 pool_idle 0
+TREER: t 94.5 nodes 24430 q 0.0000 (last 0.0000 at 22643) est 1787000021967 r 1.000 gap_red 1.0000 huge 17 need 22 newly 0/32898 w 0.0000/0.9924/0.0076
+TREER: t 94.9 nodes 24530 q 0.0000 (last 0.0000 at 22643) est 1887000021929 r 1.000 gap_red 1.0000 huge 18 need 22 newly 0/32898 w 0.0000/0.9924/0.0076
+TREER: t 95.5 nodes 24630 q 0.0000 (last 0.0000 at 22643) est 1987000021891 r 1.000 gap_red 1.0000 huge 19 need 22 newly 0/32898 w 0.0000/0.9924/0.0076
+TREER: t 95.8 nodes 24732 q 0.0000 (last 0.0000 at 22643) est 2089000021853 r 1.000 gap_red 1.0000 huge 20 need 22 newly 0/32898 w 0.0000/0.9924/0.0076
+TREER: t 96.2 nodes 24833 q 0.0000 (last 0.0000 at 22643) est 2190000021814 r 1.000 gap_red 1.0000 huge 21 need 22 newly 0/32898 w 0.0000/0.9924/0.0076
+MIP:    96.32s nodes     7041 open     999 lb 1.38382870e2 ub 1.44000000e2 lp_iters 116108 sb_iters 1075 sb_lps 74 sb_secs 2.01 node_iters 112992 (first 111448, lps 7087) heur_iters 12842 dive_iters 1333 lp_rows 2412 node_cut_secs 2.35 pool_len 20788 pool_idle 0
+TREER: t 96.6 nodes 24934 q 0.0000 (last 0.0000 at 22643) est 2291000021776 r 1.000 gap_red 1.0000 huge 22 need 22 newly 0/32898 w 0.0000/0.9924/0.0076
+TREER: t 96.6 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 97.1 nodes 25037 q 0.0000 (last 0.0000 at 24934) est 103000024895 r 1.000 gap_red 1.0000 huge 1 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 97.6 nodes 25139 q 0.0000 (last 0.0000 at 24934) est 205000024856 r 1.000 gap_red 1.0000 huge 2 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 98.0 nodes 25244 q 0.0000 (last 0.0000 at 24934) est 310000024817 r 1.000 gap_red 1.0000 huge 3 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+MIP:    98.33s nodes     7170 open     999 lb 1.38460034e2 ub 1.44000000e2 lp_iters 118846 sb_iters 1075 sb_lps 74 sb_secs 2.07 node_iters 115730 (first 114186, lps 7216) heur_iters 12842 dive_iters 1333 lp_rows 2409 node_cut_secs 2.35 pool_len 21227 pool_idle 0
+TREER: t 98.5 nodes 25344 q 0.0000 (last 0.0000 at 24934) est 410000024779 r 1.000 gap_red 1.0000 huge 4 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 98.9 nodes 25448 q 0.0000 (last 0.0000 at 24934) est 514000024740 r 1.000 gap_red 1.0000 huge 5 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 99.3 nodes 25551 q 0.0000 (last 0.0000 at 24934) est 617000024701 r 1.000 gap_red 1.0000 huge 6 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 99.6 nodes 25653 q 0.0000 (last 0.0000 at 24934) est 719000024662 r 1.000 gap_red 1.0000 huge 7 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 100.0 nodes 25761 q 0.0000 (last 0.0000 at 24934) est 827000024621 r 1.000 gap_red 1.0000 huge 8 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+MIP:   100.33s nodes     7287 open     999 lb 1.38510899e2 ub 1.44000000e2 lp_iters 123290 sb_iters 1075 sb_lps 74 sb_secs 2.12 node_iters 120174 (first 118630, lps 7333) heur_iters 12842 dive_iters 1333 lp_rows 2408 node_cut_secs 2.35 pool_len 21763 pool_idle 0
+TREER: t 100.4 nodes 25865 q 0.0000 (last 0.0000 at 24934) est 931000024582 r 1.000 gap_red 1.0000 huge 9 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 100.8 nodes 25966 q 0.0000 (last 0.0000 at 24934) est 1032000024544 r 1.000 gap_red 1.0000 huge 10 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 101.1 nodes 26068 q 0.0000 (last 0.0000 at 24934) est 1134000024505 r 1.000 gap_red 1.0000 huge 11 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 101.4 nodes 26168 q 0.0000 (last 0.0000 at 24934) est 1234000024467 r 1.000 gap_red 1.0000 huge 12 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 101.7 nodes 26268 q 0.0000 (last 0.0000 at 24934) est 1334000024429 r 1.000 gap_red 1.0000 huge 13 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 102.1 nodes 26368 q 0.0000 (last 0.0000 at 24934) est 1434000024391 r 1.000 gap_red 1.0000 huge 14 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+MIP:   102.35s nodes     7420 open     999 lb 1.38812400e2 ub 1.44000000e2 lp_iters 128872 sb_iters 1075 sb_lps 74 sb_secs 2.17 node_iters 125756 (first 124212, lps 7466) heur_iters 12842 dive_iters 1333 lp_rows 2407 node_cut_secs 2.35 pool_len 22355 pool_idle 0
+TREER: t 102.4 nodes 26468 q 0.0000 (last 0.0000 at 24934) est 1534000024354 r 1.000 gap_red 1.0000 huge 15 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 102.8 nodes 26571 q 0.0000 (last 0.0000 at 24934) est 1637000024315 r 1.000 gap_red 1.0000 huge 16 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 103.6 nodes 26721 q 0.0000 (last 0.0000 at 24934) est 1787000024258 r 1.000 gap_red 1.0000 huge 17 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 104.3 nodes 26854 q 0.0000 (last 0.0000 at 24934) est 1920000024208 r 1.000 gap_red 1.0000 huge 18 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+MIP:   104.58s nodes     7460 open     999 lb 1.38916618e2 ub 1.44000000e2 lp_iters 130962 sb_iters 1075 sb_lps 74 sb_secs 2.19 node_iters 127846 (first 125669, lps 7520) heur_iters 12842 dive_iters 1333 lp_rows 2500 node_cut_secs 3.31 pool_len 22833 pool_idle 0
+TREER: t 104.7 nodes 26975 q 0.0000 (last 0.0000 at 24934) est 2041000024162 r 1.000 gap_red 1.0000 huge 19 need 23 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 105.2 nodes 27077 q 0.0000 (last 0.0000 at 24934) est 2143000024123 r 1.000 gap_red 1.0000 huge 20 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 106.0 nodes 27241 q 0.0000 (last 0.0000 at 24934) est 2307000024061 r 1.000 gap_red 1.0000 huge 21 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 106.4 nodes 27344 q 0.0000 (last 0.0000 at 24934) est 2410000024022 r 1.000 gap_red 1.0000 huge 22 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+MIP:   106.59s nodes     7513 open    1000 lb 1.38981847e2 ub 1.44000000e2 lp_iters 133462 sb_iters 1075 sb_lps 74 sb_secs 2.20 node_iters 130337 (first 127991, lps 7581) heur_iters 12851 dive_iters 1333 lp_rows 2531 node_cut_secs 3.93 pool_len 23327 pool_idle 0
+TREER: t 106.7 nodes 27444 q 0.0000 (last 0.0000 at 24934) est 2510000023984 r 1.000 gap_red 1.0000 huge 23 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 107.0 nodes 27544 q 0.0000 (last 0.0000 at 24934) est 2610000023947 r 1.000 gap_red 1.0000 huge 24 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 107.0 skipped: newly fixed 0 < max(1, 0.01 x 32898)
+TREER: t 107.3 nodes 27644 q 0.0000 (last 0.0000 at 27544) est 100000027506 r 1.000 gap_red 1.0000 huge 1 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 107.6 nodes 27745 q 0.0000 (last 0.0000 at 27544) est 201000027468 r 1.000 gap_red 1.0000 huge 2 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 108.0 nodes 27846 q 0.0000 (last 0.0000 at 27544) est 302000027430 r 1.000 gap_red 1.0000 huge 3 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 108.4 nodes 27950 q 0.0000 (last 0.0000 at 27544) est 406000027390 r 1.000 gap_red 1.0000 huge 4 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+MIP:   108.60s nodes     7668 open     999 lb 1.39129638e2 ub 1.44000000e2 lp_iters 136403 sb_iters 1075 sb_lps 74 sb_secs 2.23 node_iters 133278 (first 130932, lps 7735) heur_iters 12851 dive_iters 1333 lp_rows 2531 node_cut_secs 3.93 pool_len 23913 pool_idle 0
+TREER: t 108.8 nodes 28051 q 0.0000 (last 0.0000 at 27544) est 507000027352 r 1.000 gap_red 1.0000 huge 5 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 109.2 nodes 28151 q 0.0000 (last 0.0000 at 27544) est 607000027314 r 1.000 gap_red 1.0000 huge 6 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 109.7 nodes 28265 q 0.0000 (last 0.0000 at 27544) est 721000027271 r 1.000 gap_red 1.0000 huge 7 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 110.1 nodes 28370 q 0.0000 (last 0.0000 at 27544) est 826000027231 r 1.000 gap_red 1.0000 huge 8 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 110.5 nodes 28472 q 0.0000 (last 0.0000 at 27544) est 928000027193 r 1.000 gap_red 1.0000 huge 9 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+MIP:   110.60s nodes     7776 open     999 lb 1.39270179e2 ub 1.44000000e2 lp_iters 140040 sb_iters 1075 sb_lps 74 sb_secs 2.28 node_iters 136915 (first 134569, lps 7843) heur_iters 12851 dive_iters 1333 lp_rows 2465 node_cut_secs 3.93 pool_len 24417 pool_idle 0
+TREER: t 110.8 nodes 28574 q 0.0000 (last 0.0000 at 27544) est 1030000027154 r 1.000 gap_red 1.0000 huge 10 need 24 newly 0/32898 w 0.0000/1.0000/0.0000
+TREER: t 111.1 nodes 28679 q 0.0000 (last 0.0000 at 27544) est 1135000027115 r 1.000 gap_red 1.0000 huge 11 need 24 newly 0/32898 w 0.0000/1.0000/0.0000

@@ -8,14 +8,17 @@ def fmt(x):
     return "-" if x is None else f"{x:.10g}"
 
 if (D / "res.jsonl").exists():
-    print("| 問題 | 設定 | 状態 | 時間 | 下界 | 暫定解 | ノード | 再スタート (根) | 木の中の再スタート (固定数) |")
-    print("|---|---|---|---|---|---|---|---|---|")
+    print("| 問題 | 設定 | 状態 | 時間 | 下界 | 暫定解 | ノード | 再スタート (根) | 木の中の再スタート (固定数) | 固定不足で見送り |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
     for l in open(D / "res.jsonl"):
         e = json.loads(l); r = e["result"]
         tree = [re.search(r"TREE restart: (\d+) newly", s).group(1) for s in r.get("restarts_tree", [])]
-        nroot = len(r.get("restart_lines", [])) - len(tree)
+        err = (D / "logs" / f"{e['cfg']}{'' if e['secs'] == 600 else int(e['secs'])}_{e['problem']}.err").read_text(errors="replace")
+        nall = len(re.findall(r"^MIP: restart \d+ \(", err, re.M))
+        nroot = nall - len(tree)
+        skips = err.count("skipped: newly fixed")
         st = "最適" if r.get("status") in ("optimal", "Optimal") else r.get("status")
-        print(f"| {e['problem']} | {e['cfg']} | {st} | {r.get('time', 0):.1f} | {fmt(r.get('bound'))} | {fmt(r.get('objective'))} | {r.get('nodes')} | {nroot} | {len(tree)} ({', '.join(tree)}) |")
+        print(f"| {e['problem']} | {e['cfg']} | {st} | {r.get('time', 0):.1f} | {fmt(r.get('bound'))} | {fmt(r.get('objective'))} | {r.get('nodes')} | {nroot} | {len(tree)} ({', '.join(tree)}) | {skips} |")
 
 if (D / "res58.jsonl").exists():
     res = defaultdict(dict)
