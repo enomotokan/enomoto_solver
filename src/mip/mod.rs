@@ -1235,9 +1235,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                             let z_orig = p.objective(&xn);
                             // 下界のずれは前処理後の問題と元の問題の目的値の定数の差で、後処理した (直す前の) 解 `x` で測る。
                             // 以前の式 (既定) は直した解 `xn` で測り、修復で目的値が上がった分まで下界を上げていた (根拠がなく、
-                            // 木が閉じていると下界が最適値を越えうる)。`ENOMOTO_MIP_FZ3_REPAIR_BOUND=1` (試作、既定では使わない) で
+                            // 木が閉じていると下界が最適値を越えうる)。`ENOMOTO_MIP_FZ3_REPAIR_BOUND` (2026-11-04 から既定、`=0` で以前の式) で
                             // `x` で測る (analysis/fuzz_tiny_classify_20261103.md)
-                            let shift = if env_str!("ENOMOTO_MIP_FZ3_REPAIR_BOUND").is_some_and(|v| v != "0") {
+                            let shift = if env_def!("ENOMOTO_MIP_FZ3_REPAIR_BOUND", "1").is_some() {
                                 p.objective(&x) - prob.objective(&xr)
                             } else {
                                 z_orig - prob.objective(&xr)
@@ -1250,7 +1250,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                                 );
                             }
                             r.best_bound += shift;
-                            if env_str!("ENOMOTO_MIP_FZ3_REPAIR_BOUND").is_some_and(|v| v != "0") {
+                            if env_def!("ENOMOTO_MIP_FZ3_REPAIR_BOUND", "1").is_some() {
                                 // 直した解は元の問題で実行可能なので、最適値はその値以下 (下界がそれを越えたら抑える)
                                 r.best_bound = r.best_bound.min(z_orig);
                             }
@@ -1740,8 +1740,8 @@ fn repair_postsolved(p: &MipProblem, x: &[f64], params: MipParams) -> Option<Vec
     }
     let secs = params.time_limit.max(tunable!("ENOMOTO_T_MIP_POSTSOLVE_REPAIR_SECS", 2.0, f64));
     // 時間の上限なし (`time_limit` が inf) だと `from_secs_f64` が panic する (fuzz_mixtiny の seed 58・189・230、
-    // analysis/fuzz_tiny_classify_20261103.md)。`ENOMOTO_MIP_FZ3_REPAIR_BOUND=1` (試作) では期限なしにする
-    let deadline = if env_str!("ENOMOTO_MIP_FZ3_REPAIR_BOUND").is_some_and(|v| v != "0") {
+    // analysis/fuzz_tiny_classify_20261103.md)。`ENOMOTO_MIP_FZ3_REPAIR_BOUND` (2026-11-04 から既定、`=0` で以前の形) では期限なしにする
+    let deadline = if env_def!("ENOMOTO_MIP_FZ3_REPAIR_BOUND", "1").is_some() {
         std::time::Duration::try_from_secs_f64(secs).ok().and_then(|d| t0.checked_add(d))
     } else {
         Some(t0 + std::time::Duration::from_secs_f64(secs))
@@ -4399,11 +4399,11 @@ pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f
     }
     // 緩める量には前処理の丸めの余裕 1e-9 (1 + |b|) を足す: 右辺 1 - 2e-9 を 1e-9 だけ緩めた 0.9999999989999999 は、整数の行の
     // 正規化 ([`normalize_integer_rows`] の `floor(b + 1e-9)`) の境目のわずかに下で 0 に丸められる (fuzz_tiny の seed 21)
-    // `ENOMOTO_MIP_MEM3_TINY_MARGIN` (試作、既定では使わない): 丸めの余裕を 1e-9 (1 + min(|b|, 1)) + 4 eps |b| にする (右辺の大きい行を
+    // `ENOMOTO_MIP_MEM3_TINY_MARGIN` (2026-11-04 から既定、`=0` で以前の 1e-9 (1 + |b|) に戻す): 丸めの余裕を 1e-9 (1 + min(|b|, 1)) + 4 eps |b| にする (右辺の大きい行を
     // 1e-9 |b| (右辺 5590 で 5.6e-6、許容誤差 1e-6 の数倍) 緩めない)。正規化の floor(b + 1e-9) の境目の心配は |b| ≤ 1 の行と同じに残る。
     // uccase12 では再スタートの後の前処理のプロービングがこの余裕で右辺 5000 前後の行を 5.6e-6 ずつ緩め、木の暫定解が元の問題で
     // 連続列の下限 0 を 1.1e-5 破っていた (analysis/uccase12_mem3_20261103.md)
-    let small = env_str!("ENOMOTO_MIP_MEM3_TINY_MARGIN").is_some();
+    let small = env_def!("ENOMOTO_MIP_MEM3_TINY_MARGIN", "1").is_some();
     let margin = |b: f64| if small { 1e-9 * (1.0 + b.abs().min(1.0)) + 4.0 * f64::EPSILON * b.abs() } else { 1e-9 * (1.0 + b.abs()) };
     let (mut nrel, mut wmax, mut mmax) = (0usize, 0.0f64, 0.0f64);
     for (i, &w) in used.iter().enumerate() {

@@ -1538,8 +1538,8 @@ fn pool_dse() -> bool {
     env_def!("ENOMOTO_MIP_POOL_DSE", "1").is_some()
 }
 
-/// `ENOMOTO_MIP_MEM2` (試作、既定では使わない): 開いたノードの持ち物を減らし、メモリに上限を置く (analysis/uccase12_mem2_20261103.md)。
-/// 値 `1` で全て、または次の文字の組み合わせ:
+/// `ENOMOTO_MIP_MEM2` (試作): 開いたノードの持ち物を減らし、メモリに上限を置く (analysis/uccase12_mem2_20261103.md)。
+/// 値 `1` で全て、または次の文字の組み合わせ。2026-11-04 から既定は `p` (analysis/mem_default_20261104.md、`=0` で以前の形):
 /// - `p`: ノードに保存する DSE 重みを番号なしの f32 の並び ([`NodeDse::Packed`]、番号は保存した基底から戻す) にする。
 /// - `s`: 共有の待ち行列に出すノード ([`SnapNode`]) の基底・DSE 重みを、同じ親の兄弟で `Arc` で共有する。
 /// - `b`: 開いたノード (各スレッドの待ち行列と共有の待ち行列) の持ち物の合計の目安が上限 ([`mem2_budget`]) を超えたら、深いノード
@@ -1547,7 +1547,7 @@ fn pool_dse() -> bool {
 /// - `d`: 上限の 1/2 を超えたら深さ優先に寄せる (潜りのノード数の上限と兄弟へ戻る下界の条件を外す)。
 /// - `l`: 潜りの兄弟に持たせる親の LP の LU (`dive_stack`) を、新しい `ENOMOTO_T_MIP_MEM2_LU_KEEP` (既定 8) 個までにする。
 fn mem2(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_MEM2").is_some_and(|v| v == "1" || v.contains(c))
+    env_def!("ENOMOTO_MIP_MEM2", "p").is_some_and(|v| v == "1" || v.contains(c))
 }
 
 /// `ENOMOTO_MIP_MEM2` の `b` の上限 [バイト]: `ENOMOTO_T_MIP_MEM2_BUDGET_MB` (> 0) があればその値、なければ使えるメモリ (cgroup の
@@ -3492,13 +3492,13 @@ fn tree_log() -> bool {
     env_str!("ENOMOTO_MIP_TREE_LOG").is_some()
 }
 
-/// `ENOMOTO_MIP_MEM1_SIBLU=K` (試作、既定では使わない。analysis/uccase12_mem1_20261103.md): 潜りの兄弟の一覧 (`dive_stack`) で
-/// 親の LP の LU キャッシュ ([`crate::simplex::mip_lp::LuSnapshot`]) を持つのを新しい方から K 個までにする (K = 0 なら持たない、
-/// `ENOMOTO_MIP_NO_SIBLING_LU` と同じ)。LU キャッシュは子の LP の Forrest-Tomlin の更新で写しが作られるので、兄弟ごとに別の
+/// `ENOMOTO_MIP_MEM1_SIBLU=K` (2026-11-04 から既定は K = 1、`=0` で以前の形 (全部持つ)。analysis/uccase12_mem1_20261103.md・mem_default_20261104.md): 潜りの兄弟の一覧 (`dive_stack`) で
+/// 親の LP の LU キャッシュ ([`crate::simplex::mip_lp::LuSnapshot`]) を持つのを新しい方から K 個までにする (持たないのは
+/// `ENOMOTO_MIP_NO_SIBLING_LU`)。LU キャッシュは子の LP の Forrest-Tomlin の更新で写しが作られるので、兄弟ごとに別の
 /// 分解 (uccase12 の 6.8 万行で 1 つ数十 MB) を潜りの深さの数だけ持つ。兄弟へは新しい方から戻るので、古い兄弟の LU はほとんど使わない
 fn mem1_siblu_keep() -> Option<usize> {
     static V: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-    *V.get_or_init(|| env_str!("ENOMOTO_MIP_MEM1_SIBLU").and_then(|v| v.parse().ok()))
+    *V.get_or_init(|| env_def!("ENOMOTO_MIP_MEM1_SIBLU", "1").and_then(|v| v.parse().ok()))
 }
 
 /// `ENOMOTO_MIP_MEM1_SIBLU` の数え上げ (全スレッドの和): [LU を持つ兄弟の数の最大 (スレッドごとの最大の最大), LU 付きで積んだ数,
@@ -8026,9 +8026,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let sib = self.queue.push(sec);
             // 兄弟へ戻ったときのために親の LP の LU を一緒に持つ (共有なので写さない)
             let sib_lu = if env_str!("ENOMOTO_MIP_NO_SIBLING_LU").is_none() { self.lp.lu_snapshot() } else { None };
-            // `ENOMOTO_MIP_MEM1_SIBLU=K` (試作、既定では使わない): LU を持つのは新しい方から K 個の兄弟だけにする
-            // `ENOMOTO_MIP_MEM1_SIBLU_ROWS=R` (既定 0): LP の行が R 以上のときだけ間引く (小さい LP の LU は安く、古い兄弟へも戻る)
-            if let Some(k) = mem1_siblu_keep().filter(|_| self.lp.num_rows() >= tunable!("ENOMOTO_MIP_MEM1_SIBLU_ROWS", 0usize, usize)) {
+            // `ENOMOTO_MIP_MEM1_SIBLU=K` (既定 1): LU を持つのは新しい方から K 個の兄弟だけにする
+            // `ENOMOTO_MIP_MEM1_SIBLU_ROWS=R` (既定 1000): LP の行が R 以上のときだけ間引く (小さい LP の LU は安く、古い兄弟へも戻る)
+            if let Some(k) = mem1_siblu_keep().filter(|_| self.lp.num_rows() >= tunable!("ENOMOTO_MIP_MEM1_SIBLU_ROWS", 1000usize, usize)) {
                 mem1_siblu_trim(&mut self.dive_stack, k.saturating_sub(1), sib_lu.is_some());
             }
             self.dive_stack.push((sib.0, sib.1, sib_lu));
