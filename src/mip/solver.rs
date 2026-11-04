@@ -5349,7 +5349,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 _ => None,
             };
-            match built.or_else(|| if skip_restart_basis { None } else { saved.and_then(|saved| restart_basis_for(&self.lp, self.p.n, saved)) }) {
+            // `ENOMOTO_MIP_TREE3_RBASIS` (試作、既定では使わない。analysis/tree_close3_20261104.md): 再スタートの前の基底で合った行が
+            // `ENOMOTO_T_MIP_TREE3_RBASIS_MATCH` (0.9) x 行の数より少なければ使わない (全スラック基底から解く)。mzzv11 では 3589 / 8545 行
+            // しか合わない基底から 66919 反復 44.7 秒かかっていた (最初の根の LP は 9375 反復 3.5 秒、HiGHS の再スタートの後は 4270 反復)
+            let rbasis_min = env_str!("ENOMOTO_MIP_TREE3_RBASIS").is_some_and(|v| v != "0").then(|| tunable!("ENOMOTO_T_MIP_TREE3_RBASIS_MATCH", 0.9, f64) * self.lp.num_rows() as f64);
+            let built = built.or_else(|| if skip_restart_basis { None } else { saved.and_then(|saved| restart_basis_for(&self.lp, self.p.n, saved)) });
+            let built = match (built, rbasis_min) {
+                (Some((_, matched)), Some(mn)) if (matched as f64) < mn => {
+                    if self.params.verbose {
+                        eprintln!("MIP: root LP basis from before the restart: {matched} of {} rows matched; not used (ENOMOTO_MIP_TREE3_RBASIS)", self.lp.num_rows());
+                    }
+                    None
+                }
+                (b, _) => b,
+            };
+            match built {
                 Some((b, matched)) => {
                     if self.params.verbose {
                         eprintln!("MIP: root LP basis from before the restart: {matched} of {} rows matched", self.lp.num_rows());
