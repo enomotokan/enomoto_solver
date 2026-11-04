@@ -33,3 +33,9 @@
 
 - 既定の `ENOMOTO_MIP_SUBMIP_HIGHS` の `p` でサブ MIP の前処理には `submip = false` が渡るので、`m` でもサブ MIP の前処理は小さい余裕のまま (qiu の固定はすべてそこ)。
   qiu の遅れは、小さい余裕で根の RENS が速く解を返し、もうすぐ −115.25 を見つける解発見スレッドを止めてしまうこと。`m` を意図どおりにする試作は uccase12 の誤った暫定解を戻すので使わない。
+
+- **訂正 (2026-11-04、`analysis/qiu_margin_20261104.md`)**: 既定 `m` はサブ MIP の前処理で以前の余裕になっていなかった (既定の `ENOMOTO_MIP_SUBMIP_HIGHS` の `p` で
+  サブ MIP の前処理に `submip = false` が渡る)。86f8b130 の後の qiu 6/6 は運で、同じ機械の既定は 4/6。qiu の遅れの仕組みは「サブ MIP の余裕が根の RENS の
+  時間を変え、解発見スレッドを止める時刻との競争で木の始めの暫定解が −115.25 か −27.65 に分かれる」で、余裕が LP を締めるのではない。
+  サブ MIP を本当に以前の余裕にする形 (`ENOMOTO_MIP_QIU_MARGIN_DEPTH=1`) は uccase12 の誤った暫定解を戻すので使わない。直すのは解発見スレッドの止め方
+  (試作 `ENOMOTO_MIP_QIU_FIND_STOP_GAP=1`、qiu 6/6・21.7 秒、uccase12 も正しい)。

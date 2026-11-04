@@ -10291,3 +10291,5 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 記録は `analysis/mem_default_20261104.md`。
 - 追記 (同日): `ENOMOTO_MIP_MEM3_TINY_MARGIN` の既定を `m` に直す (小さい余裕は外側の求解と再スタートだけ、サブ MIP は以前の余裕)。サブ MIP でも小さくすると
   qiu が系統的に遅くなった (bench23・bench24)。
+- 訂正 (同日): `m` は既定の構成ではサブ MIP の前処理でも小さい余裕のまま (サブ MIP の前処理に `submip = false` が渡る) で、qiu の回復は運だった。
+  qiu の遅れの元は解発見スレッドを止める時刻の競争 (`analysis/qiu_margin_20261104.md`、試作 `ENOMOTO_MIP_QIU_FIND_STOP_GAP`)。
