@@ -122,6 +122,13 @@ CFGS = {
     "preall4": {"ENOMOTO_MIP_MEMB": "0", "ENOMOTO_MIP_MEMC": "0", "ENOMOTO_MIP_MEMCAP": "0", "ENOMOTO_MIP_TREE2_FORCEQ": "0", "ENOMOTO_MIP_QIU_FIND_STOP_GAP": "0"},
     # 報告の下界の切り上げの既定化 (2026-11-04、analysis/bound_step_20261104.md) の後の既定から戻すのは "prebs"
     "prebs": {"ENOMOTO_MIP_BOUND_STEP": "0"},
+    # 2026-11-04 の 600 秒の測り直しで遅くなった 9 問の切り分け: 前の既定 (preall4 + prebs) と 1 つずつ戻した形
+    "preall4bs": {"ENOMOTO_MIP_MEMB": "0", "ENOMOTO_MIP_MEMC": "0", "ENOMOTO_MIP_MEMCAP": "0", "ENOMOTO_MIP_TREE2_FORCEQ": "0", "ENOMOTO_MIP_QIU_FIND_STOP_GAP": "0", "ENOMOTO_MIP_BOUND_STEP": "0"},
+    "nomem3": {"ENOMOTO_MIP_MEMB": "0", "ENOMOTO_MIP_MEMC": "0", "ENOMOTO_MIP_MEMCAP": "0"},
+    "nomemcap": {"ENOMOTO_MIP_MEMCAP": "0"},
+    "noforceq": {"ENOMOTO_MIP_TREE2_FORCEQ": "0"},
+    "nofstop": {"ENOMOTO_MIP_QIU_FIND_STOP_GAP": "0"},
+    "nobs": {"ENOMOTO_MIP_BOUND_STEP": "0"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
