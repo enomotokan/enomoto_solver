@@ -9,9 +9,9 @@ sys.path.insert(0, str(WT / "scripts"))
 sys.path.insert(0, str(WT / "analysis/halve_submip_20261030"))
 import run_miplib_benchmark as rb  # noqa: E402
 from run import CFGS  # noqa: E402
-TL = 600
+TL = int(os.environ.get("RUN_CFG_TL", "600"))  # 時間の上限 (既定 600 秒。1200 秒の回は出力の名前に _1200 が付く)
 cfg, p = sys.argv[1], sys.argv[2]
-OUT = D / f"cfg_{cfg}_{p}.jsonl"
+OUT = D / (f"cfg_{cfg}_{p}.jsonl" if TL == 600 else f"cfg_{cfg}_{p}_{TL}.jsonl")
 mps = rb.fetch(p, WT / ".miplib_cache")
 env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
 env.update(ENOMOTO_MIP_THREADS="4", **CFGS[cfg])
