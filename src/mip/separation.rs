@@ -560,7 +560,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let m0 = self.lp.num_rows();
         let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = cuts.iter().map(|c| (c.coefs.clone(), f64::NEG_INFINITY, c.rhs)).collect();
         self.lp.add_rows(&rows);
-        let st = self.lp.solve(&SolveLimits { iteration_limit: 10 * root_iters.max(100) + 10_000, cutoff: f64::INFINITY, deadline: self.deadline });
+        // `ENOMOTO_MIP_TREE3_CLIQUECAP` (試作、既定では使わない。analysis/tree_close3_20261104.md): 試しの LP に時間の上限
+        // max(`ENOMOTO_T_MIP_TREE3_CLIQUECAP_MIN` (1 秒), `ENOMOTO_T_MIP_TREE3_CLIQUECAP_MULT` (2) x 根の LP の秒) を置く (超えたら使わない)。
+        // neos-3216931-puriri ではこの LP 1 回が 285〜388 秒 (根の LP は 11.7 秒) かかり、伸びは 0 で使われなかった
+        let deadline = if env_str!("ENOMOTO_MIP_TREE3_CLIQUECAP").is_some_and(|v| v != "0") {
+            let secs = tunable!("ENOMOTO_T_MIP_TREE3_CLIQUECAP_MIN", 1.0, f64).max(tunable!("ENOMOTO_T_MIP_TREE3_CLIQUECAP_MULT", 2.0, f64) * self.root_lp_secs);
+            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs.min(1e6));
+            Some(self.deadline.map_or(d, |g| g.min(d)))
+        } else {
+            self.deadline
+        };
+        let st = self.lp.solve(&SolveLimits { iteration_limit: 10 * root_iters.max(100) + 10_000, cutoff: f64::INFINITY, deadline });
+        if self.params.verbose && st != LpStatus::Optimal && deadline != self.deadline {
+            eprintln!("MIP: clique fallback: the trial LP stopped ({st:?}, ENOMOTO_MIP_TREE3_CLIQUECAP)");
+        }
         let obj1 = if st == LpStatus::Optimal { self.lp.objective() } else { obj0 };
         let nfrac1 = if st == LpStatus::Optimal { self.fractional(&self.lp.col_values()).len() } else { nfrac0 };
         let mut remove = vec![false; self.lp.num_rows()];

@@ -6743,9 +6743,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if ret_dse {
                         crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
-                    let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+                    // `ENOMOTO_MIP_TREE3_BGCAP` (試作、既定では使わない。analysis/tree_close3_20261104.md): この LP に時間の上限
+                    // max(`ENOMOTO_T_MIP_TREE3_BGCAP_MIN` (1 秒), `ENOMOTO_T_MIP_TREE3_BGCAP_MULT` (1) x 根の LP の秒) を置く (超えたら下の
+                    // 既定の道で元のカットに戻す)。satellites2-60-fs では 157395 反復 359 秒 (根の LP は 62 秒) で時間の上限に当たり、木に入らなかった
+                    let bg_deadline = if env_str!("ENOMOTO_MIP_TREE3_BGCAP").is_some_and(|v| v != "0") {
+                        let secs = tunable!("ENOMOTO_T_MIP_TREE3_BGCAP_MIN", 1.0, f64).max(tunable!("ENOMOTO_T_MIP_TREE3_BGCAP_MULT", 1.0, f64) * self.root_lp_secs);
+                        let d = Instant::now() + std::time::Duration::from_secs_f64(secs.min(1e6));
+                        Some(self.deadline.map_or(d, |g| g.min(d)))
+                    } else {
+                        self.deadline
+                    };
+                    let st = self.lp.solve(&SolveLimits { deadline: bg_deadline, ..Default::default() });
                     if ret_dse {
                         crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if self.params.verbose && st != LpStatus::Optimal && bg_deadline != self.deadline {
+                        eprintln!("MIP: background cuts: the LP with the replaced cuts stopped ({st:?}, ENOMOTO_MIP_TREE3_BGCAP)");
                     }
                     let new = self.lp.objective() + self.p.offset;
                     if self.params.verbose {

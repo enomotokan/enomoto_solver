@@ -15,7 +15,10 @@ for p in sys.argv[4:]:
     env["ENOMOTO_MIP_THREADS"] = "4"
     env["ENOMOTO_MIP_LOG"] = "1"; env["ENOMOTO_BENCH_HIGHS_LOG"] = "1"
     env.update(CFGS.get(cfg, {}))
-    log = D / "logs" / f"{p}_{solver}_{cfg}_{tl}.log"
+    # 走っている間は追跡されない場所に書き、終わってから logs/ に移す (途中で git の rebase がファイルを作り直すと、書いている
+    # ファイルが消えてログが失われていた)
+    final = D / "logs" / f"{p}_{solver}_{cfg}_{tl}.log"
+    log = Path(os.environ.get("TREE3_TMP", "/tmp")) / final.name
     t0 = time.time()
     with open(log, "w") as lf:
         pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), f"--worker-{solver}", str(mps),
@@ -23,6 +26,8 @@ for p in sys.argv[4:]:
     if solver == "highs":  # HiGHS のログは標準出力に出る
         with open(log, "a") as lf:
             lf.write(pr.stdout)
+    import shutil
+    shutil.move(str(log), str(final))
     try:
         res = json.loads([l for l in pr.stdout.splitlines() if l.startswith("{")][-1])
     except Exception:  # noqa: BLE001
