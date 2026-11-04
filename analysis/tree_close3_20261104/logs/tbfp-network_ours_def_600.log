@@ -12,3 +12,57 @@ MIP: root LP 2.3261535494e1 (1 iters, 0.12s)
 MIP: robust cut LP cap: size false, double false, progress true
 MCF detect: rows 2436 cols 72747 | flow cands 2436 flow rows 2406 commodities 1 cap cands 30 arcs 30 nodes 2406 incons 0.93 undirected | fail 'inconsistent' | networks [] fc_network false | 0.005s
 MIP: FJ problem (FJ_P3): rows 2436 -> 2436, free columns 72747 -> 72747, 0 continuous bounds tightened (2.33s)
+MIP: cut selection probe: compared at 1 rounds (pool stopped early), probe wall 39.75s (budget 29.7s)
+MIP: cut selection probe (6 rounds): default 32 cuts gain 1.923704e-1 (4.69s), pool 9 cuts gain 1.899808e-1 (8.18s) -> default (rule rate, probe 12.88s in total, 39.87s)
+MIP: cut round 0: cut LP stopped by the progress check at iter 1250 (cap 1000): window gain -1.530e-7, gain from the start 1.524e-1 (1251 iters)
+MIP: cut round 0: LP status IterationLimit, removed the cuts (Optimal; cut LP 1251 iters 0.45s, re-solve 1 iters 0.02s, 42.57s)
+MIP: cut round 0: the cut LP hit the per-LP cap (IterationLimit); stop (ENOMOTO_MIP_CUT_LP_CAP_STOP)
+MIP: clique graph: 2158717 edges (6612 from rows, probing implications 2168370)
+MIP: clique fallback: no violated clique cuts; not used (0.58s)
+MIP: cut loop done: 15 cuts added, 0 in LP, pool 204 cuts (4316700 nonzeros), obj 2.3261535494e1 -> 2.3261535494e1
+MIP:   global fixed integers 0 of 72747 (newly 0 since the root LP)
+MIP: new incumbent 8.4378472223e1 at node 0 (43.20s) [Local-MIP]
+MIP: Local-MIP solution accepted true (43.20s)
+MIP: find thread started (budget 20.0s, 43.32s)
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1000, work_iters: 20000, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 1 iters)
+MIP: the incumbent is a poor feasibility jump solution; background cuts use 1 threads
+MIP: background cuts: basis with the column values not passed (root LP 0.05s)
+MIP: early root reduced costs stored (0 newly fixed integer columns, 43.42s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+MIP: root heuristic shifting: none (0.00s)
+MIP: root heuristic int shifting: none (0.00s)
+MIP: root heuristic randomized rounding: none (0.12s)
+MCF detect: rows 2436 cols 72747 | flow cands 2436 flow rows 2406 commodities 1 cap cands 30 arcs 30 nodes 2406 incons 0.93 undirected | fail 'inconsistent' | networks [] fc_network false | 0.005s
+MIP:   interior rounding: 1 interior points, vertex true (1.00s)
+MIP:   interior rounding: 2 rounded points tried, found false
+MIP: root heuristic interior rounding: none (1.17s)
+MIP: find thread solution: accepted false (incumbent Some(84.37847222250001)) (44.72s, node 0)
+MIP:   root reduced cost: 65138 lurking bounds, fixing rate 0.50
+MIP:   parallel sub-MIP started (root reduced cost): 36362 free columns of 72747
+MIP: root heuristic root reduced cost: none (0.23s)
+MIP:   parallel sub-MIP started (LP face): 7609 free columns of 72747
+MIP:   LP face: 65138 of 72747 integer columns fixed, found false
+MIP: root heuristic LP face: none (0.07s)
+MIP:   RENS: fixing rate 0.80 (target 0.80, 0 backtracks)
+MIP:   parallel sub-MIP started (RENS): 14543 free columns of 72747
+MIP:   no-incumbent RENS (sub-MIP depth 0) try 1: target 0.80, fixing rate 0.80, found false (45.72s)
+MIP: root heuristic RENS: none (0.69s)
+MIP:   locks: fixing rate 0.65
+MIP:   parallel sub-MIP (LP face): status Infeasible, nodes 0, objective None, 1.61s
+MIP:   parallel sub-MIP (locks): time limit 547.46s cut to the remaining 547.44s
+MIP:   parallel sub-MIP started (locks): 25450 free columns of 72747
+MIP: root heuristic locks: none (0.91s)
+MIP:   clique: fixing rate 0.90
+MIP:   parallel sub-MIP (locks): status Optimal, nodes 0, objective Some(25.88888888869999), 34.07s
+MIP:   global fixed integers 30640 of 72747 (newly 30640 since the root LP)
+MIP: new incumbent 2.5888888889e1 at node 0 (80.71s) [locks]
+MIP:   parallel sub-MIP (clique): time limit 546.71s cut to the remaining 513.36s
+MIP:   parallel sub-MIP started (clique): 7192 free columns of 72747
+MIP: early restart: 30640 newly fixed integer columns after clique (80.71s)
+MIP: root heuristic clique: none (34.08s)
+MIP: root heuristic vbounds (loose): skipped (early restart)
+MIP: root heuristic vbounds (tight): skipped (early restart)
+MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.04s
+MIP:   parallel sub-MIP (RENS): status Infeasible, nodes 13, objective None, 58.15s
