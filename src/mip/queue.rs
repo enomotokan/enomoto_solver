@@ -198,6 +198,162 @@ impl NodeDse {
     }
 }
 
+/// `ENOMOTO_MIP_MEMC` (試作、analysis/memcap_c_20261104.md): 境界の変更の並びを u32 の並びに詰める (戻すと元と同じ並び)。
+/// 1 つの変更は 1 語 (列 << 4 | 上限か << 3 | sym << 2 | 値の種類) で、値の種類は 0 = 0.0、1 = 1.0、2 = 後ろの 2 語に f64 のビット。
+/// 2 値の列の固定 (orbital fixing の固定が子へ積み重なる supportcase18 では 1 ノード数百個) は 24 → 4 バイトになる。
+/// 列の番号が 2^28 以上なら `None` (詰めない)。
+pub fn pack_changes(ch: &[BoundChange]) -> Option<Vec<u32>> {
+    let mut out = Vec::with_capacity(ch.len());
+    for c in ch {
+        if c.col >= 1 << 28 {
+            return None;
+        }
+        let vb = c.value.to_bits();
+        let vk = if vb == 0.0f64.to_bits() {
+            0
+        } else if vb == 1.0f64.to_bits() {
+            1
+        } else {
+            2
+        };
+        out.push((c.col as u32) << 4 | (c.upper as u32) << 3 | (c.sym as u32) << 2 | vk);
+        if vk == 2 {
+            out.push(vb as u32);
+            out.push((vb >> 32) as u32);
+        }
+    }
+    out.shrink_to_fit();
+    Some(out)
+}
+
+/// [`pack_changes`] で詰めた並びを戻す。
+pub fn unpack_changes(w: &[u32]) -> Vec<BoundChange> {
+    let mut out = Vec::with_capacity(w.len());
+    let mut i = 0;
+    while i < w.len() {
+        let x = w[i];
+        i += 1;
+        let value = match x & 3 {
+            0 => 0.0,
+            1 => 1.0,
+            _ => {
+                let b = w[i] as u64 | (w[i + 1] as u64) << 32;
+                i += 2;
+                f64::from_bits(b)
+            }
+        };
+        out.push(BoundChange { col: (x >> 4) as usize, upper: x & 8 != 0, value, sym: x & 4 != 0 });
+    }
+    out
+}
+
+/// `ENOMOTO_MIP_MEMC` (試作、analysis/memcap_c_20261104.md): 共有の待ち行列に出すノード (`SnapNode`) に付ける基底 (列と元の行の状態) を
+/// 詰めた形。列が多く行が少ない問題 (supportcase18: 列 13410・行 240) では、状態の並び (1 変数 1 バイト) がノードの持ち物の大半に
+/// なる。非基底で下限にある列がほとんどなので、列と行それぞれで最も多い状態を既定にして、それ以外の (番号, 状態) だけを持つ
+/// (`Sparse`、1 つ 5 バイト)。例外が多いときは 1 変数 2 ビットの並び (`Bits`) にする (小さい方)。
+#[derive(Clone, Debug)]
+pub enum SparseBasis {
+    Sparse { n: u32, m: u32, dcol: u8, drow: u8, idx: Vec<u32>, st: Vec<u8> },
+    Bits { n: u32, m: u32, bits: Vec<u8> },
+}
+
+fn vs_code(s: super::lp::VarStatus) -> u8 {
+    use super::lp::VarStatus::*;
+    match s {
+        Basic => 0,
+        Lower => 1,
+        Upper => 2,
+        Zero => 3,
+    }
+}
+
+fn vs_of(c: u8) -> super::lp::VarStatus {
+    use super::lp::VarStatus::*;
+    match c & 3 {
+        0 => Basic,
+        1 => Lower,
+        2 => Upper,
+        _ => Zero,
+    }
+}
+
+impl SparseBasis {
+    /// 列の状態 `col` と行の状態 `row` を詰める。
+    pub fn encode(col: &[super::lp::VarStatus], row: &[super::lp::VarStatus]) -> SparseBasis {
+        let most = |v: &[super::lp::VarStatus]| -> u8 {
+            let mut c = [0usize; 4];
+            for &s in v {
+                c[vs_code(s) as usize] += 1;
+            }
+            (0..4u8).max_by_key(|&k| c[k as usize]).unwrap_or(1)
+        };
+        let (dcol, drow) = (most(col), most(row));
+        let n = col.len();
+        let exc = col.iter().filter(|&&s| vs_code(s) != dcol).count() + row.iter().filter(|&&s| vs_code(s) != drow).count();
+        let nt = n + row.len();
+        if exc * 5 <= nt.div_ceil(4) {
+            let mut idx = Vec::with_capacity(exc);
+            let mut st = Vec::with_capacity(exc);
+            for (j, &s) in col.iter().enumerate() {
+                if vs_code(s) != dcol {
+                    idx.push(j as u32);
+                    st.push(vs_code(s));
+                }
+            }
+            for (i, &s) in row.iter().enumerate() {
+                if vs_code(s) != drow {
+                    idx.push((n + i) as u32);
+                    st.push(vs_code(s));
+                }
+            }
+            SparseBasis::Sparse { n: n as u32, m: row.len() as u32, dcol, drow, idx, st }
+        } else {
+            let mut bits = vec![0u8; nt.div_ceil(4)];
+            for (j, &s) in col.iter().chain(row.iter()).enumerate() {
+                bits[j >> 2] |= vs_code(s) << ((j & 3) * 2);
+            }
+            SparseBasis::Bits { n: n as u32, m: row.len() as u32, bits }
+        }
+    }
+
+    /// 詰めた基底を (列の状態, 行の状態) に戻す。
+    pub fn decode(&self) -> (Vec<super::lp::VarStatus>, Vec<super::lp::VarStatus>) {
+        match self {
+            SparseBasis::Sparse { n, m, dcol, drow, idx, st } => {
+                let n = *n as usize;
+                let mut col = vec![vs_of(*dcol); n];
+                let mut row = vec![vs_of(*drow); *m as usize];
+                for (&j, &s) in idx.iter().zip(st.iter()) {
+                    let j = j as usize;
+                    if j < n {
+                        col[j] = vs_of(s);
+                    } else {
+                        row[j - n] = vs_of(s);
+                    }
+                }
+                (col, row)
+            }
+            SparseBasis::Bits { n, m, bits } => {
+                let n = *n as usize;
+                let nt = n + *m as usize;
+                let all: Vec<super::lp::VarStatus> = (0..nt).map(|j| vs_of(bits[j >> 2] >> ((j & 3) * 2))).collect();
+                let row = all[n..].to_vec();
+                let mut col = all;
+                col.truncate(n);
+                (col, row)
+            }
+        }
+    }
+
+    /// 持ち物の大きさ [バイト] (目安)。
+    pub fn bytes(&self) -> usize {
+        match self {
+            SparseBasis::Sparse { idx, st, .. } => idx.capacity() * 4 + st.capacity() + 64,
+            SparseBasis::Bits { bits, .. } => bits.capacity() + 48,
+        }
+    }
+}
+
 /// 強分岐の子の LP 値から得た凸性の直線 (列 `col` の上の子 (`up`) か下の子)。祖先のノードの LP 値 `z`・列の値 `v`・1 単位あたりの
 /// 増分 `per` から、x_j <= t (下) の LP の値は z + (v − t)·per 以上 (上なら x_j >= t で z + (t − v)·per 以上)。子孫のノードの LP は
 /// 祖先より制約が多いので、子孫でもこの下界は成り立つ
@@ -642,5 +798,50 @@ mod tests {
         assert_eq!(*n.basis.unwrap(), *b);
         let n = q.pop_best().unwrap();
         assert_eq!(*n.basis.unwrap(), *b);
+    }
+}
+
+#[cfg(test)]
+mod memc_tests {
+    use super::*;
+    use crate::mip::lp::VarStatus;
+
+    #[test]
+    fn changes_roundtrip() {
+        let ch = vec![
+            BoundChange { col: 3, upper: true, value: 0.0, sym: false },
+            BoundChange { col: 13409, upper: false, value: 1.0, sym: true },
+            BoundChange { col: 7, upper: false, value: -0.0, sym: false },
+            BoundChange { col: 1 << 20, upper: true, value: 2.5, sym: true },
+        ];
+        let w = pack_changes(&ch).unwrap();
+        let back = unpack_changes(&w);
+        assert_eq!(back.len(), ch.len());
+        for (a, b) in ch.iter().zip(back.iter()) {
+            assert_eq!((a.col, a.upper, a.sym, a.value.to_bits()), (b.col, b.upper, b.sym, b.value.to_bits()));
+        }
+        assert!(pack_changes(&[BoundChange { col: 1 << 28, upper: true, value: 0.0, sym: false }]).is_none());
+    }
+
+    #[test]
+    fn basis_roundtrip() {
+        use VarStatus::*;
+        // ほとんど下限 (Sparse になる)
+        let mut col = vec![Lower; 1000];
+        col[5] = Basic;
+        col[17] = Upper;
+        col[999] = Zero;
+        let row = vec![Basic, Lower, Basic, Upper];
+        let p = SparseBasis::encode(&col, &row);
+        assert!(matches!(p, SparseBasis::Sparse { .. }));
+        assert_eq!(p.decode(), (col.clone(), row.clone()));
+        // 混ざっている (Bits になる)
+        let col: Vec<VarStatus> = (0..37).map(|j| [Basic, Lower, Upper, Zero][j * 7 % 4]).collect();
+        let row: Vec<VarStatus> = (0..11).map(|j| [Upper, Basic, Zero, Lower][j % 4]).collect();
+        let p = SparseBasis::encode(&col, &row);
+        assert!(matches!(p, SparseBasis::Bits { .. }));
+        assert_eq!(p.decode(), (col, row));
+        let p = SparseBasis::encode(&[], &[]);
+        assert_eq!(p.decode(), (vec![], vec![]));
     }
 }

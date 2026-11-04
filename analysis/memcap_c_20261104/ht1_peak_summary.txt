@@ -1,0 +1,105 @@
+heaptrack ht1 (supportcase18、既定、200 秒、diag_worker・ログつき) の PEAK MEMORY CONSUMERS の上位 12 (src の枠だけ)。
+total runtime: 201.69s.
+calls to allocation functions: 9305739 (46138/s)
+peak heap memory consumption: 2.85G
+peak RSS (including heaptrack overhead): 3.57G
+
+1.18G peak memory consumed over 88694 calls from
+    at /home/user/enomoto_solver/src/lib.rs:122
+    at /home/user/enomoto_solver/src/lib.rs:168
+    at /home/user/enomoto_solver/src/mip/solver.rs:1337
+    at src/mip/solver.rs:14202
+    at src/mip/solver.rs:13882
+    at src/mip/solver.rs:6678
+    at src/mip/solver.rs:3413
+    at src/mip/solver.rs:2957
+
+1.02G peak memory consumed over 61512 calls from
+    at /home/user/enomoto_solver/src/lib.rs:122
+    at /home/user/enomoto_solver/src/lib.rs:168
+    at /home/user/enomoto_solver/src/mip/solver.rs:1330
+    at /home/user/enomoto_solver/src/mip/solver.rs:1334
+    at src/mip/solver.rs:14202
+    at src/mip/solver.rs:13882
+    at src/mip/solver.rs:6678
+    at src/mip/solver.rs:3413
+
+333.10M peak memory consumed over 1296596 calls from
+    at /home/user/enomoto_solver/src/mip/solver.rs:8003
+    at src/mip/solver.rs:8022
+    at src/mip/solver.rs:3413
+    at src/mip/solver.rs:2957
+    at /home/user/enomoto_solver/src/mip/solver.rs:13816
+    at /home/user/enomoto_solver/src/cancel.rs:37
+    at src/mip/solver.rs:13816
+    at library/alloc/src/boxed.rs:2275
+
+46.73M peak memory consumed over 2990 calls from
+    at /home/user/enomoto_solver/src/lib.rs:122
+    at /home/user/enomoto_solver/src/lib.rs:168
+    at /home/user/enomoto_solver/src/mip/solver.rs:1330
+    at /home/user/enomoto_solver/src/mip/solver.rs:9923
+    at src/mip/solver.rs:3413
+    at src/mip/solver.rs:2957
+    at /home/user/enomoto_solver/src/mip/solver.rs:13816
+    at /home/user/enomoto_solver/src/cancel.rs:37
+
+43.08M peak memory consumed over 65 calls from
+    at /home/user/enomoto_solver/src/lib.rs:122
+    at /home/user/enomoto_solver/src/lib.rs:168
+    at /home/user/enomoto_solver/src/mip/problem.rs:38
+    at src/mip/solver.rs:3275
+    at /home/user/enomoto_solver/src/mip/solver.rs:3275
+    at src/mip/solver.rs:2957
+    at /home/user/enomoto_solver/src/mip/solver.rs:13816
+    at /home/user/enomoto_solver/src/cancel.rs:37
+
+42.09M peak memory consumed over 233869 calls from
+    at /home/user/enomoto_solver/src/lib.rs:122
+    at /home/user/enomoto_solver/src/lib.rs:168
+    at /home/user/enomoto_solver/src/simplex/slope_intercept_dual.rs:1083
+    at src/simplex/slope_intercept_dual.rs:1079
+    at src/simplex/slope_intercept_dual.rs:5437
+    at src/simplex/slope_intercept_dual.rs:3827
+    at /home/user/enomoto_solver/src/simplex/slope_intercept_dual.rs:3765
+    at /home/user/enomoto_solver/src/simplex/slope_intercept_dual.rs:3751
+
+41.20M peak memory consumed over 942 calls from
+    at /home/user/enomoto_solver/src/lib.rs:122
+    at /home/user/enomoto_solver/src/lib.rs:168
+    at /home/user/enomoto_solver/src/mip/separation.rs:2343
+    at src/mip/solver.rs:4582
+    at src/mip/solver.rs:3413
+    at src/mip/solver.rs:2957
+    at /home/user/enomoto_solver/src/mip/solver.rs:13816
+    at /home/user/enomoto_solver/src/cancel.rs:37
+
+35.83M peak memory consumed over 92931 calls from
+    at /home/user/enomoto_solver/src/lib.rs:122
+    at /home/user/enomoto_solver/src/lib.rs:168
+    at /home/user/enomoto_solver/src/mip/lp.rs:25
+    at /home/user/enomoto_solver/src/simplex/mip_lp.rs:530
+    at /home/user/enomoto_solver/src/mip/lp_api.rs:136
+    at src/mip/solver.rs:7981
+    at src/mip/solver.rs:3413
+    at src/mip/solver.rs:2957
+
+19.88M peak memory consumed over 14638 calls from
+    at /home/user/enomoto_solver/src/lib.rs:122
+    at /home/user/enomoto_solver/src/lib.rs:168
+    at /home/user/enomoto_solver/src/mip/conflict_pool.rs:105
+    at src/mip/solver.rs:12285
+    at src/mip/solver.rs:11310
+    at src/mip/solver.rs:11239
+    at src/mip/heuristics.rs:186
+    at src/mip/heuristics.rs:129
+
+14.36M peak memory consumed over 66 calls from
+    at /home/user/enomoto_solver/src/lib.rs:122
+    at /home/user/enomoto_solver/src/lib.rs:168
+    at /home/user/enomoto_solver/src/mip/problem.rs:35
+    at src/mip/solver.rs:3275
+    at /home/user/enomoto_solver/src/mip/solver.rs:3275
+    at src/mip/solver.rs:2957
+    at /home/user/enomoto_solver/src/mip/solver.rs:13816
+    at /home/user/enomoto_solver/src/cancel.rs:37

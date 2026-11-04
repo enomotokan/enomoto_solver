@@ -1412,11 +1412,17 @@ pub(crate) struct SnapNode {
     /// `ENOMOTO_MIP_MEMB` の `c` (試作): 共有の待ち行列にある間、`basis` を 2 ビットに詰めて持つ ([`PoolNodes::push`] で詰め、
     /// [`PoolNodes::remove`] で戻す)
     pbasis: Option<std::sync::Arc<(crate::mip::lp::PackedStatus, crate::mip::lp::PackedStatus)>>,
+    /// `ENOMOTO_MIP_MEMC` (試作): `changes` を詰めたもの ([`super::queue::pack_changes`])。あれば `changes` は空で、
+    /// [`Self::into_open`] で戻す
+    changes_p: Option<Vec<u32>>,
+    /// `ENOMOTO_MIP_MEMC` (試作): `basis` を詰めたもの ([`super::queue::SparseBasis`])。あれば `basis` は `None` で、
+    /// [`Solver::open_from_pool`] で戻す
+    basis_p: Option<super::queue::SparseBasis>,
 }
 
 impl SnapNode {
     fn of(n: &OpenNode) -> Self {
-        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None }
+        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None }
     }
     /// [`Self::of`] に、親の LP の基底の列と最初の `m` 行 (元の行) を付ける。
     fn of_with_basis(n: &OpenNode, m: usize) -> Self {
@@ -1435,7 +1441,11 @@ impl SnapNode {
         s
     }
     fn into_open(self) -> OpenNode {
-        OpenNode { changes: self.changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None }
+        let changes = match &self.changes_p {
+            Some(w) => super::queue::unpack_changes(w),
+            None => self.changes,
+        };
+        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None }
     }
 }
 
@@ -1817,7 +1827,52 @@ fn snap_bytes(n: &SnapNode) -> usize {
     if let Some(x) = &n.pbasis {
         b += (x.0.bytes() + x.1.bytes()) / std::sync::Arc::strong_count(x);
     }
+    if let Some(x) = &n.changes_p {
+        b += x.capacity() * 4;
+    }
+    if let Some(x) = &n.basis_p {
+        b += x.bytes();
+    }
     b
+}
+
+/// `ENOMOTO_MIP_MEMC=1` (試作、既定では使わない。analysis/memcap_c_20261104.md): 共有の待ち行列に出すノード ([`SnapNode`]) の
+/// 境界の変更の並びと基底を詰めて持つ (取り出すときに戻す。探索の動きは変わらない)。supportcase18 (列 13410・行 240) では
+/// 共有の待ち行列が 1 秒に数百ノード増え、1 ノードが基底の写し (13.4 KB) と orbital fixing の固定が積み重なった変更の並び
+/// (平均 約 16 KB) で約 30 KB 持っていた
+fn memc() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("ENOMOTO_MIP_MEMC").is_ok_and(|v| v != "0"))
+}
+
+/// `ENOMOTO_MIP_MEMC` の数え上げ (全スレッドの和): [詰めたノード, 変更の数, 変更を詰めたバイト, 詰めた基底の数, 基底を詰めたバイト, 基底の元のバイト]
+static MEMC_STATS: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+
+/// [`memc`] のとき、[`SnapNode`] の変更の並びと (共有されていなければ) 基底を詰める。
+fn memc_pack(s: &mut SnapNode) {
+    use std::sync::atomic::Ordering::Relaxed;
+    MEMC_STATS[0].fetch_add(1, Relaxed);
+    if !s.changes.is_empty() {
+        if let Some(w) = super::queue::pack_changes(&s.changes) {
+            MEMC_STATS[1].fetch_add(s.changes.len() as u64, Relaxed);
+            MEMC_STATS[2].fetch_add(w.len() as u64 * 4, Relaxed);
+            s.changes = Vec::new();
+            s.changes_p = Some(w);
+        }
+    }
+    if let Some(a) = s.basis.take() {
+        match std::sync::Arc::try_unwrap(a) {
+            Ok((col, row)) => {
+                let p = super::queue::SparseBasis::encode(&col, &row);
+                MEMC_STATS[3].fetch_add(1, Relaxed);
+                MEMC_STATS[4].fetch_add(p.bytes() as u64, Relaxed);
+                MEMC_STATS[5].fetch_add((col.len() + row.len()) as u64, Relaxed);
+                s.basis_p = Some(p);
+            }
+            // `ENOMOTO_MIP_MEM2` の `s` で兄弟と共有している基底はそのまま
+            Err(a) => s.basis = Some(a),
+        }
+    }
 }
 
 fn pool_dse_nan() -> bool {
@@ -1980,7 +2035,7 @@ impl PoolNodes {
             .v
             .iter()
             .enumerate()
-            .filter_map(|(i, n)| n.as_ref().filter(|n| n.dse.is_some() || (basis && (n.basis.is_some() || n.pbasis.is_some()))).map(|n| (i, n.depth, n.lower_bound)))
+            .filter_map(|(i, n)| n.as_ref().filter(|n| n.dse.is_some() || (basis && (n.basis.is_some() || n.pbasis.is_some() || n.basis_p.is_some()))).map(|n| (i, n.depth, n.lower_bound)))
             .collect();
         ids.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.total_cmp(&a.2)));
         let mut freed = 0usize;
@@ -1993,6 +2048,7 @@ impl PoolNodes {
             if basis {
                 n.basis = None;
                 n.pbasis = None;
+                n.basis_p = None;
                 n.cut_basis = None;
             }
             let m = snap_bytes(n);
@@ -2008,7 +2064,7 @@ impl PoolNodes {
             .v
             .iter()
             .enumerate()
-            .filter_map(|(i, n)| n.as_ref().filter(|n| n.dse.is_some() || (basis && (n.basis.is_some() || n.pbasis.is_some()))).map(|n| (i, n.depth, n.lower_bound)))
+            .filter_map(|(i, n)| n.as_ref().filter(|n| n.dse.is_some() || (basis && (n.basis.is_some() || n.pbasis.is_some() || n.basis_p.is_some()))).map(|n| (i, n.depth, n.lower_bound)))
             .collect();
         let total = ids.len();
         let want = ((total as f64 * frac).ceil() as usize).min(total);
@@ -2021,6 +2077,7 @@ impl PoolNodes {
             if basis {
                 n.basis = None;
                 n.pbasis = None;
+                n.basis_p = None;
                 n.cut_basis = None;
             }
             let m = snap_bytes(n);
@@ -14021,14 +14078,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         for n in nodes.iter_mut() {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None });
         }
         for n in nodes {
             self.queue.push(n);
         }
         if let Some(n) = plunge.as_mut().filter(|_| with_nodes) {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None });
         }
         if with_nodes {
             self.dive_stack.clear();
@@ -14235,8 +14292,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let basis = sn.basis.take();
         let cut_basis = sn.cut_basis.take();
         let sdse = sn.dse.take();
+        let n_basis_p = sn.basis_p.take();
         let mut n = sn.into_open();
-        let basis = basis.map(|a| std::sync::Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()));
+        let basis = basis.map(|a| std::sync::Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())).or_else(|| n_basis_p.map(|p| p.decode()));
         if let Some((col, mut row)) = basis {
             let mr = self.lp.num_rows();
             if col.len() == self.p.n && row.len() <= mr {
@@ -14539,6 +14597,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        if memc() {
+            memc_pack(&mut s);
+        }
         if env_str!("ENOMOTO_MIP_MEM2").is_some() {
             s.mem = snap_bytes(&s);
         }
@@ -14655,6 +14716,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if let Some(x) = &n.pbasis {
                             pl[2] += (x.0.bytes() + x.1.bytes()) / std::sync::Arc::strong_count(x);
+                        }
+                        // `ENOMOTO_MIP_MEMC` (試作): 詰めた変更の並びと基底
+                        if let Some(x) = &n.changes_p {
+                            pl[1] += x.capacity() * 4;
+                        }
+                        if let Some(x) = &n.basis_p {
+                            pl[2] += x.bytes();
                         }
                     }
                 }
@@ -15336,6 +15404,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if mem1_siblu_keep().is_some() {
                 let st: Vec<u64> = MEM1_SIBLU_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!("MIP: mem1 sibling LU (all threads): held at most {}, pushed {}, dropped {}, adopted {}", st[0], st[1], st[2], st[3]);
+            }
+            if memc() {
+                let st: Vec<u64> = MEMC_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: memc (all threads): packed nodes {}, changes {} ({} bytes packed, {} unpacked), bases {} ({} bytes packed, {} unpacked)", st[0], st[1], st[2], st[1] * std::mem::size_of::<BoundChange>() as u64, st[3], st[4], st[5]);
             }
             if self.snap.is_none() && !self.params.submip {
                 print_basis_nb_diag();
