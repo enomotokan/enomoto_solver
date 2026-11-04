@@ -211,6 +211,46 @@ impl RowEdit {
 }
 
 #[cfg(test)]
+mod bound_step_tests {
+    use super::round_lb_to_step;
+
+    /// `ENOMOTO_MIP_BOUND_STEP`: 下界の格子の点への切り上げ。
+    #[test]
+    fn round_lb_to_step_cases() {
+        // supportcase18: 刻み 1 で 47.18666667 → 48
+        assert_eq!(round_lb_to_step(47.18666667, 1.0, 0.0), 48.0);
+        // 格子の点のわずかに下・上 (数値誤差) は、その点にする (次の点へ上げない)
+        assert_eq!(round_lb_to_step(47.9999999, 1.0, 0.0), 48.0);
+        assert_eq!(round_lb_to_step(48.0000001, 1.0, 0.0), 48.0000001);
+        assert_eq!(round_lb_to_step(48.0, 1.0, 0.0), 48.0);
+        // 目的値の定数: 格子は 0.25 + k * 0.5
+        assert_eq!(round_lb_to_step(1.3, 0.5, 0.25), 1.75);
+        assert_eq!(round_lb_to_step(1.25, 0.5, 0.25), 1.25);
+        // 負の値 (最大化を最小化に直したもの)
+        assert_eq!(round_lb_to_step(-10.4, 1.0, 0.0), -10.0);
+        assert_eq!(round_lb_to_step(-10.0000001, 1.0, 0.0), -10.0);
+        // 大きな値: 許容は相対 1e-6 (刻みの半分まで)
+        assert_eq!(round_lb_to_step(1.0e7 + 0.7, 1.0, 0.0), 1.0e7 + 1.0);
+        assert_eq!(round_lb_to_step(1.0e7 + 0.5, 1.0, 0.0), 1.0e7 + 0.5);
+        assert_eq!(round_lb_to_step(1.0e7 + 1.0e-3, 1.0, 0.0), 1.0e7 + 1.0e-3);
+        // 刻みが小さいとき、許容は刻みの半分を越えない
+        assert!((round_lb_to_step(10.0004, 0.001, 0.0) - 10.001).abs() < 1e-9);
+        assert!((round_lb_to_step(10.0010000001, 0.001, 0.0) - 10.0010000001).abs() < 1e-12);
+        // 有限でない値・刻みが正でないときはそのまま
+        assert_eq!(round_lb_to_step(f64::NEG_INFINITY, 1.0, 0.0), f64::NEG_INFINITY);
+        assert_eq!(round_lb_to_step(f64::INFINITY, 1.0, 0.0), f64::INFINITY);
+        assert_eq!(round_lb_to_step(3.3, 0.0, 0.0), 3.3);
+        // 切り上げた値は元の下界を下回らない
+        for k in 0..2000 {
+            let lb = -50.0 + k as f64 * 0.0517;
+            let r = round_lb_to_step(lb, 0.5, 0.1);
+            assert!(r >= lb);
+            assert!(r <= lb + 0.5 + 1e-9);
+        }
+    }
+}
+
+#[cfg(test)]
 mod memb_tests {
     use super::RowEdit;
 
@@ -4616,6 +4656,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 暫定解があり、その値が下界 `lb` (の切り上げ) より目的関数の刻み (なければ相対 1e-6) 以上悪いか
     /// ([`Self::obj_support`] を呼ぶ条件)。
+    /// `ENOMOTO_MIP_BOUND_STEP` (試作、既定では使わない): 目的値が刻み `obj_step` の格子 (`offset + k * step`) にしか乗らないとき、
+    /// 利用者に返す下界 (と経過の行の下界) を格子の点に切り上げる ([`round_lb_to_step`])。暫定解があればその値で上から抑える。
+    /// 本体の求解 (サブ MIP でなく、木の従でもない) だけで使う。暗黙の整数列で刻みを取ったとき (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`) も、
+    /// 最適解のどれかは格子に乗るので、最適値は格子の点で、切り上げた下界は最適値を越えない
+    pub(super) fn step_lb(&self, lb: f64) -> f64 {
+        let Some(step) = self.report_step() else { return lb };
+        let r = round_lb_to_step(lb, step, self.p.offset);
+        match self.incumbent.as_ref() {
+            Some((z, _)) => r.min(*z).max(lb.min(*z)),
+            None => r,
+        }
+    }
+
+    /// `ENOMOTO_MIP_BOUND_STEP` で報告の下界に使う刻み: 刈り込みの刻み `obj_step`、なければ大域的な境界で整数値に固定された
+    /// 連続列を整数列と同じに扱った刻み ([`MipProblem::objective_step_bounds`]。大域的な固定は暫定解より良い解を全て残すので、
+    /// 暫定解より良い解の目的値は格子に乗る。切り上げた下界は暫定解の値で抑える)。使わないときは `None`
+    fn report_step(&self) -> Option<f64> {
+        if !bound_step_on() || self.params.submip || self.snap.is_some() {
+            return None;
+        }
+        self.obj_step.or_else(|| self.p.objective_step_bounds(Some((&self.dom.global_lo, &self.dom.global_up))))
+    }
+
+    /// `ENOMOTO_MIP_BOUND_STEP`: 下界 `lb` を刻みで切り上げると暫定解の値以上になる (探索し残した改善解はない)。
+    fn step_complete(&self, lb: f64) -> bool {
+        let Some(step) = self.report_step() else { return false };
+        let Some((z, _)) = self.incumbent.as_ref() else { return false };
+        round_lb_to_step(lb, step, self.p.offset) >= *z
+    }
+
     pub(super) fn obj_support_gap(&self, lb: f64) -> bool {
         if obj_step_lattice() && self.obj_step.is_some() {
             // 暫定解が格子に乗らないときも、格子の点で比べる
@@ -5253,7 +5323,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.user_log_header = true;
             user_log!("{:>9} {:>10} {:>9} {:>17} {:>17} {:>9}", "time", "nodes", "open", "best bound", "incumbent", "gap");
         }
-        let lb = self.final_lb.unwrap_or_else(|| self.global_lower_bound()).min(ub);
+        let lb = self.final_lb.unwrap_or_else(|| self.step_lb(self.global_lower_bound())).min(ub);
         let fmt = |v: f64| if v.is_finite() { format!("{:.9e}", s * v) } else { "-".to_string() };
         let gap = if ub.is_finite() && lb.is_finite() { format!("{:.2}%", 100.0 * (ub - lb).max(0.0) / ub.abs().max(1.0)) } else { "-".to_string() };
         let (done, open) = if self.final_lb.is_some() { (self.nodes + self.worker_totals.0, 0) } else { self.global_node_counts() };
@@ -16364,6 +16434,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 木の写しから解いた求解が見つけた解を受け取る (止める合図で終わるときも)
         let best_bound = if self.take_inbox() { best_bound.min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)) } else { best_bound };
+        // `ENOMOTO_MIP_BOUND_STEP` (試作): 報告の下界を目的値の刻みの格子の点に切り上げる ([`Self::step_lb`])
+        let best_bound = if matches!(status, MipStatus::Optimal | MipStatus::Infeasible) { best_bound } else { self.step_lb(best_bound) };
         if prof_tree_par() && self.snap.is_none() && !self.params.submip && self.watch.is_none() {
             let z = self.incumbent.as_ref().map(|(z, _)| *z);
             let total = self.start.elapsed().as_secs_f64();
@@ -16502,7 +16574,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             && raw_bound.is_finite()
             && env_str!("ENOMOTO_MIP_NO_LIMIT_GAP_EXIT").is_none()
             && self.incumbent.as_ref().map_or(self.prune_limit().is_finite(), |(z, _)| self.shared.as_ref().is_none_or(|s| !(s.best() < *z)))
-            && raw_bound >= self.prune_limit()
+            && (raw_bound >= self.prune_limit() || self.step_complete(raw_bound))
         {
             if self.params.verbose {
                 eprintln!("MIP: stopped by {status:?} with the lower bound {raw_bound:.10e} at the prune limit {:.10e}; reporting the search as complete", self.prune_limit());
@@ -16567,6 +16639,25 @@ fn pool3_best_secs() -> f64 {
 /// 潜り・兄弟をやめて次に処理する。
 fn pool3_taken() -> bool {
     env_str!("ENOMOTO_MIP_POOL3_TAKEN").is_some()
+}
+
+/// `ENOMOTO_MIP_BOUND_STEP` (試作、既定では使わない): 報告の下界を目的値の刻みで切り上げる ([`Solver::step_lb`])。
+pub(super) fn bound_step_on() -> bool {
+    env_str!("ENOMOTO_MIP_BOUND_STEP").is_some()
+}
+
+/// 目的値が `offset + k * step` (k は整数) しか取らないとき、下界 `lb` を最も近い上の格子の点に切り上げる (最小化の向き)。
+/// 下界の数値誤差で格子の点をわずかに越えた値を次の点へ上げないよう、許容 `min(1e-6 * max(|lb|, 1), step / 2)` を引いてから
+/// 切り上げる (刈り込みの上限 [`Solver::prune_limit`] と同じ許容)。有限でない値・刻みが正でないときはそのまま返す
+pub(super) fn round_lb_to_step(lb: f64, step: f64, offset: f64) -> f64 {
+    if !lb.is_finite() || !(step > 0.0) || !step.is_finite() {
+        return lb;
+    }
+    let tol = (1e-6 * lb.abs().max(1.0)).min(0.5 * step);
+    let k = ((lb - offset - tol) / step).ceil();
+    let r = offset + k * step;
+    // 丸めの誤差で lb より下がることがある (lb が格子の点ちょうどなど): 下界は下げない
+    r.max(lb)
 }
 
 /// 刈り込みの上限を、暫定解より厳密に小さい最大の格子の点で取るか (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`)。
