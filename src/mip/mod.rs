@@ -4501,7 +4501,7 @@ pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f
     // uccase12 では再スタートの後の前処理のプロービングがこの余裕で右辺 5000 前後の行を 5.6e-6 ずつ緩め、木の暫定解が元の問題で
     // 連続列の下限 0 を 1.1e-5 破っていた (analysis/uccase12_mem3_20261103.md)
     // 既定 (`m`、2026-11-04) は外側の求解 (再スタートを含む) だけで小さい余裕にし、サブ MIP では以前の余裕のまま (サブ MIP の解は元の問題で
-    // 確かめてから使う。qiu ではサブ MIP の前処理の余裕を小さくすると固定できる列が減り、サブ MIP が暫定解を見つけにくくなって遅れた、
+    // 確かめてから使う。qiu はサブ MIP でも小さい余裕にすると系統的に遅くなった (仕組みは未確認)、
     // analysis/halve_submip_20261030.md の bench24)。`=1` でサブ MIP でも小さい余裕
     let small = env_def!("ENOMOTO_MIP_MEM3_TINY_MARGIN", "m").is_some_and(|v| v != "m" || !submip);
     let margin = |b: f64| if small { 1e-9 * (1.0 + b.abs().min(1.0)) + 4.0 * f64::EPSILON * b.abs() } else { 1e-9 * (1.0 + b.abs()) };
