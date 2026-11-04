@@ -531,13 +531,13 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) early_restart: bool,
     /// `ENOMOTO_MIP_LOSE6_3_CUTRESTART` (試作): 根のカットのループを再スタートの判定で抜けた
     pub(super) l63_cut_left: bool,
-    /// `ENOMOTO_MIP_TREE_RESTART` (試作): 木の中で暫定解が良くなった (木のループの頭で再スタートを判定する)。
+    /// `ENOMOTO_MIP_TREE_RESTART=inc` (試作): 木の中で暫定解が良くなった (木のループの頭で再スタートを判定する)。
     tree_restart_check: bool,
-    /// `ENOMOTO_MIP_TREE1_RESTART` (試作): 次に調べる全体のノード数、木が大きいと見積もった判定の続いた回数、前に数え直したときの
-    /// (全体のノード数, 刈った木の重み, 打ち切り値, 全体の下界)、[`Self::maybe_restart`] で固定の数の閾値を見ないか。
-    t1r_next: u64,
-    t1r_huge: u32,
-    t1r_last: (u64, f64, f64, f64),
+    /// `ENOMOTO_MIP_TREE_RESTART` (試作、[`Self::tree_restart_due`]): 次に調べる全体のノード数、木が大きいと見積もった判定の続いた回数、
+    /// 前に数え直したときの (全体のノード数, 刈った木の重み, 打ち切り値, 全体の下界)、[`Self::maybe_restart`] で固定の数の閾値を見ないか。
+    tr_next: u64,
+    tr_huge: u32,
+    tr_last: (u64, f64, f64, f64),
     force_restart: bool,
     noinc_stall: u32,
     noinc_best_close: f64,
@@ -688,13 +688,6 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 回数・締めた境界の数
     t4_last: f64,
     t4_rc: [u64; 2],
-    /// `ENOMOTO_MIP_TREE4_RESTART` の状態: 次に調べる全体のノード数、前に記録したとき (全体のノード数, 刈った木の重み, 打ち切り値, 下界)、
-    /// 木が大きいと見込んだ回数が続いた数
-    t4r_next: u64,
-    t4r_last: (u64, f64, f64, f64),
-    t4r_huge: u32,
-    /// `ENOMOTO_MIP_TREE4_RESTART=force`: 次の再スタートは新たな固定の数を問わない ([`Self::maybe_restart`])
-    t4r_force: bool,
     /// `ENOMOTO_MIP_TREE4_RCUNION` (試作): 根のカットの各ラウンドの LP の被約費用 ([`Self::tree4_rc_add`])
     pub(super) t4_rc_extra: Vec<(f64, Vec<(usize, bool, f64, f64)>)>,
     /// `ENOMOTO_MIP_TREE4_PROOFCUT` (試作) の数: [ラウンド, 加えた行, 加えた後に刈ったノード]
@@ -2311,9 +2304,37 @@ fn tree1_pool() -> bool {
     env_str!("ENOMOTO_MIP_TREE1_POOL").is_some()
 }
 
-/// `ENOMOTO_MIP_TREE1_RESTART` (試作): HiGHS 式の木の中の再スタート ([`Solver::tree1_restart_due`])。
-fn tree1_restart() -> bool {
-    env_str!("ENOMOTO_MIP_TREE1_RESTART").is_some()
+/// 共有の待ち行列のノードの重み (深さ d のノードは 0.5^d) の和 ([`Solver::tree_restart_due`])。
+fn snap_weight(v: &[SnapNode]) -> f64 {
+    v.iter().map(|n| 0.5f64.powi(n.depth.min(2000) as i32)).sum()
+}
+
+/// `ENOMOTO_MIP_TREE_RESTART` (試作、既定では使わない): 木の中の再スタートの形。0 = 使わない、1 = HiGHS 式の判定
+/// ([`Solver::tree_restart_due`]) に、新たな固定の数の閾値を足したもの (`=1` など下の値以外)、2 = `force` (HiGHS と同じく固定の数を
+/// 問わない)、3 = `inc` (木の中で暫定解が良くなり固定が 5% 以上・主のノード 2000 以下なら再スタート。2026-11-04 までの
+/// `ENOMOTO_MIP_TREE_RESTART=1`)。古い試作の名前は別名: `ENOMOTO_MIP_TREE1_RESTART=1` → `force`、`=f` → `1`、
+/// `ENOMOTO_MIP_TREE4_RESTART=force` → `force`、`=1` → `1` (analysis/tree_restart_20261104.md)
+fn tree_restart_mode() -> u8 {
+    if let Some(v) = env_str!("ENOMOTO_MIP_TREE_RESTART") {
+        return match v {
+            "force" => 2,
+            "inc" => 3,
+            "0" | "off" => 0,
+            _ => 1,
+        };
+    }
+    if let Some(v) = env_str!("ENOMOTO_MIP_TREE1_RESTART") {
+        return if v == "f" { 1 } else { 2 };
+    }
+    if let Some(v) = env_str!("ENOMOTO_MIP_TREE4_RESTART") {
+        return if v == "force" { 2 } else { 1 };
+    }
+    0
+}
+
+/// HiGHS 式の木の中の再スタート ([`tree_restart_mode`] の 1・2) を使うか。
+fn tree_restart_on() -> bool {
+    matches!(tree_restart_mode(), 1 | 2)
 }
 
 /// `ENOMOTO_MIP_TREE1_SB` (試作): HiGHS の信頼性分枝の予算と閾値 ([`Solver::select_branch_inner`])。
@@ -2323,11 +2344,6 @@ fn tree1_sb() -> bool {
 
 /// 共有の待ち行列だけで探索するか (`ENOMOTO_MIP_TREE_SHARED_QUEUE`): 各スレッドは潜りの子だけを自分で持ち、兄弟などのノードは
 /// 全て共有の待ち行列に出して、取るときは自分の待ち行列と同じ選び方 ([`PoolNodes::pop_hybrid`]) をする。
-/// `ENOMOTO_MIP_TREE4_RESTART` (試作、既定では使わない): HiGHS 流の木の中の再スタート ([`Solver::tree4_restart_due`])
-fn tree4_restart_on() -> bool {
-    env_str!("ENOMOTO_MIP_TREE4_RESTART").is_some()
-}
-
 fn tree_shared_queue() -> bool {
     env_str!("ENOMOTO_MIP_TREE_SHARED_QUEUE").is_some()
 }
@@ -2520,6 +2536,32 @@ fn heur_role_count(threads: usize) -> usize {
 }
 
 impl WorkPool {
+    /// `ENOMOTO_MIP_TREE_RESTART` (試作): スレッド `tid` が共有の待ち行列とノードを受け渡したとき、そのスレッドが知らせた未処理の
+    /// ノードの重み (`wopen`、64 ノードおきに [`Solver::publish_tree_weight`] で書く) を `dw` だけ動かす。共有の待ち行列の錠の中で
+    /// 呼ぶ。動かさないと、出したノードを共有の待ち行列と出した側の古い重みの両方で数え、取ったノードはどちらにも数えない
+    /// ([`Solver::tree_restart_due`] の木の重みの見積もり)。既定の動き (ヒューリスティクス役の起動の判定も `wopen` を読む) を変えない
+    /// よう、試作を使うときだけ動かす
+    fn wopen_shift(&self, tid: u32, dw: f64) {
+        use std::sync::atomic::Ordering;
+        if dw == 0.0 || !tree_restart_on() {
+            return;
+        }
+        if let Some(sl) = self.slots.get(tid as usize) {
+            let v = f64::from_bits(sl.wopen.load(Ordering::Relaxed)) + dw;
+            sl.wopen.store(v.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// 自分の待ち行列が空になったスレッドの知らせた重みを 0 にする ([`Self::wopen_shift`] と同じく試作を使うときだけ)。
+    fn wopen_clear(&self, tid: u32) {
+        use std::sync::atomic::Ordering;
+        if !tree_restart_on() {
+            return;
+        }
+        if let Some(sl) = self.slots.get(tid as usize) {
+            sl.wopen.store(0f64.to_bits(), Ordering::Relaxed);
+        }
+    }
     fn new(threads: usize, lo: Vec<f64>, up: Vec<f64>, pc: Pseudocost) -> Self {
         WorkPool {
             learned: std::sync::Mutex::new(Learned::default()),
@@ -3614,9 +3656,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         early_restart: false,
         l63_cut_left: false,
         tree_restart_check: false,
-        t1r_next: 0,
-        t1r_huge: 0,
-        t1r_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
+        tr_next: 0,
+        tr_huge: 0,
+        tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
         force_restart: false,
         noinc_stall: 0,
         noinc_best_close: 0.0,
@@ -3695,10 +3737,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         last_log: start,
         t4_last: 0.0,
         t4_rc: [0; 2],
-        t4r_next: 100,
-        t4r_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
-        t4r_huge: 0,
-        t4r_force: false,
         t4_rc_extra: Vec::new(),
         t4_pc: [0; 3],
         user_log_header: false,
@@ -5053,79 +5091,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.t4_pc,
             self.dual_proofs.len(),
         );
-    }
-
-    /// `ENOMOTO_MIP_TREE4_RESTART` (試作): 木の中の再スタートの判定 (主だけ)。HiGHS の判定 (`HighsMipSolver::run` の `nextCheck` の所) を写す:
-    /// 全体のノード数が 100 増えるごとに、刈った木の重み (1 - 未処理のノードの 0.5^深さ の和) の伸びから木の全体のノード数を見積もり、
-    /// 自由な整数列の割合の 2 乗を r として、ギャップの縮みが 1 + 0.05 / r 未満で、見積もりが今までのノード数の 20 r 倍以上なら
-    /// 「大きい」と数える。続けて `ENOMOTO_T_MIP_TREE4_RESTART_CHECKS` (既定 10) × 1.5^(再スタートの回数) 回「大きい」なら再スタートする。
-    /// こちらの再スタート ([`Self::maybe_restart`]) は新たな固定を要るので、根の始めに自由だった整数列の
-    /// `ENOMOTO_T_MIP_TREE4_RESTART_FRAC` (既定 0.05) 以上が新たに固定されていて、残り時間が時間上限の 1 割以上のときだけ
-    fn tree4_restart_due(&mut self, plunge: Option<&OpenNode>) -> bool {
-        use std::sync::atomic::Ordering;
-        if self.params.submip || self.pool_tid != 0 || self.snap.is_some() || self.watch.is_some() {
-            return false;
-        }
-        // 木を分け合うスレッドが同じ木を別々に解く間 (`race_done` の前) は重みが重なるので数えない
-        if self.pool.is_some() && !self.race_done {
-            return false;
-        }
-        let (done, _) = self.global_node_counts();
-        if done < self.t4r_next {
-            return false;
-        }
-        self.t4r_next = done + 100;
-        // 未処理のノードの重み: 自分 (待ち行列と潜っている子)、共有の待ち行列、ほかのスレッドが知らせた分
-        let mut w: f64 = self.queue.iter().chain(plunge).map(|n| 0.5f64.powi(n.depth.min(2000) as i32)).sum();
-        if let Some(pool) = &self.pool {
-            let g = pool.inner.lock().unwrap();
-            w += g.nodes.iter().map(|n| 0.5f64.powi(n.depth.min(2000) as i32)).sum::<f64>();
-            drop(g);
-            for (i, sl) in pool.slots.iter().enumerate() {
-                if i != self.pool_tid as usize {
-                    w += f64::from_bits(sl.wopen.load(Ordering::Relaxed));
-                }
-            }
-        }
-        let pruned = (1.0 - w).clamp(0.0, 1.0);
-        let (n0, w0, ub0, lb0) = self.t4r_last;
-        let est = n0 as f64 + (done - n0) as f64 * (1.0 - pruned) / (pruned - w0).max(1e-9);
-        let free0 = self.p.nint.saturating_sub(self.root_fixed0).max(1) as f64;
-        let free = (free0 - self.newly_fixed_ints() as f64).max(0.0);
-        let r = (free / free0).powi(2).max(1e-3);
-        let ub = self.prune_limit();
-        let lb = self.global_lower_bound();
-        let red = if ub.is_finite() && ub0.is_finite() && lb.is_finite() && lb0.is_finite() && ub - lb > 0.0 { (ub0 - lb0) / (ub - lb) } else { 1.0 };
-        let huge = red < 1.0 + 0.05 / r && est >= r * 20.0 * done as f64;
-        if huge {
-            self.t4r_huge += 1;
-        } else {
-            self.t4r_huge = 0;
-            self.t4r_last = (done, pruned, ub, lb);
-        }
-        let need = tunable!("ENOMOTO_T_MIP_TREE4_RESTART_CHECKS", 10.0, f64) * 1.5f64.powi(self.params.restarts as i32);
-        if env_str!("ENOMOTO_MIP_TREE4_TRACE").is_some() {
-            eprintln!("TREE4R: t {:.1} done {done} pruned {pruned:.6} est {est:.3e} r {r:.3} red {red:.3} huge {} need {need:.1} newly {}", self.start.elapsed().as_secs_f64(), self.t4r_huge, self.newly_fixed_ints());
-        }
-        if (self.t4r_huge as f64) < need {
-            return false;
-        }
-        let left_ok = match self.deadline {
-            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= 0.1 * self.params.time_limit,
-            None => true,
-        };
-        if !left_ok {
-            return false;
-        }
-        // `=force`: HiGHS と同じく新たな固定がなくても再スタートする (再スタートの回数の上限と期限だけを見る)
-        if env_str!("ENOMOTO_MIP_TREE4_RESTART") == Some("force") {
-            if self.params.restarts >= max_restarts(self.p) || self.time_up() || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() {
-                return false;
-            }
-            self.t4r_force = true;
-            return true;
-        }
-        self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_TREE4_RESTART_FRAC", 0.05, f64))
     }
 
     /// `ENOMOTO_MIP_TREE4_PROOFCUT` (試作): 双対証明 `a x <= rhs` (打ち切り値の証明は今の打ち切り値で右辺を取る。打ち切り値より良い
@@ -7348,29 +7313,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_TREE_RESTART` (試作): 木に入る前の暫定解の印は消しておく (木の中で良くなったときだけ判定する)
         self.tree_restart_check = false;
         loop {
-            // `ENOMOTO_MIP_TREE1_RESTART` (試作): HiGHS 式の木の中の再スタート ([`Self::tree1_restart_due`])
-            if tree1_restart() && self.tree1_restart_due(plunge.as_ref()) {
+            // `ENOMOTO_MIP_TREE_RESTART` (試作、既定では使わない): HiGHS 式の木の中の再スタート ([`Self::tree_restart_due`])
+            if tree_restart_on() && self.tree_restart_due(plunge.as_ref()) {
                 if self.params.verbose {
-                    eprintln!("MIP: TREE1 restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
+                    eprintln!("MIP: TREE restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
                 }
                 self.join_workers();
                 if let Some(pool) = self.pool.as_ref() {
                     pool.stop.store(false, std::sync::atomic::Ordering::Relaxed);
                     pool.halt.store(false, std::sync::atomic::Ordering::Relaxed);
                 }
-                // `ENOMOTO_MIP_TREE1_RESTART=f`: 固定の数の閾値 ([`Self::maybe_restart`] の初回 1%・2 回目以降 2.5%) は見る
-                self.force_restart = env_str!("ENOMOTO_MIP_TREE1_RESTART") != Some("f");
+                // 固定の数の閾値は判定 ([`Self::tree_restart_due`]) で見たので、[`Self::maybe_restart`] の閾値 (全部の整数列の初回 1%・
+                // 2 回目以降 2.5%) は見ない
+                self.force_restart = true;
                 let r = self.maybe_restart();
                 self.force_restart = false;
                 if let Some(r) = r {
                     return r;
                 }
                 // 判定で時間と回数を確かめているので普通はここに来ない。従は止めたので、主だけで続ける
+                if self.params.verbose {
+                    eprintln!("MIP: TREE restart refused; continuing with the main thread only");
+                }
             }
-            // `ENOMOTO_MIP_TREE_RESTART` (試作): 木の中で暫定解が良くなり、根の被約費用で新たに固定された整数列が
+            // `ENOMOTO_MIP_TREE_RESTART=inc` (試作): 木の中で暫定解が良くなり、根の被約費用で新たに固定された整数列が
             // `ENOMOTO_T_MIP_TREE_RESTART_FRAC` (0.05) 以上、主のノード数が `ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES` (2000) 以下、
             // 残り時間が時間上限の `ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT` (0.1) 以上なら、従を止めて再スタートする
-            if std::mem::take(&mut self.tree_restart_check) && env_str!("ENOMOTO_MIP_TREE_RESTART").is_some() && self.watch.is_none() {
+            if std::mem::take(&mut self.tree_restart_check) && tree_restart_mode() == 3 && self.watch.is_none() {
                 let left_ok = match self.deadline {
                     Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT", 0.1, f64) * self.params.time_limit,
                     None => true,
@@ -7389,28 +7358,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         return r;
                     }
                     // 判定は通したので普通はここに来ない。従は止めたので、主だけで続ける
-                }
-            }
-            // `ENOMOTO_MIP_TREE4_RESTART` (試作、既定では使わない): HiGHS (`HighsMipSolver::run`) と同じ「木が大きくなると見込まれる状態が
-            // 続いたら再スタート」([`Self::tree4_restart_due`])。全てのスレッドが 64 ノードおきに自分の未処理のノードの重みを知らせる
-            if tree4_restart_on() && self.pool.is_some() && self.nodes % 64 == 0 {
-                self.publish_tree_weight(plunge.as_ref());
-            }
-            if tree4_restart_on() && self.tree4_restart_due(plunge.as_ref()) {
-                if self.params.verbose {
-                    eprintln!("MIP: TREE4 restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
-                }
-                self.join_workers();
-                if let Some(pool) = self.pool.as_ref() {
-                    pool.stop.store(false, std::sync::atomic::Ordering::Relaxed);
-                    pool.halt.store(false, std::sync::atomic::Ordering::Relaxed);
-                }
-                if let Some(r) = self.maybe_restart() {
-                    return r;
-                }
-                // 判定は通したので普通はここに来ない。従は止めたので、主だけで続ける
-                if self.params.verbose {
-                    eprintln!("MIP: TREE4 restart refused; continuing with the main thread only");
                 }
             }
             // ポートフォリオ並列: 下界を知らせる (二分探索のスレッドが目標値を決めるのに使う)
@@ -7475,7 +7422,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.sync_learned();
             }
             // ヒューリスティクス役の起動の判定のため、自分の未処理のノードの重みを知らせる (64 ノードおき)
-            if self.pool.as_ref().is_some_and(|p| p.heur_k > 0 && heur_trigger_mode() || tree1_restart()) && self.nodes % 64 == 0 {
+            if self.pool.as_ref().is_some_and(|p| p.heur_k > 0 && heur_trigger_mode() || tree_restart_on()) && self.nodes % 64 == 0 {
                 self.publish_tree_weight(plunge.as_ref());
             }
             // 木を分け合う: 擬似費用の観測を合わせる (`ENOMOTO_T_MIP_TREE_PC_SYNC` ノードおき、0 で合わせない)
@@ -13791,7 +13738,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         fixed.saturating_sub(self.root_fixed0)
     }
 
-    /// 早めの再スタート ([`super::early_restart_on`])・木の中の再スタート (`ENOMOTO_MIP_TREE_RESTART`、試作) の判定: 新たな固定が、根の始めに固定されて
+    /// 早めの再スタート ([`super::early_restart_on`])・木の中の再スタート (`ENOMOTO_MIP_TREE_RESTART=inc`、試作) の判定: 新たな固定が、根の始めに固定されて
     /// いなかった整数列の `frac` 以上 (かつ [`Self::maybe_restart`] の判定 (全部の整数列の、初回 `ENOMOTO_T_MIP_RESTART_FIRST_FAC` (既定 1%)、
     /// 2 回目以降 2.5%) も通る) で、再スタートの回数と時間が残っているか。HiGHS の数え方 (前処理の後の自由な整数列に対する割合) とは
     /// 分母が違う ([`Self::maybe_restart`] のコメント)。
@@ -13892,9 +13839,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose {
             eprintln!("MIP: restart check: newly fixed {newly}, integer columns {nint}, free at the root {}, threshold {:.1}, root LP {:.2}s", nint.saturating_sub(self.root_fixed0), fac * denom as f64, self.root_lp_secs);
         }
-        // `ENOMOTO_MIP_TREE1_RESTART` (試作): 木の中の再スタートは固定の数を見ない (HiGHS も見ない。前処理と根のカットをやり直す)
-        let t4_force = std::mem::take(&mut self.t4r_force);
-        if !t4_force && (nint == 0 || (!self.force_restart && (newly == 0 || (newly as f64) < fac * denom as f64))) {
+        // `ENOMOTO_MIP_TREE_RESTART` (試作): 木の中の再スタートは固定の数をここでは見ない ([`Self::tree_restart_due`] が見る。`force` なら
+        // HiGHS と同じく見ない)
+        if nint == 0 || (!self.force_restart && (newly == 0 || (newly as f64) < fac * denom as f64)) {
             return None;
         }
         // `ENOMOTO_MIP_RESTART_FIRST_LPW` (試作、既定では使わない): 初回の再スタートで、新たな固定が整数列の
@@ -14891,6 +14838,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.pool_stats[0] += out.len() as u64;
         let mut g = pool.inner.lock().unwrap();
+        pool.wopen_shift(self.pool_tid, -snap_weight(&out));
         g.nodes.extend(out);
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
     }
@@ -15003,6 +14951,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             self.pool1_cnt[0] += out.len() as u64;
         }
+        pool.wopen_shift(self.pool_tid, -snap_weight(&out));
         g.nodes.extend(out);
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
     }
@@ -15019,6 +14968,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let out: Vec<SnapNode> = nodes.iter().map(|n| self.snap_of(n)).collect();
         self.pool_stats[0] += out.len() as u64;
         let mut g = pool.inner.lock().unwrap();
+        pool.wopen_shift(self.pool_tid, -snap_weight(&out));
         g.nodes.extend(out);
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
     }
@@ -15033,6 +14983,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.pool_stats[0] += out.len() as u64;
         let mut g = pool.inner.lock().unwrap();
+        pool.wopen_shift(self.pool_tid, -snap_weight(&out));
         g.nodes.extend(out);
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
     }
@@ -15705,6 +15656,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let Some(sn) = g.nodes.pop_best() else { break };
             pool.len.store(g.nodes.len(), Ordering::Relaxed);
+            pool.wopen_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
             if !self.pool_busy && env_str!("ENOMOTO_MIP_TREE_NO_BALANCE_BUSY_FIX").is_none() {
                 g.busy += 1;
                 pool.idle.fetch_sub(1, Ordering::Relaxed);
@@ -15801,6 +15753,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if pool_min.is_finite() && pool_min <= me && pool_min <= other.0 {
             let sn = g.nodes.pop_best().unwrap();
             pool.len.store(g.nodes.len(), Ordering::Relaxed);
+            pool.wopen_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
             // [`Self::pool_balance`] と同じく、待っている側に数えられたままなら待っていない側に戻す
             if !self.pool_busy {
                 g.busy += 1;
@@ -15869,6 +15822,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if let Some(sn) = if pool_min < me - thr { g.nodes.pop_best() } else { None } {
             pool.len.store(g.nodes.len(), Ordering::Relaxed);
+            pool.wopen_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
             // 待っている側に数えられたまま (ヒューリスティクス役から木に戻った直後) ノードを取るときは、待っていない側に戻す
             // ([`Self::pool_acquire`] と同じ)。戻さないと、このスレッドがノードを持っている間にほかのスレッドが「全員が待っていて
             // 共有の待ち行列も空」と判定して探索を終え、このスレッドの部分木が失われる (mc11 で 11712 を最適と誤って報告した
@@ -15916,75 +15870,99 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
-    /// `ENOMOTO_MIP_TREE1_RESTART` (試作、既定では使わない): HiGHS (`HighsMipSolver::run` の木のループ) の木の中の再スタートの判定。
-    /// 全体のノード数が 100 増えるごとに、未処理のノードの重み (深さ d のノードは 0.5^d) から刈った木の割合 q を出し、前に数え直した
-    /// 時点からの q の進み方で木の全体のノード数を見積もる。整数列の自由な割合の 2 乗を r として、ギャップの縮み (前のギャップ / 今の
-    /// ギャップ) が 1 + 0.05 / r 未満で、見積もりが 今のノード数 × 20 r 以上なら「木が大きい」と数え (数え直さない)、そうでなければ
-    /// 数を 0 に戻して数え直す。r (10 + 0.0005 × ノード数) × 1.5^(再スタートの回数) 回続いたら再スタートする。HiGHS は kasai・swath3・
-    /// csched008 で木の途中で再スタートし、その後の下界の伸びが速い (analysis/tree_close1_20261104.md)。主のスレッドだけが判定し、
-    /// 残り時間が時間上限の `ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT` (0.1) 以上、暫定解があるときだけ
-    fn tree1_restart_due(&mut self, plunge: Option<&OpenNode>) -> bool {
+    /// `ENOMOTO_MIP_TREE_RESTART` (試作、既定では使わない): HiGHS (`HighsMipSolver::run` の木のループ) の木の中の再スタートの判定。
+    /// 全体のノード数が `ENOMOTO_T_MIP_TREE_RESTART_FIRST` (1000) を超えてから `..._EVERY` (100) 増えるごとに、未処理のノードの重み
+    /// (深さ d のノードは 0.5^d) から刈った木の割合 q を出し、前に数え直した時点からの q の進み方で木の全体のノード数を見積もる。
+    /// この求解の根の始めに自由だった整数列のうちまだ自由な割合の 2 乗を r として、ギャップの縮み (前のギャップ / 今のギャップ) が
+    /// 1 + 0.05 / r 未満で、見積もりが 今のノード数 × 20 r 以上なら「木が大きい」と数え (数え直さない)、そうでなければ数を 0 に戻して
+    /// 数え直す。r (10 + 0.0005 × ノード数) × 1.5^(再スタートの回数) 回続いたら再スタートする。主のスレッドだけが判定し、暫定解があり、
+    /// 残り時間が時間上限の `ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT` (0.1) 以上のときだけ。
+    ///
+    /// 既定 (`=1`) は、新たに固定された整数列 (根の始めに自由だった整数列のうち今は大域的に固定された数) が、根の始めに自由だった
+    /// 整数列の `ENOMOTO_T_MIP_TREE_RESTART_FIX_FRAC` (0.01) 以上かつ `ENOMOTO_T_MIP_TREE_RESTART_MIN_FIX` (1) 本以上のときだけ
+    /// 再スタートする (届かなければ数を 0 に戻して数え直す)。固定 0 本の再スタートは木を捨てて同じ問題を根からやり直すだけになり、
+    /// csched008 で暫定解が悪くなった (analysis/tree_close1_20261104.md)。`=force` は HiGHS と同じく固定の数を問わない。
+    fn tree_restart_due(&mut self, plunge: Option<&OpenNode>) -> bool {
         use std::sync::atomic::Ordering;
         if self.params.submip || self.snap.is_some() || self.watch.is_some() || self.pool_tid != 0 || self.incumbent.is_none() {
             return false;
         }
+        // 木を分け合うスレッドが同じ木を別々に解く間 (`race_done` の前) は重みが重なるので数えない
+        if self.pool.is_some() && !self.race_done {
+            return false;
+        }
         let (done, _) = self.global_node_counts();
-        if done < self.t1r_next {
+        if done < self.tr_next {
             return false;
         }
-        let first = tunable!("ENOMOTO_T_MIP_TREE1_RESTART_FIRST", 1000u64, u64).max(1);
-        if self.t1r_last.0 == 0 && done < first {
-            self.t1r_next = first;
+        let first = tunable!("ENOMOTO_T_MIP_TREE_RESTART_FIRST", 1000u64, u64).max(1);
+        if self.tr_last.0 == 0 && done < first {
+            self.tr_next = first;
             return false;
         }
-        self.t1r_next = done + tunable!("ENOMOTO_T_MIP_TREE1_RESTART_EVERY", 100u64, u64);
-        // 未処理のノードの重み: 自分の待ち行列と潜りの子、ほかのスレッドが知らせた重み、共有の待ち行列
+        self.tr_next = done + tunable!("ENOMOTO_T_MIP_TREE_RESTART_EVERY", 100u64, u64);
+        // 未処理のノードの重み: 自分の待ち行列と潜りの子、共有の待ち行列、ほかのスレッドが知らせた重み。ほかのスレッドの重みは
+        // 共有の待ち行列との受け渡しのたびに同じ錠の中で動かす ([`WorkPool::wopen_shift`]) ので、錠を持って一緒に読めば、
+        // 受け渡しの間のノードを二重に数えたり落としたりしない (残る誤差は知らせた後 64 ノードまでの分枝・処理の分だけ)
         let wt = |d: usize| 0.5f64.powi(d.min(2000) as i32);
         let mut w: f64 = self.queue.iter().chain(plunge).map(|n| wt(n.depth)).sum();
+        // 記録用の内訳: [自分, 共有の待ち行列, ほかのスレッド]
+        let mut wparts = [w, 0.0, 0.0];
         if let Some(pool) = &self.pool {
             let t = self.pool_tid as usize;
+            let g = pool.inner.lock().unwrap();
+            wparts[1] = g.nodes.iter().map(|n| wt(n.depth)).sum::<f64>();
             for (i, sl) in pool.slots.iter().enumerate() {
                 if i != t {
-                    w += f64::from_bits(sl.wopen.load(Ordering::Relaxed));
+                    wparts[2] += f64::from_bits(sl.wopen.load(Ordering::Relaxed)).max(0.0);
                 }
             }
-            let g = pool.inner.lock().unwrap();
-            w += g.nodes.iter().map(|n| wt(n.depth)).sum::<f64>();
+            w += wparts[1] + wparts[2];
         }
         let q = (1.0 - w).clamp(0.0, 1.0);
         let ub = self.prune_limit();
         let lb = self.global_lower_bound();
-        let (n0, q0, ub0, lb0) = self.t1r_last;
+        let (n0, q0, ub0, lb0) = self.tr_last;
         if n0 == 0 {
-            self.t1r_last = (done, q, ub, lb);
+            self.tr_last = (done, q, ub, lb);
             return false;
         }
         let est = n0 as f64 + (done - n0) as f64 * (1.0 - q) / (q - q0).max(1e-9);
         // 自由な割合は、この求解の根の始めに自由だった整数列に対する割合 (HiGHS は再スタート後の模型の整数列に対する割合)
         let free0 = self.p.nint.saturating_sub(self.root_fixed0).max(1);
-        let r = (1.0 - self.newly_fixed_ints() as f64 / free0 as f64).clamp(0.0, 1.0).powi(2);
+        let newly = self.newly_fixed_ints();
+        let r = (1.0 - newly as f64 / free0 as f64).clamp(0.0, 1.0).powi(2);
         let gap_red = if ub.is_finite() && ub0.is_finite() && lb.is_finite() && lb0.is_finite() { (ub0 - lb0) / (ub - lb).max(1e-9) } else { 1.0 };
         let huge = gap_red < 1.0 + 0.05 / r.max(1e-9) && est >= r * 20.0 * done as f64;
         if huge {
-            self.t1r_huge += 1;
+            self.tr_huge += 1;
         } else {
-            self.t1r_huge = 0;
-            self.t1r_last = (done, q, ub, lb);
+            self.tr_huge = 0;
+            self.tr_last = (done, q, ub, lb);
         }
         let need = (r * (10.0 + 0.0005 * done as f64) * 1.5f64.powi(self.params.restarts as i32)).round().max(1.0) as u32;
-        if env_str!("ENOMOTO_MIP_TREE1_RESTART_LOG").is_some() {
-            eprintln!("TREE1R: nodes {done} q {q:.4} (last {q0:.4} at {n0}) est {est:.0} r {r:.3} gap_red {gap_red:.4} huge {} need {need}", self.t1r_huge);
+        let log = env_str!("ENOMOTO_MIP_TREE_RESTART_LOG").is_some() || env_str!("ENOMOTO_MIP_TREE1_RESTART_LOG").is_some();
+        if log {
+            eprintln!("TREER: t {:.1} nodes {done} q {q:.4} (last {q0:.4} at {n0}) est {est:.0} r {r:.3} gap_red {gap_red:.4} huge {} need {need} newly {newly}/{free0} w {:.4}/{:.4}/{:.4}", self.start.elapsed().as_secs_f64(), self.tr_huge, wparts[0], wparts[1], wparts[2]);
         }
-        if self.t1r_huge < need {
+        if self.tr_huge < need {
             return false;
         }
-        self.t1r_huge = 0;
+        self.tr_huge = 0;
         if self.params.restarts >= max_restarts(self.p) || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() || self.time_up() {
             return false;
         }
-        // `=f`: 固定の数が [`Self::maybe_restart`] の閾値に届かなければ再スタートしない (従を止める前に確かめる)
-        if env_str!("ENOMOTO_MIP_TREE1_RESTART") == Some("f") && !self.proto_restart_ok(0.0) {
-            return false;
+        // 新たな固定の数の閾値 (`force` でなければ。従を止める前に確かめる)
+        if tree_restart_mode() != 2 {
+            let min_fix = tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_FIX", 1usize, usize).max(1);
+            let frac = tunable!("ENOMOTO_T_MIP_TREE_RESTART_FIX_FRAC", 0.01, f64);
+            if newly < min_fix || (newly as f64) < frac * free0 as f64 {
+                if log {
+                    eprintln!("TREER: t {:.1} skipped: newly fixed {newly} < max({min_fix}, {frac} x {free0})", self.start.elapsed().as_secs_f64());
+                }
+                self.tr_last = (done, q, ub, lb);
+                return false;
+            }
         }
         match self.deadline {
             Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT", 0.1, f64) * self.params.time_limit,
@@ -16010,6 +15988,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let sn = g.nodes.pop_best()?;
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
+        pool.wopen_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
         // 取ったノードの下界を同じ錠の中で書く ([`Self::pool_acquire`] と同じ)。待っている側に数えられていれば戻す ([`Self::pool_balance`] と同じ)
         if let Some(sl) = pool.slots.get(self.pool_tid as usize) {
             sl.lb.store(mine.min(sn.lower_bound).to_bits(), Ordering::Relaxed);
@@ -16054,8 +16033,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if let Some(sl) = sl {
                     sl.open.store(0, Ordering::Relaxed);
                 }
+                // 手元の待ち行列は空 (潜りの子もない) なので、知らせた重みは 0 (`ENOMOTO_MIP_TREE_RESTART`、[`WorkPool::wopen_shift`])
+                pool.wopen_clear(self.pool_tid);
                 let got = if shared_sel { g.nodes.pop_hybrid(bb_every) } else { g.nodes.pop_best() };
                 if let Some(sn) = got {
+                    pool.wopen_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
                     // 受け取ったノードの下界を同じ錠の中で書く (共有の待ち行列から消えた後も全体の下界に入るように)
                     if let Some(sl) = sl {
                         sl.lb.store(sn.lower_bound.to_bits(), Ordering::Relaxed);
