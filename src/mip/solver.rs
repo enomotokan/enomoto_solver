@@ -2396,6 +2396,14 @@ pub(crate) struct SubmipCtl {
     pub(super) outer_lb: Option<(f64, Option<std::sync::Arc<CutJob>>)>,
 }
 
+/// `ENOMOTO_MIP_TREE3_JOINCAP` (試作、既定では使わない。analysis/tree_close3_20261104.md): 外側の根で並列のサブ MIP の終わりを全部待つ
+/// ([`Solver::join_submips`] の `keep` = 0) とき、待つ時間に上限を置き、超えたら残りに止めの合図 ([`SubmipCtl::abort`]) を送る。
+/// tbfp-network では早めの再スタートが 80 秒で決まった後、時間の上限を残り時間 (547 秒) にした根の被約費用のサブ MIP (自由な列 36362)
+/// を 600 秒まで待ち、木に入らなかった。neos-873061 では同じサブ MIP を約 130 秒待っていた
+pub(crate) fn tree3_joincap() -> bool {
+    env_str!("ENOMOTO_MIP_TREE3_JOINCAP").is_some_and(|v| v != "0")
+}
+
 /// `ENOMOTO_MIP_LOSE6_1_STOP` (試作、既定では使わない): 根のヒューリスティクスで早めの再スタートが決まったら、並列のサブ MIP の終わりを
 /// 待つ前に `ENOMOTO_T_MIP_LOSE6_1_GRACE` 秒 (既定 0.5) だけ待ち、まだ走っているものに止めの合図 ([`SubmipCtl::abort`]) を送る。
 /// h80x6320d では 11 秒で早めの再スタートが決まった後、解を出さない RENS・根の被約費用のサブ MIP (各 500 ノード、13〜23 秒) の終わりを
@@ -13479,7 +13487,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let l63_t0 = Instant::now();
             let l63_wait = tunable!("ENOMOTO_T_MIP_LOSE6_3_JOINSTOP_MIN", 0.1, f64).max(tunable!("ENOMOTO_T_MIP_LOSE6_3_JOINSTOP_MULT", 0.25, f64) * self.start.elapsed().as_secs_f64());
             let mut l63_stopped = false;
+            // `ENOMOTO_MIP_TREE3_JOINCAP` (試作、既定では使わない。[`tree3_joincap`]、analysis/tree_close3_20261104.md): 外側の根で全部を
+            // 待つとき、待ち始めてから max(`ENOMOTO_T_MIP_TREE3_JOINCAP_MIN` (1 秒), `ENOMOTO_T_MIP_TREE3_JOINCAP_MULT` (0.25) x 根の始めから
+            // 待ち始めまでの秒) 過ぎても終わらないサブ MIP に止めの合図 ([`SubmipCtl::abort`]、その時点の解を返す) を送る
+            let t3 = keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && tree3_joincap();
+            let t3_wait = tunable!("ENOMOTO_T_MIP_TREE3_JOINCAP_MIN", 1.0, f64).max(tunable!("ENOMOTO_T_MIP_TREE3_JOINCAP_MULT", 0.25, f64) * self.start.elapsed().as_secs_f64());
+            let mut t3_stopped = false;
             while self.pending_submips.len() > keep {
+                if t3 && !t3_stopped && l63_t0.elapsed().as_secs_f64() >= t3_wait {
+                    t3_stopped = true;
+                    let mut n = 0usize;
+                    for it in &self.pending_submips {
+                        if let Some(c) = &it.5 {
+                            if !it.0.is_finished() {
+                                c.abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                                n += 1;
+                            }
+                        }
+                    }
+                    if self.params.verbose {
+                        eprintln!(
+                            "MIP: ENOMOTO_MIP_TREE3_JOINCAP: stopping {n} of {} parallel sub-MIPs after waiting {:.2}s (cap {t3_wait:.2}s, {:.2}s)",
+                            self.pending_submips.len(),
+                            l63_t0.elapsed().as_secs_f64(),
+                            self.start.elapsed().as_secs_f64()
+                        );
+                    }
+                }
                 if l63 && !l63_stopped && l63_t0.elapsed().as_secs_f64() >= l63_wait && self.proto_restart_ok(0.0) {
                     l63_stopped = true;
                     let mut n = 0usize;
