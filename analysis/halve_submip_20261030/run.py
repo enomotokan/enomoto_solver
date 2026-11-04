@@ -111,6 +111,8 @@ CFGS = {
     "nosib": {"ENOMOTO_MIP_MEM1_SIBLU": "0"},
     "nomem2p": {"ENOMOTO_MIP_MEM2": "0"},
     "nomargin": {"ENOMOTO_MIP_MEM3_TINY_MARGIN": "0"},
+    # 2026-11-04 の直しの後の既定は MEM3_TINY_MARGIN=m (サブ MIP では以前の余裕)。サブ MIP でも小さい余裕にするのは "marginall"
+    "marginall": {"ENOMOTO_MIP_MEM3_TINY_MARGIN": "1"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }

@@ -10289,3 +10289,5 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   `ENOMOTO_MIP_FZ3_REPAIR_BOUND` (修復の下界のずれの式・時間の上限なしの panic)。
 - 根拠: bench22 (60 秒) で ±2% の中、600 秒でメモリ不足の 6 問中 5 問が落ちなくなり最大 RSS 1.6〜9.0 GB (`analysis/mitt600_20261103.md`)。
 - 記録は `analysis/mem_default_20261104.md`。
+- 追記 (同日): `ENOMOTO_MIP_MEM3_TINY_MARGIN` の既定を `m` に直す (小さい余裕は外側の求解と再スタートだけ、サブ MIP は以前の余裕)。サブ MIP でも小さくすると
+  qiu が系統的に遅くなった (bench23・bench24)。

@@ -2692,7 +2692,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 幅が許容誤差以下の列を 1 点に固定する ([`fix_tiny_width_columns`]。再スタートの問題の大域的な境界、プロービングで締めた境界を含む)
     let (mut col_lo, mut col_up) = (p.col_lo.clone(), p.col_up.clone());
     let (mut p_row_lo, mut p_row_up) = (p.row_lo.clone(), p.row_up.clone());
-    let tiny0 = fix_tiny_width_columns(&p.rows, &mut p_row_lo, &mut p_row_up, &mut col_lo, &mut col_up, &p.is_int);
+    let tiny0 = fix_tiny_width_columns(&p.rows, &mut p_row_lo, &mut p_row_up, &mut col_lo, &mut col_up, &p.is_int, submip);
     // `ENOMOTO_MIP_DUPCOL` (試作): 同じ列の 0-1 列のうち高い方を 0 に固定する ([`duplicate_binary_fixings`])
     if env_str!("ENOMOTO_MIP_DUPCOL").is_some() {
         let t0 = std::time::Instant::now();
@@ -2794,7 +2794,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         row_up.push(rhs);
     }
     // 前処理 (伝播・行シングルトンなど) が締めた境界でも、幅が許容誤差以下になった列を固定する (係数の強化の前)
-    let tiny1 = fix_tiny_width_columns(&rows, &mut row_lo, &mut row_up, &mut pre.lb, &mut pre.ub, &p.is_int);
+    let tiny1 = fix_tiny_width_columns(&rows, &mut row_lo, &mut row_up, &mut pre.lb, &mut pre.ub, &p.is_int, submip);
     if verbose && tiny0 + tiny1 > 0 {
         eprintln!("MIP: presolve: fixed {} columns of width within tolerance ({tiny0} before, {tiny1} after the reductions)", tiny0 + tiny1);
     }
@@ -2919,7 +2919,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 列の多くが固定されたらその境界で前処理をかけ直す (LP による固定・プロービングは小さくなった問題で行う)。
     // 手元 16 スレッド・60 秒: neos8 16.2 -> 6.6 秒、drayage-100-23 5.9 -> 3.0 秒 (analysis/eprostop_16t_20261028.md)
     if lp_probe_secs.is_some() && !submip && env_str!("ENOMOTO_MIP_NO_PROBE_EARLY_REPRESOLVE").is_none() && !QUICK_PROBE_ACTIVE.with(|f| f.get()) {
-        match quick_probe_fixings(&mut prob, verbose) {
+        match quick_probe_fixings(&mut prob, verbose, submip) {
             None => return Some(Presolved::Infeasible),
             Some(k) if k > 0 => {
                 let mut postsolve = pre.postsolve_log;
@@ -3977,7 +3977,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
     }
     // 緩めた分で幅が許容誤差以下になった列 (値 0 のはずの連続列が `[0, 1e-9]` など) は 1 点に固定する ([`fix_tiny_width_columns`])
-    let tiny = fix_tiny_width_columns(&prob.rows, &mut prob.row_lo, &mut prob.row_up, &mut prob.col_lo, &mut prob.col_up, &prob.is_int);
+    let tiny = fix_tiny_width_columns(&prob.rows, &mut prob.row_lo, &mut prob.row_up, &mut prob.col_lo, &mut prob.col_up, &prob.is_int, submip);
     if verbose && tiny > 0 {
         eprintln!("MIP: probing: fixed {tiny} columns of width within tolerance");
     }
@@ -4128,7 +4128,7 @@ pub(crate) fn report_submip_components(p: &MipProblem, stage: &str) {
 /// neos8 では最初の 32 本のプロービング (0.3 秒) で 0-1 列 23035 本のうち 21379 本が固定されるが、既定ではプロービングが前処理の
 /// 最後で、かけ直さないので 46070 行・23039 列のまま LP による固定 (4.9 秒) とプロービング (10.5 秒、含意集め) を回し、根も
 /// その大きさで解いていた (HiGHS の前処理は 6496 行・659 列。analysis/smallprob_overhead_20261028.md)
-fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool) -> Option<usize> {
+fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<usize> {
     use domain::Domain;
     let t0 = std::time::Instant::now();
     let n = prob.n;
@@ -4220,7 +4220,7 @@ fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool) -> Option<usize> {
             prob.col_up[k] = dom.up[k];
         }
     }
-    fix_tiny_width_columns(&prob.rows, &mut prob.row_lo, &mut prob.row_up, &mut prob.col_lo, &mut prob.col_up, &prob.is_int);
+    fix_tiny_width_columns(&prob.rows, &mut prob.row_lo, &mut prob.row_up, &mut prob.col_lo, &mut prob.col_up, &prob.is_int, submip);
     Some(newly)
 }
 
@@ -4437,7 +4437,7 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
 ///   (越える列は固定しない。緩めには丸めの余裕 1e-9 (1 + |b|) を足す)。等式の行は緩められないので、破れの和が `1e-9 (1 + |b|)` (前処理の許容誤差) までの列だけ固定する。
 ///
 /// 固定した列の数を返す。
-pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], lo: &mut [f64], up: &mut [f64], is_int: &[bool]) -> usize {
+pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], lo: &mut [f64], up: &mut [f64], is_int: &[bool], submip: bool) -> usize {
     if env_str!("ENOMOTO_MIP_NO_TINY_WIDTH_FIX").is_some() {
         return 0;
     }
@@ -4500,7 +4500,10 @@ pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f
     // 1e-9 |b| (右辺 5590 で 5.6e-6、許容誤差 1e-6 の数倍) 緩めない)。正規化の floor(b + 1e-9) の境目の心配は |b| ≤ 1 の行と同じに残る。
     // uccase12 では再スタートの後の前処理のプロービングがこの余裕で右辺 5000 前後の行を 5.6e-6 ずつ緩め、木の暫定解が元の問題で
     // 連続列の下限 0 を 1.1e-5 破っていた (analysis/uccase12_mem3_20261103.md)
-    let small = env_def!("ENOMOTO_MIP_MEM3_TINY_MARGIN", "1").is_some();
+    // 既定 (`m`、2026-11-04) は外側の求解 (再スタートを含む) だけで小さい余裕にし、サブ MIP では以前の余裕のまま (サブ MIP の解は元の問題で
+    // 確かめてから使う。qiu ではサブ MIP の前処理の余裕を小さくすると固定できる列が減り、サブ MIP が暫定解を見つけにくくなって遅れた、
+    // analysis/halve_submip_20261030.md の bench24)。`=1` でサブ MIP でも小さい余裕
+    let small = env_def!("ENOMOTO_MIP_MEM3_TINY_MARGIN", "m").is_some_and(|v| v != "m" || !submip);
     let margin = |b: f64| if small { 1e-9 * (1.0 + b.abs().min(1.0)) + 4.0 * f64::EPSILON * b.abs() } else { 1e-9 * (1.0 + b.abs()) };
     let (mut nrel, mut wmax, mut mmax) = (0usize, 0.0f64, 0.0f64);
     for (i, &w) in used.iter().enumerate() {
@@ -5993,7 +5996,8 @@ mod tests {
         let mut lo = vec![0.0, 0.5, -1e-9, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         let mut up = vec![1e-9, 0.5 + 1e-9, 1e-9, 2e-6, 1e-9, 6e-7, 6e-7, 1.0 - 1e-9, 1e-8];
         let is_int = vec![false, false, false, false, false, false, false, true, false];
-        let k = fix_tiny_width_columns(&rows, &mut rlo, &mut rup, &mut lo, &mut up, &is_int);
+        // サブ MIP の扱い (`submip = true`) では丸めの余裕は以前の 1e-9 (1 + |b|) のまま (外側の求解では `ENOMOTO_MIP_MEM3_TINY_MARGIN` の小さい余裕)
+        let k = fix_tiny_width_columns(&rows, &mut rlo, &mut rup, &mut lo, &mut up, &is_int, true);
         assert_eq!(k, 5);
         assert_eq!((lo[0], up[0]), (0.0, 0.0));
         assert_eq!((lo[1], up[1]), (0.5, 0.5));

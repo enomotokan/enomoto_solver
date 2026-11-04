@@ -13155,7 +13155,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         // 幅が許容誤差以下になった列 (伝播は連続列の境界を誤差の分だけ緩めて締める) も 1 点に固定する ([`super::fix_tiny_width_columns`])
-        let tiny = super::fix_tiny_width_columns(&rows, &mut row_lo, &mut row_up, &mut glo, &mut gup, &p.is_int);
+        let tiny = super::fix_tiny_width_columns(&rows, &mut row_lo, &mut row_up, &mut glo, &mut gup, &p.is_int, self.params.submip);
         // [`super::restart_cuts_fix`] の (2) (`ENOMOTO_MIP_NO_RESTART_CUTS_FIX` で使わない): プールの経路のカットは、大域的に固定された列を代入して右辺に移す (前処理で固定された
         // 列を含むカットは写すときに捨てられるので)。代入して項が無くなったカットは捨てる
         if super::restart_cuts_fix() && !cuts_as_rows {
