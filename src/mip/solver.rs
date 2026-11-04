@@ -2662,6 +2662,12 @@ pub(crate) struct SubmipCtl {
 /// ([`Solver::join_submips`] の `keep` = 0) とき、待つ時間に上限を置き、超えたら残りに止めの合図 ([`SubmipCtl::abort`]) を送る。
 /// tbfp-network では早めの再スタートが 80 秒で決まった後、時間の上限を残り時間 (547 秒) にした根の被約費用のサブ MIP (自由な列 36362)
 /// を 600 秒まで待ち、木に入らなかった。neos-873061 では同じサブ MIP を約 130 秒待っていた
+/// `ENOMOTO_MIP_TREE3_DIVECAP` (試作、既定では使わない。analysis/tree_close3_20261104.md): 外側の根の Feasibility Pump・ダイビングに
+/// 根の LP の時間に比べた上限を置く (heur! の中)。
+pub(crate) fn tree3_divecap() -> bool {
+    env_str!("ENOMOTO_MIP_TREE3_DIVECAP").is_some_and(|v| v != "0")
+}
+
 pub(crate) fn tree3_joincap() -> bool {
     env_str!("ENOMOTO_MIP_TREE3_JOINCAP").is_some_and(|v| v != "0")
 }
@@ -4228,7 +4234,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     pub(super) fn limits(&self, iteration_limit: u64) -> SolveLimits {
-        SolveLimits { iteration_limit, cutoff: self.prune_limit() - self.p.offset, deadline: self.deadline }
+        // `ENOMOTO_MIP_TREE3_DIVECAP` (試作) のときだけ、根のヒューリスティクスの期限 (`heur_stop`) も LP の期限にする
+        let deadline = match self.heur_stop.filter(|_| tree3_divecap()) {
+            Some(h) => Some(self.deadline.map_or(h, |d| d.min(h))),
+            None => self.deadline,
+        };
+        SolveLimits { iteration_limit, cutoff: self.prune_limit() - self.p.offset, deadline }
     }
 
     /// この値以上の下界のノードは捨ててよい (最小化形、定数項込み)。
@@ -6345,7 +6356,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             if cap > 0.0 && !self.params.submip && self.params.time_limit.is_finite() && ($name == "feasibility pump" || $name.ends_with("diving")) {
                                 self.heur_stop = Some(Instant::now() + std::time::Duration::from_secs_f64(cap * self.params.time_limit));
                             }
+                            // `ENOMOTO_MIP_TREE3_DIVECAP` (試作、既定では使わない。[`tree3_divecap`]): 外側の根の Feasibility Pump・ダイビング 1 回を
+                            // max(`ENOMOTO_T_MIP_TREE3_DIVECAP_MIN` (1 秒), `ENOMOTO_T_MIP_TREE3_DIVECAP_MULT` (2) x 根の LP の秒) までにする (LP の 1 回の
+                            // 求解の期限にも使う、[`Self::limits`])。neos-3216931-puriri では分数ダイビング 1 回が 178〜432 秒かかり何も見つけなかった
+                            if tree3_divecap() && !self.params.submip && self.snap.is_none() && ($name == "feasibility pump" || $name.ends_with("diving")) {
+                                let secs = tunable!("ENOMOTO_T_MIP_TREE3_DIVECAP_MIN", 1.0, f64).max(tunable!("ENOMOTO_T_MIP_TREE3_DIVECAP_MULT", 2.0, f64) * self.root_lp_secs);
+                                let d = Instant::now() + std::time::Duration::from_secs_f64(secs.min(1e6));
+                                self.heur_stop = Some(self.heur_stop.map_or(d, |h| h.min(d)));
+                            }
                             let found = $e;
+                            if tree3_divecap() && self.params.verbose && self.heur_stop.is_some_and(|d| Instant::now() >= d) {
+                                eprintln!("MIP: root heuristic {}: stopped at the time cap (ENOMOTO_MIP_TREE3_DIVECAP)", $name);
+                            }
                             self.heur_stop = None;
                             self.heur_label = "";
                             // 早めの再スタート (既定で使う。`ENOMOTO_MIP_NO_EARLY_RESTART` で使わない): このヒューリスティクスで暫定解が良くなり、根の被約費用による固定で
