@@ -113,6 +113,11 @@ CFGS = {
     "nomargin": {"ENOMOTO_MIP_MEM3_TINY_MARGIN": "0"},
     # 2026-11-04 の直しの後の既定は MEM3_TINY_MARGIN=m (サブ MIP では以前の余裕)。サブ MIP でも小さい余裕にするのは "marginall"
     "marginall": {"ENOMOTO_MIP_MEM3_TINY_MARGIN": "1"},
+    # bench25 (2026-11-04): メモリの試作 3 つ (memcap_a・b・c)、前処理の強制等式 (tree_close2)、解発見スレッドの止め方 (qiu_margin)
+    "mem3": {"ENOMOTO_MIP_MEMB": "rcq", "ENOMOTO_MIP_MEMC": "1", "ENOMOTO_MIP_MEMCAP": "1"},
+    "forceq": {"ENOMOTO_MIP_TREE2_FORCEQ": "1"},
+    "fstop": {"ENOMOTO_MIP_QIU_FIND_STOP_GAP": "1"},
+    "all4": {"ENOMOTO_MIP_MEMB": "rcq", "ENOMOTO_MIP_MEMC": "1", "ENOMOTO_MIP_MEMCAP": "1", "ENOMOTO_MIP_TREE2_FORCEQ": "1", "ENOMOTO_MIP_QIU_FIND_STOP_GAP": "1"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
