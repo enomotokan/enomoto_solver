@@ -558,6 +558,16 @@ impl NodeQueue {
     }
 
     /// 下界最小のノードを取り出す。
+    /// 次の [`Self::pop`] が下界最小を取る番か (`ENOMOTO_MIP_TREE1_POOL`)。
+    pub fn next_is_best(&self, bb_every: u64) -> bool {
+        !self.prio_only && (self.pops + 1) % bb_every.max(1) == 0
+    }
+
+    /// [`Self::pop`] の番を 1 つ進める (取り出しを別の待ち行列から行ったとき。`ENOMOTO_MIP_TREE1_POOL`)。
+    pub fn skip_pop(&mut self) {
+        self.pops += 1;
+    }
+
     pub fn pop_best(&mut self) -> Option<OpenNode> {
         let id = self.by_lb.iter().next().map(|&(_, id)| id)?;
         Some(self.remove(id))
