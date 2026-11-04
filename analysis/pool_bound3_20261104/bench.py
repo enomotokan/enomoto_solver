@@ -1,4 +1,4 @@
-"""pool_bound3 の 58 問 (analysis/cbcimpl_20261029/probs.py) を今の既定 (def) と試作 (p3 = ENOMOTO_MIP_POOL3_BEST=5) で解く
+"""pool_bound3 の 58 問 (analysis/cbcimpl_20261029/probs.py) を今の既定 (def) と試作 (p3 = ENOMOTO_MIP_POOL3_BEST=0.05) で解く
 (2026-11-04、memcap_c_20261104/bench.py の写しで設定と一時ファイルだけ変えた。その元は uccase12_mem1_20261103/bench.py の写しで設定と一時ファイルだけ変えた。元は 2026-11-03、4 スレッド・60 秒・1 回ずつ。mittelmann_ready_20261103/threads/run.py の写しで、設定と置き場所だけ変えた)。
 以下は元の説明:
 スレッド数を変えて 58 問 (analysis/cbcimpl_20261029/probs.py) を今の既定で解く (2026-11-03、60 秒、1 回ずつ)。
@@ -18,7 +18,7 @@ import run_miplib_benchmark as rb  # noqa: E402
 from probs import PROBS  # noqa: E402
 HW = {"ENOMOTO_MIP_DIAG_HW_THREADS": "16"}
 CFGS = {  # (スレッド数, 足す環境変数)
-    "def": (4, {}), "p3": (4, {"ENOMOTO_MIP_POOL3_BEST": "5"}),
+    "def": (4, {}), "p3": (4, {"ENOMOTO_MIP_POOL3_BEST": "0.05"}),
 }
 
 
