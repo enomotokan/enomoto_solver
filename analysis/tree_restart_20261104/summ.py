@@ -41,7 +41,7 @@ if (D / "res58.jsonl").exists():
     print()
     print("片方だけ解けた・差の大きいもの:")
     for (p, rp), v in sorted(res.items()):
-        if len(v) < len(cfgs):
+        if len(cfgs) < 2 or len(v) < len(cfgs):
             continue
         a, b = v[cfgs[0]], v[cfgs[1]]
         if ok(a) != ok(b):
