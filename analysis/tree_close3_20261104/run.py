@@ -20,6 +20,9 @@ for p in sys.argv[4:]:
     with open(log, "w") as lf:
         pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), f"--worker-{solver}", str(mps),
                              "--time-limit", str(tl), "--threads", "4"], cwd=WT, env=env, stdout=subprocess.PIPE, stderr=lf, text=True)
+    if solver == "highs":  # HiGHS のログは標準出力に出る
+        with open(log, "a") as lf:
+            lf.write(pr.stdout)
     try:
         res = json.loads([l for l in pr.stdout.splitlines() if l.startswith("{")][-1])
     except Exception:  # noqa: BLE001
