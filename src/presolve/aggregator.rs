@@ -674,6 +674,21 @@ pub fn eliminate_implied_free_columns_v2_if_any_scaled(n: usize, a: &FaerCsr, b:
     Some(eliminate_implied_free_columns_v2_scaled(n, a, b, c, lb, ub, real_rows, real_rhs, opts, col_scale))
 }
 
+/// 試作 `ENOMOTO_MIP_TREE2_INTAGG` (既定では使わない、analysis/tree_close2_20261104.md): 整数最適化の前処理で、v2 の Aggregator が
+/// 整数列も消す。消すのは、ピボット行の残りの列が全て整数列で、その係数と右辺がピボットの係数の整数倍のとき
+/// ([`int_pivot_row`]) だけ (HiGHS の aggregator も整数性が保たれる行でなら整数列を代入で消す)。rococoC10-001000 では容量の
+/// 一般整数列 `z = Σ c y` (82 本) が残り、容量の行 `Σ d x <= z` が 0-1 だけの行にならない (HiGHS は消して 0-1 のナップサック行にする)
+pub(crate) fn tree2_intagg() -> bool {
+    env_str!("ENOMOTO_MIP_TREE2_INTAGG").is_some() && crate::presolve::int_mask().is_some()
+}
+
+/// 等式行 `row · x = rhs` を整数列 `j` (係数 `coeff`) のピボットに使って、代入式 `x_j = (rhs - Σ a_k x_k) / coeff` が
+/// 整数解で必ず整数になるか (残りが全て整数列、`a_k / coeff` と `rhs / coeff` が整数)
+fn int_pivot_row(row: &[(usize, f64)], j: usize, coeff: f64, rhs: f64, int_mask: &[bool]) -> bool {
+    let is_intv = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
+    is_intv(rhs / coeff) && row.iter().all(|&(k, v)| k == j || v == 0.0 || (int_mask.get(k).copied().unwrap_or(false) && is_intv(v / coeff)))
+}
+
 /// [`eliminate_implied_free_columns_v2`] の候補リストが空でないかを判定する。
 /// v2 の候補生成を正確に再現する: 同じ適格性判定、列番号順にソートした行での
 /// 活動量計算 (v2 は最初に未ソート行をソートするため)、列ごとの `max`/`min` の
@@ -684,7 +699,9 @@ pub fn v2_has_candidate(n: usize, a: &FaerCsr, b: &[f64], lb: &[f64], ub: &[f64]
     let p = ar.nrows();
     // 自由列は freevar の担当なので候補から外す。整数最適化の前処理中は整数列も外す (消さない)。
     let int_mask = crate::presolve::int_mask();
-    let is_free = |j: usize| (lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY) || int_mask.as_ref().is_some_and(|m| m[j]);
+    // 試作 `ENOMOTO_MIP_TREE2_INTAGG` ([`tree2_intagg`]): 整数列も候補にする (ピボット行が整数性を保つときだけ消す)
+    let intagg = tree2_intagg();
+    let is_free = |j: usize| (lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY) || (!intagg && int_mask.as_ref().is_some_and(|m| m[j]));
     // 各列が現れる等式行 / 実不等式行の本数。
     let mut col_a_count = vec![0usize; n];
     let mut col_g_count = vec![0usize; n];
@@ -805,7 +822,8 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
     let mut real_rhs: Vec<f64> = real_rhs.to_vec();
     // 自由列は freevar の担当なので候補から外す。整数最適化の前処理中は整数列も外す (消さない)。
     let int_mask = crate::presolve::int_mask();
-    let is_free = |j: usize| (lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY) || int_mask.as_ref().is_some_and(|m| m[j]);
+    let intagg = tree2_intagg();
+    let is_free = |j: usize| (lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY) || (!intagg && int_mask.as_ref().is_some_and(|m| m[j]));
     // 係数参照を二分探索にするため、全行を列番号順にソートしておく (密な行で二乗時間になるのを防ぐ)。
     for row in a_rows.iter_mut().chain(real_rows.iter_mut()) {
         if !row.windows(2).all(|w| w[0].0 < w[1].0) {
@@ -982,6 +1000,12 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
                 let un = if col_scale.is_empty() { sc } else { a_rows[i].iter().map(|&(k, v)| piv_mag(k, v)).fold(0.0f64, f64::max) };
                 (sc, un)
             });
+            // `ENOMOTO_MIP_TREE2_INTAGG`: 整数列 `j` は、行の残りが全て整数列で係数・右辺が `j` の係数の整数倍のときだけ消す
+            // (代入式 `x_j = (b - Σ a_k x_k) / a_j` が整数解で必ず整数になる)
+            // (このときは代入が整数の係数で厳密なので、ピボット比の判定はしない。rococoC10-001000 の `z - 34000 y1 - ... = 0` は比 1/34000)
+            if int_mask.as_ref().is_some_and(|m| m[j]) {
+                return int_pivot_row(&a_rows[i], j, coeff, b[i], int_mask.as_ref().unwrap());
+            }
             coeff.abs() >= ratio * row_max || (!col_scale.is_empty() && piv_mag(j, coeff) >= ratio * row_max_u)
         }) else {
             continue;

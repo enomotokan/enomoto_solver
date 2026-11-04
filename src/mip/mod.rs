@@ -2597,6 +2597,81 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     q
 }
 
+/// 試作 `ENOMOTO_MIP_TREE2_FORCEQ` (既定では使わない、analysis/tree_close2_20261104.md): 等式行 `Σ_{k≠y} a_k x_k + a_y y = b` で、
+/// `y` が 0-1 列 1 本、残りの列の活動の範囲 `[L, U]` について `y = 0` と `y = 1` の右辺 (`b` と `b - a_y`) が `L` と `U` の
+/// 一方ずつに一致するもの (強制行が `y` の値ごとに決まる) から、残りの列ごとに `x_k = v0_k + (v1_k - v0_k) y` の 2 項等式を作る
+/// (`v0_k`・`v1_k` は `y = 0`・`y = 1` で強制される境界)。整数解では元の行と同値で、LP の緩和だけが締まる。足した等式は
+/// 既定の前処理 (2 項等式・Aggregator) が連続列の代入に使う。HiGHS は neos-1445765 でこの形の行 (`Σ x = K y`、x は [0,1] の
+/// 連続列が K 本) から連続列 18467 本を消し、根の LP が -24699 -> -18811 になる。連続列だけを対象にし、行の長さは
+/// `ENOMOTO_T_MIP_TREE2_FORCEQ_MAXLEN` (既定 1000) まで
+fn tree2_forceq_rows(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], col_lo: &[f64], col_up: &[f64], is_int: &[bool]) -> Vec<(Vec<(usize, f64)>, f64)> {
+    let maxlen = tunable!("ENOMOTO_T_MIP_TREE2_FORCEQ_MAXLEN", 1000usize, usize);
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    for (i, r) in rows.iter().enumerate() {
+        if row_lo[i] != row_up[i] || !row_lo[i].is_finite() || r.len() < 2 || r.len() > maxlen {
+            continue;
+        }
+        let b = row_lo[i];
+        // 0-1 列がちょうど 1 本、残りは有限の境界を持つ連続列
+        let mut y: Option<(usize, f64)> = None;
+        let mut ok = true;
+        for &(j, a) in r {
+            if a == 0.0 {
+                continue;
+            }
+            if is_int[j] && col_lo[j] == 0.0 && col_up[j] == 1.0 {
+                if y.is_some() {
+                    ok = false;
+                    break;
+                }
+                y = Some((j, a));
+            } else if is_int[j] || !col_lo[j].is_finite() || !col_up[j].is_finite() || col_lo[j] == col_up[j] {
+                ok = false;
+                break;
+            }
+        }
+        let Some((yj, ay)) = y else { continue };
+        if !ok {
+            continue;
+        }
+        let (mut lo, mut hi, mut mag) = (0.0f64, 0.0f64, b.abs() + ay.abs());
+        for &(j, a) in r {
+            if j == yj || a == 0.0 {
+                continue;
+            }
+            let (l, u) = if a > 0.0 { (a * col_lo[j], a * col_up[j]) } else { (a * col_up[j], a * col_lo[j]) };
+            lo += l;
+            hi += u;
+            mag += l.abs() + u.abs();
+        }
+        let tol = 1e-9 * mag.max(1.0);
+        let (r0, r1) = (b, b - ay);
+        // `y = 0` で下側に強制されるか (`r0 = L`, `r1 = U`)、上側か (`r0 = U`, `r1 = L`)
+        let low_at_0 = if (r0 - lo).abs() <= tol && (r1 - hi).abs() <= tol {
+            true
+        } else if (r0 - hi).abs() <= tol && (r1 - lo).abs() <= tol {
+            false
+        } else {
+            continue;
+        };
+        for &(j, a) in r {
+            if j == yj || a == 0.0 || !seen.insert((j, yj)) {
+                continue;
+            }
+            // 行の活動が下側 (L) に強制されるとき x_j は a > 0 なら下限、a < 0 なら上限
+            let at_low = if a > 0.0 { col_lo[j] } else { col_up[j] };
+            let at_high = if a > 0.0 { col_up[j] } else { col_lo[j] };
+            let (v0, v1) = if low_at_0 { (at_low, at_high) } else { (at_high, at_low) };
+            // x_j - (v1 - v0) y = v0
+            let mut row = vec![(j, 1.0), (yj, -(v1 - v0))];
+            row.sort_unstable_by_key(|&(k, _)| k);
+            out.push((row, v0));
+        }
+    }
+    out
+}
+
 /// 前処理の結果。
 enum Presolved {
     Infeasible,
@@ -2638,15 +2713,37 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 行の列番号が狭義の昇順でないなどで作れなければ従来の経路で作る
     // 診断用 (`ENOMOTO_MIP_DEBUG_FASTPACK_CHECK`): 両方の経路で作り、ビット単位で同じかを確かめる
     let fastpack_check = env_str!("ENOMOTO_MIP_DEBUG_FASTPACK_CHECK").is_some();
-    let fast = crate::presolve::build_a_g_from_ranged_rows(&col_lo, &col_up, &p.rows, &p_row_lo, &p_row_up);
+    // 試作 `ENOMOTO_MIP_TREE2_FORCEQ` ([`tree2_forceq_rows`]): 0-1 列 1 本の強制等式から `x_j = v0 + d y` の 2 項等式を足す
+    let forceq: Vec<(Vec<(usize, f64)>, f64)> = if env_str!("ENOMOTO_MIP_TREE2_FORCEQ").is_some() {
+        let t0 = std::time::Instant::now();
+        let r = tree2_forceq_rows(&p.rows, &p_row_lo, &p_row_up, &col_lo, &col_up, &p.is_int);
+        if verbose {
+            eprintln!("MIP: presolve: TREE2_FORCEQ added {} doubleton equalities from forcing rows ({:.2}s)", r.len(), t0.elapsed().as_secs_f64());
+        }
+        r
+    } else {
+        Vec::new()
+    };
+    let aug_rows: std::borrow::Cow<'_, Vec<Vec<(usize, f64)>>> = if forceq.is_empty() {
+        std::borrow::Cow::Borrowed(&p.rows)
+    } else {
+        let mut r = p.rows.clone();
+        for (row, rhs) in &forceq {
+            r.push(row.clone());
+            p_row_lo.push(*rhs);
+            p_row_up.push(*rhs);
+        }
+        std::borrow::Cow::Owned(r)
+    };
+    let fast = crate::presolve::build_a_g_from_ranged_rows(&col_lo, &col_up, &aug_rows, &p_row_lo, &p_row_up);
     let fast_ok = fast.is_some();
     let (a, b, g, h) = match fast.filter(|_| !fastpack_check) {
         Some(r) => r,
         None => {
             let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: if p.is_int[j] { VarType::Integer } else { VarType::Continuous }, lb: col_lo[j], ub: col_up[j] }).collect();
-            let mut cons: Vec<ConstraintRow> = Vec::with_capacity(p.m);
-            for i in 0..p.m {
-                let expr = crate::types::LinearExpr { coeffs: p.rows[i].iter().cloned().collect(), constant: 0.0 };
+            let mut cons: Vec<ConstraintRow> = Vec::with_capacity(aug_rows.len());
+            for i in 0..aug_rows.len() {
+                let expr = crate::types::LinearExpr { coeffs: aug_rows[i].iter().cloned().collect(), constant: 0.0 };
                 let (lo, up) = (p_row_lo[i], p_row_up[i]);
                 if lo == up {
                     cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Eq, rhs: lo });
@@ -2661,7 +2758,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             }
             let r = crate::presolve::build_a_g(&vars, &cons);
             if fastpack_check && fast_ok {
-                let f = crate::presolve::build_a_g_from_ranged_rows(&col_lo, &col_up, &p.rows, &p_row_lo, &p_row_up).unwrap();
+                let f = crate::presolve::build_a_g_from_ranged_rows(&col_lo, &col_up, &aug_rows, &p_row_lo, &p_row_up).unwrap();
                 let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
                 let mat = |m: &crate::sparse::FaerCsr| (m.nrows(), m.ncols(), crate::sparse::csr_rows(m).into_iter().map(|r| r.into_iter().map(|(j, v)| (j, v.to_bits())).collect::<Vec<_>>()).collect::<Vec<_>>());
                 let same = mat(&f.0) == mat(&r.0) && bits(&f.1) == bits(&r.1) && mat(&f.2) == mat(&r.2) && bits(&f.3) == bits(&r.3);
