@@ -68,10 +68,6 @@ def run_one(p, c, log=False):
 
 
 if __name__ == "__main__":
-    try:  # 親 (この計測) がメモリ不足で殺されないようにする (fiball で殺された)
-        open("/proc/self/oom_score_adj", "w").write("-1000")
-    except OSError:
-        pass
     cfgs = sys.argv[1].split(",")
     probs = sys.argv[2].split(",") if len(sys.argv) > 2 and sys.argv[2] else PROBS
     name = sys.argv[3] if len(sys.argv) > 3 else "bench"
