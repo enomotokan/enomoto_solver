@@ -43,6 +43,7 @@ if R:
         if r.get("status") != "optimal" or h.get("status") != "optimal":
             return False
         return abs(r["objective"] - h["objective"]) > 1e-6 * max(1, abs(h["objective"]))
+    CF = [c for c in CF if any(c in R[p] for p in R)]
     ps = [p for p in PROBS if all(c in R.get(p, {}) for c in CF)]
     print(f"\n## 58 問・60 秒 (問題数 {len(ps)})\n")
     print("| 設定 | 解けた | SGM (秒) | crash | HiGHS の最適値との食い違い | 最大 RSS MB (中央値/最大) |")
