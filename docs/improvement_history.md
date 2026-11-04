@@ -10281,3 +10281,11 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 根拠: 上限が「それまでの最大の 5 倍」に引きずられ、道が変わって長めの LP が来ると外れていた (analysis/robust_cap_20261102.md)。bench20
   (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −2.3%・88 -> 88、Mittelmann +0.7%・49 -> 50、def だけが解けた回なし。
 - 記録は `analysis/robust_cap_default_20261103.md`。
+
+## 2026-11-04: メモリの試作 (memall) と修復の下界の直し (FZ3_REPAIR_BOUND) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて run.py の `prememall`): `ENOMOTO_MIP_MEM1_SIBLU=1` (`SIBLU_ROWS` 既定 1000、潜りの兄弟の LU は新しい 1 個だけ)、
+  `ENOMOTO_MIP_MEM2=p` (ノードの DSE 重みを f32 の並びに)、`ENOMOTO_MIP_MEM3_TINY_MARGIN` (幅の小さい列の固定の余裕を小さく)、
+  `ENOMOTO_MIP_FZ3_REPAIR_BOUND` (修復の下界のずれの式・時間の上限なしの panic)。
+- 根拠: bench22 (60 秒) で ±2% の中、600 秒でメモリ不足の 6 問中 5 問が落ちなくなり最大 RSS 1.6〜9.0 GB (`analysis/mitt600_20261103.md`)。
+- 記録は `analysis/mem_default_20261104.md`。
