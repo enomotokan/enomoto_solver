@@ -485,6 +485,11 @@ impl NodeQueue {
     }
 
     /// `push` が返した (枠, 世代) のノードがまだあり、下界が `limit` 以下なら取り出す。
+    /// (枠, 世代) のノードがまだ待ち行列にあるか。
+    pub fn holds(&self, id: usize, gen: u64) -> bool {
+        id < self.nodes.len() && self.gen[id] == gen && self.nodes[id].is_some()
+    }
+
     pub fn take(&mut self, id: usize, gen: u64, limit: f64) -> Option<OpenNode> {
         if id >= self.nodes.len() || self.gen[id] != gen {
             return None;
