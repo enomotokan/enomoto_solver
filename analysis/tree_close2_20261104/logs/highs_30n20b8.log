@@ -1,0 +1,65 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP 30n20b8 has 576 rows; 18380 cols; 109706 nonzeros; 18380 integer variables (11036 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 2e+02]
+  Cost    [5e+01, 1e+02]
+  Bound   [1e+00, 2e+02]
+  RHS     [1e+00, 1e+00]
+Presolving model
+491 rows, 8033 cols, 53143 nonzeros 0s
+491 rows, 6223 cols, 47708 nonzeros 5s
+491 rows, 4947 cols, 43823 nonzeros 14s
+488 rows, 4733 cols, 42817 nonzeros 27s
+Presolve reductions: rows 488(-88); columns 4733(-13647); nonzeros 42817(-66889) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   488 rows
+   4733 cols (4674 binary, 59 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   42817 nonzeros
+   Thread count 1 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0    28.4s
+         0       0         0   0.00%   122.9764669     inf                  inf        0      0      2      2208    29.1s
+         0       0         0   0.00%   125.3741207     inf                  inf      476     40    308      3756    34.1s
+         0       0         0   0.00%   126.2974869     inf                  inf     1059     51    371      4734    40.3s
+         0       0         0   0.00%   126.6276598     inf                  inf     1311     67    416      5534    45.8s
+         0       0         0   0.00%   127.0663645     inf                  inf     1040     79    480      6511    51.5s
+         0       0         0   0.00%   127.163291      inf                  inf     1143     82    496      6819    56.9s
+         0       0         0   0.00%   127.4932619     inf                  inf     1228     87    525      7323    62.1s
+         0       0         0   0.00%   127.6114623     inf                  inf     1285     92    552      7632    67.8s
+         0       0         0   0.00%   127.7080695     inf                  inf     1594    101    576      8025    73.5s
+         0       0         0   0.00%   127.7653233     inf                  inf     1784    103    601      8270    79.3s
+         0       0         0   0.00%   127.8980003     inf                  inf     1753    108    630      8669    85.3s
+         0       0         0   0.00%   128.407908      inf                  inf     1330    129    706     10004    90.4s
+         0       0         0   0.00%   128.407908      inf                  inf     1101    129    706     10004    90.4s
+
+Solving report
+  Model             30n20b8
+  Status            Time limit reached
+  Primal bound      inf
+  Dual bound        129
+  Gap               inf
+  P-D integral      0
+  Solution status   -
+  Timing            90.39
+                    28.10 (Presolve)
+                    62.24 (Solve)
+                    0.00 (Postsolve)
+  Max sub-MIP depth 0
+  Nodes             0
+  Repair LPs        0
+  LP iterations     10004
+                    0 (strong br.)
+                    7796 (separation)
+                    0 (heuristics)
+{"status": "Time limit reached", "objective": Infinity, "bound": 129.0, "nodes": 0, "time": 90.45210256600001}
