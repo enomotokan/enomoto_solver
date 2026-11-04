@@ -550,3 +550,25 @@ ENOMOTO の既定は今回の計測の 7〜9 回分。
   l2・l3 は片方以上解で +5〜6% 遅い。**既定の候補は l1** (ねらいの 2 問が 3/3 で縮み、Mittelmann で損なし)。l123 は hypothyroid-k1 も縮むが
   irp・noswot・physiciansched6-2 の TL がある。l2・l3 は単独では採らない (drayage-25-23 の悪化、irp・neos-1582420)。
   beasleyC3 の悪化が l1〜l3 に共通しているので、既定にする前に beasleyC3・irp を数回回して運かどうかを確かめる。
+
+## bench22 (uccase12 のメモリ不足の試作 siblu1r・mem2p・margin・memall、2026-11-04)
+
+- 土台 6b614f69 (分担 46〜49 は PENDING のまま動かず親の環境で回した)、50 分担、rep 36・37 (58 問) と 115 (Mittelmann 186 問)。集計は `summ22.txt`。
+  - siblu1r = `ENOMOTO_MIP_MEM1_SIBLU=1 ENOMOTO_MIP_MEM1_SIBLU_ROWS=1000` (LP が 1000 行以上のとき潜りの兄弟の LU を新しい 1 個だけ持つ、`uccase12_mem1_20261103.md`)
+  - mem2p = `ENOMOTO_MIP_MEM2=p` (ノードに保存する DSE 重みを f32 の並びにする、`uccase12_mem2_20261103.md`)
+  - margin = `ENOMOTO_MIP_MEM3_TINY_MARGIN=1` (幅の小さい列の固定で行を緩める余裕を小さくする、`uccase12_mem3_20261103.md`)
+  - memall = 3 つすべて
+
+| 設定 | 58 問 rep36 | 58 問 rep37 | 58 問 全回 (解けた数) | Mittelmann 186 (解けた数) | Mitt 片方以上解 |
+|---|---|---|---|---|---|
+| def | 17.41 | 16.80 | 17.10 (87) | 42.77 (49) | 13.95 |
+| siblu1r | −1.6% | −0.4% | −1.0% (87) | −0.4% (48) | −2.2% |
+| mem2p | −1.0% | −0.3% | −0.7% (86) | +0.6% (47) | +3.3% |
+| margin | −0.1% | +3.3% | +1.6% (86) | +0.1% (48) | +0.7% |
+| memall | −1.5% | +0.5% | −0.5% (85) | −0.3% (49) | −1.4% |
+
+- 片方だけ解けた回は各設定 1〜3 回で、どれも境目の問題 (h80x6320d・roll3000・noswot・qiu・physiciansched6-2・neos-1171448)。crash・60 秒超え・食い違いは 0。
+- 60 秒ではどの試作も ±2% の揺れの中で、害は見えない。60 秒の問題ではメモリの上限に届かないので、効き目 (メモリ) はこの bench では測れない。
+  効き目は uccase12 など長い上限の問題で見る (`analysis/mitt600_20261103.md` で既定が 6 問メモリ不足で落ちる)。
+- 判断: siblu1r・mem2p・margin は 60 秒で害がないので、既定にする候補。既定にする前に、600 秒でメモリ不足の 6 問 (app1-2・chromaticindex1024-7・
+  neos-4763324-toguru・radiationm40-10-02・supportcase18・uccase12) を memall で回して、落ちなくなるか・最大 RSS を確かめる。
