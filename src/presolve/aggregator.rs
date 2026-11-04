@@ -678,8 +678,14 @@ pub fn eliminate_implied_free_columns_v2_if_any_scaled(n: usize, a: &FaerCsr, b:
 /// 整数列も消す。消すのは、ピボット行の残りの列が全て整数列で、その係数と右辺がピボットの係数の整数倍のとき
 /// ([`int_pivot_row`]) だけ (HiGHS の aggregator も整数性が保たれる行でなら整数列を代入で消す)。rococoC10-001000 では容量の
 /// 一般整数列 `z = Σ c y` (82 本) が残り、容量の行 `Σ d x <= z` が 0-1 だけの行にならない (HiGHS は消して 0-1 のナップサック行にする)
+/// 値が `g` なら一般整数列 (境界が [0, 1] でない列) だけを消す (0-1 列を `y = 1 - y'` などで消すと、固定費用型の `x <= u y` の行の
+/// 形が崩れる。h80x6320d で 0-1 列 68 本が消えて VUB の行が 6241 -> 6173 本になり、根の下界が 6359 -> 6338、60 秒で解けなくなった)
 pub(crate) fn tree2_intagg() -> bool {
     env_str!("ENOMOTO_MIP_TREE2_INTAGG").is_some() && crate::presolve::int_mask().is_some()
+}
+
+fn tree2_intagg_general_only() -> bool {
+    env_str!("ENOMOTO_MIP_TREE2_INTAGG") == Some("g")
 }
 
 /// 等式行 `row · x = rhs` を整数列 `j` (係数 `coeff`) のピボットに使って、代入式 `x_j = (rhs - Σ a_k x_k) / coeff` が
@@ -1004,6 +1010,9 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
             // (代入式 `x_j = (b - Σ a_k x_k) / a_j` が整数解で必ず整数になる)
             // (このときは代入が整数の係数で厳密なので、ピボット比の判定はしない。rococoC10-001000 の `z - 34000 y1 - ... = 0` は比 1/34000)
             if int_mask.as_ref().is_some_and(|m| m[j]) {
+                if tree2_intagg_general_only() && lb[j] == 0.0 && ub[j] == 1.0 {
+                    return false;
+                }
                 return int_pivot_row(&a_rows[i], j, coeff, b[i], int_mask.as_ref().unwrap());
             }
             coeff.abs() >= ratio * row_max || (!col_scale.is_empty() && piv_mag(j, coeff) >= ratio * row_max_u)
