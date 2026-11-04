@@ -14551,7 +14551,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.find_thread.is_some() && env_str!("ENOMOTO_MIP_FIND_THREAD_NO_STOP").is_none() {
             let lb = self.fj_poor_lb;
             let thr = tunable!("ENOMOTO_T_MIP_FIND_THREAD_STOP_GAP", tunable!("ENOMOTO_T_MIP_FJ_POOR_GAP", 0.5, f64), f64);
-            let poor = self.incumbent.as_ref().is_some_and(|(z, _)| self.inc_only_fj && lb.is_finite() && (z - lb) / z.abs().max(lb.abs()).max(1.0) > thr);
+            // `ENOMOTO_MIP_QIU_FIND_STOP_GAP` (試作、既定では使わない、analysis/qiu_margin_20261104.md): FJ 以外の暫定解でも根の LP との相対ギャップが
+            // `thr` を越える間は止めない (qiu では根の RENS の解 −27.65 (ギャップ 0.97) が 2 秒で入り、0.6 秒後に −115.25 を見つけるはずの解発見スレッドを止めていた)
+            let only_fj = self.inc_only_fj || env_str!("ENOMOTO_MIP_QIU_FIND_STOP_GAP").is_some();
+            let poor = self.incumbent.as_ref().is_some_and(|(z, _)| only_fj && lb.is_finite() && (z - lb) / z.abs().max(lb.abs()).max(1.0) > thr);
             if let Some(st) = self.find_stop.as_ref().filter(|_| !poor) {
                 if !st.swap(true, std::sync::atomic::Ordering::Relaxed) && self.params.verbose {
                     eprintln!("MIP: find thread asked to stop (incumbent {:?}, {:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
