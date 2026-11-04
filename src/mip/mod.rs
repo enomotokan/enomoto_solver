@@ -2692,7 +2692,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 幅が許容誤差以下の列を 1 点に固定する ([`fix_tiny_width_columns`]。再スタートの問題の大域的な境界、プロービングで締めた境界を含む)
     let (mut col_lo, mut col_up) = (p.col_lo.clone(), p.col_up.clone());
     let (mut p_row_lo, mut p_row_up) = (p.row_lo.clone(), p.row_up.clone());
-    let tiny0 = fix_tiny_width_columns(&p.rows, &mut p_row_lo, &mut p_row_up, &mut col_lo, &mut col_up, &p.is_int, submip);
+    let tiny0 = fix_tiny_width_columns(&p.rows, &mut p_row_lo, &mut p_row_up, &mut col_lo, &mut col_up, &p.is_int, submip, "pre0");
     // `ENOMOTO_MIP_DUPCOL` (試作): 同じ列の 0-1 列のうち高い方を 0 に固定する ([`duplicate_binary_fixings`])
     if env_str!("ENOMOTO_MIP_DUPCOL").is_some() {
         let t0 = std::time::Instant::now();
@@ -2794,7 +2794,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         row_up.push(rhs);
     }
     // 前処理 (伝播・行シングルトンなど) が締めた境界でも、幅が許容誤差以下になった列を固定する (係数の強化の前)
-    let tiny1 = fix_tiny_width_columns(&rows, &mut row_lo, &mut row_up, &mut pre.lb, &mut pre.ub, &p.is_int, submip);
+    let tiny1 = fix_tiny_width_columns(&rows, &mut row_lo, &mut row_up, &mut pre.lb, &mut pre.ub, &p.is_int, submip, "pre1");
     if verbose && tiny0 + tiny1 > 0 {
         eprintln!("MIP: presolve: fixed {} columns of width within tolerance ({tiny0} before, {tiny1} after the reductions)", tiny0 + tiny1);
     }
@@ -3977,7 +3977,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
     }
     // 緩めた分で幅が許容誤差以下になった列 (値 0 のはずの連続列が `[0, 1e-9]` など) は 1 点に固定する ([`fix_tiny_width_columns`])
-    let tiny = fix_tiny_width_columns(&prob.rows, &mut prob.row_lo, &mut prob.row_up, &mut prob.col_lo, &mut prob.col_up, &prob.is_int, submip);
+    let tiny = fix_tiny_width_columns(&prob.rows, &mut prob.row_lo, &mut prob.row_up, &mut prob.col_lo, &mut prob.col_up, &prob.is_int, submip, "probe");
     if verbose && tiny > 0 {
         eprintln!("MIP: probing: fixed {tiny} columns of width within tolerance");
     }
@@ -4220,7 +4220,7 @@ fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool, submip: bool) -> Op
             prob.col_up[k] = dom.up[k];
         }
     }
-    fix_tiny_width_columns(&prob.rows, &mut prob.row_lo, &mut prob.row_up, &mut prob.col_lo, &mut prob.col_up, &prob.is_int, submip);
+    fix_tiny_width_columns(&prob.rows, &mut prob.row_lo, &mut prob.row_up, &mut prob.col_lo, &mut prob.col_up, &prob.is_int, submip, "quick");
     Some(newly)
 }
 
@@ -4437,7 +4437,7 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
 ///   (越える列は固定しない。緩めには丸めの余裕 1e-9 (1 + |b|) を足す)。等式の行は緩められないので、破れの和が `1e-9 (1 + |b|)` (前処理の許容誤差) までの列だけ固定する。
 ///
 /// 固定した列の数を返す。
-pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], lo: &mut [f64], up: &mut [f64], is_int: &[bool], submip: bool) -> usize {
+pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], lo: &mut [f64], up: &mut [f64], is_int: &[bool], submip: bool, site: &'static str) -> usize {
     if env_str!("ENOMOTO_MIP_NO_TINY_WIDTH_FIX").is_some() {
         return 0;
     }
@@ -4503,7 +4503,14 @@ pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f
     // 既定 (`m`、2026-11-04) は外側の求解 (再スタートを含む) だけで小さい余裕にし、サブ MIP では以前の余裕のまま (サブ MIP の解は元の問題で
     // 確かめてから使う。qiu はサブ MIP でも小さい余裕にすると系統的に遅くなった (仕組みは未確認)、
     // analysis/halve_submip_20261030.md の bench24)。`=1` でサブ MIP でも小さい余裕
-    let small = env_def!("ENOMOTO_MIP_MEM3_TINY_MARGIN", "m").is_some_and(|v| v != "m" || !submip);
+    let mut small = env_def!("ENOMOTO_MIP_MEM3_TINY_MARGIN", "m").is_some_and(|v| v != "m" || !submip);
+    // 調査用 (`ENOMOTO_MIP_QIU_MARGIN_SITES`、一時、analysis/qiu_margin_20261104.md): 小さい余裕を使う呼び出し元を並べる (コンマ区切り)。
+    // 各項は `o:場所` (外側の求解) か `s:場所` (サブ MIP)、場所は pre0・pre1・probe・quick・restart か `*`。設定すると MEM3_TINY_MARGIN より優先する
+    if let Some(v) = env_str!("ENOMOTO_MIP_QIU_MARGIN_SITES") {
+        // サブ MIP かは `SUBMIP_DEPTH` でも見る (既定の `ENOMOTO_MIP_SUBMIP_HIGHS` の `p` ではサブ MIP の前処理にも `submip = false` が渡る)
+        let who = if submip || heuristics::SUBMIP_DEPTH.with(|d| d.get()) > 0 { "s" } else { "o" };
+        small = v.split(',').map(str::trim).any(|t| t == "*" || t == format!("{who}:{site}") || t == format!("{who}:*"));
+    }
     let margin = |b: f64| if small { 1e-9 * (1.0 + b.abs().min(1.0)) + 4.0 * f64::EPSILON * b.abs() } else { 1e-9 * (1.0 + b.abs()) };
     let (mut nrel, mut wmax, mut mmax) = (0usize, 0.0f64, 0.0f64);
     for (i, &w) in used.iter().enumerate() {
@@ -4518,7 +4525,8 @@ pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f
     }
     // 診断用 (`ENOMOTO_MIP_MEM3_DEBUG_INC`、一時): 緩めた行の数、固定でずれた分の最大、丸めの余裕の最大
     if mem3_debug_inc_on() && fixed > 0 {
-        eprintln!("MEM3_TINY: fixed {fixed} columns; relaxed {nrel} rows, max shift {wmax:.3e}, max margin {mmax:.3e} (small margin {small})");
+        let depth = heuristics::SUBMIP_DEPTH.with(|d| d.get());
+        eprintln!("MEM3_TINY: site {site} submip {submip} depth {depth}: fixed {fixed} columns; relaxed {nrel} rows, max shift {wmax:.3e}, max margin {mmax:.3e} (small margin {small})");
     }
     fixed
 }
@@ -5997,7 +6005,7 @@ mod tests {
         let mut up = vec![1e-9, 0.5 + 1e-9, 1e-9, 2e-6, 1e-9, 6e-7, 6e-7, 1.0 - 1e-9, 1e-8];
         let is_int = vec![false, false, false, false, false, false, false, true, false];
         // サブ MIP の扱い (`submip = true`) では丸めの余裕は以前の 1e-9 (1 + |b|) のまま (外側の求解では `ENOMOTO_MIP_MEM3_TINY_MARGIN` の小さい余裕)
-        let k = fix_tiny_width_columns(&rows, &mut rlo, &mut rup, &mut lo, &mut up, &is_int, true);
+        let k = fix_tiny_width_columns(&rows, &mut rlo, &mut rup, &mut lo, &mut up, &is_int, true, "test");
         assert_eq!(k, 5);
         assert_eq!((lo[0], up[0]), (0.0, 0.0));
         assert_eq!((lo[1], up[1]), (0.5, 0.5));
