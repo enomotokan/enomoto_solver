@@ -771,10 +771,14 @@ mod tests {
         let w = vec![(0u32, 1.2345f32), (2, 1e-7), (4, 3.0e5)];
         let d = NodeDse::pack(&w, &b).unwrap().halve();
         assert!(matches!(d, NodeDse::Half(_)));
-        let q = NodeDse::pack(&w, &b).unwrap().quarter();
-        for (a, c) in w.iter().zip(q.pairs(&b).iter()) {
+        // 8 ビットの対数は 2^-16〜2^15.9 の範囲で相対誤差 4.4% 以下 (範囲の外は端に丸める)
+        let wq = vec![(0u32, 1.2345f32), (2, 1e-3), (4, 3.0e4)];
+        let q = NodeDse::pack(&wq, &b).unwrap().quarter();
+        for (a, c) in wq.iter().zip(q.pairs(&b).iter()) {
             assert!(((a.1 - c.1) / a.1).abs() <= 0.045, "{} {}", a.1, c.1);
         }
+        let q = NodeDse::pack(&w, &b).unwrap().quarter();
+        assert_eq!(q.pairs(&b)[1].1, (-127.0f32 / 8.0).exp2());
         let back = d.pairs(&b);
         assert_eq!(back.len(), 3);
         for (a, c) in w.iter().zip(back.iter()) {

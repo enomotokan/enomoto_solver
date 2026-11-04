@@ -21,7 +21,7 @@ for p in ks:
     r = (t(m) + 10) / (t(d) + 10)
     if ok(d) != ok(m) or r > 1.5 or r < 1 / 1.5 or d.get("status") not in ("optimal", "time_limit") or m.get("status") not in ("optimal", "time_limit"):
         f = lambda x: f"{x['time']:.1f}" if ok(x) else f"{x.get('status')}"
-        print(f"  {p:28s} def {f(d):>10s} mem2 {f(m):>10s}  RSS {d.get('maxrss_mb', 0):.0f} / {m.get('maxrss_mb', 0):.0f} MB")
+        print(f"  {p:28s} def {f(d):>10s} memb {f(m):>10s}  RSS {d.get('maxrss_mb', 0):.0f} / {m.get('maxrss_mb', 0):.0f} MB")
     if ok(d) and ok(m) and abs(d["objective"] - m["objective"]) > 1e-6 * max(1, abs(d["objective"])):
         print("  食い違い", p, d["objective"], m["objective"])
 print("\nRSS の大きい問題 (どちらかが 1 GB 超):")
