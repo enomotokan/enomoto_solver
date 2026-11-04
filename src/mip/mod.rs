@@ -445,6 +445,27 @@ pub fn solve_mip(
             r.objective = Some(z);
         }
     }
+    // `ENOMOTO_MIP_BOUND_STEP` (試作、既定では使わない): 元の問題の目的値が刻みの格子 (`offset + k * step`) にしか乗らなければ、
+    // 報告の下界を格子の点に切り上げる (木の中の切り上げ [`solver::Solver::step_lb`] は前処理後の問題の刻みで行う。こちらは
+    // 前処理・後処理の修復・再スタートを通った後の値に、元の問題で確かな刻みを当てる)。切り上げた下界が暫定解の値に届けば最適
+    if solver::bound_step_on() && !params.submip && matches!(r.status, MipStatus::TimeLimit | MipStatus::NodeLimit | MipStatus::NotSolved) {
+        if let Some(step) = p.objective_step() {
+            let lb = solver::round_lb_to_step(r.best_bound, step, p.offset);
+            match r.objective {
+                Some(z) => {
+                    r.best_bound = lb.min(z).max(r.best_bound.min(z));
+                    if lb >= z && r.status != MipStatus::NotSolved {
+                        if params.verbose {
+                            eprintln!("MIP: the lower bound {:.10e} rounded up by the objective step {step} reaches the incumbent {z:.10e}; optimal", r.best_bound);
+                        }
+                        r.status = MipStatus::Optimal;
+                        r.best_bound = z;
+                    }
+                }
+                None => r.best_bound = lb,
+            }
+        }
+    }
     // 非有界なら目的値・解は返さない (見つけた実行可能解は最適ではない)
     let unbounded = r.status == MipStatus::Unbounded;
     let objective_value = if unbounded { None } else { r.objective.map(|z| s * z) };
@@ -2713,8 +2734,8 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 行の列番号が狭義の昇順でないなどで作れなければ従来の経路で作る
     // 診断用 (`ENOMOTO_MIP_DEBUG_FASTPACK_CHECK`): 両方の経路で作り、ビット単位で同じかを確かめる
     let fastpack_check = env_str!("ENOMOTO_MIP_DEBUG_FASTPACK_CHECK").is_some();
-    // 試作 `ENOMOTO_MIP_TREE2_FORCEQ` ([`tree2_forceq_rows`]): 0-1 列 1 本の強制等式から `x_j = v0 + d y` の 2 項等式を足す
-    let forceq: Vec<(Vec<(usize, f64)>, f64)> = if env_str!("ENOMOTO_MIP_TREE2_FORCEQ").is_some() {
+    // `ENOMOTO_MIP_TREE2_FORCEQ` (2026-11-04 から既定、`=0` で使わない。[`tree2_forceq_rows`]): 0-1 列 1 本の強制等式から `x_j = v0 + d y` の 2 項等式を足す
+    let forceq: Vec<(Vec<(usize, f64)>, f64)> = if env_def!("ENOMOTO_MIP_TREE2_FORCEQ", "1").is_some() {
         let t0 = std::time::Instant::now();
         let r = tree2_forceq_rows(&p.rows, &p_row_lo, &p_row_up, &col_lo, &col_up, &p.is_int);
         if verbose {
