@@ -71,6 +71,37 @@ pub enum NodeDse {
     /// `ENOMOTO_MIP_MEM2` の `p` (試作): 重みだけを、一緒に保存した基底 ([`Basis`]) の基底変数の番号 (構造列 j、行 n + i) の
     /// 昇順に並べたもの。番号は基底の状態から戻す ([`Self::pairs`])。組の半分の大きさ。
     Packed(Vec<f32>),
+    /// `ENOMOTO_MIP_MEMB` の `h` (試作): `Packed` と同じ並びの重みを bf16 (f32 の上 16 ビット、丸めて相対誤差 0.4% 以下) で持つ。
+    /// `Packed` の半分の大きさ
+    Half(Vec<u16>),
+    /// `ENOMOTO_MIP_MEMB` の `q` (試作): `Packed` と同じ並びの重みを 8 ビットの対数 (2^((c − 128)/8)、2^-16〜2^15.9 に丸め、
+    /// 相対誤差 4.4% 以下。0 は NaN) で持つ。`Packed` の 1/4 の大きさ
+    Byte(Vec<u8>),
+}
+
+fn to_log8(x: f32) -> u8 {
+    if !(x > 0.0) || x.is_nan() {
+        return 0;
+    }
+    ((x.log2() * 8.0).round() + 128.0).clamp(1.0, 255.0) as u8
+}
+
+fn from_log8(c: u8) -> f32 {
+    if c == 0 { f32::NAN } else { ((c as f32 - 128.0) / 8.0).exp2() }
+}
+
+/// f32 を bf16 に丸める (最近接偶数丸め。NaN はそのまま NaN)。
+fn to_bf16(x: f32) -> u16 {
+    if x.is_nan() {
+        return 0x7fc0;
+    }
+    let b = x.to_bits();
+    let r = b.wrapping_add(0x7fff + ((b >> 16) & 1));
+    (r >> 16) as u16
+}
+
+fn from_bf16(h: u16) -> f32 {
+    f32::from_bits((h as u32) << 16)
 }
 
 impl NodeDse {
@@ -79,6 +110,24 @@ impl NodeDse {
         match self {
             NodeDse::Pairs(v) => v.len() * 8 + 24,
             NodeDse::Packed(v) => v.len() * 4 + 24,
+            NodeDse::Half(v) => v.len() * 2 + 24,
+            NodeDse::Byte(v) => v.len() + 24,
+        }
+    }
+
+    /// `Packed` を `Half` にする (`MEMB` の `h`。ほかはそのまま)。
+    pub fn halve(self) -> NodeDse {
+        match self {
+            NodeDse::Packed(v) => NodeDse::Half(v.into_iter().map(to_bf16).collect()),
+            d => d,
+        }
+    }
+
+    /// `Packed` を `Byte` にする (`MEMB` の `q`。ほかはそのまま)。
+    pub fn quarter(self) -> NodeDse {
+        match self {
+            NodeDse::Packed(v) => NodeDse::Byte(v.into_iter().map(to_log8).collect()),
+            d => d,
         }
     }
 
@@ -117,6 +166,14 @@ impl NodeDse {
                 let it = b.col.iter().chain(b.row.iter()).enumerate().filter(|(_, s)| **s == super::lp::VarStatus::Basic).map(|(j, _)| j as u32);
                 std::borrow::Cow::Owned(it.zip(w.iter().copied()).collect())
             }
+            NodeDse::Half(w) => {
+                let it = b.col.iter().chain(b.row.iter()).enumerate().filter(|(_, s)| **s == super::lp::VarStatus::Basic).map(|(j, _)| j as u32);
+                std::borrow::Cow::Owned(it.zip(w.iter().map(|&h| from_bf16(h))).collect())
+            }
+            NodeDse::Byte(w) => {
+                let it = b.col.iter().chain(b.row.iter()).enumerate().filter(|(_, s)| **s == super::lp::VarStatus::Basic).map(|(j, _)| j as u32);
+                std::borrow::Cow::Owned(it.zip(w.iter().map(|&c| from_log8(c))).collect())
+            }
         }
     }
 
@@ -128,6 +185,14 @@ impl NodeDse {
             NodeDse::Packed(w) => {
                 let k = b.col.iter().chain(b.row.iter().take(m)).filter(|s| **s == super::lp::VarStatus::Basic).count();
                 NodeDse::Packed(w[..k.min(w.len())].to_vec())
+            }
+            NodeDse::Half(w) => {
+                let k = b.col.iter().chain(b.row.iter().take(m)).filter(|s| **s == super::lp::VarStatus::Basic).count();
+                NodeDse::Half(w[..k.min(w.len())].to_vec())
+            }
+            NodeDse::Byte(w) => {
+                let k = b.col.iter().chain(b.row.iter().take(m)).filter(|s| **s == super::lp::VarStatus::Basic).count();
+                NodeDse::Byte(w[..k.min(w.len())].to_vec())
             }
         }
     }
@@ -204,11 +269,20 @@ pub struct NodeQueue {
     protect: Vec<u32>,
     /// 診断用 (`ENOMOTO_MIP_BRANCH_REPLAY`): `estimate` をそのまま優先度にし、常にその最小を取り出す
     pub prio_only: bool,
+    /// `ENOMOTO_MIP_MEMB` の `c` (試作): 入れたノードの基底を 2 ビットに詰めて (`packed`) 持ち、取り出すときに戻す
+    pub pack_basis: bool,
+    /// 枠ごとの詰めた基底 (`pack_basis` のとき。ノードの `basis` は `None` にしておく)
+    packed: Vec<Option<Rc<PackedBasis>>>,
+    /// 最後に詰めた基底 (兄弟は同じ `Rc<Basis>` を持つので、続けて入れたら詰めたものを共有する)
+    pack_last: Option<(std::rc::Weak<Basis>, Rc<PackedBasis>)>,
 }
+
+/// `ENOMOTO_MIP_MEMB` の `c` (試作): 2 ビットに詰めた基底 (列, 行)。
+pub type PackedBasis = (super::lp::PackedStatus, super::lp::PackedStatus);
 
 impl NodeQueue {
     pub fn new() -> Self {
-        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new(), protect: Vec::new(), prio_only: false }
+        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new(), protect: Vec::new(), prio_only: false, pack_basis: super::solver::memb('c'), packed: Vec::new(), pack_last: None }
     }
 
     pub fn len(&self) -> usize {
@@ -220,7 +294,8 @@ impl NodeQueue {
     }
 
     /// ノードを入れ、その (枠, 世代) を返す ([`Self::take`] で取り出すのに使う)。
-    pub fn push(&mut self, node: OpenNode) -> (usize, u64) {
+    pub fn push(&mut self, mut node: OpenNode) -> (usize, u64) {
+        let pk = if self.pack_basis { node.basis.take().map(|b| self.pack_of(&b)) } else { None };
         let lb = node.lower_bound;
         let est = self.est_of(&node);
         let depth = node.depth as f64;
@@ -241,6 +316,12 @@ impl NodeQueue {
             self.gen.push(0);
             self.nodes.len() - 1
         };
+        if self.pack_basis || !self.packed.is_empty() {
+            if self.packed.len() < self.nodes.len() {
+                self.packed.resize(self.nodes.len(), None);
+            }
+            self.packed[id] = pk;
+        }
         self.gen[id] += 1;
         self.by_lb.insert((Key(lb), id));
         self.by_est.insert((Key(est), Key(-depth), id));
@@ -259,8 +340,28 @@ impl NodeQueue {
         Some(self.remove(id))
     }
 
+    /// 基底を詰める (直前に詰めたものと同じ `Rc` なら共有する)。
+    fn pack_of(&mut self, b: &Rc<Basis>) -> Rc<PackedBasis> {
+        if let Some((w, p)) = &self.pack_last {
+            if w.upgrade().is_some_and(|x| Rc::ptr_eq(&x, b)) {
+                return p.clone();
+            }
+        }
+        let p = Rc::new((super::lp::PackedStatus::pack(&b.col), super::lp::PackedStatus::pack(&b.row)));
+        self.pack_last = Some((Rc::downgrade(b), p.clone()));
+        p
+    }
+
+    /// 詰めた基底の持ち物の大きさの目安 [バイト] (共有の数で割る)。
+    pub fn packed_bytes(&self) -> usize {
+        self.packed.iter().flatten().map(|p| (p.0.bytes() + p.1.bytes()) / Rc::strong_count(p)).sum()
+    }
+
     fn remove(&mut self, id: usize) -> OpenNode {
         let mut node = self.nodes[id].take().unwrap();
+        if let Some(p) = self.packed.get_mut(id).and_then(|x| x.take()) {
+            node.basis = Some(Rc::new(Basis { col: p.0.unpack(), row: p.1.unpack() }));
+        }
         if let Some(pr) = node.prot.take() {
             self.unprotect(&pr);
         }
@@ -334,6 +435,7 @@ impl NodeQueue {
     /// 保存している基底を捨てる (メモリ節約)。
     pub fn drop_bases(&mut self) {
         let mut prs = Vec::new();
+        self.packed.iter_mut().for_each(|p| *p = None);
         for n in self.nodes.iter_mut().flatten() {
             n.basis = None;
             if let Some(pr) = n.prot.take() {
@@ -348,7 +450,7 @@ impl NodeQueue {
     /// `ENOMOTO_MIP_MEM2` (試作): 待ち行列のノードの持ち物 (基底・DSE 重み・効くカットの番号・境界の変更) の大きさの目安 [バイト]。
     /// 兄弟で共有しているもの (`Rc`) は共有の数で割る。
     pub fn mem_bytes(&self) -> usize {
-        self.nodes.iter().flatten().map(node_bytes).sum()
+        self.nodes.iter().flatten().map(node_bytes).sum::<usize>() + self.packed_bytes()
     }
 
     /// `ENOMOTO_MIP_MEM2` (試作): 持ち物を減らす。深いノード (同じ深さなら下界の大きいもの) から、`dse` なら DSE 重みを、
@@ -358,7 +460,8 @@ impl NodeQueue {
         let mut ids: Vec<(usize, usize, f64)> = Vec::new();
         for (id, n) in self.nodes.iter().enumerate() {
             if let Some(n) = n {
-                if (n.dse.is_some() || (basis && n.basis.is_some())) && !keep.iter().any(|&(k, g)| k == id && self.gen[id] == g) {
+                let has_b = n.basis.is_some() || self.packed.get(id).is_some_and(|p| p.is_some());
+                if (n.dse.is_some() || (basis && has_b)) && !keep.iter().any(|&(k, g)| k == id && self.gen[id] == g) {
                     ids.push((id, n.depth, n.lower_bound));
                 }
             }
@@ -369,14 +472,19 @@ impl NodeQueue {
             if freed >= target {
                 break;
             }
+            let pb = |q: &Self| q.packed.get(id).and_then(|p| p.as_ref()).map_or(0, |p| (p.0.bytes() + p.1.bytes()) / Rc::strong_count(p));
+            let before = node_bytes(self.nodes[id].as_ref().unwrap()) + pb(self);
             let n = self.nodes[id].as_mut().unwrap();
-            let before = node_bytes(n);
             n.dse = None;
             let mut pr = None;
             if basis {
                 n.basis = None;
                 pr = n.prot.take();
+                if let Some(p) = self.packed.get_mut(id) {
+                    *p = None;
+                }
             }
+            let before = before - pb(self);
             freed += before.saturating_sub(node_bytes(self.nodes[id].as_ref().unwrap()));
             if let Some(pr) = pr {
                 self.unprotect(&pr);
@@ -392,7 +500,8 @@ impl NodeQueue {
         let mut ids: Vec<(usize, usize, f64)> = Vec::new();
         for (id, n) in self.nodes.iter().enumerate() {
             if let Some(n) = n {
-                if (n.dse.is_some() || (basis && n.basis.is_some())) && !keep.iter().any(|&(k, g)| k == id && self.gen[id] == g) {
+                let has_b = n.basis.is_some() || self.packed.get(id).is_some_and(|p| p.is_some());
+                if (n.dse.is_some() || (basis && has_b)) && !keep.iter().any(|&(k, g)| k == id && self.gen[id] == g) {
                     ids.push((id, n.depth, n.lower_bound));
                 }
             }
@@ -410,6 +519,10 @@ impl NodeQueue {
                 n.basis = None;
                 if let Some(pr) = n.prot.take() {
                     prs.push(pr);
+                }
+                // `ENOMOTO_MIP_MEMB` の `c`: 詰めた基底も捨てる
+                if let Some(p) = self.packed.get_mut(id) {
+                    *p = None;
                 }
             }
         }
@@ -434,6 +547,40 @@ impl NodeQueue {
 }
 
 /// `ENOMOTO_MIP_MEM2` (試作): ノード 1 つの持ち物の大きさの目安 [バイト] (`Rc` で共有しているものは共有の数で割る)。
+/// 診断用 (`ENOMOTO_MIP_MEMB_DIAG`): 待ち行列のノードの持ち物を種類ごとに数える [ノード数, 境界の変更, 基底, DSE 重み, 効くカットの番号,
+/// 強分岐の引き継ぎ, 祖先の番号, 枠の数] (バイト、`Rc` で共有しているものは共有の数で割る)。
+pub fn diag_bytes<'a>(it: impl Iterator<Item = &'a OpenNode>) -> [usize; 8] {
+    let mut r = [0usize; 8];
+    for n in it {
+        r[0] += 1;
+        r[1] += n.changes.capacity() * std::mem::size_of::<BoundChange>();
+        if let Some(x) = &n.basis {
+            r[2] += (x.col.capacity() + x.row.capacity()) / Rc::strong_count(x);
+        }
+        if let Some(x) = &n.dse {
+            r[3] += x.bytes() / Rc::strong_count(x);
+        }
+        if let Some(x) = &n.prot {
+            r[4] += x.capacity() * 8 / Rc::strong_count(x);
+        }
+        if let Some(x) = &n.sb {
+            let b = x.fixes.capacity() * std::mem::size_of::<BoundChange>() + x.polys.values().map(|v| 48 + v.capacity() * std::mem::size_of::<SbLine>()).sum::<usize>();
+            r[5] += b / Rc::strong_count(x);
+        }
+        if let Some(x) = &n.tags {
+            r[6] += x.capacity() * 8 / Rc::strong_count(x);
+        }
+    }
+    r
+}
+
+impl NodeQueue {
+    /// 診断用: 枠の数 (使っていない枠を含む)。
+    pub fn slots(&self) -> usize {
+        self.nodes.len()
+    }
+}
+
 pub fn node_bytes(n: &OpenNode) -> usize {
     let mut b = std::mem::size_of::<OpenNode>() + n.changes.capacity() * std::mem::size_of::<BoundChange>();
     if let Some(x) = &n.basis {
@@ -446,4 +593,54 @@ pub fn node_bytes(n: &OpenNode) -> usize {
         b += x.len() * 8 / Rc::strong_count(x);
     }
     b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mip::lp::{PackedStatus, VarStatus};
+
+    /// `ENOMOTO_MIP_MEMB` の `c`・`h` (試作): 2 ビットに詰めた基底は元に戻り、bf16 の重みは相対誤差 0.4% 以下で戻る。
+    #[test]
+    fn memb_pack_roundtrip() {
+        let st = [VarStatus::Basic, VarStatus::Lower, VarStatus::Upper, VarStatus::Zero];
+        for len in [0usize, 1, 3, 4, 5, 17, 1000] {
+            let v: Vec<VarStatus> = (0..len).map(|i| st[(i * 7 + i / 3) % 4]).collect();
+            let p = PackedStatus::pack(&v);
+            assert_eq!(p.unpack(), v);
+        }
+        let col = vec![VarStatus::Basic, VarStatus::Lower, VarStatus::Basic];
+        let row = vec![VarStatus::Upper, VarStatus::Basic];
+        let b = Basis { col, row };
+        let w = vec![(0u32, 1.2345f32), (2, 1e-7), (4, 3.0e5)];
+        let d = NodeDse::pack(&w, &b).unwrap().halve();
+        assert!(matches!(d, NodeDse::Half(_)));
+        let q = NodeDse::pack(&w, &b).unwrap().quarter();
+        for (a, c) in w.iter().zip(q.pairs(&b).iter()) {
+            assert!(((a.1 - c.1) / a.1).abs() <= 0.045, "{} {}", a.1, c.1);
+        }
+        let back = d.pairs(&b);
+        assert_eq!(back.len(), 3);
+        for (a, c) in w.iter().zip(back.iter()) {
+            assert_eq!(a.0, c.0);
+            assert!(((a.1 - c.1) / a.1).abs() <= 0.004, "{} {}", a.1, c.1);
+        }
+    }
+
+    /// 詰めた基底は待ち行列から取り出すと元の基底に戻る。
+    #[test]
+    fn memb_queue_pack_basis() {
+        let mut q = NodeQueue::new();
+        q.pack_basis = true;
+        let b = Rc::new(Basis { col: vec![VarStatus::Basic, VarStatus::Upper], row: vec![VarStatus::Lower] });
+        let mk = |lb: f64| OpenNode { changes: Vec::new(), lower_bound: lb, estimate: lb, depth: 1, basis: Some(b.clone()), basis_epoch: 0, dse: None, branch: None, prot: None, tags: None, sb: None };
+        q.push(mk(1.0));
+        q.push(mk(2.0));
+        assert!(q.iter().all(|n| n.basis.is_none()));
+        assert_eq!(q.packed.iter().flatten().count(), 2);
+        let n = q.pop_best().unwrap();
+        assert_eq!(*n.basis.unwrap(), *b);
+        let n = q.pop_best().unwrap();
+        assert_eq!(*n.basis.unwrap(), *b);
+    }
 }

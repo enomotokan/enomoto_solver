@@ -159,6 +159,86 @@ pub(super) enum RowEdit {
     Add(usize),
     /// 印のついた行を消した (長さは消す前の行数)。
     Delete(Vec<bool>),
+    /// `ENOMOTO_MIP_MEMB` の `r` (試作): 消した行の番号 (昇順) だけを持つ形 (中身は `Delete` と同じ。消す前の行数, 番号)。
+    /// `Delete` は 1 回ごとに行数のバイトを持ち、記録は切り詰めないので、カットを外すたびに LP の行数 (uccase12 で約 7 万) バイトずつ増える
+    DeleteIdx(usize, Vec<u32>),
+}
+
+impl RowEdit {
+    /// 行を消した記録を作る (`ENOMOTO_MIP_MEMB` の `r` なら番号の形)。
+    pub(super) fn delete(remove: &[bool]) -> RowEdit {
+        if memb('r') {
+            RowEdit::DeleteIdx(remove.len(), remove.iter().enumerate().filter(|(_, &x)| x).map(|(i, _)| i as u32).collect())
+        } else {
+            RowEdit::Delete(remove.to_vec())
+        }
+    }
+
+    /// 消した行の数 (`Add` なら 0)。
+    fn deleted(&self) -> usize {
+        match self {
+            RowEdit::Add(_) => 0,
+            RowEdit::Delete(m) => m.iter().filter(|&&x| x).count(),
+            RowEdit::DeleteIdx(_, v) => v.len(),
+        }
+    }
+
+    /// 行ごとの並び `v` から、この記録で消した行を除く (`Add` なら何もしない。記録の長さを超える分は残す)。
+    fn retain_rows<T>(&self, v: &mut Vec<T>) {
+        match self {
+            RowEdit::Add(_) => {}
+            RowEdit::Delete(mask) => {
+                let mut i = 0;
+                v.retain(|_| {
+                    let keep = !mask.get(i).copied().unwrap_or(false);
+                    i += 1;
+                    keep
+                });
+            }
+            RowEdit::DeleteIdx(_, idx) => {
+                let (mut i, mut k) = (0u32, 0usize);
+                v.retain(|_| {
+                    let del = k < idx.len() && idx[k] == i;
+                    if del {
+                        k += 1;
+                    }
+                    i += 1;
+                    !del
+                });
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod memb_tests {
+    use super::RowEdit;
+
+    /// `ENOMOTO_MIP_MEMB` の `r` (試作): 番号の形の削除は印の形と同じ行を除く。
+    #[test]
+    fn delete_idx_matches_mask() {
+        let mask: Vec<bool> = (0..50).map(|i| i % 7 == 3 || i == 0 || i == 49).collect();
+        let idx: Vec<u32> = mask.iter().enumerate().filter(|(_, &x)| x).map(|(i, _)| i as u32).collect();
+        for extra in [0usize, 5] {
+            let mut a: Vec<usize> = (0..50 + extra).collect();
+            let mut b = a.clone();
+            RowEdit::Delete(mask.clone()).retain_rows(&mut a);
+            RowEdit::DeleteIdx(50, idx.clone()).retain_rows(&mut b);
+            assert_eq!(a, b);
+            assert_eq!(RowEdit::DeleteIdx(50, idx.clone()).deleted(), RowEdit::Delete(mask.clone()).deleted());
+        }
+    }
+}
+
+/// `ENOMOTO_MIP_MEMB` (試作、analysis/memcap_b_20261104.md): 開いたノード・処理したノードの数に連れて増える持ち物を減らす。
+/// 値 `1` で `rch`、または文字の組み合わせ。既定では使わない。
+/// - `r`: 行の変更の記録 ([`Solver::row_log`]) の行の削除を、消した行の番号だけで持つ ([`RowEdit::DeleteIdx`])。
+/// - `c`: 待ち行列 ([`NodeQueue`]) と共有の待ち行列 ([`PoolNodes`]) に置く間、ノードの基底を 1 つ 2 ビットに詰める
+///   ([`crate::mip::lp::PackedStatus`]、取り出すときに戻す。兄弟で同じ基底なら詰めたものを共有する)。
+/// - `h`: ノードに保存する DSE 重み (`MEM2` の `p` の並び) を bf16 にする ([`NodeDse::Half`])。
+/// - `q`: `h` の代わりに、DSE 重みを 8 ビットの対数にする ([`NodeDse::Byte`])。`1` には入らない (`1` は `rch`)。
+pub(super) fn memb(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_MEMB").is_some_and(|v| (v == "1" && "rch".contains(c)) || (v != "1" && v.contains(c)))
 }
 
 /// 求解の結果の状態。
@@ -577,6 +657,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_MEM2` (試作): 次に持ち物を数えるノード数、新しいノードに DSE 重み・基底を保存するか、
     /// 統計 (数えた回数, DSE を捨てた大きさ, 基底を捨てた大きさ, 持ち物の最大, 上限を超えた回数, 保存しなかった DSE, 保存しなかった基底)。
     mem2_next: u64,
+    /// 診断用 (`ENOMOTO_MIP_MEMB_DIAG`): 次に持ち物を数えて表示する時刻 [秒、`start` から]。
+    memb_next: f64,
     mem2_keep: (bool, bool),
     /// `ENOMOTO_MIP_MEM2` の `d`: 持ち物の合計が上限の 1/2 を超えている (深さ優先に寄せる)
     mem2_press: bool,
@@ -1327,11 +1409,14 @@ pub(crate) struct SnapNode {
     dse: Option<std::sync::Arc<NodeDse>>,
     /// `ENOMOTO_MIP_MEM2` (試作): 共有の待ち行列に入れたときの持ち物の大きさの目安 [バイト] ([`PoolNodes::bytes`] に足す)
     mem: usize,
+    /// `ENOMOTO_MIP_MEMB` の `c` (試作): 共有の待ち行列にある間、`basis` を 2 ビットに詰めて持つ ([`PoolNodes::push`] で詰め、
+    /// [`PoolNodes::remove`] で戻す)
+    pbasis: Option<std::sync::Arc<(crate::mip::lp::PackedStatus, crate::mip::lp::PackedStatus)>>,
 }
 
 impl SnapNode {
     fn of(n: &OpenNode) -> Self {
-        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0 }
+        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None }
     }
     /// [`Self::of`] に、親の LP の基底の列と最初の `m` 行 (元の行) を付ける。
     fn of_with_basis(n: &OpenNode, m: usize) -> Self {
@@ -1554,6 +1639,11 @@ fn mem2(c: char) -> bool {
     env_def!("ENOMOTO_MIP_MEM2", "p").is_some_and(|v| v == "1" || v.contains(c))
 }
 
+/// 診断用 (`ENOMOTO_MIP_MEMB_DIAG`): [`Solver::memb_diag_tick`]。
+fn memb_diag() -> bool {
+    env_str!("ENOMOTO_MIP_MEMB_DIAG").is_some()
+}
+
 /// `ENOMOTO_MIP_MEM2` の `b` の上限 [バイト]: `ENOMOTO_T_MIP_MEM2_BUDGET_MB` (> 0) があればその値、なければ使えるメモリ (cgroup の
 /// 上限 − 今の使用量 と /proc/meminfo の MemAvailable の小さい方、最初に呼んだときの値) × `ENOMOTO_T_MIP_MEM2_FRAC` (既定 0.3)。
 /// どちらも読めなければ 4 GB × `ENOMOTO_T_MIP_MEM2_FRAC` / 0.3。
@@ -1724,6 +1814,9 @@ fn snap_bytes(n: &SnapNode) -> usize {
     if let Some(x) = &n.cut_basis {
         b += x.len() * 16;
     }
+    if let Some(x) = &n.pbasis {
+        b += (x.0.bytes() + x.1.bytes()) / std::sync::Arc::strong_count(x);
+    }
     b
 }
 
@@ -1872,11 +1965,13 @@ struct PoolNodes {
     pops: u64,
     /// `ENOMOTO_MIP_MEM2` (試作): ノードの持ち物の大きさの目安の和 ([`SnapNode::mem`])。
     bytes: usize,
+    /// `ENOMOTO_MIP_MEMB` の `c` (試作): 最後に詰めた基底 (兄弟が `MEM2` の `s` で同じ `Arc` を持つなら共有する)
+    pack_last: Option<(std::sync::Weak<(Vec<VarStatus>, Vec<VarStatus>)>, std::sync::Arc<(crate::mip::lp::PackedStatus, crate::mip::lp::PackedStatus)>)>,
 }
 
 impl PoolNodes {
     fn new() -> Self {
-        PoolNodes { v: Vec::new(), free: Vec::new(), by_lb: std::collections::BTreeSet::new(), by_est: std::collections::BTreeSet::new(), pops: 0, bytes: 0 }
+        PoolNodes { v: Vec::new(), free: Vec::new(), by_lb: std::collections::BTreeSet::new(), by_est: std::collections::BTreeSet::new(), pops: 0, bytes: 0, pack_last: None }
     }
     /// `ENOMOTO_MIP_MEM2` (試作): 持ち物を減らす。深いノード (同じ深さなら下界の大きいもの) から DSE 重みを (`basis` なら基底も)
     /// 捨て、減った大きさの目安が `target` に届いたらやめる。減った大きさの目安を返す。
@@ -1885,7 +1980,7 @@ impl PoolNodes {
             .v
             .iter()
             .enumerate()
-            .filter_map(|(i, n)| n.as_ref().filter(|n| n.dse.is_some() || (basis && n.basis.is_some())).map(|n| (i, n.depth, n.lower_bound)))
+            .filter_map(|(i, n)| n.as_ref().filter(|n| n.dse.is_some() || (basis && (n.basis.is_some() || n.pbasis.is_some()))).map(|n| (i, n.depth, n.lower_bound)))
             .collect();
         ids.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.total_cmp(&a.2)));
         let mut freed = 0usize;
@@ -1897,6 +1992,7 @@ impl PoolNodes {
             n.dse = None;
             if basis {
                 n.basis = None;
+                n.pbasis = None;
                 n.cut_basis = None;
             }
             let m = snap_bytes(n);
@@ -1912,7 +2008,7 @@ impl PoolNodes {
             .v
             .iter()
             .enumerate()
-            .filter_map(|(i, n)| n.as_ref().filter(|n| n.dse.is_some() || (basis && n.basis.is_some())).map(|n| (i, n.depth, n.lower_bound)))
+            .filter_map(|(i, n)| n.as_ref().filter(|n| n.dse.is_some() || (basis && (n.basis.is_some() || n.pbasis.is_some()))).map(|n| (i, n.depth, n.lower_bound)))
             .collect();
         let total = ids.len();
         let want = ((total as f64 * frac).ceil() as usize).min(total);
@@ -1924,6 +2020,7 @@ impl PoolNodes {
             n.dse = None;
             if basis {
                 n.basis = None;
+                n.pbasis = None;
                 n.cut_basis = None;
             }
             let m = snap_bytes(n);
@@ -1944,7 +2041,22 @@ impl PoolNodes {
     fn est_key(n: &SnapNode) -> (super::queue::Key, super::queue::Key) {
         (super::queue::Key(0.5 * n.lower_bound + 0.5 * n.estimate), super::queue::Key(-(n.depth as f64)))
     }
-    fn push(&mut self, n: SnapNode) {
+    fn push(&mut self, mut n: SnapNode) {
+        if memb('c') {
+            if let Some(b) = n.basis.take() {
+                let hit = self.pack_last.as_ref().and_then(|(w, p)| w.upgrade().filter(|x| std::sync::Arc::ptr_eq(x, &b)).map(|_| p.clone()));
+                let p = hit.unwrap_or_else(|| {
+                    let p = std::sync::Arc::new((crate::mip::lp::PackedStatus::pack(&b.0), crate::mip::lp::PackedStatus::pack(&b.1)));
+                    self.pack_last = Some((std::sync::Arc::downgrade(&b), p.clone()));
+                    p
+                });
+                n.pbasis = Some(p);
+                // 目安を詰めた大きさにする
+                if n.mem > 0 {
+                    n.mem = snap_bytes(&n);
+                }
+            }
+        }
         self.bytes += n.mem;
         let lb = super::queue::Key(n.lower_bound);
         let (e, d) = Self::est_key(&n);
@@ -1967,7 +2079,10 @@ impl PoolNodes {
         }
     }
     fn remove(&mut self, id: usize) -> SnapNode {
-        let n = self.v[id].take().unwrap();
+        let mut n = self.v[id].take().unwrap();
+        if let Some(p) = n.pbasis.take() {
+            n.basis = Some(std::sync::Arc::new((p.0.unpack(), p.1.unpack())));
+        }
         self.bytes = self.bytes.saturating_sub(n.mem);
         let (e, d) = Self::est_key(&n);
         self.by_lb.remove(&(super::queue::Key(n.lower_bound), id));
@@ -3335,6 +3450,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool_fix_stats: (0, 0, 0, 0, 0.0),
         pool_dse_stats: [0; 6],
         mem2_next: 0,
+        memb_next: 0.0,
         mem2_keep: (true, true),
         mem2_press: false,
         mem2_stats: [0; 7],
@@ -6858,6 +6974,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if memcap() && !self.params.submip {
                 self.memcap_check();
             }
+            // 診断用 (`ENOMOTO_MIP_MEMB_DIAG`): 開いたノードの持ち物と行の変更の記録の大きさを 20 秒おきに表示する
+            if memb_diag() && !self.params.submip {
+                self.memb_diag_tick();
+            }
             // ヒューリスティクス役 (`ENOMOTO_MIP_HEUR_ROLE`): 番号の大きい従は、解ができたら木を離れて大近傍探索を回し続ける
             if plunge.is_none() && !first && self.heur_role_mine() {
                 match self.heur_role_run() {
@@ -8163,7 +8283,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_NODE_DSE`: 基底と一緒に DSE 重みも保存し、取り出したノードの最初の LP で使う
             let dse = if (env_str!("ENOMOTO_MIP_NODE_DSE").is_some() || dse_all()) && keep_dse && keep_basis {
                 // `ENOMOTO_MIP_MEM2` の `p` (試作): 番号なしの f32 の並びにする
-                self.lp.dse_snapshot().map(|w| Rc::new(if mem2('p') { NodeDse::pack(&w, &basis).unwrap_or(NodeDse::Pairs(w)) } else { NodeDse::Pairs(w) }))
+                self.lp.dse_snapshot().map(|w| Rc::new(if mem2('p') { NodeDse::pack(&w, &basis).map(|d| if memb('q') { d.quarter() } else if memb('h') { d.halve() } else { d }).unwrap_or(NodeDse::Pairs(w)) } else { NodeDse::Pairs(w) }))
             } else {
                 None
             };
@@ -10148,7 +10268,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for e in &self.row_log[epoch..] {
                 match e {
                     RowEdit::Add(k) => a += *k,
-                    RowEdit::Delete(mask) => d += mask.iter().filter(|&&x| x).count(),
+                    _ => d += e.deleted(),
                 }
             }
             self.restore_diag = (a, d, false);
@@ -10194,14 +10314,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for e in &self.row_log[epoch..] {
                 match e {
                     RowEdit::Add(k) => b2.row.extend(std::iter::repeat_n(VarStatus::Basic, *k)),
-                    RowEdit::Delete(mask) => {
-                        let mut i = 0;
-                        b2.row.retain(|_| {
-                            let keep = !mask.get(i).copied().unwrap_or(false);
-                            i += 1;
-                            keep
-                        });
-                    }
+                    _ => e.retain_rows(&mut b2.row),
                 }
             }
         }
@@ -10274,14 +10387,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 for e in &self.row_log[epoch..] {
                     match e {
                         RowEdit::Add(k) => orig.extend(std::iter::repeat_n(usize::MAX, *k)),
-                        RowEdit::Delete(mask) => {
-                            let mut i = 0;
-                            orig.retain(|_| {
-                                let keep = !mask.get(i).copied().unwrap_or(false);
-                                i += 1;
-                                keep
-                            });
-                        }
+                        _ => e.retain_rows(&mut orig),
                     }
                 }
                 let mut cur_of = vec![u32::MAX; m_saved];
@@ -13915,14 +14021,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         for n in nodes.iter_mut() {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0 });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None });
         }
         for n in nodes {
             self.queue.push(n);
         }
         if let Some(n) = plunge.as_mut().filter(|_| with_nodes) {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0 });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None });
         }
         if with_nodes {
             self.dive_stack.clear();
@@ -14408,6 +14514,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.pool_dse_stats[1] += match &**w {
                 NodeDse::Pairs(v) => v.len(),
                 NodeDse::Packed(v) => v.len(),
+                NodeDse::Half(v) => v.len(),
+                NodeDse::Byte(v) => v.len(),
             } as u64;
         }
         if s.basis.is_some() && (env_str!("ENOMOTO_MIP_TREE_SHARE_CUT_BASIS").is_some() || tree_pool_basis()) {
@@ -14418,14 +14526,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     for e in &self.row_log[n.basis_epoch..] {
                         match e {
                             RowEdit::Add(k) => row.extend(std::iter::repeat_n(VarStatus::Basic, *k)),
-                            RowEdit::Delete(mask) => {
-                                let mut i = 0;
-                                row.retain(|_| {
-                                    let keep = !mask.get(i).copied().unwrap_or(false);
-                                    i += 1;
-                                    keep
-                                });
-                            }
+                            _ => e.retain_rows(&mut row),
                         }
                     }
                 }
@@ -14509,6 +14610,63 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_MEMB_DIAG`、analysis/memcap_b_20261104.md): 自分の待ち行列・共有の待ち行列 (主スレッドだけ)・行の変更の記録
+    /// (`row_log`) の持ち物を種類ごとに数えて標準エラーに出す (`ENOMOTO_T_MIP_MEMB_DIAG_SECS` (既定 20) 秒おき)。
+    fn memb_diag_tick(&mut self) {
+        let t = self.start.elapsed().as_secs_f64();
+        if t < self.memb_next {
+            return;
+        }
+        self.memb_next = t + tunable!("ENOMOTO_T_MIP_MEMB_DIAG_SECS", 20.0f64, f64);
+        let mut q = super::queue::diag_bytes(self.queue.iter());
+        q[2] += self.queue.packed_bytes();
+        let (mut ldel, mut lbytes, mut ladd) = (0usize, 0usize, 0usize);
+        for e in &self.row_log {
+            match e {
+                RowEdit::Add(_) => ladd += 1,
+                RowEdit::Delete(m) => {
+                    ldel += 1;
+                    lbytes += m.capacity();
+                }
+                RowEdit::DeleteIdx(_, v) => {
+                    ldel += 1;
+                    lbytes += v.capacity() * 4;
+                }
+            }
+        }
+        let mut pl = [0usize; 6];
+        if self.pool_tid == 0 {
+            if let Some(p) = &self.pool {
+                if let Ok(g) = p.inner.try_lock() {
+                    pl[5] = g.nodes.v.len();
+                    for n in g.nodes.v.iter().flatten() {
+                        pl[0] += 1;
+                        pl[1] += n.changes.capacity() * std::mem::size_of::<BoundChange>();
+                        if let Some(x) = &n.basis {
+                            pl[2] += (x.0.capacity() + x.1.capacity()) / std::sync::Arc::strong_count(x);
+                        }
+                        if let Some(x) = &n.dse {
+                            pl[3] += x.bytes() / std::sync::Arc::strong_count(x);
+                        }
+                        if let Some(x) = &n.cut_basis {
+                            pl[4] += x.capacity() * 16;
+                        }
+                        if let Some(x) = &n.pbasis {
+                            pl[2] += (x.0.bytes() + x.1.bytes()) / std::sync::Arc::strong_count(x);
+                        }
+                    }
+                }
+            }
+        }
+        let mb = |x: usize| x as f64 / 1048576.0;
+        let lus = self.dive_stack.iter().filter(|x| x.2.is_some()).count();
+        eprintln!(
+            "MEMB_DIAG: tid {} t {:.0} nodes {} rows {} | queue n {} slots {} changes {:.1} basis {:.1} dse {:.1} prot {:.1} sb {:.1} tags {:.1} MB | pool n {} slots {} changes {:.1} basis {:.1} dse {:.1} cutbasis {:.1} MB | row_log add {} del {} {:.1} MB | dive {} lu {}",
+            self.pool_tid, t, self.nodes, self.lp.num_rows(), q[0], self.queue.slots(), mb(q[1]), mb(q[2]), mb(q[3]), mb(q[4]), mb(q[5]), mb(q[6]),
+            pl[0], pl[5], mb(pl[1]), mb(pl[2]), mb(pl[3]), mb(pl[4]), ladd, ldel, mb(lbytes), self.dive_stack.len(), lus
+        );
     }
 
     /// `ENOMOTO_MIP_MEM2` の `b` (試作): 開いたノードの持ち物の合計の目安 (自分の待ち行列 + ほかのスレッドが知らせた分 + 共有の待ち行列) を

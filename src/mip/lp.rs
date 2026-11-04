@@ -18,6 +18,51 @@ pub enum VarStatus {
     Zero,
 }
 
+/// `ENOMOTO_MIP_MEMB` の `c` (試作、analysis/memcap_b_20261104.md): 状態の並びを 1 つ 2 ビットに詰めたもの (待ち行列に置く基底の
+/// 持ち物を 1/4 にする)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackedStatus {
+    len: usize,
+    bits: Vec<u8>,
+}
+
+impl PackedStatus {
+    fn code(s: VarStatus) -> u8 {
+        match s {
+            VarStatus::Basic => 0,
+            VarStatus::Lower => 1,
+            VarStatus::Upper => 2,
+            VarStatus::Zero => 3,
+        }
+    }
+
+    /// 詰める。
+    pub fn pack(v: &[VarStatus]) -> Self {
+        let mut bits = vec![0u8; v.len().div_ceil(4)];
+        for (i, &s) in v.iter().enumerate() {
+            bits[i >> 2] |= Self::code(s) << ((i & 3) * 2);
+        }
+        PackedStatus { len: v.len(), bits }
+    }
+
+    /// 戻す。
+    pub fn unpack(&self) -> Vec<VarStatus> {
+        (0..self.len)
+            .map(|i| match (self.bits[i >> 2] >> ((i & 3) * 2)) & 3 {
+                0 => VarStatus::Basic,
+                1 => VarStatus::Lower,
+                2 => VarStatus::Upper,
+                _ => VarStatus::Zero,
+            })
+            .collect()
+    }
+
+    /// 持ち物の大きさ [バイト]。
+    pub fn bytes(&self) -> usize {
+        self.bits.capacity() + 32
+    }
+}
+
 /// 基底 (構造変数と行ごとの状態)。[`MipLp::basis`](super::lp_api::MipLp::basis) で取得し、[`MipLp::set_basis`](super::lp_api::MipLp::set_basis) で戻す。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Basis {

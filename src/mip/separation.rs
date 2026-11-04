@@ -2600,7 +2600,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             k += 1;
             keep
         });
-        self.row_log.push(super::solver::RowEdit::Delete(remove.to_vec()));
+        self.row_log.push(super::solver::RowEdit::delete(remove));
         self.lp.delete_and_add_rows(remove, rows);
         self.cut_age.extend(std::iter::repeat_n(0, rows.len()));
         for _ in 0..rows.len() {
@@ -2627,7 +2627,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             keep
         });
         self.lp.delete_rows(remove);
-        self.row_log.push(super::solver::RowEdit::Delete(remove.to_vec()));
+        self.row_log.push(super::solver::RowEdit::delete(remove));
     }
 
     /// カットの年齢の長さを LP のカットの行の数に合わせる (足りなければ 0 で埋める)。
