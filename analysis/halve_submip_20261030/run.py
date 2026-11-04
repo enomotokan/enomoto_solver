@@ -107,6 +107,10 @@ CFGS = {
     "prememall": {"ENOMOTO_MIP_MEM1_SIBLU": "0", "ENOMOTO_MIP_MEM2": "0", "ENOMOTO_MIP_MEM3_TINY_MARGIN": "0", "ENOMOTO_MIP_FZ3_REPAIR_BOUND": "0"},
     # RSS を見て開いたノードの持ち物を捨てる試作 (2026-11-04、analysis/memcap_a_20261104.md)
     "memcap": {"ENOMOTO_MIP_MEMCAP": "1"},
+    # bench24 (2026-11-04): 新既定から 1 つずつ戻す (qiu の遅れの切り分け)
+    "nosib": {"ENOMOTO_MIP_MEM1_SIBLU": "0"},
+    "nomem2p": {"ENOMOTO_MIP_MEM2": "0"},
+    "nomargin": {"ENOMOTO_MIP_MEM3_TINY_MARGIN": "0"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
