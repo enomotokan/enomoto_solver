@@ -678,6 +678,21 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 解けなかったノード (LP が失敗し、分枝もできなかった)。最適性を主張できなくなる。
     unresolved: bool,
     last_log: Instant,
+    /// 診断用 `ENOMOTO_MIP_TREE4_TRACE` ([`Self::tree4_trace`]): 前に出した時刻 (開始からの秒) と、被約費用による局所的な固定の
+    /// 回数・締めた境界の数
+    t4_last: f64,
+    t4_rc: [u64; 2],
+    /// `ENOMOTO_MIP_TREE4_RESTART` の状態: 次に調べる全体のノード数、前に記録したとき (全体のノード数, 刈った木の重み, 打ち切り値, 下界)、
+    /// 木が大きいと見込んだ回数が続いた数
+    t4r_next: u64,
+    t4r_last: (u64, f64, f64, f64),
+    t4r_huge: u32,
+    /// `ENOMOTO_MIP_TREE4_RESTART=force`: 次の再スタートは新たな固定の数を問わない ([`Self::maybe_restart`])
+    t4r_force: bool,
+    /// `ENOMOTO_MIP_TREE4_RCUNION` (試作): 根のカットの各ラウンドの LP の被約費用 ([`Self::tree4_rc_add`])
+    pub(super) t4_rc_extra: Vec<(f64, Vec<(usize, bool, f64, f64)>)>,
+    /// `ENOMOTO_MIP_TREE4_PROOFCUT` (試作) の数: [ラウンド, 加えた行, 加えた後に刈ったノード]
+    t4_pc: [u64; 3],
     /// 利用者向けのログ ([`crate::log`]) の探索の経過の見出しを出したか。
     user_log_header: bool,
     /// 処理中 (最後に取り出した) のノードの下界 (根では根の LP の値)。待ち行列にないので全体の下界に足す。
@@ -2165,6 +2180,11 @@ impl PoolNodes {
 
 /// 共有の待ち行列だけで探索するか (`ENOMOTO_MIP_TREE_SHARED_QUEUE`): 各スレッドは潜りの子だけを自分で持ち、兄弟などのノードは
 /// 全て共有の待ち行列に出して、取るときは自分の待ち行列と同じ選び方 ([`PoolNodes::pop_hybrid`]) をする。
+/// `ENOMOTO_MIP_TREE4_RESTART` (試作、既定では使わない): HiGHS 流の木の中の再スタート ([`Solver::tree4_restart_due`])
+fn tree4_restart_on() -> bool {
+    env_str!("ENOMOTO_MIP_TREE4_RESTART").is_some()
+}
+
 fn tree_shared_queue() -> bool {
     env_str!("ENOMOTO_MIP_TREE_SHARED_QUEUE").is_some()
 }
@@ -3519,6 +3539,14 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         node_lp_secs: 0.0,
         unresolved: false,
         last_log: start,
+        t4_last: 0.0,
+        t4_rc: [0; 2],
+        t4r_next: 100,
+        t4r_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
+        t4r_huge: 0,
+        t4r_force: false,
+        t4_rc_extra: Vec::new(),
+        t4_pc: [0; 3],
         user_log_header: false,
         cur_lb: f64::NEG_INFINITY,
         root_lb: f64::NEG_INFINITY,
@@ -4759,6 +4787,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn log(&mut self, force: bool) {
+        self.tree4_trace();
         let user = crate::log::enabled();
         if !self.params.verbose && !user {
             return;
@@ -4805,6 +4834,159 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 format!(" pool_len {} pool_idle {}", pl.len.load(Ordering::Relaxed), pl.idle.load(Ordering::Relaxed) as isize)
             }),
         );
+    }
+
+    /// 診断用 `ENOMOTO_MIP_TREE4_TRACE=秒` (既定では出さない): スレッドごとに、その秒数おきに全体の下界・暫定解・開いたノードと、
+    /// 自分の待ち行列の下界の分布 (全体の下界から打ち切り値までの差の割合で 4 つに分ける)、葉の数を `TREE4:` の行で出す
+    fn tree4_trace(&mut self) {
+        let Some(every) = env_str!("ENOMOTO_MIP_TREE4_TRACE").and_then(|v| v.parse::<f64>().ok()) else { return };
+        if self.params.submip {
+            return;
+        }
+        let t = self.start.elapsed().as_secs_f64();
+        if t - self.t4_last < every {
+            return;
+        }
+        self.t4_last = t;
+        let glb = self.global_lower_bound();
+        let lim = self.prune_limit();
+        let ub = self.incumbent.as_ref().map(|(z, _)| *z).unwrap_or(f64::INFINITY);
+        let (done, open) = self.global_node_counts();
+        let mut h = [0usize; 5];
+        let gap = lim - glb;
+        for n in self.queue.iter() {
+            let r = if gap > 0.0 { (n.lower_bound - glb) / gap } else { 1.0 };
+            h[if r < 0.01 { 0 } else if r < 0.1 { 1 } else if r < 0.5 { 2 } else if r < 1.0 { 3 } else { 4 }] += 1;
+        }
+        let (slb, sn) = self.pool.as_ref().map_or((f64::INFINITY, 0), |pl| {
+            let g = pl.inner.lock().unwrap();
+            (g.nodes.min_lower_bound(), g.nodes.len())
+        });
+        eprintln!(
+            "TREE4: t {t:.1} tid {} glb {glb:.10e} ub {ub:.10e} lim {lim:.10e} gnodes {done} gopen {open} own_lb {:.10e} own_n {} cur_lb {:.10e} shared_lb {slb:.10e} shared_n {sn} own_hist {:?} nodes {} objlim {} infeas {} proofprune {} lit {:?} rcfix {:?} proofcut {:?} nproofs {}",
+            self.pool_tid,
+            self.queue.best_lower_bound(),
+            self.queue.len(),
+            self.cur_lb,
+            h,
+            self.nodes,
+            self.pc.objlim_leaves,
+            self.pc.infeasible_leaves,
+            self.proof_prunes,
+            self.lit_stats,
+            self.t4_rc,
+            self.t4_pc,
+            self.dual_proofs.len(),
+        );
+    }
+
+    /// `ENOMOTO_MIP_TREE4_RESTART` (試作): 木の中の再スタートの判定 (主だけ)。HiGHS の判定 (`HighsMipSolver::run` の `nextCheck` の所) を写す:
+    /// 全体のノード数が 100 増えるごとに、刈った木の重み (1 - 未処理のノードの 0.5^深さ の和) の伸びから木の全体のノード数を見積もり、
+    /// 自由な整数列の割合の 2 乗を r として、ギャップの縮みが 1 + 0.05 / r 未満で、見積もりが今までのノード数の 20 r 倍以上なら
+    /// 「大きい」と数える。続けて `ENOMOTO_T_MIP_TREE4_RESTART_CHECKS` (既定 10) × 1.5^(再スタートの回数) 回「大きい」なら再スタートする。
+    /// こちらの再スタート ([`Self::maybe_restart`]) は新たな固定を要るので、根の始めに自由だった整数列の
+    /// `ENOMOTO_T_MIP_TREE4_RESTART_FRAC` (既定 0.05) 以上が新たに固定されていて、残り時間が時間上限の 1 割以上のときだけ
+    fn tree4_restart_due(&mut self, plunge: Option<&OpenNode>) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.params.submip || self.pool_tid != 0 || self.snap.is_some() || self.watch.is_some() {
+            return false;
+        }
+        // 木を分け合うスレッドが同じ木を別々に解く間 (`race_done` の前) は重みが重なるので数えない
+        if self.pool.is_some() && !self.race_done {
+            return false;
+        }
+        let (done, _) = self.global_node_counts();
+        if done < self.t4r_next {
+            return false;
+        }
+        self.t4r_next = done + 100;
+        // 未処理のノードの重み: 自分 (待ち行列と潜っている子)、共有の待ち行列、ほかのスレッドが知らせた分
+        let mut w: f64 = self.queue.iter().chain(plunge).map(|n| 0.5f64.powi(n.depth.min(2000) as i32)).sum();
+        if let Some(pool) = &self.pool {
+            let g = pool.inner.lock().unwrap();
+            w += g.nodes.iter().map(|n| 0.5f64.powi(n.depth.min(2000) as i32)).sum::<f64>();
+            drop(g);
+            for (i, sl) in pool.slots.iter().enumerate() {
+                if i != self.pool_tid as usize {
+                    w += f64::from_bits(sl.wopen.load(Ordering::Relaxed));
+                }
+            }
+        }
+        let pruned = (1.0 - w).clamp(0.0, 1.0);
+        let (n0, w0, ub0, lb0) = self.t4r_last;
+        let est = n0 as f64 + (done - n0) as f64 * (1.0 - pruned) / (pruned - w0).max(1e-9);
+        let free0 = self.p.nint.saturating_sub(self.root_fixed0).max(1) as f64;
+        let free = (free0 - self.newly_fixed_ints() as f64).max(0.0);
+        let r = (free / free0).powi(2).max(1e-3);
+        let ub = self.prune_limit();
+        let lb = self.global_lower_bound();
+        let red = if ub.is_finite() && ub0.is_finite() && lb.is_finite() && lb0.is_finite() && ub - lb > 0.0 { (ub0 - lb0) / (ub - lb) } else { 1.0 };
+        let huge = red < 1.0 + 0.05 / r && est >= r * 20.0 * done as f64;
+        if huge {
+            self.t4r_huge += 1;
+        } else {
+            self.t4r_huge = 0;
+            self.t4r_last = (done, pruned, ub, lb);
+        }
+        let need = tunable!("ENOMOTO_T_MIP_TREE4_RESTART_CHECKS", 10.0, f64) * 1.5f64.powi(self.params.restarts as i32);
+        if env_str!("ENOMOTO_MIP_TREE4_TRACE").is_some() {
+            eprintln!("TREE4R: t {:.1} done {done} pruned {pruned:.6} est {est:.3e} r {r:.3} red {red:.3} huge {} need {need:.1} newly {}", self.start.elapsed().as_secs_f64(), self.t4r_huge, self.newly_fixed_ints());
+        }
+        if (self.t4r_huge as f64) < need {
+            return false;
+        }
+        let left_ok = match self.deadline {
+            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= 0.1 * self.params.time_limit,
+            None => true,
+        };
+        if !left_ok {
+            return false;
+        }
+        // `=force`: HiGHS と同じく新たな固定がなくても再スタートする (再スタートの回数の上限と期限だけを見る)
+        if env_str!("ENOMOTO_MIP_TREE4_RESTART") == Some("force") {
+            if self.params.restarts >= max_restarts(self.p) || self.time_up() || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() {
+                return false;
+            }
+            self.t4r_force = true;
+            return true;
+        }
+        self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_TREE4_RESTART_FRAC", 0.05, f64))
+    }
+
+    /// `ENOMOTO_MIP_TREE4_PROOFCUT` (試作): 双対証明 `a x <= rhs` (打ち切り値の証明は今の打ち切り値で右辺を取る。打ち切り値より良い
+    /// 解では成り立つので、刈り込みに使う LP に加えてよい) のうち LP 解 `x` が破るものを、破れの大きさ (`(a x - rhs) / |a|`) の順に
+    /// `ENOMOTO_T_MIP_TREE4_PROOFCUT_MAX` (既定 20) 本まで LP の行として加える。加えたら真
+    fn tree4_proof_cuts(&mut self, x: &[f64]) -> bool {
+        let mut cand: Vec<(f64, usize)> = Vec::new();
+        for k in 0..self.dual_proofs.len() {
+            let rhs = self.proof_rhs(k);
+            if !rhs.is_finite() {
+                continue;
+            }
+            let (c, _, _) = &self.dual_proofs[k];
+            let (mut act, mut nrm) = (0.0, 0.0);
+            for &(j, a) in c {
+                act += a * x[j];
+                nrm += a * a;
+            }
+            let viol = act - rhs;
+            if viol > 1e-6 * (1.0 + rhs.abs()) && nrm > 0.0 {
+                let eff = viol / nrm.sqrt();
+                if eff > 1e-6 {
+                    cand.push((eff, k));
+                }
+            }
+        }
+        if cand.is_empty() {
+            return false;
+        }
+        cand.sort_by(|a, b| b.0.total_cmp(&a.0));
+        cand.truncate(tunable!("ENOMOTO_T_MIP_TREE4_PROOFCUT_MAX", 20usize, usize));
+        let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = cand.iter().map(|&(_, k)| (self.dual_proofs[k].0.clone(), f64::NEG_INFINITY, self.proof_rhs(k))).collect();
+        self.t4_pc[0] += 1;
+        self.t4_pc[1] += rows.len() as u64;
+        self.add_cut_rows(&rows);
+        true
     }
 
     /// 処理を始めたノードの下界を記録する。木を分け合うときは、このスレッドの下界 (処理中のノードと自分の待ち行列の
@@ -6919,6 +7101,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 判定は通したので普通はここに来ない。従は止めたので、主だけで続ける
                 }
             }
+            // `ENOMOTO_MIP_TREE4_RESTART` (試作、既定では使わない): HiGHS (`HighsMipSolver::run`) と同じ「木が大きくなると見込まれる状態が
+            // 続いたら再スタート」([`Self::tree4_restart_due`])。全てのスレッドが 64 ノードおきに自分の未処理のノードの重みを知らせる
+            if tree4_restart_on() && self.pool.is_some() && self.nodes % 64 == 0 {
+                self.publish_tree_weight(plunge.as_ref());
+            }
+            if tree4_restart_on() && self.tree4_restart_due(plunge.as_ref()) {
+                if self.params.verbose {
+                    eprintln!("MIP: TREE4 restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
+                }
+                self.join_workers();
+                if let Some(pool) = self.pool.as_ref() {
+                    pool.stop.store(false, std::sync::atomic::Ordering::Relaxed);
+                    pool.halt.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                if let Some(r) = self.maybe_restart() {
+                    return r;
+                }
+                // 判定は通したので普通はここに来ない。従は止めたので、主だけで続ける
+                if self.params.verbose {
+                    eprintln!("MIP: TREE4 restart refused; continuing with the main thread only");
+                }
+            }
             // ポートフォリオ並列: 下界を知らせる (二分探索のスレッドが目標値を決めるのに使う)
             // 二分探索のスレッドの求解の下界は打ち切り値で絞った問題のものなので、木の写しを使う形では知らせない
             if self.nodes % 64 == 0 && (self.watch.is_none() || env_str!("ENOMOTO_MIP_BISECT_SNAPSHOT").is_none()) {
@@ -7532,6 +7736,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut ts_rounds = 0usize;
             let mut ts_first = f64::NEG_INFINITY;
             let mut ts_last = f64::NEG_INFINITY;
+            // `ENOMOTO_MIP_TREE4_PROOFCUT`: このノードでの証明の行のラウンド数と、行を加えたか
+            let mut t4pc_rounds = 0usize;
+            let mut t4pc_added = false;
             let action = loop {
                 let it0 = self.lp.total_iterations();
                 let iter_limit = (10 * self.avg_node_iters()).max(20_000);
@@ -8153,6 +8360,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     }
                 }
+                // `ENOMOTO_MIP_TREE4_PROOFCUT` (試作、既定では使わない): 双対証明 (打ち切り値の証明・Farkas の証明) のうち今の LP 解が破るものを
+                // LP の行として加えて解き直す ([`Self::tree4_proof_cuts`])。HiGHS は双対証明をカットプールに入れ、取り出したノードの分離で
+                // 破られたものを LP に加える。既定は取り出したノード (潜りの子でない) だけ、`=all` なら全てのノード。1 ノードで
+                // `ENOMOTO_T_MIP_TREE4_PROOFCUT_ROUNDS` (既定 3) ラウンドまで
+                if let Some(mode) = env_str!("ENOMOTO_MIP_TREE4_PROOFCUT").filter(|_| !self.params.submip) {
+                    if (plunge_depth == 0 || mode == "all") && t4pc_rounds < tunable!("ENOMOTO_T_MIP_TREE4_PROOFCUT_ROUNDS", 3usize, usize) {
+                        t4pc_rounds += 1;
+                        let t_nc = Instant::now();
+                        let added = self.tree4_proof_cuts(&x);
+                        self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                        if added {
+                            t4pc_added = true;
+                            resolves += 1;
+                            node_cut_resolve = Some(Instant::now());
+                            continue;
+                        }
+                    }
+                }
                 // `ENOMOTO_MIP_FC_NODE_SEP2` (固定費用ネットワーク型): 待ち行列から取り出したノードでは、プールのカットを戻した
                 // 解き直しの後でも分離する (上のプールのラウンドが `resolves` を進めるので、`resolves == 0` の条件では
                 // プールに違反カットがあるノードで分離が飛ばされていた)。LP の値が前のラウンドまでの伸びの 1.01 倍を超えて
@@ -8293,6 +8518,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             };
             xp("m_endlp");
+            if t4pc_added && matches!(action, None) {
+                self.t4_pc[2] += 1;
+            }
             let Some(branch) = action else {
                 if replay.is_some() {
                     self.rp_log(&node, "lp", rp_obj0, rp_obj, -1, &mut rp_stats);
@@ -8538,6 +8766,53 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.root_redcost = Some((z, list));
+        // `ENOMOTO_MIP_TREE4_RCUNION`: 根のカットの各ラウンドの LP の被約費用でも締める (HiGHS の `HighsRedcostFixing` は根の LP を
+        // 解くたびに被約費用を足し、列ごと・打ち切り値ごとに最も強い境界を持つ)
+        if !self.t4_rc_extra.is_empty() {
+            let lim = self.prune_limit();
+            let extra = std::mem::take(&mut self.t4_rc_extra);
+            for (z, list) in &extra {
+                let gap = lim - z;
+                if !(gap.is_finite() && gap >= 0.0) {
+                    continue;
+                }
+                for &(j, at_lower, d, bound) in list {
+                    if at_lower {
+                        self.dom.tighten_global(self.p, j, true, bound + gap / d);
+                    } else {
+                        self.dom.tighten_global(self.p, j, false, bound - gap / (-d));
+                    }
+                }
+            }
+            self.t4_rc_extra = extra;
+        }
+    }
+
+    /// `ENOMOTO_MIP_TREE4_RCUNION` (試作、既定では使わない): 根のカットのラウンドの LP (最適、目的値 `z`) の被約費用を
+    /// [`Self::t4_rc_extra`] に足す (最大 `ENOMOTO_T_MIP_TREE4_RCUNION_MAX` (既定 50) 個、古いものから捨てる)。カットは大域的に
+    /// 成り立つので、どのラウンドの LP の弱双対の不等式も全ての解で成り立つ
+    pub(super) fn tree4_rc_add(&mut self, z: f64) {
+        if self.params.submip || self.snap.is_some() || env_str!("ENOMOTO_MIP_TREE4_RCUNION").is_none() {
+            return;
+        }
+        let b = self.lp.basis_ref();
+        let d = self.lp.reduced_costs_ref();
+        let mut v = Vec::new();
+        for j in 0..self.p.n {
+            if !self.p.is_int[j] || self.dom.global_lo[j] >= self.dom.global_up[j] {
+                continue;
+            }
+            match b.col[j] {
+                VarStatus::Lower if d[j] > 1e-7 => v.push((j, true, d[j], self.dom.lo[j])),
+                VarStatus::Upper if d[j] < -1e-7 => v.push((j, false, d[j], self.dom.up[j])),
+                _ => {}
+            }
+        }
+        let cap = tunable!("ENOMOTO_T_MIP_TREE4_RCUNION_MAX", 50usize, usize);
+        if self.t4_rc_extra.len() >= cap {
+            self.t4_rc_extra.remove(0);
+        }
+        self.t4_rc_extra.push((z, v));
     }
 
     /// 診断用 (デバッグ解): 強分枝の子 (列 `j` を `v` の上/下に分けた側) が打ち切られた (`st`: 実行不能・打ち切り値以上) とき、
@@ -9261,7 +9536,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     self.dom.set_external_tag(1);
-                    changed |= self.dom.tighten_upper(self.p, j, v);
+                    let c = self.dom.tighten_upper(self.p, j, v);
+                    changed |= c;
+                    self.t4_rc[1] += c as u64;
                     self.dom.set_external(false);
                 }
                 VarStatus::Upper if d[j] < -1e-7 => {
@@ -9270,12 +9547,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     self.dom.set_external_tag(1);
-                    changed |= self.dom.tighten_lower(self.p, j, v);
+                    let c = self.dom.tighten_lower(self.p, j, v);
+                    changed |= c;
+                    self.t4_rc[1] += c as u64;
                     self.dom.set_external(false);
                 }
                 _ => {}
             }
         }
+        self.t4_rc[0] += changed as u64;
         changed
     }
 
@@ -13254,7 +13534,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose {
             eprintln!("MIP: restart check: newly fixed {newly}, integer columns {nint}, free at the root {}, threshold {:.1}, root LP {:.2}s", nint.saturating_sub(self.root_fixed0), fac * denom as f64, self.root_lp_secs);
         }
-        if nint == 0 || newly == 0 || (newly as f64) < fac * denom as f64 {
+        if !std::mem::take(&mut self.t4r_force) && (nint == 0 || newly == 0 || (newly as f64) < fac * denom as f64) {
             return None;
         }
         // `ENOMOTO_MIP_RESTART_FIRST_LPW` (試作、既定では使わない): 初回の再スタートで、新たな固定が整数列の

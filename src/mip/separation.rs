@@ -2001,6 +2001,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 最適に解けたカットの LP の値は問題全体の下界 (根を閉じる判定 [`Solver::root_gap_closed`] に使う)
             if job.is_none() && self.snap.is_none() {
                 self.root_cut_lb = self.root_cut_lb.max(obj + p.offset);
+                // `ENOMOTO_MIP_TREE4_RCUNION` (試作): このラウンドの LP の被約費用を根の被約費用による固定に足す
+                self.tree4_rc_add(obj + p.offset);
             }
             // `ENOMOTO_MIP_CUT_WIDEN_DOUBLE` (既定): 一気に行の数 (1000 本まで) に広げるのでなく、採り切っても動かないラウンドのたびに
             // 2 倍にする (50 -> 100 -> 200 -> ... -> 1000)。physiciansched6-2 では 50 本から一気に広げたラウンドで 247〜308 本が入り、
