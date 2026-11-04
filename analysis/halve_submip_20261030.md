@@ -622,3 +622,23 @@ ENOMOTO の既定は今回の計測の 7〜9 回分。
   時間を変え、解発見スレッドを止める時刻との競争で木の始めの暫定解が −115.25 か −27.65 に分かれる」で、余裕が LP を締めるのではない。
   サブ MIP を本当に以前の余裕にする形 (`ENOMOTO_MIP_QIU_MARGIN_DEPTH=1`) は uccase12 の誤った暫定解を戻すので使わない。直すのは解発見スレッドの止め方
   (試作 `ENOMOTO_MIP_QIU_FIND_STOP_GAP=1`、qiu 6/6・21.7 秒、uccase12 も正しい)。
+
+## bench25 (mem3・forceq・fstop・all4、2026-11-04)
+
+- 土台 4ecbdad9、25 分担 (bench21 の 50 を 2 つずつ)、rep 36・37 (58 問) と 115 (Mittelmann 186 問)。集計は `summ25.txt`。
+  - mem3 = `ENOMOTO_MIP_MEMB=rcq ENOMOTO_MIP_MEMC=1 ENOMOTO_MIP_MEMCAP=1` (memcap_a・b・c)
+  - forceq = `ENOMOTO_MIP_TREE2_FORCEQ=1` (tree_close2、`Σx = K y` の強制等式から x = y)
+  - fstop = `ENOMOTO_MIP_QIU_FIND_STOP_GAP=1` (qiu_margin、解発見スレッドを根の LP とのギャップが大きい間は止めない)
+  - all4 = 3 つすべて
+
+| 設定 | 58 問 rep36 | 58 問 rep37 | 58 問 全回 (解けた数) | Mittelmann 186 (解けた数) | Mitt 片方以上解 |
+|---|---|---|---|---|---|
+| def | 18.29 (43) | 17.82 (41) | 18.06 (84) | 43.48 (49) | |
+| mem3 | −5.9% | +4.0% | −1.0% (86) | −0.8% (49) | −4.2% |
+| forceq | −8.0% | −2.6% | **−5.3% (87)** | −1.5% (49) | −7.6% |
+| fstop | −7.3% | −3.3% | **−5.3% (86)** | −1.2% (**50**) | −5.9% |
+| all4 | −5.9% | +1.1% | −2.5% (86) | −0.4% (**50**) | −2.1% |
+
+- crash・60 秒超え・食い違いは 0。def だけが解けた回は mem3 の physiciansched6-2 r37 と all4 の neos-1171448 r115 の 2 回だけ (どちらも境目)。
+- forceq は 58 問の前処理を変えない (tree_close2) ので、58 問の差は揺れ。Mittelmann では neos-1445765 (60 秒では解けない) 以外に効く問題はない見込み。
+- 判断: 4 つとも害は見えない。mem3 はメモリ (下の mitt600 の 1200 秒) で大きく効き、forceq・fstop は狙った問題に効く。**4 つとも既定の候補**。
