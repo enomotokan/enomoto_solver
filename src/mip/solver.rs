@@ -16125,7 +16125,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.pool.is_some() && !self.race_done {
             return false;
         }
-        let (done, _) = self.global_node_counts();
+        // 全体のノード数は錠を取らずに数える ([`Self::global_node_counts`] は共有の待ち行列の錠を取る。毎ノード取ると、ほかのスレッドの
+        // 受け渡しと競り、試作の 2 版までは再スタートのない qiu・roll3000 が 1.4〜1.5 倍遅くなっていた)
+        let done = self.nodes + self.pool.as_ref().map_or(0, |pool| pool.slots.iter().map(|sl| sl.nodes.load(Ordering::Relaxed)).sum::<u64>());
         if done < self.tr_next {
             return false;
         }

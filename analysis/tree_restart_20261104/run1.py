@@ -10,6 +10,7 @@ CFGS = {
     "def": {},
     "tr": {"ENOMOTO_MIP_TREE_RESTART": "1"},
     "tr2": {"ENOMOTO_MIP_TREE_RESTART": "1"},  # 2 版 (ヒューリスティクス役の起動の判定の重みと分けた後)
+    "tr3": {"ENOMOTO_MIP_TREE_RESTART": "1"},  # 3 版 (全体のノード数を錠を取らずに数える)
     "trf": {"ENOMOTO_MIP_TREE_RESTART": "force"},
     "trp": {"ENOMOTO_MIP_TREE_RESTART": "1", "ENOMOTO_MIP_TREE1_POOL": "1", "ENOMOTO_MIP_RESTART_PC": "1"},
     "trpf": {"ENOMOTO_MIP_TREE_RESTART": "force", "ENOMOTO_MIP_TREE1_POOL": "1", "ENOMOTO_MIP_RESTART_PC": "1"},
