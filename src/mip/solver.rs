@@ -278,7 +278,8 @@ mod memb_tests {
 /// - `h`: ノードに保存する DSE 重み (`MEM2` の `p` の並び) を bf16 にする ([`NodeDse::Half`])。
 /// - `q`: `h` の代わりに、DSE 重みを 8 ビットの対数にする ([`NodeDse::Byte`])。`1` には入らない (`1` は `rch`)。
 pub(super) fn memb(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_MEMB").is_some_and(|v| (v == "1" && "rch".contains(c)) || (v != "1" && v.contains(c)))
+    // 2026-11-04 から既定は `rcq` (analysis/mem3_default_20261104.md、`=0` で使わない)
+    env_def!("ENOMOTO_MIP_MEMB", "rcq").is_some_and(|v| (v == "1" && "rch".contains(c)) || (v != "1" && v.contains(c)))
 }
 
 /// 求解の結果の状態。
@@ -1803,7 +1804,8 @@ pub(super) fn mem2_budget() -> usize {
 ///   兄弟の LU を持たず、深さ優先に寄せる (`ENOMOTO_MIP_MEM2` の `d` と同じ)。
 /// - 3 (`ENOMOTO_T_MIP_MEMCAP_FRAC3`、既定 0.9): 求解を止める (時間切れとして暫定解を返す。[`Solver::time_up`])。
 pub(super) fn memcap() -> bool {
-    env_str!("ENOMOTO_MIP_MEMCAP").is_some_and(|v| v != "0")
+    // 2026-11-04 から既定 (analysis/mem3_default_20261104.md、`=0` で使わない)
+    env_def!("ENOMOTO_MIP_MEMCAP", "1").is_some()
 }
 
 /// `ENOMOTO_MIP_MEMCAP` の今の段階 (0〜3)。見張りのスレッドが書く。
@@ -1951,7 +1953,8 @@ fn snap_bytes(n: &SnapNode) -> usize {
 /// (平均 約 16 KB) で約 30 KB 持っていた
 fn memc() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("ENOMOTO_MIP_MEMC").is_ok_and(|v| v != "0"))
+    // 2026-11-04 から既定 (analysis/mem3_default_20261104.md、`=0` で使わない)
+    *V.get_or_init(|| env_def!("ENOMOTO_MIP_MEMC", "1").is_some())
 }
 
 /// `ENOMOTO_MIP_MEMC` の数え上げ (全スレッドの和): [詰めたノード, 変更の数, 変更を詰めたバイト, 詰めた基底の数, 基底を詰めたバイト, 基底の元のバイト]
@@ -14852,9 +14855,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.find_thread.is_some() && env_str!("ENOMOTO_MIP_FIND_THREAD_NO_STOP").is_none() {
             let lb = self.fj_poor_lb;
             let thr = tunable!("ENOMOTO_T_MIP_FIND_THREAD_STOP_GAP", tunable!("ENOMOTO_T_MIP_FJ_POOR_GAP", 0.5, f64), f64);
-            // `ENOMOTO_MIP_QIU_FIND_STOP_GAP` (試作、既定では使わない、analysis/qiu_margin_20261104.md): FJ 以外の暫定解でも根の LP との相対ギャップが
+            // `ENOMOTO_MIP_QIU_FIND_STOP_GAP` (2026-11-04 から既定、`=0` で以前の形、analysis/qiu_margin_20261104.md): FJ 以外の暫定解でも根の LP との相対ギャップが
             // `thr` を越える間は止めない (qiu では根の RENS の解 −27.65 (ギャップ 0.97) が 2 秒で入り、0.6 秒後に −115.25 を見つけるはずの解発見スレッドを止めていた)
-            let only_fj = self.inc_only_fj || env_str!("ENOMOTO_MIP_QIU_FIND_STOP_GAP").is_some();
+            let only_fj = self.inc_only_fj || env_def!("ENOMOTO_MIP_QIU_FIND_STOP_GAP", "1").is_some();
             let poor = self.incumbent.as_ref().is_some_and(|(z, _)| only_fj && lb.is_finite() && (z - lb) / z.abs().max(lb.abs()).max(1.0) > thr);
             if let Some(st) = self.find_stop.as_ref().filter(|_| !poor) {
                 if !st.swap(true, std::sync::atomic::Ordering::Relaxed) && self.params.verbose {

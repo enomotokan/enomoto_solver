@@ -2734,8 +2734,8 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 行の列番号が狭義の昇順でないなどで作れなければ従来の経路で作る
     // 診断用 (`ENOMOTO_MIP_DEBUG_FASTPACK_CHECK`): 両方の経路で作り、ビット単位で同じかを確かめる
     let fastpack_check = env_str!("ENOMOTO_MIP_DEBUG_FASTPACK_CHECK").is_some();
-    // 試作 `ENOMOTO_MIP_TREE2_FORCEQ` ([`tree2_forceq_rows`]): 0-1 列 1 本の強制等式から `x_j = v0 + d y` の 2 項等式を足す
-    let forceq: Vec<(Vec<(usize, f64)>, f64)> = if env_str!("ENOMOTO_MIP_TREE2_FORCEQ").is_some() {
+    // `ENOMOTO_MIP_TREE2_FORCEQ` (2026-11-04 から既定、`=0` で使わない。[`tree2_forceq_rows`]): 0-1 列 1 本の強制等式から `x_j = v0 + d y` の 2 項等式を足す
+    let forceq: Vec<(Vec<(usize, f64)>, f64)> = if env_def!("ENOMOTO_MIP_TREE2_FORCEQ", "1").is_some() {
         let t0 = std::time::Instant::now();
         let r = tree2_forceq_rows(&p.rows, &p_row_lo, &p_row_up, &col_lo, &col_up, &p.is_int);
         if verbose {
