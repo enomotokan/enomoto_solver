@@ -38,6 +38,20 @@ pub(super) fn clique_cuts_mode() -> Option<&'static str> {
     }
 }
 
+/// 試作 `ENOMOTO_MIP_HO5_CUTLP_GAIN` = g (既定では使わない、analysis/highs_only_20261105/G5.md): 主の根のカットのループで、カットを足した LP が
+/// 1 回の LP の反復の上限 (`ENOMOTO_T_MIP_CUT_LP_WORK`、最低 1000) の後の進みの判定 (`ENOMOTO_MIP_CUT_LP_CAP_ROBUST` の `p`) で止まったとき、
+/// 出発の目的値からの伸びが g x max(|出発の目的値|, 1) 以上なら、カットを外さずに止まったところから続けて解き切る (反復の上限は
+/// `ENOMOTO_T_MIP_HO5_CUTLP_GAIN_ITER_MULT` (50) x 上限と行の数の 2 倍の大きい方、時間は 1 回の LP の時間の上限の
+/// `ENOMOTO_T_MIP_HO5_CUTLP_GAIN_TIME_MULT` (3) 倍)。neos-4722843-widden (11 万行) は根の LP 8220 反復で上限 1000 になり、最初のカットの LP が
+/// 1250 反復で目的値を 472.9 から 9128 まで上げている途中で外され、`ENOMOTO_MIP_CUT_LP_CAP_STOP` で主のループが 0 本で止まっていた。
+/// 値なし (`1` など数でない値) は g = 1
+fn ho5_cutlp_gain() -> f64 {
+    match env_str!("ENOMOTO_MIP_HO5_CUTLP_GAIN") {
+        None => 0.0,
+        Some(v) => v.parse::<f64>().ok().filter(|g| *g > 0.0).unwrap_or(1.0),
+    }
+}
+
 fn use_lifted_cover() -> bool {
     env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some()
 }
@@ -1150,6 +1164,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             on.then(|| (letters.contains('s'), letters.contains('d'), letters.contains('p')))
         });
         let (rob_s, rob_d, rob_p) = robust.unwrap_or((false, false, false));
+        // 試作 `ENOMOTO_MIP_HO5_CUTLP_GAIN` (外側の主の根のカットのループだけ)
+        let ho5_gain = if cs_outer { ho5_cutlp_gain() } else { 0.0 };
         if robust.is_some() && self.params.verbose {
             eprintln!("MIP: robust cut LP cap{}: size {rob_s}, double {rob_d}, progress {rob_p}", if job.is_some() { " (background)" } else { "" });
         }
@@ -1843,10 +1859,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 lim
             };
-            if rob_d {
+            if rob_d || ho5_gain > 0.0 {
                 crate::simplex::mip_lp::FORCE_RESUME_ONCE.with(|c| c.set(true));
             }
             let mut st = self.lp.solve(&SolveLimits { iteration_limit: solve_lim, cutoff: cut_cutoff, deadline: lp_deadline });
+            // 試作 `ENOMOTO_MIP_HO5_CUTLP_GAIN` ([`ho5_cutlp_gain`]): 上限 (進みの判定) で止まったカットの LP が、出発の目的値から
+            // 大きく伸びていたら、外さずに止まったところから続けて解き切る
+            if ho5_gain > 0.0 && rob_p && matches!(st, LpStatus::IterationLimit) && !self.time_up() && !stopped(&job) {
+                if let Some((it, _gain, total)) = crate::simplex::slope_intercept_dual::ext_progress_stopped() {
+                    if total >= ho5_gain * prev_lp_obj.abs().max(1.0) {
+                        let it1 = self.lp.total_iterations();
+                        let mult = tunable!("ENOMOTO_T_MIP_HO5_CUTLP_GAIN_TIME_MULT", 3.0, f64);
+                        let d = if cap.is_finite() {
+                            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(mult * cap);
+                            Some(self.deadline.map_or(d, |g| g.min(d)))
+                        } else {
+                            self.deadline
+                        };
+                        let lim2 = ((tunable!("ENOMOTO_T_MIP_HO5_CUTLP_GAIN_ITER_MULT", 50.0, f64) * lim as f64) as u64).max(2 * self.lp.num_rows() as u64);
+                        let st0 = st;
+                        st = self.lp.solve(&SolveLimits { iteration_limit: lim2, cutoff: cut_cutoff, deadline: d });
+                        if self.params.verbose {
+                            eprintln!(
+                                "MIP: cut round {round}: HO5 cut LP gain {total:.3e} >= {ho5_gain} x |{prev_lp_obj:.6e}| at iter {it} ({st0:?}); continued (cap {lim2}): {st:?} after {} more iters, obj {:.10e}",
+                                self.lp.total_iterations() - it1,
+                                self.lp.objective()
+                            );
+                        }
+                    }
+                }
+            }
             crate::simplex::mip_lp::FORCE_RESUME_ONCE.with(|c| c.set(false));
             crate::simplex::mip_lp::PROGRESS_STOP_ONCE.with(|c| c.set(None));
             if rob_p && !ho4_cut0 && self.params.verbose {

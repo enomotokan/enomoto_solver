@@ -3319,6 +3319,18 @@ pub(crate) fn lose6_2_sublb() -> bool {
     env_str!("ENOMOTO_MIP_LOSE6_2_SUBLB").is_some_and(|v| v != "0")
 }
 
+/// 試作 `ENOMOTO_MIP_HO5_BGSTALL` = g (既定では使わない、analysis/highs_only_20261105/G5.md): 裏のカットの窓の停滞の判定 ([`BgDeterm`]) に、
+/// 「直近 `win` ラウンドの伸びが、裏のカットを始めたときの LP の値からの伸びの g 倍以下」を足す (どちらかで停滞)。今の判定は伸びを
+/// 目的値の大きさに対する相対 (`ENOMOTO_T_MIP_BG_DETERM_EPS` = 1e-4) で見るので、1 ラウンドが重い問題 (neos-4722843-widden は 11 万行で
+/// 1 ラウンド約 4 秒) では、伸びがほぼ尽きた後も窓ごとに 0.3% ずつ伸びて止まらず、主が根のヒューリスティクスの後に 116 秒待っていた
+/// (84 秒に 10410、181 秒に 10540、HiGHS の根は 10599)。値が数でなければ g = 0.02
+pub(crate) fn ho5_bgstall() -> f64 {
+    match env_str!("ENOMOTO_MIP_HO5_BGSTALL") {
+        None => 0.0,
+        Some(v) => v.parse::<f64>().ok().filter(|g| *g > 0.0).unwrap_or(0.02),
+    }
+}
+
 pub(crate) fn bg_determ_mode() -> Option<&'static str> {
     env_def!("ENOMOTO_MIP_BG_CUTS_DETERM", "c")
 }
@@ -3394,6 +3406,17 @@ impl CutJob {
     /// [`BgDeterm`] の窓の判定 (`h` は窓を数え直した後の目的値の並び、`all` は初めからの並び)。[`BgRobust`] があればその判定
     fn determ_stalled(&self, d: &BgDeterm, h: &[f64], all: &[f64]) -> bool {
         let base = window_stalled(h, d.win, d.eps);
+        // 試作 `ENOMOTO_MIP_HO5_BGSTALL` ([`ho5_bgstall`]): 窓の伸びが初めからの伸びの g 倍以下でも停滞とみなす
+        let base = base || {
+            let g = ho5_bgstall();
+            g > 0.0 && h.len() > d.win && {
+                let s0 = f64::from_bits(self.start_bits.load(std::sync::atomic::Ordering::Relaxed));
+                let first = if s0.is_finite() { s0.min(all[0]) } else { all[0] };
+                let total = (all[all.len() - 1] - first).max(0.0);
+                let recent = h[h.len() - 1] - h[h.len() - 1 - d.win];
+                total > 0.0 && recent <= g * total
+            }
+        };
         let Some(r) = d.robust else {
             return base;
         };
