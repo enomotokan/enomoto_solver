@@ -4728,6 +4728,16 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let harris2_mode = env_str!("ENOMOTO_SIMPLEX_HARRIS2").filter(|v| *v != "0");
     let harris2_safe_only = harris2_mode.is_some_and(|v| v.contains('r'));
     let harris2_any = harris2_mode.is_some();
+    // 試作 `ENOMOTO_SIMPLEX_NOISE_RESET` (既定では使わない): 雑音として外した行が増えたら作り直す
+    let noise_reset_frac = env_str!("ENOMOTO_SIMPLEX_NOISE_RESET").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    let noise_reset_exact = env_str!("ENOMOTO_SIMPLEX_NOISE_RESET_W") == Some("e");
+    let noise_reset_max = tunable!("ENOMOTO_T_SIMPLEX_NOISE_RESET_MAX", 5usize, usize);
+    let mut noise_since_reset = 0usize;
+    let mut noise_resets = 0usize;
+    // `t`: 数値のトラブル (照合の不一致・特異の検査・FT 更新の拒否など、`note_numeric_trouble!` の数) が
+    // `ENOMOTO_T_SIMPLEX_H2_TROUBLE` (既定 5) 回に達したら (または安全モードなら) 使う
+    let harris2_trouble_only = harris2_mode.is_some_and(|v| v.contains('t'));
+    let h2_trouble = tunable!("ENOMOTO_T_SIMPLEX_H2_TROUBLE", 5usize, usize);
     let h2_small = tunable!("ENOMOTO_T_SIMPLEX_H2_SMALL", 1e30, f64);
     let h2_td = tunable!("ENOMOTO_T_SIMPLEX_H2_TD", 1e-8, f64);
     let mut harris2_skip: Vec<usize> = Vec::new();
@@ -5548,6 +5558,27 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     noise_feasible[basis[r]] = true;
                     row_bounds.mark_noise(r);
                     infeasible_rows.set(r, false);
+                    // 試作 `ENOMOTO_SIMPLEX_NOISE_RESET=<割合>` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): 雑音として外した行が
+                    // 前回から行の数のこの割合に達したら、分解し直し、雑音の印を消し、x_B・被約費用を作り直し、DSE 重みを作り直す
+                    // (`ENOMOTO_SIMPLEX_NOISE_RESET_W`: `u` 単位 (既定)、`e` 厳密 (BTRAN を行の数だけ))。最大 `ENOMOTO_T_SIMPLEX_NOISE_RESET_MAX` (既定 5) 回
+                    noise_since_reset += 1;
+                    if noise_reset_frac > 0.0 && noise_resets < noise_reset_max && noise_since_reset as f64 >= noise_reset_frac * m as f64 {
+                        noise_since_reset = 0;
+                        noise_resets += 1;
+                        lu = refactor_main!();
+                        noise_feasible.fill(false);
+                        row_bounds = RowBounds::new(&cache, &basis, &noise_feasible);
+                        let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, false, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
+                        rhs_inc_base = fresh_base;
+                        rhs_inc_slope = fresh_slope;
+                        rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
+                        fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut d);
+                        dse = if noise_reset_exact { super::DseState::from_basis(m, &lu) } else { super::DseState::from_weights(vec![1.0; m]) };
+                        dse_age0 = u64::MAX;
+                        if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                            eprintln!("DEBUG_EXT: noise reset {noise_resets} at iter={iter_idx}: infeasible rows after refactor = {}", infeasible_rows.rows.len());
+                        }
+                    }
                     continue;
                 }
             }
@@ -6193,7 +6224,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // |alpha| 最大の候補を入れる列にする (`kc` の位置に置く。前の候補はこれまでどおりフリップ)。飛ばした候補の被約費用の
         // 符号の誤り (高々 `Td` 程度) は、双対の更新の後で費用をずらして 0 に戻す (`harris2_skip`)
         harris2_skip.clear();
-        let harris2_on = harris2_any && (!harris2_safe_only || safe_pivot);
+        let harris2_on = harris2_any
+            && if harris2_trouble_only { safe_pivot || numeric_trouble_count >= h2_trouble } else { !harris2_safe_only || safe_pivot };
         if harris2_on && zero_pick.is_none() && !bland_mode && harris2_k > 0 {
             if let Some(ks) = k_star {
                 let kc = sorted_prefix[ks];
