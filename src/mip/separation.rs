@@ -84,7 +84,7 @@ fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
 }
 
 /// `ENOMOTO_MIP_CUTSEL_PROBE_KEEP` の比べの片側の終わりの状態 (足した行・LP の状態・分離器の状態・回ったラウンド数)
-struct ProbeEnd<S> {
+pub(super) struct ProbeEnd<S> {
     rows: Vec<(Vec<(usize, f64)>, f64, f64)>,
     lp: S,
     rng: u64,
@@ -663,7 +663,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 戻り値の 1 つ目はラウンドごとの (そこまでの伸び, そこまでの時間)。`stop` が真を返したら (ラウンドの番号, 伸び, 時間)、または
     /// `deadline` を過ぎたら、`k` ラウンドを待たずにやめる。
     /// `keep` なら終わりの状態 ([`ProbeEnd`]) も返す (`ENOMOTO_MIP_CUTSEL_PROBE_KEEP`)。
-    fn probe_cut_mode(&mut self, pool: bool, k: usize, deadline: std::time::Instant, stop: &dyn Fn(usize, f64, f64) -> bool, keep: bool) -> (Vec<(f64, f64)>, usize, Option<ProbeEnd<L::State>>) {
+    pub(super) fn probe_cut_mode(&mut self, pool: bool, k: usize, deadline: std::time::Instant, stop: &dyn Fn(usize, f64, f64) -> bool, keep: bool) -> (Vec<(f64, f64)>, usize, Option<ProbeEnd<L::State>>) {
         let p = self.p;
         let t0 = std::time::Instant::now();
         let obj0 = self.lp.objective();

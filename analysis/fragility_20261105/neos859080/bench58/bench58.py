@@ -1,11 +1,11 @@
 """58 問 (analysis/cbcimpl_20261029/probs.py) を今の既定 (def) と試作 (rob = ENOMOTO_MIP_ROBUST_ROOTIPM=1) で解く
-(2026-11-05、analysis/bound_step_20261104/bench.py の写しで設定と一時ファイルだけ変えた。4 スレッド・60 秒・1 回ずつ)。
-使い方: python analysis/fragility_20261105/bench58.py def,rob [<問題,...>] [<出力名>] [log]
+(2026-11-05。1 回目 (bench58.jsonl・logs_a/) は試作の初めの形、2 回目 (bench58b.jsonl・logs/) は直した形。analysis/bound_step_20261104/bench.py の写しで設定と一時ファイルだけ変えた。4 スレッド・60 秒・1 回ずつ)。
+使い方: python analysis/fragility_20261105/neos859080/bench58/bench58.py def,rob [<問題,...>] [<出力名>] [log]
 結果は <出力名 (既定 bench58)>.jsonl に 1 行ずつ足す (済んだものは飛ばす)。"""
 import gzip, json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
-WT = D.parents[1]
+WT = D.parents[3]
 sys.path.insert(0, str(WT / "scripts"))
 sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
 import run_miplib_benchmark as rb  # noqa: E402

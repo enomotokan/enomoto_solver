@@ -6222,28 +6222,50 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let post = self.lp.objective() + self.p.offset;
                     let flat = post - root_obj <= 1e-6 * root_obj.abs().max(1.0);
                     if flat && (self.obj_step.is_some() || v.contains('a')) && !self.time_up() {
+                        // 元の頂点に戻すための LP の写し。内点法の頂点から副作用のない比べ ([`Self::probe_cut_mode`]、終わると LP と分離器の
+                        // 状態を戻す) で数ラウンド試し、下界が上がるときだけ本当の 2 回目のループを回す。上がらなければ写しに戻して既定と
+                        // 同じ経路で続ける (2 回目のループを回してから戻す形では、強分岐の統計など戻しきれない状態が残り、noswot が
+                        // 19 秒 -> 時間切れになった)
+                        let keep_lp = self.lp.clone();
+                        // 内点法の時間の上限: 根の LP の時間の `ENOMOTO_T_MIP_ROBUST_ROOTIPM_MULT` 倍 (既定 3)、少なくとも 0.2 秒
+                        // (neos-960392 は根の LP 1.9 秒に対し内点法 + クロスオーバーが 35 秒かかった)
+                        let cap = (tunable!("ENOMOTO_T_MIP_ROBUST_ROOTIPM_MULT", 3.0, f64) * self.root_lp_secs).max(0.2);
+                        let d = Instant::now() + std::time::Duration::from_secs_f64(cap);
                         let t0 = Instant::now();
-                        let st = self.lp.solve_rescue(&SolveLimits { deadline: self.deadline, ..Default::default() });
-                        let x = self.lp.col_values();
-                        let nfrac = self.fractional(&x).len();
+                        let st = self.lp.solve_rescue(&SolveLimits { deadline: Some(self.deadline.map_or(d, |g| g.min(d))), ..Default::default() });
+                        let nfrac = if st == LpStatus::Optimal { self.fractional(&self.lp.col_values()).len() } else { 0 };
                         if self.params.verbose {
-                            eprintln!("MIP: robust root IPM: cut loop flat at {post:.10e}; re-solved by IPM + crossover: {st:?}, obj {:.10e}, {nfrac} fractional ({:.2}s)", self.lp.objective() + self.p.offset, t0.elapsed().as_secs_f64());
+                            eprintln!("MIP: robust root IPM: cut loop flat at {post:.10e}; re-solved by IPM + crossover (cap {cap:.2}s): {st:?}, obj {:.10e}, {nfrac} fractional ({:.2}s)", self.lp.objective() + self.p.offset, t0.elapsed().as_secs_f64());
                         }
+                        let mut kept = false;
                         if st == LpStatus::Optimal && nfrac > 0 {
+                            // 比べのラウンド数 `ENOMOTO_T_MIP_ROBUST_ROOTIPM_ROUNDS` (既定 3)、時間は内点法と同じ上限 (少なくとも 0.5 秒)
+                            let k = tunable!("ENOMOTO_T_MIP_ROBUST_ROOTIPM_ROUNDS", 3usize, usize).max(1);
+                            let dl = Instant::now() + std::time::Duration::from_secs_f64(cap.max(0.5));
                             let t1 = Instant::now();
-                            let ok = self.root_cut_loop(root_iters);
-                            root_cut_secs += t1.elapsed().as_secs_f64();
+                            let (hist, nadd, _) = self.probe_cut_mode(false, k, dl, &|_, _, _| false, false);
+                            let gain = hist.last().map_or(0.0, |h| h.0);
+                            let good = gain > 1e-6 * post.abs().max(1.0);
                             if self.params.verbose {
-                                eprintln!("MIP: robust root IPM: second cut loop {}, obj {:.10e} ({:.2}s)", if ok { "done" } else { "failed" }, self.lp.objective() + self.p.offset, t1.elapsed().as_secs_f64());
+                                eprintln!("MIP: robust root IPM: probe at the IPM vertex: {} rounds, {nadd} cuts, gain {gain:.6e} -> {} ({:.2}s)", hist.len(), if good { "second cut loop" } else { "back to the first vertex" }, t1.elapsed().as_secs_f64());
                             }
-                            if !ok {
-                                self.join_fj_thread();
-                                let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
-                                return self.finish(st, root_obj);
+                            if good {
+                                let t2 = Instant::now();
+                                let ok = self.root_cut_loop(root_iters);
+                                root_cut_secs += t2.elapsed().as_secs_f64();
+                                if self.params.verbose {
+                                    eprintln!("MIP: robust root IPM: second cut loop {}, obj {:.10e} ({:.2}s)", if ok { "done" } else { "failed" }, self.lp.objective() + self.p.offset, t2.elapsed().as_secs_f64());
+                                }
+                                if !ok {
+                                    self.join_fj_thread();
+                                    let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
+                                    return self.finish(st, root_obj);
+                                }
+                                kept = true;
                             }
-                        } else if st != LpStatus::Optimal {
-                            // 解き直しに失敗したら二段解法で今の LP を解き直す
-                            let _ = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+                        }
+                        if !kept {
+                            self.lp = keep_lp;
                         }
                     }
                 }
