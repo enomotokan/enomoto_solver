@@ -855,6 +855,11 @@ fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, share
 /// 戻した解が `p` で実行可能でなければ (前処理の誤りの安全網)、前処理なしで解き直す。
 /// サブ MIP (RENS/RINS) もこれで解く。
 thread_local! {
+    /// 試作 `ENOMOTO_MIP_HO4_CUT0` (analysis/highs_only_20261105/G4.md): 前処理の LP による固定の最初の LP の反復 (このスレッドで最後に解いたもの)
+    pub(crate) static HO4_PROBE_ITERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+thread_local! {
     /// 次の [`solve_problem`] に渡す最初の暫定解 (`p` の空間)。開始時に取り出し、前処理後の空間に移して
     /// [`solver::START_SOL`] に置く (再スタートで暫定解を引き継ぐ)。
     pub(crate) static RESTART_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
@@ -3500,6 +3505,9 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     // 固定したときだけ最後の LP の基底を根の LP に渡す (固定がなければ根の LP は前処理の LP と同じ問題で、基底を渡すと
     // 着く頂点が変わり、カット・探索の経路が変わるだけ: qiu は固定 0 で 40 問の 2 回とも遅くなった)。ただし最初の LP に
     // `ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS` 秒 (既定 1 秒) 以上かかったら、根で解き直す手間を省くために渡す
+    // 試作 `ENOMOTO_MIP_HO4_CUT0` 用: 前処理の LP による固定の最初の LP の反復 (根の LP がこの基底から数反復で終わると、
+    // 根のカットのループの「根の LP の反復」が LP の重さを表さなくなるので)
+    HO4_PROBE_ITERS.with(|c| c.set(root_iters));
     let slow_root = if work { root_iters as f64 * size >= tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_BASIS", 1.5e8, f64) } else { root_secs >= tunable!("ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS", 1.0, f64) };
     if verbose {
         eprintln!(

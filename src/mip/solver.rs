@@ -1187,6 +1187,11 @@ pub(crate) struct TreeSnapshot {
 /// 基底から解き始める (既定は基底なしで最初から解く)。mzzv42z (10800 行) では木に入った後の 20 秒で従 3 本が 1 ノードも
 /// 処理しなかった (analysis/mzzv42z_r4_20261021.md。r4 の「従が根の LP で時間切れなら下界を +inf」は既定の
 /// [`Solver::root_fail_bound`] に入っているので、inv/mzzv42z-20261023 でここに移したのは基底の受け渡しだけ)
+/// 診断 `ENOMOTO_MIP_HO4_DIAG` (analysis/highs_only_20261105/G4.md、解き方は変えない)
+fn ho4_diag() -> bool {
+    env_str!("ENOMOTO_MIP_HO4_DIAG").is_some()
+}
+
 fn tree_root_basis() -> bool {
     env_str!("ENOMOTO_MIP_TREE_ROOT_BASIS").is_some()
 }
@@ -7147,9 +7152,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.add_cut_rows(&rows);
                     let mut ret_dse = false;
                     if let Some(b) = bg.job.basis.lock().unwrap().take() {
+                        if ho4_diag() && !(b.col.len() == self.p.n && b.row.len() == self.lp.num_rows()) {
+                            eprintln!("HO4DIAG: background cuts: returned basis not used (cols {} / {}, rows {} / {})", b.col.len(), self.p.n, b.row.len(), self.lp.num_rows());
+                        }
                         if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
                             crate::simplex::nb_diag::tag(crate::simplex::nb_diag::BG_RETURN);
-                            self.lp.set_basis(&b);
+                            // 試作 `ENOMOTO_MIP_HO4_BGNB` (analysis/highs_only_20261105/G4.md、既定では使わない): 返された基底の非基底の
+                            // 上限・下限の置き場所も渡す (既定は基底に入る列の集合だけで、置き場所は主の今の点からの推し量り)
+                            if env_str!("ENOMOTO_MIP_HO4_BGNB").is_some() {
+                                self.lp.set_basis_nb(&b, &[]);
+                            } else {
+                                self.lp.set_basis(&b);
+                            }
+                            if ho4_diag() {
+                                let nbas = b.col.iter().chain(b.row.iter()).filter(|&&s| s == VarStatus::Basic).count();
+                                eprintln!("HO4DIAG: background cuts: returned basis set (cols {}, rows {}, basic {nbas})", b.col.len(), b.row.len());
+                            }
                             // 試作 `ENOMOTO_MIP_BG_RETURN_DSE=1`: 裏のカットのスレッドの LP の DSE 重みも当てはめる。写しの LP は主と同じ
                             // 元の行 (0..m) の後にカットの行が並び、主は自分のカットの行を消してから返されたカットの行を同じ順で末尾に
                             // 足すので、行の数が合えば変数番号 (列 j、行 n + i) はそのまま主の LP の番号になる
@@ -8289,19 +8307,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let mut st = self.lp.solve(&capped(self, iter_limit));
                 crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
                 crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+                // 診断 (`ENOMOTO_MIP_HO4_DIAG`、analysis/highs_only_20261105/G4.md): ノードの LP 1 回ごとの反復・秒・状態と、
+                // 反復・時間の上限、全論理変数基底からの解き直しの有無を出す (解き方は変えない)
+                let ho4_d = (!self.params.submip && ho4_diag()).then(|| (self.lp.total_iterations() - it0, t_lp.elapsed().as_secs_f64(), st));
                 if st == LpStatus::TimeLimit && !self.time_up() {
                     st = LpStatus::IterationLimit;
                 }
+                let mut ho4_retry: Option<(u64, f64, LpStatus)> = None;
                 if matches!(st, LpStatus::Error | LpStatus::IterationLimit) {
                     // 全論理変数基底から解き直してみる
                     let b = self.lp.basis();
                     let slack = super::lp::Basis { col: b.col.iter().map(|_| VarStatus::Lower).collect(), row: vec![VarStatus::Basic; b.row.len()] };
                     crate::simplex::nb_diag::tag(crate::simplex::nb_diag::SLACK_RETRY);
                     self.lp.set_basis(&slack);
+                    let (i1, t1) = (self.lp.total_iterations(), Instant::now());
                     st = self.lp.solve(&capped(self, u64::MAX));
+                    if ho4_d.is_some() {
+                        ho4_retry = Some((self.lp.total_iterations() - i1, t1.elapsed().as_secs_f64(), st));
+                    }
                     if st == LpStatus::TimeLimit && !self.time_up() {
                         st = LpStatus::Error;
                     }
+                }
+                if let Some((i0, s0, st0)) = ho4_d {
+                    eprintln!(
+                        "HO4DIAG: node LP tid {} node {} depth {} resolve {} restored {} kind {} rows {} iter_limit {} cap {:.2}s first {:?} {} iters {:.2}s retry {:?} (t {:.1}s)",
+                        self.pool_tid, self.nodes, node.depth, resolves, self.restored_now, self.tp_kind, self.lp.num_rows(), iter_limit, cap.as_secs_f64(), st0, i0, s0, ho4_retry, self.start.elapsed().as_secs_f64()
+                    );
                 }
                 self.node_lp_secs += t_lp.elapsed().as_secs_f64();
                 if let Some(t) = node_cut_resolve.take() {

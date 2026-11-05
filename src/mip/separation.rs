@@ -1755,6 +1755,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 lim
             };
+            // 試作 `ENOMOTO_MIP_HO4_CUT0` (analysis/highs_only_20261105/G4.md、既定では使わない): 主の根のカットのループで、下界がまだ
+            // 根の LP の値から動いていない間 (多くは 0 ラウンド目) のカットの LP は、反復の上限を `ENOMOTO_T_MIP_HO4_CUT0_MULT` (既定 2)
+            // x 根の LP の反復より小さくせず、進みの判定 (`p`) で打ち切らない (時間の上限は安全網として残す)。
+            // neos-3216931-puriri・satellites2-60-fs・neos-873061 は 0 ラウンド目のカットの LP が進みの判定 (目的値が平らな窓) で
+            // 外され、`ENOMOTO_MIP_CUT_LP_CAP_STOP` でループが止まって根の下界が根の LP のまま。HiGHS は最初の分離のラウンドに
+            // 根の LP の 0.7〜1.6 倍の反復を使って下界を上げる
+            let ho4_cut0 = cs_outer && !moved && env_str!("ENOMOTO_MIP_HO4_CUT0").is_some();
+            // 根の LP が前処理の LP の基底から数反復で終わった問題 (neos-873061 は 1 反復) では、前処理の LP の反復を基準にする
+            let ho4_base = root_iters.max(super::HO4_PROBE_ITERS.with(|c| c.get())).max(100);
+            let lim = if ho4_cut0 { lim.max((tunable!("ENOMOTO_T_MIP_HO4_CUT0_MULT", 2.0, f64) * ho4_base as f64) as u64) } else { lim };
+            if ho4_cut0 && self.params.verbose {
+                eprintln!("MIP: cut round {round}: ENOMOTO_MIP_HO4_CUT0: iteration cap {lim}, no progress check");
+            }
             // 1 回の LP の時間の上限 (全体の 2%、最低 1 秒): 数値的に悪条件の LP が残り時間を使い切るのを防ぐ
             let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
             let cap = cap.max(lp_cap_mult * ok_lp_secs);
@@ -1822,7 +1835,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` の `d`・`p`: `d` は止まったところから続けるので、止まった基底を残させ、外すときのために
             // 加える前の状態を取っておく。`p` は上限の後を目的値の進みで打ち切る (反復の上限は安全網)
             let prev_lp_obj = self.lp.objective();
-            let solve_lim = if rob_p {
+            let solve_lim = if rob_p && !ho4_cut0 {
                 let w = ((tunable!("ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_WIN", 0.25, f64) * lim as f64) as usize).max(50);
                 let frac = tunable!("ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_FRAC", 0.01, f64);
                 crate::simplex::mip_lp::PROGRESS_STOP_ONCE.with(|c| c.set(Some((lim as usize, w, frac, prev_lp_obj))));
@@ -1836,7 +1849,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut st = self.lp.solve(&SolveLimits { iteration_limit: solve_lim, cutoff: cut_cutoff, deadline: lp_deadline });
             crate::simplex::mip_lp::FORCE_RESUME_ONCE.with(|c| c.set(false));
             crate::simplex::mip_lp::PROGRESS_STOP_ONCE.with(|c| c.set(None));
-            if rob_p && self.params.verbose {
+            if rob_p && !ho4_cut0 && self.params.verbose {
                 if let Some((it, gain, total)) = crate::simplex::slope_intercept_dual::ext_progress_stopped() {
                     eprintln!("MIP: cut round {round}: cut LP stopped by the progress check at iter {it} (cap {lim}): window gain {gain:.3e}, gain from the start {total:.3e} ({} iters)", self.lp.total_iterations() - it0);
                 } else if self.lp.total_iterations() - it0 > lim {
