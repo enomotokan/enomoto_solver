@@ -246,6 +246,39 @@ impl MipProblem {
         }
     }
 
+    /// `ENOMOTO_MIP_HO2_IMPLINT` (試作、既定では使わない。analysis/highs_only_20261105/G2.md): [`Self::implied_integers`] に、HiGHS の
+    /// 双対側の暗黙の整数の規則 (`HPresolve::isImpliedInteger` の後半) を足す。連続列 `j` の出てくる行が全部、ほかの列が (暗に)
+    /// 整数で、`a_ij` で割った係数・有限の左辺と右辺が整数、列の有限の境界も整数なら、整数列を整数値に固定したとき `x_j` の
+    /// 取りうる範囲は端が整数の区間なので、整数の最適解がある。[`Self::implied_integers`] の双対の規則は出てくる行が 1 本の列
+    /// だけ。csched008 の目的関数の列 (メイクスパン、8 行) は HiGHS では暗に整数 (「Objective function is integral with scale 1」)
+    /// だが、こちらでは刻みが付かない。印を付けた列を前提に繰り返す (HiGHS と同じ)。
+    pub fn implied_integers_ho2(&self) -> Vec<bool> {
+        let integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
+        let mut mark = self.implied_integers();
+        loop {
+            let mut changed = false;
+            for j in 0..self.n {
+                if mark[j] || self.cols[j].is_empty() {
+                    continue;
+                }
+                if ![self.col_lo[j], self.col_up[j]].iter().all(|&v| !v.is_finite() || integral(v)) {
+                    continue;
+                }
+                let ok = self.cols[j].iter().all(|&(i, a)| {
+                    [self.row_lo[i], self.row_up[i]].iter().all(|&v| !v.is_finite() || integral(v / a))
+                        && self.rows[i].iter().all(|&(k, b)| k == j || (mark[k] && integral(b / a)))
+                });
+                if ok {
+                    mark[j] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return mark;
+            }
+        }
+    }
+
     /// `ENOMOTO_MIP_IMPLINT_TU` (試作、既定では使わない): `base` (整数列と [`Self::implied_integers`] の印) に加えて、連続列の部分が
     /// 完全単模 (TU) になる連続列の集まりをまとめて暗に整数とする。整数列を整数値に固定すると、残りの連続列の制約は
     /// 「TU の行列 x_C ∈ 整数の区間」になり、その多面体の頂点は整数なので、整数の最適解がある (カット生成で整数として扱える)。
@@ -449,6 +482,26 @@ mod tests {
             vec![7.0, 4.0, 1.0],
         );
         assert_eq!(p.implied_integers(), vec![true, true, true, false, true]);
+    }
+
+    #[test]
+    fn implied_integers_ho2_makespan() {
+        // x0, x1 整数。c (列 2) はメイクスパン: 3 x0 - c <= 0、2 x1 - c <= -1 (2 行に出るので既存の双対の規則では外れる)。
+        // HiGHS の規則では暗黙の整数。w (列 3) は 2 x0 - 2 w <= 1 で右辺を係数で割ると 0.5 なので外れる
+        let inf = f64::INFINITY;
+        let p = MipProblem::from_rows(
+            vec![0.0; 4],
+            vec![10.0, 10.0, inf, inf],
+            vec![0.0, 0.0, 1.0, 0.0],
+            0.0,
+            1.0,
+            vec![true, true, false, false],
+            vec![vec![(0, 3.0), (2, -1.0)], vec![(1, 2.0), (2, -1.0)], vec![(0, 2.0), (3, -2.0)]],
+            vec![-inf, -inf, -inf],
+            vec![0.0, -1.0, 1.0],
+        );
+        assert_eq!(p.implied_integers(), vec![true, true, false, false]);
+        assert_eq!(p.implied_integers_ho2(), vec![true, true, true, false]);
     }
 
     #[test]

@@ -3717,11 +3717,14 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     // 同じに扱って刻みを判定する (CBC の `CbcModel::analyzeObjective` は、連続列がネットワーク・被覆の形なら整数とみなして
     // `CbcCutoffIncrement` を付ける)。双対側の暗黙の整数は「最適解では整数」なので、暫定解の値が刻みの格子に乗るとは限らない。
     // そのため刈り込みの上限は、暫定解より厳密に小さい最大の格子の点で取る ([`Self::prune_limit`])
-    let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some();
+    // `ENOMOTO_MIP_HO2_IMPLINT` (試作): HiGHS の双対側の暗黙の整数の規則も使って刻みを判定する ([`MipProblem::implied_integers_ho2`])
+    let ho2_implint = env_str!("ENOMOTO_MIP_HO2_IMPLINT").is_some_and(|v| v != "0" && v != "off");
+    let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some() || ho2_implint;
     let obj_step = if obj_step_implint {
         // `ENOMOTO_MIP_IMPLINT_TU` も付けていれば TU の規則の暗黙の整数も使う (整数を固定すると連続列の部分に整数の最適解が
         // あるので、どの部分木でも暫定解より良い解があれば格子の点の値の解もある)
-        let mask = if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() { p.implied_integers_tu(&p.implied_integers()) } else { p.implied_integers() };
+        let base = if ho2_implint { p.implied_integers_ho2() } else { p.implied_integers() };
+        let mask = if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() { p.implied_integers_tu(&base) } else { base };
         let b = if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() { Some((&dom.lo[..], &dom.up[..])) } else { None };
         let st = p.objective_step_mask(&mask, b);
         if params.verbose && !params.submip {
@@ -9543,6 +9546,134 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             self.t4_rc_extra = extra;
+        }
+        self.ho2_global_obj_prop();
+    }
+
+    /// `ENOMOTO_MIP_HO2_GOBJ` (試作、既定では使わない。analysis/highs_only_20261105/G2.md): 打ち切り値 `U` による目的関数の行
+    /// `sum c_j x_j <= U - 定数項` を大域的な境界で伝播し、行の伝播と交互に数回回して、締まった整数列の境界と目的関数の列の境界を
+    /// 大域的に締める。HiGHS は大域的な定義域でも目的関数の伝播をし、木の中の再スタートの前処理では打ち切り値が目的関数の列の
+    /// 上限として効く (csched008 は目的関数が連続列 1 本で、上限 177 で前処理の後の列が 1503 -> 1431)。こちらの目的関数の伝播
+    /// (`ENOMOTO_MIP_OBJ_PROP`) はノードの中の局所的なもので、大域的な境界と再スタートの模型には入らない。
+    /// `=1` は目的関数の列が `ENOMOTO_T_MIP_HO2_GOBJ_MAX_COLS` (既定 16) 本以下のときだけ、`=all` は本数を問わない。
+    fn ho2_global_obj_prop(&mut self) {
+        let mode = match env_str!("ENOMOTO_MIP_HO2_GOBJ") {
+            Some(m) if m != "0" && m != "off" => m,
+            _ => return,
+        };
+        let p = self.p;
+        let u = self.prune_limit() - p.offset;
+        if !u.is_finite() || self.dom.infeasible {
+            return;
+        }
+        let obj: Vec<(usize, f64)> = (0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
+        if obj.is_empty() || (mode != "all" && obj.len() > tunable!("ENOMOTO_T_MIP_HO2_GOBJ_MAX_COLS", 16usize, usize)) {
+            return;
+        }
+        let t0 = Instant::now();
+        let mut d = Domain::new(p);
+        for j in 0..p.n {
+            if self.dom.global_lo[j] > d.lo[j] {
+                d.tighten_lower(p, j, self.dom.global_lo[j]);
+            }
+            if self.dom.global_up[j] < d.up[j] {
+                d.tighten_upper(p, j, self.dom.global_up[j]);
+            }
+        }
+        let mut ok = !d.infeasible && d.propagate(p);
+        let mut obj_tight = 0usize;
+        for _ in 0..tunable!("ENOMOTO_T_MIP_HO2_GOBJ_PASSES", 5usize, usize) {
+            if !ok {
+                break;
+            }
+            // 目的関数の行の最小活動量 (無限の項の数も)
+            let (mut minact, mut ninf) = (0.0f64, 0usize);
+            for &(j, c) in &obj {
+                let b = if c > 0.0 { d.lo[j] } else { d.up[j] };
+                if b.is_finite() {
+                    minact += c * b;
+                } else {
+                    ninf += 1;
+                }
+            }
+            if ninf > 1 {
+                break;
+            }
+            let s0 = d.stack_len();
+            for &(j, c) in &obj {
+                let b = if c > 0.0 { d.lo[j] } else { d.up[j] };
+                let rest = if b.is_finite() {
+                    if ninf > 0 {
+                        continue;
+                    }
+                    minact - c * b
+                } else {
+                    minact
+                };
+                // c x_j <= u - rest。連続列は丸め誤差の分だけ緩める
+                let lim = (u - rest) / c;
+                let slack = if p.is_int[j] { 0.0 } else { 1e-9 * (1.0 + lim.abs()) };
+                if c > 0.0 {
+                    if lim + slack < d.up[j] && d.tighten_upper(p, j, lim + slack) {
+                        obj_tight += 1;
+                    }
+                } else if lim - slack > d.lo[j] && d.tighten_lower(p, j, lim - slack) {
+                    obj_tight += 1;
+                }
+                if d.infeasible {
+                    break;
+                }
+            }
+            if d.infeasible {
+                ok = false;
+                break;
+            }
+            if d.stack_len() == s0 {
+                break;
+            }
+            ok = d.propagate(p);
+        }
+        if !ok {
+            // 打ち切り値より良い解がない (根の下で矛盾)。ここでは何もしない (木が刈って閉じる)
+            if self.params.verbose {
+                eprintln!("MIP: HO2_GOBJ: global propagation with the cutoff {:.10e} is infeasible ({:.3}s)", u + p.offset, t0.elapsed().as_secs_f64());
+            }
+            return;
+        }
+        let (mut nfix, mut nint, mut nobj) = (0usize, 0usize, 0usize);
+        for j in 0..p.n {
+            let is_obj = p.cost[j] != 0.0;
+            if !(p.is_int[j] || is_obj) {
+                continue;
+            }
+            let (glo, gup) = (self.dom.global_lo[j], self.dom.global_up[j]);
+            let mut ch = false;
+            if d.lo[j] > glo + 1e-9 * (1.0 + glo.abs()) {
+                self.dom.tighten_global(p, j, false, d.lo[j]);
+                ch = true;
+            }
+            if d.up[j] < gup - 1e-9 * (1.0 + gup.abs()) {
+                self.dom.tighten_global(p, j, true, d.up[j]);
+                ch = true;
+            }
+            if ch {
+                if is_obj {
+                    nobj += 1;
+                } else {
+                    nint += 1;
+                }
+                if p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j] {
+                    nfix += 1;
+                }
+            }
+        }
+        if self.params.verbose && (nint > 0 || nobj > 0) {
+            eprintln!(
+                "MIP: HO2_GOBJ: cutoff {:.10e}: tightened {nobj} objective columns, {nint} integer columns ({nfix} fixed; obj-row tightenings {obj_tight}) ({:.3}s, thread {})",
+                u + p.offset,
+                t0.elapsed().as_secs_f64(),
+                self.pool_tid
+            );
         }
     }
 
