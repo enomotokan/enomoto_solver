@@ -74,23 +74,70 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(ip) = self.lp.interior_point(true, false, deadline) {
                 if acfix {
                     let tol = tunable!("ENOMOTO_T_MIP_HO4_ACFIX_TOL", 1e-6, f64);
-                    let (mut nlo, mut nup) = (0usize, 0usize);
+                    // 候補: 中心で大域の境界から tol 以内の整数列 (true = 下限側)
+                    let mut cands: Vec<(usize, bool)> = Vec::new();
                     for j in 0..p.n {
                         if !p.is_int[j] || self.dom.global_lo[j] >= self.dom.global_up[j] {
                             continue;
                         }
                         let (lo, up) = (self.dom.global_lo[j], self.dom.global_up[j]);
                         if lo.is_finite() && ip.x[j] <= lo + tol {
-                            self.dom.tighten_global(p, j, true, lo);
-                            nlo += 1;
+                            cands.push((j, true));
                         } else if up.is_finite() && ip.x[j] >= up - tol {
-                            self.dom.tighten_global(p, j, false, up);
-                            nup += 1;
+                            cands.push((j, false));
+                        }
+                    }
+                    let n_cand = cands.len();
+                    // 確かめ: 内点法の点は解析的中心とは限らない (58 問の qnet1・nu25-pr12 では確かめなしの固定が最適解を切り、
+                    // 誤った最適値を返した)。候補の境界からのずれの和を今の LP (カット込み) で最大化し、ずれた列を候補から外して
+                    // やり直す (最大 `ENOMOTO_T_MIP_HO4_ACFIX_ROUNDS` 回)。和が 0 になった候補だけ固定する (LP の許容誤差の範囲で正しい)
+                    let mut verified = false;
+                    let mut rounds = 0usize;
+                    if !cands.is_empty() {
+                        let saved = self.lp.save_state();
+                        let c0 = self.lp.costs();
+                        let max_rounds = tunable!("ENOMOTO_T_MIP_HO4_ACFIX_ROUNDS", 3usize, usize);
+                        while rounds < max_rounds && !cands.is_empty() && Instant::now() < deadline {
+                            rounds += 1;
+                            let mut c = vec![0.0; p.n];
+                            for &(j, at_lo) in &cands {
+                                c[j] = if at_lo { -1.0 } else { 1.0 };
+                            }
+                            self.lp.set_costs(&c);
+                            let st = self.lp.solve(&super::lp::SolveLimits { iteration_limit: u64::MAX, cutoff: f64::INFINITY, deadline: Some(deadline) });
+                            if st != super::lp::LpStatus::Optimal {
+                                cands.clear();
+                                break;
+                            }
+                            let x = self.lp.col_values();
+                            let before = cands.len();
+                            let dev_tol = 1e-6;
+                            cands.retain(|&(j, at_lo)| if at_lo { x[j] <= self.dom.global_lo[j] + dev_tol } else { x[j] >= self.dom.global_up[j] - dev_tol });
+                            if cands.len() == before {
+                                verified = true;
+                                break;
+                            }
+                        }
+                        self.lp.set_costs(&c0);
+                        self.lp.restore_state(&saved);
+                    }
+                    let (mut nlo, mut nup) = (0usize, 0usize);
+                    if verified {
+                        for &(j, at_lo) in &cands {
+                            if at_lo {
+                                let v = self.dom.global_lo[j];
+                                self.dom.tighten_global(p, j, true, v);
+                                nlo += 1;
+                            } else {
+                                let v = self.dom.global_up[j];
+                                self.dom.tighten_global(p, j, false, v);
+                                nup += 1;
+                            }
                         }
                     }
                     if self.params.verbose {
                         eprintln!(
-                            "MIP:   interior rounding: ENOMOTO_MIP_HO4_ACFIX: fixed {nlo} integer columns at the lower bound and {nup} at the upper bound at the analytic center (newly fixed {}, {:.2}s)",
+                            "MIP:   interior rounding: ENOMOTO_MIP_HO4_ACFIX: {n_cand} candidates at the analytic center, verified {verified} after {rounds} LPs; fixed {nlo} integer columns at the lower bound and {nup} at the upper bound (newly fixed {}, {:.2}s)",
                             self.newly_fixed_ints(),
                             t0.elapsed().as_secs_f64()
                         );
