@@ -3208,7 +3208,19 @@ pub(crate) fn solve_snapshot(snap: std::sync::Arc<TreeSnapshot>, params: MipPara
 }
 
 /// 根のヒューリスティクスの間にカットを強める求解との受け渡し。
+/// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `s`: 別々の頂点から始めた裏のカットの写しが、作ったカットを互いに渡す置き場。
+/// 各写しはラウンドごとに選んだカットを (写しの番号と一緒に) 足し、`ENOMOTO_T_MIP_OPTFACE_SHARE_EVERY` ラウンドごとに他の写しの
+/// 新しいカットを読み、自分の LP の点で破られているものを効き目の順に候補へ並べる ([`Solver::root_cut_loop`])
+#[derive(Default)]
+pub(super) struct CutShare {
+    pub(super) cuts: std::sync::Mutex<Vec<(usize, Vec<(usize, f64)>, f64)>>,
+}
+
 pub(super) struct CutJob {
+    /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `s`: カットを渡し合う置き場と自分の番号、受け取って候補にした数・選ばれた数
+    pub(super) share: std::sync::Mutex<Option<(std::sync::Arc<CutShare>, usize)>>,
+    pub(super) share_in: std::sync::atomic::AtomicUsize,
+    pub(super) share_used: std::sync::atomic::AtomicUsize,
     /// 止めの合図 (主のヒューリスティクスが終わった)
     pub(super) stop: std::sync::atomic::AtomicBool,
     /// 重い設定 (停滞したら HiGHS のスコアの第 2 段階に入る、停滞の判定を緩める)
@@ -3418,6 +3430,9 @@ impl CutJob {
             flat_run: std::sync::atomic::AtomicUsize::new(0),
             robust_stalled: std::sync::atomic::AtomicBool::new(false),
             vetoes: std::sync::atomic::AtomicUsize::new(0),
+            share: std::sync::Mutex::new(None),
+            share_in: std::sync::atomic::AtomicUsize::new(0),
+            share_used: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -4839,6 +4854,75 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 試作 `ENOMOTO_MIP_OPTFACE_FIRST` = k (既定では使わない、analysis/optface_cuts_20261105.md): 根のカットのループの前に、最適面の上の
+    /// 別の最適頂点を k 個 (既定 3、種を変えて [`Self::optface_alt`]) 作り、それぞれの頂点で 1 ラウンドだけ分離して既定の選び方で選んだ
+    /// カット ([`Self::probe_cut_mode`] の 1 ラウンド、副作用なし) を重複を除いて集め、主の LP に足して解き直す。その後は既定のループを
+    /// 今の頂点から回す (主のループの増えはラウンド 1 つ分 x k)。双対退化でない (候補が `ENOMOTO_T_MIP_OPTFACE_PAR_MIN` (既定 10) 本未満) なら何もしない
+    fn optface_first(&mut self, v: &str) {
+        let kv: usize = v.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(3).max(1);
+        let mode = optface_mode(v);
+        let min_c = tunable!("ENOMOTO_T_MIP_OPTFACE_PAR_MIN", 10usize, usize);
+        let cap = (2.0 * self.root_lp_secs).clamp(0.2, tunable!("ENOMOTO_T_MIP_OPTFACE_SECS", 3.0, f64).max(0.2));
+        let t0 = Instant::now();
+        let obj0 = self.lp.objective() + self.p.offset;
+        let key = |c: &[(usize, f64)], r: f64| -> Vec<(usize, u64)> {
+            let mut k: Vec<(usize, u64)> = c.iter().map(|&(j, a)| (j, a.to_bits())).collect();
+            k.push((usize::MAX, r.to_bits()));
+            k
+        };
+        let mut seen: std::collections::HashSet<Vec<(usize, u64)>> = std::collections::HashSet::new();
+        let mut rows: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
+        let mut gains: Vec<String> = Vec::new();
+        for sd in 1..=kv {
+            if self.time_up() {
+                break;
+            }
+            let (alt, cands) = self.optface_alt("for the first round", mode, sd as u64, cap);
+            if cands < min_c {
+                if self.params.verbose {
+                    eprintln!("MIP: optface first: {cands} candidates (< {min_c}); not dual degenerate enough");
+                }
+                break;
+            }
+            let Some(alt) = alt else { continue };
+            let keep = std::mem::replace(&mut self.lp, alt);
+            let dl = Instant::now() + Duration::from_secs_f64(cap);
+            let (hist, _, end) = self.probe_cut_mode(false, 1, dl, &|_, _, _| false, true);
+            self.lp = keep;
+            let g = hist.last().map_or(0.0, |h| h.0);
+            let mut new = 0usize;
+            if let Some(e) = end {
+                for (c, l, u) in e.rows {
+                    if seen.insert(key(&c, u)) {
+                        rows.push((c, l, u));
+                        new += 1;
+                    }
+                }
+            }
+            gains.push(format!("{g:.3e} ({new} new)"));
+        }
+        if rows.is_empty() {
+            return;
+        }
+        for (c, _, r) in &rows {
+            self.add_to_pool(c, *r);
+        }
+        self.add_cut_rows(&rows);
+        let it0 = self.lp.total_iterations();
+        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        if self.params.verbose {
+            eprintln!(
+                "MIP: optface first: {} cuts from {} moved vertices (gain at each vertex alone [{}]), LP {st:?} {} iters, obj {obj0:.10e} -> {:.10e} ({:.2}s)",
+                rows.len(),
+                gains.len(),
+                gains.join(", "),
+                self.lp.total_iterations() - it0,
+                self.lp.objective() + self.p.offset,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+    }
+
     /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS`: 裏のカットの写しそれぞれの結果をまとめる。目的値が最も高い写しの行を使い、値に `u` を
     /// 含めば、今の LP の値を上げた他の写しの行も重複を除いて足す (足すときは返された基底は使わない)。`main` は最初の写し (主の
     /// 基底か、1 本だけなら別の基底から始めたもの)、`extra` は別の基底から始めた写し。
@@ -4852,7 +4936,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose {
             for (i, r, _) in &all {
                 match r {
-                    Some((rows, obj, rounds)) => eprintln!("MIP: optface parcuts: copy {i}: {rounds} rounds, {} cut rows, obj {obj:.10e} (main LP {cur:.10e})", rows.len()),
+                    Some((rows, obj, rounds)) => {
+                        let j = if *i == 0 { &main.job } else { &extra[*i - 1].job };
+                        eprintln!(
+                            "MIP: optface parcuts: copy {i}: {rounds} rounds, {} cut rows, obj {obj:.10e} (main LP {cur:.10e}), shared cuts in {} chosen {}",
+                            rows.len(),
+                            j.share_in.load(std::sync::atomic::Ordering::Relaxed),
+                            j.share_used.load(std::sync::atomic::Ordering::Relaxed)
+                        )
+                    }
                     None => eprintln!("MIP: optface parcuts: copy {i}: no result"),
                 }
             }
@@ -6794,6 +6886,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let l = both_loser.take().unwrap();
                     self.root_both_vertex(l, &x_root0, root_basis0.as_deref(), root_obj, root_iters, &mut root_cut_secs, true);
                 }
+                // 試作 `ENOMOTO_MIP_OPTFACE_FIRST` (既定では使わない、analysis/optface_cuts_20261105.md): ループの前に、最適面の上の別の頂点 k 個で
+                // 1 ラウンドずつ分離したカットを集めて足す ([`Self::optface_first`])
+                if let Some(v) = env_str!("ENOMOTO_MIP_OPTFACE_FIRST").filter(|_| !self.params.submip && self.snap.is_none() && self.params.restarts == 0) {
+                    if !self.time_up() {
+                        self.optface_first(v);
+                    }
+                }
                 // 試作 `ENOMOTO_MIP_OPTFACE_MOVE` の `p` (既定では使わない、analysis/optface_cuts_20261105.md): ループの前に、最適面の上の
                 // 別の頂点 (軸の入れ替えで作る) からの比べで伸びるならそこからループを始める
                 if let Some(v) = env_str!("ENOMOTO_MIP_OPTFACE_MOVE").filter(|v| v.contains('p') && !self.params.submip && self.snap.is_none() && self.params.restarts == 0) {
@@ -7093,8 +7192,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let per = (threads / plan.len()).max(1);
                 let n_plan = plan.len();
+                let share = (n_plan > 1 && env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('s'))).then(|| std::sync::Arc::new(CutShare::default()));
                 for (ci, (cb, cx, is_alt)) in plan.into_iter().enumerate() {
                     let job_c = if ci == 0 { job.clone() } else { std::sync::Arc::new(CutJob::new(mode == "heavy", determ, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z), self.lp.objective() + self.p.offset)) };
+                    if let Some(sh) = &share {
+                        *job_c.share.lock().unwrap() = Some((sh.clone(), ci));
+                    }
                     let j2 = job_c.clone();
                     let j3 = job_c.clone();
                     let snap = snap.clone();

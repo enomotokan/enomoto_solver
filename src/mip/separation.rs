@@ -107,7 +107,7 @@ fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
 
 /// `ENOMOTO_MIP_CUTSEL_PROBE_KEEP` の比べの片側の終わりの状態 (足した行・LP の状態・分離器の状態・回ったラウンド数)
 pub(super) struct ProbeEnd<S> {
-    rows: Vec<(Vec<(usize, f64)>, f64, f64)>,
+    pub(super) rows: Vec<(Vec<(usize, f64)>, f64, f64)>,
     lp: S,
     rng: u64,
     tab: (std::collections::HashMap<usize, u64>, u8, (u64, u64), u64, u64),
@@ -1138,6 +1138,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut obj_cont: Vec<f64> = Vec::new();
         // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` の裏のカットのスレッドでは、第 2 段階の時間の上限 (CPU 時間) で止めない (手間の上限で止まる)
         let determ_job = job.as_ref().is_some_and(|j| j.determ.is_some());
+        // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `s`: 他の写しのカットの読んだ位置と、このラウンドで受け取ったカットの印
+        let mut share_cursor = 0usize;
+        let mut share_keys: std::collections::HashSet<Vec<(usize, u64)>> = std::collections::HashSet::new();
         let mut cont_stop = false;
         if let Some((w, _, _)) = self.cut_cont {
             work_cap = w as f64 / root_iters.max(1) as f64;
@@ -1535,6 +1538,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
                 }
             }
+            // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `s`: 他の写し (別の頂点から始めた) が作ったカットを `ENOMOTO_T_MIP_OPTFACE_SHARE_EVERY`
+            // (既定 2) ラウンドごとに読み、今の LP の点で破られているものを効き目の大きい順に `ENOMOTO_T_MIP_OPTFACE_SHARE_MAX` (既定 20) 本まで
+            // 候補に足す (LP にそのまま入れず、既定の選び方 (効き目・平行度・本数の上限) に任せる)
+            share_keys.clear();
+            if let Some((sh, id)) = job.as_ref().and_then(|j| j.share.lock().unwrap().clone()) {
+                let every = tunable!("ENOMOTO_T_MIP_OPTFACE_SHARE_EVERY", 2usize, usize).max(1);
+                if round > 0 && round % every == 0 {
+                    let lim = tunable!("ENOMOTO_T_MIP_OPTFACE_SHARE_MAX", 20usize, usize);
+                    let mut got: Vec<(f64, Vec<(usize, f64)>, f64)> = Vec::new();
+                    {
+                        let v = sh.cuts.lock().unwrap();
+                        for (from, c, r) in v[share_cursor..].iter() {
+                            if *from == id {
+                                continue;
+                            }
+                            let act: f64 = c.iter().map(|&(j, a)| a * x[j]).sum();
+                            let norm = c.iter().map(|&(_, a)| a * a).sum::<f64>().sqrt();
+                            let eff = (act - r) / norm.max(1e-300);
+                            if act - r > 1e-6 * (1.0 + r.abs()) && eff >= 1e-5 {
+                                got.push((eff, c.clone(), *r));
+                            }
+                        }
+                        share_cursor = v.len();
+                    }
+                    got.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    got.truncate(lim);
+                    if let Some(j) = &job {
+                        j.share_in.fetch_add(got.len(), std::sync::atomic::Ordering::Relaxed);
+                    }
+                    for (eff, c, r) in got {
+                        share_keys.insert(c.iter().map(|&(j, a)| (j, a.to_bits())).collect());
+                        cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
+                    }
+                }
+            }
             let ncands = cands.len() + face_cands.len();
             if ncands == 0 {
                 if self.params.verbose && job.is_some() {
@@ -1696,6 +1734,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
             total_added += rows.len();
+            // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `s`: 選んだカットを他の写しに渡す (受け取ったカットのうち選ばれた数も数える)
+            if let Some((sh, id)) = job.as_ref().and_then(|j| j.share.lock().unwrap().clone()) {
+                let mut used = 0usize;
+                let mut v = sh.cuts.lock().unwrap();
+                for (c, _, r) in &rows {
+                    let k: Vec<(usize, u64)> = c.iter().map(|&(j, a)| (j, a.to_bits())).collect();
+                    if share_keys.contains(&k) {
+                        used += 1;
+                    } else {
+                        v.push((id, c.clone(), *r));
+                    }
+                }
+                if let Some(j) = &job {
+                    j.share_used.fetch_add(used, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             // カットプールに残す (ノードで違反していれば LP に戻す。候補として入れ済みなら重複は除かれる)
             if !self.params.submip {
                 for (c, _, r) in &rows {
