@@ -10307,3 +10307,14 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 
 - 既定にした: `ENOMOTO_MIP_BOUND_STEP` (戻し方 `=0`)。報告だけの変更 (探索は変えない)。supportcase18 で 47.187 → 48 (HiGHS と同じ)、58 問・fuzz で
   最適値を越える下界・食い違い 0。記録は `analysis/bound_step_default_20261104.md`。
+
+## 2026-11-05: 誤答の芽 2 件を直す (POSTSOLVE_CLIP・CONFLICT_INT_TOL を既定に、採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて戻すには `ENOMOTO_MIP_POSTSOLVE_CLIP=0 ENOMOTO_MIP_CONFLICT_INT_TOL=0`):
+  `ENOMOTO_MIP_POSTSOLVE_CLIP` (後処理した解を元の問題の境界に収めてから確かめる)、`ENOMOTO_MIP_CONFLICT_INT_TOL` (HiGHS 式の衝突解析で
+  整数列の境界の変更を説明するときの「足りるか」の許容誤差を、丸めの余裕 |a|·1e-6 の 1/10 以下に抑える)。
+- 根拠: binkar10_1 で許容誤差の中で境界を越えた解の後処理が費用 1e6 の列に移り、最適値より 0.012 小さい値を「最適」と返していた
+  (縮約後の解をずらす診断で直す前 25/25 誤答、直した後 0/25)。traininstance6 では右辺の大きい行で説明の許容誤差 (1e-9 (1+|必要量|)) が
+  余裕 1e-6 を越え、局所的な変更を落とした成り立たない衝突で最適解を切っていた (prr で「最適」28420。既知解つきの診断で誤った衝突 3/3 回 → 0/2 回)。
+  58 問・60 秒で害なし (15.76 秒・45 問 対 直す前 16.46 秒・44 問)。余裕を 1/2 にする形 (`=h`) は neos5・physiciansched6-2 が遅く採らなかった。
+- 記録は `analysis/wrongans_20261105.md`。

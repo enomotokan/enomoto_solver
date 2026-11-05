@@ -1258,11 +1258,13 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             }
             let mut ok = true;
             if let Some(xr) = r.x.take() {
+                let xr = debug_postsolve_noise(&prob, xr);
                 let mut x = xr.clone();
                 for step in postsolve.iter().rev() {
                     step.apply(&mut x);
                 }
-                let x = crate::presolve::scaling::unscale_x(&scaling, &x);
+                let mut x = crate::presolve::scaling::unscale_x(&scaling, &x);
+                postsolve_clip(p, &mut x, params.verbose);
                 if p.is_feasible(&x, 1e-6) {
                     let z_orig = p.objective(&x);
                     let shift = z_orig - prob.objective(&xr);
@@ -1347,6 +1349,54 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             r
         }
     }
+}
+
+/// 後処理した解の列を元の問題の境界に収める (`ENOMOTO_MIP_POSTSOLVE_CLIP`、2026-11-05 から既定、`=0` で以前の形)。
+/// 代入で消した列の値は後処理で行から計算し直す ([`crate::presolve::PostsolveStep::Sub`]) ので、縮約後の解が行を許容誤差の中で
+/// わずかに破る (1e-8 程度) と、境界の外 (例えば下限 0 の列が -1.2e-8) になる。費用の大きい列 (binkar10_1 の費用 1e6 の罰金の列)
+/// ではそれだけで目的値が 0.012 下がり、そのずれを下界にも足すので、最適値より小さい値を「最適」と返していた
+/// (analysis/wrongans_20261105.md)。収めた後で元の問題の許容誤差 (1e-6) を破るなら収めない (今まで通りの解で確かめと修復に回す)
+fn postsolve_clip(p: &MipProblem, x: &mut [f64], verbose: bool) {
+    if env_def!("ENOMOTO_MIP_POSTSOLVE_CLIP", "1").is_none() {
+        return;
+    }
+    let mut y = x.to_vec();
+    let mut moved = 0usize;
+    let mut dz = 0.0f64;
+    for j in 0..p.n {
+        let v = y[j].max(p.col_lo[j]).min(p.col_up[j]);
+        if v != y[j] && v.is_finite() {
+            dz += p.cost[j] * (v - y[j]);
+            y[j] = v;
+            moved += 1;
+        }
+    }
+    if moved == 0 {
+        return;
+    }
+    let ok = p.is_feasible(&y, 1e-6) || !p.is_feasible(x, 1e-6);
+    if verbose && (dz.abs() > 1e-9 * p.objective(x).abs().max(1.0) || env_str!("ENOMOTO_MIP_DEBUG_POSTSOLVE").is_some()) {
+        eprintln!("MIP: postsolve clip: {moved} columns moved into their bounds, objective change {dz:e} ({})", if ok { "used" } else { "not used: infeasible after clipping" });
+    }
+    if ok {
+        x.copy_from_slice(&y);
+    }
+}
+
+/// 診断用 (`ENOMOTO_MIP_DEBUG_POSTSOLVE_NOISE=幅`): 後処理の前に、縮約後の解の連続列へ 幅·(1+|x|) の決まった雑音を足す
+/// (境界の上の列は境界の外へ、中の列は列の番号で決まる ± の向き)。
+/// 縮約後の解が行をわずかに破るときに後処理がどう振る舞うかを再現する (binkar10_1 の誤答の確かめ用)
+fn debug_postsolve_noise(prob: &MipProblem, mut x: Vec<f64>) -> Vec<f64> {
+    let Some(w) = env_str!("ENOMOTO_MIP_DEBUG_POSTSOLVE_NOISE").and_then(|v| v.parse::<f64>().ok()) else { return x };
+    for j in 0..prob.n {
+        if !prob.is_int[j] {
+            let sgn = if (j.wrapping_mul(2654435761) >> 7) % 2 == 0 { 1.0 } else { -1.0 };
+            // 境界の上の列は外へ (許容誤差の中で境界を越える解を真似る)、中の列は ±
+            let sgn = if x[j] <= prob.col_lo[j] { -1.0 } else if x[j] >= prob.col_up[j] { 1.0 } else { sgn };
+            x[j] += sgn * w * (1.0 + x[j].abs());
+        }
+    }
+    x
 }
 
 type Mem3Ps = std::rc::Rc<(Vec<crate::presolve::PostsolveStep>, crate::presolve::scaling::Scaling)>;
@@ -5686,6 +5736,28 @@ fn merge_parallel_rows(rows: &mut Vec<Vec<(usize, f64)>>, row_lo: &mut Vec<f64>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 後処理した解を境界に収める ([`postsolve_clip`]): 費用の大きい列が許容誤差の中で下限 0 を下回る (-1.2e-8) と目的値が
+    /// 0.012 下がる (binkar10_1)。収めると目的値は正しい値に戻る。収めると行を許容誤差を越えて破る解は収めない
+    #[test]
+    fn postsolve_clip_moves_columns_into_bounds() {
+        // x0 + x1 = 1、x1 は費用 1e6 の罰金の列 (下限 0)
+        let p = MipProblem::from_rows(vec![0.0, 0.0], vec![1.0, f64::INFINITY], vec![1.0, 1e6], 0.0, 1.0, vec![false, false], vec![vec![(0, 1.0), (1, 1.0)]], vec![1.0], vec![1.0]);
+        let mut x = vec![1.0 + 1.2e-8, -1.2e-8];
+        assert!(p.is_feasible(&x, 1e-6));
+        assert!(p.objective(&x) < 1.0 - 0.01);
+        postsolve_clip(&p, &mut x, false);
+        assert_eq!(x, vec![1.0, 0.0]);
+        assert!((p.objective(&x) - 1.0).abs() < 1e-12);
+        // 収めると行が 1.5e-6 破れる (許容誤差 1e-6 を越える): 収めない
+        let p2 = MipProblem::from_rows(vec![0.0, 0.0], vec![2.0, f64::INFINITY], vec![1.0, 1e6], 0.0, 1.0, vec![false, false], vec![vec![(0, 1.0), (1, 1.0)]], vec![1.0], vec![1.0]);
+        let mut y = vec![1.0 + 1.5e-6, -5e-7];
+        assert!(p2.is_feasible(&y, 1e-6));
+        assert!(!p2.is_feasible(&[1.0 + 1.5e-6, 0.0], 1e-6));
+        let y0 = y.clone();
+        postsolve_clip(&p2, &mut y, false);
+        assert_eq!(y, y0);
+    }
 
     /// クリーク行の拡張: `x0 + x1 <= 1` に、x0・x1 の両方と衝突する x2 (`x0 + x2 <= 1`・`x1 + x2 <= 1`) を加え、
     /// 拡張した行に含まれる 2 本の行は消す。x3 は x1 とだけ衝突するので加えない。否定の文字 (`x4 - x5 <= 0` は

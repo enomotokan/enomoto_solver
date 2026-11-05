@@ -14140,10 +14140,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 診断用 (デバッグ解): 作った衝突 (リテラルの組、全部が同時には成り立たない) がデバッグ解を切っていれば知らせる。
+    /// 衝突を作ったときの定義域がデバッグ解を含むか (含めば矛盾そのものが誤り、含まなければ説明の一般化が誤り) も出す。
+    fn dbg_check_conflict(&self, lits: &[(usize, bool, f64)], tag: &str) {
+        if !self.dbg_on || self.importing {
+            return;
+        }
+        DEBUG_SOL.with(|d| {
+            let Some(x) = d.borrow().clone() else { return };
+            if self.p.objective(&x) >= self.prune_limit() - 1e-6 {
+                return;
+            }
+            let all = lits.iter().all(|&(j, upper, v)| if upper { x[j] <= v + 1e-6 } else { x[j] >= v - 1e-6 });
+            if all {
+                let terms: Vec<String> = lits.iter().take(12).map(|&(j, upper, v)| format!("x{j}{}{v}[{}]", if upper { "<=" } else { ">=" }, x[j])).collect();
+                eprintln!(
+                    "MIP_DEBUG_SOL: conflict ({tag}) cuts off the debug solution at node {} thread {} ({}): domain contains the debug solution: {}, len {}, stack {}: {}",
+                    self.nodes,
+                    self.pool_tid,
+                    if self.snap.is_some() { "helper thread" } else { "main thread" },
+                    self.dbg_contains(),
+                    lits.len(),
+                    self.dom.stack_len(),
+                    terms.join(" ")
+                );
+            }
+        });
+    }
+
     fn add_lit_conflict(&mut self, lits: &[(usize, bool, f64)]) -> bool {
         if env_str!("ENOMOTO_MIP_NO_LIT_CONFLICTS").is_some() {
             return false;
         }
+        self.dbg_check_conflict(lits, "lits");
         // 大域的に成り立っているリテラルは除く (どのノードでも成り立つ)。全部そうなら使わない
         let gl = &self.dom.global_lo;
         let gu = &self.dom.global_up;
@@ -14210,6 +14239,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     fn add_conflict_lits(&mut self, lits: &[(usize, bool, f64)]) -> bool {
         let p = self.p;
+        if lits.len() <= tunable!("ENOMOTO_T_MIP_CONFLICT_ROW_MAXLEN", 50usize, usize) {
+            self.dbg_check_conflict(lits, "row");
+        }
         // 行にできなくても、衝突に現れた列は分枝の衝突スコアに数える
         self.pc.add_conflict(lits);
         // 長い衝突は行 (証明のプール、活動量で伝播) にせずリテラルのまま持つ

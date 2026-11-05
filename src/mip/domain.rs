@@ -782,6 +782,43 @@ impl Domain {
         out
     }
 
+    /// 診断用 (デバッグ解、`ENOMOTO_MIP_DEBUG_SOL`): 衝突解析の説明 1 段 (`sum_{terms} a_j x_j >= m_req` を位置 `before` より前の
+    /// 変更の組 `chosen` と大域的な境界で示す) をデバッグ解 x で確かめる。`chosen` のリテラルが全部 x で成り立つのに
+    /// `sum a_j x_j < m_req` なら、その段は x を誤って切る。そのとき、x が外れている大域的な境界 (使った `glo`・`gup`) も出す
+    #[allow(clippy::too_many_arguments)]
+    fn dbg_check_explain(&self, p: &MipProblem, terms: &[(usize, f64)], m_req: f64, before: usize, skip: usize, chosen: &[usize], glo: &dyn Fn(usize) -> f64, gup: &dyn Fn(usize) -> f64) {
+        let Some(x) = &self.dbg_sol else { return };
+        let holds = |k: usize| {
+            let c = &self.stack[k];
+            if c.upper { x[c.col] <= c.new + 1e-6 } else { x[c.col] >= c.new - 1e-6 }
+        };
+        if !chosen.iter().all(|&k| holds(k)) {
+            return;
+        }
+        let act: f64 = terms.iter().filter(|&&(j, _)| j != skip).map(|&(j, a)| a * x[j]).sum();
+        if act >= m_req - 1e-6 * (1.0 + m_req.abs()) {
+            return;
+        }
+        let mut bad: Vec<String> = Vec::new();
+        for &(j, a) in terms {
+            if j == skip || a == 0.0 {
+                continue;
+            }
+            let g = if a < 0.0 { gup(j) } else { glo(j) };
+            let out = if a < 0.0 { x[j] > g + 1e-6 } else { x[j] < g - 1e-6 };
+            if out {
+                bad.push(format!("x{j}[{}] {} {g} (global [{}, {}])", x[j], if a < 0.0 { "upper" } else { "lower" }, self.global_lo[j], self.global_up[j]));
+            }
+        }
+        let skip_s = if skip == usize::MAX { "start".to_string() } else { format!("for x{skip}") };
+        eprintln!(
+            "MIP_DEBUG_SOL: conflict explanation ({skip_s}, before {before}) is wrong at the debug solution: sum a x = {act:.10e} < required {m_req:.10e}, chosen {} changes (all hold), len {}; columns outside the bounds used as global: {}",
+            chosen.len(),
+            terms.len(),
+            if bad.is_empty() { "none".to_string() } else { bad.join(" ") }
+        );
+    }
+
     /// HiGHS 式の衝突解析 (`HighsDomain::ConflictSet::conflictAnalysis`)。矛盾 (`start`) を、
     /// (1) 必要な分だけの境界の変更で説明し (`resolveLinearLeq`: 大域的な境界からの寄与の大きい変更から、矛盾を示すのに
     /// 足りるまで選ぶ)、(2) 分枝の深さの段ごとに、その段の変更が 1 つ (UIP) になるまで理由で置き換えて衝突を作り
@@ -825,7 +862,13 @@ impl Domain {
         let budget = std::cell::Cell::new(tunable!("ENOMOTO_T_MIP_CONFLICT_WORK", 200_000usize, usize));
         // `sum_j a_j x_j >= m_req` (x_j は a_j > 0 なら下限、a_j < 0 なら上限) を示す、位置 `before` より前の変更の組。
         // 大域的な境界で足りない分を、寄与の大きい変更から選ぶ。足りなければ関わる変更を全部返す (従来の説明)
-        let explain = |terms: &mut dyn Iterator<Item = (usize, f64)>, m_req: f64, before: usize, skip: usize| -> Option<Vec<usize>> {
+        let explain = |terms: &mut dyn Iterator<Item = (usize, f64)>, m_req: f64, before: usize, skip: usize, tol_cap: f64| -> Option<Vec<usize>> {
+            // 診断用 (デバッグ解): 項を写しておき、説明の後でデバッグ解で確かめる ([`Self::dbg_check_explain`])
+            let dbg_terms: Option<Vec<(usize, f64)>> = self.dbg_sol.as_ref().map(|_| (&mut *terms).collect());
+            let mut dbg_it = dbg_terms.iter().flatten().copied();
+            let terms: &mut dyn Iterator<Item = (usize, f64)> = if dbg_terms.is_some() { &mut dbg_it } else { terms };
+            let proved = std::cell::Cell::new(false);
+            let res = (|| -> Option<Vec<usize>> {
             let mut base = 0.0f64;
             let mut cands: Vec<(f64, usize)> = Vec::new();
             let (lo_n, hi_n) = terms.size_hint();
@@ -868,7 +911,7 @@ impl Domain {
             if !base.is_finite() {
                 return Some(all);
             }
-            let tol = 1e-9 * (1.0 + m_req.abs());
+            let tol = (1e-9 * (1.0 + m_req.abs())).min(tol_cap);
             if base < m_req - tol {
                 cands.sort_by(|x, y| y.0.total_cmp(&x.0));
                 for (d, k) in cands {
@@ -879,7 +922,18 @@ impl Domain {
                     }
                 }
             }
-            if base >= m_req - tol { Some(chosen) } else { Some(all) }
+            if base >= m_req - tol {
+                proved.set(true);
+                Some(chosen)
+            } else {
+                Some(all)
+            }
+            })();
+            // 足りないときの「関わる変更を全部」は必要量を示さない (伝播したときの組そのもの) ので確かめない
+            if let (Some(t), Some(r), true) = (&dbg_terms, &res, proved.get()) {
+                self.dbg_check_explain(p, t, m_req, before, skip, r, &glo, &gup);
+            }
+            res
         };
         // 伝播による変更 `k` の説明
         let explain_change = |k: usize| -> Option<Vec<usize>> {
@@ -890,28 +944,43 @@ impl Domain {
             let r = c.reason as usize;
             let a_c = p.rows[r].iter().find(|&&(j, _)| j == c.col).map(|&(_, a)| a)?;
             let v = c.new;
-            // 整数列の境界は丸めてある: 上限 v は (rhs - rest)/a < v + 1 - FEASTOL から、下限 v は > v - 1 + FEASTOL から
-            let w = if p.is_int[c.col] { if c.upper { v + 1.0 - FEASTOL } else { v - 1.0 + FEASTOL } } else { v };
+            // 整数列の境界は丸めてある: 上限 v は (rhs - rest)/a < v + 1 - FEASTOL から、下限 v は > v - 1 + FEASTOL から。
+            // `ENOMOTO_MIP_CONFLICT_INT_TOL` (2026-11-05 から既定、`=0` で以前の形): 以前の形では、説明が足りるかの判定の許容誤差
+            // 1e-9 (1 + |必要量|) が、右辺の大きい行 (|必要量| > 1000) で余裕 |a| FEASTOL を越え、x27 >= x1 (x1 >= 20 は大域的、x1 >= 21 は
+            // 局所的) から導いた x27 >= 21 を「x1 >= 20 で足りる」と説明して局所的な変更を落とし、成り立たない衝突を作っていた
+            // (traininstance6 で最適解を切った。analysis/wrongans_20261105.md)。既定 (`t`) では整数列の説明の許容誤差を余裕の 1/10
+            // (0.1 |a| FEASTOL) 以下に抑える。`h` は余裕を 1/2 にする形 (許容誤差はそのまま。1/2 に届かない伝播の説明が関わる変更全部に
+            // なり、neos5・physiciansched6-2 が遅くなった)
+            let mode = conflict_int_tol();
+            let int = p.is_int[c.col];
+            let w = if int && mode == b'h' {
+                if c.upper { v + 0.5 } else { v - 0.5 }
+            } else if int {
+                if c.upper { v + 1.0 - FEASTOL } else { v - 1.0 + FEASTOL }
+            } else {
+                v
+            };
+            let tol_cap = if int && mode == b't' { 0.1 * a_c.abs() * FEASTOL } else { f64::INFINITY };
             let min_side = (a_c > 0.0) == c.upper;
             if min_side {
                 let u = p.row_up[r];
-                explain(&mut p.rows[r].iter().copied(), u - a_c * w, k, c.col)
+                explain(&mut p.rows[r].iter().copied(), u - a_c * w, k, c.col, tol_cap)
             } else {
                 let l = p.row_lo[r];
-                explain(&mut p.rows[r].iter().map(|&(j, a)| (j, -a)), -l + a_c * w, k, c.col)
+                explain(&mut p.rows[r].iter().map(|&(j, a)| (j, -a)), -l + a_c * w, k, c.col, tol_cap)
             }
         };
         let init: Vec<usize> = match start {
             ConflictStart::Src(ConflictSrc::Row(i, true)) => {
                 let u = p.row_up[i];
-                match explain(&mut p.rows[i].iter().copied(), u + row_tol(u, u), end, usize::MAX) {
+                match explain(&mut p.rows[i].iter().copied(), u + row_tol(u, u), end, usize::MAX, f64::INFINITY) {
                     Some(v) => v,
                     None => return Vec::new(),
                 }
             }
             ConflictStart::Src(ConflictSrc::Row(i, false)) => {
                 let l = p.row_lo[i];
-                match explain(&mut p.rows[i].iter().map(|&(j, a)| (j, -a)), -l + row_tol(l, l), end, usize::MAX) {
+                match explain(&mut p.rows[i].iter().map(|&(j, a)| (j, -a)), -l + row_tol(l, l), end, usize::MAX, f64::INFINITY) {
                     Some(v) => v,
                     None => return Vec::new(),
                 }
@@ -919,7 +988,7 @@ impl Domain {
             ConflictStart::Src(ConflictSrc::Col(j)) => latest_before(j, false, end).into_iter().chain(latest_before(j, true, end)).collect(),
             ConflictStart::Proof(coefs, rhs) => {
                 // 証明 `sum coefs x <= rhs` が破れている: 最小活動量 > rhs
-                match explain(&mut coefs.iter().copied(), rhs + 1e-6 * (1.0 + rhs.abs()), end, usize::MAX) {
+                match explain(&mut coefs.iter().copied(), rhs + 1e-6 * (1.0 + rhs.abs()), end, usize::MAX, f64::INFINITY) {
                     Some(v) => v,
                     None => return Vec::new(),
                 }
@@ -927,6 +996,21 @@ impl Domain {
         };
         if let Some(b) = bumps.as_deref_mut() {
             b.extend(init.iter().map(|&k| (self.stack[k].col, self.stack[k].upper)));
+        }
+        // 診断用 (デバッグ解): 解析の手順の記録 (デバッグ解を切る衝突が出たら出す)
+        let trace: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let desc = |k: usize| {
+            let c = &self.stack[k];
+            let h = self.dbg_sol.as_ref().map(|x| if c.upper { x[c.col] <= c.new + 1e-6 } else { x[c.col] >= c.new - 1e-6 });
+            format!("#{k}:x{}{}{}(r{}{})", c.col, if c.upper { "<=" } else { ">=" }, c.new, c.reason, match h { Some(true) => "", Some(false) => ",X", None => "" })
+        };
+        if self.dbg_sol.is_some() {
+            let kind = match &start {
+                ConflictStart::Src(ConflictSrc::Row(i, up)) => format!("row {i} {}", if *up { "up" } else { "lo" }),
+                ConflictStart::Src(ConflictSrc::Col(j)) => format!("col {j}"),
+                ConflictStart::Proof(c, r) => format!("proof len {} rhs {r}", c.len()),
+            };
+            trace.borrow_mut().push(format!("start {kind} decisions {} end {end}: {}", dec.len(), init.iter().map(|&k| desc(k)).collect::<Vec<_>>().join(" ")));
         }
         if init.is_empty() || init.len() > max_len {
             return Vec::new();
@@ -948,7 +1032,7 @@ impl Domain {
         let mut out: Vec<Vec<(usize, bool, f64)>> = Vec::new();
         let mut lev = dec.len();
         let mut done = 0usize;
-        while lev >= 1 {
+        'outer: while lev >= 1 {
             let lo = dec[lev - 1];
             let hi = if lev < dec.len() { dec[lev] } else { end };
             // この段の変更が 1 つになるまで、最も新しい伝播による変更を理由で置き換える
@@ -956,10 +1040,13 @@ impl Domain {
             let mut cnt = set.range(lo..hi).count();
             while cnt > 1 {
                 if set.len() > cap {
-                    return out;
+                    break 'outer;
                 }
                 let Some(&k) = set.range(lo..hi).rev().find(|&&k| self.stack[k].reason >= 0) else { break };
-                let Some(ex) = explain_change(k) else { return out };
+                let Some(ex) = explain_change(k) else { break 'outer };
+                if self.dbg_sol.is_some() {
+                    trace.borrow_mut().push(format!("lev {lev} resolve {} <- {}", desc(k), ex.iter().map(|&e| desc(e)).collect::<Vec<_>>().join(" ")));
+                }
                 set.remove(&k);
                 cnt -= 1;
                 for e in ex {
@@ -1025,6 +1112,9 @@ impl Domain {
                     };
                     lits.retain(|&(j, up, _)| !(j == c.col && up != c.upper));
                     lits.push((c.col, !c.upper, neg));
+                    if self.dbg_sol.is_some() {
+                        trace.borrow_mut().push(format!("lev {lev} reconv UIP {} from {}", desc(u), r.iter().map(|&e| desc(e)).collect::<Vec<_>>().join(" ")));
+                    }
                     if lits.len() <= max_len {
                         out.push(lits);
                     }
@@ -1036,6 +1126,16 @@ impl Domain {
                 break;
             }
             lev -= 1;
+        }
+        if let Some(x) = &self.dbg_sol {
+            for (n, c) in out.iter().enumerate() {
+                if c.iter().all(|&(j, up, v)| if up { x[j] <= v + 1e-6 } else { x[j] >= v - 1e-6 }) {
+                    eprintln!("MIP_DEBUG_SOL: analyze_multi conflict {n} of {} cuts off the debug solution: {:?}", out.len(), c);
+                    for t in trace.borrow().iter().take(40) {
+                        eprintln!("MIP_DEBUG_SOL:   trace {t}");
+                    }
+                }
+            }
         }
         out
     }
@@ -1144,6 +1244,17 @@ fn bound_tol(v: f64) -> f64 {
 }
 
 #[inline]
+/// `ENOMOTO_MIP_CONFLICT_INT_TOL` (2026-11-05 から既定 `t`、`=0` で以前の形): HiGHS 式の衝突解析で整数列の境界の変更を説明するとき、
+/// 足りるかの判定の許容誤差を丸めの余裕の 1/10 以下に抑える (`t`)、または余裕を 1/2 にする (`h`) ([`Domain::analyze_multi_bumps`])。
+/// 返すのは `t`・`h`・0 (以前の形)
+fn conflict_int_tol() -> u8 {
+    match env_def!("ENOMOTO_MIP_CONFLICT_INT_TOL", "t") {
+        None => 0,
+        Some(v) if v.starts_with('h') => b'h',
+        Some(_) => b't',
+    }
+}
+
 fn row_tol(rhs: f64, act: f64) -> f64 {
     FEASTOL * (1.0 + rhs.abs().max(act.abs())).min(1e6)
 }
