@@ -1277,6 +1277,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let round = round_ctr;
             round_ctr += 1;
+            // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `m`: 裏のカットの写しは決まったラウンド数だけ回して止まる (主がまとめて続ける)
+            if let Some(cap) = job.as_ref().map(|j| j.round_cap.load(std::sync::atomic::Ordering::Relaxed)).filter(|&c| c > 0) {
+                if round >= cap {
+                    if self.params.verbose {
+                        eprintln!("MIP: cut round {round}: background cuts: round cap {cap} reached (OPTFACE_PARCUTS m); stop");
+                    }
+                    break;
+                }
+            }
             // `ENOMOTO_MIP_CUTSEL_PROBE` (既定 `rate`、`0` で外す。計測 23 で既定化): 外側の最初の根 (再スタートの前) の 0 ラウンド目の始め (時間の上限の判定の前)
             // で、既定の選び方 (50 本) と POOL の選び方 (HiGHS の点数、1000 本・平行度 0.1) のそれぞれで k ラウンド回して下界の伸びを比べ
             // ([`Solver::probe_cut_mode`]、終わったら LP と分離器の状態を戻す)、伸びの大きい方を以後の回し方 (時間の上限・本数・プールの戻し・

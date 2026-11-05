@@ -3221,6 +3221,8 @@ pub(super) struct CutJob {
     pub(super) share: std::sync::Mutex<Option<(std::sync::Arc<CutShare>, usize)>>,
     pub(super) share_in: std::sync::atomic::AtomicUsize,
     pub(super) share_used: std::sync::atomic::AtomicUsize,
+    /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `m`: 写しのカットのループをこのラウンド数で止める (0 なら止めない)
+    pub(super) round_cap: std::sync::atomic::AtomicUsize,
     /// 止めの合図 (主のヒューリスティクスが終わった)
     pub(super) stop: std::sync::atomic::AtomicBool,
     /// 重い設定 (停滞したら HiGHS のスコアの第 2 段階に入る、停滞の判定を緩める)
@@ -3433,6 +3435,7 @@ impl CutJob {
             share: std::sync::Mutex::new(None),
             share_in: std::sync::atomic::AtomicUsize::new(0),
             share_used: std::sync::atomic::AtomicUsize::new(0),
+            round_cap: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -4964,7 +4967,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut seen: std::collections::HashSet<Vec<i64>> = rows.iter().map(|(c, l, u)| key(c, *l, *u)).collect();
             for (_, r, _) in &all {
                 if let Some((rs, o, _)) = r {
-                    if *o > cur + 1e-9 * cur.abs().max(1.0) {
+                    if *o > cur + 1e-9 * cur.abs().max(1.0) || env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('m')) {
                         for (c, l, u) in rs {
                             if seen.insert(key(c, *l, *u)) {
                                 rows.push((c.clone(), *l, *u));
@@ -7198,6 +7201,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if let Some(sh) = &share {
                         *job_c.share.lock().unwrap() = Some((sh.clone(), ci));
                     }
+                    // `m`: 写しは `ENOMOTO_T_MIP_OPTFACE_MERGE_ROUNDS` (既定 5) ラウンドだけ独立に分離して止まる
+                    if n_plan > 1 && env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('m')) {
+                        job_c.round_cap.store(tunable!("ENOMOTO_T_MIP_OPTFACE_MERGE_ROUNDS", 5usize, usize), std::sync::atomic::Ordering::Relaxed);
+                    }
                     let j2 = job_c.clone();
                     let j3 = job_c.clone();
                     let snap = snap.clone();
@@ -7893,7 +7900,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS`: 別の基底から始めた写しも、主の写しの待ちの `ENOMOTO_T_MIP_OPTFACE_PAR_WAIT` (既定 0.5) 倍まで
             // 待ってから止め、結果をまとめる
             if !bg_extra.is_empty() {
-                let cap = tunable!("ENOMOTO_T_MIP_OPTFACE_PAR_WAIT", 0.5, f64) * t0.elapsed().as_secs_f64();
+                let mut cap = tunable!("ENOMOTO_T_MIP_OPTFACE_PAR_WAIT", 0.5, f64) * t0.elapsed().as_secs_f64();
+                // `m`: 写しはラウンド数で自分で止まるので、終わるまで `ENOMOTO_T_MIP_OPTFACE_MERGE_WAIT` (既定 3) 秒までは待つ
+                if env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('m')) {
+                    cap = cap.max(tunable!("ENOMOTO_T_MIP_OPTFACE_MERGE_WAIT", 3.0, f64));
+                }
                 let cutoff = self.prune_limit();
                 let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
                 let tw = Instant::now();
@@ -7912,7 +7923,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let it0 = self.lp.total_iterations();
             let st0 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
             let cur = self.lp.objective() + self.p.offset;
-            let res = if bg_extra.is_empty() { res } else { self.optface_merge(res, &bg, &mut bg_extra, cur, env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('u'))) };
+            let par_merge = !bg_extra.is_empty() && env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('m'));
+            let res = if bg_extra.is_empty() { res } else { self.optface_merge(res, &bg, &mut bg_extra, cur, env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('u') || v.contains('m'))) };
             bg_extra.clear();
             if self.params.verbose {
                 eprintln!("MIP: background cuts: root LP re-solved before replacing the cuts: {st0:?}, {} iters ({:.2}s)", self.lp.total_iterations() - it0, self.start.elapsed().as_secs_f64());
@@ -8012,6 +8024,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             eprintln!("MIP: background cuts: {} rounds, {} cut rows (was {}), obj {:.10e} -> {:.10e} (waited {:.2}s, {:.2}s)", rounds, rows.len(), saved.len(), cur, new, wait, self.start.elapsed().as_secs_f64());
                         }
                         root_obj = new;
+                        // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `m`: まとめた LP から双対値が 0 のカットの行を外し (今の解は最適のまま)、
+                        // そこから主の根のカットのループを既定のまま (並列の分離で) 回す
+                        if par_merge && !self.time_up() {
+                            let t2 = Instant::now();
+                            let duals = self.lp.row_duals();
+                            let nr = self.lp.num_rows();
+                            let mut remove = vec![false; nr];
+                            for i in self.p.m..nr.min(duals.len()) {
+                                remove[i] = duals[i].abs() <= 1e-9;
+                            }
+                            let ndrop = remove.iter().filter(|&&r| r).count();
+                            if ndrop > 0 {
+                                self.delete_lp_rows(&remove);
+                                let _ = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+                            }
+                            let kept = self.lp.num_rows() - self.p.m;
+                            let after_sel = self.lp.objective() + self.p.offset;
+                            let ok = self.root_cut_loop(root_iters);
+                            if !ok {
+                                self.join_fj_thread();
+                                let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
+                                return self.finish(st, root_obj);
+                            }
+                            let new2 = self.lp.objective() + self.p.offset;
+                            if self.params.verbose {
+                                eprintln!(
+                                    "MIP: optface parcuts merge: {} merged rows, {ndrop} with zero duals removed, {kept} kept, obj {new:.10e} -> {after_sel:.10e}, then the main cut loop -> {new2:.10e}, {} cut rows ({:.2}s, {:.2}s)",
+                                    rows.len(),
+                                    self.lp.num_rows() - self.p.m,
+                                    t2.elapsed().as_secs_f64(),
+                                    self.start.elapsed().as_secs_f64()
+                                );
+                            }
+                            root_obj = root_obj.max(new2);
+                        }
                         // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` の `c`: 裏のカットが手間の上限で終わった (まだ停滞していない) なら、主のカットの
                         // ループとして停滞まで (同じ手間の上限で) 続ける
                         if let Some(d) = determ.filter(|d| d.cont && bg_end == Some("work") && !self.time_up()) {
