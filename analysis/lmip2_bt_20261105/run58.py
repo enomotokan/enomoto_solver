@@ -12,6 +12,10 @@ WT = HERE.parents[1]
 sys.path.insert(0, str(HERE)); sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
 CFGS = {"base": {}, "b": {"ENOMOTO_MIP_LMIP2": "b"}, "l": {"ENOMOTO_MIP_LMIP2": "l"}, "w": {"ENOMOTO_MIP_LMIP2": "w"}, "blw": {"ENOMOTO_MIP_LMIP2": "blw"}, "bl": {"ENOMOTO_MIP_LMIP2": "bl"}, "bw": {"ENOMOTO_MIP_LMIP2": "bw"}, "lw": {"ENOMOTO_MIP_LMIP2": "lw"}}
+# 種を変えた設定 (`ENOMOTO_T_MIP_SEED`): base_s1・l_s1 など
+for _k in list(CFGS):
+    for _sd in range(1, 6):
+        CFGS[f"{_k}_s{_sd}"] = dict(CFGS[_k], ENOMOTO_T_MIP_SEED=str(_sd))
 sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
 
