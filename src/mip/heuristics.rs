@@ -2184,6 +2184,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.dive_neighbourhood(target_fixed, None)
     }
 
+    /// `ENOMOTO_MIP_ROBUST_TSTALL` (試作、既定では使わない) の 1 回分 ([`super::solver::Solver::robust_tstall_tick`])。
+    /// (計測のときの名前は `ENOMOTO_MIP_ROBUST_STALL` だったが、ほかの試作 ([`super::solver::robust_stall`]) と重なったので改名した)
+    /// 暫定解があれば local branching → proximity → ALNS ([`Self::alns`]) を `turn` で順に 1 つ (呼ぶ側が時間の上限を延ばす)、
+    /// なければ (再スタートの後で、前の暫定解を前処理した問題で実行不能として捨て、打ち切り値だけを持つとき) ダイビング式 RENS
+    /// (目標の固定率 0.8) を今のノードの LP から。
+    /// 戻り値は (解を受け入れたか, 使った近傍の名前)。
+    /// (1 回目の試作は ALNS の代わりに今のノードの定義域からの RENS・被約費用固定を回したが、mzzv42z では打ち切り値の下で
+    /// どれも 0 ノードで実行不能だった。analysis/fragility_20261105/mzzv42z.md)
+    pub(super) fn robust_tstall_rescue(&mut self, x: &[f64], turn: usize) -> (bool, &'static str) {
+        if self.incumbent.is_none() {
+            return (self.dive_neighbourhood(Some(tunable!("ENOMOTO_T_MIP_ROBUST_TS_RENS_RATE", 0.8, f64)), None).0, "RENS 0.8");
+        }
+        // `ENOMOTO_MIP_ROBUST_TSTALL=alns`: 毎回 ALNS (2 回目の試作)。既定 (`1` など) は local branching → proximity → ALNS を順に回す
+        // (3 回目の試作: ALNS の UCB は、5 秒の上限で時間切れになった local branching・proximity を報酬 0 として以後選ばず、
+        // 一瞬で終わる DINS ばかり選んでいた)
+        if env_str!("ENOMOTO_MIP_ROBUST_TSTALL").as_deref() == Some("alns") {
+            return (self.alns(x), "ALNS");
+        }
+        match turn % 3 {
+            0 => {
+                self.heur_label = "tree robust local branching";
+                (self.local_branching(), "local branching")
+            }
+            1 => {
+                self.heur_label = "tree robust proximity";
+                (self.proximity_search(), "proximity")
+            }
+            _ => (self.alns(x), "ALNS"),
+        }
+    }
+
     /// ダイビング式の RINS (`ENOMOTO_MIP_RINS_DIVE`。HiGHS の `HighsPrimalHeuristics::RINS` に倣う): LP 解が整数値で暫定解と
     /// 同じ値の列を、目標の固定率まで段ごとに固定して LP を解き直す。そういう列がなくなったら、分数の列のうち丸めると暫定解の
     /// 値になる列を、丸め幅の小さい順に (合計 0.5 まで) 固定する。LP が実行不能なら直前の段に戻る。残りをサブ MIP として解く。

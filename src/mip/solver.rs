@@ -1076,6 +1076,13 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) proof_first_z: f64,
     proof_last_best: (f64, Instant),
     proof_eval_at: Option<Instant>,
+    /// `ENOMOTO_MIP_ROBUST_TSTALL` (試作、[`Self::robust_tstall_tick`]): 最後に最良値が良くなった (と気づいた) 値と時刻、
+    /// 前に呼んだ時刻、回した回数、(呼んだ回数, 改善した回数, 使った秒数)。
+    robust_ts_best: (f64, Instant),
+    robust_ts_call: Option<Instant>,
+    robust_ts_turn: usize,
+    robust_ts_fails: u32,
+    robust_ts_stats: (u64, u64, f64),
     /// カットの行のハッシュ ([`Self::refresh_row_hashes`]) と、作ったときの行の記録の位置。`cut_basis_stats` は共有の待ち行列に
     /// 出したノードに付けたカットの状態の数・受け取って当てはめた数 (`ENOMOTO_MIP_TREE_SHARE_CUT_BASIS`)。
     row_hash: Vec<u64>,
@@ -2533,6 +2540,11 @@ pub(crate) fn robust_stall(c: char) -> bool {
 
 fn role_lmip_on() -> bool {
     env_str!("ENOMOTO_MIP_ROLE_LMIP").is_some()
+}
+
+/// `ENOMOTO_MIP_ROBUST_TSTALL` (試作、既定では使わない): [`Solver::robust_tstall_tick`]
+fn robust_tstall_on() -> bool {
+    env_str!("ENOMOTO_MIP_ROBUST_TSTALL").is_some()
 }
 
 fn heur_role_verbose() -> bool {
@@ -4063,6 +4075,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_first_z: f64::INFINITY,
         proof_last_best: (f64::INFINITY, Instant::now()),
         proof_eval_at: None,
+        robust_ts_best: (f64::INFINITY, Instant::now()),
+        robust_ts_call: None,
+        robust_ts_turn: 0,
+        robust_ts_fails: 0,
+        robust_ts_stats: (0, 0, 0.0),
         row_hash: Vec::new(),
         row_hash_map: std::collections::HashMap::new(),
         row_hash_epoch: None,
@@ -8587,6 +8604,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.hsub_tree(lb);
                         }
                     }
+                    // `ENOMOTO_MIP_ROBUST_TSTALL` (試作、既定では使わない): 最良値が長く良くならないとき、時間で改善ヒューリスティクスを呼ぶ
+                    if node.depth > 0 && plunge_depth == 0 && robust_tstall_on() {
+                        self.robust_tstall_tick(&x);
+                    }
                     if heur_ok && node.depth > 0 && (plunge_depth == 0 || robust_stall('l')) && self.incumbent.is_some() && self.nodes >= self.last_rins + lns_freq && lns_ok {
                         self.last_rins = self.nodes;
                         let t_lns = Instant::now();
@@ -9522,6 +9543,79 @@ impl<'a, L: MipLp> Solver<'a, L> {
         match &self.pool {
             Some(pool) => pool.proof_phase.load(std::sync::atomic::Ordering::Relaxed),
             None => self.proof_phase,
+        }
+    }
+
+    /// `ENOMOTO_MIP_ROBUST_TSTALL` (試作、既定では使わない): 木の主 (番号 0。1 スレッドなら自分) が、ノードの LP を解いた後に呼ぶ。
+    /// 刈り込みの上限 (全スレッドの最良値と打ち切り値) が良くなってから `max(ENOMOTO_T_MIP_ROBUST_TS_STALL_MIN (10 秒),
+    /// ENOMOTO_T_MIP_ROBUST_TS_STALL_FRAC (0.1) × 経過秒)` 経ち、前に呼んでからも同じだけ経ち、相対ギャップが 1e-4 以上で、使った秒数が
+    /// 経過秒の `ENOMOTO_T_MIP_ROBUST_TS_TIME_FRAC` (0.2) 倍未満なら、[`Self::robust_tstall_rescue`] を 1 回呼ぶ (サブ MIP の時間の上限は
+    /// 経過秒の `ENOMOTO_T_MIP_ROBUST_TS_SUBMIP_REL` (0.05) 倍を `ENOMOTO_T_MIP_ROBUST_TS_SUBMIP_MIN` (15)〜`_MAX` (30) 秒に収めたもの)。
+    /// 前に呼んでからの間隔は、続けて改善しなかった回数 k について 2^k 倍 (k は 6 まで) にする。
+    /// 既定の木の大近傍探索は、ノード数で間隔を決め (各スレッド 50 ノードおき)、1 回の時間も予算の残りの 2 倍に絞る。ヒューリスティクス役の
+    /// スレッドも、全体で 100 ノードを過ぎるまで就かない。1 ノードに数秒〜10 秒かかる問題 (mzzv42z) では、そのどれもがほとんど
+    /// 呼ばれず、暫定解が悪いまま数百秒進む。時間で呼ぶ機会を足すための試作。
+    fn robust_tstall_tick(&mut self, x: &[f64]) {
+        if self.params.submip || self.pool_tid != 0 || self.in_proof_phase() || self.time_up() {
+            return;
+        }
+        // 刈り込みの上限 (自分・ほかのスレッドの暫定解と、再スタートの前から渡された打ち切り値)。再スタートの後の求解は、前の暫定解を
+        // 前処理した問題で実行不能として捨て、打ち切り値だけを持つことが多い (mzzv42z)。そのときも数える
+        let z = self.prune_limit();
+        if !z.is_finite() {
+            return;
+        }
+        let now = Instant::now();
+        if z < self.robust_ts_best.0 - 1e-9 * z.abs().max(1.0) {
+            self.robust_ts_best = (z, now);
+            return;
+        }
+        let el = self.start.elapsed().as_secs_f64();
+        let wait = tunable!("ENOMOTO_T_MIP_ROBUST_TS_STALL_MIN", 10.0, f64).max(tunable!("ENOMOTO_T_MIP_ROBUST_TS_STALL_FRAC", 0.1, f64) * el);
+        // 前に呼んでからの間隔は、続けて改善しなかった回数だけ倍にする (最適解を持ったまま証明だけが残る回で主の時間を取り続けないように)
+        let gap_wait = wait * 2f64.powi(self.robust_ts_fails.min(6) as i32);
+        if now.duration_since(self.robust_ts_best.1).as_secs_f64() < wait || self.robust_ts_call.is_some_and(|t| now.duration_since(t).as_secs_f64() < gap_wait) {
+            return;
+        }
+        if self.robust_ts_stats.2 >= tunable!("ENOMOTO_T_MIP_ROBUST_TS_TIME_FRAC", 0.2, f64) * el {
+            return;
+        }
+        let lb = self.global_lower_bound();
+        if lb.is_finite() && (z - lb) <= 1e-4 * z.abs().max(1.0) {
+            return;
+        }
+        self.robust_ts_call = Some(now);
+        let keep = (self.submip_time_frac, self.submip_time_max);
+        self.submip_time_frac = tunable!("ENOMOTO_T_MIP_ROBUST_TS_SUBMIP_FRAC", 0.1, f64);
+        let cap = (tunable!("ENOMOTO_T_MIP_ROBUST_TS_SUBMIP_REL", 0.05, f64) * el).clamp(tunable!("ENOMOTO_T_MIP_ROBUST_TS_SUBMIP_MIN", 15.0, f64), tunable!("ENOMOTO_T_MIP_ROBUST_TS_SUBMIP_MAX", 30.0, f64));
+        self.submip_time_max = cap;
+        let turn = self.robust_ts_turn;
+        self.robust_ts_turn += 1;
+        self.heur_label = "tree robust";
+        let z0 = self.prune_limit();
+        let (ok, what) = self.robust_tstall_rescue(x, turn);
+        self.heur_label = "";
+        (self.submip_time_frac, self.submip_time_max) = keep;
+        let dt = now.elapsed().as_secs_f64();
+        let z1 = self.prune_limit();
+        self.robust_ts_stats.0 += 1;
+        self.robust_ts_stats.2 += dt;
+        if ok && z1 < z0 {
+            self.robust_ts_stats.1 += 1;
+            self.robust_ts_fails = 0;
+        } else {
+            self.robust_ts_fails += 1;
+        }
+        if self.params.verbose {
+            eprintln!(
+                "MIP: robust stall: call {} ({what}, sub-MIP time cap {:.1}s) at {el:.2}s after {:.1}s without improvement: accepted {ok}, prune limit {z0:.6e} -> {z1:.6e} ({dt:.2}s, calls {} improved {} secs {:.1})",
+                turn,
+                cap,
+                now.duration_since(self.robust_ts_best.1).as_secs_f64(),
+                self.robust_ts_stats.0,
+                self.robust_ts_stats.1,
+                self.robust_ts_stats.2
+            );
         }
     }
 
