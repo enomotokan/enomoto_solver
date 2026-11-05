@@ -6303,7 +6303,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.root_lp_iters = root_iters;
         self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
         if !self.params.submip {
-            HO4_ROOT_LP_SECS.store(self.root_lp_secs.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            // 最大を残す (裏のカットの写しの根の LP は主の基底から 1 反復で終わり、0 秒で上書きしてしまうので)。正の f64 のビットは
+            // 大小の順が整数と同じ
+            HO4_ROOT_LP_SECS.fetch_max(self.root_lp_secs.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
         }
         if self.params.verbose {
             eprintln!("MIP: root LP {:.10e} ({} iters, {:.2}s)", root_obj, self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
