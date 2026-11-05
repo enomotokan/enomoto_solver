@@ -2269,8 +2269,9 @@ impl TwoStageLp {
         self.status = None;
         self.ray = None;
         self.clear_memo();
+        // 確かめの解き直しは移動の期限 (もう過ぎていることがある) ではなく反復の上限で縛る (ふつうは 0〜数反復)
         let it0 = self.iters;
-        let stt = self.solve(&SolveLimits { deadline, ..Default::default() });
+        let stt = self.solve(&SolveLimits { iteration_limit: (1000 + 2 * m) as u64, ..Default::default() });
         st.resolve_iters = self.iters - it0;
         st.obj_diff = self.objective() - obj0;
         st.ok = stt == LpStatus::Optimal && st.obj_diff.abs() <= 1e-7 * obj0.abs().max(1.0);
