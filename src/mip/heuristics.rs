@@ -3083,6 +3083,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let focus = self.crossover_focus_set();
         let arm = if focus.is_some() && self.rand() < tunable!("ENOMOTO_T_MIP_CROSSOVER_FOCUS_PROB", 0.75, f64) { 4 } else { arm };
         let z0 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+        let t_frag = std::time::Instant::now();
         self.heur_label = ["tree RINS", "tree local branching", "tree proximity", "tree mutation", "tree crossover", "tree DINS"][arm];
         let ok = match arm {
             0 => self.rins(x),
@@ -3100,6 +3101,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.alns_reward[arm] += reward;
         if self.params.verbose {
             eprintln!("MIP:   ALNS arm {arm} reward {reward:.3} (counts {:?})", self.alns_count);
+        }
+        if super::solver::frag_diag() && !self.params.submip {
+            eprintln!(
+                "FRAG: alns tid {} role {} t {:.2} arm {arm} dt {:.2} ok {ok} z {z0:.4} -> {z1:.4} nodes {} counts {:?} submip_max {:.2}",
+                self.pool_tid,
+                self.in_heur_role,
+                self.frag_t(),
+                t_frag.elapsed().as_secs_f64(),
+                self.nodes,
+                self.alns_count,
+                self.submip_time_max
+            );
         }
         ok
     }

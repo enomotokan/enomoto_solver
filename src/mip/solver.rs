@@ -2505,6 +2505,23 @@ fn root_lmip_on() -> bool {
     env_str!("ENOMOTO_MIP_ROOT_LMIP").is_some()
 }
 
+/// 診断用 (`ENOMOTO_MIP_FRAG_DIAG`): 全てのスレッドの木の大近傍探索 (ALNS) の 1 回ごとの腕・時間・結果と、ヒューリスティクス役に
+/// 潜りの途中で就いたことを表示する (analysis/fragility_20261105/neos-1171448.md)
+pub(crate) fn frag_diag() -> bool {
+    env_str!("ENOMOTO_MIP_FRAG_DIAG").is_some()
+}
+
+/// 試作 (`ENOMOTO_MIP_ROBUST_STALL=<文字>`、既定では使わない): 暫定解が良くならないまま長い潜りが続く問題で、改善ヒューリスティクスが
+/// 呼ばれない間を縮める (analysis/fragility_20261105/neos-1171448.md)。
+/// `r`: ヒューリスティクス役に就くかの判定を、潜りの途中でも `ENOMOTO_T_MIP_ROBUST_ROLE_EVERY` (既定 16) ノードおきに行う
+/// (就くときは潜りの子を待ち行列に戻す)。既定では潜りの終わりにしか判定せず、潜りが数百ノード続くと就くのが遅れる。
+/// `w`: 起動の判定の「温まった」の条件 (木の探索の経過が全体の時間の 5%) を `ENOMOTO_T_MIP_ROBUST_WARM_SECS` (既定 10) 秒で頭打ちにする
+/// (時間の上限が長いほど就くのが遅れるのを避ける)。
+/// `l`: 木の中の大近傍探索を、潜りの途中のノードでも呼べるようにする (既定は潜りの始めのノードだけ)。
+pub(crate) fn robust_stall(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_ROBUST_STALL").is_some_and(|v| v.contains(c))
+}
+
 fn role_lmip_on() -> bool {
     env_str!("ENOMOTO_MIP_ROLE_LMIP").is_some()
 }
@@ -7646,7 +7663,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.memb_diag_tick();
             }
             // ヒューリスティクス役 (`ENOMOTO_MIP_HEUR_ROLE`): 番号の大きい従は、解ができたら木を離れて大近傍探索を回し続ける
-            if plunge.is_none() && !first && self.heur_role_mine() {
+            let role_mid = robust_stall('r') && plunge.is_some() && !first && self.nodes % tunable!("ENOMOTO_T_MIP_ROBUST_ROLE_EVERY", 16u64, u64).max(1) == 0;
+            if (plunge.is_none() || role_mid) && !first && self.heur_role_mine() {
+                if let Some(n) = plunge.take() {
+                    self.queue.push(n);
+                    if frag_diag() {
+                        eprintln!("FRAG: role entry mid-plunge tid {} t {:.2} nodes {}", self.pool_tid, self.frag_t(), self.nodes);
+                    }
+                }
                 match self.heur_role_run() {
                     Some(true) => break,
                     Some(false) => return self.finish_limit(MipStatus::TimeLimit, None),
@@ -8444,7 +8468,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.hsub_tree(lb);
                         }
                     }
-                    if heur_ok && node.depth > 0 && plunge_depth == 0 && self.incumbent.is_some() && self.nodes >= self.last_rins + lns_freq && lns_ok {
+                    if heur_ok && node.depth > 0 && (plunge_depth == 0 || robust_stall('l')) && self.incumbent.is_some() && self.nodes >= self.last_rins + lns_freq && lns_ok {
                         self.last_rins = self.nodes;
                         let t_lns = Instant::now();
                         // 改善ヒューリスティクス: ALNS で選ぶ (ENOMOTO_MIP_NO_ALNS なら RINS → Local Branching →
@@ -9453,6 +9477,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 診断用: 木を分け合うときは共有の始まりから、そうでなければこの求解の始まりからの秒数
+    pub(super) fn frag_t(&self) -> f64 {
+        self.pool.as_ref().map_or_else(|| self.start.elapsed().as_secs_f64(), |p| p.t0.elapsed().as_secs_f64())
+    }
+
     /// 木の中の大近傍探索・ダイビングをこのスレッドで回すか。木を分け合うときは HiGHS (`HighsMipSolver::run`) と同じく、
     /// 暫定解があればスレッドの 1/4、なければ 1/2 (切り上げ、主を含む) だけが回す (全スレッドが同じ予算で回すと、同じ
     /// 暫定解から同じ近傍のサブ MIP を重複して解く)。主 (番号 0)・1 スレッドは常に回す。
@@ -9616,7 +9645,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let nodes = self.global_node_counts().0;
         let warm = self.trig_v >= 0.0
             && tree_el >= 1.0
-            && tree_el >= tunable!("ENOMOTO_T_MIP_HEUR_TRIG_WARM_FRAC", 0.05, f64) * (tree_el + left)
+            && (tree_el >= tunable!("ENOMOTO_T_MIP_HEUR_TRIG_WARM_FRAC", 0.05, f64) * (tree_el + left) || (robust_stall('w') && tree_el >= tunable!("ENOMOTO_T_MIP_ROBUST_WARM_SECS", 10.0, f64)))
             && nodes >= tunable!("ENOMOTO_T_MIP_HEUR_TRIG_NODES", 100u64, u64);
         Some(TriggerEval { done, est, left, frac, warm, w, wcuts, gap, v })
     }
