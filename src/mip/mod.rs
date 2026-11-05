@@ -2035,7 +2035,56 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         (time_cap, u64::MAX, u64::MAX)
     };
     let (sw0, vw0, lw0, rt0) = (symmetry::search_work(), symmetry::verify_work(), symmetry::log_work(), symmetry::refine_time());
-    let (sym, sym_work) = symmetry::detect_skip_twins(&prob, time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), work_cap, log_cap, &twins);
+    // `ENOMOTO_MIP_HO3_SYMNORM` (試作、既定では使わない。analysis/highs_only_20261105/G3.md): 検出に渡す問題だけ、行の向き (-1 倍) を
+    // 列の順によらない形にそろえる ((下限, 上限, 係数の並べた列) と (-上限, -下限, -係数) の小さい方)。行を -1 倍しても実行可能な集合は
+    // 同じなので、写しで見つけた置換は元の問題の対称性でもある。前処理は `<= 2` と `>= -2` の 2 本を 1 本の幅つきの行にまとめるが、
+    // 向きが行ごとにばらばらで (fastxgemm-n2r6s0t2 では -2 <= -a-b-c+d <= 2 が 1151 本、-2 <= -a+b+c+d <= 2 が 385 本)、
+    // 行を -1 倍して写す対称性が見えない (生成元 1 個、HiGHS は 39 個)
+    let symnorm = env_str!("ENOMOTO_MIP_HO3_SYMNORM").is_some();
+    let normed = if symnorm {
+        let mut q = prob.clone();
+        let mut flipped = 0usize;
+        for i in 0..q.m {
+            let mut a: Vec<f64> = q.rows[i].iter().map(|t| t.1).collect();
+            a.sort_by(f64::total_cmp);
+            let mut b: Vec<f64> = q.rows[i].iter().map(|t| -t.1).collect();
+            b.sort_by(f64::total_cmp);
+            let ka = (q.row_lo[i], q.row_up[i]);
+            let kb = (-q.row_up[i], -q.row_lo[i]);
+            let cmp = ka.0.total_cmp(&kb.0).then(ka.1.total_cmp(&kb.1)).then_with(|| {
+                for (x, y) in a.iter().zip(&b) {
+                    let c = x.total_cmp(y);
+                    if c != std::cmp::Ordering::Equal {
+                        return c;
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+            if cmp == std::cmp::Ordering::Greater {
+                flipped += 1;
+                q.row_lo[i] = kb.0;
+                q.row_up[i] = kb.1;
+                for t in q.rows[i].iter_mut() {
+                    t.1 = -t.1;
+                }
+                for t in q.rows[i].iter() {
+                    if let Ok(k) = q.cols[t.0].binary_search_by_key(&i, |e| e.0) {
+                        q.cols[t.0][k].1 = -q.cols[t.0][k].1;
+                    } else if let Some(e) = q.cols[t.0].iter_mut().find(|e| e.0 == i) {
+                        e.1 = -e.1;
+                    }
+                }
+            }
+        }
+        if verbose {
+            eprintln!("MIP: symmetry: HO3_SYMNORM flipped {flipped} of {} rows for the detection", q.m);
+        }
+        Some(q)
+    } else {
+        None
+    };
+    let (sym, sym_work) = symmetry::detect_skip_twins(normed.as_ref().unwrap_or(&prob), time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), work_cap, log_cap, &twins);
+    drop(normed);
     // 双子の組の扱い: 探索で見つけた生成元が動かす組は入れ替えを生成元に足し (対称性で扱う)、ほかは併合する (併合できないもの
     // (下限が無限、整数列で境界が整数でない) も入れ替えを足す)。足す入れ替えは `ENOMOTO_T_MIP_SYM_TWIN_GENS` 個 (既定 500) と、
     // 生成元の大きさ (列の数) の合計 2e7 までに抑える
