@@ -2568,6 +2568,38 @@ pub(super) fn robust_lnsfreq() -> bool {
     env_str!("ENOMOTO_MIP_ROBUST_LNSFREQ").is_some()
 }
 
+/// `ENOMOTO_MIP_HO1_SUBCUT` (試作、既定では使わない。analysis/highs_only_20261105/G1.md): サブ MIP の中で、打ち切り値
+/// (`MipParams::cutoff`、外側の暫定解 − 刻み) より悪い解を暫定解にしない (HiGHS の `solveSubMip` は `objective_bound` に外側の
+/// `upper_limit` を渡すので、サブ MIP はそれより悪い解を持たない)。今は打ち切り値より悪い解も暫定解になり、それを「解を見つけた」と
+/// 数えて、成果連動の打ち切り ([`submip_outcome_stop`]、見つけたノード k から max(k, 50) ノードで止める) と停滞の打ち切り
+/// (`ENOMOTO_T_MIP_SUBMIP_STALL`、暫定解があれば 12 ノード) が早く効く (neos-933966 の根の RINS は 293135 (打ち切り値 1393) を持って
+/// 57 ノードで止まる)。値 `1` は開始解 (`accepting_start`) も同じに扱う、`n` は開始解は今のまま受け取る
+pub(super) fn ho1_subcut(accepting_start: bool) -> bool {
+    match env_str!("ENOMOTO_MIP_HO1_SUBCUT") {
+        None => false,
+        Some(v) => !(accepting_start && v == "n"),
+    }
+}
+
+thread_local! {
+    /// `ENOMOTO_MIP_HO1_SUBCUT` で捨てた解の数 (スレッドごと、診断用)
+    pub(super) static HO1_SUBCUT_REJECTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// `ENOMOTO_MIP_HO1_LNSBANK` (試作、既定では使わない。analysis/highs_only_20261105/G1.md): 木の探索のスレッドの大近傍探索を、
+/// 1 回の上限 (予算の残りの 2 倍) が `ENOMOTO_T_MIP_HO1_LNSBANK_MIN` (2) 秒に届くまで呼ばずに予算を貯める。既定では予算の残りが
+/// 正なら呼び、上限が下限の 0.3 秒になる (fiball では 0.3〜0.4 秒のサブ MIP が根を終えずノード 0 の時間切れを繰り返す)
+pub(super) fn ho1_lnsbank() -> Option<f64> {
+    env_str!("ENOMOTO_MIP_HO1_LNSBANK").is_some().then(|| tunable!("ENOMOTO_T_MIP_HO1_LNSBANK_MIN", 2.0, f64))
+}
+
+/// `ENOMOTO_MIP_HO1_ROLEEARLY` (試作、既定では使わない。analysis/highs_only_20261105/G1.md): ヒューリスティクス役のスレッドは、
+/// 暫定解があれば最初の 1 回は起動の判定 ([`Solver::heur_trigger_eval`]) なしで役に就く。判定は役のスレッドのノードの合間にしか
+/// 評価されず、速さの見積もりに 2 回の評価が要るので、1 ノードが数十秒の問題 (neos-933966) では役に就くのが 400〜500 秒になる
+pub(super) fn ho1_role_early() -> bool {
+    env_str!("ENOMOTO_MIP_HO1_ROLEEARLY").is_some()
+}
+
 /// `ENOMOTO_MIP_ROBUST_IMPORT` (試作、既定では使わない): 木を分け合う従のスレッドが木の中の大近傍探索を呼ぶ前に、共有の最良の解を
 /// 取り込む (従は自分の見つけた解しか持たず、全体より悪い暫定解を近傍の中心にしていた)
 fn robust_import() -> bool {
@@ -4927,6 +4959,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 再スタート前の暫定解そのもの (再スタート後の問題でも実行可能なもの) は打ち切り値より必ず悪いが、受け取る
         // (受け取らないと再スタート後の求解が暫定解なしになる。neos-911970: 62.30 を捨て、60 秒で解けない回が増えた)
         if self.incumbent.is_none() && self.params.restarts > 0 && !self.params.submip && !self.accepting_start && z > self.params.cutoff && super::restart_ref_for(self.p) {
+            return false;
+        }
+        // `ENOMOTO_MIP_HO1_SUBCUT` ([`ho1_subcut`]): サブ MIP は打ち切り値 (外側の刈り込みの上限) より悪い解を暫定解にしない
+        if self.params.submip && self.params.cutoff.is_finite() && z > self.params.cutoff + 1e-9 * self.params.cutoff.abs().max(1.0) && ho1_subcut(self.accepting_start) {
+            HO1_SUBCUT_REJECTS.with(|c| c.set(c.get() + 1));
             return false;
         }
         if !orig_only {
@@ -8688,6 +8725,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lns_time = env_str!("ENOMOTO_MIP_LNS_ITERS").is_none();
                     let lns_avail = frac * self.start.elapsed().as_secs_f64() - self.lns_secs;
                     let lns_ok = if lns_time { lns_avail > 0.0 } else { self.heur_iters - self.heur_iters_root < budget };
+                    // `ENOMOTO_MIP_HO1_LNSBANK` ([`ho1_lnsbank`]): 1 回の上限が下限に届くまで貯める (根の段・サブ MIP の中は今のまま)
+                    let lns_ok = lns_ok
+                        && match ho1_lnsbank().filter(|_| lns_time && !self.params.submip) {
+                            Some(m) => tunable!("ENOMOTO_T_MIP_LNS_CALL_MULT", 2.0, f64) * lns_avail >= m,
+                            None => true,
+                        };
                     let lns_freq = if lns_time { tunable!("ENOMOTO_T_MIP_LNS_FREQ", 50u64, u64) } else { 100 };
                     let lns_freq = if stalled { lns_freq.min(tunable!("ENOMOTO_T_MIP_ROBUST_LNSFREQ_NODES", 10u64, u64).max(1)) } else { lns_freq };
                     // 木を分け合うときは一部のスレッドだけが大近傍探索・ダイビングを回す ([`Solver::tree_heur_allowed`])
@@ -9839,6 +9882,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 起動の判定 (`ENOMOTO_MIP_HEUR_ROLE_TRIGGER`): 0.25 秒おきに、木の証明が時間内に終わりそうになく、暫定解が良くなれば
         // 木の多くを刈れるときだけ役に就く ([`Self::heur_trigger_eval`])。木の探索に戻った後は決めた秒数が過ぎるまで就かない
+        // `ENOMOTO_MIP_HO1_ROLEEARLY` ([`ho1_role_early`]): 最初の 1 回は判定なしで役に就く (木に戻った後は今の判定)
+        if ho1_role_early() && self.heur_role_retired.is_none() {
+            return true;
+        }
         if heur_trigger_mode() {
             if self.trig_eval_at.is_some_and(|t| t.elapsed().as_secs_f64() < 0.25) || self.heur_role_retired.is_some_and(|(t, _, cool)| t.elapsed().as_secs_f64() < cool) {
                 return false;
