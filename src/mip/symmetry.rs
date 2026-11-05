@@ -425,6 +425,10 @@ fn shortcut_perm(n: usize, ma: &std::collections::HashMap<u64, Vec<usize>>, mb: 
 
 #[allow(clippy::too_many_arguments)]
 fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: std::time::Instant, time_cap: f64, work_end: (u64, u64), row_counts: &std::collections::HashMap<u64, i64>) -> Option<Vec<usize>> {
+    // `ENOMOTO_MIP_HO3_SYMBT` (試作、既定では使わない。analysis/highs_only_20261105/G3.md): 後戻りのある探索 ([`search_bt`])
+    if env_str!("ENOMOTO_MIP_HO3_SYMBT").is_some() {
+        return search_bt(p, col0, row0, a, b, t0, time_cap, work_end, row_counts);
+    }
     let use_shortcut = env_str!("ENOMOTO_MIP_SYM_NO_SHORTCUT").is_none();
     let n = p.n;
     let (mut ca, mut ra) = (col0.to_vec(), row0.to_vec());
@@ -489,6 +493,102 @@ fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: st
         refine(p, &mut cb, &mut rb, 50);
     }
     None
+}
+
+/// [`search`] の後戻りのある形 (`ENOMOTO_MIP_HO3_SYMBT`、試作)。A 側は今と同じく最小の列 x を個別化し、B 側は x の色の列を
+/// 1 本ずつ試す (x と同じ列を先に)。細分化の後に色の数・大きさが合わなければその枝をやめ、全部の色が 1 列になったら確かめて、
+/// 合わなければ後戻りする。HiGHS の `HighsSymmetryDetection` は探索木を後戻りしながら辿る。貪欲に 1 本だけ辿る今の探索では、
+/// fastxgemm-n2r6s0t2 の生成元が 1 個しか見つからない (HiGHS は 39 個)。1 回の探索の枝の数の上限は
+/// `ENOMOTO_T_MIP_HO3_SYMBT_NODES` (既定 2000)
+#[allow(clippy::too_many_arguments)]
+fn search_bt(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: std::time::Instant, time_cap: f64, work_end: (u64, u64), row_counts: &std::collections::HashMap<u64, i64>) -> Option<Vec<usize>> {
+    let use_shortcut = env_str!("ENOMOTO_MIP_SYM_NO_SHORTCUT").is_none();
+    let max_nodes = tunable!("ENOMOTO_T_MIP_HO3_SYMBT_NODES", 2000usize, usize);
+    let indiv = |c: &mut [u64], j: usize, level: u64| c[j] = mix(c[j], 0xA5A5_0000 ^ level);
+    let (mut ca, mut ra) = (col0.to_vec(), row0.to_vec());
+    let (mut cb, mut rb) = (col0.to_vec(), row0.to_vec());
+    indiv(&mut ca, a, 1);
+    indiv(&mut cb, b, 1);
+    refine(p, &mut ca, &mut ra, 50);
+    refine(p, &mut cb, &mut rb, 50);
+    // A 側の列は後戻りしても同じなので、段ごとの (A の色、個別化した列 x) を覚える
+    let mut a_stack: Vec<(Vec<u64>, Vec<u64>)> = vec![(ca, ra)];
+    let mut nodes = 0usize;
+    #[allow(clippy::too_many_arguments)]
+    fn rec(
+        p: &MipProblem, a_stack: &mut Vec<(Vec<u64>, Vec<u64>)>, depth: usize, cb: &[u64], rb: &[u64], nodes: &mut usize, max_nodes: usize, t0: std::time::Instant, time_cap: f64,
+        work_end: (u64, u64), row_counts: &std::collections::HashMap<u64, i64>, use_shortcut: bool,
+    ) -> Option<Vec<usize>> {
+        let n = p.n;
+        *nodes += 1;
+        if *nodes > max_nodes || t0.elapsed().as_secs_f64() > time_cap || over(work_end) {
+            return None;
+        }
+        add_work(2 * n);
+        SWORK.with(|c| c.set(c.get() + 2 * n as u64));
+        LWORK.with(|c| c.set(c.get() + 2 * n as u64));
+        let ca = &a_stack[depth].0;
+        let mut ma: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+        let mut mb: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+        for j in 0..n {
+            ma.entry(ca[j]).or_default().push(j);
+            mb.entry(cb[j]).or_default().push(j);
+        }
+        if ma.len() != mb.len() {
+            return None;
+        }
+        for (c, va) in &ma {
+            if mb.get(c).is_none_or(|vb| vb.len() != va.len()) {
+                return None;
+            }
+        }
+        if use_shortcut {
+            if let Some(perm) = shortcut_perm(n, &ma, &mb) {
+                if verify(p, &perm, row_counts) {
+                    return Some(perm);
+                }
+            }
+        }
+        let mut pick: Option<(usize, u64)> = None;
+        for (c, va) in &ma {
+            if va.len() >= 2 && pick.is_none_or(|(px, _)| va[0] < px) {
+                pick = Some((va[0], *c));
+            }
+        }
+        let Some((x, cx)) = pick else {
+            let mut perm = vec![0usize; n];
+            for (c, va) in &ma {
+                perm[va[0]] = mb[c][0];
+            }
+            return if verify(p, &perm, row_counts) { Some(perm) } else { None };
+        };
+        let level = depth as u64 + 2;
+        if a_stack.len() <= depth + 1 {
+            let (mut ca2, mut ra2) = a_stack[depth].clone();
+            ca2[x] = mix(ca2[x], 0xA5A5_0000 ^ level);
+            refine(p, &mut ca2, &mut ra2, 50);
+            a_stack.push((ca2, ra2));
+        }
+        let vb = &mb[&cx];
+        let mut ys: Vec<usize> = Vec::with_capacity(vb.len());
+        if vb.contains(&x) {
+            ys.push(x);
+        }
+        ys.extend(vb.iter().copied().filter(|&y| y != x));
+        for y in ys {
+            let (mut cb2, mut rb2) = (cb.to_vec(), rb.to_vec());
+            cb2[y] = mix(cb2[y], 0xA5A5_0000 ^ level);
+            refine(p, &mut cb2, &mut rb2, 50);
+            if let Some(perm) = rec(p, a_stack, depth + 1, &cb2, &rb2, nodes, max_nodes, t0, time_cap, work_end, row_counts, use_shortcut) {
+                return Some(perm);
+            }
+            if *nodes > max_nodes || t0.elapsed().as_secs_f64() > time_cap || over(work_end) {
+                return None;
+            }
+        }
+        None
+    }
+    rec(p, &mut a_stack, 0, &cb, &rb, &mut nodes, max_nodes, t0, time_cap, work_end, row_counts, use_shortcut)
 }
 
 /// 完全オービトープ: 0-1 列の行列 `vars[行][列]` で、列をどう並べ替えても問題が変わらないもの (列の入れ替えが

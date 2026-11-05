@@ -3811,7 +3811,11 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
     }
     // `ENOMOTO_MIP_ENUM_PRESOLVE` (試作): HiGHS の Enumeration 前処理 ([`enumerate_rows`])。`=impl` ならプロービングの含意も伝播に使う
-    if let Some(mode) = env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").filter(|_| !submip) {
+    // `ENOMOTO_MIP_HO3_ENUM` (試作、既定では使わない。analysis/highs_only_20261105/G3.md): 同じ列挙を、行の数の上限 (400 行) と
+    // 空振りでやめる規則 (6 行) を外して全部の候補の行に回す (時間の上限 `ENOMOTO_T_MIP_HO3_ENUM_TIME` 秒、既定 1 秒)。
+    // net12 では上限つきだと先頭の 400 行に効く行がなく何も見つからないが、全 953 行では同値な組 154 組が出て根の LP が 68.7 -> 128.7
+    let ho3_enum = env_str!("ENOMOTO_MIP_HO3_ENUM").is_some() && !submip;
+    if let Some(mode) = env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").or(if ho3_enum { Some("1") } else { None }).filter(|_| !submip) {
         let te = std::time::Instant::now();
         let (f0, t0n, e0) = (fixed, tightened, equiv.len());
         let mut d2 = if mode == "impl" && !edges.is_empty() {
@@ -4268,8 +4272,11 @@ fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool, submip: bool) -> Op
 /// physiciansched6-2 では HiGHS の前処理のこの規則を切ると、HiGHS の前処理後の問題に対する ENOMOTO の根の LP が 48974 -> 48374 に下がる
 fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mut equiv: Option<&mut Vec<(usize, usize, bool)>>, mut edges: Option<&mut Vec<(u32, u32)>>) -> Option<(Vec<(usize, bool, f64)>, usize, usize)> {
     const MAX_ROW: usize = 8;
-    let max_rows = tunable!("ENOMOTO_T_MIP_ENUM_ROWS", 400usize, usize);
-    let max_fails = tunable!("ENOMOTO_T_MIP_ENUM_FAILS", 6usize, usize);
+    let ho3 = env_str!("ENOMOTO_MIP_HO3_ENUM").is_some();
+    let max_rows = tunable!("ENOMOTO_T_MIP_ENUM_ROWS", if ho3 { usize::MAX } else { 400usize }, usize);
+    let max_fails = tunable!("ENOMOTO_T_MIP_ENUM_FAILS", if ho3 { usize::MAX } else { 6usize }, usize);
+    let t_enum = std::time::Instant::now();
+    let time_cap = if ho3 { tunable!("ENOMOTO_T_MIP_HO3_ENUM_TIME", 1.0, f64) } else { f64::INFINITY };
     let row_vars = |dom: &domain::Domain, i: usize| -> Option<Vec<usize>> {
         let mut v = Vec::new();
         for &(j, _) in &prob.rows[i] {
@@ -4295,6 +4302,17 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
     // 重なりの多い行を外す
     let mut keep: Vec<(usize, Vec<usize>)> = Vec::new();
     let mut removed = vec![false; rows.len()];
+    let col_rows: Option<std::collections::HashMap<usize, Vec<usize>>> = if ho3 {
+        let mut m: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+        for (b, r) in rows.iter().enumerate() {
+            for &j in &r.2 {
+                m.entry(j).or_default().push(b);
+            }
+        }
+        Some(m)
+    } else {
+        None
+    };
     for a in 0..rows.len() {
         if removed[a] {
             continue;
@@ -4304,6 +4322,25 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
             break;
         }
         let va = &rows[a].2;
+        // 試作 (HO3_ENUM) では行の数の上限がないので、全部の組を比べず、同じ列を持つ行だけを数える (列 -> 候補の行の表)
+        if let Some(cr) = col_rows.as_ref() {
+            let mut cnt: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+            for j in va {
+                if let Some(bs) = cr.get(j) {
+                    for &b in bs {
+                        if b > a && !removed[b] {
+                            *cnt.entry(b).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            for (b, ov) in cnt {
+                if 100 * ov / va.len().min(rows[b].2.len()) > 50 {
+                    removed[b] = true;
+                }
+            }
+            continue;
+        }
         for b in a + 1..rows.len() {
             if removed[b] {
                 continue;
@@ -4377,6 +4414,9 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
     let mut out: Vec<(usize, bool, f64)> = Vec::new();
     let (mut fails, mut done, mut nsol) = (0usize, 0usize, 0usize);
     for (i, _) in &keep {
+        if done % 16 == 0 && (t_enum.elapsed().as_secs_f64() > time_cap || presolve_stop()) {
+            break;
+        }
         let Some(vars) = row_vars(dom, *i) else { continue };
         done += 1;
         let pos0 = dom.stack_len();
