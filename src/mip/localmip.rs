@@ -58,6 +58,12 @@ struct St<'a> {
     rng: u64,
     /// 目的の行の列 (費用の非零)
     obj_cols: Vec<(usize, f64)>,
+    /// 手を当てた回数 (`ENOMOTO_MIP_LMIP2` の `l`: lift の幅の記録が今の点のものかを見る)
+    moves: u64,
+    /// `l` の lift の幅の記録: 列ごとの lift の量 (0 = 動かせない)、記録した時の `moves`、計算し直しの印
+    lift_d: Vec<f64>,
+    lift_at: u64,
+    lift_mark: Vec<u64>,
 }
 
 impl ChainView for St<'_> {
@@ -161,6 +167,7 @@ impl St<'_> {
             self.act[i] = self.p.rows[i].iter().map(|&(j, a)| a * self.x[j]).sum();
         }
         self.act[m] = self.obj_cols.iter().map(|&(j, c)| c * self.x[j]).sum();
+        self.lift_at = u64::MAX;
         self.vset.clear();
         self.vpos.iter_mut().for_each(|v| *v = usize::MAX);
         for i in 0..=m {
@@ -243,6 +250,7 @@ impl St<'_> {
             return;
         }
         self.x[j] = v;
+        self.moves += 1;
         let tt = step + 3 + self.below(10) as u64;
         // 増やしたら減らすのを、減らしたら増やすのを禁じる
         self.tabu[j][if d > 0.0 { 0 } else { 1 }] = tt;
@@ -304,6 +312,75 @@ impl St<'_> {
         }
         moved
     }
+
+    /// 列 j の lift の量 (全部の行を満たしたまま目的が良くなる向きへ動ける幅の端まで。動けなければ 0)
+    fn lift_delta(&self, j: usize) -> f64 {
+        let c = self.p.cost[j];
+        if c == 0.0 || self.lo[j] == self.up[j] {
+            return 0.0;
+        }
+        let (mut dl, mut du) = (self.lo[j] - self.x[j], self.up[j] - self.x[j]);
+        for &(r, b) in &self.p.cols[j] {
+            let (l, u) = (self.p.row_lo[r], self.p.row_up[r]);
+            let (sl, su) = (l - self.act[r], u - self.act[r]);
+            let (a1, a2) = if b > 0.0 { (sl / b, su / b) } else { (su / b, sl / b) };
+            dl = dl.max(a1);
+            du = du.min(a2);
+        }
+        if self.p.is_int[j] {
+            dl = (dl - 1e-9).ceil();
+            du = (du + 1e-9).floor();
+        }
+        let d = if c > 0.0 { dl.min(0.0) } else { du.max(0.0) };
+        if !d.is_finite() || d.abs() < 1e-9 || dl > du { 0.0 } else { d }
+    }
+
+    /// `ENOMOTO_MIP_LMIP2` の `l` (試作): 本家の lift move。目的を最も良くする 1 手 (|c d| が最大) だけを当てる。幅は記録し、
+    /// 前回の lift の後に他の手が入っていなければ、動かした列と行を共有する目的の列だけ計算し直す。当てたら真
+    fn lift_best(&mut self, order: &[usize], step: u64) -> bool {
+        if self.lift_d.len() != self.p.n {
+            self.lift_d = vec![0.0; self.p.n];
+            self.lift_mark = vec![0; self.p.n];
+            self.lift_at = u64::MAX;
+        }
+        if self.lift_at != self.moves {
+            for &j in order {
+                self.lift_d[j] = self.lift_delta(j);
+            }
+        }
+        let mut best: Option<(f64, usize)> = None;
+        for &j in order {
+            let d = self.lift_d[j];
+            if d != 0.0 {
+                let g = -self.p.cost[j] * d;
+                if g > 1e-12 && best.is_none_or(|b| g > b.0) {
+                    best = Some((g, j));
+                }
+            }
+        }
+        let Some((_, j)) = best else {
+            self.lift_at = self.moves;
+            return false;
+        };
+        let v = self.x[j] + self.lift_d[j];
+        self.apply(j, v, step);
+        // 動かした列と行を共有する目的の列の幅を計算し直す
+        let mk = self.moves;
+        self.lift_mark[j] = mk;
+        self.lift_d[j] = self.lift_delta(j);
+        for t in 0..self.p.cols[j].len() {
+            let r = self.p.cols[j][t].0;
+            for u in 0..self.p.rows[r].len() {
+                let k = self.p.rows[r][u].0;
+                if self.lift_mark[k] != mk && self.p.cost[k] != 0.0 {
+                    self.lift_mark[k] = mk;
+                    self.lift_d[k] = self.lift_delta(k);
+                }
+            }
+        }
+        self.lift_at = self.moves;
+        true
+    }
 }
 
 /// Local-MIP 風の局所探索で実行可能な点を探す。`lo`/`up` は列の境界、`time_cap` は秒、`stop` が立ったら止める。
@@ -353,7 +430,7 @@ impl<'a> LocalMip<'a> {
         }
         let start: Vec<f64> = (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect();
         let obj_cols: Vec<(usize, f64)> = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
-        let mut s = St { p, lo: lb, up: ub, x: start.clone(), act: vec![0.0; m + 1], w: vec![1.0; m + 1], obj_up: f64::INFINITY, vset: Vec::new(), vpos: vec![usize::MAX; m + 1], tabu: vec![[0, 0]; n], rng: seed | 1, obj_cols };
+        let mut s = St { p, lo: lb, up: ub, x: start.clone(), act: vec![0.0; m + 1], w: vec![1.0; m + 1], obj_up: f64::INFINITY, vset: Vec::new(), vpos: vec![usize::MAX; m + 1], tabu: vec![[0, 0]; n], rng: seed | 1, obj_cols, moves: 0, lift_d: Vec::new(), lift_at: u64::MAX, lift_mark: Vec::new() };
         s.reset();
         let set_of = if chain { set_rows(p, &s.lo, &s.up) } else { Vec::new() };
         Some(LocalMip {
@@ -427,6 +504,12 @@ impl<'a> LocalMip<'a> {
         let chain_depth = tunable!("ENOMOTO_T_MIP_LOCALMIP_CHAIN_DEPTH", 32usize, usize);
         let pair_cols = tunable!("ENOMOTO_T_MIP_LOCALMIP_PAIR_COLS", 8usize, usize).max(1);
         let debug = env_str!("ENOMOTO_MIP_LOCALMIP_DEBUG").is_some();
+        // `ENOMOTO_MIP_LMIP2=文字` (試作、既定では使わない。本家 Local-MIP に寄せる): `b` = 暫定解の後、目的の行が違反していれば
+        // 目的の全部の列の breakthrough move (目的の行の tight move) を毎回 BMS の候補に入れる (`ENOMOTO_T_MIP_LMIP2_BT_COLS` 本まで、
+        // 越えれば抜き取り)、`l` = lift move を最良の 1 手にする (幅は差分更新)、`w` = 目的の行の重みは、違反行が目的の行だけのときに上げる
+        let lmip2 = env_str!("ENOMOTO_MIP_LMIP2").unwrap_or_default();
+        let (lm2_b, lm2_l, lm2_w) = (lmip2.contains('b'), lmip2.contains('l'), lmip2.contains('w'));
+        let bt_cols = tunable!("ENOMOTO_T_MIP_LMIP2_BT_COLS", 2250usize, usize).max(1);
         let LocalMip { s, res, start, lift_order, set_of, cand, buf, best_obj: best_obj_r, since_improve: since_r, round_best: round_r, restarts: restarts_r, step: step_r, chain_tries: tries_r, chain, t0, done: done_r } = self;
         let (chain, t0) = (*chain, *t0);
         let p = s.p;
@@ -443,7 +526,14 @@ impl<'a> LocalMip<'a> {
             let nviol = s.vset.len() - usize::from(s.vpos[m] != usize::MAX);
             if nviol == 0 {
                 // lift move で目的を良くし、良くならなくなったら暫定解として記録して目的の行を締める (breakthrough)
-                while s.lift_sweep(lift_order, step) > 0 {}
+                if lm2_l {
+                    // 本家と同じく 1 手ずつ (1 手を 1 歩と数え、時間の確かめも通す)
+                    if s.lift_best(lift_order, step) {
+                        continue;
+                    }
+                } else {
+                    while s.lift_sweep(lift_order, step) > 0 {}
+                }
                 if s.vset.iter().any(|&r| r < m) {
                     // 丸めの誤差で違反が出た (起きないはず): そのまま探索を続ける
                     continue;
@@ -539,6 +629,24 @@ impl<'a> LocalMip<'a> {
                     }
                 }
             }
+            // `b`: 目的の全部の列の breakthrough move
+            if lm2_b && s.obj_up.is_finite() && s.vpos[m] != usize::MAX {
+                let len = s.obj_cols.len();
+                for t in 0..len.min(bt_cols) {
+                    let q = if len <= bt_cols { t } else { s.below(len) };
+                    let (j, c) = s.obj_cols[q];
+                    let Some(v) = s.tight_value(m, j, c) else { continue };
+                    let d = v - s.x[j];
+                    if !s.tabu_ok(j, d, step) {
+                        continue;
+                    }
+                    let sc = s.score(j, d);
+                    let bt = s.breakthrough(j, d);
+                    if best.as_ref().is_none_or(|b| sc > b.0 || (sc == b.0 && bt && !b.1)) {
+                        best = Some((sc, bt, j, v, None));
+                    }
+                }
+            }
             // 連鎖の手: 最良の 1 列の手が正でなければ
             if chain && best.as_ref().is_none_or(|b| b.0 <= 0.0) && !s.vset.is_empty() {
                 let kk = s.below(s.vset.len());
@@ -618,8 +726,12 @@ impl<'a> LocalMip<'a> {
                             }
                         }
                     } else {
+                        let only_obj = s.vset.len() == 1 && s.vpos[m] != usize::MAX;
                         for q in 0..s.vset.len() {
                             let r = s.vset[q];
+                            if lm2_w && r == m && !only_obj {
+                                continue;
+                            }
                             s.w[r] += 1.0;
                         }
                     }
