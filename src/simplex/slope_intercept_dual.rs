@@ -7787,6 +7787,15 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
     // 可能になるようにする (cont1 分析の策5 前半)。`ENOMOTO_POLISH_PERTURB_SLACK=1` で旧動作
     // (`super::perturb_costs` をそのまま使い、スラック列も摂動する。A/B 用)。
     let active_cost = if tunable!("ENOMOTO_POLISH_PERTURB_SLACK", 0u8, u8) != 0 { super::perturb_costs(std) } else { dual_active_costs(std) };
+    // 試作 `ENOMOTO_SIMPLEX_POLISH_DSE` (既定では使わない): 仕上げの chuzr を DSE の規則にする
+    // `2`: 引き継いだ重みを捨てて 1 から始める (重みが壊れていることがある: supportcase42 は最大 1e64)
+    let polish_dse_mode = env_str!("ENOMOTO_SIMPLEX_POLISH_DSE").filter(|v| *v != "0");
+    let polish_dse_on = polish_dse_mode.is_some();
+    if polish_dse_mode == Some("2") {
+        if let Some(d) = dse.as_deref_mut() {
+            d.w.iter_mut().for_each(|v| *v = 1.0);
+        }
+    }
 
     let mut lu = lu;
     // 入る列の FTRAN・ピボット行の BTRAN・FT 更新・再分解トリガ (主単体法と共有する部品)。
@@ -7873,6 +7882,17 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
     // 主実行不能な基底行の集合(超疎 chuzr 用)。
     let mut infeasible_rows = InfeasibleRows::new(m);
     infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
+    if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+        // 診断: 仕上げの始めの主実行不能 (真の境界、許容 `tol_floor`) の行の数・最大・和
+        let (mut mx, mut sum) = (0.0f64, 0.0f64);
+        for &i in infeasible_rows.rows.iter() {
+            let bv = basis[i];
+            let dv = (std.lb[bv] - x_b[i]).max(x_b[i] - std.ub[bv]).max(0.0);
+            mx = mx.max(dv);
+            sum += dv;
+        }
+        eprintln!("DEBUG_EXT: polish_start_primal_infeasible_rows={} max={mx:.3e} sum={sum:.3e} tol_floor={tol_floor:.3e}", infeasible_rows.rows.len());
+    }
 
     // S5 (`ENOMOTO_HANDOFF_FLIP=1`、既定オフ): 真のコストで双対実行不能な箱型列を
     // 境界フリップしてからこのループを最大 1 回だけ再開する(再開箇所を参照)。
@@ -7981,17 +8001,27 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
         }
         // chuzr: 重みなしの最大逸脱 (Dantzig) 規則。`infeasible_rows.rows` のみを走査する。
         // 同値のときは小さい行番号、`bland_mode` では常に最小行番号を選ぶ。
+        // 試作 `ENOMOTO_SIMPLEX_POLISH_DSE=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): 引き継いだ DSE 重みが
+        // 有限なら、逸脱の 2 乗 / 重み (主ループと同じ DSE の規則) で選ぶ。重みが未知 (`NaN`) の行がある間は従来の最大逸脱。
         let mut best: Option<(usize, i32, f64)> = None;
+        let mut best_key = f64::NEG_INFINITY;
+        let use_w = polish_dse_on && dse.as_deref().is_some_and(|d| d.w.first().is_some_and(|w| w.is_finite()));
         for &i in &infeasible_rows.rows {
             let Some((d_dir, mag)) = row_deviation_plain(std, basis, &x_b, &noise_feasible, i, tol_floor) else { continue };
+            let key = if use_w {
+                let w = dse.as_deref().map_or(1.0, |d| d.weight(i));
+                if w.is_finite() && w > 0.0 { mag * mag / w } else { mag * mag }
+            } else {
+                mag
+            };
             let better = match best {
                 None => true,
-                Some((br, _, bmag)) => {
+                Some((br, _, _)) => {
                     if bland_mode {
                         i < br
-                    } else if mag > bmag {
+                    } else if key > best_key {
                         true
-                    } else if mag < bmag {
+                    } else if key < best_key {
                         false
                     } else {
                         i < br
@@ -8000,6 +8030,7 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
             };
             if better {
                 best = Some((i, d_dir, mag));
+                best_key = key;
             }
         }
         #[cfg(debug_assertions)]
