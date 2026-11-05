@@ -98,8 +98,146 @@ fn refine_unit(p: &MipProblem) -> usize {
     u
 }
 
+/// 探索の色の細分化の回数の上限。既定 50。`ENOMOTO_MIP_HO6_SYMREFINE` (試作、既定では使わない) なら
+/// `ENOMOTO_T_MIP_HO6_SYMREFINE_ITERS` (既定 100000、実質は不動点まで)。時刻で鎖のようにつながる模型 (unit commitment の
+/// uccase12 など) では、1 回の細分化で区別が鎖を 1 段しか伝わらないので、50 回では不動点 (等しい分割) に届かない
+fn refine_iters() -> usize {
+    if env_str!("ENOMOTO_MIP_HO6_SYMREFINE").is_some() {
+        tunable!("ENOMOTO_T_MIP_HO6_SYMREFINE_ITERS", 100000usize, usize)
+    } else {
+        50
+    }
+}
+
+thread_local! {
+    /// 診断 (`ENOMOTO_MIP_HO6_SYMWORK` のログ): 細分化が回数の上限で止まった (不動点の前) 回数と、呼んだ回数
+    static REFINE_CAPPED: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
 /// 色の細分化。色の種類の数が増えなくなるまで (最大 `max_iter` 回) 繰り返す。
 fn refine(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize) {
+    let mut capped = true;
+    refine_body(p, col, row, max_iter, &mut capped);
+    REFINE_CAPPED.with(|c| {
+        let (a, b) = c.get();
+        c.set((a + capped as u64, b + 1));
+    });
+}
+
+/// `ENOMOTO_MIP_HO6_SYMREFINE` (試作): 探索の中の細分化を、色が変わった列 `seeds` から始めて、前の回で色が変わった要素の隣だけを
+/// 塗り直す形 (作業リスト) で行う。全ての行・列を毎回塗り直す [`refine`] と同じく、行は列の色から、列は新しい行の色から作る。
+/// 色の種類の数 (列と行の色ごとの数を持って数える) が増えなくなるか、塗り直す要素がなくなれば止める。A と B の両方に同じ手順を
+/// 使うので、同型な組では対応する結果になる (見つけた置換は呼び出し側が [`verify`] で確かめる)
+fn refine_inc(p: &MipProblem, col: &mut [u64], row: &mut [u64], seeds: &[usize], max_iter: usize) {
+    let tr = std::time::Instant::now();
+    let mut cnt: std::collections::HashMap<u64, u32> = std::collections::HashMap::with_capacity(p.n + p.m);
+    for &c in col.iter().chain(row.iter()) {
+        *cnt.entry(c).or_insert(0) += 1;
+    }
+    let mut classes = cnt.len();
+    let mut changed_cols: Vec<usize> = seeds.to_vec();
+    let mut stamp_r = vec![u32::MAX; p.m];
+    let mut stamp_c = vec![u32::MAX; p.n];
+    let mut buf: Vec<u64> = Vec::new();
+    let mut capped = true;
+    let mut upd = |cnt: &mut std::collections::HashMap<u64, u32>, old: u64, new: u64| {
+        if let Some(k) = cnt.get_mut(&old) {
+            *k -= 1;
+            if *k == 0 {
+                cnt.remove(&old);
+            }
+        }
+        *cnt.entry(new).or_insert(0) += 1;
+    };
+    for it in 0..max_iter as u32 {
+        let mut rows_to: Vec<usize> = Vec::new();
+        for &j in &changed_cols {
+            for &(i, _) in &p.cols[j] {
+                if stamp_r[i] != it {
+                    stamp_r[i] = it;
+                    rows_to.push(i);
+                }
+            }
+        }
+        let mut work = 0usize;
+        let new_rows: Vec<u64> = rows_to
+            .iter()
+            .map(|&i| {
+                buf.clear();
+                buf.extend(p.rows[i].iter().map(|&(j, a)| mix(col[j], fbits(a))));
+                work += buf.len();
+                buf.sort_unstable();
+                buf.iter().fold(row[i], |h, &v| mix(h, v))
+            })
+            .collect();
+        let rows_ch = relabel_filter(&rows_to, &new_rows, row, &cnt);
+        for &(i, v) in &rows_ch {
+            upd(&mut cnt, row[i], v);
+            row[i] = v;
+        }
+        let mut cols_to: Vec<usize> = Vec::new();
+        for &(i, _) in &rows_ch {
+            for &(j, _) in &p.rows[i] {
+                if stamp_c[j] != it {
+                    stamp_c[j] = it;
+                    cols_to.push(j);
+                }
+            }
+        }
+        let new_cols: Vec<u64> = cols_to
+            .iter()
+            .map(|&j| {
+                buf.clear();
+                buf.extend(p.cols[j].iter().map(|&(i, a)| mix(row[i], fbits(a))));
+                work += buf.len();
+                buf.sort_unstable();
+                buf.iter().fold(col[j], |h, &v| mix(h, v))
+            })
+            .collect();
+        let cols_ch = relabel_filter(&cols_to, &new_cols, col, &cnt);
+        for &(j, v) in &cols_ch {
+            upd(&mut cnt, col[j], v);
+            col[j] = v;
+        }
+        add_work(work + rows_to.len() + cols_to.len());
+        LWORK.with(|c| c.set(c.get() + (work + rows_to.len() + cols_to.len()) as u64));
+        changed_cols = cols_ch.iter().map(|&(j, _)| j).collect();
+        if changed_cols.is_empty() || cnt.len() == classes {
+            capped = false;
+            break;
+        }
+        classes = cnt.len();
+    }
+    REFINE_CAPPED.with(|c| {
+        let (a, b) = c.get();
+        c.set((a + capped as u64, b + 1));
+    });
+    RTIME.with(|c| c.set(c.get() + tr.elapsed().as_secs_f64()));
+}
+
+/// [`refine_inc`] の 1 段: 塗り直した要素 `idx` (新しい値 `new`) のうち、分割を変えるものだけを返す。元の色のクラスの要素が全て
+/// 塗り直され、全て同じ新しい値になったなら、それはただの付け替え (分割は変わらない) なので元の値のままにする
+fn relabel_filter(idx: &[usize], new: &[u64], cur: &[u64], cnt: &std::collections::HashMap<u64, u32>) -> Vec<(usize, u64)> {
+    // 元の色 -> (塗り直した数, 最初の新しい値, 全て同じか)
+    let mut g: std::collections::HashMap<u64, (u32, u64, bool)> = std::collections::HashMap::new();
+    for (&k, &v) in idx.iter().zip(new) {
+        let e = g.entry(cur[k]).or_insert((0, v, true));
+        e.0 += 1;
+        if e.1 != v {
+            e.2 = false;
+        }
+    }
+    idx.iter()
+        .zip(new)
+        .filter(|&(&k, _)| {
+            let (c, _, same) = g[&cur[k]];
+            !(same && cnt.get(&cur[k]).copied().unwrap_or(0) == c)
+        })
+        .map(|(&k, &v)| (k, v))
+        .collect()
+}
+
+fn refine_body(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize, capped: &mut bool) {
     let mut prev = usize::MAX;
     let mut buf: Vec<u64> = Vec::new();
     let unit = refine_unit(p);
@@ -128,6 +266,7 @@ fn refine(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize) {
         all.sort_unstable();
         all.dedup();
         if all.len() == prev {
+            *capped = false;
             break;
         }
         prev = all.len();
@@ -258,13 +397,24 @@ impl Symmetry {
     }
 }
 
+/// 診断: 細分化が回数の上限で止まった回数と呼んだ回数 (`ENOMOTO_MIP_HO6_SYMWORK`・`ENOMOTO_MIP_HO6_SYMREFINE` のログ用)
+pub fn refine_capped() -> (u64, u64) {
+    REFINE_CAPPED.with(|c| c.get())
+}
+
+/// `ENOMOTO_MIP_HO6_SYMWORK` (試作): 対称性の検出の上限を細分化の後の探索の分だけに数えるか ([`detect_inner`])。
+fn ho6_symwork() -> bool {
+    env_str!("ENOMOTO_MIP_HO6_SYMWORK").is_some()
+}
+
 /// 手間の上限 (`WORK` の終わり, `LWORK` の終わり) を越えたか。
 fn over(end: (u64, u64)) -> bool {
     work() > end.0 || log_work() > end.1
 }
 
 fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64, u64), twins: &[Vec<usize>]) -> Option<Symmetry> {
-    let t0 = std::time::Instant::now();
+    let mut t0 = std::time::Instant::now();
+    let mut work_end = work_end;
     let n = p.n;
     if n < 2 || p.m == 0 {
         return None;
@@ -289,7 +439,18 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64,
         }
     }
     let mut row: Vec<u64> = (0..p.m).map(|i| mix(fbits(p.row_lo[i]), fbits(p.row_up[i]))).collect();
-    refine(p, &mut col, &mut row, 50);
+    let (rw0, rl0, rt0) = (work(), log_work(), std::time::Instant::now());
+    refine(p, &mut col, &mut row, refine_iters());
+    // `ENOMOTO_MIP_HO6_SYMWORK` (試作、既定では使わない): 時間・手間の上限を、色の細分化の後の探索の分だけに数える (細分化に
+    // 使った分を上限に足す)。uccase12 (前処理の後 8.9 万行・34 万非零) は細分化だけで手間 8.97e7 を使い、上限 2.5e7
+    // (`ENOMOTO_T_MIP_PRESOLVE_WORK_SYM`) を越えて探索に 1 度も入らず「対称性なし」になっていた (HiGHS は同じ模型で生成元 33 個)
+    if ho6_symwork() {
+        work_end = (work_end.0.saturating_add(work() - rw0), work_end.1.saturating_add(log_work() - rl0));
+        t0 += rt0.elapsed();
+        if env_str!("ENOMOTO_MIP_LOG").is_some() {
+            eprintln!("MIP: symmetry: refinement {:.2}s, work {} (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)", rt0.elapsed().as_secs_f64(), work() - rw0);
+        }
+    }
     // 同じ色の列の組 (2 列以上)
     let mut cells: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
     for j in 0..n {
@@ -437,8 +598,14 @@ fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: st
     let indiv = |c: &mut [u64], j: usize, level: u64| c[j] = mix(c[j], 0xA5A5_0000 ^ level);
     indiv(&mut ca, a, level);
     indiv(&mut cb, b, level);
-    refine(p, &mut ca, &mut ra, 50);
-    refine(p, &mut cb, &mut rb, 50);
+    let inc = env_str!("ENOMOTO_MIP_HO6_SYMREFINE").is_some();
+    if inc {
+        refine_inc(p, &mut ca, &mut ra, &[a], refine_iters());
+        refine_inc(p, &mut cb, &mut rb, &[b], refine_iters());
+    } else {
+        refine(p, &mut ca, &mut ra, refine_iters());
+        refine(p, &mut cb, &mut rb, refine_iters());
+    }
     for _ in 0..n {
         if t0.elapsed().as_secs_f64() > time_cap || over(work_end) {
             return None;
@@ -489,8 +656,13 @@ fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: st
         level += 1;
         indiv(&mut ca, x, level);
         indiv(&mut cb, y, level);
-        refine(p, &mut ca, &mut ra, 50);
-        refine(p, &mut cb, &mut rb, 50);
+        if inc {
+            refine_inc(p, &mut ca, &mut ra, &[x], refine_iters());
+            refine_inc(p, &mut cb, &mut rb, &[y], refine_iters());
+        } else {
+            refine(p, &mut ca, &mut ra, refine_iters());
+            refine(p, &mut cb, &mut rb, refine_iters());
+        }
     }
     None
 }

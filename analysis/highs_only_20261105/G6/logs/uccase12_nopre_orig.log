@@ -1,0 +1,2367 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option presolve to "off"
+Set option threads to 4
+Set option time_limit to 150
+Set option mip_allow_restart to false
+Set option mip_rel_gap to 0
+MIP uccase12 has 121161 rows; 62529 cols; 419447 nonzeros; 9072 integer variables (9072 binary)
+Coefficient ranges:
+  Matrix  [9e-05, 4e+02]
+  Cost    [1e+00, 7e+00]
+  Bound   [1e+00, 1e+04]
+  RHS     [3e-02, 6e+03]
+
+Presolve is switched off
+
+Solving MIP model with:
+   121161 rows
+   62529 cols (9072 binary, 0 integer, 0 implied int., 53457 continuous, 0 domain fixed)
+   419447 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     3.1s
+HCA prop len 3 limit 2821
+HCONF c 3 1 0 2
+HCONF r 3 1 0 1
+HCONF r 2 1 0 0
+         0       0         0   0.00%   11507.285324    inf                  inf        0      0      3     32524     7.3s
+HPROP 0 obj 11507.285324
+HSEP round 1 obj 11507.285324 sep0=20 sep1=232 sep2=0
+HADD 0 obj 11507.313507 lprows 121189
+HCA prop len 2 limit 2821
+HCONF c 3 0 0 3
+HCONF r 3 1 0 1
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 11507.313507
+HSEP round 2 obj 11507.313507 sep0=28 sep1=152 sep2=2
+HADD 0 obj 11507.321131 lprows 121219
+HCA prop len 3 limit 2821
+HCONF c 3 1 0 2
+HCONF r 3 2 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 11507.321131
+HSEP round 3 obj 11507.321131 sep0=30 sep1=119 sep2=0
+HADD 0 obj 11507.330989 lprows 121240
+HCA prop len 2 limit 2821
+HCONF c 3 0 0 3
+HCONF r 3 0 0 2
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 11507.330989
+HSEP round 4 obj 11507.330989 sep0=26 sep1=89 sep2=7
+HADD 0 obj 11507.356201 lprows 121254
+HCA prop len 3 limit 2821
+HCONF c 3 1 0 2
+HCONF r 3 0 0 2
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 11507.356201
+HSEP round 5 obj 11507.356201 sep0=40 sep1=50 sep2=9
+HADD 0 obj 11507.360710 lprows 121268
+HCA prop len 2 limit 2821
+HCONF c 3 0 0 3
+HCONF r 3 1 0 1
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+ C       0       0         0   0.00%   11507.36071     11507.925433       0.00%      804    107     22     32725    12.8s
+HPROP 0 obj 11507.360710
+HSEP round 6 obj 11507.360710 sep0=10 sep1=91 sep2=0
+HADD 0 obj 11507.360710 lprows 121275
+HPROP 0 obj 11507.360710
+HSEP round 7 obj 11507.360710 sep0=18 sep1=127 sep2=0
+HADD 0 obj 11507.360710 lprows 121282
+HPROP 0 obj 11507.360710
+HSEP round 8 obj 11507.360710 sep0=2 sep1=172 sep2=0
+HADD 0 obj 11507.360710 lprows 121289
+HPROP 0 obj 11507.360710
+HSEP round 9 obj 11507.360710 sep0=6 sep1=150 sep2=0
+HADD 0 obj 11507.360710 lprows 121296
+HPROP 0 obj 11507.360710
+HSEP round 10 obj 11507.360710 sep0=4 sep1=168 sep2=0
+HADD 0 obj 11507.360710 lprows 121303
+HPROP 0 obj 11507.360710
+HSEP round 11 obj 11507.360710 sep0=4 sep1=151 sep2=0
+HADD 0 obj 11507.360710 lprows 121310
+HPROP 0 obj 11507.360710
+HSEP round 12 obj 11507.360710 sep0=14 sep1=190 sep2=0
+HADD 0 obj 11507.360710 lprows 121318
+HPROP 0 obj 11507.360710
+HSEP round 13 obj 11507.360710 sep0=2 sep1=153 sep2=0
+HADD 0 obj 11507.360710 lprows 121327
+         0       0         0   0.00%   11507.36071     11507.925433       0.00%     2066    166     22     32864    18.2s
+HPROP 0 obj 11507.360710
+HSEP round 14 obj 11507.360710 sep0=2 sep1=215 sep2=0
+HADD 0 obj 11507.360710 lprows 121340
+HPROP 0 obj 11507.360710
+HSEP round 15 obj 11507.360710 sep0=0 sep1=188 sep2=0
+HADD 0 obj 11507.360710 lprows 121353
+HPROP 0 obj 11507.360710
+HSEP round 16 obj 11507.360710 sep0=14 sep1=193 sep2=0
+HADD 0 obj 11507.361888 lprows 121304
+HPROP 0 obj 11507.361888
+HSEP round 17 obj 11507.361888 sep0=14 sep1=170 sep2=0
+HADD 0 obj 11507.363067 lprows 121316
+HPROP 0 obj 11507.363067
+HSEP round 18 obj 11507.363067 sep0=4 sep1=141 sep2=0
+HADD 0 obj 11507.364246 lprows 121326
+HPROP 0 obj 11507.364246
+HSEP round 19 obj 11507.364246 sep0=4 sep1=113 sep2=0
+HADD 0 obj 11507.366603 lprows 121334
+HPROP 0 obj 11507.366603
+HSEP round 20 obj 11507.366603 sep0=14 sep1=52 sep2=0
+HADD 0 obj 11507.367782 lprows 121338
+HPROP 0 obj 11507.367782
+HSEP round 21 obj 11507.367782 sep0=4 sep1=38 sep2=0
+HADD 0 obj 11507.368960 lprows 121323
+         0       0         0   0.00%   11507.36896     11507.925433       0.00%     3232    162     22     32976    23.6s
+HPROP 0 obj 11507.368960
+HSEP round 22 obj 11507.368960 sep0=0 sep1=0 sep2=0
+HCA prop len 3 limit 1161
+HCONF c 3 3 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 11501.695964
+HSEP round 23 obj 11501.695964 sep0=228 sep1=138 sep2=11
+HADD 0 obj 11501.740316 lprows 46525
+HPROP 0 obj 11501.740316
+HSEP round 24 obj 11501.740316 sep0=84 sep1=9 sep2=0
+HADD 0 obj 11501.740960 lprows 46534
+HPROP 0 obj 11501.740960
+HSEP round 25 obj 11501.740960 sep0=6 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 46545
+HPROP 0 obj 11501.747638
+HSEP round 26 obj 11501.747638 sep0=0 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 46547
+HPROP 0 obj 11501.747638
+HSEP round 27 obj 11501.747638 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 46549
+HPROP 0 obj 11501.732710
+HSEP round 28 obj 11501.732710 sep0=187 sep1=67 sep2=0
+HADD 0 obj 11501.747638 lprows 33184
+HPROP 0 obj 11501.747638
+HSEP round 29 obj 11501.747638 sep0=8 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 33194
+HPROP 0 obj 11501.747638
+HSEP round 30 obj 11501.747638 sep0=34 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 33198
+HPROP 0 obj 11501.747638
+HSEP round 31 obj 11501.747638 sep0=21 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 33199
+HPROP 0 obj 11501.747638
+HSEP round 32 obj 11501.747638 sep0=11 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 33201
+HPROP 0 obj 11501.747638
+HSEP round 33 obj 11501.747638 sep0=0 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 33203
+HPROP 0 obj 11501.732710
+HSEP round 34 obj 11501.732710 sep0=140 sep1=53 sep2=0
+HADD 0 obj 11501.747638 lprows 26972
+HPROP 0 obj 11501.747638
+HSEP round 35 obj 11501.747638 sep0=22 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 26980
+HPROP 0 obj 11501.747638
+HSEP round 36 obj 11501.747638 sep0=64 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 26984
+HPROP 0 obj 11501.747638
+HSEP round 37 obj 11501.747638 sep0=41 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 26987
+HPROP 0 obj 11501.747638
+HSEP round 38 obj 11501.747638 sep0=34 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 26989
+HPROP 0 obj 11502.247638
+HSEP round 39 obj 11502.247638 sep0=125 sep1=0 sep2=0
+HADD 0 obj 11502.261033 lprows 23760
+HPROP 0 obj 11502.261033
+HSEP round 40 obj 11502.261033 sep0=66 sep1=0 sep2=0
+HADD 0 obj 11502.264728 lprows 23767
+HPROP 0 obj 11502.264728
+HSEP round 41 obj 11502.264728 sep0=35 sep1=0 sep2=0
+HADD 0 obj 11502.267299 lprows 23769
+HPROP 0 obj 11502.267299
+HSEP round 42 obj 11502.267299 sep0=34 sep1=0 sep2=0
+HADD 0 obj 11502.267299 lprows 23771
+HPROP 0 obj 11502.267299
+HSEP round 43 obj 11502.267299 sep0=0 sep1=0 sep2=0
+HADD 0 obj 11502.267299 lprows 23772
+HPROP 0 obj 11501.787299
+HSEP round 44 obj 11501.787299 sep0=42 sep1=0 sep2=0
+HADD 0 obj 11501.794852 lprows 22539
+HPROP 0 obj 11501.794852
+HSEP round 45 obj 11501.794852 sep0=20 sep1=0 sep2=0
+HADD 0 obj 11501.797614 lprows 22542
+HCONF r 6 5 0 0
+HCA proof explainfail prooflen 49
+HCA proof len 15 prooflen 53
+HCONF r 9 8 0 0
+HCONF r 2 1 0 0
+HCA proof len 14 prooflen 50
+HCONF c 14 14 0 0
+HCA proof len 20 prooflen 54
+HCONF r 14 13 0 0
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCA proof len 7 prooflen 47
+HCONF c 7 7 0 0
+HCA proof len 13 prooflen 51
+HCONF r 7 6 0 0
+HCONF r 2 1 0 0
+HCA proof len 11 prooflen 47
+HCONF c 11 11 0 0
+HCA proof len 11 prooflen 46
+HCONF c 11 11 0 0
+HCA proof len 15 prooflen 47
+HCONF r 11 10 0 0
+HCONF r 2 1 0 0
+HCA proof len 10 prooflen 48
+HCONF c 10 10 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 7 6 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HPROP 0 obj 11502.268443
+HSEP round 46 obj 11502.268443 sep0=14 sep1=0 sep2=0
+HADD 0 obj 11502.269936 lprows 23773
+HPROP 0 obj 11502.269936
+HSEP round 47 obj 11502.269936 sep0=36 sep1=0 sep2=0
+HADD 0 obj 11502.270406 lprows 23776
+HPROP 0 obj 11502.270406
+HSEP round 48 obj 11502.270406 sep0=16 sep1=0 sep2=0
+HADD 0 obj 11502.270459 lprows 23778
+HPROP 0 obj 11502.270459
+HSEP round 49 obj 11502.270459 sep0=25 sep1=0 sep2=0
+HADD 0 obj 11502.270885 lprows 23779
+HPROP 0 obj 11502.270885
+HSEP round 50 obj 11502.270885 sep0=0 sep1=0 sep2=0
+HADD 0 obj 11502.271854 lprows 23781
+HPROP 0 obj 11502.271854
+HSEP round 51 obj 11502.271854 sep0=16 sep1=0 sep2=0
+HADD 0 obj 11502.271866 lprows 23782
+HCA proof explainfail prooflen 46
+HCA proof len 8 prooflen 46
+HCONF c 7 7 0 0
+HCONF r 2 1 0 0
+HCONF r 5 4 0 0
+HCA proof len 5 prooflen 44
+HCONF c 5 5 0 0
+HCA proof len 10 prooflen 44
+HCONF r 5 4 0 0
+HCONF r 2 1 0 0
+HCONF r 6 5 0 0
+HCA proof len 5 prooflen 44
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 9 prooflen 44
+HCONF c 9 9 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCA proof len 5 prooflen 43
+HCONF c 5 5 0 0
+HCA proof len 9 prooflen 43
+HCONF r 5 4 0 0
+HCONF c 11 11 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 5 prooflen 44
+HCONF c 5 5 0 0
+HCA proof len 10 prooflen 44
+HCONF r 5 4 0 0
+HCONF c 11 11 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HPROP 0 obj 11502.271317
+HSEP round 52 obj 11502.271317 sep0=24 sep1=0 sep2=0
+HADD 0 obj 11502.271691 lprows 23783
+HPROP 0 obj 11502.271691
+HSEP round 53 obj 11502.271691 sep0=11 sep1=0 sep2=0
+HADD 0 obj 11502.271889 lprows 23784
+HPROP 0 obj 11502.271889
+HSEP round 54 obj 11502.271889 sep0=2 sep1=0 sep2=0
+HADD 0 obj 11502.271889 lprows 23785
+HCA prop len 7 limit 206
+HCONF c 6 6 0 0
+HCONF c 6 6 0 0
+HCONF r 2 1 0 0
+HCA proof len 13 prooflen 46
+HCONF c 14 14 0 0
+HCONF r 6 5 0 0
+HCONF c 13 13 0 0
+HCONF r 2 1 0 0
+HCA proof len 7 prooflen 45
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 13 prooflen 46
+HCONF c 13 13 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 11 prooflen 44
+HCONF c 12 12 0 0
+HCONF r 2 1 0 0
+HCA proof len 11 prooflen 44
+HCONF c 11 11 0 0
+HCONF r 2 1 0 0
+HCA proof len 15 prooflen 44
+HCONF c 16 16 0 0
+HCONF r 2 1 0 0
+HCA proof len 16 prooflen 44
+HCONF c 15 15 0 0
+HCONF r 2 1 0 0
+HCA prop len 7 limit 206
+HCONF c 13 13 0 0
+HCONF r 6 5 0 0
+HCONF r 2 1 0 0
+HCA prop len 5 limit 206
+HCONF c 9 9 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 11502.274278
+HSEP round 55 obj 11502.274278 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11502.274278 lprows 23786
+HCA proof len 7 prooflen 45
+HCONF c 13 13 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA prop len 7 limit 206
+HCONF c 7 7 0 0
+HCONF r 5 4 0 0
+HCA prop len 7 limit 206
+HCONF c 13 13 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 7 prooflen 45
+HCONF c 13 13 0 0
+HCONF c 12 12 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 14 prooflen 45
+HCONF c 19 19 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 3 prooflen 41
+HCONF c 3 3 0 0
+HCA prop len 5 limit 206
+HCONF c 7 7 0 0
+HCONF r 2 1 0 0
+HCA prop len 7 limit 206
+HCONF c 7 7 0 0
+HCONF r 7 6 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA prop len 10 limit 206
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCONF r 2 1 0 0
+HCA prop len 13 limit 206
+HCONF c 12 12 0 0
+HCONF r 2 1 0 0
+HCA prop len 5 limit 206
+HCONF c 7 7 0 0
+HCONF r 2 1 0 0
+HCA prop len 13 limit 206
+HCONF c 12 12 0 0
+HCONF r 2 1 0 0
+HCA prop len 7 limit 206
+HCONF c 7 7 0 0
+HCONF r 7 6 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA prop len 10 limit 206
+HCONF c 11 11 0 0
+HCONF r 15 14 0 0
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HPROP 0 obj 11502.274278
+HSEP round 56 obj 11502.274278 sep0=3 sep1=0 sep2=0
+HADD 0 obj 11502.276483 lprows 23785
+HPROP 0 obj 11502.275529
+HSEP round 57 obj 11502.275529 sep0=16 sep1=0 sep2=0
+HADD 0 obj 11502.276483 lprows 23786
+HCONF r 3 2 0 0
+HCONF r 2 1 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 2 1 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 2 1 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 2 1 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 57 56 0 0
+HCONF r 57 56 0 0
+HCA proof explainfail prooflen 176
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 68 67 0 0
+HCONF r 69 68 0 0
+HCA proof len 70 prooflen 172
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF c 70 70 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 71 prooflen 174
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF c 71 71 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 71 prooflen 174
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF c 71 71 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 72 prooflen 177
+HCONF c 72 72 0 0
+HCA proof len 72 prooflen 176
+HCONF c 72 72 0 0
+HCA proof len 78 prooflen 174
+HCONF c 80 80 0 0
+HCONF r 72 71 0 0
+HCONF r 2 1 0 0
+HCONF c 80 80 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF c 79 79 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 72 prooflen 175
+HCONF r 80 79 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF c 72 72 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 70 prooflen 172
+HCONF c 79 79 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF c 78 78 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof explainfail prooflen 177
+HCONF r 38 37 0 0
+HCONF r 38 37 0 0
+HCONF r 38 37 0 0
+HCONF r 38 37 0 0
+HCONF r 38 37 0 0
+HCONF r 42 41 0 0
+HCONF r 42 41 0 0
+HCONF r 42 41 0 0
+HCONF r 42 41 0 0
+HCONF r 42 41 0 0
+HCONF r 41 40 0 0
+HCONF r 42 41 0 0
+HCONF r 42 41 0 0
+HCONF r 42 41 0 0
+HCONF r 42 41 0 0
+HCONF r 42 41 0 0
+HCONF r 42 41 0 0
+HPROP 0 obj 11501.747638
+HSEP round 58 obj 11501.747638 sep0=0 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 33204
+HCONF r 60 59 0 0
+HCONF r 60 59 0 0
+HCA proof explainfail prooflen 965
+HPROP 0 obj 11501.747638
+HSEP round 59 obj 11501.747638 sep0=4 sep1=0 sep2=0
+HADD 0 obj 11501.747638 lprows 46551
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 24 23 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 24 23 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 24 23 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 24 23 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 24 23 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 24 23 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 23 22 0 0
+HCONF r 24 23 0 0
+HCONF r 23 22 0 0
+HCONF r 31 30 0 0
+HCONF r 31 30 0 0
+HCONF r 31 30 0 0
+HCONF r 31 30 0 0
+HCONF r 31 30 0 0
+HCONF r 31 30 0 0
+HCONF r 31 30 0 0
+HCONF r 43 42 0 0
+HCONF r 43 42 0 0
+HCONF r 66 65 0 0
+HCONF r 67 66 0 0
+HCONF r 65 64 0 0
+HCONF r 65 64 0 0
+HCONF r 65 64 0 0
+HCONF r 65 64 0 0
+HCONF r 66 65 0 0
+HCONF r 67 66 0 0
+HCA proof len 83 prooflen 1982
+HCONF c 83 83 0 0
+HCA proof len 83 prooflen 1984
+HCONF c 83 83 0 0
+HCA proof len 86 prooflen 1981
+HCONF c 90 90 0 0
+HCONF r 83 82 0 0
+HCONF r 2 1 0 0
+HCONF r 92 91 0 0
+HCONF r 92 91 0 0
+HCONF r 92 91 0 0
+HCONF r 92 91 0 0
+HCONF r 92 91 0 0
+HCONF r 92 91 0 0
+HCONF r 91 90 0 0
+HCONF r 92 91 0 0
+HCONF r 92 91 0 0
+HCONF r 92 91 0 0
+HCONF r 92 91 0 0
+HCONF r 91 90 0 0
+HCONF r 91 90 0 0
+HCONF r 91 90 0 0
+ L       0       0         0   0.00%   11507.36896     11507.405062       0.00%     3232    162     22     32976    44.3s
+HPROP 0 obj 11507.368960
+HSEP round 60 obj 11507.368960 sep0=0 sep1=0 sep2=0
+HPROP 0 obj 11501.460960
+HSEP round 61 obj 11501.460960 sep0=190 sep1=0 sep2=0
+HADD 0 obj 11501.483682 lprows 32785
+HPROP 0 obj 11501.483682
+HSEP round 62 obj 11501.483682 sep0=125 sep1=0 sep2=0
+HADD 0 obj 11501.488135 lprows 32790
+HPROP 0 obj 11501.488135
+HSEP round 63 obj 11501.488135 sep0=32 sep1=0 sep2=0
+HADD 0 obj 11501.489545 lprows 32794
+HPROP 0 obj 11501.489545
+HSEP round 64 obj 11501.489545 sep0=24 sep1=0 sep2=0
+HADD 0 obj 11501.490147 lprows 32796
+HPROP 0 obj 11501.490147
+HSEP round 65 obj 11501.490147 sep0=4 sep1=0 sep2=0
+HADD 0 obj 11501.490147 lprows 32797
+HPROP 0 obj 11501.460960
+HSEP round 66 obj 11501.460960 sep0=144 sep1=0 sep2=0
+HADD 0 obj 11501.474355 lprows 23605
+HPROP 0 obj 11501.474355
+HSEP round 67 obj 11501.474355 sep0=68 sep1=0 sep2=0
+HADD 0 obj 11501.490295 lprows 23618
+HPROP 0 obj 11501.490295
+HSEP round 68 obj 11501.490295 sep0=46 sep1=0 sep2=0
+HADD 0 obj 11501.491326 lprows 23620
+HPROP 0 obj 11501.491326
+HSEP round 69 obj 11501.491326 sep0=28 sep1=0 sep2=0
+HADD 0 obj 11501.491326 lprows 23621
+HPROP 0 obj 11501.491326
+HSEP round 70 obj 11501.491326 sep0=2 sep1=0 sep2=0
+HADD 0 obj 11501.492149 lprows 23624
+HPROP 0 obj 11501.477096
+HSEP round 71 obj 11501.477096 sep0=66 sep1=0 sep2=0
+HADD 0 obj 11501.487997 lprows 22758
+HPROP 0 obj 11501.487997
+HSEP round 72 obj 11501.487997 sep0=32 sep1=0 sep2=0
+HADD 0 obj 11501.497338 lprows 22768
+HPROP 0 obj 11501.542149
+HSEP round 73 obj 11501.542149 sep0=54 sep1=0 sep2=0
+HADD 0 obj 11501.545224 lprows 22323
+HPROP 0 obj 11501.545224
+HSEP round 74 obj 11501.545224 sep0=16 sep1=0 sep2=0
+HADD 0 obj 11501.546756 lprows 22325
+HPROP 0 obj 11501.546756
+HSEP round 75 obj 11501.546756 sep0=0 sep1=0 sep2=0
+HADD 0 obj 11501.547338 lprows 22328
+HPROP 0 obj 11501.542149
+HSEP round 76 obj 11501.542149 sep0=54 sep1=0 sep2=0
+HADD 0 obj 11501.545224 lprows 22323
+HPROP 0 obj 11501.545224
+HSEP round 77 obj 11501.545224 sep0=16 sep1=0 sep2=0
+HADD 0 obj 11501.546756 lprows 22325
+HPROP 0 obj 11501.546756
+HSEP round 78 obj 11501.546756 sep0=0 sep1=0 sep2=0
+HADD 0 obj 11501.547338 lprows 22328
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCA proof len 6 prooflen 135
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 5 prooflen 128
+HCONF r 6 5 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 5 prooflen 126
+HCONF c 4 4 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCA proof len 6 prooflen 134
+HCONF c 6 6 0 0
+HCA proof len 6 prooflen 134
+HCONF c 6 6 0 0
+HCA proof len 6 prooflen 134
+HCONF c 6 6 0 0
+HCA proof len 6 prooflen 134
+HCONF c 6 6 0 0
+HCA proof len 6 prooflen 134
+HCONF c 6 6 0 0
+HCA proof len 6 prooflen 134
+HCONF c 6 6 0 0
+HCA proof len 6 prooflen 134
+HCONF c 6 6 0 0
+HCA proof len 12 prooflen 134
+HCONF r 6 5 0 0
+HCONF c 12 12 0 0
+HCONF r 6 5 0 0
+HCONF c 9 9 0 0
+HCONF r 6 5 0 0
+HCONF r 4 3 0 0
+HCONF r 2 1 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCA proof len 5 prooflen 126
+HCONF c 5 5 0 0
+HCA proof len 10 prooflen 126
+HCONF c 10 10 0 0
+HCA proof len 5 prooflen 126
+HCONF r 10 9 0 0
+HCONF r 2 1 0 0
+HCA proof len 5 prooflen 126
+HCONF r 10 9 0 0
+HCONF r 2 1 0 0
+HCA proof len 5 prooflen 126
+HCONF r 9 8 0 0
+HCONF r 2 1 0 0
+HCA proof len 5 prooflen 126
+HCONF r 8 7 0 0
+HCONF r 2 1 0 0
+HCA proof len 5 prooflen 126
+HCONF r 7 6 0 0
+HCONF r 2 1 0 0
+HCA proof len 5 prooflen 127
+HCONF r 6 5 0 0
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCA proof len 6 prooflen 133
+HCONF c 6 6 0 0
+HCA proof len 6 prooflen 133
+HCONF c 6 6 0 0
+HCA proof len 6 prooflen 133
+HCONF c 6 6 0 0
+HCA proof len 6 prooflen 133
+HCONF c 6 6 0 0
+HCA proof len 5 prooflen 126
+HCONF c 5 5 0 0
+HCA proof len 5 prooflen 126
+HCONF c 5 5 0 0
+HCA proof len 4 prooflen 127
+HCONF c 4 4 0 0
+HCA proof len 4 prooflen 127
+HCONF c 4 4 0 0
+HCA proof len 4 prooflen 127
+HCONF c 4 4 0 0
+HCA proof len 4 prooflen 125
+HCONF c 4 4 0 0
+HCA proof len 4 prooflen 125
+HCONF c 4 4 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCA proof explainfail prooflen 133
+HCA proof len 5 prooflen 127
+HCONF r 6 5 0 0
+HCONF r 2 1 0 0
+HCA proof len 5 prooflen 125
+HCONF r 5 4 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 4 prooflen 135
+HCONF c 4 4 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCONF r 16 15 0 0
+HCA proof len 16 prooflen 144
+HCONF c 16 16 0 0
+HCONF r 2 1 0 0
+HCA proof len 20 prooflen 144
+HCONF c 16 16 0 0
+HCONF r 16 15 0 0
+HCA proof len 4 prooflen 132
+HCONF c 4 4 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 4 prooflen 128
+HCONF r 4 3 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCA proof len 9 prooflen 131
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCONF r 2 1 0 0
+HCONF r 3 2 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 11501.495401
+HSEP round 79 obj 11501.495401 sep0=34 sep1=0 sep2=0
+HADD 0 obj 11501.495706 lprows 23625
+HPROP 0 obj 11501.495706
+HSEP round 80 obj 11501.495706 sep0=6 sep1=1 sep2=0
+HADD 0 obj 11501.496384 lprows 23626
+HPROP 0 obj 11501.496384
+HSEP round 81 obj 11501.496384 sep0=0 sep1=0 sep2=0
+HADD 0 obj 11501.496384 lprows 23629
+HPROP 0 obj 11501.493590
+HSEP round 82 obj 11501.493590 sep0=22 sep1=0 sep2=0
+HADD 0 obj 11501.496384 lprows 22228
+HPROP 0 obj 11501.496384
+HSEP round 83 obj 11501.496384 sep0=2 sep1=0 sep2=0
+HADD 0 obj 11501.496384 lprows 22230
+HPROP 0 obj 11501.496384
+HSEP round 84 obj 11501.496384 sep0=6 sep1=0 sep2=0
+HADD 0 obj 11501.496432 lprows 22231
+HPROP 0 obj 11501.496432
+HSEP round 85 obj 11501.496432 sep0=6 sep1=0 sep2=0
+HADD 0 obj 11501.497085 lprows 22232
+HCA proof len 3 prooflen 129
+HCONF r 2 1 0 0
+HCA proof len 3 prooflen 129
+HCONF c 3 3 0 0
+HCA proof len 3 prooflen 129
+HCONF c 3 3 0 0
+HCA proof len 3 prooflen 129
+HCONF r 2 1 0 0
+HCA proof len 3 prooflen 130
+HCONF c 3 3 0 0
+HPROP 0 obj 11501.496384
+HSEP round 86 obj 11501.496384 sep0=4 sep1=0 sep2=0
+HADD 0 obj 11501.497338 lprows 23630
+HCA proof len 1 prooflen 121
+HCONF r 2 1 0 0
+HPROP 0 obj 11501.690147
+HSEP round 87 obj 11501.690147 sep0=37 sep1=0 sep2=0
+HADD 0 obj 11501.691779 lprows 23650
+HPROP 0 obj 11501.691779
+HSEP round 88 obj 11501.691779 sep0=0 sep1=0 sep2=0
+HADD 0 obj 11501.693687 lprows 23652
+HPROP 0 obj 11501.693687
+HSEP round 89 obj 11501.693687 sep0=0 sep1=0 sep2=0
+HADD 0 obj 11501.693687 lprows 23653
+HPROP 0 obj 11501.693687
+HSEP round 90 obj 11501.693687 sep0=0 sep1=0 sep2=0
+HADD 0 obj 11501.693940 lprows 23654
+HPROP 0 obj 11501.693940
+HSEP round 91 obj 11501.693940 sep0=11 sep1=0 sep2=0
+HADD 0 obj 11501.697036 lprows 23655
+HPROP 0 obj 11501.647036
+HSEP round 92 obj 11501.647036 sep0=14 sep1=0 sep2=0
+HADD 0 obj 11501.647890 lprows 21858
+HPROP 0 obj 11501.647036
+HSEP round 93 obj 11501.647036 sep0=14 sep1=0 sep2=0
+HADD 0 obj 11501.647890 lprows 21858
+HCA proof len 1 prooflen 2
+HCONF c 1 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 1 prooflen 1
+HCONF c 1 1 0 0
+HCA proof len 0 prooflen 0
+HCONF c 0 0 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 5 4 0 0
+HCONF r 6 5 0 0
+HCONF r 7 6 0 0
+HCONF r 6 5 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 6 5 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 6 5 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 6 5 0 0
+HCONF r 7 6 0 0
+HCA proof len 7 prooflen 468
+HCONF c 7 7 0 0
+HCA proof len 7 prooflen 468
+HCONF c 7 7 0 0
+HCA proof len 7 prooflen 468
+HCONF c 7 7 0 0
+HCA proof len 7 prooflen 468
+HCONF c 7 7 0 0
+HCA proof len 7 prooflen 468
+HCONF c 7 7 0 0
+HCA proof len 7 prooflen 468
+HCONF c 7 7 0 0
+HCA proof len 11 prooflen 468
+HCONF c 7 7 0 0
+HCONF r 7 6 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 8 7 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 7 6 0 0
+HCONF r 8 7 0 0
+HCONF r 7 6 0 0
+HCA proof len 8 prooflen 466
+HCONF c 8 8 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCONF r 8 7 0 0
+HCA proof len 8 prooflen 471
+HCONF c 8 8 0 0
+HCA proof len 12 prooflen 471
+HCONF c 12 12 0 0
+HCA proof len 8 prooflen 471
+HCONF r 12 11 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 8 prooflen 471
+HCONF r 11 10 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 8 prooflen 471
+HCONF r 10 9 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 8 prooflen 471
+HCONF r 9 8 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 8 prooflen 472
+HCONF c 8 8 0 0
+HCONF r 8 7 0 0
+HCONF r 2 1 0 0
+HCONF r 7 6 0 0
+HCONF r 9 8 0 0
+HCONF r 7 6 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 7 6 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 7 6 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 7 6 0 0
+HCONF r 9 8 0 0
+HCA proof len 12 prooflen 467
+HCONF c 12 12 0 0
+HCA proof len 9 prooflen 468
+HCONF r 9 8 0 0
+HCONF r 2 1 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCA proof len 13 prooflen 462
+HCONF c 10 10 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCA proof len 7 prooflen 463
+HCONF c 7 7 0 0
+HCA proof len 14 prooflen 465
+HCONF c 9 9 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 7 6 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 7 6 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 7 6 0 0
+HCONF r 9 8 0 0
+HCONF r 7 6 0 0
+HCONF r 9 8 0 0
+HCONF r 7 6 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCA proof len 8 prooflen 466
+HCONF c 11 11 0 0
+HCONF r 8 7 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 6 5 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 7 6 0 0
+HCONF r 9 8 0 0
+HCONF r 10 9 0 0
+HCONF r 9 8 0 0
+HCONF r 10 9 0 0
+HCONF r 10 9 0 0
+HCONF r 10 9 0 0
+HCONF r 9 8 0 0
+HCONF r 10 9 0 0
+HCONF r 9 8 0 0
+HCONF r 10 9 0 0
+HCONF r 10 9 0 0
+HCONF r 10 9 0 0
+HCONF r 10 9 0 0
+HCONF r 10 9 0 0
+HCONF r 10 9 0 0
+HCONF r 10 9 0 0
+HCONF r 10 9 0 0
+HCONF r 9 8 0 0
+HCONF r 10 9 0 0
+HCA proof len 8 prooflen 468
+HCONF c 8 8 0 0
+HCA proof len 13 prooflen 468
+HCONF c 10 10 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 9 8 0 0
+HCONF r 8 7 0 0
+HCONF r 9 8 0 0
+HCA proof len 8 prooflen 467
+HCONF c 8 8 0 0
+HCA proof len 13 prooflen 466
+HCONF c 10 10 0 0
+HCONF r 8 7 0 0
+HCA proof len 7 prooflen 464
+HCONF c 7 7 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCONF r 11 10 0 0
+HCA proof len 10 prooflen 467
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 14 prooflen 467
+HCONF c 11 11 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 10 prooflen 462
+HCONF c 11 11 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA prop len 10 limit 313
+HCONF c 11 11 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA prop len 10 limit 313
+HCONF c 11 11 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA prop len 10 limit 313
+HCONF c 11 11 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+         0       0         0   0.00%   11507.36896     11507.405062       0.00%     3232     87     22     56456    60.4s
+
+Symmetry detection completed in 2.3s
+Found 34 generator(s)
+
+HCA proof len 13 prooflen 1219
+HCONF c 13 13 0 0
+HCA proof len 11 prooflen 1218
+HCONF c 11 11 0 0
+HCA proof len 8 prooflen 1217
+HCONF c 8 8 0 0
+HCA proof len 8 prooflen 1228
+HCONF c 8 8 0 0
+HCONF r 20 19 0 0
+HCONF r 19 18 0 0
+HCONF r 20 19 0 0
+HCONF r 19 18 0 0
+HCONF r 20 19 0 0
+HCONF r 19 18 0 0
+HCONF r 20 19 0 0
+HCONF r 19 18 0 0
+HCONF r 20 19 0 0
+HCONF r 19 18 0 0
+HCONF r 20 19 0 0
+HCONF r 19 18 0 0
+HCONF r 20 19 0 0
+HCONF r 19 18 0 0
+HCONF r 25 24 0 0
+HCONF r 23 22 0 0
+HCONF r 25 24 0 0
+HCONF r 23 22 0 0
+HCONF r 25 24 0 0
+HCONF r 23 22 0 0
+HCONF r 25 24 0 0
+HCONF r 23 22 0 0
+HCONF r 25 24 0 0
+HCONF r 23 22 0 0
+HCONF r 25 24 0 0
+HCONF r 23 22 0 0
+HCONF r 25 24 0 0
+HCONF r 23 22 0 0
+HCA proof len 39 prooflen 1291
+HCONF c 39 39 0 0
+HCONF r 50 49 0 0
+HCONF r 50 49 0 0
+HCA proof len 60 prooflen 1343
+HCONF c 60 60 0 0
+        81       0         1   0.00%   11507.36896     11507.405062       0.00%     3238     87     58     57778    98.1s
+HCA proof len 60 prooflen 1344
+HCONF c 60 60 0 0
+HCA proof len 60 prooflen 1344
+HCONF c 60 60 0 0
+HCA proof len 66 prooflen 1344
+HCONF c 66 65 0 1
+HCONF r 5 1 0 3
+HCONF r 3 1 0 1
+HCONF r 60 59 0 0
+HCONF c 68 63 0 5
+HCONF r 2 1 0 0
+HCA prop len 61 limit 1194
+HCONF c 61 61 0 0
+HCA prop len 61 limit 1194
+HCONF c 61 61 0 0
+HCA prop len 61 limit 1194
+HCONF c 61 61 0 0
+HCA proof len 61 prooflen 1337
+HCONF c 61 61 0 0
+HCA proof len 60 prooflen 1344
+HCONF c 60 60 0 0
+HCA proof len 60 prooflen 1344
+HCONF c 60 60 0 0
+HCA proof len 61 prooflen 1337
+HCONF c 61 61 0 0
+        85       0         4   0.00%   11507.36896     11507.405062       0.00%     3245     87     73     57929   104.1s
+HCA proof len 61 prooflen 1336
+HCONF c 68 68 0 0
+HCONF r 3 0 0 2
+HCA proof len 61 prooflen 1336
+HCONF c 61 61 0 0
+HCA prop len 61 limit 1194
+HCONF c 68 68 0 0
+HCONF r 61 60 0 0
+HCONF r 3 0 0 2
+HCA prop len 61 limit 1194
+HCONF c 67 67 0 0
+HCONF r 3 0 0 2
+HCONF r 3 0 0 2
+HCA prop len 2 limit 1194
+HCONF c 3 0 0 3
+HCONF r 68 66 0 1
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA prop len 3 limit 1194
+HCONF c 3 1 0 2
+HCONF r 68 66 0 1
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA prop len 61 limit 1194
+HCONF c 68 68 0 0
+HCONF r 60 59 0 0
+HCONF r 3 0 0 2
+HCA prop len 60 limit 1194
+HCONF c 68 68 0 0
+HCONF r 61 60 0 0
+HCONF r 3 0 0 2
+HCA prop len 61 limit 1194
+HCONF c 68 68 0 0
+HCONF r 61 60 0 0
+HCONF r 3 0 0 2
+HCA proof len 58 prooflen 1346
+HCONF c 58 58 0 0
+        96       0         8   0.00%   11507.36896     11507.405062       0.00%     3248     87    100     58110   111.1s
+HCA proof len 58 prooflen 1343
+HCONF c 58 58 0 0
+HCA proof len 59 prooflen 1338
+HCONF c 59 59 0 0
+HCA proof len 64 prooflen 1343
+HCONF c 66 65 0 1
+HCONF r 3 1 0 1
+HCONF r 61 57 0 3
+HCONF r 3 0 0 2
+HCA proof len 40 prooflen 1347
+HCONF c 64 64 0 0
+HCONF r 59 58 0 0
+HCONF r 3 0 0 2
+HCA prop len 64 limit 1194
+HCONF c 64 64 0 0
+HCONF r 59 58 0 0
+HCONF r 3 0 0 2
+HCA proof len 60 prooflen 1339
+HCONF c 60 60 0 0
+HCA proof len 65 prooflen 1336
+HCONF c 67 67 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 60 59 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCONF r 61 60 0 0
+HCA proof len 61 prooflen 1338
+HCONF c 61 61 0 0
+HCA proof len 65 prooflen 1337
+HCONF r 60 59 0 0
+HCONF c 68 68 0 0
+HCONF r 61 60 0 0
+       100      77        11   0.00%   11507.36896     11507.405062       0.00%     3256     87    139     58266   116.4s
+HPROP 0 obj 11507.368960
+HSEP round 94 obj 11507.368960 sep0=0 sep1=0 sep2=0
+HPROP 0 obj 11501.660960
+HSEP round 95 obj 11501.660960 sep0=182 sep1=0 sep2=0
+HADD 0 obj 11501.665730 lprows 32892
+HPROP 0 obj 11501.665730
+HSEP round 96 obj 11501.665730 sep0=18 sep1=0 sep2=0
+HADD 0 obj 11501.674336 lprows 32900
+HPROP 0 obj 11501.674336
+HSEP round 97 obj 11501.674336 sep0=88 sep1=0 sep2=0
+HADD 0 obj 11501.674689 lprows 32903
+HPROP 0 obj 11501.674689
+HSEP round 98 obj 11501.674689 sep0=27 sep1=0 sep2=0
+HADD 0 obj 11501.674689 lprows 32911
+HPROP 0 obj 11501.674689
+HSEP round 99 obj 11501.674689 sep0=30 sep1=2 sep2=0
+HADD 0 obj 11501.674689 lprows 32913
+HPROP 0 obj 11501.660960
+HSEP round 100 obj 11501.660960 sep0=142 sep1=0 sep2=0
+HADD 0 obj 11501.670033 lprows 24715
+HPROP 0 obj 11501.670033
+HSEP round 101 obj 11501.670033 sep0=14 sep1=0 sep2=0
+HADD 0 obj 11501.674971 lprows 24721
+HPROP 0 obj 11501.674971
+HSEP round 102 obj 11501.674971 sep0=66 sep1=0 sep2=0
+HADD 0 obj 11501.675147 lprows 24722
+HPROP 0 obj 11501.675147
+HSEP round 103 obj 11501.675147 sep0=4 sep1=0 sep2=0
+HADD 0 obj 11501.675147 lprows 24728
+HPROP 0 obj 11501.675147
+HSEP round 104 obj 11501.675147 sep0=19 sep1=0 sep2=0
+HADD 0 obj 11501.675271 lprows 24734
+HPROP 0 obj 11501.775271
+HSEP round 105 obj 11501.775271 sep0=114 sep1=0 sep2=0
+HADD 0 obj 11501.781631 lprows 22852
+HPROP 0 obj 11501.781631
+HSEP round 106 obj 11501.781631 sep0=20 sep1=1 sep2=0
+HADD 0 obj 11501.788533 lprows 22858
+HPROP 0 obj 11501.788533
+HSEP round 107 obj 11501.788533 sep0=58 sep1=0 sep2=0
+HADD 0 obj 11501.791619 lprows 22860
+HPROP 0 obj 11501.791619
+HSEP round 108 obj 11501.791619 sep0=42 sep1=0 sep2=0
+HADD 0 obj 11501.792455 lprows 22862
+HPROP 0 obj 11501.792455
+HSEP round 109 obj 11501.792455 sep0=2 sep1=1 sep2=0
+HADD 0 obj 11501.793133 lprows 22863
+HPROP 0 obj 11501.643133
+HSEP round 110 obj 11501.643133 sep0=35 sep1=0 sep2=0
+HADD 0 obj 11501.643478 lprows 22144
+HPROP 0 obj 11501.643478
+HSEP round 111 obj 11501.643478 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.645497 lprows 22146
+HPROP 0 obj 11501.645497
+HSEP round 112 obj 11501.645497 sep0=14 sep1=0 sep2=0
+HADD 0 obj 11501.645508 lprows 22147
+HPROP 0 obj 11501.645508
+HSEP round 113 obj 11501.645508 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.646423 lprows 22148
+HPROP 0 obj 11501.646423
+HSEP round 114 obj 11501.646423 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.647614 lprows 22149
+HPROP 0 obj 11501.643133
+HSEP round 115 obj 11501.643133 sep0=35 sep1=0 sep2=0
+HADD 0 obj 11501.643478 lprows 22144
+HPROP 0 obj 11501.643478
+HSEP round 116 obj 11501.643478 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.645497 lprows 22146
+HPROP 0 obj 11501.645497
+HSEP round 117 obj 11501.645497 sep0=14 sep1=0 sep2=0
+HADD 0 obj 11501.645508 lprows 22147
+HPROP 0 obj 11501.645508
+HSEP round 118 obj 11501.645508 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.646423 lprows 22148
+HPROP 0 obj 11501.646423
+HSEP round 119 obj 11501.646423 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.647614 lprows 22149
+HCA proof len 4 prooflen 17
+HCONF c 4 4 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 4 prooflen 17
+HCONF c 4 4 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCA proof len 4 prooflen 15
+HCONF c 4 4 0 0
+HCA proof len 4 prooflen 17
+HCONF c 4 4 0 0
+HCA proof len 6 prooflen 17
+HCONF c 5 5 0 0
+HCONF r 4 3 0 0
+HCONF r 2 1 0 0
+HCA proof len 4 prooflen 16
+HCONF r 4 3 0 0
+HCONF r 2 1 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCA proof len 3 prooflen 17
+HCONF c 3 3 0 0
+HCA proof len 3 prooflen 16
+HCONF r 3 2 0 0
+HCA prop len 4 limit 157
+HCONF c 3 3 0 0
+HCONF r 2 1 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCA proof len 3 prooflen 16
+HCONF c 3 3 0 0
+HCONF r 2 1 0 0
+HCA proof len 3 prooflen 17
+HCONF r 3 2 0 0
+HCONF r 4 3 0 0
+HCA proof len 4 prooflen 17
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCA proof len 4 prooflen 17
+HCONF c 4 4 0 0
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCA proof len 3 prooflen 17
+HCONF c 3 3 0 0
+HCONF r 2 1 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCA prop len 6 limit 157
+HCONF c 5 5 0 0
+HCONF r 4 3 0 0
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCA proof len 4 prooflen 15
+HCONF c 4 4 0 0
+HCA proof len 4 prooflen 16
+HCONF r 4 3 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCA proof len 3 prooflen 16
+HCONF c 3 3 0 0
+HCA proof len 3 prooflen 16
+HCONF r 3 2 0 0
+HCA proof len 3 prooflen 17
+HCONF c 3 3 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 0 prooflen 12
+HCONF c 0 0 0 0
+HPROP 0 obj 11501.775271
+HSEP round 120 obj 11501.775271 sep0=114 sep1=0 sep2=0
+HADD 0 obj 11501.781631 lprows 22852
+HPROP 0 obj 11501.781631
+HSEP round 121 obj 11501.781631 sep0=20 sep1=1 sep2=0
+HADD 0 obj 11501.788533 lprows 22858
+HPROP 0 obj 11501.788533
+HSEP round 122 obj 11501.788533 sep0=58 sep1=0 sep2=0
+HADD 0 obj 11501.791619 lprows 22860
+HPROP 0 obj 11501.791619
+HSEP round 123 obj 11501.791619 sep0=42 sep1=0 sep2=0
+HADD 0 obj 11501.792455 lprows 22862
+HPROP 0 obj 11501.792455
+HSEP round 124 obj 11501.792455 sep0=2 sep1=1 sep2=0
+HADD 0 obj 11501.793133 lprows 22863
+HPROP 0 obj 11501.643133
+HSEP round 125 obj 11501.643133 sep0=35 sep1=0 sep2=0
+HADD 0 obj 11501.643478 lprows 22144
+HPROP 0 obj 11501.643478
+HSEP round 126 obj 11501.643478 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.645497 lprows 22146
+HPROP 0 obj 11501.645497
+HSEP round 127 obj 11501.645497 sep0=14 sep1=0 sep2=0
+HADD 0 obj 11501.645508 lprows 22147
+HPROP 0 obj 11501.645508
+HSEP round 128 obj 11501.645508 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.646423 lprows 22148
+HPROP 0 obj 11501.646423
+HSEP round 129 obj 11501.646423 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.647614 lprows 22149
+HPROP 0 obj 11501.643133
+HSEP round 130 obj 11501.643133 sep0=35 sep1=0 sep2=0
+HADD 0 obj 11501.643478 lprows 22144
+HPROP 0 obj 11501.643478
+HSEP round 131 obj 11501.643478 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.645497 lprows 22146
+HPROP 0 obj 11501.645497
+HSEP round 132 obj 11501.645497 sep0=14 sep1=0 sep2=0
+HADD 0 obj 11501.645508 lprows 22147
+HPROP 0 obj 11501.645508
+HSEP round 133 obj 11501.645508 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.646423 lprows 22148
+HPROP 0 obj 11501.646423
+HSEP round 134 obj 11501.646423 sep0=12 sep1=0 sep2=0
+HADD 0 obj 11501.647614 lprows 22149
+HCA proof len 4 prooflen 17
+HCONF c 4 4 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 4 prooflen 17
+HCONF c 4 4 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCA proof len 4 prooflen 15
+HCONF c 4 4 0 0
+HCA proof len 4 prooflen 17
+HCONF c 4 4 0 0
+HCA proof len 6 prooflen 17
+HCONF c 5 5 0 0
+HCONF r 4 3 0 0
+HCONF r 2 1 0 0
+HCA proof len 4 prooflen 16
+HCONF r 4 3 0 0
+HCONF r 2 1 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCA proof len 3 prooflen 17
+HCONF c 3 3 0 0
+HCA proof len 3 prooflen 16
+HCONF r 3 2 0 0
+HCA prop len 4 limit 157
+HCONF c 3 3 0 0
+HCONF r 2 1 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCA proof len 3 prooflen 16
+HCONF c 3 3 0 0
+HCONF r 2 1 0 0
+HCA proof len 3 prooflen 17
+HCONF r 3 2 0 0
+HCONF r 4 3 0 0
+HCA proof len 4 prooflen 17
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCA proof len 4 prooflen 17
+HCONF c 4 4 0 0
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCA proof len 3 prooflen 17
+HCONF c 3 3 0 0
+HCONF r 2 1 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCA prop len 6 limit 157
+HCONF c 5 5 0 0
+HCONF r 4 3 0 0
+HCONF r 2 1 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCONF r 4 3 0 0
+HCA proof len 4 prooflen 15
+HCONF c 4 4 0 0
+HCA proof len 4 prooflen 16
+HCONF r 4 3 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCONF r 3 2 0 0
+HCA proof len 3 prooflen 16
+HCONF c 3 3 0 0
+HCA proof len 3 prooflen 16
+HCONF r 3 2 0 0
+HCA proof len 3 prooflen 17
+HCONF c 3 3 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 0 prooflen 12
+HCONF c 0 0 0 0
+HCONF r 28 27 0 0
+HCONF r 27 26 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 35 34 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 36 35 0 0
+HCONF r 35 34 0 0
+HCONF r 36 35 0 0
+HCONF r 41 40 0 0
+HCONF r 41 40 0 0
+HCONF r 41 40 0 0
+HCONF r 41 40 0 0
+HCONF r 41 40 0 0
+HCONF r 41 40 0 0
+HCA proof len 41 prooflen 91
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 45 prooflen 91
+HCONF c 44 44 0 0
+HCONF r 41 40 0 0
+HCONF r 2 1 0 0
+HCONF c 43 43 0 0
+HCONF r 2 1 0 0
+HCONF c 42 42 0 0
+HCONF r 2 1 0 0
+HCA proof len 40 prooflen 86
+HCONF c 40 40 0 0
+HCA proof len 40 prooflen 85
+HCONF c 40 40 0 0
+HCONF r 40 39 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 40 prooflen 86
+HCONF c 40 40 0 0
+HCONF r 2 1 0 0
+HCONF r 41 40 0 0
+HCONF r 41 40 0 0
+HCA proof len 42 prooflen 89
+HCONF c 42 42 0 0
+HCA proof len 41 prooflen 89
+HCONF c 45 45 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 41 prooflen 86
+HCONF r 45 44 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 40 prooflen 86
+HCONF c 40 40 0 0
+HCA proof len 41 prooflen 87
+HCONF c 41 41 0 0
+HCA proof len 41 prooflen 89
+HCONF r 41 40 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 40 prooflen 86
+HCONF r 44 43 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 40 prooflen 86
+HCONF c 41 41 0 0
+HCONF r 2 1 0 0
+HCONF r 44 43 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 40 prooflen 86
+HCONF c 40 40 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 41 prooflen 90
+HCONF c 41 41 0 0
+HCA proof len 41 prooflen 89
+HCONF r 41 40 0 0
+HCA proof len 39 prooflen 83
+HCONF r 43 42 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 40 prooflen 86
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 41 prooflen 89
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 41 prooflen 88
+HCONF c 41 41 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA proof len 42 prooflen 91
+HCONF c 42 42 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 43 42 0 0
+HCONF r 43 42 0 0
+HCONF r 43 42 0 0
+HCA proof len 43 prooflen 91
+HCONF c 43 43 0 0
+HCA proof len 43 prooflen 91
+HCONF c 47 47 0 0
+HCONF r 43 42 0 0
+HCA proof len 43 prooflen 91
+HCONF c 43 43 0 0
+HCA proof len 40 prooflen 85
+HCONF c 40 40 0 0
+HCA proof len 40 prooflen 85
+HCONF c 40 40 0 0
+HPROP 0 obj 11501.675385
+HSEP round 135 obj 11501.675385 sep0=90 sep1=0 sep2=0
+HADD 0 obj 11501.679489 lprows 24735
+HPROP 0 obj 11501.679489
+HSEP round 136 obj 11501.679489 sep0=58 sep1=0 sep2=0
+HADD 0 obj 11501.680537 lprows 24739
+HPROP 0 obj 11501.680537
+HSEP round 137 obj 11501.680537 sep0=27 sep1=0 sep2=0
+HADD 0 obj 11501.681475 lprows 24741
+HPROP 0 obj 11501.681475
+HSEP round 138 obj 11501.681475 sep0=32 sep1=0 sep2=0
+HADD 0 obj 11501.681909 lprows 24743
+HPROP 0 obj 11501.681909
+HSEP round 139 obj 11501.681909 sep0=17 sep1=0 sep2=0
+HADD 0 obj 11501.682048 lprows 24745
+HPROP 0 obj 11501.682048
+HSEP round 140 obj 11501.682048 sep0=17 sep1=0 sep2=0
+HADD 0 obj 11501.682090 lprows 24747
+HCONF r 24 23 0 0
+HCA proof len 21 prooflen 1240
+HCONF c 26 20 0 6
+HCONF r 3 1 0 1
+HCONF c 24 23 0 1
+HCONF r 2 1 0 0
+HCA proof len 13 prooflen 1234
+HCONF c 13 13 0 0
+       109      77        12   0.20%   11507.36896     11507.405062       0.00%     3258     87    144     58680   141.4s
+       123      98        13   0.20%   11507.36896     11507.405062       0.00%     3258     87    144     70592   150.2s
+       123      98        13   0.20%   11507.36896     11507.405062       0.00%     3258     87    144     70592   150.2s
+
+Solving report
+  Model             uccase12
+  Status            Time limit reached
+  Primal bound      11507.4050616
+  Dual bound        11507.3689602
+  Gap               0.000314%
+  P-D integral      0.00186056405504
+  Solution status   feasible
+                    11507.4050616 (objective)
+                    0 (bound viol.)
+                    9.80326930744e-13 (int. viol.)
+                    0 (row viol.)
+  Timing            150.16
+                    4.54 (Presolve)
+                        MIP    time [calls] = 0.18 [1]
+                        subMIP time [calls] = 4.36 [22]
+                    145.59 (Solve)
+                        MIP    time [calls] = 97.58 [1]
+                        subMIP time [calls] = 48.00 [22]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [22]
+  Max sub-MIP depth 10
+  Nodes             123
+  Repair LPs        0
+  LP iterations     70592
+                    1847 (strong br.)
+                    452 (separation)
+                    35129 (heuristics)
+HCHG branching=109426 unknown=145743 modelrow=382795 clique=49298 conflictingbounds=0 objective=40802 cutpool=490 conflictpool=1257
+HINF branching=0 unknown=0 modelrow=9 clique=0 conflictingbounds=0 objective=0 cutpool=29 conflictpool=0

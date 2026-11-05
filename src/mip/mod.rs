@@ -1201,8 +1201,19 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if sym_late && params.verbose {
                 eprintln!("MIP: symmetry: skipped (the presolve passed the time limit, {:.2}s)", t_pre.elapsed().as_secs_f64());
             }
-            let prob = if !early_sol && !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() && !sym_late { add_symmetry_rows(prob, params.verbose, &mut postsolve) } else { prob };
-            if !params.submip && params.restarts > 0 {
+            // `ENOMOTO_MIP_HO6_SYMRESTART` (試作、既定では使わない): 再スタートの後の問題でも、それまでに対称性が見つかっていなければ
+            // 探し直す ([`ho6_symrestart_due`])。HiGHS は再スタートのたびに前処理の後の模型で対称性を探す (uccase12: 元の模型には
+            // 対称性がなく、根の被約費用などで固定が進んだ再スタートの後の模型で生成元 187〜262 個)。列の番号は再スタートで変わらない
+            // (前処理は列を固定するだけ) ので、見つけた生成元・オービトープはそのまま次の段の求解に渡る
+            let sym_restart = !early_sol && !params.submip && params.restarts > 0 && !sym_late && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() && ho6_symrestart_due();
+            let prob = if !early_sol && !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() && !sym_late {
+                add_symmetry_rows(prob, params.verbose, &mut postsolve, false)
+            } else if sym_restart {
+                add_symmetry_rows(prob, params.verbose, &mut postsolve, true)
+            } else {
+                prob
+            };
+            if !params.submip && params.restarts > 0 && !sym_restart {
                 sym_of_reverify(&prob, params.verbose);
             }
             // 診断用: 対称性の行を加えた後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED3=ファイル`)。`ENOMOTO_MIP_DEBUG_STOP_PRESOLVED` なら
@@ -1747,6 +1758,16 @@ pub(crate) fn sym_of() -> bool {
 }
 
 /// [`sym_of`] で、再スタートの後の問題 `p` で前の求解の生成元を確かめ直し、成り立つものだけを残す。
+/// `ENOMOTO_MIP_HO6_SYMRESTART` (試作): 再スタートの後に対称性を探し直すか。それまでの段で対称性 (orbital fixing の生成元・
+/// lex-leader の生成元・オービトープ) が 1 つも見つかっていないときだけ
+fn ho6_symrestart_due() -> bool {
+    if env_str!("ENOMOTO_MIP_HO6_SYMRESTART").is_none() {
+        return false;
+    }
+    let none = |v: Option<usize>| v.is_none_or(|k| k == 0);
+    none(SYM_OF_GENS.with(|t| t.borrow().as_ref().map(|g| g.len()))) && none(SYM_LEX_GENS.with(|t| t.borrow().as_ref().map(|g| g.len()))) && none(ORBITOPES.with(|t| t.borrow().as_ref().map(|o| o.len())))
+}
+
 fn sym_of_reverify(p: &MipProblem, verbose: bool) {
     let Some(gens) = SYM_OF_GENS.with(|t| t.borrow().clone()) else { return };
     let kept = symmetry::verify_generators(p, &gens);
@@ -2021,14 +2042,18 @@ fn merge_twin_classes(prob: MipProblem, classes: &[Vec<usize>], postsolve: &mut 
 
 /// 対称性を探し、対称性を崩す不等式 `x_i - x_k >= 0` ([`symmetry::lex_leader_pairs`]) を行として加えた問題を返す。
 /// [`sym_twins`] で双子を併合したときは後処理の手順を `postsolve` に足す。
-fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate::presolve::PostsolveStep>) -> MipProblem {
+/// `restart` が真なら再スタートの後の探し直し (`ENOMOTO_MIP_HO6_SYMRESTART`): 時間の上限は `ENOMOTO_T_MIP_HO6_SYM_TIME` (既定 5 秒)。
+fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate::presolve::PostsolveStep>, restart: bool) -> MipProblem {
     let t0 = std::time::Instant::now();
     let twin_orb = sym_twin_orbitope();
     let twins = if sym_twins() || twin_orb { symmetry::twin_classes(&prob) } else { Vec::new() };
     // 既定 (`ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE` で止める) で、生成元が動かさない整数列の双子の組から作る 1xk のオービトープ
     let mut twin_orbs: Vec<symmetry::Orbitope> = Vec::new();
     let t_twins = t0.elapsed().as_secs_f64();
-    let time_cap = tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64);
+    let time_cap = if restart { tunable!("ENOMOTO_T_MIP_HO6_SYM_TIME", 5.0, f64) } else { tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64) };
+    if restart && verbose {
+        eprintln!("MIP: symmetry: detecting again after the restart (ENOMOTO_MIP_HO6_SYMRESTART, {} rows, {} free columns)", prob.m, (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count());
+    }
     // `ENOMOTO_MIP_PRESOLVE_WORK` (試作): 時間 (0.3 秒) の代わりに手間 (`ENOMOTO_T_MIP_PRESOLVE_WORK_SYM`、細分化で読んだ非零などの数) で打ち切る
     // 2 つ目の上限 `ENOMOTO_T_MIP_PRESOLVE_WORK_SYM_LOG` は細分化の並べ替えを L (1 + log2 L) で数えたもの ([`symmetry::log_work`])。
     // 行が少なく長い問題 (nw04: 36 行で 1 行 1.7 万の非零) では 1 つ目の数え方が細分化を軽く見て、生成元を既定 (1〜2 個) より多く (3 個)
@@ -2211,6 +2236,10 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     let sym_diag = format!("detect {td:.2}s, refine {:.2}s, log work {}", symmetry::refine_time() - rt0, symmetry::log_work() - lw0);
     // 双子のオービトープだけのとき (探索で生成元が見つからない) も、下でオービトープを置くため空の対称性で続ける
     let sym = if sym.is_none() && !twin_orbs.is_empty() { Some(symmetry::Symmetry { generators: Vec::new(), orbit: vec![usize::MAX; prob.n], num_orbits: 0 }) } else { sym };
+    if verbose && (env_str!("ENOMOTO_MIP_HO6_SYMWORK").is_some() || env_str!("ENOMOTO_MIP_HO6_SYMREFINE").is_some()) {
+        let (c, k) = symmetry::refine_capped();
+        eprintln!("MIP: symmetry: refinements stopped by the iteration cap {c} of {k} (ENOMOTO_MIP_HO6_SYMREFINE {})", env_str!("ENOMOTO_MIP_HO6_SYMREFINE").is_some());
+    }
     let Some(sym) = sym else {
         if verbose {
             eprintln!("MIP: symmetry: none ({:.2}s, work {sym_work}, search {}, verify {}, {sym_diag})", t0.elapsed().as_secs_f64(), symmetry::search_work() - sw0, symmetry::verify_work() - vw0);

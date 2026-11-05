@@ -52,6 +52,14 @@ fn ho5_cutlp_gain() -> f64 {
     }
 }
 
+/// `ENOMOTO_MIP_HO6_STALL` (試作、既定では使わない): 根のカットのループの停滞を、カットで上げた分に対する割合で判定する
+/// (根のカットのループ `root_cut_loop` の停滞の判定)。値が数なら割合、ほかの値なら 1e-3。あわせて、ラウンドの上限に当たったときの延長
+/// (`ENOMOTO_MIP_CUT_ADAPT_ROUNDS` と同じ、上限 `ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP`) を、直近 5 ラウンドの伸びが今までの伸びの
+/// `ENOMOTO_T_MIP_HO6_STALL_EXT` (既定 0.01) 以上なら行う
+pub(super) fn ho6_stall_frac() -> Option<f64> {
+    env_str!("ENOMOTO_MIP_HO6_STALL").map(|v| v.parse::<f64>().ok().filter(|t| *t > 0.0 && *t < 1.0).unwrap_or(1e-3))
+}
+
 fn use_lifted_cover() -> bool {
     env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some()
 }
@@ -1055,7 +1063,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let widen_double_on = env_def!("ENOMOTO_MIP_CUT_WIDEN_DOUBLE", "1").is_some();
         // `ENOMOTO_MIP_CUT_ADAPT_ROUNDS` (実験的): ラウンドの上限に達したとき、直近 5 ラウンドの目的値の伸びがそれまでの伸びの
         // `ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_FRAC` 以上なら上限を 25 ラウンド延ばす (`ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP` まで)
-        let adapt_rounds = env_str!("ENOMOTO_MIP_CUT_ADAPT_ROUNDS").is_some() && !self.params.submip;
+        let adapt_rounds = (env_str!("ENOMOTO_MIP_CUT_ADAPT_ROUNDS").is_some() || ho6_stall_frac().is_some()) && !self.params.submip;
+        let adapt_frac = if ho6_stall_frac().is_some() && env_str!("ENOMOTO_MIP_CUT_ADAPT_ROUNDS").is_none() { tunable!("ENOMOTO_T_MIP_HO6_STALL_EXT", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_FRAC", 0.05, f64) };
         let mut obj_hist: Vec<f64> = vec![prev_obj];
         // カットを加える前の根の LP の値 (`ENOMOTO_MIP_CUT_STRONG_AUTO` の判定用)
         let cut_lp0 = prev_obj;
@@ -1209,7 +1218,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let extend = adapt_rounds
                     && max_rounds < tunable!("ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP", 100usize, usize)
                     && k > 5
-                    && obj_hist[k - 1] - obj_hist[k - 6] >= tunable!("ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_FRAC", 0.05, f64) * (obj_hist[k - 1] - obj_hist[0]).max(1e-9);
+                    && obj_hist[k - 1] - obj_hist[k - 6] >= adapt_frac * (obj_hist[k - 1] - obj_hist[0]).max(1e-9);
                 // `ENOMOTO_MIP_CUT_PHASE2_AT_CAP`: 第 1 段階がラウンドの上限に当たって止まるときは (停滞していなくても)、
                 // 第 2 段階 (HiGHS のスコア) へ進む (`ENOMOTO_MIP_CUT_PHASE2` がなくても。停滞で止まるときは既定のまま止める)。
                 // timtab1 は既定の選択で 25 ラウンド目まで毎回 1-3% 伸び、停滞の判定に届かないので、`ENOMOTO_MIP_CUT_PHASE2`・
@@ -2212,6 +2221,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // ラウンドは 2 回分と数える (何も進まない問題で長く回さない。分数の列が減っている間は続ける)。
                 let nfrac = self.fractional(&self.lp.col_values()).len();
                 let reldiff = (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0);
+                // `ENOMOTO_MIP_HO6_STALL=割合` (試作、既定では使わない。`1` なら 1e-3): 根 (サブ MIP でない) の停滞の判定の
+                // 「目的値の相対変化」を、目的値の大きさではなくカットで上げた分 (今の値 - カットの前の値) で測る (HiGHS の
+                // 「下界の伸びが今までの伸びの 0.1% 以下」と同じ尺度)。unitcal_7 は目的値 1.96e7 に対して根のギャップが 0.35% しかなく、
+                // 1 ラウンド 300〜1000 (今までの伸びの 0.3〜1%) 伸びていても相対変化 1e-4 未満で停滞と数えられ、17 ラウンド前後で止まる
+                // (HiGHS は 47 ラウンド)。この割合以下の伸びのラウンドを停滞とする (分数の列の数の条件は今までどおり)
+                let reldiff = match ho6_stall_frac() {
+                    Some(t) if !self.params.submip => {
+                        let tot = (obj - first_obj).max(1e-9 * obj.abs().max(1.0));
+                        if obj - prev_obj <= t * tot { 0.0 } else { 1.0 }
+                    }
+                    _ => reldiff,
+                };
                 if phase2 {
                     // 第 2 段階: 目的値だけで停滞を数える
                     if reldiff <= 1e-4 {
