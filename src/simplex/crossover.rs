@@ -2403,7 +2403,13 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         && vertex_solution(std, &basis_pos, &nb_status, &lu).is_some()
     {
         let mfac = tunable!("ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR", 1.0f64, f64);
-        let deadline = Instant::now() + std::time::Duration::from_secs_f64((mfac * ipm_secs + if mfac > 0.0 { 1.0 } else { 0.0 }).clamp(0.0, 1e6));
+        // 試作 `ENOMOTO_XO_DUAL_MEGIDDO_RACE_NOLIMIT=1` (既定では使わない。analysis/rootlp_ipm_fail_20261105.md): 二段解法と同時に解いている
+        // とき (共有の下界がある) は、主の押し出し (`ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR_RACE`) と同じく上限をかけない。opm2-z10-s4 の根の LP:
+        // 上限 (内点法 13.5 秒の 1 倍 + 1 秒) で候補 12.3 万列のうち 10.6 万列を残し、双対実行不能 1,593 列から仕上げの主単体法が停滞して頂点なし。
+        // 上限なしなら押し出し 88 秒で仕上げ 0 反復。
+        let no_limit = crate::cancel::bound().is_some() && env_str!("ENOMOTO_XO_DUAL_MEGIDDO_RACE_NOLIMIT").is_some_and(|v| v != "0");
+        let secs = if no_limit { 1e6 } else { (mfac * ipm_secs + if mfac > 0.0 { 1.0 } else { 0.0 }).clamp(0.0, 1e6) };
+        let deadline = Instant::now() + std::time::Duration::from_secs_f64(secs);
         let mut yd = y.clone();
         let dp = megiddo_dual_push(std, &mut yd, &mut basis, &mut basis_pos, &mut nb_status, lu, deadline)?;
         lu = dp.lu;

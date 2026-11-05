@@ -1548,7 +1548,12 @@ impl TwoStageLp {
     fn adopt_basic_solution(&mut self, x: &[f64], y: Vec<f64>, bpos: &[Option<usize>]) -> bool {
         let n = self.n;
         let m = self.rows.len();
+        // 診断 `ENOMOTO_DEBUG_ADOPT=1` (analysis/rootlp_ipm_fail_20261105.md): 採らなかった理由を stderr に出す
+        let dbg = env_str!("ENOMOTO_DEBUG_ADOPT").is_some();
         if y.len() != m || bpos.len() != n + m {
+            if dbg {
+                eprintln!("ADOPT: size mismatch y={} (m={m}) bpos={} (n+m={})", y.len(), bpos.len(), n + m);
+            }
             return false;
         }
         let mut b = vec![usize::MAX; m];
@@ -1561,9 +1566,13 @@ impl TwoStageLp {
             }
         }
         if b.iter().any(|&v| v == usize::MAX) {
+            if dbg {
+                eprintln!("ADOPT: basis positions incomplete");
+            }
             return false;
         }
         let tol = 1e-7;
+        let row_scale_tol = env_str!("ENOMOTO_MIP_ADOPT_ROW_SCALE").is_some_and(|v| v != "0");
         for v in 0..n + m {
             if bpos[v].is_some() {
                 continue;
@@ -1571,10 +1580,22 @@ impl TwoStageLp {
             // 標準形の値 (平行移動した空間) と境界
             let z = if v < n { x[v] - self.shift[v] } else { self.slack_value(v - n, x) };
             let (l, u) = (self.std.lb[v], self.std.ub[v]);
-            let at_l = l.is_finite() && (z - l).abs() <= 1e-9 * (1.0 + l.abs()) + 1e-9;
-            let at_u = u.is_finite() && (z - u).abs() <= 1e-9 * (1.0 + u.abs()) + 1e-9;
+            // 試作 `ENOMOTO_MIP_ADOPT_ROW_SCALE=1` (既定では使わない。analysis/rootlp_ipm_fail_20261105.md): スラックの値は `x` から行の
+            // 活動量を計算し直すので、丸めの誤差は行の項の大きさ `Σ|a_ij x_j|` と右辺に比例する。許容をそれに比例させる
+            // (opm2-z10-s4 の根の LP: 右辺・活動量が 1e6 級の行で、最適基底のスラック -5.6e-9 が許容 2e-9 を超えて捨てられ、解き直しに 85 秒)。
+            let mag = if v >= n && row_scale_tol {
+                let i = v - n;
+                self.rows[i].iter().map(|&(j, a)| (a * x[j]).abs()).sum::<f64>().max(self.row_lo[i].abs().min(1e300)).max(if self.row_up[i].is_finite() { self.row_up[i].abs() } else { 0.0 })
+            } else {
+                0.0
+            };
+            let at_l = l.is_finite() && (z - l).abs() <= 1e-9 * (1.0 + l.abs().max(mag)) + 1e-9;
+            let at_u = u.is_finite() && (z - u).abs() <= 1e-9 * (1.0 + u.abs().max(mag)) + 1e-9;
             let free = !l.is_finite() && !u.is_finite() && z.abs() <= 1e-9;
             if !(at_l || at_u || free) {
+                if dbg {
+                    eprintln!("ADOPT: nonbasic {v} (n={n}) off its bounds: z={z:e} l={l:e} u={u:e}");
+                }
                 return false;
             }
             if at_l && at_u {
@@ -1584,6 +1605,9 @@ impl TwoStageLp {
             let scale = tol * (1.0 + self.std.c[v].abs());
             let ok = if at_l { d >= -scale } else if at_u { d <= scale } else { d.abs() <= scale };
             if !ok {
+                if dbg {
+                    eprintln!("ADOPT: nonbasic {v} (n={n}) dual infeasible: d={d:e} at_l={at_l} at_u={at_u} tol={scale:e}");
+                }
                 return false;
             }
         }
