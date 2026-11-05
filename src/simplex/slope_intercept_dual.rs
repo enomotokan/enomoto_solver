@@ -4723,6 +4723,15 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let tiny_skip_on = env_str!("ENOMOTO_SIMPLEX_TINY_SKIP").is_some_and(|v| v != "0");
     let tiny_alpha = tunable!("ENOMOTO_T_SIMPLEX_TINY_ALPHA", 1e-7, f64);
     let tiny_td = tunable!("ENOMOTO_T_SIMPLEX_TINY_TD", 1e-7, f64);
+    // 試作 `ENOMOTO_SIMPLEX_HARRIS2` (既定では使わない): 前向きの Harris (パス 2)
+    // `r`: 安全モード (`safe_pivot`。数値の破綻で解き直した求解、または特異の検査で切り替わった後) のときだけ使う
+    let harris2_mode = env_str!("ENOMOTO_SIMPLEX_HARRIS2").filter(|v| *v != "0");
+    let harris2_safe_only = harris2_mode.is_some_and(|v| v.contains('r'));
+    let harris2_any = harris2_mode.is_some();
+    let h2_small = tunable!("ENOMOTO_T_SIMPLEX_H2_SMALL", 1e30, f64);
+    let h2_td = tunable!("ENOMOTO_T_SIMPLEX_H2_TD", 1e-8, f64);
+    let mut harris2_skip: Vec<usize> = Vec::new();
+    let mut diag_h2_shifts = 0usize;
     // 試作 `ENOMOTO_SIMPLEX_HARRIS_WIDE` (既定では使わない): 窓の中の軸が小さいとき Harris の窓を広げる (パス 2)
     let harris_wide_on = env_str!("ENOMOTO_SIMPLEX_HARRIS_WIDE").is_some_and(|v| v != "0");
     let hw_small = tunable!("ENOMOTO_T_SIMPLEX_HW_SMALL", 1e-6, f64);
@@ -5497,7 +5506,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
             }
             if noise_diag {
-                eprintln!("DEBUG_EXT: degenerate_pivots={diag_degen} max_run={diag_degen_max_run} cost_shifts={diag_shift_events} shifted_cols={diag_shift_cols} xb_mismatch={:.3e}@{}", diag_xb_mismatch.0, diag_xb_mismatch.1);
+                eprintln!("DEBUG_EXT: degenerate_pivots={diag_degen} max_run={diag_degen_max_run} cost_shifts={diag_shift_events} shifted_cols={diag_shift_cols} harris2_shifts={diag_h2_shifts} xb_mismatch={:.3e}@{}", diag_xb_mismatch.0, diag_xb_mismatch.1);
                 if dse_weight_check {
                     eprintln!("DEBUG_EXT: dse_weight_check: checked={diag_dse_checked} deviated={diag_dse_dev} rejected={diag_dse_rejects} recomputed={diag_dse_recomputes}");
                 }
@@ -5740,6 +5749,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         let mut zero_pick: Option<Cand>;
         // この反復で行 `r` を一時的にプールから外すか(`STUCK_ROW_MIN_PIVOT` 参照)。
         let mut stuck_row_taboo = false;
+        // 試作 `ENOMOTO_SIMPLEX_HARRIS2`: フィルタ後の候補の数 (`cand_scratch[..harris2_k]`。破棄した候補の禁止が効く反復は 0)
+        let mut harris2_k = 0usize;
         // 策7: 候補列を `candidates` に写さず `cand_scratch[..n]` のまま使う場合の候補数 `n`。
         let mut fast_n: Option<usize> = None;
         timed!(profile_phases, prof_phases::CHUZC1, {
@@ -5885,6 +5896,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     stuck_row_taboo = true;
                 }
             }
+            harris2_k = if ban_active { 0 } else { k };
             let kept = &cand_scratch[..k];
             // 論文 3.1 節 (iii)・注意 3.1・Algorithm 1: Eligible に `Zero` 列があれば BFRT を行わず、そのうち
             // 最小添字の列にピボットする(比 0、被約費用もフリップも変化なし)。下の停止候補による
@@ -6175,6 +6187,43 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // chuzc1 が作った並び順の候補列: `bland_mode` なら全体を並べた `candidates`、
         // そうでなければ遅延構築した `sorted_prefix`(`[0, k_star]` のみ。パス 2 と
         // フリップはそこしか参照しない)。
+        // 試作 `ENOMOTO_SIMPLEX_HARRIS2=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): HiGHS 流の前向きの Harris。
+        // パス 1 の止まった候補 `kc` (= `sorted_prefix[k_star]`) の |alpha| が `ENOMOTO_T_SIMPLEX_H2_SMALL` (既定 1e30 = ほぼいつも。無限大にすると supportcase42 は解けない: |alpha| が 1e30 を超える壊れた軸でも使ってしまう) 未満なら、`kc` 以降の
+        // 候補の緩めた比 `ratio + Td / |alpha|` (`Td` = `ENOMOTO_T_SIMPLEX_H2_TD`、既定 1e-8。1e-7・1e-9 では supportcase42 の仕上げが時間切れ) の最小 `theta_max` までの候補から
+        // |alpha| 最大の候補を入れる列にする (`kc` の位置に置く。前の候補はこれまでどおりフリップ)。飛ばした候補の被約費用の
+        // 符号の誤り (高々 `Td` 程度) は、双対の更新の後で費用をずらして 0 に戻す (`harris2_skip`)
+        harris2_skip.clear();
+        let harris2_on = harris2_any && (!harris2_safe_only || safe_pivot);
+        if harris2_on && zero_pick.is_none() && !bland_mode && harris2_k > 0 {
+            if let Some(ks) = k_star {
+                let kc = sorted_prefix[ks];
+                if kc.hat_alpha.abs() < h2_small {
+                    let mut theta_max = f64::INFINITY;
+                    for c in &cand_scratch[..harris2_k] {
+                        if *c >= kc {
+                            theta_max = theta_max.min(c.ratio + h2_td / c.hat_alpha.abs());
+                        }
+                    }
+                    let mut best = kc;
+                    for c in &cand_scratch[..harris2_k] {
+                        if *c >= kc && c.ratio <= theta_max && c.hat_alpha.abs() > best.hat_alpha.abs() {
+                            best = *c;
+                        }
+                    }
+                    if best.j != kc.j {
+                        for c in &cand_scratch[..harris2_k] {
+                            if *c >= kc && c.j != best.j && c.ratio < best.ratio {
+                                harris2_skip.push(c.j);
+                            }
+                        }
+                        sorted_prefix[ks] = best;
+                        if pivlog_on {
+                            pivlog_widened();
+                        }
+                    }
+                }
+            }
+        }
         let sorted: &[Cand] = if bland_mode && zero_pick.is_none() { &candidates[..] } else { &sorted_prefix[..] };
         let Some(k_star) = k_star else {
             for &j in &touched_cols {
@@ -7213,6 +7262,19 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 d[leaving_var] = -theta_d;
             }
         });
+        // 試作 `ENOMOTO_SIMPLEX_HARRIS2`: 飛ばした候補の被約費用が符号を誤ったら費用をずらして 0 に戻す
+        for &j in &harris2_skip {
+            let bad = match nb_status[j] {
+                Some(NbStatus::Lower) => d[j] < 0.0,
+                Some(NbStatus::Upper) => d[j] > 0.0,
+                _ => false,
+            };
+            if bad {
+                active_cost[j] -= d[j];
+                d[j] = 0.0;
+                diag_h2_shifts += 1;
+            }
+        }
         if degen_shift_run > 0 && degen_run >= degen_shift_run {
             degen_run = 0;
             diag_shift_events += 1;

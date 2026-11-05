@@ -8,7 +8,8 @@ sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
 sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
-CFGS = {"base": {}, "scale": {"ENOMOTO_SIMPLEX_SCALE": "1"}, "scale1k": {"ENOMOTO_SIMPLEX_SCALE": "1", "ENOMOTO_T_SIMPLEX_SCALE_MIN_M": "1000"}}
+CFGS = {"base": {}, "scale": {"ENOMOTO_SIMPLEX_SCALE": "1"}, "scale1k": {"ENOMOTO_SIMPLEX_SCALE": "1", "ENOMOTO_T_SIMPLEX_SCALE_MIN_M": "1000"},
+        "comb": {"ENOMOTO_SIMPLEX_SCALE": "1", "ENOMOTO_T_SIMPLEX_SCALE_MIN_M": "10000", "ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE": "1e4", "ENOMOTO_SIMPLEX_HARRIS2": "r"}}
 TL, TH = 60, 4
 out = Path(sys.argv[1])
 names = sys.argv[2:]

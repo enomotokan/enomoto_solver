@@ -248,7 +248,8 @@ pub struct LuSnapshot {
 /// 試作 `ENOMOTO_SIMPLEX_SCALE=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): 基底のない求解
 /// ([`TwoStageLp::solve_once`]、MIP の根の LP・LP プロービングの最初の LP など) を、行と列の尺度を調整した写しで解く
 /// ([`TwoStageLp::solve_scaled`])。HiGHS は尺度を調整してから解き、uccase12 の根の LP は調整なし (`simplex_scale_strategy=0`) だと
-/// 120 秒で終わらない (調整ありは 2 秒)。行の数が `ENOMOTO_T_SIMPLEX_SCALE_MIN_M` (既定 0) 未満なら使わない
+/// 120 秒で終わらない (調整ありは 2 秒)。行の数が `ENOMOTO_T_SIMPLEX_SCALE_MIN_M` (既定 0) 未満、または係数の幅 ([`coef_range`]) が
+/// `ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE` (既定 0) 未満なら使わない
 fn scale_cold_on() -> bool {
     env_str!("ENOMOTO_SIMPLEX_SCALE").is_some_and(|v| v != "0")
 }
@@ -310,6 +311,22 @@ fn scale_factors(n: usize, rows: &[Vec<(usize, f64)>]) -> (Vec<f64>, Vec<f64>) {
     }
     let p2 = |v: f64| 2f64.powi(v.log2().round() as i32);
     (rs.into_iter().map(p2).collect(), cs.into_iter().map(p2).collect())
+}
+
+/// 試作 `ENOMOTO_SIMPLEX_SCALE` の条件 `ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE` (既定 0 = いつも): 係数の絶対値の最大 / 最小。
+/// 根の LP の 9 問では、尺度の調整が効いたのは 4e4 以上 (uccase12・snp-02-004-104・uccase9)、悪くしたのは 4.2e3 (supportcase42)・1.2e3 (sing326)
+fn coef_range(rows: &[Vec<(usize, f64)>]) -> f64 {
+    let (mut mn, mut mx) = (f64::INFINITY, 0.0f64);
+    for r in rows {
+        for &(_, v) in r {
+            let a = v.abs();
+            if a > 0.0 {
+                mn = mn.min(a);
+                mx = mx.max(a);
+            }
+        }
+    }
+    if mx > 0.0 { mx / mn } else { 1.0 }
 }
 
 fn shift_of(lo: f64, up: f64) -> f64 {
@@ -1071,7 +1088,11 @@ impl TwoStageLp {
         let t0 = std::time::Instant::now();
         let it0 = self.iters;
         let pol0 = sid::ext_polish_iterations();
-        let st = if scale_cold_on() && !matches!(&self.basis, Some(b) if b.len() == self.rows.len()) && self.rows.len() >= tunable!("ENOMOTO_T_SIMPLEX_SCALE_MIN_M", 0usize, usize) {
+        let st = if scale_cold_on()
+            && !matches!(&self.basis, Some(b) if b.len() == self.rows.len())
+            && self.rows.len() >= tunable!("ENOMOTO_T_SIMPLEX_SCALE_MIN_M", 0usize, usize)
+            && coef_range(&self.rows) >= tunable!("ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE", 0.0, f64)
+        {
             self.solve_scaled(lim)
         } else {
             self.solve_inner(lim)
