@@ -124,6 +124,21 @@ pub(crate) fn set_cold_race_threads(k: usize) -> usize {
     COLD_RACE_THREADS.with(|c| c.replace(k.max(1)))
 }
 
+/// 診断用 [`TwoStageLp::diag_both`] の結果。
+pub struct BothDiag {
+    /// 二段解法で解いた写しと状態、時間 (始めからの秒)。
+    pub lp_s: TwoStageLp,
+    pub st_s: LpStatus,
+    pub t_simplex: f64,
+    /// 内点法 + クロスオーバーの頂点を採った写しと状態 (最適な頂点が得られなければ `None`)。
+    pub lp_i: TwoStageLp,
+    pub st_i: Option<LpStatus>,
+    /// 内点法が終わった時刻・クロスオーバーまで終わった時刻 (始めからの秒)、頂点を採る手間 (秒)。
+    pub t_ipm: Option<f64>,
+    pub t_xo: f64,
+    pub t_adopt: f64,
+}
+
 /// [`TwoStageLp::interior_point`] の結果 (元の空間の構造列の値)。
 pub struct InteriorPoint {
     /// 内点法の解。
@@ -1023,6 +1038,58 @@ impl TwoStageLp {
         crate::phase_timing::mark("race_ipm_crossover_won");
         user_log!("Root LP: the interior-point method + crossover finished first ({:.2}s)", t0.elapsed().as_secs_f64());
         self.adopt_ipm_vertex(&x, duals, lim, debug, t0)
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_ROOTLP_BOTH_DIAG`、既定では呼ばない。analysis/rootlp_both_diff_20261105.md): この LP の写しを 2 つ作り、
+    /// [`Self::solve_race`] と同じ配分 (二段解法は 1 スレッド、内点法 + クロスオーバーは `threads - 1` スレッド、下界は共有) で同時に、
+    /// どちらも止めずに最後まで解く。返す写しは、二段解法の写しと、内点法の頂点を採った写し (競争で内点法が勝ったときと同じ
+    /// [`Self::adopt_ipm_vertex`])。自分は変えない。
+    pub fn diag_both(&self, lim: &SolveLimits, threads: usize) -> BothDiag {
+        use std::sync::mpsc;
+        let threads = threads.max(2);
+        let build = |k: usize, name: &'static str| rayon::ThreadPoolBuilder::new().num_threads(k).thread_name(move |i| format!("enomoto-mip-diag-{name}-{i}")).build().unwrap();
+        let (pool_s, pool) = (build(1, "simplex"), build(threads - 1, "ipm"));
+        let bound = crate::cancel::SharedBound::new(self.std.n_total, self.std.n_rows);
+        let t0 = std::time::Instant::now();
+        type Got = (Option<(Vec<f64>, Option<(Vec<f64>, Vec<Option<usize>>)>)>, f64, Option<f64>);
+        let (tx, rx) = mpsc::channel::<Got>();
+        {
+            let (std, bound) = (Arc::new(self.std.clone()), bound.clone());
+            let deadline = lim.deadline;
+            std::thread::spawn(move || {
+                let r = pool.install(|| {
+                    super::crossover::XO_IPM_END.with(|t| t.set(None));
+                    sid::request_duals(true);
+                    let r = crate::cancel::with_deadline(deadline, || crate::cancel::with_bound(Some(bound), || super::crossover::solve_ipm_crossover(&std)));
+                    let duals = sid::take_duals();
+                    sid::request_duals(false);
+                    let t_ipm = super::crossover::XO_IPM_END.with(|t| t.get()).map(|e| e.saturating_duration_since(t0).as_secs_f64());
+                    (r.filter(|r| r.status == Status::Optimal).and_then(|r| r.x).map(|x| (x, duals)), t0.elapsed().as_secs_f64(), t_ipm)
+                });
+                let _ = tx.send(r);
+            });
+        }
+        let mut lp_s = self.clone();
+        let flags = sid::tl_flags();
+        let (st_s, flags) = pool_s.install(|| {
+            sid::set_tl_flags(flags);
+            let st = crate::cancel::with_bound(Some(bound), || lp_s.solve_once(lim));
+            (st, sid::tl_flags())
+        });
+        sid::set_tl_flags(flags);
+        let t_simplex = t0.elapsed().as_secs_f64();
+        let (got, t_xo, t_ipm) = rx.recv().unwrap_or((None, t0.elapsed().as_secs_f64(), None));
+        let mut lp_i = self.clone();
+        let t1 = std::time::Instant::now();
+        let st_i = match got {
+            Some((x, duals)) => Some(lp_i.adopt_ipm_vertex(&x, duals, lim, false, t1)),
+            None => None,
+        };
+        let t_adopt = t1.elapsed().as_secs_f64();
+        if let Some(st) = st_i {
+            lp_i.status = Some(st);
+        }
+        BothDiag { lp_s, st_s, t_simplex, lp_i, st_i, t_ipm, t_xo, t_adopt }
     }
 
     /// 内点法 + クロスオーバーで単独に解き (このスレッドで、期限は `lim.deadline`)、得られた最適な頂点をこの LP の解として採る

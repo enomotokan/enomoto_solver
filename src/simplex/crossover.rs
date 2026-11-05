@@ -477,6 +477,12 @@ thread_local! {
 }
 
 thread_local! {
+    /// 診断用 (`ENOMOTO_MIP_ROOTLP_BOTH_DIAG`): このスレッドで最後に内点法 (与えた点でない) が終わった時刻。内点法とクロスオーバーの
+    /// 時間を分けて測るのに使う (記録するだけで、求解の経路には使わない)。
+    pub(super) static XO_IPM_END: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+thread_local! {
     /// `ipm_point_only` で止めたときの内点法の点 `(x, y, 内点法の時間)`。
     static XO_IPM_POINT: std::cell::RefCell<Option<(Vec<f64>, Vec<f64>, f64)>> = const { std::cell::RefCell::new(None) };
 }
@@ -933,6 +939,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         return None;
     }
     crate::phase_timing::mark("ipm_end");
+    if xo.given_point.is_none() {
+        XO_IPM_END.with(|t| t.set(Some(Instant::now())));
+    }
     let ipm_secs = xo.given_point.map_or(t0.elapsed().as_secs_f64(), |g| g.2);
     if debug {
         eprintln!("CROSSOVER ipm status={:?} iters={} rel_res={:?} t={:.3}s", ipm.status, ipm.iters, ipm.rel_res, t0.elapsed().as_secs_f64());

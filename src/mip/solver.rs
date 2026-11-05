@@ -5232,6 +5232,62 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 診断用 `ENOMOTO_MIP_TREE4_TRACE=秒` (既定では出さない): スレッドごとに、その秒数おきに全体の下界・暫定解・開いたノードと、
     /// 自分の待ち行列の下界の分布 (全体の下界から打ち切り値までの差の割合で 4 つに分ける)、葉の数を `TREE4:` の行で出す
+    /// 診断 `ENOMOTO_MIP_ROOTLP_BOTH_DIAG` の本体 (上の根の LP の場所から呼ぶ)。
+    fn rootlp_both_diag(&mut self) {
+        let lp0 = crate::simplex::mip_lp::TwoStageLp::new(&self.dom.global_lo, &self.dom.global_up, &self.p.cost, &self.p.rows, &self.p.row_lo, &self.p.row_up);
+        let main_cold = !self.lp.basis_cols().is_some_and(|b| b.len() == self.lp.num_rows());
+        let threads = self.params.threads.max(2);
+        let d = lp0.diag_both(&SolveLimits { deadline: self.deadline, ..Default::default() }, threads);
+        let n = self.p.n;
+        let m = self.p.m;
+        let ok_s = d.st_s == LpStatus::Optimal;
+        let ok_i = d.st_i == Some(LpStatus::Optimal);
+        let xs = d.lp_s.col_values();
+        let xi = d.lp_i.col_values();
+        let tol = 1e-6;
+        let frac = |x: &[f64]| -> Vec<usize> { (0..n).filter(|&j| self.p.is_int[j] && (x[j] - x[j].round()).abs() > tol).collect() };
+        let (fs, fi) = if ok_s && ok_i { (frac(&xs), frac(&xi)) } else { (Vec::new(), Vec::new()) };
+        let fset: std::collections::HashSet<usize> = fs.iter().copied().collect();
+        let fboth = fi.iter().filter(|j| fset.contains(j)).count();
+        let differ = |pred: &dyn Fn(usize) -> bool| (0..n).filter(|&j| pred(j) && (xs[j] - xi[j]).abs() > tol * (1.0 + xs[j].abs().max(xi[j].abs()))).count();
+        let (ndiff, ndiff_int) = if ok_s && ok_i { (differ(&|_| true), differ(&|j| self.p.is_int[j])) } else { (0, 0) };
+        let (bdc, bdr) = match (d.lp_s.basis_cols(), d.lp_i.basis_cols()) {
+            (Some(a), Some(b)) if ok_s && ok_i => {
+                let sa: std::collections::HashSet<usize> = a.iter().copied().collect();
+                let sb: std::collections::HashSet<usize> = b.iter().copied().collect();
+                let x: Vec<usize> = sa.symmetric_difference(&sb).copied().collect();
+                (x.iter().filter(|&&v| v < n).count() as i64, x.iter().filter(|&&v| v >= n).count() as i64)
+            }
+            _ => (-1, -1),
+        };
+        let t_i = d.t_xo + d.t_adopt;
+        let winner = match (ok_s, ok_i) {
+            (true, true) => if d.t_simplex <= d.t_xo { "simplex" } else { "ipm" },
+            (true, false) => "simplex",
+            (false, true) => "ipm",
+            _ => "none",
+        };
+        let o = |v: f64| if v.is_finite() { format!("{v:.12e}") } else { "null".into() };
+        let n_int = self.p.is_int.iter().filter(|&&b| b).count();
+        eprintln!(
+            "ROOTLP_BOTH {{\"n\":{n},\"m\":{m},\"n_int\":{n_int},\"threads\":{threads},\"main_cold\":{main_cold},\"st_s\":\"{:?}\",\"st_i\":\"{:?}\",\"obj_s\":{},\"obj_i\":{},\"t_simplex\":{:.4},\"t_ipm\":{},\"t_xo\":{:.4},\"t_adopt\":{:.4},\"t_i\":{:.4},\"winner\":\"{winner}\",\"ndiff\":{ndiff},\"ndiff_int\":{ndiff_int},\"frac_s\":{},\"frac_i\":{},\"frac_both\":{fboth},\"basis_diff_cols\":{bdc},\"basis_diff_rows\":{bdr},\"iters_s\":{},\"iters_i\":{},\"t_presolve\":{:.3}}}",
+            d.st_s,
+            d.st_i,
+            o(d.lp_s.objective() + self.p.offset),
+            o(if ok_i { d.lp_i.objective() + self.p.offset } else { f64::NAN }),
+            d.t_simplex,
+            d.t_ipm.map_or("null".into(), |v| format!("{v:.4}")),
+            d.t_xo,
+            d.t_adopt,
+            t_i,
+            fs.len(),
+            fi.len(),
+            d.lp_s.total_iterations(),
+            d.lp_i.total_iterations(),
+            self.start.elapsed().as_secs_f64(),
+        );
+    }
+
     fn tree4_trace(&mut self) {
         let Some(every) = env_str!("ENOMOTO_MIP_TREE4_TRACE").and_then(|v| v.parse::<f64>().ok()) else { return };
         if self.params.submip {
@@ -6046,6 +6102,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             None
         };
+        // 診断 `ENOMOTO_MIP_ROOTLP_BOTH_DIAG` (既定では何もしない。analysis/rootlp_both_diff_20261105.md): 最初の主の根の LP (前処理の後、
+        // カットの前) を基底なしで二段解法と内点法 + クロスオーバーの両方で最後まで解き、両方の解・基底・時間の違いを 1 行の JSON
+        // (`ROOTLP_BOTH {...}`) で stderr に出して終わる
+        if root_kind == Some(4) && env_str!("ENOMOTO_MIP_ROOTLP_BOTH_DIAG").is_some() {
+            self.rootlp_both_diag();
+            return self.finish(MipStatus::NotSolved, f64::NEG_INFINITY);
+        }
         let root_it0 = self.lp.total_iterations();
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         if let Some(k) = root_kind {
