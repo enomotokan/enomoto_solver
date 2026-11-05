@@ -1,4 +1,4 @@
-"""batch1〜4.txt (neos859080・beasleyC3・n2seq36q を def・rob・both・mv・par、neos859080 の mvd、利用者の案 first3・par3s で) の集計
+"""batch1〜6.txt (neos859080・beasleyC3・n2seq36q を def・rob・both・mv・par、neos859080 の mvd、利用者の案 first3・par3s で) の集計
 (python3 summ1.py > summ1.txt)。beasleyC3 の par (batch1) は確かめの解き直しの誤りで別の基底が作られず既定と同じだったので、直した後の
 par2 (batch3) を par として数える。beasleyC3 の種 6 (batch1) はビルドと同時に走ったので、回し直した s6r (batch3) を使う。
 試作の働き (2 回目のループ・写しの選び) と根の LP の勝ち負けはログ (runs/*.log) から。"""
@@ -7,7 +7,7 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 rows = {}
 lines = []
-for b in ("batch1.txt", "batch2.txt", "batch3.txt", "batch4.txt"):
+for b in ("batch1.txt", "batch2.txt", "batch3.txt", "batch4.txt", "batch5.txt", "batch6.txt", "batch7.txt"):
     if (D / b).exists():
         lines += open(D / b).read().splitlines()
 for l in lines:

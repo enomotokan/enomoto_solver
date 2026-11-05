@@ -15,6 +15,7 @@ HW = {"ENOMOTO_MIP_DIAG_HW_THREADS": "16"}
 CFGS = {  # (スレッド数, 足す環境変数)
     "def": (4, {}), "mv": (4, {"ENOMOTO_MIP_OPTFACE_MOVE": "f"}), "par": (4, {"ENOMOTO_MIP_OPTFACE_PARCUTS": "3"}),
     "mvpar": (4, {"ENOMOTO_MIP_OPTFACE_MOVE": "f", "ENOMOTO_MIP_OPTFACE_PARCUTS": "3"}),
+    "sgl": (4, {"ENOMOTO_MIP_OPTFACE_PARCUTS": "3sg", "ENOMOTO_T_MIP_OPTFACE_SHARE_EPS": "1e-4", "ENOMOTO_T_MIP_OPTFACE_SHARE_START": "3"}),
 }
 
 
@@ -31,7 +32,7 @@ def status_of(pid):
     return th, rss
 
 
-def run_one(p, c, log, seed):
+def run_one(p, c, log, seed, logdir="logs"):
     n, extra = CFGS[c]
     mps = rb.fetch(p, WT / ".miplib_cache")
     env = dict(os.environ, ENOMOTO_MIP_THREADS=str(n), ENOMOTO_T_MIP_SEED=str(seed), **extra)
@@ -58,8 +59,8 @@ def run_one(p, c, log, seed):
         tail = errf.read_text(errors="replace")[-400:]
         res = {"status": "killed" if killed else "crash", "rc": pr.returncode, "error": tail}
     if log:
-        (D / "logs").mkdir(exist_ok=True)
-        with gzip.open(D / "logs" / f"{p}_{c}_s{seed}.log.gz", "wt") as g:
+        (D / logdir).mkdir(exist_ok=True)
+        with gzip.open(D / logdir / f"{p}_{c}_s{seed}.log.gz", "wt") as g:
             g.write(errf.read_text(errors="replace"))
     return {"problem": p, "cfg": c, "result": res, "wall": wall, "max_threads": mth, "max_rss_kb": mrss, "rc": pr.returncode,
             "nproc": os.cpu_count(), "at": time.strftime("%H:%M:%S")}
@@ -78,7 +79,7 @@ if __name__ == "__main__":
         for c in order:
             if (p, c) in done:
                 continue
-            r = run_one(p, c, log, seed)
+            r = run_one(p, c, log, seed, "logs" if name == f"bench58_s{seed}" else f"logs_{name}")
             r["seed"] = seed
             with open(OUT, "a") as f:
                 f.write(json.dumps(r) + "\n")
