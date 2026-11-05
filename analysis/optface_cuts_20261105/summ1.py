@@ -1,10 +1,16 @@
-"""batch1.txt (neos859080・beasleyC3・n2seq36q を def・rob・both・mv・par で) の集計 (python3 summ1.py > summ1.txt)。
+"""batch1〜4.txt (neos859080・beasleyC3・n2seq36q を def・rob・both・mv・par、neos859080 の mvd、利用者の案 first3・par3s で) の集計
+(python3 summ1.py > summ1.txt)。beasleyC3 の par (batch1) は確かめの解き直しの誤りで別の基底が作られず既定と同じだったので、直した後の
+par2 (batch3) を par として数える。beasleyC3 の種 6 (batch1) はビルドと同時に走ったので、回し直した s6r (batch3) を使う。
 試作の働き (2 回目のループ・写しの選び) と根の LP の勝ち負けはログ (runs/*.log) から。"""
 import json, re, statistics
 from pathlib import Path
 D = Path(__file__).resolve().parent
 rows = {}
-for l in open(D / "batch1.txt"):
+lines = []
+for b in ("batch1.txt", "batch2.txt", "batch3.txt", "batch4.txt"):
+    if (D / b).exists():
+        lines += open(D / b).read().splitlines()
+for l in lines:
     if " " not in l.strip():
         continue
     n, j = l.split(" ", 1)
@@ -13,6 +19,13 @@ for l in open(D / "batch1.txt"):
     except Exception:
         continue
     p, c, s = n.rsplit("_", 2)
+    if p == "beasleyC3" and (c == "par" or (s == "s6" and c in ("def", "rob", "both", "mv"))):
+        continue
+    r["_name"] = n
+    if s == "s6r":
+        s = "s6"
+    if c == "par2":
+        c = "par"
     rows.setdefault((p, c), []).append((s, r))
 print("問題        設定   回  中央値   最悪    最良  時間切れ  根の下界 (中央値・最小・最大)  暫定解 (中央値)")
 for (p, c), v in rows.items():
@@ -24,7 +37,7 @@ for (p, c), v in rows.items():
 print()
 for (p, c), v in rows.items():
     for s, r in v:
-        log = D / "runs" / f"{p}_{c}_{s}.log"
+        log = D / "runs" / f"{r['_name']}.log"
         t = log.read_text(errors="replace") if log.exists() else ""
         ex = []
         if "robust root IPM: second cut loop" in t:
@@ -39,6 +52,9 @@ for (p, c), v in rows.items():
             ex.append(f"mv 2 回目 (試し {k})")
         elif k:
             ex.append(f"mv 戻す (試し {k})")
+        m = re.search(r"optface first: (\d+) cuts .*obj \S+ -> (\S+)", t)
+        if m:
+            ex.append(f"first {m.group(1)} 本 -> {float(m.group(2)):.4g}")
         m = re.search(r"optface parcuts: use copy (\d+)", t)
         if m:
             ex.append("par 写し " + m.group(1))
