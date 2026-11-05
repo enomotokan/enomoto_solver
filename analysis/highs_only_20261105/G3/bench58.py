@@ -9,7 +9,8 @@ sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029")); sys.path.insert(0
 from probs import PROBS  # noqa: E402
 CFGS = {"def": {}, **json.loads((D / "cfgs.json").read_text())}
 import run_miplib_benchmark as rb  # noqa: E402
-OUT = D / "bench58.jsonl"
+# 走っている間はリポジトリの外に書き、終わってから G3/ に写す (q8.sh)
+OUT = Path("/tmp/claude-0/-home-user-enomoto-solver/9de22911-6f4d-530c-ae3b-e7d47498b968/scratchpad/runs/bench58.jsonl")
 cfgs, rep = sys.argv[1].split(","), int(sys.argv[2])
 if rep % 2:
     cfgs = cfgs[::-1]
