@@ -480,6 +480,9 @@ thread_local! {
     /// 診断用 (`ENOMOTO_MIP_ROOTLP_BOTH_DIAG`): このスレッドで最後に内点法 (与えた点でない) が終わった時刻。内点法とクロスオーバーの
     /// 時間を分けて測るのに使う (記録するだけで、求解の経路には使わない)。
     pub(super) static XO_IPM_END: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    /// 真の間は仕上げに非基底の向きを渡さない (`ENOMOTO_T_XO_CLEANUP_HINT`・`ENOMOTO_XO_MIP_CLEANUP_HINT` によらず)。MIP の LP が
+    /// 尺度をそろえた写しで内点法 + クロスオーバーを解き、係数の幅が極端に大きいとき (`ENOMOTO_XO_MIP_SCALE`) に立てる。
+    pub(super) static XO_NO_CLEANUP_HINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 thread_local! {
@@ -2179,6 +2182,25 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 元の (行数の多い) 問題を解き直していた (rmine15・graph40-40 で正規方程式の因子が数十 GB になり落ちた)。
     // 頂点の基底は双対実行可能とは限らず、修復は費用をずらした問題を解くので、どちらの双対も記録には使えない。
     let mut repaired_start: Option<(Vec<usize>, Vec<i8>)> = None;
+    // 試作 `ENOMOTO_XO_MIP_REPAIR=1` (既定では使わない。analysis/rootlp_ipm_fail_20261105.md): 双対の記録が要求されているとき (MIP の根の
+    // LP) も頂点の修復だけは行い、修復した基底を仕上げの出発点にする (受け入れの近道は使わない。双対は仕上げの単体法が記録する)。
+    // momentum1 の根の LP: LP 単独の入口では修復した基底からの仕上げで解ける (14.7 秒) が、MIP では修復が飛ばされ、主実行不能の
+    // 頂点から仕上げて主単体法が発散していた。
+    if let (Some(yi), true) = (&y_ipm, super::slope_intercept_dual::duals_requested() && env_str!("ENOMOTO_XO_MIP_REPAIR").is_some_and(|v| v != "0")) {
+        if tunable!("ENOMOTO_T_XO_REPAIR", 1u8, u8) != 0 && vertex_solution(std, &basis_pos, &nb_status, &lu).is_none() {
+            let rfac = if crate::cancel::bound().is_some() {
+                tunable!("ENOMOTO_T_XO_REPAIR_TIME_FACTOR_RACE", 0.0f64, f64)
+            } else {
+                tunable!("ENOMOTO_T_XO_REPAIR_TIME_FACTOR", 2.0f64, f64)
+            };
+            let repair_deadline = (rfac > 0.0).then(|| Instant::now() + std::time::Duration::from_secs_f64((rfac * t0.elapsed().as_secs_f64()).clamp(10.0, 1e6)));
+            // 受け入れの判定を通らないよう accept_gap に負を渡す (修復した基底を必ず返させる)
+            if let Err(Some(rb)) = repair_vertex(std, yi, &basis, &basis_pos, &nb_status, &lu, -1.0, repair_deadline, debug) {
+                crate::phase_timing::mark("xo_mip_vertex_repaired");
+                repaired_start = Some(rb);
+            }
+        }
+    }
     if let (Some(yi), false) = (&y_ipm, super::slope_intercept_dual::duals_requested()) {
         // 頂点が主実行不能 (少数) なら、費用をずらして基底を双対実行可能にしてから双対単体法で主実行不能だけを直し、
         // 直した頂点を元の費用で判定する (`ENOMOTO_T_XO_REPAIR`、既定 1 は第 61 回の比較で決めた。[`repair_vertex`])。
@@ -2452,7 +2474,10 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 // 同じ。LP 単独 (irish-electricity) では仕上げが遅くなったので、MIP の根の LP だけに絞る)。向きなしでは押し出しで得た主・双対
                 // 実行可能な基底からでも非基底の列を被約費用の符号で置き直し、主実行不能 1.7 万〜3.3 万本から解き直していた
                 // (cryptanalysiskb128n5obj16・physiciansched6-2・chromaticindex512-7 など)。
-                if outer && env_str!("ENOMOTO_XO_MIP_CLEANUP_HINT").is_some_and(|v| v != "0") {
+                if XO_NO_CLEANUP_HINT.with(|f| f.get()) {
+                    // 尺度をそろえた写しで解いていて係数の幅が極端に大きい (`ENOMOTO_XO_MIP_SCALE`): 仕上げに向きを渡さない
+                    // (momentum1: 渡すと仕上げが 1.5 → 15.5 秒)
+                } else if outer && env_str!("ENOMOTO_XO_MIP_CLEANUP_HINT").is_some_and(|v| v != "0") {
                     set_cleanup_hint(&nb_status, 0);
                 } else {
                     set_cleanup_hint(&nb_status, 2);
@@ -2908,10 +2933,12 @@ fn repair_vertex(
         let c = outer.unwrap_or(ExtControl { iteration_limit: usize::MAX, cutoff: f64::INFINITY, deadline: None });
         set_ext_control(Some(ExtControl { deadline: Some(c.deadline.map_or(d, |o| o.min(d))), ..c }));
     }
+    // 呼び出し側 (MIP の根の LP) が双対の記録を要求していれば、修復の後にその要求を戻す (`ENOMOTO_XO_MIP_REPAIR`)
+    let outer_req = super::slope_intercept_dual::duals_requested();
     super::slope_intercept_dual::request_duals(true);
     let res = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(&std2, &Default::default(), basis.to_vec());
     let final_pos = super::slope_intercept_dual::take_duals().map(|(_, bp)| bp);
-    super::slope_intercept_dual::request_duals(false);
+    super::slope_intercept_dual::request_duals(outer_req);
     if deadline.is_some() {
         if debug && super::slope_intercept_dual::ext_stop() == super::slope_intercept_dual::ExtStop::TimeLimit {
             eprintln!("CROSSOVER repair: time limit reached t={:.3}s", t0.elapsed().as_secs_f64());

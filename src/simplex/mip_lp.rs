@@ -271,6 +271,48 @@ pub struct LuSnapshot {
     price_key: u64,
 }
 
+/// 試作 `ENOMOTO_XO_MIP_SCALE=1` (既定では使わない。analysis/rootlp_ipm_fail_20261105.md): MIP の LP の内点法 + クロスオーバー
+/// (根の LP の競争・解き直し) を、行と列の尺度をそろえた写し ([`scale_factors`]、2 の冪) の標準形で解く。解は `x = c x'`、双対は
+/// `y = r y'` で元の尺度に戻す (基底は尺度によらない)。目的値は尺度によらないので、二段解法と共有する下界もそのまま使える。
+/// momentum1 の根の LP: 元の尺度では双対の乗数が 1e7〜1e12 で、内点法が停滞し、押し出しの基底からの仕上げの単体法も破綻した
+/// (LP 単独の入口 (前処理で尺度をそろえる) では 14.7 秒で解ける)。
+struct IpmScale {
+    std: StdForm,
+    /// 仕上げに非基底の向きを渡さないか (係数の幅が `ENOMOTO_T_XO_MIP_SCALE_NOHINT_RANGE` (既定 1e8) 以上。momentum1 (幅 7.9e9) は
+    /// 渡すと仕上げが 1.5 → 15.5 秒、satellites2-40 (6.6e5) は渡さないと 7.3 → 59.9 秒。この 2 問だけで決めた値)
+    no_hint: bool,
+    rs: Vec<f64>,
+    cs: Vec<f64>,
+    sc_shift: Vec<f64>,
+    shift: Vec<f64>,
+}
+
+
+/// 内点法 + クロスオーバーを (`sc` があれば尺度をそろえた写しで) 解き、解 (標準形の構造列の空間) と記録した双対を元の尺度に戻す。
+fn ipm_crossover_run(std: &StdForm, sc: Option<&IpmScale>) -> Option<super::SimplexResult> {
+    let Some(s) = sc else {
+        return super::crossover::solve_ipm_crossover(std);
+    };
+    let prev = super::crossover::XO_NO_CLEANUP_HINT.with(|f| f.replace(s.no_hint));
+    let r = super::crossover::solve_ipm_crossover(&s.std);
+    super::crossover::XO_NO_CLEANUP_HINT.with(|f| f.set(prev));
+    if sid::duals_requested() {
+        if let Some((y, bp)) = sid::take_duals() {
+            let y2: Vec<f64> = y.iter().zip(&s.rs).map(|(v, r)| v * r).collect();
+            sid::put_duals(y2, bp);
+        }
+    }
+    r.map(|mut r| {
+        if let Some(x) = r.x.as_mut() {
+            let n = s.cs.len().min(x.len());
+            for j in 0..n {
+                x[j] = (x[j] + s.sc_shift[j]) * s.cs[j] - s.shift[j];
+            }
+        }
+        r
+    })
+}
+
 /// 試作 `ENOMOTO_SIMPLEX_SCALE=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): 基底のない求解
 /// ([`TwoStageLp::solve_once`]、MIP の根の LP・LP プロービングの最初の LP など) を、行と列の尺度を調整した写しで解く
 /// ([`TwoStageLp::solve_scaled`])。HiGHS は尺度を調整してから解き、uccase12 の根の LP は調整なし (`simplex_scale_strategy=0`) だと
@@ -1133,6 +1175,38 @@ impl TwoStageLp {
         st
     }
 
+    /// 試作 `ENOMOTO_XO_MIP_SCALE` の写し ([`IpmScale`])。環境変数がなければ `None`。
+    fn ipm_scale(&self) -> Option<Arc<IpmScale>> {
+        if !env_str!("ENOMOTO_XO_MIP_SCALE").is_some_and(|v| v != "0") {
+            return None;
+        }
+        // 係数の幅 (最大 / 最小の絶対値) が `ENOMOTO_T_XO_MIP_SCALE_MIN_RANGE` (既定 1e5) 未満なら使わない (opm2-z10-s4 (幅 4.1e3) は
+        // 尺度をそろえた写しで基底の選択が 600 秒戻らなかった。momentum1 は幅 7.9e9、satellites2-40 は 6.6e5)
+        let (mut amin, mut amax) = (f64::INFINITY, 0.0f64);
+        for r in &self.rows {
+            for &(_, v) in r {
+                let a = v.abs();
+                if a > 0.0 {
+                    amin = amin.min(a);
+                    amax = amax.max(a);
+                }
+            }
+        }
+        if !(amax / amin >= tunable!("ENOMOTO_T_XO_MIP_SCALE_MIN_RANGE", 1e5f64, f64)) {
+            return None;
+        }
+        let (rs, cs) = scale_factors(self.n, &self.rows);
+        let rows: Vec<Vec<(usize, f64)>> = self.rows.iter().enumerate().map(|(i, r)| r.iter().map(|&(j, v)| (j, v * rs[i] * cs[j])).collect()).collect();
+        let row_lo: Vec<f64> = (0..rs.len()).map(|i| self.row_lo[i] * rs[i]).collect();
+        let row_up: Vec<f64> = (0..rs.len()).map(|i| self.row_up[i] * rs[i]).collect();
+        let lo: Vec<f64> = (0..self.n).map(|j| self.lo[j] / cs[j]).collect();
+        let up: Vec<f64> = (0..self.n).map(|j| self.up[j] / cs[j]).collect();
+        let cost: Vec<f64> = (0..self.n).map(|j| self.cost[j] * cs[j]).collect();
+        let sc = TwoStageLp::new(&lo, &up, &cost, &rows, &row_lo, &row_up);
+        let no_hint = amax / amin >= tunable!("ENOMOTO_T_XO_MIP_SCALE_NOHINT_RANGE", 1e8f64, f64);
+        Some(Arc::new(IpmScale { std: sc.std, no_hint, rs, cs, sc_shift: sc.shift, shift: self.shift.clone() }))
+    }
+
     /// 試作 `ENOMOTO_SIMPLEX_SCALE` ([`scale_cold_on`]) の本体: 行と列の尺度を調整した写し ([`scale_factors`]) を基底なしで解き、
     /// 最適ならその基底 (尺度によらない) から元の LP を warm start で解き直す。写しが最適で終わらなければ、時間・反復の上限はそのまま返し、
     /// それ以外 (実行不能・非有界・数値の破綻など) は元の LP を基底なしで解き直す (証明・双対を元の尺度で得るため)。
@@ -1225,13 +1299,14 @@ impl TwoStageLp {
         let (tx, rx) = mpsc::channel::<Option<Won>>();
         {
             let (std, cancel, bound) = (Arc::new(self.std.clone()), cancel.clone(), bound.clone());
+            let sc = self.ipm_scale();
             let deadline = lim.deadline;
             std::thread::spawn(move || {
                 let r = pool.install(|| {
                     // 仕上げの二段解法の最適基底と双対を記録させる
                     sid::request_duals(true);
                     let r = crate::cancel::with_deadline(deadline, || {
-                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || super::crossover::solve_ipm_crossover(&std)))
+                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || ipm_crossover_run(&std, sc.as_deref())))
                     });
                     let duals = sid::take_duals();
                     sid::request_duals(false);
@@ -1305,12 +1380,13 @@ impl TwoStageLp {
         let (tx, rx) = mpsc::channel::<Got>();
         {
             let (std, bound) = (Arc::new(self.std.clone()), bound.clone());
+            let sc = self.ipm_scale();
             let deadline = lim.deadline;
             std::thread::spawn(move || {
                 let r = pool.install(|| {
                     super::crossover::XO_IPM_END.with(|t| t.set(None));
                     sid::request_duals(true);
-                    let r = crate::cancel::with_deadline(deadline, || crate::cancel::with_bound(Some(bound), || super::crossover::solve_ipm_crossover(&std)));
+                    let r = crate::cancel::with_deadline(deadline, || crate::cancel::with_bound(Some(bound), || ipm_crossover_run(&std, sc.as_deref())));
                     let duals = sid::take_duals();
                     sid::request_duals(false);
                     let t_ipm = super::crossover::XO_IPM_END.with(|t| t.get()).map(|e| e.saturating_duration_since(t0).as_secs_f64());
@@ -1365,12 +1441,13 @@ impl TwoStageLp {
         let base = Box::new(self.clone());
         {
             let (std, cancel, bound, tx) = (Arc::new(self.std.clone()), cancel_i.clone(), bound.clone(), tx.clone());
+            let sc = self.ipm_scale();
             let deadline = lim.deadline;
             std::thread::spawn(move || {
                 let r = pool.install(|| {
                     sid::request_duals(true);
                     let r = crate::cancel::with_deadline(deadline, || {
-                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || super::crossover::solve_ipm_crossover(&std)))
+                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || ipm_crossover_run(&std, sc.as_deref())))
                     });
                     let duals = sid::take_duals();
                     sid::request_duals(false);
@@ -1478,8 +1555,9 @@ impl TwoStageLp {
     pub fn solve_ipm_rescue(&mut self, lim: &SolveLimits) -> LpStatus {
         let t0 = std::time::Instant::now();
         let std = self.std.clone();
+        let sc = self.ipm_scale();
         sid::request_duals(true);
-        let r = crate::cancel::with_deadline(lim.deadline, || super::crossover::solve_ipm_crossover(&std));
+        let r = crate::cancel::with_deadline(lim.deadline, || ipm_crossover_run(&std, sc.as_deref()));
         let duals = sid::take_duals();
         sid::request_duals(false);
         let Some(x) = r.filter(|r| r.status == Status::Optimal).and_then(|r| r.x) else {
@@ -1495,11 +1573,42 @@ impl TwoStageLp {
         let n = self.n;
         let xo: Vec<f64> = (0..n).map(|j| x.get(j).copied().unwrap_or(0.0) + self.shift[j]).collect();
         if let Some((y, bpos)) = duals {
+            let bpos_keep = env_str!("ENOMOTO_XO_MIP_SCALE").is_some_and(|v| v != "0").then(|| bpos.clone());
             if self.adopt_basic_solution(&xo, y, &bpos) {
                 if debug {
                     eprintln!("MIP root race: ipm_crossover won at {:.3}s, its optimal basis adopted", t0.elapsed().as_secs_f64());
                 }
                 return LpStatus::Optimal;
+            }
+            // 試作 `ENOMOTO_XO_MIP_SCALE`: 尺度をそろえた写しの最適基底は元の尺度では丸めで判定に通らないことがある。その基底から
+            // warm start で解き直す (最適基底なのでほとんど反復しない)
+            let m = self.rows.len();
+            let b: Option<Vec<usize>> = bpos_keep.filter(|bp| bp.len() == n + m).and_then(|bp| {
+                let mut b = vec![usize::MAX; m];
+                for (v, p) in bp.iter().enumerate() {
+                    if let Some(p) = *p {
+                        if p >= m {
+                            return None;
+                        }
+                        b[p] = v;
+                    }
+                }
+                (!b.contains(&usize::MAX)).then_some(b)
+            });
+            if let Some(b) = b {
+                self.basis = Some(b);
+                self.x.copy_from_slice(&xo);
+                self.lu = None;
+                self.lu_cache = None;
+                self.dse_cache = None;
+                self.status = None;
+                self.clear_memo();
+                let it0 = self.iters;
+                let st = self.solve_once(lim);
+                if debug || env_str!("ENOMOTO_DEBUG_ADOPT").is_some() {
+                    eprintln!("MIP root race: ipm_crossover (scaled) basis -> warm re-solve {st:?} in {} iters", self.iters - it0);
+                }
+                return st;
             }
         }
         // 仕上げの記録が使えない: 頂点で境界の内側にある列 (足りなければスラック) を基底にして warm start で解き直す

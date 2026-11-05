@@ -29,6 +29,10 @@ bench に使う環境変数: 既定 (base) はなし。試作 (trial) は
   satellites2-40 264 (頂点なし) → 75、sorrell3 269 (頂点なし) → 42、mas74 頂点なし → 0.05、graph20-20-1rand 0.44 → 0.32。momentum1・opm2-z10-s4 は頂点なしのまま。
 - 二段解法と同時に解く形 (競争) では、試作で 11 問中 7 問 (satellites2-40・crypt14/16・physiciansched6-2・chromaticindex512-7・neos-933966・sorrell3)
   で **内点法側が二段解法より先に最適な頂点を出す** (既定では 7 問とも負けるか頂点なし)。目的値はすべて二段解法と一致。
+- **追記 (11 節)**: momentum1 も、内点法 + クロスオーバーを尺度をそろえた写しで解く試作 (`ENOMOTO_XO_MIP_SCALE=1`、係数の幅 1e5 以上だけ) と
+  `ENOMOTO_T_XO_UNCONVERGED_GIVEUP=0`・`ENOMOTO_T_IPM_NOIMPROVE=10` で **13.5 秒で最適な頂点** (既定は 19 秒で頂点なし)。原因は係数の幅 7.9e9 の
+  尺度の悪さで、最適基底そのものが悪条件 (最適な双対が 4.5e9) なため、尺度をそろえない標準形では内点法も仕上げの単体法も破綻していた。
+  この試作一式 5 で 11 問すべてが最適な頂点を返す。
 - 58 問 (60 秒、1 回) の MIP 全体: SGM は負けている 21 問 15.02 → 14.63 秒 (解けた数 19 → 18)、MIPLIB 40 問 18.51 → 19.40 秒 (26 → 26)。差の出た 8 問を
   さらに 2 回ずつ回すと、noswot・qnet1・mc11 は試作が 3 回中 2〜3 回遅いが、noswot・qnet1 は既定・試作ともすべての根の LP の競争で二段解法が勝って
   いて内点法の頂点は使われない (根の LP の結果は同じ)。58 問の根の LP は 0.1 秒未満が大半で、試作の効く場面がほぼない。**58 問では効き目も害も
@@ -414,6 +418,97 @@ opm2-z10-s4 (`exp.jsonl` の `_load_ipx`・`_dualpush`・`_adopt*`):
   数値の扱い (比率テストの許容・境界のずらし・再分解の後の x_B の検査) の問題で、二段解法側 (セッション 2 の受け持ち) に近い。
 - 既定の動き (主実行不能 580 本で 19 秒で諦める) は、競争では二段解法 (10.8 秒) が先に終わるので害は小さい。既定は変えない。
 
+## 11. momentum1 を内点法 + クロスオーバーで解く
+
+### 11.1 切り分け
+
+- 事実: 書き出した根の LP を LP 単独の入口 (`Model.solve(root_solver="ipm_crossover")`、前処理と尺度の調整つき) で解くと、二段解法は 0.51 秒
+  (MIP の中の二段解法は 10.8 秒)、**内点法 + クロスオーバーも 14.7 秒で最適** (内点法は 200 反復で収束しないがギャップは許容の 15 倍、
+  頂点の主実行不能 1 本、修復のギャップ 1.3e-7、仕上げは修復した基底から)。前処理で 20,438 行・5,174 列 → 11,094 行・2,736 列。
+- 事実: IPX + クロスオーバーの **正確な最適な頂点と双対** (双対の最大 4.5e9) をこちらの MIP の標準形のクロスオーバーに渡しても、押し出しの後の基底は
+  双対実行不能 702 本で、仕上げの単体法が破綻する。この LP の最適基底は本質的に悪条件で、尺度をそろえない標準形の上ではこちらの仕上げの
+  単体法が扱えない。
+- 事実: 係数の幅 (最大 / 最小の絶対値) は **7.9e9** (最小 1.3e-9。1e-4 未満の係数が 84,798 個中 3,552 個)。他の 10 問は 1〜6.6e5。
+- 事実: 根の LP には forcing row 708 本、上下限の等しい列 2,119 本、境界だけで常に満たされる行 8,443 本、固定列を除くと列 1 本だけの行 7,707 本
+  (同じ列に重なる平行な行の組 434 組・7,694 行) がある。HiGHS の前処理では一次従属な行は 0 本。
+
+### 11.2 試して効かなかったこと (コードから外した)
+
+| 試作 | 結果 |
+|---|---|
+| 仕上げに失敗したら押し出しの頂点を MIP の LP に渡す (採る側が頂点の内側の列で基底を作って二段解法で解き直す) | 解き直しが 275 秒で期限 (一から解くと 10.8 秒) |
+| LP 単独の入口の処理一式 (前処理 → 内点法 + クロスオーバー → 後処理) を MIP の内点法側で使う | LP 側は 13.5 秒で最適だが、基底を元に戻す後処理がないので、頂点からの解き直しが 280 秒で期限 |
+| forcing row の変数とスラックを固定した写し (708 行・列 233 本) | 内点法はギャップ 400 倍で停滞、頂点なし |
+| 列 1 本の行を列の境界に移し、スラックを自由にした写し (7,707 行) | ギャップ 80 倍、双対実行不能の最大 4.8e6、頂点なし |
+| 仕上げで真の費用の双対実行不能の列を反対の境界へ移す (既存の `ENOMOTO_HANDOFF_FLIP=1/2`) | 双対単体法で 1 万反復進んでも最後は主単体法で破綻 |
+| 主単体法の境界のずらしを止める・比率テストの許容を小さく (`ENOMOTO_T_PRIMAL_SHIFT_INFEAS=0`・`ENOMOTO_T_PRIMAL_HARRIS_TOL=1e-9`) | 同じく破綻 |
+| 双対の押し出しを走らせる (`ENOMOTO_T_XO_VERTEX_FEAS_TOL=1e-4`) | 3,579 本を押し出せず、仕上げで破綻 |
+
+試作 `ENOMOTO_XO_MIP_REPAIR=1` (双対の記録が要るときも頂点の修復だけ行い、修復した基底を仕上げの出発点にする。修復が双対の記録の要求を
+切っていたのを戻す) は残した: 単独では解けないが (修復のギャップ 4.8e-5、仕上げで破綻)、LP 単独の入口と同じ流れにするための部品。
+
+### 11.3 効いたもの: 尺度をそろえた写しで内点法から仕上げまで (`ENOMOTO_XO_MIP_SCALE=1`)
+
+- MIP の LP (根の LP の競争・解き直し) の内点法 + クロスオーバーを、行と列の尺度をそろえた写し (二段解法側の `ENOMOTO_SIMPLEX_SCALE` と同じ
+  `scale_factors`、2 の冪) の標準形で解く。解は `x = c x'`、双対は `y = r y'` で戻し (基底は尺度によらない)、もとの尺度で双対の判定が
+  通らなければ、その最適基底から MIP の二段解法で warm start する。目的値は尺度によらないので、二段解法と共有する下界もそのまま使える。
+- 係数の幅が `ENOMOTO_T_XO_MIP_SCALE_MIN_RANGE` (既定 1e5) 未満なら使わない: opm2-z10-s4 (幅 4.1e3) は尺度をそろえた写しで基底の選択
+  (押し出しの後の一次独立な列の選択、期限を見ない) が 600 秒戻らなかった。
+- 係数の幅が `ENOMOTO_T_XO_MIP_SCALE_NOHINT_RANGE` (既定 1e8) 以上なら、仕上げに非基底の向きを渡さない (`crossover.rs` の
+  `XO_NO_CLEANUP_HINT`): momentum1 (幅 7.9e9) は渡すと仕上げが 1.5 → 15.5 秒、satellites2-40 (6.6e5) は渡さないと 7.3 → 59.9 秒。
+  **この 2 問だけで決めた値**。
+
+momentum1 (内点法 + クロスオーバーだけ、`exp.jsonl` の `_sc*`・`_m4_*`、`trial5.jsonl`):
+
+| 設定 | 内点法 | 結果 | 内点法 + XO |
+|---|---|---|---:|
+| `MIP_SCALE` だけ | 200 反復、ギャップ 23 倍 | 頂点の主実行不能 2,718 本で諦める | - |
+| + `ENOMOTO_T_XO_UNCONVERGED_GIVEUP=0` | 200 反復 35 秒 | **最適** (目的値 96246.84036491、二段解法と一致) | 37.8 秒 |
+| + 内点法の反復の上限 40 / 60 / 100 | | 40 は頂点なし、60・100 は最適 | - / 20.7 / 34.5 秒 |
+| + `ENOMOTO_T_IPM_NOIMPROVE=10` (既存: 最良点が 10 反復続けて 1 割以上良くならなければ止める) | 46 反復 13.7 秒 | 最適 | **15.4 秒** |
+| + 拡大系 (`ENOMOTO_IPM_AUGMENTED=1`) | 8.5 秒 | 頂点なし | - |
+| 試作一式 5 (下記) | 12.0 秒 | 最適 | **13.5 秒** (競争の形で 14.9 秒、二段解法 10.4 秒に負ける) |
+
+試作一式 5 = 4 節・8 節・9 節の試作 + `ENOMOTO_XO_MIP_SCALE=1 ENOMOTO_T_XO_UNCONVERGED_GIVEUP=0 ENOMOTO_T_IPM_NOIMPROVE=10`:
+`ENOMOTO_T_XO_CLEANUP_HINT=3 ENOMOTO_XO_IPM_RETRY_PC=3 ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST=1 ENOMOTO_IPM_KKT_AUG_RATIO=4 ENOMOTO_XO_DUAL_MEGIDDO_RACE_NOLIMIT=1 ENOMOTO_MIP_ADOPT_ROW_SCALE=1 ENOMOTO_XO_DUAL_PUSH_FAST=1 ENOMOTO_XO_MIP_SCALE=1 ENOMOTO_T_XO_UNCONVERGED_GIVEUP=0 ENOMOTO_T_IPM_NOIMPROVE=10`。
+
+11 問 (内点法 + クロスオーバーだけ、`trial4.jsonl` (尺度の上限 1e5、向きの例外なし)・`trial5.jsonl`):
+
+| 問題 | 既定 | 試作一式 3 (9 節) | 試作一式 4 |
+|---|---|---:|---:|
+| momentum1 | 頂点なし | 頂点なし | 28.7 (一式 5: **13.5**) |
+| satellites2-40 | 263.8 頂点なし | 73.4 | **7.3** (一式 5: 6.4) |
+| opm2-z10-s4 | 264.6 頂点なし | 86.4 | 80.3 |
+| sorrell3 | 268.6 頂点なし | 43.3 | 44.4 |
+| cryptanalysiskb128n5obj16 | 99.0 | 7.6 | 7.2 |
+| cryptanalysiskb128n5obj14 | 80.0 | 7.6 | 7.0 |
+| chromaticindex512-7 | 62.6 | 3.5 | 3.4 |
+| neos-933966 | 35.0 | 0.95 | 0.79 |
+| physiciansched6-2 | 294.4 頂点なし | 1.6 | 1.4 |
+| graph20-20-1rand | 0.44 | 0.32 | 0.37 |
+| mas74 | 頂点なし | 0.04 | 0.01 |
+
+競争の形 (`both_trial4.jsonl`・`both_trial5.jsonl`): satellites2-40 は内点法側が 10.7〜10.9 秒で勝つ (二段解法 78 秒)。momentum1 は 14.9 秒で最適な頂点を
+出すが二段解法 (10.4 秒) に負け、opm2-z10-s4 は 87.9 秒で二段解法 (74.2 秒) に負ける。
+
+### 11.4 58 問 (MIP 全体、60 秒、試作一式 5)
+
+`bench58.jsonl` の `trial5` (`bench58_trial5.txt`)。既定 (`base`) は 6 節の 1 回目の値 (既定の経路はその後も変えていない。9 節の tick の
+まとめ方は値が同じ)。1 回。
+
+| 組 | 既定 SGM (解けた数) | 試作一式 5 SGM (解けた数) |
+|---|---|---|
+| 負けている 21 問 | 15.02 秒 (19/21) | **12.86 秒 (20/21)** |
+| MIPLIB 40 問 | 18.51 秒 (26/40) | **18.04 秒 (27/40)** |
+
+- 目的値の食い違いなし。20% かつ 2 秒以上違う問題: 速い側 mc11 26.5 → 10.7、swath1 37.6 → 21.1、eil33-2 46.4 → 30.7、neos5 44.2 → 32.5、
+  p200x1188c 7.2 → 3.2、neos-911970 12.0 → 8.2、roll3000 46.2 → 37.9、noswot 28.1 → 20.5、exp-1-500-5-5 6.3 → 4.2、nw04 12.3 → 10.2。
+  遅い側 10teams 5.4 → 29.1、hypothyroid-k1 27.2 → 35.7、misc07 9.0 → 11.2。
+- 10teams を 2 回ずつ追加: 既定 5.4 / 4.8 / 4.5 秒、試作一式 5 29.1 / 4.4 / 10.7 秒。揺れは大きいが、試作が遅い回が 3 回中 2 回ある (原因は未確認。
+  10teams の根の LP は 0.1 秒未満で、試作の効く場面は内点法の早めの打ち切り (`NOIMPROVE`) か諦めない設定 (`UNCONVERGED_GIVEUP=0`) が LP プロービング
+  などの小さな LP の競争の勝ち負けを変えるくらいと推測)。
+- 6 節と同じく、58 問の多くは根の LP が小さく、差の多くは並列の MIP の揺れと見る。害の目立つものはない。
+
 ## ファイル
 
 - `rootlp_ipm_fail_20261105/one.py`・`highs_ipm.py`・`summ.py`・`bench58.py`: 計測と集計 (上の「測り方」)。
@@ -427,6 +522,10 @@ opm2-z10-s4 (`exp.jsonl` の `_load_ipx`・`_dualpush`・`_adopt*`):
   `src/simplex/crossover.rs` (`ENOMOTO_XO_IPM_RETRY_PC`・`ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST`・`ENOMOTO_XO_MIP_CLEANUP_HINT`)、
   `src/interior_point/kkt.rs` (`ENOMOTO_IPM_KKT_AUG_RATIO`・`ENOMOTO_IPM_DENSE_*`)。
 - `others/`: 8 節 (`ipm_solvers.py`・`make_point.py`・`ipm_runs.jsonl`・IPX のログ)。`trial2.jsonl`・`both_trial2.jsonl`: 8 節の試作一式。
+- コード (11 節): `src/simplex/mip_lp.rs` の `IpmScale`・`ipm_crossover_run`・`TwoStageLp::ipm_scale`・`adopt_ipm_vertex` の基底からの解き直し
+  (`ENOMOTO_XO_MIP_SCALE`・`ENOMOTO_T_XO_MIP_SCALE_MIN_RANGE`・`ENOMOTO_T_XO_MIP_SCALE_NOHINT_RANGE`)、`src/simplex/slope_intercept_dual.rs` の `put_duals`
+  と真の費用の双対実行不能の大きさの表示 (`ENOMOTO_DEBUG_EXT_ITERS`)、`src/simplex/crossover.rs` の `XO_NO_CLEANUP_HINT`・`ENOMOTO_XO_MIP_REPAIR`。
+  `others/make_point.py` に `ipx_xo` (IPX + クロスオーバーの頂点)。`trial4.jsonl`・`trial5.jsonl`・`both_trial4.jsonl`・`both_trial5.jsonl`。
 - コード (10 節): `src/simplex/crossover.rs` (`ENOMOTO_T_XO_DUAL_PUSH_ORDER`・`ENOMOTO_XO_DETECT_MAX_DIST`・候補の内訳の表示)、
   `src/simplex/slope_intercept_dual.rs` (`ENOMOTO_SIMPLEX_RETRY_KEEP_HINT`)。`cargo test --release --lib` 341 件通過。
 - コード (9 節): `src/simplex/crossover.rs` の `megiddo_dual_push` (`ENOMOTO_XO_DUAL_PUSH_FAST`・`ENOMOTO_T_XO_DUAL_PUSH_BLOCK`、時間の内訳の表示)、

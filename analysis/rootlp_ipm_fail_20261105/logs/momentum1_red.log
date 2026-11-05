@@ -1,0 +1,23 @@
+CROSSOVER mip reduce: fixed 0 columns and 0 slacks of forcing rows
+CROSSOVER mip reduce: fixed 233 columns and 708 slacks of forcing rows
+CROSSOVER ipm status=NotSolved iters=200 rel_res=(0.15236332257582016, 2.3794756243473733e-5, 399.86224927740085) t=19.957s
+CROSSOVER resid after ipm=1.537e-7 (before clamping 7.683e-8, max bound violation 7.683e-8, |b|max=9.976e0)
+CROSSOVER resid after ipm=1.537e-7
+CROSSOVER resid after detect=1.641e-3
+CROSSOVER m=20438 n=25612 basic_after_detect=13758 t=19.960s
+CROSSOVER resid after primal push=1.641e-3
+CROSSOVER primal_push steps=0 basic=13758 t=19.960s
+CROSSOVER dual push skipped (|D|=14689 < 0.7 m)
+CROSSOVER after dual push: max|s_D|=3.80e-4 (#>1e-6: 2973) dual-infeasible non-D=0
+CROSSOVER dual_push steps=0 active 14689->14689 t=19.960s
+CROSSOVER basis from_B=13732 from_D=0 slack=6706 (m=20438) t=19.963s
+CROSSOVER basis selector: reach=16954 elim=39867 nnz(L)=6858 scanned=48412
+CROSSOVER leftover superbasics=26 (|B|-m after primal push=-6680)
+CROSSOVER megiddo prof: total=0.01s ftran=0.00 rows=0.00 btran=0.00 update=0.00 refactor=0.00 (0x, 0 by verify, 0 by x_B residual) avg_nz=7756
+CROSSOVER megiddo pivots=25 to_bound=1 unresolved=0 t=19.979s
+CROSSOVER stats Stats { ipm_iters: 200, basic_after_detect: 13758, primal_steps: 0, basic_after_push: 13758, dual_active_start: 14689, dual_steps: 0, primal_corrections: 0, dual_corrections: 0, dual_active_end: 14689, li_from_b: 13732, li_from_d: 0, li_slack: 6706, factors: 0, solves: 0, factor_secs: 0.0 }
+CROSSOVER basis quality: primal violations relative to row size: max 5.00e-1, #>1e-9: 432
+CROSSOVER basis quality: primal_infeas=432 (max 5.25e2) dual_infeas=751 (max 3.55e5)
+CROSSOVER cleanup status=None total t=41.842s
+ROOTLP_BOTH {"n":5174,"m":20438,"n_int":2349,"threads":4,"main_cold":false,"st_s":"IterationLimit","st_i":"None","obj_s":-5.714285714312e-1,"obj_i":null,"t_simplex":0.0021,"t_ipm":19.9622,"t_xo":41.8470,"t_adopt":0.0000,"t_i":41.8470,"winner":"none","ndiff":0,"ndiff_int":0,"frac_s":0,"frac_i":0,"frac_both":0,"basis_diff_cols":-1,"basis_diff_rows":-1,"iters_s":0,"iters_i":0,"t_presolve":41.881}
+MIP: MEMCAP: tid 0 limit 13074 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0

@@ -1,0 +1,21 @@
+CROSSOVER ipm status=NotSolved iters=40 rel_res=(1.726219425281747e-5, 2.7173753100540484e-8, 25.11490197655328) t=11.957s
+CROSSOVER resid after ipm=2.559e-7 (before clamping 2.559e-7, max bound violation 3.116e-9, |b|max=6.554e4)
+CROSSOVER resid after ipm=2.559e-7
+CROSSOVER resid after detect=1.378e-1
+CROSSOVER m=20438 n=25612 basic_after_detect=15416 t=11.960s
+CROSSOVER resid after primal push=1.378e-1
+CROSSOVER primal_push steps=0 basic=15416 t=11.960s
+CROSSOVER dual push skipped (|D|=16336 < 0.7 m)
+CROSSOVER after dual push: max|s_D|=7.80e-2 (#>1e-6: 15288) dual-infeasible non-D=66
+CROSSOVER dual_push steps=0 active 16336->16336 t=11.961s
+CROSSOVER basis from_B=14979 from_D=0 slack=5459 (m=20438) t=11.965s
+CROSSOVER basis selector: reach=33113 elim=242534 nnz(L)=8813 scanned=75777
+CROSSOVER leftover superbasics=437 (|B|-m after primal push=-5022)
+CROSSOVER megiddo prof: total=0.11s ftran=0.03 rows=0.01 btran=0.00 update=0.01 refactor=0.04 (5x, 0 by verify, 1 by x_B residual) avg_nz=2926
+CROSSOVER megiddo pivots=413 to_bound=24 unresolved=0 t=12.095s
+CROSSOVER stats Stats { ipm_iters: 40, basic_after_detect: 15416, primal_steps: 0, basic_after_push: 15416, dual_active_start: 16336, dual_steps: 0, primal_corrections: 0, dual_corrections: 0, dual_active_end: 16336, li_from_b: 14979, li_from_d: 0, li_slack: 5459, factors: 0, solves: 0, factor_secs: 0.0 }
+CROSSOVER basis quality: primal violations relative to row size: max 7.86e-1, #>1e-9: 2927
+CROSSOVER basis quality: primal_infeas=2931 (max 4.20e7) dual_infeas=950 (max 6.85e6)
+CROSSOVER cleanup status=None total t=293.162s
+ROOTLP_BOTH {"n":5174,"m":20438,"n_int":2349,"threads":4,"main_cold":false,"st_s":"IterationLimit","st_i":"None","obj_s":-5.714285714312e-1,"obj_i":null,"t_simplex":0.0191,"t_ipm":11.9748,"t_xo":293.1813,"t_adopt":0.0000,"t_i":293.1813,"winner":"none","ndiff":0,"ndiff_int":0,"frac_s":0,"frac_i":0,"frac_both":0,"basis_diff_cols":-1,"basis_diff_rows":-1,"iters_s":0,"iters_i":0,"t_presolve":293.226}
+MIP: MEMCAP: tid 0 limit 13093 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0

@@ -820,6 +820,11 @@ pub(super) fn last_duals_basis() -> Option<Vec<Option<usize>>> {
     LAST_DUALS.with(|d| d.borrow().as_ref().map(|(_, bp)| bp.clone()))
 }
 
+/// 双対の記録を外から置き換える (試作 `ENOMOTO_XO_MIP_SCALE`: 尺度をそろえた写しで記録した双対を元の尺度に戻して置き直す)。
+pub(super) fn put_duals(y: Vec<f64>, basis_pos: Vec<Option<usize>>) {
+    LAST_DUALS.with(|d| *d.borrow_mut() = Some((y, basis_pos)));
+}
+
 /// [`request_duals`] で記録した直近の双対と、その基底 (`basis_pos`、列ごとの基底位置) を取り出す。
 pub(super) fn take_duals() -> Option<(Vec<f64>, Vec<Option<usize>>)> {
     LAST_DUALS.with(|d| d.borrow_mut().take())
@@ -8144,6 +8149,26 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
                 }
             };
             let true_dual_feasible = !(0..n_total).any(is_dual_bad);
+            if !true_dual_feasible && env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                // 真の費用での双対実行不能の大きさ (絶対値と、丸めの目安 `|c_j| + Σ|a_ij y_i|` に対する比) の分布 (診断)
+                let (mut amax, mut rmax) = (0.0f64, 0.0f64);
+                let mut cnt = [0usize; 4];
+                for j in 0..n_total {
+                    if !is_dual_bad(j) {
+                        continue;
+                    }
+                    let v = true_d[j].abs();
+                    let r = v / d_mag[j].max(1e-300);
+                    amax = amax.max(v);
+                    rmax = rmax.max(r);
+                    for (k, th) in [1e-12, 1e-10, 1e-8, 1e-6].iter().enumerate() {
+                        if r > *th {
+                            cnt[k] += 1;
+                        }
+                    }
+                }
+                eprintln!("DEBUG_EXT: true-cost dual infeasibility: max abs {amax:.3e}, max rel to |c|+sum|a y| {rmax:.3e}, #rel>1e-12/1e-10/1e-8/1e-6 = {cnt:?}");
+            }
             let mut t = super::Tableau { std, basis: basis.to_vec(), basis_pos: basis_pos.to_vec(), nb_status: nb_status.to_vec(), x };
             if true_dual_feasible {
                 // 残ったのが固定列(または緩めた許容誤差以下)の不整合だけなら、

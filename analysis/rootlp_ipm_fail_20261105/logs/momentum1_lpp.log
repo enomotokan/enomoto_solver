@@ -1,0 +1,29 @@
+MIP root race: simplex won at 4.114s (Optimal)
+CROSSOVER ipm status=NotSolved iters=200 rel_res=(0.007043403501406056, 2.9706375735143335e-7, 2.9327907378546376) t=11.825s
+CROSSOVER resid after ipm=4.484e-7 (before clamping 4.484e-7, max bound violation 1.618e-9, |b|max=2.129e1)
+CROSSOVER resid after ipm=4.484e-7
+CROSSOVER resid after detect=8.969e-7
+CROSSOVER m=11094 n=13830 basic_after_detect=6493 t=11.827s
+CROSSOVER resid after primal push=8.969e-7
+CROSSOVER primal_push steps=0 basic=6493 t=11.827s
+CROSSOVER dual push skipped (|D|=6693 < 0.7 m)
+CROSSOVER after dual push: max|s_D|=1.65e-5 (#>1e-6: 1) dual-infeasible non-D=0
+CROSSOVER dual_push steps=0 active 6693->6693 t=11.827s
+CROSSOVER basis from_B=6475 from_D=0 slack=4619 (m=11094) t=11.829s
+CROSSOVER basis selector: reach=13787 elim=37003 nnz(L)=8608 scanned=36926
+CROSSOVER leftover superbasics=18 (|B|-m after primal push=-4601)
+CROSSOVER megiddo prof: total=0.00s ftran=0.00 rows=0.00 btran=0.00 update=0.00 refactor=0.00 (0x, 0 by verify, 0 by x_B residual) avg_nz=4440
+CROSSOVER megiddo pivots=18 to_bound=0 unresolved=0 t=11.837s
+CROSSOVER stats Stats { ipm_iters: 200, basic_after_detect: 6493, primal_steps: 0, basic_after_push: 6493, dual_active_start: 6693, dual_steps: 0, primal_corrections: 0, dual_corrections: 0, dual_active_end: 6693, li_from_b: 6475, li_from_d: 0, li_slack: 4619, factors: 0, solves: 0, factor_secs: 0.0 }
+CROSSOVER basis quality: primal violations relative to row size: max 2.00e-9, #>1e-9: 12
+CROSSOVER basis quality: primal_infeas=12 (max 2.00e-9) dual_infeas=830 (max 2.56e3)
+CROSSOVER dual megiddo: candidates=4603 pushed=4453 pivots=2241 skipped=150 refactors=7 t=0.40s (btran 0.10 price 0.04 ratio 0.01 update 0.23 (ftran 0.13 refactor 0.06 recompute 0.00); avg |rho| 256 touched 438 ftran nnz 5793)
+CROSSOVER cleanup status=Some(Optimal) total t=13.410s
+CROSSOVER final x (presolved): len=13830 n_struct=2736 row viol max=1.000e-9 (#>1e-9: 0) col viol max=1.000e-9 (#>1e-9: 0)
+CROSSOVER final basis LU: |rhs - B x_B|=2.247e-15 x_B bound viol max=1.000e-9 (#>1e-9: 0) max|x_B - returned|=5.141e-10 obj(presolved)=5.136599329945e4 nonbasic off-bound=0
+CROSSOVER final basis refine0: |rhs - B x_B|=1.776e-15 x_B bound viol max=1.000e-9 (#>1e-9: 0) max|x_B - returned|=5.141e-10 obj(presolved)=5.136599329945e4 nonbasic off-bound=0
+CROSSOVER final basis refine1: |rhs - B x_B|=1.776e-15 x_B bound viol max=1.000e-9 (#>1e-9: 0) max|x_B - returned|=5.141e-10 obj(presolved)=5.136599329945e4 nonbasic off-bound=0
+CROSSOVER final basis refine2: |rhs - B x_B|=3.553e-15 x_B bound viol max=1.000e-9 (#>1e-9: 0) max|x_B - returned|=5.141e-10 obj(presolved)=5.136599329945e4 nonbasic off-bound=0
+CROSSOVER mip lp path: optimal (handing the vertex to the MIP LP)
+ROOTLP_BOTH {"n":5174,"m":20438,"n_int":2349,"threads":4,"main_cold":false,"st_s":"IterationLimit","st_i":"Some(TimeLimit)","obj_s":-5.714285714312e-1,"obj_i":null,"t_simplex":0.0051,"t_ipm":11.9241,"t_xo":13.5193,"t_adopt":280.3897,"t_i":293.9090,"winner":"none","ndiff":0,"ndiff_int":0,"frac_s":0,"frac_i":0,"frac_both":0,"basis_diff_cols":-1,"basis_diff_rows":-1,"iters_s":0,"iters_i":61542,"t_presolve":293.933}
+MIP: MEMCAP: tid 0 limit 13095 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0

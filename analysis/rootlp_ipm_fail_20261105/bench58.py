@@ -9,7 +9,9 @@ from probs import PROBS  # noqa: E402
 sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
 TRIAL = {"ENOMOTO_T_XO_CLEANUP_HINT": "3", "ENOMOTO_XO_IPM_RETRY_PC": "3", "ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST": "1", "ENOMOTO_IPM_KKT_AUG_RATIO": "4"}
-CFGS = {"base": {}, "trial": TRIAL, "hint": {"ENOMOTO_T_XO_CLEANUP_HINT": "3"}}
+TRIAL5 = dict(TRIAL, ENOMOTO_XO_DUAL_MEGIDDO_RACE_NOLIMIT="1", ENOMOTO_MIP_ADOPT_ROW_SCALE="1", ENOMOTO_XO_DUAL_PUSH_FAST="1", ENOMOTO_XO_MIP_SCALE="1",
+              ENOMOTO_T_XO_UNCONVERGED_GIVEUP="0", ENOMOTO_T_IPM_NOIMPROVE="10")
+CFGS = {"base": {}, "trial": TRIAL, "hint": {"ENOMOTO_T_XO_CLEANUP_HINT": "3"}, "trial5": TRIAL5}
 out = Path(sys.argv[1])
 names = sys.argv[2:] or ["base", "trial"]
 REP = int(os.environ.get("BENCH_REP", "0"))  # 回の番号 (同じ出力に足す追加の回)

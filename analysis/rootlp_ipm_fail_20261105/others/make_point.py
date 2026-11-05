@@ -1,6 +1,6 @@
 """他の内点法の解を、MIP の根の LP の標準形 (TwoStageLp::build_std: 列は x' = x - shift、行 i は σ_i a_i x' + s_i = b_i) の点
 (x' と s を n + m 個、y を m 個、f64 リトルエンディアン) に写して書く。ENOMOTO_DEBUG_XO_POINT_LOAD で読ませ、こちらのクロスオーバーだけを走らせる。
-使い方: python -I make_point.py 問題 ソルバー(ipx_noxo|clarabel) 出力.bin"""
+使い方: python -I make_point.py 問題 ソルバー(ipx_noxo|ipx_xo|clarabel) 出力.bin"""
 import sys, time
 from pathlib import Path
 import numpy as np
@@ -15,8 +15,8 @@ c = np.array(lp.col_cost_); lo = np.array(lp.col_lower_); up = np.array(lp.col_u
 n, m = len(c), len(rl)
 INF = 1e20
 t0 = time.time()
-if w == "ipx_noxo":
-    h.setOptionValue("presolve", "off"); h.setOptionValue("solver", "ipm"); h.setOptionValue("run_crossover", "off"); h.setOptionValue("threads", 3)
+if w in ("ipx_noxo", "ipx_xo"):
+    h.setOptionValue("presolve", "off"); h.setOptionValue("solver", "ipm"); h.setOptionValue("run_crossover", "off" if w == "ipx_noxo" else "on"); h.setOptionValue("threads", 3)
     h.run(); s = h.getSolution(); x = np.array(s.col_value); y = np.array(s.row_dual)
 else:
     import clarabel
