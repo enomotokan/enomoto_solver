@@ -1,0 +1,46 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP rococoC10-001000 has 1293 rows; 3117 cols; 11751 nonzeros; 3117 integer variables (2993 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 3e+04]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 3e+05]
+  RHS     [1e+00, 1e+00]
+Presolving model
+699 rows, 2524 cols, 9850 nonzeros 0s
+576 rows, 2442 cols, 7244 nonzeros 0s
+Presolve reductions: rows 576(-717); columns 2442(-675); nonzeros 7244(-4507) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   576 rows
+   2442 cols (2442 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   7244 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            50655              Large        0      0      0         0     0.0s
+ R       0       0         0   0.00%   7515.271029     23730             68.33%        0      0      0       451     0.1s
+ L       0       0         0   0.00%   10158.340782    12534             18.95%     1900    373   1416      3835     1.5s
+ L       0       0         0   0.00%   10158.340782    12417             18.19%     1710    205   1416     10088     5.9s
+        11       0         1   0.10%   10158.340782    12417             18.19%     1712    205   1484    114495    15.0s
+ L     101      39        31   1.38%   10251.809918    12408             17.38%     1767    270   3425    128421    17.3s
+       378      42       162  60.40%   10327.127315    12408             16.77%     2286    332   9858    180161    22.3s
+       644      88       272  61.07%   10327.127315    12408             16.77%     2409    365   9530    230681    27.9s
+       908     140       372  61.39%   10327.127315    12408             16.77%     2108    405   9016    278465    32.9s
+      1195     195       489  61.39%   10327.127315    12408             16.77%     2064    308   9973    321871    37.9s
+      1441     224       592  61.43%   10327.127315    12408             16.77%     1976    348   9729    369317    43.0s
+
+Restarting search from the root node
+Model after restart has 574 rows, 2440 cols (2440 bin., 0 int., 0 impl., 0 cont., 0 dom.fix.), and 7238 nonzeros
+
+      1604       0         0   0.00%   10327.127315    12408             16.77%      376      0      0    386012    44.9s
+      1604       0         0   0.00%   10327.127315    12408             16.77%      376    136     12    386690    44.9s
+ L    1604       0         0   0.00%   10327.127315    12056             14.34%      798    289     12    388654    47.3s
