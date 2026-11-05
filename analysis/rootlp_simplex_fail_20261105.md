@@ -352,3 +352,31 @@ sing326・sing44 1.2e3、rail01 1.6e2、neos-873061 1.4e2、thor50dday 49。1e4 
   **どちらも最適で二段解法が勝つ** (7 節の `HARRIS2=r` だけでは時間切れだった)。
 - 推奨: B (`ENOMOTO_SIMPLEX_HARRIS2=r ENOMOTO_SIMPLEX_NOISE_RESET=0.1 ENOMOTO_SIMPLEX_NOISE_RESET_W=e`) と 7 節の尺度の調整の組み合わせ。
   B は数値の破綻で解き直したときと、雑音の行が 10% に達したときしか働かない。58 問・Mittelmann では B をまだ回していない。
+
+## 10. combB (尺度の調整 + B) の計測 (2026-11-06)
+
+bench に使う環境変数 (combB): `ENOMOTO_SIMPLEX_SCALE=1 ENOMOTO_T_SIMPLEX_SCALE_MIN_M=10000 ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE=1e4 ENOMOTO_SIMPLEX_HARRIS2=r ENOMOTO_SIMPLEX_NOISE_RESET=0.1 ENOMOTO_SIMPLEX_NOISE_RESET_W=e`。
+
+### 10.1 Mittelmann の 29 問 (根の LP の同時実行の診断、`both_combB_mitt.jsonl`、表は `mitt_cmp_B.md`)
+
+- 二段解法が最適で終わる問題: 既定 25 問 → combB **28 問** (rail01 だけ時間切れ。HiGHS も 129.6 秒かかる問題)。
+  supportcase42 (Error → 29.82 秒で最適)、uccase12 (時間切れ → 5.32 秒)、neos-873061 (時間切れ → 106.3 秒) が新しく解ける。
+- 大きく速くなった: momentum1 10.81 → 0.66 秒、satellites2-40 83.2 → 7.3 秒、uccase9 23.5 → 12.5 秒、snp-02-004-104 19.4 → 12.0 秒。
+- 勝ちが内点法 → 二段解法に変わった: uccase9・uccase12・supportcase42 (29.82 対 30.59 秒)。二段解法 → 内点法に変わった問題はない。
+- ほかの問題の二段解法の時間は既定と ±10% 程度 (多くは少し速いが、前の計測とビルドが違い揺れと区別できない)。comb (B なし) との違いは supportcase42 だけ。
+
+### 10.2 58 問 (4 スレッド・60 秒、1 回、`p58c.jsonl`・`summ58c.md`)
+
+| 組 | 既定 | combB |
+|---|---|---|
+| 負けている 21 問 | 14.26 秒 (20/21) | 15.30 秒 (19/21) |
+| MIPLIB 40 問 | 18.59 秒 (27/40) | 18.86 秒 (26/40) |
+
+- 解けた・解けないが変わったのは h80x6320d (既定 54.9 秒で最適 → 時間切れ) だけ。5・7 節の計測でも同じ向きだったので別に 1 回ずつ回すと、
+  既定 52.96 秒・combB 55.02 秒でどちらも最適。`ENOMOTO_SIMPLEX_SCALE_LOG` の行は 1 つも出ず (行が 1 万未満で尺度の調整は働かない)、
+  根の下界が 6359.78 / 6359.54 と違うのは同時実行の順の揺れ。上限の近くの揺れと判断する (事実: 働いていない。推測: 差は揺れ)。
+- 20% かつ 2 秒以上違う問題: mas76 9.7 → 12.1、mc11 25.3 → 32.3、qiu 25.9 → 32.7、roll3000 38.8 → 51.8 (遅く)、misc07 16.2 → 12.5、noswot 25.2 → 19.1 (速く)。
+  既定どうしの回 (5・7・10 節) でも mc11 14.2 / 25.3、noswot 26.5 / 50.1 / 25.2、roll3000 50.7 / 38.8 と同じ程度に揺れる。
+- 目的値の食い違い・異常終了はない。
+- 読み方: 58 問は根の LP が小さく combB はほぼ働かないので、差は揺れ。Mittelmann の大きい根の LP では失敗が 4 問 → 1 問に減り、遅い例も速くなる。
+  既定にする候補。既定にするなら、58 問を 3 回ほど回して揺れを均したい。
