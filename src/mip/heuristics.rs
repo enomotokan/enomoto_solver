@@ -77,6 +77,11 @@ thread_local! {
 }
 
 /// 主のスレッドが暫定解を持っているか (`FJ_HAS_INC`)。
+/// `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): [`Solver::alns`] で Local Branching・Proximity Search の時間の上限を伸ばす。
+fn lnsgrow_on() -> bool {
+    env_str!("ENOMOTO_MIP_MEMBQ_LNSGROW").is_some()
+}
+
 fn main_has_incumbent() -> bool {
     FJ_HAS_INC.with(|f| f.borrow().as_ref().is_some_and(|a| a.load(std::sync::atomic::Ordering::Relaxed)))
 }
@@ -1712,6 +1717,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("SUBMIP_COMP: {} result: status {:?}, nodes {}, {:.2}s", self.heur_label, r.status, r.nodes, t_sub.elapsed().as_secs_f64());
             super::SUBMIP_LABEL.with(|l| l.set(""));
         }
+        // 診断用 (`ENOMOTO_MIP_MEMBQ_HDIAG`、analysis/membq_path_20261105.md): 木の中の改善ヒューリスティクスのサブ MIP の結果を 1 行ずつ出す
+        let hdiag = env_str!("ENOMOTO_MIP_MEMBQ_HDIAG").is_some() && !self.params.submip && self.nodes > 1;
+        let hdiag_obj = r.objective;
+        self.submip_nosol_timeout = r.status == super::solver::MipStatus::TimeLimit && r.x.is_none();
         self.heur_iters += r.lp_iterations;
         let acc = match r.x {
             Some(x) => {
@@ -1724,6 +1733,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         if let Some((id, _)) = &trace {
             eprintln!("MIP: SMT acc id={id} accepted={} T={:.3}", acc as u8, submip_trace_secs());
+        }
+        if hdiag {
+            let inc = self.incumbent.as_ref().map_or(f64::NAN, |(z, _)| *z);
+            eprintln!(
+                "HDIAG: t {:.2} tid {} node {} {} free {}/{} limit {} nodes {:.2}s | status {:?} nodes {} obj {:?} {:.2}s acc {} inc {:.1} lb_k {:.1}",
+                self.start.elapsed().as_secs_f64(), self.pool_tid, self.nodes, self.heur_label, nfree_int, nint_all, node_limit, time_limit, r.status, r.nodes, hdiag_obj, t_sub.elapsed().as_secs_f64(), acc as u8, inc, self.lb_k
+            );
         }
         if let Some(fr) = fix_rate {
             self.note_fix_rate(fr, r.status == super::solver::MipStatus::Infeasible, acc);
@@ -3085,6 +3101,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let z0 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
         let t_frag = std::time::Instant::now();
         self.heur_label = ["tree RINS", "tree local branching", "tree proximity", "tree mutation", "tree crossover", "tree DINS"][arm];
+        // `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): Local Branching・Proximity Search のサブ MIP が解を出さずに
+        // 時間の上限で止まったら (n2seq36q では根の LP・カットを終える前に 5 秒で止まり続ける)、その腕の次の時間の上限を 2 倍にする
+        // (最大 `ENOMOTO_T_MIP_MEMBQ_LNSGROW_MAX` (8) 倍)。Local Branching の近さ k は時間切れでは狭めない。既定では使わない
+        let grow = lnsgrow_on() && (arm == 1 || arm == 2);
+        let (keep_max, keep_frac, keep_k) = (self.submip_time_max, self.submip_time_frac, self.lb_k);
+        if grow {
+            self.submip_time_max *= self.lns_grow[arm];
+            self.submip_time_frac = (self.submip_time_frac * self.lns_grow[arm]).min(0.5);
+        }
+        self.submip_nosol_timeout = false;
         let ok = match arm {
             0 => self.rins(x),
             1 => self.local_branching(),
@@ -3094,6 +3120,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             _ => self.dins(x),
         };
         self.heur_label = "";
+        if grow {
+            self.submip_time_max = keep_max;
+            self.submip_time_frac = keep_frac;
+            if self.submip_nosol_timeout && !self.time_up() {
+                self.lns_grow[arm] = (2.0 * self.lns_grow[arm]).min(tunable!("ENOMOTO_T_MIP_MEMBQ_LNSGROW_MAX", 8.0, f64));
+                if arm == 1 {
+                    self.lb_k = keep_k;
+                }
+            }
+        }
         // 報酬: 改善できたら 1 (改善の相対的な大きさで少し上乗せ)
         let z1 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
         let reward = if ok && z1 < z0 { 1.0 + ((z0 - z1) / z0.abs().max(1.0)).min(1.0) } else { 0.0 };

@@ -524,6 +524,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ALNS の腕ごとの報酬の合計と試した回数。
     pub(super) alns_reward: [f64; 6],
     pub(super) alns_count: [u32; 6],
+    /// `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): ALNS の腕ごとの、サブ MIP の時間の上限の倍率。
+    pub(super) lns_grow: [f64; 6],
+    /// 直前のサブ MIP が解を出さずに時間の上限で止まったか (`ENOMOTO_MIP_MEMBQ_LNSGROW` で使う)。
+    pub(super) submip_nosol_timeout: bool,
     /// 実行可能解のプール (目的値の良い順、Crossover 用)。
     pub(super) sol_pool: Vec<(f64, Vec<f64>)>,
     /// Repair の出発点 (局所探索で違反の合計が最小だった点)。
@@ -3710,6 +3714,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         improve_turn: 0,
         alns_reward: [0.0; 6],
         alns_count: [0; 6],
+        lns_grow: [1.0; 6],
+        submip_nosol_timeout: false,
         sol_pool: Vec::new(),
         repair_start: None,
         lns_secs: 0.0,
