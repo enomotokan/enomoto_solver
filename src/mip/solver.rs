@@ -8041,7 +8041,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                             let kept = self.lp.num_rows() - self.p.m;
                             let after_sel = self.lp.objective() + self.p.offset;
+                            // 続きは裏のカットと同じ止め方 (`ENOMOTO_MIP_BG_CUTS_DETERM` の手間の上限と停滞の窓) で回す。主の根のカットのループの
+                            // 既定の上限 (1250 本ほど) で止めると、裏のカット (50〜100 ラウンド) より短く、beasleyC3 で根の下界が既定より低くなった
+                            // (`ENOMOTO_T_MIP_OPTFACE_MERGE_CONT=0` で主の既定の止め方)
+                            let cont = determ.filter(|_| tunable!("ENOMOTO_T_MIP_OPTFACE_MERGE_CONT", 1usize, usize) > 0);
+                            if let Some(d) = cont {
+                                self.cut_cont = Some((d.work_iters, d.win, d.eps));
+                            }
                             let ok = self.root_cut_loop(root_iters);
+                            self.cut_cont = None;
                             if !ok {
                                 self.join_fj_thread();
                                 let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };

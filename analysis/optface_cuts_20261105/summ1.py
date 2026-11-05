@@ -7,7 +7,7 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 rows = {}
 lines = []
-for b in ("batch1.txt", "batch2.txt", "batch3.txt", "batch4.txt", "batch5.txt", "batch6.txt", "batch7.txt", "batch8.txt"):
+for b in ("batch1.txt", "batch2.txt", "batch3.txt", "batch4.txt", "batch5.txt", "batch6.txt", "batch7.txt", "batch8.txt", "batch9.txt"):
     if (D / b).exists():
         lines += open(D / b).read().splitlines()
 for l in lines:
