@@ -106,6 +106,20 @@ fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
 }
 
 /// `ENOMOTO_MIP_CUTSEL_PROBE_KEEP` の比べの片側の終わりの状態 (足した行・LP の状態・分離器の状態・回ったラウンド数)
+/// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `k`: 勝ち残りの取り決めに、まだ届けていなければループを抜けたときの下界を届ける
+struct RaceReport {
+    race: Option<(std::sync::Arc<super::solver::CutRace>, usize)>,
+    obj: f64,
+}
+
+impl Drop for RaceReport {
+    fn drop(&mut self) {
+        if let Some((r, id)) = self.race.take() {
+            r.report(id, self.obj);
+        }
+    }
+}
+
 pub(super) struct ProbeEnd<S> {
     pub(super) rows: Vec<(Vec<(usize, f64)>, f64, f64)>,
     lp: S,
@@ -1146,6 +1160,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_T_MIP_OPTFACE_SHARE_EPS` (既定 1e-6) 以下 (停滞) の写しだけ、1 回に `ENOMOTO_T_MIP_OPTFACE_SHARE_MAX` (`g` では既定 5) 本まで
         let share_gated = env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('g'));
         let mut share_pub: std::collections::HashSet<Vec<(usize, u64)>> = std::collections::HashSet::new();
+        let mut race_rep = RaceReport { race: job.as_ref().and_then(|j| j.race.lock().unwrap().clone()), obj: prev_obj };
+        let race_rounds = tunable!("ENOMOTO_T_MIP_OPTFACE_MERGE_ROUNDS", 5usize, usize).max(1);
         let mut cont_stop = false;
         if let Some((w, _, _)) = self.cut_cont {
             work_cap = w as f64 / root_iters.max(1) as f64;
@@ -1277,6 +1293,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let round = round_ctr;
             round_ctr += 1;
+            // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `k`: `ENOMOTO_T_MIP_OPTFACE_MERGE_ROUNDS` (既定 5) ラウンドで下界を届けて全部の写しを待ち、
+            // 一番高い写しだけが写し全部の分のスレッドで続ける (負けた写しはここで止まる)
+            race_rep.obj = prev_obj;
+            if round == race_rounds {
+                if let Some((r, id)) = race_rep.race.take() {
+                    r.report(id, prev_obj);
+                    let tw = std::time::Instant::now();
+                    let w = loop {
+                        let w = r.winner.load(std::sync::atomic::Ordering::SeqCst);
+                        if w >= 0 || stopped(&job) || self.time_up() {
+                            break w;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    };
+                    if self.params.verbose {
+                        eprintln!("MIP: cut round {round}: background copy {id}: obj {:.10e}, winner {w} (waited {:.3}s)", prev_obj + p.offset, tw.elapsed().as_secs_f64());
+                    }
+                    if w != id as isize {
+                        break;
+                    }
+                    if let Some(j) = &job {
+                        j.boost.store(r.total_threads, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
             // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `m`: 裏のカットの写しは決まったラウンド数だけ回して止まる (主がまとめて続ける)
             if let Some(cap) = job.as_ref().map(|j| j.round_cap.load(std::sync::atomic::Ordering::Relaxed)).filter(|&c| c > 0) {
                 if round >= cap {
@@ -5518,6 +5559,11 @@ fn select_cuts_old(mut cands: Vec<Candidate>, max_cuts: usize) -> Vec<Candidate>
 impl<'a, L: MipLp> Solver<'a, L> {
     /// 分離に使うスレッド数の元 (`ENOMOTO_MIP_THREAD_BUDGET` では、根 (写しでない・サブ MIP でない) では FJ のスレッドの分を 1 本引く)。
     fn sep_budget_threads(&self) -> usize {
+        // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `k`: 勝ち残った裏のカットの写しは、写し全部の分のスレッドで分離する
+        let boost = super::solver::CUT_JOB.with(|j| j.borrow().as_ref().map_or(0, |j| j.boost.load(std::sync::atomic::Ordering::Relaxed)));
+        if boost > 0 && self.snap.is_some() {
+            return boost;
+        }
         if super::solver::thread_budget_on() && self.snap.is_none() && !self.params.submip && self.params.threads > 1 { self.params.threads - 1 } else { self.params.threads }
     }
 }

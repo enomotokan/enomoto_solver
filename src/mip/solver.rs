@@ -3216,7 +3216,38 @@ pub(super) struct CutShare {
     pub(super) cuts: std::sync::Mutex<Vec<(usize, Vec<(usize, f64)>, f64)>>,
 }
 
+/// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `k`: 別々の頂点から始めた写しが決まったラウンド数で下界を届け、全部そろったら一番高い写しだけが
+/// 続ける (勝った写しは分離のスレッドを写し全部の分に増やす)。
+pub(super) struct CutRace {
+    pub(super) objs: std::sync::Mutex<Vec<Option<f64>>>,
+    /// 勝った写しの番号 (-1 は未決)
+    pub(super) winner: std::sync::atomic::AtomicIsize,
+    /// 勝った写しが使う分離のスレッド数
+    pub(super) total_threads: usize,
+}
+
+impl CutRace {
+    pub(super) fn new(k: usize, total_threads: usize) -> Self {
+        CutRace { objs: std::sync::Mutex::new(vec![None; k]), winner: std::sync::atomic::AtomicIsize::new(-1), total_threads }
+    }
+
+    /// 写し `id` の下界を届ける (2 回目からは無視)。全部そろったら一番高い写しを勝ちにする
+    pub(super) fn report(&self, id: usize, obj: f64) {
+        let mut v = self.objs.lock().unwrap();
+        if id < v.len() && v[id].is_none() {
+            v[id] = Some(obj);
+        }
+        if v.iter().all(|o| o.is_some()) && self.winner.load(std::sync::atomic::Ordering::SeqCst) < 0 {
+            let w = v.iter().enumerate().max_by(|a, b| a.1.unwrap().total_cmp(&b.1.unwrap())).map_or(0, |x| x.0);
+            self.winner.store(w as isize, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 pub(super) struct CutJob {
+    /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `k`: 勝ち残りの取り決めと自分の番号、勝ったときの分離のスレッド数 (0 なら既定)
+    pub(super) race: std::sync::Mutex<Option<(std::sync::Arc<CutRace>, usize)>>,
+    pub(super) boost: std::sync::atomic::AtomicUsize,
     /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `s`: カットを渡し合う置き場と自分の番号、受け取って候補にした数・選ばれた数
     pub(super) share: std::sync::Mutex<Option<(std::sync::Arc<CutShare>, usize)>>,
     pub(super) share_in: std::sync::atomic::AtomicUsize,
@@ -3436,6 +3467,8 @@ impl CutJob {
             share_in: std::sync::atomic::AtomicUsize::new(0),
             share_used: std::sync::atomic::AtomicUsize::new(0),
             round_cap: std::sync::atomic::AtomicUsize::new(0),
+            race: std::sync::Mutex::new(None),
+            boost: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -7196,10 +7229,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let per = (threads / plan.len()).max(1);
                 let n_plan = plan.len();
                 let share = (n_plan > 1 && env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('s'))).then(|| std::sync::Arc::new(CutShare::default()));
+                let race = (n_plan > 1 && env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('k'))).then(|| std::sync::Arc::new(CutRace::new(n_plan, threads.max(1))));
                 for (ci, (cb, cx, is_alt)) in plan.into_iter().enumerate() {
                     let job_c = if ci == 0 { job.clone() } else { std::sync::Arc::new(CutJob::new(mode == "heavy", determ, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z), self.lp.objective() + self.p.offset)) };
                     if let Some(sh) = &share {
                         *job_c.share.lock().unwrap() = Some((sh.clone(), ci));
+                    }
+                    if let Some(r) = &race {
+                        *job_c.race.lock().unwrap() = Some((r.clone(), ci));
                     }
                     // `m`: 写しは `ENOMOTO_T_MIP_OPTFACE_MERGE_ROUNDS` (既定 5) ラウンドだけ独立に分離して止まる
                     if n_plan > 1 && env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('m')) {
@@ -7901,6 +7938,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 待ってから止め、結果をまとめる
             if !bg_extra.is_empty() {
                 let mut cap = tunable!("ENOMOTO_T_MIP_OPTFACE_PAR_WAIT", 0.5, f64) * t0.elapsed().as_secs_f64();
+                // `k`: 勝った写しは主の写しより後まで回るので、裏のカットの待ちの安全網 (`ENOMOTO_T_MIP_BG_DETERM_SAFE_FRAC` x 残り時間) まで待つ
+                if env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('k')) {
+                    let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                    cap = cap.max(tunable!("ENOMOTO_T_MIP_BG_DETERM_SAFE_FRAC", 0.3, f64) * remaining.min(1e6));
+                }
                 // `m`: 写しはラウンド数で自分で止まるので、終わるまで `ENOMOTO_T_MIP_OPTFACE_MERGE_WAIT` (既定 3) 秒までは待つ
                 if env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('m')) {
                     cap = cap.max(tunable!("ENOMOTO_T_MIP_OPTFACE_MERGE_WAIT", 3.0, f64));
