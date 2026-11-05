@@ -4159,6 +4159,32 @@ fn mem1_siblu_trim(stack: &mut [(usize, u64, Option<crate::simplex::mip_lp::LuSn
 }
 
 /// DSE 重みを全ての LP で引き継ぎ、待ち行列のノードに保存するか (既定で真、`ENOMOTO_MIP_NO_DSE_ALL` で偽)。
+/// `ENOMOTO_MIP_MEMBQ_SUBRC` (試作、analysis/membq_path_20261105.md): サブ MIP のノードには DSE 重みを丸めずに保存する
+/// (`MEMB` の `q`・`h` を主の木だけにする)。サブ MIP は小さく、丸めで減るメモリはわずか。既定では使わない
+fn membq_subrc() -> bool {
+    env_str!("ENOMOTO_MIP_MEMBQ_SUBRC").is_some()
+}
+
+/// 診断用 `ENOMOTO_MIP_MEMBQ_JITTER` (analysis/membq_path_20261105.md): 揺らぎの種。
+fn membq_jitter() -> Option<u64> {
+    static V: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("ENOMOTO_MIP_MEMBQ_JITTER").ok().and_then(|s| s.parse().ok()))
+}
+
+/// `seed` と変数の番号 `v` から決まる [-1, 1) の値 (splitmix64)。
+fn jitter_unit(seed: u64, v: u32) -> f32 {
+    let mut z = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (v as u64).wrapping_add(0x632b_e59b_d9b4_e019);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    ((z >> 40) as f32 / (1u64 << 23) as f32) - 1.0
+}
+
+/// 診断用 (`ENOMOTO_MIP_MEMBQ_DIAG`、analysis/membq_path_20261105.md): [`Solver::membq_diag_line`]。
+fn membq_diag() -> bool {
+    env_str!("ENOMOTO_MIP_MEMBQ_DIAG").is_some()
+}
+
 fn dse_all() -> bool {
     env_str!("ENOMOTO_MIP_NO_DSE_ALL").is_none() && crate::simplex::slope_intercept_dual::mip_profile() != 1
 }
@@ -8153,6 +8179,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if resolves == 0 && self.restored_now && env_str!("ENOMOTO_MIP_RESTORE_EXACT_DSE").is_some() {
                     crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
+                let membq_rdse = self.restored_dse && resolves == 0;
                 if std::mem::take(&mut self.restored_dse) && resolves == 0 {
                     crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -8200,6 +8227,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if ok {
                         nca_last_ok = true;
                     }
+                }
+                // 診断用 (`ENOMOTO_MIP_MEMBQ_DIAG`、analysis/membq_path_20261105.md): ノードの最初の LP ごとに、DSE 重みを復元したか・
+                // 反復数・目的値・最適な基底と LP の解の要約 (ハッシュ) を出す (rc と rcq の経路を並べて最初に分かれる所を探す)
+                if resolves == 0 && membq_diag() {
+                    self.membq_diag_line(membq_rdse, st, self.lp.total_iterations() - it0);
                 }
                 self.node_iters += self.lp.total_iterations() - it0;
                 if resolves == 0 {
@@ -8983,7 +9015,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_NODE_DSE`: 基底と一緒に DSE 重みも保存し、取り出したノードの最初の LP で使う
             let dse = if (env_str!("ENOMOTO_MIP_NODE_DSE").is_some() || dse_all()) && keep_dse && keep_basis {
                 // `ENOMOTO_MIP_MEM2` の `p` (試作): 番号なしの f32 の並びにする
-                self.lp.dse_snapshot().map(|w| Rc::new(if mem2('p') { NodeDse::pack(&w, &basis).map(|d| if memb('q') { d.quarter() } else if memb('h') { d.halve() } else { d }).unwrap_or(NodeDse::Pairs(w)) } else { NodeDse::Pairs(w) }))
+                self.lp.dse_snapshot().map(|w| {
+                    // `ENOMOTO_MIP_MEMBQ_SUBRC` (試作、analysis/membq_path_20261105.md): サブ MIP では DSE 重みを丸めない (`q`・`h` は主の木だけ)
+                    let round = !(self.params.submip && membq_subrc());
+                    // `ENOMOTO_MIP_MEMBQ_JITTER` (診断用): 丸めない重みに決まった小さな揺らぎ (相対 1e-6 程度) を掛け、経路が重みの小さな違いで
+                    // どれだけ変わるか (52200 を早く拾えるかが運かどうか) を見る。値は揺らぎの種
+                    let w = match membq_jitter() {
+                        Some(seed) => w.into_iter().map(|(v, x)| (v, x * (1.0 + 1e-6 * jitter_unit(seed, v)))).collect(),
+                        None => w,
+                    };
+                    Rc::new(if mem2('p') { NodeDse::pack(&w, &basis).map(|d| if round && memb('q') { d.quarter() } else if round && memb('h') { d.halve() } else { d }).unwrap_or(NodeDse::Pairs(w)) } else { NodeDse::Pairs(w) })
+                })
             } else {
                 None
             };
@@ -11182,6 +11224,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 戻した基底に保存した DSE 重み `w` (番号は今の LP の行に合わせたもの) を当てはめ、次の LP で引き継ぐ印を立てる。
     /// 共有の待ち行列から受け取ったノード (`ENOMOTO_MIP_POOL_DSE`) では数を数え、値 `n` なら重みのない基底変数を `NaN`
     /// (求解の始めに厳密な値を埋める) にする。
+    /// 診断用 (`ENOMOTO_MIP_MEMBQ_DIAG`): [`membq_diag`] の 1 行を標準エラーに出す。
+    fn membq_diag_line(&mut self, rdse: bool, st: LpStatus, iters: u64) {
+        use std::hash::{Hash, Hasher};
+        let b = self.lp.basis();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for s in b.col.iter().chain(b.row.iter()) {
+            (*s as u8).hash(&mut h);
+        }
+        let bh = h.finish() & 0xffff_ffff;
+        let (obj, xh) = if st == LpStatus::Optimal {
+            let x = self.lp.col_values();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for v in &x {
+                ((v * 1e6).round() as i64).hash(&mut h);
+            }
+            (self.lp.objective() + self.p.offset, h.finish() & 0xffff_ffff)
+        } else {
+            (f64::NAN, 0)
+        };
+        let th = format!("{:?}", std::thread::current().id());
+        let th = th.trim_start_matches("ThreadId(").trim_end_matches(')');
+        eprintln!("MEMBQ_DIAG: t {:.2} th {th} sub {} cols {} tid {} node {} rdse {} st {:?} it {} obj {:.6} rows {} basis {:08x} x {:08x}", self.start.elapsed().as_secs_f64(), self.params.submip as u8, b.col.len(), self.pool_tid, self.nodes, rdse as u8, st, iters, obj, self.lp.num_rows(), bh, xh);
+    }
+
     fn set_restored_dse(&mut self, w: &[(u32, f32)]) {
         if self.tp_kind == 2 && pool_dse() {
             let b = self.lp.basis();
