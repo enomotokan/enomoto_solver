@@ -1,0 +1,43 @@
+== loss21
+  base            14.83s (20/21)
+  sato            14.43s (20/21)
+  t               16.01s (19/21)
+== miplib40
+  base            18.83s (27/40)
+  sato            18.93s (27/40)
+  t               18.72s (27/40)
+
+問題ごと (各回の時間、base と 20% 以上かつ 2 秒以上違うもの):
+  drayage-25-23          rep0 base=7.7  sato=11.9
+  mc11                   rep0 base=35.4  t=26.6
+  misc07                 rep0 base=16.9  sato=11.5
+  neos-3083819-nubu      rep0 base=10.2  t=13.6
+  neos-911970            rep0 base=15.9  t=19.2
+  neos5                  rep0 base=40.2  t=49.7
+  noswot                 rep0 base=31.2  sato=59.4 t=21.7
+  physiciansched6-2      rep0 base=25.6  sato=16.6 t=60.0
+  swath1                 rep0 base=23.1  t=38.9
+
+食い違い (どれかが optimal で目的値が違う) と異常終了:
+
+58 問全体:
+- base: SGM 16.89 秒、解けた 44/58、最初の解あり 57、最初の解の幾何平均 0.41 秒
+- sato: SGM 16.87 秒、解けた 44/58、最初の解あり 57、最初の解の幾何平均 0.40 秒
+- t: SGM 17.24 秒、解けた 43/58、最初の解あり 57、最初の解の幾何平均 0.40 秒
+
+60 秒で解き終えない問題の目的値 (base / sato / t):
+- 30n20b8: time_limit 353.0 / time_limit 302.0 / time_limit 302.0
+- assign1-5-8: time_limit 212.0 / time_limit 212.0 / time_limit 212.0
+- blp-ar98: time_limit 6578.430545600001 / time_limit 6536.369270400003 / time_limit 6536.369270400003
+- bppc4-08: time_limit 53.999999945 / time_limit 53.99999999999999 / time_limit 53.999999999999986
+- cvs16r128-89: time_limit -91.0 / time_limit -93.0 / time_limit -90.0
+- gen-ip002: time_limit -4783.7333916 / time_limit -4773.2035154000005 / time_limit -4783.7333916
+- gen-ip054: time_limit 6850.576067582 / time_limit 6840.9656417920005 / time_limit 6853.012310846
+- graph20-20-1rand: time_limit -9.0 / time_limit -9.0 / time_limit -9.0
+- mas74: time_limit 11857.371258199997 / time_limit 11857.371258200006 / time_limit 11801.185729000008
+- mzzv42z: time_limit -20500.0 / time_limit -20430.0 / time_limit -20540.0
+- neos-1456979: time_limit 182.0 / time_limit 194.0 / time_limit 190.0
+- physiciansched6-2: optimal 49323.99999999999 / optimal 49323.99999999999 / time_limit 49623.999999999985
+- ran14x18-disj-8: time_limit 3736.000000009 / time_limit 3747.9999996008382 / time_limit 3736.99999997134
+- supportcase26: time_limit 1764.0178677349156 / time_limit 1785.2489306107834 / time_limit 1768.2640744460268
+- timtab1: time_limit 764771.9999315622 / time_limit 764771.99999978 / time_limit 783289.9999998001
