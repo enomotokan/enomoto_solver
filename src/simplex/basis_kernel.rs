@@ -221,6 +221,21 @@ impl BasisKernel {
         self
     }
 
+    /// 入る列 `col` の FT 更新用の `a_tilde` だけを求める (`B^-1 col` の値は求めない。`U` 段を解かない)。続けて
+    /// [`Self::btran_row_e_tilde`] (か [`Self::btran_row`]) と [`Self::update_and_check`] を呼ぶ。双対の押し出しの試作
+    /// (`ENOMOTO_XO_DUAL_PUSH_FAST`) 用: 入る列の結果がほぼ密 (opm2-z10-s4 で 14.6 万行中 10.5 万) で `U` 段が重い。
+    pub(super) fn ftran_a_tilde_only(&mut self, lu: &sparse_lu::FtLu, col: &[(usize, f64)]) {
+        for &(i, v) in col {
+            self.dense_rhs[i] += v;
+        }
+        lu.ftran_a_tilde_into(&self.dense_rhs, &mut self.a_tilde);
+        for &(i, _) in col {
+            self.dense_rhs[i] = 0.0;
+        }
+        self.ftrack.a_tilde.set_full();
+        self.a_tilde_ready = true;
+    }
+
     /// 入る列 `col` (`(行, 値)` の疎な列) の FTRAN `out = B^-1 col` (`out` は長さ `m`)。FT 更新用に `a_tilde` を記録する。
     /// 結果の非ゼロ数を返す。[`Self::ftran_fused`] の融合なし。
     ///

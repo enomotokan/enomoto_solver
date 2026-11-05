@@ -5613,6 +5613,12 @@ impl FtLu {
         self.permute_out(scratch, out)
     }
 
+    /// `(L R_1...R_k)^-1 rhs` (FT 更新に渡す `a_tilde`) だけを `out` (長さ `m`、全体を書く) に求める。`U` 段は解かない
+    /// (`B^-1 rhs` の値が要らず FT 更新だけをしたい呼び出し用: クロスオーバーの双対の押し出し)。
+    pub fn ftran_a_tilde_into(&self, rhs: &[f64], out: &mut [f64]) {
+        self.ftran_through_l_and_r_into(rhs, out);
+    }
+
     /// [`Self::solve_into`] と同じだが、`L`/`R` 適用後・`U` 適用前の中間値
     /// (`(L R_1...R_{k-1})^-1 rhs`) を `a_tilde_out` (長さ `m`) にも書き出す。
     /// `rhs` がこの反復の入力列なら、これがそのまま
@@ -7182,7 +7188,9 @@ impl FtLu {
     /// 次のキーから全走査に切り替えて `false` を返す (`touch` は不完全になる)。
     fn u_transpose_sweep_heap<Q: PosQueue>(&self, z: &mut [f64], touch: &mut Vec<usize>, marks: &mut EpochMarks, heap: &mut Q) -> bool {
         let m = self.base.m;
-        self.add_tick(m as u64);
+        // tick は関数の中で足し合わせて最後に 1 回だけ加える (合計は同じ。複数スレッドからの BTRAN (クロスオーバーの双対の押し出しの
+        // 先読み) で、行ごとの不可分な加算が共有のキャッシュ行を取り合わないように)
+        let mut tk = m as u64;
         let limit = (tunable!("ENOMOTO_T_BTRAN_HYPER_FRACTION", BTRAN_HYPER_FRACTION, f64) * m as f64) as usize;
         marks.begin();
         heap.qclear();
@@ -7199,7 +7207,7 @@ impl FtLu {
             let zp = zp / pivot;
             z[p] = zp;
             let orow = self.row_owners.row(p);
-            self.add_tick(orow.len() as u64);
+            tk += orow.len() as u64;
             let mut visit = |q: usize, v: f64| {
                 z[q] -= v * zp;
                 if !marks.is_marked(q) {
@@ -7234,7 +7242,7 @@ impl FtLu {
                     let zp = zp / pivot;
                     z[p] = zp;
                     let orow = self.row_owners.row(p);
-                    self.add_tick(orow.len() as u64);
+                    tk += orow.len() as u64;
                     for (&q, &v) in orow.idx.iter().zip(orow.val) {
                         z[q as usize] -= v * zp;
                     }
@@ -7242,9 +7250,11 @@ impl FtLu {
                         *zq -= v * zp;
                     }
                 }
+                self.add_tick(tk);
                 return false;
             }
         }
+        self.add_tick(tk);
         true
     }
 

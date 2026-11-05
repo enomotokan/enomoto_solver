@@ -3697,8 +3697,234 @@ fn megiddo_dual_push(
     let (mut pushed, mut pivots, mut skipped) = (0usize, 0usize, 0usize);
     let mut nrefac = 0usize;
     let mut prof = [0.0f64; 4];
+    // 更新の内訳 (診断): [FTRAN, 再分解, 被約費用と x_B の計算し直し]
+    let mut prof_u = [0.0f64; 3];
+    let mut ftran_nnz = 0usize;
     let (mut nzr_sum, mut touched_sum) = (0usize, 0usize);
+    // 試作 `ENOMOTO_XO_DUAL_PUSH_FAST=1` (既定では使わない。analysis/rootlp_ipm_fail_20261105.md): (1) 候補の行 `ρ = B^-T e_r` と
+    // 非基底列の `α = A_Nᵀ ρ` は基底だけで決まるので、続く `ENOMOTO_T_XO_DUAL_PUSH_BLOCK` 本の分を並列に先に求め、
+    // 順に比率テストと更新をする (ピボットが起きたら残りを捨てて求め直す。ピボットは候補の 1 割ほど)。(2) ピボットでは
+    // 入る列の `B^-1 a_k` を求めず、FT 更新に要る `a_tilde` (U 段の手前) と `e_tilde` だけを求める。
+    // opm2-z10-s4 の根の LP: 候補 12.3 万本の BTRAN・PRICE 52 秒、入る列の FTRAN (結果がほぼ密) 18 秒。
+    let fast = env_str!("ENOMOTO_XO_DUAL_PUSH_FAST").is_some_and(|v| v != "0");
+    if fast {
+        use rayon::prelude::*;
+        let block = tunable!("ENOMOTO_T_XO_DUAL_PUSH_BLOCK", 2 * rayon::current_num_threads(), usize).max(1);
+        let use_sparse = m >= sparse_lu::sparse_path_min_m();
+        // 先読みの枠ごとの作業領域 (一度だけ作って使い回す)
+        struct DualWs {
+            out: Vec<f64>,
+            et: Vec<f64>,
+            work: sparse_lu::UnitBtranWork,
+            acc: Vec<f64>,
+            touched: Vec<usize>,
+            rows: Vec<usize>,
+        }
+        let mut ws: Vec<DualWs> = (0..block)
+            .map(|_| DualWs { out: vec![0.0; m], et: vec![0.0; m], work: sparse_lu::UnitBtranWork::new(m), acc: vec![0.0; n], touched: Vec::new(), rows: Vec::new() })
+            .collect();
+        type Pre = Option<(Vec<(usize, f64)>, Vec<(usize, f64)>)>;
+        let mut ci = 0usize;
+        let mut nchecks = 0usize;
+        while ci < cand.len() {
+            nchecks += 1;
+            if crate::cancel::is_cancelled() {
+                break;
+            }
+            if Instant::now() > deadline {
+                skipped += cand.len() - ci;
+                break;
+            }
+            let hi = (ci + block).min(cand.len());
+            let tq = Instant::now();
+            let pre: Vec<Pre> = {
+                let (lu_r, bp, sr): (&sparse_lu::FtLu, &[Option<usize>], &[f64]) = (&lu, &*basis_pos, &s);
+                let len = hi - ci;
+                ws[..len]
+                    .par_iter_mut()
+                    .zip(cand[ci..hi].par_iter())
+                    .map(|(w, &j)| {
+                        let DualWs { out, et, work, acc, touched, rows } = w;
+                        let r = bp[j]?;
+                        if sr[j].abs() <= tol_d * (1.0 + std.c[j].abs()) {
+                            return None;
+                        }
+                        if use_sparse {
+                            lu_r.solve_transpose_unit_work_sparse(r, out, et, work, None);
+                        } else {
+                            lu_r.solve_transpose_unit_work(r, out, et, work, None);
+                        }
+                        rows.clear();
+                        match work.nonzero_rows() {
+                            Some(ix) => rows.extend_from_slice(ix),
+                            None => rows.extend((0..m).filter(|&i| out[i] != 0.0)),
+                        }
+                        let mut rho_l = Vec::with_capacity(rows.len());
+                        for &i in rows.iter() {
+                            let ri = out[i];
+                            if ri == 0.0 {
+                                continue;
+                            }
+                            rho_l.push((i, ri));
+                            for &(k, a) in std.rows.row(i) {
+                                if bp[k].is_some() {
+                                    continue;
+                                }
+                                if acc[k] == 0.0 {
+                                    touched.push(k);
+                                }
+                                acc[k] += ri * a;
+                                if acc[k] == 0.0 {
+                                    acc[k] = f64::MIN_POSITIVE; // 打ち消しで 0 になっても一覧から漏らさない
+                                }
+                            }
+                        }
+                        let mut al = Vec::with_capacity(touched.len());
+                        for &k in touched.iter() {
+                            al.push((k, acc[k]));
+                            acc[k] = 0.0;
+                        }
+                        touched.clear();
+                        Some((rho_l, al))
+                    })
+                    .collect()
+            };
+            prof[0] += tq.elapsed().as_secs_f64();
+            let mut next = hi;
+            for (off, pr) in pre.into_iter().enumerate() {
+                let j = cand[ci + off];
+                let Some((rho_l, al)) = pr else { continue };
+                let Some(r) = basis_pos[j] else { continue };
+                let sj = s[j];
+                if sj.abs() <= tol_d * (1.0 + std.c[j].abs()) {
+                    continue;
+                }
+                nzr_sum += rho_l.len();
+                touched_sum += al.len();
+                let tq = Instant::now();
+                let sigma = if sj > 0.0 { 1.0 } else { -1.0 };
+                let mut amax = 0.0f64;
+                blockers.clear();
+                for &(k, a) in &al {
+                    let ak = sigma * a;
+                    let aa = ak.abs();
+                    amax = amax.max(aa);
+                    if aa <= 1e-11 {
+                        continue;
+                    }
+                    let num = match nb_status[k] {
+                        Some(NbStatus::Lower) if ak > 0.0 => s[k].max(0.0),
+                        Some(NbStatus::Upper) if ak < 0.0 => (-s[k]).max(0.0),
+                        Some(NbStatus::Zero) => if s[k] * ak > 0.0 { s[k].abs() } else { 0.0 },
+                        _ => continue,
+                    };
+                    if std.lb[k] == std.ub[k] {
+                        continue;
+                    }
+                    blockers.push((k, num, aa));
+                }
+                let piv_tol = (piv_rel * amax).max(1e-11);
+                let mut tmax = sj.abs();
+                for &(_, num, aa) in &blockers {
+                    if aa > piv_tol {
+                        tmax = tmax.min((num + tol_d) / aa);
+                    }
+                }
+                let mut best: Option<(usize, f64)> = None;
+                let mut best_piv = 0.0;
+                for &(k, num, aa) in &blockers {
+                    if aa > piv_tol {
+                        let t = num / aa;
+                        if t <= tmax && aa > best_piv {
+                            best_piv = aa;
+                            best = Some((k, t));
+                        }
+                    }
+                }
+                let (t, enter) = match best {
+                    Some((k, t)) if t < sj.abs() => (t.max(0.0), Some(k)),
+                    _ => (sj.abs(), None),
+                };
+                let leave_status = if sigma > 0.0 { NbStatus::Lower } else { NbStatus::Upper };
+                let at_bound = {
+                    let bnd = nb_value(j, Some(leave_status));
+                    bnd.is_finite() && (xb[r] - bnd).abs() <= 1e-9 * (1.0 + bnd.abs())
+                };
+                prof[2] += tq.elapsed().as_secs_f64();
+                let tq = Instant::now();
+                if enter.is_some() && !at_bound {
+                    skipped += 1;
+                    prof[3] += tq.elapsed().as_secs_f64();
+                    continue;
+                }
+                let theta = sigma * t;
+                if theta != 0.0 {
+                    for &(i, ri) in &rho_l {
+                        y[i] += theta * ri;
+                    }
+                    for &(k, a) in &al {
+                        s[k] -= theta * a;
+                    }
+                }
+                pushed += 1;
+                match enter {
+                    None => s[j] = 0.0,
+                    Some(k) => {
+                        s[j] -= theta;
+                        s[k] = 0.0;
+                        let tu = Instant::now();
+                        kernel.btran_row_e_tilde(&lu, r);
+                        kernel.ftran_a_tilde_only(&lu, col(std, k));
+                        prof_u[0] += tu.elapsed().as_secs_f64();
+                        let xk = nb_value(k, nb_status[k]);
+                        basis[r] = k;
+                        basis_pos[k] = Some(r);
+                        basis_pos[j] = None;
+                        nb_status[k] = None;
+                        nb_status[j] = Some(leave_status);
+                        xb[r] = xk;
+                        pivots += 1;
+                        if kernel.update_and_check(&mut lu, r).is_due() {
+                            nrefac += 1;
+                            let tu = Instant::now();
+                            lu = match factorize_basis(std, basis_pos, Some(&lu)) {
+                                Some(f) => f,
+                                None => {
+                                    basis[r] = j;
+                                    basis_pos[j] = Some(r);
+                                    basis_pos[k] = None;
+                                    nb_status[j] = None;
+                                    nb_status[k] = Some(if s[k] >= 0.0 && std.lb[k].is_finite() { NbStatus::Lower } else { nearest_bound(std, k, xk) });
+                                    pivots -= 1;
+                                    skipped += 1;
+                                    factorize_basis(std, basis_pos, None)?
+                                }
+                            };
+                            kernel = BasisKernel::new(m, ft_max);
+                            prof_u[1] += tu.elapsed().as_secs_f64();
+                            let tu = Instant::now();
+                            compute_s(y, &mut s);
+                            compute_xb(&lu, basis_pos, nb_status, &mut xb);
+                            prof_u[2] += tu.elapsed().as_secs_f64();
+                        }
+                        // 基底が変わった: 先に求めた残りは使えない
+                        next = ci + off + 1;
+                        prof[3] += tq.elapsed().as_secs_f64();
+                        break;
+                    }
+                }
+                prof[3] += tq.elapsed().as_secs_f64();
+            }
+            ci = next;
+        }
+        if debug {
+            eprintln!("CROSSOVER dual push fast: blocks={nchecks} block={block}");
+        }
+    }
     for (ci, &j) in cand.iter().enumerate() {
+        if fast {
+            break;
+        }
         if ci % 64 == 0 && crate::cancel::is_cancelled() {
             break;
         }
@@ -3809,7 +4035,9 @@ fn megiddo_dual_push(
                 Some(k) => {
                     s[j] -= theta;
                     s[k] = 0.0;
-                    kernel.ftran_col(&lu, col(std, k), &mut d);
+                    let tu = Instant::now();
+                    ftran_nnz += kernel.ftran_col(&lu, col(std, k), &mut d);
+                    prof_u[0] += tu.elapsed().as_secs_f64();
                     let xk = nb_value(k, nb_status[k]);
                     basis[r] = k;
                     basis_pos[k] = Some(r);
@@ -3820,6 +4048,7 @@ fn megiddo_dual_push(
                     pivots += 1;
                     if kernel.update_and_check(&mut lu, r).is_due() {
                         nrefac += 1;
+                        let tu = Instant::now();
                         lu = match factorize_basis(std, basis_pos, Some(&lu)) {
                             Some(f) => f,
                             None => {
@@ -3835,9 +4064,12 @@ fn megiddo_dual_push(
                             }
                         };
                         kernel = BasisKernel::new(m, ft_max);
+                        prof_u[1] += tu.elapsed().as_secs_f64();
+                        let tu = Instant::now();
                         // 増分の誤差を消す。
                         compute_s(y, &mut s);
                         compute_xb(&lu, basis_pos, nb_status, &mut xb);
+                        prof_u[2] += tu.elapsed().as_secs_f64();
                     }
                 }
             }
@@ -3852,9 +4084,10 @@ fn megiddo_dual_push(
     let lu = factorize_basis(std, basis_pos, Some(&lu))?;
     if debug {
         eprintln!(
-            "CROSSOVER dual megiddo: candidates={} pushed={pushed} pivots={pivots} skipped={skipped} refactors={nrefac} t={:.2}s (btran {:.2} price {:.2} ratio {:.2} update {:.2}; avg |rho| {:.0} touched {:.0})",
+            "CROSSOVER dual megiddo: candidates={} pushed={pushed} pivots={pivots} skipped={skipped} refactors={nrefac} t={:.2}s (btran {:.2} price {:.2} ratio {:.2} update {:.2} (ftran {:.2} refactor {:.2} recompute {:.2}); avg |rho| {:.0} touched {:.0} ftran nnz {:.0})",
             cand.len(),
-            t_push.elapsed().as_secs_f64(), prof[0], prof[1], prof[2], prof[3], nzr_sum as f64 / pushed.max(1) as f64, touched_sum as f64 / pushed.max(1) as f64
+            t_push.elapsed().as_secs_f64(), prof[0], prof[1], prof[2], prof[3], prof_u[0], prof_u[1], prof_u[2], nzr_sum as f64 / pushed.max(1) as f64, touched_sum as f64 / pushed.max(1) as f64,
+            ftran_nnz as f64 / pivots.max(1) as f64
         );
     }
     Some(DualPushResult { lu, pushed, pivots, skipped })

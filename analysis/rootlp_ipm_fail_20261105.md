@@ -311,6 +311,69 @@ opm2-z10-s4 (`exp.jsonl` の `_load_ipx`・`_dualpush`・`_adopt*`):
 - 新しい 2 つを加えても他の 10 問の結果は変わらない (`trial2.jsonl`: physiciansched6-2 1.45 秒、neos-933966 0.88、chromaticindex512-7 3.2、
   crypt14 7.8、crypt16 7.8、graph20-20-1rand 0.36、mas74 0.03、satellites2-40 74.9、sorrell3 44.3、momentum1 頂点なし)。
 
+## 9. opm2-z10-s4 の双対の押し出しを速くする (調査と試作)
+
+8 節で残った課題: opm2-z10-s4 の双対の Megiddo 式押し出しが 1 ピボット 8 ミリ秒 (全体 88 秒) と遅い。こちらの内点の点を保存し
+(`ENOMOTO_DEBUG_XO_POINT_SAVE`)、内点法を飛ばして押し出しだけを繰り返し測った (`exp.jsonl` の `_fast*`・`_batch*`)。
+
+### 9.1 時間の内訳 (既定の押し出し、上限なし)
+
+`ENOMOTO_DEBUG_CROSSOVER` の行に更新の内訳と入る列の FTRAN の結果の非零の数を足した。
+
+| 段 | 秒 | 回数 | 1 回 |
+|---|---:|---:|---:|
+| 候補の行の BTRAN `ρ = B^-T e_r` | 29.2 | 122,806 (候補ごと) | 0.24 ms |
+| PRICE `α = A_Nᵀ ρ` | 24.5 | 122,806 | 0.20 ms |
+| 比率テスト | 3.5 | | |
+| 入る列の FTRAN `B^-1 a_k` | 18.8 | 10,586 (ピボットごと) | 1.8 ms (結果の非零 10.5 万 / 14.6 万行) |
+| 再分解 | 3.8 | 35 | |
+| 計 | 90.7 | | |
+
+- 事実: 候補 12.3 万本のうちピボットが要るのは 8.6% だけで、残りは `y` を動かすだけ。それでも候補ごとに BTRAN と PRICE をする。
+- 事実: 候補が多いのは問題の形による: 内点法の双対で被約費用が 0 の列は 23,522 本しかなく、基底の 146,325 本のうち 12.3 万本は被約費用が
+  0 でない (主に行のスラック)。内点法の双対は大きな双対の最適面の内側にあり (主の退化)、頂点に移すには 12.3 万本ぶんの押し出しがいる。
+- 事実: 入る列の FTRAN は値を使っておらず (FT 更新のためだけ)、更新に要るのは `U` 段の手前の中間値 `a_tilde` だけ。
+
+### 9.2 試したこと
+
+| 試作 | 押し出し (秒) | クロスオーバー全体 (秒) | 結果 |
+|---|---:|---:|---|
+| 既定 (1 本ずつ) | 90.7 | 109.4 | |
+| 一括の押し出し (y を今の基底の双対 `y_B = B^-T c_B` へ一度に動かし、塞ぐ列でだけピボット) | 347 で打ち切り | 364 (頂点なし) | **悪い**: ピボットが 1.06 万 → 6.6 万、y_B に届かない。最初の基底の `y_B` が双対実行可能から遠く、ほぼ毎歩すぐに塞がれる。コードは外した |
+| `a_tilde` だけの FTRAN + 先読みの並列 (塊ごとに作業領域を作る、16 本) | 86.1 | 104.2 | FTRAN 18.8 → 4.6 秒、BTRAN・PRICE は 53.6 → 67.8 秒と悪化 (作業領域の確保と、先読みの半分が無駄) |
+| 同上、作業領域を使い回す、先読み 3 / 6 / 12 本 | 61.6 / 60.0 / 62.5 | 80.5 / 78.3 / 81.1 | |
+| 同上、先読み 1 本 (並列なし) | 75.9 | 94.1 | BTRAN・PRICE 57.9 秒 (並列の伸びは 1.4 倍) |
+| 同上 + U 段の BTRAN の計数の加算をまとめる (先読み 6 本) | **55.9** | **74.9** | BTRAN・PRICE 39.3 秒、FTRAN 3.9 秒 |
+
+### 9.3 入れたもの
+
+- 試作 `ENOMOTO_XO_DUAL_PUSH_FAST=1` (既定では使わない、`crossover.rs` の `megiddo_dual_push`):
+  (1) 続く `ENOMOTO_T_XO_DUAL_PUSH_BLOCK` 本 (既定はスレッド数の 2 倍) の候補の `ρ` と `α` を並列に先に求め (基底だけで決まる)、順に比率テストと
+  更新をする。ピボットが起きたら残りを捨てて求め直す。作業領域は枠ごとに一度だけ作る。
+  (2) ピボットでは入る列の `B^-1 a_k` を求めず、FT 更新に要る `a_tilde` (`FtLu::ftran_a_tilde_into`・`BasisKernel::ftran_a_tilde_only`、新) と
+  `e_tilde` (既存の `btran_row_e_tilde`) だけを求める。
+- 既定の経路の変更 (値は変わらない): `FtLu::u_transpose_sweep_heap` (疎な BTRAN の U 段) で、行ごとに共有の計数 (原子的な加算) に足していた
+  tick を関数の中で足し合わせて最後に 1 回だけ加える。合計は同じなので再分解の判定も同じ。複数スレッドから同時に BTRAN するとき、
+  共有のキャッシュ行の取り合いを減らす (先読みの BTRAN・PRICE 42 → 39 秒)。
+- 推測: 並列の伸びが 1.4〜1.8 倍に止まるのは、先読みの無駄 (ピボットの後に捨てる分、平均でおよそ 25%) と、BTRAN・PRICE がメモリの読み出しに
+  律速されるため。
+
+### 9.4 効き目
+
+試作一式 (4 節の 4 つ + 8 節の 2 つ + `ENOMOTO_XO_DUAL_PUSH_FAST=1`、`trial3.jsonl`・`both_trial3.jsonl`):
+
+| | 8 節の試作一式 | + `DUAL_PUSH_FAST` |
+|---|---:|---:|
+| opm2-z10-s4 内点法だけ | 126.2 秒 | **86.4 秒** |
+| opm2-z10-s4 競争の形 (二段解法 82.6 秒) | 123.9 秒 | **94.4 秒** (まだ二段解法に負ける) |
+
+- 他の 10 問は変わらない (physiciansched6-2 1.6 秒、neos-933966 0.95、chromaticindex512-7 3.5、crypt14 7.6、crypt16 7.6、graph20-20-1rand 0.32、
+  mas74 0.04、satellites2-40 73.4、sorrell3 43.3、momentum1 頂点なし)。目的値はすべて二段解法と一致。
+- `cargo test --release --lib` 340 件通過。
+- 残り: 候補ごとの BTRAN・PRICE (39 秒) が押し出しの 7 割。候補の数 (12.3 万) そのものは主の退化から来るので減らせない。IPX のクロスオーバーは
+  同じ LP で 4 秒 (12,487 反復) なので、IPX は内点法の最後に保つ基底 (前処理の行列のための基底) から始めて押し出す候補がずっと少ないと見られる
+  (推測。IPX の中身は確かめていない)。次の手は、基底の選び方 (被約費用が 0 でないスラックで埋めない) か、押し出しの順番。
+
 ## ファイル
 
 - `rootlp_ipm_fail_20261105/one.py`・`highs_ipm.py`・`summ.py`・`bench58.py`: 計測と集計 (上の「測り方」)。
@@ -324,6 +387,9 @@ opm2-z10-s4 (`exp.jsonl` の `_load_ipx`・`_dualpush`・`_adopt*`):
   `src/simplex/crossover.rs` (`ENOMOTO_XO_IPM_RETRY_PC`・`ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST`・`ENOMOTO_XO_MIP_CLEANUP_HINT`)、
   `src/interior_point/kkt.rs` (`ENOMOTO_IPM_KKT_AUG_RATIO`・`ENOMOTO_IPM_DENSE_*`)。
 - `others/`: 8 節 (`ipm_solvers.py`・`make_point.py`・`ipm_runs.jsonl`・IPX のログ)。`trial2.jsonl`・`both_trial2.jsonl`: 8 節の試作一式。
+- コード (9 節): `src/simplex/crossover.rs` の `megiddo_dual_push` (`ENOMOTO_XO_DUAL_PUSH_FAST`・`ENOMOTO_T_XO_DUAL_PUSH_BLOCK`、時間の内訳の表示)、
+  `src/simplex/basis_kernel.rs` の `ftran_a_tilde_only`、`src/simplex/lu.rs` の `ftran_a_tilde_into` と `u_transpose_sweep_heap` の tick。
+  `trial3.jsonl`・`both_trial3.jsonl`: 9 節の試作一式。
 - コード (8 節): `src/simplex/crossover.rs` (`ENOMOTO_XO_DUAL_MEGIDDO_RACE_NOLIMIT`)、`src/simplex/mip_lp.rs` の `adopt_basic_solution`
   (`ENOMOTO_MIP_ADOPT_ROW_SCALE`・`ENOMOTO_DEBUG_ADOPT`)。
 - テスト: `cargo test --release --lib` 340 件通過 (8 節の変更の後、rebase で 1 件増えた)、`pytest tests/test_model.py` 35 件通過。
