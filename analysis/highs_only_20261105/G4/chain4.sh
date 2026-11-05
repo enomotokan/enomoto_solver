@@ -18,3 +18,4 @@ python run.py ours c0n 600 neos-873061
 ./prof_cutlp.sh
 python run.py ours ac 600 satellites2-60-fs
 python run.py ours all 600 satellites2-60-fs
+python bench58.py def,ho4b 0 > bench58.out 2>&1
