@@ -97,15 +97,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let saved = self.lp.save_state();
                         let c0 = self.lp.costs();
                         let max_rounds = tunable!("ENOMOTO_T_MIP_HO4_ACFIX_ROUNDS", 3usize, usize);
-                        while rounds < max_rounds && !cands.is_empty() && Instant::now() < deadline {
+                        // 確かめの LP の時間の上限: 内点法の丸めの上限か、今から `ENOMOTO_T_MIP_HO4_ACFIX_LP_MULT` (既定 2) x 根の LP の秒の
+                        // 遅い方 (全体の期限まで)。satellites2-60-fs では 30 秒の丸めの上限に当たって確かめられなかった
+                        let vd = deadline.max(Instant::now() + Duration::from_secs_f64((tunable!("ENOMOTO_T_MIP_HO4_ACFIX_LP_MULT", 2.0, f64) * self.root_lp_secs).min(1e6)));
+                        let vd = self.deadline.map_or(vd, |g| g.min(vd));
+                        while rounds < max_rounds && !cands.is_empty() && Instant::now() < vd {
                             rounds += 1;
                             let mut c = vec![0.0; p.n];
                             for &(j, at_lo) in &cands {
                                 c[j] = if at_lo { -1.0 } else { 1.0 };
                             }
                             self.lp.set_costs(&c);
-                            let st = self.lp.solve(&super::lp::SolveLimits { iteration_limit: u64::MAX, cutoff: f64::INFINITY, deadline: Some(deadline) });
+                            let st = self.lp.solve(&super::lp::SolveLimits { iteration_limit: u64::MAX, cutoff: f64::INFINITY, deadline: Some(vd) });
                             if st != super::lp::LpStatus::Optimal {
+                                if self.params.verbose {
+                                    eprintln!("MIP:   interior rounding: ENOMOTO_MIP_HO4_ACFIX: the check LP stopped ({st:?}, {:.2}s)", t0.elapsed().as_secs_f64());
+                                }
                                 cands.clear();
                                 break;
                             }
