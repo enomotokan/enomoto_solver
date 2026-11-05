@@ -1745,7 +1745,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let saved_rows = self.lp.num_rows() - keep_lu_remove.as_ref().map_or(0, |rm| rm.iter().filter(|&&r| r).count());
             let saved_state = fail_restore.then(|| self.lp.save_state());
             // 試作 `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` の `d`: 外すときに戻す加える前の状態 (止まった基底を残させるので)
-            let rob_saved = (rob_d && !fail_restore && keep_lu_remove.is_none()).then(|| self.lp.save_state());
+            // 試作 `ENOMOTO_MIP_HO4_GAIN_RESTORE` (analysis/highs_only_20261105/G4.md 10 節、既定では使わない): `ENOMOTO_MIP_HO5_CUTLP_GAIN` は
+            // 続けないときも止まった LP の状態を残させる (`FORCE_RESUME_ONCE`) ので、カットを外した後の解き直しが加える前の最適基底ではなく
+            // 止まった基底から始まり、根の頂点が変わる (neos-960392 で解き直し 1 -> 7208 反復、根の RENS が実行不能になり 60 秒で解けない)。
+            // `d` と同じく加える前の状態を取っておき、外すときに戻す
+            let ho4_gr = ho5_gain > 0.0 && env_str!("ENOMOTO_MIP_HO4_GAIN_RESTORE").is_some();
+            let rob_saved = ((rob_d || ho4_gr) && !fail_restore && keep_lu_remove.is_none()).then(|| self.lp.save_state());
             let t_add0 = std::time::Instant::now();
             let dse_check = env_str!("ENOMOTO_MIP_DEBUG_DSE_CHECK").is_some() && !self.params.submip;
             if dse_check {
@@ -1786,7 +1791,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // neos-3216931-puriri・satellites2-60-fs・neos-873061 は 0 ラウンド目のカットの LP が進みの判定 (目的値が平らな窓) で
             // 外され、`ENOMOTO_MIP_CUT_LP_CAP_STOP` でループが止まって根の下界が根の LP のまま。HiGHS は最初の分離のラウンドに
             // 根の LP の 0.7〜1.6 倍の反復を使って下界を上げる
-            let ho4_cut0 = cs_outer && !moved && env_str!("ENOMOTO_MIP_HO4_CUT0").is_some();
+            let ho4_cut0 = cs_outer && !moved && env_str!("ENOMOTO_MIP_HO4_CUT0").is_some_and(|v| v != "moved");
+            // `ENOMOTO_MIP_HO4_CUT0=moved` (G4.md 10 節): 1 回目は既定と同じ (上限・進みの判定・止まった状態を残さない) に解き、進みの判定で
+            // 止まったときに、その LP の目的値が出発から相対 `ENOMOTO_T_MIP_HO4_CUT0_MOVED_TOL` (既定 1e-6) を超えて伸びていたときだけ、同じ
+            // カットの LP を上限 `ENOMOTO_T_MIP_HO4_CUT0_MULT` x 根の LP の反復 (前処理の LP の最初の LP と大きい方) で進みの判定なしに解き直す
+            // (止まった所からは続けない: 止まった状態を残すと、続けないときにも外した後の解き直しの頂点が変わるため。HO5_CUTLP_GAIN を見よ)
+            let ho4m = cs_outer && !moved && env_str!("ENOMOTO_MIP_HO4_CUT0") == Some("moved");
             // 根の LP が前処理の LP の基底から数反復で終わった問題 (neos-873061 は 1 反復) では、前処理の LP の反復を基準にする
             let ho4_base = root_iters.max(super::HO4_PROBE_ITERS.with(|c| c.get())).max(100);
             let lim = if ho4_cut0 { lim.max((tunable!("ENOMOTO_T_MIP_HO4_CUT0_MULT", 2.0, f64) * ho4_base as f64) as u64) } else { lim };
@@ -1905,6 +1915,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: cut round {round}: cut LP stopped by the progress check at iter {it} (cap {lim}): window gain {gain:.3e}, gain from the start {total:.3e} ({} iters)", self.lp.total_iterations() - it0);
                 } else if self.lp.total_iterations() - it0 > lim {
                     eprintln!("MIP: cut round {round}: cut LP went past the cap {lim} on progress: {st:?} after {} iters", self.lp.total_iterations() - it0);
+                }
+            }
+            if ho4m && st == LpStatus::IterationLimit && !self.time_up() && !stopped(&job) {
+                if let Some((it, _gain, total)) = crate::simplex::slope_intercept_dual::ext_progress_stopped() {
+                    let thr = tunable!("ENOMOTO_T_MIP_HO4_CUT0_MOVED_TOL", 1e-6, f64) * prev_lp_obj.abs().max(1.0);
+                    if total.is_finite() && total > thr {
+                        let base = root_iters.max(super::HO4_PROBE_ITERS.with(|c| c.get())).max(100);
+                        let lim2 = (tunable!("ENOMOTO_T_MIP_HO4_CUT0_MULT", 2.0, f64) * base as f64) as u64;
+                        let it1 = self.lp.total_iterations();
+                        st = self.lp.solve(&SolveLimits { iteration_limit: lim2, cutoff: cut_cutoff, deadline: lp_deadline });
+                        if self.params.verbose {
+                            eprintln!("MIP: cut round {round}: ENOMOTO_MIP_HO4_CUT0=moved: stopped at iter {it} after a gain of {total:.3e} from the start; re-solved with the cap {lim2}: {st:?} after {} iters", self.lp.total_iterations() - it1);
+                        }
+                    } else if self.params.verbose {
+                        eprintln!("MIP: cut round {round}: ENOMOTO_MIP_HO4_CUT0=moved: stopped at iter {it}, gain from the start {total:.3e}; not moved, dropped as by default");
+                    }
                 }
             }
             // `d`: 上限 (反復・時間) に当たったら、上限を倍にして止まったところからもう 1 回だけ続ける
