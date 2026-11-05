@@ -1576,6 +1576,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP:   sub-MIP dump {f}: rows {}, free integer columns {nfree} of {} (cutoff {:.6e}, {:.2}s)", sub.m, sub.is_int.iter().filter(|&&b| b).count(), cutoff.unwrap_or_else(|| self.prune_limit()), self.start.elapsed().as_secs_f64());
             }
         }
+        // 診断用 `ENOMOTO_MIP_FRAG_DIAG` (analysis/fragility_20261105): 外側の求解のサブ MIP ごとに、スレッド・時刻・ラベル・
+        // 自由な整数列・定義域の指紋 (同じ部分問題の繰り返しを見る) を 1 行で出す
+        let frag = (frag_diag() && !self.params.submip).then(|| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for j in 0..sub.n {
+                sub.col_lo[j].to_bits().hash(&mut h);
+                sub.col_up[j].to_bits().hash(&mut h);
+            }
+            sub.m.hash(&mut h);
+            let nfi = (0..sub.n).filter(|&j| sub.is_int[j] && sub.col_lo[j] < sub.col_up[j]).count();
+            (h.finish() & 0xffff_ffff, nfi, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z))
+        });
         let hs_drop = self.hs_drop();
         let r0 = self.submip_r0_on();
         // `ENOMOTO_MIP_SUBMIP_HIGHS` の `g`: ギャップを親と同じにする (HiGHS は `mip_rel_gap = 0`)
@@ -1712,6 +1725,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         SUBMIP_R0.with(|f| f.set(r0_prev));
         if self.params.verbose {
             eprintln!("MIP:   sub-MIP: {nfree_all} free columns of {}, status {:?}, nodes {}, objective {:?}, {:.2}s{}", p.n, r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64(), if paused.is_some() { " (paused at the node limit)" } else { "" });
+        }
+        if let Some((h, nfi, z0)) = frag {
+            eprintln!(
+                "FRAG: t {:.2} tid {} node {} label {:?} nfree_int {nfi} hash {h:08x} inc {z0} status {:?} nodes {} obj {:?} secs {:.2}",
+                frag_t0().elapsed().as_secs_f64(),
+                self.pool_tid,
+                self.nodes,
+                self.heur_label,
+                r.status,
+                r.nodes,
+                r.objective,
+                t_sub.elapsed().as_secs_f64()
+            );
         }
         if comp_diag {
             eprintln!("SUBMIP_COMP: {} result: status {:?}, nodes {}, {:.2}s", self.heur_label, r.status, r.nodes, t_sub.elapsed().as_secs_f64());
@@ -3057,6 +3083,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut lo = self.dom.global_lo.clone();
         let mut up = self.dom.global_up.clone();
         let rate = tunable!("ENOMOTO_T_MIP_MUTATION_RATE", 0.7, f64);
+        // `ENOMOTO_MIP_ROBUST_LNSFREQ` (試作): 固定の割合を結果で調整した値を使う (下の結果の処理で更新する)
+        let robust = super::solver::robust_lnsfreq();
+        let rate = if robust { ROBUST_MUT_RATE.with(|r| r.get().unwrap_or(rate)) } else { rate };
         let mut nfix = 0usize;
         for j in 0..p.n {
             if p.is_int[j] && self.rand() < rate && inc[j] >= lo[j] && inc[j] <= up[j] {
@@ -3074,6 +3103,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let r = self.solve_submip_problem(sub, 500, None);
         if self.params.verbose {
             eprintln!("MIP:   mutation ({nfix} fixed): {:?}", r);
+        }
+        // 近傍に良い解がないと解き切った (最適・実行不能) なら固定を減らし、解き切れずに改善もなければ固定を増やす
+        if robust {
+            let step = tunable!("ENOMOTO_T_MIP_ROBUST_LNSFREQ_MUT_STEP", 0.1, f64);
+            let nr = match r {
+                Some((_, true)) => rate,
+                Some((super::solver::MipStatus::Optimal | super::solver::MipStatus::Infeasible, false)) => (rate - step).max(tunable!("ENOMOTO_T_MIP_ROBUST_LNSFREQ_MUT_MIN", 0.2, f64)),
+                Some(_) => (rate + 0.5 * step).min(0.9),
+                None => rate,
+            };
+            ROBUST_MUT_RATE.with(|c| c.set(Some(nr)));
         }
         r.is_some_and(|r| r.1)
     }
@@ -3149,6 +3189,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.alns_count,
                 self.submip_time_max
             );
+        }
+        if frag_diag() && !self.params.submip {
+            eprintln!("FRAG: t {:.2} tid {} ALNS arm {arm} {z0} -> {z1} counts {:?} role {}", frag_t0().elapsed().as_secs_f64(), self.pool_tid, self.alns_count, self.in_heur_role);
         }
         ok
     }
@@ -3423,4 +3466,20 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
 /// [`Solver::dive_rc_fix`] を使うか (`ENOMOTO_MIP_DIVE_RCFIX`)。
 fn dive_rcfix() -> bool {
     env_str!("ENOMOTO_MIP_DIVE_RCFIX").is_some()
+}
+
+/// 診断用 `ENOMOTO_MIP_FRAG_DIAG` (analysis/fragility_20261105): サブ MIP・ALNS の 1 行の記録を出すか。
+pub(super) fn frag_diag() -> bool {
+    env_str!("ENOMOTO_MIP_FRAG_DIAG").is_some()
+}
+
+/// [`frag_diag`] の時刻の基準 (最初に呼んだとき。前処理の始めに呼ぶ)。
+pub(super) fn frag_t0() -> Instant {
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *T0.get_or_init(Instant::now)
+}
+
+thread_local! {
+    /// `ENOMOTO_MIP_ROBUST_LNSFREQ` (試作): Mutation の固定の割合 (スレッドごと。最初は `ENOMOTO_T_MIP_MUTATION_RATE`)
+    static ROBUST_MUT_RATE: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
 }

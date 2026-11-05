@@ -261,18 +261,33 @@ pub(crate) struct RunStats {
     pub(crate) root_bound: Option<f64>,
     /// 最初の根のヒューリスティクスを始めた時刻 (求解の開始からの秒。`ENOMOTO_MIP_ROOT_SUBMIP_REL` の基準)。
     pub(crate) root_heur_t: Option<f64>,
+    /// 最後に暫定解が良くなった時刻 (求解の開始からの秒。`ENOMOTO_MIP_ROBUST_LNSFREQ` の停滞の判定に使う)。
+    pub(crate) last_sol: Option<f64>,
+    /// [`record_incumbent`] で受け取った最良の目的値 (スレッドごとの暫定解は全体の最良より悪いことがあるので、全体で良くなったときだけ `last_sol` を進める)。
+    pub(crate) best_z: f64,
 }
 
-pub(crate) static RUN_STATS: std::sync::Mutex<RunStats> = std::sync::Mutex::new(RunStats { t0: None, first_sol: None, root_bound: None, root_heur_t: None });
+pub(crate) static RUN_STATS: std::sync::Mutex<RunStats> = std::sync::Mutex::new(RunStats { t0: None, first_sol: None, root_bound: None, root_heur_t: None, last_sol: None, best_z: f64::INFINITY });
 
 /// 暫定解の記録 ([`RUN_STATS`])。最初のものだけを残す。
 pub(crate) fn record_incumbent(z: f64) {
     if let Ok(mut s) = RUN_STATS.lock() {
+        let t = s.t0.map_or(0.0, |t0| t0.elapsed().as_secs_f64());
         if s.first_sol.is_none() {
-            let t = s.t0.map_or(0.0, |t0| t0.elapsed().as_secs_f64());
             s.first_sol = Some((t, z));
         }
+        if z < s.best_z - 1e-9 * z.abs().max(1.0) {
+            s.best_z = z;
+            s.last_sol = Some(t);
+        }
     }
+}
+
+/// 最後に暫定解が良くなってからの秒 (外側の求解の時計。暫定解がまだなければ `None`)。
+pub(crate) fn secs_since_last_incumbent() -> Option<f64> {
+    let s = RUN_STATS.lock().ok()?;
+    let t0 = s.t0?;
+    s.last_sol.map(|t| t0.elapsed().as_secs_f64() - t)
 }
 
 /// 外側の求解 ([`solve_mip`]) の始まりからの経過秒 ([`RUN_STATS`] の `t0`。再スタートを通して同じ時計)。
@@ -348,7 +363,7 @@ pub fn solve_mip(
     }
     let p = MipProblem::from_model(variables, objective, constraints);
     if let Ok(mut st) = RUN_STATS.lock() {
-        *st = RunStats { t0: Some(std::time::Instant::now()), first_sol: None, root_bound: None, root_heur_t: None };
+        *st = RunStats { t0: Some(std::time::Instant::now()), first_sol: None, root_bound: None, root_heur_t: None, last_sol: None, best_z: f64::INFINITY };
     }
     // 既定値 < 環境変数 < 引数の順に優先する。
     let env_f64 = |v: Option<&str>| v.and_then(|s| s.parse::<f64>().ok());

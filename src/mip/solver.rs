@@ -2540,6 +2540,20 @@ fn proof_phase_stops_role() -> bool {
     env_str!("ENOMOTO_MIP_PROOF_KEEP_ROLE").is_none()
 }
 
+/// `ENOMOTO_MIP_ROBUST_LNSFREQ` (試作、既定では使わない。analysis/fragility_20261105/beasleyC3.md): 全体の暫定解が
+/// `max(ENOMOTO_T_MIP_ROBUST_LNSFREQ_STALL_SECS (5), ENOMOTO_T_MIP_ROBUST_LNSFREQ_STALL_FRAC (0.2) × 経過)` 秒良くならないとき (停滞)、木の中の
+/// 大近傍探索を `ENOMOTO_T_MIP_ROBUST_LNSFREQ_NODES` (10) ノードおきにし、時間の割合の下限を `ENOMOTO_T_MIP_ROBUST_LNSFREQ_TIME` (0.1) に上げる。
+/// あわせて Mutation の固定の割合を結果で調整する (近傍に良い解がないと解き切ったら下げ、解き切れなければ上げる)
+pub(super) fn robust_lnsfreq() -> bool {
+    env_str!("ENOMOTO_MIP_ROBUST_LNSFREQ").is_some()
+}
+
+/// `ENOMOTO_MIP_ROBUST_IMPORT` (試作、既定では使わない): 木を分け合う従のスレッドが木の中の大近傍探索を呼ぶ前に、共有の最良の解を
+/// 取り込む (従は自分の見つけた解しか持たず、全体より悪い暫定解を近傍の中心にしていた)
+fn robust_import() -> bool {
+    env_str!("ENOMOTO_MIP_ROBUST_IMPORT").is_some()
+}
+
 fn heur_trigger_mode() -> bool {
     env_str!("ENOMOTO_MIP_HEUR_ROLE_TRIGGER").is_none_or(|v| v != "off")
 }
@@ -3120,6 +3134,9 @@ pub(crate) fn submip_par_limit() -> usize {
 pub(crate) static MIP_THREADS_DEFAULT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 
 pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
+    if !params.submip {
+        let _ = super::heuristics::frag_t0();
+    }
     // ヒューリスティクスのサブ MIP は小さいことが多いので、基底のない求解も二段解法だけで解く (同時実行しない)
     let prev_race = params.submip.then(|| crate::simplex::mip_lp::set_cold_race_threads(1));
     // LP の実装は傾き・切片二段解法
@@ -8485,6 +8502,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lns_calls: f64 = self.alns_count.iter().sum::<u32>() as f64;
                     let succ_rate = (0.5 * self.alns_reward.iter().sum::<f64>() + 1.0) / (lns_calls + 2.0);
                     let frac = tunable!("ENOMOTO_T_MIP_LNS_TIME_MIN", 0.02, f64) + tunable!("ENOMOTO_T_MIP_LNS_TIME_FRAC", 0.08, f64) * succ_rate;
+                    // `ENOMOTO_MIP_ROBUST_LNSFREQ` ([`robust_lnsfreq`]): 全体の暫定解が停滞していれば、呼ぶ間隔を詰め時間の割合の下限を上げる
+                    let stalled = robust_lnsfreq() && !self.params.submip && self.incumbent.is_some() && {
+                        let el = super::outer_elapsed().unwrap_or(0.0);
+                        let need = tunable!("ENOMOTO_T_MIP_ROBUST_LNSFREQ_STALL_SECS", 5.0, f64).max(tunable!("ENOMOTO_T_MIP_ROBUST_LNSFREQ_STALL_FRAC", 0.2, f64) * el);
+                        super::secs_since_last_incumbent().is_some_and(|d| d >= need)
+                    };
+                    let frac = if stalled { frac.max(tunable!("ENOMOTO_T_MIP_ROBUST_LNSFREQ_TIME", 0.1, f64)) } else { frac };
                     // 既定は時間の予算で 50 ノードおき。`ENOMOTO_MIP_LNS_ITERS` なら以前の、ヒューリスティクス共通の反復の
                     // 予算の中で 100 ノードおき (根のサブ MIP の反復を数えるので、根で数万反復使った問題では木の中で
                     // 一度も呼ばれなかった: h80x6320d・timtab1・assign1-5-8・graph20)
@@ -8492,6 +8516,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lns_avail = frac * self.start.elapsed().as_secs_f64() - self.lns_secs;
                     let lns_ok = if lns_time { lns_avail > 0.0 } else { self.heur_iters - self.heur_iters_root < budget };
                     let lns_freq = if lns_time { tunable!("ENOMOTO_T_MIP_LNS_FREQ", 50u64, u64) } else { 100 };
+                    let lns_freq = if stalled { lns_freq.min(tunable!("ENOMOTO_T_MIP_ROBUST_LNSFREQ_NODES", 10u64, u64).max(1)) } else { lns_freq };
                     // 木を分け合うときは一部のスレッドだけが大近傍探索・ダイビングを回す ([`Solver::tree_heur_allowed`])
                     let heur_ok = self.tree_heur_allowed();
                     // ヒューリスティクス役のスレッドに、待ち行列から取ったノードの LP 解を渡す (`ENOMOTO_T_MIP_HEUR_ROLE_LPX_EVERY` ノードおき)
@@ -8511,6 +8536,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if heur_ok && node.depth > 0 && (plunge_depth == 0 || robust_stall('l')) && self.incumbent.is_some() && self.nodes >= self.last_rins + lns_freq && lns_ok {
                         self.last_rins = self.nodes;
                         let t_lns = Instant::now();
+                        // `ENOMOTO_MIP_ROBUST_IMPORT` ([`robust_import`]): 従のスレッドは共有の最良の解を近傍の中心にする
+                        if robust_import() && self.pool_tid != 0 {
+                            if let Some(pool) = self.pool.clone().filter(|p| p.heur_k > 0) {
+                                self.heur_role_import(&pool);
+                            }
+                        }
                         // 改善ヒューリスティクス: ALNS で選ぶ (ENOMOTO_MIP_NO_ALNS なら RINS → Local Branching →
                         // Proximity Search を順に回す)
                         let turn = if env_str!("ENOMOTO_MIP_ONLY_RINS").is_some() {
