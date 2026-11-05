@@ -1,0 +1,52 @@
+PROF_PHASES_EXT wall=3212.097ms iters=20827 (154.2us/iter) accounted=84.4% of wall refactor_count=28 (verify=0 try_update=0 bump=0 drift=0 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=28) max_update_streak=939
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=4.8us/iter
+  avg_bfrt_flips/iter=0.331 avg_infeasible_pool/iter=569.3
+  pivot_order_reuse: attempts=25 accepted=23 (92.0%) attempt_time=106.966ms row_repicks=14212 fail(singular=0 fill=2) backoff_skips=4 nnz_reuse_avg=53848 nnz_full_avg=51178
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=0 final_expected_density col_aq=0.005 bfrt=0.010
+  btran_l scatter=21037 gather=37
+  pivot_search steps=129730 search_limit_hits=5077 (3.9%) candidates=573365 (avg 4.42/step) scan=5.882ms
+  col_max_abs rescan_entries=11420 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=39 (0.2% of iters) avg_harris_window_size=1.098
+  pool_grew=5528 (26.5%) pool_shrank=6580 (31.6%) pool_same=8718 (41.9%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)          381.788ms   11.9% of wall  18.331us/iter
+  price                 167.506ms    5.2% of wall  8.043us/iter
+  chuzr                  58.565ms    1.8% of wall  2.812us/iter
+  chuzc1                172.914ms    5.4% of wall  8.302us/iter
+  bfrt                   72.806ms    2.3% of wall  3.496us/iter
+  ftran                1381.440ms   43.0% of wall  66.329us/iter
+  xb_update              45.477ms    1.4% of wall  2.184us/iter
+  dse_update             16.312ms    0.5% of wall  0.783us/iter
+  dual_update            40.731ms    1.3% of wall  1.956us/iter
+  ft_update              46.079ms    1.4% of wall  2.212us/iter
+  refactor              328.903ms   10.2% of wall  15.792us/iter
+SIMPLEX_SCALE: scaled IterationLimit 20828 iters 3.318s
+PROF_PHASES_EXT wall=114076.039ms iters=111264 (1025.3us/iter) accounted=98.0% of wall refactor_count=181 (verify=0 try_update=0 bump=0 drift=0 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=181) max_update_streak=916
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=16.8us/iter
+  avg_bfrt_flips/iter=0.579 avg_infeasible_pool/iter=4044.0
+  pivot_order_reuse: attempts=234 accepted=211 (90.2%) attempt_time=2079.841ms row_repicks=124371 fail(singular=0 fill=23) backoff_skips=46 nnz_reuse_avg=105483 nnz_full_avg=89403
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=980 final_expected_density col_aq=0.137 bfrt=0.102
+  btran_l scatter=158299 gather=802
+  pivot_search steps=1806140 search_limit_hits=643778 (35.6%) candidates=48855239 (avg 27.05/step) scan=592.980ms
+  col_max_abs rescan_entries=1101632 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=105 (0.1% of iters) avg_harris_window_size=1.074
+  pool_grew=33667 (30.3%) pool_shrank=48958 (44.0%) pool_same=28638 (25.7%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)         16403.355ms   14.4% of wall  147.427us/iter
+  price                16200.843ms   14.2% of wall  145.607us/iter
+  chuzr                3158.241ms    2.8% of wall  28.385us/iter
+  chuzc1               6760.773ms    5.9% of wall  60.763us/iter
+  bfrt                 5486.941ms    4.8% of wall  49.315us/iter
+  ftran                43688.163ms   38.3% of wall  392.653us/iter
+  xb_update            10324.931ms    9.1% of wall  92.797us/iter
+  dse_update           1978.390ms    1.7% of wall  17.781us/iter
+  dual_update          2685.611ms    2.4% of wall  24.137us/iter
+  ft_update            1103.440ms    1.0% of wall  9.917us/iter
+  refactor             4013.828ms    3.5% of wall  36.075us/iter
+SIMPLEX_SCALE: scaled TimeLimit 111265 iters 114.149s
+ROOTLP_SIMPLEX {"n":117527,"m":25722,"nnz":319884,"st":"TimeLimit","obj":null,"t":114.1509,"iters":111265,"polish":0,"offset":0.00000000000000000e0,"t_start":0.334,"pivlog":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}
+MIP: MEMCAP: tid 0 limit 11726 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0

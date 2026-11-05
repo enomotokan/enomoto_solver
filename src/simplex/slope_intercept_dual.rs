@@ -67,6 +67,61 @@ use crate::params::slope_intercept_dual::{
 };
 use crate::params::slope_intercept_dual::{DEGEN_DJ_TOL, DEGEN_SHIFT_RUN, XB_CONSISTENCY_TOL, INFEAS_GUARD_SQRT_W, NOISE_C, NOISE_MIN_SQRT_W, PIVOT_ESCALATE_BELOW_DEFAULT, PIVOT_ESCALATE_FEW_UPDATES, ROLLBACK_MAX, UNCERTIFIED_MAX};
 
+thread_local! {
+    /// 診断 `ENOMOTO_SIMPLEX_PIVLOG`: 試した軸の |alpha_r| の桁 (log10 の切り捨て、-12..=2 に丸める) ごとの数 [0..15]、
+    /// FT 更新の数が 0..10 / 10..20 / 20.. のときの |alpha_r| < 1e-7 の数 [15..18]、破棄した軸の数 [18]、試した軸の数 [19]
+    static PIVLOG: std::cell::RefCell<[u64; 20]> = const { std::cell::RefCell::new([0; 20]) };
+}
+
+fn pivlog_record(a: f64, upd: usize) {
+    PIVLOG.with(|p| {
+        let mut p = p.borrow_mut();
+        let k = if a > 0.0 { (a.log10().floor() as i64).clamp(-12, 2) + 12 } else { 0 };
+        p[k as usize] += 1;
+        if a < 1e-7 {
+            p[15 + if upd < 10 { 0 } else if upd < 20 { 1 } else { 2 }] += 1;
+        }
+        p[19] += 1;
+    });
+}
+
+fn pivlog_tiny_skip(k: usize) {
+    PIVTINY.with(|c| c.set(c.get() + k as u64));
+}
+
+thread_local! {
+    /// 診断 `ENOMOTO_SIMPLEX_PIVLOG`: 試作 `ENOMOTO_SIMPLEX_TINY_SKIP` で外した候補の数
+    static PIVTINY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 診断 `ENOMOTO_SIMPLEX_PIVLOG`: `ENOMOTO_SIMPLEX_TINY_SKIP` で外した候補の数を取り出して 0 に戻す。
+pub(crate) fn pivtiny_take() -> u64 {
+    PIVTINY.with(|c| c.replace(0))
+}
+
+fn pivlog_widened() {
+    PIVWIDE.with(|c| c.set(c.get() + 1));
+}
+
+thread_local! {
+    /// 診断 `ENOMOTO_SIMPLEX_PIVLOG`: 試作 `ENOMOTO_SIMPLEX_HARRIS_WIDE` で窓を広げて軸を変えた回数
+    static PIVWIDE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 診断 `ENOMOTO_SIMPLEX_PIVLOG`: 窓を広げて軸を変えた回数を取り出して 0 に戻す。
+pub(crate) fn pivwide_take() -> u64 {
+    PIVWIDE.with(|c| c.replace(0))
+}
+
+fn pivlog_discard() {
+    PIVLOG.with(|p| p.borrow_mut()[18] += 1);
+}
+
+/// 診断 `ENOMOTO_SIMPLEX_PIVLOG` の数を取り出して 0 に戻す。
+pub(crate) fn pivlog_take() -> [u64; 20] {
+    PIVLOG.with(|p| std::mem::take(&mut *p.borrow_mut()))
+}
+
 /// `ENOMOTO_PROF_PHASES_EXT` 診断用のフェーズ別計時カウンタ(`simplex::prof_phases` の拡張版)。
 /// [`solve_slope_intercept_dual`] の主ループの時間がどこで使われるかを測る。値はすべてナノ秒または
 /// 回数の累計で、`reset` で 0 に戻し `report` で標準エラーに出力する。制御フローには使わない。
@@ -4658,6 +4713,20 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let debug_d_drift_ext = env_str!("ENOMOTO_DEBUG_D_DRIFT_EXT").is_some();
     // `ENOMOTO_PROF_PHASES_EXT`: 主ループのフェーズ別時間計測([`prof_phases`])を行うか。
     let profile_phases = env_str!("ENOMOTO_PROF_PHASES_EXT").is_some();
+    // 診断 `ENOMOTO_SIMPLEX_PIVLOG` (既定では数えない。analysis/rootlp_simplex_fail_20261105.md): 試した軸の |alpha_r| の桁の分布を数える ([`pivlog_take`])
+    let pivlog_on = env_str!("ENOMOTO_SIMPLEX_PIVLOG").is_some();
+    // 試作 `ENOMOTO_SIMPLEX_GROW_TA` (既定では使わない): FT 更新の数で比の判定の候補の |alpha_j| の下限を上げる (主ループの chuzc1)
+    let grow_ta_on = env_str!("ENOMOTO_SIMPLEX_GROW_TA").is_some_and(|v| v != "0");
+    let grow_ta_mid = tunable!("ENOMOTO_T_SIMPLEX_GROW_TA_MID", 3e-8, f64);
+    let grow_ta_hi = tunable!("ENOMOTO_T_SIMPLEX_GROW_TA_HI", 1e-6, f64);
+    // 試作 `ENOMOTO_SIMPLEX_TINY_SKIP` (既定では使わない): |alpha| の小さい候補に Harris の比の緩めを使う (主ループの chuzc1)
+    let tiny_skip_on = env_str!("ENOMOTO_SIMPLEX_TINY_SKIP").is_some_and(|v| v != "0");
+    let tiny_alpha = tunable!("ENOMOTO_T_SIMPLEX_TINY_ALPHA", 1e-7, f64);
+    let tiny_td = tunable!("ENOMOTO_T_SIMPLEX_TINY_TD", 1e-7, f64);
+    // 試作 `ENOMOTO_SIMPLEX_HARRIS_WIDE` (既定では使わない): 窓の中の軸が小さいとき Harris の窓を広げる (パス 2)
+    let harris_wide_on = env_str!("ENOMOTO_SIMPLEX_HARRIS_WIDE").is_some_and(|v| v != "0");
+    let hw_small = tunable!("ENOMOTO_T_SIMPLEX_HW_SMALL", 1e-6, f64);
+    let hw_tol = tunable!("ENOMOTO_T_SIMPLEX_HW_TOL", 1e-5, f64);
     if profile_phases {
         prof_phases::reset();
         prof_phases::STAT_M.store(m, std::sync::atomic::Ordering::Relaxed);
@@ -4971,7 +5040,15 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             return None; // 同時実行の相手が先に結論を出した
         }
         if progress && iter_idx % 1000 == 0 {
-            eprintln!("PROGRESS main iter={iter_idx} t={:.1}s phase={phase:?} infeasible_rows={}", progress_t0.elapsed().as_secs_f64(), infeasible_rows.rows.len());
+            eprintln!(
+                "PROGRESS main iter={iter_idx} t={:.1}s phase={phase:?} infeasible_rows={} lu_nnz={} fill={} upd={} col_aq={:.4}",
+                progress_t0.elapsed().as_secs_f64(),
+                infeasible_rows.rows.len(),
+                lu.lu_nnz(),
+                lu.fill_count(),
+                lu.update_count(),
+                kernel.density_col().expected()
+            );
         }
         if ext_check(iter_idx, phase == Phase::B, || {
             // 近道 (真の費用、双対実行可能な基底、M 側の列なし) では今の基底解の目的値が双対目的値 (下界) に
@@ -5728,6 +5805,64 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 }
                 k = k2;
             }
+            // 試作 `ENOMOTO_SIMPLEX_TINY_SKIP=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): Harris の比の緩め
+            // (`ratio + Td / |alpha_j|`) を |alpha_j| が `ENOMOTO_T_SIMPLEX_TINY_ALPHA` (既定 1e-7) 未満の候補にだけ使う。緩めた比が、残りの
+            // 候補のうち幅が無限の候補 (BFRT がそこで必ず止まる) の比の最小以上なら、その候補を比の判定から外す (歩みの後の被約費用の
+            // 符号の誤りは `Td` = `ENOMOTO_T_SIMPLEX_TINY_TD` (既定 1e-7) 以下)。幅が無限の候補が残らないときは外さない (実行不能の判定を誤らないため)
+            if tiny_skip_on && k > 1 {
+                let mut stop_ratio = f64::INFINITY;
+                for c in &cand_scratch[..k] {
+                    if c.hat_alpha.abs() >= tiny_alpha && width_inf[c.j] && c.ratio < stop_ratio {
+                        stop_ratio = c.ratio;
+                    }
+                }
+                if stop_ratio.is_finite() {
+                    let mut w = 0usize;
+                    for idx in 0..k {
+                        let c = cand_scratch[idx];
+                        let a = c.hat_alpha.abs();
+                        if a >= tiny_alpha || c.ratio + tiny_td / a < stop_ratio {
+                            cand_scratch[w] = c;
+                            w += 1;
+                        }
+                    }
+                    if pivlog_on && w < k {
+                        pivlog_tiny_skip(k - w);
+                    }
+                    k = w;
+                }
+            }
+            // 試作 `ENOMOTO_SIMPLEX_GROW_TA=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): HiGHS の
+            // `HEkkDualRow::chooseMakepack` と同じく、LU の FT 更新の数が増えるほど候補の |alpha_j| の下限を上げる
+            // (更新 10 回未満 1e-9、20 回未満 3e-8、それ以上 1e-6)。下限を満たす候補が無ければ、ほかに実行不能行があれば
+            // この行を一時的に外し、無ければ今までどおりの候補を使う
+            if grow_ta_on && k > 0 {
+                let upd = lu.update_count();
+                let ta = if upd < 10 { TOL } else if upd < 20 { grow_ta_mid } else { grow_ta_hi };
+                if ta > TOL {
+                    let mut w = 0usize;
+                    for idx in 0..k {
+                        if cand_scratch[idx].hat_alpha.abs() > ta {
+                            cand_scratch[w] = cand_scratch[idx];
+                            w += 1;
+                        }
+                    }
+                    if w > 0 {
+                        k = w;
+                    } else if infeasible_rows.rows.len() > 1 {
+                        stuck_row_taboo = true;
+                    } else {
+                        // 下限を満たす候補が無く、ほかの行も無い: 元の候補を使う (並べ替えたので作り直す)
+                        k = 0;
+                        for &j in &touched_cols {
+                            chuzc1_filter_col!(j);
+                        }
+                        if rb_ban_row[r] && k > 0 {
+                            k = filter_banned_pivots(r, &rb_bans, &mut cand_scratch[..k]);
+                        }
+                    }
+                }
+            }
             // 破棄直後の行の再試行(`STUCK_ROW_MIN_PIVOT` 参照):
             // - 下限を満たす候補が 1 つも無く他に実行不能行があれば、この行を一時的にプールから外して
             //   別の行を選ばせる(HiGHS のタブー行と同じ考え。下の `stuck_row_taboo` 参照)。常に行う。
@@ -6115,6 +6250,27 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     best_idx = idx;
                 }
             }
+            // 試作 `ENOMOTO_SIMPLEX_HARRIS_WIDE=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): 窓の中の最大の
+            // |alpha| が `ENOMOTO_T_SIMPLEX_HW_SMALL` (既定 1e-6) 未満なら、比が `ENOMOTO_T_SIMPLEX_HW_TOL` (既定 1e-5) 以内の
+            // 手前の候補まで窓を広げて |alpha| 最大の候補を選ぶ。手前の候補で止まると双対の歩みが短くなるだけで、
+            // どの被約費用も符号を変えない (双対実行可能のまま)
+            if harris_wide_on && best_abs < hw_small && window_start > 0 {
+                let min2 = sorted[k_star].ratio - hw_tol;
+                let mut ws = window_start;
+                while ws > 0 && sorted[ws - 1].ratio >= min2 {
+                    ws -= 1;
+                }
+                for (idx, cand) in sorted.iter().enumerate().take(window_start).skip(ws) {
+                    let abs_a = cand.hat_alpha.abs();
+                    if abs_a > best_abs {
+                        best_abs = abs_a;
+                        best_idx = idx;
+                    }
+                }
+                if pivlog_on && best_idx < window_start {
+                    pivlog_widened();
+                }
+            }
             // 診断: 窓の大きさと、窓内に(選ばれなかった)M 側候補があったかを数える。
             if profile_phases {
                 prof_phases::HARRIS_WINDOW_SIZE_SUM.fetch_add(k_star - window_start + 1, std::sync::atomic::Ordering::Relaxed);
@@ -6467,7 +6623,13 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             safe_pivot |= singular;
             singular
         };
+        if pivlog_on {
+            pivlog_record(alpha_full[r].abs(), lu.update_count());
+        }
         if pivot_grossly_inconsistent || pivot_makes_singular || (!update_verify_disabled && super::basis_kernel::pivot_values_disagree(&lu, alpha_q, alpha_full[r])) {
+            if pivlog_on {
+                pivlog_discard();
+            }
             if env_str!("ENOMOTO_DEBUG_D_DRIFT_EXT").is_some() {
                 eprintln!("DEBUG_D_DRIFT: VERIFY_FAIL at iter={iter_idx} q={q} r={r} alpha_q={alpha_q} alpha_full_r={}", alpha_full[r]);
             }

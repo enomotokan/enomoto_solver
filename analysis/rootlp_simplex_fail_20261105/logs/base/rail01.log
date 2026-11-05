@@ -1,0 +1,50 @@
+PROF_PHASES_EXT wall=4065.998ms iters=20827 (195.2us/iter) accounted=84.8% of wall refactor_count=28 (verify=0 try_update=0 bump=0 drift=0 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=28) max_update_streak=918
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=5.2us/iter
+  avg_bfrt_flips/iter=0.358 avg_infeasible_pool/iter=590.1
+  pivot_order_reuse: attempts=24 accepted=22 (91.7%) attempt_time=134.394ms row_repicks=13220 fail(singular=0 fill=2) backoff_skips=4 nnz_reuse_avg=54452 nnz_full_avg=51015
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=0 final_expected_density col_aq=0.003 bfrt=0.006
+  btran_l scatter=21040 gather=34
+  pivot_search steps=155676 search_limit_hits=5188 (3.3%) candidates=613338 (avg 3.94/step) scan=13.346ms
+  col_max_abs rescan_entries=11839 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=38 (0.2% of iters) avg_harris_window_size=1.107
+  pool_grew=5413 (26.0%) pool_shrank=6737 (32.3%) pool_same=8676 (41.7%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)          524.020ms   12.9% of wall  25.161us/iter
+  price                 200.601ms    4.9% of wall  9.632us/iter
+  chuzr                  72.571ms    1.8% of wall  3.484us/iter
+  chuzc1                192.658ms    4.7% of wall  9.250us/iter
+  bfrt                   90.422ms    2.2% of wall  4.342us/iter
+  ftran                1708.793ms   42.0% of wall  82.047us/iter
+  xb_update              66.492ms    1.6% of wall  3.193us/iter
+  dse_update             18.824ms    0.5% of wall  0.904us/iter
+  dual_update            46.813ms    1.2% of wall  2.248us/iter
+  ft_update              57.880ms    1.4% of wall  2.779us/iter
+  refactor              469.794ms   11.6% of wall  22.557us/iter
+PROF_PHASES_EXT wall=114093.873ms iters=107840 (1058.0us/iter) accounted=98.0% of wall refactor_count=172 (verify=0 try_update=0 bump=0 drift=0 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=172) max_update_streak=908
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=18.2us/iter
+  avg_bfrt_flips/iter=0.558 avg_infeasible_pool/iter=4000.4
+  pivot_order_reuse: attempts=221 accepted=198 (89.6%) attempt_time=2049.532ms row_repicks=118812 fail(singular=0 fill=23) backoff_skips=46 nnz_reuse_avg=105961 nnz_full_avg=88098
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=465 final_expected_density col_aq=0.367 bfrt=0.230
+  btran_l scatter=153883 gather=877
+  pivot_search steps=1832086 search_limit_hits=643165 (35.1%) candidates=48727738 (avg 26.60/step) scan=599.798ms
+  col_max_abs rescan_entries=1088569 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=96 (0.1% of iters) avg_harris_window_size=1.066
+  pool_grew=32674 (30.3%) pool_shrank=47356 (43.9%) pool_same=27809 (25.8%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)         16364.500ms   14.3% of wall  151.748us/iter
+  price                16880.467ms   14.8% of wall  156.533us/iter
+  chuzr                3219.930ms    2.8% of wall  29.858us/iter
+  chuzc1               7078.278ms    6.2% of wall  65.637us/iter
+  bfrt                 5316.877ms    4.7% of wall  49.303us/iter
+  ftran                43535.042ms   38.2% of wall  403.700us/iter
+  xb_update            9629.850ms    8.4% of wall  89.298us/iter
+  dse_update           1953.533ms    1.7% of wall  18.115us/iter
+  dual_update          2780.313ms    2.4% of wall  25.782us/iter
+  ft_update            1069.488ms    0.9% of wall  9.917us/iter
+  refactor             4027.384ms    3.5% of wall  37.346us/iter
+ROOTLP_SIMPLEX {"n":117527,"m":25722,"nnz":319884,"st":"TimeLimit","obj":null,"t":114.1239,"iters":107841,"polish":0,"offset":0.00000000000000000e0,"t_start":0.433}
+MIP: MEMCAP: tid 0 limit 11740 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0

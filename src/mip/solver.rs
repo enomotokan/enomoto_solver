@@ -5298,6 +5298,48 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 診断用 `ENOMOTO_MIP_TREE4_TRACE=秒` (既定では出さない): スレッドごとに、その秒数おきに全体の下界・暫定解・開いたノードと、
     /// 自分の待ち行列の下界の分布 (全体の下界から打ち切り値までの差の割合で 4 つに分ける)、葉の数を `TREE4:` の行で出す
+    /// 診断 `ENOMOTO_MIP_ROOTLP_SIMPLEX_DIAG` の本体 (根の LP の場所から呼ぶ)。
+    fn rootlp_simplex_diag(&mut self) {
+        let prefix = env_str!("ENOMOTO_MIP_ROOTLP_SIMPLEX_DIAG").unwrap_or_default();
+        let mut lp0 = crate::simplex::mip_lp::TwoStageLp::new(&self.dom.global_lo, &self.dom.global_up, &self.p.cost, &self.p.rows, &self.p.row_lo, &self.p.row_up);
+        if !prefix.is_empty() && prefix != "1" {
+            if let Err(e) = lp0.dump_lp(&prefix, Some(&[]), Some(&[])) {
+                eprintln!("ROOTLP_SIMPLEX dump failed: {e}");
+            }
+        }
+        let (n, m) = (self.p.n, self.p.m);
+        let nnz: usize = self.p.rows.iter().map(|r| r.len()).sum();
+        if env_str!("ENOMOTO_MIP_ROOTLP_DUMP_ONLY").is_some() {
+            eprintln!("ROOTLP_SIMPLEX {{\"n\":{n},\"m\":{m},\"nnz\":{nnz},\"dump_only\":true,\"offset\":{:.17e}}}", self.p.offset);
+            return;
+        }
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).thread_name(|i| format!("enomoto-mip-diag-simplex-{i}")).build().unwrap();
+        let lim = SolveLimits { deadline: self.deadline, ..Default::default() };
+        let t0 = std::time::Instant::now();
+        let flags = crate::simplex::slope_intercept_dual::tl_flags();
+        let (st, pol, flags) = pool.install(|| {
+            crate::simplex::slope_intercept_dual::set_tl_flags(flags);
+            let p0 = crate::simplex::slope_intercept_dual::ext_polish_iterations();
+            let st = lp0.solve_simplex_only(&lim);
+            (st, crate::simplex::slope_intercept_dual::ext_polish_iterations() - p0, crate::simplex::slope_intercept_dual::tl_flags())
+        });
+        crate::simplex::slope_intercept_dual::set_tl_flags(flags);
+        let t = t0.elapsed().as_secs_f64();
+        let obj = lp0.objective() + self.p.offset;
+        let piv = pool.install(crate::simplex::slope_intercept_dual::pivlog_take);
+        let mut piv: Vec<String> = piv.iter().map(|v| v.to_string()).collect();
+        piv.push(pool.install(crate::simplex::slope_intercept_dual::pivwide_take).to_string());
+        piv.push(pool.install(crate::simplex::slope_intercept_dual::pivtiny_take).to_string());
+        eprintln!(
+            "ROOTLP_SIMPLEX {{\"n\":{n},\"m\":{m},\"nnz\":{nnz},\"st\":\"{st:?}\",\"obj\":{},\"t\":{t:.4},\"iters\":{},\"polish\":{pol},\"offset\":{:.17e},\"t_start\":{:.3},\"pivlog\":[{}]}}",
+            if obj.is_finite() && st == LpStatus::Optimal { format!("{obj:.12e}") } else { "null".into() },
+            lp0.total_iterations(),
+            self.p.offset,
+            self.start.elapsed().as_secs_f64() - t,
+            piv.join(","),
+        );
+    }
+
     /// 診断 `ENOMOTO_MIP_ROOTLP_BOTH_DIAG` の本体 (上の根の LP の場所から呼ぶ)。
     fn rootlp_both_diag(&mut self) {
         let lp0 = crate::simplex::mip_lp::TwoStageLp::new(&self.dom.global_lo, &self.dom.global_up, &self.p.cost, &self.p.rows, &self.p.row_lo, &self.p.row_up);
@@ -6171,6 +6213,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 診断 `ENOMOTO_MIP_ROOTLP_BOTH_DIAG` (既定では何もしない。analysis/rootlp_both_diff_20261105.md): 最初の主の根の LP (前処理の後、
         // カットの前) を基底なしで二段解法と内点法 + クロスオーバーの両方で最後まで解き、両方の解・基底・時間の違いを 1 行の JSON
         // (`ROOTLP_BOTH {...}`) で stderr に出して終わる
+        // 診断 `ENOMOTO_MIP_ROOTLP_SIMPLEX_DIAG=<prefix>` (既定では何もしない。analysis/rootlp_simplex_fail_20261105.md): 上と同じ根の LP
+        // (前処理・LP プロービングの後、カットの前) を `<prefix>.mps` に書き出し、基底なしで二段解法だけ (1 スレッドのプール) で解いて、
+        // 状態・時間・反復を 1 行の JSON (`ROOTLP_SIMPLEX {...}`) で stderr に出して終わる。`ENOMOTO_MIP_ROOTLP_DUMP_ONLY` なら解かない
+        if root_kind == Some(4) && env_str!("ENOMOTO_MIP_ROOTLP_SIMPLEX_DIAG").is_some() {
+            self.rootlp_simplex_diag();
+            return self.finish(MipStatus::NotSolved, f64::NEG_INFINITY);
+        }
         if root_kind == Some(4) && env_str!("ENOMOTO_MIP_ROOTLP_BOTH_DIAG").is_some() {
             self.rootlp_both_diag();
             return self.finish(MipStatus::NotSolved, f64::NEG_INFINITY);

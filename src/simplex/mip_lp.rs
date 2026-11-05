@@ -173,6 +173,73 @@ pub struct LuSnapshot {
     price_key: u64,
 }
 
+/// 試作 `ENOMOTO_SIMPLEX_SCALE=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): 基底のない求解
+/// ([`TwoStageLp::solve_once`]、MIP の根の LP・LP プロービングの最初の LP など) を、行と列の尺度を調整した写しで解く
+/// ([`TwoStageLp::solve_scaled`])。HiGHS は尺度を調整してから解き、uccase12 の根の LP は調整なし (`simplex_scale_strategy=0`) だと
+/// 120 秒で終わらない (調整ありは 2 秒)。行の数が `ENOMOTO_T_SIMPLEX_SCALE_MIN_M` (既定 0) 未満なら使わない
+fn scale_cold_on() -> bool {
+    env_str!("ENOMOTO_SIMPLEX_SCALE").is_some_and(|v| v != "0")
+}
+
+/// 試作 `ENOMOTO_SIMPLEX_SCALE` の行と列の尺度 (`r_i`, `s_j`、2 の冪): 調整した係数は `r_i a_ij s_j`。幾何平均の調整
+/// (行と列を交互に `1 / sqrt(min |a| max |a|)`、最大 `ENOMOTO_T_SIMPLEX_SCALE_PASSES` 回 (既定 4)) の後、列の最大の絶対値を 1 に近づける。
+/// 尺度は 2^-20..2^20 に収める (HiGHS の `allowed_matrix_scale_factor` と同じ)。
+fn scale_factors(n: usize, rows: &[Vec<(usize, f64)>]) -> (Vec<f64>, Vec<f64>) {
+    let m = rows.len();
+    let mut rs = vec![1.0f64; m];
+    let mut cs = vec![1.0f64; n];
+    let passes = tunable!("ENOMOTO_T_SIMPLEX_SCALE_PASSES", 4usize, usize);
+    let lim = 2f64.powi(20);
+    let clamp = |v: f64| if v.is_finite() && v > 0.0 { v.clamp(1.0 / lim, lim) } else { 1.0 };
+    for _ in 0..passes {
+        // 行
+        for (i, r) in rows.iter().enumerate() {
+            let (mut mn, mut mx) = (f64::INFINITY, 0.0f64);
+            for &(j, v) in r {
+                let a = (v * cs[j]).abs();
+                if a > 0.0 {
+                    mn = mn.min(a);
+                    mx = mx.max(a);
+                }
+            }
+            if mx > 0.0 {
+                rs[i] = clamp(1.0 / (mn * mx).sqrt());
+            }
+        }
+        // 列
+        let mut mn = vec![f64::INFINITY; n];
+        let mut mx = vec![0.0f64; n];
+        for (i, r) in rows.iter().enumerate() {
+            for &(j, v) in r {
+                let a = (v * rs[i]).abs();
+                if a > 0.0 {
+                    mn[j] = mn[j].min(a);
+                    mx[j] = mx[j].max(a);
+                }
+            }
+        }
+        for j in 0..n {
+            if mx[j] > 0.0 {
+                cs[j] = clamp(1.0 / (mn[j] * mx[j]).sqrt());
+            }
+        }
+    }
+    // 列の最大を 1 に
+    let mut mx = vec![0.0f64; n];
+    for (i, r) in rows.iter().enumerate() {
+        for &(j, v) in r {
+            mx[j] = mx[j].max((v * rs[i] * cs[j]).abs());
+        }
+    }
+    for j in 0..n {
+        if mx[j] > 0.0 {
+            cs[j] = clamp(cs[j] / mx[j]);
+        }
+    }
+    let p2 = |v: f64| 2f64.powi(v.log2().round() as i32);
+    (rs.into_iter().map(p2).collect(), cs.into_iter().map(p2).collect())
+}
+
 fn shift_of(lo: f64, up: f64) -> f64 {
     if lo.is_finite() {
         lo
@@ -929,7 +996,11 @@ impl TwoStageLp {
         let t0 = std::time::Instant::now();
         let it0 = self.iters;
         let pol0 = sid::ext_polish_iterations();
-        let st = self.solve_inner(lim);
+        let st = if scale_cold_on() && !matches!(&self.basis, Some(b) if b.len() == self.rows.len()) && self.rows.len() >= tunable!("ENOMOTO_T_SIMPLEX_SCALE_MIN_M", 0usize, usize) {
+            self.solve_scaled(lim)
+        } else {
+            self.solve_inner(lim)
+        };
         if super::nb_diag::on() {
             super::nb_diag::record(self.nb_diag.take().map(|p| *p), self.iters - it0, t0.elapsed().as_secs_f64());
         }
@@ -938,6 +1009,63 @@ impl TwoStageLp {
         }
         self.status = Some(st);
         st
+    }
+
+    /// 試作 `ENOMOTO_SIMPLEX_SCALE` ([`scale_cold_on`]) の本体: 行と列の尺度を調整した写し ([`scale_factors`]) を基底なしで解き、
+    /// 最適ならその基底 (尺度によらない) から元の LP を warm start で解き直す。写しが最適で終わらなければ、時間・反復の上限はそのまま返し、
+    /// それ以外 (実行不能・非有界・数値の破綻など) は元の LP を基底なしで解き直す (証明・双対を元の尺度で得るため)。
+    fn solve_scaled(&mut self, lim: &SolveLimits) -> LpStatus {
+        let t0 = std::time::Instant::now();
+        let (rs, cs) = scale_factors(self.n, &self.rows);
+        let rows: Vec<Vec<(usize, f64)>> = self.rows.iter().enumerate().map(|(i, r)| r.iter().map(|&(j, v)| (j, v * rs[i] * cs[j])).collect()).collect();
+        let row_lo: Vec<f64> = (0..rs.len()).map(|i| self.row_lo[i] * rs[i]).collect();
+        let row_up: Vec<f64> = (0..rs.len()).map(|i| self.row_up[i] * rs[i]).collect();
+        let lo: Vec<f64> = (0..self.n).map(|j| self.lo[j] / cs[j]).collect();
+        let up: Vec<f64> = (0..self.n).map(|j| self.up[j] / cs[j]).collect();
+        let cost: Vec<f64> = (0..self.n).map(|j| self.cost[j] * cs[j]).collect();
+        let mut sc = TwoStageLp::new(&lo, &up, &cost, &rows, &row_lo, &row_up);
+        let st_s = sc.solve_inner(lim);
+        let t_s = t0.elapsed().as_secs_f64();
+        self.iters += sc.iters;
+        let debug = env_str!("ENOMOTO_SIMPLEX_SCALE_LOG").is_some();
+        let st = match (st_s, sc.basis.take()) {
+            (LpStatus::Optimal, Some(b)) if b.len() == self.rows.len() => {
+                for j in 0..self.n {
+                    self.x[j] = sc.x[j] * cs[j];
+                }
+                self.basis = Some(b);
+                self.lu_cache = None;
+                self.dse_cache = None;
+                self.resume_nb = None;
+                self.clear_memo();
+                let it1 = self.iters;
+                let st = self.solve_inner(lim);
+                if debug {
+                    eprintln!("SIMPLEX_SCALE: scaled {st_s:?} {} iters {t_s:.3}s; unscaled warm {st:?} {} iters {:.3}s", sc.iters, self.iters - it1, t0.elapsed().as_secs_f64() - t_s);
+                }
+                st
+            }
+            (LpStatus::TimeLimit | LpStatus::IterationLimit, _) => {
+                if debug {
+                    eprintln!("SIMPLEX_SCALE: scaled {st_s:?} {} iters {t_s:.3}s", sc.iters);
+                }
+                st_s
+            }
+            _ => {
+                let it1 = self.iters;
+                let st = self.solve_inner(lim);
+                if debug {
+                    eprintln!("SIMPLEX_SCALE: scaled {st_s:?} {} iters {t_s:.3}s; unscaled cold {st:?} {} iters {:.3}s", sc.iters, self.iters - it1, t0.elapsed().as_secs_f64() - t_s);
+                }
+                st
+            }
+        };
+        st
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_ROOTLP_SIMPLEX_DIAG`): 同時実行をせず二段解法だけで 1 回解く ([`Self::solve_once`])。
+    pub fn solve_simplex_only(&mut self, lim: &SolveLimits) -> LpStatus {
+        self.solve_once(lim)
     }
 
     pub fn solve_primal(&mut self, lim: &SolveLimits) -> LpStatus {
