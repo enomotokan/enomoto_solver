@@ -1,0 +1,44 @@
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 3522 -> 3512, free columns 10250 -> 10210, nonzeros 204000 -> 203990, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 0 of 10210 free columns fixed (0.04s), not used
+MIP: LP probing pass 1: 341 candidates, 0 fixings (16 LPs, 1350 iters, 0.65s)
+MIP: LP probing: tried 8 columns, fixed 0, LP 5.4416666667e1 -> 5.4416666667e1 (16 LPs, 1350 iters, 0.65s)
+MIP: LP probing: root LP 0.22s (1563 iters, size 217752), tried 8, fixed 0, basis passed true, total 2913 iters 0.65s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.32s), not used
+MIP: probing: 2288 of 10190 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 1829712 implications (1.54s, cpu 1.53s, work 51541978, pwork 1435237857, chg 5024684)
+MIP: probing: 0 equivalent binary pairs
+Presolve: 3522 rows, 10250 columns -> 3512 rows, 10210 columns (2.30s)
+MIP: clique extension: 1410 rows extended, 254228 nonzeros added, 0 columns fixed, 0 duplicate and 20 dominated rows removed (2229270 edges, 1.32s)
+MIP: symmetry: orbital fixing with 0 of 1 generators
+MIP: symmetry: 1 full orbitopes (10x2 packing)
+MIP: symmetry: 1 generators, 10 orbits on 20 columns, 0 lex-leader rows (0.21s, work 8387376, search 20500, verify 941868, detect 0.21s, refine 0.14s, log work 59297536)
+MIP: FJ problem (FJ_P3): rows 3492 -> 3492, free columns 10210 -> 10210, 0 continuous bounds tightened (1.64s)
+FJVSLM: fj1 found 7.5700000000e2 t 1.418 | fj (3s) best 7.5700000000e2 t 3.002 | lm first none t - best none least_viol 122 steps 96
+MIP: root LP: the rows changed after LP probing; the row statuses are not used
+MIP: root LP basis from the presolve LP probing: used (columns only)
+MIP: solving the root LP (9.54s)
+MIP: root LP stopped at the time limit (9.59s, 3.43s past the deadline)
+MIP: finish start TimeLimit (9.59s)
+MIP: MEMCAP: tid 0 limit 11094 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+     time      nodes      open        best bound         incumbent       gap
+     9.6s          0         0                 -                 -         -
+MIP:     9.59s nodes        0 open       0 lb inf ub inf lp_iters 3 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 0 dive_iters 0 lp_rows 3492 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 0, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: cut pool propagation: calls 0, pruned 0 nodes, tightened 0 bounds, 0.00s, pool 0 cuts (0 nonzeros); updated terms 0, candidates 0 (0 nonzeros), rebuilds 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 0, in pool 0 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: proof CMIR cuts: tried 0, added 0, entered the cut pool 0
+MIP: conflict analysis (HiGHS style): calls 0, conflicts 0, added 0, mean length 0.0, max length 3175, 0.00s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 0 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+MIP: mem1 sibling LU (all threads): held at most 0, pushed 0, dropped 0, adopted 0
+MIP: memc (all threads): packed nodes 0, changes 0 (0 bytes packed, 0 unpacked), bases 0 (0 bytes packed, 0 unpacked)
+MIP: basis nb diag: tree first LPs restored 0 iters 0 (0.0/LP), others 0 iters 0 (0.0/LP); root LPs: submip 0 lps 0 iters (0.0/LP) 0.00s, bgcopy 0 lps 0 iters (0.0/LP) 0.00s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 3 iters (3.0/LP) 0.05s; nb hints applied 0 solves, 0 given, 0 changed
+MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 3492
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 130.9)
+MIP: orbitopes 1: fixed 0 bounds, pruned 0 nodes
+MIP: finish done (9.59s)
+MIP: solve returned TimeLimit after 13.44s (time limit 10.00s)
+{"status": "time_limit", "objective": null, "best_bound": -Infinity, "nodes": 0, "root_bound": null, "first_solution_time": null, "first_solution_objective": null, "time": 13.447245479999992}
