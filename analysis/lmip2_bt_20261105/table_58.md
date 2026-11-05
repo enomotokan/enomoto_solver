@@ -1,11 +1,30 @@
 そろった問題: 58
 | 設定 | 解けた | SGM (秒) | 主ギャップの和 | 最初の解の時刻の幾何平均 (秒) | 解なし |
 |---|---|---|---|---|---|
-| base | 0 | 60.00 | 58.000 | 60.00 | 58 |
-| l | 0 | 60.00 | 58.000 | 60.00 | 58 |
+| base | 41 | 20.94 | 2.240 | 1.61 | 2 |
+| l | 40 | 20.74 | 1.295 | 1.54 | 1 |
 
-l: 基準で解けず→解けた []、解けた→解けず []
+l: 基準で解けず→解けた []、解けた→解けず ['neos-860300']
 時間の差が大きい問題 (どちらかが解いて、比 1.5 倍以上):
+  blend2: base 1.1 / l 0.7
+  drayage-25-23: base 11.6 / l 22.5
+  misc07: base 27.8 / l 18.5
+  neos-3083819-nubu: base 16.7 / l 27.2
+  neos-860300: base 39.5 / l 60.0
+  neos-911970: base 22.8 / l 13.0
+  noswot: base 57.0 / l 25.0
 どちらも解けず、目的値が違う問題 (基準 / 設定):
+  assign1-5-8: 211.99999999999994 / 212.00000000000034
+  bppc4-08: 53.99999999999999 / 54.00000000000004
+  cvs16r128-89: -87.0 / -88.0
+  eil33-2: 974.6631 / 987.674133
+  gen-ip002: -4769.0585709 / -4783.7333916
+  gen-ip054: 6850.744023829 / 6840.9656417920005
+  mas74: 11801.185729000008 / 11891.263050799998
+  mzzv42z: -20480.0 / -20440.0
+  physiciansched6-2: None / 49424.0
+  ran14x18-disj-8: 3741.9999997269447 / 3747.9999999991073
+  supportcase26: 1806.4799864381923 / 1857.4345068819
+  timtab1: 764771.99999978 / 778241.9999997804
 
-最適値の食い違い・異常終了: [('drayage-100-23', 'base', None), ('drayage-100-23', 'l', None), ('drayage-25-23', 'base', None), ('drayage-25-23', 'l', None), ('exp-1-500-5-5', 'base', None), ('exp-1-500-5-5', 'l', None), ('h80x6320d', 'base', None), ('h80x6320d', 'l', None), ('hypothyroid-k1', 'base', None), ('hypothyroid-k1', 'l', None), ('mc11', 'base', None), ('mc11', 'l', None), ('mzzv42z', 'base', None), ('mzzv42z', 'l', None), ('neos-3083819-nubu', 'base', None), ('neos-3083819-nubu', 'l', None), ('neos-827175', 'base', None), ('neos-827175', 'l', None), ('neos-860300', 'base', None), ('neos-860300', 'l', None), ('neos-911970', 'base', None), ('neos-911970', 'l', None), ('neos-960392', 'base', None), ('neos-960392', 'l', None), ('neos17', 'base', None), ('neos17', 'l', None), ('neos8', 'base', None), ('neos8', 'l', None), ('ns1116954', 'base', None), ('ns1116954', 'l', None), ('nu25-pr12', 'base', None), ('nu25-pr12', 'l', None), ('p200x1188c', 'base', None), ('p200x1188c', 'l', None), ('physiciansched6-2', 'base', None), ('physiciansched6-2', 'l', None), ('roll3000', 'base', None), ('roll3000', 'l', None), ('sp150x300d', 'base', None), ('sp150x300d', 'l', None), ('swath1', 'base', None), ('swath1', 'l', None), ('gen-ip002', 'base', None), ('gen-ip002', 'l', None), ('gen-ip054', 'base', None), ('gen-ip054', 'l', None), ('pk1', 'base', None), ('pk1', 'l', None), ('gr4x6', 'base', None), ('gr4x6', 'l', None), ('markshare_4_0', 'base', None), ('markshare_4_0', 'l', None), ('mas74', 'base', None), ('mas74', 'l', None), ('mas76', 'base', None), ('mas76', 'l', None), ('neos5', 'base', None), ('neos5', 'l', None), ('p0201', 'base', None), ('p0201', 'l', None), ('misc07', 'base', None), ('misc07', 'l', None), ('flugpl', 'base', None), ('flugpl', 'l', None), ('dcmulti', 'base', None), ('dcmulti', 'l', None), ('gt2', 'base', None), ('gt2', 'l', None), ('khb05250', 'base', None), ('khb05250', 'l', None), ('qnet1', 'base', None), ('qnet1', 'l', None), ('rout', 'base', None), ('rout', 'l', None), ('10teams', 'base', None), ('10teams', 'l', None), ('air03', 'base', None), ('air03', 'l', None), ('blend2', 'base', None), ('blend2', 'l', None), ('fiber', 'base', None), ('fiber', 'l', None), ('noswot', 'base', None), ('noswot', 'l', None), ('qiu', 'base', None), ('qiu', 'l', None), ('30n20b8', 'base', None), ('30n20b8', 'l', None), ('binkar10_1', 'base', None), ('binkar10_1', 'l', None), ('eil33-2', 'base', None), ('eil33-2', 'l', None), ('nw04', 'base', None), ('nw04', 'l', None), ('assign1-5-8', 'base', None), ('assign1-5-8', 'l', None), ('beavma', 'base', None), ('beavma', 'l', None), ('blp-ar98', 'base', None), ('blp-ar98', 'l', None), ('ran14x18-disj-8', 'base', None), ('ran14x18-disj-8', 'l', None), ('supportcase26', 'base', None), ('supportcase26', 'l', None), ('timtab1', 'base', None), ('timtab1', 'l', None), ('bppc4-08', 'base', None), ('bppc4-08', 'l', None), ('cvs16r128-89', 'base', None), ('cvs16r128-89', 'l', None), ('mik-250-20-75-4', 'base', None), ('mik-250-20-75-4', 'l', None), ('neos-1456979', 'base', None), ('neos-1456979', 'l', None), ('graph20-20-1rand', 'base', None), ('graph20-20-1rand', 'l', None)]
+最適値の食い違い・異常終了: []
