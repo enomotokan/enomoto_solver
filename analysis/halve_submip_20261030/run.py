@@ -132,6 +132,11 @@ CFGS = {
     # 2026-11-05: MEMB の q (DSE 重みの 8 ビット丸め) が n2seq36q を遅くするので、q を外した形を比べる
     "membrch": {"ENOMOTO_MIP_MEMB": "rch"},
     "membrc": {"ENOMOTO_MIP_MEMB": "rc"},
+    # bench26 (2026-11-05): 探索の脆弱性の試作 (analysis/fragility_20261105.md)
+    "rob5": {"ENOMOTO_MIP_ROBUST_ROOTIPM": "1", "ENOMOTO_MIP_ROBUST_STALL": "rw", "ENOMOTO_MIP_ROBUST_LNSFREQ": "1", "ENOMOTO_MIP_ROBUST_IMPORT": "1", "ENOMOTO_MIP_MEMBQ_LNSGROW": "1"},
+    "rootipm": {"ENOMOTO_MIP_ROBUST_ROOTIPM": "1"},
+    "stallrw": {"ENOMOTO_MIP_ROBUST_STALL": "rw"},
+    "lnsx": {"ENOMOTO_MIP_ROBUST_LNSFREQ": "1", "ENOMOTO_MIP_ROBUST_IMPORT": "1", "ENOMOTO_MIP_MEMBQ_LNSGROW": "1"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
