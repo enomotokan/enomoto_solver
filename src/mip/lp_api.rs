@@ -48,6 +48,11 @@ pub trait MipLp: Clone + Send {
     fn solve_rescue(&mut self, _lim: &SolveLimits) -> LpStatus {
         LpStatus::Error
     }
+    /// 試作 `ENOMOTO_MIP_ROOTLP_BOTH`: 根の LP の同時実行の負けた側の LP ([`crate::simplex::mip_lp::BothLoser`]) をこの LP に
+    /// 置き換える。対応しない実装は `false`。
+    fn adopt_two_stage(&mut self, _lp: TwoStageLp) -> bool {
+        false
+    }
     fn objective(&self) -> f64;
     fn col_values(&self) -> Vec<f64>;
     fn col_value(&self, j: usize) -> f64;
@@ -170,6 +175,10 @@ forward_impl!(
     },
     fn solve_rescue(&mut self, lim: &SolveLimits) -> LpStatus {
         TwoStageLp::solve_ipm_rescue(self, lim)
+    },
+    fn adopt_two_stage(&mut self, lp: TwoStageLp) -> bool {
+        *self = lp;
+        true
     },
     fn set_basis_cols(&mut self, b: &[usize], x: Option<&[f64]>) {
         TwoStageLp::set_basis_cols(self, b, x)

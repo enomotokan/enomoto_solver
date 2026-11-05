@@ -4542,6 +4542,139 @@ impl<'a, L: MipLp> Solver<'a, L> {
         false
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOTLP_BOTH`: 根の LP の同時実行の負けた側 `l` の結果を (止める時刻まで) 待ち、届いた 2 つ目の最適頂点を使う。
+    /// (1) 頂点を丸めて暫定解を探す ([`Self::simple_rounding`])。(2) 今の LP (カット入り) の基底を 2 つ目の頂点の基底 (カットの行は
+    /// スラックを基底) にして解き直し、同じ LP の別の頂点に移る。今の頂点と 2 つ目の頂点からそれぞれ副作用のない比べ
+    /// ([`Self::probe_cut_mode`]、`ENOMOTO_T_MIP_ROOTLP_BOTH_ROUNDS` (既定 3) ラウンド) を回し、2 つ目の頂点の伸びが今の頂点の伸びの
+    /// `ENOMOTO_T_MIP_ROOTLP_BOTH_GAIN` (既定 1.2) 倍を超えるときだけ、2 つ目の頂点から根のカットのループをもう 1 回回す。
+    /// 超えなければ今の LP に戻す。カットのループが失敗したら `false`。
+    fn root_both_vertex(&mut self, l: crate::simplex::mip_lp::BothLoser, x_root0: &[f64], root_basis0: Option<&[usize]>, root_obj: f64, root_iters: u64, root_cut_secs: &mut f64, pre: bool) -> bool {
+        let kind = l.kind;
+        let t_wait = Instant::now();
+        let far = Instant::now() + std::time::Duration::from_secs(86400);
+        let got = l.wait(self.deadline.map_or(far, |d| d.min(far)));
+        let waited = t_wait.elapsed().as_secs_f64();
+        let Some((lp_b, secs)) = got else {
+            if self.params.verbose {
+                eprintln!("MIP: root LP both: no second vertex from the {kind} side (waited {waited:.2}s)");
+            }
+            return true;
+        };
+        let x_b = lp_b.col_values();
+        let n = self.p.n;
+        let diff = (0..n.min(x_b.len()).min(x_root0.len())).filter(|&j| (x_b[j] - x_root0[j]).abs() > 1e-7 * (1.0 + x_root0[j].abs())).count();
+        let nfrac_b = self.fractional(&x_b).len();
+        // 値が同じでも基底が違えば (退化)、tableau のカットなどは変わる。基底の違いは根の LP の基底 (`root_basis0`) と比べる
+        let set = |v: &[usize]| -> std::collections::HashSet<usize> { v.iter().copied().collect() };
+        let bdiff = match (lp_b.basis_cols(), root_basis0) {
+            (Some(b), Some(b0)) => set(&b).difference(&set(b0)).count(),
+            _ => usize::MAX,
+        };
+        if self.params.verbose {
+            eprintln!(
+                "MIP: root LP both: second vertex from the {kind} side at {secs:.2}s (waited {waited:.2}s): obj {:.10e}, {diff} of {n} columns differ, {bdiff} basic variables differ, {nfrac_b} fractional",
+                lp_b.objective() + self.p.offset
+            );
+        }
+        if diff == 0 && bdiff == 0 {
+            return true;
+        }
+        if nfrac_b > 0 {
+            self.simple_rounding(&x_b);
+        }
+        if nfrac_b == 0 || self.time_up() {
+            return true;
+        }
+        // 2 つ目の頂点の基底を今の LP (行 0..m0 は同じ、カットの行は後ろ) に移す
+        let m0 = lp_b.num_rows();
+        let Some(bcols) = lp_b.basis_cols() else { return true };
+        if m0 != self.p.m || self.lp.num_rows() < m0 || bcols.len() != m0 {
+            if self.params.verbose {
+                eprintln!("MIP: root LP both: the rows changed ({m0} -> {}); second vertex not used for cuts", self.lp.num_rows());
+            }
+            return true;
+        }
+        let mut alt = self.lp.clone();
+        let mut b = bcols;
+        b.extend((m0..alt.num_rows()).map(|i| n + i));
+        alt.set_basis_cols(&b, Some(&x_b));
+        let t1 = Instant::now();
+        let it0 = alt.total_iterations();
+        let st = alt.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        let obj_a = self.lp.objective();
+        let ok = st == LpStatus::Optimal && (alt.objective() - obj_a).abs() <= 1e-7 * obj_a.abs().max(1.0);
+        let x_alt = alt.col_values();
+        let nfrac = if ok { self.fractional(&x_alt).len() } else { 0 };
+        let diff2 = (0..n).filter(|&j| (x_alt[j] - self.lp.col_value(j)).abs() > 1e-7 * (1.0 + x_alt[j].abs())).count();
+        let bdiff2 = match (alt.basis_cols(), self.lp.basis_cols()) {
+            (Some(b), Some(b0)) => set(&b).difference(&set(&b0)).count(),
+            _ => usize::MAX,
+        };
+        if self.params.verbose {
+            eprintln!(
+                "MIP: root LP both: current LP re-solved from the second vertex: {st:?}, obj {:.10e} (current {:.10e}), {} iters, {diff2} columns and {bdiff2} basic variables differ, {nfrac} fractional ({:.2}s)",
+                alt.objective() + self.p.offset,
+                obj_a + self.p.offset,
+                alt.total_iterations() - it0,
+                t1.elapsed().as_secs_f64()
+            );
+        }
+        if !ok || nfrac == 0 || (diff2 == 0 && bdiff2 == 0) {
+            return true;
+        }
+        let post = obj_a + self.p.offset;
+        let flat = post - root_obj <= 1e-6 * root_obj.abs().max(1.0);
+        let k = tunable!("ENOMOTO_T_MIP_ROOTLP_BOTH_ROUNDS", 3usize, usize).max(1);
+        let base_secs = if pre { 2.0 * self.root_lp_secs } else { 0.5 * *root_cut_secs };
+        let cap = base_secs.clamp(0.2, tunable!("ENOMOTO_T_MIP_ROOTLP_BOTH_SECS", 3.0, f64).max(0.2));
+        let flat = flat && !pre;
+        // 今の頂点の伸び (根のカットのループが目的値を動かせなかったなら 0 とみなして比べない)
+        let gain_a = if flat {
+            0.0
+        } else {
+            let dl = Instant::now() + std::time::Duration::from_secs_f64(cap);
+            let (hist, _, _) = self.probe_cut_mode(false, k, dl, &|_, _, _| false, false);
+            hist.last().map_or(0.0, |h| h.0)
+        };
+        let iters_keep = self.lp.total_iterations();
+        let keep_lp = std::mem::replace(&mut self.lp, alt);
+        self.lp.set_total_iterations(iters_keep);
+        let t2 = Instant::now();
+        let dl = Instant::now() + std::time::Duration::from_secs_f64(cap);
+        let (hist, nadd, _) = self.probe_cut_mode(false, k, dl, &|_, _, _| false, false);
+        let gain_b = hist.last().map_or(0.0, |h| h.0);
+        let eps = 1e-6 * post.abs().max(1.0);
+        let good = gain_b > eps && gain_b > tunable!("ENOMOTO_T_MIP_ROOTLP_BOTH_GAIN", 1.2, f64) * gain_a + eps;
+        if self.params.verbose {
+            eprintln!(
+                "MIP: root LP both: probe gain at the current vertex {gain_a:.6e}{}, at the second vertex {gain_b:.6e} ({} rounds, {nadd} cuts, {:.2}s) -> {}",
+                if flat { " (flat cut loop)" } else { "" },
+                hist.len(),
+                t2.elapsed().as_secs_f64(),
+                match (good, pre) {
+                    (true, true) => "cut loop from the second vertex",
+                    (true, false) => "second cut loop",
+                    _ => "back to the first vertex",
+                }
+            );
+        }
+        if !good {
+            self.lp = keep_lp;
+            return true;
+        }
+        if pre {
+            // 2 つ目の頂点から既定の根のカットのループを始める
+            return true;
+        }
+        let t3 = Instant::now();
+        let ok = self.root_cut_loop(root_iters);
+        *root_cut_secs += t3.elapsed().as_secs_f64();
+        if self.params.verbose {
+            eprintln!("MIP: root LP both: second cut loop {}, obj {:.10e} ({:.2}s)", if ok { "done" } else { "failed" }, self.lp.objective() + self.p.offset, t3.elapsed().as_secs_f64());
+        }
+        ok
+    }
+
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || self.heur_stop.is_some_and(|d| Instant::now() >= d)
@@ -6225,7 +6358,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return self.finish(MipStatus::NotSolved, f64::NEG_INFINITY);
         }
         let root_it0 = self.lp.total_iterations();
+        // 試作 `ENOMOTO_MIP_ROOTLP_BOTH` (既定では使わない、analysis/rootlp_both_20261105.md): 主の最初の根の LP の同時実行で、
+        // 勝った側の後も負けた側を裏で続け (勝った側の時間の `ENOMOTO_T_MIP_ROOTLP_BOTH_RATIO` 倍 (既定 1)、多くとも
+        // `ENOMOTO_T_MIP_ROOTLP_BOTH_SECS` (既定 3) 秒と時間の上限の 5% の小さい方、少なくとも `..._MIN` (既定 0.05) 秒)、
+        // 根のカットのループの後で、届いた 2 つ目の最適頂点から分離を試す (下の `both_loser` の使い方)
+        let both_on = env_str!("ENOMOTO_MIP_ROOTLP_BOTH").is_some() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0;
+        if both_on {
+            let tl = if self.params.time_limit.is_finite() { 0.05 * self.params.time_limit } else { f64::INFINITY };
+            crate::simplex::mip_lp::request_both(
+                tunable!("ENOMOTO_T_MIP_ROOTLP_BOTH_RATIO", 1.0, f64),
+                tunable!("ENOMOTO_T_MIP_ROOTLP_BOTH_SECS", 3.0, f64).min(tl),
+                tunable!("ENOMOTO_T_MIP_ROOTLP_BOTH_MIN", 0.05, f64),
+            );
+        }
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        let mut both_loser = if both_on { crate::simplex::mip_lp::take_both_loser() } else { None };
+        if self.params.verbose {
+            if let Some(l) = &both_loser {
+                eprintln!("MIP: root LP both: the {} side lost at {:.2}s and continues in the background (until +{:.2}s)", l.kind, l.win_secs, l.give_up.saturating_duration_since(Instant::now()).as_secs_f64());
+            }
+        }
         if let Some(k) = root_kind {
             use std::sync::atomic::Ordering::Relaxed;
             BASIS_NB_ROOT[3 * k].fetch_add(1, Relaxed);
@@ -6361,6 +6513,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // カットを加える前の根の LP 解 (RENS の 2 つ目の近傍に使う)
         let x_root0 = self.lp.col_values();
+        // 試作 `ENOMOTO_MIP_ROOTLP_BOTH`: 2 つ目の頂点と比べる根の LP の基底
+        let root_basis0 = if both_loser.is_some() { self.lp.basis_cols() } else { None };
         // `ENOMOTO_MIP_EARLY_RENS` (試作): 暫定解がない (か質の悪い FJ の解だけの) とき、暫定解なし用のダイビング式 RENS を
         // カットのループの前に (カット前の LP 解で、同じスレッドで) 回す。hypothyroid-k1 ではこの RENS のサブ MIP が
         // 0.2 秒で最適値 -2851 を見つけるが、既定ではカットのループ (6.7 秒) と根のヒューリスティクスの後になる
@@ -6406,6 +6560,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if root_warm_dse {
                     crate::simplex::slope_intercept_dual::WARM_DSE_ON.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
+                // 試作 `ENOMOTO_MIP_ROOTLP_BOTH` (値に `p` を含まなければ): 根のカットのループの前に、負けた側の頂点を待って
+                // (止める時刻まで)、両方の頂点からの比べで伸びる方の頂点からループを始める
+                if both_loser.is_some() && !env_str!("ENOMOTO_MIP_ROOTLP_BOTH").is_some_and(|v| v.contains('p')) && !self.time_up() {
+                    let l = both_loser.take().unwrap();
+                    self.root_both_vertex(l, &x_root0, root_basis0.as_deref(), root_obj, root_iters, &mut root_cut_secs, true);
+                }
                 let t_cut = Instant::now();
                 let cut_ok = env_str!("ENOMOTO_MIP_NO_CUTS").is_some() || self.root_cut_loop(root_iters);
                 root_cut_secs = t_cut.elapsed().as_secs_f64();
@@ -6417,6 +6577,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.join_fj_thread();
                     let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                     return self.finish(st, root_obj);
+                }
+                if let Some(l) = both_loser.take().filter(|_| !self.time_up()) {
+                    if !self.root_both_vertex(l, &x_root0, root_basis0.as_deref(), root_obj, root_iters, &mut root_cut_secs, false) {
+                        self.join_fj_thread();
+                        let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
+                        return self.finish(st, root_obj);
+                    }
                 }
                 // 試作 `ENOMOTO_MIP_ROBUST_ROOTIPM` (既定では使わない、analysis/fragility_20261105/neos859080.md): 外側の最初の根のカットの
                 // ループが目的値をまったく上げられなかったら (目的値が整数刻みの問題だけ。値に `a` を含めば刻みによらず)、カットを入れた

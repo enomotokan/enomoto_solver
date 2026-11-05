@@ -118,6 +118,78 @@ thread_local! {
     static COLD_RACE_THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
 }
 
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_ROOTLP_BOTH`: 次の基底のない同時実行 1 回だけ、負けた側を止めずに続ける ((待ちの比 k, 待ちの絶対の上限 (秒), 待ちの下限 (秒)))
+    static BOTH_REQ: std::cell::Cell<Option<(f64, f64, f64)>> = const { std::cell::Cell::new(None) };
+    /// 同じく、続けている負けた側 ([`TwoStageLp::solve_race_both`] が置き、[`take_both_loser`] で取り出す)
+    static BOTH_LOSER: std::cell::RefCell<Option<BothLoser>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 試作 `ENOMOTO_MIP_ROOTLP_BOTH`: このスレッドの次の基底のない同時実行 1 回だけ、勝った側の後も負けた側を止めずに続ける。
+/// 負けた側は勝った側の時間の `ratio` 倍 (少なくとも `min_secs`、多くとも `max_secs`) まで続け、それを過ぎたら止める。
+pub(crate) fn request_both(ratio: f64, max_secs: f64, min_secs: f64) {
+    BOTH_REQ.with(|c| c.set(Some((ratio, max_secs, min_secs))));
+    BOTH_LOSER.with(|c| *c.borrow_mut() = None);
+}
+
+/// [`request_both`] の取り消し (同時実行が起きなかったときの残りも消す) と、続けている負けた側の取り出し。
+pub(crate) fn take_both_loser() -> Option<BothLoser> {
+    BOTH_REQ.with(|c| c.set(None));
+    BOTH_LOSER.with(|c| c.borrow_mut().take())
+}
+
+type RaceWon = (Vec<f64>, Option<(Vec<f64>, Vec<Option<usize>>)>);
+
+enum BothMsg {
+    /// 内点法 + クロスオーバーの最適な頂点 (標準形の空間) と仕上げの記録。得られなければ `None`
+    Ipm(Option<RaceWon>),
+    /// 二段解法で解いた LP の写し
+    Simplex(LpStatus, Box<TwoStageLp>, u8),
+}
+
+/// 試作 `ENOMOTO_MIP_ROOTLP_BOTH`: 根の LP の同時実行で負けた側 (裏で続いている)。落とすと止める。
+pub struct BothLoser {
+    /// 負けた側 ("ipm" または "simplex")
+    pub kind: &'static str,
+    rx: std::sync::mpsc::Receiver<BothMsg>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// 内点法側の頂点を当てはめる元の LP (基底のない写し)
+    base: Option<Box<TwoStageLp>>,
+    lim: SolveLimits,
+    /// 勝った側の時間 (同時実行の始めから)
+    pub win_secs: f64,
+    /// 負けた側を止める時刻
+    pub give_up: std::time::Instant,
+    t0: std::time::Instant,
+}
+
+impl Drop for BothLoser {
+    fn drop(&mut self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl BothLoser {
+    /// 負けた側の結果を `until` (と止める時刻の早い方) まで待つ。最適に解けていれば、その頂点を基底解にした LP と、
+    /// 同時実行の始めから届くまでの時間を返す。待ちきれない・解けなかったら `None` (負けた側は止める)。
+    pub fn wait(mut self, until: std::time::Instant) -> Option<(TwoStageLp, f64)> {
+        let end = until.min(self.give_up);
+        let msg = self.rx.recv_timeout(end.saturating_duration_since(std::time::Instant::now())).ok();
+        self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        let secs = self.t0.elapsed().as_secs_f64();
+        match msg? {
+            BothMsg::Simplex(st, lp, _) => (st == LpStatus::Optimal).then(|| (*lp, secs)),
+            BothMsg::Ipm(w) => {
+                let (x, duals) = w?;
+                let mut lp = self.base.take()?;
+                let st = lp.adopt_ipm_vertex(&x, duals, &self.lim, false, self.t0);
+                lp.status = Some(st);
+                (st == LpStatus::Optimal).then(|| (*lp, secs))
+            }
+        }
+    }
+}
+
 /// このスレッドの基底のない求解の同時実行のスレッド数を設定し、前の値を返す ([`crate::mip::solve_mip`] が入口で
 /// `threads` に、木の探索の従のスレッドを始めるときに 1 にする)。
 pub(crate) fn set_cold_race_threads(k: usize) -> usize {
@@ -982,6 +1054,9 @@ impl TwoStageLp {
                         return self.solve_race_ext(lim, k, true);
                     }
                 }
+                if let Some(cfg) = BOTH_REQ.with(|c| c.take()) {
+                    return self.solve_race_both(lim, k, cfg);
+                }
                 return self.solve_race(lim, k);
             }
         }
@@ -1218,6 +1293,134 @@ impl TwoStageLp {
             lp_i.status = Some(st);
         }
         BothDiag { lp_s, st_s, t_simplex, lp_i, st_i, t_ipm, t_xo, t_adopt }
+    }
+
+    /// 試作 `ENOMOTO_MIP_ROOTLP_BOTH` の同時実行 ([`request_both`])。[`Self::solve_race_ext`] と同じく二段解法 (1 スレッド) と
+    /// 内点法 + クロスオーバー (`threads - 1` スレッド) で解くが、二段解法もこの LP の写しで別のスレッドに解かせ、先に最適で
+    /// 終わった側を採った後、負けた側を止めずに続ける ([`BothLoser`]、[`take_both_loser`] で取り出す)。負けた側は勝った側の時間の
+    /// `ratio` 倍 (`min_secs` 以上 `max_secs` 以下) の後に見張りのスレッドが止める。
+    fn solve_race_both(&mut self, lim: &SolveLimits, threads: usize, cfg: (f64, f64, f64)) -> LpStatus {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        let build = |k: usize, name: &'static str| rayon::ThreadPoolBuilder::new().num_threads(k).thread_name(move |i| format!("enomoto-mip-{name}-{i}")).build();
+        let (Ok(pool_s), Ok(pool)) = (build(1, "simplex"), build(threads - 1, "ipm")) else {
+            return self.solve_once(lim);
+        };
+        let debug = env_str!("ENOMOTO_DEBUG_RACE").is_some();
+        let t0 = std::time::Instant::now();
+        let cancel_i = Arc::new(AtomicBool::new(false));
+        let cancel_s = Arc::new(AtomicBool::new(false));
+        let bound = crate::cancel::SharedBound::new(self.std.n_total, self.std.n_rows);
+        let (tx, rx) = mpsc::channel::<BothMsg>();
+        let base = Box::new(self.clone());
+        {
+            let (std, cancel, bound, tx) = (Arc::new(self.std.clone()), cancel_i.clone(), bound.clone(), tx.clone());
+            let deadline = lim.deadline;
+            std::thread::spawn(move || {
+                let r = pool.install(|| {
+                    sid::request_duals(true);
+                    let r = crate::cancel::with_deadline(deadline, || {
+                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || super::crossover::solve_ipm_crossover(&std)))
+                    });
+                    let duals = sid::take_duals();
+                    sid::request_duals(false);
+                    r.filter(|r| r.status == Status::Optimal).and_then(|r| r.x).map(|x| (x, duals))
+                });
+                let _ = tx.send(BothMsg::Ipm(if cancel.load(Ordering::SeqCst) { None } else { r }));
+            });
+        }
+        {
+            let (mut lp, cancel, bound, tx, lim) = (Box::new(self.clone()), cancel_s.clone(), bound, tx, *lim);
+            let flags = sid::tl_flags();
+            std::thread::Builder::new()
+                .stack_size(64 << 20)
+                .spawn(move || {
+                    let (st, flags) = pool_s.install(|| {
+                        sid::set_tl_flags(flags);
+                        let st = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || lp.solve_once(&lim)));
+                        (st, sid::tl_flags())
+                    });
+                    let _ = tx.send(BothMsg::Simplex(st, lp, flags));
+                })
+                .expect("spawn");
+        }
+        let recv = |rx: &mpsc::Receiver<BothMsg>| match lim.deadline {
+            Some(d) => rx.recv_timeout(d.saturating_duration_since(std::time::Instant::now())).ok(),
+            None => rx.recv().ok(),
+        };
+        let mut ipm_failed = false;
+        let mut simplex_failed: Option<LpStatus> = None;
+        loop {
+            let Some(msg) = recv(&rx) else {
+                cancel_i.store(true, Ordering::SeqCst);
+                cancel_s.store(true, Ordering::SeqCst);
+                return LpStatus::TimeLimit;
+            };
+            let win_secs = t0.elapsed().as_secs_f64();
+            let (ratio, max_secs, min_secs) = cfg;
+            let wait = (ratio * win_secs).max(min_secs).min(max_secs);
+            let give_up = std::time::Instant::now() + std::time::Duration::from_secs_f64(wait);
+            match msg {
+                BothMsg::Simplex(st, lp, flags) => {
+                    let conclusive = matches!(st, LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded | LpStatus::ObjectiveBound | LpStatus::TimeLimit);
+                    if !conclusive {
+                        if ipm_failed {
+                            return st;
+                        }
+                        simplex_failed = Some(st);
+                        if debug {
+                            eprintln!("MIP root race (both): simplex ended without a conclusion at {win_secs:.3}s ({st:?}), waiting for ipm_crossover");
+                        }
+                        continue;
+                    }
+                    *self = *lp;
+                    sid::set_tl_flags(flags);
+                    if debug {
+                        eprintln!("MIP root race (both): simplex won at {win_secs:.3}s ({st:?}); ipm_crossover continues for up to {wait:.3}s");
+                    }
+                    crate::phase_timing::mark("race_simplex_won");
+                    user_log!("Root LP: the two-phase method finished first ({:.2}s)", win_secs);
+                    if st == LpStatus::Optimal && !ipm_failed {
+                        let c = cancel_i.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_secs_f64(wait));
+                            c.store(true, Ordering::SeqCst);
+                        });
+                        BOTH_LOSER.with(|b| *b.borrow_mut() = Some(BothLoser { kind: "ipm", rx, cancel: cancel_i, base: Some(base), lim: *lim, win_secs, give_up, t0 }));
+                    } else {
+                        cancel_i.store(true, Ordering::SeqCst);
+                    }
+                    return st;
+                }
+                BothMsg::Ipm(None) => {
+                    ipm_failed = true;
+                    if let Some(st) = simplex_failed {
+                        return st;
+                    }
+                    continue;
+                }
+                BothMsg::Ipm(Some((x, duals))) => {
+                    crate::phase_timing::mark("race_ipm_crossover_won");
+                    user_log!("Root LP: the interior-point method + crossover finished first ({:.2}s)", win_secs);
+                    let st = self.adopt_ipm_vertex(&x, duals, lim, debug, t0);
+                    if debug {
+                        eprintln!("MIP root race (both): ipm_crossover won at {win_secs:.3}s ({st:?}); simplex continues for up to {wait:.3}s");
+                    }
+                    if st == LpStatus::Optimal && simplex_failed.is_none() {
+                        let c = cancel_s.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_secs_f64(wait));
+                            c.store(true, Ordering::SeqCst);
+                        });
+                        BOTH_LOSER.with(|b| *b.borrow_mut() = Some(BothLoser { kind: "simplex", rx, cancel: cancel_s, base: None, lim: *lim, win_secs, give_up, t0 }));
+                    } else {
+                        cancel_s.store(true, Ordering::SeqCst);
+                    }
+                    self.status = Some(st);
+                    return st;
+                }
+            }
+        }
     }
 
     /// 内点法 + クロスオーバーで単独に解き (このスレッドで、期限は `lim.deadline`)、得られた最適な頂点をこの LP の解として採る
