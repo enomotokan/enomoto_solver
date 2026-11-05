@@ -5475,6 +5475,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 診断 `ENOMOTO_MIP_ROOTLP_BOTH_DIAG` の本体 (上の根の LP の場所から呼ぶ)。
     fn rootlp_both_diag(&mut self) {
+        // 診断 `ENOMOTO_MIP_ROOTLP_DUMP=ファイル` (analysis/rootlp_ipm_fail_20261105.md): この根の LP (整数性なし、境界は `dom.global_lo/up`) を
+        // MPS に書き出す (HiGHS などで同じ LP を解いて比べるため)
+        if let Some(f) = env_str!("ENOMOTO_MIP_ROOTLP_DUMP") {
+            let mut q = self.p.clone();
+            q.col_lo.clone_from(&self.dom.global_lo);
+            q.col_up.clone_from(&self.dom.global_up);
+            q.is_int.iter_mut().for_each(|b| *b = false);
+            super::dump_mps(&q, &f);
+        }
         let lp0 = crate::simplex::mip_lp::TwoStageLp::new(&self.dom.global_lo, &self.dom.global_up, &self.p.cost, &self.p.rows, &self.p.row_lo, &self.p.row_up);
         let main_cold = !self.lp.basis_cols().is_some_and(|b| b.len() == self.lp.num_rows());
         let threads = self.params.threads.max(2);

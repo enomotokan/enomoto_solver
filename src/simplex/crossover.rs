@@ -778,7 +778,8 @@ fn load_point(f: &str, n: usize, m: usize) -> Option<(Vec<f64>, Vec<f64>)> {
 /// `ENOMOTO_T_WARM_NB_TOL` 以内の列は費用を少しずらして頂点の側に置く (分枝限定法の LP と同じ仕組み)。
 /// `which` は 1 = 頂点の修復、2 = 仕上げ (`ENOMOTO_T_XO_CLEANUP_HINT` のビット)。
 fn set_cleanup_hint(nb_status: &[Option<NbStatus>], which: u8) {
-    if tunable!("ENOMOTO_T_XO_CLEANUP_HINT", 1u8, u8) & which == 0 {
+    // `which == 0` は設定によらず渡す ([`solve_ipm_crossover_with`] の試作 `ENOMOTO_XO_MIP_CLEANUP_HINT`)。
+    if which != 0 && tunable!("ENOMOTO_T_XO_CLEANUP_HINT", 1u8, u8) & which == 0 {
         return;
     }
     let hint: Vec<i8> = nb_status
@@ -831,6 +832,10 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // (`ENOMOTO_T_XO_BOUND_GAP`、既定 1e-6 は第 11 回の比較で決めた。0 で使わない)。
     // 費用をずらしたとき (`ENOMOTO_T_IPM_COST_PERTURB`) は元の費用の下界と比べられないので使わない。
     let bound_gap = if cost_perturb > 0.0 { 0.0 } else { tunable!("ENOMOTO_T_XO_BOUND_GAP", 1e-6f64, f64) };
+    // 試作 `ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST=1` (既定では使わない。analysis/rootlp_ipm_fail_20261105.md): 費用がすべて 0 の問題では
+    // 共有の下界で内点法を止めない。目的値と下界がどちらも 0 で差が常に 0 になり、主残差が許容の 1e4 倍以内に入った途端に止まる
+    // (cryptanalysiskb128n5obj16 の根の LP: 4 反復目、主残差が許容の 728 倍で止まり、頂点の主実行不能 16,419、仕上げ 9 万反復超)。
+    let bound_gap = if bound_gap > 0.0 && env_str!("ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST").is_some_and(|v| v != "0") && c_j.iter().all(|&v| v == 0.0) { 0.0 } else { bound_gap };
     let shared = crate::cancel::bound().filter(|sb| bound_gap > 0.0 && sb.n_total == std.n_total && sb.n_rows == std.n_rows);
     let fixed_obj: f64 = (0..std.n_total).filter(|&j| !(std.lb[j] < std.ub[j])).map(|j| std.c[j] * std.lb[j]).sum();
     let lb_fn = move || shared.as_ref().map_or(f64::NEG_INFINITY, |sb| sb.get() - fixed_obj);
@@ -847,7 +852,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let ipm_pc = if a_j.compute_nnz() >= pc_min_nnz { pc_setting } else { 0 };
     let pc = (ipm_pc != 0 && xo.given_point.is_none()).then(|| ipm_prescaled(&a_j, &b_j, &c_j, &l_j, &u_j, ipm_pc));
     crate::phase_timing::mark("xo_ipm_start");
-    let ipm = if let Some((gx, gy, _)) = xo.given_point {
+    let mut ipm = if let Some((gx, gy, _)) = xo.given_point {
         BoxIpmResult {
             status: Status::Optimal,
             x: free_cols.iter().map(|&j| gx[j]).collect(),
@@ -933,6 +938,42 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             solve_box_lp_warm(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters, Some(&warm))
         }
     };
+    // 試作 `ENOMOTO_XO_IPM_RETRY_PC=k` (既定 0 = しない。analysis/rootlp_ipm_fail_20261105.md): そろえずに解いた内点法が受理できる点に
+    // 達しなければ、行・列をそろえた問題 ([`ipm_prescaled`] の `mode` = k) で一度だけ解き直す。mas74 (MIP の根の LP) は上限 6.4e6 の
+    // 列があり、そろえない内点法は相補性 1e-60 でもギャップ 0.25 のまま 172 反復で破綻したが、k = 2・3 なら数ミリ秒で収束した。
+    let retry_pc = if xo.given_point.is_none() && pc.is_none() && pdlp_mode == 0 && cost_perturb == 0.0 { tunable!("ENOMOTO_XO_IPM_RETRY_PC", 0u8, u8) } else { 0 };
+    if retry_pc != 0 && !crate::cancel::is_cancelled() && !(xo.dual_feasible_known && ipm.status == Status::Infeasible) {
+        let acc_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP_REL", prm::IPM_ACCEPT_GAP_REL, f64);
+        let ok = ipm.rel_res.0.max(ipm.rel_res.1) <= prm::IPM_ACCEPT_REL && ipm.rel_res.2 <= acc_gap;
+        if ipm.status != Status::Optimal && !(ipm.status == Status::NotSolved && ok) {
+            if debug {
+                eprintln!("CROSSOVER ipm status={:?} iters={} rel_res={:?}; retrying with prescaling mode {retry_pc}", ipm.status, ipm.iters, ipm.rel_res);
+            }
+            crate::phase_timing::mark("xo_ipm_retry_pc");
+            let (a_s, b_s, c_s, l_s, u_s, dr, dc) = ipm_prescaled(&a_j, &b_j, &c_j, &l_j, &u_j, retry_pc);
+            let yc: Option<Vec<f64>> = xo.dual_center.map(|y| y.iter().zip(&dr).map(|(v, d)| v / d).collect());
+            let warm = WarmStart {
+                y: yc.as_deref(),
+                dual_feasible_known: xo.dual_feasible_known,
+                lower_bound: if bound_gap > 0.0 { Some(&lb_fn) } else { None },
+                bound_gap,
+                bound_pres: tunable!("ENOMOTO_T_XO_BOUND_PRES", prm::IPM_ACCEPT_REL, f64),
+                ..Default::default()
+            };
+            let mut r = solve_box_lp_warm(&a_s, &b_s, &c_s, &l_s, &u_s, max_iters, Some(&warm));
+            for (v, d) in r.x.iter_mut().zip(&dc) {
+                *v *= d;
+            }
+            for (v, d) in r.y.iter_mut().zip(&dr) {
+                *v *= d;
+            }
+            for (v, d) in r.rc.iter_mut().zip(&dc) {
+                *v /= d;
+            }
+            r.iters += ipm.iters;
+            ipm = r;
+        }
+    }
     st.ipm_iters = ipm.iters;
     crate::phase_timing::record("xo_ipm_iters", ipm.iters as f64);
     if crate::cancel::is_cancelled() {
@@ -2395,7 +2436,16 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 rb
             }
             None => {
-                set_cleanup_hint(&nb_status, 2);
+                // 試作 `ENOMOTO_XO_MIP_CLEANUP_HINT=1` (既定では使わない。analysis/rootlp_ipm_fail_20261105.md): 双対の記録が要求されている
+                // とき (MIP の根の LP の競争・解き直し) に限って、仕上げにも非基底の向きを渡す (`ENOMOTO_T_XO_CLEANUP_HINT` のビット 2 と
+                // 同じ。LP 単独 (irish-electricity) では仕上げが遅くなったので、MIP の根の LP だけに絞る)。向きなしでは押し出しで得た主・双対
+                // 実行可能な基底からでも非基底の列を被約費用の符号で置き直し、主実行不能 1.7 万〜3.3 万本から解き直していた
+                // (cryptanalysiskb128n5obj16・physiciansched6-2・chromaticindex512-7 など)。
+                if outer && env_str!("ENOMOTO_XO_MIP_CLEANUP_HINT").is_some_and(|v| v != "0") {
+                    set_cleanup_hint(&nb_status, 0);
+                } else {
+                    set_cleanup_hint(&nb_status, 2);
+                }
                 basis.clone()
             }
         };

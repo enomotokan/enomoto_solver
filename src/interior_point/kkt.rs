@@ -844,7 +844,16 @@ impl NormalKkt {
         }
         // 稠密な列の判定
         let avg = col_ptr[n] as f64 / n.max(1) as f64;
-        let thr = (DENSE_COL_MIN as f64).max(DENSE_COL_AVG_FACTOR * avg);
+        // 試作 `ENOMOTO_IPM_DENSE_AVG_NOSINGLE=1` (既定では使わない。analysis/rootlp_ipm_fail_20261105.md): 平均の非零数を、非零が 1 個の列
+        // (スラック) を除いて数える。行の多い問題 (sorrell3: 構造列 1,024 本、行 52,801) ではスラックが平均を下げ、構造列の 2 割が
+        // 「稠密でない」側に残って正規方程式の分解が 1 反復 15 秒かかる。
+        let avg = if env_str!("ENOMOTO_IPM_DENSE_AVG_NOSINGLE").is_some_and(|v| v != "0") {
+            let multi: Vec<usize> = (0..n).map(|j| col_ptr[j + 1] - col_ptr[j]).filter(|&k| k > 1).collect();
+            if multi.is_empty() { avg } else { multi.iter().sum::<usize>() as f64 / multi.len() as f64 }
+        } else {
+            avg
+        };
+        let thr = (DENSE_COL_MIN as f64).max(tunable!("ENOMOTO_IPM_DENSE_COL_AVG_FACTOR", DENSE_COL_AVG_FACTOR, f64) * avg);
         let mut dense_cols: Vec<usize> = (0..n).filter(|&j| (col_ptr[j + 1] - col_ptr[j]) as f64 > thr).collect();
         // 外すのは、行数が大きく (密な分解が重い) しかも稠密な列が組の大半を占めるときだけ。小さな問題
         // (fit1p、627 行) では密な分解でも安く、外すと残りの M_s の条件が悪くなって Woodbury の精度が落ちる。
@@ -856,8 +865,8 @@ impl NormalKkt {
         let all_pairs: usize = (0..n).map(pairs).sum();
         if p < DENSE_COL_MIN_ROWS
             || dense_pairs < DENSE_PAIR_RATIO * (all_pairs - dense_pairs)
-            || dense_cols.len() > DENSE_COL_MAX
-            || dense_cols.len() * p > DENSE_W_MAX_ENTRIES
+            || dense_cols.len() > tunable!("ENOMOTO_IPM_DENSE_COL_MAX", DENSE_COL_MAX, usize)
+            || dense_cols.len() * p > tunable!("ENOMOTO_IPM_DENSE_W_MAX", DENSE_W_MAX_ENTRIES, usize)
         {
             dense_cols.clear();
         }
@@ -1786,6 +1795,22 @@ impl IpmKkt {
     pub fn new(a: &FaerCsr) -> Option<Self> {
         if env_str!("ENOMOTO_IPM_AUGMENTED").is_none() {
             if let Some(nk) = NormalKkt::new(a) {
+                // 試作 `ENOMOTO_IPM_KKT_AUG_RATIO=r` (既定 0 = 比べない。analysis/rootlp_ipm_fail_20261105.md): 正規方程式の分解の演算量が
+                // 1e9 以上なら拡大系の記号分解もして、正規方程式が拡大系の r 倍より重ければ拡大系を使う。sorrell3 の根の LP
+                // (構造列 1,024 本・行 52,801) は正規方程式 1.8e10 flops (1 反復 15 秒、15 反復で期限)、拡大系 3.5e8 flops (49 反復 38 秒)。
+                let r = tunable!("ENOMOTO_IPM_KKT_AUG_RATIO", 0.0f64, f64);
+                let fl_n = chol_flops(&nk.chol_symbolic);
+                if r > 0.0 && fl_n >= 1e9 {
+                    if let Some(ak) = AugKkt::try_new(a, max_factor_nnz()) {
+                        let fl_a = chol_flops(&ak.chol_symbolic);
+                        if env_str!("ENOMOTO_DEBUG_IPM").is_some() {
+                            eprintln!("IpmKkt: normal flops {fl_n:.2e} vs augmented {fl_a:.2e} (ratio {r})");
+                        }
+                        if fl_n > r * fl_a {
+                            return Some(IpmKkt::Aug(ak));
+                        }
+                    }
+                }
                 return Some(IpmKkt::Normal(nk));
             }
         }

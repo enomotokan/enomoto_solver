@@ -1,0 +1,68 @@
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: initial fresh_d skipped (c_B = 0)
+DEBUG_EXT: DSE weights: unit (warm_started=false, passed=none, warm_dse_on=false, once=false)
+CROSSOVER ipm status=Optimal iters=35 rel_res=(2.6038904490425838e-8, 1.407470409200797e-7, 7.349807101539388e-6) t=14.297s
+CROSSOVER resid after ipm=4.326e-13 (before clamping 4.326e-13, max bound violation 0.000e0, |b|max=4.770e2)
+CROSSOVER ipm status=Optimal iters=0 rel_res=(0.0, 0.0, 0.0) t=0.014s
+CROSSOVER resid after ipm=1.841e-8 (before clamping 1.841e-8, max bound violation 0.000e0, |b|max=2.144e6)
+CROSSOVER resid after ipm=1.841e-8
+CROSSOVER resid after detect=1.914e-7
+CROSSOVER m=146325 n=152575 basic_after_detect=23519 t=0.027s
+CROSSOVER resid after primal push=1.914e-7
+CROSSOVER primal_push steps=0 basic=23519 t=0.030s
+CROSSOVER dual push skipped (|D|=23522 < 0.7 m)
+CROSSOVER after dual push: max|s_D|=1.02e-10 (#>1e-6: 0) dual-infeasible non-D=0
+CROSSOVER dual_push steps=0 active 23522->23522 t=0.033s
+CROSSOVER basis from_B=17938 from_D=0 slack=128387 (m=146325) t=0.051s
+CROSSOVER basis selector: reach=62724 elim=1602009 nnz(L)=287 scanned=1095595
+CROSSOVER leftover superbasics=5581 (|B|-m after primal push=-122806)
+CROSSOVER megiddo prof: total=15.68s ftran=3.95 rows=1.46 btran=0.67 update=0.85 refactor=1.79 (18x, 0 by verify, 0 by x_B residual) avg_nz=75163
+CROSSOVER megiddo pivots=5440 to_bound=0 unresolved=0 t=16.011s
+CROSSOVER ipm status=Optimal iters=35 rel_res=(2.6038904490425838e-8, 1.407470409200797e-7, 7.349807101539388e-6) t=14.112s
+CROSSOVER resid after ipm=4.326e-13 (before clamping 4.326e-13, max bound violation 0.000e0, |b|max=4.770e2)
+CROSSOVER ipm status=Optimal iters=0 rel_res=(0.0, 0.0, 0.0) t=0.032s
+CROSSOVER resid after ipm=1.841e-8 (before clamping 1.841e-8, max bound violation 0.000e0, |b|max=2.144e6)
+CROSSOVER resid after ipm=1.841e-8
+CROSSOVER resid after detect=1.914e-7
+CROSSOVER m=146325 n=152575 basic_after_detect=23519 t=0.046s
+CROSSOVER resid after primal push=1.914e-7
+CROSSOVER primal_push steps=0 basic=23519 t=0.050s
+CROSSOVER dual push skipped (|D|=23522 < 0.7 m)
+CROSSOVER after dual push: max|s_D|=1.02e-10 (#>1e-6: 0) dual-infeasible non-D=0
+CROSSOVER dual_push steps=0 active 23522->23522 t=0.052s
+CROSSOVER basis from_B=17938 from_D=0 slack=128387 (m=146325) t=0.081s
+CROSSOVER basis selector: reach=62724 elim=1602009 nnz(L)=287 scanned=1095595
+CROSSOVER leftover superbasics=5581 (|B|-m after primal push=-122806)
+CROSSOVER megiddo prof: total=17.44s ftran=4.44 rows=1.57 btran=0.75 update=0.95 refactor=2.05 (18x, 0 by verify, 0 by x_B residual) avg_nz=76833
+CROSSOVER megiddo pivots=5581 to_bound=0 unresolved=0 t=17.713s
+CROSSOVER stats Stats { ipm_iters: 0, basic_after_detect: 23519, primal_steps: 0, basic_after_push: 23519, dual_active_start: 23522, dual_steps: 0, primal_corrections: 0, dual_corrections: 0, dual_active_end: 23522, li_from_b: 17938, li_from_d: 0, li_slack: 128387, factors: 0, solves: 0, factor_secs: 0.0 }
+CROSSOVER basis quality: primal violations relative to row size: max 0.00e0, #>1e-9: 0
+CROSSOVER basis quality: primal_infeas=0 (max 0.00e0) dual_infeas=1524 (max 5.57e3)
+CROSSOVER dual megiddo: candidates=122806 pushed=19728 pivots=4623 skipped=103078 refactors=15 t=15.25s (btran 2.53 price 2.76 ratio 0.36 update 9.23; avg |rho| 2901 touched 2999)
+DEBUG_EXT: warm start from a given basis (cost shifts 1582, hint agree 6099 differ 151 unknown 0, primal infeasible basics 7455)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: unit (warm_started=true, passed=none, warm_dse_on=false, once=false)
+DEBUG_EXT: main_loop_iters=281 bland_mode=false
+DEBUG_EXT: degenerate_pivots=22 max_run=10 cost_shifts=1 shifted_cols=1582 xb_mismatch=8.470e-16@0
+DEBUG_EXT: noise max_pick_sqrt_w=4.831e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(-46921.50784039876,0) z0_base=-45047.50784039876
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1585
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=-46921.507840398575
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+DEBUG_EXT: primal cleanup broke down at iter=25250 (obj -4.692e4, best -4.692e4 at iter 5241, rises 0, max|x_B| 4.927e4 vs scale 4.927e4, repairs 0, obj unchanged for 0 iters) -> restart
+DEBUG_EXT: broken-basis/max-iters bailout, retrying with safe_pivot and full cost perturbation
+DEBUG_EXT: warm start from a given basis (cost shifts 1582, hint agree 0 differ 0 unknown 0, primal infeasible basics 7455)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: unit (warm_started=true, passed=none, warm_dse_on=false, once=false)
+DEBUG_EXT: main_loop_iters=281 bland_mode=false
+DEBUG_EXT: degenerate_pivots=22 max_run=10 cost_shifts=1 shifted_cols=1582 xb_mismatch=8.470e-16@0
+DEBUG_EXT: noise max_pick_sqrt_w=4.831e3 noise_rows=0 noise_pivot_iters=0 noise_pivot_cands=0 noise_taboo=0 infeas_guard=0 rollbacks=0
+DEBUG_EXT: z=(-46921.50784039876,0) z0_base=-45047.50784039876
+DEBUG_EXT: cleanup_pivots=0 cleanup_parked=0 cleanup_parked_zero=0
+DEBUG_EXT: polish_start_dual_infeasible_cols=1585
+DEBUG_EXT: polish_iters=0 bland_mode=false obj=-46921.507840398575
+DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter=0
+CROSSOVER cleanup status=None total t=250.443s
+ROOTLP_BOTH {"n":6250,"m":146325,"n_int":6250,"threads":4,"main_cold":true,"st_s":"IterationLimit","st_i":"None","obj_s":0.000000000000e0,"obj_i":null,"t_simplex":0.0380,"t_ipm":14.1586,"t_xo":264.6178,"t_adopt":0.0000,"t_i":264.6178,"winner":"none","ndiff":0,"ndiff_int":0,"frac_s":0,"frac_i":0,"frac_both":0,"basis_diff_cols":-1,"basis_diff_rows":-1,"iters_s":0,"iters_i":0,"t_presolve":264.837}
+MIP: MEMCAP: tid 0 limit 11748 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0

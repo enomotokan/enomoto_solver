@@ -1273,10 +1273,13 @@ impl TwoStageLp {
             });
         }
         let mut lp_s = self.clone();
+        // 診断 `ENOMOTO_MIP_ROOTLP_IPM_ONLY=1` (analysis/rootlp_ipm_fail_20261105.md): 二段解法を走らせず、内点法 + クロスオーバーだけを解く
+        // (二段解法の下界の共有もない。`st_s` は `IterationLimit`)
+        let ipm_only = env_str!("ENOMOTO_MIP_ROOTLP_IPM_ONLY").is_some();
         let flags = sid::tl_flags();
         let (st_s, flags) = pool_s.install(|| {
             sid::set_tl_flags(flags);
-            let st = crate::cancel::with_bound(Some(bound), || lp_s.solve_once(lim));
+            let st = if ipm_only { LpStatus::IterationLimit } else { crate::cancel::with_bound(Some(bound), || lp_s.solve_once(lim)) };
             (st, sid::tl_flags())
         });
         sid::set_tl_flags(flags);
