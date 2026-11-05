@@ -274,7 +274,7 @@ sing326・sing44 1.2e3、rail01 1.6e2、neos-873061 1.4e2、thor50dday 49。1e4 
 ## 8. supportcase42 の仕上げが重い理由と、軽くする試み (2026-11-06)
 
 7 節で「仕上げの主単体法が重い」と書いたのは誤り。`HARRIS2=r` の supportcase42 (二段解法だけ、30.6 秒) の内訳 (`ENOMOTO_DEBUG_EXT_ITERS`・`ENOMOTO_PROF_PHASES_EXT`、
-ログは scratchpad の `pol*.log`、要点をここに写す):
+ログは `rootlp_simplex_fail_20261105/logs/pol*/` (pol: 内訳、pol2: 仕上げの始めの診断、pol3・pol4: POLISH_DSE=1・2、pol5: NOISE_C=0)):
 
 | 段 | 反復 | 秒 | 1 反復 |
 |---|---:|---:|---:|
