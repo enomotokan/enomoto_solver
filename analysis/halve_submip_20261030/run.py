@@ -129,6 +129,9 @@ CFGS = {
     "noforceq": {"ENOMOTO_MIP_TREE2_FORCEQ": "0"},
     "nofstop": {"ENOMOTO_MIP_QIU_FIND_STOP_GAP": "0"},
     "nobs": {"ENOMOTO_MIP_BOUND_STEP": "0"},
+    # 2026-11-05: MEMB の q (DSE 重みの 8 ビット丸め) が n2seq36q を遅くするので、q を外した形を比べる
+    "membrch": {"ENOMOTO_MIP_MEMB": "rch"},
+    "membrc": {"ENOMOTO_MIP_MEMB": "rc"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
 }
