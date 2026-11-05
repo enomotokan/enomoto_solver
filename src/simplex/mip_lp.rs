@@ -25,6 +25,32 @@ struct LuCache {
     d: Option<Vec<f64>>,
 }
 
+/// [`TwoStageLp::optface_move`] の結果 (試作 `ENOMOTO_MIP_OPTFACE_MOVE`)。
+#[derive(Clone, Debug, Default)]
+pub struct OptFaceStats {
+    /// 最初の基底での候補 (被約費用 0 で動ける非基底) の数 (双対退化の目安)
+    pub cands0: usize,
+    /// 軸の入れ替え・境界の入れ替え・そのうち退化 (歩幅 0) の数
+    pub pivots: usize,
+    pub flips: usize,
+    pub degenerate: usize,
+    /// FTRAN の回数・動けなかった候補の数
+    pub ftran: usize,
+    pub dead: usize,
+    /// 値の変わった構造列の数・基底の違う変数の数
+    pub moved_cols: usize,
+    pub basis_diff: usize,
+    /// 確かめの解き直しの反復・目的値の差・最適で目的値が同じか
+    pub resolve_iters: u64,
+    pub obj_diff: f64,
+    pub ok: bool,
+    pub stopped: bool,
+    pub singular: bool,
+    /// 移動だけの秒・確かめを含む秒
+    pub secs_move: f64,
+    pub secs: f64,
+}
+
 /// 二段解法を使う MIP 用の LP。
 #[derive(Clone)]
 pub struct TwoStageLp {
@@ -1992,6 +2018,266 @@ impl TwoStageLp {
 
     /// 基底位置 `s` の `e_s^T B^{-1}` を、元の行に掛ける重みとして返す
     /// (`sum_i w_i (a_i x - r_i) = 0` が基底変数 `basic_var(s)` についての tableau 行)。
+    /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE`・`ENOMOTO_MIP_OPTFACE_PARCUTS` (既定では呼ばない。analysis/optface_cuts_20261105.md): 最適な
+    /// 今の基底から、被約費用が (許容誤差で) 0 の非基底変数を入れる主単体法の軸の入れ替え (双対退化の向き) を最大 `k` 回行い、
+    /// 目的値を変えずに最適面の上の別の最適基底 (頂点) へ移る。比の判定は Harris の 2 段 (主の実行可能性を保つ)。入れる変数は
+    /// 候補から最大 `sample` 本を引いて FTRAN し、`mode` で選ぶ: `r` 乱数 (最初に引いた有効な候補)、`f` 分数の値の整数の基底列の
+    /// tableau の行を変える数 (α ≠ 0) が多い候補、`d` 動く距離 (構造列の値の変化の和) が大きい候補 (退化でない入れ替えを優先)。
+    /// 一度基底から出た変数は入れ直さない (戻りを避ける)。終わったら今の基底と値をこの LP に入れ、warm start で解き直して最適と
+    /// 目的値を確かめる (解き直しの反復も返す)。最適でない・基底がない・分解できないなら `None`。
+    pub fn optface_move(&mut self, k: usize, sample: usize, mode: char, seed: u64, is_int: &[bool], deadline: Option<std::time::Instant>) -> Option<OptFaceStats> {
+        let t0 = std::time::Instant::now();
+        if self.status != Some(LpStatus::Optimal) {
+            return None;
+        }
+        let n = self.n;
+        let m = self.rows.len();
+        let nt = n + m;
+        let mut basis = self.basis.clone().filter(|b| b.len() == m)?;
+        if self.y.len() != m || self.std.n_total != nt {
+            return None;
+        }
+        let obj0 = self.objective();
+        let mut z: Vec<f64> = (0..nt).map(|v| if v < n { self.x[v] - self.shift[v] } else { self.slack_value(v - n, &self.x) }).collect();
+        let x_start = z.clone();
+        let mut pos: Vec<Option<usize>> = vec![None; nt];
+        for (p, &v) in basis.iter().enumerate() {
+            pos[v] = Some(p);
+        }
+        let mut lu = super::basis_kernel::factorize_basis(&self.std, &pos, None)?;
+        let (lb, ub, c) = (&self.std.lb, &self.std.ub, &self.std.c);
+        let btran = |lu: &super::lu::FtLu, basis: &[usize]| -> Vec<f64> {
+            let cb: Vec<f64> = basis.iter().map(|&v| c[v]).collect();
+            let mut scratch = vec![0.0; m];
+            let mut out = vec![0.0; m];
+            lu.solve_transpose_into(&cb, &mut scratch, &mut out);
+            out
+        };
+        let mut y = btran(&lu, &basis);
+        let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut tabu = vec![false; nt];
+        let mut st = OptFaceStats::default();
+        let ptol = 1e-9;
+        let frac = |v: usize, zv: f64| -> bool {
+            if v >= n || !is_int.get(v).copied().unwrap_or(false) {
+                return false;
+            }
+            let xv = zv + self.shift[v];
+            (xv - xv.round()).abs() > 1e-6
+        };
+        while st.pivots + st.flips < k {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                st.stopped = true;
+                break;
+            }
+            // 被約費用 0 の非基底の候補 (向き付き)
+            let mut cands: Vec<(usize, f64)> = Vec::new();
+            for v in 0..nt {
+                if pos[v].is_some() || tabu[v] || lb[v] >= ub[v] {
+                    continue;
+                }
+                let d = c[v] - self.std.cols.col(v).iter().map(|&(i, a)| a * y[i]).sum::<f64>();
+                if d.abs() > 1e-9 * (1.0 + c[v].abs()) {
+                    continue;
+                }
+                let at_l = lb[v].is_finite() && (z[v] - lb[v]).abs() <= 1e-9 * (1.0 + lb[v].abs());
+                let at_u = ub[v].is_finite() && (z[v] - ub[v]).abs() <= 1e-9 * (1.0 + ub[v].abs());
+                let dir = if at_l {
+                    1.0
+                } else if at_u {
+                    -1.0
+                } else if !lb[v].is_finite() && !ub[v].is_finite() {
+                    if next() & 1 == 0 { 1.0 } else { -1.0 }
+                } else {
+                    continue;
+                };
+                cands.push((v, dir));
+            }
+            if st.pivots + st.flips == 0 {
+                st.cands0 = cands.len();
+            }
+            if cands.is_empty() {
+                break;
+            }
+            // 候補を引いて FTRAN と比の判定
+            let s = sample.max(1).min(cands.len());
+            for i in 0..s {
+                let j = i + (next() as usize) % (cands.len() - i);
+                cands.swap(i, j);
+            }
+            // (候補, 向き, 歩幅 t, 出る位置 (None は境界の入れ替え), α, 点数)
+            let mut best: Option<(usize, f64, f64, Option<usize>, Vec<f64>, f64)> = None;
+            for &(q, dir) in &cands[..s] {
+                let mut rhs = vec![0.0; m];
+                for &(i, a) in self.std.cols.col(q).iter() {
+                    rhs[i] = a;
+                }
+                let alpha = lu.solve(&rhs);
+                st.ftran += 1;
+                // Harris の 1 段目: 許容誤差つきの上限
+                let mut tmax = if lb[q].is_finite() && ub[q].is_finite() { ub[q] - lb[q] } else { f64::INFINITY };
+                for (p, &a) in alpha.iter().enumerate() {
+                    if a.abs() <= ptol {
+                        continue;
+                    }
+                    let v = basis[p];
+                    let delta = -dir * a;
+                    let lim = if delta < 0.0 {
+                        if !lb[v].is_finite() { continue }
+                        (z[v] - lb[v] + 1e-9 * (1.0 + lb[v].abs())) / -delta
+                    } else {
+                        if !ub[v].is_finite() { continue }
+                        (ub[v] - z[v] + 1e-9 * (1.0 + ub[v].abs())) / delta
+                    };
+                    tmax = tmax.min(lim);
+                }
+                if !tmax.is_finite() {
+                    continue; // 最適面の中の半直線 (動かない)
+                }
+                // 2 段目: 上限以下の中で |α| が最大の行
+                let flip = if lb[q].is_finite() && ub[q].is_finite() { ub[q] - lb[q] } else { f64::INFINITY };
+                let mut r: Option<usize> = None;
+                let mut ra = 0.0;
+                let mut t = flip;
+                for (p, &a) in alpha.iter().enumerate() {
+                    if a.abs() <= ptol {
+                        continue;
+                    }
+                    let v = basis[p];
+                    let delta = -dir * a;
+                    let lim = if delta < 0.0 {
+                        if !lb[v].is_finite() { continue }
+                        (z[v] - lb[v]) / -delta
+                    } else {
+                        if !ub[v].is_finite() { continue }
+                        (ub[v] - z[v]) / delta
+                    };
+                    if lim <= tmax && a.abs() > ra {
+                        ra = a.abs();
+                        r = Some(p);
+                        t = lim.max(0.0);
+                    }
+                }
+                if r.is_some() && flip <= t {
+                    r = None;
+                    t = flip;
+                }
+                if r.is_none() && !flip.is_finite() {
+                    continue;
+                }
+                let noise = (next() % 1024) as f64 / 1024.0 * 1e-3;
+                let score = match mode {
+                    'f' => alpha.iter().enumerate().filter(|&(p, &a)| a.abs() > ptol && Some(p) != r && frac(basis[p], z[basis[p]])).count() as f64 + noise,
+                    'd' => {
+                        let mv: f64 = alpha.iter().enumerate().filter(|&(p, _)| basis[p] < n).map(|(_, a)| a.abs()).sum::<f64>() + if q < n { 1.0 } else { 0.0 };
+                        (t * mv).min(1e12) + if t > 1e-9 { 1e6 } else { 0.0 } + noise
+                    }
+                    _ => noise,
+                };
+                if best.as_ref().is_none_or(|b| score > b.5) {
+                    best = Some((q, dir, t, r, alpha, score));
+                }
+                if mode == 'r' && best.is_some() {
+                    break;
+                }
+            }
+            let Some((q, dir, t, r, alpha, _)) = best else {
+                // 引いた候補がどれも動けない: 引いた分を除いて続ける
+                for &(q, _) in &cands[..s] {
+                    tabu[q] = true;
+                }
+                st.dead += s;
+                continue;
+            };
+            // 値の更新
+            if t > 0.0 {
+                z[q] += dir * t;
+                for (p, &a) in alpha.iter().enumerate() {
+                    if a != 0.0 {
+                        let v = basis[p];
+                        z[v] -= dir * a * t;
+                    }
+                }
+            }
+            match r {
+                None => {
+                    // 境界の入れ替え (基底は同じ、点が動く)
+                    z[q] = if dir > 0.0 { ub[q] } else { lb[q] };
+                    st.flips += 1;
+                    tabu[q] = true;
+                }
+                Some(p) => {
+                    let v = basis[p];
+                    z[v] = if -dir * alpha[p] < 0.0 { lb[v] } else { ub[v] };
+                    basis[p] = q;
+                    pos[v] = None;
+                    pos[q] = Some(p);
+                    match super::basis_kernel::factorize_basis(&self.std, &pos, None) {
+                        Some(l) => lu = l,
+                        None => {
+                            // 特異: 戻してやめる
+                            basis[p] = v;
+                            pos[q] = None;
+                            pos[v] = Some(p);
+                            st.singular = true;
+                            break;
+                        }
+                    }
+                    tabu[v] = true;
+                    st.pivots += 1;
+                    if t <= 1e-12 {
+                        st.degenerate += 1;
+                    }
+                    y = btran(&lu, &basis);
+                }
+            }
+        }
+        // 基底の値を今の LU で計算し直す (誤差を消す): x_B = B^-1 (b - N x_N)
+        let mut rhs = self.std.b.clone();
+        for v in 0..nt {
+            if pos[v].is_none() && z[v] != 0.0 {
+                for &(i, a) in self.std.cols.col(v).iter() {
+                    rhs[i] -= a * z[v];
+                }
+            }
+        }
+        let xb = lu.solve(&rhs);
+        for (p, &v) in basis.iter().enumerate() {
+            z[v] = xb[p];
+        }
+        st.moved_cols = (0..n).filter(|&j| (z[j] - x_start[j]).abs() > 1e-7 * (1.0 + x_start[j].abs())).count();
+        let b0: std::collections::HashSet<usize> = self.basis.as_ref().unwrap().iter().copied().collect();
+        st.basis_diff = basis.iter().filter(|v| !b0.contains(v)).count();
+        st.secs_move = t0.elapsed().as_secs_f64();
+        if st.pivots + st.flips == 0 {
+            return Some(st);
+        }
+        // この LP に入れて解き直す (最適の確かめ。双対の許容誤差の分だけ数反復かかることがある)
+        for j in 0..n {
+            self.x[j] = z[j] + self.shift[j];
+        }
+        self.basis = Some(basis);
+        self.lu = None;
+        self.lu_cache = None;
+        self.dse_cache = None;
+        self.status = None;
+        self.ray = None;
+        self.clear_memo();
+        let it0 = self.iters;
+        let stt = self.solve(&SolveLimits { deadline, ..Default::default() });
+        st.resolve_iters = self.iters - it0;
+        st.obj_diff = self.objective() - obj0;
+        st.ok = stt == LpStatus::Optimal && st.obj_diff.abs() <= 1e-7 * obj0.abs().max(1.0);
+        st.secs = t0.elapsed().as_secs_f64();
+        Some(st)
+    }
+
     pub fn basis_inverse_row(&mut self, s: usize) -> Vec<f64> {
         let m = self.rows.len();
         if self.lu.is_none() {
@@ -2046,6 +2332,25 @@ mod tests {
         assert!((lp.objective() - (-2.5)).abs() < 1e-9, "{}", lp.objective());
         lp.set_col_bounds(0, 3.0, 10.0);
         assert_eq!(lp.solve(&SolveLimits::default()), LpStatus::Infeasible);
+    }
+
+    #[test]
+    fn optface_move_keeps_objective() {
+        // min -x - y  s.t. x + y <= 4, x, y in [0, 3]: 最適面は (1, 3)-(3, 1) の線分 (双対退化)。最適面の上を動いて
+        // 目的値 -4 のまま別の頂点に移る
+        let mut lp = TwoStageLp::new(&[0.0, 0.0], &[3.0, 3.0], &[-1.0, -1.0], &[vec![(0, 1.0), (1, 1.0)]], &[f64::NEG_INFINITY], &[4.0]);
+        assert_eq!(lp.solve(&SolveLimits::default()), LpStatus::Optimal);
+        let x0 = lp.col_values();
+        for mode in ['f', 'd', 'r'] {
+            let mut alt = lp.clone();
+            let st = alt.optface_move(10, 4, mode, 1, &[true, true], None).expect("optimal basis");
+            assert!(st.cands0 >= 1, "{st:?}");
+            assert!(st.ok, "{st:?}");
+            assert!((alt.objective() - (-4.0)).abs() < 1e-9, "{}", alt.objective());
+            let x = alt.col_values();
+            assert!(x[0] + x[1] <= 4.0 + 1e-9 && x.iter().all(|&v| (-1e-9..=3.0 + 1e-9).contains(&v)), "{x:?}");
+            assert!(st.pivots + st.flips >= 1 && (x[0] - x0[0]).abs() > 1e-6, "mode {mode}: {st:?} {x0:?} -> {x:?}");
+        }
     }
 
     #[test]

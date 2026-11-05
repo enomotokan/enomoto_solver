@@ -3578,6 +3578,17 @@ fn max_restarts(p: &MipProblem) -> u32 {
     tunable!("ENOMOTO_T_MIP_MAX_RESTARTS", 4u32, u32)
 }
 
+/// 試作 `ENOMOTO_MIP_OPTFACE_*` の入れる変数の選び方 (値の中の `r` 乱数・`d` 離れた頂点・既定 `f` 分数の整数列の tableau の行を変える向き)
+fn optface_mode(v: &str) -> char {
+    if v.contains('r') {
+        'r'
+    } else if v.contains('d') {
+        'd'
+    } else {
+        'f'
+    }
+}
+
 pub(crate) fn bg_cuts_wait_on() -> bool {
     env_def!("ENOMOTO_MIP_BG_CUTS_WAIT", "1").is_some()
 }
@@ -4673,6 +4684,214 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: root LP both: second cut loop {}, obj {:.10e} ({:.2}s)", if ok { "done" } else { "failed" }, self.lp.objective() + self.p.offset, t3.elapsed().as_secs_f64());
         }
         ok
+    }
+
+    /// 試作 `ENOMOTO_MIP_OPTFACE_*` (既定では使わない、analysis/optface_cuts_20261105.md): 今の LP の写しを、被約費用 0 の
+    /// 非基底を入れる軸の入れ替え ([`MipLp::optface_move`]) で最適面の上の別の最適基底へ移す。入れ替えは最大
+    /// `ENOMOTO_T_MIP_OPTFACE_PIVOTS` (既定 1000) 回、1 回に引く候補は `ENOMOTO_T_MIP_OPTFACE_SAMPLE` (既定 8) 本、時間は `cap` 秒まで。
+    /// 戻り値は (移った写し (最適で目的値が同じ、基底か値が違うときだけ), 最初の基底での候補の数 (双対退化の目安))。
+    fn optface_alt(&self, tag: &str, mode: char, seed: u64, cap: f64) -> (Option<L>, usize) {
+        let mut alt = self.lp.clone();
+        // 既定は実質「候補が尽きるまで」(一度出た変数は入れ直さないので、入れ替えは候補の数で終わる。neos859080 では 30 回では
+        // 比べが伸びず、120 回ほどで尽きるまで歩くと伸びた)。時間は `cap` と、根の LP の時間の `ENOMOTO_T_MIP_OPTFACE_MOVE_MULT`
+        // (既定 0.5) 倍 (`ENOMOTO_T_MIP_OPTFACE_MOVE_MIN` 0.05 秒〜`ENOMOTO_T_MIP_OPTFACE_MOVE_MAX` 1 秒) の小さい方まで
+        let k = tunable!("ENOMOTO_T_MIP_OPTFACE_PIVOTS", 1000usize, usize);
+        let move_cap = (tunable!("ENOMOTO_T_MIP_OPTFACE_MOVE_MULT", 0.5, f64) * self.root_lp_secs)
+            .clamp(tunable!("ENOMOTO_T_MIP_OPTFACE_MOVE_MIN", 0.05, f64), tunable!("ENOMOTO_T_MIP_OPTFACE_MOVE_MAX", 1.0, f64).max(0.0));
+        let cap = cap.min(move_cap);
+        let sample = tunable!("ENOMOTO_T_MIP_OPTFACE_SAMPLE", 8usize, usize);
+        let d = Instant::now() + Duration::from_secs_f64(cap.max(0.0));
+        let dl = self.deadline.map_or(d, |g| g.min(d));
+        let it0 = alt.total_iterations();
+        // 状態が最適でなければ (行を消した直後など) まず warm start で解き直す
+        let mut st = alt.optface_move(k, sample, mode, seed, &self.p.is_int, Some(dl));
+        if st.is_none() {
+            let s0 = alt.solve(&SolveLimits { deadline: Some(dl), ..Default::default() });
+            if s0 == LpStatus::Optimal {
+                st = alt.optface_move(k, sample, mode, seed, &self.p.is_int, Some(dl));
+            }
+        }
+        let Some(st) = st else {
+            if self.params.verbose {
+                eprintln!("MIP: optface {tag}: not available (LP not optimal or no basis)");
+            }
+            return (None, 0);
+        };
+        let nfrac = self.fractional(&alt.col_values()).len();
+        if self.params.verbose {
+            eprintln!(
+                "MIP: optface {tag}: mode {mode} seed {seed}: {} candidates, {} pivots ({} degenerate) + {} bound flips, {} ftran, {} dead, {} columns moved, {} basic variables differ, re-solve {} iters (all {} iters), obj diff {:.2e}, {} fractional, ok {}{}{} (move {:.4}s, all {:.4}s)",
+                st.cands0,
+                st.pivots,
+                st.degenerate,
+                st.flips,
+                st.ftran,
+                st.dead,
+                st.moved_cols,
+                st.basis_diff,
+                st.resolve_iters,
+                alt.total_iterations() - it0,
+                st.obj_diff,
+                nfrac,
+                st.ok,
+                if st.stopped { ", stopped by time" } else { "" },
+                if st.singular { ", singular" } else { "" },
+                st.secs_move,
+                st.secs
+            );
+        }
+        if !st.ok || (st.basis_diff == 0 && st.moved_cols == 0) || nfrac == 0 {
+            return (None, st.cands0);
+        }
+        // 移った後の基底が元と同じに戻っていないか (確かめの解き直しで戻ることがある)
+        if let (Some(b), Some(b0)) = (alt.basis_cols(), self.lp.basis_cols()) {
+            let s0: std::collections::HashSet<usize> = b0.into_iter().collect();
+            if b.iter().all(|v| s0.contains(v)) && (0..self.p.n).all(|j| (alt.col_value(j) - self.lp.col_value(j)).abs() <= 1e-9 * (1.0 + self.lp.col_value(j).abs())) {
+                if self.params.verbose {
+                    eprintln!("MIP: optface {tag}: back at the same basis after the re-solve");
+                }
+                return (None, st.cands0);
+            }
+        }
+        alt.set_total_iterations(self.lp.total_iterations());
+        (Some(alt), st.cands0)
+    }
+
+    /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE` (値に `p` を含まない形): 根のカットのループが目的値をほとんど上げなかったとき、カット入りの LP の
+    /// 最適面の上の別の最適基底へ移り ([`Self::optface_alt`])、副作用のない比べ ([`Self::probe_cut_mode`]、`ENOMOTO_T_MIP_OPTFACE_ROUNDS`
+    /// (既定 3) ラウンド) で下界が上がるときだけ 2 回目のカットのループを回す。上がらなければ元の LP に戻し、種を変えて
+    /// `ENOMOTO_T_MIP_OPTFACE_TRIES` (既定 3) 回まで試す。カットのループが失敗したら `false`。
+    fn optface_second_loop(&mut self, v: &str, post: f64, root_iters: u64, root_cut_secs: &mut f64) -> bool {
+        let mode = optface_mode(v);
+        let tries = tunable!("ENOMOTO_T_MIP_OPTFACE_TRIES", 3usize, usize).max(1);
+        let k = tunable!("ENOMOTO_T_MIP_OPTFACE_ROUNDS", 3usize, usize).max(1);
+        let cap = (2.0 * self.root_lp_secs).clamp(0.5, tunable!("ENOMOTO_T_MIP_OPTFACE_SECS", 3.0, f64).max(0.5));
+        for t in 0..tries {
+            if self.time_up() {
+                break;
+            }
+            let (alt, cands) = self.optface_alt("after the cut loop", mode, t as u64 + 1, cap);
+            let Some(alt) = alt else {
+                if cands == 0 {
+                    break;
+                }
+                continue;
+            };
+            let keep = std::mem::replace(&mut self.lp, alt);
+            let t1 = Instant::now();
+            let dl = Instant::now() + Duration::from_secs_f64(cap);
+            let (hist, nadd, _) = self.probe_cut_mode(false, k, dl, &|_, _, _| false, false);
+            let gain = hist.last().map_or(0.0, |h| h.0);
+            let good = gain > 1e-6 * post.abs().max(1.0);
+            if self.params.verbose {
+                eprintln!(
+                    "MIP: optface move: probe at the moved vertex (try {}): {} rounds, {nadd} cuts, gain {gain:.6e} -> {} ({:.2}s)",
+                    t + 1,
+                    hist.len(),
+                    if good { "second cut loop" } else { "back to the first vertex" },
+                    t1.elapsed().as_secs_f64()
+                );
+            }
+            if good {
+                let t2 = Instant::now();
+                let ok = self.root_cut_loop(root_iters);
+                *root_cut_secs += t2.elapsed().as_secs_f64();
+                if self.params.verbose {
+                    eprintln!("MIP: optface move: second cut loop {}, obj {:.10e} ({:.2}s)", if ok { "done" } else { "failed" }, self.lp.objective() + self.p.offset, t2.elapsed().as_secs_f64());
+                }
+                return ok;
+            }
+            self.lp = keep;
+        }
+        true
+    }
+
+    /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE` の `p`: 根のカットのループの前に、今の頂点と最適面の上の別の頂点からの比べ
+    /// ([`Self::probe_cut_mode`]) で、別の頂点の伸びが今の頂点の伸びの `ENOMOTO_T_MIP_OPTFACE_GAIN` (既定 1.2) 倍を超えるときだけ
+    /// 別の頂点からループを始める (`ENOMOTO_MIP_ROOTLP_BOTH` と同じ形で、競争の負けた側の代わりに軸の入れ替えで作った頂点を使う)
+    fn optface_pre(&mut self, v: &str) {
+        let mode = optface_mode(v);
+        let k = tunable!("ENOMOTO_T_MIP_OPTFACE_ROUNDS", 3usize, usize).max(1);
+        let cap = (2.0 * self.root_lp_secs).clamp(0.2, tunable!("ENOMOTO_T_MIP_OPTFACE_SECS", 3.0, f64).max(0.2));
+        let (alt, _) = self.optface_alt("before the cut loop", mode, 1, cap);
+        let Some(alt) = alt else { return };
+        let post = self.lp.objective() + self.p.offset;
+        let t1 = Instant::now();
+        let dl = Instant::now() + Duration::from_secs_f64(cap);
+        let (ha, _, _) = self.probe_cut_mode(false, k, dl, &|_, _, _| false, false);
+        let gain_a = ha.last().map_or(0.0, |h| h.0);
+        let keep = std::mem::replace(&mut self.lp, alt);
+        let dl = Instant::now() + Duration::from_secs_f64(cap);
+        let (hb, nadd, _) = self.probe_cut_mode(false, k, dl, &|_, _, _| false, false);
+        let gain_b = hb.last().map_or(0.0, |h| h.0);
+        let eps = 1e-6 * post.abs().max(1.0);
+        let good = gain_b > eps && gain_b > tunable!("ENOMOTO_T_MIP_OPTFACE_GAIN", 1.2, f64) * gain_a + eps;
+        if self.params.verbose {
+            eprintln!(
+                "MIP: optface move: probe gain at the current vertex {gain_a:.6e}, at the moved vertex {gain_b:.6e} ({} rounds, {nadd} cuts, {:.2}s) -> {}",
+                hb.len(),
+                t1.elapsed().as_secs_f64(),
+                if good { "cut loop from the moved vertex" } else { "back to the first vertex" }
+            );
+        }
+        if !good {
+            self.lp = keep;
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS`: 裏のカットの写しそれぞれの結果をまとめる。目的値が最も高い写しの行を使い、値に `u` を
+    /// 含めば、今の LP の値を上げた他の写しの行も重複を除いて足す (足すときは返された基底は使わない)。`main` は最初の写し (主の
+    /// 基底か、1 本だけなら別の基底から始めたもの)、`extra` は別の基底から始めた写し。
+    fn optface_merge(&self, res: Option<(Vec<(Vec<(usize, f64)>, f64, f64)>, f64, usize)>, main: &BgCuts, extra: &mut [BgCuts], cur: f64, union: bool) -> Option<(Vec<(Vec<(usize, f64)>, f64, f64)>, f64, usize)> {
+        let mut all: Vec<(usize, Option<(Vec<(Vec<(usize, f64)>, f64, f64)>, f64, usize)>, Option<super::lp::Basis>)> = vec![(0, res, main.job.basis.lock().unwrap().take())];
+        for (i, e) in extra.iter_mut().enumerate() {
+            let r = e.finish();
+            let b = e.job.basis.lock().unwrap().take();
+            all.push((i + 1, r, b));
+        }
+        if self.params.verbose {
+            for (i, r, _) in &all {
+                match r {
+                    Some((rows, obj, rounds)) => eprintln!("MIP: optface parcuts: copy {i}: {rounds} rounds, {} cut rows, obj {obj:.10e} (main LP {cur:.10e})", rows.len()),
+                    None => eprintln!("MIP: optface parcuts: copy {i}: no result"),
+                }
+            }
+        }
+        let best = all.iter().enumerate().filter_map(|(k, (_, r, _))| r.as_ref().map(|r| (k, r.1))).max_by(|a, b| a.1.total_cmp(&b.1)).map(|x| x.0)?;
+        let (bi, best_res, best_basis) = all.swap_remove(best);
+        let (mut rows, obj, rounds) = best_res?;
+        let mut added = 0usize;
+        if union {
+            let key = |c: &[(usize, f64)], l: f64, u: f64| -> Vec<i64> {
+                let s = c.iter().map(|x| x.1.abs()).fold(0.0f64, f64::max).max(1e-12);
+                let mut k: Vec<i64> = c.iter().flat_map(|&(j, a)| [j as i64, (a / s * 1e9).round() as i64]).collect();
+                k.push(if l.is_finite() { (l / s * 1e9).round() as i64 } else { i64::MIN });
+                k.push(if u.is_finite() { (u / s * 1e9).round() as i64 } else { i64::MAX });
+                k
+            };
+            let mut seen: std::collections::HashSet<Vec<i64>> = rows.iter().map(|(c, l, u)| key(c, *l, *u)).collect();
+            for (_, r, _) in &all {
+                if let Some((rs, o, _)) = r {
+                    if *o > cur + 1e-9 * cur.abs().max(1.0) {
+                        for (c, l, u) in rs {
+                            if seen.insert(key(c, *l, *u)) {
+                                rows.push((c.clone(), *l, *u));
+                                added += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 返された基底は、選んだ写しの行だけを使うときに限り主の LP に入れる
+        *main.job.basis.lock().unwrap() = if added == 0 { best_basis } else { None };
+        if bi != 0 || added > 0 {
+            main.job.dse.lock().unwrap().take();
+        }
+        if self.params.verbose {
+            eprintln!("MIP: optface parcuts: use copy {bi} (obj {obj:.10e}){}", if union { format!(", {added} rows added from the other copies") } else { String::new() });
+        }
+        Some((rows, obj, rounds))
     }
 
     pub(super) fn time_up(&self) -> bool {
@@ -6575,6 +6794,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let l = both_loser.take().unwrap();
                     self.root_both_vertex(l, &x_root0, root_basis0.as_deref(), root_obj, root_iters, &mut root_cut_secs, true);
                 }
+                // 試作 `ENOMOTO_MIP_OPTFACE_MOVE` の `p` (既定では使わない、analysis/optface_cuts_20261105.md): ループの前に、最適面の上の
+                // 別の頂点 (軸の入れ替えで作る) からの比べで伸びるならそこからループを始める
+                if let Some(v) = env_str!("ENOMOTO_MIP_OPTFACE_MOVE").filter(|v| v.contains('p') && !self.params.submip && self.snap.is_none() && self.params.restarts == 0) {
+                    if !self.time_up() {
+                        self.optface_pre(v);
+                    }
+                }
                 let t_cut = Instant::now();
                 let cut_ok = env_str!("ENOMOTO_MIP_NO_CUTS").is_some() || self.root_cut_loop(root_iters);
                 root_cut_secs = t_cut.elapsed().as_secs_f64();
@@ -6648,6 +6874,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if !kept {
                             self.lp = keep_lp;
                         }
+                    }
+                }
+                // 試作 `ENOMOTO_MIP_OPTFACE_MOVE` (値に `p` を含まない形、既定では使わない、analysis/optface_cuts_20261105.md): 外側の最初の根の
+                // カットのループが目的値をほとんど上げなかったら (相対 `ENOMOTO_T_MIP_OPTFACE_FLAT`、既定 1e-6。目的値が整数刻みの問題だけ。
+                // 値に `a` を含めば刻みによらず)、`ROBUST_ROOTIPM` の内点法の代わりに、カット入りの LP の最適面の上で被約費用 0 の非基底を
+                // 入れる軸の入れ替えで別の最適基底へ移り、比べで伸びるときだけ 2 回目のループを回す ([`Self::optface_second_loop`])
+                if let Some(v) = env_str!("ENOMOTO_MIP_OPTFACE_MOVE").filter(|v| !v.contains('p') && !self.params.submip && self.snap.is_none() && self.params.restarts == 0) {
+                    let post = self.lp.objective() + self.p.offset;
+                    let flat = post - root_obj <= tunable!("ENOMOTO_T_MIP_OPTFACE_FLAT", 1e-6, f64) * root_obj.abs().max(1.0);
+                    if flat && (self.obj_step.is_some() || v.contains('a')) && !self.time_up() && !self.optface_second_loop(v, post, root_iters, &mut root_cut_secs) {
+                        self.join_fj_thread();
+                        let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
+                        return self.finish(st, root_obj);
                     }
                 }
                 root_obj = self.lp.objective() + self.p.offset;
@@ -6725,6 +6964,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             find_spawned = true;
         }
         let mut bg_cuts: Option<BgCuts> = None;
+        // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS`: 別の最適基底から始めた裏のカットの写し (2 本目から)
+        let mut bg_extra: Vec<BgCuts> = Vec::new();
         if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
             let bg_mode = env_str!("ENOMOTO_MIP_BG_CUTS").or(if env_str!("ENOMOTO_MIP_NO_BG_CUTS").is_none() { Some("1") } else { None });
             if let Some(mode) = bg_mode {
@@ -6755,7 +6996,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: env_str!("ENOMOTO_MIP_BG_CUTS_LOG").is_some(), threads, ..self.params };
-                let j2 = job.clone();
                 let ri = root_iters;
                 let rls = self.root_lp_secs;
                 // 既定で (`ENOMOTO_MIP_NO_BG_CUTS_BASIS` で渡さない) 主の根の LP の最後の基底 (写しの問題の行 + カットの行と同じ並び) を渡す。渡さないと
@@ -6793,7 +7033,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if bg_dse_mode == Some("rw") && self.params.verbose {
                     eprintln!("MIP: background cuts: exact DSE weights for the root LP of the copy {}", if bg_dse_rw { "on" } else { "off (column values not passed)" });
                 }
-                let j3 = job.clone();
                 if matches!(bg_dse_mode, Some("1") | Some("1q") | Some("1qa")) && self.params.verbose {
                     eprintln!("MIP: background cuts: DSE weights {}", bg_dse.as_ref().map_or("not available".to_string(), |w| format!("passed ({} rows)", w.len())));
                 }
@@ -6816,15 +7055,60 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     eprintln!("MIP: background cuts: columns with global bounds tighter than the main LP {tighter} (LP value outside: basic {moved_basic}, nonbasic {moved_nb}), looser {looser}");
                 }
-                let handle = std::thread::Builder::new()
+                // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` (既定では使わない、analysis/optface_cuts_20261105.md): 根の LP が双対退化なら
+                // (被約費用 0 で動ける非基底が `ENOMOTO_T_MIP_OPTFACE_PAR_MIN` (既定 10) 本以上)、裏のカットの写しを最適面の上の別の
+                // 最適基底 (軸の入れ替えで作る) から始める。値の数字 k (既定 1): 1 なら写し 1 本を別の基底から、2 以上なら主の基底の写し
+                // 1 本と別の基底 (種を変える) の写し k - 1 本をスレッドを分けて同時に回し、終わりに結果をまとめる ([`Self::optface_merge`])
+                let mut plan: Vec<(Option<super::lp::Basis>, Option<(Vec<usize>, Vec<f64>)>, bool)> = vec![(bg_basis, bg_x, false)];
+                if let Some(pv) = env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").filter(|_| plan[0].0.is_some()) {
+                    let kc: usize = pv.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(1).max(1);
+                    let pmode = optface_mode(pv);
+                    let cap = (2.0 * self.root_lp_secs).clamp(0.2, tunable!("ENOMOTO_T_MIP_OPTFACE_SECS", 3.0, f64).max(0.2));
+                    let min_c = tunable!("ENOMOTO_T_MIP_OPTFACE_PAR_MIN", 10usize, usize);
+                    let mut alts = Vec::new();
+                    let t_alt = Instant::now();
+                    for sd in 1..=(if kc == 1 { 1 } else { kc - 1 }) {
+                        let (alt, cands) = self.optface_alt("for the background cuts", pmode, sd as u64, cap);
+                        if cands < min_c {
+                            if self.params.verbose {
+                                eprintln!("MIP: optface parcuts: {cands} candidates (< {min_c}); not dual degenerate enough");
+                            }
+                            break;
+                        }
+                        if let Some(a) = alt {
+                            let x = if plan[0].1.is_some() { a.basis_cols().map(|c| (c, a.col_values())) } else { None };
+                            alts.push((Some(a.basis()), x, true));
+                        }
+                    }
+                    if kc == 1 {
+                        if let Some(a) = alts.pop() {
+                            plan = vec![a];
+                        }
+                    } else {
+                        plan.extend(alts);
+                    }
+                    if self.params.verbose {
+                        eprintln!("MIP: optface parcuts: {} background copies ({} from moved bases), {} threads each ({:.3}s)", plan.len(), plan.iter().filter(|p| p.2).count(), (threads / plan.len()).max(1), t_alt.elapsed().as_secs_f64());
+                    }
+                }
+                let per = (threads / plan.len()).max(1);
+                let n_plan = plan.len();
+                for (ci, (cb, cx, is_alt)) in plan.into_iter().enumerate() {
+                    let job_c = if ci == 0 { job.clone() } else { std::sync::Arc::new(CutJob::new(mode == "heavy", determ, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z), self.lp.objective() + self.p.offset)) };
+                    let j2 = job_c.clone();
+                    let j3 = job_c.clone();
+                    let snap = snap.clone();
+                    let params = if n_plan > 1 { MipParams { threads: per, ..params } } else { params };
+                    let bg_dse = if is_alt { None } else { bg_dse.clone() };
+                    let handle = std::thread::Builder::new()
                     .stack_size(64 << 20)
                     .spawn(move || {
                         CUT_JOB.with(|j| *j.borrow_mut() = Some(j2));
                         BG_ROOT_ITERS.with(|c| c.set(ri));
                         BG_ROOT_LP_SECS.with(|c| c.set(rls));
                         BG_ROOT_NB.with(|c| c.set(bg_nb));
-                        BG_ROOT_BASIS.with(|b| *b.borrow_mut() = bg_basis);
-                        BG_ROOT_X.with(|b| *b.borrow_mut() = bg_x);
+                        BG_ROOT_BASIS.with(|b| *b.borrow_mut() = cb);
+                        BG_ROOT_X.with(|b| *b.borrow_mut() = cx);
                         BG_ROOT_DSE.with(|b| *b.borrow_mut() = bg_dse);
                         BG_DSE_EXACT_FIRST.with(|c| c.set(bg_dse_exact));
                         BG_DSE_ROOT_EXACT.with(|c| c.set(bg_dse_root_exact));
@@ -6838,10 +7122,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let _ = solve_worker(snap, None, params);
                     })
                     .expect("failed to spawn the cut thread");
+                    if ci == 0 {
+                        bg_cuts = Some(BgCuts { job: job_c, handle: Some(handle) });
+                    } else {
+                        bg_extra.push(BgCuts { job: job_c, handle: Some(handle) });
+                    }
+                }
                 if env_def!("ENOMOTO_MIP_BG_CUTS_PROOF_STOP", "1").is_some() {
                     self.bg_watch = Some(job.clone());
                 }
-                bg_cuts = Some(BgCuts { job, handle: Some(handle) });
             }
         }
         // 根のヒューリスティクス
@@ -7498,12 +7787,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             let res = bg.finish();
+            // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS`: 別の基底から始めた写しも、主の写しの待ちの `ENOMOTO_T_MIP_OPTFACE_PAR_WAIT` (既定 0.5) 倍まで
+            // 待ってから止め、結果をまとめる
+            if !bg_extra.is_empty() {
+                let cap = tunable!("ENOMOTO_T_MIP_OPTFACE_PAR_WAIT", 0.5, f64) * t0.elapsed().as_secs_f64();
+                let cutoff = self.prune_limit();
+                let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+                let tw = Instant::now();
+                for e in &bg_extra {
+                    let left = (cap - tw.elapsed().as_secs_f64()).max(0.0);
+                    if e.job.determ.is_some() {
+                        e.wait_determ(left, cutoff, z);
+                    } else {
+                        e.wait_progress(left, cutoff);
+                    }
+                }
+            }
             let bg_end = *bg.job.self_stop.lock().unwrap();
             let wait = t0.elapsed().as_secs_f64();
             // 根の LP を解き直しておく (ヒューリスティクスの後で状態が戻っていることを確かめる)
             let it0 = self.lp.total_iterations();
             let st0 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
             let cur = self.lp.objective() + self.p.offset;
+            let res = if bg_extra.is_empty() { res } else { self.optface_merge(res, &bg, &mut bg_extra, cur, env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('u'))) };
+            bg_extra.clear();
             if self.params.verbose {
                 eprintln!("MIP: background cuts: root LP re-solved before replacing the cuts: {st0:?}, {} iters ({:.2}s)", self.lp.total_iterations() - it0, self.start.elapsed().as_secs_f64());
             }

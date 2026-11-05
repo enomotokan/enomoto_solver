@@ -48,6 +48,10 @@ pub trait MipLp: Clone + Send {
     fn solve_rescue(&mut self, _lim: &SolveLimits) -> LpStatus {
         LpStatus::Error
     }
+    /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE` ([`TwoStageLp::optface_move`]): 最適面の上の別の最適基底へ移る。対応しない実装は `None`。
+    fn optface_move(&mut self, _k: usize, _sample: usize, _mode: char, _seed: u64, _is_int: &[bool], _deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
+        None
+    }
     /// 試作 `ENOMOTO_MIP_ROOTLP_BOTH`: 根の LP の同時実行の負けた側の LP ([`crate::simplex::mip_lp::BothLoser`]) をこの LP に
     /// 置き換える。対応しない実装は `false`。
     fn adopt_two_stage(&mut self, _lp: TwoStageLp) -> bool {
@@ -175,6 +179,9 @@ forward_impl!(
     },
     fn solve_rescue(&mut self, lim: &SolveLimits) -> LpStatus {
         TwoStageLp::solve_ipm_rescue(self, lim)
+    },
+    fn optface_move(&mut self, k: usize, sample: usize, mode: char, seed: u64, is_int: &[bool], deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
+        TwoStageLp::optface_move(self, k, sample, mode, seed, is_int, deadline)
     },
     fn adopt_two_stage(&mut self, lp: TwoStageLp) -> bool {
         *self = lp;
