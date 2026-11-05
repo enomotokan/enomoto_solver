@@ -494,6 +494,8 @@ struct Cand1 {
     bin_mark: Vec<u32>,
     tok: u32,
     rows: Vec<usize>,
+    /// `d` の行の中の抜き取った位置
+    pos: Vec<usize>,
     /// 計測: 集めた手の数・評価した手の数・0-1 の重複で飛ばした数 (`ENOMOTO_MIP_LOCALMIP_DEBUG` で出す)
     n_collect: u64,
     n_eval: u64,
@@ -612,6 +614,9 @@ impl<'a> LocalMip<'a> {
         // `ENOMOTO_MIP_LMIP1_CAND` (試作、既定では使わない): 候補の集め方を本家 v2 に合わせる ([`Cand1`])。
         // 違反行の数 `ENOMOTO_T_MIP_LMIP1_ROWS` (本家 `bms_unsat_con` 10)、1 手の候補の上限 `ENOMOTO_T_MIP_LMIP1_OPS` (本家 `bms_unsat_ops` 2250)
         let cand1 = env_str!("ENOMOTO_MIP_LMIP1_CAND").is_some();
+        // `ENOMOTO_MIP_LMIP1_CAND=d` (切り分け用): 数は既定のまま (違反行 `SAMPLE_ROWS` 本 × 各行 `SAMPLE_COLS` 列) で、行・列・0-1 列の
+        // 重複だけを除く (違反行は重複なしに選び、64 列を超える行は位置を重複なしに抜き取る)
+        let c1_dedup = env_str!("ENOMOTO_MIP_LMIP1_CAND") == Some("d");
         let c1_rows = tunable!("ENOMOTO_T_MIP_LMIP1_ROWS", 10usize, usize).max(1);
         let c1_ops = tunable!("ENOMOTO_T_MIP_LMIP1_OPS", 2250usize, usize).max(1);
         let c1_full = tunable!("ENOMOTO_T_MIP_LMIP1_FULL", 4.0, f64);
@@ -733,6 +738,7 @@ impl<'a> LocalMip<'a> {
                 // 違反行を重複なしに選ぶ (少なければ全部。多ければ印を付けて引き直す)
                 c1.rows.clear();
                 let nv = s.vset.len();
+                let c1_rows = if c1_dedup { sample_rows } else { c1_rows };
                 if nv <= c1_rows {
                     c1.rows.extend_from_slice(&s.vset);
                 } else {
@@ -751,7 +757,30 @@ impl<'a> LocalMip<'a> {
                 // を大きくすれば本家と同じ)。0-1 列は集める時に重複を除く
                 c1.ops.clear();
                 let total: usize = c1.rows.iter().map(|&i| s.row(i).len()).sum();
-                if total == 0 || total as f64 <= c1_full * c1_ops as f64 {
+                if c1_dedup {
+                    // 各行 `sample_cols` 列: 少なければ全部、多ければ位置を重複なしに抜き取る (Floyd の方法)。0-1 列の重複は評価の時に除く
+                    for ri in 0..c1.rows.len() {
+                        let i = c1.rows[ri];
+                        let len = s.row(i).len();
+                        c1.pos.clear();
+                        if len <= sample_cols {
+                            c1.pos.extend(0..len);
+                        } else {
+                            for jj in len - sample_cols..len {
+                                let t = s.below(jj + 1);
+                                let q = if c1.pos.contains(&t) { jj } else { t };
+                                c1.pos.push(q);
+                            }
+                        }
+                        for pi in 0..c1.pos.len() {
+                            let (j, a) = s.row(i)[c1.pos[pi]];
+                            let Some(v) = s.tight_value(i, j, a) else { continue };
+                            if s.tabu_ok(j, v - s.x[j], step) {
+                                c1.ops.push((j, v));
+                            }
+                        }
+                    }
+                } else if total == 0 || total as f64 <= c1_full * c1_ops as f64 {
                     for &i in &c1.rows {
                         for &(j, a) in s.row(i) {
                             let Some(v) = s.tight_value(i, j, a) else { continue };
