@@ -1141,6 +1141,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `s`: 他の写しのカットの読んだ位置と、このラウンドで受け取ったカットの印
         let mut share_cursor = 0usize;
         let mut share_keys: std::collections::HashSet<Vec<(usize, u64)>> = std::collections::HashSet::new();
+        // `g` (利用者の案の 2 つ目): 渡すのは下界を上げたラウンドの後に LP で効いている (双対値が 0 でない) カットの行だけ、受け取るのは
+        // `ENOMOTO_T_MIP_OPTFACE_SHARE_START` (既定 5) ラウンド目からで、直近 `ENOMOTO_T_MIP_OPTFACE_SHARE_STALL` (既定 2) ラウンドの伸びが相対
+        // `ENOMOTO_T_MIP_OPTFACE_SHARE_EPS` (既定 1e-6) 以下 (停滞) の写しだけ、1 回に `ENOMOTO_T_MIP_OPTFACE_SHARE_MAX` (`g` では既定 5) 本まで
+        let share_gated = env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('g'));
+        let mut share_pub: std::collections::HashSet<Vec<(usize, u64)>> = std::collections::HashSet::new();
         let mut cont_stop = false;
         if let Some((w, _, _)) = self.cut_cont {
             work_cap = w as f64 / root_iters.max(1) as f64;
@@ -1544,8 +1549,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             share_keys.clear();
             if let Some((sh, id)) = job.as_ref().and_then(|j| j.share.lock().unwrap().clone()) {
                 let every = tunable!("ENOMOTO_T_MIP_OPTFACE_SHARE_EVERY", 2usize, usize).max(1);
-                if round > 0 && round % every == 0 {
-                    let lim = tunable!("ENOMOTO_T_MIP_OPTFACE_SHARE_MAX", 20usize, usize);
+                let due = if share_gated {
+                    let w = tunable!("ENOMOTO_T_MIP_OPTFACE_SHARE_STALL", 2usize, usize).max(1);
+                    let eps = tunable!("ENOMOTO_T_MIP_OPTFACE_SHARE_EPS", 1e-6, f64);
+                    let k = obj_hist.len();
+                    round >= tunable!("ENOMOTO_T_MIP_OPTFACE_SHARE_START", 5usize, usize) && k > w && obj_hist[k - 1] - obj_hist[k - 1 - w] <= eps * obj_hist[k - 1].abs().max(1.0)
+                } else {
+                    round > 0 && round % every == 0
+                };
+                if due {
+                    let lim = tunable!("ENOMOTO_T_MIP_OPTFACE_SHARE_MAX", if share_gated { 5usize } else { 20 }, usize);
                     let mut got: Vec<(f64, Vec<(usize, f64)>, f64)> = Vec::new();
                     {
                         let v = sh.cuts.lock().unwrap();
@@ -1568,7 +1581,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         j.share_in.fetch_add(got.len(), std::sync::atomic::Ordering::Relaxed);
                     }
                     for (eff, c, r) in got {
-                        share_keys.insert(c.iter().map(|&(j, a)| (j, a.to_bits())).collect());
+                        let k: Vec<(usize, u64)> = c.iter().map(|&(j, a)| (j, a.to_bits())).collect();
+                        // 受け取ったカットは送り返さない (`g`)
+                        share_pub.insert(k.clone());
+                        share_keys.insert(k);
                         cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
                     }
                 }
@@ -1737,12 +1753,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `s`: 選んだカットを他の写しに渡す (受け取ったカットのうち選ばれた数も数える)
             if let Some((sh, id)) = job.as_ref().and_then(|j| j.share.lock().unwrap().clone()) {
                 let mut used = 0usize;
+                let publish = !share_gated;
                 let mut v = sh.cuts.lock().unwrap();
                 for (c, _, r) in &rows {
                     let k: Vec<(usize, u64)> = c.iter().map(|&(j, a)| (j, a.to_bits())).collect();
                     if share_keys.contains(&k) {
                         used += 1;
-                    } else {
+                    } else if publish {
                         v.push((id, c.clone(), *r));
                     }
                 }
@@ -2174,6 +2191,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 adapt_max_cuts = if widen_double_on { (2 * max_cuts).min(wide_max) } else { wide_max }.max(max_cuts);
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: {max_cuts} cuts did not move the objective; up to {adapt_max_cuts} cuts per round from now");
+                }
+            }
+            // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `g`: 下界を上げたラウンドの後、LP で効いているカットの行 (まだ渡していないもの) を渡す
+            if share_gated && obj > prev_obj + 1e-9 * obj.abs().max(1.0) {
+                if let Some((sh, id)) = job.as_ref().and_then(|j| j.share.lock().unwrap().clone()) {
+                    let duals = self.lp.row_duals();
+                    let mut v = sh.cuts.lock().unwrap();
+                    for i in self.p.m..self.lp.num_rows().min(duals.len()) {
+                        if duals[i].abs() <= 1e-9 {
+                            continue;
+                        }
+                        let c = self.lp.row(i);
+                        let (_, u) = self.lp.row_bounds(i);
+                        if !u.is_finite() {
+                            continue;
+                        }
+                        let k: Vec<(usize, u64)> = c.iter().map(|&(j, a)| (j, a.to_bits())).collect();
+                        if share_keys.contains(&k) || !share_pub.insert(k) {
+                            continue;
+                        }
+                        v.push((id, c, u));
+                    }
                 }
             }
             if let Some(j) = &job {
