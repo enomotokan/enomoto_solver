@@ -477,6 +477,27 @@ pub(super) struct LocalMip<'a> {
     t0: Instant,
     /// これ以上探さない (解き終えた・続けられない)
     pub done: bool,
+    /// `ENOMOTO_MIP_LMIP1_CAND` (試作) の作業域
+    c1: Cand1,
+}
+
+/// `ENOMOTO_MIP_LMIP1_CAND` (試作) の候補集めの作業域: 本家 v2 の `explore_unsat_mtm_bm` に合わせ、違反行を重複なしに
+/// `ENOMOTO_T_MIP_LMIP1_ROWS` 本選び、その行の列の tight move を全部集めてから `ENOMOTO_T_MIP_LMIP1_OPS` 手を重複なしに抜き取る。
+/// 1 手の中で同じ 0-1 列は 1 回しか評価しない (本家の `m_binary_op_stamp`)。
+#[derive(Default)]
+struct Cand1 {
+    /// 集めた手 (列, 新しい値)
+    ops: Vec<(usize, f64)>,
+    /// 選んだ違反行の印 (`tok` と同じなら選び済み)
+    row_mark: Vec<u32>,
+    /// 0-1 列の評価済みの印 (`tok` と同じなら評価済み)
+    bin_mark: Vec<u32>,
+    tok: u32,
+    rows: Vec<usize>,
+    /// 計測: 集めた手の数・評価した手の数・0-1 の重複で飛ばした数 (`ENOMOTO_MIP_LOCALMIP_DEBUG` で出す)
+    n_collect: u64,
+    n_eval: u64,
+    n_dup: u64,
 }
 
 impl<'a> LocalMip<'a> {
@@ -519,6 +540,7 @@ impl<'a> LocalMip<'a> {
             chain,
             t0: Instant::now(),
             done: false,
+            c1: Cand1::default(),
         })
     }
 
@@ -587,10 +609,20 @@ impl<'a> LocalMip<'a> {
         let obj_w_upstream = lm3.contains('o');
         let sat_rows = tunable!("ENOMOTO_T_MIP_LMIP3_SAT_ROWS", 3usize, usize).max(1);
         self.s.tier2 = lm3.contains('s');
-        let LocalMip { s, res, start, lift_order, set_of, cand, buf, best_obj: best_obj_r, since_improve: since_r, round_best: round_r, restarts: restarts_r, step: step_r, chain_tries: tries_r, chain, t0, done: done_r } = self;
+        // `ENOMOTO_MIP_LMIP1_CAND` (試作、既定では使わない): 候補の集め方を本家 v2 に合わせる ([`Cand1`])。
+        // 違反行の数 `ENOMOTO_T_MIP_LMIP1_ROWS` (本家 `bms_unsat_con` 10)、1 手の候補の上限 `ENOMOTO_T_MIP_LMIP1_OPS` (本家 `bms_unsat_ops` 2250)
+        let cand1 = env_str!("ENOMOTO_MIP_LMIP1_CAND").is_some();
+        let c1_rows = tunable!("ENOMOTO_T_MIP_LMIP1_ROWS", 10usize, usize).max(1);
+        let c1_ops = tunable!("ENOMOTO_T_MIP_LMIP1_OPS", 2250usize, usize).max(1);
+        let c1_full = tunable!("ENOMOTO_T_MIP_LMIP1_FULL", 4.0, f64);
+        let LocalMip { s, res, start, lift_order, set_of, cand, buf, best_obj: best_obj_r, since_improve: since_r, round_best: round_r, restarts: restarts_r, step: step_r, chain_tries: tries_r, chain, t0, done: done_r, c1 } = self;
         let (chain, t0) = (*chain, *t0);
         let p = s.p;
         let (n, m) = (p.n, p.m);
+        if cand1 && c1.bin_mark.len() != n {
+            c1.bin_mark = vec![0; n];
+            c1.row_mark = vec![0; m + 1];
+        }
         let (mut best_obj, mut since_improve, mut round_best, mut restarts, mut step, mut chain_tries, mut done) = (*best_obj_r, *since_r, *round_r, *restarts_r, *step_r, *tries_r, false);
         let (start, lift_order, set_of, cand, buf) = (&*start, lift_order, &*set_of, cand, buf);
         loop {
@@ -690,7 +722,109 @@ impl<'a> LocalMip<'a> {
             let better = |b: &Option<(f64, bool, usize, f64, Option<(usize, f64)>, u64)>, sc: f64, bt: bool, ag: u64| {
                 b.as_ref().is_none_or(|b| sc > b.0 || (sc == b.0 && ((bt && !b.1) || (age_tie && bt == b.1 && ag < b.5))))
             };
-            for _ in 0..sample_rows.min(s.vset.len()) {
+            if cand1 {
+                c1.tok = c1.tok.wrapping_add(1);
+                if c1.tok == 0 {
+                    c1.bin_mark.iter_mut().for_each(|v| *v = 0);
+                    c1.row_mark.iter_mut().for_each(|v| *v = 0);
+                    c1.tok = 1;
+                }
+                let tok = c1.tok;
+                // 違反行を重複なしに選ぶ (少なければ全部。多ければ印を付けて引き直す)
+                c1.rows.clear();
+                let nv = s.vset.len();
+                if nv <= c1_rows {
+                    c1.rows.extend_from_slice(&s.vset);
+                } else {
+                    while c1.rows.len() < c1_rows {
+                        let q = s.below(nv);
+                        let i = s.vset[q];
+                        if c1.row_mark[i] != tok {
+                            c1.row_mark[i] = tok;
+                            c1.rows.push(i);
+                        }
+                    }
+                }
+                // 選んだ行の列の tight move を全部集める (タブーのものは除く)。
+                // 行の長さの和が `c1_full` × `c1_ops` を超えるときは、全部は集めず、行の中の位置を (行の長さに比例して) 乱数で
+                // 抜き取って集める (本家は全部集めるが、nw04 のような長い行では集めるのが 1 手の大半になる。`ENOMOTO_T_MIP_LMIP1_FULL`
+                // を大きくすれば本家と同じ)。0-1 列は集める時に重複を除く
+                c1.ops.clear();
+                let total: usize = c1.rows.iter().map(|&i| s.row(i).len()).sum();
+                if total == 0 || total as f64 <= c1_full * c1_ops as f64 {
+                    for &i in &c1.rows {
+                        for &(j, a) in s.row(i) {
+                            let Some(v) = s.tight_value(i, j, a) else { continue };
+                            if s.tabu_ok(j, v - s.x[j], step) {
+                                c1.ops.push((j, v));
+                            }
+                        }
+                    }
+                } else {
+                    let tries = 2 * c1_ops;
+                    for _ in 0..tries {
+                        if c1.ops.len() >= c1_ops {
+                            break;
+                        }
+                        let mut q = s.below(total);
+                        let mut ii = 0;
+                        while q >= s.row(c1.rows[ii]).len() {
+                            q -= s.row(c1.rows[ii]).len();
+                            ii += 1;
+                        }
+                        let i = c1.rows[ii];
+                        let (j, a) = s.row(i)[q];
+                        let bin = s.p.is_int[j] && s.lo[j] == 0.0 && s.up[j] == 1.0;
+                        if bin && c1.bin_mark[j] == tok {
+                            c1.n_dup += 1;
+                            continue;
+                        }
+                        let Some(v) = s.tight_value(i, j, a) else { continue };
+                        if s.tabu_ok(j, v - s.x[j], step) {
+                            if bin {
+                                c1.bin_mark[j] = tok;
+                            }
+                            c1.ops.push((j, v));
+                        }
+                    }
+                    // 評価の時の 0-1 の重複除きをやり直すため、印を進める
+                    c1.tok = c1.tok.wrapping_add(1);
+                    if c1.tok == 0 {
+                        c1.bin_mark.iter_mut().for_each(|v| *v = 0);
+                        c1.row_mark.iter_mut().for_each(|v| *v = 0);
+                        c1.tok = 1;
+                    }
+                }
+                let tok = c1.tok;
+                c1.n_collect += c1.ops.len() as u64;
+                // 多ければ `c1_ops` 手を重複なしに抜き取る (部分的な Fisher–Yates)
+                let k = c1.ops.len().min(c1_ops);
+                if c1.ops.len() > c1_ops {
+                    for t in 0..k {
+                        let r = t + s.below(c1.ops.len() - t);
+                        c1.ops.swap(t, r);
+                    }
+                }
+                for t in 0..k {
+                    let (j, v) = c1.ops[t];
+                    // 0-1 列は 1 手で 1 回だけ (どの行から来ても反転の手は同じ)
+                    if s.p.is_int[j] && s.lo[j] == 0.0 && s.up[j] == 1.0 {
+                        if c1.bin_mark[j] == tok {
+                            c1.n_dup += 1;
+                            continue;
+                        }
+                        c1.bin_mark[j] = tok;
+                    }
+                    c1.n_eval += 1;
+                    let d = v - s.x[j];
+                    let sc = s.score(j, d);
+                    let bt = s.breakthrough(j, d);
+                    if better(&best, sc, bt, s.last[j]) {
+                        best = Some((sc, bt, j, v, None, s.last[j]));
+                    }
+                }
+            }
+            for _ in 0..if cand1 { 0 } else { sample_rows.min(s.vset.len()) } {
                 let kk = s.below(s.vset.len());
                 let i = s.vset[kk];
                 let len = s.row(i).len();
@@ -877,6 +1011,9 @@ impl<'a> LocalMip<'a> {
         }
         res.steps = step;
         (*best_obj_r, *since_r, *round_r, *restarts_r, *step_r, *tries_r, *done_r) = (best_obj, since_improve, round_best, restarts, step, chain_tries, done);
+        if debug && cand1 {
+            eprintln!("MIP:   [localmip] cand1: {step} steps, collected {} evaluated {} binary duplicates skipped {} ({:.2}s)", c1.n_collect, c1.n_eval, c1.n_dup, t0.elapsed().as_secs_f64());
+        }
         if debug && done {
             eprintln!(
                 "MIP:   [localmip] {step} steps, {restarts} restarts, least violated rows {}, pair/chain moves {} (chain tries {chain_tries}, columns {}), found {} (first {:?}), {:.2}s",
