@@ -3817,6 +3817,10 @@ fn solve_slope_intercept_dual_retrying(std: &StdForm, opts: &crate::types::LpOpt
     // 与えられた基底から始める求解 ([`solve_slope_intercept_dual_from_basis`]) は、1 回目が基底を取り出して消すので、
     // 解き直しのために写しを取っておく。
     let warm = WARM_BASIS.with(|w| w.borrow().clone());
+    // 試作 `ENOMOTO_SIMPLEX_RETRY_KEEP_HINT=1` (既定では使わない。analysis/rootlp_ipm_fail_20261105.md): 非基底の向きの希望
+    // ([`set_warm_nb`]) も 1 回目が取り出して消すので、写しを取っておき、同じ基底からの解き直しにも渡す。momentum1 の根の LP の
+    // クロスオーバーの仕上げ: 主単体法が破綻した後の解き直しで向きが捨てられ、主実行不能 2 本の基底から主実行不能 6,190 本になっていた。
+    let warm_nb = env_str!("ENOMOTO_SIMPLEX_RETRY_KEEP_HINT").is_some_and(|v| v != "0").then(|| WARM_NB.with(|w| w.borrow().clone())).flatten();
     let res = solve_slope_intercept_dual_with(std, opts, false);
     let singular = SINGULAR_BAILOUT.with(|f| f.get());
     let uncertified = RESTART_BAILOUT.with(|f| f.get());
@@ -3855,7 +3859,11 @@ fn solve_slope_intercept_dual_retrying(std: &StdForm, opts: &crate::types::LpOpt
         SINGULAR_BAILOUT.with(|f| f.set(false));
         RESTART_BAILOUT.with(|f| f.set(false));
         WARM_BASIS.with(|w| *w.borrow_mut() = Some(wb));
+        if let Some(h) = &warm_nb {
+            WARM_NB.with(|w| *w.borrow_mut() = Some(h.clone()));
+        }
         let res = solve_slope_intercept_dual_with(std, opts, true);
+        WARM_NB.with(|w| *w.borrow_mut() = None);
         WARM_BASIS.with(|w| *w.borrow_mut() = None);
         let failed = SINGULAR_BAILOUT.with(|f| f.get()) || RESTART_BAILOUT.with(|f| f.get());
         if res.is_some() || !failed {

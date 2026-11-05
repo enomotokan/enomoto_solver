@@ -1230,13 +1230,18 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 非基底の検出。新たに非基底になった列を返す。
     // 列 `j` (基底候補) が境界に十分近ければ非基底にする (値を境界に置き、`newly` に積む)。
     // 戻り値は `x_j` の変化量 (残差の増分更新用)。
+    // 試作 `ENOMOTO_XO_DETECT_MAX_DIST=d` (既定 0 = 使わない。analysis/rootlp_ipm_fail_20261105.md): 境界からの距離が `d (1 + |境界|)` を
+    // 超える列は、被約費用が大きくても非基底にしない (`x_j − l_j ≤ min(γ s_j, d (1 + |l_j|))`)。momentum1 の根の LP は双対の乗数が
+    // 1e7〜1e12 で、境界から 0.5 離れた列まで境界に固定し、検出の前後で主残差が 1.4e-7 → 2.9e-3 に増えて頂点の主実行不能 580 本。
+    let detect_max_dist = tunable!("ENOMOTO_XO_DETECT_MAX_DIST", 0.0f64, f64);
     let detect_one = |j: usize, ps: &mut [PStat], x: &mut [f64], s: &[f64], newly: &mut Vec<usize>| -> Option<f64> {
         let (l, u) = (std.lb[j], std.ub[j]);
         let stat = if l == u {
             Some(if s[j] >= 0.0 { PStat::Lower } else { PStat::Upper })
         } else {
-            let at_l = l.is_finite() && x[j] - l <= (gamma[j] * s[j]).max(tol);
-            let at_u = u.is_finite() && u - x[j] <= (-gamma[j] * s[j]).max(tol);
+            let cap = |b: f64, v: f64| if detect_max_dist > 0.0 { v.min(detect_max_dist * (1.0 + b.abs())) } else { v };
+            let at_l = l.is_finite() && x[j] - l <= cap(l, gamma[j] * s[j]).max(tol);
+            let at_u = u.is_finite() && u - x[j] <= cap(u, -gamma[j] * s[j]).max(tol);
             match (at_l, at_u) {
                 (true, true) => Some(if x[j] - l <= u - x[j] { PStat::Lower } else { PStat::Upper }),
                 (true, false) => Some(PStat::Lower),
@@ -3685,7 +3690,17 @@ fn megiddo_dual_push(
     let mut xb = vec![0.0; m];
     compute_xb(&lu, basis_pos, nb_status, &mut xb);
     // 押し出す基底変数 (被約費用が許容誤差を超える)。
-    let cand: Vec<usize> = basis.iter().copied().filter(|&j| s[j].abs() > tol_d * (1.0 + std.c[j].abs())).collect();
+    let mut cand: Vec<usize> = basis.iter().copied().filter(|&j| s[j].abs() > tol_d * (1.0 + std.c[j].abs())).collect();
+    // 試作 `ENOMOTO_T_XO_DUAL_PUSH_ORDER` (既定 0 = 基底の並び。analysis/rootlp_ipm_fail_20261105.md): 押し出す順。
+    // 1: |s_j| の大きい順、2: |s_j| の小さい順、3: 構造列を先に (スラックを後に)、4: スラックを先に、5: 列の非零の多い順。
+    match tunable!("ENOMOTO_T_XO_DUAL_PUSH_ORDER", 0u8, u8) {
+        1 => cand.sort_by(|&a, &b| s[b].abs().total_cmp(&s[a].abs())),
+        2 => cand.sort_by(|&a, &b| s[a].abs().total_cmp(&s[b].abs())),
+        3 => cand.sort_by_key(|&j| (j >= n - m) as u8),
+        4 => cand.sort_by_key(|&j| (j < n - m) as u8),
+        5 => cand.sort_by_key(|&j| std::cmp::Reverse(col(std, j).len())),
+        _ => {}
+    }
     let mut kernel = BasisKernel::new(m, ft_max);
     let mut rho = vec![0.0; m];
     let mut nzr: Vec<usize> = Vec::new();
@@ -3918,7 +3933,8 @@ fn megiddo_dual_push(
             ci = next;
         }
         if debug {
-            eprintln!("CROSSOVER dual push fast: blocks={nchecks} block={block}");
+            let ns = cand.iter().filter(|&&j| j >= n - m).count();
+            eprintln!("CROSSOVER dual push fast: blocks={nchecks} block={block} candidates: slack {ns} structural {}", cand.len() - ns);
         }
     }
     for (ci, &j) in cand.iter().enumerate() {

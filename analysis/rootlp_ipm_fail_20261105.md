@@ -374,6 +374,46 @@ opm2-z10-s4 (`exp.jsonl` の `_load_ipx`・`_dualpush`・`_adopt*`):
   同じ LP で 4 秒 (12,487 反復) なので、IPX は内点法の最後に保つ基底 (前処理の行列のための基底) から始めて押し出す候補がずっと少ないと見られる
   (推測。IPX の中身は確かめていない)。次の手は、基底の選び方 (被約費用が 0 でないスラックで埋めない) か、押し出しの順番。
 
+## 10. 残りの課題の追加の調査 (opm2-z10-s4 の押し出しの候補、momentum1 の仕上げ)
+
+### 10.1 opm2-z10-s4: 押し出しの候補を減らせるか
+
+- 事実: 候補 122,806 本は **すべて行のスラック** (`ENOMOTO_DEBUG_CROSSOVER` の `dual push fast` の行)。基底 146,325 本のうち構造列は 1.8 万本だけ。
+- 事実: 候補の数は「行の数 − 内点法の双対で被約費用が 0 の列の数 (23,522)」で決まり、被約費用が 0 の列は既に基底にほぼ入っている
+  (候補でない基底 23,519 本)。基底の選び方 (`D \ B` を先に使う・`ENOMOTO_T_XO_FILL_BY_S`) では減らせない。
+  (なお基底の選択は `B` の後に `D \ B` を試さずスラックで埋めている。コメントとは違うが、この問題では効かない。)
+- 押し出しの順 (試作 `ENOMOTO_T_XO_DUAL_PUSH_ORDER`、既定 0 = 基底の並び): 0 が最良 (押し出し 54.2 秒、ピボット 1.06 万)。
+  1 (|s| の大きい順) 69.2 秒・ピボット 1.66 万、2 (|s| の小さい順) 177.8 秒・ピボット 5.7 万。3・4 (構造列・スラックの順) は候補がすべてスラックなので 0 と同じ。
+- 続く K 本の候補をまとめて押し出す案 (まとめた移動 `Δy = B^-T Σ s_j e_{r_j}` は BTRAN 1 回、移動後に非基底の被約費用が実行可能なら途中も
+  実行可能なので、ピボットなしで一度に済む。成功で K を倍、失敗で半分にしてその塊は 1 本ずつ) を試した: 候補の 64% (7.9 万本) をまとめて
+  押し出せたが、試行 1 回が 1.65 ミリ秒 (密な BTRAN と全行の走査) で失敗も 55%、押し出しは 54 → 75 秒と悪化。コードは外した。
+- 結論: この問題の押し出しは 55 秒前後 (`DUAL_PUSH_FAST`) が今の形での下限に近い。候補ごとの BTRAN を軽くするには、スラックの多い基底の
+  構造 (`ρ` は構造列の受け持つ 1.8 万行とその行だけ) を使って 1.8 万次の行列だけで解く専用の BTRAN が要る (未実装)。
+
+### 10.2 momentum1: 仕上げの主単体法の破綻
+
+試作 (既定では使わない):
+- `ENOMOTO_SIMPLEX_RETRY_KEEP_HINT=1` (`slope_intercept_dual.rs` の `solve_slope_intercept_dual_retrying`): 破綻の後の同じ基底からの解き直しに、
+  非基底の向きの希望も渡す (従来は 1 回目が希望を取り出して消すので、解き直しは向きを捨てていた)。
+- `ENOMOTO_XO_DETECT_MAX_DIST=d` (`crossover.rs` の非基底の検出): 境界から `d (1 + |境界|)` より離れた列は被約費用が大きくても非基底にしない。
+
+結果 (こちらの内点・IPX の内点を読ませて、`exp.jsonl` の `_md*`・`_keep_*`・`_rise_ipx`・`_rp*`):
+
+| 設定 | 押し出しの後の頂点 (主実行不能) | 仕上げ |
+|---|---|---|
+| 距離の上限 1e-6 / 1e-4 / 1e-2 (+ 向きを解き直しにも) | 1,573 / 387 / 581 本 | どれも破綻 (頂点なし) |
+| γ 1e-4 倍 + 希望を全部受ける + 向きを解き直しにも (こちらの内点) | 73 本 | 解き直しでも向きが残る (主実行不能 67 本から再開) が、双対単体法が「50 回続けてピボットを捨てた」で破綻 |
+| 同 (IPX の内点) | 49 本 | 主実行不能 2 本から双対単体法 389 反復 → 主単体法が 750 反復目で破綻、解き直しも同じ所で破綻 |
+| 同 + 目的値の増加の上限を外す (`ENOMOTO_T_PRIMAL_RISE_LIMIT=1e6`) | | 主単体法は 650 反復目まで目的値が下がった後、主実行可能性が崩れて発散 (目的値 5.1e4 → 1.4e9、|x_B| 6.8e8) |
+| 同 + 主単体法の相対ピボットの許容 1e-3 / 1e-2 (`ENOMOTO_T_PRIMAL_REL_PIVOT`) | | 挙動がまったく同じ (この仕上げの経路では効いていない) |
+
+- 事実: 向きの希望は解き直しにも渡るようになった (warm start の「hint agree 5174」) が、仕上げは直らない。
+- 事実: 破綻は主単体法の数値的な発散 (目的値の増加の検出は正しく働いている)。
+- 推測: 双対の乗数が 1e7〜1e12 になる LP で、押し出しで作った基底が悪条件 (基底の逆行列の要素が非常に大きい) なため、
+  主単体法の比率テストの丸めで主実行可能性が崩れる。HiGHS は同じ LP を主単体法でも一から 12,303 反復で解くので、こちらの主単体法の
+  数値の扱い (比率テストの許容・境界のずらし・再分解の後の x_B の検査) の問題で、二段解法側 (セッション 2 の受け持ち) に近い。
+- 既定の動き (主実行不能 580 本で 19 秒で諦める) は、競争では二段解法 (10.8 秒) が先に終わるので害は小さい。既定は変えない。
+
 ## ファイル
 
 - `rootlp_ipm_fail_20261105/one.py`・`highs_ipm.py`・`summ.py`・`bench58.py`: 計測と集計 (上の「測り方」)。
@@ -387,6 +427,8 @@ opm2-z10-s4 (`exp.jsonl` の `_load_ipx`・`_dualpush`・`_adopt*`):
   `src/simplex/crossover.rs` (`ENOMOTO_XO_IPM_RETRY_PC`・`ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST`・`ENOMOTO_XO_MIP_CLEANUP_HINT`)、
   `src/interior_point/kkt.rs` (`ENOMOTO_IPM_KKT_AUG_RATIO`・`ENOMOTO_IPM_DENSE_*`)。
 - `others/`: 8 節 (`ipm_solvers.py`・`make_point.py`・`ipm_runs.jsonl`・IPX のログ)。`trial2.jsonl`・`both_trial2.jsonl`: 8 節の試作一式。
+- コード (10 節): `src/simplex/crossover.rs` (`ENOMOTO_T_XO_DUAL_PUSH_ORDER`・`ENOMOTO_XO_DETECT_MAX_DIST`・候補の内訳の表示)、
+  `src/simplex/slope_intercept_dual.rs` (`ENOMOTO_SIMPLEX_RETRY_KEEP_HINT`)。`cargo test --release --lib` 341 件通過。
 - コード (9 節): `src/simplex/crossover.rs` の `megiddo_dual_push` (`ENOMOTO_XO_DUAL_PUSH_FAST`・`ENOMOTO_T_XO_DUAL_PUSH_BLOCK`、時間の内訳の表示)、
   `src/simplex/basis_kernel.rs` の `ftran_a_tilde_only`、`src/simplex/lu.rs` の `ftran_a_tilde_into` と `u_transpose_sweep_heap` の tick。
   `trial3.jsonl`・`both_trial3.jsonl`: 9 節の試作一式。
