@@ -4,7 +4,7 @@
 import json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
-WT = D.parents[1]
+WT = D.parents[2]
 sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
 CFGS = {

@@ -4,7 +4,7 @@ import json, math, sys
 from collections import defaultdict
 from pathlib import Path
 D = Path(__file__).resolve().parent
-sys.path.insert(0, str(D.parents[1] / "analysis" / "cbcimpl_20261029"))
+sys.path.insert(0, str(D.parents[2] / "analysis" / "cbcimpl_20261029"))
 from probs import SETS, PROBS  # noqa: E402
 R = defaultdict(dict); cfgs = []
 for l in open(sys.argv[1] if len(sys.argv) > 1 else D / "res58.jsonl"):
