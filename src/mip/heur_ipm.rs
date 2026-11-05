@@ -64,9 +64,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
-        if mode != 0 && Instant::now() < deadline {
+        // 試作 `ENOMOTO_MIP_HO4_ACFIX` (analysis/highs_only_20261105/G4.md、既定では使わない): HiGHS の
+        // `finishAnalyticCenterComputation` と同じく、費用 0 の根の LP (カット込み) の解析的中心で境界から
+        // `ENOMOTO_T_MIP_HO4_ACFIX_TOL` (既定 1e-6) 以内にある整数列を、その境界に大域的に固定する (解析的中心は実行可能領域の
+        // 相対的な内部の点なので、そこで境界にある列は LP の実行可能領域全体でその値。カットは整数解を切らないので整数解でも同じ)。
+        // satellites2-60-fs では HiGHS が根で 11955 列をこれで固定し (40.3%)、再スタートで 12852 x 31721 -> 6047 x 12408 になる
+        let acfix = !self.params.submip && self.snap.is_none() && env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some();
+        if (mode != 0 || acfix) && Instant::now() < deadline {
             if let Some(ip) = self.lp.interior_point(true, false, deadline) {
-                centers.push(("analytic center", ip.x));
+                if acfix {
+                    let tol = tunable!("ENOMOTO_T_MIP_HO4_ACFIX_TOL", 1e-6, f64);
+                    let (mut nlo, mut nup) = (0usize, 0usize);
+                    for j in 0..p.n {
+                        if !p.is_int[j] || self.dom.global_lo[j] >= self.dom.global_up[j] {
+                            continue;
+                        }
+                        let (lo, up) = (self.dom.global_lo[j], self.dom.global_up[j]);
+                        if lo.is_finite() && ip.x[j] <= lo + tol {
+                            self.dom.tighten_global(p, j, true, lo);
+                            nlo += 1;
+                        } else if up.is_finite() && ip.x[j] >= up - tol {
+                            self.dom.tighten_global(p, j, false, up);
+                            nup += 1;
+                        }
+                    }
+                    if self.params.verbose {
+                        eprintln!(
+                            "MIP:   interior rounding: ENOMOTO_MIP_HO4_ACFIX: fixed {nlo} integer columns at the lower bound and {nup} at the upper bound at the analytic center (newly fixed {}, {:.2}s)",
+                            self.newly_fixed_ints(),
+                            t0.elapsed().as_secs_f64()
+                        );
+                    }
+                }
+                if mode != 0 {
+                    centers.push(("analytic center", ip.x));
+                }
             }
         }
         if self.params.verbose {

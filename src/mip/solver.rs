@@ -1195,6 +1195,9 @@ pub(crate) struct TreeSnapshot {
 /// 処理しなかった (analysis/mzzv42z_r4_20261021.md。r4 の「従が根の LP で時間切れなら下界を +inf」は既定の
 /// [`Solver::root_fail_bound`] に入っているので、inv/mzzv42z-20261023 でここに移したのは基底の受け渡しだけ)
 /// 診断 `ENOMOTO_MIP_HO4_DIAG` (analysis/highs_only_20261105/G4.md、解き方は変えない)
+/// 試作 `ENOMOTO_MIP_HO4_NODECAP` 用: 主 (サブ MIP の外) の最後の根の LP の秒 (f64 のビット)
+static HO4_ROOT_LP_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn ho4_diag() -> bool {
     env_str!("ENOMOTO_MIP_HO4_DIAG").is_some()
 }
@@ -6259,6 +6262,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let root_iters = self.lp.total_iterations();
         self.root_lp_iters = root_iters;
         self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
+        if !self.params.submip {
+            HO4_ROOT_LP_SECS.store(self.root_lp_secs.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
         if self.params.verbose {
             eprintln!("MIP: root LP {:.10e} ({} iters, {:.2}s)", root_obj, self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
         }
@@ -8387,6 +8393,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 残り時間を使い切るのを防ぐ。超えたら全論理変数基底から解き直し、それも超えたら LP なしで分枝する
                 let t_lp = Instant::now();
                 let cap = Duration::from_secs_f64((50.0 * self.node_lp_secs / self.node_lps.max(1) as f64).max(0.5));
+                // 試作 `ENOMOTO_MIP_HO4_NODECAP` (analysis/highs_only_20261105/G4.md、既定では使わない): 上限を
+                // `ENOMOTO_T_MIP_HO4_NODECAP_MULT` (既定 1) x 主の根の LP の秒より短くしない。まだノードの LP を解いていないスレッドでは
+                // 上限が 0.5 秒になり、根の LP が数十秒の問題 (satellites2-60-fs・neos-3216931-puriri) では木の各スレッドの最初のノードが
+                // 全論理変数基底からの解き直しも含めて切られ、LP なしで分枝していた
+                let cap = if !self.params.submip && env_str!("ENOMOTO_MIP_HO4_NODECAP").is_some() {
+                    let r = f64::from_bits(HO4_ROOT_LP_SECS.load(std::sync::atomic::Ordering::Relaxed));
+                    cap.max(Duration::from_secs_f64((tunable!("ENOMOTO_T_MIP_HO4_NODECAP_MULT", 1.0, f64) * r).min(1e6)))
+                } else {
+                    cap
+                };
                 let capped = |s: &Self, it: u64| {
                     let mut l = s.limits(it);
                     l.deadline = Some(match l.deadline {
