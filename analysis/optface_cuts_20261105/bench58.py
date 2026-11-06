@@ -16,6 +16,7 @@ CFGS = {  # (スレッド数, 足す環境変数)
     "def": (4, {}), "mv": (4, {"ENOMOTO_MIP_OPTFACE_MOVE": "f"}), "par": (4, {"ENOMOTO_MIP_OPTFACE_PARCUTS": "3"}),
     "mvpar": (4, {"ENOMOTO_MIP_OPTFACE_MOVE": "f", "ENOMOTO_MIP_OPTFACE_PARCUTS": "3"}),
     "sgl": (4, {"ENOMOTO_MIP_OPTFACE_PARCUTS": "3sg", "ENOMOTO_T_MIP_OPTFACE_SHARE_EPS": "1e-4", "ENOMOTO_T_MIP_OPTFACE_SHARE_START": "3"}),
+    "k": (4, {"ENOMOTO_MIP_OPTFACE_PARCUTS": "3k"}),
 }
 
 

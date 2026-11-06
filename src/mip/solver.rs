@@ -3224,11 +3224,13 @@ pub(super) struct CutRace {
     pub(super) winner: std::sync::atomic::AtomicIsize,
     /// 勝った写しが使う分離のスレッド数
     pub(super) total_threads: usize,
+    /// `x`: 下界を届けるときの各写しの LP のカットの行 (写しの番号, 係数, 右辺 (<=))
+    pub(super) rows: std::sync::Mutex<Vec<(usize, Vec<(usize, f64)>, f64)>>,
 }
 
 impl CutRace {
     pub(super) fn new(k: usize, total_threads: usize) -> Self {
-        CutRace { objs: std::sync::Mutex::new(vec![None; k]), winner: std::sync::atomic::AtomicIsize::new(-1), total_threads }
+        CutRace { objs: std::sync::Mutex::new(vec![None; k]), winner: std::sync::atomic::AtomicIsize::new(-1), total_threads, rows: std::sync::Mutex::new(Vec::new()) }
     }
 
     /// 写し `id` の下界を届ける (2 回目からは無視)。全部そろったら一番高い写しを勝ちにする

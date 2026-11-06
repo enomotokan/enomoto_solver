@@ -1162,6 +1162,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut share_pub: std::collections::HashSet<Vec<(usize, u64)>> = std::collections::HashSet::new();
         let mut race_rep = RaceReport { race: job.as_ref().and_then(|j| j.race.lock().unwrap().clone()), obj: prev_obj };
         let race_rounds = tunable!("ENOMOTO_T_MIP_OPTFACE_MERGE_ROUNDS", 5usize, usize).max(1);
+        // `x`: 勝った写しが次のラウンドの候補に足す、負けた写しのカット (自分の LP の解を切るもの)
+        let race_x = env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('x'));
+        let mut race_extra: Vec<(f64, Vec<(usize, f64)>, f64)> = Vec::new();
         let mut cont_stop = false;
         if let Some((w, _, _)) = self.cut_cont {
             work_cap = w as f64 / root_iters.max(1) as f64;
@@ -1298,6 +1301,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             race_rep.obj = prev_obj;
             if round == race_rounds {
                 if let Some((r, id)) = race_rep.race.take() {
+                    // `x`: 届ける前に自分の LP のカットの行を置き場に入れる
+                    if race_x {
+                        let mut v = r.rows.lock().unwrap();
+                        for i in self.p.m..self.lp.num_rows() {
+                            let (_, u) = self.lp.row_bounds(i);
+                            if u.is_finite() {
+                                v.push((id, self.lp.row(i), u));
+                            }
+                        }
+                    }
                     r.report(id, prev_obj);
                     let tw = std::time::Instant::now();
                     let w = loop {
@@ -1315,6 +1328,40 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     if let Some(j) = &job {
                         j.boost.store(r.total_threads, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    // `x`: 負けた写しのカットのうち、勝った写し (自分) の今の LP の解を切るものを、効き目の大きい順に
+                    // `ENOMOTO_T_MIP_OPTFACE_RACE_MAX` (既定 200) 本まで次のラウンドの候補に足す (選ぶのは既定の選び方)
+                    if race_x {
+                        let xw = self.lp.col_values();
+                        let own: std::collections::HashSet<Vec<(usize, u64)>> = (self.p.m..self.lp.num_rows()).map(|i| self.lp.row(i).iter().map(|&(j, a)| (j, a.to_bits())).collect()).collect();
+                        let v = r.rows.lock().unwrap();
+                        let mut seen = std::collections::HashSet::new();
+                        let (mut nall, mut nviol) = (0usize, 0usize);
+                        for (from, c, rhs) in v.iter() {
+                            if *from == id {
+                                continue;
+                            }
+                            nall += 1;
+                            let k: Vec<(usize, u64)> = c.iter().map(|&(j, a)| (j, a.to_bits())).collect();
+                            if own.contains(&k) || !seen.insert(k) {
+                                continue;
+                            }
+                            let act: f64 = c.iter().map(|&(j, a)| a * xw[j]).sum();
+                            let norm = c.iter().map(|&(_, a)| a * a).sum::<f64>().sqrt();
+                            let eff = (act - rhs) / norm.max(1e-300);
+                            if act - rhs > 1e-6 * (1.0 + rhs.abs()) && eff >= 1e-5 {
+                                nviol += 1;
+                                race_extra.push((eff, c.clone(), *rhs));
+                            }
+                        }
+                        race_extra.sort_by(|a, b| b.0.total_cmp(&a.0));
+                        race_extra.truncate(tunable!("ENOMOTO_T_MIP_OPTFACE_RACE_MAX", 200usize, usize));
+                        if let Some(j) = &job {
+                            j.share_in.fetch_add(race_extra.len(), std::sync::atomic::Ordering::Relaxed);
+                        }
+                        if self.params.verbose || env_str!("ENOMOTO_MIP_OPTFACE_RACE_LOG").is_some() {
+                            eprintln!("MIP: cut round {round}: background copy {id} won: {nall} cut rows of the other copies, {nviol} cut off this LP point, {} added to the candidates", race_extra.len());
+                        }
                     }
                 }
             }
@@ -1597,6 +1644,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // (既定 2) ラウンドごとに読み、今の LP の点で破られているものを効き目の大きい順に `ENOMOTO_T_MIP_OPTFACE_SHARE_MAX` (既定 20) 本まで
             // 候補に足す (LP にそのまま入れず、既定の選び方 (効き目・平行度・本数の上限) に任せる)
             share_keys.clear();
+            // `x`: 勝ったときに集めた負けた写しのカットを、このラウンドの候補に足す (1 回だけ)
+            for (eff, c, r) in race_extra.drain(..) {
+                share_keys.insert(c.iter().map(|&(j, a)| (j, a.to_bits())).collect());
+                cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
+            }
             if let Some((sh, id)) = job.as_ref().and_then(|j| j.share.lock().unwrap().clone()) {
                 let every = tunable!("ENOMOTO_T_MIP_OPTFACE_SHARE_EVERY", 2usize, usize).max(1);
                 let due = if share_gated {
@@ -1800,6 +1852,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
             total_added += rows.len();
+            // `x` (共有の置き場がないとき): 負けた写しから足したカットのうち選ばれた数を数える
+            if race_x && !share_keys.is_empty() && job.as_ref().is_some_and(|j| j.share.lock().unwrap().is_none()) {
+                let used = rows.iter().filter(|(c, _, _)| share_keys.contains(&c.iter().map(|&(j, a)| (j, a.to_bits())).collect::<Vec<_>>())).count();
+                if let Some(j) = &job {
+                    j.share_used.fetch_add(used, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `s`: 選んだカットを他の写しに渡す (受け取ったカットのうち選ばれた数も数える)
             if let Some((sh, id)) = job.as_ref().and_then(|j| j.share.lock().unwrap().clone()) {
                 let mut used = 0usize;
