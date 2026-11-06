@@ -11594,6 +11594,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if hybrid { s.pc.hybrid_score(j, f) } else { s.pc.score(j, f) }
         };
+        // `ENOMOTO_MIP_S4_DEGSCORE` (試作、既定では使わない。analysis/highs_slow_20261106/S4.md): 根以外のノードで LP の双対退化の度合いを
+        // HiGHS の `computeLPDegneracy` に倣って測り (非基底の被約費用 0 の割合 d が 0.8 以上なら 10^(10 (d - 0.7))、基底と被約費用 0 の列の数と
+        // 行の数の比 r が 2 以上ならさらに 10 r 倍)、擬似費用の点数をその値で割る (HiGHS の `setDegeneracyFactor`。退化したノードでは推論・打ち切りの
+        // 点数で列を選ぶ)。neos-957323 は再スタートの後の木で全ノードが退化と判定され、開いたノードが刈れずに増え続けた
+        if env_str!("ENOMOTO_MIP_S4_DEGSCORE").is_some() {
+            let fac = if depth > 0 {
+                let (deg, ratio) = self.dual_degeneracy();
+                let mut f = if deg >= 0.8 { 10f64.powf(10.0 * (deg - 0.7)) } else { 1.0 };
+                if ratio >= 2.0 {
+                    f *= 10.0 * ratio;
+                }
+                f
+            } else {
+                1.0
+            };
+            self.pc.degen_fac = fac;
+        }
         let mut cands: Vec<(usize, f64, f64)> = frac.iter().map(|&(j, v)| (j, v, score_of(self, j, v, node_obj))).collect();
         // 診断 (`poly_diag`): 折れ線がどれだけ擬似費用の見積もりを引き上げ、スコアの 1 位を変えるか (選び方には使わない)
         if sb_ancestor() && self.sb_cur.as_ref().is_some_and(|s| !s.polys.is_empty()) {
