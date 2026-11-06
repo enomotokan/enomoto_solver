@@ -429,6 +429,10 @@ pub fn solve_mip(
     if solver::end_diag() || params.verbose {
         eprintln!("MIP: solve returned {:?} after {:.2}s (time limit {:.2}s)", r.status, t_solve.elapsed().as_secs_f64(), params.time_limit);
     }
+    // `ENOMOTO_MIP_SUBA_CUT` (試作): サブ MIP が打ち切り値より悪いとして捨てた解の数
+    if params.verbose && solver::suba_cut() {
+        eprintln!("MIP: SUBA_CUT rejected {} sub-MIP solutions worse than the cutoff", solver::SUBA_CUT_REJECTS.load(std::sync::atomic::Ordering::Relaxed));
+    }
     if crate::simplex::nb_diag::on() {
         crate::simplex::nb_diag::print(t_solve.elapsed().as_secs_f64());
     }

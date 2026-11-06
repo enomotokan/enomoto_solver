@@ -2125,6 +2125,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // (1601 列で 275 ノード、4817 列で 31 ノード、6417 列で 0 ノード、どれも時間切れ)、時間を使うだけだった
             let mut target = tunable!("ENOMOTO_T_MIP_NOINC_RENS_RATE", 0.8, f64);
             let mut tries = tunable!("ENOMOTO_T_MIP_NOINC_RENS_TRIES", 1usize, usize).max(1);
+            // `ENOMOTO_MIP_SUBA_RATE` の `z` ([`suba_rate`]): 目標を固定率の記録から決める (初期 0.6)
+            if suba_rate('z') && !nested {
+                target = self.target_fix_rate();
+            }
             if rens_highs {
                 target = tunable!("ENOMOTO_T_MIP_RENS_HIGHS_RATE", 0.6, f64);
                 tries = tunable!("ENOMOTO_T_MIP_RENS_HIGHS_TRIES", 4usize, usize).max(1);
@@ -2168,6 +2172,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         if env_str!("ENOMOTO_MIP_RENS_DIVE").is_none() {
+            // `ENOMOTO_MIP_SUBA_RATE` の `n` ([`suba_rate`]): 外側の根の RENS の固定を目標の固定率で止める
+            if suba_rate('n') && self.nodes <= 1 && !self.force_fix_cap {
+                self.force_fix_cap = true;
+                let r = self.rens_old(_x);
+                self.force_fix_cap = false;
+                return r;
+            }
             return self.rens_old(_x);
         }
         self.rens_dive()
@@ -2806,7 +2817,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         fixes.sort_by_key(|&(_, v, _)| (v == 0.0) as u8);
         let rate = |lo: &[f64], up: &[f64]| free.iter().filter(|&&j| lo[j] >= up[j]).count() as f64 / free.len() as f64;
-        let (mut lo, mut up, _) = self.propagated_fixings(&fixes);
+        // `ENOMOTO_MIP_SUBA_RATE` の `i`・`t` ([`suba_rate`]): 一致する列の固定を乱数の順に目標の固定率で止める
+        let suba = !self.params.submip && if self.nodes <= 1 { suba_rate('i') } else { suba_rate('t') };
+        let suba_target = suba.then(|| self.target_fix_rate());
+        if suba {
+            self.shuffle_fixes(&mut fixes);
+        }
+        let agree = fixes.clone();
+        let (mut lo, mut up) = match suba_target {
+            Some(t) => {
+                let (lo, up, _) = self.capped_fixings(&fixes, t);
+                (lo, up)
+            }
+            None => {
+                let (lo, up, _) = self.propagated_fixings(&fixes);
+                (lo, up)
+            }
+        };
         let mut fr = rate(&lo, &up);
         let fr0 = fr;
         if fr < 0.25 {
@@ -2850,7 +2877,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         if self.params.verbose && self.nodes <= 1 {
-            eprintln!("MIP:   RINS (HiGHS fill): fixing rate {fr0:.2} from agreeing columns, {fr:.2} after fill ({} free integer columns)", free.len());
+            eprintln!("MIP:   RINS (HiGHS fill): fixing rate {fr0:.2} from agreeing columns, {fr:.2} after fill ({} free integer columns){}", free.len(), suba_target.map_or(String::new(), |t| format!(", SUBA_RATE target {t:.2}")));
         }
         if fr < 0.1 {
             return false;
@@ -2866,7 +2893,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return false;
             }
         }
+        if suba {
+            return self.suba_rins_solve(lo, up, fr, &agree, free.len());
+        }
         self.solve_submip(lo, up, 500)
+    }
+
+    /// `ENOMOTO_MIP_SUBA_RATE` の `i`・`t` ([`suba_rate`]): 固定率 `fr` の RINS のサブ MIP を解き、固定率の記録に入れる。外側の根では、
+    /// 実行不能なら達した固定率の半分 (0.25 以上) を目標に一致する列 `agree` (乱数の順) を固定し直して `ENOMOTO_T_MIP_SUBA_RATE_TRIES` 回まで解き直す
+    fn suba_rins_solve(&mut self, lo: Vec<f64>, up: Vec<f64>, fr: f64, agree: &[(usize, f64, f64)], nfree: usize) -> bool {
+        let (mut lo, mut up, mut fr) = (lo, up, fr);
+        let tries = if self.nodes <= 1 { tunable!("ENOMOTO_T_MIP_SUBA_RATE_TRIES", 1usize, usize) } else { 0 };
+        for t in 0..=tries {
+            let mut sub = self.p.clone();
+            sub.col_lo = lo;
+            sub.col_up = up;
+            self.submip_fix_rate = Some(fr);
+            let r = self.solve_submip_problem(sub, 500, None);
+            if self.params.verbose && self.nodes <= 1 {
+                eprintln!("MIP:   RINS (SUBA_RATE) try {}: fixing rate {fr:.2}, {nfree} free integer columns, status {:?}", t + 1, r.as_ref().map(|r| r.0));
+            }
+            match r {
+                Some((_, true)) => return true,
+                Some((super::solver::MipStatus::Infeasible, false)) if t < tries && 0.5 * fr >= 0.25 && !self.time_up() => {
+                    let (l2, u2, f2) = self.capped_fixings(agree, 0.5 * fr);
+                    (lo, up, fr) = (l2, u2, f2);
+                }
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// 目的関数の台のサブ MIP (`ENOMOTO_MIP_OBJ_SUPPORT`、試作): 費用のある整数列が少ない問題 (整数列の
@@ -3561,6 +3617,22 @@ pub(super) fn frag_diag() -> bool {
 pub(super) fn frag_t0() -> Instant {
     static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     *T0.get_or_init(Instant::now)
+}
+
+/// `ENOMOTO_MIP_SUBA_RATE=<文字の並び>` (試作、既定では使わない。analysis/submip_impr_20261106/A.md): RENS・RINS の固定率を HiGHS の
+/// `determineTargetFixingRate` (初期 0.6、実行不能だった固定率の平均の 0.9 倍を上の端、解を見つけた固定率の平均の 0.9〜1.1 倍を含む範囲の乱数。
+/// [`Solver::target_fix_rate`]) で決める。今の既定は RENS が LP 解で整数値の列を全部、RINS が一致する列を全部固定する
+/// (physiciansched6-2 の根の RINS は固定率 0.88 で 0.2 秒で実行不能、0.68〜0.71 なら最適解を出す)。
+/// - `i`: 外側の根の RINS (`ENOMOTO_MIP_SUBMIP_HIGHS` の `i` の形) の一致する列の固定を目標の固定率で止める。サブ MIP が実行不能なら
+///   (近傍に打ち切り値より良い解がない)、達した固定率の半分 (0.25 以上) を目標に `ENOMOTO_T_MIP_SUBA_RATE_TRIES` (1) 回やり直す (HiGHS の RINS の retry)
+/// - `t`: 木の中の RINS (ALNS の腕) にも `i` と同じ止め方をする (やり直しはしない)
+/// - `n`: 外側の根の RENS (全部固定の形) を目標の固定率で止める (`ENOMOTO_MIP_FIX_CAP` と同じ形)
+/// - `z`: 暫定解のない根の RENS (ダイビング式、既定の目標 0.8) の目標を [`Solver::target_fix_rate`] にする
+/// 値 `1` は `inz`。固定率とその結果は RENS・RINS で共通の記録 ([`Solver::note_fix_rate`]) に入れる
+pub(super) fn suba_rate(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let v = V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBA_RATE").map_or(String::new(), |v| if v == "1" { "inz".to_string() } else { v.to_string() }));
+    v.contains(c)
 }
 
 /// `ENOMOTO_MIP_S1_RINSWIDE=k` (試作、[`Solver::rins`]): 根の RINS が短く空振りしたときのやり直しの回数 (0 なら使わない)

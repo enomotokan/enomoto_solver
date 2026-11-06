@@ -2585,6 +2585,29 @@ pub(super) fn ho1_subcut(accepting_start: bool) -> bool {
     }
 }
 
+/// `ENOMOTO_MIP_SUBA_CUT` (試作、既定では使わない。analysis/submip_impr_20261106/A.md): [`ho1_subcut`] の改良。サブ MIP の中で、
+/// 外側の打ち切り値より悪い解を暫定解にしない (HiGHS の `solveSubMip` の `objective_bound` = 外側の `upper_limit`)。比べる値は
+/// 作ったときの打ち切り値 (`MipParams::cutoff`) と、外側の根のサブ MIP なら外側の今の刈り込みの上限 ([`SubmipCtl::best`]、並列の
+/// サブ MIP の間に外側が良くなる) の小さい方。開始解も同じに扱う。捨てた数はサブ MIP の終わりのログ (`ENOMOTO_MIP_LOG`) に出す
+pub(super) fn suba_cut() -> bool {
+    env_str!("ENOMOTO_MIP_SUBA_CUT").is_some_and(|v| v != "0")
+}
+
+/// `ENOMOTO_MIP_SUBA_STOP=<文字の並び>` (試作、既定では使わない。analysis/submip_impr_20261106/A.md): サブ MIP の止め方を HiGHS に寄せる。
+/// - `e`: 成果連動の打ち切り ([`submip_outcome_stop`]) の「解を見つけたノード」を、外側の打ち切り値より良い解のときだけ数える
+///   (打ち切り値より悪い解を見つけた直後に max(k, 50) ノードで止まらない。neos-933966 の根の RENS は 101 ノード目に 22342 (外側 1393)
+///   を見つけて 201 ノードで止まった)
+/// - `s`: 停滞の打ち切り (`ENOMOTO_T_MIP_SUBMIP_STALL`、12) を、暫定解がなくても打ち切り値が有限なら数える (HiGHS はサブ MIP の
+///   `upper_limit` = `objective_bound` なので、解がなくても推定値が外側の上限以上のノードを数える)
+/// - `o`: 外側の根のサブ MIP の成果連動の打ち切りを使わない (ノード上限・時間・停滞だけ。HiGHS の `solveSubMip` に成果連動はない)
+pub(super) fn suba_stop(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBA_STOP").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
+/// `ENOMOTO_MIP_SUBA_CUT` で捨てた解の数 (全スレッドの和、診断用。外側の求解の終わりのログに出す)
+pub(super) static SUBA_CUT_REJECTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 thread_local! {
     /// `ENOMOTO_MIP_HO1_SUBCUT` で捨てた解の数 (スレッドごと、診断用)
     pub(super) static HO1_SUBCUT_REJECTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -5545,6 +5568,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.incumbent.is_none() && self.params.restarts > 0 && !self.params.submip && !self.accepting_start && z > self.params.cutoff && super::restart_ref_for(self.p) {
             return false;
         }
+        // `ENOMOTO_MIP_SUBA_CUT` ([`suba_cut`]): サブ MIP は外側の打ち切り値 (作ったときの値と外側の今の刈り込みの上限の小さい方) より
+        // 悪い解を暫定解にしない (開始解も)
+        if self.params.submip && suba_cut() {
+            let outer = self.root_submip.as_ref().map_or(f64::INFINITY, |c| c.best());
+            let lim = self.params.cutoff.min(outer);
+            if lim.is_finite() && z > lim + 1e-9 * lim.abs().max(1.0) {
+                SUBA_CUT_REJECTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return false;
+            }
+        }
         // `ENOMOTO_MIP_HO1_SUBCUT` ([`ho1_subcut`]): サブ MIP は打ち切り値 (外側の刈り込みの上限) より悪い解を暫定解にしない
         if self.params.submip && self.params.cutoff.is_finite() && z > self.params.cutoff + 1e-9 * self.params.cutoff.abs().max(1.0) && ho1_subcut(self.accepting_start) {
             HO1_SUBCUT_REJECTS.with(|c| c.set(c.get() + 1));
@@ -5644,8 +5677,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !self.params.submip && self.snap.is_none() && super::mem3_debug_inc_on() {
                 super::mem3_debug_inc(self.p, &x, z, if self.heur_label.is_empty() { "tree" } else { self.heur_label }, self.nodes);
             }
+            // `ENOMOTO_MIP_SUBA_STOP` の `e` ([`suba_stop`]): 成果連動の打ち切りの「解を見つけたノード」は、外側の打ち切り値より良い解のときだけ
+            let good = !(self.params.submip && suba_stop('e')) || {
+                let outer = self.root_submip.as_ref().map_or(f64::INFINITY, |c| c.best());
+                let lim = self.params.cutoff.min(outer);
+                !lim.is_finite() || z <= lim + 1e-9 * lim.abs().max(1.0)
+            };
             self.incumbent = Some((z, x));
-            self.last_improve_node = Some(self.nodes);
+            if good {
+                self.last_improve_node = Some(self.nodes);
+            }
             // FJ のスレッド (と解発見スレッド) の解だけのうちは立てない (`=2` はその解の改善を続ける)
             if let Some(f) = self.fj_has_inc.as_ref().filter(|_| !self.inc_only_fj) {
                 f.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -8975,14 +9016,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             // 推定値が打ち切り値以上のことが続けてこの回数あれば止める (HiGHS の `mip_max_stall_nodes`、サブ MIP では 12。
                             // 改善の見込みのないサブ MIP を早く切り、1 回の時間の上限を短くしなくて済むようにする)
                             // 成果連動の打ち切り ([`submip_outcome_stop`]): 根のサブ MIP は、解を見つけてから見つけるまでと同じだけ進めて良くならなければ止める
-                            if let (Some(_), Some(k)) = (self.root_submip.as_ref(), self.last_improve_node) {
+                            // `ENOMOTO_MIP_SUBA_STOP` の `o` ([`suba_stop`]): 成果連動の打ち切りを使わない
+                            if let (Some(_), Some(k), false) = (self.root_submip.as_ref(), self.last_improve_node, suba_stop('o')) {
                                 if self.nodes.saturating_sub(k) >= k.max(tunable!("ENOMOTO_T_MIP_SUBMIP_OUTCOME_MIN_NODES", 50u64, u64)) {
                                     self.dbg_submip_stop("outcome");
                                     return self.finish_limit(MipStatus::NodeLimit, Some(&n));
                                 }
                             }
                             let stall_lim = if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_STALL", 12u64, u64) } else { 0 };
-                            if stall_lim > 0 && self.incumbent.is_some() {
+                            // `ENOMOTO_MIP_SUBA_STOP` の `s` ([`suba_stop`]): 暫定解がなくても打ち切り値が有限なら数える (HiGHS)
+                            if stall_lim > 0 && (self.incumbent.is_some() || (suba_stop('s') && self.params.cutoff.is_finite())) {
                                 if n.estimate >= self.prune_limit() {
                                     self.submip_stall += 1;
                                     if self.submip_stall >= stall_lim {
