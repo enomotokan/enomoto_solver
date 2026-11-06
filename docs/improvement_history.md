@@ -10342,3 +10342,13 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   `ENOMOTO_MIP_S4_BGZERO` (既定 2、裏のカットが 2 ラウンド回って目的値が全く上がらなければ待たない)。
 - 根拠: cod105 (600 秒) 200 → 140 秒 (3 回)。58 問 2 回で SGM 17.08 → 16.11・17.18 → 16.62、解けた数 44 → 44・40 → 42 (drayage-25-23・noswot・neos5 が良い)。
 - 記録は `analysis/s4c_default_20261106.md` (元は `analysis/highs_slow_20261106/S4.md`)。
+
+## 2026-11-06: 根の LP が壊れたら尺度を調整した写しで解き直す安全網 (ROOTLP_SCALE_RESCUE を既定に、採用)
+
+- 既定にした: `ENOMOTO_MIP_ROOTLP_SCALE_RESCUE` (戻し方 `=0`、run.py の `prerescue`)。根の LP が `Error`・`IterationLimit` で終わったら、内点法 + クロスオーバーの
+  前に、行と列の尺度を調整した写しを基底なしの二段解法で解いて解き直す。根の LP が解けると、これまでは `not_solved` で諦めていた。
+- 根拠: MIP の根の LP (`TwoStageLp`) は尺度を調整しない。momentum1 (係数の幅 7.9e9) は尺度なしの二段解法が基底なしでも 114 秒で終わらず、尺度を調整した写しなら
+  0.7 秒。prr で前処理をかけ直した momentum1 の根の LP の `Error` (`analysis/prr_harm_20261106.md`) は、安全網で 0.53 秒で立ち直る。似た問題 6 問・ほかの問題では
+  安全網は働かない (根の LP が壊れない限り何もしない)。
+- 同じ記録の試作 `ENOMOTO_MIP_ROOTLP_SCALE=1` (基底があっても根の LP を尺度を調整した写しで解く。momentum1 の根の LP 594 秒 → 0.68 秒) は既定にしていない。
+  記録は `analysis/momentum1_rootlp_20261106.md`。
