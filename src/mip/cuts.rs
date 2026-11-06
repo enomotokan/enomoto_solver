@@ -42,7 +42,9 @@ thread_local! {
 
 /// 試作 `ENOMOTO_MIP_INTVUB` の動き方。0 = 使わない (既定)、1 = HiGHS と同じ条件 (`HighsTransformedLp`: 一般整数列の LP 値が整数で
 /// 単純な上下限の真ん中にあり、変数上下限がちょうど効いているときだけ置き換える)、2 = 緩めた条件 (LP 値が整数でなくてもよく、
-/// 変数上下限の余裕が単純な上下限の余裕より小さければ置き換える)
+/// 変数上下限の余裕が単純な上下限の余裕より小さければ置き換える)、3 = 余りを捨てる向きを優先 (係数が正なら VLB、負なら VUB を、
+/// その余裕が単純な上下限の余裕以下なら LP 値が整数でなくても使う。連続列の同点の扱い (`ENOMOTO_MIP_VB_TIE_OLD` でない既定) と同じ考え。
+/// 使えなければモード 2 と同じ)
 pub fn intvub_mode() -> u8 {
     #[cfg(test)]
     if let Some(m) = INTVUB_FORCE.with(|c| c.get()) {
@@ -52,6 +54,7 @@ pub fn intvub_mode() -> u8 {
     *M.get_or_init(|| match env_str!("ENOMOTO_MIP_INTVUB") {
         None => 0,
         Some("2") => 2,
+        Some("3") => 3,
         Some(_) => 1,
     })
 }
@@ -164,6 +167,40 @@ impl VarBounds {
             list.push((z, d, e));
         }
     }
+}
+
+/// 診断 (`ENOMOTO_MIP_INTVUB_DUMP`): 1 本の行の置き換え後の項と、CMIR の結果 (違反量・効き目) を文字列にする
+pub fn intvub_debug_row(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> String {
+    let mut o = String::new();
+    use std::fmt::Write;
+    let _ = write!(o, "row rhs {rhs}:");
+    // 構造の列 (変数上下限の表の長さ未満) だけ表示し、行の論理変数は数だけ
+    let ncol = vars.vb.map_or(usize::MAX, |v| v.vub.len());
+    for &(k, a) in base.iter().filter(|&&(k, _)| k < ncol).take(80) {
+        let _ = write!(o, " {a:+.3}*x{k}[{:.3}]", vars.x[k]);
+    }
+    let _ = write!(o, " (+{} row slacks)", base.iter().filter(|&&(k, _)| k >= ncol).count());
+    let Some((terms, beta)) = substitute(vars, base, rhs) else {
+        return o + " | substitute None";
+    };
+    let _ = write!(o, "\n   beta {beta:.4}:");
+    for t in terms.iter().filter(|t| t.k < ncol || t.int).take(80) {
+        let sub = match t.sub {
+            Sub::Simple => String::new(),
+            Sub::Vub(z, d, e) => format!(" vub z{z}[{:.3}] {d} {e}", vars.x[z]),
+            Sub::Vlb(z, d, e) => format!(" vlb z{z}[{:.3}] {d} {e}", vars.x[z]),
+        };
+        let _ = write!(o, " ({}{} {:+.3} y={:.3} u={}{})", if t.int { "i" } else { "c" }, t.k, t.a, t.yv, t.yu, sub);
+    }
+    match cmir_terms(vars, terms, beta) {
+        Some(c) => {
+            let act: f64 = c.coefs.iter().map(|&(k, v)| v * vars.x[k]).sum();
+            let nrm: f64 = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+            let _ = write!(o, "\n   cmir viol {:.4} eff {:.4} nnz {}", act - c.rhs, (act - c.rhs) / nrm.max(1e-12), c.coefs.len());
+        }
+        None => o.push_str("\n   cmir None"),
+    }
+    o
 }
 
 /// 連続変数の項の置き換え方。
@@ -351,25 +388,62 @@ fn substitute_with(vars: &CutVars, base: &[(usize, f64)], terms: &mut Vec<Term>,
 /// - 条件 (モード 1、HiGHS と同じ): 上下限の幅 > 1.5、LP 値が単純な上下限の真ん中 (両側に feastol より離れる) で整数、
 ///   変数上下限の余裕が 0 (ちょうど効いている)。VUB と VLB のどちらも効いていれば係数が正なら VUB、負なら VLB (余りの項が残る向き)。
 /// - モード 2: LP 値が整数でなくてもよく、変数上下限の余裕が単純な上下限の余裕より feastol 以上小さければ置き換える。
+/// 診断 (`ENOMOTO_MIP_INTVUB_LOG`): [`int_vb_choice`] の結果の数 (変数上下限のある列で: 呼び出し, 幅が狭い, 境界に乗っている,
+/// LP 値が整数でない, 変数上下限が効いていない, 置き換えた)
+pub static INTVUB_STATS: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+
+fn ivstat(i: usize) {
+    INTVUB_STATS[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn int_vb_choice(vars: &CutVars, k: usize, a: f64) -> Option<(Sub, f64, f64)> {
+    let r = int_vb_choice_impl(vars, k, a);
+    if r.is_some() {
+        ivstat(5);
+    }
+    r
+}
+
+fn int_vb_choice_impl(vars: &CutVars, k: usize, a: f64) -> Option<(Sub, f64, f64)> {
     const FT: f64 = 1e-6;
     let mode = intvub_mode();
     let vb = vars.vb?;
     if mode == 0 || k >= vb.ivub.len() || (vb.ivub[k].is_empty() && vb.ivlb[k].is_empty()) {
         return None;
     }
+    ivstat(0);
     let (l, u, x) = (vars.lo[k], vars.up[k], vars.x[k]);
     if !(u - l > 1.5) {
+        ivstat(1);
         return None;
     }
     let (sl, su) = (x - l, u - x);
     if sl <= FT || su <= FT {
+        ivstat(2);
         return None;
     }
     if mode == 1 && (x - x.round()).abs() >= FT {
+        ivstat(3);
         return None;
     }
     let simple = sl.min(su);
+    // モード 3: 余りを捨てる向き (a > 0 なら VLB、a < 0 なら VUB) で、余裕が単純な上下限以下の最良のもの
+    if mode == 3 {
+        let mut best: Option<(f64, usize, f64, f64)> = None;
+        let list = if a > 0.0 { &vb.ivlb[k] } else { &vb.ivub[k] };
+        for &(z, d, e) in list {
+            if z >= vars.lo.len() || vars.lo[z] == vars.up[z] || !vars.is_int[z] {
+                continue;
+            }
+            let dist = if a > 0.0 { x - d * vars.x[z] - e } else { d * vars.x[z] + e - x }.max(0.0);
+            if dist <= simple + FT && best.is_none_or(|b| dist < b.0) {
+                best = Some((dist, z, d, e));
+            }
+        }
+        if let Some((dist, z, d, e)) = best {
+            return Some(if a > 0.0 { (Sub::Vlb(z, d, e), dist, u - e.min(d + e)) } else { (Sub::Vub(z, d, e), dist, e.max(d + e) - l) });
+        }
+    }
     let fixed = |z: usize| z >= vars.lo.len() || vars.lo[z] == vars.up[z] || !vars.is_int[z];
     // 最も余裕の小さい VUB / VLB (余裕, z, d, e)
     let mut bu: Option<(f64, usize, f64, f64)> = None;
@@ -396,7 +470,9 @@ fn int_vb_choice(vars: &CutVars, k: usize, a: f64) -> Option<(Sub, f64, f64)> {
     let ld = bl.map_or(sl, |b| if b.0 <= FT { 0.0 } else { b.0 });
     let bd = ud.min(ld);
     let ok = if mode == 1 { bd == 0.0 } else { bd < simple - FT };
+    // (モード 3 で余りを捨てる向きが使えなかったときはモード 2 と同じ)
     if !ok {
+        ivstat(4);
         return None;
     }
     let use_vub = match (bu, bl) {

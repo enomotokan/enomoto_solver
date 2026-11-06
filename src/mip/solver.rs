@@ -777,6 +777,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pool3_diag_at_best: Option<Instant>,
     /// カット生成に使う変数上下限 (最初の分離で作る)。
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
+    /// 診断 `ENOMOTO_MIP_INTVUB_DUMP` を出したか
+    pub(super) intvub_dumped: bool,
     /// 根で解を見つけなかったヒューリスティクス ([`heur_bit`] のビット)。再スタートで引き継ぐ。
     failed_heurs: u64,
     /// LP の行の追加・削除の記録 (待ち行列のノードの基底を、保存した後の行の変化に合わせるのに使う)。
@@ -4069,6 +4071,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool3_diag_at: None,
         pool3_diag_at_best: None,
         vbounds: None,
+        intvub_dumped: false,
         failed_heurs: 0,
         cut_age: Vec::new(),
         cut_ids: Vec::new(),

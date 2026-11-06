@@ -4655,6 +4655,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return cands;
             }
         }
+        // 診断 (`ENOMOTO_MIP_INTVUB_DUMP=N`): 一般整数列の変数上下限を持つ列を含む行を N 本、置き換え後の項と CMIR の結果を表示する
+        if let Some(nd) = env_str!("ENOMOTO_MIP_INTVUB_DUMP").and_then(|v| v.parse::<usize>().ok()) {
+            if !self.params.submip && !self.intvub_dumped {
+                self.intvub_dumped = true;
+                let vbr = vars.vb;
+                let mut cnt = 0;
+                for i in 0..p.m {
+                    let row = &p.rows[i];
+                    if row.len() < 3 || !row.iter().any(|&(j, _)| vbr.is_some_and(|v| j < v.ivub.len() && !(v.ivub[j].is_empty() && v.ivlb[j].is_empty()))) {
+                        continue;
+                    }
+                    let neg: Vec<(usize, f64)> = row.iter().map(|&(j, a)| (j, -a)).collect();
+                    if p.row_up[i].is_finite() {
+                        eprintln!("INTVUB_DUMP {i} up {}", super::cuts::intvub_debug_row(&vars, row, p.row_up[i]));
+                    }
+                    if p.row_lo[i].is_finite() {
+                        eprintln!("INTVUB_DUMP {i} lo {}", super::cuts::intvub_debug_row(&vars, &neg, -p.row_lo[i]));
+                    }
+                    cnt += 1;
+                    if cnt >= nd {
+                        break;
+                    }
+                }
+            }
+        }
         for i in 0..if par_parts.is_some() { 0 } else { row_cuts_m } {
             if i % 64 == 0 && self.time_up() {
                 return cands;
@@ -4709,6 +4734,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if dbg_sep {
             eprintln!("SEP rows {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
+            if super::cuts::intvub_mode() > 0 {
+                let st: Vec<u64> = super::cuts::INTVUB_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("INTVUB stats (calls, narrow, at bound, fractional, not tight, substituted) {st:?}");
+            }
         }
         tag(&mut cands[nsrc0..], sepprof::SRC_ROWS);
         nsrc0 = cands.len();
@@ -5346,6 +5375,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let t0 = std::time::Instant::now();
                     let n_before = cands.len();
                     let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
+                    // 診断 (`ENOMOTO_MIP_INTVUB_DUMP=N` で `ENOMOTO_MIP_INTVUB_DUMP_TAB`): 最初の N 本の tableau の集約行を表示する
+                    if env_str!("ENOMOTO_MIP_INTVUB_DUMP_TAB").is_some() && !self.params.submip {
+                        let nd = env_str!("ENOMOTO_MIP_INTVUB_DUMP").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+                        if n_rows_used <= nd {
+                            for (si, b) in [&base, &neg].into_iter().enumerate() {
+                                eprintln!("INTVUB_DUMP_TAB {n_rows_used}.{si} {}", super::cuts::intvub_debug_row(&vars, b, 0.0));
+                            }
+                        }
+                    }
                     for b in [&base, &neg] {
                         let n0 = cands.len();
                         for c in generate_cuts(&vars, b, 0.0, tab_fc, false) {
