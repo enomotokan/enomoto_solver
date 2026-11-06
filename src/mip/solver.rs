@@ -2775,6 +2775,8 @@ pub(super) fn suba_stop(c: char) -> bool {
 /// - `w`: サブ MIP の木に入ってからの秒が max(`ENOMOTO_T_MIP_SUBCAP_W_SECS` (1 秒), k × 外側の根の LP の秒 × max(進んだノード数,
 ///   `ENOMOTO_T_MIP_SUBCAP_W_NODES` (10))) を超えたら止める (k = `ENOMOTO_T_MIP_SUBCAP_W` (1))。1 ノードの重さが根の LP の k 倍を
 ///   超える (1 つのノードで止まっている間も含む) サブ MIP を早めに切る
+/// - `W`: `w` と同じだが、秒をサブ MIP の始め (サブ MIP の根の LP・カット・ヒューリスティクスを含む) から数える (thor50dday の根の
+///   サブ MIP は木に入る前の根で 90〜150 秒使い、`w` では止まらなかった)
 /// - `j`: 外側の根で並列のサブ MIP を全部待つとき、待ち始めてから max(`ENOMOTO_T_MIP_SUBCAP_J_MIN` (1 秒), `ENOMOTO_T_MIP_SUBCAP_J` (1) ×
 ///   根の時間 (求解の始めから最初の根のヒューリスティクスまで)) 過ぎても終わらないものに止めの合図を送る (`TREE3_JOINCAP` の基準を
 ///   「根の始めから待ち始めまで」から根の LP・カットの時間に変えたもの)
@@ -3184,7 +3186,7 @@ impl SubmipCtl {
         }
         // 根の LP の秒は、前処理の LP による固定の最初の LP ([`SUBCAP_PROBE_SECS`]) の方が長ければそちら
         let root_lp_secs = if root_lp_secs > 0.0 { root_lp_secs.max(f64::from_bits(SUBCAP_PROBE_SECS.load(std::sync::atomic::Ordering::Relaxed))) } else { 0.0 };
-        if subcap('w') && root_lp_secs > 0.0 {
+        if (subcap('w') || subcap('W')) && root_lp_secs > 0.0 {
             self.cap_node_secs = tunable!("ENOMOTO_T_MIP_SUBCAP_W", 1.0, f64) * root_lp_secs;
         }
         self
@@ -5341,7 +5343,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// [`subcap`] の `w`: 根のサブ MIP の 1 ノードが重すぎるか
     fn subcap_heavy(&self) -> bool {
-        let (Some(c), Some((t1, n1))) = (self.root_submip.as_ref(), self.subcap_t1) else { return false };
+        // `W`: サブ MIP の始め (サブ MIP の根を含む) から数える
+        let t1 = if subcap('W') { Some((self.start, 0)) } else { self.subcap_t1 };
+        let (Some(c), Some((t1, n1))) = (self.root_submip.as_ref(), t1) else { return false };
         if c.cap_node_secs <= 0.0 {
             return false;
         }
