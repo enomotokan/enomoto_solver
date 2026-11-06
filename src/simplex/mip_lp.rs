@@ -150,7 +150,8 @@ struct TwState {
 
 /// 試作 `ENOMOTO_MIP_LPSCALE` の数 (求解、双子の反復、仕上げの反復、仕上げで基底が動いた回数、打ち切りを採った回数、実行不能を採った回数、
 /// 本体で解き直した回数、時間・反復の上限、双子を作った LP の数、仕上げの秒 (マイクロ秒)、双子の秒 (マイクロ秒))
-pub(crate) static LPSCALE_STATS: [std::sync::atomic::AtomicU64; 11] = [const { std::sync::atomic::AtomicU64::new(0) }; 11];
+/// 、確かめで仕上げを省いた回数、確かめで外れて仕上げた回数、確かめの秒 (マイクロ秒))
+pub(crate) static LPSCALE_STATS: [std::sync::atomic::AtomicU64; 14] = [const { std::sync::atomic::AtomicU64::new(0) }; 14];
 
 /// `ENOMOTO_MIP_LPSCALE` の数を表示する (`ENOMOTO_MIP_LPSCALE_LOG`、MIP の終わりに呼ぶ)
 pub(crate) fn lpscale_report() {
@@ -159,8 +160,8 @@ pub(crate) fn lpscale_report() {
     }
     let g = |k: usize| LPSCALE_STATS[k].load(std::sync::atomic::Ordering::Relaxed);
     eprintln!(
-        "LPSCALE: lps {} solves {} tw_iters {} polish_iters {} polish_moved {} objbound {} infeas {} fallback {} limit {} polish_s {:.2} tw_s {:.2}",
-        g(8), g(0), g(1), g(2), g(3), g(4), g(5), g(6), g(7), g(9) as f64 * 1e-6, g(10) as f64 * 1e-6
+        "LPSCALE: lps {} solves {} tw_iters {} polish_iters {} polish_moved {} objbound {} infeas {} fallback {} limit {} polish_s {:.2} tw_s {:.2} check_ok {} check_fail {} check_s {:.2}",
+        g(8), g(0), g(1), g(2), g(3), g(4), g(5), g(6), g(7), g(9) as f64 * 1e-6, g(10) as f64 * 1e-6, g(11), g(12), g(13) as f64 * 1e-6
     );
 }
 
@@ -330,7 +331,8 @@ pub struct TwoStageState {
 /// 兄弟ノードと一緒に持ち、兄弟へ戻って親の基底を置いたときに [`TwoStageLp::adopt_lu_snapshot`] で戻して分解を省く。
 #[derive(Clone)]
 pub struct LuSnapshot {
-    lu: Arc<LuCache>,
+    /// 本体の LU (試作 `ENOMOTO_MIP_LPSCALE` で本体の仕上げを省いたときは `None`、双子の LU だけ)。
+    lu: Option<Arc<LuCache>>,
     /// `lu` の基底の DSE 重み (基底位置の順)。
     dse: Option<Arc<(Vec<usize>, Vec<f64>)>>,
     /// 取り出したときの行列の識別子 ([`TwoStageLp::price_key`]。行の追加・削除で変わる)。
@@ -1138,7 +1140,10 @@ impl TwoStageLp {
     /// 今の基底の DSE 重み (直前の求解の最後の値。基底が変わっていなければ) を、基底変数の番号 (構造列 j < n、
     /// 行 n + i) との組で返す。待ち行列のノードに基底と一緒に保存する。
     pub fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>> {
-        if let Some(t) = self.tw_same() {
+        // 双子で解いた後は双子の重み (基底変数の番号との組なので基底の並びによらない。本体の仕上げで基底が動いていても、
+        // 戻すときに [`Self::set_dse_vars`] が今の基底にない変数を捨て、ない変数は 1 にする)。本体の重みは仕上げ (単位重みから始めて
+        // ふつう 0 ピボット) のもので、保存すると戻したノードの LP が単位重みで始まる (uccase12 で 1 回 1 万反復超)
+        if let Some(t) = self.tw.as_deref().filter(|_| self.tw_sync) {
             return t.dse_snapshot();
         }
         match (&self.basis, self.dse_cache.as_deref()) {
@@ -1199,26 +1204,60 @@ impl TwoStageLp {
 
     /// 今の基底の LU キャッシュ (直前の最適基底のもので、基底がそのままなら) を DSE 重みと一緒に取り出す。
     pub fn lu_snapshot(&self) -> Option<LuSnapshot> {
-        let c = self.lu_cache.as_ref()?;
-        if !matches!(&self.basis, Some(b) if *b == c.basis) {
-            return None;
-        }
+        let tw = self.tw_same().and_then(|t| t.lu_snapshot()).map(Box::new);
+        let c = match self.lu_cache.as_ref() {
+            Some(c) if matches!(&self.basis, Some(b) if *b == c.basis) => c,
+            // 本体の LU がない (双子の確かめで仕上げを省いた) なら双子の LU だけ
+            _ => return tw.map(|tw| LuSnapshot { lu: None, dse: None, price_key: self.price_key, tw: Some(tw) }),
+        };
         // `ENOMOTO_MIP_NO_SIBLING_LU_DSE`: DSE 重みは持たない (戻したときは置いた基底の重みがあればそれを使う)
         let dse = match &self.dse_cache {
             Some(d) if d.0 == c.basis && d.1.len() == c.basis.len() && env_str!("ENOMOTO_MIP_NO_SIBLING_LU_DSE").is_none() => Some(d.clone()),
             _ => None,
         };
-        let tw = self.tw_same().and_then(|t| t.lu_snapshot()).map(Box::new);
-        Some(LuSnapshot { lu: c.clone(), dse, price_key: self.price_key, tw })
+        Some(LuSnapshot { lu: Some(c.clone()), dse, price_key: self.price_key, tw })
     }
 
     /// [`Self::lu_snapshot`] を戻す。行列が取り出したときのままで、今の基底が LU の基底と同じ集合のときだけ、基底を
     /// LU の基底位置の順に並べ直して LU キャッシュと DSE 重みを差し替え、真を返す ([`Self::set_basis`] は番号順に
     /// 並べるので、並びを合わせないと次の求解が LU を使わない)。それ以外は何もしない。
     pub fn adopt_lu_snapshot(&mut self, s: &LuSnapshot) -> bool {
+        // 試作 `ENOMOTO_MIP_LPSCALE`: 双子の LU があれば先に双子に戻す (次の求解は双子で解くので、本体の LU はなくてよい)
+        if let (Some(stw), true) = (s.tw.as_deref(), self.tw.is_some()) {
+            if s.price_key != self.price_key {
+                return false;
+            }
+            let self_ok = s.lu.is_some() && self.adopt_lu_snapshot_own(s);
+            if !self_ok {
+                self.tw_sync = false;
+            }
+            // 本体の基底を双子に写してから (同じ集合のときだけ) 双子の LU の並びに直す
+            self.tw_pull();
+            if self.tw.as_mut().unwrap().adopt_lu_snapshot(stw) {
+                if !self_ok {
+                    self.basis = self.tw.as_ref().unwrap().basis.clone();
+                    self.lu = None;
+                    self.status = None;
+                    self.clear_state_memo();
+                }
+                self.tw_sync = true;
+                return true;
+            }
+            self.tw_sync = false;
+            return self_ok;
+        }
+        if s.lu.is_none() {
+            return false;
+        }
+        self.adopt_lu_snapshot_own(s)
+    }
+
+    /// [`Self::adopt_lu_snapshot`] の本体の LU の分 (`s.lu` があること)
+    fn adopt_lu_snapshot_own(&mut self, s: &LuSnapshot) -> bool {
         let m = self.rows.len();
         let nt = self.n + m;
-        let cb = &s.lu.basis;
+        let Some(slu) = s.lu.as_ref() else { return false };
+        let cb = &slu.basis;
         if s.price_key != self.price_key || cb.len() != m {
             return false;
         }
@@ -1246,27 +1285,35 @@ impl TwoStageLp {
         self.basis = Some(cb.clone());
         self.dse_cache = dse;
         self.dse_age = 0;
-        self.lu_cache = Some(s.lu.clone());
+        self.lu_cache = Some(slu.clone());
         self.lu = None;
         self.status = None;
         self.tw_sync = false;
         self.clear_state_memo();
-        // 双子の LU もあれば、双子を本体に合わせてから戻す (戻せたら次の求解は双子の LU から)
-        if let Some(stw) = s.tw.as_deref() {
-            if self.tw.is_some() {
-                self.tw_pull();
-                if self.tw.as_mut().unwrap().adopt_lu_snapshot(stw) {
-                    self.tw_sync = true;
-                }
-            }
-        }
         true
     }
 
     /// 双子が本体と同じ基底を持ち、次の求解の出発点になっているなら双子
     fn tw_same(&self) -> Option<&TwoStageLp> {
         let t = self.tw.as_deref()?;
-        (self.tw_sync && t.basis.is_some() && t.basis == self.basis).then_some(t)
+        if !self.tw_sync {
+            return None;
+        }
+        let (Some(a), Some(b)) = (t.basis.as_ref(), self.basis.as_ref()) else { return None };
+        if a.len() != b.len() {
+            return None;
+        }
+        if a == b {
+            return Some(t);
+        }
+        // 同じ集合か (並びは仕上げの分解で変わりうる)
+        let mut seen = vec![false; self.n + self.rows.len()];
+        for &v in a {
+            if v < seen.len() {
+                seen[v] = true;
+            }
+        }
+        b.iter().all(|&v| v < seen.len() && seen[v]).then_some(t)
     }
 
     /// 双子を本体に合わせる (本体の基底が外から置かれた後、双子で解く前): 基底・解 (`x / c`)・非基底列の置き場所の希望・
@@ -1443,9 +1490,29 @@ impl TwoStageLp {
                 let Some(b) = t.basis.clone().filter(|b| b.len() == m) else {
                     return fall_back(self, "no basis");
                 };
-                for j in 0..n {
-                    self.x[j] = t.x[j] * self.tw_cs[j];
+                let xo: Vec<f64> = (0..n).map(|j| t.x[j] * self.tw_cs[j]).collect();
+                let yo: Vec<f64> = if t.y.len() == m { (0..m).map(|i| t.y[i] * self.tw_rs[i]).collect() } else { Vec::new() };
+                // 元の尺度で主・双対の実行可能性を確かめ、満たせば本体の仕上げ (LU の分解) を省く
+                // (`ENOMOTO_MIP_LPSCALE_POLISH=1` ならいつも仕上げる)
+                let tc = std::time::Instant::now();
+                let ok = env_str!("ENOMOTO_MIP_LPSCALE_POLISH").is_none_or(|v| v == "0") && yo.len() == m && self.tw_check(&xo, &yo, &b);
+                lpscale_add(13, tc.elapsed().as_micros() as u64);
+                if ok {
+                    lpscale_add(11, 1);
+                    self.x = xo;
+                    self.y = yo;
+                    self.basis = Some(b);
+                    self.lu = None;
+                    self.lu_cache = None;
+                    self.dse_cache = None;
+                    self.ray = None;
+                    self.intercept = None;
+                    self.clear_memo();
+                    self.tw_sync = true;
+                    return LpStatus::Optimal;
                 }
+                lpscale_add(12, 1);
+                self.x = xo;
                 self.basis = Some(b);
                 self.lu = None;
                 self.lu_cache = None;
@@ -1514,6 +1581,71 @@ impl TwoStageLp {
             }
             _ => fall_back(self, "not conclusive"),
         }
+    }
+
+    /// 双子の最適な基底解を元の尺度に戻した `x` (構造列)・`y` (標準形の行の双対)・基底 `b` が、本体の標準形で最適と言えるか:
+    /// 非基底の列が境界にあり (`1e-9 (1 + |境界|)`)、被約費用の符号が置き場所と合い (`1e-7 (1 + |c|)`、[`Self::adopt_basic_solution`] と同じ)、
+    /// 基底の列とスラックが境界の内側にある (`1e-9 (1 + max(|境界|, 行の項の大きさ))`)
+    fn tw_check(&self, x: &[f64], y: &[f64], b: &[usize]) -> bool {
+        let n = self.n;
+        let m = self.rows.len();
+        let nt = n + m;
+        let mut basic = vec![false; nt];
+        for &v in b {
+            if v >= nt || std::mem::replace(&mut basic[v], true) {
+                return false;
+            }
+        }
+        let dbg = env_str!("ENOMOTO_MIP_LPSCALE_LOG").is_some_and(|v| v == "3");
+        for v in 0..nt {
+            let (z, mag) = if v < n {
+                (x[v] - self.shift[v], 0.0)
+            } else {
+                let i = v - n;
+                let mut act = 0.0;
+                let mut mag = 0.0f64;
+                for &(j, a) in &self.rows[i] {
+                    act += a * x[j];
+                    mag += (a * x[j]).abs();
+                }
+                let sl = if self.sigma[i] > 0.0 { self.row_up[i] - act } else { act - self.row_lo[i] };
+                (sl, mag)
+            };
+            let (l, u) = (self.std.lb[v], self.std.ub[v]);
+            let tl = 1e-9 * (1.0 + l.abs().max(mag));
+            let tu = 1e-9 * (1.0 + u.abs().max(mag));
+            if basic[v] {
+                if (l.is_finite() && z < l - tl) || (u.is_finite() && z > u + tu) || !z.is_finite() {
+                    if dbg {
+                        eprintln!("LPSCALE check: basic {v} (n={n}) infeasible: z={z:e} l={l:e} u={u:e}");
+                    }
+                    return false;
+                }
+                continue;
+            }
+            let at_l = l.is_finite() && (z - l).abs() <= tl;
+            let at_u = u.is_finite() && (z - u).abs() <= tu;
+            let free = !l.is_finite() && !u.is_finite() && z.abs() <= 1e-9;
+            if !(at_l || at_u || free) {
+                if dbg {
+                    eprintln!("LPSCALE check: nonbasic {v} (n={n}) off its bounds: z={z:e} l={l:e} u={u:e}");
+                }
+                return false;
+            }
+            if at_l && at_u {
+                continue;
+            }
+            let d = self.std.c[v] - self.std.cols.col(v).iter().map(|&(i, a)| a * y[i]).sum::<f64>();
+            let sc = 1e-7 * (1.0 + self.std.c[v].abs());
+            let ok = if at_l { d >= -sc } else if at_u { d <= sc } else { d.abs() <= sc };
+            if !ok {
+                if dbg {
+                    eprintln!("LPSCALE check: nonbasic {v} (n={n}) dual infeasible: d={d:e} at_l={at_l} at_u={at_u}");
+                }
+                return false;
+            }
+        }
+        true
     }
 
     /// 本体の標準形での下界 `L(y) = b·y + Σ_j min_{lb_j <= x_j <= ub_j} (c - A^T y)_j x_j` (標準形の空間、定数なし。
