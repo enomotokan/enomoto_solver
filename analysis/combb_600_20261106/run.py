@@ -14,6 +14,7 @@ CB = CFGS["combb"]
 CFGS = dict(CFGS)
 CFGS["combb_m17k"] = dict(CB, ENOMOTO_T_SIMPLEX_SCALE_MIN_M="17000")  # 尺度の調整を 17000 行以上だけ (supportcase42 の根 18439 行は調整、RINS の部分 MIP 16616 行は調整なし)
 CFGS["combb_noscale"] = {k: v for k, v in CB.items() if "SCALE" not in k}  # HARRIS2=r と NOISE_RESET だけ
+CFGS["comb"] = {k: v for k, v in CB.items() if "NOISE_RESET" not in k}  # 尺度の調整 + HARRIS2=r (雑音の作り直しなし。rootlp_simplex_fail_20261105 の 7 節の comb と同じ)
 CFGS["combb_h2only"] = {k: v for k, v in CB.items() if "HARRIS2" in k}  # 安全モードの前向き Harris だけ
 CFGS["combb_nronly"] = {k: v for k, v in CB.items() if "NOISE_RESET" in k}  # 雑音の行の作り直しだけ
 CFGS["combb_scaleonly"] = {k: v for k, v in CB.items() if "SCALE" in k}  # 尺度の調整だけ
