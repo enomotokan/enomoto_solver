@@ -865,6 +865,17 @@ thread_local! {
 }
 
 thread_local! {
+    /// `ENOMOTO_MIP_PROBE_REPRESOLVE` (試作) の外側の求解で、プロービングの後の前処理のかけ直し ([`represolve_after_probe`]) を実際にしたか
+    pub(crate) static PRR_APPLIED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 立っていれば [`represolve_after_probe`] はかけ直さない (かけ直した問題の根の LP が破綻した後の解き直し、[`solve_problem`])
+    pub(crate) static PRR_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 外側の求解 (サブ MIP・再スタートでない) の最初の根の LP が二段解法でも内点法でも解けずに諦めたか ([`solver::Solver`] が立てる)
+    pub(crate) static ROOT_LP_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 最後のプロービング ([`probe`]) が固定した列の数・締めた境界の数 ([`represolve_after_probe`] の条件に使う)
+    pub(crate) static PROBE_FIX_STATS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+thread_local! {
     /// 次の [`solve_problem`] に渡す最初の暫定解 (`p` の空間)。開始時に取り出し、前処理後の空間に移して
     /// [`solver::START_SOL`] に置く (再スタートで暫定解を引き継ぐ)。
     pub(crate) static RESTART_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
@@ -899,7 +910,43 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
         EQUIV2_USED.with(|f| f.set(false));
     }
-    let r = solve_problem_inner(p, params, use_presolve);
+    let prr = outer && env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_some();
+    if prr {
+        PRR_APPLIED.with(|f| f.set(false));
+        PRR_OFF.with(|f| f.set(false));
+        ROOT_LP_FAILED.with(|f| f.set(false));
+    }
+    let t0 = std::time::Instant::now();
+    let mut r = solve_problem_inner(p, params, use_presolve);
+    // `ENOMOTO_MIP_PROBE_REPRESOLVE` (試作) の安全網 (既定では通らない): かけ直した問題の根の LP が二段解法でも内点法でも解けずに
+    // 諦めた (`NotSolved`) なら、かけ直しをせずに残りの時間で解き直す (暫定解は引き継ぐ)。momentum1 はかけ直した問題 (行 24303 ->
+    // 14953) の根の LP の基底が特異になって 20 秒ほどで破綻し、34 秒で `not_solved` (下界なし) を返していた
+    // (analysis/prr_harm_20261106.md)。かけ直す前の問題の根の LP は破綻しない (60 秒では解き終わらない)
+    if prr && r.status == MipStatus::NotSolved && PRR_APPLIED.with(|f| f.get()) && ROOT_LP_FAILED.with(|f| f.get()) {
+        let left = params.time_limit - t0.elapsed().as_secs_f64();
+        if left > 1.0 && !crate::cancel::is_cancelled() {
+            if params.verbose {
+                eprintln!("MIP: PROBE_REPRESOLVE: the root LP of the re-presolved problem failed; solving again without re-presolving ({left:.2}s left)");
+            }
+            solver::ROOT_BASIS.with(|t| *t.borrow_mut() = None);
+            solver::ROOT_DSE.with(|t| *t.borrow_mut() = None);
+            solver::ROOT_BASIS_ROWS.with(|t| *t.borrow_mut() = None);
+            solver::ROOT_BASIS_SAVED.with(|t| *t.borrow_mut() = None);
+            ORBITOPES.with(|t| *t.borrow_mut() = None);
+            SYM_ORIG.with(|t| *t.borrow_mut() = None);
+            SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
+            SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
+            SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
+            RESTART_SOL.with(|s| *s.borrow_mut() = r.x.clone().filter(|x| x.len() == p.n));
+            PRR_OFF.with(|f| f.set(true));
+            let r2 = solve_problem_inner(p, MipParams { time_limit: left, ..params }, use_presolve);
+            PRR_OFF.with(|f| f.set(false));
+            // 解き直しが暫定解を失ったときは元の暫定解を残す
+            if r2.x.is_some() || r.x.is_none() {
+                r = solver::MipResult { nodes: r.nodes + r2.nodes, lp_iterations: r.lp_iterations + r2.lp_iterations, ..r2 };
+            }
+        }
+    }
     if outer {
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
@@ -3270,8 +3317,11 @@ fn substitute_probe_equiv(prob: &MipProblem, mut postsolve: Vec<crate::presolve:
 /// 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
 fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, verbose: bool, submip: bool, depth: u32) -> Option<Presolved> {
     let max = tunable!("ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX", 2u32, u32);
-    if env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_none() || depth >= max || (submip && env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE_SUBMIP").is_none()) {
+    if env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_none() || depth >= max || (submip && env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE_SUBMIP").is_none()) || PRR_OFF.with(|f| f.get()) {
         return Some(Presolved::Reduced { prob, postsolve, scaling });
+    }
+    if !submip {
+        PRR_APPLIED.with(|f| f.set(true));
     }
     if verbose {
         eprintln!("MIP: presolve again after probing (round {})", depth + 1);
@@ -4090,6 +4140,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             domain::chg_count() - chg0
         );
     }
+    PROBE_FIX_STATS.with(|s| s.set((fixed, tightened)));
     prob.conflict_edges = edges;
     if want_equiv {
         let mut seen = std::collections::HashSet::new();

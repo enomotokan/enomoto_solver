@@ -6929,6 +6929,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose {
                     eprintln!("MIP: root LP failed ({root_st:?})");
                 }
+                // `ENOMOTO_MIP_PROBE_REPRESOLVE` の安全網 ([`super::solve_problem`]) に知らせる (外側の最初の求解だけ)
+                if !self.params.submip && self.params.restarts == 0 && self.snap.is_none() {
+                    super::ROOT_LP_FAILED.with(|f| f.set(true));
+                }
                 self.join_fj_thread();
                 let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                 return self.finish(st, self.root_fail_bound());
