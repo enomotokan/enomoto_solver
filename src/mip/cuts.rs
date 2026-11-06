@@ -27,12 +27,39 @@ pub struct CutVars<'a> {
 pub struct VarBounds {
     pub vub: Vec<Vec<(usize, f64, f64)>>,
     pub vlb: Vec<Vec<(usize, f64, f64)>>,
+    /// 試作 `ENOMOTO_MIP_INTVUB`: 一般整数列 `w` の変数上下限 `w <= d z + e` (ivub) / `w >= d z + e` (ivlb) (`z` は 0-1 列)。
+    /// `d`・`e` は整数に丸めてある (`w` が整数・`z` が 0/1 なので丸めても妥当) ので、置き換えの余り `s = d z + e - w` も整数。
+    /// 既定では空 ([`VarBounds::add_int_vbs`] で入れる)
+    pub ivub: Vec<Vec<(usize, f64, f64)>>,
+    pub ivlb: Vec<Vec<(usize, f64, f64)>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 単体テストで [`intvub_mode`] を環境変数によらず決める
+    static INTVUB_FORCE: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+}
+
+/// 試作 `ENOMOTO_MIP_INTVUB` の動き方。0 = 使わない (既定)、1 = HiGHS と同じ条件 (`HighsTransformedLp`: 一般整数列の LP 値が整数で
+/// 単純な上下限の真ん中にあり、変数上下限がちょうど効いているときだけ置き換える)、2 = 緩めた条件 (LP 値が整数でなくてもよく、
+/// 変数上下限の余裕が単純な上下限の余裕より小さければ置き換える)
+pub fn intvub_mode() -> u8 {
+    #[cfg(test)]
+    if let Some(m) = INTVUB_FORCE.with(|c| c.get()) {
+        return m;
+    }
+    static M: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *M.get_or_init(|| match env_str!("ENOMOTO_MIP_INTVUB") {
+        None => 0,
+        Some("2") => 2,
+        Some(_) => 1,
+    })
 }
 
 impl VarBounds {
     /// 行 `row_lo <= sum a_j x_j <= row_up` のうち、連続変数 1 つと整数変数 1 つからなるものを集める。
     pub fn from_rows(n: usize, is_int: &[bool], rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]) -> Self {
-        let mut vb = VarBounds { vub: vec![Vec::new(); n], vlb: vec![Vec::new(); n] };
+        let mut vb = VarBounds { vub: vec![Vec::new(); n], vlb: vec![Vec::new(); n], ..Default::default() };
         for (i, r) in rows.iter().enumerate() {
             if r.len() != 2 {
                 continue;
@@ -60,6 +87,82 @@ impl VarBounds {
             }
         }
         vb
+    }
+
+    /// 試作 `ENOMOTO_MIP_INTVUB`: 一般整数列 `w` (上下限の幅 > 1.5) と 0-1 列 `z` の 2 項の行 `row_lo <= a w + b z <= row_up` から
+    /// `w <= d z + e` / `w >= d z + e` を集める (係数の符号・等式は行の両側を見て扱う)。`implied` があれば、プロービングの含意
+    /// `z = v ⇒ w <= b` (または `>= b`) も同じ形にして入れる (HiGHS の `HighsImplications::addVUB`/`addVLB` と同じ式)。
+    /// `lo`・`up` は今の大域的な境界 (`w` の境界で切り詰め、意味のないものは捨てる)
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_int_vbs(&mut self, is_int: &[bool], lo: &[f64], up: &[f64], rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], implied: &[(u32, bool, u32, bool, f64)]) {
+        let n = is_int.len().min(lo.len());
+        self.ivub = vec![Vec::new(); n];
+        self.ivlb = vec![Vec::new(); n];
+        let is_bin = |j: usize| is_int[j] && lo[j] == 0.0 && up[j] == 1.0;
+        let is_gen = |j: usize| is_int[j] && up[j] - lo[j] > 1.5;
+        for (i, r) in rows.iter().enumerate() {
+            if r.len() != 2 || r[0].0 >= n || r[1].0 >= n {
+                continue;
+            }
+            let ((w, a), (z, b)) = if is_gen(r[0].0) && is_bin(r[1].0) {
+                (r[0], r[1])
+            } else if is_gen(r[1].0) && is_bin(r[0].0) {
+                (r[1], r[0])
+            } else {
+                continue;
+            };
+            if a.abs() < 1e-9 || b.abs() < 1e-9 {
+                continue;
+            }
+            for (rhs, le) in [(row_up[i], true), (row_lo[i], false)] {
+                if !rhs.is_finite() {
+                    continue;
+                }
+                // a w + b z <= rhs: w <= (rhs - b z) / a (a > 0)。a < 0 なら下限
+                let (d, e) = (-b / a, rhs / a);
+                self.push_ivb(w, z, le == (a > 0.0), e, d + e, lo[w], up[w]);
+            }
+        }
+        for &(z, v, w, upper, bv) in implied {
+            let (z, w) = (z as usize, w as usize);
+            if z >= n || w >= n || !is_bin(z) || !is_gen(w) {
+                continue;
+            }
+            // z = v ⇒ w <= bv (upper) / w >= bv。z = 1 - v のときは w の今の境界
+            let other = if upper { up[w] } else { lo[w] };
+            if !other.is_finite() {
+                continue;
+            }
+            let (v0, v1) = if v { (other, bv) } else { (bv, other) };
+            self.push_ivb(w, z, upper, v0, v1, lo[w], up[w]);
+        }
+    }
+
+    /// `w <= (z = 0 で v0、z = 1 で v1)` (`upper`) または `w >=` を整数に丸め、`w` の境界で切り詰めて入れる。同じ `z` の重複は強い方を残す
+    #[allow(clippy::too_many_arguments)]
+    fn push_ivb(&mut self, w: usize, z: usize, upper: bool, v0: f64, v1: f64, lw: f64, uw: f64) {
+        const T: f64 = 1e-6;
+        if !v0.is_finite() || !v1.is_finite() {
+            return;
+        }
+        let (v0, v1) = if upper { ((v0 + T).floor().min(uw), (v1 + T).floor().min(uw)) } else { ((v0 - T).ceil().max(lw), (v1 - T).ceil().max(lw)) };
+        // 単純な上下限と同じ (z によらない) なら使わない
+        if v0 == v1 {
+            return;
+        }
+        let (d, e) = (v1 - v0, v0);
+        let list = if upper { &mut self.ivub[w] } else { &mut self.ivlb[w] };
+        if let Some(p) = list.iter().position(|&(y, _, _)| y == z) {
+            let (_, d0, e0) = list[p];
+            // 両方の値で強い方 (上限なら小さい方) をとる (z ごとに 0/1 の値を比べる)
+            let (o0, o1) = (e0, d0 + e0);
+            let (n0, n1) = if upper { (o0.min(v0), o1.min(v1)) } else { (o0.max(v0), o1.max(v1)) };
+            list[p] = (z, n1 - n0, n0);
+            return;
+        }
+        if list.len() < 8 {
+            list.push((z, d, e));
+        }
     }
 }
 
@@ -242,7 +345,131 @@ fn substitute_with(vars: &CutVars, base: &[(usize, f64)], terms: &mut Vec<Term>,
     Some(())
 }
 
+/// 試作 `ENOMOTO_MIP_INTVUB`: 一般整数列 `k` (係数 `a`) を変数上下限で置き換えるかを決める (HiGHS の `HighsTransformedLp` の
+/// 整数列の扱い)。置き換えるなら (置き換え方, 余りの LP 値, 余りの上限)。
+/// - VUB `w = d z + e - s`、VLB `w = d z + e + s` (`s >= 0` は整数、`d`・`e` は整数に丸めてある)。
+/// - 条件 (モード 1、HiGHS と同じ): 上下限の幅 > 1.5、LP 値が単純な上下限の真ん中 (両側に feastol より離れる) で整数、
+///   変数上下限の余裕が 0 (ちょうど効いている)。VUB と VLB のどちらも効いていれば係数が正なら VUB、負なら VLB (余りの項が残る向き)。
+/// - モード 2: LP 値が整数でなくてもよく、変数上下限の余裕が単純な上下限の余裕より feastol 以上小さければ置き換える。
+fn int_vb_choice(vars: &CutVars, k: usize, a: f64) -> Option<(Sub, f64, f64)> {
+    const FT: f64 = 1e-6;
+    let mode = intvub_mode();
+    let vb = vars.vb?;
+    if mode == 0 || k >= vb.ivub.len() || (vb.ivub[k].is_empty() && vb.ivlb[k].is_empty()) {
+        return None;
+    }
+    let (l, u, x) = (vars.lo[k], vars.up[k], vars.x[k]);
+    if !(u - l > 1.5) {
+        return None;
+    }
+    let (sl, su) = (x - l, u - x);
+    if sl <= FT || su <= FT {
+        return None;
+    }
+    if mode == 1 && (x - x.round()).abs() >= FT {
+        return None;
+    }
+    let simple = sl.min(su);
+    let fixed = |z: usize| z >= vars.lo.len() || vars.lo[z] == vars.up[z] || !vars.is_int[z];
+    // 最も余裕の小さい VUB / VLB (余裕, z, d, e)
+    let mut bu: Option<(f64, usize, f64, f64)> = None;
+    for &(z, d, e) in &vb.ivub[k] {
+        if fixed(z) {
+            continue;
+        }
+        let dist = (d * vars.x[z] + e - x).max(0.0);
+        if bu.is_none_or(|b| dist < b.0) {
+            bu = Some((dist, z, d, e));
+        }
+    }
+    let mut bl: Option<(f64, usize, f64, f64)> = None;
+    for &(z, d, e) in &vb.ivlb[k] {
+        if fixed(z) {
+            continue;
+        }
+        let dist = (x - d * vars.x[z] - e).max(0.0);
+        if bl.is_none_or(|b| dist < b.0) {
+            bl = Some((dist, z, d, e));
+        }
+    }
+    let ud = bu.map_or(su, |b| if b.0 <= FT { 0.0 } else { b.0 });
+    let ld = bl.map_or(sl, |b| if b.0 <= FT { 0.0 } else { b.0 });
+    let bd = ud.min(ld);
+    let ok = if mode == 1 { bd == 0.0 } else { bd < simple - FT };
+    if !ok {
+        return None;
+    }
+    let use_vub = match (bu, bl) {
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (Some(_), Some(_)) => {
+            if ud < ld - FT {
+                true
+            } else if ld < ud - FT {
+                false
+            } else {
+                a > 0.0
+            }
+        }
+        (None, None) => return None,
+    };
+    if use_vub {
+        let (dist, z, d, e) = bu?;
+        // s = d z + e - w <= max(e, d + e) - l
+        Some((Sub::Vub(z, d, e), dist, e.max(d + e) - l))
+    } else {
+        let (dist, z, d, e) = bl?;
+        // s = w - d z - e <= u - min(e, d + e)
+        Some((Sub::Vlb(z, d, e), dist, u - e.min(d + e)))
+    }
+}
+
 fn substitute_finish(vars: &CutVars, mut terms: Vec<Term>, mut beta: f64, int_coef: Vec<(usize, f64)>) -> Option<(Vec<Term>, f64)> {
+    // 試作 `ENOMOTO_MIP_INTVUB`: 一般整数列を変数上下限で置き換える (z の係数を足し込むので、先に全部決めてから単純な上下限の処理をする)
+    let mut int_coef = int_coef;
+    if intvub_mode() > 0 && vars.vb.is_some_and(|vb| !vb.ivub.is_empty()) {
+        let mut extra: Vec<(usize, f64)> = Vec::new();
+        for idx in 0..int_coef.len() {
+            let (k, a) = int_coef[idx];
+            if a.abs() < 1e-12 {
+                continue;
+            }
+            let Some((sub, yv, yu)) = int_vb_choice(vars, k, a) else { continue };
+            int_coef[idx].1 = 0.0;
+            match sub {
+                Sub::Vub(z, d, e) => {
+                    // a w = a d z + a e - a s
+                    beta -= a * e;
+                    extra.push((z, a * d));
+                    // s の係数 -a が正なら捨てる (HiGHS と同じ。s >= 0 なので <= を緩めるだけ)
+                    if a > 0.0 {
+                        terms.push(Term { k, a: -a, comp: false, int: true, yv, yu, sub });
+                    }
+                }
+                Sub::Vlb(z, d, e) => {
+                    // a w = a d z + a e + a s
+                    beta -= a * e;
+                    extra.push((z, a * d));
+                    if a < 0.0 {
+                        terms.push(Term { k, a, comp: false, int: true, yv, yu, sub });
+                    }
+                }
+                Sub::Simple => unreachable!(),
+            }
+        }
+        if !extra.is_empty() {
+            let mut pos: std::collections::HashMap<usize, usize> = int_coef.iter().enumerate().map(|(i, &(k, _))| (k, i)).collect();
+            for (z, c) in extra {
+                match pos.get(&z) {
+                    Some(&i) => int_coef[i].1 += c,
+                    None => {
+                        pos.insert(z, int_coef.len());
+                        int_coef.push((z, c));
+                    }
+                }
+            }
+        }
+    }
     for (k, a) in int_coef {
         if a.abs() < 1e-12 {
             continue;
@@ -275,6 +502,12 @@ fn substitute_finish(vars: &CutVars, mut terms: Vec<Term>, mut beta: f64, int_co
 /// 置き換えた項 `c * (項の変数)` を元の変数の式に戻して `coefs` に足し、右辺の変化を返す
 /// (戻り値を右辺に足す)。
 fn unsubstitute(vars: &CutVars, t: &Term, c: f64, coefs: &mut Vec<(usize, f64)>) -> f64 {
+    // 変数上下限の余り s を補変数 s' = yu - s にしたもの (試作 `ENOMOTO_MIP_INTVUB` の整数の余りだけ。連続の余りは補変数にしない):
+    // c s' = c yu - c s なので、右辺から c yu を引き、-c s を戻す
+    if t.comp && t.sub != Sub::Simple {
+        let t2 = Term { comp: false, ..*t };
+        return -c * t.yu + unsubstitute(vars, &t2, -c, coefs);
+    }
     match t.sub {
         Sub::Simple => {
             let (l, u) = (vars.lo[t.k], vars.up[t.k]);
@@ -1327,7 +1560,7 @@ mod highs_dump {
     /// `x >= l0 + (l1 - l0) y` (VLB) / `x <= u0 + (u1 - u0) y` (VUB) とする (l0, u0 は x の境界との max/min。HiGHS が probing の
     /// 含意から作る `addVLB`/`addVUB` と同じ形)。2 非零の行でもこれと同じものになる
     fn vb_from_row_activity(n: usize, lo: &[f64], up: &[f64], isint: &[bool], rows: &[Vec<(usize, f64)>], rlo: &[f64], rup: &[f64]) -> VarBounds {
-        let mut vb = VarBounds { vub: vec![Vec::new(); n], vlb: vec![Vec::new(); n] };
+        let mut vb = VarBounds { vub: vec![Vec::new(); n], vlb: vec![Vec::new(); n], ..Default::default() };
         let is_bin = |j: usize| isint[j] && lo[j] == 0.0 && up[j] == 1.0;
         for (i, r) in rows.iter().enumerate() {
             // 他の項の最小・最大の活動量 (無限大の項の数も数える)
@@ -2363,4 +2596,177 @@ fn cmir_terms_multi(vars: &CutVars, terms: Vec<Term>, beta: f64, k: usize) -> Ve
         out.extend(cmir_build(vars, terms.clone(), beta, d, e));
     }
     out
+}
+
+/// 試作 `ENOMOTO_MIP_INTVUB` (一般整数列の変数上下限による置き換え) の有効性の確かめ
+#[cfg(test)]
+mod intvub_tests {
+    use super::*;
+
+    #[test]
+    fn collect_int_vbs() {
+        // w0 in [0, 10], z1 0-1: w0 - 10 z1 <= 0 → w0 <= 10 z1。2 w0 - 7 z1 <= 1 → w0 <= 0.5 + 3.5 z1 → 丸めて w0 <= 0 + 4 z1 (同じ z なので強い方)
+        // -w0 + 3 z1 <= 0 → w0 >= 3 z1。w2 in [0, 5]: w2 + 2 z1 = 5 → w2 <= 5 - 2 z1, w2 >= 5 - 2 z1
+        let is_int = [true, true, true];
+        let lo = [0.0, 0.0, 0.0];
+        let up = [10.0, 1.0, 5.0];
+        let rows = vec![vec![(0, 1.0), (1, -10.0)], vec![(0, 2.0), (1, -7.0)], vec![(0, -1.0), (1, 3.0)], vec![(2, 1.0), (1, 2.0)]];
+        let rlo = [f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, 5.0];
+        let rup = [0.0, 1.0, 0.0, 5.0];
+        let mut vb = VarBounds::default();
+        vb.add_int_vbs(&is_int, &lo, &up, &rows, &rlo, &rup, &[]);
+        assert_eq!(vb.ivub[0], vec![(1, 4.0, 0.0)]);
+        assert_eq!(vb.ivlb[0], vec![(1, 3.0, 0.0)]);
+        assert_eq!(vb.ivub[2], vec![(1, -2.0, 5.0)]);
+        assert_eq!(vb.ivlb[2], vec![(1, -2.0, 5.0)]);
+        assert!(vb.ivub[1].is_empty());
+        // プロービングの含意: z1 = 0 ⇒ w0 <= 0 (w0 <= 10 z1)、z1 = 1 ⇒ w2 >= 4 (w2 >= 4 z1)
+        let mut vb = VarBounds::default();
+        vb.add_int_vbs(&is_int, &lo, &up, &[], &[], &[], &[(1, false, 0, true, 0.0), (1, true, 2, false, 4.0)]);
+        assert_eq!(vb.ivub[0], vec![(1, 10.0, 0.0)]);
+        assert_eq!(vb.ivlb[2], vec![(1, 4.0, 0.0)]);
+    }
+
+    /// 乱数の小さい問題 (一般整数列 w と 0-1 列 z、変数上下限の 2 項の行、w と z の 1 本の行) で、変数上下限の置き換えを使った
+    /// CMIR (と同じ置き換えを使う cover) のカットが全ての整数解で成り立つことを総当たりで確かめる
+    fn random_validity(mode: u8, seed0: u64) -> (usize, usize) {
+        INTVUB_FORCE.with(|c| c.set(Some(mode)));
+        let mut seed = seed0;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (mut cuts, mut subst_cuts) = (0, 0);
+        for _case in 0..4000 {
+            let nw = 1 + (rnd() * 3.0) as usize;
+            let nz = 1 + (rnd() * 3.0) as usize;
+            let n = nw + nz;
+            let mut lo = vec![0.0; n];
+            let mut up = vec![1.0; n];
+            let is_int = vec![true; n];
+            for k in 0..nw {
+                lo[k] = if rnd() < 0.2 { 1.0 } else { 0.0 };
+                up[k] = lo[k] + 2.0 + (rnd() * 5.0).floor();
+            }
+            // 変数上下限の行 (係数の倍率・符号・等式・小数の係数を混ぜる)
+            let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+            let (mut rlo, mut rup) = (Vec::new(), Vec::new());
+            for k in 0..nw {
+                let z = nw + (rnd() * nz as f64) as usize % nz;
+                let s = [1.0, 2.0, -1.0, 0.5][(rnd() * 4.0) as usize % 4];
+                let kind = (rnd() * 4.0) as usize;
+                let u = lo[k] + 1.0 + rnd() * (up[k] - lo[k]);
+                match kind {
+                    // w <= u z
+                    0 | 1 => {
+                        rows.push(vec![(k, s), (z, -s * u)]);
+                        if s > 0.0 {
+                            rlo.push(f64::NEG_INFINITY);
+                            rup.push(0.0);
+                        } else {
+                            rlo.push(0.0);
+                            rup.push(f64::INFINITY);
+                        }
+                    }
+                    // w >= l + c z
+                    2 => {
+                        let c = (rnd() * 3.0).floor() + rnd() * 0.5;
+                        rows.push(vec![(k, s), (z, -s * c)]);
+                        if s > 0.0 {
+                            rlo.push(s * lo[k]);
+                            rup.push(f64::INFINITY);
+                        } else {
+                            rlo.push(f64::NEG_INFINITY);
+                            rup.push(s * lo[k]);
+                        }
+                    }
+                    // 等式 w + c z = r
+                    _ => {
+                        let c = (rnd() * 3.0).floor() + 1.0;
+                        let r = (lo[k] + c).min(up[k]);
+                        rows.push(vec![(k, s), (z, s * c)]);
+                        rlo.push(s * r);
+                        rup.push(s * r);
+                    }
+                }
+            }
+            let mut base: Vec<(usize, f64)> = Vec::new();
+            for k in 0..n {
+                if rnd() < 0.85 {
+                    let a = (rnd() * 12.0 - 6.0) * if rnd() < 0.5 { 1.0 } else { 0.73 };
+                    base.push((k, a));
+                }
+            }
+            // 整数解を全部並べる
+            let mut pts: Vec<Vec<f64>> = vec![vec![]];
+            for k in 0..n {
+                let mut nx = Vec::new();
+                for p in &pts {
+                    let mut v = lo[k];
+                    while v <= up[k] {
+                        let mut q = p.clone();
+                        q.push(v);
+                        nx.push(q);
+                        v += 1.0;
+                    }
+                }
+                pts = nx;
+            }
+            let row_ok = |q: &[f64]| rows.iter().enumerate().all(|(i, r)| {
+                let a: f64 = r.iter().map(|&(k, c)| c * q[k]).sum();
+                a >= rlo[i] - 1e-9 && a <= rup[i] + 1e-9
+            });
+            let feas: Vec<Vec<f64>> = pts.into_iter().filter(|q| row_ok(q)).collect();
+            if feas.is_empty() {
+                continue;
+            }
+            let bact = |q: &[f64]| base.iter().map(|&(k, a)| a * q[k]).sum::<f64>();
+            let bmin = feas.iter().map(|q| bact(q)).fold(f64::INFINITY, f64::min);
+            let bmax = feas.iter().map(|q| bact(q)).fold(f64::NEG_INFINITY, f64::max);
+            let rhs = bmin + rnd() * (bmax - bmin);
+            let feas: Vec<Vec<f64>> = feas.into_iter().filter(|q| bact(q) <= rhs + 1e-9).collect();
+            // LP 点: 実行可能な整数解 2 つの凸結合 (行を満たす点。変数上下限がちょうど効く点になりやすい) を少しずらす
+            let pa = &feas[(rnd() * feas.len() as f64) as usize % feas.len()];
+            let pb = &feas[(rnd() * feas.len() as f64) as usize % feas.len()];
+            let t = rnd();
+            let mut x: Vec<f64> = (0..n).map(|k| t * pa[k] + (1.0 - t) * pb[k]).collect();
+            if rnd() < 0.5 {
+                // z を動かし、w を変数上下限に寄せる (w を整数に保つ)
+                for k in nw..n {
+                    x[k] = (x[k] + rnd() * 0.3 - 0.15).clamp(0.0, 1.0);
+                }
+            }
+            let mut vb = VarBounds::from_rows(n, &is_int, &rows, &rlo, &rup);
+            vb.add_int_vbs(&is_int, &lo, &up, &rows, &rlo, &rup, &[]);
+            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb) };
+            let mut out = generate_cuts(&vars, &base, rhs, true, true);
+            out.extend(lifted_cover(&vars, &base, rhs));
+            for cut in out {
+                cuts += 1;
+                if cut.coefs.iter().any(|&(k, c)| k >= nw && c != 0.0 && !base.iter().any(|&(j, _)| j == k)) {
+                    subst_cuts += 1;
+                }
+                for q in &feas {
+                    let a: f64 = cut.coefs.iter().map(|&(k, c)| c * q[k]).sum();
+                    assert!(a <= cut.rhs + 1e-7 * (1.0 + cut.rhs.abs()), "mode {mode}: integer point {q:?} cut off by {:?} <= {} (base {base:?} <= {rhs}, rows {rows:?} [{rlo:?}, {rup:?}], x {x:?}, lo {lo:?} up {up:?})", cut.coefs, cut.rhs);
+                }
+            }
+        }
+        INTVUB_FORCE.with(|c| c.set(None));
+        (cuts, subst_cuts)
+    }
+
+    #[test]
+    fn intvub_cuts_valid_mode1() {
+        let (c, s) = random_validity(1, 424242);
+        assert!(s > 20, "cuts {c}, cuts using the substitution {s}");
+    }
+
+    #[test]
+    fn intvub_cuts_valid_mode2() {
+        let (c, s) = random_validity(2, 777);
+        assert!(s > 50, "cuts {c}, cuts using the substitution {s}");
+    }
 }

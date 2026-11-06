@@ -4520,7 +4520,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             xv.push(act[i]);
         }
         if self.vbounds.is_none() {
-            self.vbounds = Some(std::rc::Rc::new(VarBounds::from_rows(n, &p.is_int, &p.rows, &p.row_lo, &p.row_up)));
+            let mut vbs = VarBounds::from_rows(n, &p.is_int, &p.rows, &p.row_lo, &p.row_up);
+            // 試作 `ENOMOTO_MIP_INTVUB`: 一般整数列と 0-1 列の変数上下限も集める (`ENOMOTO_MIP_INTVUB_IMPL` ならプロービングの含意も)
+            if super::cuts::intvub_mode() > 0 {
+                let implied: &[(u32, bool, u32, bool, f64)] = if env_str!("ENOMOTO_MIP_INTVUB_IMPL").is_some() { &p.implied_bounds } else { &[] };
+                vbs.add_int_vbs(&self.cut_int[..n], &self.dom.global_lo[..n], &self.dom.global_up[..n], &p.rows, &p.row_lo, &p.row_up, implied);
+                if env_str!("ENOMOTO_MIP_INTVUB_LOG").is_some() && !self.params.submip {
+                    let (nu, nl) = (vbs.ivub.iter().map(|v| v.len()).sum::<usize>(), vbs.ivlb.iter().map(|v| v.len()).sum::<usize>());
+                    let ncol = vbs.ivub.iter().zip(&vbs.ivlb).filter(|(a, b)| !a.is_empty() || !b.is_empty()).count();
+                    eprintln!("INTVUB: {nu} vub, {nl} vlb on {ncol} integer columns (implied {})", implied.len());
+                }
+            }
+            self.vbounds = Some(std::rc::Rc::new(vbs));
         }
         let vb = self.vbounds.clone();
         let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xv, vb: if env_str!("ENOMOTO_MIP_NO_VB").is_some() { None } else { vb.as_deref() } };
