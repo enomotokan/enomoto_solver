@@ -1,0 +1,77 @@
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: tightened 2160 coefficients (skipped 0 in rows redundant within tolerance), normalized 0 integer rows
+MIP: presolve: merged 56 parallel rows (0 new equations)
+MIP: presolve: rows 38577 -> 33784, free columns 22884 -> 19079, nonzeros 99930 -> 87535, postsolve steps 281 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 0 of 19079 free columns fixed (0.02s), not used
+ROOTLP_SCALE: rows 33784 cols 22884 range 1.840e7 warm false applies false
+MIP: LP probing pass 1: 150 candidates, 0 fixings (2 LPs, 963 iters, 1.26s)
+MIP: LP probing: tried 1 columns, fixed 0, LP -4.9172921008e10 -> -4.9172921008e10 (2 LPs, 963 iters, 1.26s)
+MIP: LP probing: root LP 1.04s (6266 iters, size 144203), tried 1, fixed 0, basis passed true, total 7229 iters 1.26s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.04s), not used
+MIP: probing: 14210 of 15372 binaries probed (1 passes), 55 fixed, 702 bounds tightened, 885350 implications (1.59s, cpu 1.58s, work 79323734, pwork 1813490216, chg 15007062)
+MIP: probing: 0 equivalent binary pairs
+MIP: probing: fixed 2 columns of width within tolerance
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (557387 edges, 0.09s)
+MIP: symmetry: HO3_SYMNORM flipped 843 of 33784 rows for the detection
+MIP: symmetry: refinement 0.03s, work 3244332 (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)
+MIP: symmetry: refinements stopped by the iteration cap 0 of 1 (ENOMOTO_MIP_HO6_SYMREFINE true)
+MIP: symmetry: none (0.06s, work 3244332, search 0, verify 0, detect 0.06s, refine 0.03s, log work 8438598)
+MIP: fixed-charge check: vb rows 2187 of 33784, continuous with vb 2186 of 3705
+MIP: root LP basis from the presolve LP probing: used (with rows)
+MIP: solving the root LP (0.20s)
+ROOTLP_SCALE: rows 33784 cols 22884 range 1.840e7 warm true applies false
+MIP: root LP -4.8800911464e10 (808 iters, 0.47s)
+MIP: fixed-charge check: vb rows 2187 of 33784, continuous with vb 2186 of 3705
+MIP: fixed-charge check: vb rows 2187 of 33784, continuous with vb 2186 of 3705
+MIP: robust cut LP cap: size false, double false, progress true
+MIP: fixed-charge check: vb rows 2187 of 33784, continuous with vb 2186 of 3705
+MIP: fixed-charge check: vb rows 2187 of 33784, continuous with vb 2186 of 3705
+MCF detect: rows 33784 cols 22884 | flow cands 30868 flow rows 15283 commodities 17 cap cands 14892 arcs 14008 nodes 15283 incons 280.50 undirected | fail 'inconsistent' | networks [] fc_network false | 0.010s
+MIP: cut selection probe: compared at 0 rounds (pool stopped early), probe wall 1.18s (budget 1.8s)
+MIP: cut selection probe (6 rounds): default 0 cuts gain 0.000000e0 (0.00s), pool 0 cuts gain 0.000000e0 (0.00s) -> default (rule rate, probe 0.00s in total, 1.66s)
+MIP: clique graph: 557387 edges (28416 from rows, probing implications 885350)
+MIP: clique fallback: no violated clique cuts; not used (0.07s)
+MIP: cut loop done: 0 cuts added, 0 in LP, pool 0 cuts (0 nonzeros), obj -4.8800911464e10 -> -4.8800911464e10
+MIP: early root reduced costs stored (0 newly fixed integer columns, 2.04s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+MIP: root heuristic shifting: none (0.00s)
+MIP: fixed-integer LP dual check: c x -4.9944662087e10, dual bound -5.0319572363e10 -> solve
+MIP:   global fixed integers 3017 of 17172 (newly 0 since the root LP)
+MIP: new incumbent -4.8426001187e10 at node 0 (2.23s) [int shifting]
+MIP: root heuristic int shifting: found (0.19s)
+MIP: root heuristic randomized rounding: none (0.33s)
+
+thread 'enomoto-0' (6529) panicked at src/interior_point/kkt.rs:1725:9:
+NormalKkt::solve_in_place before factor
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: <_core::interior_point::kkt::IpmKkt>::solve_plain
+   3: <_core::interior_point::kkt::IpmKkt>::solve_refined
+   4: _core::interior_point::boxed::solve_box_lp_scaled
+   5: _core::interior_point::boxed::solve_box_lp_warm
+   6: _core::cancel::with_token::<core::option::Option<_core::simplex::crossover::InteriorResult>, <_core::simplex::mip_lp::TwoStageLp>::interior_point::{closure#2}>
+   7: <_core::simplex::mip_lp::TwoStageLp as _core::mip::lp_api::MipLp>::interior_point
+   8: <_core::mip::solver::Solver<_core::simplex::mip_lp::TwoStageLp>>::interior_rounding
+   9: _core::simplex::mip_lp::with_ipm_abort::<bool, <_core::mip::solver::Solver<_core::simplex::mip_lp::TwoStageLp>>::run::{closure#433}>
+  10: <_core::mip::solver::Solver<_core::simplex::mip_lp::TwoStageLp>>::run
+  11: _core::mip::solver::solve_with::<_core::simplex::mip_lp::TwoStageLp>
+  12: _core::mip::solve_problem_inner
+  13: _core::mip::solve_problem
+  14: _core::mip::solve_mip
+  15: _core::log::with_sink::<_core::types::SolveResult, <_core::model::PyModel>::solve::{closure#1}::{closure#0}::{closure#0}>
+  16: <rayon_core::job::StackJob<rayon_core::latch::LatchRef<rayon_core::latch::LockLatch>, <rayon_core::registry::Registry>::in_worker_cold<<rayon_core::thread_pool::ThreadPool>::install<<_core::model::PyModel>::solve::{closure#1}::{closure#0}, _core::types::SolveResult>::{closure#0}, _core::types::SolveResult>::{closure#0}::{closure#0}, _core::types::SolveResult> as rayon_core::job::Job>::execute
+  17: <rayon_core::registry::WorkerThread>::wait_until_cold
+  18: <rayon_core::registry::ThreadBuilder>::run
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+Traceback (most recent call last):
+  File "/home/user/enomoto_solver/scripts/run_miplib_benchmark.py", line 265, in <module>
+    main()
+    ~~~~^^
+  File "/home/user/enomoto_solver/scripts/run_miplib_benchmark.py", line 239, in main
+    return worker_ours(a.worker_ours, a.time_limit, a.threads)
+  File "/home/user/enomoto_solver/scripts/run_miplib_benchmark.py", line 108, in worker_ours
+    r = m.solve(None, False, time_limit, None, None, threads)
+pyo3_runtime.PanicException: NormalKkt::solve_in_place before factor
