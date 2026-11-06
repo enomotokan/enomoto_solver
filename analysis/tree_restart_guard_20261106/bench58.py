@@ -11,9 +11,11 @@ CFGS = {
     "inc": {"ENOMOTO_MIP_TREE_RESTART": "inc"},
     "force": {"ENOMOTO_MIP_TREE_RESTART": "force"},
     "forcekc": {"ENOMOTO_MIP_TREE_RESTART": "force", "ENOMOTO_MIP_TREE_RESTART_GUARD": "kc"},
+    "forcekC": {"ENOMOTO_MIP_TREE_RESTART": "force", "ENOMOTO_MIP_TREE_RESTART_GUARD": "kC"},
+    "incC": {"ENOMOTO_MIP_TREE_RESTART": "inc", "ENOMOTO_MIP_TREE_RESTART_GUARD": "C"},
     "incc": {"ENOMOTO_MIP_TREE_RESTART": "inc", "ENOMOTO_MIP_TREE_RESTART_GUARD": "c"},
 }
-OUT = D / "bench58.jsonl"
+OUT = D / os.environ.get("BENCH58_OUT", "bench58.jsonl")  # whl5 の回は bench58_w5.jsonl
 cfgs, rep = sys.argv[1].split(","), int(sys.argv[2])
 if rep % 2:
     cfgs = cfgs[::-1]

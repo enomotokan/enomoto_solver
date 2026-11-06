@@ -6,7 +6,7 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 base = sys.argv[1] if len(sys.argv) > 1 else "def"
 R = defaultdict(dict)
-for l in (D / "bench58.jsonl").read_text().splitlines():
+for l in (D / (sys.argv[2] if len(sys.argv) > 2 else "bench58.jsonl")).read_text().splitlines():
     r = json.loads(l)
     res = r["result"]
     ok = str(res.get("status")).lower() == "optimal"
