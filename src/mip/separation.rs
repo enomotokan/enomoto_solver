@@ -2274,8 +2274,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let it1 = self.lp.total_iterations();
                             let t1 = std::time::Instant::now();
                             let mut slow: Option<(u64, f64)> = None;
+                            let mut cold_it0 = it1;
                             loop {
-                                let done = self.lp.total_iterations() - it1;
+                                // 全スラック基底に切り替えた後は、反復の上限を切り替えたところから数え直す
+                                let done = self.lp.total_iterations() - cold_it0;
                                 let left = lim2.saturating_sub(done);
                                 if left == 0 {
                                     break;
@@ -2293,9 +2295,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 let r2 = t2.elapsed().as_secs_f64() / (self.lp.total_iterations() - i2).max(1) as f64;
                                 if t1.elapsed().as_secs_f64() > cold_secs {
                                     slow = Some((self.lp.total_iterations() - it1, r2));
+                                    // 新しい LP と同じ出発にする: 全スラック基底を、点 x = 0 から非基底の置き場所を推す形で渡す
+                                    // (`set_basis` は直前の点から推すので、温かい道の途中の点が残り、puriri では全スラック基底からでも
+                                    // 30568 反復かかった。x = 0 なら 20299 反復)。止まった所の置き場所 (`resume_nb`) も消える
                                     let b = self.lp.basis();
-                                    let slack = super::lp::Basis { col: b.col.iter().map(|_| super::lp::VarStatus::Lower).collect(), row: vec![super::lp::VarStatus::Basic; b.row.len()] };
-                                    self.lp.set_basis(&slack);
+                                    let (n, m) = (b.col.len(), b.row.len());
+                                    let cols: Vec<usize> = (n..n + m).collect();
+                                    self.lp.set_basis_cols(&cols, Some(&vec![0.0; n]));
+                                    cold_it0 = self.lp.total_iterations();
                                 }
                             }
                             crate::simplex::mip_lp::PROGRESS_STOP_ONCE.with(|c| c.set(None));
