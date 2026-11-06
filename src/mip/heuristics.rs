@@ -2667,7 +2667,38 @@ impl<'a, L: MipLp> Solver<'a, L> {
             (self.submip_time_frac, self.submip_time_max) = keep;
             return r;
         }
-        self.rins_inner(x)
+        // `ENOMOTO_MIP_S1_RINSWIDE=k` (試作、既定では使わない。analysis/highs_slow_20261106/S1.md): 根の RINS が解を出さずに短く
+        // (`ENOMOTO_T_MIP_S1_RINSWIDE_SECS` 秒 (既定 1.0) 未満で) 終わったら、近傍に良い解がないと見て、一致する列の固定を
+        // 乱数で `ENOMOTO_T_MIP_S1_RINSWIDE_DROP` (既定 0.25) ずつ多く外して (固定を減らして近傍を広げて) 最大 k 回やり直す。
+        // physiciansched6-2 では RENS の 49424 と根の LP の一致する列 (固定率 0.88) の RINS が 0.2 秒で「実行不能」(近傍に良い解なし) で、
+        // 最適解 49324 は 30 秒後に木の RINS (固定率約 0.65、自由列 約 1500) が見つける
+        let t0 = Instant::now();
+        let r = self.rins_inner(x);
+        let wide = rins_wide();
+        if r || wide == 0 || self.params.submip || self.nodes > 1 {
+            return r;
+        }
+        let secs = tunable!("ENOMOTO_T_MIP_S1_RINSWIDE_SECS", 1.0, f64);
+        let step = tunable!("ENOMOTO_T_MIP_S1_RINSWIDE_DROP", 0.25, f64);
+        let mut dt = t0.elapsed().as_secs_f64();
+        for k in 1..=wide {
+            if dt >= secs || self.time_up() {
+                break;
+            }
+            let drop = (step * k as f64).min(0.9);
+            RINS_DROP.with(|c| c.set(drop));
+            let t1 = Instant::now();
+            let ok = self.rins_inner(x);
+            RINS_DROP.with(|c| c.set(0.0));
+            dt = t1.elapsed().as_secs_f64();
+            if self.params.verbose {
+                eprintln!("MIP:   RINS wide {k}: dropped {drop:.2} of the agreeing fixes, found {ok} ({dt:.2}s)");
+            }
+            if ok {
+                return true;
+            }
+        }
+        false
     }
 
     fn rins_inner(&mut self, x: &[f64]) -> bool {
@@ -2695,6 +2726,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if (x[j] - inc[j]).abs() <= FEASTOL && inc[j] >= self.dom.lo[j] && inc[j] <= self.dom.up[j] {
                 fixes.push((j, inc[j], inc[j]));
             }
+        }
+        // `ENOMOTO_MIP_S1_RINSWIDE` のやり直し: 一致する列の固定を乱数で外す
+        let drop = RINS_DROP.with(|c| c.get());
+        if drop > 0.0 {
+            let mut kept = Vec::with_capacity(fixes.len());
+            for f in fixes {
+                if self.rand() >= drop {
+                    kept.push(f);
+                }
+            }
+            fixes = kept;
         }
         if nint == 0 {
             return false;
@@ -3510,7 +3552,15 @@ pub(super) fn frag_t0() -> Instant {
     *T0.get_or_init(Instant::now)
 }
 
+/// `ENOMOTO_MIP_S1_RINSWIDE=k` (試作、[`Solver::rins`]): 根の RINS が短く空振りしたときのやり直しの回数 (0 なら使わない)
+pub(super) fn rins_wide() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_S1_RINSWIDE").map_or(0, |v| v.parse::<usize>().unwrap_or(2)))
+}
+
 thread_local! {
+    /// `ENOMOTO_MIP_S1_RINSWIDE` のやり直しで外す固定の割合 ([`Solver::rins_inner`])
+    static RINS_DROP: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     /// `ENOMOTO_MIP_ROBUST_LNSFREQ` (試作): Mutation の固定の割合 (スレッドごと。最初は `ENOMOTO_T_MIP_MUTATION_RATE`)
     static ROBUST_MUT_RATE: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
 }

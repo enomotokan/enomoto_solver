@@ -17,6 +17,22 @@ use crate::types::{LpOptions, Status};
 use std::cell::OnceCell;
 use std::sync::Arc;
 
+/// 内点法 ([`TwoStageLp::interior_point`]) を打ち切る追加の条件 (見張りのスレッドが 5 ミリ秒ごとに呼ぶ)。
+pub type IpmAbort = Arc<dyn Fn() -> bool + Send + Sync>;
+
+thread_local! {
+    static IPM_ABORT: std::cell::RefCell<Option<IpmAbort>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `abort` をこのスレッドの内点法の追加の打ち切り条件にして `f` を実行し、元に戻す
+/// (試作 `ENOMOTO_MIP_S1_IPMFIND`: 解発見スレッドが解を出したら根の内点法の丸めを止める)。
+pub fn with_ipm_abort<R>(abort: Option<IpmAbort>, f: impl FnOnce() -> R) -> R {
+    let prev = IPM_ABORT.with(|a| std::mem::replace(&mut *a.borrow_mut(), abort));
+    let r = f();
+    IPM_ABORT.with(|a| *a.borrow_mut() = prev);
+    r
+}
+
 /// 最適基底とその LU、最終の被約費用 ([`TwoStageLp::lu_cache`])。状態の保存 ([`TwoStageLp::save_state`]) と
 /// [`TwoStageLp::lu`] は `Arc` で共有し、求解で LU を渡すときだけ (共有中なら) 複製する。
 struct LuCache {
@@ -922,12 +938,13 @@ impl TwoStageLp {
         use std::sync::Arc;
         let token = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
-        // 時間切れでトークンを立てる見張り (内点法・クロスオーバーはトークンを見て止まる)
+        let abort = IPM_ABORT.with(|a| a.borrow().clone());
+        // 時間切れ (か、呼び手が渡した打ち切りの条件 [`with_ipm_abort`]) でトークンを立てる見張り (内点法・クロスオーバーはトークンを見て止まる)
         let watch = {
             let (token, done) = (token.clone(), done.clone());
             std::thread::spawn(move || {
                 while !done.load(Ordering::Relaxed) {
-                    if std::time::Instant::now() >= deadline {
+                    if std::time::Instant::now() >= deadline || abort.as_ref().is_some_and(|f| f()) {
                         token.store(true, Ordering::Relaxed);
                         return;
                     }

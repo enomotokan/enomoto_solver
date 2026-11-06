@@ -7601,7 +7601,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 heur!("randomized rounding", self.randomized_rounding(&x, 3));
                 if env_str!("ENOMOTO_MIP_NO_IPM_HEUR").is_none() {
-                    heur!("interior rounding", self.interior_rounding(&x));
+                    // `ENOMOTO_MIP_S1_IPMFIND` (試作、既定では使わない。analysis/highs_slow_20261106/S1.md): 解発見スレッドが走っている間は、
+                    // それが解を出したら内点法を止める (解は内点法の丸めが終わるまで取り込まれない。hypothyroid-k1 では内点法が 7〜9 秒
+                    // かかって何も見つけず、その間に解発見スレッドが出していた最適解 −2851 の取り込みが待たされていた)
+                    let abort: Option<crate::simplex::mip_lp::IpmAbort> = match (&self.find_out, env_str!("ENOMOTO_MIP_S1_IPMFIND").is_some()) {
+                        (Some(o), true) => {
+                            let o = o.clone();
+                            Some(std::sync::Arc::new(move || o.lock().is_ok_and(|v| !v.is_empty())))
+                        }
+                        _ => None,
+                    };
+                    heur!("interior rounding", crate::simplex::mip_lp::with_ipm_abort(abort, || self.interior_rounding(&x)));
                 }
                 if env_str!("ENOMOTO_MIP_NO_ROOT_REDCOST_HEUR").is_none() {
                     heur!("root reduced cost", self.root_reduced_cost());
