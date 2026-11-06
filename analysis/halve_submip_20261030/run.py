@@ -172,6 +172,8 @@ CFGS = {
     "s6": {"ENOMOTO_MIP_HO4_CUT0": "1", "ENOMOTO_MIP_TREE3_JOINCAP": "1", "ENOMOTO_MIP_S6_CUTLP_TCAP": "10"},
     "all29": {"ENOMOTO_MIP_S1_RINSWIDE": "2", "ENOMOTO_MIP_S1_IPMFIND": "1", "ENOMOTO_T_MIP_CLIQUE_FB_RATIO": "0.1", "ENOMOTO_MIP_S3_TSDENSE": "1",
               "ENOMOTO_MIP_HO4_CUT0": "1", "ENOMOTO_MIP_TREE3_JOINCAP": "1", "ENOMOTO_MIP_S6_CUTLP_TCAP": "10"},
+    # SYMSIGN・SYMZERO の既定化 (2026-11-06、analysis/symsign_default_20261106.md) の後は "def" が両方を含む。それより前は "presymsign"
+    "presymsign": {"ENOMOTO_MIP_SYMSIGN": "0", "ENOMOTO_MIP_SYMZERO": "0"},
 }
 if __name__ == "__main__":  # bench.py からは設定 (CFGS) だけを読む
     cfgs, probs, reps = sys.argv[1].split(","), sys.argv[2].split(","), int(sys.argv[3])

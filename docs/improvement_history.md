@@ -10352,3 +10352,10 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   安全網は働かない (根の LP が壊れない限り何もしない)。
 - 同じ記録の試作 `ENOMOTO_MIP_ROOTLP_SCALE=1` (基底があっても根の LP を尺度を調整した写しで解く。momentum1 の根の LP 594 秒 → 0.68 秒) は既定にしていない。
   記録は `analysis/momentum1_rootlp_20261106.md`。
+
+## 2026-11-06: 対称性の検出の同点の行の ±1 倍 (SYMSIGN) と右辺 0 の向き (SYMZERO) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて run.py の `presymsign`): `ENOMOTO_MIP_SYMSIGN` (-1 倍しても形が同じ行を写しで二重にし、-1 倍で対応する対称性も見つける)、
+  `ENOMOTO_MIP_SYMZERO` (向きのそろえで -0.0 を 0.0 にそろえる)。
+- 根拠: 生成元が増えるのは neos-827175 (57 → 66)・neos-2746589-doon (31 → 33)・neos859080 (0 → 1) の 3 問。neos859080 は 60 秒で 2/5 回 → 5/5 回 (1.0〜15.7 秒)。
+  58 問 2 回 +1.3% (揺れの範囲、検出が変わるのは 1 問)。記録は `analysis/symsign_default_20261106.md` (元は `analysis/symsign_20261106.md`)。

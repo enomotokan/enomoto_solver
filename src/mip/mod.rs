@@ -2232,11 +2232,15 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     // 行を -1 倍して写す対称性が見えない (生成元 1 個、HiGHS は 39 個)
     let symnorm = env_def!("ENOMOTO_MIP_HO3_SYMNORM", "1").is_some();
     let (mut sym_caps, mut sym_time) = ((work_cap, log_cap), time_cap);
-    // `ENOMOTO_MIP_SYMSIGN`・`ENOMOTO_MIP_SYMSCALE` (試作、既定では使わない。analysis/symsign_20261106.md): 同点の行 (-1 倍しても
-    // 形が同じ行) を -1 倍でも写せるようにする・行を正の倍率でそろえる写し ([`symmetry::detection_copy`]。向きのそろえも含む)
-    // `ENOMOTO_MIP_SYMZERO` (試作): 向きのそろえだけを、右辺 0 の等式も係数で向きを決める形 ([`symmetry::detection_copy`]) で行う
-    let (symsign, symscale) = (env_str!("ENOMOTO_MIP_SYMSIGN").is_some(), env_str!("ENOMOTO_MIP_SYMSCALE").is_some());
-    let normed = if symsign || symscale || env_str!("ENOMOTO_MIP_SYMZERO").is_some() {
+    // `ENOMOTO_MIP_SYMSIGN` (2026-11-06 から既定、`=0` で止める。analysis/symsign_20261106.md・symsign_default_20261106.md): 同点の行
+    // (-1 倍しても形が同じ行) を -1 倍でも写せるようにする写し ([`symmetry::detection_copy`]。向きのそろえも含む)。
+    // `ENOMOTO_MIP_SYMSCALE` (試作、既定では使わない): 行を正の倍率でそろえる。
+    // `ENOMOTO_MIP_SYMZERO` (2026-11-06 から既定、`=0` で止める): 向きのそろえを、右辺 0 の等式も係数で向きを決める形 (-0.0 を 0.0 にそろえる) で行う。
+    // どちらも `ENOMOTO_MIP_HO3_SYMNORM=0` (向きをそろえない) のときは既定では働かない (明示すれば働く)
+    let symsign = if symnorm { env_def!("ENOMOTO_MIP_SYMSIGN", "1").is_some() } else { env_str!("ENOMOTO_MIP_SYMSIGN").is_some_and(|v| v != "0") };
+    let symscale = env_str!("ENOMOTO_MIP_SYMSCALE").is_some();
+    let symzero = if symnorm { env_def!("ENOMOTO_MIP_SYMZERO", "1").is_some() } else { env_str!("ENOMOTO_MIP_SYMZERO").is_some_and(|v| v != "0") };
+    let normed = if symsign || symscale || symzero {
         let (q, [flipped, scaled, ties]) = symmetry::detection_copy(&prob, symscale, symsign);
         // 同点の行を二重にした分だけ確かめ ([`symmetry::detect`] の verify) の手間が増え、手間の上限に早く届いて試す組が減る
         // (neos-827175: 生成元 57 -> 46)。手間と時間の上限を写しの大きさ (非零 + 行) の比で広げ、試せる組の数を元の問題と同じくらいにする
