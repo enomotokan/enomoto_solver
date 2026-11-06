@@ -8003,9 +8003,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let zrows = std::mem::take(&mut *self.optface_pool_rows.borrow_mut());
             if !zrows.is_empty() {
                 let n0 = self.cut_pool.len();
+                // プールの非零の上限 (根のカットで満杯のことが多い) を越えても入れる (最大 `ENOMOTO_T_MIP_OPTFACE_RACE_MAX` 本ほど)
+                let nocap = std::mem::replace(&mut self.pool_nocap, true);
                 for (c, r) in &zrows {
                     self.add_to_pool(c, *r);
                 }
+                self.pool_nocap = nocap;
                 if self.params.verbose {
                     eprintln!("MIP: optface parcuts: {} cuts added to the cut pool ({} new, pool {})", zrows.len(), self.cut_pool.len() - n0, self.cut_pool.len());
                 }
