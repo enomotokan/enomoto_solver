@@ -1524,6 +1524,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             t_plain
         };
+        // `ENOMOTO_MIP_SUBCAP` の `t` ([`super::solver::subcap`]): 根のサブ MIP の時間の上限を根の時間の倍までにする
+        let time_limit = if super::solver::subcap('t') && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
+            time_limit.min(tunable!("ENOMOTO_T_MIP_SUBCAP_T_MIN", 2.0, f64).max(tunable!("ENOMOTO_T_MIP_SUBCAP_T", 2.0, f64) * super::solver::subcap_root_secs()))
+        } else {
+            time_limit
+        };
         (time_limit, nosol)
     }
 
@@ -1610,13 +1616,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT_ROOT`・`_TREE`・`_DEEP` (試作、既定 1): さらに、外側の根のサブ MIP・外側の木の中のサブ MIP・
             // サブ MIP の中のサブ MIP (入れ子) だけに掛ける倍率 (analysis/submip_nodes_20261101.md)
-            node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult * if self.params.submip {
-                tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT_DEEP", 1.0, f64)
-            } else if self.nodes <= 1 {
-                tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT_ROOT", 1.0, f64)
-            } else {
-                tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT_TREE", 1.0, f64)
-            }) as u64,
+            // `ENOMOTO_MIP_SUBCAP` の `n` ([`super::solver::subcap`]): 外側の根のサブ MIP は 200 + 外側のノード数 / 20 まで (HiGHS)
+            node_limit: {
+                let nl = ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult * if self.params.submip {
+                    tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT_DEEP", 1.0, f64)
+                } else if self.nodes <= 1 {
+                    tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT_ROOT", 1.0, f64)
+                } else {
+                    tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT_TREE", 1.0, f64)
+                }) as u64;
+                if super::solver::subcap('n') && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
+                    nl.min(tunable!("ENOMOTO_T_MIP_SUBCAP_NODES", 200u64, u64) + self.nodes / 20)
+                } else {
+                    nl
+                }
+            },
             // サブ MIP は解を探すためのものなので、ギャップは外側の設定より緩くてよい (外側の既定 0 でも 1e-4 で止める)
             // `ENOMOTO_T_MIP_SUBMIP_NOINC_GAP` = g (> 0、試作、既定 0 で今まで通り): 外側の求解に暫定解がまだなければ、サブ MIP をギャップ g で
             // 止めて早く解を返させる (並列のサブ MIP の解は終わるまで外側に渡らない。physiciansched6-2 では Local-MIP が解を出さない回に、
@@ -1681,7 +1695,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP` で使わない): 根の (主のスレッドで解く) サブ MIP も成果で打ち切る ([`super::solver::submip_outcome_stop`])
         if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
-            let c = super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol);
+            let c = super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol).with_subcap(self.root_lp_secs);
             // 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 目的関数を変えないサブ MIP に外側の下界を渡す
             let c = if super::solver::lose6_2_sublb() && cutoff.is_none() { c.with_outer_lb(self.root_lb_now(), self.bg_watch_job()) } else { c };
             super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(std::sync::Arc::new(c)));

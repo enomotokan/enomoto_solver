@@ -658,6 +658,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) fj_poor_lb: f64,
     /// サブ MIP の停滞の数え上げ (`ENOMOTO_T_MIP_SUBMIP_STALL`)
     submip_stall: u64,
+    /// [`subcap`] の `w`: 根のサブ MIP の木に入った時刻とそのときのノード数
+    subcap_t1: Option<(Instant, u64)>,
+    /// [`subcap`] の `n`: 根のサブ MIP の木に入ったときの葉の数 (擬似コストを外側から受け継ぐと数も受け継ぐので差で数える)
+    subcap_leaves0: Option<u64>,
     /// 根のサブ MIP の成果連動の打ち切りの情報 ([`ROOT_SUBMIP_CTL`]、サブ MIP の側)
     root_submip: Option<std::sync::Arc<SubmipCtl>>,
     /// 暫定解が最後に良くなったときのノード数 ([`submip_outcome_stop`])
@@ -2713,6 +2717,33 @@ pub(super) fn suba_stop(c: char) -> bool {
     V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBA_STOP").map_or(String::new(), |v| v.to_string())).contains(c)
 }
 
+/// `ENOMOTO_MIP_SUBCAP=<文字>` (試作、既定では使わない。analysis/submip_cap_20261106.md): 1 ノードが重い外側の根のサブ MIP
+/// (並列のものも主のスレッドで解くものも) が根を長くふさぐのを防ぐ。
+/// - `n`: ノード上限を min(今の上限, `ENOMOTO_T_MIP_SUBCAP_NODES` (200) + 外側のノード数 / 20) にし、葉 (実行不能・打ち切りで閉じたノード)
+///   が `ENOMOTO_T_MIP_SUBCAP_LEAVES` (500) に達したら止める (HiGHS の `solveSubMip`)
+/// - `w`: サブ MIP の木に入ってからの秒が max(`ENOMOTO_T_MIP_SUBCAP_W_SECS` (1 秒), k × 外側の根の LP の秒 × max(進んだノード数,
+///   `ENOMOTO_T_MIP_SUBCAP_W_NODES` (10))) を超えたら止める (k = `ENOMOTO_T_MIP_SUBCAP_W` (1))。1 ノードの重さが根の LP の k 倍を
+///   超える (1 つのノードで止まっている間も含む) サブ MIP を早めに切る
+/// - `j`: 外側の根で並列のサブ MIP を全部待つとき、待ち始めてから max(`ENOMOTO_T_MIP_SUBCAP_J_MIN` (1 秒), `ENOMOTO_T_MIP_SUBCAP_J` (1) ×
+///   根の時間 (求解の始めから最初の根のヒューリスティクスまで)) 過ぎても終わらないものに止めの合図を送る (`TREE3_JOINCAP` の基準を
+///   「根の始めから待ち始めまで」から根の LP・カットの時間に変えたもの)
+/// - `t`: 外側の根のサブ MIP の時間の上限を、残り時間ではなく max(`ENOMOTO_T_MIP_SUBCAP_T_MIN` (2 秒), `ENOMOTO_T_MIP_SUBCAP_T` (2) ×
+///   根の時間) までにする (`RENS (more nodes)` の続きも同じ)
+///
+/// どれも止めたサブ MIP は時間切れ (`TimeLimit`) としてその時点の解を返す (`n` のノード上限は `NodeLimit`)
+pub(crate) fn subcap(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBCAP").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
+/// [`subcap`] の基準の根の時間 (秒): 外側の求解の始めから最初の根のヒューリスティクスに入るまで (前処理・根の LP・カット)
+pub(crate) fn subcap_root_secs() -> f64 {
+    super::root_submip_ref_secs().unwrap_or(f64::INFINITY)
+}
+
+/// [`subcap`] で止めたサブ MIP の数 (全スレッドの和、診断用。0: 葉、1: 重さ、2: 待ちの上限)
+pub(crate) static SUBCAP_STOPS: [std::sync::atomic::AtomicU64; 3] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+
 /// `ENOMOTO_MIP_SUBA_CUT` で捨てた解の数 (全スレッドの和、診断用。外側の求解の終わりのログに出す)
 pub(super) static SUBA_CUT_REJECTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -3055,6 +3086,10 @@ pub(crate) struct SubmipCtl {
     /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB` ([`lose6_2_sublb`]): 外側の大域的な下界 (作った時点の根の下界と、外側の裏のカットの LP の値)。
     /// 目的関数を変えないサブ MIP だけに付ける
     pub(super) outer_lb: Option<(f64, Option<std::sync::Arc<CutJob>>)>,
+    /// [`subcap`] の `n`: 葉の数の上限 (0 なら使わない)
+    pub(crate) cap_leaves: u64,
+    /// [`subcap`] の `w`: 1 ノードの秒の上限 (k × 外側の根の LP の秒、0 なら使わない)
+    pub(crate) cap_node_secs: f64,
 }
 
 /// `ENOMOTO_MIP_TREE3_JOINCAP` (試作、既定では使わない。analysis/tree_close3_20261104.md): 外側の根で並列のサブ MIP の終わりを全部待つ
@@ -3081,7 +3116,17 @@ pub(crate) fn lose6_1_stop() -> bool {
 
 impl SubmipCtl {
     pub(crate) fn new(z: f64) -> Self {
-        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::atomic::AtomicBool::new(false), outer_lb: None }
+        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::atomic::AtomicBool::new(false), outer_lb: None, cap_leaves: 0, cap_node_secs: 0.0 }
+    }
+    /// [`subcap`] の `n`・`w` の上限を付ける (`root_lp_secs` は外側の根の LP の秒)
+    pub(crate) fn with_subcap(mut self, root_lp_secs: f64) -> Self {
+        if subcap('n') {
+            self.cap_leaves = tunable!("ENOMOTO_T_MIP_SUBCAP_LEAVES", 500u64, u64);
+        }
+        if subcap('w') && root_lp_secs > 0.0 {
+            self.cap_node_secs = tunable!("ENOMOTO_T_MIP_SUBCAP_W", 1.0, f64) * root_lp_secs;
+        }
+        self
     }
     /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 外側の下界を付ける (`lb0` は今の根の下界、`job` は回っている裏のカット)
     pub(super) fn with_outer_lb(mut self, lb0: f64, job: Option<std::sync::Arc<CutJob>>) -> Self {
@@ -4102,6 +4147,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         ref_sol: None,
         fj_poor_lb: f64::NEG_INFINITY,
         submip_stall: 0,
+        subcap_t1: None,
+        subcap_leaves0: None,
         root_submip: if params.submip { ROOT_SUBMIP_CTL.with(|c| c.borrow_mut().take()) } else { None },
         last_improve_node: None,
         submip_basis: None,
@@ -5228,12 +5275,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
         Some((rows, obj, rounds))
     }
 
+    /// [`subcap`] の `w`: 根のサブ MIP の 1 ノードが重すぎるか
+    fn subcap_heavy(&self) -> bool {
+        let (Some(c), Some((t1, n1))) = (self.root_submip.as_ref(), self.subcap_t1) else { return false };
+        if c.cap_node_secs <= 0.0 {
+            return false;
+        }
+        let el = t1.elapsed().as_secs_f64();
+        let dn = self.nodes.saturating_sub(n1).max(tunable!("ENOMOTO_T_MIP_SUBCAP_W_NODES", 10u64, u64));
+        let heavy = el > tunable!("ENOMOTO_T_MIP_SUBCAP_W_SECS", 1.0, f64).max(c.cap_node_secs * dn as f64);
+        if heavy && !c.abort.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            SUBCAP_STOPS[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("MIP: SUBCAP w: stopping a root sub-MIP after {} tree nodes in {el:.2}s (cap {:.3}s per node)", self.nodes.saturating_sub(n1), c.cap_node_secs);
+        }
+        heavy
+    }
+
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || self.heur_stop.is_some_and(|d| Instant::now() >= d)
             || ((self.bg_watch.is_some() || self.root_submip.is_some()) && self.bg_proved())
             || (self.incumbent.is_none() && self.root_submip.as_ref().is_some_and(|c| c.nosol_deadline.is_some_and(|d| Instant::now() >= d)))
             || self.root_submip.as_ref().is_some_and(|c| c.abort.load(std::sync::atomic::Ordering::Relaxed))
+            || self.subcap_heavy()
             || self.sublb_reached()
             || memcap_level() >= 3
             || (self.snap.is_some() && FIND_STOP.with(|f| f.borrow().as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))))
@@ -9170,6 +9234,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // `ENOMOTO_MIP_RENS_RESUME` ([`rens_resume_on`]): 一時停止できるサブ MIP は、ここで結果を渡して継続の合図を待つ
             // ([`Self::resume_pause`])。継続ならノード上限・時間の上限・打ち切り値を改めてそのまま木を進める
+            // `ENOMOTO_MIP_SUBCAP` ([`subcap`]): 根のサブ MIP の木に入った時刻 (`w`) と葉の数の上限 (`n`)
+            if let Some(c) = self.root_submip.as_ref() {
+                if self.subcap_t1.is_none() && c.cap_node_secs > 0.0 {
+                    self.subcap_t1 = Some((Instant::now(), self.nodes));
+                }
+                let leaves = self.pc.objlim_leaves + self.pc.infeasible_leaves;
+                let l0 = *self.subcap_leaves0.get_or_insert(leaves);
+                if c.cap_leaves > 0 && leaves.saturating_sub(l0) >= c.cap_leaves {
+                    SUBCAP_STOPS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!("MIP: SUBCAP n: stopping a root sub-MIP at {} leaves ({} nodes)", leaves.saturating_sub(l0), self.nodes);
+                    return self.finish_limit(MipStatus::TimeLimit, plunge.as_ref());
+                }
+            }
             if self.nodes >= self.params.node_limit && !(self.resume_hook.is_some() && self.resume_pause(plunge.as_ref())) {
                 self.dbg_submip_stop("node limit");
                 return self.finish_limit(MipStatus::NodeLimit, plunge.as_ref());
@@ -16298,7 +16375,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let nosol = self.submip_nosol.take();
         let same_obj = std::mem::take(&mut self.submip_same_obj);
         let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| {
-            let c = SubmipCtl::new(self.prune_limit()).with_nosol(nosol);
+            let c = SubmipCtl::new(self.prune_limit()).with_nosol(nosol).with_subcap(if self.nodes <= 1 { self.root_lp_secs } else { 0.0 });
             // 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 目的関数を変えないサブ MIP に外側の下界を渡す
             let c = if lose6_2_sublb() && same_obj { c.with_outer_lb(self.root_lb_now(), self.bg_watch.clone()) } else { c };
             std::sync::Arc::new(c)
@@ -16383,6 +16460,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let t3 = keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && tree3_joincap();
             let t3_wait = tunable!("ENOMOTO_T_MIP_TREE3_JOINCAP_MIN", 1.0, f64).max(tunable!("ENOMOTO_T_MIP_TREE3_JOINCAP_MULT", 0.25, f64) * self.start.elapsed().as_secs_f64());
             let mut t3_stopped = false;
+            // `ENOMOTO_MIP_SUBCAP` の `j` ([`subcap`]): 待つ時間の上限を根の時間 (前処理・根の LP・カット) の倍にする
+            let (t3, t3_wait) = if keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && subcap('j') {
+                (true, tunable!("ENOMOTO_T_MIP_SUBCAP_J_MIN", 1.0, f64).max(tunable!("ENOMOTO_T_MIP_SUBCAP_J", 1.0, f64) * subcap_root_secs()))
+            } else {
+                (t3, t3_wait)
+            };
             while self.pending_submips.len() > keep {
                 if t3 && !t3_stopped && l63_t0.elapsed().as_secs_f64() >= t3_wait {
                     t3_stopped = true;
@@ -16394,6 +16477,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 n += 1;
                             }
                         }
+                    }
+                    if subcap('j') && n > 0 {
+                        SUBCAP_STOPS[2].fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     }
                     if self.params.verbose {
                         eprintln!(
