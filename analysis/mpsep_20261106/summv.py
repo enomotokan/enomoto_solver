@@ -1,10 +1,11 @@
-"""batchv の集計 (python3 summv.py > summv.txt): 問題・設定ごとに、出発の頂点 8 通りの根の下界 (最小・中央値・最大・幅)、時間 (中央値・最悪)、
+"""batchv の集計 (python3 summv.py [名前の頭 (既定 v)] > summv.txt): 問題・設定ごとに、出発の頂点 8 通りの根の下界 (最小・中央値・最大・幅)、時間 (中央値・最悪)、
 時間切れの数、根の終わりの時刻 (`after root heuristics`) の中央値、主のループの後の目的値。行ごとの詳細も出す。"""
 import json, re, statistics, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 rows = {}
-for f in sorted((D / "runs").glob("v_*.out")):
+PFX = sys.argv[1] if len(sys.argv) > 1 else "v"  # 名前の頭 (2 回目の絞った形は v2)
+for f in sorted((D / "runs").glob(f"{PFX}_*.out")):
     try:
         r = json.loads([l for l in f.read_text().splitlines() if l.startswith("{")][-1])
     except Exception:
