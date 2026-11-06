@@ -2156,6 +2156,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 cap
             };
+            // 試作 `ENOMOTO_MIP_S6_CUTLP_TCAP` = k (analysis/highs_slow_20261106/S6.md、既定では使わない): 主の根のカットのループ (外側の求解、
+            // 裏のカットの写しでない) で、1 回のカットの LP の時間の上限を、このループで最適まで解けたカットの LP の最長の秒の k 倍
+            // (最低 `ENOMOTO_T_MIP_S6_CUTLP_TCAP_MIN` 秒、既定 2) に押さえる (最適まで解けた LP がまだないうちは押さえない)。上限に当たった LP は
+            // 既定と同じく外す。nexp-150-20-8-5 (600 秒) では普段のカットの LP は 1 秒未満なのに、ときどき 1 回が 4〜5 万反復・60 秒
+            // (全体の 2% x 5 の安全網) に当たって外され、その 60 秒でループが根のカットの時間の上限に届いて止まっていた
+            let s6_tcap = if job.is_none() && !self.params.submip && self.snap.is_none() && ok_lp_secs > 0.0 {
+                env_str!("ENOMOTO_MIP_S6_CUTLP_TCAP").and_then(|v| v.parse::<f64>().ok()).filter(|k| *k > 0.0)
+            } else {
+                None
+            };
+            let cap = match s6_tcap {
+                Some(k) => cap.min((k * ok_lp_secs).max(tunable!("ENOMOTO_T_MIP_S6_CUTLP_TCAP_MIN", 2.0, f64))),
+                None => cap,
+            };
             if job.is_some() && self.params.verbose && round <= 1 {
                 eprintln!("MIP: cut round {round}: background cut LP time cap {cap:.2}s{}", if bg_work.is_some() { format!(", iteration cap {lim}") } else { String::new() });
             }
@@ -2478,6 +2492,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         t_re.elapsed().as_secs_f64(),
                         self.start.elapsed().as_secs_f64()
                     );
+                }
+                if self.params.verbose && st == LpStatus::TimeLimit {
+                    if let Some(k) = s6_tcap {
+                        eprintln!("MIP: cut round {round}: ENOMOTO_MIP_S6_CUTLP_TCAP={k}: cut LP time cap {cap:.2}s (longest solved cut LP {ok_lp_secs:.2}s)");
+                    }
                 }
                 let capped = matches!(st, LpStatus::TimeLimit | LpStatus::IterationLimit);
                 // `ENOMOTO_MIP_CUT_LP_HALVE`: 時間の上限に当たっただけなら、本数を半分にして続ける
