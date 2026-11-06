@@ -18112,9 +18112,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
     ///   `ENOMOTO_T_MIP_TREE_RESTART_GUARD_LEFT` (0.25) を超える。
     /// - `c`: 木の残りの見込みの秒が根のやり直しの見込みの費用の `ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST` (1) 倍に満たない。木の残りは、
     ///   刈った重み q の木に入ってからの進み (残り = 木の秒 × (1 − q) / q) から出す。
-    /// - `C`: `c` に当たり、かつ今の LP のカットの行が問題の行の `ENOMOTO_T_MIP_TREE_RESTART_GUARD_CRATIO` (0.3) 倍に満たず、
-    ///   presolve で落ちる見込みの行 (固定されていない列が 1 本以下になった行) が問題の行の `..._GUARD_CROWS` (0.1) 倍に満たない
-    ///   (木が閉じかけでも、カットか固定で根が大きく変わる見込みなら通す)。
+    /// - `C`: `c` に当たり、かつ presolve で落ちる見込みの行 (固定されていない列が 1 本以下になった行) が問題の行の
+    ///   `ENOMOTO_T_MIP_TREE_RESTART_GUARD_CROWS` (0.1) 倍に満たない (木が閉じかけでも、固定で根が大きく変わる見込みなら通す)。
+    ///   今の LP のカットの行が問題の行の `..._GUARD_CRATIO` (既定 ∞ = 使わない) 倍以上でも通す。LP のカットの行は効いていない
+    ///   ものも数えるので、行の少ない問題 (eil33-2: 32 行にカット 58 行) で当てにならず、既定では使わない。
     /// - `g`: 相対ギャップ (暫定解 − 全体の下界) / max(|暫定解|, 1) が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_GAP` (1e-3) 未満。
     /// - `q`: 刈った重み q が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_Q` (0.5) 以上 (木がもう半分以上閉じた)。
     /// - `k`: 新たな固定が `ENOMOTO_T_MIP_TREE_RESTART_FIX_FRAC` (0.01) × 根で自由な整数列 (少なくとも `..._MIN_FIX` 本) に満たず
@@ -18180,7 +18181,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 'c' => est_left < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST", 1.0, f64) * root_cost,
                 'C' => {
                     est_left < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST", 1.0, f64) * root_cost
-                        && (cuts as f64) < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_CRATIO", 0.3, f64) * self.p.m as f64
+                        && (cuts as f64) < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_CRATIO", f64::INFINITY, f64) * self.p.m as f64
                         && (rowdrop as f64) < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_CROWS", 0.1, f64) * self.p.m as f64
                 }
                 'g' => gap < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_GAP", 1e-3, f64),
