@@ -159,6 +159,11 @@ pub(super) struct ProbeEnd<S> {
     rounds: usize,
 }
 
+thread_local! {
+    /// 診断 `ENOMOTO_MIP_INTVUB_CHECK` の数 (デバッグ解を切らない, 切る (デバッグ解が大域的な境界の中), 切る (境界の外))
+    static INTVUB_CHECK: std::cell::RefCell<[u64; 3]> = const { std::cell::RefCell::new([0; 3]) };
+}
+
 #[derive(Clone)]
 struct Candidate {
     coefs: Vec<(usize, f64)>,
@@ -4583,11 +4588,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let t_finish = std::cell::Cell::new(0.0f64);
         let (n_raw, n_fin) = (std::cell::Cell::new(0usize), std::cell::Cell::new(0usize));
         let mut finish_scratch = vec![0.0f64; n];
+        // 診断 (`ENOMOTO_MIP_INTVUB_CHECK` とデバッグ解 `ENOMOTO_MIP_DEBUG_SOL`): 分離の候補をすべてデバッグ解で確かめ、切るものを数えて表示する
+        // (LP に入れるカットだけを打ち切り値より良いときに確かめる既存の確かめより広い。大域的な境界がデバッグ解を含まなくなった後は
+        // 境界の締め付けのせいで切ることもあるので、そのときは別に数える)
+        let dbg_cand_check = self.dbg_on && env_str!("ENOMOTO_MIP_INTVUB_CHECK").is_some();
+        let dbg_x: Option<Vec<f64>> = if dbg_cand_check { super::solver::DEBUG_SOL.with(|d| d.borrow().clone()) } else { None };
+        let dbg_in_bounds = dbg_x.as_ref().is_some_and(|xd| (0..n).all(|j| xd[j] >= self.dom.global_lo[j] - 1e-6 && xd[j] <= self.dom.global_up[j] + 1e-6));
         let mut push = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
             if let Some(raw) = raw {
                 let t0 = std::time::Instant::now();
                 n_raw.set(n_raw.get() + 1);
                 if let Some(c) = finish_cut(raw, n, lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice()), &mut finish_scratch) {
+                    if let Some(xd) = dbg_x.as_ref() {
+                        let act: f64 = c.coefs.iter().map(|&(j, a)| a * xd[j]).sum();
+                        let viol = act - c.rhs > 1e-6 * (1.0 + c.rhs.abs());
+                        let k = if !viol { 0 } else if dbg_in_bounds { 1 } else { 2 };
+                        INTVUB_CHECK.with(|v| v.borrow_mut()[k] += 1);
+                        if viol && dbg_in_bounds {
+                            eprintln!("MIP_DEBUG_SOL: INTVUB_CHECK: candidate cut (src {}) violated by the debug solution: {act:.10e} > {:.10e}, len {}", c.src, c.rhs, c.coefs.len());
+                        }
+                    }
                     cands.push(c);
                     n_fin.set(n_fin.get() + 1);
                 }
@@ -4731,6 +4751,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let r = extended_cover(&vars, &neg, -p.row_lo[i]);
                 push(r, &mut cands, self);
             }
+        }
+        if dbg_cand_check {
+            INTVUB_CHECK.with(|v| {
+                let v = v.borrow();
+                eprintln!("MIP_DEBUG_SOL: INTVUB_CHECK: candidates checked {} violated {} (debug solution within global bounds) {} (outside)", v[0] + v[1] + v[2], v[1], v[2]);
+            });
         }
         if dbg_sep {
             eprintln!("SEP rows {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());

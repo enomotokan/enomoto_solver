@@ -52,7 +52,7 @@ pub fn intvub_mode() -> u8 {
     }
     static M: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *M.get_or_init(|| match env_str!("ENOMOTO_MIP_INTVUB") {
-        None => 0,
+        None | Some("0") => 0,
         Some("2") => 2,
         Some("3") => 3,
         Some(_) => 1,
@@ -138,6 +138,11 @@ impl VarBounds {
             }
             let (v0, v1) = if v { (other, bv) } else { (bv, other) };
             self.push_ivb(w, z, upper, v0, v1, lo[w], up[w]);
+        }
+        // 1 本もなければ表を空にして、置き換えの判定 (`substitute_finish` の整数列ごとのループ) を通らないようにする
+        if self.ivub.iter().all(|v| v.is_empty()) && self.ivlb.iter().all(|v| v.is_empty()) {
+            self.ivub.clear();
+            self.ivlb.clear();
         }
     }
 
