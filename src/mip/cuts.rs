@@ -34,10 +34,18 @@ pub struct VarBounds {
     pub ivlb: Vec<Vec<(usize, f64, f64)>>,
 }
 
-#[cfg(test)]
 thread_local! {
-    /// 単体テストで [`intvub_mode`] を環境変数によらず決める
+    /// [`intvub_mode`] を環境変数によらず決める (単体テストと、試作 `ENOMOTO_MIP_MUSHAGG` の集約行の分離 [`with_intvub_mode`])。
+    /// 既定では `None` (環境変数の値を使う)
     static INTVUB_FORCE: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+}
+
+/// `f` の間だけ [`intvub_mode`] を `m` にする (試作 `ENOMOTO_MIP_MUSHAGG`: x0 を消した集約行だけ一般整数列の変数上下限で置き換える)
+pub fn with_intvub_mode<R>(m: u8, f: impl FnOnce() -> R) -> R {
+    let old = INTVUB_FORCE.with(|c| c.replace(Some(m)));
+    let r = f();
+    INTVUB_FORCE.with(|c| c.set(old));
+    r
 }
 
 /// 試作 `ENOMOTO_MIP_INTVUB` の動き方。0 = 使わない (既定)、1 = HiGHS と同じ条件 (`HighsTransformedLp`: 一般整数列の LP 値が整数で
@@ -46,7 +54,6 @@ thread_local! {
 /// その余裕が単純な上下限の余裕以下なら LP 値が整数でなくても使う。連続列の同点の扱い (`ENOMOTO_MIP_VB_TIE_OLD` でない既定) と同じ考え。
 /// 使えなければモード 2 と同じ)
 pub fn intvub_mode() -> u8 {
-    #[cfg(test)]
     if let Some(m) = INTVUB_FORCE.with(|c| c.get()) {
         return m;
     }
@@ -2493,6 +2500,102 @@ thread_local! {
     /// 診断 (`ENOMOTO_MIP_DEBUG_SEPPROF`): generate_cuts の呼び出し数・入力の非零の合計・置き換えに通った数・生のカットの数と、
     /// 段階ごとの時間 (置き換え, CMIR, extended cover, flow cover)
     pub static GEN_PROF: std::cell::RefCell<([usize; 4], [f64; 4])> = const { std::cell::RefCell::new(([0; 4], [0.0; 4])) };
+}
+
+/// 試作 `ENOMOTO_MIP_MUSHAGG`: 変数上下限による「0-1 列の cover」。元になる不等式 `sum a_k v_k <= rhs` (`v_k` は構造変数と論理変数) の各項に
+/// 「状態を縛る 0-1 の条件 (リテラル)」を選ぶ:
+/// - 一般整数列 `w` で `a > 0` なら VLB `w >= d z + e` (`z = 0` で `w >= e`)、`a < 0` なら VUB `w <= d z + e` (`z = 0` で `w <= e`)。
+///   リテラルは `z` (`z = 0` のとき縛られる)。`e` が単純な上下限より内側のものだけ。
+/// - 0-1 列 `x` で `a < 0` ならリテラル `x` (`x = 0` で項が 0)、`a > 0` ならリテラル `1 - x` (`x = 1` で項が `a`)。
+/// どのリテラルも 0 (全部縛られる) のときの最小の活動量が `rhs` を超えるなら、`sum リテラル >= 1` が全ての整数解で成り立つ
+/// (縛られた状態では元の不等式が満たせない)。最小の活動量は、縛られた項は縛った値、ほかの項は大域的な上下限で計る。
+/// 縛っても最小の活動量の上がりが小さいリテラルから外して (外しても `rhs` を超える間) 短くする。LP 解で違反しなければ `None`。
+/// 返すカットは `<=` の形 (`-sum z - sum x + sum x' <= -1 + |{x'}|`、`x'` は `1 - x` のリテラルの列)。
+pub fn vb_cover_cut(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
+    const FT: f64 = 1e-6;
+    let vb = vars.vb?;
+    // (最小の活動量の上がり, リテラルの列, 1 - x の形か)
+    let mut lits: Vec<(f64, usize, bool)> = Vec::new();
+    let mut minact = 0.0f64;
+    for &(k, a) in base {
+        if a.abs() < 1e-12 {
+            continue;
+        }
+        let (l, u) = (vars.lo[k], vars.up[k]);
+        let m0 = if a > 0.0 { a * l } else { a * u };
+        if !m0.is_finite() {
+            return None;
+        }
+        minact += m0;
+        if !vars.is_int[k] || l == u {
+            continue;
+        }
+        if l == 0.0 && u == 1.0 {
+            lits.push((a.abs(), k, a > 0.0));
+            continue;
+        }
+        if k >= vb.ivub.len() {
+            continue;
+        }
+        // z = 0 で縛る値 (a > 0: 下限 e、a < 0: 上限 e) の最良 (同じ列で複数あれば上がりの大きいもの)
+        let list = if a > 0.0 { &vb.ivlb[k] } else { &vb.ivub[k] };
+        let mut best: Option<(f64, usize)> = None;
+        for &(z, _d, e) in list {
+            if z >= vars.lo.len() || !vars.is_int[z] || vars.lo[z] != 0.0 || vars.up[z] != 1.0 {
+                continue;
+            }
+            let gain = if a > 0.0 { a * (e - l) } else { a * (e - u) };
+            if gain > FT && best.is_none_or(|b| gain > b.0) {
+                best = Some((gain, z));
+            }
+        }
+        if let Some((g, z)) = best {
+            lits.push((g, z, false));
+        }
+    }
+    let mut total: f64 = minact + lits.iter().map(|t| t.0).sum::<f64>();
+    let tol = FT * (1.0 + rhs.abs());
+    if total <= rhs + tol {
+        return None;
+    }
+    // 上がりの小さいリテラルから外す
+    lits.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut keep: Vec<(f64, usize, bool)> = Vec::new();
+    for t in lits {
+        if total - t.0 > rhs + tol {
+            total -= t.0;
+        } else {
+            keep.push(t);
+        }
+    }
+    // 同じ列のリテラルをまとめる (z が 2 つの w の変数上下限に出るとき、z が元の式に 0-1 列としても出るとき)。
+    // 同じ列が `z` と `1 - z` の両方で出たら (縛った状態が z = 0 と z = 1 で両立しない) カットは自明なので作らない
+    let mut coef: std::collections::BTreeMap<usize, (f64, bool)> = std::collections::BTreeMap::new();
+    for &(_, k, neg) in &keep {
+        let e = coef.entry(k).or_insert((0.0, neg));
+        if e.1 != neg {
+            return None;
+        }
+    }
+    // sum_{z} z + sum_{x} x + sum_{x'} (1 - x') >= 1  <=>  -sum z - sum x + sum x' <= |x'| - 1
+    let mut lhs_x = 0.0;
+    let mut coefs = Vec::with_capacity(coef.len());
+    let mut nneg = 0.0;
+    for (&k, &(_, neg)) in &coef {
+        if neg {
+            coefs.push((k, 1.0));
+            nneg += 1.0;
+            lhs_x += vars.x[k];
+        } else {
+            coefs.push((k, -1.0));
+            lhs_x -= vars.x[k];
+        }
+    }
+    let cut_rhs = nneg - 1.0;
+    if coefs.is_empty() || lhs_x <= cut_rhs + 1e-4 {
+        return None;
+    }
+    Some(RawCut { coefs, rhs: cut_rhs })
 }
 
 pub fn generate_cuts(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover: bool, ext_cover: bool) -> Vec<RawCut> {

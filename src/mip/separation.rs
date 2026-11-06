@@ -4605,7 +4605,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.vbounds.is_none() {
             let mut vbs = VarBounds::from_rows(n, &p.is_int, &p.rows, &p.row_lo, &p.row_up);
             // 試作 `ENOMOTO_MIP_INTVUB`: 一般整数列と 0-1 列の変数上下限も集める (`ENOMOTO_MIP_INTVUB_IMPL` ならプロービングの含意も)
-            if super::cuts::intvub_mode() > 0 {
+            if super::cuts::intvub_mode() > 0 || mushagg_mode().is_some() {
                 let implied: &[(u32, bool, u32, bool, f64)] = if env_str!("ENOMOTO_MIP_INTVUB_IMPL").is_some() { &p.implied_bounds } else { &[] };
                 vbs.add_int_vbs(&self.cut_int[..n], &self.dom.global_lo[..n], &self.dom.global_up[..n], &p.rows, &p.row_lo, &p.row_up, implied);
                 if env_str!("ENOMOTO_MIP_INTVUB_LOG").is_some() && !self.params.submip {
@@ -4951,6 +4951,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
         tag(&mut cands[nsrc0..], sepprof::SRC_IMPLBD);
         nsrc0 = cands.len();
         sepprof::lap(sepprof::T_IMPLBD, &mut lap);
+        // 試作 `ENOMOTO_MIP_MUSHAGG` (既定では使わない): 変数上下限を持たない一般整数列を消す 2 本の行の集約 ([`mush_agg_cuts`])。根だけ
+        if let Some(mode) = mushagg_mode() {
+            if !light && !self.params.submip {
+                let t0 = std::time::Instant::now();
+                let (groups, npairs, ncols, ntight) = mush_agg_cuts(&vars, p, x, mode);
+                let c0 = cands.len();
+                for g in groups {
+                    let n0 = cands.len();
+                    for r in g {
+                        push(Some(r), &mut cands, self);
+                    }
+                    keep_best(&mut cands, n0, self.p);
+                }
+                if dbg_sep || env_str!("ENOMOTO_MIP_MUSHAGG_LOG").is_some() {
+                    eprintln!("SEP mushagg {:.3}s tight {ntight} cols {ncols} pairs {npairs} cands {}", t0.elapsed().as_secs_f64(), cands.len() - c0);
+                }
+            }
+        }
+        tag(&mut cands[nsrc0..], sepprof::SRC_ROWS);
+        nsrc0 = cands.len();
         // 経路集約 (path aggregation、HiGHS の `HighsPathSeparator`)
         if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
             // 固定費用ネットワーク型ではノードでも経路集約の始点を使う (`ENOMOTO_T_MIP_NODE_FC_PATH_STARTS`、[`Solver::node_cuts_due`])
@@ -5562,6 +5582,146 @@ impl<'a, L: MipLp> Solver<'a, L> {
 }
 
 /// 集約行 `base` に連続列 (境界が幅を持つもの) があるか ([`generate_cuts`] が extended cover を試さない条件)
+/// 試作 `ENOMOTO_MIP_MUSHAGG` の動き方 (既定では `None` = 使わない)。`cover` = [`super::cuts::vb_cover_cut`] だけ、`gen` = 集約行に
+/// 一般整数列の変数上下限の置き換えを使った CMIR など([`generate_cuts`]、置き換えのモードは `ENOMOTO_MIP_MUSHAGG_IV`、既定 2) だけ、
+/// ほかの値 (`1` など) は両方
+pub(crate) fn mushagg_mode() -> Option<u8> {
+    static M: std::sync::OnceLock<Option<u8>> = std::sync::OnceLock::new();
+    *M.get_or_init(|| match env_str!("ENOMOTO_MIP_MUSHAGG") {
+        None | Some("0") => None,
+        Some("cover") => Some(1),
+        Some("gen") => Some(2),
+        Some(_) => Some(3),
+    })
+}
+
+/// 試作 `ENOMOTO_MIP_MUSHAGG` (HiGHS の `HighsModkSeparator` が mushroom-best で作るカットの形を真似たもの): LP 解で等号になっている
+/// 元の行 2 本を、変数上下限を持たない一般整数列 (LP 値が上下限の内側) の係数が打ち消し合う重みで足し、その列を消した行から
+/// カットを作る。HiGHS は mod-k の連立 (GF(k) の消去) で「LP 値が 0 でない整数列の係数が k で割り切れる」行の組を探し、その集約行を
+/// `HighsCutGeneration::generateCut` (変数上下限の置き換え + lifted cover / CMIR) に渡す。mushroom-best ではその組のほとんどが
+/// 「x0 の符号が逆のデータの行 2 本 (+ LP 値が 0 でない w を消す w-z の 2 項の行)」で、できるカットは `sum_S z >= 1` の形
+/// (`analysis/mushroom_cuts_20261106.md`)。ここでは mod-k を解かずに、消す列ごとに符号が逆の行の組を直接作る。
+/// - 消す列: 整数 (0-1 でない)、LP 値が上下限から feastol より内側、一般整数列の変数上下限を持たない。等号の行に多く出る順に
+///   `ENOMOTO_T_MIP_MUSHAGG_COLS` (既定 4) 本。
+/// - 行の組: 消す列の係数が正の行と負の行 (それぞれ `ENOMOTO_T_MIP_MUSHAGG_ROWS`、既定 200 本まで) の組のうち、足した行の非零の数
+///   (共通の列を引いた概算) が小さい順に全体で `ENOMOTO_T_MIP_MUSHAGG_PAIRS` (既定 3000) 組。
+/// - 集約行 `row_p / |a_pj| + row_q / |a_qj|` (列 j は 0 にして除く) から、[`super::cuts::vb_cover_cut`] と (モード 2・3)
+///   一般整数列の変数上下限の置き換えを強制した [`generate_cuts`] でカットを作る。組ごとに返す。
+/// 返り値は (組ごとのカット, 試した組の数, 消す列の数, 等号の行の数)
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mush_agg_cuts(vars: &CutVars, p: &MipProblem, x: &[f64], mode: u8) -> (Vec<Vec<RawCut>>, usize, usize, usize) {
+    let n = p.n;
+    let Some(vb) = vars.vb else { return (Vec::new(), 0, 0, 0) };
+    let ft = FEASTOL;
+    let has_ivb = |j: usize| j < vb.ivub.len() && !(vb.ivub[j].is_empty() && vb.ivlb[j].is_empty());
+    // 消してよい列
+    let elim = |j: usize| -> bool { j < n && vars.is_int[j] && vars.up[j] - vars.lo[j] > 1.5 && x[j] - vars.lo[j] > ft && vars.up[j] - x[j] > ft && !has_ivb(j) };
+    // 等号の行の向き: (行, 符号) 符号 +1 は `row <= up`、-1 は `-row <= -lo`
+    let mut tight: Vec<(usize, f64)> = Vec::new();
+    for i in 0..p.m {
+        let r = &p.rows[i];
+        if r.len() < 2 {
+            continue;
+        }
+        let a: f64 = r.iter().map(|&(j, c)| c * x[j]).sum();
+        if p.row_up[i].is_finite() && p.row_up[i] - a <= 1e-6 * (1.0 + p.row_up[i].abs()) {
+            tight.push((i, 1.0));
+        } else if p.row_lo[i].is_finite() && a - p.row_lo[i] <= 1e-6 * (1.0 + p.row_lo[i].abs()) {
+            tight.push((i, -1.0));
+        }
+    }
+    // 列ごとの (等号の行の番号 in tight, 向きを付けた係数)
+    let mut occ: std::collections::HashMap<usize, (Vec<(usize, f64)>, Vec<(usize, f64)>)> = std::collections::HashMap::new();
+    for (t, &(i, sg)) in tight.iter().enumerate() {
+        for &(j, c) in &p.rows[i] {
+            if c.abs() > 1e-9 && elim(j) {
+                let e = occ.entry(j).or_default();
+                if sg * c > 0.0 {
+                    e.0.push((t, sg * c));
+                } else {
+                    e.1.push((t, sg * c));
+                }
+            }
+        }
+    }
+    let mut cols: Vec<(usize, usize)> = occ.iter().filter(|(_, v)| !v.0.is_empty() && !v.1.is_empty()).map(|(&j, v)| (v.0.len().min(v.1.len()), j)).collect();
+    cols.sort_by(|a, b| b.cmp(a));
+    cols.truncate(tunable!("ENOMOTO_T_MIP_MUSHAGG_COLS", 4usize, usize));
+    let max_rows = tunable!("ENOMOTO_T_MIP_MUSHAGG_ROWS", 200usize, usize);
+    let max_pairs = tunable!("ENOMOTO_T_MIP_MUSHAGG_PAIRS", 3000usize, usize);
+    // 組の候補 (非零の概算, 消す列, 正の側, 負の側)
+    let mut pairs: Vec<(usize, usize, (usize, f64), (usize, f64))> = Vec::new();
+    let mut mark = vec![false; n];
+    for &(_, j) in &cols {
+        let (pos, neg) = &occ[&j];
+        for &pp in pos.iter().take(max_rows) {
+            let rp = &p.rows[tight[pp.0].0];
+            for &(k, _) in rp {
+                mark[k] = true;
+            }
+            for &qq in neg.iter().take(max_rows) {
+                let rq = &p.rows[tight[qq.0].0];
+                let common = rq.iter().filter(|&&(k, _)| mark[k]).count();
+                pairs.push((rp.len() + rq.len() - 2 * common, j, pp, qq));
+            }
+            for &(k, _) in rp {
+                mark[k] = false;
+            }
+        }
+    }
+    pairs.sort_by_key(|t| t.0);
+    pairs.truncate(max_pairs);
+    let iv = env_str!("ENOMOTO_MIP_MUSHAGG_IV").and_then(|v| v.parse::<u8>().ok()).unwrap_or(2);
+    let mut out = Vec::new();
+    let mut acc: Vec<f64> = vec![0.0; n];
+    let mut touched: Vec<usize> = Vec::new();
+    for &(_, j, (tp, ap), (tq, aq)) in &pairs {
+        let (ip, sp) = tight[tp];
+        let (iq, sq) = tight[tq];
+        // 向きを付けた行 sp * row_ip <= rhs_p を |ap| で割る (ap は向きを付けた係数で > 0、aq < 0)
+        let (wp, wq) = (sp / ap, sq / -aq);
+        let rhs_p = if sp > 0.0 { p.row_up[ip] } else { p.row_lo[ip] };
+        let rhs_q = if sq > 0.0 { p.row_up[iq] } else { p.row_lo[iq] };
+        let rhs = wp * rhs_p + wq * rhs_q;
+        for &(i, w) in &[(ip, wp), (iq, wq)] {
+            for &(k, c) in &p.rows[i] {
+                if acc[k] == 0.0 {
+                    touched.push(k);
+                }
+                acc[k] += w * c;
+                if acc[k] == 0.0 {
+                    acc[k] = 1e-300;
+                }
+            }
+        }
+        let mut base: Vec<(usize, f64)> = Vec::with_capacity(touched.len());
+        for &k in &touched {
+            let v = acc[k];
+            if k != j && v.abs() > 1e-9 {
+                base.push((k, v));
+            }
+            acc[k] = 0.0;
+        }
+        touched.clear();
+        if base.is_empty() {
+            continue;
+        }
+        let mut cs = Vec::new();
+        if mode & 1 != 0 {
+            if let Some(c) = super::cuts::vb_cover_cut(vars, &base, rhs) {
+                cs.push(c);
+            }
+        }
+        if mode & 2 != 0 {
+            cs.extend(super::cuts::with_intvub_mode(iv, || generate_cuts(vars, &base, rhs, use_flow_cover(), true)));
+        }
+        if !cs.is_empty() {
+            out.push(cs);
+        }
+    }
+    (out, pairs.len(), cols.len(), tight.len())
+}
+
 fn has_cont_col(vars: &CutVars, base: &[(usize, f64)]) -> bool {
     base.iter().any(|&(k, a)| a != 0.0 && !vars.is_int[k] && vars.lo[k] < vars.up[k])
 }
@@ -6277,4 +6437,180 @@ pub(crate) fn lose6_2_tie() -> bool {
 thread_local! {
     /// 試作 `ENOMOTO_MIP_LOSE6_2_TIE` ([`lose6_2_tie`]): 同点の比べ直しの間だけ、比べの 1 回の LP の上限に掛ける倍率
     static LOSE6_2_PROBE_CAP_MULT: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
+}
+
+/// 試作 `ENOMOTO_MIP_MUSHAGG` (x0 を消す 2 本の行の集約と変数上下限の 0-1 cover) の有効性の確かめ
+#[cfg(test)]
+mod mushagg_tests {
+    use super::*;
+
+    struct Rng(u64);
+    impl Rng {
+        fn f(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn i(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + (self.f() * (hi - lo + 1) as f64).floor() as i64
+        }
+    }
+
+    /// 列の値の全ての組 (整数列の上下限の中) のうち、全ての行を満たすもの
+    fn feasible_points(lo: &[f64], up: &[f64], rows: &[Vec<(usize, f64)>], rlo: &[f64], rup: &[f64]) -> Vec<Vec<f64>> {
+        let n = lo.len();
+        let mut out = Vec::new();
+        let mut q: Vec<f64> = lo.to_vec();
+        loop {
+            if rows.iter().zip(rlo.iter().zip(rup)).all(|(r, (&l, &u))| {
+                let a: f64 = r.iter().map(|&(j, c)| c * q[j]).sum();
+                a >= l - 1e-9 && a <= u + 1e-9
+            }) {
+                out.push(q.clone());
+            }
+            let mut k = 0;
+            while k < n {
+                if q[k] < up[k] {
+                    q[k] += 1.0;
+                    break;
+                }
+                q[k] = lo[k];
+                k += 1;
+            }
+            if k == n {
+                return out;
+            }
+        }
+    }
+
+    /// 乱数の小さい問題: x0 (変数上下限なし) と一般整数列 w (|w| <= d z などの 2 項の行)、0-1 列 z・y、x0 を含むデータの行。
+    /// データの行は乱数の LP 点 x で等号になるように右辺を決める。[`mush_agg_cuts`] (cover と、置き換えを強制した CMIR など) と
+    /// [`super::super::cuts::vb_cover_cut`] (データの行 1 本ずつ) のカットが全ての整数解で成り立つことを総当たりで確かめる
+    #[test]
+    fn mushagg_cuts_valid() {
+        let mut rng = Rng(987654321);
+        let (mut ncuts, mut ncover, mut nfeas) = (0usize, 0usize, 0usize);
+        for _ in 0..3000 {
+            let nw = rng.i(1, 3) as usize;
+            let nz = nw;
+            let ny = rng.i(0, 1) as usize;
+            // 列: 0 = x0, 1..=nw = w, 次の nz = z, 最後の ny = y
+            let n = 1 + nw + nz + ny;
+            let mut lo = vec![0.0; n];
+            let mut up = vec![1.0; n];
+            let mut is_int = vec![true; n];
+            lo[0] = -3.0;
+            up[0] = 3.0;
+            for k in 1..=nw {
+                lo[k] = -(rng.i(2, 3) as f64);
+                up[k] = rng.i(2, 3) as f64;
+            }
+            if rng.f() < 0.2 {
+                // 連続列にすると集約の相手にならず、cover にも入らない
+                is_int[n - 1] = ny == 0;
+            }
+            let mut x = vec![0.0; n];
+            x[0] = rng.i(-2, 1) as f64 + 0.25 + 0.5 * rng.f();
+            let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+            let (mut rlo, mut rup) = (Vec::new(), Vec::new());
+            for k in 1..=nw {
+                let z = nw + k;
+                // w <= d z + e、-w <= d' z - e' (e, e' は 0 か 1)
+                let (d, e) = (up[k] - rng.i(0, 1) as f64, rng.i(0, 1) as f64 * (rng.f() < 0.3) as i64 as f64);
+                rows.push(vec![(k, 1.0), (z, -d)]);
+                rlo.push(f64::NEG_INFINITY);
+                rup.push(e);
+                let d2 = -lo[k] - rng.i(0, 1) as f64;
+                rows.push(vec![(k, -1.0), (z, -d2)]);
+                rlo.push(f64::NEG_INFINITY);
+                rup.push(0.0);
+                // LP 点: 多くは w = 0, z = 0、ときどき小数
+                if rng.f() < 0.3 {
+                    x[z] = 0.2 + 0.6 * rng.f();
+                    x[k] = (rng.f() * 2.0 - 1.0) * d.min(d2) * x[z];
+                }
+            }
+            if ny > 0 {
+                x[n - 1] = rng.f();
+            }
+            let nd = rng.i(2, 4) as usize;
+            for t in 0..nd {
+                let mut r = vec![(0, if t % 2 == 0 { 1.0 } else { -(rng.i(1, 2) as f64) })];
+                for k in 1..=nw {
+                    if rng.f() < 0.7 {
+                        r.push((k, [-1.0, 1.0, 2.0, -2.0][rng.i(0, 3) as usize]));
+                    }
+                }
+                if ny > 0 && rng.f() < 0.5 {
+                    r.push((n - 1, rng.i(-2, 2) as f64));
+                }
+                let a: f64 = r.iter().map(|&(j, c)| c * x[j]).sum();
+                // `<=` か `>=` で等号 (右辺は少し動かして整数解を減らす / 増やす)
+                let sh = [0.0, -0.5, 0.5, -1.0][rng.i(0, 3) as usize];
+                if rng.f() < 0.5 {
+                    rows.push(r);
+                    rlo.push(f64::NEG_INFINITY);
+                    rup.push(a);
+                } else {
+                    rows.push(r);
+                    rlo.push(a);
+                    rup.push(f64::INFINITY);
+                }
+                let _ = sh;
+            }
+            let feas = feasible_points(&lo, &up, &rows, &rlo, &rup);
+            nfeas += feas.len();
+            let m = rows.len();
+            let p = MipProblem::from_rows(lo.clone(), up.clone(), vec![0.0; n], 0.0, 1.0, is_int.clone(), rows.clone(), rlo.clone(), rup.clone());
+            let _ = m;
+            let mut vb = VarBounds::from_rows(n, &is_int, &rows, &rlo, &rup);
+            vb.add_int_vbs(&is_int, &lo, &up, &rows, &rlo, &rup, &[]);
+            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb) };
+            let (groups, _, _, _) = mush_agg_cuts(&vars, &p, &x, 3);
+            let mut all: Vec<RawCut> = groups.into_iter().flatten().collect();
+            let n_agg = all.len();
+            for (i, r) in rows.iter().enumerate() {
+                if r.len() > 2 {
+                    if rup[i].is_finite() {
+                        all.extend(super::super::cuts::vb_cover_cut(&vars, r, rup[i]));
+                    }
+                    if rlo[i].is_finite() {
+                        let neg: Vec<(usize, f64)> = r.iter().map(|&(j, c)| (j, -c)).collect();
+                        all.extend(super::super::cuts::vb_cover_cut(&vars, &neg, -rlo[i]));
+                    }
+                }
+            }
+            ncover += all.len() - n_agg;
+            for cut in &all {
+                ncuts += 1;
+                for q in &feas {
+                    let a: f64 = cut.coefs.iter().map(|&(k, c)| c * q[k]).sum();
+                    assert!(a <= cut.rhs + 1e-7 * (1.0 + cut.rhs.abs()), "integer point {q:?} cut off by {:?} <= {} (rows {rows:?} [{rlo:?}, {rup:?}], x {x:?}, lo {lo:?} up {up:?})", cut.coefs, cut.rhs);
+                }
+            }
+        }
+        eprintln!("mushagg_cuts_valid: cuts {ncuts}, single-row covers {ncover}, feasible points {nfeas}");
+        assert!(ncuts > 300 && ncover > 20 && nfeas > 1000, "cuts {ncuts}, single-row covers {ncover}, feasible points {nfeas}");
+    }
+
+    /// [`super::super::cuts::vb_cover_cut`] の小さい例: x0 を消した `w1 - w2 <= -1` (|w| <= 3 z) から `z1 + z2 >= 1`
+    #[test]
+    fn vb_cover_small() {
+        let is_int = vec![true; 4];
+        let lo = vec![-3.0, -3.0, 0.0, 0.0];
+        let up = vec![3.0, 3.0, 1.0, 1.0];
+        let rows = vec![vec![(0, 1.0), (2, -3.0)], vec![(0, -1.0), (2, -3.0)], vec![(1, 1.0), (3, -3.0)], vec![(1, -1.0), (3, -3.0)]];
+        let rlo = vec![f64::NEG_INFINITY; 4];
+        let rup = vec![0.0; 4];
+        let mut vb = VarBounds::default();
+        vb.add_int_vbs(&is_int, &lo, &up, &rows, &rlo, &rup, &[]);
+        let x = vec![0.0, 0.0, 0.0, 0.0];
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb) };
+        let c = super::super::cuts::vb_cover_cut(&vars, &[(0, 1.0), (1, -1.0)], -1.0).expect("cut");
+        assert_eq!(c.coefs, vec![(2, -1.0), (3, -1.0)]);
+        assert_eq!(c.rhs, -1.0);
+        // 右辺が 0 なら (w = 0 で満たせる) カットはない
+        assert!(super::super::cuts::vb_cover_cut(&vars, &[(0, 1.0), (1, -1.0)], 0.0).is_none());
+    }
 }
