@@ -305,6 +305,94 @@ fn verify(p: &MipProblem, perm: &[usize], row_counts: &std::collections::HashMap
     true
 }
 
+/// 行の向きの比べ (`ENOMOTO_MIP_HO3_SYMNORM` と同じ): (下限, 上限, 係数を並べた列) と (-上限, -下限, -係数を並べた列) の比べ。
+/// `Greater` なら -1 倍した向きの方が小さく、`Equal` なら -1 倍しても形が同じ (同点の行)。
+fn orient_cmp(lo: f64, up: f64, row: &[(usize, f64)]) -> std::cmp::Ordering {
+    let mut a: Vec<f64> = row.iter().map(|t| t.1).collect();
+    a.sort_by(f64::total_cmp);
+    let mut b: Vec<f64> = row.iter().map(|t| -t.1).collect();
+    b.sort_by(f64::total_cmp);
+    lo.total_cmp(&-up).then(up.total_cmp(&-lo)).then_with(|| {
+        for (x, y) in a.iter().zip(&b) {
+            let c = x.total_cmp(y);
+            if c != std::cmp::Ordering::Equal {
+                return c;
+            }
+        }
+        std::cmp::Ordering::Equal
+    })
+}
+
+/// 仮数を 40 ビットに丸める (`ENOMOTO_MIP_SYMSCALE`): 倍率で割った係数の 1 ulp 程度の違い (前処理で 1/3 倍した行など) を
+/// 吸収する。相対で約 1e-12 より近い値は同じ値になる。無限・0 はそのまま。
+fn snap40(x: f64) -> f64 {
+    if x == 0.0 || !x.is_finite() {
+        return x;
+    }
+    const DROP: u32 = 52 - 40;
+    let b = x.to_bits();
+    let r = (b + (1u64 << (DROP - 1))) & !((1u64 << DROP) - 1);
+    let y = f64::from_bits(r);
+    if y.is_finite() { y } else { x }
+}
+
+/// 試作 `ENOMOTO_MIP_SYMSIGN`・`ENOMOTO_MIP_SYMSCALE` (analysis/symsign_20261106.md) の検出に渡す写し。どちらかが立つときだけ
+/// 使い、`ENOMOTO_MIP_HO3_SYMNORM` の向きのそろえ (-1 倍) も必ず合わせて行う (`HO3_SYMNORM=0` は効かない)。
+/// - `scale`: 各行を係数の絶対値の最大で割り (正の倍率なので実行可能な集合は同じ)、係数と有限の左右辺を [`snap40`] で丸める。
+///   2 倍・1/3 倍などで写る行が同じ係数になる。丸めで相対 1e-12 より近い値は同じとみなすので、見つかる置換は
+///   その誤差の範囲での対称性 (確かめ ([`verify`]) も丸めた写しの上で行う)
+/// - `sign`: 向きをそろえても -1 倍で形が変わらない行 (同点の行、例 `-2 <= a + b - c - d <= 2`) に、-1 倍した行を写しに
+///   足す。足した行は元の行と同じ実行可能な集合を持つ冗長な行なので、写しの対称性 (行の多重集合を保つ列の置換) は元の問題の
+///   対称性。列の置換が同点の行 r を r' の -1 倍に写すとき、写しでは r → (r' の -1 倍の行)、(r の -1 倍の行) → r' と対応し、
+///   係数をそのまま比べる今の検出・確かめで見つかる (符号つきの置換を行の側で扱うのと同じ)
+/// 返す値は (写し, [-1 倍した行, 倍率で割った行, 同点の行])。
+pub fn detection_copy(p: &MipProblem, scale: bool, sign: bool) -> (MipProblem, [usize; 3]) {
+    let mut rows = p.rows.clone();
+    let (mut lo, mut up) = (p.row_lo.clone(), p.row_up.clone());
+    let (mut flipped, mut scaled, mut ties) = (0usize, 0usize, Vec::new());
+    for i in 0..p.m {
+        if scale {
+            let f = rows[i].iter().fold(0.0f64, |m, t| m.max(t.1.abs()));
+            if f > 0.0 && f.is_finite() && f != 1.0 {
+                scaled += 1;
+                for t in rows[i].iter_mut() {
+                    t.1 = snap40(t.1 / f);
+                }
+                lo[i] = snap40(lo[i] / f);
+                up[i] = snap40(up[i] / f);
+            } else {
+                for t in rows[i].iter_mut() {
+                    t.1 = snap40(t.1);
+                }
+                lo[i] = snap40(lo[i]);
+                up[i] = snap40(up[i]);
+            }
+        }
+        match orient_cmp(lo[i], up[i], &rows[i]) {
+            std::cmp::Ordering::Greater => {
+                flipped += 1;
+                let (l, u) = (-up[i], -lo[i]);
+                lo[i] = l;
+                up[i] = u;
+                for t in rows[i].iter_mut() {
+                    t.1 = -t.1;
+                }
+            }
+            std::cmp::Ordering::Equal if sign && !rows[i].is_empty() => ties.push(i),
+            _ => {}
+        }
+    }
+    for &i in &ties {
+        let r: Vec<(usize, f64)> = rows[i].iter().map(|&(j, a)| (j, -a)).collect();
+        rows.push(r);
+        lo.push(-up[i]);
+        up.push(-lo[i]);
+    }
+    let nt = ties.len();
+    let q = MipProblem::from_rows(p.col_lo.clone(), p.col_up.clone(), p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, lo, up);
+    (q, [flipped, scaled, nt])
+}
+
 fn find(uf: &mut [usize], mut x: usize) -> usize {
     while uf[x] != x {
         uf[x] = uf[uf[x]];
@@ -2039,5 +2127,50 @@ mod tests {
                 assert!(verify(&p, g, &counts));
             }
         }
+    }
+
+    /// `ENOMOTO_MIP_SYMSIGN`: 同点の行 `-2 <= a + b - c - d <= 2` と `-2 <= -e - f + g + h <= 2` (費用は a, b, e, f が 1、c, d, g, h が 2)。
+    /// a -> e, b -> f, c -> g, d -> h は行 1 を行 2 の -1 倍に写す対称性。係数をそのまま比べる検出 (向きのそろえだけ) では
+    /// 見つからず、同点の行を -1 倍の行で二重にした写しでは見つかる
+    #[test]
+    fn symsign_tie_rows_map_with_negation() {
+        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, -1.0), (3, -1.0)], vec![(4, -1.0), (5, -1.0), (6, 1.0), (7, 1.0)]];
+        let p = MipProblem::from_rows(vec![0.0; 8], vec![1.0; 8], vec![1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0], 0.0, 1.0, vec![true; 8], rows, vec![-2.0; 2], vec![2.0; 2]);
+        let (q0, [_, _, t0]) = detection_copy(&p, false, false);
+        assert_eq!(t0, 0);
+        let s0 = detect(&q0, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_ne!(s0.orbit[0], s0.orbit[4]);
+        let (q1, [_, _, t1]) = detection_copy(&p, false, true);
+        assert_eq!(t1, 2);
+        assert_eq!(q1.m, 4);
+        let s1 = detect(&q1, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_eq!(s1.orbit[0], s1.orbit[4]);
+        assert_eq!(s1.orbit[2], s1.orbit[6]);
+        assert_ne!(s1.orbit[0], s1.orbit[2]);
+        // 生成元は元の問題の行を (+1 倍か -1 倍の) 行に写す
+        for g in &s1.generators {
+            for i in 0..p.m {
+                let mut img: Vec<(usize, f64)> = p.rows[i].iter().map(|&(j, a)| (g[j], a)).collect();
+                img.sort_by_key(|t| t.0);
+                let neg: Vec<(usize, f64)> = img.iter().map(|&(j, a)| (j, -a)).collect();
+                assert!(p.rows.iter().any(|r| *r == img || *r == neg));
+            }
+        }
+    }
+
+    /// `ENOMOTO_MIP_SYMSCALE`: `(1/3) a + (1/3) b <= 1/3` と `c + d <= 1`、`2 e + 2 f <= 2` は正の倍率で同じ形
+    #[test]
+    fn symscale_rows_map_with_positive_factor() {
+        let th = 1.0 / 3.0;
+        let rows = vec![vec![(0, th), (1, th)], vec![(2, 1.0), (3, 1.0)], vec![(4, 2.0), (5, 2.0)]];
+        let p = MipProblem::from_rows(vec![0.0; 6], vec![1.0; 6], vec![1.0; 6], 0.0, 1.0, vec![true; 6], rows, vec![-f64::INFINITY; 3], vec![th, 1.0, 2.0]);
+        let s0 = detect(&detection_copy(&p, false, false).0, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_ne!(s0.orbit[0], s0.orbit[2]);
+        let (q, [_, scaled, _]) = detection_copy(&p, true, false);
+        assert_eq!(scaled, 2);
+        let s1 = detect(&q, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_eq!(s1.orbit[0], s1.orbit[2]);
+        assert_eq!(s1.orbit[0], s1.orbit[4]);
+        assert_eq!(snap40(0.1 * 3.0), snap40(0.3));
     }
 }

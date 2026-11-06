@@ -1279,6 +1279,12 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             } else {
                 prob
             };
+            // 診断用 (`ENOMOTO_MIP_DEBUG_STOP_AFTER_SYM`、analysis/symsign_20261106.md): 最初の対称性の検出の後でプロセスを終える
+            // (検出の生成元・軌道・時間だけを数える計測用)
+            if !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_DEBUG_STOP_AFTER_SYM").is_some() {
+                eprintln!("MIP: stopped after the symmetry detection (ENOMOTO_MIP_DEBUG_STOP_AFTER_SYM, {:.2}s)", t_pre.elapsed().as_secs_f64());
+                std::process::exit(0);
+            }
             if !params.submip && params.restarts > 0 && !sym_restart {
                 sym_of_reverify(&prob, params.verbose);
             }
@@ -2187,7 +2193,16 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     // 向きが行ごとにばらばらで (fastxgemm-n2r6s0t2 では -2 <= -a-b-c+d <= 2 が 1151 本、-2 <= -a+b+c+d <= 2 が 385 本)、
     // 行を -1 倍して写す対称性が見えない (生成元 1 個、HiGHS は 39 個)
     let symnorm = env_def!("ENOMOTO_MIP_HO3_SYMNORM", "1").is_some();
-    let normed = if symnorm {
+    // `ENOMOTO_MIP_SYMSIGN`・`ENOMOTO_MIP_SYMSCALE` (試作、既定では使わない。analysis/symsign_20261106.md): 同点の行 (-1 倍しても
+    // 形が同じ行) を -1 倍でも写せるようにする・行を正の倍率でそろえる写し ([`symmetry::detection_copy`]。向きのそろえも含む)
+    let (symsign, symscale) = (env_str!("ENOMOTO_MIP_SYMSIGN").is_some(), env_str!("ENOMOTO_MIP_SYMSCALE").is_some());
+    let normed = if symsign || symscale {
+        let (q, [flipped, scaled, ties]) = symmetry::detection_copy(&prob, symscale, symsign);
+        if verbose {
+            eprintln!("MIP: symmetry: SYMSIGN {symsign} SYMSCALE {symscale}: flipped {flipped}, scaled {scaled}, tie rows doubled {ties} of {} rows for the detection", prob.m);
+        }
+        Some(q)
+    } else if symnorm {
         let mut q = prob.clone();
         let mut flipped = 0usize;
         for i in 0..q.m {
