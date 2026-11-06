@@ -1776,6 +1776,100 @@ impl TwoStageLp {
     }
 
     fn solve_inner(&mut self, lim: &SolveLimits) -> LpStatus {
+        // 試作 `ENOMOTO_MIP_NODECUT_LIVE`・診断 `ENOMOTO_MIP_NODECUT_STAT` ([`set_nodecut_src`])。既定では入れない
+        let src = if NC_SRC_ON.with(|c| c.get()) { NC_SRC.with(|c| c.borrow().as_ref().filter(|s| s.cutoff_bits == lim.cutoff.to_bits()).map(|s| (s.f.clone(), s.kind))) } else { None };
+        let Some((f, kind)) = src else { return self.solve_inner0(lim) };
+        let n = self.n;
+        let const_obj: f64 = (0..n).map(|j| self.cost[j] * self.shift[j]).sum();
+        let apply = nodecut_live();
+        let every = tunable!("ENOMOTO_T_MIP_NODECUT_LIVE_EVERY", 32usize, usize).max(1);
+        sid::set_ext_live(Some(sid::ExtLive { f: f.clone(), shift: const_obj, every, apply }));
+        let it0 = sid::ext_iterations();
+        let st = self.solve_inner0(lim);
+        let r = sid::ext_nc_rec();
+        sid::set_ext_live(None);
+        if nodecut_stat() {
+            let it = sid::ext_iterations() - it0;
+            let k = 32 * (kind as usize).min(3);
+            let end = f().min(lim.cutoff);
+            let add = |i: usize, v: u64| NODECUT_STATS[k + i].fetch_add(v, std::sync::atomic::Ordering::Relaxed);
+            add(0, 1);
+            add(1, it);
+            if !lim.cutoff.is_finite() {
+                add(20, 1);
+            }
+            if r.lower_at.is_some() {
+                add(11, 1);
+            }
+            add(24, r.checks as u64);
+            add(25, r.inf_checks as u64);
+            // 標準形の空間の値を元に戻す (`ExtLive::shift` = const_obj)
+            let shadow_hit = r.shadow_hit;
+            match st {
+                LpStatus::ObjectiveBound => {
+                    add(2, 1);
+                    add(3, it);
+                    if r.lower_at.is_some() {
+                        add(12, 1);
+                        add(13, it);
+                    }
+                    if let Some(h) = shadow_hit {
+                        add(14, 1);
+                        add(15, it.saturating_sub(h as u64));
+                    }
+                }
+                LpStatus::Optimal => {
+                    let o = self.objective();
+                    add(18, 1);
+                    add(19, it);
+                    if o >= lim.cutoff {
+                        add(4, 1);
+                        add(5, it);
+                        match r.first_b {
+                            None => {
+                                add(6, 1);
+                                add(7, it);
+                            }
+                            Some(b) => {
+                                if env_str!("ENOMOTO_MIP_NODECUT_TRACE").is_some() {
+                                    eprintln!("NODECUT_TRACE: kind {kind} iters {it} first_b {b} checks {} last_check {:?} cutoff {:.10e} obj {:.10e} (std cutoff {:.10e})", r.checks, r.last_check, lim.cutoff, o, lim.cutoff - const_obj);
+                                }
+                                add(16, it.saturating_sub(b as u64));
+                                if r.last_check.is_some_and(|(_, v)| v == f64::NEG_INFINITY) {
+                                    add(26, 1);
+                                    add(27, it);
+                                }
+                                if let Some(h) = r.relaxed_hit {
+                                    add(28, 1);
+                                    add(29, it.saturating_sub(h as u64));
+                                }
+                                if r.checks == 0 {
+                                    add(17, 1);
+                                }
+                            }
+                        }
+                    } else if o >= end {
+                        add(8, 1);
+                        add(9, it);
+                        if let Some(h) = shadow_hit {
+                            add(10, it.saturating_sub(h as u64));
+                        }
+                        if r.first_b.is_none() {
+                            add(21, 1);
+                        }
+                    }
+                }
+                LpStatus::Infeasible => {
+                    add(22, 1);
+                    add(23, it);
+                }
+                _ => {}
+            }
+        }
+        st
+    }
+
+    fn solve_inner0(&mut self, lim: &SolveLimits) -> LpStatus {
         let n = self.n;
         // 目的値の定数 (平行移動の分): c·x = c·x' + c·shift
         let const_obj: f64 = (0..n).map(|j| self.cost[j] * self.shift[j]).sum();
@@ -2506,5 +2600,55 @@ mod tests {
         lp.set_basis_cols(&[0], Some(&[3.0, 0.0]));
         assert_eq!(lp.solve(&SolveLimits::default()), LpStatus::Optimal);
         assert!((lp.objective() - (-7.0)).abs() < 1e-9, "{}", lp.objective());
+    }
+}
+
+/// 試作 `ENOMOTO_MIP_NODECUT_LIVE`・診断 `ENOMOTO_MIP_NODECUT_STAT` (analysis/nodecutoff_20261106.md) の打ち切り値の読み直し口。
+/// 分枝限定法が `limits()` で入れ、打ち切り値 (`SolveLimits::cutoff`) がビット単位で同じ求解だけが使う
+/// (サブ MIP など、別の求解の値を取り違えないため)。`kind` は 0 = ノードの LP、1 = 強分枝の子、2 = 潜り、3 = その他
+pub(crate) struct NodecutSrc {
+    pub cutoff_bits: u64,
+    pub f: std::rc::Rc<dyn Fn() -> f64>,
+    pub kind: u8,
+}
+
+thread_local! {
+    static NC_SRC_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static NC_SRC: std::cell::RefCell<Option<NodecutSrc>> = const { std::cell::RefCell::new(None) };
+}
+
+/// [`NodecutSrc`] を入れる (`None` で外す)。
+pub(crate) fn set_nodecut_src(s: Option<NodecutSrc>) {
+    NC_SRC_ON.with(|c| c.set(s.is_some()));
+    NC_SRC.with(|c| *c.borrow_mut() = s);
+}
+
+/// `ENOMOTO_MIP_NODECUT_LIVE` (試作、既定では使わない): 双対単体法の途中で共有の最良値を読み直して打ち切り値を下げる。
+pub(crate) fn nodecut_live() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_NODECUT_LIVE").is_some_and(|v| v != "0"))
+}
+
+/// `ENOMOTO_MIP_NODECUT_STAT` (診断、既定では出さない): 打ち切り値による LP の打ち切りの計数をログの終わりに出す。
+pub(crate) fn nodecut_stat() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_NODECUT_STAT").is_some_and(|v| v != "0"))
+}
+
+/// [`nodecut_stat`] の計数 (種類ごとに 32 個、プロセス全体)。添字は [`nodecut_report`] を見よ。
+pub(crate) static NODECUT_STATS: [std::sync::atomic::AtomicU64; 128] = [const { std::sync::atomic::AtomicU64::new(0) }; 128];
+
+/// [`nodecut_stat`] の計数を出す。
+pub(crate) fn nodecut_report() {
+    let names = ["node", "sb", "dive", "other"];
+    for (k, name) in names.iter().enumerate() {
+        let v: Vec<u64> = (0..32).map(|i| NODECUT_STATS[32 * k + i].load(std::sync::atomic::Ordering::Relaxed)).collect();
+        if v[0] == 0 {
+            continue;
+        }
+        eprintln!(
+            "MIP: nodecut {name}: lps {} iters {} | objbound stops {} iters {} | optimal {} iters {} | optimal >= start cutoff {} iters {} (no stage B {} iters {}; stage B iters after entering B {}; stage B but never compared {}) | optimal < start but >= cutoff re-read at end {} iters {} est saved {} (no stage B {}) | cutoff lowered during LP {} (objbound after lowering {} iters {}) | objbound where re-read cutoff hit earlier {} est saved {} | infeasible {} iters {} | start cutoff inf {} | bound checks {} of which -inf {} | optimal >= start with the last bound -inf {} iters {} | -inf bound whose relaxed value (skipping the -inf columns) passed the cutoff {} est saved {}",
+            v[0], v[1], v[2], v[3], v[18], v[19], v[4], v[5], v[6], v[7], v[16], v[17], v[8], v[9], v[10], v[21], v[11], v[12], v[13], v[14], v[15], v[22], v[23], v[20], v[24], v[25], v[26], v[27], v[28], v[29]
+        );
     }
 }

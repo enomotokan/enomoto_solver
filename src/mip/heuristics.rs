@@ -243,7 +243,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else {
                     (2 * self.avg_node_iters()).max(1000)
                 };
-                let st = self.lp.solve(&self.limits(lim));
+                let st = self.lp.solve(&self.limits_k(lim, 2));
                 self.heur_iters += self.lp.total_iterations() - it0;
                 if st == LpStatus::Optimal {
                     let x = self.lp.col_values();
@@ -857,7 +857,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.sync_lp();
             let it0 = self.lp.total_iterations();
             let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(1000);
-            let st = self.lp.solve(&self.limits(lim));
+            let st = self.lp.solve(&self.limits_k(lim, 2));
             self.heur_iters += self.lp.total_iterations() - it0;
             if st == LpStatus::Optimal && self.lp.objective() + p.offset < search_bound.min(self.prune_limit()) {
                 return true;
@@ -2371,7 +2371,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.sync_lp();
                 let it0 = self.lp.total_iterations();
                 let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(500);
-                let st = self.lp.solve(&self.limits(lim));
+                let st = self.lp.solve(&self.limits_k(lim, 2));
                 self.heur_iters += self.lp.total_iterations() - it0;
                 ok = st == LpStatus::Optimal;
                 if self.params.verbose && self.nodes <= 1 && !ok {
@@ -2390,7 +2390,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_RENS_RETRY`: 戻った段の LP を解き直し、順を混ぜ直して幅を半分にしてやり直す
                 let it0 = self.lp.total_iterations();
                 let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(500);
-                let st = self.lp.solve(&self.limits(lim));
+                let st = self.lp.solve(&self.limits_k(lim, 2));
                 self.heur_iters += self.lp.total_iterations() - it0;
                 if st != LpStatus::Optimal {
                     break;

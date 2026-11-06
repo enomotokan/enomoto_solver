@@ -991,9 +991,89 @@ pub(crate) fn ext_progress_stopped() -> Option<(usize, f64, f64)> {
     EXT_PROG_STOPPED.with(|x| x.get())
 }
 
+/// 試作 `ENOMOTO_MIP_NODECUT_LIVE`・診断 `ENOMOTO_MIP_NODECUT_STAT` (analysis/nodecutoff_20261106.md): 求解の途中で打ち切り値を
+/// 読み直す口。`f` は分枝限定法の刈り込みの上限 (`prune_limit` と同じ刻み・ギャップの扱い、`SolveLimits::cutoff` と同じ空間) を
+/// その時点の共有の最良値で計算し直して返す。`shift` を引いて標準形の費用の空間にする。`every` 反復ごとに読む。
+/// `apply` なら `ExtControl::cutoff` を下げる (試作)。偽なら読んだ値は記録 ([`NcRec`]) だけに使う (診断)
+pub(crate) struct ExtLive {
+    pub f: std::rc::Rc<dyn Fn() -> f64>,
+    pub shift: f64,
+    pub every: usize,
+    pub apply: bool,
+}
+
+/// [`ExtLive`] を付けた求解 1 回の記録。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NcRec {
+    /// 初めて段階 B で呼ばれた反復 (`None` は段階 B に入らなかった)。
+    pub first_b: Option<usize>,
+    /// 読み直した打ち切り値が出発の値より初めて下がった反復。
+    pub lower_at: Option<usize>,
+    /// 読み直した打ち切り値のうち最小 (標準形の空間)。
+    pub shadow: f64,
+    /// 段階 B の下界が読み直した打ち切り値 `shadow` を初めて越えた反復 (`apply` でないときの見積もり)。
+    pub shadow_hit: Option<usize>,
+    /// 段階 B で下界を出発の打ち切り値と比べた回数 (読み直しの有無によらない)。
+    pub checks: u32,
+    /// 最後に比べた反復と下界。
+    pub last_check: Option<(usize, f64)>,
+    /// 比べた回のうち下界が -inf (求まらない) だった回数。
+    pub inf_checks: u32,
+    /// 下界が -inf のとき、その列を飛ばした値が出発の打ち切り値を初めて越えた反復 (見積もり)。
+    pub relaxed_hit: Option<usize>,
+}
+
+impl Default for NcRec {
+    fn default() -> Self {
+        NcRec { first_b: None, lower_at: None, shadow: f64::INFINITY, shadow_hit: None, checks: 0, last_check: None, inf_checks: 0, relaxed_hit: None }
+    }
+}
+
+thread_local! {
+    static EXT_LIVE_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static EXT_LIVE: std::cell::RefCell<Option<ExtLive>> = const { std::cell::RefCell::new(None) };
+    static EXT_NC: std::cell::Cell<NcRec> = std::cell::Cell::new(NcRec::default());
+}
+
+/// [`ExtLive`] を設定する (`None` で解除)。記録 [`NcRec`] を消す。
+pub(crate) fn set_ext_live(l: Option<ExtLive>) {
+    EXT_LIVE_ON.with(|x| x.set(l.is_some()));
+    EXT_LIVE.with(|x| *x.borrow_mut() = l);
+    EXT_NC.with(|x| x.set(NcRec::default()));
+}
+
+/// 直近の求解の [`NcRec`]。
+pub(crate) fn ext_nc_rec() -> NcRec {
+    EXT_NC.with(|x| x.get())
+}
+
 fn ext_check(iter_idx: usize, stage_b: bool, bound: impl FnOnce() -> f64) -> bool {
     EXT_ITERS.with(|x| x.set(x.get() + 1));
-    let Some(c) = EXT_CTRL.with(|x| x.get()) else { return false };
+    let Some(mut c) = EXT_CTRL.with(|x| x.get()) else { return false };
+    // `ENOMOTO_MIP_NODECUT_LIVE`・`ENOMOTO_MIP_NODECUT_STAT` ([`ExtLive`]): 既定では `EXT_LIVE_ON` が偽で何もしない
+    let mut nc: Option<NcRec> = None;
+    if EXT_LIVE_ON.with(|x| x.get()) {
+        let mut r = EXT_NC.with(|x| x.get());
+        if stage_b && r.first_b.is_none() {
+            r.first_b = Some(iter_idx);
+        }
+        let got = EXT_LIVE.with(|x| x.borrow().as_ref().filter(|l| iter_idx % l.every.max(1) == 0).map(|l| ((l.f)() - l.shift, l.apply)));
+        if let Some((v, apply)) = got {
+            if v < r.shadow {
+                r.shadow = v;
+            }
+            if v < c.cutoff {
+                if r.lower_at.is_none() {
+                    r.lower_at = Some(iter_idx);
+                }
+                if apply {
+                    c.cutoff = v;
+                    EXT_CTRL.with(|x| x.set(Some(c)));
+                }
+            }
+        }
+        nc = Some(r);
+    }
     if iter_idx >= c.iteration_limit {
         EXT_STOP.with(|x| x.set(ExtStop::IterationLimit));
         return true;
@@ -1040,16 +1120,38 @@ fn ext_check(iter_idx: usize, stage_b: bool, bound: impl FnOnce() -> f64) -> boo
             return true;
         }
     }
-    if stage_b && c.cutoff.is_finite() && (iter_idx % 8 == 0 || bval.is_some()) {
+    let due = iter_idx % 8 == 0 || bval.is_some();
+    let main = stage_b && c.cutoff.is_finite() && due;
+    // 診断: 読み直した値 (下げていない) を下界が越えた最初の反復を見積もる
+    let shadow = stage_b && due && nc.is_some_and(|r| r.shadow < c.cutoff && r.shadow_hit.is_none());
+    if main || shadow {
         let b = match (bval, bound.take()) {
             (Some(b), _) => b,
             (None, Some(f)) => f(),
             (None, None) => f64::NEG_INFINITY,
         };
-        if b > c.cutoff {
+        if let Some(mut r) = nc {
+            if main {
+                r.checks += 1;
+                r.last_check = Some((iter_idx, b));
+                if b == f64::NEG_INFINITY {
+                    r.inf_checks += 1;
+                    if r.relaxed_hit.is_none() && LB_RELAXED.with(|x| x.take()).is_some_and(|(v, _)| v > c.cutoff) {
+                        r.relaxed_hit = Some(iter_idx);
+                    }
+                }
+            }
+            if shadow && b > r.shadow {
+                r.shadow_hit = Some(iter_idx);
+            }
+            EXT_NC.with(|x| x.set(r));
+        }
+        if main && b > c.cutoff {
             EXT_STOP.with(|x| x.set(ExtStop::ObjectiveBound));
             return true;
         }
+    } else if let Some(r) = nc {
+        EXT_NC.with(|x| x.set(r));
     }
     false
 }
@@ -1997,6 +2099,10 @@ fn lower_bound_from_basis(std: &StdForm, basis: &[usize], lu: &sparse_lu::FtLu) 
     let ymax = y.iter().fold(0.0f64, |a, v| a.max(v.abs()));
     let tiny = 1e-9 * (1.0 + ymax);
     let mut lb: f64 = std.b.iter().zip(&y).map(|(b, y)| b * y).sum();
+    // 診断 `ENOMOTO_MIP_NODECUT_STAT` ([`ExtLive`] を付けた求解): 下界が -inf になる列 (境界が無限で被約費用の符号が逆) を
+    // 飛ばした値 (正しい下界ではない) を [`LB_RELAXED`] に残す (その列がなければ途中で止まっていた反復の見積もり用)
+    let diag = EXT_LIVE_ON.with(|x| x.get());
+    let mut bad = 0usize;
     for j in 0..std.n_total {
         let mut d = std.c[j];
         for &(i, a) in std.cols.col(j) {
@@ -2006,17 +2112,34 @@ fn lower_bound_from_basis(std: &StdForm, basis: &[usize], lu: &sparse_lu::FtLu) 
             if std.lb[j].is_finite() {
                 lb += d * std.lb[j];
             } else if d > tiny {
-                return f64::NEG_INFINITY;
+                if !diag {
+                    return f64::NEG_INFINITY;
+                }
+                bad += 1;
             }
         } else if d < 0.0 {
             if std.ub[j].is_finite() {
                 lb += d * std.ub[j];
             } else if -d > tiny {
-                return f64::NEG_INFINITY;
+                if !diag {
+                    return f64::NEG_INFINITY;
+                }
+                bad += 1;
             }
         }
     }
+    if diag {
+        LB_RELAXED.with(|x| x.set(Some((lb, bad))));
+        if bad > 0 {
+            return f64::NEG_INFINITY;
+        }
+    }
     lb
+}
+
+thread_local! {
+    /// 診断: 直近の [`lower_bound_from_basis`] の、-inf にする列を飛ばした値とその列の数。
+    static LB_RELAXED: std::cell::Cell<Option<(f64, usize)>> = const { std::cell::Cell::new(None) };
 }
 
 /// 段階 A の終わりで打ち切るよう求められていれば、結果を置いて真を返す。

@@ -5113,6 +5113,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         SolveLimits { iteration_limit, cutoff: self.prune_limit() - self.p.offset, deadline }
     }
 
+    /// [`Self::limits`] と同じ。`ENOMOTO_MIP_NODECUT_LIVE`・`ENOMOTO_MIP_NODECUT_STAT` のときは、求解の途中で打ち切り値を読み直す口
+    /// ([`Self::nodecut_fn`]) も入れる (`kind`: 0 = ノードの LP、1 = 強分枝の子、2 = 潜り)。既定では [`Self::limits`] そのもの
+    pub(super) fn limits_k(&self, iteration_limit: u64, kind: u8) -> SolveLimits {
+        let l = self.limits(iteration_limit);
+        if crate::simplex::mip_lp::nodecut_live() || crate::simplex::mip_lp::nodecut_stat() {
+            crate::simplex::mip_lp::set_nodecut_src(Some(crate::simplex::mip_lp::NodecutSrc { cutoff_bits: l.cutoff.to_bits(), f: self.nodecut_fn(), kind }));
+        }
+        l
+    }
+
     /// この値以上の下界のノードは捨ててよい (最小化形、定数項込み)。
     /// このノードで新しいカットを分離するか (SCIP の separator の freq と同じく、深さが `freq` の倍数のノードだけ。
     /// `ENOMOTO_T_MIP_NODE_CUT_FREQ`、既定 10、0 なら分離しない。`ENOMOTO_MIP_NODE_CUTS` なら毎回)。
@@ -5371,25 +5381,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        let lim = match eff.as_ref() {
-            None => self.params.cutoff,
-            Some(z) => {
-                let strict = match self.obj_step {
-                    // 暫定解より厳密に小さい最大の格子の点 (暫定解が格子の上なら z - step)。暗黙の整数列で刻みを取ったとき
-                    // (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`) は暫定解が格子に乗るとは限らない
-                    Some(step) if obj_step_lattice() => {
-                        let off = self.p.offset;
-                        let k = ((z - off) / step - 1e-6).ceil() - 1.0;
-                        off + k * step + (1e-6 * z.abs().max(1.0)).min(0.5 * step)
-                    }
-                    Some(step) => z - step + (1e-6 * z.abs().max(1.0)).min(0.5 * step),
-                    None => z - 1e-9 * z.abs().max(1.0),
-                };
-                let gap = z - (self.params.rel_gap * z.abs().max(1.0)).max(self.params.abs_gap);
-                strict.min(gap).min(self.params.cutoff)
-            }
+        prune_limit_of(eff, outer, self.obj_step, self.p.offset, self.params.rel_gap, self.params.abs_gap, self.params.cutoff)
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODECUT_LIVE`・診断 `ENOMOTO_MIP_NODECUT_STAT` (analysis/nodecutoff_20261106.md): LP の求解の途中で
+    /// 打ち切り値を計算し直す関数 ([`Self::prune_limit_ex`] と同じ式で、共有の最良値と根のサブ MIP の外側の上限だけを読み直す。
+    /// 自分の暫定解はこのスレッドが LP を解いている間は変わらない)。`SolveLimits::cutoff` と同じ空間 (定数項なし) で返す
+    fn nodecut_fn(&self) -> std::rc::Rc<dyn Fn() -> f64> {
+        let inc = self.incumbent.as_ref().map(|(z, _)| *z);
+        let ob = self.orig_best.as_ref().map(|(z, _)| *z);
+        let own = match (inc, ob) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         };
-        lim.min(outer)
+        let shared = self.shared.clone();
+        let outer = self.root_submip.clone();
+        let (step, off, rg, ag, cut) = (self.obj_step, self.p.offset, self.params.rel_gap, self.params.abs_gap, self.params.cutoff);
+        std::rc::Rc::new(move || {
+            let sh = shared.as_ref().map(|s| s.best()).filter(|v| v.is_finite());
+            let eff = match (own, sh) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            prune_limit_of(eff, outer.as_ref().map_or(f64::INFINITY, |c| c.best()), step, off, rg, ag, cut) - off
+        })
     }
 
     /// 暫定解があり、その値が下界 `lb` (の切り上げ) より目的関数の刻み (なければ相対 1e-6) 以上悪いか
@@ -9292,7 +9307,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     cap
                 };
                 let capped = |s: &Self, it: u64| {
-                    let mut l = s.limits(it);
+                    let mut l = s.limits_k(it, 0);
                     l.deadline = Some(match l.deadline {
                         Some(d) => d.min(Instant::now() + cap),
                         None => Instant::now() + cap,
@@ -11804,7 +11819,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         batch.push((j2, v2, self.dom.lo[j2], self.dom.up[j2]));
                     }
                 }
-                let lim = self.limits(sb_iter_limit);
+                let lim = self.limits_k(sb_iter_limit, 1);
                 let offset = self.p.offset;
                 let orbs: Vec<Vec<usize>> = batch.iter().map(|&(jj, ..)| self.sb_down_orbit(jj)).collect();
                 let orbs_ref = &orbs;
@@ -11953,7 +11968,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 let it0 = self.lp.total_iterations();
-                let st = self.lp.solve(&self.limits(sb_iter_limit));
+                let st = self.lp.solve(&self.limits_k(sb_iter_limit, 1));
                 self.sb_iters += self.lp.total_iterations() - it0;
                 self.sb_lps += 1;
                 match st {
@@ -12097,7 +12112,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if sb_fix_resolve && bound_changes > 0 {
                 self.sync_lp();
                 let it0 = self.lp.total_iterations();
-                let st = self.lp.solve(&self.limits((10 * self.avg_node_iters()).max(20_000)));
+                let st = self.lp.solve(&self.limits_k((10 * self.avg_node_iters()).max(20_000), 0));
                 self.node_iters += self.lp.total_iterations() - it0;
                 self.sb_fix_resolve_count += 1;
                 match st {
@@ -12229,7 +12244,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.lp.set_col_bounds(j, lo, v.floor());
                 }
                 let it0 = self.lp.total_iterations();
-                let st = self.lp.solve(&self.limits(sb_iter_limit));
+                let st = self.lp.solve(&self.limits_k(sb_iter_limit, 1));
                 self.sb_iters += self.lp.total_iterations() - it0;
                 self.sb_lps += 1;
                 if env_str!("ENOMOTO_MIP_DEBUG_SB").is_some() {
@@ -18142,6 +18157,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.join_submips(0);
         self.final_lb = Some(best_bound);
         self.log(true);
+        // 診断 `ENOMOTO_MIP_NODECUT_STAT`: 冗長でなくても出す
+        if crate::simplex::mip_lp::nodecut_stat() && self.snap.is_none() && !self.params.submip && self.pool_tid == 0 {
+            crate::simplex::mip_lp::nodecut_report();
+        }
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds, rejected as numerically unreliable {})", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings, self.proof_numeric_rejects);
             if proof_verify() {
@@ -18338,6 +18357,28 @@ pub(super) fn round_lb_to_step(lb: f64, step: f64, offset: f64) -> f64 {
 /// 刈り込みの上限を、暫定解より厳密に小さい最大の格子の点で取るか (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`)。
 fn obj_step_lattice() -> bool {
     env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some()
+}
+
+/// [`Solver::prune_limit_ex`] の式 (`eff` は自分と共有の暫定解の良い方、`outer` は根のサブ MIP の外側の上限)。
+fn prune_limit_of(eff: Option<f64>, outer: f64, obj_step: Option<f64>, off: f64, rel_gap: f64, abs_gap: f64, cutoff: f64) -> f64 {
+    let lim = match eff.as_ref() {
+        None => cutoff,
+        Some(z) => {
+            let strict = match obj_step {
+                // 暫定解より厳密に小さい最大の格子の点 (暫定解が格子の上なら z - step)。暗黙の整数列で刻みを取ったとき
+                // (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`) は暫定解が格子に乗るとは限らない
+                Some(step) if obj_step_lattice() => {
+                    let k = ((z - off) / step - 1e-6).ceil() - 1.0;
+                    off + k * step + (1e-6 * z.abs().max(1.0)).min(0.5 * step)
+                }
+                Some(step) => z - step + (1e-6 * z.abs().max(1.0)).min(0.5 * step),
+                None => z - 1e-9 * z.abs().max(1.0),
+            };
+            let gap = z - (rel_gap * z.abs().max(1.0)).max(abs_gap);
+            strict.min(gap).min(cutoff)
+        }
+    };
+    lim.min(outer)
 }
 
 /// `ENOMOTO_MIP_SB_TIGHTEN_INHERIT` (試作、既定では使わない): 強分岐で得た境界 (片側の打ち切りによる固定と凸性による締め付け、
