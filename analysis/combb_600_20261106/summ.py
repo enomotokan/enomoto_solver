@@ -59,3 +59,22 @@ for p in probs:
     for tag, r in prev.get(p, []):
         st = r.get("status")
         print(f"| {p} | {tag} | | {st} | {fmt(r.get('time'))} | {100 * gap(r):.3f}% | {r.get('objective')} | {r.get('bound')} | | | | | {r.get('nodes')} |")
+
+# 短い表: 問題ごとに 既定 / combb の (回ごとの) 状態・最後のギャップ・根の終わり (通し)
+print()
+print("| 問題 | 既定: ギャップ (根の終わり 秒) | combb: ギャップ (根の終わり 秒) | 旧既定 res2 | HiGHS |")
+print("|---|---|---|---|---|")
+for p in probs:
+    cells = []
+    for c in ("def", "combb"):
+        xs = []
+        for rep, r in sorted(R.get((p, c), []), key=lambda x: x[0]):
+            li = loginfo(p, c, rep)
+            g = "解 %.0f 秒" % r["time"] if r.get("status") in ("optimal", "infeasible") else f"{100 * gap(r):.3f}%"
+            xs.append(f"{g} ({fmt(li.get('root_end_last'), 0)})")
+        cells.append(" / ".join(xs))
+    pv = {t: r for t, r in prev.get(p, [])}
+    hs = pv.get("HiGHS")
+    h = "-" if hs is None else ("解 %.0f 秒" % hs["time"] if hs.get("status") == "Optimal" else f"{100 * gap(hs):.2f}%")
+    o = pv.get("旧既定 (res2)")
+    print(f"| {p} | {cells[0]} | {cells[1]} | {'-' if o is None else f'{100 * gap(o):.2f}%'} | {h} |")
