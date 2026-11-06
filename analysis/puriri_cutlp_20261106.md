@@ -210,7 +210,7 @@ ENOMOTO の単独の求解 `v_*.txt`・`base_*.txt`、HiGHS の求解 `highs_*.t
 
 ### 4.4 `cargo test --release --lib`
 
-TEST_RESULT
+通った: 346 passed、0 failed、18 ignored (試作を入れた後の作業木で)。
 
 ### 4.5 まとめ
 
