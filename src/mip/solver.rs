@@ -446,6 +446,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) face_used: usize,
     /// `ENOMOTO_MIP_FACE_ADAPT`: このカットのループでは面の頂点の分離をもうしない (面の LP が解けなかった)
     pub(super) face_off_loop: bool,
+    /// 試作 `ENOMOTO_MIP_MPSEP` (既定では使わない、analysis/mpsep_20261106.md): 分離する点が LP の頂点でないとき、[`Self::separate`] が
+    /// LP の行の活動量の代わりに使う値 (その点での行の活動量。1 回使うと消す)
+    pub(super) sep_act_override: Option<Vec<f64>>,
     /// `ENOMOTO_MIP_TAB_BUDGET`: tableau の分離の呼び出し回数と、試した行の数の累計 (HiGHS の `numTries`)
     pub(super) tab_calls: u64,
     pub(super) tab_tries: u64,
@@ -3883,6 +3886,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         face_secs: 0.0,
         face_used: 0,
         face_off_loop: false,
+        sep_act_override: None,
         tab_calls: 0,
         tab_tries: 0,
         last_cut_lp_secs: f64::INFINITY,
@@ -4805,14 +4809,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_T_MIP_OPTFACE_PIVOTS` (既定 1000) 回、1 回に引く候補は `ENOMOTO_T_MIP_OPTFACE_SAMPLE` (既定 8) 本、時間は `cap` 秒まで。
     /// 戻り値は (移った写し (最適で目的値が同じ、基底か値が違うときだけ), 最初の基底での候補の数 (双対退化の目安))。
     fn optface_alt(&self, tag: &str, mode: char, seed: u64, cap: f64) -> (Option<L>, usize) {
-        let mut alt = self.lp.clone();
         // 既定は実質「候補が尽きるまで」(一度出た変数は入れ直さないので、入れ替えは候補の数で終わる。neos859080 では 30 回では
         // 比べが伸びず、120 回ほどで尽きるまで歩くと伸びた)。時間は `cap` と、根の LP の時間の `ENOMOTO_T_MIP_OPTFACE_MOVE_MULT`
         // (既定 0.5) 倍 (`ENOMOTO_T_MIP_OPTFACE_MOVE_MIN` 0.05 秒〜`ENOMOTO_T_MIP_OPTFACE_MOVE_MAX` 1 秒) の小さい方まで
         let k = tunable!("ENOMOTO_T_MIP_OPTFACE_PIVOTS", 1000usize, usize);
         let move_cap = (tunable!("ENOMOTO_T_MIP_OPTFACE_MOVE_MULT", 0.5, f64) * self.root_lp_secs)
             .clamp(tunable!("ENOMOTO_T_MIP_OPTFACE_MOVE_MIN", 0.05, f64), tunable!("ENOMOTO_T_MIP_OPTFACE_MOVE_MAX", 1.0, f64).max(0.0));
-        let cap = cap.min(move_cap);
+        self.optface_alt_ext(tag, mode, seed, cap.min(move_cap), k, self.params.verbose)
+    }
+
+    /// [`Self::optface_alt`] の本体。入れ替えの上限 `k`、時間の上限 `cap` 秒 (そのまま使う)、`verbose` なら 1 行の記録を出す。
+    pub(super) fn optface_alt_ext(&self, tag: &str, mode: char, seed: u64, cap: f64, k: usize, verbose: bool) -> (Option<L>, usize) {
+        let mut alt = self.lp.clone();
         let sample = tunable!("ENOMOTO_T_MIP_OPTFACE_SAMPLE", 8usize, usize);
         let d = Instant::now() + Duration::from_secs_f64(cap.max(0.0));
         let dl = self.deadline.map_or(d, |g| g.min(d));
@@ -4826,13 +4834,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let Some(st) = st else {
-            if self.params.verbose {
+            if verbose {
                 eprintln!("MIP: optface {tag}: not available (LP not optimal or no basis)");
             }
             return (None, 0);
         };
         let nfrac = self.fractional(&alt.col_values()).len();
-        if self.params.verbose {
+        if verbose {
             eprintln!(
                 "MIP: optface {tag}: mode {mode} seed {seed}: {} candidates, {} pivots ({} degenerate) + {} bound flips, {} ftran, {} dead, {} columns moved, {} basic variables differ, re-solve {} iters (all {} iters), obj diff {:.2e}, {} fractional, ok {}{}{} (move {:.4}s, all {:.4}s)",
                 st.cands0,
@@ -4861,7 +4869,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let (Some(b), Some(b0)) = (alt.basis_cols(), self.lp.basis_cols()) {
             let s0: std::collections::HashSet<usize> = b0.into_iter().collect();
             if b.iter().all(|v| s0.contains(v)) && (0..self.p.n).all(|j| (alt.col_value(j) - self.lp.col_value(j)).abs() <= 1e-9 * (1.0 + self.lp.col_value(j).abs())) {
-                if self.params.verbose {
+                if verbose {
                     eprintln!("MIP: optface {tag}: back at the same basis after the re-solve");
                 }
                 return (None, st.cands0);
@@ -7070,6 +7078,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if both_loser.is_some() && !env_str!("ENOMOTO_MIP_ROOTLP_BOTH").is_some_and(|v| v.contains('p')) && !self.time_up() {
                     let l = both_loser.take().unwrap();
                     self.root_both_vertex(l, &x_root0, root_basis0.as_deref(), root_obj, root_iters, &mut root_cut_secs, true);
+                }
+                // 計測用 `ENOMOTO_MIP_MPSEP_START=種` (既定では使わない、analysis/mpsep_20261106.md): 根のカットのループを、最適面の上の
+                // 別の最適基底 ([`Self::optface_alt`]、`ENOMOTO_MIP_MPSEP_START_MODE` (既定 `f`)) から始める (出発の頂点を強制的にずらし、
+                // 根の下界が頂点によってどれだけ揺れるかを測る)。種 0 なら何もしない
+                if let Some(sd) = env_str!("ENOMOTO_MIP_MPSEP_START").and_then(|v| v.parse::<u64>().ok()).filter(|&v| v > 0 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0) {
+                    if !self.time_up() {
+                        let mode = env_str!("ENOMOTO_MIP_MPSEP_START_MODE").and_then(|v| v.chars().next()).unwrap_or('f');
+                        let (alt, cands) = self.optface_alt_ext("start (MPSEP_START)", mode, sd, 2.0, 100_000, self.params.verbose);
+                        if let Some(alt) = alt {
+                            self.lp = alt;
+                        } else if self.params.verbose {
+                            eprintln!("MIP: MPSEP_START: no moved vertex ({cands} candidates)");
+                        }
+                    }
                 }
                 // 試作 `ENOMOTO_MIP_OPTFACE_FIRST` (既定では使わない、analysis/optface_cuts_20261105.md): ループの前に、最適面の上の別の頂点 k 個で
                 // 1 ラウンドずつ分離したカットを集めて足す ([`Self::optface_first`])

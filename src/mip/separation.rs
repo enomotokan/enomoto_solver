@@ -1076,6 +1076,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let prof = sepprof::on() && !self.params.submip && job.is_none();
         self.face_off_loop = false;
         self.last_cut_lp_secs = f64::INFINITY;
+        // 試作 `ENOMOTO_MIP_MPSEP` (既定では使わない、analysis/mpsep_20261106.md): 多点分離の設定と、in-out の内点 (ループで 1 回だけ求める)
+        let mpsep = mpsep_flags(self.params.submip, job.is_some());
+        let mut mp_center: Option<Vec<f64>> = None;
+        let mut mp_center_tried = false;
+        // (多点分離をしたラウンド, 足した点, 足した候補, 選んだカットのうち x* を切らないもの, 選んだカット, 時間)
+        let mut mp_stats = (0usize, 0usize, 0usize, 0usize, 0usize, 0.0f64);
         if prof {
             sepprof::PROF.with(|pp| *pp.borrow_mut() = Default::default());
             super::cuts::GEN_PROF.with(|g| *g.borrow_mut() = Default::default());
@@ -1724,6 +1730,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.sep_pass = round;
             self.sep_adapt.ran = 0;
             let (mut cands, mut fcands) = self.separate_face_split(&x, false);
+            // 試作 `ENOMOTO_MIP_MPSEP`: 今の頂点 x* のほかの点 (最適面の上の別の頂点、x* と内点を結ぶ線分上の点) でも分離して候補に足す
+            let mp_pts: Vec<Vec<f64>> = match &mpsep {
+                Some(f) => self.mpsep_extra(f, &x, round, &mut cands, &mut mp_center, &mut mp_center_tried, &mut mp_stats),
+                None => Vec::new(),
+            };
             // 分離の間に求解の期限を過ぎたら、このラウンドを捨てて抜ける (ラウンドの頭の `time_up` で抜けるのと同じ状態)。
             // 裏のカットの求解のラウンド (rail507 で 1 回 3〜9 秒) の候補のプールへの追加・選択が期限の後も回り、主がその終わりを
             // 待って時間の上限を 5 秒過ぎていた (analysis/overrun_crypt_20261101.md)
@@ -1828,6 +1839,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
+            // 試作 `ENOMOTO_MIP_MPSEP`: 候補の効き目を、x* だけでなく全部の点での効き目 (最大、値に `u` を含めば正の部分の和) にする。
+            // x* を切る候補の最良の点数を質の閾値の基準にする (x* を切らない候補だけが採られて LP が動かなくなるのを避ける)
+            let mut mp_anchor: Option<f64> = None;
+            if !mp_pts.is_empty() && mpsep.as_ref().is_some_and(|f| !f.contains('p')) {
+                let sum = mpsep.as_ref().is_some_and(|f| f.contains('u'));
+                let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
+                for c in cands.iter_mut().filter(|c| !c.forced) {
+                    let norm = c.coefs.iter().map(|&(_, a)| a * a).sum::<f64>().sqrt().max(1e-300);
+                    let ev = |pt: &[f64]| (c.coefs.iter().map(|&(j, a)| a * pt[j]).sum::<f64>() - c.rhs) / norm;
+                    let e0 = ev(&x);
+                    let (mut emax, mut esum) = (e0, e0.max(0.0));
+                    for pt in &mp_pts {
+                        let e = ev(pt);
+                        emax = emax.max(e);
+                        esum += e.max(0.0);
+                    }
+                    c.efficacy = if sum { esum } else { emax };
+                    if e0 > 1e-6 {
+                        let sc = cut_score(c, p, cnorm);
+                        mp_anchor = Some(mp_anchor.map_or(sc, |m: f64| m.max(sc)));
+                    }
+                }
+                cands.retain(|c| c.forced || c.efficacy > 1e-6);
+            }
             let ncands = cands.len() + face_cands.len();
             if ncands == 0 {
                 if self.params.verbose && job.is_some() {
@@ -1912,6 +1947,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 1 ラウンド目の候補 (4090 本) を同じ LP に足すと、既定の選択 (150 本・0.3) では 48583 -> 48588、500 本・0.9 なら 48774
                 // (候補全部 48790)。最適面が退化していて、短いカットを少しずつ足しても LP が別の頂点に移るだけ
                 select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64), tunable!("ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAXPAR", 0.9, f64))
+            } else if mp_anchor.is_some() && env_str!("ENOMOTO_MIP_CUTSEL_OLD").is_none() {
+                select_cuts_hybrid_anchor(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64), tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), mp_anchor)
             } else if face_anchor >= 1 && env_str!("ENOMOTO_MIP_CUTSEL_OLD").is_none() {
                 select_cuts_hybrid_anchor(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64), tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), anchor)
             } else {
@@ -1943,6 +1980,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 for c in chosen.iter().take(topk) {
                     let terms: Vec<String> = c.coefs.iter().take(8).map(|&(j, a)| format!("{a:+.3}*x{j}[{:.3} {}..{} {}]", x[j], self.dom.global_lo[j], self.dom.global_up[j], if p.is_int[j] { "I" } else { "C" })).collect();
                     eprintln!("TOPCUT round {round} eff {:.4} nnz {} <= {:.3}: {}", c.efficacy, c.coefs.len(), c.rhs, terms.join(" "));
+                }
+            }
+            if !mp_pts.is_empty() {
+                let off = chosen.iter().filter(|c| c.coefs.iter().map(|&(j, a)| a * x[j]).sum::<f64>() - c.rhs <= 1e-6 * (1.0 + c.rhs.abs())).count();
+                mp_stats.3 += off;
+                mp_stats.4 += chosen.len();
+                if self.params.verbose && mpsep.as_ref().is_some_and(|f| f.contains('v')) {
+                    eprintln!("MIP: cut round {round}: mpsep: chosen {} cuts, {off} of them do not cut x*", chosen.len());
                 }
             }
             // 選択の上限まで採ったか (選択を通さないカットは数えない)
@@ -2852,6 +2897,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return true;
         }
         self.remove_inactive_cuts();
+        if mpsep.is_some() && self.params.verbose {
+            eprintln!(
+                "MIP: mpsep{}: {} rounds with extra points, {} points, {} extra candidates, chosen {} cuts ({} do not cut x*), {:.3}s",
+                if job.is_some() { " (background cuts)" } else { "" },
+                mp_stats.0,
+                mp_stats.1,
+                mp_stats.2,
+                mp_stats.4,
+                mp_stats.3,
+                mp_stats.5
+            );
+        }
         if env_str!("ENOMOTO_MIP_DEBUG_FACETIME").is_some() && !self.params.submip {
             eprintln!(
                 "FACETIME {}restarts {} rounds {nrounds}: sep {sep_tot:.2}s (face {:.2}s, {} vertices), LP {lp_tot:.2}s, loop {:.2}s, obj {:.10e}",
@@ -3972,6 +4029,103 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.path_offset = last + 1;
     }
 
+    /// 試作 `ENOMOTO_MIP_MPSEP` (既定では使わない、analysis/mpsep_20261106.md): 根のカットのループの 1 ラウンドで、今の頂点 `x` (x*) の
+    /// ほかの点でも分離して `cands` に足し、足した点を返す。
+    /// - 値に `o`: 最適面の上の別の最適基底 ([`Solver::optface_alt_ext`]、被約費用 0 の非基底を入れる軸の入れ替え) を
+    ///   `ENOMOTO_T_MIP_MPSEP_NV` (既定 2) 個作り、それぞれの基底と頂点で分離する (tableau 系 (GMI・MIR の tableau 行) は別の基底の行、
+    ///   それ以外 (cover・clique・flow cover・行の MIR) は点だけが変わる)。1 個の移動は `ENOMOTO_T_MIP_MPSEP_MOVE_SECS`
+    ///   (既定は根の LP の時間の 0.25 倍を 0.01〜0.1 秒に収めたもの) まで、入れ替えは `ENOMOTO_T_MIP_MPSEP_PIVOTS` (既定 1000) 回まで。
+    /// - 値に `c` (費用つき = 最適面の中心付近) か `a` (費用 0 = 実行可能領域の中心付近): ループで 1 回だけ内点法で内点 x_c を求め
+    ///   (`ENOMOTO_T_MIP_MPSEP_IPM_SECS`、既定は根の LP の時間の 3 倍を 0.2 秒〜時間の上限の 3% に収めたもの)、x* と x_c を結ぶ線分上の点
+    ///   x(α) = x* + α (x_c − x*) (`ENOMOTO_T_MIP_MPSEP_ALPHA`、既定 0.5) で分離する (行の活動量はその点から計算する)。
+    ///   x(α) を切る候補がなければ x_c ← x(α) (Ben-Ameur・Neto の更新)。
+    /// - 値に `l`: 足す点では軽い分離 (tableau 行・経路集約の始点を減らす)。
+    /// - `ENOMOTO_T_MIP_MPSEP_START` (既定 0) ラウンド目から `ENOMOTO_T_MIP_MPSEP_ROUNDS` (既定 1000) ラウンドだけ。
+    #[allow(clippy::too_many_arguments)]
+    fn mpsep_extra(&mut self, f: &str, x: &[f64], round: usize, cands: &mut Vec<Candidate>, center: &mut Option<Vec<f64>>, center_tried: &mut bool, stats: &mut (usize, usize, usize, usize, usize, f64)) -> Vec<Vec<f64>> {
+        let r0 = tunable!("ENOMOTO_T_MIP_MPSEP_START", 0usize, usize);
+        let nr = tunable!("ENOMOTO_T_MIP_MPSEP_ROUNDS", 1000usize, usize);
+        if round < r0 || round >= r0 + nr || self.time_up() {
+            return Vec::new();
+        }
+        let t0 = std::time::Instant::now();
+        let n = self.p.n;
+        let light = f.contains('l');
+        let n0 = cands.len();
+        let mut pts: Vec<Vec<f64>> = Vec::new();
+        let mut nmoved = 0usize;
+        if f.contains('o') {
+            let nv = tunable!("ENOMOTO_T_MIP_MPSEP_NV", 2usize, usize);
+            let cap = tunable!("ENOMOTO_T_MIP_MPSEP_MOVE_SECS", (0.25 * self.root_lp_secs).clamp(0.01, 0.1), f64);
+            let piv = tunable!("ENOMOTO_T_MIP_MPSEP_PIVOTS", 1000usize, usize);
+            let mode = if f.contains('d') { 'd' } else if f.contains('r') { 'r' } else { 'f' };
+            let dbg = f.contains('v') && self.params.verbose;
+            for k in 0..nv {
+                if self.time_up() {
+                    break;
+                }
+                let seed = 7919 * (round as u64 + 1) + k as u64 + 1;
+                let (alt, _) = self.optface_alt_ext("mpsep", mode, seed, cap, piv, dbg);
+                let Some(mut alt) = alt else { continue };
+                let xa = alt.col_values();
+                if xa.len() != n {
+                    continue;
+                }
+                std::mem::swap(&mut self.lp, &mut alt);
+                let mut cv = self.separate(&xa, light);
+                std::mem::swap(&mut self.lp, &mut alt);
+                cands.append(&mut cv);
+                pts.push(xa);
+                nmoved += 1;
+            }
+        }
+        let mut io = false;
+        if f.contains('c') || f.contains('a') {
+            if center.is_none() && !*center_tried {
+                *center_tried = true;
+                let tl = if self.params.time_limit.is_finite() { 0.03 * self.params.time_limit } else { 10.0 };
+                let secs = tunable!("ENOMOTO_T_MIP_MPSEP_IPM_SECS", (3.0 * self.root_lp_secs).clamp(0.2, tl.max(0.2)), f64);
+                let t1 = std::time::Instant::now();
+                let dl = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs);
+                let dl = self.deadline.map_or(dl, |g| g.min(dl));
+                let ip = self.lp.interior_point(!f.contains('c'), false, dl);
+                *center = ip.map(|ip| ip.x).filter(|v| v.len() == n);
+                if self.params.verbose {
+                    let diff = center.as_ref().map_or(0, |c| (0..n).filter(|&j| (c[j] - x[j]).abs() > 1e-6).count());
+                    let nfc = center.as_ref().map_or(0, |c| self.fractional(c).len());
+                    eprintln!("MIP: mpsep: interior point ({}) {} in {:.3}s: {diff} columns differ from x*, {nfc} fractional (x*: {})", if f.contains('c') { "optimal face" } else { "analytic" }, if center.is_some() { "found" } else { "not found" }, t1.elapsed().as_secs_f64(), self.fractional(x).len());
+                }
+            }
+            if let Some(xc) = center.clone() {
+                let al = tunable!("ENOMOTO_T_MIP_MPSEP_ALPHA", 0.5, f64);
+                let xm: Vec<f64> = (0..n).map(|j| x[j] + al * (xc[j] - x[j])).collect();
+                let (rows, _) = self.sep_lp_rows();
+                let act: Vec<f64> = rows.iter().map(|r| r.iter().map(|&(j, a)| a * xm[j]).sum()).collect();
+                self.sep_act_override = Some(act);
+                let mut cv = self.separate(&xm, light);
+                self.sep_act_override = None;
+                let viol = cv.iter().any(|c| c.coefs.iter().map(|&(j, a)| a * xm[j]).sum::<f64>() - c.rhs > 1e-6 * (1.0 + c.rhs.abs()));
+                if !viol {
+                    *center = Some(xm.clone());
+                }
+                cands.append(&mut cv);
+                pts.push(xm);
+                io = true;
+            }
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        if !pts.is_empty() {
+            stats.0 += 1;
+            stats.1 += pts.len();
+            stats.2 += cands.len() - n0;
+        }
+        stats.5 += secs;
+        if self.params.verbose && f.contains('v') {
+            eprintln!("MIP: cut round {round}: mpsep: {nmoved} moved vertices, in-out {io}, +{} candidates ({:.3}s)", cands.len() - n0, secs);
+        }
+        pts
+    }
+
     /// 根の分離 (退化に強い形、`ENOMOTO_MIP_FACE_SEP`)。LP が双対退化している (非基底で被約費用が 0 の列がある) と
     /// 最適解の集合 (最適面) に頂点が多く、どの頂点に着くかは DSE 重みなど解き方の履歴で変わる。カットは着いた頂点から
     /// 作るので、頂点が変わるとカットも根の下界も変わり、また 1 つの頂点だけを切っても LP は同じ目的値の別の頂点へ移るだけで
@@ -4299,7 +4453,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SEP_NO_ROWCLONE`: 行の写しと整数の行の印を使い回す ([`SepRowsCache`])
         let (lp_rows_rc, row_integral) = self.sep_lp_rows();
         let lp_rows: &[Vec<(usize, f64)>] = &lp_rows_rc;
-        let act = self.lp.row_activities();
+        // 試作 `ENOMOTO_MIP_MPSEP` の in-out の点 (LP の頂点でない点) では、その点での行の活動量を使う
+        let act = match self.sep_act_override.take() {
+            Some(a) if a.len() == mr => a,
+            _ => self.lp.row_activities(),
+        };
         // カットは木全体で有効にするため、大域的な境界から作る
         let mut lo = self.dom.global_lo.clone();
         let mut up = self.dom.global_up.clone();
@@ -5630,6 +5788,16 @@ fn finish_cut(
 }
 
 /// 効き目の大きい順に、既に選んだものとほぼ平行 (|cos| > 0.99) なものを除いて選ぶ。
+/// 試作 `ENOMOTO_MIP_MPSEP` (既定では使わない、analysis/mpsep_20261106.md) の値。サブ MIP では使わない。値に `m` を含めば主の根のループだけ、
+/// `b` を含めば裏のカットの写しだけ。
+fn mpsep_flags(submip: bool, in_job: bool) -> Option<String> {
+    let v = env_str!("ENOMOTO_MIP_MPSEP")?;
+    if submip || (v.contains('m') && in_job) || (v.contains('b') && !in_job) {
+        return None;
+    }
+    Some(v.to_string())
+}
+
 fn select_cuts(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) -> Vec<Candidate> {
     if env_str!("ENOMOTO_MIP_CUTSEL_OLD").is_some() {
         return select_cuts_old(cands, max_cuts);
