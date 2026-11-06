@@ -1,6 +1,6 @@
 """設定ごとに問題を 4 スレッドで解き、<出力>.jsonl に足す (済んだ組は飛ばす。設定の順は回ごとに逆)。
 使い方: python bench.py 出力 時間 回 設定,設定 問題 ...   (問題が "58" なら analysis/cbcimpl_20261029/probs.py の 58 問)
-設定: def (既定)、s/n/r/x/xr/f は ENOMOTO_MIP_PROBE_BASIS_GUARD の値。ENOMOTO_MIP_LOG=1 で、試作・根の LP の行だけを記録に残す。"""
+設定: def (既定)、s/n/r/x/xr/f は ENOMOTO_MIP_PROBE_BASIS_GUARD の値、"+ho4" で ENOMOTO_MIP_HO4_CUT0=1 も足す。ENOMOTO_MIP_LOG=1 で、試作・根の LP の行だけを記録に残す。"""
 import json, os, re, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -25,8 +25,12 @@ for p in probs:
         if (p, c, rep) in done:
             continue
         env = dict(base, ENOMOTO_MIP_THREADS="4", ENOMOTO_MIP_LOG="1")
-        if c != "def":
-            env["ENOMOTO_MIP_PROBE_BASIS_GUARD"] = c
+        # 設定の名前: "+" で区切り、ho4 は ENOMOTO_MIP_HO4_CUT0=1、def 以外の残りは ENOMOTO_MIP_PROBE_BASIS_GUARD の値
+        for part in c.split("+"):
+            if part == "ho4":
+                env["ENOMOTO_MIP_HO4_CUT0"] = "1"
+            elif part != "def":
+                env["ENOMOTO_MIP_PROBE_BASIS_GUARD"] = part
         notes, rl = [], {}
         t0 = time.time()
         try:
