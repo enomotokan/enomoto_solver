@@ -1,0 +1,71 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP neos-1445765 has 2147 rows; 20617 cols; 40230 nonzeros; 2150 integer variables (2150 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 5e+01]
+  Cost    [1e+01, 5e+01]
+  Bound   [1e+00, 1e+00]
+  RHS     [2e+01, 2e+01]
+Presolving model
+1001 rows, 2146 cols, 20613 nonzeros 0s
+999 rows, 2133 cols, 20524 nonzeros 0s
+Presolve reductions: rows 999(-1148); columns 2133(-18484); nonzeros 20524(-19706) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   999 rows
+   2133 cols (2133 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   20524 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ z       0       0         0   0.00%   -inf            0                  Large        0      0      0         0     0.2s
+ J       0       0         0   0.00%   -inf            -37                Large        0      0      0         0     0.2s
+ R       0       0         0   0.00%   -18811.492536   -3691            409.66%        0      0      0      3768     0.9s
+ C       0       0         0   0.00%   -18688.803937   -4096            356.27%      622      8      0      4425     1.7s
+ L       0       0         0   0.00%   -18631.83986    -15447            20.62%     1055     38      0      7122     9.3s
+         6       0         1   3.12%   -18631.83986    -15447            20.62%      867     27     18    126917    24.4s
+ T     100       1        46  25.00%   -18631.83986    -17783             4.77%     3918     66   2341    138586    33.6s
+       246       1       119  87.50%   -18630.535787   -17783             4.77%     4683     77   4281    167405    41.6s
+       346       8       166  98.33%   -18246.605944   -17783             2.61%     4996     82   6385    188027    47.2s
+       378       4       183  98.44%   -18246.605944   -17783             2.61%     5104    103   7312    202069    52.2s
+       470       1       231 100.00%   -17995.591717   -17783             1.20%     7230    123   9546    223758    58.6s
+       480       0       237 100.00%   -17783          -17783             0.00%     7672    107   9972    226448    59.7s
+
+Solving report
+  Model             neos-1445765
+  Status            Optimal
+  Primal bound      -17783
+  Dual bound        -17783
+  Gap               0%
+  P-D integral      548.421445134
+  Solution status   feasible
+                    -17783 (objective)
+                    0 (bound viol.)
+                    2.52242671195e-13 (int. viol.)
+                    0 (row viol.)
+  Timing            59.70
+                    0.25 (Presolve)
+                        MIP    time [calls] = 0.18 [1]
+                        subMIP time [calls] = 0.07 [2]
+                    59.45 (Solve)
+                        MIP    time [calls] = 54.61 [1]
+                        subMIP time [calls] = 4.84 [1]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [2]
+  Max sub-MIP depth 2
+  Nodes             480
+  Repair LPs        0
+  LP iterations     226448
+                    136863 (strong br.)
+                    14628 (separation)
+                    14221 (heuristics)
+{"status": "Optimal", "objective": -17782.999999999894, "bound": -17782.999999999894, "nodes": 480, "time": 59.717477471000166}

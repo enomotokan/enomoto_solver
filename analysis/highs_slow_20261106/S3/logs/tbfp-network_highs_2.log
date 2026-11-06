@@ -1,0 +1,87 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP tbfp-network has 2436 rows; 72747 cols; 215837 nonzeros; 72747 integer variables (72747 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+00]
+  Cost    [2e-01, 2e+01]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 1e+00]
+Presolving model
+2436 rows, 72747 cols, 215837 nonzeros 0s
+2435 rows, 72746 cols, 215835 nonzeros 1s
+Presolve reductions: rows 2435(-1); columns 72746(-1); nonzeros 215835(-2) 
+
+Solving MIP model with:
+   2435 rows
+   72746 cols (72746 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   215835 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            117.25             Large        0      0      0         0     2.6s
+         0       0         0   0.00%   23.26153549     117.25            80.16%        0      0      3     15063    12.6s
+         0       0         0   0.00%   23.33401124     117.25            80.10%        4      1      3     25620    24.1s
+         0       0         0   0.00%   23.35988706     117.25            80.08%       17      5      3     29803    29.8s
+         0       0         0   0.00%   23.45444804     117.25            80.00%       21      8      5     38292    39.0s
+         0       0         0   0.00%   23.47211304     117.25            79.98%       39     21      5     43792    46.3s
+         0       0         0   0.00%   23.49641077     117.25            79.96%       54     26      5     47807    51.3s
+         0       0         0   0.00%   23.49702307     117.25            79.96%       93     37      5     50325    56.4s
+ L       0       0         0   0.00%   23.49728247     24.16319444        2.76%      111     43      5     52364   185.4s
+
+79.7% inactive integer columns, restarting
+Model after restart has 1782 rows, 14049 cols (14049 bin., 0 int., 0 impl., 0 cont., 0 dom.fix.), and 41915 nonzeros
+
+         0       0         0   0.00%   23.49728247     24.16319444        2.76%       31      0      0    154094   195.5s
+         0       0         0   0.00%   23.52650794     24.16319444        2.63%       31      9      5    163071   196.9s
+
+10.1% inactive integer columns, restarting
+Model after restart has 1580 rows, 12372 cols (12372 bin., 0 int., 0 impl., 0 cont., 0 dom.fix.), and 37488 nonzeros
+
+         0       0         0   0.00%   23.53438165     24.16319444        2.60%        7      0      0    165402   202.9s
+         0       0         0   0.00%   23.53438165     24.16319444        2.60%        7      4      6    170202   203.6s
+
+11.3% inactive integer columns, restarting
+Model after restart has 1476 rows, 10927 cols (10927 bin., 0 int., 0 impl., 0 cont., 0 dom.fix.), and 33152 nonzeros
+
+         0       0         0   0.00%   23.58775791     24.16319444        2.38%       18      0      0    177555   211.1s
+         0       0         0   0.00%   23.58839623     24.16319444        2.38%       18     16      5    182873   211.8s
+ B       2       0         1  50.00%   23.61871829     24.16319444        2.25%       94     22    229    192985   217.3s
+         7       0         4 100.00%   24.16319444     24.16319444        0.00%      105     22    456    209572   219.5s
+
+Solving report
+  Model             tbfp-network
+  Status            Optimal
+  Primal bound      24.1631944445
+  Dual bound        24.1631944445
+  Gap               0%
+  P-D integral      148.978488529
+  Solution status   feasible
+                    24.1631944445 (objective)
+                    0 (bound viol.)
+                    5.10702591328e-15 (int. viol.)
+                    0 (row viol.)
+  Timing            219.48
+                    16.28 (Presolve)
+                        MIP    time [calls] = 2.08 [1]
+                        subMIP time [calls] = 14.19 [51]
+                    203.18 (Solve)
+                        MIP    time [calls] = 92.57 [1]
+                        subMIP time [calls] = 110.61 [22]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [51]
+  Max sub-MIP depth 14
+  Nodes             7
+  Repair LPs        0
+  LP iterations     209572
+                    4102 (strong br.)
+                    52463 (separation)
+                    101608 (heuristics)
+{"status": "Optimal", "objective": 24.163194444499982, "bound": 24.163194444499982, "nodes": 7, "time": 219.56468568299988}
