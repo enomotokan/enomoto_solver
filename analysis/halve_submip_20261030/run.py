@@ -147,6 +147,14 @@ CFGS = {
     "ipmcombb": {"ENOMOTO_T_XO_CLEANUP_HINT": "3", "ENOMOTO_XO_IPM_RETRY_PC": "3", "ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST": "1", "ENOMOTO_IPM_KKT_AUG_RATIO": "4",
                  "ENOMOTO_SIMPLEX_SCALE": "1", "ENOMOTO_T_SIMPLEX_SCALE_MIN_M": "10000", "ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE": "1e4", "ENOMOTO_SIMPLEX_HARRIS2": "r",
                  "ENOMOTO_SIMPLEX_NOISE_RESET": "0.1", "ENOMOTO_SIMPLEX_NOISE_RESET_W": "e"},
+    # bench28 (2026-11-06): 他セッションの試作で既定の候補。sym = 対称性の検出の直し (HO3_SYMNORM: 行の向きをそろえる、HO6_SYMWORK・SYMREFINE: 手間の上限)、
+    # lp = 基底の受け渡し (HO4_BGNB: 裏のカットの LP の非基底の置き場所も渡す、TREE3_RBASIS: 再スタートの後の合わない基底を捨てる)、
+    # prr = プロービングの後の前処理のかけ直し (PROBE_REPRESOLVE、衝突解析の直しの後)、all = 全部
+    "sym": {"ENOMOTO_MIP_HO3_SYMNORM": "1", "ENOMOTO_MIP_HO6_SYMWORK": "1", "ENOMOTO_MIP_HO6_SYMREFINE": "1"},
+    "lp": {"ENOMOTO_MIP_HO4_BGNB": "1", "ENOMOTO_MIP_TREE3_RBASIS": "1"},
+    "prr": {"ENOMOTO_MIP_PROBE_REPRESOLVE": "1"},
+    "all28": {"ENOMOTO_MIP_HO3_SYMNORM": "1", "ENOMOTO_MIP_HO6_SYMWORK": "1", "ENOMOTO_MIP_HO6_SYMREFINE": "1", "ENOMOTO_MIP_HO4_BGNB": "1",
+              "ENOMOTO_MIP_TREE3_RBASIS": "1", "ENOMOTO_MIP_PROBE_REPRESOLVE": "1"},
 }
 if __name__ == "__main__":  # bench.py からは設定 (CFGS) だけを読む
     cfgs, probs, reps = sys.argv[1].split(","), sys.argv[2].split(","), int(sys.argv[3])
