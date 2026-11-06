@@ -590,6 +590,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     tr_next: u64,
     tr_huge: u32,
     tr_last: (u64, f64, f64, f64),
+    /// 木の中の再スタートの記帳 (`TRSTAT`、ログだけ) と `ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、[`Self::tree_restart_guard_ok`]) 用:
+    /// この求解で木のループに入った時刻 (この求解の始めからの秒)、そのときの全体の下界、[`Self::tree_restart_due`] の最後の木の大きさの見積もり。
+    tr_t0: f64,
+    tr_root_lb: f64,
+    tr_est: f64,
     force_restart: bool,
     noinc_stall: u32,
     noinc_best_close: f64,
@@ -3966,6 +3971,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tr_next: 0,
         tr_huge: 0,
         tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
+        tr_t0: 0.0,
+        tr_root_lb: f64::NEG_INFINITY,
+        tr_est: f64::NAN,
         force_restart: false,
         noinc_stall: 0,
         noinc_best_close: 0.0,
@@ -8630,9 +8638,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut rp_stats = [0u64; 5];
         // `ENOMOTO_MIP_TREE_RESTART` (試作): 木に入る前の暫定解の印は消しておく (木の中で良くなったときだけ判定する)
         self.tree_restart_check = false;
+        // 木の中の再スタートの記帳 (`TRSTAT`) 用: 木に入った時刻と下界 (ログを出すだけで解き方は変えない)
+        self.tr_t0 = self.start.elapsed().as_secs_f64();
+        self.tr_root_lb = self.global_lower_bound().min(plunge.as_ref().map_or(f64::INFINITY, |n| n.lower_bound));
+        if self.params.verbose && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
+            eprintln!("TRSTAT: tree start outer {:.2} solve {:.2} restarts {} lb {:.10e} ub {:.10e}", super::outer_elapsed().unwrap_or(f64::NAN), self.tr_t0, self.params.restarts, self.tr_root_lb, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z));
+        }
         loop {
             // `ENOMOTO_MIP_TREE_RESTART` (試作、既定では使わない): HiGHS 式の木の中の再スタート ([`Self::tree_restart_due`])
-            if tree_restart_on() && self.tree_restart_due(plunge.as_ref()) {
+            if tree_restart_on() && self.tree_restart_due(plunge.as_ref()) && self.tree_restart_guard_ok(plunge.as_ref(), "due") {
                 if self.params.verbose {
                     eprintln!("MIP: TREE restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
                 }
@@ -8670,7 +8684,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT", 0.1, f64) * self.params.time_limit,
                     None => true,
                 };
-                if left_ok && self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64)) {
+                if left_ok && self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64)) && self.tree_restart_guard_ok(plunge.as_ref(), "inc") {
                     if self.params.verbose {
                         eprintln!("MIP: tree restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
                     }
@@ -17756,6 +17770,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let est = n0 as f64 + (done - n0) as f64 * (1.0 - q) / (q - q0).max(1e-9);
+        self.tr_est = est;
         // 自由な割合は、この求解の根の始めに自由だった整数列に対する割合 (HiGHS は再スタート後の模型の整数列に対する割合)
         let free0 = self.p.nint.saturating_sub(self.root_fixed0).max(1);
         let newly = self.newly_fixed_ints();
@@ -17796,6 +17811,92 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT", 0.1, f64) * self.params.time_limit,
             None => true,
         }
+    }
+
+    /// 木の中の再スタート (`ENOMOTO_MIP_TREE_RESTART` の判定を通った後、従を止める前) の時点の量を `TRSTAT:` の行に書き
+    /// (`ENOMOTO_MIP_LOG` か `ENOMOTO_MIP_TREE_RESTART_LOG`。ログだけ)、`ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、既定では使わない) の
+    /// 文字の条件のどれかに当たれば再スタートを止める (false を返す)。
+    /// - `l`: 根のやり直しの見込みの費用 (この求解で木に入るまでの秒 × `ENOMOTO_T_MIP_TREE_RESTART_GUARD_ROOT` (1)) が残り時間の
+    ///   `ENOMOTO_T_MIP_TREE_RESTART_GUARD_LEFT` (0.25) を超える。
+    /// - `c`: 木の残りの見込みの秒が根のやり直しの見込みの費用の `ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST` (3) 倍に満たない。木の残りは、
+    ///   HiGHS 式の見積もり ([`Self::tree_restart_due`] のノード数) があればそれと木の 1 ノードあたりの秒から、なければ刈った重み q の
+    ///   木に入ってからの進み (残り = 木の秒 × (1 − q) / q) から出す。
+    /// - `g`: 相対ギャップ (暫定解 − 全体の下界) / max(|暫定解|, 1) が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_GAP` (1e-3) 未満。
+    /// - `q`: 刈った重み q が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_Q` (0.5) 以上 (木がもう半分以上閉じた)。
+    /// - `n`: この求解の木の全体のノード数が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_NODES` (300) 未満 (木の中の暫定解ですぐ再スタートしない)。
+    fn tree_restart_guard_ok(&mut self, plunge: Option<&OpenNode>, why: &str) -> bool {
+        use std::sync::atomic::Ordering;
+        let guard = env_str!("ENOMOTO_MIP_TREE_RESTART_GUARD").unwrap_or_default();
+        let log = self.params.verbose || env_str!("ENOMOTO_MIP_TREE_RESTART_LOG").is_some();
+        if guard.is_empty() && !log {
+            return true;
+        }
+        let solve_t = self.start.elapsed().as_secs_f64();
+        let tree_t = (solve_t - self.tr_t0).max(1e-3);
+        let done = self.nodes + self.pool.as_ref().map_or(0, |pool| pool.slots.iter().map(|sl| sl.nodes.load(Ordering::Relaxed)).sum::<u64>());
+        let wt = |d: usize| 0.5f64.powi(d.min(2000) as i32);
+        let mut w: f64 = self.queue.iter().chain(plunge).map(|n| wt(n.depth)).sum();
+        let mut open = self.queue.len() + plunge.is_some() as usize;
+        if let Some(pool) = &self.pool {
+            let t = self.pool_tid as usize;
+            let g = pool.inner.lock().unwrap();
+            w += g.nodes.iter().map(|n| wt(n.depth)).sum::<f64>();
+            open += g.nodes.len();
+            for (i, sl) in pool.slots.iter().enumerate() {
+                if i != t {
+                    w += f64::from_bits(sl.wtree.load(Ordering::Relaxed)).max(0.0);
+                    open += sl.open.load(Ordering::Relaxed);
+                }
+            }
+        }
+        let q = (1.0 - w).clamp(0.0, 1.0);
+        let lb = self.global_lower_bound().min(plunge.map_or(f64::INFINITY, |n| n.lower_bound));
+        let ub = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+        let gap = if ub.is_finite() && lb.is_finite() { (ub - lb).max(0.0) / ub.abs().max(1.0) } else { f64::INFINITY };
+        let left = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+        let root_cost = self.tr_t0 * tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_ROOT", 1.0, f64);
+        let est_left = if self.tr_est.is_finite() && why == "due" {
+            (self.tr_est - done as f64).max(0.0) * tree_t / done.max(1) as f64
+        } else if q > 0.0 {
+            tree_t * (1.0 - q) / q
+        } else {
+            f64::INFINITY
+        };
+        let free0 = self.p.nint.saturating_sub(self.root_fixed0).max(1);
+        let newly = self.newly_fixed_ints();
+        let mut stop: Option<char> = None;
+        for c in guard.chars() {
+            let hit = match c {
+                'l' => root_cost > tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_LEFT", 0.25, f64) * left,
+                'c' => est_left < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST", 3.0, f64) * root_cost,
+                'g' => gap < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_GAP", 1e-3, f64),
+                'q' => q >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_Q", 0.5, f64),
+                'n' => done < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_NODES", 300u64, u64),
+                _ => false,
+            };
+            if hit {
+                stop = Some(c);
+                break;
+            }
+        }
+        if log {
+            eprintln!(
+                "TRSTAT: {why} outer {:.2} solve {solve_t:.2} root {:.2} tree {tree_t:.2} restarts {} nodes {done} open {open} q {q:.4} est {:.0} est_left {est_left:.2} lb {lb:.10e} root_lb {:.10e} ub {ub:.10e} gap {gap:.3e} newly {newly}/{free0} ({:.4}) left {left:.1} guard {}",
+                super::outer_elapsed().unwrap_or(f64::NAN),
+                self.tr_t0,
+                self.params.restarts,
+                self.tr_est,
+                self.tr_root_lb,
+                newly as f64 / free0 as f64,
+                stop.map_or("pass".to_string(), |c| format!("stop {c}"))
+            );
+        }
+        if stop.is_some() {
+            // 判定の起点を今の点に置き直す (続けて毎回止めないように。[`Self::tree_restart_due`] の固定の閾値で見送るときと同じ)
+            self.tr_last = (done, q, self.prune_limit(), self.global_lower_bound());
+            return false;
+        }
+        true
     }
 
     /// `ENOMOTO_MIP_TREE1_POOL` (試作): 共有の待ち行列の下界最小のノードが手元の待ち行列の最小より小さければ取る。木を分け合うと、
