@@ -15,6 +15,7 @@ CFGS = {
     "p3": {"ENOMOTO_MIP_POOL3_BEST": "0.05"},
     "hard2": {"ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_HARD": "2"},
     "tcap": {"ENOMOTO_MIP_S6_CUTLP_TCAP": "10"},
+    "p2r": {"ENOMOTO_MIP_S6_CUTLP_TCAP": "10", "ENOMOTO_T_MIP_CUT_PHASE2_ROUNDS": "200"},
     "jcx": {"ENOMOTO_MIP_TREE3_JOINCAP": "1", "ENOMOTO_MIP_ROBUST_STALL": "rw", "ENOMOTO_MIP_ROBUST_LNSFREQ": "1", "ENOMOTO_MIP_ROBUST_IMPORT": "1", "ENOMOTO_MIP_MEMBQ_LNSGROW": "1"},
 }
 cfgs, rep = sys.argv[1].split(","), int(sys.argv[2])
