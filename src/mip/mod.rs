@@ -2226,12 +2226,20 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     // 向きが行ごとにばらばらで (fastxgemm-n2r6s0t2 では -2 <= -a-b-c+d <= 2 が 1151 本、-2 <= -a+b+c+d <= 2 が 385 本)、
     // 行を -1 倍して写す対称性が見えない (生成元 1 個、HiGHS は 39 個)
     let symnorm = env_def!("ENOMOTO_MIP_HO3_SYMNORM", "1").is_some();
+    let (mut sym_caps, mut sym_time) = ((work_cap, log_cap), time_cap);
     // `ENOMOTO_MIP_SYMSIGN`・`ENOMOTO_MIP_SYMSCALE` (試作、既定では使わない。analysis/symsign_20261106.md): 同点の行 (-1 倍しても
     // 形が同じ行) を -1 倍でも写せるようにする・行を正の倍率でそろえる写し ([`symmetry::detection_copy`]。向きのそろえも含む)
     // `ENOMOTO_MIP_SYMZERO` (試作): 向きのそろえだけを、右辺 0 の等式も係数で向きを決める形 ([`symmetry::detection_copy`]) で行う
     let (symsign, symscale) = (env_str!("ENOMOTO_MIP_SYMSIGN").is_some(), env_str!("ENOMOTO_MIP_SYMSCALE").is_some());
     let normed = if symsign || symscale || env_str!("ENOMOTO_MIP_SYMZERO").is_some() {
         let (q, [flipped, scaled, ties]) = symmetry::detection_copy(&prob, symscale, symsign);
+        // 同点の行を二重にした分だけ確かめ ([`symmetry::detect`] の verify) の手間が増え、手間の上限に早く届いて試す組が減る
+        // (neos-827175: 生成元 57 -> 46)。手間と時間の上限を写しの大きさ (非零 + 行) の比で広げ、試せる組の数を元の問題と同じくらいにする
+        if ties > 0 {
+            let r = (q.nnz + q.m) as f64 / (prob.nnz + prob.m).max(1) as f64;
+            sym_caps = (((sym_caps.0 as f64) * r).min(u64::MAX as f64) as u64, ((sym_caps.1 as f64) * r).min(u64::MAX as f64) as u64);
+            sym_time *= r;
+        }
         if verbose {
             eprintln!("MIP: symmetry: SYMSIGN {symsign} SYMSCALE {symscale}: flipped {flipped}, scaled {scaled}, tie rows doubled {ties} of {} rows for the detection", prob.m);
         }
@@ -2278,7 +2286,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     } else {
         None
     };
-    let (sym, sym_work) = symmetry::detect_skip_twins(normed.as_ref().unwrap_or(&prob), time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), work_cap, log_cap, &twins);
+    let (sym, sym_work) = symmetry::detect_skip_twins(normed.as_ref().unwrap_or(&prob), sym_time, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), sym_caps.0, sym_caps.1, &twins);
     drop(normed);
     // 双子の組の扱い: 探索で見つけた生成元が動かす組は入れ替えを生成元に足し (対称性で扱う)、ほかは併合する (併合できないもの
     // (下限が無限、整数列で境界が整数でない) も入れ替えを足す)。足す入れ替えは `ENOMOTO_T_MIP_SYM_TWIN_GENS` 個 (既定 500) と、
