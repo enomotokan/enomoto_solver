@@ -679,6 +679,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_is_rens: bool,
     /// `ENOMOTO_MIP_SUBMIP_HIGHS` の `i`: 根の最初の RINS の LP 解 (HiGHS の `rootlpsol` の代わり。固定の向きを決める)
     pub(super) rins_root_x: Option<Vec<f64>>,
+    /// 最後に (主のスレッドで) 解いたサブ MIP のノード数 (`ENOMOTO_MIP_SUBFIX` の空振りの判定に使う)
+    pub(super) last_submip_nodes: u64,
     /// 別スレッドの Feasibility Jump とその停止の印。
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッド (試作)
@@ -4017,6 +4019,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_fix_rate: None,
         submip_is_rens: false,
         rins_root_x: None,
+        last_submip_nodes: 0,
         fj_thread: None,
         lmip_thread: None,
         lmip_mailbox: None,
@@ -7930,7 +7933,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 使わなかった一時停止のサブ MIP は、ここで止めの合図を出して捨てる (スレッドとその状態を残さない)
                 self.drop_rens_paused("not resumed");
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
-                if (self.incumbent.is_some() || self.ref_sol.is_some()) && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
+                // `ENOMOTO_MIP_SUBFIX` の `h` (試作、[`super::heur_subfix`]): HiGHS と同じく外側の根では RINS を呼ばない
+                let subfix_h = super::heur_subfix::on('h') && !self.params.submip;
+                if (self.incumbent.is_some() || self.ref_sol.is_some()) && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() && !subfix_h {
                     heur!("RINS", self.rins(&x));
                 }
                 // `ENOMOTO_MIP_ROOT_LMIP` (試作): 根のヒューリスティクスの暫定解 (RENS・RINS などのサブ MIP の解を含む) を出発点に

@@ -21,6 +21,7 @@ pub(crate) mod fj;
 pub(crate) mod localmip;
 mod heuristics;
 mod subb;
+pub(crate) mod heur_subfix;
 pub(crate) mod heur_scip;
 pub(crate) mod heur_ipm;
 pub(crate) mod heur_shift;
@@ -924,6 +925,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     let _subb_sym = (params.submip && params.restarts == 0 && subb::sym_on()).then(subb::SymScope::enter);
     if outer {
         subb::reset();
+        heur_subfix::reset();
     }
     if outer {
         ORBITOPES.with(|t| *t.borrow_mut() = None);
@@ -973,6 +975,9 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     if outer {
         if params.verbose {
             subb::report();
+            if heur_subfix::any() {
+                eprintln!("MIP: SUBFIX summary: {}", heur_subfix::summary());
+            }
         }
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);

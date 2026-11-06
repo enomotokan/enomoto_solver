@@ -1719,6 +1719,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: SMT end id={id} status={:?} nodes={} objective={:?} secs={:.3} T={:.3}{}", r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64(), submip_trace_secs(), if paused.is_some() { " paused=1" } else { "" });
         }
         self.submip_full_nodes = r.nodes >= node_limit;
+        self.last_submip_nodes = r.nodes;
         super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = None);
         if p3 {
             crate::set_fj_p3_force(false);
@@ -2177,6 +2178,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if nested {
             return false;
         }
+        // `ENOMOTO_MIP_SUBFIX` の `r` (試作、[`super::heur_subfix`]): 外側の根の RENS を HiGHS の形のダイブ (目標の固定率で止め、
+        // 根で実行不能なら目標を半分にして深さの半分まで戻ってやり直す) にする。やり直しに結果が要るので、サブ MIP は主のスレッドで解く
+        if super::heur_subfix::on('r') && self.nodes <= 1 && !self.params.submip {
+            self.subfix_note_root_x(_x);
+            let keep = self.parallel_submips;
+            self.parallel_submips = false;
+            self.rens_node_limited = false;
+            let r = self.subfix_dive(None, "RENS");
+            self.parallel_submips = keep;
+            return r;
+        }
         if env_str!("ENOMOTO_MIP_RENS_DIVE").is_none() {
             // `ENOMOTO_MIP_SUBA_RATE` の `n` ([`suba_rate`]): 外側の根の RENS の固定を目標の固定率で止める
             if suba_rate('n') && self.nodes <= 1 && !self.force_fix_cap {
@@ -2519,6 +2531,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 固定率 `fr` のサブ MIP の結果を固定率の記録に入れる (実行不能なら失敗の記録、暫定解が良くなれば成功の記録)。
     pub(super) fn note_fix_rate(&mut self, fr: f64, infeasible: bool, improved: bool) {
+        // `ENOMOTO_MIP_SUBFIX` (試作): 外側の求解の全スレッドで共通の記録にも入れる ([`super::heur_subfix`])
+        if super::heur_subfix::any() && !self.params.submip {
+            super::heur_subfix::note(fr, infeasible, improved);
+        }
         if improved {
             self.rens_succ.0 += fr;
             self.rens_succ.1 += 1;
@@ -2722,6 +2738,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         if self.params.submip && !self.submip_nested('i') {
             return false;
+        }
+        // `ENOMOTO_MIP_SUBFIX` の `i` (外側の根)・`t` (木の中) (試作、[`super::heur_subfix`]): HiGHS の形のダイブで固定する
+        if !self.params.submip && ((self.nodes <= 1 && super::heur_subfix::on('i')) || (self.nodes > 1 && super::heur_subfix::on('t'))) {
+            let inc = match (self.incumbent.as_ref(), self.ref_sol.as_ref()) {
+                (Some((_, inc)), _) => inc.clone(),
+                (None, Some(r)) => r.clone(),
+                (None, None) => return false,
+            };
+            if self.nodes <= 1 {
+                self.subfix_note_root_x(x);
+                let keep = self.parallel_submips;
+                self.parallel_submips = false;
+                let r = self.subfix_dive(Some(&inc), "RINS");
+                self.parallel_submips = keep;
+                return r;
+            }
+            return self.subfix_dive(Some(&inc), "tree RINS");
         }
         if env_str!("ENOMOTO_MIP_RINS_DIVE").is_some() {
             return self.rins_dive();
@@ -3409,6 +3442,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // サブ MIP の時間の上限 (既定は通常と同じ残りの 7%。3% では 10teams のサブ MIP が解を見つける前に止まった)
         let keep = self.submip_time_frac;
         self.submip_time_frac = tunable!("ENOMOTO_T_MIP_RRC_TIME_FRAC", 0.07, f64);
+        // `ENOMOTO_MIP_SUBFIX` の `c` (試作、[`super::heur_subfix`]): 固定率と結果を RENS・RINS と共通の記録に入れる
+        if super::heur_subfix::on('c') && !self.params.submip {
+            self.submip_fix_rate = Some(fr);
+        }
         let r = self.solve_submip(lo, up, 500);
         self.submip_time_frac = keep;
         r
