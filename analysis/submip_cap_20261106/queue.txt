@@ -1,6 +1,3 @@
-python run1.py ours neos-873061 t 1 300 ENOMOTO_MIP_SUBCAP=t
-python run1.py ours trento1 j 1 300 ENOMOTO_MIP_SUBCAP=j
-python run1.py ours trento1 t 1 300 ENOMOTO_MIP_SUBCAP=t
 cd ../.. && RUSTFLAGS="-C link-arg=-L/usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib cargo test --release --lib > /tmp/claude-0/-home-user-enomoto-solver/e42a6474-53a0-5bac-bf0f-cfe91e2a50d9/scratchpad/cargo_test.log 2>&1; tail -3 /tmp/claude-0/-home-user-enomoto-solver/e42a6474-53a0-5bac-bf0f-cfe91e2a50d9/scratchpad/cargo_test.log
 python bench58.py def,nWjt 0
 python bench58.py def,nWjt 1
