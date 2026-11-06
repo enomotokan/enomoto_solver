@@ -139,6 +139,14 @@ CFGS = {
     "lnsx": {"ENOMOTO_MIP_ROBUST_LNSFREQ": "1", "ENOMOTO_MIP_ROBUST_IMPORT": "1", "ENOMOTO_MIP_MEMBQ_LNSGROW": "1"},
     "cfl": {"ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
     "halve_cfl": {"ENOMOTO_MIP_CUT_LP_HALVE": "1", "ENOMOTO_MIP_CUT_CAP_FROM_LOOP": "1"},
+    # bench27 (2026-11-06): 根の LP の失敗対策。ipmx = 内点法 + クロスオーバーの試作一式 (analysis/rootlp_ipm_fail_20261105.md)、
+    # combb = 二段解法の尺度の調整 (大きい LP だけ) + 前向きの Harris (安全モード) + 雑音の行の作り直し (analysis/rootlp_simplex_fail_20261105.md の 10 節)
+    "ipmx": {"ENOMOTO_T_XO_CLEANUP_HINT": "3", "ENOMOTO_XO_IPM_RETRY_PC": "3", "ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST": "1", "ENOMOTO_IPM_KKT_AUG_RATIO": "4"},
+    "combb": {"ENOMOTO_SIMPLEX_SCALE": "1", "ENOMOTO_T_SIMPLEX_SCALE_MIN_M": "10000", "ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE": "1e4", "ENOMOTO_SIMPLEX_HARRIS2": "r",
+              "ENOMOTO_SIMPLEX_NOISE_RESET": "0.1", "ENOMOTO_SIMPLEX_NOISE_RESET_W": "e"},
+    "ipmcombb": {"ENOMOTO_T_XO_CLEANUP_HINT": "3", "ENOMOTO_XO_IPM_RETRY_PC": "3", "ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST": "1", "ENOMOTO_IPM_KKT_AUG_RATIO": "4",
+                 "ENOMOTO_SIMPLEX_SCALE": "1", "ENOMOTO_T_SIMPLEX_SCALE_MIN_M": "10000", "ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE": "1e4", "ENOMOTO_SIMPLEX_HARRIS2": "r",
+                 "ENOMOTO_SIMPLEX_NOISE_RESET": "0.1", "ENOMOTO_SIMPLEX_NOISE_RESET_W": "e"},
 }
 if __name__ == "__main__":  # bench.py からは設定 (CFGS) だけを読む
     cfgs, probs, reps = sys.argv[1].split(","), sys.argv[2].split(","), int(sys.argv[3])
