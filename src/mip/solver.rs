@@ -18637,6 +18637,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if crate::simplex::mip_lp::nodecut_stat() && self.snap.is_none() && !self.params.submip && self.pool_tid == 0 {
             crate::simplex::mip_lp::nodecut_report();
         }
+        // 試作 `ENOMOTO_MIP_LPSCALE`: `ENOMOTO_MIP_LPSCALE_LOG` で数を出す (サブ MIP を含む全体の数)
+        if env_str!("ENOMOTO_MIP_LPSCALE_LOG").is_some() && self.snap.is_none() && !self.params.submip && self.pool_tid == 0 {
+            crate::simplex::mip_lp::lpscale_report();
+        }
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds, rejected as numerically unreliable {})", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings, self.proof_numeric_rejects);
             if proof_verify() {
