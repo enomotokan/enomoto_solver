@@ -15,7 +15,9 @@ cfg, p, tl, rep, out = sys.argv[1:6]
 env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
 env.update(ENOMOTO_MIP_THREADS="4", ENOMOTO_MIP_LOG="1", ENOMOTO_SIMPLEX_SCALE_LOG="1", **CFGS[cfg])
 (D / "logs").mkdir(exist_ok=True)
-log = D / "logs" / f"{out}_{cfg}_{p}_{rep}.log"
+# 書き途中のログはリポジトリの外に置く (コミット・rebase で書き先が置き換わらないように)。終わったら logs/ に gzip で置く
+TMP = Path(os.environ.get("ROOTLP_TMP", "/tmp/rootlp_logs")); TMP.mkdir(exist_ok=True)
+log = TMP / f"{out}_{cfg}_{p}_{rep}.log"
 t0 = time.time()
 pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(WT / ".miplib_cache" / f"{p}.mps"),
                      "--time-limit", tl, "--threads", "4"], cwd=WT, env=env, stdout=subprocess.PIPE, stderr=open(log, "w"), text=True, timeout=float(tl) + 400)
@@ -29,7 +31,7 @@ cl = re.search(r"MIP: cut loop done: .* obj \S+ -> (\S+)", txt)
 info = dict(root_lp_s=float(rl[3]) if rl else None, root_iters=int(rl[2]) if rl else None, root_obj=float(rl[1]) if rl else None,
             root_cut_obj=float(cl[1]) if cl else None, scale=[l for l in txt.splitlines() if l.startswith(("SIMPLEX_SCALE:", "ROOTLP_SCALE:"))][:6],
             rescue=("re-solved with the scaled" in txt))
-with gzip.open(str(log) + ".gz", "wt") as g: g.write(txt)
+with gzip.open(str(D / "logs" / log.name) + ".gz", "wt") as g: g.write(txt)
 log.unlink()
 with open(D / f"{out}.jsonl", "a") as f:
     f.write(json.dumps({"problem": p, "cfg": cfg, "rep": int(rep), "result": res, "info": info, "wall": round(time.time() - t0, 1)}) + "\n")
