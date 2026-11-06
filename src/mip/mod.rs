@@ -871,8 +871,20 @@ thread_local! {
     pub(crate) static PRR_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 外側の求解 (サブ MIP・再スタートでない) の最初の根の LP が二段解法でも内点法でも解けずに諦めたか ([`solver::Solver`] が立てる)
     pub(crate) static ROOT_LP_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// 最後のプロービング ([`probe`]) が固定した列の数・締めた境界の数 ([`represolve_after_probe`] の条件に使う)
-    pub(crate) static PROBE_FIX_STATS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+    /// 最後のプロービング ([`probe`]) が固定した列の数 ([`represolve_after_probe`] の条件に使う)
+    pub(crate) static PROBE_FIXED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// 今の前処理がサブ MIP のものか ([`solve_problem_inner`] が `params.submip` で立てる)。既定の `ENOMOTO_MIP_SUBMIP_HIGHS` の `p` では
+    /// サブ MIP の前処理にも `submip = false` が渡るので、[`prr_active`] はこちらを見る
+    pub(crate) static PRESOLVE_IN_SUBMIP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `ENOMOTO_MIP_PROBE_REPRESOLVE` (試作) がこの前処理で効くか: 環境変数があり、安全網の解き直し ([`PRR_OFF`]) でも FJ だけに渡す問題の
+/// 前処理 ([`fj_p3_problem`]) でもなく、サブ MIP の前処理なら `ENOMOTO_MIP_PROBE_REPRESOLVE_SUBMIP` もあるとき。効かないときの前処理は既定とまったく同じ
+fn prr_active(submip: bool) -> bool {
+    env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_some()
+        && !PRR_OFF.with(|f| f.get())
+        && !crate::fj_p3_force()
+        && (!(submip || PRESOLVE_IN_SUBMIP.with(|f| f.get())) || env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE_SUBMIP").is_some())
 }
 
 thread_local! {
@@ -1007,7 +1019,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             (params.threads.max(1), cap)
         }))
     });
+    let prev_in_sub = PRESOLVE_IN_SUBMIP.with(|f| f.replace(params.submip));
     let presolved = if use_presolve { presolve_mip(p, params.verbose, pre_submip, lp_probe_secs) } else { None };
+    PRESOLVE_IN_SUBMIP.with(|f| f.set(prev_in_sub));
     FEAS_FJ_EARLY.with(|c| c.set(None));
     RESTART_PRESOLVE.with(|f| f.set(prev_rp));
     // `ENOMOTO_MIP_SPARSIFY_LATE`: HiGHS と同じく前処理 (プロービング・同値の代入の後) の最後に 1 回だけ疎化し
@@ -3257,7 +3271,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
 /// 締めた境界の上でかけるので、締めた境界も使われる。同値な組がなければ既定と同じ (早く戻るのと同じ結果になる)
 /// `ENOMOTO_MIP_PROBE_EQUIV2` の 2 巡目が多くの組を見つけたとき ([`PROBE_EQUIV_FORCE`]) も同じ。
 fn probe_equiv_fix() -> bool {
-    env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_none()
+    !prr_active(false)
         && PROBE_EQUIV.with(|e| !e.borrow().is_empty())
         && (env_str!("ENOMOTO_MIP_PROBE_EQUIV_FIX").is_some() || PROBE_EQUIV_FORCE.with(|f| f.get()))
 }
@@ -3317,16 +3331,44 @@ fn substitute_probe_equiv(prob: &MipProblem, mut postsolve: Vec<crate::presolve:
 /// 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
 fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, verbose: bool, submip: bool, depth: u32) -> Option<Presolved> {
     let max = tunable!("ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX", 2u32, u32);
-    if env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_none() || depth >= max || (submip && env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE_SUBMIP").is_none()) || PRR_OFF.with(|f| f.get()) {
+    if !prr_active(submip) || depth >= max {
         return Some(Presolved::Reduced { prob, postsolve, scaling });
     }
-    if !submip {
-        PRR_APPLIED.with(|f| f.set(true));
+    // プロービングが列を `ENOMOTO_T_MIP_PRR_MIN_FIXED` 本 (既定 1) より少なくしか固定しなければ (境界を締めただけなら)、かけ直さない。
+    // drayage-25-23 (連続列の境界を 8 本締めるだけ) では、かけ直しが行を 2〜5% しか減らさず、下の判定で捨てるかけ直しに再スタートの
+    // 度に 0.4 秒ほど使っていた
+    let fixed = PROBE_FIXED.with(|f| f.get());
+    if fixed < tunable!("ENOMOTO_T_MIP_PRR_MIN_FIXED", 1usize, usize) {
+        if verbose {
+            eprintln!("MIP: presolve again after probing: skipped (probing fixed {fixed} columns)");
+        }
+        return Some(Presolved::Reduced { prob, postsolve, scaling });
     }
     if verbose {
         eprintln!("MIP: presolve again after probing (round {})", depth + 1);
     }
-    match presolve_mip_depth(&prob, verbose, submip, None, depth + 1) {
+    // かけ直しが行を `ENOMOTO_T_MIP_PRR_MIN_ROW_FRAC` (既定 0.1) の割合より減らさなければ、かけ直した結果を捨てて元の問題を使う
+    // (かけ直さない既定と同じ問題になる。0 なら減り方を見ない)。drayage-25-23 はかけ直しが行を 752 -> 732 (2.7%)・列を 1 本しか
+    // 減らさないのに、根の LP の解がずれて根の clique のサブ MIP が解を出さなくなり、根の被約費用の固定が再スタートの閾値に届かずに
+    // 6 秒 -> 13〜60 秒になっていた。かけ直しが効く momentum1・traininstance6 は行を 38〜43% 減らす (analysis/prr_harm_20261106.md)。
+    // 捨てるときは、かけ直しの中のプロービングが置いた同値な組を元に戻す
+    let min_frac = tunable!("ENOMOTO_T_MIP_PRR_MIN_ROW_FRAC", 0.1, f64);
+    let saved_equiv = (min_frac > 0.0).then(|| (PROBE_EQUIV.with(|e| e.borrow().clone()), PROBE_EQUIV_FORCE.with(|f| f.get())));
+    let r = presolve_mip_depth(&prob, verbose, submip, None, depth + 1);
+    if let (Some((eq, force)), Some(Presolved::Reduced { prob: prob2, .. })) = (&saved_equiv, &r) {
+        if (prob.m as f64 - prob2.m as f64) < min_frac * prob.m as f64 {
+            if verbose {
+                eprintln!("MIP: presolve again after probing: rows {} -> {} (less than {:.0}% fewer), the result is not used", prob.m, prob2.m, 100.0 * min_frac);
+            }
+            PROBE_EQUIV.with(|e| *e.borrow_mut() = eq.clone());
+            PROBE_EQUIV_FORCE.with(|f| f.set(*force));
+            return Some(Presolved::Reduced { prob, postsolve, scaling });
+        }
+    }
+    if !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get()) {
+        PRR_APPLIED.with(|f| f.set(true));
+    }
+    match r {
         Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
         Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) => {
             debug_assert!(sc2.d.iter().chain(&scaling.d).all(|&d| d == 1.0));
@@ -4140,7 +4182,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             domain::chg_count() - chg0
         );
     }
-    PROBE_FIX_STATS.with(|s| s.set((fixed, tightened)));
+    PROBE_FIXED.with(|f| f.set(fixed));
     prob.conflict_edges = edges;
     if want_equiv {
         let mut seen = std::collections::HashSet::new();
