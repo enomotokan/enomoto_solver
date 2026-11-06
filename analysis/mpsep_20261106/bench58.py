@@ -14,6 +14,7 @@ from probs import PROBS  # noqa: E402
 HW = {"ENOMOTO_MIP_DIAG_HW_THREADS": "16"}
 CFGS = {  # (スレッド数, 足す環境変数)
     "def": (4, {}), "ocq": (4, {"ENOMOTO_MIP_MPSEP": "ocq"}), "oq": (4, {"ENOMOTO_MIP_MPSEP": "oq"}),
+    "gs": (4, {"ENOMOTO_MIP_MPSEP": "oqmgs", "ENOMOTO_T_MIP_MPSEP_NV": "1", "ENOMOTO_T_MIP_MPSEP_EXTRA": "5"}),
 }
 
 
