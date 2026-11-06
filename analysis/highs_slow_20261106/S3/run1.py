@@ -20,13 +20,18 @@ else:
     env.update(ENOMOTO_BENCH_HIGHS_LOG="1", ENOMOTO_BENCH_HIGHS_OPT=f"random_seed={seed}")
 env.update(extra)
 log = D / "logs" / f"{p}_{tag}_{seed}.log"
+# 走っている間は作業ツリーの外に書き、終わってから logs/ へ移す (git の rebase で書いている途中のファイルが作り直されないように)
+live = Path("/tmp/s3_live") / log.name
+live.parent.mkdir(exist_ok=True)
 t0 = time.time()
-with open(log, "w") as lf:
+with open(live, "w") as lf:
     pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), f"--worker-{kind}", str(mps), "--time-limit", str(TL),
                          "--threads", "4"], cwd=WT, env=env, stdout=subprocess.PIPE, stderr=lf, text=True, timeout=TL + 300)
 out = pr.stdout
-with open(log, "a") as lf:
+with open(live, "a") as lf:
     lf.write(out)
+import shutil  # noqa: E402
+shutil.move(str(live), str(log))
 try:
     res = json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
 except Exception:  # noqa: BLE001

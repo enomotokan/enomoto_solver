@@ -552,6 +552,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
     /// まだ測っていなければ None (最初に LP にある根のカットの行の平均で始める)
     pub(super) nca_cut_nnz: Option<f64>,
+    /// 試作 `ENOMOTO_MIP_S3_TSDENSE` が既定と違う判定をしたことをログに出したか (1 度だけ出す)
+    pub(super) s3_tsdense_logged: bool,
     /// 暫定解がない間の木の中のヒューリスティクス (RENS・Feasibility Pump) に使った時間 (秒) と呼んだ回数。
     pub(super) noinc_secs: f64,
     pub(super) noinc_calls: u64,
@@ -3915,6 +3917,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         node_sep_stats: [0; 2],
         nca_hist: [0; 5],
         nca_cut_nnz: None,
+        s3_tsdense_logged: false,
         noinc_secs: 0.0,
         noinc_calls: 0,
         heur_close: 0.0,
@@ -5247,8 +5250,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_TREE_SEP` では上限を列の数の `ENOMOTO_T_MIP_TREE_SEP_DENSITY_COLS` 倍 (既定 0.05) より下げない: 元の行が
         // 非常に短い問題 (beasleyC3 は 1 行平均 2.8 非零) では、列の 1.7% のカット (29 非零) でも元の行の 10 倍を超えて止まった。
         // qiu (840 列、カット 110〜220 非零)・rout (556 列、150〜185) は 0.05 倍でも密と判定される
-        let floor = if self.tree_sep { tunable!("ENOMOTO_T_MIP_TREE_SEP_DENSITY_COLS", 0.05, f64) * self.p.n as f64 } else { 0.0 };
-        self.nca_cut_nnz.is_some_and(|d| d > (r * avg).max(floor))
+        // 試作 `ENOMOTO_MIP_S3_TSDENSE` (既定では使わない、analysis/highs_slow_20261106/S3.md): 下限の列の数を、前処理で固定された列
+        // (`col_lo == col_up`) を除いた自由な列の数にする。neos-1445765 は前処理で連続列 18467 本が代入で消えても列の並びに固定の列として
+        // 残り (20617 列、自由な列 2146)、下限が 0.05 x 20617 = 1031 非零になって、ノードのカット (平均約 700 非零、元の行は 20.6) を
+        // 密と判定せず、取り出したノードごとに分離していた (LP の行 1001 -> 2259、ノードの LP 1 回 0.11 秒)
+        let ncols = if env_str!("ENOMOTO_MIP_S3_TSDENSE").is_some_and(|v| v != "0") {
+            (0..self.p.n).filter(|&j| self.p.col_lo[j] < self.p.col_up[j]).count().max(1)
+        } else {
+            self.p.n
+        };
+        let floor = if self.tree_sep { tunable!("ENOMOTO_T_MIP_TREE_SEP_DENSITY_COLS", 0.05, f64) * ncols as f64 } else { 0.0 };
+        let dense = self.nca_cut_nnz.is_some_and(|d| d > (r * avg).max(floor));
+        if dense && ncols < self.p.n && !self.s3_tsdense_logged && self.params.verbose {
+            let floor0 = tunable!("ENOMOTO_T_MIP_TREE_SEP_DENSITY_COLS", 0.05, f64) * self.p.n as f64;
+            if self.tree_sep && !self.nca_cut_nnz.is_some_and(|d| d > (r * avg).max(floor0)) {
+                self.s3_tsdense_logged = true;
+                eprintln!("MIP: ENOMOTO_MIP_S3_TSDENSE: node cuts judged dense (cut nnz {:.1}, row mean {avg:.1}, floor {floor:.1} with {ncols} free columns, was {floor0:.1} with {} columns)", self.nca_cut_nnz.unwrap_or(0.0), self.p.n);
+            }
+        }
+        dense
     }
 
     /// ノードの分離の後の解き直しの結果を効き目の統計に入れる (`obj0`: 分離の前の LP の値、`obj`: 解き直した値。
