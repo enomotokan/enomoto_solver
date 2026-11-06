@@ -554,6 +554,13 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nca_stats: [u64; 3],
     /// 診断用: ノードの LP の行数の合計 (`node_lps` で割ると平均)、木のノードでの新しい分離のラウンド数と加えたラウンド数
     pub(super) node_lp_rows: u64,
+    /// 診断 `ENOMOTO_MIP_NODELP_DIAG` (analysis/node_lp_20261106.md): ノードの LP の計数。添字 0〜2 は最初の LP の種類
+    /// ([`TreeProf::kind_n`] と同じ: 潜り・自分の待ち行列・共有の待ち行列)、3 は同じノードでの解き直し (カット・強分岐の固定の後)。
+    /// 各行: [回数, 反復, 行の和, カットの行の和, warm start, 出発の主実行不能の行の和, 費用をずらした列の和, 再分解の和,
+    /// DSE 単位, DSE 引き継ぎ, DSE 厳密, 段階 A から, 段階 A の反復の和, 最適, 実行不能, 打ち切り値, そのほか, 費用の摂動, 秒 (us)]
+    pub(super) nodelp_stats: [[u64; 19]; 4],
+    /// 診断 `ENOMOTO_MIP_NODELP_DUMP=<dir>`: 書き出したノードの LP の数。
+    pub(super) nodelp_dumps: usize,
     pub(super) node_sep_stats: [u64; 2],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
@@ -1224,6 +1231,24 @@ pub(crate) struct TreeSnapshot {
 /// 診断 `ENOMOTO_MIP_HO4_DIAG` (analysis/highs_only_20261105/G4.md、解き方は変えない)
 /// 試作 `ENOMOTO_MIP_HO4_NODECAP` 用: 主 (サブ MIP の外) の最後の根の LP の秒 (f64 のビット)
 static HO4_ROOT_LP_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 診断 `ENOMOTO_MIP_NODELP_DIAG` の 1 スレッド分の表 ([`Solver::nodelp_stats`]) を出す。
+fn print_nodelp_stats(tid: usize, st: &[[u64; 19]; 4]) {
+    if !crate::simplex::slope_intercept_dual::nodelp_diag() {
+        return;
+    }
+    for (k, a) in st.iter().enumerate() {
+        if a[0] == 0 {
+            continue;
+        }
+        let n = a[0] as f64;
+        eprintln!(
+            "MIP: nodelp tid {tid} {}: n {} iters {:.1}/LP ms {:.3}/LP rows {:.1} cutrows {:.1} warm {} prim_inf {:.1} dual_shift {:.2} refactor {:.2} dse unit/inh/exact {}/{}/{} stageA {} ({:.1} it) opt/inf/cut/other {}/{}/{}/{} perturb {} | total iters {} secs {:.2}",
+            ["dive", "queue", "pool", "resolve"][k], a[0], a[1] as f64 / n, a[18] as f64 / 1e3 / n, a[2] as f64 / n, a[3] as f64 / n, a[4], a[5] as f64 / n, a[6] as f64 / n, a[7] as f64 / n,
+            a[8], a[9], a[10], a[11], a[12] as f64 / a[11].max(1) as f64, a[13], a[14], a[15], a[16], a[17], a[1], a[18] as f64 / 1e6
+        );
+    }
+}
 
 fn ho4_diag() -> bool {
     env_str!("ENOMOTO_MIP_HO4_DIAG").is_some()
@@ -4095,6 +4120,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nca_ema: 1.0,
         nca_stats: [0; 3],
         node_lp_rows: 0,
+        nodelp_stats: [[0; 19]; 4],
+        nodelp_dumps: 0,
         node_sep_stats: [0; 2],
         nca_hist: [0; 5],
         nca_cut_nnz: None,
@@ -9771,7 +9798,67 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if std::mem::take(&mut self.restored_dse) && resolves == 0 {
                     crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
+                // 診断 `ENOMOTO_MIP_NODELP_DUMP=<dir>` (analysis/node_lp_20261106.md、解き方は変えない): 主 (pool_tid 0、サブ MIP の外) の
+                // ノードの最初の LP を `ENOMOTO_T_MIP_NODELP_DUMP_EVERY` (既定 50) 回に 1 回、`ENOMOTO_T_MIP_NODELP_DUMP_MAX` (既定 30) 個まで、
+                // 解く前の LP・出発の基底・直近の解・DSE 重みを書き出し、解いた後に結果を `<dir>/index.txt` に 1 行足す
+                let nl_dump = if resolves == 0 && self.pool_tid == 0 && !self.params.submip {
+                    env_str!("ENOMOTO_MIP_NODELP_DUMP").filter(|_| {
+                        let every = tunable!("ENOMOTO_T_MIP_NODELP_DUMP_EVERY", 50usize, usize).max(1);
+                        self.nodelp_dumps < tunable!("ENOMOTO_T_MIP_NODELP_DUMP_MAX", 30usize, usize) && self.node_lps as usize % every == every - 1
+                    })
+                } else {
+                    None
+                };
+                let nl_prefix = nl_dump.map(|dir| {
+                    let _ = std::fs::create_dir_all(&dir);
+                    let prefix = format!("{dir}/node{}", self.node_lps);
+                    let b = self.lp.basis_cols();
+                    let w = self.lp.dse_weights();
+                    let r = self.lp.dump_lp(&prefix, b.as_deref(), w.as_deref());
+                    if r.is_err() {
+                        eprintln!("NODELP_DUMP: write {prefix} failed: {r:?}");
+                    }
+                    self.nodelp_dumps += 1;
+                    prefix
+                });
                 let mut st = self.lp.solve(&capped(self, iter_limit));
+                if crate::simplex::slope_intercept_dual::nodelp_diag() && !self.params.submip {
+                    let rec = crate::simplex::slope_intercept_dual::NODELP_REC.with(|c| c.get());
+                    let k = if resolves == 0 { self.tp_kind.min(2) } else { 3 };
+                    let a = &mut self.nodelp_stats[k];
+                    let rows = self.lp.num_rows() as u64;
+                    a[0] += 1;
+                    a[1] += self.lp.total_iterations() - it0;
+                    a[2] += rows;
+                    a[3] += rows.saturating_sub(self.p.m as u64);
+                    for (i, &v) in rec[..4].iter().enumerate() {
+                        a[4 + i] += v as u64;
+                    }
+                    a[8 + (rec[4] as usize).min(2)] += 1;
+                    a[11] += rec[5] as u64;
+                    a[12] += rec[6] as u64;
+                    a[match st {
+                        LpStatus::Optimal => 13,
+                        LpStatus::Infeasible => 14,
+                        LpStatus::ObjectiveBound => 15,
+                        _ => 16,
+                    }] += 1;
+                    a[17] += rec[7] as u64;
+                    a[18] += (t_lp.elapsed().as_secs_f64() * 1e6) as u64;
+                }
+                if let Some(prefix) = nl_prefix {
+                    use std::io::Write as _;
+                    let rec = crate::simplex::slope_intercept_dual::NODELP_REC.with(|c| c.get());
+                    let dir = env_str!("ENOMOTO_MIP_NODELP_DUMP").unwrap_or_default();
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(format!("{dir}/index.txt")) {
+                        let _ = writeln!(
+                            f,
+                            "{prefix} kind {} depth {} rows {} cutrows {} iters {} secs {:.6} status {:?} obj {:.12e} cutoff {:.12e} rec {:?}",
+                            self.tp_kind, node.depth, self.lp.num_rows(), self.lp.num_rows().saturating_sub(self.p.m), self.lp.total_iterations() - it0, t_lp.elapsed().as_secs_f64(), st,
+                            self.lp.objective() + self.p.offset, self.prune_limit(), rec
+                        );
+                    }
+                }
                 crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
                 crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
                 // 診断 (`ENOMOTO_MIP_HO4_DIAG`、analysis/highs_only_20261105/G4.md): ノードの LP 1 回ごとの反復・秒・状態と、
@@ -18733,6 +18820,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.join_submips(0);
         self.final_lb = Some(best_bound);
         self.log(true);
+        // 診断 `ENOMOTO_MIP_NODELP_DIAG`: スレッドごとのノードの LP の計数 (冗長でなくても出す)
+        if !self.params.submip {
+            print_nodelp_stats(self.pool_tid as usize, &self.nodelp_stats);
+        }
         // 診断 `ENOMOTO_MIP_NODECUT_STAT`: 冗長でなくても出す
         if crate::simplex::mip_lp::nodecut_stat() && self.snap.is_none() && !self.params.submip && self.pool_tid == 0 {
             crate::simplex::mip_lp::nodecut_report();

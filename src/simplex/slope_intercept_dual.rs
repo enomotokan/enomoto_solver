@@ -1271,6 +1271,26 @@ fn fast_finish(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Option<N
     Ok(SimplexResult { status: Status::Optimal, x: Some(x) })
 }
 
+/// 診断 `ENOMOTO_MIP_NODELP_DIAG` (analysis/node_lp_20261106.md、解き方は変えない) が有効か。
+pub(crate) fn nodelp_diag() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_NODELP_DIAG").is_some_and(|v| v != "0"))
+}
+
+thread_local! {
+    /// 診断 `ENOMOTO_MIP_NODELP_DIAG`: 直近の求解の [warm start したか, 出発の主実行不能の行の数, warm start で費用をずらした列の数
+    /// (出発の基底の双対実行不能), 再分解の回数, DSE 重み (0 単位・1 引き継ぎ・2 厳密), 段階 A から始めたか, 段階 A の反復, 費用の摂動 (1)]
+    pub(crate) static NODELP_REC: std::cell::Cell<[u32; 8]> = const { std::cell::Cell::new([0; 8]) };
+}
+
+fn nodelp_set(i: usize, v: u32) {
+    NODELP_REC.with(|c| {
+        let mut a = c.get();
+        a[i] = v;
+        c.set(a);
+    });
+}
+
 thread_local! {
     /// 直近に [`lower_bound_from_basis`] で使った双対 (目的値による打ち切りで止めたときの双対証明用)。
     static BOUND_DUALS: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -4308,6 +4328,14 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let warm_started = WARM_BASIS.with(|w| w.borrow_mut().take()).is_some_and(|wb| {
         warm_start_basis(std, n_orig, &wb, &mut active_cost, &mut basis, &mut basis_pos, &mut nb_status, &mut warm_d)
     });
+    let nl_diag = nodelp_diag();
+    if nl_diag {
+        NODELP_REC.with(|c| c.set([0; 8]));
+        nodelp_set(0, warm_started as u32);
+        if warm_started {
+            nodelp_set(2, (0..n_total).filter(|&j| active_cost[j] != std.c[j]).count() as u32);
+        }
+    }
     if fast_reopt && !warm_started {
         // warm start に失敗: 通常の開始 (摂動した費用と crash) に戻す
         active_cost = dual_active_costs(std);
@@ -4345,6 +4373,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             _ => ColCache::build(std, n_orig),
         }
     };
+    if nl_diag {
+        nodelp_set(5, (phase != Phase::B) as u32);
+    }
     // `cache.width[j].is_none()`(幅が真の無限)を 1 列 1 バイトで持つ。chuzc1 の停止候補判定用。
     let mut width_inf: Vec<bool> = cache.width.iter().map(|w| w.is_none()).collect();
 
@@ -4627,6 +4658,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 基底行ごとの境界のキャッシュ([`RowBounds`])。
     let mut row_bounds = RowBounds::new(&cache, &basis, &noise_feasible);
     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
+    if nl_diag {
+        nodelp_set(1, infeasible_rows.rows.len() as u32);
+    }
     // `ENOMOTO_NODE_PERTURB` (試作、既定では使わない): 再最適化の近道 (分枝限定法の warm start) でも、主実行不能な行があり、
     // 構造列の費用の絶対値の種類が少なければ (種類の数 x 4 <= 構造列の数) 費用を摂動する。CLP の双対単体法
     // (ClpSimplexDual.cpp 336-365 の startupSolve: CBC の中では主実行不能なときだけ `perturb()`、6650-6662 の判定) にならう。
@@ -4640,6 +4674,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         && env_str!("ENOMOTO_NODE_PERTURB").is_some()
         && node_perturb_criterion(std, PRICE_KEY.with(|k| k.get()));
     if node_perturbed {
+        if nl_diag {
+            nodelp_set(7, 1);
+        }
         let pert = dual_active_costs(std);
         for j in 0..n_total {
             active_cost[j] += pert[j] - std.c[j];
@@ -4693,6 +4730,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let warm_dse_age = WARM_DSE_AGE.with(|c| c.replace(0));
     let dse_age_it0 = ext_iterations();
     let mut dse_age0: u64 = u64::MAX;
+    let mut dse_kind = 0u32;
     let mut dse = match WARM_DSE.with(|w| w.borrow_mut().take()) {
         // 呼び出し側が「この 1 回は厳密な重みから」と求めたとき ([`DSE_EXACT_ONCE`]) は、引き継いだ重みがあってもそれを使う
         _ if warm_started && exact_once && DSE_EXACT_STOP.with(|h| h.borrow().is_some()) => {
@@ -4702,7 +4740,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             let t0 = std::time::Instant::now();
             let stop = || dl.is_some_and(|d| std::time::Instant::now() >= d) || crate::cancel::is_cancelled() || DSE_EXACT_STOP.with(|h| h.borrow().as_ref().is_some_and(|f| f()));
             match super::DseState::from_basis_stoppable(m, &lu, &stop) {
-                Some(s) => s,
+                Some(s) => {
+                    dse_kind = 2;
+                    s
+                }
                 None => {
                     dse_age0 = 0;
                     if DSE_EXACT_STOP_LOG.with(|c| c.get()) {
@@ -4716,6 +4757,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 eprintln!("DEBUG_EXT: DSE weights: exact for the whole basis (requested once)");
             }
+            dse_kind = 2;
             super::DseState::from_basis(m, &lu)
         }
         // 既定では使わない (`ENOMOTO_WARM_DSE` で有効): 反復は少し減るが、退化した LP で着く頂点が変わり、misc07・mik-250 で
@@ -4723,6 +4765,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         Some(w) if warm_started && w.len() == m && (warm_once || env_str!("ENOMOTO_WARM_DSE").is_some() || WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed)) => {
             let mut s = super::DseState::from_weights(w);
             dse_age0 = warm_dse_age;
+            dse_kind = 1;
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 eprintln!("DEBUG_EXT: DSE weights: inherited ({} rows, {} unknown, age {})", s.w.len(), s.w.iter().filter(|v| v.is_nan()).count(), if warm_dse_age == u64::MAX { "exact".to_string() } else { warm_dse_age.to_string() });
             }
@@ -4747,6 +4790,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 eprintln!("DEBUG_EXT: DSE weights: exact for the whole basis");
             }
+            dse_kind = 2;
             super::DseState::from_basis(m, &lu)
         }
         w => {
@@ -4760,6 +4804,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             super::DseState::new(m)
         }
     };
+    if nl_diag {
+        nodelp_set(4, dse_kind);
+    }
 
     // 試作 `ENOMOTO_MIP_BG_CUTS_DSE=q` ([`DSE_SAMPLE_ONCE`]): 重みを標本の行で厳密な値と比べ、ずれが大きいときだけ
     // 全部の行の厳密な重みを計算する (止めの合図・期限でやめたら今の重みのまま)。`after == 0` なら始めに、そうでなければ
@@ -5094,6 +5141,13 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         () => {{
             match refactorize(std, &basis_pos, Some(&lu)) {
                 Some(l) => {
+                    if nl_diag {
+                        NODELP_REC.with(|c| {
+                            let mut a = c.get();
+                            a[3] += 1;
+                            c.set(a);
+                        });
+                    }
                     pivot_log.clear();
                     pivot_flips.clear();
                     l
@@ -5606,6 +5660,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     .sum();
                 if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                     eprintln!("DEBUG_EXT: stage_a_iters={iter_idx} z1={z1}");
+                }
+                if nl_diag {
+                    nodelp_set(6, iter_idx as u32);
                 }
                 crate::phase_timing::mark(if z1 < -Z_SLOPE_TOL { "stage_a_no_finite_optimum" } else { "stage_a_end" });
                 // `z^1 < 0`: 実行不能か非有界で、有限最適は無い(論文の系 7.3 (i))。どちらかの
