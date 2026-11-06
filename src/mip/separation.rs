@@ -2031,6 +2031,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `d` と同じく加える前の状態を取っておき、外すときに戻す
             let ho4_gr = ho5_gain > 0.0 && env_str!("ENOMOTO_MIP_HO4_GAIN_RESTORE").is_some();
             let rob_saved = ((rob_d || ho4_gr) && !fail_restore && keep_lu_remove.is_none()).then(|| self.lp.save_state());
+            // 試作 `ENOMOTO_MIP_CUT0_RETRY` (analysis/cutloop_stop_20261106/A.md、既定では使わない): `HO4_CUT0=moved` の改良。
+            // 1 回目は既定とまったく同じに解き、進みの判定で止まったとき、次の 3 つを満たすときだけ同じカットの LP を解き直す。
+            // (1) 下界がまだ根の LP の値から動いていない (`!moved`) 序盤のラウンド (`ENOMOTO_T_MIP_CUT0_RETRY_ROUNDS` 未満、既定 2)。
+            // (2) 止まった LP の目的値が出発から相対 `ENOMOTO_T_MIP_CUT0_RETRY_TOL` (既定 1e-6) を超えて伸びていた (平らな窓は双対退化の
+            //     途中であって「伸びない」のではない。neos-960392 は根の LP の値が最適値で伸びが -1e-10 なので外れ、既定と同じ道)。
+            // (3) 解き直しの反復の上限は MULT (既定 2) x max(根の LP の反復, 前処理の LP の最初の LP の反復, 行の数) (neos-873061 は根の LP が
+            //     前処理の LP の基底から 1 反復で終わり、根の LP の反復だけを基準にすると上限が最低値 1000 に張り付く)。
+            // 値に `c` を含むと、解き直しが根の LP の時間を超えても終わらないとき、残りを全スラック基底から解く (neos-3216931-puriri は
+            // 根の最適基底から出発すると照合の不一致による再分解が 9 反復に 1 回続き 1 反復 2〜5 ms で 2 万反復を超えても終わらず、
+            // 全スラック基底からなら 0.33 ms/反復・22850 反復・7.4 秒で最適)。値に `w` を含むと、解き直しにも長い窓の進みの判定
+            // (上限の半分を過ぎてから、窓は上限の 1/4、伸びが出発からの伸びの `ENOMOTO_T_MIP_CUT0_RETRY_FRAC` (既定 1e-3) 倍未満なら止める) を使う。
+            // 解き直しが最適にならなければ、加える前の状態に戻してから既定どおりカットを外す
+            // (`c0r_saved` は解き直しが最適にならなかったときに戻す、加える前の状態)
+            let c0r = if cs_outer && !moved { env_str!("ENOMOTO_MIP_CUT0_RETRY").filter(|v| *v != "0") } else { None };
+            let c0r = c0r.filter(|_| (round as usize) < tunable!("ENOMOTO_T_MIP_CUT0_RETRY_ROUNDS", 2usize, usize));
+            let c0r_saved = (c0r.is_some() && !fail_restore && keep_lu_remove.is_none()).then(|| self.lp.save_state());
             let t_add0 = std::time::Instant::now();
             let dse_check = env_str!("ENOMOTO_MIP_DEBUG_DSE_CHECK").is_some() && !self.params.submip;
             if dse_check {
@@ -2213,6 +2229,77 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
+            let mut c0r_failed = false;
+            if let (Some(mode), Some(ss)) = (c0r, c0r_saved.as_ref()) {
+                if rob_p && st == LpStatus::IterationLimit && !self.time_up() && !stopped(&job) {
+                    if let Some((it, _gain, total)) = crate::simplex::slope_intercept_dual::ext_progress_stopped() {
+                        let thr = tunable!("ENOMOTO_T_MIP_CUT0_RETRY_TOL", 1e-6, f64) * prev_lp_obj.abs().max(1.0);
+                        let it_first = self.lp.total_iterations() - it0;
+                        let secs_first = t_lp0.elapsed().as_secs_f64();
+                        if total.is_finite() && total > thr {
+                            let base = root_iters.max(super::HO4_PROBE_ITERS.with(|c| c.get())).max(self.lp.num_rows() as u64).max(100);
+                            let lim2 = (tunable!("ENOMOTO_T_MIP_CUT0_RETRY_MULT", 2.0, f64) * base as f64) as u64;
+                            // `c`: 解き直しを `ENOMOTO_T_MIP_CUT0_RETRY_CHUNK` 反復 (既定は上限の 1/40、最低 500) ずつに区切り (止まった所から続ける)、
+                            // 解き直しにかかった時間が根の LP の時間の `ENOMOTO_T_MIP_CUT0_RETRY_COLD` 倍 (既定 1) を超えても終わらなければ、残りを
+                            // 全スラック基底から解く (全スラック基底から解く費用の目安が根の LP の時間なので、合わせて高々その 2 倍ほどで済む。
+                            // 根の LP が 1000 反復未満なら見ない)
+                            let root_rate = if root_iters >= 1000 && self.root_lp_secs > 0.0 { self.root_lp_secs / root_iters as f64 } else { 0.0 };
+                            let rate = secs_first / it_first.max(1) as f64;
+                            let chunked = mode.contains('c') && root_rate > 0.0;
+                            let cold_secs = tunable!("ENOMOTO_T_MIP_CUT0_RETRY_COLD", 1.0, f64) * self.root_lp_secs;
+                            let chunk = if chunked { tunable!("ENOMOTO_T_MIP_CUT0_RETRY_CHUNK", (lim2 / 40).max(500), u64) } else { lim2 };
+                            if mode.contains('w') && !chunked {
+                                let w = (lim2 / 4).max(50) as usize;
+                                let frac = tunable!("ENOMOTO_T_MIP_CUT0_RETRY_FRAC", 1e-3, f64);
+                                crate::simplex::mip_lp::PROGRESS_STOP_ONCE.with(|c| c.set(Some(((lim2 / 2) as usize, w, frac, prev_lp_obj))));
+                            }
+                            let it1 = self.lp.total_iterations();
+                            let t1 = std::time::Instant::now();
+                            let mut slow: Option<(u64, f64)> = None;
+                            loop {
+                                let done = self.lp.total_iterations() - it1;
+                                let left = lim2.saturating_sub(done);
+                                if left == 0 {
+                                    break;
+                                }
+                                let k = if chunked && slow.is_none() { chunk.min(left) } else { left };
+                                if chunked && slow.is_none() {
+                                    crate::simplex::mip_lp::FORCE_RESUME_ONCE.with(|c| c.set(true));
+                                }
+                                let (i2, t2) = (self.lp.total_iterations(), std::time::Instant::now());
+                                st = self.lp.solve(&SolveLimits { iteration_limit: k, cutoff: cut_cutoff, deadline: lp_deadline });
+                                crate::simplex::mip_lp::FORCE_RESUME_ONCE.with(|c| c.set(false));
+                                if !chunked || slow.is_some() || st != LpStatus::IterationLimit || self.time_up() || stopped(&job) {
+                                    break;
+                                }
+                                let r2 = t2.elapsed().as_secs_f64() / (self.lp.total_iterations() - i2).max(1) as f64;
+                                if t1.elapsed().as_secs_f64() > cold_secs {
+                                    slow = Some((self.lp.total_iterations() - it1, r2));
+                                    let b = self.lp.basis();
+                                    let slack = super::lp::Basis { col: b.col.iter().map(|_| super::lp::VarStatus::Lower).collect(), row: vec![super::lp::VarStatus::Basic; b.row.len()] };
+                                    self.lp.set_basis(&slack);
+                                }
+                            }
+                            crate::simplex::mip_lp::PROGRESS_STOP_ONCE.with(|c| c.set(None));
+                            if self.params.verbose {
+                                eprintln!(
+                                    "MIP: cut round {round}: ENOMOTO_MIP_CUT0_RETRY: stopped at iter {it} after a gain of {total:.3e} from the start ({it_first} iters {secs_first:.2}s, {:.3} ms/iter vs root LP {:.3}); re-solved with the cap {lim2}{}: {st:?} after {} iters {:.2}s, obj {:.10e}",
+                                    1e3 * rate,
+                                    1e3 * root_rate,
+                                    slow.map_or(String::new(), |(i, r)| format!(" (past {cold_secs:.2}s at {i} iters, last {:.3} ms/iter; the rest from the slack basis)", 1e3 * r)),
+                                    self.lp.total_iterations() - it1,
+                                    t1.elapsed().as_secs_f64(),
+                                    self.lp.objective()
+                                );
+                            }
+                            c0r_failed = st != LpStatus::Optimal;
+                        } else if self.params.verbose {
+                            eprintln!("MIP: cut round {round}: ENOMOTO_MIP_CUT0_RETRY: stopped at iter {it}, gain from the start {total:.3e}; not moved, dropped as by default");
+                        }
+                    }
+                }
+                let _ = ss;
+            }
             // `d`: 上限 (反復・時間) に当たったら、上限を倍にして止まったところからもう 1 回だけ続ける
             if rob_d && matches!(st, LpStatus::IterationLimit | LpStatus::TimeLimit) && !self.time_up() && !stopped(&job) {
                 let it1 = self.lp.total_iterations();
@@ -2317,6 +2404,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_CUT_FAIL_RESTORE`: 加える前の最適基底・LU・DSE 重みを戻す (行は加える前と同じ)
                 if let Some(ss) = &saved_state {
                     self.lp.restore_state(ss);
+                }
+                // 試作 `ENOMOTO_MIP_CUT0_RETRY`: 解き直しが最適にならなかったら、加える前の状態に戻す
+                if c0r_failed {
+                    if let Some(ss) = &c0r_saved {
+                        if self.lp.num_rows() == saved_rows {
+                            self.lp.restore_state(ss);
+                        }
+                    }
                 }
                 // 試作 `ENOMOTO_MIP_CUT_LP_CAP_ROBUST` の `d`: 止まった基底からの解き直しにせず、加える前の最適基底に戻す
                 if let Some(ss) = &rob_saved {
