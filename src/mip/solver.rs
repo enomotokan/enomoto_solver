@@ -3759,10 +3759,10 @@ impl BgCuts {
         let t0 = Instant::now();
         let gap = self.job.determ.and_then(|d| d.robust).map_or(0.0, |r| r.gap);
         let s0 = f64::from_bits(self.job.start_bits.load(std::sync::atomic::Ordering::Relaxed));
-        // `ENOMOTO_MIP_S4_BGZERO` = r (試作、既定では使わない。analysis/highs_slow_20261106/S4.md): 裏のカットが r ラウンド (既定 2) 回っても
+        // `ENOMOTO_MIP_S4_BGZERO` = r (2026-11-06 から既定 2、`=0` で止める。analysis/highs_slow_20261106/S4.md): 裏のカットが r ラウンド (既定 2) 回っても
         // 目的値が始めの値から全く上がっていなければ (相対 1e-9 以下) 待たない。cod105 (密な 1024 行) は裏のカットの 1 ラウンドが 5〜8 秒で、
         // 6 ラウンドとも -18.2857 のまま、裏のスレッド自身の停滞の判定 (窓 5 ラウンド) まで 38 秒待っていた
-        let zero_r = env_str!("ENOMOTO_MIP_S4_BGZERO").map(|v| v.parse::<usize>().unwrap_or(2).max(1));
+        let zero_r = env_def!("ENOMOTO_MIP_S4_BGZERO", "2").map(|v| v.parse::<usize>().unwrap_or(2).max(1));
         let why = loop {
             if self.handle.as_ref().is_none_or(|h| h.is_finished()) {
                 break "done";

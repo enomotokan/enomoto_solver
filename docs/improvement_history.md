@@ -10335,3 +10335,10 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 根拠: bench27 の ipmx で chromaticindex512-7 (zerohalf 1 回 約 21 秒) と dano3_3 (研磨の LP 16〜17 秒) が 60 秒の上限を約 14 秒越えた。直した後は 60.01〜60.1 秒。
   dano3_3 の目的値は研磨ありと 1e-12 で同じ。
 - 記録は `analysis/ipmx_harm_20261106.md` (同じ記録で、ipmx の mc11 の悪化は `T_XO_CLEANUP_HINT=3` が根の頂点を変えるためと分かり、大きい LP だけに絞った ipmxm を作った。ipmxm は既定にしていない)。
+
+## 2026-11-06: 根の RINS の固定率の下限 (S4_RINSRATE) と、上がらない裏のカットを待たない形 (S4_BGZERO) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて run.py の `pres4c`): `ENOMOTO_MIP_S4_RINSRATE` (既定 0.5、外側の根の RINS は固定率が 0.5 未満ならサブ MIP を作らない)、
+  `ENOMOTO_MIP_S4_BGZERO` (既定 2、裏のカットが 2 ラウンド回って目的値が全く上がらなければ待たない)。
+- 根拠: cod105 (600 秒) 200 → 140 秒 (3 回)。58 問 2 回で SGM 17.08 → 16.11・17.18 → 16.62、解けた数 44 → 44・40 → 42 (drayage-25-23・noswot・neos5 が良い)。
+- 記録は `analysis/s4c_default_20261106.md` (元は `analysis/highs_slow_20261106/S4.md`)。
