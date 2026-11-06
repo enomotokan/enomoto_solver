@@ -155,6 +155,9 @@ CFGS = {
     "prr": {"ENOMOTO_MIP_PROBE_REPRESOLVE": "1"},
     "all28": {"ENOMOTO_MIP_HO3_SYMNORM": "1", "ENOMOTO_MIP_HO6_SYMWORK": "1", "ENOMOTO_MIP_HO6_SYMREFINE": "1", "ENOMOTO_MIP_HO4_BGNB": "1",
               "ENOMOTO_MIP_TREE3_RBASIS": "1", "ENOMOTO_MIP_PROBE_REPRESOLVE": "1"},
+    # sym・lp の既定化 (2026-11-06、analysis/symlp_default_20261106.md) の後は "def" が sym と lp を含む。それより前の既定は "presymlp"
+    "presymlp": {"ENOMOTO_MIP_HO3_SYMNORM": "0", "ENOMOTO_MIP_HO6_SYMWORK": "0", "ENOMOTO_MIP_HO6_SYMREFINE": "0", "ENOMOTO_MIP_HO4_BGNB": "0",
+                 "ENOMOTO_MIP_TREE3_RBASIS": "0"},
 }
 if __name__ == "__main__":  # bench.py からは設定 (CFGS) だけを読む
     cfgs, probs, reps = sys.argv[1].split(","), sys.argv[2].split(","), int(sys.argv[3])

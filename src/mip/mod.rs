@@ -2120,12 +2120,12 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         (time_cap, u64::MAX, u64::MAX)
     };
     let (sw0, vw0, lw0, rt0) = (symmetry::search_work(), symmetry::verify_work(), symmetry::log_work(), symmetry::refine_time());
-    // `ENOMOTO_MIP_HO3_SYMNORM` (試作、既定では使わない。analysis/highs_only_20261105/G3.md): 検出に渡す問題だけ、行の向き (-1 倍) を
+    // `ENOMOTO_MIP_HO3_SYMNORM` (2026-11-06 から既定、`=0` で止める。analysis/highs_only_20261105/G3.md): 検出に渡す問題だけ、行の向き (-1 倍) を
     // 列の順によらない形にそろえる ((下限, 上限, 係数の並べた列) と (-上限, -下限, -係数) の小さい方)。行を -1 倍しても実行可能な集合は
     // 同じなので、写しで見つけた置換は元の問題の対称性でもある。前処理は `<= 2` と `>= -2` の 2 本を 1 本の幅つきの行にまとめるが、
     // 向きが行ごとにばらばらで (fastxgemm-n2r6s0t2 では -2 <= -a-b-c+d <= 2 が 1151 本、-2 <= -a+b+c+d <= 2 が 385 本)、
     // 行を -1 倍して写す対称性が見えない (生成元 1 個、HiGHS は 39 個)
-    let symnorm = env_str!("ENOMOTO_MIP_HO3_SYMNORM").is_some();
+    let symnorm = env_def!("ENOMOTO_MIP_HO3_SYMNORM", "1").is_some();
     let normed = if symnorm {
         let mut q = prob.clone();
         let mut flipped = 0usize;
@@ -2291,9 +2291,9 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     let sym_diag = format!("detect {td:.2}s, refine {:.2}s, log work {}", symmetry::refine_time() - rt0, symmetry::log_work() - lw0);
     // 双子のオービトープだけのとき (探索で生成元が見つからない) も、下でオービトープを置くため空の対称性で続ける
     let sym = if sym.is_none() && !twin_orbs.is_empty() { Some(symmetry::Symmetry { generators: Vec::new(), orbit: vec![usize::MAX; prob.n], num_orbits: 0 }) } else { sym };
-    if verbose && (env_str!("ENOMOTO_MIP_HO6_SYMWORK").is_some() || env_str!("ENOMOTO_MIP_HO6_SYMREFINE").is_some()) {
+    if verbose && (env_def!("ENOMOTO_MIP_HO6_SYMWORK", "1").is_some() || env_def!("ENOMOTO_MIP_HO6_SYMREFINE", "1").is_some()) {
         let (c, k) = symmetry::refine_capped();
-        eprintln!("MIP: symmetry: refinements stopped by the iteration cap {c} of {k} (ENOMOTO_MIP_HO6_SYMREFINE {})", env_str!("ENOMOTO_MIP_HO6_SYMREFINE").is_some());
+        eprintln!("MIP: symmetry: refinements stopped by the iteration cap {c} of {k} (ENOMOTO_MIP_HO6_SYMREFINE {})", env_def!("ENOMOTO_MIP_HO6_SYMREFINE", "1").is_some());
     }
     let Some(sym) = sym else {
         if verbose {

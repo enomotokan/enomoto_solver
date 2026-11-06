@@ -98,11 +98,11 @@ fn refine_unit(p: &MipProblem) -> usize {
     u
 }
 
-/// 探索の色の細分化の回数の上限。既定 50。`ENOMOTO_MIP_HO6_SYMREFINE` (試作、既定では使わない) なら
+/// 探索の色の細分化の回数の上限。既定 50。`ENOMOTO_MIP_HO6_SYMREFINE` (2026-11-06 から既定、`=0` で止める) なら
 /// `ENOMOTO_T_MIP_HO6_SYMREFINE_ITERS` (既定 100000、実質は不動点まで)。時刻で鎖のようにつながる模型 (unit commitment の
 /// uccase12 など) では、1 回の細分化で区別が鎖を 1 段しか伝わらないので、50 回では不動点 (等しい分割) に届かない
 fn refine_iters() -> usize {
-    if env_str!("ENOMOTO_MIP_HO6_SYMREFINE").is_some() {
+    if env_def!("ENOMOTO_MIP_HO6_SYMREFINE", "1").is_some() {
         tunable!("ENOMOTO_T_MIP_HO6_SYMREFINE_ITERS", 100000usize, usize)
     } else {
         50
@@ -124,7 +124,7 @@ fn refine(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize) {
     });
 }
 
-/// `ENOMOTO_MIP_HO6_SYMREFINE` (試作): 探索の中の細分化を、色が変わった列 `seeds` から始めて、前の回で色が変わった要素の隣だけを
+/// `ENOMOTO_MIP_HO6_SYMREFINE` (2026-11-06 から既定): 探索の中の細分化を、色が変わった列 `seeds` から始めて、前の回で色が変わった要素の隣だけを
 /// 塗り直す形 (作業リスト) で行う。全ての行・列を毎回塗り直す [`refine`] と同じく、行は列の色から、列は新しい行の色から作る。
 /// 色の種類の数 (列と行の色ごとの数を持って数える) が増えなくなるか、塗り直す要素がなくなれば止める。A と B の両方に同じ手順を
 /// 使うので、同型な組では対応する結果になる (見つけた置換は呼び出し側が [`verify`] で確かめる)
@@ -402,9 +402,9 @@ pub fn refine_capped() -> (u64, u64) {
     REFINE_CAPPED.with(|c| c.get())
 }
 
-/// `ENOMOTO_MIP_HO6_SYMWORK` (試作): 対称性の検出の上限を細分化の後の探索の分だけに数えるか ([`detect_inner`])。
+/// `ENOMOTO_MIP_HO6_SYMWORK` (2026-11-06 から既定): 対称性の検出の上限を細分化の後の探索の分だけに数えるか ([`detect_inner`])。
 fn ho6_symwork() -> bool {
-    env_str!("ENOMOTO_MIP_HO6_SYMWORK").is_some()
+    env_def!("ENOMOTO_MIP_HO6_SYMWORK", "1").is_some()
 }
 
 /// 手間の上限 (`WORK` の終わり, `LWORK` の終わり) を越えたか。
@@ -441,7 +441,7 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64,
     let mut row: Vec<u64> = (0..p.m).map(|i| mix(fbits(p.row_lo[i]), fbits(p.row_up[i]))).collect();
     let (rw0, rl0, rt0) = (work(), log_work(), std::time::Instant::now());
     refine(p, &mut col, &mut row, refine_iters());
-    // `ENOMOTO_MIP_HO6_SYMWORK` (試作、既定では使わない): 時間・手間の上限を、色の細分化の後の探索の分だけに数える (細分化に
+    // `ENOMOTO_MIP_HO6_SYMWORK` (2026-11-06 から既定、`=0` で止める): 時間・手間の上限を、色の細分化の後の探索の分だけに数える (細分化に
     // 使った分を上限に足す)。uccase12 (前処理の後 8.9 万行・34 万非零) は細分化だけで手間 8.97e7 を使い、上限 2.5e7
     // (`ENOMOTO_T_MIP_PRESOLVE_WORK_SYM`) を越えて探索に 1 度も入らず「対称性なし」になっていた (HiGHS は同じ模型で生成元 33 個)
     if ho6_symwork() {
@@ -598,7 +598,7 @@ fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: st
     let indiv = |c: &mut [u64], j: usize, level: u64| c[j] = mix(c[j], 0xA5A5_0000 ^ level);
     indiv(&mut ca, a, level);
     indiv(&mut cb, b, level);
-    let inc = env_str!("ENOMOTO_MIP_HO6_SYMREFINE").is_some();
+    let inc = env_def!("ENOMOTO_MIP_HO6_SYMREFINE", "1").is_some();
     if inc {
         refine_inc(p, &mut ca, &mut ra, &[a], refine_iters());
         refine_inc(p, &mut cb, &mut rb, &[b], refine_iters());

@@ -10318,3 +10318,12 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   余裕 1e-6 を越え、局所的な変更を落とした成り立たない衝突で最適解を切っていた (prr で「最適」28420。既知解つきの診断で誤った衝突 3/3 回 → 0/2 回)。
   58 問・60 秒で害なし (15.76 秒・45 問 対 直す前 16.46 秒・44 問)。余裕を 1/2 にする形 (`=h`) は neos5・physiciansched6-2 が遅く採らなかった。
 - 記録は `analysis/wrongans_20261105.md`。
+
+## 2026-11-06: 対称性の検出の直し (sym) と基底の受け渡しの直し (lp) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて run.py の `presymlp`): `ENOMOTO_MIP_HO3_SYMNORM` (検出に渡す行の向きをそろえる)、`ENOMOTO_MIP_HO6_SYMWORK`
+  (検出の上限を細分化の後の探索だけに数える)、`ENOMOTO_MIP_HO6_SYMREFINE` (探索の中の細分化を増分で)、`ENOMOTO_MIP_HO4_BGNB` (裏のカットの LP を
+  主に入れ替えるとき非基底の置き場所も渡す)、`ENOMOTO_MIP_TREE3_RBASIS` (再スタートの後に合わない基底を捨てる)。
+- 根拠: bench28 (60 秒) で sym は 58 問 −0.7%・Mittelmann 50 → 51、lp は 58 問 +1.2%・Mittelmann 50 → 52 (解けた問題の SGM −4.1%)。どちらも既定だけ解けた回なし。
+  担当の問題で fastxgemm-n2r6s0t2 (600 秒で最適)・satellites2-60-fs (主の解き直し 385 秒 → 1 反復)・mzzv11 (再スタート後の根の LP 約 1/3) に効く。
+- 記録は `analysis/symlp_default_20261106.md`。prr (`PROBE_REPRESOLVE`) は momentum1 で `not_solved` に止まるので既定にせず調べる。

@@ -6657,10 +6657,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 _ => None,
             };
-            // `ENOMOTO_MIP_TREE3_RBASIS` (試作、既定では使わない。analysis/tree_close3_20261104.md): 再スタートの前の基底で合った行が
+            // `ENOMOTO_MIP_TREE3_RBASIS` (2026-11-06 から既定、`=0` で止める。analysis/tree_close3_20261104.md): 再スタートの前の基底で合った行が
             // `ENOMOTO_T_MIP_TREE3_RBASIS_MATCH` (0.9) x 行の数より少なければ使わない (全スラック基底から解く)。mzzv11 では 3589 / 8545 行
             // しか合わない基底から 66919 反復 44.7 秒かかっていた (最初の根の LP は 9375 反復 3.5 秒、HiGHS の再スタートの後は 4270 反復)
-            let rbasis_min = env_str!("ENOMOTO_MIP_TREE3_RBASIS").is_some_and(|v| v != "0").then(|| tunable!("ENOMOTO_T_MIP_TREE3_RBASIS_MATCH", 0.9, f64) * self.lp.num_rows() as f64);
+            let rbasis_min = env_def!("ENOMOTO_MIP_TREE3_RBASIS", "1").is_some().then(|| tunable!("ENOMOTO_T_MIP_TREE3_RBASIS_MATCH", 0.9, f64) * self.lp.num_rows() as f64);
             let built = built.or_else(|| if skip_restart_basis { None } else { saved.and_then(|saved| restart_basis_for(&self.lp, self.p.n, saved)) });
             let built = match (built, rbasis_min) {
                 (Some((_, matched)), Some(mn)) if (matched as f64) < mn => {
@@ -8101,9 +8101,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
                             crate::simplex::nb_diag::tag(crate::simplex::nb_diag::BG_RETURN);
-                            // 試作 `ENOMOTO_MIP_HO4_BGNB` (analysis/highs_only_20261105/G4.md、既定では使わない): 返された基底の非基底の
+                            // `ENOMOTO_MIP_HO4_BGNB` (analysis/highs_only_20261105/G4.md。2026-11-06 から既定、`=0` で止める): 返された基底の非基底の
                             // 上限・下限の置き場所も渡す (既定は基底に入る列の集合だけで、置き場所は主の今の点からの推し量り)
-                            if env_str!("ENOMOTO_MIP_HO4_BGNB").is_some() {
+                            if env_def!("ENOMOTO_MIP_HO4_BGNB", "1").is_some() {
                                 self.lp.set_basis_nb(&b, &[]);
                             } else {
                                 self.lp.set_basis(&b);
