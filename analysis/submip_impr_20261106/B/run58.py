@@ -7,7 +7,7 @@ D = Path(__file__).resolve().parent
 WT = D.parents[2]
 sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
-ALL = {"ENOMOTO_MIP_SUBB_DIV": "1", "ENOMOTO_MIP_SUBB_POOL": "1", "ENOMOTO_MIP_SUBB_SYM": "1"}
+ALL = {"ENOMOTO_MIP_SUBB_DIV": "2", "ENOMOTO_MIP_SUBB_POOL": "1", "ENOMOTO_MIP_SUBB_SYM": "1"}
 CFGS = {
     "def": {},
     "all": ALL,

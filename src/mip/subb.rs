@@ -5,7 +5,7 @@
 //!   繰り返すときは固定を変える (前の回が近傍を解き切った (最適・実行不能) なら固定を乱数で外して広げ、上限で止まったなら
 //!   自由な整数列を暫定解の値に乱数で固定して狭める。割合は繰り返しの回数で大きくする)。改善のない回が
 //!   `ENOMOTO_T_MIP_SUBB_STREAK` (4) 回続いたら、繰り返しでなくても、それまでの結果の向き (解き切りが多ければ広げ、上限が多ければ狭める)
-//!   で固定を変える。
+//!   で固定を変える。`=2` は広げる量を今の自由な整数列の数の割合にする (`=1` は固定の集合の割合)。
 //! - `ENOMOTO_MIP_SUBB_POOL=1`: ALNS の Crossover の腕を、解のプールの複数の解から作る近傍に替える (乱数で選んだ 2〜3 個の解が
 //!   一致する列を固定する交差と、最良でないプールの解を中心に整数列の一部を固定する変異を交互に)。
 //! - `ENOMOTO_MIP_SUBB_SYM=1`: サブ MIP の中でも対称性を検出して使う。対称性の表 (オービトープ・生成元・対称性の行の前の問題) は
@@ -17,6 +17,11 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 pub(crate) fn div_on() -> bool {
     env_str!("ENOMOTO_MIP_SUBB_DIV").is_some_and(|s| s != "0")
+}
+
+/// `ENOMOTO_MIP_SUBB_DIV=2`: 広げる量を自由な列の数に比べて決める版 ([`Solver::subb_diversify`])。
+pub(crate) fn div_v2() -> bool {
+    env_str!("ENOMOTO_MIP_SUBB_DIV") == Some("2")
 }
 
 pub(crate) fn pool_on() -> bool {
@@ -209,8 +214,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let dir = if fixed.is_empty() { -1 } else { dir };
         let mut k = 0usize;
         if dir > 0 {
+            // `=2`: 外す数を今の自由な整数列の数 (50 未満なら 50) の `frac` 倍にする (`=1` は固定の集合の `frac` 倍で、自由な列が
+            // 数百のときに 1 回で数千に跳んで解き切れない: nexp-150-20-8-5 の RINS 253 → 3550)
+            let pr = if div_v2() { (frac * free.len().max(50) as f64 / fixed.len() as f64).min(1.0) } else { frac };
             for &j in &fixed {
-                if self.rand() < frac {
+                if self.rand() < pr {
                     sub.col_lo[j] = self.dom.global_lo[j];
                     sub.col_up[j] = self.dom.global_up[j];
                     k += 1;
