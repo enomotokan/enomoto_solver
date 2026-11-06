@@ -14,6 +14,8 @@ CB = CFGS["combb"]
 CFGS = dict(CFGS)
 CFGS["combb_m17k"] = dict(CB, ENOMOTO_T_SIMPLEX_SCALE_MIN_M="17000")  # 尺度の調整を 17000 行以上だけ (supportcase42 の根 18439 行は調整、RINS の部分 MIP 16616 行は調整なし)
 CFGS["combb_noscale"] = {k: v for k, v in CB.items() if "SCALE" not in k}  # HARRIS2=r と NOISE_RESET だけ
+CFGS["combb_h2only"] = {k: v for k, v in CB.items() if "HARRIS2" in k}  # 安全モードの前向き Harris だけ
+CFGS["combb_nronly"] = {k: v for k, v in CB.items() if "NOISE_RESET" in k}  # 雑音の行の作り直しだけ
 CFGS["combb_scaleonly"] = {k: v for k, v in CB.items() if "SCALE" in k}  # 尺度の調整だけ
 TL = int(os.environ.get("RUN_CFG_TL", "600"))
 cfg, p, rep = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -21,10 +23,14 @@ OUT = D / (f"res_{TL}.jsonl" if os.environ.get("RUN_THREADS", "4") == "4" else f
 mps = rb.fetch(p, WT / ".miplib_cache")
 env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
 TH = os.environ.get("RUN_THREADS", "4")  # 切り分け用 (1 スレッドで同じ道筋か見る)。4 以外ならログ・結果の名前に _t<数> が付く
+if os.environ.get("RUN_DEBUG_EXT"):  # 切り分け用: 二段解法の診断の出力 (ENOMOTO_DEBUG_EXT_ITERS) を足す。ログの名前に _dbg が付き、結果は res_dbg.jsonl
+    env["ENOMOTO_DEBUG_EXT_ITERS"] = "1"
 env.update(ENOMOTO_MIP_THREADS=TH, ENOMOTO_MIP_LOG="1", **CFGS[cfg])
 if os.environ.get("RUN_SEED"):
     env["ENOMOTO_T_MIP_SEED"] = os.environ["RUN_SEED"]
-logf = D / "logs" / (f"{p}_{cfg}_r{rep}_{TL}.log" if TH == "4" else f"{p}_{cfg}_r{rep}_{TL}_t{TH}.log")
+logf = D / "logs" / ((f"{p}_{cfg}_r{rep}_{TL}.log" if TH == "4" else f"{p}_{cfg}_r{rep}_{TL}_t{TH}.log").replace(".log", "_dbg.log" if os.environ.get("RUN_DEBUG_EXT") else ".log"))
+if os.environ.get("RUN_DEBUG_EXT"):
+    OUT = D / "res_dbg.jsonl"
 t0 = time.time(); peak = 0.0
 with open(logf, "w") as ef:
     pr = subprocess.Popen([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", str(TL), "--threads", TH],
