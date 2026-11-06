@@ -1,7 +1,3 @@
-python run1.py ours cod105 nw 1 300 ENOMOTO_MIP_SUBCAP=nw
-python run1.py ours trento1 nwjt 1 300 ENOMOTO_MIP_SUBCAP=nwjt
-python run1.py ours trento1 def 1 300
-python run1.py ours trento1 nw 1 300 ENOMOTO_MIP_SUBCAP=nw
 python run1.py ours h80x6320d nwjt 1 300 ENOMOTO_MIP_SUBCAP=nwjt
 python run1.py ours h80x6320d def 1 300
 python run1.py ours h80x6320d nw 1 300 ENOMOTO_MIP_SUBCAP=nw
@@ -27,6 +23,7 @@ python run1.py ours neos-933966 nWjt 1 300 ENOMOTO_MIP_SUBCAP=nWjt
 python run1.py ours physiciansched6-2 nWjt 1 300 ENOMOTO_MIP_SUBCAP=nWjt
 python run1.py ours drayage-25-23 nWjt 1 300 ENOMOTO_MIP_SUBCAP=nWjt
 python run1.py ours neos-4722843-widden nWjt 1 300 ENOMOTO_MIP_SUBCAP=nWjt
+cd ../.. && RUSTFLAGS="-C link-arg=-L/usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib cargo test --release --lib > /tmp/claude-0/-home-user-enomoto-solver/e42a6474-53a0-5bac-bf0f-cfe91e2a50d9/scratchpad/cargo_test.log 2>&1; tail -3 /tmp/claude-0/-home-user-enomoto-solver/e42a6474-53a0-5bac-bf0f-cfe91e2a50d9/scratchpad/cargo_test.log
 python bench58.py def,nwjt 0
 python bench58.py def,nwjt 1
 python run1.py ours supportcase42 def 2 300
