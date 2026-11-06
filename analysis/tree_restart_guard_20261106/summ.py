@@ -59,7 +59,9 @@ def main():
             nr = e.get("root_lp")
             drop = f"{nr - rl:+.4g}" if nr is not None else "-"
             dend = f"{e['root_end'] - rl:+.4g}" if "root_end" in e else "-"
-            print(f"|  ↳ #{i} {e['why']} | t {float(e['outer']):.1f} | n {e['nodes']} open {e['open']} q {float(e['q']):.3f} | 根 {float(e['root']):.1f}s 木 {float(e['tree']):.1f}s 残り見込み {float(e['est_left']):.1f}s 残り {float(e['left']):.0f}s"
+            q, tr, ro = float(e["q"]), float(e["tree"]), float(e["root"])
+            estq = tr * (1 - q) / q if q > 0 else float("inf")
+            print(f"|  ↳ #{i} {e['why']} | t {float(e['outer']):.1f} | n {e['nodes']} open {e['open']} q {q:.3f} | 根 {ro:.1f}s 木 {tr:.1f}s 木の残り見込み {estq:.1f}s (÷根 {estq / max(ro, 1e-3):.2f}) 残り {float(e['left']):.0f}s"
                   f" | gap {float(e['gap']):.2e} 閉じた {closed:.2f} | 固定 {e['newly']} ({float(e['frac']):.3f}) | 行 {f('rows')} 列 {f('cols')} カット {f('kept')}"
                   f" | 後の根 LP−前の根 {drop}, 根の終わり−前の根 {dend}, 根 {f('next_root')}s |")
 

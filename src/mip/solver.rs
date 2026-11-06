@@ -17819,8 +17819,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// - `l`: 根のやり直しの見込みの費用 (この求解で木に入るまでの秒 × `ENOMOTO_T_MIP_TREE_RESTART_GUARD_ROOT` (1)) が残り時間の
     ///   `ENOMOTO_T_MIP_TREE_RESTART_GUARD_LEFT` (0.25) を超える。
     /// - `c`: 木の残りの見込みの秒が根のやり直しの見込みの費用の `ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST` (3) 倍に満たない。木の残りは、
-    ///   HiGHS 式の見積もり ([`Self::tree_restart_due`] のノード数) があればそれと木の 1 ノードあたりの秒から、なければ刈った重み q の
-    ///   木に入ってからの進み (残り = 木の秒 × (1 − q) / q) から出す。
+    ///   刈った重み q の木に入ってからの進み (残り = 木の秒 × (1 − q) / q) から出す。
     /// - `g`: 相対ギャップ (暫定解 − 全体の下界) / max(|暫定解|, 1) が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_GAP` (1e-3) 未満。
     /// - `q`: 刈った重み q が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_Q` (0.5) 以上 (木がもう半分以上閉じた)。
     /// - `n`: この求解の木の全体のノード数が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_NODES` (300) 未満 (木の中の暫定解ですぐ再スタートしない)。
@@ -17855,13 +17854,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let gap = if ub.is_finite() && lb.is_finite() { (ub - lb).max(0.0) / ub.abs().max(1.0) } else { f64::INFINITY };
         let left = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
         let root_cost = self.tr_t0 * tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_ROOT", 1.0, f64);
-        let est_left = if self.tr_est.is_finite() && why == "due" {
-            (self.tr_est - done as f64).max(0.0) * tree_t / done.max(1) as f64
-        } else if q > 0.0 {
-            tree_t * (1.0 - q) / q
-        } else {
-            f64::INFINITY
-        };
+        // 木の残りの秒の見込み: 刈った重み q の木に入ってからの進みから (残り = 木の秒 × (1 − q) / q)。HiGHS 式の見積もり
+        // ([`Self::tree_restart_due`] のノード数) からの値は記帳だけ (q が止まると見積もりが桁外れに大きくなる。eil33-2 で 1e9 秒)
+        let est_left = if q > 0.0 { tree_t * (1.0 - q) / q } else { f64::INFINITY };
+        let est_left_h = if self.tr_est.is_finite() && why == "due" { (self.tr_est - done as f64).max(0.0) * tree_t / done.max(1) as f64 } else { f64::NAN };
         let free0 = self.p.nint.saturating_sub(self.root_fixed0).max(1);
         let newly = self.newly_fixed_ints();
         let mut stop: Option<char> = None;
@@ -17881,7 +17877,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if log {
             eprintln!(
-                "TRSTAT: {why} outer {:.2} solve {solve_t:.2} root {:.2} tree {tree_t:.2} restarts {} nodes {done} open {open} q {q:.4} est {:.0} est_left {est_left:.2} lb {lb:.10e} root_lb {:.10e} ub {ub:.10e} gap {gap:.3e} newly {newly}/{free0} ({:.4}) left {left:.1} guard {}",
+                "TRSTAT: {why} outer {:.2} solve {solve_t:.2} root {:.2} tree {tree_t:.2} restarts {} nodes {done} open {open} q {q:.4} est {:.0} est_left {est_left:.2} est_left_h {est_left_h:.1} lb {lb:.10e} root_lb {:.10e} ub {ub:.10e} gap {gap:.3e} newly {newly}/{free0} ({:.4}) left {left:.1} guard {}",
                 super::outer_elapsed().unwrap_or(f64::NAN),
                 self.tr_t0,
                 self.params.restarts,
