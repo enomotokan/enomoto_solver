@@ -2448,7 +2448,12 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
                 }
             }
         }
-        let gens = symmetry::lex_leader_generators_except(&sym, &used, &orb_moved);
+        let mut gens = symmetry::lex_leader_generators_except(&sym, &used, &orb_moved);
+        // `ENOMOTO_MIP_SUBB_SYM` の `ENOMOTO_T_MIP_SUBB_SYM_OF_MAX` (既定は上限なし): サブ MIP では生成元がこの数より多ければ orbital fixing を
+        // 使わない (オービトープは使う。trento1 では生成元 931 のサブ MIP の 1 ノードが約 2.5 倍遅かった)
+        if in_sub && gens.len() > tunable!("ENOMOTO_T_MIP_SUBB_SYM_OF_MAX", usize::MAX, usize) {
+            gens.clear();
+        }
         if verbose {
             eprintln!("MIP: symmetry: orbital fixing with {} of {} generators", gens.len(), sym.generators.len());
         }
