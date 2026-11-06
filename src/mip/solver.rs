@@ -17856,6 +17856,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     ///   `ENOMOTO_T_MIP_TREE_RESTART_GUARD_LEFT` (0.25) を超える。
     /// - `c`: 木の残りの見込みの秒が根のやり直しの見込みの費用の `ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST` (1) 倍に満たない。木の残りは、
     ///   刈った重み q の木に入ってからの進み (残り = 木の秒 × (1 − q) / q) から出す。
+    /// - `C`: `c` に当たり、かつ今の LP のカットの行が問題の行の `ENOMOTO_T_MIP_TREE_RESTART_GUARD_CRATIO` (0.3) 倍に満たず、
+    ///   presolve で落ちる見込みの行 (固定されていない列が 1 本以下になった行) が問題の行の `..._GUARD_CROWS` (0.1) 倍に満たない
+    ///   (木が閉じかけでも、カットか固定で根が大きく変わる見込みなら通す)。
     /// - `g`: 相対ギャップ (暫定解 − 全体の下界) / max(|暫定解|, 1) が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_GAP` (1e-3) 未満。
     /// - `q`: 刈った重み q が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_Q` (0.5) 以上 (木がもう半分以上閉じた)。
     /// - `k`: 新たな固定が `ENOMOTO_T_MIP_TREE_RESTART_FIX_FRAC` (0.01) × 根で自由な整数列 (少なくとも `..._MIN_FIX` 本) に満たず
@@ -17902,6 +17905,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 今の LP (最後のノードの LP) のカットの行の数。再スタートでは、このうち効いているものが問題の行になる
         let cuts = self.lp.num_rows().saturating_sub(self.p.m);
         let fix_min = (tunable!("ENOMOTO_T_MIP_TREE_RESTART_FIX_FRAC", 0.01, f64) * free0 as f64).max(tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_FIX", 1usize, usize).max(1) as f64);
+        // presolve で落ちる見込みの行: 全体の上下限で固定されていない列が 1 本以下になった問題の行 (固定で空・1 列の行になる。
+        // 活動の上下限で冗長になる行は数えないので、実際に減る行より少なめ)
+        let rowdrop = self
+            .p
+            .rows
+            .iter()
+            .filter(|r| r.iter().filter(|&&(j, _)| self.dom.global_lo[j] != self.dom.global_up[j]).take(2).count() <= 1)
+            .count();
         let mut stop: Option<char> = None;
         for c in guard.chars() {
             let hit = match c {
@@ -17911,6 +17922,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 'l' => root_cost > tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_LEFT", 0.25, f64) * left,
                 'c' => est_left < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST", 1.0, f64) * root_cost,
+                'C' => {
+                    est_left < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST", 1.0, f64) * root_cost
+                        && (cuts as f64) < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_CRATIO", 0.3, f64) * self.p.m as f64
+                        && (rowdrop as f64) < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_CROWS", 0.1, f64) * self.p.m as f64
+                }
                 'g' => gap < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_GAP", 1e-3, f64),
                 'q' => q >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_Q", 0.5, f64),
                 'n' => done < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_NODES", 300u64, u64),
@@ -17923,7 +17939,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if log {
             eprintln!(
-                "TRSTAT: {why} outer {:.2} solve {solve_t:.2} root {:.2} tree {tree_t:.2} restarts {} nodes {done} open {open} q {q:.4} est {:.0} est_left {est_left:.2} est_left_h {est_left_h:.1} lb {lb:.10e} root_lb {:.10e} ub {ub:.10e} gap {gap:.3e} newly {newly}/{free0} ({:.4}) cuts {cuts}/{} left {left:.1} guard {}",
+                "TRSTAT: {why} outer {:.2} solve {solve_t:.2} root {:.2} tree {tree_t:.2} restarts {} nodes {done} open {open} q {q:.4} est {:.0} est_left {est_left:.2} est_left_h {est_left_h:.1} lb {lb:.10e} root_lb {:.10e} ub {ub:.10e} gap {gap:.3e} newly {newly}/{free0} ({:.4}) cuts {cuts}/{} rowdrop {rowdrop} left {left:.1} guard {}",
                 super::outer_elapsed().unwrap_or(f64::NAN),
                 self.tr_t0,
                 self.params.restarts,
