@@ -6888,6 +6888,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 tunable!("ENOMOTO_T_MIP_ROOTLP_BOTH_MIN", 0.05, f64),
             );
         }
+        // 試作 `ENOMOTO_MIP_ROOTLP_SCALE` (既定では使わない、analysis/momentum1_rootlp_20261106.md): 主の根の LP (最初・再スタートの後) を、
+        // 基底があっても行と列の尺度を調整した写しで解く (行が 1 万以上・係数の幅が 1e4 以上のときだけ。LP の経路は尺度を調整して解くが、
+        // MIP の根の LP は調整しない。momentum1 は前処理の LP による固定の基底から尺度なしの二段解法で 600 秒解けなかった)
+        if matches!(root_kind, Some(3) | Some(4)) && env_str!("ENOMOTO_MIP_ROOTLP_SCALE").is_some_and(|v| v != "0") {
+            self.lp.request_scale_once();
+        }
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         let mut both_loser = if both_on { crate::simplex::mip_lp::take_both_loser() } else { None };
         if self.params.verbose {
@@ -6969,6 +6975,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if self.params.verbose && self.snap.is_some() {
             eprintln!("MIP: [snapshot] root LP {root_st:?} ({} iters, {:.2}s)", self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
+        }
+        // 根の LP の安全網 (既定で使う。`ENOMOTO_MIP_ROOTLP_SCALE_RESCUE=0` で使わない、analysis/momentum1_rootlp_20261106.md):
+        // 結論を出せなかった (数値的な破綻など) ら、まず尺度を調整した写しを基底なしの二段解法で解いて元の LP を解き直す
+        // (係数の幅が 1e4 以上のときだけ)。それでも結論がなければ下の内点法 + クロスオーバー
+        if matches!(root_st, LpStatus::Error | LpStatus::IterationLimit) && !self.time_up() && env_def!("ENOMOTO_MIP_ROOTLP_SCALE_RESCUE", "1").is_some() {
+            let t_r = Instant::now();
+            if let Some(st) = self.lp.solve_scaled_rescue(&SolveLimits { deadline: self.deadline, ..Default::default() }) {
+                if self.params.verbose {
+                    eprintln!("MIP: root LP {root_st:?}, re-solved with the scaled two-phase method: {st:?} ({:.2}s)", t_r.elapsed().as_secs_f64());
+                }
+                root_st = st;
+            }
         }
         if matches!(root_st, LpStatus::Error | LpStatus::IterationLimit) && !self.time_up() {
             // 結論を出せなかった (数値的な破綻など): 内点法 + クロスオーバーだけで解き直す

@@ -123,6 +123,9 @@ pub struct TwoStageLp {
     /// 直近の解 `x` についての [`Self::row_activities`] の結果 (行と `x` にだけよるので、`x` か行を変えたら捨てる。
     /// 列の境界・基底を変えただけなら残し、次の求解の [`Self::nb_hint`] でも使う)。
     act_memo: OnceCell<Vec<f64>>,
+    /// 試作 `ENOMOTO_MIP_ROOTLP_SCALE` ([`Self::request_scale_once`]): 次の求解 1 回だけ、基底があっても行と列の尺度を調整した写しで解く
+    /// ([`Self::solve_scaled`])。求解の始めに使い切る
+    scale_once: bool,
 }
 
 /// 試作 `ENOMOTO_MIP_BASIS_NB` ([`TwoStageLp::set_basis_nb`]) を、場所 `site` (`t` 木のノードの基底の復元、`s` サブ MIP の根、
@@ -471,6 +474,7 @@ impl TwoStageLp {
             basis_memo: OnceCell::new(),
             rc_memo: OnceCell::new(),
             act_memo: OnceCell::new(),
+            scale_once: false,
             resume_nb: None,
             basis_nb: None,
             nb_diag: None,
@@ -1173,10 +1177,12 @@ impl TwoStageLp {
         let t0 = std::time::Instant::now();
         let it0 = self.iters;
         let pol0 = sid::ext_polish_iterations();
-        let st = if scale_cold_on()
-            && !matches!(&self.basis, Some(b) if b.len() == self.rows.len())
-            && self.rows.len() >= tunable!("ENOMOTO_T_SIMPLEX_SCALE_MIN_M", 0usize, usize)
-            && coef_range(&self.rows) >= tunable!("ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE", 0.0, f64)
+        let scale_once = std::mem::take(&mut self.scale_once);
+        let st = if (scale_once && self.scale_once_applies())
+            || (scale_cold_on()
+                && !matches!(&self.basis, Some(b) if b.len() == self.rows.len())
+                && self.rows.len() >= tunable!("ENOMOTO_T_SIMPLEX_SCALE_MIN_M", 0usize, usize)
+                && coef_range(&self.rows) >= tunable!("ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE", 0.0, f64))
         {
             self.solve_scaled(lim)
         } else {
@@ -1224,6 +1230,38 @@ impl TwoStageLp {
         Some(Arc::new(IpmScale { std: sc.std, no_hint, rs, cs, sc_shift: sc.shift, shift: self.shift.clone() }))
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOTLP_SCALE` (analysis/momentum1_rootlp_20261106.md): 次の求解 1 回 (MIP の根の LP・前処理の LP による固定の
+    /// 最初の LP) だけ、基底の有無によらず尺度を調整した写しで解く ([`Self::solve_scaled`])。行の数が `ENOMOTO_T_MIP_ROOTLP_SCALE_MIN_M`
+    /// (既定 10000) 未満、または係数の幅 ([`coef_range`]) が `ENOMOTO_T_MIP_ROOTLP_SCALE_MIN_RANGE` (既定 1e4) 未満なら何もしない
+    pub fn request_scale_once(&mut self) {
+        self.scale_once = true;
+    }
+
+    fn scale_once_applies(&self) -> bool {
+        self.rows.len() >= tunable!("ENOMOTO_T_MIP_ROOTLP_SCALE_MIN_M", 10000usize, usize)
+            && coef_range(&self.rows) >= tunable!("ENOMOTO_T_MIP_ROOTLP_SCALE_MIN_RANGE", 1e4f64, f64)
+    }
+
+    /// 根の LP の安全網 ([`crate::mip`] の根の LP が `Error`・`IterationLimit` で終わったとき): 尺度を調整した写しを基底なしで解き、
+    /// 最適ならその基底から元の LP を warm start で解き直す ([`Self::solve_scaled`])。係数の幅が `ENOMOTO_T_MIP_ROOTLP_RESCUE_MIN_RANGE`
+    /// (既定 1e4) 未満なら `None` (試さない)
+    pub fn solve_scaled_rescue(&mut self, lim: &SolveLimits) -> Option<LpStatus> {
+        if coef_range(&self.rows) < tunable!("ENOMOTO_T_MIP_ROOTLP_RESCUE_MIN_RANGE", 1e4f64, f64) {
+            return None;
+        }
+        self.basis = None;
+        self.lu = None;
+        self.lu_cache = None;
+        self.dse_cache = None;
+        self.resume_nb = None;
+        self.basis_nb = None;
+        self.status = None;
+        self.clear_memo();
+        let st = self.solve_scaled(lim);
+        self.status = Some(st);
+        Some(st)
+    }
+
     /// 試作 `ENOMOTO_SIMPLEX_SCALE` ([`scale_cold_on`]) の本体: 行と列の尺度を調整した写し ([`scale_factors`]) を基底なしで解き、
     /// 最適ならその基底 (尺度によらない) から元の LP を warm start で解き直す。写しが最適で終わらなければ、時間・反復の上限はそのまま返し、
     /// それ以外 (実行不能・非有界・数値の破綻など) は元の LP を基底なしで解き直す (証明・双対を元の尺度で得るため)。
@@ -1237,6 +1275,17 @@ impl TwoStageLp {
         let up: Vec<f64> = (0..self.n).map(|j| self.up[j] / cs[j]).collect();
         let cost: Vec<f64> = (0..self.n).map(|j| self.cost[j] * cs[j]).collect();
         let mut sc = TwoStageLp::new(&lo, &up, &cost, &rows, &row_lo, &row_up);
+        // 基底があれば (`ENOMOTO_MIP_ROOTLP_SCALE` の warm start) 写しに渡す。基底と非基底の置き場所は尺度によらない。
+        // 解 `x` は写しの尺度に直す (`x' = x / c`)。DSE 重みは尺度による (元の LP の重みは写しでは使わない)
+        let warm = matches!(&self.basis, Some(b) if b.len() == self.rows.len());
+        if warm {
+            sc.basis = self.basis.clone();
+            for j in 0..self.n {
+                sc.x[j] = self.x[j] / cs[j];
+            }
+            sc.resume_nb = self.resume_nb.clone();
+            sc.basis_nb = self.basis_nb.take();
+        }
         let st_s = sc.solve_inner(lim);
         let t_s = t0.elapsed().as_secs_f64();
         self.iters += sc.iters;
@@ -1254,7 +1303,7 @@ impl TwoStageLp {
                 let it1 = self.iters;
                 let st = self.solve_inner(lim);
                 if debug {
-                    eprintln!("SIMPLEX_SCALE: scaled {st_s:?} {} iters {t_s:.3}s; unscaled warm {st:?} {} iters {:.3}s", sc.iters, self.iters - it1, t0.elapsed().as_secs_f64() - t_s);
+                    eprintln!("SIMPLEX_SCALE: scaled{} {st_s:?} {} iters {t_s:.3}s; unscaled warm {st:?} {} iters {:.3}s", if warm { " (from the basis)" } else { "" }, sc.iters, self.iters - it1, t0.elapsed().as_secs_f64() - t_s);
                 }
                 st
             }

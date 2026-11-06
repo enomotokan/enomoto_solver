@@ -48,6 +48,13 @@ pub trait MipLp: Clone + Send {
     fn solve_rescue(&mut self, _lim: &SolveLimits) -> LpStatus {
         LpStatus::Error
     }
+    /// 根の LP の安全網: 尺度を調整した写しを基底なしで解いて元の LP を解き直す ([`TwoStageLp::solve_scaled_rescue`])。
+    /// 試さない (係数の幅が狭い・対応しない実装) なら `None`。
+    fn solve_scaled_rescue(&mut self, _lim: &SolveLimits) -> Option<LpStatus> {
+        None
+    }
+    /// 試作 `ENOMOTO_MIP_ROOTLP_SCALE`: 次の求解 1 回だけ尺度を調整した写しで解く ([`TwoStageLp::request_scale_once`])。
+    fn request_scale_once(&mut self) {}
     /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE` ([`TwoStageLp::optface_move`]): 最適面の上の別の最適基底へ移る。対応しない実装は `None`。
     fn optface_move(&mut self, _k: usize, _sample: usize, _mode: char, _seed: u64, _is_int: &[bool], _deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
         None
@@ -179,6 +186,12 @@ forward_impl!(
     },
     fn solve_rescue(&mut self, lim: &SolveLimits) -> LpStatus {
         TwoStageLp::solve_ipm_rescue(self, lim)
+    },
+    fn solve_scaled_rescue(&mut self, lim: &SolveLimits) -> Option<LpStatus> {
+        TwoStageLp::solve_scaled_rescue(self, lim)
+    },
+    fn request_scale_once(&mut self) {
+        TwoStageLp::request_scale_once(self)
     },
     fn optface_move(&mut self, k: usize, sample: usize, mode: char, seed: u64, is_int: &[bool], deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
         TwoStageLp::optface_move(self, k, sample, mode, seed, is_int, deadline)
