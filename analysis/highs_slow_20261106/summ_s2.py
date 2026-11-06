@@ -6,6 +6,8 @@ D = Path(__file__).resolve().parent / "S2"
 only = sys.argv[1] if len(sys.argv) > 1 else None
 rows = {}
 for f in sorted(D.glob("*.jsonl")):
+    if f.stem == "bench58":
+        continue
     for l in f.read_text().splitlines():
         r = json.loads(l)
         if only and r["problem"] != only:
