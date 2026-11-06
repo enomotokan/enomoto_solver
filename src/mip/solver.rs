@@ -5253,22 +5253,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_TREE_SEP` では上限を列の数の `ENOMOTO_T_MIP_TREE_SEP_DENSITY_COLS` 倍 (既定 0.05) より下げない: 元の行が
         // 非常に短い問題 (beasleyC3 は 1 行平均 2.8 非零) では、列の 1.7% のカット (29 非零) でも元の行の 10 倍を超えて止まった。
         // qiu (840 列、カット 110〜220 非零)・rout (556 列、150〜185) は 0.05 倍でも密と判定される
-        // 試作 `ENOMOTO_MIP_S3_TSDENSE` (既定では使わない、analysis/highs_slow_20261106/S3.md): 下限の列の数を、前処理で固定された列
-        // (`col_lo == col_up`) を除いた自由な列の数にする。neos-1445765 は前処理で連続列 18467 本が代入で消えても列の並びに固定の列として
-        // 残り (20617 列、自由な列 2146)、下限が 0.05 x 20617 = 1031 非零になって、ノードのカット (平均約 700 非零、元の行は 20.6) を
-        // 密と判定せず、取り出したノードごとに分離していた (LP の行 1001 -> 2259、ノードの LP 1 回 0.11 秒)
-        let ncols = if env_str!("ENOMOTO_MIP_S3_TSDENSE").is_some_and(|v| v != "0") {
-            (0..self.p.n).filter(|&j| self.p.col_lo[j] < self.p.col_up[j]).count().max(1)
-        } else {
-            self.p.n
-        };
+        // 試作 `ENOMOTO_MIP_S3_TSDENSE` (既定では使わない、analysis/highs_slow_20261106/S3.md): `ENOMOTO_MIP_TREE_SEP` のとき、既定の判定に
+        // 加えて、カットの非零の数の平均が自由な列 (前処理で固定された列 `col_lo == col_up` を除く) の数の f 倍 (値が 0 と 1 の間の数ならその値、ほかの値 (`1` など) なら
+        // `ENOMOTO_T_MIP_S3_TSDENSE_FRAC` (既定 0.2)) を超えたら密と判定する。neos-1445765 は前処理で連続列 18467 本が代入で消えても列の並びに
+        // 固定の列として残り (20617 列、自由な列 2146)、下限 0.05 x 20617 = 1031 非零のためにノードのカット (平均約 700 非零 = 自由な列の 32%、
+        // 元の行は 20.6) を密と判定せず、取り出したノードごとに分離していた (LP の行 1001 -> 2259、ノードの LP 1 回 0.11 秒)。
+        // `=floor` は最初の形 (下限の 0.05 x 列の数の列を自由な列に置き換える) で、drayage-25-23 (カット 400 非零 = 自由な列 7746 本の 5.2%) まで
+        // 密と判定して木の分離を止め、5 秒 -> 3 回中 2 回時間切れ (60 秒) になった
+        let s3 = env_str!("ENOMOTO_MIP_S3_TSDENSE").filter(|v| *v != "0" && self.tree_sep);
+        let nfree = if s3.is_some() { (0..self.p.n).filter(|&j| self.p.col_lo[j] < self.p.col_up[j]).count().max(1) } else { self.p.n };
+        let ncols = if s3 == Some("floor") { nfree } else { self.p.n };
         let floor = if self.tree_sep { tunable!("ENOMOTO_T_MIP_TREE_SEP_DENSITY_COLS", 0.05, f64) * ncols as f64 } else { 0.0 };
-        let dense = self.nca_cut_nnz.is_some_and(|d| d > (r * avg).max(floor));
-        if dense && ncols < self.p.n && !self.s3_tsdense_logged && self.params.verbose {
+        let dense0 = self.nca_cut_nnz.is_some_and(|d| d > (r * avg).max(floor));
+        let frac = match s3 {
+            Some("floor") | None => f64::INFINITY,
+            Some(v) => v.parse::<f64>().ok().filter(|f| *f > 0.0 && *f < 1.0).unwrap_or_else(|| tunable!("ENOMOTO_T_MIP_S3_TSDENSE_FRAC", 0.2, f64)),
+        };
+        let dense = dense0 || self.nca_cut_nnz.is_some_and(|d| d > (r * avg).max(frac * nfree as f64));
+        if dense && s3.is_some() && !self.s3_tsdense_logged && self.params.verbose {
             let floor0 = tunable!("ENOMOTO_T_MIP_TREE_SEP_DENSITY_COLS", 0.05, f64) * self.p.n as f64;
-            if self.tree_sep && !self.nca_cut_nnz.is_some_and(|d| d > (r * avg).max(floor0)) {
+            if !self.nca_cut_nnz.is_some_and(|d| d > (r * avg).max(floor0)) {
                 self.s3_tsdense_logged = true;
-                eprintln!("MIP: ENOMOTO_MIP_S3_TSDENSE: node cuts judged dense (cut nnz {:.1}, row mean {avg:.1}, floor {floor:.1} with {ncols} free columns, was {floor0:.1} with {} columns)", self.nca_cut_nnz.unwrap_or(0.0), self.p.n);
+                eprintln!("MIP: ENOMOTO_MIP_S3_TSDENSE: node cuts judged dense (cut nnz {:.1}, row mean {avg:.1}, {nfree} free columns of {}, floor {floor:.1}, frac {frac})", self.nca_cut_nnz.unwrap_or(0.0), self.p.n);
             }
         }
         dense
