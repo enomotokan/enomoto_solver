@@ -36,7 +36,7 @@ for p, rs in rows.items():
         log = readlog(r["tag"], p, r["seed"])
         incs = [(float(t), float(z)) for z, t in re.findall(r"new incumbent (\S+) at node \d+ \(([\d.]+)s\)", log)]
         root = re.findall(r"after root heuristics: incumbent Some\(([^)]+)\)", log)
-        subs = [float(s) for s in re.findall(r"sub-MIP: .*?, ([\d.]+)s", log)]
+        subs = [float(s) for s in re.findall(r"(?m)(?:sub-MIP|parallel sub-MIP \([^)]*\)): (?:\d+ free|status).*?([\d.]+)s\s*$", log)]
         rej = re.findall(r"SUBA_CUT rejected (\d+)", log)
         z, b = res.get("objective"), res.get("bound")
         gap = abs(z - b) / max(abs(z), 1e-9) if z is not None and b is not None else None
