@@ -660,3 +660,27 @@ ENOMOTO の既定は今回の計測の 7〜9 回分。
 - **食い違い 1 件**: stallrw の binkar10_1 (rep 36) が「最適 6742.188013」を返した。ほかの 14 回はすべて 6742.200024 (MIPLIB の最適値)。返した値が最適値より
   1.8e-6 (相対) 小さい = 元の問題で許容誤差を越えて実行不能な解を最適と返した誤答の見込み。`ROBUST_STALL=rw` は役の起動の時機を変えるだけなので、
   たまたまその経路で起きた既存の誤りの芽かもしれない (未調査)。
+
+## bench27 (根の LP の失敗対策 ipmx・combb・ipmcombb、2026-11-06)
+
+- 土台 8b0d17f3、20 分担、rep 38・39 (58 問) と 116 (Mittelmann 186 問)。集計は `B=<設定> python3 summ27.py`。
+  ipmx = `ENOMOTO_T_XO_CLEANUP_HINT=3 ENOMOTO_XO_IPM_RETRY_PC=3 ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST=1 ENOMOTO_IPM_KKT_AUG_RATIO=4`
+  (`analysis/rootlp_ipm_fail_20261105.md`)、combb = `ENOMOTO_SIMPLEX_SCALE=1 ENOMOTO_T_SIMPLEX_SCALE_MIN_M=10000 ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE=1e4
+  ENOMOTO_SIMPLEX_HARRIS2=r ENOMOTO_SIMPLEX_NOISE_RESET=0.1 ENOMOTO_SIMPLEX_NOISE_RESET_W=e` (`analysis/rootlp_simplex_fail_20261105.md` の 10 節)、ipmcombb = 両方。
+
+| 設定 | 58 問 全回 (解けた数) | Mittelmann 186 (解けた数) | Mitt 片方以上解 |
+|---|---|---|---|
+| def | 15.52 (89) | 41.34 (50) | |
+| ipmx | +4.0% (86) | +1.2% (49) | +6.6% |
+| combb | +1.6% (87) | +0.9% (50) | +4.6% |
+| ipmcombb | +5.6% (85) | +1.9% (48) | +10.7% |
+
+- **ipmx は mc11 を系統的に悪くする** (事実): 既定 24.0・9.7・26.7 秒に対し ipmx は 3 回とも時間切れ (ipmcombb も 3 回中 2 回)。combb は 27.3・16.1・30.0 秒で既定並み。
+  前の記録 (`rootlp_ipm_fail_20261105.md` の 6 節) でも mc11 は試作が 3 回中 2〜3 回遅かった。
+- **ipmx は 60 秒の上限を 14 秒ほど越える** (事実): dano3_3 (ipmx 74.0 秒・ipmcombb 75.2 秒、どちらも最適だが上限超え。既定・combb は時間切れ 60 秒)、
+  chromaticindex512-7 (73.6・74.8 秒、既定・combb は 60 秒)。内点法 + クロスオーバーの側が期限を見ずに走り切っているとみられる (推測)。
+- combb は 58 問・Mittelmann とも揺れの範囲 (+1.6%・+0.9%)。片方だけ解けた回は h80x6320d (rep 39、既定 53.8 秒・combb 60.0 秒の際)・timtab1 (rep 38・116 で
+  既定 40 秒、combb 時間切れ。rep 39 は 4 設定とも時間切れ、ipmx・ipmcombb も rep 38 で時間切れ) と、neos-957323 (combb だけ 57.9 秒)。
+  Mittelmann で効くはずの大きい根の LP の問題 (uccase12・supportcase42・satellites2-40 など) は 60 秒では根の後まで進んでも解けず、差が SGM に出ない。
+- 判断: **どれも 60 秒では既定にしない**。ipmx は mc11 の悪化と期限の超過を直すのが先。combb は害が見えないが 60 秒では得も見えないので、
+  効く問題 (根の LP が数秒以上) を 600 秒で比べてから決める。
