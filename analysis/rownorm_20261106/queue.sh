@@ -1,15 +1,9 @@
 #!/bin/bash
-# 計測の待ち行列 (同時に 1 つずつ): fastxgemm 600 秒 (既定・ROWNORM を交互に 2 回ずつ、ROWNORM だけ (SYMNORM=0) を 1 回)、58 問 2 回、誤答の検査
+# 計測の待ち行列 (同時に 1 つずつ)。fastxgemm の 600 秒の回 (run1.sh、既定・ROWNORM を交互に 2 回ずつ、ROWNORM だけ (SYMNORM=0) を 1 回) は
+# 済み。58 問 2 回 (既定と ROWNORM)、誤答の検査
 cd /home/user/enomoto_solver/analysis/rownorm_20261106
-P=fastxgemm-n2r6s0t2
-./run1.sh $P def1
-./run1.sh $P rn1 ENOMOTO_MIP_ROWNORM=1
-./run1.sh $P rn2 ENOMOTO_MIP_ROWNORM=1
-./run1.sh $P def2
-./run1.sh $P rnnosym1 ENOMOTO_MIP_HO3_SYMNORM=0 ENOMOTO_MIP_ROWNORM=1
-echo fastx-done >> queue.log
-python bench58.py rownorm 0 >> bench58.log 2>&1
-python bench58.py rownorm 1 >> bench58.log 2>&1
+python bench58.py def,rownorm 0 >> bench58.log 2>&1
+python bench58.py def,rownorm 1 >> bench58.log 2>&1
 cp /tmp/claude-0/-home-user-enomoto-solver/a5f7a634-6cc1-5fca-8eb4-42ca5e3d5078/scratchpad/runs/bench58.jsonl .
 echo bench-done >> queue.log
 cd /home/user/enomoto_solver
