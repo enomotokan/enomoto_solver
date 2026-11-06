@@ -136,5 +136,5 @@ bench に使う環境変数: base = `ENOMOTO_MIP_ROOTLP_SCALE_RESCUE=0` (直す�
   3 問だけなので、条件 (行 1 万以上・係数の幅 1e4 以上) に当たる問題を MIPLIB から集めて測ってから決める。
 - momentum1 は根の LP の後も遅い (4 節)。サブ MIP・潜り・ノードの LP も尺度なしの `TwoStageLp` なので、MIP の LP を尺度を調整した形で持つ
   直しが次の手 (推測)。
-- rail01・physiciansched6-2・momentum1 で、LP 探りの最初の LP の基底 (列だけ) が根の LP を遅くする例がある (rail01 29.6 → 116 秒)。
+- rail01・momentum1 で、LP 探りの最初の LP の基底 (列だけ) が根の LP を遅くする例がある (rail01 29.6 → 116 秒)。
   列だけの基底を渡す判定の見直しも候補。
