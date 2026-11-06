@@ -1907,7 +1907,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `q`: x* での既定の選択はそのまま (候補も効き目も変えない) にし、別枠で、全部の点での効き目の順に
             // `ENOMOTO_T_MIP_MPSEP_EXTRA` (既定 10) 本まで足す候補 (足した点の候補と、x* の候補の全部。効き目は全部の点での値)
             let mut mp_extra_pool: Vec<Candidate> = Vec::new();
-            if mp_quota {
+            // (点を足さなかったラウンドでは何もしない。前の版は `q` のとき点がなくても x* の候補から別枠を足していた)
+            if mp_pts.is_empty() {
+                // 何もしない
+            } else if mp_quota {
                 mp_extra_pool = std::mem::take(&mut mp_cands);
                 mp_extra_pool.extend(cands.iter().filter(|c| !c.forced).cloned());
             } else {
