@@ -16,6 +16,15 @@ CFGS = {
     "h2t": dict(DG, ENOMOTO_SIMPLEX_HARRIS2="t"),
     "h2r": dict(DG, ENOMOTO_SIMPLEX_HARRIS2="r"),
     "pert": dict(DG, ENOMOTO_NODE_PERTURB="1"),
+    # 試作 ENOMOTO_MIP_NODELP_PERTURB (ノードの LP だけ費用の摂動 p/P と前向きの Harris h、g は重い LP のときだけ)
+    "ph": dict(DG, ENOMOTO_MIP_NODELP_PERTURB="ph"),
+    "phg": dict(DG, ENOMOTO_MIP_NODELP_PERTURB="phg"),
+    "Ph": dict(DG, ENOMOTO_MIP_NODELP_PERTURB="Ph"),
+    "ch": dict(DG, ENOMOTO_MIP_CHILD_HIGHS="1"),
+    "bnt": dict(DG, ENOMOTO_MIP_BASIS_NB="t"),
+    "chph": dict(DG, ENOMOTO_MIP_CHILD_HIGHS="1", ENOMOTO_MIP_NODELP_PERTURB="ph"),
+    "plainph": {"ENOMOTO_MIP_NODELP_PERTURB": "ph"},
+    "plainphg": {"ENOMOTO_MIP_NODELP_PERTURB": "phg"},
 }
 for k, v in list(os.environ.items()):
     # 追加の設定: NODELP_CFG_<名前>="K=V,K=V"
