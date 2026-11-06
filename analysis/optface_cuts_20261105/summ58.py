@@ -38,7 +38,7 @@ def loginfo(p, c, s):
     return info
 
 
-for s in (1, 2):
+for s in (1, 2, 3):
     f = D / f"{NAME}_s{s}.jsonl"
     if not f.exists():
         continue
