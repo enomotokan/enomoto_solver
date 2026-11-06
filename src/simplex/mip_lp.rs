@@ -241,6 +241,11 @@ pub(crate) fn set_cold_race_threads(k: usize) -> usize {
     COLD_RACE_THREADS.with(|c| c.replace(k.max(1)))
 }
 
+/// このスレッドの [`set_cold_race_threads`] の値。
+pub(crate) fn cold_race_threads() -> usize {
+    COLD_RACE_THREADS.with(|c| c.get())
+}
+
 /// 診断用 [`TwoStageLp::diag_both`] の結果。
 pub struct BothDiag {
     /// 二段解法で解いた写しと状態、時間 (始めからの秒)。
@@ -2170,6 +2175,84 @@ impl TwoStageLp {
         let t0 = std::time::Instant::now();
         let st = lp.solve(&SolveLimits::default());
         eprintln!("TSLP resolve_fresh_debug: {st:?} after {} iters ({:.3}s), obj {:.10e}", lp.total_iterations(), t0.elapsed().as_secs_f64(), lp.objective());
+    }
+
+    /// 基底を捨てる (次の求解は基底のない求解になり、[`Self::solve`] の同時実行に入る)。試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD`
+    /// (analysis/probe_basis_20261106.md) の切り替え (`x`) で、warm start が反復の上限に当たったときに使う。
+    pub fn drop_basis(&mut self) {
+        self.basis = None;
+        self.lu = None;
+        self.lu_cache = None;
+        self.dse_cache = None;
+        self.resume_nb = None;
+        self.basis_nb = None;
+        self.status = None;
+        self.clear_memo();
+    }
+
+    /// [`Self::solve_race`] を基底があっても呼ぶ (試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` の `r`): 二段解法側は今の基底から warm start、
+    /// 内点法 + クロスオーバー側は基底なしで同時に解く。`threads` < 2 なら二段解法だけ。
+    pub fn solve_race_warm(&mut self, lim: &SolveLimits, threads: usize) -> LpStatus {
+        self.solve_race(lim, threads)
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_PROBE_BASIS_DIAG`・試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD`): 今の基底 ([`Self::set_basis`] の後、修復済み) の
+    /// 出発の点の性質。基底の LU が特異なら `None`。特異でなければ (主実行不能な基底変数の数, その量の和 (1 + |境界| で割った相対値))。
+    /// 非基底の構造列は `col` (渡した列の状態) の側 (Upper なら上限、それ以外は有限な下限、なければ上限、なければ 0)、
+    /// 非基底のスラックは下限 0 (行がどちらかの境界) に置く。
+    pub fn basis_start_info(&self, col: &[VarStatus]) -> Option<(usize, f64)> {
+        let b = self.basis.as_ref()?;
+        let m = self.rows.len();
+        if b.len() != m {
+            return None;
+        }
+        let nt = self.std.n_total;
+        let mut pos = vec![None; nt];
+        for (p, &v) in b.iter().enumerate() {
+            pos[v] = Some(p);
+        }
+        let lu = super::basis_kernel::factorize_basis(&self.std, &pos, None)?;
+        let mut rhs = self.std.b.clone();
+        for j in 0..nt {
+            if pos[j].is_some() {
+                continue;
+            }
+            let (lb, ub) = (self.std.lb[j], self.std.ub[j]);
+            let up = j < self.n && col.get(j) == Some(&VarStatus::Upper);
+            let v = if up && ub.is_finite() {
+                ub
+            } else if lb.is_finite() {
+                lb
+            } else if ub.is_finite() {
+                ub
+            } else {
+                0.0
+            };
+            if v != 0.0 {
+                for &(i, a) in self.std.cols.col(j) {
+                    rhs[i] -= a * v;
+                }
+            }
+        }
+        let mut xb = vec![0.0; m];
+        let mut scratch = vec![0.0; m];
+        lu.solve_into(&rhs, &mut scratch, &mut xb);
+        let (mut cnt, mut sum) = (0usize, 0.0f64);
+        for (&j, &v) in b.iter().zip(&xb) {
+            let (lb, ub) = (self.std.lb[j], self.std.ub[j]);
+            let d = if v < lb - 1e-7 {
+                (lb - v) / (1.0 + lb.abs())
+            } else if v > ub + 1e-7 {
+                (v - ub) / (1.0 + ub.abs())
+            } else {
+                0.0
+            };
+            if d > 0.0 {
+                cnt += 1;
+                sum += d;
+            }
+        }
+        Some((cnt, sum))
     }
 
     /// 診断用: 今の基底を分解して、その厳密な DSE 重み (基底位置順、[`super::DseState::from_basis`]) を返す。

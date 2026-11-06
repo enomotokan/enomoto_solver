@@ -1,7 +1,7 @@
 //! 分枝限定法が LP に求める操作 ([`MipLp`])。実装は
 //! [`crate::simplex::mip_lp::TwoStageLp`] (既存の傾き・切片二段解法を warm start で使うもの)。
 
-use super::lp::{Basis, LpStatus, SolveLimits};
+use super::lp::{Basis, LpStatus, SolveLimits, VarStatus};
 use crate::simplex::mip_lp::{InteriorPoint, LuSnapshot, TwoStageLp, TwoStageState};
 use std::borrow::Cow;
 
@@ -55,6 +55,16 @@ pub trait MipLp: Clone + Send {
     }
     /// 試作 `ENOMOTO_MIP_ROOTLP_SCALE`: 次の求解 1 回だけ尺度を調整した写しで解く ([`TwoStageLp::request_scale_once`])。
     fn request_scale_once(&mut self) {}
+    /// 試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` (analysis/probe_basis_20261106.md): 基底を捨てる ([`TwoStageLp::drop_basis`])。
+    fn drop_basis(&mut self) {}
+    /// 同: 基底があっても基底なしの内点法 + クロスオーバーと同時に解く ([`TwoStageLp::solve_race_warm`])。対応しない実装は [`Self::solve`]。
+    fn solve_race_warm(&mut self, lim: &SolveLimits, _threads: usize) -> LpStatus {
+        self.solve(lim)
+    }
+    /// 同: 今の基底の出発の点の性質 ([`TwoStageLp::basis_start_info`])。特異・対応しない実装は `None`。
+    fn basis_start_info(&self, _col: &[VarStatus]) -> Option<(usize, f64)> {
+        None
+    }
     /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE` ([`TwoStageLp::optface_move`]): 最適面の上の別の最適基底へ移る。対応しない実装は `None`。
     fn optface_move(&mut self, _k: usize, _sample: usize, _mode: char, _seed: u64, _is_int: &[bool], _deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
         None
@@ -192,6 +202,15 @@ forward_impl!(
     },
     fn request_scale_once(&mut self) {
         TwoStageLp::request_scale_once(self)
+    },
+    fn drop_basis(&mut self) {
+        TwoStageLp::drop_basis(self)
+    },
+    fn solve_race_warm(&mut self, lim: &SolveLimits, threads: usize) -> LpStatus {
+        TwoStageLp::solve_race_warm(self, lim, threads)
+    },
+    fn basis_start_info(&self, col: &[VarStatus]) -> Option<(usize, f64)> {
+        TwoStageLp::basis_start_info(self, col)
     },
     fn optface_move(&mut self, k: usize, sample: usize, mode: char, seed: u64, is_int: &[bool], deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
         TwoStageLp::optface_move(self, k, sample, mode, seed, is_int, deadline)

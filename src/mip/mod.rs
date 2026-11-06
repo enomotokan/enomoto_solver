@@ -3823,7 +3823,15 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     // `ENOMOTO_MIP_LP_PROBE_AFTER_EXT`: クリーク行の拡張の後に解いた LP は根の LP と同じ (対称性の行は末尾に足す) なので、常に渡す。
     // 値に `s` を含めば既定と同じ条件 (固定が出たか最初の LP が重い) のときだけ渡す (常に渡すと根の LP が 0.1 秒もない問題でも
     // 着く頂点が変わり、58 問で SGM +9.4%・解けた数 87 → 80 だった: analysis/lp_probe_after_ext_20261102.md)
-    if n_fixed > 0 || slow_root || (lp_probe_after_ext() && !lp_probe_after_ext_has('s')) {
+    let passed = n_fixed > 0 || slow_root || (lp_probe_after_ext() && !lp_probe_after_ext_has('s'));
+    // 診断 `ENOMOTO_MIP_PROBE_BASIS_DIAG`・試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` (既定では何もしない、analysis/probe_basis_20261106.md):
+    // 最後の LP の基底と行の指紋・大きさ・最初の LP の手間を根の LP に渡す (根で列だけの基底の良し悪しを見る)
+    if solver::probe_basis_diag_on() || env_str!("ENOMOTO_MIP_PROBE_BASIS_GUARD").is_some() {
+        let row_hashes = (0..prob.m).map(|i| solver::row_hash(&prob.rows[i], prob.row_lo[i], prob.row_up[i])).collect();
+        let info = solver::ProbeBasisInfo { basis: lp.basis(), row_hashes, m: prob.m, nnz: prob.rows.iter().map(|r| r.len()).sum(), iters: root_iters, secs: root_secs, passed, n_fixed };
+        solver::PROBE_BASIS_INFO.with(|s| *s.borrow_mut() = Some(info));
+    }
+    if passed || solver::probe_basis_guard_has('p') {
         let b = lp.basis();
         // 行の状態は `ENOMOTO_MIP_LP_PROBE_FINISH` か `ENOMOTO_MIP_LP_PROBE_ROW_BASIS` のときだけ渡す (既定は列の状態だけ)。行の指紋
         // ([`rows_fingerprint`]) も渡し、根の LP の始めの行が同じときだけ使う ([`solver::ROOT_BASIS_ROWS`])

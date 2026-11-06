@@ -373,6 +373,9 @@ thread_local! {
     /// 次に始める求解 (サブ MIP でないもの) の根の LP の初めの基底 (列の状態)。前処理の LP による固定
     /// ([`super::lp_probe`]) が解いた LP の基底を渡す (根の LP を解き直す手間を減らす)。
     pub(crate) static ROOT_BASIS: std::cell::RefCell<Option<super::lp::Basis>> = const { std::cell::RefCell::new(None) };
+    /// 診断 `ENOMOTO_MIP_PROBE_BASIS_DIAG`・試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` 用 (analysis/probe_basis_20261106.md): 前処理の LP による
+    /// 固定の最後の LP の様子 ([`ProbeBasisInfo`])。どちらかの環境変数があるときだけ置く
+    pub(crate) static PROBE_BASIS_INFO: std::cell::RefCell<Option<ProbeBasisInfo>> = const { std::cell::RefCell::new(None) };
     /// [`ROOT_BASIS`] の DSE 重み (`ENOMOTO_MIP_LP_PROBE_FINISH` のときだけ。番号は構造列 j < n、行 n + i)
     pub(crate) static ROOT_DSE: std::cell::RefCell<Option<Vec<(u32, f32)>>> = const { std::cell::RefCell::new(None) };
     /// 再スタートの後の根の LP の初めの基底 (`ENOMOTO_MIP_RESTART_BASIS`、試作)。再スタートの直前の LP の列の状態と、
@@ -1320,6 +1323,93 @@ fn restart_basis_for<L: MipLp>(lp: &L, n: usize, saved: (Vec<super::lp::VarStatu
         })
         .collect();
     Some((super::lp::Basis { col, row }, matched))
+}
+
+/// 根の LP に置いた前処理の LP の列だけの基底の性質 (診断 `ENOMOTO_MIP_PROBE_BASIS_DIAG`・試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD`)
+pub(crate) struct ProbeBasisFeatures {
+    /// 前処理の LP の行・非零
+    pub m0: usize,
+    pub nnz0: usize,
+    /// 根の LP の行・非零
+    pub m1: usize,
+    pub nnz1: usize,
+    /// 根の LP の行のうち、前処理の LP に同じ中身の行があるもの
+    pub same_rows: usize,
+    /// 基底の構造列の数・そのうち根で固定された列
+    pub kb: usize,
+    pub kb_fixed: usize,
+    /// 前処理の LP で論理変数が基底だった行の数
+    pub probe_basic_rows: usize,
+    pub probe_iters: u64,
+    pub probe_secs: f64,
+    pub passed: bool,
+    pub n_fixed: usize,
+    /// 修復した基底の出発の点の (主実行不能な基底変数の数, 量の和)。特異なら `None`
+    pub pinf: Option<(usize, f64)>,
+}
+
+impl ProbeBasisFeatures {
+    pub(crate) fn json(&self) -> String {
+        let (pc, ps) = match self.pinf {
+            Some((c, s)) => (c.to_string(), format!("{s:.4e}")),
+            None => ("null".into(), "null".into()),
+        };
+        format!(
+            "{{\"m0\":{},\"nnz0\":{},\"m1\":{},\"nnz1\":{},\"same_rows\":{},\"kb\":{},\"kb_fixed\":{},\"probe_basic_rows\":{},\"probe_iters\":{},\"probe_secs\":{:.3},\"passed\":{},\"n_fixed\":{},\"singular\":{},\"pinf_cnt\":{pc},\"pinf_sum\":{ps}}}",
+            self.m0, self.nnz0, self.m1, self.nnz1, self.same_rows, self.kb, self.kb_fixed, self.probe_basic_rows, self.probe_iters, self.probe_secs, self.passed, self.n_fixed, self.pinf.is_none()
+        )
+    }
+}
+
+/// 試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` の `c` の条件 (当たれば列だけの基底を渡さない)。根の LP の行のうち前処理の LP と中身の
+/// 違う行の割合が `ENOMOTO_T_MIP_PROBE_BASIS_GUARD_CHG` (既定 0.05) を超えるか、出発の点の主実行不能な基底変数が行の数の
+/// `ENOMOTO_T_MIP_PROBE_BASIS_GUARD_PINF` (既定 0.05) を超えるか、特異
+pub(crate) fn probe_basis_guard_cond(f: &ProbeBasisFeatures) -> bool {
+    let chg = 1.0 - f.same_rows as f64 / f.m1.max(1) as f64;
+    let pinf = f.pinf.map_or(f64::INFINITY, |(c, _)| c as f64 / f.m1.max(1) as f64);
+    chg > tunable!("ENOMOTO_T_MIP_PROBE_BASIS_GUARD_CHG", 0.05, f64) || pinf > tunable!("ENOMOTO_T_MIP_PROBE_BASIS_GUARD_PINF", 0.05, f64)
+}
+
+/// 前処理の LP による固定 ([`super::lp_probe`]) の最後の LP の様子 ([`PROBE_BASIS_INFO`])。
+pub(crate) struct ProbeBasisInfo {
+    /// 最後の LP の基底 (列と行の状態)
+    pub basis: super::lp::Basis,
+    /// 前処理の LP の行の中身の指紋 ([`row_hash`]) の集まり
+    pub row_hashes: std::collections::HashSet<u64>,
+    pub m: usize,
+    pub nnz: usize,
+    /// 最初の LP の反復・秒
+    pub iters: u64,
+    pub secs: f64,
+    /// 既定の判定で根の LP に渡したか
+    pub passed: bool,
+    pub n_fixed: usize,
+}
+
+/// 行の中身 (列番号・係数・左辺・右辺) の指紋
+pub(crate) fn row_hash(r: &[(usize, f64)], lo: f64, up: f64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut v: Vec<(usize, u64)> = r.iter().map(|&(j, a)| (j, a.to_bits())).collect();
+    v.sort_unstable();
+    v.hash(&mut h);
+    lo.to_bits().hash(&mut h);
+    up.to_bits().hash(&mut h);
+    h.finish()
+}
+
+/// 診断 `ENOMOTO_MIP_PROBE_BASIS_DIAG` (既定では何もしない)
+pub(crate) fn probe_basis_diag_on() -> bool {
+    env_str!("ENOMOTO_MIP_PROBE_BASIS_DIAG").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` (既定では使わない、analysis/probe_basis_20261106.md) の値に文字 `c` が入っているか。
+/// `n`: 列だけの基底を根の LP に渡さない (診断の「渡さない」)、`p`: 既定の判定で渡さない場合も渡す (診断の「渡す」)、
+/// `s`: 列だけの基底から作った根の基底が特異なら渡さない、`c`: 条件 ([`probe_basis_guard_cond`]) に当たれば渡さない、
+/// `r`: 渡す場合も基底なしの内点法 + クロスオーバーと同時に解く、`x`: warm start の反復が見込み (前処理の最初の LP の反復の
+/// `ENOMOTO_T_MIP_PROBE_BASIS_GUARD_X` 倍) を超えたら基底を捨てて基底なし (同時実行) で解き直す
+pub(crate) fn probe_basis_guard_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_PROBE_BASIS_GUARD").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_ROOT_BASIS_FIX` (試作、既定では使わない): 前処理の LP の基底からの根 (root_probe) と再スタートの後の根 (restart) に、
@@ -5948,6 +6038,135 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 診断用 `ENOMOTO_MIP_TREE4_TRACE=秒` (既定では出さない): スレッドごとに、その秒数おきに全体の下界・暫定解・開いたノードと、
     /// 自分の待ち行列の下界の分布 (全体の下界から打ち切り値までの差の割合で 4 つに分ける)、葉の数を `TREE4:` の行で出す
     /// 診断 `ENOMOTO_MIP_ROOTLP_SIMPLEX_DIAG` の本体 (根の LP の場所から呼ぶ)。
+    /// 前処理の LP の列だけの基底を根の LP に置いた直後に呼ぶ ([`PROBE_BASIS_INFO`] があるときだけ働く)。基底の性質
+    /// (行の変わり方・基底の列・特異か・出発の点の主実行不能) をログに出し、試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` の `s`・`c` の
+    /// 条件に当たれば基底を捨てる。基底を残したら真。
+    fn probe_basis_guard_check(&mut self, col: &[super::lp::VarStatus]) -> bool {
+        let Some(f) = self.probe_basis_features(col) else { return true };
+        let singular = f.pinf.is_none();
+        let drop_s = probe_basis_guard_has('s') && singular;
+        let drop_c = probe_basis_guard_has('c') && probe_basis_guard_cond(&f);
+        if self.params.verbose {
+            eprintln!("MIP: probe basis features: {}{}", f.json(), if drop_s || drop_c { "; not used (ENOMOTO_MIP_PROBE_BASIS_GUARD)" } else { "" });
+        }
+        if drop_s || drop_c {
+            self.lp.drop_basis();
+            return false;
+        }
+        true
+    }
+
+    /// 根の LP に置いた列だけの基底の性質 ([`ProbeBasisFeatures`])。[`PROBE_BASIS_INFO`] がなければ `None`。
+    fn probe_basis_features(&self, col: &[super::lp::VarStatus]) -> Option<ProbeBasisFeatures> {
+        PROBE_BASIS_INFO.with(|s| {
+            let s = s.borrow();
+            let info = s.as_ref()?;
+            let m1 = self.p.m;
+            let nnz1: usize = self.p.rows.iter().map(|r| r.len()).sum();
+            let same = (0..m1).filter(|&i| info.row_hashes.contains(&row_hash(&self.p.rows[i], self.p.row_lo[i], self.p.row_up[i]))).count();
+            let kb = col.iter().filter(|v| **v == super::lp::VarStatus::Basic).count();
+            let kb_fixed = (0..self.p.n.min(col.len())).filter(|&j| col[j] == super::lp::VarStatus::Basic && self.dom.global_lo[j] == self.dom.global_up[j]).count();
+            // 前処理の LP で論理変数が基底だった行 (行の中身が根にも残るもの) の数
+            let probe_basic_rows = info.basis.row.iter().filter(|v| **v == super::lp::VarStatus::Basic).count();
+            Some(ProbeBasisFeatures {
+                m0: info.m,
+                nnz0: info.nnz,
+                m1,
+                nnz1,
+                same_rows: same,
+                kb,
+                kb_fixed,
+                probe_basic_rows,
+                probe_iters: info.iters,
+                probe_secs: info.secs,
+                passed: info.passed,
+                n_fixed: info.n_fixed,
+                pinf: self.lp.basis_start_info(col),
+            })
+        })
+    }
+
+    /// 試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` の `r`・`x`: 列だけの基底から根の LP を解く。`r` は基底なしの内点法 + クロスオーバーと同時に、
+    /// `x` は反復の上限 (前処理の最初の LP の反復の `ENOMOTO_T_MIP_PROBE_BASIS_GUARD_X` 倍 (既定 2) と行の数の
+    /// `ENOMOTO_T_MIP_PROBE_BASIS_GUARD_XM` 倍 (既定 0.5) の大きい方) を付けて warm start で解き、上限に当たったら基底を捨てて
+    /// 基底なし (同時実行) で解き直す
+    fn probe_basis_guard_solve(&mut self) -> LpStatus {
+        let lim = SolveLimits { deadline: self.deadline, ..Default::default() };
+        let threads = crate::simplex::mip_lp::cold_race_threads();
+        let t0 = Instant::now();
+        let it0 = self.lp.total_iterations();
+        if probe_basis_guard_has('x') {
+            let probe_iters = PROBE_BASIS_INFO.with(|s| s.borrow().as_ref().map_or(0, |i| i.iters));
+            let cap = (tunable!("ENOMOTO_T_MIP_PROBE_BASIS_GUARD_X", 2.0, f64) * probe_iters as f64)
+                .max(tunable!("ENOMOTO_T_MIP_PROBE_BASIS_GUARD_XM", 0.5, f64) * self.lp.num_rows() as f64)
+                .max(100.0) as u64;
+            let st = if probe_basis_guard_has('r') {
+                self.lp.solve_race_warm(&SolveLimits { iteration_limit: cap, ..lim.clone() }, threads)
+            } else {
+                self.lp.solve(&SolveLimits { iteration_limit: cap, ..lim.clone() })
+            };
+            if st != LpStatus::IterationLimit {
+                if self.params.verbose {
+                    eprintln!("MIP: probe basis guard: warm root LP {st:?}, {} iters (cap {cap}, {:.2}s)", self.lp.total_iterations() - it0, t0.elapsed().as_secs_f64());
+                }
+                return st;
+            }
+            if self.params.verbose {
+                eprintln!("MIP: probe basis guard: warm root LP hit the cap {cap} iters ({:.2}s); solving without the basis", t0.elapsed().as_secs_f64());
+            }
+            self.lp.drop_basis();
+            return self.lp.solve(&lim);
+        }
+        let st = self.lp.solve_race_warm(&lim, threads);
+        if self.params.verbose {
+            eprintln!("MIP: probe basis guard: root LP raced from the basis: {st:?}, {} iters ({:.2}s)", self.lp.total_iterations() - it0, t0.elapsed().as_secs_f64());
+        }
+        st
+    }
+
+    /// 診断 `ENOMOTO_MIP_PROBE_BASIS_DIAG` (既定では何もしない、analysis/probe_basis_20261106.md): 最初の主の根の LP (カットの前) を、
+    /// 前処理の LP の列だけの基底から (既定の判定で渡さない場合も) と、基底なし (同時実行) の両方で解き、基底の性質と両方の
+    /// 状態・秒・反復・目的値を 1 行の JSON (`PROBE_BASIS {...}`) で stderr に出す。1 回の求解は `ENOMOTO_T_MIP_PROBE_BASIS_DIAG_SECS`
+    /// (既定 300) 秒まで。前処理の LP がなければ基底なしだけ
+    fn probe_basis_diag(&mut self) {
+        let cap = tunable!("ENOMOTO_T_MIP_PROBE_BASIS_DIAG_SECS", 300.0, f64);
+        let dl = |s: &Self| {
+            let d = Instant::now() + std::time::Duration::from_secs_f64(cap);
+            Some(s.deadline.map_or(d, |x| x.min(d)))
+        };
+        let col = PROBE_BASIS_INFO.with(|s| s.borrow().as_ref().map(|i| i.basis.col.clone())).filter(|c| c.len() == self.p.n);
+        let run = |lp: &mut L, lim: SolveLimits, off: f64| {
+            let t0 = Instant::now();
+            let it0 = lp.total_iterations();
+            let st = lp.solve(&lim);
+            let obj = lp.objective() + off;
+            format!(
+                "{{\"st\":\"{st:?}\",\"t\":{:.3},\"it\":{},\"obj\":{}}}",
+                t0.elapsed().as_secs_f64(),
+                lp.total_iterations() - it0,
+                if st == LpStatus::Optimal && obj.is_finite() { format!("{obj:.10e}") } else { "null".into() }
+            )
+        };
+        let mut warm = "null".to_string();
+        let mut feat = "null".to_string();
+        if let Some(col) = &col {
+            let mut w = self.lp.clone();
+            w.set_basis(&super::lp::Basis { col: col.clone(), row: Vec::new() });
+            let mut me = self.lp.clone();
+            std::mem::swap(&mut self.lp, &mut me);
+            self.lp.set_basis(&super::lp::Basis { col: col.clone(), row: Vec::new() });
+            if let Some(f) = self.probe_basis_features(col) {
+                feat = f.json();
+            }
+            std::mem::swap(&mut self.lp, &mut me);
+            warm = run(&mut w, SolveLimits { deadline: dl(self), ..Default::default() }, self.p.offset);
+        }
+        let mut c = self.lp.clone();
+        c.drop_basis();
+        let cold = run(&mut c, SolveLimits { deadline: dl(self), ..Default::default() }, self.p.offset);
+        eprintln!("PROBE_BASIS {{\"feat\":{feat},\"warm\":{warm},\"cold\":{cold}}}");
+    }
+
     fn rootlp_simplex_diag(&mut self) {
         let prefix = env_str!("ENOMOTO_MIP_ROOTLP_SIMPLEX_DIAG").unwrap_or_default();
         let mut lp0 = crate::simplex::mip_lp::TwoStageLp::new(&self.dom.global_lo, &self.dom.global_up, &self.p.cost, &self.p.rows, &self.p.row_lo, &self.p.row_up);
@@ -6635,6 +6854,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let mut root_warm_dse_once = false;
+        // 試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD`: 前処理の LP の列だけの基底から根の LP を解き始めるか (`r`・`x` の対象)
+        let mut probe_cols_only_warm = false;
         if !self.params.submip && self.snap.is_none() {
             let rb = ROOT_BASIS.with(|s| s.borrow_mut().take());
             // 行の状態は、前処理の LP の行と根の LP の始めの行が同じ (指紋が合う) ときだけ使う (`ENOMOTO_MIP_LP_PROBE_ROW_BASIS`。
@@ -6684,8 +6905,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 );
             }
+            // 試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` の `n`: 列だけの基底を渡さない
+            let rb = match rb {
+                Some(b) if b.row.is_empty() && probe_basis_guard_has('n') => {
+                    if self.params.verbose {
+                        eprintln!("MIP: probe basis guard: the columns-only basis is not used (n)");
+                    }
+                    None
+                }
+                rb => rb,
+            };
             if let Some(mut b) = rb {
                 if b.col.len() == self.p.n {
+                    let cols_only = b.row.is_empty();
                     // 行の状態 (`ENOMOTO_MIP_LP_PROBE_FINISH`。既定は列の状態だけ): 前処理の後に末尾に足した行 (対称性の
                     // lex-leader の行など) は論理変数を基底に入れる。行が減っていたら使わない
                     if b.row.len() > self.lp.num_rows() {
@@ -6706,6 +6938,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if let Some(w) = ROOT_DSE.with(|s| s.borrow_mut().take()) {
                         self.lp.set_dse_vars(&w);
                         root_warm_dse_once = true;
+                    }
+                    if cols_only {
+                        probe_cols_only_warm = self.probe_basis_guard_check(&b.col);
                     }
                 }
             }
@@ -6874,6 +7109,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 診断 `ENOMOTO_MIP_ROOTLP_SIMPLEX_DIAG=<prefix>` (既定では何もしない。analysis/rootlp_simplex_fail_20261105.md): 上と同じ根の LP
         // (前処理・LP プロービングの後、カットの前) を `<prefix>.mps` に書き出し、基底なしで二段解法だけ (1 スレッドのプール) で解いて、
         // 状態・時間・反復を 1 行の JSON (`ROOTLP_SIMPLEX {...}`) で stderr に出して終わる。`ENOMOTO_MIP_ROOTLP_DUMP_ONLY` なら解かない
+        if root_kind == Some(4) && probe_basis_diag_on() {
+            self.probe_basis_diag();
+            return self.finish(MipStatus::NotSolved, f64::NEG_INFINITY);
+        }
         if root_kind == Some(4) && env_str!("ENOMOTO_MIP_ROOTLP_SIMPLEX_DIAG").is_some() {
             self.rootlp_simplex_diag();
             return self.finish(MipStatus::NotSolved, f64::NEG_INFINITY);
@@ -6902,7 +7141,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if matches!(root_kind, Some(3) | Some(4)) && env_str!("ENOMOTO_MIP_ROOTLP_SCALE").is_some_and(|v| v != "0") {
             self.lp.request_scale_once();
         }
-        let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        let mut root_st = if probe_cols_only_warm && root_kind == Some(4) && (probe_basis_guard_has('r') || probe_basis_guard_has('x')) {
+            self.probe_basis_guard_solve()
+        } else {
+            self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() })
+        };
         let mut both_loser = if both_on { crate::simplex::mip_lp::take_both_loser() } else { None };
         if self.params.verbose {
             if let Some(l) = &both_loser {
