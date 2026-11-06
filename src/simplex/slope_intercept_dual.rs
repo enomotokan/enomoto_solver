@@ -95,6 +95,13 @@ thread_local! {
     pub(crate) static HARRIS2_SCOPE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_NODELP_PERTURB` (analysis/node_lp_20261106.md): 木のノードの LP を解くあいだだけ、warm start の近道でも費用を
+    /// 摂動する (`ENOMOTO_NODE_PERTURB` と同じ処理)。0 = 使わない (既定)、1 = `ENOMOTO_NODE_PERTURB` と同じ判定 (費用の絶対値の種類が少ない)、
+    /// 2 = 判定なしで摂動する
+    pub(crate) static NODE_PERTURB_SCOPE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
 /// [`HARRIS2_SCOPE`] を置き、手放すときに元へ戻す
 pub(crate) struct Harris2Scope(Option<&'static str>);
 
@@ -4671,8 +4678,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let node_perturbed = fast_reopt
         && warm_started
         && !infeasible_rows.rows.is_empty()
-        && env_str!("ENOMOTO_NODE_PERTURB").is_some()
-        && node_perturb_criterion(std, PRICE_KEY.with(|k| k.get()));
+        && {
+            let sc = NODE_PERTURB_SCOPE.with(|c| c.get());
+            sc == 2 || ((env_str!("ENOMOTO_NODE_PERTURB").is_some() || sc == 1) && node_perturb_criterion(std, PRICE_KEY.with(|k| k.get())))
+        };
     if node_perturbed {
         if nl_diag {
             nodelp_set(7, 1);

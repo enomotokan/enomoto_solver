@@ -555,10 +555,13 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 診断用: ノードの LP の行数の合計 (`node_lps` で割ると平均)、木のノードでの新しい分離のラウンド数と加えたラウンド数
     pub(super) node_lp_rows: u64,
     /// 診断 `ENOMOTO_MIP_NODELP_DIAG` (analysis/node_lp_20261106.md): ノードの LP の計数。添字 0〜2 は最初の LP の種類
-    /// ([`TreeProf::kind_n`] と同じ: 潜り・自分の待ち行列・共有の待ち行列)、3 は同じノードでの解き直し (カット・強分岐の固定の後)。
+    /// ([`TreeProf::kind_n`] と同じ: 潜り・自分の待ち行列・共有の待ち行列)、3 は同じノードでの解き直し (カット・強分岐の固定の後)、
+    /// 4 は潜りの途中で兄弟へ戻ったノードの最初の LP (0 から外す)。
     /// 各行: [回数, 反復, 行の和, カットの行の和, warm start, 出発の主実行不能の行の和, 費用をずらした列の和, 再分解の和,
     /// DSE 単位, DSE 引き継ぎ, DSE 厳密, 段階 A から, 段階 A の反復の和, 最適, 実行不能, 打ち切り値, そのほか, 費用の摂動, 秒 (us)]
-    pub(super) nodelp_stats: [[u64; 19]; 4],
+    pub(super) nodelp_stats: [[u64; 19]; 5],
+    /// 診断 `ENOMOTO_MIP_NODELP_DIAG`: 今のノードが潜りの途中で兄弟へ戻ったノードか ([`Solver::nodelp_stats`] の添字 4)。
+    pub(super) nodelp_sib: bool,
     /// 診断 `ENOMOTO_MIP_NODELP_DUMP=<dir>`: 書き出したノードの LP の数。
     pub(super) nodelp_dumps: usize,
     pub(super) node_sep_stats: [u64; 2],
@@ -1232,8 +1235,28 @@ pub(crate) struct TreeSnapshot {
 /// 試作 `ENOMOTO_MIP_HO4_NODECAP` 用: 主 (サブ MIP の外) の最後の根の LP の秒 (f64 のビット)
 static HO4_ROOT_LP_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// 試作 `ENOMOTO_MIP_NODELP_PERTURB` (analysis/node_lp_20261106.md、既定では使わない) の値 (`p`/`P`/`h`/`g` の組み合わせ)。
+fn nodelp_perturb_mode() -> Option<&'static str> {
+    env_str!("ENOMOTO_MIP_NODELP_PERTURB").filter(|v| *v != "0")
+}
+
+/// [`crate::simplex::slope_intercept_dual::NODE_PERTURB_SCOPE`] を置き、手放すときに元へ戻す
+struct NodePerturbScope(u8);
+
+impl NodePerturbScope {
+    fn new(v: u8) -> Self {
+        NodePerturbScope(crate::simplex::slope_intercept_dual::NODE_PERTURB_SCOPE.with(|c| c.replace(v)))
+    }
+}
+
+impl Drop for NodePerturbScope {
+    fn drop(&mut self) {
+        crate::simplex::slope_intercept_dual::NODE_PERTURB_SCOPE.with(|c| c.set(self.0));
+    }
+}
+
 /// 診断 `ENOMOTO_MIP_NODELP_DIAG` の 1 スレッド分の表 ([`Solver::nodelp_stats`]) を出す。
-fn print_nodelp_stats(tid: usize, st: &[[u64; 19]; 4]) {
+fn print_nodelp_stats(tid: usize, st: &[[u64; 19]; 5]) {
     if !crate::simplex::slope_intercept_dual::nodelp_diag() {
         return;
     }
@@ -1244,7 +1267,7 @@ fn print_nodelp_stats(tid: usize, st: &[[u64; 19]; 4]) {
         let n = a[0] as f64;
         eprintln!(
             "MIP: nodelp tid {tid} {}: n {} iters {:.1}/LP ms {:.3}/LP rows {:.1} cutrows {:.1} warm {} prim_inf {:.1} dual_shift {:.2} refactor {:.2} dse unit/inh/exact {}/{}/{} stageA {} ({:.1} it) opt/inf/cut/other {}/{}/{}/{} perturb {} | total iters {} secs {:.2}",
-            ["dive", "queue", "pool", "resolve"][k], a[0], a[1] as f64 / n, a[18] as f64 / 1e3 / n, a[2] as f64 / n, a[3] as f64 / n, a[4], a[5] as f64 / n, a[6] as f64 / n, a[7] as f64 / n,
+            ["dive", "queue", "pool", "resolve", "sibling"][k], a[0], a[1] as f64 / n, a[18] as f64 / 1e3 / n, a[2] as f64 / n, a[3] as f64 / n, a[4], a[5] as f64 / n, a[6] as f64 / n, a[7] as f64 / n,
             a[8], a[9], a[10], a[11], a[12] as f64 / a[11].max(1) as f64, a[13], a[14], a[15], a[16], a[17], a[1], a[18] as f64 / 1e6
         );
     }
@@ -4132,7 +4155,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nca_ema: 1.0,
         nca_stats: [0; 3],
         node_lp_rows: 0,
-        nodelp_stats: [[0; 19]; 4],
+        nodelp_stats: [[0; 19]; 5],
+        nodelp_sib: false,
         nodelp_dumps: 0,
         node_sep_stats: [0; 2],
         nca_hist: [0; 5],
@@ -9419,6 +9443,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             let from_sibling = sibling.is_some();
             let from_plunge = plunge.is_some();
+            self.nodelp_sib = from_sibling;
             let mut pre_qlb = f64::NAN;
             self.tp_kind = 0;
             let node = match plunge.take().or(sibling) {
@@ -9878,10 +9903,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.nodelp_dumps += 1;
                     prefix
                 });
+                // 試作 `ENOMOTO_MIP_NODELP_PERTURB` (analysis/node_lp_20261106.md、既定では使わない): ノードの LP を解くあいだだけ
+                // 費用の摂動 (`p`: `ENOMOTO_NODE_PERTURB` と同じ判定、`P`: 判定なし) と前向きの Harris (`h`: `ENOMOTO_SIMPLEX_HARRIS2=t` と同じ) を使う。
+                // `g` なら、このスレッドのノードの LP の平均の反復が `ENOMOTO_T_MIP_NODELP_HEAVY` (既定 100) 以上のときだけ
+                let (_nl_h2, _nl_pert) = match nodelp_perturb_mode() {
+                    Some(mode) if !mode.contains('g') || self.avg_node_iters() as f64 >= tunable!("ENOMOTO_T_MIP_NODELP_HEAVY", 100.0, f64) => (
+                        mode.contains('h').then(|| crate::simplex::slope_intercept_dual::Harris2Scope::new(Some("t"))),
+                        NodePerturbScope::new(if mode.contains('P') { 2 } else if mode.contains('p') { 1 } else { 0 }),
+                    ),
+                    _ => (None, NodePerturbScope::new(crate::simplex::slope_intercept_dual::NODE_PERTURB_SCOPE.with(|c| c.get()))),
+                };
                 let mut st = self.lp.solve(&capped(self, iter_limit));
+                drop(_nl_h2);
+                drop(_nl_pert);
                 if crate::simplex::slope_intercept_dual::nodelp_diag() && !self.params.submip {
                     let rec = crate::simplex::slope_intercept_dual::NODELP_REC.with(|c| c.get());
-                    let k = if resolves == 0 { self.tp_kind.min(2) } else { 3 };
+                    let k = if resolves > 0 { 3 } else if self.nodelp_sib && self.tp_kind == 0 { 4 } else { self.tp_kind.min(2) };
                     let a = &mut self.nodelp_stats[k];
                     let rows = self.lp.num_rows() as u64;
                     a[0] += 1;
