@@ -22,6 +22,8 @@ CFGS = {
     "Ph": dict(DG, ENOMOTO_MIP_NODELP_PERTURB="Ph"),
     "ch": dict(DG, ENOMOTO_MIP_CHILD_HIGHS="1"),
     "bnt": dict(DG, ENOMOTO_MIP_BASIS_NB="t"),
+    "phb": dict(DG, ENOMOTO_MIP_NODELP_PERTURB="ph", ENOMOTO_MIP_BASIS_NB="t"),
+    "plainphb": {"ENOMOTO_MIP_NODELP_PERTURB": "ph", "ENOMOTO_MIP_BASIS_NB": "t"},
     "chph": dict(DG, ENOMOTO_MIP_CHILD_HIGHS="1", ENOMOTO_MIP_NODELP_PERTURB="ph"),
     "plainph": {"ENOMOTO_MIP_NODELP_PERTURB": "ph"},
     "plainphg": {"ENOMOTO_MIP_NODELP_PERTURB": "phg"},
