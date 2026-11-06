@@ -52,6 +52,25 @@ fn ho5_cutlp_gain() -> f64 {
     }
 }
 
+/// `ENOMOTO_MIP_CUTSTALL_GAP` (試作、既定では使わない。analysis/cutloop_stop_20261106/B.md): 根 (サブ MIP でない。裏のカットの写しを含む) の
+/// カットのループの停滞の判定を、目的値の大きさではなく **ギャップの閉じ方** でも測り、どちらの尺度でも伸びていないラウンドだけを停滞と数える。
+/// - 尺度は min(カットで上げた分 (今の値 - ループの始めの値), 暫定解があれば打ち切り値との残りの差)。前者は HiGHS の `evaluateRootNode` の
+///   「今までの伸びの 0.1%」と同じ尺度、後者は根のギャップが閉じかけているときに少しの伸びでも続けるため
+/// - ラウンドの伸びが割合 × 尺度以下なら新しい尺度で停滞。今までの判定 (目的値の相対変化 1e-4) でも停滞のときだけ停滞と数える (今までより早く止まることはない)
+/// - 裏のカットの写しの窓の判定 ([`super::solver::CutJob::record_round`]) も同じ尺度で、窓の伸びが窓のラウンド数 × 割合 × 尺度を超えていれば停滞としない
+/// - ラウンドの上限に当たったとき、直近 5 ラウンドの伸びが新しい尺度で停滞でなければ (5 ラウンドの伸び > 5 × 割合 × 尺度) 25 ラウンド延ばす
+///   (`ENOMOTO_T_MIP_CUTSTALL_MAX_ROUNDS`、既定 100 まで)。時間の上限 (`ENOMOTO_T_MIP_CUT_TIME_FRAC`) はそのまま効く
+///
+/// 値: 数 (0 < t < 1) ならその割合、ほかは 1e-3。末尾に `n` を付けるとラウンドの延長をしない (例 `1n`)。
+/// unitcal_7 は目的値 1.96e7 に対し 1 ラウンドの伸びが 300〜1000 で、今までの判定では相対変化 1.5e-5〜5e-5 の「停滞」になり 17 ラウンド前後で止まる
+pub(super) fn cutstall_gap() -> Option<(f64, bool)> {
+    env_str!("ENOMOTO_MIP_CUTSTALL_GAP").map(|v| {
+        let ext = !v.ends_with('n');
+        let t = v.trim_end_matches('n').parse::<f64>().ok().filter(|t| *t > 0.0 && *t < 1.0).unwrap_or(1e-3);
+        (t, ext)
+    })
+}
+
 /// `ENOMOTO_MIP_HO6_STALL` (試作、既定では使わない): 根のカットのループの停滞を、カットで上げた分に対する割合で判定する
 /// (根のカットのループ `root_cut_loop` の停滞の判定)。値が数なら割合、ほかの値なら 1e-3。あわせて、ラウンドの上限に当たったときの延長
 /// (`ENOMOTO_MIP_CUT_ADAPT_ROUNDS` と同じ、上限 `ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP`) を、直近 5 ラウンドの伸びが今までの伸びの
@@ -875,6 +894,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut prev_obj = self.lp.objective();
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
         let first_obj = prev_obj;
+        // `ENOMOTO_MIP_CUTSTALL_GAP` ([`cutstall_gap`]): 外側の根 (裏のカットの写しを含む) だけ
+        let cs_gap = cutstall_gap().filter(|_| !self.params.submip);
+        // 尺度 = min(カットで上げた分, 暫定解との残りの差)。どちらかの割合を超えて伸びたラウンドは停滞と数えない
+        let cs_scale = |slf: &Self, obj: f64| -> f64 {
+            let cut = slf.prune_limit();
+            let mut s = obj - first_obj;
+            if cut.is_finite() {
+                s = s.min(cut - obj);
+            }
+            s.max(1e-9 * obj.abs().max(1.0))
+        };
         if clique_cuts_mode() == Some("auto") && self.clique_auto.is_none() && !self.params.submip {
             // 再スタートの後は最初の求解の判定を引き継ぐ (再スタートの根は前の根のカットを持つので、試しても伸びない)
             let on = match CLIQUE_AUTO_FIRST.with(|c| c.get()) {
@@ -1249,6 +1279,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     && max_rounds < tunable!("ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP", 100usize, usize)
                     && k > 5
                     && obj_hist[k - 1] - obj_hist[k - 6] >= adapt_frac * (obj_hist[k - 1] - obj_hist[0]).max(1e-9);
+                // `ENOMOTO_MIP_CUTSTALL_GAP`: 直近 5 ラウンドの伸びが新しい尺度で停滞でなければ 25 ラウンド延ばす
+                let extend = extend
+                    || cs_gap.is_some_and(|(t, ext)| {
+                        let kr = round_obj.len();
+                        ext && max_rounds < tunable!("ENOMOTO_T_MIP_CUTSTALL_MAX_ROUNDS", 100usize, usize) && kr > 5 && {
+                            let o = round_obj[kr - 1];
+                            o - round_obj[kr - 6] > 5.0 * t * cs_scale(self, o)
+                        }
+                    });
                 // `ENOMOTO_MIP_CUT_PHASE2_AT_CAP`: 第 1 段階がラウンドの上限に当たって止まるときは (停滞していなくても)、
                 // 第 2 段階 (HiGHS のスコア) へ進む (`ENOMOTO_MIP_CUT_PHASE2` がなくても。停滞で止まるときは既定のまま止める)。
                 // timtab1 は既定の選択で 25 ラウンド目まで毎回 1-3% 伸び、停滞の判定に届かないので、`ENOMOTO_MIP_CUT_PHASE2`・
@@ -2522,6 +2561,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     _ => reldiff,
                 };
+                // `ENOMOTO_MIP_CUTSTALL_GAP`: 今までの判定 (相対変化 1e-4) で停滞でも、ギャップの尺度で伸びていれば停滞と数えない
+                let reldiff = match cs_gap {
+                    Some((t, _)) if reldiff <= 1e-4 => {
+                        let gain = obj - prev_obj;
+                        if gain > t * cs_scale(self, obj) && gain > 1e-9 * obj.abs().max(1.0) { 1.0 } else { reldiff }
+                    }
+                    _ => reldiff,
+                };
                 if phase2 {
                     // 第 2 段階: 目的値だけで停滞を数える
                     if reldiff <= 1e-4 {
@@ -2573,6 +2620,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 }
                                 stall = 0;
                             } else if !phase2_on {
+                                if cs_gap.is_some() && self.params.verbose {
+                                    eprintln!("MIP: cut round {round}: stall stop (ENOMOTO_MIP_CUTSTALL_GAP, obj {obj:.10e})");
+                                }
                                 break;
                             } else {
                             // 第 2 段階へ (ラウンド数の上限を延ばす)
