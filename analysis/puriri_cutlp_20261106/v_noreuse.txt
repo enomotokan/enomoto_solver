@@ -1,0 +1,57 @@
+
+running 1 test
+CUTLP: /tmp/dump/cutlp_r0_TimeLimit: n=3555 m=5977 nnz=120812 basis=5977 x=3555 dse=5977
+PROF_PHASES_EXT wall=40206.660ms iters=15840 (2538.3us/iter) accounted=98.4% of wall refactor_count=1033 (verify=431 try_update=3 bump=0 drift=255 d_drift=0 illcond=342 max_updates=0 infeas_check=2 clock=0) max_update_streak=172
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=0.5us/iter
+  avg_bfrt_flips/iter=6.263 avg_infeasible_pool/iter=3339.5
+  pivot_order_reuse: attempts=0 accepted=0 (0.0%) attempt_time=0.000ms row_repicks=0 fail(singular=0 fill=0) backoff_skips=0 nnz_reuse_avg=0 nnz_full_avg=92677
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=25104 final_expected_density col_aq=0.952 bfrt=0.463
+  btran_l scatter=16363 gather=1639
+  pivot_search steps=6646455 search_limit_hits=744372 (11.2%) candidates=86291729 (avg 12.98/step) scan=10608.632ms
+  col_max_abs rescan_entries=386967807 pivot_threshold=0.5 (escalations=1)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=875 (5.5% of iters) avg_harris_window_size=12.839
+  pool_grew=7142 (45.1%) pool_shrank=7725 (48.8%) pool_same=972 (6.1%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)          835.388ms    2.1% of wall  52.739us/iter
+  price                1305.331ms    3.2% of wall  82.407us/iter
+  chuzr                 316.376ms    0.8% of wall  19.973us/iter
+  chuzc1                344.646ms    0.9% of wall  21.758us/iter
+  bfrt                   89.821ms    0.2% of wall  5.671us/iter
+  ftran                2981.030ms    7.4% of wall  188.196us/iter
+  xb_update            1522.621ms    3.8% of wall  96.125us/iter
+  dse_update            149.469ms    0.4% of wall  9.436us/iter
+  dual_update            89.551ms    0.2% of wall  5.653us/iter
+  ft_update             484.446ms    1.2% of wall  30.584us/iter
+  refactor             31433.147ms   78.2% of wall  1984.416us/iter
+PROF_PHASES_EXT wall=0.049ms iters=1 (48.8us/iter) accounted=0.0% of wall refactor_count=0 (verify=0 try_update=0 bump=0 drift=0 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=0) max_update_streak=0
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=0.0us/iter
+  avg_bfrt_flips/iter=0.000 avg_infeasible_pool/iter=0.0
+  pivot_order_reuse: attempts=0 accepted=0 (0.0%) attempt_time=0.000ms row_repicks=0 fail(singular=0 fill=0) backoff_skips=0 nnz_reuse_avg=0 nnz_full_avg=92677
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=0 final_expected_density col_aq=0.000 bfrt=0.000
+  btran_l scatter=16363 gather=1639
+  pivot_search steps=6646455 search_limit_hits=744372 (11.2%) candidates=86291729 (avg 12.98/step) scan=10608.632ms
+  col_max_abs rescan_entries=386967807 pivot_threshold=0.25 (escalations=1)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=0 (0.0% of iters) avg_harris_window_size=0.000
+  pool_grew=0 (0.0%) pool_shrank=0 (0.0%) pool_same=0 (0.0%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)            0.000ms    0.0% of wall  0.000us/iter
+  price                   0.000ms    0.0% of wall  0.000us/iter
+  chuzr                   0.000ms    0.0% of wall  0.000us/iter
+  chuzc1                  0.000ms    0.0% of wall  0.000us/iter
+  bfrt                    0.000ms    0.0% of wall  0.000us/iter
+  ftran                   0.000ms    0.0% of wall  0.000us/iter
+  xb_update               0.000ms    0.0% of wall  0.000us/iter
+  dse_update              0.000ms    0.0% of wall  0.000us/iter
+  dual_update             0.000ms    0.0% of wall  0.000us/iter
+  ft_update               0.000ms    0.0% of wall  0.000us/iter
+  refactor                0.000ms    0.0% of wall  0.000us/iter
+CUTLP: rep=0 status=TimeLimit iters=16975 time=41.150s (2424.2 us/iter) obj=5.9119682617e4
+CUTLP: pivlog log10|alpha_r| -12..2: [4, 4, 11, 28, 11, 7, 1, 2, 14, 162, 1211, 6411, 7340, 1425, 278] tiny(upd<10,<20,>=20): [11, 6, 41] discarded 782 tried 16909
+test simplex::cut_lp_debug::cut_lp_debug ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 359 filtered out; finished in 41.19s
+

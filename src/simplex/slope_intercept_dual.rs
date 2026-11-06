@@ -6725,7 +6725,62 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 pivlog_discard();
             }
             if env_str!("ENOMOTO_DEBUG_D_DRIFT_EXT").is_some() {
-                eprintln!("DEBUG_D_DRIFT: VERIFY_FAIL at iter={iter_idx} q={q} r={r} alpha_q={alpha_q} alpha_full_r={}", alpha_full[r]);
+                eprintln!("DEBUG_D_DRIFT: VERIFY_FAIL at iter={iter_idx} q={q} r={r} alpha_q={alpha_q} alpha_full_r={} upd={} gross={pivot_grossly_inconsistent} sing={pivot_makes_singular}", alpha_full[r], lu.update_count());
+                // 診断 `ENOMOTO_DEBUG_VERIFY_RESID` (analysis/puriri_cutlp_20261106.md): 照合に落ちた軸で、今の LU (更新込み) と
+                // 一から分解し直した LU (順序の使い回しなし) の FTRAN・BTRAN の残差と、2 つの軸の値を比べる
+                if env_str!("ENOMOTO_DEBUG_VERIFY_RESID").is_some() {
+                    let mut aq = vec![0.0; m];
+                    for &(i, v) in std.cols.col(q) {
+                        aq[i] = v;
+                    }
+                    let mut er = vec![0.0; m];
+                    er[r] = 1.0;
+                    let resid = |x: &[f64]| -> (f64, f64) {
+                        let mut bx = aq.clone();
+                        for (pos, &xv) in x.iter().enumerate() {
+                            if xv != 0.0 {
+                                for &(i, v) in std.cols.col(basis[pos]) {
+                                    bx[i] -= v * xv;
+                                }
+                            }
+                        }
+                        (bx.iter().fold(0.0f64, |a, v| a.max(v.abs())), x.iter().fold(0.0f64, |a, v| a.max(v.abs())))
+                    };
+                    let resid_t = |y: &[f64]| -> (f64, f64) {
+                        let mut e = 0.0f64;
+                        for (pos, &var) in basis.iter().enumerate() {
+                            let mut d: f64 = std.cols.col(var).iter().map(|&(i, v)| v * y[i]).sum();
+                            if pos == r {
+                                d -= 1.0;
+                            }
+                            e = e.max(d.abs());
+                        }
+                        (e, y.iter().fold(0.0f64, |a, v| a.max(v.abs())))
+                    };
+                    let mut scr = vec![0.0; m];
+                    let mut x1 = vec![0.0; m];
+                    lu.solve_into(&aq, &mut scr, &mut x1);
+                    let mut y1 = vec![0.0; m];
+                    lu.solve_transpose_into(&er, &mut scr, &mut y1);
+                    let (rx1, nx1) = resid(&x1);
+                    let (ry1, ny1) = resid_t(&y1);
+                    let a_row1: f64 = aq.iter().zip(&y1).map(|(a, b)| a * b).sum();
+                    let fresh = super::basis_kernel::factorize_basis(std, &basis_pos, None);
+                    let (s2, ok2) = if let Some(f) = fresh.as_ref() {
+                        let mut x2 = vec![0.0; m];
+                        f.solve_into(&aq, &mut scr, &mut x2);
+                        let mut y2 = vec![0.0; m];
+                        f.solve_transpose_into(&er, &mut scr, &mut y2);
+                        let (rx2, nx2) = resid(&x2);
+                        let (ry2, ny2) = resid_t(&y2);
+                        let a_row2: f64 = aq.iter().zip(&y2).map(|(a, b)| a * b).sum();
+                        (format!("fresh: x_r={:.6e} rho.a_q={:.6e} ftran_resid={rx2:.2e} |x|={nx2:.2e} btran_resid={ry2:.2e} |rho|={ny2:.2e} lu_nnz={}", x2[r], a_row2, f.lu_nnz()), true)
+                    } else {
+                        ("fresh: singular".to_string(), false)
+                    };
+                    let _ = ok2;
+                    eprintln!("VERIFY_RESID iter={iter_idx} upd={} cur: x_r={:.6e} rho.a_q={a_row1:.6e} ftran_resid={rx1:.2e} |x|={nx1:.2e} btran_resid={ry1:.2e} |rho|={ny1:.2e} | {s2}", lu.update_count(), x1[r]);
+                }
             }
             discards_since_pivot += 1;
             discards_since_pivot_max = discards_since_pivot_max.max(discards_since_pivot);

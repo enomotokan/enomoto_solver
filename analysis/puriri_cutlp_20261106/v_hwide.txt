@@ -1,0 +1,57 @@
+
+running 1 test
+CUTLP: /tmp/dump/cutlp_r0_TimeLimit: n=3555 m=5977 nnz=120812 basis=5977 x=3555 dse=5977
+PROF_PHASES_EXT wall=41067.735ms iters=7936 (5174.9us/iter) accounted=98.9% of wall refactor_count=811 (verify=476 try_update=1 bump=0 drift=90 d_drift=0 illcond=225 max_updates=0 infeas_check=19 clock=0) max_update_streak=160
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=0.6us/iter
+  avg_bfrt_flips/iter=8.619 avg_infeasible_pool/iter=3128.7
+  pivot_order_reuse: attempts=111 accepted=33 (29.7%) attempt_time=1856.613ms row_repicks=13127 fail(singular=21 fill=57) backoff_skips=748 nnz_reuse_avg=91739 nnz_full_avg=112233
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=11160 final_expected_density col_aq=0.941 bfrt=0.459
+  btran_l scatter=7893 gather=1130
+  pivot_search steps=5008755 search_limit_hits=787703 (15.7%) candidates=75595346 (avg 15.09/step) scan=13248.335ms
+  col_max_abs rescan_entries=482044347 pivot_threshold=0.5 (escalations=1)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=3236 (40.8% of iters) avg_harris_window_size=19.009
+  pool_grew=2849 (35.9%) pool_shrank=4463 (56.2%) pool_same=623 (7.9%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)          470.564ms    1.1% of wall  59.295us/iter
+  price                 496.561ms    1.2% of wall  62.571us/iter
+  chuzr                 164.217ms    0.4% of wall  20.693us/iter
+  chuzc1                112.657ms    0.3% of wall  14.196us/iter
+  bfrt                   60.467ms    0.1% of wall  7.619us/iter
+  ftran                1635.790ms    4.0% of wall  206.123us/iter
+  xb_update             655.248ms    1.6% of wall  82.567us/iter
+  dse_update             72.824ms    0.2% of wall  9.176us/iter
+  dual_update            32.181ms    0.1% of wall  4.055us/iter
+  ft_update             385.532ms    0.9% of wall  48.580us/iter
+  refactor             36510.182ms   88.9% of wall  4600.577us/iter
+PROF_PHASES_EXT wall=0.048ms iters=1 (48.5us/iter) accounted=0.0% of wall refactor_count=0 (verify=0 try_update=0 bump=0 drift=0 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=0) max_update_streak=0
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=0.0us/iter
+  avg_bfrt_flips/iter=0.000 avg_infeasible_pool/iter=0.0
+  pivot_order_reuse: attempts=111 accepted=33 (29.7%) attempt_time=1856.613ms row_repicks=13127 fail(singular=21 fill=57) backoff_skips=748 nnz_reuse_avg=91739 nnz_full_avg=112233
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=0 final_expected_density col_aq=0.000 bfrt=0.000
+  btran_l scatter=7893 gather=1130
+  pivot_search steps=5008755 search_limit_hits=787703 (15.7%) candidates=75595346 (avg 15.09/step) scan=13248.335ms
+  col_max_abs rescan_entries=482044347 pivot_threshold=0.25 (escalations=1)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=0 (0.0% of iters) avg_harris_window_size=0.000
+  pool_grew=0 (0.0%) pool_shrank=0 (0.0%) pool_same=0 (0.0%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)            0.000ms    0.0% of wall  0.000us/iter
+  price                   0.000ms    0.0% of wall  0.000us/iter
+  chuzr                   0.000ms    0.0% of wall  0.000us/iter
+  chuzc1                  0.000ms    0.0% of wall  0.000us/iter
+  bfrt                    0.000ms    0.0% of wall  0.000us/iter
+  ftran                   0.000ms    0.0% of wall  0.000us/iter
+  xb_update               0.000ms    0.0% of wall  0.000us/iter
+  dse_update              0.000ms    0.0% of wall  0.000us/iter
+  dual_update             0.000ms    0.0% of wall  0.000us/iter
+  ft_update               0.000ms    0.0% of wall  0.000us/iter
+  refactor                0.000ms    0.0% of wall  0.000us/iter
+CUTLP: rep=0 status=TimeLimit iters=8530 time=41.598s (4876.7 us/iter) obj=5.9119682617e4
+CUTLP: pivlog log10|alpha_r| -12..2: [4, 1, 8, 17, 5, 4, 1, 7, 9, 41, 278, 2555, 4769, 341, 96] tiny(upd<10,<20,>=20): [9, 4, 22] discarded 708 tried 8136
+test simplex::cut_lp_debug::cut_lp_debug ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 359 filtered out; finished in 41.63s
+

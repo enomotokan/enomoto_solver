@@ -14,7 +14,7 @@ h.readModel(prefix + ".mps")
 lp = h.getLp()
 n, m = lp.num_col_, lp.num_row_
 h.changeColsIntegrality(n, np.arange(n, dtype=np.int32), np.zeros(n, dtype=np.uint8))
-for k, v in [("presolve", "off"), ("solver", "simplex"), ("simplex_strategy", 1), ("time_limit", tl), ("random_seed", 0)]:
+for k, v in [("presolve", "off"), ("solver", "simplex"), ("simplex_strategy", 1), ("time_limit", tl), ("random_seed", 0)] + [(k, int(v)) for k, v in (a.split("=") for a in sys.argv[4:])]:
     h.setOptionValue(k, v)
 lines = open(prefix + ".bas").read().split("\n")
 b = [int(t) for t in lines[1].split()]
@@ -55,3 +55,9 @@ dt = time.time() - t0
 info = h.getInfo()
 print(f"HIGHS mode={mode} status={h.modelStatusToString(h.getModelStatus())} iters={info.simplex_iteration_count} time={dt:.3f}s "
       f"({1e6*dt/max(1,info.simplex_iteration_count):.1f} us/iter) obj={info.objective_function_value:.10e}", flush=True)
+# 環境変数 HB_DUMP=<パス>: 終わった時の基底を .bas の 2 行目と同じ形 (構造列 j、スラック n + i) で書き出す
+import os
+if os.environ.get("HB_DUMP"):
+    hb = h.getBasis()
+    bb = [j for j in range(n) if hb.col_status[j] == highspy.HighsBasisStatus.kBasic] + [n + i for i in range(m) if hb.row_status[i] == highspy.HighsBasisStatus.kBasic]
+    open(os.environ["HB_DUMP"], "w").write(f"{n} {m}\n" + " ".join(map(str, bb)) + "\n")

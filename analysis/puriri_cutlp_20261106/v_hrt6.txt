@@ -1,0 +1,33 @@
+
+running 1 test
+CUTLP: /tmp/dump/cutlp_r0_TimeLimit: n=3555 m=5977 nnz=120812 basis=5977 x=3555 dse=5977
+PROF_PHASES_EXT wall=39380.743ms iters=11968 (3290.5us/iter) accounted=98.7% of wall refactor_count=980 (verify=530 try_update=3 bump=0 drift=157 d_drift=0 illcond=289 max_updates=0 infeas_check=1 clock=0) max_update_streak=280
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=0.6us/iter
+  avg_bfrt_flips/iter=8.242 avg_infeasible_pool/iter=3305.5
+  pivot_order_reuse: attempts=81 accepted=6 (7.4%) attempt_time=1333.081ms row_repicks=10497 fail(singular=31 fill=44) backoff_skips=988 nnz_reuse_avg=95826 nnz_full_avg=99652
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=18697 final_expected_density col_aq=0.958 bfrt=0.467
+  btran_l scatter=12804 gather=1465
+  pivot_search steps=6102526 search_limit_hits=636026 (10.4%) candidates=77987018 (avg 12.78/step) scan=9816.633ms
+  col_max_abs rescan_entries=339426334 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=2585 (21.6% of iters) avg_harris_window_size=16.146
+  pool_grew=5239 (43.8%) pool_shrank=5927 (49.5%) pool_same=801 (6.7%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)          683.632ms    1.7% of wall  57.122us/iter
+  price                 878.941ms    2.2% of wall  73.441us/iter
+  chuzr                 242.734ms    0.6% of wall  20.282us/iter
+  chuzc1                220.412ms    0.6% of wall  18.417us/iter
+  bfrt                   91.438ms    0.2% of wall  7.640us/iter
+  ftran                2306.457ms    5.9% of wall  192.719us/iter
+  xb_update            1061.071ms    2.7% of wall  88.659us/iter
+  dse_update            110.756ms    0.3% of wall  9.254us/iter
+  dual_update            59.705ms    0.2% of wall  4.989us/iter
+  ft_update             458.127ms    1.2% of wall  38.279us/iter
+  refactor             32766.230ms   83.2% of wall  2737.820us/iter
+CUTLP: rep=0 status=TimeLimit iters=13253 time=40.399s (3048.3 us/iter) obj=5.9119682617e4
+CUTLP: pivlog log10|alpha_r| -12..2: [3, 3, 6, 24, 7, 0, 6, 3, 10, 109, 763, 4794, 6365, 987, 158] tiny(upd<10,<20,>=20): [4, 5, 34] discarded 826 tried 13238
+test simplex::cut_lp_debug::cut_lp_debug ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 359 filtered out; finished in 40.46s
+

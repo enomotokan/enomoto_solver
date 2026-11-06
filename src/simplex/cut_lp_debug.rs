@@ -198,6 +198,16 @@ fn cut_lp_debug() {
         let secs = t0.elapsed().as_secs_f64();
         let it = lp.total_iterations();
         eprintln!("CUTLP: rep={rep} status={st:?} iters={it} time={secs:.3}s ({:.1} us/iter) obj={:.10e}", 1e6 * secs / it.max(1) as f64, lp.objective());
+        // `CUTLP_DUMP_BASIS=<パス>`: 求解の後の基底の列 (.bas の 2 行目と同じ形) を書き出す (途中の基底の条件数を見る)
+        if let (Ok(path), Some(b2)) = (std::env::var("CUTLP_DUMP_BASIS"), lp.basis_cols()) {
+            let line: Vec<String> = b2.iter().map(|v| v.to_string()).collect();
+            std::fs::write(&path, format!("{n} {m}\n{}\n", line.join(" "))).unwrap();
+        }
+        // `ENOMOTO_SIMPLEX_PIVLOG`: 試した軸の |alpha_r| の桁の分布 (1e-12 未満, 1e-11, ..., 1e2 以上)、更新 0..10/10..20/20.. の |alpha_r| < 1e-7、破棄・試した数
+        if std::env::var("ENOMOTO_SIMPLEX_PIVLOG").is_ok() {
+            let p = crate::simplex::slope_intercept_dual::pivlog_take();
+            eprintln!("CUTLP: pivlog log10|alpha_r| -12..2: {:?} tiny(upd<10,<20,>=20): {:?} discarded {} tried {}", &p[0..15], &p[15..18], p[18], p[19]);
+        }
         // 求解の後の基底について、次の求解に渡る重み (求解の最後の重み) と厳密な重みを比べる
         if std::env::var("CUTLP_DSE_COMPARE").is_ok() {
             if let (Some(b2), Some(w2)) = (lp.basis_cols(), lp.dse_weights()) {
