@@ -1,0 +1,77 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP swath1 has 884 rows; 6805 cols; 34965 nonzeros; 2306 integer variables (2306 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 2e+01]
+Presolving model
+482 rows, 6320 cols, 27760 nonzeros 0s
+482 rows, 6260 cols, 25480 nonzeros 0s
+Presolve reductions: rows 482(-402); columns 6260(-545); nonzeros 25480(-9485) 
+
+Solving MIP model with:
+   482 rows
+   6260 cols (2089 binary, 0 integer, 0 implied int., 4171 continuous, 0 domain fixed)
+   25480 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     0.5s
+         0       0         0   0.00%   334.4968581     inf                  inf        0      0      0       113     0.5s
+ R       0       0         0   0.00%   340.2035695     416.4742865       18.31%      252     49     34       174     0.9s
+ L       0       0         0   0.00%   340.2035695     383.0327481       11.18%      252     49     34       174     3.0s
+
+65.9% inactive integer columns, restarting
+Model after restart has 474 rows, 4884 cols (713 bin., 0 int., 0 impl., 4171 cont., 0 dom.fix.), and 19996 nonzeros
+
+         0       0         0   0.00%   340.8557088     383.0327481       11.01%       13      0      0      3924     4.2s
+         0       0         0   0.00%   340.8557088     383.0327481       11.01%       14     11      0      3974     4.2s
+ L       0       0         0   0.00%   340.8602297     379.0712957       10.08%      236     39      0      5711     6.4s
+
+4.9% inactive integer columns, restarting
+Model after restart has 472 rows, 4849 cols (678 bin., 0 int., 0 impl., 4171 cont., 0 dom.fix.), and 19854 nonzeros
+
+         0       0         0   0.00%   340.860232      379.0712957       10.08%       17      0      0      6859     6.5s
+         0       0         0   0.00%   340.860232      379.0712957       10.08%       17     16      0      6905     6.5s
+        31       0        15  98.83%   341.3284942     379.0712957        9.96%      394     18   2512     16761    11.6s
+       107       0        54 100.00%   379.0712957     379.0712957        0.00%      551     33   9695     28895    15.0s
+
+Solving report
+  Model             swath1
+  Status            Optimal
+  Primal bound      379.07129575
+  Dual bound        379.07129575
+  Gap               0%
+  P-D integral      1.5992319212
+  Solution status   feasible
+                    379.07129575 (objective)
+                    0 (bound viol.)
+                    1.11022302463e-15 (int. viol.)
+                    0 (row viol.)
+  Timing            15.04
+                    2.32 (Presolve)
+                        MIP    time [calls] = 0.44 [1]
+                        subMIP time [calls] = 1.88 [52]
+                    12.70 (Solve)
+                        MIP    time [calls] = 6.94 [1]
+                        subMIP time [calls] = 5.76 [52]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [52]
+  Max sub-MIP depth 12
+  Nodes             107
+  Repair LPs        0
+  LP iterations     28895
+                    13467 (strong br.)
+                    242 (separation)
+                    9960 (heuristics)
+{"status": "Optimal", "objective": 379.0712957499999, "bound": 379.0712957499999, "nodes": 107, "time": 15.04769763500002}
