@@ -1178,6 +1178,11 @@ impl TwoStageLp {
         let it0 = self.iters;
         let pol0 = sid::ext_polish_iterations();
         let scale_once = std::mem::take(&mut self.scale_once);
+        // 調べ用 (`ENOMOTO_SIMPLEX_SCALE_LOG`): 根の LP・最初の LP の大きさと係数の幅、条件に当たったか (analysis/rootlp_scale_20261106.md)
+        if scale_once && env_str!("ENOMOTO_SIMPLEX_SCALE_LOG").is_some() {
+            let warm = matches!(&self.basis, Some(b) if b.len() == self.rows.len());
+            eprintln!("ROOTLP_SCALE: rows {} cols {} range {:.3e} warm {warm} applies {}", self.rows.len(), self.n, coef_range(&self.rows), self.scale_once_applies());
+        }
         let st = if (scale_once && self.scale_once_applies())
             || (scale_cold_on()
                 && !matches!(&self.basis, Some(b) if b.len() == self.rows.len())
