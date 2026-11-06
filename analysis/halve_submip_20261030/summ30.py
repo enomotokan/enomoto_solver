@@ -29,9 +29,6 @@ for rep in reps:
         continue
     row([(p, rep) for p in PROBS], f"58問 rep {rep}")
 row([(p, r) for p in PROBS for r in reps if r != 118], "58問 全回")
-mk = row([k for k in R if k[1] == 118], "Mittelmann")
-mk2 = [k for k in mk if ok(R[k][A]) or ok(R[k][B])]
-row(mk2, "Mitt 片方以上解")
 print("\n片方だけ解けた回:")
 for k in sorted(R):
     d = R[k]
