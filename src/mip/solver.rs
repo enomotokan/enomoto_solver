@@ -17818,10 +17818,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 文字の条件のどれかに当たれば再スタートを止める (false を返す)。
     /// - `l`: 根のやり直しの見込みの費用 (この求解で木に入るまでの秒 × `ENOMOTO_T_MIP_TREE_RESTART_GUARD_ROOT` (1)) が残り時間の
     ///   `ENOMOTO_T_MIP_TREE_RESTART_GUARD_LEFT` (0.25) を超える。
-    /// - `c`: 木の残りの見込みの秒が根のやり直しの見込みの費用の `ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST` (3) 倍に満たない。木の残りは、
+    /// - `c`: 木の残りの見込みの秒が根のやり直しの見込みの費用の `ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST` (1) 倍に満たない。木の残りは、
     ///   刈った重み q の木に入ってからの進み (残り = 木の秒 × (1 − q) / q) から出す。
     /// - `g`: 相対ギャップ (暫定解 − 全体の下界) / max(|暫定解|, 1) が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_GAP` (1e-3) 未満。
     /// - `q`: 刈った重み q が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_Q` (0.5) 以上 (木がもう半分以上閉じた)。
+    /// - `k`: 新たな固定が `ENOMOTO_T_MIP_TREE_RESTART_FIX_FRAC` (0.01) × 根で自由な整数列 (少なくとも `..._MIN_FIX` 本) に満たず
+    ///   (`=1` なら見送る再スタート)、今の LP のカットの行が max(`ENOMOTO_T_MIP_TREE_RESTART_GUARD_KCUTS` (50),
+    ///   `ENOMOTO_T_MIP_TREE_RESTART_GUARD_KFRAC` (0.1) × 問題の行) に満たない (固定もカットも持ち込めない再スタート)。
     /// - `n`: この求解の木の全体のノード数が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_NODES` (300) 未満 (木の中の暫定解ですぐ再スタートしない)。
     fn tree_restart_guard_ok(&mut self, plunge: Option<&OpenNode>, why: &str) -> bool {
         use std::sync::atomic::Ordering;
@@ -17860,11 +17863,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let est_left_h = if self.tr_est.is_finite() && why == "due" { (self.tr_est - done as f64).max(0.0) * tree_t / done.max(1) as f64 } else { f64::NAN };
         let free0 = self.p.nint.saturating_sub(self.root_fixed0).max(1);
         let newly = self.newly_fixed_ints();
+        // 今の LP (最後のノードの LP) のカットの行の数。再スタートでは、このうち効いているものが問題の行になる
+        let cuts = self.lp.num_rows().saturating_sub(self.p.m);
+        let fix_min = (tunable!("ENOMOTO_T_MIP_TREE_RESTART_FIX_FRAC", 0.01, f64) * free0 as f64).max(tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_FIX", 1usize, usize).max(1) as f64);
         let mut stop: Option<char> = None;
         for c in guard.chars() {
             let hit = match c {
+                'k' => {
+                    (newly as f64) < fix_min
+                        && (cuts as f64) < (tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_KCUTS", 50usize, usize) as f64).max(tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_KFRAC", 0.1, f64) * self.p.m as f64)
+                }
                 'l' => root_cost > tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_LEFT", 0.25, f64) * left,
-                'c' => est_left < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST", 3.0, f64) * root_cost,
+                'c' => est_left < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST", 1.0, f64) * root_cost,
                 'g' => gap < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_GAP", 1e-3, f64),
                 'q' => q >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_Q", 0.5, f64),
                 'n' => done < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_NODES", 300u64, u64),
@@ -17877,13 +17887,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if log {
             eprintln!(
-                "TRSTAT: {why} outer {:.2} solve {solve_t:.2} root {:.2} tree {tree_t:.2} restarts {} nodes {done} open {open} q {q:.4} est {:.0} est_left {est_left:.2} est_left_h {est_left_h:.1} lb {lb:.10e} root_lb {:.10e} ub {ub:.10e} gap {gap:.3e} newly {newly}/{free0} ({:.4}) left {left:.1} guard {}",
+                "TRSTAT: {why} outer {:.2} solve {solve_t:.2} root {:.2} tree {tree_t:.2} restarts {} nodes {done} open {open} q {q:.4} est {:.0} est_left {est_left:.2} est_left_h {est_left_h:.1} lb {lb:.10e} root_lb {:.10e} ub {ub:.10e} gap {gap:.3e} newly {newly}/{free0} ({:.4}) cuts {cuts}/{} left {left:.1} guard {}",
                 super::outer_elapsed().unwrap_or(f64::NAN),
                 self.tr_t0,
                 self.params.restarts,
                 self.tr_est,
                 self.tr_root_lb,
                 newly as f64 / free0 as f64,
+                self.p.m,
                 stop.map_or("pass".to_string(), |c| format!("stop {c}"))
             );
         }
