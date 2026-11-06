@@ -1731,10 +1731,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.sep_adapt.ran = 0;
             let (mut cands, mut fcands) = self.separate_face_split(&x, false);
             // 試作 `ENOMOTO_MIP_MPSEP`: 今の頂点 x* のほかの点 (最適面の上の別の頂点、x* と内点を結ぶ線分上の点) でも分離して候補に足す
+            // 足した点の候補は `mp_cands` に分けておく (値に `P` を含まなければカットプールに入れない。`q` でなければ選択の前に候補に混ぜる)
+            let mut mp_cands: Vec<Candidate> = Vec::new();
             let mp_pts: Vec<Vec<f64>> = match &mpsep {
-                Some(f) => self.mpsep_extra(f, &x, round, &mut cands, &mut mp_center, &mut mp_center_tried, &mut mp_stats),
+                Some(f) => self.mpsep_extra(f, &x, round, &mut mp_cands, &mut mp_center, &mut mp_center_tried, &mut mp_stats),
                 None => Vec::new(),
             };
+            let mp_quota = mpsep.as_ref().is_some_and(|f| f.contains('q'));
+            if mpsep.as_ref().is_some_and(|f| f.contains('P')) {
+                for c in &mp_cands {
+                    self.add_to_pool(&c.coefs, c.rhs);
+                }
+            }
             // 分離の間に求解の期限を過ぎたら、このラウンドを捨てて抜ける (ラウンドの頭の `time_up` で抜けるのと同じ状態)。
             // 裏のカットの求解のラウンド (rail507 で 1 回 3〜9 秒) の候補のプールへの追加・選択が期限の後も回り、主がその終わりを
             // 待って時間の上限を 5 秒過ぎていた (analysis/overrun_crypt_20261101.md)
@@ -1842,10 +1850,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_MPSEP`: 候補の効き目を、x* だけでなく全部の点での効き目 (最大、値に `u` を含めば正の部分の和) にする。
             // x* を切る候補の最良の点数を質の閾値の基準にする (x* を切らない候補だけが採られて LP が動かなくなるのを避ける)
             let mut mp_anchor: Option<f64> = None;
+            // `q`: x* での既定の選択はそのまま (候補も効き目も変えない) にし、別枠で、全部の点での効き目の順に
+            // `ENOMOTO_T_MIP_MPSEP_EXTRA` (既定 10) 本まで足す候補 (足した点の候補と、x* の候補の全部。効き目は全部の点での値)
+            let mut mp_extra_pool: Vec<Candidate> = Vec::new();
+            if mp_quota {
+                mp_extra_pool = std::mem::take(&mut mp_cands);
+                mp_extra_pool.extend(cands.iter().filter(|c| !c.forced).cloned());
+            } else {
+                cands.append(&mut mp_cands);
+            }
             if !mp_pts.is_empty() && mpsep.as_ref().is_some_and(|f| !f.contains('p')) {
                 let sum = mpsep.as_ref().is_some_and(|f| f.contains('u'));
                 let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
-                for c in cands.iter_mut().filter(|c| !c.forced) {
+                let target = if mp_quota { &mut mp_extra_pool } else { &mut cands };
+                for c in target.iter_mut().filter(|c| !c.forced) {
                     let norm = c.coefs.iter().map(|&(_, a)| a * a).sum::<f64>().sqrt().max(1e-300);
                     let ev = |pt: &[f64]| (c.coefs.iter().map(|&(j, a)| a * pt[j]).sum::<f64>() - c.rhs) / norm;
                     let e0 = ev(&x);
@@ -1856,12 +1874,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         esum += e.max(0.0);
                     }
                     c.efficacy = if sum { esum } else { emax };
-                    if e0 > 1e-6 {
+                    if e0 > 1e-6 && !mp_quota {
                         let sc = cut_score(c, p, cnorm);
                         mp_anchor = Some(mp_anchor.map_or(sc, |m: f64| m.max(sc)));
                     }
                 }
-                cands.retain(|c| c.forced || c.efficacy > 1e-6);
+                target.retain(|c| c.forced || c.efficacy > 1e-6);
             }
             let ncands = cands.len() + face_cands.len();
             if ncands == 0 {
@@ -1980,6 +1998,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 for c in chosen.iter().take(topk) {
                     let terms: Vec<String> = c.coefs.iter().take(8).map(|&(j, a)| format!("{a:+.3}*x{j}[{:.3} {}..{} {}]", x[j], self.dom.global_lo[j], self.dom.global_up[j], if p.is_int[j] { "I" } else { "C" })).collect();
                     eprintln!("TOPCUT round {round} eff {:.4} nnz {} <= {:.3}: {}", c.efficacy, c.coefs.len(), c.rhs, terms.join(" "));
+                }
+            }
+            if mp_quota && !mp_extra_pool.is_empty() {
+                // 別枠: 選んだカットと同じもの・平行度が `ENOMOTO_T_MIP_MPSEP_MAXPAR` (既定 0.3) を超えるものを除き、全部の点での効き目の順に
+                let q = tunable!("ENOMOTO_T_MIP_MPSEP_EXTRA", 10usize, usize);
+                let maxpar = tunable!("ENOMOTO_T_MIP_MPSEP_MAXPAR", 0.3, f64);
+                let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
+                let mut ex: Vec<(f64, Candidate)> = mp_extra_pool.drain(..).map(|c| (cut_score(&c, p, cnorm), c)).collect();
+                ex.sort_by(|a, b| b.0.total_cmp(&a.0));
+                let mut added = 0usize;
+                for (_, c) in ex {
+                    if added >= q {
+                        break;
+                    }
+                    if chosen.iter().any(|d| d.coefs == c.coefs && d.rhs == c.rhs || cut_parallelism(&c.coefs, &d.coefs) > maxpar) {
+                        continue;
+                    }
+                    chosen.push(c);
+                    added += 1;
                 }
             }
             if !mp_pts.is_empty() {
