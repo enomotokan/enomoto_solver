@@ -1,6 +1,6 @@
 """デバッグ解による確かめ (analysis/intvub_20261106.md の 2): 前処理後の模型を書き出し (ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED3)、HiGHS で
 最適解を求め (mip_rel_gap 0)、それを ENOMOTO_MIP_DEBUG_SOL に渡して試作で解き、分離の候補がデバッグ解を切るかを
-ENOMOTO_MIP_INTVUB_CHECK で数える。結果は debugsol.txt に足す。使い方: python debugsol.py 問題 設定(iv1|iv3) [時間]"""
+ENOMOTO_MIP_INTVUB_CHECK で数える。結果は debugsol.txt に足す。使い方: python debugsol.py 問題 設定(def|iv1|iv3|iv1i|iv3i) [時間]"""
 import os, re, subprocess, sys
 from pathlib import Path
 import highspy
@@ -23,7 +23,8 @@ if not sol.exists():
         print(p, "HiGHS", st); sys.exit(1)
     sol.write_text("\n".join(repr(v) for v in h.getSolution().col_value) + "\n")
 env = {**base, "ENOMOTO_MIP_DEBUG_SOL": str(sol), "ENOMOTO_MIP_INTVUB_CHECK": "1", "ENOMOTO_MIP_INTVUB_LOG": "1"}
-env.update({"iv1": {"ENOMOTO_MIP_INTVUB": "1"}, "iv3": {"ENOMOTO_MIP_INTVUB": "3"}, "def": {}}[cfg])
+env.update({"iv1": {"ENOMOTO_MIP_INTVUB": "1"}, "iv3": {"ENOMOTO_MIP_INTVUB": "3"}, "def": {},
+            "iv1i": {"ENOMOTO_MIP_INTVUB": "1", "ENOMOTO_MIP_INTVUB_IMPL": "1"}, "iv3i": {"ENOMOTO_MIP_INTVUB": "3", "ENOMOTO_MIP_INTVUB_IMPL": "1"}}[cfg])
 r = run(env)
 err = r.stderr
 feas = re.findall(r"MIP_DEBUG_SOL: reduced objective (\S+) feasible (\S+)", err)
