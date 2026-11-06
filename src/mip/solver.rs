@@ -3567,13 +3567,16 @@ impl CutJob {
                 self.determ_stalled(&d, &h[w0..], &h)
             };
         // 試作 `ENOMOTO_MIP_CUTSTALL_GAP` ([`super::separation::cutstall_gap`]): 窓の判定が停滞でも、窓の伸びが
-        // 窓のラウンド数 × 割合 × min(初めからの伸び, 暫定解との差) を超えていれば停滞としない (初め = 裏のカットを始めたときの主の LP の値)
+        // 窓のラウンド数 × 割合 × min(初めからの伸び, 暫定解との差) を超えていれば停滞としない (初め = 裏のカットを始めたときの主の LP の値と、外側の最初の根のカットの前の値の小さいほう)
         let stall_now = stall_now
             && !super::separation::cutstall_gap().is_some_and(|(t, _)| {
                 let k = h.len();
                 k > w0 + d.win && {
                     let s0 = f64::from_bits(self.start_bits.load(std::sync::atomic::Ordering::Relaxed));
                     let first = if s0.is_finite() { s0.min(h[0]) } else { h[0] };
+                    // 外側の最初の根のカットの前の値 ([`super::separation::cutstall_base`]、元の問題の目的値) があればそれから測る
+                    let b = super::separation::cutstall_base();
+                    let first = if b.is_finite() { first.min(b) } else { first };
                     let (cur, recent) = (h[k - 1], h[k - 1] - h[k - 1 - d.win]);
                     let mut scale = (cur - first).max(0.0);
                     if zc.is_finite() {

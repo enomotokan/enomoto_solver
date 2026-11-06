@@ -22,7 +22,9 @@ h.startCallback(highspy.cb.HighsCallbackType.kCallbackMipGetCutPool)
 h.run()
 info = h.getInfo()
 print("BOUND", info.mip_dual_bound, "pools", [(p["ncut"], p["dual"]) for p in pools])
-plp = h.getPresolvedLp()
+# MIP の求解の後の getPresolvedLp は空なので、同じ模型を別に前処理だけして列の種類を取る (列の数がカットプールと同じか確かめる)
+h2 = highspy.Highs(); h2.setOptionValue("output_flag", False); h2.readModel(sys.argv[1]); h2.presolve()
+plp = h2.getPresolvedLp()
 names = list(plp.col_names_)
 integ = list(plp.integrality_)
 lo, up = list(plp.col_lower_), list(plp.col_upper_)
@@ -41,5 +43,5 @@ for p in pools:
         nnz.append(len(ix))
     out["pools"].append({"ncut": p["ncut"], "ncol": p["ncol"], "dual": p["dual"], "nnz_mean": sum(nnz) / max(1, len(nnz)),
                          "top_kinds": sig.most_common(15),
-                         "examples": [(list(zip([names[j] if j < len(names) else j for j in ix], va)), l, u) for ix, va, l, u in p["cuts"][:6]]})
+                         "examples": [([(names[j] if j < len(names) else j, kind(j), v, lo[j], up[j]) for j, v in zip(ix, va)], l, u) for ix, va, l, u in p["cuts"][:6]]})
 json.dump(out, open(sys.argv[3], "w"), indent=1, default=str)

@@ -63,6 +63,15 @@ fn ho5_cutlp_gain() -> f64 {
 ///
 /// 値: 数 (0 < t < 1) ならその割合、ほかは 1e-3。末尾に `n` を付けるとラウンドの延長をしない (例 `1n`)。
 /// unitcal_7 は目的値 1.96e7 に対し 1 ラウンドの伸びが 300〜1000 で、今までの判定では相対変化 1.5e-5〜5e-5 の「停滞」になり 17 ラウンド前後で止まる
+/// `ENOMOTO_MIP_CUTSTALL_GAP` の「カットで上げた分」の基準: 外側の最初の根のカットの前の LP の値 (前処理の定数項を足した元の問題の目的値)。
+/// 再スタートの後の根や裏のカットの写しも、この値からの伸びを尺度にする (再スタートの後の根の LP の値を基準にすると、伸びが小さい分だけ
+/// 少しの伸びでも停滞と数えなくなる。neos-3083819-nubu で再スタートの後の根が 25 ラウンドを延長して回った)。値がなければ NaN
+pub(super) static CUTSTALL_BASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+pub(super) fn cutstall_base() -> f64 {
+    f64::from_bits(CUTSTALL_BASE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 pub(super) fn cutstall_gap() -> Option<(f64, bool)> {
     env_str!("ENOMOTO_MIP_CUTSTALL_GAP").map(|v| {
         let ext = !v.ends_with('n');
@@ -896,10 +905,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let first_obj = prev_obj;
         // `ENOMOTO_MIP_CUTSTALL_GAP` ([`cutstall_gap`]): 外側の根 (裏のカットの写しを含む) だけ
         let cs_gap = cutstall_gap().filter(|_| !self.params.submip);
+        if cs_gap.is_some() && self.params.restarts == 0 && self.snap.is_none() && self.cut_cont.is_none() && first_obj.is_finite() {
+            CUTSTALL_BASE.store((first_obj + p.offset).to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
+        let cs_first = {
+            let b = cutstall_base() - p.offset;
+            if cs_gap.is_some() && b.is_finite() { b.min(first_obj) } else { first_obj }
+        };
+        if cs_gap.is_some() && self.params.verbose && self.snap.is_none() {
+            eprintln!("MIP: cut loop (ENOMOTO_MIP_CUTSTALL_GAP): base {cs_first:.10e} (LP {first_obj:.10e}, offset {:.6e}, prune limit {:.10e})", p.offset, self.prune_limit());
+        }
         // 尺度 = min(カットで上げた分, 暫定解との残りの差)。どちらかの割合を超えて伸びたラウンドは停滞と数えない
         let cs_scale = |slf: &Self, obj: f64| -> f64 {
             let cut = slf.prune_limit();
-            let mut s = obj - first_obj;
+            let mut s = obj - cs_first;
             if cut.is_finite() {
                 s = s.min(cut - obj);
             }
