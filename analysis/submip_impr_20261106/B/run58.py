@@ -15,7 +15,8 @@ CFGS = {
     "sym": {"ENOMOTO_MIP_SUBB_SYM": "1"},
 }
 rep = int(sys.argv[1]); names = sys.argv[2:]
-OUT = D / "res58.jsonl"
+# 書き込み中はリポジトリの外に置く (記録に写すのは終わってから)
+OUT = Path("/tmp/claude-0/running/res58.jsonl")
 done = set()
 if OUT.exists():
     for l in OUT.read_text().splitlines():

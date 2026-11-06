@@ -7,7 +7,7 @@ D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D.parents[2] / "analysis" / "cbcimpl_20261029"))
 from probs import SETS, PROBS  # noqa: E402
 R = defaultdict(dict); keys = []
-for l in open(D / "res58.jsonl"):
+for l in open(sys.argv[1] if len(sys.argv) > 1 else D / "res58.jsonl"):
     r = json.loads(l); k = (r["cfg"], r["rep"]); R[r["problem"]][k] = r["result"]
     if k not in keys: keys.append(k)
 keys.sort()
