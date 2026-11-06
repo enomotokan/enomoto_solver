@@ -982,6 +982,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     obj_prop_stats: [u64; 2],
     /// カットプールの伝播 ([`Self::propagate_cut_pool`]): 呼び出し回数、枝刈りしたノード数、締めた境界の数、時間 (ナノ秒)。
     cutpool_prop_stats: [u64; 4],
+    /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `z`: カットプールにだけ入れる他の写しのカット ([`Self::optface_merge`] が置き、呼び出し側が入れる)
+    optface_pool_rows: std::cell::RefCell<Vec<(Vec<(usize, f64)>, f64)>>,
     /// カットプールの伝播の差分評価の状態 ([`CutPropState`])。
     pub(super) cpp: CutPropState,
     /// 根のカットのループが HiGHS 流のカット管理を有効にしたか (`ENOMOTO_MIP_CUT_STRONG_AUTO`、[`Self::highs_cutmgmt`])。
@@ -4142,6 +4144,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         obj_cols: None,
         obj_prop_stats: [0; 2],
         cutpool_prop_stats: [0; 4],
+        optface_pool_rows: std::cell::RefCell::new(Vec::new()),
         cpp: CutPropState::default(),
         hcm_auto: snap.as_ref().is_some_and(|sn| sn.hcm_auto),
         root_obj_probe_stats: [0; 2],
@@ -4990,6 +4993,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let best = all.iter().enumerate().filter_map(|(k, (_, r, _))| r.as_ref().map(|r| (k, r.1))).max_by(|a, b| a.1.total_cmp(&b.1)).map(|x| x.0)?;
         let (bi, best_res, best_basis) = all.swap_remove(best);
         let (mut rows, obj, rounds) = best_res?;
+        // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `z` (利用者の案): 他の写しのカットのうち、選んだ写しのカット (と取り込んだもの) との平行度が
+        // `ENOMOTO_T_MIP_OPTFACE_RACE_MAXPAR` (既定 0.5) 以下のものを、LP には入れずカットプールにだけ入れる (木のノードの伝播とプールからの分離に使う)
+        if env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('z')) {
+            let maxpar = tunable!("ENOMOTO_T_MIP_OPTFACE_RACE_MAXPAR", 0.5, f64);
+            let mut have: Vec<Vec<(usize, f64)>> = rows.iter().map(|r| r.0.clone()).collect();
+            let mut pool_rows: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
+            let mut nall = 0usize;
+            for (_, r, _) in &all {
+                if let Some((rs, _, _)) = r {
+                    for (c, _, u) in rs {
+                        if !u.is_finite() {
+                            continue;
+                        }
+                        nall += 1;
+                        if have.iter().all(|h| super::separation::cut_parallelism(c, h) <= maxpar) {
+                            have.push(c.clone());
+                            pool_rows.push((c.clone(), *u));
+                        }
+                    }
+                }
+            }
+            if self.params.verbose {
+                eprintln!("MIP: optface parcuts: {} of {nall} cut rows of the other copies with parallelism <= {maxpar} go to the cut pool only", pool_rows.len());
+            }
+            *self.optface_pool_rows.borrow_mut() = pool_rows;
+        }
         let mut added = 0usize;
         if union {
             let key = |c: &[(usize, f64)], l: f64, u: f64| -> Vec<i64> {
@@ -7970,6 +7999,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let par_merge = !bg_extra.is_empty() && env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('m'));
             let res = if bg_extra.is_empty() { res } else { self.optface_merge(res, &bg, &mut bg_extra, cur, env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('u') || v.contains('m'))) };
             bg_extra.clear();
+            // `z`: 他の写しの平行度の低いカットをカットプールにだけ入れる
+            let zrows = std::mem::take(&mut *self.optface_pool_rows.borrow_mut());
+            if !zrows.is_empty() {
+                let n0 = self.cut_pool.len();
+                for (c, r) in &zrows {
+                    self.add_to_pool(c, *r);
+                }
+                if self.params.verbose {
+                    eprintln!("MIP: optface parcuts: {} cuts added to the cut pool ({} new, pool {})", zrows.len(), self.cut_pool.len() - n0, self.cut_pool.len());
+                }
+            }
             if self.params.verbose {
                 eprintln!("MIP: background cuts: root LP re-solved before replacing the cuts: {st0:?}, {} iters ({:.2}s)", self.lp.total_iterations() - it0, self.start.elapsed().as_secs_f64());
             }

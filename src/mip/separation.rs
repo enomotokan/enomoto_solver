@@ -1164,6 +1164,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let race_rounds = tunable!("ENOMOTO_T_MIP_OPTFACE_MERGE_ROUNDS", 5usize, usize).max(1);
         // `x`: 勝った写しが次のラウンドの候補に足す、負けた写しのカット (自分の LP の解を切るもの)
         let race_x = env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('x'));
+        // `y`: 勝った写しは、負けた写しのカットのうち自分の LP のカット (と取り込んだもの) との平行度が `ENOMOTO_T_MIP_OPTFACE_RACE_MAXPAR`
+        // (既定 0.5) 以下のものを、自分の解を切るかによらず LP に直接足す (最大 `ENOMOTO_T_MIP_OPTFACE_RACE_MAX` 本)
+        let race_y = env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('y'));
         let mut race_extra: Vec<(f64, Vec<(usize, f64)>, f64)> = Vec::new();
         let mut cont_stop = false;
         if let Some((w, _, _)) = self.cut_cont {
@@ -1301,8 +1304,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             race_rep.obj = prev_obj;
             if round == race_rounds {
                 if let Some((r, id)) = race_rep.race.take() {
-                    // `x`: 届ける前に自分の LP のカットの行を置き場に入れる
-                    if race_x {
+                    // `x`・`y`: 届ける前に自分の LP のカットの行を置き場に入れる
+                    if race_x || race_y {
                         let mut v = r.rows.lock().unwrap();
                         for i in self.p.m..self.lp.num_rows() {
                             let (_, u) = self.lp.row_bounds(i);
@@ -1361,6 +1364,64 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if self.params.verbose || env_str!("ENOMOTO_MIP_OPTFACE_RACE_LOG").is_some() {
                             eprintln!("MIP: cut round {round}: background copy {id} won: {nall} cut rows of the other copies, {nviol} cut off this LP point, {} added to the candidates", race_extra.len());
+                        }
+                    }
+                    if race_y {
+                        let maxpar = tunable!("ENOMOTO_T_MIP_OPTFACE_RACE_MAXPAR", 0.5, f64);
+                        let lim = tunable!("ENOMOTO_T_MIP_OPTFACE_RACE_MAX", 200usize, usize);
+                        let mut have: Vec<Vec<(usize, f64)>> = (self.p.m..self.lp.num_rows()).map(|i| self.lp.row(i)).collect();
+                        // `x` で候補にしたカットは除く
+                        let cand_keys: std::collections::HashSet<Vec<(usize, u64)>> = race_extra.iter().map(|(_, c, _)| c.iter().map(|&(j, a)| (j, a.to_bits())).collect()).collect();
+                        let v = r.rows.lock().unwrap();
+                        let mut add: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
+                        let mut nall = 0usize;
+                        for (from, c, rhs) in v.iter() {
+                            if *from == id || add.len() >= lim {
+                                continue;
+                            }
+                            nall += 1;
+                            let k: Vec<(usize, u64)> = c.iter().map(|&(j, a)| (j, a.to_bits())).collect();
+                            if cand_keys.contains(&k) {
+                                continue;
+                            }
+                            if have.iter().all(|h| cut_parallelism(c, h) <= maxpar) {
+                                have.push(c.clone());
+                                add.push((c.clone(), f64::NEG_INFINITY, *rhs));
+                            }
+                        }
+                        drop(v);
+                        let mut st_ok = true;
+                        if !add.is_empty() {
+                            let m_before = self.lp.num_rows();
+                            for (c, _, rr) in &add {
+                                self.add_to_pool(c, *rr);
+                            }
+                            self.add_cut_rows(&add);
+                            let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+                            if st != LpStatus::Optimal {
+                                // 解けなければ足した行を外して解き直す
+                                let mut remove = vec![false; self.lp.num_rows()];
+                                for rr in remove.iter_mut().skip(m_before) {
+                                    *rr = true;
+                                }
+                                self.delete_lp_rows(&remove);
+                                let _ = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+                                st_ok = false;
+                            }
+                        }
+                        if self.params.verbose || env_str!("ENOMOTO_MIP_OPTFACE_RACE_LOG").is_some() {
+                            eprintln!(
+                                "MIP: cut round {round}: background copy {id} won: {nall} cut rows of the other copies, {} with parallelism <= {maxpar} added to the LP{}, obj {:.10e} -> {:.10e}",
+                                add.len(),
+                                if st_ok { "" } else { " (LP failed; removed)" },
+                                prev_obj + p.offset,
+                                self.lp.objective() + p.offset
+                            );
+                        }
+                        if st_ok && !add.is_empty() {
+                            if let Some(j) = &job {
+                                j.share_used.fetch_add(add.len(), std::sync::atomic::Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -5404,7 +5465,7 @@ fn fixed_charge_network_with(p: &MipProblem, row_frac: f64) -> bool {
 
 /// 疎なベクトル (列番号の昇順) の内積。
 /// 2 本のカットの係数の向きの余弦 (絶対値)。
-fn cut_parallelism(a: &[(usize, f64)], b: &[(usize, f64)]) -> f64 {
+pub(super) fn cut_parallelism(a: &[(usize, f64)], b: &[(usize, f64)]) -> f64 {
     let na = a.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
     let nb = b.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
     if na == 0.0 || nb == 0.0 {
