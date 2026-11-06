@@ -4,7 +4,7 @@ ENOMOTO は ENOMOTO_MIP_LOG=1 で、ログ (stderr) を logs/<タグ>_<問題>_s
 import json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
-WT = D.parents[2]
+WT = D.parents[1]
 sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
 kind, p, tag, seed = sys.argv[1:5]
