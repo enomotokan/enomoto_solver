@@ -1463,7 +1463,8 @@ pub(crate) fn probe_basis_diag_on() -> bool {
 /// `n`: 列だけの基底を根の LP に渡さない (診断の「渡さない」)、`p`: 既定の判定で渡さない場合も渡す (診断の「渡す」)、
 /// `s`: 列だけの基底から作った根の基底が特異なら渡さない、`c`: 条件 ([`probe_basis_guard_cond`]) に当たれば渡さない、
 /// `r`: 渡す場合も基底なしの内点法 + クロスオーバーと同時に解く、`x`: warm start の反復が見込み (前処理の最初の LP の反復の
-/// `ENOMOTO_T_MIP_PROBE_BASIS_GUARD_X` 倍) を超えたら基底を捨てて基底なし (同時実行) で解き直す
+/// `ENOMOTO_T_MIP_PROBE_BASIS_GUARD_X` 倍) を超えたら基底を捨てて基底なし (同時実行) で解き直す、`f`: 行が変わっていたら行の中身で
+/// 照らし合わせて基底を作り直す ([`root_basis_rebuild`]、`ENOMOTO_MIP_ROOT_BASIS_FIX` の根 (root_probe) の部分だけ)
 pub(crate) fn probe_basis_guard_has(c: char) -> bool {
     env_str!("ENOMOTO_MIP_PROBE_BASIS_GUARD").is_some_and(|v| v.contains(c))
 }
@@ -7037,7 +7038,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let rows_same = |b: &super::lp::Basis| !b.row.is_empty() && b.row.len() <= self.p.m && fp.is_some_and(|f| super::rows_fingerprint(&self.p.rows[..b.row.len()]) == f);
             let mut rebuilt = false;
             let rb = match (rb, saved) {
-                (Some(b), Some((rows, x))) if root_basis_fix_on() && b.col.len() == self.p.n && !rows_same(&b) => {
+                (Some(b), Some((rows, x))) if (root_basis_fix_on() || probe_basis_guard_has('f')) && b.col.len() == self.p.n && !rows_same(&b) => {
                     let t0 = std::time::Instant::now();
                     match root_basis_rebuild(&self.lp, self.p.n, &b.col, &rows, &x) {
                         Some((nb, st)) => {
