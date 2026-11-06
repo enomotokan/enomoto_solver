@@ -1415,6 +1415,8 @@ pub(crate) struct ProbeBasisInfo {
     /// 既定の判定で根の LP に渡したか
     pub passed: bool,
     pub n_fixed: usize,
+    /// 診断 `ENOMOTO_MIP_PROBE_BASIS_DIAG` の値に `f` を含むときだけ: 行の中身と状態・列の値 ([`root_basis_rebuild`] に渡す)
+    pub rows_x: Option<(Vec<(Vec<(usize, f64)>, super::lp::VarStatus)>, Vec<f64>)>,
 }
 
 /// 行の中身 (列番号・係数・左辺・右辺) の指紋
@@ -6232,7 +6234,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 前処理の LP の列だけの基底から (既定の判定で渡さない場合も) と、基底なし (同時実行) の両方で解き、基底の性質と両方の
     /// 状態・秒・反復・目的値を 1 行の JSON (`PROBE_BASIS {...}`) で stderr に出す。1 回の求解は `ENOMOTO_T_MIP_PROBE_BASIS_DIAG_SECS`
     /// (既定 300) 秒まで。前処理の LP がなければ基底なしだけ
-    fn probe_basis_diag(&mut self) {
+    fn probe_basis_diag(&mut self, kind: &str) {
         let cap = tunable!("ENOMOTO_T_MIP_PROBE_BASIS_DIAG_SECS", 300.0, f64);
         let dl = |s: &Self| {
             let d = Instant::now() + std::time::Duration::from_secs_f64(cap);
@@ -6251,8 +6253,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if st == LpStatus::Optimal && obj.is_finite() { format!("{obj:.10e}") } else { "null".into() }
             )
         };
+        let mode = env_str!("ENOMOTO_MIP_PROBE_BASIS_DIAG").unwrap_or_default();
+        let has = |c: char| !mode.chars().any(|c| c.is_ascii_alphabetic()) || mode.contains(c);
         let mut warm = "null".to_string();
         let mut feat = "null".to_string();
+        let mut fix = "null".to_string();
+        // `f`: 行の中身で照らし合わせて作り直した基底 ([`root_basis_rebuild`]、`ENOMOTO_MIP_ROOT_BASIS_FIX` と同じ) からも解く
+        if let (Some(col), true) = (&col, mode.contains('f')) {
+            let rx = PROBE_BASIS_INFO.with(|s| s.borrow_mut().as_mut().and_then(|i| i.rows_x.take()));
+            if let Some((rows, x)) = rx {
+                let mut w = self.lp.clone();
+                let t0 = Instant::now();
+                if let Some((nb, st)) = root_basis_rebuild(&w, self.p.n, col, &rows, &x) {
+                    w.set_basis(&nb);
+                    let sing = w.basis_start_info(&nb.col);
+                    let r = run(&mut w, SolveLimits { deadline: dl(self), ..Default::default() }, self.p.offset);
+                    fix = format!(
+                        "{{\"matched\":{},\"dropped\":{},\"build_t\":{:.3},\"singular\":{},\"pinf_cnt\":{},\"res\":{r}}}",
+                        st.matched,
+                        st.dropped,
+                        t0.elapsed().as_secs_f64(),
+                        sing.is_none(),
+                        sing.map_or("null".into(), |p| p.0.to_string())
+                    );
+                }
+            }
+        }
         if let Some(col) = &col {
             let mut w = self.lp.clone();
             w.set_basis(&super::lp::Basis { col: col.clone(), row: Vec::new() });
@@ -6263,12 +6289,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 feat = f.json();
             }
             std::mem::swap(&mut self.lp, &mut me);
-            warm = run(&mut w, SolveLimits { deadline: dl(self), ..Default::default() }, self.p.offset);
+            // 列だけの基底からの求解は、既定で行の状態つきを渡す問題 (`kind` が `rows`) では値に `W` があるときだけ
+            if has('w') && (kind != "rows" || mode.contains('W')) {
+                warm = run(&mut w, SolveLimits { deadline: dl(self), ..Default::default() }, self.p.offset);
+            }
         }
-        let mut c = self.lp.clone();
-        c.drop_basis();
-        let cold = run(&mut c, SolveLimits { deadline: dl(self), ..Default::default() }, self.p.offset);
-        eprintln!("PROBE_BASIS {{\"feat\":{feat},\"warm\":{warm},\"cold\":{cold}}}");
+        // `d`: 既定どおり (根の LP に置いた基底のまま。`kind` が `rows` のときだけ。`cols` なら上の列だけと同じ、`none` なら基底なしと同じ)
+        let mut dflt = "null".to_string();
+        if has('d') && kind == "rows" {
+            let mut w = self.lp.clone();
+            let sing = w.basis_start_info(col.as_deref().unwrap_or(&[]));
+            let r = run(&mut w, SolveLimits { deadline: dl(self), ..Default::default() }, self.p.offset);
+            dflt = format!("{{\"singular\":{},\"pinf_cnt\":{},\"res\":{r}}}", sing.is_none(), sing.map_or("null".into(), |p| p.0.to_string()));
+        }
+        let mut cold = "null".to_string();
+        if has('c') {
+            let mut c = self.lp.clone();
+            c.drop_basis();
+            cold = run(&mut c, SolveLimits { deadline: dl(self), ..Default::default() }, self.p.offset);
+        }
+        eprintln!("PROBE_BASIS {{\"kind\":\"{kind}\",\"feat\":{feat},\"warm\":{warm},\"dflt\":{dflt},\"cold\":{cold},\"fix\":{fix}}}");
     }
 
     fn rootlp_simplex_diag(&mut self) {
@@ -6960,6 +7000,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut root_warm_dse_once = false;
         // 試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD`: 前処理の LP の列だけの基底から根の LP を解き始めるか (`r`・`x` の対象)
         let mut probe_cols_only_warm = false;
+        // 診断 `ENOMOTO_MIP_PROBE_BASIS_DIAG` 用: 既定で根の LP に置いた前処理の LP の基底 (`rows` 行の状態つき・`cols` 列だけ・`none`)
+        let mut probe_kind = "none";
         if !self.params.submip && self.snap.is_none() {
             let rb = ROOT_BASIS.with(|s| s.borrow_mut().take());
             // 行の状態は、前処理の LP の行と根の LP の始めの行が同じ (指紋が合う) ときだけ使う (`ENOMOTO_MIP_LP_PROBE_ROW_BASIS`。
@@ -6997,6 +7039,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 b
             });
+            probe_kind = match &rb {
+                Some(b) if b.col.len() == self.p.n && !b.row.is_empty() => "rows",
+                Some(b) if b.col.len() == self.p.n => "cols",
+                _ => "none",
+            };
             if self.params.verbose {
                 eprintln!(
                     "MIP: root LP basis from the presolve LP probing: {}",
@@ -7214,7 +7261,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (前処理・LP プロービングの後、カットの前) を `<prefix>.mps` に書き出し、基底なしで二段解法だけ (1 スレッドのプール) で解いて、
         // 状態・時間・反復を 1 行の JSON (`ROOTLP_SIMPLEX {...}`) で stderr に出して終わる。`ENOMOTO_MIP_ROOTLP_DUMP_ONLY` なら解かない
         if root_kind == Some(4) && probe_basis_diag_on() {
-            self.probe_basis_diag();
+            self.probe_basis_diag(probe_kind);
             return self.finish(MipStatus::NotSolved, f64::NEG_INFINITY);
         }
         if root_kind == Some(4) && env_str!("ENOMOTO_MIP_ROOTLP_SIMPLEX_DIAG").is_some() {
