@@ -2766,6 +2766,14 @@ pub(crate) fn subcap_root_secs() -> f64 {
     super::root_submip_ref_secs().unwrap_or(f64::INFINITY)
 }
 
+/// [`subcap`] の `w` 用: 外側の前処理の LP による固定の最初の LP (根の LP) の秒 (f64 のビット、なければ 0)
+pub(crate) static SUBCAP_PROBE_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 今のスレッドがサブ MIP を解いているか (入れ子の深さ > 0)
+pub(crate) fn in_submip_thread() -> bool {
+    super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) > 0
+}
+
 /// [`subcap`] で止めたサブ MIP の数 (全スレッドの和、診断用。0: 葉、1: 重さ、2: 待ちの上限)
 pub(crate) static SUBCAP_STOPS: [std::sync::atomic::AtomicU64; 3] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
 
@@ -3148,6 +3156,8 @@ impl SubmipCtl {
         if subcap('n') {
             self.cap_leaves = tunable!("ENOMOTO_T_MIP_SUBCAP_LEAVES", 500u64, u64);
         }
+        // 根の LP の秒は、前処理の LP による固定の最初の LP ([`SUBCAP_PROBE_SECS`]) の方が長ければそちら
+        let root_lp_secs = if root_lp_secs > 0.0 { root_lp_secs.max(f64::from_bits(SUBCAP_PROBE_SECS.load(std::sync::atomic::Ordering::Relaxed))) } else { 0.0 };
         if subcap('w') && root_lp_secs > 0.0 {
             self.cap_node_secs = tunable!("ENOMOTO_T_MIP_SUBCAP_W", 1.0, f64) * root_lp_secs;
         }

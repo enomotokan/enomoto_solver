@@ -3816,6 +3816,11 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     // 試作 `ENOMOTO_MIP_HO4_CUT0` 用: 前処理の LP による固定の最初の LP の反復 (根の LP がこの基底から数反復で終わると、
     // 根のカットのループの「根の LP の反復」が LP の重さを表さなくなるので)
     HO4_PROBE_ITERS.with(|c| c.set(root_iters));
+    // 試作 `ENOMOTO_MIP_SUBCAP` の `w` 用: 前処理の LP による固定の最初の LP の秒 (根の LP がこの基底から温め直しで終わると、
+    // 根の LP の秒が LP の重さを表さなくなるので。supportcase42 は 28.7 秒 → 根の LP 0.05 秒)
+    if !solver::in_submip_thread() {
+        solver::SUBCAP_PROBE_SECS.store(root_secs.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
     let slow_root = if work { root_iters as f64 * size >= tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_BASIS", 1.5e8, f64) } else { root_secs >= tunable!("ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS", 1.0, f64) };
     if verbose {
         eprintln!(
