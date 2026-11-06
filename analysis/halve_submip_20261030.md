@@ -684,3 +684,24 @@ ENOMOTO の既定は今回の計測の 7〜9 回分。
   Mittelmann で効くはずの大きい根の LP の問題 (uccase12・supportcase42・satellites2-40 など) は 60 秒では根の後まで進んでも解けず、差が SGM に出ない。
 - 判断: **どれも 60 秒では既定にしない**。ipmx は mc11 の悪化と期限の超過を直すのが先。combb は害が見えないが 60 秒では得も見えないので、
   効く問題 (根の LP が数秒以上) を 600 秒で比べてから決める。
+
+## bench28 (他セッションの試作で既定の候補 sym・lp・prr・all28、2026-11-06)
+
+- 土台 0589ff02 (分担 23 は 88e641c7 から。間は既定で使わない S4 の試作だけ)、25 分担、rep 40・41 (58 問) と 117 (Mittelmann 186 問)。集計は `B=<設定> python3 summ28.py`。
+  sym = `ENOMOTO_MIP_HO3_SYMNORM=1 ENOMOTO_MIP_HO6_SYMWORK=1 ENOMOTO_MIP_HO6_SYMREFINE=1` (対称性の検出の見落としの直し)、
+  lp = `ENOMOTO_MIP_HO4_BGNB=1 ENOMOTO_MIP_TREE3_RBASIS=1` (基底の受け渡し)、prr = `ENOMOTO_MIP_PROBE_REPRESOLVE=1`、all28 = 全部。
+
+| 設定 | 58 問 全回 (解けた数) | Mittelmann 186 (解けた数) | Mitt 片方以上解 |
+|---|---|---|---|
+| def | 15.42 (88) | 42.09 (50) | |
+| sym | −0.7% (88) | +0.0% (51) | +0.1% |
+| lp | +1.2% (88) | −0.8% (52) | −4.1% |
+| prr | +3.1% (87) | −0.4% (51) | −1.9% |
+| all28 | +4.8% (88) | −0.5% (52) | −2.2% |
+
+- 片方だけ解けた回: sym は neos-957323 (sym だけ 57.4 秒)。lp は neos-1171737 (47.5 秒)・timtab1 (55.4 秒) が lp だけ。prr は timtab1 (50.3 秒) が prr だけ、
+  drayage-25-23 (rep 41、既定 6.7 秒) が prr で時間切れ。all28 は dano3_3 (59.7 秒)・timtab1 (50.7 秒) が all28 だけ。最適値の食い違いは 0。
+- **prr は momentum1 で 34 秒に `not_solved` (暫定解・下界なし) で止まる** (all28 も 33 秒)。既定・sym・lp は 60 秒の時間切れ。前処理のかけ直しの後に
+  何かが失敗して諦めている (未調査)。
+- 判断 (推測を含む): sym は害がなく (検出だけを変える直し)、Mittelmann で 1 問多い。lp は Mittelmann で 2 問多く、解けた問題の SGM が −4.1%、58 問は揺れの範囲。
+  **sym と lp は既定の候補**。prr は 58 問で +3.1% と momentum1 の異常な止まり方があるので、原因を調べるまで既定にしない。all28 は prr を含むぶん 58 問で遅い。
