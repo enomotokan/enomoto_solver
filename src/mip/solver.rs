@@ -524,6 +524,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ALNS の腕ごとの報酬の合計と試した回数。
     pub(super) alns_reward: [f64; 6],
     pub(super) alns_count: [u32; 6],
+    /// `ENOMOTO_MIP_SUBB_DIV` (試作): 近傍の多様化の状態 ([`super::subb::DivState`])
+    pub(super) subb: super::subb::DivState,
     /// `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): ALNS の腕ごとの、サブ MIP の時間の上限の倍率。
     pub(super) lns_grow: [f64; 6],
     /// 直前のサブ MIP が解を出さずに時間の上限で止まったか (`ENOMOTO_MIP_MEMBQ_LNSGROW` で使う)。
@@ -3929,6 +3931,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         improve_turn: 0,
         alns_reward: [0.0; 6],
         alns_count: [0; 6],
+        subb: Default::default(),
         lns_grow: [1.0; 6],
         submip_nosol_timeout: false,
         sol_pool: Vec::new(),
@@ -4119,18 +4122,18 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_conflicts: 0,
         orbitopes: match &snap {
             Some(sn) => Rc::new(sn.orbitopes.clone()),
-            None if params.submip => Rc::new(Vec::new()),
+            None if params.submip && !super::subb::sub_tables() => Rc::new(Vec::new()),
             None => super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default(),
         },
         orbitope_fixings: 0,
         lex_gens: match &snap {
             Some(sn) => Rc::new(sn.lex_gens.clone()),
-            None if params.submip => Rc::new(Vec::new()),
+            None if params.submip && !super::subb::sub_tables() => Rc::new(Vec::new()),
             None => super::SYM_LEX_GENS.with(|t| t.borrow().clone()).unwrap_or_default(),
         },
         of_gens: Rc::new(super::symmetry::OrbitalGens::new(match &snap {
             Some(sn) => sn.of_gens.clone(),
-            None if params.submip => Vec::new(),
+            None if params.submip && !super::subb::sub_tables() => Vec::new(),
             None => super::SYM_OF_GENS.with(|t| t.borrow().as_ref().map(|g| (**g).clone())).unwrap_or_default(),
         })),
         of_cache: (vec![u32::MAX], Rc::new(Vec::new())),
@@ -4140,7 +4143,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         of_stats: [0; 3],
         orig: match &snap {
             Some(sn) => sn.orig.as_ref().map(|o| Rc::new((**o).clone())),
-            None if params.submip || env_str!("ENOMOTO_MIP_SYM_NO_ORIG").is_some() => None,
+            None if (params.submip && !super::subb::sub_tables()) || env_str!("ENOMOTO_MIP_SYM_NO_ORIG").is_some() => None,
             None => super::SYM_ORIG.with(|t| t.borrow().clone()),
         },
         sym_canon: (0, 0),
@@ -18065,6 +18068,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
+        // `ENOMOTO_MIP_SUBB_SYM` (試作): サブ MIP の中の対称性による固定を数える
+        if self.params.submip && super::subb::sub_tables() {
+            super::subb::add(&super::subb::SYM_STATS[5], self.orbitope_fixings);
+            super::subb::add(&super::subb::SYM_STATS[6], self.of_stats[0]);
+        }
         if (self.params.verbose || end_diag()) && !self.params.submip && self.snap.is_none() {
             eprintln!("MIP: finish start {status:?} ({:.2}s)", self.start.elapsed().as_secs_f64());
         }

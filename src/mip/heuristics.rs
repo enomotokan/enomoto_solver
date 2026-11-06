@@ -1544,6 +1544,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         sub.col_lo = lo;
         sub.col_up = up;
+        // `ENOMOTO_MIP_SUBB_DIV` (試作、既定では使わない) / 診断 `ENOMOTO_MIP_SUBB_COUNT`: 外側の求解のサブ MIP の固定の集合の指紋を覚え、
+        // 同じ近傍の繰り返しで固定を変える ([`Self::subb_diversify`])
+        if !self.params.submip && super::subb::count_on() {
+            self.subb_diversify(&mut sub, cutoff.is_some());
+        }
         // `ENOMOTO_MIP_SUBMIP_CUTS`: 今の LP のカットの行のうち LP 解で効いている (等号で成り立つ) ものをサブ MIP の行に加える
         // (HiGHS はサブ MIP に今の LP (カットを含み、効いていない行を除いたもの) を渡す。元の行だけのサブ MIP は根の LP が弱く、
         // neos-3381206-awhea では 500 ノードで解が見つからない)。カットはプールで大域的に使うもので、打ち切り値で成り立つ
@@ -1770,6 +1775,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(fr) = fix_rate {
             self.note_fix_rate(fr, r.status == super::solver::MipStatus::Infeasible, acc);
         }
+        self.subb_note(r.status, acc);
         if paused.is_some() {
             self.rens_paused = paused;
         }
@@ -3296,6 +3302,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             1 => self.local_branching(),
             2 => self.proximity_search(),
             3 => self.mutation(),
+            // `ENOMOTO_MIP_SUBB_POOL` (試作): 解のプールの複数の解から作る近傍 ([`Self::subb_pool_lns`])
+            4 if super::subb::pool_on() && focus.is_none() => self.subb_pool_lns(),
             4 => self.crossover_from(focus.as_deref()),
             _ => self.dins(x),
         };

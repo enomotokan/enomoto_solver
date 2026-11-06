@@ -20,6 +20,7 @@ pub(crate) mod solver;
 pub(crate) mod fj;
 pub(crate) mod localmip;
 mod heuristics;
+mod subb;
 pub(crate) mod heur_scip;
 pub(crate) mod heur_ipm;
 pub(crate) mod heur_shift;
@@ -918,6 +919,12 @@ pub(crate) fn restart_pc_on() -> bool {
 
 pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
     let outer = !params.submip && params.restarts == 0;
+    // `ENOMOTO_MIP_SUBB_SYM` (試作、既定では使わない): サブ MIP の求解の間は外側の対称性の表を退避し、サブ MIP が自分で検出した表を使う
+    // (終わりに外側の表を戻す。[`subb::SymScope`])
+    let _subb_sym = (params.submip && params.restarts == 0 && subb::sym_on()).then(subb::SymScope::enter);
+    if outer {
+        subb::reset();
+    }
     if outer {
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
@@ -964,6 +971,9 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         }
     }
     if outer {
+        if params.verbose {
+            subb::report();
+        }
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
@@ -1276,7 +1286,8 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             // 対称性がなく、根の被約費用などで固定が進んだ再スタートの後の模型で生成元 187〜262 個)。列の番号は再スタートで変わらない
             // (前処理は列を固定するだけ) ので、見つけた生成元・オービトープはそのまま次の段の求解に渡る
             let sym_restart = !early_sol && !params.submip && params.restarts > 0 && !sym_late && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() && ho6_symrestart_due();
-            let prob = if !early_sol && !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() && !sym_late {
+            // `ENOMOTO_MIP_SUBB_SYM` (試作): サブ MIP も自分の表 ([`subb::SymScope`]) に検出する
+            let prob = if !early_sol && (!params.submip || subb::sub_tables()) && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() && !sym_late {
                 add_symmetry_rows(prob, params.verbose, &mut postsolve, false)
             } else if sym_restart {
                 add_symmetry_rows(prob, params.verbose, &mut postsolve, true)
@@ -2169,6 +2180,15 @@ fn merge_twin_classes(prob: MipProblem, classes: &[Vec<usize>], postsolve: &mut 
 /// 対称性を探し、対称性を崩す不等式 `x_i - x_k >= 0` ([`symmetry::lex_leader_pairs`]) を行として加えた問題を返す。
 /// [`sym_twins`] で双子を併合したときは後処理の手順を `postsolve` に足す。
 /// `restart` が真なら再スタートの後の探し直し (`ENOMOTO_MIP_HO6_SYMRESTART`): 時間の上限は `ENOMOTO_T_MIP_HO6_SYM_TIME` (既定 5 秒)。
+/// `ENOMOTO_MIP_SUBB_SYM`: サブ MIP の検出の終わり (どの return でも) に表を数える
+struct SubSymNote(std::time::Instant);
+
+impl Drop for SubSymNote {
+    fn drop(&mut self) {
+        subb::note_sub_detection(self.0.elapsed().as_secs_f64());
+    }
+}
+
 fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate::presolve::PostsolveStep>, restart: bool) -> MipProblem {
     let t0 = std::time::Instant::now();
     let twin_orb = sym_twin_orbitope();
@@ -2176,7 +2196,16 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     // 既定 (`ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE` で止める) で、生成元が動かさない整数列の双子の組から作る 1xk のオービトープ
     let mut twin_orbs: Vec<symmetry::Orbitope> = Vec::new();
     let t_twins = t0.elapsed().as_secs_f64();
-    let time_cap = if restart { tunable!("ENOMOTO_T_MIP_HO6_SYM_TIME", 5.0, f64) } else { tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64) };
+    // `ENOMOTO_MIP_SUBB_SYM` のサブ MIP の検出は小さい上限 (`ENOMOTO_T_MIP_SUBB_SYM_TIME`)
+    let in_sub = subb::sub_tables();
+    let time_cap = if in_sub {
+        tunable!("ENOMOTO_T_MIP_SUBB_SYM_TIME", 0.05, f64)
+    } else if restart {
+        tunable!("ENOMOTO_T_MIP_HO6_SYM_TIME", 5.0, f64)
+    } else {
+        tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64)
+    };
+    let _note = in_sub.then(|| SubSymNote(t0));
     if restart && verbose {
         eprintln!("MIP: symmetry: detecting again after the restart (ENOMOTO_MIP_HO6_SYMRESTART, {} rows, {} free columns)", prob.m, (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count());
     }
