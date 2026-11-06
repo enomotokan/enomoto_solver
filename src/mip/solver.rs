@@ -15446,6 +15446,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if nint == 0 || (!self.force_restart && (newly == 0 || (newly as f64) < fac * denom as f64)) {
             return None;
         }
+        // `ENOMOTO_MIP_S4_TINYGAP` (試作、既定では使わない。analysis/highs_slow_20261106/S4.md): 暫定解と根の LP 値の相対ギャップが
+        // `ENOMOTO_T_MIP_S4_TINYGAP_REL` (既定 1e-5) 以下なら、`ENOMOTO_MIP_S4_TINYGAP` の値 k (既定 1) 回目以降の再スタートをせずに木に進む。
+        // neos-957323 は 26 秒で最適値を持ち、相対ギャップ 1.7e-6 を閉じるのに再スタートを 4 回 (1 回 20〜30 秒: カットのループ 9 秒・
+        // 裏のカットの待ち 8〜12 秒など) 重ねていた (HiGHS は 168 ノードの木で閉じる)
+        if let Some(k) = env_str!("ENOMOTO_MIP_S4_TINYGAP").map(|v| v.parse::<u32>().unwrap_or(1)) {
+            if self.params.restarts >= k {
+                if let Some((z, _)) = self.incumbent.as_ref() {
+                    let lp_z = self.lp.objective() + p.offset;
+                    let rel = (*z - lp_z).max(0.0) / z.abs().max(lp_z.abs()).max(1.0);
+                    if rel <= tunable!("ENOMOTO_T_MIP_S4_TINYGAP_REL", 1e-5, f64) {
+                        if self.params.verbose {
+                            eprintln!("MIP: S4_TINYGAP: restart skipped (relative gap {rel:.3e}, restarts so far {})", self.params.restarts);
+                        }
+                        return None;
+                    }
+                }
+            }
+        }
         // `ENOMOTO_MIP_RESTART_FIRST_LPW` (試作、既定では使わない): 初回の再スタートで、新たな固定が整数列の
         // `ENOMOTO_T_MIP_RESTART_FIRST_LPW_FAC` (0.01) 未満で、根の LP (カットの前) を解くのに `ENOMOTO_T_MIP_RESTART_FIRST_LPW_SECS` (2 秒)
         // 以上かかったときは再スタートしない。固定がわずかなのに根の LP の解き直しが重い (physiciansched6-2: 109346 列中 46〜56 列の固定で

@@ -1,0 +1,72 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP cod105 has 1024 rows; 1024 cols; 57344 nonzeros; 1024 integer variables (1024 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+00]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 1e+00]
+Presolving model
+1024 rows, 1024 cols, 57344 nonzeros 0s
+1024 rows, 1024 cols, 57344 nonzeros 1s
+Presolve reductions: rows 1024(-0); columns 1024(-0); nonzeros 57344(-0) - Not reduced
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   1024 rows
+   1024 cols (1024 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   57344 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ z       0       0         0   0.00%   -inf            0                  Large        0      0      0         0     1.7s
+ J       0       0         0   0.00%   -inf            -1                 Large        0      0      0         0     1.7s
+ R       0       0         0   0.00%   -18.28571429    -2               814.29%        0      0      0      4090     9.7s
+ C       0       0         0   0.00%   -18.28571429    -3               509.52%        0      0      0      4090    22.7s
+ L       0       0         0   0.00%   -18.28571429    -12               52.38%        0      0      0      4090    41.8s
+
+Symmetry detection completed in 0.2s
+Found 11 generator(s)
+
+         3       0         1  25.00%   -18.28571429    -12               52.38%        0      0     14    136172    95.2s
+        55       0        27  81.25%   -18.28571429    -12               52.38%        0      0    354    169487   100.7s
+       101       2        50  97.66%   -13.71261667    -12               14.27%        0      0    677    212027   108.2s
+       103       0        52 100.00%   -12             -12                0.00%     1352      6    952    229114   112.8s
+
+Solving report
+  Model             cod105
+  Status            Optimal
+  Primal bound      -12
+  Dual bound        -12
+  Gap               0%
+  P-D integral      717.467892764
+  Solution status   feasible
+                    -12 (objective)
+                    0 (bound viol.)
+                    7.16461786587e-13 (int. viol.)
+                    0 (row viol.)
+  Timing            112.82
+                    2.22 (Presolve)
+                        MIP    time [calls] = 1.64 [1]
+                        subMIP time [calls] = 0.59 [4]
+                    110.59 (Solve)
+                        MIP    time [calls] = 95.65 [1]
+                        subMIP time [calls] = 14.94 [4]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [4]
+  Max sub-MIP depth 8
+  Nodes             103
+  Repair LPs        0
+  LP iterations     229114
+                    133202 (strong br.)
+                    942 (separation)
+                    24590 (heuristics)
+{"status": "Optimal", "objective": -11.999999999999968, "bound": -11.999999999999968, "nodes": 103, "time": 112.82352914300009}
