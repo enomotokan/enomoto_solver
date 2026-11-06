@@ -2182,6 +2182,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             // 診断 (`ENOMOTO_MIP_DEBUG_DUMP_CUT_LP=ディレクトリ`): カットを足した LP と出発の基底を、求解の前の状態で
             // `<ディレクトリ>/cutlp_r<ラウンド>_<結果>.mps/.bas` に書き出す (analysis/lp_hang_20261021.md)
+            // 試作 `ENOMOTO_MIP_CUT_HARRIS2` = `ENOMOTO_SIMPLEX_HARRIS2` の値 (`1`・`t`・`r`。既定では使わない、analysis/puriri_cutlp_20261106.md):
+            // 根のカットのループ (サブ MIP でないもの。裏のカットの写しも) のこのラウンドの LP だけ、双対単体法の比の判定に前向きの Harris を使う。
+            // カットを足した直後の基底から既定の後ろ向きの窓 (比で 1e-7) で進むと、puriri では 100 反復で基底の条件数が 4.5e6 から 3e11 に
+            // 悪くなり、照合の不一致と悪条件の再分解が 9 反復に 1 回起きて 1 反復 5 ms になる
+            let _h2_scope = crate::simplex::slope_intercept_dual::Harris2Scope::new(
+                env_str!("ENOMOTO_MIP_CUT_HARRIS2").filter(|v| *v != "0" && !self.params.submip),
+            );
             let dump_dir = env_str!("ENOMOTO_MIP_DEBUG_DUMP_CUT_LP").filter(|_| !self.params.submip && job.is_none());
             let dump_basis = dump_dir.as_ref().map(|_| (self.lp.basis_cols(), self.lp.dse_weights()));
             // `ENOMOTO_MIP_CUT_DSE_EXACT` (試作、既定では使わない): カットを足した LP を、引き継いだ DSE 重みではなく出発の基底の

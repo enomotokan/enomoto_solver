@@ -90,6 +90,27 @@ fn pivlog_tiny_skip(k: usize) {
 }
 
 thread_local! {
+    /// 試作 `ENOMOTO_MIP_CUT_HARRIS2` (既定では使わない、analysis/puriri_cutlp_20261106.md): このスレッドの求解で、
+    /// `ENOMOTO_SIMPLEX_HARRIS2` が無いときに代わりに使う値 (前向きの Harris)。根のカットのループが LP を解くあいだだけ置く ([`Harris2Scope`])
+    pub(crate) static HARRIS2_SCOPE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`HARRIS2_SCOPE`] を置き、手放すときに元へ戻す
+pub(crate) struct Harris2Scope(Option<&'static str>);
+
+impl Harris2Scope {
+    pub(crate) fn new(mode: Option<&'static str>) -> Self {
+        Harris2Scope(HARRIS2_SCOPE.with(|c| c.replace(mode)))
+    }
+}
+
+impl Drop for Harris2Scope {
+    fn drop(&mut self) {
+        HARRIS2_SCOPE.with(|c| c.set(self.0));
+    }
+}
+
+thread_local! {
     /// 診断 `ENOMOTO_SIMPLEX_PIVLOG`: 試作 `ENOMOTO_SIMPLEX_TINY_SKIP` で外した候補の数
     static PIVTINY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -4861,7 +4882,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let tiny_td = tunable!("ENOMOTO_T_SIMPLEX_TINY_TD", 1e-7, f64);
     // 試作 `ENOMOTO_SIMPLEX_HARRIS2` (既定では使わない): 前向きの Harris (パス 2)
     // `r`: 安全モード (`safe_pivot`。数値の破綻で解き直した求解、または特異の検査で切り替わった後) のときだけ使う
-    let harris2_mode = env_str!("ENOMOTO_SIMPLEX_HARRIS2").filter(|v| *v != "0");
+    // 試作 `ENOMOTO_MIP_CUT_HARRIS2` (analysis/puriri_cutlp_20261106.md): 根のカットのループの LP だけ、[`HARRIS2_SCOPE`] で同じ値を使う
+    let harris2_mode = env_str!("ENOMOTO_SIMPLEX_HARRIS2").filter(|v| *v != "0").or_else(|| HARRIS2_SCOPE.with(|c| c.get()));
     let harris2_safe_only = harris2_mode.is_some_and(|v| v.contains('r'));
     let harris2_any = harris2_mode.is_some();
     // 試作 `ENOMOTO_SIMPLEX_NOISE_RESET` (既定では使わない): 雑音として外した行が増えたら作り直す
