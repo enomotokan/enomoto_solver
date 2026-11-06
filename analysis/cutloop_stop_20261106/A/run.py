@@ -7,12 +7,8 @@ D = Path(__file__).resolve().parent
 WT = D.parents[2]
 sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
-CFGS = {
-    "def": {},
-    "c": {"ENOMOTO_MIP_CUT0_RETRY": "c"},
-    "r": {"ENOMOTO_MIP_CUT0_RETRY": "1"},
-    "mv": {"ENOMOTO_MIP_HO4_CUT0": "moved"},
-}
+sys.path.insert(0, str(D))
+from cfgs import CFGS  # noqa: E402
 cfg, tl, rep = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 for p in sys.argv[4:]:
     mps = rb.fetch(p, WT / ".miplib_cache")
