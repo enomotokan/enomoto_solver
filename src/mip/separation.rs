@@ -1012,6 +1012,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
             phase2 = true;
             max_rounds = cont_p2;
         }
+        // `ENOMOTO_MIP_S4_TINYCUT` = k (試作、既定では使わない。analysis/highs_slow_20261106/S4.md): 再スタートの後の根 (主のスレッド) で、
+        // 暫定解と根の LP 値の相対ギャップが `ENOMOTO_T_MIP_S4_TINYGAP_REL` (1e-5) 以下なら、主のカットのループを k ラウンド (既定 1) までにする
+        // (残りは裏のカットに任せる)。neos-957323 は再スタートの後の根でカットのループが 6 ラウンド・約 9 秒回るが、目的値が動くのは
+        // 1 ラウンド目だけ (-237.75707531 -> -237.75697464、その後は同じ値) で、これを 4 回の再スタートで繰り返していた
+        if let Some(k) = env_str!("ENOMOTO_MIP_S4_TINYCUT").map(|v| v.parse::<usize>().unwrap_or(1)) {
+            if !self.params.submip && job.is_none() && self.params.restarts >= 1 {
+                if let Some((z, _)) = self.incumbent.as_ref() {
+                    let lp_z = self.lp.objective() + self.p.offset;
+                    let rel = (*z - lp_z).max(0.0) / z.abs().max(lp_z.abs()).max(1.0);
+                    if rel <= tunable!("ENOMOTO_T_MIP_S4_TINYGAP_REL", 1e-5, f64) && max_rounds > k {
+                        if self.params.verbose {
+                            eprintln!("MIP: S4_TINYCUT: cut rounds {max_rounds} -> {k} (relative gap {rel:.3e})");
+                        }
+                        max_rounds = k;
+                    }
+                }
+            }
+        }
         // 第 2 段階の時間の上限 (第 1 段階に使った時間の `ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT` 倍。qnet1 では再スタート後の
         // 第 2 段階が 88 ラウンド回って根が 6 秒伸び、9.2 秒 -> 17.2 秒になった)
         // 上限はこのスレッドの CPU 時間で測る ([`super::cap_clock`]。求解の開始からの分は `cpu0` から)
