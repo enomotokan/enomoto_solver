@@ -7,5 +7,5 @@ while true; do
   git diff --cached --quiet && continue
   git commit -qm "tree restart ガード: 計測の途中データ (自動)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01HrNYnFQi4DKbTKEQoJfX8Y"
-  for i in 1 2 3 4 5; do git push -q -u origin ccr-1beed81b-ex0uhq 2>/dev/null && break; git fetch -q origin ccr-1beed81b-ex0uhq && git rebase -q origin/ccr-1beed81b-ex0uhq; sleep $((2**i)); done
+  for i in 1 2 3 4 5; do git push -q -u origin ccr-1beed81b-ex0uhq 2>/dev/null && break; git fetch -q origin ccr-1beed81b-ex0uhq && git rebase -q --autostash origin/ccr-1beed81b-ex0uhq; sleep $((2**i)); done
 done
