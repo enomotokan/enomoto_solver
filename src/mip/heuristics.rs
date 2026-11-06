@@ -2855,6 +2855,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if fr < 0.1 {
             return false;
         }
+        // `ENOMOTO_MIP_S4_RINSRATE` = r (試作、既定では使わない。analysis/highs_slow_20261106/S4.md): 外側の根の RINS は、固定率が r (既定 0.5)
+        // 未満ならサブ MIP にしない。cod105 は根の RINS が固定率 0.32 (1024 列中 700 列が自由、密な行) で 113 ノード・76 秒回り、
+        // 外側の暫定解 (-12、0.35 秒で既に最適値) を良くしなかった
+        if let Some(r) = env_str!("ENOMOTO_MIP_S4_RINSRATE").map(|v| v.parse::<f64>().unwrap_or(0.5)) {
+            if !self.params.submip && self.nodes <= 1 && fr < r {
+                if self.params.verbose {
+                    eprintln!("MIP:   RINS skipped: fixing rate {fr:.2} below {r:.2} (S4_RINSRATE)");
+                }
+                return false;
+            }
+        }
         self.solve_submip(lo, up, 500)
     }
 
