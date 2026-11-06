@@ -1,0 +1,654 @@
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 3202 -> 3151, free columns 13873 -> 13837, nonzeros 79655 -> 79553, postsolve steps 36 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 0 of 13837 free columns fixed (0.00s), not used
+NormalKkt: dense_cols=0 (threshold 52) triplets=488361 pattern nnz=310839 built in 0.03s
+NormalKkt: AMD nnz(L)=Some(4068605) flops=2.679e9, METIS nnz(L)=Some(2379127) flops=1.599e9 (METIS 0.05s)
+NormalKkt: symbolic (AMD) nnz(L)=2379127 at 0.10s
+NormalKkt: backend=multifrontal flops=1.60e9
+NormalKkt: AMD nnz(L)=Some(2202626) flops=9.815e8, METIS nnz(L)=Some(2312089) flops=1.071e9 (METIS 0.08s)
+AugKkt: backend=multifrontal nnz(L)=2202626 flops=9.82e8
+IpmKkt: normal flops 1.60e9 vs augmented 9.82e8 (ratio 4)
+IPM kkt=normal nnz(A)=81516 nnz(L)=2379127 setup=0.25s
+IPM n=15800 p=3151 n_lo=15800 n_up=13836 |h|max=3.470e2 (#|bnd|>1e6: 0) |b|=1.000e0 |c|=1.000e0
+IPM t=0.37s it=  0 pobj=4.0322460440e-1 pres=2.10e1 dres=5.85e2 gap=5.30e6 rho=1.0e-4 delta=1.0e-4
+IPM it=0 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  0 alpha_p=8.55e-1 alpha_d=8.49e-1 mu=1.24e4 sigma=1.32e-2 min(sz)/mu=5.6e-1 max(sz)/mu=7.3e0 solve_rel=1.1e-13 corr_rel=1.0e-13
+IPM t=0.43s it=  1 pobj=1.1101517521e1 pres=3.06e0 dres=8.80e1 gap=4.99e6 rho=1.6e-5 delta=1.6e-5
+IPM it=1 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  1 alpha_p=9.03e-1 alpha_d=6.87e-1 mu=1.93e3 sigma=1.57e-1 min(sz)/mu=3.5e-2 max(sz)/mu=6.7e0 solve_rel=1.7e-14 corr_rel=2.1e-14
+IPM t=0.46s it=  2 pobj=1.7477238541e1 pres=3.92e-1 dres=2.76e1 gap=4.35e6 rho=2.8e-6 delta=2.8e-6
+IPM it=2 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  2 alpha_p=8.74e-1 alpha_d=8.41e-1 mu=3.44e2 sigma=1.05e-1 min(sz)/mu=3.0e-2 max(sz)/mu=1.2e1 solve_rel=3.4e-16 corr_rel=3.6e-16
+IPM t=0.50s it=  3 pobj=2.2668907835e1 pres=8.62e-2 dres=4.38e0 gap=1.35e6 rho=5.5e-7 delta=5.5e-7
+IPM it=3 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  3 alpha_p=8.47e-1 alpha_d=9.67e-1 mu=6.83e1 sigma=6.11e-2 min(sz)/mu=5.4e-2 max(sz)/mu=1.0e1 solve_rel=3.4e-17 corr_rel=1.8e-17
+IPM t=0.53s it=  4 pobj=2.4586949696e1 pres=1.41e-2 dres=1.46e-1 gap=1.30e5 rho=5.9e-8 delta=5.9e-8
+IPM it=4 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  4 alpha_p=6.37e-1 alpha_d=8.43e-1 mu=7.33e0 sigma=2.14e-2 min(sz)/mu=1.3e-1 max(sz)/mu=1.1e1 solve_rel=4.0e-15 corr_rel=1.8e-15
+IPM t=0.57s it=  5 pobj=2.5023041862e1 pres=5.02e-3 dres=2.30e-2 gap=3.33e4 rho=1.5e-8 delta=1.5e-8
+IPM it=5 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  5 alpha_p=8.51e-1 alpha_d=6.49e-1 mu=1.86e0 sigma=2.06e-1 min(sz)/mu=2.4e-2 max(sz)/mu=9.2e0 solve_rel=9.2e-15 corr_rel=1.5e-14
+IPM t=0.60s it=  6 pobj=3.5653628025e1 pres=7.07e-4 dres=8.07e-3 gap=1.94e4 rho=6.0e-9 delta=6.0e-9
+IPM it=6 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  6 alpha_p=6.51e-1 alpha_d=8.29e-1 mu=7.40e-1 sigma=1.01e-2 min(sz)/mu=4.7e-2 max(sz)/mu=1.0e1 solve_rel=3.8e-16 corr_rel=1.2e-16
+IPM t=0.64s it=  7 pobj=2.9161412783e1 pres=2.92e-4 dres=1.38e-3 gap=3.68e3 rho=1.1e-9 delta=1.1e-9
+IPM it=7 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  7 alpha_p=2.29e-1 alpha_d=1.13e-1 mu=1.38e-1 sigma=8.02e-1 min(sz)/mu=4.4e-2 max(sz)/mu=1.6e1 solve_rel=1.0e-16 corr_rel=1.0e-16
+IPM t=0.67s it=  8 pobj=3.2476158690e1 pres=2.28e-4 dres=1.22e-3 gap=3.64e3 rho=1.1e-9 delta=1.1e-9
+IPM it=8 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  8 alpha_p=8.20e-2 alpha_d=3.11e-1 mu=1.34e-1 sigma=6.85e-1 min(sz)/mu=7.1e-3 max(sz)/mu=3.4e2 solve_rel=7.8e-17 corr_rel=1.5e-16
+IPM t=0.70s it=  9 pobj=3.2989156282e1 pres=2.06e-4 dres=8.41e-4 gap=3.33e3 rho=9.8e-10 delta=9.8e-10
+IPM it=9 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  9 alpha_p=5.00e-1 alpha_d=2.77e-1 mu=1.21e-1 sigma=5.80e-1 min(sz)/mu=1.9e-3 max(sz)/mu=3.0e2 solve_rel=1.9e-16 corr_rel=1.4e-16
+IPM t=0.74s it= 10 pobj=3.2989474176e1 pres=1.05e-4 dres=6.07e-4 gap=2.97e3 rho=8.4e-10 delta=8.4e-10
+IPM it=10 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 10 alpha_p=3.89e-1 alpha_d=6.32e-1 mu=1.05e-1 sigma=2.23e-1 min(sz)/mu=1.5e-2 max(sz)/mu=2.2e2 solve_rel=6.4e-17 corr_rel=4.0e-17
+IPM t=0.77s it= 11 pobj=2.5320798758e1 pres=5.90e-5 dres=2.23e-4 gap=1.54e3 rho=4.3e-10 delta=4.3e-10
+IPM it=11 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 11 alpha_p=4.18e-1 alpha_d=8.08e-1 mu=5.35e-2 sigma=4.76e-1 min(sz)/mu=1.6e-3 max(sz)/mu=1.8e2 solve_rel=5.4e-17 corr_rel=1.9e-16
+IPM t=0.81s it= 12 pobj=2.0833320952e1 pres=3.26e-5 dres=4.29e-5 gap=9.01e2 rho=2.5e-10 delta=2.5e-10
+IPM it=12 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 12 alpha_p=1.00e0 alpha_d=9.90e-1 mu=3.09e-2 sigma=4.94e-2 min(sz)/mu=1.2e-2 max(sz)/mu=1.1e2 solve_rel=6.5e-17 corr_rel=5.3e-17
+IPM t=0.85s it= 13 pobj=1.1607160482e0 pres=3.60e-6 dres=4.44e-7 gap=5.49e1 rho=1.5e-11 delta=1.5e-11
+IPM it=13 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 13 alpha_p=7.63e-1 alpha_d=9.86e-1 mu=1.85e-3 sigma=4.65e-4 min(sz)/mu=1.6e-1 max(sz)/mu=6.1e1 solve_rel=3.8e-16 corr_rel=9.2e-16
+IPM t=0.90s it= 14 pobj=4.5271741023e-1 pres=8.64e-7 dres=6.01e-9 gap=9.75e-1 rho=2.6e-13 delta=2.6e-13
+IPM it=14 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 14 alpha_p=4.40e-1 alpha_d=2.54e-2 mu=3.29e-5 sigma=4.73e-1 min(sz)/mu=7.2e-2 max(sz)/mu=4.0e1 solve_rel=1.4e-14 corr_rel=3.7e-14
+IPM t=0.95s it= 15 pobj=4.9505043955e-1 pres=4.84e-7 dres=5.85e-9 gap=1.00e0 rho=2.6e-13 delta=2.6e-13
+IPM it=15 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 15 alpha_p=5.51e-1 alpha_d=6.13e-1 mu=3.38e-5 sigma=2.45e-1 min(sz)/mu=2.2e-3 max(sz)/mu=8.8e1 solve_rel=5.9e-14 corr_rel=4.7e-15
+IPM t=0.99s it= 16 pobj=3.5326359206e-1 pres=2.17e-7 dres=2.27e-9 gap=5.54e-1 rho=1.5e-13 delta=1.5e-13
+IPM it=16 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 16 alpha_p=3.19e-1 alpha_d=8.62e-1 mu=1.87e-5 sigma=4.77e-1 min(sz)/mu=5.6e-3 max(sz)/mu=7.1e1 solve_rel=4.0e-15 corr_rel=2.1e-15
+IPM t=1.03s it= 17 pobj=2.9383797819e-1 pres=1.48e-7 dres=3.12e-10 gap=4.05e-1 rho=1.1e-13 delta=1.1e-13
+IPM it=17 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 17 alpha_p=3.32e-1 alpha_d=5.44e-1 mu=1.37e-5 sigma=2.45e-1 min(sz)/mu=2.1e-2 max(sz)/mu=6.3e1 solve_rel=4.4e-15 corr_rel=1.7e-15
+IPM t=1.07s it= 18 pobj=2.5171768616e-1 pres=9.88e-8 dres=1.42e-10 gap=2.66e-1 rho=1.0e-13 delta=1.0e-13
+IPM it=18 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 18 alpha_p=2.48e-1 alpha_d=3.28e-1 mu=8.97e-6 sigma=2.09e-1 min(sz)/mu=2.2e-2 max(sz)/mu=5.8e1 solve_rel=7.8e-14 corr_rel=1.2e-15
+IPM t=1.10s it= 19 pobj=2.3650350049e-1 pres=7.43e-8 dres=9.55e-11 gap=2.02e-1 rho=1.0e-13 delta=1.0e-13
+IPM it=19 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 19 alpha_p=2.55e-1 alpha_d=1.50e-1 mu=6.81e-6 sigma=2.66e-1 min(sz)/mu=1.2e-2 max(sz)/mu=8.9e1 solve_rel=1.4e-15 corr_rel=7.8e-16
+IPM t=1.14s it= 20 pobj=2.3016480861e-1 pres=5.54e-8 dres=8.12e-11 gap=1.77e-1 rho=1.0e-13 delta=1.0e-13
+IPM it=20 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 20 alpha_p=4.42e-1 alpha_d=3.46e-1 mu=5.97e-6 sigma=2.25e-1 min(sz)/mu=1.9e-2 max(sz)/mu=1.6e2 solve_rel=1.4e-15 corr_rel=8.0e-16
+IPM t=1.18s it= 21 pobj=2.2015206575e-1 pres=3.09e-8 dres=5.31e-11 gap=1.27e-1 rho=1.0e-13 delta=1.0e-13
+IPM it=21 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 21 alpha_p=3.73e-1 alpha_d=3.84e-1 mu=4.30e-6 sigma=2.60e-1 min(sz)/mu=4.7e-3 max(sz)/mu=1.4e2 solve_rel=6.5e-16 corr_rel=5.7e-16
+IPM t=1.22s it= 22 pobj=2.1347193534e-1 pres=1.94e-8 dres=3.27e-11 gap=9.14e-2 rho=1.0e-13 delta=1.0e-13
+IPM it=22 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 22 alpha_p=3.16e-1 alpha_d=3.48e-1 mu=3.08e-6 sigma=2.75e-1 min(sz)/mu=3.0e-2 max(sz)/mu=1.6e2 solve_rel=4.8e-16 corr_rel=6.9e-16
+IPM t=1.26s it= 23 pobj=2.0912427973e-1 pres=1.32e-8 dres=2.13e-11 gap=6.88e-2 rho=1.0e-13 delta=1.0e-13
+IPM it=23 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 23 alpha_p=4.48e-1 alpha_d=6.00e-1 mu=2.32e-6 sigma=3.24e-1 min(sz)/mu=1.5e-3 max(sz)/mu=1.9e2 solve_rel=2.6e-16 corr_rel=2.5e-16
+IPM t=1.30s it= 24 pobj=2.0327980285e-1 pres=7.31e-9 dres=8.55e-12 gap=4.29e-2 rho=1.0e-13 delta=1.0e-13
+IPM it=24 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 24 alpha_p=3.41e-1 alpha_d=5.36e-1 mu=1.45e-6 sigma=4.15e-1 min(sz)/mu=2.5e-3 max(sz)/mu=2.1e2 solve_rel=1.4e-16 corr_rel=1.5e-16
+IPM t=1.33s it= 25 pobj=1.9993097206e-1 pres=4.81e-9 dres=3.98e-12 gap=3.13e-2 rho=1.0e-13 delta=1.0e-13
+IPM it=25 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 25 alpha_p=4.97e-1 alpha_d=3.62e-1 mu=1.06e-6 sigma=2.95e-1 min(sz)/mu=9.7e-3 max(sz)/mu=2.1e2 solve_rel=1.0e-16 corr_rel=1.7e-16
+IPM t=1.38s it= 26 pobj=1.9601196724e-1 pres=2.42e-9 dres=2.55e-12 gap=2.23e-2 rho=1.0e-13 delta=1.0e-13
+IPM it=26 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 26 alpha_p=3.05e-1 alpha_d=2.70e-1 mu=7.51e-7 sigma=6.56e-1 min(sz)/mu=1.0e-2 max(sz)/mu=1.7e2 solve_rel=4.9e-17 corr_rel=1.2e-16
+IPM t=1.41s it= 27 pobj=1.9527726018e-1 pres=1.68e-9 dres=1.86e-12 gap=2.01e-2 rho=1.0e-13 delta=1.0e-13
+IPM it=27 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 27 alpha_p=6.41e-1 alpha_d=4.59e-1 mu=6.79e-7 sigma=6.98e-1 min(sz)/mu=1.2e-3 max(sz)/mu=1.4e2 solve_rel=1.4e-16 corr_rel=2.1e-17
+IPM t=1.45s it= 28 pobj=1.9408997514e-1 pres=6.03e-10 dres=1.01e-12 gap=1.70e-2 rho=1.0e-13 delta=1.0e-13
+IPM it=28 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 28 alpha_p=4.96e-1 alpha_d=6.59e-1 mu=5.73e-7 sigma=2.45e-1 min(sz)/mu=9.0e-3 max(sz)/mu=7.5e1 solve_rel=9.7e-17 corr_rel=1.1e-16
+IPM t=1.49s it= 29 pobj=1.9246681803e-1 pres=3.04e-10 dres=3.48e-13 gap=9.08e-3 rho=1.0e-13 delta=1.0e-13
+IPM it=29 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 29 alpha_p=2.33e-1 alpha_d=4.92e-1 mu=3.06e-7 sigma=4.19e-1 min(sz)/mu=1.3e-2 max(sz)/mu=8.0e1 solve_rel=1.1e-16 corr_rel=8.3e-17
+IPM t=1.53s it= 30 pobj=1.9204099049e-1 pres=2.33e-10 dres=1.79e-13 gap=6.96e-3 rho=1.0e-13 delta=1.0e-13
+IPM it=30 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 30 alpha_p=3.35e-1 alpha_d=6.02e-1 mu=2.35e-7 sigma=4.29e-1 min(sz)/mu=1.5e-2 max(sz)/mu=8.2e1 solve_rel=7.6e-17 corr_rel=6.1e-17
+IPM t=1.57s it= 31 pobj=1.9147409553e-1 pres=1.55e-10 dres=7.46e-14 gap=5.01e-3 rho=1.0e-13 delta=1.0e-13
+IPM it=31 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 31 alpha_p=4.40e-1 alpha_d=6.34e-1 mu=1.69e-7 sigma=2.93e-1 min(sz)/mu=6.8e-3 max(sz)/mu=8.5e1 solve_rel=8.2e-17 corr_rel=1.1e-16
+IPM t=1.60s it= 32 pobj=1.9076009876e-1 pres=8.66e-11 dres=3.01e-14 gap=3.08e-3 rho=1.0e-13 delta=1.0e-13
+IPM it=32 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 32 alpha_p=4.09e-1 alpha_d=4.47e-1 mu=1.04e-7 sigma=4.60e-1 min(sz)/mu=7.7e-3 max(sz)/mu=9.3e1 solve_rel=1.1e-16 corr_rel=5.0e-17
+IPM t=1.64s it= 33 pobj=1.9039310234e-1 pres=5.12e-11 dres=1.79e-14 gap=2.37e-3 rho=1.0e-13 delta=1.0e-13
+IPM it=33 external lower bound=6.0925406011e-2 rel_gap=6.80e-1
+IPM it= 33 alpha_p=3.94e-1 alpha_d=5.27e-1 mu=8.00e-8 sigma=2.18e-1 min(sz)/mu=1.0e-2 max(sz)/mu=7.9e1 solve_rel=4.2e-17 corr_rel=3.4e-17
+IPM t=1.68s it= 34 pobj=1.9004766792e-1 pres=3.10e-11 dres=9.73e-15 gap=1.51e-3 rho=1.0e-13 delta=1.0e-13
+IPM it=34 external lower bound=6.0925406011e-2 rel_gap=6.79e-1
+IPM it= 34 alpha_p=5.97e-1 alpha_d=4.79e-1 mu=5.10e-8 sigma=4.62e-1 min(sz)/mu=1.5e-2 max(sz)/mu=8.0e1 solve_rel=2.8e-17 corr_rel=3.1e-17
+IPM t=1.72s it= 35 pobj=1.8977665490e-1 pres=1.25e-11 dres=5.91e-15 gap=1.07e-3 rho=1.0e-13 delta=1.0e-13
+IPM it=35 external lower bound=6.0925406011e-2 rel_gap=6.79e-1
+IPM it= 35 alpha_p=2.89e-1 alpha_d=7.08e-1 mu=3.60e-8 sigma=4.15e-1 min(sz)/mu=1.3e-2 max(sz)/mu=5.0e1 solve_rel=5.6e-17 corr_rel=2.4e-17
+IPM t=1.76s it= 36 pobj=1.8969413810e-1 pres=8.90e-12 dres=2.99e-15 gap=7.45e-4 rho=1.0e-13 delta=1.0e-13
+IPM it=36 external lower bound=6.0925406011e-2 rel_gap=6.79e-1
+IPM it= 36 alpha_p=4.82e-1 alpha_d=4.93e-1 mu=2.52e-8 sigma=2.73e-1 min(sz)/mu=8.2e-3 max(sz)/mu=5.2e1 solve_rel=1.1e-16 corr_rel=1.1e-16
+IPM t=1.80s it= 37 pobj=1.8954576315e-1 pres=4.61e-12 dres=2.67e-15 gap=4.82e-4 rho=1.0e-13 delta=1.0e-13
+IPM it=37 external lower bound=6.0925406011e-2 rel_gap=6.79e-1
+IPM it= 37 alpha_p=5.20e-1 alpha_d=6.01e-1 mu=1.62e-8 sigma=2.37e-1 min(sz)/mu=1.2e-2 max(sz)/mu=4.3e1 solve_rel=1.1e-16 corr_rel=3.2e-17
+IPM t=1.84s it= 38 pobj=1.8944332936e-1 pres=2.21e-12 dres=2.18e-15 gap=2.77e-4 rho=1.0e-13 delta=1.0e-13
+IPM it=38 external lower bound=6.0925406011e-2 rel_gap=6.78e-1
+IPM it= 38 alpha_p=4.46e-1 alpha_d=6.38e-1 mu=9.34e-9 sigma=3.51e-1 min(sz)/mu=1.3e-2 max(sz)/mu=3.7e1 solve_rel=1.1e-16 corr_rel=1.1e-16
+IPM t=1.88s it= 39 pobj=1.8939764461e-1 pres=1.22e-12 dres=1.89e-15 gap=1.82e-4 rho=1.0e-13 delta=1.0e-13
+IPM it=39 external lower bound=6.0925406011e-2 rel_gap=6.78e-1
+IPM it= 39 alpha_p=5.83e-1 alpha_d=7.67e-1 mu=6.14e-9 sigma=1.83e-1 min(sz)/mu=7.6e-3 max(sz)/mu=3.2e1 solve_rel=7.3e-17 corr_rel=1.1e-16
+IPM t=1.92s it= 40 pobj=1.8934784151e-1 pres=5.10e-13 dres=1.53e-15 gap=8.36e-5 rho=1.0e-13 delta=1.0e-13
+IPM it=40 external lower bound=6.0925406011e-2 rel_gap=6.78e-1
+IPM it= 40 alpha_p=5.84e-1 alpha_d=7.61e-1 mu=2.82e-9 sigma=1.68e-1 min(sz)/mu=1.4e-2 max(sz)/mu=2.9e1 solve_rel=1.0e-16 corr_rel=5.0e-17
+IPM t=1.96s it= 41 pobj=1.8932194556e-1 pres=2.12e-13 dres=1.05e-15 gap=3.85e-5 rho=1.0e-13 delta=1.0e-13
+IPM it=41 external lower bound=6.0925406011e-2 rel_gap=6.78e-1
+IPM it= 41 alpha_p=6.03e-1 alpha_d=7.94e-1 mu=1.30e-9 sigma=2.51e-1 min(sz)/mu=1.4e-2 max(sz)/mu=2.7e1 solve_rel=3.4e-16 corr_rel=1.1e-16
+IPM t=2.00s it= 42 pobj=1.8930967124e-1 pres=8.43e-14 dres=1.72e-15 gap=1.95e-5 rho=1.0e-13 delta=1.0e-13
+IPM it=42 external lower bound=6.0925406011e-2 rel_gap=6.78e-1
+IPM it= 42 alpha_p=7.55e-1 alpha_d=1.00e0 mu=6.58e-10 sigma=3.72e-1 min(sz)/mu=1.5e-2 max(sz)/mu=2.2e1 solve_rel=3.0e-16 corr_rel=7.6e-16
+IPM t=2.04s it= 43 pobj=1.8930273066e-1 pres=5.68e-14 dres=8.51e-16 gap=9.52e-6 rho=1.0e-13 delta=1.0e-13
+IPM it=43 external lower bound=6.0925406011e-2 rel_gap=6.78e-1
+IPM it= 43 alpha_p=6.55e-1 alpha_d=6.66e-1 mu=3.21e-10 sigma=1.51e-1 min(sz)/mu=1.5e-2 max(sz)/mu=1.2e1 solve_rel=7.8e-16 corr_rel=1.6e-15
+IPM t=2.08s it= 44 pobj=1.8929949163e-1 pres=7.14e-15 dres=1.89e-15 gap=4.19e-6 rho=1.0e-13 delta=1.0e-13
+IPM it=44 external lower bound=6.0925406012e-2 rel_gap=6.78e-1
+IPM it= 44 alpha_p=6.10e-1 alpha_d=7.65e-1 mu=1.42e-10 sigma=8.70e-2 min(sz)/mu=1.0e-2 max(sz)/mu=9.7e0 solve_rel=6.1e-15 corr_rel=4.7e-14
+IPM t=2.12s it= 45 pobj=1.8929814668e-1 pres=2.88e-14 dres=1.76e-15 gap=1.61e-6 rho=1.0e-13 delta=1.0e-13
+IPM it=45 external lower bound=6.0925406012e-2 rel_gap=6.78e-1
+IPM it= 45 alpha_p=6.96e-1 alpha_d=1.00e0 mu=5.42e-11 sigma=1.41e-1 min(sz)/mu=7.7e-3 max(sz)/mu=1.0e1 solve_rel=9.2e-15 corr_rel=3.5e-15
+IPM t=2.16s it= 46 pobj=1.8929750379e-1 pres=8.30e-15 dres=2.05e-15 gap=5.07e-7 rho=1.0e-13 delta=1.0e-13
+IPM it=46 external lower bound=6.5035127371e-2 rel_gap=6.56e-1
+IPM it= 46 alpha_p=1.00e0 alpha_d=6.84e-1 mu=1.71e-11 sigma=1.45e-1 min(sz)/mu=2.6e-2 max(sz)/mu=9.9e0 solve_rel=4.4e-13 corr_rel=1.5e-11
+IPM t=2.21s it= 47 pobj=1.8929715259e-1 pres=4.60e-12 dres=4.81e-16 gap=9.95e-8 rho=1.0e-13 delta=1.0e-13
+IPM it=47 external lower bound=6.5035127372e-2 rel_gap=6.56e-1
+IPM it=47 factorization failed; raising regularization
+IPM t=2.23s it= 48 pobj=1.8929715259e-1 pres=4.60e-12 dres=4.81e-16 gap=9.95e-8 rho=1.0e-8 delta=1.0e-8
+IPM it=48 external lower bound=6.5035127372e-2 rel_gap=6.56e-1
+IPM it= 48 alpha_p=7.72e-1 alpha_d=9.80e-1 mu=3.36e-12 sigma=1.86e-2 min(sz)/mu=3.9e-2 max(sz)/mu=4.5e0 solve_rel=1.4e-15 corr_rel=1.3e-15
+IPM t=2.26s it= 49 pobj=1.8929712700e-1 pres=3.07e-12 dres=8.96e-13 gap=1.07e-8 rho=4.1e-9 delta=1.1e-9
+IPM it=49 reached the tolerance; pushing for higher accuracy (target 1.0e-3)
+IPM it=49 external lower bound=6.5035127372e-2 rel_gap=6.56e-1
+IPM it= 49 alpha_p=9.94e-1 alpha_d=9.92e-1 mu=3.61e-13 sigma=1.26e-5 min(sz)/mu=4.9e-2 max(sz)/mu=1.0e1 solve_rel=4.7e-17 corr_rel=1.6e-16
+IPM t=2.30s it= 50 pobj=1.8929711865e-1 pres=2.18e-14 dres=4.10e-13 gap=6.78e-11 rho=2.6e-11 delta=6.8e-12
+IPM it=50 external lower bound=6.5035127372e-2 rel_gap=6.56e-1
+IPM it=50 factorization failed; raising regularization
+IPM t=2.32s it= 51 pobj=1.8929711865e-1 pres=2.18e-14 dres=4.10e-13 gap=6.78e-11 rho=1.0e-8 delta=1.0e-8
+IPM it=51 external lower bound=6.5035127372e-2 rel_gap=6.56e-1
+IPM it= 51 alpha_p=9.60e-1 alpha_d=9.95e-1 mu=2.30e-15 sigma=1.39e-7 min(sz)/mu=7.2e-2 max(sz)/mu=9.7e0 solve_rel=1.2e-12 corr_rel=1.8e-10
+IPM t=2.36s it= 52 pobj=1.8929711860e-1 pres=1.73e-10 dres=1.57e-14 gap=2.14e-12 rho=3.1e-10 delta=3.5e-9
+IPM factor breakdown: assemble=0.074s numeric=1.504s
+IPM end status=Optimal iters=52 rel_res=(4.9782700321658777e-5, 7.867299201103322e-7, 0.00017944667618774977)
+IPM profile total=2.357s factor=1.464s solve=0.419s other=0.474s
+CROSSOVER ipm status=Optimal iters=52 rel_res=(4.9782700321658777e-5, 7.867299201103322e-7, 0.00017944667618774977) t=2.360s
+CROSSOVER resid after ipm=2.633e-7 (before clamping 2.633e-7, max bound violation 3.428e-13, |b|max=1.520e3)
+CROSSOVER resid after ipm=2.633e-7
+CROSSOVER resid after detect=1.248e-6
+CROSSOVER m=3151 n=17024 basic_after_detect=2099 t=2.362s
+CROSSOVER resid after primal push=1.248e-6
+CROSSOVER primal_push steps=0 basic=2099 t=2.362s
+CROSSOVER dual push skipped (|D|=2158 < 0.7 m)
+CROSSOVER after dual push: max|s_D|=6.57e-7 (#>1e-6: 0) dual-infeasible non-D=0
+CROSSOVER dual_push steps=0 active 2158->2158 t=2.362s
+CROSSOVER basis from_B=2064 from_D=0 slack=1087 (m=3151) t=2.373s
+CROSSOVER basis selector: reach=62420 elim=2332515 nnz(L)=29653 scanned=108170
+CROSSOVER leftover superbasics=35 (|B|-m after primal push=-1052)
+CROSSOVER megiddo prof: total=0.00s ftran=0.00 rows=0.00 btran=0.00 update=0.00 refactor=0.00 (0x, 0 by verify, 0 by x_B residual) avg_nz=1290
+CROSSOVER megiddo pivots=32 to_bound=3 unresolved=0 t=2.383s
+CROSSOVER stats Stats { ipm_iters: 52, basic_after_detect: 2099, primal_steps: 0, basic_after_push: 2099, dual_active_start: 2158, dual_steps: 0, primal_corrections: 0, dual_corrections: 0, dual_active_end: 2158, li_from_b: 2064, li_from_d: 0, li_slack: 1087, factors: 0, solves: 0, factor_secs: 0.0 }
+CROSSOVER basis quality: primal violations relative to row size: max 0.00e0, #>1e-9: 0
+CROSSOVER basis quality: primal_infeas=0 (max 0.00e0) dual_infeas=8095 (max 1.21e0)
+CROSSOVER dual megiddo: candidates=1067 pushed=1067 pivots=939 skipped=0 refactors=3 t=0.04s (btran 0.00 price 0.00 ratio 0.00 update 0.03 (ftran 0.02 refactor 0.01 recompute 0.00); avg |rho| 7 touched 87 ftran nnz 2018)
+CROSSOVER cleanup status=Some(Optimal) total t=2.437s
+CROSSOVER final x (presolved): len=17024 n_struct=13873 row viol max=5.187e-12 (#>1e-9: 0) col viol max=1.117e-13 (#>1e-9: 0)
+CROSSOVER final basis LU: |rhs - B x_B|=6.480e-12 x_B bound viol max=5.144e-12 (#>1e-9: 0) max|x_B - returned|=2.274e-13 obj(presolved)=2.877316202746e2 nonbasic off-bound=0
+CROSSOVER final basis refine0: |rhs - B x_B|=6.466e-13 x_B bound viol max=5.500e-14 (#>1e-9: 0) max|x_B - returned|=2.411e-10 obj(presolved)=2.877316202746e2 nonbasic off-bound=0
+CROSSOVER final basis refine1: |rhs - B x_B|=6.352e-13 x_B bound viol max=4.056e-14 (#>1e-9: 0) max|x_B - returned|=2.446e-10 obj(presolved)=2.877316202746e2 nonbasic off-bound=0
+CROSSOVER final basis refine2: |rhs - B x_B|=5.835e-13 x_B bound viol max=5.971e-13 (#>1e-9: 0) max|x_B - returned|=2.442e-10 obj(presolved)=2.877316202746e2 nonbasic off-bound=0
+MIP root race: simplex ended without a conclusion at 2.460s (Error), waiting for ipm_crossover
+MIP root race: ipm_crossover won at 2.460s, its optimal basis adopted
+MIP: LP probing pass 1: 12 candidates, 0 fixings (2 LPs, 1936 iters, 3.16s)
+MIP: LP probing: tried 1 columns, fixed 0, LP 5.7623162027e2 -> 5.7623162027e2 (2 LPs, 1936 iters, 3.16s)
+MIP: LP probing: root LP 2.46s (11008 iters, size 96577), tried 1, fixed 0, basis passed true, total 12944 iters 3.16s
+MIP: probing: 69 of 69 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 0 implications (0.00s, cpu 0.00s, work 188236, pwork 1280788, chg 3726)
+MIP: probing: 0 equivalent binary pairs
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (0 edges, 0.00s)
+MIP: symmetry: none (0.01s, work 704520, search 0, verify 0, detect 0.01s, refine 0.01s, log work 3344648)
+MIP: fixed-charge check: vb rows 79 of 3151, continuous with vb 79 of 13768
+MIP: root LP basis from the presolve LP probing: used (with rows)
+MIP: solving the root LP (0.01s)
+MIP: root LP 5.7623162027e2 (1 iters, 0.02s)
+MIP: fixed-charge check: vb rows 79 of 3151, continuous with vb 79 of 13768
+MIP: fixed-charge check: vb rows 79 of 3151, continuous with vb 79 of 13768
+MIP: robust cut LP cap: size false, double false, progress true
+MIP: FJ problem (FJ_P3): rows 3151 -> 3151, free columns 13837 -> 13837, 1 continuous bounds tightened (0.02s)
+MIP: fixed-charge check: vb rows 79 of 3151, continuous with vb 79 of 13768
+MIP: fixed-charge check: vb rows 79 of 3151, continuous with vb 79 of 13768
+MCF detect: rows 3151 cols 13873 | flow cands 1191 flow rows 532 commodities 1 cap cands 1432 arcs 646 nodes 532 incons 13.00 undirected | fail 'inconsistent' | networks [] fc_network false | 0.003s
+MIP: cut selection probe: compared at 5 rounds (pool stopped early), probe wall 2.96s (budget 2.8s)
+MIP: cut selection probe (6 rounds): default 12 cuts gain 4.554181e-3 (1.02s), pool 17 cuts gain 9.167534e-3 (1.17s) -> pool (rule rate, probe 2.19s in total, 2.98s)
+MIP: cut round 0: 7 cuts (of 102, sep 0.16s, LP 293 iters), LP rows 3158 (cut rows mean nnz 43), obj 5.7623553707e2 (3.25s)
+MIP: cut round 1: root cut time cap check: clock 0.261s of cap 5.68s (min rounds 0)
+MIP: cut round 1: 5 cuts (of 86, sep 0.16s, LP 164 iters), LP rows 3163 (cut rows mean nnz 45), obj 5.7623729948e2 (3.47s)
+MIP: cut round 2: root cut time cap check: clock 0.468s of cap 5.68s (min rounds 0)
+MIP: cut round 2: 2 cuts (of 42, sep 0.17s, LP 262 iters), LP rows 3164 (cut rows mean nnz 43), obj 5.7624039344e2 (3.74s)
+MIP: cut round 3: root cut time cap check: clock 0.719s of cap 5.68s (min rounds 0)
+MIP: cut round 3: 1 cuts (of 66, sep 0.18s, LP 38 iters), LP rows 3165 (cut rows mean nnz 42), obj 5.7624043540e2 (3.94s)
+MIP: cut round 4: root cut time cap check: clock 0.895s of cap 5.68s (min rounds 0)
+MIP: cut round 4: 2 cuts (of 66, sep 0.17s, LP 69 iters), LP rows 3167 (cut rows mean nnz 41), obj 5.7624060195e2 (4.14s)
+MIP: cut round 5: root cut time cap check: clock 1.076s of cap 5.68s (min rounds 0)
+MIP: cut round 5: 5 cuts (of 92, sep 0.17s, LP 193 iters), LP rows 3172 (cut rows mean nnz 42), obj 5.7624282286e2 (4.38s)
+MIP: clique graph: 0 edges (0 from rows, probing implications 0)
+MIP: clique fallback: no violated clique cuts; not used (0.00s)
+MIP: cut loop done: 22 cuts added, 21 in LP, pool 296 cuts (19427 nonzeros), obj 5.7623162027e2 -> 5.7624282286e2
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1000, work_iters: 20000, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 1 iters)
+MIP: background cuts: basis with the column values not passed (root LP 0.01s)
+MIP: early root reduced costs stored (0 newly fixed integer columns, 4.40s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+MIP: root heuristic shifting: none (0.00s)
+MIP: fixed-charge check: vb rows 79 of 3151, continuous with vb 79 of 13768
+MIP: fixed-charge check: vb rows 79 of 3151, continuous with vb 79 of 13768
+MIP: fixed-charge check: vb rows 79 of 3151, continuous with vb 79 of 13768
+MIP: fixed-charge check: vb rows 79 of 3151, continuous with vb 79 of 13768
+MIP: fixed-charge check: vb rows 79 of 3151, continuous with vb 79 of 13768
+MCF detect: rows 3151 cols 13873 | flow cands 1191 flow rows 532 commodities 1 cap cands 1432 arcs 646 nodes 532 incons 13.00 undirected | fail 'inconsistent' | networks [] fc_network false | 0.002s
+MIP: fixed-integer LP dual check: c x 5.7650537666e2, dual bound 5.7624282286e2 -> solve
+MIP:   global fixed integers 37 of 69 (newly 37 since the root LP)
+MIP: new incumbent 5.7650537666e2 at node 0 (6.48s) [int shifting]
+MIP: early restart: 37 newly fixed integer columns after int shifting (6.48s)
+MIP: root heuristic int shifting: found (2.08s)
+MIP: root heuristic randomized rounding: skipped (early restart)
+MIP: root heuristic interior rounding: skipped (early restart)
+MIP: root heuristic root reduced cost: skipped (early restart)
+MIP: root heuristic LP face: skipped (early restart)
+MIP: root heuristic RENS: skipped (early restart)
+MIP: root heuristic RINS: skipped (early restart)
+MIP: after root heuristics: incumbent Some(576.5053766636233) (6.48s)
+MIP: background cuts: determ: waited 0.00s (safety cap 15.09s, done, background end stalled), 6 rounds, 1494 LP iters (1.49 x 1000 of cap 20000), obj Some(576.2611739525779) (6.48s)
+MIP: background cuts: rounds so far [576.3 at 4.83s, 576.3 at 5.13s, 576.3 at 5.38s, 576.3 at 5.60s, 576.3 at 5.82s, 576.3 at 6.10s]
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (6.49s)
+MIP: background cuts: LP solve time with the replaced cuts 0.010s (returned DSE not used)
+MIP: background cuts: LP with the replaced cuts: Optimal, 1 iters (6.50s)
+MIP: background cuts: 6 rounds, 38 cut rows (was 21), obj 5.7624282286e2 -> 5.7626117395e2 (waited 0.00s, 6.50s)
+MIP: root reduced costs re-stored after the background cuts (39 newly fixed integer columns)
+MIP: root objective probing: skipped (gap 4.236e-4 (LP 5.7626117395e2, incumbent 5.7650537666e2), 14 fractional binaries)
+MIP: restart check: newly fixed 39, integer columns 69, free at the root 69, threshold 0.7, root LP 0.01s
+MIP: restart 1 (39 of 69 integer columns newly fixed at the root, 38 cuts kept) (6.50s)
+MIP: restart 1: pseudocost observations: columns up 0, down 0, both 0 (free integer columns 30); observations up 0, down 0; nodes 0
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 3189 -> 3063, free columns 13798 -> 12934, nonzeros 81421 -> 75777, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: probing: 30 of 30 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 298 implications (0.00s, cpu 0.00s, work 224125, pwork 2713654, chg 20484)
+MIP: probing: 0 equivalent binary pairs
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (149 edges, 0.00s)
+MIP: fixed-charge check: vb rows 40 of 3063, continuous with vb 40 of 12904
+MIP: fixed-integer LP dual check: c x 5.7650537666e2, dual bound 5.4329200000e2 -> solve
+NormalKkt: dense_cols=0 (threshold 52) triplets=455794 pattern nnz=285018 built in 0.02s
+NormalKkt: AMD nnz(L)=Some(3960353) flops=2.582e9, METIS nnz(L)=Some(2400839) flops=1.349e9 (METIS 0.05s)
+NormalKkt: symbolic (AMD) nnz(L)=2400839 at 0.09s
+NormalKkt: backend=multifrontal flops=1.35e9
+NormalKkt: AMD nnz(L)=Some(2190846) flops=9.656e8, METIS nnz(L)=Some(2081392) flops=1.077e9 (METIS 0.08s)
+AugKkt: backend=multifrontal nnz(L)=2190846 flops=9.66e8
+IpmKkt: normal flops 1.35e9 vs augmented 9.66e8 (ratio 4)
+IPM kkt=normal nnz(A)=77272 nnz(L)=2400839 setup=0.23s
+IPM n=14815 p=3063 n_lo=14815 n_up=12903 |h|max=3.191e2 (#|bnd|>1e6: 0) |b|=1.000e0 |c|=1.000e0
+IPM t=0.34s it=  0 pobj=2.3380336917e-1 pres=1.93e1 dres=5.38e2 gap=4.49e6 rho=1.0e-4 delta=1.0e-4
+IPM it=0 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  0 alpha_p=8.44e-1 alpha_d=8.46e-1 mu=1.05e4 sigma=2.67e-2 min(sz)/mu=5.6e-1 max(sz)/mu=7.3e0 solve_rel=9.5e-14 corr_rel=9.0e-14
+IPM t=0.41s it=  1 pobj=1.0789946701e1 pres=3.05e0 dres=8.29e1 gap=4.26e6 rho=1.7e-5 delta=1.7e-5
+IPM it=1 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  1 alpha_p=9.09e-1 alpha_d=6.96e-1 mu=1.77e3 sigma=1.42e-1 min(sz)/mu=3.5e-2 max(sz)/mu=6.2e0 solve_rel=2.0e-14 corr_rel=1.2e-14
+IPM t=0.45s it=  2 pobj=1.6409755608e1 pres=3.63e-1 dres=2.52e1 gap=3.68e6 rho=2.9e-6 delta=2.9e-6
+IPM it=2 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  2 alpha_p=8.42e-1 alpha_d=8.36e-1 mu=3.02e2 sigma=9.17e-2 min(sz)/mu=3.2e-2 max(sz)/mu=1.2e1 solve_rel=8.3e-16 corr_rel=4.6e-16
+IPM t=0.48s it=  3 pobj=2.0795744443e1 pres=8.93e-2 dres=4.13e0 gap=1.10e6 rho=6.0e-7 delta=6.0e-7
+IPM it=3 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  3 alpha_p=8.02e-1 alpha_d=7.67e-1 mu=6.30e1 sigma=1.01e-1 min(sz)/mu=1.7e-2 max(sz)/mu=9.4e0 solve_rel=1.3e-16 corr_rel=2.9e-17
+IPM t=0.52s it=  4 pobj=2.3090197723e1 pres=1.88e-2 dres=9.64e-1 gap=3.39e5 rho=1.6e-7 delta=1.6e-7
+IPM it=4 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  4 alpha_p=7.13e-1 alpha_d=7.24e-1 mu=1.68e1 sigma=1.17e-1 min(sz)/mu=1.7e-2 max(sz)/mu=8.6e0 solve_rel=1.7e-16 corr_rel=4.4e-17
+IPM t=0.55s it=  5 pobj=2.4702454206e1 pres=5.31e-3 dres=2.66e-1 gap=1.25e5 rho=5.4e-8 delta=5.4e-8
+IPM it=5 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  5 alpha_p=4.50e-1 alpha_d=7.69e-1 mu=5.73e0 sigma=1.01e-1 min(sz)/mu=1.0e-2 max(sz)/mu=7.2e0 solve_rel=3.8e-16 corr_rel=2.4e-16
+IPM t=0.59s it=  6 pobj=2.5578255661e1 pres=2.87e-3 dres=6.13e-2 gap=4.10e4 rho=1.9e-8 delta=1.9e-8
+IPM it=6 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  6 alpha_p=8.29e-1 alpha_d=8.71e-1 mu=1.97e0 sigma=2.04e-1 min(sz)/mu=6.2e-3 max(sz)/mu=5.1e0 solve_rel=3.7e-16 corr_rel=2.1e-16
+IPM t=0.64s it=  7 pobj=2.9798316728e1 pres=4.85e-4 dres=7.90e-3 gap=1.42e4 rho=5.4e-9 delta=5.4e-9
+IPM it=7 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  7 alpha_p=6.66e-1 alpha_d=6.96e-1 mu=5.72e-1 sigma=2.58e-2 min(sz)/mu=2.1e-2 max(sz)/mu=3.0e0 solve_rel=3.5e-17 corr_rel=1.3e-16
+IPM t=0.68s it=  8 pobj=2.4448590611e1 pres=2.44e-4 dres=2.40e-3 gap=4.63e3 rho=1.7e-9 delta=1.7e-9
+IPM it=8 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  8 alpha_p=3.26e-1 alpha_d=1.06e-1 mu=1.81e-1 sigma=8.52e-1 min(sz)/mu=2.4e-2 max(sz)/mu=2.8e0 solve_rel=3.8e-17 corr_rel=1.1e-16
+IPM t=0.71s it=  9 pobj=3.1556927320e1 pres=1.66e-4 dres=2.15e-3 gap=4.59e3 rho=1.7e-9 delta=1.7e-9
+IPM it=9 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  9 alpha_p=3.49e-1 alpha_d=8.29e-1 mu=1.76e-1 sigma=7.38e-1 min(sz)/mu=6.2e-3 max(sz)/mu=2.3e2 solve_rel=1.2e-16 corr_rel=8.2e-17
+IPM t=0.75s it= 10 pobj=3.5852187460e1 pres=1.21e-4 dres=3.68e-4 gap=3.59e3 rho=1.3e-9 delta=1.3e-9
+IPM it=10 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 10 alpha_p=8.36e-1 alpha_d=9.31e-1 mu=1.38e-1 sigma=6.75e-1 min(sz)/mu=2.0e-2 max(sz)/mu=1.3e2 solve_rel=1.3e-16 corr_rel=1.4e-16
+IPM t=0.78s it= 11 pobj=4.4717866813e1 pres=3.32e-5 dres=2.54e-5 gap=2.55e3 rho=8.9e-10 delta=8.9e-10
+IPM it=11 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 11 alpha_p=6.91e-1 alpha_d=6.12e-1 mu=9.37e-2 sigma=3.13e-1 min(sz)/mu=1.6e-2 max(sz)/mu=9.4e1 solve_rel=1.3e-16 corr_rel=1.6e-16
+IPM t=0.82s it= 12 pobj=2.5689948303e1 pres=1.87e-5 dres=9.86e-6 gap=1.48e3 rho=5.1e-10 delta=5.1e-10
+IPM it=12 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 12 alpha_p=1.00e0 alpha_d=1.00e0 mu=5.38e-2 sigma=6.52e-2 min(sz)/mu=3.0e-3 max(sz)/mu=6.9e1 solve_rel=1.3e-16 corr_rel=1.2e-16
+IPM t=0.86s it= 13 pobj=2.1156325863e0 pres=1.90e-5 dres=1.20e-8 gap=9.50e1 rho=3.3e-11 delta=1.9e-10
+IPM it=13 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 13 alpha_p=8.99e-1 alpha_d=9.93e-1 mu=3.46e-3 sigma=1.71e-2 min(sz)/mu=1.3e-1 max(sz)/mu=2.8e1 solve_rel=1.5e-16 corr_rel=1.5e-16
+IPM t=0.91s it= 14 pobj=2.9797439870e-1 pres=8.56e-6 dres=1.49e-10 gap=2.45e0 rho=8.9e-13 delta=5.2e-12
+IPM it=14 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 14 alpha_p=3.49e-1 alpha_d=9.77e-2 mu=9.39e-5 sigma=4.26e-1 min(sz)/mu=7.3e-2 max(sz)/mu=1.3e1 solve_rel=1.1e-16 corr_rel=2.0e-16
+IPM t=0.99s it= 15 pobj=3.5329295245e-1 pres=5.57e-6 dres=1.34e-10 gap=2.35e0 rho=8.4e-13 delta=4.9e-12
+IPM it=15 external lower bound=0.0000000000e0 rel_gap=1.00e0
+MIP root race: simplex won at 1.007s (TimeLimit)
+MIP: fixed-integer LP: TimeLimit (4833 iters)
+MIP:   global fixed integers 39 of 69 (newly 39 since the root LP)
+MIP: new incumbent 5.7650537666e2 at node 0 (1.01s) [tree]
+MIP: start solution from before the restart: accepted true
+MIP: root LP basis from the presolve LP probing: none
+MIP: root LP basis from before the restart: 2250 of 3063 rows matched
+MIP: solving the root LP (1.02s)
+MIP: FJ problem (FJ_P3): rows 3151 -> 3151, free columns 13837 -> 13837, 1 continuous bounds tightened (0.04s)
+IPM it= 15 alpha_p=6.39e-1 alpha_d=5.94e-1 mu=8.88e-5 sigma=4.17e-1 min(sz)/mu=6.9e-3 max(sz)/mu=3.3e1 solve_rel=1.5e-16 corr_rel=1.2e-16
+IPM end status=NotSolved iters=16; returning best iterate rel_res=(6032972.208759169, 98263200.76446901, 100001245.93840563)
+IPM profile total=1.071s factor=0.588s solve=0.108s other=0.375s
+MIP: root LP after the restart: Optimal, 38256 iters (11.46s)
+MIP: root LP 5.7626117395e2 (38256 iters, 11.46s)
+MIP: fixed-charge check: vb rows 40 of 3063, continuous with vb 40 of 12904
+MIP: fixed-charge check: vb rows 40 of 3063, continuous with vb 40 of 12904
+MIP: robust cut LP cap: size false, double false, progress true
+MIP: fixed-charge check: vb rows 40 of 3063, continuous with vb 40 of 12904
+MIP: fixed-charge check: vb rows 40 of 3063, continuous with vb 40 of 12904
+MCF detect: rows 3063 cols 13873 | flow cands 1165 flow rows 524 commodities 1 cap cands 2440 arcs 678 nodes 524 incons 14.00 undirected | fail 'inconsistent' | networks [] fc_network false | 0.002s
+MIP: cut round 0: 4 cuts (of 60, sep 0.16s, LP 209 iters), LP rows 3067 (cut rows mean nnz 22), obj 5.7626280441e2 (11.70s)
+MIP: cut round 1: root cut time cap check: clock 0.230s of cap 5.03s (min rounds 0)
+MIP: cut round 1: 3 cuts (of 86, sep 0.16s, LP 67 iters), LP rows 3070 (cut rows mean nnz 28), obj 5.7626349030e2 (11.89s)
+MIP: cut round 2: root cut time cap check: clock 0.412s of cap 5.03s (min rounds 0)
+MIP: cut round 2: 4 cuts (of 50, sep 0.15s, LP 95 iters), LP rows 3074 (cut rows mean nnz 38), obj 5.7626450401e2 (12.08s)
+MIP: cut round 3: root cut time cap check: clock 0.599s of cap 5.03s (min rounds 0)
+MIP: cut round 3: 5 cuts (of 93, sep 0.16s, LP 114 iters), LP rows 3079 (cut rows mean nnz 40), obj 5.7626563120e2 (12.29s)
+MIP: cut round 4: root cut time cap check: clock 0.799s of cap 5.03s (min rounds 0)
+MIP: cut round 4: 6 cuts (of 71, sep 0.17s, LP 102 iters), LP rows 3082 (cut rows mean nnz 47), obj 5.7626627276e2 (12.51s)
+MIP: cut round 5: root cut time cap check: clock 1.001s of cap 5.03s (min rounds 0)
+MIP: cut round 5: 3 cuts (of 64, sep 0.16s, LP 73 iters), LP rows 3085 (cut rows mean nnz 51), obj 5.7626646749e2 (12.70s)
+MIP: cut round 6: root cut time cap check: clock 1.187s of cap 5.03s (min rounds 0)
+MIP: cut round 6: 3 cuts (of 44, sep 0.16s, LP 221 iters), LP rows 3088 (cut rows mean nnz 55), obj 5.7626922563e2 (12.96s)
+MIP: cut loop done: 28 cuts added, 23 in LP, pool 273 cuts (20898 nonzeros), obj 5.7626117395e2 -> 5.7626922563e2
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 38256, work_iters: 765120, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 38256 iters)
+MIP: background cuts: basis with the column values passed (root LP 10.44s)
+MIP: early root reduced costs stored (0 newly fixed integer columns, 12.98s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: skipped (no solution before the restart)
+MIP: root heuristic shifting: skipped (no solution before the restart)
+MIP: fixed-charge check: vb rows 40 of 3063, continuous with vb 40 of 12904
+MIP: fixed-charge check: vb rows 40 of 3063, continuous with vb 40 of 12904
+MIP: fixed-charge check: vb rows 40 of 3063, continuous with vb 40 of 12904
+MIP: fixed-charge check: vb rows 40 of 3063, continuous with vb 40 of 12904
+MIP: fixed-charge check: vb rows 40 of 3063, continuous with vb 40 of 12904
+MCF detect: rows 3063 cols 13873 | flow cands 1165 flow rows 524 commodities 1 cap cands 2440 arcs 678 nodes 524 incons 14.00 undirected | fail 'inconsistent' | networks [] fc_network false | 0.003s
+MIP: root heuristic int shifting: none (1.17s)
+MIP: fixed-integer LP dual check: c x 5.7634463303e2, dual bound 5.7503201109e2 -> solve
+MIP:   global fixed integers 44 of 69 (newly 5 since the root LP)
+MIP: new incumbent 5.7634463303e2 at node 0 (14.67s) [randomized rounding]
+MIP: early restart: 5 newly fixed integer columns after randomized rounding (14.67s)
+MIP: root heuristic randomized rounding: found (0.52s)
+MIP: root heuristic interior rounding: skipped (early restart)
+MIP: root heuristic root reduced cost: skipped (early restart)
+MIP: root heuristic LP face: skipped (early restart)
+MIP: root heuristic RENS: skipped (early restart)
+MIP: root heuristic RINS: skipped (early restart)
+MIP: after root heuristics: incumbent Some(576.3446330306424) (14.67s)
+MIP: background cuts: determ: waited 0.00s (safety cap 10.68s, done, background end stalled), 6 rounds, 629 LP iters (0.02 x 38256 of cap 765120), obj Some(576.2723885936641) (14.67s)
+MIP: background cuts: rounds so far [576.3 at 13.32s, 576.3 at 13.57s, 576.3 at 13.81s, 576.3 at 14.01s, 576.3 at 14.21s, 576.3 at 14.41s]
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (14.67s)
+MIP: background cuts: LP solve time with the replaced cuts 0.011s (returned DSE not used)
+MIP: background cuts: LP with the replaced cuts: Optimal, 1 iters (14.68s)
+MIP: background cuts: 6 rounds, 33 cut rows (was 23), obj 5.7626922563e2 -> 5.7627238859e2 (waited 0.00s, 14.68s)
+MIP: root reduced costs re-stored after the background cuts (5 newly fixed integer columns)
+MIP: root objective probing: skipped (gap 1.253e-4 (LP 5.7627238859e2, incumbent 5.7634463303e2), 13 fractional binaries)
+MIP: restart check: newly fixed 5, integer columns 69, free at the root 30, threshold 1.7, root LP 10.44s
+MIP: restart 2 (5 of 69 integer columns newly fixed at the root, 33 cuts kept) (14.69s)
+MIP: restart 2: pseudocost observations: columns up 0, down 0, both 0 (free integer columns 25); observations up 0, down 0; nodes 0
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 3096 -> 3077, free columns 12929 -> 12808, nonzeros 77395 -> 76608, postsolve steps 1 (parallel columns merged: 0 integer, 0 continuous)
+MIP: probing: 25 of 25 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 212 implications (0.00s, cpu 0.00s, work 147986, pwork 1832475, chg 13720)
+MIP: probing: 0 equivalent binary pairs
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (106 edges, 0.00s)
+MIP: fixed-charge check: vb rows 34 of 3077, continuous with vb 34 of 12783
+MIP: fixed-integer LP dual check: c x 5.7634463303e2, dual bound 5.4329200000e2 -> solve
+NormalKkt: dense_cols=0 (threshold 53) triplets=466094 pattern nnz=287593 built in 0.03s
+NormalKkt: AMD nnz(L)=Some(3962484) flops=2.578e9, METIS nnz(L)=Some(1927000) flops=1.147e9 (METIS 0.04s)
+NormalKkt: symbolic (AMD) nnz(L)=1927000 at 0.09s
+NormalKkt: backend=multifrontal flops=1.15e9
+NormalKkt: AMD nnz(L)=Some(2253897) flops=1.000e9, METIS nnz(L)=Some(2366407) flops=1.169e9 (METIS 0.09s)
+AugKkt: backend=multifrontal nnz(L)=2253897 flops=1.00e9
+IpmKkt: normal flops 1.15e9 vs augmented 1.00e9 (ratio 4)
+IPM kkt=normal nnz(A)=78117 nnz(L)=1927000 setup=0.24s
+IPM n=14714 p=3077 n_lo=14714 n_up=12782 |h|max=3.158e2 (#|bnd|>1e6: 0) |b|=1.000e0 |c|=1.000e0
+IPM t=0.31s it=  0 pobj=2.3322546430e-1 pres=1.91e1 dres=5.32e2 gap=4.40e6 rho=1.0e-4 delta=1.0e-4
+IPM it=0 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  0 alpha_p=8.45e-1 alpha_d=8.46e-1 mu=1.04e4 sigma=2.65e-2 min(sz)/mu=5.6e-1 max(sz)/mu=7.3e0 solve_rel=7.7e-14 corr_rel=8.9e-14
+IPM t=0.35s it=  1 pobj=1.0625929437e1 pres=3.00e0 dres=8.20e1 gap=4.17e6 rho=1.7e-5 delta=1.7e-5
+IPM it=1 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  1 alpha_p=9.08e-1 alpha_d=6.94e-1 mu=1.73e3 sigma=1.45e-1 min(sz)/mu=3.5e-2 max(sz)/mu=6.2e0 solve_rel=1.3e-14 corr_rel=2.1e-14
+IPM t=0.39s it=  2 pobj=1.6218534154e1 pres=3.59e-1 dres=2.51e1 gap=3.60e6 rho=2.9e-6 delta=2.9e-6
+IPM it=2 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  2 alpha_p=8.61e-1 alpha_d=8.35e-1 mu=2.97e2 sigma=1.12e-1 min(sz)/mu=3.2e-2 max(sz)/mu=1.2e1 solve_rel=8.6e-16 corr_rel=9.6e-16
+IPM t=0.43s it=  3 pobj=2.0905437675e1 pres=8.33e-2 dres=4.15e0 gap=1.12e6 rho=6.0e-7 delta=6.0e-7
+IPM it=3 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  3 alpha_p=7.84e-1 alpha_d=7.21e-1 mu=6.19e1 sigma=1.06e-1 min(sz)/mu=1.7e-2 max(sz)/mu=9.6e0 solve_rel=8.7e-17 corr_rel=1.4e-16
+IPM t=0.47s it=  4 pobj=2.3157894975e1 pres=1.92e-2 dres=1.16e0 gap=3.92e5 rho=1.8e-7 delta=1.8e-7
+IPM it=4 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  4 alpha_p=7.20e-1 alpha_d=7.69e-1 mu=1.89e1 sigma=9.15e-2 min(sz)/mu=1.5e-2 max(sz)/mu=9.1e0 solve_rel=7.5e-17 corr_rel=4.4e-17
+IPM t=0.50s it=  5 pobj=2.4421179170e1 pres=5.25e-3 dres=2.68e-1 gap=1.21e5 rho=5.4e-8 delta=5.4e-8
+IPM it=5 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  5 alpha_p=4.52e-1 alpha_d=7.79e-1 mu=5.56e0 sigma=6.51e-2 min(sz)/mu=1.2e-2 max(sz)/mu=7.4e0 solve_rel=3.5e-16 corr_rel=2.6e-16
+IPM t=0.54s it=  6 pobj=2.4937019009e1 pres=2.81e-3 dres=5.93e-2 gap=3.59e4 rho=1.7e-8 delta=1.7e-8
+IPM it=6 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  6 alpha_p=8.51e-1 alpha_d=8.82e-1 mu=1.72e0 sigma=2.08e-1 min(sz)/mu=1.1e-2 max(sz)/mu=5.4e0 solve_rel=3.2e-16 corr_rel=2.1e-16
+IPM t=0.57s it=  7 pobj=2.8867621295e1 pres=4.23e-4 dres=7.01e-3 gap=1.22e4 rho=4.7e-9 delta=4.7e-9
+IPM it=7 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  7 alpha_p=6.81e-1 alpha_d=6.41e-1 mu=4.89e-1 sigma=3.68e-2 min(sz)/mu=5.0e-2 max(sz)/mu=3.0e0 solve_rel=1.0e-16 corr_rel=7.5e-17
+IPM t=0.60s it=  8 pobj=2.3355066294e1 pres=2.37e-4 dres=2.52e-3 gap=4.70e3 rho=1.8e-9 delta=1.8e-9
+IPM it=8 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  8 alpha_p=5.14e-1 alpha_d=1.85e-1 mu=1.82e-1 sigma=8.62e-1 min(sz)/mu=1.8e-2 max(sz)/mu=2.9e0 solve_rel=9.4e-17 corr_rel=8.9e-17
+IPM t=0.64s it=  9 pobj=3.4937821148e1 pres=2.12e-4 dres=2.05e-3 gap=4.59e3 rho=1.7e-9 delta=1.7e-9
+IPM it=9 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it=  9 alpha_p=5.47e-1 alpha_d=4.87e-1 mu=1.75e-1 sigma=4.26e-1 min(sz)/mu=6.4e-3 max(sz)/mu=2.2e2 solve_rel=2.1e-16 corr_rel=6.5e-17
+IPM t=0.67s it= 10 pobj=3.2471423361e1 pres=8.91e-5 dres=1.05e-3 gap=3.32e3 rho=1.2e-9 delta=1.2e-9
+IPM it=10 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 10 alpha_p=5.40e-1 alpha_d=6.22e-1 mu=1.24e-1 sigma=4.72e-1 min(sz)/mu=7.7e-3 max(sz)/mu=1.6e2 solve_rel=1.7e-16 corr_rel=2.7e-17
+IPM t=0.71s it= 11 pobj=2.9118679720e1 pres=2.22e-5 dres=3.98e-4 gap=2.23e3 rho=8.0e-10 delta=8.0e-10
+IPM it=11 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 11 alpha_p=9.35e-1 alpha_d=7.49e-1 mu=8.27e-2 sigma=3.81e-1 min(sz)/mu=1.3e-2 max(sz)/mu=1.1e2 solve_rel=1.3e-16 corr_rel=1.5e-16
+IPM t=0.74s it= 12 pobj=1.7073723979e1 pres=2.53e-5 dres=9.97e-5 gap=1.19e3 rho=4.2e-10 delta=5.5e-10
+IPM it=12 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 12 alpha_p=9.88e-1 alpha_d=9.88e-1 mu=4.35e-2 sigma=3.17e-3 min(sz)/mu=7.6e-3 max(sz)/mu=6.6e1 solve_rel=2.1e-16 corr_rel=1.8e-16
+IPM t=0.77s it= 13 pobj=3.7617198214e-1 pres=2.30e-5 dres=1.20e-6 gap=1.82e1 rho=6.6e-12 delta=8.6e-12
+IPM it=13 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 13 alpha_p=4.62e-1 alpha_d=8.86e-1 mu=6.83e-4 sigma=2.18e-2 min(sz)/mu=1.1e-2 max(sz)/mu=5.4e1 solve_rel=1.3e-16 corr_rel=1.3e-16
+IPM t=0.81s it= 14 pobj=2.9235671925e-1 pres=1.24e-5 dres=1.38e-7 gap=2.53e0 rho=1.0e-12 delta=1.3e-12
+IPM it=14 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 14 alpha_p=2.85e-1 alpha_d=2.17e-2 mu=1.05e-4 sigma=7.60e-1 min(sz)/mu=1.5e-2 max(sz)/mu=3.8e1 solve_rel=1.0e-16 corr_rel=2.0e-15
+IPM t=0.84s it= 15 pobj=2.6754473965e-1 pres=8.84e-6 dres=1.35e-7 gap=2.50e0 rho=9.8e-13 delta=1.3e-12
+IPM it=15 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 15 alpha_p=5.93e-1 alpha_d=1.31e-1 mu=1.00e-4 sigma=2.38e-1 min(sz)/mu=7.9e-3 max(sz)/mu=4.0e1 solve_rel=1.1e-16 corr_rel=2.2e-15
+IPM t=0.87s it= 16 pobj=2.5054280822e-1 pres=3.60e-6 dres=1.17e-7 gap=2.24e0 rho=8.4e-13 delta=1.1e-12
+IPM it=16 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 16 alpha_p=1.52e-1 alpha_d=6.55e-2 mu=8.54e-5 sigma=1.97e-1 min(sz)/mu=2.4e-4 max(sz)/mu=4.7e1 solve_rel=1.2e-16 corr_rel=6.2e-15
+IPM t=0.91s it= 17 pobj=2.4371612932e-1 pres=3.05e-6 dres=1.09e-7 gap=2.12e0 rho=7.9e-13 delta=1.0e-12
+IPM it=17 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 17 alpha_p=1.97e-1 alpha_d=4.68e-2 mu=8.05e-5 sigma=1.86e-1 min(sz)/mu=1.6e-4 max(sz)/mu=4.9e1 solve_rel=1.3e-16 corr_rel=3.4e-15
+IPM t=0.94s it= 18 pobj=2.4637193165e-1 pres=2.45e-6 dres=1.04e-7 gap=2.04e0 rho=7.7e-13 delta=9.7e-13
+IPM it=18 external lower bound=0.0000000000e0 rel_gap=1.00e0
+IPM it= 18 alpha_p=5.22e-1 alpha_d=4.18e-1 mu=7.70e-5 sigma=2.23e-1 min(sz)/mu=6.4e-3 max(sz)/mu=2.1e2 solve_rel=1.3e-16 corr_rel=9.4e-15
+IPM t=0.98s it= 19 pobj=2.0621767601e-1 pres=1.17e-6 dres=6.07e-8 gap=1.37e0 rho=5.1e-13 delta=6.5e-13
+IPM it=19 external lower bound=0.0000000000e0 rel_gap=1.00e0
+MIP root race: simplex won at 1.012s (TimeLimit)
+MIP: fixed-integer LP: TimeLimit (5121 iters)
+MIP:   global fixed integers 44 of 69 (newly 44 since the root LP)
+MIP: new incumbent 5.7634463303e2 at node 0 (1.02s) [tree]
+MIP: start solution from before the restart: accepted true
+MIP: root LP basis from the presolve LP probing: none
+MIP: root LP basis from before the restart: 2719 of 3077 rows matched
+MIP: solving the root LP (1.03s)
+IPM it= 19 alpha_p=5.33e-1 alpha_d=6.57e-1 mu=5.14e-5 sigma=1.48e-1 min(sz)/mu=1.5e-3 max(sz)/mu=1.7e2 solve_rel=1.5e-16 corr_rel=1.6e-14
+IPM end status=NotSolved iters=20; returning best iterate rel_res=(0.36994397118221894, 0.0007014487760618759, 78553152.11676154)
+IPM profile total=1.024s factor=0.562s solve=0.116s other=0.346s
+MIP: FJ problem (FJ_P3): rows 3151 -> 3151, free columns 13837 -> 13837, 1 continuous bounds tightened (0.02s)
+MIP: root LP after the restart: Optimal, 42868 iters (12.54s)
+MIP: root LP 5.7627238859e2 (42868 iters, 12.54s)
+MIP: fixed-charge check: vb rows 34 of 3077, continuous with vb 34 of 12783
+MIP: fixed-charge check: vb rows 34 of 3077, continuous with vb 34 of 12783
+MIP: robust cut LP cap: size false, double false, progress true
+MIP: fixed-charge check: vb rows 34 of 3077, continuous with vb 34 of 12783
+MIP: fixed-charge check: vb rows 34 of 3077, continuous with vb 34 of 12783
+MCF detect: rows 3077 cols 13873 | flow cands 1159 flow rows 522 commodities 1 cap cands 2460 arcs 676 nodes 522 incons 14.00 undirected | fail 'inconsistent' | networks [] fc_network false | 0.002s
+MIP: cut round 0: 1 cuts (of 16, sep 0.16s, LP 37 iters), LP rows 3078 (cut rows mean nnz 43), obj 5.7627240604e2 (12.72s)
+MIP: cut round 1: root cut time cap check: clock 0.174s of cap 3.55s (min rounds 0)
+MIP: cut round 1: 1 cuts (of 30, sep 0.15s, LP 11 iters), LP rows 3079 (cut rows mean nnz 43), obj 5.7627240951e2 (12.90s)
+MIP: cut round 2: root cut time cap check: clock 0.337s of cap 3.55s (min rounds 0)
+MIP: cut round 2: 2 cuts (of 20, sep 0.16s, LP 17 iters), LP rows 3081 (cut rows mean nnz 38), obj 5.7627241094e2 (13.07s)
+MIP: cut round 3: root cut time cap check: clock 0.502s of cap 3.55s (min rounds 0)
+MIP: cut round 3: 1 cuts (of 2, sep 0.16s, LP 16 iters), LP rows 3082 (cut rows mean nnz 39), obj 5.7627241315e2 (13.25s)
+MIP: cut round 4: root cut time cap check: clock 0.666s of cap 3.55s (min rounds 0)
+MIP: cut round 4: 1 cuts (of 6, sep 0.16s, LP 16 iters), LP rows 3083 (cut rows mean nnz 39), obj 5.7627242194e2 (13.43s)
+MIP: cut round 5: root cut time cap check: clock 0.830s of cap 3.55s (min rounds 0)
+MIP: cut round 5: 1 cuts (of 16, sep 0.16s, LP 92 iters), LP rows 3084 (cut rows mean nnz 44), obj 5.7627266177e2 (13.63s)
+MIP: cut loop done: 7 cuts added, 6 in LP, pool 60 cuts (4678 nonzeros), obj 5.7627238859e2 -> 5.7627266177e2
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 42868, work_iters: 857360, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 42868 iters)
+MIP: background cuts: basis with the column values passed (root LP 11.51s)
+MIP: early root reduced costs stored (1 newly fixed integer columns, 13.64s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: skipped (no solution before the restart)
+MIP: root heuristic shifting: skipped (no solution before the restart)
+MIP: root heuristic int shifting: skipped (no solution before the restart)
+MIP: fixed-charge check: vb rows 34 of 3077, continuous with vb 34 of 12783
+MIP: fixed-charge check: vb rows 34 of 3077, continuous with vb 34 of 12783
+MIP: fixed-charge check: vb rows 34 of 3077, continuous with vb 34 of 12783
+MIP: fixed-charge check: vb rows 34 of 3077, continuous with vb 34 of 12783
+MIP: fixed-charge check: vb rows 34 of 3077, continuous with vb 34 of 12783
+MCF detect: rows 3077 cols 13873 | flow cands 1159 flow rows 522 commodities 1 cap cands 2460 arcs 676 nodes 522 incons 14.00 undirected | fail 'inconsistent' | networks [] fc_network false | 0.002s
+MIP: root heuristic randomized rounding: none (0.73s)
+NormalKkt: dense_cols=0 (threshold 53) triplets=472822 pattern nnz=290874 built in 0.03s
+NormalKkt: AMD nnz(L)=Some(4160485) flops=2.782e9, METIS nnz(L)=Some(2786567) flops=1.618e9 (METIS 0.04s)
+NormalKkt: symbolic (AMD) nnz(L)=2786567 at 0.09s
+NormalKkt: backend=multifrontal flops=1.62e9
+NormalKkt: AMD nnz(L)=Some(2336042) flops=1.065e9, METIS nnz(L)=Some(2320684) flops=1.299e9 (METIS 0.08s)
+AugKkt: backend=multifrontal nnz(L)=2336042 flops=1.07e9
+IpmKkt: normal flops 1.62e9 vs augmented 1.07e9 (ratio 4)
+IPM kkt=normal nnz(A)=78812 nnz(L)=2786567 setup=0.22s
+IPM n=14745 p=3083 n_lo=14745 n_up=12807 |h|max=3.158e2 (#|bnd|>1e6: 0) |b|=1.000e0 |c|=1.000e0
+IPM t=0.31s it=  0 pobj=2.3171508844e-1 pres=1.92e1 dres=5.32e2 gap=4.40e6 rho=1.0e-4 delta=1.0e-4
+IPM it=  0 alpha_p=8.42e-1 alpha_d=8.50e-1 mu=1.04e4 sigma=1.31e-2 min(sz)/mu=5.6e-1 max(sz)/mu=7.3e0 solve_rel=1.6e-13 corr_rel=7.8e-14
+IPM t=0.41s it=  1 pobj=9.9403977426e0 pres=3.05e0 dres=7.97e1 gap=4.12e6 rho=1.7e-5 delta=1.7e-5
+IPM it=  1 alpha_p=8.98e-1 alpha_d=6.94e-1 mu=1.74e3 sigma=1.36e-1 min(sz)/mu=3.4e-2 max(sz)/mu=6.1e0 solve_rel=1.4e-14 corr_rel=1.4e-14
+IPM t=0.46s it=  2 pobj=1.5525149027e1 pres=3.60e-1 dres=2.44e1 gap=3.55e6 rho=3.0e-6 delta=3.0e-6
+IPM it=  2 alpha_p=9.06e-1 alpha_d=8.44e-1 mu=3.10e2 sigma=9.83e-2 min(sz)/mu=3.1e-2 max(sz)/mu=1.1e1 solve_rel=9.2e-16 corr_rel=5.1e-16
+IPM t=0.51s it=  3 pobj=2.0687865915e1 pres=7.30e-2 dres=3.81e0 gap=1.10e6 rho=5.4e-7 delta=5.4e-7
+IPM it=  3 alpha_p=8.48e-1 alpha_d=8.73e-1 mu=5.63e1 sigma=6.97e-2 min(sz)/mu=4.9e-2 max(sz)/mu=9.7e0 solve_rel=1.3e-16 corr_rel=2.3e-17
+IPM t=0.55s it=  4 pobj=2.2516187689e1 pres=1.14e-2 dres=4.84e-1 gap=2.06e5 rho=9.4e-8 delta=9.4e-8
+IPM it=  4 alpha_p=5.95e-1 alpha_d=8.18e-1 mu=9.74e0 sigma=8.91e-2 min(sz)/mu=1.7e-2 max(sz)/mu=8.1e0 solve_rel=1.4e-15 corr_rel=8.0e-16
+IPM t=0.60s it=  5 pobj=2.3626900966e1 pres=4.45e-3 dres=8.81e-2 gap=5.69e4 rho=2.7e-8 delta=2.7e-8
+IPM it=  5 alpha_p=6.83e-1 alpha_d=5.42e-1 mu=2.75e0 sigma=1.61e-1 min(sz)/mu=1.9e-2 max(sz)/mu=5.1e0 solve_rel=1.7e-15 corr_rel=7.0e-16
+IPM t=0.64s it=  6 pobj=2.6480279205e1 pres=1.48e-3 dres=4.03e-2 gap=3.25e4 rho=1.3e-8 delta=1.3e-8
+IPM it=  6 alpha_p=6.46e-1 alpha_d=7.10e-1 mu=1.36e0 sigma=3.21e-2 min(sz)/mu=1.4e-2 max(sz)/mu=2.0e1 solve_rel=7.6e-16 corr_rel=9.2e-16
+IPM t=0.68s it=  7 pobj=2.5819098166e1 pres=6.90e-4 dres=1.17e-2 gap=1.05e4 rho=4.1e-9 delta=4.1e-9
+IPM it=  7 alpha_p=6.98e-1 alpha_d=8.11e-1 mu=4.22e-1 sigma=3.62e-1 min(sz)/mu=1.8e-2 max(sz)/mu=2.1e1 solve_rel=7.5e-16 corr_rel=1.6e-15
+IPM t=0.71s it=  8 pobj=2.9592524728e1 pres=2.39e-4 dres=2.20e-3 gap=5.13e3 rho=1.9e-9 delta=1.9e-9
+IPM it=  8 alpha_p=6.43e-1 alpha_d=2.65e-1 mu=1.98e-1 sigma=8.50e-1 min(sz)/mu=1.5e-2 max(sz)/mu=1.0e1 solve_rel=2.0e-16 corr_rel=1.8e-16
+IPM t=0.75s it=  9 pobj=4.4623674210e1 pres=1.34e-4 dres=1.62e-3 gap=4.97e3 rho=1.8e-9 delta=1.8e-9
+IPM it=  9 alpha_p=6.64e-1 alpha_d=5.47e-1 mu=1.86e-1 sigma=3.83e-1 min(sz)/mu=2.2e-2 max(sz)/mu=1.9e2 solve_rel=4.9e-16 corr_rel=1.4e-16
+IPM t=0.78s it= 10 pobj=3.6440473678e1 pres=6.26e-5 dres=7.33e-4 gap=3.31e3 rho=1.2e-9 delta=1.2e-9
+IPM it= 10 alpha_p=1.00e0 alpha_d=6.85e-1 mu=1.22e-1 sigma=2.25e-1 min(sz)/mu=1.3e-2 max(sz)/mu=1.3e2 solve_rel=8.9e-17 corr_rel=1.2e-16
+IPM t=0.82s it= 11 pobj=1.4694140452e1 pres=4.44e-5 dres=2.31e-4 gap=1.56e3 rho=5.4e-10 delta=5.4e-10
+IPM it= 11 alpha_p=1.00e0 alpha_d=9.88e-1 mu=5.62e-2 sigma=4.76e-2 min(sz)/mu=6.3e-2 max(sz)/mu=9.7e1 solve_rel=1.3e-17 corr_rel=2.6e-17
+IPM t=0.86s it= 12 pobj=1.6555918950e0 pres=2.27e-5 dres=2.72e-6 gap=9.19e1 rho=3.2e-11 delta=3.2e-11
+IPM it= 12 alpha_p=8.63e-1 alpha_d=9.78e-1 mu=3.32e-3 sigma=5.82e-3 min(sz)/mu=1.4e-1 max(sz)/mu=4.6e1 solve_rel=1.1e-16 corr_rel=2.5e-16
+IPM t=0.89s it= 13 pobj=2.9223587367e-1 pres=3.19e-6 dres=5.95e-8 gap=2.74e0 rho=9.6e-13 delta=9.6e-13
+IPM it= 13 alpha_p=5.92e-1 alpha_d=1.80e-1 mu=9.93e-5 sigma=3.14e-1 min(sz)/mu=1.6e-1 max(sz)/mu=3.5e1 solve_rel=5.5e-14 corr_rel=2.8e-14
+IPM t=0.93s it= 14 pobj=4.1643085155e-1 pres=1.30e-6 dres=4.88e-8 gap=2.49e0 rho=8.7e-13 delta=8.7e-13
+IPM it= 14 alpha_p=7.19e-1 alpha_d=5.73e-1 mu=9.02e-5 sigma=3.04e-1 min(sz)/mu=9.7e-3 max(sz)/mu=7.6e1 solve_rel=3.7e-14 corr_rel=9.3e-15
+IPM t=0.97s it= 15 pobj=2.6661539701e-1 pres=3.66e-7 dres=2.09e-8 gap=1.46e0 rho=5.1e-13 delta=5.1e-13
+IPM it= 15 alpha_p=5.53e-1 alpha_d=5.29e-2 mu=5.31e-5 sigma=3.79e-1 min(sz)/mu=6.0e-2 max(sz)/mu=6.8e1 solve_rel=1.8e-14 corr_rel=3.1e-14
+IPM t=1.02s it= 16 pobj=2.3748133519e-1 pres=1.64e-7 dres=1.98e-8 gap=1.39e0 rho=4.9e-13 delta=4.9e-13
+IPM it= 16 alpha_p=6.99e-1 alpha_d=2.30e-1 mu=5.04e-5 sigma=3.85e-1 min(sz)/mu=4.6e-3 max(sz)/mu=9.0e1 solve_rel=1.1e-14 corr_rel=3.2e-14
+IPM t=1.07s it= 17 pobj=1.4427114779e-1 pres=4.92e-8 dres=1.52e-8 gap=1.13e0 rho=4.0e-13 delta=4.0e-13
+IPM it= 17 alpha_p=1.71e-1 alpha_d=6.20e-1 mu=4.10e-5 sigma=1.13e-1 min(sz)/mu=4.8e-3 max(sz)/mu=2.2e2 solve_rel=1.2e-14 corr_rel=7.2e-15
+IPM t=1.10s it= 18 pobj=1.1760951950e-1 pres=4.08e-8 dres=5.78e-9 gap=5.78e-1 rho=2.0e-13 delta=2.0e-13
+IPM it= 18 alpha_p=2.72e-1 alpha_d=2.55e-1 mu=2.10e-5 sigma=6.77e-1 min(sz)/mu=7.9e-3 max(sz)/mu=2.5e2 solve_rel=3.8e-15 corr_rel=2.2e-15
+IPM t=1.14s it= 19 pobj=9.9046162238e-2 pres=2.97e-8 dres=4.30e-9 gap=5.30e-1 rho=1.9e-13 delta=1.9e-13
+IPM it= 19 alpha_p=2.70e-1 alpha_d=4.39e-1 mu=1.92e-5 sigma=1.97e-1 min(sz)/mu=9.1e-3 max(sz)/mu=1.8e2 solve_rel=4.6e-15 corr_rel=8.4e-14
+IPM t=1.18s it= 20 pobj=7.4698745075e-2 pres=2.17e-8 dres=2.42e-9 gap=3.58e-1 rho=1.3e-13 delta=1.3e-13
+IPM it= 20 alpha_p=4.17e-1 alpha_d=3.50e-1 mu=1.30e-5 sigma=3.31e-1 min(sz)/mu=8.2e-3 max(sz)/mu=1.7e2 solve_rel=3.8e-15 corr_rel=2.4e-15
+IPM t=1.21s it= 21 pobj=6.0294375838e-2 pres=1.26e-8 dres=1.57e-9 gap=2.72e-1 rho=1.0e-13 delta=1.0e-13
+IPM it= 21 alpha_p=4.35e-1 alpha_d=7.22e-2 mu=9.87e-6 sigma=1.47e-1 min(sz)/mu=1.2e-2 max(sz)/mu=1.1e2 solve_rel=1.6e-15 corr_rel=1.3e-15
+IPM t=1.25s it= 22 pobj=6.0116793785e-2 pres=7.14e-9 dres=1.46e-9 gap=2.55e-1 rho=1.0e-13 delta=1.0e-13
+IPM it= 22 alpha_p=3.91e-1 alpha_d=4.41e-1 mu=9.26e-6 sigma=2.77e-1 min(sz)/mu=1.3e-2 max(sz)/mu=3.2e2 solve_rel=2.2e-15 corr_rel=1.2e-15
+IPM t=1.29s it= 23 pobj=5.2032356739e-2 pres=4.35e-9 dres=8.13e-10 gap=1.75e-1 rho=1.0e-13 delta=1.0e-13
+IPM it= 23 alpha_p=5.06e-1 alpha_d=6.41e-1 mu=6.35e-6 sigma=1.45e-1 min(sz)/mu=8.6e-3 max(sz)/mu=2.9e2 solve_rel=1.1e-15 corr_rel=1.1e-15
+IPM t=1.33s it= 24 pobj=4.2324032044e-2 pres=2.15e-9 dres=2.92e-10 gap=8.16e-2 rho=1.0e-13 delta=1.0e-13
+IPM it= 24 alpha_p=2.25e-1 alpha_d=5.28e-1 mu=2.96e-6 sigma=4.75e-1 min(sz)/mu=4.1e-3 max(sz)/mu=3.5e2 solve_rel=4.4e-16 corr_rel=2.8e-16
+IPM t=1.37s it= 25 pobj=3.9494221535e-2 pres=1.67e-9 dres=1.38e-10 gap=6.28e-2 rho=1.0e-13 delta=1.0e-13
+IPM it= 25 alpha_p=4.26e-1 alpha_d=6.41e-1 mu=2.28e-6 sigma=2.78e-1 min(sz)/mu=1.3e-2 max(sz)/mu=4.3e2 solve_rel=2.7e-16 corr_rel=2.2e-16
+IPM t=1.41s it= 26 pobj=3.4281299560e-2 pres=9.55e-10 dres=4.95e-11 gap=3.63e-2 rho=1.0e-13 delta=1.0e-13
+IPM it= 26 alpha_p=2.97e-1 alpha_d=4.54e-1 mu=1.32e-6 sigma=4.69e-1 min(sz)/mu=1.5e-2 max(sz)/mu=5.0e2 solve_rel=2.6e-16 corr_rel=2.0e-16
+IPM t=1.45s it= 27 pobj=3.1489597580e-2 pres=6.71e-10 dres=2.70e-11 gap=2.91e-2 rho=1.0e-13 delta=1.0e-13
+IPM it= 27 alpha_p=4.72e-1 alpha_d=3.20e-1 mu=1.05e-6 sigma=3.48e-1 min(sz)/mu=8.5e-3 max(sz)/mu=4.7e2 solve_rel=1.3e-16 corr_rel=8.2e-17
+IPM t=1.49s it= 28 pobj=2.7989737636e-2 pres=3.54e-10 dres=1.84e-11 gap=2.19e-2 rho=1.0e-13 delta=1.0e-13
+IPM it= 28 alpha_p=2.56e-1 alpha_d=5.27e-2 mu=7.94e-7 sigma=3.52e-1 min(sz)/mu=1.1e-2 max(sz)/mu=3.5e2 solve_rel=7.2e-17 corr_rel=3.1e-14
+IPM t=1.53s it= 29 pobj=2.7001601716e-2 pres=2.63e-10 dres=1.74e-11 gap=2.03e-2 rho=1.0e-13 delta=1.0e-13
+IPM it= 29 alpha_p=2.90e-1 alpha_d=3.66e-1 mu=7.38e-7 sigma=2.39e-1 min(sz)/mu=3.5e-3 max(sz)/mu=2.8e2 solve_rel=8.8e-17 corr_rel=5.3e-17
+IPM t=1.57s it= 30 pobj=2.5897983791e-2 pres=1.87e-10 dres=1.10e-11 gap=1.50e-2 rho=1.0e-13 delta=1.0e-13
+IPM it= 30 alpha_p=3.34e-1 alpha_d=3.92e-1 mu=5.43e-7 sigma=6.47e-1 min(sz)/mu=8.0e-4 max(sz)/mu=2.8e2 solve_rel=4.5e-17 corr_rel=6.9e-17
+IPM t=1.61s it= 31 pobj=2.5391032671e-2 pres=1.24e-10 dres=6.71e-12 gap=1.30e-2 rho=1.0e-13 delta=1.0e-13
+IPM it= 31 alpha_p=7.06e-1 alpha_d=6.23e-1 mu=4.71e-7 sigma=5.79e-1 min(sz)/mu=3.0e-3 max(sz)/mu=2.2e2 solve_rel=1.1e-16 corr_rel=8.3e-17
+IPM t=1.65s it= 32 pobj=2.4240810360e-2 pres=3.66e-11 dres=2.53e-12 gap=9.44e-3 rho=1.0e-13 delta=1.0e-13
+IPM it= 32 alpha_p=5.13e-1 alpha_d=5.48e-1 mu=3.42e-7 sigma=3.28e-1 min(sz)/mu=7.9e-3 max(sz)/mu=9.8e1 solve_rel=5.6e-17 corr_rel=5.6e-17
+IPM t=1.69s it= 33 pobj=2.3354900800e-2 pres=1.78e-11 dres=1.15e-12 gap=6.02e-3 rho=1.0e-13 delta=1.0e-13
+IPM it= 33 alpha_p=4.35e-1 alpha_d=5.24e-1 mu=2.19e-7 sigma=2.75e-1 min(sz)/mu=1.0e-2 max(sz)/mu=7.7e1 solve_rel=4.5e-17 corr_rel=3.6e-17
+IPM t=1.73s it= 34 pobj=2.2770985219e-2 pres=1.00e-11 dres=5.49e-13 gap=3.85e-3 rho=1.0e-13 delta=1.0e-13
+IPM it= 34 alpha_p=4.46e-1 alpha_d=5.11e-1 mu=1.40e-7 sigma=3.93e-1 min(sz)/mu=1.2e-2 max(sz)/mu=6.9e1 solve_rel=2.6e-17 corr_rel=1.1e-16
+IPM t=1.77s it= 35 pobj=2.2412622500e-2 pres=5.57e-12 dres=2.70e-13 gap=2.71e-3 rho=1.0e-13 delta=1.0e-13
+IPM it= 35 alpha_p=5.62e-1 alpha_d=6.61e-1 mu=9.84e-8 sigma=3.81e-1 min(sz)/mu=9.9e-3 max(sz)/mu=5.5e1 solve_rel=2.8e-17 corr_rel=1.1e-16
+IPM end status=NotSolved iters=36; returning best iterate rel_res=(1.7573098636991634e-6, 1.3498464335886146e-5, 265288.9240405817)
+IPM profile total=1.815s factor=1.150s solve=0.272s other=0.393s
+MIP:   interior rounding: IPM (cost) failed (1.82s)
+MIP:   interior rounding: 0 interior points, vertex false (1.82s)
+MIP:   interior rounding: 0 rounded points tried, found false
+MIP: root heuristic interior rounding: none (1.82s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 2 of 24 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   parallel sub-MIP started (RENS): 12794 free columns of 13873
+MIP: root heuristic RENS: none (0.00s)
+MIP:   parallel sub-MIP (RENS): status TimeLimit, nodes 0, objective None, 1.36s
+MIP:   sub-MIP: 12794 free columns of 13873, status TimeLimit, nodes 0, objective None, 1.26s
+MIP: root heuristic RINS: none (1.27s)
+MIP: after root heuristics: incumbent Some(576.3446330306424) (18.83s)
+MIP: background cuts: determ: waited 0.00s (safety cap 5.01s, done, background end stalled), 6 rounds, 439 LP iters (0.01 x 42868 of cap 857360), obj Some(576.2738043950562) (18.83s)
+MIP: background cuts: rounds so far [576.3 at 13.90s, 576.3 at 14.13s, 576.3 at 14.32s, 576.3 at 14.53s, 576.3 at 14.78s, 576.3 at 14.98s]
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (18.83s)
+MIP: background cuts: LP solve time with the replaced cuts 0.011s (returned DSE not used)
+MIP: background cuts: LP with the replaced cuts: Optimal, 1 iters (18.85s)
+MIP: background cuts: 6 rounds, 16 cut rows (was 6), obj 5.7627266177e2 -> 5.7627380440e2 (waited 0.00s, 18.85s)
+MIP: root reduced costs re-stored after the background cuts (1 newly fixed integer columns)
+MIP: root objective probing: skipped (gap 1.229e-4 (LP 5.7627380440e2, incumbent 5.7634463303e2), 11 fractional binaries)
+MIP: restart check: newly fixed 1, integer columns 69, free at the root 25, threshold 1.7, root LP 11.51s
+MIP:    18.85s nodes        1 open       0 lb inf ub 5.76344633e2 lp_iters 44855 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 14505 dive_iters 0 lp_rows 3093 node_cut_secs 0.00
+MIP: finish start Optimal (27.33s)
+MIP: MEMCAP: tid 0 limit 12063 MB peak rss 422 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP:    27.33s nodes        1 open       0 lb inf ub 5.76344633e2 lp_iters 66181 sb_iters 18655 sb_lps 72 sb_secs 7.45 node_iters 2671 (first 1, lps 5) heur_iters 14505 dive_iters 0 lp_rows 3093 node_cut_secs 0.00
+MIP: dual proofs and conflicts 36 (conflicts added 0 (from proofs 18), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 0, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: cut pool propagation: calls 2, pruned 0 nodes, tightened 0 bounds, 0.00s, pool 88 cuts (5408 nonzeros); updated terms 0, candidates 20 (645 nonzeros), rebuilds 1
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 18, in pool 18 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: proof CMIR cuts: tried 18, added 18, entered the cut pool 18
+MIP: conflict analysis (HiGHS style): calls 18, conflicts 18, added 18, mean length 5.6, max length 120, 0.00s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 5 selections, 0 without strong branching for dual degeneracy; sb LPs 72 iters 18655
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+MIP: mem1 sibling LU (all threads): held at most 0, pushed 0, dropped 0, adopted 0
+MIP: memc (all threads): packed nodes 0, changes 0 (0 bytes packed, 0 unpacked), bases 0 (0 bytes packed, 0 unpacked)
+MIP: basis nb diag: tree first LPs restored 0 iters 0 (0.0/LP), others 1 iters 1 (1.0/LP); root LPs: submip 2 lps 12710 iters (6355.0/LP) 2.56s, bgcopy 3 lps 3 iters (1.0/LP) 0.04s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 2 lps 81124 iters (40562.0/LP) 21.95s, main 1 lps 1 iters (1.0/LP) 0.01s; nb hints applied 0 solves, 0 given, 0 changed
+MIP: node diag: nodes 1 node LPs 5 mean rows 3093.0 iters 2671 (534.2/LP) LP secs 1.01 sep rounds 0 added 0 node cut secs 0.00 final rows 3093
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 24.9)
+MIP: finish done (27.33s)
+MIP: solve returned Optimal after 51.80s (time limit 60.00s)
+MIP: polished the solution (68.62s)
+
+{"status": "optimal", "objective": 576.3446330306436, "bound": 576.3446330306436, "nodes": 1, "time": 68.62176296000007, "root_bound": 576.2738043950562, "first_solution_time": 9.689277327, "first_solution_objective": 576.5053766636233}

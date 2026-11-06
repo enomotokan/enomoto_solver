@@ -796,6 +796,21 @@ fn set_cleanup_hint(nb_status: &[Option<NbStatus>], which: u8) {
     super::slope_intercept_dual::set_warm_nb(Some(hint));
 }
 
+/// 試作 `ENOMOTO_XO_MIP_CLEANUP_HINT=1` を効かせる LP の大きさか (列 (スラックを含む) + 非零の数が
+/// `ENOMOTO_T_XO_MIP_CLEANUP_HINT_MIN_SIZE` (既定 50000、0 で大きさによらず) 以上)。小さい LP (mc11: 約 1.1 万) では仕上げは
+/// 向きがなくても数十ミリ秒で、向きを渡すと最適な頂点が変わるだけ (mc11 では根のカットの道が下界 11616 の遅い道に固まり、
+/// 4 スレッド・60 秒で 3 回とも 40 秒以上か時間切れ。analysis/ipmx_harm_20261106.md)。効く例 (physiciansched6-2・chromaticindex512-7・
+/// neos-933966 など) は 10 万以上
+fn mip_cleanup_hint_size_ok(std: &StdForm) -> bool {
+    let min = tunable!("ENOMOTO_T_XO_MIP_CLEANUP_HINT_MIN_SIZE", 50000.0, f64);
+    let size = std.n_total + std.rows.nnz();
+    let ok = (size as f64) >= min;
+    if env_str!("ENOMOTO_DEBUG_CROSSOVER").is_some() || env_str!("ENOMOTO_DEBUG_RACE").is_some() {
+        eprintln!("CROSSOVER ENOMOTO_XO_MIP_CLEANUP_HINT: size {size} (min {min}) -> {}", if ok { "hint" } else { "no hint" });
+    }
+    ok
+}
+
 /// 内点法 + クロスオーバー ([`XoOptions`] 付き)。
 pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<SimplexResult> {
     let debug = env_str!("ENOMOTO_DEBUG_CROSSOVER").is_some();
@@ -2477,7 +2492,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 if XO_NO_CLEANUP_HINT.with(|f| f.get()) {
                     // 尺度をそろえた写しで解いていて係数の幅が極端に大きい (`ENOMOTO_XO_MIP_SCALE`): 仕上げに向きを渡さない
                     // (momentum1: 渡すと仕上げが 1.5 → 15.5 秒)
-                } else if outer && env_str!("ENOMOTO_XO_MIP_CLEANUP_HINT").is_some_and(|v| v != "0") {
+                } else if outer && env_str!("ENOMOTO_XO_MIP_CLEANUP_HINT").is_some_and(|v| v != "0") && mip_cleanup_hint_size_ok(std) {
                     set_cleanup_hint(&nb_status, 0);
                 } else {
                     set_cleanup_hint(&nb_status, 2);

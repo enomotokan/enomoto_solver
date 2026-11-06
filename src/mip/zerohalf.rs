@@ -86,8 +86,16 @@ pub(crate) fn overrun3(c: char) -> bool {
     env_str!("ENOMOTO_MIP_OVERRUN3").is_some_and(|v| v.contains(c))
 }
 
+/// zerohalf の分離が求解の期限・止めの合図を見るか (`ENOMOTO_MIP_ZH_DEADLINE`、既定 1、`=0` で以前の形 = `ENOMOTO_MIP_OVERRUN3` の `z` の
+/// ときだけ)。chromaticindex512-7 では mod 2 の消去が 1 回 約 21 秒かかり、根の LP が早く終わる設定 (内点法 + クロスオーバーの試作 ipmx) で
+/// カットの選び方の比べと根のカットの 0 ラウンド目が期限を 11〜14 秒越えていた (analysis/ipmx_harm_20261106.md)。期限を過ぎた後だけ効く
+pub(crate) fn zh_deadline_on() -> bool {
+    overrun3('z') || env_def!("ENOMOTO_MIP_ZH_DEADLINE", "1").is_some()
+}
+
 fn zh_past_deadline() -> bool {
-    ZH_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d)
+    // 止めの合図 ([`crate::cancel::halted`]、木の探索の従のスレッド) も期限と同じに扱う
+    ZH_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d) || crate::cancel::halted()
 }
 
 pub fn zerohalf_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], is_int: &[bool], lo: &[f64], up: &[f64], x: &[f64], max_cuts: usize) -> Vec<RawCut> {

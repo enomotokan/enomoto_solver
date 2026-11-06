@@ -4485,7 +4485,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(pp) = par_parts.as_mut() {
             cands.append(&mut pp.zh);
         } else if zh_on {
-            let zhd = if super::zerohalf::overrun3('z') { sep_deadline(self.deadline) } else { None };
+            let zhd = if super::zerohalf::zh_deadline_on() { sep_deadline(self.deadline) } else { None };
             let zh = super::zerohalf::with_zh_deadline(zhd, || super::zerohalf::zerohalf_cuts(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, 100));
             for raw in zh {
                 push(Some(raw), &mut cands, self);
@@ -5248,7 +5248,7 @@ fn sep_parallel_parts(c: &SepParCtx, row_m: usize, modes: Option<&[[u8; 2]]>, zh
                         match t {
                             0 => {
                                 if zh_on {
-                                    let zhd = if super::zerohalf::overrun3('z') { c.deadline } else { None };
+                                    let zhd = if super::zerohalf::zh_deadline_on() { c.deadline } else { None };
                                     for raw in super::zerohalf::with_zh_deadline(zhd, || super::zerohalf::zerohalf_cuts(&p.rows, &p.row_lo, &p.row_up, c.cut_int, c.glo, c.gup, c.x, 100)) {
                                         fin(raw, &mut cs);
                                     }
