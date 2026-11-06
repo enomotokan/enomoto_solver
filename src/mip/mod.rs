@@ -2933,6 +2933,46 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Opti
     presolve_mip_depth(p, verbose, submip, lp_probe_secs, 0)
 }
 
+/// 行ごとに (下限, 上限, 係数を小さい順に並べた列) と (-上限, -下限, -係数を並べた列) を辞書式に比べ、後の方が小さければ
+/// 行を -1 倍する (`ENOMOTO_MIP_HO3_SYMNORM` と同じ規則。ただし -0.0 は 0.0 にそろえてから比べる: そのままだと右辺 0 の等式は
+/// 係数によらず必ず向き直されて、向きがそろわない)。片側の行は `<=` の形 (下限 -inf) にそろう。列方向の表現も直す。
+/// 向き直した行の数を返す
+pub(crate) fn normalize_row_signs(q: &mut MipProblem) -> usize {
+    let z = |x: f64| x + 0.0;
+    let mut flipped = 0usize;
+    for i in 0..q.m {
+        let (lo, up) = (z(q.row_lo[i]), z(q.row_up[i]));
+        let ka = (lo, up);
+        let kb = (z(-up), z(-lo));
+        let mut cmp = ka.0.total_cmp(&kb.0).then(ka.1.total_cmp(&kb.1));
+        if cmp == std::cmp::Ordering::Equal {
+            let mut a: Vec<f64> = q.rows[i].iter().map(|t| z(t.1)).collect();
+            a.sort_by(f64::total_cmp);
+            let mut b: Vec<f64> = q.rows[i].iter().map(|t| z(-t.1)).collect();
+            b.sort_by(f64::total_cmp);
+            cmp = a.iter().zip(&b).map(|(x, y)| x.total_cmp(y)).find(|c| *c != std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal);
+        }
+        q.row_lo[i] = lo;
+        q.row_up[i] = up;
+        if cmp == std::cmp::Ordering::Greater {
+            flipped += 1;
+            q.row_lo[i] = kb.0;
+            q.row_up[i] = kb.1;
+            for t in q.rows[i].iter_mut() {
+                t.1 = -t.1;
+            }
+            for t in q.rows[i].iter() {
+                if let Ok(k) = q.cols[t.0].binary_search_by_key(&i, |e| e.0) {
+                    q.cols[t.0][k].1 = -q.cols[t.0][k].1;
+                } else if let Some(e) = q.cols[t.0].iter_mut().find(|e| e.0 == i) {
+                    e.1 = -e.1;
+                }
+            }
+        }
+    }
+    flipped
+}
+
 fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Option<f64>, depth: u32) -> Option<Presolved> {
     use crate::params::simplex::{PRESOLVE_ROUNDS, PROPAGATION_PASSES, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS};
     // 前の呼び出しのプロービングが残した同値な列の組は使わない (列の番号が違いうる)
@@ -3111,6 +3151,18 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     let shift = p.objective(&x_orig) - (pre.c.iter().zip(&x_red).map(|(c, x)| c * x).sum::<f64>() + p.offset);
     let offset = if shift.is_finite() { p.offset + shift } else { p.offset };
     let mut prob = MipProblem::from_rows(pre.lb.clone(), pre.ub.clone(), pre.c.clone(), offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
+    // `ENOMOTO_MIP_ROWNORM` (試作、既定では使わない。analysis/rownorm_20261106.md): 行の向き (-1 倍するか) を列の順・行の順に
+    // よらない形にそろえる ([`normalize_row_signs`])。[`merge_parallel_rows`] は `<= u` と `>= l` の 2 本を、組の中で先に来た行の向きの
+    // まま 1 本の幅つきの行にまとめるので、向きが行ごとにばらばらになる (fastxgemm-n2r6s0t2。analysis/highs_only_20261105/G3.md)。
+    // 行の -1 倍は実行可能な集合を変えず、整数最適化の後処理は列の値だけを戻す (行の活動値は元の問題で x から数える) ので、後処理の
+    // 手順は要らない。LP による固定・プロービング・かけ直しの前にそろえる (LP による固定が渡す根の基底の行の指紋が合うように)。
+    // かけ直しの前処理もここを通るので、返す問題の行はそろっている (前処理が何も減らさず `None` を返すときは元の問題のまま)
+    if env_str!("ENOMOTO_MIP_ROWNORM").is_some() {
+        let k = normalize_row_signs(&mut prob);
+        if verbose {
+            eprintln!("MIP: presolve: ROWNORM flipped {k} of {} rows", prob.m);
+        }
+    }
     // `ENOMOTO_MIP_KEEP_IMPLICATIONS`: 元の問題が持っていた含意 (サブ MIP なら親のプロービングの結果) を引き継ぐ。前処理は
     // 列の番号を変えないので、両端が前処理後も尺度 1 の 0-1 列のままの組だけ残す (HiGHS もサブ MIP に含意とクリーク表を渡す)
     if env_str!("ENOMOTO_MIP_KEEP_IMPLICATIONS").is_some() && !p.conflict_edges.is_empty() {
@@ -6283,6 +6335,35 @@ mod tests {
             assert!(q.is_feasible(&xbest, 1e-9) && (0..n).all(|j| xbest[j] >= q.col_lo[j] - 1e-9 && xbest[j] <= q.col_up[j] + 1e-9), "tightened bounds cut off the optimum {xbest:?}: {:?} {:?}", q.col_lo, q.col_up);
         }
         assert!(tightened > 0);
+    }
+
+    /// `ENOMOTO_MIP_ROWNORM` の向きのそろえ ([`normalize_row_signs`]): 同じ行を -1 倍した 2 つの書き方が同じ形になり、
+    /// 実行可能な点が変わらない。右辺 0 の等式 (-0.0 を含む) もそろう。片側の `>=` の行は `<=` の形になる
+    #[test]
+    fn normalize_row_signs_is_orientation_independent() {
+        let mk = |rows: Vec<Vec<(usize, f64)>>, lo: Vec<f64>, up: Vec<f64>| MipProblem::from_rows(vec![0.0; 4], vec![1.0; 4], vec![0.0; 4], 0.0, 1.0, vec![true; 4], rows, lo, up);
+        // -2 <= -x0-x1-x2+x3 <= 2 と -2 <= x0+x1+x2-x3 <= 2、0 = x0-2x1 と -0 = -x0+2x1、x0+x1 >= 1 と -x0-x1 <= -1
+        let mut p = mk(vec![vec![(0, -1.0), (1, -1.0), (2, -1.0), (3, 1.0)], vec![(0, 1.0), (1, -2.0)], vec![(0, 1.0), (1, 1.0)]], vec![-2.0, 0.0, 1.0], vec![2.0, 0.0, f64::INFINITY]);
+        let mut q = mk(vec![vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, -1.0)], vec![(0, -1.0), (1, 2.0)], vec![(0, -1.0), (1, -1.0)]], vec![-2.0, -0.0, f64::NEG_INFINITY], vec![2.0, -0.0, -1.0]);
+        normalize_row_signs(&mut p);
+        normalize_row_signs(&mut q);
+        assert_eq!(p.rows, q.rows);
+        assert_eq!(p.cols, q.cols);
+        for i in 0..p.m {
+            assert_eq!(p.row_lo[i].to_bits(), q.row_lo[i].to_bits());
+            assert_eq!(p.row_up[i].to_bits(), q.row_up[i].to_bits());
+        }
+        assert_eq!(p.row_lo[2], f64::NEG_INFINITY);
+        // 2 回かけても変わらない
+        let r = p.clone();
+        assert_eq!(normalize_row_signs(&mut p), 0);
+        assert_eq!(p.rows, r.rows);
+        // 0-1 の全点で実行可能かが元と同じ
+        let p0 = mk(vec![vec![(0, -1.0), (1, -1.0), (2, -1.0), (3, 1.0)], vec![(0, 1.0), (1, -2.0)], vec![(0, 1.0), (1, 1.0)]], vec![-2.0, 0.0, 1.0], vec![2.0, 0.0, f64::INFINITY]);
+        for b in 0..16u32 {
+            let x: Vec<f64> = (0..4).map(|j| ((b >> j) & 1) as f64).collect();
+            assert_eq!(p0.is_feasible(&x, 1e-9), p.is_feasible(&x, 1e-9));
+        }
     }
 
     #[test]
