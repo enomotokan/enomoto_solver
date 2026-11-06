@@ -1,0 +1,128 @@
+# 担当 B: 暫定解を改善するサブ MIP の近傍の多様化と、サブ MIP の中の対称性 (2026-11-06)
+
+bench に使う環境変数: 既定 (`def`) は `ENOMOTO_MIP_SUBB_COUNT=1 ENOMOTO_MIP_MEMBQ_HDIAG=1` (どちらも診断の出力だけで解き方は変えない)。
+試作は `all` = `ENOMOTO_MIP_SUBB_DIV=1 ENOMOTO_MIP_SUBB_POOL=1 ENOMOTO_MIP_SUBB_SYM=1`、`allv2` = `ENOMOTO_MIP_SUBB_DIV=2 ENOMOTO_MIP_SUBB_POOL=1 ENOMOTO_MIP_SUBB_SYM=1`、
+部品だけの `div` = `ENOMOTO_MIP_SUBB_DIV=1 ENOMOTO_MIP_SUBB_POOL=1`、`sym` = `ENOMOTO_MIP_SUBB_SYM=1`、trento1 の確かめの `allof` = `all` +
+`ENOMOTO_T_MIP_SUBB_SYM_OF_MAX=100`。600 秒の回はどれも `ENOMOTO_MIP_LOG=1 ENOMOTO_MIP_THREADS=4`・4 スレッド (上の診断も付ける)。
+58 問は `def` と `all` (この表では `all` = **`ENOMOTO_MIP_SUBB_DIV=2`** + `POOL` + `SYM`) を 4 スレッド・60 秒・rep 1・2。
+試作はどれも既定では使わない。既定の動きは変えていない。
+
+- 担当 A (`A.md`、`ENOMOTO_MIP_SUBA_*`) と並行。機械は 4 CPU、ソルバーは同時に 1 つ。ビルドはブランチ ccr-1beed81b-ex0uhq の
+  eab2205b (600 秒の def1・all1 の fiball〜thor50dday と all2・def2 の fiball〜nexp)、d9de6434 (OF_MAX を足した版)、53ebc256 (DIV=2 を足した版。
+  def2・all2 の thor50dday、div1・sym1・allof1・allv2_1 と 58 問)。足したのは既定で通らない分岐だけなので、`def`・`all` の動きは版で変わらない。
+- 生データ: `B/logs/<回>_<問題>.{out,err}` (`.out` の最後の行が結果、`.err` が詳細ログ)、`B/summ600.txt` (`summ600.py --trace` の出力)、
+  `B/res58.jsonl`・`B/summ58.txt` (58 問)、`B/run1.sh`・`q1.sh`・`q1.sh_extra.sh`・`q2.sh` (回し方)、`B/run58.py`・`summ58.py`。
+- 注意 (計測の傷): `def1` の fiball の `.err` は、書き込み中のログを途中でコミットしたときの rebase の autostash で 103 秒以降が欠けた
+  (`.out` の結果は無事)。以後は書き込み中のログをリポジトリの外に置いて、終わってから移した。
+
+## まとめ
+
+(58 問の結果を待って書く)
+
+## 試作の中身
+
+すべて `src/mip/subb.rs` (新しいファイル) と、`heuristics.rs`・`mod.rs`・`solver.rs` の数か所のつなぎ。
+
+### 1. 近傍の多様化 `ENOMOTO_MIP_SUBB_DIV` (`=1`・`=2`)
+
+- 外側の求解のサブ MIP ごとに (`Solver::solve_submip_problem` の入口)、**固定の集合の指紋** を作る: ラベル (`tree RINS` など)・行の数・
+  目的関数を変えたか (proximity)・大域的に自由な整数列のうちサブ MIP で固定した列とその値・暫定解の目的値。スレッドの `Solver` ごとに
+  指紋 → (見た回数, 前の回が近傍を解き切ったか) を覚える。
+- **同じ指紋の繰り返し** (同じ暫定解で同じ固定) なら固定を変える: 前の回が近傍を解き切った (最適・実行不能で改善なし) なら固定を乱数で外して
+  広げ、上限 (ノード・時間) で止まったなら自由な整数列を暫定解の値に乱数で固定して狭める。割合は 0.2 から繰り返しごとに 1.5 倍 (最大 0.8、
+  `ENOMOTO_T_MIP_SUBB_FRAC`)。固定のない近傍 (local branching・proximity) は狭めるだけ。
+- **改善のない回が続いたら** (`ENOMOTO_T_MIP_SUBB_STREAK` = 4 回)、繰り返しでなくても、それまでの結果の向き (解き切りが多ければ広げ、
+  上限が多ければ狭める) で、割合 0.1 × (連続 − 3) (最大 0.6) だけ固定を変える。改善したら連続と向きを消す。
+- `=1` は広げるとき固定の集合の割合を外す。**`=2`** は外す数を「今の自由な整数列の数 (50 未満なら 50) × 割合」にする
+  (`=1` は自由な列が数百の近傍で 1 回に数千外し、nexp-150-20-8-5 の RINS が 253 → 3550 列になって 500 ノードで解を出さなかったため)。
+- `ENOMOTO_MIP_SUBB_COUNT=1` は指紋を数えるだけ (乱数を引かないので解き方は変わらない)。終わりに
+  `MIP: SUBB div: sub-MIPs …, repeated fingerprints …, widened …, narrowed …, changed after a streak …, pool crossovers …, pool mutations …,
+  improved after a change …` を出す (全スレッドの和)。
+
+### 2. 解のプールから作る近傍 `ENOMOTO_MIP_SUBB_POOL`
+
+- ALNS の Crossover の腕 (`ENOMOTO_MIP_CROSSOVER_FOCUS` が効いていないとき) を、次の 2 つを交互に使う腕に替える:
+  - **交差**: プール (最大 10 解) から乱数で選んだ 2〜3 個の解 (最良とは限らない) で値が一致する整数列を固定 (固定率 0.4 未満なら使わない、
+    `ENOMOTO_T_MIP_SUBB_POOL_XRATE`)。既定の Crossover は最良の解を必ず入れる。
+  - **変異**: 最良でないプールの解を中心に、整数列の 7 割 (`ENOMOTO_T_MIP_SUBB_POOL_MRATE`) を乱数でその値に固定する。
+- ラベルは `tree pool crossover`・`tree pool mutation` (HDIAG・指紋で区別する)。
+
+### 3. サブ MIP の中の対称性 `ENOMOTO_MIP_SUBB_SYM`
+
+- 対称性の表 (`ORBITOPES`・`SYM_ORIG`・`SYM_LEX_GENS`・`SYM_OF_GENS`・`SYM_CUT_GENS`) はスレッドごとの変数で、外側の求解の最初の検出が置き、
+  `Solver` を作るときに読む。サブ MIP は読まない (空にする) 決まりだった。
+- `solve_problem` の入口で、サブ MIP (`params.submip`) なら **外側の表を退避して空にし** (`subb::SymScope`)、サブ MIP の前処理の後に
+  外側と同じ `add_symmetry_rows` で検出し (時間の上限 `ENOMOTO_T_MIP_SUBB_SYM_TIME` = 0.05 秒。手間の上限は外側と同じ)、サブ MIP の
+  `Solver` はその表を読む。**サブ MIP の求解が終わると (どの戻り方でも、`Drop` で) 外側の表を戻す。** サブ MIP の中のサブ MIP も同じ
+  (入れ子ごとに退避・復元)。並列のサブ MIP (別スレッド) は自分のスレッドの表を使う。外側の `Solver` は作るときに表を写して持つので、
+  サブ MIP の間に変わっても影響はなく、退避は再スタート・カットの像 (`SYM_CUT_GENS`) など後で表を読む所のため。
+- `ENOMOTO_T_MIP_SUBB_SYM_OF_MAX` (既定は上限なし): サブ MIP で orbital fixing の生成元がこの数より多ければ orbital fixing を使わない
+  (trento1 の遅さを疑って足したが、下のとおり原因は別だった)。
+- 終わりに `MIP: SUBB sym: sub-MIP detections …, with symmetry …, generators …, orbitopes … (columns …), orbitopal fixings …,
+  orbital fixings …, detection …s` を出す (全スレッドの和)。
+- `cargo test --release --lib` は既定でも 3 つの試作を全部入れても 346 通る。
+
+## 600 秒の 5 問 (事実)
+
+暫定解 (600 秒の終わり、最小化)。`*` は `.err` が欠けた回。HiGHS は fiball 138・neos-933966 318 (`highs_only_20261105/G1.md`)。
+全ての回の詳細 (暫定解の推移・計数) は `B/summ600.txt`。
+
+| 問題 | def (2 回) | all (DIV=1、2 回) | allv2 (DIV=2、1 回) | div (1 回) | sym (1 回) |
+|---|---|---|---|---|---|
+| fiball | 142*, 140 | 140, 140 | 142 | **139** | 142 |
+| neos-933966 | 346, 352 | 331, **319** | 334 | 323 | 322 |
+| trento1 | 15418808, 16580135 | 35876489, **5692009** | — | 36700115 | 35282551 (allof 56242200) |
+| nexp-150-20-8-5 | 248, **238** | 251, 251 | 242 | 241 | 242 |
+| thor50dday | 136383, 85527 | 85527, 85527 | — | 123297 | 85527 |
+
+### 同じ近傍の繰り返し (既定、`SUBB_COUNT`)
+
+| 問題 | 外側のサブ MIP の数 | うち同じ指紋 (同じ暫定解・同じ固定) の繰り返し |
+|---|---|---|
+| fiball (def2) | 51 | 11 |
+| neos-933966 | 42, 42 | 13, 12 |
+| trento1 | 11, 30 | 1, 5 |
+| nexp-150-20-8-5 | 60, 103 | 8, 19 |
+| thor50dday | 7, 7 | 0, 0 |
+
+- 既定では外側のサブ MIP の 2〜3 割が、同じ暫定解で同じ固定のサブ MIP の繰り返し (同じ結果になるはずのもの) だった。
+  ほとんどは役のスレッドの local branching・proximity (固定なし、暫定解が変わらない間は毎回同じ) と、mutation 以外の RINS・DINS・Crossover
+  (同じノードの LP 解から同じ固定)。
+
+### 問題ごと
+
+- **fiball**: 既定でも 2 回目は 140 (224 秒、木のノード) で、試作との差は揺れの幅に入る。試作の回の改善はほとんど役のスレッドの
+  local branching・proximity で、多様化で **狭めた近傍** から出た: all1 は 61.9 秒に自由な列 32898 → 26318 に狭めた local branching が
+  24 ノードで 146 → 140 (同じ近傍は直前まで 5 秒の時間切れ・ノード 0 を繰り返していた)。div1 は 80〜204 秒に proximity・local branching で
+  145 → 139 (HiGHS の 138 に 1 足りない)。sym1 (対称性だけ) は 142 で、サブ MIP 72 回のうち 61 回で対称性 (オービトープ 6710 個、
+  orbitopal fixing 1302 本) を見つけたが、暫定解には効いて見えない。
+- **neos-933966**: どの回も、改善はほぼ全部役のスレッドの local branching (370〜420 秒に役に就き、1 回 5 秒で 2〜5 ずつ詰める)。
+  試作の 5 回 (319〜334) は既定の 2 回 (346・352) より全部良いが、役の始まりの時刻 (369〜423 秒) と連鎖の進み方で決まる形で、
+  多様化・対称性のどちらが効いたかは切り分けられていない (sym1 の 322 は多様化なし、div1 の 323 は対称性なし)。
+- **trento1**: 根の RENS (並列のサブ MIP) の当たり外れ (15518859〜66341042) と、続く根の「root reduced cost」のサブ MIP の長さ
+  (95〜384 秒) で回の結果がほぼ決まる。この長さは既定の def2 (297 秒) や対称性なしの div1 (354 秒) でも起きるので、**対称性のせいではない**
+  (最初は対称性を疑って `SUBB_SYM_OF_MAX` を足したが、allof1 も 306 秒で 56242200)。all2 は 429 秒に木で 5792401 に下がり、多様化した
+  mutation・local branching・プールの変異で 5692009 まで (既定の 2 回の約 1/3)。
+- **nexp-150-20-8-5**: all (DIV=1) は 2 回とも 121〜124 秒の 251 で止まった (既定 248・238)。部品だけの div1 (241)・sym1 (242) や
+  DIV=2 の allv2 (242) では止まらない。all の回の木のサブ MIP は、RINS (自由な列 253) が実行不能 → 繰り返しで固定の集合の 2 割を外して
+  自由な列 3550 → 500 ノードで解なし、を繰り返していた (これが DIV=2 を作った理由)。
+- **thor50dday**: サブ MIP は 7 回で繰り返しも対称性もなく、試作は何もしない。差 (85527〜136383) は木の丸めの揺れ (def2 も 85527)。
+
+### サブ MIP の中の対称性 (事実)
+
+| 問題 | 検出したサブ MIP | うち対称性あり | 生成元 (計) | オービトープ (列) | orbitopal fixing の固定 | 検出の秒 (計) |
+|---|---|---|---|---|---|---|
+| fiball (all1, all2, sym1) | 87, 76, 72 | 79, 69, 61 | 287, 257, 278 | 7703 (46905), 7143 (47061), 6710 (49327) | 905, 751, 1302 | 15.1, 16.5, 13.6 |
+| neos-933966 (all1, all2, sym1) | 110, 74, 51 | 42, 32, 24 | 36, 26, 22 | 374, 263, 226 | 41, 70, 59 | 5.3, 4.2, 3.0 |
+| trento1 (all2, sym1) | 62, 29 | 62, 29 | 5537, 2559 | 801, 443 | 0 | 15.4, 6.7 |
+| nexp-150-20-8-5 (all1, sym1) | 71, 94 | 23, 31 | 4, 8 | 151, 192 | 0 | 1.5, 1.8 |
+| thor50dday | 8 | 0 | 0 | 0 | 0 | 0.2 |
+
+- fiball のサブ MIP (自由な列 1000〜10000) の 9 割で対称性 (オービトープ) が見つかり、1 回あたり 0.2 秒ほどで検出する。外側の求解は
+  既定の上限では軌道 254 列しか見つけない (`G1.md`) のに、固定で小さくなったサブ MIP では見つかる。
+- **orbital fixing の固定はどのサブ MIP でも 0** (生成元が 5537 あった trento1 でも)。働いたのはオービトープ (orbitopal fixing) だけ。
+- サブ MIP の対称性で暫定解が良くなったと言える回はない (fiball の sym1 は 142)。
+
+## 58 問 (60 秒、事実)
+
+(58 問の結果を待って書く)
