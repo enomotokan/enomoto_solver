@@ -174,6 +174,8 @@ CFGS = {
               "ENOMOTO_MIP_HO4_CUT0": "1", "ENOMOTO_MIP_TREE3_JOINCAP": "1", "ENOMOTO_MIP_S6_CUTLP_TCAP": "10"},
     # SYMSIGN・SYMZERO の既定化 (2026-11-06、analysis/symsign_default_20261106.md) の後は "def" が両方を含む。それより前は "presymsign"
     "presymsign": {"ENOMOTO_MIP_SYMSIGN": "0", "ENOMOTO_MIP_SYMZERO": "0"},
+    # 根の RENS を目標の固定率で止める (analysis/submip_impr_20261106/A.md の SUBA_RATE の n だけ)
+    "suban": {"ENOMOTO_MIP_SUBA_RATE": "n"},
 }
 if __name__ == "__main__":  # bench.py からは設定 (CFGS) だけを読む
     cfgs, probs, reps = sys.argv[1].split(","), sys.argv[2].split(","), int(sys.argv[3])
