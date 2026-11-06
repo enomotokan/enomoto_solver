@@ -10327,3 +10327,11 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 根拠: bench28 (60 秒) で sym は 58 問 −0.7%・Mittelmann 50 → 51、lp は 58 問 +1.2%・Mittelmann 50 → 52 (解けた問題の SGM −4.1%)。どちらも既定だけ解けた回なし。
   担当の問題で fastxgemm-n2r6s0t2 (600 秒で最適)・satellites2-60-fs (主の解き直し 385 秒 → 1 反復)・mzzv11 (再スタート後の根の LP 約 1/3) に効く。
 - 記録は `analysis/symlp_default_20261106.md`。prr (`PROBE_REPRESOLVE`) は momentum1 で `not_solved` に止まるので既定にせず調べる。
+
+## 2026-11-06: zerohalf の分離と解の研磨が期限を見るようにする (ZH_DEADLINE・POLISH_DEADLINE を既定に、採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて run.py の `prezhpol`): `ENOMOTO_MIP_ZH_DEADLINE` (zerohalf の分離 (mod 2 の消去) が求解の期限と止めの合図を見る)、
+  `ENOMOTO_MIP_POLISH_DEADLINE` (返す前の解の研磨の LP に求解の期限を渡し、間に合わなければ研磨しない)。どちらも期限を過ぎた後だけ効く。
+- 根拠: bench27 の ipmx で chromaticindex512-7 (zerohalf 1 回 約 21 秒) と dano3_3 (研磨の LP 16〜17 秒) が 60 秒の上限を約 14 秒越えた。直した後は 60.01〜60.1 秒。
+  dano3_3 の目的値は研磨ありと 1e-12 で同じ。
+- 記録は `analysis/ipmx_harm_20261106.md` (同じ記録で、ipmx の mc11 の悪化は `T_XO_CLEANUP_HINT=3` が根の頂点を変えるためと分かり、大きい LP だけに絞った ipmxm を作った。ipmxm は既定にしていない)。

@@ -158,6 +158,8 @@ CFGS = {
     # sym・lp の既定化 (2026-11-06、analysis/symlp_default_20261106.md) の後は "def" が sym と lp を含む。それより前の既定は "presymlp"
     "presymlp": {"ENOMOTO_MIP_HO3_SYMNORM": "0", "ENOMOTO_MIP_HO6_SYMWORK": "0", "ENOMOTO_MIP_HO6_SYMREFINE": "0", "ENOMOTO_MIP_HO4_BGNB": "0",
                  "ENOMOTO_MIP_TREE3_RBASIS": "0"},
+    # 期限の直し (2026-11-06、analysis/ipmx_harm_20261106.md) の後は "def" が ZH_DEADLINE・POLISH_DEADLINE を含む。それより前の既定は "prezhpol"
+    "prezhpol": {"ENOMOTO_MIP_ZH_DEADLINE": "0", "ENOMOTO_MIP_POLISH_DEADLINE": "0"},
 }
 if __name__ == "__main__":  # bench.py からは設定 (CFGS) だけを読む
     cfgs, probs, reps = sys.argv[1].split(","), sys.argv[2].split(","), int(sys.argv[3])
