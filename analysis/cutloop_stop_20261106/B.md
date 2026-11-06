@@ -119,4 +119,4 @@
 
 ## テスト
 
-- `cargo test --release --lib` (この機械では `RUSTFLAGS="-C link-arg=-L/usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib`): TESTRESULT
+- `cargo test --release --lib` (この機械では `RUSTFLAGS="-C link-arg=-L/usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib`): 344 通る、0 失敗、18 無視 (rebase で他の人の変更を取り込んだ後のソース、58 問の計測が終わってから回した)。
