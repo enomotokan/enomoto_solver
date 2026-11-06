@@ -13,7 +13,9 @@ CFGS = {
     "h1": {"ENOMOTO_MIP_CUT_HARRIS2": "1"},
     "sh1": {"ENOMOTO_SIMPLEX_HARRIS2": "1"},
     "shr": {"ENOMOTO_SIMPLEX_HARRIS2": "r"},
+    "h1mv_noclamp": {"ENOMOTO_MIP_CUT_HARRIS2": "1", "ENOMOTO_MIP_HO4_CUT0": "moved", "ENOMOTO_MIP_ROOT_BOUND_CLAMP": "0"},
 }
+OUTF = os.environ.get("REP_OUT", "rep.jsonl")  # 直した後の計測は REP_OUT=rep_fix.jsonl
 OPT = {"nw04": 16862.0}
 NUM = r"([-+0-9.eE]+)"
 def scan(log):
@@ -41,7 +43,7 @@ if __name__ == "__main__":
             t = time.time()
             r = subprocess.run([sys.executable, str(WT / "scripts" / "run_miplib_benchmark.py"), "--worker-ours", str(mps),
                                 "--time-limit", "60", "--threads", "4"], cwd=WT, env=env, capture_output=True, text=True, timeout=400)
-            (D / "logs" / f"{prob}_{c}_s{seed}.log").write_text(r.stderr)
+            (D / "logs" / f"{prob}_{c}_s{seed}{'_fix' if OUTF != 'rep.jsonl' else ''}.log").write_text(r.stderr)
             try:
                 res = json.loads([l for l in r.stdout.splitlines() if l.startswith("{")][-1])
             except Exception as e:  # noqa: BLE001
@@ -52,6 +54,6 @@ if __name__ == "__main__":
             pre_over = opt is not None and seg[0] is not None and seg[0] > opt + 1e-6
             rec = {"problem": prob, "cfg": c, "seed": seed, "env": CFGS[c], "result": res, "seg_max": seg, "restarts": len(seg) - 1,
                    "over": over, "pre_restart_over": pre_over, "wall": round(time.time() - t, 1), "at": time.strftime("%H:%M:%S")}
-            with open(D / "rep.jsonl", "a") as f:
+            with open(D / OUTF, "a") as f:
                 f.write(json.dumps(rec) + "\n")
             print(prob, c, seed, res.get("status"), res.get("objective"), res.get("root_bound"), seg, over, pre_over, flush=True)

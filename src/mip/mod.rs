@@ -259,7 +259,7 @@ pub(crate) struct RunStats {
     pub(crate) t0: Option<std::time::Instant>,
     /// 最初の暫定解 (求解の開始からの秒, 目的値)。
     pub(crate) first_sol: Option<(f64, f64)>,
-    /// 根の切除平面ループを終えた時点の LP の目的値 (再スタート後の根があれば最後のもの)。
+    /// 根の切除平面ループを終えた時点の LP の目的値 (再スタート後の根があれば最後のもの)。暫定解の目的値で上から切り詰める ([`record_root_bound`])。
     pub(crate) root_bound: Option<f64>,
     /// 最初の根のヒューリスティクスを始めた時刻 (求解の開始からの秒。`ENOMOTO_MIP_ROOT_SUBMIP_REL` の基準)。
     pub(crate) root_heur_t: Option<f64>,
@@ -320,10 +320,15 @@ pub(crate) fn root_submip_rel() -> Option<f64> {
     env_str!("ENOMOTO_MIP_ROOT_SUBMIP_REL").and_then(|v| v.parse::<f64>().ok()).filter(|&k| k > 0.0)
 }
 
-/// 根の下界の記録 ([`RUN_STATS`])。
+/// 根の下界の記録 ([`RUN_STATS`])。暫定解があれば、その目的値 (`best_z`) より大きくは記録しない (`ENOMOTO_MIP_ROOT_BOUND_CLAMP=0` で
+/// 切り詰めない、元の記録)。暫定解を得た後の根 (再スタートの後の根や、被約費用の固定の後に解き直した根の LP) は
+/// 「暫定解より良い解」だけを残した問題 (打ち切り値による被約費用の固定、刈り込みの上限) の下界で、暫定解が最適なら
+/// その LP の値は最適値を越えうる (nw04 で 16866.37 > 16862、analysis/nw04_bound_20261106.md)。元の問題の下界は
+/// min(暫定解の目的値, その LP の値) なので、ここで切り詰める
 pub(crate) fn record_root_bound(z: f64) {
     if let Ok(mut s) = RUN_STATS.lock() {
-        s.root_bound = Some(z);
+        let clamp = env_str!("ENOMOTO_MIP_ROOT_BOUND_CLAMP").is_none_or(|v| v != "0");
+        s.root_bound = Some(if clamp && s.best_z.is_finite() { z.min(s.best_z) } else { z });
     }
 }
 
