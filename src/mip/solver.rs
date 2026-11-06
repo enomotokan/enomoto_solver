@@ -2613,6 +2613,8 @@ pub(super) fn suba_cut() -> bool {
 ///   を見つけて 201 ノードで止まった)
 /// - `s`: 停滞の打ち切り (`ENOMOTO_T_MIP_SUBMIP_STALL`、12) を、暫定解がなくても打ち切り値が有限なら数える (HiGHS はサブ MIP の
 ///   `upper_limit` = `objective_bound` なので、解がなくても推定値が外側の上限以上のノードを数える)
+/// - `n`: 外側の根のサブ MIP が、打ち切り値より良い解 (`SUBA_CUT` なら受け取った解、`e` なら良い解) をまだ見つけていなければ
+///   `ENOMOTO_T_MIP_SUBA_NOIMP` (既定 100) ノードで止める (cod105 の根の RINS は 1 ノード 0.7 秒で、`SUBA_CUT` だと 238 秒走った)
 /// - `o`: 外側の根のサブ MIP の成果連動の打ち切りを使わない (ノード上限・時間・停滞だけ。HiGHS の `solveSubMip` に成果連動はない)
 pub(super) fn suba_stop(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -9085,6 +9087,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             if let (Some(_), Some(k), false) = (self.root_submip.as_ref(), self.last_improve_node, suba_stop('o')) {
                                 if self.nodes.saturating_sub(k) >= k.max(tunable!("ENOMOTO_T_MIP_SUBMIP_OUTCOME_MIN_NODES", 50u64, u64)) {
                                     self.dbg_submip_stop("outcome");
+                                    return self.finish_limit(MipStatus::NodeLimit, Some(&n));
+                                }
+                            }
+                            // `ENOMOTO_MIP_SUBA_STOP` の `n` ([`suba_stop`]): 根のサブ MIP が打ち切り値より良い解をまだ見つけていなければ
+                            // `ENOMOTO_T_MIP_SUBA_NOIMP` (既定 100) ノードで止める (`SUBA_CUT`・`e` で成果連動の打ち切りが効かなくなる分の歯止め)
+                            if let (Some(_), None, true) = (self.root_submip.as_ref(), self.last_improve_node, suba_stop('n')) {
+                                if self.nodes >= tunable!("ENOMOTO_T_MIP_SUBA_NOIMP", 100u64, u64) {
+                                    self.dbg_submip_stop("noimp");
                                     return self.finish_limit(MipStatus::NodeLimit, Some(&n));
                                 }
                             }
