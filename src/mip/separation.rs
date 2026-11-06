@@ -1085,6 +1085,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mpsep = mpsep_flags(self.params.submip, job.is_some());
         let mut mp_center: Option<Vec<f64>> = None;
         let mut mp_center_tried = false;
+        // 絞った形 (値に `g`・`s`・`h`): 止めたか (`g` で最適面が広くなくなったら、このループの残りでは使わない)、前のラウンドの目的値
+        let mut mp_off = false;
+        let mut mp_last_obj: Option<f64> = None;
+        // `h`: 根の LP が重い問題 (根の LP の秒 ≥ `ENOMOTO_T_MIP_MPSEP_GATE_SECS` (0.5)、または元の行の数 ≥ `ENOMOTO_T_MIP_MPSEP_GATE_ROWS` (5000)) だけ
+        if mpsep.as_ref().is_some_and(|f| f.contains('h'))
+            && self.root_lp_secs < tunable!("ENOMOTO_T_MIP_MPSEP_GATE_SECS", 0.5, f64)
+            && p.m < tunable!("ENOMOTO_T_MIP_MPSEP_GATE_ROWS", 5000usize, usize)
+        {
+            mp_off = true;
+            if self.params.verbose {
+                eprintln!("MIP: mpsep gate: light root LP ({:.3}s, {} rows); not used in this cut loop", self.root_lp_secs, p.m);
+            }
+        }
+        // 計測用 `ENOMOTO_MIP_MPSEP_WIDTH_ONLY`: 外側の最初の主の根のカットのループの始めで、最適面の広さ ([`Solver::mpsep_width`]) を 1 行の JSON で出して終わる
+        if env_str!("ENOMOTO_MIP_MPSEP_WIDTH_ONLY").is_some() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && job.is_none() {
+            let w = self.mpsep_width();
+            eprintln!(
+                "MPSEP_WIDTH {{\"width\": {w}, \"rows\": {}, \"cols\": {}, \"lp_rows\": {}, \"root_lp_secs\": {:.4}, \"nfrac\": {}}}",
+                p.m,
+                p.n,
+                self.lp.num_rows(),
+                self.root_lp_secs,
+                self.fractional(&self.lp.col_values()).len()
+            );
+            std::process::exit(0);
+        }
         // (多点分離をしたラウンド, 足した点, 足した候補, 選んだカットのうち x* を切らないもの, 選んだカット, 時間)
         let mut mp_stats = (0usize, 0usize, 0usize, 0usize, 0usize, 0.0f64);
         if prof {
@@ -1738,9 +1764,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_MPSEP`: 今の頂点 x* のほかの点 (最適面の上の別の頂点、x* と内点を結ぶ線分上の点) でも分離して候補に足す
             // 足した点の候補は `mp_cands` に分けておく (値に `P` を含まなければカットプールに入れない。`q` でなければ選択の前に候補に混ぜる)
             let mut mp_cands: Vec<Candidate> = Vec::new();
+            // 絞った形: `g` は最適面が広い (被約費用 0 の非基底の数 ≥ max(`ENOMOTO_T_MIP_MPSEP_GATE_K` (20), 元の行の数 × `ENOMOTO_T_MIP_MPSEP_GATE_R` (0.5)))
+            // ラウンドだけ (広くなくなったら残りは止める)、`s` は前のラウンドで目的値が相対 `ENOMOTO_T_MIP_MPSEP_STALL_EPS` (1e-4) 以下しか上がらなかったラウンドだけ
+            let mp_go = match &mpsep {
+                Some(f) if !mp_off => {
+                    let obj = self.lp.objective();
+                    let stalled = mp_last_obj.is_some_and(|o| obj - o <= tunable!("ENOMOTO_T_MIP_MPSEP_STALL_EPS", 1e-4, f64) * obj.abs().max(1.0));
+                    mp_last_obj = Some(obj);
+                    let mut go = !f.contains('s') || stalled;
+                    if go && f.contains('g') {
+                        let w = self.mpsep_width();
+                        let th = (tunable!("ENOMOTO_T_MIP_MPSEP_GATE_K", 20usize, usize) as f64).max(tunable!("ENOMOTO_T_MIP_MPSEP_GATE_R", 0.5, f64) * p.m as f64);
+                        if (w as f64) < th {
+                            mp_off = true;
+                            go = false;
+                        }
+                        if self.params.verbose && (mp_off || mp_stats.0 == 0) {
+                            eprintln!("MIP: cut round {round}: mpsep gate: optimal face width {w} (threshold {th:.0}, {} rows) -> {}", p.m, if mp_off { "narrow; stop" } else { "wide" });
+                        }
+                    }
+                    go
+                }
+                _ => false,
+            };
             let mp_pts: Vec<Vec<f64>> = match &mpsep {
-                Some(f) => self.mpsep_extra(f, &x, round, &mut mp_cands, &mut mp_center, &mut mp_center_tried, &mut mp_stats),
-                None => Vec::new(),
+                Some(f) if mp_go => self.mpsep_extra(f, &x, round, &mut mp_cands, &mut mp_center, &mut mp_center_tried, &mut mp_stats),
+                _ => Vec::new(),
             };
             let mp_quota = mpsep.as_ref().is_some_and(|f| f.contains('q'));
             if mpsep.as_ref().is_some_and(|f| f.contains('P')) {
@@ -4069,6 +4118,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.path_offset = last + 1;
+    }
+
+    /// 試作 `ENOMOTO_MIP_MPSEP` の絞った形: 今の LP の最適面の広さの目安 = 被約費用が 0 (相対 1e-9) で固定されていない非基底の構造列と、
+    /// 双対値が 0 の非基底の (等式でない) 行の数 (`TwoStageLp::optface_move` の候補の数に近い)。
+    fn mpsep_width(&self) -> usize {
+        let p = self.p;
+        let d = self.lp.reduced_costs();
+        let b = self.lp.basis();
+        let y = self.lp.row_duals();
+        let mut k = 0usize;
+        for j in 0..p.n.min(b.col.len()) {
+            if b.col[j] == VarStatus::Basic {
+                continue;
+            }
+            let (l, u) = self.lp.col_bounds(j);
+            if l < u && d[j].abs() <= 1e-9 * (1.0 + p.cost[j].abs()) {
+                k += 1;
+            }
+        }
+        for i in 0..b.row.len().min(y.len()) {
+            if b.row[i] == VarStatus::Basic {
+                continue;
+            }
+            let (l, u) = self.lp.row_bounds(i);
+            if l < u && y[i].abs() <= 1e-9 {
+                k += 1;
+            }
+        }
+        k
     }
 
     /// 試作 `ENOMOTO_MIP_MPSEP` (既定では使わない、analysis/mpsep_20261106.md): 根のカットのループの 1 ラウンドで、今の頂点 `x` (x*) の
