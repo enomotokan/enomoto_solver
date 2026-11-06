@@ -2183,7 +2183,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if super::heur_subfix::on('r') && self.nodes <= 1 && !self.params.submip {
             self.subfix_note_root_x(_x);
             let keep = self.parallel_submips;
-            self.parallel_submips = false;
+            // `p`: 1 回目は並列のサブ MIP のまま出す (やり直しは受け取りの後に主で、[`Self::subfix_par_retry`])
+            self.parallel_submips = keep && super::heur_subfix::on('p');
             self.rens_node_limited = false;
             let r = self.subfix_dive(None, "RENS");
             self.parallel_submips = keep;
