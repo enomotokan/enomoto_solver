@@ -312,6 +312,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 break;
             }
+            // 外側の根の RINS は、既定の `ENOMOTO_MIP_S4_RINSRATE` (0.5) と同じく固定率がそれ未満ならサブ MIP にしない
+            // (1 回目の計測で cod105 の根の RINS が固定率 0.32 (一致する列が尽きた) で 87 秒回った。既定はこの判定で飛ばす)
+            if inc.is_some() && self.nodes <= 1 {
+                if let Some(r) = env_def!("ENOMOTO_MIP_S4_RINSRATE", "0.5").map(|v| v.parse::<f64>().unwrap_or(0.5)) {
+                    if fr < r {
+                        if verbose {
+                            eprintln!("MIP:   SUBFIX {label} try {}: fixing rate {fr:.2} below {r:.2} (S4_RINSRATE); no sub-MIP", tries + 1);
+                        }
+                        break;
+                    }
+                }
+            }
             let mut sub = p.clone();
             sub.col_lo = self.dom.lo.clone();
             sub.col_up = self.dom.up.clone();
