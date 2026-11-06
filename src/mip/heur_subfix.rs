@@ -10,6 +10,10 @@
 //! - `t`: 木の中の RINS (ALNS の RINS の腕) を同じダイブにする。
 //! - `h`: 根の呼び方を HiGHS に寄せる: 外側の根の RINS を呼ばない (根の RENS は暫定解があっても呼ぶ。`r` と合わせて使う)。
 //! - `c`: 根の被約費用のサブ MIP の固定率と結果も固定率の記録に入れる (HiGHS は RENS・RINS・被約費用で共通)。
+//! - `n`: SUBFIX のサブ MIP のノード上限を HiGHS と同じ `200 + 外側のノード数 / 20` にする (既定の 500 の代わり)。
+//! - `p`: 根の RENS の 1 回目は既定どおり並列のサブ MIP (別スレッド) で出し、受け取ったときに根 (1 ノード以下) で実行不能と分かったら、
+//!   根のヒューリスティクスの並列のサブ MIP を受け取った後 ([`Solver::subfix_par_retry`]) に、目標を「達した固定率 × 0.5」にしたダイブを
+//!   主のスレッドで解き直す (深さの半分まで戻る代わりに、今の LP 解から新しくダイブする)。
 //!
 //! 目標の固定率は HiGHS の `determineTargetFixingRate` (初め 0.6、実行不能だった固定率の平均 × 0.9 を上の端、解を見つけた固定率の平均の
 //! 0.9〜1.1 倍を含む範囲の乱数)。記録は外側の求解の全スレッドで共通 ([`STATS`]、求解の始めに [`reset`])。
@@ -31,6 +35,9 @@ pub(crate) fn on(c: char) -> bool {
     let v = V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBFIX").map_or(String::new(), |v| if v == "1" { "ritc".to_string() } else { v.to_string() }));
     v.contains(c)
 }
+
+/// `p` で並列に出した RENS のサブ MIP のラベル (受け取りのときにやり直しの印を付けるため)
+pub(crate) const SUBFIX_PAR_LABEL: &str = "SUBFIX RENS";
 
 /// `ENOMOTO_MIP_SUBFIX` が何か付いているか
 pub(crate) fn any() -> bool {
@@ -114,6 +121,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// RENS (`inc` が `None`)・RINS (`inc` が暫定解) のダイブ ([モジュールの説明](self) を参照)。今の LP 解から始める。
     /// 解を受け入れたら真。定義域と LP は元に戻す。
     pub(super) fn subfix_dive(&mut self, inc: Option<&[f64]>, label: &'static str) -> bool {
+        self.subfix_dive_with(inc, label, None)
+    }
+
+    /// `p` の並列の RENS が根で実行不能だったときのやり直し: 根の並列のサブ MIP を受け取った後に呼ぶ。主のスレッドで、目標を
+    /// 「達した固定率 × 0.5」にしたダイブを解く (その後の空振りのやり直しも主で)。
+    pub(super) fn subfix_par_retry(&mut self) -> bool {
+        let pending = std::mem::take(&mut self.subfix_retry);
+        let mut found = false;
+        for fr in pending {
+            if self.time_up() || 0.5 * fr < 0.1 {
+                continue;
+            }
+            count(3);
+            let keep = self.parallel_submips;
+            self.parallel_submips = false;
+            if self.params.verbose {
+                eprintln!("MIP:   SUBFIX RENS (parallel) was infeasible at the root at fixing rate {fr:.2}; retrying on the main thread with target {:.2}", 0.5 * fr);
+            }
+            found |= self.subfix_dive_with(None, "RENS retry", Some(0.5 * fr));
+            self.parallel_submips = keep;
+        }
+        found
+    }
+
+    fn subfix_dive_with(&mut self, inc: Option<&[f64]>, label: &'static str, target0: Option<f64>) -> bool {
         let p = self.p;
         let mut ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
         if ints.is_empty() {
@@ -160,7 +192,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // ダイブの LP 反復の上限 (やり直しを含む全体): ノードの平均の `ENOMOTO_T_MIP_SUBFIX_ITERS_MULT` (20) 倍 + 1 万
         let budget = (tunable!("ENOMOTO_T_MIP_SUBFIX_ITERS_MULT", 20.0, f64) * self.avg_node_iters().max(100) as f64) as u64 + 10_000;
         let max_tries = tunable!("ENOMOTO_T_MIP_SUBFIX_TRIES", 5usize, usize);
-        let mut target = self.subfix_target();
+        let mut target = target0.unwrap_or_else(|| self.subfix_target());
         // 締めるたびの記録の位置 (ダイブの深さ = この長さ)
         let mut branch_pos: Vec<usize> = Vec::new();
         // 段の始めの `branch_pos` の長さ
@@ -330,7 +362,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.submip_fix_rate = Some(fr);
             let ts = std::time::Instant::now();
             count(1);
-            let r = self.solve_submip_problem(sub, 500, None);
+            // `n`: HiGHS のノード上限 (200 + 外側のノード数 / 20)
+            let nl = if on('n') { 200 + self.nodes / 20 } else { 500 };
+            // `p`: 並列で出すサブ MIP は、受け取りのときに根で実行不能ならやり直しの印を付ける ([`Solver::take_submip`])
+            let keep_label = self.heur_label;
+            if self.parallel_submips {
+                self.heur_label = SUBFIX_PAR_LABEL;
+            }
+            let r = self.solve_submip_problem(sub, nl, None);
+            self.heur_label = keep_label;
             self.submip_fix_rate = None;
             let nodes = self.last_submip_nodes;
             if verbose && !self.params.submip {

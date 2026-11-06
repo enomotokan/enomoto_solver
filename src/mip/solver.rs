@@ -684,6 +684,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) rins_root_x: Option<Vec<f64>>,
     /// 最後に (主のスレッドで) 解いたサブ MIP のノード数 (`ENOMOTO_MIP_SUBFIX` の空振りの判定に使う)
     pub(super) last_submip_nodes: u64,
+    /// `ENOMOTO_MIP_SUBFIX` の `p`: 並列で出した RENS のサブ MIP が根で実行不能だったときの固定率 (主のスレッドでやり直す)
+    pub(super) subfix_retry: Vec<f64>,
     /// 別スレッドの Feasibility Jump とその停止の印。
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッド (試作)
@@ -4114,6 +4116,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_is_rens: false,
         rins_root_x: None,
         last_submip_nodes: 0,
+        subfix_retry: Vec::new(),
         fj_thread: None,
         lmip_thread: None,
         lmip_mailbox: None,
@@ -8122,6 +8125,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.abort_submips_after_grace();
                 }
                 self.join_submips(0);
+                // `ENOMOTO_MIP_SUBFIX` の `p`: 並列の RENS が根で実行不能だったら、ここで主のスレッドでやり直す
+                if !self.subfix_retry.is_empty() {
+                    heur!("RENS (SUBFIX retry)", self.subfix_par_retry());
+                }
                 self.poll_find_thread();
                 // `ENOMOTO_MIP_EARLY_RESTART_JOIN` (試作、既定では使わない): 別スレッドのサブ MIP (RENS など)・解探しのスレッドの解を
                 // ここで受け取って暫定解が良くなり、早めの再スタートの判定が通れば、残りの根のヒューリスティクス (RENS のやり直し・RINS)
@@ -16539,10 +16546,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // ([`Self::failed_heurs`]) が付く。ここで解を受け入れたら印を外す (逐次のときの「見つけた」と同じ)。p200x1188c は並列の RENS・
                 // LP face のサブ MIP が 0.01 秒で最適値 15078 を見つけていたのに、再スタートの後はどちらも飛ばされていた
                 if acc && par_heur_found() {
-                    self.failed_heurs &= !heur_bit(label);
+                    // `ENOMOTO_MIP_SUBFIX` の `p` の並列の RENS は印の名前が違う ("SUBFIX RENS")。RENS の印を外す
+                    let name = if label == super::heur_subfix::SUBFIX_PAR_LABEL { "RENS" } else { label };
+                    self.failed_heurs &= !heur_bit(name);
                 }
                 if let Some(fr) = fix_rate {
                     self.note_fix_rate(fr, infeasible, acc);
+                    // `ENOMOTO_MIP_SUBFIX` の `p`: 並列の RENS のダイブのサブ MIP が根で実行不能なら、主のスレッドでやり直す印
+                    if label == super::heur_subfix::SUBFIX_PAR_LABEL && infeasible && r.nodes <= 1 && !self.params.submip {
+                        self.subfix_retry.push(fr);
+                    }
                 }
             }
         }
