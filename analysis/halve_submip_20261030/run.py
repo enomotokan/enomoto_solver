@@ -164,6 +164,14 @@ CFGS = {
     "pres4c": {"ENOMOTO_MIP_S4_RINSRATE": "0", "ENOMOTO_MIP_S4_BGZERO": "0"},
     # 根の LP の尺度の安全網 (2026-11-06、analysis/momentum1_rootlp_20261106.md) の後は "def" が ROOTLP_SCALE_RESCUE を含む。それより前は "prerescue"
     "prerescue": {"ENOMOTO_MIP_ROOTLP_SCALE_RESCUE": "0"},
+    # bench29 (2026-11-06): HiGHS より遅い問題の組 S1・S3・S6 の候補 (analysis/highs_slow_20261106/)。s1 = 根の RINS の空振りのやり直し・解発見の解を
+    # 内点法の丸めの間も取り込む・クリークの判定の比、s3 = 木の分離の密なカットの判定、s6 = 0 ラウンド目のカットの LP を外さない + 根でサブ MIP を待つ上限 +
+    # カットの LP の時間の上限、all29 = 全部
+    "s1": {"ENOMOTO_MIP_S1_RINSWIDE": "2", "ENOMOTO_MIP_S1_IPMFIND": "1", "ENOMOTO_T_MIP_CLIQUE_FB_RATIO": "0.1"},
+    "s3": {"ENOMOTO_MIP_S3_TSDENSE": "1"},
+    "s6": {"ENOMOTO_MIP_HO4_CUT0": "1", "ENOMOTO_MIP_TREE3_JOINCAP": "1", "ENOMOTO_MIP_S6_CUTLP_TCAP": "10"},
+    "all29": {"ENOMOTO_MIP_S1_RINSWIDE": "2", "ENOMOTO_MIP_S1_IPMFIND": "1", "ENOMOTO_T_MIP_CLIQUE_FB_RATIO": "0.1", "ENOMOTO_MIP_S3_TSDENSE": "1",
+              "ENOMOTO_MIP_HO4_CUT0": "1", "ENOMOTO_MIP_TREE3_JOINCAP": "1", "ENOMOTO_MIP_S6_CUTLP_TCAP": "10"},
 }
 if __name__ == "__main__":  # bench.py からは設定 (CFGS) だけを読む
     cfgs, probs, reps = sys.argv[1].split(","), sys.argv[2].split(","), int(sys.argv[3])
