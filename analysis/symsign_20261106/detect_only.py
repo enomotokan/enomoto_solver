@@ -1,4 +1,4 @@
-"""対称性の検出だけを数える (2026-11-06)。1 問を 4 つの設定 (def・sign・scale・both) で、最初の検出の直後に止めて
+"""対称性の検出だけを数える (2026-11-06)。1 問を 5 つの設定 (def・zero・sign・scale・both) で、最初の検出の直後に止めて
 (`ENOMOTO_MIP_DEBUG_STOP_AFTER_SYM`) ログから生成元の数・軌道の数・検出の時間などを拾い、detect_<集合>.jsonl に書く。
 使い方: python detect_only.py 集合(p58|mitt) [並列の数 (既定 4)]"""
 import json, os, re, subprocess, sys, time
@@ -9,7 +9,7 @@ WT = D.parents[1]
 sys.path.insert(0, str(WT / "scripts")); sys.path.insert(0, str(WT / "analysis/cbcimpl_20261029"))
 import run_miplib_benchmark as rb  # noqa: E402
 from probs import PROBS  # noqa: E402
-CFGS = {"def": {}, "sign": {"ENOMOTO_MIP_SYMSIGN": "1"}, "scale": {"ENOMOTO_MIP_SYMSCALE": "1"},
+CFGS = {"def": {}, "zero": {"ENOMOTO_MIP_SYMZERO": "1"}, "sign": {"ENOMOTO_MIP_SYMSIGN": "1"}, "scale": {"ENOMOTO_MIP_SYMSCALE": "1"},
         "both": {"ENOMOTO_MIP_SYMSIGN": "1", "ENOMOTO_MIP_SYMSCALE": "1"}}
 which = sys.argv[1]; par = int(sys.argv[2]) if len(sys.argv) > 2 else 4
 probs = PROBS if which == "p58" else sorted({p for part in json.loads((WT / "analysis/cbcimpl_20261029/mitt_parts.json").read_text()) for p in part})

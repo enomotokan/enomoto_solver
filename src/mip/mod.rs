@@ -2195,8 +2195,9 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     let symnorm = env_def!("ENOMOTO_MIP_HO3_SYMNORM", "1").is_some();
     // `ENOMOTO_MIP_SYMSIGN`・`ENOMOTO_MIP_SYMSCALE` (試作、既定では使わない。analysis/symsign_20261106.md): 同点の行 (-1 倍しても
     // 形が同じ行) を -1 倍でも写せるようにする・行を正の倍率でそろえる写し ([`symmetry::detection_copy`]。向きのそろえも含む)
+    // `ENOMOTO_MIP_SYMZERO` (試作): 向きのそろえだけを、右辺 0 の等式も係数で向きを決める形 ([`symmetry::detection_copy`]) で行う
     let (symsign, symscale) = (env_str!("ENOMOTO_MIP_SYMSIGN").is_some(), env_str!("ENOMOTO_MIP_SYMSCALE").is_some());
-    let normed = if symsign || symscale {
+    let normed = if symsign || symscale || env_str!("ENOMOTO_MIP_SYMZERO").is_some() {
         let (q, [flipped, scaled, ties]) = symmetry::detection_copy(&prob, symscale, symsign);
         if verbose {
             eprintln!("MIP: symmetry: SYMSIGN {symsign} SYMSCALE {symscale}: flipped {flipped}, scaled {scaled}, tie rows doubled {ties} of {} rows for the detection", prob.m);

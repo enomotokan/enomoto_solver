@@ -312,7 +312,10 @@ fn orient_cmp(lo: f64, up: f64, row: &[(usize, f64)]) -> std::cmp::Ordering {
     a.sort_by(f64::total_cmp);
     let mut b: Vec<f64> = row.iter().map(|t| -t.1).collect();
     b.sort_by(f64::total_cmp);
-    lo.total_cmp(&-up).then(up.total_cmp(&-lo)).then_with(|| {
+    // -0.0 を 0.0 にそろえて比べる (`total_cmp` は -0.0 < 0.0 とするので、右辺 0 の等式 (`a + b - c - d = 0`) は係数によらず
+    // 必ず `Greater` になり、同点にもならない。既定の `ENOMOTO_MIP_HO3_SYMNORM` はこの形のまま)
+    let (lo, up) = (lo + 0.0, up + 0.0);
+    lo.total_cmp(&(-up + 0.0)).then(up.total_cmp(&(-lo + 0.0))).then_with(|| {
         for (x, y) in a.iter().zip(&b) {
             let c = x.total_cmp(y);
             if c != std::cmp::Ordering::Equal {
@@ -336,7 +339,7 @@ fn snap40(x: f64) -> f64 {
     if y.is_finite() { y } else { x }
 }
 
-/// 試作 `ENOMOTO_MIP_SYMSIGN`・`ENOMOTO_MIP_SYMSCALE` (analysis/symsign_20261106.md) の検出に渡す写し。どちらかが立つときだけ
+/// 試作 `ENOMOTO_MIP_SYMSIGN`・`ENOMOTO_MIP_SYMSCALE`・`ENOMOTO_MIP_SYMZERO` (analysis/symsign_20261106.md) の検出に渡す写し。どれかが立つときだけ
 /// 使い、`ENOMOTO_MIP_HO3_SYMNORM` の向きのそろえ (-1 倍) も必ず合わせて行う (`HO3_SYMNORM=0` は効かない)。
 /// - `scale`: 各行を係数の絶対値の最大で割り (正の倍率なので実行可能な集合は同じ)、係数と有限の左右辺を [`snap40`] で丸める。
 ///   2 倍・1/3 倍などで写る行が同じ係数になる。丸めで相対 1e-12 より近い値は同じとみなすので、見つかる置換は
@@ -345,6 +348,7 @@ fn snap40(x: f64) -> f64 {
 ///   足す。足した行は元の行と同じ実行可能な集合を持つ冗長な行なので、写しの対称性 (行の多重集合を保つ列の置換) は元の問題の
 ///   対称性。列の置換が同点の行 r を r' の -1 倍に写すとき、写しでは r → (r' の -1 倍の行)、(r の -1 倍の行) → r' と対応し、
 ///   係数をそのまま比べる今の検出・確かめで見つかる (符号つきの置換を行の側で扱うのと同じ)
+/// - どちらでもなければ (`ENOMOTO_MIP_SYMZERO`) 向きのそろえだけ。`HO3_SYMNORM` と違い、右辺 0 の等式も係数で向きを決める ([`orient_cmp`])
 /// 返す値は (写し, [-1 倍した行, 倍率で割った行, 同点の行])。
 pub fn detection_copy(p: &MipProblem, scale: bool, sign: bool) -> (MipProblem, [usize; 3]) {
     let mut rows = p.rows.clone();
@@ -371,7 +375,7 @@ pub fn detection_copy(p: &MipProblem, scale: bool, sign: bool) -> (MipProblem, [
         match orient_cmp(lo[i], up[i], &rows[i]) {
             std::cmp::Ordering::Greater => {
                 flipped += 1;
-                let (l, u) = (-up[i], -lo[i]);
+                let (l, u) = (-up[i] + 0.0, -lo[i] + 0.0);
                 lo[i] = l;
                 up[i] = u;
                 for t in rows[i].iter_mut() {
@@ -385,8 +389,8 @@ pub fn detection_copy(p: &MipProblem, scale: bool, sign: bool) -> (MipProblem, [
     for &i in &ties {
         let r: Vec<(usize, f64)> = rows[i].iter().map(|&(j, a)| (j, -a)).collect();
         rows.push(r);
-        lo.push(-up[i]);
-        up.push(-lo[i]);
+        lo.push(-up[i] + 0.0);
+        up.push(-lo[i] + 0.0);
     }
     let nt = ties.len();
     let q = MipProblem::from_rows(p.col_lo.clone(), p.col_up.clone(), p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, lo, up);
@@ -2156,6 +2160,25 @@ mod tests {
                 assert!(p.rows.iter().any(|r| *r == img || *r == neg));
             }
         }
+    }
+
+    /// 右辺 0 の等式 `a + b - c = 0` と `-d - e + f = 0` (費用 a, b, d, e が 1、c, f が 2): 既定の向きのそろえ (`HO3_SYMNORM`) は
+    /// -0.0 < 0.0 で両方を反転して向きがそろわないが、[`detection_copy`] はそろえて a -> d を見つける。
+    /// 同点の行 `a + b - c - d = 0` (右辺 0) も同点として二重にする
+    #[test]
+    fn symzero_orients_zero_rhs_equalities() {
+        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, -1.0)], vec![(3, -1.0), (4, -1.0), (5, 1.0)]];
+        let p = MipProblem::from_rows(vec![0.0; 6], vec![1.0; 6], vec![1.0, 1.0, 2.0, 1.0, 1.0, 2.0], 0.0, 1.0, vec![true; 6], rows, vec![0.0; 2], vec![0.0; 2]);
+        let s0 = detect(&p, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_ne!(s0.orbit[0], s0.orbit[3]);
+        let (q, [flipped, _, ties]) = detection_copy(&p, false, false);
+        assert_eq!((flipped, ties), (1, 0));
+        let s1 = detect(&q, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_eq!(s1.orbit[0], s1.orbit[3]);
+        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, -1.0), (3, -1.0)]];
+        let p = MipProblem::from_rows(vec![0.0; 4], vec![1.0; 4], vec![1.0; 4], 0.0, 1.0, vec![true; 4], rows, vec![0.0], vec![0.0]);
+        assert_eq!(detection_copy(&p, false, true).0.m, 2);
+        assert!(detection_copy(&p, false, true).0.row_lo.iter().all(|v| v.is_sign_positive()));
     }
 
     /// `ENOMOTO_MIP_SYMSCALE`: `(1/3) a + (1/3) b <= 1/3` と `c + d <= 1`、`2 e + 2 f <= 2` は正の倍率で同じ形
