@@ -5033,7 +5033,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if dbg_sep || env_str!("ENOMOTO_MIP_MODKVB_LOG").is_some() {
                     eprintln!(
-                        "SEP modkvb {:.3}s tight {} sys {} cols {} vbsub {}/{} k {} sols {} solrows {} timeout {} cands {} snf {}",
+                        "SEP modkvb {:.3}s tight {} sys {} cols {} vbsub {}/{} k {} sols {} solrows {} dense {} timeout {} cands {} snf {}",
                         t0.elapsed().as_secs_f64(),
                         st.tight,
                         st.sys,
@@ -5043,6 +5043,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         st.k,
                         st.sols,
                         st.sol_rows,
+                        st.dense,
                         st.timed_out as u8,
                         cands.len() - c0,
                         st.snf

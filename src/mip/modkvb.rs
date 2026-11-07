@@ -26,6 +26,8 @@
 //! - カット: 集約行 (右辺 0) を [`super::cuts::vb_cover_cut`] と、一般整数列の変数上下限の置き換えを
 //!   (`ENOMOTO_MIP_MODKVB_IV`、既定 3) 使った [`super::cuts::generate_cuts`] に渡す。解ごとに返す (呼び出し側が最良の 1 本を残す)。
 //! - ある k でカットが出れば次の k は試さない (HiGHS と同じ)。
+//! - 集約行の非零が `1000 + n / 10` (`ENOMOTO_T_MIP_MODKVB_MAXLEN`) を超えたら使わない。分離 1 回の時間の上限は
+//!   `ENOMOTO_T_MIP_MODKVB_TIME` (既定 0.3 秒)、解の数は k ごとに `ENOMOTO_T_MIP_MODKVB_SOLS` (既定 300、1 本だけの解は別に 150 まで)。
 
 use super::cuts::{CutVars, RawCut};
 
@@ -58,6 +60,8 @@ pub(crate) struct ModkStats {
     pub sols: usize,
     /// 解の行の数の和
     pub sol_rows: usize,
+    /// 長すぎて使わなかった集約行の数
+    pub dense: usize,
     /// 時間の上限で止まったか
     pub timed_out: bool,
     /// `ENOMOTO_MIP_SNFMODK` の `v`: 群の要約 / 諦めたか / 元の数
@@ -504,6 +508,8 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
     let max_sols = tunable!("ENOMOTO_T_MIP_MODKVB_SOLS", 300usize, usize);
     let max_comb = tunable!("ENOMOTO_T_MIP_MODKVB_COMB", 40usize, usize);
     let passes = tunable!("ENOMOTO_T_MIP_MODKVB_PASSES", 3usize, usize);
+    let max_agg_len = tunable!("ENOMOTO_T_MIP_MODKVB_MAXLEN", 0usize, usize);
+    let max_agg_len = if max_agg_len > 0 { max_agg_len } else { 1000 + n / 10 };
     let iv = env_str!("ENOMOTO_MIP_MODKVB_IV").and_then(|v| v.parse::<u8>().ok()).unwrap_or(3);
     let mut out: Vec<Vec<RawCut>> = Vec::new();
     let mut aggv = vec![0.0f64; n + m];
@@ -549,7 +555,7 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
         st.sols += sols.len();
         let n0 = out.len();
         for (si, sol) in sols.iter().enumerate() {
-            if si % 16 == 0 && std::time::Instant::now() >= deadline {
+            if std::time::Instant::now() >= deadline {
                 st.timed_out = true;
                 break;
             }
@@ -590,7 +596,9 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
                     aggv[j] = 0.0;
                 }
                 atouch.clear();
-                if base.is_empty() {
+                // 密な集約行は使わない (nw04 で 1 本 4 万非零のカットになり根が 5 倍遅くなった。HiGHS の連立の行の長さの上限と同じ式)
+                if base.is_empty() || base.len() > max_agg_len {
+                    st.dense += 1;
                     continue;
                 }
                 base.sort_unstable_by_key(|t| t.0);
