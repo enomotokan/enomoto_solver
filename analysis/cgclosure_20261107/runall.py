@@ -11,6 +11,7 @@ ap.add_argument("--tsep", type=float, default=20)
 ap.add_argument("--tmax", type=float, default=300)
 ap.add_argument("--par", type=int, default=4)
 ap.add_argument("--out", default="closures.jsonl")
+ap.add_argument("--extra", default="", help="cgclosure.py に足す引数 (空白区切り)")
 ap.add_argument("probs", nargs="+")
 a = ap.parse_args()
 OUT = D / a.out
@@ -29,8 +30,10 @@ def run(job):
            "--name", p, "--out", str(OUT)]
     if sol.exists():
         cmd += ["--sol", str(sol)]
+    cmd += a.extra.split()
     t0 = time.time()
-    with open(D / "logs" / f"{p}_{m}.log", "w") as f:
+    tag = "" if a.out == "closures.jsonl" else Path(a.out).stem + "_"
+    with open(D / "logs" / f"{tag}{p}_{m}.log", "w") as f:
         try:
             r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=f, timeout=a.tmax + 900)
             rc = r.returncode

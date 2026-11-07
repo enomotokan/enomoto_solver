@@ -113,6 +113,9 @@ class Model:
                     else:
                         mn = np.max(np.abs(av)) if len(av) else 1.0
                     sc = 1.0 / mn if mn > 0 else 1.0
+                    mx = np.max(np.abs(av)) if len(av) else 0.0
+                    if mx * sc > 1e4:  # 大きな M の行で係数が 1e9 になると分離 MIP が壊れる (ran14x18-disj-8)
+                        sc = 1e4 / mx
                     pr = False
                 else:
                     nscaled += 1

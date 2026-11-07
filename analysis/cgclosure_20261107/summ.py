@@ -16,8 +16,9 @@ for l in (D / "roots.jsonl").read_text().splitlines():
     r = json.loads(l); roots[(r["problem"], r["kind"])] = r
 clo = {}
 fn = sys.argv[1] if len(sys.argv) > 1 else "closures.jsonl"
-for l in (D / fn).read_text().splitlines():
-    r = json.loads(l); clo[(r["name"], r["mode"])] = r
+for f_ in [fn] + sys.argv[2:]:  # 後のファイルが前のものを上書きする (やり直し)
+    for l in (D / f_).read_text().splitlines():
+        r = json.loads(l); clo[(r["name"], r["mode"])] = r
 MODES = ["cg", "mod2", "modk"]
 
 
