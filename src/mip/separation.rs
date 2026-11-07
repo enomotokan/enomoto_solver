@@ -4608,7 +4608,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.vbounds.is_none() {
             let mut vbs = VarBounds::from_rows(n, &p.is_int, &p.rows, &p.row_lo, &p.row_up);
             // 試作 `ENOMOTO_MIP_INTVUB`: 一般整数列と 0-1 列の変数上下限も集める (`ENOMOTO_MIP_INTVUB_IMPL` ならプロービングの含意も)
-            if super::cuts::intvub_mode() > 0 || mushagg_mode().is_some() {
+            if super::cuts::intvub_mode() > 0 || mushagg_mode().is_some() || super::modkvb::modkvb_mode().is_some() {
                 let implied: &[(u32, bool, u32, bool, f64)] = if env_str!("ENOMOTO_MIP_INTVUB_IMPL").is_some() { &p.implied_bounds } else { &[] };
                 vbs.add_int_vbs(&self.cut_int[..n], &self.dom.global_lo[..n], &self.dom.global_up[..n], &p.rows, &p.row_lo, &p.row_up, implied);
                 if env_str!("ENOMOTO_MIP_INTVUB_LOG").is_some() && !self.params.submip {
@@ -4969,6 +4969,42 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if dbg_sep || env_str!("ENOMOTO_MIP_MUSHAGG_LOG").is_some() {
                     eprintln!("SEP mushagg {:.3}s tight {ntight} cols {ncols} pairs {npairs} cands {}", t0.elapsed().as_secs_f64(), cands.len() - c0);
+                }
+            }
+        }
+        // 試作 `ENOMOTO_MIP_MODKVB` (既定では使わない): 変数上下限で置き換えた空間の mod-k の行の組 ([`super::modkvb::modkvb_cuts`])。根だけ
+        if let Some(mode) = super::modkvb::modkvb_mode() {
+            if !light && !self.params.submip {
+                let t0 = std::time::Instant::now();
+                let tl = tunable!("ENOMOTO_T_MIP_MODKVB_TIME", 0.3f64, f64);
+                let mut dl = t0 + std::time::Duration::from_secs_f64(tl);
+                if let Some(d) = sep_deadline(self.deadline) {
+                    dl = dl.min(d);
+                }
+                let (groups, st) = super::modkvb::modkvb_cuts(&vars, lp_rows, n, mode, use_flow_cover(), dl);
+                let c0 = cands.len();
+                for g in groups {
+                    let n0 = cands.len();
+                    for r in g {
+                        push(Some(r), &mut cands, self);
+                    }
+                    keep_best(&mut cands, n0, self.p);
+                }
+                if dbg_sep || env_str!("ENOMOTO_MIP_MODKVB_LOG").is_some() {
+                    eprintln!(
+                        "SEP modkvb {:.3}s tight {} sys {} cols {} vbsub {}/{} k {} sols {} solrows {} timeout {} cands {}",
+                        t0.elapsed().as_secs_f64(),
+                        st.tight,
+                        st.sys,
+                        st.cols,
+                        st.vbsub.0,
+                        st.vbsub.1,
+                        st.k,
+                        st.sols,
+                        st.sol_rows,
+                        st.timed_out as u8,
+                        cands.len() - c0
+                    );
                 }
             }
         }
