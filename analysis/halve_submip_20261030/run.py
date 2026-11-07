@@ -201,6 +201,20 @@ CFGS = {
                  "ENOMOTO_MIP_NODELP_PERTURB": "phg", "ENOMOTO_MIP_BASIS_NB": "t",
                  "ENOMOTO_MIP_PROBE_BASIS_GUARD": "x",
                  "ENOMOTO_MIP_HNFPRE": "bounds"},
+    # cand1108 (2026-11-08): cand1107 に 11-08 の改良を入れた形。SUBFIX は保険つきの rtcqf (C.md の 8 節)、PROBE_BASIS_GUARD は x → g (列だけの基底を
+    # 前処理の行の順で埋める、probe_basis_20261106.md の 9 節)、CUTLPCAP=ac (根のカットの LP の上限、cutlpcap_20261107.md)、CMIRDELTA=n
+    # (cmirdelta_20261107.md)、LPSCALE=h (重い LP だけ双子に移る、mip_lp_scale_20261106.md の 6 節) を足す。Mittelmann 600 秒の res6 で既定と比べる
+    "cand1108": {"ENOMOTO_SIMPLEX_SCALE": "1", "ENOMOTO_T_SIMPLEX_SCALE_MIN_M": "10000", "ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE": "1e4", "ENOMOTO_SIMPLEX_HARRIS2": "r",
+                 "ENOMOTO_MIP_MPSEP": "oqmgs", "ENOMOTO_T_MIP_MPSEP_NV": "1", "ENOMOTO_T_MIP_MPSEP_EXTRA": "5",
+                 "ENOMOTO_MIP_MUSHAGG": "cover",
+                 "ENOMOTO_MIP_PROBE_REPRESOLVE": "1",
+                 "ENOMOTO_MIP_SUBFIX": "rtcqf",
+                 "ENOMOTO_MIP_NODELP_PERTURB": "phg", "ENOMOTO_MIP_BASIS_NB": "t",
+                 "ENOMOTO_MIP_PROBE_BASIS_GUARD": "g",
+                 "ENOMOTO_MIP_HNFPRE": "bounds",
+                 "ENOMOTO_MIP_CUTLPCAP": "ac",
+                 "ENOMOTO_MIP_CMIRDELTA": "n",
+                 "ENOMOTO_MIP_LPSCALE": "h", "ENOMOTO_T_MIP_LPSCALE_MIN_RANGE": "1e4"},
     # 根の RENS を目標の固定率で止める (analysis/submip_impr_20261106/A.md の SUBA_RATE の n だけ)
     "suban": {"ENOMOTO_MIP_SUBA_RATE": "n"},
 }
