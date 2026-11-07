@@ -1314,6 +1314,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let rob_root = if job.is_some() { super::solver::BG_ROOT_ITERS.with(|c| c.get()) } else { root_iters };
         let mut ok_lp_iters = 0u64;
+        // 試作 `ENOMOTO_MIP_CUTLPCAP` = 文字の並び (analysis/cutlpcap_20261107.md、既定では使わない。主の根のカットのループ (`cs_outer`) だけ):
+        // - `a`: カットの LP が上限 (反復・時間・進みの判定) に当たったら、全部外す前に、そのラウンドのカットのうち効き目の大きい
+        //   半分だけを残して加える前の状態から解き直す (`ENOMOTO_T_MIP_CUTLPCAP_AMIN` 本 (既定 5) 未満になるか最適になるまで繰り返す)。
+        //   最適になればそのラウンドは成功として続け、以後の 1 ラウンドの本数の上限を残した本数にする
+        // - `n`: 1 ラウンドに入れる本数 (選択を通さないカットも含む) を、0 ラウンド目は `ENOMOTO_T_MIP_CUTLPCAP_N0` 本 (既定 100)、
+        //   以後は前に最適まで解けたラウンドの本数の `ENOMOTO_T_MIP_CUTLPCAP_NMULT` 倍 (既定 2) と N0 の大きい方までに、効き目の順に絞る
+        // - `c`: 反復の上限を `ENOMOTO_T_MIP_CUTLPCAP_CMULT` (既定 1) x max(根の LP の反復, 前処理の LP の反復, 今の LP の行の数) より小さくしない
+        // 値に `l` を含むか `ENOMOTO_MIP_CUTLPCAP_LOG` を置くと、ラウンドごとの上限と本数を出す (診断。動きは変えない)
+        let cl = if cs_outer { env_str!("ENOMOTO_MIP_CUTLPCAP").filter(|v| *v != "0") } else { None };
+        let cl_a = cl.is_some_and(|v| v.contains('a'));
+        let cl_n = cl.is_some_and(|v| v.contains('n'));
+        let cl_c = cl.is_some_and(|v| v.contains('c'));
+        let cl_log = cs_outer && self.params.verbose && (cl.is_some_and(|v| v.contains('l')) || env_str!("ENOMOTO_MIP_CUTLPCAP_LOG").is_some());
+        let mut cl_last_ok_cuts = 0usize;
         let mut loop_iters = 0u64;
         let mut work_rounds = 0usize;
         // `ENOMOTO_MIP_LOSE6_3_CUTRESTART` (試作、既定では使わない): 主の根のカットのループで、`ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_MIN` (既定 3)
@@ -2128,10 +2142,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if saturated {
                 adapt_max_cuts = (2 * max_cuts).min(tunable!("ENOMOTO_T_MIP_CUT_ADAPT_MAX_CAP", 500usize, usize)).max(max_cuts);
             }
+            // 試作 `ENOMOTO_MIP_CUTLPCAP` の `n`: 1 ラウンドの本数を前のラウンドに合わせて絞る
+            if cl_n {
+                let n0 = tunable!("ENOMOTO_T_MIP_CUTLPCAP_N0", 100usize, usize).max(1);
+                let lim_n = if cl_last_ok_cuts == 0 { n0 } else { n0.max((tunable!("ENOMOTO_T_MIP_CUTLPCAP_NMULT", 2.0, f64) * cl_last_ok_cuts as f64) as usize) };
+                if chosen.len() > lim_n {
+                    let before = chosen.len();
+                    chosen.sort_by(|a, b| b.efficacy.partial_cmp(&a.efficacy).unwrap_or(std::cmp::Ordering::Equal));
+                    chosen.truncate(lim_n);
+                    if self.params.verbose {
+                        eprintln!("MIP: cut round {round}: CUTLPCAP n: {before} cuts -> {lim_n} (last solved round {cl_last_ok_cuts} cuts)");
+                    }
+                }
+            }
             if !self.params.submip && env_def!("ENOMOTO_MIP_CUT_CLIQUE_EXTEND", "1").is_some() {
                 self.extend_clique_cuts(&mut chosen, &x, round);
             }
-            let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
+            let row_effs: Vec<f64> = if cl_a { chosen.iter().map(|c| c.efficacy).collect() } else { Vec::new() };
+            let mut rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
             total_added += rows.len();
             // `x` (共有の置き場がないとき): 負けた写しから足したカットのうち選ばれた数を数える
             if race_x && !share_keys.is_empty() && job.as_ref().is_some_and(|j| j.share.lock().unwrap().is_none()) {
@@ -2212,6 +2240,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `d` と同じく加える前の状態を取っておき、外すときに戻す
             let ho4_gr = ho5_gain > 0.0 && env_str!("ENOMOTO_MIP_HO4_GAIN_RESTORE").is_some();
             let rob_saved = ((rob_d || ho4_gr) && !fail_restore && keep_lu_remove.is_none()).then(|| self.lp.save_state());
+            // 試作 `ENOMOTO_MIP_CUTLPCAP` の `a`: 解き直しのために加える前の状態を取っておく
+            let cl_saved = (cl_a && !fail_restore && keep_lu_remove.is_none() && rows.len() >= 2 * tunable!("ENOMOTO_T_MIP_CUTLPCAP_AMIN", 5usize, usize)).then(|| self.lp.save_state());
             // 試作 `ENOMOTO_MIP_CUT0_RETRY` (analysis/cutloop_stop_20261106/A.md、既定では使わない): `HO4_CUT0=moved` の改良。
             // 1 回目は既定とまったく同じに解き、進みの判定で止まったとき、次の 3 つを満たすときだけ同じカットの LP を解き直す。
             // (1) 下界がまだ根の LP の値から動いていない (`!moved`) 序盤のラウンド (`ENOMOTO_T_MIP_CUT0_RETRY_ROUNDS` 未満、既定 2)。
@@ -2277,6 +2307,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 根の LP が前処理の LP の基底から数反復で終わった問題 (neos-873061 は 1 反復) では、前処理の LP の反復を基準にする
             let ho4_base = root_iters.max(super::HO4_PROBE_ITERS.with(|c| c.get())).max(100);
             let lim = if ho4_cut0 { lim.max((tunable!("ENOMOTO_T_MIP_HO4_CUT0_MULT", 2.0, f64) * ho4_base as f64) as u64) } else { lim };
+            let lim = if cl_c {
+                let b = (self.lp.num_rows() as u64).max(ho4_base);
+                lim.max((tunable!("ENOMOTO_T_MIP_CUTLPCAP_CMULT", 1.0, f64) * b as f64) as u64)
+            } else {
+                lim
+            };
+            if cl_log {
+                eprintln!("MIP: cut round {round}: CUTLPCAP cap {lim} cuts {} rows {} root_iters {root_iters} ok_iters {ok_lp_iters}", rows.len(), self.lp.num_rows());
+            }
             if ho4_cut0 && self.params.verbose {
                 eprintln!("MIP: cut round {round}: ENOMOTO_MIP_HO4_CUT0: iteration cap {lim}, no progress check");
             }
@@ -2584,6 +2623,55 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: cut round {round}: LP hit the time cap; continued for up to {:.2}s more: {st:?}", retry * cap);
                 }
             }
+            // 試作 `ENOMOTO_MIP_CUTLPCAP` の `a`: 上限に当たったら、効き目の大きい半分を残して加える前の状態から解き直す
+            if let Some(ss) = cl_saved.as_ref().filter(|_| matches!(st, LpStatus::IterationLimit | LpStatus::TimeLimit)) {
+                let amin = tunable!("ENOMOTO_T_MIP_CUTLPCAP_AMIN", 5usize, usize).max(1);
+                let mut order: Vec<usize> = (0..rows.len()).collect();
+                order.sort_by(|&i, &j| row_effs[j].partial_cmp(&row_effs[i]).unwrap_or(std::cmp::Ordering::Equal).then(i.cmp(&j)));
+                let mut keep = rows.len();
+                while matches!(st, LpStatus::IterationLimit | LpStatus::TimeLimit) && keep / 2 >= amin && !self.time_up() && !stopped(&job) {
+                    keep /= 2;
+                    let mut remove = vec![false; self.lp.num_rows()];
+                    for r in remove.iter_mut().skip(saved_rows) {
+                        *r = true;
+                    }
+                    self.delete_lp_rows(&remove);
+                    if self.lp.num_rows() != saved_rows {
+                        break;
+                    }
+                    self.lp.restore_state(ss);
+                    let mut idx: Vec<usize> = order[..keep].to_vec();
+                    idx.sort_unstable();
+                    let sub: Vec<(Vec<(usize, f64)>, f64, f64)> = idx.iter().map(|&i| rows[i].clone()).collect();
+                    self.add_cut_rows(&sub);
+                    if rob_p {
+                        let w = ((tunable!("ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_WIN", 0.25, f64) * lim as f64) as usize).max(50);
+                        let frac = tunable!("ENOMOTO_T_MIP_CUT_LP_CAP_ROBUST_FRAC", 0.01, f64);
+                        crate::simplex::mip_lp::PROGRESS_STOP_ONCE.with(|c| c.set(Some((lim as usize, w, frac, prev_lp_obj))));
+                    }
+                    let d = if cap.is_finite() {
+                        let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
+                        Some(self.deadline.map_or(d, |g| g.min(d)))
+                    } else {
+                        self.deadline
+                    };
+                    let it1 = self.lp.total_iterations();
+                    st = self.lp.solve(&SolveLimits { iteration_limit: solve_lim, cutoff: cut_cutoff, deadline: d });
+                    crate::simplex::mip_lp::PROGRESS_STOP_ONCE.with(|c| c.set(None));
+                    if self.params.verbose {
+                        eprintln!(
+                            "MIP: cut round {round}: CUTLPCAP a: kept {keep} of {} cuts by efficacy and re-solved: {st:?} after {} iters, obj {:.10e}",
+                            rows.len(),
+                            self.lp.total_iterations() - it1,
+                            self.lp.objective() + p.offset
+                        );
+                    }
+                    if st == LpStatus::Optimal {
+                        rows = idx.iter().map(|&i| rows[i].clone()).collect();
+                        lp_cap_cuts = lp_cap_cuts.min(keep.max(amin));
+                    }
+                }
+            }
             self.sb_iters += 0;
             loop_iters += self.lp.total_iterations() - it0;
             lp_tot += t_lp0.elapsed().as_secs_f64();
@@ -2689,6 +2777,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             ok_lp_secs = ok_lp_secs.max(t_lp0.elapsed().as_secs_f64());
             ok_lp_iters = ok_lp_iters.max(self.lp.total_iterations() - it0);
+            cl_last_ok_cuts = rows.len();
             let obj = self.lp.objective();
             // 最適に解けたカットの LP の値は問題全体の下界 (根を閉じる判定 [`Solver::root_gap_closed`] に使う)
             if job.is_none() && self.snap.is_none() {
