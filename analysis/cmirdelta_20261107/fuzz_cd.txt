@@ -1,0 +1,16 @@
+== ENOMOTO_MIP_CMIRDELTA=1 ENOMOTO_MIP_REL_GAP=1e-9 (1 スレッド)
+fuzz_tiny 400 0: bad 13 of 400 (既定でも同じ 13 問 (seed 61, 81, 139, 148, 159, 195, 201, 210, 246, 260, ...)。前からの不一致)
+mip_fuzz_vs_highs 300: bad 0 of 300
+fuzz_rat 300 0: bad 0 of 300 (infeasible 24, optimal 276)
+
+== 以下 ENOMOTO_MIP_THREADS=4
+== fuzz_rat 1000 300 (THREADS=4)
+bad 0 of 1000 highs statuses {'optimal': 907, 'infeasible': 93} time 21.4
+== mip_fuzz_vs_highs 300 (THREADS=4)
+bad 0 of 300 time 4.2
+== fuzz_rat 300 0 CMIRDELTA=c
+bad 0 of 300 highs statuses {'infeasible': 24, 'optimal': 276} time 6.3
+== fuzz_rat 300 0 CMIRDELTA=l
+bad 0 of 300 highs statuses {'infeasible': 24, 'optimal': 276} time 6.4
+== fuzz_rat 300 0 CMIRDELTA=g
+bad 0 of 300 highs statuses {'infeasible': 24, 'optimal': 276} time 5.9
