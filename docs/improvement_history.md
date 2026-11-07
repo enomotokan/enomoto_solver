@@ -10343,6 +10343,17 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 根拠: cod105 (600 秒) 200 → 140 秒 (3 回)。58 問 2 回で SGM 17.08 → 16.11・17.18 → 16.62、解けた数 44 → 44・40 → 42 (drayage-25-23・noswot・neos5 が良い)。
 - 記録は `analysis/s4c_default_20261106.md` (元は `analysis/highs_slow_20261106/S4.md`)。
 
+## 2026-11-07: 根の LP を尺度を調整した写しで解く ROOTLP_SCALE を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_ROOTLP_SCALE` (戻し方 `=0`、run.py の `prerootscale`)。主の根の LP (最初・再スタートの後) と前処理の LP による固定の
+  最初の LP を、基底があっても行と列の尺度を調整した写しで解く。条件 (行 `ENOMOTO_T_MIP_ROOTLP_SCALE_MIN_M` 10000 以上・係数の幅
+  `ENOMOTO_T_MIP_ROOTLP_SCALE_MIN_RANGE` 1e4 以上) は変えていない。
+- 根拠: 条件に当たるのは数えた 161 問 (MIPLIB benchmark・Mittelmann の行 1 万以上 103 問と collection の 58 問) のうち 37 問。300 秒 (4 スレッド) で
+  momentum1 は下界・解なし → ギャップ 81.8%、neos-2987310-joes は最適 31 → 10 秒 (2 回とも)、satellites2-40・satellites2-60-fs は根の LP 68 → 0.16 秒・
+  38〜42 → 6〜8 秒。ほかの問題の差は 2 回で向きが入れ替わる揺れ。58 問には条件に当たる問題がない (1 回回して尺度の調整は一度も働かない)。
+- 試して採らなかった: 幅の閾値 1e3 (neos-1367061 で最初の LP 5.5 → 12.8 秒・根の LP 0.12 → 9.6 秒・最適 32 → 61 秒。尺度なしで最適な基底が
+  写しでは最適でなく 2924 反復かかる)。記録は `analysis/rootlp_scale_20261106.md`。
+
 ## 2026-11-06: 根の LP が壊れたら尺度を調整した写しで解き直す安全網 (ROOTLP_SCALE_RESCUE を既定に、採用)
 
 - 既定にした: `ENOMOTO_MIP_ROOTLP_SCALE_RESCUE` (戻し方 `=0`、run.py の `prerescue`)。根の LP が `Error`・`IterationLimit` で終わったら、内点法 + クロスオーバーの

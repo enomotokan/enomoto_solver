@@ -7315,10 +7315,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 tunable!("ENOMOTO_T_MIP_ROOTLP_BOTH_MIN", 0.05, f64),
             );
         }
-        // 試作 `ENOMOTO_MIP_ROOTLP_SCALE` (既定では使わない、analysis/momentum1_rootlp_20261106.md): 主の根の LP (最初・再スタートの後) を、
-        // 基底があっても行と列の尺度を調整した写しで解く (行が 1 万以上・係数の幅が 1e4 以上のときだけ。LP の経路は尺度を調整して解くが、
-        // MIP の根の LP は調整しない。momentum1 は前処理の LP による固定の基底から尺度なしの二段解法で 600 秒解けなかった)
-        if matches!(root_kind, Some(3) | Some(4)) && env_str!("ENOMOTO_MIP_ROOTLP_SCALE").is_some_and(|v| v != "0") {
+        // `ENOMOTO_MIP_ROOTLP_SCALE` (既定で使う。`=0` で使わない、analysis/momentum1_rootlp_20261106.md・analysis/rootlp_scale_20261106.md):
+        // 主の根の LP (最初・再スタートの後) を、基底があっても行と列の尺度を調整した写しで解く (行が 1 万以上・係数の幅が 1e4 以上のときだけ。
+        // LP の経路は尺度を調整して解くが、MIP の根の LP は調整しない。momentum1 は前処理の LP による固定の基底から尺度なしの二段解法で 600 秒解けなかった)
+        if matches!(root_kind, Some(3) | Some(4)) && env_def!("ENOMOTO_MIP_ROOTLP_SCALE", "1").is_some() {
             self.lp.request_scale_once();
         }
         let mut root_st = if probe_cols_only_warm && root_kind == Some(4) && (probe_basis_guard_has('r') || probe_basis_guard_has('x')) {

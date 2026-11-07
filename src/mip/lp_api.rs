@@ -53,7 +53,7 @@ pub trait MipLp: Clone + Send {
     fn solve_scaled_rescue(&mut self, _lim: &SolveLimits) -> Option<LpStatus> {
         None
     }
-    /// 試作 `ENOMOTO_MIP_ROOTLP_SCALE`: 次の求解 1 回だけ尺度を調整した写しで解く ([`TwoStageLp::request_scale_once`])。
+    /// `ENOMOTO_MIP_ROOTLP_SCALE` (既定で使う): 次の求解 1 回だけ尺度を調整した写しで解く ([`TwoStageLp::request_scale_once`])。
     fn request_scale_once(&mut self) {}
     /// 試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` (analysis/probe_basis_20261106.md): 基底を捨てる ([`TwoStageLp::drop_basis`])。
     fn drop_basis(&mut self) {}

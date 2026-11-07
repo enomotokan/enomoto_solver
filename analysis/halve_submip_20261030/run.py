@@ -164,6 +164,9 @@ CFGS = {
     "pres4c": {"ENOMOTO_MIP_S4_RINSRATE": "0", "ENOMOTO_MIP_S4_BGZERO": "0"},
     # 根の LP の尺度の安全網 (2026-11-06、analysis/momentum1_rootlp_20261106.md) の後は "def" が ROOTLP_SCALE_RESCUE を含む。それより前は "prerescue"
     "prerescue": {"ENOMOTO_MIP_ROOTLP_SCALE_RESCUE": "0"},
+    # 根の LP を尺度を調整した写しで解く ROOTLP_SCALE の既定化 (2026-11-07、analysis/rootlp_scale_20261106.md) の後は "def" が ROOTLP_SCALE を含む。
+    # それより前の既定は "prerootscale"
+    "prerootscale": {"ENOMOTO_MIP_ROOTLP_SCALE": "0"},
     # bench29 (2026-11-06): HiGHS より遅い問題の組 S1・S3・S6 の候補 (analysis/highs_slow_20261106/)。s1 = 根の RINS の空振りのやり直し・解発見の解を
     # 内点法の丸めの間も取り込む・クリークの判定の比、s3 = 木の分離の密なカットの判定、s6 = 0 ラウンド目のカットの LP を外さない + 根でサブ MIP を待つ上限 +
     # カットの LP の時間の上限、all29 = 全部

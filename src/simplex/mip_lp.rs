@@ -123,7 +123,7 @@ pub struct TwoStageLp {
     /// 直近の解 `x` についての [`Self::row_activities`] の結果 (行と `x` にだけよるので、`x` か行を変えたら捨てる。
     /// 列の境界・基底を変えただけなら残し、次の求解の [`Self::nb_hint`] でも使う)。
     act_memo: OnceCell<Vec<f64>>,
-    /// 試作 `ENOMOTO_MIP_ROOTLP_SCALE` ([`Self::request_scale_once`]): 次の求解 1 回だけ、基底があっても行と列の尺度を調整した写しで解く
+    /// `ENOMOTO_MIP_ROOTLP_SCALE` (既定で使う) ([`Self::request_scale_once`]): 次の求解 1 回だけ、基底があっても行と列の尺度を調整した写しで解く
     /// ([`Self::solve_scaled`])。求解の始めに使い切る
     scale_once: bool,
     /// 試作 `ENOMOTO_MIP_LPSCALE` (analysis/mip_lp_scale_20261106.md): 行と列の尺度をかけた双子 (係数 `r_i a_ij c_j`)。
@@ -1750,7 +1750,7 @@ impl TwoStageLp {
         Some(Arc::new(IpmScale { std: sc.std, no_hint, rs, cs, sc_shift: sc.shift, shift: self.shift.clone() }))
     }
 
-    /// 試作 `ENOMOTO_MIP_ROOTLP_SCALE` (analysis/momentum1_rootlp_20261106.md): 次の求解 1 回 (MIP の根の LP・前処理の LP による固定の
+    /// `ENOMOTO_MIP_ROOTLP_SCALE` (既定で使う) (analysis/momentum1_rootlp_20261106.md): 次の求解 1 回 (MIP の根の LP・前処理の LP による固定の
     /// 最初の LP) だけ、基底の有無によらず尺度を調整した写しで解く ([`Self::solve_scaled`])。行の数が `ENOMOTO_T_MIP_ROOTLP_SCALE_MIN_M`
     /// (既定 10000) 未満、または係数の幅 ([`coef_range`]) が `ENOMOTO_T_MIP_ROOTLP_SCALE_MIN_RANGE` (既定 1e4) 未満なら何もしない
     pub fn request_scale_once(&mut self) {

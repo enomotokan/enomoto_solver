@@ -3762,8 +3762,8 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     } else {
         lp_iter_cap
     };
-    // 試作 `ENOMOTO_MIP_ROOTLP_SCALE` (既定では使わない): 最初の LP も尺度を調整した写しで解く ([`TwoStageLp::request_scale_once`])
-    if env_str!("ENOMOTO_MIP_ROOTLP_SCALE").is_some_and(|v| v != "0") {
+    // `ENOMOTO_MIP_ROOTLP_SCALE` (既定で使う。`=0` で使わない): 最初の LP も尺度を調整した写しで解く ([`TwoStageLp::request_scale_once`])
+    if env_def!("ENOMOTO_MIP_ROOTLP_SCALE", "1").is_some() {
         lp.request_scale_once();
     }
     match lp.solve(&SolveLimits { deadline: first_deadline, iteration_limit: first_iters, ..Default::default() }) {
