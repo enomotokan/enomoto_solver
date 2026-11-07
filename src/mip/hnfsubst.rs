@@ -119,6 +119,30 @@ pub(crate) fn substitute(prob: &mut MipProblem, info: &[(usize, i64, i64)], int_
             }
         }
     }
+    // 置き換えた列を含む行で、列がすべて整数列 (尺度なし) で係数が整数なら最大公約数で割り、右辺を丸める
+    // (例: 2 x1 + 3 x2 = 12 は 6 y1 + 6 y2 = 6 -> y1 + y2 = 1)。`ENOMOTO_MIP_HNFSUBST=raw` ならしない
+    if env_str!("ENOMOTO_MIP_HNFSUBST") != Some("raw") {
+        let mut touched = vec![false; prob.m];
+        for s in &map {
+            for &(i, _) in &prob.cols[s.j] {
+                touched[i] = true;
+            }
+        }
+        let mut changed = false;
+        for i in (0..prob.m).filter(|&i| touched[i]) {
+            changed |= normalize_row(&mut prob.rows[i], &mut prob.row_lo[i], &mut prob.row_up[i], &prob.is_int, int_ok);
+        }
+        if changed {
+            for c in prob.cols.iter_mut() {
+                c.clear();
+            }
+            for (i, r) in prob.rows.iter().enumerate() {
+                for &(j, a) in r {
+                    prob.cols[j].push((i, a));
+                }
+            }
+        }
+    }
     // 含意 `x_j = v ⇒ x_k <= b` / `>= b` の k が置き換えた列なら y の値に直す
     for ib in prob.implied_bounds.iter_mut() {
         if let Some(&(r, g)) = sub.get(&(ib.2 as usize)) {
@@ -127,6 +151,38 @@ pub(crate) fn substitute(prob: &mut MipProblem, info: &[(usize, i64, i64)], int_
         }
     }
     map
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// 整数列 (尺度なし) だけで係数が整数の行を最大公約数で割り、右辺を整数に丸める (下限は切り上げ、上限は切り下げ)。
+/// 等式で右辺が割り切れない・丸めると下限 > 上限になるときは変えない (実行不能は解く側に任せる)。変えたら `true`
+fn normalize_row(row: &mut [(usize, f64)], lo: &mut f64, up: &mut f64, is_int: &[bool], int_ok: &[bool]) -> bool {
+    if row.is_empty() || !row.iter().all(|&(j, a)| is_int[j] && int_ok.get(j).copied().unwrap_or(false) && a.abs() < 1e9 && (a - a.round()).abs() <= 1e-9) {
+        return false;
+    }
+    let g = row.iter().fold(0u64, |g, &(_, a)| gcd(g, a.round().abs() as u64));
+    if g <= 1 {
+        return false;
+    }
+    let g = g as f64;
+    let rt = 1e-9;
+    let nl = if lo.is_finite() { (*lo / g - rt).ceil() } else { *lo };
+    let nu = if up.is_finite() { (*up / g + rt).floor() } else { *up };
+    if nl > nu {
+        return false;
+    }
+    if *lo == *up && ((*lo / g) - nl).abs() > 1e-9 {
+        return false;
+    }
+    for e in row.iter_mut() {
+        e.1 = (e.1 / g).round();
+    }
+    *lo = nl;
+    *up = nu;
+    true
 }
 
 #[cfg(test)]
@@ -144,6 +200,10 @@ mod tests {
         assert_eq!((map[0].r, map[0].g), (3.0, 3.0));
         assert_eq!((p.col_lo[0], p.col_up[0]), (0.0, 2.0));
         assert_eq!((p.col_lo[1], p.col_up[1]), (0.0, 5.0));
+        // 6 y1 + 6 y2 = 6 を 6 で割って y1 + y2 = 1
+        assert_eq!(p.rows[0], vec![(0, 1.0), (1, 1.0)]);
+        assert_eq!((p.row_lo[0], p.row_up[0]), (1.0, 1.0));
+        assert_eq!(p.cols[0], vec![(0, 1.0)]);
         // y = (1, 1) -> x = (6, 0) は 2*6 = 12 を満たす
         let y = vec![1.0, 0.0];
         assert!(p.is_feasible(&y, 1e-9));
