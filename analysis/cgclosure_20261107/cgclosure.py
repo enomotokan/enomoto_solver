@@ -89,6 +89,7 @@ class Model:
     def build_rows(self):
         rows, cols, vals, rhs, pure = [], [], [], [], []
         nscaled = nfail = 0
+        self.rname = []
         A, sig, d = self.A, self.sig, self.d
         r = 0
         for i in range(self.m0):
@@ -122,10 +123,12 @@ class Model:
                     av = np.round(av)
                     b = math.floor(b + 1e-9)  # 整数の行は右辺を切り下げる
                 rows += [r] * len(idx); cols += list(idx); vals += list(av); rhs.append(b); pure.append(pr)
+                self.rname.append(("+" if side > 0 else "-", int(i), float(sc)))
                 r += 1
         # 整数列の上限の行 x'_j ≤ W_j
         for j in np.where(self.isint & (self.W < INF) & (self.W > 0))[0]:
             rows.append(r); cols.append(j); vals.append(1.0); rhs.append(self.W[j]); pure.append(True); r += 1
+            self.rname.append(("ub", int(j), 1.0))
         self.T = sp.csr_matrix((vals, (rows, cols)), shape=(r, self.n))
         self.Tc = self.T.tocsc()
         self.b = np.array(rhs)
@@ -245,7 +248,7 @@ def separate(M, x, mode_k, tsep, threads=1):
         if viol < MINVIOL:
             continue
         nz = u[R] > 1e-9
-        cuts.append((coef, rhs, {"viol": viol, "nu": int(nz.sum()), "u": [float(t) for t in u[R][nz]]}))
+        cuts.append((coef, rhs, {"viol": viol, "nu": int(nz.sum()), "u": [float(t) for t in u[R][nz]], "rows": [int(t) for t in R[nz]]}))
     return cuts, info
 
 
@@ -301,6 +304,7 @@ def main():
     ap.add_argument("--name", default=None)
     ap.add_argument("--threads", type=int, default=1)
     ap.add_argument("--smax", type=float, default=None)
+    ap.add_argument("--dump", default=None, help="カットごとに乗数の行 (元の行の番号・名前・向き・乗数) と係数を書く jsonl")
     a = ap.parse_args()
     global SMAX
     if a.smax is not None:
@@ -315,7 +319,8 @@ def main():
     h.setOptionValue("output_flag", False)
     h.setOptionValue("threads", a.threads)
     h.readModel(a.mps)
-    names = list(h.getLp().col_names_)
+    lp0 = h.getLp()
+    names = list(lp0.col_names_)
     h.changeColsIntegrality(M.n, np.arange(M.n, dtype=np.int32), np.array([highspy.HighsVarType.kContinuous] * M.n))
     h.run()
     st = h.modelStatusToString(h.getModelStatus())
@@ -347,6 +352,12 @@ def main():
                 nbad += 1
                 print(f"BAD cut: viol at sol {float(coef @ xsol) - rhs:.3g} rhs {rhs:.6g} nnz {len(nz)} maxcoef {np.max(np.abs(coef)):.3g} u {ci['u'][:20]}", file=sys.stderr)
             h.addRow(-INF, rhs, len(nz), nz.astype(np.int32), coef[nz])
+            if a.dump:
+                rn = list(lp0.row_names_)
+                with open(a.dump, "a") as fd:
+                    fd.write(json.dumps({"round": r, "viol": ci["viol"], "rhs": rhs, "coef": {names[j]: float(coef[j]) for j in nz},
+                                         "rows": [[M.rname[t][0], (rn[M.rname[t][1]] if M.rname[t][0] != "ub" else names[M.rname[t][1]]), M.rname[t][2], uu]
+                                                  for t, uu in zip(ci["rows"], ci["u"])]}) + "\n")
             us.append(ci["u"])
             added += 1
         ncut += added
