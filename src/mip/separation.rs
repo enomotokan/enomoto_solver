@@ -4881,7 +4881,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if dbg_sep || env_str!("ENOMOTO_MIP_SNFMODK_LOG").is_some() {
                 eprintln!(
-                    "SEP snfmodk {:.3}s rows {} cols {} rank {} unit {} core {}x{} gaveup {} divs {} elems {} cuts_p {} cuts_new {} eff_p {:.4} eff_new {:.4} cands {}",
+                    "SEP snfmodk {:.3}s rows {} cols {} rank {} unit {} core {}x{} gaveup {} divs {} elems {} cuts_p {} cuts_new {} eff_p {:.4} eff_new {:.4} cands {} single {}",
                     t0.elapsed().as_secs_f64(),
                     st.rows,
                     st.cols,
@@ -4896,7 +4896,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     st.cuts_new,
                     st.best_eff_p,
                     st.best_eff_new,
-                    cands.len() - c0
+                    cands.len() - c0,
+                    st.cuts_single
                 );
             }
         }

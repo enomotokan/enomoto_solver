@@ -503,7 +503,9 @@ pub(crate) fn group_summary(gr: &Group) -> String {
         }
     }
     let s: Vec<String> = cnt.iter().map(|(q, c)| format!("{q}:{c}")).collect();
-    if s.is_empty() { "-".to_string() } else { s.join(",") }
+    // 台が行 1 本の生成元の数 (行の係数の最大公約数から出るだけの因子)
+    let single = gr.gens.iter().filter(|g| g.1.len() == 1).count();
+    if s.is_empty() { "-".to_string() } else { format!("{}#s{single}", s.join(",")) }
 }
 
 /// [`snfmodk_cg_cuts`] の記録
@@ -517,6 +519,8 @@ pub(crate) struct SnfStats {
     pub cuts_new: usize,
     pub best_eff_new: f64,
     pub best_eff_p: f64,
+    /// 作ったカットのうち、行 1 本だけの元 (行の係数の最大公約数で割るのと同じ) から出たもの
+    pub cuts_single: usize,
 }
 
 /// zerohalf と同じ行・列の選び方で、余裕 0 の行の連立 A_N の群から CG カットを作る。引数は [`super::zerohalf::zerohalf_cuts`] と同じ。
@@ -660,6 +664,7 @@ pub(crate) fn snfmodk_cg_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up
         if act > rhs_x + 1e-6 * (1.0 + rhs_x.abs()) {
             let eff = (act - rhs_x) / nrm;
             let newk = !matches!(el.order, 2 | 3 | 5 | 7);
+            st.cuts_single += (el.w.len() == 1) as usize;
             if newk {
                 st.cuts_new += 1;
                 st.best_eff_new = st.best_eff_new.max(eff);
