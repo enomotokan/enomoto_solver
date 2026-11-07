@@ -1,6 +1,12 @@
-Presolve: the problem is infeasible (0.00s)
-Result: optimal, objective -7.12, best bound -7.12, gap 0.00%, nodes 0 (0.01s)
-bad 11 of 400 time 11.4
-bad 13 of 400 time 11.1
-Result: optimal, objective -78.37836523, best bound -78.37836523, gap 0.00%, nodes 0 (0.07s)
-bad 0 of 300 time 24.1
+# 2026-11-07、上下限の丸めを 1e-6 の側に直した後
+## ENOMOTO_MIP_GCDFORCE=1 fuzz_gcd.py 1000 0
+bad 0 of 1000 time 3.5 {'infeasible': 531, 'optimal': 469}
+    515 MIP: presolve: GCDFORCE: 0 rows made equations, 0 redundant rows removed
+      1 MIP: presolve: GCDFORCE: infeasible
+## 既定 fuzz_gcd.py 1000 0
+bad 0 of 1000 time 5.3 {'infeasible': 531, 'optimal': 469}
+## ENOMOTO_MIP_GCDFORCE=1 mip_fuzz_vs_highs.py 300
+bad 0 of 300 time 5.7
+## fuzz_tiny.py 400 0 (GCDFORCE / 既定)
+ENOMOTO_MIP_GCDFORCE=1: 61 81 139 148 159 195 201 210 246 260 324 350 362 13 
+ENOMOTO_MIP_X=1: 61 81 139 148 159 195 201 210 246 260 324 350 362 13 
