@@ -5022,7 +5022,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if let Some(d) = sep_deadline(self.deadline) {
                     dl = dl.min(d);
                 }
-                let (groups, st) = super::modkvb::modkvb_cuts(&vars, lp_rows, n, mode, use_flow_cover(), dl);
+                let (groups, st) = super::modkvb::modkvb_cuts(&vars, lp_rows, n, p.m, mode, use_flow_cover(), dl);
                 let c0 = cands.len();
                 for g in groups {
                     let n0 = cands.len();

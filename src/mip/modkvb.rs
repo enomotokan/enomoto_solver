@@ -159,6 +159,9 @@ struct SysRow {
     /// (列, 整数の係数)
     ents: Vec<(usize, i64)>,
     rhs: i64,
+    /// 変数上下限で置き換えた項の数 (連続列, 一般整数列、診断用)
+    vbc: u32,
+    vbi: u32,
 }
 
 /// 簡単な擬似乱数 (xorshift)
@@ -310,8 +313,8 @@ fn gfk_solutions(sys: &[SysRow], k: u32, ncol: usize, max_sols: usize, max_comb:
 }
 
 /// 試作 `ENOMOTO_MIP_MODKVB` の分離。`vars` は [`super::separation`] の分離と同じ (列 0..n は構造変数、n..n+m は LP の行の
-/// 活動量で、境界は行の上下限)、`lp_rows` は LP の行。返り値は (解ごとのカット, 記録)
-pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize, mode: u8, flow_cover: bool, deadline: std::time::Instant) -> (Vec<Vec<RawCut>>, ModkStats) {
+/// 活動量で、境界は行の上下限)、`lp_rows` は LP の行 (最初の `m_orig` 本が元の行)。返り値は (解ごとのカット, 記録)
+pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize, m_orig: usize, mode: u8, flow_cover: bool, deadline: std::time::Instant) -> (Vec<Vec<RawCut>>, ModkStats) {
     const FT: f64 = 1e-6;
     let mut st = ModkStats::default();
     let m = lp_rows.len();
@@ -489,7 +492,7 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
         let irhs = (rhs * scale).round() as i64;
         nvc += c1;
         nvi += c2;
-        sys.push(SysRow { row: i, sg, scale, ents, rhs: irhs });
+        sys.push(SysRow { row: i, sg, scale, ents, rhs: irhs, vbc: c1 as u32, vbi: c2 as u32 });
     }
     st.sys = sys.len();
     st.vbsub = (nvc, nvi);
@@ -511,6 +514,7 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
     let max_agg_len = tunable!("ENOMOTO_T_MIP_MODKVB_MAXLEN", 0usize, usize);
     let max_agg_len = if max_agg_len > 0 { max_agg_len } else { 1000 + n / 10 };
     let iv = env_str!("ENOMOTO_MIP_MODKVB_IV").and_then(|v| v.parse::<u8>().ok()).unwrap_or(3);
+    let dump = env_str!("ENOMOTO_MIP_MODKVB_DUMP").is_some();
     let mut out: Vec<Vec<RawCut>> = Vec::new();
     let mut aggv = vec![0.0f64; n + m];
     let mut atouch: Vec<usize> = Vec::new();
@@ -561,6 +565,7 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
             }
             st.sol_rows += sol.len();
             let mut cs: Vec<RawCut> = Vec::new();
+            let (mut ncov, mut ngen, mut alen) = (0usize, 0usize, 0usize);
             let forms: &[bool] = if k == 2 { &[true] } else { &[false, true] };
             for &negform in forms {
                 // negform: 重み w / k で足して符号を反転、そうでなければ ((k-1) w mod k) / k
@@ -605,11 +610,29 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
                 if mode & 1 != 0 {
                     if let Some(c) = super::cuts::vb_cover_cut(vars, &base, 0.0) {
                         cs.push(c);
+                        ncov += 1;
                     }
                 }
                 if mode & 2 != 0 {
-                    cs.extend(super::cuts::with_intvub_mode(iv, || super::cuts::generate_cuts(vars, &base, 0.0, flow_cover, true)));
+                    let g = super::cuts::with_intvub_mode(iv, || super::cuts::generate_cuts(vars, &base, 0.0, flow_cover, true));
+                    ngen += g.len();
+                    cs.extend(g);
                 }
+                alen = alen.max(base.len());
+            }
+            // 診断 (`ENOMOTO_MIP_MODKVB_DUMP`): カットの出た解の形 (k、行の数、そのうち LP のカットの行、変数上下限で置き換えた
+            // 項のある行・項の数 (連続列, 一般整数列)、cover・generate_cuts のカットの数、集約行の長さ)
+            if dump && !cs.is_empty() {
+                let rows: Vec<&SysRow> = sol.iter().map(|&(q, _)| &sys[q]).collect();
+                eprintln!(
+                    "MODKVB_SOL k {k} rows {} cutrows {} rows_vbc {} rows_vbi {} vbc {} vbi {} cover {ncov} gen {ngen} agglen {alen}",
+                    rows.len(),
+                    rows.iter().filter(|r| r.row >= m_orig).count(),
+                    rows.iter().filter(|r| r.vbc > 0).count(),
+                    rows.iter().filter(|r| r.vbi > 0).count(),
+                    rows.iter().map(|r| r.vbc).sum::<u32>(),
+                    rows.iter().map(|r| r.vbi).sum::<u32>()
+                );
             }
             if !cs.is_empty() {
                 out.push(cs);
@@ -646,7 +669,7 @@ mod tests {
     #[test]
     fn gfk_finds_pair() {
         // x0 の係数が逆の 2 本: x0 <= 3, -x0 <= -4 → mod 2 では右辺 3 - 4 = -1 で奇数
-        let sys = vec![SysRow { row: 0, sg: 1.0, scale: 1.0, ents: vec![(0, 1)], rhs: 3 }, SysRow { row: 1, sg: 1.0, scale: 1.0, ents: vec![(0, -1)], rhs: -4 }];
+        let sys = vec![SysRow { row: 0, sg: 1.0, scale: 1.0, ents: vec![(0, 1)], rhs: 3, vbc: 0, vbi: 0 }, SysRow { row: 1, sg: 1.0, scale: 1.0, ents: vec![(0, -1)], rhs: -4, vbc: 0, vbi: 0 }];
         let mut to = false;
         let far = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let s = gfk_solutions(&sys, 2, 1, 10, 10, 1, far, &mut to);
@@ -796,7 +819,7 @@ mod tests {
                 ex.push(rows[i].iter().map(|&(j, c)| c * x[j]).sum());
             }
             let vars = CutVars { lo: &elo, up: &eup, is_int: &eint, x: &ex, vb: Some(&vb) };
-            let (groups, _st) = modkvb_cuts(&vars, &rows, n, 3, true, far);
+            let (groups, _st) = modkvb_cuts(&vars, &rows, n, rows.len(), 3, true, far);
             for cut in groups.into_iter().flatten() {
                 ncuts += 1;
                 if cut.coefs.iter().any(|&(k, _)| k >= n) {
