@@ -24,7 +24,20 @@ def mk_cands(out):
             r = json.loads(l)
             if r["cfg"] == "mk": c[r["problem"]] = r.get("sep", {}).get("cands", 0)
     return c
+def side_jobs():
+    """side_jobs.txt の行 (シェルのコマンド) を 1 つずつ回す (計測の合間の割り込み。済んだ行は side_done.txt へ)"""
+    f = D / "side_jobs.txt"
+    while f.exists():
+        lines = [l for l in f.read_text().splitlines() if l.strip()]
+        if not lines:
+            return
+        cmd = lines[0]
+        f.write_text("\n".join(lines[1:]) + ("\n" if lines[1:] else ""))
+        subprocess.run(cmd, shell=True, cwd=D)
+        with open(D / "side_done.txt", "a") as g:
+            g.write(cmd + "\n")
 def run(p, cfg, tl, out):
+    side_jobs()
     if (p, cfg) in done(out):
         return
     if cfg == "highs":
@@ -47,3 +60,4 @@ mc = mk_cands("rootmitt.jsonl")
 for p in MITT:
     if mc.get(p, 0) > 0:
         run(p, "highs", 120, "rootmitt.jsonl")
+side_jobs()
