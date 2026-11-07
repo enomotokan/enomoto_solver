@@ -1469,7 +1469,9 @@ pub(crate) fn probe_basis_diag_on() -> bool {
 /// `s`: 列だけの基底から作った根の基底が特異なら渡さない、`c`: 条件 ([`probe_basis_guard_cond`]) に当たれば渡さない、
 /// `r`: 渡す場合も基底なしの内点法 + クロスオーバーと同時に解く、`x`: warm start の反復が見込み (前処理の最初の LP の反復の
 /// `ENOMOTO_T_MIP_PROBE_BASIS_GUARD_X` 倍) を超えたら基底を捨てて基底なし (同時実行) で解き直す、`f`: 行が変わっていたら行の中身で
-/// 照らし合わせて基底を作り直す ([`root_basis_rebuild`]、`ENOMOTO_MIP_ROOT_BASIS_FIX` の根 (root_probe) の部分だけ)
+/// 照らし合わせて基底を作り直す ([`root_basis_rebuild`]、`ENOMOTO_MIP_ROOT_BASIS_FIX` の根 (root_probe) の部分だけ)、
+/// (改良 11-08) `g`: 列だけの基底の足りない分を [`probe_cols_fill`] の順で論理変数で埋める、`h`: `g` + 根の LP の間だけ特異な基底列を
+/// スラックに替える修復 (`ENOMOTO_SIMPLEX_WARM_SING_REPAIR` と同じ)、`H`: 既定の埋め方 + その修復
 pub(crate) fn probe_basis_guard_has(c: char) -> bool {
     env_str!("ENOMOTO_MIP_PROBE_BASIS_GUARD").is_some_and(|v| v.contains(c))
 }
@@ -1521,6 +1523,58 @@ pub(crate) struct RootBasisFixStats {
 /// 4. 疎な LU ([`crate::simplex::lu::rank_deficient_remainder`]) でピボットの取れない列を、残りの行の論理変数に差し替える
 ///    (数回まで)。
 /// 列の数が違えば `None`
+/// 試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` の `g` (analysis/probe_basis_20261106.md「改良 (11-08)」): 前処理の LP の列だけの基底 `col` に、
+/// 足りない基底を論理変数で埋める。`set_basis` の修復 (行 0, 1, 2, ... の順) の代わりに、(a) 行の中身 ([`row_key`]、右辺は見ない) で
+/// 前処理の LP の行と照らし合わせ、そこで論理変数が基底だった行、(b) 照らし合わせられない行 (新しい行)、(c) 前処理の LP の解 `x` での
+/// 行の活動が境界から遠い順 (余裕の相対値の大きい順) の行、の順に埋める。基底の構造列はそのまま (多すぎる分は削らない: その場合は
+/// `set_basis` の修復に任せる)。返すのは (行の状態つきの基底, (a) の数, (b) の数, (c) の数)
+pub(crate) fn probe_cols_fill<L: MipLp>(lp: &L, n: usize, col: &[super::lp::VarStatus], rows: &[(Vec<(usize, f64)>, super::lp::VarStatus)], x: &[f64]) -> Option<(super::lp::Basis, [usize; 3])> {
+    use super::lp::VarStatus;
+    if col.len() != n || x.len() != n {
+        return None;
+    }
+    let m = lp.num_rows();
+    let kb = col.iter().filter(|v| **v == VarStatus::Basic).count();
+    let mut map: std::collections::HashMap<Vec<(usize, i64)>, VarStatus> = std::collections::HashMap::with_capacity(rows.len());
+    for (r, st) in rows {
+        if let Some((k, _)) = row_key(r) {
+            map.insert(k, *st);
+        }
+    }
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    let mut c: Vec<(f64, usize)> = Vec::new();
+    for i in 0..m {
+        let r = lp.row(i);
+        match row_key(&r).and_then(|(k, _)| map.get(&k).copied()) {
+            Some(VarStatus::Basic) => a.push(i),
+            Some(_) => {
+                let act: f64 = r.iter().map(|&(j, v)| if j < n { v * x[j] } else { 0.0 }).sum();
+                let (lo, up) = lp.row_bounds(i);
+                let gap = (act - lo).min(up - act).max(0.0) / (1.0 + act.abs());
+                c.push((gap, i));
+            }
+            None => b.push(i),
+        }
+    }
+    c.sort_by(|p, q| q.0.total_cmp(&p.0).then(p.1.cmp(&q.1)));
+    let need = m.saturating_sub(kb);
+    let mut row = vec![VarStatus::Lower; m];
+    let mut cnt = [0usize; 3];
+    let mut k = 0;
+    for (t, list) in [a, b, c.into_iter().map(|p| p.1).collect()].into_iter().enumerate() {
+        for i in list {
+            if k >= need {
+                break;
+            }
+            row[i] = VarStatus::Basic;
+            cnt[t] += 1;
+            k += 1;
+        }
+    }
+    Some((super::lp::Basis { col: col.to_vec(), row }, cnt))
+}
+
 pub(crate) fn root_basis_rebuild<L: MipLp>(lp: &L, n: usize, col: &[super::lp::VarStatus], rows: &[(Vec<(usize, f64)>, super::lp::VarStatus)], x: &[f64]) -> Option<(super::lp::Basis, RootBasisFixStats)> {
     use super::lp::VarStatus;
     if col.len() != n || x.len() != n {
@@ -6378,6 +6432,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let col = PROBE_BASIS_INFO.with(|s| s.borrow().as_ref().map(|i| i.basis.col.clone())).filter(|c| c.len() == self.p.n);
         let run = |lp: &mut L, lim: SolveLimits, off: f64| {
+            // 既定の根の LP と同じく尺度を調整した写しで解く (`ENOMOTO_MIP_ROOTLP_SCALE`、11-07 から既定)
+            if env_def!("ENOMOTO_MIP_ROOTLP_SCALE", "1").is_some() {
+                lp.request_scale_once();
+            }
             let t0 = Instant::now();
             let it0 = lp.total_iterations();
             let st = lp.solve(&lim);
@@ -6396,7 +6454,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut fix = "null".to_string();
         // `f`: 行の中身で照らし合わせて作り直した基底 ([`root_basis_rebuild`]、`ENOMOTO_MIP_ROOT_BASIS_FIX` と同じ) からも解く
         if let (Some(col), true) = (&col, mode.contains('f')) {
-            let rx = PROBE_BASIS_INFO.with(|s| s.borrow_mut().as_mut().and_then(|i| i.rows_x.take()));
+            let rx = PROBE_BASIS_INFO.with(|s| s.borrow().as_ref().and_then(|i| i.rows_x.clone()));
             if let Some((rows, x)) = rx {
                 let mut w = self.lp.clone();
                 let t0 = Instant::now();
@@ -6430,6 +6488,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 warm = run(&mut w, SolveLimits { deadline: dl(self), ..Default::default() }, self.p.offset);
             }
         }
+        // `g`・`h`・`H` (改良 11-08): 列だけの基底の補い方を変えて解く。`g` は [`probe_cols_fill`]、`h` は `g` + 特異な基底列だけを
+        // スラックに替える修復 ([`crate::simplex::slope_intercept_dual::SING_REPAIR_GLOBAL`])、`H` は既定の補い方 + その修復
+        let mut fills = Vec::new();
+        if let Some(col) = &col {
+            let rx = PROBE_BASIS_INFO.with(|s| s.borrow().as_ref().and_then(|i| i.rows_x.clone()));
+            for (tag, use_fill, repair) in [('g', true, false), ('h', true, true), ('H', false, true)] {
+                if !mode.contains(tag) {
+                    continue;
+                }
+                let mut w = self.lp.clone();
+                let mut cnt = [0usize; 3];
+                let col_only = super::lp::Basis { col: col.clone(), row: Vec::new() };
+                if use_fill {
+                    let Some((rx_rows, x)) = &rx else { continue };
+                    let Some((nb, c)) = probe_cols_fill(&w, self.p.n, col, rx_rows, x) else { continue };
+                    cnt = c;
+                    w.set_basis(&nb);
+                } else {
+                    w.set_basis(&col_only);
+                }
+                let sing = w.basis_start_info(col);
+                crate::simplex::slope_intercept_dual::SING_REPAIR_GLOBAL.store(repair, std::sync::atomic::Ordering::Relaxed);
+                let r = run(&mut w, SolveLimits { deadline: dl(self), ..Default::default() }, self.p.offset);
+                crate::simplex::slope_intercept_dual::SING_REPAIR_GLOBAL.store(false, std::sync::atomic::Ordering::Relaxed);
+                fills.push(format!(
+                    "\"{tag}\":{{\"fill\":[{},{},{}],\"singular\":{},\"pinf_cnt\":{},\"res\":{r}}}",
+                    cnt[0],
+                    cnt[1],
+                    cnt[2],
+                    sing.is_none(),
+                    sing.map_or("null".into(), |p| p.0.to_string())
+                ));
+            }
+        }
+        let fills = if fills.is_empty() { String::new() } else { format!(",{}", fills.join(",")) };
         // `d`: 既定どおり (根の LP に置いた基底のまま。`kind` が `rows` のときだけ。`cols` なら上の列だけと同じ、`none` なら基底なしと同じ)
         let mut dflt = "null".to_string();
         if has('d') && kind == "rows" {
@@ -6444,7 +6537,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             c.drop_basis();
             cold = run(&mut c, SolveLimits { deadline: dl(self), ..Default::default() }, self.p.offset);
         }
-        eprintln!("PROBE_BASIS {{\"kind\":\"{kind}\",\"feat\":{feat},\"warm\":{warm},\"dflt\":{dflt},\"cold\":{cold},\"fix\":{fix}}}");
+        eprintln!("PROBE_BASIS {{\"kind\":\"{kind}\",\"feat\":{feat},\"warm\":{warm},\"dflt\":{dflt},\"cold\":{cold},\"fix\":{fix}{fills}}}");
     }
 
     fn rootlp_simplex_diag(&mut self) {
@@ -7227,6 +7320,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         root_warm_dse_once = true;
                     }
                     if cols_only {
+                        // 試作 `g`・`h` (改良 11-08): 足りない基底を [`probe_cols_fill`] の順で埋めた基底に置き換える
+                        if probe_basis_guard_has('g') || probe_basis_guard_has('h') {
+                            let rx = PROBE_BASIS_INFO.with(|s| s.borrow().as_ref().and_then(|i| i.rows_x.clone()));
+                            if let Some((rows, x)) = rx {
+                                if let Some((nb, cnt)) = probe_cols_fill(&self.lp, self.p.n, &b.col, &rows, &x) {
+                                    if self.params.verbose {
+                                        eprintln!("MIP: probe basis guard: columns-only basis filled by the probe rows (basic {}, new {}, loose {})", cnt[0], cnt[1], cnt[2]);
+                                    }
+                                    self.lp.set_basis(&nb);
+                                }
+                            }
+                        }
                         probe_cols_only_warm = self.probe_basis_guard_check(&b.col);
                     }
                 }
@@ -7428,11 +7533,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if matches!(root_kind, Some(3) | Some(4)) && env_def!("ENOMOTO_MIP_ROOTLP_SCALE", "1").is_some() {
             self.lp.request_scale_once();
         }
+        // 試作 `h`・`H` (改良 11-08): 列だけの基底からの根の LP の間だけ、特異な基底列をスラックに替える修復を有効にする
+        let sing_repair = probe_cols_only_warm && root_kind == Some(4) && (probe_basis_guard_has('h') || probe_basis_guard_has('H'));
+        if sing_repair {
+            crate::simplex::slope_intercept_dual::SING_REPAIR_GLOBAL.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut root_st = if probe_cols_only_warm && root_kind == Some(4) && (probe_basis_guard_has('r') || probe_basis_guard_has('x')) {
             self.probe_basis_guard_solve()
         } else {
             self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() })
         };
+        if sing_repair {
+            crate::simplex::slope_intercept_dual::SING_REPAIR_GLOBAL.store(false, std::sync::atomic::Ordering::Relaxed);
+            if self.params.verbose {
+                eprintln!("MIP: probe basis guard: root LP with the singular-basis repair: {root_st:?} ({:.2}s)", t_root_lp.elapsed().as_secs_f64());
+            }
+        }
         let mut both_loser = if both_on { crate::simplex::mip_lp::take_both_loser() } else { None };
         if self.params.verbose {
             if let Some(l) = &both_loser {

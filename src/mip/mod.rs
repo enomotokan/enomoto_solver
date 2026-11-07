@@ -4068,7 +4068,8 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     if solver::probe_basis_diag_on() || env_str!("ENOMOTO_MIP_PROBE_BASIS_GUARD").is_some() {
         let row_hashes = (0..prob.m).map(|i| solver::row_hash(&prob.rows[i], prob.row_lo[i], prob.row_up[i])).collect();
         let info = solver::ProbeBasisInfo { basis: lp.basis(), row_hashes, m: prob.m, nnz: prob.rows.iter().map(|r| r.len()).sum(), iters: root_iters, secs: root_secs, passed, n_fixed, rows_x: None };
-        let info = if env_str!("ENOMOTO_MIP_PROBE_BASIS_DIAG").is_some_and(|v| v.contains('f')) && lp.basis().row.len() == prob.m {
+        let want_rows = env_str!("ENOMOTO_MIP_PROBE_BASIS_DIAG").is_some_and(|v| v.contains(['f', 'g', 'h'])) || solver::probe_basis_guard_has('g') || solver::probe_basis_guard_has('h');
+        let info = if want_rows && lp.basis().row.len() == prob.m {
             let b = lp.basis();
             solver::ProbeBasisInfo { rows_x: Some((prob.rows.iter().cloned().zip(b.row.iter().copied()).collect(), lp.col_values())), ..info }
         } else {

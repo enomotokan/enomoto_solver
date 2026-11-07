@@ -5,7 +5,7 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 name = sys.argv[1]
 rows = [json.loads(l) for l in open(D / f"{name}.jsonl")]
-if name.startswith("heavy"):
+if not name.startswith("bench"):
     print("| 問題 | 設定 | 回 | 根の LP 秒 (反復) | 根の終わり 秒 | 根の下界 (カットの後) | 300 秒の下界 | 解 | 試作のログ |")
     print("|---|---|---:|---|---:|---|---|---|---|")
     for r in rows:

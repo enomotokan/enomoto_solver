@@ -1732,9 +1732,16 @@ pub(super) fn solve_slope_intercept_dual_from_basis(std: &StdForm, opts: &crate:
 
 /// 試作 `ENOMOTO_SIMPLEX_WARM_SING_REPAIR=1` (既定オフ): warm start で渡した基底の LU が特異なら、特異の原因の基底列だけを
 /// スラックに差し替えて残りの基底で warm start する ([`warm_start_basis`])。オフなら今まで通り全スラック基底から解く。
+/// 試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` の `h`・`H` (analysis/probe_basis_20261106.md「改良 (11-08)」): MIP の根の LP の求解の間だけ立て、
+/// [`warm_sing_repair`] を有効にする (特異な基底列だけをスラックに替えて warm start する)。全スレッドに効く
+pub(crate) static SING_REPAIR_GLOBAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn warm_sing_repair() -> bool {
     if let Some(v) = SING_REPAIR_OVERRIDE.with(|o| o.get()) {
         return v;
+    }
+    if SING_REPAIR_GLOBAL.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
     }
     env_str!("ENOMOTO_SIMPLEX_WARM_SING_REPAIR").is_some_and(|v| v != "0")
 }
