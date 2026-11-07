@@ -2194,7 +2194,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // `ENOMOTO_MIP_SUBFIX` の `r` (試作、[`super::heur_subfix`]): 外側の根の RENS を HiGHS の形のダイブ (目標の固定率で止め、
         // 根で実行不能なら目標を半分にして深さの半分まで戻ってやり直す) にする。やり直しに結果が要るので、サブ MIP は主のスレッドで解く
-        if super::heur_subfix::on('r') && self.nodes <= 1 && !self.params.submip {
+        // `q`: 暫定解があるときだけ (暫定解がなければ下の既定の RENS)
+        if super::heur_subfix::on('r') && self.nodes <= 1 && !self.params.submip && (!super::heur_subfix::on('q') || self.incumbent.is_some()) {
             self.subfix_note_root_x(_x);
             let keep = self.parallel_submips;
             // `p`: 1 回目は並列のサブ MIP のまま出す (やり直しは受け取りの後に主で、[`Self::subfix_par_retry`])
@@ -2202,6 +2203,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.rens_node_limited = false;
             let r = self.subfix_dive(None, "RENS");
             self.parallel_submips = keep;
+            // `f`: ダイブが解を出さなければ既定の RENS も 1 回 (並列の根なら並列のサブ MIP)
+            if !r && super::heur_subfix::on('f') && !self.time_up() {
+                if self.params.verbose {
+                    eprintln!("MIP:   SUBFIX RENS found nothing; running the default RENS as well");
+                }
+                return self.rens_old(_x);
+            }
             return r;
         }
         if env_str!("ENOMOTO_MIP_RENS_DIVE").is_none() {

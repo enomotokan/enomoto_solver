@@ -14,6 +14,11 @@
 //! - `p`: 根の RENS の 1 回目は既定どおり並列のサブ MIP (別スレッド) で出し、受け取ったときに根 (1 ノード以下) で実行不能と分かったら、
 //!   根のヒューリスティクスの並列のサブ MIP を受け取った後 ([`Solver::subfix_par_retry`]) に、目標を「達した固定率 × 0.5」にしたダイブを
 //!   主のスレッドで解き直す (深さの半分まで戻る代わりに、今の LP 解から新しくダイブする)。
+//! - `q` (保険、11-08): `r` を暫定解があるときだけにする (暫定解がなければ既定の RENS。`r` だけだと、暫定解のない根の 2 回目の RENS
+//!   (`RENS (LP before cuts)`) もダイブにしてしまう)。根で実行不能のやり直しは、目標が `ENOMOTO_T_MIP_SUBFIX_RETRY_MIN` (0.2) 未満になるならしない。
+//!   momentum1 (cand1107) では暫定解のない根で 0.58 → 0.29 → 0.15 → 0.09 とやり直し、最後のサブ MIP (自由な整数列 1039/1203) が 130 秒の時間切れで根を
+//!   ふさぎ、既定で解を出す shift-and-propagate (85 秒) が回らなかった
+//! - `f` (保険、11-08): 根の RENS のダイブが解を出さなければ、既定の RENS (LP で整数値の列を全部固定、並列のサブ MIP) も 1 回回す
 //!
 //! 目標の固定率は HiGHS の `determineTargetFixingRate` (初め 0.6、実行不能だった固定率の平均 × 0.9 を上の端、解を見つけた固定率の平均の
 //! 0.9〜1.1 倍を含む範囲の乱数)。記録は外側の求解の全スレッドで共通 ([`STATS`]、求解の始めに [`reset`])。
@@ -390,7 +395,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     found = true;
                     break;
                 }
-                Some((MipStatus::Infeasible, false)) if nodes <= 1 && tries < max_tries && !self.time_up() => {
+                // `q`: 目標が `ENOMOTO_T_MIP_SUBFIX_RETRY_MIN` (0.2) 未満になるやり直しはしない
+                Some((MipStatus::Infeasible, false)) if nodes <= 1 && tries < max_tries && !self.time_up() && !(on('q') && 0.5 * fr < tunable!("ENOMOTO_T_MIP_SUBFIX_RETRY_MIN", 0.2, f64)) => {
                     // 根で実行不能: 目標を達した固定率の半分にして、深さの半分まで戻ってやり直す
                     let td = depth / 2;
                     if td <= 1 {
