@@ -7,7 +7,7 @@
 //!   値が 1 つに決まる行は等式に、冗長な行は消し、実行不能なら実行不能を返す。変わった行があれば前処理をかけ直す。
 //!
 //! 行の活動値は `c0 + Σ a_j x_j` (`c0` は固定された列の寄与) で、固定されていない列がすべて整数列、係数が整数 (|a| < 1e9) のとき、
-//! 可変部は `g` (係数の最大公約数) の倍数。整数列の上下限は整数に丸めて (`ceil(lo)`, `floor(up)`) 活動値の範囲を数えるので、
+//! 可変部は `g` (係数の最大公約数) の倍数。整数列の上下限は整数に丸めて (`ceil(lo - 1e-6)`, `floor(up + 1e-6)`) 活動値の範囲を数えるので、
 //! `mn`・`mx` も `g` の倍数 (有限のとき)。
 
 /// 判定の分類: 0 値が 1 つに決まる (強制でない)、1 冗長、2 実行不能、3 強制 (値が活動値の端で 1 つに決まる)
@@ -35,7 +35,10 @@ pub(crate) fn int_row(row: &[(usize, f64)], col_lo: &[f64], col_up: &[f64], is_i
         nfree += 1;
         let ar = a.round();
         g = gcd(g, ar.abs() as u64);
-        let (lo, up) = ((col_lo[j] - 1e-9).ceil(), (col_up[j] + 1e-9).floor());
+        // 上下限の整数への丸めはソルバーの整数の許容誤差 (1e-6) の側にする (範囲を広げる側で、判定は保守的になる)。1e-9 で丸めると、
+        // 前処理が `z <= 0.999999` と残した 0-1 列を z = 0 と見て `x + y + 1e6 z <= 999959` を冗長として消し、許容誤差の内で z = 1 の
+        // 解が元の問題の行を破った (supportcase33、GCDFORCE の 7 回中 1 回で解が後処理で捨てられた)
+        let (lo, up) = ((col_lo[j] - 1e-6).ceil(), (col_up[j] + 1e-6).floor());
         if lo > up {
             // 整数の値を持たない列: 前処理の別の手順が実行不能として扱う
             return None;
@@ -147,7 +150,13 @@ pub(crate) fn apply(rows: &mut Vec<Vec<(usize, f64)>>, row_lo: &mut Vec<f64>, ro
         let (nl, nu) = round_side(row_lo[i] - c0, row_up[i] - c0, g);
         match classify(nl, nu, mn, mx) {
             Some(2) => return None,
-            Some(1) => keep[i] = false,
+            Some(1) => {
+                keep[i] = false;
+                if env_str!("ENOMOTO_MIP_GCDFORCE_DEBUG").is_some() {
+                    let sa: f64 = rows[i].iter().map(|e| e.1.abs()).sum();
+                    eprintln!("GCDFORCE_DEBUG: redundant row {i} len {} g {g} c0 {c0} [{nl}, {nu}] act [{mn}, {mx}] sum|a| {sa}", rows[i].len());
+                }
+            }
             Some(_) => {
                 // 値が 1 つ: 丸めた幅と活動値の範囲の共通部分の点 (g の倍数)
                 let v = nl.max(mn);
