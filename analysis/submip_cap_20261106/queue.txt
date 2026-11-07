@@ -1,8 +1,20 @@
-python run1.py ours neos-873061 JT 1 300 ENOMOTO_MIP_SUBCAP=JT
-python run1.py ours neos-873061 BT 1 300 ENOMOTO_MIP_SUBCAP=BT
-python run1.py ours cod105 fixh_b 1 300 ENOMOTO_MIP_SUBFIX=rtch
 python run1.py ours cod105 fixhJT 1 300 ENOMOTO_MIP_SUBFIX=rtch ENOMOTO_MIP_SUBCAP=JT
 python run1.py ours cod105 fixhBT 1 300 ENOMOTO_MIP_SUBFIX=rtch ENOMOTO_MIP_SUBCAP=BT
 python run1.py ours thor50dday fixh_b 1 300 ENOMOTO_MIP_SUBFIX=rtch
 python run1.py ours thor50dday fixhJT 1 300 ENOMOTO_MIP_SUBFIX=rtch ENOMOTO_MIP_SUBCAP=JT
 python run1.py ours thor50dday fixhBT 1 300 ENOMOTO_MIP_SUBFIX=rtch ENOMOTO_MIP_SUBCAP=BT
+python run1.py ours thor50dday def_b600 1 600
+python run1.py ours thor50dday JT600 1 600 ENOMOTO_MIP_SUBCAP=JT
+python run1.py ours trento1 def_b600 1 600
+python run1.py ours trento1 JT600 1 600 ENOMOTO_MIP_SUBCAP=JT
+python run1.py ours neos-873061 def_b600 1 600
+python run1.py ours neos-873061 JT600 1 600 ENOMOTO_MIP_SUBCAP=JT
+python run1.py ours thor50dday def_b600 2 600
+python run1.py ours thor50dday JT600 2 600 ENOMOTO_MIP_SUBCAP=JT
+python run1.py ours trento1 def_b600 2 600
+python run1.py ours trento1 JT600 2 600 ENOMOTO_MIP_SUBCAP=JT
+python run1.py ours neos-873061 def_b600 2 600
+python run1.py ours neos-873061 JT600 2 600 ENOMOTO_MIP_SUBCAP=JT
+BENCH58_OUT=bench58_b.jsonl python bench58.py def,JT 0
+BENCH58_OUT=bench58_b.jsonl python bench58.py def,JT 1
+./fuzz/run_fuzz.sh

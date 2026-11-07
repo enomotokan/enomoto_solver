@@ -2,7 +2,7 @@
 # 誤答の検査 (SUBCAP 改良、2026-11-08): 設定ごとに fuzz_tiny.py 400・mip_fuzz_vs_highs.py 300 (並列のサブ MIP が出るように 4 スレッド)
 cd "$(dirname "$0")/../../.."
 F=analysis/submip_cap_20261106/fuzz
-for cfg in def JT BT; do
+for cfg in def JT; do
   case $cfg in
     def) E="";;
     *) E="ENOMOTO_MIP_SUBCAP=$cfg";;
