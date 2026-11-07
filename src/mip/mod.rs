@@ -3151,12 +3151,13 @@ fn hnf_presolve(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::Postso
 
 /// 試作 `ENOMOTO_MIP_HNFSUBST`: [`hnf_presolve`] の後の問題を解析し直し、合同式 `x_j ≡ r_j (mod g_j)` (g_j > 1) の出た一般整数列を
 /// `x_j = r_j + g_j y_j` に置き換える ([`hnfsubst::substitute`])。後処理の手順 (自己参照の代入) を最後に足す。
-/// 前処理の中で置いた前処理後の空間の値 (早めの FJ の解) は y に写し、根の基底は捨てる (列の値の意味が変わる)。
+/// 前処理の中で置いた前処理後の空間の値 (早めの FJ の解) は y に写す。根の基底は列の状態をそのまま使う (下の注)。
 fn hnf_subst(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling) -> (Option<Presolved>, Vec<hnfsubst::Subst>) {
     let int_ok: Vec<bool> = (0..prob.n).map(|j| scaling.d.get(j).is_none_or(|&d| d == 1.0)).collect();
     let res = hnf::analyze(&prob, &int_ok);
+    let fp0 = rows_fingerprint(&prob.rows);
     let map = if res.stats.infeasible { Vec::new() } else { hnfsubst::substitute(&mut prob, &res.info, &int_ok) };
-    if env_str!("ENOMOTO_MIP_HNFPRE_QUIET").is_none() {
+    if env_str!("ENOMOTO_MIP_HNFSUBST_QUIET").is_none() {
         let gens = res.info.iter().filter(|&&(j, _, g)| g > 1 && prob.col_lo[j] < prob.col_up[j]).count();
         eprintln!("HNFSUBST: substituted {} of {gens} congruence columns (max modulus {}) ({:.3}s)", map.len(), map.iter().map(|s| s.g).fold(0.0, f64::max), res.stats.secs);
     }
@@ -3169,9 +3170,18 @@ fn hnf_subst(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::Postsolve
             hnfsubst::forward(&map, x);
         }
     });
-    solver::ROOT_BASIS.with(|s| *s.borrow_mut() = None);
+    // 前処理の LP による固定の基底 (列の状態) はそのまま使える (有限の上下限は合同式に合うよう詰めてあるので、x の上下限の
+    // 状態は y の上下限の状態。基本列は基本列)。行は係数・右辺が変わるだけで並びは同じなので、行の指紋が置き換えの前の行と
+    // 合っていたなら置き換えの後の行の指紋にする (合わなくなると行の状態が使われず、根の LP が遠い基底から解き直す: snp-02-004-104
+    // で根の LP が 6 秒で終わらなかった)。DSE の重み・行の中身の写しは捨てる
+    let fp1 = rows_fingerprint(&prob.rows);
+    solver::ROOT_BASIS_ROWS.with(|s| {
+        let mut s = s.borrow_mut();
+        if *s == Some(fp0) {
+            *s = Some(fp1);
+        }
+    });
     solver::ROOT_DSE.with(|s| *s.borrow_mut() = None);
-    solver::ROOT_BASIS_ROWS.with(|s| *s.borrow_mut() = None);
     solver::ROOT_BASIS_SAVED.with(|s| *s.borrow_mut() = None);
     solver::PROBE_BASIS_INFO.with(|s| *s.borrow_mut() = None);
     solver::RESTART_BASIS.with(|s| *s.borrow_mut() = None);
