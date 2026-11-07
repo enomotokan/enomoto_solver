@@ -248,6 +248,6 @@ bench に使う環境変数: 既定 (def) = なし、試作 = `ENOMOTO_MIP_PROBE
 
 ## 8. 確かめ
 
-- `cargo test --release --lib`: (後で書く)
+- `cargo test --release --lib`: 368 通過・0 失敗・19 無視 (2026-11-07、ブランチの先頭に試作を載せた状態)
 - 既定の動き: 新しいつまみはどれも環境変数がないと何もしない (`PROBE_BASIS_INFO` も置かない)。58 問の既定の根の LP の反復は
   `momentum1_rootlp_20261106.md` の既定と同じ問題で一致 (physiciansched6-2 6074 反復など)。
