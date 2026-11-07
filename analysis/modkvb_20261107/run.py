@@ -14,6 +14,8 @@ CFGS = {
     "mk": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_MODKVB_LOG": "1"},
     "mkc": {"ENOMOTO_MIP_MODKVB": "cover", "ENOMOTO_MIP_MODKVB_LOG": "1"},
     "mkg": {"ENOMOTO_MIP_MODKVB": "gen", "ENOMOTO_MIP_MODKVB_LOG": "1"},
+    # 候補の数の上限つき (wheel は /tmp/pyw4、上限の入ったもの)
+    "mk50": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_MODKVB_LOG": "1", "ENOMOTO_T_MIP_MODKVB_MAXCANDS": "50", "PYTHONPATH": "/tmp/pyw4"},
 }
 cfg, p, tl, rep, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 root = len(sys.argv) > 6 and sys.argv[6] == "root"
