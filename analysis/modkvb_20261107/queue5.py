@@ -50,9 +50,13 @@ for rep in [1, 2]:
     for p in ["comp21-2idx", "mushroom-best"]:
         for cfg in ["mk50z", "mk50cg", "mk50cgb"]:
             run(p, cfg, 90, rep, "rootmitt.jsonl", True)
+# zerohalf と平行な候補を出さない形 (根と 60 秒、種 1・2)
 for rep in [1, 2]:
     for p in PROBS:
-        for cfg in ["nozh6", "mk50nozh6"]:
+        run(p, "mk50skz", 60, rep, "root58.jsonl", True)
+for rep in [1, 2]:
+    for p in PROBS:
+        for cfg in ["nozh6", "mk50nozh6", "mk50skz"]:
             run(p, cfg, 60, rep, "b58.jsonl")
 for p in MITT:
     for cfg in ["def6", "mk50z"]:
