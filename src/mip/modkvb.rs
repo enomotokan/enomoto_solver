@@ -316,6 +316,11 @@ fn gfk_solutions(sys: &[SysRow], k: u32, ncol: usize, max_sols: usize, max_comb:
 /// 活動量で、境界は行の上下限)、`lp_rows` は LP の行 (最初の `m_orig` 本が元の行)。返り値は (解ごとのカット, 記録)
 pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize, m_orig: usize, mode: u8, flow_cover: bool, deadline: std::time::Instant) -> (Vec<Vec<RawCut>>, ModkStats) {
     const FT: f64 = 1e-6;
+    // 診断 (どの部分が効くかを分ける比べ、`analysis/modkvb_20261107.md` の 5 章): `ENOMOTO_MIP_MODKVB_NOVB` = 変数上下限で置き換えない
+    // (連続列は単純な上下限にあるときだけ、一般整数列は単純な上下限で)、`_NOCUTROWS` = LP のカットの行を使わない (元の行だけ)、`_K2` = k = 2 だけ
+    let no_vb = env_str!("ENOMOTO_MIP_MODKVB_NOVB").is_some();
+    let no_cutrows = env_str!("ENOMOTO_MIP_MODKVB_NOCUTROWS").is_some();
+    let only_k2 = env_str!("ENOMOTO_MIP_MODKVB_K2").is_some();
     let mut st = ModkStats::default();
     let m = lp_rows.len();
     let x = vars.x;
@@ -357,7 +362,7 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
                 }
             }
             match best {
-                Some((dist, y, d, e, _)) if dist <= FT => sub.push(Sub::Vb(y, d, e)),
+                Some((dist, y, d, e, _)) if dist <= FT && !no_vb => sub.push(Sub::Vb(y, d, e)),
                 _ => sub.push(Sub::Off),
             }
             continue;
@@ -367,7 +372,7 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
             continue;
         }
         // 一般整数列の変数上下限 (LP 値が整数で単純な上下限の内側、ちょうど効いているもの)
-        if u - l > 1.5 && dl > FT && du > FT && (x[j] - x[j].round()).abs() < FT {
+        if !no_vb && u - l > 1.5 && dl > FT && du > FT && (x[j] - x[j].round()).abs() < FT {
             let mut found: Option<Sub> = None;
             if let Some(vb) = vars.vb {
                 if j < vb.ivub.len() {
@@ -402,6 +407,9 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
     let mut sys: Vec<SysRow> = Vec::new();
     let (mut nvc, mut nvi) = (0usize, 0usize);
     'rows: for (i, row) in lp_rows.iter().enumerate() {
+        if no_cutrows && i >= m_orig {
+            break;
+        }
         let (rl, ru, ra) = (vars.lo[n + i], vars.up[n + i], x[n + i]);
         let sg = if ru.is_finite() && ru - ra <= FT {
             1.0
@@ -539,7 +547,11 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
         plan.extend(by_den.into_iter().map(|(d, s)| (d, Some(s))));
     }
     if !super::snfmodk::snfmodk_has('v') || super::snfmodk::snfmodk_has('k') {
-        plan.extend([2u32, 3, 5, 7].map(|k| (k, None)));
+        if only_k2 {
+            plan.push((2, None));
+        } else {
+            plan.extend([2u32, 3, 5, 7].map(|k| (k, None)));
+        }
     }
     let mut snf_found = false;
     for (k, pre) in plan {
