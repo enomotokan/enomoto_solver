@@ -23,7 +23,8 @@ INF = highspy.kHighsInf
 DELTA = 0.01
 EPS_U = 1e-5
 MINVIOL = 1e-3
-SMAX = 1.0 - 1e-9
+UBIG = 10.0  # 整数にできない行・連続列を含む行の乗数の上限 (近似)
+SMAX = float("inf")  # 余裕で行を絞らない (1 未満に絞ると p0201 で閉包を大きく取りこぼした)
 
 
 def int_scale(vals):
@@ -107,16 +108,19 @@ class Model:
                 if sc is None:
                     if ii.any():
                         nfail += 1
-                    mx = np.max(np.abs(av)) if len(av) else 1.0
-                    sc = 1.0 / mx if mx > 0 else 1.0
+                        mn = np.min(np.abs(av[ii]))
+                    else:
+                        mn = np.max(np.abs(av)) if len(av) else 1.0
+                    sc = 1.0 / mn if mn > 0 else 1.0
                     pr = False
                 else:
                     nscaled += 1
                     pr = bool(ii.all())
                 av = av * sc
+                b = b * sc
                 if pr:
                     av = np.round(av)
-                b = b * sc
+                    b = math.floor(b + 1e-9)  # 整数の行は右辺を切り下げる
                 rows += [r] * len(idx); cols += list(idx); vals += list(av); rhs.append(b); pure.append(pr)
                 r += 1
         # 整数列の上限の行 x'_j ≤ W_j
@@ -126,6 +130,8 @@ class Model:
         self.Tc = self.T.tocsc()
         self.b = np.array(rhs)
         self.pure = np.array(pure)
+        # 乗数の上限: 整数の行 (整数列だけ・整数係数・整数右辺) は 1 - δ (Fischetti–Lodi)、それ以外は UBIG
+        self.umax = np.where(self.pure, 1.0 - DELTA, UBIG)
         self.nscaled, self.nfail = nscaled, nfail
 
     def to_t(self, x):
@@ -174,13 +180,13 @@ def separate(M, x, mode_k, tsep, threads=1):
     cost[nR + nV:nR + nV + nJ] = -xt[J]
     cost[-1] = 1.0
     lb = np.zeros(nv); ub = np.zeros(nv)
-    ub[:nR] = (k - 1) if k else 1.0 - DELTA
+    ub[:nR] = (k - 1) if k else M.umax[R]
     ub[nR:nR + nV] = INF
     # α の範囲
     TRJ = TRc[:, J]
-    umax = (k - 1) / k if k else 1.0 - DELTA
-    pos = np.asarray(TRJ.maximum(0).sum(axis=0)).ravel() * umax
-    neg = np.asarray(TRJ.minimum(0).sum(axis=0)).ravel() * umax
+    um = sp.diags(np.full(nR, (k - 1) / k) if k else M.umax[R])
+    pos = np.asarray((um @ TRJ.maximum(0)).sum(axis=0)).ravel()
+    neg = np.asarray((um @ TRJ.minimum(0)).sum(axis=0)).ravel()
     lb[nR + nV:nR + nV + nJ] = np.floor(neg) - 1
     ub[nR + nV:nR + nV + nJ] = np.ceil(pos) + 1
     lb[-1], ub[-1] = -INF, INF
@@ -362,7 +368,7 @@ def main():
         dens.append(dm)
     rec = {"name": a.name or a.mps, "mode": a.mode, "lp_status": st, "lp": z0, "bound": hist[-1]["z"], "rounds": len(hist) - 1,
            "ncut": ncut, "nbad": nbad if xsol is not None else None, "stop": stop, "time": round(time.time() - T0, 1),
-           "m": M.T.shape[0], "n": M.n, "nscaled": M.nscaled, "nfail": M.nfail, "sense": M.sense,
+           "m": M.T.shape[0], "n": M.n, "nscaled": M.nscaled, "nfail": M.nfail, "npure": int(M.pure.sum()), "sense": M.sense,
            "dens": {str(dd): dens.count(dd) for dd in sorted(set(dens))},
            "hist": [{kk: vv for kk, vv in hh.items()} for hh in hist]}
     line = json.dumps(rec)
