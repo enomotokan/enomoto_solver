@@ -18712,8 +18712,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             .count();
         // `R` 用: 前にガードを見た時点からの q の伸びで見た木の残りの秒 (残り = (1 − q) × Δ木の秒 / Δq、q が伸びていなければ ∞)
         let (dt, dq) = (tree_t - self.tr_qprev.0, q - self.tr_qprev.1);
-        let est_r = if dq > 1e-9 { (1.0 - q) * dt.max(0.0) / dq } else { f64::INFINITY };
-        let stalled = dq <= 1e-9;
+        // q の伸びが `..._GUARD_RDQ` (1e-3) 未満なら止まっているとみなす (丸めの程度の伸びで見込みが桁外れになり通ってしまう。eil33-2)
+        let stalled = dq < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_RDQ", 1e-3, f64);
+        let est_r = if !stalled { (1.0 - q) * dt.max(0.0) / dq } else { f64::INFINITY };
         // `K` 用: 今の LP のカットの行のうち、上下限のどちらかで等式に近い (効いている) 行の数
         let tcuts = if guard.contains('K') || log {
             let act = self.lp.row_activities();
