@@ -1,0 +1,14 @@
+== ENOMOTO_MIP_CMIRDELTA=n ENOMOTO_MIP_REL_GAP=1e-9 (1 スレッド)
+fuzz_tiny 400 0:
+bad 13 of 400 time 3.0
+mip_fuzz_vs_highs 300:
+bad 0 of 300 time 4.4
+fuzz_rat 300 0:
+bad 0 of 300 highs statuses {'infeasible': 24, 'optimal': 276} time 7.5
+
+== 以下 ENOMOTO_MIP_THREADS=4
+fuzz_rat 1000 300:
+bad 0 of 1000 highs statuses {'optimal': 907, 'infeasible': 93} time 24.6
+mip_fuzz_vs_highs 300:
+bad 0 of 300 time 4.4
+(fuzz_rat 300 0 の n で、根で選ばれたカット 3699 本のうち 196 本が新しい δ から: SEP cmirdelta: calls 89332 with_new 29821 wins 4980 (c 4968 l 12) chosen 196/3699)
