@@ -1,4 +1,4 @@
-"""既定 (def) と試作 (hnf = ENOMOTO_MIP_HNFPRE=1、hnfb = =bounds) を 4 スレッドで解く (2026-11-07)。1 回ずつ順に (ソルバーの計測は同時に 1 つ)。
+"""既定 (def) と試作 (hnf = ENOMOTO_MIP_HNFPRE=1、hnfb = =bounds、lat = ENOMOTO_MIP_HNFPRE_LAT=1、luold = ENOMOTO_T_LU_DENSE_SING_TOL=0) を 4 スレッドで解く (2026-11-07)。1 回ずつ順に (ソルバーの計測は同時に 1 つ)。
 使い方: python run.py out.jsonl T cfgs(カンマ区切り) seeds(カンマ区切り) 問題...  (problem に "@p58" と書くと 58 問)。
 既に out にある (問題, 設定, 回) は飛ばす (止まったら同じ命令で続きから回る)。"""
 import json, os, subprocess, sys, time
@@ -7,7 +7,9 @@ D = Path(__file__).resolve().parent
 WT = D.parents[1]
 sys.path.insert(0, str(D))
 import hprobs
-CFG = {"def": {}, "hnf": {"ENOMOTO_MIP_HNFPRE": "1"}, "hnfb": {"ENOMOTO_MIP_HNFPRE": "bounds"}}
+CFG = {"def": {}, "hnf": {"ENOMOTO_MIP_HNFPRE": "1"}, "hnfb": {"ENOMOTO_MIP_HNFPRE": "bounds"},
+       # 書き直し (hnflat) と、稠密 LU の特異判定の修正の前 (許容 0 = 厳密な 0 だけを特異とする以前の判定)
+       "lat": {"ENOMOTO_MIP_HNFPRE_LAT": "1"}, "luold": {"ENOMOTO_T_LU_DENSE_SING_TOL": "0"}}
 out = Path(sys.argv[1]); T = float(sys.argv[2]); cfgs = sys.argv[3].split(","); seeds = [int(s) for s in sys.argv[4].split(",")]
 probs = []
 for a in sys.argv[5:]:
