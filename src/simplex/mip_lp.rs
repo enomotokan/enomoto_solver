@@ -135,6 +135,8 @@ pub struct TwoStageLp {
     /// 双子の基底・解が次の求解の出発点として使えるか (直前の求解を双子で解き、その後に本体の基底が外から置かれていない)。
     /// 偽なら次の求解の前に本体から写す ([`Self::tw_pull`])
     tw_sync: bool,
+    /// 試作 `ENOMOTO_MIP_LPSCALE=h`: 尺度なしの求解が重かったら双子を作る ([`Self::solve_once`])
+    tw_lazy: bool,
 }
 
 /// 試作 `ENOMOTO_MIP_LPSCALE` の双子の状態 ([`TwoStageState`]・[`LuSnapshot`] に付ける)。
@@ -151,7 +153,8 @@ struct TwState {
 /// 試作 `ENOMOTO_MIP_LPSCALE` の数 (求解、双子の反復、仕上げの反復、仕上げで基底が動いた回数、打ち切りを採った回数、実行不能を採った回数、
 /// 本体で解き直した回数、時間・反復の上限、双子を作った LP の数、仕上げの秒 (マイクロ秒)、双子の秒 (マイクロ秒))
 /// 、確かめで仕上げを省いた回数、確かめで外れて仕上げた回数、確かめの秒 (マイクロ秒))
-pub(crate) static LPSCALE_STATS: [std::sync::atomic::AtomicU64; 14] = [const { std::sync::atomic::AtomicU64::new(0) }; 14];
+/// 、`h` で重い求解を見て双子に切り替えた回数)
+pub(crate) static LPSCALE_STATS: [std::sync::atomic::AtomicU64; 15] = [const { std::sync::atomic::AtomicU64::new(0) }; 15];
 
 /// `ENOMOTO_MIP_LPSCALE` の数を表示する (`ENOMOTO_MIP_LPSCALE_LOG`、MIP の終わりに呼ぶ)
 pub(crate) fn lpscale_report() {
@@ -160,9 +163,27 @@ pub(crate) fn lpscale_report() {
     }
     let g = |k: usize| LPSCALE_STATS[k].load(std::sync::atomic::Ordering::Relaxed);
     eprintln!(
-        "LPSCALE: lps {} solves {} tw_iters {} polish_iters {} polish_moved {} objbound {} infeas {} fallback {} limit {} polish_s {:.2} tw_s {:.2} check_ok {} check_fail {} check_s {:.2}",
-        g(8), g(0), g(1), g(2), g(3), g(4), g(5), g(6), g(7), g(9) as f64 * 1e-6, g(10) as f64 * 1e-6, g(11), g(12), g(13) as f64 * 1e-6
+        "LPSCALE: lps {} solves {} tw_iters {} polish_iters {} polish_moved {} objbound {} infeas {} fallback {} limit {} polish_s {:.2} tw_s {:.2} check_ok {} check_fail {} check_s {:.2} switched {}",
+        g(8), g(0), g(1), g(2), g(3), g(4), g(5), g(6), g(7), g(9) as f64 * 1e-6, g(10) as f64 * 1e-6, g(11), g(12), g(13) as f64 * 1e-6, g(14)
     );
+}
+
+/// 試作 `ENOMOTO_MIP_LPSCALE=h` (analysis/mip_lp_scale_20261106.md の改良 (11-08)): 尺度なしの LP の求解が重かった (1 回が
+/// `ENOMOTO_T_MIP_LPSCALE_HEAVY_SECS` 秒 (既定 1) 以上、または数値の破綻) のを見て立てる印。立った後に作る LP (サブ MIP・再スタート・
+/// 潜りの写しなど) は作るときに双子を持つ。外側の求解の始めに下ろす ([`lpscale_disarm`])
+static LPSCALE_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn lpscale_disarm() {
+    LPSCALE_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `ENOMOTO_MIP_LPSCALE` の形: 0 使わない、1 作るときから (条件 [`TwoStageLp::attach_tw`])、2 重い求解を見てから (`h`)
+fn lpscale_mode() -> u8 {
+    match env_str!("ENOMOTO_MIP_LPSCALE") {
+        None | Some("0") => 0,
+        Some("h") => 2,
+        Some(_) => 1,
+    }
 }
 
 fn lpscale_add(k: usize, v: u64) {
@@ -481,8 +502,11 @@ impl TwoStageLp {
     /// MIP の LP を作る。試作 `ENOMOTO_MIP_LPSCALE=1` で条件 ([`Self::attach_tw`]) に当たれば、尺度をかけた双子も持つ。
     pub fn new(col_lo: &[f64], col_up: &[f64], cost: &[f64], rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]) -> Self {
         let mut lp = Self::new_raw(col_lo, col_up, cost, rows, row_lo, row_up);
-        if env_str!("ENOMOTO_MIP_LPSCALE").is_some_and(|v| v != "0") {
-            lp.attach_tw();
+        match lpscale_mode() {
+            1 => lp.attach_tw(),
+            2 if LPSCALE_ARMED.load(std::sync::atomic::Ordering::Relaxed) => lp.attach_tw(),
+            2 => lp.tw_lazy = true,
+            _ => {}
         }
         lp
     }
@@ -571,6 +595,7 @@ impl TwoStageLp {
             tw_rs: Vec::new(),
             tw_cs: Arc::new(Vec::new()),
             tw_sync: false,
+            tw_lazy: false,
             resume_nb: None,
             basis_nb: None,
             nb_diag: None,
@@ -1444,6 +1469,27 @@ impl TwoStageLp {
         } else {
             self.solve_inner(lim)
         };
+        // 試作 `ENOMOTO_MIP_LPSCALE=h`: 尺度なしの求解が重かった (または数値の破綻) なら、この LP に双子を作って以後は双子で解き、
+        // 以後に作る LP も双子を持つ印を立てる。破綻ならすぐ双子で解き直す
+        let mut st = st;
+        if self.tw_lazy && self.tw.is_none() {
+            let secs = t0.elapsed().as_secs_f64();
+            let failed = st == LpStatus::Error;
+            if failed || secs >= tunable!("ENOMOTO_T_MIP_LPSCALE_HEAVY_SECS", 1.0f64, f64) {
+                self.tw_lazy = false;
+                self.attach_tw();
+                if self.tw.is_some() {
+                    LPSCALE_ARMED.store(true, std::sync::atomic::Ordering::Relaxed);
+                    lpscale_add(14, 1);
+                    if env_str!("ENOMOTO_MIP_LPSCALE_LOG").is_some() {
+                        eprintln!("LPSCALE: heavy unscaled solve ({st:?}, {} iters, {secs:.2}s, {} rows); switching to the scaled twin", self.iters - it0, self.rows.len());
+                    }
+                    if failed {
+                        st = self.solve_tw(lim);
+                    }
+                }
+            }
+        }
         if super::nb_diag::on() {
             super::nb_diag::record(self.nb_diag.take().map(|p| *p), self.iters - it0, t0.elapsed().as_secs_f64());
         }

@@ -381,6 +381,8 @@ pub fn solve_mip(
     if let Ok(mut st) = RUN_STATS.lock() {
         *st = RunStats { t0: Some(std::time::Instant::now()), first_sol: None, root_bound: None, root_heur_t: None, last_sol: None, best_z: f64::INFINITY };
     }
+    // 試作 `ENOMOTO_MIP_LPSCALE=h`: 重い LP を見て立てた印は外側の求解ごとに下ろす
+    crate::simplex::mip_lp::lpscale_disarm();
     // 既定値 < 環境変数 < 引数の順に優先する。
     let env_f64 = |v: Option<&str>| v.and_then(|s| s.parse::<f64>().ok());
     let d = MipParams::default();
