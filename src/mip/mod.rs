@@ -1261,6 +1261,13 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if let Some(v) = env_str!("ENOMOTO_MIP_DEBUG_GCDCOUNT").filter(|_| !params.submip && params.restarts == 0) {
                 let c = gcdforce::count(&prob.rows, &prob.row_lo, &prob.row_up, &prob.col_lo, &prob.col_up, &prob.is_int);
                 eprintln!("GCDCOUNT final: rows {} {} ({:.2}s)", prob.m, c.line(), t_pre.elapsed().as_secs_f64());
+                // 暗黙の整数列 ([`MipProblem::implied_integers`]、主側と双対側) も整数列として数えた場合 (双対側は最適解でだけ整数なので、
+                // 問題を変える判定には使えない。数えるだけ)
+                let mask: Vec<bool> = prob.implied_integers();
+                if mask != prob.is_int {
+                    let c2 = gcdforce::count(&prob.rows, &prob.row_lo, &prob.row_up, &prob.col_lo, &prob.col_up, &mask);
+                    eprintln!("GCDCOUNT final_impl: rows {} {} (implied {})", prob.m, c2.line(), mask.iter().zip(&prob.is_int).filter(|(a, b)| **a && !**b).count());
+                }
                 if v == "stop" {
                     std::process::exit(0);
                 }

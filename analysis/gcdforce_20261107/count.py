@@ -15,7 +15,7 @@ if out.exists():
     done = {json.loads(l)["problem"] for l in out.open()}
 probs = list(dict.fromkeys(p for s in sets for p in gprobs.SETS[s]))
 num = r"\[(\d+), (\d+), (\d+), (\d+)\]"
-pat = re.compile(r"GCDCOUNT (presolve depth \d+|final: rows \d+):? ineq (\d+) g>1 (\d+) raw uniq/red/infeas/force " + num + " rounded " + num + " only_rounded " + num + r" eq_infeas (\d+)")
+pat = re.compile(r"GCDCOUNT (presolve depth \d+|final: rows \d+|final_impl: rows \d+):? ineq (\d+) g>1 (\d+) raw uniq/red/infeas/force " + num + " rounded " + num + " only_rounded " + num + r" eq_infeas (\d+)")
 for p in probs:
     if p in done:
         continue
@@ -39,7 +39,7 @@ for p in probs:
             d = {"ineq": g[0], "g_gt1": g[1], "raw": g[2:6], "rnd": g[6:10], "only_rnd": g[10:14], "eq_infeas": g[14]}
             if m.group(1).startswith("final"):
                 d["rows"] = int(m.group(1).split()[-1])
-                rec["final"] = d
+                rec["final_impl" if m.group(1).startswith("final_impl") else "final"] = d
             else:
                 d["tag"] = m.group(1)
                 rec["calls"].append(d)
