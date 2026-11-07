@@ -103,6 +103,10 @@ pub(crate) struct HnfStats {
     pub comps: usize,
     pub comps_done: usize,
     pub comps_gave_up: usize,
+    /// 諦めた理由: 溢れ (値が 2^96 を越えた)・手間・大きさ。
+    pub gave_overflow: usize,
+    pub gave_work: usize,
+    pub gave_size: usize,
     /// 等式の列の数・階数の合計。
     pub cols: usize,
     pub rank: usize,
@@ -218,7 +222,8 @@ fn axpy(a: &SCol, q: i128, b: &SCol, na: u32, fill: &mut Vec<u32>) -> Option<SCo
 
 enum CompOut {
     Infeasible,
-    GaveUp,
+    /// 0 = 溢れ、1 = 手間
+    GaveUp(u8),
     /// (局所の列, x0, g)、階数
     Done(Vec<(usize, i128, i128)>, usize),
 }
@@ -242,7 +247,27 @@ fn solve_comp(rows: &[Vec<(usize, i128)>], b: &[i128], nc: usize, work: &mut i64
     // 行 i の軸の列 (なければ None = 従属な行)
     let mut pivot: Vec<Option<usize>> = vec![None; rows.len()];
     let mut fill = Vec::new();
-    for i in 0..rows.len() {
+    // 行は「活きた候補の列の少ない順」に動的に選ぶ (埋まりを減らす)。軸の列は先に選んだ行で 0 なので、選んだ順に下三角
+    let mut order: Vec<usize> = Vec::with_capacity(rows.len());
+    let mut done_row = vec![false; rows.len()];
+    let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize)>> = (0..rows.len()).map(|i| std::cmp::Reverse((rowcols[i].len(), i))).collect();
+    while let Some(std::cmp::Reverse((key, i))) = heap.pop() {
+        if done_row[i] {
+            continue;
+        }
+        {
+            let ik = i as u32;
+            rowcols[i].sort_unstable();
+            rowcols[i].dedup();
+            rowcols[i].retain(|&c| active[c as usize] && get(&cols[c as usize], ik) != 0);
+            let c = rowcols[i].len();
+            if c > key && heap.peek().is_some_and(|t| t.0 .0 < c) {
+                heap.push(std::cmp::Reverse((c, i)));
+                continue;
+            }
+        }
+        done_row[i] = true;
+        order.push(i);
         let ik = i as u32;
         loop {
             // 行 i に非零を持つ活きた列
@@ -285,12 +310,12 @@ fn solve_comp(rows: &[Vec<(usize, i128)>], b: &[i128], nc: usize, work: &mut i64
                 };
                 *work -= (cols[c].len() + colp.len()) as i64;
                 if *work < 0 {
-                    return CompOut::GaveUp;
+                    return CompOut::GaveUp(1);
                 }
                 fill.clear();
                 match axpy(&cols[c], q, &colp, na, &mut fill) {
                     Some(nv) => cols[c] = nv,
-                    None => return CompOut::GaveUp,
+                    None => return CompOut::GaveUp(0),
                 }
                 for &t in &fill {
                     rowcols[t as usize].push(c as u32);
@@ -301,7 +326,7 @@ fn solve_comp(rows: &[Vec<(usize, i128)>], b: &[i128], nc: usize, work: &mut i64
     // H y = b を前から解く
     let mut res: Vec<i128> = b.to_vec();
     let mut y: Vec<(usize, i128)> = Vec::new();
-    for i in 0..rows.len() {
+    for &i in &order {
         match pivot[i] {
             None => {
                 if res[i] != 0 {
@@ -319,8 +344,8 @@ fn solve_comp(rows: &[Vec<(usize, i128)>], b: &[i128], nc: usize, work: &mut i64
                         if t >= na {
                             break;
                         }
-                        let Some(d) = v.checked_mul(yp) else { return CompOut::GaveUp };
-                        let Some(nr) = res[t as usize].checked_sub(d) else { return CompOut::GaveUp };
+                        let Some(d) = v.checked_mul(yp) else { return CompOut::GaveUp(0) };
+                        let Some(nr) = res[t as usize].checked_sub(d) else { return CompOut::GaveUp(0) };
                         res[t as usize] = nr;
                     }
                     y.push((p, yp));
@@ -335,9 +360,9 @@ fn solve_comp(rows: &[Vec<(usize, i128)>], b: &[i128], nc: usize, work: &mut i64
             if t < na {
                 continue;
             }
-            let Some(d) = v.checked_mul(yp) else { return CompOut::GaveUp };
+            let Some(d) = v.checked_mul(yp) else { return CompOut::GaveUp(0) };
             let c = (t - na) as usize;
-            let Some(s) = x0[c].checked_add(d) else { return CompOut::GaveUp };
+            let Some(s) = x0[c].checked_add(d) else { return CompOut::GaveUp(0) };
             x0[c] = s;
         }
     }
@@ -455,7 +480,7 @@ pub(crate) fn analyze(p: &MipProblem, int_ok: &[bool]) -> HnfResult {
     let mut comps: Vec<Vec<usize>> = comp_rows.into_values().collect();
     comps.sort_by_key(|c| c.len());
     st.comps = comps.len();
-    let mut work: i64 = tunable!("ENOMOTO_T_MIP_HNFPRE_WORK", 50_000_000.0, f64) as i64;
+    let mut work: i64 = tunable!("ENOMOTO_T_MIP_HNFPRE_WORK", 300_000_000.0, f64) as i64;
     let mut info = Vec::new();
     let mut lmap = vec![usize::MAX; p.n];
     for comp in &comps {
@@ -471,7 +496,7 @@ pub(crate) fn analyze(p: &MipProblem, int_ok: &[bool]) -> HnfResult {
         }
         let rows: Vec<Vec<(usize, i128)>> = comp.iter().map(|&k| erows[k].0.iter().map(|&(j, a)| (lmap[j], a)).collect()).collect();
         let b: Vec<i128> = comp.iter().map(|&k| erows[k].1).collect();
-        let out = if gcols.len() > 200_000 { CompOut::GaveUp } else { solve_comp(&rows, &b, gcols.len(), &mut work) };
+        let out = if gcols.len() > 200_000 { CompOut::GaveUp(2) } else { solve_comp(&rows, &b, gcols.len(), &mut work) };
         for &j in &gcols {
             lmap[j] = usize::MAX;
         }
@@ -481,7 +506,14 @@ pub(crate) fn analyze(p: &MipProblem, int_ok: &[bool]) -> HnfResult {
                 st.comps_done += 1;
                 break;
             }
-            CompOut::GaveUp => st.comps_gave_up += 1,
+            CompOut::GaveUp(why) => {
+                st.comps_gave_up += 1;
+                match why {
+                    0 => st.gave_overflow += 1,
+                    1 => st.gave_work += 1,
+                    _ => st.gave_size += 1,
+                }
+            }
             CompOut::Done(v, rank) => {
                 st.comps_done += 1;
                 st.cols += gcols.len();

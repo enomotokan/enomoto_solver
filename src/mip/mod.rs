@@ -3011,8 +3011,8 @@ fn hnf_presolve(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::Postso
         let s = &res.stats;
         if !quiet {
             eprintln!(
-                "HNFPRE: round {round} eq {} int_eq {} rat_skip {} comps {} done {} gave_up {} cols {} rank {} fixes {} congs {} (gen {}, tighten {}, max_mod {}) infeasible {} ({:.3}s)",
-                s.eq_rows, s.int_eq_rows, s.rat_skipped, s.comps, s.comps_done, s.comps_gave_up, s.cols, s.rank, s.fixes, s.congs, s.congs_gen, s.congs_tighten, s.max_mod, s.infeasible, s.secs
+                "HNFPRE: round {round} eq {} int_eq {} rat_skip {} comps {} done {} gave_up {} cols {} rank {} fixes {} congs {} (gen {}, tighten {}, max_mod {}) infeasible {} ({:.3}s) gave_up_why {}/{}/{}",
+                s.eq_rows, s.int_eq_rows, s.rat_skipped, s.comps, s.comps_done, s.comps_gave_up, s.cols, s.rank, s.fixes, s.congs, s.congs_gen, s.congs_tighten, s.max_mod, s.infeasible, s.secs, s.gave_overflow, s.gave_work, s.gave_size
             );
         }
         if mode == hnf::Mode::Count {
