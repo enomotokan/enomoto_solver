@@ -10,6 +10,7 @@
 //!
 //! 使う条件 ([`reform`]): 整数列が 2〜`ENOMOTO_T_MIP_HNFPRE_LAT_MAXN` (既定 120) 本、整数列はすべて上下限が有限、整数列の係数が
 //! 整数で 3 本以上の整数列を含み、係数の絶対値の最大が 2 以上の等式が 1 本以上ある (集合分割のような ±1 の行だけの問題には使わない)。
+//! 固定されていない連続列を 2 本以上含む等式があれば使わない (pk1 の型)。
 
 use super::problem::MipProblem;
 
@@ -191,8 +192,11 @@ pub(crate) fn reform(p: &MipProblem, verbose: bool) -> Option<LatReform> {
         }
         let mut r = vec![0i128; ni];
         let mut ok = true;
-        let (mut nz, mut amax) = (0usize, 0f64);
+        let (mut nz, mut amax, mut ncont) = (0usize, 0f64, 0usize);
         for &(j, a) in &p.rows[i] {
+            if pos[j] == usize::MAX && p.col_lo[j] < p.col_up[j] {
+                ncont += 1;
+            }
             if pos[j] != usize::MAX {
                 if (a - a.round()).abs() > 1e-9 || a.abs() > 1e9 {
                     ok = false;
@@ -204,6 +208,11 @@ pub(crate) fn reform(p: &MipProblem, verbose: bool) -> Option<LatReform> {
             }
         }
         if ok && nz > 0 {
+            // 固定されていない連続列が 2 本以上の等式 (pk1 の正負の外れの組) があれば書き直さない (外れの大きい解を探す問題で、
+            // Ax = d の近くを探す market split の型ではない。pk1 は 15 秒 → 300 秒で終わらなくなった。手元の 5 問に合わせた条件)
+            if ncont >= 2 {
+                return None;
+            }
             useful |= nz >= 3 && amax >= 2.0;
             aeq.push(r);
         }
