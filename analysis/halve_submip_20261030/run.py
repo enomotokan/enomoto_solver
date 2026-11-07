@@ -177,6 +177,20 @@ CFGS = {
               "ENOMOTO_MIP_HO4_CUT0": "1", "ENOMOTO_MIP_TREE3_JOINCAP": "1", "ENOMOTO_MIP_S6_CUTLP_TCAP": "10"},
     # SYMSIGN・SYMZERO の既定化 (2026-11-06、analysis/symsign_default_20261106.md) の後は "def" が両方を含む。それより前は "presymsign"
     "presymsign": {"ENOMOTO_MIP_SYMSIGN": "0", "ENOMOTO_MIP_SYMZERO": "0"},
+    # all1107 (2026-11-07): 今日の既定の候補を全部入れた形 (Mittelmann 600 秒の res4 で既定と比べる)。comb = 二段解法の尺度の調整 (大きい LP だけ) +
+    # 前向きの Harris (安全モード) (analysis/combb_600_20261106.md)、gs = 多点分離を最適面が広く停滞したときだけ (analysis/mpsep_20261106.md の 6 節)、
+    # MUSHAGG=cover (analysis/mushroom_cuts_20261106.md)、LPSCALE = MIP の LP 全体を尺度を調整した双子で解く (係数の幅 1e4 以上、
+    # analysis/mip_lp_scale_20261106.md)、prr (analysis/prr_harm_20261106.md)、SUBFIX=rtc = 根の RENS・木の RINS を目標の固定率で止めるダイブ
+    # (analysis/submip_impr_20261106/C.md)、phgb = ノードの LP が重いスレッドだけ費用の摂動 + 前向きの Harris + 保存した置き場所 (analysis/node_lp_20261106.md)、
+    # PROBE_BASIS_GUARD=x = 列だけの基底の warm start が長引いたら捨てる (analysis/probe_basis_20261106.md)
+    "all1107": {"ENOMOTO_SIMPLEX_SCALE": "1", "ENOMOTO_T_SIMPLEX_SCALE_MIN_M": "10000", "ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE": "1e4", "ENOMOTO_SIMPLEX_HARRIS2": "r",
+                "ENOMOTO_MIP_MPSEP": "oqmgs", "ENOMOTO_T_MIP_MPSEP_NV": "1", "ENOMOTO_T_MIP_MPSEP_EXTRA": "5",
+                "ENOMOTO_MIP_MUSHAGG": "cover",
+                "ENOMOTO_MIP_LPSCALE": "1", "ENOMOTO_T_MIP_LPSCALE_MIN_RANGE": "1e4",
+                "ENOMOTO_MIP_PROBE_REPRESOLVE": "1",
+                "ENOMOTO_MIP_SUBFIX": "rtc",
+                "ENOMOTO_MIP_NODELP_PERTURB": "phg", "ENOMOTO_MIP_BASIS_NB": "t",
+                "ENOMOTO_MIP_PROBE_BASIS_GUARD": "x"},
     # 根の RENS を目標の固定率で止める (analysis/submip_impr_20261106/A.md の SUBA_RATE の n だけ)
     "suban": {"ENOMOTO_MIP_SUBA_RATE": "n"},
 }

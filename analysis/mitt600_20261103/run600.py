@@ -11,7 +11,8 @@ import run_miplib_benchmark as rb  # noqa: E402
 TL = int(os.environ.get("MITT600_TL", "600"))  # 確かめ用に短くできる
 k = int(sys.argv[1])
 # MITT600_SHARDS (分担表のファイル名、既定 shards.json)・MITT600_TAG (結果の名前の頭、既定 res)・MITT600_SOLVERS (既定 ours,highs) で、
-# 既定を変えた後に ENOMOTO だけを測り直す回 (2026-11-04 の res2、shards2.json) にも使う
+# 既定を変えた後に ENOMOTO だけを測り直す回 (2026-11-04 の res2、shards2.json) にも使う。
+# MITT600_SOLVERS に "ours:<設定名>" を書くと、analysis/halve_submip_20261030/run.py の CFGS の環境変数を付けた ENOMOTO を回す (2026-11-07 の res4)
 mine = json.loads((D / os.environ.get("MITT600_SHARDS", "shards.json")).read_text())["shards"][k]
 OUT = D / f"{os.environ.get('MITT600_TAG', 'res')}_s{k}.jsonl"
 SOLVERS = os.environ.get("MITT600_SOLVERS", "ours,highs").split(",")
@@ -32,6 +33,11 @@ def run(kind, mps):
     env = dict(os.environ)
     for key in list(env):
         if key.startswith("ENOMOTO_"): del env[key]
+    if ":" in kind:  # "ours:<設定名>"
+        kind, cfg = kind.split(":", 1)
+        sys.path.insert(0, str(WT / "analysis" / "halve_submip_20261030"))
+        from run import CFGS  # noqa: E402
+        env.update(CFGS[cfg])
     env["ENOMOTO_MIP_THREADS"] = "4"
     t0 = time.time(); peak = 0.0
     pr = subprocess.Popen([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), f"--worker-{kind}", str(mps),
@@ -58,7 +64,7 @@ for i, p in enumerate(mine):
         with open(OUT, "a") as f:
             f.write(json.dumps({"problem": p, "solver": "fetch", "result": {"status": "fetch_error", "error": str(err)[:200]}}) + "\n")
         continue
-    order = [x for x in (["ours", "highs"] if i % 2 == 0 else ["highs", "ours"]) if x in SOLVERS]
+    order = SOLVERS if i % 2 == 0 else SOLVERS[::-1]
     for s in order:
         if (p, s) in done: continue
         res, peak, wall = run(s, mps)
