@@ -3,7 +3,7 @@
 cd "$(dirname "$0")/../.."
 while true; do
   sleep 900
-  git add analysis/hnfcut_20261107/*.jsonl analysis/hnfcut_20261107/*.log analysis/hnfcut_20261107/*.txt analysis/hnfcut_20261107/scan.jsonl 2>/dev/null
+  git add analysis/hnfcut_20261107/*.jsonl analysis/hnfcut_20261107/*.log analysis/hnfcut_20261107/*.txt analysis/hnfcut_20261107/scan.jsonl analysis/hnfcut_20261107/v2_*.jsonl 2>/dev/null
   if ! git diff --cached --quiet; then
     git commit -qm "HNFCUT: 計測の途中経過 ($(date +%H:%M))
 

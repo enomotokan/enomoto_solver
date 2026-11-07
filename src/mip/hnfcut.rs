@@ -3,11 +3,12 @@
 //! 分離器の中だけで列を `z_j` に写し (係数 `a_j g_j`、右辺から `a_j r_j` を引く)、丸めてから `x` に戻す。LP 緩和の値は変わらない
 //! (アフィン変換) が、丸めが「`x_j` は `g_j` 刻み」を使えるので、合同式に合わない整数の LP 点も切れる。
 //!
-//! 文字で使う場所を選ぶ (`1` = `abc`):
+//! 文字で使う場所を選ぶ (`1` = `b`。2026-11-07 の記録の `1` は `abc`):
 //! - `a`: CMIR (集約行・経路集約・元の行 1 本ずつの [`super::cuts::generate_cuts`]) の項の置き換え ([`super::cuts`] の `Sub::Cong`)。
 //!   置き換えた空間と元の空間の両方で CMIR を作り、効き目の大きい方を残す。
 //! - `b`: zerohalf と `ENOMOTO_MIP_SNFMODK` の CG カット (元の行から作るもの) を、列を `z` に写した行・上下限・LP 値で作って戻す ([`map_rows`])。
 //! - `c`: 単体表の行 (tableau 行) の CMIR (GMI に当たる) に `a` と同じ置き換えを使う。
+//! - `p`: `a`・`c` で置き換えた方が勝っても、元の CMIR も候補に残す (どちらを入れるかは行ごとの選び `keep_best` とカットの選びに任せる)。
 //! - `l` (`1` には含めない): 行の活動量の合同式。整数の行 `s = Σ a_j x_j` で合同式の列を含むものは、`s ≡ Σ a_j r_j (mod G)`
 //!   (`G` = 合同式の列の `a_j g_j` とほかの整数列の `a_j` の gcd) なので、`a`・`c` では論理変数 (行の活動量) も `s = r + G t` と置き換え
 //!   ([`extend_logicals`])、`b` では写した行の上下限を `G` の倍数に丸める ([`map_rows`])。
@@ -29,7 +30,8 @@ pub(crate) fn letters() -> &'static str {
     static L: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     L.get_or_init(|| match env_str!("ENOMOTO_MIP_HNFCUT") {
         None | Some("") | Some("0") => String::new(),
-        Some("1") => "abc".to_string(),
+        // `1` = `b` (2026-11-08 から。それまでの記録の `1` は `abc`)
+        Some("1") => "b".to_string(),
         Some(s) => s.to_string(),
     })
 }
@@ -52,6 +54,8 @@ pub(crate) struct State {
     pub tab: bool,
     /// `l` (行の活動量の合同式) を使うか
     pub logi: bool,
+    /// `p`: `a`・`c` で置き換えた方が勝っても元の CMIR も候補に残す (選びは既定の仕組みに任せる)
+    pub both: bool,
 }
 
 thread_local! {
@@ -101,7 +105,7 @@ pub(crate) fn state_for(table: Option<Arc<CongTable>>, kind: char) -> State {
     if table.is_none() || !on() {
         return State::default();
     }
-    State { table, cmir: has(kind), modk: has('b'), tab: kind == 'c', logi: has('l') }
+    State { table, cmir: has(kind), modk: has('b'), tab: kind == 'c', logi: has('l'), both: has('p') }
 }
 
 /// 今の状態の CMIR の可否だけを `kind` (`'a'` か `'c'`) に合わせて変える (tableau 行の区間の出入り)。表がなければ何もしない
@@ -113,6 +117,11 @@ pub(crate) fn set_kind(kind: char) {
             s.tab = kind == 'c';
         }
     });
+}
+
+/// `p` (両方を候補に残す) か
+pub(crate) fn add_both() -> bool {
+    CUR.with(|c| c.borrow().both)
 }
 
 /// tableau 行の区間か
@@ -605,7 +614,7 @@ mod tests {
                 ru.push(b);
             }
             let tbl = Arc::new(t);
-            let _g = Guard::new(State { table: Some(tbl.clone()), cmir: true, modk: true, tab: false, logi: false });
+            let _g = Guard::new(State { table: Some(tbl.clone()), cmir: true, modk: true, tab: false, logi: false, both: it % 3 == 0 });
             let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None };
             // a: 行 1 本ずつ
             for (i, row) in rows.iter().enumerate() {
@@ -700,7 +709,7 @@ mod tests {
             }
             let vint = vec![true; n + mr];
             let tbl = Arc::new(t);
-            let _g = Guard::new(State { table: Some(tbl.clone()), cmir: true, modk: true, tab: false, logi: true });
+            let _g = Guard::new(State { table: Some(tbl.clone()), cmir: true, modk: true, tab: false, logi: true, both: false });
             extend_logicals(&rows, &vint, &vlo, &vup, n);
             if CUR.with(|c| c.borrow().table.as_ref().is_some_and(|t| t.n > n)) {
                 n_l += 1;

@@ -906,11 +906,13 @@ fn raw_efficacy(vars: &CutVars, c: &RawCut) -> f64 {
 
 /// [`cmir_terms`] に試作 `ENOMOTO_MIP_HNFCUT` の置き換えを足したもの: 合同式の表があり、項に合同式の列があれば、置き換えた空間と
 /// 元の空間の両方で CMIR を作り、効き目の大きい方を返す (表がなければ [`cmir_terms`] と同じ)
-fn cmir_terms_hnfcut(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
+/// 試作 `ENOMOTO_MIP_HNFCUT` の `p`: 置き換えた方を選ばず、両方 (違反するもの) を候補として返す (選びは呼び出し側の既定の仕組みに任せる)
+fn cmir_terms_hnfcut(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Vec<RawCut> {
     let ct = super::hnfcut::with_cmir_table(|t| t.and_then(|t| cong_terms(vars, t, &terms, beta)));
     let Some((cterms, cbeta)) = ct else {
-        return cmir_terms(vars, terms, beta);
+        return cmir_terms(vars, terms, beta).into_iter().collect();
     };
+    let both = super::hnfcut::add_both();
     use super::hnfcut::{stat, EFF};
     stat(0);
     if super::hnfcut::in_tab() {
@@ -919,14 +921,14 @@ fn cmir_terms_hnfcut(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawC
     let orig = cmir_terms(vars, terms, beta);
     let cong = cmir_terms(vars, cterms, cbeta);
     match (orig, cong) {
-        (None, None) => None,
+        (None, None) => Vec::new(),
         (Some(o), None) => {
             stat(2);
-            Some(o)
+            vec![o]
         }
         (None, Some(c)) => {
             stat(3);
-            Some(c)
+            vec![c]
         }
         (Some(o), Some(c)) => {
             let (eo, ec) = (raw_efficacy(vars, &o), raw_efficacy(vars, &c));
@@ -935,9 +937,13 @@ fn cmir_terms_hnfcut(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawC
                 stat(1);
                 EFF[0].fetch_add((ec * 1e6) as u64, std::sync::atomic::Ordering::Relaxed);
                 EFF[1].fetch_add((eo * 1e6) as u64, std::sync::atomic::Ordering::Relaxed);
-                Some(c)
+                if both {
+                    vec![o, c]
+                } else {
+                    vec![c]
+                }
             } else {
-                Some(o)
+                vec![o]
             }
         }
     }
