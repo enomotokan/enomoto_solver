@@ -1347,6 +1347,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             let ps = std::rc::Rc::new((postsolve, scaling));
             install_resume_hook(p, params, Some(ps.clone()));
             let _mem3 = Mem3Level::push(p, &params, Some(ps.clone()));
+            if HNF_PENDING.with(|f| f.replace(false)) {
+                hnf_register_final(&prob, &ps.1.d);
+            }
             let mut r = match early {
                 // 目的関数が全部 0 なので、どの実行可能解も最適 (下界 = 目的値 = 定数)
                 Some(xr) => {
@@ -2999,6 +3002,24 @@ enum Presolved {
     Reduced { prob: MipProblem, postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling },
 }
 
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_HNFPRE`: 前処理で合同式が見つかり、解く直前に表を作ることになっているか
+    static HNF_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 試作 `ENOMOTO_MIP_HNFPRE`: 解く直前の問題 `prob` で整数列だけの等式を解析し直し、合同式の表を登録する (分枝・伝播の丸めに使う)。
+fn hnf_register_final(prob: &MipProblem, d: &[f64]) {
+    let int_ok: Vec<bool> = (0..prob.n).map(|j| d.get(j).is_none_or(|&d| d == 1.0)).collect();
+    let res = hnf::analyze(prob, &int_ok);
+    let t = if res.stats.infeasible { None } else { hnf::make_table(prob, &res.info) };
+    if env_str!("ENOMOTO_MIP_HNFPRE_QUIET").is_none() {
+        eprintln!("HNFPRE: final table: {} congruences ({:.3}s)", t.as_ref().map_or(0, |t| t.m.iter().filter(|&&m| m > 1).count()), res.stats.secs);
+    }
+    if let Some(t) = t {
+        hnf::register(t);
+    }
+}
+
 /// 試作 `ENOMOTO_MIP_HNFPRE`: 前処理の後の問題の整数列だけの等式を Hermite 標準形で解析し ([`hnf::analyze`])、実行不能なら
 /// `Infeasible`、固定・合同式で上下限が詰まれば詰めて前処理をかけ直す (尺度が掛かっていなければ。最大 3 回)。`Full` なら最後の
 /// 問題の合同式を登録する (分枝・伝播の丸めに使う、[`hnf::table_for`])。
@@ -3039,10 +3060,10 @@ fn hnf_presolve(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::Postso
                 prob.col_lo = lo;
                 prob.col_up = up;
             }
-            if mode == hnf::Mode::Full {
-                if let Some(t) = hnf::make_table(&prob, &res.info) {
-                    hnf::register(t);
-                }
+            // 合同式があれば、解く直前の最終の問題 (クリーク行・対称性の行の追加、前処理のかけ直し、双子の併合の後) で解析を
+            // やり直して表を作る ([`hnf_register_final`])。ここで作った表を使うと、その後の変換で列の意味が変わったときに誤る
+            if mode == hnf::Mode::Full && res.info.iter().any(|&(j, _, g)| g > 1 && prob.col_lo[j] < prob.col_up[j]) {
+                HNF_PENDING.with(|f| f.set(true));
             }
             return Some(Presolved::Reduced { prob, postsolve, scaling });
         }
