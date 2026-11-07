@@ -4859,6 +4859,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 push(Some(raw), &mut cands, self);
             }
         }
+        // 試作 `ENOMOTO_MIP_SNFMODK` (既定では使わない): 余裕 0 の行の群全体からの CG カット ([`super::snfmodk::snfmodk_cg_cuts`])
+        if super::snfmodk::snfmodk_has('c') && (!light || super::snfmodk::snfmodk_has('t')) && !self.params.submip {
+            let t0 = std::time::Instant::now();
+            let mut dl = t0 + std::time::Duration::from_secs_f64(tunable!("ENOMOTO_T_MIP_SNFMODK_TIME", 0.3f64, f64));
+            if let Some(d) = sep_deadline(self.deadline) {
+                dl = dl.min(d);
+            }
+            let (cs, gr, st) = super::snfmodk::snfmodk_cg_cuts(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, tunable!("ENOMOTO_T_MIP_SNFMODK_CUTS", 50usize, usize), dl);
+            let c0 = cands.len();
+            for raw in cs {
+                push(Some(raw), &mut cands, self);
+            }
+            if dbg_sep || env_str!("ENOMOTO_MIP_SNFMODK_LOG").is_some() {
+                eprintln!(
+                    "SEP snfmodk {:.3}s rows {} cols {} rank {} unit {} core {}x{} gaveup {} divs {} elems {} cuts_p {} cuts_new {} eff_p {:.4} eff_new {:.4} cands {}",
+                    t0.elapsed().as_secs_f64(),
+                    st.rows,
+                    st.cols,
+                    gr.rank,
+                    gr.unit_piv,
+                    gr.core.0,
+                    gr.core.1,
+                    gr.gave_up,
+                    super::snfmodk::group_summary(&gr),
+                    st.elems,
+                    st.cuts_p,
+                    st.cuts_new,
+                    st.best_eff_p,
+                    st.best_eff_new,
+                    cands.len() - c0
+                );
+            }
+        }
         if dbg_sep {
             eprintln!("SEP zerohalf {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
         }
@@ -4992,7 +5025,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if dbg_sep || env_str!("ENOMOTO_MIP_MODKVB_LOG").is_some() {
                     eprintln!(
-                        "SEP modkvb {:.3}s tight {} sys {} cols {} vbsub {}/{} k {} sols {} solrows {} timeout {} cands {}",
+                        "SEP modkvb {:.3}s tight {} sys {} cols {} vbsub {}/{} k {} sols {} solrows {} timeout {} cands {} snf {}",
                         t0.elapsed().as_secs_f64(),
                         st.tight,
                         st.sys,
@@ -5003,7 +5036,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         st.sols,
                         st.sol_rows,
                         st.timed_out as u8,
-                        cands.len() - c0
+                        cands.len() - c0,
+                        st.snf
                     );
                 }
             }

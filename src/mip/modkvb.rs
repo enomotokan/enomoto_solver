@@ -60,6 +60,8 @@ pub(crate) struct ModkStats {
     pub sol_rows: usize,
     /// 時間の上限で止まったか
     pub timed_out: bool,
+    /// `ENOMOTO_MIP_SNFMODK` の `v`: 群の要約 / 諦めたか / 元の数
+    pub snf: String,
 }
 
 /// 列の置き換え
@@ -506,13 +508,44 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
     let mut out: Vec<Vec<RawCut>> = Vec::new();
     let mut aggv = vec![0.0f64; n + m];
     let mut atouch: Vec<usize> = Vec::new();
-    for k in [2u32, 3, 5, 7] {
+    // 試作 `ENOMOTO_MIP_SNFMODK` の `v`: GF(k) の解の代わりに、連立の群 (Smith 標準形の対角化) の元を分母ごとに試す
+    // (`k` も付けたら、群の元でカットが出なければ GF(k) も)。重み w / 分母 は GF(k) の解の w / k と同じ式で集約する
+    let mut plan: Vec<(u32, Option<Vec<Vec<(usize, u32)>>>)> = Vec::new();
+    if super::snfmodk::snfmodk_has('v') {
+        let mat: Vec<Vec<(usize, i64)>> = sys.iter().map(|r| r.ents.clone()).collect();
+        let gr = super::snfmodk::snf_group(&mat, n, tunable!("ENOMOTO_T_MIP_SNFMODK_CORE", 250_000usize, usize), 20_000_000, deadline);
+        let rhs: Vec<i128> = sys.iter().map(|r| r.rhs as i128).collect();
+        let els = super::snfmodk::group_elements(&gr, &rhs, max_sols, 65535);
+        st.snf = format!("{}/{}/{}", super::snfmodk::group_summary(&gr), gr.gave_up, els.len());
+        let mut by_den: Vec<(u32, Vec<Vec<(usize, u32)>>)> = Vec::new();
+        for e in els.iter().filter(|e| e.w.len() <= 4 * max_comb) {
+            let d = e.den as u32;
+            let sol: Vec<(usize, u32)> = e.w.iter().map(|&(i, w)| (i, w as u32)).collect();
+            match by_den.iter_mut().find(|t| t.0 == d) {
+                Some(t) => t.1.push(sol),
+                None => by_den.push((d, vec![sol])),
+            }
+        }
+        plan.extend(by_den.into_iter().map(|(d, s)| (d, Some(s))));
+    }
+    if !super::snfmodk::snfmodk_has('v') || super::snfmodk::snfmodk_has('k') {
+        plan.extend([2u32, 3, 5, 7].map(|k| (k, None)));
+    }
+    let mut snf_found = false;
+    for (k, pre) in plan {
         st.k = k;
         if std::time::Instant::now() >= deadline {
             st.timed_out = true;
             break;
         }
-        let sols = gfk_solutions(&sys, k, n, max_sols, max_comb, passes, deadline, &mut st.timed_out);
+        let is_snf = pre.is_some();
+        if !is_snf && snf_found {
+            break;
+        }
+        let sols = match pre {
+            Some(s) => s,
+            None => gfk_solutions(&sys, k, n, max_sols, max_comb, passes, deadline, &mut st.timed_out),
+        };
         st.sols += sols.len();
         let n0 = out.len();
         for (si, sol) in sols.iter().enumerate() {
@@ -573,6 +606,13 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
             if !cs.is_empty() {
                 out.push(cs);
             }
+        }
+        if is_snf {
+            snf_found |= out.len() > n0;
+            if st.timed_out {
+                break;
+            }
+            continue;
         }
         if out.len() > n0 || st.timed_out {
             break;
