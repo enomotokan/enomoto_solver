@@ -201,6 +201,7 @@ pub fn intvub_debug_row(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Stri
             Sub::Simple => String::new(),
             Sub::Vub(z, d, e) => format!(" vub z{z}[{:.3}] {d} {e}", vars.x[z]),
             Sub::Vlb(z, d, e) => format!(" vlb z{z}[{:.3}] {d} {e}", vars.x[z]),
+            Sub::Cong(r, g, lz) => format!(" cong {r} {g} {lz}"),
         };
         let _ = write!(o, " ({}{} {:+.3} y={:.3} u={}{})", if t.int { "i" } else { "c" }, t.k, t.a, t.yv, t.yu, sub);
     }
@@ -224,6 +225,8 @@ enum Sub {
     Vub(usize, f64, f64),
     /// `x = d y + e + s` (VLB)。項の変数は `s`。
     Vlb(usize, f64, f64),
+    /// 試作 `ENOMOTO_MIP_HNFCUT`: 整数列の合同式 `x = r + g z` (`r`, `g`, `lz`)。項の変数は `z - lz` (`comp` なら `uz - z`)
+    Cong(f64, f64, f64),
 }
 
 /// 生成した切除平面 `sum coef_k v_k <= rhs` と、その効き目 (違反量 / 係数のノルム)。
@@ -388,6 +391,7 @@ fn substitute_with(vars: &CutVars, base: &[(usize, f64)], terms: &mut Vec<Term>,
                 }
                 terms.push(Term { k, a, comp: false, int: false, yv: best.0.max(0.0), yu: f64::INFINITY, sub: best.1 });
             }
+            Sub::Cong(..) => unreachable!(),
         }
     }
     *beta_ref = beta;
@@ -542,7 +546,7 @@ fn substitute_finish(vars: &CutVars, mut terms: Vec<Term>, mut beta: f64, int_co
                         terms.push(Term { k, a, comp: false, int: true, yv, yu, sub });
                     }
                 }
-                Sub::Simple => unreachable!(),
+                Sub::Simple | Sub::Cong(..) => unreachable!(),
             }
         }
         if !extra.is_empty() {
@@ -620,6 +624,11 @@ fn unsubstitute(vars: &CutVars, t: &Term, c: f64, coefs: &mut Vec<(usize, f64)>)
             coefs.push((t.k, c));
             coefs.push((y, -c * d));
             c * e
+        }
+        Sub::Cong(r, g, lz) => {
+            // 項の変数 z - lz = (x - r) / g - lz (補変数は上の分岐で戻してある)
+            coefs.push((t.k, c / g));
+            c * (r / g + lz)
         }
     }
 }
@@ -827,6 +836,99 @@ pub fn cmir_with_deltas(vars: &CutVars, base: &[(usize, f64)], rhs: f64, deltas:
     }
     let (delta, eff) = best?;
     cmir_build(vars, terms, beta, delta, eff)
+}
+
+/// 試作 `ENOMOTO_MIP_HNFCUT` ([`super::hnfcut`]): 置き換えた項のうち、単純な上下限で置き換えた整数列で合同式 `x = r + g z` の
+/// あるものを `z` の項にする (係数 `a g`、右辺から定数を引く)。変えた項がなければ `None`。
+/// `v = l + y` (`y = x - l`) なら `y = g (z - lz) + (r + g lz - l)`、`v = u - y` (`y = u - x`) なら `y = g (uz - z) + (u - r - g uz)`。
+fn cong_terms(vars: &CutVars, tbl: &super::hnf::CongTable, terms: &[Term], beta: f64) -> Option<(Vec<Term>, f64)> {
+    let mut out: Vec<Term> = terms.to_vec();
+    let mut beta = beta;
+    let mut changed = false;
+    for t in out.iter_mut() {
+        if !t.int || t.sub != Sub::Simple || !super::hnfcut::is_cong(tbl, t.k, vars.is_int, vars.lo, vars.up) {
+            continue;
+        }
+        let (l, u, x) = (vars.lo[t.k], vars.up[t.k], vars.x[t.k]);
+        let Some((lz, uz)) = super::hnfcut::z_range(tbl, t.k, l, u) else { continue };
+        let (r, g) = (tbl.r[t.k] as f64, tbl.m[t.k] as f64);
+        let zx = (x - r) / g;
+        if !t.comp {
+            if !lz.is_finite() {
+                continue;
+            }
+            beta -= t.a * (r + g * lz - l);
+            *t = Term { k: t.k, a: t.a * g, comp: false, int: true, yv: (zx - lz).max(0.0), yu: uz - lz, sub: Sub::Cong(r, g, lz) };
+        } else {
+            if !uz.is_finite() {
+                continue;
+            }
+            beta -= t.a * (u - r - g * uz);
+            *t = Term { k: t.k, a: t.a * g, comp: true, int: true, yv: (uz - zx).max(0.0), yu: uz - lz, sub: Sub::Cong(r, g, lz) };
+        }
+        changed = true;
+    }
+    changed.then_some((out, beta))
+}
+
+/// 生のカットの効き目 (`x` での違反量 / 係数のノルム。同じ変数の係数はまとめる)。違反しなければ 0
+fn raw_efficacy(vars: &CutVars, c: &RawCut) -> f64 {
+    let mut v = c.coefs.clone();
+    v.sort_by_key(|e| e.0);
+    let (mut act, mut nrm) = (0.0, 0.0);
+    let mut i = 0;
+    while i < v.len() {
+        let k = v[i].0;
+        let mut a = 0.0;
+        while i < v.len() && v[i].0 == k {
+            a += v[i].1;
+            i += 1;
+        }
+        act += a * vars.x[k];
+        nrm += a * a;
+    }
+    if nrm <= 0.0 {
+        return 0.0;
+    }
+    ((act - c.rhs) / nrm.sqrt()).max(0.0)
+}
+
+/// [`cmir_terms`] に試作 `ENOMOTO_MIP_HNFCUT` の置き換えを足したもの: 合同式の表があり、項に合同式の列があれば、置き換えた空間と
+/// 元の空間の両方で CMIR を作り、効き目の大きい方を返す (表がなければ [`cmir_terms`] と同じ)
+fn cmir_terms_hnfcut(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
+    let ct = super::hnfcut::with_cmir_table(|t| t.and_then(|t| cong_terms(vars, t, &terms, beta)));
+    let Some((cterms, cbeta)) = ct else {
+        return cmir_terms(vars, terms, beta);
+    };
+    use super::hnfcut::{stat, EFF};
+    stat(0);
+    if super::hnfcut::in_tab() {
+        stat(8);
+    }
+    let orig = cmir_terms(vars, terms, beta);
+    let cong = cmir_terms(vars, cterms, cbeta);
+    match (orig, cong) {
+        (None, None) => None,
+        (Some(o), None) => {
+            stat(2);
+            Some(o)
+        }
+        (None, Some(c)) => {
+            stat(3);
+            Some(c)
+        }
+        (Some(o), Some(c)) => {
+            let (eo, ec) = (raw_efficacy(vars, &o), raw_efficacy(vars, &c));
+            if ec > eo + 1e-9 {
+                stat(1);
+                EFF[0].fetch_add((ec * 1e6) as u64, std::sync::atomic::Ordering::Relaxed);
+                EFF[1].fetch_add((eo * 1e6) as u64, std::sync::atomic::Ordering::Relaxed);
+                Some(c)
+            } else {
+                Some(o)
+            }
+        }
+    }
 }
 
 /// [`cmir`] の本体 (置き換え済みの項と右辺から)。
@@ -2008,7 +2110,7 @@ mod highs_dump {
                 match substitute(&vars_b, b, 0.0) {
                     None => println!("   substitute: None"),
                     Some((terms, beta)) => {
-                        let tt: Vec<String> = terms.iter().map(|t| format!("{}{}:{:.6}{}(y={:.4},u={:.4}{})", t.k, if t.int { "i" } else { "c" }, t.a, if t.comp { "C" } else { "" }, t.yv, t.yu, match t.sub { Sub::Simple => String::new(), Sub::Vub(y, d, e) => format!(",vub {y} {d:.4} {e:.4}"), Sub::Vlb(y, d, e) => format!(",vlb {y} {d:.4} {e:.4}") })).collect();
+                        let tt: Vec<String> = terms.iter().map(|t| format!("{}{}:{:.6}{}(y={:.4},u={:.4}{})", t.k, if t.int { "i" } else { "c" }, t.a, if t.comp { "C" } else { "" }, t.yv, t.yu, match t.sub { Sub::Simple => String::new(), Sub::Vub(y, d, e) => format!(",vub {y} {d:.4} {e:.4}"), Sub::Vlb(y, d, e) => format!(",vlb {y} {d:.4} {e:.4}"), Sub::Cong(r, g, lz) => format!(",cong {r} {g} {lz}") })).collect();
                         println!("   substitute: beta {beta:.6} terms {}", tt.join(" "));
                         for t in terms.iter().filter(|t| t.int) {
                             let d = t.a.abs();
@@ -2750,7 +2852,7 @@ fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
     // 探索 + 上位 3 本は 16 問 (29.95)、割る数 1..8 だけ (局所探索なし・1 本) は 18 問 (28.86) と悪化した
     // (分離が遅くなり、カットが密になり、根の下界も下がった)。
     if env_str!("ENOMOTO_MIP_CMIR_SEARCH").is_none() {
-        out.extend(cmir_terms(vars, terms, beta));
+        out.extend(cmir_terms_hnfcut(vars, terms, beta));
     } else {
         out.extend(cmir_terms_multi(vars, terms, beta, tunable!("ENOMOTO_T_CMIR_K", 3usize, usize)));
     }

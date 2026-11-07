@@ -33,6 +33,7 @@ pub(crate) mod snfmodk;
 pub(crate) mod zerohalf;
 pub(crate) mod modkvb;
 pub(crate) mod hnf;
+pub(crate) mod hnfcut;
 pub(crate) mod redsplit;
 pub(crate) mod cmirdelta;
 pub(crate) mod mcf;
@@ -1361,6 +1362,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 }
                 None => solver::solve(&prob, remaining(params)),
             };
+            if outer_level && hnfcut::on() && env_str!("ENOMOTO_MIP_HNFPRE_QUIET").is_none() {
+                eprintln!("{}", hnfcut::stats_line());
+            }
             solver::RESUME_HOOK.with(|s| *s.borrow_mut() = None);
             let (postsolve, scaling) = (&ps.0, &ps.1);
             if outer_level {

@@ -4570,6 +4570,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     fn separate(&mut self, x: &[f64], light: bool) -> Vec<Candidate> {
         let mut lap = std::time::Instant::now();
+        // 試作 `ENOMOTO_MIP_HNFCUT`: 合同式の表を分離の間だけ置く ([`super::hnfcut`])
+        let _hnfcut = if super::hnfcut::on() { super::hnfcut::Guard::new(super::hnfcut::state_for(self.dom.cong.clone(), 'a')) } else { super::hnfcut::Guard::none() };
         let fidx = if sepprof::AT_FACE.with(|c| c.get()) { 1 } else { 0 };
         let src_off = if fidx == 1 { sepprof::SRC_FACE } else { 0 };
         let tag = |cands: &mut [Candidate], src: u8| {
@@ -4862,7 +4864,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             cands.append(&mut pp.zh);
         } else if zh_on {
             let zhd = if super::zerohalf::zh_deadline_on() { sep_deadline(self.deadline) } else { None };
-            let zh = super::zerohalf::with_zh_deadline(zhd, || super::zerohalf::zerohalf_cuts(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, 100));
+            let zh = super::zerohalf::with_zh_deadline(zhd, || {
+                super::hnfcut::map_rows(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, |rw, rl, ru, ii, lo, up, xx| super::zerohalf::zerohalf_cuts(rw, rl, ru, ii, lo, up, xx, 100))
+            });
             for raw in zh {
                 push(Some(raw), &mut cands, self);
             }
@@ -4874,7 +4878,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(d) = sep_deadline(self.deadline) {
                 dl = dl.min(d);
             }
-            let (cs, gr, st) = super::snfmodk::snfmodk_cg_cuts(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, tunable!("ENOMOTO_T_MIP_SNFMODK_CUTS", 50usize, usize), dl);
+            // 試作 `ENOMOTO_MIP_HNFCUT` の `b`: 合同式の列を写した空間で作って戻す ([`super::hnfcut::map_rows`])
+            let mut side = None;
+            let cs = super::hnfcut::map_rows(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, |rw, rl, ru, ii, lo, up, xx| {
+                let (cs, gr, st) = super::snfmodk::snfmodk_cg_cuts(rw, rl, ru, ii, lo, up, xx, tunable!("ENOMOTO_T_MIP_SNFMODK_CUTS", 50usize, usize), dl);
+                side = Some((gr, st));
+                cs
+            });
+            let (gr, st) = side.expect("snfmodk");
             let c0 = cands.len();
             for raw in cs {
                 push(Some(raw), &mut cands, self);
@@ -5336,6 +5347,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_REDSPLIT` ([`super::redsplit`]、既定では使わない。根だけ): `a` = k-cuts (δ = 1/k の CMIR も候補に足す)、
         // `b` = reduce-and-split (分離に使った行を集めておき、下で縮約してからカットを作る)
         let (rs_a, rs_b) = if light || self.params.submip { (false, false) } else { super::redsplit::redsplit_mode() };
+        super::hnfcut::set_kind('c');
+        let hnfcut_st = super::hnfcut::snapshot();
         let rs_deltas = super::redsplit::deltas(rs_a);
         let mut rs_bases: Vec<Vec<(usize, f64)>> = Vec::new();
         if par {
@@ -5415,6 +5428,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let inc = self.incumbent.as_ref().map(|(_, v)| v.as_slice());
             let (pp, lp_rows_ref, vars_ref, bases_ref) = (self.p, lp_rows, &vars, &bases);
             let rs_deltas_ref = &rs_deltas;
+            let hnfcut_ref = &hnfcut_st;
             let nb = bases.len();
             let nth = par_threads.min(nb.max(1));
             let deadline = sep_deadline(self.deadline);
@@ -5423,6 +5437,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let hs: Vec<_> = (0..nth)
                     .map(|t| {
                         sc.spawn(move || {
+                            let _hc = super::hnfcut::Guard::new(hnfcut_ref.clone());
                             let c0 = super::cap_clock();
                             let mut scratch = vec![0.0f64; n];
                             let mut out = Vec::new();
@@ -5713,6 +5728,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 lp_rows.iter().map(|r| r.len()).sum::<usize>()
             );
         }
+        super::hnfcut::set_kind('a');
         // 並列の経路では tableau 行の生成は 1 回にまとまる (逐次の経路では行ごとに足し済みで、ここは端数)
         sepprof::lap(sepprof::T_TABGEN, &mut lap);
         tag(&mut cands[nsrc0..], sepprof::SRC_TAB);
@@ -5908,10 +5924,12 @@ fn sep_parallel_parts(c: &SepParCtx, row_m: usize, modes: Option<&[[u8; 2]]>, zh
     let next = AtomicUsize::new(0);
     let timed = AtomicBool::new(false);
     let nth = nth.clamp(1, ntask);
+    let hnfcut_st = super::hnfcut::snapshot();
     let parts: Vec<(Vec<(usize, Vec<Candidate>)>, f64)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nth)
             .map(|_| {
                 sc.spawn(|| {
+                    let _hc = super::hnfcut::Guard::new(hnfcut_st.clone());
                     let c0 = super::cap_clock();
                     let mut scratch = vec![0.0f64; n];
                     let mut out: Vec<(usize, Vec<Candidate>)> = Vec::new();
@@ -5930,7 +5948,9 @@ fn sep_parallel_parts(c: &SepParCtx, row_m: usize, modes: Option<&[[u8; 2]]>, zh
                             0 => {
                                 if zh_on {
                                     let zhd = if super::zerohalf::zh_deadline_on() { c.deadline } else { None };
-                                    for raw in super::zerohalf::with_zh_deadline(zhd, || super::zerohalf::zerohalf_cuts(&p.rows, &p.row_lo, &p.row_up, c.cut_int, c.glo, c.gup, c.x, 100)) {
+                                    for raw in super::zerohalf::with_zh_deadline(zhd, || {
+                                        super::hnfcut::map_rows(&p.rows, &p.row_lo, &p.row_up, c.cut_int, c.glo, c.gup, c.x, |rw, rl, ru, ii, lo, up, xx| super::zerohalf::zerohalf_cuts(rw, rl, ru, ii, lo, up, xx, 100))
+                                    }) {
                                         fin(raw, &mut cs);
                                     }
                                 }
@@ -6107,10 +6127,13 @@ fn gen_cuts_parallel(
 ) -> (Vec<Vec<Candidate>>, f64) {
     let nb = bases.len();
     let nth = nth.min(nb.max(1));
+    let hnfcut_st = super::hnfcut::snapshot();
+    let hnfcut_ref = &hnfcut_st;
     let parts: Vec<(Vec<(usize, Vec<Candidate>)>, f64)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nth)
             .map(|t| {
                 sc.spawn(move || {
+                    let _hc = super::hnfcut::Guard::new(hnfcut_ref.clone());
                     let c0 = super::cap_clock();
                     let mut scratch = vec![0.0f64; n];
                     let mut out = Vec::new();
