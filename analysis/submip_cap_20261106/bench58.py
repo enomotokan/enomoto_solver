@@ -9,7 +9,7 @@ sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
 C = {l.split(":")[0]: l.split(":", 1)[1].strip() for l in (D / "cfgs.txt").read_text().splitlines() if l and not l.startswith("#")}
 CFGS = {k: dict(a.split("=", 1) for a in v.split()) for k, v in C.items()}
-OUT = D / "bench58.jsonl"
+OUT = D / os.environ.get("BENCH58_OUT", "bench58.jsonl")
 cfgs, rep = sys.argv[1].split(","), int(sys.argv[2])
 if rep % 2:
     cfgs = cfgs[::-1]
