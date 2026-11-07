@@ -23,7 +23,7 @@ for p, d in by.items():
         if lp is not None and ac is not None and p in best and best[p] - lp > 1e-9:
             gc = "%.1f%%" % (100 * (ac - lp) / (best[p] - lp))
         st = ""
-        m = re.search(r"cong won (\d+).*only cong (\d+).*cuts (\d+)", i.get("root_stats", ""))
+        m = re.search(r"cong won (\d+).*only cong (\d+).*mapped cols \d+ cuts (\d+)", i.get("root_stats", ""))
         if m: st = "/".join(m.groups())
         f = lambda v: "-" if v is None else "%.6g" % v
         print(f"| {p} | {c} | {s} | {f(lp)} | {f(ac)} | {gc} | {res.get('status')} | {f(res.get('time'))} | {res.get('nodes')} | {st} |")
