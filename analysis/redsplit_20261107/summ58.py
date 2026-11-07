@@ -8,6 +8,6 @@ rows = bl.load([HERE / (sys.argv[1] if len(sys.argv) > 1 else "res58.jsonl")])
 R = bl.table(rows)
 keys = sorted(R)
 noise = bl.load_noise()
-for B in ["b", "a"]:
+for B in (sys.argv[2].split(",") if len(sys.argv) > 2 else ["b", "a"]):
     bl.report(R, "def", B, keys, noise=noise, label=f"def vs {B}")
     print()
