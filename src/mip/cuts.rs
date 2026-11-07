@@ -925,7 +925,8 @@ fn cmir_terms_hnfcut(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawC
         }
         (Some(o), Some(c)) => {
             let (eo, ec) = (raw_efficacy(vars, &o), raw_efficacy(vars, &c));
-            if ec > eo + 1e-9 {
+            // 同点 (相対 1e-3 以内) なら元の方 (置き換えた方は係数が 1/g の分数になり、数値の上で不利なことがある)
+            if ec > eo * (1.0 + 1e-3) + 1e-9 {
                 stat(1);
                 EFF[0].fetch_add((ec * 1e6) as u64, std::sync::atomic::Ordering::Relaxed);
                 EFF[1].fetch_add((eo * 1e6) as u64, std::sync::atomic::Ordering::Relaxed);
