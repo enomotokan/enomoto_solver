@@ -36,8 +36,8 @@ def f(v):
 
 
 rows = []
-print("| 問題 | LP (最小化の向き) | 最適値 | ENOMOTO 既定の根 | HiGHS の根 | CG 閉包 (近似) | mod-2 閉包 | mod-k 閉包 | CG の止まり方 | CG のラウンド・カット |")
-print("|---|---|---|---|---|---|---|---|---|---|")
+print("| 問題 | LP (最小化の向き) | 最適値 | ENOMOTO 既定の根 | HiGHS の根 | CG 閉包 (近似、cg の回) | mod-2 閉包 | mod-k 閉包 | CG の下からの見積もり (3 つの最大) | CG の止まり方 | CG のラウンド・カット |")
+print("|---|---|---|---|---|---|---|---|---|---|---|")
 for p in PROBS:
     base = next((clo.get((p, m)) for m in MODES if clo.get((p, m)) and "lp" in clo.get((p, m))), None)
     if base is None:
@@ -53,6 +53,8 @@ for p in PROBS:
     for m in MODES:
         c = clo.get((p, m))
         vals.append(pct(c["bound"] * s, lp, z, s) if c and "bound" in c else None)
+    cl = [v for v in vals[2:] if v is not None]
+    vals.append(max(cl) if cl else None)
     cg = clo.get((p, "cg"), {})
     last = (cg.get("hist") or [{}])[-1].get("sep", [{}])
     stop = cg.get("stop", cg.get("fail", ""))
