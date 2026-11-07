@@ -13,7 +13,7 @@ R = bl.table(bl.load([F]))
 keys = sorted(k for k in R if "def" in R[k] and B in R[k])
 bl.report(R, "def", B, keys, noise=bl.load_noise(), label="58 問 種 1・2")
 print()
-print("問題ごと (時間、未解決は 60): def r1 r2 | cd r1 r2 | cd の選ばれた新しい δ のカット/全体 (r1)")
+print(f"問題ごと (時間、未解決は 60): def r1 r2 | {B} r1 r2 | {B} の選ばれた新しい δ のカット/全体 (r1)")
 sep = {}
 for l in open(F):
     r = json.loads(l)
