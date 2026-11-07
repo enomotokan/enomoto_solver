@@ -24,6 +24,14 @@ CFGS = {
     "mk50novb": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_MODKVB_LOG": "1", "ENOMOTO_T_MIP_MODKVB_MAXCANDS": "50", "ENOMOTO_MIP_MODKVB_NOVB": "1", "PYTHONPATH": "/tmp/pyw5"},
     "mk50nocut": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_MODKVB_LOG": "1", "ENOMOTO_T_MIP_MODKVB_MAXCANDS": "50", "ENOMOTO_MIP_MODKVB_NOCUTROWS": "1", "PYTHONPATH": "/tmp/pyw5"},
     "mk50k2": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_MODKVB_LOG": "1", "ENOMOTO_T_MIP_MODKVB_MAXCANDS": "50", "ENOMOTO_MIP_MODKVB_K2": "1", "PYTHONPATH": "/tmp/pyw5"},
+    # 6 章 (wheel は /tmp/pyw6 = 35ec5a71 + pyw6_from_35ec5a71.patch: pyw5 に zerohalf との比べの診断と CG の式の形を足したもの)
+    "def6": {"PYTHONPATH": "/tmp/pyw6"},
+    "nozh6": {"ENOMOTO_MIP_NO_ZEROHALF": "1", "PYTHONPATH": "/tmp/pyw6"},
+    "mk50z": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_MODKVB_LOG": "1", "ENOMOTO_T_MIP_MODKVB_MAXCANDS": "50", "ENOMOTO_MIP_MODKVB_ZHCMP": "1", "PYTHONPATH": "/tmp/pyw6"},
+    "mk50nozh6": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_MODKVB_LOG": "1", "ENOMOTO_T_MIP_MODKVB_MAXCANDS": "50", "ENOMOTO_MIP_NO_ZEROHALF": "1", "PYTHONPATH": "/tmp/pyw6"},
+    "mk50skz": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_MODKVB_LOG": "1", "ENOMOTO_T_MIP_MODKVB_MAXCANDS": "50", "ENOMOTO_MIP_MODKVB_ZHCMP": "1", "ENOMOTO_MIP_MODKVB_SKIPZH": "1", "PYTHONPATH": "/tmp/pyw6"},
+    "mk50cg": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_MODKVB_LOG": "1", "ENOMOTO_T_MIP_MODKVB_MAXCANDS": "50", "ENOMOTO_MIP_MODKVB_CG": "1", "ENOMOTO_MIP_MODKVB_ZHCMP": "1", "PYTHONPATH": "/tmp/pyw6"},
+    "mk50cgb": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_MODKVB_LOG": "1", "ENOMOTO_T_MIP_MODKVB_MAXCANDS": "50", "ENOMOTO_MIP_MODKVB_CG": "both", "ENOMOTO_MIP_MODKVB_ZHCMP": "1", "PYTHONPATH": "/tmp/pyw6"},
 }
 cfg, p, tl, rep, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 root = len(sys.argv) > 6 and sys.argv[6] == "root"
@@ -54,6 +62,11 @@ for l in err.splitlines():
         loops.append({"added": int(m.group(1)), "in_lp": int(m.group(2)), "obj0": float(m.group(3)), "obj1": float(m.group(4)), "t": last_t, "rounds": rounds})
         last_t, rounds = None, 0
 sep = [l for l in err.splitlines() if l.startswith("SEP modkvb") or l.startswith("SEP mushagg")]
+zh = [0] * 9
+for l in err.splitlines():
+    if l.startswith("MODKVB_ZHCMP"):
+        v = [int(t) for t in re.findall(r" (\d+)", l)]
+        zh = [a + b for a, b in zip(zh, v)]
 mk = {"calls": len(sep), "cands": 0, "time": 0.0, "timeout": 0}
 for l in sep:
     m = re.search(r"cands (\d+)", l); mk["cands"] += int(m.group(1)) if m else 0
@@ -63,7 +76,7 @@ for l in sep:
 with gzip.open(D / "logs" / f"{cfg}_{p}_{tl}_r{rep}{'_root' if root else ''}.err.gz", "wt") as f:
     f.write(err)
 rec = {"problem": p, "cfg": cfg, "tl": tl, "rep": rep, "root": root, "wall": round(time.time() - t0, 1), "result": res, "root_loops": loops[:4],
-       "sep": mk, "sep_first": sep[:2], "warn": err.count("MIP: WARNING"), "at": time.strftime("%H:%M:%S")}
+       "sep": mk, "zhcmp": zh, "sep_first": sep[:2], "warn": err.count("MIP: WARNING"), "at": time.strftime("%H:%M:%S")}
 with open(OUT, "a") as f:
     f.write(json.dumps(rec) + "\n")
 print(p, cfg, rep, res.get("status"), res.get("time"), res.get("objective"), res.get("bound"), loops[:1], mk, flush=True)
