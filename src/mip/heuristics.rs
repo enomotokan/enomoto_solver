@@ -1695,7 +1695,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP` で使わない): 根の (主のスレッドで解く) サブ MIP も成果で打ち切る ([`super::solver::submip_outcome_stop`])
         if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
-            let c = super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol).with_subcap(self.root_lp_secs);
+            let c = super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol).with_subcap(self.root_lp_secs).with_subcap_t(self.params.time_limit);
             // 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 目的関数を変えないサブ MIP に外側の下界を渡す
             let c = if super::solver::lose6_2_sublb() && cutoff.is_none() { c.with_outer_lb(self.root_lb_now(), self.bg_watch_job()) } else { c };
             super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(std::sync::Arc::new(c)));
