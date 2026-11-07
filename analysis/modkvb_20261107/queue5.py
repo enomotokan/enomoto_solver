@@ -35,6 +35,14 @@ for rep in [1, 2]:
     for p in PM:
         for cfg in ["def5", "mk50b", "nozh", "mk50nozh", "mk50novb", "mk50nocut", "mk50k2"]:
             run(p, cfg, 90, rep, "rootmitt.jsonl", True)
+# queue4 の 1 の残り (58 問の根の 2 回目)
+P58 = ["misc07", "fiber", "mzzv42z", "p0201", "nu25-pr12", "swath1", "rout", "blend2", "mc11", "h80x6320d", "qnet1", "neos5"]
+for p in PROBS:
+    for cfg in ["nozh", "mk50nozh"]:
+        run(p, cfg, 60, 2, "root58.jsonl", True)
+for p in P58:
+    for cfg in ["mk50novb", "mk50nocut", "mk50k2"]:
+        run(p, cfg, 60, 2, "root58.jsonl", True)
 for rep in [1, 2]:
     for p in PROBS:
         for cfg in ["mk50z", "mk50cg", "mk50cgb"]:
