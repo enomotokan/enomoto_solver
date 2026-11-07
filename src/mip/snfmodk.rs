@@ -521,6 +521,9 @@ pub(crate) struct SnfStats {
     pub best_eff_p: f64,
     /// 作ったカットのうち、行 1 本だけの元 (行の係数の最大公約数で割るのと同じ) から出たもの
     pub cuts_single: usize,
+    /// 位数が 2・3・5・7 以外で、行 2 本以上の元から出たカット (その数, 効き目の最大)
+    pub cuts_new_multi: usize,
+    pub best_eff_new_multi: f64,
 }
 
 /// zerohalf と同じ行・列の選び方で、余裕 0 の行の連立 A_N の群から CG カットを作る。引数は [`super::zerohalf::zerohalf_cuts`] と同じ。
@@ -598,7 +601,7 @@ pub(crate) fn snfmodk_cg_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up
     let elems = group_elements(&gr, &rhs, tunable!("ENOMOTO_T_MIP_SNFMODK_ELEMS", 200usize, usize), 1 << 40);
     st.elems = elems.len();
     // カットを作る
-    let mut cuts: Vec<(f64, bool, RawCut)> = Vec::new();
+    let mut cuts: Vec<(f64, bool, bool, RawCut)> = Vec::new();
     let mut acc = vec![0i128; n];
     let mut touched: Vec<usize> = Vec::new();
     'el: for el in &elems {
@@ -665,6 +668,10 @@ pub(crate) fn snfmodk_cg_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up
             let eff = (act - rhs_x) / nrm;
             let newk = !matches!(el.order, 2 | 3 | 5 | 7);
             st.cuts_single += (el.w.len() == 1) as usize;
+            if newk && el.w.len() > 1 {
+                st.cuts_new_multi += 1;
+                st.best_eff_new_multi = st.best_eff_new_multi.max(eff);
+            }
             if newk {
                 st.cuts_new += 1;
                 st.best_eff_new = st.best_eff_new.max(eff);
@@ -672,13 +679,14 @@ pub(crate) fn snfmodk_cg_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up
                 st.cuts_p += 1;
                 st.best_eff_p = st.best_eff_p.max(eff);
             }
-            cuts.push((eff, newk, RawCut { coefs, rhs: rhs_x }));
+            cuts.push((eff, newk, el.w.len() > 1, RawCut { coefs, rhs: rhs_x }));
         }
     }
     cuts.sort_by(|a, b| b.0.total_cmp(&a.0));
-    // `ENOMOTO_MIP_SNFMODK` に `n` を付けたら位数が 2・3・5・7 以外の元のカットだけ
-    let only_new = snfmodk_has('n');
-    let out: Vec<RawCut> = cuts.into_iter().filter(|c| !only_new || c.1).take(max_cuts).map(|c| c.2).collect();
+    // `ENOMOTO_MIP_SNFMODK` に `n` を付けたら位数が 2・3・5・7 以外の元のカットだけ、`m` を付けたら行 2 本以上の元のカットだけ
+    // (行 1 本の元は行の係数の最大公約数で割って丸めるのと同じで、元の行 1 本ずつの分離と重なる)
+    let (only_new, only_multi) = (snfmodk_has('n'), snfmodk_has('m'));
+    let out: Vec<RawCut> = cuts.into_iter().filter(|c| (!only_new || c.1) && (!only_multi || c.2)).take(max_cuts).map(|c| c.3).collect();
     (out, gr, st)
 }
 
