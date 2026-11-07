@@ -78,7 +78,7 @@ class Model:
         for j in range(self.n):
             if self.lo[j] > -INF:
                 self.sig[j], self.d[j] = 1.0, self.lo[j]
-                if self.up[j] < INF:
+                if self.up[j] < INF and self.up[j] - self.lo[j] < 1e6:  # 1e6 以上の幅は無限とみなす (roll3000 の 1e9 で分離 MIP が壊れた)
                     self.W[j] = self.up[j] - self.lo[j]
             elif self.up[j] < INF:
                 self.sig[j], self.d[j] = -1.0, self.up[j]
