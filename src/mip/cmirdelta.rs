@@ -10,7 +10,7 @@
 //! - `l` (LLL): 格子 `{(q ε, q α_1 - p_1, ..., q α_n - p_n)}` の基底を浮動小数点の LLL (Lenstra–Lenstra–Lovász 1982) で縮約し、
 //!   短いベクトルの `q` を使う (Lagarias 1985 の同時近似)。変換行列は i64 で溢れを検査して持ち、`q` と残差は元の係数から計算し直して検算する。
 //!
-//! 値は `1` (= `gcl`) か、`g`・`c`・`l` の組み合わせ。候補の数 (`ENOMOTO_T_CMIRDELTA_K`、既定 8)・使う列の数 (`ENOMOTO_T_CMIRDELTA_N`、既定 10)・
+//! 値は `1` (= `gcl`) か、`g`・`c`・`l` の組み合わせ。候補の数 (`ENOMOTO_T_CMIRDELTA_K`、既定 8)・使う列の数 (`ENOMOTO_T_CMIRDELTA_N`、既定 8)・
 //! `q` の上限 (`ENOMOTO_T_CMIRDELTA_QMAX`、既定 64)・LLL の入れ替えの回数 (列の数の 20 倍) と、全体の時間 (`ENOMOTO_T_CMIRDELTA_SECS`、
 //! 既定 20 秒、全スレッドの合計) に上限がある。
 //!
@@ -168,7 +168,7 @@ pub(crate) fn extra_deltas(ints: &[(f64, f64, f64)], existing: &[f64]) -> Vec<(f
     let t0 = std::time::Instant::now();
     CALLS.fetch_add(1, Ordering::Relaxed);
     let kmax = tunable!("ENOMOTO_T_CMIRDELTA_K", 8usize, usize);
-    let nmax = tunable!("ENOMOTO_T_CMIRDELTA_N", 10usize, usize).max(1);
+    let nmax = tunable!("ENOMOTO_T_CMIRDELTA_N", 8usize, usize).max(1);
     let qmax = tunable!("ENOMOTO_T_CMIRDELTA_QMAX", 64i64, i64).max(2);
     // 列: LP 値が境界の内側のものを先に、次に係数の大きい順。|a| の重複は除く
     let mut cols: Vec<(f64, bool)> = ints
@@ -220,8 +220,8 @@ pub(crate) fn extra_deltas(ints: &[(f64, f64, f64)], existing: &[f64]) -> Vec<(f
         }
         // l: LLL
         if m & 4 != 0 && alphas.len() >= 2 {
-            for eps_q in [qmax, 8.min(qmax)] {
-                for q in lll_multipliers(&alphas, eps_q, qmax) {
+            if r == refs[0] {
+                for q in lll_multipliers(&alphas, qmax, qmax) {
                     push(&mut out, r / q as f64, 2);
                 }
             }
@@ -241,7 +241,8 @@ pub(crate) fn extra_deltas(ints: &[(f64, f64, f64)], existing: &[f64]) -> Vec<(f
         CALLS_NEW.fetch_add(1, Ordering::Relaxed);
         NEW_DELTAS.fetch_add(out.len() as u64, Ordering::Relaxed);
     }
-    TIME_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    let el = t0.elapsed().as_nanos() as u64;
+    TIME_NS.fetch_add(el, Ordering::Relaxed);
     out
 }
 
@@ -377,6 +378,9 @@ fn dot(x: &[f64], y: &[f64]) -> f64 {
 fn lll(b: &mut [Vec<f64>], u: &mut [Vec<i64>], max_swaps: usize) -> bool {
     let d = b.len();
     let (mut mu, mut bn) = gram_schmidt(b);
+    if bn.iter().any(|&v| v <= 0.0) {
+        return false;
+    }
     let mut k = 1;
     let mut swaps = 0;
     const LIM: i64 = 1 << 40;
@@ -422,9 +426,25 @@ fn lll(b: &mut [Vec<f64>], u: &mut [Vec<i64>], max_swaps: usize) -> bool {
             if swaps > max_swaps {
                 return false;
             }
-            let g = gram_schmidt(b);
-            mu = g.0;
-            bn = g.1;
+            // Gram–Schmidt の更新 (Cohen 1993 の Algorithm 2.6.3 の SWAP)
+            let m = mu[k][k - 1];
+            let big = bn[k] + m * m * bn[k - 1];
+            if big <= 0.0 {
+                return false;
+            }
+            mu[k][k - 1] = m * bn[k - 1] / big;
+            bn[k] = bn[k - 1] * bn[k] / big;
+            bn[k - 1] = big;
+            for j in 0..k - 1 {
+                let t = mu[k - 1][j];
+                mu[k - 1][j] = mu[k][j];
+                mu[k][j] = t;
+            }
+            for i in k + 1..d {
+                let t = mu[i][k];
+                mu[i][k] = mu[i][k - 1] - m * t;
+                mu[i][k - 1] = t + mu[k][k - 1] * mu[i][k];
+            }
             k = (k - 1).max(1);
         }
     }
@@ -465,5 +485,33 @@ mod tests {
         if mode() == 0 {
             assert!(extra_deltas(&[(3.0, 0.5, 1.0), (5.0, 0.2, 1.0)], &[3.0]).is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod timing {
+    #[test]
+    #[ignore]
+    fn time_pieces() {
+        let mut s: u64 = 12345;
+        let mut rnd = || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let sets: Vec<Vec<f64>> = (0..1000).map(|_| (0..8).map(|_| 0.1 + 5.0 * rnd()).collect()).collect();
+        let t = std::time::Instant::now();
+        let mut c = 0;
+        for a in &sets {
+            c += super::lll_multipliers(a, 64, 64).len();
+        }
+        eprintln!("lll {:.1}us/call ({c})", t.elapsed().as_secs_f64() * 1e6 / 1000.0);
+        let t = std::time::Instant::now();
+        for a in &sets {
+            for &x in a.iter().take(4) {
+                c += super::convergent_denominators(x, 64).len();
+            }
+            c += super::common_denominator(a, 10_000).is_some() as usize;
+        }
+        eprintln!("cf+gcd {:.1}us/call ({c})", t.elapsed().as_secs_f64() * 1e6 / 1000.0);
     }
 }
