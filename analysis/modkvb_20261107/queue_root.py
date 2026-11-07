@@ -59,8 +59,12 @@ for p in MITT:
     run(p, "mk", 90, "rootmitt.jsonl")
     if mk_cands("rootmitt.jsonl").get(p, 0) > 0:
         run(p, "def", 90, "rootmitt.jsonl")
-mc = mk_cands("rootmitt.jsonl")
+# HiGHS は mk と def の根の下界が違った問題だけ (時間の節約)
+B = {}
+for l in open(D / "rootmitt.jsonl"):
+    r = json.loads(l); B.setdefault(r["problem"], {})[r["cfg"]] = r["result"].get("bound")
 for p in MITT:
-    if mc.get(p, 0) > 0:
+    b = B.get(p, {})
+    if isinstance(b.get("mk"), (int, float)) and isinstance(b.get("def"), (int, float)) and abs(b["mk"] - b["def"]) > 1e-6 * max(1, abs(b["def"])):
         run(p, "highs", 90, "rootmitt.jsonl")
 side_jobs()
