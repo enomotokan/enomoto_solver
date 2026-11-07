@@ -1,1 +1,21 @@
 ## cargo test
+## mip_fuzz_vs_highs 300 (def)
+bad 0 of 300 time 3.4
+## fuzz_hnf 1000 (def)
+bad 0 of 1000 {'infeasible': 420, 'optimal': 580} time 12.2
+## fuzz_hnf 1000 (HNFPRE=1)
+bad 0 of 1000 {'infeasible': 420, 'optimal': 580} time 7.8
+## fuzz_lat 1000 (def)
+bad 0 of 1000 {'optimal': 765, 'infeasible': 235} time 13.8
+## fuzz_lat 1000 (HNFPRE_LAT=1)
+bad 0 of 1000 {'optimal': 765, 'infeasible': 235} time 13.1
+## fuzz_lat 1000 (HNFPRE_LAT=1, LU 修正なし T_LU_DENSE_SING_TOL=0)
+seed 4 highs Optimal -37.4 ours optimal 13.000000000000002
+bad 1 of 1000 {'optimal': 765, 'infeasible': 235} time 12.0
+## mip_fuzz_vs_highs 3000 1000 (def)
+seed 3470 highs Optimal -181.206732015515 ours infeasible None
+bad 1 of 3000 time 35.9
+## mip_fuzz_vs_highs 3000 1000 (LU 修正なし)
+seed 3470 highs Optimal -181.206732015515 ours infeasible None
+bad 1 of 3000 time 36.2
+CHK_DONE
