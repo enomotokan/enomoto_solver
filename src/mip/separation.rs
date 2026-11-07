@@ -2318,6 +2318,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 lim
             };
+            // 試作 `ENOMOTO_MIP_CUTLPCAP` の検査用 (`ENOMOTO_T_MIP_CUTLPCAP_TESTCAP` = k > 0): 反復の上限を k にして `a` の解き直しを必ず通す (誤答の検査だけに使う)
+            let lim = match tunable!("ENOMOTO_T_MIP_CUTLPCAP_TESTCAP", 0u64, u64) {
+                k if k > 0 && cl.is_some() => k,
+                _ => lim,
+            };
             if cl_log {
                 eprintln!("MIP: cut round {round}: CUTLPCAP cap {lim} cuts {} rows {} root_iters {root_iters} ok_iters {ok_lp_iters}", rows.len(), self.lp.num_rows());
             }
