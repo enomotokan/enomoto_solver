@@ -5,6 +5,7 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 WT = D.parents[1]
 CFGS = {
+    # base は既定化 (2026-11-07) の前のビルドでの既定。既定化の後のビルドで同じ形を回すには ENOMOTO_MIP_ROOTLP_SCALE=0 を足す
     "base": {},
     "fix": {"ENOMOTO_MIP_ROOTLP_SCALE": "1"},
     "fixm5k": {"ENOMOTO_MIP_ROOTLP_SCALE": "1", "ENOMOTO_T_MIP_ROOTLP_SCALE_MIN_M": "5000"},
