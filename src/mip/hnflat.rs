@@ -1,7 +1,7 @@
 //! 試作 `ENOMOTO_MIP_HNFPRE_LAT` (既定では使わない): 整数列を格子の簡約した基底で置き換える書き直し
 //! (Aardal–Hurkens–Lenstra 2000 の格子の書き直しを、最適化問題・連続列つきの問題に広げたもの)。
 //!
-//! 整数列 x (n_I 本) を `x = U^T ν` (U は n_I × n_I の単模な整数行列、ν は上下限のない整数) と置き換える。U の行は
+//! 整数列 x (n_I 本) を `x = U^T ν` (U は n_I × n_I の単模な整数行列、ν は整数 (上下限は x の箱から出る範囲)) と置き換える。U の行は
 //! 埋め込み `[e_j | N A_eq e_j]` (A_eq は等式の行の整数列の係数、N は大きな重み) を LLL で簡約した基底の前半で、
 //! 先頭の n_I − rank 本は A_eq の核 (A_eq u = 0) になる。U は単模なので、x の整数解と ν の整数解は 1 対 1 に対応し
 //! (問題は同値)、元の整数列の上下限は行 `lo_j ≤ Σ_k U_kj ν_k ≤ up_j` になる。連続列はそのまま残す。
@@ -125,6 +125,46 @@ fn lll(b: &mut [Vec<i128>], max_steps: usize, deadline: std::time::Instant) -> O
     Some(())
 }
 
+/// 単模な整数行列の逆行列 (整数)。f64 の Gauss–Jordan で求めて丸め、`u w = I` を i128 で確かめる。
+fn int_inverse(u: &[Vec<i64>]) -> Option<Vec<Vec<i64>>> {
+    let n = u.len();
+    let mut a: Vec<Vec<f64>> = (0..n).map(|i| {
+        let mut r: Vec<f64> = u[i].iter().map(|&v| v as f64).collect();
+        r.extend((0..n).map(|j| if i == j { 1.0 } else { 0.0 }));
+        r
+    }).collect();
+    for c in 0..n {
+        let p = (c..n).max_by(|&x, &y| a[x][c].abs().partial_cmp(&a[y][c].abs()).unwrap())?;
+        if a[p][c].abs() < 1e-9 {
+            return None;
+        }
+        a.swap(c, p);
+        let pv = a[c][c];
+        for v in a[c].iter_mut() {
+            *v /= pv;
+        }
+        for r in 0..n {
+            if r != c && a[r][c] != 0.0 {
+                let f = a[r][c];
+                let (rc, rr) = if r < c { let (x, y) = a.split_at_mut(c); (&y[0], &mut x[r]) } else { let (x, y) = a.split_at_mut(r); (&x[c], &mut y[0]) };
+                for t in 0..2 * n {
+                    rr[t] -= f * rc[t];
+                }
+            }
+        }
+    }
+    let w: Vec<Vec<i64>> = (0..n).map(|i| (0..n).map(|j| a[i][n + j].round() as i64).collect()).collect();
+    for i in 0..n {
+        for j in 0..n {
+            let s: i128 = (0..n).map(|t| u[i][t] as i128 * w[t][j] as i128).sum();
+            if s != (i == j) as i128 {
+                return None;
+            }
+        }
+    }
+    Some(w)
+}
+
 /// 書き直しを作る (条件に合わなければ `None`)。
 pub(crate) fn reform(p: &MipProblem, verbose: bool) -> Option<LatReform> {
     let t0 = std::time::Instant::now();
@@ -202,10 +242,31 @@ pub(crate) fn reform(p: &MipProblem, verbose: bool) -> Option<LatReform> {
         u.push(r);
     }
     let ker = b.iter().filter(|r| r[ni..].iter().all(|&v| v == 0)).count();
+    // ν = U^{-T} x なので、x の箱から ν の上下限が出る。U は単模なので逆行列 W = U^{-1} は整数 (f64 の Gauss–Jordan で求めて
+    // 丸め、U W = I を整数で確かめる。合わなければ書き直さない)。上下限のない列を作らない (列だけの基底からの根の LP が自由変数で
+    // 誤る件、analysis/hnfpre_20261107.md §9。ヒューリスティクスにも上下限がある方がよい)
+    let w = int_inverse(&u)?;
+    let mut nu_lo = vec![0.0f64; ni];
+    let mut nu_up = vec![0.0f64; ni];
+    for k in 0..ni {
+        let (mut l, mut h) = (0.0f64, 0.0f64);
+        for (t, &j) in int_cols.iter().enumerate() {
+            let c = w[t][k] as f64;
+            if c > 0.0 {
+                l += c * p.col_lo[j];
+                h += c * p.col_up[j];
+            } else if c < 0.0 {
+                l += c * p.col_up[j];
+                h += c * p.col_lo[j];
+            }
+        }
+        nu_lo[k] = l.round();
+        nu_up[k] = h.round();
+    }
     // 新しい問題
     let nq = ni + cont_cols.len();
-    let mut col_lo = vec![f64::NEG_INFINITY; ni];
-    let mut col_up = vec![f64::INFINITY; ni];
+    let mut col_lo = nu_lo;
+    let mut col_up = nu_up;
     let mut cost: Vec<f64> = (0..ni).map(|k| int_cols.iter().enumerate().map(|(t, &j)| p.cost[j] * u[k][t] as f64).sum()).collect();
     let mut is_int = vec![true; ni];
     for &j in &cont_cols {
@@ -262,6 +323,10 @@ pub(crate) fn reform(p: &MipProblem, verbose: bool) -> Option<LatReform> {
     if verbose || env_str!("ENOMOTO_MIP_HNFPRE_QUIET").is_none() {
         let umax = u.iter().flatten().map(|v| v.abs()).max().unwrap_or(0);
         eprintln!("HNFPRE_LAT: {ni} integer columns, {} equality rows, kernel {ker}, max |U| {umax}, N {nw}, {:.3}s", aeq.len(), lll_secs);
+    }
+    // 診断用: 書き直した問題を書き出す
+    if let Some(path) = env_str!("ENOMOTO_MIP_HNFPRE_LAT_DUMP") {
+        let _ = q.write_mps(path);
     }
     Some(LatReform { q, int_cols, cont_cols, u, ker, lll_secs })
 }

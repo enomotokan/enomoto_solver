@@ -1901,8 +1901,20 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
     let row_perm: Vec<usize> = fwd.iter().map(|&idx| usize::from(idx)).collect();
     let col_perm: Vec<usize> = (0..m).collect();
 
+    // 特異の判定: 対角が厳密な 0 か、元の列の最大の絶対値の `ENOMOTO_T_LU_DENSE_SING_TOL` (既定 1e-11) 倍以下 (部分ピボットは
+    // 残りの列の最大を選ぶので、それがこれほど小さければ列は数値的に従属)。以前は厳密な 0 だけを見ていて、構造的に特異な
+    // 基底の消去の打ち消しで残った 6.7e-17 を軸に取り、基底解が 1e17 になって単体法が誤った「最適」を返していた
+    // (analysis/hnfpre_20261107.md §9、`wrong_q4.mps`)
+    let sing_tol = tunable!("ENOMOTO_T_LU_DENSE_SING_TOL", 1e-11, f64);
+    let mut col_max = vec![0.0f64; m];
+    for row in rows_in {
+        for &(j, v) in row {
+            col_max[j] = col_max[j].max(v.abs());
+        }
+    }
     for step in 0..m {
-        if u[(step, step)] == 0.0 {
+        let d = u[(step, step)];
+        if d == 0.0 || d.abs() <= sing_tol * col_max[col_perm[step]] {
             return None;
         }
     }
@@ -9620,5 +9632,40 @@ mod tests {
         let mut out = vec![0.0; m];
         state.solve_sparse_into(&to_sparse(&rhs), &mut scratch, &mut gp, &mut out);
         assert!(approx_vec(&out, &x_full), "sparse-rhs path ft={out:?} full={x_full:?}");
+    }
+}
+
+#[cfg(test)]
+mod hnf_singular_tests {
+    use super::*;
+
+    /// 構造的に特異 (行 3〜6 の 4 行に非零を持つ列が 3 本) な 7x7 の基底 (analysis/hnfpre_20261107.md §9、`wrong_q4.mps` の根の LP の
+    /// 列だけの基底)。分解は `None` (特異) を返すべき。
+    #[test]
+    fn structurally_singular_basis_is_rejected() {
+        let cols: Vec<Vec<(usize, f64)>> = vec![
+            vec![(0, 8.0), (1, 1.0), (4, -1.0), (5, 1.0), (6, -1.0)],
+            vec![(0, 1.0), (1, 1.0), (2, -2.0), (3, -1.0)],
+            vec![(0, 15.0), (1, 1.0), (2, 1.0), (4, 3.0), (5, -4.0), (6, -2.0)],
+            vec![(2, -1.0)],
+            vec![(0, 1.0)],
+            vec![(1, 1.0)],
+            vec![(2, 1.0)],
+        ];
+        let m = 7;
+        let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+        for (c, col) in cols.iter().enumerate() {
+            for &(i, v) in col {
+                rows[i].push((c, v));
+            }
+        }
+        // 疎な Markowitz の経路も特異と判定すること
+        assert!(factorize_flat_markowitz_routed(m, &rows, false, 0.0).is_none(), "sparse path accepted a singular basis");
+        let r = factorize(m, &rows);
+        if let Some(lu) = &r {
+            let x = lu.solve(&[7.0, 6.0, -10.0, -5.0, 0.0, 0.0, 1.0]);
+            eprintln!("factorize accepted: x = {x:?}");
+        }
+        assert!(r.is_none());
     }
 }
