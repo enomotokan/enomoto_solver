@@ -796,6 +796,25 @@ fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut
     Some(RawCut { coefs, rhs: r })
 }
 
+/// 試作 `ENOMOTO_MIP_REDSPLIT` ([`super::redsplit`]): δ の候補を与えた CMIR。単体表の行 (基底の整数列の係数が整数) では
+/// δ = 1/k が「行を k 倍してから GMI」(k-cuts) に当たる。効き目の最も大きい δ で [`cmir_build`] と同じく作る
+pub fn cmir_with_deltas(vars: &CutVars, base: &[(usize, f64)], rhs: f64, deltas: &[f64]) -> Option<RawCut> {
+    let (terms, beta) = substitute(vars, base, rhs)?;
+    if !terms.iter().any(|t| t.int) {
+        return None;
+    }
+    let mut best: Option<(f64, f64)> = None;
+    for &delta in deltas {
+        if let Some(eff) = mir_efficacy(&terms, beta, delta) {
+            if best.is_none_or(|(_, e)| eff > e) {
+                best = Some((delta, eff));
+            }
+        }
+    }
+    let (delta, eff) = best?;
+    cmir_build(vars, terms, beta, delta, eff)
+}
+
 /// [`cmir`] の本体 (置き換え済みの項と右辺から)。
 fn cmir_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
     if !terms.iter().any(|t| t.int) {

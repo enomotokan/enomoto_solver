@@ -5321,6 +5321,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             && !tab_rules
             && !nnz_budget.is_finite()
             && env_str!("ENOMOTO_MIP_SEP_SEQ").is_none();
+        // 試作 `ENOMOTO_MIP_REDSPLIT` ([`super::redsplit`]、既定では使わない。根だけ): `a` = k-cuts (δ = 1/k の CMIR も候補に足す)、
+        // `b` = reduce-and-split (分離に使った行を集めておき、下で縮約してからカットを作る)
+        let (rs_a, rs_b) = if light || self.params.submip { (false, false) } else { super::redsplit::redsplit_mode() };
+        let rs_deltas = super::redsplit::deltas(rs_a);
+        let mut rs_bases: Vec<Vec<(usize, f64)>> = Vec::new();
         if par {
             let mut bases: Vec<Vec<(usize, f64)>> = Vec::new();
             for &(s, _) in basics.iter() {
@@ -5397,6 +5402,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (cut_int, glo, gup) = (&self.cut_int[..], &self.dom.global_lo[..], &self.dom.global_up[..]);
             let inc = self.incumbent.as_ref().map(|(_, v)| v.as_slice());
             let (pp, lp_rows_ref, vars_ref, bases_ref) = (self.p, lp_rows, &vars, &bases);
+            let rs_deltas_ref = &rs_deltas;
             let nb = bases.len();
             let nth = par_threads.min(nb.max(1));
             let deadline = sep_deadline(self.deadline);
@@ -5419,6 +5425,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     for raw in generate_cuts(vars_ref, b, 0.0, tab_fc, false) {
                                         if let Some(c) = finish_cut(raw, n, lp_rows_ref, cut_int, glo, gup, x, inc, &mut scratch) {
                                             cs.push(c);
+                                        }
+                                    }
+                                    if rs_a {
+                                        if let Some(raw) = super::cuts::cmir_with_deltas(vars_ref, b, 0.0, rs_deltas_ref) {
+                                            if let Some(c) = finish_cut(raw, n, lp_rows_ref, cut_int, glo, gup, x, inc, &mut scratch) {
+                                                cs.push(c);
+                                            }
                                         }
                                     }
                                     keep_best(&mut cs, n0, pp);
@@ -5451,6 +5464,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if dbg_sep {
                 t_gen += t0.elapsed().as_secs_f64();
+            }
+            if rs_b {
+                rs_bases = bases;
             }
         } else {
             for (bi, &(s, score)) in basics.iter().enumerate() {
@@ -5567,6 +5583,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 n_rows_used += 1;
                 base_nnz_total += base.len();
+                if rs_b {
+                    rs_bases.push(base.clone());
+                }
                 sepprof::lap(sepprof::T_TABAGG, &mut lap);
                 if !gen_old() {
                     let t0 = std::time::Instant::now();
@@ -5585,6 +5604,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let n0 = cands.len();
                         for c in generate_cuts(&vars, b, 0.0, tab_fc, false) {
                             push(Some(c), &mut cands, self);
+                        }
+                        if rs_a {
+                            push(super::cuts::cmir_with_deltas(&vars, b, 0.0, &rs_deltas), &mut cands, self);
                         }
                         keep_best(&mut cands, n0, self.p);
                     }
@@ -5613,6 +5635,45 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     push(lifted_flow_cover(&vars, &base, 0.0), &mut cands, self);
                     push(lifted_flow_cover(&vars, &neg, 0.0), &mut cands, self);
                 }
+            }
+        }
+        // 試作 `ENOMOTO_MIP_REDSPLIT` の `b`: 集めた行を縮約し、短くなった行から δ の候補 ([`super::redsplit::deltas`]) で CMIR を作る
+        if rs_b && !rs_bases.is_empty() {
+            let t0 = std::time::Instant::now();
+            let tl = tunable!("ENOMOTO_T_MIP_REDSPLIT_TIME", 0.5f64, f64);
+            let dl = t0 + std::time::Duration::from_secs_f64(tl);
+            let dl = match sep_deadline(self.deadline) {
+                Some(d) if d < dl => d,
+                _ => dl,
+            };
+            let (rows, st) = super::redsplit::reduce(&rs_bases, &is_int, n, Some(dl));
+            let c0 = cands.len();
+            for (_, row) in &rows {
+                if self.time_up() {
+                    break;
+                }
+                let neg: Vec<(usize, f64)> = row.iter().map(|&(k, a)| (k, -a)).collect();
+                for b in [row, &neg] {
+                    let n0 = cands.len();
+                    push(super::cuts::cmir_with_deltas(&vars, b, 0.0, &rs_deltas), &mut cands, self);
+                    keep_best(&mut cands, n0, self.p);
+                }
+            }
+            if dbg_sep || env_str!("ENOMOTO_MIP_REDSPLIT_LOG").is_some() {
+                let effs: Vec<f64> = cands[c0..].iter().map(|c| c.efficacy).collect();
+                let emax = effs.iter().fold(0.0f64, |m, &v| m.max(v));
+                eprintln!(
+                    "REDSPLIT pass {} rows {} (cont {}) reduced {} (mean norm2 ratio {:.3}) rejected {} cuts {} (max eff {:.4}) {:.3}s",
+                    self.sep_pass,
+                    rs_bases.len(),
+                    st.rows,
+                    st.reduced,
+                    st.ratio_sum / st.reduced.max(1) as f64,
+                    st.rejected,
+                    effs.len(),
+                    emax,
+                    t0.elapsed().as_secs_f64()
+                );
             }
         }
         if dbg_sep && tab_cbc_init.is_some() {
