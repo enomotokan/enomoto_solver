@@ -21,6 +21,9 @@ CFGS = {
     "mka": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_CUTLPCAP": "al"},
     "mkn": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_CUTLPCAP": "nl"},
     "mkc": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_CUTLPCAP": "cl"},
+    # HNFSUBST (並行の試作、analysis/hnfsubst_20261107.md) と合わせたもの (mzzv11 が同じ型と知らせを受けた)
+    "hs": {"ENOMOTO_MIP_HNFSUBST": "1", **L},
+    "hsa": {"ENOMOTO_MIP_HNFSUBST": "1", "ENOMOTO_MIP_CUTLPCAP": "al"},
 }
 cfg, p, tl, rep, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 root = len(sys.argv) > 6 and sys.argv[6] == "root"

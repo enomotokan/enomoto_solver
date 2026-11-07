@@ -8,6 +8,8 @@ from queue1 import run  # noqa: E402
 for p in ["physiciansched6-2"]:
     for cfg in ["mk", "mka", "mkn", "mkc"]:
         run(p, cfg, 60, "rootcmp_mk.jsonl")
+for cfg in ["hs", "hsa"]:
+    run("mzzv11", cfg, 90, "rootcmp_hs.jsonl")
 for cfg in ["def", "a", "n", "c", "ac"]:
     for p in json.load(open(D / "flagged.json")):
         run(p, cfg, 90, "rootcmp.jsonl")
