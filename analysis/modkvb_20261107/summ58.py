@@ -11,12 +11,16 @@ for rep in (1, 2):
     print(f"回 {rep}: def SGM {bl.sgm([bl.t(R[k]['def']) for k in ks if 'def' in R[k] and 'mk' in R[k]]):.2f} 解けた {sum(bl.ok(R[k]['def']) for k in ks if 'mk' in R[k])}"
           f" / mk SGM {bl.sgm([bl.t(R[k]['mk']) for k in ks if 'def' in R[k] and 'mk' in R[k]]):.2f} 解けた {sum(bl.ok(R[k]['mk']) for k in ks if 'def' in R[k])} ({len([k for k in ks if 'def' in R[k] and 'mk' in R[k]])} 問)")
 bl.report(R, "def", "mk", list(R), noise=bl.load_noise(), label="58 問 def→mk")
+if any("mk50" in d for d in R.values()):
+    bl.report(R, "def", "mk50", list(R), noise=bl.load_noise(), label="58 問 def→mk50 (候補 50 本まで)")
+    bl.report(R, "mk", "mk50", list(R), noise=bl.load_noise(), label="58 問 mk→mk50")
 # 時間が 1.5 倍以上違う・解けた/解けないが変わった回
 print("\n1.5 倍以上・解けたかが変わった回 (問題 回 def mk、mk の分離の候補・時間):")
 sep = {}
 for l in open(here / "b58.jsonl"):
     r = json.loads(l)
     if r["cfg"] == "mk": sep[(r["problem"], r["rep"])] = r.get("sep", {})
+    if r["cfg"] == "mk50": sep50 = sep.setdefault(("mk50",), {}); sep50[(r["problem"], r["rep"])] = r
 for k in sorted(R):
     d = R[k]
     if "def" not in d or "mk" not in d: continue
