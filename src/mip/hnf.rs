@@ -231,6 +231,12 @@ enum CompOut {
 
 /// 1 つの連結成分の `A x = b` (行は局所の列番号の疎な行) を解く。`work` は手間の残り (足りなくなったら諦める)。
 fn solve_comp(rows: &[Vec<(usize, i128)>], b: &[i128], nc: usize, work: &mut i64) -> CompOut {
+    solve_comp_dl(rows, b, nc, work, None)
+}
+
+/// [`solve_comp`] に期限をつけたもの (期限を過ぎたら手間で諦めたのと同じに扱う)。
+fn solve_comp_dl(rows: &[Vec<(usize, i128)>], b: &[i128], nc: usize, work: &mut i64, deadline: Option<std::time::Instant>) -> CompOut {
+    let mut ops: u32 = 0;
     let na = rows.len() as u32;
     // 列 c: A の列 (キー 0..na) と U の列 (キー na + c)
     let mut cols: Vec<SCol> = vec![Vec::new(); nc];
@@ -310,7 +316,8 @@ fn solve_comp(rows: &[Vec<(usize, i128)>], b: &[i128], nc: usize, work: &mut i64
                     }
                 };
                 *work -= (cols[c].len() + colp.len()) as i64;
-                if *work < 0 {
+                ops = ops.wrapping_add(1);
+                if *work < 0 || (ops % 256 == 0 && deadline.is_some_and(|d| std::time::Instant::now() > d)) {
                     return CompOut::GaveUp(1);
                 }
                 fill.clear();
@@ -482,6 +489,8 @@ pub(crate) fn analyze(p: &MipProblem, int_ok: &[bool]) -> HnfResult {
     comps.sort_by_key(|c| c.len());
     st.comps = comps.len();
     let mut work: i64 = tunable!("ENOMOTO_T_MIP_HNFPRE_WORK", 300_000_000.0, f64) as i64;
+    // 時間の上限 (`ENOMOTO_T_MIP_HNFPRE_SECS`、既定 1 秒。手間の上限と早い方で諦める)
+    let deadline = Some(t0 + std::time::Duration::from_secs_f64(tunable!("ENOMOTO_T_MIP_HNFPRE_SECS", 1.0, f64)));
     let mut info = Vec::new();
     let mut lmap = vec![usize::MAX; p.n];
     for comp in &comps {
@@ -497,7 +506,7 @@ pub(crate) fn analyze(p: &MipProblem, int_ok: &[bool]) -> HnfResult {
         }
         let rows: Vec<Vec<(usize, i128)>> = comp.iter().map(|&k| erows[k].0.iter().map(|&(j, a)| (lmap[j], a)).collect()).collect();
         let b: Vec<i128> = comp.iter().map(|&k| erows[k].1).collect();
-        let out = if gcols.len() > 200_000 { CompOut::GaveUp(2) } else { solve_comp(&rows, &b, gcols.len(), &mut work) };
+        let out = if gcols.len() > 200_000 { CompOut::GaveUp(2) } else { solve_comp_dl(&rows, &b, gcols.len(), &mut work, deadline) };
         for &j in &gcols {
             lmap[j] = usize::MAX;
         }

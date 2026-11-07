@@ -33,6 +33,7 @@ pub(crate) mod snfmodk;
 pub(crate) mod zerohalf;
 pub(crate) mod modkvb;
 pub(crate) mod hnf;
+pub(crate) mod hnflat;
 pub(crate) mod hnfcut;
 pub(crate) mod hnfsubst;
 pub(crate) mod gcdforce;
@@ -953,6 +954,31 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         PRR_APPLIED.with(|f| f.set(false));
         PRR_OFF.with(|f| f.set(false));
         ROOT_LP_FAILED.with(|f| f.set(false));
+    }
+    // 試作 `ENOMOTO_MIP_HNFPRE_LAT` (既定では使わない): 整数列を格子の簡約した基底で置き換えた問題を解いて戻す ([`hnflat`])
+    if outer && hnflat::on() && !HNF_LAT_ACTIVE.with(|f| f.get()) {
+        if let Some(lr) = hnflat::reform(p, params.verbose) {
+            HNF_LAT_ACTIVE.with(|f| f.set(true));
+            let t1 = std::time::Instant::now();
+            let mut r = solve_problem(&lr.q, MipParams { time_limit: (params.time_limit - lr.lll_secs).max(0.0), ..params }, use_presolve);
+            HNF_LAT_ACTIVE.with(|f| f.set(false));
+            if let Some(y) = r.x.take() {
+                let x = lr.map_back(p.n, &y);
+                if p.is_feasible(&x, 1e-6) {
+                    r.objective = Some(p.objective(&x));
+                    r.x = Some(x);
+                } else {
+                    // 安全網: 戻した解が元の問題で実行可能でなければ、書き直さずに残りの時間で解き直す
+                    eprintln!("HNFPRE_LAT: the mapped solution is not feasible in the original problem; solving the original");
+                    let left = (params.time_limit - lr.lll_secs - t1.elapsed().as_secs_f64()).max(0.0);
+                    HNF_LAT_ACTIVE.with(|f| f.set(true));
+                    let r2 = solve_problem(p, MipParams { time_limit: left, ..params }, use_presolve);
+                    HNF_LAT_ACTIVE.with(|f| f.set(false));
+                    return r2;
+                }
+            }
+            return r;
+        }
     }
     let t0 = std::time::Instant::now();
     let mut r = solve_problem_inner(p, params, use_presolve);
@@ -3032,6 +3058,8 @@ enum Presolved {
 }
 
 thread_local! {
+    /// 試作 `ENOMOTO_MIP_HNFPRE_LAT`: 書き直した問題を解いている間 (入れ子で書き直さない)
+    static HNF_LAT_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 試作 `ENOMOTO_MIP_HNFPRE`: 前処理で合同式が見つかり、解く直前に表を作ることになっているか
     static HNF_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
