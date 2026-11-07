@@ -31,6 +31,7 @@ pub(crate) mod cuts;
 pub(crate) mod separation;
 pub(crate) mod zerohalf;
 pub(crate) mod modkvb;
+pub(crate) mod hnf;
 pub(crate) mod mcf;
 pub(crate) mod clique;
 
@@ -1082,6 +1083,11 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 }
             }
         }
+        other => other,
+    };
+    // 試作 `ENOMOTO_MIP_HNFPRE` (既定では使わない): 整数列だけの等式の Hermite 標準形 ([`hnf`])
+    let presolved = match presolved {
+        Some(Presolved::Reduced { prob, postsolve, scaling }) if hnf::mode().is_some() && !params.submip => hnf_presolve(prob, postsolve, scaling, pre_submip),
         other => other,
     };
     // 利用者向けのログ (サブ MIP の前処理は出さない)
@@ -2988,6 +2994,70 @@ fn tree2_forceq_rows(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64],
 enum Presolved {
     Infeasible,
     Reduced { prob: MipProblem, postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling },
+}
+
+/// 試作 `ENOMOTO_MIP_HNFPRE`: 前処理の後の問題の整数列だけの等式を Hermite 標準形で解析し ([`hnf::analyze`])、実行不能なら
+/// `Infeasible`、固定・合同式で上下限が詰まれば詰めて前処理をかけ直す (尺度が掛かっていなければ。最大 3 回)。`Full` なら最後の
+/// 問題の合同式を登録する (分枝・伝播の丸めに使う、[`hnf::table_for`])。
+fn hnf_presolve(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, pre_submip: bool) -> Option<Presolved> {
+    let mode = hnf::mode()?;
+    let quiet = env_str!("ENOMOTO_MIP_HNFPRE_QUIET").is_some();
+    for round in 0..4 {
+        let int_ok: Vec<bool> = (0..prob.n).map(|j| scaling.d.get(j).is_none_or(|&d| d == 1.0)).collect();
+        let res = hnf::analyze(&prob, &int_ok);
+        let s = &res.stats;
+        if !quiet {
+            eprintln!(
+                "HNFPRE: round {round} eq {} int_eq {} rat_skip {} comps {} done {} gave_up {} cols {} rank {} fixes {} congs {} (gen {}, tighten {}, max_mod {}) infeasible {} ({:.3}s)",
+                s.eq_rows, s.int_eq_rows, s.rat_skipped, s.comps, s.comps_done, s.comps_gave_up, s.cols, s.rank, s.fixes, s.congs, s.congs_gen, s.congs_tighten, s.max_mod, s.infeasible, s.secs
+            );
+        }
+        if mode == hnf::Mode::Count {
+            return Some(Presolved::Reduced { prob, postsolve, scaling });
+        }
+        if s.infeasible {
+            return Some(Presolved::Infeasible);
+        }
+        let (mut lo, mut up) = (prob.col_lo.clone(), prob.col_up.clone());
+        let k = match hnf::apply_bounds(&mut lo, &mut up, &res.info) {
+            Err(()) => {
+                if !quiet {
+                    eprintln!("HNFPRE: bounds and the lattice conflict: infeasible");
+                }
+                return Some(Presolved::Infeasible);
+            }
+            Ok(k) => k,
+        };
+        if !quiet {
+            eprintln!("HNFPRE: round {round} tightened {k} columns");
+        }
+        if k == 0 || round == 3 {
+            if k > 0 {
+                prob.col_lo = lo;
+                prob.col_up = up;
+            }
+            if mode == hnf::Mode::Full {
+                if let Some(t) = hnf::make_table(&prob, &res.info) {
+                    hnf::register(t);
+                }
+            }
+            return Some(Presolved::Reduced { prob, postsolve, scaling });
+        }
+        prob.col_lo = lo;
+        prob.col_up = up;
+        if !scaling.d.iter().all(|&d| d == 1.0) {
+            continue;
+        }
+        match presolve_mip(&prob, false, pre_submip, None) {
+            Some(Presolved::Infeasible) => return Some(Presolved::Infeasible),
+            Some(Presolved::Reduced { prob: p2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().all(|&d| d == 1.0) && p2.n == prob.n => {
+                postsolve.extend(post2);
+                prob = p2;
+            }
+            _ => {}
+        }
+    }
+    Some(Presolved::Reduced { prob, postsolve, scaling })
 }
 
 /// 整数を考慮した前処理をかけた問題を作る。前処理が何も減らさなければ `None` (元の問題で解く)。

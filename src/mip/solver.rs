@@ -10786,8 +10786,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let est_gain: f64 = frac.iter().map(|&(j, v)| self.pc.estimate_gain(j, v - v.floor())).sum();
             let estimate = node_obj + est_gain;
             let f = value - value.floor();
-            let down = BoundChange { col, upper: true, value: value.floor(), sym: false };
-            let up = BoundChange { col, upper: false, value: value.ceil(), sym: false };
+            // 試作 `ENOMOTO_MIP_HNFPRE`: 合同式があれば子の上下限を合同式に合う値まで詰める
+            let (vdn, vup) = match &self.dom.cong {
+                Some(t) => (t.round_down(col, value.floor()), t.round_up(col, value.ceil())),
+                None => (value.floor(), value.ceil()),
+            };
+            let down = BoundChange { col, upper: true, value: vdn, sym: false };
+            let up = BoundChange { col, upper: false, value: vup, sym: false };
             let prefer_up = {
                 let cu = self.pc.cost_up(col) * (1.0 - f);
                 let cd = self.pc.cost_down(col) * f;

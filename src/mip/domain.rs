@@ -84,6 +84,8 @@ pub struct Domain {
     /// 行ごとの `max_j |a_ij| (u_j - l_j)` (作ったときの境界で。境界は締まるだけなので以後も上界)。
     /// 行の余裕がこれ以上なら、その行からはどの境界も締まらないので走査を省く (HiGHS の capacity threshold)。
     row_cap: Vec<f64>,
+    /// 試作 `ENOMOTO_MIP_HNFPRE`: 整数列の合同式 (上下限の丸めに使う、[`super::hnf::CongTable`])。
+    pub cong: Option<std::sync::Arc<super::hnf::CongTable>>,
     /// 含意による伝播 (`ENOMOTO_MIP_IMPL_PROP`): 文字 (`2j` は `x_j = 1`、`2j+1` は `x_j = 0`) ごとの、同時には成り立たない
     /// 文字 ([`MipProblem::conflict_edges`] から作る)。HiGHS のクリーク表の伝播に当たる (行の伝播では見えない、
     /// プロービングで見つけた含意も使う)。
@@ -155,6 +157,7 @@ impl Domain {
                 None
             },
             impl_queue: Vec::new(),
+            cong: super::hnf::table_for(p),
             row_cap: if env_str!("ENOMOTO_MIP_NO_ROWCAP").is_some() { vec![f64::INFINITY; p.m] } else { p.rows.iter().map(|r| r.iter().map(|&(j, a)| a.abs() * (p.col_up[j] - p.col_lo[j])).fold(0.0f64, f64::max)).collect() },
         };
         // 問題の境界が許容誤差の範囲で交差していたら (前処理の丸め。h80x6320d で下限 21.0、上限 20.999999999999932)
@@ -363,6 +366,10 @@ impl Domain {
     /// 下限を `v` 以上に締める (整数列は丸める)。締まったら真。
     pub fn tighten_lower(&mut self, p: &MipProblem, j: usize, v: f64) -> bool {
         let v = if p.is_int[j] { (v - FEASTOL).ceil() } else { v };
+        let v = match &self.cong {
+            Some(t) if p.is_int[j] => t.round_up(j, v),
+            _ => v,
+        };
         if v > self.lo[j] {
             self.set_bound(p, j, false, v, true);
             true
@@ -374,6 +381,10 @@ impl Domain {
     /// 上限を `v` 以下に締める (整数列は丸める)。締まったら真。
     pub fn tighten_upper(&mut self, p: &MipProblem, j: usize, v: f64) -> bool {
         let v = if p.is_int[j] { (v + FEASTOL).floor() } else { v };
+        let v = match &self.cong {
+            Some(t) if p.is_int[j] => t.round_down(j, v),
+            _ => v,
+        };
         if v < self.up[j] {
             self.set_bound(p, j, true, v, true);
             true
@@ -449,6 +460,10 @@ impl Domain {
             }
         } else {
             v
+        };
+        let v = match &self.cong {
+            Some(t) if p.is_int[j] => if upper { t.round_down(j, v) } else { t.round_up(j, v) },
+            _ => v,
         };
         // 反対側の大域的な境界を許容誤差の範囲で越えるだけなら、そろえる (`set_bound` と同じ)
         if upper {
