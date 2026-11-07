@@ -34,6 +34,7 @@ pub(crate) mod zerohalf;
 pub(crate) mod modkvb;
 pub(crate) mod hnf;
 pub(crate) mod hnfcut;
+pub(crate) mod hnfsubst;
 pub(crate) mod redsplit;
 pub(crate) mod cmirdelta;
 pub(crate) mod mcf;
@@ -1091,8 +1092,14 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     };
     // 試作 `ENOMOTO_MIP_HNFPRE` (既定では使わない): 整数列だけの等式の Hermite 標準形 ([`hnf`])
     let presolved = match presolved {
-        Some(Presolved::Reduced { prob, postsolve, scaling }) if hnf::mode().is_some() && !params.submip => hnf_presolve(prob, postsolve, scaling, pre_submip),
+        Some(Presolved::Reduced { prob, postsolve, scaling }) if (hnf::mode().is_some() || hnfsubst::on()) && !params.submip => hnf_presolve(prob, postsolve, scaling, pre_submip),
         other => other,
+    };
+    // 試作 `ENOMOTO_MIP_HNFSUBST` (既定では使わない): 合同式の出た一般整数列を x_j = r_j + g_j y_j に置き換える ([`hnf_subst`])。
+    // `hnf_subst_map` は置き換えの一覧 (暫定解を前処理後の空間に写すのに使う。空なら置き換えなし)
+    let (presolved, hnf_subst_map) = match presolved {
+        Some(Presolved::Reduced { prob, postsolve, scaling }) if hnfsubst::on() && !params.submip => hnf_subst(prob, postsolve, scaling),
+        other => (other, Vec::new()),
     };
     // 利用者向けのログ (サブ MIP の前処理は出さない)
     if !params.submip {
@@ -1112,7 +1119,8 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     let mut ref_shift: Option<f64> = None;
     match (&presolved, start) {
         (Some(Presolved::Reduced { prob, scaling, .. }), Some(x)) if x.len() == prob.n => {
-            let xr: Vec<f64> = x.iter().zip(&scaling.d).map(|(v, d)| v / d).collect();
+            let mut xr: Vec<f64> = x.iter().zip(&scaling.d).map(|(v, d)| v / d).collect();
+            hnfsubst::forward(&hnf_subst_map, &mut xr);
             if params.restarts > 0 && restart_ref_for(p) {
                 ref_shift = Some(p.objective(&x) - prob.objective(&xr));
             }
@@ -1171,7 +1179,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         // 代入で写さないとき (`ENOMOTO_MIP_NO_RESTART_CUTS_SUBST`)
         // 前処理で新たに固定された列を含むカットは捨てる。(試作だった `ENOMOTO_MIP_RESTART_CUTS_FIXED` (後処理が値を書き換えない固定列を
         // 含むカットは残す) は、代入で写す方がその範囲を全部含む (p200x1188c で 43/65 本 対 全部) ので消した)
-        (Some(Presolved::Reduced { prob, scaling, .. }), Some(cuts)) if prob.n == p.n => {
+        (Some(Presolved::Reduced { prob, scaling, .. }), Some(cuts)) if prob.n == p.n && hnf_subst_map.is_empty() => {
             let keep_col = |j: usize| p.col_lo[j] == p.col_up[j] || prob.col_lo[j] < prob.col_up[j];
             let mapped: Vec<(Vec<(usize, f64)>, f64)> = cuts
                 .into_iter()
@@ -1188,7 +1196,12 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         let mapped = match &presolved {
             Some(Presolved::Reduced { prob, scaling, .. }) if prob.n == p.n && pc.len() == p.n => {
                 let keep: Vec<bool> = (0..p.n).map(|j| prob.col_lo[j] < prob.col_up[j]).collect();
-                pc.remap_for_restart(&keep, &scaling.d);
+                // `ENOMOTO_MIP_HNFSUBST`: 置き換えた列は y の 1 刻みが x の g 刻み
+                let mut d = scaling.d.clone();
+                for s in &hnf_subst_map {
+                    d[s.j] *= s.g;
+                }
+                pc.remap_for_restart(&keep, &d);
                 Some(pc)
             }
             None if pc.len() == p.n => {
@@ -1341,7 +1354,8 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 solver::DEBUG_SOL.with(|d| *d.borrow_mut() = Some(xd));
             }
             let outer_level = !params.submip && params.restarts == 0;
-            if outer_level {
+            // `ENOMOTO_MIP_HNFSUBST` で置き換えたら尺度だけでは元の空間に戻せないので渡さない (カットの共有をしない)
+            if outer_level && hnf_subst_map.is_empty() {
                 solver::set_thread_scale(Some(scaling.d.clone()));
             }
             // `ENOMOTO_MIP_RENS_RESUME`: 一時停止できるサブ MIP なら、一時停止のときの結果を元の問題の空間に戻す手続きを置く
@@ -3028,7 +3042,8 @@ fn hnf_register_final(prob: &MipProblem, d: &[f64]) {
 /// `Infeasible`、固定・合同式で上下限が詰まれば詰めて前処理をかけ直す (尺度が掛かっていなければ。最大 3 回)。`Full` なら最後の
 /// 問題の合同式を登録する (分枝・伝播の丸めに使う、[`hnf::table_for`])。
 fn hnf_presolve(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, pre_submip: bool) -> Option<Presolved> {
-    let mode = hnf::mode()?;
+    // `ENOMOTO_MIP_HNFSUBST` だけなら `bounds` と同じ (実行不能・固定・上下限の丸め) をしてから置き換える
+    let mode = hnf::mode().or(hnfsubst::on().then_some(hnf::Mode::Bounds))?;
     let quiet = env_str!("ENOMOTO_MIP_HNFPRE_QUIET").is_some();
     for round in 0..4 {
         let int_ok: Vec<bool> = (0..prob.n).map(|j| scaling.d.get(j).is_none_or(|&d| d == 1.0)).collect();
@@ -3086,6 +3101,36 @@ fn hnf_presolve(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::Postso
         }
     }
     Some(Presolved::Reduced { prob, postsolve, scaling })
+}
+
+/// 試作 `ENOMOTO_MIP_HNFSUBST`: [`hnf_presolve`] の後の問題を解析し直し、合同式 `x_j ≡ r_j (mod g_j)` (g_j > 1) の出た一般整数列を
+/// `x_j = r_j + g_j y_j` に置き換える ([`hnfsubst::substitute`])。後処理の手順 (自己参照の代入) を最後に足す。
+/// 前処理の中で置いた前処理後の空間の値 (早めの FJ の解) は y に写し、根の基底は捨てる (列の値の意味が変わる)。
+fn hnf_subst(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling) -> (Option<Presolved>, Vec<hnfsubst::Subst>) {
+    let int_ok: Vec<bool> = (0..prob.n).map(|j| scaling.d.get(j).is_none_or(|&d| d == 1.0)).collect();
+    let res = hnf::analyze(&prob, &int_ok);
+    let map = if res.stats.infeasible { Vec::new() } else { hnfsubst::substitute(&mut prob, &res.info, &int_ok) };
+    if env_str!("ENOMOTO_MIP_HNFPRE_QUIET").is_none() {
+        let gens = res.info.iter().filter(|&&(j, _, g)| g > 1 && prob.col_lo[j] < prob.col_up[j]).count();
+        eprintln!("HNFSUBST: substituted {} of {gens} congruence columns (max modulus {}) ({:.3}s)", map.len(), map.iter().map(|s| s.g).fold(0.0, f64::max), res.stats.secs);
+    }
+    if map.is_empty() {
+        return (Some(Presolved::Reduced { prob, postsolve, scaling }), map);
+    }
+    postsolve.extend(map.iter().map(hnfsubst::postsolve_step));
+    FEAS_FJ_SOL.with(|s| {
+        if let Some(x) = s.borrow_mut().as_mut() {
+            hnfsubst::forward(&map, x);
+        }
+    });
+    solver::ROOT_BASIS.with(|s| *s.borrow_mut() = None);
+    solver::ROOT_DSE.with(|s| *s.borrow_mut() = None);
+    solver::ROOT_BASIS_ROWS.with(|s| *s.borrow_mut() = None);
+    solver::ROOT_BASIS_SAVED.with(|s| *s.borrow_mut() = None);
+    solver::PROBE_BASIS_INFO.with(|s| *s.borrow_mut() = None);
+    solver::RESTART_BASIS.with(|s| *s.borrow_mut() = None);
+    solver::RESTART_X.with(|s| *s.borrow_mut() = None);
+    (Some(Presolved::Reduced { prob, postsolve, scaling }), map)
 }
 
 /// 整数を考慮した前処理をかけた問題を作る。前処理が何も減らさなければ `None` (元の問題で解く)。
