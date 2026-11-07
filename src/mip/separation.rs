@@ -4575,6 +4575,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut lap = std::time::Instant::now();
         // 試作 `ENOMOTO_MIP_HNFCUT`: 合同式の表を分離の間だけ置く ([`super::hnfcut`])
         let _hnfcut = if super::hnfcut::on() { super::hnfcut::Guard::new(super::hnfcut::state_for(self.dom.cong.clone(), 'a')) } else { super::hnfcut::Guard::none() };
+        if let (true, Some(t)) = (super::hnfcut::on() && !self.params.submip, self.dom.cong.as_deref()) {
+            super::hnfcut::note_lp_point(t, x, &self.dom.global_lo, &self.dom.global_up);
+        }
         let fidx = if sepprof::AT_FACE.with(|c| c.get()) { 1 } else { 0 };
         let src_off = if fidx == 1 { sepprof::SRC_FACE } else { 0 };
         let tag = |cands: &mut [Candidate], src: u8| {

@@ -115,6 +115,35 @@ pub(crate) fn in_tab() -> bool {
 /// 数え上げ: 0 = 合同式の項を含む CMIR の行, 1 = 置き換えた方のカットが勝った, 2 = 元の方だけ作れた, 3 = 置き換えた方だけ作れた,
 /// 4 = mod-k の呼び出し (写した), 5 = 写した列の数の合計, 6 = mod-k のカット, 7 = tableau 行で 0 の数, 8 = tableau 行で 1 の数
 pub(crate) static STATS: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
+/// 診断: 分離の LP 点での合同式の列の値 (最初の分離 = 根の最初の LP の点): 0 = 列の数, 1 = x が分数, 2 = x は整数だが合同式に合わない,
+/// 3 = 合同式に合う, 4 = 上下限に乗っている (3 のうち), 5 = 数えたか
+pub(crate) static LPPT: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+
+/// 根の最初の分離の LP 点で合同式の列の値を数える (1 回だけ)
+pub(crate) fn note_lp_point(t: &CongTable, x: &[f64], lo: &[f64], up: &[f64]) {
+    if LPPT[5].swap(1, Ordering::Relaxed) == 1 {
+        return;
+    }
+    for k in 0..t.n.min(x.len()) {
+        if t.m[k] <= 1 || lo[k] >= up[k] {
+            continue;
+        }
+        LPPT[0].fetch_add(1, Ordering::Relaxed);
+        let v = x[k];
+        let i = if (v - v.round()).abs() > 1e-6 {
+            1
+        } else if (v.round() as i64 - t.r[k]).rem_euclid(t.m[k]) != 0 {
+            2
+        } else {
+            if (v - lo[k]).abs() < 1e-6 || (v - up[k]).abs() < 1e-6 {
+                LPPT[4].fetch_add(1, Ordering::Relaxed);
+            }
+            3
+        };
+        LPPT[i].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// 置き換えた方が勝ったときの効き目の合計 (×1e6) と、元の方の効き目の合計 (×1e6、両方作れたとき)。
 pub(crate) static EFF: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
@@ -125,9 +154,10 @@ pub(crate) fn stat(i: usize) {
 pub(crate) fn stats_line() -> String {
     let s: Vec<u64> = STATS.iter().map(|a| a.load(Ordering::Relaxed)).collect();
     let e: Vec<f64> = EFF.iter().map(|a| a.load(Ordering::Relaxed) as f64 * 1e-6).collect();
+    let q: Vec<u64> = LPPT.iter().map(|a| a.load(Ordering::Relaxed)).collect();
     format!(
-        "HNFCUT stats: cmir rows with cong {} (tab {}), cong won {} (eff {:.3} vs orig {:.3}), only orig {}, only cong {}; modk calls {} mapped cols {} cuts {}",
-        s[0], s[8], s[1], e[0], e[1], s[2], s[3], s[4], s[5], s[6]
+        "HNFCUT stats: first LP point: cong cols {} (x frac {}, int but off {}, on {} (at bound {})); cmir rows with cong {} (tab {}), cong won {} (eff {:.3} vs orig {:.3}), only orig {}, only cong {}; modk calls {} mapped cols {} cuts {}",
+        q[0], q[1], q[2], q[3], q[4], s[0], s[8], s[1], e[0], e[1], s[2], s[3], s[4], s[5], s[6]
     )
 }
 
