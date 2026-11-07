@@ -35,6 +35,7 @@ pub(crate) mod modkvb;
 pub(crate) mod hnf;
 pub(crate) mod hnfcut;
 pub(crate) mod hnfsubst;
+pub(crate) mod gcdforce;
 pub(crate) mod redsplit;
 pub(crate) mod cmirdelta;
 pub(crate) mod mcf;
@@ -1230,6 +1231,14 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                     eprintln!("MIP: presolve: tightened {k} continuous column bounds by dual arguments");
                 }
             }
+            // 診断 `ENOMOTO_MIP_DEBUG_GCDCOUNT` ([`gcdforce::count`]): 前処理の最後の問題を数える。`=stop` なら数えた後にプロセスを終える
+            if let Some(v) = env_str!("ENOMOTO_MIP_DEBUG_GCDCOUNT").filter(|_| !params.submip && params.restarts == 0) {
+                let c = gcdforce::count(&prob.rows, &prob.row_lo, &prob.row_up, &prob.col_lo, &prob.col_up, &prob.is_int);
+                eprintln!("GCDCOUNT final: rows {} {} ({:.2}s)", prob.m, c.line(), t_pre.elapsed().as_secs_f64());
+                if v == "stop" {
+                    std::process::exit(0);
+                }
+            }
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
             }
@@ -1886,6 +1895,8 @@ thread_local! {
     static VUBS_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`presolve_mip`] の 行をまとめた後のかけ直し (`ENOMOTO_MIP_NO_MERGE_REPRESOLVE` で使わない) の 2 回目の前処理の中か。
     static MERGE_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 試作 `ENOMOTO_MIP_GCDFORCE` のかけ直しの中か (1 回だけ)
+    static GCDFORCE_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`presolve_mip`] の `ENOMOTO_MIP_DOMCOL` のかけ直しの中か。
     static DOMCOL_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`presolve_mip`] の `ENOMOTO_MIP_SPARSIFY` のかけ直しの中か。
@@ -3299,11 +3310,36 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         COEF_TIGHTEN_SKIPPED.with(|c| c.set(0));
         let tightened = tighten_coefficients(&mut rows, &mut row_lo, &mut row_up, &pre.lb, &pre.ub, &is_int_now, env_str!("ENOMOTO_MIP_COEF_TIGHTEN_GENERAL").is_some());
         let skipped = COEF_TIGHTEN_SKIPPED.with(|c| c.get());
+        // 診断 `ENOMOTO_MIP_DEBUG_GCDCOUNT` ([`gcdforce::count`]): 丸めの直前の行を数える (問題は変えない)
+        if env_str!("ENOMOTO_MIP_DEBUG_GCDCOUNT").is_some() && !submip {
+            let c = gcdforce::count(&rows, &row_lo, &row_up, &pre.lb, &pre.ub, &is_int_now);
+            eprintln!("GCDCOUNT presolve depth {depth}: {}", c.line());
+        }
         let normalized = normalize_integer_rows(&mut rows, &mut row_lo, &mut row_up, &is_int_now);
         if verbose && (tightened > 0 || normalized > 0 || skipped > 0) {
             eprintln!("MIP: presolve: tightened {tightened} coefficients (skipped {skipped} in rows redundant within tolerance), normalized {normalized} integer rows");
         }
     }
+    // 試作 `ENOMOTO_MIP_GCDFORCE` (既定では使わない。[`gcdforce::apply`]、analysis/gcdforce_20261107.md): 最大公約数で丸めた右辺と
+    // 上下限から決まる活動値の範囲を合わせ、値が 1 つに決まる行を等式に、冗長な行を消す。変わった行があれば下で前処理をかけ直す
+    let gcdforced = if env_str!("ENOMOTO_MIP_GCDFORCE").is_some() && !GCDFORCE_REPRESOLVING.with(|f| f.get()) {
+        match gcdforce::apply(&mut rows, &mut row_lo, &mut row_up, &pre.lb, &pre.ub, &p.is_int) {
+            None => {
+                if verbose {
+                    eprintln!("MIP: presolve: GCDFORCE: infeasible");
+                }
+                return Some(Presolved::Infeasible);
+            }
+            Some((neq, nred)) => {
+                if verbose {
+                    eprintln!("MIP: presolve: GCDFORCE: {neq} rows made equations, {nred} redundant rows removed");
+                }
+                neq + nred
+            }
+        }
+    } else {
+        0
+    };
     // 係数が定数倍の関係にある行をまとめる (上限側と下限側の組は範囲制約 1 本に、同じ向きはきつい方に)。
     // 前処理は範囲制約を 2 本の不等式で表すので、そのままだと LP の行が倍になる
     let eq0 = (0..rows.len()).filter(|&i| row_lo[i] == row_up[i]).count();
@@ -3379,14 +3415,16 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // こうしてできた 0-1 列どうしの `x - y = 0` が 3482 本、`x + y = 1` が 46 本残り (HiGHS の前処理後は等式 283 本)、
     // Feasibility Jump が解を見つけられない。後処理は内側の手順の後に外側の手順を並べる (LP による固定と同じ)
     let merge_rp = new_eq > 0 && env_str!("ENOMOTO_MIP_NO_MERGE_REPRESOLVE").is_none() && !MERGE_REPRESOLVING.with(|f| f.get());
-    if merge_rp || sparsified > 0 {
-        // 疎化のかけ直しの中では疎化しない (1 回だけ)
-        let (was_m, was_s) = (MERGE_REPRESOLVING.with(|f| f.get()), SPARSIFY_REPRESOLVING.with(|f| f.get()));
+    if merge_rp || sparsified > 0 || gcdforced > 0 {
+        // 疎化のかけ直しの中では疎化しない (1 回だけ)。GCDFORCE のかけ直しも 1 回だけ
+        let (was_m, was_s, was_g) = (MERGE_REPRESOLVING.with(|f| f.get()), SPARSIFY_REPRESOLVING.with(|f| f.get()), GCDFORCE_REPRESOLVING.with(|f| f.get()));
         MERGE_REPRESOLVING.with(|f| f.set(was_m || merge_rp));
         SPARSIFY_REPRESOLVING.with(|f| f.set(was_s || sparsified > 0));
+        GCDFORCE_REPRESOLVING.with(|f| f.set(was_g || gcdforced > 0));
         let r = presolve_mip(&prob, verbose, submip, lp_probe_secs);
         MERGE_REPRESOLVING.with(|f| f.set(was_m));
         SPARSIFY_REPRESOLVING.with(|f| f.set(was_s));
+        GCDFORCE_REPRESOLVING.with(|f| f.set(was_g));
         match r {
             Some(Presolved::Infeasible) => return Some(Presolved::Infeasible),
             Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0) => {
