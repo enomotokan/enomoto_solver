@@ -14,6 +14,7 @@ CFGS = {
     "cdg": {"ENOMOTO_MIP_CMIRDELTA": "g"},
     "cdc": {"ENOMOTO_MIP_CMIRDELTA": "c"},
     "cdl": {"ENOMOTO_MIP_CMIRDELTA": "l"},
+    "cdn": {"ENOMOTO_MIP_CMIRDELTA": "n"},
 }
 cfg, p, tl, rep, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 root = len(sys.argv) > 6 and sys.argv[6] == "root"

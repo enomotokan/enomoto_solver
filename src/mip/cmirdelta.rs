@@ -31,6 +31,9 @@ pub(crate) fn mode() -> u8 {
         Ok(v) if !v.is_empty() && v != "0" && v != "off" => {
             if v == "1" {
                 7
+            } else if v.contains('n') {
+                // 絞った形 (`n`、[`narrow_deltas`]): 連続分数を主に、LLL は足りないときだけ
+                8 | 2 | 4
             } else {
                 (v.contains('g') as u8) | ((v.contains('c') as u8) << 1) | ((v.contains('l') as u8) << 2)
             }
@@ -155,11 +158,15 @@ pub(crate) fn summary() -> String {
 
 /// 整数の項 `(係数, LP 値, 上界)` (置き換え後の y の空間) と既存の候補 `existing` から、新しい δ の候補を `(δ, 作り方)` で返す
 /// (`existing` と重なるものは除く)。作り方は 0 = g, 1 = c, 2 = l
-pub(crate) fn extra_deltas(ints: &[(f64, f64, f64)], existing: &[f64]) -> Vec<(f64, usize)> {
+/// `best_old` は既存の候補の中で最良の δ (効き目のあるカットが作れなければ `None`)。絞った形 (`n`) だけが使う
+pub(crate) fn extra_deltas(ints: &[(f64, f64, f64)], existing: &[f64], best_old: Option<f64>) -> Vec<(f64, usize)> {
     let m = mode();
     let mut out: Vec<(f64, usize)> = Vec::new();
     if m == 0 {
         return out;
+    }
+    if m & 8 != 0 {
+        return narrow_deltas(ints, existing, best_old);
     }
     let budget = tunable!("ENOMOTO_T_CMIRDELTA_SECS", 20.0, f64);
     if TIME_NS.load(Ordering::Relaxed) as f64 > budget * 1e9 {
@@ -248,6 +255,100 @@ pub(crate) fn extra_deltas(ints: &[(f64, f64, f64)], existing: &[f64]) -> Vec<(f
     let el = t0.elapsed().as_nanos() as u64;
     TIME_NS.fetch_add(el, Ordering::Relaxed);
     out
+}
+
+/// 絞った形 (`ENOMOTO_MIP_CMIRDELTA=n`)。次のときだけ候補を作る:
+/// (1) 既存の候補で効き目のあるカットが作れる (`best_old` がある)、(2) その δ で内側の整数列の端数 `frac(|a_j| / δ)` が 0.02〜0.98 の列がある
+/// (そろっていない)。候補は内側の列の係数を基準 r に、ほかの列の α_j = |a_j| / r の連続分数の分母 q から δ = r / q を作り、
+/// 「q α_j の端数が 0.05 以内になる内側の列の数」(同点は q の小さい順) で並べて上位 `ENOMOTO_T_CMIRDELTA_NK` (既定 3) 個。
+/// 内側の列が 4 つ以上あり、連続分数の最良でも半分未満の列しかそろわないときだけ LLL の q も比べる
+fn narrow_deltas(ints: &[(f64, f64, f64)], existing: &[f64], best_old: Option<f64>) -> Vec<(f64, usize)> {
+    let mut out: Vec<(f64, usize)> = Vec::new();
+    let Some(d0) = best_old else {
+        return out;
+    };
+    let budget = tunable!("ENOMOTO_T_CMIRDELTA_SECS", 20.0, f64);
+    if TIME_NS.load(Ordering::Relaxed) as f64 > budget * 1e9 {
+        return out;
+    }
+    let t0 = std::time::Instant::now();
+    CALLS.fetch_add(1, Ordering::Relaxed);
+    let kmax = tunable!("ENOMOTO_T_CMIRDELTA_NK", 3usize, usize);
+    let nmax = tunable!("ENOMOTO_T_CMIRDELTA_N", 8usize, usize).max(1);
+    let qmax = tunable!("ENOMOTO_T_CMIRDELTA_QMAX", 64i64, i64).max(2);
+    // 内側の整数列の |a| (重複を除き、大きい順に nmax + 1 個まで)
+    let mut inner: Vec<f64> = ints.iter().filter(|&&(a, yv, yu)| a.abs() > 1e-6 && a.is_finite() && yv > 1e-6 && yv < yu - 1e-6).map(|t| t.0.abs()).collect();
+    let misaligned = inner.iter().any(|&a| {
+        let v = a / d0;
+        let f = v - v.floor();
+        (0.02..=0.98).contains(&f)
+    });
+    let done = |out: Vec<(f64, usize)>| {
+        if !out.is_empty() {
+            CALLS_NEW.fetch_add(1, Ordering::Relaxed);
+            NEW_DELTAS.fetch_add(out.len() as u64, Ordering::Relaxed);
+        }
+        TIME_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        out
+    };
+    if !misaligned {
+        return done(out);
+    }
+    inner.sort_by(|x, y| y.total_cmp(x));
+    let mut vals: Vec<f64> = Vec::new();
+    for a in inner {
+        if vals.len() > nmax {
+            break;
+        }
+        if !vals.iter().any(|&v| (v - a).abs() <= 1e-9 * v) {
+            vals.push(a);
+        }
+    }
+    if vals.len() < 2 {
+        return done(out);
+    }
+    let score = |r: f64, q: i64| -> usize {
+        vals.iter()
+            .filter(|&&a| {
+                let v = q as f64 * a / r;
+                (v - v.round()).abs() <= 0.05
+            })
+            .count()
+    };
+    // (そろう列の数, -q, δ, 作り方)
+    let mut cands: Vec<(usize, i64, f64, usize)> = Vec::new();
+    for &r in vals.iter().take(2) {
+        for &a in vals.iter().filter(|&&a| (a - r).abs() > 1e-9 * r).take(4) {
+            for q in convergent_denominators(a / r, qmax) {
+                if q >= 2 {
+                    cands.push((score(r, q), -q, r / q as f64, 1));
+                }
+            }
+        }
+    }
+    let best_cf = cands.iter().map(|c| c.0).max().unwrap_or(0);
+    if vals.len() >= 4 && 2 * best_cf < vals.len() {
+        let r = vals[0];
+        let alphas: Vec<f64> = vals[1..].iter().map(|&a| a / r).collect();
+        for q in lll_multipliers(&alphas, qmax, qmax) {
+            cands.push((score(r, q), -q, r / q as f64, 2));
+        }
+    }
+    cands.sort_by(|x, y| y.0.cmp(&x.0).then(y.1.cmp(&x.1)));
+    for (sc, _, d, kind) in cands {
+        if out.len() >= kmax {
+            break;
+        }
+        // 基準の列だけしかそろわない (sc <= 1) 候補は使わない
+        if sc < 2 || !(d.is_finite() && d > 1e-9) {
+            continue;
+        }
+        if existing.iter().chain(out.iter().map(|(e, _)| e)).any(|&e| (e - d).abs() <= 1e-9 * d) {
+            continue;
+        }
+        out.push((d, kind));
+    }
+    done(out)
 }
 
 /// `x` の連続分数の近似分数の分母 (1 を除かない、`qmax` 以下)。
@@ -485,9 +586,20 @@ mod tests {
     }
 
     #[test]
+    fn narrow_only_when_misaligned() {
+        let ints = [(3.0, 0.5, 10.0), (-4.5, 0.5, 10.0), (7.5, 0.3, 10.0), (2.0, 0.0, 10.0)];
+        // δ = 3 では 4.5 / 3 の端数が 0.5 (そろっていない) → δ = 1.5 (3・4.5・7.5 がそろう) を足す
+        let out = narrow_deltas(&ints, &[3.0, 1.5 / 2.0], Some(3.0));
+        assert!(out.iter().any(|&(d, _)| (d - 1.5).abs() < 1e-12), "{out:?}");
+        // δ = 1.5 ならそろっているので足さない。既存の候補でカットが作れないときも足さない
+        assert!(narrow_deltas(&ints, &[1.5], Some(1.5)).is_empty());
+        assert!(narrow_deltas(&ints, &[3.0], None).is_empty());
+    }
+
+    #[test]
     fn extra_deltas_mode_off_is_empty() {
         if mode() == 0 {
-            assert!(extra_deltas(&[(3.0, 0.5, 1.0), (5.0, 0.2, 1.0)], &[3.0]).is_empty());
+            assert!(extra_deltas(&[(3.0, 0.5, 1.0), (5.0, 0.2, 1.0)], &[3.0], Some(3.0)).is_empty());
         }
     }
 }
