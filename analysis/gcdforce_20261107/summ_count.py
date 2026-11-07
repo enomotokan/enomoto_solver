@@ -26,6 +26,14 @@ for s, ps in gprobs.SETS.items():
         t = [sum(c[key][k] for _, c in calls) for k in range(4)]
         hit = sorted({p for p, c in calls if any(c[key])})
         print(f"- 前処理の呼び出しごとの丸めの直前 ({len(calls)} 回) {name}: " + ", ".join(f"{c} {t[k]}" for k, c in enumerate(CL)) + f" ({len(hit)} 問: {' '.join(hit[:10])})")
+    gt = sum(c["g_gt1"] for _, c in calls); iq = sum(c["ineq"] for _, c in calls)
+    print(f"- 前処理の呼び出しごとの丸めの直前: 整数列だけの不等式 {iq} 本、うち g>1 (丸めが係数を割る) {gt} 本 ({len({p for p, c in calls if c['g_gt1']})} 問)")
+    imp = [r for r in rs if r.get("final_impl")]
+    if imp:
+        ti = lambda key: [sum(r["final_impl"][key][k] for r in imp) for k in range(4)]
+        add = sum(r["final_impl"]["ineq"] - r["final"]["ineq"] for r in imp if r["final"])
+        hit = sorted({r["problem"] for r in imp if any(r["final_impl"]["raw"]) or any(r["final_impl"]["only_rnd"]) or r["final_impl"]["eq_infeas"]})
+        print(f"- 暗黙の整数列も整数として数えた最後の問題 ({len(imp)} 問で印が増える): 不等式 +{add} 本、丸める前 {ti('raw')}、丸めで初めて {ti('only_rnd')}、等式の実行不能 {sum(r['final_impl']['eq_infeas'] for r in imp)} ({' '.join(hit[:10])})")
     to = [r["problem"] for r in rs if not r["final"]]
     if to:
         print(f"- 最後まで数えられなかった問題: {' '.join(to)}")
