@@ -5051,6 +5051,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     keep_best(&mut cands, n0, self.p);
                 }
+                // `ENOMOTO_T_MIP_MODKVB_MAXCANDS` (既定 0 = 上限なし): 候補を効き目の大きい順にこの数まで残す (physiciansched6-2 では
+                // 0 ラウンド目の 450 本で根のカットの LP が反復の上限に当たり、根のカットのループが止まった)
+                let maxc = tunable!("ENOMOTO_T_MIP_MODKVB_MAXCANDS", 0usize, usize);
+                if maxc > 0 && cands.len() - c0 > maxc {
+                    cands[c0..].sort_by(|a, b| b.efficacy.total_cmp(&a.efficacy));
+                    cands.truncate(c0 + maxc);
+                }
                 if dbg_sep || env_str!("ENOMOTO_MIP_MODKVB_LOG").is_some() {
                     eprintln!(
                         "SEP modkvb {:.3}s tight {} sys {} cols {} vbsub {}/{} k {} sols {} solrows {} dense {} timeout {} cands {} snf {}",
