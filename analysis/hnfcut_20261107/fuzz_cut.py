@@ -1,8 +1,9 @@
 """HNFCUT 向けの乱数の問題で HiGHS と最適値を突き合わせる (python fuzz_cut.py 問題数 [開始seed])。2026-11-07。
 一般整数列 x に、3 列の等式 x_j - g w_j - g v_j = r (w・v は他の行にも出る整数列) で合同式 x_j ≡ r (mod g) を持たせ、
 x の不等式 (係数 -9〜9) と目的関数で LP の解を分数・合同式に合わない整数にする (カットが効く形)。ときどき連続列も混ぜる。
-ENOMOTO_MIP_HNFCUT を付けて動かす。ENOMOTO_MIP_LOG=1 なら標準エラーの "MIP: root HNFCUT stats" の行で、合同式のカットが出た問題を数えられる。"""
-import random, sys, time
+ENOMOTO_MIP_HNFCUT を付けて動かす。環境変数 FUZZ_CUT_L=1 なら、法を偶数にし、不等式を合同式の列だけで作る
+(行の活動量の合同式 `l` が立つ形)。ENOMOTO_MIP_LOG=1 なら標準エラーの "MIP: root HNFCUT stats" の行で、合同式のカットが出た問題を数えられる。"""
+import os, random, sys, time
 from pathlib import Path
 import types
 _src = (Path(__file__).resolve().parents[2] / "scripts/mip_fuzz_vs_highs.py").read_text().split("\nN=int(")[0]
@@ -11,6 +12,7 @@ inf = float('inf')
 
 def gen(seed):
     g = random.Random(seed)
+    L = os.environ.get("FUZZ_CUT_L") == "1"
     nx = g.randint(4, 10)
     lo, up, c, it = [], [], [], []
     def col(l, u, cost, integ):
@@ -19,12 +21,15 @@ def gen(seed):
     rows, rlo, rup = [], [], []
     aux = []
     for j in xs:
-        if g.random() < 0.7:
-            gg = g.choice([2, 3, 4, 5, 6, 10]); r = g.randrange(-3, 7)
+        if L or g.random() < 0.7:
+            gg = g.choice([2, 4, 6, 10] if L else [2, 3, 4, 5, 6, 10]); r = g.randrange(-3, 7)
             w = col(0, g.randint(3, 15), round(g.random() - 0.5, 1), True); v = col(0, g.randint(3, 15), round(g.random() - 0.5, 1), True)
             aux += [w, v]
             rows.append([(j, 1.0), (w, -float(gg)), (v, -float(gg))]); rlo.append(float(r)); rup.append(float(r))
-    if g.random() < 0.3:
+    congx = [r[0][0] for r in rows]
+    if L and congx:
+        xs = congx
+    if not L and g.random() < 0.3:
         y = col(0, 5, round(g.random() * 2, 1), False); aux.append(y)
     # x (と補助の列) の不等式
     for _ in range(g.randint(2, 6)):
@@ -32,7 +37,7 @@ def gen(seed):
         for j in xs:
             if g.random() < 0.6:
                 r[j] = float(g.randint(1, 9) * (1 if g.random() < 0.85 else -1))
-        if aux and g.random() < 0.5:
+        if aux and not L and g.random() < 0.5:
             r[g.choice(aux)] = float(g.randint(-5, 5) or 1)
         if not r: continue
         r = list(r.items())
