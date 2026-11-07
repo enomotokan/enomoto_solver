@@ -34,6 +34,7 @@ pub(crate) mod zerohalf;
 pub(crate) mod modkvb;
 pub(crate) mod hnf;
 pub(crate) mod redsplit;
+pub(crate) mod cmirdelta;
 pub(crate) mod mcf;
 pub(crate) mod clique;
 

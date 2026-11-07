@@ -2112,6 +2112,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 });
             }
+            if super::cmirdelta::on() && !self.params.submip {
+                for c in &chosen {
+                    super::cmirdelta::note_chosen(&c.coefs, c.rhs, c.efficacy);
+                }
+            }
             if chosen.is_empty() {
                 if self.params.verbose && job.is_some() {
                     eprintln!("MIP: cut round {round}: background cuts: no cuts chosen; stop");
@@ -3039,6 +3044,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.lp.num_rows() - p.m,
             self.start.elapsed().as_secs_f64()
         );
+        if self.params.verbose && super::cmirdelta::on() && !self.params.submip {
+            eprintln!("{}", super::cmirdelta::summary());
+        }
         if self.params.verbose {
             eprintln!(
                 "MIP: cut loop done: {} cuts added, {} in LP, pool {} cuts ({} nonzeros), obj {:.10e} -> {:.10e}",
@@ -6148,6 +6156,8 @@ fn finish_cut(
     incumbent: Option<&[f64]>,
     scratch: &mut [f64],
 ) -> Option<Candidate> {
+    // 試作 `ENOMOTO_MIP_CMIRDELTA` の診断: 新しい δ で作った CMIR か
+    let cmirdelta_new = super::cmirdelta::on() && super::cmirdelta::is_new_raw(&raw.coefs, raw.rhs);
     // 構造変数ごとの係数を密な作業領域 (呼び出し側が長さ n の 0 で用意し、ここで 0 に戻す) に集める。
     // 以前は BTreeMap で、集約行の非零が数千のときは finish_cut が tableau 行のカット生成と同程度の時間を使っていた
     let mut touched: Vec<usize> = Vec::with_capacity(raw.coefs.len());
@@ -6267,6 +6277,9 @@ fn finish_cut(
             }
             return None;
         }
+    }
+    if cmirdelta_new {
+        super::cmirdelta::note_new_cand(&coefs, rhs);
     }
     Some(Candidate { coefs, rhs, efficacy, forced: false, src: 0 })
 }

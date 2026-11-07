@@ -730,12 +730,20 @@ fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut
     if cmir_delta1() && !deltas.iter().any(|&e| (e - 1.0).abs() <= 1e-9) {
         deltas.push(1.0);
     }
+    let n_old = deltas.len();
+    let kinds = cmirdelta_extend(&terms, &mut deltas);
     let mut ev = MirEval::new(&terms);
     let mut best: Option<(f64, f64)> = None;
-    for &delta in &deltas {
+    let mut best_i = 0;
+    let mut best_old: Option<f64> = None;
+    for (i, &delta) in deltas.iter().enumerate() {
         if let Some(eff) = ev.efficacy(beta, delta) {
             if best.is_none_or(|(_, e)| eff > e) {
                 best = Some((delta, eff));
+                best_i = i;
+            }
+            if i < n_old && best_old.is_none_or(|e| eff > e) {
+                best_old = Some(eff);
             }
         }
     }
@@ -751,6 +759,7 @@ fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut
         }
     }
     let (delta, mut eff) = best?;
+    let eff0 = best.map_or(0.0, |b| b.1);
     // 補変数化の向きの反転 (cmir_build と同じ手順)
     let mut terms = terms;
     let mut beta = beta;
@@ -793,7 +802,12 @@ fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut
     if coefs.is_empty() {
         return None;
     }
-    Some(RawCut { coefs, rhs: r })
+    let cut = RawCut { coefs, rhs: r };
+    // 最良の δ の 1/2・1/4・1/8 (HIGHS) が勝ったときは新しい δ とみなさない
+    if (delta - deltas[best_i]).abs() <= 1e-12 * delta {
+        cmirdelta_note(&kinds, n_old, best_i, eff0, best_old, Some(&cut));
+    }
+    Some(cut)
 }
 
 /// 試作 `ENOMOTO_MIP_REDSPLIT` ([`super::redsplit`]): δ の候補を与えた CMIR。単体表の行 (基底の整数列の係数が整数) では
@@ -854,17 +868,50 @@ fn cmir_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
     if cmir_delta1() && !deltas.iter().any(|&e| (e - 1.0).abs() <= 1e-9) {
         deltas.push(1.0);
     }
+    // 試作 `ENOMOTO_MIP_CMIRDELTA`: 同時ディオファントス近似で作った δ を足す (既定では足さない)
+    let n_old = deltas.len();
+    let kinds = cmirdelta_extend(&terms, &mut deltas);
     // 3. 各 delta で MIR を作り、違反量 / ノルムの最大のものを選ぶ
     let mut best: Option<(f64, f64)> = None; // (delta, efficacy)
-    for &delta in &deltas {
+    let mut best_i = 0;
+    let mut best_old: Option<f64> = None;
+    for (i, &delta) in deltas.iter().enumerate() {
         if let Some(eff) = mir_efficacy(&terms, beta, delta) {
             if best.is_none_or(|(_, e)| eff > e) {
                 best = Some((delta, eff));
+                best_i = i;
+            }
+            if i < n_old && best_old.is_none_or(|e| eff > e) {
+                best_old = Some(eff);
             }
         }
     }
     let (delta, eff) = best?;
-    cmir_build(vars, terms, beta, delta, eff)
+    let cut = cmir_build(vars, terms, beta, delta, eff);
+    cmirdelta_note(&kinds, n_old, best_i, eff, best_old, cut.as_ref());
+    cut
+}
+
+/// 試作 `ENOMOTO_MIP_CMIRDELTA` の δ の候補を `deltas` の後ろに足し、足したものの作り方を返す (使わなければ空)
+fn cmirdelta_extend(terms: &[Term], deltas: &mut Vec<f64>) -> Vec<usize> {
+    if !super::cmirdelta::on() {
+        return Vec::new();
+    }
+    let ints: Vec<(f64, f64, f64)> = terms.iter().filter(|t| t.int).map(|t| (t.a, t.yv, t.yu)).collect();
+    let extra = super::cmirdelta::extra_deltas(&ints, deltas);
+    deltas.extend(extra.iter().map(|e| e.0));
+    extra.into_iter().map(|e| e.1).collect()
+}
+
+/// 試作 `ENOMOTO_MIP_CMIRDELTA`: 選んだ δ が新しい候補 (`n_old` 番目以降) なら数え、そのカットを覚える
+fn cmirdelta_note(kinds: &[usize], n_old: usize, best_i: usize, eff: f64, best_old: Option<f64>, cut: Option<&RawCut>) {
+    if kinds.is_empty() || best_i < n_old {
+        return;
+    }
+    super::cmirdelta::note_win(kinds[best_i - n_old], eff, best_old);
+    if let Some(c) = cut {
+        super::cmirdelta::note_new_raw(&c.coefs, c.rhs);
+    }
 }
 
 /// δ を決めた後の CMIR: 補変数化の向きを 1 つずつ反転して効き目が上がるか試し、切除平面を作って元の変数に戻す。
