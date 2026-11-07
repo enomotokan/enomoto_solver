@@ -7,9 +7,12 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D.parent))
 import benchlib as bl  # noqa: E402
-cfgs = sys.argv[1:] or ["def", "cd", "cdg"]
+args = sys.argv[1:]
+# 2 回目: python summ_root.py n  (root58n.jsonl の def・cdn、HiGHS と最良の既知値は 1 回目のファイルも使う)
+second = args[:1] == ["n"]
+cfgs = ["def", "cdn"] if second else (args or ["def", "cd", "cdg"])
 rows = []
-for f in ["root58.jsonl", "highs_root58.jsonl", "bench58.jsonl"]:
+for f in (["root58n.jsonl", "bench58n.jsonl"] if second else []) + ["root58.jsonl", "highs_root58.jsonl", "bench58.jsonl"]:
     if (D / f).exists():
         for l in open(D / f):
             try:
@@ -20,14 +23,14 @@ root = defaultdict(dict)
 R = defaultdict(dict)
 for r in rows:
     R[(r["problem"], (r.get("rep", 1), r.get("root", False), r["cfg"]))][r["cfg"]] = r["result"]
-    if r.get("root") and r["cfg"] in cfgs + ["highs"]:
+    if r.get("root") and r["cfg"] in cfgs + ["highs"] and not (second and r["cfg"] == "def" and r["problem"] in root and "def" in root[r["problem"]]):
         root[r["problem"]][r["cfg"]] = r
 ref = bl.best_known(R)
 def gap(r):
     res = r["result"]
     b = res.get("root_bound", res.get("bound")) if r["cfg"] != "highs" else res.get("bound")
     return bl.rel_gap(b, ref.get(r["problem"]))
-print(f"{'問題':28s} " + " ".join(f"{c+'_gap':>10s} {c+'_t':>7s}" for c in cfgs + ["highs"]) + "  cd: wins chosen_new/all")
+print(f"{'問題':28s} " + " ".join(f"{c+'_gap':>10s} {c+'_t':>7s}" for c in cfgs + ["highs"]) + f"  {cfgs[1]}: wins chosen_new/all")
 agg = defaultdict(list)
 for p in sorted(root):
     d = root[p]
@@ -38,7 +41,7 @@ for p in sorted(root):
             line += f" {g if g is not None else float('nan'):10.3e} {t if t is not None else float('nan'):7.2f}"
         else:
             line += f" {'-':>10s} {'-':>7s}"
-    s = d.get("cd", {}).get("sep") or {}
+    s = d.get(cfgs[1], {}).get("sep") or {}
     if s:
         line += f"  {int(s.get('wins') or 0)} {int(s.get('chosen_new') or 0)}/{int(s.get('chosen_all') or 0)}"
     print(line)
