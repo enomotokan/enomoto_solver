@@ -28,7 +28,7 @@ for l in open(D / "res.jsonl"):
     rows[r["problem"]].append(r)
 for p, rs in rows.items():
     print(f"## {p}\n")
-    print("| 設定 | 種 | 状態 | 秒 | 暫定解 | 下界 | 根の終わり (秒) | 根の後 | 根のサブ MIP: 本数・ノード・秒の和・最長 (秒)・解あり | SUBCAP 止め (葉・重さ・待ち) |")
+    print("| 設定 | 種 | 状態 | 秒 | 暫定解 | 下界 | 根の終わり (秒) | 根の後 | 根のサブ MIP: 本数・ノード・秒の和・最長 (秒)・解あり | SUBCAP 止め (葉・重さか T・待ち・B で後回し) |")
     print("|---|---|---|---:|---:|---:|---:|---:|---|---|")
     for r in sorted(rs, key=lambda r: (r["tag"], r["seed"])):
         res = r["result"]
@@ -52,7 +52,7 @@ for p, rs in rows.items():
         secs = [float(s[4]) for s in subs]
         sol = sum(1 for s in subs if s[3] != "None")
         jn = sum(int(x) for x in re.findall(r"TREE3_JOINCAP: stopping (\d+) of", log))
-        scs = f"{log.count('SUBCAP n: stopping')}・{log.count('SUBCAP w: stopping')}・{jn}"
+        scs = f"{log.count('SUBCAP n: stopping')}・{log.count('SUBCAP w: stopping') + log.count('SUBCAP T: stopping')}・{jn + log.count('SUBCAP J: stopping')}・{log.count('SUBCAP B: deferring')}"
         sub = f"{n}・{nodes}・{sum(secs):.1f}・{max(secs, default=0):.1f}・{sol}" if n else "-"
         print(f"| {r['tag']} | {r['seed']} | {res.get('status')} | {g(res.get('time'))} | {g(res.get('objective'))} | {g(res.get('bound'))} | {g(rt)} | {rinc} | {sub} | {scs} |")
     print()
