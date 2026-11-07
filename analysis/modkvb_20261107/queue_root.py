@@ -53,11 +53,14 @@ def run(p, cfg, tl, out):
 for p in PROBS:
     for cfg in ["def", "mk", "highs"]:
         run(p, cfg, 60, "root58.jsonl")
+# Mittelmann: mk を先に回し、mk の分離が候補を 1 本も出さなかった問題 (分離の結果は既定と同じ) は def・HiGHS を省く (時間の節約)。
+# 時間の上限は始めの 22 件は 120 秒、その後は 90 秒
 for p in MITT:
-    for cfg in ["def", "mk"]:
-        run(p, cfg, 120, "rootmitt.jsonl")
+    run(p, "mk", 90, "rootmitt.jsonl")
+    if mk_cands("rootmitt.jsonl").get(p, 0) > 0:
+        run(p, "def", 90, "rootmitt.jsonl")
 mc = mk_cands("rootmitt.jsonl")
 for p in MITT:
     if mc.get(p, 0) > 0:
-        run(p, "highs", 120, "rootmitt.jsonl")
+        run(p, "highs", 90, "rootmitt.jsonl")
 side_jobs()
