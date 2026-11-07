@@ -18,7 +18,7 @@ def done(out):
     return s
 for probs, tl, out in [(PROBS, 60, "root58.jsonl")]:
     for p in probs:
-        for cfg in ["def", "cd", "cdg"]:
+        for cfg in ["def", "cd", "cdg", "highs"]:
             if (p, cfg) in done(out):
                 continue
             if cfg == "highs":

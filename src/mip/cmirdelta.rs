@@ -177,8 +177,12 @@ pub(crate) fn extra_deltas(ints: &[(f64, f64, f64)], existing: &[f64]) -> Vec<(f
         .map(|&(a, yv, yu)| (a.abs(), yv > 1e-6 && yv < yu - 1e-6))
         .collect();
     cols.sort_by(|x, y| y.1.cmp(&x.1).then(y.0.total_cmp(&x.0)));
+    // 長い行で 2 乗の手間にならないよう、使う数 (基準 2 つ + nmax) が集まったら止める
     let mut vals: Vec<(f64, bool)> = Vec::new();
     for c in cols {
+        if vals.len() >= nmax + 2 {
+            break;
+        }
         if !vals.iter().any(|&(v, _)| (v - c.0).abs() <= 1e-9 * v) {
             vals.push(c);
         }
