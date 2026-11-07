@@ -3047,6 +3047,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose && super::cmirdelta::on() && !self.params.submip {
             eprintln!("{}", super::cmirdelta::summary());
         }
+        if self.params.verbose && super::hnfcut::on() && !self.params.submip {
+            eprintln!("MIP: root {}", super::hnfcut::stats_line());
+        }
         if self.params.verbose {
             eprintln!(
                 "MIP: cut loop done: {} cuts added, {} in LP, pool {} cuts ({} nonzeros), obj {:.10e} -> {:.10e}",
