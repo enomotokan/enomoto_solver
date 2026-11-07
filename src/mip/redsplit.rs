@@ -31,6 +31,12 @@ pub(crate) fn redsplit_mode() -> (bool, bool) {
     })
 }
 
+/// 改良 (11-08): 値に `c` があれば、縮約の行のカットは元の行のカットより効き目が大きいときだけ使う
+pub(crate) fn compare_mode() -> bool {
+    static M: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *M.get_or_init(|| env_str!("ENOMOTO_MIP_REDSPLIT").is_some_and(|s| s.contains('c')))
+}
+
 /// CMIR に渡す δ の候補: k-cuts なら 1/k (k = 1..K)、そうでなければ既存と同じ 1, 1/2, 1/4, 1/8
 pub(crate) fn deltas(kcuts: bool) -> Vec<f64> {
     if kcuts {
@@ -39,6 +45,60 @@ pub(crate) fn deltas(kcuts: bool) -> Vec<f64> {
     } else {
         vec![1.0, 0.5, 0.25, 0.125]
     }
+}
+
+thread_local! {
+    /// 改良 (11-08) `ENOMOTO_T_MIP_REDSPLIT_TFRAC`: このスレッドの求解 (開始の時刻で見分ける) での縮約とカットの生成の時間の累計
+    static RS_TIME: std::cell::Cell<(Option<std::time::Instant>, f64)> = const { std::cell::Cell::new((None, 0.0)) };
+    /// 診断 (`ENOMOTO_MIP_REDSPLIT_LOG`): 縮約の行から作った候補の指紋 (カットの選択で採られた数を数える)
+    static RS_FP: std::cell::RefCell<std::collections::HashSet<u64>> = std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// 求解 `start` での縮約の時間の累計 (秒)
+pub(crate) fn time_used(start: std::time::Instant) -> f64 {
+    RS_TIME.with(|c| {
+        let (s, t) = c.get();
+        if s == Some(start) { t } else { 0.0 }
+    })
+}
+
+/// 求解 `start` での縮約の時間に `dt` 秒を足す
+pub(crate) fn add_time(start: std::time::Instant, dt: f64) {
+    RS_TIME.with(|c| {
+        let (s, t) = c.get();
+        c.set((Some(start), if s == Some(start) { t + dt } else { dt }));
+    })
+}
+
+/// カットの指紋 (右辺・非零の数・係数)
+pub(crate) fn fingerprint(coefs: &[(usize, f64)], rhs: f64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    rhs.to_bits().hash(&mut h);
+    coefs.len().hash(&mut h);
+    for &(j, a) in coefs.iter().take(8) {
+        j.hash(&mut h);
+        a.to_bits().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// 縮約の行から作った候補を覚える (診断)
+pub(crate) fn remember(fp: u64) {
+    RS_FP.with(|s| {
+        s.borrow_mut().insert(fp);
+    });
+}
+
+/// 覚えた候補のうち `chosen` にあるものの数を返し、覚えたものを消す (診断)
+pub(crate) fn count_chosen(chosen: impl Iterator<Item = u64>) -> (usize, usize) {
+    RS_FP.with(|s| {
+        let mut s = s.borrow_mut();
+        let total = s.len();
+        let k = chosen.filter(|fp| s.contains(fp)).count();
+        s.clear();
+        (k, total)
+    })
 }
 
 /// [`reduce`] の記録
@@ -55,8 +115,8 @@ pub(crate) struct RsStats {
 }
 
 /// 行 `bases` (単体表の行、列 0..n は構造変数、n.. は論理変数、右辺 0) の連続の列 (`is_int[j]` が false) の部分を縮約し、
-/// 短くなった行の組み合わせ (元の行の番号, 組み合わせた行) を返す
-pub(crate) fn reduce(bases: &[Vec<(usize, f64)>], is_int: &[bool], n: usize, deadline: Option<std::time::Instant>) -> (Vec<(usize, Vec<(usize, f64)>)>, RsStats) {
+/// 短くなった行の組み合わせ (元の行の番号, 連続の部分のノルムの 2 乗の比 (縮約の後 / 前), 組み合わせた行) を返す
+pub(crate) fn reduce(bases: &[Vec<(usize, f64)>], is_int: &[bool], n: usize, deadline: Option<std::time::Instant>) -> (Vec<(usize, f64, Vec<(usize, f64)>)>, RsStats) {
     let mut st = RsStats::default();
     let rmax = tunable!("ENOMOTO_T_MIP_REDSPLIT_ROWS", 100usize, usize);
     let passes = tunable!("ENOMOTO_T_MIP_REDSPLIT_PASSES", 3usize, usize);
@@ -204,7 +264,7 @@ pub(crate) fn reduce(bases: &[Vec<(usize, f64)>], is_int: &[bool], n: usize, dea
         }
         st.reduced += 1;
         st.ratio_sum += nn / norm0[i];
-        out.push((rows[i], row));
+        out.push((rows[i], nn / norm0[i], row));
     }
     (out, st)
 }
@@ -290,7 +350,8 @@ mod tests {
         assert_eq!(st.rows, 2);
         // 行 1 も行 0 を引いて (0, -1) に短くなる
         assert_eq!(out.len(), 2);
-        let (_, row) = out.iter().find(|e| e.0 == 0).unwrap();
+        let (_, ratio, row) = out.iter().find(|e| e.0 == 0).unwrap();
+        assert!(*ratio < 0.01);
         let get = |j: usize| row.iter().find(|e| e.0 == j).map(|e| e.1).unwrap_or(0.0);
         assert_eq!(get(0), 1.0);
         assert_eq!(get(1), -1.0);

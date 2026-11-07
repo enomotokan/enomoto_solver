@@ -13,6 +13,14 @@ CFGS = {
     "a": {"ENOMOTO_MIP_REDSPLIT": "a"},
     "b": {"ENOMOTO_MIP_REDSPLIT": "b", "ENOMOTO_MIP_REDSPLIT_LOG": "1"},
     "ab": {"ENOMOTO_MIP_REDSPLIT": "ab", "ENOMOTO_MIP_REDSPLIT_LOG": "1"},
+    # 改良 (11-08)
+    "bd2": {"ENOMOTO_MIP_REDSPLIT": "b", "ENOMOTO_MIP_REDSPLIT_LOG": "1", "ENOMOTO_T_MIP_REDSPLIT_DENS": "2"},
+    "bd1": {"ENOMOTO_MIP_REDSPLIT": "b", "ENOMOTO_MIP_REDSPLIT_LOG": "1", "ENOMOTO_T_MIP_REDSPLIT_DENS": "1"},
+    "bc": {"ENOMOTO_MIP_REDSPLIT": "bc", "ENOMOTO_MIP_REDSPLIT_LOG": "1"},
+    "bd2c": {"ENOMOTO_MIP_REDSPLIT": "bc", "ENOMOTO_MIP_REDSPLIT_LOG": "1", "ENOMOTO_T_MIP_REDSPLIT_DENS": "2"},
+    "br": {"ENOMOTO_MIP_REDSPLIT": "b", "ENOMOTO_MIP_REDSPLIT_LOG": "1", "ENOMOTO_T_MIP_REDSPLIT_RATIO": "0.25"},
+    "bR5": {"ENOMOTO_MIP_REDSPLIT": "b", "ENOMOTO_MIP_REDSPLIT_LOG": "1", "ENOMOTO_T_MIP_REDSPLIT_ROUNDS": "5"},
+    "bt": {"ENOMOTO_MIP_REDSPLIT": "b", "ENOMOTO_MIP_REDSPLIT_LOG": "1", "ENOMOTO_T_MIP_REDSPLIT_TFRAC": "0.05"},
 }
 cfg, p, tl, rep, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 root = len(sys.argv) > 6 and sys.argv[6] == "root"
@@ -42,7 +50,7 @@ for l in err.splitlines():
     if m:
         loops.append({"added": int(m.group(1)), "in_lp": int(m.group(2)), "obj0": float(m.group(3)), "obj1": float(m.group(4)), "t": last_t, "rounds": rounds})
         last_t, rounds = None, 0
-sep = [l for l in err.splitlines() if l.startswith("REDSPLIT")]
+sep = [l for l in err.splitlines() if l.startswith("REDSPLIT pass")]
 mk = {"calls": len(sep), "rows": 0, "reduced": 0, "cuts": 0, "time": 0.0}
 for l in sep:
     m = re.search(r"cont (\d+)\) reduced (\d+) .* cuts (\d+) .* ([\d.]+)s$", l)
@@ -51,6 +59,8 @@ for l in sep:
 (D / "logs").mkdir(exist_ok=True)
 with gzip.open(D / "logs" / f"{cfg}_{p}_{tl}_r{rep}{'_root' if root else ''}.err.gz", "wt") as f:
     f.write(err)
+ch = [re.search(r"chosen round \d+: (\d+) of (\d+)", l) for l in err.splitlines() if l.startswith("REDSPLIT chosen")]
+mk["chosen"] = sum(int(m.group(1)) for m in ch if m); mk["chosen_all"] = sum(int(m.group(2)) for m in ch if m)
 rec = {"problem": p, "cfg": cfg, "tl": tl, "rep": rep, "root": root, "wall": round(time.time() - t0, 1), "result": res, "root_loops": loops[:4],
        "sep": mk, "sep_first": sep[:2], "warn": err.count("MIP: WARNING"), "at": time.strftime("%H:%M:%S")}
 with open(OUT, "a") as f:

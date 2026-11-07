@@ -2101,6 +2101,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 選択の上限まで採ったか (選択を通さないカットは数えない)
             let quota_full = chosen.len() >= max_cuts && ncands >= 2 * max_cuts;
             chosen.extend(forced);
+            // 診断 (`ENOMOTO_MIP_REDSPLIT_LOG`): 試作 `ENOMOTO_MIP_REDSPLIT` の縮約の行から作った候補のうち採られた数
+            if super::redsplit::redsplit_mode().1 && env_str!("ENOMOTO_MIP_REDSPLIT_LOG").is_some() && !self.params.submip {
+                let (k, total) = super::redsplit::count_chosen(chosen.iter().map(|c| super::redsplit::fingerprint(&c.coefs, c.rhs)));
+                eprintln!("REDSPLIT chosen round {round}: {k} of {} chosen (candidates {total})", chosen.len());
+            }
             if self.sep_adapt_on() {
                 let mut acc = [0usize; sepprof::NSRC];
                 for c in &chosen {
@@ -5777,8 +5782,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
-        // 試作 `ENOMOTO_MIP_REDSPLIT` の `b`: 集めた行を縮約し、短くなった行から δ の候補 ([`super::redsplit::deltas`]) で CMIR を作る
-        if rs_b && !rs_bases.is_empty() {
+        // 試作 `ENOMOTO_MIP_REDSPLIT` の `b`: 集めた行を縮約し、短くなった行から δ の候補 ([`super::redsplit::deltas`]) で CMIR を作る。
+        // 改良 (11-08、どれも既定では効かない値): `ENOMOTO_T_MIP_REDSPLIT_ROUNDS` = R (> 0) なら根のループの最初の R ラウンドだけ、
+        // `ENOMOTO_T_MIP_REDSPLIT_TFRAC` = r (> 0) なら縮約の時間の累計が求解の経過時間の r 倍を超えたら止める、
+        // `ENOMOTO_T_MIP_REDSPLIT_RATIO` = q (< 1) なら連続の部分のノルムの 2 乗が q 倍以下に縮んだ行だけ使う、
+        // `ENOMOTO_T_MIP_REDSPLIT_DENS` = d (> 0) なら元の行のカットの非零の d 倍を超えるカットは捨てる、
+        // 値に `c` があれば元の行のカット (同じ δ の候補) より効き目が大きいカットだけ使う
+        let rs_rounds = tunable!("ENOMOTO_T_MIP_REDSPLIT_ROUNDS", 0usize, usize);
+        let rs_tfrac = tunable!("ENOMOTO_T_MIP_REDSPLIT_TFRAC", 0.0f64, f64);
+        let rs_go = rs_b
+            && !rs_bases.is_empty()
+            && (rs_rounds == 0 || self.sep_pass < rs_rounds)
+            && (rs_tfrac <= 0.0 || super::redsplit::time_used(self.start) <= rs_tfrac * self.start.elapsed().as_secs_f64());
+        if rs_go {
             let t0 = std::time::Instant::now();
             let tl = tunable!("ENOMOTO_T_MIP_REDSPLIT_TIME", 0.5f64, f64);
             let dl = t0 + std::time::Duration::from_secs_f64(tl);
@@ -5786,34 +5802,85 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 Some(d) if d < dl => d,
                 _ => dl,
             };
+            let ratio_max = tunable!("ENOMOTO_T_MIP_REDSPLIT_RATIO", 1.0f64, f64);
+            let dens = tunable!("ENOMOTO_T_MIP_REDSPLIT_DENS", 0.0f64, f64);
+            let cmp_orig = super::redsplit::compare_mode();
+            let rs_log = dbg_sep || env_str!("ENOMOTO_MIP_REDSPLIT_LOG").is_some();
             let (rows, st) = super::redsplit::reduce(&rs_bases, &is_int, n, Some(dl));
             let c0 = cands.len();
-            for (_, row) in &rows {
+            let (mut n_ratio_skip, mut n_dens_skip, mut n_cmp_skip) = (0usize, 0usize, 0usize);
+            let mut tmp: Vec<Candidate> = Vec::new();
+            for (idx, ratio, row) in &rows {
                 // 縮約とカットの生成を合わせて 1 回 `ENOMOTO_T_MIP_REDSPLIT_TIME` 秒まで (blp-ar98 で密な行のカットの生成が重かった)
                 if self.time_up() || std::time::Instant::now() >= dl {
                     break;
                 }
+                if *ratio > ratio_max {
+                    n_ratio_skip += 1;
+                    continue;
+                }
+                tmp.clear();
                 let neg: Vec<(usize, f64)> = row.iter().map(|&(k, a)| (k, -a)).collect();
                 for b in [row, &neg] {
-                    let n0 = cands.len();
-                    push(super::cuts::cmir_with_deltas(&vars, b, 0.0, &rs_deltas), &mut cands, self);
-                    keep_best(&mut cands, n0, self.p);
+                    let n0 = tmp.len();
+                    push(super::cuts::cmir_with_deltas(&vars, b, 0.0, &rs_deltas), &mut tmp, self);
+                    keep_best(&mut tmp, n0, self.p);
                 }
+                if tmp.is_empty() {
+                    continue;
+                }
+                // 元の行のカット (効き目の最大と非零の数の最大)
+                if cmp_orig || dens > 0.0 {
+                    let mut orig: Vec<Candidate> = Vec::new();
+                    let base = &rs_bases[*idx];
+                    let negb: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
+                    for b in [base, &negb] {
+                        let n0 = orig.len();
+                        push(super::cuts::cmir_with_deltas(&vars, b, 0.0, &rs_deltas), &mut orig, self);
+                        keep_best(&mut orig, n0, self.p);
+                    }
+                    let e_o = orig.iter().fold(0.0f64, |m, c| m.max(c.efficacy));
+                    let nnz_o = orig.iter().map(|c| c.coefs.len()).max();
+                    tmp.retain(|c| {
+                        if cmp_orig && c.efficacy <= e_o * (1.0 + 1e-3) {
+                            n_cmp_skip += 1;
+                            return false;
+                        }
+                        if dens > 0.0 && nnz_o.is_some_and(|k| c.coefs.len() as f64 > dens * k.max(1) as f64) {
+                            n_dens_skip += 1;
+                            return false;
+                        }
+                        true
+                    });
+                }
+                if rs_log {
+                    for c in &tmp {
+                        super::redsplit::remember(super::redsplit::fingerprint(&c.coefs, c.rhs));
+                    }
+                }
+                cands.append(&mut tmp);
             }
-            if dbg_sep || env_str!("ENOMOTO_MIP_REDSPLIT_LOG").is_some() {
+            let dt = t0.elapsed().as_secs_f64();
+            super::redsplit::add_time(self.start, dt);
+            if rs_log {
                 let effs: Vec<f64> = cands[c0..].iter().map(|c| c.efficacy).collect();
                 let emax = effs.iter().fold(0.0f64, |m, &v| m.max(v));
+                let nnz = cands[c0..].iter().map(|c| c.coefs.len()).sum::<usize>() as f64 / effs.len().max(1) as f64;
                 eprintln!(
-                    "REDSPLIT pass {} rows {} (cont {}) reduced {} (mean norm2 ratio {:.3}) rejected {} cuts {} (max eff {:.4}) {:.3}s",
+                    "REDSPLIT pass {} rows {} (cont {}) reduced {} (mean norm2 ratio {:.3}) rejected {} skipped ratio/dens/cmp {}/{}/{} cuts {} (max eff {:.4}, mean nnz {:.0}) {:.3}s",
                     self.sep_pass,
                     rs_bases.len(),
                     st.rows,
                     st.reduced,
                     st.ratio_sum / st.reduced.max(1) as f64,
                     st.rejected,
+                    n_ratio_skip,
+                    n_dens_skip,
+                    n_cmp_skip,
                     effs.len(),
                     emax,
-                    t0.elapsed().as_secs_f64()
+                    nnz,
+                    dt
                 );
             }
         }
