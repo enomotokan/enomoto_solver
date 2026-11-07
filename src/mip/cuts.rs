@@ -201,7 +201,7 @@ pub fn intvub_debug_row(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Stri
             Sub::Simple => String::new(),
             Sub::Vub(z, d, e) => format!(" vub z{z}[{:.3}] {d} {e}", vars.x[z]),
             Sub::Vlb(z, d, e) => format!(" vlb z{z}[{:.3}] {d} {e}", vars.x[z]),
-            Sub::Cong(r, g, lz) => format!(" cong {r} {g} {lz}"),
+            Sub::Cong(r, g, lz, uz) => format!(" cong {r} {g} {lz} {uz}"),
         };
         let _ = write!(o, " ({}{} {:+.3} y={:.3} u={}{})", if t.int { "i" } else { "c" }, t.k, t.a, t.yv, t.yu, sub);
     }
@@ -225,8 +225,8 @@ enum Sub {
     Vub(usize, f64, f64),
     /// `x = d y + e + s` (VLB)。項の変数は `s`。
     Vlb(usize, f64, f64),
-    /// 試作 `ENOMOTO_MIP_HNFCUT`: 整数列の合同式 `x = r + g z` (`r`, `g`, `lz`)。項の変数は `z - lz` (`comp` なら `uz - z`)
-    Cong(f64, f64, f64),
+    /// 試作 `ENOMOTO_MIP_HNFCUT`: 整数列の合同式 `x = r + g z` (`r`, `g`, `lz`, `uz`)。項の変数は `z - lz` (`comp` なら `uz - z`)
+    Cong(f64, f64, f64, f64),
 }
 
 /// 生成した切除平面 `sum coef_k v_k <= rhs` と、その効き目 (違反量 / 係数のノルム)。
@@ -596,6 +596,15 @@ fn substitute_finish(vars: &CutVars, mut terms: Vec<Term>, mut beta: f64, int_co
 fn unsubstitute(vars: &CutVars, t: &Term, c: f64, coefs: &mut Vec<(usize, f64)>) -> f64 {
     // 変数上下限の余り s を補変数 s' = yu - s にしたもの (試作 `ENOMOTO_MIP_INTVUB` の整数の余りだけ。連続の余りは補変数にしない):
     // c s' = c yu - c s なので、右辺から c yu を引き、-c s を戻す
+    // 試作 `ENOMOTO_MIP_HNFCUT`: z - lz = (x - r)/g - lz、uz - z = uz - (x - r)/g (片側が無限でも戻せるよう、下の補変数の分岐より先に)
+    if let Sub::Cong(r, g, lz, uz) = t.sub {
+        if t.comp {
+            coefs.push((t.k, -c / g));
+            return -c * (uz + r / g);
+        }
+        coefs.push((t.k, c / g));
+        return c * (r / g + lz);
+    }
     if t.comp && t.sub != Sub::Simple {
         let t2 = Term { comp: false, ..*t };
         return -c * t.yu + unsubstitute(vars, &t2, -c, coefs);
@@ -625,11 +634,7 @@ fn unsubstitute(vars: &CutVars, t: &Term, c: f64, coefs: &mut Vec<(usize, f64)>)
             coefs.push((y, -c * d));
             c * e
         }
-        Sub::Cong(r, g, lz) => {
-            // 項の変数 z - lz = (x - r) / g - lz (補変数は上の分岐で戻してある)
-            coefs.push((t.k, c / g));
-            c * (r / g + lz)
-        }
+        Sub::Cong(..) => unreachable!(),
     }
 }
 
@@ -864,13 +869,13 @@ fn cong_terms(vars: &CutVars, tbl: &super::hnf::CongTable, terms: &[Term], beta:
                 continue;
             }
             beta -= t.a * (r + g * lz - l);
-            *t = Term { k: t.k, a: t.a * g, comp: false, int: true, yv: (zx - lz).max(0.0), yu: uz - lz, sub: Sub::Cong(r, g, lz) };
+            *t = Term { k: t.k, a: t.a * g, comp: false, int: true, yv: (zx - lz).max(0.0), yu: uz - lz, sub: Sub::Cong(r, g, lz, uz) };
         } else {
             if !uz.is_finite() {
                 continue;
             }
             beta -= t.a * (u - r - g * uz);
-            *t = Term { k: t.k, a: t.a * g, comp: true, int: true, yv: (uz - zx).max(0.0), yu: uz - lz, sub: Sub::Cong(r, g, lz) };
+            *t = Term { k: t.k, a: t.a * g, comp: true, int: true, yv: (uz - zx).max(0.0), yu: uz - lz, sub: Sub::Cong(r, g, lz, uz) };
         }
         changed = true;
     }
@@ -2125,7 +2130,7 @@ mod highs_dump {
                 match substitute(&vars_b, b, 0.0) {
                     None => println!("   substitute: None"),
                     Some((terms, beta)) => {
-                        let tt: Vec<String> = terms.iter().map(|t| format!("{}{}:{:.6}{}(y={:.4},u={:.4}{})", t.k, if t.int { "i" } else { "c" }, t.a, if t.comp { "C" } else { "" }, t.yv, t.yu, match t.sub { Sub::Simple => String::new(), Sub::Vub(y, d, e) => format!(",vub {y} {d:.4} {e:.4}"), Sub::Vlb(y, d, e) => format!(",vlb {y} {d:.4} {e:.4}"), Sub::Cong(r, g, lz) => format!(",cong {r} {g} {lz}") })).collect();
+                        let tt: Vec<String> = terms.iter().map(|t| format!("{}{}:{:.6}{}(y={:.4},u={:.4}{})", t.k, if t.int { "i" } else { "c" }, t.a, if t.comp { "C" } else { "" }, t.yv, t.yu, match t.sub { Sub::Simple => String::new(), Sub::Vub(y, d, e) => format!(",vub {y} {d:.4} {e:.4}"), Sub::Vlb(y, d, e) => format!(",vlb {y} {d:.4} {e:.4}"), Sub::Cong(r, g, lz, uz) => format!(",cong {r} {g} {lz} {uz}") })).collect();
                         println!("   substitute: beta {beta:.6} terms {}", tt.join(" "));
                         for t in terms.iter().filter(|t| t.int) {
                             let d = t.a.abs();

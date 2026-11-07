@@ -8,7 +8,11 @@ WT = D.parents[1]
 sys.path.insert(0, str(D))
 import hprobs
 CFG = {"def": {}, "hnf": {"ENOMOTO_MIP_HNFPRE": "1"}, "hcut": {"ENOMOTO_MIP_HNFCUT": "1"},
-       "hcut_a": {"ENOMOTO_MIP_HNFCUT": "a"}, "hcut_b": {"ENOMOTO_MIP_HNFCUT": "b"}, "hcut_c": {"ENOMOTO_MIP_HNFCUT": "c"}, "hcut_ac": {"ENOMOTO_MIP_HNFCUT": "ac"}}
+       "hcut_a": {"ENOMOTO_MIP_HNFCUT": "a"}, "hcut_b": {"ENOMOTO_MIP_HNFCUT": "b"}, "hcut_c": {"ENOMOTO_MIP_HNFCUT": "c"}, "hcut_ac": {"ENOMOTO_MIP_HNFCUT": "ac"},
+       "hcut_beven": {"ENOMOTO_MIP_HNFCUT": "b", "ENOMOTO_MIP_HNFCUT_BPAR": "even"}, "hcut_bodd": {"ENOMOTO_MIP_HNFCUT": "b", "ENOMOTO_MIP_HNFCUT_BPAR": "odd"},
+       "hcut_bl": {"ENOMOTO_MIP_HNFCUT": "bl"}, "hcut_al": {"ENOMOTO_MIP_HNFCUT": "al"}, "hcut_cl": {"ENOMOTO_MIP_HNFCUT": "cl"},
+       "hcut_abcl": {"ENOMOTO_MIP_HNFCUT": "abcl"},
+       "mkvb": {"ENOMOTO_MIP_MODKVB": "1"}, "mkvb_b": {"ENOMOTO_MIP_MODKVB": "1", "ENOMOTO_MIP_HNFCUT": "b"}}
 out = Path(sys.argv[1]); T = float(sys.argv[2]); cfgs = sys.argv[3].split(","); seeds = [int(s) for s in sys.argv[4].split(",")]
 probs = []
 for a in sys.argv[5:]:
@@ -27,7 +31,7 @@ for s in seeds:
             if (p, c, s) in done:
                 continue
             env = dict(os.environ, ENOMOTO_MIP_LOG="1", ENOMOTO_MIP_THREADS="4", ENOMOTO_T_MIP_SEED=str(s), **CFG[c])
-            for k in ("ENOMOTO_MIP_HNFPRE", "ENOMOTO_MIP_HNFCUT"):
+            for k in ("ENOMOTO_MIP_HNFPRE", "ENOMOTO_MIP_HNFCUT", "ENOMOTO_MIP_HNFCUT_BPAR", "ENOMOTO_MIP_MODKVB"):
                 if k not in CFG[c]:
                     env.pop(k, None)
             mps = WT / ".miplib_cache" / f"{p}.mps"

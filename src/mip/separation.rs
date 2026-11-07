@@ -4726,6 +4726,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let vb = self.vbounds.clone();
         let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xv, vb: if env_str!("ENOMOTO_MIP_NO_VB").is_some() { None } else { vb.as_deref() } };
+        // 試作 `ENOMOTO_MIP_HNFCUT` の `l`: 論理変数 (LP の行の活動量) の合同式を表に足す ([`super::hnfcut::extend_logicals`])
+        if super::hnfcut::on() {
+            super::hnfcut::extend_logicals(lp_rows, &is_int, &lo, &up, n);
+        }
         // 診断用 (`ENOMOTO_MIP_DEBUG_XFILE`): HiGHS の書き出し (`HIGHS_CUT_DUMP`) の LP 解で経路集約だけを試し、カットの数と
         // 効き目を表示する (前処理なし `ENOMOTO_MIP_NO_PRESOLVE` で、列の並びを HiGHS と揃えて使う)
         if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_XFILE") {
@@ -5131,7 +5135,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if let Some(d) = sep_deadline(self.deadline) {
                     dl = dl.min(d);
                 }
-                let (groups, st) = super::modkvb::modkvb_cuts(&vars, lp_rows, n, p.m, mode, use_flow_cover(), dl);
+                // 試作 `ENOMOTO_MIP_HNFCUT` の `b`: 合同式の列を写した空間で連立を作って戻す ([`super::hnfcut::map_cutvars`])
+                let (groups, st) = match super::hnfcut::map_cutvars(&vars, lp_rows, n) {
+                    Some(mv) => {
+                        let (gs, st) = super::hnfcut::with_cmir(false, || super::modkvb::modkvb_cuts(&mv.vars(), &mv.rows, n, p.m, mode, use_flow_cover(), dl));
+                        (gs.into_iter().map(|g| g.into_iter().filter_map(|c| mv.unmap(c)).collect::<Vec<_>>()).collect::<Vec<_>>(), st)
+                    }
+                    None => super::modkvb::modkvb_cuts(&vars, lp_rows, n, p.m, mode, use_flow_cover(), dl),
+                };
                 let c0 = cands.len();
                 for g in groups {
                     let n0 = cands.len();
