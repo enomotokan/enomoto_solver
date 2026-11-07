@@ -343,8 +343,9 @@ def main():
             if key in seen:
                 continue
             seen.add(key)
-            if xsol is not None and float(coef @ xsol) > rhs + 1e-6:
+            if xsol is not None and float(coef @ xsol) > rhs + 1e-5 * (1.0 + float(np.abs(coef).sum())):  # 既知解は整数性が 1e-5 程度ずれる (binkar10_1 で 7.4e-6)
                 nbad += 1
+                print(f"BAD cut: viol at sol {float(coef @ xsol) - rhs:.3g} rhs {rhs:.6g} nnz {len(nz)} maxcoef {np.max(np.abs(coef)):.3g} u {ci['u'][:20]}", file=sys.stderr)
             h.addRow(-INF, rhs, len(nz), nz.astype(np.int32), coef[nz])
             us.append(ci["u"])
             added += 1
