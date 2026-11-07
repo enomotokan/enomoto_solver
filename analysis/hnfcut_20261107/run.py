@@ -8,7 +8,7 @@ WT = D.parents[1]
 sys.path.insert(0, str(D))
 import hprobs
 CFG = {"def": {}, "hnf": {"ENOMOTO_MIP_HNFPRE": "1"}, "hcut": {"ENOMOTO_MIP_HNFCUT": "1"},
-       "hcut_a": {"ENOMOTO_MIP_HNFCUT": "a"}, "hcut_b": {"ENOMOTO_MIP_HNFCUT": "b"}, "hcut_c": {"ENOMOTO_MIP_HNFCUT": "c"}}
+       "hcut_a": {"ENOMOTO_MIP_HNFCUT": "a"}, "hcut_b": {"ENOMOTO_MIP_HNFCUT": "b"}, "hcut_c": {"ENOMOTO_MIP_HNFCUT": "c"}, "hcut_ac": {"ENOMOTO_MIP_HNFCUT": "ac"}}
 out = Path(sys.argv[1]); T = float(sys.argv[2]); cfgs = sys.argv[3].split(","); seeds = [int(s) for s in sys.argv[4].split(",")]
 probs = []
 for a in sys.argv[5:]:
