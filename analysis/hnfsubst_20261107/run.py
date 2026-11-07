@@ -66,7 +66,7 @@ for s in seeds:
                 res = json.loads(out_s.strip().splitlines()[-1])
             except Exception:
                 res = {"status": "error", "err": err[-500:]}
-            with gzip.open(D / "logs" / f"{p}.{c}.{s}.{int(T)}.log.gz", "wt") as f:
+            with gzip.open(D / "logs" / f"{out.stem}.{p}.{c}.{s}.log.gz", "wt") as f:
                 f.write(err)
             rec = {"problem": p, "cfg": c, "rep": s, "T": T, "result": res, "info": parse(err), "wall": round(time.time() - t0, 2)}
             with out.open("a") as f:
