@@ -5659,7 +5659,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (rows, st) = super::redsplit::reduce(&rs_bases, &is_int, n, Some(dl));
             let c0 = cands.len();
             for (_, row) in &rows {
-                if self.time_up() {
+                // 縮約とカットの生成を合わせて 1 回 `ENOMOTO_T_MIP_REDSPLIT_TIME` 秒まで (blp-ar98 で密な行のカットの生成が重かった)
+                if self.time_up() || std::time::Instant::now() >= dl {
                     break;
                 }
                 let neg: Vec<(usize, f64)> = row.iter().map(|&(k, a)| (k, -a)).collect();
