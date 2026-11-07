@@ -24,7 +24,9 @@ else:
     for rep in reps:
         common = set.intersection(*[set(by[(c, rep)]) for c in cfgs if (c, rep) in by])
         for c in cfgs:
-            d = by.get((c, rep), {})
+            if (c, rep) not in by:
+                continue
+            d = by[(c, rep)]
             ok = [p for p in common if d[p]["result"].get("status") == "optimal"]
             sgm = math.exp(sum(math.log(min(d[p]["result"].get("time") or 60, 60) + 1) for p in common) / max(len(common), 1)) - 1
             hit = sorted(p for p in common if any(("(ENOMOTO_MIP_PROBE_BASIS_GUARD)" in n) or ("probe basis guard" in n and "hit the cap" in n) or ("root LP raced from the basis" in n) for n in d[p]["notes"]))
