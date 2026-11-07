@@ -609,4 +609,158 @@ mod tests {
         assert_eq!(s[0].len(), 2);
         assert_eq!(s[0][0].1, s[0][1].1);
     }
+
+    struct Rng(u64);
+    impl Rng {
+        fn f(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn i(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + (self.f() * (hi - lo + 1) as f64).floor() as i64
+        }
+    }
+
+    /// 列の値の全ての組 (整数列は上下限の中の整数、連続列は 0.5 刻み) のうち、全ての行を満たすもの
+    fn feasible_points(lo: &[f64], up: &[f64], is_int: &[bool], rows: &[Vec<(usize, f64)>], rlo: &[f64], rup: &[f64]) -> Vec<Vec<f64>> {
+        let n = lo.len();
+        let mut out = Vec::new();
+        let mut q: Vec<f64> = lo.to_vec();
+        loop {
+            if rows.iter().zip(rlo.iter().zip(rup)).all(|(r, (&l, &u))| {
+                let a: f64 = r.iter().map(|&(j, c)| c * q[j]).sum();
+                a >= l - 1e-9 && a <= u + 1e-9
+            }) {
+                out.push(q.clone());
+            }
+            let mut k = 0;
+            while k < n {
+                let st = if is_int[k] { 1.0 } else { 0.5 };
+                if q[k] + st <= up[k] + 1e-9 {
+                    q[k] += st;
+                    break;
+                }
+                q[k] = lo[k];
+                k += 1;
+            }
+            if k == n {
+                return out;
+            }
+        }
+    }
+
+    /// 乱数の小さい問題 (x0 と変数上下限つきの一般整数列 w・連続列 c、0-1 列 z、x0 を含むデータの行を LP 点で等号にしたもの) で、
+    /// [`modkvb_cuts`] のカット (論理変数を含む) が全ての点 (連続列は 0.5 刻み) で成り立つことを総当たりで確かめる
+    #[test]
+    fn modkvb_cuts_valid() {
+        use super::super::cuts::VarBounds;
+        let mut rng = Rng(1234567891);
+        let (mut ncuts, mut nfeas, mut nslack) = (0usize, 0usize, 0usize);
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        for _ in 0..3000 {
+            let nw = rng.i(1, 3) as usize;
+            let nc = rng.i(0, 1) as usize;
+            // 列: 0 = x0, 1..=nw = w, 次の nw = z (w の相手), 次の nc = c (連続), 次の nc = zc (c の相手)
+            let n = 1 + 2 * nw + 2 * nc;
+            let mut lo = vec![0.0; n];
+            let mut up = vec![1.0; n];
+            let mut is_int = vec![true; n];
+            lo[0] = -(rng.i(2, 3) as f64);
+            up[0] = 3.0;
+            for k in 1..=nw {
+                lo[k] = -(rng.i(1, 3) as f64);
+                up[k] = rng.i(1, 3) as f64;
+            }
+            let mut x = vec![0.0; n];
+            x[0] = rng.i(-2, 1) as f64 + 0.25 + 0.5 * rng.f();
+            let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+            let (mut rlo, mut rup) = (Vec::new(), Vec::new());
+            for k in 1..=nw {
+                let z = nw + k;
+                let (d, d2) = (up[k] - rng.i(0, 1) as f64, -lo[k] - rng.i(0, 1) as f64);
+                rows.push(vec![(k, 1.0), (z, -d)]);
+                rlo.push(f64::NEG_INFINITY);
+                rup.push(0.0);
+                rows.push(vec![(k, -1.0), (z, -d2)]);
+                rlo.push(f64::NEG_INFINITY);
+                rup.push(0.0);
+                if rng.f() < 0.3 {
+                    x[z] = 0.2 + 0.6 * rng.f();
+                    x[k] = (rng.f() * 2.0 - 1.0) * d.min(d2) * x[z];
+                } else if rng.f() < 0.3 {
+                    x[z] = 1.0;
+                    x[k] = rng.i(-(d2 as i64), d as i64) as f64;
+                }
+            }
+            for t in 0..nc {
+                let (c, zc) = (1 + 2 * nw + t, 1 + 2 * nw + nc + t);
+                is_int[c] = false;
+                up[c] = 2.0;
+                // c <= 2 zc
+                rows.push(vec![(c, 1.0), (zc, -2.0)]);
+                rlo.push(f64::NEG_INFINITY);
+                rup.push(0.0);
+                x[zc] = [0.0, 0.5, 1.0][rng.i(0, 2) as usize];
+                // 多くは変数上限にちょうど (c = 2 zc)、ときどき 0
+                x[c] = if rng.f() < 0.7 { 2.0 * x[zc] } else { 0.0 };
+            }
+            let nd = rng.i(2, 4) as usize;
+            for t in 0..nd {
+                let mut r = vec![(0, if t % 2 == 0 { 1.0 } else { -(rng.i(1, 2) as f64) })];
+                for k in 1..=nw {
+                    if rng.f() < 0.7 {
+                        r.push((k, [-1.0, 1.0, 2.0, -2.0, 3.0][rng.i(0, 4) as usize]));
+                    }
+                }
+                for t2 in 0..nc {
+                    if rng.f() < 0.6 {
+                        r.push((1 + 2 * nw + t2, [-1.0, 1.0, 0.5][rng.i(0, 2) as usize]));
+                    }
+                }
+                let a: f64 = r.iter().map(|&(j, c)| c * x[j]).sum();
+                rows.push(r);
+                if rng.f() < 0.5 {
+                    rlo.push(f64::NEG_INFINITY);
+                    rup.push(a);
+                } else if rng.f() < 0.8 {
+                    rlo.push(a);
+                    rup.push(f64::INFINITY);
+                } else {
+                    rlo.push(a);
+                    rup.push(a);
+                }
+            }
+            let feas = feasible_points(&lo, &up, &is_int, &rows, &rlo, &rup);
+            nfeas += feas.len();
+            let mut vb = VarBounds::from_rows(n, &is_int, &rows, &rlo, &rup);
+            vb.add_int_vbs(&is_int, &lo, &up, &rows, &rlo, &rup, &[]);
+            // 論理変数 (行の活動量) を足した列
+            let m = rows.len();
+            let (mut elo, mut eup, mut eint, mut ex) = (lo.clone(), up.clone(), is_int.clone(), x.clone());
+            for i in 0..m {
+                let integral = rows[i].iter().all(|&(j, a)| is_int[j] && (a - a.round()).abs() < 1e-9);
+                let (l, u) = if integral { ((rlo[i] - 1e-6).ceil(), (rup[i] + 1e-6).floor()) } else { (rlo[i], rup[i]) };
+                elo.push(l);
+                eup.push(u);
+                eint.push(integral);
+                ex.push(rows[i].iter().map(|&(j, c)| c * x[j]).sum());
+            }
+            let vars = CutVars { lo: &elo, up: &eup, is_int: &eint, x: &ex, vb: Some(&vb) };
+            let (groups, _st) = modkvb_cuts(&vars, &rows, n, 3, true, far);
+            for cut in groups.into_iter().flatten() {
+                ncuts += 1;
+                if cut.coefs.iter().any(|&(k, _)| k >= n) {
+                    nslack += 1;
+                }
+                for q in &feas {
+                    let a: f64 = cut.coefs.iter().map(|&(k, c)| c * if k < n { q[k] } else { rows[k - n].iter().map(|&(j, cc)| cc * q[j]).sum::<f64>() }).sum();
+                    assert!(a <= cut.rhs + 1e-7 * (1.0 + cut.rhs.abs()), "point {q:?} cut off by {:?} <= {} (rows {rows:?} [{rlo:?}, {rup:?}], x {x:?}, lo {lo:?} up {up:?} int {is_int:?})", cut.coefs, cut.rhs);
+                }
+            }
+        }
+        eprintln!("modkvb_cuts_valid: cuts {ncuts} (with slacks {nslack}), feasible points {nfeas}");
+        assert!(ncuts > 300 && nfeas > 1000, "cuts {ncuts}, feasible points {nfeas}");
+    }
 }
