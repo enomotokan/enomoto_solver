@@ -43,6 +43,11 @@ pub(crate) fn modkvb_mode() -> Option<u8> {
     })
 }
 
+thread_local! {
+    /// 6 章の診断: 直前の [`modkvb_cuts`] の返した組ごとの印 (1 = k が 2、2 = 変数上下限の置き換えを含む、4 = LP のカットの行を含む、8 = CG の式)
+    pub(crate) static MODKVB_TAGS: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// [`modkvb_cuts`] の記録
 #[derive(Default, Debug, Clone)]
 pub(crate) struct ModkStats {
@@ -162,6 +167,8 @@ struct SysRow {
     /// 変数上下限で置き換えた項の数 (連続列, 一般整数列、診断用)
     vbc: u32,
     vbi: u32,
+    /// 変数上下限で置き換えた項があるか (6 章の診断)
+    vbf: bool,
 }
 
 /// 簡単な擬似乱数 (xorshift)
@@ -500,7 +507,7 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
         let irhs = (rhs * scale).round() as i64;
         nvc += c1;
         nvi += c2;
-        sys.push(SysRow { row: i, sg, scale, ents, rhs: irhs, vbc: c1 as u32, vbi: c2 as u32 });
+        sys.push(SysRow { row: i, sg, scale, ents, rhs: irhs, vbc: c1 as u32, vbi: c2 as u32 , vbf: c1 + c2 > 0 });
     }
     st.sys = sys.len();
     st.vbsub = (nvc, nvi);
@@ -514,6 +521,7 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
         st.cols = used.iter().filter(|&&b| b).count();
     }
     if sys.is_empty() || sys.iter().all(|r| r.rhs == 0) {
+        MODKVB_TAGS.with(|t| t.borrow_mut().clear());
         return (Vec::new(), st);
     }
     let max_sols = tunable!("ENOMOTO_T_MIP_MODKVB_SOLS", 300usize, usize);
@@ -524,6 +532,8 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
     let iv = env_str!("ENOMOTO_MIP_MODKVB_IV").and_then(|v| v.parse::<u8>().ok()).unwrap_or(3);
     let dump = env_str!("ENOMOTO_MIP_MODKVB_DUMP").is_some();
     let mut out: Vec<Vec<RawCut>> = Vec::new();
+    let mut tags: Vec<u8> = Vec::new();
+    let cg_mode: u8 = match env_str!("ENOMOTO_MIP_MODKVB_CG") { None | Some("0") => 0, Some("both") => 2, Some(_) => 1 };
     let mut aggv = vec![0.0f64; n + m];
     let mut atouch: Vec<usize> = Vec::new();
     // 試作 `ENOMOTO_MIP_SNFMODK` の `v`: GF(k) の解の代わりに、連立の群 (Smith 標準形の対角化) の元を分母ごとに試す
@@ -577,6 +587,25 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
             }
             st.sol_rows += sol.len();
             let mut cs: Vec<RawCut> = Vec::new();
+            let has_vb = sol.iter().any(|&(q, _)| sys[q].vbf);
+            let has_cut = sol.iter().any(|&(q, _)| sys[q].row >= m_orig);
+            let mut tag: u8 = (k == 2) as u8 | ((has_vb as u8) << 1) | ((has_cut as u8) << 2);
+            // 6 章の診断 `ENOMOTO_MIP_MODKVB_CG` (=1 は CG の式だけ、=both は CG の式と従来の両方): 重み ((k-1) w mod k) / k の非負の乗数で
+            // 向きをそろえた行を足し、単純な上下限で x' >= 0 に移して係数と右辺を切り下げる (Chvátal-Gomory)。変数上下限の置き換えを含む解と、
+            // 係数が負の連続列 (x' >= 0 で落とせない) が残るものは作らない
+            if cg_mode > 0 && !has_vb {
+                if let Some(c) = cg_cut(vars, lp_rows, n, &sys, sol, k, &sub) {
+                    cs.push(c);
+                    tag |= 8;
+                }
+            }
+            if cg_mode == 1 {
+                if !cs.is_empty() {
+                    out.push(cs);
+                    tags.push(tag);
+                }
+                continue;
+            }
             let (mut ncov, mut ngen, mut alen) = (0usize, 0usize, 0usize);
             let forms: &[bool] = if k == 2 { &[true] } else { &[false, true] };
             for &negform in forms {
@@ -648,6 +677,7 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
             }
             if !cs.is_empty() {
                 out.push(cs);
+                tags.push(tag);
             }
         }
         if is_snf {
@@ -661,7 +691,79 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
             break;
         }
     }
+    MODKVB_TAGS.with(|t| *t.borrow_mut() = tags);
     (out, st)
+}
+
+/// 6 章の診断: 解 `sol` の mod-k の CG カット (非負の乗数 ((k-1) w mod k) / k で向きをそろえた LP の行を足し、単純な上下限で
+/// `x' >= 0` に移して係数と右辺を切り下げる)。構造変数だけの式で返す。置き換えが使えない列があれば `None`
+fn cg_cut(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize, sys: &[SysRow], sol: &[(usize, u32)], k: u32, sub: &[Sub]) -> Option<RawCut> {
+    let mut acc: std::collections::BTreeMap<usize, f64> = std::collections::BTreeMap::new();
+    let mut beta = 0.0f64;
+    for &(q, w) in sol {
+        let r = &sys[q];
+        let u = (((k - 1) * w) % k) as f64 / k as f64 * r.scale;
+        if u == 0.0 {
+            continue;
+        }
+        let b = if r.sg > 0.0 { vars.up[n + r.row] } else { -vars.lo[n + r.row] };
+        if !b.is_finite() {
+            return None;
+        }
+        beta += u * b;
+        for &(j, a) in &lp_rows[r.row] {
+            *acc.entry(j).or_insert(0.0) += u * r.sg * a;
+        }
+    }
+    let fl = |v: f64| (v + 1e-9 * v.abs().max(1.0)).floor();
+    let mut coefs: Vec<(usize, f64)> = Vec::new();
+    let mut rhs_const = 0.0f64;
+    let mut terms: Vec<(usize, bool, f64)> = Vec::new();
+    for (&j, &c) in &acc {
+        if c.abs() <= 1e-12 {
+            continue;
+        }
+        match sub[j] {
+            Sub::Fixed(v) => beta -= c * v,
+            Sub::ContAt(v) => {
+                let lower = v == vars.lo[j];
+                // x = l + x' (係数 c) か x = u - x' (係数 -c)。係数が負なら x' >= 0 で落とせない
+                let cc = if lower { c } else { -c };
+                if cc < -1e-9 {
+                    return None;
+                }
+                beta -= c * v;
+            }
+            Sub::Int(lower, _) => {
+                let (cc, b) = if lower { (c, vars.lo[j]) } else { (-c, vars.up[j]) };
+                if !b.is_finite() {
+                    return None;
+                }
+                beta -= c * b;
+                terms.push((j, lower, cc));
+            }
+            Sub::Vb(..) | Sub::Off => return None,
+        }
+    }
+    let fb = fl(beta);
+    for (j, lower, cc) in terms {
+        let f = fl(cc);
+        if f == 0.0 {
+            continue;
+        }
+        // f x' : 下限なら f (x - l)、上限なら f (u - x)
+        if lower {
+            coefs.push((j, f));
+            rhs_const += f * vars.lo[j];
+        } else {
+            coefs.push((j, -f));
+            rhs_const -= f * vars.up[j];
+        }
+    }
+    if coefs.is_empty() {
+        return None;
+    }
+    Some(RawCut { coefs, rhs: fb + rhs_const })
 }
 
 #[cfg(test)]
@@ -681,7 +783,7 @@ mod tests {
     #[test]
     fn gfk_finds_pair() {
         // x0 の係数が逆の 2 本: x0 <= 3, -x0 <= -4 → mod 2 では右辺 3 - 4 = -1 で奇数
-        let sys = vec![SysRow { row: 0, sg: 1.0, scale: 1.0, ents: vec![(0, 1)], rhs: 3, vbc: 0, vbi: 0 }, SysRow { row: 1, sg: 1.0, scale: 1.0, ents: vec![(0, -1)], rhs: -4, vbc: 0, vbi: 0 }];
+        let sys = vec![SysRow { row: 0, sg: 1.0, scale: 1.0, ents: vec![(0, 1)], rhs: 3, vbc: 0, vbi: 0, vbf: false }, SysRow { row: 1, sg: 1.0, scale: 1.0, ents: vec![(0, -1)], rhs: -4, vbc: 0, vbi: 0, vbf: false }];
         let mut to = false;
         let far = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let s = gfk_solutions(&sys, 2, 1, 10, 10, 1, far, &mut to);

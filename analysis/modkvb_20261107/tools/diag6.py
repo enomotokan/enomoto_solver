@@ -10,7 +10,14 @@ def rep(a, b, cnt=1):
     assert a in s, a[:80]
     s = s.replace(a, b, cnt)
 # 連立の行に変数上下限の印
-rep("""    ents: Vec<(usize, i64)>,
+if "    vbi: u32,\n}" in s:
+    rep("""    vbi: u32,
+}""", """    vbi: u32,
+    /// 変数上下限で置き換えた項があるか (6 章の診断)
+    vbf: bool,
+}""")
+else:
+    rep("""    ents: Vec<(usize, i64)>,
     rhs: i64,
 }""", """    ents: Vec<(usize, i64)>,
     rhs: i64,
@@ -55,13 +62,11 @@ rep("""            st.sol_rows += sol.len();
 rep("""            if !cs.is_empty() {
                 out.push(cs);
             }
-        }
-        if out.len() > n0 || st.timed_out {""", """            if !cs.is_empty() {
+        }""", """            if !cs.is_empty() {
                 out.push(cs);
                 tags.push(tag);
             }
-        }
-        if out.len() > n0 || st.timed_out {""")
+        }""")
 rep("""    let mut out: Vec<Vec<RawCut>> = Vec::new();
     let mut aggv""", """    let mut out: Vec<Vec<RawCut>> = Vec::new();
     let mut tags: Vec<u8> = Vec::new();
