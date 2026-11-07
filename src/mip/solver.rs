@@ -1332,6 +1332,13 @@ pub(crate) fn sym_orig_cut_on() -> bool {
     env_str!("ENOMOTO_MIP_NO_SYM_ORIG_CUT").is_none()
 }
 
+/// 試作 `ENOMOTO_MIP_HNFBR` (改良 11-08、既定では使わない): HNFPRE の合同式の表 (`dom.cong`) のある列の分枝を、置き換えずに
+/// y = (x - r)/m の刻みで扱う (候補 [`Solver::fractional`]、強分岐の子の境界、擬似費用の距離と分数部分)。表は `ENOMOTO_MIP_HNFPRE=1` と
+/// 同じに作る ([`super::hnf::mode`])
+pub(crate) fn hnfbr_on() -> bool {
+    !matches!(env_str!("ENOMOTO_MIP_HNFBR"), None | Some("") | Some("0"))
+}
+
 fn sb_agree_on() -> bool {
     env_str!("ENOMOTO_MIP_SB_AGREE").is_some()
 }
@@ -6271,11 +6278,68 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 現在の LP 解で整数でない整数列の (列, 値) の一覧。
+    /// `ENOMOTO_MIP_HNFBR` (改良 11-08、試作) なら、合同式 x ≡ r (mod m) の列は y = (x - r)/m が整数でないときも入れる
+    /// (x が整数でも合同式に合わなければ分枝の候補。整数列がすべて整数なら行から合同式は成り立つので、一覧が空かどうかは変わらない)
     pub(super) fn fractional(&self, x: &[f64]) -> Vec<(usize, f64)> {
+        let cong = if hnfbr_on() { self.dom.cong.as_deref() } else { None };
         (0..self.p.n)
-            .filter(|&j| self.p.is_int[j] && (x[j] - x[j].round()).abs() > FEASTOL && self.dom.lo[j] < self.dom.up[j])
+            .filter(|&j| {
+                self.p.is_int[j]
+                    && self.dom.lo[j] < self.dom.up[j]
+                    && ((x[j] - x[j].round()).abs() > FEASTOL || cong.is_some_and(|t| t.m[j] > 1 && x[j].abs() < 1e15 && (x[j].round() as i64 - t.r[j]).rem_euclid(t.m[j]) != 0))
+            })
             .map(|j| (j, x[j]))
             .collect()
+    }
+
+    /// `ENOMOTO_MIP_HNFBR`: 値 `v` の列 j で分けたときの下の子の上限 (合同式があれば `v` 以下で合う最大の値。なければ `v.floor()`)
+    #[inline]
+    fn bfl(&self, j: usize, v: f64) -> f64 {
+        match self.dom.cong.as_deref().filter(|t| hnfbr_on() && t.m[j] > 1) {
+            Some(t) => t.round_down(j, (v + FEASTOL).floor()),
+            None => v.floor(),
+        }
+    }
+
+    /// `ENOMOTO_MIP_HNFBR`: 上の子の下限 (合同式があれば `v` 以上で合う最小の値。なければ `v.ceil()`)
+    #[inline]
+    fn bce(&self, j: usize, v: f64) -> f64 {
+        match self.dom.cong.as_deref().filter(|t| hnfbr_on() && t.m[j] > 1) {
+            Some(t) => t.round_up(j, (v - FEASTOL).ceil()),
+            None => v.ceil(),
+        }
+    }
+
+    /// `ENOMOTO_MIP_HNFBR`: 分数部分 (合同式があれば y = (x - r)/m の刻みで。なければ `v - v.floor()`)
+    #[inline]
+    fn bfr(&self, j: usize, v: f64) -> f64 {
+        match self.dom.cong.as_deref().filter(|t| hnfbr_on() && t.m[j] > 1) {
+            Some(_) => {
+                let (d, u) = (self.bfl(j, v), self.bce(j, v));
+                if u > d { ((v - d) / (u - d)).clamp(0.0, 1.0) } else { v - v.floor() }
+            }
+            None => v - v.floor(),
+        }
+    }
+
+    /// 強分岐の子の擬似費用の観測の距離 (y の刻み。合同式がなければ従来の `ceil - v`・`v - floor`)
+    #[inline]
+    fn hnfbr_delta(&self, j: usize, v: f64, is_up: bool) -> f64 {
+        let f = self.bfr(j, v);
+        if is_up { 1.0 - f } else { f }
+    }
+
+    /// ノードの擬似費用の観測の距離を y の刻みに直す (合同式がなければ `delta` のまま)
+    #[inline]
+    fn hnfbr_obs_delta(&self, j: usize, up: bool, x: f64, parent_val: f64, delta: f64) -> f64 {
+        match self.dom.cong.as_deref().filter(|t| hnfbr_on() && t.m[j] > 1) {
+            Some(t) => {
+                let m = t.m[j] as f64;
+                let d0 = if up { 1.0 - self.bfr(j, parent_val) } else { self.bfr(j, parent_val) };
+                ((x - parent_val).abs() / m).max(d0)
+            }
+            None => delta,
+        }
     }
 
     fn log(&mut self, force: bool) {
@@ -10332,6 +10396,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if let Some((j, up, parent_val, parent_obj)) = node.branch.filter(|b| b.3.is_finite()) {
                         let x = self.lp.col_value(j);
                         let delta = (x - parent_val).abs().max(if up { parent_val.ceil() - parent_val } else { parent_val - parent_val.floor() });
+                        // `ENOMOTO_MIP_HNFBR`: 合同式の列は y = (x - r)/m の刻みで学ぶ
+                        let delta = self.hnfbr_obs_delta(j, up, x, parent_val, delta);
                         self.pc.add_observation(j, up, delta, node_obj - parent_obj);
                     }
                 }
@@ -11012,9 +11078,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
-            let est_gain: f64 = frac.iter().map(|&(j, v)| self.pc.estimate_gain(j, v - v.floor())).sum();
+            let est_gain: f64 = frac.iter().map(|&(j, v)| self.pc.estimate_gain(j, self.bfr(j, v))).sum();
             let estimate = node_obj + est_gain;
-            let f = value - value.floor();
+            let f = self.bfr(col, value);
             // 試作 `ENOMOTO_MIP_HNFPRE`: 合同式があれば子の上下限を合同式に合う値まで詰める
             let (vdn, vup) = match &self.dom.cong {
                 Some(t) => (t.round_down(col, value.floor()), t.round_up(col, value.ceil())),
@@ -12464,7 +12530,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (折れ線の直線は子孫のノードの LP の値の下界なので、子の値の正しい下界)
         let poly_score = env_str!("ENOMOTO_MIP_SB_POLY_SCORE").is_some();
         let score_of = |s: &Self, j: usize, v: f64, z: f64| {
-            let f = v - v.floor();
+            let f = s.bfr(j, v);
             if poly_score {
                 if let Some((gd, gu)) = s.poly_child_gains(j, v, z) {
                     let (pd, pu) = (s.pc.cost_down(j) * f, s.pc.cost_up(j) * (1.0 - f));
@@ -12496,7 +12562,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if sb_ancestor() && self.sb_cur.as_ref().is_some_and(|s| !s.polys.is_empty()) {
             let (mut any, mut bp, mut bq) = (false, (usize::MAX, f64::MIN), (usize::MAX, f64::MIN));
             for &(j, v) in frac {
-                let f = v - v.floor();
+                let f = self.bfr(j, v);
                 let plain = if hybrid { self.pc.hybrid_score(j, f) } else { self.pc.score(j, f) };
                 let mut with = plain;
                 if let Some((gd, gu)) = self.poly_child_gains(j, v, node_obj) {
@@ -12686,6 +12752,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let lim = self.limits_k(sb_iter_limit, 1);
                 let offset = self.p.offset;
+                // `ENOMOTO_MIP_HNFBR`: 子の境界 (合同式があれば合う値に丸めた下の子の上限・上の子の下限)
+                let bnds: Vec<(f64, f64)> = batch.iter().map(|&(jj, vv, ..)| (self.bfl(jj, vv), self.bce(jj, vv))).collect();
+                let bnds_ref = &bnds;
                 let orbs: Vec<Vec<usize>> = batch.iter().map(|&(jj, ..)| self.sb_down_orbit(jj)).collect();
                 let orbs_ref = &orbs;
                 let lp0 = &self.lp;
@@ -12705,9 +12774,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     let mut sides: Vec<SbSide> = Vec::with_capacity(2);
                                     for is_up in [false, true] {
                                         if is_up {
-                                            lpc.set_col_bounds(jj, vv.ceil(), u0);
+                                            lpc.set_col_bounds(jj, bnds_ref[k].1, u0);
                                         } else {
-                                            lpc.set_col_bounds(jj, l0, vv.floor());
+                                            lpc.set_col_bounds(jj, l0, bnds_ref[k].0);
                                             for &kk in &orbs_ref[k] {
                                                 lpc.set_col_bounds(kk, 0.0, 0.0);
                                             }
@@ -12755,7 +12824,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             gains[side] = (o - node_obj).max(0.0);
                             child_obj[side] = o;
                             child_rc[side] = r.rc;
-                            let delta = if is_up { v.ceil() - v } else { v - v.floor() };
+                            let delta = self.hnfbr_delta(j, v, is_up);
                             self.pc.add_observation(j, is_up, delta, gains[side]);
                             if o >= self.prune_limit() {
                                 cut[side] = true;
@@ -12796,9 +12865,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let pos = self.dom.stack_len();
                 if sb_prop {
                     if is_up {
-                        self.dom.tighten_lower(self.p, j, v.ceil());
+                        self.dom.tighten_lower(self.p, j, self.bce(j, v));
                     } else {
-                        self.dom.tighten_upper(self.p, j, v.floor());
+                        self.dom.tighten_upper(self.p, j, self.bfl(j, v));
                     }
                     let ok = !self.dom.infeasible && self.dom.propagate(self.p) && self.propagate_objective() && {
                         match self.lit_conflicts.propagate(self.p, &mut self.dom, pos) {
@@ -12824,9 +12893,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if is_up {
-                    self.lp.set_col_bounds(j, v.ceil(), up);
+                    self.lp.set_col_bounds(j, self.bce(j, v), up);
                 } else {
-                    self.lp.set_col_bounds(j, lo, v.floor());
+                    self.lp.set_col_bounds(j, lo, self.bfl(j, v));
                     for k in self.sb_down_orbit(j) {
                         self.lp.set_col_bounds(k, 0.0, 0.0);
                         self.sb_of_count += 1;
@@ -12844,7 +12913,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if sb_rc() {
                             child_rc[side] = sb_child_rc(&self.lp, j, is_up);
                         }
-                        let delta = if is_up { v.ceil() - v } else { v - v.floor() };
+                        let delta = self.hnfbr_delta(j, v, is_up);
                         self.pc.add_observation(j, is_up, delta, gains[side]);
                         if o >= self.prune_limit() {
                             cut[side] = true;
@@ -12884,26 +12953,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 (true, false) => {
                     let had = self.dbg_on && self.dbg_contains();
                     self.dom.set_external_tag(2);
-                    self.dom.tighten_lower(self.p, j, v.ceil());
+                    self.dom.tighten_lower(self.p, j, self.bce(j, v));
                     self.dom.set_external(false);
                     if had && !self.dbg_contains() {
-                        self.dbg_lost(&format!("strong branching fixing x{j} >= {}", v.ceil()), true);
+                        self.dbg_lost(&format!("strong branching fixing x{j} >= {}", self.bce(j, v)), true);
                     }
                     if sb_inherit() {
-                        self.sb_node_fixes.push(BoundChange { col: j, upper: false, value: v.ceil(), sym: true });
+                        self.sb_node_fixes.push(BoundChange { col: j, upper: false, value: self.bce(j, v), sym: true });
                     }
                     bound_changes += 1;
                 }
                 (false, true) => {
                     let had = self.dbg_on && self.dbg_contains();
                     self.dom.set_external_tag(2);
-                    self.dom.tighten_upper(self.p, j, v.floor());
+                    self.dom.tighten_upper(self.p, j, self.bfl(j, v));
                     self.dom.set_external(false);
                     if had && !self.dbg_contains() {
-                        self.dbg_lost(&format!("strong branching fixing x{j} <= {}", v.floor()), true);
+                        self.dbg_lost(&format!("strong branching fixing x{j} <= {}", self.bfl(j, v)), true);
                     }
                     if sb_inherit() {
-                        self.sb_node_fixes.push(BoundChange { col: j, upper: true, value: v.floor(), sym: true });
+                        self.sb_node_fixes.push(BoundChange { col: j, upper: true, value: self.bfl(j, v), sym: true });
                     }
                     bound_changes += 1;
                 }
@@ -12922,14 +12991,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             // 直線 (z, v, per): 割線は (今の LP 値, v) を通り傾きは子の値との差から。`ENOMOTO_MIP_SB_RC` で子の LP の
                             // 被約費用 d が使えるなら、(子の値, 分けた境界) を通り傾き |d| の直線 (LP の双対性による。凸性から割線と
                             // 同じか急で、同じ点を通るので割線を支配する)
-                            let bound = if is_up { v.ceil() } else { v.floor() };
+                            let bound = if is_up { self.bce(j, v) } else { self.bfl(j, v) };
                             let rc = child_rc[side].abs();
                             let line = if rc > 1e-7 {
                                 self.sb_rc_count += 1;
                                 SbLine { col: j as u32, up: is_up, z: o, v: bound, per: rc }
                             } else {
                                 let change = o - node_obj;
-                                let dist0 = if is_up { v.ceil() - v } else { v - v.floor() };
+                                let dist0 = if is_up { self.bce(j, v) - v } else { v - self.bfl(j, v) };
                                 if change <= 1e-5 || dist0 <= 1e-3 {
                                     continue;
                                 }

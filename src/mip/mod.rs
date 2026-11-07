@@ -1127,7 +1127,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // 試作 `ENOMOTO_MIP_HNFSUBST` (既定では使わない): 合同式の出た一般整数列を x_j = r_j + g_j y_j に置き換える ([`hnf_subst`])。
     // `hnf_subst_map` は置き換えの一覧 (暫定解を前処理後の空間に写すのに使う。空なら置き換えなし)
     let (presolved, hnf_subst_map) = match presolved {
-        Some(Presolved::Reduced { prob, postsolve, scaling }) if hnfsubst::on() && !params.submip => hnf_subst(prob, postsolve, scaling),
+        Some(Presolved::Reduced { prob, postsolve, scaling }) if hnfsubst::on() && !params.submip => hnf_subst(prob, postsolve, scaling, pre_submip),
         other => (other, Vec::new()),
     };
     // 利用者向けのログ (サブ MIP の前処理は出さない)
@@ -3154,7 +3154,7 @@ fn hnf_presolve(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::Postso
 /// 試作 `ENOMOTO_MIP_HNFSUBST`: [`hnf_presolve`] の後の問題を解析し直し、合同式 `x_j ≡ r_j (mod g_j)` (g_j > 1) の出た一般整数列を
 /// `x_j = r_j + g_j y_j` に置き換える ([`hnfsubst::substitute`])。後処理の手順 (自己参照の代入) を最後に足す。
 /// 前処理の中で置いた前処理後の空間の値 (早めの FJ の解) は y に写す。根の基底は列の状態をそのまま使う (下の注)。
-fn hnf_subst(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling) -> (Option<Presolved>, Vec<hnfsubst::Subst>) {
+fn hnf_subst(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, pre_submip: bool) -> (Option<Presolved>, Vec<hnfsubst::Subst>) {
     let int_ok: Vec<bool> = (0..prob.n).map(|j| scaling.d.get(j).is_none_or(|&d| d == 1.0)).collect();
     let res = hnf::analyze(&prob, &int_ok);
     let fp0 = rows_fingerprint(&prob.rows);
@@ -3188,6 +3188,30 @@ fn hnf_subst(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::Postsolve
     solver::PROBE_BASIS_INFO.with(|s| *s.borrow_mut() = None);
     solver::RESTART_BASIS.with(|s| *s.borrow_mut() = None);
     solver::RESTART_X.with(|s| *s.borrow_mut() = None);
+    // `ENOMOTO_MIP_HNFSUBST=re` (改良 11-08、試作): 置き換えた問題に前処理をかけ直す (割った行の丸めから上下限の伝播・係数の締め付け)。
+    // 尺度が掛からず列の数が同じときだけ使い、後処理の手順は置き換えの手順の後に並べる (逆順に戻すので、かけ直しの手順が先に戻る)
+    if env_str!("ENOMOTO_MIP_HNFSUBST") == Some("re") && scaling.d.iter().all(|&d| d == 1.0) {
+        let (m0, free0) = (prob.m, (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count());
+        match presolve_mip(&prob, false, pre_submip, None) {
+            Some(Presolved::Infeasible) => return (Some(Presolved::Infeasible), map),
+            Some(Presolved::Reduced { prob: p2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().all(|&d| d == 1.0) && p2.n == prob.n => {
+                if env_str!("ENOMOTO_MIP_HNFSUBST_QUIET").is_none() {
+                    let free1 = (0..p2.n).filter(|&j| p2.col_lo[j] < p2.col_up[j]).count();
+                    eprintln!("HNFSUBST: re-presolved: rows {m0} -> {}, free columns {free0} -> {free1}", p2.m);
+                }
+                postsolve.extend(post2);
+                prob = p2;
+                // 早めの FJ の解はかけ直した問題で実行不能なら捨てる (かけ直しは列を固定・代入するだけ)
+                FEAS_FJ_SOL.with(|s| {
+                    let bad = s.borrow().as_ref().is_some_and(|x| x.len() != prob.n || !prob.is_feasible(x, 1e-6));
+                    if bad {
+                        *s.borrow_mut() = None;
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
     (Some(Presolved::Reduced { prob, postsolve, scaling }), map)
 }
 

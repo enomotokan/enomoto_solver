@@ -10,7 +10,14 @@ HITS = ["flugpl", "flugplinf", "brazil3", "lectsched-5-obj", "mzzv11", "neos-365
         "radiationm18-12-05", "radiationm40-10-02", "rocI-4-11", "rococoB10-011000", "rococoC10-001000", "snp-02-004-104",
         "traininstance2", "traininstance6", "8div-n59k10"]
 CFG = {"def": {}, "hnf": {"ENOMOTO_MIP_HNFPRE": "1"}, "sub": {"ENOMOTO_MIP_HNFSUBST": "1"},
-       "subh": {"ENOMOTO_MIP_HNFSUBST": "1", "ENOMOTO_MIP_HNFPRE": "1"}, "cut": {"ENOMOTO_MIP_HNFCUT": "1"}}
+       "subh": {"ENOMOTO_MIP_HNFSUBST": "1", "ENOMOTO_MIP_HNFPRE": "1"}, "cut": {"ENOMOTO_MIP_HNFCUT": "1"},
+       # 改良 (11-08): 分け方・組み合わせ
+       "dnc": {"ENOMOTO_MIP_NO_CUTS": "1"}, "snc": {"ENOMOTO_MIP_HNFSUBST": "1", "ENOMOTO_MIP_NO_CUTS": "1"},
+       "defc": {"ENOMOTO_MIP_CUTLPCAP": "c"}, "subc": {"ENOMOTO_MIP_HNFSUBST": "1", "ENOMOTO_MIP_CUTLPCAP": "c"},
+       "subac": {"ENOMOTO_MIP_HNFSUBST": "1", "ENOMOTO_MIP_CUTLPCAP": "ac"},
+       "subre": {"ENOMOTO_MIP_HNFSUBST": "re"}, "br": {"ENOMOTO_MIP_HNFBR": "1"}, "brs": {"ENOMOTO_MIP_HNFBR": "s"}}
+# `ENOMOTO_BENCH_EXTRA=名=値,名=値`: 全部の回に足す (根だけの回の ENOMOTO_MIP_NODE_LIMIT=1 など)
+EXTRA = dict(kv.split("=", 1) for kv in os.environ.get("ENOMOTO_BENCH_EXTRA", "").split(",") if kv)
 out = Path(sys.argv[1]); T = float(sys.argv[2]); cfgs = sys.argv[3].split(","); seeds = [int(s) for s in sys.argv[4].split(",")]
 probs = []
 for a in sys.argv[5:]:
@@ -51,7 +58,7 @@ for s in seeds:
             if (p, c, s) in done:
                 continue
             env = dict(os.environ, ENOMOTO_MIP_LOG="1", ENOMOTO_MIP_THREADS="4", ENOMOTO_T_MIP_SEED=str(s), ENOMOTO_MIP_HNFPRE_QUIET="1",
-                       ENOMOTO_MIP_DEBUG_SEPPROF="1", **CFG[c])
+                       ENOMOTO_MIP_DEBUG_SEPPROF="1", **EXTRA, **CFG[c])
             mps = WT / ".miplib_cache" / f"{p}.mps"
             if not mps.exists():
                 subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0,'{WT}/scripts'); import run_miplib_benchmark as r; from pathlib import Path; r.fetch('{p}', Path('{WT}/.miplib_cache'))"])

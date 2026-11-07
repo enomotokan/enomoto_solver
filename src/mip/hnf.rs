@@ -25,8 +25,8 @@ pub(crate) enum Mode {
 
 pub(crate) fn mode() -> Option<Mode> {
     match env_str!("ENOMOTO_MIP_HNFPRE") {
-        // 試作 `ENOMOTO_MIP_HNFCUT` ([`super::hnfcut`]) だけなら `1` と同じ
-        None | Some("") | Some("0") => super::hnfcut::on().then_some(Mode::Full),
+        // 試作 `ENOMOTO_MIP_HNFCUT` ([`super::hnfcut`])・`ENOMOTO_MIP_HNFBR` ([`super::solver::hnfbr_on`]) だけなら `1` と同じ
+        None | Some("") | Some("0") => (super::hnfcut::on() || super::solver::hnfbr_on()).then_some(Mode::Full),
         Some("count") => Some(Mode::Count),
         Some("bounds") => Some(Mode::Bounds),
         Some(_) => Some(Mode::Full),
