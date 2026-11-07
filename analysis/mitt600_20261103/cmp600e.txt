@@ -1,0 +1,42 @@
+問題数 186
+種 1: 既定 解けた 69 SGM 220.29  | cand1107 解けた 78 SGM 211.80 (比 0.961)  | HiGHS だけが解く: 既定 23・cand1107 19  | crash 0・0
+種 2: 既定 解けた 70 SGM 222.10  | cand1107 解けた 73 SGM 215.94 (比 0.972)  | HiGHS だけが解く: 既定 21・cand1107 19  | crash 0・0
+2 種合わせて: 既定 SGM 221.20・cand1107 213.86 (比 0.967)
+HiGHS (1 回) 解けた 86
+
+2 種とも cand1107 だけ解けた / 2 種とも既定だけ解けた:
+  cand1107 だけ: mushroom-best                種1 207.7  種2 260.0
+  cand1107 だけ: rocI-4-11                    種1 438.1  種2 586.9
+
+片方の種だけで解けたかが変わった:
+  30n20b8                      種1 既定 229.4 / cand 586.4  種2 既定 TL gap 6.0e-01 / cand 454.6
+  fastxgemm-n2r6s0t2           種1 既定 TL gap 8.5e-01 / cand 283.8  種2 既定 534.5 / cand 87.2
+  istanbul-no-cutoff           種1 既定 TL gap 1.8e-01 / cand 539.5  種2 既定 TL gap 2.1e-01 / cand TL gap 2.9e-01
+  n2seq36q                     種1 既定 TL gap 2.2e-02 / cand 64.0  種2 既定 377.1 / cand 21.2
+  neos-1445765                 種1 既定 TL gap 1.2e-02 / cand 142.5  種2 既定 401.1 / cand 220.5
+  neos-933966                  種1 既定 332.4 / cand 340.9  種2 既定 TL gap 1.2e-01 / cand 510.4
+  neos-957323                  種1 既定 TL gap 7.8e-07 / cand 504.3  種2 既定 TL gap 7.8e-07 / cand TL gap 3.0e-07
+  ns1830653                    種1 既定 TL gap 4.0e-01 / cand TL gap 3.0e-01  種2 既定 TL gap 3.4e-01 / cand 523.4
+  ns1952667                    種1 既定 TL 解なし / cand 291.5  種2 既定 TL 解なし / cand TL 解なし
+  pg5_34                       種1 既定 410.7 / cand TL gap 2.9e-04  種2 既定 TL gap 4.3e-04 / cand TL gap 3.4e-04
+  supportcase26                種1 既定 TL gap 9.0e-02 / cand 431.3  種2 既定 TL gap 1.2e-01 / cand TL gap 9.5e-02
+  supportcase40                種1 既定 TL gap 1.0e-02 / cand 550.4  種2 既定 529.6 / cand 584.8
+  swath3                       種1 既定 161.8 / cand TL gap 3.3e-02  種2 既定 67.4 / cand 93.3
+  unitcal_7                    種1 既定 TL gap 5.9e-04 / cand TL gap 9.7e-04  種2 既定 386.6 / cand TL gap 9.8e-04
+
+2 種とも同じ向きに 1.5 倍以上 (両方解けた回):
+  mzzv42z                      種1 144.0 → 335.5  種2 140.9 → 262.2
+  physiciansched6-2            種1 85.2 → 34.6  種2 78.3 → 18.1
+
+2 種とも解けず、ギャップが 2 種とも同じ向きに 2 倍以上:
+  悪 momentum1                  種1 TL gap 7.3e-01 → TL 解なし  種2 TL gap 7.2e-01 → TL 解なし
+  良 neos-3216931-puriri        種1 TL 解なし → TL gap 2.6e-01  種2 TL 解なし → TL gap 2.7e-01
+  良 neos-662469                種1 TL gap 2.3e-03 → TL gap 1.9e-05  種2 TL gap 1.4e-01 → TL gap 6.9e-04
+  良 rail01                     種1 TL 解なし → TL gap 1.4e-01  種2 TL 解なし → TL gap 2.7e-01
+
+HiGHS だけが解く問題 (どちらかの種で):
+  既定 (2 種とも解けない) 18: csched008, fiball, mcsched, mushroom-best, mzzv11, neos-1456979, neos-3216931-puriri, neos-3627168-kasai, neos-4722843-widden, neos-873061, neos-957323, net12, ns1830653, rococoC10-001000, satellites2-60-fs, sct2, tr12-30, uccase12
+  cand1107 (2 種とも解けない) 17: csched008, fiball, mcsched, mzzv11, neos-1456979, neos-3216931-puriri, neos-3627168-kasai, neos-4722843-widden, neos-873061, net12, pg5_34, rococoC10-001000, satellites2-60-fs, sct2, tr12-30, uccase12, unitcal_7
+
+食い違い:
+  計 0 件
