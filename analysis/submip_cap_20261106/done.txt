@@ -47,3 +47,9 @@ python run1.py ours trento1 j 1 300 ENOMOTO_MIP_SUBCAP=j
 python run1.py ours trento1 t 1 300 ENOMOTO_MIP_SUBCAP=t
 cd ../.. && RUSTFLAGS="-C link-arg=-L/usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib cargo test --release --lib > /tmp/claude-0/-home-user-enomoto-solver/e42a6474-53a0-5bac-bf0f-cfe91e2a50d9/scratchpad/cargo_test.log 2>&1; tail -3 /tmp/claude-0/-home-user-enomoto-solver/e42a6474-53a0-5bac-bf0f-cfe91e2a50d9/scratchpad/cargo_test.log
 python bench58.py def,nwjt 0
+python bench58.py def,nwjt 1
+python run1.py ours supportcase42 def 2 300
+python run1.py ours neos-1456979 def 1 60
+python run1.py ours neos-1456979 nwjt 1 60 ENOMOTO_MIP_SUBCAP=nwjt
+python run1.py ours 10teams def 1 60
+python run1.py ours 10teams nwjt 1 60 ENOMOTO_MIP_SUBCAP=nwjt
