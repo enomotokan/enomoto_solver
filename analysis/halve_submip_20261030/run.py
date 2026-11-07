@@ -191,6 +191,16 @@ CFGS = {
                 "ENOMOTO_MIP_SUBFIX": "rtc",
                 "ENOMOTO_MIP_NODELP_PERTURB": "phg", "ENOMOTO_MIP_BASIS_NB": "t",
                 "ENOMOTO_MIP_PROBE_BASIS_GUARD": "x"},
+    # cand1107 (2026-11-07): all1107 から LPSCALE (cbs-cta の害、analysis/mitt600_20261103.md の res4 の節) を外し、HNFPRE の bounds
+    # (整数列だけの等式の Hermite 標準形で実行不能・固定・上下限の詰め、analysis/hnfpre_20261107.md) を足した形。Mittelmann 600 秒の res5 で既定と比べる
+    "cand1107": {"ENOMOTO_SIMPLEX_SCALE": "1", "ENOMOTO_T_SIMPLEX_SCALE_MIN_M": "10000", "ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE": "1e4", "ENOMOTO_SIMPLEX_HARRIS2": "r",
+                 "ENOMOTO_MIP_MPSEP": "oqmgs", "ENOMOTO_T_MIP_MPSEP_NV": "1", "ENOMOTO_T_MIP_MPSEP_EXTRA": "5",
+                 "ENOMOTO_MIP_MUSHAGG": "cover",
+                 "ENOMOTO_MIP_PROBE_REPRESOLVE": "1",
+                 "ENOMOTO_MIP_SUBFIX": "rtc",
+                 "ENOMOTO_MIP_NODELP_PERTURB": "phg", "ENOMOTO_MIP_BASIS_NB": "t",
+                 "ENOMOTO_MIP_PROBE_BASIS_GUARD": "x",
+                 "ENOMOTO_MIP_HNFPRE": "bounds"},
     # 根の RENS を目標の固定率で止める (analysis/submip_impr_20261106/A.md の SUBA_RATE の n だけ)
     "suban": {"ENOMOTO_MIP_SUBA_RATE": "n"},
 }

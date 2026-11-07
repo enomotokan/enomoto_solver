@@ -39,6 +39,8 @@ def run(kind, mps):
         from run import CFGS  # noqa: E402
         env.update(CFGS[cfg])
     env["ENOMOTO_MIP_THREADS"] = "4"
+    if os.environ.get("MITT600_SEED") and kind == "ours":  # 2026-11-07 の res5: ENOMOTO の乱数の種 (既定の回も試作の回も同じ種)
+        env["ENOMOTO_T_MIP_SEED"] = os.environ["MITT600_SEED"]
     t0 = time.time(); peak = 0.0
     pr = subprocess.Popen([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), f"--worker-{kind}", str(mps),
                            "--time-limit", str(TL), "--threads", "4"], cwd=WT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
