@@ -10,13 +10,13 @@
 //!   まだ LP にあり |双対値| > 1e-9 のカットの割合 (それまでに外れたものは生き残らなかったと数える)
 //!
 //! 学習 (`ENOMOTO_MIP_SEPLEARN`、既定では使わない): 分離器ごとに 1 回の呼び出しあたりの伸び・仕事 (決定的な量: 候補の非零の数 +
-//! `ENOMOTO_T_MIP_SEPLEARN_LPW` × LP に入れたカットの非零の数)・生き残りの指数移動平均を持ち、得点 = 伸び / 仕事 (最良を 1 に
-//! そろえる) × 0.8 + 生き残り × 0.2 とする。呼び出しごと (根のラウンド・ノードの分離) に、
+//! `ENOMOTO_T_MIP_SEPLEARN_LPW` × LP に入れたカットの非零の数)・生き残りの指数移動平均を持ち、得点 = 0.5 × 伸び (最良を 1 に
+//! そろえる) + 0.3 × 伸び / 仕事 (同) + 0.2 × 生き残り とする。呼び出しごと (根のラウンド・ノードの分離) に、
 //! (a) 呼ぶか: 最初の W 回 (根 `..._WARM` 3、ノードは根で学んだ値を引き継ぐ) は呼び、得点が `..._SKIP` (既定 0.1) 未満なら飛ばす。
 //!     飛ばす長さは 2 から外れるたびに倍 (最大 `..._MAXSKIP` 16)、飛ばし終えたら 1 回試す (ε-greedy の試しを決定的にしたもの)。
 //!     また仕事の割合が得点の割合の `..._WORKF` (既定 3) 倍 + 0.05 を超えた分離器も飛ばす (時間の上限の代わり。時刻は使わない)
 //! (b) 候補の上限: 得点の割合 × 予算 (根は 1 ラウンドの本数の上限 × `..._CAPMULT` (既定 2)、ノードは 20 × 同) と `..._CAPMIN`
-//!     (既定 20) の大きい方まで、効き目の大きい順に残す
+//!     (既定 20) の大きい方まで、効き目の大きい順に残す (得点が `..._NOCAP` (既定 0.5) 以上の分離器にはかけない)
 //! 根で学んだ値を木の探索の写しへ引き継ぎ ([`SepLearn::for_tree`])、木の中ではノードの観測で更新する (スレッドごと)。
 //! 時刻を判断に使わないので、スレッド数・種が同じなら判断は同じ (`ENOMOTO_MIP_SEPLEARN=t` なら仕事の代わりに時間を使う。決定的でない)。
 //! 対象は元の行 (CMIR・flow cover・cover)・zerohalf・clique・implied bound・経路集約 (2 種)・mcf・mod-k (MODKVB)。
@@ -175,21 +175,24 @@ impl SepLearn {
         s
     }
 
-    /// 得点 (0..1): 伸び / 仕事 を最良の分離器で 1 にそろえ、生き残りを混ぜる。観測がまだ足りない分離器は `None`
+    /// 得点 (0..1): 0.5 x 伸び (最良の分離器で 1) + 0.3 x 伸び / 仕事 (最良で 1) + 0.2 x 生き残り。観測がまだない分離器は `None`
+    /// (伸び / 仕事 だけだと、伸びの小さい安い分離器 (元の行) が伸びの大部分を出す分離器より高くなった。enlight_hard のノードの zerohalf)
     fn scores(&self, w: usize) -> [Option<f64>; NSRC] {
         let mut eff = [0.0f64; NSRC];
-        let mut best = 0.0f64;
+        let (mut best_e, mut best_g) = (0.0f64, 0.0f64);
         for k in 0..NSRC {
             if self.nobs[w][k] > 0 {
                 eff[k] = self.ema_gain[w][k].max(0.0) / self.ema_work[w][k].max(1e-12);
-                best = best.max(eff[k]);
+                best_e = best_e.max(eff[k]);
+                best_g = best_g.max(self.ema_gain[w][k]);
             }
         }
         let mut out = [None; NSRC];
         for k in 0..NSRC {
             if self.nobs[w][k] > 0 {
-                let r = if best > 0.0 { eff[k] / best } else { 1.0 };
-                out[k] = Some(0.8 * r + 0.2 * self.ema_surv[w][k]);
+                let e = if best_e > 0.0 { eff[k] / best_e } else { 1.0 };
+                let g = if best_g > 0.0 { self.ema_gain[w][k].max(0.0) / best_g } else { 1.0 };
+                out[k] = Some(0.5 * g + 0.3 * e + 0.2 * self.ema_surv[w][k]);
             }
         }
         out
@@ -277,7 +280,8 @@ impl SepLearn {
                     continue;
                 }
                 let Some(score) = sc[k] else { continue };
-                if self.nobs[w][k] < warm || ssum <= 0.0 {
+                // 得点が `ENOMOTO_T_MIP_SEPLEARN_NOCAP` (既定 0.5) 以上の分離器には上限をかけない
+                if self.nobs[w][k] < warm || ssum <= 0.0 || score >= tunable!("ENOMOTO_T_MIP_SEPLEARN_NOCAP", 0.5, f64) {
                     continue;
                 }
                 let cap = ((score / ssum) * mult * budget as f64).ceil().max(cmin as f64) as usize;
