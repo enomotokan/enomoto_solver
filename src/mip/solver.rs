@@ -4270,7 +4270,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         fc_sep2: env_str!("ENOMOTO_MIP_FC_NODE_SEP2").is_some(),
         fc_submip: !params.submip && env_str!("ENOMOTO_MIP_FC_SUBMIP").is_some() && super::separation::fixed_charge_network_for_nodes(p),
         tree_sep: !params.submip && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none(),
-        tree_sep_fc: !params.submip && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none() && env_str!("ENOMOTO_MIP_TREE_SEP_NO_FC").is_none() && super::separation::fixed_charge_network_for_nodes(p),
+        tree_sep_fc: !params.submip
+            && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none()
+            && env_str!("ENOMOTO_MIP_TREE_SEP_NO_FC").is_none()
+            && (nodecnt('p') || nodecnt('h') || super::separation::fixed_charge_network_for_nodes(p)),
         fc_stats: (0, 0.0, 0, 0),
         fc_probe: 0,
         last_rins: 0,
@@ -19835,10 +19838,16 @@ fn obj_step_lattice() -> bool {
 }
 
 /// [`Solver::prune_limit_ex`] の式 (`eff` は自分と共有の暫定解の良い方、`outer` は根のサブ MIP の外側の上限)。
-/// 試作 `ENOMOTO_MIP_NODECNT` (既定では使わない): ノードで基底にあって境界に張り付いた整数列の被約費用による固定
-/// ([`Solver::degen_dual_fixing`])
+/// 試作 `ENOMOTO_MIP_NODECNT` (既定では使わない、analysis/nodecnt_20261107.md)。値の文字で部品を選ぶ (`1` は `d` と同じ):
+/// `d` ノードで基底にあって境界に張り付いた整数列の被約費用による固定 ([`Solver::degen_dual_fixing`])、
+/// `p` 固定費用ネットワーク型でなくてもノードの分離で経路集約を使う (始点は `ENOMOTO_T_MIP_NODE_FC_PATH_STARTS`)、
+/// `h` `p` に加えノードでも HiGHS の経路集約の移植を使う
+pub(super) fn nodecnt(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_NODECNT").is_some_and(|v| v.contains(c) || (c == 'd' && v == "1"))
+}
+
 fn nodecnt_on() -> bool {
-    env_str!("ENOMOTO_MIP_NODECNT").is_some()
+    nodecnt('d')
 }
 
 fn prune_limit_of(eff: Option<f64>, outer: f64, obj_step: Option<f64>, off: f64, rel_gap: f64, abs_gap: f64, cutoff: f64) -> f64 {

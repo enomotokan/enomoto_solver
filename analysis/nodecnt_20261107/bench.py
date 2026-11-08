@@ -14,6 +14,12 @@ CFG = {
     "nc": {"ENOMOTO_MIP_NODECNT": "1"},
     "t1": {"ENOMOTO_MIP_THREADS": "1"},
     "t1nc": {"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_NODECNT": "1"},
+    "t1p": {"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_NODECNT": "p"},
+    "t1h": {"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_NODECNT": "h"},
+    "p": {"ENOMOTO_MIP_NODECNT": "p"},
+    "h": {"ENOMOTO_MIP_NODECNT": "h"},
+    "htp": {"ENOMOTO_MIP_NODECNT": "h", "ENOMOTO_MIP_TREE1_POOL": "1"},
+    "hp3": {"ENOMOTO_MIP_NODECNT": "h", "ENOMOTO_MIP_POOL3_BEST": "0.05"},
     "nds": {"ENOMOTO_MIP_SB_NO_DEGEN_SKIP": "1"},
     "ncnds": {"ENOMOTO_MIP_NODECNT": "1", "ENOMOTO_MIP_SB_NO_DEGEN_SKIP": "1"},
 }
@@ -37,14 +43,14 @@ for s in seeds:
                 continue
             mps = rb.fetch(p, WT / ".miplib_cache")
             env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
-            env.update({"ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_THREADS": "4", "ENOMOTO_T_MIP_SEED": s})
+            env.update({"ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_THREADS": "4", "ENOMOTO_T_MIP_SEED": s, "ENOMOTO_MIP_TREE4_TRACE": "10"})
             env.update(CFG[c])
             if os.environ.get("NC_TREELOG"):
                 env["ENOMOTO_MIP_TREE_LOG"] = "1"
             t0 = time.time()
             err = ""
             try:
-                pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", TL, "--threads", "4"],
+                pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", TL, "--threads", env["ENOMOTO_MIP_THREADS"]],
                                     cwd=WT, env=env, capture_output=True, text=True, timeout=float(TL) + 300)
                 out, err = pr.stdout, pr.stderr
                 res = json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
