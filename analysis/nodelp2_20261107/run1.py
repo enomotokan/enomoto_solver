@@ -29,6 +29,8 @@ CFGS = {
     # 試作 ENOMOTO_MIP_NODELP2 (計数なしの plain と比べる形と、計数つき)
     "nl2": {"ENOMOTO_MIP_NODELP2": "pbxg"},
     "nl2b": {"ENOMOTO_MIP_NODELP2": "pbx"},
+    # 誤答の検査用: 判定なしで、厳密な DSE 重みと保存した重みを頻繁に入れ替える
+    "nl2chk": {"ENOMOTO_MIP_NODELP2": "pbxX", "ENOMOTO_T_MIP_NODELP2_WARM": "1", "ENOMOTO_T_MIP_NODELP2_EXPLORE": "2"},
     "nl2bd": dict(DG, ENOMOTO_MIP_NODELP2="pbx", ENOMOTO_MIP_HO4_DIAG="1"),
     "nl2d": dict(DG, ENOMOTO_MIP_NODELP2="pbxg", ENOMOTO_MIP_HO4_DIAG="1"),
     "rexact": dict(DG, ENOMOTO_MIP_RESTORE_EXACT_DSE="1", ENOMOTO_MIP_HO4_DIAG="1"),
