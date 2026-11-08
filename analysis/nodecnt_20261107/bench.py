@@ -13,6 +13,9 @@ CFG = {
     "def": {},
     "nc": {"ENOMOTO_MIP_NODECNT": "1"},
     "t1": {"ENOMOTO_MIP_THREADS": "1"},
+    "t1nc": {"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_NODECNT": "1"},
+    "nds": {"ENOMOTO_MIP_SB_NO_DEGEN_SKIP": "1"},
+    "ncnds": {"ENOMOTO_MIP_NODECNT": "1", "ENOMOTO_MIP_SB_NO_DEGEN_SKIP": "1"},
 }
 OUT, TL, P, cfgs, seeds = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4].split(","), sys.argv[5].split(",")
 if P == "p58":
@@ -36,6 +39,8 @@ for s in seeds:
             env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
             env.update({"ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_THREADS": "4", "ENOMOTO_T_MIP_SEED": s})
             env.update(CFG[c])
+            if os.environ.get("NC_TREELOG"):
+                env["ENOMOTO_MIP_TREE_LOG"] = "1"
             t0 = time.time()
             err = ""
             try:
