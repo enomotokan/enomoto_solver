@@ -4179,7 +4179,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
         eprintln!(
             "MIP: LP probing: root LP {root_secs:.2}s ({root_iters} iters, size {size}), tried {n_tried}, fixed {n_fixed}, basis passed {}, total {} iters {:.2}s",
             n_fixed > 0 || slow_root,
-            lp.total_iterations(),
+            tot_it(&lp),
             t0.elapsed().as_secs_f64()
         );
     }
@@ -4283,8 +4283,57 @@ fn probe_spec_block(prob: &MipProblem, base: &domain::Domain, js: &[usize]) -> V
         .collect()
 }
 
+/// [`probe`] の同値な組の巡 (`ENOMOTO_MIP_PREPAR` の `e`): 塊の候補を `base` の写しで順に試し、候補ごとに見つけた組
+/// (列の番号の順) と数えた手間 (行の走査) を返す。固定されている候補・どちらかの側が成り立たない候補は組なし
+fn probe_equiv_block(prob: &MipProblem, base: &domain::Domain, bin0: &[bool], js: &[usize]) -> Vec<(Vec<(usize, usize, bool)>, u64)> {
+    let mut d = base.clone();
+    js.iter()
+        .map(|&j| {
+            let mut pairs = Vec::new();
+            if d.lo[j] == d.up[j] {
+                return (pairs, 0);
+            }
+            let w0 = d.debug_work();
+            let pos = d.stack_len();
+            d.tighten_upper(prob, j, 0.0);
+            let ok0 = d.propagate(prob);
+            let mut ch0: Vec<(usize, bool, f64)> = if ok0 { d.changes_since(pos).collect() } else { Vec::new() };
+            d.backtrack_to(prob, pos);
+            d.tighten_lower(prob, j, 1.0);
+            let ok1 = d.propagate(prob);
+            let ch1: std::collections::HashMap<(usize, bool), f64> = if ok1 { d.changes_since(pos).map(|(k, u, v)| ((k, u), v)).collect() } else { Default::default() };
+            d.backtrack_to(prob, pos);
+            let w = d.debug_work() - w0;
+            if !(ok0 && ok1) {
+                return (pairs, w);
+            }
+            // 逐次の巡と同じく、同じ (列, 側) の変更は最後の値を使う
+            let mut last0: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
+            for &(k, u, v) in &ch0 {
+                last0.insert((k, u), v);
+            }
+            ch0.sort_by_key(|&(k, u, _)| (k, u));
+            ch0.dedup_by_key(|t| (t.0, t.1));
+            for &(k, upper, _) in &ch0 {
+                let v0 = last0[&(k, upper)];
+                if k == j || !bin0[k] || d.lo[k] == d.up[k] {
+                    continue;
+                }
+                let Some(&v1) = ch1.get(&(k, !upper)) else { continue };
+                if upper && v0 <= 0.5 && v1 >= 0.5 {
+                    pairs.push((j, k, false));
+                } else if !upper && v0 >= 0.5 && v1 <= 0.5 {
+                    pairs.push((j, k, true));
+                }
+            }
+            (pairs, w)
+        })
+        .collect()
+}
+
 /// 試作 `ENOMOTO_MIP_PREPAR` (既定では使わない。analysis/prepar_20261107.md): 前処理の並列化。値の文字で選ぶ
-/// (`p`: 含意を集めるプロービング ([`probe`]) の候補を投機的に並べる)
+/// (`p`: 含意を集めるプロービング ([`probe`]) の候補を投機的に並べる、`e`: プロービングの同値な組の巡を並べる、
+/// `l`: LP による固定 ([`lp_probe`]) の 1 巡の列の試しを並べる)
 pub(crate) fn prepar_has(c: char) -> bool {
     env_str!("ENOMOTO_MIP_PREPAR").is_some_and(|v| v.contains(c))
 }
@@ -4732,7 +4781,37 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             (time_cap2, giveup2, u64::MAX, u64::MAX)
         };
         let w0 = d2.debug_work();
+        // `ENOMOTO_MIP_PREPAR` の `e` (試作): この巡は定義域 `d2` を変えない (試して巻き戻すだけ) ので、候補の窓を塊に分けて
+        // 塊ごとの `d2` の写しで試し、決まった順にまとめる。手間は写しで数えた分を足して逐次と同じ打ち切りにする。
+        // 1 つの候補で見つけた組は列の番号の順に並べる (逐次はハッシュ表の順)
+        let epool = (prepar_has('e') && !solver::in_submip_thread()).then(|| rayon::ThreadPoolBuilder::new().num_threads(PREPAR_THREADS.with(|t| t.get()).max(1)).build().ok()).flatten();
+        if let Some(pool) = &epool {
+            let (eb, ek) = (tunable!("ENOMOTO_T_MIP_PREPAR_EQ_BSZ", 32usize, usize).max(1), tunable!("ENOMOTO_T_MIP_PREPAR_BLOCKS", 4usize, usize).max(1));
+            let mut virt = 0u64;
+            let mut ci = 0usize;
+            'eq: while ci < cands.len() {
+                let end = (ci + eb * ek).min(cands.len());
+                let blocks: Vec<&[usize]> = cands[ci..end].chunks(eb).collect();
+                let (base, pr, b0): (&Domain, &MipProblem, &[bool]) = (&d2, prob, &bin0);
+                let res: Vec<Vec<(Vec<(usize, usize, bool)>, u64)>> = pool.install(|| {
+                    use rayon::prelude::*;
+                    blocks.par_iter().map(|bl| probe_equiv_block(pr, base, b0, bl)).collect()
+                });
+                for (idx, (pairs, w1)) in res.into_iter().flatten().enumerate() {
+                    let cj = ci + idx;
+                    if virt > work_cap.min(wcap2) || tq.elapsed().as_secs_f64() > time_cap2 || ((tq.elapsed().as_secs_f64() > giveup2 || virt > wgive2) && equiv.len() == n0) || (cj % 16 == 0 && presolve_stop()) {
+                        break 'eq;
+                    }
+                    virt += w1;
+                    equiv.extend(pairs);
+                }
+                ci = end;
+            }
+        }
         for (ci, &j) in cands.iter().enumerate() {
+            if epool.is_some() {
+                break;
+            }
             // 毎列見る (長い列の多い問題では 16 列で 0.7 秒かかる: nw04)。時間の上限・止めの合図 ([`presolve_stop`]) は 16 列ごと
             let w = d2.debug_work() - w0;
             if w > work_cap.min(wcap2) || tq.elapsed().as_secs_f64() > time_cap2 || ((tq.elapsed().as_secs_f64() > giveup2 || w > wgive2) && equiv.len() == n0) || (ci % 16 == 0 && presolve_stop()) {
