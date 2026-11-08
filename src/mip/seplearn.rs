@@ -160,6 +160,10 @@ impl SepLearn {
     /// 木の探索の写し (別のスレッド) に引き継ぐ状態: 学んだ平均 (根の値をノードの初めの値にもする) だけを持つ
     pub(super) fn for_tree(&self) -> SepLearn {
         let mut s = SepLearn::default();
+        // `ENOMOTO_T_MIP_SEPLEARN_NODE_WARM` > 0: ノードは根の値を引き継がず、自分の観測がこの数たまるまで飛ばさない
+        if tunable!("ENOMOTO_T_MIP_SEPLEARN_NODE_WARM", 0u32, u32) > 0 {
+            return s;
+        }
         s.ema_gain = self.ema_gain;
         s.ema_work = self.ema_work;
         s.ema_surv = self.ema_surv;
@@ -211,7 +215,11 @@ impl SepLearn {
         }
         let w = node as usize;
         self.ncalls[w] += 1;
-        let warm = tunable!("ENOMOTO_T_MIP_SEPLEARN_WARM", 3u32, u32);
+        let nw = tunable!("ENOMOTO_T_MIP_SEPLEARN_NODE_WARM", 0u32, u32);
+        let warm = if node && nw > 0 { nw } else { tunable!("ENOMOTO_T_MIP_SEPLEARN_WARM", 3u32, u32) };
+        // `ENOMOTO_T_MIP_SEPLEARN_ROOT_SKIP` = 0: 根では飛ばさない (候補の上限だけ)。misc07 は根の最初の 3 ラウンドで zerohalf の伸びが 0 と
+        // 出て飛ばし、根の下界が弱くなった (既定では根の伸びの 63% が zerohalf)
+        let no_skip = !node && tunable!("ENOMOTO_T_MIP_SEPLEARN_ROOT_SKIP", 1u32, u32) == 0;
         let thr = tunable!("ENOMOTO_T_MIP_SEPLEARN_SKIP", 0.1, f64);
         let workf = tunable!("ENOMOTO_T_MIP_SEPLEARN_WORKF", 3.0, f64);
         let maxskip = tunable!("ENOMOTO_T_MIP_SEPLEARN_MAXSKIP", 16u32, u32);
@@ -230,7 +238,7 @@ impl SepLearn {
                 continue;
             }
             let Some(score) = sc[k] else { continue };
-            if self.nobs[w][k] < warm {
+            if self.nobs[w][k] < warm || no_skip {
                 continue;
             }
             let wshare = if wsum > 0.0 { self.ema_work[w][k] / wsum } else { 0.0 };
