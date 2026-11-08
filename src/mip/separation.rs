@@ -3430,6 +3430,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let chosen = select_cuts(cands, max_node, p);
+        // 試作 `ENOMOTO_MIP_NODECNT` の `p`・`h`: ノードで採った経路集約のカットを数え、`g` なら採られないときにやめる
+        if self.nc_path_forced && self.tree_sep_fc {
+            let np = chosen.iter().filter(|c| matches!(c.src & 0xF, sepprof::SRC_PATH | sepprof::SRC_PATHH)).count() as u64;
+            let st = &mut self.nc_path_stats;
+            st[0] += 1;
+            st[1] += (np > 0) as u64;
+            st[2] += np;
+            st[3] += chosen.len() as u64;
+            if super::solver::nodecnt('g')
+                && st[0] >= tunable!("ENOMOTO_T_MIP_NODECNT_GATE_N", 30u64, u64)
+                && (st[1] as f64) < tunable!("ENOMOTO_T_MIP_NODECNT_GATE", 0.3, f64) * st[0] as f64
+            {
+                self.tree_sep_fc = false;
+            }
+        }
         if chosen.is_empty() {
             if sl_on {
                 self.sl.end_call_without_add();

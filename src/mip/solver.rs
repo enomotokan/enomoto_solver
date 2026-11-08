@@ -515,6 +515,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) tree_sep: bool,
     /// [`Self::tree_sep`] で、固定費用ネットワーク型ならノードの分離でも経路集約の始点を使う
     pub(super) tree_sep_fc: bool,
+    /// 試作 `ENOMOTO_MIP_NODECNT` の `p`・`h` で [`Self::tree_sep_fc`] を立てたか (固定費用ネットワーク型の判定には当たらない)
+    pub(super) nc_path_forced: bool,
+    /// 同: ノードの分離のラウンドの数・経路集約のカットを 1 本以上採ったラウンドの数・採った経路集約のカットの本数・採ったカットの本数
+    /// (`g` で、ラウンドが `ENOMOTO_T_MIP_NODECNT_GATE_N` (既定 30) 回たまって経路集約を採ったラウンドの割合が
+    /// `ENOMOTO_T_MIP_NODECNT_GATE` (既定 0.3) 未満なら、ノードの経路集約をやめる)
+    pub(super) nc_path_stats: [u64; 4],
     /// ノードの分離の効き目の統計: (回数, 効き目の指数移動平均, 分離で枝が切れた回数, 深さの規則から外れて分離した回数)
     pub(super) fc_stats: (u64, f64, u64, u64),
     /// 効き目が低いときに、何回に 1 回は試し続けるかの数え
@@ -4286,6 +4292,12 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none()
             && env_str!("ENOMOTO_MIP_TREE_SEP_NO_FC").is_none()
             && (nodecnt('p') || nodecnt('h') || super::separation::fixed_charge_network_for_nodes(p)),
+        nc_path_forced: !params.submip
+            && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none()
+            && env_str!("ENOMOTO_MIP_TREE_SEP_NO_FC").is_none()
+            && (nodecnt('p') || nodecnt('h'))
+            && !super::separation::fixed_charge_network_for_nodes(p),
+        nc_path_stats: [0; 4],
         fc_stats: (0, 0.0, 0, 0),
         fc_probe: 0,
         last_rins: 0,
@@ -19710,6 +19722,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
             if self.par_sb_stats[0] > 0 {
                 eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
+            }
+            if self.nc_path_forced {
+                let c = &self.nc_path_stats;
+                eprintln!("MIP: NODECNT node path aggregation (tid {}): rounds {}, rounds with path cuts {}, path cuts {} of {} chosen, still on {}", self.pool_tid, c[0], c[1], c[2], c[3], self.tree_sep_fc);
             }
             if nodecnt_on() {
                 let c = &self.nodecnt_stats;
