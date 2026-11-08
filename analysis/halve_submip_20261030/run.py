@@ -215,9 +215,13 @@ CFGS = {
                  "ENOMOTO_MIP_CUTLPCAP": "ac",
                  "ENOMOTO_MIP_CMIRDELTA": "n",
                  "ENOMOTO_MIP_LPSCALE": "h", "ENOMOTO_T_MIP_LPSCALE_MIN_RANGE": "1e4"},
+    # res7 (2026-11-08): zerohalf を止めた形 (58 問で既定の zerohalf を止めると SGM -6.2%、analysis/modkvb_20261107.md の 6.3 節)。
+    # nozh = 既定 + zerohalf なし、cand1108z = cand1108 + zerohalf なし。res6 (既定・cand1108、同じ種) と並べて 2 x 2 で比べる
+    "nozh": {"ENOMOTO_MIP_NO_ZEROHALF": "1"},
     # 根の RENS を目標の固定率で止める (analysis/submip_impr_20261106/A.md の SUBA_RATE の n だけ)
     "suban": {"ENOMOTO_MIP_SUBA_RATE": "n"},
 }
+CFGS["cand1108z"] = dict(CFGS["cand1108"], ENOMOTO_MIP_NO_ZEROHALF="1")  # res7: cand1108 + zerohalf なし
 if __name__ == "__main__":  # bench.py からは設定 (CFGS) だけを読む
     cfgs, probs, reps = sys.argv[1].split(","), sys.argv[2].split(","), int(sys.argv[3])
     for rep in range(reps):
