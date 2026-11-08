@@ -41,6 +41,7 @@ pub(crate) mod redsplit;
 pub(crate) mod cmirdelta;
 pub(crate) mod mcf;
 pub(crate) mod clique;
+pub(crate) mod pretime;
 
 use crate::solver::solve_lp;
 use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective, RootSolver, SolveResult, Status, VarType, VariableData};
@@ -1053,6 +1054,9 @@ pub(crate) fn rows_fingerprint(rows: &[Vec<(usize, f64)>]) -> u64 {
 fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
     let start = RESTART_SOL.with(|s| s.borrow_mut().take());
     let t_pre = std::time::Instant::now();
+    if !params.submip && params.restarts == 0 {
+        pretime::start();
+    }
     // 前処理の重い手順の期限 ([`presolve_stop`]): この求解の時間の上限。戻るときに前の値 (外側の求解のもの) に戻す
     struct RestoreDeadline(Option<std::time::Instant>);
     impl Drop for RestoreDeadline {
@@ -1081,6 +1085,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     });
     let prev_in_sub = PRESOLVE_IN_SUBMIP.with(|f| f.replace(params.submip));
     let presolved = if use_presolve { presolve_mip(p, params.verbose, pre_submip, lp_probe_secs) } else { None };
+    pretime::mark("presolve_mip");
     PRESOLVE_IN_SUBMIP.with(|f| f.set(prev_in_sub));
     FEAS_FJ_EARLY.with(|c| c.set(None));
     RESTART_PRESOLVE.with(|f| f.set(prev_rp));
@@ -1121,7 +1126,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     };
     // 試作 `ENOMOTO_MIP_HNFPRE` (既定では使わない): 整数列だけの等式の Hermite 標準形 ([`hnf`])
     let presolved = match presolved {
-        Some(Presolved::Reduced { prob, postsolve, scaling }) if (hnf::mode().is_some() || hnfsubst::on()) && !params.submip => hnf_presolve(prob, postsolve, scaling, pre_submip),
+        Some(Presolved::Reduced { prob, postsolve, scaling }) if (hnf::mode().is_some() || hnfsubst::on()) && !params.submip => {
+            let _pt = pretime::guard("hnfpre");
+            hnf_presolve(prob, postsolve, scaling, pre_submip)
+        }
         other => other,
     };
     // 試作 `ENOMOTO_MIP_HNFSUBST` (既定では使わない): 合同式の出た一般整数列を x_j = r_j + g_j y_j に置き換える ([`hnf_subst`])。
@@ -1412,13 +1420,21 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             let mut r = match early {
                 // 目的関数が全部 0 なので、どの実行可能解も最適 (下界 = 目的値 = 定数)
                 Some(xr) => {
+                    if !params.submip && params.restarts == 0 {
+                        pretime::report(prob.m, prob.n, prob.nnz, 0);
+                    }
                     let z = prob.objective(&xr);
                     if params.verbose {
                         eprintln!("MIP: the early FJ solution is optimal (objective {z:e}, feasibility problem); no tree search ({:.2}s)", t_pre.elapsed().as_secs_f64());
                     }
                     solver::MipResult { status: MipStatus::Optimal, x: Some(xr), objective: Some(z), best_bound: z, nodes: 0, lp_iterations: 0 }
                 }
-                None => solver::solve(&prob, remaining(params)),
+                None => {
+                    if !params.submip && params.restarts == 0 {
+                        pretime::report(prob.m, prob.n, prob.nnz, (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count());
+                    }
+                    solver::solve(&prob, remaining(params))
+                }
             };
             if outer_level && hnfcut::on() && env_str!("ENOMOTO_MIP_HNFPRE_QUIET").is_none() {
                 eprintln!("{}", hnfcut::stats_line());
@@ -2277,6 +2293,7 @@ impl Drop for SubSymNote {
 }
 
 fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate::presolve::PostsolveStep>, restart: bool) -> MipProblem {
+    let _pt = pretime::guard("sym");
     let t0 = std::time::Instant::now();
     let twin_orb = sym_twin_orbitope();
     let twins = if sym_twins() || twin_orb { symmetry::twin_classes(&prob) } else { Vec::new() };
@@ -2781,6 +2798,7 @@ pub(super) fn with_presolve_deadline<R>(deadline: Option<std::time::Instant>, f:
 /// 等式の行 (文字の和 = 1) では、すべての文字と衝突する文字は偽に固定できる (`ENOMOTO_MIP_CLIQUE_EXTEND_FIX`)。
 /// 1 行に加える文字は `ENOMOTO_T_MIP_CLIQUE_EXTEND_MAX` 個まで (既定 1000)。拡張でまったく同じになった行は 1 本にする。
 fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
+    let _pt = pretime::guard("clqext");
     let t0 = std::time::Instant::now();
     let n = prob.n;
     let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0).collect();
@@ -3262,6 +3280,8 @@ pub(crate) fn normalize_row_signs(q: &mut MipProblem) -> usize {
 
 fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Option<f64>, depth: u32) -> Option<Presolved> {
     use crate::params::simplex::{PRESOLVE_ROUNDS, PROPAGATION_PASSES, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS};
+    let _pt_nest = pretime::nest();
+    let pt_build = pretime::guard("build");
     // 前の呼び出しのプロービングが残した同値な列の組は使わない (列の番号が違いうる)
     PROBE_EQUIV.with(|e| e.borrow_mut().clear());
     PROBE_EQUIV_FORCE.with(|f| f.set(false));
@@ -3344,7 +3364,10 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             r
         }
     };
+    drop(pt_build);
+    let pt_red = pretime::guard("reduce");
     let mut pre = crate::presolve::run_extended_mip(n, &a, &b, &g, &h, &p.cost, &p.is_int, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS);
+    drop(pt_red);
     if pre.infeasible {
         return Some(Presolved::Infeasible);
     }
@@ -3376,6 +3399,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         eprintln!("MIP: presolve: fixed {} columns of width within tolerance ({tiny0} before, {tiny1} after the reductions)", tiny0 + tiny1);
     }
     // 係数の強化 (片側の行の 0-1 列の係数を、整数解を変えずに LP の緩和が締まる値に縮める)
+    let pt_coef = pretime::guard("coef_merge");
     if env_str!("ENOMOTO_MIP_NO_COEF_TIGHTEN").is_none() {
         let is_int_now: Vec<bool> = p.is_int.clone();
         COEF_TIGHTEN_SKIPPED.with(|c| c.set(0));
@@ -3417,6 +3441,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     let merged = if env_str!("ENOMOTO_MIP_NO_ROW_MERGE").is_none() { merge_parallel_rows(&mut rows, &mut row_lo, &mut row_up) } else { 0 };
     // 行をまとめて新しくできた等式 (`x - y <= 0` と `x - y >= 0` から `x = y` など) の数
     let new_eq = (0..rows.len()).filter(|&i| row_lo[i] == row_up[i]).count().saturating_sub(eq0);
+    drop(pt_coef);
     if verbose && merged > 0 {
         eprintln!("MIP: presolve: merged {merged} parallel rows ({new_eq} new equations)");
     }
@@ -3561,7 +3586,11 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
     if lp_probe_secs.is_some() && !submip && heuristics::fj_feas_extend(&prob) {
         if let Some((threads, cap)) = FEAS_FJ_EARLY.with(|c| c.take()) {
+            pretime::mark("fj_early_start");
+            let pt_fj = pretime::guard("fj_early");
             let r = if feas_fj_early_lmip() { feas_fj_lmip_early(&prob, threads, cap, verbose) } else { feas_fj_early(&prob, threads, cap, verbose) };
+            drop(pt_fj);
+            pretime::mark("fj_early_end");
             if let Some(x) = r {
                 FEAS_FJ_SOL.with(|s| *s.borrow_mut() = Some(x));
                 return Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling });
@@ -3877,6 +3906,7 @@ pub(crate) fn lp_probe_after_ext_has(c: char) -> bool {
 
 /// `try_fix` が偽なら LP を解いて基底を渡すだけ (列の固定は試さない。`ENOMOTO_MIP_LP_PROBE_AFTER_EXT=r` のかけ直しの後)。
 fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> Option<usize> {
+    let _pt = pretime::guard("lpprobe");
     use lp::{LpStatus, SolveLimits};
     let t0 = std::time::Instant::now();
     let deadline = Some(t0 + std::time::Duration::from_secs_f64(secs.max(0.0)));
@@ -3936,6 +3966,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     }
     let z0 = lp.objective() + prob.offset;
     let root_secs = t0.elapsed().as_secs_f64();
+    pretime::add("lpprobe_first", root_secs);
     let root_iters = lp.total_iterations();
     if finish_late && (if work { root_iters < lp_iter_cap } else { root_secs < secs }) {
         finish = false;
@@ -4150,6 +4181,7 @@ pub(crate) fn presolve_work_safe() -> f64 {
 /// 出ていれば `ENOMOTO_T_MIP_PROBE_TIME_FOUND` 秒、既定 0.5 秒。長い行の多い問題 (nw04・air03) は 1 回が重く何も得られない) で打ち切る。
 /// 締めた境界があれば `Some(true)`、何もなければ `None`。
 fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
+    let _pt = pretime::guard("probe");
     use domain::Domain;
     let t0 = std::time::Instant::now();
     let c0 = cap_clock();
@@ -4808,6 +4840,7 @@ pub(crate) fn report_submip_components(p: &MipProblem, stage: &str) {
 /// 最後で、かけ直さないので 46070 行・23039 列のまま LP による固定 (4.9 秒) とプロービング (10.5 秒、含意集め) を回し、根も
 /// その大きさで解いていた (HiGHS の前処理は 6496 行・659 列。analysis/smallprob_overhead_20261028.md)
 fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<usize> {
+    let _pt = pretime::guard("qprobe");
     use domain::Domain;
     let t0 = std::time::Instant::now();
     let n = prob.n;
