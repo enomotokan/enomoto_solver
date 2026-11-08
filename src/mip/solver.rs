@@ -729,6 +729,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 基底の復元の回数、そのうち基底の数が行数と合わなかった回数、復元後の最初の LP の反復数 (診断用)
     restore_stats: (u64, u64, u64),
     restored_now: bool,
+    /// 試作 `ENOMOTO_MIP_NODELP2` の `a`: 今のノードで選んだ腕 (Some(true) 戻した・Some(false) 戻さなかった) と、腕ごとの [回数, 反復の指数移動平均]
+    nl2_arm: Option<bool>,
+    nl2_stat: [(u64, f64); 2],
     /// 診断用 (`ENOMOTO_MIP_RESTORE_DIAG`): 直前に戻した基底の (保存後に足された行, 消えた行, 基底の数の不一致)
     restore_diag: (usize, usize, bool),
     /// 診断用: 共有の待ち行列から受け取ったノードの基底の、基底変数の余り (受け取ったときに数える)
@@ -1255,6 +1258,15 @@ pub(crate) struct TreeSnapshot {
 static HO4_ROOT_LP_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 試作 `ENOMOTO_MIP_NODELP_PERTURB` (analysis/node_lp_20261106.md、既定では使わない) の値 (`p`/`P`/`h`/`g` の組み合わせ)。
+/// 試作 `ENOMOTO_MIP_NODELP2` (analysis/nodelp2_20261107.md、既定では使わない) の文字。
+/// `q`: 待ち行列・共有の待ち行列から取ったノード (兄弟でない) では保存した基底を戻さず、今の LP の基底 (直前のノードの最適基底) から解く
+/// (HiGHS の `HighsSearch::installNode` はノードに基底を持たせない)。`a`: 戻す・戻さないを、このスレッドの取り出したノードの最初の LP の
+/// 反復の指数移動平均の小さい方で選ぶ (両方を最初に `ENOMOTO_T_MIP_NODELP2_WARM` 回ずつ、その後も 1/`ENOMOTO_T_MIP_NODELP2_EXPLORE` で他方を試す)。
+fn nodelp2(c: char) -> bool {
+    static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_NODELP2").filter(|v| *v != "0").map(|v| v.to_string())).as_deref().is_some_and(|v| v.contains(c))
+}
+
 fn nodelp_perturb_mode() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_NODELP_PERTURB").filter(|v| *v != "0")
 }
@@ -4369,6 +4381,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         node_iters_first: 0,
         restore_stats: (0, 0, 0),
         restored_now: false,
+        nl2_arm: None,
+        nl2_stat: [(0, 0.0); 2],
         restore_diag: (0, 0, false),
         pool_excess: 0,
         pool_basis_stats: 0,
@@ -10457,6 +10471,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         BASIS_NB_TREE[r].fetch_add(1, Relaxed);
                         BASIS_NB_TREE[r + 1].fetch_add(self.lp.total_iterations() - it0, Relaxed);
                     }
+                    if let Some(arm) = self.nl2_arm.take() {
+                        let it = (self.lp.total_iterations() - it0) as f64;
+                        let a = tunable!("ENOMOTO_T_MIP_NODELP2_ALPHA", 0.1, f64);
+                        let e = &mut self.nl2_stat[arm as usize];
+                        e.1 = if e.0 == 0 { it } else { (1.0 - a) * e.1 + a * it };
+                        e.0 += 1;
+                    }
                     if std::mem::take(&mut self.restored_now) {
                         self.restore_stats.2 += self.lp.total_iterations() - it0;
                         if env_str!("ENOMOTO_MIP_RESTORE_DIAG").is_some() {
@@ -13719,6 +13740,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 調査用: 保存した基底を使わず、今の LP の基底 (直前のノードの最適基底) のまま解く
         if env_str!("ENOMOTO_MIP_RESTORE_NEVER").is_some() {
             return;
+        }
+        // 試作 `ENOMOTO_MIP_NODELP2` の `q`・`a` ([`nodelp2`]): 取り出したノード (兄弟でない) の出発の基底
+        if self.tp_kind >= 1 && !self.params.submip {
+            if nodelp2('a') {
+                let warm = tunable!("ENOMOTO_T_MIP_NODELP2_WARM", 8u64, u64);
+                let explore = tunable!("ENOMOTO_T_MIP_NODELP2_EXPLORE", 16u64, u64).max(2);
+                let [(nr, er), (nk, ek)] = [self.nl2_stat[1], self.nl2_stat[0]];
+                let restore = if nr < warm || nk < warm {
+                    nr <= nk
+                } else {
+                    let best = er <= ek;
+                    if (nr + nk) % explore == 0 { !best } else { best }
+                };
+                self.nl2_arm = Some(restore);
+                if !restore {
+                    return;
+                }
+            } else if nodelp2('q') {
+                return;
+            }
         }
         // `ENOMOTO_MIP_POOL_BASIS_FIX` (試作): 共有の待ち行列から受け取った基底なら、set_basis の前に非特異になるように直す
         let pool_fix = !self.pool_fix_ptrs.is_empty() && self.pool_fix_ptrs.remove(&(b as *const super::lp::Basis as usize));
@@ -19579,6 +19620,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 診断 `ENOMOTO_MIP_NODELP_DIAG`: スレッドごとのノードの LP の計数 (冗長でなくても出す)
         if !self.params.submip {
             print_nodelp_stats(self.pool_tid as usize, &self.nodelp_stats);
+            if nodelp2('a') && !self.params.submip && crate::simplex::slope_intercept_dual::nodelp_diag() {
+                eprintln!("MIP: nodelp2 tid {} restore n {} ema {:.1} keep n {} ema {:.1}", self.pool_tid, self.nl2_stat[1].0, self.nl2_stat[1].1, self.nl2_stat[0].0, self.nl2_stat[0].1);
+            }
         }
         // 診断 `ENOMOTO_MIP_NODECUT_STAT`: 冗長でなくても出す
         if crate::simplex::mip_lp::nodecut_stat() && self.snap.is_none() && !self.params.submip && self.pool_tid == 0 {

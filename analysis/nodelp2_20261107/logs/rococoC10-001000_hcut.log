@@ -1,0 +1,92 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP rococoC10-001000 has 1293 rows; 3117 cols; 11751 nonzeros; 3117 integer variables (2993 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 3e+04]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 3e+05]
+  RHS     [1e+00, 1e+00]
+Presolving model
+699 rows, 2524 cols, 9850 nonzeros 0s
+576 rows, 2442 cols, 7244 nonzeros 0s
+Presolve reductions: rows 576(-717); columns 2442(-675); nonzeros 7244(-4507) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   576 rows
+   2442 cols (2442 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   7244 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               11460.5          100.00%        0      0      0         0     0.1s
+         0       0         0   0.00%   7515.271029     11460.5           85.16%        0      0     21       451     0.1s
+         0       0         0   0.00%   10211.183298    11460.5           37.02%     1463    228    688     16000     6.8s
+
+0.0% inactive integer columns, restarting
+Model after restart has 576 rows, 2441 cols (2441 bin., 0 int., 0 impl., 0 cont., 0 dom.fix.), and 7241 nonzeros
+
+         0       0         0   0.00%   10211.183298    11460.5           37.02%      228      0      0     16000     6.8s
+         0       0         0   0.00%   10214.448355    11460.5           37.00%      228    206     21     16984     6.9s
+         9       1         1   0.39%   10227.906859    11460.5           36.92%      357    232    361    123686    18.8s
+       219      30        85  74.92%   10393.678367    11460.5           35.90%     1665    420   5615    160623    23.9s
+       417      46       178  93.69%   10393.678367    11460.5           35.90%     2182    315   7575    195550    28.9s
+       621      67       269  96.82%   10393.678367    11460.5           35.90%     2134    427   6586    229001    34.0s
+       706      50       320  99.19%   10414.451397    11460.5           20.46%     1992    384   8664    266269    39.1s
+       924      90       411  99.33%   10709.056488    11460.5           18.21%     2001    388   9414    300040    44.1s
+       980      77       443  99.51%   10755.856934    11460.5           10.98%     2342    357   9001    326331    49.2s
+      1123      71       520  99.66%   10885.347456    11460.5            9.91%     2512    322   9700    364648    54.2s
+      1244      79       575  99.71%   10886.50151     11460.5            9.90%     2146    358   8847    400898    59.2s
+      1399     101       639  99.71%   10927.458522    11460.5            9.56%     2108    350   9044    435563    64.3s
+      1586     129       719  99.74%   10959.101396    11460.5            9.30%     2150    338   9704    470571    69.3s
+      1714     132       781  99.75%   10985.735601    11460.5            9.08%     2204    393   9652    512261    75.1s
+      1850     126       851  99.76%   10990.691261    11460.5            9.04%     2197    332   9890    549295    80.4s
+      2037     128       942  99.76%   11000.100131    11460.5            8.96%     2287    290   9973    582674    85.5s
+      2249     125      1051  99.77%   11010.550094    11460.5            8.88%     2086    356   9251    622124    92.6s
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+      2442     134      1143  99.81%   11061.505992    11460.5            8.45%     2053    392   9914    662363    97.7s
+      2603     136      1223  99.84%   11083.447038    11460.5            8.27%     2279    366   9360    699854   102.7s
+      2697     122      1276  99.84%   11090.036046    11460.5            8.22%     2155    361   9915    733519   107.8s
+      2821     129      1330  99.84%   11090.036046    11460.5            8.22%     2096    404   9966    776003   113.6s
+      3037     150      1429  99.84%   11106.402221    11460.5            8.08%     2189    385   9921    811638   118.6s
+      3101     159      1458  99.84%   11106.402221    11460.5            8.08%     2085    244  10016    821341   120.0s
+
+Solving report
+  Model             rococoC10-001000
+  Status            Time limit reached
+  Primal bound      12083
+  Dual bound        11107
+  Gap               8.08%
+  P-D integral      23.3405758794
+  Solution status   feasible
+                    12083 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            120.00
+                    0.73 (Presolve)
+                        MIP    time [calls] = 0.04 [1]
+                        subMIP time [calls] = 0.69 [69]
+                    119.26 (Solve)
+                        MIP    time [calls] = 111.09 [1]
+                        subMIP time [calls] = 8.17 [69]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [69]
+  Max sub-MIP depth 10
+  Nodes             3101
+  Repair LPs        0
+  LP iterations     821341
+                    320928 (strong br.)
+                    57580 (separation)
+                    41835 (heuristics)

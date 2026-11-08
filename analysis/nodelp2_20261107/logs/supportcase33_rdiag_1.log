@@ -1,0 +1,1091 @@
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: tightened 3339 coefficients (skipped 0 in rows redundant within tolerance), normalized 39 integer rows
+MIP: presolve: merged 55 parallel rows (0 new equations)
+MIP: presolve: rows 20489 -> 3624, free columns 20196 -> 7405, nonzeros 211915 -> 60096, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 264 of 7405 free columns fixed (0.02s), not used
+MIP: LP probing pass 1: 259 candidates, 0 fixings (4 LPs, 1396 iters, 0.55s)
+MIP: LP probing: tried 2 columns, fixed 0, LP -5.5250000000e2 -> -5.5250000000e2 (4 LPs, 1396 iters, 0.55s)
+MIP: LP probing: root LP 0.18s (1393 iters, size 83923), tried 2, fixed 0, basis passed false, total 2789 iters 0.55s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.40s), not used
+MIP: probing: 8560 of 7305 binaries probed (2 passes), 615 fixed, 640 bounds tightened, 553251 implications (2.94s, cpu 2.93s, work 58206688, pwork 2532919473, chg 20660366)
+MIP: probing: 0 equivalent binary pairs
+MIP: clique extension: 70 rows extended, 181 nonzeros added, 0 columns fixed, 0 duplicate and 54 dominated rows removed (926138 edges, 0.22s)
+MIP: symmetry: SYMSIGN true SYMSCALE false: flipped 79, scaled 0, tie rows doubled 2 of 3570 rows for the detection
+MIP: symmetry: refinement 0.01s, work 432597 (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)
+MIP: symmetry: refinements stopped by the iteration cap 0 of 1 (ENOMOTO_MIP_HO6_SYMREFINE true)
+MIP: symmetry: none (0.01s, work 432597, search 0, verify 0, detect 0.01s, refine 0.01s, log work 2126346)
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.01s)
+MIP: root LP -4.6300000000e2 (1052 iters, 0.12s)
+MIP: robust cut LP cap: size false, double false, progress true
+MCF detect: rows 3570 cols 20203 | flow cands 396 flow rows 126 commodities 1 cap cands 3036 arcs 1955 nodes 126 incons 39.24 directed | fail 'inconsistent' | networks [] fc_network false | 0.003s
+MIP: cut selection probe: compared at 1 rounds (after round 1), probe wall 0.46s (budget 2.8s)
+MIP: cut selection probe (6 rounds): default 22 cuts gain 5.968559e-12 (0.25s), pool 38 cuts gain 8.109461e0 (0.21s) -> pool (rule rate, probe 0.46s in total, 0.58s)
+MIP: cut round 0: 38 cuts (of 287, sep 0.04s, LP 792 iters), LP rows 3608 (cut rows mean nnz 129), obj -4.5489053948e2 (0.80s)
+MIP: cut round 1: root cut time cap check: clock 0.200s of cap 5.62s (min rounds 0)
+MIP: cut round 1: 39 cuts (of 357, sep 0.07s, LP 543 iters), LP rows 3625 (cut rows mean nnz 105), obj -4.4250000000e2 (0.99s)
+MIP: cut round 2: root cut time cap check: clock 0.369s of cap 5.62s (min rounds 0)
+MIP: cut round 2: 14 cuts (of 314, sep 0.06s, LP 789 iters), LP rows 3623 (cut rows mean nnz 249), obj -4.4000000000e2 (1.24s)
+MIP: cut round 3: root cut time cap check: clock 0.594s of cap 5.62s (min rounds 0)
+MIP: cut round 3: 22 cuts (of 319, sep 0.08s, LP 774 iters), LP rows 3624 (cut rows mean nnz 259), obj -4.4000000000e2 (1.50s)
+MIP: cut round 4: root cut time cap check: clock 0.819s of cap 5.62s (min rounds 0)
+MIP: cut round 4: 18 cuts (of 100, sep 0.07s, LP 447 iters), LP rows 3623 (cut rows mean nnz 242), obj -4.4000000000e2 (1.68s)
+MIP: cut round 5: root cut time cap check: clock 0.954s of cap 5.62s (min rounds 0)
+MIP: cut round 5: 11 cuts (of 113, sep 0.06s, LP 441 iters), LP rows 3620 (cut rows mean nnz 327), obj -4.4000000000e2 (1.85s)
+MIP: cut loop: integral objective, LP bound unchanged for 3 rounds; stop
+MIP: FJ problem (FJ_P3): rows 3570 -> 2334, free columns 6119 -> 6119, 0 continuous bounds tightened (1.95s)
+MIP: clique graph: 926138 edges (460836 from rows, probing implications 553251)
+MIP: clique fallback: 11 cuts, LP -4.4000000000e2 -> -4.4000000000e2 (g_c 0.000e0, g_d 5.227e-2 relative), fractional 113 -> 110; not used (0.25s)
+MIP: cut loop done: 142 cuts added, 43 in LP, pool 752 cuts (1200760 nonzeros), obj -4.6300000000e2 -> -4.4000000000e2
+MIP:   global fixed integers 14084 of 20203 (newly 0 since the root LP)
+MIP: new incumbent -1.5000000000e1 at node 0 (2.12s) [Local-MIP]
+MIP: Local-MIP solution accepted true (2.12s)
+MIP: find thread started (budget 16.2s, 2.13s)
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1052, work_iters: 21040, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 1052 iters)
+MIP: the incumbent is a poor feasibility jump solution; background cuts use 1 threads
+MIP: background cuts: basis with the column values not passed (root LP 0.12s)
+MIP: early root reduced costs stored (0 newly fixed integer columns, 2.15s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+MIP: root heuristic shifting: none (0.00s)
+MIP: root heuristic int shifting: none (0.00s)
+MIP: root heuristic randomized rounding: none (0.01s)
+MCF detect: rows 3570 cols 20203 | flow cands 396 flow rows 126 commodities 1 cap cands 3036 arcs 1955 nodes 126 incons 39.24 directed | fail 'inconsistent' | networks [] fc_network false | 0.004s
+MIP:   interior rounding: 1 interior points, vertex true (2.73s)
+MIP:   interior rounding: 6 rounded points tried, found false
+MIP: root heuristic interior rounding: none (2.76s)
+MIP:   global fixed integers 14084 of 20203 (newly 0 since the root LP)
+MIP: new incumbent -5.5000000000e1 at node 0 (4.92s) [find thread]
+MIP: find thread solution: accepted true (incumbent Some(-15.0)) (4.92s, node 0)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 526 of 6119 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   RENS: fixing rate 0.80 (target 0.80, 0 backtracks)
+MIP:   parallel sub-MIP started (RENS): 1208 free columns of 20203
+MIP:   no-incumbent RENS (sub-MIP depth 0) try 1: target 0.80, fixing rate 0.80, found false (4.98s)
+MIP: root heuristic RENS: none (0.06s)
+MIP:   locks: fixing rate 0.84
+MIP:   parallel sub-MIP started (locks): 995 free columns of 20203
+MIP: root heuristic locks: none (0.00s)
+MIP:   clique: fixing rate 0.79
+MIP:   parallel sub-MIP started (clique): 1256 free columns of 20203
+MIP: root heuristic clique: none (0.00s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.05s
+MIP:   parallel sub-MIP (locks): status Optimal, nodes 0, objective Some(-130.0), 0.16s
+MIP:   global fixed integers 14084 of 20203 (newly 0 since the root LP)
+MIP: new incumbent -1.3000000000e2 at node 0 (5.15s) [locks]
+RESTDIAG: tid 0 kind 1 added 0 deleted 0 mismatch false excess 0 rows 640 iters 172
+RESTDIAG: tid 0 kind 1 added 0 deleted 0 mismatch false excess 0 rows 640 iters 189
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 640 iters 175
+RESTDIAG: tid 0 kind 1 added 0 deleted 0 mismatch false excess 0 rows 640 iters 112
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 640 iters 150
+MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 50, objective Some(-35.0), 1.03s
+MIP:   RINS (HiGHS fill): fixing rate 0.97 from agreeing columns, 0.97 after fill (6119 free integer columns)
+MIP:   sub-MIP: 184 free columns of 20203, status Infeasible, nodes 0, objective None, 0.02s
+MIP: root heuristic RINS: none (0.03s)
+MIP: after root heuristics: incumbent Some(-130.0) (6.04s)
+MIP: background cuts: determ: waited 0.00s (safety cap 15.04s, done, background end own stall), 5 rounds, 1756 LP iters (1.67 x 1052 of cap 21040), obj Some(-440.0) (6.04s)
+MIP: background cuts: rounds so far [-440.0 at 2.65s, -440.0 at 2.76s, -440.0 at 2.82s, -440.0 at 2.87s, -440.0 at 2.92s]
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (6.05s)
+MIP: background cuts: 5 rounds, obj -4.4000000000e2 not above -4.4000000000e2; not used (waited 0.00s)
+MIP: root objective probing: skipped (gap 7.045e-1 (LP -4.4000000000e2, incumbent -1.3000000000e2), 89 fractional binaries)
+MIP: restart check: newly fixed 0, integer columns 20203, free at the root 6119, threshold 202.0, root LP 0.12s
+TRSTAT: tree start outer 9.86 solve 6.05 restarts 0 lb -4.6300000000e2 ub -1.3000000000e2
+MIP:     6.05s nodes        1 open       0 lb inf ub -1.30000000e2 lp_iters 5169 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 6998 dive_iters 0 lp_rows 3613 node_cut_secs 0.00
+MIP: find thread done: objective Some(-55.0), accepted false (incumbent Some(-130.0)) (7.39s, node 1)
+MIP: 1 of 4 tree threads take the heuristic role once a solution exists
+MIP: tree search with 4 threads (12.76s)
+MIP:    12.76s nodes        2 open       1 lb -4.40000000e2 ub -1.30000000e2 lp_iters 31023 sb_iters 25279 sb_lps 180 sb_secs 6.51 node_iters 575 (first 1, lps 5) heur_iters 6998 dive_iters 0 lp_rows 3613 node_cut_secs 0.00 pool_len 0 pool_idle 0
+RESTDIAG: tid 2 kind 2 added 0 deleted 0 mismatch false excess 19 rows 3613 iters 2859
+RESTDIAG: tid 1 kind 2 added 0 deleted 0 mismatch false excess 19 rows 3613 iters 2913
+RESTDIAG: tid 3 kind 2 added 0 deleted 0 mismatch false excess 21 rows 3613 iters 3109
+MIP:    14.80s nodes       58 open      53 lb -4.40000000e2 ub -1.30000000e2 lp_iters 38142 sb_iters 25764 sb_lps 186 sb_secs 6.63 node_iters 5390 (first 4623, lps 62) heur_iters 10636 dive_iters 1819 lp_rows 3613 node_cut_secs 0.00 pool_len 0 pool_idle 0
+RESTDIAG: tid 2 kind 2 added 0 deleted 0 mismatch false excess 18 rows 3613 iters 2110
+RESTDIAG: tid 0 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3613 iters 564
+MIP:   sub-MIP: 156 free columns of 20203, status Infeasible, nodes 0, objective None, 0.02s
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3635 iters 80
+MIP:    16.81s nodes      114 open     105 lb -4.40000000e2 ub -1.30000000e2 lp_iters 46062 sb_iters 26723 sb_lps 198 sb_secs 6.86 node_iters 12351 (first 10995, lps 122) heur_iters 10636 dive_iters 1819 lp_rows 3635 node_cut_secs 0.05 pool_len 0 pool_idle 0
+RESTDIAG: tid 2 kind 2 added 0 deleted 0 mismatch false excess 18 rows 3636 iters 2339
+RESTDIAG: tid 0 kind 1 added 22 deleted 0 mismatch false excess 0 rows 3635 iters 720
+RESTDIAG: tid 1 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3637 iters 498
+RESTDIAG: tid 1 kind 1 added 15 deleted 0 mismatch false excess 0 rows 3652 iters 672
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3647 iters 168
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3647 iters 3
+MIP:    18.88s nodes      167 open     152 lb -4.40000000e2 ub -1.30000000e2 lp_iters 54456 sb_iters 27622 sb_lps 204 sb_secs 7.06 node_iters 19846 (first 17400, lps 179) heur_iters 10636 dive_iters 1819 lp_rows 3647 node_cut_secs 0.10 pool_len 0 pool_idle 0
+RESTDIAG: tid 0 kind 1 added 34 deleted 0 mismatch false excess 0 rows 3647 iters 1008
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 1.78s
+MIP:   local branching k=18: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+MIP:    21.30s nodes      173 open     156 lb -4.40000000e2 ub -1.30000000e2 lp_iters 56734 sb_iters 28034 sb_lps 206 sb_secs 7.17 node_iters 21712 (first 18738, lps 188) heur_iters 10639 dive_iters 1819 lp_rows 3669 node_cut_secs 0.16 pool_len 0 pool_idle 0
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3669 iters 598
+RESTDIAG: tid 0 kind 1 added 56 deleted 0 mismatch false excess 0 rows 3669 iters 1142
+RESTDIAG: tid 3 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3636 iters 960
+RESTDIAG: tid 0 kind 1 added 56 deleted 0 mismatch false excess 0 rows 3669 iters 840
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3670 iters 486
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3670 iters 885
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3670 iters 166
+RESTDIAG: tid 1 kind 1 added 27 deleted 0 mismatch false excess 0 rows 3664 iters 810
+MIP:    23.32s nodes      208 open     179 lb -4.40000000e2 ub -1.30000000e2 lp_iters 64271 sb_iters 28317 sb_lps 208 sb_secs 7.24 node_iters 28966 (first 25681, lps 223) heur_iters 10639 dive_iters 1819 lp_rows 3670 node_cut_secs 0.25 pool_len 0 pool_idle 0
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3679 iters 10
+RESTDIAG: tid 1 kind 1 added 27 deleted 0 mismatch false excess 0 rows 3679 iters 720
+RESTDIAG: tid 0 kind 1 added 57 deleted 0 mismatch false excess 0 rows 3670 iters 1360
+RESTDIAG: tid 1 kind 1 added 22 deleted 0 mismatch false excess 0 rows 3686 iters 562
+RESTDIAG: tid 3 kind 1 added 16 deleted 0 mismatch false excess 0 rows 3652 iters 502
+RESTDIAG: tid 3 kind 1 added 16 deleted 0 mismatch false excess 0 rows 3652 iters 354
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3689 iters 114
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3657 iters 112
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3694 iters 30
+RESTDIAG: tid 1 kind 1 added 25 deleted 0 mismatch false excess 0 rows 3689 iters 798
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3694 iters 56
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3694 iters 84
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3694 iters 63
+RESTDIAG: tid 2 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3698 iters 79
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3694 iters 106
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3694 iters 25
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3694 iters 62
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3694 iters 204
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3712 iters 13
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3694 iters 128
+RESTDIAG: tid 3 kind 1 added 21 deleted 0 mismatch false excess 0 rows 3657 iters 442
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3694 iters 129
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3694 iters 258
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 120
+RESTDIAG: tid 2 kind 1 added 14 deleted 0 mismatch false excess 0 rows 3712 iters 235
+RESTDIAG: tid 2 kind 1 added 14 deleted 0 mismatch false excess 0 rows 3712 iters 159
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 29
+RESTDIAG: tid 1 kind 1 added 57 deleted 0 mismatch false excess 0 rows 3721 iters 733
+RESTDIAG: tid 3 kind 1 added 22 deleted 0 mismatch false excess 0 rows 3658 iters 379
+RESTDIAG: tid 2 kind 1 added 15 deleted 0 mismatch false excess 0 rows 3713 iters 237
+RESTDIAG: tid 3 kind 1 added 22 deleted 0 mismatch false excess 0 rows 3658 iters 458
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3722 iters 7
+RESTDIAG: tid 0 kind 1 added 81 deleted 0 mismatch false excess 0 rows 3694 iters 1371
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3722 iters 40
+RESTDIAG: tid 1 kind 1 added 58 deleted 0 mismatch false excess 0 rows 3722 iters 670
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3671 iters 95
+RESTDIAG: tid 2 kind 1 added 10 deleted 0 mismatch false excess 0 rows 3722 iters 416
+RESTDIAG: tid 1 kind 1 added 68 deleted 0 mismatch false excess 0 rows 3732 iters 684
+MIP:    25.92s nodes      249 open     202 lb -4.40000000e2 ub -1.30000000e2 lp_iters 72856 sb_iters 29723 sb_lps 234 sb_secs 7.67 node_iters 36092 (first 31092, lps 275) heur_iters 10745 dive_iters 1872 lp_rows 3720 node_cut_secs 0.80 pool_len 0 pool_idle 0
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3753 iters 40
+RESTDIAG: tid 3 kind 1 added 35 deleted 0 mismatch false excess 0 rows 3671 iters 538
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3753 iters 65
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3741 iters 14
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3741 iters 171
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 14
+RESTDIAG: tid 2 kind 1 added 31 deleted 0 mismatch false excess 0 rows 3753 iters 733
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 128
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 136
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3676 iters 44
+RESTDIAG: tid 1 kind 1 added 55 deleted 0 mismatch false excess 0 rows 3741 iters 916
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3676 iters 120
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 285
+RESTDIAG: tid 3 kind 1 added 24 deleted 0 mismatch false excess 0 rows 3676 iters 236
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 97
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 66
+RESTDIAG: tid 3 kind 1 added 24 deleted 0 mismatch false excess 0 rows 3676 iters 579
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 64
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 113
+RESTDIAG: tid 2 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 1494
+RESTDIAG: tid 3 kind 1 added 24 deleted 0 mismatch false excess 0 rows 3676 iters 446
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 59
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 80
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 31
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3680 iters 48
+RESTDIAG: tid 0 kind 1 added 107 deleted 0 mismatch false excess 0 rows 3720 iters 822
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3680 iters 57
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 14
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3680 iters 96
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 157
+RESTDIAG: tid 0 kind 1 added 107 deleted 0 mismatch false excess 0 rows 3720 iters 776
+RESTDIAG: tid 3 kind 1 added 44 deleted 0 mismatch false excess 0 rows 3680 iters 598
+RESTDIAG: tid 2 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 311
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3778 iters 146
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3778 iters 29
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 51
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3778 iters 151
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 37
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3778 iters 79
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 301
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3778 iters 373
+RESTDIAG: tid 1 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 481
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3744 iters 48
+RESTDIAG: tid 2 kind 1 added 10 deleted 0 mismatch false excess 0 rows 3778 iters 701
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3693 iters 90
+RESTDIAG: tid 0 kind 1 added 108 deleted 0 mismatch false excess 0 rows 3721 iters 1155
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3778 iters 47
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3693 iters 13
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3778 iters 158
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3778 iters 154
+MIP:    28.26s nodes      300 open     224 lb -4.40000000e2 ub -1.30000000e2 lp_iters 80481 sb_iters 30758 sb_lps 246 sb_secs 7.95 node_iters 42682 (first 37552, lps 321) heur_iters 10745 dive_iters 1872 lp_rows 3724 node_cut_secs 0.80 pool_len 0 pool_idle 0
+RESTDIAG: tid 1 kind 1 added 2 deleted 0 mismatch false excess 0 rows 3744 iters 586
+RESTDIAG: tid 3 kind 1 added 57 deleted 0 mismatch false excess 0 rows 3693 iters 466
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3699 iters 51
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3766 iters 91
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3699 iters 393
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3766 iters 147
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3766 iters 65
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3699 iters 321
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3719 iters 588
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3719 iters 7
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3699 iters 75
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3719 iters 57
+RESTDIAG: tid 2 kind 1 added 10 deleted 0 mismatch false excess 0 rows 3778 iters 386
+RESTDIAG: tid 1 kind 1 added 102 deleted 0 mismatch false excess 0 rows 3766 iters 398
+RESTDIAG: tid 3 kind 1 added 63 deleted 0 mismatch false excess 0 rows 3699 iters 540
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3780 iters 33
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3780 iters 43
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3780 iters 104
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3699 iters 231
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3780 iters 115
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3780 iters 282
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3780 iters 30
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3699 iters 1
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3699 iters 138
+RESTDIAG: tid 2 kind 1 added 2 deleted 0 mismatch false excess 0 rows 3780 iters 316
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3718 iters 14
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3780 iters 32
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3699 iters 108
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3718 iters 179
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3718 iters 122
+RESTDIAG: tid 2 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3780 iters 393
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3781 iters 24
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3781 iters 19
+RESTDIAG: tid 3 kind 1 added 63 deleted 0 mismatch false excess 0 rows 3699 iters 602
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3781 iters 259
+RESTDIAG: tid 0 kind 1 added 111 deleted 6 mismatch false excess 0 rows 3718 iters 834
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3781 iters 23
+RESTDIAG: tid 2 kind 1 added 1 deleted 0 mismatch false excess 0 rows 3781 iters 354
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3783 iters 25
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3700 iters 210
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3783 iters 16
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3783 iters 4
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3700 iters 278
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3783 iters 41
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3700 iters 20
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3722 iters 63
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3722 iters 142
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3700 iters 307
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3700 iters 351
+RESTDIAG: tid 2 kind 1 added 61 deleted 0 mismatch false excess 0 rows 3783 iters 464
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 32
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3722 iters 1421
+MIP:    30.41s nodes      340 open     246 lb -4.40000000e2 ub -1.30000000e2 lp_iters 88578 sb_iters 31398 sb_lps 250 sb_secs 8.10 node_iters 50139 (first 44645, lps 358) heur_iters 10745 dive_iters 1872 lp_rows 3722 node_cut_secs 0.85 pool_len 0 pool_idle 0
+RESTDIAG: tid 3 kind 1 added 64 deleted 0 mismatch false excess 0 rows 3700 iters 444
+RESTDIAG: tid 3 kind 1 added 64 deleted 0 mismatch false excess 0 rows 3700 iters 552
+RESTDIAG: tid 0 kind 1 added 115 deleted 6 mismatch false excess 0 rows 3722 iters 987
+RESTDIAG: tid 2 kind 1 added 12 deleted 0 mismatch false excess 0 rows 3790 iters 119
+RESTDIAG: tid 0 kind 1 added 119 deleted 6 mismatch false excess 0 rows 3726 iters 693
+RESTDIAG: tid 1 kind 1 added 103 deleted 0 mismatch false excess 0 rows 3767 iters 782
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 178
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 216
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 60
+RESTDIAG: tid 3 kind 1 added 66 deleted 0 mismatch false excess 0 rows 3702 iters 527
+RESTDIAG: tid 0 kind 1 added 132 deleted 6 mismatch false excess 0 rows 3739 iters 892
+RESTDIAG: tid 2 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 714
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3703 iters 271
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3703 iters 45
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 4
+RESTDIAG: tid 1 kind 1 added 25 deleted 0 mismatch false excess 0 rows 3767 iters 290
+RESTDIAG: tid 0 kind 1 added 132 deleted 6 mismatch false excess 0 rows 3739 iters 1099
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 8
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 10
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 10
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 115
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 215
+RESTDIAG: tid 3 kind 1 added 67 deleted 0 mismatch false excess 0 rows 3703 iters 703
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 50
+RESTDIAG: tid 2 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 8
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 38
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 1
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 132
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 48
+RESTDIAG: tid 0 kind 1 added 132 deleted 6 mismatch false excess 0 rows 3739 iters 803
+RESTDIAG: tid 1 kind 1 added 25 deleted 0 mismatch false excess 0 rows 3767 iters 285
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 48
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 147
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 106
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 27
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3707 iters 59
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 8
+RESTDIAG: tid 0 kind 1 added 132 deleted 6 mismatch false excess 0 rows 3739 iters 1225
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3767 iters 77
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3707 iters 74
+MIP:    32.61s nodes      347 open     245 lb -4.40000000e2 ub -1.30000000e2 lp_iters 95706 sb_iters 32182 sb_lps 252 sb_secs 8.29 node_iters 56483 (first 50344, lps 369) heur_iters 10745 dive_iters 1872 lp_rows 3748 node_cut_secs 1.10 pool_len 0 pool_idle 0
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3707 iters 202
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3707 iters 150
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3707 iters 24
+RESTDIAG: tid 2 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 393
+RESTDIAG: tid 1 kind 1 added 130 deleted 0 mismatch false excess 0 rows 3767 iters 804
+MIP:   global fixed integers 14084 of 20203 (newly 0 since the root LP)
+MIP: new incumbent -3.0000000000e2 at node 348 (32.79s) [other thread (tree)]
+RESTDIAG: tid 3 kind 0 added 0 deleted 10 mismatch false excess 0 rows 3700 iters 263
+RESTDIAG: tid 0 kind 1 added 141 deleted 6 mismatch false excess 0 rows 3748 iters 461
+RESTDIAG: tid 1 kind 1 added 26 deleted 0 mismatch false excess 0 rows 3770 iters 285
+RESTDIAG: tid 2 kind 1 added 14 deleted 0 mismatch false excess 0 rows 3792 iters 317
+RESTDIAG: tid 1 kind 1 added 28 deleted 0 mismatch false excess 0 rows 3770 iters 67
+RESTDIAG: tid 3 kind 1 added 74 deleted 10 mismatch false excess 0 rows 3700 iters 712
+RESTDIAG: tid 2 kind 1 added 39 deleted 0 mismatch false excess 0 rows 3792 iters 352
+RESTDIAG: tid 1 kind 1 added 28 deleted 0 mismatch false excess 0 rows 3770 iters 380
+RESTDIAG: tid 2 kind 1 added 14 deleted 0 mismatch false excess 0 rows 3792 iters 293
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 59
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 178
+RESTDIAG: tid 2 kind 1 added 39 deleted 0 mismatch false excess 0 rows 3792 iters 190
+RESTDIAG: tid 1 kind 1 added 29 deleted 0 mismatch false excess 0 rows 3771 iters 475
+RESTDIAG: tid 1 kind 1 added 29 deleted 0 mismatch false excess 0 rows 3771 iters 278
+RESTDIAG: tid 0 kind 1 added 141 deleted 6 mismatch false excess 0 rows 3748 iters 1258
+RESTDIAG: tid 3 kind 1 added 31 deleted 10 mismatch false excess 0 rows 3701 iters 432
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 139
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 51
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 29
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 166
+RESTDIAG: tid 1 kind 1 added 29 deleted 0 mismatch false excess 0 rows 3771 iters 606
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 213
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 45
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 13
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 187
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 10
+RESTDIAG: tid 1 kind 1 added 30 deleted 0 mismatch false excess 0 rows 3772 iters 162
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 49
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 51
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 310
+RESTDIAG: tid 1 kind 1 added 30 deleted 0 mismatch false excess 0 rows 3772 iters 234
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 8
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 53
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 217
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 180
+RESTDIAG: tid 0 kind 1 added 160 deleted 6 mismatch false excess 0 rows 3767 iters 1209
+RESTDIAG: tid 3 kind 1 added 54 deleted 10 mismatch false excess 0 rows 3701 iters 458
+RESTDIAG: tid 1 kind 1 added 87 deleted 0 mismatch false excess 0 rows 3773 iters 1110
+RESTDIAG: tid 2 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 1498
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 704
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 215
+RESTDIAG: tid 1 kind 1 added 40 deleted 0 mismatch false excess 0 rows 3784 iters 381
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3793 iters 102
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 29
+RESTDIAG: tid 1 kind 1 added 42 deleted 0 mismatch false excess 0 rows 3784 iters 361
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 342
+RESTDIAG: tid 1 kind 1 added 42 deleted 0 mismatch false excess 0 rows 3784 iters 276
+MIP:    34.63s nodes      357 open     248 lb -4.40000000e2 ub -3.00000000e2 lp_iters 101687 sb_iters 33172 sb_lps 254 sb_secs 8.59 node_iters 61120 (first 54250, lps 381) heur_iters 11453 dive_iters 2226 lp_rows 3768 node_cut_secs 1.34 pool_len 2 pool_idle 0
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 82
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3782 iters 460
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 329
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 139
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3701 iters 66
+RESTDIAG: tid 1 kind 1 added 147 deleted 0 mismatch false excess 0 rows 3784 iters 843
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 405
+RESTDIAG: tid 3 kind 1 added 35 deleted 10 mismatch false excess 0 rows 3701 iters 598
+RESTDIAG: tid 1 kind 1 added 42 deleted 0 mismatch false excess 0 rows 3784 iters 276
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3782 iters 1021
+RESTDIAG: tid 3 kind 1 added 9 deleted 10 mismatch false excess 0 rows 3701 iters 42
+RESTDIAG: tid 3 kind 1 added 32 deleted 10 mismatch false excess 0 rows 3702 iters 395
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3782 iters 619
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 950
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3782 iters 27
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 5
+RESTDIAG: tid 3 kind 1 added 54 deleted 10 mismatch false excess 0 rows 3702 iters 316
+RESTDIAG: tid 1 kind 1 added 159 deleted 0 mismatch false excess 0 rows 3796 iters 680
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3782 iters 228
+RESTDIAG: tid 2 kind 0 added 0 deleted 11 mismatch false excess 0 rows 3782 iters 354
+RESTDIAG: tid 3 kind 1 added 54 deleted 10 mismatch false excess 0 rows 3702 iters 601
+RESTDIAG: tid 0 kind 1 added 161 deleted 6 mismatch false excess 0 rows 3768 iters 811
+RESTDIAG: tid 1 kind 1 added 159 deleted 0 mismatch false excess 0 rows 3796 iters 744
+RESTDIAG: tid 2 kind 0 added 0 deleted 11 mismatch false excess 0 rows 3782 iters 555
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 3
+RESTDIAG: tid 3 kind 1 added 55 deleted 10 mismatch false excess 0 rows 3703 iters 489
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3782 iters 154
+RESTDIAG: tid 1 kind 1 added 159 deleted 0 mismatch false excess 0 rows 3796 iters 868
+RESTDIAG: tid 3 kind 1 added 47 deleted 13 mismatch false excess 0 rows 3705 iters 481
+RESTDIAG: tid 2 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3782 iters 675
+RESTDIAG: tid 0 kind 1 added 161 deleted 6 mismatch false excess 0 rows 3768 iters 1178
+RESTDIAG: tid 3 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3705 iters 510
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3706 iters 9
+RESTDIAG: tid 1 kind 1 added 54 deleted 0 mismatch false excess 0 rows 3796 iters 179
+RESTDIAG: tid 2 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3782 iters 634
+RESTDIAG: tid 3 kind 1 added 61 deleted 15 mismatch false excess 0 rows 3704 iters 337
+RESTDIAG: tid 1 kind 1 added 54 deleted 0 mismatch false excess 0 rows 3796 iters 369
+RESTDIAG: tid 1 kind 1 added 54 deleted 0 mismatch false excess 0 rows 3796 iters 185
+RESTDIAG: tid 1 kind 1 added 54 deleted 0 mismatch false excess 0 rows 3796 iters 131
+RESTDIAG: tid 3 kind 1 added 61 deleted 15 mismatch false excess 0 rows 3704 iters 705
+RESTDIAG: tid 1 kind 1 added 75 deleted 0 mismatch false excess 0 rows 3796 iters 408
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3771 iters 3
+RESTDIAG: tid 0 kind 1 added 161 deleted 6 mismatch false excess 0 rows 3768 iters 1700
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3771 iters 11
+RESTDIAG: tid 1 kind 1 added 13 deleted 0 mismatch false excess 0 rows 3797 iters 233
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3771 iters 68
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3771 iters 41
+RESTDIAG: tid 3 kind 1 added 62 deleted 15 mismatch false excess 0 rows 3705 iters 610
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3771 iters 31
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3771 iters 309
+RESTDIAG: tid 3 kind 1 added 18 deleted 15 mismatch false excess 0 rows 3705 iters 261
+RESTDIAG: tid 3 kind 1 added 62 deleted 15 mismatch false excess 0 rows 3705 iters 492
+RESTDIAG: tid 0 kind 1 added 161 deleted 6 mismatch false excess 0 rows 3768 iters 1282
+RESTDIAG: tid 3 kind 1 added 49 deleted 15 mismatch false excess 0 rows 3705 iters 311
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3797 iters 3
+RESTDIAG: tid 3 kind 1 added 20 deleted 15 mismatch false excess 0 rows 3705 iters 125
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3797 iters 231
+RESTDIAG: tid 3 kind 1 added 50 deleted 15 mismatch false excess 0 rows 3706 iters 164
+RESTDIAG: tid 3 kind 1 added 21 deleted 15 mismatch false excess 0 rows 3706 iters 358
+MIP:    37.31s nodes      372 open     253 lb -4.40000000e2 ub -3.00000000e2 lp_iters 109817 sb_iters 33968 sb_lps 258 sb_secs 8.85 node_iters 68454 (first 61369, lps 395) heur_iters 11453 dive_iters 2226 lp_rows 3768 node_cut_secs 1.34 pool_len 1 pool_idle 0
+RESTDIAG: tid 3 kind 1 added 21 deleted 15 mismatch false excess 0 rows 3706 iters 260
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3797 iters 15
+RESTDIAG: tid 1 kind 0 added 0 deleted 17 mismatch false excess 0 rows 3780 iters 94
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3780 iters 242
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 326
+RESTDIAG: tid 3 kind 1 added 65 deleted 15 mismatch false excess 0 rows 3708 iters 725
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 28
+RESTDIAG: tid 1 kind 0 added 0 deleted 17 mismatch false excess 0 rows 3780 iters 164
+RESTDIAG: tid 3 kind 1 added 53 deleted 15 mismatch false excess 0 rows 3709 iters 272
+RESTDIAG: tid 1 kind 1 added 13 deleted 17 mismatch false excess 0 rows 3780 iters 216
+RESTDIAG: tid 0 kind 1 added 161 deleted 6 mismatch false excess 0 rows 3768 iters 829
+RESTDIAG: tid 3 kind 1 added 66 deleted 15 mismatch false excess 0 rows 3709 iters 696
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3781 iters 10
+RESTDIAG: tid 1 kind 0 added 0 deleted 8 mismatch false excess 0 rows 3773 iters 20
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3710 iters 144
+RESTDIAG: tid 0 kind 1 added 161 deleted 6 mismatch false excess 0 rows 3768 iters 778
+RESTDIAG: tid 3 kind 1 added 25 deleted 15 mismatch false excess 0 rows 3710 iters 222
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3773 iters 282
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3773 iters 21
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3710 iters 144
+RESTDIAG: tid 1 kind 0 added 0 deleted 8 mismatch false excess 0 rows 3773 iters 212
+RESTDIAG: tid 3 kind 1 added 54 deleted 15 mismatch false excess 0 rows 3710 iters 216
+RESTDIAG: tid 3 kind 1 added 54 deleted 15 mismatch false excess 0 rows 3710 iters 167
+RESTDIAG: tid 1 kind 0 added 0 deleted 8 mismatch false excess 0 rows 3773 iters 156
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3773 iters 12
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3773 iters 14
+RESTDIAG: tid 3 kind 1 added 25 deleted 15 mismatch false excess 0 rows 3710 iters 333
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3773 iters 43
+RESTDIAG: tid 0 kind 1 added 161 deleted 6 mismatch false excess 0 rows 3768 iters 1029
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3710 iters 1
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3769 iters 19
+RESTDIAG: tid 1 kind 0 added 0 deleted 4 mismatch false excess 0 rows 3769 iters 33
+RESTDIAG: tid 3 kind 1 added 54 deleted 15 mismatch false excess 0 rows 3710 iters 285
+RESTDIAG: tid 1 kind 0 added 0 deleted 4 mismatch false excess 0 rows 3769 iters 76
+RESTDIAG: tid 2 kind 1 added 0 deleted 52 mismatch false excess 0 rows 3730 iters 408
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 31
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3731 iters 92
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 212
+RESTDIAG: tid 3 kind 1 added 12 deleted 2 mismatch false excess 0 rows 3715 iters 384
+RESTDIAG: tid 1 kind 1 added 0 deleted 12 mismatch false excess 0 rows 3769 iters 78
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 56
+RESTDIAG: tid 2 kind 1 added 1 deleted 52 mismatch false excess 0 rows 3731 iters 635
+RESTDIAG: tid 1 kind 1 added 1 deleted 29 mismatch false excess 0 rows 3769 iters 254
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3715 iters 205
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 8
+RESTDIAG: tid 3 kind 1 added 30 deleted 15 mismatch false excess 0 rows 3715 iters 481
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3732 iters 904
+RESTDIAG: tid 3 kind 1 added 37 deleted 15 mismatch false excess 0 rows 3715 iters 270
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 544
+MIP:    39.33s nodes      398 open     262 lb -4.40000000e2 ub -3.00000000e2 lp_iters 116031 sb_iters 34177 sb_lps 260 sb_secs 8.91 node_iters 74459 (first 67374, lps 417) heur_iters 11453 dive_iters 2226 lp_rows 3768 node_cut_secs 1.34 pool_len 1 pool_idle 0
+RESTDIAG: tid 3 kind 1 added 37 deleted 15 mismatch false excess 0 rows 3715 iters 314
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3732 iters 364
+RESTDIAG: tid 1 kind 1 added 3 deleted 29 mismatch false excess 0 rows 3771 iters 395
+RESTDIAG: tid 3 kind 1 added 37 deleted 15 mismatch false excess 0 rows 3715 iters 402
+RESTDIAG: tid 3 kind 1 added 37 deleted 15 mismatch false excess 0 rows 3715 iters 189
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 641
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3732 iters 352
+RESTDIAG: tid 3 kind 1 added 38 deleted 15 mismatch false excess 0 rows 3716 iters 151
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3771 iters 18
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3771 iters 174
+RESTDIAG: tid 3 kind 1 added 32 deleted 15 mismatch false excess 0 rows 3716 iters 324
+RESTDIAG: tid 2 kind 1 added 2 deleted 43 mismatch false excess 0 rows 3730 iters 374
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3771 iters 102
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 1007
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3716 iters 19
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3771 iters 475
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3768 iters 546
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 39
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 47
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3759 iters 79
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 119
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3759 iters 59
+RESTDIAG: tid 3 kind 1 added 38 deleted 15 mismatch false excess 0 rows 3716 iters 122
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3759 iters 258
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 285
+RESTDIAG: tid 3 kind 1 added 32 deleted 15 mismatch false excess 0 rows 3716 iters 287
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3759 iters 442
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 411
+RESTDIAG: tid 1 kind 0 added 0 deleted 12 mismatch false excess 0 rows 3759 iters 52
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3718 iters 16
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3718 iters 3
+RESTDIAG: tid 0 kind 1 added 161 deleted 6 mismatch false excess 0 rows 3768 iters 1299
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 122
+RESTDIAG: tid 3 kind 1 added 40 deleted 15 mismatch false excess 0 rows 3718 iters 388
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 188
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 221
+RESTDIAG: tid 3 kind 1 added 40 deleted 15 mismatch false excess 0 rows 3718 iters 370
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 26
+RESTDIAG: tid 3 kind 1 added 23 deleted 15 mismatch false excess 0 rows 3718 iters 313
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3743 iters 5
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3719 iters 71
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 403
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 144
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 236
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3719 iters 44
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3719 iters 158
+RESTDIAG: tid 1 kind 1 added 3 deleted 57 mismatch false excess 0 rows 3743 iters 756
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3719 iters 70
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 2
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 3
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3719 iters 199
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 36
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3719 iters 34
+RESTDIAG: tid 1 kind 0 added 0 deleted 7 mismatch false excess 0 rows 3736 iters 68
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 236
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3719 iters 39
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3712 iters 60
+RESTDIAG: tid 3 kind 0 added 0 deleted 7 mismatch false excess 0 rows 3712 iters 9
+RESTDIAG: tid 1 kind 0 added 0 deleted 7 mismatch false excess 0 rows 3736 iters 319
+RESTDIAG: tid 3 kind 0 added 0 deleted 7 mismatch false excess 0 rows 3712 iters 84
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3725 iters 250
+RESTDIAG: tid 3 kind 1 added 77 deleted 22 mismatch false excess 0 rows 3712 iters 145
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 29
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 31
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 21
+RESTDIAG: tid 3 kind 1 added 81 deleted 26 mismatch false excess 0 rows 3712 iters 86
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 96
+RESTDIAG: tid 0 kind 1 added 162 deleted 6 mismatch false excess 0 rows 3769 iters 2361
+MIP:    41.50s nodes      408 open     258 lb -4.40000000e2 ub -3.00000000e2 lp_iters 122953 sb_iters 35091 sb_lps 268 sb_secs 9.19 node_iters 80467 (first 73259, lps 425) heur_iters 11453 dive_iters 2226 lp_rows 3769 node_cut_secs 1.34 pool_len 0 pool_idle 0
+RESTDIAG: tid 1 kind 0 added 0 deleted 7 mismatch false excess 0 rows 3736 iters 128
+RESTDIAG: tid 3 kind 1 added 63 deleted 26 mismatch false excess 0 rows 3713 iters 374
+RESTDIAG: tid 1 kind 0 added 0 deleted 7 mismatch false excess 0 rows 3736 iters 312
+RESTDIAG: tid 3 kind 1 added 39 deleted 26 mismatch false excess 0 rows 3713 iters 135
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3725 iters 1048
+RESTDIAG: tid 3 kind 1 added 83 deleted 26 mismatch false excess 0 rows 3714 iters 215
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3734 iters 107
+RESTDIAG: tid 2 kind 0 added 0 deleted 5 mismatch false excess 0 rows 3725 iters 315
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3734 iters 195
+RESTDIAG: tid 3 kind 1 added 83 deleted 26 mismatch false excess 0 rows 3714 iters 489
+RESTDIAG: tid 3 kind 1 added 40 deleted 26 mismatch false excess 0 rows 3714 iters 153
+RESTDIAG: tid 3 kind 1 added 40 deleted 26 mismatch false excess 0 rows 3714 iters 49
+RESTDIAG: tid 2 kind 1 added 2 deleted 48 mismatch false excess 0 rows 3725 iters 332
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3734 iters 479
+RESTDIAG: tid 0 kind 1 added 162 deleted 6 mismatch false excess 0 rows 3769 iters 1530
+RESTDIAG: tid 1 kind 0 added 0 deleted 2 mismatch false excess 0 rows 3734 iters 20
+RESTDIAG: tid 3 kind 1 added 29 deleted 16 mismatch false excess 0 rows 3714 iters 235
+RESTDIAG: tid 3 kind 1 added 8 deleted 11 mismatch false excess 0 rows 3715 iters 13
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3770 iters 104
+RESTDIAG: tid 3 kind 1 added 8 deleted 11 mismatch false excess 0 rows 3715 iters 117
+RESTDIAG: tid 1 kind 0 added 0 deleted 9 mismatch false excess 0 rows 3734 iters 608
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3725 iters 336
+RESTDIAG: tid 1 kind 0 added 0 deleted 9 mismatch false excess 0 rows 3734 iters 324
+RESTDIAG: tid 3 kind 1 added 30 deleted 16 mismatch false excess 0 rows 3715 iters 508
+RESTDIAG: tid 1 kind 0 added 0 deleted 9 mismatch false excess 0 rows 3734 iters 124
+RESTDIAG: tid 3 kind 1 added 38 deleted 17 mismatch false excess 0 rows 3722 iters 169
+RESTDIAG: tid 0 kind 1 added 163 deleted 6 mismatch false excess 0 rows 3770 iters 1166
+RESTDIAG: tid 1 kind 1 added 16 deleted 67 mismatch false excess 0 rows 3733 iters 425
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3734 iters 4
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3724 iters 98
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3724 iters 167
+RESTDIAG: tid 1 kind 1 added 4 deleted 67 mismatch false excess 0 rows 3734 iters 297
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3724 iters 215
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 203
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3724 iters 101
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3724 iters 203
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3734 iters 215
+RESTDIAG: tid 2 kind 0 added 0 deleted 3 mismatch false excess 0 rows 3717 iters 146
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3724 iters 329
+RESTDIAG: tid 1 kind 1 added 34 deleted 67 mismatch false excess 0 rows 3734 iters 347
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3717 iters 269
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3717 iters 36
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3724 iters 78
+RESTDIAG: tid 2 kind 0 added 0 deleted 3 mismatch false excess 0 rows 3717 iters 210
+RESTDIAG: tid 2 kind 0 added 0 deleted 3 mismatch false excess 0 rows 3717 iters 182
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3724 iters 392
+RESTDIAG: tid 2 kind 0 added 0 deleted 3 mismatch false excess 0 rows 3717 iters 148
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3770 iters 948
+RESTDIAG: tid 2 kind 0 added 0 deleted 3 mismatch false excess 0 rows 3717 iters 343
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3722 iters 31
+RESTDIAG: tid 2 kind 0 added 0 deleted 3 mismatch false excess 0 rows 3717 iters 257
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3724 iters 61
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3722 iters 26
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3722 iters 186
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3770 iters 539
+RESTDIAG: tid 2 kind 1 added 3 deleted 57 mismatch false excess 0 rows 3717 iters 416
+MIP:    43.58s nodes      420 open     267 lb -4.40000000e2 ub -3.00000000e2 lp_iters 129280 sb_iters 35914 sb_lps 272 sb_secs 9.43 node_iters 85971 (first 78541, lps 439) heur_iters 11453 dive_iters 2226 lp_rows 3770 node_cut_secs 1.34 pool_len 0 pool_idle 0
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3722 iters 184
+RESTDIAG: tid 2 kind 1 added 1 deleted 14 mismatch false excess 0 rows 3717 iters 66
+RESTDIAG: tid 3 kind 1 added 20 deleted 12 mismatch false excess 0 rows 3724 iters 232
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3722 iters 205
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3722 iters 236
+RESTDIAG: tid 2 kind 1 added 6 deleted 14 mismatch false excess 0 rows 3722 iters 162
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3725 iters 14
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3770 iters 591
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3725 iters 72
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3722 iters 283
+RESTDIAG: tid 3 kind 1 added 43 deleted 19 mismatch false excess 0 rows 3725 iters 171
+RESTDIAG: tid 1 kind 0 added 0 deleted 8 mismatch false excess 0 rows 3722 iters 250
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3735 iters 234
+RESTDIAG: tid 1 kind 0 added 0 deleted 8 mismatch false excess 0 rows 3722 iters 171
+RESTDIAG: tid 2 kind 1 added 19 deleted 14 mismatch false excess 0 rows 3735 iters 207
+RESTDIAG: tid 1 kind 0 added 0 deleted 8 mismatch false excess 0 rows 3722 iters 346
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3770 iters 892
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3731 iters 217
+RESTDIAG: tid 1 kind 0 added 0 deleted 8 mismatch false excess 0 rows 3722 iters 350
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3731 iters 223
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 53
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 57
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 263
+RESTDIAG: tid 3 kind 0 added 0 deleted 1 mismatch false excess 0 rows 3731 iters 289
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 61
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 118
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 113
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 9
+RESTDIAG: tid 1 kind 0 added 0 deleted 9 mismatch false excess 0 rows 3721 iters 64
+RESTDIAG: tid 3 kind 0 added 0 deleted 1 mismatch false excess 0 rows 3731 iters 284
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3770 iters 169
+RESTDIAG: tid 2 kind 1 added 20 deleted 14 mismatch false excess 0 rows 3736 iters 430
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3731 iters 102
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 25
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3731 iters 111
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 10
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 82
+RESTDIAG: tid 3 kind 1 added 30 deleted 15 mismatch false excess 0 rows 3731 iters 96
+RESTDIAG: tid 1 kind 0 added 0 deleted 9 mismatch false excess 0 rows 3721 iters 185
+RESTDIAG: tid 2 kind 1 added 21 deleted 14 mismatch false excess 0 rows 3737 iters 402
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 22
+RESTDIAG: tid 2 kind 1 added 20 deleted 9 mismatch false excess 0 rows 3737 iters 222
+RESTDIAG: tid 0 kind 1 added 163 deleted 6 mismatch false excess 0 rows 3770 iters 799
+RESTDIAG: tid 3 kind 1 added 39 deleted 19 mismatch false excess 0 rows 3730 iters 274
+RESTDIAG: tid 1 kind 1 added 9 deleted 57 mismatch false excess 0 rows 3721 iters 288
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 238
+RESTDIAG: tid 1 kind 1 added 36 deleted 86 mismatch false excess 0 rows 3721 iters 263
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 54
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 4
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 20
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 58
+RESTDIAG: tid 1 kind 1 added 9 deleted 57 mismatch false excess 0 rows 3721 iters 194
+RESTDIAG: tid 0 kind 1 added 163 deleted 6 mismatch false excess 0 rows 3770 iters 787
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 509
+RESTDIAG: tid 3 kind 1 added 40 deleted 19 mismatch false excess 0 rows 3730 iters 50
+RESTDIAG: tid 1 kind 1 added 9 deleted 61 mismatch false excess 0 rows 3721 iters 131
+RESTDIAG: tid 3 kind 1 added 31 deleted 19 mismatch false excess 0 rows 3730 iters 91
+RESTDIAG: tid 0 kind 1 added 163 deleted 6 mismatch false excess 0 rows 3770 iters 409
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 15
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 117
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3721 iters 51
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 162
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 54
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 23
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 20
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 143
+RESTDIAG: tid 0 kind 1 added 163 deleted 6 mismatch false excess 0 rows 3770 iters 643
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 85
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 35
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 112
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 47
+RESTDIAG: tid 1 kind 0 added 0 deleted 1 mismatch false excess 0 rows 3720 iters 265
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 116
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 264
+RESTDIAG: tid 1 kind 0 added 0 deleted 1 mismatch false excess 0 rows 3720 iters 184
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 271
+RESTDIAG: tid 1 kind 1 added 9 deleted 58 mismatch false excess 0 rows 3720 iters 25
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 261
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3772 iters 122
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 109
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3772 iters 69
+RESTDIAG: tid 1 kind 1 added 40 deleted 87 mismatch false excess 0 rows 3720 iters 187
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 156
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 175
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 105
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 14
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 128
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 1
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 99
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 40
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 30
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 66
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 62
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 42
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 308
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 37
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 219
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 16
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 382
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 210
+RESTDIAG: tid 0 kind 1 added 165 deleted 6 mismatch false excess 0 rows 3772 iters 1186
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 139
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 130
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 252
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 183
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 33
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 29
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 236
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 70
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 150
+RESTDIAG: tid 3 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3730 iters 45
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 201
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 344
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 164
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3731 iters 52
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3731 iters 90
+RESTDIAG: tid 2 kind 1 added 20 deleted 8 mismatch false excess 0 rows 3737 iters 204
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 302
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 0.34s
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 1, 0, 0, 0])
+MIP:    46.24s nodes      437 open     274 lb -4.39805784e2 ub -3.00000000e2 lp_iters 136411 sb_iters 36573 sb_lps 276 sb_secs 9.62 node_iters 92443 (first 84398, lps 457) heur_iters 11456 dive_iters 2226 lp_rows 3772 node_cut_secs 1.38 pool_len 0 pool_idle 0
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3720 iters 20
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 6
+RESTDIAG: tid 1 kind 1 added 7 deleted 58 mismatch false excess 0 rows 3720 iters 216
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 49
+RESTDIAG: tid 3 kind 1 added 41 deleted 19 mismatch false excess 0 rows 3731 iters 487
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 126
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 127
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 46
+RESTDIAG: tid 3 kind 1 added 54 deleted 24 mismatch false excess 0 rows 3731 iters 195
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 142
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 25
+RESTDIAG: tid 0 kind 1 added 165 deleted 6 mismatch false excess 0 rows 3772 iters 1256
+RESTDIAG: tid 1 kind 0 added 0 deleted 1 mismatch false excess 0 rows 3721 iters 92
+RESTDIAG: tid 2 kind 1 added 63 deleted 79 mismatch true excess 0 rows 3737 iters 951
+RESTDIAG: tid 1 kind 1 added 9 deleted 47 mismatch false excess 0 rows 3721 iters 177
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3772 iters 65
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 293
+RESTDIAG: tid 1 kind 1 added 42 deleted 88 mismatch false excess 0 rows 3721 iters 534
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3732 iters 68
+RESTDIAG: tid 2 kind 1 added 33 deleted 80 mismatch true excess 0 rows 3736 iters 593
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3732 iters 385
+RESTDIAG: tid 0 kind 1 added 165 deleted 6 mismatch false excess 0 rows 3772 iters 1002
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3738 iters 6
+RESTDIAG: tid 2 kind 1 added 22 deleted 9 mismatch false excess 0 rows 3738 iters 189
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3732 iters 248
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3723 iters 664
+RESTDIAG: tid 2 kind 1 added 22 deleted 9 mismatch false excess 0 rows 3738 iters 344
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3732 iters 67
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3723 iters 448
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3723 iters 19
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3732 iters 302
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3765 iters 248
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3732 iters 199
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3738 iters 96
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3765 iters 126
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3738 iters 140
+RESTDIAG: tid 2 kind 0 added 0 deleted 8 mismatch false excess 0 rows 3730 iters 121
+RESTDIAG: tid 2 kind 0 added 0 deleted 8 mismatch false excess 0 rows 3730 iters 208
+RESTDIAG: tid 3 kind 1 added 55 deleted 24 mismatch false excess 0 rows 3732 iters 581
+RESTDIAG: tid 2 kind 0 added 0 deleted 8 mismatch false excess 0 rows 3730 iters 53
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3765 iters 455
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3732 iters 26
+RESTDIAG: tid 2 kind 0 added 0 deleted 8 mismatch false excess 0 rows 3730 iters 169
+RESTDIAG: tid 3 kind 1 added 55 deleted 24 mismatch false excess 0 rows 3732 iters 284
+RESTDIAG: tid 3 kind 1 added 2 deleted 0 mismatch false excess 0 rows 3732 iters 37
+RESTDIAG: tid 3 kind 1 added 33 deleted 19 mismatch false excess 0 rows 3732 iters 16
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3707 iters 10
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3707 iters 115
+RESTDIAG: tid 3 kind 1 added 33 deleted 19 mismatch false excess 0 rows 3732 iters 235
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3707 iters 96
+RESTDIAG: tid 2 kind 1 added 40 deleted 88 mismatch true excess 0 rows 3730 iters 773
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3707 iters 168
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3707 iters 163
+RESTDIAG: tid 0 kind 1 added 165 deleted 13 mismatch false excess 0 rows 3765 iters 951
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3733 iters 146
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3733 iters 10
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3707 iters 144
+RESTDIAG: tid 1 kind 0 added 0 deleted 16 mismatch false excess 0 rows 3707 iters 65
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3733 iters 129
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3732 iters 3
+RESTDIAG: tid 1 kind 0 added 0 deleted 16 mismatch false excess 0 rows 3707 iters 130
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3733 iters 130
+RESTDIAG: tid 2 kind 1 added 27 deleted 50 mismatch false excess 0 rows 3732 iters 75
+RESTDIAG: tid 1 kind 0 added 0 deleted 16 mismatch false excess 0 rows 3707 iters 128
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3733 iters 75
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3707 iters 7
+RESTDIAG: tid 1 kind 0 added 0 deleted 16 mismatch false excess 0 rows 3707 iters 78
+MIP:    48.25s nodes      451 open     285 lb -4.37060890e2 ub -3.00000000e2 lp_iters 142380 sb_iters 37280 sb_lps 286 sb_secs 9.87 node_iters 97705 (first 89249, lps 476) heur_iters 11456 dive_iters 2226 lp_rows 3770 node_cut_secs 1.44 pool_len 1 pool_idle 0
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3734 iters 46
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3733 iters 14
+MIP:   global fixed integers 14084 of 20203 (newly 0 since the root LP)
+MIP: new incumbent -3.3500000000e2 at node 451 (48.27s) [other thread (tree)]
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3770 iters 113
+RESTDIAG: tid 1 kind 0 added 0 deleted 16 mismatch false excess 0 rows 3707 iters 451
+RESTDIAG: tid 2 kind 1 added 29 deleted 55 mismatch false excess 0 rows 3729 iters 253
+RESTDIAG: tid 3 kind 1 added 56 deleted 24 mismatch false excess 0 rows 3733 iters 298
+RESTDIAG: tid 1 kind 1 added 44 deleted 104 mismatch false excess 0 rows 3707 iters 286
+RESTDIAG: tid 1 kind 1 added 45 deleted 104 mismatch false excess 0 rows 3708 iters 424
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3734 iters 428
+RESTDIAG: tid 3 kind 1 added 38 deleted 19 mismatch false excess 0 rows 3734 iters 149
+RESTDIAG: tid 1 kind 1 added 13 deleted 38 mismatch false excess 0 rows 3709 iters 25
+RESTDIAG: tid 0 kind 1 added 170 deleted 13 mismatch false excess 0 rows 3770 iters 1123
+RESTDIAG: tid 2 kind 1 added 53 deleted 93 mismatch true excess 0 rows 3738 iters 1285
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3734 iters 53
+RESTDIAG: tid 2 kind 1 added 41 deleted 22 mismatch false excess 0 rows 3744 iters 391
+RESTDIAG: tid 3 kind 1 added 58 deleted 24 mismatch false excess 0 rows 3734 iters 399
+RESTDIAG: tid 1 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3709 iters 1495
+RESTDIAG: tid 2 kind 1 added 43 deleted 23 mismatch false excess 0 rows 3746 iters 298
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 41
+RESTDIAG: tid 0 kind 1 added 172 deleted 13 mismatch false excess 0 rows 3772 iters 690
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 105
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3736 iters 113
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 253
+RESTDIAG: tid 3 kind 1 added 40 deleted 19 mismatch false excess 0 rows 3736 iters 123
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 19
+RESTDIAG: tid 0 kind 1 added 172 deleted 13 mismatch false excess 0 rows 3772 iters 522
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 195
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 9
+RESTDIAG: tid 2 kind 1 added 43 deleted 23 mismatch false excess 0 rows 3746 iters 282
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 260
+RESTDIAG: tid 3 kind 1 added 59 deleted 24 mismatch false excess 0 rows 3737 iters 57
+RESTDIAG: tid 0 kind 1 added 173 deleted 13 mismatch false excess 0 rows 3773 iters 725
+RESTDIAG: tid 3 kind 1 added 40 deleted 19 mismatch false excess 0 rows 3737 iters 69
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 102
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 353
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 110
+RESTDIAG: tid 3 kind 1 added 41 deleted 19 mismatch false excess 0 rows 3737 iters 188
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 41
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 537
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 9
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 286
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 17
+RESTDIAG: tid 0 kind 1 added 173 deleted 13 mismatch false excess 0 rows 3773 iters 1013
+RESTDIAG: tid 3 kind 1 added 60 deleted 24 mismatch false excess 0 rows 3737 iters 80
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 359
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 43
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3737 iters 10
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 427
+RESTDIAG: tid 3 kind 1 added 60 deleted 24 mismatch false excess 0 rows 3737 iters 160
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 331
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3738 iters 63
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 410
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3738 iters 20
+RESTDIAG: tid 3 kind 1 added 8 deleted 0 mismatch false excess 0 rows 3738 iters 152
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 246
+RESTDIAG: tid 0 kind 1 added 173 deleted 13 mismatch false excess 0 rows 3773 iters 1221
+RESTDIAG: tid 3 kind 1 added 61 deleted 24 mismatch false excess 0 rows 3738 iters 91
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3738 iters 72
+RESTDIAG: tid 3 kind 1 added 61 deleted 24 mismatch false excess 0 rows 3738 iters 99
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 18
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3738 iters 120
+MIP:    50.56s nodes      460 open     274 lb -4.36584699e2 ub -3.35000000e2 lp_iters 148932 sb_iters 38104 sb_lps 290 sb_secs 10.13 node_iters 103430 (first 94702, lps 487) heur_iters 11462 dive_iters 2229 lp_rows 3774 node_cut_secs 1.44 pool_len 0 pool_idle 0
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3744 iters 40
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3738 iters 73
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 352
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3744 iters 107
+RESTDIAG: tid 3 kind 1 added 8 deleted 0 mismatch false excess 0 rows 3738 iters 57
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 83
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3744 iters 84
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3744 iters 144
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3740 iters 41
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3744 iters 6
+RESTDIAG: tid 3 kind 1 added 55 deleted 21 mismatch false excess 0 rows 3740 iters 121
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3744 iters 41
+RESTDIAG: tid 0 kind 1 added 174 deleted 13 mismatch false excess 0 rows 3774 iters 879
+RESTDIAG: tid 3 kind 1 added 12 deleted 0 mismatch false excess 0 rows 3742 iters 168
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3744 iters 150
+RESTDIAG: tid 3 kind 1 added 59 deleted 21 mismatch false excess 0 rows 3744 iters 105
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3744 iters 51
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 913
+RESTDIAG: tid 3 kind 1 added 14 deleted 0 mismatch false excess 0 rows 3744 iters 149
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3744 iters 258
+RESTDIAG: tid 3 kind 1 added 14 deleted 0 mismatch false excess 0 rows 3744 iters 91
+RESTDIAG: tid 3 kind 1 added 14 deleted 0 mismatch false excess 0 rows 3744 iters 215
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3744 iters 283
+RESTDIAG: tid 0 kind 1 added 174 deleted 13 mismatch false excess 0 rows 3774 iters 916
+RESTDIAG: tid 2 kind 0 added 0 deleted 2 mismatch false excess 0 rows 3742 iters 187
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 472
+RESTDIAG: tid 3 kind 1 added 14 deleted 0 mismatch false excess 0 rows 3744 iters 209
+RESTDIAG: tid 2 kind 0 added 0 deleted 2 mismatch false excess 0 rows 3742 iters 141
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 215
+RESTDIAG: tid 3 kind 1 added 14 deleted 0 mismatch false excess 0 rows 3744 iters 154
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 176
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 278
+RESTDIAG: tid 3 kind 1 added 14 deleted 0 mismatch false excess 0 rows 3744 iters 179
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 191
+RESTDIAG: tid 2 kind 0 added 0 deleted 2 mismatch false excess 0 rows 3742 iters 305
+RESTDIAG: tid 0 kind 1 added 174 deleted 13 mismatch false excess 0 rows 3774 iters 832
+RESTDIAG: tid 3 kind 1 added 7 deleted 0 mismatch false excess 0 rows 3745 iters 191
+RESTDIAG: tid 2 kind 0 added 0 deleted 2 mismatch false excess 0 rows 3742 iters 177
+RESTDIAG: tid 3 kind 1 added 8 deleted 0 mismatch false excess 0 rows 3745 iters 9
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 241
+RESTDIAG: tid 3 kind 1 added 15 deleted 0 mismatch false excess 0 rows 3745 iters 173
+RESTDIAG: tid 2 kind 0 added 0 deleted 4 mismatch false excess 0 rows 3742 iters 318
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 891
+RESTDIAG: tid 3 kind 1 added 11 deleted 0 mismatch false excess 0 rows 3745 iters 80
+RESTDIAG: tid 3 kind 1 added 60 deleted 19 mismatch false excess 0 rows 3745 iters 41
+RESTDIAG: tid 3 kind 1 added 15 deleted 0 mismatch false excess 0 rows 3745 iters 118
+RESTDIAG: tid 3 kind 1 added 60 deleted 19 mismatch false excess 0 rows 3745 iters 97
+RESTDIAG: tid 2 kind 1 added 43 deleted 27 mismatch false excess 0 rows 3742 iters 364
+RESTDIAG: tid 3 kind 1 added 15 deleted 0 mismatch false excess 0 rows 3745 iters 145
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 663
+RESTDIAG: tid 3 kind 1 added 15 deleted 0 mismatch false excess 0 rows 3745 iters 129
+RESTDIAG: tid 0 kind 1 added 174 deleted 13 mismatch false excess 0 rows 3774 iters 1525
+RESTDIAG: tid 2 kind 1 added 46 deleted 75 mismatch false excess 0 rows 3742 iters 349
+RESTDIAG: tid 3 kind 1 added 8 deleted 0 mismatch false excess 0 rows 3745 iters 99
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 23
+RESTDIAG: tid 3 kind 1 added 11 deleted 0 mismatch false excess 0 rows 3745 iters 29
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 576
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3745 iters 132
+RESTDIAG: tid 3 kind 1 added 11 deleted 0 mismatch false excess 0 rows 3745 iters 117
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 91
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 63
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3745 iters 137
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 495
+RESTDIAG: tid 3 kind 1 added 8 deleted 0 mismatch false excess 0 rows 3745 iters 107
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 276
+RESTDIAG: tid 3 kind 1 added 99 deleted 34 mismatch false excess 0 rows 3745 iters 118
+RESTDIAG: tid 3 kind 1 added 15 deleted 0 mismatch false excess 0 rows 3745 iters 196
+RESTDIAG: tid 0 kind 1 added 174 deleted 13 mismatch false excess 0 rows 3774 iters 1097
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 747
+RESTDIAG: tid 3 kind 1 added 1 deleted 0 mismatch false excess 0 rows 3746 iters 49
+RESTDIAG: tid 3 kind 1 added 16 deleted 0 mismatch false excess 0 rows 3746 iters 25
+RESTDIAG: tid 3 kind 1 added 9 deleted 0 mismatch false excess 0 rows 3746 iters 37
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 503
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 60
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 236
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 178
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 49
+RESTDIAG: tid 3 kind 1 added 9 deleted 0 mismatch false excess 0 rows 3746 iters 255
+RESTDIAG: tid 1 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 168
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 347
+RESTDIAG: tid 0 kind 1 added 174 deleted 13 mismatch false excess 0 rows 3774 iters 1017
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 123
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 150
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 232
+RESTDIAG: tid 3 kind 1 added 16 deleted 0 mismatch false excess 0 rows 3746 iters 105
+RESTDIAG: tid 3 kind 1 added 8 deleted 0 mismatch false excess 0 rows 3746 iters 74
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 97
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 69
+RESTDIAG: tid 3 kind 1 added 12 deleted 10 mismatch false excess 0 rows 3740 iters 160
+MIP:    52.94s nodes      467 open     277 lb -4.35743143e2 ub -3.35000000e2 lp_iters 156325 sb_iters 38960 sb_lps 296 sb_secs 10.39 node_iters 109967 (first 100968, lps 494) heur_iters 11462 dive_iters 2229 lp_rows 3774 node_cut_secs 1.44 pool_len 0 pool_idle 0
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3742 iters 39
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 178
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 65
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 21
+RESTDIAG: tid 2 kind 1 added 46 deleted 59 mismatch false excess 0 rows 3742 iters 285
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 192
+RESTDIAG: tid 0 kind 1 added 174 deleted 13 mismatch false excess 0 rows 3774 iters 517
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 132
+RESTDIAG: tid 2 kind 1 added 47 deleted 75 mismatch false excess 0 rows 3743 iters 305
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 392
+RESTDIAG: tid 3 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3745 iters 1277
+RESTDIAG: tid 2 kind 1 added 47 deleted 63 mismatch false excess 0 rows 3743 iters 497
+RESTDIAG: tid 1 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 468
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 166
+RESTDIAG: tid 2 kind 1 added 44 deleted 26 mismatch false excess 0 rows 3743 iters 516
+RESTDIAG: tid 0 kind 1 added 140 deleted 13 mismatch false excess 0 rows 3774 iters 1398
+RESTDIAG: tid 3 kind 1 added 12 deleted 10 mismatch false excess 0 rows 3747 iters 202
+RESTDIAG: tid 2 kind 1 added 49 deleted 63 mismatch false excess 0 rows 3745 iters 304
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 451
+RESTDIAG: tid 3 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 70
+RESTDIAG: tid 2 kind 1 added 49 deleted 43 mismatch false excess 0 rows 3745 iters 73
+RESTDIAG: tid 3 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 223
+RESTDIAG: tid 2 kind 1 added 49 deleted 59 mismatch false excess 0 rows 3745 iters 177
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 62
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 80
+RESTDIAG: tid 2 kind 1 added 49 deleted 59 mismatch false excess 0 rows 3745 iters 367
+RESTDIAG: tid 0 kind 1 added 140 deleted 13 mismatch false excess 0 rows 3774 iters 849
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 437
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 67
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 120
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 65
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 175
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 172
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 70
+RESTDIAG: tid 0 kind 1 added 152 deleted 13 mismatch false excess 0 rows 3774 iters 515
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 293
+RESTDIAG: tid 2 kind 1 added 75 deleted 97 mismatch false excess 0 rows 3746 iters 113
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 123
+RESTDIAG: tid 0 kind 1 added 154 deleted 13 mismatch false excess 0 rows 3776 iters 536
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 243
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 141
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 41
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 454
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 198
+RESTDIAG: tid 2 kind 1 added 50 deleted 63 mismatch false excess 0 rows 3746 iters 921
+RESTDIAG: tid 0 kind 1 added 142 deleted 13 mismatch false excess 0 rows 3776 iters 704
+RESTDIAG: tid 3 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 25
+RESTDIAG: tid 3 kind 1 added 92 deleted 44 mismatch false excess 0 rows 3747 iters 109
+RESTDIAG: tid 2 kind 1 added 75 deleted 97 mismatch false excess 0 rows 3746 iters 89
+RESTDIAG: tid 3 kind 1 added 92 deleted 44 mismatch false excess 0 rows 3747 iters 135
+RESTDIAG: tid 3 kind 1 added 92 deleted 44 mismatch false excess 0 rows 3747 iters 77
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 239
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 69
+RESTDIAG: tid 3 kind 1 added 92 deleted 44 mismatch false excess 0 rows 3747 iters 60
+RESTDIAG: tid 2 kind 1 added 50 deleted 63 mismatch false excess 0 rows 3746 iters 337
+RESTDIAG: tid 0 kind 1 added 155 deleted 13 mismatch false excess 0 rows 3777 iters 697
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 186
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 279
+RESTDIAG: tid 2 kind 1 added 52 deleted 63 mismatch false excess 0 rows 3748 iters 547
+RESTDIAG: tid 1 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 418
+RESTDIAG: tid 0 kind 1 added 156 deleted 13 mismatch false excess 0 rows 3778 iters 737
+RESTDIAG: tid 3 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3747 iters 1289
+RESTDIAG: tid 2 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3748 iters 334
+RESTDIAG: tid 1 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3713 iters 340
+MIP:    55.22s nodes      479 open     279 lb -4.28571429e2 ub -3.35000000e2 lp_iters 163488 sb_iters 39699 sb_lps 306 sb_secs 10.62 node_iters 116391 (first 106966, lps 508) heur_iters 11462 dive_iters 2229 lp_rows 3778 node_cut_secs 1.44 pool_len 0 pool_idle 0
+RESTDIAG: tid 0 kind 1 added 156 deleted 13 mismatch false excess 0 rows 3778 iters 382
+RESTDIAG: tid 1 kind 1 added 4 deleted 0 mismatch false excess 0 rows 3717 iters 479
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3748 iters 502
+RESTDIAG: tid 2 kind 1 added 52 deleted 63 mismatch false excess 0 rows 3748 iters 861
+RESTDIAG: tid 0 kind 1 added 156 deleted 13 mismatch false excess 0 rows 3778 iters 794
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3748 iters 324
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3714 iters 595
+RESTDIAG: tid 3 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3748 iters 260
+RESTDIAG: tid 3 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3748 iters 287
+RESTDIAG: tid 2 kind 1 added 55 deleted 63 mismatch false excess 0 rows 3751 iters 532
+RESTDIAG: tid 1 kind 0 added 0 deleted 3 mismatch false excess 0 rows 3714 iters 220
+RESTDIAG: tid 3 kind 1 added 1 deleted 3 mismatch false excess 0 rows 3745 iters 206
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3714 iters 26
+RESTDIAG: tid 2 kind 1 added 55 deleted 63 mismatch false excess 0 rows 3751 iters 612
+RESTDIAG: tid 3 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 131
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 76
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3714 iters 42
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 52
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 77
+RESTDIAG: tid 2 kind 1 added 55 deleted 63 mismatch false excess 0 rows 3751 iters 445
+RESTDIAG: tid 3 kind 1 added 0 deleted 0 mismatch false excess 0 rows 3746 iters 265
+RESTDIAG: tid 0 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3790 iters 112
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3714 iters 106
+RESTDIAG: tid 1 kind 0 added 0 deleted 0 mismatch false excess 0 rows 3714 iters 249
+RESTDIAG: tid 0 kind 1 added 168 deleted 13 mismatch false excess 0 rows 3790 iters 545
+MIP: finish start TimeLimit (56.19s)
+MIP: MEMCAP: tid 0 limit 12158 MB peak rss 924 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+RESTDIAG: tid 2 kind 1 added 56 deleted 63 mismatch false excess 0 rows 3752 iters 321
+MIP: MEMCAP: tid 2 limit 12158 MB peak rss 924 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: nodelp tid 2 dive: n 485 iters 72.9/LP ms 18.500/LP rows 3750.8 cutrows 180.8 warm 485 prim_inf 2.8 dual_shift 0.00 refactor 0.16 dse unit/inh/exact 0/485/0 stageA 0 (0.0 it) opt/inf/cut/other 450/33/2/0 perturb 0 | total iters 35357 secs 8.97 | inf col/row/cut 2.6/0.1/0.0
+MIP: nodelp tid 2 queue: n 68 iters 423.2/LP ms 98.196/LP rows 3750.0 cutrows 180.0 warm 65 prim_inf 209.6 dual_shift 0.00 refactor 1.38 dse unit/inh/exact 3/65/0 stageA 0 (0.0 it) opt/inf/cut/other 57/4/6/1 perturb 0 | total iters 28778 secs 6.68 | inf col/row/cut 47.6/140.8/21.2
+MIP: nodelp tid 2 pool: n 3 iters 2144.7/LP ms 537.873/LP rows 3620.7 cutrows 50.7 warm 3 prim_inf 1636.0 dual_shift 21.67 refactor 10.67 dse unit/inh/exact 0/3/0 stageA 0 (0.0 it) opt/inf/cut/other 2/0/0/1 perturb 0 | total iters 6434 secs 1.61 | inf col/row/cut 287.7/1325.7/22.7
+MIP: nodelp tid 2 resolve: n 89 iters 113.6/LP ms 29.438/LP rows 3729.7 cutrows 159.7 warm 89 prim_inf 3.9 dual_shift 0.00 refactor 0.16 dse unit/inh/exact 0/89/0 stageA 0 (0.0 it) opt/inf/cut/other 85/1/3/0 perturb 0 | total iters 10111 secs 2.62 | inf col/row/cut 1.2/0.0/2.7
+MIP: nodelp tid 2 sibling: n 168 iters 167.2/LP ms 38.145/LP rows 3752.4 cutrows 182.4 warm 168 prim_inf 34.5 dual_shift 0.00 refactor 0.50 dse unit/inh/exact 0/168/0 stageA 0 (0.0 it) opt/inf/cut/other 138/23/7/0 perturb 0 | total iters 28082 secs 6.41 | inf col/row/cut 14.0/17.3/3.3
+RESTDIAG: tid 3 kind 1 added 1 deleted 3 mismatch false excess 0 rows 3746 iters 289
+RESTDIAG: tid 1 kind 1 added 4 deleted 3 mismatch false excess 0 rows 3714 iters 161
+MIP: MEMCAP: tid 3 limit 12158 MB peak rss 924 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: nodelp tid 3 dive: n 431 iters 80.0/LP ms 18.135/LP rows 3698.5 cutrows 128.5 warm 431 prim_inf 3.5 dual_shift 0.00 refactor 0.20 dse unit/inh/exact 0/431/0 stageA 0 (0.0 it) opt/inf/cut/other 386/40/5/0 perturb 0 | total iters 34488 secs 7.82 | inf col/row/cut 2.9/0.5/0.1
+MIP: nodelp tid 3 queue: n 146 iters 278.7/LP ms 61.430/LP rows 3721.3 cutrows 151.3 warm 143 prim_inf 98.9 dual_shift 0.00 refactor 0.90 dse unit/inh/exact 3/143/0 stageA 0 (0.0 it) opt/inf/cut/other 117/16/12/1 perturb 0 | total iters 40688 secs 8.97 | inf col/row/cut 25.3/63.1/10.5
+MIP: nodelp tid 3 pool: n 1 iters 2049.0/LP ms 502.026/LP rows 3613.0 cutrows 43.0 warm 1 prim_inf 1646.0 dual_shift 35.00 refactor 9.00 dse unit/inh/exact 0/1/0 stageA 0 (0.0 it) opt/inf/cut/other 0/0/0/1 perturb 0 | total iters 2049 secs 0.50 | inf col/row/cut 271.0/1354.0/21.0
+MIP: nodelp tid 3 resolve: n 119 iters 121.7/LP ms 30.445/LP rows 3705.8 cutrows 135.8 warm 119 prim_inf 2.5 dual_shift 0.00 refactor 0.28 dse unit/inh/exact 0/119/0 stageA 0 (0.0 it) opt/inf/cut/other 117/2/0/0 perturb 0 | total iters 14480 secs 3.62 | inf col/row/cut 1.0/0.0/1.5
+MIP: nodelp tid 3 sibling: n 145 iters 138.8/LP ms 31.069/LP rows 3720.7 cutrows 150.7 warm 145 prim_inf 40.4 dual_shift 0.00 refactor 0.24 dse unit/inh/exact 0/145/0 stageA 0 (0.0 it) opt/inf/cut/other 126/9/10/0 perturb 0 | total iters 20119 secs 4.51 | inf col/row/cut 14.5/22.4/3.5
+MIP: MEMCAP: tid 1 limit 12158 MB peak rss 924 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: nodelp tid 1 dive: n 431 iters 88.0/LP ms 22.807/LP rows 3735.2 cutrows 165.2 warm 431 prim_inf 3.8 dual_shift 0.00 refactor 0.16 dse unit/inh/exact 0/431/0 stageA 0 (0.0 it) opt/inf/cut/other 407/24/0/0 perturb 0 | total iters 37919 secs 9.83 | inf col/row/cut 3.2/0.5/0.1
+MIP: nodelp tid 1 queue: n 68 iters 437.4/LP ms 108.514/LP rows 3744.5 cutrows 174.5 warm 67 prim_inf 237.8 dual_shift 0.00 refactor 1.50 dse unit/inh/exact 1/67/0 stageA 0 (0.0 it) opt/inf/cut/other 60/3/4/1 perturb 0 | total iters 29744 secs 7.38 | inf col/row/cut 60.4/157.6/19.8
+MIP: nodelp tid 1 pool: n 1 iters 2017.0/LP ms 501.390/LP rows 3613.0 cutrows 43.0 warm 1 prim_inf 1570.0 dual_shift 27.00 refactor 10.00 dse unit/inh/exact 0/1/0 stageA 0 (0.0 it) opt/inf/cut/other 0/0/0/1 perturb 0 | total iters 2017 secs 0.50 | inf col/row/cut 270.0/1270.0/30.0
+MIP: nodelp tid 1 resolve: n 91 iters 101.5/LP ms 26.615/LP rows 3718.4 cutrows 148.4 warm 91 prim_inf 3.5 dual_shift 0.00 refactor 0.11 dse unit/inh/exact 0/91/0 stageA 0 (0.0 it) opt/inf/cut/other 91/0/0/0 perturb 0 | total iters 9241 secs 2.42 | inf col/row/cut 1.2/0.0/2.3
+MIP: nodelp tid 1 sibling: n 177 iters 163.9/LP ms 39.917/LP rows 3731.4 cutrows 161.4 warm 177 prim_inf 31.5 dual_shift 0.00 refactor 0.47 dse unit/inh/exact 0/177/0 stageA 0 (0.0 it) opt/inf/cut/other 152/23/2/0 perturb 0 | total iters 29002 secs 7.07 | inf col/row/cut 14.1/15.2/2.2
+MIP: tree thread 0 joined 0.009s after the stop signal (56.20s)
+MIP: tree thread 1 joined 0.010s after the stop signal (56.20s)
+MIP: tree thread 2 joined 0.011s after the stop signal (56.20s)
+MIP: tree search threads: worker nodes 2735, nodes given away 12, taken 0, global bounds taken from other threads 0, proofs 300 and conflicts 76 taken from other threads
+MIP:    56.20s nodes      495 open     284 lb -4.28484100e2 ub -3.35000000e2 lp_iters 166463 sb_iters 39889 sb_lps 310 sb_secs 10.68 node_iters 119176 (first 109203, lps 524) heur_iters 11462 dive_iters 2229 lp_rows 3790 node_cut_secs 1.59 pool_len 654 pool_idle 0
+MIP: nodelp tid 0 dive: n 311 iters 104.3/LP ms 26.879/LP rows 3668.8 cutrows 98.8 warm 311 prim_inf 2.6 dual_shift 0.00 refactor 0.22 dse unit/inh/exact 0/311/0 stageA 0 (0.0 it) opt/inf/cut/other 296/14/1/0 perturb 0 | total iters 32443 secs 8.36 | inf col/row/cut 2.6/0.0/0.0
+MIP: nodelp tid 0 queue: n 63 iters 943.7/LP ms 280.936/LP rows 3749.1 cutrows 179.1 warm 63 prim_inf 301.5 dual_shift 0.00 refactor 3.75 dse unit/inh/exact 0/63/0 stageA 0 (0.0 it) opt/inf/cut/other 49/12/1/1 perturb 0 | total iters 59450 secs 17.70 | inf col/row/cut 82.4/173.8/45.3
+MIP: nodelp tid 0 resolve: n 76 iters 131.2/LP ms 37.435/LP rows 3713.8 cutrows 143.8 warm 76 prim_inf 3.2 dual_shift 0.00 refactor 0.11 dse unit/inh/exact 0/76/0 stageA 0 (0.0 it) opt/inf/cut/other 76/0/0/0 perturb 0 | total iters 9973 secs 2.85 | inf col/row/cut 0.8/0.0/2.5
+MIP: nodelp tid 0 sibling: n 74 iters 233.9/LP ms 63.621/LP rows 3733.1 cutrows 163.1 warm 74 prim_inf 31.4 dual_shift 0.00 refactor 0.82 dse unit/inh/exact 0/74/0 stageA 0 (0.0 it) opt/inf/cut/other 57/16/1/0 perturb 0 | total iters 17310 secs 4.71 | inf col/row/cut 14.2/15.4/1.8
+MIP: dual proofs and conflicts 484 (conflicts added 2 (from proofs 93), Farkas 90, pruned 30 nodes, tightened 235658 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 284, no 1-UIP 4, 1-UIP not a row 0, no decision set 4, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: cut pool propagation: calls 980, pruned 10 nodes, tightened 2580 bounds, 0.50s, pool 839 cuts (1220354 nonzeros); updated terms 53522937, candidates 6415 (2466367 nonzeros), rebuilds 2
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 443, in pool 443 (aged out 0), pruned 1 nodes, tightened 87 bounds
+MIP: proof CMIR cuts: tried 95, added 87, entered the cut pool 87
+MIP: conflict analysis (HiGHS style): calls 386, conflicts 887, added 367, mean length 232.4, max length 6160, 0.20s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 274, reason row lacks column 0, empty 0, too long at the end 81 (total length 12844), max length 50
+MIP: branching: 431 selections, 141 without strong branching for dual degeneracy; sb LPs 310 iters 39889
+MIP: sibling backtracks 97; basis restores 176 (basic count mismatch 0), first LP iterations after a restore 76759
+MIP: mem1 sibling LU (all threads): held at most 1, pushed 2246, dropped 1512, adopted 201
+MIP: memc (all threads): packed nodes 18, changes 490 (2112 bytes packed, 11760 unpacked), bases 18 (60187 bytes packed, 427914 unpacked)
+MIP: basis nb diag: tree first LPs restored 912 iters 266025 (291.7/LP), others 1660 iters 140685 (84.8/LP); root LPs: submip 5 lps 1101 iters (220.2/LP) 0.06s, bgcopy 1 lps 419 iters (419.0/LP) 0.10s, find 1 lps 419 iters (419.0/LP) 0.09s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 1052 iters (1052.0/LP) 0.12s; nb hints applied 0 solves, 0 given, 0 changed
+MIP: node diag: nodes 495 node LPs 524 mean rows 3694.0 iters 119176 (227.4/LP) LP secs 33.61 sep rounds 26 added 26 node cut secs 1.59 final rows 3790
+MIP: adaptive node cuts: rounds 26 effective 3 skipped 0 (rate 0.366), node cut secs 1.59, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 23, 3, 0, 0], cut nnz Some(1097.7057766297553) (rows mean 16.8)
+MIP: finish done (56.20s)
+MIP: solve returned TimeLimit after 60.04s (time limit 60.00s)
+MIP: polished the solution (60.04s)

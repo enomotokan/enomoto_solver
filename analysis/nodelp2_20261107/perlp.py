@@ -20,3 +20,9 @@ for fn in sys.argv[1:]:
             st.setdefault(a[1], [0, 0]); st[a[1]][0] += 1; st[a[1]][1] += a[0]
         print(f"  {k}: n {n} it/LP {S.mean(it):.1f} median {it[n//2]} p90 {it[int(.9*n)]} max {it[-1]} depth {S.mean(a[2] for a in v):.1f} "
               f"zero {sum(1 for x in it if x == 0)} status " + ", ".join(f"{s}: {c[0]} ({c[1]/c[0]:.0f} it)" for s, c in sorted(st.items())))
+    # 深さの帯ごと (最初の LP、10 刻み)
+    v = g.get("all-first", [])
+    b = {}
+    for a in v:
+        b.setdefault(min(a[2] // 10 * 10, 60), []).append(a[0])
+    print("  depth: " + " ".join(f"d{k}:{len(x)}/{sum(x)/len(x):.0f}" for k, x in sorted(b.items())))
