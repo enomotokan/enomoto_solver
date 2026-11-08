@@ -4010,7 +4010,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     let tot_it = |lp: &crate::simplex::mip_lp::TwoStageLp| lp.total_iterations() + it_extra.get();
     let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| tot_it(lp) - root_iters < iter_budget && tot_it(lp) < lp_iter_cap && t0.elapsed().as_secs_f64() < secs;
     let (mut n_lps, mut n_fixed, mut n_tried) = (0usize, 0usize, 0usize);
-    let mut n_lwin = 0usize;
+    let (mut n_lwin, mut n_lwin_cands) = (0usize, 0usize);
     let mut tried: std::collections::HashSet<(usize, i64)> = std::collections::HashSet::new();
     let mut ok = true;
     for pass in 0..passes {
@@ -4051,9 +4051,21 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                     } else {
                         lbsz = (lbsz * 2).min(tunable!("ENOMOTO_T_MIP_PREPAR_LP_BSZ_MAX", 16usize, usize).max(1));
                     }
-                    let end = (ci + lbsz * lpar_blocks).min(cands.len());
+                    // 窓の候補の数は、残りの反復の予算をこれまでの 1 列あたりの反復で割った数と、まだ固定がなければあきらめまでの
+                    // 列の数までにする (予算で打ち切る巡で、使われない試しを並べない。数えた量だけで決まる)
+                    let mut wlen = lbsz * lpar_blocks;
+                    let used_it = tot_it(&lp) - root_iters;
+                    if n_lwin_cands > 0 {
+                        let per = (it_extra.get() as f64 / n_lwin_cands as f64).max(1.0);
+                        let left = iter_budget.saturating_sub(used_it).min(lp_iter_cap.saturating_sub(tot_it(&lp)));
+                        wlen = wlen.min(((left as f64 / per).ceil() as usize).max(lpar_blocks));
+                    }
+                    if n_fixed + fixes.len() == 0 {
+                        wlen = wlen.min(giveup.saturating_sub(n_tried - 1).max(lpar_blocks));
+                    }
+                    let end = (ci + wlen).min(cands.len());
                     let rem = if work { lp_iter_cap.saturating_sub(tot_it(&lp)).max(1) } else { u64::MAX };
-                    let blocks: Vec<&[(usize, f64)]> = cands[ci..end].chunks(lbsz).collect();
+                    let blocks: Vec<&[(usize, f64)]> = cands[ci..end].chunks((end - ci).div_ceil(lpar_blocks).max(1)).collect();
                     let (col_lo, col_up, saved_r) = (&prob.col_lo, &prob.col_up, &saved);
                     let res: Vec<Vec<(bool, bool, u64)>> = pool.install(|| {
                         use rayon::prelude::*;
@@ -4085,6 +4097,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                 }
                 let (c0, c1, it) = win[ci - win_start];
                 it_extra.set(it_extra.get() + it);
+                n_lwin_cands += 1;
                 cut = [c0, c1];
                 n_lps += 2;
             } else {
