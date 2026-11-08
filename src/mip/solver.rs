@@ -729,7 +729,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 基底の復元の回数、そのうち基底の数が行数と合わなかった回数、復元後の最初の LP の反復数 (診断用)
     restore_stats: (u64, u64, u64),
     restored_now: bool,
-    /// 試作 `ENOMOTO_MIP_NODELP2` の `a`: 今のノードで選んだ腕 (Some(true) 戻した・Some(false) 戻さなかった) と、腕ごとの [回数, 反復の指数移動平均]
+    /// 試作 `ENOMOTO_MIP_NODELP2` の `x`: 今のノードで選んだ腕 (Some(true) 厳密な DSE 重み・Some(false) 保存した重み) と、腕ごとの [回数, 秒の指数移動平均]
     nl2_arm: Option<bool>,
     nl2_stat: [(u64, f64); 2],
     /// 診断用 (`ENOMOTO_MIP_RESTORE_DIAG`): 直前に戻した基底の (保存後に足された行, 消えた行, 基底の数の不一致)
@@ -1262,12 +1262,13 @@ static HO4_ROOT_LP_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 /// `p`: 木のノードの LP (解き直しを含む) を費用の摂動つきで解く (`ENOMOTO_MIP_NODELP_PERTURB=P` と同じ。HiGHS の `HEkkDual::solve` は
 /// 出発点が near optimal (主実行不能が 1000 行未満かつ最大 1e-3 未満) でない限り毎回摂動する)。`b`: 兄弟・取り出したノードで基底を戻すとき
 /// 保存した非基底の上限・下限の置き場所も渡す (`ENOMOTO_MIP_BASIS_NB=t` と同じ。HiGHS の `HighsBasis` は置き場所ごと戻す)。
-/// `x`: 取り出したノード (兄弟でない) で基底を戻した最初の LP は厳密な DSE 重みから解く、`X`: 兄弟も (`ENOMOTO_MIP_RESTORE_EXACT_DSE`
-/// と同じ。HiGHS は基底を置き直すと重みを捨て、near optimal でなければ厳密な重みを計算し直す)。`g`: `p`・`b`・`x`・`X` を、このスレッドの
+/// `x`: 取り出したノード (兄弟でない) で基底を戻した最初の LP を、保存した DSE 重みから解くか厳密な重み (行ごとの BTRAN) から解くかを、
+/// このスレッドのその LP の時間 (重みの計算を含む) の指数移動平均の小さい方で選ぶ (両方を最初に `ENOMOTO_T_MIP_NODELP2_WARM` (8) 回ずつ、
+/// その後も 1/`ENOMOTO_T_MIP_NODELP2_EXPLORE` (16) で他方を試す)。`X`: 兄弟も含めていつも厳密な重み (`ENOMOTO_MIP_RESTORE_EXACT_DSE`
+/// と同じ。HiGHS は基底を置き直すと重みを捨て、near optimal でなければ厳密な重みを計算し直す。行の多い LP では計算が重い)。`g`: `p`・`b`・`x`・`X` を、このスレッドの
 /// ノードの LP の平均の反復が `ENOMOTO_T_MIP_NODELP2_HEAVY` (既定 100) 以上のときだけ使う。
-/// `q`: 待ち行列・共有の待ち行列から取ったノード (兄弟でない) では保存した基底を戻さず、今の LP の基底 (直前のノードの最適基底) から解く
-/// (HiGHS の `HighsSearch::installNode` はノードに基底を持たせない)。`a`: 戻す・戻さないを、このスレッドの取り出したノードの最初の LP の
-/// 反復の指数移動平均の小さい方で選ぶ (両方を最初に `ENOMOTO_T_MIP_NODELP2_WARM` 回ずつ、その後も 1/`ENOMOTO_T_MIP_NODELP2_EXPLORE` で他方を試す)。
+/// `q` (比べ用): 待ち行列・共有の待ち行列から取ったノード (兄弟でない) では保存した基底を戻さず、今の LP の基底 (直前のノードの最適基底) から
+/// 解く (HiGHS の `HighsSearch::installNode` はノードに基底を持たせない。ENOMOTO では待ち行列のノードが重くなった)。
 fn nodelp2(c: char) -> bool {
     static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_NODELP2").filter(|v| *v != "0").map(|v| v.to_string())).as_deref().is_some_and(|v| v.contains(c))
@@ -10313,10 +10314,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // neos-911970: 取り出したノードの最初の LP は 1 回 300 -> 98 反復、60 秒のノード数 2190 -> 6424 だが、
                 // 探索の順が変わって下界 54.23 -> 53.09。40 問: 19 問 25.05 -> 25.90 (binkar10_1 21 -> 33 秒、mik-250 22 -> 28 秒、
                 // neos5 37 -> 49 秒: 行ごとの BTRAN m 回の分が重い)。既定では使わない
-                if resolves == 0
-                    && self.restored_now
-                    && (env_str!("ENOMOTO_MIP_RESTORE_EXACT_DSE").is_some() || self.nl2_on('X') || (self.tp_kind >= 1 && self.nl2_on('x')))
-                {
+                // 試作 `ENOMOTO_MIP_NODELP2` の `x` ([`nodelp2`]): 取り出したノードの最初の LP の重みを時間の移動平均で選ぶ
+                let nl2x = resolves == 0 && self.restored_now && self.tp_kind >= 1 && self.nl2_on('x') && {
+                    let warm = tunable!("ENOMOTO_T_MIP_NODELP2_WARM", 8u64, u64);
+                    let explore = tunable!("ENOMOTO_T_MIP_NODELP2_EXPLORE", 16u64, u64).max(2);
+                    let [(n0, e0), (n1, e1)] = self.nl2_stat;
+                    let exact = if n0 < warm || n1 < warm {
+                        n1 < n0
+                    } else {
+                        let best = e1 < e0;
+                        if (n0 + n1) % explore == 0 { !best } else { best }
+                    };
+                    self.nl2_arm = Some(exact);
+                    exact
+                };
+                if resolves == 0 && self.restored_now && (env_str!("ENOMOTO_MIP_RESTORE_EXACT_DSE").is_some() || self.nl2_on('X') || nl2x) {
                     crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 let membq_rdse = self.restored_dse && resolves == 0;
@@ -10486,7 +10498,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         BASIS_NB_TREE[r + 1].fetch_add(self.lp.total_iterations() - it0, Relaxed);
                     }
                     if let Some(arm) = self.nl2_arm.take() {
-                        let it = (self.lp.total_iterations() - it0) as f64;
+                        let it = t_lp.elapsed().as_secs_f64();
                         let a = tunable!("ENOMOTO_T_MIP_NODELP2_ALPHA", 0.1, f64);
                         let e = &mut self.nl2_stat[arm as usize];
                         e.1 = if e.0 == 0 { it } else { (1.0 - a) * e.1 + a * it };
@@ -13762,21 +13774,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 試作 `ENOMOTO_MIP_NODELP2` の `q`・`a` ([`nodelp2`]): 取り出したノード (兄弟でない) の出発の基底
         if self.tp_kind >= 1 && !self.params.submip {
-            if nodelp2('a') {
-                let warm = tunable!("ENOMOTO_T_MIP_NODELP2_WARM", 8u64, u64);
-                let explore = tunable!("ENOMOTO_T_MIP_NODELP2_EXPLORE", 16u64, u64).max(2);
-                let [(nr, er), (nk, ek)] = [self.nl2_stat[1], self.nl2_stat[0]];
-                let restore = if nr < warm || nk < warm {
-                    nr <= nk
-                } else {
-                    let best = er <= ek;
-                    if (nr + nk) % explore == 0 { !best } else { best }
-                };
-                self.nl2_arm = Some(restore);
-                if !restore {
-                    return;
-                }
-            } else if nodelp2('q') {
+            if nodelp2('q') {
                 return;
             }
         }
@@ -19639,8 +19637,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 診断 `ENOMOTO_MIP_NODELP_DIAG`: スレッドごとのノードの LP の計数 (冗長でなくても出す)
         if !self.params.submip {
             print_nodelp_stats(self.pool_tid as usize, &self.nodelp_stats);
-            if nodelp2('a') && !self.params.submip && crate::simplex::slope_intercept_dual::nodelp_diag() {
-                eprintln!("MIP: nodelp2 tid {} restore n {} ema {:.1} keep n {} ema {:.1}", self.pool_tid, self.nl2_stat[1].0, self.nl2_stat[1].1, self.nl2_stat[0].0, self.nl2_stat[0].1);
+            if nodelp2('x') && !self.params.submip && crate::simplex::slope_intercept_dual::nodelp_diag() {
+                eprintln!("MIP: nodelp2 tid {} exact-dse n {} ema {:.4}s saved-dse n {} ema {:.4}s", self.pool_tid, self.nl2_stat[1].0, self.nl2_stat[1].1, self.nl2_stat[0].0, self.nl2_stat[0].1);
             }
         }
         // 診断 `ENOMOTO_MIP_NODECUT_STAT`: 冗長でなくても出す

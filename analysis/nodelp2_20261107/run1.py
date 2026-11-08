@@ -28,6 +28,8 @@ CFGS = {
     # HiGHS に寄せる比べ (HO4DIAG で LP 1 回ごとの深さ・反復も出す)
     # 試作 ENOMOTO_MIP_NODELP2 (計数なしの plain と比べる形と、計数つき)
     "nl2": {"ENOMOTO_MIP_NODELP2": "pbxg"},
+    "nl2b": {"ENOMOTO_MIP_NODELP2": "pbx"},
+    "nl2bd": dict(DG, ENOMOTO_MIP_NODELP2="pbx", ENOMOTO_MIP_HO4_DIAG="1"),
     "nl2d": dict(DG, ENOMOTO_MIP_NODELP2="pbxg", ENOMOTO_MIP_HO4_DIAG="1"),
     "rexact": dict(DG, ENOMOTO_MIP_RESTORE_EXACT_DSE="1", ENOMOTO_MIP_HO4_DIAG="1"),
     "Pb": dict(DG, ENOMOTO_MIP_NODELP_PERTURB="P", ENOMOTO_MIP_BASIS_NB="t", ENOMOTO_MIP_HO4_DIAG="1"),
