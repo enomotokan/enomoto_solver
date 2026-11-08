@@ -3608,9 +3608,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let i = m0 + k;
             let (_, up) = self.lp.row_bounds(i);
             if ts2a && self.cut_ids[k] >= self.ts2_id0 {
-                if b.row[i] == VarStatus::Basic || y2[i].abs() <= 1e-9 {
+                // HiGHS の `performAging` と同じく、双対値 0 の非基底の行は年齢をそのままにする (外すのは基底の行だけ。
+                // 非基底の行を外すと基底が崩れ、大きな LP (uccase12・unitcal_7) でノードの LP の反復が 6〜7 倍になった)
+                if b.row[i] == VarStatus::Basic {
                     *age = age.saturating_add(1);
-                } else {
+                } else if y2[i].abs() > 1e-9 {
                     *age = 0;
                 }
                 continue;
@@ -3672,7 +3674,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut remove = vec![false; self.lp.num_rows()];
             let mut cnt = 0;
             for (k, &age) in self.cut_age.iter().enumerate() {
-                let tree = if ts2a { self.cut_ids[k] >= self.ts2_id0 } else { self.ts_cut_ids.contains(&self.cut_ids[k]) };
+                let tree = if ts2a { self.cut_ids[k] >= self.ts2_id0 && self.lp.basis_ref().row[m0 + k] == VarStatus::Basic } else { self.ts_cut_ids.contains(&self.cut_ids[k]) };
                 if age > ts_age && tree && !self.queue.is_protected(self.cut_ids[k]) {
                     remove[m0 + k] = true;
                     cnt += 1;
@@ -3693,12 +3695,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.sync_cut_age();
             let cap = self.ts2_rows_cap();
             let mut tree: Vec<(u32, usize)> = (0..self.cut_ids.len()).filter(|&k| self.cut_ids[k] >= self.ts2_id0 && !self.queue.is_protected(self.cut_ids[k])).map(|k| (self.cut_age[k], k)).collect();
+            // 外すのは基底の (効いていない) 行だけ (上の a と同じ)
+            let basic_of: std::collections::HashMap<usize, bool> = { let b = self.lp.basis_ref(); tree.iter().map(|&(_, k)| (k, b.row[self.p.m + k] == VarStatus::Basic)).collect() };
             if tree.len() > cap {
                 tree.sort_by(|a, b| b.cmp(a));
                 let m0 = self.p.m;
                 let mut remove = vec![false; self.lp.num_rows()];
                 let mut cnt = 0;
-                for &(_, k) in tree.iter().filter(|&&(a, _)| a > 0).take(tree.len() - cap) {
+                for &(_, k) in tree.iter().filter(|&&(a, k)| a > 0 && basic_of[&k]).take(tree.len() - cap) {
                     remove[m0 + k] = true;
                     cnt += 1;
                 }
