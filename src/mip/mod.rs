@@ -39,6 +39,7 @@ pub(crate) mod hnfsubst;
 pub(crate) mod gcdforce;
 pub(crate) mod redsplit;
 pub(crate) mod cmirdelta;
+pub(crate) mod seplearn;
 pub(crate) mod mcf;
 pub(crate) mod clique;
 pub(crate) mod pretime;
