@@ -68,6 +68,52 @@ use crate::types::{ConstraintRow, Objective, RowSense, Sense, Status, VariableDa
 use crate::params::simplex::{COST_PERTURB_BASE, COST_PERTURB_BOXED_FRACTION, COST_PERTURB_ZERO_COST_SCALE, COST_PERTURB_FEW_BOXED_COST_CAP, COST_PERTURB_LARGE_COST, EXPAND_DELTA_0, EXPAND_DELTA_F, EXPAND_K, EXPAND_TAU, FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MAX_UPDATES, FT_MIN_PIVOT, FT_RESIDUAL_TOL, MAX_ITERS_CEILING, MAX_ITERS_FLOOR, MAX_ITERS_SCALE, PARALLEL_COMPONENT_MIN_VARS, PARTIAL_PRICING_GROUPS, PARTIAL_PRICING_THRESHOLD, PRESOLVE_ROUNDS, PRIMAL_HARRIS_TOL, PRIMAL_STALL_LIMIT_MIN, PRIMAL_STALL_LIMIT_PER_ROW, PROPAGATION_PASSES, RACE_MIN_ROWS, RAYON_SIZE_THRESHOLD, XO_SERIAL_NNZ, XO_SPLIT_MIN_VARS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, RUIZ_ITERS, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL, UPDATE_VERIFY_TOL};
 
 /// Markowitz ピボットの疎 LU と Forrest-Tomlin 更新。このファイル内では
+/// 厳密な DSE 重みの 1 行分 `||B^-T e_i||^2` を超疎の単位 BTRAN で求める ([`DseState::from_basis_sparse`]・
+/// [`DseState::from_basis_stoppable`]・[`DseState::fill_missing`] が使う。`ENOMOTO_DSE_EXACT_SPARSE=0` なら呼ばない)。
+/// 返り値は (ノルムの 2 乗, 結果の非零の数, 超疎の経路で終わったか)。
+/// 呼ぶ側は前後で [`sparse_lu::FtLu::synth_tick`] を保存・復元する ([`DseTickGuard`])。
+fn dse_exact_row_sparse(lu: &sparse_lu::FtLu, i: usize, out: &mut [f64], et: &mut [f64], work: &mut sparse_lu::UnitBtranWork) -> (f64, usize, bool) {
+    // 行ごとに結果の密度が大きく違う (単位ベクトルの行による) ので、前の行の密度で超疎経路を止めない
+    // (`ENOMOTO_T_DSE_EXACT_KEEP_DENSITY=1` で反復の中と同じく移動平均で判断する)
+    if tunable!("ENOMOTO_T_DSE_EXACT_KEEP_DENSITY", 0u8, u8) == 0 {
+        work.set_density(0.0);
+    }
+    lu.solve_transpose_unit_work_sparse(i, out, et, work, None);
+    match work.nonzero_rows() {
+        Some(rows) => (rows.iter().map(|&k| out[k] * out[k]).sum(), rows.len(), true),
+        None => (out.iter().map(|&v| v * v).sum(), out.iter().filter(|&&v| v != 0.0).count(), false),
+    }
+}
+
+/// 超疎の厳密な DSE 重みの計算の作業を LU の決定的演算量カウンタに残さない (手放すときに計算の前の値へ戻す。
+/// `ENOMOTO_T_DSE_EXACT_TICKS=1` で残す)。密な従来の経路 (`ENOMOTO_DSE_EXACT_SPARSE=0`) では使わない (従来どおり数える)。
+struct DseTickGuard<'a>(&'a sparse_lu::FtLu, u64);
+
+impl<'a> DseTickGuard<'a> {
+    fn new(lu: &'a sparse_lu::FtLu) -> Self {
+        DseTickGuard(lu, lu.synth_tick())
+    }
+}
+
+impl Drop for DseTickGuard<'_> {
+    fn drop(&mut self) {
+        if tunable!("ENOMOTO_T_DSE_EXACT_TICKS", 0u8, u8) == 0 {
+            self.0.restore_synth_tick(self.1);
+        }
+    }
+}
+
+/// 診断: [`DseState::from_basis`] の [回数, 合計マイクロ秒, 行の数の合計, 疎な版と密な版の相対差の最大 (1e-9 単位、検査のときだけ),
+/// 超疎の版の BTRAN の結果の非零の数の合計, 超疎の経路で終わった BTRAN の数]
+pub(crate) static DSE_EXACT_STATS: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+
+/// `ENOMOTO_DSE_EXACT_SPARSE` (既定で使う、`=0` で従来の密な掃引): [`DseState::from_basis`] を超疎の単位 BTRAN で行う
+/// (analysis/nodelp2_20261107.md。値は密な版と同じで、1 回の計算は 1.2〜2.8 倍速い)。
+fn dse_exact_sparse() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_DSE_EXACT_SPARSE").map_or(true, |v| v != "0"))
+}
+
 /// ローカル変数名 `lu` (FtLu インスタンス) との衝突を避けるため `sparse_lu` の別名で参照する。
 pub(crate) mod lu;
 /// FTRAN/BTRAN の結果や eta 要素を 0 とみなす絶対値の閾値 (他モジュール向けの再公開)。
@@ -2085,6 +2131,35 @@ impl DseState {
     /// (`B^T z = e_i`) を 1 回行い `w[i] = ||z||^2` とする (計 m 回)。`lu` は重みを
     /// 求めたい基底の分解でなければならない (`slope_intercept_dual` は再分解の直後に呼ぶ)。
     fn from_basis(m: usize, lu: &sparse_lu::FtLu) -> Self {
+        // `ENOMOTO_DSE_EXACT_SPARSE` (analysis/nodelp2_20261107.md、既定で使う。`=0` で下の従来の経路): 行ごとの BTRAN を反復の中と同じ超疎の
+        // 単位 BTRAN ([`sparse_lu::FtLu::solve_transpose_unit_work`]) で行い、ノルムは非零の位置だけで足す (HiGHS の
+        // `HEkk::computeDualSteepestEdgeWeight` と同じ形)。既定の経路は行ごとに密な掃引と長さ m の走査をするので m 回で O(m^2) 以上かかる
+        let t0 = std::time::Instant::now();
+        let r = Self::from_basis_inner(m, lu);
+        DSE_EXACT_STATS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        DSE_EXACT_STATS[1].fetch_add(t0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+        DSE_EXACT_STATS[2].fetch_add(m as u64, std::sync::atomic::Ordering::Relaxed);
+        r
+    }
+
+    fn from_basis_inner(m: usize, lu: &sparse_lu::FtLu) -> Self {
+        if dse_exact_sparse() {
+            let s = Self::from_basis_sparse(m, lu);
+            // 検査 `ENOMOTO_DSE_EXACT_SPARSE=check`: 密な版と比べ、相対差の最大を記録する (1e-9 単位の整数)
+            if env_str!("ENOMOTO_DSE_EXACT_SPARSE") == Some("check") && lu.update_count() == 0 {
+                let mut scratch = vec![0.0; m];
+                let mut z = vec![0.0; m];
+                let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+                let mut worst = 0.0f64;
+                for i in 0..m {
+                    lu.solve_transpose_unit_into(i, &mut scratch, &mut z);
+                    let d = z.iter().map(|&v| v * v).sum::<f64>().max(floor);
+                    worst = worst.max((d - s.w[i]).abs() / d.abs().max(1e-300));
+                }
+                DSE_EXACT_STATS[3].fetch_max((worst * 1e9).min(u64::MAX as f64 / 2.0) as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            return s;
+        }
         let mut w = vec![1.0; m];
         let mut scratch = vec![0.0; m];
         let mut z = vec![0.0; m];
@@ -2106,6 +2181,26 @@ impl DseState {
         DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD }
     }
 
+    /// [`Self::from_basis`] の超疎の版 (`ENOMOTO_DSE_EXACT_SPARSE`)。FT 更新のある分解でも使える。
+    fn from_basis_sparse(m: usize, lu: &sparse_lu::FtLu) -> Self {
+        let _tick = DseTickGuard::new(lu);
+        let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+        let mut w = vec![1.0; m];
+        let mut out = vec![0.0; m];
+        let mut et = vec![0.0; m];
+        let mut work = sparse_lu::UnitBtranWork::new(m);
+        let (mut nnz, mut hyper) = (0u64, 0u64);
+        for i in 0..m {
+            let (norm_sq, nz, hy) = dse_exact_row_sparse(lu, i, &mut out, &mut et, &mut work);
+            nnz += nz as u64;
+            hyper += hy as u64;
+            w[i] = norm_sq.max(floor);
+        }
+        DSE_EXACT_STATS[4].fetch_add(nnz, std::sync::atomic::Ordering::Relaxed);
+        DSE_EXACT_STATS[5].fetch_add(hyper, std::sync::atomic::Ordering::Relaxed);
+        DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD }
+    }
+
     /// [`Self::from_basis`] と同じだが、`stop` が真を返したら途中でやめて `None` を返す (32 行ごとに見る)。
     /// 試作 `ENOMOTO_MIP_BG_CUTS_DSE=rw` (裏のカットの写しの根の LP): 行の多い問題 (uccase12・neos-4763324-toguru) では
     /// 行ごとの BTRAN だけで数十秒かかり、止めの合図・期限を見ないので時間の上限を大きく超えていた (analysis/bg_lp_work_20261102.md)
@@ -2115,6 +2210,19 @@ impl DseState {
         let mut z = vec![0.0; m];
         let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
         let fresh = lu.update_count() == 0;
+        if dse_exact_sparse() {
+            let _tick = DseTickGuard::new(lu);
+            let mut out = vec![0.0; m];
+            let mut et = vec![0.0; m];
+            let mut work = sparse_lu::UnitBtranWork::new(m);
+            for i in 0..m {
+                if i & 31 == 0 && stop() {
+                    return None;
+                }
+                w[i] = dse_exact_row_sparse(lu, i, &mut out, &mut et, &mut work).0.max(floor);
+            }
+            return Some(DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD });
+        }
         for i in 0..m {
             if i & 31 == 0 && stop() {
                 return None;
@@ -2139,6 +2247,19 @@ impl DseState {
         let mut z = vec![0.0; m];
         let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
         let mut filled = 0;
+        if dse_exact_sparse() {
+            let _tick = DseTickGuard::new(lu);
+            let mut out = vec![0.0; m];
+            let mut et = vec![0.0; m];
+            let mut work = sparse_lu::UnitBtranWork::new(m);
+            for i in 0..m {
+                if self.w[i].is_nan() {
+                    self.w[i] = dse_exact_row_sparse(lu, i, &mut out, &mut et, &mut work).0.max(floor);
+                    filled += 1;
+                }
+            }
+            return filled;
+        }
         for i in 0..m {
             if !self.w[i].is_nan() {
                 continue;

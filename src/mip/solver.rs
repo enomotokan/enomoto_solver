@@ -19670,6 +19670,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 診断 `ENOMOTO_MIP_NODELP_DIAG`: スレッドごとのノードの LP の計数 (冗長でなくても出す)
         if !self.params.submip {
             print_nodelp_stats(self.pool_tid as usize, &self.nodelp_stats);
+            if self.pool_tid == 0 && !self.params.submip && crate::simplex::slope_intercept_dual::nodelp_diag() {
+                let st: Vec<u64> = crate::simplex::DSE_EXACT_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!(
+                    "MIP: dse-exact n {} secs {:.3} ms/call {:.3} rows/call {:.0} max_rel_diff {:.3e} result_density {:.3} hyper_frac {:.3}",
+                    st[0], st[1] as f64 / 1e6, st[1] as f64 / 1e3 / st[0].max(1) as f64, st[2] as f64 / st[0].max(1) as f64, st[3] as f64 / 1e9,
+                    st[4] as f64 / (st[2].max(1) as f64 * st[2] as f64 / st[0].max(1) as f64), st[5] as f64 / st[2].max(1) as f64
+                );
+            }
             if nodelp2('x') && !self.params.submip && crate::simplex::slope_intercept_dual::nodelp_diag() {
                 eprintln!("MIP: nodelp2 tid {} exact-dse n {} ema {:.4}s saved-dse n {} ema {:.4}s", self.pool_tid, self.nl2_stat[1].0, self.nl2_stat[1].1, self.nl2_stat[0].0, self.nl2_stat[0].1);
             }

@@ -4522,6 +4522,12 @@ impl UnitBtranWork {
         }
     }
 
+    /// 結果の非零率の移動平均を `d` にする ([`super::DseState`] の厳密な重みの計算は行ごとに独立なので、毎回 0 にして超疎経路を試す)。
+    #[inline]
+    pub fn set_density(&mut self, d: f64) {
+        self.density = d;
+    }
+
     /// `out` に渡すベクトルを [`FtLu::solve_transpose_unit_work`] の外で書いた後に呼ぶ
     /// (次回の超疎書き出しが全体を 0 に戻すようにする)。
     #[inline]
@@ -4921,6 +4927,12 @@ impl FtLu {
     /// `CLOCK` 再分解トリガが読む。
     pub fn synth_tick(&self) -> u64 {
         self.tick.get()
+    }
+
+    /// 決定的演算量カウンタを `v` に戻す。厳密な DSE 重みの計算 ([`super::DseState`]、超疎の単位 BTRAN を m 回) の作業を
+    /// 再分解の判断 (`CLOCK` トリガ、分解の劣化の見積もり) に数えないために使う。
+    pub fn restore_synth_tick(&self, v: u64) {
+        self.tick.set(v);
     }
 
     /// この分解自体の構築コスト ([`Self::synth_tick`] と同じ単位)。
