@@ -825,6 +825,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) tsd: [u64; 6],
     /// 診断の前回の出力の (秒, ノードの LP の数, 反復, 行の和, ノードの分離の秒)
     pub(super) tsd_last: (f64, u64, u64, u64, f64),
+    /// `ENOMOTO_MIP_TREESEP2` の b: 探索全体の下界の最良値と、それが (打ち切り値までの差の 1% を超えて) 最後に伸びた時刻
+    pub(super) ts2_glb: (f64, f64),
+    /// `ENOMOTO_MIP_TREESEP2` の b・c で分離したノードの数
+    pub(super) ts2_forced: u64,
+    /// 根の後に LP に入ったカットの番号の境 (これ以上の番号のカットを `ENOMOTO_MIP_TREESEP2` の a・d で木のカットとして扱う)
+    pub(super) ts2_id0: u64,
     /// 最適面の頂点での分離 (`separate_face_split`) で、今の頂点の tableau 行 (基底変数ごとの、集約した行とその列の
     /// LP 値のハッシュ)。`tab_memo_mode`: 0 = 使わない、1 = 記録する、2 = 照合する。
     pub(super) tab_memo: std::collections::HashMap<usize, u64>,
@@ -4404,6 +4410,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         ts_rows0: 0,
         tsd: [0; 6],
         tsd_last: (0.0, 0, 0, 0, 0.0),
+        ts2_glb: (f64::NEG_INFINITY, 0.0),
+        ts2_forced: 0,
+        ts2_id0: u64::MAX,
         tab_memo: std::collections::HashMap::new(),
         tab_memo_mode: 0,
         tab_memo_stats: (0, 0),
@@ -5580,13 +5589,82 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let dl = (self.node_lps - l0).max(1) as f64;
         let ncut = self.lp.num_rows().saturating_sub(self.p.m);
         let ntree = self.cut_ids.iter().filter(|id| self.ts_cut_ids.contains(id)).count();
+        let npost = self.ts2_tree_rows();
         eprintln!(
-            "TSDIAG tid {} t {:.1} nodes {} lb {:.10e} rows {} cuts {} treecuts {} | dt {:.1} lps {} rows/lp {:.1} it/lp {:.1} cutsecs {:.2} | ts rounds {} added {} rows {} del tree {} other {} aged-tree {}",
+            "TSDIAG tid {} t {:.1} nodes {} lb {:.10e} rows {} cuts {} treecuts {} postroot {npost} | dt {:.1} lps {} rows/lp {:.1} it/lp {:.1} cutsecs {:.2} | ts rounds {} added {} rows {} del tree {} other {} aged-tree {} forced {}",
             self.pool_tid, t, self.nodes, self.global_lower_bound(), self.lp.num_rows(), ncut, ntree,
             t - t0, self.node_lps - l0, (self.node_lp_rows - r0) as f64 / dl, (self.node_iters - i0) as f64 / dl, self.node_cut_secs - c0,
-            self.tsd[3], self.tsd[4], self.tsd[0], self.tsd[1], self.tsd[2], self.tsd[5]
+            self.tsd[3], self.tsd[4], self.tsd[0], self.tsd[1], self.tsd[2], self.tsd[5], self.ts2_forced
         );
         self.tsd_last = (t, self.node_lps, self.node_iters, self.node_lp_rows, self.node_cut_secs);
+    }
+
+    /// 試作 `ENOMOTO_MIP_TREESEP2` (既定では使わない、analysis/treesep_20261107.md) の形の文字 `c` を含むか。文字は組み合わせる:
+    /// `a` = 根の後に LP に入ったカット (木の分離で加えたもの・プールから戻したもの。番号が [`Self::ts2_id0`] 以上) を HiGHS の数え方 (退化して基底にある行・双対値 0 の行も年齢を増やす) の年齢
+    /// `ENOMOTO_T_MIP_TREESEP2_AGE` (既定 10) で外す (根のカットは今のまま)。`b` = 終盤 (相対ギャップが `ENOMOTO_T_MIP_TREESEP2_GAP`
+    /// (既定 0.01) 以下か、探索全体の下界が伸びない) だけ取り出したノードで毎回分離する。`c` = 下界に近い (ノードの LP の値が
+    /// 探索全体の下界から打ち切り値までの差の `ENOMOTO_T_MIP_TREESEP2_NEAR` (既定 0.1) 倍以内の) ノードで毎回分離する
+    /// (b と c を両方付けると両方を満たすノードだけ)。`d` = 根の後に LP に入ったカットの行を元の行の数の `ENOMOTO_T_MIP_TREESEP2_ROWS`
+    /// (既定 0.5、最低 50) 倍までにする (超えたら年齢の高いものから外し、超えている間は b・c で分離しない)。`e` = b・c の分離で
+    /// カットの密度の判定 ([`Self::nca_dense`]) を見ない。b・c の分離の時間は経過時間の `ENOMOTO_T_MIP_TREESEP2_FRAC` (既定 0.3) 倍まで
+    pub(super) fn ts2_has(&self, c: char) -> bool {
+        !self.params.submip && env_str!("ENOMOTO_MIP_TREESEP2").is_some_and(|v| v.contains(c))
+    }
+
+    /// [`Self::ts2_has`] の b・c の分離の時間の予算 (と d の行の上限)
+    fn ts2_budget_ok(&mut self) -> bool {
+        if self.node_cut_secs >= tunable!("ENOMOTO_T_MIP_TREESEP2_FRAC", 0.3, f64) * self.start.elapsed().as_secs_f64() {
+            return false;
+        }
+        if self.ts2_has('d') && self.ts2_tree_rows() > self.ts2_rows_cap() {
+            return false;
+        }
+        self.ts2_has('e') || !self.nca_dense()
+    }
+
+    /// LP にある木の分離で加えたカットの行の数
+    pub(super) fn ts2_tree_rows(&self) -> usize {
+        self.cut_ids.iter().filter(|&&id| id >= self.ts2_id0).count()
+    }
+
+    /// [`Self::ts2_has`] の d の行の上限
+    pub(super) fn ts2_rows_cap(&self) -> usize {
+        ((tunable!("ENOMOTO_T_MIP_TREESEP2_ROWS", 0.5, f64) * self.p.m as f64) as usize).max(50)
+    }
+
+    /// 取り出したノード (LP の値 `node_obj`) で、[`Self::ts2_has`] の b・c により既定の判定によらず分離するか
+    fn ts2_force(&mut self, node_obj: f64) -> bool {
+        let (b, c) = (self.ts2_has('b'), self.ts2_has('c'));
+        if !b && !c {
+            return false;
+        }
+        let ub = self.prune_limit();
+        let glb = self.global_lower_bound();
+        if !ub.is_finite() || !glb.is_finite() || glb >= ub {
+            return false;
+        }
+        let t = self.start.elapsed().as_secs_f64();
+        let gap = ub - glb;
+        if glb > self.ts2_glb.0 + 0.01 * gap {
+            self.ts2_glb = (glb, t);
+        } else if glb > self.ts2_glb.0 {
+            self.ts2_glb.0 = glb;
+        }
+        if b {
+            let small = gap <= tunable!("ENOMOTO_T_MIP_TREESEP2_GAP", 0.01, f64) * ub.abs().max(1.0);
+            let stall = t - self.ts2_glb.1 >= (tunable!("ENOMOTO_T_MIP_TREESEP2_STALL", 0.25, f64) * t).max(10.0);
+            if !small && !stall {
+                return false;
+            }
+        }
+        if c && node_obj - glb > tunable!("ENOMOTO_T_MIP_TREESEP2_NEAR", 0.1, f64) * gap {
+            return false;
+        }
+        let ok = self.ts2_budget_ok();
+        if ok {
+            self.ts2_forced += 1;
+        }
+        ok
     }
 
     /// この値以上の下界のノードは捨ててよい (最小化形、定数項込み)。
@@ -10166,6 +10244,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut fc2_last = f64::NEG_INFINITY;
             // `ENOMOTO_MIP_TREE_SEP`: このノードでのラウンド数 (加わらなければ打ち止め)、最初のラウンドの前と前のラウンドの前の LP の値
             let mut ts_rounds = 0usize;
+            let mut ts_forced = false;
+            // `ENOMOTO_MIP_TREESEP2`: 根の後に LP に入るカット (木の分離・プールから戻したカット) を見分ける番号の境
+            if self.ts2_id0 == u64::MAX && node.depth > 0 {
+                self.sync_cut_age();
+                self.ts2_id0 = self.next_cut_id;
+            }
             let mut ts_first = f64::NEG_INFINITY;
             let mut ts_last = f64::NEG_INFINITY;
             // `ENOMOTO_MIP_TREE4_PROOFCUT`: このノードでの証明の行のラウンド数と、行を加えたか
@@ -10959,9 +11043,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let ts_due = self.tree_sep && !hcm_sep && node.depth > 0 && plunge_depth == 0 && ts_rounds < tunable!("ENOMOTO_T_MIP_TREE_SEP_ROUNDS", 5usize, usize) && {
                     let feastol = 1e-6 * node_obj.abs().max(1.0);
                     if ts_rounds == 0 {
-                        self.tree_sep_start(node.depth)
+                        // `ENOMOTO_MIP_TREESEP2` の b・c: 終盤・下界に近いノードでは既定の判定によらず分離する ([`Solver::ts2_force`])
+                        ts_forced = self.ts2_force(node_obj);
+                        ts_forced || self.tree_sep_start(node.depth)
                     } else {
-                        node_obj - ts_first > 1.01 * (ts_last - ts_first).max(feastol) && self.tree_sep_budget_ok() && !self.nca_dense()
+                        node_obj - ts_first > 1.01 * (ts_last - ts_first).max(feastol) && if ts_forced { self.ts2_budget_ok() } else { self.tree_sep_budget_ok() && !self.nca_dense() }
                     }
                 };
                 if ts_due {
@@ -10970,11 +11056,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     ts_last = node_obj;
                     let t_nc = Instant::now();
-                    let r0 = self.lp.num_rows();
+                    // 加えたカットは新しい番号 (`next_cut_id` 以降) で見分ける (`node_cut_round` は加える前に年齢で行を外すので、
+                    // 行の位置では見分けられない)
+                    self.sync_cut_age();
+                    let id0 = self.next_cut_id;
                     let added = self.node_cut_round(&x);
                     if added {
-                        self.mark_tree_sep_cuts(r0);
-                        self.tsd[0] += (self.lp.num_rows() - r0) as u64;
+                        self.mark_tree_sep_cuts(id0);
+                        self.tsd[0] += self.next_cut_id - id0;
                     }
                     self.tsd[3] += 1;
                     self.tsd[4] += added as u64;

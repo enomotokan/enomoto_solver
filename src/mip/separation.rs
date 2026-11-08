@@ -3495,7 +3495,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// カットの年齢の長さを LP のカットの行の数に合わせる (足りなければ 0 で埋める)。
-    fn sync_cut_age(&mut self) {
+    pub(super) fn sync_cut_age(&mut self) {
         let want = self.lp.num_rows().saturating_sub(self.p.m);
         self.cut_age.resize(want, 0);
         if self.cut_ids.len() > want {
@@ -3601,9 +3601,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         } else {
+        // `ENOMOTO_MIP_TREESEP2` の a: 木の分離で加えたカットは HiGHS の数え方 (退化して基底にある行・双対値 0 の行も年齢を増やす)
+        let ts2a = self.ts2_has('a') && self.ts2_id0 != u64::MAX;
+        let y2 = if ts2a { self.lp.row_duals() } else { Vec::new() };
         for (k, age) in self.cut_age.iter_mut().enumerate() {
             let i = m0 + k;
             let (_, up) = self.lp.row_bounds(i);
+            if ts2a && self.cut_ids[k] >= self.ts2_id0 {
+                if b.row[i] == VarStatus::Basic || y2[i].abs() <= 1e-9 {
+                    *age = age.saturating_add(1);
+                } else {
+                    *age = 0;
+                }
+                continue;
+            }
             if b.row[i] == VarStatus::Basic && act[i] < up - 1e-6 * (1.0 + up.abs()) {
                 if srel > 0.0 && nslack[k] < srel * max_slack {
                     continue;
@@ -3653,14 +3664,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut removed = self.remove_cuts_older_than(limit);
         // `ENOMOTO_T_MIP_TREE_SEP_CUT_AGE` = a (> 0): `ENOMOTO_MIP_TREE_SEP` のラウンドで加えたカットは年齢 a で外す
         // (根のカットは上の上限のまま)。ノードで加えたカットの行が残ってノードの LP が重くなるのを抑える
-        let ts_age = tunable!("ENOMOTO_T_MIP_TREE_SEP_CUT_AGE", 0u32, u32);
-        if ts_age > 0 && !self.ts_cut_ids.is_empty() {
+        let ts_age = if self.ts2_has('a') { tunable!("ENOMOTO_T_MIP_TREESEP2_AGE", 10u32, u32) } else { tunable!("ENOMOTO_T_MIP_TREE_SEP_CUT_AGE", 0u32, u32) };
+        let ts2a = self.ts2_has('a');
+        if ts_age > 0 && (!self.ts_cut_ids.is_empty() || ts2a) {
             self.sync_cut_age();
             let m0 = self.p.m;
             let mut remove = vec![false; self.lp.num_rows()];
             let mut cnt = 0;
             for (k, &age) in self.cut_age.iter().enumerate() {
-                if age > ts_age && self.ts_cut_ids.contains(&self.cut_ids[k]) && !self.queue.is_protected(self.cut_ids[k]) {
+                let tree = if ts2a { self.cut_ids[k] >= self.ts2_id0 } else { self.ts_cut_ids.contains(&self.cut_ids[k]) };
+                if age > ts_age && tree && !self.queue.is_protected(self.cut_ids[k]) {
                     remove[m0 + k] = true;
                     cnt += 1;
                 }
@@ -3668,10 +3681,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if cnt > 0 {
                 self.delete_lp_rows(&remove);
                 removed += cnt;
+                self.tsd[5] += cnt as u64;
             }
             if self.ts_cut_ids.len() > 4 * self.cut_ids.len() + 1000 {
                 let live: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
                 self.ts_cut_ids.retain(|id| live.contains(id));
+            }
+        }
+        // `ENOMOTO_MIP_TREESEP2` の d: 木の分離で加えたカットの行が上限を超えたら、年齢の高い (今効いていない) ものから外す
+        if self.ts2_has('d') && self.ts2_id0 != u64::MAX {
+            self.sync_cut_age();
+            let cap = self.ts2_rows_cap();
+            let mut tree: Vec<(u32, usize)> = (0..self.cut_ids.len()).filter(|&k| self.cut_ids[k] >= self.ts2_id0 && !self.queue.is_protected(self.cut_ids[k])).map(|k| (self.cut_age[k], k)).collect();
+            if tree.len() > cap {
+                tree.sort_by(|a, b| b.cmp(a));
+                let m0 = self.p.m;
+                let mut remove = vec![false; self.lp.num_rows()];
+                let mut cnt = 0;
+                for &(_, k) in tree.iter().filter(|&&(a, _)| a > 0).take(tree.len() - cap) {
+                    remove[m0 + k] = true;
+                    cnt += 1;
+                }
+                if cnt > 0 {
+                    self.delete_lp_rows(&remove);
+                    removed += cnt;
+                    self.tsd[5] += cnt as u64;
+                }
             }
         }
         let r = tunable!("ENOMOTO_T_MIP_CUT_ROWS_CAP", 0.0, f64);
@@ -3699,15 +3734,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         removed
     }
 
-    /// `ENOMOTO_MIP_TREE_SEP` のラウンドで LP の行 `r0..` に加えたカットを覚える (`ENOMOTO_T_MIP_TREE_SEP_CUT_AGE` > 0 のときだけ)
-    pub(super) fn mark_tree_sep_cuts(&mut self, r0: usize) {
+    /// `ENOMOTO_MIP_TREE_SEP` のラウンドで加えたカット (番号が `id0` 以上) を覚える (`ENOMOTO_T_MIP_TREE_SEP_CUT_AGE` > 0、
+    /// `ENOMOTO_MIP_TREESEP2`・`ENOMOTO_MIP_TREESEP_DIAG` のときだけ)。以前は加える前の行の数 `r0` から後ろを覚えていたが、
+    /// `node_cut_round` は加える前に年齢で行を外すので、外した分だけ前の (根の) カットまで木のカットとして覚えていた
+    pub(super) fn mark_tree_sep_cuts(&mut self, id0: u64) {
         if tunable!("ENOMOTO_T_MIP_TREE_SEP_CUT_AGE", 0u32, u32) == 0 && env_str!("ENOMOTO_MIP_TREESEP_DIAG").is_none() && env_str!("ENOMOTO_MIP_TREESEP2").is_none() {
             return;
         }
         self.sync_cut_age();
-        let m0 = self.p.m;
-        for k in r0.max(m0) - m0..self.cut_ids.len() {
-            self.ts_cut_ids.insert(self.cut_ids[k]);
+        for &id in self.cut_ids.iter().rev() {
+            if id < id0 {
+                break;
+            }
+            self.ts_cut_ids.insert(id);
         }
     }
 
