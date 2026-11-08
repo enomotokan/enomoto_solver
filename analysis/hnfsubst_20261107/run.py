@@ -15,7 +15,9 @@ CFG = {"def": {}, "hnf": {"ENOMOTO_MIP_HNFPRE": "1"}, "sub": {"ENOMOTO_MIP_HNFSU
        "dnc": {"ENOMOTO_MIP_NO_CUTS": "1"}, "snc": {"ENOMOTO_MIP_HNFSUBST": "1", "ENOMOTO_MIP_NO_CUTS": "1"},
        "defc": {"ENOMOTO_MIP_CUTLPCAP": "c"}, "subc": {"ENOMOTO_MIP_HNFSUBST": "1", "ENOMOTO_MIP_CUTLPCAP": "c"},
        "subac": {"ENOMOTO_MIP_HNFSUBST": "1", "ENOMOTO_MIP_CUTLPCAP": "ac"},
-       "subre": {"ENOMOTO_MIP_HNFSUBST": "re"}, "br": {"ENOMOTO_MIP_HNFBR": "1"}, "brs": {"ENOMOTO_MIP_HNFBR": "s"}}
+       "subre": {"ENOMOTO_MIP_HNFSUBST": "re"}, "br": {"ENOMOTO_MIP_HNFBR": "1"}, "brs": {"ENOMOTO_MIP_HNFBR": "s"},
+       "hnc": {"ENOMOTO_MIP_HNFPRE": "1", "ENOMOTO_MIP_NO_CUTS": "1"}, "brnc": {"ENOMOTO_MIP_HNFBR": "1", "ENOMOTO_MIP_NO_CUTS": "1"},
+       "subrec": {"ENOMOTO_MIP_HNFSUBST": "re", "ENOMOTO_MIP_CUTLPCAP": "c"}}
 # `ENOMOTO_BENCH_EXTRA=名=値,名=値`: 全部の回に足す (根だけの回の ENOMOTO_MIP_NODE_LIMIT=1 など)
 EXTRA = dict(kv.split("=", 1) for kv in os.environ.get("ENOMOTO_BENCH_EXTRA", "").split(",") if kv)
 out = Path(sys.argv[1]); T = float(sys.argv[2]); cfgs = sys.argv[3].split(","); seeds = [int(s) for s in sys.argv[4].split(",")]
