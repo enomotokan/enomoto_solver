@@ -25,6 +25,13 @@ CFGS = {
     "rnever": dict(DG, ENOMOTO_MIP_RESTORE_NEVER="1"),
     "nots": dict(DG, ENOMOTO_MIP_NO_TREE_SEP="1"),
     "rdiag": dict(DG, ENOMOTO_MIP_RESTORE_DIAG="1"),
+    # HiGHS に寄せる比べ (HO4DIAG で LP 1 回ごとの深さ・反復も出す)
+    # 試作 ENOMOTO_MIP_NODELP2 (計数なしの plain と比べる形と、計数つき)
+    "nl2": {"ENOMOTO_MIP_NODELP2": "pbxg"},
+    "nl2d": dict(DG, ENOMOTO_MIP_NODELP2="pbxg", ENOMOTO_MIP_HO4_DIAG="1"),
+    "rexact": dict(DG, ENOMOTO_MIP_RESTORE_EXACT_DSE="1", ENOMOTO_MIP_HO4_DIAG="1"),
+    "Pb": dict(DG, ENOMOTO_MIP_NODELP_PERTURB="P", ENOMOTO_MIP_BASIS_NB="t", ENOMOTO_MIP_HO4_DIAG="1"),
+    "Pbx": dict(DG, ENOMOTO_MIP_NODELP_PERTURB="P", ENOMOTO_MIP_BASIS_NB="t", ENOMOTO_MIP_RESTORE_EXACT_DSE="1", ENOMOTO_MIP_HO4_DIAG="1"),
     "phb": dict(DG, ENOMOTO_MIP_NODELP_PERTURB="ph", ENOMOTO_MIP_BASIS_NB="t"),
     "plainphgb": {"ENOMOTO_MIP_NODELP_PERTURB": "phg", "ENOMOTO_MIP_BASIS_NB": "t"},
     "plainphb": {"ENOMOTO_MIP_NODELP_PERTURB": "ph", "ENOMOTO_MIP_BASIS_NB": "t"},

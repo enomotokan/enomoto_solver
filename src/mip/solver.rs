@@ -1259,6 +1259,12 @@ static HO4_ROOT_LP_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 
 /// 試作 `ENOMOTO_MIP_NODELP_PERTURB` (analysis/node_lp_20261106.md、既定では使わない) の値 (`p`/`P`/`h`/`g` の組み合わせ)。
 /// 試作 `ENOMOTO_MIP_NODELP2` (analysis/nodelp2_20261107.md、既定では使わない) の文字。
+/// `p`: 木のノードの LP (解き直しを含む) を費用の摂動つきで解く (`ENOMOTO_MIP_NODELP_PERTURB=P` と同じ。HiGHS の `HEkkDual::solve` は
+/// 出発点が near optimal (主実行不能が 1000 行未満かつ最大 1e-3 未満) でない限り毎回摂動する)。`b`: 兄弟・取り出したノードで基底を戻すとき
+/// 保存した非基底の上限・下限の置き場所も渡す (`ENOMOTO_MIP_BASIS_NB=t` と同じ。HiGHS の `HighsBasis` は置き場所ごと戻す)。
+/// `x`: 取り出したノード (兄弟でない) で基底を戻した最初の LP は厳密な DSE 重みから解く、`X`: 兄弟も (`ENOMOTO_MIP_RESTORE_EXACT_DSE`
+/// と同じ。HiGHS は基底を置き直すと重みを捨て、near optimal でなければ厳密な重みを計算し直す)。`g`: `p`・`b`・`x`・`X` を、このスレッドの
+/// ノードの LP の平均の反復が `ENOMOTO_T_MIP_NODELP2_HEAVY` (既定 100) 以上のときだけ使う。
 /// `q`: 待ち行列・共有の待ち行列から取ったノード (兄弟でない) では保存した基底を戻さず、今の LP の基底 (直前のノードの最適基底) から解く
 /// (HiGHS の `HighsSearch::installNode` はノードに基底を持たせない)。`a`: 戻す・戻さないを、このスレッドの取り出したノードの最初の LP の
 /// 反復の指数移動平均の小さい方で選ぶ (両方を最初に `ENOMOTO_T_MIP_NODELP2_WARM` 回ずつ、その後も 1/`ENOMOTO_T_MIP_NODELP2_EXPLORE` で他方を試す)。
@@ -10307,7 +10313,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // neos-911970: 取り出したノードの最初の LP は 1 回 300 -> 98 反復、60 秒のノード数 2190 -> 6424 だが、
                 // 探索の順が変わって下界 54.23 -> 53.09。40 問: 19 問 25.05 -> 25.90 (binkar10_1 21 -> 33 秒、mik-250 22 -> 28 秒、
                 // neos5 37 -> 49 秒: 行ごとの BTRAN m 回の分が重い)。既定では使わない
-                if resolves == 0 && self.restored_now && env_str!("ENOMOTO_MIP_RESTORE_EXACT_DSE").is_some() {
+                if resolves == 0
+                    && self.restored_now
+                    && (env_str!("ENOMOTO_MIP_RESTORE_EXACT_DSE").is_some() || self.nl2_on('X') || (self.tp_kind >= 1 && self.nl2_on('x')))
+                {
                     crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 let membq_rdse = self.restored_dse && resolves == 0;
@@ -10345,6 +10354,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         mode.contains('h').then(|| crate::simplex::slope_intercept_dual::Harris2Scope::new(Some("t"))),
                         NodePerturbScope::new(if mode.contains('P') { 2 } else if mode.contains('p') { 1 } else { 0 }),
                     ),
+                    // 試作 `ENOMOTO_MIP_NODELP2` の `p` ([`nodelp2`]): 判定なしの摂動 (`P` と同じ)
+                    _ if self.nl2_on('p') => (None, NodePerturbScope::new(2)),
                     _ => (None, NodePerturbScope::new(crate::simplex::slope_intercept_dual::NODE_PERTURB_SCOPE.with(|c| c.get()))),
                 };
                 if crate::simplex::slope_intercept_dual::nodelp_diag() {
@@ -12680,6 +12691,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.noinc_cost[arm] += secs;
     }
 
+    /// 試作 `ENOMOTO_MIP_NODELP2` の文字 `c` をこのノードで使うか (サブ MIP では使わない。`g` なら重い LP のスレッドだけ)
+    fn nl2_on(&self, c: char) -> bool {
+        nodelp2(c) && !self.params.submip && (!nodelp2('g') || self.avg_node_iters() as f64 >= tunable!("ENOMOTO_T_MIP_NODELP2_HEAVY", 100.0, f64))
+    }
+
     pub(super) fn avg_node_iters(&self) -> u64 {
         if self.node_lps == 0 { 1000 } else { self.node_iters / self.node_lps + 1 }
     }
@@ -13729,7 +13745,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize, dse: Option<&[(u32, f32)]>, changes: &[BoundChange]) {
         let mr = self.lp.num_rows();
         // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `t`): 保存した基底の上限・下限の置き場所も渡す。根からの分枝で締めた列は推し量りのまま
-        let nb_skip: Option<Vec<usize>> = crate::simplex::mip_lp::basis_nb_on('t').then(|| changes.iter().map(|c| c.col).collect());
+        let nb_skip: Option<Vec<usize>> = (crate::simplex::mip_lp::basis_nb_on('t') || self.nl2_on('b')).then(|| changes.iter().map(|c| c.col).collect());
         if env_str!("ENOMOTO_MIP_RESTORE_DIAG").is_some() && epoch <= self.row_log.len() {
             let (mut a, mut d) = (0usize, 0usize);
             for e in &self.row_log[epoch..] {
