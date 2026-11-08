@@ -4528,6 +4528,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let mut ver = 0u64;
     let (mut spec, mut spec_start, mut spec_ver, mut spec_used): (Vec<Option<ProbeSpec>>, usize, u64, usize) = (Vec::new(), 0, u64::MAX, 0);
     let (mut n_windows, mut n_spec_used) = (0usize, 0usize);
+    // 逐次に試す残りの候補の数と、次に逐次にするときの数 (固定が続くとき)。試し 1 回の手間の和と数 (塊の大きさの下限に使う)
+    let (mut seq_left, mut seq_run) = (0usize, 32usize);
+    let (mut sum_units, mut n_units) = (0.0f64, 0usize);
+    let clone_mult = tunable!("ENOMOTO_T_MIP_PREPAR_CLONE_MULT", 4.0, f64);
     'passes: for _pass in 0..max_pass {
         passes += 1;
         let fixed_pass0 = fixed;
@@ -4551,19 +4555,41 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             probed += 1;
             // `ENOMOTO_MIP_PREPAR` の `p`: 窓の結果を使う (窓がない・古ければ、ここから窓を作る)
             let spec_res = if let Some(pool) = &pool {
-                if spec_ver != ver || cnt < spec_start || cnt >= spec_start + spec.len() {
-                    // 前の窓の使われ方で塊の大きさを決める (使い切れば倍、1/4 未満で半分。候補の並びだけで決まる)
-                    if !spec.is_empty() {
-                        if spec_used * 4 < spec.len() {
-                            bsz = (bsz / 2).max(bsz_min);
-                        } else if spec_used >= spec.len() {
-                            bsz = (bsz * 2).min(bsz_max);
+                let valid = spec_ver == ver && cnt >= spec_start && cnt < spec_start + spec.len();
+                if !valid && !spec.is_empty() {
+                    // 前の窓の使われ方で塊の大きさを決める (使い切れば倍、1/4 未満で半分。候補の並びだけで決まる)。
+                    // 塊が最小でも 1/4 未満しか使えなければ (固定が続く)、次の `seq_run` 個の候補は逐次に試す (続けば倍)
+                    if spec_used * 4 < spec.len() {
+                        if bsz == bsz_min {
+                            seq_left = seq_run;
+                            seq_run = (seq_run * 2).min(1024);
                         }
+                        bsz = (bsz / 2).max(bsz_min);
+                    } else if spec_used >= spec.len() {
+                        bsz = (bsz * 2).min(bsz_max);
+                        seq_run = 32;
                     }
-                    let end = (cnt + bsz * par_blocks).min(cands.len());
+                    spec.clear();
+                }
+                if valid {
+                    // 窓の結果を使う
+                } else if seq_left > 0 {
+                    seq_left -= 1;
+                } else {
+                    // 塊の手間が写しの手間の `ENOMOTO_T_MIP_PREPAR_CLONE_MULT` 倍 (既定 4) 以上になるよう塊を大きくする
+                    // (1 回の試しが軽い問題で、定義域の写しが試しより重くなるのを防ぐ。手間は数えた量なので決定的)。
+                    // 手間の重みは pwork と同じ (行の走査 2.5、活動の更新 5)、写しは 1 要素 16 とみる
+                    let lo = if n_units > 0 {
+                        let per = (sum_units / n_units as f64).max(1.0);
+                        ((clone_mult * 16.0 * (prob.n + prob.m) as f64 / per).ceil() as usize).clamp(bsz_min, tunable!("ENOMOTO_T_MIP_PREPAR_BSZ_WORK_MAX", 512usize, usize))
+                    } else {
+                        bsz_min
+                    };
+                    let b = bsz.max(lo);
+                    let end = (cnt + b * par_blocks).min(cands.len());
                     let base: &Domain = &dom;
                     let pr: &MipProblem = prob;
-                    let blocks: Vec<&[usize]> = cands[cnt..end].chunks(bsz).collect();
+                    let blocks: Vec<&[usize]> = cands[cnt..end].chunks(b).collect();
                     let res: Vec<Vec<Option<ProbeSpec>>> = pool.install(|| {
                         use rayon::prelude::*;
                         blocks.par_iter().map(|bl| probe_spec_block(pr, base, bl)).collect()
@@ -4574,8 +4600,12 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     spec_used = 0;
                     n_windows += 1;
                 }
-                spec_used = cnt - spec_start + 1;
-                spec[cnt - spec_start].take()
+                if !spec.is_empty() {
+                    spec_used = cnt - spec_start + 1;
+                    spec[cnt - spec_start].take()
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -4583,8 +4613,11 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                 n_spec_used += 1;
                 let w = spec_w.get();
                 spec_w.set((w.0 + r.w.0, w.1 + r.w.1, w.2 + r.w.2));
+                sum_units += 2.5 * r.w.0 as f64 + 5.0 * r.w.1 as f64;
+                n_units += 1;
                 (r.ok0, r.ch0, r.ok1, r.ch1)
             } else {
+                let u0 = (dom.debug_work(), domain::act_work());
                 let pos = dom.stack_len();
                 // x_j = 0 (変わった境界だけ覚える: 全列の境界を写すと列の多い問題で重い)
                 dom.tighten_upper(prob, j, 0.0);
@@ -4604,6 +4637,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     probe_strengthen_collect(prob, &dom.lo, &dom.up, j, true, &ch1, &mut st_mark, &mut st_touched, &mut st_c1);
                 }
                 dom.backtrack_to(prob, pos);
+                if pool.is_some() {
+                    sum_units += 2.5 * (dom.debug_work() - u0.0) as f64 + 5.0 * (domain::act_work() - u0.1) as f64;
+                    n_units += 1;
+                }
                 (ok0, ch0, ok1, ch1)
             };
             match (ok0, ok1) {
