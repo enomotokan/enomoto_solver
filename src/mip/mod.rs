@@ -4667,7 +4667,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // 逐次に試す残りの候補の数と、次に逐次にするときの数 (固定が続くとき)。試し 1 回の手間の和と数 (塊の大きさの下限に使う)
     let (mut seq_left, mut seq_run) = (0usize, 32usize);
     let (mut sum_units, mut n_units) = (0.0f64, 0usize);
-    let clone_mult = tunable!("ENOMOTO_T_MIP_PREPAR_CLONE_MULT", 4.0, f64);
+    let clone_mult = tunable!("ENOMOTO_T_MIP_PREPAR_CLONE_MULT", 0.25, f64);
     'passes: for _pass in 0..max_pass {
         passes += 1;
         let fixed_pass0 = fixed;
@@ -4712,12 +4712,12 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                 } else if seq_left > 0 {
                     seq_left -= 1;
                 } else {
-                    // 塊の手間が写しの手間の `ENOMOTO_T_MIP_PREPAR_CLONE_MULT` 倍 (既定 4) 以上になるよう塊を大きくする
+                    // 塊の手間が写しの手間の `ENOMOTO_T_MIP_PREPAR_CLONE_MULT` 倍 (既定 0.25。neos-4722843-widden で写し 1 回 2.4 ミリ秒、試し 1 回 約 1 ミリ秒。4 倍だと塊が 300 を越えて、締め付けで崩れた窓の試しが無駄になった) 以上になるよう塊を大きくする
                     // (1 回の試しが軽い問題で、定義域の写しが試しより重くなるのを防ぐ。手間は数えた量なので決定的)。
                     // 手間の重みは pwork と同じ (行の走査 2.5、活動の更新 5)、写しは 1 要素 16 とみる
                     let lo = if n_units > 0 {
                         let per = (sum_units / n_units as f64).max(1.0);
-                        ((clone_mult * 16.0 * (prob.n + prob.m) as f64 / per).ceil() as usize).clamp(bsz_min, tunable!("ENOMOTO_T_MIP_PREPAR_BSZ_WORK_MAX", 512usize, usize))
+                        ((clone_mult * 16.0 * (prob.n + prob.m) as f64 / per).ceil() as usize).clamp(bsz_min, tunable!("ENOMOTO_T_MIP_PREPAR_BSZ_WORK_MAX", 64usize, usize))
                     } else {
                         bsz_min
                     };
@@ -4727,7 +4727,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     let pr: &MipProblem = prob;
                     // 窓が候補の残りで短くなったときも塊の数がそろうよう、窓を塊の数で等分する
                     let b = (end - cnt).div_ceil(par_blocks).max(1);
-                    let blocks: Vec<&[usize]> = cands[cnt..end].chunks(b).collect();
+                    // 塊 k は窓の k, k + 塊の数, k + 2 x 塊の数, ... 番目の候補 (候補は行の多い列からなので、続きで分けると前の塊に重い試しが集まる)
+                    let nb = (end - cnt).min(par_blocks);
+                    let blocks_v: Vec<Vec<usize>> = (0..nb).map(|k| cands[cnt..end].iter().skip(k).step_by(nb).copied().collect()).collect();
+                    let blocks: Vec<&[usize]> = blocks_v.iter().map(|v| v.as_slice()).collect();
                     let cx = ProbeSpecCtx { bin0: &bin0, genint_on, want_impl, want_implied, want_equiv };
                     let tw = std::time::Instant::now();
                     let res: Vec<Vec<Option<ProbeSpec>>> = pool.install(|| {
@@ -4738,7 +4741,9 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     if env_str!("ENOMOTO_MIP_PREPAR_DEBUG").is_some() {
                         eprintln!("PREPAR window at {cnt}: {} blocks of {b}, {:.4}s", blocks.len(), tw.elapsed().as_secs_f64());
                     }
-                    spec = res.into_iter().flatten().collect();
+                    // 窓の順に並べ直す
+                    let mut its: Vec<std::vec::IntoIter<Option<ProbeSpec>>> = res.into_iter().map(|v| v.into_iter()).collect();
+                    spec = (0..end - cnt).map(|i| its[i % nb].next().flatten()).collect();
                     spec_start = cnt;
                     spec_ver = ver;
                     spec_used = 0;
@@ -5016,13 +5021,17 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             let mut ci = 0usize;
             'eq: while ci < cands.len() {
                 let end = (ci + eb * ek).min(cands.len());
-                let blocks: Vec<&[usize]> = cands[ci..end].chunks(eb).collect();
+                // 塊 k は窓の k, k + 塊の数, ... 番目の候補 (重い試しが 1 つの塊に集まらないように)
+                let nb = (end - ci).min(ek);
+                let blocks_v: Vec<Vec<usize>> = (0..nb).map(|k| cands[ci..end].iter().skip(k).step_by(nb).copied().collect()).collect();
                 let (base, pr, b0): (&Domain, &MipProblem, &[bool]) = (&d2, prob, &bin0);
                 let res: Vec<Vec<(Vec<(usize, usize, bool)>, u64)>> = pool.install(|| {
                     use rayon::prelude::*;
-                    blocks.par_iter().map(|bl| probe_equiv_block(pr, base, b0, bl)).collect()
+                    blocks_v.par_iter().map(|bl| probe_equiv_block(pr, base, b0, bl)).collect()
                 });
-                for (idx, (pairs, w1)) in res.into_iter().flatten().enumerate() {
+                let mut its: Vec<_> = res.into_iter().map(|v| v.into_iter()).collect();
+                let ordered: Vec<(Vec<(usize, usize, bool)>, u64)> = (0..end - ci).map(|i| its[i % nb].next().unwrap()).collect();
+                for (idx, (pairs, w1)) in ordered.into_iter().enumerate() {
                     let cj = ci + idx;
                     if virt > work_cap.min(wcap2) || tq.elapsed().as_secs_f64() > time_cap2 || ((tq.elapsed().as_secs_f64() > giveup2 || virt > wgive2) && equiv.len() == n0) || (cj % 16 == 0 && presolve_stop()) {
                         break 'eq;
