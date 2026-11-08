@@ -2173,6 +2173,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let (k, total) = super::redsplit::count_chosen(chosen.iter().map(|c| super::redsplit::fingerprint(&c.coefs, c.rhs)));
                 eprintln!("REDSPLIT chosen round {round}: {k} of {} chosen (candidates {total})", chosen.len());
             }
+            // 試作 `ENOMOTO_MIP_NODECNT` の `r`: 根で採ったカットの指紋と出どころ (経路集約か) を覚える ([`Self::nc_root_decide`])
+            if self.nc_path_forced && super::solver::nodecnt('r') && !self.params.submip {
+                for c in &chosen {
+                    let is_path = matches!(c.src % sepprof::SRC_FACE, sepprof::SRC_PATH | sepprof::SRC_PATHH);
+                    self.nc_root_cnt[0] += 1;
+                    self.nc_root_cnt[1] += is_path as u64;
+                    self.nc_root_fp.insert(cut_fingerprint(&c.coefs, c.rhs), is_path);
+                }
+            }
             if self.sep_adapt_on() {
                 let mut acc = [0usize; sepprof::NSRC];
                 for c in &chosen {
@@ -3399,6 +3408,50 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.add_cut_rows(&rows);
         true
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODECNT` の `r`: ノードで経路集約を使うかを根の情報で決める (決めたら以後は同じ)。主のスレッドは、根のカットの
+    /// ループ (再スタートの後を含む) で採った経路集約のカットが `ENOMOTO_T_MIP_NODECNT_ROOT_PATH` (既定 5) 本以上なら使う。診断に、
+    /// 根で採ったカット ([`Solver::nc_root_fp`]) のうち最初に木で分離するノードの LP で効いている (双対値が 0 でない) 行と、そのうち経路集約の
+    /// ものを数えて出す。決めた値は共有の待ち行列 ([`WorkPool::nc_rdec`]) に置き、
+    /// 従のスレッド (根のカットのループを回さない) はそれを読む。まだ決まっていなければ使わない
+    pub(super) fn nc_root_decide(&mut self) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.nc_rdec == 0 {
+            if let Some(d) = self.pool.as_ref().map(|pl| pl.nc_rdec.load(Ordering::Relaxed)).filter(|&d| d != 0) {
+                self.nc_rdec = d;
+            } else if self.nc_root_cnt[0] > 0 {
+                let m = self.lp.num_rows();
+                let ncut = self.cut_ids.len().min(m);
+                let y = self.lp.row_duals();
+                let (mut tight, mut tight_path, mut matched) = (0u64, 0u64, 0u64);
+                for i in (m - ncut)..m {
+                    let (_, up) = self.lp.row_bounds(i);
+                    let Some(&is_path) = self.nc_root_fp.get(&cut_fingerprint(&self.lp.row(i), up)) else { continue };
+                    matched += 1;
+                    if y.get(i).is_some_and(|v| v.abs() > 1e-9) {
+                        tight += 1;
+                        tight_path += is_path as u64;
+                    }
+                }
+                let share = tight_path as f64 / tight.max(1) as f64;
+                // 判定は根で採った経路集約のカットの本数 (効いている行の割合は診断に出すだけ: 効く neos-1456979 で 0、効かない tr12-30 で 0.71 と分けられない)
+                let on = self.nc_root_cnt[1] >= tunable!("ENOMOTO_T_MIP_NODECNT_ROOT_PATH", 5u64, u64);
+                self.nc_rdec = if on { 1 } else { 2 };
+                if let Some(pl) = &self.pool {
+                    pl.nc_rdec.store(self.nc_rdec, Ordering::Relaxed);
+                }
+                if env_str!("ENOMOTO_MIP_LOG").is_some() {
+                    eprintln!(
+                        "MIP: NODECNT root gate: cut rows {ncut}, matched root cuts {matched}, tight {tight}, tight path {tight_path} (share {share:.3}); root chosen {} (path {}); node path aggregation {}",
+                        self.nc_root_cnt[0],
+                        self.nc_root_cnt[1],
+                        if on { "on" } else { "off" }
+                    );
+                }
+            }
+        }
+        self.nc_rdec == 1
     }
 
     /// ノードでの分離 (1 ラウンド)。カットを加えたら LP を解き直し、真を返す。LP の行数の上限を超えたら何もしない。
@@ -5385,7 +5438,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 固定費用ネットワーク型ではノードでも経路集約の始点を使う (`ENOMOTO_T_MIP_NODE_FC_PATH_STARTS`、[`Solver::node_cuts_due`])
             let max_starts = if !light {
                 tunable!("ENOMOTO_T_MIP_PATH_STARTS", 1000usize, usize)
-            } else if self.fc_node_sep || self.tree_sep_fc {
+            } else if self.fc_node_sep || (self.tree_sep_fc && !(self.nc_path_forced && super::solver::nodecnt('r') && !self.nc_root_decide())) {
                 tunable!("ENOMOTO_T_MIP_NODE_FC_PATH_STARTS", 1000usize, usize)
             } else {
                 tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 0usize, usize)
@@ -5395,7 +5448,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // (h80x6320d・rout は移植で根の下界が上がり、mik-250 は従来のものの方が強い)
             // `ENOMOTO_MIP_FC_NODE_PATH_HIGHS`: 固定費用ネットワーク型の毎ノードの分離では、ノードでも HiGHS の移植を使う
             // 試作 `ENOMOTO_MIP_NODECNT` の `h`: 木の中の分離 (`tree_sep_fc`) でもノードで HiGHS の移植を使う
-            let node_highs = light && ((self.fc_node_sep && env_str!("ENOMOTO_MIP_FC_NODE_PATH_HIGHS").is_some()) || (self.tree_sep_fc && super::solver::nodecnt('h')));
+            let node_highs = light && ((self.fc_node_sep && env_str!("ENOMOTO_MIP_FC_NODE_PATH_HIGHS").is_some()) || (self.tree_sep_fc && super::solver::nodecnt('h') && !(self.nc_path_forced && super::solver::nodecnt('r') && self.nc_rdec != 1)));
             let old_only = env_str!("ENOMOTO_MIP_PATH_OLD").is_some() || (light && !node_highs);
             let highs_only = env_str!("ENOMOTO_MIP_PATH_HIGHS_ONLY").is_some();
             if !old_only && self.sep_src_on(sepprof::SRC_PATHH, light) {
@@ -6745,6 +6798,20 @@ fn fixed_charge_network_with(p: &MipProblem, row_frac: f64) -> bool {
         eprintln!("MIP: fixed-charge check: vb rows {nrows} of {}, continuous with vb {ncol} of {ncont}", p.m);
     }
     nrows as f64 >= row_frac * p.m as f64 && ncol as f64 >= tunable!("ENOMOTO_T_FC_COL_FRAC", 0.9, f64) * ncont as f64
+}
+
+/// 試作 `ENOMOTO_MIP_NODECNT` の `r`: カットの指紋 (係数・右辺のビットのハッシュ、非零だけ)
+fn cut_fingerprint(coefs: &[(usize, f64)], rhs: f64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for &(j, a) in coefs {
+        if a != 0.0 {
+            j.hash(&mut h);
+            a.to_bits().hash(&mut h);
+        }
+    }
+    rhs.to_bits().hash(&mut h);
+    h.finish()
 }
 
 /// 疎なベクトル (列番号の昇順) の内積。

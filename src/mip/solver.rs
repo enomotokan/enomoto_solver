@@ -521,6 +521,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// (`g` で、ラウンドが `ENOMOTO_T_MIP_NODECNT_GATE_N` (既定 30) 回たまって経路集約を採ったラウンドの割合が
     /// `ENOMOTO_T_MIP_NODECNT_GATE` (既定 0.3) 未満なら、ノードの経路集約をやめる)
     pub(super) nc_path_stats: [u64; 4],
+    /// 同 `r`: 根のカットのループで採ったカットの指紋 (係数と右辺のハッシュ) → 経路集約から来たか
+    pub(super) nc_root_fp: std::collections::HashMap<u64, bool>,
+    /// 同 `r`: 根で採ったカットの数・そのうち経路集約のカットの数
+    pub(super) nc_root_cnt: [u64; 2],
+    /// 同 `r`: このスレッドの判定 (0 未定、1 使う、2 使わない)
+    pub(super) nc_rdec: u8,
     /// ノードの分離の効き目の統計: (回数, 効き目の指数移動平均, 分離で枝が切れた回数, 深さの規則から外れて分離した回数)
     pub(super) fc_stats: (u64, f64, u64, u64),
     /// 効き目が低いときに、何回に 1 回は試し続けるかの数え
@@ -1856,6 +1862,8 @@ impl SnapNode {
 /// ノードを取り、ほかのスレッドは待っているスレッドがいれば自分の待ち行列の下界の小さいノードをここへ渡す。
 /// 全てのスレッドが待っていて、ここも空なら探索は終わり。
 pub(crate) struct WorkPool {
+    /// 試作 `ENOMOTO_MIP_NODECNT` の `r`: 根の情報で決めたノードの経路集約の可否 (0 未定、1 使う、2 使わない)。主が決め、従はこれを読む
+    pub(super) nc_rdec: std::sync::atomic::AtomicU8,
     inner: std::sync::Mutex<PoolInner>,
     /// 止める合図 (主が終わるときに立てる)。
     stop: std::sync::atomic::AtomicBool,
@@ -3068,6 +3076,7 @@ impl WorkPool {
     }
     fn new(threads: usize, lo: Vec<f64>, up: Vec<f64>, pc: Pseudocost) -> Self {
         WorkPool {
+            nc_rdec: std::sync::atomic::AtomicU8::new(0),
             learned: std::sync::Mutex::new(Learned::default()),
             next_tid: std::sync::atomic::AtomicU32::new(0),
             threads,
@@ -4298,6 +4307,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             && (nodecnt('p') || nodecnt('h'))
             && !super::separation::fixed_charge_network_for_nodes(p),
         nc_path_stats: [0; 4],
+        nc_root_fp: std::collections::HashMap::new(),
+        nc_root_cnt: [0; 2],
+        nc_rdec: 0,
         fc_stats: (0, 0.0, 0, 0),
         fc_probe: 0,
         last_rins: 0,
@@ -19722,6 +19734,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
             if self.par_sb_stats[0] > 0 {
                 eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
+            }
+            if self.nc_path_forced && nodecnt('r') {
+                eprintln!("MIP: NODECNT root gate (tid {}): decision {} (root chosen cuts {}, path {})", self.pool_tid, self.nc_rdec, self.nc_root_cnt[0], self.nc_root_cnt[1]);
             }
             if self.nc_path_forced {
                 let c = &self.nc_path_stats;
