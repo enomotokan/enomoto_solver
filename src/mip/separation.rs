@@ -3477,11 +3477,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             keep
         });
         let mut k = m0;
-        self.cut_ids.retain(|_| {
+        let track = !self.ts_cut_ids.is_empty();
+        let mut ntree = 0u64;
+        let mut nother = 0u64;
+        self.cut_ids.retain(|id| {
             let keep = !remove[k];
             k += 1;
+            if !keep && track {
+                if self.ts_cut_ids.contains(id) { ntree += 1 } else { nother += 1 }
+            }
             keep
         });
+        self.tsd[1] += ntree;
+        self.tsd[2] += nother;
         self.lp.delete_rows(remove);
         self.row_log.push(super::solver::RowEdit::delete(remove));
     }
@@ -3693,7 +3701,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `ENOMOTO_MIP_TREE_SEP` のラウンドで LP の行 `r0..` に加えたカットを覚える (`ENOMOTO_T_MIP_TREE_SEP_CUT_AGE` > 0 のときだけ)
     pub(super) fn mark_tree_sep_cuts(&mut self, r0: usize) {
-        if tunable!("ENOMOTO_T_MIP_TREE_SEP_CUT_AGE", 0u32, u32) == 0 {
+        if tunable!("ENOMOTO_T_MIP_TREE_SEP_CUT_AGE", 0u32, u32) == 0 && env_str!("ENOMOTO_MIP_TREESEP_DIAG").is_none() && env_str!("ENOMOTO_MIP_TREESEP2").is_none() {
             return;
         }
         self.sync_cut_age();

@@ -820,6 +820,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) ts_cut_ids: std::collections::HashSet<u64>,
     /// `ENOMOTO_MIP_TREE_SEP`: 最初に分離を考えた取り出したノードでの LP の行数 (`ENOMOTO_T_MIP_TREE_SEP_HEAVY` の基準)
     pub(super) ts_rows0: usize,
+    /// 診断 `ENOMOTO_MIP_TREESEP_DIAG=秒` (analysis/treesep_20261107.md) と試作 `ENOMOTO_MIP_TREESEP2` の計数:
+    /// [木の分離で加えた行, 外した行 (木で加えた), 外した行 (ほか), 木の分離のラウンド, 加えたラウンド, 木で加えた行の年齢で外した数]
+    pub(super) tsd: [u64; 6],
+    /// 診断の前回の出力の (秒, ノードの LP の数, 反復, 行の和, ノードの分離の秒)
+    pub(super) tsd_last: (f64, u64, u64, u64, f64),
     /// 最適面の頂点での分離 (`separate_face_split`) で、今の頂点の tableau 行 (基底変数ごとの、集約した行とその列の
     /// LP 値のハッシュ)。`tab_memo_mode`: 0 = 使わない、1 = 記録する、2 = 照合する。
     pub(super) tab_memo: std::collections::HashMap<usize, u64>,
@@ -4397,6 +4402,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         merged_cuts: std::collections::HashSet::new(),
         ts_cut_ids: std::collections::HashSet::new(),
         ts_rows0: 0,
+        tsd: [0; 6],
+        tsd_last: (0.0, 0, 0, 0, 0.0),
         tab_memo: std::collections::HashMap::new(),
         tab_memo_mode: 0,
         tab_memo_stats: (0, 0),
@@ -5557,6 +5564,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
             crate::simplex::mip_lp::set_nodecut_src(Some(crate::simplex::mip_lp::NodecutSrc { cutoff_bits: l.cutoff.to_bits(), f: self.nodecut_fn(), kind }));
         }
         l
+    }
+
+    /// 診断 `ENOMOTO_MIP_TREESEP_DIAG=秒` (既定では出さない): スレッドごとに、前回からの間のノードの LP の平均の行数・反復、
+    /// 木の分離のラウンド・加えた行、LP のカットの行 (うち木の分離で加えたもの)、年齢で外した行、探索全体の下界を出す
+    pub(super) fn treesep_diag(&mut self) {
+        let Some(every) = env_str!("ENOMOTO_MIP_TREESEP_DIAG").and_then(|v| v.parse::<f64>().ok()) else {
+            return;
+        };
+        let t = self.start.elapsed().as_secs_f64();
+        if t < self.tsd_last.0 + every {
+            return;
+        }
+        let (t0, l0, i0, r0, c0) = self.tsd_last;
+        let dl = (self.node_lps - l0).max(1) as f64;
+        let ncut = self.lp.num_rows().saturating_sub(self.p.m);
+        let ntree = self.cut_ids.iter().filter(|id| self.ts_cut_ids.contains(id)).count();
+        eprintln!(
+            "TSDIAG tid {} t {:.1} nodes {} lb {:.10e} rows {} cuts {} treecuts {} | dt {:.1} lps {} rows/lp {:.1} it/lp {:.1} cutsecs {:.2} | ts rounds {} added {} rows {} del tree {} other {} aged-tree {}",
+            self.pool_tid, t, self.nodes, self.global_lower_bound(), self.lp.num_rows(), ncut, ntree,
+            t - t0, self.node_lps - l0, (self.node_lp_rows - r0) as f64 / dl, (self.node_iters - i0) as f64 / dl, self.node_cut_secs - c0,
+            self.tsd[3], self.tsd[4], self.tsd[0], self.tsd[1], self.tsd[2], self.tsd[5]
+        );
+        self.tsd_last = (t, self.node_lps, self.node_iters, self.node_lp_rows, self.node_cut_secs);
     }
 
     /// この値以上の下界のノードは捨ててよい (最小化形、定数項込み)。
@@ -10338,6 +10368,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 self.node_lps += 1;
                 self.node_lp_rows += self.lp.num_rows() as u64;
+                if self.node_lps % 32 == 0 && !self.params.submip {
+                    self.treesep_diag();
+                }
                 match st {
                     LpStatus::Optimal => {}
                     LpStatus::Infeasible | LpStatus::ObjectiveBound => {
@@ -10941,7 +10974,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let added = self.node_cut_round(&x);
                     if added {
                         self.mark_tree_sep_cuts(r0);
+                        self.tsd[0] += (self.lp.num_rows() - r0) as u64;
                     }
+                    self.tsd[3] += 1;
+                    self.tsd[4] += added as u64;
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
                     self.node_sep_stats[0] += 1;
                     self.node_sep_stats[1] += added as u64;
