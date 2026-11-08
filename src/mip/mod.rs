@@ -4257,10 +4257,117 @@ struct ProbeSpec {
     ok1: bool,
     ch1: Vec<(usize, bool, f64)>,
     w: (u64, u64, u64),
+    /// 両側が成り立つときの集計 (写しの定義域で求める。窓を作った時点から定義域が変わっていなければ主の定義域と同じ値)
+    derived: Option<ProbeDerived>,
+}
+
+/// [`ProbeSpec`] の集計: 衝突の組・含意による境界・同値な組・両側で締まる境界 (列の番号の順)
+struct ProbeDerived {
+    edges: Vec<(u32, u32)>,
+    implied: Vec<(u32, bool, u32, bool, f64)>,
+    equiv: Vec<(usize, usize, bool)>,
+    tight: Vec<(usize, bool, f64)>,
+}
+
+/// [`probe_spec_block`] が集計に使う設定 ([`probe`] の同名の値)
+struct ProbeSpecCtx<'a> {
+    bin0: &'a [bool],
+    genint_on: bool,
+    want_impl: bool,
+    want_implied: bool,
+    want_equiv: bool,
+}
+
+/// x_j の両側の変更 `ch0`・`ch1` から [`ProbeDerived`] を作る ([`probe`] の (true, true) の枝と同じ規則。ハッシュ表の順の代わりに
+/// 列の番号の順に並べる)
+fn probe_derive(j: usize, ch0: &[(usize, bool, f64)], ch1: &[(usize, bool, f64)], lo: &[f64], up: &[f64], cx: &ProbeSpecCtx) -> ProbeDerived {
+    let mut edges = Vec::new();
+    let mut implied = Vec::new();
+    if cx.want_impl {
+        for (v, ch) in [(1u32, ch1), (0u32, ch0)].into_iter().rev() {
+            let lj = 2 * j as u32 + if v == 1 { 0 } else { 1 };
+            for &(k, upper, val) in ch {
+                if k == j || !cx.bin0[k] {
+                    continue;
+                }
+                if upper && val <= 0.5 {
+                    edges.push((lj, 2 * k as u32));
+                } else if !upper && val >= 0.5 {
+                    edges.push((lj, 2 * k as u32 + 1));
+                }
+            }
+        }
+        if cx.want_implied {
+            for (vb, ch) in [(false, ch0), (true, ch1)] {
+                let mut best: std::collections::BTreeMap<(usize, bool), f64> = std::collections::BTreeMap::new();
+                for &(k, upper, val) in ch {
+                    if k == j {
+                        continue;
+                    }
+                    let e = best.entry((k, upper)).or_insert(val);
+                    *e = if upper { e.min(val) } else { e.max(val) };
+                }
+                for ((k, upper), val) in best {
+                    if cx.genint_on && cx.bin0[k] {
+                        continue;
+                    }
+                    let (l, u) = (lo[k], up[k]);
+                    if !l.is_finite() || !u.is_finite() {
+                        continue;
+                    }
+                    let gain = if upper { u - val } else { val - l };
+                    if gain > 1e-6 * (1.0 + val.abs()) {
+                        implied.push((j as u32, vb, k as u32, upper, val));
+                    }
+                }
+            }
+        }
+    }
+    let mut first: std::collections::BTreeMap<(usize, bool), f64> = std::collections::BTreeMap::new();
+    for &(k, upper, v) in ch0 {
+        first.insert((k, upper), v);
+    }
+    let mut last1: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
+    for &(k, upper, v) in ch1 {
+        last1.insert((k, upper), v);
+    }
+    let mut equiv = Vec::new();
+    if cx.want_equiv {
+        for (&(k, upper), &v0) in &first {
+            if k == j || !cx.bin0[k] || lo[k] == up[k] {
+                continue;
+            }
+            let Some(&v1) = last1.get(&(k, !upper)) else { continue };
+            if upper && v0 <= 0.5 && v1 >= 0.5 {
+                equiv.push((j, k, false));
+            } else if !upper && v0 >= 0.5 && v1 <= 0.5 {
+                equiv.push((j, k, true));
+            }
+        }
+    }
+    let mut tight = Vec::new();
+    for (&(k, upper), &v0) in &first {
+        if k == j {
+            continue;
+        }
+        let Some(&v1) = last1.get(&(k, upper)) else { continue };
+        if upper {
+            let u = v0.max(v1);
+            if u < up[k] - 1e-9 * (1.0 + u.abs()) {
+                tight.push((k, true, u));
+            }
+        } else {
+            let l = v0.min(v1);
+            if l > lo[k] + 1e-9 * (1.0 + l.abs()) {
+                tight.push((k, false, l));
+            }
+        }
+    }
+    ProbeDerived { edges, implied, equiv, tight }
 }
 
 /// 塊の候補を、`base` の写しで順に試す (各候補の後に巻き戻す)。`base` で固定されている候補は `None`
-fn probe_spec_block(prob: &MipProblem, base: &domain::Domain, js: &[usize]) -> Vec<Option<ProbeSpec>> {
+fn probe_spec_block(prob: &MipProblem, base: &domain::Domain, js: &[usize], cx: &ProbeSpecCtx) -> Vec<Option<ProbeSpec>> {
     let mut d = base.clone();
     js.iter()
         .map(|&j| {
@@ -4278,7 +4385,8 @@ fn probe_spec_block(prob: &MipProblem, base: &domain::Domain, js: &[usize]) -> V
             let ch1: Vec<_> = if ok1 { d.changes_since(pos).collect() } else { Vec::new() };
             d.backtrack_to(prob, pos);
             let e = (d.debug_work(), domain::act_work(), domain::chg_count());
-            Some(ProbeSpec { ok0, ch0, ok1, ch1, w: (e.0 - s.0, e.1 - s.1, e.2 - s.2) })
+            let derived = (ok0 && ok1).then(|| probe_derive(j, &ch0, &ch1, &d.lo, &d.up, cx));
+            Some(ProbeSpec { ok0, ch0, ok1, ch1, w: (e.0 - s.0, e.1 - s.1, e.2 - s.2), derived })
         })
         .collect()
 }
@@ -4379,6 +4487,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // 含意 (`ENOMOTO_MIP_NO_PROBE_IMPLICATIONS` で集めない): x_j = v で 0-1 列 x_k が固定されれば、
     // 「x_j = v かつ x_k が固定と逆の値」は成り立たない (衝突の組)。上限は非零数の 10 倍
     let want_impl = env_str!("ENOMOTO_MIP_NO_PROBE_IMPLICATIONS").is_none();
+    let want_implied = env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() || env_str!("ENOMOTO_MIP_NO_IMPLBD_CONT").is_none();
     let edge_cap = 10 * nnz + 10_000;
     let bin0: Vec<bool> = (0..n).map(|k| prob.is_int[k] && prob.col_lo[k] == 0.0 && prob.col_up[k] == 1.0).collect();
     let genint_on = implbd_genint_for(&prob.is_int, &prob.col_lo, &prob.col_up);
@@ -4590,9 +4699,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     let base: &Domain = &dom;
                     let pr: &MipProblem = prob;
                     let blocks: Vec<&[usize]> = cands[cnt..end].chunks(b).collect();
+                    let cx = ProbeSpecCtx { bin0: &bin0, genint_on, want_impl, want_implied, want_equiv };
                     let res: Vec<Vec<Option<ProbeSpec>>> = pool.install(|| {
                         use rayon::prelude::*;
-                        blocks.par_iter().map(|bl| probe_spec_block(pr, base, bl)).collect()
+                        blocks.par_iter().map(|bl| probe_spec_block(pr, base, bl, &cx)).collect()
                     });
                     spec = res.into_iter().flatten().collect();
                     spec_start = cnt;
@@ -4609,12 +4719,14 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             } else {
                 None
             };
+            let mut derived: Option<ProbeDerived> = None;
             let (ok0, ch0, ok1, ch1) = if let Some(r) = spec_res {
                 n_spec_used += 1;
                 let w = spec_w.get();
                 spec_w.set((w.0 + r.w.0, w.1 + r.w.1, w.2 + r.w.2));
                 sum_units += 2.5 * r.w.0 as f64 + 5.0 * r.w.1 as f64;
                 n_units += 1;
+                derived = r.derived;
                 (r.ok0, r.ch0, r.ok1, r.ch1)
             } else {
                 let u0 = (dom.debug_work(), domain::act_work());
@@ -4656,6 +4768,48 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     ver += 1;
                     if env_str!("ENOMOTO_MIP_DEBUG_PROBE").is_some() {
                         eprintln!("MIP:   probing fixed column {j} at candidate {cnt} (pass {passes}, {} rows)", prob.cols[j].len());
+                    }
+                }
+                (true, true) if derived.is_some() => {
+                    // `ENOMOTO_MIP_PREPAR` の `p`: 塊のスレッドで集計した分をそのまま足す (定義域は窓の時点と同じ)
+                    let dv = derived.take().unwrap();
+                    if want_impl {
+                        for e in dv.edges {
+                            if edges.len() < edge_cap {
+                                edges.push(e);
+                            }
+                        }
+                        if want_implied {
+                            for t in dv.implied {
+                                if implied.len() >= edge_cap {
+                                    break;
+                                }
+                                implied.push(t);
+                            }
+                        }
+                    }
+                    if want_equiv {
+                        equiv.extend(dv.equiv);
+                    }
+                    let mut any = false;
+                    for (k, upper, v) in dv.tight {
+                        if upper {
+                            if v < dom.up[k] - 1e-9 * (1.0 + v.abs()) {
+                                dom.tighten_upper(prob, k, v);
+                                any = true;
+                                tightened += 1;
+                            }
+                        } else if v > dom.lo[k] + 1e-9 * (1.0 + v.abs()) {
+                            dom.tighten_lower(prob, k, v);
+                            any = true;
+                            tightened += 1;
+                        }
+                    }
+                    if any {
+                        ver += 1;
+                        if !dom.propagate(prob) {
+                            return Some(false);
+                        }
                     }
                 }
                 (true, true) => {
