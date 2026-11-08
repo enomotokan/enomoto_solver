@@ -559,7 +559,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 4 は潜りの途中で兄弟へ戻ったノードの最初の LP (0 から外す)。
     /// 各行: [回数, 反復, 行の和, カットの行の和, warm start, 出発の主実行不能の行の和, 費用をずらした列の和, 再分解の和,
     /// DSE 単位, DSE 引き継ぎ, DSE 厳密, 段階 A から, 段階 A の反復の和, 最適, 実行不能, 打ち切り値, そのほか, 費用の摂動, 秒 (us)]
-    pub(super) nodelp_stats: [[u64; 19]; 5],
+    pub(super) nodelp_stats: [[u64; 22]; 5],
     /// 診断 `ENOMOTO_MIP_NODELP_DIAG`: 今のノードが潜りの途中で兄弟へ戻ったノードか ([`Solver::nodelp_stats`] の添字 4)。
     pub(super) nodelp_sib: bool,
     /// 診断 `ENOMOTO_MIP_NODELP_DUMP=<dir>`: 書き出したノードの LP の数。
@@ -1275,7 +1275,7 @@ impl Drop for NodePerturbScope {
 }
 
 /// 診断 `ENOMOTO_MIP_NODELP_DIAG` の 1 スレッド分の表 ([`Solver::nodelp_stats`]) を出す。
-fn print_nodelp_stats(tid: usize, st: &[[u64; 19]; 5]) {
+fn print_nodelp_stats(tid: usize, st: &[[u64; 22]; 5]) {
     if !crate::simplex::slope_intercept_dual::nodelp_diag() {
         return;
     }
@@ -1285,9 +1285,10 @@ fn print_nodelp_stats(tid: usize, st: &[[u64; 19]; 5]) {
         }
         let n = a[0] as f64;
         eprintln!(
-            "MIP: nodelp tid {tid} {}: n {} iters {:.1}/LP ms {:.3}/LP rows {:.1} cutrows {:.1} warm {} prim_inf {:.1} dual_shift {:.2} refactor {:.2} dse unit/inh/exact {}/{}/{} stageA {} ({:.1} it) opt/inf/cut/other {}/{}/{}/{} perturb {} | total iters {} secs {:.2}",
+            "MIP: nodelp tid {tid} {}: n {} iters {:.1}/LP ms {:.3}/LP rows {:.1} cutrows {:.1} warm {} prim_inf {:.1} dual_shift {:.2} refactor {:.2} dse unit/inh/exact {}/{}/{} stageA {} ({:.1} it) opt/inf/cut/other {}/{}/{}/{} perturb {} | total iters {} secs {:.2} | inf col/row/cut {:.1}/{:.1}/{:.1}",
             ["dive", "queue", "pool", "resolve", "sibling"][k], a[0], a[1] as f64 / n, a[18] as f64 / 1e3 / n, a[2] as f64 / n, a[3] as f64 / n, a[4], a[5] as f64 / n, a[6] as f64 / n, a[7] as f64 / n,
-            a[8], a[9], a[10], a[11], a[12] as f64 / a[11].max(1) as f64, a[13], a[14], a[15], a[16], a[17], a[1], a[18] as f64 / 1e6
+            a[8], a[9], a[10], a[11], a[12] as f64 / a[11].max(1) as f64, a[13], a[14], a[15], a[16], a[17], a[1], a[18] as f64 / 1e6,
+            a[19] as f64 / n, a[20] as f64 / n, a[21] as f64 / n
         );
     }
 }
@@ -4279,7 +4280,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nca_ema: 1.0,
         nca_stats: [0; 3],
         node_lp_rows: 0,
-        nodelp_stats: [[0; 19]; 5],
+        nodelp_stats: [[0; 22]; 5],
         nodelp_sib: false,
         nodelp_dumps: 0,
         node_sep_stats: [0; 2],
@@ -10329,7 +10330,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     ),
                     _ => (None, NodePerturbScope::new(crate::simplex::slope_intercept_dual::NODE_PERTURB_SCOPE.with(|c| c.get()))),
                 };
+                if crate::simplex::slope_intercept_dual::nodelp_diag() {
+                    crate::simplex::slope_intercept_dual::NODELP_M0.with(|c| c.set(self.p.m));
+                }
                 let mut st = self.lp.solve(&capped(self, iter_limit));
+                if crate::simplex::slope_intercept_dual::nodelp_diag() {
+                    crate::simplex::slope_intercept_dual::NODELP_M0.with(|c| c.set(0));
+                }
                 drop(_nl_h2);
                 drop(_nl_pert);
                 if crate::simplex::slope_intercept_dual::nodelp_diag() && !self.params.submip {
@@ -10355,6 +10362,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }] += 1;
                     a[17] += rec[7] as u64;
                     a[18] += (t_lp.elapsed().as_secs_f64() * 1e6) as u64;
+                    let c3 = crate::simplex::slope_intercept_dual::NODELP_INF3.with(|c| c.replace([0; 3]));
+                    for i in 0..3 {
+                        a[19 + i] += c3[i] as u64;
+                    }
                 }
                 if let Some(prefix) = nl_prefix {
                     use std::io::Write as _;

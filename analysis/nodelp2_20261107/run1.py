@@ -22,6 +22,9 @@ CFGS = {
     "Ph": dict(DG, ENOMOTO_MIP_NODELP_PERTURB="Ph"),
     "ch": dict(DG, ENOMOTO_MIP_CHILD_HIGHS="1"),
     "bnt": dict(DG, ENOMOTO_MIP_BASIS_NB="t"),
+    "rnever": dict(DG, ENOMOTO_MIP_RESTORE_NEVER="1"),
+    "nots": dict(DG, ENOMOTO_MIP_NO_TREE_SEP="1"),
+    "rdiag": dict(DG, ENOMOTO_MIP_RESTORE_DIAG="1"),
     "phb": dict(DG, ENOMOTO_MIP_NODELP_PERTURB="ph", ENOMOTO_MIP_BASIS_NB="t"),
     "plainphgb": {"ENOMOTO_MIP_NODELP_PERTURB": "phg", "ENOMOTO_MIP_BASIS_NB": "t"},
     "plainphb": {"ENOMOTO_MIP_NODELP_PERTURB": "ph", "ENOMOTO_MIP_BASIS_NB": "t"},
@@ -33,7 +36,13 @@ for k, v in list(os.environ.items()):
     # 追加の設定: NODELP_CFG_<名前>="K=V,K=V"
     if k.startswith("NODELP_CFG_"):
         CFGS[k[len("NODELP_CFG_"):].lower()] = dict(DG, **dict(x.split("=", 1) for x in v.split(",")))
+# 既知の最適値 + 余裕 (打ち切り値の比べ `cut*` に使う。MIPLIB の値)
+CUTV = {"supportcase33": -344.5, "ns1830653": 20622.5, "rococoC10-001000": 11460.5, "traininstance6": 28290.5,
+        "uccase12": 11507.42, "mzzv11": -21717.5, "tr12-30": 130596.5}
 out, cfg, p, tl, rep = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
+if cfg.startswith("cut"):
+    CFGS[cfg] = dict(CFGS[cfg[3:] or "diag"], ENOMOTO_MIP_CUTOFF=str(CUTV[p]), ENOMOTO_MIP_HO4_DIAG="1")
+CFGS["diag4"] = dict(DG, ENOMOTO_MIP_HO4_DIAG="1")
 mps = rb.fetch(p, WT / ".miplib_cache")
 env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
 env.update(ENOMOTO_MIP_THREADS="4", ENOMOTO_MIP_LOG="1", ENOMOTO_T_MIP_SEED=str(rep), **CFGS[cfg])

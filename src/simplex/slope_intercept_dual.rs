@@ -1290,6 +1290,13 @@ thread_local! {
     pub(crate) static NODELP_REC: std::cell::Cell<[u32; 8]> = const { std::cell::Cell::new([0; 8]) };
 }
 
+thread_local! {
+    /// 診断 `ENOMOTO_MIP_NODELP_DIAG` (analysis/nodelp2_20261107.md): 呼び出し側が置く元の行の数 (これより後ろの行をカットの行と数える。0 なら数えない)
+    pub(crate) static NODELP_M0: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// 診断: 出発の主実行不能の基底変数の内訳 [構造列, 元の行の論理変数, カットの行の論理変数]
+    pub(crate) static NODELP_INF3: std::cell::Cell<[u32; 3]> = const { std::cell::Cell::new([0; 3]) };
+}
+
 fn nodelp_set(i: usize, v: u32) {
     NODELP_REC.with(|c| {
         let mut a = c.get();
@@ -4674,6 +4681,16 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
     if nl_diag {
         nodelp_set(1, infeasible_rows.rows.len() as u32);
+        let m0 = NODELP_M0.with(|c| c.get());
+        let mut c3 = [0u32; 3];
+        if m0 > 0 {
+            let n_str = n_total - m;
+            for &r in &infeasible_rows.rows {
+                let v = basis[r];
+                c3[if v < n_str { 0 } else if v - n_str < m0 { 1 } else { 2 }] += 1;
+            }
+        }
+        NODELP_INF3.with(|c| c.set(c3));
     }
     // `ENOMOTO_NODE_PERTURB` (試作、既定では使わない): 再最適化の近道 (分枝限定法の warm start) でも、主実行不能な行があり、
     // 構造列の費用の絶対値の種類が少なければ (種類の数 x 4 <= 構造列の数) 費用を摂動する。CLP の双対単体法

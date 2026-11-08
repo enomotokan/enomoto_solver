@@ -1,0 +1,93 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP rococoC10-001000 has 1293 rows; 3117 cols; 11751 nonzeros; 3117 integer variables (2993 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 3e+04]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 3e+05]
+  RHS     [1e+00, 1e+00]
+Presolving model
+699 rows, 2524 cols, 9850 nonzeros 0s
+576 rows, 2442 cols, 7244 nonzeros 0s
+Presolve reductions: rows 576(-717); columns 2442(-675); nonzeros 7244(-4507) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   576 rows
+   2442 cols (2442 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   7244 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            50655              Large        0      0      0         0     0.1s
+ R       0       0         0   0.00%   7515.271029     23730             68.33%        0      0      0       451     0.1s
+ L       0       0         0   0.00%   10158.340782    12534             18.95%     1900    373   1416      3835     2.1s
+ L       0       0         0   0.00%   10158.340782    12417             18.19%     1710    205   1416     10088     7.9s
+        11       0         1   0.10%   10158.340782    12417             18.19%     1712    205   1484    114495    19.2s
+ L     101      39        31   1.38%   10251.809918    12408             17.38%     1767    270   3425    128421    22.2s
+       306      33       133  60.40%   10327.127315    12408             16.77%     2247    332   8016    170475    27.2s
+       561      76       233  60.88%   10327.127315    12408             16.77%     2419    319   9377    209092    32.4s
+       756     106       315  61.27%   10327.127315    12408             16.77%     2119    348   8664    247899    37.9s
+       951     158       388  61.39%   10327.127315    12408             16.77%     2135    405  10134    286640    43.0s
+      1178     195       480  61.39%   10327.127315    12408             16.77%     2049    308   9693    318860    48.0s
+      1404     222       579  61.39%   10327.127315    12408             16.77%     2138    239   8904    355479    53.1s
+
+Restarting search from the root node
+Model after restart has 574 rows, 2440 cols (2440 bin., 0 int., 0 impl., 0 cont., 0 dom.fix.), and 7238 nonzeros
+
+      1604       0         0   0.00%   10327.127315    12408             16.77%      376      0      0    386012    57.4s
+      1604       0         0   0.00%   10327.127315    12408             16.77%      376    136     12    386690    57.5s
+ L    1604       0         0   0.00%   10327.127315    12056             14.34%      798    289     12    388654    60.6s
+ L    1604       0         0   0.00%   10327.127315    11916             13.33%      798    289     12    394608    66.7s
+      1733      14        57  84.44%   10517.563653    11916             11.74%     1136    302   2191    443039    71.7s
+      1890      33       123  85.39%   10642.843503    11916             10.68%     1513    379   6050    481157    76.8s
+      2124      86       211  85.67%   10755.196612    11916              9.74%     1823    377   9245    521770    82.1s
+      2385     132       311  85.67%   10755.196612    11916              9.74%     1814    348   8363    560008    87.4s
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+      2630     164       415  85.67%   10755.196612    11916              9.74%     1945    375   9704    595608    92.4s
+      2810     184       494  85.68%   10767.874088    11916              9.64%     2002    283   7911    632867    97.4s
+      3162     245       636  85.69%   10788.906751    11916              9.46%     2313    295   9381    665791   102.4s
+      3566     303       801  85.69%   10812.457453    11916              9.26%     2448    162   9538    698585   107.5s
+ L    3784      51       894  87.26%   10812.457453    11522              6.16%     2173    285   9734    717146   112.1s
+      3943      55       970  87.26%   10824.337447    11522              6.06%     1988    401   8434    760845   117.4s
+      4021      67      1004  87.26%   10938.851409    11522              5.06%     2042    401   9780    781813   120.0s
+
+Solving report
+  Model             rococoC10-001000
+  Status            Time limit reached
+  Primal bound      11522
+  Dual bound        10939
+  Gap               5.06%
+  P-D integral      17.3393026071
+  Solution status   feasible
+                    11522 (objective)
+                    0 (bound viol.)
+                    1.90993887372e-11 (int. viol.)
+                    0 (row viol.)
+  Timing            120.00
+                    0.82 (Presolve)
+                        MIP    time [calls] = 0.04 [1]
+                        subMIP time [calls] = 0.78 [92]
+                    119.16 (Solve)
+                        MIP    time [calls] = 102.66 [1]
+                        subMIP time [calls] = 16.50 [92]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [92]
+  Max sub-MIP depth 12
+  Nodes             4021
+  Repair LPs        0
+  LP iterations     781813
+                    300048 (strong br.)
+                    47824 (separation)
+                    44622 (heuristics)
