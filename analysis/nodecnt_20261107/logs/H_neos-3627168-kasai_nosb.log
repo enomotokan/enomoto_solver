@@ -1,0 +1,88 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP neos-3627168-kasai has 1655 rows; 1462 cols; 5158 nonzeros; 535 integer variables (535 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 2e+04]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [2e+00, 4e+03]
+Presolving model
+1652 rows, 1400 cols, 4158 nonzeros 0s
+1206 rows, 1400 cols, 3266 nonzeros 0s
+Presolve reductions: rows 1206(-449); columns 1400(-62); nonzeros 3266(-1892) 
+
+Solving MIP model with:
+   1206 rows
+   1400 cols (476 binary, 0 integer, 0 implied int., 924 continuous, 0 domain fixed)
+   3266 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     0.0s
+         0       0         0   0.00%   954341.026667   inf                  inf        0      0      4      1148     0.1s
+ L       0       0         0   0.00%   968681.240266   990023.66          2.16%    10485    567    215      7667     2.2s
+ L       0       0         0   0.00%   968681.240266   989159.3           2.07%    10485    567    215      9503     2.7s
+ L     111     109         1   0.00%   968681.240266   988585.62          2.01%    10045    526    222     20996     6.7s
+ L     414     242        77   0.29%   968824.196515   988585.62          2.00%     8148    762    443     52551    12.6s
+       723     331       178   0.78%   968824.196515   988585.62          2.00%    10353    639   1128     77556    17.7s
+
+Restarting search from the root node
+Model after restart has 1201 rows, 1400 cols (476 bin., 0 int., 0 impl., 924 cont., 0 dom.fix.), and 3256 nonzeros
+
+      1020       0         0   0.00%   968824.196515   988585.62          2.00%      730      0      0     96533    21.4s
+      1020       0         0   0.00%   976025.803688   988585.62          1.27%      730    349      2     97476    21.5s
+      1715     187       190  14.12%   981163.08506    988585.62          0.75%    10238    700    590    129431    26.5s
+      2024     196       334  41.68%   981412.093471   988585.62          0.73%     8418    568   1226    165578    31.5s
+      2946     327       725  51.02%   982209.381094   988585.62          0.64%    10371    499   4020    191234    36.5s
+      3277     323       882  56.21%   982507.573669   988585.62          0.61%    10974    797   4811    224731    42.1s
+      4051     473      1184  59.72%   983652.71701    988585.62          0.50%    10415    716   6520    250871    47.1s
+      4932     513      1589  72.05%   984216.758661   988585.62          0.44%     9069    681   8212    278242    52.2s
+      6702     758      2339  74.12%   984842.975309   988585.62          0.38%     7366    665   9297    293162    57.2s
+      7875     788      2912  80.60%   985574.131423   988585.62          0.30%     8333    699   9928    319325    62.2s
+      8650     617      3369  81.39%   986038.889092   988585.62          0.26%    10760    808   9667    354557    67.4s
+      9219     502      3708  85.51%   986311.388011   988585.62          0.23%    10659    631   9350    393278    72.5s
+      9696     381      4004  89.29%   986807.524134   988585.62          0.18%     9170    575   7856    455290    77.5s
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+     10479     326      4396  90.00%   987133.739996   988585.62          0.15%    10405    551   8225    492205    82.5s
+     10864     241      4627  96.55%   987272.986238   988585.62          0.13%    10039    494   6702    543731    87.5s
+     11159       0      4896 100.00%   988585.62       988585.62          0.00%     9773    642   5883    605507    90.9s
+
+Solving report
+  Model             neos-3627168-kasai
+  Status            Optimal
+  Primal bound      988585.62
+  Dual bound        988585.62
+  Gap               0%
+  P-D integral      0.690700913399
+  Solution status   feasible
+                    988585.62 (objective)
+                    0 (bound viol.)
+                    1.6538037873e-12 (int. viol.)
+                    0 (row viol.)
+  Timing            90.92
+                    0.53 (Presolve)
+                        MIP    time [calls] = 0.01 [1]
+                        subMIP time [calls] = 0.52 [245]
+                    90.35 (Solve)
+                        MIP    time [calls] = 77.64 [1]
+                        subMIP time [calls] = 12.71 [245]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [245]
+  Max sub-MIP depth 14
+  Nodes             11159
+  Repair LPs        1 (1 feasible; 0 iterations)
+  LP iterations     605507
+                    0 (strong br.)
+                    107025 (separation)
+                    56559 (heuristics)

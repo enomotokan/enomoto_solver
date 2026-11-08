@@ -1,0 +1,35 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP neos-3627168-kasai has 1655 rows; 1462 cols; 5158 nonzeros; 535 integer variables (535 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 2e+04]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [2e+00, 4e+03]
+Presolving model
+1652 rows, 1400 cols, 4158 nonzeros 0s
+1206 rows, 1400 cols, 3266 nonzeros 0s
+Presolve reductions: rows 1206(-449); columns 1400(-62); nonzeros 3266(-1892) 
+
+Solving MIP model with:
+   1206 rows
+   1400 cols (476 binary, 0 integer, 0 implied int., 924 continuous, 0 domain fixed)
+   3266 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     0.0s
+         0       0         0   0.00%   954341.026667   inf                  inf        0      0      4      1148     0.1s
+ L       0       0         0   0.00%   968681.240266   990023.66          2.16%    10485    567    215      7667     2.2s
+ L       0       0         0   0.00%   968681.240266   989159.3           2.07%    10485    567    215      9503     2.8s
+ L       0       0         0   0.00%   968681.240266   989159.3           2.07%     9918    315    215     12285     4.0s
+        41       1        14   5.13%   968681.240266   989159.3           2.07%     9952    315    572     34796     9.0s
+       137      15        50  11.45%   970735.835776   989159.3           1.86%     9616    590    827     66223    14.0s
+       217      37        87  32.93%   970735.835776   989159.3           1.86%    11334    912   1037     97998    19.1s

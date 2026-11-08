@@ -771,6 +771,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 回数・締めた境界の数
     t4_last: f64,
     t4_rc: [u64; 2],
+    /// 試作 `ENOMOTO_MIP_NODECNT` の数 ([`Self::degen_dual_fixing`]): [呼んだノード, 候補の基底の整数列, BTRAN, θ ≥ ギャップで固定,
+    /// θ = ∞ で固定, 1 本以上固定したノード, 符号の食い違いで飛ばした候補]
+    nodecnt_stats: [u64; 7],
     /// `ENOMOTO_MIP_TREE4_RCUNION` (試作): 根のカットの各ラウンドの LP の被約費用 ([`Self::tree4_rc_add`])
     pub(super) t4_rc_extra: Vec<(f64, Vec<(usize, bool, f64, f64)>)>,
     /// `ENOMOTO_MIP_TREE4_PROOFCUT` (試作) の数: [ラウンド, 加えた行, 加えた後に刈ったノード]
@@ -4386,6 +4389,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         last_log: start,
         t4_last: 0.0,
         t4_rc: [0; 2],
+        nodecnt_stats: [0; 7],
         t4_rc_extra: Vec::new(),
         t4_pc: [0; 3],
         user_log_header: false,
@@ -10559,7 +10563,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 xp("m_frac");
                 // 被約費用による局所的な固定。LP 解が新しい境界から外れたら解き直す。
-                if self.has_cutoff_value() && self.local_redcost_fixing(node_obj) {
+                let rc_fixed = self.has_cutoff_value() && self.local_redcost_fixing(node_obj);
+                // 試作 `ENOMOTO_MIP_NODECNT`: 基底にあって境界に張り付いた整数列の被約費用による固定 ([`Self::degen_dual_fixing`])
+                let dd_fixed = nodecnt_on() && !self.dom.infeasible && self.degen_dual_fixing(node_obj);
+                if rc_fixed || dd_fixed {
                     if dn && !self.dbg_contains() {
                         self.dbg_lost("local redcost fixing", true);
                     }
@@ -12447,6 +12454,157 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.t4_rc[0] += changed as u64;
+        changed
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODECNT` (既定では使わない、analysis/nodecnt_20261107.md): HiGHS の
+    /// `HighsLpRelaxation::computeBasicDegenerateDuals` に倣い、ノードの LP で**基底にあって境界に張り付いた**整数列 x_k
+    /// (主退化) に、双対単体法の 1 歩の比の判定で被約費用 θ を与え、被約費用による固定をする。
+    ///
+    /// x_k の tableau 行 x_k + Σ_N ᾱ_j x_j = β (構造列は ᾱ_j = (w^T A)_j、行 i の論理変数 r_i = a_i x は ᾱ = -w_i、w = e_s^T B^{-1})
+    /// で x_k を境界から t だけ動かすには、非基底の変数を動ける向きに動かすしかなく、その費用の 1 単位あたりの最小値が
+    /// θ = min |d_j| / |ᾱ_j| (動ける向きに効く j について)。双対単体法で x_k を出す 1 歩の後の双対実行可能な解の目的値が
+    /// z + θ t なので、このノード以下では c x >= z + θ |x_k - 境界| が成り立つ。θ がギャップ (打ち切り値 − z) を越えれば
+    /// x_k は境界に固定できる。効く j が 1 本もなければ (θ = ∞) x_k は LP の中で動けないので、打ち切り値がなくても固定できる。
+    /// 等式行の論理変数・固定された列は動けないので数えない。1 ノードで見る候補は `ENOMOTO_T_MIP_NODECNT_MAXC` (既定 100) 本まで。
+    /// 締めたら真。
+    fn degen_dual_fixing(&mut self, node_obj: f64) -> bool {
+        let gap = if self.has_cutoff_value() { self.prune_limit() - node_obj } else { f64::INFINITY };
+        if !(gap >= 0.0) {
+            return false;
+        }
+        self.nodecnt_stats[0] += 1;
+        let n = self.p.n;
+        let m = self.lp.num_rows();
+        let x = self.lp.col_values();
+        let maxc = tunable!("ENOMOTO_T_MIP_NODECNT_MAXC", 100usize, usize);
+        // 候補: 基底の位置 s、列 k、向き σ (+1: 下限に張り付き上へ動かす、-1: 上限に張り付き下へ動かす)
+        let mut cands: Vec<(usize, usize, f64)> = Vec::new();
+        for s in 0..m {
+            let k = self.lp.basic_var(s);
+            if k >= n || !self.p.is_int[k] {
+                continue;
+            }
+            let (lo, up) = (self.dom.lo[k], self.dom.up[k]);
+            if up - lo < 0.5 {
+                continue;
+            }
+            if x[k] - lo <= FEASTOL {
+                cands.push((s, k, 1.0));
+            } else if up - x[k] <= FEASTOL {
+                cands.push((s, k, -1.0));
+            }
+            if cands.len() >= maxc {
+                break;
+            }
+        }
+        if cands.is_empty() {
+            return false;
+        }
+        self.nodecnt_stats[1] += cands.len() as u64;
+        let basis = self.lp.basis_ref().into_owned();
+        let d = self.lp.reduced_costs_ref().into_owned();
+        let y = self.lp.row_duals();
+        let col_b: Vec<(f64, f64)> = (0..n).map(|j| self.lp.col_bounds(j)).collect();
+        let mut alpha = vec![0.0f64; n];
+        let mut touched: Vec<usize> = Vec::new();
+        let mut changed = false;
+        // 双対の符号の許容誤差 (これより大きく食い違う候補は数値が怪しいので使わない)
+        let dtol = 1e-7;
+        for (s, k, sigma) in cands {
+            let w = self.lp.basis_inverse_row(s);
+            self.nodecnt_stats[2] += 1;
+            let wmax = w.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+            if !(wmax > 0.0 && wmax.is_finite()) {
+                continue;
+            }
+            let eps = 1e-9;
+            let mut theta = f64::INFINITY;
+            let mut bad = false;
+            // 論理変数 (行)
+            for i in 0..m {
+                let wi = w[i];
+                if wi.abs() <= eps * wmax.max(1.0) {
+                    continue;
+                }
+                let (rlo, rup) = self.lp.row_bounds(i);
+                // 構造列への寄与
+                for (j, a) in self.lp.row(i) {
+                    if alpha[j] == 0.0 {
+                        touched.push(j);
+                    }
+                    alpha[j] += wi * a;
+                    if alpha[j] == 0.0 {
+                        alpha[j] = 1e-300;
+                    }
+                }
+                if rlo == rup {
+                    continue;
+                }
+                let e = sigma * -wi;
+                let (st, di) = (basis.row[i], y[i]);
+                let r = match st {
+                    VarStatus::Lower if e < 0.0 => {
+                        bad |= di < -dtol;
+                        di.max(0.0) / -e
+                    }
+                    VarStatus::Upper if e > 0.0 => {
+                        bad |= di > dtol;
+                        (-di).max(0.0) / e
+                    }
+                    VarStatus::Zero => 0.0,
+                    _ => continue,
+                };
+                theta = theta.min(r);
+            }
+            for &j in &touched {
+                let a = alpha[j];
+                alpha[j] = 0.0;
+                if j == k || a.abs() <= eps || theta < gap || bad {
+                    continue;
+                }
+                let (lo, up) = col_b[j];
+                if lo == up {
+                    continue;
+                }
+                let e = sigma * a;
+                let r = match basis.col[j] {
+                    VarStatus::Lower if e < 0.0 => {
+                        bad |= d[j] < -dtol;
+                        d[j].max(0.0) / -e
+                    }
+                    VarStatus::Upper if e > 0.0 => {
+                        bad |= d[j] > dtol;
+                        (-d[j]).max(0.0) / e
+                    }
+                    VarStatus::Zero => 0.0,
+                    _ => continue,
+                };
+                theta = theta.min(r);
+            }
+            touched.clear();
+            if bad {
+                self.nodecnt_stats[6] += 1;
+                continue;
+            }
+            // 余裕を持たせる: θ がギャップをはっきり越えるときだけ (θ (1 - 1e-6) > ギャップ + 1e-6 (1 + |z|))
+            let ok = theta == f64::INFINITY || theta * (1.0 - 1e-6) > gap + 1e-6 * (1.0 + node_obj.abs());
+            if !ok {
+                continue;
+            }
+            let (lo, up) = (self.dom.lo[k], self.dom.up[k]);
+            self.dom.set_external_tag(1);
+            let c = if sigma > 0.0 { self.dom.tighten_upper(self.p, k, lo) } else { self.dom.tighten_lower(self.p, k, up) };
+            self.dom.set_external(false);
+            if c {
+                changed = true;
+                self.nodecnt_stats[if theta == f64::INFINITY { 4 } else { 3 }] += 1;
+            }
+            if self.dom.infeasible {
+                break;
+            }
+        }
+        self.nodecnt_stats[5] += changed as u64;
         changed
     }
 
@@ -19472,6 +19630,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.par_sb_stats[0] > 0 {
                 eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
             }
+            if nodecnt_on() {
+                let c = &self.nodecnt_stats;
+                eprintln!("MIP: NODECNT degenerate duals (tid {}): nodes {}, candidates {}, btran {}, fixed by theta >= gap {}, fixed by theta = inf {}, nodes changed {}, sign mismatch {}", self.pool_tid, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
+            }
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
             if sb_agree_on() {
                 eprintln!("MIP: branching: strong branching vs pseudocost: {} of {} agreed, {} nodes without strong branching", self.sb_agree_stats[1], self.sb_agree_stats[0], self.sb_agree_stats[2]);
@@ -19618,6 +19780,12 @@ fn obj_step_lattice() -> bool {
 }
 
 /// [`Solver::prune_limit_ex`] の式 (`eff` は自分と共有の暫定解の良い方、`outer` は根のサブ MIP の外側の上限)。
+/// 試作 `ENOMOTO_MIP_NODECNT` (既定では使わない): ノードで基底にあって境界に張り付いた整数列の被約費用による固定
+/// ([`Solver::degen_dual_fixing`])
+fn nodecnt_on() -> bool {
+    env_str!("ENOMOTO_MIP_NODECNT").is_some()
+}
+
 fn prune_limit_of(eff: Option<f64>, outer: f64, obj_step: Option<f64>, off: f64, rel_gap: f64, abs_gap: f64, cutoff: f64) -> f64 {
     let lim = match eff.as_ref() {
         None => cutoff,
