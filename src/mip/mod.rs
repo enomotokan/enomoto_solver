@@ -3999,8 +3999,18 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     } else {
         u64::MAX
     };
-    let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| lp.total_iterations() - root_iters < iter_budget && lp.total_iterations() < lp_iter_cap && t0.elapsed().as_secs_f64() < secs;
+    // `ENOMOTO_MIP_PREPAR` の `l` (試作、[`prepar_has`]): 1 巡の中の列の試しは、どれも巡の始めの状態 (`saved`) から解くので互いに
+    // 独立。候補の窓を塊に分け、塊ごとの LP の写し (巡の始めに作る) で順に試し、決まった順にまとめる。写しで使った反復は
+    // `it_extra` に足して、逐次と同じく手間の上限・あきらめに数える。窓・塊の大きさはスレッドの数によらない
+    let par_threads = PREPAR_THREADS.with(|t| t.get());
+    let lpar = try_fix && prepar_has('l') && par_threads >= 1 && !solver::in_submip_thread();
+    let lpool = lpar.then(|| rayon::ThreadPoolBuilder::new().num_threads(par_threads).build().ok()).flatten();
+    let lpar_blocks = tunable!("ENOMOTO_T_MIP_PREPAR_BLOCKS", 4usize, usize).max(1);
+    let it_extra = std::cell::Cell::new(0u64);
+    let tot_it = |lp: &crate::simplex::mip_lp::TwoStageLp| lp.total_iterations() + it_extra.get();
+    let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| tot_it(lp) - root_iters < iter_budget && tot_it(lp) < lp_iter_cap && t0.elapsed().as_secs_f64() < secs;
     let (mut n_lps, mut n_fixed, mut n_tried) = (0usize, 0usize, 0usize);
+    let mut n_lwin = 0usize;
     let mut tried: std::collections::HashSet<(usize, i64)> = std::collections::HashSet::new();
     let mut ok = true;
     for pass in 0..passes {
@@ -4021,25 +4031,75 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
         let saved = lp.save_state();
         // (列, 上限を締めるか, 値)
         let mut fixes: Vec<(usize, bool, f64)> = Vec::new();
-        for &(j, v) in &cands {
-            if !budget_left(&lp) || (n_fixed + fixes.len() == 0 && (n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs || lp.total_iterations() > giveup_iters)) {
+        // `ENOMOTO_MIP_PREPAR` の `l`: 塊ごとの LP の写し (この巡の始めの状態) と、窓の結果 (上の子が切れるか, 下の子が切れるか, 反復)
+        let mut wk: Vec<crate::simplex::mip_lp::TwoStageLp> = Vec::new();
+        let (mut win, mut win_start): (Vec<(bool, bool, u64)>, usize) = (Vec::new(), 0);
+        // 塊の大きさ: 最初の窓はあきらめの列の数 (`giveup`) を塊に分けた大きさ、窓ごとに倍 (`ENOMOTO_T_MIP_PREPAR_LP_BSZ_MAX` まで)
+        let mut lbsz = (giveup / lpar_blocks).max(1);
+        for (ci, &(j, v)) in cands.iter().enumerate() {
+            if !budget_left(&lp) || (n_fixed + fixes.len() == 0 && (n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs || tot_it(&lp) > giveup_iters)) {
                 break;
             }
             tried.insert((j, v.floor() as i64));
             n_tried += 1;
             let (lo, up) = (prob.col_lo[j], prob.col_up[j]);
             let mut cut = [false; 2];
-            for (side, is_up) in [(0usize, true), (1usize, false)] {
-                if is_up {
-                    lp.set_col_bounds(j, v.ceil(), up);
-                } else {
-                    lp.set_col_bounds(j, lo, v.floor());
+            if let Some(pool) = &lpool {
+                if ci >= win_start + win.len() {
+                    if wk.is_empty() {
+                        wk = (0..lpar_blocks).map(|_| lp.clone()).collect();
+                    } else {
+                        lbsz = (lbsz * 2).min(tunable!("ENOMOTO_T_MIP_PREPAR_LP_BSZ_MAX", 16usize, usize).max(1));
+                    }
+                    let end = (ci + lbsz * lpar_blocks).min(cands.len());
+                    let rem = if work { lp_iter_cap.saturating_sub(tot_it(&lp)).max(1) } else { u64::MAX };
+                    let blocks: Vec<&[(usize, f64)]> = cands[ci..end].chunks(lbsz).collect();
+                    let (col_lo, col_up, saved_r) = (&prob.col_lo, &prob.col_up, &saved);
+                    let res: Vec<Vec<(bool, bool, u64)>> = pool.install(|| {
+                        use rayon::prelude::*;
+                        wk.par_iter_mut()
+                            .zip(blocks.par_iter())
+                            .map(|(w, bl)| {
+                                bl.iter()
+                                    .map(|&(j, v)| {
+                                        let it0 = w.total_iterations();
+                                        let mut c = [false; 2];
+                                        for (side, is_up) in [(0usize, true), (1usize, false)] {
+                                            if is_up {
+                                                w.set_col_bounds(j, v.ceil(), col_up[j]);
+                                            } else {
+                                                w.set_col_bounds(j, col_lo[j], v.floor());
+                                            }
+                                            c[side] = w.solve(&SolveLimits { iteration_limit: per_lp.min(rem), deadline, ..Default::default() }) == LpStatus::Infeasible;
+                                            w.restore_state(saved_r);
+                                        }
+                                        (c[0], c[1], w.total_iterations() - it0)
+                                    })
+                                    .collect()
+                            })
+                            .collect()
+                    });
+                    win = res.into_iter().flatten().collect();
+                    win_start = ci;
+                    n_lwin += 1;
                 }
-                // `ENOMOTO_MIP_PRESOLVE_WORK`: 反復の上限 `lp_iter_cap` を越えない (時間の期限で途中で止まる分を手間で決める)
-                let lim = if work { per_lp.min(lp_iter_cap.saturating_sub(lp.total_iterations()).max(1)) } else { per_lp };
-                cut[side] = lp.solve(&SolveLimits { iteration_limit: lim, deadline, ..Default::default() }) == LpStatus::Infeasible;
-                n_lps += 1;
-                lp.restore_state(&saved);
+                let (c0, c1, it) = win[ci - win_start];
+                it_extra.set(it_extra.get() + it);
+                cut = [c0, c1];
+                n_lps += 2;
+            } else {
+                for (side, is_up) in [(0usize, true), (1usize, false)] {
+                    if is_up {
+                        lp.set_col_bounds(j, v.ceil(), up);
+                    } else {
+                        lp.set_col_bounds(j, lo, v.floor());
+                    }
+                    // `ENOMOTO_MIP_PRESOLVE_WORK`: 反復の上限 `lp_iter_cap` を越えない (時間の期限で途中で止まる分を手間で決める)
+                    let lim = if work { per_lp.min(lp_iter_cap.saturating_sub(lp.total_iterations()).max(1)) } else { per_lp };
+                    cut[side] = lp.solve(&SolveLimits { iteration_limit: lim, deadline, ..Default::default() }) == LpStatus::Infeasible;
+                    n_lps += 1;
+                    lp.restore_state(&saved);
+                }
             }
             match (cut[0], cut[1]) {
                 (true, true) => {
@@ -4060,7 +4120,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                 fixes.len(),
                 if ok { "" } else { ", both sides infeasible" },
                 n_lps,
-                lp.total_iterations() - root_iters,
+                tot_it(&lp) - root_iters,
                 t0.elapsed().as_secs_f64()
             );
         }
@@ -4077,7 +4137,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
         }
         n_fixed += fixes.len();
         // 固定した後の解き直しの反復の上限 (`ENOMOTO_MIP_PRESOLVE_WORK` のとき): 残りの手間と最初の LP の反復の大きい方
-        let lim = if work { lp_iter_cap.saturating_sub(lp.total_iterations()).max(root_iters) } else { u64::MAX };
+        let lim = if work { lp_iter_cap.saturating_sub(tot_it(&lp)).max(root_iters) } else { u64::MAX };
         match lp.solve(&SolveLimits { iteration_limit: lim, deadline, ..Default::default() }) {
             LpStatus::Optimal => {}
             LpStatus::Infeasible => {
@@ -4089,14 +4149,15 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     }
     if verbose && n_tried > 0 {
         eprintln!(
-            "MIP: LP probing: tried {} columns, fixed {}, LP {:.10e} -> {:.10e} ({} LPs, {} iters, {:.2}s)",
+            "MIP: LP probing: tried {} columns, fixed {}, LP {:.10e} -> {:.10e} ({} LPs, {} iters, {:.2}s{})",
             n_tried,
             n_fixed,
             z0,
             lp.objective() + prob.offset,
             n_lps,
-            lp.total_iterations() - root_iters,
-            t0.elapsed().as_secs_f64()
+            tot_it(&lp) - root_iters,
+            t0.elapsed().as_secs_f64(),
+            if lpool.is_some() { format!(", PREPAR {par_threads} threads, {n_lwin} windows") } else { String::new() }
         );
     }
     if !ok {
@@ -4229,7 +4290,8 @@ pub(crate) fn prepar_has(c: char) -> bool {
 }
 
 thread_local! {
-    /// `ENOMOTO_MIP_PREPAR` で使うスレッドの数 (最初の求解の `params.threads`。サブ MIP・再スタートでは 1)
+    /// `ENOMOTO_MIP_PREPAR` で使うスレッドの数 (最初の求解の `params.threads`。サブ MIP・再スタートでは 1)。1 本でも窓で試す
+    /// (結果をスレッドの数によらずそろえるため)
     static PREPAR_THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
 }
 
@@ -4408,7 +4470,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // 逐次に試す。今の定義域が窓を作った時点から変わっていなければ (固定・締め付けがなければ) 結果をそのまま使い、変わっていれば
     // 次の候補から窓を作り直す。窓・塊の大きさはスレッドの数によらず決まるので、結果はスレッドの数・順序によらない
     let par_threads = PREPAR_THREADS.with(|t| t.get());
-    let par = prepar_has('p') && !submip && !want_strengthen && !want_pclique && par_threads > 1 && !solver::in_submip_thread();
+    let par = prepar_has('p') && !submip && !want_strengthen && !want_pclique && par_threads >= 1 && !solver::in_submip_thread();
     let pool = par.then(|| rayon::ThreadPoolBuilder::new().num_threads(par_threads).build().ok()).flatten();
     let par_blocks = tunable!("ENOMOTO_T_MIP_PREPAR_BLOCKS", 4usize, usize).max(1);
     let (bsz_min, bsz_max) = (2usize, tunable!("ENOMOTO_T_MIP_PREPAR_BSZ_MAX", 32usize, usize).max(2));
