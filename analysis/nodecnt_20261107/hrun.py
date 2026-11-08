@@ -21,7 +21,9 @@ for kv in sys.argv[4:]:
                 pass
     opts[k] = v
 h = highspy.Highs()
-log = D / "logs" / f"H_{name}_{tag}.log"
+# 書いている途中のログを git が書き換えないよう、追跡しない logs/tmp/ に書いてから移す
+(D / "logs" / "tmp").mkdir(parents=True, exist_ok=True)
+log = D / "logs" / "tmp" / f"H_{name}_{tag}.log"
 h.setOptionValue("output_flag", True)
 h.setOptionValue("log_to_console", False)
 h.setOptionValue("log_file", str(log))
@@ -39,6 +41,8 @@ info = h.getInfo()
 r = dict(prob=name, tag=tag, opts=opts, tl=tl, secs=round(dt, 2), status=h.modelStatusToString(h.getModelStatus()),
          nodes=int(info.mip_node_count), obj=info.objective_function_value, bound=info.mip_dual_bound, gap=info.mip_gap,
          iters=int(info.simplex_iteration_count))
+del h
+log.replace(D / "logs" / f"H_{name}_{tag}.log")
 print(json.dumps(r))
 with open(D / "hres.jsonl", "a") as f:
     f.write(json.dumps(r) + "\n")
