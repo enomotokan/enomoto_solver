@@ -81,3 +81,10 @@ python run1.py ours trento1 JT600 2 600 ENOMOTO_MIP_SUBCAP=JT
 python run1.py ours neos-873061 def_b600 2 600
 python run1.py ours neos-873061 JT600 2 600 ENOMOTO_MIP_SUBCAP=JT
 BENCH58_OUT=bench58_b.jsonl python bench58.py def,JT 0
+BENCH58_OUT=bench58_b.jsonl python bench58.py def,JT 1
+./fuzz/run_fuzz.sh
+python run1.py ours neos-1456979 def60 1 60 
+python run1.py ours neos-1456979 JT60 1 60 ENOMOTO_MIP_SUBCAP=JT
+python run1.py ours neos-1456979 def60 2 60 
+python run1.py ours neos-1456979 JT60 2 60 ENOMOTO_MIP_SUBCAP=JT
+cd ../.. && RUSTFLAGS="-C link-arg=-L/usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib cargo test --release --lib > analysis/submip_cap_20261106/cargo_test_1108.log 2>&1; tail -1 analysis/submip_cap_20261106/cargo_test_1108.log

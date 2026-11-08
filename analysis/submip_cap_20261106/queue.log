@@ -167,3 +167,16 @@
 22:30:35 start BENCH58_OUT=bench58_b.jsonl python bench58.py def,JT 0
 23:19:49 graph20-20-1rand JT 0 time_limit 60.02285678299995
 23:19:49 start BENCH58_OUT=bench58_b.jsonl python bench58.py def,JT 1
+00:08:46 graph20-20-1rand def 1 time_limit 60.024030890002905
+00:08:46 start ./fuzz/run_fuzz.sh
+00:09:01 
+00:10:01 start python run1.py ours neos-1456979 def60 1 60 
+00:11:01 neos-1456979 ours def60 1 time_limit 60.0 221.0 11278
+00:11:01 start python run1.py ours neos-1456979 JT60 1 60 ENOMOTO_MIP_SUBCAP=JT
+00:12:01 neos-1456979 ours JT60 1 time_limit 60.0 263.0 12450
+00:12:01 start python run1.py ours neos-1456979 def60 2 60 
+00:13:02 neos-1456979 ours def60 2 time_limit 60.0 238.0 8858
+00:13:02 start python run1.py ours neos-1456979 JT60 2 60 ENOMOTO_MIP_SUBCAP=JT
+00:14:02 neos-1456979 ours JT60 2 time_limit 60.0 221.0 11976
+00:14:02 start cd ../.. && RUSTFLAGS="-C link-arg=-L/usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib cargo test --release --lib > analysis/submip_cap_20261106/cargo_test_1108.log 2>&1; tail -1 analysis/submip_cap_20261106/cargo_test_1108.log
+00:15:46 

@@ -5,7 +5,7 @@ import json, sys
 from collections import defaultdict
 from pathlib import Path
 D = Path(__file__).resolve().parent
-rows = [json.loads(l) for l in (D / "bench58.jsonl").read_text().splitlines() if l.strip()]
+rows = [json.loads(l) for l in (D / __import__("os").environ.get("BENCH58_OUT", "bench58.jsonl")).read_text().splitlines() if l.strip()]
 best = {}
 for r in rows:
     z = r["result"].get("objective")

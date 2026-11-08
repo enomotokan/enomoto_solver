@@ -5,7 +5,7 @@ from collections import defaultdict
 from pathlib import Path
 a, b = sys.argv[1], sys.argv[2]
 R = defaultdict(dict)
-for l in (Path(__file__).parent / "bench58.jsonl").read_text().splitlines():
+for l in (Path(__file__).parent / __import__("os").environ.get("BENCH58_OUT", "bench58.jsonl")).read_text().splitlines():
     r = json.loads(l)
     st = r["result"].get("status", "")
     t = r["result"]["time"] if st.lower() == "optimal" and r["result"].get("time") is not None else 60.0
