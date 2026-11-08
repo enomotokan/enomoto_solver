@@ -21,7 +21,7 @@ for line in Path(sys.argv[1]).read_text().splitlines():
     if not a or a[0].startswith("#"):
         continue
     if a[0] == "e":
-        _, cfg, p, tl, seed = a
+        _, cfg, p, tl, seed = a[:5]
         out = a[5] if len(a) > 5 else "e.jsonl"
         if (p, cfg, int(tl), int(seed)) in done(out, lambda r: (r["problem"], r["cfg"], r["tl"], r["rep"])):
             continue
