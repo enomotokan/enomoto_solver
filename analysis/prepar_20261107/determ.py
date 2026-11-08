@@ -18,6 +18,9 @@ for p in probs:
         f = tmp / f"{p}_{val}_{th}.mps"
         env.update({"ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_THREADS": th, "ENOMOTO_T_MIP_SEED": "1", "ENOMOTO_MIP_DEBUG_PRETIME": "1",
                     "ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED3": str(f), "ENOMOTO_MIP_DEBUG_STOP_PRESOLVED": "1"})
+        # DETERM_NORACE=1: 基底のない LP の同時実行 (勝ち負けが時間で決まる) を止める (ENOMOTO_MIP_MC11FIX1_RACE=s を全部の大きさに)
+        if os.environ.get("DETERM_NORACE"):
+            env.update({"ENOMOTO_MIP_MC11FIX1_RACE": "s", "ENOMOTO_T_MIP_MC11FIX1_RACE_SIZE": "1e15"})
         if val != "def":
             env["ENOMOTO_MIP_PREPAR"] = val
         t0 = time.time()
@@ -27,7 +30,7 @@ for p in probs:
         md5 = hashlib.md5(f.read_bytes()).hexdigest()[:12] if f.exists() else None
         if f.exists():
             f.unlink()
-        r = {"problem": p, "cfg": cfg, "wall": round(time.time() - t0, 2), "md5": md5}
+        r = {"problem": p, "cfg": cfg, "norace": bool(os.environ.get("DETERM_NORACE")), "wall": round(time.time() - t0, 2), "md5": md5}
         m = re.search(r"PRETIME total=([\d.]+) m=(\d+) n=(\d+) nnz=(\d+) free=(\d+)", err)
         pt = [l for l in err.splitlines() if l.startswith("PRETIME")]
         if pt:
