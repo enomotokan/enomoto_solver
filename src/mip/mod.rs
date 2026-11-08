@@ -1057,6 +1057,14 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     if !params.submip && params.restarts == 0 {
         pretime::start();
     }
+    let prev_par = PREPAR_THREADS.with(|t| t.replace(if !params.submip && params.restarts == 0 { params.threads.max(1) } else { 1 }));
+    struct RestorePar(usize);
+    impl Drop for RestorePar {
+        fn drop(&mut self) {
+            PREPAR_THREADS.with(|t| t.set(self.0));
+        }
+    }
+    let _restore_par = RestorePar(prev_par);
     // 前処理の重い手順の期限 ([`presolve_stop`]): この求解の時間の上限。戻るときに前の値 (外側の求解のもの) に戻す
     struct RestoreDeadline(Option<std::time::Instant>);
     impl Drop for RestoreDeadline {
@@ -4180,6 +4188,51 @@ pub(crate) fn presolve_work_safe() -> f64 {
 /// (非零数の `ENOMOTO_T_MIP_PROBE_WORK` 倍、既定 20 倍) と時間 (`ENOMOTO_T_MIP_PROBE_TIME` 秒、既定 0.5 秒。固定・締め付けが
 /// 出ていれば `ENOMOTO_T_MIP_PROBE_TIME_FOUND` 秒、既定 0.5 秒。長い行の多い問題 (nw04・air03) は 1 回が重く何も得られない) で打ち切る。
 /// 締めた境界があれば `Some(true)`、何もなければ `None`。
+/// [`probe`] の投機的な試しの結果 (`ENOMOTO_MIP_PREPAR` の `p`): x_j = 0 と x_j = 1 の伝播が成り立つか、変わった境界、
+/// 数えた手間 (行の走査, 活動の更新, 境界の変更)
+struct ProbeSpec {
+    ok0: bool,
+    ch0: Vec<(usize, bool, f64)>,
+    ok1: bool,
+    ch1: Vec<(usize, bool, f64)>,
+    w: (u64, u64, u64),
+}
+
+/// 塊の候補を、`base` の写しで順に試す (各候補の後に巻き戻す)。`base` で固定されている候補は `None`
+fn probe_spec_block(prob: &MipProblem, base: &domain::Domain, js: &[usize]) -> Vec<Option<ProbeSpec>> {
+    let mut d = base.clone();
+    js.iter()
+        .map(|&j| {
+            if d.lo[j] == d.up[j] {
+                return None;
+            }
+            let s = (d.debug_work(), domain::act_work(), domain::chg_count());
+            let pos = d.stack_len();
+            d.tighten_upper(prob, j, 0.0);
+            let ok0 = d.propagate(prob);
+            let ch0: Vec<_> = if ok0 { d.changes_since(pos).collect() } else { Vec::new() };
+            d.backtrack_to(prob, pos);
+            d.tighten_lower(prob, j, 1.0);
+            let ok1 = d.propagate(prob);
+            let ch1: Vec<_> = if ok1 { d.changes_since(pos).collect() } else { Vec::new() };
+            d.backtrack_to(prob, pos);
+            let e = (d.debug_work(), domain::act_work(), domain::chg_count());
+            Some(ProbeSpec { ok0, ch0, ok1, ch1, w: (e.0 - s.0, e.1 - s.1, e.2 - s.2) })
+        })
+        .collect()
+}
+
+/// 試作 `ENOMOTO_MIP_PREPAR` (既定では使わない。analysis/prepar_20261107.md): 前処理の並列化。値の文字で選ぶ
+/// (`p`: 含意を集めるプロービング ([`probe`]) の候補を投機的に並べる)
+pub(crate) fn prepar_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_PREPAR").is_some_and(|v| v.contains(c))
+}
+
+thread_local! {
+    /// `ENOMOTO_MIP_PREPAR` で使うスレッドの数 (最初の求解の `params.threads`。サブ MIP・再スタートでは 1)
+    static PREPAR_THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+}
+
 fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let _pt = pretime::guard("probe");
     use domain::Domain;
@@ -4312,8 +4365,12 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_W_CHG", 68.0, f64),
         tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_W_IMPL", 190.0, f64),
     );
+    // `ENOMOTO_MIP_PREPAR` の `p` ([`prepar_has`]): ほかのスレッドで試した分の手間 (行の走査, 活動の更新, 境界の変更)。
+    // 手間はスレッドごとに数えるので、使った試しの分をここに足して、逐次と同じ数え方にする
+    let spec_w: std::cell::Cell<(u64, u64, u64)> = std::cell::Cell::new((0, 0, 0));
     let pwork = |dom: &Domain, probed: usize, n_edges: usize| {
-        (ww * (dom.debug_work() - work0) as f64 + wa * (domain::act_work() - act0) as f64 + wc * (domain::chg_count() - chg0) as f64 + wi * n_edges.saturating_sub(e_init) as f64 + each * probed as f64) as u64
+        let sw = spec_w.get();
+        (ww * (dom.debug_work() - work0 + sw.0) as f64 + wa * (domain::act_work() - act0 + sw.1) as f64 + wc * (domain::chg_count() - chg0 + sw.2) as f64 + wi * n_edges.saturating_sub(e_init) as f64 + each * probed as f64) as u64
     };
     // 予算の初期値は候補の数 (全部を一巡できる)。`ENOMOTO_T_MIP_PROBE_BASE` > 0 ならその回数。HiGHS の 1000 回は含意の多い列
     // から試す順番と組み合わせたもので、行の多い列から試すこちらの順番では、30n20b8 の固定できる列 (3 行の短い列、3161 本)
@@ -4346,16 +4403,31 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // 行 -> (新しい行の係数の絶対値の和, 列 j, 係数の増分, 下限の増分, 上限の増分)
     let mut st_best: std::collections::HashMap<usize, (f64, usize, f64, f64, f64)> = std::collections::HashMap::new();
     let mut passes = 0usize;
+    // `ENOMOTO_MIP_PREPAR` の `p` (試作、既定では使わない。analysis/prepar_20261107.md): 先の候補をほかのスレッドで投機的に試す
+    // ([`ProbeSpec`])。候補の並びの窓 (`PROBE_PAR_BLOCKS` 個の塊、塊は `bsz` 個の候補) を、窓を作った時点の定義域の写しで塊ごとに
+    // 逐次に試す。今の定義域が窓を作った時点から変わっていなければ (固定・締め付けがなければ) 結果をそのまま使い、変わっていれば
+    // 次の候補から窓を作り直す。窓・塊の大きさはスレッドの数によらず決まるので、結果はスレッドの数・順序によらない
+    let par_threads = PREPAR_THREADS.with(|t| t.get());
+    let par = prepar_has('p') && !submip && !want_strengthen && !want_pclique && par_threads > 1 && !solver::in_submip_thread();
+    let pool = par.then(|| rayon::ThreadPoolBuilder::new().num_threads(par_threads).build().ok()).flatten();
+    let par_blocks = tunable!("ENOMOTO_T_MIP_PREPAR_BLOCKS", 4usize, usize).max(1);
+    let (bsz_min, bsz_max) = (2usize, tunable!("ENOMOTO_T_MIP_PREPAR_BSZ_MAX", 32usize, usize).max(2));
+    let mut bsz = tunable!("ENOMOTO_T_MIP_PREPAR_BSZ", 8usize, usize).clamp(bsz_min, bsz_max);
+    // 今の定義域の版 (固定・締め付けのたびに増やす)
+    let mut ver = 0u64;
+    let (mut spec, mut spec_start, mut spec_ver, mut spec_used): (Vec<Option<ProbeSpec>>, usize, u64, usize) = (Vec::new(), 0, u64::MAX, 0);
+    let (mut n_windows, mut n_spec_used) = (0usize, 0usize);
     'passes: for _pass in 0..max_pass {
         passes += 1;
         let fixed_pass0 = fixed;
+        spec_ver = u64::MAX;
         for (cnt, &j) in cands.iter().enumerate() {
             let (cap, wcap) = if fixed + tightened > 0 { (time_cap_found, wcap1) } else { (time_cap, wcap0) };
             // 診断用 (`ENOMOTO_MIP_DEBUG_PROBE_PROGRESS`): 16 候補ごとの経過 (CPU 時間・試した数・固定・締め付け・含意の数)
             if cnt % 16 == 0 && verbose && env_str!("ENOMOTO_MIP_DEBUG_PROBE_PROGRESS").is_some() {
                 eprintln!("MIP:   probing progress: candidate {cnt} (pass {passes}), probed {probed}, fixed {fixed}, tightened {tightened}, implications {}, cpu {:.3}s", edges.len(), cap_clock() - c0);
             }
-            if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || pwork(&dom, probed, edges.len()) > wcap || cap_clock() - c0 > cap || presolve_stop()) {
+            if cnt % 16 == 0 && (dom.debug_work() - work0 + spec_w.get().0 > work_cap || pwork(&dom, probed, edges.len()) > wcap || cap_clock() - c0 > cap || presolve_stop()) {
                 break 'passes;
             }
             if dom.lo[j] == dom.up[j] {
@@ -4366,25 +4438,63 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             }
             let found0 = fixed + tightened;
             probed += 1;
-            let pos = dom.stack_len();
-            // x_j = 0 (変わった境界だけ覚える: 全列の境界を写すと列の多い問題で重い)
-            dom.tighten_upper(prob, j, 0.0);
-            let ok0 = dom.propagate(prob);
-            let ch0: Vec<_> = if ok0 { dom.changes_since(pos).collect() } else { Vec::new() };
-            st_c0.clear();
-            if want_strengthen && ok0 {
-                probe_strengthen_collect(prob, &dom.lo, &dom.up, j, false, &ch0, &mut st_mark, &mut st_touched, &mut st_c0);
-            }
-            dom.backtrack_to(prob, pos);
-            // x_j = 1
-            dom.tighten_lower(prob, j, 1.0);
-            let ok1 = dom.propagate(prob);
-            let ch1: Vec<_> = if ok1 { dom.changes_since(pos).collect() } else { Vec::new() };
-            st_c1.clear();
-            if want_strengthen && ok1 {
-                probe_strengthen_collect(prob, &dom.lo, &dom.up, j, true, &ch1, &mut st_mark, &mut st_touched, &mut st_c1);
-            }
-            dom.backtrack_to(prob, pos);
+            // `ENOMOTO_MIP_PREPAR` の `p`: 窓の結果を使う (窓がない・古ければ、ここから窓を作る)
+            let spec_res = if let Some(pool) = &pool {
+                if spec_ver != ver || cnt < spec_start || cnt >= spec_start + spec.len() {
+                    // 前の窓の使われ方で塊の大きさを決める (使い切れば倍、1/4 未満で半分。候補の並びだけで決まる)
+                    if !spec.is_empty() {
+                        if spec_used * 4 < spec.len() {
+                            bsz = (bsz / 2).max(bsz_min);
+                        } else if spec_used >= spec.len() {
+                            bsz = (bsz * 2).min(bsz_max);
+                        }
+                    }
+                    let end = (cnt + bsz * par_blocks).min(cands.len());
+                    let base: &Domain = &dom;
+                    let pr: &MipProblem = prob;
+                    let blocks: Vec<&[usize]> = cands[cnt..end].chunks(bsz).collect();
+                    let res: Vec<Vec<Option<ProbeSpec>>> = pool.install(|| {
+                        use rayon::prelude::*;
+                        blocks.par_iter().map(|bl| probe_spec_block(pr, base, bl)).collect()
+                    });
+                    spec = res.into_iter().flatten().collect();
+                    spec_start = cnt;
+                    spec_ver = ver;
+                    spec_used = 0;
+                    n_windows += 1;
+                }
+                spec_used = cnt - spec_start + 1;
+                spec[cnt - spec_start].take()
+            } else {
+                None
+            };
+            let (ok0, ch0, ok1, ch1) = if let Some(r) = spec_res {
+                n_spec_used += 1;
+                let w = spec_w.get();
+                spec_w.set((w.0 + r.w.0, w.1 + r.w.1, w.2 + r.w.2));
+                (r.ok0, r.ch0, r.ok1, r.ch1)
+            } else {
+                let pos = dom.stack_len();
+                // x_j = 0 (変わった境界だけ覚える: 全列の境界を写すと列の多い問題で重い)
+                dom.tighten_upper(prob, j, 0.0);
+                let ok0 = dom.propagate(prob);
+                let ch0: Vec<_> = if ok0 { dom.changes_since(pos).collect() } else { Vec::new() };
+                st_c0.clear();
+                if want_strengthen && ok0 {
+                    probe_strengthen_collect(prob, &dom.lo, &dom.up, j, false, &ch0, &mut st_mark, &mut st_touched, &mut st_c0);
+                }
+                dom.backtrack_to(prob, pos);
+                // x_j = 1
+                dom.tighten_lower(prob, j, 1.0);
+                let ok1 = dom.propagate(prob);
+                let ch1: Vec<_> = if ok1 { dom.changes_since(pos).collect() } else { Vec::new() };
+                st_c1.clear();
+                if want_strengthen && ok1 {
+                    probe_strengthen_collect(prob, &dom.lo, &dom.up, j, true, &ch1, &mut st_mark, &mut st_touched, &mut st_c1);
+                }
+                dom.backtrack_to(prob, pos);
+                (ok0, ch0, ok1, ch1)
+            };
             match (ok0, ok1) {
                 (false, false) => return Some(false),
                 (false, true) | (true, false) => {
@@ -4395,6 +4505,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                         return Some(false);
                     }
                     fixed += 1;
+                    ver += 1;
                     if env_str!("ENOMOTO_MIP_DEBUG_PROBE").is_some() {
                         eprintln!("MIP:   probing fixed column {j} at candidate {cnt} (pass {passes}, {} rows)", prob.cols[j].len());
                     }
@@ -4467,6 +4578,9 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                                 tightened += 1;
                             }
                         }
+                    }
+                    if any {
+                        ver += 1;
                     }
                     if any && !dom.propagate(prob) {
                         return Some(false);
@@ -4618,6 +4732,9 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             pwork(&dom, probed, edges.len()),
             domain::chg_count() - chg0
         );
+    }
+    if verbose && pool.is_some() {
+        eprintln!("MIP: probing: PREPAR {par_threads} threads, {n_windows} windows, {n_spec_used} of {probed} probes from the windows");
     }
     PROBE_FIXED.with(|f| f.set(fixed));
     prob.conflict_edges = edges;
