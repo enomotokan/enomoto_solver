@@ -4368,7 +4368,11 @@ fn probe_derive(j: usize, ch0: &[(usize, bool, f64)], ch1: &[(usize, bool, f64)]
 
 /// 塊の候補を、`base` の写しで順に試す (各候補の後に巻き戻す)。`base` で固定されている候補は `None`
 fn probe_spec_block(prob: &MipProblem, base: &domain::Domain, js: &[usize], cx: &ProbeSpecCtx) -> Vec<Option<ProbeSpec>> {
+    let tc = std::time::Instant::now();
     let mut d = base.clone();
+    if env_str!("ENOMOTO_MIP_PREPAR_DEBUG").is_some() {
+        eprintln!("PREPAR clone {:.4}s", tc.elapsed().as_secs_f64());
+    }
     js.iter()
         .map(|&j| {
             if d.lo[j] == d.up[j] {
@@ -4666,14 +4670,14 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             let spec_res = if let Some(pool) = &pool {
                 let valid = spec_ver == ver && cnt >= spec_start && cnt < spec_start + spec.len();
                 if !valid && !spec.is_empty() {
-                    // 前の窓の使われ方で塊の大きさを決める (使い切れば倍、1/4 未満で半分。候補の並びだけで決まる)。
+                    // 前の窓の使われ方で塊の大きさを決める (使い切れば倍、1/4 未満で 1/4。候補の並びだけで決まる)。
                     // 塊が最小でも 1/4 未満しか使えなければ (固定が続く)、次の `seq_run` 個の候補は逐次に試す (続けば倍)
                     if spec_used * 4 < spec.len() {
                         if bsz == bsz_min {
                             seq_left = seq_run;
                             seq_run = (seq_run * 2).min(1024);
                         }
-                        bsz = (bsz / 2).max(bsz_min);
+                        bsz = (bsz / 4).max(bsz_min);
                     } else if spec_used >= spec.len() {
                         bsz = (bsz * 2).min(bsz_max);
                         seq_run = 32;
@@ -4698,12 +4702,19 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     let end = (cnt + b * par_blocks).min(cands.len());
                     let base: &Domain = &dom;
                     let pr: &MipProblem = prob;
+                    // 窓が候補の残りで短くなったときも塊の数がそろうよう、窓を塊の数で等分する
+                    let b = (end - cnt).div_ceil(par_blocks).max(1);
                     let blocks: Vec<&[usize]> = cands[cnt..end].chunks(b).collect();
                     let cx = ProbeSpecCtx { bin0: &bin0, genint_on, want_impl, want_implied, want_equiv };
+                    let tw = std::time::Instant::now();
                     let res: Vec<Vec<Option<ProbeSpec>>> = pool.install(|| {
                         use rayon::prelude::*;
                         blocks.par_iter().map(|bl| probe_spec_block(pr, base, bl, &cx)).collect()
                     });
+                    // 診断 `ENOMOTO_MIP_PREPAR_DEBUG`: 窓ごとの大きさと時間
+                    if env_str!("ENOMOTO_MIP_PREPAR_DEBUG").is_some() {
+                        eprintln!("PREPAR window at {cnt}: {} blocks of {b}, {:.4}s", blocks.len(), tw.elapsed().as_secs_f64());
+                    }
                     spec = res.into_iter().flatten().collect();
                     spec_start = cnt;
                     spec_ver = ver;
