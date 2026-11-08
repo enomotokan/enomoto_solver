@@ -20,6 +20,7 @@ CFG = {
     "h": {"ENOMOTO_MIP_NODECNT": "h"},
     "htp": {"ENOMOTO_MIP_NODECNT": "h", "ENOMOTO_MIP_TREE1_POOL": "1"},
     "hp3": {"ENOMOTO_MIP_NODECNT": "h", "ENOMOTO_MIP_POOL3_BEST": "0.05"},
+    "hg": {"ENOMOTO_MIP_NODECNT": "hg"},
     "nds": {"ENOMOTO_MIP_SB_NO_DEGEN_SKIP": "1"},
     "ncnds": {"ENOMOTO_MIP_NODECNT": "1", "ENOMOTO_MIP_SB_NO_DEGEN_SKIP": "1"},
 }
