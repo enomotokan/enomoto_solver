@@ -4982,7 +4982,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         DEBUG_SOL.with(|d| {
             if let Some(x) = d.borrow().as_ref() {
                 for i in 0..self.lp.num_rows() {
-                    let act: f64 = self.lp.row(i).iter().map(|&(j, v)| v * x[j]).sum();
+                    let act: f64 = self.lp.row_ref(i).iter().map(|&(j, v)| v * x[j]).sum();
                     let (lo, up) = self.lp.row_bounds(i);
                     if act < lo - 1e-6 * (1.0 + lo.abs()) || act > up + 1e-6 * (1.0 + up.abs()) {
                         eprintln!("MIP_DEBUG_SOL {label}: LP row {i} violated: {lo} <= {act} <= {up} (orig rows {})", self.p.m);
@@ -5859,7 +5859,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let m0 = self.p.m;
         if self.nca_cut_nnz.is_none() && self.lp.num_rows() > m0 {
             let k = self.lp.num_rows() - m0;
-            self.nca_cut_nnz = Some((m0..self.lp.num_rows()).map(|i| self.lp.row(i).len()).sum::<usize>() as f64 / k as f64);
+            self.nca_cut_nnz = Some((m0..self.lp.num_rows()).map(|i| self.lp.row_ref(i).len()).sum::<usize>() as f64 / k as f64);
         }
         let avg = (self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / m0.max(1) as f64).max(1.0);
         // `ENOMOTO_MIP_TREE_SEP` では上限を列の数の `ENOMOTO_T_MIP_TREE_SEP_DENSITY_COLS` 倍 (既定 0.05) より下げない: 元の行が
@@ -10402,7 +10402,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if crate::simplex::slope_intercept_dual::nodelp_diag() {
                     crate::simplex::slope_intercept_dual::NODELP_M0.with(|c| c.set(self.p.m));
                 }
+                // 試作 `ENOMOTO_MIP_DSE_INIT` の `r`: 特異な基底は列を差し替えて warm start する
+                let _nl_sr = crate::simplex::slope_intercept_dual::dse_init_has('r').then(crate::simplex::slope_intercept_dual::SingRepairScope::new);
                 let mut st = self.lp.solve(&capped(self, iter_limit));
+                drop(_nl_sr);
                 if crate::simplex::slope_intercept_dual::nodelp_diag() {
                     crate::simplex::slope_intercept_dual::NODELP_M0.with(|c| c.set(0));
                 }
@@ -11084,7 +11087,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let mut d = self.p.cost.clone();
                         for (i, &yi) in y.iter().enumerate() {
                             if yi != 0.0 {
-                                for (j, a) in self.lp.row(i) {
+                                for &(j, a) in self.lp.row_ref(i) {
                                     d[j] -= yi * a;
                                 }
                             }
@@ -11753,7 +11756,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let act = self.lp.row_activities();
         let mut viol = 0usize;
         for i in 0..self.lp.num_rows() {
-            let a: f64 = self.lp.row(i).iter().map(|&(c, w)| w * x[c]).sum();
+            let a: f64 = self.lp.row_ref(i).iter().map(|&(c, w)| w * x[c]).sum();
             let (l, u) = self.lp.row_bounds(i);
             if a < l - 1e-6 * (1.0 + l.abs()) || a > u + 1e-6 * (1.0 + u.abs()) {
                 viol += 1;
@@ -12620,7 +12623,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let (rlo, rup) = self.lp.row_bounds(i);
                 // 構造列への寄与
-                for (j, a) in self.lp.row(i) {
+                for &(j, a) in self.lp.row_ref(i) {
                     if alpha[j] == 0.0 {
                         touched.push(j);
                     }
@@ -14504,7 +14507,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             konst += yi * b;
             num_err += yi.abs() * (1.0 + b.abs());
-            for (j, a) in self.lp.row(i) {
+            for &(j, a) in self.lp.row_ref(i) {
                 d[j] -= yi * a;
             }
         }
@@ -14692,7 +14695,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             if !b.is_finite() {
                                 continue;
                             }
-                            let ax: f64 = self.lp.row(i).iter().map(|&(j, a)| a * x[j]).sum();
+                            let ax: f64 = self.lp.row_ref(i).iter().map(|&(j, a)| a * x[j]).sum();
                             let t = yi * (ax - b);
                             sum_rows += t;
                             if t < -1e-7 * (1.0 + b.abs()) {
@@ -18196,7 +18199,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut cent: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nc];
         for (r, &i) in rows.iter().enumerate() {
             let mut e = Vec::new();
-            for (j, v) in self.lp.row(i) {
+            for &(j, v) in self.lp.row_ref(i) {
                 if j < n && cloc[j] != usize::MAX && v.abs() > 1e-12 {
                     e.push((cloc[j], v));
                     cent[cloc[j]].push((r, v));
@@ -19671,11 +19674,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !self.params.submip {
             print_nodelp_stats(self.pool_tid as usize, &self.nodelp_stats);
             if self.pool_tid == 0 && !self.params.submip && crate::simplex::slope_intercept_dual::nodelp_diag() {
+                let bc: Vec<u64> = crate::simplex::mip_lp::BINV_ROW_CHECK.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                if bc[0] > 0 {
+                    eprintln!("MIP: binv-row check n {} mismatched {}", bc[0], bc[1]);
+                }
                 let st: Vec<u64> = crate::simplex::DSE_EXACT_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!(
-                    "MIP: dse-exact n {} secs {:.3} ms/call {:.3} rows/call {:.0} max_rel_diff {:.3e} result_density {:.3} hyper_frac {:.3}",
+                    "MIP: dse-exact n {} secs {:.3} ms/call {:.3} rows/call {:.0} max_rel_diff {:.3e} result_density {:.3} hyper_frac {:.3} fill_calls {} fill_rows {}",
                     st[0], st[1] as f64 / 1e6, st[1] as f64 / 1e3 / st[0].max(1) as f64, st[2] as f64 / st[0].max(1) as f64, st[3] as f64 / 1e9,
-                    st[4] as f64 / (st[2].max(1) as f64 * st[2] as f64 / st[0].max(1) as f64), st[5] as f64 / st[2].max(1) as f64
+                    st[4] as f64 / (st[2].max(1) as f64 * st[2] as f64 / st[0].max(1) as f64), st[5] as f64 / st[2].max(1) as f64, st[6], st[7]
                 );
             }
             if nodelp2('x') && !self.params.submip && crate::simplex::slope_intercept_dual::nodelp_diag() {

@@ -20,6 +20,14 @@ use std::sync::Arc;
 /// 内点法 ([`TwoStageLp::interior_point`]) を打ち切る追加の条件 (見張りのスレッドが 5 ミリ秒ごとに呼ぶ)。
 pub type IpmAbort = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// 検査 `ENOMOTO_MIP_BINV_ROW_DENSE=check` の [照合した回数, ビット一致しなかった要素の数]
+pub(crate) static BINV_ROW_CHECK: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+thread_local! {
+    /// [`TwoStageLp::basis_inverse_row`] の超疎の単位 BTRAN の作業領域 (次数, 作業, 出力, `e_tilde`)。出力は作業の非零の記録と対で使い回す
+    static BINV_ROW_WORK: std::cell::RefCell<Option<(usize, super::lu::UnitBtranWork, Vec<f64>, Vec<f64>)>> = const { std::cell::RefCell::new(None) };
+}
+
 thread_local! {
     static IPM_ABORT: std::cell::RefCell<Option<IpmAbort>> = const { std::cell::RefCell::new(None) };
 }
@@ -703,6 +711,10 @@ impl TwoStageLp {
         self.rows[i].clone()
     }
 
+    pub fn row_ref(&self, i: usize) -> &[(usize, f64)] {
+        &self.rows[i]
+    }
+
     pub fn costs(&self) -> Vec<f64> {
         self.cost.clone()
     }
@@ -1188,7 +1200,9 @@ impl TwoStageLp {
                 map[v as usize] = x;
             }
         }
-        let ws: Vec<f64> = b.iter().map(|&v| if map[v].is_infinite() { 1.0 } else if map[v].is_nan() { f64::NAN } else { (map[v] as f64).max(1e-8) }).collect();
+        // 試作 `ENOMOTO_MIP_DSE_INIT` の `m` ([`sid::dse_init_has`]): 重みのない基底変数は 1 でなく未知 (求解の始めに厳密な値で埋める)
+        let missing = if sid::dse_init_has('m') { f64::NAN } else { 1.0 };
+        let ws: Vec<f64> = b.iter().map(|&v| if map[v].is_infinite() { missing } else if map[v].is_nan() { f64::NAN } else { (map[v] as f64).max(1e-8) }).collect();
         self.dse_cache = Some(Arc::new((b.clone(), ws)));
         self.dse_age = 0;
     }
@@ -3220,13 +3234,53 @@ impl TwoStageLp {
             self.lu = super::basis_kernel::factorize_basis(&self.std, &pos, None).map(Arc::new);
         }
         let Some(lu) = &self.lu else { return vec![0.0; m] };
-        let mut out = vec![0.0; m];
-        let mut scratch = vec![0.0; m];
-        lu.solve_transpose_unit(s, &mut scratch, &mut out);
         // σ_i a_i x + s_i = b_i で s_i = b_i - σ_i r_i なので、重みは ρ_i σ_i
         // (スラックが基底の行では、基底変数 s_i の係数は 1 で、r_i については -σ_i)
         let k = self.basic_var(s);
         let sc = if k >= self.n { -self.sigma[k - self.n] } else { 1.0 };
+        // 既定: 反復の中と同じ超疎の単位 BTRAN (値は密な版とビット一致)。作業領域はスレッドごとに使い回し、LU の決定的演算量
+        // カウンタ (双対単体法の再分解の判断が読む) には残さない。`ENOMOTO_MIP_BINV_ROW_DENSE=1` で従来の密な BTRAN
+        if env_str!("ENOMOTO_MIP_BINV_ROW_DENSE").is_none_or(|v| v == "0" || v == "check") {
+            let tick0 = lu.synth_tick();
+            let r = BINV_ROW_WORK.with(|c| {
+                let mut c = c.borrow_mut();
+                if c.as_ref().is_none_or(|w| w.0 != m) {
+                    *c = Some((m, super::lu::UnitBtranWork::new(m), vec![0.0; m], vec![0.0; m]));
+                }
+                let (_, work, out, et) = c.as_mut().unwrap();
+                work.set_density(0.0);
+                lu.solve_transpose_unit_work_sparse(s, out, et, work, None);
+                let mut r = vec![0.0; m];
+                match work.nonzero_rows() {
+                    Some(rows) => {
+                        for &i in rows {
+                            r[i] = out[i] * self.sigma[i] / sc;
+                        }
+                    }
+                    None => {
+                        for i in 0..m {
+                            r[i] = out[i] * self.sigma[i] / sc;
+                        }
+                    }
+                }
+                r
+            });
+            lu.restore_synth_tick(tick0);
+            // 検査 `ENOMOTO_MIP_BINV_ROW_DENSE=check`: 密な版と照合し、ビット一致しない要素の数を数える
+            if env_str!("ENOMOTO_MIP_BINV_ROW_DENSE") == Some("check") {
+                let mut out = vec![0.0; m];
+                let mut scratch = vec![0.0; m];
+                lu.solve_transpose_unit(s, &mut scratch, &mut out);
+                let bad = (0..m).filter(|&i| (out[i] * self.sigma[i] / sc).to_bits() != r[i].to_bits() && !(r[i] == 0.0 && out[i] == 0.0)).count();
+                BINV_ROW_CHECK[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                BINV_ROW_CHECK[1].fetch_add(bad as u64, std::sync::atomic::Ordering::Relaxed);
+                lu.restore_synth_tick(tick0);
+            }
+            return r;
+        }
+        let mut out = vec![0.0; m];
+        let mut scratch = vec![0.0; m];
+        lu.solve_transpose_unit(s, &mut scratch, &mut out);
         (0..m).map(|i| out[i] * self.sigma[i] / sc).collect()
     }
 }

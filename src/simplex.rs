@@ -104,8 +104,8 @@ impl Drop for DseTickGuard<'_> {
 }
 
 /// 診断: [`DseState::from_basis`] の [回数, 合計マイクロ秒, 行の数の合計, 疎な版と密な版の相対差の最大 (1e-9 単位、検査のときだけ),
-/// 超疎の版の BTRAN の結果の非零の数の合計, 超疎の経路で終わった BTRAN の数]
-pub(crate) static DSE_EXACT_STATS: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+/// 超疎の版の BTRAN の結果の非零の数の合計, 超疎の経路で終わった BTRAN の数, `fill_missing` の回数, 埋めた行の数]
+pub(crate) static DSE_EXACT_STATS: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
 
 /// `ENOMOTO_DSE_EXACT_SPARSE` (既定で使う、`=0` で従来の密な掃引): [`DseState::from_basis`] を超疎の単位 BTRAN で行う
 /// (analysis/nodelp2_20261107.md。値は密な版と同じで、1 回の計算は 1.2〜2.8 倍速い)。
@@ -2258,6 +2258,8 @@ impl DseState {
                     filled += 1;
                 }
             }
+            DSE_EXACT_STATS[6].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            DSE_EXACT_STATS[7].fetch_add(filled as u64, std::sync::atomic::Ordering::Relaxed);
             return filled;
         }
         for i in 0..m {

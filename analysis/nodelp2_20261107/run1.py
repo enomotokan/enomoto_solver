@@ -34,6 +34,13 @@ CFGS = {
     "nl2bd": dict(DG, ENOMOTO_MIP_NODELP2="pbx", ENOMOTO_MIP_HO4_DIAG="1"),
     "nl2d": dict(DG, ENOMOTO_MIP_NODELP2="pbxg", ENOMOTO_MIP_HO4_DIAG="1"),
     # 厳密な DSE 重みの計算の実装の比べ (密な既定 / 超疎 / 超疎 + 密な版との照合)
+    "diumr": dict(DG, ENOMOTO_MIP_DSE_INIT="um", ENOMOTO_SIMPLEX_WARM_SING_REPAIR="1"),
+    "di3": dict(DG, ENOMOTO_MIP_DSE_INIT="umr"),
+    "di3_p": {"ENOMOTO_MIP_DSE_INIT": "umr"},
+    "dim": dict(DG, ENOMOTO_MIP_DSE_INIT="m"),
+    "diu": dict(DG, ENOMOTO_MIP_DSE_INIT="u"),
+    "dium": dict(DG, ENOMOTO_MIP_DSE_INIT="um"),
+    "dium_p": {"ENOMOTO_MIP_DSE_INIT": "um"},
     "diagd": dict(DG, ENOMOTO_DSE_EXACT_SPARSE="0"),
     "rexd": dict(DG, ENOMOTO_MIP_RESTORE_EXACT_DSE="1", ENOMOTO_DSE_EXACT_SPARSE="0"),
     "rexs": dict(DG, ENOMOTO_MIP_RESTORE_EXACT_DSE="1", ENOMOTO_DSE_EXACT_SPARSE="1"),

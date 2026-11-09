@@ -16,6 +16,8 @@ pub trait MipLp: Clone + Send {
     fn col_bounds(&self, j: usize) -> (f64, f64);
     fn row_bounds(&self, i: usize) -> (f64, f64);
     fn row(&self, i: usize) -> Vec<(usize, f64)>;
+    /// 行 `i` の係数を複製せずに見る ([`Self::row`] と同じ中身)
+    fn row_ref(&self, i: usize) -> &[(usize, f64)];
     fn set_col_bounds(&mut self, j: usize, lo: f64, up: f64);
     fn set_costs(&mut self, c: &[f64]);
     fn costs(&self) -> Vec<f64>;
@@ -154,6 +156,7 @@ macro_rules! forward_impl {
             fn col_bounds(&self, j: usize) -> (f64, f64) { <$t>::col_bounds(self, j) }
             fn row_bounds(&self, i: usize) -> (f64, f64) { <$t>::row_bounds(self, i) }
             fn row(&self, i: usize) -> Vec<(usize, f64)> { <$t>::row(self, i) }
+            fn row_ref(&self, i: usize) -> &[(usize, f64)] { <$t>::row_ref(self, i) }
             fn set_col_bounds(&mut self, j: usize, lo: f64, up: f64) { <$t>::set_col_bounds(self, j, lo, up) }
             fn set_costs(&mut self, c: &[f64]) { <$t>::set_costs(self, c) }
             fn costs(&self) -> Vec<f64> { <$t>::costs(self) }

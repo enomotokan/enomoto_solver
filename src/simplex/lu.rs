@@ -4610,7 +4610,9 @@ impl Default for FtranDensity {
 #[derive(Clone)]
 pub struct FtLu {
     /// 元の分解 (`L` と置換。`L` は更新で変わらない)。
-    base: LuFactors,
+    /// 分解そのもの (L・元の U・置換)。分解のあとは書き換えないので共有する (LU の複製 (強分岐の子・兄弟のノードへの受け渡し)
+    /// で L と U をまるごと写さない。Forrest-Tomlin の更新で変わるのは `u_seq` などの残りの部分)
+    base: std::sync::Arc<LuFactors>,
     /// `U` の非シングルトン eta を **作成順** (= 三角順) に格納したもの。
     /// FTRAN/BTRAN の `U` 段はこれを順に走査する。
     u_seq: EtaFile,
@@ -4831,7 +4833,7 @@ impl FtLu {
         }
         let fill = total_off;
         FtLu {
-            base,
+            base: std::sync::Arc::new(base),
             u_seq,
             singles,
             singles_pos,

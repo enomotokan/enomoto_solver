@@ -2949,7 +2949,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 super::cuts::FC_STATS.with(|s| eprintln!("FC stats (calls, cuts, no SNF): {:?}", s.borrow()));
             }
             if self.params.verbose {
-                let cut_nnz: usize = (p.m..self.lp.num_rows()).map(|i| self.lp.row(i).len()).sum();
+                let cut_nnz: usize = (p.m..self.lp.num_rows()).map(|i| self.lp.row_ref(i).len()).sum();
                 let ncut_rows = self.lp.num_rows() - p.m;
                 eprintln!(
                     "MIP: cut round {round}: {} cuts (of {ncands}, sep {sep_secs:.2}s, LP {} iters), LP rows {} (cut rows mean nnz {:.0}), obj {:.10e} ({:.2}s)",
@@ -3750,7 +3750,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let norm = match self.cut_norm.get(&id) {
                         Some(&v) => v,
                         None => {
-                            let v = self.lp.row(i).iter().map(|&(_, a)| a * a).sum::<f64>().sqrt().max(1e-12);
+                            let v = self.lp.row_ref(i).iter().map(|&(_, a)| a * a).sum::<f64>().sqrt().max(1e-12);
                             self.cut_norm.insert(id, v);
                             v
                         }
@@ -3997,7 +3997,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             used += 1;
-            for (j, a) in self.lp.row(i) {
+            for &(j, a) in self.lp.row_ref(i) {
                 dense[j] += w * a;
             }
             rhs += w * u;
