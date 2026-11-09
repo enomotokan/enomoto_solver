@@ -2070,6 +2070,7 @@ fn mem2(c: char) -> bool {
 /// `ENOMOTO_MIP_GAP4=<文字>` (試作、既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): 根から出られない問題とメモリの試作。
 /// `i`: 暫定解の整数列を固定した LP が時間切れになったら以後は解かない。`p`: 根の LP が重いときカットの選び方の比べを飛ばす。
 /// `r`: 再スタートの前に、入れ子の求解の間は使わない LP・カットのプール・待ち行列を捨てる。
+/// `l`: カットの非零を 100 + 0.15 × 列 までに短くする (HiGHS の `postprocessCut`、[`super::separation`] の `finish_cut`)。
 /// `o`: 木のスレッドに渡す対称性の前の問題 (`orig`) の写しから含意を除く。`c`: 密なカットをカットのプールの伝播に入れない (HiGHS と同じ規則)。
 pub(super) fn gap4(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -20089,6 +20090,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: pool2 (all threads): calls {}, pool empty {}, pool_min >= own {}, pool_min < own but within threshold {}, taken {}, taken then donated again {}, taken then processed {}, forced {}, plunges cut {}, mean (own - pool_min | lower) {:.6}, mean threshold {:.6}, pool holds the global bound {}", st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9] as f64 * 1e-6 / (st[0] - st[1] - st[2]).max(1) as f64, st[10] as f64 * 1e-6 / (st[0] - st[1] - st[2]).max(1) as f64, st[11]);
                 let rs: Vec<u64> = POOL2_REF_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!("MIP: pool2 ref (all threads): branched nodes at the reference bound {}, of which the LP stayed at the reference {}", rs[0], rs[1]);
+            }
+            if gap4('l') {
+                eprintln!("MIP: GAP4 l: cuts shortened to 100 + 0.15 n nonzeros (all threads): {}", super::separation::GAP4_CUT_SHORTENED.load(std::sync::atomic::Ordering::Relaxed));
             }
             if gap4('c') {
                 eprintln!("MIP: GAP4 c: dense cuts kept out of the cut pool propagation (all threads, counted per rebuild): {}", GAP4_DENSE_SKIP.load(std::sync::atomic::Ordering::Relaxed));

@@ -6771,6 +6771,9 @@ fn gen_cuts_parallel(
 }
 
 /// 生のカット (構造変数と行の活動量の変数) を構造変数だけの式にし、整え、検査する。
+/// 試作 `ENOMOTO_MIP_GAP4` の `l`: [`finish_cut`] で長さの上限まで短くしたカットの数 (全スレッド)
+pub(super) static GAP4_CUT_SHORTENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn finish_cut(
     raw: RawCut,
     n: usize,
@@ -6870,6 +6873,39 @@ fn finish_cut(
                     }
                 }
             }
+        }
+    }
+    // 試作 `ENOMOTO_MIP_GAP4` の `l` (既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): HiGHS の `HighsCutGeneration::postprocessCut`
+    // と同じく、カットの非零を 100 + 0.15 × 列 までにする。超えた分は、LP の解が大域の境界にある列の項 (係数が正なら下限、負なら上限) を
+    // 係数の小さい順に落とし、右辺を `c × 境界` だけ直す (落とした項は境界で下から押さえるので妥当なまま、LP の解での違反は変わらない)。
+    // 落とせる項が足りなければ捨てる。neos-957323・tbfp-network の根のカットは 1 本 3.5〜4 万非零で、木の各スレッドのプール・LP が大きかった
+    if super::solver::gap4('l') {
+        let maxlen = 100 + (0.15 * n as f64) as usize;
+        if coefs.len() > maxlen {
+            let need = coefs.len() - maxlen;
+            let tol = 1e-9;
+            let mut cancel: Vec<usize> = (0..coefs.len())
+                .filter(|&t| {
+                    let (j, c) = coefs[t];
+                    if c > 0.0 { lo[j].is_finite() && x[j] <= lo[j] + tol } else { up[j].is_finite() && x[j] >= up[j] - tol }
+                })
+                .collect();
+            if cancel.len() < need {
+                return None;
+            }
+            cancel.sort_by(|&a, &b| coefs[a].1.abs().total_cmp(&coefs[b].1.abs()));
+            let mut drop = vec![false; coefs.len()];
+            for &t in &cancel[..need] {
+                let (j, c) = coefs[t];
+                rhs -= c * if c > 0.0 { lo[j] } else { up[j] };
+                drop[t] = true;
+            }
+            let mut k = 0;
+            coefs.retain(|_| {
+                k += 1;
+                !drop[k - 1]
+            });
+            GAP4_CUT_SHORTENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
     // 係数の幅 (dynamism) が大きすぎるカットは数値的に危ないので捨てる (小さい係数を吸収した後で判定する)
