@@ -42,6 +42,29 @@ pub struct MipProblem {
 }
 
 impl MipProblem {
+    /// 含意 (`conflict_edges`・`implied_bounds`) を除いた写し (試作 `ENOMOTO_MIP_GAP4` の `o`: 対称性の扱いの前の問題 `orig` は実行可能性の
+    /// 確かめにしか使わないのに、木の各スレッドが深く写していた。neos-957323 では含意が大きく、写し 1 つで数百 MB)
+    pub fn clone_without_implications(&self) -> MipProblem {
+        MipProblem {
+            n: self.n,
+            m: self.m,
+            col_lo: self.col_lo.clone(),
+            col_up: self.col_up.clone(),
+            cost: self.cost.clone(),
+            offset: self.offset,
+            sense_sign: self.sense_sign,
+            is_int: self.is_int.clone(),
+            rows: self.rows.clone(),
+            row_lo: self.row_lo.clone(),
+            row_up: self.row_up.clone(),
+            cols: self.cols.clone(),
+            conflict_edges: Vec::new(),
+            implied_bounds: Vec::new(),
+            nnz: self.nnz,
+            nint: self.nint,
+        }
+    }
+
     /// 診断用: 自由 MPS 形式で書き出す (最小化形の費用と定数項、行の範囲は RANGES、整数列は MARKER)。
     pub fn write_mps(&self, path: &str) -> std::io::Result<()> {
         use std::fmt::Write as _;

@@ -2069,6 +2069,9 @@ fn mem2(c: char) -> bool {
 
 /// `ENOMOTO_MIP_GAP4=<文字>` (試作、既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): 根から出られない問題とメモリの試作。
 /// `i`: 暫定解の整数列を固定した LP が時間切れになったら以後は解かない。`p`: 根の LP が重いときカットの選び方の比べを飛ばす。
+/// `r`: 再スタートの前に、入れ子の求解の間は使わない LP・カットのプール・待ち行列を捨てる。
+/// `o`: 木のスレッドに渡す対称性の前の問題 (`orig`) の写しから含意を除く。`c`: 密なカットをカットのプールの伝播に入れない (HiGHS と同じ規則)。
+/// `g`: 根の内点法の丸めを使い捨ての rayon のスレッドで解く (gemm のスレッドごとの作業領域を終わったら返す)。
 pub(super) fn gap4(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP4").ok().filter(|v| v != "0").unwrap_or_default()).contains(c)
@@ -2080,6 +2083,9 @@ pub(super) fn gap4_rss_secs() -> Option<f64> {
     static V: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP4_RSS").ok().and_then(|v| v.parse::<f64>().ok()).filter(|&x| x > 0.0))
 }
+
+/// `ENOMOTO_MIP_GAP4` の `c`: 伝播に入れなかった密なカットの数 (全スレッド、索引を作り直すたびに数える)
+pub(super) static GAP4_DENSE_SKIP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// [`gap4_rss_secs`] の数: [生きている外側の Solver, 生きているサブ MIP の Solver, 作った外側, 作ったサブ MIP]
 pub(super) static GAP4_LIVE: [std::sync::atomic::AtomicI64; 4] = [const { std::sync::atomic::AtomicI64::new(0) }; 4];
@@ -4617,7 +4623,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         of_node_fixes: Vec::new(),
         of_stats: [0; 3],
         orig: match &snap {
-            Some(sn) => sn.orig.as_ref().map(|o| Rc::new((**o).clone())),
+            // 試作 `ENOMOTO_MIP_GAP4` の `o`: 含意を除いて写す (`orig` の含意は使わない)
+            Some(sn) => sn.orig.as_ref().map(|o| Rc::new(if gap4('o') { o.clone_without_implications() } else { (**o).clone() })),
             None if (params.submip && !super::subb::sub_tables()) || env_str!("ENOMOTO_MIP_SYM_NO_ORIG").is_some() => None,
             None => super::SYM_ORIG.with(|t| t.borrow().clone()),
         },
@@ -15921,8 +15928,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             st.fired.clear();
         }
         let (gl, gu) = (&self.dom.global_lo, &self.dom.global_up);
+        // 試作 `ENOMOTO_MIP_GAP4` の `c` (既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): HiGHS の `HighsCutPool::addCut` と同じく、
+        // 非零の数が max(2 × 行の平均の非零, 0.1 × 列) 以上のカットは伝播しない (列の索引に入れず、見直しもしない)。neos-957323 は
+        // 根のカットが 1 本 4 万非零で、木の各スレッドの索引 (`cols`) が合わせて 1.6 GB になっていた
+        let dense_lim = if gap4('c') { (2.0 * p.nnz as f64 / p.m.max(1) as f64).max(0.1 * p.n as f64) } else { f64::INFINITY };
         for k in st.ncuts..self.cut_pool.len() {
             let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
+            if (e0 - s0) as f64 >= dense_lim {
+                // 無限の項が 2 つ以上あるのと同じ扱い (締めない)。列の索引に入れないので見直されない
+                st.min.push(0.0);
+                st.ninf.push(u32::MAX / 2);
+                st.cap.push(0.0);
+                st.mark.push(false);
+                GAP4_DENSE_SKIP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
             let (mut mn, mut ni, mut cap) = (0.0f64, 0u32, 0.0f64);
             for t in s0..e0 {
                 let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
@@ -17292,6 +17312,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if restart_root_cuts('l') && self.params.verbose && tree_lb.is_finite() {
             eprintln!("MIP: RESTART_ROOT_CUTS: global lower bound {tree_lb:.10e} at the restart kept as a floor of the returned bound");
         }
+        // 試作 `ENOMOTO_MIP_GAP4` の `r` (既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): 再スタートの後の求解はこの
+        // `Solver` の中から入れ子で呼ぶので、戻るまでこの `Solver` の LP・カットのプール・待ち行列などが残る (neos-957323 は再スタート 2 回で
+        // 外側の `Solver` が 3 つ同時に生きたまま木に入る)。戻った後に使うのは反復の数・ノード数・暫定解・根の下界だけなので、先に捨てる
+        let lp_iters_before = self.lp.total_iterations();
+        if gap4('r') {
+            self.lp = L::new(&[], &[], &[], &[], &[], &[]);
+            self.cut_pool = Vec::new();
+            self.dual_proofs = Default::default();
+            self.sep_rows_cache = None;
+            self.queue = NodeQueue::new();
+            self.row_log = Vec::new();
+            self.sol_pool = Vec::new();
+            self.dive_stack = Vec::new();
+            if self.params.verbose {
+                eprintln!("MIP: GAP4 r: released the LP, cut pool and queue of the solver before restart {}", params.restarts);
+            }
+        }
         let r = super::solve_problem(&newp, params, true);
         super::RESTART_PC.with(|s| *s.borrow_mut() = None);
         super::RESTART_HCM.with(|f| f.set(false));
@@ -17301,7 +17338,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         super::RESTART_SOL.with(|s| *s.borrow_mut() = None);
         super::RESTART_CUTS.with(|s| *s.borrow_mut() = None);
         let nodes = self.nodes + r.nodes;
-        let iters = self.lp.total_iterations() + r.lp_iterations;
+        let iters = lp_iters_before + r.lp_iterations;
         // 良い方の解を採る
         let (x, objective) = match (&r.x, r.objective, &self.incumbent) {
             (Some(x2), Some(z2), Some((z, x))) => {
@@ -17970,7 +18007,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             })
             .collect();
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
-        let orig = self.orig.as_ref().map(|o| std::sync::Arc::new((**o).clone()));
+        let orig = self.orig.as_ref().map(|o| std::sync::Arc::new(if gap4('o') { o.clone_without_implications() } else { (**o).clone() }));
         let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
         let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), root_basis };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
@@ -19921,6 +19958,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: pool2 (all threads): calls {}, pool empty {}, pool_min >= own {}, pool_min < own but within threshold {}, taken {}, taken then donated again {}, taken then processed {}, forced {}, plunges cut {}, mean (own - pool_min | lower) {:.6}, mean threshold {:.6}, pool holds the global bound {}", st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9] as f64 * 1e-6 / (st[0] - st[1] - st[2]).max(1) as f64, st[10] as f64 * 1e-6 / (st[0] - st[1] - st[2]).max(1) as f64, st[11]);
                 let rs: Vec<u64> = POOL2_REF_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!("MIP: pool2 ref (all threads): branched nodes at the reference bound {}, of which the LP stayed at the reference {}", rs[0], rs[1]);
+            }
+            if gap4('c') {
+                eprintln!("MIP: GAP4 c: dense cuts kept out of the cut pool propagation (all threads, counted per rebuild): {}", GAP4_DENSE_SKIP.load(std::sync::atomic::Ordering::Relaxed));
             }
             if memc() {
                 let st: Vec<u64> = MEMC_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();

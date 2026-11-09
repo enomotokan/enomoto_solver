@@ -50,7 +50,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut vertex: Option<(Vec<usize>, Vec<f64>)> = None;
         let t0 = Instant::now();
         if mode != 1 {
-            match self.lp.interior_point(false, env_str!("ENOMOTO_MIP_IPM_NO_VERTEX").is_none(), deadline) {
+            // 試作 `ENOMOTO_MIP_GAP4` の `g` (既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): 内点法の多前線法が使う gemm
+            // (private-gemm-x86) はスレッドごとの作業領域 (L3 の 2 倍、この機械では 520 MB) を thread_local に取り、スレッドが終わるまで返さない。
+            // 使い捨ての rayon のスレッドで解き、終わったら領域ごと返す (取り消しの印・期限・止める合図は引き継ぐ)
+            let ip = if super::solver::gap4('g') {
+                let (tok, dl, halt) = (crate::cancel::current(), crate::cancel::deadline(), crate::cancel::current_halt());
+                let nt = rayon::current_num_threads().max(1);
+                let lp = &mut self.lp;
+                let vtx = env_str!("ENOMOTO_MIP_IPM_NO_VERTEX").is_none();
+                match rayon::ThreadPoolBuilder::new().num_threads(nt).build() {
+                    Ok(pool) => pool.install(move || crate::cancel::with_token(tok, || crate::cancel::with_deadline(dl, || crate::cancel::with_halt(halt, || lp.interior_point(false, vtx, deadline))))),
+                    Err(_) => self.lp.interior_point(false, vtx, deadline),
+                }
+            } else {
+                self.lp.interior_point(false, env_str!("ENOMOTO_MIP_IPM_NO_VERTEX").is_none(), deadline)
+            };
+            match ip {
                 Some(ip) => {
                     centers.push(("optimal face", ip.x));
                     if let Some((b, Some(xv))) = ip.vertex {
