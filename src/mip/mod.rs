@@ -3995,6 +3995,14 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     // (子の LP が重い問題: cvs16r128-89 は 5 列で 3 秒、根の LP は 0.9 秒)
     let giveup_secs = tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_secs + 0.1;
     let giveup_secs = if work { f64::INFINITY } else { giveup_secs };
+    // 試作 `ENOMOTO_MIP_GAP2_LPPGIVE=g` (既定では使わない。analysis/gap2_rootcost_20261109.md): `ENOMOTO_MIP_PRESOLVE_WORK` (既定) の
+    // 反復によるあきらめに加え、固定が 1 つもないまま最初の LP の後の子の LP に g x 最初の LP の秒 (壁時計) を使ってもやめる。
+    // 反復の手間の見積もり (反復 x (行 + 列)) は密な行の問題で軽く出る: cod105 (1024 行、1 行 56 非零) は最初の LP が 11.4 秒、
+    // 子の LP 4 本 (2 列) に 18.6 秒使い、固定 0 のまま時間の上限 (時間の上限の 5% = 30 秒) まで回っていた
+    let giveup_secs = match env_str!("ENOMOTO_MIP_GAP2_LPPGIVE").and_then(|v| v.parse::<f64>().ok()).filter(|&g| g > 0.0) {
+        Some(g) => giveup_secs.min((1.0 + g) * root_secs),
+        None => giveup_secs,
+    };
     // あきらめの手間は反復 x (行 + 列) で数える (非零を入れると、反復の安い列の長い問題 (neos-860300) で 1 列目であきらめる)
     let giveup_iters = if work {
         (tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_iters as f64) as u64 + (tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_GIVEUP", 2.0e7, f64) / (prob.m + prob.n).max(1) as f64) as u64
