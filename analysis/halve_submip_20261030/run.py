@@ -225,6 +225,11 @@ CFGS["cand1108z"] = dict(CFGS["cand1108"], ENOMOTO_MIP_NO_ZEROHALF="1")  # res7:
 # res8 (2026-11-09、analysis/mitt600_20261103.md): 厳密な DSE 重みから始める試作 (analysis/nodelp2_20261107.md の 10.2 節) を既定と cand1108z に足す
 CFGS["umr"] = {"ENOMOTO_MIP_DSE_INIT": "umr"}
 CFGS["cand1108zd"] = dict(CFGS["cand1108z"], ENOMOTO_MIP_DSE_INIT="umr")
+# 2026-11-09: cand1108zd を既定にした (analysis/cand1108zd_default_20261109.md)。これからの "def" は cand1108zd を含む。
+# precand1108zd = 新しい既定から 20 個を元の振る舞いに戻す形 (切り替えは "0"、tunable は元の既定の値)
+CFGS["precand1108zd"] = {k: "0" for k in CFGS["cand1108zd"] if not k.startswith("ENOMOTO_T_")}
+CFGS["precand1108zd"].update({"ENOMOTO_T_SIMPLEX_SCALE_MIN_M": "0", "ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE": "0", "ENOMOTO_T_MIP_MPSEP_NV": "2",
+                              "ENOMOTO_T_MIP_MPSEP_EXTRA": "10", "ENOMOTO_T_MIP_LPSCALE_MIN_RANGE": "0"})
 if __name__ == "__main__":  # bench.py からは設定 (CFGS) だけを読む
     cfgs, probs, reps = sys.argv[1].split(","), sys.argv[2].split(","), int(sys.argv[3])
     for rep in range(reps):

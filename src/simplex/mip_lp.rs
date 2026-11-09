@@ -166,7 +166,7 @@ pub(crate) static LPSCALE_STATS: [std::sync::atomic::AtomicU64; 15] = [const { s
 
 /// `ENOMOTO_MIP_LPSCALE` の数を表示する (`ENOMOTO_MIP_LPSCALE_LOG`、MIP の終わりに呼ぶ)
 pub(crate) fn lpscale_report() {
-    if env_str!("ENOMOTO_MIP_LPSCALE").is_none_or(|v| v == "0") {
+    if env_def!("ENOMOTO_MIP_LPSCALE", "h").is_none_or(|v| v == "0") {
         return;
     }
     let g = |k: usize| LPSCALE_STATS[k].load(std::sync::atomic::Ordering::Relaxed);
@@ -187,7 +187,7 @@ pub(crate) fn lpscale_disarm() {
 
 /// `ENOMOTO_MIP_LPSCALE` の形: 0 使わない、1 作るときから (条件 [`TwoStageLp::attach_tw`])、2 重い求解を見てから (`h`)
 fn lpscale_mode() -> u8 {
-    match env_str!("ENOMOTO_MIP_LPSCALE") {
+    match env_def!("ENOMOTO_MIP_LPSCALE", "h") {
         None | Some("0") => 0,
         Some("h") => 2,
         Some(_) => 1,
@@ -201,7 +201,7 @@ fn lpscale_add(k: usize, v: u64) {
 /// 試作 `ENOMOTO_MIP_BASIS_NB` ([`TwoStageLp::set_basis_nb`]) を、場所 `site` (`t` 木のノードの基底の復元、`s` サブ MIP の根、
 /// `b` 裏のカットの写しの根 (と解探索のスレッドの根)、`w` 主の根の LP が 1 秒以上の問題の裏のカットの写しの根だけ、`r` 再スタートの後の根、`p` 前処理の LP による固定の基底からの根 (root_probe)) で使うか。`1` なら全部、`t,s` のようにカンマ区切りで場所を選ぶ
 pub fn basis_nb_on(site: char) -> bool {
-    match env_str!("ENOMOTO_MIP_BASIS_NB") {
+    match env_def!("ENOMOTO_MIP_BASIS_NB", "t") {
         None | Some("0") | Some("off") => false,
         Some("1") => true,
         Some(v) => v.split(',').any(|s| s.trim().starts_with(site)),
@@ -210,7 +210,7 @@ pub fn basis_nb_on(site: char) -> bool {
 
 /// [`basis_nb_on`] のどれかの場所で使うか。
 pub fn basis_nb_any() -> bool {
-    matches!(env_str!("ENOMOTO_MIP_BASIS_NB"), Some(v) if v != "0" && v != "off")
+    matches!(env_def!("ENOMOTO_MIP_BASIS_NB", "t"), Some(v) if v != "0" && v != "off")
 }
 
 /// 診断: [`TwoStageLp::set_basis_nb`] の希望を使った求解の数、今の境界で有効だった希望の数、推し量りから変えた数。
@@ -415,10 +415,10 @@ fn ipm_crossover_run(std: &StdForm, sc: Option<&IpmScale>) -> Option<super::Simp
 /// 試作 `ENOMOTO_SIMPLEX_SCALE=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): 基底のない求解
 /// ([`TwoStageLp::solve_once`]、MIP の根の LP・LP プロービングの最初の LP など) を、行と列の尺度を調整した写しで解く
 /// ([`TwoStageLp::solve_scaled`])。HiGHS は尺度を調整してから解き、uccase12 の根の LP は調整なし (`simplex_scale_strategy=0`) だと
-/// 120 秒で終わらない (調整ありは 2 秒)。行の数が `ENOMOTO_T_SIMPLEX_SCALE_MIN_M` (既定 0) 未満、または係数の幅 ([`coef_range`]) が
-/// `ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE` (既定 0) 未満なら使わない
+/// 120 秒で終わらない (調整ありは 2 秒)。行の数が `ENOMOTO_T_SIMPLEX_SCALE_MIN_M` (既定 10000、2026-11-09 から) 未満、または係数の幅 ([`coef_range`]) が
+/// `ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE` (既定 1e4、2026-11-09 から) 未満なら使わない
 fn scale_cold_on() -> bool {
-    env_str!("ENOMOTO_SIMPLEX_SCALE").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_SIMPLEX_SCALE", "1").is_some_and(|v| v != "0")
 }
 
 /// 試作 `ENOMOTO_SIMPLEX_SCALE` の行と列の尺度 (`r_i`, `s_j`、2 の冪): 調整した係数は `r_i a_ij s_j`。幾何平均の調整
@@ -526,7 +526,7 @@ impl TwoStageLp {
             return;
         }
         let range = coef_range(&self.rows);
-        if range < tunable!("ENOMOTO_T_MIP_LPSCALE_MIN_RANGE", 0.0f64, f64) {
+        if range < tunable!("ENOMOTO_T_MIP_LPSCALE_MIN_RANGE", 1e4f64, f64) {
             return;
         }
         let (rs, cs) = scale_factors(self.n, &self.rows);
@@ -1476,8 +1476,8 @@ impl TwoStageLp {
         } else if (scale_once && self.scale_once_applies())
             || (scale_cold_on()
                 && !matches!(&self.basis, Some(b) if b.len() == self.rows.len())
-                && self.rows.len() >= tunable!("ENOMOTO_T_SIMPLEX_SCALE_MIN_M", 0usize, usize)
-                && coef_range(&self.rows) >= tunable!("ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE", 0.0, f64))
+                && self.rows.len() >= tunable!("ENOMOTO_T_SIMPLEX_SCALE_MIN_M", 10000usize, usize)
+                && coef_range(&self.rows) >= tunable!("ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE", 1e4, f64))
         {
             self.solve_scaled(lim)
         } else {

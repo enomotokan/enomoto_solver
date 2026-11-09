@@ -1291,7 +1291,7 @@ fn nodelp2(c: char) -> bool {
 }
 
 fn nodelp_perturb_mode() -> Option<&'static str> {
-    env_str!("ENOMOTO_MIP_NODELP_PERTURB").filter(|v| *v != "0")
+    env_def!("ENOMOTO_MIP_NODELP_PERTURB", "phg").filter(|v| *v != "0")
 }
 
 /// [`crate::simplex::slope_intercept_dual::NODE_PERTURB_SCOPE`] を置き、手放すときに元へ戻す
@@ -1530,7 +1530,7 @@ pub(crate) fn probe_basis_diag_on() -> bool {
 /// (改良 11-08) `g`: 列だけの基底の足りない分を [`probe_cols_fill`] の順で論理変数で埋める、`h`: `g` + 根の LP の間だけ特異な基底列を
 /// スラックに替える修復 (`ENOMOTO_SIMPLEX_WARM_SING_REPAIR` と同じ)、`H`: 既定の埋め方 + その修復
 pub(crate) fn probe_basis_guard_has(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_PROBE_BASIS_GUARD").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_PROBE_BASIS_GUARD", "g").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_ROOT_BASIS_FIX` (試作、既定では使わない): 前処理の LP の基底からの根 (root_probe) と再スタートの後の根 (restart) に、

@@ -905,7 +905,7 @@ thread_local! {
 /// `ENOMOTO_MIP_PROBE_REPRESOLVE` (試作) がこの前処理で効くか: 環境変数があり、安全網の解き直し ([`PRR_OFF`]) でも FJ だけに渡す問題の
 /// 前処理 ([`fj_p3_problem`]) でもなく、サブ MIP の前処理なら `ENOMOTO_MIP_PROBE_REPRESOLVE_SUBMIP` もあるとき。効かないときの前処理は既定とまったく同じ
 fn prr_active(submip: bool) -> bool {
-    env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_some()
+    env_def!("ENOMOTO_MIP_PROBE_REPRESOLVE", "1").is_some()
         && !PRR_OFF.with(|f| f.get())
         && !crate::fj_p3_force()
         && (!(submip || PRESOLVE_IN_SUBMIP.with(|f| f.get())) || env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE_SUBMIP").is_some())
@@ -953,7 +953,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
         EQUIV2_USED.with(|f| f.set(false));
     }
-    let prr = outer && env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_some();
+    let prr = outer && env_def!("ENOMOTO_MIP_PROBE_REPRESOLVE", "1").is_some();
     if prr {
         PRR_APPLIED.with(|f| f.set(false));
         PRR_OFF.with(|f| f.set(false));
@@ -4213,7 +4213,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     let passed = n_fixed > 0 || slow_root || (lp_probe_after_ext() && !lp_probe_after_ext_has('s'));
     // 診断 `ENOMOTO_MIP_PROBE_BASIS_DIAG`・試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` (既定では何もしない、analysis/probe_basis_20261106.md):
     // 最後の LP の基底と行の指紋・大きさ・最初の LP の手間を根の LP に渡す (根で列だけの基底の良し悪しを見る)
-    if solver::probe_basis_diag_on() || env_str!("ENOMOTO_MIP_PROBE_BASIS_GUARD").is_some() {
+    if solver::probe_basis_diag_on() || env_def!("ENOMOTO_MIP_PROBE_BASIS_GUARD", "g").is_some() {
         let row_hashes = (0..prob.m).map(|i| solver::row_hash(&prob.rows[i], prob.row_lo[i], prob.row_up[i])).collect();
         let info = solver::ProbeBasisInfo { basis: lp.basis(), row_hashes, m: prob.m, nnz: prob.rows.iter().map(|r| r.len()).sum(), iters: root_iters, secs: root_secs, passed, n_fixed, rows_x: None };
         let want_rows = env_str!("ENOMOTO_MIP_PROBE_BASIS_DIAG").is_some_and(|v| v.contains(['f', 'g', 'h'])) || solver::probe_basis_guard_has('g') || solver::probe_basis_guard_has('h');

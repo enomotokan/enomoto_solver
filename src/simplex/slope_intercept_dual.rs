@@ -1359,7 +1359,7 @@ fn fast_finish(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Option<N
 /// 重みのない基底変数を 1 でなく未知 (`NaN`) にして、求解の始めに厳密な値で埋める ([`super::DseState`] の `fill_missing`)。
 pub(crate) fn dse_init_has(c: char) -> bool {
     static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_DSE_INIT").filter(|v| *v != "0").map(|v| v.to_string())).as_deref().is_some_and(|v| v.contains(c))
+    V.get_or_init(|| env_def!("ENOMOTO_MIP_DSE_INIT", "umr").filter(|v| *v != "0").map(|v| v.to_string())).as_deref().is_some_and(|v| v.contains(c))
 }
 
 /// 診断 `ENOMOTO_MIP_NODELP_DIAG` (analysis/node_lp_20261106.md、解き方は変えない) が有効か。
@@ -5081,7 +5081,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 試作 `ENOMOTO_SIMPLEX_HARRIS2` (既定では使わない): 前向きの Harris (パス 2)
     // `r`: 安全モード (`safe_pivot`。数値の破綻で解き直した求解、または特異の検査で切り替わった後) のときだけ使う
     // 試作 `ENOMOTO_MIP_CUT_HARRIS2` (analysis/puriri_cutlp_20261106.md): 根のカットのループの LP だけ、[`HARRIS2_SCOPE`] で同じ値を使う
-    let harris2_mode = env_str!("ENOMOTO_SIMPLEX_HARRIS2").filter(|v| *v != "0").or_else(|| HARRIS2_SCOPE.with(|c| c.get()));
+    let harris2_mode = env_def!("ENOMOTO_SIMPLEX_HARRIS2", "r").filter(|v| *v != "0").or_else(|| HARRIS2_SCOPE.with(|c| c.get()));
     let harris2_safe_only = harris2_mode.is_some_and(|v| v.contains('r'));
     let harris2_any = harris2_mode.is_some();
     // 試作 `ENOMOTO_SIMPLEX_NOISE_RESET` (既定では使わない): 雑音として外した行が増えたら作り直す

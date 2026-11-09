@@ -1379,7 +1379,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         //   以後は前に最適まで解けたラウンドの本数の `ENOMOTO_T_MIP_CUTLPCAP_NMULT` 倍 (既定 2) と N0 の大きい方までに、効き目の順に絞る
         // - `c`: 反復の上限を `ENOMOTO_T_MIP_CUTLPCAP_CMULT` (既定 1) x max(根の LP の反復, 前処理の LP の反復, 今の LP の行の数) より小さくしない
         // 値に `l` を含むか `ENOMOTO_MIP_CUTLPCAP_LOG` を置くと、ラウンドごとの上限と本数を出す (診断。動きは変えない)
-        let cl = if cs_outer { env_str!("ENOMOTO_MIP_CUTLPCAP").filter(|v| *v != "0") } else { None };
+        let cl = if cs_outer { env_def!("ENOMOTO_MIP_CUTLPCAP", "ac").filter(|v| *v != "0") } else { None };
         let cl_a = cl.is_some_and(|v| v.contains('a'));
         let cl_n = cl.is_some_and(|v| v.contains('n'));
         let cl_c = cl.is_some_and(|v| v.contains('c'));
@@ -2140,7 +2140,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if mp_quota && !mp_extra_pool.is_empty() {
                 // 別枠: 選んだカットと同じもの・平行度が `ENOMOTO_T_MIP_MPSEP_MAXPAR` (既定 0.3) を超えるものを除き、全部の点での効き目の順に
-                let q = tunable!("ENOMOTO_T_MIP_MPSEP_EXTRA", 10usize, usize);
+                let q = tunable!("ENOMOTO_T_MIP_MPSEP_EXTRA", 5usize, usize);
                 let maxpar = tunable!("ENOMOTO_T_MIP_MPSEP_MAXPAR", 0.3, f64);
                 let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
                 let mut ex: Vec<(f64, Candidate)> = mp_extra_pool.drain(..).map(|c| (cut_score(&c, p, cnorm), c)).collect();
@@ -4526,7 +4526,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut pts: Vec<Vec<f64>> = Vec::new();
         let mut nmoved = 0usize;
         if f.contains('o') {
-            let nv = tunable!("ENOMOTO_T_MIP_MPSEP_NV", 2usize, usize);
+            let nv = tunable!("ENOMOTO_T_MIP_MPSEP_NV", 1usize, usize);
             let cap = tunable!("ENOMOTO_T_MIP_MPSEP_MOVE_SECS", (0.25 * self.root_lp_secs).clamp(0.01, 0.1), f64);
             let piv = tunable!("ENOMOTO_T_MIP_MPSEP_PIVOTS", 1000usize, usize);
             let mode = if f.contains('d') { 'd' } else if f.contains('r') { 'r' } else { 'f' };
@@ -5076,7 +5076,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // ([`orig_row_modes`]。0 = 試さない, 1 = 全部 (`generate_cuts`), 2 = extended cover だけ)。既定は毎ラウンド・毎ノード、
         // 余裕と関係なくすべての行の両側を試していた
         let row_modes = if row_cuts_m > 0 && env_str!("ENOMOTO_MIP_ORIGROW_TIGHT").is_some() && !gen_old() && mr >= p.m { self.orig_row_modes(&vars, lp_rows, &act, light) } else { None };
-        let zh_on = env_str!("ENOMOTO_MIP_NO_ZEROHALF").is_none() && self.sep_src_on(sepprof::SRC_ZH, light);
+        let zh_on = env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() && self.sep_src_on(sepprof::SRC_ZH, light);
         // clique カットの使い方は下の説明を参照
         let clique_on = clique_cuts_mode().is_some_and(|m| !(light && (m == "root" || (m == "fallback" && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && ((m != "auto" && m != "fallback") || self.clique_auto == Some(true)));
         let clique_on = clique_on && self.sep_src_on(sepprof::SRC_CLIQUE, light);
@@ -6179,7 +6179,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 /// ほかの値 (`1` など) は両方
 pub(crate) fn mushagg_mode() -> Option<u8> {
     static M: std::sync::OnceLock<Option<u8>> = std::sync::OnceLock::new();
-    *M.get_or_init(|| match env_str!("ENOMOTO_MIP_MUSHAGG") {
+    *M.get_or_init(|| match env_def!("ENOMOTO_MIP_MUSHAGG", "cover") {
         None | Some("0") => None,
         Some("cover") => Some(1),
         Some("gen") => Some(2),
@@ -6745,7 +6745,7 @@ fn finish_cut(
 /// 試作 `ENOMOTO_MIP_MPSEP` (既定では使わない、analysis/mpsep_20261106.md) の値。サブ MIP では使わない。値に `m` を含めば主の根のループだけ、
 /// `b` を含めば裏のカットの写しだけ。
 fn mpsep_flags(submip: bool, in_job: bool) -> Option<String> {
-    let v = env_str!("ENOMOTO_MIP_MPSEP")?;
+    let v = env_def!("ENOMOTO_MIP_MPSEP", "oqmgs")?;
     if submip || (v.contains('m') && in_job) || (v.contains('b') && !in_job) {
         return None;
     }

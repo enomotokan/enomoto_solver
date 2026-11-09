@@ -37,7 +37,7 @@ use std::sync::Mutex;
 /// `ENOMOTO_MIP_SUBFIX` の文字 `c` が入っているか
 pub(crate) fn on(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let v = V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBFIX").map_or(String::new(), |v| if v == "1" { "ritc".to_string() } else { v.to_string() }));
+    let v = V.get_or_init(|| env_def!("ENOMOTO_MIP_SUBFIX", "rtcqf").map_or(String::new(), |v| if v == "1" { "ritc".to_string() } else { v.to_string() }));
     v.contains(c)
 }
 
@@ -46,7 +46,7 @@ pub(crate) const SUBFIX_PAR_LABEL: &str = "SUBFIX RENS";
 
 /// `ENOMOTO_MIP_SUBFIX` が何か付いているか
 pub(crate) fn any() -> bool {
-    env_str!("ENOMOTO_MIP_SUBFIX").is_some_and(|v| !v.is_empty() && v != "0")
+    env_def!("ENOMOTO_MIP_SUBFIX", "rtcqf").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
 /// 外側の求解で共通の記録: (成功した固定率の和, 回数, 実行不能だった固定率の和, 回数) と、根の LP 解 (`getFixVal` の基準)

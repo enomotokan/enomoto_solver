@@ -27,8 +27,9 @@ const QMAX_GCD: i64 = 10_000;
 /// 試作の値 (`g`・`c`・`l` のどれを使うか、ビット 1・2・4)。使わなければ 0
 pub(crate) fn mode() -> u8 {
     static M: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *M.get_or_init(|| match std::env::var("ENOMOTO_MIP_CMIRDELTA") {
-        Ok(v) if !v.is_empty() && v != "0" && v != "off" => {
+    // 2026-11-09 から既定 `n` (cand1108zd、`=0` で使わない)
+    *M.get_or_init(|| match env_def!("ENOMOTO_MIP_CMIRDELTA", "n") {
+        Some(v) if !v.is_empty() => {
             if v == "1" {
                 7
             } else if v.contains('n') {

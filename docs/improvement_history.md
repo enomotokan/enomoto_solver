@@ -10370,3 +10370,13 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   `ENOMOTO_MIP_SYMZERO` (向きのそろえで -0.0 を 0.0 にそろえる)。
 - 根拠: 生成元が増えるのは neos-827175 (57 → 66)・neos-2746589-doon (31 → 33)・neos859080 (0 → 1) の 3 問。neos859080 は 60 秒で 2/5 回 → 5/5 回 (1.0〜15.7 秒)。
   58 問 2 回 +1.3% (揺れの範囲、検出が変わるのは 1 問)。記録は `analysis/symsign_default_20261106.md` (元は `analysis/symsign_20261106.md`)。
+
+## 2026-11-09: cand1108zd (cand1108 + zerohalf なし + 厳密な DSE 重みから始める DSE_INIT=umr) を既定にする (採用)
+
+- 既定にした (20 個、戻し方は `=0` か元の値。まとめて run.py の `precand1108zd`): `ENOMOTO_SIMPLEX_SCALE=1` (+ `_MIN_M` 10000・`_MIN_RANGE` 1e4)・`ENOMOTO_SIMPLEX_HARRIS2=r`・
+  `ENOMOTO_MIP_MPSEP=oqmgs` (+ `_NV` 1・`_EXTRA` 5)・`ENOMOTO_MIP_MUSHAGG=cover`・`ENOMOTO_MIP_PROBE_REPRESOLVE`・`ENOMOTO_MIP_SUBFIX=rtcqf`・
+  `ENOMOTO_MIP_NODELP_PERTURB=phg`・`ENOMOTO_MIP_BASIS_NB=t`・`ENOMOTO_MIP_PROBE_BASIS_GUARD=g`・`ENOMOTO_MIP_HNFPRE=bounds`・`ENOMOTO_MIP_CUTLPCAP=ac`・
+  `ENOMOTO_MIP_CMIRDELTA=n`・`ENOMOTO_MIP_LPSCALE=h` (+ `_MIN_RANGE` 1e4)・`ENOMOTO_MIP_NO_ZEROHALF=1`・`ENOMOTO_MIP_DSE_INIT=umr`。
+- 根拠: Mittelmann の HiGHS に負ける 47 問 (600 秒・2 種、res8): SGM −8.3% (区間 −17.3%〜+0.5%)、解けた 54 → 56 回、1 種でも解く 28 → 30 問。
+  res7 (186 問) の cand1108z は既定より解けた +6・SGM −1.7%。遅くなる問題: hypothyroid-k1・enlight_hard・mzzv42z (zerohalf なし)、ns1208400。
+- 記録は `analysis/cand1108zd_default_20261109.md`。
