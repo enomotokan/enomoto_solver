@@ -11,8 +11,8 @@ from probs import PROBS  # noqa: E402
 import run_miplib_benchmark as rb  # noqa: E402
 CFGS = {
     "def": {},
-    "g4": {"ENOMOTO_MIP_GAP4": "iproc"},
-    "g4b": {"ENOMOTO_MIP_GAP4": "iproc", "ENOMOTO_MIP_TREE_NO_PASS_BASIS": "1"},
+    "g4": {"ENOMOTO_MIP_GAP4": "proc"},
+    "g4b": {"ENOMOTO_MIP_GAP4": "proc", "ENOMOTO_MIP_TREE_NO_PASS_BASIS": "1"},
 }
 OUT = D / "res58.jsonl"
 
