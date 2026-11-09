@@ -1,0 +1,22 @@
+# heaptrack (neos-957323、4 スレッド・400 秒・種 1、確保を全部 glibc に回したデバッグ情報つきの wheel、ピーク RSS 5.6 GB)
+# heaptrack_print --print-peaks の上位 20。行: ピークの大きさ・呼び出しの数・このクレートの中の呼び出し元 (内側から)
+2.18G 8002 private-gemm-x86-0.1.22/src/lib.rs:1294 <- src/lib.rs:1300 <- src/interior_point/multifrontal.rs:347 <- src/interior_point/multifrontal.rs:445 <- src/interior_point/multifrontal.rs:447 <- src/interior_point/multifrontal.rs:462 <- src/interior_point/multifrontal.rs:999
+1.63G 19722174 mip/solver.rs:15914 <- mip/solver.rs:15745 <- mip/solver.rs:15711 <- src/mip/solver.rs:10311 <- src/mip/solver.rs:4773 <- src/mip/solver.rs:4230 <- mip/solver.rs:18039
+736.72M 47 mip/problem.rs:38 <- src/mip/solver.rs:4620 <- mip/solver.rs:4620 <- src/mip/solver.rs:4230 <- mip/solver.rs:18039 <- cancel.rs:37 <- src/mip/solver.rs:18039
+484.03M 1328 mip/separation.rs:3448 <- src/mip/solver.rs:7223 <- src/mip/solver.rs:4773 <- src/mip/solver.rs:4230 <- mip/solver.rs:18039 <- cancel.rs:37 <- src/mip/solver.rs:18039
+245.57M 15958 mip/problem.rs:35 <- src/mip/solver.rs:4620 <- mip/solver.rs:4620 <- src/mip/solver.rs:4230 <- mip/solver.rs:18039 <- cancel.rs:37 <- src/mip/solver.rs:18039
+201.18M 511 sparse.rs:795 <- sparse.rs:1043 <- simplex.rs:321 <- src/simplex/mip_lp.rs:672 <- src/simplex/mip_lp.rs:679 <- src/simplex/mip_lp.rs:803 <- src/simplex/mip_lp.rs:843
+201.18M 511 sparse.rs:774 <- sparse.rs:884 <- simplex.rs:321 <- src/simplex/mip_lp.rs:672 <- src/simplex/mip_lp.rs:679 <- src/simplex/mip_lp.rs:803 <- src/simplex/mip_lp.rs:843
+139.20M 2268521 src/mip/problem.rs:32 <- src/mip/solver.rs:4620 <- mip/solver.rs:4620 <- src/mip/solver.rs:4230 <- mip/solver.rs:18039 <- cancel.rs:37 <- src/mip/solver.rs:18039
+95.65M 465600 mip/clique.rs:105 <- mip/clique.rs:109 <- src/mip/clique.rs:27 <- mip/separation.rs:641 <- src/mip/separation.rs:677 <- src/mip/separation.rs:720 <- src/mip/separation.rs:3358
+95.18M 65139 simplex/mip_lp.rs:563 <- src/simplex/mip_lp.rs:542 <- src/simplex/mip_lp.rs:0 <- src/mip/lp_api.rs:151 <- mip/solver.rs:4252 <- src/mip/solver.rs:4230 <- mip/solver.rs:18039
+62.11M 463 mip/solver.rs:17957 <- src/mip/solver.rs:18021 <- src/mip/solver.rs:9734 <- src/mip/solver.rs:4773 <- src/mip/solver.rs:3652 <- mip/solver.rs:3654 <- mip/mod.rs:1446
+53.77M 9373493 simplex/slope_intercept_dual.rs:4279 <- src/simplex/slope_intercept_dual.rs:4639 <- src/simplex/slope_intercept_dual.rs:4190 <- simplex/slope_intercept_dual.rs:4124 <- simplex/slope_intercept_dual.rs:4106 <- src/simplex/slope_intercept_dual.rs:1820 <- src/simplex/mip_lp.rs:2583
+42.78M 290 simplex/slope_intercept_dual.rs:4265 <- src/simplex/slope_intercept_dual.rs:4639 <- src/simplex/slope_intercept_dual.rs:4190 <- simplex/slope_intercept_dual.rs:4124 <- simplex/slope_intercept_dual.rs:4106 <- src/simplex/slope_intercept_dual.rs:1820 <- src/simplex/mip_lp.rs:2583
+39.90M 20936 mip/lp.rs:41 <- src/mip/queue.rs:517 <- mip/queue.rs:457 <- src/mip/solver.rs:11506 <- src/mip/solver.rs:4773 <- src/mip/solver.rs:4230 <- mip/solver.rs:18039
+33.27M 60 mip/cuts.rs:110 <- src/mip/separation.rs:5124 <- src/mip/separation.rs:3630 <- src/mip/solver.rs:11245 <- src/mip/solver.rs:4773 <- src/mip/solver.rs:4230 <- mip/solver.rs:18039
+25.87M 273 mip/heur_scip.rs:23 <- src/mip/solver.rs:6235 <- src/mip/heuristics.rs:225 <- src/mip/heuristics.rs:134 <- mip/heuristics.rs:127 <- mip/heuristics.rs:459 <- src/mip/solver.rs:10914
+24.95M 1825 mip/solver.rs:16453 <- src/mip/solver.rs:10257 <- src/mip/solver.rs:4773 <- src/mip/solver.rs:4230 <- mip/solver.rs:18039 <- cancel.rs:37 <- src/mip/solver.rs:18039
+21.39M 290 simplex/slope_intercept_dual.rs:4264 <- src/simplex/slope_intercept_dual.rs:4639 <- src/simplex/slope_intercept_dual.rs:4190 <- simplex/slope_intercept_dual.rs:4124 <- simplex/slope_intercept_dual.rs:4106 <- src/simplex/slope_intercept_dual.rs:1820 <- src/simplex/mip_lp.rs:2583
+21.39M 290 simplex/slope_intercept_dual.rs:4315 <- src/simplex/slope_intercept_dual.rs:4639 <- src/simplex/slope_intercept_dual.rs:4190 <- simplex/slope_intercept_dual.rs:4124 <- simplex/slope_intercept_dual.rs:4106 <- src/simplex/slope_intercept_dual.rs:1820 <- src/simplex/mip_lp.rs:2583
+21.15M 32622 simplex.rs:298 <- src/mip/solver.rs:4620 <- mip/solver.rs:4620 <- src/mip/solver.rs:4230 <- mip/solver.rs:18039 <- cancel.rs:37 <- src/mip/solver.rs:18039
