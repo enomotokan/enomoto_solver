@@ -1056,7 +1056,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 目的関数の伝播 [刈ったノード, 締めた境界]、強分岐の子の伝播 [矛盾した子, 子の LP に渡した境界]
     obj_prop_stats: [u64; 2],
     /// 試作 `ENOMOTO_MIP_GAP1` の `r`: 子の選び方で下・上を選んだ回数
-    gap1_stats: [u64; 6],
+    gap1_stats: [u64; 8],
     /// カットプールの伝播 ([`Self::propagate_cut_pool`]): 呼び出し回数、枝刈りしたノード数、締めた境界の数、時間 (ナノ秒)。
     cutpool_prop_stats: [u64; 4],
     /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `z`: カットプールにだけ入れる他の写しのカット ([`Self::optface_merge`] が置き、呼び出し側が入れる)
@@ -4676,7 +4676,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         debug_x_done: false,
         obj_cols: None,
         obj_prop_stats: [0; 2],
-        gap1_stats: [0; 6],
+        gap1_stats: [0; 8],
         cutpool_prop_stats: [0; 4],
         optface_pool_rows: std::cell::RefCell::new(Vec::new()),
         cpp: CutPropState::default(),
@@ -4850,6 +4850,15 @@ fn proof_fixpoint() -> bool {
 /// `HNODE`・`HBR` と並べる (scripts/tree_log_compare.py)
 /// 試作 `ENOMOTO_MIP_GAP1` の `r`: 主の木の根 (深さ 0 のノード) の LP 解 (HiGHS の `getRootLpSol`)
 static GAP1_ROOT_X: std::sync::Mutex<Option<std::sync::Arc<Vec<f64>>>> = std::sync::Mutex::new(None);
+
+/// 双対証明の破れ・刈り込みの判定の許容誤差。既定は `1e-6 (1 + |rhs|)` (右辺の大きさに比例)。試作 `ENOMOTO_MIP_GAP1` の `p`
+/// (analysis/gap1_tree_20261109.md) では `1e-6 (1 + 1e-3 |rhs|)` (HiGHS の双対証明は絶対値の `feastol`)。neos-957323 は目的値が
+/// -237.76 で、目的関数の証明の右辺が 238 程度になり、既定では 2.4e-4 を越えて破れないと証明にしないが、根の LP と暫定解の差
+/// (ギャップ全体) が 1.7e-4 しかないので、目的関数の証明は 1 本も通らない
+#[inline]
+fn gap1_proof_tol(rhs: f64) -> f64 {
+    if super::pseudocost::gap1().contains('p') { 1e-6 * (1.0 + 1e-3 * rhs.abs()) } else { 1e-6 * (1.0 + rhs.abs()) }
+}
 
 fn tree_log() -> bool {
     env_str!("ENOMOTO_MIP_TREE_LOG").is_some()
@@ -13101,19 +13110,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 待ち行列のノードでその列が下・上に変更された数の釣り合い ((下/計) × (上/計)、次に計) の大きい順にする (HiGHS の
         // `HighsSearch::selectBranchingCandidate` の同点の扱い)。既定では同点は候補の順 (列の番号の順) のまま
         // `t` は同点の数を数えるだけ (並べ替えない)
-        if !cands.is_empty() && !self.params.submip && (super::pseudocost::gap1().contains('q') || super::pseudocost::gap1().contains('t')) {
+        // `f` は同点の中を小数部の積 f (1 - f) の大きい順 (最も分数の列から) にする (`q` と両方なら `q` の後に `f`)
+        let g1 = super::pseudocost::gap1();
+        if !cands.is_empty() && !self.params.submip && (g1.contains('q') || g1.contains('t') || g1.contains('f')) {
             let top = cands[0].2;
             let k = cands.iter().take_while(|c| c.2 >= top - 1e-6).count();
             self.gap1_stats[2] += 1;
             self.gap1_stats[3] += (k > 1) as u64;
             self.gap1_stats[4] += k as u64;
-            if k > 1 && super::pseudocost::gap1().contains('q') {
-                let key = |s: &Self, j: usize| {
-                    let (d, u) = s.queue.col_count(j);
+            if k > 1 && (g1.contains('q') || g1.contains('f')) {
+                let (use_q, use_f) = (g1.contains('q'), g1.contains('f'));
+                let key = |s: &Self, j: usize, v: f64| {
+                    let (d, u) = if use_q { s.queue.col_count(j) } else { (0, 0) };
                     let n = (d + u) as f64;
-                    (if n > 0.0 { (d as f64 / n) * (u as f64 / n) } else { 0.0 }, n)
+                    let f = s.bfr(j, v);
+                    (if n > 0.0 { (d as f64 / n) * (u as f64 / n) } else { 0.0 }, if use_f { f * (1.0 - f) } else { 0.0 } + if use_q { 1e-9 * n } else { 0.0 })
                 };
-                let mut grp: Vec<(usize, f64, f64, (f64, f64))> = cands[..k].iter().map(|&(j, v, sc)| (j, v, sc, key(self, j))).collect();
+                let mut grp: Vec<(usize, f64, f64, (f64, f64))> = cands[..k].iter().map(|&(j, v, sc)| (j, v, sc, key(self, j, v))).collect();
                 grp.sort_by(|a, b| b.3 .0.total_cmp(&a.3 .0).then(b.3 .1.total_cmp(&a.3 .1)));
                 self.gap1_stats[5] += (grp[0].0 != cands[0].0) as u64;
                 for (i, g) in grp.into_iter().enumerate() {
@@ -14781,7 +14794,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 今のノードで破れていることを確かめる (数値誤差で破れていない証明は使わない)
         let rhs = if obj { self.prune_limit() - p.offset - konst } else { -konst };
         let minact: f64 = coefs.iter().map(|&(j, a)| if a > 0.0 { a * self.dom.lo[j] } else { a * self.dom.up[j] }).sum();
-        if minact.is_finite() && minact > rhs + 1e-6 * (1.0 + rhs.abs()) && minact - rhs <= num_err {
+        if minact.is_finite() && minact > rhs + gap1_proof_tol(rhs) && minact - rhs <= num_err {
             // 破れているが、数値誤差の見積もりの範囲内: 証明として信用しない
             self.proof_numeric_rejects += 1;
             if dbg || self.params.verbose && env_str!("ENOMOTO_MIP_PROOF_NUM_LOG").is_some() {
@@ -14790,7 +14803,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             return false;
         }
-        if !minact.is_finite() || minact <= rhs + 1e-6 * (1.0 + rhs.abs()) {
+        if !minact.is_finite() || minact <= rhs + gap1_proof_tol(rhs) {
+            // 診断 (`ENOMOTO_MIP_GAP1` の出力): 目的関数の証明が破れていない (許容誤差の内) として捨てた数
+            self.gap1_stats[6] += obj as u64;
             if dbg {
                 eprintln!("PROOF reject not violated: minact {minact} rhs {rhs} obj {obj} lp_obj {} limit {} len {} rows_skipped {}", self.lp.objective() + p.offset, self.prune_limit(), coefs.len(), skipped);
                 for &(j, a) in &coefs {
@@ -16555,7 +16570,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let slack = rhs - minact;
                 let org = (self.proof_state[k] == ProofState::Imported) as usize;
                 self.tprof.proof[org][0] += 1;
-                if slack < -1e-6 * (1.0 + rhs.abs()) {
+                if slack < -gap1_proof_tol(rhs) {
                     if self.dbg_on || proof_diag() {
                         self.proof_diag_prune(k, rhs, minact, full);
                     }
@@ -19835,7 +19850,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: cut pool propagation: calls {}, pruned {} nodes, tightened {} bounds, {:.2}s, pool {} cuts ({} nonzeros); updated terms {}, candidates {} ({} nonzeros), rebuilds {}", self.cutpool_prop_stats[0], self.cutpool_prop_stats[1], self.cutpool_prop_stats[2], self.cutpool_prop_stats[3] as f64 * 1e-9, self.cut_pool.len(), self.cut_pool_nnz, self.cpp.work[0], self.cpp.work[1], self.cpp.work[2], self.cpp.work[3]);
             }
             if !super::pseudocost::gap1().is_empty() {
-                eprintln!("MIP: GAP1 {}: child selection down {} up {}; branching selections {}, with ties {} (candidates in ties {}), changed by the queue counts {}", super::pseudocost::gap1(), self.gap1_stats[0], self.gap1_stats[1], self.gap1_stats[2], self.gap1_stats[3], self.gap1_stats[4], self.gap1_stats[5]);
+                eprintln!("MIP: GAP1 {}: child selection down {} up {}; branching selections {}, with ties {} (candidates in ties {}), changed by the queue counts {}; objective proofs not violated beyond the tolerance {}", super::pseudocost::gap1(), self.gap1_stats[0], self.gap1_stats[1], self.gap1_stats[2], self.gap1_stats[3], self.gap1_stats[4], self.gap1_stats[5], self.gap1_stats[6]);
             }
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
             if self.dive_rcfix_count > 0 {

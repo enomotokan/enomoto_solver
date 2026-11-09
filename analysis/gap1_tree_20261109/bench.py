@@ -11,11 +11,12 @@ import run_miplib_benchmark as rb  # noqa: E402
 TGT = "neos-957323 neos-3627168-kasai tr12-30 mzzv11".split()
 CFG = {
     "def": {},
+    "dt": {"ENOMOTO_MIP_GAP1": "t"},
     "cw": {"ENOMOTO_T_MIP_CONFLICT_WEIGHT": "0.01"},
     "s": {"ENOMOTO_MIP_GAP1": "s"},
     "sw": {"ENOMOTO_MIP_GAP1": "sw"},
     "w": {"ENOMOTO_MIP_GAP1": "w"},
-    "r": {"ENOMOTO_MIP_GAP1": "r"},
+    "r": {"ENOMOTO_MIP_GAP1": "rt"},
     "rs": {"ENOMOTO_MIP_GAP1": "rs"},
     "ch": {"ENOMOTO_MIP_CHILD_HIGHS": "1"},
     "nocut": {"ENOMOTO_MIP_NO_CUTS": "1"},
@@ -26,6 +27,12 @@ CFG = {
     "rq": {"ENOMOTO_MIP_GAP1": "rq"},
     "t1q": {"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_GAP1": "q"},
     "t1rq": {"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_GAP1": "rq"},
+    "f": {"ENOMOTO_MIP_GAP1": "f"},
+    "rf": {"ENOMOTO_MIP_GAP1": "rf"},
+    "pt": {"ENOMOTO_MIP_GAP1": "pt"},
+    "prt": {"ENOMOTO_MIP_GAP1": "prt"},
+    "p": {"ENOMOTO_MIP_GAP1": "pt"},
+    "pr": {"ENOMOTO_MIP_GAP1": "prt"},
     "t1r": {"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_GAP1": "r"},
 }
 OUT, TL, P, cfgs, seeds = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4].split(","), sys.argv[5].split(",")
