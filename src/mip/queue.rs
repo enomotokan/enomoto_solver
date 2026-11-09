@@ -431,6 +431,9 @@ pub struct NodeQueue {
     packed: Vec<Option<Rc<PackedBasis>>>,
     /// 最後に詰めた基底 (兄弟は同じ `Rc<Basis>` を持つので、続けて入れたら詰めたものを共有する)
     pack_last: Option<(std::rc::Weak<Basis>, Rc<PackedBasis>)>,
+    /// 試作 `ENOMOTO_MIP_GAP1` の `q` (analysis/gap1_tree_20261109.md): 列ごとの、待ち行列のノードの境界の変更のうち
+    /// 下向き (`[0]`、上限を下げる) と上向き (`[1]`) の数 (HiGHS の `HighsNodeQueue::numNodesDown/Up`)。`q` がなければ空
+    pub col_cnt: Vec<[u32; 2]>,
 }
 
 /// `ENOMOTO_MIP_MEMB` の `c` (試作): 2 ビットに詰めた基底 (列, 行)。
@@ -438,7 +441,7 @@ pub type PackedBasis = (super::lp::PackedStatus, super::lp::PackedStatus);
 
 impl NodeQueue {
     pub fn new() -> Self {
-        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new(), protect: Vec::new(), prio_only: false, pack_basis: super::solver::memb('c'), packed: Vec::new(), pack_last: None }
+        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new(), protect: Vec::new(), prio_only: false, pack_basis: super::solver::memb('c'), packed: Vec::new(), pack_last: None, col_cnt: Vec::new() }
     }
 
     pub fn len(&self) -> usize {
@@ -463,6 +466,9 @@ impl NodeQueue {
                 }
                 self.protect[c] += 1;
             }
+        }
+        if super::pseudocost::gap1().contains('q') {
+            self.count_cols(&node.changes, true);
         }
         let id = if let Some(id) = self.free.pop() {
             self.nodes[id] = Some(node);
@@ -518,8 +524,29 @@ impl NodeQueue {
         self.packed.iter().flatten().map(|p| (p.0.bytes() + p.1.bytes()) / Rc::strong_count(p)).sum()
     }
 
+    /// `col_cnt` を足す・引く (`ENOMOTO_MIP_GAP1` の `q`)
+    fn count_cols(&mut self, ch: &[BoundChange], add: bool) {
+        for c in ch {
+            if c.col >= self.col_cnt.len() {
+                self.col_cnt.resize(c.col + 1, [0; 2]);
+            }
+            let k = &mut self.col_cnt[c.col][(!c.upper) as usize];
+            *k = if add { *k + 1 } else { k.saturating_sub(1) };
+        }
+    }
+
+    /// 待ち行列のノードで列 `j` が (下向き, 上向き) に変更された数 (`ENOMOTO_MIP_GAP1` の `q`)
+    pub fn col_count(&self, j: usize) -> (u32, u32) {
+        self.col_cnt.get(j).map_or((0, 0), |c| (c[0], c[1]))
+    }
+
     fn remove(&mut self, id: usize) -> OpenNode {
         let mut node = self.nodes[id].take().unwrap();
+        if !self.col_cnt.is_empty() {
+            let ch = std::mem::take(&mut node.changes);
+            self.count_cols(&ch, false);
+            node.changes = ch;
+        }
         if let Some(p) = self.packed.get_mut(id).and_then(|x| x.take()) {
             node.basis = Some(Rc::new(Basis { col: p.0.unpack(), row: p.1.unpack() }));
         }

@@ -1053,6 +1053,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     obj_cols: Option<std::rc::Rc<Vec<(usize, f64)>>>,
     /// 目的関数の伝播 [刈ったノード, 締めた境界]、強分岐の子の伝播 [矛盾した子, 子の LP に渡した境界]
     obj_prop_stats: [u64; 2],
+    /// 試作 `ENOMOTO_MIP_GAP1` の `r`: 子の選び方で下・上を選んだ回数
+    gap1_stats: [u64; 6],
     /// カットプールの伝播 ([`Self::propagate_cut_pool`]): 呼び出し回数、枝刈りしたノード数、締めた境界の数、時間 (ナノ秒)。
     cutpool_prop_stats: [u64; 4],
     /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `z`: カットプールにだけ入れる他の写しのカット ([`Self::optface_merge`] が置き、呼び出し側が入れる)
@@ -4621,6 +4623,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         debug_x_done: false,
         obj_cols: None,
         obj_prop_stats: [0; 2],
+        gap1_stats: [0; 6],
         cutpool_prop_stats: [0; 4],
         optface_pool_rows: std::cell::RefCell::new(Vec::new()),
         cpp: CutPropState::default(),
@@ -4792,6 +4795,9 @@ fn proof_fixpoint() -> bool {
 /// 診断用 (`ENOMOTO_MIP_TREE_LOG`): 木のノードの終わり方と分枝を 1 行ずつ標準エラーに出すか (サブ MIP では出さない)。
 /// `ENODE d=深さ r=終わり方 lp=LP 値 rows=LP の行数` と `EBR d=深さ col=列 val=値 rows=行数`。HiGHS の計測用パッチの
 /// `HNODE`・`HBR` と並べる (scripts/tree_log_compare.py)
+/// 試作 `ENOMOTO_MIP_GAP1` の `r`: 主の木の根 (深さ 0 のノード) の LP 解 (HiGHS の `getRootLpSol`)
+static GAP1_ROOT_X: std::sync::Mutex<Option<std::sync::Arc<Vec<f64>>>> = std::sync::Mutex::new(None);
+
 fn tree_log() -> bool {
     env_str!("ENOMOTO_MIP_TREE_LOG").is_some()
 }
@@ -11357,6 +11363,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 None => prefer_up,
             };
+            // `ENOMOTO_MIP_GAP1` の `r` (試作、analysis/gap1_tree_20261109.md): HiGHS の主の木の子の選び方 (`ChildSelectionRule::kRootSol`)。
+            // 両側の推論の平均に、根の LP 解からの距離の分だけ重みを掛け (根の LP 解に近づく側を重く)、大きい側へ潜る。既定 (擬似費用の
+            // 見積りの小さい側) では、小数部の小さい列 (0.0002 など) の下の子に潜り続け、LP の値が動かないまま深さ 700 まで進む (neos-957323)
+            let prefer_up = if super::pseudocost::gap1().contains('r') && !self.params.submip {
+                if node.depth == 0 {
+                    *GAP1_ROOT_X.lock().unwrap() = Some(std::sync::Arc::new(self.lp.col_values()));
+                }
+                let mut dp = self.pc.inference(col, false) + 1e-9;
+                let mut upr = self.pc.inference(col, true) + 1e-9;
+                if let Some(rx) = GAP1_ROOT_X.lock().unwrap().as_ref().filter(|rx| rx.len() == self.p.n) {
+                    let r = rx[col].clamp(value.floor(), value.ceil());
+                    upr *= 1.0 + (value - r);
+                    dp *= 1.0 + (r - value);
+                }
+                self.gap1_stats[(upr + 1e-9 >= dp) as usize] += 1;
+                upr + 1e-9 >= dp
+            } else {
+                prefer_up
+            };
             let prefer_up = prefer_up ^ (self.race_div & 1 == 1 && !self.race_done);
             // なぞる: 子の優先度は HiGHS の処理順 (ファイルにない子は親の直後)
             let rp_parent = rp_entry.map_or(node.estimate, |e| e.seq as f64);
@@ -13019,6 +13044,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         cands.sort_by(|a, b| b.2.total_cmp(&a.2));
+        // `ENOMOTO_MIP_GAP1` の `q` (試作、analysis/gap1_tree_20261109.md): 点数が最良から 1e-6 以内の候補 (同点) の中では、
+        // 待ち行列のノードでその列が下・上に変更された数の釣り合い ((下/計) × (上/計)、次に計) の大きい順にする (HiGHS の
+        // `HighsSearch::selectBranchingCandidate` の同点の扱い)。既定では同点は候補の順 (列の番号の順) のまま
+        // `t` は同点の数を数えるだけ (並べ替えない)
+        if !cands.is_empty() && !self.params.submip && (super::pseudocost::gap1().contains('q') || super::pseudocost::gap1().contains('t')) {
+            let top = cands[0].2;
+            let k = cands.iter().take_while(|c| c.2 >= top - 1e-6).count();
+            self.gap1_stats[2] += 1;
+            self.gap1_stats[3] += (k > 1) as u64;
+            self.gap1_stats[4] += k as u64;
+            if k > 1 && super::pseudocost::gap1().contains('q') {
+                let key = |s: &Self, j: usize| {
+                    let (d, u) = s.queue.col_count(j);
+                    let n = (d + u) as f64;
+                    (if n > 0.0 { (d as f64 / n) * (u as f64 / n) } else { 0.0 }, n)
+                };
+                let mut grp: Vec<(usize, f64, f64, (f64, f64))> = cands[..k].iter().map(|&(j, v, sc)| (j, v, sc, key(self, j))).collect();
+                grp.sort_by(|a, b| b.3 .0.total_cmp(&a.3 .0).then(b.3 .1.total_cmp(&a.3 .1)));
+                self.gap1_stats[5] += (grp[0].0 != cands[0].0) as u64;
+                for (i, g) in grp.into_iter().enumerate() {
+                    cands[i] = (g.0, g.1, g.2);
+                }
+            }
+        }
         // 予算: ノード LP の反復数 (強分岐を除く) の 0.125 倍 + 25000
         // `ENOMOTO_MIP_SB_BUDGET_HIGHS` (試作): HiGHS (`HighsSearch::selectBranchingCandidate`) と同じ大きさの予算
         // 100000 + 0.5 × (強分岐・ヒューリスティクス以外の LP 反復)。既定の 25000 + 0.125 倍では、h80x6320d の木の主のスレッドが
@@ -19731,6 +19780,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: propagation conflicts: analysed {}, no 1-UIP {}, 1-UIP not a row {}, no decision set {}, decision set not a row {}; not a row because continuous {}, general integer {}, both sides {}", self.conf_stats[0], self.conf_stats[1], self.conf_stats[2], self.conf_stats[3], self.conf_stats[4], self.conf_stats[5], self.conf_stats[6], self.conf_stats[7]);
             if cutpool_prop() {
                 eprintln!("MIP: cut pool propagation: calls {}, pruned {} nodes, tightened {} bounds, {:.2}s, pool {} cuts ({} nonzeros); updated terms {}, candidates {} ({} nonzeros), rebuilds {}", self.cutpool_prop_stats[0], self.cutpool_prop_stats[1], self.cutpool_prop_stats[2], self.cutpool_prop_stats[3] as f64 * 1e-9, self.cut_pool.len(), self.cut_pool_nnz, self.cpp.work[0], self.cpp.work[1], self.cpp.work[2], self.cpp.work[3]);
+            }
+            if !super::pseudocost::gap1().is_empty() {
+                eprintln!("MIP: GAP1 {}: child selection down {} up {}; branching selections {}, with ties {} (candidates in ties {}), changed by the queue counts {}", super::pseudocost::gap1(), self.gap1_stats[0], self.gap1_stats[1], self.gap1_stats[2], self.gap1_stats[3], self.gap1_stats[4], self.gap1_stats[5]);
             }
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
             if self.dive_rcfix_count > 0 {

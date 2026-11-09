@@ -15,6 +15,18 @@ CFG = {
     "s": {"ENOMOTO_MIP_GAP1": "s"},
     "sw": {"ENOMOTO_MIP_GAP1": "sw"},
     "w": {"ENOMOTO_MIP_GAP1": "w"},
+    "r": {"ENOMOTO_MIP_GAP1": "r"},
+    "rs": {"ENOMOTO_MIP_GAP1": "rs"},
+    "ch": {"ENOMOTO_MIP_CHILD_HIGHS": "1"},
+    "nocut": {"ENOMOTO_MIP_NO_CUTS": "1"},
+    "nors": {"ENOMOTO_MIP_NO_RESTART": "1"},
+    "t1": {"ENOMOTO_MIP_THREADS": "1"},
+    "t": {"ENOMOTO_MIP_GAP1": "t"},
+    "q": {"ENOMOTO_MIP_GAP1": "q"},
+    "rq": {"ENOMOTO_MIP_GAP1": "rq"},
+    "t1q": {"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_GAP1": "q"},
+    "t1rq": {"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_GAP1": "rq"},
+    "t1r": {"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_GAP1": "r"},
 }
 OUT, TL, P, cfgs, seeds = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4].split(","), sys.argv[5].split(",")
 if P == "p58":
