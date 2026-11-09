@@ -1055,7 +1055,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 固定費用のネットワーク型か (`root_cut_highs` がループの初めから使うので先に決める。下でも同じ値を入れ直す)
         self.fc_network = !self.params.submip && fixed_charge_network(p);
         // `ENOMOTO_MIP_CUTSEL_PROBE`: 外側の最初の根では前の求解の選択を消す (0 ラウンド目の比べで決め直す)
-        if !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && self.cut_cont.is_none() && env_def!("ENOMOTO_MIP_CUTSEL_PROBE", "rate").is_some() {
+        // (試作 `ENOMOTO_MIP_GAP2_PROBE1` では clique の fallback の 2 回目のループで消さない。下の `probe_pending` を参照)
+        if !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && self.cut_cont.is_none() && env_def!("ENOMOTO_MIP_CUTSEL_PROBE", "rate").is_some()
+            && !(CLIQUE_FB_SECOND.with(|c| c.get()) && env_str!("ENOMOTO_MIP_GAP2_PROBE1").is_some_and(|v| v != "0"))
+        {
             CUT_PROBE_CHOICE.store(0, std::sync::atomic::Ordering::Relaxed);
         }
         let n = p.n;
