@@ -1063,6 +1063,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut intobj_stall = 0usize;
         // 整数値に固定された連続列を整数列と扱って目的値が整数刻みか (`ENOMOTO_MIP_CUT_INTOBJ_STALL` の判定に使う)
         let intobj_step = env_def!("ENOMOTO_MIP_CUT_INTOBJ_STALL", "1").is_some() && p.objective_step_bounds(Some((&self.dom.lo, &self.dom.up))).is_some();
+        // 試作 `ENOMOTO_MIP_GAP2_FLAT=k` (既定では使わない。analysis/gap2_rootcost_20261109.md): 目的値が整数刻みでない問題でも、
+        // `ENOMOTO_MIP_CUT_INTOBJ_STALL` と同じ「一度上がった後に k ラウンド (既定 3) まったく動かない」で根のカットのループを止める。
+        // physiciansched6-2 (連続列 9 本に費用があり整数刻みと判定されない) は 4 ラウンド目で下界が最適値 49324 に届いた後、分数の列の
+        // 数が減り続けるので停滞と数えられず、下界が全く動かないまま 11 ラウンド (約 4.8 秒) 回っていた
+        let gap2_flat = (!intobj_step && !self.params.submip)
+            .then(|| env_str!("ENOMOTO_MIP_GAP2_FLAT").filter(|v| *v != "0").map(|v| v.parse::<usize>().unwrap_or(3).max(1)))
+            .flatten();
         let mut prev_obj = self.lp.objective();
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
         let first_obj = prev_obj;
@@ -1229,6 +1236,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // physiciansched6-2 でも比べる)
         let min_rounds0 = min_rounds;
         let probe_pending = !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && self.cut_cont.is_none() && !self.fc_network && env_def!("ENOMOTO_MIP_CUTSEL_PROBE", "rate").is_some();
+        // 試作 `ENOMOTO_MIP_GAP2_PROBE1` (既定では使わない。analysis/gap2_rootcost_20261109.md): clique の fallback (と zerohalf の試し) で
+        // 続ける 2 回目のループでは、カットの選び方の比べをやり直さず 1 回目の選択 (`CUT_PROBE_CHOICE`) をそのまま使う。
+        // neos-960392 では 2 回目の比べに 5.9 秒 (1 ラウンドの分離が 2〜3 秒) かかり、選択は 1 回目と同じ (既定) だった
+        let probe_pending = probe_pending && !(CLIQUE_FB_SECOND.with(|c| c.get()) && env_str!("ENOMOTO_MIP_GAP2_PROBE1").is_some_and(|v| v != "0") && CUT_PROBE_CHOICE.load(std::sync::atomic::Ordering::Relaxed) != 0);
         let mut cap_base = if (CLIQUE_FB_SECOND.with(|c| c.get()) && env_str!("ENOMOTO_MIP_CLIQUE_FB_SHARED_CAP").is_none()) || cap_from_loop { t_loop0 } else { self.cpu0 };
         let mut phase2_deadline = f64::INFINITY;
         let mut round_ctr = 0usize;
@@ -3192,21 +3203,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 数えられず、14 ラウンド (約 6 秒) 回してから根のヒューリスティクスに進んでいた。最初から動かない
                     // ラウンド (neos-1456979) は数えない。整数刻みかは整数値に固定された連続列を整数列と扱って判定する (10teams は費用のある固定の連続列
                     // 225 本のために `obj_step` が無い)
-                    let intobj_flat = intobj_step
+                    let intobj_flat = (intobj_step || gap2_flat.is_some())
                         && !self.params.submip
                         && obj - first_obj > 1e-6 * obj.abs().max(1.0)
                         && (obj - prev_obj).abs() <= 1e-9 * obj.abs().max(1.0)
                         && env_def!("ENOMOTO_MIP_CUT_INTOBJ_STALL", "1").is_some();
                     if intobj_flat {
                         intobj_stall += 1;
-                        if intobj_stall >= tunable!("ENOMOTO_T_MIP_CUT_INTOBJ_STALL", 3usize, usize) {
+                        if intobj_stall >= gap2_flat.unwrap_or_else(|| tunable!("ENOMOTO_T_MIP_CUT_INTOBJ_STALL", 3usize, usize)) {
                             if self.params.verbose {
-                                eprintln!("MIP: cut loop: integral objective, LP bound unchanged for {intobj_stall} rounds; stop");
+                                eprintln!("MIP: cut loop: {}, LP bound unchanged for {intobj_stall} rounds; stop", if gap2_flat.is_some() { "GAP2_FLAT" } else { "integral objective" });
                             }
                             break;
                         }
                     } else {
                         intobj_stall = 0;
+                    }
+                    // 試作 `ENOMOTO_MIP_GAP2_ZEROCAP=m` (既定では使わない。analysis/gap2_rootcost_20261109.md): 外側の根で、ループの始めから
+                    // 目的値がまったく動かないまま、ループの経過 (壁時計) が max(m x 根の LP の秒, `ENOMOTO_T_MIP_GAP2_ZEROCAP_MIN` (1 秒)) を
+                    // 超えたら止める。neos-960392 は根の LP の値 -238 が最適値で、1 ラウンドの分離が 1〜6 秒 (密なカット) のまま
+                    // 下界が全く動かないラウンドを 6〜14 回 (13〜58 秒) 回していた (HiGHS は 5 秒ほどで抜ける)
+                    if !self.params.submip && job.is_none() && (obj - first_obj).abs() <= 1e-9 * obj.abs().max(1.0) {
+                        if let Some(m) = env_str!("ENOMOTO_MIP_GAP2_ZEROCAP").and_then(|v| v.parse::<f64>().ok()).filter(|&m| m > 0.0) {
+                            let lim = (m * self.root_lp_secs).max(tunable!("ENOMOTO_T_MIP_GAP2_ZEROCAP_MIN", 1.0, f64));
+                            let el = t_loop_wall.elapsed().as_secs_f64();
+                            if el > lim {
+                                if self.params.verbose {
+                                    eprintln!("MIP: cut loop: GAP2_ZEROCAP, LP bound unchanged since the loop start for {el:.2}s (limit {lim:.2}s, root LP {:.2}s); stop", self.root_lp_secs);
+                                }
+                                break;
+                            }
+                        }
                     }
                     if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 && !saturated && !widen_now {
                         stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened { 2 } else { 1 };
