@@ -5235,7 +5235,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 余裕と関係なくすべての行の両側を試していた
         let row_modes = if row_cuts_m > 0 && env_str!("ENOMOTO_MIP_ORIGROW_TIGHT").is_some() && !gen_old() && mr >= p.m { self.orig_row_modes(&vars, lp_rows, &act, light) } else { None };
         // `ENOMOTO_MIP_ZH_TRIAL` (試作): 根の試しで使うと決まった問題では使う ([`super::zerohalf::zh_trial_mode`])
-        let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::zerohalf::zh_trial_used()) && self.sep_src_on(sepprof::SRC_ZH, light);
+        // 診断用 `ENOMOTO_MIP_ZH_ONLY` = `root` / `tree`: zerohalf を使うとき、根 (`light` でない分離) だけ / ノードだけで使う
+        let zh_where = match env_str!("ENOMOTO_MIP_ZH_ONLY") {
+            Some("root") => !light,
+            Some("tree") => light,
+            _ => true,
+        };
+        let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::zerohalf::zh_trial_used()) && zh_where && self.sep_src_on(sepprof::SRC_ZH, light);
         // clique カットの使い方は下の説明を参照
         let clique_on = clique_cuts_mode().is_some_and(|m| !(light && (m == "root" || (m == "fallback" && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && ((m != "auto" && m != "fallback") || self.clique_auto == Some(true)));
         let clique_on = clique_on && self.sep_src_on(sepprof::SRC_CLIQUE, light);
