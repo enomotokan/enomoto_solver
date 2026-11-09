@@ -8,23 +8,23 @@ import benchlib as bl  # noqa: E402
 rows = bl.load([D / "res58.jsonl"])
 R = bl.table(rows)
 keys = list(R)
-for B in ["g4", "g4n"]:
-    bl.report(R, "def", B, keys, noise=bl.load_noise(), label=f"def→{B}")
+for A, B in [("def", "g4"), ("def", "g4n"), ("g4", "g4n")]:
+    bl.report(R, A, B, keys, noise=bl.load_noise(), label=f"{A}→{B}")
     print()
 # 最大 RSS と目的値の食い違い
 raw = [json.loads(l) for l in open(D / "res58.jsonl")]
 M = {}
 for r in raw:
     M.setdefault((r["problem"], r["rep"]), {})[r["cfg"]] = r
-for B in ["g4", "g4n"]:
+for A, B in [("def", "g4"), ("def", "g4n"), ("g4", "g4n")]:
     tot = [0, 0]; big = []; bad = []
     for k, v in M.items():
-        if "def" in v and B in v:
-            a, b = v["def"].get("max_rss_mb", 0), v[B].get("max_rss_mb", 0)
+        if A in v and B in v:
+            a, b = v[A].get("max_rss_mb", 0), v[B].get("max_rss_mb", 0)
             tot[0] += a; tot[1] += b
             if a > 800 and abs(b - a) > 0.2 * a:
                 big.append((k, a, b))
-            ra, rb = v["def"]["result"], v[B]["result"]
+            ra, rb = v[A]["result"], v[B]["result"]
             if ra.get("status") == "optimal" and rb.get("status") == "optimal":
                 za, zb = ra.get("objective"), rb.get("objective")
                 if za is not None and zb is not None and abs(za - zb) > 1e-6 * max(1, abs(za)):
@@ -33,5 +33,5 @@ for B in ["g4", "g4n"]:
                 # 片方の下界がもう片方の解より 1e-6 を超えて上なら矛盾
                 if x.get("bound") is not None and y.get("objective") is not None and x["bound"] > y["objective"] + 1e-6 * max(1, abs(y["objective"])):
                     bad.append((k, "bound>obj", x["bound"], y["objective"]))
-    print(f"def→{B}: 最大 RSS の和 {tot[0]} → {tot[1]} MB ({tot[1] / max(1, tot[0]) - 1:+.1%})、20% 超の差 (800 MB 超): {sorted(big)}")
+    print(f"{A}→{B}: 最大 RSS の和 {tot[0]} → {tot[1]} MB ({tot[1] / max(1, tot[0]) - 1:+.1%})、20% 超の差 (800 MB 超): {sorted(big)}")
     print(f"  両方最適で目的値が違う・下界と解の矛盾: {bad}")
