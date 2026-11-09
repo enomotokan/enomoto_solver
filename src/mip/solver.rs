@@ -767,6 +767,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     memb_next: f64,
     /// `ENOMOTO_MIP_GAP4` の `i` (試作): 暫定解の整数列を固定した LP ([`Self::resolve_continuous`]) が時間切れになった回数・飛ばした回数
     gap4_inclp: (u32, u32),
+    /// 診断用 `ENOMOTO_MIP_GAP4_RSS`: 生きている `Solver` の数に数えたか (サブ MIP か)。[`GAP4_LIVE`]
+    gap4_live: Option<bool>,
     mem2_keep: (bool, bool),
     /// `ENOMOTO_MIP_MEM2` の `d`: 持ち物の合計が上限の 1/2 を超えている (深さ優先に寄せる)
     mem2_press: bool,
@@ -2070,6 +2072,47 @@ fn mem2(c: char) -> bool {
 pub(super) fn gap4(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP4").ok().filter(|v| v != "0").unwrap_or_default()).contains(c)
+}
+
+/// 診断用 `ENOMOTO_MIP_GAP4_RSS=<秒>` (既定では出さない。analysis/gap4_rootstuck_mem_20261109.md): その秒おきに RSS と生きている
+/// `Solver` の数 (外側・サブ MIP、作った累計) を `GAP4RSS:` の行で標準エラーに出す (ログの時刻と並べて RSS の行き先を見る)
+pub(super) fn gap4_rss_secs() -> Option<f64> {
+    static V: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP4_RSS").ok().and_then(|v| v.parse::<f64>().ok()).filter(|&x| x > 0.0))
+}
+
+/// [`gap4_rss_secs`] の数: [生きている外側の Solver, 生きているサブ MIP の Solver, 作った外側, 作ったサブ MIP]
+pub(super) static GAP4_LIVE: [std::sync::atomic::AtomicI64; 4] = [const { std::sync::atomic::AtomicI64::new(0) }; 4];
+
+/// [`gap4_rss_secs`] の見張りのスレッドを (まだなら) 立てる
+pub(super) fn gap4_rss_start() {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let Some(secs) = gap4_rss_secs() else { return };
+    STARTED.get_or_init(|| {
+        let t0 = Instant::now();
+        let _ = std::thread::Builder::new().name("gap4rss".into()).spawn(move || loop {
+            use std::sync::atomic::Ordering::Relaxed;
+            let rss = rss_bytes().unwrap_or(0) as f64 / 1048576.0;
+            eprintln!(
+                "GAP4RSS: t {:.1} rss {:.0} MB live outer {} sub {} made outer {} sub {}",
+                t0.elapsed().as_secs_f64(),
+                rss,
+                GAP4_LIVE[0].load(Relaxed),
+                GAP4_LIVE[1].load(Relaxed),
+                GAP4_LIVE[2].load(Relaxed),
+                GAP4_LIVE[3].load(Relaxed)
+            );
+            std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+        });
+    });
+}
+
+impl<L: MipLp> Drop for Solver<'_, L> {
+    fn drop(&mut self) {
+        if let Some(b) = self.gap4_live {
+            GAP4_LIVE[b as usize].fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 /// 診断用 (`ENOMOTO_MIP_MEMB_DIAG`): [`Solver::memb_diag_tick`]。
@@ -4244,6 +4287,15 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     } else {
         p.objective_step()
     };
+    // 診断用 `ENOMOTO_MIP_GAP4_RSS`: 生きている `Solver` を (外側・サブ MIP に分けて) 数える
+    let gap4_sub = gap4_rss_secs().map(|_| params.submip);
+    if let Some(b) = gap4_sub {
+        GAP4_LIVE[b as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        GAP4_LIVE[2 + b as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if !b {
+            gap4_rss_start();
+        }
+    }
     let mut s: Solver<L> = Solver {
         p,
         params,
@@ -4442,6 +4494,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         mem2_next: 0,
         memb_next: 0.0,
         gap4_inclp: (0, 0),
+        gap4_live: gap4_sub,
         mem2_keep: (true, true),
         mem2_press: false,
         mem2_stats: [0; 7],
