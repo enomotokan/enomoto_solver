@@ -37,6 +37,9 @@ CFGS = {
     "diumr": dict(DG, ENOMOTO_MIP_DSE_INIT="um", ENOMOTO_SIMPLEX_WARM_SING_REPAIR="1"),
     "di3": dict(DG, ENOMOTO_MIP_DSE_INIT="umr"),
     "di3_p": {"ENOMOTO_MIP_DSE_INIT": "umr"},
+    # 今日の効率の直し (DSE の超疎・B^-1 の行の超疎・検算 2 回・polish の双対・cleanup の BTRAN・費用の比べ) を全部戻した形
+    "eff0": {"ENOMOTO_DSE_EXACT_SPARSE": "0", "ENOMOTO_MIP_BINV_ROW_DENSE": "1", "ENOMOTO_SIMPLEX_WARM_LU_RECHECK": "1",
+             "ENOMOTO_SIMPLEX_RECORD_DUALS_COPY": "1", "ENOMOTO_SIMPLEX_CLEANUP_DENSE_BTRAN": "1", "ENOMOTO_SIMPLEX_COST_EQ_RECHECK": "1"},
     "dim": dict(DG, ENOMOTO_MIP_DSE_INIT="m"),
     "diu": dict(DG, ENOMOTO_MIP_DSE_INIT="u"),
     "dium": dict(DG, ENOMOTO_MIP_DSE_INIT="um"),
