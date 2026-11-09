@@ -10,18 +10,17 @@ MIP: presolve again after probing: skipped (probing fixed 0 columns)
 MIP: root LP basis from the presolve LP probing: none
 MIP: solving the root LP (0.01s)
 MIP: root LP 1.0333387407e5 (574 iters, 0.03s)
-MIP: clique fallback: 6 cuts, LP 1.0333387407e5 -> 1.0333387407e5 (g_c -1.408e-16, g_d 2.816e-16 relative), fractional 101 -> 83; used (0.20s)
+MIP: clique fallback: 4 cuts, LP 1.0333387407e5 -> 1.0333387407e5 (g_c 0.000e0, g_d 1.408e-16 relative), fractional 68 -> 45; used (0.20s)
 MIP:   global fixed integers 3341 of 11025 (newly 0 since the root LP)
 MIP:   global fixed integers 3341 of 11025 (newly 0 since the root LP)
-MIP: cut loop done: 99 cuts added, 66 in LP, pool 755 cuts (126731 nonzeros), obj 1.0333387407e5 -> 1.0333387407e5
+MIP: cut loop done: 81 cuts added, 63 in LP, pool 751 cuts (101190 nonzeros), obj 1.0333387407e5 -> 1.0333387407e5
 MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1000, work_iters: 20000, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 574 iters)
 MIP: background cuts: basis with the column values not passed (root LP 0.02s)
-MIP:   global fixed integers 3512 of 11025 (newly 171 since the root LP)
-MIP:   global fixed integers 3512 of 11025 (newly 171 since the root LP)
-MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (2.02s)
-MIP: the root LP bound after cuts and heuristics 1.0333387407e5 closed the gap to the prune limit 1.0333387397e5 (incumbent Some(103333.87407302858), 2.02s)
-MIP:     2.02s nodes        0 open       0 lb inf ub 1.03333874e5 lp_iters 2517 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 5724 dive_iters 0 lp_rows 773 node_cut_secs 0.00
-MIP: basis nb diag: tree first LPs restored 0 iters 0 (0.0/LP), others 0 iters 0 (0.0/LP); root LPs: submip 3 lps 666 iters (222.0/LP) 0.01s, bgcopy 1 lps 151 iters (151.0/LP) 0.01s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 574 iters (574.0/LP) 0.02s; nb hints applied 0 solves, 0 given, 0 changed
-MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 773
+MIP:   global fixed integers 3383 of 11025 (newly 42 since the root LP)
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (1.03s)
+MIP: the root LP bound after cuts and heuristics 1.0333387407e5 closed the gap to the prune limit 1.0333387397e5 (incumbent Some(103333.87407302858), 1.03s)
+MIP:     1.03s nodes        0 open       0 lb inf ub 1.03333874e5 lp_iters 2552 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 0 dive_iters 0 lp_rows 770 node_cut_secs 0.00
+MIP: basis nb diag: tree first LPs restored 0 iters 0 (0.0/LP), others 0 iters 0 (0.0/LP); root LPs: submip 0 lps 0 iters (0.0/LP) 0.00s, bgcopy 1 lps 154 iters (154.0/LP) 0.01s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 574 iters (574.0/LP) 0.02s; nb hints applied 0 solves, 0 given, 0 changed
+MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 770
 MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 24.0)
-MIP: solve returned Optimal after 2.63s (time limit 60.00s)
+MIP: solve returned Optimal after 1.79s (time limit 60.00s)
