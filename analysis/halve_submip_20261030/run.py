@@ -222,6 +222,9 @@ CFGS = {
     "suban": {"ENOMOTO_MIP_SUBA_RATE": "n"},
 }
 CFGS["cand1108z"] = dict(CFGS["cand1108"], ENOMOTO_MIP_NO_ZEROHALF="1")  # res7: cand1108 + zerohalf なし
+# res8 (2026-11-09、analysis/mitt600_20261103.md): 厳密な DSE 重みから始める試作 (analysis/nodelp2_20261107.md の 10.2 節) を既定と cand1108z に足す
+CFGS["umr"] = {"ENOMOTO_MIP_DSE_INIT": "umr"}
+CFGS["cand1108zd"] = dict(CFGS["cand1108z"], ENOMOTO_MIP_DSE_INIT="umr")
 if __name__ == "__main__":  # bench.py からは設定 (CFGS) だけを読む
     cfgs, probs, reps = sys.argv[1].split(","), sys.argv[2].split(","), int(sys.argv[3])
     for rep in range(reps):
