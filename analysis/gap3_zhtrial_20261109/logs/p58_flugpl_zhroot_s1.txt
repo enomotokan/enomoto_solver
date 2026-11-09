@@ -1,0 +1,22 @@
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 18 -> 15, free columns 18 -> 15, nonzeros 46 -> 38, postsolve steps 1 (parallel columns merged: 0 integer, 0 continuous)
+MIP: LP probing: root LP 0.01s (13 iters, size 71), tried 10, fixed 1, basis passed true, total 54 iters 0.01s
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 15 -> 15, free columns 15 -> 15, nonzeros 38 -> 38, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: root LP basis from the presolve LP probing: used (with rows)
+MIP: solving the root LP (0.00s)
+MIP: root LP 1.1678751664e6 (1 iters, 0.00s)
+MIP: clique fallback: no violated clique cuts; not used (0.00s)
+MIP: cut loop done: 25 cuts added, 6 in LP, pool 166 cuts (1656 nonzeros), obj 1.1678751664e6 -> 1.1729482996e6
+MIP:   global fixed integers 2 of 11 (newly 0 since the root LP)
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1000, work_iters: 20000, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 1 iters)
+MIP: background cuts: basis with the column values not passed (root LP 0.00s)
+MIP:   global fixed integers 2 of 11 (newly 0 since the root LP)
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (0.10s)
+MIP: restart check: newly fixed 0, integer columns 11, free at the root 9, threshold 0.1, root LP 0.00s
+TRSTAT: tree start outer 0.12 solve 0.11 restarts 0 lb 1.1678751664e6 ub 1.2015000000e6
+MIP:     0.12s nodes       24 open       0 lb inf ub 1.20150000e6 lp_iters 569 sb_iters 293 sb_lps 82 sb_secs 0.00 node_iters 149 (first 81, lps 41) heur_iters 300 dive_iters 74 lp_rows 69 node_cut_secs 0.00 pool_len 0 pool_idle 4
+MIP: basis nb diag: tree first LPs restored 41 iters 150 (3.7/LP), others 20 iters 73 (3.6/LP); root LPs: submip 4 lps 12 iters (3.0/LP) 0.00s, bgcopy 1 lps 1 iters (1.0/LP) 0.00s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 1 iters (1.0/LP) 0.00s; nb hints applied 47 solves, 373 given, 122 changed
+MIP: node diag: nodes 24 node LPs 41 mean rows 52.9 iters 149 (3.6/LP) LP secs 0.00 sep rounds 19 added 18 node cut secs 0.00 final rows 69
+MIP: adaptive node cuts: rounds 18 effective 2 skipped 0 (rate 0.473), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [1, 16, 1, 0, 0], cut nnz Some(5.186644693508702) (rows mean 2.5)
+MIP: solve returned Optimal after 0.13s (time limit 60.00s)
