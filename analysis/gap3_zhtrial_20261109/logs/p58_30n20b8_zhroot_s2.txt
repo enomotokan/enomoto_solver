@@ -1,0 +1,38 @@
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 576 -> 491, free columns 11098 -> 8033, nonzeros 109706 -> 53143, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: LP probing: root LP 0.17s (2350 iters, size 72014), tried 2, fixed 0, basis passed true, total 3651 iters 0.30s
+MIP: presolve again after probing (round 1)
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 491 -> 491, free columns 4750 -> 4750, nonzeros 53143 -> 43080, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: presolve again after probing (round 2)
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 491 -> 491, free columns 4728 -> 4728, nonzeros 43080 -> 42929, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: presolve again after probing: rows 491 -> 491 (less than 10% fewer), the result is not used
+MIP: presolve again after probing: rows 491 -> 491 (less than 10% fewer), the result is not used
+MIP: root LP basis from the presolve LP probing: used (with rows)
+MIP: solving the root LP (0.01s)
+MIP: root LP 1.2295194690e2 (2363 iters, 0.24s)
+MIP:   global fixed integers 13630 of 18380 (newly 0 since the root LP)
+MIP:   global fixed integers 13630 of 18380 (newly 0 since the root LP)
+MIP:   global fixed integers 13630 of 18380 (newly 0 since the root LP)
+MIP:   global fixed integers 13630 of 18380 (newly 0 since the root LP)
+MIP: clique fallback: 54 cuts, LP 1.4908612539e2 -> 1.4913640443e2 (g_c 3.372e-4, g_d 1.753e-1 relative), fractional 266 -> 275; not used (0.34s)
+MIP: cut loop done: 189 cuts added, 51 in LP, pool 302 cuts (1062858 nonzeros), obj 1.2295194690e2 -> 1.4908612539e2
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 2363, work_iters: 47260, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 2363 iters)
+MIP: background cuts: basis with the column values not passed (root LP 0.23s)
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (36.00s)
+MIP: restart check: newly fixed 0, integer columns 18380, free at the root 4750, threshold 183.8, root LP 0.23s
+TRSTAT: tree start outer 38.94 solve 36.04 restarts 0 lb 1.2295194690e2 ub 3.0200000000e2
+MIP:    36.04s nodes        1 open       0 lb inf ub 3.02000000e2 lp_iters 16521 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 377625 dive_iters 0 lp_rows 558 node_cut_secs 0.00
+MIP:    38.43s nodes        3 open       2 lb 1.49092754e2 ub 3.02000000e2 lp_iters 28254 sb_iters 6477 sb_lps 88 sb_secs 1.43 node_iters 5256 (first 5256, lps 2) heur_iters 377625 dive_iters 0 lp_rows 558 node_cut_secs 0.00 pool_len 0 pool_idle 3
+MIP:    40.96s nodes       32 open      23 lb 1.88937345e2 ub 3.02000000e2 lp_iters 39923 sb_iters 10176 sb_lps 110 sb_secs 1.98 node_iters 11957 (first 10621, lps 36) heur_iters 380163 dive_iters 1269 lp_rows 575 node_cut_secs 0.11 pool_len 0 pool_idle 0
+MIP:    43.31s nodes       52 open      34 lb 1.88937345e2 ub 3.02000000e2 lp_iters 56008 sb_iters 17511 sb_lps 156 sb_secs 2.98 node_iters 20424 (first 18782, lps 56) heur_iters 380729 dive_iters 1552 lp_rows 575 node_cut_secs 0.11 pool_len 0 pool_idle 0
+MIP:    45.31s nodes       75 open      24 lb 2.04272978e2 ub 3.02000000e2 lp_iters 67045 sb_iters 17511 sb_lps 156 sb_secs 2.98 node_iters 31451 (first 29755, lps 72) heur_iters 380739 dive_iters 1552 lp_rows 576 node_cut_secs 0.11 pool_len 1 pool_idle 0
+MIP:    50.61s nodes      108 open       1 lb 1.49167533e2 ub 3.02000000e2 lp_iters 87046 sb_iters 28502 sb_lps 192 sb_secs 5.42 node_iters 40461 (first 38124, lps 82) heur_iters 380742 dive_iters 1552 lp_rows 585 node_cut_secs 0.11 pool_len 0 pool_idle 0
+MIP:    52.63s nodes      118 open       8 lb 1.49168907e2 ub 3.02000000e2 lp_iters 97945 sb_iters 30946 sb_lps 200 sb_secs 5.79 node_iters 47772 (first 45244, lps 93) heur_iters 383030 dive_iters 2696 lp_rows 585 node_cut_secs 0.11 pool_len 0 pool_idle 0
+MIP:    54.71s nodes      128 open      16 lb 1.49168907e2 ub 3.02000000e2 lp_iters 107347 sb_iters 32175 sb_lps 206 sb_secs 6.06 node_iters 55945 (first 52278, lps 106) heur_iters 383030 dive_iters 2696 lp_rows 591 node_cut_secs 0.25 pool_len 0 pool_idle 0
+MIP:    57.12s nodes      134 open      21 lb 1.49185593e2 ub 3.02000000e2 lp_iters 121389 sb_iters 33363 sb_lps 210 sb_secs 6.25 node_iters 68799 (first 65132, lps 113) heur_iters 383030 dive_iters 2696 lp_rows 591 node_cut_secs 0.25 pool_len 171 pool_idle 0
+MIP: basis nb diag: tree first LPs restored 113 iters 124099 (1098.2/LP), others 300 iters 117402 (391.3/LP); root LPs: submip 13 lps 3042 iters (234.0/LP) 0.23s, bgcopy 1 lps 1 iters (1.0/LP) 0.01s, find 1 lps 1 iters (1.0/LP) 0.01s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 2363 iters (2363.0/LP) 0.23s; nb hints applied 259 solves, 573783 given, 26783 changed
+MIP: node diag: nodes 134 node LPs 113 mean rows 576.9 iters 68799 (608.8/LP) LP secs 11.22 sep rounds 3 added 3 node cut secs 0.25 final rows 591
+MIP: adaptive node cuts: rounds 3 effective 0 skipped 0 (rate 0.857), node cut secs 0.25, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 3, 0, 0, 0], cut nnz Some(1597.2925) (rows mean 108.2)
+MIP: solve returned TimeLimit after 60.03s (time limit 60.00s)
