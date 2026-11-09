@@ -2070,6 +2070,7 @@ fn mem2(c: char) -> bool {
 /// `ENOMOTO_MIP_GAP4=<文字>` (試作、既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): 根から出られない問題とメモリの試作。
 /// `i`: 暫定解の整数列を固定した LP が時間切れになったら以後は解かない。`p`: 根の LP が重いときカットの選び方の比べを飛ばす。
 /// `r`: 再スタートの前に、入れ子の求解の間は使わない LP・カットのプール・待ち行列を捨てる。
+/// `n`: 共有の待ち行列のノードに基底・DSE 重みを付けない (境界の変更の詰めは残す)。
 /// `l`: カットの非零を 100 + 0.15 × 列 までに短くする (HiGHS の `postprocessCut`、[`super::separation`] の `finish_cut`)。
 /// `o`: 木のスレッドに渡す対称性の前の問題 (`orig`) の写しから含意を除く。`c`: 密なカットをカットのプールの伝播に入れない (HiGHS と同じ規則)。
 pub(super) fn gap4(c: char) -> bool {
@@ -18705,6 +18706,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn snap_of(&mut self, n: &OpenNode) -> SnapNode {
         if env_str!("ENOMOTO_MIP_TREE_NO_PASS_BASIS").is_some() {
             return SnapNode::of(n);
+        }
+        // 試作 `ENOMOTO_MIP_GAP4` の `n` (既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): 共有の待ち行列のノードに基底・DSE 重みを
+        // 付けない (HiGHS と同じく、取り出したスレッドの LP の今の基底から解く)。`TREE_NO_PASS_BASIS` と違い、境界の変更の詰め (`MEMC`) は残す
+        // (`TREE_NO_PASS_BASIS` では詰めも飛び、fiball の 21 万ノードの変更が 5.2 GB になった)
+        if gap4('n') {
+            let mut s = SnapNode::of(n);
+            if memc() {
+                memc_pack(&mut s);
+            }
+            return s;
         }
         let mut s = if mem2('s') { self.mem2_snap_shared(n) } else { SnapNode::of_with_basis(n, self.p.m) };
         if let Some(w) = &s.dse {

@@ -12,7 +12,7 @@ import run_miplib_benchmark as rb  # noqa: E402
 CFGS = {
     "def": {},
     "g4": {"ENOMOTO_MIP_GAP4": "procl"},
-    "g4b": {"ENOMOTO_MIP_GAP4": "procl", "ENOMOTO_MIP_TREE_NO_PASS_BASIS": "1"},
+    "g4n": {"ENOMOTO_MIP_GAP4": "procln"},
 }
 OUT = D / "res58.jsonl"
 
