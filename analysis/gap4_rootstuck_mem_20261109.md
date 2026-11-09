@@ -1,6 +1,7 @@
 # GAP4: 根から出られない問題とメモリの元 (2026-11-09)
 
-bench に使う環境変数: `ENOMOTO_MIP_GAP4=<文字>` (試作、既定では使わない。`i`・`p`・`r`・`o`・`c` の組み合わせ。58 問は `proc`)、
+bench に使う環境変数: `ENOMOTO_MIP_GAP4=<文字>` (試作、既定では使わない。`i`・`p`・`r`・`o`・`c`・`l`・`n` の組み合わせ。58 問は `procl` と `procln`。
+メモリだけを減らし害の見えない組は `ENOMOTO_MIP_GAP4=rocn`)、
 診断 `ENOMOTO_MIP_GAP4_RSS=<秒>` (RSS と生きている `Solver` の数を秒おきに標準エラーへ。動きは変えない)、既存の `ENOMOTO_MIP_MEMB_DIAG=1`
 (開いたノードの持ち物)、既存の `ENOMOTO_MIP_TREE_NO_PASS_BASIS=1` (共有の待ち行列のノードに基底・DSE 重みを付けない)。
 計測は `ENOMOTO_MIP_LOG=1 ENOMOTO_MIP_THREADS=4 ENOMOTO_T_MIP_SEED=s`、4 スレッド・600 秒 (断りのない限り種 1)、ソルバーは同時に 1 つ。
@@ -8,7 +9,7 @@ HiGHS は highspy 1.15.1 (threads=4・mip_rel_gap=0・output_flag 真)。機械�
 
 生データ: `analysis/gap4_rootstuck_mem_20261109/` (`run.py` が `jobs1.json` の仕事を回して `runs.jsonl` に結果・最大 RSS、
 `logs/<名前>.log.gz` にログ、`logs/<名前>.rss` に 5 秒ごとの RSS。要約は `summ_time.py` (ENOMOTO)・`summ_highs.py` (HiGHS)。
-58 問は `bench58.py` → `res58.jsonl`)。heaptrack の要約は `heaptrack_neos-957323.txt`。
+58 問は `bench58.py` → `res58.jsonl`、集計 `cmp58.py` → `cmp58.txt`。誤答の検査は `checks/`)。heaptrack の要約は `heaptrack_neos-957323.txt`。
 
 ## 結論 (先に)
 
@@ -56,11 +57,33 @@ HiGHS は highspy 1.15.1 (threads=4・mip_rel_gap=0・output_flag 真)。機械�
        (内点の丸めを止めても・使い捨てのスレッドで解いても、150 秒の最大 RSS は 4137 → 4211・4191 MB)。
   3. 再スタートは古い `Solver` の中から入れ子で次の求解を呼ぶので、**再スタートの前の `Solver` (LP・カットのプール・待ち行列) が木の間ずっと
      生きている** (neos-957323 は再スタート 2 回で外側の `Solver` が 3 つ同時に生き、木の 3 スレッドと合わせて 6)。
-- **試作 `ENOMOTO_MIP_GAP4=roc`** (r: 再スタートの前に古い `Solver` の LP・カットのプール・待ち行列を捨てる、o: 木のスレッドの `orig` の写しから
-  含意を除く、c: 密なカットを伝播に入れない) で neos-957323 の 150 秒の最大 RSS は 4137 → 3002 MB (−27%、r −9%・o −14%・c −8%)。
-  600 秒の効き目と、開いたノードの側 (既存の `TREE_NO_PASS_BASIS`) を合わせた効き目は 3 節。
 
-(以下、作業中)
+### 試作の効き目と害 (事実)
+
+- メモリ: `r` (再スタート前の古い `Solver` の LP・プール・待ち行列を捨てる)・`o` (木のスレッドの `orig` の写しから含意を除く)・`c` (密なカットを
+  伝播に入れない、HiGHS と同じ規則)・`n` (共有の待ち行列のノードに基底・DSE を付けない、境界の変更の詰めは残す) で、5 問の最大 RSS (600 秒・種 1) は
+  neos-957323 5597 → 3509 (rocln)、uccase12 5665 → 2628 (rocln)、fiball 5625 → 2522 (rocln)、tbfp-network 4464 → 1978 (rocln)、widden 4330 → 3167
+  (rocl + TREE_NO_PASS_BASIS) MB (−27〜−56%)。neos-957323 の 150 秒では r −390・o −561・c −346 MB でほぼ足し算 (表 4)。
+- 58 問 (60 秒・種 1・2): 既定 → `procl` は SGM −1.2% (95% 区間 −7.5%〜+6.2%)・解けた 86 → 86・最大 RSS の和 −14.6%、`procl` → `procln` は
+  +0.9% [−3.5%, +6.5%]・86 → 86。誤答 (両方最適で目的値が違う・下界と解の矛盾) 0 件。**揃って遅い 3 問の元は `p` と `l`**:
+  physiciansched6-2 は `p` (比べを飛ばして POOL の選択を失う、21 → 52 秒)、roll3000・nw04 は `l` (長いカットを短く・捨てる、21 → 55 秒・13 → 25 秒)。
+  `r`・`o`・`c`・`n` は 58 問で揃った害がない (`n` は 600 秒の widden で主のスレッドのノードの LP が 1.6 倍重い兆し、1 回)。
+- 根から出られない問題: `p` は puriri で比べの 43 秒を消し、木に入るのが 2 種とも 37〜44 秒早い (カットは同じ)。`i` は neos-873061 で根を縮めず解を
+  悪くした。どちらも根の下界の差 (HiGHS の 1/10〜1/2 の距離) は変えない。`l` は neos-957323 の解き方を変え、rocl・rocln の 3 回のうち 2 回が最適まで
+  解いた (117.9・325.5 秒。既定は 3 回とも 600 秒で解けない)。
+- 誤答の検査: `fuzz_tiny.py 400 0` は既定・`procln` とも bad 0 (strict 13 は既知の許容誤差の内の差)、`mip_fuzz_vs_highs.py 300` は両方 bad 0、
+  `cargo test --release --lib` は 5 節。
+
+### 次の一手 (推測を含む)
+
+1. 根の下界: puriri・net12 は HiGHS の前処理が何を外しているか (net12 は 2 値 1603 → 1107、根の LP 68.4 → 128.3) を突き合わせる。neos-873061・widden は
+   固定費用のネットワークのカット (HiGHS は根で 1 万本を作り 600 本を LP に置く) と、根の下界で被約費用の固定・再スタートを起こす流れ。
+2. メモリ: `roc` と `n` を既定の候補として 600 秒の 47 問 (res8 の組) で確かめる。`n` は widden の兆しを見るため、ノードの基底は残して DSE だけ外す形
+   (既存の `ENOMOTO_MIP_POOL_DSE=0`) とも比べる。fiball は 1 ノード約 1100 個の境界の変更を持つので、HiGHS のように分枝の決定だけを持ち
+   取り出すときに伝播し直す形が次の大物。
+3. `p` は「1 ラウンド目の LP が予算を超えたら比べを打ち切り、終わった側の状態を使う」形に直す (既存の `CUTSEL_PROBE_KEEP` が近い)。
+   `l` は上限を max(100 + 0.15 n, 数千) にするか木の中のカットだけに掛ける形で、nw04・roll3000 の害を避けられるかを見る。
+4. 整数固定の LP (neos-873061 で 12 秒 × 4 回) は、整数列を外した小さい LP (連続列だけ) を別に解く形にする (時間切れで解の磨きを失わない)。
 
 ## 1. 根から出られない 6 問の時間の行き先
 
@@ -199,3 +222,16 @@ HiGHS は highspy 1.15.1 (threads=4・mip_rel_gap=0・output_flag 真)。機械�
   か、「1 ラウンド目の LP が予算を超えたら打ち切る」形に直すのが筋 (未試作)。`l` は HiGHS と同じ規則だが、HiGHS の分離器が作らない長いカット
   (nw04 の集合分割の行の集約) に効いている問題では害になる。メモリには極端に長いカット (neos-957323・tbfp-network の 3.5〜4 万非零) だけが効くので、
   上限を max(100 + 0.15 n, 数千) にする・木の中のカットだけに掛ける、などで害を避けられるかを見るのが次 (未試作)。
+
+## 5. 誤答の検査 (`checks/`)
+
+- `benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0`: 既定 bad 0 of 400 (strict 13)、`ENOMOTO_MIP_GAP4=procln` bad 0 of 400 (strict 13)。
+  strict 13 は以前から記録のある許容誤差の内の差 (analysis/fuzz_tiny_judge_20261109.md)。小さい問題なので試作の文字はほとんど働かない。
+- `scripts/mip_fuzz_vs_highs.py 300` (`ENOMOTO_MIP_REL_GAP=1e-9`): 既定 bad 0 of 300、`procln` bad 0 of 300。
+- 58 問の 348 回 (3 設定 × 種 1・2): 両方最適で目的値が違う組・片方の下界がもう片方の解を超える組は 0 件 (`cmp58.txt`)。
+- 600 秒の試作の回 (表 4): 最適を返した回 (neos-957323 の rocl 2 回・tbfp-network の rocln) の値は HiGHS の最適値 (−237.756681・24.1632) と一致、
+  時間切れの回の下界は HiGHS の最適値を超えない。
+- `cargo test --release --lib` (コミット d66a343b、`RUSTFLAGS="-C link-arg=-L/usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib`):
+  375 passed、0 failed、19 ignored。
+- 既定の動きは変えていない: 試作は全部 `ENOMOTO_MIP_GAP4` の文字で入る (`maybe_restart` の反復の数は捨てる前に読むよう並べ替えただけ、
+  `Solver` の `Drop` は `ENOMOTO_MIP_GAP4_RSS` の数を減らすだけ)。
