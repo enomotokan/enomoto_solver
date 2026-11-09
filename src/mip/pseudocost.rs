@@ -1,6 +1,12 @@
 //! pseudocost (分枝による目的値の増加の単位あたりの平均) と分枝スコア
 //! (HiGHS の `HighsPseudocost` を簡略化したもの)。
 
+/// 試作 `ENOMOTO_MIP_GAP1` の値 (既定では空)。analysis/gap1_tree_20261109.md
+pub fn gap1() -> &'static str {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP1").unwrap_or_default())
+}
+
 /// 列ごとの pseudocost と観測回数。
 #[derive(Clone)]
 pub struct Pseudocost {
@@ -320,7 +326,14 @@ impl Pseudocost {
         let conf = self.conflict[0][j].max(eps * conf_avg) * self.conflict[1][j].max(eps * conf_avg);
         let wc = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT", 0.0, f64);
         let conf_term = if self.conflict_total > 0.0 { wc * s(conf, conf_avg * conf_avg) } else { 0.0 };
-        dynw * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01) + conf_term) + s(ps, ps_avg) / (dynw * self.degen_fac.max(1.0))
+        // `ENOMOTO_MIP_GAP1` (試作、既定では使わない。analysis/gap1_tree_20261109.md): 文字で部品を選ぶ。
+        // `s`: 擬似費用の項の正規化の下限を 0.1 から 1e-6 にする (HiGHS の `getScore` は `max(1e-6, cost_total^2)`)。目的値の刻みが
+        // 1e-4 程度の問題 (neos-957323) では、0.1 の下限で擬似費用の項が 1e-9 程度に潰れ、推論の項 (1e-4) だけで列を選んでいた。
+        // `w`: SCIP の動的な重み `dynw` を 1 にする (HiGHS にはない)。
+        let g1 = gap1();
+        let dynw = if g1.contains('w') { 1.0 } else { dynw };
+        let ps_s = if g1.contains('s') { 1.0 - 1.0 / (1.0 + ps / ps_avg.max(1e-6)) } else { s(ps, ps_avg) };
+        dynw * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01) + conf_term) + ps_s / (dynw * self.degen_fac.max(1.0))
     }
 
     /// pseudocost による [`Self::hybrid`] スコア (小数部 `frac`)。

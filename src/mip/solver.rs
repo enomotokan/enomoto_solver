@@ -11267,7 +11267,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         };
                         let (col, value) = if rp_force.is_some() { (col, value) } else { self.orbitope_branching_column(col, value) };
                         if tree_log() && !self.params.submip {
-                            eprintln!("EBR d={} col={col} val={value} lp={node_obj} rows={} resolves={resolves}", node.depth, self.lp.num_rows());
+                            // GAP1 の診断: 候補の数・小数部の距離 (min(f, 1-f)) が 0.1 以上の候補の数・最大の距離
+                            let dist = |v: f64| (v - v.floor()).min(v.ceil() - v);
+                            let n01 = frac.iter().filter(|&&(_, v)| dist(v) >= 0.1).count();
+                            let dmax = frac.iter().map(|&(_, v)| dist(v)).fold(0.0f64, f64::max);
+                            eprintln!("EBR d={} col={col} val={value} lp={node_obj} rows={} resolves={resolves} nfrac={} n01={n01} dmax={dmax:.4}", node.depth, self.lp.num_rows(), frac.len());
                         }
                         break Some(Some((col, value, node_obj, frac)));
                     }
