@@ -33,6 +33,10 @@ CFG = {
     "prt": {"ENOMOTO_MIP_GAP1": "prt"},
     "p": {"ENOMOTO_MIP_GAP1": "pt"},
     "pr": {"ENOMOTO_MIP_GAP1": "prt"},
+    "u": {"ENOMOTO_MIP_GAP1": "ut"},
+    "up": {"ENOMOTO_MIP_GAP1": "upt"},
+    "tp": {"ENOMOTO_MIP_GAP1": "t", "ENOMOTO_MIP_TREE1_POOL": "1"},
+    "tp2": {"ENOMOTO_MIP_GAP1": "t", "ENOMOTO_MIP_TREE1_POOL": "1", "ENOMOTO_T_MIP_BB_EVERY_INC": "2"},
     "t1r": {"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_GAP1": "r"},
 }
 OUT, TL, P, cfgs, seeds = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4].split(","), sys.argv[5].split(",")

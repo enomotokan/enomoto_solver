@@ -9571,6 +9571,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // `ENOMOTO_MIP_GAP1` の `u` (試作、既定では使わない。analysis/gap1_tree_20261109.md): LP を解く打ち切り値つきのプロービング
+        if super::pseudocost::gap1().contains('u') && self.snap.is_none() && !self.params.submip && self.has_cutoff_value() {
+            self.gap1_lp_probe();
+            if self.dom.infeasible {
+                if let Some(z) = self.incumbent.as_ref().map(|(z, _)| *z) {
+                    if self.shared.as_ref().is_none_or(|s| !(s.best() < z)) {
+                        if self.params.verbose {
+                            eprintln!("MIP: GAP1 u: LP probing proved the incumbent {z:.10e} optimal ({:.2}s)", self.start.elapsed().as_secs_f64());
+                        }
+                        return self.finish(MipStatus::Optimal, z);
+                    }
+                }
+            }
+        }
         if self.snap.is_none() {
             // `ENOMOTO_MIP_RESTART_ROOT_CUTS` の `r` (試作): 根の終わりの LP で効いているカットの行を控える (木の中の再スタートで持ち込む)
             if restart_root_cuts('r') && !self.params.submip {
@@ -15383,6 +15397,102 @@ impl<'a, L: MipLp> Solver<'a, L> {
             && cut_rows.iter().all(|(r, u)| self.propagate_le_row(r, *u, false));
         self.dom.backtrack_to(p, pos);
         !ok
+    }
+
+    /// `ENOMOTO_MIP_GAP1` の `u` (試作、既定では使わない。analysis/gap1_tree_20261109.md): 根の LP 解で分数値の 0-1 列 x_j ごとに、
+    /// x_j = 1 と x_j = 0 の LP を (反復の上限と打ち切り値つきで) 解き、実行不能か打ち切り値を越える側があれば逆の値に大域的に
+    /// 固定する。固定が出たら LP を解き直し、新しい LP 解の分数の列でもう一回りする (固定が出なくなるか時間の上限まで)。
+    /// 伝播だけの [`Self::root_obj_probe`] では捉えられない、LP の値による固定 (強分枝の片側の打ち切りと同じもの) を根で全ての
+    /// 分数の列について行う。neos-957323 では HiGHS の LP で、打ち切り値を最適値にして上の子だけをこれで 3 回り試すと
+    /// (固定 31 + 6 + 7 本) 根の LP が -237.7579121 から最適値 -237.7566815 に上がる。HiGHS の木 (168 ノード) は、根の子の片側が
+    /// すぐ刈られる分枝を重ねて同じ固定を得ていると見られる (推測)。ENOMOTO の木は点数が平らで列の番号の順に分枝し、下界が動かない
+    fn gap1_lp_probe(&mut self) {
+        let p = self.p;
+        let t0 = Instant::now();
+        let tmax = tunable!("ENOMOTO_T_MIP_GAP1_PROBE_TIME_FRAC", 0.1, f64) * if self.params.time_limit.is_finite() { self.params.time_limit } else { 300.0 };
+        let max_rounds = tunable!("ENOMOTO_T_MIP_GAP1_PROBE_ROUNDS", 20usize, usize);
+        let iter_mult = tunable!("ENOMOTO_T_MIP_GAP1_PROBE_ITERMULT", 2.0, f64);
+        let it_all = self.lp.total_iterations();
+        let (mut probed, mut fixed_total, mut rounds, mut lps, mut itlim_hits) = (0usize, 0usize, 0usize, 0usize, 0usize);
+        // `ENOMOTO_T_MIP_GAP1_PROBE_BOTH` = 1: 両側を試す (既定 0: 遠い側だけ)
+        let both = tunable!("ENOMOTO_T_MIP_GAP1_PROBE_BOTH", 0usize, usize) > 0;
+        let z0 = self.lp.objective() + p.offset;
+        let mut z = z0;
+        let itlim = (iter_mult * (self.root_lp_iters as f64 / 10.0).max(100.0)) as u64;
+        'outer: for _ in 0..max_rounds {
+            rounds += 1;
+            let x = self.lp.col_values();
+            let mut cands: Vec<usize> = (0..p.n)
+                .filter(|&j| p.is_int[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0 && x[j] > FEASTOL && x[j] < 1.0 - FEASTOL)
+                .collect();
+            // 試すのは遠い側だけ (x < 0.5 なら x = 1、でなければ x = 0)。整数に近い列 (遠い側の LP が大きく動く) から
+            cands.sort_by(|&a, &b| (0.5 - x[b]).abs().total_cmp(&(0.5 - x[a]).abs()));
+            let saved = self.lp.save_state();
+            let it0 = self.lp.total_iterations();
+            let mut fixes: Vec<(usize, f64)> = Vec::new();
+            for &j in &cands {
+                if self.time_up() || t0.elapsed().as_secs_f64() > tmax {
+                    self.lp.restore_state(&saved);
+                    break 'outer;
+                }
+                probed += 1;
+                let mut bad = [false; 2];
+                let sides: &[usize] = if both { &[0, 1] } else if x[j] < 0.5 { &[1] } else { &[0] };
+                for &k in sides {
+                    let v = k as f64;
+                    self.lp.set_col_bounds(j, v, v);
+                    let st = self.lp.solve(&self.limits_k(itlim, 1));
+                    lps += 1;
+                    itlim_hits += (st == LpStatus::IterationLimit) as usize;
+                    bad[k] = match st {
+                        LpStatus::Infeasible | LpStatus::ObjectiveBound => true,
+                        LpStatus::Optimal => self.lp.objective() + p.offset >= self.prune_limit(),
+                        _ => false,
+                    };
+                    self.lp.restore_state(&saved);
+                }
+                match bad {
+                    [true, true] => {
+                        // どちらの値でも打ち切り値より良い解がない
+                        self.dom.infeasible = true;
+                        self.lp.set_total_iterations(it0);
+                        break 'outer;
+                    }
+                    [true, false] => fixes.push((j, 1.0)),
+                    [false, true] => fixes.push((j, 0.0)),
+                    _ => {}
+                }
+            }
+            self.lp.set_total_iterations(it0);
+            if fixes.is_empty() {
+                break;
+            }
+            fixed_total += fixes.len();
+            for &(j, v) in &fixes {
+                self.dom.tighten_global(p, j, v == 0.0, v);
+            }
+            if !self.dom.propagate(p) {
+                self.dom.infeasible = true;
+                break;
+            }
+            self.sync_lp();
+            let st = self.lp.solve(&self.limits(u64::MAX));
+            if st != LpStatus::Optimal {
+                if matches!(st, LpStatus::Infeasible | LpStatus::ObjectiveBound) {
+                    self.dom.infeasible = true;
+                }
+                break;
+            }
+            z = self.lp.objective() + p.offset;
+        }
+        let _ = it_all;
+        if self.params.verbose {
+            eprintln!(
+                "MIP: GAP1 u: LP probing {rounds} rounds, {probed} columns probed ({lps} LPs, {itlim_hits} at the iteration limit {itlim}), {fixed_total} fixed, LP {z0:.10e} -> {z:.10e}, infeasible {} ({:.2}s)",
+                self.dom.infeasible,
+                t0.elapsed().as_secs_f64()
+            );
+        }
     }
 
     /// どちらの値でも矛盾する列が見つかった (打ち切り値より良い解がない) なら真。
