@@ -15415,7 +15415,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let (mut probed, mut fixed_total, mut rounds, mut lps, mut itlim_hits) = (0usize, 0usize, 0usize, 0usize, 0usize);
         // `ENOMOTO_T_MIP_GAP1_PROBE_BOTH` = 1: 両側を試す (既定 0: 遠い側だけ)
         let both = tunable!("ENOMOTO_T_MIP_GAP1_PROBE_BOTH", 0usize, usize) > 0;
+        // 診断: 子の LP の状態 (最適・実行不能・打ち切り・ほか) と、最適で終わった子の LP の値の上がり幅の最大
+        let (mut st_cnt, mut max_rise) = ([0usize; 4], 0.0f64);
+        let mut timed_out = false;
         let z0 = self.lp.objective() + p.offset;
+        // 根の LP と暫定解の相対ギャップが `ENOMOTO_T_MIP_GAP1_PROBE_MAX_GAP` (既定 1e-3) を越えるときは試さない
+        // (子の LP が打ち切り値を越えにくく、時間だけ使う)
+        let cut_z = self.incumbent.as_ref().map_or(self.prune_limit(), |(z, _)| *z);
+        let rel_gap = (cut_z - z0).max(0.0) / cut_z.abs().max(z0.abs()).max(1.0);
+        if !(rel_gap <= tunable!("ENOMOTO_T_MIP_GAP1_PROBE_MAX_GAP", 1e-3, f64)) {
+            if self.params.verbose {
+                eprintln!("MIP: GAP1 u: LP probing skipped (gap {rel_gap:.3e})");
+            }
+            return;
+        }
         let mut z = z0;
         let itlim = (iter_mult * (self.root_lp_iters as f64 / 10.0).max(100.0)) as u64;
         'outer: for _ in 0..max_rounds {
@@ -15431,8 +15444,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut fixes: Vec<(usize, f64)> = Vec::new();
             for &j in &cands {
                 if self.time_up() || t0.elapsed().as_secs_f64() > tmax {
-                    self.lp.restore_state(&saved);
-                    break 'outer;
+                    // 時間切れ: この回りで集めた固定は入れてから終える
+                    timed_out = true;
+                    break;
                 }
                 probed += 1;
                 let mut bad = [false; 2];
@@ -15443,6 +15457,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let st = self.lp.solve(&self.limits_k(itlim, 1));
                     lps += 1;
                     itlim_hits += (st == LpStatus::IterationLimit) as usize;
+                    st_cnt[match st { LpStatus::Optimal => 0, LpStatus::Infeasible => 1, LpStatus::ObjectiveBound => 2, _ => 3 }] += 1;
+                    if st == LpStatus::Optimal {
+                        max_rise = max_rise.max(self.lp.objective() + p.offset - z);
+                    }
                     bad[k] = match st {
                         LpStatus::Infeasible | LpStatus::ObjectiveBound => true,
                         LpStatus::Optimal => self.lp.objective() + p.offset >= self.prune_limit(),
@@ -15483,13 +15501,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             z = self.lp.objective() + p.offset;
+            if timed_out {
+                break;
+            }
         }
         let _ = it_all;
         if self.params.verbose {
             eprintln!(
-                "MIP: GAP1 u: LP probing {rounds} rounds, {probed} columns probed ({lps} LPs, {itlim_hits} at the iteration limit {itlim}), {fixed_total} fixed, LP {z0:.10e} -> {z:.10e}, infeasible {} ({:.2}s)",
+                "MIP: GAP1 u: LP probing {rounds} rounds, {probed} columns probed ({lps} LPs, {itlim_hits} at the iteration limit {itlim}), {fixed_total} fixed, LP {z0:.10e} -> {z:.10e}, infeasible {} ({:.2}s); child LPs optimal/infeasible/cutoff/other {st_cnt:?}, max rise {max_rise:.3e}, cutoff {:.10e}",
                 self.dom.infeasible,
-                t0.elapsed().as_secs_f64()
+                t0.elapsed().as_secs_f64(),
+                self.prune_limit()
             );
         }
     }
