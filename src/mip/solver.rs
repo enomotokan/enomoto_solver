@@ -765,6 +765,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     mem2_next: u64,
     /// 診断用 (`ENOMOTO_MIP_MEMB_DIAG`): 次に持ち物を数えて表示する時刻 [秒、`start` から]。
     memb_next: f64,
+    /// `ENOMOTO_MIP_GAP4` の `i` (試作): 暫定解の整数列を固定した LP ([`Self::resolve_continuous`]) が時間切れになった回数・飛ばした回数
+    gap4_inclp: (u32, u32),
     mem2_keep: (bool, bool),
     /// `ENOMOTO_MIP_MEM2` の `d`: 持ち物の合計が上限の 1/2 を超えている (深さ優先に寄せる)
     mem2_press: bool,
@@ -2059,6 +2061,13 @@ fn pool_dse() -> bool {
 /// - `l`: 潜りの兄弟に持たせる親の LP の LU (`dive_stack`) を、新しい `ENOMOTO_T_MIP_MEM2_LU_KEEP` (既定 8) 個までにする。
 fn mem2(c: char) -> bool {
     env_def!("ENOMOTO_MIP_MEM2", "p").is_some_and(|v| v == "1" || v.contains(c))
+}
+
+/// `ENOMOTO_MIP_GAP4=<文字>` (試作、既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): 根から出られない問題とメモリの試作。
+/// `i`: 暫定解の整数列を固定した LP が時間切れになったら以後は解かない。`p`: 根の LP が重いときカットの選び方の比べを飛ばす。
+pub(super) fn gap4(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP4").ok().filter(|v| v != "0").unwrap_or_default()).contains(c)
 }
 
 /// 診断用 (`ENOMOTO_MIP_MEMB_DIAG`): [`Solver::memb_diag_tick`]。
@@ -4430,6 +4439,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool_dse_stats: [0; 6],
         mem2_next: 0,
         memb_next: 0.0,
+        gap4_inclp: (0, 0),
         mem2_keep: (true, true),
         mem2_press: false,
         mem2_stats: [0; 7],
@@ -6324,6 +6334,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_INC_LP_NO_DUAL_CHECK").is_none() && self.continuous_optimal_by_duals(x, &cost) {
             return;
         }
+        // `ENOMOTO_MIP_GAP4` の `i` (試作、既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): この LP が時間の上限で
+        // `ENOMOTO_T_MIP_GAP4_INCLP_FAILS` (1) 回止まったら、以後は解かない (neos-873061 では根で 4 回とも 12 秒の上限まで回って解けず、48 秒を使っていた)
+        if gap4('i') && self.gap4_inclp.0 >= tunable!("ENOMOTO_T_MIP_GAP4_INCLP_FAILS", 1u32, u32) {
+            self.gap4_inclp.1 += 1;
+            if self.params.verbose {
+                eprintln!("MIP: GAP4 i: fixed-integer LP skipped ({} time-outs, {} skipped)", self.gap4_inclp.0, self.gap4_inclp.1);
+            }
+            return;
+        }
         let saved = self.lp.save_state();
         let it0 = self.lp.total_iterations();
         let swap = cost != self.p.cost;
@@ -6348,6 +6367,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let st = self.lp.solve(&SolveLimits { deadline, ..Default::default() });
         if self.params.verbose && st != LpStatus::Optimal {
             eprintln!("MIP: fixed-integer LP: {st:?} ({} iters)", self.lp.total_iterations() - it0);
+        }
+        if st == LpStatus::TimeLimit {
+            self.gap4_inclp.0 += 1;
         }
         if st == LpStatus::Optimal {
             let mut y = self.lp.col_values();

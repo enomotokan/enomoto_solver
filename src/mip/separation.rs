@@ -1243,6 +1243,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 続ける 2 回目のループでは、カットの選び方の比べをやり直さず 1 回目の選択 (`CUT_PROBE_CHOICE`) をそのまま使う。
         // neos-960392 では 2 回目の比べに 5.9 秒 (1 ラウンドの分離が 2〜3 秒) かかり、選択は 1 回目と同じ (既定) だった
         let probe_pending = probe_pending && !(CLIQUE_FB_SECOND.with(|c| c.get()) && env_str!("ENOMOTO_MIP_GAP2_PROBE1").is_some_and(|v| v != "0") && CUT_PROBE_CHOICE.load(std::sync::atomic::Ordering::Relaxed) != 0);
+        // 試作 `ENOMOTO_MIP_GAP4` の `p` (既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): 根の LP の秒が比べの時間の予算
+        // (全体の `ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC` 倍) の `ENOMOTO_T_MIP_GAP4_PROBE_FRAC` (0.25) 倍を超えるなら比べない。
+        // neos-3216931-puriri (根の LP 10 秒) では比べが 1 ラウンドの LP も終えられず予算 29.7 秒を超えて 43.5 秒使い、0 ラウンドで比べて捨てていた
+        let probe_pending = probe_pending
+            && !(super::solver::gap4('p')
+                && self.params.time_limit.is_finite()
+                && self.root_lp_secs > tunable!("ENOMOTO_T_MIP_GAP4_PROBE_FRAC", 0.25, f64) * tunable!("ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC", 0.05, f64) * self.params.time_limit
+                && {
+                    if self.params.verbose {
+                        eprintln!("MIP: GAP4 p: cut selection probe skipped (root LP {:.2}s)", self.root_lp_secs);
+                    }
+                    true
+                });
         let mut cap_base = if (CLIQUE_FB_SECOND.with(|c| c.get()) && env_str!("ENOMOTO_MIP_CLIQUE_FB_SHARED_CAP").is_none()) || cap_from_loop { t_loop0 } else { self.cpu0 };
         let mut phase2_deadline = f64::INFINITY;
         let mut round_ctr = 0usize;
