@@ -1,5 +1,12 @@
 """幅 1e-9 の連続列とクリーク型の行 (`Σx + Σy <= 1 - k 1e-9`) を持つ小さな MIP を作り、HiGHS と最適値を突き合わせる。
-使い方: python fuzz_tiny.py 問題数 [開始seed]  (ENOMOTO_MIP_COEF_TIGHTEN_TINY=1 で以前の係数の強化)"""
+使い方: python fuzz_tiny.py 問題数 [開始seed]  (ENOMOTO_MIP_COEF_TIGHTEN_TINY=1 で以前の係数の強化)
+
+判定 (2026-11-09 に直した、analysis/fuzz_tiny_when_20261103.md・analysis/fuzz_tiny_judge_20261109.md): 状態が同じで最適値が
+相対 1e-6 で一致すれば正しい。一致しないときは、許容誤差の内の扱いの差 (幅 1e-9 の列・右辺 1 - 2e-9 の行を 1e-6 の内で
+どう扱うか) かを次の 3 つで確かめ、全部満たせば「許容誤差の内の差」として正しいとみなす (印字はする):
+(1) ENOMOTO の返した点が許容誤差 1e-6 で実行可能 (行・境界・整数性)、(2) 点の目的値が返した最適値と一致、
+(3) 返した最適値が、HiGHS を許容誤差 1e-10・前処理なしで解いた値 (厳密に実行可能な最良) 以下 (最小化、相対 1e-6 の余裕)。
+(1)〜(3) のどれかが破れたら誤り (bad) と数える。以前の判定 (値の一致だけ) の数も `strict` として出す。"""
 import random, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
@@ -24,13 +31,48 @@ def gen(seed):
     for _ in range(g.randint(1, 3)):  # 普通のナップサック
         xs = g.sample(range(nb), g.randint(2, nb)); rows.append([(j, float(g.randint(1, 9))) for j in xs]); rlo.append(-inf); rup.append(float(g.randint(5, 20)))
     return lo, up, c, it, rows, rlo, rup
+def highs_tight(lp):
+    """許容誤差 1e-10・前処理なしの HiGHS (厳密に実行可能な最良の値の目安)"""
+    import highspy
+    lo, up, c, it, rows, rlo, rup = lp; K = highspy.kHighsInf
+    h = highspy.Highs(); h.setOptionValue('output_flag', False); h.setOptionValue('mip_rel_gap', 1e-9)
+    for o in ('primal_feasibility_tolerance', 'mip_feasibility_tolerance'): h.setOptionValue(o, 1e-10)
+    h.setOptionValue('presolve', 'off')
+    for j in range(len(lo)):
+        h.addVar(lo[j], up[j]); h.changeColCost(j, c[j])
+        if it[j]: h.changeColIntegrality(j, highspy.HighsVarType.kInteger)
+    for r, l, u in zip(rows, rlo, rup): h.addRow(l if l > -inf else -K, u if u < inf else K, len(r), [a for a, _ in r], [b for _, b in r])
+    h.run(); return h.modelStatusToString(h.getModelStatus()), h.getInfo().objective_function_value
+def tol_explained(lp, oo, x, tol=1e-6):
+    """一致しない最適値が許容誤差の内の扱いの差で説明できるか ((1)〜(3))。理由の文字列も返す"""
+    lo, up, c, it, rows, rlo, rup = lp
+    if x is None: return False, "点なし"
+    for j, v in enumerate(x):
+        if v < lo[j] - tol or v > up[j] + tol: return False, f"境界を破る x{j}={v}"
+        if it[j] and abs(v - round(v)) > tol: return False, f"整数でない x{j}={v}"
+    for r, l, u in zip(rows, rlo, rup):
+        a = sum(v * x[j] for j, v in r)
+        if a < l - tol or a > u + tol: return False, f"行を破る {a} not in [{l}, {u}]"
+    ox = sum(cc * v for cc, v in zip(c, x))
+    if abs(ox - oo) > 1e-6 * (1 + abs(oo)): return False, f"点の目的値 {ox} と返した値 {oo} が違う"
+    ts, to = highs_tight(lp)
+    if ts != "Optimal": return False, f"1e-10 の HiGHS が {ts}"
+    if oo > to + 1e-6 * (1 + abs(to)): return False, f"厳密に実行可能な値 {to} より悪い"
+    return True, f"許容誤差の内の差 (1e-10 の HiGHS {to})"
 N = int(sys.argv[1]); start = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-bad = 0; t0 = time.time()
+bad = 0; strict = 0; t0 = time.time()
 for seed in range(start, start + N):
     lp = gen(seed); hs, ho = highs(lp); os_, oo, x = ours(lp)
     hmap = {"Optimal": "optimal", "Infeasible": "infeasible"}.get(hs, hs)
     ok = (hmap == os_) and (hmap != "optimal" or abs(ho - oo) <= 1e-6 * (1 + abs(ho)))
     if not ok:
-        bad += 1
-        if bad <= 10: print("seed", seed, "highs", hs, ho, "ours", os_, oo, flush=True)
-print("bad", bad, "of", N, "time %.1f" % (time.time() - t0))
+        strict += 1
+        why = ""
+        if hmap == os_ == "optimal":
+            ok, why = tol_explained(lp, oo, x)
+        if not ok:
+            bad += 1
+            if bad <= 10: print("seed", seed, "highs", hs, ho, "ours", os_, oo, why, flush=True)
+        else:
+            print("tol", seed, "highs", hs, ho, "ours", os_, oo, why, flush=True)
+print("bad", bad, "of", N, "time %.1f" % (time.time() - t0), f"(strict {strict}: 値の一致だけの以前の判定)")
