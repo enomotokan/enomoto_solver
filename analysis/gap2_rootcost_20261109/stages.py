@@ -74,16 +74,32 @@ def ours(path):
     import json
     res = json.loads(js[-1]) if js else {}
     seglen = sum(o["len"] for o in out)
-    return {"segs": out, "total": res.get("time", total), "premip": (total or 0) - seglen, "res": res}
+    # 1 区間目の MIP の時計の前 (前処理の段) の内訳: 時刻つきの行の秒を名前ごとに足す
+    pre = {}
+    pats = [("lpprobe", r"MIP: LP probing: root LP .* total \d+ iters ([0-9.]+)s"), ("equiv", r"MIP: probing: equivalence pass .*\(([0-9.]+)s\)"),
+            ("probing", r"MIP: probing: \d+ of \d+ binaries probed .*\(([0-9.]+)s,"), ("clqext", r"MIP: clique extension: .*edges, ([0-9.]+)s\)"),
+            ("symmetry", r"MIP: symmetry: \d+ generators.*\(([0-9.]+)s,"), ("earlyprobe", r"MIP: early probing: .*\(([0-9.]+)s\)")]
+    for ln in lines:
+        if "MIP: solving the root LP" in ln or re.match(r"MIP: root LP [-0-9]", ln):
+            break
+        for k, p in pats:
+            m = re.search(p, ln)
+            if m:
+                pre[k] = pre.get(k, 0.0) + float(m.group(1))
+    return {"segs": out, "total": res.get("time", total), "premip": (total or 0) - seglen, "pre": pre, "res": res}
 
 def highs(path):
     txt = Path(path).read_text(errors="replace")
     import json
     d = {}
-    m = re.search(r"Timing\s+([0-9.]+)\s+([0-9.]+) \(Presolve\)\s+MIP\s+time \[calls\] = ([0-9.]+) \[\d+\]\s+subMIP time \[calls\] = ([0-9.]+) \[(\d+)\]\s+([0-9.]+) \(Solve\)\s+MIP\s+time \[calls\] = ([0-9.]+) \[\d+\]\s+subMIP time \[calls\] = ([0-9.]+) \[(\d+)\]", txt)
+    m = re.search(r"Timing\s+([0-9.]+)\s+([0-9.]+) \(Presolve\)", txt)
     if m:
-        d.update(total=float(m.group(1)), presolve=float(m.group(2)), solve=float(m.group(6)), submip_solve=float(m.group(8)),
-                 submip_pre=float(m.group(4)), submip_calls=int(m.group(9)))
+        d.update(total=float(m.group(1)), presolve=float(m.group(2)))
+    m = re.search(r"([0-9.]+) \(Solve\)", txt)
+    if m:
+        d["solve"] = float(m.group(1))
+    m = re.search(r"\(Solve\)\s+MIP\s+time \[calls\] = [0-9.]+ \[\d+\]\s+subMIP time \[calls\] = ([0-9.]+) \[(\d+)\]", txt)
+    d["submip_solve"], d["submip_calls"] = (float(m.group(1)), int(m.group(2))) if m else (0.0, 0)
     d["restarts"] = len(re.findall(r"restarting", txt))
     # 根の終わり: 木の表で Proc. が 0 でない最初の行の時刻 (ないなら最後)
     rows = re.findall(r"^ ([A-Za-z ]) +(\d+) +(\d+) +(\d+) +[0-9.]+% .* ([0-9.]+)s$", txt, re.M)
@@ -107,6 +123,6 @@ if __name__ == "__main__":
             print(p, highs(p))
         else:
             r = ours(p)
-            print(p, "total", r["total"], "premip %.2f" % r["premip"])
+            print(p, "total", r["total"], "premip %.2f" % r["premip"], {k: round(v, 2) for k, v in r["pre"].items()})
             for s in r["segs"]:
                 print("   ", {k: (round(v, 2) if isinstance(v, float) else v) for k, v in s.items()})

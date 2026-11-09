@@ -1,0 +1,66 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP neos8 has 46324 rows; 23228 cols; 313180 nonzeros; 23228 integer variables (23224 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 6e+00]
+  Cost    [1e+00, 3e+03]
+  Bound   [1e+00, 9e+02]
+  RHS     [1e+00, 2e+00]
+Presolving model
+46212 rows, 23088 cols, 312788 nonzeros 0s
+46100 rows, 1660 cols, 137989 nonzeros 1s
+6774 rows, 1660 cols, 24181 nonzeros 2s
+6496 rows, 659 cols, 23625 nonzeros 4s
+6496 rows, 659 cols, 23625 nonzeros 4s
+Presolve reductions: rows 6496(-39828); columns 659(-22569); nonzeros 23625(-289555) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   6496 rows
+   659 cols (655 binary, 4 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   23625 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ z       0       0         0   0.00%   -inf            0                  Large        0      0      0         0     4.6s
+ J       0       0         0   0.00%   -inf            -602               Large        0      0      0         0     4.7s
+ R       0       0         0   0.00%   -3725           -3701              0.65%        0      0      0        58     4.7s
+
+76.3% inactive integer columns, restarting
+Model after restart has 311 rows, 128 cols (124 bin., 4 int., 0 impl., 0 cont., 0 dom.fix.), and 1067 nonzeros
+
+         0       0         0   0.00%   -3725           -3701              0.65%        0      0      0        58     4.8s
+ R       0       0         0 100.00%   -3725           -3719              0.16%        0      0      0        67     4.8s
+         1       0         1 100.00%   -3719           -3719              0.00%        0      0      0        67     4.8s
+
+Solving report
+  Model             neos8
+  Status            Optimal
+  Primal bound      -3719
+  Dual bound        -3719
+  Gap               0%
+  P-D integral      0.426046220788
+  Solution status   feasible
+                    -3719 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            4.77
+                    4.60 (Presolve)
+                    0.17 (Solve)
+                    0.00 (Postsolve)
+  Max sub-MIP depth 0
+  Nodes             1
+  Repair LPs        0
+  LP iterations     67
+                    0 (strong br.)
+                    0 (separation)
+                    0 (heuristics)
+{"status": "Optimal", "objective": -3719.0, "bound": -3719.0, "nodes": 1, "time": 4.774254326999994}
