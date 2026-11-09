@@ -31,11 +31,6 @@ pub fn halted() -> bool {
     HALT.with(|h| h.borrow().as_ref().is_some_and(|a| a.load(Ordering::Relaxed)))
 }
 
-/// このスレッドの止める合図 ([`with_halt`] で別のスレッドに渡すため)。
-pub fn current_halt() -> Option<Arc<AtomicBool>> {
-    HALT.with(|h| h.borrow().clone())
-}
-
 /// `flag` をこのスレッドの止める合図にして `f` を実行し、元に戻す (木の探索の従のスレッドが主の止める合図を LP にも伝えるのに使う)。
 pub fn with_halt<R>(flag: Option<Arc<AtomicBool>>, f: impl FnOnce() -> R) -> R {
     let prev = HALT.with(|h| std::mem::replace(&mut *h.borrow_mut(), flag));

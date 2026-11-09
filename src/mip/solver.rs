@@ -2071,7 +2071,6 @@ fn mem2(c: char) -> bool {
 /// `i`: 暫定解の整数列を固定した LP が時間切れになったら以後は解かない。`p`: 根の LP が重いときカットの選び方の比べを飛ばす。
 /// `r`: 再スタートの前に、入れ子の求解の間は使わない LP・カットのプール・待ち行列を捨てる。
 /// `o`: 木のスレッドに渡す対称性の前の問題 (`orig`) の写しから含意を除く。`c`: 密なカットをカットのプールの伝播に入れない (HiGHS と同じ規則)。
-/// `g`: 根の内点法の丸めを使い捨ての rayon のスレッドで解く (gemm のスレッドごとの作業領域を終わったら返す)。
 pub(super) fn gap4(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP4").ok().filter(|v| v != "0").unwrap_or_default()).contains(c)
