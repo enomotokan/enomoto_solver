@@ -3372,7 +3372,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (2 回目のループの時間の上限は clique の fallback と同じくループの始めから数える)。再スタートの後は最初の判定を引き継ぐ
         if let Some(zm) = super::zerohalf::zh_trial_mode() {
             if st == LpStatus::Optimal && job.is_none() && !self.params.submip && !super::zerohalf::zh_trial_decided() && env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_some() && !self.time_up() {
-                let on = self.zh_trial(root_iters, first_obj) && zm == "on";
+                // `r`: 試しの LP をせずに使う (根の続きと裏のカットだけ。木では [`super::zerohalf::zh_trial_used`] が偽)
+                let on = if zm == "r" { true } else { self.zh_trial(root_iters, first_obj) && zm == "on" };
+                if zm == "r" && self.params.verbose {
+                    eprintln!("MIP: zh trial (r): continuing the root cut loop with zerohalf ({:.2}s)", self.start.elapsed().as_secs_f64());
+                }
                 super::zerohalf::zh_trial_set(on);
                 if on {
                     CLIQUE_FB_SECOND.with(|c| c.set(true));
@@ -5241,7 +5245,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some("tree") => light,
             _ => true,
         };
-        let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::zerohalf::zh_trial_used()) && zh_where && self.sep_src_on(sepprof::SRC_ZH, light);
+        let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::zerohalf::zh_trial_used(light)) && zh_where && self.sep_src_on(sepprof::SRC_ZH, light);
         // clique カットの使い方は下の説明を参照
         let clique_on = clique_cuts_mode().is_some_and(|m| !(light && (m == "root" || (m == "fallback" && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && ((m != "auto" && m != "fallback") || self.clique_auto == Some(true)));
         let clique_on = clique_on && self.sep_src_on(sepprof::SRC_CLIQUE, light);

@@ -96,11 +96,14 @@ pub(crate) fn zh_deadline_on() -> bool {
 /// `ENOMOTO_MIP_ZH_TRIAL` (試作、既定では使わない。analysis/gap3_zhtrial_20261109.md): 既定 (`ENOMOTO_MIP_NO_ZEROHALF` の既定 1) で zerohalf を
 /// 使わないとき、根のカットのループを zerohalf なしで回し終えた LP で zerohalf だけのカットを短く試し
 /// ([`super::solver::Solver::zh_trial`])、根のギャップを十分に閉じる問題でだけ、根の続き・木・再スタート後に zerohalf を使う。
-/// 値: `1` (か `on`) = 判定して使う、`log` = 判定と記録だけして使わない (計測用)。`0` で使わない
+/// 値: `1` (か `on`) = 判定して使う、`log` = 判定と記録だけして使わない (計測用)、`r` = 試しの LP をせず、根のループを zerohalf なしで
+/// 回し終えた後 (clique の fallback の判定の後) の根の続き・裏のカット (と根の分離、サブ MIP の根) でだけ zerohalf を使い、木のノードの分離
+/// (`light`) では使わない。`0` で使わない
 pub(crate) fn zh_trial_mode() -> Option<&'static str> {
     match env_str!("ENOMOTO_MIP_ZH_TRIAL") {
         None | Some("0") => None,
         Some("log") => Some("log"),
+        Some("r") => Some("r"),
         Some(_) => Some("on"),
     }
 }
@@ -121,9 +124,13 @@ pub(crate) fn zh_trial_set(on: bool) {
     ZH_TRIAL_STATE.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// 試しの判定で zerohalf を使うことになったか
-pub(crate) fn zh_trial_used() -> bool {
-    ZH_TRIAL_STATE.load(std::sync::atomic::Ordering::Relaxed) == 2 && zh_trial_mode() == Some("on")
+/// 試しの判定で zerohalf を使うことになったか (`light` = 木のノードの分離。`r` では使わない)
+pub(crate) fn zh_trial_used(light: bool) -> bool {
+    ZH_TRIAL_STATE.load(std::sync::atomic::Ordering::Relaxed) == 2 && match zh_trial_mode() {
+        Some("on") => true,
+        Some("r") => !light,
+        _ => false,
+    }
 }
 
 fn zh_past_deadline() -> bool {
