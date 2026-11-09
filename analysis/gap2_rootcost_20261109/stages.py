@@ -13,7 +13,7 @@ ENOMOTO の MIP の時計は前処理の後から数え、再スタートのた�
 import re, sys
 from pathlib import Path
 
-T = re.compile(r"\(([0-9.]+)s[,)]")
+T = re.compile(r"(?:\(|, )([0-9]+\.[0-9]+)s[,)]")
 
 def tlast(line):
     m = T.findall(line)
