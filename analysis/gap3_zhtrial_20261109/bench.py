@@ -22,7 +22,7 @@ if EXTRA:
     for item in EXTRA.split(";"):
         name, kv = item.split("=", 1)
         CFG[name] = dict(x.split(":", 1) for x in kv.split(","))
-KEEP = re.compile(r"zh trial|Root cuts|cut loop done|clique fallback|node diag|solve returned|restart|^MIP: +[0-9.]+s nodes|root LP|presolve|SEPLEARN")
+KEEP = re.compile(r"zh trial|Root cuts|cut loop done|clique fallback|node diag|solve returned|restart|^MIP: +[0-9.]+s nodes|root LP|presolve|SEPLEARN|adaptive node cuts")
 OUT, TL, P, cfgs, seeds = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4].split(","), sys.argv[5].split(",")
 if P == "p58":
     from probs import PROBS  # noqa: E402

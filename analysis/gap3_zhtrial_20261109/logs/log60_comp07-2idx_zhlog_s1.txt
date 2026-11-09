@@ -1,0 +1,21 @@
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 21235 -> 21189, free columns 17264 -> 17187, nonzeros 86577 -> 86485, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: LP probing: root LP 1.67s (2925 iters, size 124938), tried 3, fixed 0, basis passed true, total 3664 iters 3.22s
+MIP: root LP: the rows changed after LP probing; the row statuses are not used
+MIP: root LP basis from the presolve LP probing: used (columns only)
+MIP: solving the root LP (0.03s)
+MIP: root LP 0.0000000000e0 (3318 iters, 1.80s)
+MIP:   global fixed integers 77 of 17264 (newly 0 since the root LP)
+MIP:   global fixed integers 77 of 17264 (newly 0 since the root LP)
+MIP:   global fixed integers 77 of 17264 (newly 0 since the root LP)
+MIP: clique fallback: no violated clique cuts; not used (0.09s)
+MIP: zh trial: 3 rounds, 300 cuts (avg 37.2 nonzeros, rows avg 4.7, zh rows 17054/17054), LP 6.0000000000e0 -> 6.0000000000e0 [6.000000e0 6.000000e0 6.000000e0], g_z 0.000e0 g_d 1.000e0 gap 6.667e0 (relative to |obj|), g_z/gap 0.000 g_z/g_d 0.000, fractional 1180 -> 1281, 1988 LP iters (root LP 3318), sep 0.87s, root LP 1.77s; not used (2.80s)
+MIP: cut loop done: 105 cuts added, 69 in LP, pool 753 cuts (1616678 nonzeros), obj 0.0000000000e0 -> 6.0000000000e0
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 3318, work_iters: 66360, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 3318 iters)
+MIP: background cuts: basis with the column values passed (root LP 1.77s)
+MIP: background cuts: root LP re-solved before replacing the cuts: TimeLimit, 1 iters (55.95s)
+TRSTAT: tree start outer 60.05 solve 55.96 restarts 0 lb 0.0000000000e0 ub 4.7000000000e1
+MIP:    55.96s nodes        0 open       1 lb 6.00000000e0 ub 4.70000000e1 lp_iters 9520 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 157681 dive_iters 0 lp_rows 17123 node_cut_secs 0.00
+MIP: basis nb diag: tree first LPs restored 0 iters 0 (0.0/LP), others 0 iters 0 (0.0/LP); root LPs: submip 3 lps 6542 iters (2180.7/LP) 1.81s, bgcopy 1 lps 1 iters (1.0/LP) 0.41s, find 1 lps 2751 iters (2751.0/LP) 2.75s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 3318 iters (3318.0/LP) 1.77s; nb hints applied 5 solves, 19856 given, 1515 changed
+MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 17123
+MIP: solve returned TimeLimit after 60.06s (time limit 60.00s)
