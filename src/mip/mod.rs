@@ -4646,7 +4646,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // 誤った最適値 11507.90 を返していた
     let equiv2 = env_def!("ENOMOTO_MIP_PROBE_EQUIV2", "1").is_some() && !submip && !(RESTART_PRESOLVE.with(|f| f.get()) && env_str!("ENOMOTO_MIP_PROBE_EQUIV2_RESTART").is_none());
     let pclique_equiv = (equiv2 || env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some_and(|v| v == "equiv")) && !submip;
-    let want_pclique = env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !pclique_equiv && !submip;
+    // 試作 `ENOMOTO_MIP_GAP4` の `q` (既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): `PROBE_CLIQUE` と同じく見つけた含意を
+    // 後の列のプロービングの伝播に使う (EQUIV2 の 2 巡目は残す)。HiGHS の probing はクリークの表で伝播するので、neos-3216931-puriri では
+    // ENOMOTO の前処理の後でもさらに 2 値列を 203 本固定し、根の LP が 58940 → 60272 (HiGHS) と開いていた。`q` で根の LP 60237
+    let want_pclique = ((env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !pclique_equiv) || solver::gap4('q')) && !submip;
     let mut equiv: Vec<(usize, usize, bool)> = Vec::new();
     // `ENOMOTO_MIP_PROBE_STRENGTHEN` (試作、既定では使わない。サブ MIP では使わない): プロービングによる行の係数の強化
     // ([`probe_strengthen_collect`])。CBC の前処理 (CglPreProcess が CglProbing を `setRowCuts(3)` で使い、`strengthenRow`
