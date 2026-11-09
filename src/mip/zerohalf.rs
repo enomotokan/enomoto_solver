@@ -93,6 +93,39 @@ pub(crate) fn zh_deadline_on() -> bool {
     overrun3('z') || env_def!("ENOMOTO_MIP_ZH_DEADLINE", "1").is_some()
 }
 
+/// `ENOMOTO_MIP_ZH_TRIAL` (試作、既定では使わない。analysis/gap3_zhtrial_20261109.md): 既定 (`ENOMOTO_MIP_NO_ZEROHALF` の既定 1) で zerohalf を
+/// 使わないとき、根のカットのループを zerohalf なしで回し終えた LP で zerohalf だけのカットを短く試し
+/// ([`super::solver::Solver::zh_trial`])、根のギャップを十分に閉じる問題でだけ、根の続き・木・再スタート後に zerohalf を使う。
+/// 値: `1` (か `on`) = 判定して使う、`log` = 判定と記録だけして使わない (計測用)。`0` で使わない
+pub(crate) fn zh_trial_mode() -> Option<&'static str> {
+    match env_str!("ENOMOTO_MIP_ZH_TRIAL") {
+        None | Some("0") => None,
+        Some("log") => Some("log"),
+        Some(_) => Some("on"),
+    }
+}
+
+/// [`zh_trial_mode`] の判定 (0 = 未判定、1 = 使わない、2 = 使う)。木の探索・裏のカット・サブ MIP のスレッドも読むのでプロセスで 1 つ
+/// (外側の求解の始めに [`zh_trial_reset`] で戻す。同じプロセスで同時に別の求解をすると混ざる: `ENOMOTO_MIP_ZH_TRIAL` を付けたときだけ)
+static ZH_TRIAL_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub(crate) fn zh_trial_reset() {
+    ZH_TRIAL_STATE.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn zh_trial_decided() -> bool {
+    ZH_TRIAL_STATE.load(std::sync::atomic::Ordering::Relaxed) != 0
+}
+
+pub(crate) fn zh_trial_set(on: bool) {
+    ZH_TRIAL_STATE.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 試しの判定で zerohalf を使うことになったか
+pub(crate) fn zh_trial_used() -> bool {
+    ZH_TRIAL_STATE.load(std::sync::atomic::Ordering::Relaxed) == 2 && zh_trial_mode() == Some("on")
+}
+
 fn zh_past_deadline() -> bool {
     // 止めの合図 ([`crate::cancel::halted`]、木の探索の従のスレッド) も期限と同じに扱う
     ZH_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d) || crate::cancel::halted()
