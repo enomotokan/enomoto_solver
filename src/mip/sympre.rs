@@ -113,40 +113,69 @@ fn detect_d1(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64, log
     let mut sub = vec![0u64; nv];
     let mut order: Vec<usize> = Vec::new();
     let mut h = vec![0u64; nv];
-    let mut stack: Vec<usize> = (0..nv).filter(|&v| deg0[v] == 1).collect();
+    // 回ごとに、その回の始めに次数 1 以下の頂点を全部外す (木の葉から中心へ。1 本ずつ外すと、全部が外れる木の根が中心からずれ、
+    // 根を動かす木の自己同型を失う)。最後に辺 1 本 (列と行) が残れば、行を列に付ける (二部グラフなので列と行は入れ替わらない)
     let fin = |v: usize, kids: &mut Vec<Vec<(u64, usize)>>| -> u64 {
         kids[v].sort_unstable();
         kids[v].iter().fold(base[v], |acc, &(s, _)| symmetry::mix(acc, s))
     };
-    while let Some(v) = stack.pop() {
-        if !alive[v] || deg[v] > 1 {
-            continue;
+    let mut cur: Vec<usize> = (0..nv).filter(|&v| deg0[v] == 1).collect();
+    let mut in_round = vec![false; nv];
+    while !cur.is_empty() {
+        for &v in &cur {
+            in_round[v] = true;
         }
-        // 生きている隣 (なければ根に付ける: 部分木で連結成分の全部が外れた)
-        let nb: Option<(usize, f64)> = if v < n {
-            p.cols[v].iter().find(|&&(i, _)| alive[n + i]).map(|&(i, a)| (n + i, a))
-        } else {
-            p.rows[v - n].iter().find(|&&(j, _)| alive[j]).map(|&(j, a)| (j, a))
-        };
-        alive[v] = false;
-        h[v] = fin(v, &mut kids);
-        order.push(v);
-        match nb {
-            Some((u, a)) => {
-                sub[v] = symmetry::mix(symmetry::mix(h[v], fbits(a)), (v < n) as u64);
-                par[v] = u;
-                kids[u].push((sub[v], v));
-                deg[u] -= 1;
-                if deg[u] <= 1 {
-                    stack.push(u);
+        let mut next: Vec<usize> = Vec::new();
+        for &v in &cur {
+            if !alive[v] || deg[v] > 1 {
+                continue;
+            }
+            // 生きている隣 (なければ根に付ける: 部分木で連結成分の全部が外れた)
+            let nb: Option<(usize, f64)> = if v < n {
+                p.cols[v].iter().find(|&&(i, _)| alive[n + i]).map(|&(i, a)| (n + i, a))
+            } else {
+                p.rows[v - n].iter().find(|&&(j, _)| alive[j]).map(|&(j, a)| (j, a))
+            };
+            if let Some((u, _)) = nb {
+                if v < n && in_round[u] && deg[u] <= 1 {
+                    // 残った辺 1 本: 列は残し、行をこの列に付ける (行の番で)
+                    continue;
                 }
             }
-            None => {
-                sub[v] = symmetry::mix(h[v], 0x0F0F_0000 | (v < n) as u64);
-                par[v] = root;
-                kids[root].push((sub[v], v));
+            alive[v] = false;
+            h[v] = fin(v, &mut kids);
+            order.push(v);
+            match nb {
+                Some((u, a)) => {
+                    sub[v] = symmetry::mix(symmetry::mix(h[v], fbits(a)), (v < n) as u64);
+                    par[v] = u;
+                    kids[u].push((sub[v], v));
+                    deg[u] -= 1;
+                    if deg[u] <= 1 {
+                        next.push(u);
+                    }
+                }
+                None => {
+                    sub[v] = symmetry::mix(h[v], 0x0F0F_0000 | (v < n) as u64);
+                    par[v] = root;
+                    kids[root].push((sub[v], v));
+                }
             }
         }
+        for &v in &cur {
+            in_round[v] = false;
+            if alive[v] {
+                next.push(v);
+            }
+        }
+        next.sort_unstable();
+        next.dedup();
+        next.retain(|&v| alive[v] && deg[v] <= 1);
+        // 外れるものが無い回 (残った列が次数 1 のまま) で止まらないよう、前の回と同じなら止める
+        if next == cur {
+            break;
+        }
+        cur = next;
     }
     for v in 0..nv {
         if alive[v] {
@@ -273,18 +302,42 @@ fn detect_d1(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64, log
         }
         bad += 1;
     }
-    // 同じ親の下の同じ形の部分木の入れ替え (隣どうしの互換)。双子 (呼び出し側が扱う) どうしは除く
-    let (mut leaf_gens, mut leaf_bad, mut leaf_cut) = (0usize, 0usize, 0usize);
-    'outer: for u in 0..=nv {
-        let ks = &kids[u];
-        for w in ks.windows(2) {
+    // 同じ親の下の同じ形の部分木の入れ替え (隣どうしの互換)。双子 (呼び出し側が扱う) どうしは除く。
+    // 核で同じ行 (色と中身が同じ) の組も、行に付いた部分木の入れ替えを足す (核の列を動かさないので、核の列の置換では見えない)
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for u in 0..=nv {
+        for w in kids[u].windows(2) {
             let ((s1, x), (s2, y)) = (w[0], w[1]);
-            if s1 != s2 || (x < n && y < n && twin_id[x] != usize::MAX && twin_id[x] == twin_id[y]) {
+            if s1 == s2 && !(x < n && y < n && twin_id[x] != usize::MAX && twin_id[x] == twin_id[y]) {
+                pairs.push((x, y));
+            }
+        }
+    }
+    {
+        let mut same: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+        for &i in &core_rows {
+            if kids[n + i].is_empty() {
                 continue;
             }
+            let mut e: Vec<(usize, u64)> = p.rows[i].iter().filter(|&&(j, _)| alive[j]).map(|&(j, a)| (j, fbits(a))).collect();
+            e.sort_unstable();
+            let k = e.iter().fold(h[n + i], |acc, &(j, a)| symmetry::mix(symmetry::mix(acc, j as u64), a));
+            same.entry(k).or_default().push(n + i);
+        }
+        let mut groups: Vec<Vec<usize>> = same.into_values().filter(|g| g.len() >= 2).collect();
+        groups.sort_unstable();
+        for g in groups {
+            for w in g.windows(2) {
+                pairs.push((w[0], w[1]));
+            }
+        }
+    }
+    let (mut leaf_gens, mut leaf_bad, mut leaf_cut) = (0usize, 0usize, 0usize);
+    for (x, y) in pairs {
+        {
             if gens.len() >= cap_gens {
                 leaf_cut += 1;
-                continue 'outer;
+                continue;
             }
             let mut perm: Vec<usize> = (0..n).collect();
             let mut st = vec![(x, y)];
