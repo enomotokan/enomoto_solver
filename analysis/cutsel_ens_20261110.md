@@ -27,7 +27,8 @@ def = なし (既定 = cand1108zd)、ens = `ENOMOTO_MIP_CUTSEL_ENS=1`、ensw = `
 - SCIP の点数は相対の閾値を持たず「予算まで採る」形で、SCIP 側は LP からカットを積極的に外す (age) ことと組で調整されている。ENOMOTO の根のループは
   1 ラウンドの本数の上限と停滞の判定で止めるので、採る本数が増えるぶん LP が重くなり、伸びは変わらない。
 - 密度の罰 (疎の点 0.5、密度 0.425 で捨てる) は、ENOMOTO で効く密なカット (hypothyroid-k1 の 1000 非零級の CMIR など) を落とす。`d` で外すと根は強くなる。
-- 論文の 5% は SCIP 8 の上で SMAC で合わせた重みでの値で、重みが選び方の他の部品 (本数・止め方・age) に依存しているため、そのまま写しても効かない。
+- 論文の 5% は SCIP 8.0.3 (LP は Xpress) で、両方が解けた組だけの値。本文でも点数の重みは SMAC の回ごとにばらばらで、重みが選び方の他の部品 (本数・止め方・age) と
+  解く仕組みに依存していると見られるので、そのまま写しても効かない。
 
 既定にする価値: **ない** (ens は有意に遅い、enskd は中立)。47 問 (600 秒) は効き目が見えなかったので回していない。
 
@@ -38,9 +39,22 @@ def = なし (既定 = cand1108zd)、ens = `ENOMOTO_MIP_CUTSEL_ENS=1`、ensw = `
 ## 2. 文献と SCIP のソース
 
 - Turner・Berthold・Besançon "A Context-Aware Cutting Plane Selection Algorithm for Mixed-Integer Programming" (ZIB Report 23-21・arXiv 2307.07322 (2023)、
-  Operations Research Proceedings 2023 (2025))。要旨 (WebSearch の抜粋): 点数の項・間引き・止め方の 3 つに、カットそのものと分離の文脈 (擬似費用など) の
-  情報を入れる。密度で捨てる間引きを含む。SCIP 8.0.3・MIPLIB 2017 benchmark・種 1〜5 で 5% 速い。本文の表 (SMAC で調整した重みの値) は
-  arxiv.org に届かず**未確認**。
+  Operations Research Proceedings 2023 (2025))。本文 (arXiv の v2 の PDF、2026-11-10 に curl で取得) で確かめた事実:
+  - 点数の項: 擬似費用 psc = Σ ψ(x_i) |x_i^LP − α_i (α x^LP − β) / ‖α‖²| (回の最大で正規化、式 (2))、ロック loc = (1/n) Σ (ζ_i^− + ζ_i^+) (回の最大で正規化、
+    多いのを良しとするか少ないのを良しとするかを選べる、式 (3))、疎の点 sps = max{maxsps − (maxsps / endsps) ‖α‖_0, 0} (式 (4))。これに効き目・期待される改善・
+    目的との平行度・整数台を足した加重和。directed cutoff distance は学習で最適解を読み込むと有利になるので外した。
+  - 間引き: 密度で先に捨てる (40% 前後が良いという先行の結果)、平行なものは捨てずに点を下げ、点が 0 を下回ったら外す。
+  - 止め方: 1 ラウンドに LP に足す非零の数の上限を LP の列の数の倍数にする。
+  - 重み: SMAC を種 1〜5 で 5 回 (40 問の訓練集合、SCIP 8.0.3、LP は Xpress)。訓練集合で 8〜15% 速い設定が出たが、点数の重みは回ごとにばらばらで共通の値がなかった。
+    一致したのは「密なカットを 40〜50% で捨てる」「平行なものは捨てずに軽く罰する」の 2 点。最終の設定は SMAC の結果と専門知識を組み合わせて決めた
+    (**本文に重みの数値は載っていない**)。
+  - 結果: MIPLIB 2017 benchmark (種 1〜5、2 時間) の影響を受けた組 (97%) のうち両方が解けた組で、時間の SGM (ずらし 10 秒) 0.95・ノード 0.92、解けた数 +14 (/668)。
+- 著者のコード (GitHub の Opt-Mucca/Context-Aware-Cut-Selection、2023-08-02 の `49f38d1`) の `configuration.txt` が最終の設定: isp 0.45・obp 0.25・eff 0.75・exp 0.1・
+  psc 0.75・loc 0.25・sparsity_bonus 0.5・end_sparsity_bonus 0.2・root_budget 4.5・tree_budget 9.5・max_parallel 0.95・parallel_penalty 0.25・max_density 0.425・
+  filter_dense_cuts True・filter_parallel_cuts False・penalise_locks True・penalise_obp True。**これは SCIP の `cutsel_ensemble.c` の既定値とすべて一致する**ので、
+  この試作の `ENOMOTO_MIP_CUTSEL_ENS=1` は論文で計測した設定そのもの (根では擬似費用の項は SCIP でも 0)。
+- 本文とソースの違い: ロックの項は、本文の式 (3) では変数の上下のロックの和、SCIP のソースではカットの係数の向きで上か下のロックだけを数え、非零の数で割る。
+  試作はソースに合わせた。
 - SCIP のソース `src/scip/cutsel_ensemble.c` (GitHub の master、2026-11-10 に取得) で確かめた事実:
   - 既定の重み: 効き目 0.75、directed cutoff distance 0、目的との平行度 0.25 (**既定では平行度を罰する** `penaliseobjparal = TRUE`、点は 0.25 × (1 − 平行度))、
     整数台 0.45、期待される改善 (効き目 × 平行度) 0.1、擬似費用 0.75 (木だけ)、ロック 0.25 (**既定ではロックの少ないものを良しとする**)、
