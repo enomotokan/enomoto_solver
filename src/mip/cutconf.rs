@@ -95,7 +95,8 @@ fn bump(i: usize, v: u64) {
 
 /// `ENOMOTO_MIP_CUTCONF` の値 (付いていなければ `None`)。文字で形を選ぶ:
 /// `m` 得た制約を双対証明と同じく CMIR で強めたカットも作る、`p` 証明のプールに入れない (`m` のカットだけ)、
-/// `r` 伝播の矛盾 (行) からだけ、`d` 証明からだけ。
+/// `r` 伝播の矛盾 (行) からだけ、`d` 証明からだけ、`x` cut-based の衝突ができたらグラフ式の衝突は作らない、
+/// `b` 一般整数列を含む制約は捨てる、`S` 証明のプールで双対証明と同じ分類にする。
 pub fn mode() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_CUTCONF")
 }
@@ -618,6 +619,12 @@ fn run(h: &mut Hist, p: &MipProblem, acc: &mut Acc, b: &mut f64, dec: &[usize], 
     }
     let s = h.slack(coefs.iter().copied(), rhs, end);
     if coefs.is_empty() || !(s < -eps) || coefs.len() > max_len || !rhs.is_finite() {
+        bump(st::DROP, 1);
+        return None;
+    }
+    let has_genint = coefs.iter().any(|&(j, _)| p.is_int[j] && !(h.glo[j] >= 0.0 && h.gup[j] <= 1.0));
+    if has_genint && mode().unwrap_or("").contains('b') {
+        // `b`: 一般整数列を含む制約は捨てる (論文の対象は 0-1 混合。一般整数の行は弱い締め付けを多く起こす)
         bump(st::DROP, 1);
         return None;
     }
