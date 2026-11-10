@@ -2,7 +2,8 @@
 //! (van der Hulst 2026「Folding Mixed-Integer Linear Programs and Reflection Symmetries」の第 4 節)。畳み方の本体は
 //! [`crate::simplex::lp_fold`]。
 //!
-//! 値の文字: `r` 反転も使う、`i` 整数列もまとめる (段階 3)、`q` ログを出さない、`c` 畳んだ数を出すだけで解かない (数える用)。`1` は連続列だけ・反転なし。
+//! 値の文字: `r` 反転も使う、`i` 整数列もまとめる (段階 3)、`q` ログを出さない、`c` 畳んだ数を出すだけで解かない (数える用)、
+//! `p` 行が 1 本もまとまらない (平行な列だけの) 畳みも使う (既定では使わない。前処理が同じ列をまとめるので)。`1` は連続列だけ・反転なし。
 //!
 //! - 連続列だけ (段階 2): 整数列はどれも 1 列だけの組にする (論文の Lemma 28)。和の等しい行は整数列の係数が同じになるので、
 //!   畳んだ MIP と元の MIP は解が行き来でき (x_w = δ_w + λ_w z_Q、整数列は δ が整数)、最適値も同じ。
@@ -319,6 +320,15 @@ pub fn try_fold(p: &MipProblem, verbose: bool) -> Option<MipFold> {
         }
         return None;
     };
+    // 行の組がどれも 1 行だけ (行が 1 本もまとまらない) なら、列の組は係数の同じ列 (平行な列) の集まりで、MIP の前処理が同じ列を
+    // まとめる (`parallel columns merged`)。畳んでも前処理と同じ仕事を別の変数の形 (平均・和) でするだけで、neos-2987310-joes
+    // (連続列 2943 本、既定 11 秒 → 53 秒) と nw04 (整数の組、12.9 → 15.6 秒) で遅くなったので畳まない
+    if f.stats.row_parts == p.m && f.stats.bip_rows == 0 && !fl.contains('p') {
+        if log {
+            eprintln!("MIP_FOLD: no fold: only parallel columns (n {} -> {}, rows not merged); the MIP presolve merges them", p.n, f.stats.n_red);
+        }
+        return None;
+    }
     let r = &f.red;
     let q = MipProblem::from_rows(r.col_lo.clone(), r.col_up.clone(), r.cost.clone(), p.offset + r.offset, p.sense_sign, r.is_int.clone(), r.rows.clone(), r.row_lo.clone(), r.row_up.clone());
     let int_groups = f.stats.int_groups > 0;
