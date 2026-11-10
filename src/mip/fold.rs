@@ -3,7 +3,8 @@
 //! [`crate::simplex::lp_fold`]。
 //!
 //! 値の文字: `r` 反転も使う、`i` 整数列もまとめる (段階 3)、`q` ログを出さない、`c` 畳んだ数を出すだけで解かない (数える用)、
-//! `p` 行が 1 本もまとまらない (平行な列だけの) 畳みも使う (既定では使わない。前処理が同じ列をまとめるので)。`1` は連続列だけ・反転なし。
+//! `p` 行が 1 本もまとまらない (平行な列だけの) 畳みと、列が 1 本もまとまらない (平行な行だけの) 畳みも使う (既定では使わない。
+//! 前処理が同じ列・同じ行をまとめるので)。`1` は連続列だけ・反転なし。
 //!
 //! - 連続列だけ (段階 2): 整数列はどれも 1 列だけの組にする (論文の Lemma 28)。和の等しい行は整数列の係数が同じになるので、
 //!   畳んだ MIP と元の MIP は解が行き来でき (x_w = δ_w + λ_w z_Q、整数列は δ が整数)、最適値も同じ。
@@ -326,6 +327,14 @@ pub fn try_fold(p: &MipProblem, verbose: bool) -> Option<MipFold> {
     if f.stats.row_parts == p.m && f.stats.bip_rows == 0 && !fl.contains('p') {
         if log {
             eprintln!("MIP_FOLD: no fold: only parallel columns (n {} -> {}, rows not merged); the MIP presolve merges them", p.n, f.stats.n_red);
+        }
+        return None;
+    }
+    // 列が 1 本もまとまらない (構造の列の数が同じで、双極の列もない) なら、行の組は係数の同じ行 (平行な行) の集まりで、MIP の
+    // 前処理が同じ行を除く。roll3000 (行 2295 → 2091) と neos-860300 (行 850 → 595) が 58 問の種 1〜3 の全部の回で遅くなったので畳まない
+    if f.stats.n_red == p.n && f.stats.bip_cols == 0 && !fl.contains('p') {
+        if log {
+            eprintln!("MIP_FOLD: no fold: only parallel rows (m {} -> {}, columns not merged); the MIP presolve removes them", p.m, f.stats.m_red);
         }
         return None;
     }
