@@ -28,6 +28,7 @@ pub(crate) mod heur_ipm;
 pub(crate) mod heur_shift;
 pub(crate) mod heur_lns2;
 pub(crate) mod symmetry;
+pub(crate) mod symdyn;
 pub(crate) mod cuts;
 pub(crate) mod separation;
 pub(crate) mod snfmodk;
@@ -954,6 +955,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
         SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
+        symdyn::reset();
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
         EQUIV2_USED.with(|f| f.set(false));
         zerohalf::zh_trial_reset();
@@ -1009,6 +1011,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
             SYM_ORIG.with(|t| *t.borrow_mut() = None);
             SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
             SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
+            symdyn::reset();
             SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
             RESTART_SOL.with(|s| *s.borrow_mut() = r.x.clone().filter(|x| x.len() == p.n));
             PRR_OFF.with(|f| f.set(true));
@@ -1031,6 +1034,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
         SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
+        symdyn::reset();
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
         solver::ROOT_BASIS.with(|t| *t.borrow_mut() = None);
         solver::ROOT_DSE.with(|t| *t.borrow_mut() = None);
@@ -2027,6 +2031,7 @@ fn ho6_symrestart_due() -> bool {
 }
 
 fn sym_of_reverify(p: &MipProblem, verbose: bool) {
+    symdyn::reverify(p, verbose);
     let Some(gens) = SYM_OF_GENS.with(|t| t.borrow().clone()) else { return };
     let kept = symmetry::verify_generators(p, &gens);
     if verbose {
@@ -2539,7 +2544,13 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         let (c, k) = symmetry::refine_capped();
         eprintln!("MIP: symmetry: refinements stopped by the iteration cap {c} of {k} (ENOMOTO_MIP_HO6_SYMREFINE {})", env_def!("ENOMOTO_MIP_HO6_SYMREFINE", "1").is_some());
     }
+    // 試作 `ENOMOTO_MIP_SYMREFL` (analysis/symdyn_20261110.md): 反転を含む対称性を列を 2 倍にした写しで探す。lex-leader の行
+    // (`ENOMOTO_MIP_NO_SYM_OF`) とは混ぜない。下でオービトープの列を動かすものを除いて置く
+    let refl = if symdyn::symrefl() && !in_sub && sym_of() { symdyn::detect_reflections(&prob, tunable!("ENOMOTO_T_MIP_SYMREFL_TIME", 1.0, f64), verbose) } else { Vec::new() };
     let Some(sym) = sym else {
+        if !refl.is_empty() {
+            symdyn::set_refl(refl);
+        }
         if verbose {
             eprintln!("MIP: symmetry: none ({:.2}s, work {sym_work}, search {}, verify {}, {sym_diag})", t0.elapsed().as_secs_f64(), symmetry::search_work() - sw0, symmetry::verify_work() - vw0);
         }
@@ -2584,6 +2595,14 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
             eprintln!("MIP: symmetry: orbital fixing with {} of {} generators", gens.len(), sym.generators.len());
         }
         SYM_OF_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(gens)));
+        if !refl.is_empty() {
+            let k0 = refl.len();
+            let refl: Vec<symdyn::SignedGen> = refl.into_iter().filter(|s| s.moves.iter().all(|m| !orb_moved[m.0 as usize] && !orb_moved[m.1 as usize])).collect();
+            if verbose {
+                eprintln!("MIP: symmetry: SYMREFL keeps {} of {k0} reflection generators (not moving orbitope columns)", refl.len());
+            }
+            symdyn::set_refl(refl);
+        }
     } else {
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(symmetry::lex_leader_generators_except(&sym, &used, &in_orb))));
     }

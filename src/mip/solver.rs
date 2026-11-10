@@ -978,6 +978,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     of_node_fixes: Vec<BoundChange>,
     /// orbital fixing の集計: 固定した境界の数、固定したノードの数、矛盾で刈ったノードの数。
     of_stats: [u64; 3],
+    /// 試作 `ENOMOTO_MIP_SYMDYN`・`ENOMOTO_MIP_SYMREFL` ([`super::symdyn`]): 動的な辞書式の縮小。あれば orbital fixing の代わりに使う
+    symdyn: Option<Rc<super::symdyn::DynSym>>,
+    symdyn_stats: super::symdyn::DynStats,
     /// 対称性の行・固定を加える前の問題 (なければ `None`)。ヒューリスティクスの解の判定・局所探索に使う。
     pub(super) orig: Option<Rc<MipProblem>>,
     /// オービトープの列 -> (オービトープの番号, 行)。
@@ -1274,6 +1277,8 @@ pub(crate) struct TreeSnapshot {
     orig: Option<std::sync::Arc<MipProblem>>,
     lex_gens: Vec<Vec<usize>>,
     of_gens: Vec<Vec<usize>>,
+    /// 試作 `ENOMOTO_MIP_SYMREFL` の反転を含む生成元
+    refl_gens: Vec<super::symdyn::SignedGen>,
     /// 写しを作ったときの LP の基底 (`ENOMOTO_MIP_TREE_ROOT_BASIS`、試作。列と、元の行 + `rows` の行)
     root_basis: Option<super::lp::Basis>,
 }
@@ -4646,6 +4651,16 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         of_stab_memo: std::collections::HashMap::new(),
         of_node_fixes: Vec::new(),
         of_stats: [0; 3],
+        symdyn: if params.submip || !super::symdyn::symdyn() {
+            None
+        } else {
+            let (plain, refl) = match &snap {
+                Some(sn) => (sn.of_gens.clone(), sn.refl_gens.clone()),
+                None => (super::SYM_OF_GENS.with(|t| t.borrow().as_ref().map(|g| (**g).clone())).unwrap_or_default(), super::symdyn::refl_gens()),
+            };
+            super::symdyn::DynSym::new(p, &plain, &refl).map(Rc::new)
+        },
+        symdyn_stats: [0; 4],
         orig: match &snap {
             // 試作 `ENOMOTO_MIP_GAP4` の `o`: 含意を除いて写す (`orig` の含意は使わない)
             Some(sn) => sn.orig.as_ref().map(|o| Rc::new(if gap4('o') { o.clone_without_implications() } else { (**o).clone() })),
@@ -14468,6 +14483,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// [`Self::orbital_fixing`] を呼び、矛盾なら衝突を作って刈った数を数える。
     fn orbital_fixing_checked(&mut self, changes: &[BoundChange]) -> bool {
+        if let Some(sd) = self.symdyn.clone() {
+            // 試作 `ENOMOTO_MIP_SYMDYN`: orbital fixing の代わりに動的な辞書式の縮小 (分枝した列の順)
+            let order = super::symdyn::branch_order(changes, self.p.n);
+            let ok = sd.propagate(self.p, &mut self.dom, &order, &mut self.symdyn_stats);
+            if !ok && self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
+                self.add_conflict();
+            }
+            self.dbg_trace("after symdyn");
+            return ok;
+        }
         if self.of_gens.is_empty() {
             return true;
         }
@@ -18185,7 +18210,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new(if gap4('o') { o.clone_without_implications() } else { (**o).clone() }));
         let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), root_basis };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
@@ -20166,7 +20191,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() || self.tree_sep {
                 eprintln!("MIP: adaptive node cuts: rounds {} effective {} skipped {} (rate {:.3}), node cut secs {:.2}, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 {:?}, cut nnz {:?} (rows mean {:.1})", self.nca_stats[0], self.nca_stats[1], self.nca_stats[2], self.nca_ema, self.node_cut_secs, self.nca_hist, self.nca_cut_nnz, self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / self.p.m.max(1) as f64);
             }
-            if !self.of_gens.is_empty() {
+            if let Some(sd) = &self.symdyn {
+                let (a, b) = sd.counts();
+                let st = self.symdyn_stats;
+                eprintln!("MIP: SYMDYN ({a} permutations, {b} reflections): tightened {} bounds at {} nodes, pruned {} nodes, strict {}", st[0], st[1], st[2], st[3]);
+            } else if !self.of_gens.is_empty() {
                 eprintln!("MIP: orbital fixing ({} generators): fixed {} bounds at {} nodes, pruned {} nodes", self.of_gens.gens.len(), self.of_stats[0], self.of_stats[1], self.of_stats[2]);
             }
             if !self.orbitopes.is_empty() {
