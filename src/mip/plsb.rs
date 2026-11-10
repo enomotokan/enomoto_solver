@@ -19,6 +19,8 @@
 //! - 費用: 既定は SCIP と同じく強分岐 1 本 = 2 ノード、続ける条件は E[T'] <= T(d) − 1。`c` で強分岐 1 本 = (強分岐の LP 1 回の
 //!   平均反復 × 2) / (ノードの LP の平均反復) ノード (`ENOMOTO_T_MIP_PLSB_COSTMULT` 倍) にし、続ける条件は E[T'] <= T(d)
 //!
+//! - `u`: 深さ 50 以上でも判定する (上限 1000。SCIP は 50 以上なら判定せずに続ける)
+//!
 //! 正の観測が `ENOMOTO_T_MIP_PLSB_MINSAMPLE` (既定 10、SCIP の `minsamplesize`) 未満、暫定解がない、g* が 0、d が 50 以上の
 //! ときは判定しない (従来の打ち切り。SCIP と同じ)。
 
@@ -46,6 +48,7 @@ pub(crate) struct PlsbCfg {
     pub dist: Dist,
     pub replace: bool,
     pub iter_cost: bool,
+    pub uncapped: bool,
     pub min_sample: usize,
     pub quot: f64,
     pub cost_mult: f64,
@@ -71,6 +74,7 @@ pub(crate) fn plsb_cfg() -> Option<PlsbCfg> {
             dist,
             replace: s.contains('x'),
             iter_cost: s.contains('c'),
+            uncapped: s.contains('u'),
             min_sample: tunable!("ENOMOTO_T_MIP_PLSB_MINSAMPLE", 10usize, usize),
             quot: tunable!("ENOMOTO_T_MIP_PLSB_QUOT", 0.6, f64),
             cost_mult: tunable!("ENOMOTO_T_MIP_PLSB_COSTMULT", 1.0, f64),
@@ -239,8 +243,8 @@ fn tree_size(d: f64) -> f64 {
 /// 判定の結果
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
-    /// 判定できない (標本が足りない・暫定解がない・g* が 0・深さが大きすぎる): 従来の打ち切り
-    Undecided,
+    /// 判定できない: 従来の打ち切り。理由は 0 = 標本が足りない、1 = 暫定解がない・g* が 0・当てはめられない、2 = 深さが 50 以上
+    Undecided(u8),
     Continue,
     Stop,
 }
@@ -248,15 +252,22 @@ pub(crate) enum Verdict {
 /// もう 1 本強分岐するかの判定。`gap` = 打ち切り値 − ノードの LP 値、`best` = このノードで強分岐した候補の最良の幾何平均の利得、
 /// `cost` = 強分岐 1 本の費用 (ノード数)、`margin` = 続けるのに要る木の大きさの減り (SCIP は 1)
 pub(crate) fn decide(st: &GainStats, cfg: &PlsbCfg, gap: f64, best: f64, cost: f64, margin: f64) -> Verdict {
-    if st.n < cfg.min_sample || !gap.is_finite() || gap <= 0.0 || !(best > 0.0) {
-        return Verdict::Undecided;
+    if st.n < cfg.min_sample {
+        return Verdict::Undecided(0);
+    }
+    if !gap.is_finite() || gap <= 0.0 || !(best > 0.0) {
+        return Verdict::Undecided(1);
     }
     let Some(f) = Fitted::fit(st, cfg.dist) else {
-        return Verdict::Undecided;
+        return Verdict::Undecided(1);
     };
     let d = (gap / best.max(MIN_GAIN)).ceil().max(1.0);
-    if d >= 50.0 {
-        return Verdict::Undecided;
+    if d >= if cfg.uncapped { 1000.0 } else { 50.0 } {
+        return Verdict::Undecided(2);
+    }
+    // 深さを 1 つでも減らす確率が `MIN_GAIN` 未満なら止める (SCIP の `expectedTreeSize` は無限大を返す)
+    if d >= 2.0 && 1.0 - f.cdf(gap / (d - 1.0)) < MIN_GAIN {
+        return Verdict::Stop;
     }
     let cur = tree_size(d);
     let next = expected_next(&f, gap, d) + cost;
@@ -336,12 +347,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let st = if pn.cfg.global { &self.plsb_tree } else { &pn.stats };
         let v = decide(st, &pn.cfg, gap, pn.best, cost, margin);
         self.plsb_stats[match v {
-            Verdict::Undecided => 0,
+            Verdict::Undecided(r) => 5 + r as usize,
             Verdict::Continue => 1,
             Verdict::Stop => 2,
         }] += 1;
         match v {
-            Verdict::Undecided => old,
+            Verdict::Undecided(_) => {
+                self.plsb_stats[0] += 1;
+                old
+            }
             Verdict::Continue => {
                 if old {
                     // 従来なら止めていたところで続ける (`x`)
@@ -366,7 +380,7 @@ mod tests {
     use super::*;
 
     fn cfg(dist: Dist) -> PlsbCfg {
-        PlsbCfg { global: false, dist, replace: false, iter_cost: false, min_sample: 3, quot: 0.6, cost_mult: 1.0 }
+        PlsbCfg { global: false, dist, replace: false, iter_cost: false, uncapped: false, min_sample: 3, quot: 0.6, cost_mult: 1.0 }
     }
 
     #[test]
@@ -390,7 +404,7 @@ mod tests {
         // 標本が足りない
         let mut c = cfg(Dist::Pareto);
         c.min_sample = 10;
-        assert_eq!(decide(&st, &c, 40.0, 4.0, 2.0, 1.0), Verdict::Undecided);
+        assert_eq!(decide(&st, &c, 40.0, 4.0, 2.0, 1.0), Verdict::Undecided(0));
     }
 
     #[test]

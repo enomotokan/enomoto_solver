@@ -474,8 +474,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) sb_degen_stats: [u64; 2],
     /// `ENOMOTO_MIP_PLSB` の `g`: 木全体 (このスレッドの求解) の強分岐の利得の統計
     pub(super) plsb_tree: super::plsb::GainStats,
-    /// `ENOMOTO_MIP_PLSB` の判定の数: 判定できない・続ける・止める・従来より長く続けた・従来より早く止めた
-    pub(super) plsb_stats: [u64; 5],
+    /// `ENOMOTO_MIP_PLSB` の判定の数: 判定できない・続ける・止める・従来より長く続けた・従来より早く止めた・
+    /// 判定できない理由 (標本が足りない・暫定解がないなど・深さ 50 以上)
+    pub(super) plsb_stats: [u64; 8],
     /// `ENOMOTO_MIP_SB_AGREE` (試作): 直近の強分岐で、擬似費用の 1 位が強分岐の 1 位と (ほぼ) 一致したか ([`Solver::sb_agree_learned`])
     sb_agree: std::collections::VecDeque<bool>,
     /// `ENOMOTO_MIP_SB_AGREE`: 学べたと判断して強分岐を省いたノードの数 (間隔 `ENOMOTO_T_MIP_SB_AGREE_PROBE` ごとに強分岐を続ける)
@@ -4354,7 +4355,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_lps: 0,
         sb_degen_stats: [0; 2],
         plsb_tree: super::plsb::GainStats::new(),
-        plsb_stats: [0; 5],
+        plsb_stats: [0; 8],
         sb_agree: std::collections::VecDeque::new(),
         sb_agree_tick: 0,
         sb_agree_stats: [0; 3],
@@ -20123,7 +20124,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
             if super::plsb::plsb_cfg().is_some() {
                 let c = &self.plsb_stats;
-                eprintln!("MIP: PLSB (tid {}): undecided {}, continue {}, stop {}, continued past lookahead {}, stopped before lookahead {}; tree gains n {} zero {}", self.pool_tid, c[0], c[1], c[2], c[3], c[4], self.plsb_tree.n, self.plsb_tree.nzero);
+                eprintln!("MIP: PLSB (tid {}): undecided {} (few samples {}, no gap {}, depth>=50 {}), continue {}, stop {}, continued past lookahead {}, stopped before lookahead {}; tree gains n {} zero {}", self.pool_tid, c[0], c[5], c[6], c[7], c[1], c[2], c[3], c[4], self.plsb_tree.n, self.plsb_tree.nzero);
             }
             if sb_agree_on() {
                 eprintln!("MIP: branching: strong branching vs pseudocost: {} of {} agreed, {} nodes without strong branching", self.sb_agree_stats[1], self.sb_agree_stats[0], self.sb_agree_stats[2]);

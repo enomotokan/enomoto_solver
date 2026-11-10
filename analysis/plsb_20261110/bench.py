@@ -19,6 +19,8 @@ CFG = {
     "gl": {"ENOMOTO_MIP_PLSB": "gl"},
     "x": {"ENOMOTO_MIP_PLSB": "x"},
 }
+for k in "u gu gxu xu gxuc".split():
+    CFG[k] = {"ENOMOTO_MIP_PLSB": k}
 OUT, TL, P, cfgs, seeds = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4].split(","), sys.argv[5].split(",")
 if P == "p58":
     from probs import PROBS  # noqa: E402
