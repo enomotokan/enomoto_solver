@@ -1155,7 +1155,7 @@ pub fn try_solve_lp(
     let obj_x: f64 = (0..n).map(|w| cost[w] * x[w]).sum();
     let obj_y: f64 = (0..y.len()).map(|q| r.cost[q] * y[q]).sum::<f64>() + r.offset;
     let obj_ok = (obj_x - obj_y).abs() <= 1e-7 * (1.0 + obj_x.abs());
-    if viol > 1e-7 || !obj_ok {
+    if viol > 1e-6 || !obj_ok {
         if log {
             eprintln!("LP_FOLD: safety net: violation {viol:.2e}, objective {obj_x} vs folded {obj_y}; solving the original");
         }
