@@ -20,6 +20,7 @@ pub(crate) mod brcut;
 pub(crate) mod solver;
 pub(crate) mod fj;
 pub(crate) mod localmip;
+pub(crate) mod fpr;
 mod heuristics;
 mod subb;
 pub(crate) mod heur_subfix;

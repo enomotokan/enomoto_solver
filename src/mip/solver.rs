@@ -730,6 +730,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     lmip_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// `ENOMOTO_MIP_LOCALMIP` のスレッドが良くなった解を入れる箱
     lmip_mailbox: Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>,
+    /// 試作 `ENOMOTO_MIP_FPR` (fix-propagate-repair、[`super::fpr`]) の別スレッドと受け渡し箱
+    pub(super) fpr: super::fpr::FprState,
     /// `ENOMOTO_MIP_FJ_NOSOL_EXTEND`: 暫定解を持ったら立てて、FJ のスレッドの延長をやめさせる印
     fj_has_inc: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// 根のヒューリスティクスの最初に別スレッドで始めた局所探索 (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`。結果は元の位置で受け取る)。
@@ -4506,6 +4508,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         fj_thread: None,
         lmip_thread: None,
         lmip_mailbox: None,
+        fpr: Default::default(),
         fj_has_inc: None,
         ls_thread: None,
         find_thread: None,
@@ -4841,7 +4844,10 @@ fn proof_only() -> bool {
 
 /// 暫定解がない間の木の中のヒューリスティクスの腕の数 (0: RENS、1: Feasibility Pump、2..8: ダイビング
 /// 分数・ベクトル長・係数・擬似費用・Farkas・衝突、8: 何もせず木を進める ([`NOINC_TREE_ARM`]))。
-const NOINC_ARMS: usize = 9;
+const NOINC_ARMS: usize = 10;
+
+/// 試作 `ENOMOTO_MIP_FPR` の `b`: fix-propagate-repair の腕 (`b` のときだけ選ぶ)。
+const NOINC_FPR_ARM: usize = 9;
 
 /// 「木を進める」腕 (`ENOMOTO_MIP_NOINC_TREE_ARM` のときだけ選ぶ)。
 const NOINC_TREE_ARM: usize = 8;
@@ -4855,6 +4861,7 @@ fn noinc_root_arm(name: &str) -> Option<usize> {
         "fractional diving" => Some(2),
         "vector length diving" => Some(3),
         "coefficient diving" => Some(4),
+        "FPR" => Some(NOINC_FPR_ARM),
         _ => None,
     }
 }
@@ -7476,6 +7483,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     });
                     self.lmip_thread = Some((hl, lstop));
                 }
+                // 試作 `ENOMOTO_MIP_FPR` の `t` (既定では使わない): 別スレッドで LP を使わない fix-propagate-repair
+                self.spawn_fpr_thread(pc.clone(), seed ^ 0x3C6E_F372_FE94_F82B);
                 // `ENOMOTO_MIP_FJ_LOCALMIP` (試作): FJ のスレッドで、FJ2 が続けて解なしなら Local-MIP + 連鎖の手に切り替える
                 // ([`super::heuristics::fj_search_fb`])。Local-MIP は時間の上限 (`ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC` × 時間上限、最大 10 秒) か、
                 // FJ のスレッドを止める合図 (根のカットのループの終わり) まで回り、良くなった解はその場で受け渡し箱に入れる
@@ -8773,6 +8782,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     heur!("trivial", self.trivial());
                 }
                 heur!("randomized rounding", self.randomized_rounding(&x, 3));
+                // 試作 `ENOMOTO_MIP_FPR` の `r` (既定では使わない): 暫定解がなければ fix-propagate-repair ([`super::fpr`])
+                if self.incumbent.is_none() && super::fpr::fpr_on('r') {
+                    let secs = if self.params.time_limit.is_finite() { (0.02 * self.params.time_limit).min(2.0) } else { 2.0 };
+                    heur!("FPR", self.fpr_heur(&x, 8, secs));
+                }
                 if env_str!("ENOMOTO_MIP_NO_IPM_HEUR").is_none() {
                     // `ENOMOTO_MIP_S1_IPMFIND` (試作、既定では使わない。analysis/highs_slow_20261106/S1.md): 解発見スレッドが走っている間は、
                     // それが解を出したら内点法を止める (解は内点法の丸めが終わるまで取り込まれない。hypothyroid-k1 では内点法が 7〜9 秒
@@ -11051,6 +11065,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let bandit = env_str!("ENOMOTO_MIP_NOINC_BANDIT").is_some();
                         let arm = if bandit {
                             self.noinc_select_arm()
+                        } else if super::fpr::fpr_on('b') {
+                            // 試作 `ENOMOTO_MIP_FPR` の `b`: RENS → FP → ダイビング → FPR を回す
+                            match self.noinc_calls % 4 {
+                                0 => 0,
+                                1 => 1,
+                                2 => 2 + (self.noinc_calls / 4) as usize % 6,
+                                _ => NOINC_FPR_ARM,
+                            }
                         } else {
                             match self.noinc_calls % 3 {
                                 0 => 0,
@@ -11071,6 +11093,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             NOINC_TREE_ARM => {}
                             0 => {
                                 self.rens_dive();
+                            }
+                            NOINC_FPR_ARM => {
+                                self.fpr_heur(&x, 4, 1.0);
                             }
                             1 => {
                                 let r = 4 * self.avg_node_iters();
@@ -12892,8 +12917,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn noinc_select_arm(&self) -> usize {
         let w = if env_str!("ENOMOTO_MIP_NOINC_ROOT_PRIOR").is_some() { tunable!("ENOMOTO_T_MIP_NOINC_PRIOR_W", 1.0, f64) } else { 0.0 };
         let prior = |a: usize| if w > 0.0 { self.noinc_prior[a] } else { None };
-        let n_arms = if env_str!("ENOMOTO_MIP_NOINC_TREE_ARM").is_some() { NOINC_ARMS } else { NOINC_TREE_ARM };
-        if let Some(a) = (0..n_arms).find(|&a| self.noinc_count[a] == 0 && prior(a).is_none()) {
+        let tree_arm = env_str!("ENOMOTO_MIP_NOINC_TREE_ARM").is_some();
+        let fpr_arm = super::fpr::fpr_on('b');
+        let arms: Vec<usize> = (0..NOINC_ARMS).filter(|&a| (a != NOINC_TREE_ARM || tree_arm) && (a != NOINC_FPR_ARM || fpr_arm)).collect();
+        if let Some(&a) = arms.iter().find(|&&a| self.noinc_count[a] == 0 && prior(a).is_none()) {
             return a;
         }
         let n_eff = |a: usize| self.noinc_count[a] as f64 + if prior(a).is_some() { w } else { 0.0 };
@@ -12910,7 +12937,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let reward = self.noinc_reward[a] + w * prior(a).unwrap_or(0.0);
             reward / n / (cost / mean_cost).sqrt().max(1.0) + c * (2.0 * total.max(1.0).ln() / n).sqrt()
         };
-        (0..n_arms).max_by(|&a, &b| score(a).total_cmp(&score(b))).unwrap()
+        arms.into_iter().max_by(|&a, &b| score(a).total_cmp(&score(b))).unwrap()
     }
 
     fn noinc_update_arm(&mut self, arm: usize, reward: f64, secs: f64) {
@@ -17973,6 +18000,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッドが終わっていれば結果を受け取る (待たない)。
     pub(super) fn poll_lmip_thread(&mut self) {
+        self.poll_fpr();
         // 受け渡し箱には良くなった解を全部ためてあり、新しい (良い) 順に試して、受け付けられたらそこで止める。最良の解が受け付け
         // られなくても (対称性の行に反するなど。neos-950242 で最良の解だけを残していたときは全部失った)、前の解が暫定解になれる。
         // 古い順に全部試すと、uccase12 では受け付けるたびの oneopt・連続列の解き直しに 1 回 1 秒かかり、根で 20 秒を失った
