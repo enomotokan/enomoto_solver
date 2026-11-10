@@ -4288,8 +4288,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             agg[k] -= w;
         };
+        // 診断 `ENOMOTO_MIP_GAP4_PATHDIAG` (既定では出さない): [始点, 試した向き, 生成の試み, 成功, 消す連続変数なしで止まる, 相手の行なしで止まる, 段の上限]
+        let pdiag = env_str!("ENOMOTO_MIP_GAP4_PATHDIAG").is_some();
+        let mut pd = [0u64; 7];
+        let pd_out = |pd: &[u64; 7], m: usize| {
+            eprintln!("GAP4 PATHDIAG: rows {m} starts {} orientations {} attempts {} success {} stop_nocol {} stop_norow {} stop_len {}", pd[0], pd[1], pd[2], pd[3], pd[4], pd[5], pd[6]);
+        };
         for start in 0..m {
             if start % 64 == 0 && self.time_up() {
+                if pdiag {
+                    pd_out(&pd, m);
+                }
                 return;
             }
             let scales: [f64; 2] = match rtype[start] {
@@ -4297,7 +4306,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 1 | 2 => [1.0, -1.0],
                 _ => [-1.0, 1.0],
             };
+            pd[0] += 1;
             for &scale in &scales {
+                pd[1] += 1;
                 for &k in &touched {
                     agg[k] = 0.0;
                     in_t[k] = false;
@@ -4402,6 +4413,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     }
                     success = cands.len() > n_before;
+                    // 診断 `ENOMOTO_MIP_GAP4_PATHDIAG=2`: 等式の始点で 1 段目にカットが出なかった行を 6 本まで、列ごとに (列, 係数, LP 値, 下限, 上限, 整数か, VUB) を出す
+                    if pdiag && !success && path.len() == 1 && base.len() >= 3 && env_str!("ENOMOTO_MIP_GAP4_PATHDIAG") == Some("2") && base.iter().any(|&(k, _)| k < n && !vars.is_int[k] && vars.vb.is_some_and(|vb| vb.vub[k].iter().any(|&(y, _, _)| vars.x[y] > 1e-6 && vars.x[y] < 1.0 - 1e-6))) {
+                        let desc: Vec<String> = base
+                            .iter()
+                            .map(|&(k, a)| {
+                                if k < n {
+                                    let vub = vars.vb.and_then(|vb| vb.vub.get(k)).map(|v| format!("{v:?}")).unwrap_or_default();
+                                    format!("({k} a={a:.4} x={:.6} [{},{}] int={} vub={vub})", vars.x[k], vars.lo[k], vars.up[k], vars.is_int[k])
+                                } else {
+                                    format!("(row{} a={a:.4} x={:.6} [{},{}])", k - n, vars.x[k], vars.lo[k], vars.up[k])
+                                }
+                            })
+                            .collect();
+                        eprintln!("GAP4 PATHROW start {start} scale {scale}: {}", desc.join(" "));
+                    }
+                    pd[2] += 1;
+                    if success {
+                        pd[3] += 1;
+                    } else if best_out.is_none() && best_in.is_none() {
+                        pd[4] += 1;
+                    } else if path.len() + 1 >= MAX_PATH_LEN {
+                        pd[6] += 1;
+                    }
                     if success || (best_out.is_none() && best_in.is_none()) {
                         break;
                     }
@@ -4426,7 +4460,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         (_, Some(i)) => find_row(i.0, i.1, &out_arcs[i.0], self, &path),
                         _ => None,
                     };
-                    let Some((r, w)) = pick else { break };
+                    let Some((r, w)) = pick else {
+                        pd[5] += 1;
+                        break;
+                    };
                     add_row(r, w, &mut agg, &mut touched, &mut in_t);
                     path.push(r);
                 }
@@ -4435,6 +4472,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     break;
                 }
             }
+        }
+        if pdiag {
+            pd_out(&pd, m);
         }
     }
 
