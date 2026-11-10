@@ -46,12 +46,219 @@ pub struct Tu2Stats {
     pub why: [usize; 6],
     /// 端数の境界が冗長と分かって候補に入れた列の数。
     pub red: usize,
+    /// `e` で TU と分かった全体の成分の数と、分からなかった数。
+    pub er_ok: usize,
+    pub er_bad: usize,
+}
+
+fn tu_flag_e() -> bool {
+    tu2_flag('e')
+}
+
+/// 0/±1 の行列 (行ごとに列の番号の昇順の (列, 符号)) が、剥がし (非零が 1 つ以下の行・列を除く) の後の芯の連結成分ごとに、
+/// 列の 2 色塗り (列の非零が全部 2) か行の 2 色塗り (行の非零が全部 2) で TU と分かるか ([`implied_integers_tu2`] の 4・5 と同じ判定)。
+pub fn tu_shape(rows: &[Vec<(usize, i8)>], ncols: usize) -> bool {
+    let m = rows.len();
+    let mut cols: Vec<Vec<(usize, i8)>> = vec![Vec::new(); ncols];
+    for (i, r) in rows.iter().enumerate() {
+        for &(j, s) in r {
+            cols[j].push((i, s));
+        }
+    }
+    let mut rdeg: Vec<usize> = rows.iter().map(|r| r.len()).collect();
+    let mut cdeg: Vec<usize> = cols.iter().map(|c| c.len()).collect();
+    let mut ra: Vec<bool> = vec![true; m];
+    let mut ca: Vec<bool> = vec![true; ncols];
+    let mut stack: Vec<(bool, usize)> = (0..m).filter(|&i| rdeg[i] <= 1).map(|i| (true, i)).chain((0..ncols).filter(|&j| cdeg[j] <= 1).map(|j| (false, j))).collect();
+    while let Some((is_row, k)) = stack.pop() {
+        if is_row {
+            if !ra[k] {
+                continue;
+            }
+            ra[k] = false;
+            for &(j, _) in &rows[k] {
+                if ca[j] {
+                    cdeg[j] -= 1;
+                    if cdeg[j] == 1 {
+                        stack.push((false, j));
+                    }
+                }
+            }
+        } else {
+            if !ca[k] {
+                continue;
+            }
+            ca[k] = false;
+            for &(i, _) in &cols[k] {
+                if ra[i] {
+                    rdeg[i] -= 1;
+                    if rdeg[i] == 1 {
+                        stack.push((true, i));
+                    }
+                }
+            }
+        }
+    }
+    // 芯の連結成分ごと
+    let mut rseen = vec![false; m];
+    let mut color_r: Vec<i8> = vec![-1; m];
+    let mut color_c: Vec<i8> = vec![-1; ncols];
+    let mut cseen = vec![false; ncols];
+    for r0 in 0..m {
+        if !ra[r0] || rseen[r0] {
+            continue;
+        }
+        let (mut rs, mut cs) = (vec![r0], Vec::new());
+        rseen[r0] = true;
+        let mut h = 0;
+        while h < rs.len() {
+            let r = rs[h];
+            h += 1;
+            for &(j, _) in &rows[r] {
+                if ca[j] && !cseen[j] {
+                    cseen[j] = true;
+                    cs.push(j);
+                    for &(i, _) in &cols[j] {
+                        if ra[i] && !rseen[i] {
+                            rseen[i] = true;
+                            rs.push(i);
+                        }
+                    }
+                }
+            }
+        }
+        let lr = |i: usize| -> Vec<(usize, i8)> { rows[i].iter().copied().filter(|&(j, _)| ca[j]).collect() };
+        let lc = |j: usize| -> Vec<(usize, i8)> { cols[j].iter().copied().filter(|&(i, _)| ra[i]).collect() };
+        let col2 = cs.iter().all(|&j| lc(j).len() == 2);
+        let row2 = rs.iter().all(|&i| lr(i).len() == 2);
+        let two_color = |nodes: &[usize], color: &mut [i8], edges_of: &dyn Fn(usize) -> Vec<(usize, i8)>, other_end: &dyn Fn(usize, usize) -> (usize, i8)| -> bool {
+            for &s in nodes {
+                if color[s] >= 0 {
+                    continue;
+                }
+                color[s] = 0;
+                let mut q = vec![s];
+                while let Some(v) = q.pop() {
+                    for (e, sv) in edges_of(v) {
+                        let (w, sw) = other_end(e, v);
+                        let want = color[v] ^ ((sv == sw) as i8);
+                        if color[w] < 0 {
+                            color[w] = want;
+                            q.push(w);
+                        } else if color[w] != want {
+                            return false;
+                        }
+                    }
+                }
+            }
+            true
+        };
+        let ok = (col2 && two_color(&rs, &mut color_r, &|i| lr(i), &|j, i| *lc(j).iter().find(|&&(k, _)| k != i).unwrap()))
+            || (row2 && two_color(&cs, &mut color_c, &|j| lc(j), &|i, j| *lr(i).iter().find(|&&(k, _)| k != j).unwrap()));
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// [`tu_shape`] で分からなければ、行列を TU か同値な形に直してから判定し直す (`e`)。
+/// 1. 符号を除いて同じ行を 1 本にする (同じ行を足しても TU は保たれる)。
+/// 2. 分割: 行 R の非零が別の行 E に含まれ、R = σE (R の列の上で) なら、補助の連続列 z (= R の連続列の部分、境界なし) を足して、
+///    E を E − σR + σz に、R を R − z (= 0、等式) に、元の R の行を z + (整数列の部分) に置き換えた問題を考える。z の定義が等式なので、
+///    x への射影の実行可能集合は元と同じで、整数列の係数・左辺・右辺の整数性も保たれる。置き換えた行列が TU なら、整数列を固定した LP に
+///    (x, z) が整数の最適解があり、x はその一部。元の R の行は z だけの行になって剥がれるので、行列の上では E ← E − σR + σz、
+///    R ← R − z とすればよい。前処理が流れの保存の行で列 (枝 k: r → q) を消すと、q の行は q と r の行の和に、k の容量の行は r の行
+///    (の連続列の部分) になる (mc11・sp150x300d)。分割で z が消えた枝 k の役をして、節点と枝の接続行列に戻る。
+/// 分割は R の非零が 2 以上のときだけ、回数は行の数の 2 倍まで。
+pub fn is_tu_er(rows: Vec<Vec<(usize, i8)>>, eq: &[bool], ncols: usize) -> bool {
+    if tu_shape(&rows, ncols) {
+        return true;
+    }
+    // 1. 重複を除く (最初の非零の符号を + に揃えた形で比べる)
+    let norm = |r: &Vec<(usize, i8)>| -> Vec<(usize, i8)> {
+        let f = r.first().map_or(1, |&(_, s)| s);
+        r.iter().map(|&(j, s)| (j, s * f)).collect()
+    };
+    let mut seen: std::collections::HashSet<Vec<(usize, i8)>> = std::collections::HashSet::new();
+    // 等式の行を先に残す (重複のうち等式でない方を落とす)
+    let mut order0: Vec<usize> = (0..rows.len()).collect();
+    order0.sort_by_key(|&i| (!eq[i], i));
+    let mut keep: Vec<(Vec<(usize, i8)>, bool)> = Vec::new();
+    for i in order0 {
+        if rows[i].len() >= 2 && seen.insert(norm(&rows[i])) {
+            keep.push((rows[i].clone(), eq[i]));
+        }
+    }
+    let mut eq: Vec<bool> = keep.iter().map(|k| k.1).collect();
+    let mut rows: Vec<Vec<(usize, i8)>> = keep.into_iter().map(|k| k.0).collect();
+    let mut ncols = ncols;
+    if tu_shape(&rows, ncols) {
+        return true;
+    }
+    // 2. 分割 (短い R から)
+    let limit = 2 * rows.len() + 10;
+    let mut done = 0;
+    let mut val: Vec<i8> = vec![0; ncols];
+    loop {
+        let mut cols: Vec<Vec<usize>> = vec![Vec::new(); ncols];
+        for (i, r) in rows.iter().enumerate() {
+            for &(j, _) in r {
+                cols[j].push(i);
+            }
+        }
+        let mut order: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].len() >= 2).collect();
+        // R は不等式の行 (前処理が消した枝の容量の行) を先に、短いものから
+        order.sort_by_key(|&i| (eq[i], rows[i].len(), i));
+        let mut found: Option<(usize, usize, i8)> = None;
+        'outer: for &r in &order {
+            let (j0, s0) = rows[r][0];
+            // E は R の最初の列を含む、R より長い行
+            for &e in &cols[j0] {
+                if e == r || rows[e].len() <= rows[r].len() {
+                    continue;
+                }
+                for &(j, sj) in &rows[e] {
+                    val[j] = sj;
+                }
+                let se0 = val[j0];
+                let sigma = s0 * se0;
+                let contained = rows[r].iter().all(|&(j, sj)| val[j] != 0 && sj == sigma * val[j]);
+                for &(j, _) in &rows[e] {
+                    val[j] = 0;
+                }
+                if contained {
+                    found = Some((r, e, sigma));
+                    break 'outer;
+                }
+            }
+        }
+        let Some((r, e, sigma)) = found else { break };
+        let z = ncols;
+        ncols += 1;
+        val.push(0);
+        let rset: std::collections::HashSet<usize> = rows[r].iter().map(|&(j, _)| j).collect();
+        let mut ne: Vec<(usize, i8)> = rows[e].iter().copied().filter(|&(j, _)| !rset.contains(&j)).collect();
+        ne.push((z, sigma));
+        rows[e] = ne;
+        rows[r].push((z, -1));
+        // R − z = 0 は等式
+        eq[r] = true;
+        done += 1;
+        if tu_shape(&rows, ncols) {
+            return true;
+        }
+        if done >= limit {
+            break;
+        }
+    }
+    false
 }
 
 /// 値の文字で部品を選ぶ (`1` は `b` と同じ): `b` 行から導ける端数の境界を無視する ([`redundant_frac_bounds`])、
 /// `v` 変数上下限の行に出る列はカットの整数の印から外す ([`cut_mask`])、`a` TU2 で足した列を SCIP と同じく、集約・変数上下限の
 /// 置き換え・flow cover では連続、c-MIR で単純な境界で置き換えるときだけ整数として扱う (`CutVars::imp`、solver.rs の `cut_imp`)、
-/// `F` (診断、誤答になりうる) TU と判定できない芯も TU とみなす、`s` 目的値の刻みにも使う (solver.rs、`ENOMOTO_MIP_OBJ_STEP_IMPLINT`
+/// `F` (診断、誤答になりうる) TU と判定できない芯も TU とみなす、`e` 判定できない成分を重複の除去と行の分割で同値な形に直して判定し直す ([`is_tu_er`])、`s` 目的値の刻みにも使う (solver.rs、`ENOMOTO_MIP_OBJ_STEP_IMPLINT`
 /// を付けなくても TU2 の印で刻みを取り、刈り込みは格子の点で取る)、`n` カットの印には使わない (刻みだけ)。
 pub fn tu2_flag(c: char) -> bool {
     env_str!("ENOMOTO_MIP_IMPLINT_TU2").is_some_and(|v| v.contains(c) || (v == "1" && "b".contains(c)))
@@ -423,6 +630,51 @@ pub fn implied_integers_tu2_opt(p: &MipProblem, base: &[bool], use_red: bool) ->
             }
         }
     }
+    // `e`: TU と判定できなかった全体の成分を、重複の除去と行の分割で同値な形に直して判定し直す ([`is_tu_er`])
+    if tu_flag_e() {
+        let bad_roots: Vec<usize> = (0..n).filter(|&j| cand[j] && find(&mut uf, j) == j && comp_bad[j]).collect();
+        if !bad_roots.is_empty() {
+            let mut rows_of: std::collections::HashMap<usize, Vec<usize>> = bad_roots.iter().map(|&r| (r, Vec::new())).collect();
+            for i in 0..m {
+                if let Some(&(j0, _)) = crow[i].first() {
+                    let r = find(&mut uf, j0);
+                    if let Some(v) = rows_of.get_mut(&r) {
+                        v.push(i);
+                    }
+                }
+            }
+            for root in bad_roots {
+                let rs = &rows_of[&root];
+                let nnz: usize = rs.iter().map(|&i| crow[i].len()).sum();
+                if nnz > 200_000 {
+                    continue;
+                }
+                // 列を詰めた番号に直す
+                let mut lid: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+                let rows: Vec<Vec<(usize, i8)>> = rs
+                    .iter()
+                    .map(|&i| {
+                        let mut r: Vec<(usize, i8)> = crow[i]
+                            .iter()
+                            .map(|&(j, pos)| {
+                                let k = lid.len();
+                                (*lid.entry(j).or_insert(k), if pos { 1 } else { -1 })
+                            })
+                            .collect();
+                        r.sort_unstable();
+                        r
+                    })
+                    .collect();
+                let eq: Vec<bool> = rs.iter().map(|&i| p.row_lo[i] == p.row_up[i]).collect();
+                if is_tu_er(rows, &eq, lid.len()) {
+                    comp_bad[root] = false;
+                    st.er_ok += 1;
+                } else {
+                    st.er_bad += 1;
+                }
+            }
+        }
+    }
     let out: Vec<bool> = (0..n).map(|j| base[j] || (cand[j] && !comp_bad[find(&mut uf, j)])).collect();
     st.marked = (0..n).filter(|&j| out[j] && !base[j]).count();
     (out, st)
@@ -628,6 +880,90 @@ mod tests {
         let p = mk(7.5);
         let b = p.implied_integers();
         assert_eq!(implied_integers_tu2_opt(&p, &b, true).0[..4], [false; 4]);
+    }
+
+    #[test]
+    fn tu2_split_recovers_contracted_network() {
+        // 節点 0..4 の流れ。枝: a0 0→1、a1 1→3、a2 2→3、a3 2→4、a4 0→2、a5 3→4。消した枝 k: 1→2 (前処理が節点 1 の行で消した)。
+        // 前処理の後の行: 節点 0、節点 1∪2 (和、等式)、節点 3、節点 4、k の容量の行 (節点 1 の行の連続列の部分 + 整数列、不等式) と
+        // その符号を反転した重複。芯の列の非零が 3 つになり 2 色塗りでは判定できないが、`e` の分割で接続行列に戻る
+        let out = |v: usize, arcs: &[(usize, usize)]| -> Vec<(usize, f64)> {
+            let mut r: Vec<(usize, f64)> = Vec::new();
+            for (a, &(f, t)) in arcs.iter().enumerate() {
+                if f == v {
+                    r.push((a, 1.0));
+                } else if t == v {
+                    r.push((a, -1.0));
+                }
+            }
+            r
+        };
+        let arcs = [(0, 1), (1, 3), (2, 3), (2, 4), (0, 2), (3, 4)];
+        let y = 6; // 整数列 (k の開閉)
+        let mut merged = out(1, &arcs);
+        for (a, v) in out(2, &arcs) {
+            merged.push((a, v));
+        }
+        merged.sort_by_key(|&(a, _)| a);
+        let mut cap = out(1, &arcs); // x_k = 1 - (節点 1 の他の枝) <= 5 y  →  -(節点 1 の他の枝) - 5 y <= -1
+        for t in cap.iter_mut() {
+            t.1 = -t.1;
+        }
+        cap.push((y, -5.0));
+        let mut cap2: Vec<(usize, f64)> = cap.iter().map(|&(a, v)| if a == y { (a, 7.0) } else { (a, -v) }).collect();
+        cap2.sort_by_key(|&(a, _)| a);
+        let rows = vec![out(0, &arcs), merged, out(3, &arcs), out(4, &arcs), cap, cap2];
+        let mut up = vec![INF; 7];
+        up[y] = 1.0;
+        let mut is_int = vec![false; 7];
+        is_int[y] = true;
+        let p = prob(7, is_int, up, rows, vec![-2.0, 3.0, 0.0, -1.0, -INF, -INF], vec![-2.0, 3.0, 0.0, -1.0, -1.0, 9.0]);
+        let b = p.implied_integers();
+        let (t, st) = implied_integers_tu2_opt(&p, &b, true);
+        assert_eq!(t[..6], [false; 6], "{st:?}");
+        // 分割の判定を直接呼ぶ (環境変数によらず)
+        let crow: Vec<Vec<(usize, i8)>> = p.rows.iter().map(|r| r.iter().filter(|&&(j, _)| j < 6).map(|&(j, a)| (j, if a > 0.0 { 1 } else { -1 })).collect()).collect();
+        assert!(!tu_shape(&crow, 6));
+        assert!(is_tu_er(crow, &[true, true, true, true, false, false], 6));
+    }
+
+    #[test]
+    fn tu2_split_random_is_tu() {
+        // でたらめな小さな 0/±1 行列で、is_tu_er が真なら本当に TU (全部の正方の部分行列の行列式) か
+        let mut seed: u64 = 777;
+        let mut rnd = |k: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % k
+        };
+        let (mut yes, mut yes_shape) = (0, 0);
+        for _ in 0..20000 {
+            let m = 2 + rnd(5) as usize;
+            let n = 2 + rnd(5) as usize;
+            let mut rows: Vec<Vec<(usize, i8)>> = Vec::new();
+            for _ in 0..m {
+                let mut r = Vec::new();
+                for j in 0..n {
+                    match rnd(5) {
+                        0 => r.push((j, 1i8)),
+                        1 => r.push((j, -1i8)),
+                        _ => {}
+                    }
+                }
+                rows.push(r);
+            }
+            let a: Vec<Vec<i64>> = rows.iter().map(|r| (0..n).map(|j| r.iter().find(|&&(k, _)| k == j).map_or(0, |&(_, s)| s as i64)).collect()).collect();
+            if tu_shape(&rows, n) {
+                yes_shape += 1;
+                assert!(is_tu(&a), "tu_shape: {a:?}");
+            }
+            if is_tu_er(rows, &vec![false; m], n) {
+                yes += 1;
+                assert!(is_tu(&a), "is_tu_er: {a:?}");
+            }
+        }
+        assert!(yes > yes_shape && yes_shape > 1000, "{yes} {yes_shape}");
     }
 
     /// 0/±1 の小さな行列が TU かを全部の正方の部分行列の行列式で確かめる。

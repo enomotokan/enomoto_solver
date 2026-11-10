@@ -6,7 +6,7 @@ D = Path(__file__).resolve().parent
 WT = D.parents[1]
 sys.path.insert(0, str(D))
 from probs_all import ALL  # noqa: E402
-OUT = D / "count.jsonl"
+OUT = D / os.environ.get("COUNT_OUT", "count.jsonl")
 probs = sys.argv[1:] or ALL
 done = set()
 if OUT.exists():
@@ -15,7 +15,11 @@ for p in probs:
     if p in done:
         continue
     env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
-    env.update(ENOMOTO_MIP_THREADS="4", ENOMOTO_MIP_LOG="1", ENOMOTO_MIP_DEBUG_IMPLINTCOUNT="stop")
+    env.update(ENOMOTO_MIP_THREADS="1", ENOMOTO_MIP_LOG="1", ENOMOTO_MIP_DEBUG_IMPLINTCOUNT="stop")
+    if os.environ.get("COUNT_TU2"):
+        env["ENOMOTO_MIP_IMPLINT_TU2"] = os.environ["COUNT_TU2"]
+    if os.environ.get("IMPLINT_PKG"):
+        env["PYTHONPATH"] = os.environ["IMPLINT_PKG"]
     t0 = time.time()
     try:
         r = subprocess.run([sys.executable, str(WT / "scripts" / "run_miplib_benchmark.py"), "--worker-ours", str(WT / ".miplib_cache" / f"{p}.mps"),
