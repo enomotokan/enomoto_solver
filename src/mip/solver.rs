@@ -472,6 +472,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) sb_lps: u64,
     /// 分枝の選択の回数と、そのうち双対退化で強分岐をしなかった回数 (診断用)。
     pub(super) sb_degen_stats: [u64; 2],
+    /// `ENOMOTO_MIP_PLSB` の `g`: 木全体 (このスレッドの求解) の強分岐の利得の統計
+    pub(super) plsb_tree: super::plsb::GainStats,
+    /// `ENOMOTO_MIP_PLSB` の判定の数: 判定できない・続ける・止める・従来より長く続けた・従来より早く止めた
+    pub(super) plsb_stats: [u64; 5],
     /// `ENOMOTO_MIP_SB_AGREE` (試作): 直近の強分岐で、擬似費用の 1 位が強分岐の 1 位と (ほぼ) 一致したか ([`Solver::sb_agree_learned`])
     sb_agree: std::collections::VecDeque<bool>,
     /// `ENOMOTO_MIP_SB_AGREE`: 学べたと判断して強分岐を省いたノードの数 (間隔 `ENOMOTO_T_MIP_SB_AGREE_PROBE` ごとに強分岐を続ける)
@@ -4344,6 +4348,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_secs: 0.0,
         sb_lps: 0,
         sb_degen_stats: [0; 2],
+        plsb_tree: super::plsb::GainStats::new(),
+        plsb_stats: [0; 5],
         sb_agree: std::collections::VecDeque::new(),
         sb_agree_tick: 0,
         sb_agree_stats: [0; 3],
@@ -13246,6 +13252,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut no_improve = 0.0f64;
         let mut tried = 0usize;
         let mut bound_changes = 0usize;
+        // `ENOMOTO_MIP_PLSB` (試作、既定では使わない): lookahead の打ち切りを確率的な判定に替える (src/mip/plsb.rs)
+        let mut plsb = self.plsb_begin();
         // 強分岐の前の LP の状態 (最初に強分岐する候補で 1 回だけ保存する)。各候補の子の LP は解いた後でこの状態に戻し、
         // 候補の間では LP に触れない (境界の締め付けは定義域だけ) ので、候補ごとに保存し直しても同じ状態になる
         let mut sb_saved: Option<L::State> = None;
@@ -13266,7 +13274,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (j, v, pscore) = cands[ci];
             ci += 1;
             let is_reliable = (self.pc.min_observations(j) as f64) >= thr_of(self, j);
-            if is_reliable || !allow_sb || tried >= max_tried || no_improve >= lookahead as f64 || self.time_up() || (self.sb_iters as f64) > maxsb {
+            let la_stop = |s: &mut Self, pl: &mut Option<super::plsb::PlsbNode>| match pl {
+                None => no_improve >= lookahead as f64,
+                Some(pn) => s.plsb_lookahead_stop(pn, no_improve, lookahead as f64, node_obj),
+            };
+            if is_reliable || !allow_sb || tried >= max_tried || la_stop(self, &mut plsb) || self.time_up() || (self.sb_iters as f64) > maxsb {
                 if best.is_none_or(|(_, _, s)| pscore > s) {
                     best = Some((j, v, pscore));
                     best_sb = None;
@@ -13658,6 +13670,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let score = if hybrid { self.pc.hybrid_score_with_gains(j, gains[0], gains[1]) } else { gains[0].max(1e-6) * gains[1].max(1e-6) };
             sb_eval.push((pscore, score));
+            if let Some(pn) = plsb.as_mut() {
+                self.plsb_record(pn, gains[0], gains[1]);
+            }
             if best.is_none_or(|(_, _, s)| score > s) {
                 best = Some((j, v, score));
                 best_sb = Some((j, child_obj[0], child_obj[1]));
@@ -20101,6 +20116,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: NODECNT degenerate duals (tid {}): nodes {}, candidates {}, btran {}, fixed by theta >= gap {}, fixed by theta = inf {}, nodes changed {}, sign mismatch {}", self.pool_tid, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
             }
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
+            if super::plsb::plsb_cfg().is_some() {
+                let c = &self.plsb_stats;
+                eprintln!("MIP: PLSB (tid {}): undecided {}, continue {}, stop {}, continued past lookahead {}, stopped before lookahead {}; tree gains n {} zero {}", self.pool_tid, c[0], c[1], c[2], c[3], c[4], self.plsb_tree.n, self.plsb_tree.nzero);
+            }
             if sb_agree_on() {
                 eprintln!("MIP: branching: strong branching vs pseudocost: {} of {} agreed, {} nodes without strong branching", self.sb_agree_stats[1], self.sb_agree_stats[0], self.sb_agree_stats[2]);
             }

@@ -43,6 +43,7 @@ pub(crate) mod seplearn;
 pub(crate) mod mcf;
 pub(crate) mod clique;
 pub(crate) mod pretime;
+pub(crate) mod plsb;
 
 use crate::solver::solve_lp;
 use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective, RootSolver, SolveResult, Status, VarType, VariableData};
