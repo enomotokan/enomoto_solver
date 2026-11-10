@@ -54,7 +54,10 @@ pub mod st {
     /// 結合しても破れなくなって止めた段の列の種類: 一般整数、連続 (残りは 0-1)
     pub const FAIL_GENINT: usize = 14;
     pub const FAIL_CONT: usize = 15;
-    pub const N: usize = 16;
+    /// 証明のプールの cutconf の行が、ノードを刈った・境界を締めた回数 (このスレッドで作ったもの)
+    pub const USE_PRUNE: usize = 16;
+    pub const USE_TIGHTEN: usize = 17;
+    pub const N: usize = 18;
 }
 
 static STATS: [std::sync::atomic::AtomicU64; st::N] = [const { std::sync::atomic::AtomicU64::new(0) }; st::N];
@@ -670,4 +673,32 @@ fn ext_row(dom: &Domain, k: usize) -> Option<ExtRow> {
         Some(Some((r, j2, u2, v2))) if *j2 == j && *u2 == upper && *v2 == v => Some(r.clone()),
         _ => None,
     })
+}
+
+thread_local! {
+    /// このスレッドで証明のプールに入れた cutconf の行の指紋 (証明のプールを詰め直すと番号が変わるので、中身で見分ける)。
+    static MINE: std::cell::RefCell<std::collections::HashSet<(usize, u64, usize, u64)>> = std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+fn fingerprint(coefs: &[(usize, f64)], rhs: f64) -> (usize, u64, usize, u64) {
+    let (j, a) = coefs.first().copied().unwrap_or((0, 0.0));
+    (coefs.len(), rhs.to_bits(), j, a.to_bits())
+}
+
+/// 証明のプールに入れた cutconf の行を覚える (係数は入れた後の並びで)。
+pub fn remember(coefs: &[(usize, f64)], rhs: f64) {
+    MINE.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() > 200_000 {
+            m.clear();
+        }
+        m.insert(fingerprint(coefs, rhs));
+    });
+}
+
+/// 証明のプールの行が使われた (`prune` ならノードを刈った、そうでなければ境界を締めた): cutconf の行なら数える。
+pub fn note_use(coefs: &[(usize, f64)], rhs: f64, prune: bool) {
+    if MINE.with(|m| m.borrow().contains(&fingerprint(coefs, rhs))) {
+        bump(if prune { st::USE_PRUNE } else { st::USE_TIGHTEN }, 1);
+    }
 }

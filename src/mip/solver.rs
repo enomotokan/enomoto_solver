@@ -15392,8 +15392,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// HiGHS 式の衝突解析で衝突を作って入れる (入れた数)。`ENOMOTO_MIP_CONFLICT_OLD` なら使わない (0)。
     fn add_conflicts_multi(&mut self, start: super::domain::ConflictStart) -> usize {
-        if super::cutconf::mode().is_some() {
-            self.add_cutconf(&start);
+        if super::cutconf::mode().is_some() && self.add_cutconf(&start) && super::cutconf::mode().unwrap_or("").contains('x') {
+            // `x`: cut-based の衝突ができたら、グラフ式の衝突は作らない (できなければグラフ式に戻る)
+            return 1;
         }
         if env_str!("ENOMOTO_MIP_CONFLICT_OLD").is_some() {
             return 0;
@@ -15441,21 +15442,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 試作 `ENOMOTO_MIP_CUTCONF` (既定では使わない、[`super::cutconf`]): cut-based の衝突解析で得た制約を証明のプールに入れる
     /// (`m` なら双対証明と同じく CMIR で強めたカットも作る、`p` なら証明のプールには入れない)。
-    fn add_cutconf(&mut self, start: &super::domain::ConflictStart) {
+    fn add_cutconf(&mut self, start: &super::domain::ConflictStart) -> bool {
         let mode = super::cutconf::mode().unwrap_or("");
         let is_proof = matches!(start, super::domain::ConflictStart::Proof(..));
         if self.params.submip || (mode.contains('r') && is_proof) || (mode.contains('d') && !is_proof) {
-            return;
+            return false;
         }
         if super::cutconf::secs() > tunable!("ENOMOTO_T_MIP_CUTCONF_TIME_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64() + 0.05 {
-            return;
+            return false;
         }
         let t0 = Instant::now();
         // 診断用: デバッグ解が打ち切り値より良ければ、解析の段ごとにデバッグ解を切らないか確かめる
         let dbg_x: Option<Vec<f64>> = if self.dbg_on { DEBUG_SOL.with(|dd| dd.borrow().as_ref().filter(|xd| super::cutconf::check_mode() || self.p.objective(xd) < self.prune_limit() - 1e-6).cloned()) } else { None };
         let r = super::cutconf::analyze(&self.dom, self.p, start, self.conflict_max_len_multi(), dbg_x.as_deref());
         super::cutconf::add_secs(t0.elapsed().as_secs_f64());
-        let Some((coefs, rhs)) = r else { return };
+        let Some((coefs, rhs)) = r else { return false };
         // 診断用: デバッグ解を切っていないか (打ち切り値による大域的な固定を使うので、デバッグ解が打ち切り値より良いときだけ)
         if self.dbg_on {
             DEBUG_SOL.with(|dd| {
@@ -15477,9 +15478,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if !mode.contains('p') {
             self.cutconf_push = !mode.contains('S');
+            let n0 = self.dual_proofs.len();
             self.push_pool_row(coefs, rhs, false);
             self.cutconf_push = false;
+            if self.dual_proofs.len() > n0 {
+                let (c, k, _) = self.dual_proofs.back().unwrap();
+                super::cutconf::remember(c, *k);
+            }
         }
+        true
     }
 
     fn conflict_max_len(&self) -> usize {
@@ -16890,6 +16897,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.proof_diag_prune(k, rhs, minact, full);
                     }
                     self.tprof.proof[org][1] += 1;
+                    if super::cutconf::mode().is_some() { let (c, kk, _) = &self.dual_proofs[k]; super::cutconf::note_use(c, *kk, true); }
                     self.proof_used(k);
                     self.proof_last_prune = Some(k);
                     self.proof_prune_after_tighten = tightened;
@@ -16938,9 +16946,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         used = true;
                         self.proof_tightenings += 1;
                         self.tprof.proof[org][2] += 1;
+                        if super::cutconf::mode().is_some() { let (c, kk, _) = &self.dual_proofs[k]; super::cutconf::note_use(c, *kk, false); }
                     }
                     if self.dom.infeasible {
                         self.tprof.proof[org][1] += 1;
+                        if super::cutconf::mode().is_some() { let (c, kk, _) = &self.dual_proofs[k]; super::cutconf::note_use(c, *kk, true); }
                         self.proof_used(k);
                         self.proof_last_prune = Some(k);
                         self.proof_prune_after_tighten = true;
@@ -20244,7 +20254,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if super::cutconf::mode().is_some() {
                 let c = super::cutconf::stats();
-                eprintln!("MIP: cutconf (ENOMOTO_MIP_CUTCONF): calls {}, no start {}, steps plain {} reduced {} (by remembered external rows {}), stop fail {} (general integer {}, continuous {}) decision {} uip {} budget {}, no step {}, dropped {}, out {} (non-binary {}, mean length {:.1}), {:.2}s", c[0], c[1], c[2], c[3], c[13], c[4], c[14], c[15], c[5], c[6], c[7], c[11], c[10], c[8], c[12], c[9] as f64 / c[8].max(1) as f64, super::cutconf::total_secs());
+                eprintln!("MIP: cutconf (ENOMOTO_MIP_CUTCONF): calls {}, no start {}, steps plain {} reduced {} (by remembered external rows {}), stop fail {} (general integer {}, continuous {}) decision {} uip {} budget {}, no step {}, dropped {}, out {} (non-binary {}, mean length {:.1}), used: pruned {} tightened {}, {:.2}s", c[0], c[1], c[2], c[3], c[13], c[4], c[14], c[15], c[5], c[6], c[7], c[11], c[10], c[8], c[12], c[9] as f64 / c[8].max(1) as f64, c[16], c[17], super::cutconf::total_secs());
             }
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
