@@ -51,7 +51,10 @@ pub mod st {
     pub const OUT_NONBIN: usize = 12;
     /// 外から来た変更を覚えた行で置き換えた段
     pub const EXT: usize = 13;
-    pub const N: usize = 14;
+    /// 結合しても破れなくなって止めた段の列の種類: 一般整数、連続 (残りは 0-1)
+    pub const FAIL_GENINT: usize = 14;
+    pub const FAIL_CONT: usize = 15;
+    pub const N: usize = 16;
 }
 
 static STATS: [std::sync::atomic::AtomicU64; st::N] = [const { std::sync::atomic::AtomicU64::new(0) }; st::N];
@@ -92,6 +95,11 @@ fn bump(i: usize, v: u64) {
 /// `r` 伝播の矛盾 (行) からだけ、`d` 証明からだけ。
 pub fn mode() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_CUTCONF")
+}
+
+/// 診断用 `ENOMOTO_MIP_CUTCONF_CHECK` ([`analyze`])。
+pub fn check_mode() -> bool {
+    env_str!("ENOMOTO_MIP_CUTCONF_CHECK").is_some()
 }
 
 /// 衝突の制約の係数を持つ密な作業領域 (スレッドごとに使い回す)。
@@ -292,9 +300,14 @@ fn reduce(h: &Hist, p: &MipProblem, r: &[(usize, f64)], e: f64, col: usize, pos:
         if f == 0.0 {
             continue;
         }
-        // 補の変数 y = x - bnd (下限) なら係数 f、z = bnd - x (上限) なら係数 -f。右辺から f * bnd を引く
-        rhs -= f * bnd;
-        out.push((j, if at_lower { f } else { -f }));
+        // 補の変数 y = x - bnd (下限) なら f x <= .. + f bnd、z = bnd - x (上限) なら -f x <= .. - f bnd
+        if at_lower {
+            rhs += f * bnd;
+            out.push((j, f));
+        } else {
+            rhs -= f * bnd;
+            out.push((j, -f));
+        }
     }
     if !rhs.is_finite() {
         return None;
@@ -304,7 +317,7 @@ fn reduce(h: &Hist, p: &MipProblem, r: &[(usize, f64)], e: f64, col: usize, pos:
 
 /// cut-based の衝突解析。`start` から始め、境界の記録を遡って理由の行と線形結合する。得た制約 `sum coefs x <= rhs`
 /// (今の境界で破れている、長さ `max_len` 以下) を返す。1 段も進まなければ `None`。
-pub fn analyze(dom: &Domain, p: &MipProblem, start: &ConflictStart, max_len: usize) -> Option<(Vec<(usize, f64)>, f64)> {
+pub fn analyze(dom: &Domain, p: &MipProblem, start: &ConflictStart, max_len: usize, dbg: Option<&[f64]>) -> Option<(Vec<(usize, f64)>, f64)> {
     bump(st::CALLS, 1);
     let end = dom.stack_len();
     let mut dec: Vec<usize> = Vec::new();
@@ -325,9 +338,18 @@ pub fn analyze(dom: &Domain, p: &MipProblem, start: &ConflictStart, max_len: usi
         bump(st::NO_START, 1);
         return None;
     }
-    let (rlo, rup) = dom.root_bounds();
-    let glo: Vec<f64> = (0..n).map(|j| rlo[j].max(dom.global_lo[j])).collect();
-    let gup: Vec<f64> = (0..n).map(|j| rup[j].min(dom.global_up[j])).collect();
+    // 診断用 `ENOMOTO_MIP_CUTCONF_CHECK`: どの実行可能解にも妥当なものだけを使う (問題の境界、元の行、伝播の矛盾からの始まり)。
+    // 得た制約はデバッグ解 (どの実行可能解でもよい) を切ってはならないので、暫定解によらず確かめられる
+    let check = check_mode();
+    if check && matches!(start, ConflictStart::Proof(..)) {
+        return None;
+    }
+    let (glo, gup): (Vec<f64>, Vec<f64>) = if check {
+        (p.col_lo.clone(), p.col_up.clone())
+    } else {
+        let (rlo, rup) = dom.root_bounds();
+        ((0..n).map(|j| rlo[j].max(dom.global_lo[j])).collect(), (0..n).map(|j| rup[j].min(dom.global_up[j])).collect())
+    };
     let mut h = Hist { dom, last_lo, last_up, prev, glo, gup, kept: std::collections::HashMap::new() };
     ACC.with(|acc| {
         let mut acc = acc.borrow_mut();
@@ -353,7 +375,7 @@ pub fn analyze(dom: &Domain, p: &MipProblem, start: &ConflictStart, max_len: usi
                 r
             }
         };
-        let res = run(&mut h, p, &mut acc, &mut b, &dec, end, max_len);
+        let res = run(&mut h, p, &mut acc, &mut b, &dec, end, max_len, dbg);
         acc.reset(n);
         res
     })
@@ -372,10 +394,26 @@ fn normalize(acc: &mut Acc, b: &mut f64) -> bool {
     true
 }
 
-fn run(h: &mut Hist, p: &MipProblem, acc: &mut Acc, b: &mut f64, dec: &[usize], end: usize, max_len: usize) -> Option<(Vec<(usize, f64)>, f64)> {
+/// 診断用 (デバッグ解): `sum terms x <= rhs` がデバッグ解 `x` で破れる量 (正なら切る)。
+fn dbg_viol(x: &[f64], terms: impl Iterator<Item = (usize, f64)>, rhs: f64) -> f64 {
+    let a: f64 = terms.map(|(j, v)| v * x[j]).sum();
+    a - rhs - 1e-6 * (1.0 + rhs.abs())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run(h: &mut Hist, p: &MipProblem, acc: &mut Acc, b: &mut f64, dec: &[usize], end: usize, max_len: usize, dbg: Option<&[f64]>) -> Option<(Vec<(usize, f64)>, f64)> {
     if !b.is_finite() || !normalize(acc, b) {
         bump(st::NO_START, 1);
         return None;
+    }
+    // 診断用: 始めの制約がデバッグ解を切るなら知らせて止める (始めの証明が誤り)。以後は段ごとに確かめる
+    let mut dbg = dbg;
+    if let Some(x) = dbg {
+        let v = dbg_viol(x, acc.nz.iter().map(|&j| (j, acc.v[j])), *b);
+        if v > 0.0 {
+            eprintln!("MIP_DEBUG_SOL: cutconf start constraint already cuts off the debug solution (by {v:.3e}, len {})", acc.nz.len());
+            dbg = None;
+        }
     }
     let eps = 1e-6;
     let slack_now = |h: &Hist, acc: &Acc, b: f64, pos: usize| h.slack(acc.nz.iter().map(|&j| (j, acc.v[j])), b, pos);
@@ -422,7 +460,7 @@ fn run(h: &mut Hist, p: &MipProblem, acc: &mut Acc, b: &mut f64, dec: &[usize], 
         };
         let (col, upper, _, reason) = h.dom.trail_entry(kstar);
         // 外から来た変更でも、伝播した行を覚えていれば (双対証明・目的関数・カットのプール) その行で置き換える
-        let ext = if reason < -1 { ext_row(h.dom, kstar).filter(|r| r.0.iter().any(|&(j, a)| j == col && (a > 0.0) == upper)) } else { None };
+        let ext = if reason < -1 && !check_mode() { ext_row(h.dom, kstar).filter(|r| r.0.iter().any(|&(j, a)| j == col && (a > 0.0) == upper)) } else { None };
         if reason < 0 && ext.is_none() {
             // 理由のない変更 (決定・外から来た変更) は残して、同じ段の次の変更へ
             h.kept.insert((col, upper), kstar);
@@ -466,6 +504,25 @@ fn run(h: &mut Hist, p: &MipProblem, acc: &mut Acc, b: &mut f64, dec: &[usize], 
                     None => break,
                 }
             };
+            if let Some(x) = dbg {
+                let v = dbg_viol(x, rr.iter().copied(), ee);
+                if v > 0.0 {
+                    let (gl, gu) = (h.glo[col], h.gup[col]);
+                    eprintln!(
+                        "MIP_DEBUG_SOL: cutconf reason ({}, reason {reason}, ext {}) cuts off the debug solution by {v:.3e}: col x{col} int {} global [{gl}, {gu}] upper {upper} len {}",
+                        if attempt == 0 { "plain" } else { "reduced" },
+                        ext.is_some(),
+                        p.is_int[col],
+                        rr.len()
+                    );
+                    if attempt == 1 {
+                        let terms: Vec<String> = rvec.iter().map(|&(j, a)| format!("{a}*x{j}[{}..{}|{}|x={}]", h.glo[j], h.gup[j], if a > 0.0 { h.lo_at(j, kstar) } else { h.up_at(j, kstar) }, x[j])).collect();
+                        eprintln!("MIP_DEBUG_SOL:   R = {} <= {e}", terms.join(" + "));
+                        eprintln!("MIP_DEBUG_SOL:   R' = {:?} <= {ee}", rr);
+                    }
+                    dbg = None;
+                }
+            }
             let Some(rho) = rr.iter().find(|&&(j, _)| j == col).map(|&(_, a)| a) else { continue };
             let lambda = -cp / rho;
             if !(lambda > 0.0) || !lambda.is_finite() {
@@ -497,7 +554,19 @@ fn run(h: &mut Hist, p: &MipProblem, acc: &mut Acc, b: &mut f64, dec: &[usize], 
         }
         if !ok {
             bump(st::FAIL_STEP, 1);
+            if !p.is_int[col] {
+                bump(st::FAIL_CONT, 1);
+            } else if !(h.glo[col] >= 0.0 && h.gup[col] <= 1.0) {
+                bump(st::FAIL_GENINT, 1);
+            }
             break;
+        }
+        if let Some(x) = dbg {
+            let v = dbg_viol(x, acc.nz.iter().map(|&j| (j, acc.v[j])), *b);
+            if v > 0.0 {
+                eprintln!("MIP_DEBUG_SOL: cutconf combination at step {resolved} cuts off the debug solution by {v:.3e} (reduced {used_reduce}) though the parts do not");
+                dbg = None;
+            }
         }
         bump(if used_reduce { st::REDUCED } else { st::PLAIN }, 1);
         resolved += 1;

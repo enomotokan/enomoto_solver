@@ -15451,14 +15451,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         let t0 = Instant::now();
-        let r = super::cutconf::analyze(&self.dom, self.p, start, self.conflict_max_len_multi());
+        // 診断用: デバッグ解が打ち切り値より良ければ、解析の段ごとにデバッグ解を切らないか確かめる
+        let dbg_x: Option<Vec<f64>> = if self.dbg_on { DEBUG_SOL.with(|dd| dd.borrow().as_ref().filter(|xd| super::cutconf::check_mode() || self.p.objective(xd) < self.prune_limit() - 1e-6).cloned()) } else { None };
+        let r = super::cutconf::analyze(&self.dom, self.p, start, self.conflict_max_len_multi(), dbg_x.as_deref());
         super::cutconf::add_secs(t0.elapsed().as_secs_f64());
         let Some((coefs, rhs)) = r else { return };
         // 診断用: デバッグ解を切っていないか (打ち切り値による大域的な固定を使うので、デバッグ解が打ち切り値より良いときだけ)
         if self.dbg_on {
             DEBUG_SOL.with(|dd| {
                 if let Some(xd) = dd.borrow().as_ref() {
-                    if self.p.objective(xd) < self.prune_limit() - 1e-6 {
+                    if super::cutconf::check_mode() || self.p.objective(xd) < self.prune_limit() - 1e-6 {
                         let a: f64 = coefs.iter().map(|&(j, v)| v * xd[j]).sum();
                         if a > rhs + 1e-6 * (1.0 + rhs.abs()) {
                             eprintln!("MIP_DEBUG_SOL: cutconf constraint cuts off the debug solution ({a} > {rhs}, len {}, proof {is_proof})", coefs.len());
@@ -20242,7 +20244,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if super::cutconf::mode().is_some() {
                 let c = super::cutconf::stats();
-                eprintln!("MIP: cutconf (ENOMOTO_MIP_CUTCONF): calls {}, no start {}, steps plain {} reduced {} (by remembered external rows {}), stop fail {} decision {} uip {} budget {}, no step {}, dropped {}, out {} (non-binary {}, mean length {:.1}), {:.2}s", c[0], c[1], c[2], c[3], c[13], c[4], c[5], c[6], c[7], c[11], c[10], c[8], c[12], c[9] as f64 / c[8].max(1) as f64, super::cutconf::total_secs());
+                eprintln!("MIP: cutconf (ENOMOTO_MIP_CUTCONF): calls {}, no start {}, steps plain {} reduced {} (by remembered external rows {}), stop fail {} (general integer {}, continuous {}) decision {} uip {} budget {}, no step {}, dropped {}, out {} (non-binary {}, mean length {:.1}), {:.2}s", c[0], c[1], c[2], c[3], c[13], c[4], c[14], c[15], c[5], c[6], c[7], c[11], c[10], c[8], c[12], c[9] as f64 / c[8].max(1) as f64, super::cutconf::total_secs());
             }
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
