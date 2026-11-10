@@ -20,6 +20,7 @@ CFGS = {
     "notu": {"ENOMOTO_MIP_NO_IMPLINT": "1"},
     "tu2ae": {"ENOMOTO_MIP_IMPLINT_TU2": "bae"},
     "tu2aes": {"ENOMOTO_MIP_IMPLINT_TU2": "baes"},
+    "tu2av": {"ENOMOTO_MIP_IMPLINT_TU2": "bav"},
     "tu2aF": {"ENOMOTO_MIP_IMPLINT_TU2": "baF"},  # 診断 (誤答になりうる): TU と判定できない芯も TU とみなす
 }
 # TU2 で暗黙の整数の印が既定 (行の規則) から変わる問題 (count.jsonl)
