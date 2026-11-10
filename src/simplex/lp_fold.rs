@@ -51,11 +51,13 @@ pub struct FoldOpts {
     pub max_ratio: f64,
     /// 細分化の時間の上限 (秒)。
     pub max_secs: f64,
+    /// 素朴な細分化 (毎回全部の行・列の鍵を作り直す、比べる用。`ENOMOTO_T_FOLD_NAIVE`)。既定は [`refine_fast`]。
+    pub naive: bool,
 }
 
 impl Default for FoldOpts {
     fn default() -> Self {
-        FoldOpts { reflect: false, max_rounds: 1000, max_ratio: 0.95, max_secs: 30.0 }
+        FoldOpts { reflect: false, max_rounds: 1000, max_ratio: 0.95, max_secs: 30.0, naive: false }
     }
 }
 
@@ -151,6 +153,253 @@ fn close(a: f64, b: f64, scale: f64) -> bool {
         return false;
     }
     (a - b).abs() <= 1e-9 * (1.0 + scale + a.abs().max(b.abs()))
+}
+
+/// 片側 (行か列) の分割の状態 ([`refine_fast`])。
+struct Side {
+    cls: Vec<u32>,
+    sg: Vec<f64>,
+    bip: Vec<bool>,
+    members: Vec<Vec<u32>>,
+    pos: Vec<u32>,
+    queued: Vec<bool>,
+}
+
+impl Side {
+    fn new(cls: Vec<u32>, sg: Vec<f64>, bip: Vec<bool>) -> Side {
+        let mut members = vec![Vec::new(); bip.len()];
+        let mut pos = vec![0u32; cls.len()];
+        for (e, &c) in cls.iter().enumerate() {
+            pos[e] = members[c as usize].len() as u32;
+            members[c as usize].push(e as u32);
+        }
+        let queued = vec![false; bip.len()];
+        Side { cls, sg, bip, members, pos, queued }
+    }
+
+    /// 要素 e を組 y に移す。
+    fn mv(&mut self, e: u32, y: u32) {
+        let x = self.cls[e as usize] as usize;
+        let i = self.pos[e as usize] as usize;
+        let last = *self.members[x].last().unwrap();
+        self.members[x][i] = last;
+        self.pos[last as usize] = i as u32;
+        self.members[x].pop();
+        self.pos[e as usize] = self.members[y as usize].len() as u32;
+        self.members[y as usize].push(e);
+        self.cls[e as usize] = y;
+    }
+}
+
+/// 速い色の細分化 (Hopcroft・Paige-Tarjan の形。Grohe・Kersting・Mladenov・Selman 2014 の第 3 節と同じく和で割る): 割る側の組を
+/// 待ち行列に入れ、取り出した組 C の要素から隣の要素へ符号つきの和 Σ_{w∈C} a λ_w を足し、触れた要素の組をその和 (単極なら γ をかけた値、
+/// 双極なら絶対値で、0 でない片は単極になり符号は和の符号) で割る。単極の組が割れたら、その組が待ち行列になければ一番大きい片を除いて
+/// 入れる (和は線形なので、一番大きい片の和は親の和と他の片の和の差で決まる)。双極の組から分かれた単極の片は全部入れる (双極の組の
+/// 和はいつも 0 で、片の和を差で決められない。論文の第 3.7 節の注意)。双極の組は割る側にしない (和が 0、系 10)。
+/// 結果の組の番号は 0.. で詰まり、空の組はない。手間は O((n + nnz) log n) (双極の組から分かれる分は要素ごとに 1 回)。
+/// 戻り値は処理した割る側の組の数。時間の上限か、縮みの下限 (素朴な形と同じ) が上限を超えたら `Err`。
+#[allow(clippy::too_many_arguments)]
+fn refine_fast(
+    n: usize,
+    m: usize,
+    rows: &[Vec<(usize, f64)>],
+    cols: &[Vec<(u32, f64)>],
+    row_cls: &mut Vec<u32>,
+    row_sg: &mut Vec<f64>,
+    rcls_bip: &mut Vec<bool>,
+    col_cls: &mut Vec<u32>,
+    col_sg: &mut Vec<f64>,
+    ccls_bip: &mut Vec<bool>,
+    opts: FoldOpts,
+    t0: std::time::Instant,
+) -> Result<usize, ()> {
+    let ne = n + m;
+    let mut sides = [
+        Side::new(std::mem::take(row_cls), std::mem::take(row_sg), std::mem::take(rcls_bip)),
+        Side::new(std::mem::take(col_cls), std::mem::take(col_sg), std::mem::take(ccls_bip)),
+    ];
+    // 待ち行列 (側 0 = 行、1 = 列、組)
+    let mut queue: std::collections::VecDeque<(usize, u32)> = std::collections::VecDeque::new();
+    for sd in 0..2 {
+        for c in 0..sides[sd].bip.len() {
+            if !sides[sd].bip[c] {
+                sides[sd].queued[c] = true;
+                queue.push_back((sd, c as u32));
+            }
+        }
+    }
+    let mut acc = vec![0.0f64; ne.max(m)];
+    let mut mark = vec![false; ne.max(m)];
+    let mut touched: Vec<u32> = Vec::new();
+    let mut processed = 0usize;
+    let mut work = 0usize;
+    let mut work_check = 0usize;
+    let mut splitter: Vec<u32> = Vec::new();
+    let mut keyed: Vec<(u32, i64, u32)> = Vec::new(); // (組, 鍵, 要素)
+    while let Some((sd, c)) = queue.pop_front() {
+        sides[sd].queued[c as usize] = false;
+        if sides[sd].bip[c as usize] {
+            continue;
+        }
+        processed += 1;
+        let td = 1 - sd;
+        // 割る側の組の要素から隣へ和を足す
+        splitter.clear();
+        splitter.extend_from_slice(&sides[sd].members[c as usize]);
+        for &w in &splitter {
+            let sw = sides[sd].sg[w as usize];
+            if sd == 1 {
+                // 列 w → 行
+                for &(v, a) in &cols[w as usize] {
+                    let v = v as usize;
+                    if !mark[v] {
+                        mark[v] = true;
+                        touched.push(v as u32);
+                    }
+                    acc[v] += a * sw;
+                }
+                work += cols[w as usize].len();
+            } else {
+                // 行 w → 列 (構造の列とスラック)
+                let v = w as usize;
+                for &(e, a) in rows[v].iter().chain(std::iter::once(&(n + v, -1.0))) {
+                    if !mark[e] {
+                        mark[e] = true;
+                        touched.push(e as u32);
+                    }
+                    acc[e] += a * sw;
+                }
+                work += rows[v].len() + 1;
+            }
+        }
+        // 触れた要素を組ごとに鍵で並べる
+        keyed.clear();
+        {
+            let t = &sides[td];
+            for &e in &touched {
+                let x = t.cls[e as usize];
+                if t.bip[x as usize] {
+                    let k = qk(acc[e as usize].abs());
+                    if k != 0 {
+                        keyed.push((x, k, e));
+                    }
+                } else {
+                    let k = qk(t.sg[e as usize] * acc[e as usize]);
+                    if k != 0 {
+                        keyed.push((x, k, e));
+                    }
+                }
+            }
+        }
+        keyed.sort_unstable();
+        let mut i = 0;
+        while i < keyed.len() {
+            let x = keyed[i].0;
+            let mut j = i;
+            while j < keyed.len() && keyed[j].0 == x {
+                j += 1;
+            }
+            // keyed[i..j] は組 x の触れた要素 (鍵が 0 でないもの)、鍵の順
+            let t = &mut sides[td];
+            let size = t.members[x as usize].len();
+            let n0 = size - (j - i);
+            let bipx = t.bip[x as usize];
+            // 鍵ごとの片
+            let mut groups: Vec<(usize, usize)> = Vec::new();
+            let mut a = i;
+            while a < j {
+                let mut b = a;
+                while b < j && keyed[b].1 == keyed[a].1 {
+                    b += 1;
+                }
+                groups.push((a, b));
+                a = b;
+            }
+            if !bipx && n0 == 0 && groups.len() == 1 {
+                i = j;
+                continue;
+            }
+            // 残る組: 鍵 0 の要素があればそれが x に残る、なければ最初の片が x に残る
+            let first_moved = if n0 > 0 { 0 } else { 1 };
+            let mut pieces: Vec<(u32, usize)> = Vec::new(); // (組, 大きさ)
+            if n0 > 0 {
+                pieces.push((x, n0));
+            } else {
+                let (ga, gb) = groups[0];
+                if bipx {
+                    // 組 x が丸ごと単極になる
+                    t.bip[x as usize] = false;
+                    for k in ga..gb {
+                        let e = keyed[k].2 as usize;
+                        t.sg[e] = if acc[e] < 0.0 { -1.0 } else { 1.0 };
+                    }
+                }
+                pieces.push((x, gb - ga));
+            }
+            for &(ga, gb) in &groups[first_moved..] {
+                let y = t.bip.len() as u32;
+                t.bip.push(false);
+                t.members.push(Vec::new());
+                t.queued.push(false);
+                for k in ga..gb {
+                    let e = keyed[k].2;
+                    if bipx {
+                        t.sg[e as usize] = if acc[e as usize] < 0.0 { -1.0 } else { 1.0 };
+                    }
+                    t.mv(e, y);
+                }
+                pieces.push((y, gb - ga));
+            }
+            // 待ち行列に入れる
+            if bipx {
+                for &(y, _) in &pieces {
+                    if !t.bip[y as usize] && !t.queued[y as usize] {
+                        t.queued[y as usize] = true;
+                        queue.push_back((td, y));
+                    }
+                }
+            } else {
+                let skip = if t.queued[x as usize] { u32::MAX } else { pieces.iter().max_by_key(|p| p.1).unwrap().0 };
+                for &(y, _) in &pieces {
+                    if y != skip && !t.queued[y as usize] {
+                        t.queued[y as usize] = true;
+                        queue.push_back((td, y));
+                    }
+                }
+            }
+            i = j;
+        }
+        for &e in &touched {
+            acc[e as usize] = 0.0;
+            mark[e as usize] = false;
+        }
+        touched.clear();
+        // 時間の上限と、縮みの下限 (働いた量が n + m を越えるごと、確かめる手間を働いた量で抑える)
+        if work - work_check >= ne + m {
+            work_check = work;
+            if t0.elapsed().as_secs_f64() > opts.max_secs {
+                LAST_FAIL.with(|c| c.set(line!()));
+                return Err(());
+            }
+            if opts.max_ratio < 1.0 {
+                let lb = sides[0].bip.iter().filter(|&&b| !b).count()
+                    + (0..sides[1].bip.len()).filter(|&c| !sides[1].bip[c] && sides[1].members[c].iter().any(|&e| (e as usize) < n)).count();
+                if lb as f64 > opts.max_ratio * (n + m) as f64 {
+                    LAST_RATIO.with(|c| c.set(lb as f64 / (n + m) as f64));
+                    LAST_FAIL.with(|c| c.set(line!()));
+                    return Err(());
+                }
+            }
+        }
+    }
+    let [r, c] = sides;
+    *row_cls = r.cls;
+    *row_sg = r.sg;
+    *rcls_bip = r.bip;
+    *col_cls = c.cls;
+    *col_sg = c.sg;
+    *ccls_bip = c.bip;
+    Ok(processed)
 }
 
 thread_local! {
@@ -271,13 +520,19 @@ impl Fold {
                 row_sg[v] = sg;
             }
         }
-        // 細分化 (行 → 列を止まるまで)
+        // 細分化。既定は待ち行列で割る側の組だけ処理する速い形 ([`refine_fast`])、`naive` なら行 → 列を止まるまで全部やり直す形
         let mut rounds = 0;
+        if !opts.naive {
+            match refine_fast(n, m, &p.rows, &cols, &mut row_cls, &mut row_sg, &mut rcls_bip, &mut col_cls, &mut col_sg, &mut ccls_bip, opts, t0) {
+                Ok(r) => rounds = r,
+                Err(()) => nope!(),
+            }
+        }
         let mut acc: Vec<f64> = Vec::new();
         let mut mark: Vec<bool> = Vec::new();
         let mut touched: Vec<u32> = Vec::new();
         let mut sig: Vec<(u32, i64)> = Vec::new();
-        loop {
+        while opts.naive {
             rounds += 1;
             if rounds > opts.max_rounds || t0.elapsed().as_secs_f64() > opts.max_secs {
                 nope!();
@@ -1048,7 +1303,7 @@ pub fn lp_fold_flags() -> Option<&'static str> {
 
 /// 細分化の設定を環境変数から (`ENOMOTO_T_FOLD_MAX_RATIO`: 縮みの割合の上限、既定 0.95)。
 pub fn opts_from_env(reflect: bool) -> FoldOpts {
-    FoldOpts { reflect, max_ratio: tunable!("ENOMOTO_T_FOLD_MAX_RATIO", 0.95, f64), ..Default::default() }
+    FoldOpts { reflect, max_ratio: tunable!("ENOMOTO_T_FOLD_MAX_RATIO", 0.95, f64), naive: env_str!("ENOMOTO_T_FOLD_NAIVE").is_some(), ..Default::default() }
 }
 
 /// `ENOMOTO_LP_FOLD`: LP を畳んで解き、解を配る。畳まない・安全網に外れたなら `None` (呼び出し側が元の LP を解く)。
