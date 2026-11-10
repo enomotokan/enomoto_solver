@@ -64,7 +64,7 @@ for p in tab:
             res, rt = tab[p][(c, s)]
             rt = rt or (0, 0, 0, 0, 0.0)
             tm = res.get("time")
-            print(f"| {p} | {c} | {s} | {res.get('status')} | {tm:.1f} | {res.get('root_bound', float('nan')):.6g} | {rt[0]} | {rt[1]} | {rt[2]} | {rt[3]} | {rt[4]:.2f} |" if tm is not None else f"| {p} | {c} | {s} | {res.get('status')} | - | - | | | | | |")
+            print(f"| {p} | {c} | {s} | {res.get('status')} | {tm:.1f} | {(res.get('root_bound') if res.get('root_bound') is not None else float('nan')):.6g} | {rt[0]} | {rt[1]} | {rt[2]} | {rt[3]} | {rt[4]:.2f} |" if tm is not None else f"| {p} | {c} | {s} | {res.get('status')} | - | - | | | | | |")
 print()
 print("矛盾:", "なし" if not bad else "")
 for b in bad:
