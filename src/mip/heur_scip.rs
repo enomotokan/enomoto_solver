@@ -163,6 +163,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let fr = rate(self);
         let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
         self.dom.backtrack_to(p, pos);
+        if label == "locks" {
+            self.gap4_locks.0 = fr;
+        }
         if self.params.verbose && self.nodes <= 1 {
             eprintln!("MIP:   {label}: fixing rate {fr:.2}");
         }
@@ -175,6 +178,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// locks (SCIP の heur_locks): lock の多い整数列から、lock の少ない側の境界に固定して伝播し、固定率 65% で
     /// サブ MIP を解く。
     pub(super) fn locks_heur(&mut self) -> bool {
+        self.locks_heur_with(0.65)
+    }
+
+    /// 試作 `ENOMOTO_MIP_GAP4` の `k` (既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): 根の並列の locks のサブ MIP が根で実行不能
+    /// (ノード 1 以下) だったら、並列のサブ MIP を受け取った後に主のスレッドで固定率の目標を「達した固定率 × 0.5」にしてやり直す
+    /// (`SUBFIX` の RENS のやり直しと同じ形)。neos-3216931-puriri では `q` で締まった問題の locks の固定 (固定率 0.73) が
+    /// サブ MIP の前処理ですぐ実行不能になり、既定で 81480 を出す locks が何も出さなかった
+    pub(super) fn locks_retry(&mut self) -> bool {
+        let fr = std::mem::replace(&mut self.gap4_locks, (0.0, false)).0;
+        if self.time_up() || 0.5 * fr < 0.3 {
+            return false;
+        }
+        let keep = self.parallel_submips;
+        self.parallel_submips = false;
+        if self.params.verbose {
+            eprintln!("MIP:   GAP4 k: locks sub-MIP was infeasible at the root at fixing rate {fr:.2}; retrying on the main thread with target {:.2}", 0.5 * fr);
+        }
+        let r = self.locks_heur_with(0.5 * fr);
+        self.parallel_submips = keep;
+        r
+    }
+
+    fn locks_heur_with(&mut self, stop_rate: f64) -> bool {
         let p = self.p;
         // `ENOMOTO_MIP_SUBMIP_NESTED` の `l` なら深さ 1 のサブ MIP の中でも ([`Self::submip_nested`])
         if self.params.submip && !self.submip_nested('l') {
@@ -192,7 +218,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 v.is_finite().then_some((j, v))
             })
             .collect();
-        self.fix_then_submip(&fixes, 0.65, 0.3, "locks")
+        self.fix_then_submip(&fixes, stop_rate, stop_rate.min(0.3), "locks")
     }
 
     /// clique (SCIP の heur_clique の簡略版): 集合パッキング・分割の行 (2 値列だけ、係数が同じ正の値で上限がその値)

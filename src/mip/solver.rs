@@ -769,6 +769,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     gap4_inclp: (u32, u32),
     /// 診断用 `ENOMOTO_MIP_GAP4_RSS`: 生きている `Solver` の数に数えたか (サブ MIP か)。[`GAP4_LIVE`]
     gap4_live: Option<bool>,
+    /// `ENOMOTO_MIP_GAP4` の `k`: 最後の locks の固定率と、根の並列の locks のサブ MIP が実行不能だったか ([`Self::locks_retry`])
+    pub(super) gap4_locks: (f64, bool),
     mem2_keep: (bool, bool),
     /// `ENOMOTO_MIP_MEM2` の `d`: 持ち物の合計が上限の 1/2 を超えている (深さ優先に寄せる)
     mem2_press: bool,
@@ -2070,6 +2072,7 @@ fn mem2(c: char) -> bool {
 /// `ENOMOTO_MIP_GAP4=<文字>` (試作、既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): 根から出られない問題とメモリの試作。
 /// `i`: 暫定解の整数列を固定した LP が時間切れになったら以後は解かない。`p`: 根の LP が重いときカットの選び方の比べを飛ばす。
 /// `r`: 再スタートの前に、入れ子の求解の間は使わない LP・カットのプール・待ち行列を捨てる。
+/// `k`: 根の並列の locks のサブ MIP が根で実行不能なら、固定率の目標を半分にして主のスレッドでやり直す。
 /// `q`: 前処理のプロービングで、見つけた含意を後の列の伝播に使う (`PROBE_CLIQUE` を EQUIV2 と並べて効かせる)。
 /// `n`: 共有の待ち行列のノードに基底・DSE 重みを付けない (境界の変更の詰めは残す)。
 /// `l`: カットの非零を 100 + 0.15 × 列 までに短くする (HiGHS の `postprocessCut`、[`super::separation`] の `finish_cut`)。
@@ -4503,6 +4506,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         memb_next: 0.0,
         gap4_inclp: (0, 0),
         gap4_live: gap4_sub,
+        gap4_locks: (0.0, false),
         mem2_keep: (true, true),
         mem2_press: false,
         mem2_stats: [0; 7],
@@ -8857,6 +8861,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_SUBFIX` の `p`: 並列の RENS が根で実行不能だったら、ここで主のスレッドでやり直す
                 if !self.subfix_retry.is_empty() {
                     heur!("RENS (SUBFIX retry)", self.subfix_par_retry());
+                }
+                // 試作 `ENOMOTO_MIP_GAP4` の `k`: 並列の locks が根で実行不能だったら、ここで主のスレッドでやり直す
+                if self.gap4_locks.1 && self.incumbent.is_none() {
+                    heur!("locks (GAP4 retry)", self.locks_retry());
                 }
                 self.poll_find_thread();
                 // `ENOMOTO_MIP_EARLY_RESTART_JOIN` (試作、既定では使わない): 別スレッドのサブ MIP (RENS など)・解探しのスレッドの解を
@@ -17863,6 +17871,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if label == super::heur_subfix::SUBFIX_PAR_LABEL && infeasible && r.nodes <= 1 && !self.params.submip {
                         self.subfix_retry.push(fr);
                     }
+                }
+                // 試作 `ENOMOTO_MIP_GAP4` の `k`: 根の並列の locks のサブ MIP が根で実行不能なら、主のスレッドでやり直す印 ([`Self::locks_retry`])
+                if label == "locks" && infeasible && r.nodes <= 1 && !self.params.submip && self.nodes <= 1 && gap4('k') {
+                    self.gap4_locks.1 = true;
                 }
             }
         }
