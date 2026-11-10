@@ -18,6 +18,7 @@ CFGS = {
     "defs": {"ENOMOTO_MIP_OBJ_STEP_IMPLINT": "1"},
     "tu2s": {"ENOMOTO_MIP_IMPLINT_TU2": "1", "ENOMOTO_MIP_OBJ_STEP_IMPLINT": "1"},
     "notu": {"ENOMOTO_MIP_NO_IMPLINT": "1"},
+    "tu2aF": {"ENOMOTO_MIP_IMPLINT_TU2": "baF"},  # 診断 (誤答になりうる): TU と判定できない芯も TU とみなす
 }
 # TU2 で暗黙の整数の印が既定 (行の規則) から変わる問題 (count.jsonl)
 AFF = [json.loads(l)["problem"] for l in open(D / "count.jsonl") if json.loads(l).get("tu2")]
