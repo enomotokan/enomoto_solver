@@ -453,6 +453,7 @@ impl Fold {
         let row_ext = |v: usize| p.rows[v].iter().map(|&(w, a)| (w, a)).chain(std::iter::once((n + v, -1.0)));
         // 中央 δ^C (反転なしなら 0)
         let dc: Vec<f64> = (0..ne).map(|e| if opts.reflect { center(elo(e), eup(e)) } else { 0.0 }).collect();
+        if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF cols {:.3}s", t0.elapsed().as_secs_f64()); }
         // 初めの列の組
         let mut col_cls = vec![0u32; ne];
         let mut col_sg = vec![1.0f64; ne];
@@ -520,6 +521,7 @@ impl Fold {
                 row_sg[v] = sg;
             }
         }
+        if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF init {:.3}s", t0.elapsed().as_secs_f64()); }
         // 細分化。既定は待ち行列で割る側の組だけ処理する速い形 ([`refine_fast`])、`naive` なら行 → 列を止まるまで全部やり直す形
         let mut rounds = 0;
         if !opts.naive {
@@ -676,6 +678,7 @@ impl Fold {
                 }
             }
         }
+        if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF refined {:.3}s", t0.elapsed().as_secs_f64()); }
         let ncc = ccls_bip.len();
         let nrc = rcls_bip.len();
         // 単極の組の符号は組ごとに丸ごと反転してよい (Proposition 15 の後の注意)。補う列・行が少ないよう、多数が +1 の向きにする
@@ -768,89 +771,149 @@ impl Fold {
                 rhs_sc[v] += (a * delta[w]).abs();
             }
         }
-        // 組の和 (P, Q) の合計 T_PQ = Σ_{v∈P, w∈Q} γ_v A_vw λ_w
-        let mut tot: HashMap<(u32, u32), f64> = HashMap::new();
+        if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF delta {:.3}s", t0.elapsed().as_secs_f64()); }
+        // 組の和 (P, Q) の合計 T_PQ = Σ_{v∈P, w∈Q} γ_v A_vw λ_w を、行の組ごとに R_PQ = T_PQ / |P| の疎な並び (`rrows`) と、
+        // 列の組ごとに (P, T_PQ) の並び (`ccols`) で持つ (密な作業配列で数える。HashMap は使わない)
+        let mut rmem: Vec<Vec<u32>> = vec![Vec::new(); nrc];
         for v in 0..m {
-            let pr = row_cls[v];
-            if rcls_bip[pr as usize] {
+            rmem[row_cls[v] as usize].push(v as u32);
+        }
+        let mut cmem: Vec<Vec<u32>> = vec![Vec::new(); ncc];
+        for e in 0..ne {
+            cmem[col_cls[e] as usize].push(e as u32);
+        }
+        let mut wacc = vec![0.0f64; ncc.max(nrc)];
+        let mut wsc = vec![0.0f64; ncc.max(nrc)];
+        let mut wmark = vec![false; ncc.max(nrc)];
+        let mut want = vec![0.0f64; ncc.max(nrc)];
+        let mut wtouch: Vec<u32> = Vec::new();
+        let mut rrows: Vec<Vec<(u32, f64)>> = vec![Vec::new(); nrc];
+        for pr in 0..nrc {
+            if rcls_bip[pr] {
                 continue;
             }
-            for (w, a) in row_ext(v) {
-                let q = col_cls[w];
-                if ccls_bip[q as usize] {
-                    continue;
+            for &v in &rmem[pr] {
+                let v = v as usize;
+                for (w, a) in row_ext(v) {
+                    let q = col_cls[w] as usize;
+                    if ccls_bip[q] {
+                        continue;
+                    }
+                    if !wmark[q] {
+                        wmark[q] = true;
+                        wtouch.push(q as u32);
+                    }
+                    wacc[q] += row_sg[v] * a * col_sg[w];
                 }
-                *tot.entry((pr, q)).or_insert(0.0) += row_sg[v] * a * col_sg[w];
+            }
+            let sz = rmem[pr].len() as f64;
+            wtouch.sort_unstable();
+            for &q in &wtouch {
+                let t = wacc[q as usize];
+                if qk(t) != 0 {
+                    rrows[pr].push((q, t / sz));
+                }
+                wacc[q as usize] = 0.0;
+                wmark[q as usize] = false;
+            }
+            wtouch.clear();
+        }
+        let mut ccols: Vec<Vec<(u32, f64)>> = vec![Vec::new(); ncc];
+        for pr in 0..nrc {
+            for &(q, r) in &rrows[pr] {
+                ccols[q as usize].push((pr as u32, r * rmem[pr].len() as f64));
             }
         }
-        // 検査: 行ごと・列ごとの組の和が R_PQ = T/|P|、C_PQ = T/|Q| に等しい (双極の組との和は 0)
-        {
-            let get = |pr: u32, q: u32| tot.get(&(pr, q)).copied().unwrap_or(0.0);
-            let mut accm: HashMap<u32, (f64, f64)> = HashMap::new();
-            // 行の組ごとに非零の列の組の数 (行ごとの非零の組の数と比べる)
-            let mut nz_per_rc: Vec<usize> = vec![0; nrc];
-            let mut nz_per_cc: Vec<usize> = vec![0; ncc];
-            for (&(pr, q), &t) in tot.iter() {
-                if qk(t / rsize[pr as usize] as f64) != 0 {
-                    nz_per_rc[pr as usize] += 1;
-                }
-                if qk(t / csize[q as usize] as f64) != 0 {
-                    nz_per_cc[q as usize] += 1;
-                }
+        if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF sums {:.3}s", t0.elapsed().as_secs_f64()); }
+        // 検査: 行ごと・列ごとの組の和が R_PQ = T/|P|、C_PQ = T/|Q| に等しい (双極の組との和は 0)。組の中の各要素の和を、組の
+        // 合計から出した値と比べ、非零の組の数も比べる
+        for pr in 0..nrc {
+            let bip = rcls_bip[pr];
+            for &(q, r) in &rrows[pr] {
+                want[q as usize] = r;
             }
-            for v in 0..m {
-                accm.clear();
-                let pr = row_cls[v];
+            let nzw = rrows[pr].len();
+            for &v in &rmem[pr] {
+                let v = v as usize;
                 for (w, a) in row_ext(v) {
-                    let q = col_cls[w];
-                    if ccls_bip[q as usize] {
+                    let q = col_cls[w] as usize;
+                    if ccls_bip[q] {
                         continue;
                     }
-                    let ent = accm.entry(q).or_insert((0.0, 0.0));
-                    ent.0 += row_sg[v] * a * col_sg[w];
-                    ent.1 += a.abs();
-                }
-                let bip = rcls_bip[pr as usize];
-                let mut nz = 0;
-                for (&q, &(s, sc)) in accm.iter() {
-                    let want = if bip { 0.0 } else { get(pr, q) / rsize[pr as usize] as f64 };
-                    if !close(s, want, sc) {
-                        nope!();
+                    if !wmark[q] {
+                        wmark[q] = true;
+                        wtouch.push(q as u32);
                     }
-                    if qk(want) != 0 {
+                    wacc[q] += row_sg[v] * a * col_sg[w];
+                    wsc[q] += a.abs();
+                }
+                let mut nz = 0;
+                let mut bad = false;
+                for &q in &wtouch {
+                    let q = q as usize;
+                    let w0 = if bip { 0.0 } else { want[q] };
+                    if !close(wacc[q], w0, wsc[q]) {
+                        bad = true;
+                    }
+                    if qk(w0) != 0 {
                         nz += 1;
                     }
+                    wacc[q] = 0.0;
+                    wsc[q] = 0.0;
+                    wmark[q] = false;
                 }
-                if !bip && nz != nz_per_rc[pr as usize] {
+                wtouch.clear();
+                if bad || (!bip && nz != nzw) {
                     nope!();
                 }
             }
-            for e in 0..ne {
-                accm.clear();
-                let q = col_cls[e];
+            for &(q, _) in &rrows[pr] {
+                want[q as usize] = 0.0;
+            }
+        }
+        for q in 0..ncc {
+            let bip = ccls_bip[q];
+            let csz = cmem[q].len() as f64;
+            for &(pr, t) in &ccols[q] {
+                want[pr as usize] = t / csz;
+            }
+            let nzw = ccols[q].iter().filter(|&&(_, t)| qk(t / csz) != 0).count();
+            for &e in &cmem[q] {
+                let e = e as usize;
                 for &(v, a) in &cols[e] {
-                    let pr = row_cls[v as usize];
-                    if rcls_bip[pr as usize] {
+                    let pr = row_cls[v as usize] as usize;
+                    if rcls_bip[pr] {
                         continue;
                     }
-                    let ent = accm.entry(pr).or_insert((0.0, 0.0));
-                    ent.0 += row_sg[v as usize] * a * col_sg[e];
-                    ent.1 += a.abs();
-                }
-                let bip = ccls_bip[q as usize];
-                let mut nz = 0;
-                for (&pr, &(s, sc)) in accm.iter() {
-                    let want = if bip { 0.0 } else { get(pr, q) / csize[q as usize] as f64 };
-                    if !close(s, want, sc) {
-                        nope!();
+                    if !wmark[pr] {
+                        wmark[pr] = true;
+                        wtouch.push(pr as u32);
                     }
-                    if qk(want) != 0 {
+                    wacc[pr] += row_sg[v as usize] * a * col_sg[e];
+                    wsc[pr] += a.abs();
+                }
+                let mut nz = 0;
+                let mut bad = false;
+                for &pr in &wtouch {
+                    let pr = pr as usize;
+                    let w0 = if bip { 0.0 } else { want[pr] };
+                    if !close(wacc[pr], w0, wsc[pr]) {
+                        bad = true;
+                    }
+                    if qk(w0) != 0 {
                         nz += 1;
                     }
+                    wacc[pr] = 0.0;
+                    wsc[pr] = 0.0;
+                    wmark[pr] = false;
                 }
-                if !bip && nz != nz_per_cc[q as usize] {
+                wtouch.clear();
+                if bad || (!bip && nz != nzw) {
                     nope!();
                 }
+            }
+            for &(pr, _) in &ccols[q] {
+                want[pr as usize] = 0.0;
             }
         }
         // 検査: 行の右辺 (γ_v b_v が組で等しい、双極なら 0)
@@ -891,6 +954,7 @@ impl Fold {
                 nope!();
             }
         }
+        if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF verified {:.3}s", t0.elapsed().as_secs_f64()); }
         // 畳んだ問題を作る。列: 単極の組、行: 単極の組
         let mut red_col = vec![u32::MAX; ncc];
         let mut red_row = vec![u32::MAX; nrc];
@@ -901,10 +965,12 @@ impl Fold {
         }
         let mut c_nnz = vec![0usize; ncc];
         let mut c_row = vec![u32::MAX; ncc];
-        for (&(pr, q), &t) in tot.iter() {
-            if qk(t) != 0 {
-                c_nnz[q as usize] += 1;
-                c_row[q as usize] = pr;
+        for q in 0..ncc {
+            for &(pr, t) in &ccols[q] {
+                if qk(t) != 0 {
+                    c_nnz[q] += 1;
+                    c_row[q] = pr;
+                }
             }
         }
         let mut row_abs: Vec<Option<u32>> = vec![None; nrc];
@@ -971,16 +1037,18 @@ impl Fold {
         let mut rows_r: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nrow_red as usize];
         let mut row_lo_r = vec![0.0; nrow_red as usize];
         let mut row_up_r = vec![0.0; nrow_red as usize];
-        let mut keys: Vec<(&(u32, u32), &f64)> = tot.iter().collect();
-        keys.sort_by_key(|a| *a.0);
-        for (&(pr, q), &t) in keys {
-            let rq = red_col[q as usize];
-            if rq == u32::MAX || qk(t) == 0 {
+        for pr in 0..nrc {
+            if rcls_bip[pr] {
                 continue;
             }
-            let rr = red_row[pr as usize] as usize;
-            let coef = t / rsize[pr as usize] as f64 / red_scale[rq as usize];
-            rows_r[rr].push((rq as usize, coef));
+            let rr = red_row[pr] as usize;
+            for &(q, r) in &rrows[pr] {
+                let rq = red_col[q as usize];
+                if rq == u32::MAX {
+                    continue;
+                }
+                rows_r[rr].push((rq as usize, r / red_scale[rq as usize]));
+            }
         }
         for pr in 0..nrc {
             if rcls_bip[pr] {
@@ -992,7 +1060,7 @@ impl Fold {
             let (lo, up) = match row_abs[pr] {
                 None => (b, b),
                 Some(q) => {
-                    let alpha = tot[&(pr as u32, q)] / rsize[pr] as f64;
+                    let alpha = rrows[pr].iter().find(|e| e.0 == q).map_or(0.0, |e| e.1);
                     let (l, u) = zr(cfirst[q as usize]);
                     // Σ others + α z = b, z ∈ [l, u]
                     let (a1, a2) = (b - alpha * u, b - alpha * l);
