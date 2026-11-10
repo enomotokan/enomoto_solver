@@ -83,6 +83,12 @@ pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64, lo
     if !sympre_mode().0 {
         return symmetry::detect_skip_twins(p, time_cap, max_tries, work_cap, log_cap, twins);
     }
+    detect_d1(p, time_cap, max_tries, work_cap, log_cap, twins, verbose)
+}
+
+/// (1) 次数 0・1 の頂点を外してから核で検出し、生成元を元の問題に戻す ([`detect`])。
+#[allow(clippy::too_many_arguments)]
+fn detect_d1(p: &MipProblem, time_cap: f64, max_tries: usize, work_cap: u64, log_cap: u64, twins: &[Vec<usize>], verbose: bool) -> (Option<Symmetry>, u64) {
     let t0 = std::time::Instant::now();
     let (n, m) = (p.n, p.m);
     let nv = n + m;
@@ -398,5 +404,41 @@ pub(super) fn probe(
             t1.elapsed().as_secs_f64(),
             if stopped { ", stopped by the caps" } else { "" }
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 2 つの同じ部品 (列 x_k と、行 g_k: x_k + s_k + 2 t_k = 1 の 1 行だけの列 s_k・t_k) が行 r0: x_1 + x_2 <= 1 でつながる問題は、
+    /// (1) で全部が木として外れ (核は空)、根の下の部分木の入れ替え 1 つ (x_1<->x_2, s_1<->s_2, t_1<->t_2) が生成元になる
+    #[test]
+    fn d1_collapses_trees_and_swaps_subtrees() {
+        // 列: x1 x2 s1 t1 s2 t2
+        let rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(0, 1.0), (2, 1.0), (3, 2.0)], vec![(1, 1.0), (4, 1.0), (5, 2.0)]];
+        let p = MipProblem::from_rows(vec![0.0; 6], vec![1.0; 6], vec![1.0, 1.0, 2.0, 3.0, 2.0, 3.0], 0.0, 1.0, vec![true; 6], rows, vec![f64::NEG_INFINITY, 1.0, 1.0], vec![1.0, 1.0, 1.0]);
+        let (sym, _) = detect_d1(&p, 10.0, 100, u64::MAX, u64::MAX, &[], false);
+        let sym = sym.expect("対称性があるはず");
+        assert_eq!(sym.generators, vec![vec![1, 0, 4, 5, 2, 3]]);
+        assert_eq!(sym.num_orbits, 3);
+    }
+
+    /// 核が残る問題: 2 本の行 a + b + c = 1, a + b + d = 1 (c・d は 1 行だけ) と、a・b 両方に付いた葉の列。核の生成元 (a<->b) を
+    /// 戻すと葉も入れ替わり、確かめを通る
+    #[test]
+    fn d1_lifts_core_generators() {
+        // 列: a b c d la lb (la は a だけの行 a + la <= 1、lb は b だけの行 b + lb <= 1)
+        let rows = vec![
+            vec![(0, 1.0), (1, 1.0), (2, 1.0)],
+            vec![(0, 1.0), (1, 1.0), (3, 1.0)],
+            vec![(0, 1.0), (4, 1.0)],
+            vec![(1, 1.0), (5, 1.0)],
+        ];
+        let p = MipProblem::from_rows(vec![0.0; 6], vec![1.0; 6], vec![1.0, 1.0, 0.0, 0.0, 5.0, 5.0], 0.0, 1.0, vec![true; 6], rows, vec![1.0, 1.0, f64::NEG_INFINITY, f64::NEG_INFINITY], vec![1.0; 4]);
+        let (sym, _) = detect_d1(&p, 10.0, 100, u64::MAX, u64::MAX, &[], false);
+        let sym = sym.expect("対称性があるはず");
+        assert!(sym.generators.contains(&vec![1, 0, 2, 3, 5, 4]), "{:?}", sym.generators);
+        assert!(sym.generators.contains(&vec![0, 1, 3, 2, 4, 5]), "{:?}", sym.generators);
     }
 }
