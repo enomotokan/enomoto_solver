@@ -7024,6 +7024,8 @@ fn mpsep_flags(submip: bool, in_job: bool) -> Option<String> {
 fn select_cuts_ens(cands: Vec<Candidate>, forced: &[Candidate], max_cuts: usize, p: &MipProblem, fl: &str) -> Vec<Candidate> {
     let cs: Vec<(&[(usize, f64)], f64)> = cands.iter().map(|c| (c.coefs.as_slice(), c.efficacy)).collect();
     let fs: Vec<&[(usize, f64)]> = forced.iter().map(|c| c.coefs.as_slice()).collect();
+    // `k`: 本数を既定の選び方が採る本数にそろえる
+    let max_cuts = if fl.contains('k') { select_cuts(cands.clone(), max_cuts, p).len().max(1) } else { max_cuts };
     let Some(sel) = super::cutsel_ens::select(&cs, &fs, p, max_cuts, fl) else {
         return select_cuts(cands, max_cuts, p);
     };

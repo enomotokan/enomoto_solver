@@ -17,7 +17,8 @@
 //! 値の文字: `w` = 1 ラウンドの本数の上限を `ENOMOTO_T_MIP_CUTSEL_ENS_MAX` (既定 2000、SCIP の根の `separating/maxcutsroot`)
 //! にする (ないときは今の上限 (根 50 本、広げたラウンドはその本数) のまま)。`f` = 平行度で罰するのではなく捨てる (SCIP の
 //! `filterparalcuts`)。`c` = 候補が `ENOMOTO_T_MIP_CUTSEL_ENS_MAXCANDS` (既定 200、SCIP の `maxcuts`) を超えたら既定の選び方に戻す
-//! (SCIP は次の優先度の選び方に任せる)。`p` = 平行度を罰する重み・しきい値を `ENOMOTO_T_MIP_CUTSEL_ENS_PARPEN`・`_MAXPAR` から読む。
+//! (SCIP は次の優先度の選び方に任せる)。`k` = 本数を既定の選び方 (`select_cuts`) が採る本数にそろえる (並べ方だけ ensemble)。
+//! `d` = 密度で捨てず、密度の点・非零の予算も使わない。`p` = 平行度を罰する重み・しきい値を `ENOMOTO_T_MIP_CUTSEL_ENS_PARPEN`・`_MAXPAR` から読む。
 
 use super::problem::MipProblem;
 
@@ -97,8 +98,9 @@ pub(super) fn select(cuts: &[(&[(usize, f64)], f64)], forced: &[&[(usize, f64)]]
     // LP の列の数 (前処理で消えた列は数えない)
     let ncols = (0..p.n).filter(|&j| !p.cols[j].is_empty() && p.col_lo[j] < p.col_up[j]).count().max(1) as f64;
     let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
-    // 密なカットを捨てる
-    let mut idx: Vec<usize> = (0..cuts.len()).filter(|&i| !cuts[i].0.is_empty() && cuts[i].0.len() as f64 / ncols <= MAX_DENSITY).collect();
+    // 密なカットを捨てる (`d` なら捨てず、密度の点も 0 にする)
+    let no_dens = flags.contains('d');
+    let mut idx: Vec<usize> = (0..cuts.len()).filter(|&i| !cuts[i].0.is_empty() && (no_dens || cuts[i].0.len() as f64 / ncols <= MAX_DENSITY)).collect();
     if idx.is_empty() {
         return Some(Vec::new());
     }
@@ -127,7 +129,7 @@ pub(super) fn select(cuts: &[(&[(usize, f64)], f64)], forced: &[&[(usize, f64)]]
         let (c, eff) = cuts[i];
         let nint = c.iter().filter(|&&(j, _)| p.is_int[j]).count() as f64;
         let density = c.len() as f64 / ncols;
-        let dens = (MAX_SPARSE_BONUS - MAX_SPARSE_BONUS / END_SPARSE_BONUS * density).max(0.0);
+        let dens = if no_dens { 0.0 } else { (MAX_SPARSE_BONUS - MAX_SPARSE_BONUS / END_SPARSE_BONUS * density).max(0.0) };
         score[i] = W_EFF * sq(eff, maxeff)
             + W_EXP * sq(eff * objpar[i], maxexp)
             + W_OBJPAR * (1.0 - objpar[i])
@@ -170,7 +172,7 @@ pub(super) fn select(cuts: &[(&[(usize, f64)], f64)], forced: &[&[(usize, f64)]]
         taken += cuts[bi].0.len() as f64 / ncols;
         idx.swap_remove(bk);
         penalise(cuts[bi].0, nrm[bi], &mut idx, &mut score);
-        if nz_budget - taken < 1.0 {
+        if !no_dens && nz_budget - taken < 1.0 {
             let room = nz_budget - taken;
             idx.retain(|&i| cuts[i].0.len() as f64 / ncols <= room);
         }
