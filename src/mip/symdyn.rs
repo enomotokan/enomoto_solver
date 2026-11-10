@@ -52,6 +52,15 @@ pub fn symdyn() -> bool {
     env_str!("ENOMOTO_MIP_SYMDYN").is_some_and(|v| v != "0") || symrefl()
 }
 
+/// `ENOMOTO_MIP_SYMDYN=o` (値に `o` を含む): 生成元ごとの比べに加えて、順の先頭 v_1..v_{i-1} を動かさない部分群 (Schreier の
+/// 生成元で求める、打ち切れば部分群) の軌道 O について `x_{v_i} ≥ x_u` (u ∈ O) を締める (`DynSym::orbital`)。部分群の元 γ は
+/// 先頭の位置を動かさないので、`x ≥_lex γ(x)` は位置 v_i の比べ `x_{v_i} ≥ x_{γ^{-1}(v_i)}` を含む。同じ辞書式で最大の代表の
+/// 規則の一部なので、生成元ごとの比べと混ぜてよい。推移的な群で v_1 を 0 に分けた子では軌道の全ての列が 0 になる
+/// (orbital fixing と同じ強さ。生成元ごとの比べだけでは生成元の数の列しか締まらない、cod105)
+pub fn symdyn_orbital() -> bool {
+    env_str!("ENOMOTO_MIP_SYMDYN").is_some_and(|v| v.contains('o'))
+}
+
 pub fn symrefl() -> bool {
     env_str!("ENOMOTO_MIP_SYMREFL").is_some_and(|v| v != "0")
 }
@@ -289,6 +298,14 @@ pub struct DynSym {
     nplain: usize,
     lsum: Vec<f64>,
     moving: Vec<Vec<u32>>,
+    /// [`symdyn_orbital`]: 置換の生成元と、順の先頭 (位置の並び) ごとの固定群の生成元・軌道の控え
+    orb: Option<OrbState>,
+}
+
+struct OrbState {
+    og: super::symmetry::OrbitalGens,
+    stab: RefCell<std::collections::HashMap<Vec<u32>, Rc<Vec<Rc<Vec<u32>>>>>>,
+    orbit: RefCell<std::collections::HashMap<(Vec<u32>, u32), Rc<Vec<usize>>>>,
 }
 
 /// 集計: [締めた境界, 締めたノード, 刈ったノード, 等号を除いた (1 だけ離した) 回数]
@@ -309,7 +326,13 @@ impl DynSym {
             }
         }
         let lsum = (0..p.n).map(|j| p.col_lo[j] + p.col_up[j]).collect();
-        Some(DynSym { gens, nplain, lsum, moving })
+        let plain_ok: Vec<Vec<usize>> = plain.iter().filter(|g| g.len() == p.n && g.iter().enumerate().any(|(j, &t)| j != t)).cloned().collect();
+        let orb = (symdyn_orbital() && !plain_ok.is_empty()).then(|| OrbState {
+            og: super::symmetry::OrbitalGens::new(plain_ok),
+            stab: RefCell::new(std::collections::HashMap::new()),
+            orbit: RefCell::new(std::collections::HashMap::new()),
+        });
+        Some(DynSym { gens, nplain, lsum, moving, orb })
     }
 
     pub fn counts(&self) -> (usize, usize) {
@@ -342,9 +365,20 @@ impl DynSym {
         if cand.is_empty() {
             return true;
         }
+        let orbits = self.orbits_for(order);
         let mut node_fixed = false;
         for _pass in 0..tunable!("ENOMOTO_T_MIP_SYMDYN_PASSES", 20usize, usize) {
             let mut changed = 0usize;
+            for (i, orb) in &orbits {
+                let v = order[*i];
+                for &u in orb.iter() {
+                    // x_v ≥ x_u
+                    if !Self::tighten(p, dom, v, false, dom.lo[u], &mut changed) || !Self::tighten(p, dom, u, true, dom.up[v], &mut changed) {
+                        stats[2] += 1;
+                        return false;
+                    }
+                }
+            }
             for &k in &cand {
                 match self.prop_one(p, dom, order, &self.gens[k as usize], stats) {
                     Some(c) => changed += c,
@@ -368,6 +402,54 @@ impl DynSym {
             }
         }
         true
+    }
+
+    /// [`symdyn_orbital`]: 順の位置 i ごとに、先頭 v_1..v_{i-1} を動かさない部分群での v_i の軌道 (v_i を除く列)。
+    fn orbits_for(&self, order: &[usize]) -> Vec<(usize, Rc<Vec<usize>>)> {
+        let Some(os) = &self.orb else { return Vec::new() };
+        let max_orbit = tunable!("ENOMOTO_T_MIP_SYMDYN_ORBIT", 4096usize, usize);
+        let max_gens = tunable!("ENOMOTO_T_MIP_SYMDYN_GENS", 64usize, usize).max(os.og.gens.len());
+        let memo_cap = tunable!("ENOMOTO_T_MIP_SYMDYN_MEMO", 20000usize, usize);
+        let mut stab = os.stab.borrow_mut();
+        let mut orbm = os.orbit.borrow_mut();
+        if stab.len() > memo_cap {
+            stab.clear();
+        }
+        if orbm.len() > memo_cap {
+            orbm.clear();
+        }
+        let mut h: Rc<Vec<Rc<Vec<u32>>>> = stab.entry(Vec::new()).or_insert_with(|| Rc::new(os.og.base_perms())).clone();
+        let mut key: Vec<u32> = Vec::new();
+        let mut out = Vec::new();
+        for (i, &v) in order.iter().enumerate() {
+            if h.is_empty() {
+                break;
+            }
+            let Some(q) = os.og.position(v) else { continue };
+            let ok = (key.clone(), q);
+            let orb = match orbm.get(&ok) {
+                Some(o) => o.clone(),
+                None => {
+                    let o: Vec<usize> = os.og.orbits_of(&h, |_| true).into_iter().find(|o| o.contains(&v)).map(|o| o.into_iter().filter(|&u| u != v).collect()).unwrap_or_default();
+                    let o = Rc::new(o);
+                    orbm.insert(ok, o.clone());
+                    o
+                }
+            };
+            if !orb.is_empty() {
+                out.push((i, orb));
+            }
+            key.push(q);
+            h = match stab.get(&key) {
+                Some(g) => g.clone(),
+                None => {
+                    let g = Rc::new(super::symmetry::OrbitalGens::schreier_stabilizer(&h, q, max_orbit, max_gens));
+                    stab.insert(key.clone(), g.clone());
+                    g
+                }
+            };
+        }
+        out
     }
 
     fn tighten(p: &MipProblem, dom: &mut Domain, j: usize, upper: bool, v: f64, changed: &mut usize) -> bool {
@@ -553,5 +635,29 @@ mod tests {
         let mut st = [0; 4];
         assert!(ds.propagate(&p, &mut dom, &[0], &mut st));
         assert_eq!(dom.up[1], 0.0);
+    }
+
+    /// `SYMDYN=o` の軌道の比べ: 巡回 (0 1 2 3) の生成元 1 個で、x_0 を先に分枝して 0 にすると軌道の全ての列が 0。
+    /// 生成元ごとの比べ (x_0 ≥ x_1) だけでは x_1 しか締まらない。
+    #[test]
+    fn symdyn_orbit_fixes_whole_orbit() {
+        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0)]];
+        let p = prob(4, rows, vec![f64::NEG_INFINITY], vec![4.0], vec![1.0; 4]);
+        let mut ds = DynSym::new(&p, &[vec![1, 2, 3, 0]], &[]).unwrap();
+        let mut dom = Domain::new(&p);
+        dom.tighten_upper(&p, 0, 0.0);
+        let mut st = [0; 4];
+        assert!(ds.propagate(&p, &mut dom, &[0], &mut st));
+        assert_eq!(dom.up[1], 0.0);
+        assert_eq!(dom.up[2], 1.0);
+        ds.orb = Some(OrbState {
+            og: crate::mip::symmetry::OrbitalGens::new(vec![vec![1, 2, 3, 0]]),
+            stab: RefCell::new(std::collections::HashMap::new()),
+            orbit: RefCell::new(std::collections::HashMap::new()),
+        });
+        let mut dom = Domain::new(&p);
+        dom.tighten_upper(&p, 0, 0.0);
+        assert!(ds.propagate(&p, &mut dom, &[0], &mut st));
+        assert!((1..4).all(|j| dom.up[j] == 0.0));
     }
 }
