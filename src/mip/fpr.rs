@@ -592,7 +592,9 @@ pub(crate) fn fpr_thread(p: &MipProblem, cap: f64, seed: u64, stop: &AtomicBool,
                     best = z;
                     mailbox.lock().unwrap().push((x, true));
                 }
-            } else if partial_sent < 4 {
+            } else if partial_sent < 4 && !fpr_on('p') {
+                // 論文に寄せた核 (`p`) では整数列の割り当てを渡さない (58 問の種 1 で、主が LP で仕上げられずに失敗し (roll3000・swath1・
+                // h80x6320d など 2〜4 回)、時間と衝突の学習で道筋を変えていた。analysis/fpr_20261110.md)
                 partial_sent += 1;
                 mailbox.lock().unwrap().push((x, false));
             }
