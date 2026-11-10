@@ -13,8 +13,9 @@ CFGS = {
     "def": {},
     "g4": {"ENOMOTO_MIP_GAP4": "procl"},
     "g4n": {"ENOMOTO_MIP_GAP4": "procln"},
+    "q": {"ENOMOTO_MIP_GAP4": "q"},
 }
-OUT = D / "res58.jsonl"
+OUT = D / os.environ.get("GAP4_BENCH_OUT", "res58.jsonl")
 
 def rss_mb(pid):
     try:

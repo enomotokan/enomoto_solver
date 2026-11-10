@@ -235,3 +235,28 @@ HiGHS は highspy 1.15.1 (threads=4・mip_rel_gap=0・output_flag 真)。機械�
   375 passed、0 failed、19 ignored。
 - 既定の動きは変えていない: 試作は全部 `ENOMOTO_MIP_GAP4` の文字で入る (`maybe_restart` の反復の数は捨てる前に読むよう並べ替えただけ、
   `Solver` の `Drop` は `ENOMOTO_MIP_GAP4_RSS` の数を減らすだけ)。
+
+## 6. 続き: 根の下界の差の元 (前処理、2026-11-10)
+
+前の「次の一手 1」。HiGHS の前処理の規則を 1 つずつ止めて (`presolve_rule_off`)、前処理の後の問題の LP 緩和の値を比べた
+(台本は `pre_ablate/`: `lpval.py`・`ablate.py`・`only.py`・`fixes.py`)。
+
+### 6.1 net12 (事実)
+
+- 単純な LP 緩和 17.25、ENOMOTO の根の LP 68.40、HiGHS の前処理の後の LP 128.31。HiGHS で **Enumeration だけを止めると 68.41** (ほかの規則は
+  どれを止めても 128.3 前後、Probing と Enumeration の両方を止めると 17.25)。差は全部 Enumeration (2 値だけで非零 8 個以下の行の 0-1 の割り当てを
+  列挙し、共通の境界・同値の組を取る) から来る。
+- これは analysis/highs_only_20261105/G3.md で既に分かっていて、試作 `ENOMOTO_MIP_HO3_ENUM=1` (同じ列挙を全部の候補の行に回す) で ENOMOTO の根も
+  129.9 にそろう。ただし 600 秒は時間切れ 214 / 143 (HiGHS は根 130.3 から 386 秒で最適) で、残りは木の側。
+
+### 6.2 neos-3216931-puriri (事実)
+
+- 単純な LP 緩和 58817、ENOMOTO の根の LP 58940、HiGHS の前処理の後 60272。HiGHS で **Probing だけを止めると 58817** に落ちる (Enumeration を止めても 60330)。
+- ENOMOTO の前処理の後の問題を書き出し (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED`、LP 58940) その上に HiGHS の前処理をかけると 60287 (HiGHS 単独とほぼ同じ)。
+  Probing だけを残すと 60257。そのとき HiGHS は 2 値列を **さらに 203 本固定** (199 本は 0 へ) し、その固定だけを ENOMOTO の前処理の後の問題に入れると
+  LP は 60021 (+1081、Probing 全体の伸びの 82%)。クリークの行の拡張 (lifted nonzeros) と同値の組の代入は LP をほとんど動かさない
+  (ENOMOTO も 2132 行を拡張済み。同値の組を全部使っても LP は同じ)。
+- ENOMOTO の probing は行の伝播だけで試す。見つけた含意 (`x_j = v ⇒ x_k = w`) を後の列の伝播に使う既存の試作 `ENOMOTO_MIP_PROBE_CLIQUE` は、既定の
+  `PROBE_EQUIV2` と同時だと働かない作りだった。両方を並べて効かせる試作 `ENOMOTO_MIP_GAP4=q` を入れた (`mod.rs` の `want_pclique`)。
+  - puriri: probing の固定 304 → 346、境界の締め 40 → 168、**根の LP 58940 → 60237** (HiGHS 60272)。根の LP の反復は 26518 → 47720 (9 → 17 秒)。
+  - ほかの 5 問 (net12・neos-873061・widden・satellites2・traininstance6) は根の LP が変わらない (60 秒の回、`q60*`)。
