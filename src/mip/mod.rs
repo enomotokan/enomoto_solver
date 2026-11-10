@@ -24,6 +24,7 @@ pub(crate) mod localmip;
 pub(crate) mod fpr;
 mod heuristics;
 mod subb;
+pub(crate) mod sympre;
 pub(crate) mod heur_subfix;
 pub(crate) mod heur_scip;
 pub(crate) mod heur_ipm;
@@ -2419,7 +2420,12 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     } else {
         None
     };
-    let (sym, sym_work) = symmetry::detect_skip_twins(normed.as_ref().unwrap_or(&prob), sym_time, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), sym_caps.0, sym_caps.1, &twins);
+    let (sym, sym_work) = sympre::detect(normed.as_ref().unwrap_or(&prob), sym_time, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize), sym_caps.0, sym_caps.1, &twins, verbose);
+    // 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_SYMGRAPH=ファイル`、analysis/sassy_20261110.md): 最初の検出に渡した問題と生成元を書き出す
+    if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_SYMGRAPH").filter(|_| !in_sub && !restart) {
+        let gens: &[Vec<usize>] = sym.as_ref().map(|s| &s.generators[..]).unwrap_or(&[]);
+        sympre::dump(normed.as_ref().unwrap_or(&prob), &twins, gens, t0.elapsed().as_secs_f64(), &f);
+    }
     drop(normed);
     // 双子の組の扱い: 探索で見つけた生成元が動かす組は入れ替えを生成元に足し (対称性で扱う)、ほかは併合する (併合できないもの
     // (下限が無限、整数列で境界が整数でない) も入れ替えを足す)。足す入れ替えは `ENOMOTO_T_MIP_SYM_TWIN_GENS` 個 (既定 500) と、

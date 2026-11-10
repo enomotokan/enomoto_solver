@@ -15,7 +15,7 @@
 
 use super::problem::MipProblem;
 
-fn mix(a: u64, b: u64) -> u64 {
+pub(crate) fn mix(a: u64, b: u64) -> u64 {
     // splitmix64 の混ぜ方
     let mut z = a ^ b.wrapping_add(0x9E37_79B9_7F4A_7C15).wrapping_add(a << 6).wrapping_add(a >> 2);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -101,7 +101,7 @@ fn refine_unit(p: &MipProblem) -> usize {
 /// 探索の色の細分化の回数の上限。既定 50。`ENOMOTO_MIP_HO6_SYMREFINE` (2026-11-06 から既定、`=0` で止める) なら
 /// `ENOMOTO_T_MIP_HO6_SYMREFINE_ITERS` (既定 100000、実質は不動点まで)。時刻で鎖のようにつながる模型 (unit commitment の
 /// uccase12 など) では、1 回の細分化で区別が鎖を 1 段しか伝わらないので、50 回では不動点 (等しい分割) に届かない
-fn refine_iters() -> usize {
+pub(super) fn refine_iters() -> usize {
     if env_def!("ENOMOTO_MIP_HO6_SYMREFINE", "1").is_some() {
         tunable!("ENOMOTO_T_MIP_HO6_SYMREFINE_ITERS", 100000usize, usize)
     } else {
@@ -128,7 +128,7 @@ fn refine(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize) {
 /// 塗り直す形 (作業リスト) で行う。全ての行・列を毎回塗り直す [`refine`] と同じく、行は列の色から、列は新しい行の色から作る。
 /// 色の種類の数 (列と行の色ごとの数を持って数える) が増えなくなるか、塗り直す要素がなくなれば止める。A と B の両方に同じ手順を
 /// 使うので、同型な組では対応する結果になる (見つけた置換は呼び出し側が [`verify`] で確かめる)
-fn refine_inc(p: &MipProblem, col: &mut [u64], row: &mut [u64], seeds: &[usize], max_iter: usize) {
+pub(super) fn refine_inc(p: &MipProblem, col: &mut [u64], row: &mut [u64], seeds: &[usize], max_iter: usize) {
     let tr = std::time::Instant::now();
     let mut cnt: std::collections::HashMap<u64, u32> = std::collections::HashMap::with_capacity(p.n + p.m);
     for &c in col.iter().chain(row.iter()) {
@@ -275,9 +275,14 @@ fn refine_body(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize
 }
 
 /// 行の中身 (境界と (列, 係数) の並び) のハッシュ。
-fn row_hash(lo: f64, up: f64, entries: &mut [(usize, f64)]) -> u64 {
+pub(crate) fn row_hash(lo: f64, up: f64, entries: &mut [(usize, f64)]) -> u64 {
     entries.sort_unstable_by_key(|&(j, _)| j);
     entries.iter().fold(mix(fbits(lo), fbits(up)), |h, &(j, a)| mix(mix(h, j as u64), fbits(a)))
+}
+
+/// [`verify`] を外から呼ぶ形 (`ENOMOTO_MIP_SYMPRE`、[`super::sympre`])。
+pub(crate) fn verify_perm(p: &MipProblem, perm: &[usize], row_counts: &std::collections::HashMap<u64, i64>) -> bool {
+    verify(p, perm, row_counts)
 }
 
 /// 置換 `perm` が問題の対称性か確かめる。
@@ -397,7 +402,7 @@ pub fn detection_copy(p: &MipProblem, scale: bool, sign: bool) -> (MipProblem, [
     (q, [flipped, scaled, nt])
 }
 
-fn find(uf: &mut [usize], mut x: usize) -> usize {
+pub(super) fn find(uf: &mut [usize], mut x: usize) -> usize {
     while uf[x] != x {
         uf[x] = uf[uf[x]];
         x = uf[x];
@@ -500,7 +505,7 @@ fn ho6_symwork() -> bool {
 }
 
 /// 手間の上限 (`WORK` の終わり, `LWORK` の終わり) を越えたか。
-fn over(end: (u64, u64)) -> bool {
+pub(super) fn over(end: (u64, u64)) -> bool {
     work() > end.0 || log_work() > end.1
 }
 
@@ -581,6 +586,10 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64,
     let ext_rate = tunable!("ENOMOTO_T_MIP_SYM_EXT_RATE", 0.5, f64);
     let ext_min = tunable!("ENOMOTO_T_MIP_SYM_EXT_MIN_GENS", 100usize, usize);
     let mut time_cap = time_cap;
+    // `ENOMOTO_MIP_SYMPRE` の (3) (試作): 深い探索の前に、全ての色の組で浅い探り (個別化 1 回と細分化) の疎な置換を集める
+    if super::sympre::probe_on() {
+        super::sympre::probe(p, &col, &row, &cells, &mut uf, &mut generators, &row_counts, (t0, time_cap, work_end));
+    }
     'cells: for cell in &cells {
         let a = cell[0];
         for &b in &cell[1..] {
@@ -643,7 +652,7 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64,
 /// 問題 (neos-3381206-awhea: 同じ箱が 475 個) で、箱 a と b の入れ替えは最初の細分化の直後にこれで得られる
 /// (A 側の残りの箱の色は {b, 他}、B 側は {a, 他} なので、他は動かさず b -> a)。個別化を全ての色が
 /// 1 列になるまで続けると 1 回の試行に数百回の細分化が要り、時間の上限 (0.3 秒) までに生成元が 1 つしか見つからなかった
-fn shortcut_perm(n: usize, ma: &std::collections::HashMap<u64, Vec<usize>>, mb: &std::collections::HashMap<u64, Vec<usize>>) -> Option<Vec<usize>> {
+pub(super) fn shortcut_perm(n: usize, ma: &std::collections::HashMap<u64, Vec<usize>>, mb: &std::collections::HashMap<u64, Vec<usize>>) -> Option<Vec<usize>> {
     let mut perm = vec![usize::MAX; n];
     for (c, va) in ma {
         let vb = mb.get(c)?;
