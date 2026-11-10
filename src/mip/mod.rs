@@ -16,6 +16,7 @@ pub(crate) mod conflict_pool;
 pub(crate) mod queue;
 pub(crate) mod replay;
 pub(crate) mod pseudocost;
+pub(crate) mod brcut;
 pub(crate) mod solver;
 pub(crate) mod fj;
 pub(crate) mod localmip;

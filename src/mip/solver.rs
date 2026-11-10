@@ -3660,6 +3660,7 @@ pub(crate) static MIP_THREADS_DEFAULT: std::sync::atomic::AtomicUsize = std::syn
 pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     if !params.submip {
         let _ = super::heuristics::frag_t0();
+        super::brcut::reset(p.n);
     }
     // ヒューリスティクスのサブ MIP は小さいことが多いので、基底のない求解も二段解法だけで解く (同時実行しない)
     let prev_race = params.submip.then(|| crate::simplex::mip_lp::set_cold_race_threads(1));
@@ -4317,7 +4318,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dom,
         lp,
         queue: NodeQueue::new(),
-        pc: snap.as_ref().map_or_else(|| Pseudocost::new(p.n), |sn| sn.pc.clone()),
+        pc: {
+            let mut pc = snap.as_ref().map_or_else(|| Pseudocost::new(p.n), |sn| sn.pc.clone());
+            pc.brcut = super::brcut::on() && !params.submip;
+            pc
+        },
         incumbent: None,
         obj_step,
         start,

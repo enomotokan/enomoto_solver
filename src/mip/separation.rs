@@ -5912,6 +5912,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let (mut t_btran, mut t_agg, mut t_gen) = (0.0f64, 0.0f64, 0.0f64);
         let (mut n_rows_used, mut w_nnz_total, mut base_nnz_total, mut n_fill_skip) = (0usize, 0usize, 0usize, 0usize);
         let cands_before_tab = cands.len();
+        // 試作 `ENOMOTO_MIP_BRCUT`: 行 (元の基底の列) ごとの候補のカットの効き目の最大 ([`super::brcut::record`])
+        let brcut_on = super::brcut::on() && !self.params.submip;
+        let mut brcut_round: Vec<(usize, f64)> = Vec::new();
         let mut best_score = -1.0f64;
         // 根の分離 (木を分け合う前、サブ MIP でない) で既定の行の選び方なら、tableau 行のカットの生成と仕上げ (分離の時間の
         // 大半: 30n20b8・blp-ar98・graph20-20-1rand で 8 割) を複数のスレッドで行う (`ENOMOTO_MIP_SEP_SEQ` で逐次)。
@@ -5934,6 +5937,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut rs_bases: Vec<Vec<(usize, f64)>> = Vec::new();
         if par {
             let mut bases: Vec<Vec<(usize, f64)>> = Vec::new();
+            let mut brcut_src: Vec<usize> = Vec::new();
             for &(s, _) in basics.iter() {
                 if self.time_up() || n_rows_used >= limit {
                     break;
@@ -6002,6 +6006,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 n_rows_used += 1;
                 base_nnz_total += base.len();
                 bases.push(base);
+                if brcut_on {
+                    brcut_src.push(self.lp.basic_var(s));
+                }
             }
             sepprof::lap(sepprof::T_TABAGG, &mut lap);
             let t0 = std::time::Instant::now();
@@ -6058,6 +6065,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.sep_par_cpu += cpu;
                 for (k, cs) in part {
                     by_row[k] = cs;
+                }
+            }
+            if brcut_on {
+                for (k, cs) in by_row.iter().enumerate() {
+                    brcut_round.push((brcut_src[k], cs.iter().fold(0.0f64, |m, c| m.max(c.efficacy))));
                 }
             }
             for cs in by_row {
@@ -6218,6 +6230,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         keep_best(&mut cands, n0, self.p);
                     }
+                    if brcut_on {
+                        brcut_round.push((self.lp.basic_var(s), cands[n_before..].iter().fold(0.0f64, |m, c| m.max(c.efficacy))));
+                    }
                     if let Some(left) = tab_cbc_left.as_mut() {
                         *left -= cands[n_before..].iter().map(|c| (c.coefs.len() as i64).min(tab_cut_cap)).sum::<i64>();
                     }
@@ -6370,6 +6385,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 mr,
                 lp_rows.iter().map(|r| r.len()).sum::<usize>()
             );
+        }
+        if brcut_on {
+            super::brcut::record(&brcut_round);
         }
         super::hnfcut::set_kind('a');
         // 並列の経路では tableau 行の生成は 1 回にまとまる (逐次の経路では行ごとに足し済みで、ここは端数)

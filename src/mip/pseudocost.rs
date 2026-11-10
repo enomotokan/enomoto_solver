@@ -40,6 +40,9 @@ pub struct Pseudocost {
     /// 試作 `ENOMOTO_MIP_S4_DEGSCORE` (既定では使わない): 今のノードの LP の退化の度合い (HiGHS の `computeLPDegneracy` に倣う。1 = 退化なし)。
     /// [`Self::hybrid`] の擬似費用の項をこれで割る (退化したノードでは推論・打ち切りの点数で選ぶ)
     pub degen_fac: f64,
+    /// 試作 `ENOMOTO_MIP_BRCUT` (既定では使わない): [`Self::hybrid`] に tableau 行のカットの効き目の履歴 ([`super::brcut::term`]) を足すか
+    /// (外側の求解でだけ立てる。サブ MIP は列の番号が違う)
+    pub brcut: bool,
 }
 
 impl Pseudocost {
@@ -66,6 +69,7 @@ impl Pseudocost {
             conflict_inc: 1.0,
             conflict_total: 0.0,
             degen_fac: 1.0,
+            brcut: false,
         }
     }
 
@@ -333,7 +337,8 @@ impl Pseudocost {
         let g1 = gap1();
         let dynw = if g1.contains('w') { 1.0 } else { dynw };
         let ps_s = if g1.contains('s') { 1.0 - 1.0 / (1.0 + ps / ps_avg.max(1e-6)) } else { s(ps, ps_avg) };
-        dynw * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01) + conf_term) + ps_s / (dynw * self.degen_fac.max(1.0))
+        let bc = if self.brcut { super::brcut::term(j) } else { 0.0 };
+        dynw * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01) + conf_term + bc) + ps_s / (dynw * self.degen_fac.max(1.0))
     }
 
     /// pseudocost による [`Self::hybrid`] スコア (小数部 `frac`)。
