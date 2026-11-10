@@ -1122,6 +1122,14 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         let g = symdyn::detect_reflections(p, tunable!("ENOMOTO_T_MIP_SYMREFL_PRE_TIME", 5.0, f64), false);
         let cols: std::collections::BTreeSet<u32> = g.iter().flat_map(|s| s.moves.iter().filter(|m| m.2).map(|m| m.0)).collect();
         eprintln!("MIP: SYMREFL_PRE before presolve: {} reflection generators, {} reflected columns of {} ({:.2}s)", g.len(), cols.len(), p.n, t.elapsed().as_secs_f64());
+        if env_str!("ENOMOTO_MIP_SYMREFL_PRE_DIAG").is_some_and(|v| v.contains('v')) {
+            for (k, s) in g.iter().enumerate().take(4) {
+                for &(v, b, r) in s.moves.iter().take(24) {
+                    let (v, b) = (v as usize, b as usize);
+                    eprintln!("MIP: SYMREFL_PRE gen {k}: col {v} -> {b}{} [{}, {}] int {} cost {} nnz {}", if r { " (reflected)" } else { "" }, p.col_lo[v], p.col_up[v], p.is_int[v], p.cost[v], p.cols[v].len());
+                }
+            }
+        }
     }
     let presolved = if use_presolve { presolve_mip(p, params.verbose, pre_submip, lp_probe_secs) } else { None };
     pretime::mark("presolve_mip");
