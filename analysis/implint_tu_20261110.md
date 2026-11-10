@@ -4,7 +4,7 @@ bench に使う環境変数: `ENOMOTO_MIP_IMPLINT_TU2` (試作、既定では使
 `ENOMOTO_MIP_IMPLINT_TU` (既存の試作)、`ENOMOTO_MIP_OBJ_STEP_IMPLINT` (既存の試作、目的値の刻みに暗黙の整数を使う)、
 診断 `ENOMOTO_MIP_DEBUG_IMPLINTCOUNT=stop` (前処理の後の問題で判定ごとの数を出して終える)。
 計測の設定の名前 (`implint_tu_20261110/run.py` の `CFGS`): `def` (なし)、`tu` (`IMPLINT_TU=1`)、`tu2` (`TU2=1`)、`tu2a` (`TU2=ba`)、
-`tu2as` (`TU2=bas`)、`tu2ns` (`TU2=bns`)。
+`tu2as` (`TU2=bas`)、`tu2av` (`TU2=bav`)、`tu2ae` (`TU2=bae`)、診断 `tu2aF` (`TU2=baF`、誤答になりうる)。
 
 
 ## 結論
