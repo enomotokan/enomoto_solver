@@ -44,7 +44,9 @@ class P:
 
 def gen(seed):
     g = random.Random(seed)
-    kind = g.choice(["graph", "assign", "knap", "maxcut", "bisect", "intrefl", "circcut", "cutcover"])
+    import os
+    kinds = os.environ.get("FUZZ_KINDS", "graph,assign,knap,maxcut,bisect,intrefl,circcut,cutcover").split(",")
+    kind = g.choice(kinds)
     p = P()
     if kind == "graph":
         if g.random() < 0.6:
@@ -119,6 +121,26 @@ def gen(seed):
                 inc = [len(xs) + k for k, ed in enumerate(e) if v in ed]
                 if inc:
                     p.row([(j, 1.0) for j in inc], 1.0, inf)
+    elif kind in ("binpack", "gbinpack"):
+        # 同じ箱への詰め込み (箱の数の最小化)。gbinpack は品の個数が一般整数 (x_{i,m} ∈ [0, k_i])
+        ni = g.randint(5, 8) + 2 * (SCALE - 1); nm = g.randint(3, 5) + (SCALE - 1)
+        w = [g.randint(2, 9) for _ in range(ni)]; cap = g.randint(10, 20)
+        gen_int = kind == "gbinpack"
+        k = [g.randint(1, 3) if gen_int else 1 for _ in range(ni)]
+        y = [p.var(0, 1, 1.0) for _ in range(nm)]
+        x = {(i, m): p.var(0, k[i], g.choice([0.0, 0.0, 0.01])) for i in range(ni) for m in range(nm)}
+        # 費用は同じ品で箱によらず同じ (対称)
+        for i in range(ni):
+            cc = p.c[x[i, 0]]
+            for m in range(nm):
+                p.c[x[i, m]] = cc
+        for i in range(ni):
+            p.row([(x[i, m], 1.0) for m in range(nm)], float(k[i]), float(k[i]))
+        for m in range(nm):
+            p.row([(x[i, m], float(w[i])) for i in range(ni)] + [(y[m], -float(cap))], -inf, 0.0)
+            if g.random() < 0.5:
+                for i in range(ni):
+                    p.row([(x[i, m], 1.0), (y[m], -float(k[i]))], -inf, 0.0)
     else:  # intrefl
         n = g.randint(4, 9) * SCALE; U = g.randint(2, 5)
         xs = [p.var(0, U, 0.0) for _ in range(n)]
