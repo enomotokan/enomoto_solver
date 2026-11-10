@@ -41,6 +41,126 @@ pub struct Tu2Stats {
     pub worst_bad: (usize, usize, usize, usize),
     /// 最後に暗黙の整数とした列の数 (base に加えた分)。
     pub marked: usize,
+    /// 行の確かめで候補を外した行の数を、理由ごとに (候補でない連続列・候補の係数が ±1 にならない・整数列の係数が整数でない・
+    /// 左辺か右辺が整数でない・固定された連続列の寄与・係数が大きすぎる)。行ごとに最初に見つけた理由だけ数える。
+    pub why: [usize; 6],
+    /// 端数の境界が冗長と分かって候補に入れた列の数。
+    pub red: usize,
+}
+
+/// 値の文字で部品を選ぶ (`1` は `b` と同じ): `b` 行から導ける端数の境界を無視する ([`redundant_frac_bounds`])、
+/// `v` 変数上下限の行に出る列はカットの整数の印から外す ([`cut_mask`])、`a` TU2 で足した列を SCIP と同じく、集約・変数上下限の
+/// 置き換え・flow cover では連続、c-MIR で単純な境界で置き換えるときだけ整数として扱う (`CutVars::imp`、solver.rs の `cut_imp`)、`s` 目的値の刻みにも使う (solver.rs、`ENOMOTO_MIP_OBJ_STEP_IMPLINT`
+/// を付けなくても TU2 の印で刻みを取り、刈り込みは格子の点で取る)、`n` カットの印には使わない (刻みだけ)。
+pub fn tu2_flag(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_IMPLINT_TU2").is_some_and(|v| v.contains(c) || (v == "1" && "b".contains(c)))
+}
+
+/// 連続列 (base でなく、固定されていない) の端数の有限の境界が、行と他の列の (使ってよい) 境界から導けるかを調べ、両側とも
+/// (端数の側が全部) 導ける列に印を付ける。導けた境界は、その境界がなくても実行可能集合は変わらないので、TU の判定では無限と
+/// みなしてよい。循環を避けるため、まだ導けていない端数の境界は使わず (無限とみなす)、前の回までに導けた境界だけを次の回で
+/// 使う (導けた順に並べると、どの境界もそれより前の境界と行だけから導ける)。前処理が締めた在庫の上限 (tr12-30) がこれに当たる。
+pub fn redundant_frac_bounds(p: &MipProblem, base: &[bool]) -> Vec<bool> {
+    let n = p.n;
+    let frac = |v: f64| v.is_finite() && !integral(v);
+    let f: Vec<bool> = (0..n).map(|j| !base[j] && p.col_lo[j] < p.col_up[j] && (frac(p.col_lo[j]) || frac(p.col_up[j]))).collect();
+    if !f.iter().any(|&b| b) {
+        return vec![false; n];
+    }
+    let mut lo_use = p.col_lo.clone();
+    let mut up_use = p.col_up.clone();
+    let mut lo_pend = vec![false; n];
+    let mut up_pend = vec![false; n];
+    for j in 0..n {
+        if f[j] {
+            if frac(p.col_lo[j]) {
+                lo_use[j] = f64::NEG_INFINITY;
+                lo_pend[j] = true;
+            }
+            if frac(p.col_up[j]) {
+                up_use[j] = f64::INFINITY;
+                up_pend[j] = true;
+            }
+        }
+    }
+    // 行の活動の下限・上限 (有限の部分と無限の項の数)
+    let act = |lo_use: &[f64], up_use: &[f64]| -> Vec<(f64, usize, f64, usize)> {
+        p.rows
+            .iter()
+            .map(|r| {
+                let (mut mn, mut nmn, mut mx, mut nmx) = (0.0, 0usize, 0.0, 0usize);
+                for &(k, a) in r {
+                    let (l, u) = if a > 0.0 { (lo_use[k], up_use[k]) } else { (up_use[k], lo_use[k]) };
+                    if l.is_finite() { mn += a * l } else { nmn += 1 }
+                    if u.is_finite() { mx += a * u } else { nmx += 1 }
+                }
+                (mn, nmn, mx, nmx)
+            })
+            .collect()
+    };
+    for _round in 0..60 {
+        if !(0..n).any(|j| lo_pend[j] || up_pend[j]) {
+            break;
+        }
+        let ac = act(&lo_use, &up_use);
+        // 導いた境界 (列, 上限か, 値)。この回の終わりに使える境界に入れる (Jacobi の形)
+        let mut done: Vec<(usize, bool, f64)> = Vec::new();
+        let mut any = false;
+        for j in 0..n {
+            // 連続列 (base でない) だけ境界を導く。導いた境界は (冗長なので) 次の回から使ってよい
+            if base[j] || p.col_lo[j] >= p.col_up[j] {
+                continue;
+            }
+            let (mut best_u, mut best_l) = (up_use[j], lo_use[j]);
+            for &(i, a) in &p.cols[j] {
+                let (mn, nmn, mx, nmx) = ac[i];
+                // 自分の寄与を除いた他の列の活動の下限・上限
+                let (l, u) = if a > 0.0 { (lo_use[j], up_use[j]) } else { (up_use[j], lo_use[j]) };
+                let omin = if l.is_finite() { if nmn == 0 { Some(mn - a * l) } else { None } } else if nmn == 1 { Some(mn) } else { None };
+                let omax = if u.is_finite() { if nmx == 0 { Some(mx - a * u) } else { None } } else if nmx == 1 { Some(mx) } else { None };
+                // a x_j ∈ [row_lo - omax, row_up - omin]
+                let (rl, ru) = (p.row_lo[i], p.row_up[i]);
+                let ax_up = omin.filter(|_| ru.is_finite()).map(|v| ru - v);
+                let ax_lo = omax.filter(|_| rl.is_finite()).map(|v| rl - v);
+                let (xu, xl) = if a > 0.0 { (ax_up.map(|v| v / a), ax_lo.map(|v| v / a)) } else { (ax_lo.map(|v| v / a), ax_up.map(|v| v / a)) };
+                if let Some(v) = xu {
+                    best_u = best_u.min(v);
+                }
+                if let Some(v) = xl {
+                    best_l = best_l.max(v);
+                }
+            }
+            let tol = |v: f64| 1e-9 * v.abs().max(1.0);
+            if up_pend[j] && best_u <= p.col_up[j] + tol(p.col_up[j]) {
+                up_pend[j] = false;
+                any = true;
+            }
+            if lo_pend[j] && best_l >= p.col_lo[j] - tol(p.col_lo[j]) {
+                lo_pend[j] = false;
+                any = true;
+            }
+            // 使える境界を締める (列の境界より緩い値は使わない。少しの締めは数えない)
+            let cu = best_u.max(p.col_lo[j]);
+            if cu < up_use[j] - 1e-6 * cu.abs().max(1.0) {
+                done.push((j, true, cu));
+            }
+            let cl = best_l.min(p.col_up[j]);
+            if cl > lo_use[j] + 1e-6 * cl.abs().max(1.0) {
+                done.push((j, false, cl));
+            }
+        }
+        if done.is_empty() && !any {
+            break;
+        }
+        for (j, up, v) in done {
+            if up {
+                up_use[j] = v;
+            } else {
+                lo_use[j] = v;
+            }
+        }
+    }
+    (0..n).map(|j| f[j] && !lo_pend[j] && !up_pend[j]).collect()
 }
 
 /// 整数かを、数値の大きさに応じた許容誤差で確かめる (大きすぎる値は整数とみなさない)。
@@ -53,47 +173,65 @@ const NUM_LIMIT: f64 = 1e8;
 
 /// `base` (整数列と暗黙の整数列の印) に、TU の部分による暗黙の整数列を加えた印を返す (モジュールの説明を見よ)。
 pub fn implied_integers_tu2(p: &MipProblem, base: &[bool]) -> (Vec<bool>, Tu2Stats) {
+    implied_integers_tu2_opt(p, base, tu2_flag('b'))
+}
+
+/// [`implied_integers_tu2`] の本体。`use_red` なら行から導ける端数の境界を無視する。
+pub fn implied_integers_tu2_opt(p: &MipProblem, base: &[bool], use_red: bool) -> (Vec<bool>, Tu2Stats) {
     let n = p.n;
     let m = p.m;
     let mut st = Tu2Stats::default();
+    // 端数の境界が行から導ける (冗長な) 列は、その境界を無いものとして候補にする ([`redundant_frac_bounds`])
+    let red = if use_red { redundant_frac_bounds(p, base) } else { vec![false; n] };
     let mut cand: Vec<bool> = (0..n)
         .map(|j| {
             !base[j]
                 && p.col_lo[j] < p.col_up[j]
                 && !p.cols[j].is_empty()
-                && [p.col_lo[j], p.col_up[j]].iter().all(|&v| !v.is_finite() || integral(v))
+                && (red[j] || [p.col_lo[j], p.col_up[j]].iter().all(|&v| !v.is_finite() || integral(v)))
         })
         .collect();
+    st.red = red.iter().zip(&cand).filter(|(r, c)| **r && **c).count();
     st.cand0 = cand.iter().filter(|&&c| c).count();
     if st.cand0 == 0 {
         return (base.to_vec(), st);
     }
     let fixed_cont = |j: usize| !base[j] && p.col_lo[j] == p.col_up[j];
     // 2. 行の確かめ (候補を外すと、その列の行を確かめ直す)
-    let row_ok = |i: usize, cand: &[bool]| -> bool {
+    // 行が良いか (悪ければ理由の番号、[`Tu2Stats::why`])
+    let row_bad = |i: usize, cand: &[bool]| -> Option<usize> {
         let r = &p.rows[i];
-        let Some(&(_, a0)) = r.iter().find(|&&(j, _)| cand[j]) else { return true };
+        let &(_, a0) = r.iter().find(|&&(j, _)| cand[j])?;
         let s = 1.0 / a0.abs();
-        r.iter().all(|&(j, a)| {
+        for &(j, a) in r {
             let v = a * s;
             if v.abs() > NUM_LIMIT {
-                false
+                return Some(5);
             } else if cand[j] {
-                (v.abs() - 1.0).abs() <= 1e-9
+                if (v.abs() - 1.0).abs() > 1e-9 {
+                    return Some(1);
+                }
             } else if base[j] {
-                integral(v)
-            } else {
-                fixed_cont(j) && integral(p.col_lo[j] * v)
+                if !integral(v) {
+                    return Some(2);
+                }
+            } else if !fixed_cont(j) {
+                return Some(0);
+            } else if !integral(p.col_lo[j] * v) {
+                return Some(4);
             }
-        }) && [p.row_lo[i], p.row_up[i]].iter().all(|&v| !v.is_finite() || integral(v * s))
+        }
+        if [p.row_lo[i], p.row_up[i]].iter().any(|&v| v.is_finite() && !integral(v * s)) {
+            return Some(3);
+        }
+        None
     };
     let mut queued = vec![true; m];
     let mut q: std::collections::VecDeque<usize> = (0..m).collect();
     while let Some(i) = q.pop_front() {
         queued[i] = false;
-        if row_ok(i, &cand) {
-            continue;
-        }
+        let Some(why) = row_bad(i, &cand) else { continue };
+        st.why[why] += 1;
         for &(j, _) in &p.rows[i] {
             if cand[j] {
                 cand[j] = false;
@@ -294,12 +432,28 @@ pub fn tu2_on() -> bool {
 pub fn cut_mask(p: &MipProblem, verbose: bool) -> Vec<bool> {
     let t0 = std::time::Instant::now();
     let b = p.implied_integers();
-    let (t, st) = implied_integers_tu2(p, &b);
+    if tu2_flag('n') {
+        return b;
+    }
+    let (mut t, st) = implied_integers_tu2(p, &b);
+    // `v`: 変数上下限の行 (この列と整数列の 2 つだけの行、x <= u y の形) に出る列は、カットでは連続のままにする。整数として扱うと
+    // c-MIR の変数上限の置き換えと flow cover の対象から外れ、固定費用の流れの問題 (exp-1-500-5-5・h80x6320d) で根の下界が大きく
+    // 下がった。SCIP (cuts.c、2025 年の master) も連続の暗黙の整数には変数上下限の置き換えを許し、集約では連続として消す
+    let mut nvb = 0;
+    if tu2_flag('v') {
+        for j in 0..p.n {
+            if t[j] && !b[j] && p.cols[j].iter().any(|&(i, _)| p.rows[i].len() == 2 && p.rows[i].iter().any(|&(k, _)| k != j && p.is_int[k])) {
+                t[j] = false;
+                nvb += 1;
+            }
+        }
+    }
     if verbose {
         eprintln!(
-            "MIP: implied integers: {} by the row rules, +{} with the TU2 rule ({:?}, {:.3}s)",
+            "MIP: implied integers: {} by the row rules, +{} with the TU2 rule (-{} with variable bounds kept continuous) ({:?}, {:.3}s)",
             b.iter().zip(&p.is_int).filter(|(a, i)| **a && !**i).count(),
             st.marked,
+            nvb,
             st,
             t0.elapsed().as_secs_f64()
         );
@@ -315,18 +469,21 @@ pub fn debug_count(p: &MipProblem, stop: bool) {
     let nb = b.iter().zip(&p.is_int).filter(|(a, i)| **a && !**i).count();
     let t1 = p.implied_integers_tu(&b);
     let nt1 = t1.iter().zip(&b).filter(|(a, i)| **a && !**i).count();
-    let (t2, st) = implied_integers_tu2(p, &b);
+    let (t2n, _) = implied_integers_tu2_opt(p, &b, false);
+    let (t2, st) = implied_integers_tu2_opt(p, &b, true);
+    let nt2n = t2n.iter().zip(&b).filter(|(a, i)| **a && !**i).count();
     // TU2 が既存の TU の印を全部含むか (含まない列の数)
     let miss = t1.iter().zip(&t2).filter(|(a, c)| **a && !**c).count();
     let costed = (0..p.n).filter(|&j| p.cost[j] != 0.0 && !p.is_int[j]).count();
     let costed_t2 = (0..p.n).filter(|&j| p.cost[j] != 0.0 && !p.is_int[j] && !t2[j]).count();
     eprintln!(
-        "IMPLINTCOUNT n {} m {} cont {} rowrule {} tu {} tu2 {} tu_not_in_tu2 {} costed_cont {} costed_cont_left_tu2 {} step0 {:?} step_tu2 {:?} stats {:?} ({:.3}s)",
+        "IMPLINTCOUNT n {} m {} cont {} rowrule {} tu {} tu2nob {} tu2 {} tu_not_in_tu2 {} costed_cont {} costed_cont_left_tu2 {} step0 {:?} step_tu2 {:?} stats {:?} ({:.3}s)",
         p.n,
         p.m,
         ncont,
         nb,
         nt1,
+        nt2n,
         st.marked,
         miss,
         costed,
@@ -438,6 +595,34 @@ mod tests {
         // この小さな例は、どの行も連続列が 2 つなので転置の 2 色塗り (x^0_1・x^1_2 と x^0_2・x^1_1 の組) で TU と分かる
         assert_eq!(t, vec![true; 6], "{st:?}");
         assert_eq!(st.core_row, 1);
+    }
+
+    #[test]
+    fn tu2_redundant_fractional_bound() {
+        // 在庫の流れ: x0 - s0 = 0、s0 + x1 - s1 = 0 (保存)、x_t - 10 y_t <= 0 (容量、y は 2 値)。s0 <= 10.5 は x0 <= 10 y0 <= 10
+        // から導ける (2 段)。境界を無視すれば TU。s1 <= 7.5 は導けない (x1 + s0 は 20 まで) ので成分ごと外れる
+        let rows = vec![vec![(0, 1.0), (2, -1.0)], vec![(2, 1.0), (1, 1.0), (3, -1.0)], vec![(0, 1.0), (4, -10.0)], vec![(1, 1.0), (5, -10.0)]];
+        let mk = |s1up: f64| {
+            MipProblem::from_rows(
+                vec![0.0; 6],
+                vec![INF, INF, 10.5, s1up, 1.0, 1.0],
+                vec![0.0; 6],
+                0.0,
+                1.0,
+                vec![false, false, false, false, true, true],
+                rows.clone(),
+                vec![0.0, 0.0, -INF, -INF],
+                vec![0.0, 0.0, 0.0, 0.0],
+            )
+        };
+        let p = mk(INF);
+        let b = p.implied_integers();
+        assert_eq!(redundant_frac_bounds(&p, &b), vec![false, false, true, false, false, false]);
+        assert_eq!(implied_integers_tu2_opt(&p, &b, false).0[..4], [false; 4]);
+        assert_eq!(implied_integers_tu2_opt(&p, &b, true).0[..4], [true; 4]);
+        let p = mk(7.5);
+        let b = p.implied_integers();
+        assert_eq!(implied_integers_tu2_opt(&p, &b, true).0[..4], [false; 4]);
     }
 
     /// 0/±1 の小さな行列が TU かを全部の正方の部分行列の行列式で確かめる。

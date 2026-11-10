@@ -932,7 +932,7 @@ mod tests {
                 eint.push(integral);
                 ex.push(rows[i].iter().map(|&(j, c)| c * x[j]).sum());
             }
-            let vars = CutVars { lo: &elo, up: &eup, is_int: &eint, x: &ex, vb: Some(&vb) };
+            let vars = CutVars { lo: &elo, up: &eup, is_int: &eint, x: &ex, vb: Some(&vb), imp: None };
             let (groups, _st) = modkvb_cuts(&vars, &rows, n, rows.len(), 3, true, far);
             for cut in groups.into_iter().flatten() {
                 ncuts += 1;

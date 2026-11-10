@@ -23,7 +23,7 @@ for p in probs:
         line = [l for l in r.stderr.splitlines() if l.startswith("IMPLINTCOUNT")]
         rec = {"problem": p, "line": line[-1] if line else None, "wall": round(time.time() - t0, 1)}
         if line:
-            for k in ["n", "m", "cont", "rowrule", "tu", "tu2", "tu_not_in_tu2", "costed_cont", "costed_cont_left_tu2"]:
+            for k in ["n", "m", "cont", "rowrule", "tu", "tu2nob", "tu2", "tu_not_in_tu2", "costed_cont", "costed_cont_left_tu2"]:
                 mm = re.search(rf"\b{k} (\d+)", line[-1])
                 rec[k] = int(mm.group(1)) if mm else None
         else:

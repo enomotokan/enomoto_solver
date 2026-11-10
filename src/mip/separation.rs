@@ -5180,7 +5180,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.vbounds = Some(std::rc::Rc::new(vbs));
         }
         let vb = self.vbounds.clone();
-        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xv, vb: if env_str!("ENOMOTO_MIP_NO_VB").is_some() { None } else { vb.as_deref() } };
+        // 試作 `ENOMOTO_MIP_IMPLINT_TU2` の `a` ([`Solver::cut_imp`]): TU2 で足した暗に整数の列は連続の印に戻し、`imp` で渡す
+        if !self.cut_imp.is_empty() {
+            for j in 0..n {
+                if self.cut_imp[j] {
+                    is_int[j] = false;
+                }
+            }
+        }
+        let cut_imp = self.cut_imp.clone();
+        let imp = if cut_imp.is_empty() { None } else { Some(&cut_imp[..]) };
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xv, vb: if env_str!("ENOMOTO_MIP_NO_VB").is_some() { None } else { vb.as_deref() }, imp };
         // 試作 `ENOMOTO_MIP_HNFCUT` の `l`: 論理変数 (LP の行の活動量) の合同式を表に足す ([`super::hnfcut::extend_logicals`])
         if super::hnfcut::on() {
             super::hnfcut::extend_logicals(lp_rows, &is_int, &lo, &up, n);
@@ -5196,7 +5206,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     for row in lp_rows {
                         xvh.push(row.iter().map(|&(j, a)| a * xh[j]).sum());
                     }
-                    let vars_h = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xvh, vb: vb.as_deref() };
+                    let vars_h = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xvh, vb: vb.as_deref(), imp: None };
                     let mut ch: Vec<Candidate> = Vec::new();
                     let mut scratch_h = vec![0.0f64; n];
                     let mut push_h = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
@@ -7465,7 +7475,7 @@ mod mushagg_tests {
             let _ = m;
             let mut vb = VarBounds::from_rows(n, &is_int, &rows, &rlo, &rup);
             vb.add_int_vbs(&is_int, &lo, &up, &rows, &rlo, &rup, &[]);
-            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb) };
+            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb), imp: None };
             let (groups, _, _, _) = mush_agg_cuts(&vars, &p, &x, 3);
             let mut all: Vec<RawCut> = groups.into_iter().flatten().collect();
             let n_agg = all.len();
@@ -7505,7 +7515,7 @@ mod mushagg_tests {
         let mut vb = VarBounds::default();
         vb.add_int_vbs(&is_int, &lo, &up, &rows, &rlo, &rup, &[]);
         let x = vec![0.0, 0.0, 0.0, 0.0];
-        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb) };
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb), imp: None };
         let c = super::super::cuts::vb_cover_cut(&vars, &[(0, 1.0), (1, -1.0)], -1.0).expect("cut");
         assert_eq!(c.coefs, vec![(2, -1.0), (3, -1.0)]);
         assert_eq!(c.rhs, -1.0);

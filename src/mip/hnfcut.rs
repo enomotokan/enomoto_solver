@@ -496,7 +496,7 @@ pub(crate) fn map_cutvars(vars: &super::cuts::CutVars, lp_rows: &[Vec<(usize, f6
 
 impl MappedVars {
     pub fn vars(&self) -> super::cuts::CutVars<'_> {
-        super::cuts::CutVars { lo: &self.lo, up: &self.up, is_int: &self.is_int, x: &self.x, vb: Some(&self.vb) }
+        super::cuts::CutVars { lo: &self.lo, up: &self.up, is_int: &self.is_int, x: &self.x, vb: Some(&self.vb), imp: None }
     }
 
     /// 写した空間のカットを元の空間に戻す (構造変数 `c z = (c/g) x - c r/g`、論理変数 `c s' = c s - c shift`)
@@ -615,7 +615,7 @@ mod tests {
             }
             let tbl = Arc::new(t);
             let _g = Guard::new(State { table: Some(tbl.clone()), cmir: true, modk: true, tab: false, logi: false, both: it % 3 == 0 });
-            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None };
+            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None, imp: None };
             // a: 行 1 本ずつ
             for (i, row) in rows.iter().enumerate() {
                 let feas: Vec<&Vec<f64>> = pts.iter().filter(|p| act(row, p) <= ru[i] + 1e-9).collect();
@@ -730,7 +730,7 @@ mod tests {
             }
             let neg: Vec<(usize, f64)> = base.iter().map(|&(j, a)| (j, -a)).collect();
             {
-                let vars = CutVars { lo: &vlo, up: &vup, is_int: &vint, x: &vx, vb: None };
+                let vars = CutVars { lo: &vlo, up: &vup, is_int: &vint, x: &vx, vb: None, imp: None };
                 for b in [&base, &neg] {
                     for c in generate_cuts(&vars, b, 0.0, false, false) {
                         n_lc += 1;

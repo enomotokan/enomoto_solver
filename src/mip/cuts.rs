@@ -18,6 +18,9 @@ pub struct CutVars<'a> {
     pub x: &'a [f64],
     /// 連続変数の変数上下限 (なければ空)。
     pub vb: Option<&'a VarBounds>,
+    /// 試作 `ENOMOTO_MIP_IMPLINT_TU2` の `a` (src/mip/implint_tu.rs): 連続列 (`is_int` が偽) のうち暗に整数のもの。集約・変数上下限の
+    /// 置き換え・flow cover では連続として扱い、[`substitute_with`] で単純な境界で置き換えるときだけ整数の項にする (SCIP の cuts.c と同じ)
+    pub imp: Option<&'a [bool]>,
 }
 
 /// 連続変数 `x_k` の変数上下限 `x_k <= d y + e` (VUB) / `x_k >= d y + e` (VLB) (`y` は整数変数)。
@@ -350,6 +353,11 @@ fn substitute_with(vars: &CutVars, base: &[(usize, f64)], terms: &mut Vec<Term>,
                     }
                 }
             }
+        }
+        // 試作 `ENOMOTO_MIP_IMPLINT_TU2` の `a`: 暗に整数の列は、単純な境界で置き換えるなら整数の項にする (境界は丸め済み)
+        if best.1 == Sub::Simple && vars.imp.is_some_and(|m| k < m.len() && m[k]) && l.is_finite() && u.is_finite() {
+            add_int(k, a, int_coef, int_pos);
+            continue;
         }
         if !best.0.is_finite() {
             *beta_ref = beta;
@@ -1152,7 +1160,7 @@ mod tests {
         let up = [1.0; 3];
         let is_int = [true; 3];
         let x = [0.9, 0.9, 0.2];
-        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None };
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None, imp: None };
         let cut = extended_cover(&vars, &[(0, 3.0), (1, 4.0), (2, 5.0)], 6.0).expect("cover");
         let act: f64 = cut.coefs.iter().map(|&(k, c)| c * x[k]).sum();
         assert!(act > cut.rhs + 1e-6);
@@ -1172,7 +1180,7 @@ mod tests {
         let x = [3.0, 0.3];
         let vb = VarBounds::from_rows(2, &is_int, &[vec![(0, 1.0), (1, -10.0)]], &[f64::NEG_INFINITY], &[0.0]);
         assert_eq!(vb.vub[0], vec![(1, 10.0, 0.0)]);
-        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb) };
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb), imp: None };
         let cut = cmir(&vars, &[(0, -1.0)], -3.0).expect("cut");
         let act: f64 = cut.coefs.iter().map(|&(k, c)| c * x[k]).sum();
         assert!(act > cut.rhs + 1e-6, "LP point must be cut off");
@@ -1181,7 +1189,7 @@ mod tests {
             assert!(a <= cut.rhs + 1e-9, "valid point {pt:?} cut off: {a} > {}", cut.rhs);
         }
         // without the VUB no cut exists (the row has no integer variable)
-        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None };
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None, imp: None };
         assert!(cmir(&vars, &[(0, -1.0)], -3.0).is_none());
     }
 
@@ -1193,7 +1201,7 @@ mod tests {
         let is_int = [false, false, true, true];
         let x = [3.0, 3.0, 1.0, 0.6];
         let vb = VarBounds::from_rows(4, &is_int, &[vec![(0, 1.0), (2, -3.0)], vec![(1, 1.0), (3, -5.0)]], &[f64::NEG_INFINITY; 2], &[0.0; 2]);
-        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb) };
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb), imp: None };
         let cut = lifted_flow_cover(&vars, &[(0, 1.0), (1, 1.0)], 6.0).expect("flow cover");
         let act: f64 = cut.coefs.iter().map(|&(k, c)| c * x[k]).sum();
         assert!(act > cut.rhs + 0.5, "violation {} too small", act - cut.rhs);
@@ -1234,7 +1242,7 @@ mod tests {
             }
             let act: f64 = base.iter().map(|&(k, a)| a * x[k]).sum();
             let rhs = act - rnd() * 0.5;
-            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None };
+            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None, imp: None };
             let Some((terms, beta)) = substitute(&vars, &base, rhs) else { continue };
             let old = cmir_terms(&vars, terms.clone(), beta);
             let fast = if terms.iter().any(|t| t.int) { cmir_terms_fast(&vars, terms, beta) } else { None };
@@ -1326,7 +1334,7 @@ mod tests {
                 }
             }
             let vb = VarBounds::from_rows(n, &is_int, &vub_rows, &vec![f64::NEG_INFINITY; vub_rows.len()], &vec![0.0; vub_rows.len()]);
-            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb) };
+            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb), imp: None };
             let Some(cut) = lifted_flow_cover(&vars, &base, rhs) else { continue };
             cuts_found += 1;
             let ccoef = |k: usize| cut.coefs.iter().filter(|&&(j, _)| j == k).map(|&(_, c)| c).sum::<f64>();
@@ -1391,7 +1399,7 @@ mod tests {
         let up = [10.0, f64::INFINITY];
         let is_int = [true, false];
         let x = [2.5, 0.0];
-        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None };
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None, imp: None };
         let cut = cmir(&vars, &[(0, 1.0), (1, -1.0)], 2.5).expect("cut");
         let act: f64 = cut.coefs.iter().map(|&(k, c)| c * x[k]).sum();
         assert!(act > cut.rhs + 1e-6, "LP point must be cut off");
@@ -2084,7 +2092,7 @@ mod highs_dump {
             }
         }
         let mut per_base_out = std::env::var("HIGHS_CUT_DUMP_PERBASE").ok().map(|f| std::fs::File::create(f).unwrap());
-        let vars = CutVars { lo: &vlo, up: &vup, is_int: &vint, x: &vx, vb: Some(&vb) };
+        let vars = CutVars { lo: &vlo, up: &vup, is_int: &vint, x: &vx, vb: Some(&vb), imp: None };
         // 論理変数を行の式に展開して、効き目 (違反量 / ノルム) を測る
         let eff = |coefs: &[(usize, f64)], rhs: f64| -> f64 {
             let mut d: std::collections::BTreeMap<usize, f64> = std::collections::BTreeMap::new();
@@ -2115,9 +2123,9 @@ mod highs_dump {
                         lo2[c] = l;
                         up2[c] = u;
                     }
-                    CutVars { lo: &lo2, up: &up2, is_int: &vint, x: &vx, vb: Some(&vb) }
+                    CutVars { lo: &lo2, up: &up2, is_int: &vint, x: &vx, vb: Some(&vb), imp: None }
                 }
-                None => CutVars { lo: &vlo, up: &vup, is_int: &vint, x: &vx, vb: Some(&vb) },
+                None => CutVars { lo: &vlo, up: &vup, is_int: &vint, x: &vx, vb: Some(&vb), imp: None },
             };
             let mut which = "";
             let proto = std::env::var("HIGHS_CUT_DUMP_DELTAS").is_ok().then(|| cmir_highs_deltas(&vars_b, b, 0.0)).flatten();
@@ -2639,7 +2647,7 @@ mod lifted_cover_tests {
             let b = (1 + rnd(30)) as f64;
             // LP 点: 乱数 (実行可能でなくてもよい。カットの妥当性だけを調べる)
             let x: Vec<f64> = (0..n).map(|j| if is_int[j] { rnd(100) as f64 / 100.0 * up[j] } else { rnd(100) as f64 / 50.0 }).collect();
-            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None };
+            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None, imp: None };
             let Some(cut) = lifted_cover(&vars, &base, b) else { continue };
             found += 1;
             // 整数点の列挙
@@ -3118,7 +3126,7 @@ mod intvub_tests {
             }
             let mut vb = VarBounds::from_rows(n, &is_int, &rows, &rlo, &rup);
             vb.add_int_vbs(&is_int, &lo, &up, &rows, &rlo, &rup, &[]);
-            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb) };
+            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb), imp: None };
             let mut out = generate_cuts(&vars, &base, rhs, true, true);
             out.extend(lifted_cover(&vars, &base, rhs));
             for cut in out {

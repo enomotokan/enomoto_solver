@@ -1001,6 +1001,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     orbitope_prunes: u64,
     /// カット生成で整数として扱う列 (整数列と暗黙の整数列、[`MipProblem::implied_integers`])。
     pub(super) cut_int: Vec<bool>,
+    /// 試作 `ENOMOTO_MIP_IMPLINT_TU2` の `a` (src/mip/implint_tu.rs): `cut_int` のうち TU2 で足した列 (集約・変数上下限の置き換えでは
+    /// 連続として扱い、c-MIR で単純な境界で置き換えるときだけ整数の項にする)。使わないときは空
+    pub(super) cut_imp: Vec<bool>,
     /// 根で作ったカット (係数, 右辺, ノルム)。大域的に成り立つ。ノードで違反していれば LP に戻す。
     pub(super) cut_pool: Vec<(Vec<(usize, f64)>, f64, f64)>,
     /// 双対証明 (衝突分析): `sum coefs x <= U - konst` (U は打ち切り値から定数項を引いたもの、最新の値を使う)。
@@ -4295,7 +4298,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     // そのため刈り込みの上限は、暫定解より厳密に小さい最大の格子の点で取る ([`Self::prune_limit`])
     // `ENOMOTO_MIP_HO2_IMPLINT` (試作): HiGHS の双対側の暗黙の整数の規則も使って刻みを判定する ([`MipProblem::implied_integers_ho2`])
     let ho2_implint = env_str!("ENOMOTO_MIP_HO2_IMPLINT").is_some_and(|v| v != "0" && v != "off");
-    let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some() || ho2_implint;
+    let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some() || ho2_implint || super::implint_tu::tu2_flag('s');
     let obj_step = if obj_step_implint {
         // `ENOMOTO_MIP_IMPLINT_TU` も付けていれば TU の規則の暗黙の整数も使う (整数を固定すると連続列の部分に整数の最適解が
         // あるので、どの部分木でも暫定解より良い解があれば格子の点の値の解もある)
@@ -4693,6 +4696,13 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             t
         } else {
             p.implied_integers()
+        },
+        cut_imp: if super::implint_tu::tu2_on() && super::implint_tu::tu2_flag('a') {
+            let b = p.implied_integers();
+            let t = super::implint_tu::cut_mask(p, false);
+            (0..p.n).map(|j| t[j] && !b[j]).collect()
+        } else {
+            Vec::new()
         },
         cut_pool: Vec::new(),
         dual_proofs: std::collections::VecDeque::new(),
@@ -15073,7 +15083,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for &(j, a) in coefs {
             x[j] = if a > 0.0 { gl[j] + sc * (self.dom.lo[j].max(gl[j]) - gl[j]) } else { gu[j] - sc * (gu[j] - self.dom.up[j].min(gu[j])) };
         }
-        let vars = super::cuts::CutVars { lo: gl, up: gu, is_int: &p.is_int, x: &x, vb: None };
+        let vars = super::cuts::CutVars { lo: gl, up: gu, is_int: &p.is_int, x: &x, vb: None, imp: None };
         let cut = super::cuts::cmir(&vars, coefs, rhs);
         self.proof_cmir_x = Some(x);
         self.proof_cmir_stats[0] += 1;
@@ -20411,7 +20421,7 @@ pub(super) fn round_lb_to_step(lb: f64, step: f64, offset: f64) -> f64 {
 
 /// 刈り込みの上限を、暫定解より厳密に小さい最大の格子の点で取るか (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`)。
 fn obj_step_lattice() -> bool {
-    env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some()
+    env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some() || super::implint_tu::tu2_flag('s')
 }
 
 /// [`Solver::prune_limit_ex`] の式 (`eff` は自分と共有の暫定解の良い方、`outer` は根のサブ MIP の外側の上限)。
