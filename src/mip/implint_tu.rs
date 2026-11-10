@@ -50,7 +50,8 @@ pub struct Tu2Stats {
 
 /// 値の文字で部品を選ぶ (`1` は `b` と同じ): `b` 行から導ける端数の境界を無視する ([`redundant_frac_bounds`])、
 /// `v` 変数上下限の行に出る列はカットの整数の印から外す ([`cut_mask`])、`a` TU2 で足した列を SCIP と同じく、集約・変数上下限の
-/// 置き換え・flow cover では連続、c-MIR で単純な境界で置き換えるときだけ整数として扱う (`CutVars::imp`、solver.rs の `cut_imp`)、`s` 目的値の刻みにも使う (solver.rs、`ENOMOTO_MIP_OBJ_STEP_IMPLINT`
+/// 置き換え・flow cover では連続、c-MIR で単純な境界で置き換えるときだけ整数として扱う (`CutVars::imp`、solver.rs の `cut_imp`)、
+/// `F` (診断、誤答になりうる) TU と判定できない芯も TU とみなす、`s` 目的値の刻みにも使う (solver.rs、`ENOMOTO_MIP_OBJ_STEP_IMPLINT`
 /// を付けなくても TU2 の印で刻みを取り、刈り込みは格子の点で取る)、`n` カットの印には使わない (刻みだけ)。
 pub fn tu2_flag(c: char) -> bool {
     env_str!("ENOMOTO_MIP_IMPLINT_TU2").is_some_and(|v| v.contains(c) || (v == "1" && "b".contains(c)))
@@ -415,7 +416,11 @@ pub fn implied_integers_tu2_opt(p: &MipProblem, base: &[bool], use_red: bool) ->
                 st.worst_bad = (rs.len(), cs.len(), maxc, maxr);
             }
             let root = find(&mut uf, cs[0]);
-            comp_bad[root] = true;
+            // 診断 `F` (誤答になりうる、計測の見積もりだけに使う): TU と判定できない芯も TU とみなす。ネットワーク行列の一般の判定を
+            // 入れたら効くかを、TU らしい問題 (mc11・sp150x300d の前処理の集約で形の崩れた流れ) で前もって見るため
+            if !tu2_flag('F') {
+                comp_bad[root] = true;
+            }
         }
     }
     let out: Vec<bool> = (0..n).map(|j| base[j] || (cand[j] && !comp_bad[find(&mut uf, j)])).collect();
