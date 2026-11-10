@@ -265,7 +265,7 @@ HiGHS は highspy 1.15.1 (threads=4・mip_rel_gap=0・output_flag 真)。機械�
     締まった問題ではすぐ実行不能で終わり、FP は 61 → 147 秒に延びる。
   - 58 問 (60 秒・種 1・2、`res58q.jsonl`・`cmp58q.txt`): SGM 16.07 → 15.75 (−2.0%、95% 区間 −6.2%〜+1.6%、p=0.37)、解けた 83 → 87 (`q` だけ解いた 4 回:
     noswot 2 回 (60 → 49.4・17.8 秒)・mc11・neos-960392。既定だけ解いた回は 0)。揃った差なし。両方最適で目的値が違う組・下界と解の矛盾 0 件。
-  - 誤答の検査: `fuzz_tiny.py 400 0` bad 0 (strict 13)、`mip_fuzz_vs_highs.py 300` bad 0 (`checks/*_q.txt.gz`)。
+  - 誤答の検査: `fuzz_tiny.py 400 0` bad 0 (strict 13)、`mip_fuzz_vs_highs.py 300` bad 0 (`checks/*_q.txt.gz`)、`cargo test --release --lib` 375 通過・0 失敗。
 
 ### 6.3 neos-873061 のカット (事実、`sep120_neos-873061_s1`、`ENOMOTO_MIP_DEBUG_SEPPROF=1`)
 
