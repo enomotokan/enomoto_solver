@@ -587,8 +587,17 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64,
     let ext_min = tunable!("ENOMOTO_T_MIP_SYM_EXT_MIN_GENS", 100usize, usize);
     let mut time_cap = time_cap;
     // `ENOMOTO_MIP_SYMPRE` の (3) (試作): 深い探索の前に、全ての色の組で浅い探り (個別化 1 回と細分化) の疎な置換を集める
+    // 探りは自分の上限 (残りの時間・手間の `ENOMOTO_T_MIP_SYMPRE_PROBE_FRAC` 倍、既定 0.5) で止め、使った分は深い探索の上限に足す
+    // (探りが上限を先に使うと、深い探索で拾えた生成元を落とす: cod105・mushroom-best。analysis/sassy_20261110.md)
     if super::sympre::probe_on() {
-        super::sympre::probe(p, &col, &row, &cells, &mut uf, &mut generators, &row_counts, (t0, time_cap, work_end));
+        let (tp, w0, l0) = (std::time::Instant::now(), work(), log_work());
+        let frac = tunable!("ENOMOTO_T_MIP_SYMPRE_PROBE_FRAC", 0.5, f64);
+        let part = |end: u64, now: u64| now.saturating_add((end.saturating_sub(now) as f64 * frac).min(u64::MAX as f64) as u64);
+        let pend = (part(work_end.0, w0), part(work_end.1, l0));
+        let ptime = (time_cap - t0.elapsed().as_secs_f64()).max(0.0) * frac;
+        super::sympre::probe(p, &col, &row, &cells, &mut uf, &mut generators, &row_counts, (tp, ptime, pend));
+        work_end = (work_end.0.saturating_add(work() - w0), work_end.1.saturating_add(log_work() - l0));
+        t0 += tp.elapsed();
     }
     'cells: for cell in &cells {
         let a = cell[0];

@@ -15,8 +15,9 @@ old = [json.loads(l) for f in ["detect_p58.jsonl", "detect_mitt.jsonl"] for l in
 base = list(dict.fromkeys(PROBS + sh))
 extra = sorted({r["problem"] for r in old if r["cfg"] == "def" and (r.get("gens") or 0) > 0} - set(base))
 probs = base + extra
+if os.environ.get("PROBS"): probs = os.environ["PROBS"].split(",")
 cfgs = sys.argv[1].split(",") if len(sys.argv) > 1 else list(CFGS)
-OUT = D / "detect.jsonl"
+OUT = D / os.environ.get("OUT_NAME", "detect.jsonl")
 DUMP = Path(os.environ.get("DUMP_DIR", "/tmp/symdumps")); DUMP.mkdir(parents=True, exist_ok=True)
 done = set()
 if OUT.exists():
