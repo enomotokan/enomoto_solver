@@ -41,7 +41,7 @@ def highs_ref(mps, timeout):
     return h.getInfo().objective_function_value if h.getModelStatus() == highspy.HighsModelStatus.kOptimal else None, time.perf_counter() - t0
 
 
-CFG = {"def": {}, "fold": {"ENOMOTO_LP_FOLD": "1"}, "rfold": {"ENOMOTO_LP_FOLD": "r"}, "rfoldv": {"ENOMOTO_LP_FOLD": "rv"}, "foldv": {"ENOMOTO_LP_FOLD": "1v"}}
+CFG = {"def": {}, "fold": {"ENOMOTO_LP_FOLD": "1"}, "rfold": {"ENOMOTO_LP_FOLD": "r"}, "rfoldv": {"ENOMOTO_LP_FOLD": "rv"}, "foldv": {"ENOMOTO_LP_FOLD": "1v"}, "cnt": {"ENOMOTO_LP_FOLD": "1c"}, "rcnt": {"ENOMOTO_LP_FOLD": "rc"}}
 
 
 def run(out, cfg, timeout, mpss):
