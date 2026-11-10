@@ -734,6 +734,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) fpr: super::fpr::FprState,
     /// `ENOMOTO_MIP_FJ_NOSOL_EXTEND`: 暫定解を持ったら立てて、FJ のスレッドの延長をやめさせる印
     fj_has_inc: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// 試作 `ENOMOTO_MIP_PRECHAIN` ([`super::prechain`]): 前処理から続く FJ・Local-MIP のスレッドの分け合う状態と、渡した暫定解の値・境界の数
+    prechain: Option<std::sync::Arc<super::prechain::Shared>>,
+    prechain_posted: (f64, usize),
     /// 根のヒューリスティクスの最初に別スレッドで始めた局所探索 (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`。結果は元の位置で受け取る)。
     pub(super) ls_thread: Option<std::thread::JoinHandle<super::heuristics::LocalSearchResult>>,
     /// 根の解発見スレッド ([`find_thread_on`])。根のヒューリスティクスの後と木の各ノードで、終わっていれば受け取る
@@ -4515,6 +4518,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         lmip_mailbox: None,
         fpr: Default::default(),
         fj_has_inc: None,
+        prechain: None,
+        prechain_posted: (f64::INFINITY, 0),
         ls_thread: None,
         find_thread: None,
         find_out: None,
@@ -7415,6 +7420,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.snap.is_some() || env_str!("ENOMOTO_MIP_DEBUG_NO_FJ").is_some() {
                 // 木の写しから解く: 解探しはしない (`ENOMOTO_MIP_DEBUG_NO_FJ` は診断用に FJ を使わない)
+            } else if !self.params.submip && !proof_only() && mip_threads() > 1 && self.params.restarts == 0 && super::prechain::on() && self.attach_prechain(cap) {
+                // 試作 `ENOMOTO_MIP_PRECHAIN`: 前処理の間に立てた FJ・Local-MIP のスレッドを根の FJ のスレッドとして続ける ([`Self::attach_prechain`])
             } else if !self.params.submip && !proof_only() && mip_threads() > 1 {
                 // 並列モード: 別スレッドで根の LP・切除平面と同時に回す (根のヒューリスティクスの前に受け取る)
                 // 対称性の行・固定を加える前の問題で探す (見つけた解は try_incumbent で並べ替える)
@@ -18098,6 +18105,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッドが終わっていれば結果を受け取る (待たない)。
     pub(super) fn poll_lmip_thread(&mut self) {
         self.poll_fpr();
+        self.post_prechain();
         // 受け渡し箱には良くなった解を全部ためてあり、新しい (良い) 順に試して、受け付けられたらそこで止める。最良の解が受け付け
         // られなくても (対称性の行に反するなど。neos-950242 で最良の解だけを残していたときは全部失った)、前の解が暫定解になれる。
         // 古い順に全部試すと、uccase12 では受け付けるたびの oneopt・連続列の解き直しに 1 回 1 秒かかり、根で 20 秒を失った
@@ -18120,6 +18128,65 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let ok = self.try_incumbent(x);
                 self.heur_label = "";
                 eprintln!("MIP: Local-MIP solution accepted {ok} ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_PRECHAIN` ([`super::prechain`]): 前処理の間に立てた FJ・Local-MIP のスレッドに根の問題 (対称性の行を足す前の
+    /// 問題) を渡し、根の FJ のスレッドとして受け取る。打ち切りは今の FJ のスレッドと同じ (`cap`・Local-MIP の秒数、解がない間は
+    /// `ENOMOTO_T_MIP_FJ_NOSOL_FRAC` × 時間上限まで)。連鎖がなければ偽 (今までどおり FJ のスレッドを立てる)
+    fn attach_prechain(&mut self, cap: f64) -> bool {
+        let pc = match &self.orig {
+            Some(o) => std::sync::Arc::new((**o).clone()),
+            None => std::sync::Arc::new(self.p.clone()),
+        };
+        let fjl_cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * self.params.time_limit).min(10.0) } else { 10.0 };
+        let now = Instant::now();
+        let t_end = now + std::time::Duration::from_secs_f64(fjl_cap.max(cap));
+        let t_ext = if env_def!("ENOMOTO_MIP_FJ_NOSOL_EXTEND", "2").is_some() && self.params.time_limit.is_finite() {
+            self.start + std::time::Duration::from_secs_f64((tunable!("ENOMOTO_T_MIP_FJ_NOSOL_FRAC", 0.25, f64) * self.params.time_limit).max(0.0))
+        } else {
+            t_end
+        };
+        let Some(c) = super::prechain::attach(pc, t_end, t_ext) else { return false };
+        c.sh.has_inc.store(self.incumbent.is_some() && !self.inc_only_fj, std::sync::atomic::Ordering::Relaxed);
+        self.fj_has_inc = Some(c.sh.has_inc.clone());
+        self.lmip_mailbox = Some(c.sh.mailbox.clone());
+        self.prechain = Some(c.sh.clone());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let h = std::thread::spawn(move || {
+            while !stop2.load(std::sync::atomic::Ordering::Relaxed) && !c.all_done() {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            c.finish();
+            None
+        });
+        self.fj_thread = Some((h, stop));
+        if self.params.verbose {
+            eprintln!("MIP: PRECHAIN: the FJ/Local-MIP threads from the presolve continue at the root ({:.2}s)", self.start.elapsed().as_secs_f64());
+        }
+        true
+    }
+
+    /// 試作 `ENOMOTO_MIP_PRECHAIN`: 主の暫定解 (`i`) と大域的な境界 (`b`) が変わっていれば連鎖のスレッドに渡す
+    fn post_prechain(&mut self) {
+        let Some(sh) = self.prechain.clone() else { return };
+        if self.fj_thread.is_none() {
+            self.prechain = None;
+            return;
+        }
+        if let Some((z, x)) = &self.incumbent {
+            if *z < self.prechain_posted.0 && x.len() == self.p.n {
+                self.prechain_posted.0 = *z;
+                sh.post_main(*z, x);
+            }
+        }
+        if super::prechain::has('b') && self.dom.global_lo.len() == self.p.n {
+            let k = (0..self.p.n).filter(|&j| self.dom.global_lo[j] > self.p.col_lo[j] || self.dom.global_up[j] < self.p.col_up[j]).count();
+            if k > self.prechain_posted.1 {
+                self.prechain_posted.1 = k;
+                sh.post_bounds(&self.dom.global_lo, &self.dom.global_up);
             }
         }
     }

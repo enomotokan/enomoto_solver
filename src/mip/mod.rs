@@ -54,6 +54,7 @@ pub(crate) mod clique;
 pub(crate) mod cutsel_ens;
 pub(crate) mod pretime;
 pub(crate) mod plsb;
+pub(crate) mod prechain;
 
 use crate::solver::solve_lp;
 use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective, RootSolver, SolveResult, Status, VarType, VariableData};
@@ -1089,6 +1090,19 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         }
     }
     let _restore_par = RestorePar(prev_par);
+    // 試作 `ENOMOTO_MIP_PRECHAIN` ([`prechain`]): 最初の求解の前処理の途中で FJ・Local-MIP のスレッドを立てる用意をし、戻るときに止める
+    struct Disarm(bool);
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            if self.0 {
+                prechain::disarm();
+            }
+        }
+    }
+    let _prechain = Disarm(!params.submip && params.restarts == 0 && prechain::on());
+    if _prechain.0 {
+        prechain::arm(params.threads, params.time_limit, params.verbose);
+    }
     // 前処理の重い手順の期限 ([`presolve_stop`]): この求解の時間の上限。戻るときに前の値 (外側の求解のもの) に戻す
     struct RestoreDeadline(Option<std::time::Instant>);
     impl Drop for RestoreDeadline {
@@ -3653,6 +3667,15 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
                 };
             }
             Some(_) => {}
+        }
+    }
+    // 試作 `ENOMOTO_MIP_PRECHAIN` ([`prechain::start`]): 軽い縮約 (行をまとめた後のかけ直し・早めのプロービングとかけ直しを含む) の後、
+    // LP による固定・プロービングなどの重い前処理の前に、FJ・Local-MIP のスレッドを立てる (最初の求解で 1 回だけ)。`p` なら並列の
+    // プロービングと分け合う。立てた後にかけ直しの前処理がここを通ったら、縮んだ問題に乗り換えさせる ([`prechain::refresh`])
+    if !submip && prechain::on() {
+        match prechain::start(&prob) {
+            Some(par) => PREPAR_THREADS.with(|t| t.set(par)),
+            None => prechain::refresh(&prob),
         }
     }
     // LP による固定は含意を集めるプロービングの前に行う (固定をプロービングの伝播に使い、固定した列の含意を作らない)。
