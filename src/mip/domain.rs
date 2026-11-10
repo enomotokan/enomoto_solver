@@ -1244,6 +1244,12 @@ impl Domain {
         Some(set.iter().map(|&k| (self.stack[k].col, self.stack[k].upper, self.stack[k].new)).collect())
     }
 
+    /// 試作 `ENOMOTO_MIP_CUTCONF` ([`super::cutconf`]) 用: 変更の記録 `k` の (列, 上限か, 変更後の値, 理由)。
+    pub(crate) fn trail_entry(&self, k: usize) -> (usize, bool, f64, i32) {
+        let c = &self.stack[k];
+        (c.col, c.upper, c.new, c.reason)
+    }
+
     /// 列 `j` が固定されているか。
     pub fn is_fixed(&self, j: usize) -> bool {
         self.lo[j] == self.up[j]

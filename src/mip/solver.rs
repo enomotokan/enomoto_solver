@@ -15377,6 +15377,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// HiGHS 式の衝突解析で衝突を作って入れる (入れた数)。`ENOMOTO_MIP_CONFLICT_OLD` なら使わない (0)。
     fn add_conflicts_multi(&mut self, start: super::domain::ConflictStart) -> usize {
+        if super::cutconf::mode().is_some() {
+            self.add_cutconf(&start);
+        }
         if env_str!("ENOMOTO_MIP_CONFLICT_OLD").is_some() {
             return 0;
         }
@@ -15419,6 +15422,45 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.multi_stats[3] += confs.iter().map(|c| c.len() as u64).sum::<u64>();
         // 何も作れなければ従来の解析も試す (呼び出し側)
         if confs.is_empty() { 0 } else { n.max(1) }
+    }
+
+    /// 試作 `ENOMOTO_MIP_CUTCONF` (既定では使わない、[`super::cutconf`]): cut-based の衝突解析で得た制約を証明のプールに入れる
+    /// (`m` なら双対証明と同じく CMIR で強めたカットも作る、`p` なら証明のプールには入れない)。
+    fn add_cutconf(&mut self, start: &super::domain::ConflictStart) {
+        let mode = super::cutconf::mode().unwrap_or("");
+        let is_proof = matches!(start, super::domain::ConflictStart::Proof(..));
+        if self.params.submip || (mode.contains('r') && is_proof) || (mode.contains('d') && !is_proof) {
+            return;
+        }
+        if super::cutconf::secs() > tunable!("ENOMOTO_T_MIP_CUTCONF_TIME_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64() + 0.05 {
+            return;
+        }
+        let t0 = Instant::now();
+        let r = super::cutconf::analyze(&self.dom, self.p, start, self.conflict_max_len_multi());
+        super::cutconf::add_secs(t0.elapsed().as_secs_f64());
+        let Some((coefs, rhs)) = r else { return };
+        // 診断用: デバッグ解を切っていないか (打ち切り値による大域的な固定を使うので、デバッグ解が打ち切り値より良いときだけ)
+        if self.dbg_on {
+            DEBUG_SOL.with(|dd| {
+                if let Some(xd) = dd.borrow().as_ref() {
+                    if self.p.objective(xd) < self.prune_limit() - 1e-6 {
+                        let a: f64 = coefs.iter().map(|&(j, v)| v * xd[j]).sum();
+                        if a > rhs + 1e-6 * (1.0 + rhs.abs()) {
+                            eprintln!("MIP_DEBUG_SOL: cutconf constraint cuts off the debug solution ({a} > {rhs}, len {}, proof {is_proof})", coefs.len());
+                        }
+                    }
+                }
+            });
+        }
+        if env_str!("ENOMOTO_MIP_DEBUG_CUTCONF").is_some() {
+            eprintln!("CUTCONF proof {is_proof} len {} rhs {rhs}: {:?}", coefs.len(), &coefs[..coefs.len().min(12)]);
+        }
+        if mode.contains('m') {
+            self.add_proof_cmir(&coefs, rhs);
+        }
+        if !mode.contains('p') {
+            self.push_pool_row(coefs, rhs, false);
+        }
     }
 
     fn conflict_max_len(&self) -> usize {
@@ -16019,7 +16061,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.cpp.work[1] += cand.len() as u64;
             for (i, &k) in cand.iter().enumerate() {
                 self.cpp.work[2] += (self.pool_start[k as usize + 1] - self.pool_start[k as usize]) as u64;
-                match self.cutpool_prop_cut(k as usize, cont_frac) {
+                let cc_pos0 = self.dom.stack_len();
+                let r = self.cutpool_prop_cut(k as usize, cont_frac);
+                if super::cutconf::mode().is_some() && !self.params.submip {
+                    let kk = k as usize;
+                    super::cutconf::note_range(&self.dom, cc_pos0, &mut None, || (self.cut_pool[kk].0.clone(), self.cut_pool[kk].1));
+                }
+                match r {
                     Ok(c) => {
                         if c {
                             self.cpp.fired.push(k);
@@ -16433,6 +16481,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let gap = u - minact;
             let mut changed = false;
+            let cc_pos0 = self.dom.stack_len();
             self.dom.set_external_tag(6);
             for &(j, c) in obj.iter() {
                 let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
@@ -16463,6 +16512,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             self.dom.set_external(false);
+            if conflicts && super::cutconf::mode().is_some() && !self.params.submip {
+                super::cutconf::note_range(&self.dom, cc_pos0, &mut None, || (obj.to_vec(), u));
+            }
             if self.dom.infeasible {
                 if conflicts && self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
                     self.add_conflict();
@@ -16849,13 +16901,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 let mut used = false;
+                let mut cc_row = None;
                 for (j, upper, v) in changes {
                     if self.dbg_on {
                         self.proof_diag_tighten(k, j, upper, v, rhs, minact);
                     }
                     self.dom.set_external_tag(4);
+                    let cc_pos0 = self.dom.stack_len();
                     let ch = if upper { self.dom.tighten_upper(p, j, v) } else { self.dom.tighten_lower(p, j, v) };
                     self.dom.set_external(false);
+                    if ch && super::cutconf::mode().is_some() && !self.params.submip {
+                        super::cutconf::note_range(&self.dom, cc_pos0, &mut cc_row, || (self.dual_proofs[k].0.clone(), rhs));
+                    }
                     if ch {
                         tightened = true;
                         tightened_now = true;
@@ -20165,6 +20222,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.obj_cut_stats[0] > 0 {
                 eprintln!("MIP: objective bound cuts: tried {}, added {}", self.obj_cut_stats[0], self.obj_cut_stats[1]);
+            }
+            if super::cutconf::mode().is_some() {
+                let c = super::cutconf::stats();
+                eprintln!("MIP: cutconf (ENOMOTO_MIP_CUTCONF): calls {}, no start {}, steps plain {} reduced {} (by remembered external rows {}), stop fail {} decision {} uip {} budget {}, no step {}, dropped {}, out {} (non-binary {}, mean length {:.1}), {:.2}s", c[0], c[1], c[2], c[3], c[13], c[4], c[5], c[6], c[7], c[11], c[10], c[8], c[12], c[9] as f64 / c[8].max(1) as f64, super::cutconf::total_secs());
             }
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
