@@ -38,6 +38,7 @@ pub(crate) mod hnflat;
 pub(crate) mod hnfcut;
 pub(crate) mod hnfsubst;
 pub(crate) mod gcdforce;
+pub(crate) mod implint_tu;
 pub(crate) mod redsplit;
 pub(crate) mod cmirdelta;
 pub(crate) mod seplearn;
@@ -1294,6 +1295,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 if v == "stop" {
                     std::process::exit(0);
                 }
+            }
+            // 診断 `ENOMOTO_MIP_DEBUG_IMPLINTCOUNT` (src/mip/implint_tu.rs): 暗黙の整数の数を判定ごとに数える。`=stop` なら終える
+            if let Some(v) = env_str!("ENOMOTO_MIP_DEBUG_IMPLINTCOUNT").filter(|_| !params.submip && params.restarts == 0) {
+                implint_tu::debug_count(&prob, v == "stop");
             }
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);

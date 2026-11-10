@@ -4291,7 +4291,13 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         // `ENOMOTO_MIP_IMPLINT_TU` も付けていれば TU の規則の暗黙の整数も使う (整数を固定すると連続列の部分に整数の最適解が
         // あるので、どの部分木でも暫定解より良い解があれば格子の点の値の解もある)
         let base = if ho2_implint { p.implied_integers_ho2() } else { p.implied_integers() };
-        let mask = if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() { p.implied_integers_tu(&base) } else { base };
+        let mask = if super::implint_tu::tu2_on() {
+            super::implint_tu::implied_integers_tu2(p, &base).0
+        } else if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() {
+            p.implied_integers_tu(&base)
+        } else {
+            base
+        };
         let b = if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() { Some((&dom.lo[..], &dom.up[..])) } else { None };
         let st = p.objective_step_mask(&mask, b);
         if params.verbose && !params.submip {
@@ -4655,6 +4661,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         row_log: Vec::new(),
         cut_int: if env_str!("ENOMOTO_MIP_NO_IMPLINT").is_some() {
             p.is_int.clone()
+        } else if super::implint_tu::tu2_on() {
+            // 試作 `ENOMOTO_MIP_IMPLINT_TU2` (src/mip/implint_tu.rs)
+            super::implint_tu::cut_mask(p, params.verbose && !params.submip)
         } else if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() {
             let b = p.implied_integers();
             let t = p.implied_integers_tu(&b);
