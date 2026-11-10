@@ -1,4 +1,4 @@
-//! 試作 `ENOMOTO_MIP_FOLD` (既定では使わない。analysis/drcr_20261110.md): MIP を色の細分化で畳んで解き、解を元に戻す
+//! `ENOMOTO_MIP_FOLD` (2026-11-10 から既定で使う、既定の値 `riq`。`0` で止める。analysis/drcr_20261110.md): MIP を色の細分化で畳んで解き、解を元に戻す
 //! (van der Hulst 2026「Folding Mixed-Integer Linear Programs and Reflection Symmetries」の第 4 節)。畳み方の本体は
 //! [`crate::simplex::lp_fold`]。
 //!
@@ -23,9 +23,10 @@ use super::problem::MipProblem;
 use super::solver::{MipResult, MipStatus};
 use crate::simplex::lp_fold::{Fold, FoldIn, FoldOpts};
 
-/// `ENOMOTO_MIP_FOLD` の値 (付けていなければ `None`)。
+/// `ENOMOTO_MIP_FOLD` の値。2026-11-10 から既定で使う (既定の値 `riq` = 反転・整数の組・ログなし。`0` か `off` で止める。
+/// analysis/drcr_20261110.md の既定化の節)。
 pub fn flags() -> Option<&'static str> {
-    env_str!("ENOMOTO_MIP_FOLD").filter(|v| *v != "0" && *v != "off")
+    env_def!("ENOMOTO_MIP_FOLD", "riq")
 }
 
 /// 畳み方と畳んだ問題。

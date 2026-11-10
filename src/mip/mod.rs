@@ -9,7 +9,7 @@
 
 /// 分枝切除法の LP とやり取りする型 (基底・結果・打ち切り条件)。
 pub(crate) mod lp;
-/// 試作 `ENOMOTO_MIP_FOLD`: 色の細分化で MIP を畳む。
+/// `ENOMOTO_MIP_FOLD` (既定): 色の細分化で MIP を畳む。
 pub(crate) mod fold;
 pub(crate) mod lp_api;
 pub(crate) mod problem;
@@ -460,7 +460,7 @@ pub fn solve_mip(
         let params = MipParams { time_limit: tl, ..params };
         if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() { solve_portfolio(q, params) } else { solve_problem(q, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()) }
     };
-    // 試作 `ENOMOTO_MIP_FOLD` (既定では使わない。analysis/drcr_20261110.md): 色の細分化で畳んで解き、元に戻す ([`fold`])
+    // `ENOMOTO_MIP_FOLD` (2026-11-10 から既定、`0` で止める。analysis/drcr_20261110.md): 色の細分化で畳んで解き、元に戻す ([`fold`])
     let r = match fold::solve_folded(&p, params.time_limit, params.verbose, &dispatch) {
         Some(r) => r,
         None => dispatch(&p, params.time_limit),

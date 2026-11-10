@@ -10380,3 +10380,13 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 根拠: Mittelmann の HiGHS に負ける 47 問 (600 秒・2 種、res8): SGM −8.3% (区間 −17.3%〜+0.5%)、解けた 54 → 56 回、1 種でも解く 28 → 30 問。
   res7 (186 問) の cand1108z は既定より解けた +6・SGM −1.7%。遅くなる問題: hypothyroid-k1・enlight_hard・mzzv42z (zerohalf なし)、ns1208400。
 - 記録は `analysis/cand1108zd_default_20261109.md`。
+
+## 2026-11-10: 色の細分化で MIP を畳む ENOMOTO_MIP_FOLD=ri を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_FOLD` (既定の値 `riq` = 反転 (R-DRCR)・整数の組 (アフィンな TU の分解の簡単な十分条件)・ログなし。止めるのは `=0` か `off`)。
+  van der Hulst「Folding Mixed-Integer Linear Programs and Reflection Symmetries」(arXiv 2603.12136、2026) の第 3・4 節の試作。
+  行も列もまとまる畳みだけを使い、平行な列だけ・平行な行だけの畳み (前処理と同じ仕事) はしない。戻した解は全部の回で元の問題で確かめる。
+- 根拠: 58 問 (60 秒・4 種): SGM −1.7% (区間 −9.4%〜+4.5%)、解けた 167 → 171 回。Mittelmann の HiGHS に負ける 47 問のうち畳める 10 問
+  (600 秒・2 種): SGM 103.6 → 61.3 秒、解けた 12 → 16 回 (neos-957323 は時間切れ → 15 秒)。誤答 0 (fuzz_tiny 400・mip_fuzz_vs_highs 300・
+  対称な乱数の fuzz 2000・cargo test)。遅くなる問題: physiciansched6-2 (25 → 40 秒)。
+- LP の `ENOMOTO_LP_FOLD` は既定にしていない。記録は `analysis/drcr_20261110.md`。
