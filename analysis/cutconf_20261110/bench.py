@@ -21,6 +21,7 @@ CFG = {
     "ccx": {"ENOMOTO_MIP_CUTCONF": "x"},
     "ccrx": {"ENOMOTO_MIP_CUTCONF": "rx"},
     "ccb": {"ENOMOTO_MIP_CUTCONF": "b"},
+    "ccw": {"ENOMOTO_MIP_CUTCONF": "w"},
 }
 for k, v in list(CFG.items()):
     if k.startswith("cc") and os.environ.get("CC_EXTRA"):

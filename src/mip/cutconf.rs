@@ -96,7 +96,7 @@ fn bump(i: usize, v: u64) {
 /// `ENOMOTO_MIP_CUTCONF` の値 (付いていなければ `None`)。文字で形を選ぶ:
 /// `m` 得た制約を双対証明と同じく CMIR で強めたカットも作る、`p` 証明のプールに入れない (`m` のカットだけ)、
 /// `r` 伝播の矛盾 (行) からだけ、`d` 証明からだけ、`x` cut-based の衝突ができたらグラフ式の衝突は作らない、
-/// `b` 一般整数列を含む制約は捨てる、`S` 証明のプールで双対証明と同じ分類にする。
+/// `b` 一般整数列を含む制約は捨てる、`w` SCIP と同じ長さの上限 (relaxable な列を消して縮める) と係数の比の上限、`S` 証明のプールで双対証明と同じ分類にする。
 pub fn mode() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_CUTCONF")
 }
@@ -404,6 +404,30 @@ fn dbg_viol(x: &[f64], terms: impl Iterator<Item = (usize, f64)>, rhs: f64) -> f
     a - rhs - 1e-6 * (1.0 + rhs.abs())
 }
 
+
+/// `w` (SCIP の `weakenConflictRow` と同じ): 位置 `pos` の状態で大域的な境界にある (relaxable な) 列を、その境界で消す
+/// (最小活動量は変わらないので余裕も変わらない)。消せない (境界が無限) ものは残す。
+fn weaken_relaxable(h: &Hist, acc: &mut Acc, b: &mut f64, pos: usize) {
+    let mut kill: Vec<usize> = Vec::new();
+    let mut db = 0.0;
+    for &j in &acc.nz {
+        let a = acc.v[j];
+        if a == 0.0 || h.rel_change(j, a, pos).is_some() {
+            continue;
+        }
+        let g = if a > 0.0 { h.glo[j] } else { h.gup[j] };
+        if g.is_finite() {
+            db += a * g;
+            kill.push(j);
+        }
+    }
+    for j in kill {
+        acc.v[j] = 0.0;
+    }
+    *b -= db;
+    acc.compact();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(h: &mut Hist, p: &MipProblem, acc: &mut Acc, b: &mut f64, dec: &[usize], end: usize, max_len: usize, dbg: Option<&[f64]>) -> Option<(Vec<(usize, f64)>, f64)> {
     if !b.is_finite() || !normalize(acc, b) {
@@ -424,6 +448,17 @@ fn run(h: &mut Hist, p: &MipProblem, acc: &mut Acc, b: &mut f64, dec: &[usize], 
     if !(slack_now(h, acc, *b, end) < -eps) {
         bump(st::NO_START, 1);
         return None;
+    }
+    // `w`: SCIP (conflict_resolution.c) と同じ長さの上限 0.2 x (連続でない列の数) と、係数の比の上限 1e6。長すぎれば relaxable な列を
+    // 消して縮め、それでも長ければ止める
+    let wmode = mode().unwrap_or("").contains('w');
+    let wmax = ((tunable!("ENOMOTO_T_MIP_CUTCONF_LEN_FRAC", 0.2, f64) * p.is_int.iter().filter(|&&b| b).count() as f64) as usize).max(1);
+    if wmode && acc.nz.len() > wmax {
+        weaken_relaxable(h, acc, b, end);
+        if acc.nz.len() > wmax {
+            bump(st::STOP_BUDGET, 1);
+            return None;
+        }
     }
     let max_steps = tunable!("ENOMOTO_T_MIP_CUTCONF_STEPS", 200usize, usize);
     let budget = tunable!("ENOMOTO_T_MIP_CUTCONF_WORK", 200_000usize, usize);
@@ -595,6 +630,13 @@ fn run(h: &mut Hist, p: &MipProblem, acc: &mut Acc, b: &mut f64, dec: &[usize], 
         }
         *b -= drop_b;
         acc.compact();
+        if wmode && acc.nz.len() > wmax {
+            weaken_relaxable(h, acc, b, pos);
+            if acc.nz.len() > wmax {
+                bump(st::STOP_BUDGET, 1);
+                return None;
+            }
+        }
         if !normalize(acc, b) {
             return None;
         }
@@ -615,6 +657,13 @@ fn run(h: &mut Hist, p: &MipProblem, acc: &mut Acc, b: &mut f64, dec: &[usize], 
             rhs -= a * h.glo[j];
         } else {
             coefs.push((j, a));
+        }
+    }
+    if wmode {
+        let (mx, mn) = coefs.iter().fold((0.0f64, f64::INFINITY), |(x, n), &(_, a)| (x.max(a.abs()), n.min(a.abs())));
+        if mx > 1e6 * mn {
+            bump(st::DROP, 1);
+            return None;
         }
     }
     let s = h.slack(coefs.iter().copied(), rhs, end);
