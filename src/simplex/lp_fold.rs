@@ -403,9 +403,47 @@ impl Fold {
             if (rcls_bip.len() + ccls_bip.len()) as f64 > opts.max_ratio * (n + 2 * m) as f64 + 1.0 && rcls_bip.len() == m && ccls_bip.len() == ne {
                 nope!();
             }
+            // 組は細かくなる一方で、双極の組は単極に分かれることはあっても戻らないので、構造の列を含む単極の列の組の数と
+            // 単極の行の組の数の和は畳んだ問題の (列 + 行) のおおよその下限 (列のない行は数えすぎ)。上限を超えたらやめる
+            if opts.max_ratio < 1.0 {
+                let mut seen = vec![false; ccls_bip.len()];
+                let mut lb = rcls_bip.iter().filter(|&&b| !b).count();
+                for e in 0..n {
+                    let c = col_cls[e] as usize;
+                    if !ccls_bip[c] && !seen[c] {
+                        seen[c] = true;
+                        lb += 1;
+                    }
+                }
+                if lb as f64 > opts.max_ratio * (n + m) as f64 {
+                    LAST_RATIO.with(|c| c.set(lb as f64 / (n + m) as f64));
+                    nope!();
+                }
+            }
         }
         let ncc = ccls_bip.len();
         let nrc = rcls_bip.len();
+        // 単極の組の符号は組ごとに丸ごと反転してよい (Proposition 15 の後の注意)。補う列・行が少ないよう、多数が +1 の向きにする
+        {
+            let mut cneg = vec![0i64; ncc];
+            for e in 0..ne {
+                cneg[col_cls[e] as usize] += if col_sg[e] < 0.0 { 1 } else { -1 };
+            }
+            for e in 0..ne {
+                if !ccls_bip[col_cls[e] as usize] && cneg[col_cls[e] as usize] > 0 {
+                    col_sg[e] = -col_sg[e];
+                }
+            }
+            let mut rneg = vec![0i64; nrc];
+            for v in 0..m {
+                rneg[row_cls[v] as usize] += if row_sg[v] < 0.0 { 1 } else { -1 };
+            }
+            for v in 0..m {
+                if !rcls_bip[row_cls[v] as usize] && rneg[row_cls[v] as usize] > 0 {
+                    row_sg[v] = -row_sg[v];
+                }
+            }
+        }
         // 組の大きさ
         let mut csize = vec![0usize; ncc];
         let mut csize_struct = vec![0usize; ncc];
@@ -862,6 +900,9 @@ pub fn max_violation(p: &FoldIn, x: &[f64]) -> f64 {
 /// 弱双対の下界 g(π) = min_{x∈箱} (c − Aᵀπ) x + min_{r∈[lo,up]} π r (最小化。π の符号の約束によらないよう ±π の大きい方)。
 pub fn dual_bound(p: &FoldIn, pi: &[f64]) -> f64 {
     let n = p.col_lo.len();
+    // ごく小さい双対値 (丸め誤差で符号が揺れる) は 0 とみなす
+    let pmax = pi.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+    let pi: Vec<f64> = pi.iter().map(|&y| if y.abs() <= 1e-12 * (1.0 + pmax) { 0.0 } else { y }).collect();
     let one = |sg: f64| -> f64 {
         let mut d: Vec<f64> = p.cost.to_vec();
         for (v, r) in p.rows.iter().enumerate() {
@@ -969,11 +1010,38 @@ mod tests {
         assert!((obj - (f.red.cost[0] * z + f.red.offset)).abs() < 1e-9);
         assert!((obj - (-1.0)).abs() < 1e-9, "obj = {obj}");
     }
+    #[test]
+    fn reflection_duals_map_to_optimal_duals() {
+        // fuzz_fold.py の seed 5 (lp): 反転で畳んだ LP の双対値を配ると元の LP の最適な双対値になる
+        let lo = vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let up = vec![1.0, 1.0, 2.0, 1.0, 2.0, 4.0, 1.0, 4.0, 2.0, 4.0, 4.0, 2.0];
+        let c = vec![-5.0, 5.0, -3.0, 5.0, -3.0, -5.0, 5.0, -5.0, 3.0, -5.0, 5.0, -3.0];
+        let int = vec![false; lo.len()];
+        let rows: Vec<Vec<(usize, f64)>> = vec![vec![(1, 1.0), (7, 2.0), (2, -1.0)], vec![(5, 3.0), (4, -2.0)], vec![(1, 3.0), (7, 1.0), (2, -2.0)], vec![(3, 1.0), (9, 2.0), (11, -1.0)], vec![(11, 1.0), (8, -1.0), (4, 1.0), (2, 1.0)], vec![(6, 1.0), (5, 2.0), (4, -1.0)], vec![(0, -1.0), (10, -2.0), (8, 1.0)], vec![(9, 3.0), (11, -2.0)], vec![(7, 3.0), (2, -2.0)], vec![(6, 3.0), (5, 1.0), (4, -2.0)], vec![(3, 1.0), (0, -1.0), (6, 1.0), (1, 1.0)], vec![(10, -3.0), (8, 2.0)], vec![(0, -3.0), (10, -1.0), (8, 2.0)], vec![(3, 3.0), (9, 1.0), (11, -2.0)]];
+        let rlo = vec![f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+        let rup = vec![4.0, 4.0, 0.0, 4.0, 1.0, 4.0, -3.0, 4.0, 4.0, 0.0, 0.0, -4.0, -3.0, 0.0];
+        let p = fin(&lo, &up, &c, &int, &rows, &rlo, &rup);
+        let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&lo, &up, &c, &rows, &rlo, &rup);
+        lp.solve(&crate::mip::lp::SolveLimits::default());
+        let pi = lp.row_duals();
+        eprintln!("orig obj {} duals {:?} bound {}", lp.objective(), pi, dual_bound(&p, &pi));
+        let f = Fold::build(&p, FoldOpts { reflect: true, max_ratio: 1.0, ..Default::default() }).unwrap();
+        let r = &f.red;
+        eprintln!("red {:?}", r);
+        eprintln!("col_red {:?} sign {:?} off {:?} row_red {:?} row_sign {:?}", f.col_red, f.col_sign, f.col_off, f.row_red, f.row_sign);
+        let mut lp2 = crate::simplex::mip_lp::TwoStageLp::new(&r.col_lo, &r.col_up, &r.cost, &r.rows, &r.row_lo, &r.row_up);
+        lp2.solve(&crate::mip::lp::SolveLimits::default());
+        let pi2 = f.unfold_duals(&lp2.row_duals());
+        let g = dual_bound(&p, &pi2);
+        eprintln!("red obj {} rduals {:?} mapped {:?} bound {}", lp2.objective() + r.offset, lp2.row_duals(), pi2, g);
+        assert!((g - lp.objective()).abs() < 1e-7, "dual bound {g}");
+    }
+
 }
 
 /// `ENOMOTO_LP_FOLD` の値 (付けていなければ `None`)。値の文字: `r` 反転も使う (R-DRCR)、`v` 検査 (畳んだ問題を MIP の LP の
 /// 実装でも解いて双対値を配り、元の問題の弱双対の下界と主の目的値の差 (相補性) を確かめる。外れたら畳まずに解く)、
-/// `q` ログを出さない。`1` は反転なし。
+/// `q` ログを出さない、`c` 畳んだ数を出すだけで解かない (`not_solved` を返す。数える用)。`1` は反転なし。
 pub fn lp_fold_flags() -> Option<&'static str> {
     env_str!("ENOMOTO_LP_FOLD").filter(|v| *v != "0" && *v != "off")
 }
@@ -1021,6 +1089,10 @@ pub fn try_solve_lp(
     LAST_FAIL.with(|c| c.set(0));
     LAST_RATIO.with(|c| c.set(1.0));
     let Some(f) = Fold::build(&fin, opts_from_env(reflect)) else {
+        if flags.contains('c') {
+            eprintln!("LP_FOLD: no fold (n {} m {}) in {:.3}s (reason line {}, ratio {:.3})", n, rows.len(), t0.elapsed().as_secs_f64(), LAST_FAIL.with(|c| c.get()), LAST_RATIO.with(|c| c.get()));
+            return Some(SolveResult { status: Status::NotSolved, objective: None, x: None, node_limit_hit: false, mip: None });
+        }
         if log {
             eprintln!(
                 "LP_FOLD: no fold (n {} m {}) in {:.3}s (reason line {}, ratio {:.3})",
@@ -1040,6 +1112,10 @@ pub fn try_solve_lp(
             "LP_FOLD: n {} -> {}, m {} -> {} (bip cols {}, bip rows {}, neg cols {}, absorbed {}, rounds {}) in {:.3}s",
             st.n, st.n_red, st.m, st.m_red, st.bip_cols, st.bip_rows, st.neg_cols, st.absorbed, st.rounds, t_build
         );
+    }
+    if flags.contains('c') {
+        // 数えるだけ (解かずに終える)
+        return Some(SolveResult { status: Status::NotSolved, objective: None, x: None, node_limit_hit: false, mip: None });
     }
     // 畳んだ問題を元の形 (変数・目的・制約) にする
     let r = &f.red;

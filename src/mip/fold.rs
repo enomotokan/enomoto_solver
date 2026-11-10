@@ -2,7 +2,7 @@
 //! (van der Hulst 2026「Folding Mixed-Integer Linear Programs and Reflection Symmetries」の第 4 節)。畳み方の本体は
 //! [`crate::simplex::lp_fold`]。
 //!
-//! 値の文字: `r` 反転も使う、`i` 整数列もまとめる (段階 3)、`q` ログを出さない。`1` は連続列だけ・反転なし。
+//! 値の文字: `r` 反転も使う、`i` 整数列もまとめる (段階 3)、`q` ログを出さない、`c` 畳んだ数を出すだけで解かない (数える用)。`1` は連続列だけ・反転なし。
 //!
 //! - 連続列だけ (段階 2): 整数列はどれも 1 列だけの組にする (論文の Lemma 28)。和の等しい行は整数列の係数が同じになるので、
 //!   畳んだ MIP と元の MIP は解が行き来でき (x_w = δ_w + λ_w z_Q、整数列は δ が整数)、最適値も同じ。
@@ -401,6 +401,11 @@ impl MipFold {
 
 /// `ENOMOTO_MIP_FOLD`: 畳んで `solve` で解き、元に戻す。畳まないなら `None`。安全網に外れたら残りの時間で元を `solve` で解く。
 pub fn solve_folded(p: &MipProblem, time_limit: f64, verbose: bool, solve: &dyn Fn(&MipProblem, f64) -> MipResult) -> Option<MipResult> {
+    if flags().is_some_and(|f| f.contains('c')) {
+        // 数えるだけ (畳んだ数を出して解かずに終える)
+        let _ = try_fold(p, true);
+        return Some(MipResult { status: MipStatus::NotSolved, x: None, objective: None, best_bound: f64::NEG_INFINITY, nodes: 0, lp_iterations: 0 });
+    }
     let mf = try_fold(p, verbose)?;
     let t0 = std::time::Instant::now();
     let mut r = solve(&mf.q, (time_limit - mf.secs).max(0.0));
