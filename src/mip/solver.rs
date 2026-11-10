@@ -1022,7 +1022,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 証明ごとの状態 (`dual_proofs` と同じ並び、[`ProofState`])。
     proof_state: std::collections::VecDeque<ProofState>,
     /// 生きている証明の通し番号を古い順に、[自前, 取り込み] ごとに (上限を分けて古いものから捨てるため)。
-    proof_fifo: [std::collections::VecDeque<u64>; 2],
+    proof_fifo: [std::collections::VecDeque<u64>; 3],
     /// 捨てた (中身を空にした) が、まだ `dual_proofs` に残っている証明の数。
     proof_dead: usize,
     /// 証明ごとの、前に捨てる候補になってから刈り込み・締め付けに使われたかの印 (木を分け合うとき、`ENOMOTO_MIP_PROOF_NO_AGING` でなければ: 捨てるときに
@@ -1053,6 +1053,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     conflicts_added: u64,
     /// HiGHS 式の衝突解析 [呼び出し, 作った衝突, 入れた衝突, 長さの和]
     multi_stats: [u64; 4],
+    /// 試作 `ENOMOTO_MIP_CUTCONF`: 証明のプールに cut-based の衝突の制約を入れている最中 (分類 2 にする)
+    cutconf_push: bool,
     multi_secs: f64,
     /// HiGHS 式のカット選択の状態 (これまでの最良のスコア、残す下限の係数)
     pub(super) cutsel_best: f64,
@@ -4701,7 +4703,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_cuts: std::collections::VecDeque::new(),
         proof_pending_cuts: None,
         proof_state: std::collections::VecDeque::new(),
-        proof_fifo: [std::collections::VecDeque::new(), std::collections::VecDeque::new()],
+        proof_fifo: [std::collections::VecDeque::new(), std::collections::VecDeque::new(), std::collections::VecDeque::new()],
         proof_dead: 0,
         proof_ref: std::collections::VecDeque::new(),
         proof_col_index: [Vec::new(), Vec::new()],
@@ -4719,6 +4721,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_dirty: true,
         conflicts_added: 0,
         multi_stats: [0; 4],
+        cutconf_push: false,
         multi_secs: 0.0,
         cutsel_best: 0.0,
         cutsel_factor: 0.9,
@@ -15251,6 +15254,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_T_MIP_PROOF_POOL_IMPORTED`
         let cat = (state == ProofState::Imported) as usize;
         let cap = if cat == 0 { tunable!("ENOMOTO_T_MIP_PROOF_POOL", 2000usize, usize) } else { tunable!("ENOMOTO_T_MIP_PROOF_POOL_IMPORTED", 500usize, usize) };
+        // 試作 `ENOMOTO_MIP_CUTCONF`: cut-based の衝突の制約は別の分類 (2) にして、双対証明を追い出さない
+        let cat = if cat == 0 && self.cutconf_push { 2 } else { cat };
         // 木を分け合うとき、`ENOMOTO_T_MIP_PROOF_POOL_PER_COL` = c (> 0、既定 4): 上限を max(200, c * 列数) 以下にする (小さい問題で証明のプールが問題より
         // ずっと大きくなり、ノードごとの伝播が重くなるのを避ける)
         let per_col = tunable!("ENOMOTO_T_MIP_PROOF_POOL_PER_COL", 4usize, usize);
@@ -15263,7 +15268,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 非零の上限: 取り込みから、なければ自前の古いものから捨てる
         while self.dual_proof_nnz + coefs.len() > nnz_cap {
-            let c = if !self.proof_fifo[1].is_empty() { 1 } else if !self.proof_fifo[0].is_empty() { 0 } else { break };
+            let c = if !self.proof_fifo[1].is_empty() { 1 } else if !self.proof_fifo[2].is_empty() { 2 } else if !self.proof_fifo[0].is_empty() { 0 } else { break };
             self.proof_evict(c);
         }
         // 捨てたものが多ければ詰め直す (先頭から取り除くと証明の番号がずれて差分を作り直すことになるので、まとめて行う)
@@ -15459,7 +15464,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.add_proof_cmir(&coefs, rhs);
         }
         if !mode.contains('p') {
+            self.cutconf_push = !mode.contains('S');
             self.push_pool_row(coefs, rhs, false);
+            self.cutconf_push = false;
         }
     }
 
