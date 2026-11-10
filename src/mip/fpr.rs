@@ -748,3 +748,50 @@ impl<'a, L: MipLp> Solver<'a, L> {
         found
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 0-1 列 6 本、x0 + x1 + x2 = 1、x3 + x4 + x5 = 1、x0 + x3 <= 1、x0 - x4 >= 0 (x4 = 1 なら x0 = 1)、x2 + x5 >= 1。
+    /// 目的は全部 +1 (目的の良い端は 0)。0 に固定していくと伝播が矛盾するので repair が要る。全ての組み合わせで実行可能解を返すこと。
+    #[test]
+    fn fpr_finds_feasible_points() {
+        let n = 6;
+        let rows = vec![
+            vec![(0, 1.0), (1, 1.0), (2, 1.0)],
+            vec![(3, 1.0), (4, 1.0), (5, 1.0)],
+            vec![(0, 1.0), (3, 1.0)],
+            vec![(0, 1.0), (4, -1.0)],
+            vec![(2, 1.0), (5, 1.0)],
+        ];
+        let p = MipProblem::from_rows(
+            vec![0.0; n],
+            vec![1.0; n],
+            vec![1.0; n],
+            0.0,
+            1.0,
+            vec![true; n],
+            rows,
+            vec![1.0, 1.0, f64::NEG_INFINITY, 0.0, 1.0],
+            vec![1.0, 1.0, 1.0, f64::INFINITY, f64::INFINITY],
+        );
+        let mut dom = Domain::new(&p);
+        assert!(dom.propagate(&p));
+        let locks = super::super::heuristics::compute_locks(&p);
+        let mut found = 0;
+        for (k, &(o, v)) in LP_FREE.iter().enumerate() {
+            for seed in 0..4u64 {
+                let r = fpr_run(&p, &mut dom, &locks, None, o, v, false, 1 + seed * 7 + k as u64, None, None);
+                if r.complete {
+                    let x = r.x.unwrap();
+                    assert!(p.is_feasible(&x, 1e-9), "{o:?}/{v:?}: {x:?}");
+                    found += 1;
+                }
+            }
+        }
+        // 定義域は元に戻る
+        assert!(dom.lo.iter().all(|&v| v == 0.0) && dom.up.iter().all(|&v| v == 1.0));
+        assert!(found >= LP_FREE.len() * 4 / 2, "found {found}");
+    }
+}
