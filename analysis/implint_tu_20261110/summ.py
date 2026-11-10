@@ -50,6 +50,9 @@ for name, pat, tl, probs in [("58 問 (60 秒)", "b58*.jsonl", 60.0, P58), ("47 
         continue
     R = bl.table(rs)
     bl.TL = tl
+    # benchlib の ok・t・lt は既定の引数で 60 秒を持つので、時間の上限を差し替える
+    for fn in (bl.ok, bl.t, bl.lt):
+        fn.__defaults__ = (tl,)
     cfgs = sorted({r["cfg"] for r in rs})
     print(f"\n## {name}  設定 {cfgs}")
     keys_all = [k for k in R if k[0] in probs]
