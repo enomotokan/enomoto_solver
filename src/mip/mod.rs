@@ -42,6 +42,7 @@ pub(crate) mod cmirdelta;
 pub(crate) mod seplearn;
 pub(crate) mod mcf;
 pub(crate) mod clique;
+pub(crate) mod cutsel_ens;
 pub(crate) mod pretime;
 pub(crate) mod plsb;
 

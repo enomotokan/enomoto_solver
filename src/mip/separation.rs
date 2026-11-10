@@ -931,6 +931,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nmax = if pool && alt_has('N') { 1000usize } else { tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize) }.min(p.m.max(50));
             let chosen = if pool && alt_has('S') {
                 self.select_cuts_highs(cands, nmax, &x, tunable!("ENOMOTO_T_CUTSEL_HIGHS_MAXPAR", 0.1, f64))
+            } else if let Some(fl) = super::cutsel_ens::flags(self.params.submip) {
+                select_cuts_ens(cands, &forced_r, nmax, p, fl)
             } else {
                 select_cuts(cands, nmax, p)
             };
@@ -2224,6 +2226,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else {
                     self.select_cuts_highs(cands, max_cuts, &x, maxpar)
                 }
+            } else if let Some(fl) = super::cutsel_ens::flags(self.params.submip).filter(|_| !fc_relax) {
+                // 試作 `ENOMOTO_MIP_CUTSEL_ENS` (既定では使わない): SCIP の cutsel_ensemble の点数・間引き・止め方 ([`super::cutsel_ens`])
+                select_cuts_ens(cands, &forced, max_cuts, p, fl)
             } else if fc_relax {
                 select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_FC_MIN_REL", 0.0, f64), tunable!("ENOMOTO_T_CUTSEL_FC_MAXPAR", 0.9, f64))
             } else if env_str!("ENOMOTO_MIP_ROOT_CUT_HIGHS").is_some() && self.root_cut_highs() && job.is_none() {
@@ -6995,6 +7000,17 @@ fn mpsep_flags(submip: bool, in_job: bool) -> Option<String> {
         return None;
     }
     Some(v.to_string())
+}
+
+/// 試作 `ENOMOTO_MIP_CUTSEL_ENS` の選択 ([`super::cutsel_ens::select`])。候補が多すぎて使わない (`c`) なら [`select_cuts`]
+fn select_cuts_ens(cands: Vec<Candidate>, forced: &[Candidate], max_cuts: usize, p: &MipProblem, fl: &str) -> Vec<Candidate> {
+    let cs: Vec<(&[(usize, f64)], f64)> = cands.iter().map(|c| (c.coefs.as_slice(), c.efficacy)).collect();
+    let fs: Vec<&[(usize, f64)]> = forced.iter().map(|c| c.coefs.as_slice()).collect();
+    let Some(sel) = super::cutsel_ens::select(&cs, &fs, p, max_cuts, fl) else {
+        return select_cuts(cands, max_cuts, p);
+    };
+    let mut slot: Vec<Option<Candidate>> = cands.into_iter().map(Some).collect();
+    sel.into_iter().filter_map(|i| slot[i].take()).collect()
 }
 
 fn select_cuts(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) -> Vec<Candidate> {
