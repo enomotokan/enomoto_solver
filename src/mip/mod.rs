@@ -9,6 +9,8 @@
 
 /// 分枝切除法の LP とやり取りする型 (基底・結果・打ち切り条件)。
 pub(crate) mod lp;
+/// 試作 `ENOMOTO_MIP_FOLD`: 色の細分化で MIP を畳む。
+pub(crate) mod fold;
 pub(crate) mod lp_api;
 pub(crate) mod problem;
 pub(crate) mod domain;
@@ -453,7 +455,15 @@ pub fn solve_mip(
     if crate::simplex::nb_diag::on() {
         crate::simplex::nb_diag::reset();
     }
-    let r = if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() { solve_portfolio(&p, params) } else { solve_problem(&p, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()) };
+    let dispatch = |q: &MipProblem, tl: f64| {
+        let params = MipParams { time_limit: tl, ..params };
+        if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() { solve_portfolio(q, params) } else { solve_problem(q, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()) }
+    };
+    // 試作 `ENOMOTO_MIP_FOLD` (既定では使わない。analysis/drcr_20261110.md): 色の細分化で畳んで解き、元に戻す ([`fold`])
+    let r = match fold::solve_folded(&p, params.time_limit, params.verbose, &dispatch) {
+        Some(r) => r,
+        None => dispatch(&p, params.time_limit),
+    };
     if solver::end_diag() || params.verbose {
         eprintln!("MIP: solve returned {:?} after {:.2}s (time limit {:.2}s)", r.status, t_solve.elapsed().as_secs_f64(), params.time_limit);
     }

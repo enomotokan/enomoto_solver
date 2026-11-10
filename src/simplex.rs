@@ -133,6 +133,8 @@ mod sifting;
 mod dualize;
 /// 分枝限定法から二段解法を使うためのラッパー (前処理なしの標準形を保持し、warm start で解く)。
 pub(crate) mod mip_lp;
+/// 試作 `ENOMOTO_LP_FOLD`・`ENOMOTO_MIP_FOLD`: 色の細分化による次元削減 (DRCR・R-DRCR)。
+pub(crate) mod lp_fold;
 /// 診断用 (`ENOMOTO_MIP_NB_DIAG`): `set_basis` の置き場所と `nb_hint` の食い違いを数える。
 pub(crate) mod nb_diag;
 #[cfg(test)]

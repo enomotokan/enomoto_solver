@@ -18,6 +18,20 @@ pub fn solve_lp(
     root_solver: RootSolver,
     opts: LpOptions,
 ) -> SolveResult {
+    // 試作 `ENOMOTO_LP_FOLD` (既定では使わない。analysis/drcr_20261110.md): 色の細分化で畳んで解き、解を配る
+    if let Some(r) = simplex::lp_fold::try_solve_lp(variables, objective, constraints, &|v, o, c| solve_lp_plain(v, o, c, root_solver, opts)) {
+        return r;
+    }
+    solve_lp_plain(variables, objective, constraints, root_solver, opts)
+}
+
+fn solve_lp_plain(
+    variables: &[VariableData],
+    objective: &Objective,
+    constraints: &[ConstraintRow],
+    root_solver: RootSolver,
+    opts: LpOptions,
+) -> SolveResult {
     let (status, x) = match root_solver {
         RootSolver::Simplex => {
             let result = simplex::solve_lp_dual_with(variables, objective, constraints, opts);
