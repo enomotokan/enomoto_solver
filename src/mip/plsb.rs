@@ -101,10 +101,6 @@ impl GainStats {
         GainStats { min: f64::INFINITY, max: f64::NEG_INFINITY, ..Default::default() }
     }
 
-    pub fn clear(&mut self) {
-        *self = Self::new();
-    }
-
     /// 左右の利得 (どちらも >= 0) の観測を足す。足した幾何平均を返す (大きすぎて捨てたなら None)
     pub fn add(&mut self, down: f64, up: f64) -> Option<f64> {
         if !(down < MAX_GAIN && up < MAX_GAIN) {
@@ -123,16 +119,6 @@ impl GainStats {
         self.min = self.min.min(g);
         self.max = self.max.max(g);
         Some(g)
-    }
-
-    pub fn merge(&mut self, o: &GainStats) {
-        self.n += o.n;
-        self.nzero += o.nzero;
-        self.sum += o.sum;
-        self.sum_log += o.sum_log;
-        self.sum_log2 += o.sum_log2;
-        self.min = self.min.min(o.min);
-        self.max = self.max.max(o.max);
     }
 
     fn zero_prob(&self) -> f64 {
