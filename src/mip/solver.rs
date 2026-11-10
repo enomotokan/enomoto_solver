@@ -6396,7 +6396,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 暫定解なし用の RENS (-2851 = 最適値を出す) が回らなくなった
             // FJ のスレッドの Local-MIP (`ENOMOTO_MIP_FJ_LMIP_MIX`・`ENOMOTO_MIP_FJ_LOCALMIP`・`ENOMOTO_MIP_LOCALMIP`) の解も同じに扱う。
             // そうしないと、混ぜた形では FJ の解も受け渡し箱を通って「Local-MIP」の名で入り、hypothyroid-k1 で RENS が回らず -3 のまま終わった
-            self.inc_only_fj = self.heur_label.starts_with("feasibility jump") || self.heur_label.starts_with("find thread") || self.heur_label == "Local-MIP";
+            // 試作 `ENOMOTO_MIP_FPR` の別スレッドの解も同じに扱う (10teams・hypothyroid-k1 で、その早くて質の悪い解が FJ のスレッドの延長と暫定解なし用の
+            // ヒューリスティクスを止めていた。analysis/fpr_20261110.md)
+            self.inc_only_fj = self.heur_label.starts_with("feasibility jump") || self.heur_label.starts_with("find thread") || self.heur_label == "Local-MIP"
+                || self.heur_label == "FPR (thread)";
             if !self.proof_first_z.is_finite() {
                 self.proof_first_z = z;
             }
