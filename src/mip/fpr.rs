@@ -23,11 +23,13 @@ use super::problem::MipProblem;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-/// `ENOMOTO_MIP_FPR` の文字 `c` を使うか (値が空・`1` なら `t`・`r`・`b` 全部)。
+/// `ENOMOTO_MIP_FPR` の文字 `c` を使うか (値が空・`1` なら `t`・`r`・`b` 全部)。`p` は論文に寄せた核 ([`super::fpr_paper`]) を使う
+/// (`p` だけなら `t`・`r`・`b` も全部使う)。
 pub(crate) fn fpr_on(c: char) -> bool {
     match env_str!("ENOMOTO_MIP_FPR") {
         None => false,
         Some(v) if v.is_empty() || v == "1" => matches!(c, 't' | 'r' | 'b'),
+        Some("p") => matches!(c, 't' | 'r' | 'b' | 'p'),
         Some(v) => v.contains(c),
     }
 }
@@ -571,7 +573,14 @@ pub(crate) fn fpr_thread(p: &MipProblem, cap: f64, seed: u64, stop: &AtomicBool,
     while Instant::now() < deadline.unwrap() && !stop.load(Ordering::Relaxed) {
         let (o, v) = LP_FREE[runs as usize % LP_FREE.len()];
         let s = seed.wrapping_add(runs.wrapping_mul(0xD1B5_4A32_D192_ED03));
-        let r = fpr_run(p, &mut dom, &locks, None, o, v, false, s, deadline, Some(stop));
+        let r = if fpr_on('p') {
+            // 論文に寄せた核 ([`super::fpr_paper`]): Class 1 の 8 通りを回し、2 周目からは順の先頭を混ぜる
+            let cfg = super::fpr_paper::CLASS1[runs as usize % super::fpr_paper::CLASS1.len()];
+            let q = super::fpr_paper::fpr_attempt(p, &mut dom, &locks, None, cfg, runs / super::fpr_paper::CLASS1.len() as u64, false, s, deadline, Some(stop));
+            FprOut { x: q.x, complete: q.complete, repairs: q.repairs, moves: q.repairs_ok }
+        } else {
+            fpr_run(p, &mut dom, &locks, None, o, v, false, s, deadline, Some(stop))
+        };
         runs += 1;
         if let Some(x) = r.x {
             if r.complete {
@@ -721,7 +730,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (o, v) = if k % 3 == 2 { LP_FREE[(k / 3) % LP_FREE.len()] } else { WITH_LP[(k - k / 3) % WITH_LP.len()] };
             let seed = self.rng ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
             let locks = std::mem::take(&mut self.locks);
-            let r = fpr_run(p, &mut self.dom, &locks, Some(x), o, v, true, seed, Some(deadline), None);
+            let r = if fpr_on('p') {
+                use super::fpr_paper as fp;
+                let cfg = if k % 3 == 2 { fp::CLASS1[(k / 3) % fp::CLASS1.len()] } else { fp::WITH_LP[(k - k / 3) % fp::WITH_LP.len()] };
+                let q = fp::fpr_attempt(p, &mut self.dom, &locks, Some(x), cfg, (k / 12) as u64, true, seed, Some(deadline), None);
+                FprOut { x: q.x, complete: q.complete, repairs: q.repairs, moves: q.repairs_ok }
+            } else {
+                fpr_run(p, &mut self.dom, &locks, Some(x), o, v, true, seed, Some(deadline), None)
+            };
             self.locks = locks;
             nrep += r.repairs;
             nmov += r.moves;
