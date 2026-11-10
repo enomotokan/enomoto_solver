@@ -6,7 +6,7 @@ D = Path(__file__).resolve().parent
 WT = D.parents[1]
 sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
-CFGS = {"def": {}, "fpr": {"ENOMOTO_MIP_FPR": "1"}, "fprt": {"ENOMOTO_MIP_FPR": "t"}, "fprr": {"ENOMOTO_MIP_FPR": "rb"},
+CFGS = {"def": {}, "fpr": {"ENOMOTO_MIP_FPR": "1"}, "fprt": {"ENOMOTO_MIP_FPR": "t"}, "fpr2": {"ENOMOTO_MIP_FPR": "1"}, "fprr": {"ENOMOTO_MIP_FPR": "rb"},
         "fprbandit": {"ENOMOTO_MIP_FPR": "1", "ENOMOTO_MIP_NOINC_BANDIT": "1"}}
 out, cfg, seed, tl = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
 probs = sys.argv[5:]
