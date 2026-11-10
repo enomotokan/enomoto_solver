@@ -139,6 +139,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let nint = ints.len() as f64;
         let rate = |s: &Self| ints.iter().filter(|&&j| s.dom.lo[j] == s.dom.up[j]).count() as f64 / nint;
+        // 試作 `ENOMOTO_MIP_GAP4` の `k`: locks の固定の伝播に前処理の含意 (`conflict_edges`) も使う (写しの定義域で固定し、終わったら戻す)。
+        // 行の伝播だけでは、`q` の前処理が含意で見つけた矛盾を見落とし、サブ MIP の前処理ですぐ実行不能になっていた (neos-3216931-puriri)
+        let saved_dom = if label == "locks" && super::solver::gap4('k') && !p.conflict_edges.is_empty() {
+            let mut d = self.dom.clone();
+            d.add_implications(p.n, &p.conflict_edges);
+            if !d.propagate(p) {
+                return false;
+            }
+            Some(std::mem::replace(&mut self.dom, d))
+        } else {
+            None
+        };
         let pos = self.dom.stack_len();
         let work0 = self.dom.debug_work();
         let work_cap = 20 * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
@@ -162,7 +174,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let fr = rate(self);
         let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
-        self.dom.backtrack_to(p, pos);
+        match saved_dom {
+            Some(d) => self.dom = d,
+            None => self.dom.backtrack_to(p, pos),
+        }
         if label == "locks" {
             self.gap4_locks.0 = fr;
         }
