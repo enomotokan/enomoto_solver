@@ -33,7 +33,8 @@ for p in probs:
         res = {"status": "crash", "returncode": pr.returncode}
     fl = [l for l in pr.stderr.splitlines() if "FPR" in l and "FPR run" not in l][:12]
     # 誤答の検査用: 暫定解と下界
-    rec = {"problem": p, "cfg": cfg, "seed": seed, "tl": tl, "result": res, "fpr_lines": fl, "wall": round(time.time() - t0, 1)}
+    inc = [l for l in pr.stderr.splitlines() if "new incumbent" in l or "FJ thread" in l or "feasibility jump" in l][:10]
+    rec = {"incumbent_lines": inc, "problem": p, "cfg": cfg, "seed": seed, "tl": tl, "result": res, "fpr_lines": fl, "wall": round(time.time() - t0, 1)}
     with open(OUT, "a") as f:
         f.write(json.dumps(rec) + "\n")
     print(p, cfg, seed, res.get("status"), res.get("time"), res.get("first_solution_time"), res.get("objective"), flush=True)
