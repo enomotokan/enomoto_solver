@@ -6242,7 +6242,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 捨てられていた (以前は対称性なしで 4 を見つけていた)
             // FJ と Local-MIP を混ぜる形 (`ENOMOTO_MIP_FJ_LMIP_MIX`) の解には既定で使う: Local-MIP は対称性の行のない問題で探すので、
             // neos-950242 では最適解 4 が lex-leader の行に反して拒まれ 5〜8 で止まっていた (並べ替えると 3 回とも根で最適)
-            let lex_canon = env_str!("ENOMOTO_MIP_SYM_LEX_CANON").is_some() || (fj_lmip_mix_on() && self.heur_label == "Local-MIP");
+            // 試作 `ENOMOTO_MIP_FPR` のスレッドの解 (対称性の行のない問題で探す) にも使う
+            let lex_canon = env_str!("ENOMOTO_MIP_SYM_LEX_CANON").is_some() || (fj_lmip_mix_on() && self.heur_label == "Local-MIP") || self.heur_label == "FPR (thread)";
             if !self.lex_gens.is_empty() && !self.p.is_feasible(&x, FEASTOL) && lex_canon {
                 super::symmetry::lex_canonicalize(&self.lex_gens, &mut x, 4 * self.lex_gens.len() * 64 + 1000);
             }
