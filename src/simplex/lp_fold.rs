@@ -235,7 +235,7 @@ fn refine_fast(
     let mut work = 0usize;
     let mut work_check = 0usize;
     let mut splitter: Vec<u32> = Vec::new();
-    let mut keyed: Vec<(u32, i64, u32)> = Vec::new(); // (組, 鍵, 要素)
+    let mut keyed: Vec<(u32, f64, u32)> = Vec::new(); // (組, 値, 要素)
     while let Some((sd, c)) = queue.pop_front() {
         sides[sd].queued[c as usize] = false;
         if sides[sd].bip[c as usize] {
@@ -278,20 +278,16 @@ fn refine_fast(
             let t = &sides[td];
             for &e in &touched {
                 let x = t.cls[e as usize];
-                if t.bip[x as usize] {
-                    let k = qk(acc[e as usize].abs());
-                    if k != 0 {
-                        keyed.push((x, k, e));
-                    }
-                } else {
-                    let k = qk(t.sg[e as usize] * acc[e as usize]);
-                    if k != 0 {
-                        keyed.push((x, k, e));
-                    }
+                // 値 (双極の組は絶対値、単極の組は γ をかけた値)。ごく小さい値は 0 (触れていないのと同じ)
+                let val = if t.bip[x as usize] { acc[e as usize].abs() } else { t.sg[e as usize] * acc[e as usize] };
+                if qk(val) != 0 {
+                    keyed.push((x, val, e));
                 }
             }
         }
-        keyed.sort_unstable();
+        // 組ごとに値で並べ、隣と相対 1e-10 の内なら同じ片にする (丸めた鍵の境目をまたぐ丸めの誤差で割りすぎないよう)
+        keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)));
+        let same = |a: f64, b: f64| (a - b).abs() <= 1e-10 * a.abs().max(b.abs()) + 1e-13;
         let mut i = 0;
         while i < keyed.len() {
             let x = keyed[i].0;
@@ -308,8 +304,8 @@ fn refine_fast(
             let mut groups: Vec<(usize, usize)> = Vec::new();
             let mut a = i;
             while a < j {
-                let mut b = a;
-                while b < j && keyed[b].1 == keyed[a].1 {
+                let mut b = a + 1;
+                while b < j && same(keyed[b].1, keyed[b - 1].1) {
                     b += 1;
                 }
                 groups.push((a, b));
