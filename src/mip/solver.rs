@@ -14528,7 +14528,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// [`Self::orbital_fixing`] を呼び、矛盾なら衝突を作って刈った数を数える。
     fn orbital_fixing_checked(&mut self, changes: &[BoundChange]) -> bool {
         if let Some(sd) = self.symdyn.clone() {
-            // 試作 `ENOMOTO_MIP_SYMDYN`: orbital fixing の代わりに動的な辞書式の縮小 (分枝した列の順)
+            // 試作 `ENOMOTO_MIP_SYMDYN`: orbital fixing の代わりに動的な辞書式の縮小 (分枝した列の順)。`=f` なら orbital fixing の後に足す
+            if super::symdyn::symdyn_keep_of() && !self.of_gens.is_empty() && !self.orbital_fixing(changes) {
+                if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
+                    self.add_conflict();
+                }
+                self.of_stats[2] += 1;
+                return false;
+            }
             let order = super::symdyn::branch_order(changes, self.p.n);
             let ok = sd.propagate(self.p, &mut self.dom, &order, &mut self.symdyn_stats);
             if !ok && self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
@@ -20317,7 +20324,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let (a, b) = sd.counts();
                 let st = self.symdyn_stats;
                 eprintln!("MIP: SYMDYN ({a} permutations, {b} reflections): tightened {} bounds at {} nodes, pruned {} nodes, strict {}", st[0], st[1], st[2], st[3]);
-            } else if !self.of_gens.is_empty() {
+            }
+            if (self.symdyn.is_none() || super::symdyn::symdyn_keep_of()) && !self.of_gens.is_empty() {
                 eprintln!("MIP: orbital fixing ({} generators): fixed {} bounds at {} nodes, pruned {} nodes", self.of_gens.gens.len(), self.of_stats[0], self.of_stats[1], self.of_stats[2]);
             }
             if !self.orbitopes.is_empty() {

@@ -61,6 +61,102 @@ pub fn symdyn_orbital() -> bool {
     env_str!("ENOMOTO_MIP_SYMDYN").is_some_and(|v| v.contains('o'))
 }
 
+/// `ENOMOTO_MIP_SYMDYN=f` (値に `f` を含む): 既定の orbital fixing を残し、その後に辞書式の縮小を足す (van Doornmalen・Hojny の
+/// 補題 6・24・25: 0-1 列の orbital fixing の固定は、分枝の順の辞書式の規則 `σ(x) ≥_lex σ(γ(x))` から出るので、同じ規則の
+/// LexRed と併用してよい。SCIP の設定 (5.1 節の 2) もオービトープでない成分に LexRed と orbital reduction を併用する)
+pub fn symdyn_keep_of() -> bool {
+    env_str!("ENOMOTO_MIP_SYMDYN").is_some_and(|v| v.contains('f'))
+}
+
+/// 診断 `ENOMOTO_MIP_SYMCOMP_DIAG`: 生成元を、動かす列の集まりが重ならない成分 (直積の成分) に分け、成分ごとに
+/// 列・生成元の数と、オービトープに使った生成元・orbital fixing に回した生成元・どちらにも使わず捨てた生成元の数、作用の形
+/// (全てオービトープ / 生成元 1 個 (巡回、位数) / orbital fixing だけ / 混ざる) を 1 行にまとめる。
+pub fn component_diag(n: usize, gens: &[Vec<usize>], used: &[bool], orb_moved: &[bool]) -> String {
+    let mut uf: Vec<usize> = (0..n).collect();
+    fn root(uf: &mut [usize], mut x: usize) -> usize {
+        while uf[x] != x {
+            uf[x] = uf[uf[x]];
+            x = uf[x];
+        }
+        x
+    }
+    for g in gens {
+        let mut first = usize::MAX;
+        for j in 0..n {
+            if g[j] != j {
+                if first == usize::MAX {
+                    first = j;
+                } else {
+                    let (a, b) = (root(&mut uf, first), root(&mut uf, j));
+                    if a != b {
+                        uf[a] = b;
+                    }
+                }
+            }
+        }
+    }
+    let mut comp: std::collections::BTreeMap<usize, (usize, Vec<usize>)> = std::collections::BTreeMap::new();
+    for (k, g) in gens.iter().enumerate() {
+        if let Some(j) = (0..n).find(|&j| g[j] != j) {
+            let r = root(&mut uf, j);
+            comp.entry(r).or_insert((0, Vec::new())).1.push(k);
+        }
+    }
+    for j in 0..n {
+        if gens.iter().any(|g| g[j] != j) {
+            let r = root(&mut uf, j);
+            if let Some(c) = comp.get_mut(&r) {
+                c.0 += 1;
+            }
+        }
+    }
+    let order = |g: &Vec<usize>| -> u64 {
+        let mut seen = vec![false; g.len()];
+        let mut l: u64 = 1;
+        for j in 0..g.len() {
+            if seen[j] || g[j] == j {
+                continue;
+            }
+            let (mut x, mut c) = (j, 0u64);
+            while !seen[x] {
+                seen[x] = true;
+                x = g[x];
+                c += 1;
+            }
+            let gcd = |mut a: u64, mut b: u64| {
+                while b != 0 {
+                    (a, b) = (b, a % b);
+                }
+                a
+            };
+            l = (l / gcd(l, c)).saturating_mul(c);
+        }
+        l
+    };
+    let mut kinds: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut parts = Vec::new();
+    for (_, (cols, ks)) in comp.iter() {
+        let no = ks.iter().filter(|&&k| used[k]).count();
+        let nof = ks.iter().filter(|&&k| !used[k] && !(0..n).any(|j| gens[k][j] != j && orb_moved[j])).count();
+        let ndrop = ks.len() - no - nof;
+        let kind = if no == ks.len() {
+            "orbitope"
+        } else if ks.len() == 1 {
+            "cyclic1"
+        } else if nof == ks.len() {
+            "of"
+        } else {
+            "mixed"
+        };
+        *kinds.entry(kind).or_insert(0) += 1;
+        if parts.len() < 12 {
+            let ord = if ks.len() == 1 { format!(" order {}", order(&gens[ks[0]])) } else { String::new() };
+            parts.push(format!("{kind}: {cols} cols, {} gens (orbitope {no}, of {nof}, dropped {ndrop}){ord}", ks.len()));
+        }
+    }
+    format!("{} components {:?}; {}", comp.len(), kinds, parts.join("; "))
+}
+
 pub fn symrefl() -> bool {
     env_str!("ENOMOTO_MIP_SYMREFL").is_some_and(|v| v != "0")
 }

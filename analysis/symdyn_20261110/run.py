@@ -21,6 +21,9 @@ CFGS = {
     # (a) + 順の先頭を固定する部分群の軌道の比べ (ENOMOTO_MIP_SYMDYN=o、2 本目のビルド) と反転
     "reflo": {"ENOMOTO_MIP_SYMREFL": "1", "ENOMOTO_MIP_SYMDYN": "o"},
     "dyno": {"ENOMOTO_MIP_SYMDYN": "o"},
+    # 3 本目のビルド: orbital fixing を残して LexRed を足す (論文の設定)、さらに軌道の比べ
+    "dynf": {"ENOMOTO_MIP_SYMDYN": "f"},
+    "dynfo": {"ENOMOTO_MIP_SYMDYN": "fo"},
 }
 cfg, p, tl, rep, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 OUT = D / out

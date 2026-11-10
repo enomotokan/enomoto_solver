@@ -1116,6 +1116,13 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         }))
     });
     let prev_in_sub = PRESOLVE_IN_SUBMIP.with(|f| f.replace(params.submip));
+    // 診断 `ENOMOTO_MIP_SYMREFL_PRE_DIAG` (analysis/symdyn_20261110.md): 前処理の前の問題で反転を含む対称性を数える (求解は変えない)
+    if env_str!("ENOMOTO_MIP_SYMREFL_PRE_DIAG").is_some() && !params.submip && params.restarts == 0 {
+        let t = std::time::Instant::now();
+        let g = symdyn::detect_reflections(p, tunable!("ENOMOTO_T_MIP_SYMREFL_PRE_TIME", 5.0, f64), false);
+        let cols: std::collections::BTreeSet<u32> = g.iter().flat_map(|s| s.moves.iter().filter(|m| m.2).map(|m| m.0)).collect();
+        eprintln!("MIP: SYMREFL_PRE before presolve: {} reflection generators, {} reflected columns of {} ({:.2}s)", g.len(), cols.len(), p.n, t.elapsed().as_secs_f64());
+    }
     let presolved = if use_presolve { presolve_mip(p, params.verbose, pre_submip, lp_probe_secs) } else { None };
     pretime::mark("presolve_mip");
     PRESOLVE_IN_SUBMIP.with(|f| f.set(prev_in_sub));
@@ -2612,6 +2619,9 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         }
         if verbose {
             eprintln!("MIP: symmetry: orbital fixing with {} of {} generators", gens.len(), sym.generators.len());
+        }
+        if env_str!("ENOMOTO_MIP_SYMCOMP_DIAG").is_some() && !in_sub {
+            eprintln!("MIP: symmetry: SYMCOMP {}", symdyn::component_diag(prob.n, &sym.generators, &used, &orb_moved));
         }
         SYM_OF_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(gens)));
         if !refl.is_empty() {
