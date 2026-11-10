@@ -579,7 +579,7 @@ pub(crate) fn fpr_thread(p: &MipProblem, cap: f64, seed: u64, stop: &AtomicBool,
                 if first.is_none() {
                     first = Some(t0.elapsed().as_secs_f64());
                 }
-                if z < best - 1e-9 * best.abs().max(1.0) {
+                if best.is_infinite() || z < best - 1e-9 * best.abs().max(1.0) {
                     best = z;
                     mailbox.lock().unwrap().push((x, true));
                 }
