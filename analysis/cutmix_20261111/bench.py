@@ -63,7 +63,7 @@ for s in seeds:
             except Exception as e:  # noqa: BLE001
                 res = {"status": "crash", "error": str(e)[-200:]}
             keep = [l for l in err.splitlines() if l.startswith("SEPLEARN") or l.startswith("CUTMIX") or "node diag" in l or "root bound" in l.lower()
-                    or "cut loop" in l or "restart" in l.lower()[:40]]
+                    or "cut loop" in l or "clique graph" in l or "clique extension" in l or "restart" in l.lower()[:40]]
             keep = [l for l in keep if l.startswith(("SEPLEARN", "CUTMIX"))][-2000:] + [l for l in keep if not l.startswith(("SEPLEARN", "CUTMIX"))][-200:]
             (D / "logs" / f"{OUT.stem}_{p}_{c}_s{s}.txt").write_text("\n".join(keep) + "\n")
             r = {"problem": p, "cfg": c, "rep": int(s), "result": res, "wall": round(time.time() - t0, 1)}

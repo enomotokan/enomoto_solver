@@ -26,6 +26,11 @@ pub(super) struct TypeFracs {
     pub knap_tight: f64,
     /// 整数列が 2 本以上で、その係数の絶対値がそろっておらず、連続列が整数列より多くない行 (一般整数・連続列を含むナップサック行) の割合
     pub mix_knap: f64,
+    /// ナップサック行 (`knap`) のうち、同じ GUB の行 (0-1 列だけ・係数がそろい・文字の和 <= 1 か = 1) に入る列を 2 本以上持つ行の割合
+    /// (分母はナップサック行。GUB 被覆が使える形)
+    pub knap_gub: f64,
+    /// ナップサック行の列のうち、どれかの GUB の行に入る列の割合 (分母はナップサック行の非零)
+    pub knap_gub_col: f64,
     /// 0-1 列だけで係数の絶対値がそろった行 (集合分割・詰め込み・被覆・個数) の割合
     pub setp: f64,
     /// 整数列だけで係数が整数の行の割合
@@ -124,7 +129,45 @@ pub(super) fn type_fracs(p: &MipProblem, x: Option<&[f64]>) -> TypeFracs {
             nflow += 1;
         }
     }
+    // GUB の行 (0-1 列だけ、係数がすべて同じ符号で絶対値がそろい、上の側が「1 本まで」: 正規化した右辺 <= 1) と、列ごとの最初の GUB
+    let mut gub_of = vec![usize::MAX; p.n];
+    for (i, r) in p.rows.iter().enumerate() {
+        if r.len() < 2 || !r.iter().all(|&(j, _)| is_bin(p, j)) {
+            continue;
+        }
+        let a0 = r[0].1;
+        if !r.iter().all(|&(_, a)| (a - a0).abs() <= 1e-9 * a0.abs()) {
+            continue;
+        }
+        let ub = if a0 > 0.0 { p.row_up[i] / a0 } else { -p.row_lo[i] / -a0 };
+        if ub.is_finite() && ub <= 1.0 + 1e-9 {
+            for &(j, _) in r {
+                if gub_of[j] == usize::MAX {
+                    gub_of[j] = i;
+                }
+            }
+        }
+    }
+    let (mut nkg, mut knz, mut kgc) = (0usize, 0usize, 0usize);
+    for r in &p.rows {
+        if r.len() < 2 || !r.iter().all(|&(j, _)| is_bin(p, j)) {
+            continue;
+        }
+        let (amin, amax) = r.iter().fold((f64::INFINITY, 0.0f64), |(lo, hi), &(_, a)| (lo.min(a.abs()), hi.max(a.abs())));
+        if amax <= amin * (1.0 + 1e-9) {
+            continue;
+        }
+        let mut g: Vec<usize> = r.iter().map(|&(j, _)| gub_of[j]).filter(|&g| g != usize::MAX).collect();
+        knz += r.len();
+        kgc += g.len();
+        g.sort_unstable();
+        if g.windows(2).any(|w| w[0] == w[1]) {
+            nkg += 1;
+        }
+    }
     let fr = |a: usize, b: usize| if b == 0 { 0.0 } else { a as f64 / b as f64 };
+    f.knap_gub = fr(nkg, nknap);
+    f.knap_gub_col = fr(kgc, knz);
     f.vb_row = fr(nvb, p.m);
     f.vb_col = fr(has_vb.iter().filter(|&&v| v).count(), ncont);
     f.cont = fr(ncont, f.n);
@@ -147,7 +190,7 @@ pub(super) fn log_types(p: &MipProblem, x: Option<&[f64]>, restarts: u32, fc: bo
     }
     let f = type_fracs(p, x);
     eprintln!(
-        "CUTMIX types restarts {restarts} m {} n {} vbrow {:.3} vbcol {:.3} fc {} fcnode {} cont {:.3} genint {:.3} knap {:.3} knaptight {:.3} mixknap {:.3} setp {:.3} introw {:.3} intsmall {:.3} flow {:.3}",
+        "CUTMIX types restarts {restarts} m {} n {} vbrow {:.3} vbcol {:.3} fc {} fcnode {} cont {:.3} genint {:.3} knap {:.3} knaptight {:.3} knapgub {:.3} knapgubcol {:.3} mixknap {:.3} setp {:.3} introw {:.3} intsmall {:.3} flow {:.3}",
         f.m,
         f.n,
         f.vb_row,
@@ -158,6 +201,8 @@ pub(super) fn log_types(p: &MipProblem, x: Option<&[f64]>, restarts: u32, fc: bo
         f.genint,
         f.knap,
         f.knap_tight,
+        f.knap_gub,
+        f.knap_gub_col,
         f.mix_knap,
         f.setp,
         f.int_row,
