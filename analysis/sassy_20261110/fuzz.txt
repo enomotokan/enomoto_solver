@@ -1,0 +1,24 @@
+== SYMPRE=0 sym_fuzz 400
+bad 0 of 400 {'optimal': 308, 'infeasible': 92} time 10.5
+runs with generators: 542, SYMPRE lines: 0
+== SYMPRE=probe sym_fuzz 400
+bad 0 of 400 {'optimal': 308, 'infeasible': 92} time 9.9
+runs with generators: 542, SYMPRE lines: 286
+== SYMPRE=pre sym_fuzz 400
+bad 0 of 400 {'optimal': 308, 'infeasible': 92} time 10.3
+runs with generators: 542, SYMPRE lines: 578
+== SYMPRE=d1 sym_fuzz 400
+bad 0 of 400 {'optimal': 308, 'infeasible': 92} time 10.2
+runs with generators: 542, SYMPRE lines: 311
+== SYMPRE=0 fuzz_tiny 400 0
+Result: optimal, objective -7.12, best bound -7.12, gap 0.00%, nodes 0 (0.00s)
+bad 0 of 400 time 2.9 (strict 13: 値の一致だけの以前の判定)
+== SYMPRE=0 mip_fuzz_vs_highs 300
+Result: optimal, objective -78.37836523, best bound -78.37836523, gap 0.00%, nodes 0 (0.00s)
+bad 0 of 300 time 4.2
+== SYMPRE=probe fuzz_tiny 400 0
+Result: optimal, objective -7.12, best bound -7.12, gap 0.00%, nodes 0 (0.00s)
+bad 0 of 400 time 2.9 (strict 13: 値の一致だけの以前の判定)
+== SYMPRE=probe mip_fuzz_vs_highs 300
+Result: optimal, objective -78.37836523, best bound -78.37836523, gap 0.00%, nodes 0 (0.00s)
+bad 0 of 300 time 5.0
