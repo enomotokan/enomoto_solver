@@ -16,6 +16,10 @@ use super::pseudocost::Pseudocost;
 use super::queue::{BoundChange, NodeDse, NodeQueue, OpenNode, SbInherit, SbLine};
 use std::rc::Rc;
 
+/// 試作 `ENOMOTO_MIP_TREEFIX` (木の中で暫定解が良くなったら大域的な範囲を締める仕事)
+#[path = "treefix.rs"]
+mod treefix;
+
 /// 証明 `sum a_j x_j` の境界 `lo`/`up` での最小活動量 (有限部分, 無限の項の数) と `max_j |a_j| (u_j - l_j)`
 /// (余裕がこれ以上ならどの境界も締まらない。境界は締まるだけなので以後も上界)。
 fn proof_min_activity(coefs: &[(usize, f64)], lo: &[f64], up: &[f64]) -> (f64, u32, f64) {
@@ -1902,6 +1906,8 @@ pub(crate) struct WorkPool {
     len: std::sync::atomic::AtomicUsize,
     /// 解けなかったノードを捨てたスレッドがある (最適とは言えない)。
     unresolved: std::sync::atomic::AtomicBool,
+    /// 試作 `ENOMOTO_MIP_TREEFIX` の共有の状態 ([`treefix`])
+    treefix: treefix::Shared,
     /// スレッドの間で共有する大域的な境界 (根の被約費用による固定・双対証明などの大域的な締め付けの和)。
     bounds: std::sync::Mutex<(Vec<f64>, Vec<f64>)>,
     /// スレッドの間で合わせた擬似費用 (各スレッドの観測の和)。
@@ -3188,6 +3194,7 @@ impl WorkPool {
             idle: std::sync::atomic::AtomicUsize::new(0),
             len: std::sync::atomic::AtomicUsize::new(0),
             unresolved: std::sync::atomic::AtomicBool::new(false),
+            treefix: Default::default(),
         }
     }
 }
@@ -9797,15 +9804,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: TREE restart refused; continuing with the main thread only");
                 }
             }
+            // `ENOMOTO_MIP_TREEFIX` (試作): 仕事が根で矛盾を見つけたら最適として終える。`R` の合図なら下の再スタートの判定を立てる
+            if let Some(z) = self.treefix_main_tick() {
+                return self.finish(MipStatus::Optimal, z);
+            }
             // `ENOMOTO_MIP_TREE_RESTART=inc` (試作): 木の中で暫定解が良くなり、根の被約費用で新たに固定された整数列が
             // `ENOMOTO_T_MIP_TREE_RESTART_FRAC` (0.05) 以上、主のノード数が `ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES` (2000) 以下、
             // 残り時間が時間上限の `ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT` (0.1) 以上なら、従を止めて再スタートする
-            if std::mem::take(&mut self.tree_restart_check) && tree_restart_mode() == 3 && self.watch.is_none() {
+            if std::mem::take(&mut self.tree_restart_check) && (tree_restart_mode() == 3 || self.treefix_restart_mode()) && self.watch.is_none() {
                 let left_ok = match self.deadline {
                     Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT", 0.1, f64) * self.params.time_limit,
                     None => true,
                 };
-                if left_ok && self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64)) && self.tree_restart_guard_ok(plunge.as_ref(), "inc") {
+                if left_ok && (self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) || self.treefix_restart_mode()) && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64)) && self.tree_restart_guard_ok(plunge.as_ref(), "inc") {
                     if self.params.verbose {
                         eprintln!("MIP: tree restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
                     }
@@ -9877,6 +9888,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let t_sync = Instant::now();
             if self.pool.is_some() && self.nodes % 64 == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_BOUNDS").is_none() {
                 self.sync_global_bounds();
+                self.treefix_count_dead();
             }
             // 木を分け合う: ほかのスレッドの双対証明・衝突を取り込む (64 ノードおき)
             if self.pool.is_some() && self.nodes % 64 == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
@@ -9971,6 +9983,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 診断用 (`ENOMOTO_MIP_MEMB_DIAG`): 開いたノードの持ち物と行の変更の記録の大きさを 20 秒おきに表示する
             if memb_diag() && !self.params.submip {
                 self.memb_diag_tick();
+            }
+            // `ENOMOTO_MIP_TREEFIX` (試作): 共有の最良値が下がったら、ヒューリスティクス役のスレッドが潜りの切れ目で範囲を締める仕事を回す
+            if plunge.is_none() && !first && self.treefix_due() {
+                self.treefix_job();
             }
             // ヒューリスティクス役 (`ENOMOTO_MIP_HEUR_ROLE`): 番号の大きい従は、解ができたら木を離れて大近傍探索を回し続ける
             let role_mid = robust_stall('r') && plunge.is_some() && !first && self.nodes % tunable!("ENOMOTO_T_MIP_ROBUST_ROLE_EVERY", 16u64, u64).max(1) == 0;
@@ -11826,14 +11842,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some(m) if m != "0" && m != "off" => m,
             _ => return,
         };
+        self.global_obj_prop(mode == "all", "HO2_GOBJ");
+    }
+
+    /// [`Self::ho2_global_obj_prop`] の本体 (`all` が偽なら目的関数の列が多い問題では何もしない)。`ENOMOTO_MIP_TREEFIX` の `p`
+    /// ([`treefix`]) からも呼ぶ。[締めた整数列, 締めた目的関数の列, 固定した整数列, 矛盾したら 1] を返す
+    pub(super) fn global_obj_prop(&mut self, all: bool, tag: &str) -> [usize; 4] {
         let p = self.p;
         let u = self.prune_limit() - p.offset;
         if !u.is_finite() || self.dom.infeasible {
-            return;
+            return [0; 4];
         }
         let obj: Vec<(usize, f64)> = (0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
-        if obj.is_empty() || (mode != "all" && obj.len() > tunable!("ENOMOTO_T_MIP_HO2_GOBJ_MAX_COLS", 16usize, usize)) {
-            return;
+        if obj.is_empty() || (!all && obj.len() > tunable!("ENOMOTO_T_MIP_HO2_GOBJ_MAX_COLS", 16usize, usize)) {
+            return [0; 4];
         }
         let t0 = Instant::now();
         let mut d = Domain::new(p);
@@ -11901,9 +11923,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !ok {
             // 打ち切り値より良い解がない (根の下で矛盾)。ここでは何もしない (木が刈って閉じる)
             if self.params.verbose {
-                eprintln!("MIP: HO2_GOBJ: global propagation with the cutoff {:.10e} is infeasible ({:.3}s)", u + p.offset, t0.elapsed().as_secs_f64());
+                eprintln!("MIP: {tag}: global propagation with the cutoff {:.10e} is infeasible ({:.3}s)", u + p.offset, t0.elapsed().as_secs_f64());
             }
-            return;
+            return [0, 0, 0, 1];
         }
         let (mut nfix, mut nint, mut nobj) = (0usize, 0usize, 0usize);
         for j in 0..p.n {
@@ -11934,19 +11956,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if self.params.verbose && (nint > 0 || nobj > 0) {
             eprintln!(
-                "MIP: HO2_GOBJ: cutoff {:.10e}: tightened {nobj} objective columns, {nint} integer columns ({nfix} fixed; obj-row tightenings {obj_tight}) ({:.3}s, thread {})",
+                "MIP: {tag}: cutoff {:.10e}: tightened {nobj} objective columns, {nint} integer columns ({nfix} fixed; obj-row tightenings {obj_tight}) ({:.3}s, thread {})",
                 u + p.offset,
                 t0.elapsed().as_secs_f64(),
                 self.pool_tid
             );
         }
+        [nint, nobj, nfix, 0]
     }
 
     /// `ENOMOTO_MIP_TREE4_RCUNION` (試作、既定では使わない): 根のカットのラウンドの LP (最適、目的値 `z`) の被約費用を
     /// [`Self::t4_rc_extra`] に足す (最大 `ENOMOTO_T_MIP_TREE4_RCUNION_MAX` (既定 50) 個、古いものから捨てる)。カットは大域的に
     /// 成り立つので、どのラウンドの LP の弱双対の不等式も全ての解で成り立つ
     pub(super) fn tree4_rc_add(&mut self, z: f64) {
-        if self.params.submip || self.snap.is_some() || env_str!("ENOMOTO_MIP_TREE4_RCUNION").is_none() {
+        // `ENOMOTO_MIP_TREEFIX` の `r` ([`treefix`]) でも集める
+        if self.params.submip || self.snap.is_some() || (env_str!("ENOMOTO_MIP_TREE4_RCUNION").is_none() && !treefix::on('r')) {
             return;
         }
         let b = self.lp.basis_ref();
@@ -12636,6 +12660,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break None;
             }
             self.heur_role_import(&pool);
+            // `ENOMOTO_MIP_TREEFIX` (試作): 大近傍探索の合間に範囲を締める仕事を回す
+            if self.treefix_due() {
+                self.treefix_job();
+            }
             let lpx = pool.lp_x.lock().unwrap().clone();
             let x = match (lpx, &self.incumbent) {
                 (Some(x), _) => (*x).clone(),
@@ -15601,11 +15629,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (固定 31 + 6 + 7 本) 根の LP が -237.7579121 から最適値 -237.7566815 に上がる。HiGHS の木 (168 ノード) は、根の子の片側が
     /// すぐ刈られる分枝を重ねて同じ固定を得ていると見られる (推測)。ENOMOTO の木は点数が平らで列の番号の順に分枝し、下界が動かない
     fn gap1_lp_probe(&mut self) {
+        let tmax = tunable!("ENOMOTO_T_MIP_GAP1_PROBE_TIME_FRAC", 0.1, f64) * if self.params.time_limit.is_finite() { self.params.time_limit } else { 300.0 };
+        let iter_mult = tunable!("ENOMOTO_T_MIP_GAP1_PROBE_ITERMULT", 2.0, f64);
+        let itlim = (iter_mult * (self.root_lp_iters as f64 / 10.0).max(100.0)) as u64;
+        let max_gap = tunable!("ENOMOTO_T_MIP_GAP1_PROBE_MAX_GAP", 1e-3, f64);
+        self.lp_probe_cutoff(tmax, max_gap, itlim, "GAP1 u");
+    }
+
+    /// [`Self::gap1_lp_probe`] の本体: 時間の上限 `tmax` 秒、子の LP の反復の上限 `itlim`、相対ギャップが `max_gap` を越えれば試さない。
+    /// 根の定義域・根の LP (最適に解いた後) で呼ぶ。`ENOMOTO_MIP_TREEFIX` の `u` ([`treefix`]) からも呼ぶ。
+    /// [試した列, 子の LP の数, 固定した列] を返す
+    pub(super) fn lp_probe_cutoff(&mut self, tmax: f64, max_gap: f64, itlim: u64, tag: &str) -> [usize; 3] {
         let p = self.p;
         let t0 = Instant::now();
-        let tmax = tunable!("ENOMOTO_T_MIP_GAP1_PROBE_TIME_FRAC", 0.1, f64) * if self.params.time_limit.is_finite() { self.params.time_limit } else { 300.0 };
         let max_rounds = tunable!("ENOMOTO_T_MIP_GAP1_PROBE_ROUNDS", 20usize, usize);
-        let iter_mult = tunable!("ENOMOTO_T_MIP_GAP1_PROBE_ITERMULT", 2.0, f64);
         let it_all = self.lp.total_iterations();
         let (mut probed, mut fixed_total, mut rounds, mut lps, mut itlim_hits) = (0usize, 0usize, 0usize, 0usize, 0usize);
         // `ENOMOTO_T_MIP_GAP1_PROBE_BOTH` = 1: 両側を試す (既定 0: 遠い側だけ)
@@ -15616,16 +15653,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let z0 = self.lp.objective() + p.offset;
         // 根の LP と暫定解の相対ギャップが `ENOMOTO_T_MIP_GAP1_PROBE_MAX_GAP` (既定 1e-3) を越えるときは試さない
         // (子の LP が打ち切り値を越えにくく、時間だけ使う)
-        let cut_z = self.incumbent.as_ref().map_or(self.prune_limit(), |(z, _)| *z);
+        // 木を分け合う従 (`ENOMOTO_MIP_TREEFIX`) は自分の暫定解が古いことがあるので、共有の最良値とも比べる
+        let cut_z = self.incumbent.as_ref().map_or(self.prune_limit(), |(z, _)| *z).min(self.shared.as_ref().map_or(f64::INFINITY, |s| s.best()));
         let rel_gap = (cut_z - z0).max(0.0) / cut_z.abs().max(z0.abs()).max(1.0);
-        if !(rel_gap <= tunable!("ENOMOTO_T_MIP_GAP1_PROBE_MAX_GAP", 1e-3, f64)) {
+        if !(rel_gap <= max_gap) {
             if self.params.verbose {
-                eprintln!("MIP: GAP1 u: LP probing skipped (gap {rel_gap:.3e})");
+                eprintln!("MIP: {tag}: LP probing skipped (gap {rel_gap:.3e})");
             }
-            return;
+            return [0; 3];
         }
         let mut z = z0;
-        let itlim = (iter_mult * (self.root_lp_iters as f64 / 10.0).max(100.0)) as u64;
         'outer: for _ in 0..max_rounds {
             rounds += 1;
             let x = self.lp.col_values();
@@ -15703,12 +15740,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let _ = it_all;
         if self.params.verbose {
             eprintln!(
-                "MIP: GAP1 u: LP probing {rounds} rounds, {probed} columns probed ({lps} LPs, {itlim_hits} at the iteration limit {itlim}), {fixed_total} fixed, LP {z0:.10e} -> {z:.10e}, infeasible {} ({:.2}s); child LPs optimal/infeasible/cutoff/other {st_cnt:?}, max rise {max_rise:.3e}, cutoff {:.10e}",
+                "MIP: {tag}: LP probing {rounds} rounds, {probed} columns probed ({lps} LPs, {itlim_hits} at the iteration limit {itlim}), {fixed_total} fixed, LP {z0:.10e} -> {z:.10e}, infeasible {} ({:.2}s); child LPs optimal/infeasible/cutoff/other {st_cnt:?}, max rise {max_rise:.3e}, cutoff {:.10e}",
                 self.dom.infeasible,
                 t0.elapsed().as_secs_f64(),
                 self.prune_limit()
             );
         }
+        [probed, lps, fixed_total]
     }
 
     /// どちらの値でも矛盾する列が見つかった (打ち切り値より良い解がない) なら真。
@@ -20027,6 +20065,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if pool.unresolved.load(Ordering::Relaxed) {
             self.unresolved = true;
         }
+        // `ENOMOTO_MIP_TREEFIX` (試作): 仕事の集計を出す
+        self.treefix_summary(&pool);
         // 従が見つけた解は受信箱 (`take_inbox`) で主に届く。主が共有の待ち行列を待っている間 (`pool_acquire`) は受信箱を見ないので、
         // 探索の終わり際に従 (ヒューリスティクス役の従の ALNS など) が見つけた解はここまで受信箱に残っている。従の解と主の
         // 暫定解を比べるのは受信箱を受け取ってから (以前はその前に比べていて、正しく届く解に「従が主より良い解で終わった」の
