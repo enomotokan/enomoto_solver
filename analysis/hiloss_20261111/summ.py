@@ -49,6 +49,7 @@ def highs(p):
         m = re.match(r"Model after restart has (\d+) rows, (\d+) cols \((\d+) bin., (\d+) int., (\d+) impl., (\d+) cont.*and (\d+) nonzeros", s)
         if m:
             g = [int(x) for x in m.groups()]; r["last_restart"] = [g[0], g[1], g[6], g[2] + g[3] + g[4]]; r["restarts"] += 1; r["last_restart_t"] = t
+            if r.get("nodes", 0) > 0: r["tree_restarts"] = r.get("tree_restarts", 0) + 1  # 直前の表の行でノードが進んでいれば木の中の再スタート
         m = ROW.match(s)
         if m:
             src, proc, inq, leaves, expl, bb, bs, gap, cuts, inlp, confl, iters, tm = m.groups()
@@ -68,6 +69,8 @@ def highs(p):
         m = re.match(r"\s+(\S+) \((Presolve|strong br.|separation|heuristics)\)", s)
         if m: r["x_" + m.group(2)] = float(m.group(1))
     r.pop("_last", None)
+    if r.get("nodes") and "lp_iters" in r:  # ノードの LP の反復 / ノード (全体から強分岐・分離・ヒューリスティクスを引く)
+        r["node_iters_per_node"] = (r["lp_iters"] - r.get("x_strong br.", 0) - r.get("x_separation", 0) - r.get("x_heuristics", 0)) / r["nodes"]
     r["traj"] = traj(pts, r.get("end_t", 0))
     return r
 def ours(p):
@@ -136,7 +139,7 @@ def show(p, h, o):
     row("根の LP の値", f(g(h, "root_lp")), f(g(o, "root_lp")))
     row("根の LP の時刻 (秒)", f(g(h, "root_lp_t")), f(g(o, "root_lp_t")))
     row("最初のカットのループの後の下界", "-", f(g(o, "cut0")))
-    row("再スタートの回数 (根 / 木)", f(g(h, "restarts")), f"{g(o, 'restarts')} / {g(o, 'tree_restarts')}" if o else "-")
+    row("再スタートの回数 (根 / 木)", f"{g(h, 'restarts', ) - g(h, 'tree_restarts') if h and g(h, 'tree_restarts') else g(h, 'restarts')} / {g(h, 'tree_restarts') or 0}" if h else "-", f"{g(o, 'restarts')} / {g(o, 'tree_restarts')}" if o else "-")
     row("最後の再スタート後 行/列/非零", sz(g(h, "last_restart")), sz(g(o, "last_restart")))
     row("木に入る直前の下界", f(g(h, "root_bound")), f(g(o, "root_bound")))
     row("木に入る時刻 (秒)", f(g(h, "root_end_t")), f(g(o, "root_end_t")))
@@ -155,6 +158,7 @@ def show(p, h, o):
     row("木のノード/秒", f(rate(h)), f(rate(o)))
     row("LP の反復の総数", f(g(h, "lp_iters")), f(g(o, "lp_iters")))
     if o: print(f"  ENOMOTO の木: 強分岐 {g(o, 'sb_secs')} 秒 ({g(o, 'sb_lps')} LP)、ノードのカット {g(o, 'node_cut_secs')} 秒、ノードの LP {g(o, 'diag_lp_secs')} 秒 ({g(o, 'diag_iters_per_lp')} 反復/LP、平均 {g(o, 'diag_rows')} 行)、開いたノード {g(o, 'open')}")
+    if h and g(h, "node_iters_per_node") is not None: print(f"  HiGHS のノードの LP: {g(h, 'node_iters_per_node'):.1f} 反復/ノード (強分岐・分離・ヒューリスティクスを除く)")
     if h: print(f"  HiGHS の LP 反復の内訳: 強分岐 {g(h, 'x_strong br.')}、分離 {g(h, 'x_separation')}、ヒューリスティクス {g(h, 'x_heuristics')}")
     print("  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)")
     for mk in MARKS:
