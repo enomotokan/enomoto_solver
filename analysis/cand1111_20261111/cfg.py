@@ -12,3 +12,6 @@ CAND1111 = {
     "ENOMOTO_MIP_GAP4": "rocn",         # GAP4: メモリの削減 (analysis/gap4mem_20261111.md)
 }
 CFGS = {"def": {}, "cand1111": CAND1111}
+# 切り分け (bisect、2026-11-11): Mittelmann で cand1111 が害 (+10.3%) だったので、既定に 1 項目だけ足した形 only_<名> を比べる
+for _k, _v in CAND1111.items():
+    CFGS["only_" + _k.removeprefix("ENOMOTO_MIP_").lower()] = {_k: _v}
