@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 
 use super::problem::MipProblem;
 
+mod swap;
+
 const TOL: f64 = 1e-6;
 
 /// [`local_mip`] の結果。
@@ -479,6 +481,8 @@ pub(super) struct LocalMip<'a> {
     pub done: bool,
     /// `ENOMOTO_MIP_LMIP1_CAND` (試作) の作業域
     c1: Cand1,
+    /// `ENOMOTO_MIP_LMIP_SWAP` (試作) の集合分割の行の索引 (最初の `run` で作る。外側の None = まだ作っていない)
+    swap: Option<Option<swap::SwapIdx>>,
 }
 
 /// `ENOMOTO_MIP_LMIP1_CAND` (試作) の候補集めの作業域: 本家 v2 の `explore_unsat_mtm_bm` に合わせ、違反行を重複なしに
@@ -543,6 +547,7 @@ impl<'a> LocalMip<'a> {
             t0: Instant::now(),
             done: false,
             c1: Cand1::default(),
+            swap: None,
         })
     }
 
@@ -641,7 +646,11 @@ impl<'a> LocalMip<'a> {
         let c1_rows = tunable!("ENOMOTO_T_MIP_LMIP1_ROWS", 10usize, usize).max(1);
         let c1_ops = tunable!("ENOMOTO_T_MIP_LMIP1_OPS", 2250usize, usize).max(1);
         let c1_full = tunable!("ENOMOTO_T_MIP_LMIP1_FULL", 4.0, f64);
-        let LocalMip { s, res, start, lift_order, set_of, cand, buf, best_obj: best_obj_r, since_improve: since_r, round_best: round_r, restarts: restarts_r, step: step_r, chain_tries: tries_r, chain, t0, done: done_r, c1 } = self;
+        let LocalMip { s, res, start, lift_order, set_of, cand, buf, best_obj: best_obj_r, since_improve: since_r, round_best: round_r, restarts: restarts_r, step: step_r, chain_tries: tries_r, chain, t0, done: done_r, c1, swap } = self;
+        // `ENOMOTO_MIP_LMIP_SWAP` (試作、既定では使わない): 集合分割の行の中で 1 を立てる列を入れ替える組の手を候補に足す ([`swap`])
+        let swap_rows = tunable!("ENOMOTO_T_MIP_LMIP_SWAP_ROWS", 2usize, usize);
+        let (swap_cols, swap_partners) = (tunable!("ENOMOTO_T_MIP_LMIP_SWAP_COLS", 16usize, usize).max(1), tunable!("ENOMOTO_T_MIP_LMIP_SWAP_PARTNERS", 4usize, usize));
+        let swap = swap.get_or_insert_with(|| env_str!("ENOMOTO_MIP_LMIP_SWAP").and_then(|_| swap::SwapIdx::build(s)));
         let (chain, t0) = (*chain, *t0);
         let p = s.p;
         let (n, m) = (p.n, p.m);
@@ -905,6 +914,17 @@ impl<'a> LocalMip<'a> {
                     }
                 }
             }
+            if let Some(sw) = swap.as_mut() {
+                for _ in 0..swap_rows.min(s.vset.len()) {
+                    let kk = s.below(s.vset.len());
+                    let i = s.vset[kk];
+                    if let Some((sc, bt, j, v, k, vk)) = sw.best_swap(s, i, swap_cols, swap_partners, step, buf) {
+                        if better(&best, sc, bt, s.last[j]) {
+                            best = Some((sc, bt, j, v, Some((k, vk)), s.last[j]));
+                        }
+                    }
+                }
+            }
             // `b`: 目的の全部の列の breakthrough move
             if lm2_b && s.obj_up.is_finite() && s.vpos[m] != usize::MAX {
                 let len = s.obj_cols.len();
@@ -1074,6 +1094,9 @@ impl<'a> LocalMip<'a> {
         (*best_obj_r, *since_r, *round_r, *restarts_r, *step_r, *tries_r, *done_r) = (best_obj, since_improve, round_best, restarts, step, chain_tries, done);
         if debug && cand1 {
             eprintln!("MIP:   [localmip] cand1: {step} steps, collected {} evaluated {} binary duplicates skipped {} ({:.2}s)", c1.n_collect, c1.n_eval, c1.n_dup, t0.elapsed().as_secs_f64());
+        }
+        if let (true, Some(sw)) = (debug, swap.as_ref()) {
+            eprintln!("MIP:   [localmip] swap: {step} steps, pairs evaluated {}, pair moves {}", sw.n_eval, res.pair_moves);
         }
         if debug && done {
             eprintln!(
