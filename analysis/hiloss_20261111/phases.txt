@@ -1,4 +1,44 @@
 
+=== csched008 (ENOMOTO、時刻は最初の行からの秒) ===
+      0.0 前処理: 行 351 -> 276、列 1536 -> 1460、非零 5687 -> 5494
+      0.4 LP プロービング: root LP 0.16s (2504 iters, size 7306), tried 8, fixed 0, basis passed false, total 4553 iters 0.36s
+      0.4 対称性: none (0.00s, work 38487, search 0, verify 0, detect 0.00s, refine 0.00s, log work 144615)
+      0.6 根の LP 1.7100000000e2 (960 反復、0.17 秒)
+      0.9-    2.1 カットのループ: 5 ラウンド、1.7100000000e2 -> 1.7100000000e2、LP 1362 反復 | 97 cuts added, 62 in LP, pool 452 cuts (199999 nonzeros), obj 1.7100000000e2 -> 1.7100000000e2
+      4.6 暫定解 1.8900000000e2 [RENS] (ノード 0)
+      7.4 根のヒューリスティクス RINS: none (2.85 秒)
+      7.5 根のヒューリスティクスの終わり: incumbent Some(189.0) (7.04s)
+      7.5 裏のカット: 6 rounds, obj 1.7100000000e2 not above 1.7100000000e2; not used (waited 0.00s)
+      7.5 root objective probing: skipped (gap 9.524e-2 (LP 1.7100000000e2, incumbent 1.8900000000e2), 171 fractional binaries)
+      7.5 再スタートの判定: newly fixed 0, integer columns 1284, free at the root 1284, threshold 12.8, root LP 0.17s
+      7.5 TRSTAT tree start outer 7.46 solve 7.04 restarts 0 lb 1.7100000000e2 ub 1.8900000000e2
+     64.8 暫定解 1.8800000000e2 [tree proximity] (ノード 2037)
+     74.2 暫定解 1.8700000000e2 [tree proximity] (ノード 2658)
+     77.0 暫定解 1.8600000000e2 [tree proximity] (ノード 2862)
+     80.8 暫定解 1.8500000000e2 [tree proximity] (ノード 3079)
+     85.2 暫定解 1.8400000000e2 [tree proximity] (ノード 3313)
+     88.6 暫定解 1.8300000000e2 [tree proximity] (ノード 3567)
+     90.6 暫定解 1.8200000000e2 [tree proximity] (ノード 3809)
+     94.7 暫定解 1.8100000000e2 [tree proximity] (ノード 4008)
+    101.1 暫定解 1.8000000000e2 [tree proximity] (ノード 4281)
+    111.8 暫定解 1.7900000000e2 [other thread: tree proximity] (ノード 5282)
+    115.0 暫定解 1.7800000000e2 [other thread: tree proximity] (ノード 5472)
+    480.8 暫定解 1.7400000000e2 [other thread (tree)] (ノード 19201)
+    600.0 dual proofs and conflicts 591 (conflicts added 0 (from proofs 1156), Farkas 329, pruned 1948 nodes, tightened 831407 bounds, rejected as numerically unreliable 0)
+    600.0 branching: 17764 selections, 12424 without strong branching for dual degeneracy; sb LPs 2470 iters 397781
+    600.0 basis nb diag: tree first LPs restored 9122 iters 6189003 (678.5/LP), others 40863 iters 8358038 (204.5/LP); root LPs: submip 168 lps 28931 iters (172.2/LP) 1.07s, bgcopy 1 lps 1635 iters (1635.0/LP) 0.38s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 960 iters (960.0/LP) 0.17s; nb hints ap
+    600.0 node diag: nodes 20816 node LPs 19706 mean rows 572.5 iters 3747797 (190.2/LP) LP secs 497.64 sep rounds 187 added 187 node cut secs 5.54 final rows 769
+    600.0 adaptive node cuts: rounds 187 effective 34 skipped 243 (rate 0.278), node cut secs 5.54, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [3, 153, 17, 9, 5], cut nnz Some(229.7069384749914) (rows mean 19.9)
+    600.1 solve returned TimeLimit after 600.09s (time limit 600.00s)
+      7.5 MIP: 7.04s nodes 1 open 0 lb inf ub 1.89000000e2 lp_iters 16956 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 50500 dive_iters 0 lp_rows 338 node_cut_secs 0.00
+    107.2 MIP: 106.74s nodes 4901 open 997 lb 1.74913043e2 ub 1.80000000e2 lp_iters 683943 sb_iters 96214 sb_lps 922 sb_secs 13.96 node_iters 568298 (first 552484, lps 4841) heur_iters 86386 dive_iters 2466 lp_rows 430 node_cut_secs 1.03 pool_len 8015 pool_idl
+    204.9 MIP: 204.51s nodes 9178 open 982 lb 1.75000000e2 ub 1.78000000e2 lp_iters 1448939 sb_iters 179955 sb_lps 1482 sb_secs 24.45 node_iters 1248860 (first 1214562, lps 8730) heur_iters 94114 dive_iters 3151 lp_rows 613 node_cut_secs 2.19 pool_len 12861 po
+    301.7 MIP: 301.30s nodes 12674 open 994 lb 1.71194489e2 ub 1.78000000e2 lp_iters 2178260 sb_iters 260449 sb_lps 1834 sb_secs 35.29 node_iters 1896960 (first 1847476, lps 12041) heur_iters 104689 dive_iters 3870 lp_rows 678 node_cut_secs 2.96 pool_len 18826
+    399.5 MIP: 399.12s nodes 16546 open 1000 lb 1.72000000e2 ub 1.78000000e2 lp_iters 2873582 sb_iters 299097 sb_lps 2010 sb_secs 41.26 node_iters 2553454 (first 2483606, lps 15807) heur_iters 110126 dive_iters 4041 lp_rows 641 node_cut_secs 3.90 pool_len 2370
+    501.1 MIP: 500.71s nodes 19666 open 129 lb 1.71729053e2 ub 1.74000000e2 lp_iters 3567745 sb_iters 352487 sb_lps 2234 sb_secs 48.75 node_iters 3192329 (first 3104298, lps 18622) heur_iters 121429 dive_iters 5934 lp_rows 658 node_cut_secs 4.74 pool_len 27875
+    600.0 MIP: 599.60s nodes 20816 open 623 lb 1.71759665e2 ub 1.74000000e2 lp_iters 4168512 sb_iters 397781 sb_lps 2470 sb_secs 56.12 node_iters 3747797 (first 3648109, lps 19706) heur_iters 125293 dive_iters 5934 lp_rows 769 node_cut_secs 5.54 pool_len 28832
+    600.0 MIP: 599.60s nodes 20816 open 623 lb 1.71759665e2 ub 1.74000000e2 lp_iters 4168512 sb_iters 397781 sb_lps 2470 sb_secs 56.12 node_iters 3747797 (first 3648109, lps 19706) heur_iters 125293 dive_iters 5934 lp_rows 769 node_cut_secs 5.54 pool_len 28832
+
 === fiball (ENOMOTO、時刻は最初の行からの秒) ===
       0.0 前処理: 行 1337 -> 878、列 5337 -> 4878、非零 18028 -> 16841
       0.2 LP プロービング: root LP 0.04s (898 iters, size 23056), tried 8, fixed 0, basis passed false, total 1222 iters 0.15s
@@ -445,6 +485,38 @@
      74.0 MIP: 74.02s nodes 133391 open 3 lb 2.00000000e0 ub inf lp_iters 703801 sb_iters 13000 sb_lps 1668 sb_secs 1.37 node_iters 687673 (first 672429, lps 69262) heur_iters 4407 dive_iters 1411 lp_rows 217 node_cut_secs 0.44 pool_len 125 pool_idle 0
      74.8 MIP: 74.73s nodes 133884 open 0 lb inf ub inf lp_iters 709443 sb_iters 13043 sb_lps 1672 sb_secs 1.37 node_iters 693272 (first 677644, lps 69493) heur_iters 4407 dive_iters 1411 lp_rows 273 node_cut_secs 0.45 pool_len 0 pool_idle 4
 
+=== net12 (ENOMOTO、時刻は最初の行からの秒) ===
+      0.0 前処理: 行 14021 -> 14021、列 14115 -> 14115、非零 80384 -> 80384
+      2.6 LP プロービング: root LP 1.29s (2245 iters, size 108520), tried 2, fixed 0, basis passed true, total 3613 iters 2.52s
+      2.8 前処理: 行 14021 -> 12852、列 13771 -> 12631、非零 80384 -> 65116
+      2.9 前処理: 行 12944 -> 12783、列 12631 -> 12539、非零 65300 -> 64840
+      3.1 対称性: none (0.04s, work 778320, search 0, verify 0, detect 0.04s, refine 0.02s, log work 3154280)
+      3.8 根の LP 6.8397875817e1 (948 反復、0.67 秒)
+      4.2 暫定解 2.9600000000e2 [Local-MIP] (ノード 0)
+     26.6 暫定解 2.1400000000e2 [Local-MIP] (ノード 0)
+     26.2-   43.4 カットのループ: 25 ラウンド、7.0762029839e1 -> 8.2669740504e1、LP 14766 反復 | 950 cuts added, 326 in LP, pool 8322 cuts (1607680 nonzeros), obj 6.8397875817e1 -> 8.2669740504e1
+     73.1 根のヒューリスティクス interior rounding: none (29.67 秒)
+     75.2 根のヒューリスティクス RENS: none (2.14 秒)
+     75.3 根のヒューリスティクスの終わり: incumbent Some(214.0) (72.19s)
+     75.6 裏のカット: 15 rounds, 403 cut rows (was 326), obj 8.2669740504e1 -> 8.3240933728e1 (waited 0.00s, 72.51s)
+     75.6 root objective probing: skipped (gap 6.110e-1 (LP 8.3240933728e1, incumbent 2.1400000000e2), 735 fractional binaries)
+     75.6 再スタートの判定: newly fixed 0, integer columns 1603, free at the root 1259, threshold 16.0, root LP 0.66s
+     75.6 TRSTAT tree start outer 75.68 solve 72.52 restarts 0 lb 6.8397875817e1 ub 2.1400000000e2
+    600.4 dual proofs and conflicts 48 (conflicts added 0 (from proofs 19), Farkas 6, pruned 5 nodes, tightened 481 bounds, rejected as numerically unreliable 0)
+    600.4 branching: 190 selections, 189 without strong branching for dual degeneracy; sb LPs 66 iters 6882
+    600.4 basis nb diag: tree first LPs restored 673 iters 1123509 (1669.4/LP), others 558 iters 511104 (916.0/LP); root LPs: submip 16 lps 6868 iters (429.2/LP) 1.28s, bgcopy 1 lps 58 iters (58.0/LP) 0.22s, find 1 lps 58 iters (58.0/LP) 0.32s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 948 iters (948.0/LP) 0.66s; nb hints applied 6
+    600.4 node diag: nodes 245 node LPs 358 mean rows 14852.3 iters 458524 (1280.8/LP) LP secs 492.43 sep rounds 94 added 94 node cut secs 61.32 final rows 15164
+    600.4 adaptive node cuts: rounds 94 effective 29 skipped 5 (rate 0.382), node cut secs 61.32, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [2, 65, 24, 3, 0], cut nnz Some(30.09228576473488) (rows mean 5.7)
+    600.4 solve returned TimeLimit after 600.50s (time limit 600.00s)
+     75.6 MIP: 72.52s nodes 1 open 0 lb inf ub 2.14000000e2 lp_iters 19265 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 2829 dive_iters 0 lp_rows 14424 node_cut_secs 0.00
+    155.5 MIP: 152.40s nodes 64 open 58 lb 1.14804303e2 ub 2.14000000e2 lp_iters 101271 sb_iters 6882 sb_lps 66 sb_secs 5.46 node_iters 72198 (first 52103, lps 111) heur_iters 11912 dive_iters 2918 lp_rows 14755 node_cut_secs 15.90 pool_len 1 pool_idle 0
+    226.8 MIP: 223.71s nodes 94 open 86 lb 1.16049416e2 ub 2.14000000e2 lp_iters 167533 sb_iters 6882 sb_lps 66 sb_secs 5.47 node_iters 136793 (first 112320, lps 154) heur_iters 15246 dive_iters 4585 lp_rows 14802 node_cut_secs 20.06 pool_len 0 pool_idle 0
+    318.6 MIP: 315.45s nodes 123 open 105 lb 1.23665230e2 ub 2.14000000e2 lp_iters 245518 sb_iters 6882 sb_lps 66 sb_secs 5.48 node_iters 214778 (first 175609, lps 213) heur_iters 23100 dive_iters 4585 lp_rows 14965 node_cut_secs 33.42 pool_len 1 pool_idle 0
+    397.6 MIP: 394.44s nodes 156 open 131 lb 1.25934660e2 ub 2.14000000e2 lp_iters 317789 sb_iters 6882 sb_lps 66 sb_secs 5.48 node_iters 286397 (first 240357, lps 258) heur_iters 31954 dive_iters 5237 lp_rows 15024 node_cut_secs 40.25 pool_len 117 pool_idle 0
+    497.4 MIP: 494.26s nodes 185 open 142 lb 1.40098655e2 ub 2.14000000e2 lp_iters 403250 sb_iters 6882 sb_lps 66 sb_secs 5.49 node_iters 371496 (first 314644, lps 305) heur_iters 32678 dive_iters 5599 lp_rows 15125 node_cut_secs 51.50 pool_len 111 pool_idle 0
+    600.4 MIP: 597.32s nodes 245 open 136 lb 1.46921769e2 ub 2.14000000e2 lp_iters 490278 sb_iters 6882 sb_lps 66 sb_secs 5.50 node_iters 458524 (first 387972, lps 358) heur_iters 32678 dive_iters 5599 lp_rows 15164 node_cut_secs 61.32 pool_len 598 pool_idle 0
+    600.4 MIP: 597.32s nodes 245 open 136 lb 1.46921769e2 ub 2.14000000e2 lp_iters 490278 sb_iters 6882 sb_lps 66 sb_secs 5.50 node_iters 458524 (first 387972, lps 358) heur_iters 32678 dive_iters 5599 lp_rows 15164 node_cut_secs 61.32 pool_len 598 pool_idle 0
+
 === p200x1188c (ENOMOTO、時刻は最初の行からの秒) ===
       0.0 前処理: 行 1388 -> 1388、列 2376 -> 2376、非零 4752 -> 4752
       0.1 LP プロービング: root LP 0.03s (559 iters, size 8516), tried 5, fixed 0, basis passed false, total 1245 iters 0.07s
@@ -538,6 +610,30 @@
     501.9 MIP: 501.87s nodes 25504 open 4 lb -1.43394906e4 ub -1.43393534e4 lp_iters 2422072 sb_iters 67821 sb_lps 3486 sb_secs 19.47 node_iters 2291683 (first 2180373, lps 29480) heur_iters 174574 dive_iters 3618 lp_rows 1565 node_cut_secs 0.00 pool_len 16083
     600.0 MIP: 599.99s nodes 27947 open 3 lb -1.43438175e4 ub -1.43393534e4 lp_iters 3005703 sb_iters 69742 sb_lps 3646 sb_secs 20.12 node_iters 2856583 (first 2729087, lps 32435) heur_iters 201771 dive_iters 3880 lp_rows 1574 node_cut_secs 0.00 pool_len 14611
     600.0 MIP: 599.99s nodes 27947 open 3 lb -1.43438175e4 ub -1.43393534e4 lp_iters 3005703 sb_iters 69742 sb_lps 3646 sb_secs 20.12 node_iters 2856583 (first 2729087, lps 32435) heur_iters 201771 dive_iters 3880 lp_rows 1574 node_cut_secs 0.00 pool_len 14611
+
+=== physiciansched6-2 (ENOMOTO、時刻は最初の行からの秒) ===
+      1.4 前処理: 行 138986 -> 15889、列 68876 -> 9757、非零 405393 -> 52839
+      1.5 前処理: 行 15889 -> 12119、列 9757 -> 6183、非零 52839 -> 45274
+      7.0 LP プロービング: root LP 4.44s (5760 iters, size 127318), tried 2, fixed 0, basis passed true, total 6146 iters 5.47s
+      7.3 前処理: 行 12119 -> 11916、列 6003 -> 6003、非零 45274 -> 44352
+      7.6 前処理: 行 13000 -> 9872、列 6003 -> 4981、非零 46520 -> 36318
+     11.0 対称性: 91 generators, 35 orbits on 186 columns, 0 lex-leader rows (3.20s, work 16810882, search 6013550, verify 10154
+     15.3 根の LP 4.7422500000e4 (6430 反復、4.29 秒)
+     15.5 暫定解 4.9824000000e4 [Local-MIP] (ノード 0)
+     21.4-   32.4 カットのループ: 10 ラウンド、4.8923666667e4 -> 4.9324000000e4、LP 8603 反復 | 691 cuts added, 631 in LP, pool 2377 cuts (790519 nonzeros), obj 4.7422500000e4 -> 4.9324000000e4
+     35.9 根のヒューリスティクス interior rounding: none (3.34 秒)
+     37.8 暫定解 4.9324000000e4 [RENS] (ノード 0)
+     37.8 根のヒューリスティクス RENS: found (1.93 秒)
+     37.8 根のヒューリスティクスの終わり: incumbent Some(49324.0) (26.78s)
+     37.8 裏のカット: 6 rounds, obj 4.9324000000e4 not above 4.9324000000e4; not used (waited 0.00s)
+     37.8 dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+     37.8 branching: 0 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+     37.8 basis nb diag: tree first LPs restored 0 iters 0 (0.0/LP), others 0 iters 0 (0.0/LP); root LPs: submip 1 lps 745 iters (745.0/LP) 0.07s, bgcopy 1 lps 1 iters (1.0/LP) 0.20s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 6430 iters (6430.0/LP) 4.12s; nb hints applied 0 solves, 0 given, 0 chan
+     37.8 node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 9252
+     37.8 adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 4.6)
+     38.3 solve returned Optimal after 39.73s (time limit 600.00s)
+     37.8 MIP: 26.80s nodes 0 open 0 lb inf ub 4.93240000e4 lp_iters 15144 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 3125 dive_iters 0 lp_rows 9252 node_cut_secs 0.00
+     37.8 MIP: 26.80s nodes 0 open 0 lb inf ub 4.93240000e4 lp_iters 15144 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 3125 dive_iters 0 lp_rows 9252 node_cut_secs 0.00
 
 === rococoC10-001000 (ENOMOTO、時刻は最初の行からの秒) ===
       0.0 前処理: 行 1293 -> 741、列 3117 -> 2566、非零 11751 -> 10179
@@ -881,3 +977,36 @@
     523.3 MIP: 463.27s nodes 2098 open 999 lb 1.15073790e4 ub 1.15074056e4 lp_iters 75119 sb_iters 22840 sb_lps 2766 sb_secs 166.04 node_iters 22096 (first 20532, lps 2190) heur_iters 126670 dive_iters 1063 lp_rows 67336 node_cut_secs 12.96 pool_len 4319 pool_
     598.8 MIP: 538.73s nodes 2626 open 1000 lb 1.15073819e4 ub 1.15074050e4 lp_iters 82529 sb_iters 22985 sb_lps 2782 sb_secs 168.68 node_iters 29346 (first 27172, lps 2773) heur_iters 139182 dive_iters 1078 lp_rows 67356 node_cut_secs 16.75 pool_len 7070 pool
     600.7 MIP: 540.65s nodes 2658 open 999 lb 1.15073819e4 ub 1.15074050e4 lp_iters 82650 sb_iters 22985 sb_lps 2782 sb_secs 168.69 node_iters 29467 (first 27293, lps 2806) heur_iters 139182 dive_iters 1078 lp_rows 67356 node_cut_secs 16.75 pool_len 9351 pool_
+
+=== unitcal_7 (ENOMOTO、時刻は最初の行からの秒) ===
+      2.9 前処理: 行 48939 -> 40357、列 25755 -> 20721、非零 127595 -> 98856
+      5.7 LP プロービング: root LP 2.72s (13721 iters, size 164968), tried 0, fixed 0, basis passed true, total 13721 iters 2.72s
+      6.6 対称性: 4 generators, 4680 orbits on 9360 columns, 0 lex-leader rows (0.23s, work 3498044, search 206040, verify 13716
+      7.6 根の LP 1.9449580544e7 (1343 反復、1.03 秒)
+     26.9 暫定解 2.0787848908e7 [Local-MIP] (ノード 0)
+     26.4-   42.0 カットのループ: 25 ラウンド、1.9483584993e7 -> 1.9541276682e7、LP 7777 反復 | 3766 cuts added, 2285 in LP, pool 22163 cuts (524130 nonzeros), obj 1.9449580544e7 -> 1.9541276682e7
+     47.7 根のヒューリスティクス interior rounding: none (5.38 秒)
+    129.9 根のヒューリスティクス RENS: none (82.22 秒)
+    131.0 暫定解 1.9655126049e7 [root reduced cost] (ノード 0)
+    131.0 根のヒューリスティクス locks: none (1.06 秒)
+    149.7 暫定解 1.9637388893e7 [RINS] (ノード 0)
+    149.7 根のヒューリスティクス RINS: found (16.95 秒)
+    149.7 根のヒューリスティクスの終わり: incumbent Some(19637388.892533623) (143.11s)
+    150.0 裏のカット: 20 rounds, 2530 cut rows (was 2285), obj 1.9541276682e7 -> 1.9557812163e7 (waited 0.00s, 143.35s)
+    150.0 root objective probing: skipped (gap 4.052e-3 (LP 1.9557812163e7, incumbent 1.9637388893e7), 467 fractional binaries)
+    150.0 再スタートの判定: newly fixed 0, integer columns 2856, free at the root 2503, threshold 28.6, root LP 1.01s
+    150.0 TRSTAT tree start outer 150.18 solve 143.35 restarts 0 lb 1.9449580544e7 ub 1.9637388893e7
+    600.2 dual proofs and conflicts 436 (conflicts added 0 (from proofs 204), Farkas 5, pruned 6 nodes, tightened 20517 bounds, rejected as numerically unreliable 0)
+    600.2 branching: 272 selections, 0 without strong branching for dual degeneracy; sb LPs 578 iters 52962
+    600.2 basis nb diag: tree first LPs restored 504 iters 300483 (596.2/LP), others 777 iters 538234 (692.7/LP); root LPs: submip 21 lps 50312 iters (2395.8/LP) 3.86s, bgcopy 1 lps 1 iters (1.0/LP) 0.30s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 1343 iters (1343.0/LP) 1.01s; nb hints applied 665
+    600.2 node diag: nodes 367 node LPs 1035 mean rows 42288.0 iters 224516 (216.9/LP) LP secs 318.49 sep rounds 334 added 327 node cut secs 59.36 final rows 42187
+    600.2 adaptive node cuts: rounds 327 effective 175 skipped 0 (rate 0.651), node cut secs 59.36, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [10, 152, 107, 32, 26], cut nnz Some(30.770809412759085) (rows mean 2.4)
+    600.2 solve returned TimeLimit after 600.43s (time limit 600.00s)
+    150.0 MIP: 143.35s nodes 1 open 0 lb inf ub 1.96373889e7 lp_iters 9430 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 129535 dive_iters 0 lp_rows 42887 node_cut_secs 0.00
+    231.0 MIP: 224.43s nodes 54 open 28 lb 1.95978470e7 ub 1.96373889e7 lp_iters 59225 sb_iters 27844 sb_lps 196 sb_secs 31.43 node_iters 20495 (first 15338, lps 130) heur_iters 140440 dive_iters 1187 lp_rows 42350 node_cut_secs 8.42 pool_len 0 pool_idle 0
+    310.0 MIP: 303.41s nodes 112 open 1 lb 1.96004531e7 ub 1.96373889e7 lp_iters 107855 sb_iters 33270 sb_lps 236 sb_secs 36.87 node_iters 63472 (first 51246, lps 292) heur_iters 140880 dive_iters 1397 lp_rows 42224 node_cut_secs 19.39 pool_len 1 pool_idle 0
+    374.2 MIP: 367.59s nodes 181 open 43 lb 1.96041813e7 ub 1.96373889e7 lp_iters 148626 sb_iters 37528 sb_lps 276 sb_secs 41.08 node_iters 99246 (first 79051, lps 503) heur_iters 142358 dive_iters 2136 lp_rows 42322 node_cut_secs 35.13 pool_len 0 pool_idle 0
+    440.5 MIP: 433.87s nodes 222 open 48 lb 1.96140521e7 ub 1.96373889e7 lp_iters 189922 sb_iters 41471 sb_lps 354 sb_secs 45.86 node_iters 136599 (first 110512, lps 649) heur_iters 142361 dive_iters 2136 lp_rows 42321 node_cut_secs 42.89 pool_len 0 pool_idle 
+    510.3 MIP: 503.72s nodes 304 open 73 lb 1.96178326e7 ub 1.96373889e7 lp_iters 230062 sb_iters 46782 sb_lps 444 sb_secs 51.98 node_iters 171428 (first 138997, lps 850) heur_iters 142364 dive_iters 2136 lp_rows 42300 node_cut_secs 50.51 pool_len 0 pool_idle 
+    596.1 MIP: 589.46s nodes 364 open 63 lb 1.96223497e7 ub 1.96373889e7 lp_iters 286839 sb_iters 52829 sb_lps 572 sb_secs 59.58 node_iters 222158 (first 182863, lps 1018) heur_iters 142367 dive_iters 2136 lp_rows 42120 node_cut_secs 58.19 pool_len 140 pool_id
+    600.2 MIP: 593.55s nodes 367 open 64 lb 1.96223497e7 ub 1.96373889e7 lp_iters 289330 sb_iters 52962 sb_lps 578 sb_secs 59.74 node_iters 224516 (first 184715, lps 1035) heur_iters 142367 dive_iters 2136 lp_rows 42187 node_cut_secs 59.36 pool_len 365 pool_id
