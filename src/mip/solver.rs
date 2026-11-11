@@ -7420,7 +7420,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.snap.is_some() || env_str!("ENOMOTO_MIP_DEBUG_NO_FJ").is_some() {
                 // 木の写しから解く: 解探しはしない (`ENOMOTO_MIP_DEBUG_NO_FJ` は診断用に FJ を使わない)
-            } else if !self.params.submip && !proof_only() && mip_threads() > 1 && self.params.restarts == 0 && super::prechain::on() && self.attach_prechain(cap) {
+            } else if !self.params.submip && !proof_only() && mip_threads() > 1 && (self.params.restarts == 0 || super::prechain::has('r')) && super::prechain::on() && self.attach_prechain(cap) {
                 // 試作 `ENOMOTO_MIP_PRECHAIN`: 前処理の間に立てた FJ・Local-MIP のスレッドを根の FJ のスレッドとして続ける ([`Self::attach_prechain`])
             } else if !self.params.submip && !proof_only() && mip_threads() > 1 {
                 // 並列モード: 別スレッドで根の LP・切除平面と同時に回す (根のヒューリスティクスの前に受け取る)
@@ -18136,9 +18136,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 問題) を渡し、根の FJ のスレッドとして受け取る。打ち切りは今の FJ のスレッドと同じ (`cap`・Local-MIP の秒数、解がない間は
     /// `ENOMOTO_T_MIP_FJ_NOSOL_FRAC` × 時間上限まで)。連鎖がなければ偽 (今までどおり FJ のスレッドを立てる)
     fn attach_prechain(&mut self, cap: f64) -> bool {
+        // 最初の求解は今の FJ のスレッドと同じ問題 (対称性の行を足す前)。`r` の再スタートの後は、再スタートの前処理で縮んだ今の問題
+        // (`self.orig` は最初の求解の問題のまま作り直さないので使わない)
         let pc = match &self.orig {
-            Some(o) => std::sync::Arc::new((**o).clone()),
-            None => std::sync::Arc::new(self.p.clone()),
+            Some(o) if self.params.restarts == 0 => std::sync::Arc::new((**o).clone()),
+            _ => std::sync::Arc::new(self.p.clone()),
         };
         let fjl_cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * self.params.time_limit).min(10.0) } else { 10.0 };
         let now = Instant::now();
@@ -18148,23 +18150,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             t_end
         };
-        let Some(c) = super::prechain::attach(pc, t_end, t_ext) else { return false };
-        c.sh.has_inc.store(self.incumbent.is_some() && !self.inc_only_fj, std::sync::atomic::Ordering::Relaxed);
-        self.fj_has_inc = Some(c.sh.has_inc.clone());
-        self.lmip_mailbox = Some(c.sh.mailbox.clone());
-        self.prechain = Some(c.sh.clone());
+        let Some(sh) = super::prechain::attach(pc, t_end, t_ext) else { return false };
+        sh.has_inc.store(self.incumbent.is_some() && !self.inc_only_fj, std::sync::atomic::Ordering::Relaxed);
+        self.fj_has_inc = Some(sh.has_inc.clone());
+        self.lmip_mailbox = Some(sh.mailbox.clone());
+        self.prechain = Some(sh.clone());
+        // 主の `join_fj_thread` が待つ手: 止める合図かスレッドが全部終わるまで待つだけ (連鎖は主のスレッドに置いたまま。止めるのは
+        // `join_fj_thread` の後 ([`super::prechain::stop_current`]、`r` なら木に入るとき))
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop2 = stop.clone();
         let h = std::thread::spawn(move || {
-            while !stop2.load(std::sync::atomic::Ordering::Relaxed) && !c.all_done() {
+            while !stop2.load(std::sync::atomic::Ordering::Relaxed) && !sh.all_done() {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
-            c.finish();
             None
         });
         self.fj_thread = Some((h, stop));
         if self.params.verbose {
-            eprintln!("MIP: PRECHAIN: the FJ/Local-MIP threads from the presolve continue at the root ({:.2}s)", self.start.elapsed().as_secs_f64());
+            eprintln!("MIP: PRECHAIN: the FJ/Local-MIP threads from the presolve continue at the root (restarts {}, {:.2}s)", self.params.restarts, self.start.elapsed().as_secs_f64());
         }
         true
     }
@@ -18172,7 +18175,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 試作 `ENOMOTO_MIP_PRECHAIN`: 主の暫定解 (`i`) と大域的な境界 (`b`) が変わっていれば連鎖のスレッドに渡す
     fn post_prechain(&mut self) {
         let Some(sh) = self.prechain.clone() else { return };
-        if self.fj_thread.is_none() {
+        // `r`: 木に入ったら止める (再スタートの後の根まで続ける)。それ以外は根のカットのループの終わり (`join_fj_thread`) で止めている
+        if self.fj_thread.is_none() && (!super::prechain::has('r') || self.nodes > 1 || !super::prechain::running()) {
+            if super::prechain::has('r') {
+                super::prechain::stop_current();
+            }
             self.prechain = None;
             return;
         }
@@ -18200,6 +18207,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 待ちが長いときだけ出す (時間の上限の超過の切り分け、analysis/overrun_crypt_20261101.md)
             if self.params.verbose && tj.elapsed().as_secs_f64() >= 0.05 {
                 eprintln!("MIP: FJ thread joined {:.2}s after the stop signal ({:.2}s)", tj.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
+            }
+            // 試作 `ENOMOTO_MIP_PRECHAIN`: 連鎖のスレッドを止める (`r` なら止めず、再スタートの後の根・木に入るまで続ける)
+            if self.prechain.is_some() && !super::prechain::has('r') {
+                super::prechain::stop_current();
             }
             // 受け渡し箱に残った解 (FJ のスレッドの Local-MIP) を先に受け取る
             self.poll_lmip_thread();

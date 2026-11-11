@@ -9,6 +9,8 @@
 //! - `b`: 暫定解が良くなったら目的の行 `c x <= z - δ` を足した伝播で境界を締め、FJ の範囲を狭める。根に入ってからは主の大域的な
 //!   境界 (被約費用による固定など) も渡す。締めた範囲は今の暫定解を外すので、FJ にだけ使い、暫定解から磨く Local-MIP には渡さない。
 //! - `i`: スレッドの間と、主 → スレッドの向きに暫定解を渡す (Local-MIP の [`super::localmip::LocalMip::inject`])。
+//! - `r`: 根のカットのループの終わりで止めず、再スタートの後の根でも続ける (再スタートの前処理で縮んだ問題に乗り換え、主の
+//!   大域的な境界・暫定解を受け取り続ける)。木に入ったら止める。
 //! - `p`: 並列のプロービング (`ENOMOTO_MIP_PREPAR`) と分け合う (FJ・Local-MIP をスレッド数 − 2 本、プロービングに 2 本)。
 //!
 //! 主への解の受け渡しは今の根の FJ のスレッドと同じ受け渡し箱 (根のカットのループの各ラウンドで受け取る) なので、前処理の結果は
@@ -49,6 +51,8 @@ pub(crate) struct Shared {
     stop: Arc<AtomicBool>,
     /// 番号がこれ以上のスレッドは次の区切りで抜ける (根に入ったら減らす)
     active: AtomicUsize,
+    /// 走っているスレッドの数 (抜けるときに減らす)
+    running: AtomicUsize,
     /// スレッドごとの止める合図 (全体を止めるときと、根に入って減らすときに立てる。FJ・Local-MIP・FJ_P3 の前処理に渡す)
     wstop: Vec<Arc<AtomicBool>>,
     /// 打ち切りの時刻 (根に入るまでは求解の時間の上限、根に入ったら今の FJ のスレッドと同じ秒数)
@@ -159,6 +163,8 @@ impl Shared {
         };
         if root {
             self.root_ver.store(ver, Ordering::Release);
+            // 主の暫定解は根の問題ごとに渡し直す (再スタートの後の主は新しい問題の空間で渡す)
+            *self.main_inc.lock().unwrap() = None;
         }
         self.epoch_ver.store(ver, Ordering::Release);
         if let Some((_, _, x)) = old {
@@ -383,6 +389,7 @@ fn worker(sh: Arc<Shared>, id: usize, seed: u64) {
         }
     }
     super::fj::SKIP_REPAIR_ON_STOP.with(|c| c.set(false));
+    sh.running.fetch_sub(1, Ordering::AcqRel);
     if sh.verbose && env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
         eprintln!("MIP: PRECHAIN thread {id}: {n_fj} FJ runs, {n_lm} Local-MIP slices, epochs {n_ep}, ended at {:.2}s", sh.t0.elapsed().as_secs_f64());
     }
@@ -462,6 +469,7 @@ pub(crate) fn start(prob: &MipProblem) -> Option<usize> {
     let sh = Arc::new(Shared {
         stop: Arc::new(AtomicBool::new(false)),
         active: AtomicUsize::new(k),
+        running: AtomicUsize::new(k),
         wstop: (0..k).map(|_| Arc::new(AtomicBool::new(false))).collect(),
         deadline: Mutex::new((far, far)),
         epoch: Mutex::new(Epoch { ver: 0, prob: Arc::new(prob.clone()) }),
@@ -522,26 +530,45 @@ pub(crate) fn refresh(prob: &MipProblem) {
     });
 }
 
-/// 根に入るときに主が呼ぶ: 走っている連鎖があれば根の問題 `q` を渡して受け取る (`None` なら今までどおり主が FJ のスレッドを立てる)。
-/// `t_end` と `t_ext` は今の FJ のスレッドと同じ打ち切り (解があるとき / 主が FJ のスレッド以外の暫定解を持たないとき)
-pub(crate) fn attach(q: Arc<MipProblem>, t_end: Instant, t_ext: Instant) -> Option<Chain> {
-    let c = CUR.with(|c| c.borrow_mut().take())?;
-    let (_, q0) = c.sh.epoch();
-    if q0.n != q.n {
-        c.finish();
+/// 根に入るときに主が呼ぶ: 走っている連鎖があれば根の問題 `q` を渡し、分け合う状態を返す (`None` なら今までどおり主が FJ のスレッドを
+/// 立てる)。連鎖そのものは主のスレッドに置いたまま ([`stop_current`] か [`disarm`] で止める)。`t_end` と `t_ext` は今の FJ のスレッドと
+/// 同じ打ち切り (解があるとき / 主が FJ のスレッド以外の暫定解を持たないとき)。`r` なら再スタートの後の根でも呼び、再スタートの
+/// 前処理で縮んだ問題に乗り換えさせる
+pub(crate) fn attach(q: Arc<MipProblem>, t_end: Instant, t_ext: Instant) -> Option<Arc<Shared>> {
+    let sh = CUR.with(|c| c.borrow().as_ref().map(|c| c.sh.clone()))?;
+    let (_, q0) = sh.epoch();
+    if q0.n != q.n || sh.stop.load(Ordering::Relaxed) || sh.running.load(Ordering::Acquire) == 0 {
+        stop_current();
         return None;
     }
-    *c.sh.deadline.lock().unwrap() = (t_end, t_ext.max(t_end));
+    *sh.deadline.lock().unwrap() = (t_end, t_ext.max(t_end));
     let keep = tunable!("ENOMOTO_T_MIP_PRECHAIN_ROOT_KEEP", 1usize, usize).max(1);
-    c.sh.active.fetch_min(keep, Ordering::Relaxed);
-    for w in c.sh.wstop.iter().skip(keep) {
+    sh.active.fetch_min(keep, Ordering::Relaxed);
+    for w in sh.wstop.iter().skip(keep) {
         w.store(true, Ordering::Relaxed);
     }
-    c.sh.publish(q, true);
-    Some(c)
+    sh.publish(q, true);
+    Some(sh)
+}
+
+/// 走っている連鎖を止めて待つ (根のカットのループの終わり、`r` なら木に入るとき)
+pub(crate) fn stop_current() {
+    if let Some(c) = CUR.with(|c| c.borrow_mut().take()) {
+        c.finish();
+    }
+}
+
+/// 連鎖が走っているか (主のスレッド)
+pub(crate) fn running() -> bool {
+    CUR.with(|c| c.borrow().as_ref().is_some_and(|c| !c.all_done()))
 }
 
 impl Shared {
+    /// スレッドが全部終わったか
+    pub(crate) fn all_done(&self) -> bool {
+        self.running.load(Ordering::Acquire) == 0
+    }
+
     /// 主の暫定解を渡す (`i`)
     pub(crate) fn post_main(&self, z: f64, x: &[f64]) {
         if !has('i') {
