@@ -10390,3 +10390,14 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   (600 秒・2 種): SGM 103.6 → 61.3 秒、解けた 12 → 16 回 (neos-957323 は時間切れ → 15 秒)。誤答 0 (fuzz_tiny 400・mip_fuzz_vs_highs 300・
   対称な乱数の fuzz 2000・cargo test)。遅くなる問題: physiciansched6-2 (25 → 40 秒)。
 - LP の `ENOMOTO_LP_FOLD` は既定にしていない。記録は `analysis/drcr_20261110.md`。
+
+## 2026-11-11: 動的な辞書式の縮小 ENOMOTO_MIP_SYMDYN=f を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_SYMDYN` (既定の値 `f` = 既定の orbital fixing の後に、分枝の順の動的な辞書式の縮小 (LexRed) を足す。止めるのは `=0` か `off`)。
+  van Doornmalen・Hojny「A Unified Framework for Symmetry Handling」(arXiv 2211.01295) の 4.1 節の LexRed と例 11 の分枝の順。補題 6・24・25 から
+  orbital fixing と同じ規則に収まるので併用する (SCIP 9 の設定と同じ)。`src/mip/symdyn.rs`。
+- 根拠 (既定 = cand1108zd + DRCR): 58 問のうち働く 8 問 (60 秒・4 種): SGM −3.2% (区間 −12.0%〜+4.3%)、解けた 22 → 23 回 (残り 50 問は同じ道、58 問に直すと約 −0.4%)。
+  47 問のうち働く 8 問 (600 秒・2 種): SGM +2.4% (区間 +0.2%〜+5.3%、p=0.127)、解けた 10 → 10 回 (悪い向きの差の一部は試作が作られない問題の揺れ)。
+  誤答 0 (fuzz_tiny 400・mip_fuzz_vs_highs 300・対称な乱数の fuzz 約 860 問・cargo test 400 件)。効き目ははっきりしない。
+- 既定にしていない: `=1` (orbital fixing の代わり、cod105 で弱い)・`o` (軌道の比べ、小さい群で遅い)・`ENOMOTO_MIP_SYMREFL` (反転、MIPLIB で効く問題がない)。
+  記録は `analysis/symdyn_20261110.md`。

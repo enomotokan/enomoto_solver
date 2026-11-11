@@ -1,4 +1,5 @@
-//! 試作 `ENOMOTO_MIP_SYMDYN`・`ENOMOTO_MIP_SYMREFL` (analysis/symdyn_20261110.md、既定では使わない)。
+//! `ENOMOTO_MIP_SYMDYN` (2026-11-11 から既定 `f`: orbital fixing + LexRed) と試作 `ENOMOTO_MIP_SYMREFL` (既定では使わない)
+//! (analysis/symdyn_20261110.md)。
 //!
 //! - `ENOMOTO_MIP_SYMDYN`: 動的な辞書式の縮小 (dynamic lexicographic reduction、van Doornmalen・Hojny 2022/2024 の
 //!   「A Unified Framework for Symmetry Handling」、SCIP 9 の lexred)。各ノードで、根からそのノードまでに分枝した列の
@@ -48,8 +49,14 @@ impl SignedGen {
     }
 }
 
+/// `ENOMOTO_MIP_SYMDYN` の値。2026-11-11 から既定 `f` (orbital fixing + LexRed、analysis/symdyn_20261110.md の 11 節)。
+/// `=0` か `off` で止める (以前の orbital fixing だけ)。`=1` は orbital fixing の代わりに LexRed、`o` を含めば軌道の比べも足す
+fn symdyn_value() -> Option<&'static str> {
+    env_def!("ENOMOTO_MIP_SYMDYN", "f")
+}
+
 pub fn symdyn() -> bool {
-    env_str!("ENOMOTO_MIP_SYMDYN").is_some_and(|v| v != "0") || symrefl()
+    symdyn_value().is_some() || symrefl()
 }
 
 /// `ENOMOTO_MIP_SYMDYN=o` (値に `o` を含む): 生成元ごとの比べに加えて、順の先頭 v_1..v_{i-1} を動かさない部分群 (Schreier の
@@ -58,14 +65,14 @@ pub fn symdyn() -> bool {
 /// 規則の一部なので、生成元ごとの比べと混ぜてよい。推移的な群で v_1 を 0 に分けた子では軌道の全ての列が 0 になる
 /// (orbital fixing と同じ強さ。生成元ごとの比べだけでは生成元の数の列しか締まらない、cod105)
 pub fn symdyn_orbital() -> bool {
-    env_str!("ENOMOTO_MIP_SYMDYN").is_some_and(|v| v.contains('o'))
+    symdyn_value().is_some_and(|v| v.contains('o'))
 }
 
 /// `ENOMOTO_MIP_SYMDYN=f` (値に `f` を含む): 既定の orbital fixing を残し、その後に辞書式の縮小を足す (van Doornmalen・Hojny の
 /// 補題 6・24・25: 0-1 列の orbital fixing の固定は、分枝の順の辞書式の規則 `σ(x) ≥_lex σ(γ(x))` から出るので、同じ規則の
 /// LexRed と併用してよい。SCIP の設定 (5.1 節の 2) もオービトープでない成分に LexRed と orbital reduction を併用する)
 pub fn symdyn_keep_of() -> bool {
-    env_str!("ENOMOTO_MIP_SYMDYN").is_some_and(|v| v.contains('f'))
+    symdyn_value().is_some_and(|v| v.contains('f'))
 }
 
 /// 診断 `ENOMOTO_MIP_SYMCOMP_DIAG`: 生成元を、動かす列の集まりが重ならない成分 (直積の成分) に分け、成分ごとに

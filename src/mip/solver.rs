@@ -989,7 +989,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     of_node_fixes: Vec<BoundChange>,
     /// orbital fixing の集計: 固定した境界の数、固定したノードの数、矛盾で刈ったノードの数。
     of_stats: [u64; 3],
-    /// 試作 `ENOMOTO_MIP_SYMDYN`・`ENOMOTO_MIP_SYMREFL` ([`super::symdyn`]): 動的な辞書式の縮小。あれば orbital fixing の代わりに使う
+    /// `ENOMOTO_MIP_SYMDYN` (既定 `f`: orbital fixing の後に動的な辞書式の縮小)・試作 `ENOMOTO_MIP_SYMREFL` ([`super::symdyn`])
     symdyn: Option<Rc<super::symdyn::DynSym>>,
     symdyn_stats: super::symdyn::DynStats,
     /// 対称性の行・固定を加える前の問題 (なければ `None`)。ヒューリスティクスの解の判定・局所探索に使う。
