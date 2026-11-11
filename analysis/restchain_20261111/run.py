@@ -15,6 +15,9 @@ CFGS = {
     "ebir": {"ENOMOTO_MIP_PRECHAIN": "ebir"},
     # RESTCHAIN: r + 根の後も木に入るまで延長 + 再スタートで立て直し + 被約費用固定の後の受け渡し
     "ebiR": {"ENOMOTO_MIP_PRECHAIN": "ebiR"},
+    # W: 再スタートの判定の前に Local-MIP を回して被約費用による固定をやり直す (単独と ebiR に重ねた形)
+    "W": {"ENOMOTO_MIP_PRECHAIN": "W"},
+    "ebiRW": {"ENOMOTO_MIP_PRECHAIN": "ebiRW"},
 }
 cfg, p, tl, rep, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 OUT = D / out
@@ -59,10 +62,12 @@ for l in err.splitlines():
     if m:
         rst.append([int(m.group(1)), int(m.group(2)), int(m.group(3)), best])
 respawn = err.count("PRECHAIN R: restarted")
+# W: (秒, 前の暫定解, 後の暫定解, 前の固定, 後の固定) を段ごとに
+wst = [[float(m.group(5)), float(m.group(1)), float(m.group(2)), int(m.group(3)), int(m.group(4))] for m in re.finditer(r"RESTCHAIN W: Local-MIP [\d.]+s .*?incumbent ([-\d.e+]+) -> ([-\d.e+]+), newly fixed integers (\d+) -> (\d+) \(([\d.]+)s\)", err)]
 rec = {"problem": p, "cfg": cfg, "tl": tl, "rep": rep, "wall": round(time.time() - t0, 1), "result": res,
        "pre": float(pre.group(1)) if pre else None, "inc": float(inc.group(1)) if inc else None,
        "chain": list(chain.groups()) if chain else None,
-       "restarts": rst, "respawn": respawn, "warn": err.count("MIP: WARNING"), "at": time.strftime("%H:%M:%S")}
+       "restarts": rst, "respawn": respawn, "wst": wst, "warn": err.count("MIP: WARNING"), "at": time.strftime("%H:%M:%S")}
 with open(OUT, "a") as f:
     f.write(json.dumps(rec) + "\n")
 print(p, cfg, rep, res.get("status"), res.get("time"), res.get("objective"), res.get("bound"), rec["pre"], rec["inc"], rec["chain"], flush=True)

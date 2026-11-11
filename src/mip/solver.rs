@@ -9657,6 +9657,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if super::prechain::has('R') {
             self.post_prechain();
         }
+        // 試作 `ENOMOTO_MIP_PRECHAIN` の `W`: 再スタートの判定の前に、被約費用による固定で締めた範囲の上で Local-MIP を主の暫定解から
+        // 短く回し、良くなったら新しい打ち切り値で被約費用による固定をやり直す ([`Self::restchain_w`])
+        if super::prechain::has('W') && self.snap.is_none() && !self.params.submip && self.incumbent.is_some() {
+            self.restchain_w();
+        }
         // `ENOMOTO_MIP_ROOT_OBJ_PROBE_SUBMIP`: サブ MIP (RENS・RINS など) の根でも行う。サブ MIP では渡された打ち切り値
         // (元の問題の暫定解) も使う
         let probe_sub = env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_SUBMIP").is_some();
@@ -12592,6 +12597,54 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.try_incumbent(x);
                 self.heur_label = "";
             }
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_PRECHAIN` の `W` (RESTCHAIN、analysis/restchain_20261111.md): 根の終わりの被約費用による固定の後、再スタートの
+    /// 判定の前に、大域的な境界 (固定で締めた範囲) の上で Local-MIP を主の暫定解から短く回す。暫定解が範囲の外 (打ち切り値で締めた固定が
+    /// 外す) なら、範囲に収めた点から目的の行だけ締めて探す ([`super::localmip::LocalMip::seed_outside`])。秒は根までの時間の
+    /// `ENOMOTO_T_MIP_PRECHAIN_W_FRAC` (0.1) 倍、`ENOMOTO_T_MIP_PRECHAIN_W_SECS` (1) 秒と時間上限の 0.02 倍まで。良くなったら新しい
+    /// 打ち切り値で被約費用による固定 ([`Self::root_redcost_fixing`]) をやり直す (増えた固定も再スタートの判定に入る)
+    fn restchain_w(&mut self) {
+        let p = self.p;
+        let Some((z0, x0)) = self.incumbent.clone() else { return };
+        let t = Instant::now();
+        let mut secs = (tunable!("ENOMOTO_T_MIP_PRECHAIN_W_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64()).min(tunable!("ENOMOTO_T_MIP_PRECHAIN_W_SECS", 1.0, f64));
+        if self.params.time_limit.is_finite() {
+            secs = secs.min(0.02 * self.params.time_limit);
+        }
+        let fixed0 = self.newly_fixed_ints();
+        let seed = self.rng ^ 0x2545_F491_4F6C_DD1D;
+        let Some(mut lm) = super::localmip::LocalMip::new(p, &self.dom.global_lo, &self.dom.global_up, seed, true) else { return };
+        let inside = lm.inject(&x0);
+        if !inside && !lm.seed_outside(&x0, p.objective(&x0)) {
+            return;
+        }
+        let mut t_end = t + Duration::from_secs_f64(secs.max(0.0));
+        if let Some(d) = self.deadline {
+            t_end = t_end.min(d);
+        }
+        lm.run(t_end, None, &|_| {});
+        let mut improved = false;
+        if let Some(x) = lm.res.best.clone() {
+            if p.objective(&x) < z0 - 1e-9 * z0.abs().max(1.0) {
+                self.heur_label = "RESTCHAIN W (Local-MIP)";
+                self.try_incumbent(x);
+                self.heur_label = "";
+                improved = self.incumbent.as_ref().is_some_and(|(zi, _)| *zi < z0 - 1e-9 * z0.abs().max(1.0));
+            }
+        }
+        if improved {
+            self.root_redcost_fixing();
+        }
+        if self.params.verbose {
+            let z1 = self.incumbent.as_ref().map_or(z0, |(z, _)| *z);
+            eprintln!(
+                "MIP: RESTCHAIN W: Local-MIP {secs:.2}s from the incumbent ({}): incumbent {z0:.10e} -> {z1:.10e}, newly fixed integers {fixed0} -> {} ({:.2}s)",
+                if inside { "inside" } else { "outside the bounds" },
+                self.newly_fixed_ints(),
+                t.elapsed().as_secs_f64()
+            );
         }
     }
 
