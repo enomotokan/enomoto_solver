@@ -42,148 +42,6 @@ fn integral(v: f64) -> bool {
     (v - v.round()).abs() <= 1e-9 * (1.0 + v.abs())
 }
 
-/// 行列 (列 → (行, 係数 ±1)) が十分条件で TU か: 剥がしと、芯の連結成分ごとに列の非零が全部 2 つで行の 2 色塗りができるか、
-/// 行の非零が全部 2 つで列の 2 色塗りができるか。
-pub fn simple_tu(nrows: usize, cols: &[Vec<(usize, f64)>]) -> bool {
-    let nc = cols.len();
-    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nrows];
-    for (j, c) in cols.iter().enumerate() {
-        for &(i, a) in c {
-            if a != 1.0 && a != -1.0 {
-                return false;
-            }
-            rows[i].push((j, a));
-        }
-    }
-    let mut rdeg: Vec<usize> = rows.iter().map(|r| r.len()).collect();
-    let mut cdeg: Vec<usize> = cols.iter().map(|c| c.len()).collect();
-    let mut ralive = vec![true; nrows];
-    let mut calive = vec![true; nc];
-    let mut stack: Vec<(bool, usize)> = Vec::new();
-    for i in 0..nrows {
-        if rdeg[i] <= 1 {
-            stack.push((true, i));
-        }
-    }
-    for j in 0..nc {
-        if cdeg[j] <= 1 {
-            stack.push((false, j));
-        }
-    }
-    while let Some((is_row, k)) = stack.pop() {
-        if is_row {
-            if !ralive[k] {
-                continue;
-            }
-            ralive[k] = false;
-            for &(j, _) in &rows[k] {
-                if calive[j] {
-                    cdeg[j] -= 1;
-                    if cdeg[j] <= 1 {
-                        stack.push((false, j));
-                    }
-                }
-            }
-        } else {
-            if !calive[k] {
-                continue;
-            }
-            calive[k] = false;
-            for &(i, _) in &cols[k] {
-                if ralive[i] {
-                    rdeg[i] -= 1;
-                    if rdeg[i] <= 1 {
-                        stack.push((true, i));
-                    }
-                }
-            }
-        }
-    }
-    // 芯の連結成分 (行と列の二部グラフ)
-    let mut comp_r = vec![usize::MAX; nrows];
-    let mut comp_c = vec![usize::MAX; nc];
-    let mut ncomp = 0;
-    for s in 0..nrows {
-        if !ralive[s] || comp_r[s] != usize::MAX {
-            continue;
-        }
-        let mut rs = vec![s];
-        comp_r[s] = ncomp;
-        let (mut crows, mut ccols) = (Vec::new(), Vec::new());
-        while let Some(i) = rs.pop() {
-            crows.push(i);
-            for &(j, _) in &rows[i] {
-                if calive[j] && comp_c[j] == usize::MAX {
-                    comp_c[j] = ncomp;
-                    ccols.push(j);
-                    for &(i2, _) in &cols[j] {
-                        if ralive[i2] && comp_r[i2] == usize::MAX {
-                            comp_r[i2] = ncomp;
-                            rs.push(i2);
-                        }
-                    }
-                }
-            }
-        }
-        ncomp += 1;
-        // 列の非零が 2 つ: 行の 2 色塗り (同じ符号 → 別の色、逆の符号 → 同じ色)
-        let col_ok = ccols.iter().all(|&j| cols[j].iter().filter(|&&(i, _)| ralive[i]).count() == 2);
-        let row_ok = crows.iter().all(|&i| rows[i].iter().filter(|&&(j, _)| calive[j]).count() == 2);
-        let color = |nodes: &[usize], edges: &dyn Fn(usize) -> Vec<(usize, usize, bool)>, n: usize| -> bool {
-            // edges(e) = (a, b, same): same なら同じ色、そうでなければ別の色
-            let mut col = vec![-1i8; n];
-            let mut adj: std::collections::HashMap<usize, Vec<(usize, bool)>> = std::collections::HashMap::new();
-            for &e in nodes {
-                for (a, b, same) in edges(e) {
-                    adj.entry(a).or_default().push((b, same));
-                    adj.entry(b).or_default().push((a, same));
-                }
-            }
-            for (&s, _) in adj.iter() {
-                if col[s] >= 0 {
-                    continue;
-                }
-                col[s] = 0;
-                let mut st = vec![s];
-                while let Some(a) = st.pop() {
-                    for &(b, same) in &adj[&a] {
-                        let want = if same { col[a] } else { 1 - col[a] };
-                        if col[b] < 0 {
-                            col[b] = want;
-                            st.push(b);
-                        } else if col[b] != want {
-                            return false;
-                        }
-                    }
-                }
-            }
-            true
-        };
-        let ok = (col_ok
-            && color(
-                &ccols,
-                &|j| {
-                    let e: Vec<(usize, f64)> = cols[j].iter().filter(|&&(i, _)| ralive[i]).copied().collect();
-                    vec![(e[0].0, e[1].0, e[0].1 != e[1].1)]
-                },
-                nrows,
-            ))
-            || (row_ok
-                && color(
-                    &crows,
-                    &|i| {
-                        let e: Vec<(usize, f64)> = rows[i].iter().filter(|&&(j, _)| calive[j]).copied().collect();
-                        vec![(e[0].0, e[1].0, e[0].1 != e[1].1)]
-                    },
-                    nc,
-                ));
-        if !ok {
-            return false;
-        }
-    }
-    true
-}
-
 fn fold_in<'a>(p: &'a MipProblem, int_key: Option<&'a [u64]>, single: Option<&'a [bool]>) -> FoldIn<'a> {
     FoldIn { col_lo: &p.col_lo, col_up: &p.col_up, cost: &p.cost, is_int: &p.is_int, rows: &p.rows, row_lo: &p.row_lo, row_up: &p.row_up, int_key, single }
 }
@@ -249,7 +107,7 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                 // 整数の組ごとに打ち消しと TU を確かめる
                 let mut single = vec![false; p.n];
                 // TU を確かめる行列 (列 → (行, 係数)) を行の連結成分ごとに持つ (行 0..m は元の行、m.. は組の和の行)。TU の十分条件
-                // (`simple_tu`: 剥がしと芯の 2 色塗り) は連結成分ごとに閉じているので、新しい組が触れる成分だけを集めて確かめれば、
+                // (`tu::tu_cols_f64`: 剥がしと芯の 2 色塗り) は連結成分ごとに閉じているので、新しい組が触れる成分だけを集めて確かめれば、
                 // 全体を確かめるのと同じ答えになる (全体を毎回複写して確かめると組の数の 2 乗の手間になり、neos-631710 で 208 秒かかった)
                 let mut nrows_m = p.m;
                 let mut dsu: Vec<usize> = (0..p.m).collect();
@@ -319,7 +177,7 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                             }
                         }
                     }
-                    simple_tu(nr, &cols_all)
+                    super::tu::tu_cols_f64(nr, &cols_all)
                 };
                 if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF mip batch {:.3}s ok {all_ok}", t0.elapsed().as_secs_f64()); }
                 for ((_q, mem), g) in groups.iter().zip(gdata) {
@@ -331,7 +189,7 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                         ok_g += 1;
                         continue;
                     }
-                    // 近道 (結果は同じ): S に ±1 でない係数があれば TU の十分条件は必ず外れる (`simple_tu` も最初にそれで偽を返す)
+                    // 近道 (結果は同じ): S に ±1 でない係数があれば TU の十分条件は必ず外れる (`tu::tu_cols_f64` も最初にそれで偽を返す)
                     let good = good && s_cols.iter().all(|c| c.iter().all(|&(_, a)| a == 1.0 || a == -1.0));
                     if good {
                         if cancel {
@@ -373,7 +231,7 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                                     .collect()
                             })
                             .collect();
-                        if simple_tu(remap.len(), &local) {
+                        if super::tu::tu_cols_f64(remap.len(), &local) {
                             // 成分をつなぐ
                             let mut merged: Vec<Vec<(usize, f64)>> = Vec::new();
                             for r in &roots {
@@ -563,21 +421,6 @@ pub fn solve_folded(p: &MipProblem, time_limit: f64, verbose: bool, solve: &dyn 
         }
     }
     Some(r)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn simple_tu_incidence_and_odd_cycle() {
-        // 有向グラフの接続行列 (列 = 辺) は TU
-        let cols = vec![vec![(0, 1.0), (1, -1.0)], vec![(1, 1.0), (2, -1.0)], vec![(0, -1.0), (2, 1.0)]];
-        assert!(simple_tu(3, &cols));
-        // 奇閉路の無向の接続行列 (同じ符号) は TU でない
-        let cols = vec![vec![(0, 1.0), (1, 1.0)], vec![(1, 1.0), (2, 1.0)], vec![(0, 1.0), (2, 1.0)]];
-        assert!(!simple_tu(3, &cols));
-    }
 }
 
 /// 試作 (既定では使わない): 値の文字 `P` (前処理 → 畳む。畳んだ問題は前処理をかけずに解く) と `Q` (前処理 → 畳む → 前処理) で、
