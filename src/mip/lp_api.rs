@@ -67,6 +67,14 @@ pub trait MipLp: Clone + Send {
     fn basis_start_info(&self, _col: &[VarStatus]) -> Option<(usize, f64)> {
         None
     }
+    /// 試作 `ENOMOTO_MIP_ROOTLP3`: 次の求解が warm start する基底 (行の数の大きさ) を持つか。対応しない実装は偽。
+    fn has_warm_basis(&self) -> bool {
+        false
+    }
+    /// 同: その基底の LU が特異か ([`TwoStageLp::warm_basis_singular`])。対応しない実装は偽。
+    fn warm_basis_singular(&self) -> bool {
+        false
+    }
     /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE` ([`TwoStageLp::optface_move`]): 最適面の上の別の最適基底へ移る。対応しない実装は `None`。
     fn optface_move(&mut self, _k: usize, _sample: usize, _mode: char, _seed: u64, _is_int: &[bool], _deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
         None
@@ -214,6 +222,12 @@ forward_impl!(
     },
     fn basis_start_info(&self, col: &[VarStatus]) -> Option<(usize, f64)> {
         TwoStageLp::basis_start_info(self, col)
+    },
+    fn has_warm_basis(&self) -> bool {
+        TwoStageLp::has_warm_basis(self)
+    },
+    fn warm_basis_singular(&self) -> bool {
+        TwoStageLp::warm_basis_singular(self)
     },
     fn optface_move(&mut self, k: usize, sample: usize, mode: char, seed: u64, is_int: &[bool], deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
         TwoStageLp::optface_move(self, k, sample, mode, seed, is_int, deadline)

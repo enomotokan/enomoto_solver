@@ -2760,6 +2760,26 @@ impl TwoStageLp {
         self.clear_memo();
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOTLP3` (analysis/rootlp3_20261111.md): 次の求解が warm start する基底 (行の数の大きさ) を持つか
+    /// ([`Self::solve`] の `cold` の否定)。
+    pub fn has_warm_basis(&self) -> bool {
+        matches!(&self.basis, Some(b) if b.len() == self.rows.len())
+    }
+
+    /// 同: 今の基底の LU が特異か (warm start が全スラック基底からの解き直しになるか。単体法の `refactorize` と同じ分解)。
+    /// 基底がなければ偽。
+    pub fn warm_basis_singular(&self) -> bool {
+        let Some(b) = self.basis.as_ref().filter(|b| b.len() == self.rows.len()) else { return false };
+        let mut pos = vec![None; self.std.n_total];
+        for (p, &v) in b.iter().enumerate() {
+            if v >= pos.len() || pos[v].is_some() {
+                return true;
+            }
+            pos[v] = Some(p);
+        }
+        super::basis_kernel::factorize_basis(&self.std, &pos, None).is_none()
+    }
+
     /// [`Self::solve_race`] を基底があっても呼ぶ (試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` の `r`): 二段解法側は今の基底から warm start、
     /// 内点法 + クロスオーバー側は基底なしで同時に解く。`threads` < 2 なら二段解法だけ。
     pub fn solve_race_warm(&mut self, lim: &SolveLimits, threads: usize) -> LpStatus {

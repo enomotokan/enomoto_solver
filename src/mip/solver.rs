@@ -7941,11 +7941,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if sing_repair {
             crate::simplex::slope_intercept_dual::SING_REPAIR_GLOBAL.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        // 試作 `ENOMOTO_MIP_ROOTLP3` (analysis/rootlp3_20261111.md): 特異な基底は捨てて基底なしの同時実行で解く
+        let rootlp3 = self.rootlp3_before(root_kind);
         let mut root_st = if probe_cols_only_warm && root_kind == Some(4) && (probe_basis_guard_has('r') || probe_basis_guard_has('x')) {
             self.probe_basis_guard_solve()
         } else {
             self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() })
         };
+        self.rootlp3_after(root_kind, rootlp3, root_st, self.lp.total_iterations() - root_it0, t_root_lp);
         if sing_repair {
             crate::simplex::slope_intercept_dual::SING_REPAIR_GLOBAL.store(false, std::sync::atomic::Ordering::Relaxed);
             if self.params.verbose {

@@ -31,6 +31,7 @@ pub(crate) mod sympre;
 mod sympre0;
 pub(crate) mod heur_subfix;
 pub(crate) mod heur_scip;
+pub(crate) mod rootlp3;
 pub(crate) mod heur_ipm;
 pub(crate) mod heur_shift;
 pub(crate) mod heur_lns2;
