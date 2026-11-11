@@ -732,6 +732,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) subfix_retry: Vec<f64>,
     /// 別スレッドの Feasibility Jump とその停止の印。
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07): Local-MIP の解で暫定解が良くなった時刻 (この求解の経過秒)
+    lmip_imps: Vec<f64>,
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッド (試作)
     lmip_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// `ENOMOTO_MIP_LOCALMIP` のスレッドが良くなった解を入れる箱
@@ -3353,6 +3355,11 @@ pub(crate) fn thread_budget_on() -> bool {
 ///   最適解を見つけるので、時間で一律に絞る `ENOMOTO_MIP_ROOT_SUBMIP_REL` はそれを切っていた
 /// - 並列のサブ MIP には外側の刈り込みの上限 (ほかのサブ MIP・主のスレッドが見つけた解による) を打ち切り値として渡し続ける ([`SubmipCtl::outer_best`])
 /// - 並列のサブ MIP は終わった順に受け取る (`ENOMOTO_MIP_SUBMIP_FIRST_DONE` と同じ)
+/// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、既定では使わない): [`Solver::lmip_boost`]。
+fn lmboost_on() -> bool {
+    env_str!("ENOMOTO_MIP_LMBOOST").is_some()
+}
+
 /// 試作 `ENOMOTO_MIP_FJKEEP` (COMP07、既定では使わない): 根のカットのループの後も FJ のスレッドを根のヒューリスティクスの終わりまで続ける。
 fn fjkeep_on() -> bool {
     env_str!("ENOMOTO_MIP_FJKEEP").is_some()
@@ -4533,6 +4540,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         last_submip_nodes: 0,
         subfix_retry: Vec::new(),
         fj_thread: None,
+        lmip_imps: Vec::new(),
         lmip_thread: None,
         lmip_mailbox: None,
         fpr: Default::default(),
@@ -6424,6 +6432,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // ヒューリスティクスを止めていた。analysis/fpr_20261110.md)
             self.inc_only_fj = self.heur_label.starts_with("feasibility jump") || self.heur_label.starts_with("find thread") || self.heur_label == "Local-MIP"
                 || self.heur_label == "FPR (thread)";
+            if self.heur_label == "Local-MIP" {
+                self.lmip_imps.push(self.start.elapsed().as_secs_f64());
+            }
             if !self.proof_first_z.is_finite() {
                 self.proof_first_z = z;
             }
@@ -8376,6 +8387,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // comp07-2idx では Local-MIP が 300 → 100 → 35 → 15 と下げている途中で、カットのループ (下界が 6 に届いて 17〜19 秒で終わる) に止められ、
         // その後の根のサブ MIP (約 80 秒) は何も見つけなかった。スレッドは自分の期限 (`FJ_NOSOL_EXTEND`、時間上限の 1/4) か、主が FJ の
         // スレッド以外から暫定解を得たときにも自分で終わる
+        if lmboost_on() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !self.root_gap_closed() {
+            self.lmip_boost();
+        }
         if fjkeep_on() && !self.params.submip && self.snap.is_none() && self.fj_thread.is_some() && (self.incumbent.is_none() || self.inc_only_fj) && !self.root_gap_closed() {
             self.poll_lmip_thread();
             if self.params.verbose {
@@ -18449,6 +18463,109 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.prechain_posted.1 = k;
                 sh.post_bounds(&self.dom.global_lo, &self.dom.global_up);
             }
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、analysis/comp07_20261111.md、既定では使わない): 根のカットのループの終わりで、暫定解が
+    /// FJ のスレッドの Local-MIP の解だけで、それがまだ下がり続けている (Local-MIP の改善が 2 回以上あり、最後の改善がループの後半) なら、
+    /// 根のヒューリスティクスの前に Local-MIP を増やして回す: FJ のスレッドは止めず、スレッド数 − 2 本 (`ENOMOTO_T_MIP_LMBOOST_THREADS`) の
+    /// Local-MIP を足し (対称性の行を足す前の問題で、暫定解から種を変えて磨く。スレッドの間で最良の解を分け合う)、主は待って受け取る。
+    /// 下界に届く・`ENOMOTO_T_MIP_LMBOOST_STALL` (0.5) × (根の始めからの秒) (5 秒以上) 改善がない・時間上限の
+    /// `ENOMOTO_T_MIP_LMBOOST_FRAC` (0.25) を過ぎる、のどれかで止める。前処理の間の連鎖 (`ENOMOTO_MIP_PRECHAIN` の `e`) は使わない。
+    /// comp07-2idx (Mittelmann) は根の下界が 6 で、6 を見つけるのは Local-MIP だけ (根のサブ MIP・木は見つけない)
+    fn lmip_boost(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let t_now = self.start.elapsed().as_secs_f64();
+        let imps = self.lmip_imps.len();
+        let last = self.lmip_imps.last().copied().unwrap_or(0.0);
+        let ok = self.fj_thread.is_some() && self.inc_only_fj && imps >= 2 && last >= tunable!("ENOMOTO_T_MIP_LMBOOST_RECENT", 0.5, f64) * t_now;
+        if self.params.verbose {
+            eprintln!("MIP: LMBOOST: {} (Local-MIP improvements {imps}, last at {last:.2}s, incumbent only from the FJ thread {}, {t_now:.2}s)", if ok { "boosting" } else { "not used" }, self.inc_only_fj);
+        }
+        if !ok {
+            return;
+        }
+        let Some((_, x0)) = self.incumbent.clone() else { return };
+        let q: std::sync::Arc<MipProblem> = std::sync::Arc::new(match &self.orig {
+            Some(o) => (**o).clone(),
+            None => self.p.clone(),
+        });
+        if q.n != x0.len() {
+            return;
+        }
+        let k = tunable!("ENOMOTO_T_MIP_LMBOOST_THREADS", mip_threads().saturating_sub(2) as f64, f64).max(1.0) as usize;
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let best: std::sync::Arc<std::sync::Mutex<(f64, Vec<f64>)>> = std::sync::Arc::new(std::sync::Mutex::new((q.objective(&x0), x0.clone())));
+        let mailbox = self.lmip_mailbox.clone().unwrap_or_default();
+        if self.lmip_mailbox.is_none() {
+            self.lmip_mailbox = Some(mailbox.clone());
+        }
+        let base_seed = self.rng ^ 0x5851_F42D_4C95_7F2D;
+        let mut hs = Vec::new();
+        for t in 0..k {
+            let (q, stop, best, mb) = (q.clone(), stop.clone(), best.clone(), mailbox.clone());
+            let seed = base_seed.wrapping_add((t as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            hs.push(std::thread::spawn(move || {
+                let Some(mut lm) = super::localmip::LocalMip::new(&q, &q.col_lo, &q.col_up, seed, true) else { return };
+                let x = best.lock().unwrap().1.clone();
+                lm.inject(&x);
+                while !stop.load(Ordering::Relaxed) {
+                    let before = lm.best_obj();
+                    lm.run(Instant::now() + Duration::from_secs_f64(0.2), Some(&stop), &|_| {});
+                    if lm.best_obj() < before {
+                        if let Some(x) = lm.res.best.clone() {
+                            let z = q.objective(&x);
+                            let mut b = best.lock().unwrap();
+                            if z < b.0 - 1e-9 * b.0.abs().max(1.0) {
+                                *b = (z, x.clone());
+                                mb.lock().unwrap().push(x);
+                            }
+                        }
+                    }
+                    // ほかのスレッドの良い解から磨き直す
+                    let (bz, bx) = best.lock().unwrap().clone();
+                    if bz - q.offset < lm.best_obj() - 1e-9 * bz.abs().max(1.0) {
+                        lm.inject(&bx);
+                    }
+                    if lm.done {
+                        break;
+                    }
+                }
+            }));
+        }
+        let t0 = Instant::now();
+        let cap = if self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_LMBOOST_FRAC", 0.25, f64) * self.params.time_limit } else { 60.0 };
+        let stall_k = tunable!("ENOMOTO_T_MIP_LMBOOST_STALL", 0.5, f64);
+        let mut last_imp = t0;
+        let mut inc = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+        let why = loop {
+            std::thread::sleep(Duration::from_millis(20));
+            self.poll_lmip_thread();
+            let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+            if z < inc {
+                inc = z;
+                last_imp = Instant::now();
+            }
+            if self.root_gap_closed() {
+                break "gap closed";
+            }
+            if self.time_up() || self.start.elapsed().as_secs_f64() >= cap {
+                break "time cap";
+            }
+            if last_imp.elapsed().as_secs_f64() >= (stall_k * self.start.elapsed().as_secs_f64()).max(5.0) {
+                break "stalled";
+            }
+            if !self.inc_only_fj {
+                break "other incumbent";
+            }
+        };
+        stop.store(true, Ordering::Relaxed);
+        for h in hs {
+            let _ = h.join();
+        }
+        self.poll_lmip_thread();
+        if self.params.verbose {
+            eprintln!("MIP: LMBOOST: stopped ({why}) after {:.2}s with {k} extra Local-MIP threads, incumbent {:?} ({:.2}s)", t0.elapsed().as_secs_f64(), self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
         }
     }
 

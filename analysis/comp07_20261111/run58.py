@@ -2,7 +2,7 @@
 (問題ごとに設定を続けて回す。途中から再開できる)。ログは logs58/ (gzip しない、コミットしない)。
 使い方: python analysis/comp07_20261111/run58.py ビルド 設定,設定 種,種 [分担の数 分担の番号]
 分担のときは出力を res58_sh<番号>.jsonl に分ける (分担セッションの結果をまとめてコミットしても衝突しない)。"""
-import sys
+import os, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D)); sys.path.insert(0, str(D.parents[1] / "scripts"))
@@ -18,4 +18,4 @@ for s in seeds:
             continue
         rb.fetch(p, D.parents[1] / ".miplib_cache")
         for c in cfgs:
-            R.run(build, c, s, 60, p, out=D / ("res58.jsonl" if nsh == 1 else f"res58_sh{ish}.jsonl"), logdir=D / "logs58")
+            R.run(build, c, s, 60, p, out=D / ("res58.jsonl" if nsh == 1 else f"res58{os.environ.get('COMP07_TAG', '')}_sh{ish}.jsonl"), logdir=D / "logs58")
