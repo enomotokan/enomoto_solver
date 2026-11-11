@@ -102,6 +102,8 @@ pub(super) struct BasisKernel {
     e_tilde_row: Option<usize>,
     /// 周期検査までの反復数。
     since_check: usize,
+    /// 試作 `ENOMOTO_SIMPLEX_LUCLOCK=g` ([`luclock_mode`]): 今の分解の FT 更新ごとの eta の fill ([`sparse_lu::FtLu::fill_count`]) の和。
+    fill_sum: u64,
     /// 周期検査の間隔 (既定 [`FT_CHECK_INTERVAL`]、[`Self::with_periodic_check`])。
     check_interval: usize,
     /// 分解自体が `bump_limit` より大きいとき、fill の上限を `bump_lu_ratio * nnz(LU)` まで広げる
@@ -189,6 +191,7 @@ impl BasisKernel {
             a_tilde_ready: false,
             e_tilde_row: None,
             since_check: 0,
+            fill_sum: 0,
             check_interval: FT_CHECK_INTERVAL,
             bump_lu_ratio: 0.0,
             bump_limit: tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1),
@@ -510,14 +513,30 @@ impl BasisKernel {
             return RefactorDue::Rejected;
         }
         if lu.update_count() > self.max_updates {
+            luclock_count(1);
             return RefactorDue::MaxUpdates;
         }
-        if synth_clock_should_refactor_density(lu, density) {
+        let clock = if luclock_mode() == b'g' {
+            if lu.update_count() <= 1 {
+                self.fill_sum = 0;
+            }
+            self.fill_sum += lu.fill_count() as u64;
+            luclock_growth_due(lu, self.fill_sum)
+        } else {
+            synth_clock_should_refactor_density(lu, density)
+        };
+        if clock {
+            luclock_count(0);
             return RefactorDue::Clock;
         }
         if self.since_check >= self.check_interval {
             self.since_check = 0;
-            return if self.fill_too_big(lu) { RefactorDue::Fill } else { RefactorDue::Periodic };
+            return if self.fill_too_big(lu) {
+                luclock_count(2);
+                RefactorDue::Fill
+            } else {
+                RefactorDue::Periodic
+            };
         }
         RefactorDue::No
     }
@@ -851,6 +870,43 @@ pub(super) fn factorize_basis_repair(
         }
     }
     None
+}
+
+/// 試作 `ENOMOTO_SIMPLEX_LUCLOCK` (既定では使わない。analysis/luclock_20261111.md) の形: `0` = 既定 (合成クロック)、
+/// `b'b'` = 単体法の 1 歩に属さない計算 (下界の計算 `lower_bound_from_basis`) の FTRAN/BTRAN を合成クロックに数えない、
+/// `b'g'` = トリガ (5) を合成クロックでなく FT 更新の eta の増え方で決める ([`luclock_growth_due`]、下界の計算も数えない)。
+#[inline]
+pub(super) fn luclock_mode() -> u8 {
+    match env_str!("ENOMOTO_SIMPLEX_LUCLOCK") {
+        Some("b") => b'b',
+        Some("g") => b'g',
+        _ => 0,
+    }
+}
+
+thread_local! {
+    /// 診断 `ENOMOTO_SIMPLEX_LUCLOCK_LOG` 用の、このスレッドの再分解トリガの累計 ([トリガ (5), トリガ (4), トリガ (3) の fill])。
+    pub(super) static LUCLOCK_COUNTS: [std::cell::Cell<u64>; 3] = const { [std::cell::Cell::new(0), std::cell::Cell::new(0), std::cell::Cell::new(0)] };
+}
+
+#[inline]
+fn luclock_count(k: usize) {
+    LUCLOCK_COUNTS.with(|c| c[k].set(c[k].get() + 1));
+}
+
+/// `ENOMOTO_SIMPLEX_LUCLOCK=g` のトリガ (5): 分解の後 `k` 回目の FT 更新の後の eta の fill を `E_k`、その和を `S_k` とすると、
+/// 1 反復の求解の手間を「分解の手間 + `c` * `E_k`」と見て、分解の手間 (`build_tick`) を含めた 1 反復あたりの平均が最小になる
+/// 時点 (`c * (k * E_k - S_k) >= build_tick`、今の 1 反復の手間が平均を超えた時点) で分解し直す。`c` は 1 反復の
+/// FTRAN/BTRAN の本数 (`ENOMOTO_T_LUCLOCK_G_SOLVES`、既定 3) に係数 (`ENOMOTO_T_LUCLOCK_G_FACTOR`、既定 1) を掛けたもの。
+/// 道 (eta の大きさ) だけで決まり、求解の回数・密度 (下界の計算などの寄り道) によらない。更新が [`SYNTH_CLOCK_MIN_UPDATES`] 未満なら偽。
+#[inline]
+fn luclock_growth_due(lu: &sparse_lu::FtLu, fill_sum: u64) -> bool {
+    let k = lu.update_count() as f64;
+    if (k as usize) < tunable!("ENOMOTO_T_SYNTH_CLOCK_MIN_UPDATES", SYNTH_CLOCK_MIN_UPDATES, usize) {
+        return false;
+    }
+    let c = tunable!("ENOMOTO_T_LUCLOCK_G_SOLVES", 3.0, f64) * tunable!("ENOMOTO_T_LUCLOCK_G_FACTOR", 1.0, f64);
+    c * (k * lu.fill_count() as f64 - fill_sum as f64) >= lu.build_tick().max(1) as f64
 }
 
 /// トリガ (4) の閾値: FT 更新回数の上限 `max(FT_MAX_UPDATES_FACTOR * m, FT_MAX_UPDATES_FLOOR)`

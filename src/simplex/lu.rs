@@ -405,6 +405,11 @@ pub(crate) static PROF_BTRAN_L_SCATTER: AtomicUsize = AtomicUsize::new(0);
 /// BTRAN の `L^{-T}` 段で列優先ギャザー形式にフォールバックした回数。
 pub(crate) static PROF_BTRAN_L_GATHER: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    /// 診断 `ENOMOTO_SIMPLEX_LUCLOCK_LOG` (analysis/luclock_20261111.md): このスレッドで作った分解の数。
+    pub static LU_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Markowitz 消去が作業する活性部分行列のフラット格納 (HiGHS `HFactor` の
 /// `mc_*`/`mr_*` 方式を行・列を入れ替えて採用)。
 ///
@@ -4739,6 +4744,7 @@ impl FtLu {
         // `U` の非対角非ゼロ数 (`u_row[s]` は対角を 1 個含むので長さ - 1。HiGHS の
         // `u_countX` と同じく非対角だけを数える)。
         let u_off: u64 = base.u_row.iter().map(|v| v.len().saturating_sub(1) as u64).sum();
+        LU_BUILDS.with(|c| c.set(c.get() + 1));
         let mut build_tick = tunable!("ENOMOTO_T_TICK_BUILD_M_COEF", TICK_BUILD_M_COEF, u64) * m as u64 + tunable!("ENOMOTO_T_TICK_BUILD_LU_COEF", TICK_BUILD_LU_COEF, u64) * (l_nnz + u_off);
         if s0 < m {
             // 密行列の分解 #7: 密ブロック (k x k) の分解は稠密 LU で疎な消去より桁違いに安いので、構築 tick の

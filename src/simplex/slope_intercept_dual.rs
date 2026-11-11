@@ -2249,6 +2249,66 @@ pub(super) fn solve_stage_a(std: &StdForm, opts: &crate::types::LpOptions) -> Op
     }
 }
 
+thread_local! {
+    /// 診断 `ENOMOTO_SIMPLEX_LUCLOCK_LOG` (analysis/luclock_20261111.md): [`lower_bound_from_basis`] の (呼んだ回数, 合成クロックの tick)。
+    static LUCLOCK_BOUND: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// 診断 `ENOMOTO_SIMPLEX_LUCLOCK_LOG=1` (振る舞いは変えない): 双対単体法の主ループを抜けるときに、反復が
+/// `ENOMOTO_T_LUCLOCK_LOG_MIN_ITERS` (既定 1000) 以上なら `LUCLOCK {...}` の 1 行 (行・列・反復・秒・分解の数・トリガ別の数・
+/// 下界の計算の回数と tick・共有の下界の有無・形) を stderr に出す。
+struct LuClockLog {
+    t0: std::time::Instant,
+    m: usize,
+    n: usize,
+    iters: std::cell::Cell<usize>,
+    shared: bool,
+    builds0: u64,
+    counts0: [u64; 3],
+    bound0: (u64, u64),
+}
+
+impl LuClockLog {
+    fn new(m: usize, n: usize, shared: bool) -> Option<Self> {
+        env_str!("ENOMOTO_SIMPLEX_LUCLOCK_LOG").filter(|v| *v != "0")?;
+        Some(LuClockLog {
+            t0: std::time::Instant::now(),
+            m,
+            n,
+            iters: std::cell::Cell::new(0),
+            shared,
+            builds0: sparse_lu::LU_BUILDS.with(|c| c.get()),
+            counts0: super::basis_kernel::LUCLOCK_COUNTS.with(|c| [c[0].get(), c[1].get(), c[2].get()]),
+            bound0: LUCLOCK_BOUND.with(|c| c.get()),
+        })
+    }
+}
+
+impl Drop for LuClockLog {
+    fn drop(&mut self) {
+        let it = self.iters.get();
+        if it < tunable!("ENOMOTO_T_LUCLOCK_LOG_MIN_ITERS", 1000usize, usize) {
+            return;
+        }
+        let b = sparse_lu::LU_BUILDS.with(|c| c.get()) - self.builds0;
+        let c = super::basis_kernel::LUCLOCK_COUNTS.with(|c| [c[0].get(), c[1].get(), c[2].get()]);
+        let bd = LUCLOCK_BOUND.with(|c| c.get());
+        eprintln!(
+            "LUCLOCK {{\"m\": {}, \"n\": {}, \"iters\": {it}, \"secs\": {:.4}, \"builds\": {b}, \"clock\": {}, \"maxupd\": {}, \"fill\": {}, \"bounds\": {}, \"bound_tick\": {}, \"shared\": {}, \"mode\": \"{}\"}}",
+            self.m,
+            self.n,
+            self.t0.elapsed().as_secs_f64(),
+            c[0] - self.counts0[0],
+            c[1] - self.counts0[1],
+            c[2] - self.counts0[2],
+            bd.0 - self.bound0.0,
+            bd.1 - self.bound0.1,
+            self.shared,
+            env_str!("ENOMOTO_SIMPLEX_LUCLOCK").unwrap_or(""),
+        );
+    }
+}
+
 /// 今の基底の双対 `y = B^{-T} c_B` (真の費用) から、元の問題の最適値の下界
 /// `L(y) = b·y + Σ_j min_{l_j <= x_j <= u_j} (c - A^T y)_j x_j` を計算する。どの `y` でも正しい下界で、
 /// 無限の境界の向きに有意な被約費用がある列があれば `-inf` (使えない)。
@@ -2261,6 +2321,20 @@ fn lower_bound_from_basis(std: &StdForm, basis: &[usize], lu: &sparse_lu::FtLu) 
         }
     }
     let _bd = BoundDone;
+    // 試作 `ENOMOTO_SIMPLEX_LUCLOCK=b`/`g` (analysis/luclock_20261111.md): この BTRAN を LU の決定的演算量カウンタ (再分解の
+    // 合成クロック) に残さない (下界の計算は単体法の 1 歩に属さず、呼ぶかどうかが共有の下界・分枝限定法の打ち切りで変わる)
+    // (既定でも、この計算の分を診断 `ENOMOTO_SIMPLEX_LUCLOCK_LOG` 用に [`LUCLOCK_BOUND`] に数える)
+    struct TickRestore<'a>(&'a sparse_lu::FtLu, u64);
+    impl Drop for TickRestore<'_> {
+        fn drop(&mut self) {
+            let t = self.0.synth_tick();
+            LUCLOCK_BOUND.with(|c| c.set((c.get().0 + 1, c.get().1 + t.saturating_sub(self.1))));
+            if super::basis_kernel::luclock_mode() != 0 {
+                self.0.restore_synth_tick(self.1);
+            }
+        }
+    }
+    let _tick = TickRestore(lu, lu.synth_tick());
     let m = std.n_rows;
     let cb: Vec<f64> = basis.iter().map(|&j| std.c[j]).collect();
     let mut y = vec![0.0; m];
@@ -5414,6 +5488,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 同時実行で内点法に渡す下界 (同じ形の問題を解いているときだけ、段階 B の間に書く)。
     let shared_bound = crate::cancel::bound().filter(|b| b.n_total == n_total && b.n_rows == m);
     let bound_every = tunable!("ENOMOTO_T_RACE_BOUND_EVERY", 100usize, usize).max(1);
+    let luclock_log = LuClockLog::new(m, n_total, shared_bound.is_some());
     // 計測用 (`ENOMOTO_DEBUG_PROGRESS=1`): 1000 反復ごとに経過時間と主実行不能の行数を出す (解けない問題の進み具合の比較)。
     let progress = env_str!("ENOMOTO_DEBUG_PROGRESS").is_some();
     let progress_t0 = std::time::Instant::now();
@@ -5433,6 +5508,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         v
     };
     for iter_idx in 0..max_iters {
+        if let Some(l) = &luclock_log {
+            l.iters.set(iter_idx + 1);
+        }
         if iter_idx & 63 == 0 && crate::cancel::is_cancelled() {
             return None; // 同時実行の相手が先に結論を出した
         }
