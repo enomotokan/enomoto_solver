@@ -782,6 +782,26 @@ neos3・savsched1 の auto の変更後は neos3 が順 1 + y_B なし、savsche
 なって頂点の受理が 89 → 43・15 問に落ち、仕上げの単体法が走るので合計 8.4 → 12.8・20.9 秒と遅くなる。δ = 1e-8 では超基底は
 減らない。詳細は `analysis/ipm_cost_perturb_20261102.md`。
 
+### PDLP の解を中心化してから内点法に渡す案 (2026-11-11、課題 PDLG、不採用)
+
+`ENOMOTO_T_XO_PDLP=2` (PDLP の解を内点法の初期点にも) の初期点は相補積が成分ごとに大きくばらつき (最小/平均 1e-4〜3e-2、最大/平均 1e2〜1e3)、
+最初の数反復の歩幅が 0.001〜0.1 に縮むことを確かめた。相補積を [μ/10, 10μ] に寄せる案 A (`ENOMOTO_T_PDLP_WARM_CENTER`) と、σ = 1 の
+中心化の Newton 歩 (`ENOMOTO_T_PDLP_WARM_CSTEPS`) は最初の歩幅を戻すが反復の合計は減らず、効くのは正則化の初期値を 1e-8 にすること
+(`ENOMOTO_T_PDLP_WARM_REG0`、近接項が点を PDLP の点へ引き戻すのを防ぐ。perold 130 → 77 反復、osa-30 80 → 37、pilot.we の差し戻しが消える)。
+109 問 (`benchmarks/crossover/pdlg/`、7 案を交互に 3 回):
+
+| 案 | 比 | 二段解法へ戻した数 | 退行 |
+|---|---|---|---|
+| 既定 | 1.000 | 1 | — |
+| PDLP 500 反復を初期点に (p2) | 1.373 | 2 | greenbea, perold |
+| p2 + 正則化 1e-8 | 1.307 | 0 | なし |
+| p2 + 案 A + 正則化 1e-8 | 1.314 | 0 | なし |
+| 失敗したときだけ PDLP から解き直す (`ENOMOTO_T_XO_IPM_RETRY_PDLP=500`、`_ANY=1`) | 1.040 | 0 | なし |
+
+分解の重さ (`ENOMOTO_T_XO_PDLP_GATE`) や大きさ (`ENOMOTO_T_XO_PDLP_MIN_NNZ`) で PDLP を使う問題を絞っても 1.00〜1.03 倍。内点法の反復は
+20〜40% 減るが PDLP の時間と相殺する。Rothberg (arXiv:2603.03150) の同じ形の試みも、Mittelmann の時間では冷えた初期点の内点法が勝つ。
+詳細は `analysis/pdlg_20261111.md`。
+
 ## 計測
 
 `scripts/crossover_bench/run.py` (計測) と `report.py` (集計)。結果は `benchmarks/crossover/`。
