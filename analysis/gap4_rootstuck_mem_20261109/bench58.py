@@ -15,6 +15,8 @@ CFGS = {
     "g4n": {"ENOMOTO_MIP_GAP4": "procln"},
     "q": {"ENOMOTO_MIP_GAP4": "q"},
     "hr": {"ENOMOTO_MIP_TAB_HIGHS_RULES": "1"},
+    "rocn": {"ENOMOTO_MIP_GAP4": "rocn"},
+    "t": {"ENOMOTO_MIP_GAP4": "t"},
 }
 OUT = D / os.environ.get("GAP4_BENCH_OUT", "res58.jsonl")
 
