@@ -1,5 +1,6 @@
 """HILOSS の切り分けの実験: 負けている問題を、既存の試作の環境変数を 1 つずつ足して 600 秒・4 スレッド・種 1 で回す (既定は変えない)。
 使い方: python run2.py K [問題 設定]   (shards2.json の K 番目の分担。途中から再開できる。ソルバーは同時に 1 つ)
+        HILOSS_SET=3 python run2.py K   (shards3.json の分担、出力は res3_sK.jsonl)
 出力: res2_sK.jsonl (1 行 = 問題 x 設定)、logs2/<問題>.<設定>.log.gz (各行の頭にプロセスの開始からの経過秒)。
 どの回も ENOMOTO_MIP_LOG=1 と ENOMOTO_MIP_TREE4_TRACE=10 (ログだけ)。
 前もって: pip install maturin highspy && pip install -e . (リポジトリの根で)"""
@@ -16,12 +17,15 @@ CFGS = {
     "cqr": {"ENOMOTO_MIP_CLIQUE_CUTS": "1", "ENOMOTO_T_MIP_CUT_ROUNDS": "100"},
     "sj": {"ENOMOTO_MIP_SUBCAP": "JB"},                                            # 根の並列のサブ MIP を待つ時間に上限 (analysis/submip_cap_20261106.md の改良)
     "ru": {"ENOMOTO_MIP_TREE4_RCUNION": "1"},                                      # 根のカットの各ラウンドの LP の被約費用でも固定する
+    "sd": {"ENOMOTO_MIP_SB_NO_DEGEN_SKIP": "1"},                                   # 双対退化の強いノードでも強分岐を止めない
+    "t1": {"ENOMOTO_MIP_TREE1_SB": "1"},                                           # HiGHS の信頼性分枝にそろえる (予算 100000 + 0.5 x、閾値 8)
 }
 TL = 600
 k = int(sys.argv[1])
-mine = json.loads((D / "shards2.json").read_text())["shards"][k]
+SET = os.environ.get("HILOSS_SET", "2")
+mine = json.loads((D / f"shards{SET}.json").read_text())["shards"][k]
 if len(sys.argv) > 3: mine = [[sys.argv[2], sys.argv[3]]]
-OUT = D / f"res2_s{k}.jsonl"
+OUT = D / f"res{SET}_s{k}.jsonl"
 (D / "logs2").mkdir(exist_ok=True)
 done = set()
 if OUT.exists():
