@@ -28,6 +28,7 @@ pub(crate) mod fpr_paper;
 mod heuristics;
 mod subb;
 pub(crate) mod sympre;
+mod sympre0;
 pub(crate) mod heur_subfix;
 pub(crate) mod heur_scip;
 pub(crate) mod heur_ipm;
@@ -1145,6 +1146,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             }
         }
     }
+    // 診断 `ENOMOTO_MIP_SYMPRE0_DIAG` (analysis/sympre0_20261111.md): 前処理の前 (DRCR の後) の問題で置換の対称性を数える (求解は変えない)
+    if env_str!("ENOMOTO_MIP_SYMPRE0_DIAG").is_some() && !params.submip && params.restarts == 0 {
+        sympre0::diag(p, "before");
+    }
     let presolved = if use_presolve { presolve_mip(p, params.verbose, pre_submip, lp_probe_secs) } else { None };
     pretime::mark("presolve_mip");
     PRESOLVE_IN_SUBMIP.with(|f| f.set(prev_in_sub));
@@ -1438,6 +1443,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             // (前処理は列を固定するだけ) ので、見つけた生成元・オービトープはそのまま次の段の求解に渡る
             let sym_restart = !early_sol && !params.submip && params.restarts > 0 && !sym_late && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() && ho6_symrestart_due();
             // `ENOMOTO_MIP_SUBB_SYM` (試作): サブ MIP も自分の表 ([`subb::SymScope`]) に検出する
+            // 診断 `ENOMOTO_MIP_SYMPRE0_DIAG`: 前処理の後の問題で同じ数え方をする
+            if env_str!("ENOMOTO_MIP_SYMPRE0_DIAG").is_some() && !params.submip && params.restarts == 0 && !early_sol {
+                sympre0::diag(&prob, "after");
+            }
             let prob = if !early_sol && (!params.submip || subb::sub_tables()) && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() && !sym_late {
                 add_symmetry_rows(prob, params.verbose, &mut postsolve, false)
             } else if sym_restart {
