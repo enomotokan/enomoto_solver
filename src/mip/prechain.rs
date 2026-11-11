@@ -11,6 +11,10 @@
 //! - `i`: スレッドの間と、主 → スレッドの向きに暫定解を渡す (Local-MIP の [`super::localmip::LocalMip::inject`])。
 //! - `r`: 根のカットのループの終わりで止めず、再スタートの後の根でも続ける (再スタートの前処理で縮んだ問題に乗り換え、主の
 //!   大域的な境界・暫定解を受け取り続ける)。木に入ったら止める。
+//! - `R` (`r` を含む。RESTCHAIN、analysis/restchain_20261111.md): `r` に加えて、(1) 根のカットのループの後も打ち切りを延ばして
+//!   再スタートの判定 (木に入る直前) まで回し、木に入るときに止める。(2) 再スタートの後の根でスレッドが終わっていれば (打ち切りに
+//!   達した・木の中の再スタート)、再スタートの前処理で縮んだ問題で立て直す。(3) 根の終わりの被約費用による固定の後にも主の大域的な
+//!   境界・暫定解を渡す。
 //! - `p`: 並列のプロービング (`ENOMOTO_MIP_PREPAR`) と分け合う (FJ・Local-MIP をスレッド数 − 2 本、プロービングに 2 本)。
 //!
 //! 主への解の受け渡しは今の根の FJ のスレッドと同じ受け渡し箱 (根のカットのループの各ラウンドで受け取る) なので、前処理の結果は
@@ -26,6 +30,8 @@ fn val() -> &'static str {
     V.get_or_init(|| match env_str!("ENOMOTO_MIP_PRECHAIN") {
         None | Some("0") => String::new(),
         Some("1") => "ebi".to_string(),
+        // `R` は `r` を含む
+        Some(v) if v.contains('R') => format!("{v}r"),
         Some(v) => v.to_string(),
     })
 }
@@ -85,6 +91,8 @@ pub(crate) struct Shared {
     n_drop: AtomicU64,
     n_tight: AtomicU64,
     n_inject: AtomicU64,
+    /// `R`: 範囲の外の主の暫定解から探し直させた数
+    n_seed: AtomicU64,
     verbose: bool,
 }
 
@@ -308,12 +316,17 @@ fn worker(sh: Arc<Shared>, id: usize, seed: u64) {
                     seen_main = ms;
                     let b = sh.main_inc.lock().unwrap().clone();
                     if let (Some((_, x)), Some(l)) = (b, lm.as_mut()) {
-                        if let Some(y) = to_sp(&x) {
+                        let y = to_sp(&x).filter(|y| sp.is_feasible(y, 1e-6));
+                        if let Some(y) = y {
                             let z = sp.objective(&y);
                             if better(z, my_best) && l.inject(&y) {
                                 my_best = z;
                                 sh.n_inject.fetch_add(1, Ordering::Relaxed);
                             }
+                        } else if has('R') && x.len() == sp.n && better(sp.objective(&x), my_best) && l.seed_outside(&x, sp.objective(&x)) {
+                            // `R`: 主の暫定解が締まった範囲 (再スタートで固定した列など) の外: 範囲に収めた点から目的の行だけ締めて探す
+                            // (目的値は探す問題の費用・定数で測り直す)
+                            sh.n_seed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -419,12 +432,13 @@ impl Chain {
         let sh = &self.sh;
         if sh.verbose {
             eprintln!(
-                "MIP: PRECHAIN summary: found {} improvements (first at {}), dropped {} when mapped to the root problem, injected {}, last tightened bounds {}",
+                "MIP: PRECHAIN summary: found {} improvements (first at {}), dropped {} when mapped to the root problem, injected {}, last tightened bounds {}, seeded outside {}",
                 sh.n_found.load(Ordering::Relaxed),
                 sh.first_at.lock().unwrap().map_or("-".to_string(), |t| format!("{t:.2}s")),
                 sh.n_drop.load(Ordering::Relaxed),
                 sh.n_inject.load(Ordering::Relaxed),
-                sh.n_tight.load(Ordering::Relaxed)
+                sh.n_tight.load(Ordering::Relaxed),
+                sh.n_seed.load(Ordering::Relaxed)
             );
         }
     }
@@ -457,24 +471,18 @@ pub(crate) fn prepar_share(threads: usize) -> Option<usize> {
     (has('p') && threads >= 3).then_some(2)
 }
 
-/// 前処理の途中 (軽い縮約の後、重い前処理の前) で呼ぶ: 立っていれば FJ・Local-MIP のスレッドを立てる。戻り値はプロービングに回すスレッドの数
-pub(crate) fn start(prob: &MipProblem) -> Option<usize> {
-    let (threads, tl, t0, verbose) = PENDING.with(|p| p.take())?;
-    if super::heuristics::fj_feas_extend(prob) || prob.n == 0 {
-        return None;
-    }
-    let par = prepar_share(threads);
-    let k = threads.saturating_sub(par.unwrap_or(1)).max(1);
-    let far = if tl.is_finite() { t0 + Duration::from_secs_f64(tl.max(0.0)) } else { t0 + Duration::from_secs(1 << 30) };
+/// `k` 本のスレッドを問題 `q` で立てる。`root` なら `q` を根の問題 (版 0) とする (`R` の再スタートの後の立て直し)。
+/// `salt` は種に混ぜる (再スタートの回数)
+fn spawn(q: Arc<MipProblem>, k: usize, deadline: (Instant, Instant), t0: Instant, verbose: bool, salt: u64, root: bool) -> (Arc<Shared>, Vec<std::thread::JoinHandle<()>>) {
     let sh = Arc::new(Shared {
         stop: Arc::new(AtomicBool::new(false)),
         active: AtomicUsize::new(k),
         running: AtomicUsize::new(k),
         wstop: (0..k).map(|_| Arc::new(AtomicBool::new(false))).collect(),
-        deadline: Mutex::new((far, far)),
-        epoch: Mutex::new(Epoch { ver: 0, prob: Arc::new(prob.clone()) }),
+        deadline: Mutex::new(deadline),
+        epoch: Mutex::new(Epoch { ver: 0, prob: q }),
         epoch_ver: AtomicU64::new(0),
-        root_ver: AtomicU64::new(u64::MAX),
+        root_ver: AtomicU64::new(if root { 0 } else { u64::MAX }),
         best: Mutex::new(None),
         best_ser: AtomicU64::new(0),
         main_inc: Mutex::new(None),
@@ -492,9 +500,10 @@ pub(crate) fn start(prob: &MipProblem) -> Option<usize> {
         n_drop: AtomicU64::new(0),
         n_tight: AtomicU64::new(0),
         n_inject: AtomicU64::new(0),
+        n_seed: AtomicU64::new(0),
         verbose,
     });
-    let base = tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03) ^ 0x5851_F42D_4C95_7F2D;
+    let base = tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03) ^ 0x5851_F42D_4C95_7F2D ^ salt.wrapping_mul(0xA076_1D64_78BD_642F);
     let handles = (0..k)
         .map(|id| {
             let sh = sh.clone();
@@ -502,6 +511,19 @@ pub(crate) fn start(prob: &MipProblem) -> Option<usize> {
             std::thread::spawn(move || worker(sh, id, seed))
         })
         .collect();
+    (sh, handles)
+}
+
+/// 前処理の途中 (軽い縮約の後、重い前処理の前) で呼ぶ: 立っていれば FJ・Local-MIP のスレッドを立てる。戻り値はプロービングに回すスレッドの数
+pub(crate) fn start(prob: &MipProblem) -> Option<usize> {
+    let (threads, tl, t0, verbose) = PENDING.with(|p| p.take())?;
+    if super::heuristics::fj_feas_extend(prob) || prob.n == 0 {
+        return None;
+    }
+    let par = prepar_share(threads);
+    let k = threads.saturating_sub(par.unwrap_or(1)).max(1);
+    let far = if tl.is_finite() { t0 + Duration::from_secs_f64(tl.max(0.0)) } else { t0 + Duration::from_secs(1 << 30) };
+    let (sh, handles) = spawn(Arc::new(prob.clone()), k, (far, far), t0, verbose, 0, false);
     if verbose {
         eprintln!("MIP: PRECHAIN: started {k} FJ/Local-MIP threads on the problem in the presolve ({} rows, {} free columns, {:.2}s)", prob.m, (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count(), t0.elapsed().as_secs_f64());
     }
@@ -534,13 +556,24 @@ pub(crate) fn refresh(prob: &MipProblem) {
 /// 立てる)。連鎖そのものは主のスレッドに置いたまま ([`stop_current`] か [`disarm`] で止める)。`t_end` と `t_ext` は今の FJ のスレッドと
 /// 同じ打ち切り (解があるとき / 主が FJ のスレッド以外の暫定解を持たないとき)。`r` なら再スタートの後の根でも呼び、再スタートの
 /// 前処理で縮んだ問題に乗り換えさせる
-pub(crate) fn attach(q: Arc<MipProblem>, t_end: Instant, t_ext: Instant) -> Option<Arc<Shared>> {
-    let sh = CUR.with(|c| c.borrow().as_ref().map(|c| c.sh.clone()))?;
-    let (_, q0) = sh.epoch();
-    if q0.n != q.n || sh.stop.load(Ordering::Relaxed) || sh.running.load(Ordering::Acquire) == 0 {
+pub(crate) fn attach(q: Arc<MipProblem>, t_end: Instant, t_ext: Instant, restarts: u32, verbose: bool) -> Option<Arc<Shared>> {
+    let cur = CUR.with(|c| c.borrow().as_ref().map(|c| c.sh.clone()));
+    let alive = cur.as_ref().is_some_and(|sh| sh.epoch().1.n == q.n && !sh.stop.load(Ordering::Relaxed) && sh.running.load(Ordering::Acquire) > 0);
+    if !alive {
         stop_current();
-        return None;
+        // `R`: 再スタートの後の根で、スレッドが終わっていれば (打ち切りに達した・木に入って止めた) 縮んだ問題で立て直す
+        if !(has('R') && restarts > 0 && q.n > 0) {
+            return None;
+        }
+        let k = tunable!("ENOMOTO_T_MIP_PRECHAIN_ROOT_KEEP", 1usize, usize).max(1);
+        let (sh, handles) = spawn(q.clone(), k, (t_end, t_ext.max(t_end)), Instant::now(), verbose, restarts as u64, true);
+        if verbose {
+            eprintln!("MIP: PRECHAIN R: restarted {k} FJ/Local-MIP threads on the problem after restart {restarts} ({} rows, {} free columns)", q.m, (0..q.n).filter(|&j| q.col_lo[j] < q.col_up[j]).count());
+        }
+        CUR.with(|c| *c.borrow_mut() = Some(Chain { sh: sh.clone(), handles }));
+        return Some(sh);
     }
+    let sh = cur.unwrap();
     *sh.deadline.lock().unwrap() = (t_end, t_ext.max(t_end));
     let keep = tunable!("ENOMOTO_T_MIP_PRECHAIN_ROOT_KEEP", 1usize, usize).max(1);
     sh.active.fetch_min(keep, Ordering::Relaxed);
@@ -549,6 +582,15 @@ pub(crate) fn attach(q: Arc<MipProblem>, t_end: Instant, t_ext: Instant) -> Opti
     }
     sh.publish(q, true);
     Some(sh)
+}
+
+/// `R`: 根のカットのループの終わりに呼ぶ。打ち切りを `t` (求解の期限) まで延ばし、再スタートの判定 (木に入る直前) まで回す
+pub(crate) fn extend_to(t: Instant) {
+    CUR.with(|c| {
+        if let Some(c) = c.borrow().as_ref() {
+            *c.sh.deadline.lock().unwrap() = (t, t);
+        }
+    });
 }
 
 /// 走っている連鎖を止めて待つ (根のカットのループの終わり、`r` なら木に入るとき)

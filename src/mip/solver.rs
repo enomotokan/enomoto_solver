@@ -9629,6 +9629,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if dbg_root && !self.dbg_contains() {
             self.dbg_lost("root redcost fixing", true);
         }
+        // 試作 `ENOMOTO_MIP_PRECHAIN` の `R`: 被約費用による固定で締まった大域的な境界と暫定解を連鎖のスレッドに渡す
+        if super::prechain::has('R') {
+            self.post_prechain();
+        }
         // `ENOMOTO_MIP_ROOT_OBJ_PROBE_SUBMIP`: サブ MIP (RENS・RINS など) の根でも行う。サブ MIP では渡された打ち切り値
         // (元の問題の暫定解) も使う
         let probe_sub = env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_SUBMIP").is_some();
@@ -9681,6 +9685,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(r) = self.maybe_restart() {
                 return r;
             }
+        }
+        // 試作 `ENOMOTO_MIP_PRECHAIN` の `R`: 再スタートしないので、木に入る前に連鎖のスレッドを止め、残った解を受け取る
+        if self.prechain.is_some() && super::prechain::has('R') {
+            super::prechain::stop_current();
+            self.poll_lmip_thread();
+            self.prechain = None;
         }
         let prot = self.basis_protected_cuts();
         // 木の写しから解くときは、根のノードの代わりに写しのノードを入れる (定義域は取り出すたびに根から積み直す)
@@ -18151,7 +18161,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             t_end
         };
-        let Some(sh) = super::prechain::attach(pc, t_end, t_ext) else { return false };
+        let Some(sh) = super::prechain::attach(pc, t_end, t_ext, self.params.restarts, self.params.verbose) else { return false };
         sh.has_inc.store(self.incumbent.is_some() && !self.inc_only_fj, std::sync::atomic::Ordering::Relaxed);
         self.fj_has_inc = Some(sh.has_inc.clone());
         self.lmip_mailbox = Some(sh.mailbox.clone());
@@ -18212,6 +18222,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_PRECHAIN`: 連鎖のスレッドを止める (`r` なら止めず、再スタートの後の根・木に入るまで続ける)
             if self.prechain.is_some() && !super::prechain::has('r') {
                 super::prechain::stop_current();
+            }
+            // `R` (RESTCHAIN): 打ち切りを求解の期限まで延ばし、再スタートの判定 (木に入る直前) まで回し続ける
+            if self.prechain.is_some() && super::prechain::has('R') {
+                let far = self.deadline.unwrap_or_else(|| Instant::now() + std::time::Duration::from_secs(1 << 30));
+                super::prechain::extend_to(far);
             }
             // 受け渡し箱に残った解 (FJ のスレッドの Local-MIP) を先に受け取る
             self.poll_lmip_thread();

@@ -584,6 +584,27 @@ impl<'a> LocalMip<'a> {
         true
     }
 
+    /// 試作 `ENOMOTO_MIP_PRECHAIN` の `R` (analysis/restchain_20261111.md): 範囲の外の点 `x` (打ち切り値で締めた範囲 (被約費用による
+    /// 固定など) が外す主の暫定解、元の問題の目的値 `z`) から探し直す。範囲に収めた点から始め、目的の行を `z` より刻み 1 つ良い値に
+    /// 締める (`x` は範囲の外なので最良の解としては持たない)。自分の最良が `z` 以下なら何もしない
+    pub(super) fn seed_outside(&mut self, x: &[f64], z: f64) -> bool {
+        let p = self.s.p;
+        if x.len() != p.n || !z.is_finite() {
+            return false;
+        }
+        let z = z - p.offset;
+        if self.best_obj.is_finite() && self.best_obj <= z + 1e-9 * z.abs().max(1.0) {
+            return false;
+        }
+        self.s.x = x.iter().enumerate().map(|(j, &v)| v.clamp(self.s.lo[j], self.s.up[j])).collect();
+        self.s.obj_up = z - super::heuristics::ls_obj_step_pub(p, z);
+        self.s.reset();
+        self.since_improve = 0;
+        self.round_best = usize::MAX;
+        self.done = false;
+        true
+    }
+
     /// `t_end` まで (か `stop` が立つまで) 探す。`on_sol` は実行可能解が良くなるたびに呼ぶ。
     pub(super) fn run(&mut self, t_end: Instant, stop: Option<&std::sync::atomic::AtomicBool>, on_sol: &dyn Fn(&[f64])) {
         if self.done {
