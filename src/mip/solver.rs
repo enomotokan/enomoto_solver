@@ -9166,6 +9166,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.early_restart && env_str!("ENOMOTO_MIP_LOSE6_1_STOP").is_some_and(|v| v.contains('w')) {
                     cap = cap.min(tunable!("ENOMOTO_T_MIP_LOSE6_1_BGWAIT", 2.0, f64));
                 }
+                // 試作 `ENOMOTO_MIP_ROOTSTOP` の `w`: 再スタートが見込まれる根では裏のカットを待たない (その時点の結果は取り込む)
+                if super::rootstop::on('w') && self.rootstop_skip_wait() {
+                    cap = 0.0;
+                }
                 let cutoff = if env_def!("ENOMOTO_MIP_BG_CUTS_PROOF_STOP", "1").is_some() { self.prune_limit() } else { self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z) };
                 let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
                 bg.job.cutoff_bits.store(z.to_bits(), std::sync::atomic::Ordering::Relaxed);

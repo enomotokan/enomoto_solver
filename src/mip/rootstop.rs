@@ -9,6 +9,7 @@
 //!   判定 (SCIP 式の 10 回) は使わない (ラウンドの上限・時間の上限・目的値が整数刻みの判定はそのまま効く)。下界が一度も動いて
 //!   いない間は今までの判定のまま。
 //! - `b` (案 6): 根の終わりで先に再スタートを見込み (新たに固定できた整数列が再スタートの閾値以上)、見込まれる根では裏のカットを起こさない。
+//! - `w` (案 6 の続き): 根のヒューリスティクスの後、裏のカットを待つ前に同じ見込みを立て、見込まれる根では待たない (それまでの結果は取り込む)。
 //!
 //! 試作 `ENOMOTO_MIP_CUTSTALL_GAP`・`ENOMOTO_MIP_HO6_STALL`・`ENOMOTO_MIP_CUT_STALL_HIGHS` とは併用しない前提 (併用したときは `r` が先に判定する)。
 
@@ -119,6 +120,24 @@ impl<'a, L: super::lp_api::MipLp> super::solver::Solver<'a, L> {
                 self.newly_fixed_ints(),
                 if skip { "" } else { "not " },
                 if skip { "skipped" } else { "started" },
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+        skip
+    }
+
+    /// `w`: 根のヒューリスティクスの後、裏のカット (`ENOMOTO_MIP_BG_CUTS_DETERM` の待ち) を待つ前に呼ぶ。`b` と同じ見込みで再スタートが
+    /// 見込まれるなら真 (待たない)。最初の根では裏のカットを起こす時点の暫定解が悪く (FJ の解など) 見込みが立たないことが多いが、
+    /// この時点では根のヒューリスティクスの解で見込める (mc11: 起動時は 0 本、再スタートの判定では 295 本)
+    pub(super) fn rootstop_skip_wait(&self) -> bool {
+        let would = self.rootstop_redcost_would_fix();
+        let skip = self.restart_expected(would);
+        if self.params.verbose {
+            eprintln!(
+                "MIP: ROOTSTOP w: newly fixed {} + fixable by reduced costs {would} before waiting for the background cuts, restart {}expected; {} ({:.2}s)",
+                self.newly_fixed_ints(),
+                if skip { "" } else { "not " },
+                if skip { "not waiting" } else { "waiting" },
                 self.start.elapsed().as_secs_f64()
             );
         }
