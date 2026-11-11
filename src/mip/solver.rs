@@ -3441,6 +3441,9 @@ pub(crate) fn lose6_1_stop() -> bool {
 /// - `b`: 裏のカットを待たず、回っているラウンドも止める ([`CutJob::halt`] を LP の反復・分離の止める合図にする)。止めた裏のカットの
 ///   LP は最適とは限らないので行を置き換えず、終わったラウンドのカットの行 (片側のもの) をカットプールに入れるだけにする。
 ///   裏のカットが合図の前に自分で終わっていれば今まで通り置き換える。
+/// - `k` (`b` と使う): 裏のカットを `ENOMOTO_T_MIP_ERWAIT_BGWAIT` 秒 (2) まで今まで通り待ち、まだ回っていたら止めて、最後に終わった
+///   ラウンドの LP のカットの行と基底 ([`CutJob::last_ok`]) で置き換える (裏のカットのスレッドがラウンドごとに写しを取っておく)。
+///   p200x1188c では裏のカットが 1.6 秒で 62 ラウンド回り、根の下界と再スタートの固定 (841 対 606 列) を大きく増やしていた。
 /// - `c`: 裏のカットが手間の上限で終わったときの主のカットのループの続き (`BG_CUTS_DETERM` の `c`) と `MC11FIX2` の続きを回さない
 ///   (再スタートの後の根でカットのループを回し直す)。
 ///
@@ -3835,6 +3838,9 @@ pub(super) struct CutJob {
     /// 試作 `ENOMOTO_MIP_ERWAIT` の `b` ([`erwait`]): 裏のカットのスレッドの LP の反復・分離を途中で止める合図
     /// ([`crate::cancel::with_halt`] でスレッドの止める合図にする)。立てたら結果の LP は最適とは限らないので、主は行を置き換えない
     pub(super) halt: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 試作 `ENOMOTO_MIP_ERWAIT` の `k` ([`erwait`]): 最後に終わったラウンドの LP のカットの行・目的値 (offset 込み)・ラウンド数・基底
+    /// (裏のカットのスレッドが LP が最適になったラウンドごとに置き換える)。止めたときに主はこれで置き換える
+    pub(super) last_ok: std::sync::Mutex<Option<(Vec<(Vec<(usize, f64)>, f64, f64)>, f64, usize, super::lp::Basis)>>,
 }
 
 /// 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` (既定では使わない。[`BgDeterm`] が働くときだけ。analysis/robust_stall_20261102.md): 裏のカットの停滞の判定を
@@ -4010,6 +4016,7 @@ impl CutJob {
             robust_stalled: std::sync::atomic::AtomicBool::new(false),
             vetoes: std::sync::atomic::AtomicUsize::new(0),
             halt: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_ok: std::sync::Mutex::new(None),
             share: std::sync::Mutex::new(None),
             share_in: std::sync::atomic::AtomicUsize::new(0),
             share_used: std::sync::atomic::AtomicUsize::new(0),
@@ -9232,6 +9239,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(mut bg) = bg_cuts.take() {
             let t0 = Instant::now();
             // 試作 `ENOMOTO_MIP_ERWAIT` の `b` ([`erwait`]): 早めの再スタートが決まった根では、まだ回っている裏のカットを LP の途中でも止める
+            let er_keep = erwait('k');
+            if self.early_restart && erwait('b') && er_keep && !self.params.submip {
+                let cutoff = self.prune_limit();
+                let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+                let cap = tunable!("ENOMOTO_T_MIP_ERWAIT_BGWAIT", 2.0, f64);
+                let (w, why) = if bg.job.determ.is_some() { bg.wait_determ(cap, cutoff, z) } else { bg.wait_progress(cap, cutoff) };
+                if self.params.verbose {
+                    eprintln!("MIP: ERWAIT: waited {w:.2}s for the background cuts before halting ({why}, {} rounds)", bg.job.prog.lock().unwrap().len());
+                }
+            }
             let er_halt = self.early_restart && erwait('b') && !self.params.submip && bg.handle.as_ref().is_some_and(|h| !h.is_finished());
             if er_halt {
                 bg.job.halt.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -9372,7 +9389,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.er_diag("background cuts joined");
             // `ERWAIT` の `b`: 止めた裏のカットの LP は最適とは限らないので行を置き換えない。終わったラウンドのカットの行 (妥当な不等式) は
             // カットプールに入れる
-            let res = if er_halt {
+            let res = if er_halt && er_keep {
+                // `k`: 最後に終わったラウンドの行と基底で置き換える (基底は下の置き換えの道で LP に入れる)
+                let last = bg.job.last_ok.lock().unwrap().take();
+                if self.params.verbose {
+                    eprintln!("MIP: ERWAIT: halted background cuts: using the last completed round ({:?} rounds, obj {:?})", last.as_ref().map(|l| l.2), last.as_ref().map(|l| l.1));
+                }
+                last.map(|(rows, obj, rounds, basis)| {
+                    *bg.job.basis.lock().unwrap() = Some(basis);
+                    *bg.job.dse.lock().unwrap() = None;
+                    (rows, obj, rounds)
+                })
+            } else if er_halt {
                 if let Some((rows, _, rounds)) = &res {
                     let n0 = self.cut_pool.len();
                     for (c, l, u) in rows {

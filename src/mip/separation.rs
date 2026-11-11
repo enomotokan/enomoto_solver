@@ -3158,6 +3158,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             if let Some(j) = &job {
+                // 試作 `ENOMOTO_MIP_ERWAIT` の `k`: このラウンドの LP (最適) のカットの行と基底を取っておく (主が途中で止めたときに使う)
+                if super::solver::erwait('b') && super::solver::erwait('k') {
+                    let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = (p.m..self.lp.num_rows())
+                        .map(|i| {
+                            let (l, u) = self.lp.row_bounds(i);
+                            (self.lp.row(i), l, u)
+                        })
+                        .collect();
+                    *j.last_ok.lock().unwrap() = Some((rows, obj + p.offset, round_ctr, self.lp.basis()));
+                }
                 if let Some(why) = j.record_round(obj + p.offset, self.lp.col_values(), self.lp.total_iterations(), phase2_on && !phase2) {
                     if self.params.verbose {
                         eprintln!("MIP: cut round {round}: background cuts stop by themselves ({why}, {} LP iters, obj {:.10e})", self.lp.total_iterations(), obj + p.offset);
