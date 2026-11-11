@@ -1080,6 +1080,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let first_obj = prev_obj;
         // `ENOMOTO_MIP_CUTSTALL_GAP` ([`cutstall_gap`]): 外側の根 (裏のカットの写しを含む) だけ
         let cs_gap = cutstall_gap().filter(|_| !self.params.submip);
+        // 試作 `ENOMOTO_MIP_ROOTSTOP` の `r` ([`super::rootstop::RateStop`]): 外側の主の根だけ
+        let mut rate_stop = (super::rootstop::on('r') && !self.params.submip && self.snap.is_none() && self.cut_cont.is_none()).then(|| super::rootstop::RateStop::new(first_obj, self.params.restarts));
         if cs_gap.is_some() && self.params.restarts == 0 && self.snap.is_none() && self.cut_cont.is_none() && first_obj.is_finite() {
             CUTSTALL_BASE.store((first_obj + p.offset).to_bits(), std::sync::atomic::Ordering::Relaxed);
         }
@@ -3198,6 +3200,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     _ => reldiff,
                 };
+                let rs = rate_stop.as_mut().map(|r| r.record(obj, self.lp.total_iterations() - it0));
+                if rs == Some(super::rootstop::Rate::Stop) {
+                    if self.params.verbose {
+                        let (r, r0) = rate_stop.as_ref().map_or((0.0, 0.0), |r| r.last);
+                        eprintln!("MIP: cut round {round}: ROOTSTOP r: rate {r:.3e} < {} x first {r0:.3e}; stop (obj {:.10e})", tunable!("ENOMOTO_T_MIP_ROOTSTOP_RATE", 0.05, f64), obj + p.offset);
+                    }
+                    break;
+                }
+                let reldiff = if rs == Some(super::rootstop::Rate::Continue) { 1.0 } else { reldiff };
                 if phase2 {
                     // 第 2 段階: 目的値だけで停滞を数える
                     if reldiff <= 1e-4 {

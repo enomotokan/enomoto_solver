@@ -57,6 +57,7 @@ pub(crate) mod cutsel_ens;
 pub(crate) mod pretime;
 pub(crate) mod plsb;
 pub(crate) mod prechain;
+pub(crate) mod rootstop;
 
 use crate::solver::solve_lp;
 use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective, RootSolver, SolveResult, Status, VarType, VariableData};

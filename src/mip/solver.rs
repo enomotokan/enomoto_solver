@@ -8360,6 +8360,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut bg_extra: Vec<BgCuts> = Vec::new();
         if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
             let bg_mode = env_str!("ENOMOTO_MIP_BG_CUTS").or(if env_str!("ENOMOTO_MIP_NO_BG_CUTS").is_none() { Some("1") } else { None });
+            // 試作 `ENOMOTO_MIP_ROOTSTOP` の `b`: 再スタートが見込まれる根では裏のカットを起こさない
+            let bg_mode = bg_mode.filter(|_| !(super::rootstop::on('b') && self.rootstop_skip_bg()));
             if let Some(mode) = bg_mode {
                 let determ = BgDeterm::new(root_iters);
                 if let Some(d) = &determ {
@@ -17178,6 +17180,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         let fixed = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
         fixed.saturating_sub(self.root_fixed0)
+    }
+
+    /// 試作 `ENOMOTO_MIP_ROOTSTOP` の `b` ([`super::rootstop`]): 今の新たな固定の数 + `extra` (これから固定できる見込みの数) で
+    /// [`Self::maybe_restart`] の閾値を越えている (この根の終わりで再スタートが見込まれる) か。閾値の数え方は [`Self::maybe_restart`] と同じ
+    pub(super) fn restart_expected(&self, extra: usize) -> bool {
+        let p = self.p;
+        if self.params.submip || self.snap.is_some() || self.params.restarts >= max_restarts(p) || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() || p.nint == 0 {
+            return false;
+        }
+        let newly = self.newly_fixed_ints() + extra;
+        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
+        let denom = if env_str!("ENOMOTO_MIP_RESTART_FRAC_FREE").is_some() || super::gr_restart_ff_for(p) { p.nint.saturating_sub(self.root_fixed0) } else { p.nint };
+        newly > 0 && newly as f64 >= fac * denom as f64
     }
 
     /// 早めの再スタート ([`super::early_restart_on`])・木の中の再スタート (`ENOMOTO_MIP_TREE_RESTART=inc`、試作) の判定: 新たな固定が、根の始めに固定されて
