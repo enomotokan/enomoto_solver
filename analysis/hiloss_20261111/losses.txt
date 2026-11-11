@@ -1,0 +1,34 @@
+cand1111 の Mittelmann の回: 580 行 (全 744)
+組: A = 2 種とも HiGHS だけ / B = 片方の種で HiGHS だけ / C = 2 種とも解くが HiGHS が 2 倍以上速い
+組  問題                            HiGHS res9 s1    s2      比 | c.def s1    s2 c1111 s1    s2 | res9 の終わりのギャップ% (s1,s2)  ノード (HiGHS / res9 s1)
+A  neos-3627168-kasai               84      TL    TL    7.1 |       TL    TL       TL    TL |    0.34    0.48  11880 / 159335
+A  mzzv11                          113      TL    TL    5.3 |       TL    TL       TL    TL |    0.52    0.87  6 / 1606
+A  csched008                       197      TL    TL    3.0 |      -     -        -     -   |    1.16    3.39  14798 / 89350
+A  neos-4722843-widden             234      TL    TL    2.6 |       TL    TL       TL    TL |   37.17   22.36  319 / 5881
+A  rococoC10-001000                257      TL    TL    2.3 |       TL    TL       TL    TL |    6.21    6.25  7477 / 60237
+A  neos-873061                     296      TL    TL    2.0 |       TL    TL       TL    TL |   14.05   13.54  6255 / 0
+A  satellites2-60-fs               392      TL    TL    1.5 |       TL    TL       TL    TL | 3000.00 2900000000000.00  191 / 413
+A  net12                           407      TL    TL    1.5 |       TL    TL       TL    TL |   48.63   44.39  1197 / 1994
+A  tr12-30                         418      TL    TL    1.4 |      -     -        -     -   |    0.07    0.06  45369 / 133048
+A  sct2                            428      TL    TL    1.4 |       TL    TL       TL    TL |    0.03    0.03  21632 / 81385
+A  neos-1456979                    446      TL    TL    1.3 |      -     -        -     -   |   10.67    6.21  13917 / 62580
+A  neos-3216931-puriri             485      TL    TL    1.2 |       TL    TL       TL    TL |   26.97   27.06  1129 / 30
+A  uccase12                        488      TL    TL    1.2 |       TL    TL       TL    TL |    0.00    0.00  6949 / 22535
+B  supportcase33                   158     421    TL    3.2 |       TL    TL       TL    TL |       解    7.25  1360 / 25013
+B  unitcal_7                       180      TL   500    3.0 |       TL    TL       TL    TL |    0.09       解  766 / 3240
+B  tbfp-network                    268      TL   566    2.2 |       TL   448       TL    TL |    8.24       解  1 / 427
+B  pg5_34                          358     516    TL    1.6 |       TL    TL      189   230 |       解    0.05  22259 / 110062
+B  mcsched                         477      TL   585    1.2 |       TL    TL       TL    TL |    2.81       解  17758 / 141587
+B  traininstance6                  441     405    TL    1.1 |       TL    TL       TL    TL |       解   69.24  230994 / 120849
+C  neos859080                        1      13    27    8.4 |       45    17      127    TL |       解       解  1102 / 150649
+C  hypothyroid-k1                   12      85    89    6.6 |      -     -        -     -   |       解       解  1 / 0
+C  fiball                          129     600   474    4.1 |      600    TL       TL    TL |       解       解  667 / 1046889
+C  mzzv42z                          57     234   235    4.0 |      -     -        -     -   |       解       解  1 / 1187
+C  p200x1188c                        1       5     7    3.6 |        4     9        3     4 |       解       解  1 / 1
+C  h80x6320d                        19      56    67    3.1 |      -     -        -     -   |       解       解  19 / 115
+C  physiciansched6-2                10      26    19    2.2 |       23    15       26   107 |       解       解  1 / 0
+
+cand1111 (揃った分) で HiGHS だけが解く問題 (2 種とも揃っていて 2 種とも解けない):
+  fiball, mcsched, mzzv11, neos-3216931-puriri, neos-3627168-kasai, neos-4722843-widden, neos-873061, net12, rococoC10-001000, satellites2-60-fs, sct2, supportcase33, tbfp-network, traininstance6, uccase12, unitcal_7
+ENOMOTO (res9) だけが解く問題 (どちらかの種):
+  comp07-2idx, fhnw-binpack4-48, gen-ip054, istanbul-no-cutoff, mas74, neos-1171737, supportcase40, wachplan
