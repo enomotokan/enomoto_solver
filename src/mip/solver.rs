@@ -2781,6 +2781,9 @@ fn snap_weight(v: &[SnapNode]) -> f64 {
 /// `ENOMOTO_MIP_TREE_RESTART=1`)。古い試作の名前は別名: `ENOMOTO_MIP_TREE1_RESTART=1` → `force`、`=f` → `1`、
 /// `ENOMOTO_MIP_TREE4_RESTART=force` → `force`、`=1` → `1` (analysis/tree_restart_20261104.md)
 fn tree_restart_mode() -> u8 {
+    if treeeff('r') && env_str!("ENOMOTO_MIP_TREE_RESTART").is_none() {
+        return 2;
+    }
     if let Some(v) = env_str!("ENOMOTO_MIP_TREE_RESTART") {
         return match v {
             "force" => 2,
@@ -2801,6 +2804,23 @@ fn tree_restart_mode() -> u8 {
 /// HiGHS 式の木の中の再スタート ([`tree_restart_mode`] の 1・2) を使うか。
 fn tree_restart_on() -> bool {
     matches!(tree_restart_mode(), 1 | 2)
+}
+
+/// `ENOMOTO_MIP_TREEEFF=文字` (試作、既定では使わない。analysis/treeeff_20261111.md): 木の中の再スタートを既定に入れられる形にする束。
+/// - `r`: 木の中の再スタートを HiGHS 式の判定 ([`Solver::tree_restart_due`]、固定の数を問わない `force` と同じ) で行い、損の型を
+///   `ENOMOTO_MIP_TREE_RESTART_GUARD` の `KR` で見送る (ガードを別に置いたらそちらを使う)。加えて、効いているカットの行が問題の行の
+///   `ENOMOTO_T_MIP_TREEEFF_CRATIO` (0.3) 倍以上なら `R` (木がほぼ閉じている) を当てない (カットを持ち込む再スタートは閉じかけでも通す)。
+/// - `p`: 木の中の再スタートで、擬似費用 (`ENOMOTO_MIP_RESTART_PC` と同じ)・カットプール・木の下界 (`ENOMOTO_MIP_RESTART_ROOT_CUTS` の
+///   `p`・`l` と同じ) を持ち越す (HiGHS の `performRestart` は下界とカットプールを持ち越す)。
+/// - `s`: 木の中の再スタートの後の根では、カットのループを `ENOMOTO_T_MIP_TREEEFF_ROUNDS` (5) ラウンドまでにする (カットは行として持ち込む)。
+/// - `h`: 木の中の再スタートの後の根では、軽いヒューリスティクスだけを回す (暫定解があるとき)。
+pub(super) fn treeeff(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_TREEEFF").is_some_and(|v| v.contains(c))
+}
+
+thread_local! {
+    /// 木の中の再スタートの後の求解の中か ([`treeeff`] の `s`。[`Solver::maybe_restart`] が求解の間だけ立てる)
+    pub(super) static TREE_RESTART_CHILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// `ENOMOTO_MIP_TREE1_SB` (試作): HiGHS の信頼性分枝の予算と閾値 ([`Solver::select_branch_inner`])。
@@ -9981,7 +10001,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose {
                     eprintln!("MIP: TREE restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
                 }
-                if restart_root_cuts('l') {
+                if restart_root_cuts('l') || treeeff('p') {
                     self.restart_tree_lb = self.global_lower_bound().min(plunge.as_ref().map_or(f64::INFINITY, |n| n.lower_bound));
                 }
                 // `ENOMOTO_MIP_RESTART_ROOT_CUTS` の `f` (試作): 未処理のノードの全てで締まっている整数列の境界を大域的な境界にする
@@ -18052,6 +18072,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // `ENOMOTO_MIP_TREEEFF` の `h` (試作): 木の中の再スタートの後の根では軽いヒューリスティクスだけ (暫定解があるとき)
+        if treeeff('h') && self.force_restart && self.nodes > 1 && self.incumbent.is_some() && !self.params.submip {
+            params.skip_heurs = u64::MAX;
+        }
         self.rstcrit_diag("go");
         user_log!("Restart {}: {} of {} integer columns newly fixed at the root ({:.2}s)", params.restarts, newly, nint, self.start.elapsed().as_secs_f64());
         self.er_diag("restart");
@@ -18070,7 +18094,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // `ENOMOTO_MIP_RESTART_ROOT_CUTS` の `p` (試作): カットを問題の行にする経路でも、カットプールを新しい求解のプールに渡す
         // (固定された列は代入して右辺に移す。項が無くなったものは捨てる)
-        if cuts_as_rows && restart_root_cuts('p') && !self.cut_pool.is_empty() {
+        let tree_carry = self.force_restart && self.nodes > 1 && treeeff('p');
+        if cuts_as_rows && (restart_root_cuts('p') || tree_carry) && !self.cut_pool.is_empty() {
             let pc: Vec<(Vec<(usize, f64)>, f64)> = self
                 .cut_pool
                 .iter()
@@ -18117,12 +18142,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // `ENOMOTO_MIP_RESTART_PC` (試作、既定では使わない): 今の pseudocost を再スタート後の求解の初めの pseudocost にする
         // (前処理の後の列へ写すのは [`super::solve_problem`] の中、受け取りは [`Self::run`])
-        if super::restart_pc_on() {
+        if super::restart_pc_on() || tree_carry {
             super::RESTART_PC.with(|s| *s.borrow_mut() = Some(Box::new(self.pc.clone())));
         }
         super::RESTART_HCM.with(|f| f.set(self.hcm_auto && super::restart_hcm_keep()));
         let tree_lb = std::mem::replace(&mut self.restart_tree_lb, f64::NEG_INFINITY);
-        if restart_root_cuts('l') && self.params.verbose && tree_lb.is_finite() {
+        if (restart_root_cuts('l') || tree_carry) && self.params.verbose && tree_lb.is_finite() {
             eprintln!("MIP: RESTART_ROOT_CUTS: global lower bound {tree_lb:.10e} at the restart kept as a floor of the returned bound");
         }
         // 試作 `ENOMOTO_MIP_GAP4` の `r` (既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): 再スタートの後の求解はこの
@@ -18143,7 +18168,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         RSTCRIT_LAST_RED.with(|c| c.set(newly as f64 / nint.saturating_sub(self.root_fixed0).max(1) as f64));
+        // `ENOMOTO_MIP_TREEEFF` の `s`・`h` (試作): 木の中の再スタートの後の求解の間だけ印を立てる (根のカットのループを短くする)
+        let tree_child = self.force_restart && self.nodes > 1 && (treeeff('s') || treeeff('h'));
+        let prev_child = TREE_RESTART_CHILD.with(|c| c.replace(tree_child || TREE_RESTART_CHILD.with(|c| c.get())));
         let r = super::solve_problem(&newp, params, true);
+        TREE_RESTART_CHILD.with(|c| c.set(prev_child));
         super::RESTART_PC.with(|s| *s.borrow_mut() = None);
         super::RESTART_HCM.with(|f| f.set(false));
         super::RESTART_CUTS_READD.with(|f| f.set(false));
@@ -18174,7 +18203,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             },
             // 再スタート後の求解の下界が失われていても (暫定解なしで終わった、など)、再スタート前の根の下界は正しい
             // `ENOMOTO_MIP_RESTART_ROOT_CUTS` の `l` (試作): 木の中の再スタートを決めた時点の全体の下界も下限にする
-            s => (s, r.best_bound.max(self.root_lb).max(if restart_root_cuts('l') { tree_lb } else { f64::NEG_INFINITY }).min(objective.unwrap_or(f64::INFINITY))),
+            s => (s, r.best_bound.max(self.root_lb).max(if restart_root_cuts('l') || tree_carry { tree_lb } else { f64::NEG_INFINITY }).min(objective.unwrap_or(f64::INFINITY))),
         };
         Some(MipResult { status, x, objective, best_bound, nodes, lp_iterations: iters })
     }
@@ -20331,7 +20360,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// - `n`: この求解の木の全体のノード数が `ENOMOTO_T_MIP_TREE_RESTART_GUARD_NODES` (300) 未満 (木の中の暫定解ですぐ再スタートしない)。
     fn tree_restart_guard_ok(&mut self, plunge: Option<&OpenNode>, why: &str) -> bool {
         use std::sync::atomic::Ordering;
-        let guard = env_str!("ENOMOTO_MIP_TREE_RESTART_GUARD").unwrap_or_default();
+        let guard = env_str!("ENOMOTO_MIP_TREE_RESTART_GUARD").unwrap_or(if treeeff('r') { "KR" } else { "" });
         let log = self.params.verbose || env_str!("ENOMOTO_MIP_TREE_RESTART_LOG").is_some();
         if guard.is_empty() && !log {
             return true;
@@ -20413,7 +20442,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     (newly as f64) < fix_min
                         && (tcuts as f64) < (tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_KCUTS", 50usize, usize) as f64).max(tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_KFRAC", 0.1, f64) * self.p.m as f64)
                 }
-                'R' => (est_r < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST", 1.0, f64) * root_cost || (stalled && self.tr_rstop)) && !rowdrop_ok,
+                'R' => {
+                    (est_r < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_COST", 1.0, f64) * root_cost || (stalled && self.tr_rstop))
+                        && !rowdrop_ok
+                        && !(treeeff('r') && (tcuts as f64) >= tunable!("ENOMOTO_T_MIP_TREEEFF_CRATIO", 0.3, f64) * self.p.m as f64)
+                }
                 'g' => gap < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_GAP", 1e-3, f64),
                 'q' => q >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_Q", 0.5, f64),
                 'n' => done < tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_NODES", 300u64, u64),

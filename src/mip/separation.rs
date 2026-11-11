@@ -1235,6 +1235,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 外側と別にする。`ENOMOTO_T_MIP_CUT_ROUNDS=3` は外側の根 (neos-960392 で 3 ラウンド目の密なカットを入れない) と
         // サブ MIP の中 (physiciansched6-2 の根の RINS が速くなる) の両方を変えるので、その切り分け用 (analysis/neos960392_20261101.md の 3 節)
         let mut max_rounds = if sub_hc { tunable!("ENOMOTO_T_MIP_SUBMIP_HC_CUT_ROUNDS", tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize), usize) } else if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS", 25usize, usize) } else if sub_agg { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_AGG_ROUNDS", 25usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_ROUNDS", 5usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
+        // `ENOMOTO_MIP_TREEEFF` の `s` (試作): 木の中の再スタートの後の根はカットのループを短くする (カットは行として持ち込んでいる)
+        if !self.params.submip && self.params.restarts > 0 && super::solver::treeeff('s') && super::solver::TREE_RESTART_CHILD.with(|c| c.get()) {
+            max_rounds = max_rounds.min(tunable!("ENOMOTO_T_MIP_TREEEFF_ROUNDS", 5usize, usize));
+        }
         let eq2c = self.equiv2_cuts();
         let cut_frac = if sub_agg { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_AGG_TIME_FRAC", 0.5, f64) } else if eq2c { tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC", 0.3, f64) } else { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) };
         let mut time_cap = if self.params.time_limit.is_finite() { cut_frac * self.params.time_limit } else { f64::INFINITY };

@@ -24,3 +24,18 @@ def balance(tasks, n, out, tl):
 if sys.argv[1] == "D":
     cfgs = ["def", "trf", "nc", "sd", "ca", "pl", "all", "highs"]
     balance([(p, c, s) for p in PROBS_D for s in (1, 2) for c in cfgs], int(sys.argv[2]), "shards_D.json", 600)
+# P (58 問 × 種 1〜3、60 秒): 既定と候補を同じ分担で対にして回す。使い方: python plan.py P N 候補 [候補 ...]
+if sys.argv[1] == "P":
+    import glob
+    WT = D.parents[1]
+    sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
+    from probs import PROBS  # noqa: E402
+    T2 = defaultdict(list)
+    for f in glob.glob(str(WT / "analysis/cand1111_20261111/res_P_s*.jsonl")):
+        for l in open(f):
+            r = json.loads(l)
+            if r.get("cfg") == "def" and isinstance(r["result"].get("time"), (int, float)): T2[r["problem"]].append(min(r["result"]["time"], 60))
+    E = {p: (sum(T2[p]) / len(T2[p]) if T2[p] else 40) + 6 for p in PROBS}
+    cands = sys.argv[3:]
+    EST.clear(); EST.update({p: {"*": E[p]} for p in PROBS})
+    balance([(p, c, s) for p in PROBS for s in (1, 2, 3) for c in ["def"] + cands], int(sys.argv[2]), "shards_P.json", 60)
