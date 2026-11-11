@@ -9991,7 +9991,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT", 0.1, f64) * self.params.time_limit,
                     None => true,
                 };
-                if left_ok && (self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) || self.treefix_restart_mode()) && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64)) && self.tree_restart_guard_ok(plunge.as_ref(), "inc") {
+                // 試作 `ENOMOTO_MIP_RSTCRIT` の `t` ([`Self::rstcrit_tree_big`]): 縮みが大きければノード数の上限を見ない
+                if left_ok && (self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) || self.treefix_restart_mode() || self.rstcrit_tree_big()) && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64)) && self.tree_restart_guard_ok(plunge.as_ref(), "inc") {
                     if self.params.verbose {
                         eprintln!("MIP: tree restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
                     }
@@ -17541,6 +17542,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z),
             self.root_lp_secs
         );
+    }
+
+    /// 試作 `ENOMOTO_MIP_RSTCRIT` の `t` (`ENOMOTO_MIP_TREE_RESTART=inc` と合わせて使う、analysis/rstcrit_20261111.md): 木の中で、新たに
+    /// 固定された列の非零がこの根の始めに自由だった列の非零の `ENOMOTO_T_MIP_RSTCRIT_TREE_NNZ` (0.2) 以上なら、主のノード数の上限
+    /// (`ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES`) を見ずに再スタートを許す (sct2 は 9522 ノードで自由な整数列の 22.6% が固定されていた)
+    fn rstcrit_tree_big(&self) -> bool {
+        if !env_str!("ENOMOTO_MIP_RSTCRIT").is_some_and(|v| v.contains('t')) {
+            return false;
+        }
+        let (_, nnz_new, nnz_free, _, _) = self.restart_shrink();
+        let s = nnz_new as f64 / nnz_free.max(1) as f64;
+        let big = s >= tunable!("ENOMOTO_T_MIP_RSTCRIT_TREE_NNZ", 0.2, f64);
+        if big && self.params.verbose {
+            eprintln!("MIP: RSTCRIT t: newly fixed columns hold {nnz_new} of {nnz_free} nonzeros ({:.1}%) at node {}; node limit of the tree restart ignored", 100.0 * s, self.nodes);
+        }
+        big
     }
 
     /// 根の LP を解く前から新たに大域固定された整数列の数 ([`Self::maybe_restart`] の判定と同じ数え方)。
