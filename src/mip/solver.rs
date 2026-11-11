@@ -397,6 +397,9 @@ thread_local! {
     pub(crate) static ROOT_BASIS_SAVED: std::cell::RefCell<Option<(Vec<(Vec<(usize, f64)>, super::lp::VarStatus)>, Vec<f64>)>> = const { std::cell::RefCell::new(None) };
     /// `ENOMOTO_MIP_ROOT_BASIS_FIX` (試作): [`RESTART_BASIS`] を作った再スタートの直前の LP の解 (列の値)
     pub(crate) static RESTART_X: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+    /// 試作 `ENOMOTO_MIP_RSTCRIT` の `m` (analysis/rstcrit_20261111.md): 直前の再スタートで新たに固定された整数列の、その根の始めに
+    /// 自由だった整数列に対する割合 (入れ子の求解に渡す。再スタートの後の求解は同じスレッドで入れ子に呼ばれる)
+    pub(crate) static RSTCRIT_LAST_RED: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
     /// ヒューリスティクス役のスレッド (`ENOMOTO_MIP_HEUR_ROLE`、[`Solver::heur_role_run`]) の共有の待ち行列。このスレッドで
     /// 解くサブ MIP も、木の探索が終わるか止める合図が立ったら打ち切る ([`Solver::time_up`])。
     static ROLE_POOL: std::cell::RefCell<Option<std::sync::Arc<WorkPool>>> = const { std::cell::RefCell::new(None) };
@@ -7671,6 +7674,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 根の LP
         self.root_fixed0 = (0..self.p.n).filter(|&j| self.p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
+        self.rstcrit_diag("root");
         // 基底のない求解なので、`threads` >= 2 なら二段解法と内点法 + クロスオーバーで同時に解かれる
         // (`TwoStageLp::solve`、`crate::simplex::mip_lp::set_cold_race_threads`)
         if self.params.submip {
@@ -17468,6 +17472,77 @@ impl<'a, L: MipLp> Solver<'a, L> {
         changed
     }
 
+    /// 再スタートの縮みの量り (RSTCRIT、analysis/rstcrit_20261111.md): この求解の問題 (`self.p`、前処理の後) で自由な列のうち、
+    /// 大域的な境界で新たに固定された列 (整数・連続とも) の数とその非零の数、自由な列がすべて固定されて消える元の行の数を返す。
+    /// (新たに固定された列, その非零, 自由な列の非零, 消える行, 自由な列が 1 本でもある行)
+    pub(super) fn restart_shrink(&self) -> (usize, usize, usize, usize, usize) {
+        let p = self.p;
+        let free = |j: usize| p.col_lo[j] < p.col_up[j];
+        let fixed_now = |j: usize| self.dom.global_lo[j] == self.dom.global_up[j];
+        let (mut cols, mut nnz_new, mut nnz_free) = (0usize, 0usize, 0usize);
+        for j in 0..p.n {
+            if !free(j) {
+                continue;
+            }
+            let k = p.cols[j].iter().filter(|&&(i, _)| i < p.m).count();
+            nnz_free += k;
+            if fixed_now(j) {
+                cols += 1;
+                nnz_new += k;
+            }
+        }
+        let (mut gone, mut live) = (0usize, 0usize);
+        for r in p.rows.iter().take(p.m) {
+            let mut any = false;
+            let mut all = true;
+            for &(j, _) in r {
+                if free(j) {
+                    any = true;
+                    if !fixed_now(j) {
+                        all = false;
+                        break;
+                    }
+                }
+            }
+            if any {
+                live += 1;
+                if all {
+                    gone += 1;
+                }
+            }
+        }
+        (cols, nnz_new, nnz_free, gone, live)
+    }
+
+    /// 診断 `ENOMOTO_MIP_RSTCRIT_DIAG` (振る舞いは変えない): 根の始め (`root`)・再スタートの判定 (`check`)・再スタートの決定 (`go`) で、
+    /// 時刻 (前処理を含む壁時計)・固定の数・縮みの量り ([`Self::restart_shrink`])・LP の値・根の下界・暫定解を 1 行に出す
+    pub(super) fn rstcrit_diag(&self, tag: &str) {
+        if env_str!("ENOMOTO_MIP_RSTCRIT_DIAG").is_none() || self.params.submip {
+            return;
+        }
+        let p = self.p;
+        let (cols, nnz_new, nnz_free, gone, live) = self.restart_shrink();
+        let lpv = if self.lp.num_rows() > 0 { self.lp.objective() + p.offset } else { f64::NAN };
+        eprintln!(
+            "RSTCRIT {tag} restarts {} outer {:.3} solve {:.3} nodes {} nint {} free0 {} newly {} m {} n {} nnz {} lprows {} newcols {cols} nnznew {nnz_new} nnzfree {nnz_free} rowsgone {gone} rowslive {live} lp {:.10e} rootlb {:.10e} inc {:.10e} rootlp {:.3}",
+            self.params.restarts,
+            super::outer_elapsed().unwrap_or(f64::NAN),
+            self.start.elapsed().as_secs_f64(),
+            self.nodes,
+            p.nint,
+            p.nint.saturating_sub(self.root_fixed0),
+            self.newly_fixed_ints(),
+            p.m,
+            p.n,
+            p.nnz,
+            self.lp.num_rows(),
+            lpv,
+            self.root_lb,
+            self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z),
+            self.root_lp_secs
+        );
+    }
+
     /// 根の LP を解く前から新たに大域固定された整数列の数 ([`Self::maybe_restart`] の判定と同じ数え方)。
     pub(super) fn newly_fixed_ints(&self) -> usize {
         let p = self.p;
@@ -17503,7 +17578,40 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let free = nint.saturating_sub(self.root_fixed0);
         let newly = self.newly_fixed_ints();
         let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
-        newly > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * nint as f64
+        newly > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * nint as f64 && self.rstcrit_gate(false)
+    }
+
+    /// 試作 `ENOMOTO_MIP_RSTCRIT` (既定では使わない。analysis/rstcrit_20261111.md): 固定の数の閾値を越えた再スタートを、縮みの効き目で
+    /// さらに選ぶ。再スタートしてよいなら true (`ENOMOTO_MIP_RSTCRIT` がなければ常に true)。文字:
+    /// - `n`: 新たに固定された列 (整数・連続とも) の非零が、この根の始めに自由だった列の非零 (元の行のみ) の
+    ///   `ENOMOTO_T_MIP_RSTCRIT_NNZ` (0.05) 以上でなければ再スタートしない (LP がほとんど縮まない再スタートを見送る)
+    /// - `m`: SCIP の `presolving/restartminred` に倣い、直前の再スタートで新たに固定された整数列が、その根の始めに自由だった整数列の
+    ///   `ENOMOTO_T_MIP_RSTCRIT_MINRED` (0.10) 未満なら、それ以上再スタートしない
+    /// `verbose` なら見送ったときに理由を出す
+    pub(super) fn rstcrit_gate(&self, verbose: bool) -> bool {
+        let Some(v) = env_str!("ENOMOTO_MIP_RSTCRIT") else { return true };
+        if v.contains('m') && self.params.restarts >= 1 {
+            let last = RSTCRIT_LAST_RED.with(|c| c.get());
+            let thr = tunable!("ENOMOTO_T_MIP_RSTCRIT_MINRED", 0.10, f64);
+            if last < thr {
+                if verbose && self.params.verbose {
+                    eprintln!("MIP: RSTCRIT m: restart skipped (the last restart fixed {:.1}% of the free integer columns < {:.1}%)", 100.0 * last, 100.0 * thr);
+                }
+                return false;
+            }
+        }
+        if v.contains('n') {
+            let (_, nnz_new, nnz_free, _, _) = self.restart_shrink();
+            let s = nnz_new as f64 / nnz_free.max(1) as f64;
+            let thr = tunable!("ENOMOTO_T_MIP_RSTCRIT_NNZ", 0.05, f64);
+            if s < thr {
+                if verbose && self.params.verbose {
+                    eprintln!("MIP: RSTCRIT n: restart skipped (newly fixed columns hold {nnz_new} of {nnz_free} nonzeros, {:.1}% < {:.1}%)", 100.0 * s, 100.0 * thr);
+                }
+                return false;
+            }
+        }
+        true
     }
 
     /// `ENOMOTO_MIP_LOSE6_3_CUTRESTART` (試作、既定では使わない。analysis/lose6_3_20261103.md): 根のカットのループの途中で、今の LP
@@ -17651,9 +17759,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose {
             eprintln!("MIP: restart check: newly fixed {newly}, integer columns {nint}, free at the root {}, threshold {:.1}, root LP {:.2}s", nint.saturating_sub(self.root_fixed0), fac * denom as f64, self.root_lp_secs);
         }
+        self.rstcrit_diag("check");
         // `ENOMOTO_MIP_TREE_RESTART` (試作): 木の中の再スタートは固定の数をここでは見ない ([`Self::tree_restart_due`] が見る。`force` なら
         // HiGHS と同じく見ない)
         if nint == 0 || (!self.force_restart && (newly == 0 || (newly as f64) < fac * denom as f64)) {
+            return None;
+        }
+        // 試作 `ENOMOTO_MIP_RSTCRIT` ([`Self::rstcrit_gate`]): 縮みの小さい再スタートを見送る
+        if !self.force_restart && !self.rstcrit_gate(true) {
             return None;
         }
         // `ENOMOTO_MIP_S4_TINYGAP` (試作、既定では使わない。analysis/highs_slow_20261106/S4.md): 暫定解と根の LP 値の相対ギャップが
@@ -17894,6 +18007,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        self.rstcrit_diag("go");
         user_log!("Restart {}: {} of {} integer columns newly fixed at the root ({:.2}s)", params.restarts, newly, nint, self.start.elapsed().as_secs_f64());
         self.er_diag("restart");
         if crate::simplex::mip_lp::xolazy_log() {
@@ -17983,6 +18097,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: GAP4 r: released the LP, cut pool and queue of the solver before restart {}", params.restarts);
             }
         }
+        RSTCRIT_LAST_RED.with(|c| c.set(newly as f64 / nint.saturating_sub(self.root_fixed0).max(1) as f64));
         let r = super::solve_problem(&newp, params, true);
         super::RESTART_PC.with(|s| *s.borrow_mut() = None);
         super::RESTART_HCM.with(|f| f.set(false));
