@@ -11,6 +11,11 @@ fn cap_mult() -> f64 {
         .unwrap_or(1.0)
 }
 
+thread_local! {
+    /// 前処理の前の軌道の代表 (列ごと、軌道にない列は `usize::MAX`)。後の数えで、失った列・得た列を数えるのに使う
+    static BEFORE: std::cell::RefCell<Option<Vec<usize>>> = const { std::cell::RefCell::new(None) };
+}
+
 fn find(u: &mut [usize], mut a: usize) -> usize {
     while u[a] != a {
         u[a] = u[u[a]];
@@ -68,6 +73,50 @@ pub fn diag(p: &MipProblem, label: &str) -> Vec<Vec<usize>> {
     }
     let (orb, orb_cols) = size.iter().filter(|&&s| s > 1).fold((0, 0), |(a, b), &s| (a + 1, b + s));
     let ints = (0..n).filter(|&j| size[find(&mut u, j)] > 1 && p.is_int[j]).count();
+    let rep: Vec<usize> = (0..n).map(|j| { let r = find(&mut u, j); if size[r] > 1 { r } else { usize::MAX } }).collect();
+    // 前処理は列の番号を保つ (固定した列も残す) ので、前の軌道と後の軌道を列の番号で比べる。
+    // 失った列: 前の軌道にあり、後で固定されず、前の軌道の別の列も後で固定されずに残るのに、後の軌道に入らない列。
+    // 得た列: 後の軌道にあり、前の軌道にない列
+    if label == "before" {
+        BEFORE.with(|b| *b.borrow_mut() = Some(rep));
+    } else if let Some(br) = BEFORE.with(|b| b.borrow_mut().take()).filter(|br| br.len() == n) {
+        let free = |j: usize| p.col_lo[j] < p.col_up[j];
+        let mut nfree = std::collections::HashMap::new();
+        for j in 0..n {
+            if br[j] != usize::MAX && free(j) {
+                *nfree.entry(br[j]).or_insert(0usize) += 1;
+            }
+        }
+        let kept = (0..n).filter(|&j| br[j] != usize::MAX && free(j) && nfree[&br[j]] >= 2).count();
+        let lost = (0..n).filter(|&j| br[j] != usize::MAX && free(j) && nfree[&br[j]] >= 2 && rep[j] == usize::MAX).count();
+        let lost_int = (0..n).filter(|&j| br[j] != usize::MAX && free(j) && nfree[&br[j]] >= 2 && rep[j] == usize::MAX && p.is_int[j]).count();
+        let gained = (0..n).filter(|&j| rep[j] != usize::MAX && br[j] == usize::MAX).count();
+        // 値に `v` を含めば、失った列を含む前の軌道を最大 4 つ、残った列ごとに後の境界・費用・非零の数・後の軌道で出す
+        if env_str!("ENOMOTO_MIP_SYMPRE0_DIAG").is_some_and(|v| v.contains('v')) {
+            let mut shown: Vec<usize> = Vec::new();
+            for j in 0..n {
+                if br[j] == usize::MAX || !free(j) || nfree[&br[j]] < 2 || rep[j] != usize::MAX || shown.contains(&br[j]) || shown.len() >= 4 {
+                    continue;
+                }
+                shown.push(br[j]);
+                for k in (0..n).filter(|&k| br[k] == br[j] && free(k)).take(12) {
+                    let rows: Vec<String> = p.cols[k].iter().take(6).map(|&(i, a)| format!("{i}:{a}[{},{}]len{}", p.row_lo[i], p.row_up[i], p.rows[i].len())).collect();
+                    eprintln!(
+                        "MIP: SYMPRE0 lost orbit {}: col {k} [{}, {}] int {} cost {} nnz {} after-orbit {} rows {}",
+                        br[j],
+                        p.col_lo[k],
+                        p.col_up[k],
+                        p.is_int[k],
+                        p.cost[k],
+                        p.cols[k].len(),
+                        if rep[k] == usize::MAX { "-".to_string() } else { rep[k].to_string() },
+                        rows.join(" ")
+                    );
+                }
+            }
+        }
+        eprintln!("MIP: SYMPRE0 compare: before-orbit columns still free {kept}, lost {lost} ({lost_int} integer), gained {gained}");
+    }
     eprintln!(
         "MIP: SYMPRE0 {label}: n {} m {} nnz {}; generators {}, moved {gen_cols} columns; twins {} classes {twin_cols} columns; orbits {orb} on {orb_cols} columns ({ints} integer) ({secs:.3}s, caps x{k})",
         p.n,

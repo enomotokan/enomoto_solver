@@ -42,6 +42,8 @@ def one(p, cfg):
     r = {"problem": p, "cfg": cfg, "rc": rc, "wall": round(time.time() - t0, 2)}
     for m in PAT.finditer(err):
         r[m[1]] = {k: (float(v) if k == "secs" else int(v)) for k, v in zip(KEYS, m.groups()[1:])}
+    m = re.search(r"SYMPRE0 compare: before-orbit columns still free (\d+), lost (\d+) \((\d+) integer\), gained (\d+)", err)
+    if m: r["cmp"] = dict(zip(["kept", "lost", "lost_int", "gained"], map(int, m.groups())))
     m = re.search(r"MIP: symmetry: (\d+) generators, (\d+) orbits on (\d+) columns", err)
     if m: r["log"] = [int(m[1]), int(m[2]), int(m[3])]
     m = re.search(r"MIP_FOLD: (n \d+ ->[^\n]*|no fold[^\n]*)", err)
