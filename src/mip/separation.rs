@@ -19,6 +19,8 @@ thread_local! {
     /// [`Solver::probe_cut_mode`] で、目的値が動かないラウンドでも止めずに k ラウンド回すか (試作 `ENOMOTO_MIP_CLIQUE_CUTS=probe` の比べ。
     /// neos-1456979 はクリークカットを入れても 3 ラウンド目までは目的値が 154 のままで、4 ラウンド目から伸びる)
     static PROBE_NO_FLAT_STOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// [`Solver::probe_cut_mode`] で選んだカットのうちクリークの分離器から来た本数 (試作 `ENOMOTO_MIP_CLIQUE_CUTS=probe_s` の数え)
+    static PROBE_CLIQUE_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// `ENOMOTO_MIP_CUT_EXTEND` で根のカットの時間の上限を延ばした後か (延ばした後は面の頂点での分離を止める)
     static CUT_EXTENDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -735,11 +737,49 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let obj = self.lp.objective();
         let scale = obj.abs().max(1.0);
         let nfrac_start = self.fractional(&self.lp.col_values()).len();
+        // `probe_s` (試作 `probe` の余分を減らす形): (1) 始めの LP 解で破れるクリークカットがなければ比べない (使わない)。(2) 「あり」の側を
+        // 先に回し、選ばれたクリークカットが 0 本なら「なし」の側は同じ道筋になるので回さない (その終わりの状態から使わずに続ける)。
+        // 58 問の根だけの回では、既定でクリークカットの破れが 0 本の 42 問でも比べを回し、nw04 5.8 秒・mzzv42z 4.7 秒を使っていた
+        let skip = clique_cuts_mode() == Some("probe_s");
+        if skip && self.clique_graph_get().separate(&self.lp.col_values(), 1).is_empty() {
+            self.clique_auto = Some(false);
+            if self.params.verbose {
+                eprintln!("MIP: clique probe: no violated clique cuts; not used ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+            return (false, 0);
+        }
         PROBE_NO_FLAT_STOP.with(|c| c.set(true));
-        self.clique_auto = Some(false);
-        let (h0, n0, e0) = self.probe_cut_mode(pool, k, deadline, &never, true);
+        // `probe` (v2、分担の計測の形) は「なし」→「あり」の順
+        let first0 = if skip {
+            None
+        } else {
+            self.clique_auto = Some(false);
+            Some(self.probe_cut_mode(pool, k, deadline, &never, true))
+        };
+        PROBE_CLIQUE_ROWS.with(|c| c.set(0));
         self.clique_auto = Some(true);
         let (h1, n1, e1) = self.probe_cut_mode(pool, k, deadline, &never, true);
+        let nclq = PROBE_CLIQUE_ROWS.with(|c| c.get());
+        if skip && nclq == 0 {
+            PROBE_NO_FLAT_STOP.with(|c| c.set(false));
+            let mut nr = 0;
+            if let Some(e) = e1 {
+                nr = e.rounds;
+                self.probe_restore(e);
+            }
+            self.clique_auto = Some(false);
+            if self.params.verbose {
+                eprintln!("MIP: clique probe ({k} rounds): no clique cuts chosen in {} rounds ({n1} cuts); not used (kept {nr} rounds, probe {:.2}s, {:.2}s)", h1.len(), t_all.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
+            }
+            return (false, nr);
+        }
+        let (h0, n0, e0) = match first0 {
+            Some(v) => v,
+            None => {
+                self.clique_auto = Some(false);
+                self.probe_cut_mode(pool, k, deadline, &never, true)
+            }
+        };
         PROBE_NO_FLAT_STOP.with(|c| c.set(false));
         let (g0, t0) = h0.last().copied().unwrap_or((0.0, 0.0));
         let (g1, t1) = h1.last().copied().unwrap_or((0.0, 0.0));
@@ -770,7 +810,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.clique_auto = Some(on);
         if self.params.verbose {
             eprintln!(
-                "MIP: clique probe ({k} rounds): without {n0} cuts gain {:.3e} ({t0:.2}s, {} rounds, fractional {f0}), with {n1} cuts gain {:.3e} ({t1:.2}s, {} rounds, fractional {f1}) relative; {} (kept {nr} rounds, LP {:.10e}, probe {:.2}s, {:.2}s)",
+                "MIP: clique probe ({k} rounds): without {n0} cuts gain {:.3e} ({t0:.2}s, {} rounds, fractional {f0}), with {n1} cuts ({nclq} clique) gain {:.3e} ({t1:.2}s, {} rounds, fractional {f1}) relative; {} (kept {nr} rounds, LP {:.10e}, probe {:.2}s, {:.2}s)",
                 g0 / scale,
                 h0.len(),
                 g1 / scale,
@@ -1009,6 +1049,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 select_cuts(cands, nmax, p)
             };
+            PROBE_CLIQUE_ROWS.with(|c| c.set(c.get() + chosen.iter().chain(forced_r.iter()).filter(|c| c.src & !sepprof::SRC_FACE == sepprof::SRC_CLIQUE).count()));
             let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.iter().chain(forced_r.iter()).map(|c| (c.coefs.clone(), f64::NEG_INFINITY, c.rhs)).collect();
             if rows.is_empty() {
                 break;
@@ -1199,7 +1240,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         // 試作 `probe` (課題 CLIQFB、analysis/cliqfb_20261111.md): ループの始めの比べで判定する ([`Self::clique_probe`])。再スタートの後は最初の判定を引き継ぐ
-        let mut clique_probe_pending = clique_cuts_mode() == Some("probe") && self.clique_auto.is_none() && !self.params.submip;
+        let mut clique_probe_pending = matches!(clique_cuts_mode(), Some("probe") | Some("probe_s")) && self.clique_auto.is_none() && !self.params.submip;
         if clique_probe_pending && self.params.restarts > 0 {
             if let Some(v) = CLIQUE_AUTO_FIRST.with(|c| c.get()) {
                 self.clique_auto = Some(v);
@@ -5430,8 +5471,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::zerohalf::zh_trial_used(light) || super::cutmix::zh_on()) && zh_where && self.sep_src_on(sepprof::SRC_ZH, light);
         // clique カットの使い方は下の説明を参照
         let clique_on = clique_cuts_mode().is_some_and(|m| {
-            let judged = m == "auto" || m == "fallback" || m == "probe";
-            !(light && (m == "root" || ((m == "fallback" || m == "probe") && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && (!judged || self.clique_auto == Some(true))
+            let probe = m == "probe" || m == "probe_s";
+            let judged = m == "auto" || m == "fallback" || probe;
+            !(light && (m == "root" || ((m == "fallback" || probe) && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && (!judged || self.clique_auto == Some(true))
         });
         let clique_on = clique_on && self.sep_src_on(sepprof::SRC_CLIQUE, light);
         // `ENOMOTO_MIP_SEP_PARALLEL` (試作、既定では使わない): 根の分離 (木を分け合う前、サブ MIP でない) で、元の行 1 本ずつ・zerohalf・
