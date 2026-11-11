@@ -14,6 +14,7 @@ CFGS = {
     "tfR": {"ENOMOTO_MIP_TREEFIX": "pcurR"},
     "tfp": {"ENOMOTO_MIP_TREEFIX": "p"},
     "tfpc": {"ENOMOTO_MIP_TREEFIX": "pc"},
+    "tfnr": {"ENOMOTO_MIP_TREEFIX": "pcuR"},
 }
 SETS = {"@58": P58, "@hit": ["csched008", "fiball", "timtab1", "csched007", "neos-957323"]}
 out, cfgs, seeds, tl = Path(sys.argv[1]), sys.argv[2].split(","), [int(s) for s in sys.argv[3].split(",")], int(sys.argv[4])
