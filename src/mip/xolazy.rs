@@ -17,6 +17,8 @@ struct Saved {
     /// 根の LP の時点の大域的な境界 (整数列の固定を数える基準)
     lo: Vec<f64>,
     up: Vec<f64>,
+    /// 診断 `ENOMOTO_MIP_IPMRC_WAIT`: 二段解法が勝った後に内点法の点を待った秒
+    t_wait: Option<f64>,
     /// (名前, 最適値との下界の差, 構造列の被約費用)
     duals: Vec<(&'static str, f64, Vec<f64>)>,
 }
@@ -40,7 +42,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             duals.push(("ipm", g, v.clone()));
         }
         let z = self.lp.objective() + self.p.offset;
-        SAVED.with(|s| *s.borrow_mut() = Some(Saved { z, restarts: self.params.restarts, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), duals }));
+        SAVED.with(|s| *s.borrow_mut() = Some(Saved { z, restarts: self.params.restarts, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), t_wait: d.t_wait, duals }));
         Some(diff)
     }
 
@@ -54,10 +56,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let u = self.prune_limit();
         let p = self.p;
         let mut parts = Vec::new();
+        let mut sets: Vec<(&str, Vec<bool>)> = Vec::new();
         for (name, gap, dv) in &s.duals {
             let lb = s.z - gap;
             let room = u - lb;
-            let mut nfix = 0usize;
+            let mut fixed = vec![false; p.n];
             if room.is_finite() && room >= 0.0 && dv.len() == p.n {
                 for j in 0..p.n {
                     let (lo, up) = (s.lo[j], s.up[j]);
@@ -65,20 +68,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     let dj = dv[j];
-                    let fixed = if dj > 1e-7 && lo.is_finite() {
+                    // 境界から 1 動かすと下界が `room` を越える (`|d_j| > room`、整数の丸めの余裕つき)
+                    fixed[j] = if dj > 1e-7 && lo.is_finite() {
                         (lo + room / dj + 1e-6).floor() <= lo
                     } else if dj < -1e-7 && up.is_finite() {
                         (up - room / (-dj) - 1e-6).ceil() >= up
                     } else {
                         false
                     };
-                    if fixed {
-                        nfix += 1;
-                    }
                 }
             }
+            let nfix = fixed.iter().filter(|&&f| f).count();
             parts.push(format!("\"fix_{name}\":{nfix},\"gap_{name}\":{}", num(*gap)));
+            sets.push((name, fixed));
         }
+        // 最適な双対と内点法の双対の和集合
+        let get = |nm: &str| sets.iter().find(|(n, _)| *n == nm).map(|(_, v)| v);
+        if let (Some(a), Some(b)) = (get("opt"), get("ipm")) {
+            let nu = a.iter().zip(b).filter(|(x, y)| **x || **y).count();
+            parts.push(format!("\"fix_union\":{nu}"));
+        }
+        let t_wait = s.t_wait.map_or("null".to_string(), |v| format!("{v:.4}"));
+        parts.push(format!("\"t_wait\":{t_wait}"));
         format!(",\"newly\":{},\"U\":{},\"z\":{},{}", self.newly_fixed_ints(), num(u), num(s.z), parts.join(","))
     }
 }

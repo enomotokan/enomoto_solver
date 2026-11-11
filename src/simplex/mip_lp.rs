@@ -424,6 +424,8 @@ pub struct RaceDiag {
     pub d_opt: Option<Vec<f64>>,
     pub d_simplex: Option<Vec<f64>>,
     pub d_ipm: Option<Vec<f64>>,
+    /// 診断 `ENOMOTO_MIP_IPMRC_WAIT`: 二段解法が勝った後、内点法の点を待った秒
+    pub t_wait: Option<f64>,
 }
 
 thread_local! {
@@ -445,7 +447,7 @@ fn xolazy_record(winner: &'static str, t0: std::time::Instant, stamp: Option<&su
 }
 
 /// 標準形の行の双対 `y` (どの `y` でもよい) からラグランジュ緩和の下界 `L(y) = b·y + Σ_j min_{l_j <= x_j <= u_j} (c - A^T y)_j x_j`
-/// (標準形の目的の単位) と構造列の被約費用を返す。無限の境界の向きに被約費用がある列があれば `L = -inf`。
+/// (標準形の目的の単位、浮動小数の誤差の余裕を引いた値) と構造列の被約費用を返す。無限の境界の向きに被約費用がある列があれば `L = -inf`。
 fn lagrange_std(std: &StdForm, n: usize, y: &[f64]) -> Option<(f64, Vec<f64>)> {
     if y.len() != std.n_rows || y.iter().any(|v| !v.is_finite()) {
         return None;
@@ -466,6 +468,8 @@ fn lagrange_std(std: &StdForm, n: usize, y: &[f64]) -> Option<(f64, Vec<f64>)> {
     }
     let y = &y[..];
     let mut lb: f64 = std.b.iter().zip(y).map(|(b, y)| b * y).sum();
+    // 浮動小数の和の誤差の余裕に使う、項の絶対値の和
+    let mut abs: f64 = std.b.iter().zip(y).map(|(b, y)| (b * y).abs()).sum();
     let mut dn = vec![0.0; n];
     for j in 0..std.n_total {
         let mut d = std.c[j];
@@ -477,10 +481,14 @@ fn lagrange_std(std: &StdForm, n: usize, y: &[f64]) -> Option<(f64, Vec<f64>)> {
         }
         if d > 0.0 {
             lb += if std.lb[j].is_finite() { d * std.lb[j] } else { f64::NEG_INFINITY };
+            abs += (d * std.lb[j]).abs();
         } else if d < 0.0 {
             lb += if std.ub[j].is_finite() { d * std.ub[j] } else { f64::NEG_INFINITY };
+            abs += (d * std.ub[j]).abs();
         }
     }
+    // 余裕: 和の丸めの誤差 (項の絶対値の和の 1e-9 倍) と、値の大きさの 1e-9 倍を引いた値を下界とする
+    let lb = lb - 1e-9 * abs - 1e-9 * (1.0 + lb.abs());
     Some((lb, dn))
 }
 
@@ -2081,8 +2089,29 @@ impl TwoStageLp {
         // beasleyC3 では、どちらが先かで根の頂点が変わり、背景のカットの後の下界が 741.96 (二段解法) と 746.3 (内点法) に分かれ、
         // 解けるかどうかがほぼこれで決まった (analysis/beasleyC3_r3_20261020.md)
         let wait_ipm = st == LpStatus::Optimal && (force_ipm || env_str!("ENOMOTO_MIP_ROOT_LP_IPM").is_some());
+        // 診断 `ENOMOTO_MIP_IPMRC_WAIT` (analysis/ipmrc_20261111.md、採る結果は変えない): 二段解法が先に最適で終わっても、内点法の点
+        // (押し出しの前の双対) が届くか内点法側が終わるまで待ってから止める (その間に内点法側が頂点で勝っても、二段解法の結果を採る)。
+        // 待った時間は [`RaceDiag::t_wait`]
+        let mut t_wait = None;
+        if conclusive && !wait_ipm && st == LpStatus::Optimal && stamp.is_some() && env_str!("ENOMOTO_MIP_IPMRC_WAIT").is_some() {
+            let tw = std::time::Instant::now();
+            let cap = tunable!("ENOMOTO_T_MIP_IPMRC_WAIT_MAX", 60.0, f64);
+            let sp = stamp.as_ref().unwrap();
+            loop {
+                // 内点法の点が届いた・内点法側が終わった (頂点で勝った、または失敗した)・待つ上限・期限
+                if sp.lock().map(|a| a.y_ipm.is_some()).unwrap_or(true) || cancel.load(Ordering::SeqCst) || rx.try_recv().is_ok() || tw.elapsed().as_secs_f64() >= cap || lim.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            t_wait = Some(tw.elapsed().as_secs_f64());
+        }
         let won = if conclusive && !wait_ipm {
-            if !cancel.swap(true, Ordering::SeqCst) {
+            if t_wait.is_some() || !cancel.swap(true, Ordering::SeqCst) {
+                if t_wait.is_some() {
+                    // 待つ間に内点法側が頂点で勝っていたら (合図を立てた後)、その結果は受け取って捨てる
+                    cancel.store(true, Ordering::SeqCst);
+                }
                 // 二段解法が先 (内点法側は確認点で止まる。待たない)
                 if debug {
                     eprintln!("MIP root race: simplex won at {:.3}s ({st:?})", t0.elapsed().as_secs_f64());
@@ -2090,6 +2119,16 @@ impl TwoStageLp {
                 crate::phase_timing::mark("race_simplex_won");
                 user_log!("Root LP: the two-phase method finished first ({:.2}s)", t0.elapsed().as_secs_f64());
                 xolazy_record("simplex", t0, stamp.as_ref(), None);
+                if let Some(sp) = stamp.as_ref() {
+                    RACE_DIAG.with(|r| {
+                        if let Some(d) = r.borrow_mut().as_mut() {
+                            d.t_wait = t_wait;
+                        }
+                    });
+                    if st == LpStatus::Optimal {
+                        self.xolazy_duals(sp, y_mid.as_deref(), &shared_lb);
+                    }
+                }
                 return st;
             }
             rx.recv().ok().flatten()
@@ -2119,26 +2158,30 @@ impl TwoStageLp {
         let st = self.adopt_ipm_vertex(&x, duals, lim, debug, t0);
         xolazy_record(if st == LpStatus::Optimal { "ipm" } else { "ipm_resolve" }, t0, stamp.as_ref(), Some(t_won));
         if let (Some(stamp), LpStatus::Optimal) = (stamp.as_ref(), st) {
-            // 最適な双対・途中の基底の双対・内点法の双対のラグランジュ下界と被約費用 (時刻を測った後に計算する)
-            let n = self.n;
-            if let Some((l_opt, d_opt)) = lagrange_std(&self.std, n, &self.y) {
-                let y_ipm = stamp.lock().ok().and_then(|mut a| a.y_ipm.take());
-                let ls = y_mid.as_deref().and_then(|y| lagrange_std(&self.std, n, y));
-                let li = y_ipm.as_deref().and_then(|y| lagrange_std(&self.std, n, y));
-                let sh = shared_lb.get();
-                RACE_DIAG.with(|r| {
-                    if let Some(d) = r.borrow_mut().as_mut() {
-                        d.gap_simplex = ls.as_ref().map(|v| l_opt - v.0);
-                        d.gap_ipm = li.as_ref().map(|v| l_opt - v.0);
-                        d.gap_shared = sh.is_finite().then(|| l_opt - sh);
-                        d.d_opt = Some(d_opt);
-                        d.d_simplex = ls.map(|v| v.1);
-                        d.d_ipm = li.map(|v| v.1);
-                    }
-                });
-            }
+            self.xolazy_duals(stamp, y_mid.as_deref(), &shared_lb);
         }
         st
+    }
+
+    /// 診断 `ENOMOTO_MIP_XOLAZY_LOG`: 最適な双対・途中の基底の双対・内点法の双対のラグランジュ下界と被約費用を [`RACE_DIAG`] に足す
+    /// (時刻を測った後に呼ぶ。最適で終わったときだけ)
+    fn xolazy_duals(&self, stamp: &super::crossover::XoStamp, y_mid: Option<&[f64]>, shared_lb: &crate::cancel::SharedBound) {
+        let n = self.n;
+        let Some((l_opt, d_opt)) = lagrange_std(&self.std, n, &self.y) else { return };
+        let y_ipm = stamp.lock().ok().and_then(|mut a| a.y_ipm.take());
+        let ls = y_mid.and_then(|y| lagrange_std(&self.std, n, y));
+        let li = y_ipm.as_deref().and_then(|y| lagrange_std(&self.std, n, y));
+        let sh = shared_lb.get();
+        RACE_DIAG.with(|r| {
+            if let Some(d) = r.borrow_mut().as_mut() {
+                d.gap_simplex = ls.as_ref().map(|v| l_opt - v.0);
+                d.gap_ipm = li.as_ref().map(|v| l_opt - v.0);
+                d.gap_shared = sh.is_finite().then(|| l_opt - sh);
+                d.d_opt = Some(d_opt);
+                d.d_simplex = ls.map(|v| v.1);
+                d.d_ipm = li.map(|v| v.1);
+            }
+        });
     }
 
     /// 診断用 (`ENOMOTO_MIP_ROOTLP_BOTH_DIAG`、既定では呼ばない。analysis/rootlp_both_diff_20261105.md): この LP の写しを 2 つ作り、

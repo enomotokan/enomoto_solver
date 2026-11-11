@@ -7982,7 +7982,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 内点法が勝ったときは途中の基底・内点法の双対を控える (根の終わりに固定の数を数える、[`super::xolazy`])
             let rc_diff = d.as_ref().and_then(|d| self.xolazy_save(d));
             eprintln!(
-                "XOLAZY {{\"ev\":\"rootlp\",\"kind\":{},\"restarts\":{},\"t\":{:.4},\"secs\":{:.4},\"rows\":{},\"cols\":{},\"st\":\"{root_st:?}\",\"winner\":\"{}\",\"t_win\":{},\"t_ipm\":{},\"t_push\":{},\"t_xo\":{},\"t_end\":{},\"gap_simplex\":{},\"gap_ipm\":{},\"gap_shared\":{},\"rc_diff\":{}}}",
+                "XOLAZY {{\"ev\":\"rootlp\",\"kind\":{},\"restarts\":{},\"t\":{:.4},\"secs\":{:.4},\"rows\":{},\"cols\":{},\"st\":\"{root_st:?}\",\"winner\":\"{}\",\"t_win\":{},\"t_ipm\":{},\"t_push\":{},\"t_xo\":{},\"t_end\":{},\"gap_simplex\":{},\"gap_ipm\":{},\"gap_shared\":{},\"rc_diff\":{},\"t_wait\":{}}}",
                 root_kind.unwrap_or(0),
                 self.params.restarts,
                 super::outer_elapsed().unwrap_or(f64::NAN),
@@ -7999,6 +7999,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 og(d.as_ref().and_then(|d| d.gap_ipm)),
                 og(d.as_ref().and_then(|d| d.gap_shared)),
                 og(rc_diff),
+                o(d.as_ref().and_then(|d| d.t_wait)),
             );
         }
         if sing_repair {
