@@ -23,3 +23,13 @@ CUTCONF=1, PLSB=gxu, GAP1=u, GAP4=rocn (いずれも ENOMOTO_MIP_ 接頭)。ビ�
 - HiGHS だけが解く (延べ): 既定 40 / cand1111 42。最大 RSS: 既定 7811 MB / cand1111 5429 MB (GAP4 の効き)。
 - 判定: 58 問では基準を満たしたが、Mittelmann で害があるので cand1111 は既定にしない。害の出た問題と速くなった問題で、
   既定に 1 項目だけ足した形 (only_*) を比べて原因の項目を探す (plan_B.py → shards_B.json、20 分担 × 10 回、600 秒)。
+
+## 切り分け (既定に 1 項目だけ足した only_*、10 問 × 種 1・2、600 秒、res_B_s*.jsonl、集計 summB.py → summB.txt)
+
+- 200 行、crash 0。1 回ずつなので揺れは大きい (hypothyroid-k1 種 2 は 4 つの形で時間切れ)。
+- def に対する比: **CUTCONF 1.41 (遅 4・速 0)**、**TREEFIX 1.25 (遅 3)**、RCSTRONG 1.11、GAP1 1.07、PLSB 1.04、LMIP_SWAP 1.01、
+  GAP4 0.96 (解けた +3)、SYMPRE 0.94、ROOTSTOP 0.93。
+- 害の主: CUTCONF (neos859080 21・2 → 91・391 秒、mas74 種 1 301 → 557 秒、hypothyroid-k1 種 2 時間切れ)、TREEFIX (neos859080 種 2 2 → 113 秒、
+  hypothyroid-k1 種 2 時間切れ)。
+- pg5_34 を解けるようにしたのは GAP4 だけ (時間切れ → 243・205 秒)。
+- 次の束の案 cand1112 = cand1111 から CUTCONF・TREEFIX を外したもの (7 項目)。
