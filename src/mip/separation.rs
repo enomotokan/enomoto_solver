@@ -1541,6 +1541,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 値に `h` があれば根のヒューリスティクスは飛ばさない (その中の早めの再スタートの判定に任せる)
                     if !env_str!("ENOMOTO_MIP_LOSE6_3_CUTRESTART").is_some_and(|v| v.contains('h')) {
                         self.early_restart = true;
+                        self.er_at.get_or_insert_with(std::time::Instant::now);
                     }
                     self.l63_cut_left = true;
                     if self.params.verbose {

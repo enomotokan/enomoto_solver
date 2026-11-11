@@ -619,6 +619,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     noinc_root_frac: usize,
     /// 早めの再スタート ([`super::early_restart_on`]): 根のヒューリスティクスの途中で再スタートの判定が通った (残りの根のヒューリスティクスを飛ばす)。
     pub(super) early_restart: bool,
+    /// 試作 `ENOMOTO_MIP_ERWAIT` ([`erwait`]) と診断 `ENOMOTO_MIP_ERWAIT_DIAG` ([`erwait_diag`]): 早めの再スタートを決めた時刻
+    pub(super) er_at: Option<Instant>,
     /// `ENOMOTO_MIP_LOSE6_3_CUTRESTART` (試作): 根のカットのループを再スタートの判定で抜けた
     pub(super) l63_cut_left: bool,
     /// `ENOMOTO_MIP_TREE_RESTART=inc` (試作): 木の中で暫定解が良くなった (木のループの頭で再スタートを判定する)。
@@ -3429,6 +3431,28 @@ pub(crate) fn lose6_1_stop() -> bool {
     env_str!("ENOMOTO_MIP_LOSE6_1_STOP").is_some_and(|v| v != "0")
 }
 
+/// `ENOMOTO_MIP_ERWAIT` (試作、既定では使わない。analysis/erwait_20261111.md): 早めの再スタート (`early_restart`) を決めた後に待つものを止めて、
+/// すぐ再スタートする。値は文字の並び:
+/// - `s`: 走っている並列のサブ MIP に止めの合図を送る ([`lose6_1_stop`] と同じ。`ENOMOTO_T_MIP_LOSE6_1_GRACE` 秒 (0.5) 待ってから。
+///   止めたサブ MIP がそれまでに見つけた解は時間切れの結果として受け取る)。
+/// - `b`: 裏のカットを待たず、回っているラウンドも止める ([`CutJob::halt`] を LP の反復・分離の止める合図にする)。止めた裏のカットの
+///   LP は最適とは限らないので行を置き換えず、終わったラウンドのカットの行 (片側のもの) をカットプールに入れるだけにする。
+///   裏のカットが合図の前に自分で終わっていれば今まで通り置き換える。
+/// - `c`: 裏のカットが手間の上限で終わったときの主のカットのループの続き (`BG_CUTS_DETERM` の `c`) と `MC11FIX2` の続きを回さない
+///   (再スタートの後の根でカットのループを回し直す)。
+///
+/// tbfp-network は `LOSE6_1_STOP=w` でもサブ MIP を止めた後、裏のカットの回っているラウンドの終わりを 25 秒待ち、続けて主のカットのループを
+/// 59 秒回してから再スタートしていた (analysis/hiloss_20261111.md の 5.3)
+pub(crate) fn erwait(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_ERWAIT").is_some_and(|v| v.contains(c))
+}
+
+/// 診断 `ENOMOTO_MIP_ERWAIT_DIAG` (振る舞いは変えない): 早めの再スタートを決めてから再スタートするまでの区切りの時刻を
+/// `MIP: ERWAIT_DIAG: <区切り> +<決めてからの秒>s (<通しの秒>s)` の形で出す
+pub(crate) fn erwait_diag() -> bool {
+    env_str!("ENOMOTO_MIP_ERWAIT_DIAG").is_some_and(|v| v != "0")
+}
+
 impl SubmipCtl {
     pub(crate) fn new(z: f64) -> Self {
         SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::atomic::AtomicBool::new(false), outer_lb: None, cap_leaves: 0, cap_node_secs: 0.0, t0: Instant::now(), found_at: std::sync::atomic::AtomicU64::new(u64::MAX), cap_t: 0.0 }
@@ -3805,6 +3829,9 @@ pub(super) struct CutJob {
     pub(super) robust_stalled: std::sync::atomic::AtomicBool,
     /// [`BgRobust`] の `o`: ループの今までの停滞の判定を止めずに続けさせた回数 (ログ用)
     pub(super) vetoes: std::sync::atomic::AtomicUsize,
+    /// 試作 `ENOMOTO_MIP_ERWAIT` の `b` ([`erwait`]): 裏のカットのスレッドの LP の反復・分離を途中で止める合図
+    /// ([`crate::cancel::with_halt`] でスレッドの止める合図にする)。立てたら結果の LP は最適とは限らないので、主は行を置き換えない
+    pub(super) halt: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` (既定では使わない。[`BgDeterm`] が働くときだけ。analysis/robust_stall_20261102.md): 裏のカットの停滞の判定を
@@ -3979,6 +4006,7 @@ impl CutJob {
             flat_run: std::sync::atomic::AtomicUsize::new(0),
             robust_stalled: std::sync::atomic::AtomicBool::new(false),
             vetoes: std::sync::atomic::AtomicUsize::new(0),
+            halt: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             share: std::sync::Mutex::new(None),
             share_in: std::sync::atomic::AtomicUsize::new(0),
             share_used: std::sync::atomic::AtomicUsize::new(0),
@@ -4481,6 +4509,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         noinc_tree_win: None,
         noinc_root_frac: 0,
         early_restart: false,
+        er_at: None,
         l63_cut_left: false,
         tree_restart_check: false,
         tr_next: 0,
@@ -8588,6 +8617,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     let j2 = job_c.clone();
                     let j3 = job_c.clone();
+                    let halt = erwait('b').then(|| job_c.halt.clone());
                     let snap = snap.clone();
                     let params = if n_plan > 1 { MipParams { threads: per, ..params } } else { params };
                     let bg_dse = if is_alt { None } else { bg_dse.clone() };
@@ -8610,7 +8640,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             crate::simplex::slope_intercept_dual::DSE_EXACT_STOP.with(|h| *h.borrow_mut() = Some(Box::new(move || j3.stop.load(std::sync::atomic::Ordering::Relaxed))));
                             crate::simplex::slope_intercept_dual::DSE_EXACT_STOP_LOG.with(|c| c.set(verbose));
                         }
-                        let _ = solve_worker(snap, None, params);
+                        // 試作 `ENOMOTO_MIP_ERWAIT` の `b` ([`erwait`]): 主の止める合図 (`CutJob::halt`) を LP の反復・分離にも伝える
+                        if let Some(h) = halt {
+                            let _ = crate::cancel::with_halt(Some(h), || solve_worker(snap, None, params));
+                        } else {
+                            let _ = solve_worker(snap, None, params);
+                        }
                     })
                     .expect("failed to spawn the cut thread");
                     if ci == 0 {
@@ -8799,6 +8834,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_EARLY_RESTART_FRAC", 0.025, f64))
                             {
                                 self.early_restart = true;
+                        self.er_at.get_or_insert_with(std::time::Instant::now);
                                 if self.params.verbose {
                                     eprintln!("MIP: early restart: {} newly fixed integer columns after {} ({:.2}s)", self.newly_fixed_ints(), $name, self.start.elapsed().as_secs_f64());
                                 }
@@ -9019,10 +9055,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 並列モード: 別スレッドのサブ MIP の結果を出した順に受け取る
                 self.parallel_submips = false;
                 let z_join0 = self.incumbent.as_ref().map(|(z, _)| *z);
-                if self.early_restart && lose6_1_stop() {
+                if self.early_restart && (lose6_1_stop() || erwait('s')) {
                     self.abort_submips_after_grace();
                 }
                 self.join_submips(0);
+                self.er_diag("parallel sub-MIPs joined after the root heuristics");
                 // `ENOMOTO_MIP_SUBFIX` の `p`: 並列の RENS が根で実行不能だったら、ここで主のスレッドでやり直す
                 if !self.subfix_retry.is_empty() {
                     heur!("RENS (SUBFIX retry)", self.subfix_par_retry());
@@ -9044,6 +9081,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_EARLY_RESTART_FRAC", 0.025, f64))
                 {
                     self.early_restart = true;
+                        self.er_at.get_or_insert_with(std::time::Instant::now);
                     if self.params.verbose {
                         eprintln!("MIP: early restart: {} newly fixed integer columns after the parallel sub-MIPs ({:.2}s)", self.newly_fixed_ints(), self.start.elapsed().as_secs_f64());
                     }
@@ -9185,9 +9223,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             self.join_fj_thread();
         }
+        self.er_diag("before the background cuts");
         // カットを強める求解を止め、その LP のカットで根の LP のカットを置き換える
         if let Some(mut bg) = bg_cuts.take() {
             let t0 = Instant::now();
+            // 試作 `ENOMOTO_MIP_ERWAIT` の `b` ([`erwait`]): 早めの再スタートが決まった根では、まだ回っている裏のカットを LP の途中でも止める
+            let er_halt = self.early_restart && erwait('b') && !self.params.submip && bg.handle.as_ref().is_some_and(|h| !h.is_finished());
+            if er_halt {
+                bg.job.halt.store(true, std::sync::atomic::Ordering::Relaxed);
+                bg.job.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                if self.params.verbose {
+                    eprintln!("MIP: ERWAIT: halting the background cuts after the early restart ({} rounds done, {:.2}s)", bg.job.prog.lock().unwrap().len(), self.start.elapsed().as_secs_f64());
+                }
+            }
             let small_nowait = small1(self.p, 'w') || (self.params.restarts > 0 && small1(self.p, 'W'));
             if small_nowait && self.params.verbose {
                 eprintln!("MIP: background cuts: not waiting (ENOMOTO_MIP_SMALL1, nnz {}, {:.2}s)", self.p.nnz, self.start.elapsed().as_secs_f64());
@@ -9243,6 +9291,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.early_restart && env_str!("ENOMOTO_MIP_LOSE6_1_STOP").is_some_and(|v| v.contains('w')) {
                     cap = cap.min(tunable!("ENOMOTO_T_MIP_LOSE6_1_BGWAIT", 2.0, f64));
                 }
+                if er_halt {
+                    cap = 0.0;
+                }
                 // 試作 `ENOMOTO_MIP_ROOTSTOP` の `w`: 再スタートが見込まれる根では裏のカットを待たない (その時点の結果は取り込む)
                 if super::rootstop::on('w') && self.rootstop_skip_wait() {
                     cap = 0.0;
@@ -9274,7 +9325,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let rounds: Vec<String> = h.iter().zip(at.iter()).map(|(o, t)| format!("{o:.1} at {:.2}s", t.saturating_duration_since(self.start).as_secs_f64())).collect();
                     eprintln!("MIP: background cuts: rounds so far [{}]", rounds.join(", "));
                 }
-            } else if bg_cuts_wait_on() && !small_nowait {
+            } else if bg_cuts_wait_on() && !small_nowait && !er_halt {
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let mult = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MULT", 5.0, f64);
                 let mut cap = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_FRAC", 0.1, f64) * remaining;
@@ -9314,6 +9365,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             let res = bg.finish();
+            self.er_diag("background cuts joined");
+            // `ERWAIT` の `b`: 止めた裏のカットの LP は最適とは限らないので行を置き換えない。終わったラウンドのカットの行 (妥当な不等式) は
+            // カットプールに入れる
+            let res = if er_halt {
+                if let Some((rows, _, rounds)) = &res {
+                    let n0 = self.cut_pool.len();
+                    for (c, l, u) in rows {
+                        if u.is_finite() && !l.is_finite() {
+                            self.add_to_pool(c, *u);
+                        }
+                    }
+                    if self.params.verbose {
+                        eprintln!("MIP: ERWAIT: halted background cuts: {rounds} rounds, {} cut rows not used in the LP, {} added to the cut pool", rows.len(), self.cut_pool.len() - n0);
+                    }
+                }
+                None
+            } else {
+                res
+            };
             // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS`: 別の基底から始めた写しも、主の写しの待ちの `ENOMOTO_T_MIP_OPTFACE_PAR_WAIT` (既定 0.5) 倍まで
             // 待ってから止め、結果をまとめる
             if !bg_extra.is_empty() {
@@ -9505,7 +9575,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` の `c`: 裏のカットが手間の上限で終わった (まだ停滞していない) なら、主のカットの
                         // ループとして停滞まで (同じ手間の上限で) 続ける
-                        if let Some(d) = determ.filter(|d| d.cont && bg_end == Some("work") && !self.time_up()) {
+                        if let Some(d) = determ.filter(|d| d.cont && bg_end == Some("work") && !self.time_up() && !(self.early_restart && erwait('c'))) {
                             let t2 = Instant::now();
                             let it2 = self.lp.total_iterations();
                             self.cut_cont = Some((d.work_iters, d.win, d.eps));
@@ -9525,7 +9595,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // 試作 `ENOMOTO_MIP_MC11FIX2` の `a`・`c` ([`mc11fix2`]): 裏のカットが停滞で終わった (待ちが `done`) のに暫定解との差が
                         // まだ大きければ、主のカットのループとして続ける (`a`: 第 1 段階を停滞まで、`c`: 第 2 段階を決まったラウンド数)
                         let fix2 = mc11fix2().unwrap_or("");
-                        if let Some(d) = determ.filter(|_| (fix2.contains('a') || fix2.contains('c')) && wait_why == "done" && bg_end != Some("work") && !self.time_up()) {
+                        if let Some(d) = determ.filter(|_| (fix2.contains('a') || fix2.contains('c')) && wait_why == "done" && bg_end != Some("work") && !self.time_up() && !(self.early_restart && erwait('c'))) {
                             let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
                             let cur2 = self.lp.objective() + self.p.offset;
                             let gap = (z - cur2) / z.abs().max(1.0);
@@ -9719,6 +9789,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 s.set_cuts(out, self.prune_limit());
             }
         }
+        self.er_diag("background cuts replaced (and the main cut loop continued)");
         // 根のヒューリスティクス・裏のカットの後: 暫定解がカットの後の根の下界に届いていれば最適で終える (木に入ると、
         // 根のノードを刈る前に時間切れの判定があるので、ヒューリスティクスが期限を越えると時間切れで返していた)
         if self.root_cut_gap_closed(root_obj) {
@@ -17824,6 +17895,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         user_log!("Restart {}: {} of {} integer columns newly fixed at the root ({:.2}s)", params.restarts, newly, nint, self.start.elapsed().as_secs_f64());
+        self.er_diag("restart");
         if crate::simplex::mip_lp::xolazy_log() {
             eprintln!("XOLAZY {{\"ev\":\"restart\",\"restarts\":{},\"t\":{:.4}{}}}", params.restarts, super::outer_elapsed().unwrap_or(f64::NAN), self.xolazy_fix_counts());
         }
@@ -18172,6 +18244,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     if n > 0 {
                         self.early_restart = true;
+                        self.er_at.get_or_insert_with(std::time::Instant::now);
                     }
                     if self.params.verbose {
                         eprintln!(
@@ -18208,6 +18281,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         while self.pending_submips.len() > keep {
             let item = self.pending_submips.pop_front().unwrap();
             self.take_submip(item);
+        }
+    }
+
+    /// 診断 `ENOMOTO_MIP_ERWAIT_DIAG` ([`erwait_diag`]): 早めの再スタートを決めていれば、決めてからの秒を出す (外側の求解だけ)
+    pub(super) fn er_diag(&self, what: &str) {
+        if let Some(t) = self.er_at.filter(|_| !self.params.submip && self.snap.is_none() && erwait_diag()) {
+            eprintln!("MIP: ERWAIT_DIAG: {what} +{:.2}s ({:.2}s)", t.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
         }
     }
 
