@@ -32,12 +32,12 @@ git pull --rebase --autostash origin ccr-1beed81b-ex0uhq && git push -u origin c
 |---|---|
 | D0〜D17 | `python run.py D 0` 〜 `python run.py D 17` (18 分担) |
 
-## P: 58 問の対 (60 秒、58 問 × 種 1〜3 × {def, te, ter}、522 回、5 分担)
+## P: 58 問の対 (60 秒、58 問 × 種 1〜3 × {def, te, ter, tenc}、696 回、6 分担)
 
-- コミット: **84c80f28** (`ENOMOTO_MIP_TREEEFF` の試作を足したソース。既定の動きは変わらない)。
-- 設定: `def` 既定 / `te` = `ENOMOTO_MIP_TREEEFF=rpsh` / `ter` = `ENOMOTO_MIP_TREEEFF=r` (`cfg.py`)。同じ (問題, 種) は同じ分担で続けて回す。
-- 見積り: 1 分担 約 0.9 時間。集計は `python summP.py`。
+- コミット: **(下で書き足す)** (`ENOMOTO_MIP_TREEEFF` の試作を足したソース。既定の動きは変わらない)。
+- 設定: `def` 既定 / `te` = `ENOMOTO_MIP_TREEEFF=rpsh` / `ter` = `ENOMOTO_MIP_TREEEFF=r` / `tenc` = `te` + `ENOMOTO_MIP_NODECNT=hr` (`cfg.py`)。同じ (問題, 種) は同じ分担で続けて回す。
+- 見積り: 1 分担 約 1.0 時間。集計は `python summP.py`。
 
 | 分担 | 命令 |
 |---|---|
-| P0〜P4 | `python run.py P 0` 〜 `python run.py P 4` |
+| P0〜P5 | `python run.py P 0` 〜 `python run.py P 5` |
