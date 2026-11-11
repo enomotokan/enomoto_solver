@@ -19,6 +19,8 @@ CFGS = {
     "ru": {"ENOMOTO_MIP_TREE4_RCUNION": "1"},                                      # 根のカットの各ラウンドの LP の被約費用でも固定する
     "sd": {"ENOMOTO_MIP_SB_NO_DEGEN_SKIP": "1"},                                   # 双対退化の強いノードでも強分岐を止めない
     "t1": {"ENOMOTO_MIP_TREE1_SB": "1"},                                           # HiGHS の信頼性分枝にそろえる (予算 100000 + 0.5 x、閾値 8)
+    "es": {"ENOMOTO_MIP_LOSE6_1_STOP": "w"},                                       # 早めの再スタートが決まったら並列のサブ MIP を止め、裏のカットの待ちを 2 秒まで (analysis/lose6_1_20261103.md)
+    "fb": {"ENOMOTO_T_MIP_CLIQUE_FB_RATIO": "0.1"},                                # クリークカットの fallback の採否の割合 0.5 -> 0.1
 }
 TL = 600
 k = int(sys.argv[1])
