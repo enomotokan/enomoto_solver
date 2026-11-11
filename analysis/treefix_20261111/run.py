@@ -1,6 +1,7 @@
 """TREEFIX の計測 (analysis/treefix_20261111.md): 問題 x 設定 x 種を 4 スレッドで 1 つずつ解き、jsonl に足す (途中から再開できる。
 設定の順は種ごとに逆)。種は ENOMOTO_T_MIP_SEED=種。計測する wheel は環境変数 TF_PKG (pip install --target の場所) を PYTHONPATH の
-先に置いて固定する。stderr の `TREEFIX: summary` の行 (再スタートごとに 1 行) と `MIP: tree restart` の行の数も記録する。
+先に置いて固定する。stderr の `TREEFIX: summary` の行 (再スタートごとに 1 行) と `MIP: tree restart` の行の数も記録する
+(この行は ENOMOTO_MIP_LOG のときだけ出るので、計測では数えられず 0 のまま。木の中の再スタートは別に ENOMOTO_MIP_LOG で確かめる)。
 使い方: python run.py <出力.jsonl> <設定,...> <種,...> <時間> <問題 ...|@58|@hit>"""
 import json, os, subprocess, sys, time
 from pathlib import Path
@@ -15,6 +16,7 @@ CFGS = {
     "tfp": {"ENOMOTO_MIP_TREEFIX": "p"},
     "tfpc": {"ENOMOTO_MIP_TREEFIX": "pc"},
     "tfnr": {"ENOMOTO_MIP_TREEFIX": "pcuR"},
+    "tfpcu": {"ENOMOTO_MIP_TREEFIX": "pcu"},
 }
 SETS = {"@58": P58, "@hit": ["csched008", "fiball", "timtab1", "csched007", "neos-957323"]}
 out, cfgs, seeds, tl = Path(sys.argv[1]), sys.argv[2].split(","), [int(s) for s in sys.argv[3].split(",")], int(sys.argv[4])
