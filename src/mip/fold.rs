@@ -4,7 +4,7 @@
 //!
 //! 値の文字: `r` 反転も使う、`i` 整数列もまとめる (段階 3)、`q` ログを出さない、`c` 畳んだ数を出すだけで解かない (数える用)、
 //! `p` 行が 1 本もまとまらない (平行な列だけの) 畳みと、列が 1 本もまとまらない (平行な行だけの) 畳みも使う (既定では使わない。
-//! 前処理が同じ列・同じ行をまとめるので)。`1` は連続列だけ・反転なし。
+//! 前処理が同じ列・同じ行をまとめるので)、`P` 前処理 → 畳む・`Q` 前処理 → 畳む → 前処理 (試作、[`solve_folded_any`])。`1` は連続列だけ・反転なし。
 //!
 //! - 連続列だけ (段階 2): 整数列はどれも 1 列だけの組にする (論文の Lemma 28)。和の等しい行は整数列の係数が同じになるので、
 //!   畳んだ MIP と元の MIP は解が行き来でき (x_w = δ_w + λ_w z_Q、整数列は δ が整数)、最適値も同じ。
@@ -295,6 +295,7 @@ pub fn try_fold(p: &MipProblem, verbose: bool) -> Option<MipFold> {
                     Some((cancel, s_cols))
                 };
                 let gdata: Vec<Option<(bool, Vec<Vec<(usize, f64)>>)>> = groups.iter().map(|(_, mem)| group_s(mem)).collect();
+                if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF mip gdata {:.3}s", t0.elapsed().as_secs_f64()); }
                 // 近道: V_R の条件を満たす組を全部並べた行列が TU なら全部認める (TU の十分条件は列を減らしても成り立つので、
                 // 1 組ずつ足していっても全部認められる。結果は 1 組ずつの判定と同じ)
                 let all_ok = {
@@ -316,6 +317,7 @@ pub fn try_fold(p: &MipProblem, verbose: bool) -> Option<MipFold> {
                     }
                     simple_tu(nr, &cols_all)
                 };
+                if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF mip batch {:.3}s ok {all_ok}", t0.elapsed().as_secs_f64()); }
                 for ((_q, mem), g) in groups.iter().zip(gdata) {
                     let (good, cancel, mut s_cols) = match g {
                         Some((c, sc)) => (true, c, sc),
@@ -325,6 +327,8 @@ pub fn try_fold(p: &MipProblem, verbose: bool) -> Option<MipFold> {
                         ok_g += 1;
                         continue;
                     }
+                    // 近道 (結果は同じ): S に ±1 でない係数があれば TU の十分条件は必ず外れる (`simple_tu` も最初にそれで偽を返す)
+                    let good = good && s_cols.iter().all(|c| c.iter().all(|&(_, a)| a == 1.0 || a == -1.0));
                     if good {
                         if cancel {
                             for (k, &w) in mem.iter().enumerate() {
@@ -336,10 +340,11 @@ pub fn try_fold(p: &MipProblem, verbose: bool) -> Option<MipFold> {
                         }
                         // 新しい列が触れる行の成分
                         let mut roots: Vec<usize> = Vec::new();
+                        let mut seen_roots: std::collections::HashSet<usize> = std::collections::HashSet::new();
                         for c in &s_cols {
                             for &(i, _) in c {
                                 let r = find(&mut dsu, i);
-                                if !roots.contains(&r) {
+                                if seen_roots.insert(r) {
                                     roots.push(r);
                                 }
                             }
@@ -569,4 +574,49 @@ mod tests {
         let cols = vec![vec![(0, 1.0), (1, 1.0)], vec![(1, 1.0), (2, 1.0)], vec![(0, 1.0), (2, 1.0)]];
         assert!(!simple_tu(3, &cols));
     }
+}
+
+/// 試作 (既定では使わない): 値の文字 `P` (前処理 → 畳む。畳んだ問題は前処理をかけずに解く) と `Q` (前処理 → 畳む → 前処理) で、
+/// MIP の前処理をかけた問題を畳む (論文は PaPILO の後に畳む)。どちらもなければ今まで通り元の問題を畳む ([`solve_folded`]、畳む → 前処理)。
+/// 戻すのは 3 段 (畳んだ問題の後処理 → 配る (整数の組は繊維の LP) → 前の前処理の後処理) で、最後に元の問題での実行可能性を確かめる。
+/// `solve` は前処理をかける求解、`solve_np` はかけない求解。
+pub fn solve_folded_any(
+    p: &MipProblem,
+    time_limit: f64,
+    verbose: bool,
+    solve: &dyn Fn(&MipProblem, f64) -> MipResult,
+    solve_np: &dyn Fn(&MipProblem, f64) -> MipResult,
+) -> Option<MipResult> {
+    let fl = flags()?;
+    let pre_p = fl.contains('P');
+    if !pre_p && !fl.contains('Q') {
+        return solve_folded(p, time_limit, verbose, solve);
+    }
+    let t0 = std::time::Instant::now();
+    let (prob, unpre) = super::presolve_for_fold(p, false)?;
+    let secs_pre = t0.elapsed().as_secs_f64();
+    if verbose || !fl.contains('q') {
+        eprintln!("MIP_FOLD: presolved before folding: n {} -> {}, m {} -> {} in {:.3}s", p.n, prob.n, p.m, prob.m, secs_pre);
+    }
+    let inner: &dyn Fn(&MipProblem, f64) -> MipResult = if pre_p { solve_np } else { solve };
+    let mut r = solve_folded(&prob, (time_limit - secs_pre).max(0.0), verbose, inner)?;
+    if let Some(xr) = r.x.take() {
+        let mut x = unpre(&xr);
+        for j in 0..p.n {
+            if p.is_int[j] {
+                x[j] = x[j].round();
+            }
+        }
+        if p.is_feasible(&x, 1e-6) {
+            let z = p.objective(&x);
+            r.best_bound += z - prob.objective(&xr);
+            r.objective = Some(z);
+            r.x = Some(x);
+        } else {
+            let left = (time_limit - t0.elapsed().as_secs_f64()).max(0.0);
+            eprintln!("MIP_FOLD: safety net: the solution mapped back through the presolve is not feasible; solving the original ({left:.2}s left)");
+            return Some(solve(p, left));
+        }
+    }
+    Some(r)
 }

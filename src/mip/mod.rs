@@ -467,7 +467,8 @@ pub fn solve_mip(
         if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() { solve_portfolio(q, params) } else { solve_problem(q, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()) }
     };
     // `ENOMOTO_MIP_FOLD` (2026-11-10 から既定、`0` で止める。analysis/drcr_20261110.md): 色の細分化で畳んで解き、元に戻す ([`fold`])
-    let r = match fold::solve_folded(&p, params.time_limit, params.verbose, &dispatch) {
+    let dispatch_np = |q: &MipProblem, tl: f64| solve_problem(q, MipParams { time_limit: tl, ..params }, false);
+    let r = match fold::solve_folded_any(&p, params.time_limit, params.verbose, &dispatch, &dispatch_np) {
         Some(r) => r,
         None => dispatch(&p, params.time_limit),
     };
@@ -3338,6 +3339,28 @@ fn hnf_subst(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::Postsolve
 /// 整数を考慮した前処理をかけた問題を作る。前処理が何も減らさなければ `None` (元の問題で解く)。
 fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Option<f64>) -> Option<Presolved> {
     presolve_mip_depth(p, verbose, submip, lp_probe_secs, 0)
+}
+
+/// 試作 `ENOMOTO_MIP_FOLD` の `P`・`Q` (前処理の後に畳む、[`fold::solve_folded_after_presolve`]) 用: 前処理をかけた問題と、その問題の解を
+/// 元の問題の解に戻す関数。前処理で実行不能と分かったか、何も縮まなかったなら `None`。
+pub(crate) type Unpresolve = Box<dyn Fn(&[f64]) -> Vec<f64>>;
+pub(crate) fn presolve_for_fold(p: &MipProblem, verbose: bool) -> Option<(MipProblem, Unpresolve)> {
+    match presolve_mip(p, verbose, false, None)? {
+        Presolved::Infeasible => None,
+        Presolved::Reduced { prob, postsolve, scaling } => {
+            let n = p.n;
+            let f = move |xr: &[f64]| -> Vec<f64> {
+                let mut x = xr.to_vec();
+                for step in postsolve.iter().rev() {
+                    step.apply(&mut x);
+                }
+                let mut x = crate::presolve::scaling::unscale_x(&scaling, &x);
+                x.truncate(n);
+                x
+            };
+            Some((prob, Box::new(f)))
+        }
+    }
 }
 
 /// 行ごとに (下限, 上限, 係数を小さい順に並べた列) と (-上限, -下限, -係数を並べた列) を辞書式に比べ、後の方が小さければ
