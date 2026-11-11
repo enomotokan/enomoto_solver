@@ -1,7 +1,8 @@
 """HILOSS: 負けている問題で HiGHS と ENOMOTO (今の既定、種 1) を同じ機械で続けて回し、ログを取る。
 使い方: python run.py K [問題]   (shards.json の K 番目の分担、問題を書けばその 1 問だけ。途中から再開できる。ソルバーは同時に 1 つ、4 スレッド・600 秒)
 出力: res_sK.jsonl (1 行 = 問題 x ソルバー)、logs/<問題>.<highs|ours>.log.gz (各行の頭に、プロセスの開始からの経過秒を付ける)。
-ENOMOTO は ENOMOTO_MIP_LOG=1 (経過を標準エラーに出すだけで解き方は変えない)、HiGHS は output_flag=true・mip_rel_gap=0。
+ENOMOTO は ENOMOTO_MIP_LOG=1 と ENOMOTO_MIP_TREE4_TRACE=10 (全スレッドの下界を 10 秒ごとに出す。最初の 26 問の回には付いていない。
+どちらも経過を標準エラーに出すだけで解き方は変えない)、HiGHS は output_flag=true・mip_rel_gap=0。
 前もって: pip install maturin highspy && pip install -e . (リポジトリの根で。リリースのビルド)"""
 import gzip, json, os, subprocess, sys, threading, time
 from pathlib import Path
@@ -30,7 +31,7 @@ def rss_mb(pid):
 def run(solver, mps, log):
     env = {key: v for key, v in os.environ.items() if not key.startswith("ENOMOTO_")}
     if solver == "ours":
-        env.update(ENOMOTO_MIP_THREADS="4", ENOMOTO_T_MIP_SEED="1", ENOMOTO_MIP_LOG="1")
+        env.update(ENOMOTO_MIP_THREADS="4", ENOMOTO_T_MIP_SEED="1", ENOMOTO_MIP_LOG="1", ENOMOTO_MIP_TREE4_TRACE="10")
     else:
         env.update(ENOMOTO_BENCH_HIGHS_LOG="1")
     t0 = time.time(); peak = 0.0; last = [""]
