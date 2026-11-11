@@ -3353,6 +3353,11 @@ pub(crate) fn thread_budget_on() -> bool {
 ///   最適解を見つけるので、時間で一律に絞る `ENOMOTO_MIP_ROOT_SUBMIP_REL` はそれを切っていた
 /// - 並列のサブ MIP には外側の刈り込みの上限 (ほかのサブ MIP・主のスレッドが見つけた解による) を打ち切り値として渡し続ける ([`SubmipCtl::outer_best`])
 /// - 並列のサブ MIP は終わった順に受け取る (`ENOMOTO_MIP_SUBMIP_FIRST_DONE` と同じ)
+/// 試作 `ENOMOTO_MIP_FJKEEP` (COMP07、既定では使わない): 根のカットのループの後も FJ のスレッドを根のヒューリスティクスの終わりまで続ける。
+fn fjkeep_on() -> bool {
+    env_str!("ENOMOTO_MIP_FJKEEP").is_some()
+}
+
 pub(crate) fn submip_outcome_stop() -> bool {
     env_str!("ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP").is_none()
 }
@@ -8359,7 +8364,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             return MipResult { status: MipStatus::NotSolved, x: None, objective: None, best_bound: f64::NEG_INFINITY, nodes: 0, lp_iterations: self.lp.total_iterations() };
         }
-        self.join_fj_thread();
+        // 試作 `ENOMOTO_MIP_FJKEEP` (COMP07、analysis/comp07_20261111.md、既定では使わない): 暫定解が FJ のスレッド (Local-MIP) の解だけ
+        // (かまだない) なら、根のカットのループの終わりで FJ のスレッドを止めず、根のヒューリスティクスの終わり (サブ MIP を待ち終えるまで) 続ける。
+        // comp07-2idx では Local-MIP が 300 → 100 → 35 → 15 と下げている途中で、カットのループ (下界が 6 に届いて 17〜19 秒で終わる) に止められ、
+        // その後の根のサブ MIP (約 80 秒) は何も見つけなかった。スレッドは自分の期限 (`FJ_NOSOL_EXTEND`、時間上限の 1/4) か、主が FJ の
+        // スレッド以外から暫定解を得たときにも自分で終わる
+        if fjkeep_on() && !self.params.submip && self.snap.is_none() && self.fj_thread.is_some() && (self.incumbent.is_none() || self.inc_only_fj) && !self.root_gap_closed() {
+            self.poll_lmip_thread();
+            if self.params.verbose {
+                eprintln!("MIP: FJKEEP: the FJ thread keeps running through the root heuristics ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+        } else {
+            self.join_fj_thread();
+        }
         if self.root_gap_closed() {
             let lb = if env_str!("ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT").is_some() { self.cur_lb } else { self.root_bound_now(root_obj) };
             return self.finish_root_gap("root LP bound", lb);
@@ -9140,6 +9157,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.bg_watch = None;
         self.bg_proved_seen.set(false);
         self.join_submips(0);
+        // 試作 `ENOMOTO_MIP_FJKEEP`: 根のヒューリスティクスの間も続けた FJ のスレッドをここで止める (受け渡し箱の解も受け取る)
+        if self.fj_thread.is_some() && fjkeep_on() {
+            if self.params.verbose {
+                eprintln!("MIP: FJKEEP: stopping the FJ thread after the root heuristics ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+            self.join_fj_thread();
+        }
         // カットを強める求解を止め、その LP のカットで根の LP のカットを置き換える
         if let Some(mut bg) = bg_cuts.take() {
             let t0 = Instant::now();
@@ -18142,6 +18166,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             c.offer(z);
                         }
                     }
+                }
+                // 試作 `ENOMOTO_MIP_FJKEEP`: 待つ間も続けている FJ のスレッドの解を受け取る (良くなれば次の回で打ち切り値としてサブ MIP に渡る)
+                if keep == 0 && self.fj_thread.is_some() && fjkeep_on() {
+                    self.poll_lmip_thread();
                 }
                 match self.pending_submips.iter().position(|it| it.0.is_finished() || it.7.as_ref().is_some_and(|l| l.paused())) {
                     Some(k) => {
