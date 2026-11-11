@@ -485,6 +485,25 @@ thread_local! {
     pub(super) static XO_NO_CLEANUP_HINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// 診断 `ENOMOTO_MIP_XOLAZY_LOG` (analysis/xolazy_20261111.md) の時刻の記録: (内点法の終わり, 押し出しの終わり = 仕上げの単体法の始め,
+/// 仕上げの終わり)。同時実行の内点法側のスレッドが [`XO_STAMP`] に置き、呼び出し側が勝ち負けの時点で読む (記録するだけ)。
+pub(crate) type XoStamp = std::sync::Arc<std::sync::Mutex<[Option<Instant>; 3]>>;
+
+thread_local! {
+    /// [`XoStamp`] の置き場 (このスレッドで解くクロスオーバーの時刻を書く。`None` なら書かない)。
+    pub(crate) static XO_STAMP: std::cell::RefCell<Option<XoStamp>> = const { std::cell::RefCell::new(None) };
+}
+
+fn xo_stamp(k: usize) {
+    XO_STAMP.with(|s| {
+        if let Some(s) = s.borrow().as_ref() {
+            if let Ok(mut a) = s.lock() {
+                a[k] = Some(Instant::now());
+            }
+        }
+    });
+}
+
 thread_local! {
     /// `ipm_point_only` で止めたときの内点法の点 `(x, y, 内点法の時間)`。
     static XO_IPM_POINT: std::cell::RefCell<Option<(Vec<f64>, Vec<f64>, f64)>> = const { std::cell::RefCell::new(None) };
@@ -1000,6 +1019,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     crate::phase_timing::mark("ipm_end");
     if xo.given_point.is_none() {
         XO_IPM_END.with(|t| t.set(Some(Instant::now())));
+        xo_stamp(0);
     }
     let ipm_secs = xo.given_point.map_or(t0.elapsed().as_secs_f64(), |g| g.2);
     if debug {
@@ -2466,6 +2486,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 仕上げは polish ではなく二段解法の主ループ (DSE・BFRT・超疎の経路) で行う (既定、第 13 回の比較。`ENOMOTO_T_XO_CLEANUP_MAIN=0` で polish)
     // でこの基底から始める (内点法の解が強く退化していて、基底の多くをスラックで埋めた問題: ns1688926)。
     let mut final_basis_pos: Option<Vec<Option<usize>>> = None;
+    xo_stamp(1);
     let res = if tunable!("ENOMOTO_T_XO_CLEANUP_MAIN", 1u8, u8) != 0 {
         drop(lu);
         // 呼び出し側 (双対化した問題) が双対の記録を要求しているなら、それを取り出したり要求を消したりしない
@@ -2515,6 +2536,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         polish_with_true_bounds(std, &mut basis, &mut basis_pos, &mut nb_status, lu, None)
     };
     crate::phase_timing::mark("cleanup_end");
+    xo_stamp(2);
     if xo.given_point.is_some() {
         GIVEN_LAST_BASIS.with(|b| *b.borrow_mut() = final_basis_pos.clone());
     }

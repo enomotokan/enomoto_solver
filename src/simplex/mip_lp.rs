@@ -392,6 +392,47 @@ struct IpmScale {
 
 
 /// 内点法 + クロスオーバーを (`sc` があれば尺度をそろえた写しで) 解き、解 (標準形の構造列の空間) と記録した双対を元の尺度に戻す。
+/// 診断 `ENOMOTO_MIP_XOLAZY_LOG` (analysis/xolazy_20261111.md、振る舞いは変えない) が立っているか
+pub(crate) fn xolazy_log() -> bool {
+    env_str!("ENOMOTO_MIP_XOLAZY_LOG").is_some()
+}
+
+/// 基底のない LP の同時実行 ([`TwoStageLp::solve_race`]) の記録 (診断 `ENOMOTO_MIP_XOLAZY_LOG`)。秒はどれも同時実行の始めから。
+#[derive(Clone, Debug, Default)]
+pub struct RaceDiag {
+    /// 勝った側: `simplex` 二段解法・`ipm` 内点法 + クロスオーバー (最適基底をそのまま採った)・`ipm_resolve` (頂点から解き直した)・
+    /// `none` (内点法側も結論なし、二段解法で解き直した)
+    pub winner: &'static str,
+    /// 勝ち負けが決まった時刻 (二段解法が勝ったときはその終わり、内点法が勝ったときは頂点が届いた時刻)
+    pub t_win: f64,
+    /// 勝ち負けが決まった時点までに内点法が終わっていればその時刻
+    pub t_ipm: Option<f64>,
+    /// 同じく押し出しが終わっていれば (仕上げの単体法の始め) その時刻
+    pub t_push: Option<f64>,
+    /// 同じく仕上げが終わっていればその時刻
+    pub t_xo: Option<f64>,
+    /// 同時実行を抜けた時刻 (内点法が勝ったときは頂点を採る・解き直しを含む)
+    pub t_end: f64,
+}
+
+thread_local! {
+    static RACE_DIAG: std::cell::RefCell<Option<RaceDiag>> = const { std::cell::RefCell::new(None) };
+}
+
+/// このスレッドで最後に記録した同時実行の記録を取り出す (診断 `ENOMOTO_MIP_XOLAZY_LOG`)
+pub fn take_race_diag() -> Option<RaceDiag> {
+    RACE_DIAG.with(|d| d.borrow_mut().take())
+}
+
+fn xolazy_record(winner: &'static str, t0: std::time::Instant, stamp: Option<&super::crossover::XoStamp>, t_win: Option<f64>) {
+    let Some(stamp) = stamp else { return };
+    let t_end = t0.elapsed().as_secs_f64();
+    let a = stamp.lock().map(|a| *a).unwrap_or([None; 3]);
+    let f = |t: Option<std::time::Instant>| t.map(|t| t.saturating_duration_since(t0).as_secs_f64());
+    let d = RaceDiag { winner, t_win: t_win.unwrap_or(t_end), t_ipm: f(a[0]), t_push: f(a[1]), t_xo: f(a[2]), t_end };
+    RACE_DIAG.with(|r| *r.borrow_mut() = Some(d));
+}
+
 fn ipm_crossover_run(std: &StdForm, sc: Option<&IpmScale>) -> Option<super::SimplexResult> {
     let Some(s) = sc else {
         return super::crossover::solve_ipm_crossover(std);
@@ -1947,12 +1988,16 @@ impl TwoStageLp {
         let bound = crate::cancel::SharedBound::new(self.std.n_total, self.std.n_rows);
         type Won = (Vec<f64>, Option<(Vec<f64>, Vec<Option<usize>>)>);
         let (tx, rx) = mpsc::channel::<Option<Won>>();
+        // 診断 `ENOMOTO_MIP_XOLAZY_LOG` (振る舞いは変えない): 内点法側の時刻を記録させる
+        let stamp: Option<super::crossover::XoStamp> = xolazy_log().then(Default::default);
         {
             let (std, cancel, bound) = (Arc::new(self.std.clone()), cancel.clone(), bound.clone());
             let sc = self.ipm_scale();
             let deadline = lim.deadline;
+            let stamp = stamp.clone();
             std::thread::spawn(move || {
                 let r = pool.install(|| {
+                    super::crossover::XO_STAMP.with(|s| *s.borrow_mut() = stamp);
                     // 仕上げの二段解法の最適基底と双対を記録させる
                     sid::request_duals(true);
                     let r = crate::cancel::with_deadline(deadline, || {
@@ -1960,6 +2005,7 @@ impl TwoStageLp {
                     });
                     let duals = sid::take_duals();
                     sid::request_duals(false);
+                    super::crossover::XO_STAMP.with(|s| *s.borrow_mut() = None);
                     r.filter(|r| r.status == Status::Optimal).and_then(|r| r.x).map(|x| (x, duals))
                 });
                 // 最適な頂点が得られ、二段解法より先なら合図を立てて二段解法を止める
@@ -1988,6 +2034,7 @@ impl TwoStageLp {
                 }
                 crate::phase_timing::mark("race_simplex_won");
                 user_log!("Root LP: the two-phase method finished first ({:.2}s)", t0.elapsed().as_secs_f64());
+                xolazy_record("simplex", t0, stamp.as_ref(), None);
                 return st;
             }
             rx.recv().ok().flatten()
@@ -2008,11 +2055,15 @@ impl TwoStageLp {
             }
         };
         let Some((x, duals)) = won else {
+            xolazy_record("none", t0, stamp.as_ref(), None);
             return self.solve_once(lim);
         };
         crate::phase_timing::mark("race_ipm_crossover_won");
         user_log!("Root LP: the interior-point method + crossover finished first ({:.2}s)", t0.elapsed().as_secs_f64());
-        self.adopt_ipm_vertex(&x, duals, lim, debug, t0)
+        let t_won = t0.elapsed().as_secs_f64();
+        let st = self.adopt_ipm_vertex(&x, duals, lim, debug, t0);
+        xolazy_record(if st == LpStatus::Optimal { "ipm" } else { "ipm_resolve" }, t0, stamp.as_ref(), Some(t_won));
+        st
     }
 
     /// 診断用 (`ENOMOTO_MIP_ROOTLP_BOTH_DIAG`、既定では呼ばない。analysis/rootlp_both_diff_20261105.md): この LP の写しを 2 つ作り、

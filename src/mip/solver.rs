@@ -7956,6 +7956,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 試作 `ENOMOTO_MIP_ROOTLP3` (analysis/rootlp3_20261111.md): 特異な基底は捨てて基底なしの同時実行で解く
         let rootlp3 = self.rootlp3_before(root_kind);
+        let xolazy_log = matches!(root_kind, Some(3) | Some(4)) && crate::simplex::mip_lp::xolazy_log();
+        if xolazy_log {
+            let _ = crate::simplex::mip_lp::take_race_diag();
+        }
         let mut root_st = if let Some(st) = self.rootlp3_solve(rootlp3.as_ref()) {
             st
         } else if probe_cols_only_warm && root_kind == Some(4) && (probe_basis_guard_has('r') || probe_basis_guard_has('x')) {
@@ -7964,6 +7968,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() })
         };
         self.rootlp3_after(root_kind, rootlp3, root_st, self.lp.total_iterations() - root_it0, t_root_lp);
+        if xolazy_log {
+            // 診断 `ENOMOTO_MIP_XOLAZY_LOG` (analysis/xolazy_20261111.md、振る舞いは変えない): 根の LP の同時実行の勝ち負けと
+            // 内点法・押し出し・仕上げの時刻 (同時実行の始めから)。`t` は外側の求解の始めからの秒 (根の LP の終わり)
+            let d = crate::simplex::mip_lp::take_race_diag();
+            let o = |v: Option<f64>| v.map_or("null".to_string(), |v| format!("{v:.4}"));
+            eprintln!(
+                "XOLAZY {{\"ev\":\"rootlp\",\"kind\":{},\"restarts\":{},\"t\":{:.4},\"secs\":{:.4},\"rows\":{},\"cols\":{},\"st\":\"{root_st:?}\",\"winner\":\"{}\",\"t_win\":{},\"t_ipm\":{},\"t_push\":{},\"t_xo\":{},\"t_end\":{}}}",
+                root_kind.unwrap_or(0),
+                self.params.restarts,
+                super::outer_elapsed().unwrap_or(f64::NAN),
+                t_root_lp.elapsed().as_secs_f64(),
+                self.lp.num_rows(),
+                self.p.n,
+                d.as_ref().map_or("warm", |d| d.winner),
+                o(d.as_ref().map(|d| d.t_win)),
+                o(d.as_ref().and_then(|d| d.t_ipm)),
+                o(d.as_ref().and_then(|d| d.t_push)),
+                o(d.as_ref().and_then(|d| d.t_xo)),
+                o(d.as_ref().map(|d| d.t_end)),
+            );
+        }
         if sing_repair {
             crate::simplex::slope_intercept_dual::SING_REPAIR_GLOBAL.store(false, std::sync::atomic::Ordering::Relaxed);
             if self.params.verbose {
@@ -9786,6 +9811,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.tr_root_lb = self.global_lower_bound().min(plunge.as_ref().map_or(f64::INFINITY, |n| n.lower_bound));
         self.tr_qprev = (0.0, 0.0);
         self.tr_rstop = false;
+        if crate::simplex::mip_lp::xolazy_log() && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
+            eprintln!("XOLAZY {{\"ev\":\"tree\",\"restarts\":{},\"t\":{:.4}}}", self.params.restarts, super::outer_elapsed().unwrap_or(f64::NAN));
+        }
         if self.params.verbose && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
             eprintln!("TRSTAT: tree start outer {:.2} solve {:.2} restarts {} lb {:.10e} ub {:.10e}", super::outer_elapsed().unwrap_or(f64::NAN), self.tr_t0, self.params.restarts, self.tr_root_lb, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z));
         }
@@ -17741,6 +17769,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         user_log!("Restart {}: {} of {} integer columns newly fixed at the root ({:.2}s)", params.restarts, newly, nint, self.start.elapsed().as_secs_f64());
+        if crate::simplex::mip_lp::xolazy_log() {
+            eprintln!("XOLAZY {{\"ev\":\"restart\",\"restarts\":{},\"t\":{:.4}}}", params.restarts, super::outer_elapsed().unwrap_or(f64::NAN));
+        }
         if self.params.verbose {
             eprintln!(
                 "MIP: restart {} ({} of {} integer columns newly fixed at the root, {} cuts kept) ({:.2}s)",
