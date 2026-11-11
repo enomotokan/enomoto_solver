@@ -14,6 +14,13 @@ CFGS = {
     "rfold": {"ENOMOTO_MIP_FOLD": "r"},
     "rifold": {"ENOMOTO_MIP_FOLD": "ri"},
     "ifold": {"ENOMOTO_MIP_FOLD": "i"},
+    # 2026-11-11 (analysis/drcr2_20261111.md): 既定は riq。前処理の順と、畳んだ問題の上の GAP1 の u
+    "nofold": {"ENOMOTO_MIP_FOLD": "0"},
+    "fP": {"ENOMOTO_MIP_FOLD": "riPq"},
+    "fQ": {"ENOMOTO_MIP_FOLD": "riQq"},
+    "fu": {"ENOMOTO_MIP_GAP1": "u"},
+    "fui": {"ENOMOTO_MIP_GAP1": "u", "ENOMOTO_MIP_FOLD_PROBE_INT": "1"},
+    "nfu": {"ENOMOTO_MIP_FOLD": "0", "ENOMOTO_MIP_GAP1": "u"},
 }
 SETS = {"@58": P58}
 out, cfgs, seeds, tl = Path(sys.argv[1]), sys.argv[2].split(","), [int(s) for s in sys.argv[3].split(",")], int(sys.argv[4])

@@ -1013,6 +1013,10 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
             return r;
         }
     }
+    // 試作 `ENOMOTO_MIP_FOLD_COUNT` (診断): サブ MIP・再スタートの後の問題で畳める構造を数える
+    if params.submip || params.restarts > 0 {
+        fold::count_hook(p, &p.col_lo, &p.col_up, &if params.submip { "submip".to_string() } else { format!("restart {}", params.restarts) });
+    }
     let t0 = std::time::Instant::now();
     let mut r = solve_problem_inner(p, params, use_presolve);
     // `ENOMOTO_MIP_PROBE_REPRESOLVE` (試作) の安全網 (既定では通らない): かけ直した問題の根の LP が二段解法でも内点法でも解けずに

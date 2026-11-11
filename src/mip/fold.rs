@@ -219,7 +219,11 @@ fn int_keys(p: &MipProblem, vr: &[bool]) -> Vec<u64> {
 
 /// 畳む。畳まないなら `None`。
 pub fn try_fold(p: &MipProblem, verbose: bool) -> Option<MipFold> {
-    let fl = flags()?;
+    try_fold_with(p, verbose, flags()?)
+}
+
+/// [`try_fold`] の本体 (値の文字 `fl` を引数で受け取る。数える用の [`count_hook`] からも呼ぶ)。
+pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold> {
     let log = verbose || !fl.contains('q');
     let t0 = std::time::Instant::now();
     let opts = crate::simplex::lp_fold::opts_from_env(fl.contains('r'));
@@ -619,4 +623,80 @@ pub fn solve_folded_any(
         }
     }
     Some(r)
+}
+
+/// 試作 `ENOMOTO_MIP_FOLD_COUNT` (診断、既定では使わない。analysis/drcr2_20261111.md の (3)): 分枝・固定の後のノード、サブ MIP、再スタートの後の
+/// 問題で、畳める構造がどれだけ出るかを数えて 1 行出す (畳みはしない)。固定された列は右辺に移してから、規則 (平行な列・行だけなら畳まない)
+/// を外した `rip` の手順で畳んだときの大きさを数える。`tag` は場所 (`node d=10`・`submip`・`restart 1` など)。
+pub fn count_hook(p: &MipProblem, lo: &[f64], up: &[f64], tag: &str) {
+    if env_str!("ENOMOTO_MIP_FOLD_COUNT").is_none() {
+        return;
+    }
+    let t0 = std::time::Instant::now();
+    // 固定された列を除き、行の範囲をずらす
+    let keep: Vec<bool> = (0..p.n).map(|j| lo[j] < up[j]).collect();
+    let mut newid = vec![usize::MAX; p.n];
+    let mut k = 0;
+    for j in 0..p.n {
+        if keep[j] {
+            newid[j] = k;
+            k += 1;
+        }
+    }
+    let mut rows = Vec::with_capacity(p.m);
+    let (mut rlo, mut rup) = (Vec::with_capacity(p.m), Vec::with_capacity(p.m));
+    for i in 0..p.m {
+        let mut sh = 0.0;
+        let mut r = Vec::new();
+        for &(j, a) in &p.rows[i] {
+            if keep[j] {
+                r.push((newid[j], a));
+            } else {
+                sh += a * lo[j];
+            }
+        }
+        if r.is_empty() {
+            continue;
+        }
+        rows.push(r);
+        rlo.push(p.row_lo[i] - sh);
+        rup.push(p.row_up[i] - sh);
+    }
+    let pick = |v: &[f64]| -> Vec<f64> { (0..p.n).filter(|&j| keep[j]).map(|j| v[j]).collect() };
+    let q = MipProblem::from_rows(pick(lo), pick(up), pick(&p.cost), 0.0, p.sense_sign, (0..p.n).filter(|&j| keep[j]).map(|j| p.is_int[j]).collect(), rows, rlo, rup);
+    let r = try_fold_with(&q, false, "ripq");
+    match r {
+        Some(f) => {
+            let st = &f.fold.stats;
+            eprintln!(
+                "MIP_FOLD_COUNT {tag}: free n {} m {} (of n {}) -> n {} m {} (int groups {} with {} cols, bip cols {}, bip rows {}) in {:.3}s",
+                q.n, q.m, p.n, st.n_red, st.m_red, st.int_groups, st.int_grouped_cols, st.bip_cols, st.bip_rows, t0.elapsed().as_secs_f64()
+            );
+        }
+        None => eprintln!("MIP_FOLD_COUNT {tag}: free n {} m {} (of n {}) -> no fold in {:.3}s", q.n, q.m, p.n, t0.elapsed().as_secs_f64()),
+    }
+}
+
+thread_local! {
+    /// [`count_hook`] で数えたノードの深さ (同じ深さは 1 回だけ)
+    static COUNTED_DEPTHS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// ノードで数える (`ENOMOTO_MIP_FOLD_COUNT`、深さ 0・5・10・20・30・50 の最初のノードで 1 回ずつ)。
+pub fn count_node(p: &MipProblem, lo: &[f64], up: &[f64], depth: usize) {
+    if env_str!("ENOMOTO_MIP_FOLD_COUNT").is_none() || ![0usize, 5, 10, 20, 30, 50].contains(&depth) {
+        return;
+    }
+    if COUNTED_DEPTHS.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.contains(&depth) {
+            true
+        } else {
+            c.push(depth);
+            false
+        }
+    }) {
+        return;
+    }
+    count_hook(p, lo, up, &format!("node d={depth}"));
 }

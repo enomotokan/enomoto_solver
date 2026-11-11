@@ -10513,6 +10513,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 continue;
             }
+            // 試作 `ENOMOTO_MIP_FOLD_COUNT` (診断): 分枝・固定の後のノードで畳める構造を数える
+            if !self.params.submip {
+                super::fold::count_node(self.p, &self.dom.lo, &self.dom.up, node.depth as usize);
+            }
             self.sync_lp();
             xp("m_sync");
             // ノードの LP を解く (強分岐で境界が締まったら解き直す)。
@@ -15681,11 +15685,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         'outer: for _ in 0..max_rounds {
             rounds += 1;
             let x = self.lp.col_values();
+            // 試作 `ENOMOTO_MIP_FOLD_PROBE_INT` (既定では使わない。analysis/drcr2_20261111.md): 0-1 でない整数列も試す
+            // (DRCR で畳んだ問題の整数の組は和の変数 y_Q で範囲が 0..|Q| なので、0-1 列だけでは試せない)
+            let genint = env_str!("ENOMOTO_MIP_FOLD_PROBE_INT").is_some();
             let mut cands: Vec<usize> = (0..p.n)
-                .filter(|&j| p.is_int[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0 && x[j] > FEASTOL && x[j] < 1.0 - FEASTOL)
+                .filter(|&j| {
+                    p.is_int[j]
+                        && if genint {
+                            self.dom.up[j] - self.dom.lo[j] >= 1.0 && (x[j] - x[j].round()).abs() > FEASTOL
+                        } else {
+                            self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0 && x[j] > FEASTOL && x[j] < 1.0 - FEASTOL
+                        }
+                })
                 .collect();
             // 試すのは遠い側だけ (x < 0.5 なら x = 1、でなければ x = 0)。整数に近い列 (遠い側の LP が大きく動く) から
-            cands.sort_by(|&a, &b| (0.5 - x[b]).abs().total_cmp(&(0.5 - x[a]).abs()));
+            cands.sort_by(|&a, &b| (0.5 - (x[b] - x[b].floor())).abs().total_cmp(&(0.5 - (x[a] - x[a].floor())).abs()));
             let saved = self.lp.save_state();
             let it0 = self.lp.total_iterations();
             let mut fixes: Vec<(usize, f64)> = Vec::new();
@@ -15697,10 +15711,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 probed += 1;
                 let mut bad = [false; 2];
-                let sides: &[usize] = if both { &[0, 1] } else if x[j] < 0.5 { &[1] } else { &[0] };
+                // 0-1 列: 0 側 = x_j = 0、1 側 = x_j = 1。一般の整数列 (`ENOMOTO_MIP_FOLD_PROBE_INT`): 0 側 = x_j ≤ ⌊x⌋、1 側 = x_j ≥ ⌈x⌉
+                let (fl, ce) = (x[j].floor(), x[j].ceil());
+                let frac = x[j] - fl;
+                let sides: &[usize] = if both { &[0, 1] } else if frac < 0.5 { &[1] } else { &[0] };
                 for &k in sides {
-                    let v = k as f64;
-                    self.lp.set_col_bounds(j, v, v);
+                    let (l, u) = if k == 1 { (ce, self.dom.up[j]) } else { (self.dom.lo[j], fl) };
+                    self.lp.set_col_bounds(j, l, u);
                     let st = self.lp.solve(&self.limits_k(itlim, 1));
                     lps += 1;
                     itlim_hits += (st == LpStatus::IterationLimit) as usize;
@@ -15722,8 +15739,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.lp.set_total_iterations(it0);
                         break 'outer;
                     }
-                    [true, false] => fixes.push((j, 1.0)),
-                    [false, true] => fixes.push((j, 0.0)),
+                    // 0 側がだめ → x_j ≥ ⌈x⌉ (下限)、1 側がだめ → x_j ≤ ⌊x⌋ (上限)。0-1 列では x_j = 1・x_j = 0 の固定と同じ
+                    [true, false] => fixes.push((j, ce)),
+                    [false, true] => fixes.push((j, -1.0 - fl)),
                     _ => {}
                 }
             }
@@ -15732,8 +15750,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             fixed_total += fixes.len();
+            // fixes の値: 0 以上なら下限、負なら上限 −1 − v (0-1 列では (j, 1) が x_j = 1、(j, −1) が x_j = 0 の固定)
             for &(j, v) in &fixes {
-                self.dom.tighten_global(p, j, v == 0.0, v);
+                if v >= 0.0 {
+                    self.dom.tighten_global(p, j, false, v);
+                } else {
+                    self.dom.tighten_global(p, j, true, -1.0 - v);
+                }
             }
             if !self.dom.propagate(p) {
                 self.dom.infeasible = true;
