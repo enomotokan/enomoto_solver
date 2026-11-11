@@ -1056,6 +1056,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         // 固定費用のネットワーク型か (`root_cut_highs` がループの初めから使うので先に決める。下でも同じ値を入れ直す)
         self.fc_network = !self.params.submip && fixed_charge_network(p);
+        // 診断 (analysis/cutmix_20261111.md): 型の割合と 2 択の判定を再スタートごとに出す
+        if !self.params.submip && env_str!("ENOMOTO_MIP_LOG").is_some() {
+            super::cutmix::log_types(p, Some(&self.lp.col_values()), self.params.restarts, self.fc_network, fixed_charge_network_for_nodes(p));
+        }
         // `ENOMOTO_MIP_CUTSEL_PROBE`: 外側の最初の根では前の求解の選択を消す (0 ラウンド目の比べで決め直す)
         // (試作 `ENOMOTO_MIP_GAP2_PROBE1` では clique の fallback の 2 回目のループで消さない。下の `probe_pending` を参照)
         if !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && self.cut_cont.is_none() && env_def!("ENOMOTO_MIP_CUTSEL_PROBE", "rate").is_some()

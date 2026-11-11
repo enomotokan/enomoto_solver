@@ -51,6 +51,7 @@ pub(crate) mod implint_tu;
 pub(crate) mod redsplit;
 pub(crate) mod cmirdelta;
 pub(crate) mod seplearn;
+pub(crate) mod cutmix;
 pub(crate) mod mcf;
 pub(crate) mod clique;
 pub(crate) mod cutsel_ens;
