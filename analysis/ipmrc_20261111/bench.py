@@ -17,6 +17,8 @@ CFG = {
     # 段階 1 の試作: 内点法の双対を被約費用による固定に使う (u)、二段解法が勝っても内点法の点を待つ (w)
     "u": {"ENOMOTO_MIP_IPMRC": "u"},
     "uw": {"ENOMOTO_MIP_IPMRC": "uw"},
+    # 案 (1): 再スタートの判断には使わず、木に入るときに足す
+    "utw": {"ENOMOTO_MIP_IPMRC": "utw"},
 }
 # Mittelmann で根の LP が重い問題 (analysis/rootlp3_20261111/m47scr.jsonl で根の LP の和が 0.1 秒以上の 25 問 + 186 問から LP の大きい 5 問)
 M30 = ["satellites2-60-fs", "mzzv11", "neos-3216931-puriri", "neos-933966", "mzzv42z", "uccase12", "physiciansched6-2",

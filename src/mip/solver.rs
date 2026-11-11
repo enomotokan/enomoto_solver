@@ -9849,6 +9849,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.tr_root_lb = self.global_lower_bound().min(plunge.as_ref().map_or(f64::INFINITY, |n| n.lower_bound));
         self.tr_qprev = (0.0, 0.0);
         self.tr_rstop = false;
+        if crate::simplex::mip_lp::ipmrc_has('t') && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
+            self.ipmrc_tree_start();
+        }
         if crate::simplex::mip_lp::xolazy_log() && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
             eprintln!("XOLAZY {{\"ev\":\"tree\",\"restarts\":{},\"t\":{:.4}{}}}", self.params.restarts, super::outer_elapsed().unwrap_or(f64::NAN), self.xolazy_fix_counts());
         }

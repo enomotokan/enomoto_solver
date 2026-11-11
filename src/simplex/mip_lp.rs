@@ -394,7 +394,8 @@ struct IpmScale {
 /// 内点法 + クロスオーバーを (`sc` があれば尺度をそろえた写しで) 解き、解 (標準形の構造列の空間) と記録した双対を元の尺度に戻す。
 /// 試作 `ENOMOTO_MIP_IPMRC` (analysis/ipmrc_20261111.md、既定では使わない) に文字 `c` が入っているか。`u`: 根の LP の同時実行で
 /// 内点法の点が手に入ったら、その双対のラグランジュ下界と被約費用を被約費用による固定に使う (`src/mip/xolazy.rs` の
-/// `ipmrc_store`)。`w`: 二段解法が先に最適で終わっても内点法の点が届くまで待つ (採るのは二段解法の結果)
+/// `ipmrc_store`)。`w`: 二段解法が先に最適で終わっても内点法の点が届くまで待つ (採るのは二段解法の結果)。`t`: `u` の固定を
+/// 再スタートの判断には使わず、木に入るときに足す (`ipmrc_tree_start`)
 pub(crate) fn ipmrc_has(c: char) -> bool {
     env_str!("ENOMOTO_MIP_IPMRC").is_some_and(|v| v.contains(c))
 }

@@ -101,7 +101,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 }
 
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_IPMRC` の `t`: 木に入るまで取っておく (再スタートの回数, 下界, 被約費用の一覧)
+    static IPMRC_DEFER: RefCell<Option<(u32, f64, Vec<(usize, bool, f64, f64)>)>> = const { RefCell::new(None) };
+}
+
 impl<'a, L: MipLp> Solver<'a, L> {
+    /// 試作 `ENOMOTO_MIP_IPMRC` の `t`: 木に入るとき (主、再スタートの判断の後) に、取っておいた内点法の双対の被約費用を
+    /// [`Self::t4_rc_extra`] に足して締める (木の中の再スタートの判断には効く)
+    pub(super) fn ipmrc_tree_start(&mut self) {
+        let Some((r, lb, v)) = IPMRC_DEFER.with(|d| d.borrow_mut().take()) else { return };
+        if r != self.params.restarts {
+            return;
+        }
+        let fixed0 = self.newly_fixed_ints();
+        let nv = v.len();
+        self.t4_rc_extra.push((lb, v));
+        if self.root_redcost.is_some() {
+            self.root_redcost_fixing();
+        }
+        if self.params.verbose || crate::simplex::mip_lp::xolazy_log() {
+            eprintln!(
+                "XOLAZY {{\"ev\":\"ipmrc_tree\",\"restarts\":{},\"lb\":{},\"cols\":{nv},\"fixed_now\":{}}}",
+                self.params.restarts,
+                num(lb),
+                self.newly_fixed_ints().saturating_sub(fixed0)
+            );
+        }
+    }
+
     /// 試作 `ENOMOTO_MIP_IPMRC` の `u` (analysis/ipmrc_20261111.md): 根の LP の直後、同時実行で内点法の点が手に入っていれば、その双対の
     /// ラグランジュ下界 `L(y)` と被約費用 `d = c - A^T y` を [`Self::t4_rc_extra`] に足す。以後 [`Self::root_redcost_fixing`] が打ち切り値
     /// `U` で `L(y) + |d_j| (x_j - 境界) <= U` を満たす範囲に整数列を締める (`TREE4_RCUNION` の根のラウンドの被約費用と同じ形)。
@@ -143,6 +171,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let fixed0 = self.newly_fixed_ints();
         let nv = v.len();
+        // `t`: 再スタートの判断には使わない。木に入るとき ([`Self::ipmrc_tree_start`]) に足す
+        if crate::simplex::mip_lp::ipmrc_has('t') {
+            IPMRC_DEFER.with(|d| *d.borrow_mut() = Some((self.params.restarts, lb, v)));
+            return;
+        }
         self.t4_rc_extra.push((lb, v));
         // 暫定解がもうあれば、すぐ締める (根の被約費用の記録がまだなら次の呼び出しで締まる)
         if self.root_redcost.is_some() {
