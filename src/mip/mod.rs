@@ -3715,7 +3715,9 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 試作 `ENOMOTO_MIP_PRECHAIN` ([`prechain::start`]): 軽い縮約 (行をまとめた後のかけ直し・早めのプロービングとかけ直しを含む) の後、
     // LP による固定・プロービングなどの重い前処理の前に、FJ・Local-MIP のスレッドを立てる (最初の求解で 1 回だけ)。`p` なら並列の
     // プロービングと分け合う。立てた後にかけ直しの前処理がここを通ったら、縮んだ問題に乗り換えさせる ([`prechain::refresh`])
-    if !submip && prechain::on() {
+    // サブ MIP の前処理では呼ばない (根の後も連鎖が生きている `r`・`R` で、主のスレッドで解くサブ MIP の前処理がサブ MIP の問題を
+    // 渡して連鎖を乗り換えさせていた。analysis/restchain_20261111.md)
+    if !submip && prechain::on() && !PRESOLVE_IN_SUBMIP.with(|f| f.get()) {
         match prechain::start(&prob) {
             Some(par) => PREPAR_THREADS.with(|t| t.set(par)),
             None => prechain::refresh(&prob),

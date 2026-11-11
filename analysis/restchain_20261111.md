@@ -62,4 +62,23 @@ bench に使う環境変数: 既定 (`def`、`ENOMOTO_` なし) / `ebi` = `ENOMO
 
 ## 3. 計測
 
-(計測の後に書く)
+ビルドは a3f25705 の作業木 (下の 2 つの直しを含む) で、58 問 × 種 1・2 × (`def`・`ebi`・`ebiR`)、60 秒・4 スレッド (`jobs58.txt`、`res58.jsonl`)。
+
+### 3.0 最初の版の不具合 (直した。`res58_v1.jsonl`・`logs_v1/` は直す前の種 1)
+
+最初の版 (9272abd9) の種 1 は `ebiR` が SGM +6.9% (区間 [−1.0%, +18.2%])、解けた 45 → 41 で、binkar10_1 が**止まって** 460 秒で
+打ち切られた (`crash`)。gdb で見ると、主は木に入る前に連鎖を止めて待ち (`prechain::stop_current` → `Chain::finish` の join)、連鎖の
+スレッドは `LocalMip::run` の中で回り続けていた。原因は 2 つ:
+
+1. **サブ MIP の問題への乗り換え** (`r` にもある): 根の後も連鎖が生きているので、根のヒューリスティクスで主のスレッドが解くサブ MIP
+   (RENS など) の前処理が `presolve_mip_depth` の連鎖の位置を通り、`refresh` がサブ MIP の問題 (列の数は同じ) を連鎖に渡していた
+   (`submip` の引数はサブ MIP の前処理でも偽のことがある)。サブ MIP の前処理では呼ばないようにした (`PRESOLVE_IN_SUBMIP` を見る)。
+2. **Local-MIP の lift move の繰り返しが終わらない**: `while s.lift_sweep(..) > 0 {}` には回数の上限も止める合図の確かめもなく、
+   サブ MIP の問題では連続列が少しずつ動き続けて抜けなかった (10 回中 9 回で 1000 回を超えた)。1000 回の上限と止める合図の確かめを
+   足した (`localmip.rs`、上限に当たらない限り振る舞いは同じ。既定・`ebi` の binkar10_1 では当たらなかった)。
+
+直した後は binkar10_1 の `ebiR` は 5 回とも 9〜10 秒で最適、上限に当たる回 0。fuzz_tiny 400・mip_fuzz_vs_highs 300 は bad 0、
+`cargo test --release --lib` (`ENOMOTO_MIP_PRECHAIN=ebiR`) は 400 件通過 (pyo3 のリンクに `RUSTFLAGS="-L /usr/local/lib -l python3.13"`
+と別の `CARGO_TARGET_DIR` が要る)。
+
+(結果は計測の後に書く)

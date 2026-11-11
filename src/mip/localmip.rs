@@ -667,7 +667,18 @@ impl<'a> LocalMip<'a> {
                         continue;
                     }
                 } else {
-                    while s.lift_sweep(lift_order, step) > 0 {}
+                    // lift move を動かなくなるまで繰り返す。連続列が少しずつ動き続けて終わらないことがある (binkar10_1 で、
+                    // 止める合図も見ずに回り続けた。analysis/restchain_20261111.md) ので、回数に上限を置き、止める合図も見る
+                    let mut sweeps = 0u32;
+                    while s.lift_sweep(lift_order, step) > 0 {
+                        sweeps += 1;
+                        if sweeps >= 1000 || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+                            if debug || env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
+                                eprintln!("MIP:   [localmip] lift sweeps stopped after {sweeps} sweeps (step {step})");
+                            }
+                            break;
+                        }
+                    }
                 }
                 if s.vset.iter().any(|&r| r < m) {
                     // 丸めの誤差で違反が出た (起きないはず): そのまま探索を続ける
