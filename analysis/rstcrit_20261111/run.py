@@ -15,6 +15,9 @@ CFGS = {
     "n05": {"ENOMOTO_MIP_RSTCRIT": "n"},
     # 案 2': SCIP の restartminred (直前の再スタートの固定が自由な整数列の 10% 未満なら、それ以上しない)
     "m10": {"ENOMOTO_MIP_RSTCRIT": "m"},
+    # 木の中の再スタート (試作 inc) だけ / それに t (縮みが 20% 以上ならノード数の上限 2000 を見ない) を重ねたもの
+    "ti": {"ENOMOTO_MIP_TREE_RESTART": "inc"},
+    "tt": {"ENOMOTO_MIP_TREE_RESTART": "inc", "ENOMOTO_MIP_RSTCRIT": "t"},
 }
 cfg, p, tl, rep, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 OUT = D / out
