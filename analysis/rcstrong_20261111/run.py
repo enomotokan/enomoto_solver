@@ -15,6 +15,8 @@ CFGS = {
     "rck": {"ENOMOTO_MIP_RCSTRONG": "k"},
     "rcik": {"ENOMOTO_MIP_RCSTRONG": "ikc"},
     "rcic": {"ENOMOTO_MIP_RCSTRONG": "ic"},
+    "rcir": {"ENOMOTO_MIP_RCSTRONG": "irc"},
+    "rcirk": {"ENOMOTO_MIP_RCSTRONG": "irkc"},
 }
 SETS = {"@58": P58}
 out, cfgs, seeds, tl = Path(sys.argv[1]), sys.argv[2].split(","), [int(s) for s in sys.argv[3].split(",")], int(sys.argv[4])

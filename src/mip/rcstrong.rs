@@ -13,6 +13,8 @@
 //!   どの項も 0 以上なので、項を落としても成り立つ: 密にならないよう、min(|d_j| × 幅_j, G) が G の
 //!   `ENOMOTO_T_MIP_RCSTRONG_KFRAC` (既定 0.05) 倍以上の列に絞り、多いときは大きい順に `ENOMOTO_T_MIP_RCSTRONG_KMAX`
 //!   (既定 2000) 本まで。打ち切り値が変わるたびに作り直す。
+//! - `r` (`i` と一緒に) 切り捨てを根の大域的な固定だけにし、ノードの局所的な固定では切り捨てない (pk1 でノードの切り捨てが
+//!   揃って遅くしたため。ノードでは数えるだけ)。
 //! - `c` (診断、解き方は変えない): `i` で切り捨てたら新たに締まる・固定される本数を数えて、終わりに 1 行出す (`i` と一緒なら
 //!   実際に締めた数)。
 
@@ -148,7 +150,7 @@ pub(crate) fn node_round(st: &RcsState, j: usize, upper: bool, v: f64, lo: f64, 
             NODE_CNT[2].fetch_add(1, Relaxed);
         }
     }
-    if flag('i') && tight {
+    if flag('i') && !flag('r') && tight {
         Some(r)
     } else {
         None
