@@ -55,7 +55,11 @@ def cell(res, tl):
     return f"切れ({g:.1%})" if g is not None else f"{res.get('status')}"
 
 
-for name, pat, tl, probs in [("58 問 (60 秒)", "b58*.jsonl", 60.0, P58), ("47 問の一部 (600 秒)", "b47*.jsonl", 600.0, P47)]:
+# wheel ごとに分ける: b58.jsonl (wheel b: def・rcic・rck)、b58x.jsonl (wheel b: 揃って遅く見えた問題の種 3〜8)、
+# b58r.jsonl (wheel c: r を加えた後の def・rcir)。def は同じ wheel のものとだけ比べる
+for name, pat, tl, probs in [("58 問 (60 秒、wheel b)", "b58.jsonl", 60.0, P58),
+                             ("揃って遅く見えた問題の種 3〜8 (60 秒、wheel b)", "b58x.jsonl", 60.0, P58),
+                             ("58 問 (60 秒、wheel c)", "b58r.jsonl", 60.0, P58), ("47 問の一部 (600 秒)", "b47*.jsonl", 600.0, P47)]:
     rs = rows(pat)
     if not rs:
         continue
@@ -82,16 +86,17 @@ for name, pat, tl, probs in [("58 問 (60 秒)", "b58*.jsonl", 60.0, P58), ("47 
         ka = [k for k in ks if k[0] in hit]
         if ka and len(ka) != len(ks):
             bl.report(R, "def", c, ka, label=f"{name} 当たる問題だけ def 対 {c}", show_root=False)
-    print("\n### 当たる問題の時間 (種 1・種 2、解けなければ最終ギャップ) と数 (種 1)\n")
+    print("\n### 当たる問題の時間 (種の順、解けなければ最終ギャップ) と数 (最初の種)\n")
     print("暗黙の整数: 印 / 根の表に入った / 根で切り捨てで締めた / 根で固定 / ノードで切り捨てで締めた / ノードで固定。"
           "被約費用の行: 呼んだ / 刈った / 締めた / 長さ\n")
     print("| 問題 | " + " | ".join(cfgs) + " | 暗黙の整数 | 被約費用の行 |")
     print("|---|" + "---|" * (len(cfgs) + 2))
     for p in [p for p in probs if p in hit_i | hit_k]:
-        cells = ["・".join(cell(R.get((p, s), {}).get(c), tl) for s in (0, 1)) for c in cfgs]
+        reps = sorted({k[1] for k in R if k[0] == p})
+        cells = ["・".join(cell(R.get((p, s), {}).get(c), tl) for s in reps) for c in cfgs]
         ci = ck = ""
         for c in cfgs:
-            r1 = next((r for r in rs if r["problem"] == p and r["cfg"] == c and r["seed"] == 1), None)
+            r1 = next((r for r in rs if r["problem"] == p and r["cfg"] == c), None)
             if r1 is None:
                 continue
             imp, kn = counts(r1)
