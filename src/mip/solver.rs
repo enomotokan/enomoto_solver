@@ -7962,7 +7962,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_ROOTLP3` (analysis/rootlp3_20261111.md): 特異な基底は捨てて基底なしの同時実行で解く
         let rootlp3 = self.rootlp3_before(root_kind);
         let xolazy_log = matches!(root_kind, Some(3) | Some(4)) && crate::simplex::mip_lp::xolazy_log();
-        if xolazy_log {
+        // 試作 `ENOMOTO_MIP_IPMRC` の `u` (analysis/ipmrc_20261111.md): 根の LP の同時実行の内点法の双対を被約費用による固定に使う
+        let ipmrc_u = matches!(root_kind, Some(3) | Some(4)) && crate::simplex::mip_lp::ipmrc_has('u');
+        if xolazy_log || ipmrc_u {
             let _ = crate::simplex::mip_lp::take_race_diag();
         }
         let mut root_st = if let Some(st) = self.rootlp3_solve(rootlp3.as_ref()) {
@@ -7973,10 +7975,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() })
         };
         self.rootlp3_after(root_kind, rootlp3, root_st, self.lp.total_iterations() - root_it0, t_root_lp);
+        let race_d = if xolazy_log || ipmrc_u { crate::simplex::mip_lp::take_race_diag() } else { None };
+        if ipmrc_u && root_st == LpStatus::Optimal {
+            self.ipmrc_store(race_d.as_ref());
+        }
         if xolazy_log {
             // 診断 `ENOMOTO_MIP_XOLAZY_LOG` (analysis/xolazy_20261111.md、振る舞いは変えない): 根の LP の同時実行の勝ち負けと
             // 内点法・押し出し・仕上げの時刻 (同時実行の始めから)。`t` は外側の求解の始めからの秒 (根の LP の終わり)
-            let d = crate::simplex::mip_lp::take_race_diag();
+            let d = race_d;
             let o = |v: Option<f64>| v.filter(|v| v.is_finite()).map_or("null".to_string(), |v| format!("{v:.4}"));
             let og = |v: Option<f64>| v.filter(|v| v.is_finite()).map_or("null".to_string(), |v| format!("{v:.6e}"));
             // 内点法が勝ったときは途中の基底・内点法の双対を控える (根の終わりに固定の数を数える、[`super::xolazy`])
@@ -11877,7 +11883,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 根の被約費用と現在の打ち切り値から、大域的に境界を締める。
-    fn root_redcost_fixing(&mut self) {
+    pub(super) fn root_redcost_fixing(&mut self) {
         let Some((z, list)) = self.root_redcost.take() else { return };
         let gap = self.prune_limit() - z;
         if gap.is_finite() && gap >= 0.0 {

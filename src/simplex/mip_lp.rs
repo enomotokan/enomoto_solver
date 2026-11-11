@@ -392,6 +392,13 @@ struct IpmScale {
 
 
 /// 内点法 + クロスオーバーを (`sc` があれば尺度をそろえた写しで) 解き、解 (標準形の構造列の空間) と記録した双対を元の尺度に戻す。
+/// 試作 `ENOMOTO_MIP_IPMRC` (analysis/ipmrc_20261111.md、既定では使わない) に文字 `c` が入っているか。`u`: 根の LP の同時実行で
+/// 内点法の点が手に入ったら、その双対のラグランジュ下界と被約費用を被約費用による固定に使う (`src/mip/xolazy.rs` の
+/// `ipmrc_store`)。`w`: 二段解法が先に最適で終わっても内点法の点が届くまで待つ (採るのは二段解法の結果)
+pub(crate) fn ipmrc_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_IPMRC").is_some_and(|v| v.contains(c))
+}
+
 /// 診断 `ENOMOTO_MIP_XOLAZY_LOG` (analysis/xolazy_20261111.md、振る舞いは変えない) が立っているか
 pub(crate) fn xolazy_log() -> bool {
     env_str!("ENOMOTO_MIP_XOLAZY_LOG").is_some()
@@ -418,6 +425,10 @@ pub struct RaceDiag {
     /// 無限の境界の向きに被約費用がある列があれば `inf`
     pub gap_simplex: Option<f64>,
     pub gap_ipm: Option<f64>,
+    /// 最適な双対 (この LP の双対) のラグランジュ下界と主の目的値の差 (双対の精度と余裕の分)
+    pub gap_opt: Option<f64>,
+    /// 内点法の双対のラグランジュ下界 (元の列の単位の目的値、定数項 `offset` は含まない。浮動小数の誤差の余裕を引いた値)
+    pub lb_ipm: Option<f64>,
     /// 同時実行で共有した下界 (二段解法の途中の基底からの値) の最適値との差
     pub gap_shared: Option<f64>,
     /// 構造列の被約費用 (最小化形): 最適な双対・途中の基底の双対・内点法の双対
@@ -2048,7 +2059,7 @@ impl TwoStageLp {
         type Won = (Vec<f64>, Option<(Vec<f64>, Vec<Option<usize>>)>);
         let (tx, rx) = mpsc::channel::<Option<Won>>();
         // 診断 `ENOMOTO_MIP_XOLAZY_LOG` (振る舞いは変えない): 内点法側の時刻を記録させる
-        let stamp: Option<super::crossover::XoStamp> = xolazy_log().then(Default::default);
+        let stamp: Option<super::crossover::XoStamp> = (xolazy_log() || ipmrc_has('u')).then(Default::default);
         {
             let (std, cancel, bound) = (Arc::new(self.std.clone()), cancel.clone(), bound.clone());
             let sc = self.ipm_scale();
@@ -2093,7 +2104,7 @@ impl TwoStageLp {
         // (押し出しの前の双対) が届くか内点法側が終わるまで待ってから止める (その間に内点法側が頂点で勝っても、二段解法の結果を採る)。
         // 待った時間は [`RaceDiag::t_wait`]
         let mut t_wait = None;
-        if conclusive && !wait_ipm && st == LpStatus::Optimal && stamp.is_some() && env_str!("ENOMOTO_MIP_IPMRC_WAIT").is_some() {
+        if conclusive && !wait_ipm && st == LpStatus::Optimal && stamp.is_some() && (env_str!("ENOMOTO_MIP_IPMRC_WAIT").is_some() || ipmrc_has('w')) {
             let tw = std::time::Instant::now();
             let cap = tunable!("ENOMOTO_T_MIP_IPMRC_WAIT_MAX", 60.0, f64);
             let sp = stamp.as_ref().unwrap();
@@ -2167,7 +2178,10 @@ impl TwoStageLp {
     /// (時刻を測った後に呼ぶ。最適で終わったときだけ)
     fn xolazy_duals(&self, stamp: &super::crossover::XoStamp, y_mid: Option<&[f64]>, shared_lb: &crate::cancel::SharedBound) {
         let n = self.n;
-        let Some((l_opt, d_opt)) = lagrange_std(&self.std, n, &self.y) else { return };
+        let Some((l_opt0, d_opt)) = lagrange_std(&self.std, n, &self.y) else { return };
+        // 下界の差の基準は主の目的値 (標準形の単位、`x' = x - shift`)。最適な双対の `L` を基準にすると、その双対が少しでも
+        // 最適でないとき他の双対の下界を高く見積もる (khb05250 で内点法の下界が LP の値を 0.05 越えて見えた)
+        let l_opt = (0..n).map(|j| self.std.c[j] * (self.x[j] - self.shift[j])).sum::<f64>();
         let y_ipm = stamp.lock().ok().and_then(|mut a| a.y_ipm.take());
         let ls = y_mid.and_then(|y| lagrange_std(&self.std, n, y));
         let li = y_ipm.as_deref().and_then(|y| lagrange_std(&self.std, n, y));
@@ -2177,6 +2191,9 @@ impl TwoStageLp {
                 d.gap_simplex = ls.as_ref().map(|v| l_opt - v.0);
                 d.gap_ipm = li.as_ref().map(|v| l_opt - v.0);
                 d.gap_shared = sh.is_finite().then(|| l_opt - sh);
+                d.gap_opt = Some(l_opt - l_opt0);
+                // 標準形の目的は平行移動した列 `x' = x - shift` のもの: 元の単位は `c·shift` を足す
+                d.lb_ipm = li.as_ref().map(|v| v.0 + (0..n).map(|j| self.std.c[j] * self.shift[j]).sum::<f64>());
                 d.d_opt = Some(d_opt);
                 d.d_simplex = ls.map(|v| v.1);
                 d.d_ipm = li.map(|v| v.1);

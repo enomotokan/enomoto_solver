@@ -34,7 +34,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let d_opt = d.d_opt.as_ref()?;
         let rc = self.lp.reduced_costs();
         let diff = d_opt.iter().zip(&rc).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
-        let mut duals = vec![("opt", 0.0, d_opt.clone())];
+        let mut duals = vec![("opt", d.gap_opt.unwrap_or(0.0), d_opt.clone())];
         if let (Some(g), Some(v)) = (d.gap_simplex, d.d_simplex.as_ref()) {
             duals.push(("simplex", g, v.clone()));
         }
@@ -98,6 +98,65 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let t_wait = s.t_wait.map_or("null".to_string(), |v| format!("{v:.4}"));
         parts.push(format!("\"t_wait\":{t_wait}"));
         format!(",\"newly\":{},\"U\":{},\"z\":{},{}", self.newly_fixed_ints(), num(u), num(s.z), parts.join(","))
+    }
+}
+
+impl<'a, L: MipLp> Solver<'a, L> {
+    /// 試作 `ENOMOTO_MIP_IPMRC` の `u` (analysis/ipmrc_20261111.md): 根の LP の直後、同時実行で内点法の点が手に入っていれば、その双対の
+    /// ラグランジュ下界 `L(y)` と被約費用 `d = c - A^T y` を [`Self::t4_rc_extra`] に足す。以後 [`Self::root_redcost_fixing`] が打ち切り値
+    /// `U` で `L(y) + |d_j| (x_j - 境界) <= U` を満たす範囲に整数列を締める (`TREE4_RCUNION` の根のラウンドの被約費用と同じ形)。
+    ///
+    /// 正しさ: `L(y) = b·y + Σ_j min_{l_j <= x_j <= u_j} d_j x_j` はどの `y` でも LP の (したがって MIP の) 下界で、各項の最小を
+    /// 境界の値に置けば `c·x >= L(y) + d_j (x_j - l_j)` (`d_j > 0`) が LP の境界の中のすべての `x` で成り立つ。内点法の双対は近似なので
+    /// 頂点の双対と違って被約費用の符号が逆の列 (境界の内側) を持つが、それも `L(y)` の中で最小の側の境界に置いて数えている。
+    /// スラック列の符号は射影で合わせ (`lagrange_std`)、浮動小数の和の誤差の余裕を引く。境界の基準は今の大域的な境界 (根の LP の境界と
+    /// 同じか内側なので、上の不等式はそのまま成り立つ)。`L(y)` が LP の値を越えるとき (あり得ない) は使わない
+    pub(super) fn ipmrc_store(&mut self, d: Option<&crate::simplex::mip_lp::RaceDiag>) {
+        if self.params.submip || self.snap.is_some() {
+            return;
+        }
+        let Some(d) = d else { return };
+        let (Some(lb0), Some(dv)) = (d.lb_ipm, d.d_ipm.as_ref()) else { return };
+        let p = self.p;
+        if dv.len() != p.n || !lb0.is_finite() {
+            return;
+        }
+        let lb = lb0 + p.offset;
+        let z = self.lp.objective() + p.offset;
+        if lb > z + 1e-6 * (1.0 + z.abs()) {
+            if self.params.verbose {
+                eprintln!("MIP: IPMRC: the interior-point bound {lb:.10e} exceeds the root LP value {z:.10e}; not used");
+            }
+            return;
+        }
+        let mut v = Vec::new();
+        for j in 0..p.n {
+            if !p.is_int[j] || self.dom.global_lo[j] >= self.dom.global_up[j] {
+                continue;
+            }
+            let dj = dv[j];
+            if dj > 1e-7 && self.dom.global_lo[j].is_finite() {
+                v.push((j, true, dj, self.dom.global_lo[j]));
+            } else if dj < -1e-7 && self.dom.global_up[j].is_finite() {
+                v.push((j, false, dj, self.dom.global_up[j]));
+            }
+        }
+        let fixed0 = self.newly_fixed_ints();
+        let nv = v.len();
+        self.t4_rc_extra.push((lb, v));
+        // 暫定解がもうあれば、すぐ締める (根の被約費用の記録がまだなら次の呼び出しで締まる)
+        if self.root_redcost.is_some() {
+            self.root_redcost_fixing();
+        }
+        if self.params.verbose || crate::simplex::mip_lp::xolazy_log() {
+            eprintln!(
+                "XOLAZY {{\"ev\":\"ipmrc\",\"restarts\":{},\"lb\":{},\"z\":{},\"cols\":{nv},\"fixed_now\":{}}}",
+                self.params.restarts,
+                num(lb),
+                num(z),
+                self.newly_fixed_ints().saturating_sub(fixed0)
+            );
+        }
     }
 }
 
