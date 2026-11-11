@@ -344,4 +344,4 @@ LP の伝播・分枝の側で、それは既存の Proximity Search・`ROOT_OBJ
 - 2026-11-11 に着手 (PDLG、analysis/pdlg_20261111.md)。PDLP の点の相補積のばらつきで最初の歩幅が縮むことは確かめたが、中心化 (案 A・B) は
   反復を減らさず、効くのは正則化の初期値 1e-8。109 問では常用 1.31 倍・振り分けても 1.00〜1.03 倍・失敗時だけの解き直し 1.04 倍 (差し戻し 1 → 0) で、
   既定にしない。試験用 `ENOMOTO_T_PDLP_WARM_CENTER`・`_CSTEPS`・`ENOMOTO_T_XO_PDLP_GATE`・`_MIN_NNZ`・`ENOMOTO_T_XO_IPM_RETRY_PDLP[_ANY]`。
-- 残り: Mittelmann 級の分解の重い問題 (nnz ≥ 5 万 かつ 演算量 / nnz(A) ≥ 200) をスレッド 4 で測る。MIP の根の LP 4 問の比較の残り (opm2-z10-s4・momentum1)。
+- 残り: Mittelmann 級の分解の重い問題 (nnz ≥ 5 万 かつ 演算量 / nnz(A) ≥ 200) をスレッド 4 で測る。MIP の根の LP 4 問 (neos-933966・chromaticindex512-7・opm2-z10-s4・momentum1) では効き目なし (時間の大半はクロスオーバー、momentum1 は PDLP から始めても収束しない)。
