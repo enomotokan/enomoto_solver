@@ -872,6 +872,24 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 試験用 (`ENOMOTO_T_XO_PDLP`): 先に PDLP で近似解を求め、
     //   1: 内点法の近接中心にする、2: 近接中心と初期点にする、3: 内点法を飛ばしてそのままクロスオーバーに渡す。
     let pdlp_mode = tunable!("ENOMOTO_T_XO_PDLP", 0u8, u8);
+    // 試験用 (`ENOMOTO_T_XO_PDLP_GATE=R`、0 で振り分けない。課題 PDLG): 内点法の数値分解の演算量の見積もりが R × nnz(A) 未満なら
+    // PDLP を使わない (PDLP 500 反復の手間は行列とベクトルの積およそ 1000 回で、分解が軽い小さな問題では内点法そのものと同じくらい
+    // かかる)。見積もりのために作った KKT 系は内点法がそのまま使う。
+    let pdlp_gate = tunable!("ENOMOTO_T_XO_PDLP_GATE", 0.0f64, f64);
+    // 試験用 (`ENOMOTO_T_XO_PDLP_MIN_NNZ=k`、0 で使わない): 内点法に渡す行列の非零の数が k 未満なら PDLP を使わない (問題の大きさの下限)。
+    let pdlp_min_nnz = tunable!("ENOMOTO_T_XO_PDLP_MIN_NNZ", 0usize, usize);
+    let pdlp_mode = if pdlp_mode != 0 && pdlp_min_nnz > 0 && a_j.compute_nnz() < pdlp_min_nnz { 0 } else { pdlp_mode };
+    let pdlp_mode = if pdlp_mode != 0 && pdlp_gate > 0.0 && xo.given_point.is_none() {
+        let fl = crate::interior_point::boxed::prebuild_kkt_flops(&a_j).unwrap_or(0.0);
+        let on = fl >= pdlp_gate * a_j.compute_nnz() as f64;
+        crate::phase_timing::record("xo_pdlp_gate_ratio", fl / (a_j.compute_nnz().max(1) as f64));
+        if debug {
+            eprintln!("CROSSOVER pdlp gate: flops {fl:.2e} / nnz(A) {} = {:.1} -> {}", a_j.compute_nnz(), fl / (a_j.compute_nnz().max(1) as f64), if on { "PDLP" } else { "skip" });
+        }
+        if on { pdlp_mode } else { 0 }
+    } else {
+        pdlp_mode
+    };
     // 同時実行の二段解法が共有する下界 (元の問題の単位) を、固定列の分を引いて内点法の問題の単位にする
     // (`ENOMOTO_T_XO_BOUND_GAP`、既定 1e-6 は第 11 回の比較で決めた。0 で使わない)。
     // 費用をずらしたとき (`ENOMOTO_T_IPM_COST_PERTURB`) は元の費用の下界と比べられないので使わない。
@@ -977,6 +995,10 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 theta: tunable!("ENOMOTO_T_PDLP_WARM_THETA", 1e-2, f64),
                 reg0: env_str!("ENOMOTO_T_PDLP_WARM_REG0").and_then(|v| v.parse().ok()),
                 dual_feasible_known: xo.dual_feasible_known,
+                // 同時実行の二段解法が共有する下界での打ち切りは PDLP を使わない経路と同じ (課題 PDLG で足した)。
+                lower_bound: if bound_gap > 0.0 { Some(&lb_fn) } else { None },
+                bound_gap,
+                bound_pres: tunable!("ENOMOTO_T_XO_BOUND_PRES", prm::IPM_ACCEPT_REL, f64),
                 ..Default::default()
             };
             solve_box_lp_warm(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters, Some(&warm))
@@ -985,6 +1007,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 試作 `ENOMOTO_XO_IPM_RETRY_PC=k` (既定 0 = しない。analysis/rootlp_ipm_fail_20261105.md): そろえずに解いた内点法が受理できる点に
     // 達しなければ、行・列をそろえた問題 ([`ipm_prescaled`] の `mode` = k) で一度だけ解き直す。mas74 (MIP の根の LP) は上限 6.4e6 の
     // 列があり、そろえない内点法は相補性 1e-60 でもギャップ 0.25 のまま 172 反復で破綻したが、k = 2・3 なら数ミリ秒で収束した。
+    crate::interior_point::boxed::clear_prebuilt_kkt();
     let retry_pc = if xo.given_point.is_none() && pc.is_none() && pdlp_mode == 0 && cost_perturb == 0.0 { tunable!("ENOMOTO_XO_IPM_RETRY_PC", 0u8, u8) } else { 0 };
     if retry_pc != 0 && !crate::cancel::is_cancelled() && !(xo.dual_feasible_known && ipm.status == Status::Infeasible) {
         let acc_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP_REL", prm::IPM_ACCEPT_GAP_REL, f64);
@@ -1014,6 +1037,41 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             for (v, d) in r.rc.iter_mut().zip(&dc) {
                 *v /= d;
             }
+            r.iters += ipm.iters;
+            ipm = r;
+        }
+    }
+    // 試験用 (`ENOMOTO_T_XO_IPM_RETRY_PDLP=k`、0 でしない。課題 PDLG): 内点法が受理できる点に達しなければ、PDLP を k 反復 (許容 1e-4)
+    // 回してその解を近接中心と初期点にし、正則化の初期値 `ENOMOTO_T_XO_IPM_RETRY_PDLP_REG0` (既定 1e-8) で一度だけ解き直す
+    // (二段解法への差し戻しの代わり。PDLP の解から始めると正則化の初期値 1e-4 の近接項が内点法を PDLP の点へ引き戻して進まず、
+    // 1e-8 から始めると pilot.we は差し戻しなしで 47 反復で収束した)。
+    let retry_pdlp = if xo.given_point.is_none() && pdlp_mode == 0 && cost_perturb == 0.0 { tunable!("ENOMOTO_T_XO_IPM_RETRY_PDLP", 0usize, usize) } else { 0 };
+    if retry_pdlp > 0 && !crate::cancel::is_cancelled() && !(xo.dual_feasible_known && ipm.status == Status::Infeasible) {
+        let acc_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP_REL", prm::IPM_ACCEPT_GAP_REL, f64);
+        let ok = ipm.rel_res.0.max(ipm.rel_res.1) <= prm::IPM_ACCEPT_REL && ipm.rel_res.2 <= acc_gap;
+        // `ENOMOTO_T_XO_IPM_RETRY_PDLP_ANY=1`: 残差で受理できる未収束の点でも解き直す (pilot.we は受理された未収束の点からの頂点が
+        // 主実行不能 371 本でクロスオーバーを諦め、二段解法へ戻っていた)。
+        let any = tunable!("ENOMOTO_T_XO_IPM_RETRY_PDLP_ANY", 0u8, u8) != 0;
+        if ipm.status != Status::Optimal && (any || !(ipm.status == Status::NotSolved && ok)) {
+            if debug {
+                eprintln!("CROSSOVER ipm status={:?} iters={} rel_res={:?}; retrying from a PDLP point ({retry_pdlp} iterations)", ipm.status, ipm.iters, ipm.rel_res);
+            }
+            crate::phase_timing::mark("xo_ipm_retry_pdlp");
+            let opts = PdlpOptions { eps: 1e-4, max_iters: retry_pdlp, time_limit: 1e9, max_restarts: usize::MAX };
+            let pd = solve_pdlp(&a_j, &b_j, &c_j, &l_j, &u_j, &opts);
+            let warm = WarmStart {
+                x: Some(&pd.x),
+                y: Some(xo.dual_center.unwrap_or(&pd.y)),
+                point: true,
+                theta: tunable!("ENOMOTO_T_PDLP_WARM_THETA", 1e-2, f64),
+                reg0: Some(tunable!("ENOMOTO_T_XO_IPM_RETRY_PDLP_REG0", 1e-8f64, f64)),
+                dual_feasible_known: xo.dual_feasible_known,
+                lower_bound: if bound_gap > 0.0 { Some(&lb_fn) } else { None },
+                bound_gap,
+                bound_pres: tunable!("ENOMOTO_T_XO_BOUND_PRES", prm::IPM_ACCEPT_REL, f64),
+                ..Default::default()
+            };
+            let mut r = solve_box_lp_warm(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters, Some(&warm));
             r.iters += ipm.iters;
             ipm = r;
         }

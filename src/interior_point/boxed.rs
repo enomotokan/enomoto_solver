@@ -305,6 +305,25 @@ pub fn solve_box_lp_warm(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]
     r
 }
 
+thread_local! {
+    /// 試験用 (課題 PDLG): [`prebuild_kkt_flops`] が先に作った KKT 系 (行列の値の先頭番地・行数・列数で同じ行列か確かめる)。
+    static PREBUILT_KKT: std::cell::RefCell<Option<(usize, usize, usize, IpmKkt)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 試験用 (課題 PDLG の振り分け): 内点法の KKT 系を先に作って数値分解の演算量の見積もりを返す。作った系は、同じスレッドで
+/// 次に同じ行列 `a` を解く内点法がそのまま使う (記号分解を 2 回しない)。因子が大きすぎれば `None`。
+pub fn prebuild_kkt_flops(a: &FaerCsr) -> Option<f64> {
+    let k = IpmKkt::new(a)?;
+    let fl = k.factor_flops();
+    PREBUILT_KKT.with(|c| *c.borrow_mut() = Some((a.values().as_ptr() as usize, a.nrows(), a.ncols(), k)));
+    Some(fl)
+}
+
+/// [`prebuild_kkt_flops`] で作って使われなかった KKT 系を捨てる (別の行列が同じ番地に来て取り違えないように)。
+pub fn clear_prebuilt_kkt() {
+    PREBUILT_KKT.with(|c| *c.borrow_mut() = None);
+}
+
 /// 診断用: 問題 `(A, b, c, l, u)` を `n p nnz row_ptr col_idx val b c l u` (u64 / f64、リトルエンディアン) で書き出す。
 fn dump_problem(f: &str, a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]) {
     let mut out: Vec<u8> = Vec::new();
@@ -390,7 +409,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     // `Aᵀ` を行圧縮で持ち、`Aᵀ y` を行ごとに並列に計算する (`A` の行圧縮のまま足し込むと逐次: osa-60 は列が 24 万本で
     // `Aᵀ y` が反復の時間の多くを占めた)。
     let at = csr_transpose(a);
-    let Some(mut kkt) = IpmKkt::new(a) else {
+    let prebuilt = PREBUILT_KKT.with(|c| c.borrow_mut().take()).filter(|(ptr, nr, nc, _)| *ptr == a.values().as_ptr() as usize && *nr == a.nrows() && *nc == a.ncols());
+    let Some(mut kkt) = prebuilt.map(|t| t.3).or_else(|| IpmKkt::new(a)) else {
         // 因子が大きすぎる (`MAX_FACTOR_NNZ`): 内点法を諦める。
         if debug {
             eprintln!("IPM factor too large; giving up (setup {:.2}s)", t_kkt.elapsed().as_secs_f64());
@@ -407,10 +427,11 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     };
     if debug {
         eprintln!(
-            "IPM kkt={} nnz(A)={} nnz(L)={} setup={:.2}s",
+            "IPM kkt={} nnz(A)={} nnz(L)={} flops={:.2e} setup={:.2}s",
             if kkt.is_normal() { "normal" } else { "augmented" },
             a.compute_nnz(),
             kkt.factor_nnz(),
+            kkt.factor_flops(),
             t_kkt.elapsed().as_secs_f64()
         );
     }
@@ -576,6 +597,45 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
                         side.s[k] = (-side.sgn * (x[j] - side.bnd[k])).max(w.theta);
                         side.z[k] = side.nu[k].max(w.theta);
                     }
+                }
+                // 試験用 (`ENOMOTO_T_PDLP_WARM_CENTER=κ`、0 でしない。課題 PDLG の案 A): 近似解から作った初期点の相補積
+                // `s z` を [μ/κ, κ μ] に寄せる (分解なし)。小さすぎる積は小さい側 (境界に張り付いた側) を持ち上げ、大きすぎる
+                // 積も小さい側 (下限 θ で持ち上げた、0 に近いはずの乗数・距離) を下げる。両側とも寄せきれなければ両方を
+                // `sqrt(目標)` にする。μ は `ENOMOTO_T_PDLP_WARM_MU` (>0 なら大きさをそろえた後の単位の値) か、相補積の平均
+                // (`ENOMOTO_T_PDLP_WARM_MU_MODE=1` なら幾何平均)。Rothberg (arXiv:2603.03150) の PDHG → 内点法の中心化と同じ考え。
+                let kappa = tunable!("ENOMOTO_T_PDLP_WARM_CENTER", 0.0f64, f64);
+                if kappa > 1.0 {
+                    let mu_c = warm_center_mu(&lo, &up);
+                    let (t_lo, t_hi) = (mu_c / kappa, mu_c * kappa);
+                    let hi_side = tunable!("ENOMOTO_T_PDLP_WARM_CENTER_HI", 1u8, u8) != 0;
+                    for side in [&mut lo, &mut up] {
+                        for k in 0..side.len() {
+                            let (s, z) = (side.s[k], side.z[k]);
+                            let v = s * z;
+                            let t = if v < t_lo {
+                                t_lo
+                            } else if v > t_hi && hi_side {
+                                t_hi
+                            } else {
+                                continue;
+                            };
+                            // 小さい側を動かして積を t にする。小さい側が大きい側を追い越す (または下回るべき大きい側を
+                            // 越える) なら両方を sqrt(t) にする。
+                            let (small_is_s, big) = if s <= z { (true, z) } else { (false, s) };
+                            let ns = t / big;
+                            let (s2, z2) = if (v < t_lo && ns > big) || ns <= 0.0 || !ns.is_finite() {
+                                (t.sqrt(), t.sqrt())
+                            } else if small_is_s {
+                                (ns, big)
+                            } else {
+                                (big, ns)
+                            };
+                            side.s[k] = s2;
+                            side.z[k] = z2;
+                        }
+                    }
+                }
+                for side in [&mut lo, &mut up] {
                     side.nu.copy_from_slice(&side.z);
                 }
             }
@@ -663,6 +723,10 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let infeas_guard = tunable!("ENOMOTO_T_IPM_INFEAS_GUARD", 0.0f64, f64);
     let mut guard_ratio0: Option<f64> = None;
     let mut pushing = false;
+    // 試験用 (`ENOMOTO_T_PDLP_WARM_CSTEPS=k`、0 でしない。課題 PDLG の案 B): 近似解から初期点を作ったとき、最初の k 反復を
+    // 純粋な中心化の Newton 歩 (σ = 1、μ は [`warm_center_mu`] で固定、残差の右辺は 0 で残差は減らさない) にする。
+    let mut center_left = if warm.is_some_and(|w| w.point && w.x.is_some() && w.y.is_some()) { tunable!("ENOMOTO_T_PDLP_WARM_CSTEPS", 0usize, usize) } else { 0 };
+    let center_mu = if center_left > 0 { warm_center_mu(&lo, &up) } else { 0.0 };
     let mut push_it = 0usize;
     let mut push_stall = 0usize;
     let mut push_prev = f64::NAN;
@@ -976,6 +1040,46 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             continue;
         }
 
+        if center_left > 0 {
+            center_left -= 1;
+            let zx = vec![0.0; n];
+            let zy = vec![0.0; p];
+            for side in [&mut lo, &mut up] {
+                side.r_z.iter_mut().for_each(|v| *v = 0.0);
+                side.ds_aff.iter_mut().for_each(|v| *v = 0.0);
+                side.dz_aff.iter_mut().for_each(|v| *v = 0.0);
+                side.set_rs(true, center_mu);
+            }
+            let t_s = std::time::Instant::now();
+            newton(&mut kkt, a, &at, &top, delta, &zx, &zy, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
+            prof.1 += t_s.elapsed().as_secs_f64();
+            if rhs.iter().all(|v| v.is_finite()) {
+                let ap = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
+                let ad = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
+                {
+                    let (dx, dy) = rhs.split_at(n);
+                    x.iter_mut().zip(dx).for_each(|(v, d)| *v += ap * d);
+                    y.iter_mut().zip(dy).for_each(|(v, d)| *v += ad * d);
+                }
+                for side in [&mut lo, &mut up] {
+                    side.set_new(ap, ad);
+                    std::mem::swap(&mut side.s, &mut side.s_new);
+                    std::mem::swap(&mut side.z, &mut side.z_new);
+                }
+                if debug {
+                    let (mut pmin, mut pmax) = (f64::INFINITY, 0.0f64);
+                    for side in [&lo, &up] {
+                        for k in 0..side.len() {
+                            let v = side.s[k] * side.z[k];
+                            pmin = pmin.min(v);
+                            pmax = pmax.max(v);
+                        }
+                    }
+                    eprintln!("IPM it={it} centering step alpha=({ap:.2e},{ad:.2e}) mu_c={center_mu:.2e} min(sz)/mu_c={:.1e} max(sz)/mu_c={:.1e}", pmin / center_mu, pmax / center_mu);
+                }
+            }
+            continue;
+        }
         // 1) 予測子: r_s = -S z
         lo.set_rs(false, 0.0);
         up.set_rs(false, 0.0);
@@ -1410,6 +1514,22 @@ fn init_ipx(
             side.s[k] += xs2;
             side.z[k] += zs2;
         }
+    }
+}
+
+/// 試験用 (課題 PDLG): 近似解から作った初期点を中心化するときの目標 μ。`ENOMOTO_T_PDLP_WARM_MU` (>0) ならその値、
+/// そうでなければ相補積の平均 (`ENOMOTO_T_PDLP_WARM_MU_MODE=1` なら幾何平均)。
+fn warm_center_mu(lo: &Side, up: &Side) -> f64 {
+    let fixed = tunable!("ENOMOTO_T_PDLP_WARM_MU", 0.0f64, f64);
+    if fixed > 0.0 {
+        return fixed;
+    }
+    let nb = (lo.len() + up.len()).max(1) as f64;
+    if tunable!("ENOMOTO_T_PDLP_WARM_MU_MODE", 0u8, u8) == 1 {
+        let sl: f64 = [lo, up].iter().map(|sd| (0..sd.len()).map(|k| (sd.s[k] * sd.z[k]).max(1e-300).ln()).sum::<f64>()).sum();
+        (sl / nb).exp()
+    } else {
+        (dot(&lo.s, &lo.z) + dot(&up.s, &up.z)) / nb
     }
 }
 
