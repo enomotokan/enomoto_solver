@@ -506,6 +506,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 根の LP の目的値と、非基底の構造変数の (列, 下限側か, 被約費用)。暫定解が良くなるたびに
     /// 大域的な被約費用固定に使う。
     pub(super) root_redcost: Option<(f64, Vec<(usize, bool, f64, f64)>)>,
+    /// 試作 `ENOMOTO_MIP_RCSTRONG` の状態 (src/mip/rcstrong.rs)。
+    pub(super) rcs: super::rcstrong::RcsState,
     /// 固定費用ネットワーク型の問題で、木のノードの分離を強めるか ([`Solver::node_cuts_due`]、`ENOMOTO_MIP_FC_NODE_SEP` で使う。評価中)
     pub(super) fc_node_sep: bool,
     /// `ENOMOTO_MIP_FC_NODE_SEP_ADAPT`: [`Self::fc_node_sep`] の毎ノードの分離を、効き目 (分離後の解き直しで LP の値が
@@ -1896,6 +1898,8 @@ impl SnapNode {
 pub(crate) struct WorkPool {
     /// 試作 `ENOMOTO_MIP_NODECNT` の `r`: 根の情報で決めたノードの経路集約の可否 (0 未定、1 使う、2 使わない)。主が決め、従はこれを読む
     pub(super) nc_rdec: std::sync::atomic::AtomicU8,
+    /// 試作 `ENOMOTO_MIP_RCSTRONG` の `k`: 主の根の被約費用の表 (従は写しに持たないので、ここから読む。src/mip/rcstrong.rs)
+    pub(super) rcs_root: super::rcstrong::SharedRoot,
     inner: std::sync::Mutex<PoolInner>,
     /// 止める合図 (主が終わるときに立てる)。
     stop: std::sync::atomic::AtomicBool,
@@ -3169,6 +3173,7 @@ impl WorkPool {
     fn new(threads: usize, lo: Vec<f64>, up: Vec<f64>, pc: Pseudocost) -> Self {
         WorkPool {
             nc_rdec: std::sync::atomic::AtomicU8::new(0),
+            rcs_root: Default::default(),
             learned: std::sync::Mutex::new(Learned::default()),
             next_tid: std::sync::atomic::AtomicU32::new(0),
             threads,
@@ -4405,6 +4410,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         } ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03))
         .max(1),
         root_redcost: None,
+        rcs: Default::default(),
         fc_node_sep: !params.submip
             && (env_str!("ENOMOTO_MIP_FC_NODE_SEP").is_some() || env_str!("ENOMOTO_MIP_FC_NODE_SEP_ADAPT").is_some() || env_str!("ENOMOTO_MIP_FC_NODE_SEP2").is_some())
             && super::separation::fixed_charge_network_for_nodes(p),
@@ -11777,11 +11783,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.dbg_on && self.dbg_contains() {
             self.dbg_local_redcost_check(root_obj);
         }
+        self.rcs_prepare();
         let b = self.lp.basis_ref();
         let d = self.lp.reduced_costs_ref();
         let mut v = Vec::new();
         for j in 0..self.p.n {
-            if !self.p.is_int[j] {
+            // 試作 `ENOMOTO_MIP_RCSTRONG` の `i`・`c`: 暗黙の整数の連続列も入れる (src/mip/rcstrong.rs)
+            if !self.p.is_int[j] && !self.rcs_store_col(j) {
                 continue;
             }
             match b.col[j] {
@@ -11800,10 +11808,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if gap.is_finite() && gap >= 0.0 {
             for &(j, at_lower, d, bound) in &list {
                 // 根の LP で変数がいた境界 `bound` を基準にする: z(x_j) >= z + d (x_j - bound)
+                // (暗黙の整数の連続列は試作 `ENOMOTO_MIP_RCSTRONG` で切り捨てる、src/mip/rcstrong.rs)
                 if at_lower {
-                    self.dom.tighten_global(self.p, j, true, bound + gap / d);
-                } else {
-                    self.dom.tighten_global(self.p, j, false, bound - gap / (-d));
+                    if let Some(v) = self.rcs_root_round(j, true, bound + gap / d) {
+                        self.dom.tighten_global(self.p, j, true, v);
+                    }
+                } else if let Some(v) = self.rcs_root_round(j, false, bound - gap / (-d)) {
+                    self.dom.tighten_global(self.p, j, false, v);
                 }
             }
         }
@@ -12776,6 +12787,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         xp("r_pre");
+        self.rcs_prepare();
         // 診断用 (デバッグ解): このノードがデバッグ解を含むなら、固定の根拠の弱双対の不等式 c x >= z + sum_{非基底 j} d_j (x_j - 境界_j) を
         // デバッグ解で確かめる (破れていれば z・d・境界のどれかが今の LP と食い違っている)
         if self.dbg_on && self.dbg_contains() {
@@ -12797,6 +12809,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             match b.col[j] {
                 VarStatus::Lower if d[j] > 1e-7 => {
                     let v = lo + gap / d[j];
+                    // 試作 `ENOMOTO_MIP_RCSTRONG` の `i`: 暗黙の整数の連続列は切り捨てる (src/mip/rcstrong.rs)
+                    let (v, min_cut) = super::rcstrong::node_round(&self.rcs, j, true, v, lo, up, min_cut).map_or((v, min_cut), |r| (r, 0.0));
                     if !(up - v >= min_cut) {
                         continue;
                     }
@@ -12808,6 +12822,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 VarStatus::Upper if d[j] < -1e-7 => {
                     let v = up - gap / (-d[j]);
+                    let (v, min_cut) = super::rcstrong::node_round(&self.rcs, j, false, v, lo, up, min_cut).map_or((v, min_cut), |r| (r, 0.0));
                     if !(v - lo >= min_cut) {
                         continue;
                     }
@@ -15996,6 +16011,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 伝播する。最小活動量が右辺を超えれば矛盾 (この行を証明として衝突解析する)。そうでなければ各列の境界を
     /// 余裕の分だけ締める (締めた境界は外から来た変更として記録)。矛盾なら偽。
     pub(super) fn propagate_objective(&mut self) -> bool {
+        // 試作 `ENOMOTO_MIP_RCSTRONG` の `k`: 根の被約費用の行も伝播する (src/mip/rcstrong.rs)
+        if !self.rcs_propagate() {
+            return false;
+        }
         // 既定では無効 (`ENOMOTO_MIP_OBJ_PROP` で有効): neos-911970 の下界・暫定解は良くなるが、40 問では 2 回の比較とも
         // わずかに悪化した (sgeomean +0.2〜0.3)
         if env_str!("ENOMOTO_MIP_OBJ_PROP").is_none() {
@@ -16552,7 +16571,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 1 本の行 `sum a_j x_j <= u` を定義域で伝播する ([`Self::propagate_objective_with`] の本体。根のプロービングの
     /// 被約費用の行にも使う)。矛盾なら偽。
-    fn propagate_le_row(&mut self, obj: &[(usize, f64)], u: f64, conflicts: bool) -> bool {
+    pub(super) fn propagate_le_row(&mut self, obj: &[(usize, f64)], u: f64, conflicts: bool) -> bool {
         let p = self.p;
         for _ in 0..3 {
             let mut minact = 0.0f64;

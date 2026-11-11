@@ -59,6 +59,7 @@ pub(crate) mod pretime;
 pub(crate) mod plsb;
 pub(crate) mod prechain;
 pub(crate) mod rootstop;
+pub(crate) mod rcstrong;
 
 use crate::solver::solve_lp;
 use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective, RootSolver, SolveResult, Status, VarType, VariableData};
