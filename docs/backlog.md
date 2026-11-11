@@ -336,4 +336,5 @@ LP の伝播・分枝の側で、それは既存の Proximity Search・`ROOT_OBJ
   satellites2-60-fs の根の LP が 13109 → 6087 反復と変わった。
 - 2026-11-11 に着手 (LUCLOCK、analysis/luclock_20261111.md)。試作 `ENOMOTO_SIMPLEX_LUCLOCK=b` (下界の計算をクロックから外す)・
   `=g` (トリガ (5) を eta の fill の増え方だけで決める)、診断 `ENOMOTO_SIMPLEX_LUCLOCK_LOG`。重い根の LP 11 問では揺れの本体は道そのもの
-  (閾値を ±6% 動かすだけで反復が 2〜20 倍変わる)。58 問は計測中。
+  (閾値を ±6% 動かすだけで反復が 2〜20 倍変わる)。58 問 (87 組の途中) で b +6.2%・g +6.4% と遅めで基準を満たさず、
+  既定にしない。
