@@ -1,5 +1,6 @@
 """CUTMIX (analysis/cutmix_20261111.md) の計測。ソルバーは同時に 1 つ。途中から再開できる。
 使い方: python bench.py OUT.jsonl TL {p58|m47|問題,...} 設定,... 種,...
+分担: python analysis/cutmix_20261111/bench.py --shard K (shards.json の K 番目、結果は <out>_sK.jsonl)
 設定の名前と環境変数は CFG (全部 `ENOMOTO_MIP_LOG=1` で回し、stat の付く設定は `ENOMOTO_MIP_SEPSTAT=1` も)。
 行は benchlib.load で読める形 (cfg, rep = 種)。stderr の CUTMIX・SEPLEARN の行と MIP: の要約の数行は
 logs/<OUT>_<問題>_<設定>_s<種>.txt に残す。"""
@@ -28,45 +29,52 @@ if EXTRA:
     for item in EXTRA.split(";"):
         name, kv = item.split("=", 1)
         CFG[name] = dict(x.split(":", 1) for x in kv.split(","))
-OUT, TL, P, cfgs, seeds = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4].split(","), sys.argv[5].split(",")
-if P == "p58":
-    from probs import PROBS  # noqa: E402
-elif P == "m47":
-    PROBS = M47
+if sys.argv[1] == "--shard":  # 分担 K (shards.json、plan.py) の (問題, 設定, 種) の並びだけ回し、<名前>_sK.jsonl に足す
+    K = int(sys.argv[2]); SH = json.loads((D / "shards.json").read_text())
+    OUT, TL = D / f"{SH['out']}_s{K}.jsonl", str(SH["tl"])
+    for item in SH["extra_cfg"].split(";"):
+        name, kv = item.split("=", 1)
+        CFG[name] = dict(x.split(":", 1) for x in kv.split(","))
+    TASKS = [tuple(t) for t in SH["shards"][K]]
 else:
-    PROBS = P.split(",")
+    OUT, TL, P, cfgs, seeds = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4].split(","), sys.argv[5].split(",")
+    if P == "p58":
+        from probs import PROBS  # noqa: E402
+    elif P == "m47":
+        PROBS = M47
+    else:
+        PROBS = P.split(",")
+    TASKS = [(p, c, int(s)) for s in seeds for i, p in enumerate(PROBS) for c in (cfgs if i % 2 == 0 else cfgs[::-1])]
 done = set()
 if OUT.exists():
     for l in OUT.read_text().splitlines():
         if l.strip():
             r = json.loads(l); done.add((r["problem"], r["cfg"], r["rep"]))
 (D / "logs").mkdir(exist_ok=True)
-for s in seeds:
-    for i, p in enumerate(PROBS):
-        order = cfgs if i % 2 == 0 else cfgs[::-1]
-        for c in order:
-            if (p, c, int(s)) in done:
-                continue
-            mps = rb.fetch(p, WT / ".miplib_cache")
-            env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
-            env.update({"ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_THREADS": "4", "ENOMOTO_T_MIP_SEED": s})
-            env.update(CFG[c])
-            if os.environ.get("CM_PKG"):  # 凍結した拡張のコピー (計測中に作業木を作り直しても混ざらない)
-                env["PYTHONPATH"] = os.environ["CM_PKG"]
-            t0 = time.time()
-            err = ""
-            try:
-                pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", TL, "--threads", env["ENOMOTO_MIP_THREADS"]],
-                                    cwd=WT, env=env, capture_output=True, text=True, timeout=float(TL) + 300)
-                out, err = pr.stdout, pr.stderr
-                res = json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
-            except Exception as e:  # noqa: BLE001
-                res = {"status": "crash", "error": str(e)[-200:]}
-            keep = [l for l in err.splitlines() if l.startswith("SEPLEARN") or l.startswith("CUTMIX") or "node diag" in l or "root bound" in l.lower()
-                    or "cut loop" in l or "clique graph" in l or "clique extension" in l or "restart" in l.lower()[:40]]
-            keep = [l for l in keep if l.startswith(("SEPLEARN", "CUTMIX"))][-2000:] + [l for l in keep if not l.startswith(("SEPLEARN", "CUTMIX"))][-200:]
-            (D / "logs" / f"{OUT.stem}_{p}_{c}_s{s}.txt").write_text("\n".join(keep) + "\n")
-            r = {"problem": p, "cfg": c, "rep": int(s), "result": res, "wall": round(time.time() - t0, 1)}
-            with OUT.open("a") as f:
-                f.write(json.dumps(r) + "\n")
-            print(p, c, s, res.get("status"), res.get("time"), res.get("bound"), res.get("objective"), res.get("nodes"), flush=True)
+for p, c, s in TASKS:
+    s = str(s)
+    if (p, c, int(s)) in done:
+        continue
+    mps = rb.fetch(p, WT / ".miplib_cache")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
+    env.update({"ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_THREADS": "4", "ENOMOTO_T_MIP_SEED": s})
+    env.update(CFG[c])
+    if os.environ.get("CM_PKG"):  # 凍結した拡張のコピー (計測中に作業木を作り直しても混ざらない)
+        env["PYTHONPATH"] = os.environ["CM_PKG"]
+    t0 = time.time()
+    err = ""
+    try:
+        pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", TL, "--threads", env["ENOMOTO_MIP_THREADS"]],
+                            cwd=WT, env=env, capture_output=True, text=True, timeout=float(TL) + 300)
+        out, err = pr.stdout, pr.stderr
+        res = json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
+    except Exception as e:  # noqa: BLE001
+        res = {"status": "crash", "error": str(e)[-200:]}
+    keep = [l for l in err.splitlines() if l.startswith("SEPLEARN") or l.startswith("CUTMIX") or "node diag" in l or "root bound" in l.lower()
+            or "cut loop" in l or "clique graph" in l or "clique extension" in l or "restart" in l.lower()[:40]]
+    keep = [l for l in keep if l.startswith(("SEPLEARN", "CUTMIX"))][-2000:] + [l for l in keep if not l.startswith(("SEPLEARN", "CUTMIX"))][-200:]
+    (D / "logs" / f"{OUT.stem}_{p}_{c}_s{s}.txt").write_text("\n".join(keep) + "\n")
+    r = {"problem": p, "cfg": c, "rep": int(s), "result": res, "wall": round(time.time() - t0, 1)}
+    with OUT.open("a") as f:
+        f.write(json.dumps(r) + "\n")
+    print(p, c, s, res.get("status"), res.get("time"), res.get("bound"), res.get("objective"), res.get("nodes"), flush=True)
