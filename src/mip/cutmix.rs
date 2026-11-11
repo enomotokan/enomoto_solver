@@ -216,7 +216,8 @@ pub(super) fn log_types(p: &MipProblem, x: Option<&[f64]>, restarts: u32, fc: bo
 // - `f`: 根のカット選択の固定費用ネットワーク型の緩め (`fc_relax`: 質の閾値 0.5 → 0、平行度の上限 0.3 → 0.9) を、VUB 行の割合と
 //   VUB を持つ連続列の割合から作る重み w ∈ [0, 1] で連続に変える ([`fc_weight`])。境目から離れた問題では今と同じ
 // - `h`: 固定費用ネットワーク型の 2 択の判定 (根・ノード) にヒステリシスを持たせる ([`fc_hyst`])。一度型と判定したら、再スタートの
-//   後は割合がしきい値から `ENOMOTO_T_CUTMIX_HYST` (0.1) 下がるまで型のまま
+//   後は VUB 行の割合がしきい値から `ENOMOTO_T_CUTMIX_HYST_ROW` (0.5)、VUB を持つ連続列の割合が `ENOMOTO_T_CUTMIX_HYST` (0.1)
+//   下がるまで型のまま
 // - `c`: 持ち上げつきの被覆 (`ENOMOTO_MIP_ROW_LIFTED_COVER` と同じ、元の行 1 本ずつ) を、ナップサック行の割合が
 //   `ENOMOTO_T_CUTMIX_LC_MIN` 以上の問題でだけ使う ([`lifted_cover_on`])
 // - `z`: zero-half (既定で切ってある) を、全部整数で係数が小さい行の割合が `ENOMOTO_T_CUTMIX_ZH_MIN` 以上の問題でだけ使う ([`zh_on`])
@@ -309,8 +310,11 @@ pub(super) fn fc_hyst(raw: bool, row_frac: f64, col_frac: f64, vbrow: f64, vbcol
     let mut st = STATE.lock().unwrap();
     let v = match st.fc_prev[slot] {
         Some(true) if !raw => {
-            let h = tunable!("ENOMOTO_T_CUTMIX_HYST", 0.1, f64);
-            vbrow >= row_frac - h && vbcol >= col_frac - h
+            // 再スタートで 0-1 列が固定されると VUB 行は消えるが流量保存の行は残るので、VUB 行の割合は大きく下がる (h80x6320d:
+            // 0.97 → 0.57、p200x1188c: 0.86 → 0.59 → 0.39 → 0.24)。残る連続列はみな VUB を持つまま (1.0) なので、行の割合の幅は広く取る
+            let hr = tunable!("ENOMOTO_T_CUTMIX_HYST_ROW", 0.5, f64);
+            let hc = tunable!("ENOMOTO_T_CUTMIX_HYST", 0.1, f64);
+            vbrow >= row_frac - hr && vbcol >= col_frac - hc
         }
         _ => raw,
     };
@@ -326,4 +330,17 @@ pub(super) fn lifted_cover_on() -> bool {
 /// `z`: zero-half を使うか (全部整数で係数が絶対値 2 以下の行の割合が `ENOMOTO_T_CUTMIX_ZH_MIN` 以上)
 pub(super) fn zh_on() -> bool {
     has('z') && fracs().is_some_and(|f| f.int_small >= tunable!("ENOMOTO_T_CUTMIX_ZH_MIN", 0.5, f64))
+}
+
+/// 診断 (`ENOMOTO_MIP_LOG` のとき): 衝突グラフの辺のうち、行から作る辺とプロービングの含意だけから来る辺の数を
+/// `CUTMIX clique edges ...` の 1 行で出す (クリーク行の拡張の初め、前処理の後の問題)。行から作る辺は行の伝播で
+/// すでに分かる固定しか生まないので、伝播に衝突グラフを使って増える固定の上限の目安は含意だけの辺の数になる
+pub(super) fn log_clique(p: &MipProblem, binary: &[bool], total_edges: usize) {
+    if env_str!("ENOMOTO_MIP_LOG").is_none() {
+        return;
+    }
+    let g = super::clique::CliqueGraph::build_with(p.n, &p.rows, &p.row_lo, &p.row_up, binary, &p.col_lo, &p.col_up, &[]);
+    let rows = g.num_edges();
+    let nbin = binary.iter().filter(|&&b| b).count();
+    eprintln!("CUTMIX clique edges total {total_edges} rows {rows} implonly {} implpairs {} bin {nbin}", total_edges.saturating_sub(rows), p.conflict_edges.len());
 }

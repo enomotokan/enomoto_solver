@@ -2918,6 +2918,7 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
         }
         return prob;
     };
+    cutmix::log_clique(&prob, &binary, g.num_edges());
     // `ENOMOTO_MIP_CLIQUE_EXTEND_ROWS_FIRST` (試作、既定では使わない): まず行から作る衝突グラフ (プロービングの含意なし) だけで
     // 文字を足し、その後に含意を含むグラフで足せるだけ足す。含意の辺が多いと (mzzv42z は行から 205346 辺、含意から 1186997 本)、
     // 番号順の貪欲が LP に効かない文字を先に取り、行から作る辺だけの拡張 (HiGHS の前処理の clique merging に当たる) を塞ぐ。
