@@ -21,13 +21,13 @@ git commit -m "TREEEFF <SET><K>: 完了 (N 行)"
 git pull --rebase --autostash origin ccr-1beed81b-ex0uhq && git push -u origin ccr-1beed81b-ex0uhq   # 失敗したら間を空けて最大 4 回
 ```
 
-## D: 診断 (600 秒、9 問 × 7 設定 × 種 1・2、126 回、17 分担)
+## D: 診断 (600 秒、9 問 × 8 設定 × 種 1・2、144 回、18 分担)
 
-- コミット: 表の下の「D のコミット」(この shards.md を足したコミット。解く側のソースは既定のまま)。
-- 設定 (`cfg.py`): `def` 既定 / `trf` 木の中の再スタート (force + GUARD kc + RESTART_ROOT_CUTS=1) / `nc` ノードの経路集約 (NODECNT=hr) /
-  `sd` 退化でも強分岐 / `ca` HiGHS 式のカットの年齢 + 木の LP のカットの行の上限 / `all` 4 つ全部 / `highs` HiGHS 1.15.1 (random_seed = 種)。
-- 見積り: 1 分担 0.3〜1.2 時間 (`shards_D.json` の `est_hours`)。
+- コミット: **cf87df31** (解く側のソースは既定のまま)。
+- 設定 (`cfg.py`): `def` 既定 / `trf` 木の中の再スタート (force + GUARD KR) / `nc` ノードの経路集約 (NODECNT=hr) /
+  `sd` 退化でも強分岐 / `ca` HiGHS 式のカットの年齢 + 木の LP のカットの行の上限 / `pl` 下界最小の番に共有の待ち行列も見る (TREE1_POOL) / `all` 5 つ全部 / `highs` HiGHS 1.15.1 (random_seed = 種)。
+- 見積り: 1 分担 0.2〜1.4 時間 (`shards_D.json` の `est_hours`)。
 
 | 分担 | 命令 |
 |---|---|
-| D0〜D16 | `python run.py D 0` 〜 `python run.py D 16` |
+| D0〜D17 | `python run.py D 0` 〜 `python run.py D 17` (18 分担) |
