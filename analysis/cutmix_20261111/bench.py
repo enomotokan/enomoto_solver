@@ -51,6 +51,8 @@ for s in seeds:
             env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
             env.update({"ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_THREADS": "4", "ENOMOTO_T_MIP_SEED": s})
             env.update(CFG[c])
+            if os.environ.get("CM_PKG"):  # 凍結した拡張のコピー (計測中に作業木を作り直しても混ざらない)
+                env["PYTHONPATH"] = os.environ["CM_PKG"]
             t0 = time.time()
             err = ""
             try:

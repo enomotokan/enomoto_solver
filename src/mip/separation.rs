@@ -1057,8 +1057,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 固定費用のネットワーク型か (`root_cut_highs` がループの初めから使うので先に決める。下でも同じ値を入れ直す)
         self.fc_network = !self.params.submip && fixed_charge_network(p);
         // 診断 (analysis/cutmix_20261111.md): 型の割合と 2 択の判定を再スタートごとに出す
-        if !self.params.submip && env_str!("ENOMOTO_MIP_LOG").is_some() {
-            super::cutmix::log_types(p, Some(&self.lp.col_values()), self.params.restarts, self.fc_network, fixed_charge_network_for_nodes(p));
+        if !self.params.submip && super::cutmix::want_root() {
+            super::cutmix::at_root(p, Some(&self.lp.col_values()), self.params.restarts, self.fc_network, fixed_charge_network_for_nodes(p));
         }
         // `ENOMOTO_MIP_CUTSEL_PROBE`: 外側の最初の根では前の求解の選択を消す (0 ラウンド目の比べで決め直す)
         // (試作 `ENOMOTO_MIP_GAP2_PROBE1` では clique の fallback の 2 回目のループで消さない。下の `probe_pending` を参照)
@@ -1317,7 +1317,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // SGM 29.16 -> 27.00、29.09 -> 27.49 (2 回)、解けた問題 9 -> 10。`ENOMOTO_MIP_NO_CUTSEL_FC` で無効
         let fc_net = !self.params.submip && fixed_charge_network(p);
         self.fc_network = fc_net;
-        let fc_relax = env_str!("ENOMOTO_MIP_NO_CUTSEL_FC").is_none() && fc_net;
+        // 試作 `ENOMOTO_MIP_CUTMIX=f` (analysis/cutmix_20261111.md): 緩めの重み (既定では今の 2 択で 1 か 0)
+        let fc_w = super::cutmix::fc_weight(p, fc_net);
+        let fc_relax = env_str!("ENOMOTO_MIP_NO_CUTSEL_FC").is_none() && fc_w > 0.0;
         if fc_relax && self.params.verbose {
             eprintln!("MIP: fixed-charge network structure: relaxed root cut selection");
         }
@@ -2235,6 +2237,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else if let Some(fl) = super::cutsel_ens::flags(self.params.submip).filter(|_| !fc_relax) {
                 // 試作 `ENOMOTO_MIP_CUTSEL_ENS` (既定では使わない): SCIP の cutsel_ensemble の点数・間引き・止め方 ([`super::cutsel_ens`])
                 select_cuts_ens(cands, &forced, max_cuts, p, fl)
+            } else if fc_relax && fc_w < 1.0 {
+                let (mr, mp) = super::cutmix::fc_sel_params(fc_w);
+                select_cuts_hybrid_with(cands, max_cuts, p, mr, mp)
             } else if fc_relax {
                 select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_FC_MIN_REL", 0.0, f64), tunable!("ENOMOTO_T_CUTSEL_FC_MAXPAR", 0.9, f64))
             } else if env_str!("ENOMOTO_MIP_ROOT_CUT_HIGHS").is_some() && self.root_cut_highs() && job.is_none() {
@@ -5315,7 +5320,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some("tree") => light,
             _ => true,
         };
-        let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::zerohalf::zh_trial_used(light)) && zh_where && self.sep_src_on(sepprof::SRC_ZH, light);
+        let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::zerohalf::zh_trial_used(light) || super::cutmix::zh_on()) && zh_where && self.sep_src_on(sepprof::SRC_ZH, light);
         // clique カットの使い方は下の説明を参照
         let clique_on = clique_cuts_mode().is_some_and(|m| !(light && (m == "root" || (m == "fallback" && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && ((m != "auto" && m != "fallback") || self.clique_auto == Some(true)));
         let clique_on = clique_on && self.sep_src_on(sepprof::SRC_CLIQUE, light);
@@ -7106,7 +7111,10 @@ fn fixed_charge_network_with(p: &MipProblem, row_frac: f64) -> bool {
     if env_str!("ENOMOTO_MIP_LOG").is_some() {
         eprintln!("MIP: fixed-charge check: vb rows {nrows} of {}, continuous with vb {ncol} of {ncont}", p.m);
     }
-    nrows as f64 >= row_frac * p.m as f64 && ncol as f64 >= tunable!("ENOMOTO_T_FC_COL_FRAC", 0.9, f64) * ncont as f64
+    let col_frac = tunable!("ENOMOTO_T_FC_COL_FRAC", 0.9, f64);
+    let raw = nrows as f64 >= row_frac * p.m as f64 && ncol as f64 >= col_frac * ncont as f64;
+    // 試作 `ENOMOTO_MIP_CUTMIX=h`: 再スタートでの入れ替わりにヒステリシス (analysis/cutmix_20261111.md)
+    super::cutmix::fc_hyst(raw, row_frac, col_frac, nrows as f64 / p.m as f64, ncol as f64 / ncont as f64)
 }
 
 /// 試作 `ENOMOTO_MIP_NODECNT` の `r`: カットの指紋 (係数・右辺のビットのハッシュ、非零だけ)

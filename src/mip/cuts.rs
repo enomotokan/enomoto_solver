@@ -2879,7 +2879,7 @@ fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
     // (集約行・tableau 行では試さない。どれを残すかは呼び出し側がカットの質で決める)
     // 40 問: 使わない 20 問 28.04、使う 19 問 27.66 (mik-250 53.3 -> 20.7 秒、binkar10_1 28.1 -> 24.5 秒、rout 31.9 秒 -> 時間切れ)。
     // 差はばらつきの範囲なので既定では使わない
-    if env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some() || (ext_cover && env_str!("ENOMOTO_MIP_ROW_LIFTED_COVER").is_some()) {
+    if env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some() || (ext_cover && (env_str!("ENOMOTO_MIP_ROW_LIFTED_COVER").is_some() || super::cutmix::lifted_cover_on())) {
         out.extend(lifted_cover_terms(vars, terms.clone(), beta));
     }
     // δ の探索 (`cmir_terms_multi`) は `ENOMOTO_MIP_CMIR_SEARCH` のときだけ。40 問で、従来 18 問 (sgeomean 28.12) に対し
