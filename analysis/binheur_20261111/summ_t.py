@@ -14,7 +14,8 @@ for l in open(WT / "scripts/miplib2017-v31.solu"):
     if len(t) >= 3 and t[0] in ("=opt=", "=best="):
         SOLU[t[1]] = float(t[2])
 K = json.loads((D / "kinds.json").read_text())
-R = [json.loads(l) for l in (D / "res_t.jsonl").read_text().splitlines() if l.strip()]
+import os
+R = [json.loads(l) for l in (Path(os.environ.get("BINHEUR_OUT", D)) / "res_t.jsonl").read_text().splitlines() if l.strip()]
 def close(a, b): return a is not None and b is not None and abs(a - b) <= 1e-6 * max(1.0, abs(b))
 def pgap(a, b):
     if a is None: return 1.0

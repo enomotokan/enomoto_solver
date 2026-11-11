@@ -11,7 +11,9 @@ K = json.loads((D / "kinds.json").read_text())
 sel = [p for p, v in K.items() if v["bin"] >= 0.9 * v["n"]]
 tasks = [(p, 60, s) for s in (1, 2) for p in sel if K[p]["in58"]] + [(p, 600, 1) for p in sel if K[p]["inres8"] and not K[p]["in58"]]
 tasks += [(p, 600, 1) for p in sel if K[p]["inres8"] and K[p]["in58"]]
-out = D / "res_t.jsonl"
+O = Path(os.environ.get("BINHEUR_OUT", D))  # 計測中は git の外に書き、終わってから戻す
+(O / "logs").mkdir(parents=True, exist_ok=True)
+out = O / "res_t.jsonl"
 done = {(r["problem"], r["tl"], r["seed"]) for r in map(json.loads, out.read_text().splitlines())} if out.exists() else set()
 RE = re.compile(r"MIP: new incumbent (\S+) .*\(([0-9.]+)s\)(?: \[(.*)\])?")
 for p, tl, s in tasks:
@@ -20,7 +22,7 @@ for p, tl, s in tasks:
     mps = rb.fetch(p, WT / ".miplib_cache")
     env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
     env.update({"ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_THREADS": "4", "ENOMOTO_T_MIP_SEED": str(s)})
-    log = D / "logs" / f"{p}_{tl}_s{s}.log"
+    log = O / "logs" / f"{p}_{tl}_s{s}.log"
     with open(log, "w") as ferr:
         try:
             pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", str(tl),
