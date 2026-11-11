@@ -413,6 +413,17 @@ pub struct RaceDiag {
     pub t_xo: Option<f64>,
     /// 同時実行を抜けた時刻 (内点法が勝ったときは頂点を採る・解き直しを含む)
     pub t_end: f64,
+    /// 内点法が勝った (最適で終わった) ときの、ラグランジュ緩和の下界 `L(y)` の最適値との差 (最適な双対の `L` − その双対の `L`、
+    /// 0 以上なら弱い)。`simplex` は止められた二段解法が最後に下界を計算した途中の基底の双対、`ipm` は内点法の双対 (押し出しの前)。
+    /// 無限の境界の向きに被約費用がある列があれば `inf`
+    pub gap_simplex: Option<f64>,
+    pub gap_ipm: Option<f64>,
+    /// 同時実行で共有した下界 (二段解法の途中の基底からの値) の最適値との差
+    pub gap_shared: Option<f64>,
+    /// 構造列の被約費用 (最小化形): 最適な双対・途中の基底の双対・内点法の双対
+    pub d_opt: Option<Vec<f64>>,
+    pub d_simplex: Option<Vec<f64>>,
+    pub d_ipm: Option<Vec<f64>>,
 }
 
 thread_local! {
@@ -427,10 +438,35 @@ pub fn take_race_diag() -> Option<RaceDiag> {
 fn xolazy_record(winner: &'static str, t0: std::time::Instant, stamp: Option<&super::crossover::XoStamp>, t_win: Option<f64>) {
     let Some(stamp) = stamp else { return };
     let t_end = t0.elapsed().as_secs_f64();
-    let a = stamp.lock().map(|a| *a).unwrap_or([None; 3]);
+    let a = stamp.lock().map(|a| a.t).unwrap_or([None; 3]);
     let f = |t: Option<std::time::Instant>| t.map(|t| t.saturating_duration_since(t0).as_secs_f64());
-    let d = RaceDiag { winner, t_win: t_win.unwrap_or(t_end), t_ipm: f(a[0]), t_push: f(a[1]), t_xo: f(a[2]), t_end };
+    let d = RaceDiag { winner, t_win: t_win.unwrap_or(t_end), t_ipm: f(a[0]), t_push: f(a[1]), t_xo: f(a[2]), t_end, ..Default::default() };
     RACE_DIAG.with(|r| *r.borrow_mut() = Some(d));
+}
+
+/// 標準形の行の双対 `y` (どの `y` でもよい) からラグランジュ緩和の下界 `L(y) = b·y + Σ_j min_{l_j <= x_j <= u_j} (c - A^T y)_j x_j`
+/// (標準形の目的の単位) と構造列の被約費用を返す。無限の境界の向きに被約費用がある列があれば `L = -inf`。
+fn lagrange_std(std: &StdForm, n: usize, y: &[f64]) -> Option<(f64, Vec<f64>)> {
+    if y.len() != std.n_rows || y.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let mut lb: f64 = std.b.iter().zip(y).map(|(b, y)| b * y).sum();
+    let mut dn = vec![0.0; n];
+    for j in 0..std.n_total {
+        let mut d = std.c[j];
+        for &(i, a) in std.cols.col(j) {
+            d -= a * y[i];
+        }
+        if j < n {
+            dn[j] = d;
+        }
+        if d > 0.0 {
+            lb += if std.lb[j].is_finite() { d * std.lb[j] } else { f64::NEG_INFINITY };
+        } else if d < 0.0 {
+            lb += if std.ub[j].is_finite() { d * std.ub[j] } else { f64::NEG_INFINITY };
+        }
+    }
+    Some((lb, dn))
 }
 
 fn ipm_crossover_run(std: &StdForm, sc: Option<&IpmScale>) -> Option<super::SimplexResult> {
@@ -2015,10 +2051,14 @@ impl TwoStageLp {
         }
         // 二段解法は 1 スレッドのプールで解く。スレッドごとの設定 (MIP のポートフォリオの設定など) を持ち込み、持ち帰る
         let flags = sid::tl_flags();
-        let (st, flags) = pool_s.install(|| {
+        let shared_lb = bound.clone();
+        let (st, flags, y_mid) = pool_s.install(|| {
             sid::set_tl_flags(flags);
+            let _ = stamp.is_some().then(sid::take_bound_duals);
             let st = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || self.solve_once(lim)));
-            (st, sid::tl_flags())
+            // 診断 `ENOMOTO_MIP_XOLAZY_LOG`: 二段解法が最後に下界を計算した途中の基底の双対
+            let y_mid = stamp.is_some().then(sid::take_bound_duals);
+            (st, sid::tl_flags(), y_mid)
         });
         sid::set_tl_flags(flags);
         let conclusive = matches!(st, LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded | LpStatus::ObjectiveBound | LpStatus::TimeLimit);
@@ -2063,6 +2103,26 @@ impl TwoStageLp {
         let t_won = t0.elapsed().as_secs_f64();
         let st = self.adopt_ipm_vertex(&x, duals, lim, debug, t0);
         xolazy_record(if st == LpStatus::Optimal { "ipm" } else { "ipm_resolve" }, t0, stamp.as_ref(), Some(t_won));
+        if let (Some(stamp), LpStatus::Optimal) = (stamp.as_ref(), st) {
+            // 最適な双対・途中の基底の双対・内点法の双対のラグランジュ下界と被約費用 (時刻を測った後に計算する)
+            let n = self.n;
+            if let Some((l_opt, d_opt)) = lagrange_std(&self.std, n, &self.y) {
+                let y_ipm = stamp.lock().ok().and_then(|mut a| a.y_ipm.take());
+                let ls = y_mid.as_deref().and_then(|y| lagrange_std(&self.std, n, y));
+                let li = y_ipm.as_deref().and_then(|y| lagrange_std(&self.std, n, y));
+                let sh = shared_lb.get();
+                RACE_DIAG.with(|r| {
+                    if let Some(d) = r.borrow_mut().as_mut() {
+                        d.gap_simplex = ls.as_ref().map(|v| l_opt - v.0);
+                        d.gap_ipm = li.as_ref().map(|v| l_opt - v.0);
+                        d.gap_shared = sh.is_finite().then(|| l_opt - sh);
+                        d.d_opt = Some(d_opt);
+                        d.d_simplex = ls.map(|v| v.1);
+                        d.d_ipm = li.map(|v| v.1);
+                    }
+                });
+            }
+        }
         st
     }
 

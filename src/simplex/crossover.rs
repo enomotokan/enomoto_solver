@@ -487,7 +487,14 @@ thread_local! {
 
 /// 診断 `ENOMOTO_MIP_XOLAZY_LOG` (analysis/xolazy_20261111.md) の時刻の記録: (内点法の終わり, 押し出しの終わり = 仕上げの単体法の始め,
 /// 仕上げの終わり)。同時実行の内点法側のスレッドが [`XO_STAMP`] に置き、呼び出し側が勝ち負けの時点で読む (記録するだけ)。
-pub(crate) type XoStamp = std::sync::Arc<std::sync::Mutex<[Option<Instant>; 3]>>;
+/// `y_ipm` は内点法の双対 (標準形の行。押し出しの前の値、双対化しない経路だけ)。
+pub(crate) type XoStamp = std::sync::Arc<std::sync::Mutex<XoStampData>>;
+
+#[derive(Default)]
+pub(crate) struct XoStampData {
+    pub(crate) t: [Option<Instant>; 3],
+    pub(crate) y_ipm: Option<Vec<f64>>,
+}
 
 thread_local! {
     /// [`XoStamp`] の置き場 (このスレッドで解くクロスオーバーの時刻を書く。`None` なら書かない)。
@@ -498,7 +505,7 @@ fn xo_stamp(k: usize) {
     XO_STAMP.with(|s| {
         if let Some(s) = s.borrow().as_ref() {
             if let Ok(mut a) = s.lock() {
-                a[k] = Some(Instant::now());
+                a.t[k] = Some(Instant::now());
             }
         }
     });
@@ -1203,6 +1210,15 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 頂点の採用判定の射影 (`ENOMOTO_T_XO_ACCEPT_PROJ`) で最適分割を推定するのに使う内点法の主の点 (押し出しの前)。
     let x_ipm_saved = (tunable!("ENOMOTO_T_XO_ACCEPT_PROJ", 0u8, u8) != 0).then(|| x.clone());
     let mut y = ipm.y;
+    if xo.given_point.is_none() && !xo.ipm_point_only && y.len() == std.n_rows {
+        XO_STAMP.with(|s| {
+            if let Some(s) = s.borrow().as_ref() {
+                if let Ok(mut a) = s.lock() {
+                    a.y_ipm = Some(y.clone());
+                }
+            }
+        });
+    }
     // 診断用 (`ENOMOTO_DEBUG_XO_POINT_SAVE=ファイル`): 双対化しない問題の内点法の点を書き出す (`ENOMOTO_DEBUG_XO_POINT_LOAD` で読む)。
     if xo.given_point.is_none() && !xo.ipm_point_only {
         if let Some(f) = env_str!("ENOMOTO_DEBUG_XO_POINT_SAVE") {

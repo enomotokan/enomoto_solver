@@ -7972,9 +7972,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 診断 `ENOMOTO_MIP_XOLAZY_LOG` (analysis/xolazy_20261111.md、振る舞いは変えない): 根の LP の同時実行の勝ち負けと
             // 内点法・押し出し・仕上げの時刻 (同時実行の始めから)。`t` は外側の求解の始めからの秒 (根の LP の終わり)
             let d = crate::simplex::mip_lp::take_race_diag();
-            let o = |v: Option<f64>| v.map_or("null".to_string(), |v| format!("{v:.4}"));
+            let o = |v: Option<f64>| v.filter(|v| v.is_finite()).map_or("null".to_string(), |v| format!("{v:.4}"));
+            let og = |v: Option<f64>| v.filter(|v| v.is_finite()).map_or("null".to_string(), |v| format!("{v:.6e}"));
+            // 内点法が勝ったときは途中の基底・内点法の双対を控える (根の終わりに固定の数を数える、[`super::xolazy`])
+            let rc_diff = d.as_ref().and_then(|d| self.xolazy_save(d));
             eprintln!(
-                "XOLAZY {{\"ev\":\"rootlp\",\"kind\":{},\"restarts\":{},\"t\":{:.4},\"secs\":{:.4},\"rows\":{},\"cols\":{},\"st\":\"{root_st:?}\",\"winner\":\"{}\",\"t_win\":{},\"t_ipm\":{},\"t_push\":{},\"t_xo\":{},\"t_end\":{}}}",
+                "XOLAZY {{\"ev\":\"rootlp\",\"kind\":{},\"restarts\":{},\"t\":{:.4},\"secs\":{:.4},\"rows\":{},\"cols\":{},\"st\":\"{root_st:?}\",\"winner\":\"{}\",\"t_win\":{},\"t_ipm\":{},\"t_push\":{},\"t_xo\":{},\"t_end\":{},\"gap_simplex\":{},\"gap_ipm\":{},\"gap_shared\":{},\"rc_diff\":{}}}",
                 root_kind.unwrap_or(0),
                 self.params.restarts,
                 super::outer_elapsed().unwrap_or(f64::NAN),
@@ -7987,6 +7990,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 o(d.as_ref().and_then(|d| d.t_push)),
                 o(d.as_ref().and_then(|d| d.t_xo)),
                 o(d.as_ref().map(|d| d.t_end)),
+                og(d.as_ref().and_then(|d| d.gap_simplex)),
+                og(d.as_ref().and_then(|d| d.gap_ipm)),
+                og(d.as_ref().and_then(|d| d.gap_shared)),
+                og(rc_diff),
             );
         }
         if sing_repair {
@@ -9812,7 +9819,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.tr_qprev = (0.0, 0.0);
         self.tr_rstop = false;
         if crate::simplex::mip_lp::xolazy_log() && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
-            eprintln!("XOLAZY {{\"ev\":\"tree\",\"restarts\":{},\"t\":{:.4}}}", self.params.restarts, super::outer_elapsed().unwrap_or(f64::NAN));
+            eprintln!("XOLAZY {{\"ev\":\"tree\",\"restarts\":{},\"t\":{:.4}{}}}", self.params.restarts, super::outer_elapsed().unwrap_or(f64::NAN), self.xolazy_fix_counts());
         }
         if self.params.verbose && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
             eprintln!("TRSTAT: tree start outer {:.2} solve {:.2} restarts {} lb {:.10e} ub {:.10e}", super::outer_elapsed().unwrap_or(f64::NAN), self.tr_t0, self.params.restarts, self.tr_root_lb, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z));
@@ -17770,7 +17777,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         user_log!("Restart {}: {} of {} integer columns newly fixed at the root ({:.2}s)", params.restarts, newly, nint, self.start.elapsed().as_secs_f64());
         if crate::simplex::mip_lp::xolazy_log() {
-            eprintln!("XOLAZY {{\"ev\":\"restart\",\"restarts\":{},\"t\":{:.4}}}", params.restarts, super::outer_elapsed().unwrap_or(f64::NAN));
+            eprintln!("XOLAZY {{\"ev\":\"restart\",\"restarts\":{},\"t\":{:.4}{}}}", params.restarts, super::outer_elapsed().unwrap_or(f64::NAN), self.xolazy_fix_counts());
         }
         if self.params.verbose {
             eprintln!(
