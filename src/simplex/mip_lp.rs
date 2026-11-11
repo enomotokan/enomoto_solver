@@ -450,6 +450,21 @@ fn lagrange_std(std: &StdForm, n: usize, y: &[f64]) -> Option<(f64, Vec<f64>)> {
     if y.len() != std.n_rows || y.iter().any(|v| !v.is_finite()) {
         return None;
     }
+    // 近似の双対 (内点法) はスラック列 (片側だけ有限の境界) の被約費用の符号がわずかに逆になり `L = -inf` になりやすいので、
+    // スラック列の被約費用が境界の無限の向きに 0 となるよう行の双対を射影する (射影した `y` でも `L(y)` は正しい下界)
+    let mut y = y.to_vec();
+    for j in n..std.n_total {
+        let col = std.cols.col(j);
+        if col.len() != 1 {
+            continue;
+        }
+        let (i, a) = col[0];
+        let d = std.c[j] - a * y[i];
+        if (d > 0.0 && !std.lb[j].is_finite()) || (d < 0.0 && !std.ub[j].is_finite()) {
+            y[i] = std.c[j] / a;
+        }
+    }
+    let y = &y[..];
     let mut lb: f64 = std.b.iter().zip(y).map(|(b, y)| b * y).sum();
     let mut dn = vec![0.0; n];
     for j in 0..std.n_total {
