@@ -1,5 +1,6 @@
 """(2) の分担 K を回す: shards_gap1u.json の K 番目の (問題, 設定, 種) を 4 スレッド・300 秒で 1 回ずつ解き、gap1u_sK.jsonl に足す。
-途中から再開できる。ソルバーは同時に 1 つ。行の形は drcr_20261110/run.py と同じ (+ "shard")。使い方: python run_gap1u.py K"""
+途中から再開できる。ソルバーは同時に 1 つ。行の形は drcr_20261110/run.py と同じ (+ "shard")。使い方: python run_gap1u.py K [表の名前]
+表の名前 (既定 gap1u) を NAME とすると shards_NAME.json を読み、NAME_sK.jsonl に足す (fu58 = 58 問の対の計測、plan_fu58.py)。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -10,9 +11,10 @@ CFGS = {"def": {}, "fu": {"ENOMOTO_MIP_GAP1": "u"},
         "fui": {"ENOMOTO_MIP_GAP1": "u", "ENOMOTO_MIP_FOLD_PROBE_INT": "1"},
         "nfu": {"ENOMOTO_MIP_FOLD": "0", "ENOMOTO_MIP_GAP1": "u"}}
 k = int(sys.argv[1])
-plan = json.loads((D / "shards_gap1u.json").read_text())
+NAME = sys.argv[2] if len(sys.argv) > 2 else "gap1u"
+plan = json.loads((D / f"shards_{NAME}.json").read_text())
 TL = plan["tl"]
-OUT = D / f"gap1u_s{k}.jsonl"
+OUT = D / f"{NAME}_s{k}.jsonl"
 done = set()
 if OUT.exists():
     for l in OUT.read_text().splitlines():
