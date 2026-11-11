@@ -88,6 +88,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nu = a.iter().zip(b).filter(|(x, y)| **x || **y).count();
             parts.push(format!("\"fix_union\":{nu}"));
         }
+        // 実際の固定 (今の大域的な境界) に足される分: その双対で固定できるが、今はまだ固定されていない整数列
+        for nm in ["opt", "ipm", "simplex"] {
+            if let Some(a) = get(nm) {
+                let k = (0..p.n).filter(|&j| a[j] && self.dom.global_lo[j] < self.dom.global_up[j]).count();
+                parts.push(format!("\"fix_{nm}_new\":{k}"));
+            }
+        }
         let t_wait = s.t_wait.map_or("null".to_string(), |v| format!("{v:.4}"));
         parts.push(format!("\"t_wait\":{t_wait}"));
         format!(",\"newly\":{},\"U\":{},\"z\":{},{}", self.newly_fixed_ints(), num(u), num(s.z), parts.join(","))
