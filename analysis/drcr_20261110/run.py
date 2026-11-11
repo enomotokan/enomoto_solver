@@ -21,6 +21,8 @@ CFGS = {
     "fu": {"ENOMOTO_MIP_GAP1": "u"},
     "fui": {"ENOMOTO_MIP_GAP1": "u", "ENOMOTO_MIP_FOLD_PROBE_INT": "1"},
     "nfu": {"ENOMOTO_MIP_FOLD": "0", "ENOMOTO_MIP_GAP1": "u"},
+    "cnt": {"ENOMOTO_MIP_FOLD_COUNT": "1"},
+    "ncnt": {"ENOMOTO_MIP_FOLD": "0", "ENOMOTO_MIP_FOLD_COUNT": "1"},
 }
 SETS = {"@58": P58}
 out, cfgs, seeds, tl = Path(sys.argv[1]), sys.argv[2].split(","), [int(s) for s in sys.argv[3].split(",")], int(sys.argv[4])
@@ -54,7 +56,7 @@ for seed in seeds:
                 r = subprocess.run([sys.executable, str(WT / "scripts" / "run_miplib_benchmark.py"), "--worker-ours", str(mps),
                                     "--time-limit", str(tl), "--threads", "4"], cwd=WT, env=env, capture_output=True, text=True, timeout=tl + 400)
                 res = json.loads([l for l in r.stdout.splitlines() if l.startswith("{")][-1])
-                fold = [l for l in r.stderr.splitlines() if l.startswith("MIP_FOLD")][:6]
+                fold = [l for l in r.stderr.splitlines() if l.startswith("MIP_FOLD")][:40]
             except Exception as e:  # noqa: BLE001
                 res = {"status": "crash", "error": str(e)[:300]}
             with open(out, "a") as f:
