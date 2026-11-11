@@ -14,6 +14,8 @@ CFG = {
     "def": {},
     "s": {"ENOMOTO_MIP_ROOTLP3": "s"},
     "defnb": {"ENOMOTO_MIP_NB_DIAG": "1"},
+    "r3": {"ENOMOTO_MIP_ROOTLP3": "3"},
+    "r3s": {"ENOMOTO_MIP_ROOTLP3": "3s"},
     "snb": {"ENOMOTO_MIP_ROOTLP3": "s", "ENOMOTO_MIP_NB_DIAG": "1"},
 }
 OUT, TL, P, cfgs, seeds = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4].split(","), sys.argv[5].split(",")

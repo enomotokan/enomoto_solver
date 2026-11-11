@@ -75,6 +75,11 @@ pub trait MipLp: Clone + Send {
     fn warm_basis_singular(&self) -> bool {
         false
     }
+    /// 同: 基底からの単体法・全スラック基底からの二段解法・内点法 + クロスオーバーの 3 本同時 ([`TwoStageLp::solve_race3`])。
+    /// 対応しない実装は [`Self::solve`]。
+    fn solve_race3(&mut self, lim: &SolveLimits, _threads: usize) -> LpStatus {
+        self.solve(lim)
+    }
     /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE` ([`TwoStageLp::optface_move`]): 最適面の上の別の最適基底へ移る。対応しない実装は `None`。
     fn optface_move(&mut self, _k: usize, _sample: usize, _mode: char, _seed: u64, _is_int: &[bool], _deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
         None
@@ -228,6 +233,9 @@ forward_impl!(
     },
     fn warm_basis_singular(&self) -> bool {
         TwoStageLp::warm_basis_singular(self)
+    },
+    fn solve_race3(&mut self, lim: &SolveLimits, threads: usize) -> LpStatus {
+        TwoStageLp::solve_race3(self, lim, threads)
     },
     fn optface_move(&mut self, k: usize, sample: usize, mode: char, seed: u64, is_int: &[bool], deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
         TwoStageLp::optface_move(self, k, sample, mode, seed, is_int, deadline)

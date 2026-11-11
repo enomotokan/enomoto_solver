@@ -7956,7 +7956,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 試作 `ENOMOTO_MIP_ROOTLP3` (analysis/rootlp3_20261111.md): 特異な基底は捨てて基底なしの同時実行で解く
         let rootlp3 = self.rootlp3_before(root_kind);
-        let mut root_st = if probe_cols_only_warm && root_kind == Some(4) && (probe_basis_guard_has('r') || probe_basis_guard_has('x')) {
+        let mut root_st = if let Some(st) = self.rootlp3_solve(rootlp3.as_ref()) {
+            st
+        } else if probe_cols_only_warm && root_kind == Some(4) && (probe_basis_guard_has('r') || probe_basis_guard_has('x')) {
             self.probe_basis_guard_solve()
         } else {
             self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() })
