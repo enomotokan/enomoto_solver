@@ -13,6 +13,11 @@ import run_miplib_benchmark as rb  # noqa: E402
 CFGS = {
     "def": {},
     "swap": {"ENOMOTO_MIP_LMIP_SWAP": "1"},
+    # 組み合わせ (RESTCHAIN の ebiR は Local-MIP を根の後も木に入る直前まで延ばす。ROLE_LMIP は木のヒューリスティクス役で回す)
+    "ebiR": {"ENOMOTO_MIP_PRECHAIN": "ebiR"},
+    "ebiRs": {"ENOMOTO_MIP_PRECHAIN": "ebiR", "ENOMOTO_MIP_LMIP_SWAP": "1"},
+    "rl": {"ENOMOTO_MIP_ROLE_LMIP": "1"},
+    "rls": {"ENOMOTO_MIP_ROLE_LMIP": "1", "ENOMOTO_MIP_LMIP_SWAP": "1"},
 }
 # 集合分割の行があって、解を見つける側が遅かった問題 (summ_t60.txt・summ_t600.txt) と air03
 SETS = {"@58": P58, "@hit": ["eil33-2", "nw04", "air03", "bppc4-08", "neos-1456979", "neos-911970", "30n20b8", "fiball", "satellites2-60-fs"]}
