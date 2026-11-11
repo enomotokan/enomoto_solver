@@ -19,3 +19,4 @@ CFGS["ter"] = {"ENOMOTO_MIP_TREEEFF": "r"}         # 判定 (force + KR + 効い
 CFGS["te"] = {"ENOMOTO_MIP_TREEEFF": "rpsh"}       # + 擬似費用・プール・下界の持ち越し + 短い根 (5 ラウンド・軽いヒューリスティクス)
 # 診断の回でだけ足すログ (解き方は変えない)
 LOGENV = {"ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_TREE_RESTART_LOG": "1", "ENOMOTO_MIP_TREE4_TRACE": "10"}
+CFGS["tenc"] = {**CFGS["te"], **NC}                # te + ノードの経路集約
