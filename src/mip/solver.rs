@@ -18424,6 +18424,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.prechain = None;
             return;
         }
+        // `K` (COMP07、analysis/comp07_20261111.md): `R` で根のカットのループの後も続ける連鎖を、主が連鎖 (FJ のスレッド) 以外から暫定解を
+        // 得たら止める (根の RENS などが解を出す問題では、続ける連鎖が裏のカット・サブ MIP と CPU を取り合うだけ。mc11 で根が 2 秒延びた)
+        if super::prechain::has('K') && self.fj_thread.is_none() && self.incumbent.is_some() && !self.inc_only_fj {
+            if self.params.verbose {
+                eprintln!("MIP: PRECHAIN K: stopping the chain (the incumbent is not from the chain) ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+            super::prechain::stop_current();
+            self.prechain = None;
+            return;
+        }
         if let Some((z, x)) = &self.incumbent {
             if *z < self.prechain_posted.0 && x.len() == self.p.n {
                 self.prechain_posted.0 = *z;
@@ -18454,7 +18464,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 super::prechain::stop_current();
             }
             // `R` (RESTCHAIN): 打ち切りを求解の期限まで延ばし、再スタートの判定 (木に入る直前) まで回し続ける
-            if self.prechain.is_some() && super::prechain::has('R') {
+            if self.prechain.is_some() && super::prechain::has('R') && !(super::prechain::has('K') && self.incumbent.is_some() && !self.inc_only_fj) {
                 let far = self.deadline.unwrap_or_else(|| Instant::now() + std::time::Duration::from_secs(1 << 30));
                 super::prechain::extend_to(far);
             }

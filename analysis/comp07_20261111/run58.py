@@ -1,6 +1,7 @@
 """COMP07: 58 問 (analysis/restchain_20261111/jobs58.txt と同じ問題) を、同じビルドの設定どうしで交互に 60 秒・4 スレッドで解き res58.jsonl に足す
 (問題ごとに設定を続けて回す。途中から再開できる)。ログは logs58/ (gzip しない、コミットしない)。
-使い方: python analysis/comp07_20261111/run58.py ビルド 設定,設定 種,種 [分担の数 分担の番号]"""
+使い方: python analysis/comp07_20261111/run58.py ビルド 設定,設定 種,種 [分担の数 分担の番号]
+分担のときは出力を res58_sh<番号>.jsonl に分ける (分担セッションの結果をまとめてコミットしても衝突しない)。"""
 import sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -17,4 +18,4 @@ for s in seeds:
             continue
         rb.fetch(p, D.parents[1] / ".miplib_cache")
         for c in cfgs:
-            R.run(build, c, s, 60, p, out=D / "res58.jsonl", logdir=D / "logs58")
+            R.run(build, c, s, 60, p, out=D / ("res58.jsonl" if nsh == 1 else f"res58_sh{ish}.jsonl"), logdir=D / "logs58")
