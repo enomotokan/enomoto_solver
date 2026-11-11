@@ -16,6 +16,9 @@ thread_local! {
     static CLIQUE_AUTO_FIRST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// `ENOMOTO_MIP_CLIQUE_CUTS=fallback` で clique カットを加えて回す 2 回目のループの中か (時間の上限をループの始めから数える)
     static CLIQUE_FB_SECOND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// [`Solver::probe_cut_mode`] で、目的値が動かないラウンドでも止めずに k ラウンド回すか (試作 `ENOMOTO_MIP_CLIQUE_CUTS=probe` の比べ。
+    /// neos-1456979 はクリークカットを入れても 3 ラウンド目までは目的値が 154 のままで、4 ラウンド目から伸びる)
+    static PROBE_NO_FLAT_STOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `ENOMOTO_MIP_CUT_EXTEND` で根のカットの時間の上限を延ばした後か (延ばした後は面の頂点での分離を止める)
     static CUT_EXTENDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -157,6 +160,8 @@ pub(super) struct ProbeEnd<S> {
     sel: (f64, f64),
     iters: u64,
     rounds: usize,
+    /// 終わりの LP 解の分数の列の数 (試作 `ENOMOTO_MIP_CLIQUE_CUTS=probe` の判定に使う)
+    nfrac: usize,
 }
 
 thread_local! {
@@ -711,6 +716,74 @@ impl<'a, L: MipLp> Solver<'a, L> {
         Some((obj0, obj1, nfrac0, nfrac1, cuts.len()))
     }
 
+    /// 試作 `ENOMOTO_MIP_CLIQUE_CUTS=probe` の判定 (課題 CLIQFB、analysis/cliqfb_20261111.md): 根のカットのループの 0 ラウンド目の始めで、
+    /// クリークカットなし・ありのそれぞれで `ENOMOTO_T_MIP_CLIQUE_PROBE_ROUNDS` (5) ラウンドずつ回し ([`Self::probe_cut_mode`]、選び方は
+    /// カットの選び方の比べの結果に従う。目的値が動かないラウンドでも止めない)、下界の伸び (g0, g1) と時間 (t0, t1) を比べる。使うのは
+    /// g1 - g0 > `ENOMOTO_T_MIP_CLIQUE_PROBE_GAIN` (1e-4) x max(1, |目的値|) かつ時間あたりの伸び g1 / t1 が
+    /// `ENOMOTO_T_MIP_CLIQUE_PROBE_RATE` (1.0) x g0 / t0 以上のとき (時間は下限 `ENOMOTO_T_MIP_CLIQUE_PROBE_TMIN` (0.5 秒) で測る)。どちらの伸びも 1e-9 x max(1, |目的値|) 以下なら、終わりの LP 解の分数の列の数が
+    /// `ENOMOTO_T_MIP_CLIQUE_PROBE_FRAC` (0.9、0 で使わない) 倍以下に減るときも使う (今の fallback の drayage-100-23 の規則と同じ考え)。
+    /// 比べの時間は全体の `ENOMOTO_T_MIP_CLIQUE_PROBE_TIME_FRAC` (0.05) 倍まで。勝った側の終わりの状態 (足したカット・LP の状態) に戻し、
+    /// 負けた側のカットはプールに入れる。(使うか, 勝った側で回ったラウンド数) を返し、`self.clique_auto` を決める
+    fn clique_probe(&mut self) -> (bool, usize) {
+        let t_all = std::time::Instant::now();
+        let k = tunable!("ENOMOTO_T_MIP_CLIQUE_PROBE_ROUNDS", 5usize, usize).max(1);
+        let tfrac = tunable!("ENOMOTO_T_MIP_CLIQUE_PROBE_TIME_FRAC", 0.05, f64);
+        let budget = if tfrac > 0.0 && self.params.time_limit.is_finite() { tfrac * self.params.time_limit } else { f64::INFINITY };
+        let deadline = t_all + std::time::Duration::from_secs_f64(budget.min(1e6));
+        let pool = self.probe_pool_on();
+        let never = |_: usize, _: f64, _: f64| false;
+        let obj = self.lp.objective();
+        let scale = obj.abs().max(1.0);
+        let nfrac_start = self.fractional(&self.lp.col_values()).len();
+        PROBE_NO_FLAT_STOP.with(|c| c.set(true));
+        self.clique_auto = Some(false);
+        let (h0, n0, e0) = self.probe_cut_mode(pool, k, deadline, &never, true);
+        self.clique_auto = Some(true);
+        let (h1, n1, e1) = self.probe_cut_mode(pool, k, deadline, &never, true);
+        PROBE_NO_FLAT_STOP.with(|c| c.set(false));
+        let (g0, t0) = h0.last().copied().unwrap_or((0.0, 0.0));
+        let (g1, t1) = h1.last().copied().unwrap_or((0.0, 0.0));
+        let f0 = e0.as_ref().map_or(nfrac_start, |e| if e.rounds > 0 { e.nfrac } else { nfrac_start });
+        let f1 = e1.as_ref().map_or(nfrac_start, |e| if e.rounds > 0 { e.nfrac } else { nfrac_start });
+        // 時間の下限 `ENOMOTO_T_MIP_CLIQUE_PROBE_TMIN` (0.5 秒): 比べが短い問題では時間の差は誤差なので伸びだけで比べる
+        // (rococoC10-001000: なし 0.10 秒で 15.6%、あり 0.11 秒で 17.0%)
+        let tmin = tunable!("ENOMOTO_T_MIP_CLIQUE_PROBE_TMIN", 0.5, f64).max(1e-3);
+        let rate = |g: f64, t: f64| g.max(0.0) / t.max(tmin);
+        let gain_thr = tunable!("ENOMOTO_T_MIP_CLIQUE_PROBE_GAIN", 1e-4, f64) * scale;
+        let rate_r = tunable!("ENOMOTO_T_MIP_CLIQUE_PROBE_RATE", 1.0, f64);
+        let frac_r = tunable!("ENOMOTO_T_MIP_CLIQUE_PROBE_FRAC", 0.9, f64);
+        let by_gain = g1 - g0 > gain_thr && rate(g1, t1) >= rate_r * rate(g0, t0);
+        let flat = g0 <= 1e-9 * scale && g1 <= 1e-9 * scale;
+        let by_frac = frac_r > 0.0 && flat && (f1 as f64) <= frac_r * f0 as f64 && f1 < f0;
+        let on = by_gain || by_frac;
+        let (win, lose) = if on { (e1, e0) } else { (e0, e1) };
+        if let Some(e) = lose {
+            for (c, _, r) in &e.rows {
+                self.add_to_pool(c, *r);
+            }
+        }
+        let mut nr = 0;
+        if let Some(e) = win {
+            nr = e.rounds;
+            self.probe_restore(e);
+        }
+        self.clique_auto = Some(on);
+        if self.params.verbose {
+            eprintln!(
+                "MIP: clique probe ({k} rounds): without {n0} cuts gain {:.3e} ({t0:.2}s, {} rounds, fractional {f0}), with {n1} cuts gain {:.3e} ({t1:.2}s, {} rounds, fractional {f1}) relative; {} (kept {nr} rounds, LP {:.10e}, probe {:.2}s, {:.2}s)",
+                g0 / scale,
+                h0.len(),
+                g1 / scale,
+                h1.len(),
+                if on { if by_gain { "used" } else { "used (fractional)" } } else { "not used" },
+                self.lp.objective(),
+                t_all.elapsed().as_secs_f64(),
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+        (on, nr)
+    }
+
     /// `ENOMOTO_MIP_CLIQUE_CUTS=fallback` の判定 (試作): 根の切除平面ループを clique カットなしで回し終えた LP で、破れる clique
     /// カットだけを入れた LP の伸び g_c を測り、ループ全体の伸び g_d (clique なしのカットでの伸び) と比べる。
     /// g_c > `ENOMOTO_T_MIP_CLIQUE_FB_GAIN` (既定 1e-4) x max(1, |目的値|) かつ g_c > `ENOMOTO_T_MIP_CLIQUE_FB_RATIO` (既定 0.5) x g_d
@@ -957,7 +1030,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if stop(r, gain, t0.elapsed().as_secs_f64()) {
                 break;
             }
-            if self.lp.objective() <= before + 1e-9 * before.abs().max(1.0) && r > 0 {
+            if self.lp.objective() <= before + 1e-9 * before.abs().max(1.0) && r > 0 && !PROBE_NO_FLAT_STOP.with(|c| c.get()) {
                 break;
             }
         }
@@ -970,6 +1043,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             sel: (self.cutsel_best, self.cutsel_factor),
             iters: self.lp.total_iterations(),
             rounds: hist.len(),
+            nfrac: self.fractional(&self.lp.col_values()).len(),
         });
         let mut remove = vec![false; self.lp.num_rows()];
         for rr in remove.iter_mut().skip(m0) {
@@ -1122,6 +1196,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(v) = CLIQUE_AUTO_FIRST.with(|c| c.get()) {
                 self.clique_auto = Some(v);
                 clique_fb = false;
+            }
+        }
+        // 試作 `probe` (課題 CLIQFB、analysis/cliqfb_20261111.md): ループの始めの比べで判定する ([`Self::clique_probe`])。再スタートの後は最初の判定を引き継ぐ
+        let mut clique_probe_pending = clique_cuts_mode() == Some("probe") && self.clique_auto.is_none() && !self.params.submip;
+        if clique_probe_pending && self.params.restarts > 0 {
+            if let Some(v) = CLIQUE_AUTO_FIRST.with(|c| c.get()) {
+                self.clique_auto = Some(v);
+                clique_probe_pending = false;
             }
         }
         // HiGHS の停滞判定 (`ENOMOTO_MIP_CUT_STALL_HIGHS`, HighsMipSolverData::evaluateRootNode): 最初の LP 解からの
@@ -1891,6 +1973,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     }
                 }
+            }
+            // 試作 `ENOMOTO_MIP_CLIQUE_CUTS=probe` (課題 CLIQFB): 0 ラウンド目の始め (カットの選び方の比べの後) に、クリークカットの
+            // あり・なしで k ラウンドずつ回して比べ、勝った側の終わりの状態からループを続ける ([`Self::clique_probe`])
+            if round == 0 && clique_probe_pending && job.is_none() && self.snap.is_none() && self.cut_cont.is_none() && !self.time_up() {
+                clique_probe_pending = false;
+                let (on, nr) = self.clique_probe();
+                if self.params.restarts == 0 {
+                    CLIQUE_AUTO_FIRST.with(|c| c.set(Some(on)));
+                }
+                round_ctr += nr;
             }
             let now = super::cap_clock();
             let now = if env_str!("ENOMOTO_MIP_SEP_COUNT_CPU").is_some() { now + self.sep_par_cpu } else { now };
@@ -5323,7 +5415,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::zerohalf::zh_trial_used(light) || super::cutmix::zh_on()) && zh_where && self.sep_src_on(sepprof::SRC_ZH, light);
         // clique カットの使い方は下の説明を参照
-        let clique_on = clique_cuts_mode().is_some_and(|m| !(light && (m == "root" || (m == "fallback" && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && ((m != "auto" && m != "fallback") || self.clique_auto == Some(true)));
+        let clique_on = clique_cuts_mode().is_some_and(|m| {
+            let judged = m == "auto" || m == "fallback" || m == "probe";
+            !(light && (m == "root" || ((m == "fallback" || m == "probe") && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && (!judged || self.clique_auto == Some(true))
+        });
         let clique_on = clique_on && self.sep_src_on(sepprof::SRC_CLIQUE, light);
         // `ENOMOTO_MIP_SEP_PARALLEL` (試作、既定では使わない): 根の分離 (木を分け合う前、サブ MIP でない) で、元の行 1 本ずつ・zerohalf・
         // clique の分離を複数のスレッドで行う ([`sep_parallel_parts`])。行は連続した塊に分けて塊の順に、zerohalf・clique はそれぞれ
