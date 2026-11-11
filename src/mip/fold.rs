@@ -236,18 +236,32 @@ pub fn try_fold(p: &MipProblem, verbose: bool) -> Option<MipFold> {
             })
             .collect();
         let keys = int_keys(p, &vr);
+        if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF mip keys {:.3}s", t0.elapsed().as_secs_f64()); }
         let f1 = Fold::build(&fold_in(p, Some(&keys), None), FoldOpts { max_ratio: 1.0, ..opts });
         match f1 {
             None => None,
             Some(f1) => {
+                if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF mip f1 {:.3}s", t0.elapsed().as_secs_f64()); }
                 // 整数の組ごとに打ち消しと TU を確かめる
                 let mut single = vec![false; p.n];
-                let mut acc_cols: Vec<Vec<(usize, f64)>> = Vec::new(); // TU を確かめる行列 (列 → (行, 係数))
-                let mut nrows_m = p.m; // 行 0..m は元の行、m.. は組の和の行
+                // TU を確かめる行列 (列 → (行, 係数)) を行の連結成分ごとに持つ (行 0..m は元の行、m.. は組の和の行)。TU の十分条件
+                // (`simple_tu`: 剥がしと芯の 2 色塗り) は連結成分ごとに閉じているので、新しい組が触れる成分だけを集めて確かめれば、
+                // 全体を確かめるのと同じ答えになる (全体を毎回複写して確かめると組の数の 2 乗の手間になり、neos-631710 で 208 秒かかった)
+                let mut nrows_m = p.m;
+                let mut dsu: Vec<usize> = (0..p.m).collect();
+                let mut comp_cols: std::collections::HashMap<usize, Vec<Vec<(usize, f64)>>> = std::collections::HashMap::new();
+                fn find(d: &mut [usize], mut x: usize) -> usize {
+                    while d[x] != x {
+                        d[x] = d[d[x]];
+                        x = d[x];
+                    }
+                    x
+                }
                 let mut groups: Vec<(usize, Vec<u32>)> = f1.red_members.iter().enumerate().filter(|(q, mem)| f1.red.is_int[*q] && mem.len() > 1).map(|(q, m)| (q, m.clone())).collect();
                 groups.sort_by_key(|g| std::cmp::Reverse(g.1.len()));
                 let (mut ok_g, mut bad_g) = (0usize, 0usize);
-                for (_q, mem) in &groups {
+                // 組ごとに、打ち消しのあと残る行列 S の列 (組の和の行はまだ足さない) と打ち消しの有無。V_R の行が残る組は None
+                let group_s = |mem: &[u32]| -> Option<(bool, Vec<Vec<(usize, f64)>>)> {
                     // 行ごとの組の列の係数 (λ をかけて)
                     let mut by_row: std::collections::HashMap<usize, Vec<f64>> = std::collections::HashMap::new();
                     for (k, &w) in mem.iter().enumerate() {
@@ -258,7 +272,6 @@ pub fn try_fold(p: &MipProblem, verbose: bool) -> Option<MipFold> {
                         }
                     }
                     let mut cancel = false;
-                    let mut good = true;
                     let mut s_cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); mem.len()];
                     let mut rows_sorted: Vec<_> = by_row.into_iter().collect();
                     rows_sorted.sort_by_key(|r| r.0);
@@ -269,8 +282,7 @@ pub fn try_fold(p: &MipProblem, verbose: bool) -> Option<MipFold> {
                             continue;
                         }
                         if vr[i] {
-                            good = false;
-                            break;
+                            return None;
                         }
                         for (k, &v) in vals.iter().enumerate() {
                             if v != 0.0 {
@@ -280,21 +292,101 @@ pub fn try_fold(p: &MipProblem, verbose: bool) -> Option<MipFold> {
                             }
                         }
                     }
+                    Some((cancel, s_cols))
+                };
+                let gdata: Vec<Option<(bool, Vec<Vec<(usize, f64)>>)>> = groups.iter().map(|(_, mem)| group_s(mem)).collect();
+                // 近道: V_R の条件を満たす組を全部並べた行列が TU なら全部認める (TU の十分条件は列を減らしても成り立つので、
+                // 1 組ずつ足していっても全部認められる。結果は 1 組ずつの判定と同じ)
+                let all_ok = {
+                    let mut cols_all: Vec<Vec<(usize, f64)>> = Vec::new();
+                    let mut nr = p.m;
+                    for (g, (_, mem)) in gdata.iter().zip(&groups) {
+                        if let Some((cancel, sc)) = g {
+                            for (k, c) in sc.iter().enumerate() {
+                                let mut c = c.clone();
+                                if *cancel {
+                                    c.push((nr, f1.col_sign[mem[k] as usize]));
+                                }
+                                cols_all.push(c);
+                            }
+                            if *cancel {
+                                nr += 1;
+                            }
+                        }
+                    }
+                    simple_tu(nr, &cols_all)
+                };
+                for ((_q, mem), g) in groups.iter().zip(gdata) {
+                    let (good, cancel, mut s_cols) = match g {
+                        Some((c, sc)) => (true, c, sc),
+                        None => (false, false, Vec::new()),
+                    };
+                    if good && all_ok {
+                        ok_g += 1;
+                        continue;
+                    }
                     if good {
                         if cancel {
                             for (k, &w) in mem.iter().enumerate() {
                                 s_cols[k].push((nrows_m, f1.col_sign[w as usize]));
                             }
                         }
-                        let mut trial = acc_cols.clone();
+                        if cancel {
+                            dsu.push(nrows_m);
+                        }
+                        // 新しい列が触れる行の成分
+                        let mut roots: Vec<usize> = Vec::new();
+                        for c in &s_cols {
+                            for &(i, _) in c {
+                                let r = find(&mut dsu, i);
+                                if !roots.contains(&r) {
+                                    roots.push(r);
+                                }
+                            }
+                        }
+                        // 成分の列と新しい列を集め、行の番号を詰めて確かめる
+                        let mut trial: Vec<Vec<(usize, f64)>> = Vec::new();
+                        for r in &roots {
+                            if let Some(cs) = comp_cols.get(r) {
+                                trial.extend(cs.iter().cloned());
+                            }
+                        }
                         trial.extend(s_cols.iter().cloned());
-                        if simple_tu(nrows_m + usize::from(cancel), &trial) {
-                            acc_cols = trial;
+                        let mut remap: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+                        let local: Vec<Vec<(usize, f64)>> = trial
+                            .iter()
+                            .map(|c| {
+                                c.iter()
+                                    .map(|&(i, a)| {
+                                        let k = remap.len();
+                                        (*remap.entry(i).or_insert(k), a)
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        if simple_tu(remap.len(), &local) {
+                            // 成分をつなぐ
+                            let mut merged: Vec<Vec<(usize, f64)>> = Vec::new();
+                            for r in &roots {
+                                if let Some(cs) = comp_cols.remove(r) {
+                                    merged.extend(cs);
+                                }
+                            }
+                            merged.extend(s_cols);
+                            if let Some(&r0) = roots.first() {
+                                for &r in &roots[1..] {
+                                    dsu[r] = r0;
+                                }
+                                comp_cols.insert(r0, merged);
+                            }
                             if cancel {
                                 nrows_m += 1;
                             }
                             ok_g += 1;
                             continue;
+                        }
+                        if cancel {
+                            dsu.pop();
                         }
                     }
                     bad_g += 1;
@@ -305,6 +397,7 @@ pub fn try_fold(p: &MipProblem, verbose: bool) -> Option<MipFold> {
                 if log {
                     eprintln!("MIP_FOLD: integer groups: {} accepted, {} rejected (V_R rows {})", ok_g, bad_g, vr.iter().filter(|&&b| b).count());
                 }
+                if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF mip groups {:.3}s", t0.elapsed().as_secs_f64()); }
                 Fold::build(&fold_in(p, Some(&keys), Some(&single)), opts)
             }
         }
