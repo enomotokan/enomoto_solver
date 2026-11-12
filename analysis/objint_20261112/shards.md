@@ -37,3 +37,12 @@ git pull --rebase --autostash origin ccr-1beed81b-ex0uhq && git push -u origin c
 | 分担 | 命令 |
 |---|---|
 | T0〜T2 | `python run.py T 0` 〜 `python run.py T 2` |
+
+## Poic: `c` を足した形の 58 問の対 (60 秒、58 問 × 種 1〜3 × {def, oic}、348 回、3 分担)
+
+- **コミット: 5d36cb0b** (上の手順の `<コミット>` をこれに読み替える。`ENOMOTO_MIP_OBJINT` の `c` 入り)。
+- 設定: `def` 既定 / `oic` = `ENOMOTO_MIP_OBJINT=hfc`。見積り 1 分担 約 1.0 時間。
+
+| 分担 | 命令 |
+|---|---|
+| Poic0〜Poic2 | `python run.py Poic 0` 〜 `python run.py Poic 2` |
