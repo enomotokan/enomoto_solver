@@ -65,28 +65,13 @@
 
 ## 課題 PRESOLVE2: 前処理で HiGHS ほど縮まない問題 (2026-11-11 に着手、analysis/presolve2_20261111.md)
 
-- **状態: 規則ごとの差は特定した。既存の試作 3 つ + 新しい試作 `ENOMOTO_MIP_DUALEQ` を 58 問 × 種 1〜3 で測っている途中 (分担 P0〜P5)。既定の候補はまだない。**
-- 差の正体 (事実): kasai = Sparsify (`SPARSIFY_LATE` で 1652 → 1190 行、HiGHS 1206)、rococoC10 = 整数列の Aggregator (`TREE2_INTAGG`、害は既知)、
-  net12 = Enumeration (`HO3_ENUM` で根の LP 68.4 → 128.3)、neos859080 = 双対の議論による行の等式化 (`DUALEQ` で 160 → 120 列。ただし既定で 1.6 秒で解ける)、
-  mzzv11・42z・puriri = Probing (含意を使う伝播の繰り返し + かけ直し。試作を全部入れても mzzv11 7463 行対 5723)。physiciansched6-2・neos-1445765 は差がもうない。
-- 600 秒 (1〜2 回): kasai は spl で種 1 が時間切れ → 450 秒、種 2 は下界のギャップ 0.38% → 0.09%。net12 の enum は下界が上がるが解が悪い、
-  puriri の spl + enum は解なし、mzzv42z は遅い。
-- 次の手 (推測): spl が 58 問で害がなければ候補。mzzv の Probing の差は HiGHS の `HighsCliqueTable` を使う伝播とプロービングの繰り返し
-  (mzzpre_20261024・presolve_gap_20261022) を移す大きな作業で、`PRR_MIN_ROW_FRAC` の判定 (かけ直しで行が 10% 減らなければ捨てる) とも絡む。
-
-## 既定の部品を外す束 prune1112 を次の cand で確かめる (2026-11-12、PRUNE)
-
-- PRUNE (analysis/prune_20261112.md) で既定の部品 12 個を 1 つずつ止めた (58 問 × 種 1・2 × 60 秒)。止めても害がなく、Mittelmann の 10 問 (600 秒) でも
-  害の向きが見えなかった 4 つを束 `prune1112` とする: `ENOMOTO_MIP_SUBFIX=0`・`ENOMOTO_MIP_HNFPRE=0`・`ENOMOTO_MIP_NO_ORBITOPE_TWO_COL=1`・
-  `ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE=1`・`ENOMOTO_MIP_LP_PROBE_FINISH=0`。58 問では単独で −1.7〜−4.9% (区間が 0 をまたぐ)、Mittelmann 10 問では
-  SUBFIX を止めて −15%・残り 3 つで −23% (揺れの大きい neos859080 の分が大きい)。
-- 次の手: 次の束 (cand) に入れて 58 問 × 種 4・47 問 × 600 秒 × 種 2 で確かめる。通ったら既定の値を切に変え、しばらく後に部品のコードを消すか決める。
-- 外さない (効いている): CUT_AGG (止めて +9.7%)・MPSEP (+6.3%)・TAB_NNZ_CBC (+5.0%)。
-- 弱める案 (未着手): SUBFIX を残すなら、根の SUBFIX RENS のサブ MIP に時間の上限を付ける (neos-873061 で 1 回 421 秒。外側の根のサブ MIP は
-  `SUBMIP_HIGHS` の `t` で残り時間を全部もらう)。ROOTCAP の結果 (根を縮めても 600 秒で解ける問題は増えない) から優先度は低い。
-- まだ見ていない部品 (同じ記録の §1 の「次の組の候補」): MUSHAGG・CMIRDELTA・NODELP_PERTURB・S4_RINSRATE・S4_BGZERO・TREE2_FORCEQ・TWOOPT・SHIFT_HEURS・
-  PROBE_EARLY_REPRESOLVE・SUBMIP_OUTCOME_STOP・SYM_SKIP_FIXED・FJ_NOSOL_EXTEND・CUT_STRONG_WIN5・CUT_INTOBJ_STALL・CUTSEL_PROBE など。
-  同じ台本 (analysis/prune_20261112/ の cfg.py に足して plan.py) で回せる。
+- **状態: 規則ごとの差は特定した。新しい試作 `ENOMOTO_MIP_DUALEQ=1` (双対の議論で行を等式にし、縮んだときだけ使う) は 58 問 × 種 4〜6 で
+  +0.1% [−3.4%, +3.2%]・解けた +1・害なしで、次の束 (cand) の候補。既存の `SPARSIFY_LATE`・`HO3_ENUM` は 58 問の害・時間の費用で不採用。**
+- 差の正体 (事実): kasai = Sparsify、rococoC10 = 整数列の Aggregator (`TREE2_INTAGG`、害は既知)、net12 = Enumeration (`HO3_ENUM`)、
+  neos859080 = 行の等式化 (`DUALEQ`)、mzzv11・42z・puriri = Probing (含意を使う伝播の繰り返し + かけ直し。試作を全部入れても mzzv11 7463 行対 5723)。
+- 次の手 (推測): (1) `SPARSIFY_LATE` を「疎化で行が消える (1 列の行になる) ときだけ」に絞れば kasai の効き目を残して air03・nubu・nw04 の害を避けられるかもしれない。
+  (2) `HO3_ENUM` は列挙の時間の上限を小さな問題で縮める (sp150x300d・neos8 の費用)。(3) mzzv の Probing は HiGHS の `HighsCliqueTable` の伝播と
+  繰り返しを移す大きな作業で、`ENOMOTO_T_MIP_PRR_MIN_ROW_FRAC` (かけ直しで行が 10% 減らなければ捨てる) の判定とも絡む。
 
 ## 対称性の検出を前処理の前にし、前処理に対称性を守らせる (2026-11-10 に後回し)
 
