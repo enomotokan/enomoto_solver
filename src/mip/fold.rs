@@ -126,20 +126,17 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                 // (`tu::tu_cols_f64_net`、analysis/drcrtu_20261111.md)。どちらも列を減らしても真のままで、連結成分ごとに閉じている
                 let use_net = fl.contains('n');
                 let net_max: usize = env_str!("ENOMOTO_T_FOLD_NET_MAX").and_then(|v| v.parse().ok()).unwrap_or(2_000_000);
-                // ネットワークの判定に渡す非零の合計の上限 (決定的な仕事量の上限。超えたら 2 色塗りの判定だけに戻す。畳めない問題で
-                // 大きな成分を組ごとに確かめ直す手間が、chromaticindex512-7 で 0.4 → 71 秒になったため)。既定は元の非零の 20 倍 + 100 万
+                // ネットワークの判定に渡す非零の合計の上限 (決定的な仕事量の上限。超えたら残りの組は外す)。既定は元の非零の 0.25 倍 + 200 万
+                // (`ENOMOTO_T_FOLD_NET_WORK` で倍率)。上限なしでは畳めない問題で大きな成分を組ごとに確かめ直す手間が大きく
+                // (chromaticindex1024-7 0.5 → 284 秒、s100 1.7 → 438 秒)、2 倍でも square47 で 18.6 → 35 秒だった。当たる問題の仕事は
+                // widden 100 万・decomp2 400・physiciansched6-2 1500 (analysis/drcrtu_20261111.md)
                 let nnz_p: usize = p.rows.iter().map(|r| r.len()).sum();
-                let net_work_mult: usize = env_str!("ENOMOTO_T_FOLD_NET_WORK").and_then(|v| v.parse().ok()).unwrap_or(20);
-                let net_budget = std::cell::Cell::new(net_work_mult * nnz_p + 1_000_000);
+                let net_work_mult: f64 = env_str!("ENOMOTO_T_FOLD_NET_WORK").and_then(|v| v.parse().ok()).unwrap_or(0.25);
+                let net_budget = std::cell::Cell::new((net_work_mult * nnz_p as f64) as usize + 2_000_000);
                 let net_used = std::cell::Cell::new(0usize);
                 let net_over = std::cell::Cell::new(0usize);
-                let tu_test = |nr: usize, cols: &[Vec<(usize, f64)>]| -> bool {
-                    if super::tu::tu_cols_f64(nr, cols) {
-                        return true;
-                    }
-                    if !use_net {
-                        return false;
-                    }
+                // 2 周目 (`n`) の判定: ネットワーク行列かその転置か (仕事量の上限つき。超えたら偽)
+                let net_test = |nr: usize, cols: &[Vec<(usize, f64)>]| -> bool {
                     let nnz: usize = cols.iter().map(|c| c.len()).sum();
                     if net_used.get() + nnz > net_budget.get() {
                         net_over.set(net_over.get() + 1);
@@ -150,7 +147,7 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                 };
                 let (mut ok_g, mut bad_g) = (0usize, 0usize);
                 // 外した理由の内訳 (V_R の行が残る・S に ±1 でない係数・TU の判定に落ちた) と、TU に落ちた行列の書き出しの数
-                let (mut vr_fail, mut pm1_fail, mut tu_fail, mut n_dump) = (0usize, 0usize, 0usize, 0usize);
+                let (mut vr_fail, mut pm1_fail, mut tu_fail, mut n_dump, mut net_ok) = (0usize, 0usize, 0usize, 0usize, 0usize);
                 // 組ごとに、打ち消しのあと残る行列 S の列 (組の和の行はまだ足さない) と打ち消しの有無。V_R の行が残る組は None
                 let group_s = |mem: &[u32]| -> Option<(bool, Vec<Vec<(usize, f64)>>)> {
                     // 行ごとの組の列の係数 (λ をかけて)
@@ -206,11 +203,15 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                             }
                         }
                     }
-                    tu_test(nr, &cols_all)
+                    super::tu::tu_cols_f64(nr, &cols_all)
                 };
                 if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF mip batch {:.3}s ok {all_ok}", t0.elapsed().as_secs_f64()); }
-                for ((_q, mem), g) in groups.iter().zip(gdata) {
-                    let (good, cancel, mut s_cols) = match g {
+                // 1 周目は今まで通り (剥がしと 2 色塗りの十分条件、組の大きい順)。`n` なら 1 周目に外れた組を同じ順で 2 周目に
+                // ネットワークの判定で確かめ直す (1 周目の結果は `n` なしと同じになり、認める組は増えるだけ。1 周目から一般の判定を
+                // 使うと、早く認めた組の成分が 2 色塗りで分からなくなり、後の組がまとめて外れて s100 で 6289 → 1038 組に減った)
+                let mut queue: Vec<(usize, bool, Vec<Vec<(usize, f64)>>)> = Vec::new();
+                for (gi, ((_q, mem), g)) in groups.iter().zip(gdata).enumerate() {
+                    let (good, cancel, s_cols) = match g {
                         Some((c, sc)) => (true, c, sc),
                         None => (false, false, Vec::new()),
                     };
@@ -218,7 +219,8 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                         ok_g += 1;
                         continue;
                     }
-                    // 近道 (結果は同じ): S に ±1 でない係数があれば TU の十分条件は必ず外れる (`tu::tu_cols_f64` も最初にそれで偽を返す)
+                    // 近道 (結果は同じ): S に ±1 でない係数があれば TU の十分条件は必ず外れる (`tu::tu_cols_f64` も最初にそれで偽を返す。
+                    // ネットワークの判定も ±1 だけ)
                     if !good {
                         vr_fail += 1;
                     }
@@ -226,14 +228,36 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                     if good && !pm1 {
                         pm1_fail += 1;
                     }
-                    let good = good && pm1;
-                    if good {
+                    if good && pm1 {
+                        queue.push((gi, cancel, s_cols));
+                    } else {
+                        bad_g += 1;
+                        for &w in &groups[gi].1 {
+                            single[w as usize] = true;
+                        }
+                    }
+                }
+                for pass in 0..2 {
+                    if pass == 1 && !use_net {
+                        break;
+                    }
+                    for (gi, cancel, mut s_cols) in std::mem::take(&mut queue) {
+                        let mem = &groups[gi].1;
+                        if pass == 1 && net_over.get() > 0 {
+                            // 仕事量の上限に達したら、残りの組は試す行列も作らずに外す (作るだけで成分の大きさの手間がかかり、
+                            // s100 で 1.7 → 19.9 秒になった)
+                            net_over.set(net_over.get() + 1);
+                            tu_fail += 1;
+                            bad_g += 1;
+                            for &w in mem {
+                                single[w as usize] = true;
+                            }
+                            continue;
+                        }
                         if cancel {
                             for (k, &w) in mem.iter().enumerate() {
                                 s_cols[k].push((nrows_m, f1.col_sign[w as usize]));
                             }
-                        }
-                        if cancel {
                             dsu.push(nrows_m);
                         }
                         // 新しい列が触れる行の成分
@@ -267,11 +291,7 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                                     .collect()
                             })
                             .collect();
-                        let tu_ok = tu_test(remap.len(), &local);
-                        if !tu_ok {
-                            tu_fail += 1;
-                            tu_dump(remap.len(), &local, s_cols.len(), &mut n_dump);
-                        }
+                        let tu_ok = if pass == 0 { super::tu::tu_cols_f64(remap.len(), &local) } else { net_test(remap.len(), &local) };
                         if tu_ok {
                             // 成分をつなぐ
                             let mut merged: Vec<Vec<(usize, f64)>> = Vec::new();
@@ -291,20 +311,32 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                                 nrows_m += 1;
                             }
                             ok_g += 1;
+                            if pass == 1 {
+                                net_ok += 1;
+                            }
                             continue;
                         }
                         if cancel {
                             dsu.pop();
+                            for c in s_cols.iter_mut() {
+                                c.pop();
+                            }
                         }
-                    }
-                    bad_g += 1;
-                    for &w in mem {
-                        single[w as usize] = true;
+                        if pass == 0 && use_net {
+                            queue.push((gi, cancel, s_cols));
+                            continue;
+                        }
+                        tu_fail += 1;
+                        tu_dump(remap.len(), &local, mem.len(), &mut n_dump);
+                        bad_g += 1;
+                        for &w in mem {
+                            single[w as usize] = true;
+                        }
                     }
                 }
                 if log {
                     eprintln!(
-                        "MIP_FOLD: integer groups: {} accepted, {} rejected (V_R rows {}; rejected for V_R {}, non-±1 {}, TU {}; net {} work {} over {}, panics {}, cert fails {})",
+                        "MIP_FOLD: integer groups: {} accepted, {} rejected (V_R rows {}; rejected for V_R {}, non-±1 {}, TU {}; net {} accepted by net {} work {} over {}, panics {}, cert fails {})",
                         ok_g,
                         bad_g,
                         vr.iter().filter(|&&b| b).count(),
@@ -312,6 +344,7 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                         pm1_fail,
                         tu_fail,
                         use_net,
+                        net_ok,
                         net_used.get(),
                         net_over.get(),
                         super::network::NET_PANICS.with(|c| c.get()),
