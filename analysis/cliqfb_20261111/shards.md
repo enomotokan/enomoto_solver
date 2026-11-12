@@ -47,3 +47,20 @@ cpr は使わないときに比べの状態を捨てて既定と同じ道筋に�
 | D1 | `CF_LOG=1 CF_LOGDIR=logs600r2 python run.py cq600r2_k1.jsonl cpr 1,2 600 neos-1456979 drayage-25-23` |
 | D2 | `CF_LOG=1 CF_LOGDIR=logs600r2 python run.py cq600r2_k2.jsonl cpr 1,2 600 hypothyroid-k1 neos859080` |
 | D3 | `CF_LOG=1 CF_LOGDIR=logs600r2 python run.py cq600r2_k3.jsonl cpr 1,2 600 30n20b8 net12` |
+
+## E. 58 問 × 種 1〜3 × 60 秒、試作 cpf (`ENOMOTO_MIP_CLIQUE_CUTS=probe_f`) (2026-11-12 に足した、6 分担、それぞれ約 1 時間)
+コミット「CLIQFB: 試作 probe_f を足す」以降でビルドすること。cpf は cpr で使わないときに判定を既定の fallback に任せる (使わない問題の道筋が既定と同じ)。
+| 分担 | 命令 |
+|---|---|
+| E0 | `python run.py p58f_k0.jsonl def,cpf 1,2,3 60 @k0/6` |
+| E1 | `python run.py p58f_k1.jsonl def,cpf 1,2,3 60 @k1/6` |
+| E2 | `python run.py p58f_k2.jsonl def,cpf 1,2,3 60 @k2/6` |
+| E3 | `python run.py p58f_k3.jsonl def,cpf 1,2,3 60 @k3/6` |
+| E4 | `python run.py p58f_k4.jsonl def,cpf 1,2,3 60 @k4/6` |
+| E5 | `python run.py p58f_k5.jsonl def,cpf 1,2,3 60 @k5/6` |
+
+## F. 使わない判定の 4 問 × 種 1・2 × 600 秒、試作 cpf (B の def と比べる、2 分担)
+| 分担 | 命令 |
+|---|---|
+| F0 | `CF_LOG=1 CF_LOGDIR=logs600f python run.py cq600f_k0.jsonl cpf 1,2 600 hypothyroid-k1 neos859080` |
+| F1 | `CF_LOG=1 CF_LOGDIR=logs600f python run.py cq600f_k1.jsonl cpf 1,2 600 30n20b8 net12` |

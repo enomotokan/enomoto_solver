@@ -740,11 +740,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `probe_s` (試作 `probe` の余分を減らす形): (1) 始めの LP 解で破れるクリークカットがなければ比べない (使わない)。(2) 「あり」の側を
         // 先に回し、選ばれたクリークカットが 0 本なら「なし」の側は同じ道筋になるので回さない (その終わりの状態から使わずに続ける)。
         // 58 問の根だけの回では、既定でクリークカットの破れが 0 本の 42 問でも比べを回し、nw04 5.8 秒・mzzv42z 4.7 秒を使っていた
-        let skip = matches!(clique_cuts_mode(), Some("probe_s") | Some("probe_r"));
+        let skip = matches!(clique_cuts_mode(), Some("probe_s") | Some("probe_r") | Some("probe_f"));
         // `probe_r` (`probe_s` に足す形): 使わないと決めたら、どちらの側の状態も捨てて比べの前の状態のまま続け、負けた側のカットもプールに
         // 入れない (既定のループと同じ道筋にする。比べの時間は呼び出し側で時間の上限の起点をずらす)。roll3000 は `probe_s` で使わない判定なのに、
         // 比べの「なし」の側の状態とプールに入れた「あり」の側のカットで道筋が変わり、種 1〜3 とも 23〜33 秒 -> 49〜60 秒に遅くなった
-        let rest = clique_cuts_mode() == Some("probe_r");
+        let rest = matches!(clique_cuts_mode(), Some("probe_r") | Some("probe_f"));
         // `probe_r`: 使わないと決めたら、比べの中で作った衝突グラフも捨てる (グラフは既定でもカットのクリーク拡張 `extend_clique_cuts` が
         // 初めて要るときに、その時の大域的な境界で作る。比べで早く作ると拡張が変わり道筋が変わる。neos859080 は `probe_s` で破れなしの判定なのに
         // 根の下界が 1.87 -> 2 に変わった)
@@ -1258,7 +1258,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         // 試作 `probe` (課題 CLIQFB、analysis/cliqfb_20261111.md): ループの始めの比べで判定する ([`Self::clique_probe`])。再スタートの後は最初の判定を引き継ぐ
-        let mut clique_probe_pending = matches!(clique_cuts_mode(), Some("probe") | Some("probe_s") | Some("probe_r")) && self.clique_auto.is_none() && !self.params.submip;
+        let mut clique_probe_pending = matches!(clique_cuts_mode(), Some("probe") | Some("probe_s") | Some("probe_r") | Some("probe_f")) && self.clique_auto.is_none() && !self.params.submip;
         if clique_probe_pending && self.params.restarts > 0 {
             if let Some(v) = CLIQUE_AUTO_FIRST.with(|c| c.get()) {
                 self.clique_auto = Some(v);
@@ -2044,10 +2044,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let c0 = super::cap_clock();
                 let (on, nr) = self.clique_probe();
                 // `probe_r` で使わない (比べの状態を捨てた) ときは、時間の上限の起点を比べにかかった時間だけ後ろにずらす (比べがなかったのと同じ判定)
-                if !on && nr == 0 && clique_cuts_mode() == Some("probe_r") {
+                if !on && nr == 0 && matches!(clique_cuts_mode(), Some("probe_r") | Some("probe_f")) {
                     cap_base += super::cap_clock() - c0;
                 }
-                if self.params.restarts == 0 {
+                // `probe_f` (`probe_r` に足す形): 使わないと決めたら判定を既定の fallback に任せる (ループの後で [`Self::clique_fallback_trial`])。
+                // 使わない問題の道筋は比べの時間を除いて既定と同じになる (既定の fallback の試しは衝突グラフを作って残すので、`probe_r` の
+                // 「グラフを捨てる」だけでは既定と同じにならない。mas76・rout は `probe_r` の使わない判定で種 1〜3 とも遅かった)
+                if !on && clique_cuts_mode() == Some("probe_f") {
+                    self.clique_auto = None;
+                    clique_fb = true;
+                } else if self.params.restarts == 0 {
                     CLIQUE_AUTO_FIRST.with(|c| c.set(Some(on)));
                 }
                 round_ctr += nr;
@@ -5519,7 +5525,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::zerohalf::zh_trial_used(light) || super::cutmix::zh_on()) && zh_where && self.sep_src_on(sepprof::SRC_ZH, light);
         // clique カットの使い方は下の説明を参照
         let clique_on = clique_cuts_mode().is_some_and(|m| {
-            let probe = m == "probe" || m == "probe_s" || m == "probe_r";
+            let probe = m == "probe" || m == "probe_s" || m == "probe_r" || m == "probe_f";
             let judged = m == "auto" || m == "fallback" || probe;
             !(light && (m == "root" || ((m == "fallback" || probe) && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && (!judged || self.clique_auto == Some(true))
         });
