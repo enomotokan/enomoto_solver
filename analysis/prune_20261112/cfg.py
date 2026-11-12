@@ -15,3 +15,5 @@ LOO = {
     "fjp3off": {"ENOMOTO_MIP_NO_FJ_P3": "1"},               # FJ にだけ前処理をかけ直した問題を渡す (10-21)
 }
 CFGS = {"def": {}, **LOO}
+# 2 段目 (Mittelmann 600 秒): 58 問で止めても害のなかった 4 個のうち、SUBFIX を単独で、残り 3 個 (小さい・中立) を束で止める
+CFGS["prune3"] = {**LOO["hnf0"], **LOO["orbx0"], **LOO["lpfin0"]}
