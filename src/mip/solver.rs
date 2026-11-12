@@ -18876,7 +18876,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// FJ のスレッドの Local-MIP の解だけで、それがまだ下がり続けている (Local-MIP の改善が 2 回以上あり、最後の改善がループの後半) なら、
     /// 根のヒューリスティクスの前に Local-MIP を増やして回す: FJ のスレッドは止めず、スレッド数 − 2 本 (`ENOMOTO_T_MIP_LMBOOST_THREADS`) の
     /// Local-MIP を足し (対称性の行を足す前の問題で、暫定解から種を変えて磨く。スレッドの間で最良の解を分け合う)、主は待って受け取る。
-    /// 下界に届く・`ENOMOTO_T_MIP_LMBOOST_STALL` (0.5) × (根の始めからの秒) (5 秒以上) 改善がない・時間上限の
+    /// 下界に届く・`ENOMOTO_T_MIP_LMBOOST_STALL` (0.5) × (発動した時刻の秒) (2 秒以上) 改善がない・時間上限の
     /// `ENOMOTO_T_MIP_LMBOOST_FRAC` (0.25) を過ぎる、のどれかで止める。前処理の間の連鎖 (`ENOMOTO_MIP_PRECHAIN` の `e`) は使わない。
     /// comp07-2idx (Mittelmann) は根の下界が 6 で、6 を見つけるのは Local-MIP だけ (根のサブ MIP・木は見つけない)
     fn lmip_boost(&mut self) {
@@ -18884,9 +18884,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let t_now = self.start.elapsed().as_secs_f64();
         let imps = self.lmip_imps.len();
         let last = self.lmip_imps.last().copied().unwrap_or(0.0);
-        let ok = self.fj_thread.is_some() && self.inc_only_fj && imps >= 2 && last >= tunable!("ENOMOTO_T_MIP_LMBOOST_RECENT", 0.5, f64) * t_now;
+        // 根の短い問題では、待つ間の主の休みが損になる (58 問の 1 回目の計測で drayage-25-23・p0201・qnet1 などが 5〜10 秒遅れた) ので、根の
+        // カットのループの終わりが `ENOMOTO_T_MIP_LMBOOST_MIN_SECS` (10) 秒以後で、暫定解と根の下界の相対ギャップが
+        // `ENOMOTO_T_MIP_LMBOOST_GAP` (0.1) 以上のときだけ
+        let lpz = self.lp.objective() + self.p.offset;
+        let gap = self.incumbent.as_ref().map_or(0.0, |(z, _)| (z - lpz) / z.abs().max(1.0));
+        let ok = self.fj_thread.is_some()
+            && self.inc_only_fj
+            && imps >= 2
+            && last >= tunable!("ENOMOTO_T_MIP_LMBOOST_RECENT", 0.5, f64) * t_now
+            && t_now >= tunable!("ENOMOTO_T_MIP_LMBOOST_MIN_SECS", 10.0, f64)
+            && gap >= tunable!("ENOMOTO_T_MIP_LMBOOST_GAP", 0.1, f64);
         if self.params.verbose {
-            eprintln!("MIP: LMBOOST: {} (Local-MIP improvements {imps}, last at {last:.2}s, incumbent only from the FJ thread {}, {t_now:.2}s)", if ok { "boosting" } else { "not used" }, self.inc_only_fj);
+            eprintln!("MIP: LMBOOST: {} (Local-MIP improvements {imps}, last at {last:.2}s, incumbent only from the FJ thread {}, gap {gap:.3}, {t_now:.2}s)", if ok { "boosting" } else { "not used" }, self.inc_only_fj);
         }
         if !ok {
             return;
@@ -18958,7 +18968,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.time_up() || self.start.elapsed().as_secs_f64() >= cap {
                 break "time cap";
             }
-            if last_imp.elapsed().as_secs_f64() >= (stall_k * self.start.elapsed().as_secs_f64()).max(5.0) {
+            if last_imp.elapsed().as_secs_f64() >= (stall_k * t_now).max(2.0) {
                 break "stalled";
             }
             if !self.inc_only_fj {

@@ -16,6 +16,7 @@ CFGS = {
     "ebi": {"ENOMOTO_MIP_PRECHAIN": "ebi"},                      # PRECHAIN: 前処理の間から FJ・Local-MIP (根のカットのループの終わりまで)
     "ebiRK": {"ENOMOTO_MIP_PRECHAIN": "ebiRK"},                  # COMP07 の試作: R の延長を、主の暫定解が連鎖の解だけの間に限る
     "lmboost": {"ENOMOTO_MIP_LMBOOST": "1"},                     # COMP07 の試作: 根の後だけ Local-MIP を増やす (主の暫定解が Local-MIP の解だけで下がり続けるとき)
+    "lmboost2": {"ENOMOTO_MIP_LMBOOST": "1"},                    # LMBOOST の 2 版 (根のカットのループの終わりが 10 秒以後・ギャップ 0.1 以上だけ、停滞は発動の時刻に比例)。ビルド lb2
     "fjkeep": {"ENOMOTO_MIP_FJKEEP": "1"},                       # COMP07 の試作: 根の FJ のスレッドを根のヒューリスティクスの終わりまで続ける
     "pre": dict(PRE, ENOMOTO_MIP_FOLD="0", ENOMOTO_MIP_SYMDYN="0"),  # 今のコードで res6 の既定に寄せた形
 }
