@@ -1,13 +1,13 @@
 # OBJINT の計測の分担 (手順)
 
-どの分担も、同じブランチ `ccr-1beed81b-ex0uhq` の **コミット 1de6b977** をビルドして回す (`ENOMOTO_MIP_OBJINT` の試作入り。既定の動きは変わらない)。
+どの分担も、同じブランチ `ccr-1beed81b-ex0uhq` の **コミット 693301c3** をビルドして回す (`ENOMOTO_MIP_OBJINT` の試作入り。既定の動きは変わらない)。
 ソルバーは 1 つの機械で同時に 1 つ (4 スレッド)。計測中はチェックアウトを動かさない。
 
 ## 手順 (1 分担 = 1 セッション、約 1〜1.5 時間)
 
 ```sh
 cd <リポジトリの根>
-git fetch origin ccr-1beed81b-ex0uhq && git checkout 1de6b977
+git fetch origin ccr-1beed81b-ex0uhq && git checkout 693301c3
 sh analysis/objint_20261112/build.sh                                 # "installed" と出れば良い (maturin・highspy==1.15.1 を入れてビルド)
 cd analysis/objint_20261112
 python run.py <SET> <K>                                              # 途中で切れても同じ命令で続きから回る
