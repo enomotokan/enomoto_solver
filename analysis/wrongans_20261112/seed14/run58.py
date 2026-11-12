@@ -1,7 +1,8 @@
 """58 問 (analysis/cbcimpl_20261029/probs.py) を 4 スレッド・60 秒で、def (今の既定) と old (直す前: ENOMOTO_PRESOLVE_SLACK_COL_RANGE=0・
 ENOMOTO_MIP_RESOLVE_SYM_RESET=0) を種 (ENOMOTO_T_MIP_SEED) ごとに 1 回ずつ解き、res58.jsonl に足す (2026-11-12)。問題ごとに設定の順を入れ替える。
 ENOMOTO_ の環境変数は消してから与える。ENOMOTO_DEBUG_SLACK_COL=1 で、区間の空な行の組で列を残した回数・前処理なしの解き直しの回数も数える。
-途中から再開できる。使い方: python run58.py 種 [種 ...]"""
+途中から再開できる。使い方: python run58.py 種 [種 ...]
+RUN58_OUT (出力の名前)・RUN58_PROBS (カンマ区切りの問題) で一部だけ回し直せる (並走のない状態での回し直しに使った)"""
 import json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -9,7 +10,9 @@ WT = D.parents[2]
 sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
 CFGS = {"def": {}, "old": {"ENOMOTO_PRESOLVE_SLACK_COL_RANGE": "0", "ENOMOTO_MIP_RESOLVE_SYM_RESET": "0"}}
-OUT = D / "res58.jsonl"
+OUT = D / os.environ.get("RUN58_OUT", "res58.jsonl")
+if os.environ.get("RUN58_PROBS"):
+    PROBS = os.environ["RUN58_PROBS"].split(",")
 done = set()
 if OUT.exists():
     for l in OUT.read_text().splitlines():
