@@ -2406,6 +2406,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 chosen
             };
             let mut chosen = chosen;
+            // 試作 `ENOMOTO_MIP_ROOTCAP` の `d` ([`super::solver::rootcap`]): 根の LP が重い (根の LP の秒 (前処理の LP の最初の LP を含む) が
+            // `ENOMOTO_T_MIP_ROOTCAP_DENSE_LP` (2 秒) 以上) 外側の根のカットのループ (裏のカットの写しも) では、1 ラウンドに足すカットの非零の和を
+            // max(`ENOMOTO_T_MIP_ROOTCAP_DENSE_FRAC` (0.05) x 元の行列の非零, 1000) までにする (選んだ順に、最初の 1 本は必ず残す)。
+            // neos-873061 はカットの行の平均非零が 2700〜4400 (元の行は 3.8) で、1 ラウンドの LP が 17〜37 秒かかっていた
+            if super::solver::rootcap('d') && !self.params.submip && chosen.len() > 1 {
+                let t_lp = self.root_lp_secs.max(f64::from_bits(super::solver::ROOTCAP_PROBE_SECS.load(std::sync::atomic::Ordering::Relaxed)));
+                if t_lp >= tunable!("ENOMOTO_T_MIP_ROOTCAP_DENSE_LP", 2.0, f64) {
+                    let cap = (tunable!("ENOMOTO_T_MIP_ROOTCAP_DENSE_FRAC", 0.05, f64) * p.nnz as f64).max(1000.0);
+                    let n0 = chosen.len();
+                    let nnz0: usize = chosen.iter().map(|c| c.coefs.len()).sum();
+                    let mut acc = 0usize;
+                    let mut k = 0usize;
+                    chosen.retain(|c| {
+                        let keep = k == 0 || (acc + c.coefs.len()) as f64 <= cap;
+                        k += 1;
+                        if keep {
+                            acc += c.coefs.len();
+                        }
+                        keep
+                    });
+                    if self.params.verbose && chosen.len() < n0 {
+                        eprintln!("MIP: cut round {round}: ROOTCAP d: kept {} of {n0} cuts (nonzeros {acc} of {nnz0}, cap {cap:.0}){}", chosen.len(), if job.is_some() { " (background)" } else { "" });
+                    }
+                }
+            }
             if !quota_cuts.is_empty() {
                 if self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_AGG_QUOTA").is_some() {
                     eprintln!("MIP: cut round {round}: {} cuts by the aggregation quota, {} by the selection", quota_cuts.len(), chosen.len());

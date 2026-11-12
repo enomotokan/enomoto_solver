@@ -1530,6 +1530,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             time_limit
         };
+        // 試作 `ENOMOTO_MIP_ROOTCAP` の `h` ([`super::solver::rootcap`]): 外側の根のヒューリスティクスの間は、1 本の上限と全体の期限までにする
+        let time_limit = match self.rootcap_left().filter(|_| !self.params.submip && self.snap.is_none() && self.nodes <= 1) {
+            Some(l) => time_limit.min(l.max(0.05)),
+            None => time_limit,
+        };
         (time_limit, nosol)
     }
 

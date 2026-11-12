@@ -29,6 +29,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(d) = self.deadline {
             budget = budget.min(0.5 * d.saturating_duration_since(Instant::now()).as_secs_f64());
         }
+        // 試作 `ENOMOTO_MIP_ROOTCAP` の `h`: 根のヒューリスティクスの 1 本の上限と全体の期限まで
+        if let Some(l) = self.rootcap_left() {
+            budget = budget.min(l);
+        }
         if budget <= 0.01 {
             return false;
         }

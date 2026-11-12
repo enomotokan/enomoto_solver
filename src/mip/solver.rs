@@ -146,6 +146,17 @@ fn restart_light_heurs() -> bool {
 }
 
 /// 安い根のヒューリスティクス (LP 解の丸めと自明な解・shift-and-propagate。サブ MIP・ダイビング・局所探索・内点法を使わないもの)。
+/// 試作 `ENOMOTO_MIP_ROOTCAP` の `h` ([`rootcap`]): 根のヒューリスティクスの全体の期限を過ぎたら飛ばす重いもの (ほかは 1 本の下限の秒
+/// `rootcap_late` までで回す。neos-3216931-puriri では期限の後の locks が 7.7 秒で唯一の暫定解を出していた)
+fn rootcap_heavy(name: &str) -> bool {
+    name == "feasibility pump"
+        || name.ends_with("diving")
+        || name.starts_with("RINS")
+        || name.starts_with("RENS (more")
+        || name.starts_with("RENS (wide")
+        || matches!(name, "local search" | "repair" | "interior rounding" | "objective support" | "root Local-MIP" | "local branching 2" | "proximity 2" | "min relaxation")
+}
+
 fn light_root_heur(name: &str) -> bool {
     matches!(name, "trivial" | "simple rounding" | "ZI round" | "randomized rounding" | "shift-and-propagate")
 }
@@ -681,6 +692,13 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) heur_label: &'static str,
     /// 根のヒューリスティクス 1 回の時間の上限 (`ENOMOTO_T_MIP_ROOT_DIVE_TIME_FRAC`。[`Solver::time_up`] が見る)
     pub(super) heur_stop: Option<Instant>,
+    /// 試作 `ENOMOTO_MIP_ROOTCAP` の `h` ([`rootcap`]): 根のヒューリスティクス全体の期限と 1 本の上限の秒 (外側の根のヒューリスティクスの間だけ)
+    pub(super) rootcap_until: Option<Instant>,
+    pub(super) rootcap_each: f64,
+    /// [`rootcap`] の `h`: 全体の期限の後も回す安いヒューリスティクス 1 本の上限の秒
+    pub(super) rootcap_late: f64,
+    /// [`rootcap`] の `w`: 根のヒューリスティクスの終わりに残っていた期限 (裏のカットを待つ上限に使う)
+    pub(super) rootcap_end: Option<Instant>,
     /// `ENOMOTO_MIP_BG_CUTS_PROOF_STOP` (既定で使う。`0` で止める): 根のヒューリスティクスの間に見る裏のカットの求解 ([`Solver::bg_proved`])
     bg_watch: Option<std::sync::Arc<CutJob>>,
     /// 裏のカットの下界が刈り込みの上限に届いたのを見た印 ([`Solver::bg_proved`]、一度立てば戻さない)
@@ -3062,6 +3080,28 @@ pub(crate) fn in_submip_thread() -> bool {
     super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) > 0
 }
 
+/// 試作 `ENOMOTO_MIP_ROOTCAP=<文字>` (課題 ROOTCAP、既定では使わない。analysis/rootcap_20261111.md): 外側の根で、根のヒューリスティクス・サブ MIP・
+/// LP プロービングの最初の LP に時間を使いすぎて木に入るのが遅れるのを防ぐ。
+/// - `h`: 根のヒューリスティクスの時間を根の LP の重さ T (根の LP の秒と、前処理の LP による固定の最初の LP の秒 (打ち切られたものも) の大きい方) に
+///   比べた上限で打ち切る。1 本 (Feasibility Pump・ダイビング・interior rounding・外側の根のサブ MIP 1 本) は
+///   max(`ENOMOTO_T_MIP_ROOTCAP_EACH_MIN` (1 秒), `ENOMOTO_T_MIP_ROOTCAP_EACH_TL` (0.02) x 時間の上限, `ENOMOTO_T_MIP_ROOTCAP_EACH` (5) x T) まで、
+///   全体は min(max(`ENOMOTO_T_MIP_ROOTCAP_TOT_TL` (0.05) x 時間の上限, `ENOMOTO_T_MIP_ROOTCAP_TOT` (20) x T),
+///   `ENOMOTO_T_MIP_ROOTCAP_REM` (0.15、暫定解がなければ `ENOMOTO_T_MIP_ROOTCAP_REM_NOINC` (0.25)) x 根のヒューリスティクスの始めの残り時間) まで。
+///   全体の上限を過ぎたら、安い丸め ([`light_root_heur`]) のほかは飛ばす (HiGHS は根のヒューリスティクスに LP の手間の 5% (`mip_heuristic_effort`)、
+///   SCIP はダイビングに LP の反復の 5% + 1000 (`maxlpiterquot`・`maxlpiterofs`) と、どちらも LP の重さに比べた上限で止める)
+/// - `p`: LP プロービングの最初の LP が期限で止まったとき、その基底 (行の状態・DSE 重みつき) を捨てずに根の LP に渡す
+///   (neos-873061 は 30 秒解いた LP を捨てて根で 20 秒かけて解き直していた)
+/// - `q`: `p` の前に、止まった LP をそのまま (尺度・DSE 重み・摂動を保ったまま) 続けて解き、解ければその最適基底を渡す
+/// - `w`: 根のヒューリスティクスの後に裏のカットを待つのも `h` の期限の残り (最低 1 秒) まで
+/// - `d`: 根の LP が重い問題の根のカットのループで、1 ラウンドに足すカットの非零の和に上限 (`separation.rs` の `ROOTCAP d`)
+pub(crate) fn rootcap(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTCAP").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
+/// [`rootcap`] の `h` 用: 外側の前処理の LP による固定の最初の LP の秒 (期限で止まったものも。f64 のビット、なければ 0)
+pub(crate) static ROOTCAP_PROBE_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// [`subcap`] で止めたサブ MIP の数 (全スレッドの和、診断用。0: 葉、1: 重さ、2: 待ちの上限)
 pub(crate) static SUBCAP_STOPS: [std::sync::atomic::AtomicU64; 3] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
 
@@ -4570,6 +4610,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_cmir_stats: [0; 3],
         heur_label: "",
         heur_stop: None,
+        rootcap_until: None,
+        rootcap_each: 0.0,
+        rootcap_late: 0.0,
+        rootcap_end: None,
         bg_watch: None,
         bg_proved_seen: std::cell::Cell::new(false),
         sublb_seen: std::cell::Cell::new(false),
@@ -5831,6 +5875,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         heavy
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOTCAP` の `h` ([`rootcap`]): 外側の根のヒューリスティクスの間なら、今から始める 1 本に使える秒
+    /// (1 本の上限と全体の期限までの残りの小さい方)。それ以外は `None`
+    pub(super) fn rootcap_left(&self) -> Option<f64> {
+        self.rootcap_until.map(|d| self.rootcap_each.min(d.saturating_duration_since(Instant::now()).as_secs_f64().max(self.rootcap_late)))
+    }
+
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || self.heur_stop.is_some_and(|d| Instant::now() >= d)
@@ -5854,7 +5904,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     pub(super) fn limits(&self, iteration_limit: u64) -> SolveLimits {
         // `ENOMOTO_MIP_TREE3_DIVECAP` (試作) のときだけ、根のヒューリスティクスの期限 (`heur_stop`) も LP の期限にする
-        let deadline = match self.heur_stop.filter(|_| tree3_divecap()) {
+        let deadline = match self.heur_stop.filter(|_| tree3_divecap() || self.rootcap_until.is_some()) {
             Some(h) => Some(self.deadline.map_or(h, |d| d.min(h))),
             None => self.deadline,
         };
@@ -8784,6 +8834,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if !self.params.submip && self.params.restarts == 0 {
                     super::record_root_heur_start();
                 }
+                // 試作 `ENOMOTO_MIP_ROOTCAP` の `h` ([`rootcap`]): 根のヒューリスティクスの期限と 1 本の上限を根の LP の重さから決める
+                self.rootcap_until = None;
+                if rootcap('h') && !self.params.submip && self.snap.is_none() {
+                    let t_lp = self.root_lp_secs.max(f64::from_bits(ROOTCAP_PROBE_SECS.load(std::sync::atomic::Ordering::Relaxed)));
+                    let tl = if self.params.time_limit.is_finite() { self.params.time_limit } else { 0.0 };
+                    let each = tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_MIN", 1.0, f64)
+                        .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_TL", 0.02, f64) * tl)
+                        .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH", 5.0, f64) * t_lp);
+                    let rem = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                    let f_rem = if self.incumbent.is_some() { tunable!("ENOMOTO_T_MIP_ROOTCAP_REM", 0.15, f64) } else { tunable!("ENOMOTO_T_MIP_ROOTCAP_REM_NOINC", 0.25, f64) };
+                    let tot = (tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT_TL", 0.05, f64) * tl).max(tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT", 20.0, f64) * t_lp).min(f_rem * rem);
+                    let each = each.min(tot);
+                    self.rootcap_late = (tunable!("ENOMOTO_T_MIP_ROOTCAP_LATE", 1.0, f64) * t_lp).clamp(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_MIN", 1.0, f64), each.max(1.0));
+                    self.rootcap_each = each;
+                    self.rootcap_until = Some(Instant::now() + std::time::Duration::from_secs_f64(tot.min(1e6)));
+                    if self.params.verbose {
+                        eprintln!("MIP: ROOTCAP h: root heuristics budget {tot:.2}s, {each:.2}s each (root LP {t_lp:.2}s, remaining {rem:.2}s, {:.2}s)", self.start.elapsed().as_secs_f64());
+                    }
+                }
                 let rh_frac = tunable!("ENOMOTO_T_MIP_ROOT_HEUR_TIME_FRAC", 0.0, f64);
                 let rh_frac_noinc = tunable!("ENOMOTO_T_MIP_ROOT_HEUR_TIME_FRAC_NOINC", 0.5, f64);
                 let rh_over = |s: &Self| {
@@ -8805,6 +8874,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         } else if rh_over(self) {
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (root heuristic time budget)", $name);
+                            }
+                        } else if self.rootcap_until.is_some_and(|d| Instant::now() >= d) && rootcap_heavy($name) {
+                            if self.params.verbose {
+                                eprintln!("MIP: root heuristic {}: skipped (ROOTCAP budget)", $name);
                             }
                         } else if self.early_restart {
                             if self.params.verbose {
@@ -8853,7 +8926,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 let d = Instant::now() + std::time::Duration::from_secs_f64(secs.min(1e6));
                                 self.heur_stop = Some(self.heur_stop.map_or(d, |h| h.min(d)));
                             }
+                            // 試作 `ENOMOTO_MIP_ROOTCAP` の `h`: Feasibility Pump・ダイビング・局所探索 1 回を 1 本の上限と全体の期限までにする
+                            // (LP の 1 回の求解の期限にも使う、[`Self::limits`])
+                            if let Some(l) = self.rootcap_left().filter(|_| $name == "feasibility pump" || $name.ends_with("diving") || $name == "local search") {
+                                let d = Instant::now() + std::time::Duration::from_secs_f64(l.min(1e6));
+                                self.heur_stop = Some(self.heur_stop.map_or(d, |h| h.min(d)));
+                            }
                             let found = $e;
+                            if self.rootcap_until.is_some() && self.params.verbose && self.heur_stop.is_some_and(|d| Instant::now() >= d) {
+                                eprintln!("MIP: root heuristic {}: stopped at the time cap (ROOTCAP)", $name);
+                            }
                             if tree3_divecap() && self.params.verbose && self.heur_stop.is_some_and(|d| Instant::now() >= d) {
                                 eprintln!("MIP: root heuristic {}: stopped at the time cap (ENOMOTO_MIP_TREE3_DIVECAP)", $name);
                             }
@@ -9220,6 +9302,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose && share_x {
                     eprintln!("MIP: root heuristics used {shared_x_used} LP solutions from the background cuts");
                 }
+                self.rootcap_end = self.rootcap_until.take();
                 if self.params.verbose {
                     eprintln!("MIP: after root heuristics: incumbent {:?} ({:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
                     // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 根のヒューリスティクスの時間を、どの求解の根か (道筋、`M` は外側) をつけて出す
@@ -9338,6 +9421,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if er_halt {
                     cap = 0.0;
+                }
+                // 試作 `ENOMOTO_MIP_ROOTCAP` の `w` ([`rootcap`]): 裏のカットを待つのも根のヒューリスティクスの期限 (`h`) の残りまで
+                // (最低 `ENOMOTO_T_MIP_ROOTCAP_BGWAIT_MIN` 秒、既定 1)。根のヒューリスティクスを短くした分を裏のカットの待ちで失わないため
+                // (neos-873061 は `h` で根のヒューリスティクスが 72 秒で終わった後、裏のカットを 97.5 秒待った)
+                if rootcap('w') {
+                    if let Some(e) = self.rootcap_end {
+                        let left = e.saturating_duration_since(Instant::now()).as_secs_f64().max(tunable!("ENOMOTO_T_MIP_ROOTCAP_BGWAIT_MIN", 1.0, f64));
+                        if left < cap && self.params.verbose {
+                            eprintln!("MIP: ROOTCAP w: waiting for the background cuts at most {left:.2}s (was {cap:.2}s)");
+                        }
+                        cap = cap.min(left);
+                    }
                 }
                 // 試作 `ENOMOTO_MIP_ROOTSTOP` の `w`: 再スタートが見込まれる根では裏のカットを待たない (その時点の結果は取り込む)
                 if super::rootstop::on('w') && self.rootstop_skip_wait() {

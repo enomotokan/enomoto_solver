@@ -4259,11 +4259,48 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
             if verbose {
                 eprintln!("MIP: LP probing: the first LP stopped: {st:?} ({:.2}s, limit {secs:.2}s{})", t0.elapsed().as_secs_f64(), if finish { " x mult" } else { "" });
             }
+            if !solver::in_submip_thread() {
+                solver::ROOTCAP_PROBE_SECS.store(t0.elapsed().as_secs_f64().to_bits(), std::sync::atomic::Ordering::Relaxed);
+            }
+            // 試作 `ENOMOTO_MIP_ROOTCAP` の `p` ([`solver::rootcap`]): 止まった LP の基底 (行の状態・DSE 重みつき) を捨てずに根の LP に渡す
+            // (根の LP はここから続きを解く。行が変わっていれば根の側で行の状態を捨てる)
+            // `ENOMOTO_MIP_ROOTCAP` の `q`: 渡す前に、同じ LP (尺度・DSE 重み・摂動をそのまま) を `ENOMOTO_T_MIP_ROOTCAP_P_MULT` (2) x 止まるまでの秒だけ
+            // 続けて解く (最適まで解ければ、根の LP はその基底からすぐ終わる。止まればやはり渡す)
+            let mut st = st;
+            if solver::rootcap('q') && !solver::in_submip_thread() && matches!(st, LpStatus::TimeLimit | LpStatus::IterationLimit) {
+                let t1 = std::time::Instant::now();
+                let d = t1 + std::time::Duration::from_secs_f64(tunable!("ENOMOTO_T_MIP_ROOTCAP_P_MULT", 2.0, f64) * t0.elapsed().as_secs_f64());
+                let it0 = lp.total_iterations();
+                st = lp.solve(&SolveLimits { deadline: Some(d), ..Default::default() });
+                if verbose {
+                    eprintln!("MIP: LP probing: ROOTCAP q: continued the first LP: {st:?} (+{} iters, {:.2}s)", lp.total_iterations() - it0, t1.elapsed().as_secs_f64());
+                }
+                if st == LpStatus::Infeasible {
+                    return None;
+                }
+            }
+            if (solver::rootcap('p') || solver::rootcap('q')) && !solver::in_submip_thread() && matches!(st, LpStatus::TimeLimit | LpStatus::IterationLimit | LpStatus::Optimal) {
+                let b = lp.basis();
+                let with_rows = b.row.len() == prob.m;
+                if with_rows {
+                    solver::ROOT_BASIS_ROWS.with(|s| *s.borrow_mut() = Some(rows_fingerprint(&prob.rows)));
+                    let w = lp.dse_snapshot();
+                    solver::ROOT_DSE.with(|s| *s.borrow_mut() = w);
+                }
+                let b = if with_rows { b } else { lp::Basis { col: b.col, row: Vec::new() } };
+                if verbose {
+                    eprintln!("MIP: LP probing: ROOTCAP p: passing the stopped LP's basis to the root LP (rows {with_rows}, {} iters)", lp.total_iterations());
+                }
+                solver::ROOT_BASIS.with(|s| *s.borrow_mut() = Some(b));
+            }
             return Some(0);
         }
     }
     let z0 = lp.objective() + prob.offset;
     let root_secs = t0.elapsed().as_secs_f64();
+    if !solver::in_submip_thread() {
+        solver::ROOTCAP_PROBE_SECS.store(root_secs.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
     pretime::add("lpprobe_first", root_secs);
     let root_iters = lp.total_iterations();
     if finish_late && (if work { root_iters < lp_iter_cap } else { root_secs < secs }) {
