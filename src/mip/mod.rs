@@ -1658,7 +1658,19 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 }
                 return r;
             }
-            if ok { r } else { solver::solve(p, remaining(params)) }
+            if ok {
+                r
+            } else {
+                // `ENOMOTO_MIP_RESOLVE_SYM_RESET` (2026-11-12 から既定、`=0` で以前の形): 前処理なしで解き直す前に、前処理した問題で作った
+                // 対称性の控え (`SYM_ORIG` など) を消す。残すと、解き直しの木が `SYM_ORIG` (前処理した問題。列の数が `p` と同じなら
+                // 見分けられない) で実行可能な点を「対称性の行にだけ反する解」として打ち切り値に使い、最後に答えとして返す
+                // (`ENOMOTO_MIP_SYM_ORIG_CUT`)。前処理が誤って実行不能な問題を縮めたとき、解き直しの根の LP が実行不能と分かっても
+                // その点を「最適」と返していた (analysis/objint_20261112/wrong_seed14.py、analysis/wrongans_20261112.md)
+                if !params.submip && env_def!("ENOMOTO_MIP_RESOLVE_SYM_RESET", "1").is_some() {
+                    clear_sym_state();
+                }
+                solver::solve(p, remaining(params))
+            }
         }
         None => {
             if params.submip && debug_submip_components() && heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1 {
@@ -1674,6 +1686,16 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             r
         }
     }
+}
+
+/// 対称性の検出が置いたスレッドごとの控え (オービトープ・対称性の行を加える前の問題・生成元) を消す
+fn clear_sym_state() {
+    ORBITOPES.with(|t| *t.borrow_mut() = None);
+    SYM_ORIG.with(|t| *t.borrow_mut() = None);
+    SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
+    SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
+    symdyn::reset();
+    SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
 }
 
 /// 後処理した解の列を元の問題の境界に収める (`ENOMOTO_MIP_POSTSOLVE_CLIP`、2026-11-05 から既定、`=0` で以前の形)。
@@ -7743,6 +7765,43 @@ mod tests {
         assert_eq!(r.status, MipStatus::Optimal);
         let z = r.objective.unwrap();
         assert!(z <= -10.9 + 1e-6, "objective {z} (expected -10.9)");
+    }
+
+    /// 実行不能な問題を「最適」と答えた例 (analysis/objint_20261112/wrong_seed14.py、analysis/wrongans_20261112.md): 2 行目と 3 行目が
+    /// `x32 - x33 >= 2` と `x32 - x33 <= 6 x13 + 7.5 x12 + 7 x23 + 6 x31` (0-1 列) で、和から `0 >= 2 + ...` になる。前処理の費用 0 の
+    /// スラック列の消去 ([`crate::presolve::slackcol`]) が区間の空な行の組から x33 を消して実行可能な問題に変え、前処理なしの解き直しの
+    /// 側も前処理した問題の対称性の控えで点を返していた。縮めた形 (列 3 本) と元の形 (列 34 本、17 本は行にも目的にも出ない) の両方
+    #[test]
+    fn infeasible_seed14_is_reported_infeasible() {
+        let inf = f64::INFINITY;
+        let p = MipProblem::from_rows(vec![0.0, 1.0, -4.0], vec![1.0, 58.0, inf], vec![-5.0, 0.0, 0.0], 0.0, 1.0, vec![true, false, false],
+            vec![vec![(1, -1.0), (2, 1.0)], vec![(1, 1.0), (2, -1.0)]], vec![0.0, 2.0], vec![inf, inf]);
+        let r = solve_problem(&p, MipParams { rel_gap: 1e-9, ..MipParams::default() }, true);
+        assert_eq!(r.status, MipStatus::Infeasible, "small: objective {:?}", r.objective);
+        let mut lo = vec![0.0; 34];
+        lo[32] = 1.0;
+        lo[33] = -4.0;
+        let mut up = vec![1.0; 34];
+        for (j, v) in [(0, 5.0), (6, 3.0), (8, 3.0), (9, 3.0), (10, 3.0), (18, 5.0), (21, 5.0), (27, 5.0), (32, 58.0), (33, inf)] {
+            up[j] = v;
+        }
+        let mut cost = vec![0.0; 34];
+        cost[1] = -5.0;
+        let mut is_int = vec![true; 34];
+        is_int[32] = false;
+        is_int[33] = false;
+        let mut rows = vec![
+            vec![(33, 1.0), (1, -6.0), (22, -4.5), (23, -9.0), (30, -5.5), (16, -2.5)],
+            vec![(33, 1.0), (32, -1.0), (13, -6.0)],
+            vec![(32, 1.0), (33, -1.0), (12, -7.5), (23, -7.0), (31, -6.0)],
+            vec![(11, 9.0), (4, 1.0), (0, 7.0), (21, 8.0), (7, 5.0), (20, 8.0), (28, 6.0), (31, 2.0)],
+        ];
+        for r in rows.iter_mut() {
+            r.sort_by_key(|t| t.0);
+        }
+        let p = MipProblem::from_rows(lo, up, cost, 0.0, 1.0, is_int, rows, vec![-0.5, 0.0, 2.0, -inf], vec![inf, inf, inf, 19.0]);
+        let r = solve_problem(&p, MipParams { rel_gap: 1e-9, ..MipParams::default() }, true);
+        assert_eq!(r.status, MipStatus::Infeasible, "seed14: objective {:?}", r.objective);
     }
 
     /// 幅が許容誤差以下の列の固定 ([`fix_tiny_width_columns`]): 区間の整数 (0) に固定し、整数がなければ下限。幅が許容誤差を

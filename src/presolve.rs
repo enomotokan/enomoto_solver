@@ -106,6 +106,12 @@ pub fn run_extended_mip(n: usize, a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64]
     r
 }
 
+/// `ENOMOTO_PRESOLVE_SLACK_COL_RANGE` (2026-11-12 から既定、`=0` で以前の形): 費用 0 のスラック列の消去 ([`slackcol`]) で、
+/// 範囲制約の区間が空 (`L > U`) の行の組からは列を消さない
+pub(crate) fn slack_col_range_on() -> bool {
+    env_def!("ENOMOTO_PRESOLVE_SLACK_COL_RANGE", "1").is_some()
+}
+
 /// 診断用: `ENOMOTO_DBG_SKIP` (カンマ区切り) に名前があればその縮約を飛ばす。
 /// (原因の切り分け用。既定では何も飛ばさない)
 fn dbg_skip(name: &str) -> bool {

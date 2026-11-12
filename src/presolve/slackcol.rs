@@ -103,6 +103,20 @@ pub fn eliminate_slack_columns(
             if !ok {
                 continue;
             }
+            // `ENOMOTO_PRESOLVE_SLACK_COL_RANGE` (2026-11-12 から既定、`=0` で以前の形): 範囲制約 `L <= r + a x_j <= U` の区間が空
+            // (`L > U`) なら消さない。緩めた 2 本 `r <= U - mn`・`r >= L - mx` は `L > U` でも (`a x_j` の値域が広ければ) 満たせるので、
+            // 実行不能な行を実行可能な行に変えてしまう (analysis/objint_20261112/wrong_seed14.py: `x32 - x33 >= 2` と `x32 - x33 <= 0`
+            // から x33 を消し、実行不能な問題を「最適」と答えた。analysis/wrongans_20261112.md)。消さなければ、ほかの縮約・LP が実行不能を見つける。
+            // 2 本目は 1 本目を反転した行なので、`L = -rhs[1本目でない方]`。列を消すたびに右辺が変わるので毎回比べる
+            if crate::presolve::slack_col_range_on() {
+                let (u, l) = (real_rhs[rs[0]], -real_rhs[rs[1]]);
+                if l > u + 1e-9 * (1.0 + u.abs().max(l.abs())) {
+                    if env_str!("ENOMOTO_DEBUG_SLACK_COL").is_some() {
+                        eprintln!("DEBUG_SLACK_COL: kept column {j} of rows with an empty range ({l} > {u})");
+                    }
+                    continue;
+                }
+            }
         }
         let mut rec = SlackCol { var: j, lb: lb[j], ub: ub[j], rows: Vec::with_capacity(rs.len()) };
         for &i in rs.iter() {
@@ -146,6 +160,19 @@ mod tests {
             assert!((-1e-9..=1.0 + 1e-9).contains(&r), "y {y}: x {x:?}");
             assert!(x[1..].iter().all(|v| (0.0..=1.0).contains(v)));
         }
+    }
+
+    #[test]
+    fn keeps_slack_of_an_empty_range() {
+        // x1 - x2 >= 2 と x1 - x2 <= 0 (区間が空、analysis/objint_20261112/wrong_seed14.py を縮めたもの)。G では x1 - x2 <= 0 と -x1 + x2 <= -2。
+        // x2 は費用 0・[1, 58] の連続列で、消すと行が x1 <= 57 と -x1 <= -3 になり実行可能になってしまう
+        let mut rows = vec![vec![(1, 1.0), (2, -1.0)], vec![(1, -1.0), (2, 1.0)]];
+        let mut rhs = vec![0.0, -2.0];
+        let c = vec![-5.0, 0.0, 0.0];
+        let (lb, ub) = (vec![0.0, 1.0, 1.0], vec![1.0, 58.0, 58.0]);
+        let recs = eliminate_slack_columns(3, &[false; 3], &mut rows, &mut rhs, &c, &lb, &ub, &|j| j == 0);
+        assert!(recs.is_empty());
+        assert_eq!(rhs, vec![0.0, -2.0]);
     }
 
     #[test]
