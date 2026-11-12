@@ -2939,6 +2939,75 @@ pub(super) fn with_presolve_deadline<R>(deadline: Option<std::time::Instant>, f:
 /// 衝突するものだけ足すので、行は大きなクリークのままで整数解は変わらず、LP の緩和だけが締まる。
 /// 等式の行 (文字の和 = 1) では、すべての文字と衝突する文字は偽に固定できる (`ENOMOTO_MIP_CLIQUE_EXTEND_FIX`)。
 /// 1 行に加える文字は `ENOMOTO_T_MIP_CLIQUE_EXTEND_MAX` 個まで (既定 1000)。拡張でまったく同じになった行は 1 本にする。
+/// 試作 `ENOMOTO_MIP_CLQEXT_KNAP` (WINWHY、既定では使わない。analysis/winwhy_20261111.md) を使うか。
+fn clqext_knap_on() -> bool {
+    env_str!("ENOMOTO_MIP_CLQEXT_KNAP").is_some()
+}
+
+/// [`clqext_knap_on`] の本体: 0-1 列だけの行 `sum a x <= b` (>= は向きを反転、等式は両向き) で、係数が ±1 だけではないものから、
+/// どの 2 つも同時に真にできない文字の組 (クリーク) を取り出し、集合詰め込み行 `sum 文字 <= 1` として返す ((行, 右辺の上限) の組。
+/// 負の文字 1 - x_j は係数 -1 と右辺の -1 で表す)。負の係数の列は 1 - x_j に置き換えて全部の重み w > 0・右辺 B にし、重みの大きい順に
+/// 並べて、上から k 個のうち最後の 2 つの和が B を越える最大の k を取る (重みは大きい順なので、上から k 個のどの 2 つの和も B を越える)。
+/// k >= `ENOMOTO_T_MIP_CLQEXT_KNAP_MIN` (既定 3) のときだけ足す。1 つで B を越える文字 (それだけで偽に固定できる) を含む行は飛ばす
+/// (前処理が扱う)。neos-950242 ではクリーク行の拡張だけで根の LP が 1 -> 4 (= 最適値) になり、HiGHS に 3 倍勝つ。拡張は係数 ±1 の
+/// 行にしか当たらないので、ナップサック行に隠れたクリークにも当たるように広げる。足した行は続く拡張でさらに広げ、含まれる行は消す
+fn knapsack_clique_rows(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], binary: &[bool], col_lo: &[f64], col_up: &[f64]) -> Vec<(Vec<(usize, f64)>, f64)> {
+    let kmin = tunable!("ENOMOTO_T_MIP_CLQEXT_KNAP_MIN", 3usize, usize).max(2);
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<Vec<u32>> = std::collections::HashSet::new();
+    for i in 0..rows.len() {
+        let r = &rows[i];
+        if r.len() < kmin || !r.iter().all(|&(j, _)| binary[j]) || r.iter().all(|&(_, a)| (a.abs() - 1.0).abs() <= 1e-12) {
+            continue;
+        }
+        for sg in [1.0f64, -1.0] {
+            let b = if sg > 0.0 { row_up[i] } else { -row_lo[i] };
+            if !b.is_finite() {
+                continue;
+            }
+            // 固定された列は右辺に移し、残りを文字と重みにする
+            let mut bb = b;
+            let mut lits: Vec<(f64, u32)> = Vec::new();
+            for &(j, a) in r {
+                let c = sg * a;
+                if col_lo[j] == col_up[j] {
+                    bb -= c * col_lo[j];
+                } else if c > 1e-12 {
+                    lits.push((c, 2 * j as u32));
+                } else if c < -1e-12 {
+                    // c x = c - c (1 - x): 文字 1 - x の重み -c、右辺に -c を足す
+                    bb -= c;
+                    lits.push((-c, 2 * j as u32 + 1));
+                }
+            }
+            if lits.len() < kmin {
+                continue;
+            }
+            let tol = 1e-9 * (1.0 + bb.abs());
+            lits.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap_or(std::cmp::Ordering::Equal));
+            if lits[0].0 > bb + tol || lits[0].0 + lits[1].0 <= bb + tol {
+                continue;
+            }
+            let mut k = 2;
+            while k < lits.len() && lits[k - 1].0 + lits[k].0 > bb + tol {
+                k += 1;
+            }
+            if k < kmin {
+                continue;
+            }
+            let mut key: Vec<u32> = lits[..k].iter().map(|&(_, l)| l).collect();
+            key.sort_unstable();
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let nneg = key.iter().filter(|&&l| l % 2 == 1).count() as f64;
+            let row: Vec<(usize, f64)> = key.iter().map(|&l| ((l / 2) as usize, if l % 2 == 0 { 1.0 } else { -1.0 })).collect();
+            out.push((row, 1.0 - nneg));
+        }
+    }
+    out
+}
+
 fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     let _pt = pretime::guard("clqext");
     let t0 = std::time::Instant::now();
@@ -2964,6 +3033,17 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     let max_add = tunable!("ENOMOTO_T_MIP_CLIQUE_EXTEND_MAX", 1000usize, usize);
     let want_fix = env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_FIX").is_some();
     let MipProblem { mut col_lo, mut col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, conflict_edges, implied_bounds, .. } = prob;
+    // 試作 `ENOMOTO_MIP_CLQEXT_KNAP` (WINWHY、既定では使わない。analysis/winwhy_20261111.md): ナップサック行のクリークも行にして拡張する
+    let knap_rows = if clqext_knap_on() { knapsack_clique_rows(&rows, &row_lo, &row_up, &binary, &col_lo, &col_up) } else { Vec::new() };
+    let n_knap = knap_rows.len();
+    for (r, up) in knap_rows {
+        rows.push(r);
+        row_lo.push(f64::NEG_INFINITY);
+        row_up.push(up);
+    }
+    if verbose && clqext_knap_on() {
+        eprintln!("MIP: clique extension: CLQEXT_KNAP added {n_knap} clique rows from knapsack rows");
+    }
     let (mut ext_rows, mut added, mut fixed) = (0usize, 0usize, 0usize);
     let mut fix_lits: Vec<u32> = Vec::new();
     // 片側の集合詰め込み行の文字の集合 (拡張の後)。ほかの片側の集合詰め込み行に含まれる行は冗長なので消す
@@ -7146,6 +7226,28 @@ mod tests {
             let x: Vec<f64> = (0..7).map(|j| ((mask >> j) & 1) as f64).collect();
             let orig_ok = [x[0] + x[1], x[0] + x[2], x[1] + x[2], x[1] + x[3], x[4] + x[6]].iter().all(|&v| v <= 1.0) && x[4] - x[5] <= 0.0 && x[6] - x[5] <= 0.0;
             assert_eq!(orig_ok, q.is_feasible(&x, 1e-9), "{x:?}");
+        }
+    }
+
+    /// `ENOMOTO_MIP_CLQEXT_KNAP` の本体: ナップサック行から取り出すクリーク行は、元の行を満たすどの 0-1 点でも満たされる (全列挙)
+    #[test]
+    fn knapsack_clique_rows_are_valid() {
+        // 5 x0 + 4 x1 + 4 x2 + 2 x3 + x4 <= 7 (x0..x2 がクリーク)、3 x0 - 3 x5 + 3 x6 + x3 >= -1 (<= の向きで -3 x0 + 3 x5 - 3 x6 - x3 <= 1)
+        let rows = vec![vec![(0, 5.0), (1, 4.0), (2, 4.0), (3, 2.0), (4, 1.0)], vec![(0, 3.0), (3, 1.0), (5, -3.0), (6, 3.0)]];
+        let (lo, up) = (vec![f64::NEG_INFINITY, -1.0], vec![7.0, f64::INFINITY]);
+        let bin = vec![true; 7];
+        let out = knapsack_clique_rows(&rows, &lo, &up, &bin, &[0.0; 7], &[1.0; 7]);
+        assert!(out.iter().any(|(r, u)| r == &[(0, 1.0), (1, 1.0), (2, 1.0)] && *u == 1.0), "{out:?}");
+        assert!(!out.is_empty());
+        for mask in 0u32..128 {
+            let x: Vec<f64> = (0..7).map(|j| ((mask >> j) & 1) as f64).collect();
+            let act = |r: &[(usize, f64)]| r.iter().map(|&(j, a)| a * x[j]).sum::<f64>();
+            let ok = (0..2).all(|i| act(&rows[i]) >= lo[i] - 1e-9 && act(&rows[i]) <= up[i] + 1e-9);
+            if ok {
+                for (r, u) in &out {
+                    assert!(act(r) <= u + 1e-9, "{x:?} {r:?} {u}");
+                }
+            }
         }
     }
 
