@@ -14,6 +14,7 @@ pub(crate) mod fold;
 /// 完全単模の判定 (fold と implint_tu で共通)。
 pub(crate) mod tu;
 pub(crate) mod network;
+pub(crate) mod tubr;
 pub(crate) mod lp_api;
 pub(crate) mod problem;
 pub(crate) mod domain;
@@ -1431,6 +1432,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             // 診断 `ENOMOTO_MIP_DEBUG_IMPLINTCOUNT` (src/mip/implint_tu.rs): 暗黙の整数の数を判定ごとに数える。`=stop` なら終える
             if let Some(v) = env_str!("ENOMOTO_MIP_DEBUG_IMPLINTCOUNT").filter(|_| !params.submip && params.restarts == 0) {
                 implint_tu::debug_count(&prob, v == "stop");
+            }
+            // 診断 `ENOMOTO_MIP_TUBR_COUNT` (src/mip/tubr.rs、analysis/tubr_20261112.md): 分枝しなくてよい整数列 I' を数える。`=stop` なら終える
+            if let Some(v) = env_str!("ENOMOTO_MIP_TUBR_COUNT").filter(|_| !params.submip && params.restarts == 0) {
+                tubr::debug_count(&prob, v == "stop");
             }
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
