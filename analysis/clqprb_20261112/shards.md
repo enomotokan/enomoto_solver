@@ -41,3 +41,13 @@ git pull --rebase --autostash origin ccr-1beed81b-ex0uhq && git push -u origin c
 | 分担 | 命令 |
 |---|---|
 | C0〜C5 | `python census.py mitt186.txt 0 6` 〜 `python census.py mitt186.txt 5 6` |
+
+## A: Mittelmann 186 問の CLQACT の数え上げ (診断だけ、3 分担)
+
+- コミット: **778566ed** (診断 `ENOMOTO_MIP_DEBUG_CLQACT` を足したソース。既定の動きは変わらない)。手順のビルドまでは上と同じ。
+- 命令: `python census.py mitt186.txt <K> 3 act` (K = 0〜2)。`CLQPRB=1` で前処理の後の CLQACT の行が出たら止める (最大 約 3.5 分 × 62 問)。
+- 結果: `census_mitt186_act_s<K>.jsonl` だけをコミットして push (コミットの文は `CLQPRB A<K>: 完了 (N 行)`)。
+
+| 分担 | 命令 |
+|---|---|
+| A0〜A2 | `python census.py mitt186.txt 0 3 act` 〜 `python census.py mitt186.txt 2 3 act` |
