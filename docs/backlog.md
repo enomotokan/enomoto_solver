@@ -23,6 +23,7 @@
   decomp2 は単独の主因なし。DRCR が要る勝ちはない (cbs-cta・ns1208400 は規則 2 で畳まず、外しても揺れの範囲)。
 - 広げる試作 `ENOMOTO_MIP_CLQEXT_KNAP` (ナップサック行に隠れたクリークも拡張する) は既定候補にしない (91 問で当たる 8 問、根の LP は動かない)。
 - 守ること: cand1112 の項目のうち RCSTRONG は rmatr100-p10 のノードの LP に行を足して 1.2〜1.4 倍、GAP1=u は pk1 を 1.15〜1.5 倍遅くする (種 2 つ)。
+  RCSTRONG の分は `i` の根の固定が元で、既定化では `RCSTRONG=k` にする (2026-11-12、analysis/rcstrong2_20261112.md)。
   CUTCONF は mas74・mas76 を遅くする。木で勝つ型の問題 (pk1・rmatr100-p10・mas74・markshare_4_0) を束の計測で見張る。
 - 残り: 600 秒の組 (mas74・gen-ip054・wachplan・n2seq36q・neos-957323) の HiGHS との並べ (分担 session_01HrNYnHmGcp4Cm4psQMbb3G)。
   Local-MIP を FJ と混ぜない形が decomp2 で揃って速い (3.2・3.3 対 1.4・15.6) 件は 1 問だけの事実で、COMP07 (Local-MIP の時間) の受け持ちに渡す。
@@ -436,6 +437,10 @@ LP の伝播・分枝の側で、それは既存の Proximity Search・`ROOT_OBJ
 
 - 2026-11-11 に 1・2 を試作した (`ENOMOTO_MIP_RCSTRONG`、analysis/rcstrong_20261111.md)。根だけで切り捨てる `ir` と行の伝播 `k` は
   取り込みの基準を満たすが効き目は揺れの内。ノードでも切り捨てる `i` は pk1 を揃って遅くする。3 は未着手。
+- 2026-11-12 (RCSTRONG2、analysis/rcstrong2_20261112.md): `irk` が rmatr100-p10 を遅くする元は `i` の根の大域的な固定 (TU2 の連続列 約 7000 本を
+  0 に固定 → 根の部分 MIP の根のカットのループと木のノードで tableau 行の CMIR が効き始める。ノード数は減らない)。`k` は無害。直しの試作 `g`・`n` は
+  効かず外した。58 問 × 種 1〜3 で `k` 対 `irk` は −1.5% [−4.7%, +1.8%]・解けた 125 対 127・食い違い 0。gen-ip054 は暗黙の整数 0 本で `i` は何もしない。
+  **決定 (親): 束 cand1113 を既定にするときは `ENOMOTO_MIP_RCSTRONG=k` にする (`i`・`r` を外す)。**
 
 - 前提: 被約費用による固定はもともと 1 本のナップサック不等式。根の LP の値 z、打ち切り値 U、G = U − z、列 j の LP で張り付いた境界からの
   距離 δ_j (0 以上)・被約費用 d_j として、暫定解より良い解はすべて Σ_j d_j δ_j ≤ G を満たす。
