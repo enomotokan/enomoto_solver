@@ -98,6 +98,9 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                     || (p.row_up[i].is_finite() && !integral(p.row_up[i]))
             })
             .collect();
+        // 診断 `ENOMOTO_T_FOLD_NOVR` (数えるモード `c` のときだけ効く。解くときは無視): V_R を空にして、連続列の部分が全部 TU なら
+        // どこまで縮むかの上限を数える (analysis/drcrtu_20261111.md の (6))。戻せる保証がないので解くのには使わない
+        let vr: Vec<bool> = if fl.contains('c') && env_str!("ENOMOTO_T_FOLD_NOVR").is_some() { vec![false; p.m] } else { vr };
         let keys = int_keys(p, &vr);
         if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF mip keys {:.3}s", t0.elapsed().as_secs_f64()); }
         let f1 = Fold::build(&fold_in(p, Some(&keys), None), FoldOpts { max_ratio: 1.0, ..opts });

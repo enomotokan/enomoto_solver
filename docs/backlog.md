@@ -172,7 +172,7 @@ LP の伝播・分枝の側で、それは既存の Proximity Search・`ROOT_OBJ
 ### DRCR の整数の組の TU の判定にネットワーク行列の一般の判定 (DRCRTU、2026-11-12、analysis/drcrtu_20261111.md)
 - 済み (試作 `ENOMOTO_MIP_FOLD` の文字 `n`、既定では切): MATREC の列の追加を `src/mip/network.rs` に移し、証明書の検査つきで 2 周目に使う。
   240 問で列が縮むのは widden (77723 → 63136 が 7300 に、600 秒で時間切れ・477 秒 → 43〜45 秒)・decomp2・physiciansched6-2 (わずか)。誤答 0。
-- 残り: 58 問 × 種 1〜3 の対の計測 (`analysis/drcrtu_20261111/shards.md`) の後に既定化を判断。連続列の連結成分の TU (論文の V_R の狭め方)。
+- 残り: 58 問 × 種 1〜3 の対の計測 (`analysis/drcrtu_20261111/shards.md`) の後に既定化を判断。連続列の連結成分の TU (論文の V_R の狭め方) は上限を数えて余地が小さい (physiciansched6-2・sct2 だけ) ので後回し。
   論文 7 の暗黙の整数の判定 (`implint_tu.rs`) にも `tu::tu_cols_f64_net` を試す (fuzz_tu.py をやり直す)。
 
 ## 課題 XOLAZY: 根の LP のクロスオーバーを後回しにする (2026-11-11 に着手、段階 0 で止めた)
