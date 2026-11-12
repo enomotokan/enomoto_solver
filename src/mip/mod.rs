@@ -1203,6 +1203,37 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         }
         other => other,
     };
+    // `ENOMOTO_MIP_DUALEQ` (試作、既定では使わない。analysis/presolve2_20261111.md): 前処理の最後に、双対の議論で不等式行を
+    // 等式にし ([`dual_row_equalities`])、等式にした行があれば前処理をもう一度かける (2 項等式の消去が `y_b = 1 - y_a` などを代入する)。
+    // 前処理の後の問題でかけるのは、冗長な行が消え双対の固定が済んだ後で錠を数えるため。最適解の集合を狭めるだけなので後処理は要らない
+    let presolved = match presolved {
+        Some(Presolved::Reduced { prob, postsolve, scaling })
+            if env_str!("ENOMOTO_MIP_DUALEQ").is_some_and(|v| v != "early") && !params.submip && params.restarts == 0 && scaling.d.iter().all(|&d| d == 1.0) =>
+        {
+            let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, rows, mut row_lo, mut row_up, cols, .. } = prob.clone();
+            let t0 = std::time::Instant::now();
+            let k = dual_row_equalities(&rows, &mut row_lo, &mut row_up, &cols, &cost, &is_int, &col_lo, &col_up);
+            if params.verbose {
+                eprintln!("MIP: presolve: DUALEQ made {k} rows equations (late, {:.2}s)", t0.elapsed().as_secs_f64());
+            }
+            if k == 0 {
+                Some(Presolved::Reduced { prob, postsolve, scaling })
+            } else {
+                let q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
+                match presolve_mip(&q, params.verbose, pre_submip, None) {
+                    Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+                    Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().all(|&d| d == 1.0) => {
+                        let mut postsolve = postsolve;
+                        postsolve.extend(post2);
+                        Some(Presolved::Reduced { prob: prob2, postsolve, scaling })
+                    }
+                    // かけ直しが何も減らさない: 等式にした問題をそのまま使う
+                    _ => Some(Presolved::Reduced { prob: q, postsolve, scaling }),
+                }
+            }
+        }
+        other => other,
+    };
     // 試作 `ENOMOTO_MIP_HNFPRE` (既定では使わない): 整数列だけの等式の Hermite 標準形 ([`hnf`])
     let presolved = match presolved {
         Some(Presolved::Reduced { prob, postsolve, scaling }) if (hnf::mode().is_some() || hnfsubst::on()) && !params.submip => {
@@ -3114,6 +3145,120 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     q
 }
 
+/// 試作 `ENOMOTO_MIP_DUALEQ` (既定では使わない、analysis/presolve2_20261111.md): 双対の議論による行の等式化。列 `j` を目的の
+/// 悪くならない向き (費用 `c_j <= 0` なら増やす、`c_j >= 0` なら減らす) に動かしたとき破れうる行 (錠) がちょうど 1 本 `r` なら、
+/// どの最適解からも `x_j` をその向きに `r` が等号になるまで動かせば、目的は悪くならず、ほかの行は緩む向きにしか動かない。
+/// ただし (1) `r` が等号になる前に `x_j` の境界に当たらない (`r` から導かれる `x_j` の境界が `x_j` の境界より内側)、
+/// (2) `x_j` が整数列なら、`r` のほかの列がすべて整数列で、係数と右辺が `a_rj` の整数倍 (動かす幅が整数になる) のときだけ。
+/// このとき `r` を等式にしても最適解が 1 つは残る。1 回の呼び出しで複数の組 (j, r) を選ぶときは、選んだ列はほかの選んだ行に
+/// 現れないようにする (動かす順によらず等号が保たれる)。HiGHS はこの形で neos859080 の `y_a + y_b <= 1` (y_b は費用 0 で、
+/// ほかには `x_k <= 10 y_b` にしか出ない) を等式にして `y_b = 1 - y_a` と代入し、0-1 列 40 本を消す (等式は既定の 2 項等式の
+/// 消去が代入する)。等式にした行の数を返す。最適解の集合を狭めるだけ (実行可能な点は変えない) なので後処理は要らない
+#[allow(clippy::too_many_arguments)]
+fn dual_row_equalities(rows: &[Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], cols: &[Vec<(usize, f64)>], cost: &[f64], is_int: &[bool], col_lo: &[f64], col_up: &[f64]) -> usize {
+    let m = rows.len();
+    let n = cols.len().min(cost.len());
+    let integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
+    // 等式にした行と、選んだ列が現れる行 (後で選ぶ行はこれらを含まない)
+    let mut used_row = vec![false; m];
+    let mut blocked_row = vec![false; m];
+    let mut count = 0usize;
+    for j in 0..n {
+        // 1 行にしか出ない列は列シングルトンの縮約 (不等式のまま扱う方が強い) に任せる
+        if col_lo[j] >= col_up[j] || cols[j].len() < 2 {
+            continue;
+        }
+        for dir in [1.0f64, -1.0] {
+            if dir * cost[j] > 0.0 {
+                continue;
+            }
+            // 錠の行: x_j を dir の向きに動かすと破れうる側を持つ行
+            let mut lock: Option<(usize, f64)> = None;
+            let mut cnt = 0usize;
+            for &(i, a) in &cols[j] {
+                if i >= m || a == 0.0 {
+                    continue;
+                }
+                let s = a * dir;
+                if (s > 0.0 && row_up[i].is_finite()) || (s < 0.0 && row_lo[i].is_finite()) {
+                    cnt += 1;
+                    lock = Some((i, a));
+                }
+            }
+            if cnt != 1 {
+                continue;
+            }
+            let (r, a) = lock.unwrap();
+            if row_lo[r] == row_up[r] || used_row[r] || blocked_row[r] || cols[j].iter().any(|&(i, _)| i < m && used_row[i]) {
+                continue;
+            }
+            let upper = a * dir > 0.0;
+            let rhs = if upper { row_up[r] } else { row_lo[r] };
+            // 等式にすると r のほかの列 k に逆の向きの錠が 1 本増える。その向きに錠がなく目的も悪くならない列 (双対の固定で
+            // 境界に固定できる列) があれば選ばない (gt2 では `Σ x <= 6` の費用 0 の列 8 本の固定を失っていた)
+            let breaks_dualfix = rows[r].iter().any(|&(k, b)| {
+                if k == j || k >= n || b == 0.0 {
+                    return false;
+                }
+                let dk = if upper { -b.signum() } else { b.signum() };
+                dk * cost[k] <= 0.0
+                    && !cols[k].iter().any(|&(i, c)| i < m && ((c * dk > 0.0 && row_up[i].is_finite()) || (c * dk < 0.0 && row_lo[i].is_finite())))
+            });
+            if breaks_dualfix {
+                continue;
+            }
+            // r のほかの列の活動の範囲と、整数性の条件
+            let (mut smin, mut smax) = (0.0f64, 0.0f64);
+            let mut int_ok = true;
+            for &(k, b) in &rows[r] {
+                if k == j {
+                    continue;
+                }
+                let (lo, up) = (col_lo[k], col_up[k]);
+                if b > 0.0 {
+                    smin += b * lo;
+                    smax += b * up;
+                } else {
+                    smin += b * up;
+                    smax += b * lo;
+                }
+                if is_int[j] && (!is_int[k] || !integral(b / a)) {
+                    int_ok = false;
+                }
+            }
+            if is_int[j] && (!int_ok || !integral(rhs / a)) {
+                continue;
+            }
+            // 等号にしたときの x_j = (rhs - S) / a の、dir の向きの端が x_j の境界を越えない
+            let bound = if dir > 0.0 { col_up[j] } else { col_lo[j] };
+            if bound.is_finite() {
+                let (x1, x2) = ((rhs - smin) / a, (rhs - smax) / a);
+                if !x1.is_finite() || !x2.is_finite() {
+                    continue;
+                }
+                let far = if dir > 0.0 { x1.max(x2) } else { x1.min(x2) };
+                if dir * (far - bound) > 1e-9 * (1.0 + bound.abs()) {
+                    continue;
+                }
+            }
+            if upper {
+                row_lo[r] = row_up[r];
+            } else {
+                row_up[r] = row_lo[r];
+            }
+            used_row[r] = true;
+            for &(i, _) in &cols[j] {
+                if i < m {
+                    blocked_row[i] = true;
+                }
+            }
+            count += 1;
+            break;
+        }
+    }
+    count
+}
+
 /// 試作 `ENOMOTO_MIP_TREE2_FORCEQ` (既定では使わない、analysis/tree_close2_20261104.md): 等式行 `Σ_{k≠y} a_k x_k + a_y y = b` で、
 /// `y` が 0-1 列 1 本、残りの列の活動の範囲 `[L, U]` について `y = 0` と `y = 1` の右辺 (`b` と `b - a_y`) が `L` と `U` の
 /// 一方ずつに一致するもの (強制行が `y` の値ごとに決まる) から、残りの列ごとに `x_k = v0_k + (v1_k - v0_k) y` の 2 項等式を作る
@@ -3423,6 +3568,15 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     let (mut col_lo, mut col_up) = (p.col_lo.clone(), p.col_up.clone());
     let (mut p_row_lo, mut p_row_up) = (p.row_lo.clone(), p.row_up.clone());
     let tiny0 = fix_tiny_width_columns(&p.rows, &mut p_row_lo, &mut p_row_up, &mut col_lo, &mut col_up, &p.is_int, submip, "pre0");
+    // `ENOMOTO_MIP_DUALEQ=early` (試作、既定では使わない。PRESOLVE2): 前処理の前に、双対の議論で不等式行を等式にする
+    // ([`dual_row_equalities`])。元の行で錠を数えるので、前処理で消える冗長な行も錠に数えてしまう (gt2)。ふつうは `=1` (前処理の最後)
+    if env_str!("ENOMOTO_MIP_DUALEQ") == Some("early") && !submip {
+        let t0 = std::time::Instant::now();
+        let k = dual_row_equalities(&p.rows, &mut p_row_lo, &mut p_row_up, &p.cols, &p.cost, &p.is_int, &col_lo, &col_up);
+        if verbose {
+            eprintln!("MIP: presolve: DUALEQ made {k} rows equations ({:.2}s)", t0.elapsed().as_secs_f64());
+        }
+    }
     // `ENOMOTO_MIP_DUPCOL` (試作): 同じ列の 0-1 列のうち高い方を 0 に固定する ([`duplicate_binary_fixings`])
     if env_str!("ENOMOTO_MIP_DUPCOL").is_some() {
         let t0 = std::time::Instant::now();
