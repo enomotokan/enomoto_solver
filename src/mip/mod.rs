@@ -4016,6 +4016,11 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // `ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE`): LP による固定の前に、少しだけプロービングし ([`quick_probe_fixings`])、
     // 列の多くが固定されたらその境界で前処理をかけ直す (LP による固定・プロービングは小さくなった問題で行う)。
     // 手元 16 スレッド・60 秒: neos8 16.2 -> 6.6 秒、drayage-100-23 5.9 -> 3.0 秒 (analysis/eprostop_16t_20261028.md)
+    // `ENOMOTO_MIP_CLQACT` (試作): 最初の前処理の後、プロービング・LP による固定の前に、行の活動量のクリーク分割で係数と境界を締める
+    // ([`clqact_tighten`])。LP による固定の後にかけると、その LP の基底を根で使えなくなる (uccase9 で根の LP が 130 → 16462 反復)
+    if clqact_on() && lp_probe_secs.is_some() && !submip && depth == 0 && !RESTART_PRESOLVE.with(|f| f.get()) && !QUICK_PROBE_ACTIVE.with(|f| f.get()) {
+        clqact_tighten(&mut prob, verbose);
+    }
     if env_str!("ENOMOTO_MIP_DEBUG_INTCENSUS").is_some() && lp_probe_secs.is_some() && !submip && depth == 0 && !RESTART_PRESOLVE.with(|f| f.get()) && !QUICK_PROBE_ACTIVE.with(|f| f.get()) {
         int_census(&prob, &prob.col_lo, &prob.col_up, None, "a_presolve");
     }
@@ -5316,6 +5321,181 @@ pub(crate) fn clqtab_census(prob: &MipProblem, tag: &str) {
         cap[4],
         t2.elapsed().as_secs_f64()
     );
+}
+
+/// 文字と重み (正) の並びを、衝突グラフ `g` で重みの大きい順に貪欲にクリークに分ける (1 文字あたり先頭 64 個のクリークまで試す)。
+/// 重みの和が `own` を超える組は使わない (行そのものから出る組)。(クリークごとの最大の和, 文字ごとの「その文字を除いたときの和の減り」)。
+/// `lits` は重みの降順に並べ替える
+fn clq_partition(g: &clique::CliqueGraph, lits: &mut [(f64, u32)], own: f64) -> (f64, Vec<f64>) {
+    lits.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut cls: Vec<Vec<usize>> = Vec::new();
+    let mut of = vec![0usize; lits.len()];
+    for (q, &(w, l)) in lits.iter().enumerate() {
+        let mut put = None;
+        for (c, cl) in cls.iter().enumerate().take(64) {
+            if cl.iter().all(|&o| w + lits[o].0 <= own && g.adjacent(l, lits[o].1)) {
+                put = Some(c);
+                break;
+            }
+        }
+        match put {
+            Some(c) => {
+                cls[c].push(q);
+                of[q] = c;
+            }
+            None => {
+                of[q] = cls.len();
+                cls.push(vec![q]);
+            }
+        }
+    }
+    let total: f64 = cls.iter().map(|cl| lits[cl[0]].0).sum();
+    let dec: Vec<f64> = (0..lits.len())
+        .map(|q| {
+            let cl = &cls[of[q]];
+            if cl[0] == q { lits[q].0 - cl.get(1).map_or(0.0, |&o| lits[o].0) } else { 0.0 }
+        })
+        .collect();
+    (total, dec)
+}
+
+/// 試作 `ENOMOTO_MIP_CLQACT` (既定では使わない。analysis/clqprb_20261112.md §12): 前処理の後の問題で、行の活動量にクリーク分割を使って
+/// (1) 片側の行の 0-1 列の係数を締め (x_k の文字を偽にしたときの最大の活動量が右辺を下回るなら、その差 d だけ係数と右辺を減らす)、
+/// (2) 連続列・一般の整数列の境界を締める (最小の活動量から)。行は消さない。
+/// 使う衝突の組は前処理の後の**元の行**から出る組 ([`clique::CliqueGraph::build`]) で、締める行そのものから出る組は使わない
+/// (プロービングの含意は出どころが分からないので使わない)。係数を締めても行から出る組は減らない (右辺と係数が同じだけ減るので、
+/// 含む組は同じ、含まない組は増えるだけ) ので、ほかの行の元の組はずっと成り立ち、順にかけても整数の実行可能な点の集合は変わらない。
+/// (締めた係数の数, 締めた境界の数) を返す
+pub(crate) fn clqact_tighten(prob: &mut MipProblem, verbose: bool) -> (usize, usize) {
+    let t0 = std::time::Instant::now();
+    let n = prob.n;
+    let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0).collect();
+    let g = clique::CliqueGraph::build(n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, &prob.col_lo, &prob.col_up);
+    let maxlits = tunable!("ENOMOTO_T_MIP_CLQACT_MAXLITS", 1000usize, usize);
+    let (mut ncoef, mut nbnd) = (0usize, 0usize);
+    // 行 i の `sign * a x <= b` の形について、(固定・0-1 以外の列の (列, 符号つき係数), 増える側の文字, 減る側の文字, 0-1 以外の列の幅の和, 文字が全部偽の最大の活動量, 最小の活動量) を作る
+    #[allow(clippy::type_complexity)]
+    let parts = |prob: &MipProblem, i: usize, sign: f64| -> Option<(Vec<(usize, f64)>, Vec<(f64, u32)>, Vec<(f64, u32)>, f64, f64, f64)> {
+        let (lo, up) = (&prob.col_lo, &prob.col_up);
+        let (mut base_max, mut base_min, mut span) = (0.0, 0.0, 0.0);
+        let (mut ul, mut dl, mut other) = (Vec::new(), Vec::new(), Vec::new());
+        for &(j, a0) in &prob.rows[i] {
+            let a = sign * a0;
+            if lo[j] == up[j] {
+                base_max += a * lo[j];
+                base_min += a * lo[j];
+            } else if binary[j] {
+                if a > 0.0 {
+                    ul.push((a, 2 * j as u32));
+                    dl.push((a, 2 * j as u32 + 1));
+                    base_min += a;
+                } else {
+                    ul.push((-a, 2 * j as u32 + 1));
+                    dl.push((-a, 2 * j as u32));
+                    base_max += a;
+                }
+            } else {
+                let (mx, mn) = if a > 0.0 { (a * up[j], a * lo[j]) } else { (a * lo[j], a * up[j]) };
+                if !mx.is_finite() || !mn.is_finite() {
+                    return None;
+                }
+                base_max += mx;
+                base_min += mn;
+                span += mx - mn;
+                other.push((j, a));
+            }
+        }
+        (ul.len() >= 2 && ul.len() <= maxlits).then_some((other, ul, dl, span, base_max, base_min))
+    };
+    for i in 0..prob.m {
+        // (1) 係数の締め付け (片側の行だけ)
+        let side = match (prob.row_lo[i].is_finite(), prob.row_up[i].is_finite()) {
+            (false, true) => Some(1.0),
+            (true, false) => Some(-1.0),
+            _ => None,
+        };
+        if let Some(sign) = side {
+            for _ in 0..32 {
+                let b = if sign > 0.0 { prob.row_up[i] } else { -prob.row_lo[i] };
+                let tol = 1e-9 * (1.0 + b.abs());
+                let Some((_, mut ul, _, span, base_max, _)) = parts(prob, i, sign) else { break };
+                let (tot, dec) = clq_partition(&g, &mut ul, b - (base_max - span) + tol);
+                let max_new = base_max + tot;
+                if max_new <= b + tol {
+                    break;
+                }
+                // 締め幅 d = b - (l を偽にしたときの最大の活動量) が最大の文字
+                let best = (0..ul.len()).map(|q| (b - (max_new - dec[q]), q)).filter(|&(d, q)| d > 1e-6 * (1.0 + b.abs()) && d < ul[q].0 - 1e-9).max_by(|x, y| x.0.total_cmp(&y.0));
+                let Some((d, q)) = best else { break };
+                let l = ul[q].1;
+                let j = (l / 2) as usize;
+                let pos_lit = l % 2 == 0; // 文字が x_j (符号つき係数 > 0) か 1 - x_j (< 0) か
+                // 符号つきの形で: x_j の文字なら a' = a - d、b' = b - d。1 - x_j の文字なら a' = a + d、b は同じ
+                let k = prob.rows[i].iter().position(|t| t.0 == j).unwrap();
+                let a_signed = sign * prob.rows[i][k].1;
+                let (a2, b2) = if pos_lit { (a_signed - d, b - d) } else { (a_signed + d, b) };
+                prob.rows[i][k].1 = sign * a2;
+                if let Some(e) = prob.cols[j].iter_mut().find(|e| e.0 == i) {
+                    e.1 = sign * a2;
+                }
+                if sign > 0.0 {
+                    prob.row_up[i] = b2;
+                } else {
+                    prob.row_lo[i] = -b2;
+                }
+                ncoef += 1;
+            }
+        }
+        // (2) 0-1 以外の列の境界 (両方の向き)
+        for (sign, b, b_other) in [(1.0, prob.row_up[i], -prob.row_lo[i]), (-1.0, -prob.row_lo[i], prob.row_up[i])] {
+            if !b.is_finite() {
+                continue;
+            }
+            let Some((other, _, mut dl, span, _, base_min)) = parts(prob, i, sign) else { continue };
+            if other.is_empty() {
+                continue;
+            }
+            let old_dn: f64 = dl.iter().map(|t| t.0).sum();
+            let own_dn = if b_other.is_finite() { b_other + base_min + span + 1e-9 * (1.0 + b_other.abs()) } else { f64::INFINITY };
+            let (new_dn, _) = clq_partition(&g, &mut dl, own_dn);
+            let min_new = base_min - new_dn;
+            if min_new <= base_min - old_dn + 1e-9 * (1.0 + b.abs()) {
+                continue;
+            }
+            for &(j, a) in &other {
+                let cmin = if a > 0.0 { a * prob.col_lo[j] } else { a * prob.col_up[j] };
+                let v = (b - (min_new - cmin)) / a;
+                if a > 0.0 {
+                    let mut nv = v + 1e-9 * (1.0 + v.abs());
+                    if prob.is_int[j] {
+                        nv = (v + 1e-6).floor();
+                    }
+                    if nv < prob.col_up[j] - 1e-7 * (1.0 + prob.col_up[j].abs()) && nv >= prob.col_lo[j] {
+                        prob.col_up[j] = nv;
+                        nbnd += 1;
+                    }
+                } else {
+                    let mut nv = v - 1e-9 * (1.0 + v.abs());
+                    if prob.is_int[j] {
+                        nv = (v - 1e-6).ceil();
+                    }
+                    if nv > prob.col_lo[j] + 1e-7 * (1.0 + prob.col_lo[j].abs()) && nv <= prob.col_up[j] {
+                        prob.col_lo[j] = nv;
+                        nbnd += 1;
+                    }
+                }
+            }
+        }
+    }
+    if verbose {
+        eprintln!("MIP: presolve: CLQACT tightened {ncoef} coefficients and {nbnd} bounds ({} edges from rows, {:.2}s)", g.num_edges(), t0.elapsed().as_secs_f64());
+    }
+    (ncoef, nbnd)
+}
+
+/// [`clqact_tighten`] を使うか (`ENOMOTO_MIP_CLQACT`)。
+pub(crate) fn clqact_on() -> bool {
+    env_str!("ENOMOTO_MIP_CLQACT").is_some_and(|v| v != "0")
 }
 
 /// 試作 `ENOMOTO_MIP_CLQPRB` (既定では使わない。analysis/clqprb_20261112.md): 含意を集めるプロービング ([`probe`]) で、見つけた含意

@@ -1,0 +1,32 @@
+    0.54 MIP_FOLD: integer groups: 0 accepted, 0 rejected (V_R rows 12267; rejected for V_R 0, non-±1 0, TU 0; net false accepted by net 0 work 0 over 0, panics 0, cert fails 0)
+    0.56 MIP_FOLD: no fold (n 32504 m 14187) in 0.089s (reason line 526, ratio 0.981)
+    0.56 MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+    0.61 MIP: presolve: tightened 1830 coefficients (skipped 0 in rows redundant within tolerance), normalized 0 integer rows
+    0.61 MIP: presolve: rows 14187 -> 14039, free columns 32504 -> 31598, nonzeros 110790 -> 101260, postsolve steps 784 (parallel columns merged: 0 integer, 610 continuous)
+    0.61 MIP: early probing: 64 probed, 0 of 31598 free columns fixed (0.00s), not used
+    1.91 MIP: LP probing pass 1: 11 candidates, 0 fixings (12 LPs, 295 iters, 1.29s)
+    1.91 MIP: LP probing: tried 6 columns, fixed 0, LP 1.1200152000e2 -> 1.1200152000e2 (12 LPs, 295 iters, 1.29s)
+    1.91 MIP: LP probing: root LP 0.77s (8163 iters, size 147803), tried 6, fixed 0, basis passed true, total 8458 iters 1.29s
+    2.55 MIP: probing: equivalence pass with implications: 0 pairs found (0.27s), not used
+    2.59 MIP: probing: 21350 of 21350 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 669536 implications (0.67s, cpu 0.66s, work 5763280, pwork 446137408, chg 3146136)
+    2.59 MIP: probing: 0 equivalent binary pairs
+    2.65 MIP: presolve: CLQACT tightened 1830 coefficients and 0 bounds (245098 edges from rows, 0.06s)
+    2.65 HNFPRE: round 0 eq 10338 int_eq 90 rat_skip 0 comps 90 done 90 gave_up 0 cols 10980 rank 90 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.003s) gave_up_why 0/0/0
+    2.66 HNFPRE: round 0 tightened 0 columns
+    2.85 CUTMIX clique edges total 347578 rows 245098 implonly 102480 implpairs 669536 bin 21350
+    2.86 MIP: clique extension: 122 rows extended, 122 nonzeros added, 0 columns fixed, 0 duplicate and 122 dominated rows removed (347578 edges, 0.20s)
+    2.87 MIP: symmetry: SYMSIGN true SYMSCALE false: flipped 90, scaled 0, tie rows doubled 10248 of 13917 rows for the detection
+    2.89 MIP: symmetry: refinement 0.02s, work 2377963 (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)
+    3.64 MIP: symmetry: refinements stopped by the iteration cap 0 of 135 (ENOMOTO_MIP_HO6_SYMREFINE true)
+    3.69 MIP: symmetry: orbital fixing with 0 of 67 generators
+    3.70 MIP: symmetry: 1 full orbitopes (175x68)
+    3.70 MIP: symmetry: 67 generators, 259 orbits on 17612 columns, 0 lex-leader rows (0.83s, work 39030715, search 4355536, verify 26557326, detect 0.78s, refine 0.22s, log work 44784799)
+    3.70 MIP: fixed-charge check: vb rows 0 of 13917, continuous with vb 0 of 10248
+    3.72 MIP: root LP: the rows changed after LP probing; the row statuses are not used
+    3.72 MIP: root LP basis from the presolve LP probing: used (columns only)
+    3.74 MIP: probe basis guard: columns-only basis filled by the probe rows (basic 4444, new 1818, loose 0)
+    3.75 MIP: probe basis features: {"m0":14039,"nnz0":101260,"m1":13917,"nnz1":100528,"same_rows":12087,"kb":7655,"kb_fixed":0,"probe_basic_rows":6384,"probe_iters":8163,"probe_secs":0.770,"passed":true,"n_fixed":0,"singular":true,"pinf_cnt":null,"pinf_sum":null}
+    3.75 MIP: solving the root LP (0.06s)
+    4.34 MIP: FJ problem (FJ_P3): rows 13917 -> 13917, free columns 31598 -> 31598, 0 continuous bounds tightened (0.61s)
+    5.11 MIP: root LP 1.1200152000e2 (8514 iters, 1.41s)
+    5.11 MIP: root LP size: rows 13917, free columns 31598, nonzeros 100528

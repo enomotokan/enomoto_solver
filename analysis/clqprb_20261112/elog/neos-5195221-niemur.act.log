@@ -1,0 +1,45 @@
+    0.78 MIP_FOLD: integer groups: 0 accepted, 0 rejected (V_R rows 14388; rejected for V_R 0, non-±1 0, TU 0; net false accepted by net 0 work 0 over 0, panics 0, cert fails 0)
+    0.90 MIP_FOLD: no fold: only parallel rows (m 42256 -> 37504, columns not merged); the MIP presolve removes them
+    0.91 MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+    0.95 MIP: presolve: tightened 9504 coefficients (skipped 0 in rows redundant within tolerance), normalized 0 integer rows
+    0.96 MIP: presolve: rows 42256 -> 33813, free columns 14546 -> 12044, nonzeros 176586 -> 159594, postsolve steps 2502 (parallel columns merged: 0 integer, 0 continuous)
+    0.97 MIP: early probing: 64 probed, 0 of 12044 free columns fixed (0.01s), not used
+    2.28 MIP: LP probing pass 1: 1049 candidates, 0 fixings (10 LPs, 504 iters, 1.31s)
+    2.28 MIP: LP probing: tried 5 columns, fixed 0, LP 0.0000000000e0 -> 0.0000000000e0 (10 LPs, 504 iters, 1.31s)
+    2.28 MIP: LP probing: root LP 0.50s (1792 iters, size 207953), tried 5, fixed 0, basis passed true, total 2296 iters 1.31s
+    2.83 MIP: probing: equivalence pass with implications: 3004 pairs found (0.18s), used
+    2.84 MIP: probing: 13267 of 7290 binaries probed (2 passes), 1073 fixed, 4950 bounds tightened, 82580 implications (0.53s, cpu 0.53s, work 16038363, pwork 223594803, chg 1058372)
+    2.84 MIP: probing: 1540 equivalent binary pairs
+    2.84 MIP: probing: fixed 730 columns of width within tolerance
+    2.84 MIP: presolve again after probing (round 1)
+    2.84 MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+    2.92 MIP: presolve: tightened 4022 coefficients (skipped 0 in rows redundant within tolerance), normalized 0 integer rows
+    2.93 MIP: presolve: merged 396 parallel rows (0 new equations)
+    2.93 MIP: presolve: rows 33813 -> 27798, free columns 10120 -> 9914, nonzeros 159594 -> 131064, postsolve steps 206 (parallel columns merged: 0 integer, 0 continuous)
+    3.21 MIP: probing: equivalence pass with implications: 2230 pairs found (0.13s), used
+    3.22 MIP: probing: 5890 of 5890 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 86504 implications (0.29s, cpu 0.29s, work 9490883, pwork 128668267, chg 699070)
+    3.22 MIP: probing: 1115 equivalent binary pairs
+    3.23 MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+    3.27 MIP: presolve: merged 342 parallel rows (0 new equations)
+    3.27 MIP: presolve: rows 28913 -> 25480, free columns 9914 -> 8970, nonzeros 133294 -> 123840, postsolve steps 944 (parallel columns merged: 0 integer, 0 continuous)
+    3.49 MIP: probing: equivalence pass with implications: 0 pairs found (0.12s), not used
+    3.49 MIP: probing: 4946 of 4946 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 41388 implications (0.22s, cpu 0.22s, work 6298858, pwork 97929385, chg 487960)
+    3.49 MIP: probing: 0 equivalent binary pairs
+    3.52 MIP: presolve: CLQACT tightened 4022 coefficients and 4022 bounds (10115 edges from rows, 0.02s)
+    3.52 HNFPRE: round 0 eq 2274 int_eq 2274 rat_skip 0 comps 131 done 131 gave_up 0 cols 4946 rank 1998 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.006s) gave_up_why 0/0/0
+    3.52 HNFPRE: round 0 tightened 0 columns
+    3.54 CUTMIX clique edges total 23896 rows 10115 implonly 13781 implpairs 41388 bin 4946
+    3.56 MIP: clique extension: 5498 rows extended, 7941 nonzeros added, 0 columns fixed, 0 duplicate and 1718 dominated rows removed (23896 edges, 0.03s)
+    3.57 MIP: symmetry: SYMSIGN true SYMSCALE false: flipped 582, scaled 0, tie rows doubled 1197 of 23762 rows for the detection
+    3.60 MIP: symmetry: refinement 0.03s, work 1531695 (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)
+    3.61 MIP: symmetry: refinements stopped by the iteration cap 0 of 1 (ENOMOTO_MIP_HO6_SYMREFINE true)
+    3.61 MIP: symmetry: none (0.05s, work 1531695, search 0, verify 0, detect 0.05s, refine 0.03s, log work 7196420)
+    3.62 MIP: fixed-charge check: vb rows 4022 of 23762, continuous with vb 4022 of 4024
+    3.62 MIP: root LP: the rows changed after LP probing; the row statuses are not used
+    3.62 MIP: root LP basis from the presolve LP probing: used (columns only)
+    3.64 MIP: probe basis guard: columns-only basis filled by the probe rows (basic 8714, new 13415, loose 0)
+    3.65 MIP: probe basis features: {"m0":33813,"nnz0":159594,"m1":23762,"nnz1":126013,"same_rows":9053,"kb":1633,"kb_fixed":321,"probe_basic_rows":32180,"probe_iters":1792,"probe_secs":0.501,"passed":true,"n_fixed":0,"singular":true,"pinf_cnt":null,"pinf_sum":null}
+    3.65 MIP: solving the root LP (0.05s)
+    4.16 MIP: FJ problem (FJ_P3): rows 23762 -> 23762, free columns 8970 -> 8970, 2 continuous bounds tightened (0.54s)
+    4.25 MIP: root LP 0.0000000000e0 (1741 iters, 0.64s)
+    4.25 MIP: root LP size: rows 23762, free columns 8970, nonzeros 126013

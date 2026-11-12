@@ -8,5 +8,7 @@ CFGS = {
     "clqd": {"ENOMOTO_MIP_CLQPRB": "d"},
     # clqk = clq + 既存の試作 GAP4 の k (locks の固定に含意も使い、根で実行不能なら固定率を半分にしてやり直す。puriri の対策の試し)
     "clqk": {"ENOMOTO_MIP_CLQPRB": "1", "ENOMOTO_MIP_GAP4": "k"},
+    # clqa = clq + 試作 CLQACT (行の活動量のクリーク分割で係数・境界を締める、analysis/clqprb_20261112.md §12)
+    "clqa": {"ENOMOTO_MIP_CLQPRB": "1", "ENOMOTO_MIP_CLQACT": "1"},
 }
 LOGENV = {"ENOMOTO_MIP_LOG": "1"}

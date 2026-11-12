@@ -6,14 +6,15 @@ R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
 def t(r): return min(r["result"]["time"], r["tl"]) if solved(r) else r["tl"]
 def solved(r): return r["result"].get("status") in ("optimal", "infeasible")
 probs = sorted({p for p, c, s in R}); seeds = sorted({s for p, c, s in R})
-cands = sys.argv[1:] or sorted({c for p, c, s in R} - {"def"})
+BASE = __import__('os').environ.get('BASE', 'def')   # 対の基準 (Q は BASE=clq)
+cands = sys.argv[1:] or sorted({c for p, c, s in R} - {BASE})
 crash = sum(1 for r in rows if r["result"].get("status") in (None, "crash", "error", "fetch_error"))
 print(f"行数 {len(rows)}、crash {crash}")
 for c in cands:
     logr = collections.defaultdict(list); ns = [0, 0]; bad = []; n = 0
     for p in probs:
         for s in seeds:
-            a, b = R.get((p, "def", s)), R.get((p, c, s))
+            a, b = R.get((p, BASE, s)), R.get((p, c, s))
             if not a or not b: continue
             n += 1; ns[0] += solved(a); ns[1] += solved(b)
             sa, sb = a["result"].get("status"), b["result"].get("status")
@@ -28,10 +29,10 @@ for c in cands:
     ps = list(logr); est = sgm(ps); random.seed(0)
     bs = sorted(sgm([random.choice(ps) for _ in ps]) for _ in range(4000))
     print(f"\n== {c}: 対 {n} 組、食い違い {len(bad)} {bad}")
-    print(f"解けた数: def {ns[0]} / {c} {ns[1]}")
+    print(f"解けた数: {BASE} {ns[0]} / {c} {ns[1]}")
     print(f"対の比 (どちらかが解けた {len(ps)} 問): {est-1:+.1%} [{bs[100]-1:+.1%}, {bs[3899]-1:+.1%}]")
     for p in ps:
         v = logr[p]
         if len(v) == len(seeds) and all(x > math.log(1.25) for x in v): print("  全種で遅い", p, [round(math.exp(x), 2) for x in v])
         if len(v) == len(seeds) and all(x < math.log(0.8) for x in v): print("  全種で速い", p, [round(math.exp(x), 2) for x in v])
-    print("  最大 RSS", max(r["max_rss_mb"] for r in rows if r["cfg"] == c), "MB (def", max(r["max_rss_mb"] for r in rows if r["cfg"] == "def"), "MB)")
+    print("  最大 RSS", max(r["max_rss_mb"] for r in rows if r["cfg"] == c), "MB (def", max(r["max_rss_mb"] for r in rows if r["cfg"] == BASE), "MB)")
