@@ -13,3 +13,16 @@
 | 3 | `bash analysis/erwait_20261111/shard58.sh 4 3` | res58_sh3.jsonl |
 
 終わったら `res58_sh<k>.jsonl` だけをコミットして push する (`git pull --rebase --autostash origin ccr-1beed81b-ex0uhq` の後)。
+
+## 2 組目: def と ewk (`ENOMOTO_MIP_ERWAIT=sbkc`) (2026-11-12 に追加)
+
+同じ分け方 (分担 k は i % 4 == k の問題、種 1・2・3、問題ごとに def → ewk)。def も同じ分担で回し直す (同じ分担の中で対にするため)。
+
+| 分担 | コマンド (リポジトリの頭で) | 結果 |
+|---|---|---|
+| 0 | `bash analysis/erwait_20261111/shard58.sh 4 0 def,ewk resk58` | resk58_sh0.jsonl |
+| 1 | `bash analysis/erwait_20261111/shard58.sh 4 1 def,ewk resk58` | resk58_sh1.jsonl |
+| 2 | `bash analysis/erwait_20261111/shard58.sh 4 2 def,ewk resk58` | resk58_sh2.jsonl |
+| 3 | `bash analysis/erwait_20261111/shard58.sh 4 3 def,ewk resk58` | resk58_sh3.jsonl |
+
+終わったら `resk58_sh<k>.jsonl` だけをコミットして push する。比べは `python analysis/erwait_20261111/cmp58.py def ewk "resk58_sh*.jsonl"`。
