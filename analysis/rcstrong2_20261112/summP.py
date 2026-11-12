@@ -35,4 +35,4 @@ for c in cands:
         v = logr[p]
         if len(v) == len(seeds) and all(x > math.log(1.25) for x in v): print("  全種で遅い", p, [round(math.exp(x), 2) for x in v])
         if len(v) == len(seeds) and all(x < math.log(0.8) for x in v): print("  全種で速い", p, [round(math.exp(x), 2) for x in v])
-    print("  最大 RSS", max(r["max_rss_mb"] for r in rows if r["cfg"] == c), "MB (def", max(r["max_rss_mb"] for r in rows if r["cfg"] == BASE), "MB)")
+    print("  最大 RSS", max(r["max_rss_mb"] for r in rows if r["cfg"] == c), "MB (" + BASE + ", max(r["max_rss_mb"] for r in rows if r["cfg"] == BASE), "MB)")
