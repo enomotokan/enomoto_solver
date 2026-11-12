@@ -1,0 +1,576 @@
+
+=== decomp2 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS        10765/14387/64073/14387   ENOMOTO                8751/7679/44045
+  前処理後 行/列/非零(/整数)                   HiGHS           5360/5292/25215/5292   ENOMOTO                6483/6766/32494
+  前処理の終わり (秒)                        HiGHS                           0.38   ENOMOTO                           0.03
+  根の LP の値                           HiGHS                           -160   ENOMOTO                           -160
+  根の LP の時刻 (秒)                      HiGHS                           0.51   ENOMOTO                           1.04
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                           -160
+  再スタートの回数 (根 / 木)                   HiGHS                          0 / 0   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS                              -   ENOMOTO                4556/5374/24286
+  木に入る直前の下界                          HiGHS                           -160   ENOMOTO                              -
+  木に入る時刻 (秒)                         HiGHS                            5.1   ENOMOTO                              -
+  最初の暫定解 値                           HiGHS                             30   ENOMOTO                            -65
+  最初の暫定解 時刻 (出どころ)                   HiGHS                        0.4 (J)   ENOMOTO               1.13 (Local-MIP)
+  最後に暫定解が良くなった時刻                     HiGHS                          21.24   ENOMOTO               1.27 (Local-MIP)
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                          21.24   ENOMOTO                           1.31
+  終わり 下界                             HiGHS                           -160   ENOMOTO                           -160
+  終わり 暫定解                            HiGHS                           -160   ENOMOTO                           -160
+  ノード数                               HiGHS                            295   ENOMOTO                              0
+  木のノード/秒                            HiGHS                      18.277571   ENOMOTO                              -
+  LP の反復の総数                          HiGHS                          51869   ENOMOTO                              -
+  ENOMOTO の木: 強分岐 None 秒 (None LP)、ノードのカット None 秒、ノードの LP 0.0 秒 (0.0 反復/LP、平均 0.0 行)、開いたノード None
+  HiGHS のノードの LP: 89.4 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 0.0、分離 8597.0、ヒューリスティクス 16893.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS          -160 /         -142   ENOMOTO                          終了後
+      30: HiGHS                          終了後   ENOMOTO                          終了後
+      60: HiGHS                          終了後   ENOMOTO                          終了後
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS          -160 /         -160   ENOMOTO             - /         -160
+
+=== app1-1 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS           4926/2480/18275/1225   ENOMOTO                4926/2480/18275
+  前処理後 行/列/非零(/整数)                   HiGHS           3242/1059/19029/1030   ENOMOTO                3649/1253/24981
+  前処理の終わり (秒)                        HiGHS                           0.16   ENOMOTO                           0.01
+  根の LP の値                           HiGHS                     -20.956665   ENOMOTO                     -3.9938279
+  根の LP の時刻 (秒)                      HiGHS                           0.21   ENOMOTO                           0.47
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                             -3
+  再スタートの回数 (根 / 木)                   HiGHS                          1 / 1   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS             2684/780/15429/751   ENOMOTO                3457/1134/23564
+  木に入る直前の下界                          HiGHS                             -4   ENOMOTO                             -3
+  木に入る時刻 (秒)                         HiGHS                           3.89   ENOMOTO                           3.31
+  最初の暫定解 値                           HiGHS                              0   ENOMOTO                              0
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       0.18 (J)   ENOMOTO               1.06 (Local-MIP)
+  最後に暫定解が良くなった時刻                     HiGHS                          20.17   ENOMOTO          10.84 (tree rounding)
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                          20.17   ENOMOTO                          10.84
+  終わり 下界                             HiGHS                             -3   ENOMOTO                             -3
+  終わり 暫定解                            HiGHS                             -3   ENOMOTO                             -3
+  ノード数                               HiGHS                           2663   ENOMOTO                           4684
+  木のノード/秒                            HiGHS                      163.57494   ENOMOTO                      622.04515
+  LP の反復の総数                          HiGHS                          84229   ENOMOTO                          36187
+  ENOMOTO の木: 強分岐 3.03 秒 (1102 LP)、ノードのカット 0.15 秒、ノードの LP 2.63 秒 (12.6 反復/LP、平均 3546.5 行)、開いたノード 0
+  HiGHS のノードの LP: 25.1 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 0.0、分離 2420.0、ヒューリスティクス 15025.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS            -4 /            0   ENOMOTO            -3 /           -2
+      30: HiGHS                          終了後   ENOMOTO                          終了後
+      60: HiGHS                          終了後   ENOMOTO                          終了後
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS            -3 /           -3   ENOMOTO            -3 /           -3
+
+=== neos-911970 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS               107/888/3408/840   ENOMOTO                   107/888/3408
+  前処理後 行/列/非零(/整数)                   HiGHS               107/888/3408/864   ENOMOTO                   107/888/3408
+  前処理の終わり (秒)                        HiGHS                           0.01   ENOMOTO                              0
+  根の LP の値                           HiGHS                          23.26   ENOMOTO                          23.26
+  根の LP の時刻 (秒)                      HiGHS                           0.07   ENOMOTO                           0.06
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                      46.864167
+  再スタートの回数 (根 / 木)                   HiGHS                          2 / 0   ENOMOTO                          2 / 0
+  最後の再スタート後 行/列/非零                   HiGHS               107/738/2808/714   ENOMOTO                   284/821/8775
+  木に入る直前の下界                          HiGHS                      52.739936   ENOMOTO                      51.986384
+  木に入る時刻 (秒)                         HiGHS                           4.92   ENOMOTO                           5.58
+  最初の暫定解 値                           HiGHS                         203.04   ENOMOTO                         381.06
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       0.07 (R)   ENOMOTO               0.11 (Local-MIP)
+  最後に暫定解が良くなった時刻                     HiGHS                          24.96   ENOMOTO         17.12 (other thread: tree local branching)
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                          27.29   ENOMOTO                          40.21
+  終わり 下界                             HiGHS                          54.76   ENOMOTO                          54.76
+  終わり 暫定解                            HiGHS                          54.76   ENOMOTO                          54.76
+  ノード数                               HiGHS                           8867   ENOMOTO                           8841
+  木のノード/秒                            HiGHS                      396.37908   ENOMOTO                      255.29887
+  LP の反復の総数                          HiGHS                         259151   ENOMOTO                         405482
+  ENOMOTO の木: 強分岐 3.74 秒 (456 LP)、ノードのカット 1.5 秒、ノードの LP 24.92 秒 (197.4 反復/LP、平均 747.4 行)、開いたノード 0
+  HiGHS のノードの LP: 15.1 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 90180.0、分離 19276.0、ヒューリスティクス 16194.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS     53.191084 /        56.26   ENOMOTO     52.139043 /        59.11
+      30: HiGHS                          終了後   ENOMOTO      52.75331 /        54.76
+      60: HiGHS                          終了後   ENOMOTO                          終了後
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS         54.76 /        54.76   ENOMOTO     54.728571 /        54.76
+
+=== binkar10_1 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS             1026/2298/4496/170   ENOMOTO                 1026/2298/4496
+  前処理後 行/列/非零(/整数)                   HiGHS              820/2013/3848/170   ENOMOTO                  822/1440/3434
+  前処理の終わり (秒)                        HiGHS                           0.01   ENOMOTO                           0.01
+  根の LP の値                           HiGHS                       6637.188   ENOMOTO                       6637.188
+  根の LP の時刻 (秒)                      HiGHS                           0.03   ENOMOTO                           0.09
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                      6689.0687
+  再スタートの回数 (根 / 木)                   HiGHS                          1 / 0   ENOMOTO                          2 / 0
+  最後の再スタート後 行/列/非零                   HiGHS              780/1907/3650/174   ENOMOTO                  769/1245/3887
+  木に入る直前の下界                          HiGHS                      6701.2255   ENOMOTO                      6717.5619
+  木に入る時刻 (秒)                         HiGHS                           1.33   ENOMOTO                           2.88
+  最初の暫定解 値                           HiGHS                        2011758   ENOMOTO                        9226.41
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       0.02 (J)   ENOMOTO               0.27 (Local-MIP)
+  最後に暫定解が良くなった時刻                     HiGHS                          27.31   ENOMOTO          5.55 (other thread: tree randomized rounding)
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                          31.22   ENOMOTO                           7.19
+  終わり 下界                             HiGHS                         6742.2   ENOMOTO                         6742.2
+  終わり 暫定解                            HiGHS                         6742.2   ENOMOTO                         6742.2
+  ノード数                               HiGHS                           3955   ENOMOTO                           1965
+  木のノード/秒                            HiGHS                       132.3185   ENOMOTO                      455.91647
+  LP の反復の総数                          HiGHS                         161184   ENOMOTO                          39701
+  ENOMOTO の木: 強分岐 1.25 秒 (926 LP)、ノードのカット 0.31 秒、ノードの LP 1.86 秒 (22.9 反復/LP、平均 934.8 行)、開いたノード 0
+  HiGHS のノードの LP: 24.4 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 36991.0、分離 13969.0、ヒューリスティクス 13572.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS     6704.0443 /      6747.31   ENOMOTO                          終了後
+      30: HiGHS      6724.072 /       6742.2   ENOMOTO                          終了後
+      60: HiGHS                          終了後   ENOMOTO                          終了後
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS        6742.2 /       6742.2   ENOMOTO           inf /       6742.2
+
+=== piperout-08 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS        14589/10399/44959/10375   ENOMOTO              14589/10385/44959
+  前処理後 行/列/非零(/整数)                   HiGHS           6875/5885/23684/5885   ENOMOTO                8027/7512/28041
+  前処理の終わり (秒)                        HiGHS                          19.95   ENOMOTO                           0.04
+  根の LP の値                           HiGHS                         124955   ENOMOTO                         125023
+  根の LP の時刻 (秒)                      HiGHS                          20.17   ENOMOTO                           10.3
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                         125055
+  再スタートの回数 (根 / 木)                   HiGHS                          0 / 0   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS                              -   ENOMOTO                6883/5903/23134
+  木に入る直前の下界                          HiGHS                         125005   ENOMOTO                         125055
+  木に入る時刻 (秒)                         HiGHS                          24.76   ENOMOTO                          16.02
+  最初の暫定解 値                           HiGHS                         125055   ENOMOTO                         209559
+  最初の暫定解 時刻 (出どころ)                   HiGHS                      24.76 (L)   ENOMOTO         15.95 (fractional diving)
+  最後に暫定解が良くなった時刻                     HiGHS                          24.76   ENOMOTO          22.4 (other thread (tree))
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                          24.76   ENOMOTO                          22.42
+  終わり 下界                             HiGHS                         125055   ENOMOTO                         125055
+  終わり 暫定解                            HiGHS                         125055   ENOMOTO                         125055
+  ノード数                               HiGHS                              1   ENOMOTO                            134
+  木のノード/秒                            HiGHS                              -   ENOMOTO                        20.9375
+  LP の反復の総数                          HiGHS                           5602   ENOMOTO                          53040
+  ENOMOTO の木: 強分岐 4.43 秒 (194 LP)、ノードのカット 0.12 秒、ノードの LP 1.18 秒 (89.3 反復/LP、平均 7912.6 行)、開いたノード 0
+  HiGHS のノードの LP: 3033.0 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 0.0、分離 2545.0、ヒューリスティクス 24.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS                          終了後   ENOMOTO                          終了後
+      30: HiGHS                          終了後   ENOMOTO                          終了後
+      60: HiGHS                          終了後   ENOMOTO                          終了後
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS        125055 /       125055   ENOMOTO        125055 /       125055
+
+=== neos-950242 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS         34224/5760/104160/5760   ENOMOTO              34224/5760/104160
+  前処理後 行/列/非零(/整数)                   HiGHS         32736/4272/101184/4272   ENOMOTO              32976/4512/101664
+  前処理の終わり (秒)                        HiGHS                           0.37   ENOMOTO                           0.05
+  根の LP の値                           HiGHS                              1   ENOMOTO                              4
+  根の LP の時刻 (秒)                      HiGHS                            0.7   ENOMOTO                           8.33
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                              4
+  再スタートの回数 (根 / 木)                   HiGHS                          0 / 0   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS                              -   ENOMOTO                              -
+  木に入る直前の下界                          HiGHS                              2   ENOMOTO                              -
+  木に入る時刻 (秒)                         HiGHS                          22.72   ENOMOTO                              -
+  最初の暫定解 値                           HiGHS                              5   ENOMOTO                              4
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       0.42 (J)   ENOMOTO               8.34 (Local-MIP)
+  最後に暫定解が良くなった時刻                     HiGHS                          24.52   ENOMOTO               8.34 (Local-MIP)
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                          26.23   ENOMOTO                           8.52
+  終わり 下界                             HiGHS                              4   ENOMOTO                              4
+  終わり 暫定解                            HiGHS                              4   ENOMOTO                              4
+  ノード数                               HiGHS                             14   ENOMOTO                              0
+  木のノード/秒                            HiGHS                       3.988604   ENOMOTO                              -
+  LP の反復の総数                          HiGHS                          38755   ENOMOTO                              -
+  ENOMOTO の木: 強分岐 None 秒 (None LP)、ノードのカット None 秒、ノードの LP 0.0 秒 (0.0 反復/LP、平均 0.0 行)、開いたノード None
+  HiGHS のノードの LP: 363.5 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 0.0、分離 7494.0、ヒューリスティクス 26172.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS             2 /            5   ENOMOTO                          終了後
+      30: HiGHS                          終了後   ENOMOTO                          終了後
+      60: HiGHS                          終了後   ENOMOTO                          終了後
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS             4 /            4   ENOMOTO             - /            4
+
+=== cbs-cta ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS         10112/24793/64388/2467   ENOMOTO               10112/8293/64388
+  前処理後 行/列/非零(/整数)                   HiGHS           9964/8214/31146/2467   ENOMOTO                9964/8214/31148
+  前処理の終わり (秒)                        HiGHS                           0.22   ENOMOTO                           0.04
+  根の LP の値                           HiGHS                              0   ENOMOTO                              0
+  根の LP の時刻 (秒)                      HiGHS                           0.48   ENOMOTO                           1.04
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                              0
+  再スタートの回数 (根 / 木)                   HiGHS                          1 / 0   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS           9964/8213/31146/2466   ENOMOTO                              -
+  木に入る直前の下界                          HiGHS                              0   ENOMOTO                              0
+  木に入る時刻 (秒)                         HiGHS                          57.89   ENOMOTO                           23.3
+  最初の暫定解 値                           HiGHS                       10364883   ENOMOTO                      11899.886
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       0.48 (R)   ENOMOTO               2.77 (Local-MIP)
+  最後に暫定解が良くなった時刻                     HiGHS                          57.89   ENOMOTO         75.65 (other thread: tree proximity)
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                          57.89   ENOMOTO                          76.11
+  終わり 下界                             HiGHS                              0   ENOMOTO                              0
+  終わり 暫定解                            HiGHS                              0   ENOMOTO                              0
+  ノード数                               HiGHS                           1931   ENOMOTO                           1575
+  木のノード/秒                            HiGHS                              -   ENOMOTO                      29.823897
+  LP の反復の総数                          HiGHS                          90595   ENOMOTO                          68993
+  ENOMOTO の木: 強分岐 25.14 秒 (148 LP)、ノードのカット 0.24 秒、ノードの LP 22.65 秒 (86.1 反復/LP、平均 10288.8 行)、開いたノード 0
+  HiGHS のノードの LP: 31.4 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 0.0、分離 12447.0、ヒューリスティクス 17527.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS             0 /     10364883   ENOMOTO             - /    3899.4213
+      30: HiGHS             0 /    329793.39   ENOMOTO             0 /    129.95924
+      60: HiGHS                          終了後   ENOMOTO             0 /    129.95924
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS             0 /            0   ENOMOTO             0 /2.7873237e-10
+
+=== ns1208400 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS           4289/2883/81746/2880   ENOMOTO                4289/2883/81746
+  前処理後 行/列/非零(/整数)                   HiGHS           1981/2597/73621/2597   ENOMOTO                1981/2596/73620
+  前処理の終わり (秒)                        HiGHS                           0.19   ENOMOTO                           0.05
+  根の LP の値                           HiGHS                              0   ENOMOTO                              0
+  根の LP の時刻 (秒)                      HiGHS                            1.3   ENOMOTO                           3.62
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                              0
+  再スタートの回数 (根 / 木)                   HiGHS                          1 / 0   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS           1961/2540/72158/2540   ENOMOTO                1981/2594/73590
+  木に入る直前の下界                          HiGHS                              0   ENOMOTO                              0
+  木に入る時刻 (秒)                         HiGHS                          30.85   ENOMOTO                          13.58
+  最初の暫定解 値                           HiGHS                              2   ENOMOTO                              2
+  最初の暫定解 時刻 (出どころ)                   HiGHS                      99.79 (B)   ENOMOTO               4.22 (Local-MIP)
+  最後に暫定解が良くなった時刻                     HiGHS                          99.79   ENOMOTO               4.22 (Local-MIP)
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                      TimeLimit
+  終わり 時刻 (秒)                         HiGHS                         100.07   ENOMOTO                         120.06
+  終わり 下界                             HiGHS                              2   ENOMOTO                              0
+  終わり 暫定解                            HiGHS                              2   ENOMOTO                              2
+  ノード数                               HiGHS                            673   ENOMOTO                          10500
+  木のノード/秒                            HiGHS                      9.7226235   ENOMOTO                      98.610068
+  LP の反復の総数                          HiGHS                         421109   ENOMOTO                         423511
+  ENOMOTO の木: 強分岐 5.1 秒 (132 LP)、ノードのカット 2.9 秒、ノードの LP 92.06 秒 (189.2 反復/LP、平均 2065.3 行)、開いたノード 531
+  HiGHS のノードの LP: 127.4 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 146858.0、分離 18264.0、ヒューリスティクス 170251.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS             0 /          inf   ENOMOTO             - /            2
+      30: HiGHS             0 /          inf   ENOMOTO             0 /            2
+      60: HiGHS             0 /          inf   ENOMOTO             0 /            2
+     120: HiGHS                          終了後   ENOMOTO             0 /            2
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS             2 /            2   ENOMOTO             0 /            2
+
+=== fhnw-binpack4-48 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS           4480/3710/17290/3605   ENOMOTO                4480/3710/17290
+  前処理後 行/列/非零(/整数)                   HiGHS           4480/3330/16530/3225   ENOMOTO                4480/3330/16530
+  前処理の終わり (秒)                        HiGHS                            0.1   ENOMOTO                              0
+  根の LP の値                           HiGHS                              0   ENOMOTO                              -
+  根の LP の時刻 (秒)                      HiGHS                           0.35   ENOMOTO                              -
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                              -
+  再スタートの回数 (根 / 木)                   HiGHS                          0 / 2   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS           4480/3330/16530/3225   ENOMOTO                              -
+  木に入る直前の下界                          HiGHS                              0   ENOMOTO                              -
+  木に入る時刻 (秒)                         HiGHS                           8.56   ENOMOTO                              -
+  最初の暫定解 値                           HiGHS                              -   ENOMOTO                              -
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       - (None)   ENOMOTO                       - (None)
+  最後に暫定解が良くなった時刻                     HiGHS                              -   ENOMOTO                       - (None)
+  終わり 状態                             HiGHS             Time limit reached   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                         120.03   ENOMOTO                           1.03
+  終わり 下界                             HiGHS                              0   ENOMOTO                              0
+  終わり 暫定解                            HiGHS                            inf   ENOMOTO                              0
+  ノード数                               HiGHS                           3085   ENOMOTO                              0
+  木のノード/秒                            HiGHS                      27.675608   ENOMOTO                              -
+  LP の反復の総数                          HiGHS                         493634   ENOMOTO                              -
+  ENOMOTO の木: 強分岐 None 秒 (None LP)、ノードのカット None 秒、ノードの LP None 秒 (None 反復/LP、平均 None 行)、開いたノード None
+  HiGHS のノードの LP: 66.2 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 0.0、分離 54734.0、ヒューリスティクス 234773.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS             0 /          inf   ENOMOTO                          終了後
+      30: HiGHS             0 /          inf   ENOMOTO                          終了後
+      60: HiGHS             0 /          inf   ENOMOTO                          終了後
+     120: HiGHS             0 /          inf   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS             0 /          inf   ENOMOTO                          終了後
+
+=== markshare_4_0 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS                    4/34/123/30   ENOMOTO                       4/34/123
+  前処理後 行/列/非零(/整数)                   HiGHS                    4/34/123/34   ENOMOTO                       4/30/119
+  前処理の終わり (秒)                        HiGHS                              0   ENOMOTO                              0
+  根の LP の値                           HiGHS                              0   ENOMOTO                              0
+  根の LP の時刻 (秒)                      HiGHS                           0.01   ENOMOTO                           0.01
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                              0
+  再スタートの回数 (根 / 木)                   HiGHS                          0 / 6   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS                    4/34/122/34   ENOMOTO                              -
+  木に入る直前の下界                          HiGHS                              0   ENOMOTO                              0
+  木に入る時刻 (秒)                         HiGHS                           0.04   ENOMOTO                           0.07
+  最初の暫定解 値                           HiGHS                           3082   ENOMOTO                             68
+  最初の暫定解 時刻 (出どころ)                   HiGHS                          0 (J)   ENOMOTO                    0.01 (tree)
+  最後に暫定解が良くなった時刻                     HiGHS                          21.57   ENOMOTO          0.59 (other thread (tree))
+  終わり 状態                             HiGHS             Time limit reached   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                            120   ENOMOTO                           2.08
+  終わり 下界                             HiGHS                              0   ENOMOTO                              1
+  終わり 暫定解                            HiGHS                              1   ENOMOTO                              1
+  ノード数                               HiGHS                         824062   ENOMOTO                         247146
+  木のノード/秒                            HiGHS                      6869.4732   ENOMOTO                      122958.21
+  LP の反復の総数                          HiGHS                        2273000   ENOMOTO                         142036
+  ENOMOTO の木: 強分岐 0.02 秒 (18 LP)、ノードのカット 0.03 秒、ノードの LP 0.7 秒 (4.5 反復/LP、平均 4.3 行)、開いたノード 0
+  HiGHS のノードの LP: 2.4 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 882.0、分離 165379.0、ヒューリスティクス 131020.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS             0 /            8   ENOMOTO                          終了後
+      30: HiGHS             0 /            1   ENOMOTO                          終了後
+      60: HiGHS             0 /            1   ENOMOTO                          終了後
+     120: HiGHS             0 /            1   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS             0 /            1   ENOMOTO           inf /            1
+
+=== neos-3004026-krka ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS        12545/17030/41860/17030   ENOMOTO               10401/8451/33281
+  前処理後 行/列/非零(/整数)                   HiGHS          10400/8450/33280/8450   ENOMOTO               10400/8450/33280
+  前処理の終わり (秒)                        HiGHS                           0.14   ENOMOTO                           0.02
+  根の LP の値                           HiGHS                              0   ENOMOTO                              -
+  根の LP の時刻 (秒)                      HiGHS                           0.67   ENOMOTO                              -
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                              -
+  再スタートの回数 (根 / 木)                   HiGHS                          0 / 1   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS          10400/8450/33280/8450   ENOMOTO                              -
+  木に入る直前の下界                          HiGHS                              0   ENOMOTO                              -
+  木に入る時刻 (秒)                         HiGHS                           7.62   ENOMOTO                              -
+  最初の暫定解 値                           HiGHS                              -   ENOMOTO                              -
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       - (None)   ENOMOTO                       - (None)
+  最後に暫定解が良くなった時刻                     HiGHS                              -   ENOMOTO                       - (None)
+  終わり 状態                             HiGHS             Time limit reached   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                         120.06   ENOMOTO                           0.85
+  終わり 下界                             HiGHS                              0   ENOMOTO                              0
+  終わり 暫定解                            HiGHS                            inf   ENOMOTO                              0
+  ノード数                               HiGHS                           2782   ENOMOTO                              0
+  木のノード/秒                            HiGHS                      24.742085   ENOMOTO                              -
+  LP の反復の総数                          HiGHS                         323300   ENOMOTO                              -
+  ENOMOTO の木: 強分岐 None 秒 (None LP)、ノードのカット None 秒、ノードの LP None 秒 (None 反復/LP、平均 None 行)、開いたノード None
+  HiGHS のノードの LP: 45.2 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 0.0、分離 24222.0、ヒューリスティクス 173389.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS             0 /          inf   ENOMOTO                          終了後
+      30: HiGHS             0 /          inf   ENOMOTO                          終了後
+      60: HiGHS             0 /          inf   ENOMOTO                          終了後
+     120: HiGHS             0 /          inf   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS             0 /          inf   ENOMOTO                          終了後
+
+=== pk1 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS                   45/86/915/55   ENOMOTO                      45/86/915
+  前処理後 行/列/非零(/整数)                   HiGHS                   45/86/915/55   ENOMOTO                      45/86/915
+  前処理の終わり (秒)                        HiGHS                           0.01   ENOMOTO                              0
+  根の LP の値                           HiGHS                              0   ENOMOTO                              0
+  根の LP の時刻 (秒)                      HiGHS                           0.01   ENOMOTO                           0.01
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                              0
+  再スタートの回数 (根 / 木)                   HiGHS                          0 / 6   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS                   45/86/915/55   ENOMOTO                              -
+  木に入る直前の下界                          HiGHS                              0   ENOMOTO                              0
+  木に入る時刻 (秒)                         HiGHS                           0.17   ENOMOTO                           0.68
+  最初の暫定解 値                           HiGHS                             27   ENOMOTO                             38
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       0.01 (R)   ENOMOTO               0.04 (Local-MIP)
+  最後に暫定解が良くなった時刻                     HiGHS                          65.23   ENOMOTO          3.97 (other thread: tree randomized rounding)
+  終わり 状態                             HiGHS             Time limit reached   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                            120   ENOMOTO                          19.59
+  終わり 下界                             HiGHS                      3.0967835   ENOMOTO                             11
+  終わり 暫定解                            HiGHS                             13   ENOMOTO                             11
+  ノード数                               HiGHS                         223385   ENOMOTO                         183063
+  木のノード/秒                            HiGHS                      1864.1826   ENOMOTO                      9680.7509
+  LP の反復の総数                          HiGHS                        2195000   ENOMOTO                         351555
+  ENOMOTO の木: 強分岐 0.21 秒 (354 LP)、ノードのカット 1.34 秒、ノードの LP 5.36 秒 (11.0 反復/LP、平均 53.3 行)、開いたノード 0
+  HiGHS のノードの LP: 8.3 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 8604.0、分離 170310.0、ヒューリスティクス 156314.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS             0 /           17   ENOMOTO     5.0106933 /           11
+      30: HiGHS             0 /           17   ENOMOTO                          終了後
+      60: HiGHS     1.0022939 /           17   ENOMOTO                          終了後
+     120: HiGHS     3.0967835 /           13   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS     3.0967835 /           13   ENOMOTO     4.3394519 /           11
+
+=== mas76 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS                12/151/1640/150   ENOMOTO                    12/151/1640
+  前処理後 行/列/非零(/整数)                   HiGHS                12/148/1615/147   ENOMOTO                    12/150/1639
+  前処理の終わり (秒)                        HiGHS                           0.02   ENOMOTO                              0
+  根の LP の値                           HiGHS                      38893.904   ENOMOTO                      38893.904
+  根の LP の時刻 (秒)                      HiGHS                           0.02   ENOMOTO                           0.01
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                      39016.107
+  再スタートの回数 (根 / 木)                   HiGHS                          2 / 0   ENOMOTO                          3 / 0
+  最後の再スタート後 行/列/非零                   HiGHS                   12/68/664/67   ENOMOTO                     35/70/2248
+  木に入る直前の下界                          HiGHS                      39031.931   ENOMOTO                      39054.462
+  木に入る時刻 (秒)                         HiGHS                           0.36   ENOMOTO                           0.69
+  最初の暫定解 値                           HiGHS                      90710.514   ENOMOTO                      102510.84
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       0.02 (J)   ENOMOTO               0.11 (Local-MIP)
+  最後に暫定解が良くなった時刻                     HiGHS                           0.24   ENOMOTO                 0.52 (LP face)
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                         105.94   ENOMOTO                          11.04
+  終わり 下界                             HiGHS                      40005.054   ENOMOTO                      40005.054
+  終わり 暫定解                            HiGHS                      40005.054   ENOMOTO                      40005.054
+  ノード数                               HiGHS                         229317   ENOMOTO                         118831
+  木のノード/秒                            HiGHS                      2171.9739   ENOMOTO                      11481.256
+  LP の反復の総数                          HiGHS                        1617000   ENOMOTO                         183742
+  ENOMOTO の木: 強分岐 0.14 秒 (464 LP)、ノードのカット 0.72 秒、ノードの LP 2.88 秒 (9.2 反復/LP、平均 50.8 行)、開いたノード 0
+  HiGHS のノードの LP: 6.3 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 7958.0、分離 83497.0、ヒューリスティクス 81233.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS      39154.02 /    40005.054   ENOMOTO     39711.858 /    40005.054
+      30: HiGHS     39275.261 /    40005.054   ENOMOTO                          終了後
+      60: HiGHS     39371.271 /    40005.054   ENOMOTO                          終了後
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS     40005.054 /    40005.054   ENOMOTO     39669.887 /    40005.054
+
+=== timtab1 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS                171/397/829/171   ENOMOTO                    171/384/829
+  前処理後 行/列/非零(/整数)                   HiGHS                161/361/811/146   ENOMOTO                    196/212/716
+  前処理の終わり (秒)                        HiGHS                              0   ENOMOTO                              0
+  根の LP の値                           HiGHS                          28694   ENOMOTO                      163277.21
+  根の LP の時刻 (秒)                      HiGHS                           0.01   ENOMOTO                           0.03
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                      603212.09
+  再スタートの回数 (根 / 木)                   HiGHS                          1 / 1   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS                161/360/811/145   ENOMOTO                    193/200/710
+  木に入る直前の下界                          HiGHS                         609536   ENOMOTO                      603212.09
+  木に入る時刻 (秒)                         HiGHS                           2.91   ENOMOTO                            2.4
+  最初の暫定解 値                           HiGHS                         816264   ENOMOTO                        1010456
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       1.81 (L)   ENOMOTO               0.25 (Local-MIP)
+  最後に暫定解が良くなった時刻                     HiGHS                          43.68   ENOMOTO         20.49 (other thread: tree RINS)
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                          59.22   ENOMOTO                          69.17
+  終わり 下界                             HiGHS                         764772   ENOMOTO                         764772
+  終わり 暫定解                            HiGHS                         764772   ENOMOTO                         764772
+  ノード数                               HiGHS                           9156   ENOMOTO                          49246
+  木のノード/秒                            HiGHS                      162.59989   ENOMOTO                       737.5468
+  LP の反復の総数                          HiGHS                         522353   ENOMOTO                         965720
+  ENOMOTO の木: 強分岐 1.01 秒 (1208 LP)、ノードのカット 1.25 秒、ノードの LP 41.77 秒 (60.9 反復/LP、平均 665.3 行)、開いたノード 0
+  HiGHS のノードの LP: 39.9 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 50699.0、分離 72465.0、ヒューリスティクス 33673.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS     622620.08 /       804458   ENOMOTO     737633.27 /       798865
+      30: HiGHS     663688.94 /       804458   ENOMOTO     681413.22 /       764772
+      60: HiGHS        764772 /       764772   ENOMOTO     716152.55 /       764772
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS        764772 /       764772   ENOMOTO     732832.93 /       764772
+
+=== roll3000 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS            2295/1166/29386/738   ENOMOTO                2295/1166/29386
+  前処理後 行/列/非零(/整数)                   HiGHS             1473/996/25017/736   ENOMOTO                 1617/878/26640
+  前処理の終わり (秒)                        HiGHS                           0.13   ENOMOTO                           0.01
+  根の LP の値                           HiGHS                       11097.88   ENOMOTO                      11098.171
+  根の LP の時刻 (秒)                      HiGHS                           0.25   ENOMOTO                           0.42
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                      12239.005
+  再スタートの回数 (根 / 木)                   HiGHS                          1 / 0   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS             1436/974/24578/714   ENOMOTO                              -
+  木に入る直前の下界                          HiGHS                      12622.392   ENOMOTO                      12239.005
+  木に入る時刻 (秒)                         HiGHS                           9.01   ENOMOTO                            8.1
+  最初の暫定解 値                           HiGHS                          13357   ENOMOTO                          13672
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       3.37 (L)   ENOMOTO                     2.6 (RENS)
+  最後に暫定解が良くなった時刻                     HiGHS                           48.7   ENOMOTO            26 (other thread: tree rounding)
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                          49.35   ENOMOTO                          30.74
+  終わり 下界                             HiGHS                          12890   ENOMOTO                          12890
+  終わり 暫定解                            HiGHS                          12890   ENOMOTO                          12890
+  ノード数                               HiGHS                           1316   ENOMOTO                           1366
+  木のノード/秒                            HiGHS                      32.622707   ENOMOTO                      60.335689
+  LP の反復の総数                          HiGHS                         221944   ENOMOTO                         107687
+  ENOMOTO の木: 強分岐 4.55 秒 (772 LP)、ノードのカット 0.8 秒、ノードの LP 12.38 秒 (125.9 反復/LP、平均 2100.2 行)、開いたノード 0
+  HiGHS のノードの LP: 50.5 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 127441.0、分離 12784.0、ヒューリスティクス 15201.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS     12622.392 /        13009   ENOMOTO           inf /        13291
+      30: HiGHS     12629.391 /        13009   ENOMOTO     12751.938 /        12890
+      60: HiGHS                          終了後   ENOMOTO                          終了後
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS         12890 /        12890   ENOMOTO     12751.938 /        12890
+
+=== n5-3 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS             1062/2550/9900/150   ENOMOTO                 1062/2550/9900
+  前処理後 行/列/非零(/整数)                   HiGHS              836/2139/8327/137   ENOMOTO                  836/2143/8331
+  前処理の終わり (秒)                        HiGHS                           0.03   ENOMOTO                           0.01
+  根の LP の値                           HiGHS                      3801.4706   ENOMOTO                      2883.8235
+  根の LP の時刻 (秒)                      HiGHS                           0.08   ENOMOTO                            0.1
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                      7686.1658
+  再スタートの回数 (根 / 木)                   HiGHS                          0 / 0   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS                              -   ENOMOTO                              -
+  木に入る直前の下界                          HiGHS                      7784.0437   ENOMOTO                      7686.1658
+  木に入る時刻 (秒)                         HiGHS                           9.34   ENOMOTO                           17.7
+  最初の暫定解 値                           HiGHS                          12025   ENOMOTO                          10425
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       0.07 (S)   ENOMOTO                    0.11 (tree)
+  最後に暫定解が良くなった時刻                     HiGHS                          42.77   ENOMOTO         25.75 (tree randomized rounding)
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                          43.25   ENOMOTO                          26.35
+  終わり 下界                             HiGHS                           8105   ENOMOTO                           8105
+  終わり 暫定解                            HiGHS                           8105   ENOMOTO                           8105
+  ノード数                               HiGHS                            599   ENOMOTO                            220
+  木のノード/秒                            HiGHS                      17.664406   ENOMOTO                      25.433526
+  LP の反復の総数                          HiGHS                         218814   ENOMOTO                          53422
+  ENOMOTO の木: 強分岐 3.52 秒 (242 LP)、ノードのカット 0.38 秒、ノードの LP 2.38 秒 (123.8 反復/LP、平均 1218.3 行)、開いたノード 0
+  HiGHS のノードの LP: 120.6 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 103036.0、分離 17570.0、ヒューリスティクス 25980.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS     7784.0437 /         8650   ENOMOTO             - /        10425
+      30: HiGHS     7839.6084 /         8265   ENOMOTO                          終了後
+      60: HiGHS                          終了後   ENOMOTO                          終了後
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS          8105 /         8105   ENOMOTO     7769.6231 /         8105
+
+=== neos5 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS                  63/63/2016/53   ENOMOTO                     63/63/2016
+  前処理後 行/列/非零(/整数)                   HiGHS                  63/63/2016/53   ENOMOTO                     63/63/2016
+  前処理の終わり (秒)                        HiGHS                              0   ENOMOTO                           0.01
+  根の LP の値                           HiGHS                             13   ENOMOTO                             13
+  根の LP の時刻 (秒)                      HiGHS                           0.01   ENOMOTO                           0.03
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                       13.45197
+  再スタートの回数 (根 / 木)                   HiGHS                          0 / 2   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS                  63/63/2016/53   ENOMOTO                              -
+  木に入る直前の下界                          HiGHS                      13.317129   ENOMOTO                       13.45197
+  木に入る時刻 (秒)                         HiGHS                           0.33   ENOMOTO                           0.73
+  最初の暫定解 値                           HiGHS                             20   ENOMOTO                             17
+  最初の暫定解 時刻 (出どころ)                   HiGHS                          0 (J)   ENOMOTO                    0.03 (tree)
+  最後に暫定解が良くなった時刻                     HiGHS                           0.33   ENOMOTO                    0.48 (RENS)
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                         112.87   ENOMOTO                          33.19
+  終わり 下界                             HiGHS                             15   ENOMOTO                             15
+  終わり 暫定解                            HiGHS                             15   ENOMOTO                             15
+  ノード数                               HiGHS                         206031   ENOMOTO                         151723
+  木のノード/秒                            HiGHS                      1830.7357   ENOMOTO                      4674.1528
+  LP の反復の総数                          HiGHS                        2557000   ENOMOTO                         836867
+  ENOMOTO の木: 強分岐 0.35 秒 (452 LP)、ノードのカット 3.32 秒、ノードの LP 19.94 秒 (19.4 反復/LP、平均 128.5 行)、開いたノード 0
+  HiGHS のノードの LP: 11.4 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 9754.0、分離 60388.0、ヒューリスティクス 131008.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS         13.75 /           15   ENOMOTO     14.462334 /           15
+      30: HiGHS            14 /           15   ENOMOTO        14.225 /           15
+      60: HiGHS          14.2 /           15   ENOMOTO                          終了後
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS            15 /           15   ENOMOTO          14.5 /           15
+
+=== rmatr100-p10 ===
+  元の大きさ 行/列/非零(/整数)                  HiGHS            7260/7359/21877/100   ENOMOTO                7260/7359/21877
+  前処理後 行/列/非零(/整数)                   HiGHS            7260/7359/21877/100   ENOMOTO                7260/7359/21877
+  前処理の終わり (秒)                        HiGHS                           0.05   ENOMOTO                           0.01
+  根の LP の値                           HiGHS                      360.59331   ENOMOTO                      360.59331
+  根の LP の時刻 (秒)                      HiGHS                           0.39   ENOMOTO                           1.46
+  最初のカットのループの後の下界                    HiGHS                              -   ENOMOTO                      360.59331
+  再スタートの回数 (根 / 木)                   HiGHS                          0 / 0   ENOMOTO                          0 / 0
+  最後の再スタート後 行/列/非零                   HiGHS                              -   ENOMOTO                              -
+  木に入る直前の下界                          HiGHS                      363.69976   ENOMOTO                      360.59331
+  木に入る時刻 (秒)                         HiGHS                           7.44   ENOMOTO                           6.14
+  最初の暫定解 値                           HiGHS                            713   ENOMOTO                            599
+  最初の暫定解 時刻 (出どころ)                   HiGHS                       0.39 (R)   ENOMOTO               1.51 (Local-MIP)
+  最後に暫定解が良くなった時刻                     HiGHS                          70.58   ENOMOTO          23.8 (other thread (tree))
+  終わり 状態                             HiGHS                        Optimal   ENOMOTO                        Optimal
+  終わり 時刻 (秒)                         HiGHS                         103.28   ENOMOTO                           26.2
+  終わり 下界                             HiGHS                            423   ENOMOTO                            423
+  終わり 暫定解                            HiGHS                            423   ENOMOTO                            423
+  ノード数                               HiGHS                            945   ENOMOTO                            965
+  木のノード/秒                            HiGHS                      9.8601836   ENOMOTO                      48.105683
+  LP の反復の総数                          HiGHS                         283958   ENOMOTO                          64088
+  ENOMOTO の木: 強分岐 7.48 秒 (230 LP)、ノードのカット 0.79 秒、ノードの LP 7.03 秒 (94.6 反復/LP、平均 7260.0 行)、開いたノード 0
+  HiGHS のノードの LP: 125.8 反復/ノード (強分岐・分離・ヒューリスティクスを除く)
+  HiGHS の LP 反復の内訳: 強分岐 124638.0、分離 5767.0、ヒューリスティクス 34683.0
+  推移 (秒: 下界 / 暫定解。ENOMOTO の下界は TREE4 の行がないログでは主スレッドの経過の行のもので、全スレッドの下界 (終わりの行) より高く出ることがある)
+      10: HiGHS     363.69976 /          458   ENOMOTO           inf /          430
+      30: HiGHS     363.69976 /          458   ENOMOTO                          終了後
+      60: HiGHS     368.24186 /          426   ENOMOTO                          終了後
+     120: HiGHS                          終了後   ENOMOTO                          終了後
+     300: HiGHS                          終了後   ENOMOTO                          終了後
+     600: HiGHS           423 /          423   ENOMOTO     403.53547 /          423
