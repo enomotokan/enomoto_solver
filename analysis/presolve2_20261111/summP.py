@@ -1,7 +1,7 @@
 """PRESOLVE2 の 58 問 × 種 1〜3 (60 秒) の対の比較: python summP.py [候補 ...] (既定は res_P_s*.jsonl にある def 以外の設定全部)。
 SGM は shift 1 秒、時間切れは制限時間で数える。区間は問題単位のブートストラップ (95%)。cand1111 の summP.py と同じ数え方。"""
 import json, glob, math, random, collections, sys
-rows = [json.loads(l) for f in sorted(glob.glob("res_P_s*.jsonl")) for l in open(f) if l.strip()]
+rows = [json.loads(l) for f in sorted(glob.glob(f"res_{__import__('os').environ.get('SET', 'P')}_s*.jsonl")) for l in open(f) if l.strip()]
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
 def t(r): return min(r["result"]["time"], r["tl"]) if solved(r) else r["tl"]
 def solved(r): return r["result"].get("status") in ("optimal", "infeasible")

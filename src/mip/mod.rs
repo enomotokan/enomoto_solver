@@ -1211,25 +1211,42 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         Some(Presolved::Reduced { prob, postsolve, scaling })
             if env_str!("ENOMOTO_MIP_DUALEQ").is_some_and(|v| v != "early") && !params.submip && params.restarts == 0 && scaling.d.iter().all(|&d| d == 1.0) =>
         {
+            let free_cols = |q: &MipProblem| (0..q.n).filter(|&j| q.col_lo[j] < q.col_up[j]).count();
             let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, rows, mut row_lo, mut row_up, cols, .. } = prob.clone();
             let t0 = std::time::Instant::now();
             let k = dual_row_equalities(&rows, &mut row_lo, &mut row_up, &cols, &cost, &is_int, &col_lo, &col_up);
+            // 等式にした行のうち、固定でない列が 2 本の行 (2 項等式の消去が列を代入で消せる行) の数
+            let k2 = (0..rows.len())
+                .filter(|&i| row_lo[i] == row_up[i] && prob.row_lo[i] != prob.row_up[i] && rows[i].iter().filter(|e| col_lo[e.0] < col_up[e.0]).count() == 2)
+                .count();
             if params.verbose {
-                eprintln!("MIP: presolve: DUALEQ made {k} rows equations (late, {:.2}s)", t0.elapsed().as_secs_f64());
+                eprintln!("MIP: presolve: DUALEQ made {k} rows equations ({k2} with two columns) (late, {:.2}s)", t0.elapsed().as_secs_f64());
             }
-            if k == 0 {
+            // 2 列の行が 1 本もなければかけ直さない (`ENOMOTO_T_MIP_DUALEQ_NEED2=0` で数を見ない)。ns1116954 は 741 行を等式にしても
+            // かけ直しが何も減らさず、かけ直し (プロービングを含む約 3 秒) の分だけ遅くなっていた
+            let need2 = tunable!("ENOMOTO_T_MIP_DUALEQ_NEED2", 1usize, usize) != 0;
+            if k == 0 || (need2 && k2 == 0) {
                 Some(Presolved::Reduced { prob, postsolve, scaling })
             } else {
                 let q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
                 match presolve_mip(&q, params.verbose, pre_submip, None) {
                     Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
-                    Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().all(|&d| d == 1.0) => {
+                    // かけ直しで行か固定でない列が減ったときだけ使う。減らなければ等式にする前の問題に戻す (等式は縮約の
+                    // きっかけとしてだけ意味があり、縮まないまま等式を残すと LP の基底の引き継ぎを失い遅くなる: ns1116954 は 741 行を
+                    // 等式にしても何も減らず、60 秒の回で 3〜6 秒 -> 26〜51 秒、メモリ 359 -> 2340 MB)
+                    Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 })
+                        if sc2.d.iter().all(|&d| d == 1.0) && (prob2.m < prob.m || free_cols(&prob2) < free_cols(&prob)) =>
+                    {
                         let mut postsolve = postsolve;
                         postsolve.extend(post2);
                         Some(Presolved::Reduced { prob: prob2, postsolve, scaling })
                     }
-                    // かけ直しが何も減らさない: 等式にした問題をそのまま使う
-                    _ => Some(Presolved::Reduced { prob: q, postsolve, scaling }),
+                    _ => {
+                        if params.verbose {
+                            eprintln!("MIP: presolve: DUALEQ: presolve again reduced nothing, the equations are not used");
+                        }
+                        Some(Presolved::Reduced { prob, postsolve, scaling })
+                    }
                 }
             }
         }
