@@ -61,3 +61,14 @@ git pull --rebase --autostash origin ccr-1beed81b-ex0uhq && git push -u origin c
 | 分担 | 命令 |
 |---|---|
 | Q0〜Q2 | `python run.py Q 0` 〜 `python run.py Q 2` (3 分担) |
+
+## T: Mittelmann 186 問のクリーク表の持ち方の数え上げ (診断だけ、3 分担)
+
+- コミット: **2eadfefa** (診断 `ENOMOTO_MIP_DEBUG_CLQTAB` を含むソース。既定の動きは変わらない)。手順のビルドまでは上と同じ。
+- 命令: `python census.py mitt186.txt <K> 3 tab` (K = 0〜2)。`CLQPRB=1` で前処理の後の CLQTAB の行が出たら止める (含意のまとめは 60 秒で打ち切り。
+  1 問 最大 約 4.5 分 × 62 問)。
+- 結果: `census_mitt186_tab_s<K>.jsonl` だけをコミットして push (コミットの文は `CLQPRB T<K>: 完了 (N 行)`)。
+
+| 分担 | 命令 |
+|---|---|
+| T0〜T2 | `python census.py mitt186.txt 0 3 tab` 〜 `python census.py mitt186.txt 2 3 tab` |
