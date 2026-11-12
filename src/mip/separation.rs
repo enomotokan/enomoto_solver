@@ -6078,7 +6078,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let tab_mr = if env_str!("ENOMOTO_MIP_DEBUG_NO_TAB_CUTS").is_some() { 0 } else { mr };
         for s in 0..tab_mr {
             let k = self.lp.basic_var(s);
-            if k < n && self.cut_int[k] {
+            if k < n && self.cut_int[k] && !self.tubr_no_gomory(k) {
                 let v = x[k];
                 let f = v - v.floor();
                 if f > 1e-3 && f < 1.0 - 1e-3 {

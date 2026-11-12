@@ -137,13 +137,15 @@ def ours_logged(lp):
 
 
 N = int(sys.argv[1]); start = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-bad = 0; t0 = time.time(); folded = intg = safety = acc = 0; chk = [0, 0]
+bad = 0; t0 = time.time(); folded = intg = safety = acc = 0; chk = [0, 0]; lift = [0, 0]
 for seed in range(start, start + N):
     lp = gen(seed) if seed % 2 else gen_facility(seed)
     hs, ho = highs(lp); (os_, oo, x), lines = ours_logged(lp)
     if any("need no branching" in l and not l.split("MIP: TUBR: ")[1].startswith("0 ") and "not used" not in l for l in lines): folded += 1
     intg += sum(int(l.split("solved by the fiber LP ")[1].split(",")[0]) for l in lines if "solved by the fiber LP" in l)
     for l in lines:
+        if "lift (l/s): fiber LPs" in l:
+            lift[0] += int(l.split("fiber LPs ")[1].split(",")[0]); lift[1] += int(l.split("integral solutions ")[1].split()[0])
         if "check: integral" in l:
             chk[0] += int(l.split("check: integral ")[1].split()[0]); chk[1] += int(l.split(" fractional ")[-1].split()[0])
     if any("safety net" in l for l in lines): safety += 1
@@ -155,5 +157,5 @@ for seed in range(start, start + N):
     if not ok:
         bad += 1
         if bad <= 10: print("seed", seed, "highs", hs, ho, "ours", os_, oo, lines[-2:], flush=True)
-print("ENOMOTO_MIP_TUBR=%s bad %d of %d time %.1f with_iprime=%d fiber_solved_nodes=%d check_integral=%d check_fractional=%d"
-      % (os.environ.get("ENOMOTO_MIP_TUBR", "(なし)"), bad, N, time.time() - t0, folded, intg, chk[0], chk[1]))
+print("ENOMOTO_MIP_TUBR=%s bad %d of %d time %.1f with_iprime=%d fiber_solved_nodes=%d check_integral=%d check_fractional=%d lift_lp=%d lift_int=%d"
+      % (os.environ.get("ENOMOTO_MIP_TUBR", "(なし)"), bad, N, time.time() - t0, folded, intg, chk[0], chk[1], lift[0], lift[1]))

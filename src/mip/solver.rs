@@ -667,6 +667,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     tubr_secs: f64,
     /// 診断 `F` の数: 繊維の LP の頂点で I' が整数だった回・整数でなかった回 (検出の誤り)
     tubr_check: [u64; 2],
+    /// `l`・`s` の数: 繊維の LP を試した回・I' が整数の解を得た回
+    tubr_lift_stats: [u64; 2],
     /// 早めの再スタート ([`super::early_restart_on`]): 根のヒューリスティクスの途中で再スタートの判定が通った (残りの根のヒューリスティクスを飛ばす)。
     pub(super) early_restart: bool,
     /// 試作 `ENOMOTO_MIP_ERWAIT` ([`erwait`]) と診断 `ENOMOTO_MIP_ERWAIT_DIAG` ([`erwait_diag`]): 早めの再スタートを決めた時刻
@@ -4653,6 +4655,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tubr_stats: [0; 3],
         tubr_secs: 0.0,
         tubr_check: [0; 2],
+        tubr_lift_stats: [0; 2],
         early_restart: false,
         er_at: None,
         l63_cut_left: false,
@@ -6468,6 +6471,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 解 `x` (整数列は丸める) を暫定解として試す。採用したら真。
     pub(super) fn try_incumbent(&mut self, mut x: Vec<f64>) -> bool {
+        // 試作 `ENOMOTO_MIP_TUBR` の `l`・`s`: I' が丸めで行に反するなら、I' 以外を固定した繊維の LP で I' を整数の頂点にする
+        if tubr_on() {
+            if let Some(y) = self.tubr_lift(&x) {
+                x = y;
+            }
+        }
         for j in 0..self.p.n {
             if self.p.is_int[j] {
                 x[j] = x[j].round();
@@ -6862,8 +6871,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// LP (繊維の LP) を解き、頂点が整数でこのノードを刈り込めるなら `None` (ノードは解けた)。刈り込めなければ I' も含めた `frac` を返す
     /// (I' で分枝する。安全網)。
     fn tubr_filter(&mut self, frac: Vec<(usize, f64)>, x: &[f64], node_obj: f64) -> Option<Vec<(usize, f64)>> {
-        if self.params.submip {
+        if self.params.submip || !(tubr_letter('1') || tubr_letter('b')) {
             return Some(frac);
+        }
+        self.tubr_get();
+        let Some(Some(mask)) = self.tubr_mask.as_ref() else { return Some(frac) };
+        let rest: Vec<(usize, f64)> = frac.iter().copied().filter(|&(j, _)| !mask[j]).collect();
+        self.tubr_after_rest(frac, rest, x, node_obj)
+    }
+
+    /// I' を求める (1 回だけ。外側の求解のときだけ)。`c` ならカットの整数の印から I' を外す。I' があれば真。
+    pub(super) fn tubr_get(&mut self) -> bool {
+        if self.params.submip || !tubr_on() {
+            return false;
         }
         if self.tubr_mask.is_none() {
             let t0 = Instant::now();
@@ -6881,10 +6901,82 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if use_it { "" } else { "; not used" },
                 t0.elapsed().as_secs_f64()
             );
+            if use_it && tubr_letter('c') {
+                for j in 0..self.p.n {
+                    if m[j] {
+                        self.cut_int[j] = false;
+                    }
+                }
+            }
             self.tubr_mask = Some(if use_it { Some(m) } else { None });
         }
-        let Some(Some(mask)) = self.tubr_mask.as_ref() else { return Some(frac) };
-        let rest: Vec<(usize, f64)> = frac.iter().copied().filter(|&(j, _)| !mask[j]).collect();
+        matches!(self.tubr_mask, Some(Some(_)))
+    }
+
+    /// I' の印 (求めていなければ `None`)
+    pub(super) fn tubr_mask_ref(&self) -> Option<&Option<Vec<bool>>> {
+        self.tubr_mask.as_ref()
+    }
+
+    /// `ENOMOTO_MIP_TUBR` の `g`: 列 k を Gomory (tableau 行) の元の行に使わないか
+    pub(super) fn tubr_no_gomory(&self, k: usize) -> bool {
+        tubr_letter('g') && matches!(&self.tubr_mask, Some(Some(m)) if m[k])
+    }
+
+    /// `ENOMOTO_MIP_TUBR` の `l` (`s` でも): 暫定解の候補 `x` の I' 以外の整数列を丸めて固定し、繊維の LP で I' を整数の頂点にする。
+    /// 丸めた `x` が実行可能なら何もしない (`None`)。手間を抑えるため、I' 以外の整数列と固定された列だけの行に反するなら試さない、
+    /// 回数は 1000 回まで。
+    pub(super) fn tubr_lift(&mut self, x: &[f64]) -> Option<Vec<f64>> {
+        if !(tubr_letter('l') || tubr_letter('s')) || !self.tubr_get() || self.tubr_lift_stats[0] >= 1000 {
+            return None;
+        }
+        let p = self.p;
+        let Some(Some(mask)) = self.tubr_mask.as_ref() else { return None };
+        let mut xr = x.to_vec();
+        for j in 0..p.n {
+            if p.is_int[j] {
+                xr[j] = xr[j].round();
+            }
+        }
+        if p.is_feasible(&xr, FEASTOL) {
+            return None;
+        }
+        let fixed_only = |i: usize| p.rows[i].iter().all(|&(j, _)| (p.is_int[j] && !mask[j]) || p.col_lo[j] == p.col_up[j]);
+        for i in 0..p.m {
+            if fixed_only(i) {
+                let a: f64 = p.rows[i].iter().map(|&(j, v)| v * xr[j]).sum();
+                if a < p.row_lo[i] - 1e-6 * (1.0 + p.row_lo[i].abs()) || a > p.row_up[i] + 1e-6 * (1.0 + p.row_up[i].abs()) {
+                    return None;
+                }
+            }
+        }
+        self.tubr_lift_stats[0] += 1;
+        let t0 = Instant::now();
+        let mut lo = p.col_lo.clone();
+        let mut up = p.col_up.clone();
+        for j in 0..p.n {
+            if p.is_int[j] && !mask[j] {
+                let v = xr[j].clamp(lo[j], up[j]);
+                lo[j] = v;
+                up[j] = v;
+            }
+        }
+        let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&lo, &up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
+        let st = lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        self.tubr_secs += t0.elapsed().as_secs_f64();
+        if st != LpStatus::Optimal {
+            return None;
+        }
+        let y = lp.col_values();
+        if (0..p.n).any(|j| p.is_int[j] && (y[j] - y[j].round()).abs() > 1e-6) {
+            return None;
+        }
+        self.tubr_lift_stats[1] += 1;
+        Some(y)
+    }
+
+    /// [`Self::tubr_filter`] の続き (I' を外した一覧 `rest` が空なら繊維の LP)
+    fn tubr_after_rest(&mut self, frac: Vec<(usize, f64)>, rest: Vec<(usize, f64)>, x: &[f64], node_obj: f64) -> Option<Vec<(usize, f64)>> {
         // 診断 `F` (検出の確かめ): どのノードでも I' 以外を丸めて固定した繊維の LP を解き、最適なら I' が整数かを数える (刈り込まない)
         if !rest.is_empty() && env_str!("ENOMOTO_MIP_TUBR").is_some_and(|v| v.contains('F')) {
             match self.tubr_fiber_check(x) {
@@ -7624,6 +7716,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn run(&mut self) -> MipResult {
+        // 試作 `ENOMOTO_MIP_TUBR`: I' を先に求める (カットの `c`・`g`、ヒューリスティクスの `l`・`s` が根から使う)
+        if tubr_on() {
+            self.tubr_get();
+        }
         // `ENOMOTO_MIP_RESTART_PC` (試作): 再スタート前の pseudocost (前処理の後の列へ写したもの) から始める
         if !self.params.submip && self.params.restarts > 0 && self.snap.is_none() {
             if let Some(pc) = super::RESTART_PC.with(|s| s.borrow_mut().take()) {
@@ -21152,6 +21248,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 "MIP: TUBR: nodes with only I' fractional {}, solved by the fiber LP {}, branched on I' {} ({:.2}s in the fiber LP); check: integral {} fractional {}",
                 self.tubr_stats[0], self.tubr_stats[1], self.tubr_stats[2], self.tubr_secs, self.tubr_check[0], self.tubr_check[1]
             );
+            eprintln!(
+                "MIP: TUBR: lift (l/s): fiber LPs {}, integral solutions {}",
+                self.tubr_lift_stats[0], self.tubr_lift_stats[1]
+            );
         }
         // `ENOMOTO_MIP_SUBB_SYM` (試作): サブ MIP の中の対称性による固定を数える
         if self.params.submip && super::subb::sub_tables() {
@@ -21736,6 +21836,12 @@ fn sb_child_rc<L: MipLp>(lp: &L, j: usize, is_up: bool) -> f64 {
 
 /// 試作 `ENOMOTO_MIP_TUBR` (既定では使わない。analysis/tubr_20261112.md、[`super::tubr`]): 分枝しなくてよい整数列 I' を分枝の候補から外す。
 /// 値の文字 `h` ならネットワークの判定を使わず 2 色塗りだけ。`0` は使わない。
-fn tubr_on() -> bool {
+pub(super) fn tubr_on() -> bool {
     env_str!("ENOMOTO_MIP_TUBR").is_some_and(|v| v != "0")
+}
+
+/// `ENOMOTO_MIP_TUBR` の値の文字: `1`・`b` 分枝の候補から I' を外す、`l` 暫定解の候補で I' を繊維の LP の頂点にする、`s` サブ MIP で I' を
+/// 連続列にする (`l` も入る)、`c` カットで I' を連続として扱う、`g` I' を Gomory の元の行から外す、`h` ネットワークの判定なし、`F` 診断
+pub(super) fn tubr_letter(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_TUBR").is_some_and(|v| v != "0" && v.contains(c))
 }

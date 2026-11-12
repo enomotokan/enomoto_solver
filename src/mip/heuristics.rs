@@ -1555,6 +1555,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         sub.col_lo = lo;
         sub.col_up = up;
+        // 試作 `ENOMOTO_MIP_TUBR` の `s`: サブ MIP では I' を連続列にする (解は暫定解の候補にするときに繊維の LP で I' を整数にする)
+        if super::solver::tubr_letter('s') && !self.params.submip && self.tubr_get() {
+            if let Some(Some(m)) = self.tubr_mask_ref() {
+                for j in 0..p.n {
+                    if m[j] {
+                        sub.is_int[j] = false;
+                    }
+                }
+            }
+        }
         // `ENOMOTO_MIP_SUBB_DIV` (試作、既定では使わない) / 診断 `ENOMOTO_MIP_SUBB_COUNT`: 外側の求解のサブ MIP の固定の集合の指紋を覚え、
         // 同じ近傍の繰り返しで固定を変える ([`Self::subb_diversify`])
         if !self.params.submip && super::subb::count_on() {
