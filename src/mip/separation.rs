@@ -745,8 +745,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 入れない (既定のループと同じ道筋にする。比べの時間は呼び出し側で時間の上限の起点をずらす)。roll3000 は `probe_s` で使わない判定なのに、
         // 比べの「なし」の側の状態とプールに入れた「あり」の側のカットで道筋が変わり、種 1〜3 とも 23〜33 秒 -> 49〜60 秒に遅くなった
         let rest = clique_cuts_mode() == Some("probe_r");
+        // `probe_r`: 使わないと決めたら、比べの中で作った衝突グラフも捨てる (グラフは既定でもカットのクリーク拡張 `extend_clique_cuts` が
+        // 初めて要るときに、その時の大域的な境界で作る。比べで早く作ると拡張が変わり道筋が変わる。neos859080 は `probe_s` で破れなしの判定なのに
+        // 根の下界が 1.87 -> 2 に変わった)
+        let graph_was = self.clique_graph.is_some();
         if skip && self.clique_graph_get().separate(&self.lp.col_values(), 1).is_empty() {
             self.clique_auto = Some(false);
+            if rest && !graph_was {
+                self.clique_graph = None;
+            }
             if self.params.verbose {
                 eprintln!("MIP: clique probe: no violated clique cuts; not used ({:.2}s)", self.start.elapsed().as_secs_f64());
             }
@@ -772,6 +779,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.probe_restore(e);
             }
             self.clique_auto = Some(false);
+            if rest && !graph_was {
+                self.clique_graph = None;
+            }
             if self.params.verbose {
                 eprintln!("MIP: clique probe ({k} rounds): no clique cuts chosen in {} rounds ({n1} cuts); not used (kept {nr} rounds, probe {:.2}s, {:.2}s)", h1.len(), t_all.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
             }
@@ -802,6 +812,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let on = by_gain || by_frac;
         let (win, lose) = if on { (e1, e0) } else { (e0, e1) };
         let (win, lose) = if rest && !on { (None, None) } else { (win, lose) };
+        if rest && !on && !graph_was {
+            self.clique_graph = None;
+        }
         if let Some(e) = lose {
             for (c, _, r) in &e.rows {
                 self.add_to_pool(c, *r);
