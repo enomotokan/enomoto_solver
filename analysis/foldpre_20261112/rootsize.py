@@ -1,5 +1,5 @@
 """畳んだ後の前処理でどれだけ縮むか (analysis/foldpre_20261112.md): 設定ごとに 1 スレッドで解き始め、根の LP の大きさ (MIP: root LP size の行)、
-前処理の最後の行・列、根の LP が解けるまでの壁時計の秒を記録して止める。
+前処理の最後の行・列、根の LP が解けるまでの壁時計の秒、診断 ENOMOTO_MIP_FOLD_IMPLDIAG の行 (暗黙の整数と刻み) を記録して止める。
 python rootsize.py <出力.jsonl> <設定,...> <問題 ...>   (wheel は FOLD_PKG)"""
 import json, os, subprocess, sys, time, re
 from pathlib import Path
@@ -16,14 +16,16 @@ for p in probs:
         env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
         if os.environ.get("FOLD_PKG"):
             env["PYTHONPATH"] = os.environ["FOLD_PKG"]
-        env.update(ENOMOTO_MIP_FOLD=CF[c], ENOMOTO_MIP_LOG="1", ENOMOTO_MIP_THREADS="1")
+        env.update(ENOMOTO_MIP_FOLD=CF[c], ENOMOTO_MIP_LOG="1", ENOMOTO_MIP_THREADS="1", ENOMOTO_MIP_FOLD_IMPLDIAG="1")
         t0 = time.time()
         pr = subprocess.Popen([sys.executable, str(WT / "scripts" / "run_miplib_benchmark.py"), "--worker-ours", str(WT / ".miplib_cache" / f"{p}.mps"),
                                "--time-limit", "600", "--threads", "1"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        rec = {"problem": p, "cfg": c, "fold": [], "presolve": None, "root_lp": None, "root_size": None, "t_root": None, "t_presolve": None}
+        rec = {"problem": p, "cfg": c, "fold": [], "impl": [], "presolve": None, "root_lp": None, "root_size": None, "t_root": None, "t_presolve": None}
         for ln in pr.stderr:
             t = round(time.time() - t0, 2)
-            if ln.startswith("MIP_FOLD:"):
+            if ln.startswith("IMPLDIAG"):
+                rec["impl"].append(ln.strip()[:400])
+            elif ln.startswith("MIP_FOLD:"):
                 rec["fold"].append(ln.strip()[:300])
             elif ln.startswith("MIP: presolve: rows"):
                 rec["presolve"] = ln.strip()[:300]; rec["t_presolve"] = t

@@ -236,8 +236,12 @@ impl MipProblem {
     /// 他の列が同じ条件を満たせば暗黙の整数 (どの最適解でも整数値。`ENOMOTO_MIP_NO_DUAL_IMPLINT` で使わない)。
     /// 新しく印のついた列から更に判定が進むので、変化がなくなるまで繰り返す。
     pub fn implied_integers(&self) -> Vec<bool> {
+        self.implied_integers_opt(env_str!("ENOMOTO_MIP_NO_DUAL_IMPLINT").is_none())
+    }
+
+    /// [`Self::implied_integers`] の本体 (`dual` で双対側の判定を使うか。診断で主側だけの本数を数えるのにも使う)。
+    pub fn implied_integers_opt(&self, dual: bool) -> Vec<bool> {
         let integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
-        let dual = env_str!("ENOMOTO_MIP_NO_DUAL_IMPLINT").is_none();
         let mut mark = self.is_int.clone();
         loop {
             let mut changed = false;

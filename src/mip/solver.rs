@@ -4483,6 +4483,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     // 試作 `ENOMOTO_MIP_OBJINT` (既定では使わない。analysis/objint_20261112.md、[`objint`]): `h` は `HO2_IMPLINT` と同じ判定、`f` は
     // 判定の始めの定義域で整数値に固定された列 (費用があって行に出ない列が前処理の後に残る bppc4-08 など) を整数列と同じに扱う。
     // どちらでも刈り込みは格子の点で取る ([`obj_step_lattice`])
+    // 診断 `ENOMOTO_MIP_FOLD_IMPLDIAG` (analysis/foldpre_20261112.md): 分枝限定法が見る問題の暗黙の整数と刻み
+    if !params.submip {
+        super::fold::impl_diag(p, "solver");
+    }
     let ho2_implint = env_str!("ENOMOTO_MIP_HO2_IMPLINT").is_some_and(|v| v != "0" && v != "off") || objint('h');
     let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some() || ho2_implint || super::implint_tu::tu2_flag('s') || objint('f');
     let obj_step = if obj_step_implint {

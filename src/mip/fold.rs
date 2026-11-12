@@ -412,6 +412,8 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
             secs
         );
     }
+    impl_diag(p, "fold in");
+    impl_diag(&q, "fold out");
     Some(MipFold { fold: f, q, int_groups, secs })
 }
 
@@ -487,6 +489,42 @@ impl MipFold {
         }
         p.is_feasible(&x, 1e-6).then_some(x)
     }
+}
+
+/// 診断 `ENOMOTO_MIP_FOLD_IMPLDIAG` (analysis/foldpre_20261112.md、解く側は変えない): 問題 `p` の暗黙の整数の本数 (主側だけ、双対側で
+/// 増える分、HO2 (OBJINT の `h`) で増える分) と目的関数の刻み (整数列だけ、HO2 の暗黙の整数も使う、さらに固定された列を整数扱い
+/// (OBJINT の `f`)) を 1 行出す。`tag` は場所 (`fold in`・`fold out`・`solver`)。
+pub fn impl_diag(p: &MipProblem, tag: &str) {
+    if env_str!("ENOMOTO_MIP_FOLD_IMPLDIAG").is_none() {
+        return;
+    }
+    let t0 = std::time::Instant::now();
+    let cnt = |m: &[bool]| m.iter().zip(&p.is_int).filter(|(a, b)| **a && !**b).count();
+    let prim = p.implied_integers_opt(false);
+    let dual = p.implied_integers_opt(true);
+    let ho2 = p.implied_integers_ho2();
+    let ncont = p.is_int.iter().filter(|&&b| !b).count();
+    let costed_cont = (0..p.n).filter(|&j| !p.is_int[j] && p.cost[j] != 0.0 && p.col_lo[j] < p.col_up[j]).count();
+    let costed_cont_ho2 = (0..p.n).filter(|&j| !ho2[j] && p.cost[j] != 0.0 && p.col_lo[j] < p.col_up[j]).count();
+    let st0 = p.objective_step();
+    let st_h = p.objective_step_mask(&ho2, None);
+    let st_hf = p.objective_step_mask(&ho2, Some((&p.col_lo, &p.col_up)));
+    eprintln!(
+        "IMPLDIAG {tag}: n {} m {} ints {} conts {} | implied primal {} dual +{} ho2 +{} | costed conts {} (not ho2 {}) | obj step int {:?} h {:?} hf {:?} ({:.2}s)",
+        p.n,
+        p.m,
+        p.n - ncont,
+        ncont,
+        cnt(&prim),
+        cnt(&dual) - cnt(&prim),
+        cnt(&ho2) - cnt(&dual),
+        costed_cont,
+        costed_cont_ho2,
+        st0,
+        st_h,
+        st_hf,
+        t0.elapsed().as_secs_f64()
+    );
 }
 
 /// `ENOMOTO_MIP_FOLD`: 畳んで `solve` で解き、元に戻す。畳まないなら `None`。安全網に外れたら残りの時間で元を `solve` で解く。
