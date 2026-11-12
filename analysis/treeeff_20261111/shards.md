@@ -44,7 +44,7 @@ git pull --rebase --autostash origin ccr-1beed81b-ex0uhq && git push -u origin c
 
 ## P2: 直した版の 58 問の対 (60 秒、58 問 × 種 1〜3 × {def, tenc}、348 回、4 分担)
 
-- コミット: **(下で書き足す)** (TREEEFF の `K` の固定のしきい値を 5% にした版。10teams の害の直し)。D もこのコミットで回す。
+- コミット: **a46bfa61** (TREEEFF の `K` の固定のしきい値を 5% にした版。10teams の害の直し)。D もこのコミットで回す。
 - 見積り: 1 分担 約 0.75 時間。集計は `SET=P2 python summP.py`。
 
 | 分担 | 命令 |
