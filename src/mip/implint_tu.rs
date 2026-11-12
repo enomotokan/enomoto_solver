@@ -536,6 +536,17 @@ pub fn debug_count(p: &MipProblem, stop: bool) {
     let miss = t1.iter().zip(&t2).filter(|(a, c)| **a && !**c).count();
     let costed = (0..p.n).filter(|&j| p.cost[j] != 0.0 && !p.is_int[j]).count();
     let costed_t2 = (0..p.n).filter(|&j| p.cost[j] != 0.0 && !p.is_int[j] && !t2[j]).count();
+    // OBJINT (analysis/objint_20261112.md): HiGHS の双対側の規則 (`implied_integers_ho2`) での刻みと、行の規則だけの刻み
+    let h = p.implied_integers_ho2();
+    let nh = h.iter().zip(&b).filter(|(a, i)| **a && !**i).count();
+    eprintln!(
+        "IMPLINTCOUNT step_rowrule {:?} step_ho2 {:?} step_hf {:?} ho2_extra {} costed_cont_left_ho2 {}",
+        p.objective_step_mask(&b, None),
+        p.objective_step_mask(&h, None),
+        p.objective_step_mask(&h, Some((&p.col_lo, &p.col_up))),
+        nh,
+        (0..p.n).filter(|&j| p.cost[j] != 0.0 && !h[j]).count()
+    );
     eprintln!(
         "IMPLINTCOUNT n {} m {} cont {} rowrule {} tu {} tu2nob {} tu2 {} tu_not_in_tu2 {} costed_cont {} costed_cont_left_tu2 {} step0 {:?} step_tu2 {:?} stats {:?} ({:.3}s)",
         p.n,

@@ -4436,8 +4436,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     // `CbcCutoffIncrement` を付ける)。双対側の暗黙の整数は「最適解では整数」なので、暫定解の値が刻みの格子に乗るとは限らない。
     // そのため刈り込みの上限は、暫定解より厳密に小さい最大の格子の点で取る ([`Self::prune_limit`])
     // `ENOMOTO_MIP_HO2_IMPLINT` (試作): HiGHS の双対側の暗黙の整数の規則も使って刻みを判定する ([`MipProblem::implied_integers_ho2`])
-    let ho2_implint = env_str!("ENOMOTO_MIP_HO2_IMPLINT").is_some_and(|v| v != "0" && v != "off");
-    let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some() || ho2_implint || super::implint_tu::tu2_flag('s');
+    // 試作 `ENOMOTO_MIP_OBJINT` (既定では使わない。analysis/objint_20261112.md、[`objint`]): `h` は `HO2_IMPLINT` と同じ判定、`f` は
+    // 判定の始めの定義域で整数値に固定された列 (費用があって行に出ない列が前処理の後に残る bppc4-08 など) を整数列と同じに扱う。
+    // どちらでも刈り込みは格子の点で取る ([`obj_step_lattice`])
+    let ho2_implint = env_str!("ENOMOTO_MIP_HO2_IMPLINT").is_some_and(|v| v != "0" && v != "off") || objint('h');
+    let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some() || ho2_implint || super::implint_tu::tu2_flag('s') || objint('f');
     let obj_step = if obj_step_implint {
         // `ENOMOTO_MIP_IMPLINT_TU` も付けていれば TU の規則の暗黙の整数も使う (整数を固定すると連続列の部分に整数の最適解が
         // あるので、どの部分木でも暫定解より良い解があれば格子の点の値の解もある)
@@ -4449,7 +4452,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         } else {
             base
         };
-        let b = if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() { Some((&dom.lo[..], &dom.up[..])) } else { None };
+        let b = if env_str!("ENOMOTO_MIP_OBJ_STEP_SKIP_FIXED").is_some() || objint('f') { Some((&dom.lo[..], &dom.up[..])) } else { None };
         let st = p.objective_step_mask(&mask, b);
         if params.verbose && !params.submip {
             let miss: Vec<usize> = (0..p.n).filter(|&j| p.cost[j] != 0.0 && !mask[j] && !(dom.lo[j] == dom.up[j])).collect();
@@ -21324,9 +21327,24 @@ pub(super) fn round_lb_to_step(lb: f64, step: f64, offset: f64) -> f64 {
     r.max(lb)
 }
 
-/// 刈り込みの上限を、暫定解より厳密に小さい最大の格子の点で取るか (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`)。
+/// 刈り込みの上限を、暫定解より厳密に小さい最大の格子の点で取るか (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`・`ENOMOTO_MIP_OBJINT`)。
+/// 双対側の暗黙の整数 (「整数の最適解がある」だけ) で刻みを取ると、暫定解 (ヒューリスティクスの解) の値は格子に乗るとは限らない
+/// (メイクスパンの列が下限より大きい解など)。`z - step` で刈ると、暫定解 174.3 のとき格子の点 174 の解を捨てうる。
+/// `ENOMOTO_MIP_HO2_IMPLINT` だけではここが偽のままだった (OBJINT で直した。HO2_IMPLINT 単独の動きは変えない)
 fn obj_step_lattice() -> bool {
-    env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some() || super::implint_tu::tu2_flag('s')
+    env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some() || super::implint_tu::tu2_flag('s') || objint_on()
+}
+
+/// 試作 `ENOMOTO_MIP_OBJINT` (既定では使わない。analysis/objint_20261112.md): 目的関数の整数性 (HiGHS の `objintscale`) の検出を広げる。
+/// 値の文字で部品を選ぶ (`1` は `hf` と同じ): `h` 暗黙の整数に HiGHS の双対側の規則 ([`MipProblem::implied_integers_ho2`]) を使う、
+/// `f` 整数値に固定された列を整数列と同じに扱う。刻みが付けば、刈り込みは暫定解より厳密に小さい格子の点 ([`prune_limit_of`])、
+/// 報告の下界は格子に切り上げ (`ENOMOTO_MIP_BOUND_STEP`、既定)
+pub(super) fn objint(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_OBJINT").is_some_and(|v| v != "0" && v != "off" && (v.contains(c) || v == "1"))
+}
+
+fn objint_on() -> bool {
+    objint('h') || objint('f')
 }
 
 /// [`Solver::prune_limit_ex`] の式 (`eff` は自分と共有の暫定解の良い方、`outer` は根のサブ MIP の外側の上限)。
