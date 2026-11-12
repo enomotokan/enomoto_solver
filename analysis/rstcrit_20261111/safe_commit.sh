@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 # live ファイルの行を res_sK.jsonl に写す (まだないものだけ)
 python3 - <<'P'
 import glob
-for lv in glob.glob("analysis/rstcrit_20261111/res_s*.live.jsonl"):
+for lv in glob.glob("analysis/rstcrit_20261111/res*.live.jsonl"):
     f = lv.replace(".live", "")
     have = set(open(f).read().splitlines()) if __import__("os").path.exists(f) else set()
     new = [l for l in open(lv).read().splitlines() if l.strip() and l not in have]
