@@ -227,7 +227,33 @@ impl RowEdit {
 
 #[cfg(test)]
 mod bound_step_tests {
-    use super::round_lb_to_step;
+    use super::{round_lb_to_step, ObjLat};
+
+    /// `ENOMOTO_MIP_OBJINT` の `c`: 目的値の範囲 `base + k s + [m, M]` での切り上げと刈り込みの上限。
+    #[test]
+    fn objlat_round_up_and_limit() {
+        // 刻み 1・連続部 0.01 y (y ∈ [0, 1]) → 値は k + [0, 0.01]
+        let l = ObjLat { s: 1.0, base: 0.0, m: 0.0, mm: 0.01 };
+        assert_eq!(l.round_up(5.3), 6.0);
+        assert_eq!(l.round_up(5.005), 5.005);
+        assert_eq!(l.round_up(5.0), 5.0);
+        assert_eq!(l.round_up(4.9999999), 5.0);
+        // 暫定解が区間の中: その少し下まで探す
+        assert!(l.limit(6.005) > 6.0 && l.limit(6.005) < 6.005);
+        // 暫定解が区間の左端・隙間: 前の区間の右端 (+ 許容)
+        assert!((l.limit(6.0) - 5.01).abs() < 1e-4 && l.limit(6.0) >= 5.01);
+        assert!((l.limit(5.5) - 5.01).abs() < 1e-4 && l.limit(5.5) >= 5.01);
+        // 幅のない形は格子の刈り込み・切り上げと同じ
+        let g = ObjLat { s: 1.0, base: 0.0, m: 0.0, mm: 0.0 };
+        assert_eq!(g.round_up(171.2), round_lb_to_step(171.2, 1.0, 0.0));
+        assert!((g.limit(174.3) - 174.0).abs() < 1e-3 && (g.limit(174.0) - 173.0).abs() < 1e-3);
+        // 定数 (整数でない値の固定の列) と負の値: 値は 0.3 + 0.5 k + [0, 0.1]
+        let h = ObjLat { s: 0.5, base: 0.3, m: 0.0, mm: 0.1 };
+        assert!((h.round_up(-1.05) - (-0.7)).abs() < 1e-12);
+        assert_eq!(h.round_up(-1.15), -1.15);
+        assert!((h.round_up(0.45) - 0.8).abs() < 1e-12);
+        assert!((h.limit(0.8) - 0.4).abs() < 1e-3);
+    }
 
     /// `ENOMOTO_MIP_BOUND_STEP`: 下界の格子の点への切り上げ。
     #[test]
@@ -435,6 +461,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) pc: Pseudocost,
     pub(super) incumbent: Option<(f64, Vec<f64>)>,
     pub(super) obj_step: Option<f64>,
+    /// 試作 `ENOMOTO_MIP_OBJINT` の `c` ([`ObjLat`]): 目的値の取りうる範囲 `base + k s + [m, M]` と、整数部の列の印 (計算し直しに使う)
+    pub(super) obj_lat: Option<ObjLat>,
+    pub(super) obj_lat_mask: Option<std::sync::Arc<Vec<bool>>>,
     pub(super) start: Instant,
     /// 求解の開始時の [`super::cap_clock`] (根のカットのループの上限に使う)。
     pub(super) cpu0: f64,
@@ -4471,6 +4500,23 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     } else {
         p.objective_step()
     };
+    // 試作 `ENOMOTO_MIP_OBJINT` の `c`: 整数部の刻みと連続部の幅 ([`ObjLat`])。刻みだけの形で表せないとき (連続部に幅がある・
+    // 整数でない値に固定された列がある) は `obj_step` を使わず、刈り込み・報告の下界は `obj_lat` で取る
+    let (obj_lat, obj_lat_mask, obj_step) = if objint('c') {
+        let mask = std::sync::Arc::new(p.implied_integers_ho2());
+        let lat = ObjLat::of(p, &mask, &dom.lo, &dom.up);
+        let step = match (obj_step, lat) {
+            (Some(s0), _) => Some(s0),
+            (None, Some(l)) if l.pure_on(p.offset) => Some(l.s),
+            _ => None,
+        };
+        if params.verbose && !params.submip {
+            eprintln!("MIP: OBJINT c: lattice {lat:?} (offset {:.10e}), step {step:?}", p.offset);
+        }
+        (lat, Some(mask), step)
+    } else {
+        (None, None, obj_step)
+    };
     // 診断用 `ENOMOTO_MIP_GAP4_RSS`: 生きている `Solver` を (外側・サブ MIP に分けて) 数える
     let gap4_sub = gap4_rss_secs().map(|_| params.submip);
     if let Some(b) = gap4_sub {
@@ -4493,6 +4539,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         },
         incumbent: None,
         obj_step,
+        obj_lat,
+        obj_lat_mask,
         start,
         cpu0: super::cap_clock(),
         sep_par_cpu: 0.0,
@@ -6298,7 +6346,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        prune_limit_of(eff, outer, self.obj_step, self.p.offset, self.params.rel_gap, self.params.abs_gap, self.params.cutoff)
+        prune_limit_of(eff, outer, self.obj_step, self.obj_lat, self.p.offset, self.params.rel_gap, self.params.abs_gap, self.params.cutoff)
     }
 
     /// 試作 `ENOMOTO_MIP_NODECUT_LIVE`・診断 `ENOMOTO_MIP_NODECUT_STAT` (analysis/nodecutoff_20261106.md): LP の求解の途中で
@@ -6313,14 +6361,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let shared = self.shared.clone();
         let outer = self.root_submip.clone();
-        let (step, off, rg, ag, cut) = (self.obj_step, self.p.offset, self.params.rel_gap, self.params.abs_gap, self.params.cutoff);
+        let (step, lat, off, rg, ag, cut) = (self.obj_step, self.obj_lat, self.p.offset, self.params.rel_gap, self.params.abs_gap, self.params.cutoff);
         std::rc::Rc::new(move || {
             let sh = shared.as_ref().map(|s| s.best()).filter(|v| v.is_finite());
             let eff = match (own, sh) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
             };
-            prune_limit_of(eff, outer.as_ref().map_or(f64::INFINITY, |c| c.best()), step, off, rg, ag, cut) - off
+            prune_limit_of(eff, outer.as_ref().map_or(f64::INFINITY, |c| c.best()), step, lat, off, rg, ag, cut) - off
         })
     }
 
@@ -6331,8 +6379,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 本体の求解 (サブ MIP でなく、木の従でもない) だけで使う。暗黙の整数列で刻みを取ったとき (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`) も、
     /// 最適解のどれかは格子に乗るので、最適値は格子の点で、切り上げた下界は最適値を越えない
     pub(super) fn step_lb(&self, lb: f64) -> f64 {
-        let Some(step) = self.report_step() else { return lb };
-        let r = round_lb_to_step(lb, step, self.p.offset);
+        let r = match self.report_lat() {
+            Some(l) => l.round_up(lb),
+            None => {
+                let Some(step) = self.report_step() else { return lb };
+                round_lb_to_step(lb, step, self.p.offset)
+            }
+        };
         match self.incumbent.as_ref() {
             Some((z, _)) => r.min(*z).max(lb.min(*z)),
             None => r,
@@ -6351,12 +6404,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `ENOMOTO_MIP_BOUND_STEP`: 下界 `lb` を刻みで切り上げると暫定解の値以上になる (探索し残した改善解はない)。
     fn step_complete(&self, lb: f64) -> bool {
+        if let Some(l) = self.report_lat() {
+            return self.incumbent.as_ref().is_some_and(|(z, _)| l.round_up(lb) >= *z);
+        }
         let Some(step) = self.report_step() else { return false };
         let Some((z, _)) = self.incumbent.as_ref() else { return false };
         round_lb_to_step(lb, step, self.p.offset) >= *z
     }
 
+    /// `ENOMOTO_MIP_OBJINT` の `c` の報告用の範囲 ([`Self::report_step`] と同じ条件で使う)
+    fn report_lat(&self) -> Option<ObjLat> {
+        if !bound_step_on() || self.params.submip || self.snap.is_some() {
+            return None;
+        }
+        self.obj_lat
+    }
+
+    /// `ENOMOTO_MIP_OBJINT` の `c`: 大域的な境界で [`ObjLat`] を計算し直す (根の大域的な固定の後。整数部の印は作成時のもの)。
+    /// 大域的な固定は打ち切り値以下の解を全部残すので、締まった境界での範囲も暫定解より良い解を全部含む
+    pub(super) fn refresh_obj_lat(&mut self) {
+        let Some(mask) = self.obj_lat_mask.clone() else { return };
+        if let Some(l) = ObjLat::of(self.p, &mask, &self.dom.global_lo, &self.dom.global_up) {
+            if self.params.verbose && !self.params.submip && self.snap.is_none() && self.obj_lat.is_none_or(|o| o.m != l.m || o.mm != l.mm || o.base != l.base) {
+                eprintln!("MIP: OBJINT c: lattice refreshed {:?} -> {l:?}", self.obj_lat);
+            }
+            self.obj_lat = Some(l);
+        }
+    }
+
     pub(super) fn obj_support_gap(&self, lb: f64) -> bool {
+        if let Some(l) = self.obj_lat {
+            let Some((z, _)) = self.incumbent.as_ref() else { return false };
+            return l.round_up(lb) < *z - 1e-6 * z.abs().max(1.0);
+        }
         if obj_step_lattice() && self.obj_step.is_some() {
             // 暫定解が格子に乗らないときも、格子の点で比べる
             let Some((z, _)) = self.incumbent.as_ref() else { return false };
@@ -12335,6 +12415,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.t4_rc_extra = extra;
         }
         self.ho2_global_obj_prop();
+        self.refresh_obj_lat();
     }
 
     /// `ENOMOTO_MIP_HO2_GOBJ` (試作、既定では使わない。analysis/highs_only_20261105/G2.md): 打ち切り値 `U` による目的関数の行
@@ -21466,6 +21547,83 @@ pub(super) fn bound_step_on() -> bool {
     env_def!("ENOMOTO_MIP_BOUND_STEP", "1").is_some()
 }
 
+/// 試作 `ENOMOTO_MIP_OBJINT` の `c` (analysis/objint_20261112.md): 目的値の取りうる範囲 `base + k s + [m, mm]` (k は整数)。
+/// 費用のある列を、整数部 (整数列と暗黙の整数の印の列、係数は刻み `s` の整数倍)・固定の列 (`lo == up`、寄与 `c_j v_j` は定数なので
+/// `base` に入れる。値が整数でなくてもよい)・連続部 (それ以外、全部有界で `Σ c_j x_j ∈ [m, mm]`) に分ける。`mm - m < s` のときだけ作る
+/// (そうでなければ隙間がなく何も言えない)。双対側の暗黙の整数は「整数の最適解がある」だけなので、暫定解の値は範囲に乗るとは限らない。
+/// 刈り込み・切り上げはどれも「暫定解より良い解があれば、範囲に乗る値のものもある」ことだけを使う
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ObjLat {
+    pub(super) s: f64,
+    pub(super) base: f64,
+    pub(super) m: f64,
+    pub(super) mm: f64,
+}
+
+impl ObjLat {
+    /// 境界 `(lo, up)` での範囲。整数部の費用がない・連続部に無限の境界がある・幅が刻み以上なら `None`
+    pub(super) fn of(p: &MipProblem, int_mask: &[bool], lo: &[f64], up: &[f64]) -> Option<ObjLat> {
+        let (mut coefs, mut base, mut m, mut mm) = (Vec::new(), p.offset, 0.0f64, 0.0f64);
+        for j in 0..p.n {
+            let c = p.cost[j];
+            if c == 0.0 {
+                continue;
+            }
+            if lo[j] == up[j] {
+                base += c * lo[j];
+            } else if int_mask[j] {
+                coefs.push(c.abs());
+            } else {
+                if !lo[j].is_finite() || !up[j].is_finite() {
+                    return None;
+                }
+                let (a, b) = (c * lo[j], c * up[j]);
+                m += a.min(b);
+                mm += a.max(b);
+            }
+        }
+        let s = MipProblem::step_of(&coefs)?;
+        // 幅は和の丸め誤差を見込んで少し広げ、刻みに対してはっきり小さいときだけ使う
+        let slack = 1e-9 * (m.abs() + mm.abs() + base.abs() + 1.0);
+        let (m, mm) = (m - slack, mm + slack);
+        (mm - m < s * (1.0 - 1e-6)).then_some(ObjLat { s, base, m, mm })
+    }
+
+    /// 刻みだけの格子 `offset + k s` で表せるか (連続部に幅がなく、`base + m` が格子の点)
+    pub(super) fn pure_on(&self, offset: f64) -> bool {
+        let w = (self.base + self.m - offset) / self.s;
+        // 幅は丸め誤差の余裕 (`of` の slack) だけなら 0 とみなす
+        self.mm - self.m <= 1e-6 * self.s && (w - w.round()).abs() <= 1e-6
+    }
+
+    /// 下界 `lb` を、取りうる値の最小で `lb` 以上のもの (隙間にあれば次の区間の左端) に切り上げる。許容は [`round_lb_to_step`] と同じ
+    pub(super) fn round_up(&self, lb: f64) -> f64 {
+        if !lb.is_finite() {
+            return lb;
+        }
+        let tol = (1e-6 * lb.abs().max(1.0)).min(0.5 * self.s);
+        let t = lb - self.base;
+        // 右端が t - tol 以上の最初の区間
+        let k = ((t - tol - self.mm) / self.s).ceil();
+        let v = self.base + k * self.s + self.m;
+        v.max(lb)
+    }
+
+    /// 暫定解 `z` より良い解を探すときの刈り込みの上限: `z` より厳密に小さい取りうる値の最大 (+ 許容)。`z` がある区間の中なら
+    /// `z` のわずかに下、`z` が隙間か区間の左端なら前の区間の右端
+    pub(super) fn limit(&self, z: f64) -> f64 {
+        let t = z - self.base;
+        // 左端が t (の許容の内) 以上の最初の区間 k0。前の区間 k0 - 1 の左端は t より小さい
+        let k0 = ((t - self.m) / self.s - 1e-6).ceil();
+        let right = (k0 - 1.0) * self.s + self.mm;
+        if right >= t {
+            z - 1e-9 * z.abs().max(1.0)
+        } else {
+            self.base + right + (1e-6 * z.abs().max(1.0)).min(0.5 * (self.s - (self.mm - self.m)))
+        }
+    }
+}
+
 /// 目的値が `offset + k * step` (k は整数) しか取らないとき、下界 `lb` を最も近い上の格子の点に切り上げる (最小化の向き)。
 /// 下界の数値誤差で格子の点をわずかに越えた値を次の点へ上げないよう、許容 `min(1e-6 * max(|lb|, 1), step / 2)` を引いてから
 /// 切り上げる (刈り込みの上限 [`Solver::prune_limit`] と同じ許容)。有限でない値・刻みが正でないときはそのまま返す
@@ -21490,14 +21648,16 @@ fn obj_step_lattice() -> bool {
 
 /// 試作 `ENOMOTO_MIP_OBJINT` (既定では使わない。analysis/objint_20261112.md): 目的関数の整数性 (HiGHS の `objintscale`) の検出を広げる。
 /// 値の文字で部品を選ぶ (`1` は `hf` と同じ): `h` 暗黙の整数に HiGHS の双対側の規則 ([`MipProblem::implied_integers_ho2`]) を使う、
-/// `f` 整数値に固定された列を整数列と同じに扱う。刻みが付けば、刈り込みは暫定解より厳密に小さい格子の点 ([`prune_limit_of`])、
+/// `f` 整数値に固定された列を整数列と同じに扱う、`c` 連続列が混ざっても有界なら目的値の範囲 `base + k s + [m, M]` ([`ObjLat`]) を使う
+/// (固定の列は値が整数でなくても定数に移す。根の大域的な固定の後に計算し直す)。刻みが付けば、刈り込みは暫定解より厳密に小さい格子の点 ([`prune_limit_of`])、
 /// 報告の下界は格子に切り上げ (`ENOMOTO_MIP_BOUND_STEP`、既定)
 pub(super) fn objint(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_OBJINT").is_some_and(|v| v != "0" && v != "off" && (v.contains(c) || v == "1"))
+    // `1` は計測した形 `hf` (`c` は含めない)
+    env_str!("ENOMOTO_MIP_OBJINT").is_some_and(|v| v != "0" && v != "off" && (v.contains(c) || (v == "1" && matches!(c, 'h' | 'f'))))
 }
 
 fn objint_on() -> bool {
-    objint('h') || objint('f')
+    objint('h') || objint('f') || objint('c')
 }
 
 /// [`Solver::prune_limit_ex`] の式 (`eff` は自分と共有の暫定解の良い方、`outer` は根のサブ MIP の外側の上限)。
@@ -21513,11 +21673,13 @@ fn nodecnt_on() -> bool {
     nodecnt('d')
 }
 
-fn prune_limit_of(eff: Option<f64>, outer: f64, obj_step: Option<f64>, off: f64, rel_gap: f64, abs_gap: f64, cutoff: f64) -> f64 {
+fn prune_limit_of(eff: Option<f64>, outer: f64, obj_step: Option<f64>, lat: Option<ObjLat>, off: f64, rel_gap: f64, abs_gap: f64, cutoff: f64) -> f64 {
     let lim = match eff.as_ref() {
         None => cutoff,
         Some(z) => {
-            let strict = match obj_step {
+            let strict = match (lat, obj_step) {
+                (Some(l), _) => l.limit(*z),
+                (None, obj_step) => match obj_step {
                 // 暫定解より厳密に小さい最大の格子の点 (暫定解が格子の上なら z - step)。暗黙の整数列で刻みを取ったとき
                 // (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`) は暫定解が格子に乗るとは限らない
                 Some(step) if obj_step_lattice() => {
@@ -21526,6 +21688,7 @@ fn prune_limit_of(eff: Option<f64>, outer: f64, obj_step: Option<f64>, off: f64,
                 }
                 Some(step) => z - step + (1e-6 * z.abs().max(1.0)).min(0.5 * step),
                 None => z - 1e-9 * z.abs().max(1.0),
+                },
             };
             let gap = z - (rel_gap * z.abs().max(1.0)).max(abs_gap);
             strict.min(gap).min(cutoff)

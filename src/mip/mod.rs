@@ -525,8 +525,13 @@ pub fn solve_mip(
     // 報告の下界を格子の点に切り上げる (木の中の切り上げ [`solver::Solver::step_lb`] は前処理後の問題の刻みで行う。こちらは
     // 前処理・後処理の修復・再スタートを通った後の値に、元の問題で確かな刻みを当てる)。切り上げた下界が暫定解の値に届けば最適
     if solver::bound_step_on() && !params.submip && matches!(r.status, MipStatus::TimeLimit | MipStatus::NodeLimit | MipStatus::NotSolved) {
-        if let Some(step) = p.objective_step() {
-            let lb = solver::round_lb_to_step(r.best_bound, step, p.offset);
+        // 試作 `ENOMOTO_MIP_OBJINT` の `c`: 元の問題でも、HO2 の暗黙の整数・固定の列・有界な連続部の範囲 ([`solver::ObjLat`]) で切り上げる
+        let lat = if solver::objint('c') { solver::ObjLat::of(&p, &p.implied_integers_ho2(), &p.col_lo, &p.col_up) } else { None };
+        let st = match lat {
+            Some(l) => Some((l.s, l.round_up(r.best_bound))),
+            None => p.objective_step().map(|step| (step, solver::round_lb_to_step(r.best_bound, step, p.offset))),
+        };
+        if let Some((step, lb)) = st {
             match r.objective {
                 Some(z) => {
                     r.best_bound = lb.min(z).max(r.best_bound.min(z));

@@ -451,6 +451,11 @@ impl MipProblem {
     /// `(lo, up)` で整数値に固定された列) と連続部 (それ以外) に分ける。整数部に刻み `s` があり、連続部の列が全部有界なら
     /// `(s, m, M, 連続部の列の数)` を返す (`m`・`M` は連続部 `Σ c_j x_j` の最小・最大)。目的値は `offset + k s + [m, M]` にしか乗らない。
     /// 整数部の費用がなければ `None` (連続部だけの目的は刻みがない)
+    /// 係数 (絶対値) の共通の刻み ([`step_of_coefs`])
+    pub fn step_of(coefs: &[f64]) -> Option<f64> {
+        step_of_coefs(coefs)
+    }
+
     pub fn objective_split_gap(&self, int_mask: &[bool], lo: &[f64], up: &[f64]) -> Option<(f64, f64, f64, usize)> {
         let (mut coefs, mut m, mut mm, mut nc) = (Vec::new(), 0.0f64, 0.0f64, 0usize);
         for j in 0..self.n {

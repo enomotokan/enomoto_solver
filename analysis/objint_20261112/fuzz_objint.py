@@ -6,7 +6,9 @@ HiGHS (mip_rel_gap 1e-9) と最適値を突き合わせる。形: メイクス�
 使い方: ENOMOTO_MIP_OBJINT=1 python fuzz_objint.py 問題数 [開始seed]   (付けなければ既定の動きの検査)。1 スレッドで解く。"""
 import os, random, re, sys, tempfile, time
 NODES = []
+LASTLOG = [""]
 NEWSTEP = []
+LATW = []
 os.environ.setdefault("ENOMOTO_MIP_THREADS", "1")
 os.environ.setdefault("ENOMOTO_MIP_LOG", "1")
 import highspy
@@ -71,12 +73,32 @@ def gen(seed):
     # 費用のある、どこにも出ない連続列 (有界)
     if g.random() < 0.2:
         f = var(float(g.randint(0, 2)), float(g.randint(3, 5)) + (0.5 if frac() else 0.0), False); c[f] = s * g.choice([1, -1])
+    add_cont_part(g, s, var, row, c, it, lo, up)
     off = g.choice([0.0, 0.0, 0.3, -2.0, 5.5])
     sense = g.choice(["minimize", "minimize", "maximize"])
     if sense == "maximize":
         # 最大化でも有界になるように、費用の符号を返す (Y・Z は下に有界なので最大化の向きでは費用を負にする)
         c = [-v for v in c]
     return (lo, up, c, it, rows, rlo, rup, off, sense)
+
+
+def add_cont_part(g, s, var, row, c, it, lo, up):
+    """OBJINT の `c` の形: 費用の小さい有界な連続列 w (Σ |c| (u - l) が刻みより小さいことが多い) を 1〜3 本と、整数でない値に固定された
+    費用のある列を確率で足す。w は整数列と行でつなぐ (w <= Σ a x + b、w >= Σ a x - b)"""
+    X = [j for j in range(len(lo)) if it[j]]
+    if g.random() < 0.6 and X:
+        for _ in range(g.randint(1, 3)):
+            u = float(g.randint(1, 10)) + (0.3 if g.random() < 0.7 else 0.0)  # 端数の境界なら HO2 の印が付かず連続部に残る
+            w = var(0.0, u, False)
+            c[w] = s * g.choice([0.01, 0.02, -0.01, 0.03, 0.05, -0.05, 0.3])
+            S = g.sample(X, min(len(X), g.randint(1, 3)))
+            if g.random() < 0.5:
+                row([(w, 1.0)] + [(j, -float(g.randint(1, 4))) for j in S], -float("inf"), float(g.randint(0, 3)) + 0.5 * g.randint(0, 1))
+            else:
+                row([(w, 1.0)] + [(j, -float(g.randint(1, 4))) for j in S], -float(g.randint(0, 6)) - 0.25 * g.randint(0, 1), float("inf"))
+    if g.random() < 0.3:
+        v = round(g.uniform(-3, 3), 2)
+        f = var(v, v, False); c[f] = s * g.choice([1, 0.37, -2])
 
 
 def gen_pm(g, brk, frac):
@@ -113,6 +135,7 @@ def gen_pm(g, brk, frac):
     if g.random() < 0.3:
         v = float(g.randint(-3, 3)) + (0.25 if frac() else 0.0)
         f = var(v, v, False); c[f] = s * g.randint(1, 4)
+    add_cont_part(g, s, var, row, c, it, lo, up)
     off = g.choice([0.0, 0.0, 0.3, -2.0, 5.5])
     sense = g.choice(["minimize", "minimize", "maximize"])
     if sense == "maximize":
@@ -151,12 +174,15 @@ def ours(lp):
         s = M.solve(mip_rel_gap=1e-9)
     finally:
         sys.stdout.flush(); os.dup2(saved, 2); os.dup2(saved1, 1); os.close(saved); os.close(saved1); os.close(fd)
-    log = open(path).read(); os.unlink(path)
+    log = open(path).read(); os.unlink(path); LASTLOG[0] = log
     m = re.findall(r"nodes (\d+) \(", log)
     NODES.append(int(m[-1]) if m else -1)
     # OBJINT で刻みが新しく付いたか (既定の判定では付かない)
     st = re.findall(r"objective step with implied integers: (Some\([^)]*\)|None) \(without: (Some\([^)]*\)|None)\)", log)
     NEWSTEP.append(any(a != "None" and b == "None" for a, b in st))
+    # `c`: 連続部に幅のある範囲が付いたか (m < M)
+    lat = re.findall(r"OBJINT c: lattice Some\(ObjLat \{ s: ([-0-9.e]+), base: ([-0-9.e]+), m: ([-0-9.e]+), mm: ([-0-9.e]+) \}\)", log)
+    LATW.append(any(float(mm) - float(m) > 1e-6 for _, _, m, mm in lat))
     return s.status, s.objective, ([x.value for x in xs] if s.status == "optimal" else None)
 
 
@@ -184,4 +210,4 @@ if __name__ == "__main__":
         if not ok:
             bad += 1
             if bad <= 10: print("seed", seed, "highs", hs, ho, "ours", os_, oo, flush=True)
-    print("bad", bad, "of", N, "status", st, "with nodes>0", sum(n > 0 for n in NODES), "new step", sum(NEWSTEP), "new step and nodes>0", sum(a and n > 0 for a, n in zip(NEWSTEP, NODES)), "time %.1f" % (time.time() - t0))
+    print("bad", bad, "of", N, "status", st, "with nodes>0", sum(n > 0 for n in NODES), "new step", sum(NEWSTEP), "new step and nodes>0", sum(a and n > 0 for a, n in zip(NEWSTEP, NODES)), "c range with width", sum(LATW), "c and nodes>0", sum(a and n > 0 for a, n in zip(LATW, NODES)), "time %.1f" % (time.time() - t0))

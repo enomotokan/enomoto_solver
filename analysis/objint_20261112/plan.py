@@ -19,7 +19,7 @@ def balance(tasks, n, out):
         i = min(range(n), key=lambda j: load[j]); shards[i] += [list(t) for t in ts]; load[i] += sum(est(t[0], t[1]) for t in ts)
     (D / out).write_text(json.dumps({"shards": shards, "est_hours": [round(x / 3600, 2) for x in load]}, indent=0))
     print(out, len(tasks), "回", "見積り (時間):", min(round(x / 3600, 2) for x in load), "〜", max(round(x / 3600, 2) for x in load))
-if sys.argv[1] == "P":
+if sys.argv[1].startswith("P"):
     sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
     from probs import PROBS  # noqa: E402
     T2 = defaultdict(list)
@@ -28,7 +28,9 @@ if sys.argv[1] == "P":
             r = json.loads(l)
             if r.get("cfg") == "def" and isinstance(r["result"].get("time"), (int, float)): T2[r["problem"]].append(min(r["result"]["time"], 60))
     EST.update({p: {"*": (sum(T2[p]) / len(T2[p]) if T2[p] else 40) + 6} for p in PROBS})
-    balance([(p, c, s, 60) for p in PROBS for s in (1, 2, 3) for c in ["def", "oi"]], int(sys.argv[2]), "shards_P.json")
+    cand = sys.argv[3] if len(sys.argv) > 3 else "oi"
+    out = "shards_P.json" if cand == "oi" else f"shards_P{cand}.json"
+    balance([(p, c, s, 60) for p in PROBS for s in (1, 2, 3) for c in ["def", cand]], int(sys.argv[2]), out)
 CT = ["def", "oi"]  # T の設定 (HiGHS は hiloss・mitt600 の回を使う)
 if sys.argv[1] == "T":
     balance([(p, c, s, 600) for p in sys.argv[3:] for s in (1, 2) for c in CT], int(sys.argv[2]), "shards_T.json")
