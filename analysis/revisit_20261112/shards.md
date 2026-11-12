@@ -27,3 +27,16 @@ python run.py P <K>                                                  # 途中で
 | 10・11 | (REVISIT のセッション) | res_P_s10・s11.jsonl |
 
 集計: `python summ.py` (設定ごとに既定との対の SGM・95% 区間・解けた回・揃って遅い問題・RSS の比・食い違い)。
+
+## 種 3 の追加 (Q、2026-11-12)
+
+種 1・2 の 116 対の集計 (`summ_P.txt`) で、区間の上端が +5% 以下かつ解けた回が減らなかった 6 件 (lm2・prepar・sbt・ncm・ns250s・opf3) と def を、
+58 問 × 種 3 で回す (`plan_s3.py 4` → `shards_Q.json`、406 回、見積り各 約 0.83 時間)。コミット・ビルドは上と同じ (224a15d4c)。
+
+| 分担 | 命令 | 結果 |
+|---|---|---|
+| Q0〜Q2 | `python run.py Q 0` 〜 `python run.py Q 2` | res_Q_s0〜s2.jsonl |
+| Q3 | (REVISIT のセッション) | res_Q_s3.jsonl |
+
+コミットメッセージは「REVISIT Q<K>: 途中 (n 行)」「REVISIT Q<K>: 完了 (n 行)」。
+集計: `python summ.py 'res_*_s*.jsonl'` (種 3 の無い設定の「揃って遅い」は出ない。候補の 6 件だけを見る)。
