@@ -1,5 +1,5 @@
 #!/bin/bash
-# ROOTCAP の 58 問の分担 (2026-11-11): 分担セッションで 1 つ回す。def・rc (ENOMOTO_MIP_ROOTCAP=hdw) を問題ごとに続けて、種 1・2・3、60 秒・4 スレッド。
+# ROOTCAP の 58 問の分担 (2026-11-11): 分担セッションで 1 つ回す。def・rc (ENOMOTO_MIP_ROOTCAP=hd) を問題ごとに続けて、種 1・2・3、60 秒・4 スレッド。
 # 同じ (問題, 種) の def と rc は同じ分担で続けて回る (問題 i は i % 分担の数 == 分担の番号 の分担)。
 # 使い方: bash analysis/rootcap_20261111/shard58.sh 分担の数 分担の番号   (リポジトリの頭で。結果は analysis/rootcap_20261111/res58_sh<番号>.jsonl)
 # 終わったら res58_sh<番号>.jsonl だけをコミットして push する (logs58/ はコミットしない)。ソルバーは同時に 1 つ (ほかの重い仕事と重ねない)。
