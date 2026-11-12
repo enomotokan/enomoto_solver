@@ -5,11 +5,14 @@ import json, subprocess, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 k = int(sys.argv[1])
-mine = json.loads((D / "shards.json").read_text())["shards"][k]
+# `--file shards45.json` で別の分担の表 (出力は res45_sK.jsonl)
+fname = sys.argv[sys.argv.index("--file") + 1] if "--file" in sys.argv else "shards.json"
+tag = "" if fname == "shards.json" else fname.replace("shards", "").replace(".json", "")
+mine = json.loads((D / fname).read_text())["shards"][k]
 # 計測中は追跡しない live ファイルに書き、コミットのときに res_sK.jsonl へ写す (safe_commit.sh。git の取り込みが追記とぶつからないように)
-out = f"res_s{k}.live.jsonl" if "--live" in sys.argv else f"res_s{k}.jsonl"
+out = f"res{tag}_s{k}.live.jsonl" if "--live" in sys.argv else f"res{tag}_s{k}.jsonl"
 done = set()
-for o in {out, f"res_s{k}.jsonl"}:
+for o in {out, f"res{tag}_s{k}.jsonl"}:
     if (D / o).exists():
         for l in (D / o).read_text().splitlines():
             if l.strip():

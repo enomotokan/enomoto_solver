@@ -5,7 +5,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import benchlib as bl  # noqa: E402
-rows = bl.load(sorted(HERE.glob("res_s*.jsonl")))
+rows = bl.load(sorted([f for f in HERE.glob("res*_s*.jsonl") if ".live" not in f.name]))
 R = bl.table(rows)
 noise = bl.load_noise()
 for B in (sys.argv[1] if len(sys.argv) > 1 else "u").split(","):

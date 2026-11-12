@@ -24,3 +24,18 @@ python analysis/fixmore_20261112/run_share.py K --live    # K = 0, 1, 2 (live �
 | 1 | `python analysis/fixmore_20261112/run_share.py 1 --live` | 88 |
 | 2 | `python analysis/fixmore_20261112/run_share.py 2 --live` | 88 |
 | 3 | (手元) `python analysis/fixmore_20261112/run_share.py 3 --live` | 86 |
+
+## 種 4・5 の追加 (2026-11-12、`shards45.json`、3 分担、各 76〜78 回・見込み約 36 分)
+
+種 1〜3 で SGM の区間の上限が基準を越えた (+6.6%) ので、既定と u の対を種 4・5 に足す。**解く側のソースは種 1〜3 と同じ 5bc168e1**
+(その後に入った WRONGANS の既定の直しを混ぜないため)。台本だけ新しいコミットから取る:
+
+```sh
+git fetch origin ccr-1beed81b-ex0uhq && git checkout --detach 5bc168e1
+git checkout <台本のコミット> -- analysis/fixmore_20261112/      # run_share.py の --file と shards45.json
+sh analysis/fixmore_20261112/build.sh
+python analysis/fixmore_20261112/run_share.py K --live --file shards45.json   # K = 0, 1, 2 → res45_sK.live.jsonl
+```
+
+終わったら、ブランチの最新に戻って (`git checkout -f ccr-1beed81b-ex0uhq && git pull --rebase`。live ファイルとログは追跡しないので残る)
+`sh analysis/fixmore_20261112/safe_commit.sh "FIXMORE 種 4・5 分担 K: 完了 (N 行)"`。
