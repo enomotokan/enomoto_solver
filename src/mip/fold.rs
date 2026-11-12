@@ -5,7 +5,7 @@
 //! 値の文字: `r` 反転も使う、`i` 整数列もまとめる (段階 3)、`n` 整数の組の TU の判定にネットワーク行列 (とその転置) の一般の判定も使う
 //! (試作、既定では使わない。analysis/drcrtu_20261111.md)、`q` ログを出さない、`c` 畳んだ数を出すだけで解かない (数える用)、
 //! `p` 行が 1 本もまとまらない (平行な列だけの) 畳みと、列が 1 本もまとまらない (平行な行だけの) 畳みも使う (既定では使わない。
-//! 前処理が同じ列・同じ行をまとめるので)、`P` 前処理 → 畳む・`Q` 前処理 → 畳む → 前処理 (試作、[`solve_folded_any`])。`1` は連続列だけ・反転なし。
+//! 前処理が同じ列・同じ行をまとめるので)、`P` 前処理 → 畳む・`Q` 前処理 → 畳む → 前処理・`B` 畳む → 前処理 → 畳む (試作、[`solve_folded_any`])。`1` は連続列だけ・反転なし。
 //!
 //! - 連続列だけ (段階 2): 整数列はどれも 1 列だけの組にする (論文の Lemma 28)。和の等しい行は整数列の係数が同じになるので、
 //!   畳んだ MIP と元の MIP は解が行き来でき (x_w = δ_w + λ_w z_Q、整数列は δ が整数)、最適値も同じ。
@@ -546,9 +546,39 @@ pub fn solve_folded_any(
 ) -> Option<MipResult> {
     let fl = flags()?;
     let pre_p = fl.contains('P');
+    if fl.contains('B') {
+        // 試作 `B` (analysis/foldpre_20261112.md、既定では使わない): 前と後の両方。元の問題を畳み、畳んだ問題を前処理してもう一度畳む
+        // (後は `Q` があれば 前処理 → 畳む → 前処理、なければ `P` と同じ 前処理 → 畳む)。後で畳めなければ畳んだ問題をふつうに解く。
+        // 前で畳めなければ後だけ。
+        let pre_p = !fl.contains('Q');
+        let inner = |q: &MipProblem, t: f64| -> MipResult {
+            let t1 = std::time::Instant::now();
+            match solve_folded_pre(q, t, verbose, solve, solve_np, pre_p) {
+                Some(r) => r,
+                None => solve(q, (t - t1.elapsed().as_secs_f64()).max(0.0)),
+            }
+        };
+        if let Some(r) = solve_folded(p, time_limit, verbose, &inner) {
+            return Some(r);
+        }
+        return solve_folded_pre(p, time_limit, verbose, solve, solve_np, pre_p);
+    }
     if !pre_p && !fl.contains('Q') {
         return solve_folded(p, time_limit, verbose, solve);
     }
+    solve_folded_pre(p, time_limit, verbose, solve, solve_np, pre_p)
+}
+
+/// `P`・`Q` の本体: 前処理してから畳む (`pre_p` なら畳んだ問題は前処理なしで解く)。畳まないなら `None`。
+fn solve_folded_pre(
+    p: &MipProblem,
+    time_limit: f64,
+    verbose: bool,
+    solve: &dyn Fn(&MipProblem, f64) -> MipResult,
+    solve_np: &dyn Fn(&MipProblem, f64) -> MipResult,
+    pre_p: bool,
+) -> Option<MipResult> {
+    let fl = flags()?;
     let t0 = std::time::Instant::now();
     let (prob, unpre) = super::presolve_for_fold(p, false)?;
     let secs_pre = t0.elapsed().as_secs_f64();
