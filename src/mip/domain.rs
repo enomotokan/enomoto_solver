@@ -101,6 +101,13 @@ thread_local! {
     static ACT_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// 境界を変える・戻した回数 (スレッドごと、`ENOMOTO_MIP_PRESOLVE_WORK` の較正用)
     static CHG_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// 伝播 1 回の手間の上限で打ち切った回数 (スレッドごと、CLQPRB の診断用)
+    static WORK_CUTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`WORK_CUTS`] の値。
+pub fn work_cuts() -> u64 {
+    WORK_CUTS.with(|w| w.get())
 }
 
 /// [`CHG_COUNT`] の値。
@@ -397,6 +404,20 @@ impl Domain {
     /// (`ENOMOTO_MIP_PROBE_CLIQUE`) が見つけた含意を、後の列のプロービングの伝播に使う (HiGHS はプロービングで見つけた含意を
     /// クリーク表に入れ、クリーク表で伝播する。行の伝播では `x = 1 => y = 0` の対偶 `y = 1 => x = 0` が見えないことがある)。
     /// 足す前に固定されていた列の含意は伝播しないので、根で呼ぶこと。
+    /// 含意の表を `edges` だけで作り直す (`ENOMOTO_MIP_CLQPRB` のプロービングで、重複を除いた後に使う)。固定済みの 0-1 の整数列を
+    /// 含意の伝播の待ち行列に積む (表に後から足した含意は、それより前に固定された列からは伝播していない)。呼び手が [`Self::propagate`] する
+    pub fn reset_implications(&mut self, p: &MipProblem, edges: &[(u32, u32)]) {
+        self.impl_adj = None;
+        self.add_implications(p.n, edges);
+        if self.impl_adj.is_some() {
+            for j in 0..p.n {
+                if p.is_int[j] && self.lo[j] == self.up[j] && (self.lo[j] == 0.0 || self.lo[j] == 1.0) {
+                    self.impl_queue.push(j);
+                }
+            }
+        }
+    }
+
     pub fn add_implications(&mut self, n: usize, edges: &[(u32, u32)]) {
         if edges.is_empty() {
             return;
@@ -514,7 +535,8 @@ impl Domain {
         if self.infeasible {
             return false;
         }
-        let nnz_limit = 20 * (p.m + p.n) + 100_000;
+        // `ENOMOTO_T_DOMAIN_PROP_WORK_MULT` (試作、CLQPRB): 伝播 1 回の手間の上限の倍率 (既定 20)
+        let nnz_limit = tunable!("ENOMOTO_T_DOMAIN_PROP_WORK_MULT", 20usize, usize) * (p.m + p.n) + 100_000;
         let mut work = 0usize;
         loop {
             // 含意を先に伝播する (固定された 2 値列の文字と同時に成り立たない文字の列を、反対の値に固定する)。
@@ -580,6 +602,7 @@ impl Domain {
             }
             if work > nnz_limit {
                 // 打ち切り (残りは次回に回す)
+                WORK_CUTS.with(|w| w.set(w.get() + 1));
                 break;
             }
         }

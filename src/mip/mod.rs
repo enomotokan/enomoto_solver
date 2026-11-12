@@ -1167,6 +1167,18 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     }
     let presolved = if use_presolve { presolve_mip(p, params.verbose, pre_submip, lp_probe_secs) } else { None };
     pretime::mark("presolve_mip");
+    // 診断 `ENOMOTO_MIP_DEBUG_PRESOLVE_COLS=ファイル` (CLQPRB、analysis/clqprb_20261112.md): 最初の前処理の後の列ごとに
+    // (番号, 下限, 上限, 残った行の非零の数) を書く。前処理は列の番号を保つので、HiGHS の前処理で消えた列と突き合わせられる
+    if let (Some(path), Some(Presolved::Reduced { prob, .. })) = (env_str!("ENOMOTO_MIP_DEBUG_PRESOLVE_COLS"), &presolved) {
+        if !params.submip && params.restarts == 0 && prob.n == p.n {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::File::create(path) {
+                for j in 0..prob.n {
+                    let _ = writeln!(f, "{j}\t{}\t{}\t{}", prob.col_lo[j], prob.col_up[j], prob.cols[j].len());
+                }
+            }
+        }
+    }
     PRESOLVE_IN_SUBMIP.with(|f| f.set(prev_in_sub));
     FEAS_FJ_EARLY.with(|c| c.set(None));
     RESTART_PRESOLVE.with(|f| f.set(prev_rp));
@@ -3910,7 +3922,10 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     }
     // `ENOMOTO_MIP_KEEP_IMPLICATIONS`: 元の問題が持っていた含意 (サブ MIP なら親のプロービングの結果) を引き継ぐ。前処理は
     // 列の番号を変えないので、両端が前処理後も尺度 1 の 0-1 列のままの組だけ残す (HiGHS もサブ MIP に含意とクリーク表を渡す)
-    if env_str!("ENOMOTO_MIP_KEEP_IMPLICATIONS").is_some() && !p.conflict_edges.is_empty() {
+    // `ENOMOTO_MIP_CLQPRB` ([`clqprb_on`]) のときも、プロービングの後の前処理のかけ直し (`depth` > 0) では引き継ぐ (次のプロービングが
+    // 前のプロービングの含意を伝播に使う。HiGHS はクリーク表を前処理の繰り返しの間で持ち続ける)
+    let keep_impl = env_str!("ENOMOTO_MIP_KEEP_IMPLICATIONS").is_some() || (clqprb_on() && depth > 0 && !submip);
+    if keep_impl && !p.conflict_edges.is_empty() {
         let bin = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0 && pre.scaling.d.get(j).is_none_or(|&d| d == 1.0);
         prob.conflict_edges = p.conflict_edges.iter().copied().filter(|&(a, b)| bin((a / 2) as usize) && bin((b / 2) as usize)).collect();
     }
@@ -4922,6 +4937,13 @@ fn probe_equiv_block(prob: &MipProblem, base: &domain::Domain, bin0: &[bool], js
         .collect()
 }
 
+/// 試作 `ENOMOTO_MIP_CLQPRB` (既定では使わない。analysis/clqprb_20261112.md): 含意を集めるプロービング ([`probe`]) で、見つけた含意
+/// (クリーク表の 2 文字のクリークにあたる) を後の列の伝播に使い (HiGHS の probing はクリーク表で伝播する)、含意の本数の上限を広げ、
+/// 試す回数の予算と時間の上限を広げる
+pub(crate) fn clqprb_on() -> bool {
+    env_str!("ENOMOTO_MIP_CLQPRB").is_some_and(|v| v != "0")
+}
+
 /// 試作 `ENOMOTO_MIP_PREPAR` (既定では使わない。analysis/prepar_20261107.md): 前処理の並列化。値の文字で選ぶ
 /// (`p`: 含意を集めるプロービング ([`probe`]) の候補を投機的に並べる、`e`: プロービングの同値な組の巡を並べる、
 /// `l`: LP による固定 ([`lp_probe`]) の 1 巡の列の試しを並べる)
@@ -4966,12 +4988,25 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let mut cands: Vec<usize> = (0..n).filter(|&j| prob.is_int[j] && dom.lo[j] == 0.0 && dom.up[j] == 1.0).collect();
     cands.sort_by_key(|&j| std::cmp::Reverse(prob.cols[j].len()));
     let work0 = dom.debug_work();
+    let wcut0 = domain::work_cuts();
     let (mut probed, mut fixed, mut tightened) = (0usize, 0usize, 0usize);
     // 含意 (`ENOMOTO_MIP_NO_PROBE_IMPLICATIONS` で集めない): x_j = v で 0-1 列 x_k が固定されれば、
     // 「x_j = v かつ x_k が固定と逆の値」は成り立たない (衝突の組)。上限は非零数の 10 倍
     let want_impl = env_str!("ENOMOTO_MIP_NO_PROBE_IMPLICATIONS").is_none();
     let want_implied = env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() || env_str!("ENOMOTO_MIP_NO_IMPLBD_CONT").is_none();
-    let edge_cap = 10 * nnz + 10_000;
+    // `ENOMOTO_T_MIP_PROBE_EDGE_CAP_MULT` (試作、CLQPRB): 含意の本数の上限の倍率 (既定 10)
+    // `ENOMOTO_MIP_CLQPRB` (試作、既定では使わない。analysis/clqprb_20261112.md、[`clqprb_on`]): 上限を非零数の
+    // `ENOMOTO_T_MIP_CLQPRB_EDGE_MULT` 倍 (既定 40) と `ENOMOTO_T_MIP_CLQPRB_EDGE_MAX` 本 (既定 600 万) の小さい方にする (非零数の 10 倍は下回らない)。
+    // 上限に届いたら重複を除いて詰める (2 巡目は同じ含意をもう一度集めるので、重複込みで数えると上限に早く届く)。mzzv11 は 10 倍 (136 万本) では
+    // 足りず、後ろの候補の含意が落ちて、含意を使う伝播で見つかるはずの固定 (HiGHS の probing の固定の大半) を逃していた
+    let clqprb = clqprb_on() && !submip;
+    let edge_cap = if clqprb {
+        (tunable!("ENOMOTO_T_MIP_CLQPRB_EDGE_MULT", 40usize, usize) * nnz).min(tunable!("ENOMOTO_T_MIP_CLQPRB_EDGE_MAX", 6_000_000usize, usize)).max(10 * nnz) + 10_000
+    } else {
+        tunable!("ENOMOTO_T_MIP_PROBE_EDGE_CAP_MULT", 10usize, usize) * nnz + 10_000
+    };
+    // 次に重複を除いて詰める本数 (`clqprb` のとき)
+    let mut compact_at = 0usize;
     let bin0: Vec<bool> = (0..n).map(|k| prob.is_int[k] && prob.col_lo[k] == 0.0 && prob.col_up[k] == 1.0).collect();
     let genint_on = implbd_genint_for(&prob.is_int, &prob.col_lo, &prob.col_up);
     // 引き継いだ含意 ([`presolve_mip`] の `ENOMOTO_MIP_KEEP_IMPLICATIONS`) に足していく
@@ -5033,7 +5068,14 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // 2.39/3.02/2.63/2.76。neos-860300 は 31-50 秒 -> 45-49 秒と遅くなる
     let adaptive = env_str!("ENOMOTO_MIP_NO_PROBE_ADAPTIVE").is_none() && (!submip || env_str!("ENOMOTO_MIP_PROBE_ADAPTIVE_SUBMIP").is_some());
     let (work_cap, time_cap, time_cap_found) = if adaptive {
-        let t = if submip { tunable!("ENOMOTO_T_MIP_PROBE_ADAPT_TIME_SUB", 0.5, f64) } else { tunable!("ENOMOTO_T_MIP_PROBE_ADAPT_TIME", 3.0, f64) };
+        let t = if submip {
+            tunable!("ENOMOTO_T_MIP_PROBE_ADAPT_TIME_SUB", 0.5, f64)
+        } else if clqprb {
+            // `ENOMOTO_MIP_CLQPRB`: 固定・締め付けが出ているときの時間の上限 (既定 6 秒。HiGHS は mzzv11 の前処理に 30 秒かける)
+            tunable!("ENOMOTO_T_MIP_CLQPRB_TIME", 6.0, f64)
+        } else {
+            tunable!("ENOMOTO_T_MIP_PROBE_ADAPT_TIME", 3.0, f64)
+        };
         // 何も固定・締め付けられない間は `ENOMOTO_T_MIP_PROBE_ADAPT_TIME0` 秒 (既定 1 秒) で止める。3 秒のままだと長い行の
         // 多い問題で何も得られずに使い切る (40 問・3 回で air03 0.9 -> 4.0 秒、nw04 9.3 -> 11.9 秒)。30n20b8 は最初の固定まで
         // 約 0.6 秒
@@ -5079,7 +5121,9 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // から試す順番と組み合わせたもので、行の多い列から試すこちらの順番では、30n20b8 の固定できる列 (3 行の短い列、3161 本)
     // が候補の後ろ (4730 番目以降) に並び、1000 回では 1 本も固定できない (全部を試しても 0.96 秒で 3305 本固定)
     let base = tunable!("ENOMOTO_T_MIP_PROBE_BASE", 0.0, f64);
-    let mut contingent = if adaptive { if base > 0.0 { base } else { cands.len() as f64 } } else { f64::INFINITY };
+    // `ENOMOTO_MIP_CLQPRB`: 予算の初期値を候補の数の `ENOMOTO_T_MIP_CLQPRB_BASE_MULT` 倍 (既定 2) にする (含意を使う伝播で 2 巡目にも固定が出る)
+    let base_mult = if clqprb { tunable!("ENOMOTO_T_MIP_CLQPRB_BASE_MULT", 2.0, f64) } else { 1.0 };
+    let mut contingent = if adaptive { if base > 0.0 { base } else { base_mult * cands.len() as f64 } } else { f64::INFINITY };
     let max_pass = if adaptive { tunable!("ENOMOTO_T_MIP_PROBE_PASSES", 10usize, usize).max(1) } else { 1 };
     let want_equiv = env_str!("ENOMOTO_MIP_NO_PROBE_EQUIV").is_none() && !submip;
     // `ENOMOTO_MIP_PROBE_CLIQUE`: 見つけた含意を後の列のプロービングの伝播に使う ([`domain::Domain::add_implications`])
@@ -5095,7 +5139,8 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // 試作 `ENOMOTO_MIP_GAP4` の `q` (既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): `PROBE_CLIQUE` と同じく見つけた含意を
     // 後の列のプロービングの伝播に使う (EQUIV2 の 2 巡目は残す)。HiGHS の probing はクリークの表で伝播するので、neos-3216931-puriri では
     // ENOMOTO の前処理の後でもさらに 2 値列を 203 本固定し、根の LP が 58940 → 60272 (HiGHS) と開いていた。`q` で根の LP 60237
-    let want_pclique = ((env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !pclique_equiv) || solver::gap4('q')) && !submip;
+    // `ENOMOTO_MIP_CLQPRB` も同じく含意を伝播に使う
+    let want_pclique = ((env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !pclique_equiv) || solver::gap4('q') || clqprb) && !submip;
     let mut equiv: Vec<(usize, usize, bool)> = Vec::new();
     // `ENOMOTO_MIP_PROBE_STRENGTHEN` (試作、既定では使わない。サブ MIP では使わない): プロービングによる行の係数の強化
     // ([`probe_strengthen_collect`])。CBC の前処理 (CglPreProcess が CglProbing を `setRowCuts(3)` で使い、`strengthenRow`
@@ -5129,6 +5174,17 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let clone_mult = tunable!("ENOMOTO_T_MIP_PREPAR_CLONE_MULT", 0.25, f64);
     'passes: for _pass in 0..max_pass {
         passes += 1;
+        // `ENOMOTO_MIP_CLQPRB`: 2 巡目からは、含意の重複を除き、伝播に使う含意の表を作り直す (同じ含意を 2 度集めて表が膨らむのを防ぐ)。
+        // 1 巡目でも引き継いだ含意 (前処理のかけ直しの前のプロービングの結果) があれば表に入れる
+        if clqprb && want_pclique && (passes > 1 || !edges.is_empty()) {
+            edges.sort_unstable();
+            edges.dedup();
+            dom.reset_implications(prob, &edges);
+            compact_at = edges.len() + edge_cap / 8;
+            if !dom.propagate(prob) {
+                return Some(false);
+            }
+        }
         let fixed_pass0 = fixed;
         spec_ver = u64::MAX;
         for (cnt, &j) in cands.iter().enumerate() {
@@ -5321,6 +5377,12 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                         }
                     }
                     if want_impl {
+                        // `ENOMOTO_MIP_CLQPRB`: 上限に近づいたら重複を除いて詰める (詰めても 1/8 しか空かなければ、もう詰めない)
+                        if clqprb && edges.len() + ch0.len() + ch1.len() >= edge_cap && edges.len() >= compact_at {
+                            edges.sort_unstable();
+                            edges.dedup();
+                            compact_at = edges.len() + edge_cap / 8;
+                        }
                         let e0 = edges.len();
                         add_edges(j, 0, &ch0, &mut edges);
                         add_edges(j, 1, &ch1, &mut edges);
@@ -5552,9 +5614,15 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
     }
     // 固定した列を含む組は捨てる (固定後は意味がない)
+    if verbose && env_str!("ENOMOTO_MIP_DEBUG_PROBE_WORKCUT").is_some() {
+        eprintln!("MIP: probing: {} implications collected before the dedup (cap {edge_cap})", edges.len());
+    }
     edges.retain(|&(a, b)| dom.lo[(a / 2) as usize] < dom.up[(a / 2) as usize] && dom.lo[(b / 2) as usize] < dom.up[(b / 2) as usize]);
     edges.sort_unstable();
     edges.dedup();
+    if verbose && env_str!("ENOMOTO_MIP_DEBUG_PROBE_WORKCUT").is_some() {
+        eprintln!("MIP: probing: {} propagations stopped by the work limit", domain::work_cuts() - wcut0);
+    }
     if verbose {
         eprintln!(
             "MIP: probing: {probed} of {} binaries probed ({passes} passes), {fixed} fixed, {tightened} bounds tightened, {} implications ({:.2}s, cpu {:.2}s, work {}, pwork {}, chg {})",
