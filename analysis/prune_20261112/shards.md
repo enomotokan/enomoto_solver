@@ -16,7 +16,7 @@ python run.py P <K>                                                  # 途中で
 終わったら `res_P_s<K>.jsonl` だけをコミットして push する (`git pull --rebase --autostash origin ccr-1beed81b-ex0uhq` の後
 `git push -u origin ccr-1beed81b-ex0uhq`、失敗したら間を空けて最大 4 回)。途中でも 20 分ごとに push してよい。
 
-- コミット: (下に書く)
+- コミット: `d644a0e0` (このコミットの後の記録だけのコミットでもよい。src は d644a0e0 と同じであること)
 - 分担: 0〜11 (`shards_P.json`、見積り各 約 1.04 時間)。10・11 は PRUNE のセッション自身が回す。
 
 | 分担 | 命令 | 結果 |
