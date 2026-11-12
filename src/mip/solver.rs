@@ -19296,6 +19296,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 .expect("failed to spawn a tree search thread");
             self.workers.push(h);
         }
+        if env_str!("ENOMOTO_MIP_DEBUG_INTCENSUS").is_some() && !self.params.submip {
+            super::int_census(&self.p, &self.dom.global_lo, &self.dom.global_up, Some((&self.p.col_lo, &self.p.col_up)), &format!("c_root_r{}", self.params.restarts));
+        }
         if self.params.verbose {
             eprintln!("MIP: tree search with {} threads ({:.2}s)", tt, self.start.elapsed().as_secs_f64());
         }

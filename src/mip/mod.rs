@@ -1169,6 +1169,11 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     pretime::mark("presolve_mip");
     // 診断 `ENOMOTO_MIP_DEBUG_PRESOLVE_COLS=ファイル` (CLQPRB、analysis/clqprb_20261112.md): 最初の前処理の後の列ごとに
     // (番号, 下限, 上限, 残った行の非零の数) を書く。前処理は列の番号を保つので、HiGHS の前処理で消えた列と突き合わせられる
+    if let (Some(_), Some(Presolved::Reduced { prob, .. })) = (env_str!("ENOMOTO_MIP_DEBUG_INTCENSUS"), &presolved) {
+        if !params.submip && params.restarts == 0 {
+            int_census(prob, &prob.col_lo, &prob.col_up, None, "b_probing");
+        }
+    }
     if let (Some(path), Some(Presolved::Reduced { prob, .. })) = (env_str!("ENOMOTO_MIP_DEBUG_PRESOLVE_COLS"), &presolved) {
         if !params.submip && params.restarts == 0 && prob.n == p.n {
             use std::io::Write;
@@ -3982,6 +3987,9 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // `ENOMOTO_MIP_PROBE_EARLY_REPRESOLVE`): LP による固定の前に、少しだけプロービングし ([`quick_probe_fixings`])、
     // 列の多くが固定されたらその境界で前処理をかけ直す (LP による固定・プロービングは小さくなった問題で行う)。
     // 手元 16 スレッド・60 秒: neos8 16.2 -> 6.6 秒、drayage-100-23 5.9 -> 3.0 秒 (analysis/eprostop_16t_20261028.md)
+    if env_str!("ENOMOTO_MIP_DEBUG_INTCENSUS").is_some() && lp_probe_secs.is_some() && !submip && depth == 0 && !RESTART_PRESOLVE.with(|f| f.get()) && !QUICK_PROBE_ACTIVE.with(|f| f.get()) {
+        int_census(&prob, &prob.col_lo, &prob.col_up, None, "a_presolve");
+    }
     if lp_probe_secs.is_some() && !submip && env_str!("ENOMOTO_MIP_NO_PROBE_EARLY_REPRESOLVE").is_none() && !QUICK_PROBE_ACTIVE.with(|f| f.get()) {
         match quick_probe_fixings(&mut prob, verbose, submip) {
             None => return Some(Presolved::Infeasible),
@@ -4935,6 +4943,101 @@ fn probe_equiv_block(prob: &MipProblem, base: &domain::Domain, bin0: &[bool], js
             (pairs, w)
         })
         .collect()
+}
+
+/// 診断 `ENOMOTO_MIP_DEBUG_INTCENSUS` (CLQPRB の続き、analysis/clqprb_20261112.md §7): 整数列の幅と暗黙の整数の本数を数え、
+/// `INTCENSUS {json}` の 1 行を標準エラーに出す (求解は変えない)。`lo`・`up` はその時点の (大域的な) 境界、`base` は
+/// クリーク表・衝突グラフを作った時点の境界 (根の後の時点で、後から [0,1] に締まった整数列が表に載っていないかを数える)
+pub(crate) fn int_census(p: &MipProblem, lo: &[f64], up: &[f64], base: Option<(&[f64], &[f64])>, tag: &str) {
+    let n = p.n;
+    let free = |j: usize| lo[j] < up[j];
+    let (mut b01, mut w1nz, mut w2, mut w3, mut wide) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    for j in 0..n {
+        if !p.is_int[j] || !free(j) {
+            continue;
+        }
+        let w = up[j] - lo[j];
+        if w == 1.0 {
+            if lo[j] == 0.0 { b01 += 1 } else { w1nz += 1 }
+        } else if w == 2.0 {
+            w2 += 1
+        } else if w == 3.0 {
+            w3 += 1
+        } else {
+            wide += 1
+        }
+    }
+    let integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
+    // 暗黙の整数 ([`MipProblem::implied_integers`] と同じ規則)。`dual`: 双対側の規則も使う、`fixc`: 固定された列を定数として右辺に移す
+    let implied = |dual: bool, fixc: bool| -> Vec<bool> {
+        let mut mark = p.is_int.clone();
+        let fixed = |k: usize| fixc && lo[k] == up[k];
+        loop {
+            let mut changed = false;
+            for j in 0..n {
+                if mark[j] || !free(j) {
+                    continue;
+                }
+                // 行 i の、j と固定列 (fixc のとき) を除く列がすべて印つきで係数が a の整数倍か。固定列の寄与 (定数) を返す
+                let rest = |i: usize, a: f64| -> Option<f64> {
+                    let mut c = 0.0;
+                    for &(k, b) in &p.rows[i] {
+                        if k == j {
+                            continue;
+                        }
+                        if fixed(k) {
+                            c += b * lo[k];
+                        } else if !(mark[k] && integral(b / a)) {
+                            return None;
+                        }
+                    }
+                    Some(c)
+                };
+                let ok = p.cols[j].iter().any(|&(i, a)| p.row_lo[i] == p.row_up[i] && rest(i, a).is_some_and(|c| integral((p.row_lo[i] - c) / a)))
+                    || (dual && p.cols[j].len() == 1 && p.cost[j] != 0.0 && {
+                        let (i, a) = p.cols[j][0];
+                        let side = if (p.cost[j] > 0.0) == (a > 0.0) { p.row_lo[i] } else { p.row_up[i] };
+                        [lo[j], up[j]].iter().all(|&v| !v.is_finite() || integral(v)) && rest(i, a).is_some_and(|c| !side.is_finite() || integral((side - c) / a))
+                    });
+                if ok {
+                    mark[j] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return mark;
+            }
+        }
+    };
+    let cnt = |m: &[bool]| (0..n).filter(|&j| m[j] && !p.is_int[j] && free(j)).count();
+    let (pr, prd, prf, prdf) = (implied(false, false), implied(true, false), implied(false, true), implied(true, true));
+    let pr01 = (0..n).filter(|&j| prf[j] && !p.is_int[j] && free(j) && up[j] - lo[j] == 1.0).count();
+    let cont_free = (0..n).filter(|&j| !p.is_int[j] && free(j)).count();
+    // 連続列で実質 0-1: [0,1] の連続列が、固定でない列がちょうど 2 本の等式で、係数の絶対値が同じ 0-1 の整数列と結ばれている
+    let bin = |k: usize| p.is_int[k] && lo[k] == 0.0 && up[k] == 1.0;
+    let cont01 = (0..n)
+        .filter(|&j| {
+            !p.is_int[j] && lo[j] == 0.0 && up[j] == 1.0 && p.cols[j].iter().any(|&(i, a)| {
+                if p.row_lo[i] != p.row_up[i] {
+                    return false;
+                }
+                let others: Vec<(usize, f64)> = p.rows[i].iter().copied().filter(|&(k, _)| k != j && free(k)).collect();
+                others.len() == 1 && bin(others[0].0) && (others[0].1.abs() - a.abs()).abs() <= 1e-9 * a.abs()
+            })
+        })
+        .count();
+    // 表を作った時点より後に [0,1] に締まった整数列 (表を作った時点では 0-1 でなかった)
+    let late01 = base.map_or(0, |(bl, bu)| (0..n).filter(|&j| bin(j) && !(bl[j] == 0.0 && bu[j] == 1.0)).count());
+    let late_w1 = base.map_or(0, |(bl, bu)| (0..n).filter(|&j| p.is_int[j] && free(j) && up[j] - lo[j] == 1.0 && lo[j] != 0.0 && bu[j] - bl[j] > 1.0).count());
+    eprintln!(
+        "INTCENSUS {{\"at\":\"{tag}\",\"n\":{n},\"m\":{},\"int_free\":{},\"bin01\":{b01},\"w1_lo_nz\":{w1nz},\"w2\":{w2},\"w3\":{w3},\"wide\":{wide},\"cont_free\":{cont_free},\"impl_primal\":{},\"impl_primal_dual\":{},\"impl_primal_fixc\":{},\"impl_primal_dual_fixc\":{},\"impl_primal_fixc_w1\":{pr01},\"cont01_linked\":{cont01},\"late01\":{late01},\"late_w1_lo_nz\":{late_w1}}}",
+        p.m,
+        (0..n).filter(|&j| p.is_int[j] && free(j)).count(),
+        cnt(&pr),
+        cnt(&prd),
+        cnt(&prf),
+        cnt(&prdf)
+    );
 }
 
 /// 試作 `ENOMOTO_MIP_CLQPRB` (既定では使わない。analysis/clqprb_20261112.md): 含意を集めるプロービング ([`probe`]) で、見つけた含意
