@@ -92,6 +92,7 @@
 - 計測: comp07-2idx は 150 秒・種 1〜4 で既定 0/4、11-08 の既定 1/4、ebiR 4/4、ebiRK 4/4、ebi 3/4、試作 `ENOMOTO_MIP_FJKEEP` 2/4。
   600 秒・種 1・2 で既定 0/2、ebiR 2/2、ebiRK 2/2。58 問の mc11 の落ちは種 4〜9 で揺れと確かめた。
 - 次の手: LMBOOST を次の束に入れ、Mittelmann の 186 問 (600 秒・種 1・2) で効き目と害を確かめる。
+- 続きの候補 (WINWHY から、まだ誰にも渡していない): decomp2 では FJ のスレッドで Local-MIP を FJ と混ぜない形 (`ENOMOTO_MIP_NO_FJ_LMIP_MIX=1`) が種 1・2 とも 3.2・3.3 秒 (FJ が 2.4 秒に最適解)、既定は 1.4・15.6 秒と揺れる (1 問・種 2 つの事実、analysis/winwhy_20261111.md 3 節)。
 
 ## 課題 CLQPRB: クリーク表を使う Probing (2026-11-12、analysis/clqprb_20261112.md)
 
