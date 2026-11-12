@@ -31,3 +31,13 @@ git pull --rebase --autostash origin ccr-1beed81b-ex0uhq && git push -u origin c
 | 分担 | 命令 |
 |---|---|
 | P0〜P2 | `python run.py P 0` 〜 `python run.py P 2` (3 分担) |
+
+## C: Mittelmann 186 問の整数列の幅・暗黙の整数の数え上げ (診断だけ、6 分担)
+
+- コミット: **73d9bf43** (診断 `ENOMOTO_MIP_DEBUG_INTCENSUS` を足したソース。既定の動きは変わらない)。手順のビルドまでは上と同じ。
+- 命令: `python census.py mitt186.txt <K> 6` (K = 0〜5)。問題ごとに根の後の行が出るか 150 秒で止める (最大 約 3.5 分 × 31 問 ≒ 1〜1.5 時間)。
+- 結果: `census_mitt186_def_s<K>.jsonl` だけをコミットして push (コミットの文は `CLQPRB C<K>: 完了 (N 行)`)。
+
+| 分担 | 命令 |
+|---|---|
+| C0〜C5 | `python census.py mitt186.txt 0 6` 〜 `python census.py mitt186.txt 5 6` |
