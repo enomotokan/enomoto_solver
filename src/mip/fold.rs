@@ -2,7 +2,8 @@
 //! (van der Hulst 2026「Folding Mixed-Integer Linear Programs and Reflection Symmetries」の第 4 節)。畳み方の本体は
 //! [`crate::simplex::lp_fold`]。
 //!
-//! 値の文字: `r` 反転も使う、`i` 整数列もまとめる (段階 3)、`q` ログを出さない、`c` 畳んだ数を出すだけで解かない (数える用)、
+//! 値の文字: `r` 反転も使う、`i` 整数列もまとめる (段階 3)、`n` 整数の組の TU の判定にネットワーク行列 (とその転置) の一般の判定も使う
+//! (試作、既定では使わない。analysis/drcrtu_20261111.md)、`q` ログを出さない、`c` 畳んだ数を出すだけで解かない (数える用)、
 //! `p` 行が 1 本もまとまらない (平行な列だけの) 畳みと、列が 1 本もまとまらない (平行な行だけの) 畳みも使う (既定では使わない。
 //! 前処理が同じ列・同じ行をまとめるので)、`P` 前処理 → 畳む・`Q` 前処理 → 畳む → 前処理 (試作、[`solve_folded_any`])。`1` は連続列だけ・反転なし。
 //!
@@ -121,7 +122,35 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                 }
                 let mut groups: Vec<(usize, Vec<u32>)> = f1.red_members.iter().enumerate().filter(|(q, mem)| f1.red.is_int[*q] && mem.len() > 1).map(|(q, m)| (q, m.clone())).collect();
                 groups.sort_by_key(|g| std::cmp::Reverse(g.1.len()));
+                // TU の判定: 既定は剥がしと 2 色塗りの十分条件、値の文字 `n` でネットワーク行列 (とその転置) の一般の判定も
+                // (`tu::tu_cols_f64_net`、analysis/drcrtu_20261111.md)。どちらも列を減らしても真のままで、連結成分ごとに閉じている
+                let use_net = fl.contains('n');
+                let net_max: usize = env_str!("ENOMOTO_T_FOLD_NET_MAX").and_then(|v| v.parse().ok()).unwrap_or(2_000_000);
+                // ネットワークの判定に渡す非零の合計の上限 (決定的な仕事量の上限。超えたら 2 色塗りの判定だけに戻す。畳めない問題で
+                // 大きな成分を組ごとに確かめ直す手間が、chromaticindex512-7 で 0.4 → 71 秒になったため)。既定は元の非零の 20 倍 + 100 万
+                let nnz_p: usize = p.rows.iter().map(|r| r.len()).sum();
+                let net_work_mult: usize = env_str!("ENOMOTO_T_FOLD_NET_WORK").and_then(|v| v.parse().ok()).unwrap_or(20);
+                let net_budget = std::cell::Cell::new(net_work_mult * nnz_p + 1_000_000);
+                let net_used = std::cell::Cell::new(0usize);
+                let net_over = std::cell::Cell::new(0usize);
+                let tu_test = |nr: usize, cols: &[Vec<(usize, f64)>]| -> bool {
+                    if super::tu::tu_cols_f64(nr, cols) {
+                        return true;
+                    }
+                    if !use_net {
+                        return false;
+                    }
+                    let nnz: usize = cols.iter().map(|c| c.len()).sum();
+                    if net_used.get() + nnz > net_budget.get() {
+                        net_over.set(net_over.get() + 1);
+                        return false;
+                    }
+                    net_used.set(net_used.get() + nnz);
+                    super::tu::tu_cols_f64_net(nr, cols, net_max)
+                };
                 let (mut ok_g, mut bad_g) = (0usize, 0usize);
+                // 外した理由の内訳 (V_R の行が残る・S に ±1 でない係数・TU の判定に落ちた) と、TU に落ちた行列の書き出しの数
+                let (mut vr_fail, mut pm1_fail, mut tu_fail, mut n_dump) = (0usize, 0usize, 0usize, 0usize);
                 // 組ごとに、打ち消しのあと残る行列 S の列 (組の和の行はまだ足さない) と打ち消しの有無。V_R の行が残る組は None
                 let group_s = |mem: &[u32]| -> Option<(bool, Vec<Vec<(usize, f64)>>)> {
                     // 行ごとの組の列の係数 (λ をかけて)
@@ -177,7 +206,7 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                             }
                         }
                     }
-                    super::tu::tu_cols_f64(nr, &cols_all)
+                    tu_test(nr, &cols_all)
                 };
                 if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF mip batch {:.3}s ok {all_ok}", t0.elapsed().as_secs_f64()); }
                 for ((_q, mem), g) in groups.iter().zip(gdata) {
@@ -190,7 +219,14 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                         continue;
                     }
                     // 近道 (結果は同じ): S に ±1 でない係数があれば TU の十分条件は必ず外れる (`tu::tu_cols_f64` も最初にそれで偽を返す)
-                    let good = good && s_cols.iter().all(|c| c.iter().all(|&(_, a)| a == 1.0 || a == -1.0));
+                    if !good {
+                        vr_fail += 1;
+                    }
+                    let pm1 = s_cols.iter().all(|c| c.iter().all(|&(_, a)| a == 1.0 || a == -1.0));
+                    if good && !pm1 {
+                        pm1_fail += 1;
+                    }
+                    let good = good && pm1;
                     if good {
                         if cancel {
                             for (k, &w) in mem.iter().enumerate() {
@@ -231,7 +267,12 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                                     .collect()
                             })
                             .collect();
-                        if super::tu::tu_cols_f64(remap.len(), &local) {
+                        let tu_ok = tu_test(remap.len(), &local);
+                        if !tu_ok {
+                            tu_fail += 1;
+                            tu_dump(remap.len(), &local, s_cols.len(), &mut n_dump);
+                        }
+                        if tu_ok {
                             // 成分をつなぐ
                             let mut merged: Vec<Vec<(usize, f64)>> = Vec::new();
                             for r in &roots {
@@ -262,7 +303,20 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
                     }
                 }
                 if log {
-                    eprintln!("MIP_FOLD: integer groups: {} accepted, {} rejected (V_R rows {})", ok_g, bad_g, vr.iter().filter(|&&b| b).count());
+                    eprintln!(
+                        "MIP_FOLD: integer groups: {} accepted, {} rejected (V_R rows {}; rejected for V_R {}, non-±1 {}, TU {}; net {} work {} over {}, panics {}, cert fails {})",
+                        ok_g,
+                        bad_g,
+                        vr.iter().filter(|&&b| b).count(),
+                        vr_fail,
+                        pm1_fail,
+                        tu_fail,
+                        use_net,
+                        net_used.get(),
+                        net_over.get(),
+                        super::network::NET_PANICS.with(|c| c.get()),
+                        super::network::NET_VERIFY_FAIL.with(|c| c.get())
+                    );
                 }
                 if env_str!("ENOMOTO_T_FOLD_PROF").is_some() { eprintln!("FOLD_PROF mip groups {:.3}s", t0.elapsed().as_secs_f64()); }
                 Fold::build(&fold_in(p, Some(&keys), Some(&single)), opts)
@@ -323,6 +377,26 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
         );
     }
     Some(MipFold { fold: f, q, int_groups, secs })
+}
+
+/// 診断 `ENOMOTO_T_FOLD_TUDUMP=<ディレクトリ>` (既定では使わない。analysis/drcrtu_20261111.md): 整数の組の TU の判定に落ちた行列を
+/// 1 つずつファイルに書き出す (問題ごとに先頭の 40 個、非零 50 万以下)。1 行目は `行の数 列の数 新しい組の列の数` (新しい組の列は後ろ)、
+/// 2 行目からは列ごとに `行:係数` を空白で並べたもの。ファイル名は `<ENOMOTO_T_FOLD_TUDUMP_TAG>_<番号>.txt`。
+fn tu_dump(nrows: usize, cols: &[Vec<(usize, f64)>], new_cols: usize, n_dump: &mut usize) {
+    let Some(dir) = env_str!("ENOMOTO_T_FOLD_TUDUMP") else { return };
+    let nnz: usize = cols.iter().map(|c| c.len()).sum();
+    if *n_dump >= 40 || nnz > 500_000 {
+        return;
+    }
+    let tag = env_str!("ENOMOTO_T_FOLD_TUDUMP_TAG").unwrap_or("p");
+    let mut s = format!("{nrows} {} {new_cols}\n", cols.len());
+    for c in cols {
+        let v: Vec<String> = c.iter().map(|&(i, a)| format!("{i}:{a}")).collect();
+        s.push_str(&v.join(" "));
+        s.push('\n');
+    }
+    let _ = std::fs::write(format!("{dir}/{tag}_{:03}.txt", *n_dump), s);
+    *n_dump += 1;
 }
 
 impl MipFold {

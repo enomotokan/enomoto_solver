@@ -13,6 +13,7 @@ pub(crate) mod lp;
 pub(crate) mod fold;
 /// 完全単模の判定 (fold と implint_tu で共通)。
 pub(crate) mod tu;
+pub(crate) mod network;
 pub(crate) mod lp_api;
 pub(crate) mod problem;
 pub(crate) mod domain;

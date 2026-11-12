@@ -232,6 +232,104 @@ pub fn tu_cols_f64(nrows: usize, cols: &[Vec<(usize, f64)>]) -> bool {
     tu_shape(&rows, cols.len())
 }
 
+/// [`tu_cols_f64`] で分からなければ、剥がし (非零が 1 つ以下の行・列を除く。TU は保たれる) の後の芯の連結成分ごとに、ネットワーク
+/// 行列かその転置か ([`super::network::is_network_or_transpose`]、MATREC の列の追加と証明書の検査) を確かめる。どの成分も通れば TU
+/// (ブロック対角の TU 行列は TU)。`ENOMOTO_MIP_FOLD` の値の文字 `n` (analysis/drcrtu_20261111.md)。成分の非零が `max_nnz` を超えたら偽。
+pub fn tu_cols_f64_net(nrows: usize, cols: &[Vec<(usize, f64)>], max_nnz: usize) -> bool {
+    if tu_cols_f64(nrows, cols) {
+        return true;
+    }
+    let ncols = cols.len();
+    let mut rows: Vec<Vec<usize>> = vec![Vec::new(); nrows];
+    let mut colb: Vec<Vec<(usize, bool)>> = Vec::with_capacity(ncols);
+    for (j, c) in cols.iter().enumerate() {
+        let mut v = Vec::with_capacity(c.len());
+        for &(i, a) in c {
+            let neg = if a == 1.0 {
+                false
+            } else if a == -1.0 {
+                true
+            } else {
+                return false;
+            };
+            rows[i].push(j);
+            v.push((i, neg));
+        }
+        colb.push(v);
+    }
+    // 剥がし
+    let mut rdeg: Vec<usize> = rows.iter().map(|r| r.len()).collect();
+    let mut cdeg: Vec<usize> = colb.iter().map(|c| c.len()).collect();
+    let mut ra = vec![true; nrows];
+    let mut ca = vec![true; ncols];
+    let mut stack: Vec<(bool, usize)> = (0..nrows).filter(|&i| rdeg[i] <= 1).map(|i| (true, i)).chain((0..ncols).filter(|&j| cdeg[j] <= 1).map(|j| (false, j))).collect();
+    while let Some((is_row, k)) = stack.pop() {
+        if is_row {
+            if !ra[k] {
+                continue;
+            }
+            ra[k] = false;
+            for &j in &rows[k] {
+                if ca[j] {
+                    cdeg[j] -= 1;
+                    if cdeg[j] == 1 {
+                        stack.push((false, j));
+                    }
+                }
+            }
+        } else {
+            if !ca[k] {
+                continue;
+            }
+            ca[k] = false;
+            for &(i, _) in &colb[k] {
+                if ra[i] {
+                    rdeg[i] -= 1;
+                    if rdeg[i] == 1 {
+                        stack.push((true, i));
+                    }
+                }
+            }
+        }
+    }
+    // 芯の連結成分ごと
+    let mut rseen = vec![false; nrows];
+    let mut rloc = vec![usize::MAX; nrows];
+    for r0 in 0..nrows {
+        if !ra[r0] || rseen[r0] {
+            continue;
+        }
+        let (mut rs, mut cs) = (vec![r0], Vec::new());
+        rseen[r0] = true;
+        let mut cseen_local: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut h = 0;
+        while h < rs.len() {
+            let r = rs[h];
+            h += 1;
+            for &j in &rows[r] {
+                if ca[j] && cseen_local.insert(j) {
+                    cs.push(j);
+                    for &(i, _) in &colb[j] {
+                        if ra[i] && !rseen[i] {
+                            rseen[i] = true;
+                            rs.push(i);
+                        }
+                    }
+                }
+            }
+        }
+        for (k, &r) in rs.iter().enumerate() {
+            rloc[r] = k;
+        }
+        let sub: Vec<Vec<(usize, bool)>> = cs.iter().map(|&j| colb[j].iter().filter(|e| ra[e.0]).map(|&(i, s)| (rloc[i], s)).collect()).collect();
+        let nnz: usize = sub.iter().map(|c| c.len()).sum();
+        if nnz > max_nnz || !super::network::is_network_or_transpose(rs.len(), &sub) {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
