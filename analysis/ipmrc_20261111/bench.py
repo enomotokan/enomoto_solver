@@ -19,6 +19,9 @@ CFG = {
     "uw": {"ENOMOTO_MIP_IPMRC": "uw"},
     # 案 (1): 再スタートの判断には使わず、木に入るときに足す
     "utw": {"ENOMOTO_MIP_IPMRC": "utw"},
+    # PDLRC (analysis/pdlrc_20261111.md): 裏の PDLP の双対で固定 (u)、数えるだけ (d)
+    "pd": {"ENOMOTO_MIP_PDLRC": "d"},
+    "pu": {"ENOMOTO_MIP_PDLRC": "u"},
 }
 # Mittelmann で根の LP が重い問題 (analysis/rootlp3_20261111/m47scr.jsonl で根の LP の和が 0.1 秒以上の 25 問 + 186 問から LP の大きい 5 問)
 M30 = ["satellites2-60-fs", "mzzv11", "neos-3216931-puriri", "neos-933966", "mzzv42z", "uccase12", "physiciansched6-2",

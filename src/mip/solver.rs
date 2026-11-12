@@ -8082,6 +8082,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 試作 `ENOMOTO_MIP_ROOTLP3` (analysis/rootlp3_20261111.md): 特異な基底は捨てて基底なしの同時実行で解く
         let rootlp3 = self.rootlp3_before(root_kind);
+        // 試作 `ENOMOTO_MIP_PDLRC` (analysis/pdlrc_20261111.md): 根の LP の写しを裏の PDLP で解き始める
+        if matches!(root_kind, Some(3) | Some(4)) {
+            self.pdlrc_begin();
+        }
         let xolazy_log = matches!(root_kind, Some(3) | Some(4)) && crate::simplex::mip_lp::xolazy_log();
         // 試作 `ENOMOTO_MIP_IPMRC` の `u` (analysis/ipmrc_20261111.md): 根の LP の同時実行の内点法の双対を被約費用による固定に使う
         let ipmrc_u = matches!(root_kind, Some(3) | Some(4)) && crate::simplex::mip_lp::ipmrc_has('u');
@@ -10010,6 +10014,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: RESTART_ROOT_CUTS: {} tight cut rows at the end of the root kept for a restart in the tree", self.root_end_cuts.len());
                 }
             }
+            // 試作 `ENOMOTO_MIP_PDLRC`: 裏の PDLP の双対の固定を、再スタートの判断の前に足す
+            self.pdlrc_apply("root_end");
             if let Some(r) = self.maybe_restart() {
                 return r;
             }
@@ -10087,6 +10093,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.tr_rstop = false;
         if crate::simplex::mip_lp::ipmrc_has('t') && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
             self.ipmrc_tree_start();
+        }
+        if !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
+            self.pdlrc_apply("tree");
         }
         if crate::simplex::mip_lp::xolazy_log() && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
             eprintln!("XOLAZY {{\"ev\":\"tree\",\"restarts\":{},\"t\":{:.4}{}}}", self.params.restarts, super::outer_elapsed().unwrap_or(f64::NAN), self.xolazy_fix_counts());

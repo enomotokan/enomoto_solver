@@ -18,7 +18,9 @@ use std::cell::OnceCell;
 use std::sync::Arc;
 
 // 試作 `ENOMOTO_MIP_ROOTLP3=3` の 3 本同時 (analysis/rootlp3_20261111.md)
+mod pdlrc;
 mod race3;
+pub use pdlrc::{PdlrcBest, PdlrcJob};
 pub(crate) use race3::take_race3_winner;
 
 /// 内点法 ([`TwoStageLp::interior_point`]) を打ち切る追加の条件 (見張りのスレッドが 5 ミリ秒ごとに呼ぶ)。

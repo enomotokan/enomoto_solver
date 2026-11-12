@@ -193,6 +193,97 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 }
 
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_PDLRC` の裏の PDLP の仕事 (再スタートの回数, 仕事)。落とすと PDLP が止まる
+    static PDLRC_JOB: RefCell<Option<(u32, std::sync::Arc<crate::simplex::mip_lp::PdlrcJob>)>> = const { RefCell::new(None) };
+}
+
+/// 試作 `ENOMOTO_MIP_PDLRC` (analysis/pdlrc_20261111.md) に文字 `c` が入っているか。`u`: 根の終わりに PDLP の双対の固定を足す。
+/// `d`: 足さずに数えるだけ (診断)
+pub(crate) fn pdlrc_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_PDLRC").is_some_and(|v| v.contains(c))
+}
+
+impl<'a, L: MipLp> Solver<'a, L> {
+    /// 試作 `ENOMOTO_MIP_PDLRC`: 主の根の LP を解く直前に、その LP の写しで裏の PDLP を始める (前の仕事は止める)
+    pub(super) fn pdlrc_begin(&mut self) {
+        if self.params.submip || self.snap.is_some() || !(pdlrc_has('u') || pdlrc_has('d')) {
+            return;
+        }
+        let job = self.lp.pdlrc_start();
+        PDLRC_JOB.with(|j| *j.borrow_mut() = job.map(|job| (self.params.restarts, job)));
+    }
+
+    /// 試作 `ENOMOTO_MIP_PDLRC`: 根の終わり (`ev` = `root_end` 再スタートの判断の前・`tree` 木に入るとき) に、裏の PDLP の一番良い
+    /// 双対のラグランジュ下界と被約費用で被約費用による固定を足す (`u`)。`tree` では仕事を止める。数えた結果を XOLAZY の行に出す
+    pub(super) fn pdlrc_apply(&mut self, ev: &str) {
+        if self.params.submip || self.snap.is_some() {
+            return;
+        }
+        let Some((r, job)) = PDLRC_JOB.with(|j| j.borrow().clone()) else { return };
+        if r != self.params.restarts {
+            return;
+        }
+        if ev == "tree" {
+            PDLRC_JOB.with(|j| *j.borrow_mut() = None);
+        }
+        let checks = job.checks.load(std::sync::atomic::Ordering::Relaxed);
+        let neg = job.neg_inf.load(std::sync::atomic::Ordering::Relaxed);
+        let best = job.best();
+        let p = self.p;
+        let u = self.prune_limit();
+        let mut line = format!("\"ev\":\"pdlrc\",\"at\":\"{ev}\",\"restarts\":{},\"checks\":{checks},\"neg_inf\":{neg},\"U\":{}", self.params.restarts, num(u));
+        if let Some(b) = best.filter(|b| b.d.len() == p.n && b.lb.is_finite()) {
+            let lb = b.lb + p.offset;
+            // 今の大域的な境界で、まだ固定されていない整数列のうちこの双対で固定できる数
+            let room = u - lb;
+            let mut nfix = 0usize;
+            if room.is_finite() && room >= 0.0 {
+                for j in 0..p.n {
+                    let (lo, up) = (self.dom.global_lo[j], self.dom.global_up[j]);
+                    if !p.is_int[j] || lo >= up {
+                        continue;
+                    }
+                    let dj = b.d[j];
+                    if (dj > 1e-7 && lo.is_finite() && (lo + room / dj + 1e-6).floor() <= lo) || (dj < -1e-7 && up.is_finite() && (up - room / (-dj) - 1e-6).ceil() >= up) {
+                        nfix += 1;
+                    }
+                }
+            }
+            let fixed0 = self.newly_fixed_ints();
+            if pdlrc_has('u') {
+                let mut v = Vec::new();
+                for j in 0..p.n {
+                    if !p.is_int[j] || self.dom.global_lo[j] >= self.dom.global_up[j] {
+                        continue;
+                    }
+                    let dj = b.d[j];
+                    if dj > 1e-7 && self.dom.global_lo[j].is_finite() {
+                        v.push((j, true, dj, self.dom.global_lo[j]));
+                    } else if dj < -1e-7 && self.dom.global_up[j].is_finite() {
+                        v.push((j, false, dj, self.dom.global_up[j]));
+                    }
+                }
+                self.t4_rc_extra.push((lb, v));
+                if self.root_redcost.is_some() {
+                    self.root_redcost_fixing();
+                }
+            }
+            line += &format!(
+                ",\"lb\":{},\"lp_now\":{},\"iters\":{},\"secs\":{:.3},\"fixable_new\":{nfix},\"fixed_now\":{}",
+                num(lb),
+                num(self.lp.objective() + p.offset),
+                b.iters,
+                b.secs,
+                self.newly_fixed_ints().saturating_sub(fixed0)
+            );
+        }
+        if self.params.verbose || crate::simplex::mip_lp::xolazy_log() {
+            eprintln!("XOLAZY {{{line}}}");
+        }
+    }
+}
+
 /// JSON の数 (有限でなければ null)
 fn num(v: f64) -> String {
     if v.is_finite() { format!("{v:.10e}") } else { "null".to_string() }

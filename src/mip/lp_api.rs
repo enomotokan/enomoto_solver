@@ -89,6 +89,10 @@ pub trait MipLp: Clone + Send {
     fn adopt_two_stage(&mut self, _lp: TwoStageLp) -> bool {
         false
     }
+    /// 試作 `ENOMOTO_MIP_PDLRC` ([`TwoStageLp::pdlrc_start`]): 今の LP の写しを裏の PDLP で解き、ラグランジュ下界を控える。対応しない実装は `None`。
+    fn pdlrc_start(&self) -> Option<std::sync::Arc<crate::simplex::mip_lp::PdlrcJob>> {
+        None
+    }
     fn objective(&self) -> f64;
     fn col_values(&self) -> Vec<f64>;
     fn col_value(&self, j: usize) -> f64;
@@ -209,6 +213,9 @@ forward_impl!(
     },
     fn interior_point(&self, zero_cost: bool, want_vertex: bool, deadline: std::time::Instant) -> Option<InteriorPoint> {
         TwoStageLp::interior_point(self, zero_cost, want_vertex, deadline)
+    },
+    fn pdlrc_start(&self) -> Option<std::sync::Arc<crate::simplex::mip_lp::PdlrcJob>> {
+        TwoStageLp::pdlrc_start(self)
     },
     fn solve_rescue(&mut self, lim: &SolveLimits) -> LpStatus {
         TwoStageLp::solve_ipm_rescue(self, lim)
