@@ -21683,10 +21683,11 @@ impl ObjLat {
             }
         }
         let s = MipProblem::step_of(&coefs)?;
-        // 幅は和の丸め誤差を見込んで少し広げ、刻みに対してはっきり小さいときだけ使う
+        // 幅は和の丸め誤差を見込んで少し広げ、刻みに対してはっきり小さいときだけ使う。範囲の右端だけ余裕を足す (刈り込みの上限が
+        // 安全側になる)。左端は正確な値のまま (切り上げた下界が 197 でなく 196.999999999 になると、暫定解 197 に届かない)
         let slack = 1e-9 * (m.abs() + mm.abs() + base.abs() + 1.0);
-        let (m, mm) = (m - slack, mm + slack);
-        (mm - m < s * (1.0 - 1e-6)).then_some(ObjLat { s, base, m, mm })
+        let mm = mm + slack;
+        (mm - m + slack < s * (1.0 - 1e-6)).then_some(ObjLat { s, base, m, mm })
     }
 
     /// 刻みだけの格子 `offset + k s` で表せるか (連続部に幅がなく、`base + m` が格子の点)
