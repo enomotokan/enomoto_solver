@@ -3043,6 +3043,18 @@ pub(super) fn suba_stop(c: char) -> bool {
 ///   根の時間) までにする (`RENS (more nodes)` の続きも同じ)
 ///
 /// どれも止めたサブ MIP は時間切れ (`TimeLimit`) としてその時点の解を返す (`n` のノード上限は `NodeLimit`)
+/// `ENOMOTO_MIP_INCUMB=<文字の並び>` (試作、既定では使わない。analysis/incumb_20261111.md): 暫定解が HiGHS より遅い問題の根のサブ MIP。
+/// - `r`: 再スタートの後の根で、再スタート前の暫定解が打ち切り値の固定で前処理後の問題から外れた (参照解だけがある) ときも、根の RENS を
+///   `ENOMOTO_MIP_SUBFIX` の `r` のダイブ (目標の固定率で止める) にする。既定の `q` は暫定解があるときだけダイブにするので、この場合は
+///   LP で整数値の列を全部固定する旧来の RENS に落ち、打ち切り値で 0 ノードで実行不能になる (mzzv11 の再スタート 2 の後: 自由な列 903 / 10240)
+/// - `a`: 外側の根の RINS が暫定解を良くしたら、新しい暫定解で RINS をもう一度回す (最大 `ENOMOTO_T_MIP_INCUMB_RINS_REP` (2) 回、
+///   良くならなければやめる)。HiGHS は再スタートの後の根でもう一度 RENS を回し、良くなった暫定解からまたサブ MIP を回す
+///   (neos-4722843-widden: 26340 → 25109 → 25009 (最適) を 172 秒までに根で)。ENOMOTO の根の RINS は成果連動の打ち切りで 54 ノードで止まり、木に入る
+pub(crate) fn incumb_on(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_INCUMB").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
 pub(crate) fn subcap(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBCAP").map_or(String::new(), |v| v.to_string())).contains(c)
@@ -9252,7 +9264,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_SUBFIX` の `h` (試作、[`super::heur_subfix`]): HiGHS と同じく外側の根では RINS を呼ばない
                 let subfix_h = super::heur_subfix::on('h') && !self.params.submip;
                 if (self.incumbent.is_some() || self.ref_sol.is_some()) && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() && !subfix_h {
+                    let z_rins0 = self.incumbent.as_ref().map(|(z, _)| *z);
                     heur!("RINS", self.rins(&x));
+                    // `ENOMOTO_MIP_INCUMB` の `a` (試作、[`incumb_on`]): RINS が暫定解を良くしたら、新しい暫定解でもう一度
+                    if incumb_on('a') && !self.params.submip {
+                        let mut z_prev = z_rins0;
+                        for k in 0..tunable!("ENOMOTO_T_MIP_INCUMB_RINS_REP", 2usize, usize) {
+                            let z_now = self.incumbent.as_ref().map(|(z, _)| *z);
+                            if z_now.is_none() || z_now == z_prev {
+                                break;
+                            }
+                            if self.params.verbose {
+                                eprintln!("MIP: INCUMB: root RINS improved the incumbent {:?} -> {:?}; RINS again ({})", z_prev, z_now, k + 1);
+                            }
+                            z_prev = z_now;
+                            heur!("RINS", self.rins(&x));
+                        }
+                    }
                 }
                 // `ENOMOTO_MIP_ROOT_LMIP` (試作): 根のヒューリスティクスの暫定解 (RENS・RINS などのサブ MIP の解を含む) を出発点に
                 // Local-MIP を回して磨く ([`Self::root_lmip`])

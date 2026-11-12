@@ -2199,8 +2199,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // `ENOMOTO_MIP_SUBFIX` の `r` (試作、[`super::heur_subfix`]): 外側の根の RENS を HiGHS の形のダイブ (目標の固定率で止め、
         // 根で実行不能なら目標を半分にして深さの半分まで戻ってやり直す) にする。やり直しに結果が要るので、サブ MIP は主のスレッドで解く
-        // `q`: 暫定解があるときだけ (暫定解がなければ下の既定の RENS)
-        if super::heur_subfix::on('r') && self.nodes <= 1 && !self.params.submip && (!super::heur_subfix::on('q') || self.incumbent.is_some()) {
+        // `q`: 暫定解があるときだけ (暫定解がなければ下の既定の RENS)。試作 `ENOMOTO_MIP_INCUMB` の `r` ([`super::solver::incumb_on`]) なら参照解だけのときも
+        if super::heur_subfix::on('r') && self.nodes <= 1 && !self.params.submip && (!super::heur_subfix::on('q') || self.incumbent.is_some() || (super::solver::incumb_on('r') && self.ref_sol.is_some())) {
             self.subfix_note_root_x(_x);
             let keep = self.parallel_submips;
             // `p`: 1 回目は並列のサブ MIP のまま出す (やり直しは受け取りの後に主で、[`Self::subfix_par_retry`])

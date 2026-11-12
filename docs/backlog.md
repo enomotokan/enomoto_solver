@@ -419,6 +419,16 @@ LP の伝播・分枝の側で、それは既存の Proximity Search・`ROOT_OBJ
   カットの行の非零が多い問題 (hypothyroid-k1 は行の平均非零 84) は外す。
 - 確かめ: 根の下界 (58 問 + 負ける 26 問)、解く時間、30n20b8・hypothyroid-k1 の害。600 秒で新しく解ける問題は今回 0 なので、効き目は根の下界と C 組の速さで見る。
 
+### 暫定解が HiGHS より遅い問題 (課題 INCUMB、2026-11-12 に着手、analysis/incumb_20261111.md)
+
+- 事実: 7 問 (widden・mzzv11・csched008・satellites2-60-fs・supportcase33・hypothyroid-k1・fiball) の HiGHS の最良解の出どころは、根 (再スタート後を含む) の
+  サブ MIP が widden・mzzv11 (途中まで)・hypothyroid-k1、木のノード・潜りが csched008・supportcase33・satellites2、木の中のサブ MIP が fiball (同等・揺れ)。
+- 試作 `ENOMOTO_MIP_INCUMB` (既定では使わない): `r` = 再スタート前の暫定解が前処理後の問題から外れたときも根の RENS をダイブにする、
+  `a` = 根の RINS が良くしたら新しい暫定解で繰り返す。mzzv11・widden (種 1・600 秒) でどちらも既定より良くならない (widden の最適解 既定 345 秒、`ra` 537 秒)。既定候補ではない。
+- 見立て (推測): 多くは主因 (下界 C/P、固定 F、カットのループ R、木 T) の結果。widden は HiGHS が 0.2% の固定でも根で再スタートし、その後の根のサブ MIP で最適解に着く →
+  RSTCRIT へ。supportcase33・csched008 → TREEEFF。hypothyroid-k1 → ROOTCAP・CLIQFB。
+- 残る案 (未試作): 再スタート後の根で、打ち切り値で外れた暫定解を受け取れる形 (丸め系・サブ MIP が暫定解なしで回る件、mzzv11)。
+
 ### 木の大きさの切り分け (課題 TREEEFF、未着手)
 
 - 事実: 根の下界が HiGHS と同等なのにノード数が 2〜8 倍で閉じない問題が最も多い (sct2・pg5_34・kasai・csched008・supportcase33、根の下界も弱い tr12-30・rococoC10・neos-1456979)。
