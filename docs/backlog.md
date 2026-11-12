@@ -14,6 +14,19 @@
 基準を満たしたものはまとめて 1 つの候補 (例 cand1111) にし、58 問を種 4 つ・Mittelmann の HiGHS に負ける 47 問を 600 秒・種 2 つで
 束として確かめてから既定にする (小さな損の積み重なりを見るため)。束で害があれば 1 つずつ抜いて原因を探す。
 
+## 課題 WINWHY: HiGHS に大差で勝つ問題・ENOMOTO だけが解く問題の勝ちの元 (2026-11-12、analysis/winwhy_20261111.md)
+
+- 同じ機械で HiGHS 1.15.1 と並べ、勝ちの元の部品を切って確かめた。60 秒の表の 18 問のうち 5 問 (neos-911970・piperout-08・cbs-cta・timtab1・
+  ns1208400) は同じ機械では勝ちでない (60 秒の比べは HiGHS を遅い機械で回していた・揺れ)。
+- 勝ちの元 (切ると勝ちが消える): クリーク行の拡張 (neos-950242)・前処理の LP による固定 (app1-1)・目的 0 の問題の早めの Local-MIP (fhnw-binpack4-48・
+  krka)・4 本の木 (pk1・neos5・mas76・roll3000、HiGHS は木 1 本)。木 1 本でも勝つ: markshare_4_0・rmatr100-p10 (ノードの LP が軽い)・binkar10_1・n5-3。
+  decomp2 は単独の主因なし。DRCR が要る勝ちはない (cbs-cta・ns1208400 は規則 2 で畳まず、外しても揺れの範囲)。
+- 広げる試作 `ENOMOTO_MIP_CLQEXT_KNAP` (ナップサック行に隠れたクリークも拡張する) は既定候補にしない (91 問で当たる 8 問、根の LP は動かない)。
+- 守ること: cand1112 の項目のうち RCSTRONG は rmatr100-p10 のノードの LP に行を足して 1.2〜1.4 倍、GAP1=u は pk1 を 1.15〜1.5 倍遅くする (種 2 つ)。
+  CUTCONF は mas74・mas76 を遅くする。木で勝つ型の問題 (pk1・rmatr100-p10・mas74・markshare_4_0) を束の計測で見張る。
+- 残り: 600 秒の組 (mas74・gen-ip054・wachplan・n2seq36q・neos-957323) の HiGHS との並べ (分担 session_01HrNYnHmGcp4Cm4psQMbb3G)。
+  Local-MIP を FJ と混ぜない形が decomp2 で揃って速い (3.2・3.3 対 1.4・15.6) 件は 1 問だけの事実で、COMP07 (Local-MIP の時間) の受け持ちに渡す。
+
 ## 課題 REVISIT: 以前に見送った試作を今の既定で測り直す (2026-11-12、analysis/revisit_20261112.md)
 
 - **状態: 測り直しを終えた。cand1113 の材料として prepar (`ENOMOTO_MIP_PREPAR=ple`) と ncm (`ENOMOTO_MIP_NODE_CUT_MAXLEN=1`) を勧める。
