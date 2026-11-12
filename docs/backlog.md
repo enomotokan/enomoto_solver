@@ -481,7 +481,7 @@ LP の伝播・分枝の側で、それは既存の Proximity Search・`ROOT_OBJ
 
 - 進み (2026-11-12): 試作 `ENOMOTO_MIP_TREEEFF=rpsh` (木の中の再スタートを HiGHS 式の判定 + 損の型の見送り + 擬似費用・プール・下界の持ち越し + 短い根) と
   `ENOMOTO_MIP_NODECNT=hr` の組 (tenc) が 58 問 × 種 1〜3 で −0.1% [−4.8%, +4.6%]・解けた 127 → 131・誤答 0 (既定候補)。kasai が 564 秒で最適、pg5_34 は 341 秒。
-  残り: 600 秒の 9 問 × 2 種の診断 (分担 D)、Mittelmann での害の確かめ。csched008 は木ではなく目的関数の刻み (暗黙の整数) の課題。
+  残り: Mittelmann での害の確かめ (次の束 cand1113 で)、600 秒の 9 問 × 2 種の診断 (分担 D、2026-11-12 から保留。`analysis/treeeff_20261111/shards.md`)。csched008 は木ではなく目的関数の刻み (暗黙の整数) の課題。
 
 - 事実: 根の下界が HiGHS と同等なのにノード数が 2〜8 倍で閉じない問題が最も多い (sct2・pg5_34・kasai・csched008・supportcase33、根の下界も弱い tr12-30・rococoC10・neos-1456979)。
   終わりのギャップは sct2 0.03%・tr12-30 0.06%・pg5_34 0.07%・kasai 0.5%。強分岐の規則 (`SB_NO_DEGEN_SKIP`・`TREE1_SB`)・カットのラウンド・クリークのどれでも閉じない。
