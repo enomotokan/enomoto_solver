@@ -9,3 +9,5 @@ CFGS = {
     "deq": {"ENOMOTO_MIP_DUALEQ": "1"},
 }
 LOGENV = {"ENOMOTO_MIP_LOG": "1"}
+CFGS["se"] = {**CFGS["spl"], **CFGS["enum"]}                # spl + enum (対象の問題の 600 秒の回だけ)
+CFGS["sed"] = {**CFGS["spl"], **CFGS["enum"], **CFGS["deq"]}
