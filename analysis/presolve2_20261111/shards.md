@@ -31,3 +31,13 @@ git pull --rebase --autostash origin ccr-1beed81b-ex0uhq && git push -u origin c
 | 分担 | 命令 |
 |---|---|
 | P0〜P5 | `python run.py P 0` 〜 `python run.py P 5` (6 分担) |
+
+## Q: 58 問の対の 2 組目 (60 秒、58 問 × 種 4〜6 × {def, deq, enum}、522 回、5 分担)
+
+- コミット: **5a23c417** (DUALEQ を直した版: かけ直しで縮んだときだけ使い、2 列の行がなければかけ直さない。既定の動きは変わらない)。
+- 手順は上と同じで、命令が `python run.py Q <K>`、結果が `res_Q_s<K>.jsonl`。集計は `SET=Q python summP.py`。
+- 見積り: 1 分担 約 0.9 時間。
+
+| 分担 | 命令 |
+|---|---|
+| Q0〜Q4 | `python run.py Q 0` 〜 `python run.py Q 4` (5 分担) |
