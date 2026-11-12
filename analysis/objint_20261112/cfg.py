@@ -1,0 +1,8 @@
+"""OBJINT (2026-11-12) の設定。def = 既定 (環境変数なし)。highs = HiGHS 1.15.1 (種は random_seed)。"""
+CFGS = {
+    "def": {},
+    "oi": {"ENOMOTO_MIP_OBJINT": "1"},                                  # 目的値の刻みに HO2 の暗黙の整数と整数値に固定された列を使う
+    "oig": {"ENOMOTO_MIP_OBJINT": "1", "ENOMOTO_MIP_HO2_GOBJ": "1"},    # + 打ち切り値による目的関数の行の大域的な伝播 (既存の試作)
+}
+# 診断の回でだけ足すログ (解き方は変えない)
+LOGENV = {"ENOMOTO_MIP_LOG": "1"}
