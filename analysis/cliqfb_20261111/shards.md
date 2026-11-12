@@ -64,3 +64,15 @@ cpr は使わないときに比べの状態を捨てて既定と同じ道筋に�
 |---|---|
 | F0 | `CF_LOG=1 CF_LOGDIR=logs600f python run.py cq600f_k0.jsonl cpf 1,2 600 hypothyroid-k1 neos859080` |
 | F1 | `CF_LOG=1 CF_LOGDIR=logs600f python run.py cq600f_k1.jsonl cpf 1,2 600 30n20b8 net12` |
+
+## G. 58 問 × 種 1〜3 × 60 秒、試作 cpf2 (`probe_f` + `ENOMOTO_T_MIP_CLIQUE_PROBE_TIME_FRAC=0.02`) (2026-11-12 に足した、6 分担)
+コミット「CLIQFB: probe_f の比べを同じラウンド数でそろえる」以降でビルドすること。E (cpf) で比べの時間が重い問題 (physiciansched6-2・eil33-2) が
+揃って 3〜6 秒遅かったため、比べの時間を全体の 5% → 2% にする (60 秒なら 1.2 秒)。
+| 分担 | 命令 |
+|---|---|
+| G0 | `python run.py p58f2_k0.jsonl def,cpf2 1,2,3 60 @k0/6` |
+| G1 | `python run.py p58f2_k1.jsonl def,cpf2 1,2,3 60 @k1/6` |
+| G2 | `python run.py p58f2_k2.jsonl def,cpf2 1,2,3 60 @k2/6` |
+| G3 | `python run.py p58f2_k3.jsonl def,cpf2 1,2,3 60 @k3/6` |
+| G4 | `python run.py p58f2_k4.jsonl def,cpf2 1,2,3 60 @k4/6` |
+| G5 | `python run.py p58f2_k5.jsonl def,cpf2 1,2,3 60 @k5/6` |

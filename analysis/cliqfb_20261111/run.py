@@ -17,6 +17,7 @@ CFGS = {
     "cps": {"ENOMOTO_MIP_CLIQUE_CUTS": "probe_s"},                   # 試作: cp の余分を減らす形 (破れるクリークがなければ・選ばれなければ比べない)
     "cpr": {"ENOMOTO_MIP_CLIQUE_CUTS": "probe_r"},                   # 試作: cps に加え、使わないときは比べの状態を捨てて既定と同じ道筋にする
     "cpf": {"ENOMOTO_MIP_CLIQUE_CUTS": "probe_f"},                   # 試作: cpr で使わないときは既定の fallback に任せる (道筋が既定と同じ)
+    "cpf2": {"ENOMOTO_MIP_CLIQUE_CUTS": "probe_f", "ENOMOTO_T_MIP_CLIQUE_PROBE_TIME_FRAC": "0.02"},  # 試作: cpf で比べの時間を全体の 2% まで
     "cp3": {"ENOMOTO_MIP_CLIQUE_CUTS": "probe", "ENOMOTO_T_MIP_CLIQUE_PROBE_ROUNDS": "3"},
     "cq": {"ENOMOTO_MIP_CLIQUE_CUTS": "1"},                         # 常用 (根とノード)
     "cr": {"ENOMOTO_MIP_CLIQUE_CUTS": "root"},                      # 常用 (根だけ)

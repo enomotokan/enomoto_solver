@@ -795,8 +795,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         };
         PROBE_NO_FLAT_STOP.with(|c| c.set(false));
-        let (g0, t0) = h0.last().copied().unwrap_or((0.0, 0.0));
-        let (g1, t1) = h1.last().copied().unwrap_or((0.0, 0.0));
+        // `probe_f`: 両方の側がそろっている同じラウンド数の値で比べる (比べの時間の上限で片方が早く止まったとき、ラウンド数の違う伸びを比べない)
+        let m = if clique_cuts_mode() == Some("probe_f") { h0.len().min(h1.len()) } else { usize::MAX };
+        let at = |h: &Vec<(f64, f64)>| if m == usize::MAX { h.last().copied() } else { m.checked_sub(1).and_then(|i| h.get(i).copied()) };
+        let (g0, t0) = at(&h0).unwrap_or((0.0, 0.0));
+        let (g1, t1) = at(&h1).unwrap_or((0.0, 0.0));
         let f0 = e0.as_ref().map_or(nfrac_start, |e| if e.rounds > 0 { e.nfrac } else { nfrac_start });
         let f1 = e1.as_ref().map_or(nfrac_start, |e| if e.rounds > 0 { e.nfrac } else { nfrac_start });
         // 時間の下限 `ENOMOTO_T_MIP_CLIQUE_PROBE_TMIN` (0.5 秒): 比べが短い問題では時間の差は誤差なので伸びだけで比べる
