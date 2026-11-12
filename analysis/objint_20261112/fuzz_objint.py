@@ -6,7 +6,9 @@ HiGHS (mip_rel_gap 1e-9) と最適値を突き合わせる。形: メイクス�
 使い方: ENOMOTO_MIP_OBJINT=1 python fuzz_objint.py 問題数 [開始seed]   (付けなければ既定の動きの検査)。1 スレッドで解く。"""
 import os, random, re, sys, tempfile, time
 NODES = []
+NEWSTEP = []
 os.environ.setdefault("ENOMOTO_MIP_THREADS", "1")
+os.environ.setdefault("ENOMOTO_MIP_LOG", "1")
 import highspy
 from enomoto_solver import Model, Variable
 inf = float("inf")
@@ -85,7 +87,7 @@ def gen_pm(g, brk, frac):
         lo.append(l); up.append(u); c.append(0.0); it.append(integer); return len(lo) - 1
     def row(r, l, u):
         rows.append(r); rlo.append(l); rup.append(u)
-    J, M = g.randint(6, 11), g.randint(2, 4)
+    J, M = g.randint(7, 13), g.randint(2, 4)
     p = [float(g.randint(3, 20)) + (0.5 if frac() else 0.0) for _ in range(J)]
     x = [[var(0.0, 1.0, True) for _ in range(M)] for _ in range(J)]
     C = var(0.0, inf, False)
@@ -152,6 +154,9 @@ def ours(lp):
     log = open(path).read(); os.unlink(path)
     m = re.findall(r"nodes (\d+) \(", log)
     NODES.append(int(m[-1]) if m else -1)
+    # OBJINT で刻みが新しく付いたか (既定の判定では付かない)
+    st = re.findall(r"objective step with implied integers: (Some\([^)]*\)|None) \(without: (Some\([^)]*\)|None)\)", log)
+    NEWSTEP.append(any(a != "None" and b == "None" for a, b in st))
     return s.status, s.objective, ([x.value for x in xs] if s.status == "optimal" else None)
 
 
@@ -179,4 +184,4 @@ if __name__ == "__main__":
         if not ok:
             bad += 1
             if bad <= 10: print("seed", seed, "highs", hs, ho, "ours", os_, oo, flush=True)
-    print("bad", bad, "of", N, "status", st, "with nodes>0", sum(n > 0 for n in NODES), "time %.1f" % (time.time() - t0))
+    print("bad", bad, "of", N, "status", st, "with nodes>0", sum(n > 0 for n in NODES), "new step", sum(NEWSTEP), "new step and nodes>0", sum(a and n > 0 for a, n in zip(NEWSTEP, NODES)), "time %.1f" % (time.time() - t0))

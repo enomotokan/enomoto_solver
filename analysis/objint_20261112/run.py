@@ -13,7 +13,7 @@ from cfg import CFGS, LOGENV  # noqa: E402
 SET, k = sys.argv[1], int(sys.argv[2])
 mine = json.loads((D / f"shards_{SET}.json").read_text())["shards"][k]
 OUT = D / f"res_{SET}_s{k}.jsonl"
-LOGS = SET.startswith("T")
+LOGS = SET.startswith("T") or SET.startswith("X")
 LD = D / f"logs_{SET}"
 if LOGS: LD.mkdir(exist_ok=True)
 done = set()

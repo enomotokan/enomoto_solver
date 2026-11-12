@@ -6,3 +6,6 @@ CFGS = {
 }
 # 診断の回でだけ足すログ (解き方は変えない)
 LOGENV = {"ENOMOTO_MIP_LOG": "1"}
+# この機械で回す追加の組 (X): TREEEFF の tenc (= TREEEFF=rpsh + NODECNT=hr、cand1113 の候補) との組み合わせ
+CFGS["tenc"] = {"ENOMOTO_MIP_TREEEFF": "rpsh", "ENOMOTO_MIP_NODECNT": "hr"}
+CFGS["oitenc"] = {**CFGS["oi"], **CFGS["tenc"]}
