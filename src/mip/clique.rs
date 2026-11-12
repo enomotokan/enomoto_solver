@@ -15,6 +15,15 @@ const MAX_ROW_LITS: usize = 2000;
 /// 1 行から作る辺の数の上限。
 const MAX_ROW_EDGES: usize = 20_000;
 
+/// `ENOMOTO_T_MIP_CLQ_MAX_ROW_LITS`・`ENOMOTO_T_MIP_CLQ_MAX_ROW_EDGES` (試作、CLQPRB の続き): 行の上限を変える (既定は上の値)。
+/// 落ちている行の衝突を入れたときに根の LP・クリークのカットが変わるかを、クリーク表の持ち方を変える前に安く確かめる
+fn max_row_lits() -> usize {
+    tunable!("ENOMOTO_T_MIP_CLQ_MAX_ROW_LITS", MAX_ROW_LITS, usize)
+}
+fn max_row_edges() -> usize {
+    tunable!("ENOMOTO_T_MIP_CLQ_MAX_ROW_EDGES", MAX_ROW_EDGES, usize)
+}
+
 impl CliqueGraph {
     /// 行 `row_lo <= sum a_j x_j <= row_up` から作る。`binary[j]` は 2 値列か、`lo`/`up` は列の境界 (大域的)。
     pub fn build(n: usize, rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], binary: &[bool], lo: &[f64], up: &[f64]) -> Self {
@@ -70,7 +79,7 @@ impl CliqueGraph {
                         }
                     }
                 }
-                if !ok || lits.len() < 2 || lits.len() > MAX_ROW_LITS {
+                if !ok || lits.len() < 2 || lits.len() > max_row_lits() {
                     continue;
                 }
                 let slack = b - minact;
@@ -92,7 +101,7 @@ impl CliqueGraph {
                         adj[lits[u].1 as usize].insert(lits[v].1);
                         adj[lits[v].1 as usize].insert(lits[u].1);
                         edges += 1;
-                        if edges >= MAX_ROW_EDGES {
+                        if edges >= max_row_edges() {
                             break 'outer;
                         }
                     }
