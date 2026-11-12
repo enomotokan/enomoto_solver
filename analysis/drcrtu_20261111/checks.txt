@@ -1,0 +1,15 @@
+誤答の検査 (wheel = コミット 3160c3d7、PYTHONPATH で固定)
+== fuzz_net.py 2000 0 (ネットワーク行列の形の整数計画の写し、HiGHS と突き合わせ)
+ENOMOTO_MIP_FOLD=rin bad 0 of 2000 time 23.1 folded=1344 intgroups=1344 accepted_groups=5554 safety=0
+ENOMOTO_MIP_FOLD=ri bad 0 of 2000 time 18.3 folded=841 intgroups=841 accepted_groups=4442 safety=0
+ENOMOTO_MIP_FOLD=rinp bad 0 of 2000 time 23.3 folded=1383 intgroups=1345 accepted_groups=5554 safety=0
+== analysis/drcr_20261110/fuzz_fold.py 2000 1000 mip (ENOMOTO_MIP_FOLD=rin)
+bad 0 of 2000 time 21.0
+== benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0 (ENOMOTO_MIP_FOLD=rin)
+bad 0 of 400 time 3.6 (strict 17: 値の一致だけの以前の判定)   (既定でも strict 17)
+== scripts/mip_fuzz_vs_highs.py 300 (ENOMOTO_MIP_FOLD=rin、ENOMOTO_MIP_REL_GAP=1e-9)
+bad 0 of 300 time 4.8
+== cargo test --release --lib (RUSTFLAGS で libpython を結ぶ)
+test result: ok. 404 passed; 0 failed; 19 ignored; 0 measured; 0 filtered out; finished in 2.50s
+test result: ok. 404 passed; 0 failed; 19 ignored; 0 measured; 0 filtered out; finished in 2.82s
+done
