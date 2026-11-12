@@ -1186,6 +1186,11 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             clqact_census(prob, "b_probing");
         }
     }
+    if let (Some(_), Some(Presolved::Reduced { prob, .. })) = (env_str!("ENOMOTO_MIP_DEBUG_CLQTAB"), &presolved) {
+        if !params.submip && params.restarts == 0 {
+            clqtab_census(prob, "b_probing");
+        }
+    }
     if let (Some(path), Some(Presolved::Reduced { prob, .. })) = (env_str!("ENOMOTO_MIP_DEBUG_PRESOLVE_COLS"), &presolved) {
         if !params.submip && params.restarts == 0 && prob.n == p.n {
             use std::io::Write;
@@ -5213,6 +5218,103 @@ pub(crate) fn clqact_census(prob: &MipProblem, tag: &str) {
         prob.m,
         g.num_edges(),
         t0.elapsed().as_secs_f64()
+    );
+}
+
+/// 診断 `ENOMOTO_MIP_DEBUG_CLQTAB` (クリーク表の持ち方の見直しの数え上げ、analysis/clqprb_20261112.md §11): 前処理の後の問題で、
+/// 衝突グラフ ([`clique::CliqueGraph`]) の辺の数・作る時間・行の上限で落ちる行と組、含意の組 (`conflict_edges`) のうち行の辺と重なる数、
+/// 残りの含意の組を貪欲にクリークにまとめたときの個数と総文字数を数え、`CLQTAB {json}` の 1 行を出す (求解は変えない)
+pub(crate) fn clqtab_census(prob: &MipProblem, tag: &str) {
+    let n = prob.n;
+    let (lo, up) = (&prob.col_lo, &prob.col_up);
+    let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && lo[j] == 0.0 && up[j] == 1.0).collect();
+    let t0 = std::time::Instant::now();
+    let g = clique::CliqueGraph::build_with(n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, lo, up, &prob.conflict_edges);
+    let t_full = t0.elapsed().as_secs_f64();
+    let t1 = std::time::Instant::now();
+    let g0 = clique::CliqueGraph::build(n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, lo, up);
+    let t_rows = t1.elapsed().as_secs_f64();
+    let cap = clique::CliqueGraph::row_cap_stats(&prob.rows, &prob.row_lo, &prob.row_up, &binary, lo, up);
+    // 含意の組 (重複・固定の列・同じ列を除く)
+    let mut imp: Vec<(u32, u32)> = prob
+        .conflict_edges
+        .iter()
+        .filter(|&&(a, b)| a / 2 != b / 2 && binary[(a / 2) as usize] && binary[(b / 2) as usize])
+        .map(|&(a, b)| (a.min(b), a.max(b)))
+        .collect();
+    imp.sort_unstable();
+    imp.dedup();
+    let n_imp = imp.len();
+    let rest: Vec<(u32, u32)> = imp.iter().copied().filter(|&(a, b)| !g0.adjacent(a, b)).collect();
+    let n_rest = rest.len();
+    // 残りの組を貪欲にクリークにまとめる: 次数の大きい文字から、まだ覆っていない隣を全体のグラフ g で互いに隣なものから足していく
+    let t2 = std::time::Instant::now();
+    let mut adj: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    for &(a, b) in &rest {
+        adj.entry(a).or_default().push(b);
+        adj.entry(b).or_default().push(a);
+    }
+    let rest_set: std::collections::HashSet<(u32, u32)> = rest.iter().copied().collect();
+    let mut covered: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::with_capacity(n_rest);
+    let mut order: Vec<u32> = adj.keys().copied().collect();
+    order.sort_by_key(|u| (std::cmp::Reverse(adj[u].len()), *u));
+    let (mut n_cl, mut n_lits, mut max_cl, mut timed_out) = (0usize, 0usize, 0usize, false);
+    let key = |a: u32, b: u32| (a.min(b), a.max(b));
+    let tmax = tunable!("ENOMOTO_T_MIP_CLQTAB_TIME", 60.0, f64);
+    'outer: for &u in &order {
+        loop {
+            if t2.elapsed().as_secs_f64() > tmax {
+                timed_out = true;
+                break 'outer;
+            }
+            let nb: Vec<u32> = adj[&u].iter().copied().filter(|&v| !covered.contains(&key(u, v))).collect();
+            if nb.is_empty() {
+                break;
+            }
+            let mut cl = vec![u, nb[0]];
+            for &w in &nb[1..] {
+                if cl.len() >= 256 {
+                    break;
+                }
+                if cl[1..].iter().all(|&c| g.adjacent(w, c)) {
+                    cl.push(w);
+                }
+            }
+            let mut newly = 0usize;
+            for x in 0..cl.len() {
+                for y in (x + 1)..cl.len() {
+                    let k = key(cl[x], cl[y]);
+                    if rest_set.contains(&k) && covered.insert(k) {
+                        newly += 1;
+                    }
+                }
+            }
+            if newly == 0 {
+                // 進まない (覆いの印が rest にない組だけ): u の残りを 1 組ずつ覆う
+                for &v in &nb {
+                    covered.insert(key(u, v));
+                    n_cl += 1;
+                    n_lits += 2;
+                }
+                break;
+            }
+            n_cl += 1;
+            n_lits += cl.len();
+            max_cl = max_cl.max(cl.len());
+        }
+    }
+    eprintln!(
+        "CLQTAB {{\"at\":\"{tag}\",\"n_bin\":{},\"edges_full\":{},\"edges_rows\":{},\"build_full_s\":{t_full:.2},\"build_rows_s\":{t_rows:.2},\"adj_mb\":{:.1},\"rows_over_lits\":{},\"pairs_over_lits\":{},\"rows_over_edges\":{},\"pairs_over_edges\":{},\"row_pairs_total\":{},\"impl_pairs\":{n_imp},\"impl_not_rows\":{n_rest},\"impl_cliques\":{n_cl},\"impl_clique_lits\":{n_lits},\"impl_clique_max\":{max_cl},\"cover_s\":{:.2},\"cover_timeout\":{timed_out}}}",
+        binary.iter().filter(|&&b| b).count(),
+        g.num_edges(),
+        g0.num_edges(),
+        (g.num_edges() * 2 * 4) as f64 / 1e6,
+        cap[0],
+        cap[1],
+        cap[2],
+        cap[3],
+        cap[4],
+        t2.elapsed().as_secs_f64()
     );
 }
 

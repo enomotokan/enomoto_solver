@@ -110,6 +110,62 @@ impl CliqueGraph {
         Some(CliqueGraph { adj })
     }
 
+    /// 診断 (CLQPRB の続き、クリーク表の持ち方の数え上げ): [`Self::build_with`] の行の上限 ([`MAX_ROW_LITS`]・[`MAX_ROW_EDGES`]) で
+    /// 落ちる行と組の数。(文字が多すぎて使わない行, その行の組の数, 辺の上限に当たる行, 上限を超えて落ちる組の数, 行から出る組の総数)。
+    /// 組の数は重みを並べて 2 本の指で数える (行の中の重複・同じ列の組も数えるので上限の目安)
+    pub fn row_cap_stats(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], binary: &[bool], lo: &[f64], up: &[f64]) -> [u64; 5] {
+        let mut st = [0u64; 5];
+        for (i, r) in rows.iter().enumerate() {
+            for (sign, b) in [(1.0, row_up[i]), (-1.0, -row_lo[i])] {
+                if !b.is_finite() {
+                    continue;
+                }
+                let mut minact = 0.0;
+                let mut w: Vec<f64> = Vec::new();
+                let mut ok = true;
+                for &(j, a0) in r {
+                    let a = sign * a0;
+                    let m = if a > 0.0 { a * lo[j] } else { a * up[j] };
+                    if !m.is_finite() {
+                        ok = false;
+                        break;
+                    }
+                    minact += m;
+                    if binary[j] && lo[j] < up[j] && a != 0.0 {
+                        w.push(a.abs());
+                    }
+                }
+                if !ok || w.len() < 2 {
+                    continue;
+                }
+                let slack = b - minact;
+                let tol = 1e-9 * (1.0 + b.abs());
+                w.sort_by(|a, b| b.total_cmp(a));
+                // 重みの和が slack を超える組の数 (降順の w で、u ごとに v > u のうち w_u + w_v > slack の数)
+                let mut pairs = 0u64;
+                let mut hi = w.len();
+                for u in 0..w.len() {
+                    while hi > u + 1 && w[u] + w[hi - 1] <= slack + tol {
+                        hi -= 1;
+                    }
+                    if hi <= u + 1 {
+                        break;
+                    }
+                    pairs += (hi - u - 1) as u64;
+                }
+                st[4] += pairs;
+                if w.len() > MAX_ROW_LITS {
+                    st[0] += 1;
+                    st[1] += pairs;
+                } else if pairs > MAX_ROW_EDGES as u64 {
+                    st[2] += 1;
+                    st[3] += pairs - MAX_ROW_EDGES as u64;
+                }
+            }
+        }
+        st
+    }
+
     /// 辺があるか。
     pub fn num_edges(&self) -> usize {
         self.adj.iter().map(|a| a.len()).sum::<usize>() / 2

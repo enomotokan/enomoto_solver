@@ -23,6 +23,7 @@ for p in probs:
     env = {key: v for key, v in os.environ.items() if not key.startswith("ENOMOTO_")}
     env.update(ENOMOTO_MIP_THREADS="4", ENOMOTO_T_MIP_SEED="1", ENOMOTO_MIP_LOG="1")
     if cfg == "act": env.update(ENOMOTO_MIP_CLQPRB="1", ENOMOTO_MIP_DEBUG_CLQACT="1")
+    elif cfg == "tab": env.update(ENOMOTO_MIP_CLQPRB="1", ENOMOTO_MIP_DEBUG_CLQTAB="1")   # クリーク表の持ち方の数え上げ
     else: env["ENOMOTO_MIP_DEBUG_INTCENSUS"] = "1"
     if cfg == "clq": env["ENOMOTO_MIP_CLQPRB"] = "1"
     t0 = time.time()
@@ -34,7 +35,7 @@ for p in probs:
         if line.startswith("INTCENSUS "):
             c = json.loads(line[10:]); c["t"] = round(time.time() - t0, 1); res["census"].append(c)
             if c["at"].startswith("c_root"): break
-        elif line.startswith("CLQACT "):
+        elif line.startswith("CLQACT ") or line.startswith("CLQTAB "):
             c = json.loads(line[7:]); c["t"] = round(time.time() - t0, 1); res["census"].append(c); break
         elif line.startswith("{"):
             try: res["final"] = json.loads(line)
