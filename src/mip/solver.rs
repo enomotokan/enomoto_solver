@@ -4504,7 +4504,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     };
     // 試作 `ENOMOTO_MIP_OBJINT` の `c`: 整数部の刻みと連続部の幅 ([`ObjLat`])。刻みだけの形で表せないとき (連続部に幅がある・
     // 整数でない値に固定された列がある) は `obj_step` を使わず、刈り込み・報告の下界は `obj_lat` で取る
-    let (obj_lat, obj_lat_mask, obj_step) = if objint('c') {
+    // 診断 `ENOMOTO_MIP_OBJINT_C_NOSUB` (調べるとき用): サブ MIP では `c` を使わない
+    let (obj_lat, obj_lat_mask, obj_step) = if objint('c') && !(params.submip && env_str!("ENOMOTO_MIP_OBJINT_C_NOSUB").is_some()) {
         let mask = std::sync::Arc::new(p.implied_integers_ho2());
         let lat = ObjLat::of(p, &mask, &dom.lo, &dom.up);
         let step = match (obj_step, lat) {
