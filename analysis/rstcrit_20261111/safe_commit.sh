@@ -13,6 +13,7 @@ for lv in glob.glob("analysis/rstcrit_20261111/res*.live.jsonl"):
     if new:
         open(f, "a").write("\n".join(new) + "\n")
 P
+mkdir -p analysis/rstcrit_20261111/logs && mv analysis/rstcrit_20261111/logs_live/* analysis/rstcrit_20261111/logs/ 2>/dev/null
 git add analysis/rstcrit_20261111 analysis/rstcrit_20261111.md docs/backlog.md 2>/dev/null
 git commit -qm "$1
 

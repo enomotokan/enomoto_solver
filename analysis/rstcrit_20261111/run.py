@@ -37,8 +37,10 @@ except Exception as e:  # noqa: BLE001
     err = getattr(e, "stderr", "") or ""
     if isinstance(err, bytes):
         err = err.decode(errors="replace")
-(D / "logs").mkdir(exist_ok=True)
-with gzip.open(D / "logs" / f"{cfg}_{p}_{tl}_r{rep}.err.gz", "wt") as f:
+# 計測中 (出力が live) は追跡しない logs_live/ に置き、safe_commit.sh が logs/ に移す
+LOGD = D / ("logs_live" if out.endswith(".live.jsonl") else "logs")
+LOGD.mkdir(exist_ok=True)
+with gzip.open(LOGD / f"{cfg}_{p}_{tl}_r{rep}.err.gz", "wt") as f:
     f.write(err)
 def first(pat):
     for l in err.splitlines():
