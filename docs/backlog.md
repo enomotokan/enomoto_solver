@@ -14,6 +14,26 @@
 基準を満たしたものはまとめて 1 つの候補 (例 cand1111) にし、58 問を種 4 つ・Mittelmann の HiGHS に負ける 47 問を 600 秒・種 2 つで
 束として確かめてから既定にする (小さな損の積み重なりを見るため)。束で害があれば 1 つずつ抜いて原因を探す。
 
+## 課題 REVISIT: 以前に見送った試作を今の既定で測り直す (2026-11-12、analysis/revisit_20261112.md)
+
+- **状態: 測り直しを終えた。cand1113 の材料として prepar (`ENOMOTO_MIP_PREPAR=ple`) と ncm (`ENOMOTO_MIP_NODE_CUT_MAXLEN=1`) を勧める。
+  ns250s (`ENOMOTO_T_MIP_SUBMIP_NOSOL_CAP=250` と `ENOMOTO_MIP_SUBMIP_NOSOL_CAP_SERIAL=1`) は足してもよい。束での確かめはまだ。**
+- 種 1〜3 の 58 問 (種 3 の基準は def の 2 回の平均) の数字:
+  - prepar: −4.4% [−8.6%, −0.6%]
+  - ncm: −3.1% [−6.4%, +0.2%]
+  - ns250s: −1.9% [−5.2%, +1.1%]
+
+  3 件とも、解けた回は減らず、揃って遅い問題もない。
+- 見送った試作を 745 件洗い出した (`analysis/revisit_20261112/inventory.tsv`・`inventory_abc.md`)。そのうち 13 件を測り直した。
+  sbt・lm2・opf3 は基準を満たすが、得が揺れの中か、揃って遅い問題 (sbt の neos-911970) があるので勧めない。
+  subcap・pool2・face・tab・hnfbc・g4q・rs は外した。
+- 次の手:
+  - 束 (prepar + ncm、± ns250s) を 58 問 × 4 種と Mittelmann 47 問 × 600 秒 × 2 種で確かめる。
+  - 洗い出しで見つけた次の候補を測る: ROOTSTOP=r、DUAL_BOUND2=1、MC11FIX2=b、NODE_CUT_ADAPT。
+  - 誤った答えの記録 (PROBE_REPRESOLVE の traininstance6 など) を今のソースで確かめる。
+- 手順の教訓: 種 3 で def の 1 回が運悪く遅く、全候補が −3〜−12% に見えた。A/A では def 2 回の差が −8.6% あった。
+  種を足すときは def を 2 回回すと安全である。
+
 ## 課題 RSTCRIT: 根の再スタートの基準が緩すぎないか (2026-11-11 に着手、analysis/rstcrit_20261111.md)
 
 - **状態: 58 問 × 種 1〜3 を終えた。試作 `ENOMOTO_MIP_RSTCRIT=n` (新しい固定の非零が自由な列の非零の 5% 未満の再スタートを見送る) が
