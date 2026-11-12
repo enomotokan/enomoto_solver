@@ -34,3 +34,7 @@ assert sorted(k for v in GROUPS.values() for k in v) == sorted(CAND1113)
 CFGS = {"def": {}, "cand1113": CAND1113}
 for _g, _ks in GROUPS.items():
     CFGS["-" + _g] = {k: v for k, v in CAND1113.items() if k not in _ks}
+
+# 追加 (親の依頼): prune1112 の 5 部品を 1 つずつ外した形 (neos-960392 用)。"-P:X" は CAND1113 から ENOMOTO_MIP_X だけを外した形。
+for _k in GROUPS["prune1112"]:
+    CFGS["-P:" + _k.replace("ENOMOTO_MIP_", "")] = {k: v for k, v in CAND1113.items() if k != _k}
