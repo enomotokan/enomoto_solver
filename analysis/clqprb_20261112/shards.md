@@ -51,3 +51,13 @@ git pull --rebase --autostash origin ccr-1beed81b-ex0uhq && git push -u origin c
 | 分担 | 命令 |
 |---|---|
 | A0〜A2 | `python census.py mitt186.txt 0 3 act` 〜 `python census.py mitt186.txt 2 3 act` |
+
+## Q: 58 問の対 clq と clqa (60 秒、58 問 × 種 1〜3 × {clq, clqa}、348 回、3 分担)
+
+- コミット: **e9041ef0** (試作 `ENOMOTO_MIP_CLQACT` を足したソース。既定の動きは変わらない)。手順は P と同じで、命令が `python run.py Q <K>`、結果が `res_Q_s<K>.jsonl`。
+- 設定 (`cfg.py`): `clq` = `ENOMOTO_MIP_CLQPRB=1` (対の基準) / `clqa` = `ENOMOTO_MIP_CLQPRB=1 ENOMOTO_MIP_CLQACT=1`。
+- 見積り: 1 分担 約 1.0 時間。集計は `SET=Q BASE=clq python summP.py`。
+
+| 分担 | 命令 |
+|---|---|
+| Q0〜Q2 | `python run.py Q 0` 〜 `python run.py Q 2` (3 分担) |
