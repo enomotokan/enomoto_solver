@@ -1,6 +1,8 @@
 """費用 0 の連続列 (スラック列) と範囲制約・行にも目的にも出ない列を含む小さな MIP を乱数で作り、HiGHS と状態・最適値を突き合わせる
 (2026-11-12、analysis/wrongans_20261112.md)。行の 1/8 は区間の空な範囲制約にする (L > U) ので、実行不能な問題も混ざる。
-使い方: python fuzz_slack.py 問題数 [開始seed]   (ENOMOTO_MIP_THREADS は既定 1、ENOMOTO_MIP_REL_GAP=1e-9 を置く)"""
+使い方: python fuzz_slack.py 問題数 [開始seed]   (ENOMOTO_MIP_THREADS は既定 1、ENOMOTO_MIP_REL_GAP=1e-9 を置く)
+FUZZ_STRICT=1 (2026-11-12 に足した): HiGHS が非有界か「実行不能か非有界」のとき、目的を 0 にした問題を HiGHS で解いて実行可能か調べ、
+ENOMOTO の状態が unbounded (実行可能) / infeasible (実行不能) と一致することまで求める (以前の判定はどれでも可)"""
 import math, os, random, sys
 os.environ.setdefault("ENOMOTO_MIP_THREADS", "1")
 os.environ.setdefault("ENOMOTO_MIP_REL_GAP", "1e-9")
@@ -41,8 +43,10 @@ def gen(seed):
     return lo, up, c, it, rows, rlo, rup
 
 
-def highs(lp):
+def highs(lp, zero_obj=False):
     lo, up, c, it, rows, rlo, rup = lp
+    if zero_obj:
+        c = [0.0] * len(c)
     h = highspy.Highs(); h.setOptionValue("output_flag", False); h.setOptionValue("mip_rel_gap", 1e-9)
     n = len(lo)
     for j in range(n):
@@ -81,6 +85,10 @@ for seed in range(s0, s0 + N):
     cnt[hs] = cnt.get(hs, 0) + 1
     ok = (hs == "Optimal" and os_ == "optimal" and abs(ho - oo) <= 1e-6 * max(1, abs(ho))) or (hs == "Infeasible" and os_ == "infeasible") \
         or (hs in ("Unbounded", "Primal infeasible or unbounded") and os_ in ("unbounded", "infeasible_or_unbounded", "infeasible"))
+    if ok and os.environ.get("FUZZ_STRICT") and hs in ("Unbounded", "Primal infeasible or unbounded"):
+        fs, _ = highs(lp, zero_obj=True)
+        ok = (fs == "Optimal" and os_ == "unbounded") or (fs == "Infeasible" and os_ == "infeasible")
+        hs = f"{hs} (feasibility {fs})"
     if not ok:
         bad += 1
         print("MISMATCH seed", seed, "HiGHS", hs, ho, "ENOMOTO", os_, oo, flush=True)

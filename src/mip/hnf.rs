@@ -24,6 +24,16 @@ pub(crate) enum Mode {
 }
 
 pub(crate) fn mode() -> Option<Mode> {
+    let m = mode_env();
+    // 根の緩和が非有界のときの実行可能性の問題 ([`super::UNB_CHECK`]) では、`ENOMOTO_MIP_HNFPRE=0` でも `bounds` で使う: 整数の等式の
+    // 合同式と境界だけで実行不能が分かる問題 (slack240) を、整数列に上限のない木の探索に任せると終わらないことがある
+    if m.is_none() && super::UNB_CHECK.with(|f| f.get()) {
+        return Some(Mode::Bounds);
+    }
+    m
+}
+
+fn mode_env() -> Option<Mode> {
     match env_def!("ENOMOTO_MIP_HNFPRE", "bounds") {
         // 試作 `ENOMOTO_MIP_HNFCUT` ([`super::hnfcut`])・`ENOMOTO_MIP_HNFBR` ([`super::solver::hnfbr_on`]) だけなら `1` と同じ
         None | Some("") | Some("0") => (super::hnfcut::on() || super::solver::hnfbr_on()).then_some(Mode::Full),

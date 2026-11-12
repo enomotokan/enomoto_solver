@@ -74,6 +74,12 @@ pub struct MipParams {
     pub fc_submip: bool,
 }
 
+/// `ENOMOTO_MIP_UNB_FEAS` (2026-11-12 から既定、`=0` で以前の形): 根の緩和が非有界のとき、区別を求められていなくても実行可能性の
+/// 問題を解いて実行不能と非有界を分ける ([`Solver::resolve_unbounded_root`])
+pub(super) fn unb_feas_on() -> bool {
+    env_def!("ENOMOTO_MIP_UNB_FEAS", "1").is_some()
+}
+
 /// `ENOMOTO_MIP_SHIFT_HEURS` の値。既定は `root` (根だけ、2026-10-29、analysis/mergeall_20261028.md)。
 fn shift_heurs_mode() -> &'static str {
     env_str!("ENOMOTO_MIP_SHIFT_HEURS").unwrap_or("root")
@@ -21191,32 +21197,44 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// が目的値をいくらでも下げる整数解なので非有界、実行不能なら元の整数最適化も実行不能 (元の実行可能解 `x` から
     /// `x - M x^1` が切片問題の整数解になる)。切片問題の緩和は段階 B の双対実行可能な基底から解けるので下に有界。
     /// 切片問題は実行可能性だけを問うので、目的を 0 にして解く (最初の整数解で終わる)。
+    ///
+    /// `ENOMOTO_MIP_UNB_FEAS` (2026-11-12 から既定、`=0` で以前の形): 区別を求められていなくても同じことをする (整数の実行可能解が
+    /// あれば非有界、なければ実行不能)。以前は `InfeasibleOrUnbounded` で終わり、合同式などで整数解のない問題 (fuzz_slack seed 240、
+    /// `ENOMOTO_MIP_HNFPRE=0`。analysis/cand1113_20261112/fuzz.md) で HiGHS の Infeasible より弱い答えになっていた。切片問題が
+    /// 作れないとき (基底の情報がない) は、目的を 0 にした同じ問題 (実行可能性の問題) を解く: 整数の実行可能解と緩和の非有界な
+    /// 方向があれば (データは有理数なので) 整数最適化も非有界、実行可能解がなければ実行不能
     fn resolve_unbounded_root(&mut self) -> MipStatus {
-        if !self.params.distinguish || self.params.submip {
+        let feas = unb_feas_on();
+        if (!self.params.distinguish && !feas) || self.params.submip {
             return MipStatus::InfeasibleOrUnbounded;
         }
         if self.incumbent.is_some() {
             return MipStatus::Unbounded;
         }
         let p = self.p;
-        let Some((col_lo, col_up, row_lo, row_up)) = self.lp.intercept_bounds().filter(|b| b.0.len() == p.n && b.2.len() >= p.m) else {
-            return MipStatus::InfeasibleOrUnbounded;
-        };
         let mut sub = p.clone();
-        for j in 0..p.n {
-            let (mut lo, mut up) = (col_lo[j], col_up[j]);
-            if p.is_int[j] {
-                lo = (lo - 1e-9).ceil();
-                up = (up + 1e-9).floor();
+        match self.lp.intercept_bounds().filter(|b| b.0.len() == p.n && b.2.len() >= p.m) {
+            Some((col_lo, col_up, row_lo, row_up)) => {
+                for j in 0..p.n {
+                    let (mut lo, mut up) = (col_lo[j], col_up[j]);
+                    if p.is_int[j] {
+                        lo = (lo - 1e-9).ceil();
+                        up = (up + 1e-9).floor();
+                    }
+                    if lo > up {
+                        return MipStatus::Infeasible;
+                    }
+                    sub.col_lo[j] = lo;
+                    sub.col_up[j] = up;
+                }
+                sub.row_lo.copy_from_slice(&row_lo[..p.m]);
+                sub.row_up.copy_from_slice(&row_up[..p.m]);
             }
-            if lo > up {
-                return MipStatus::Infeasible;
-            }
-            sub.col_lo[j] = lo;
-            sub.col_up[j] = up;
+            // 切片問題が作れない: 以前は `InfeasibleOrUnbounded`。`ENOMOTO_MIP_UNB_FEAS` なら元の問題の実行可能性の問題を解く
+            // (目的は下で 0 にする)。`ENOMOTO_MIP_INTERCEPT_KEEP_OBJ` で目的を残すと非有界のままになるので、そのときは以前の形
+            None if feas && env_str!("ENOMOTO_MIP_INTERCEPT_KEEP_OBJ").is_none() => {}
+            None => return MipStatus::InfeasibleOrUnbounded,
         }
-        sub.row_lo.copy_from_slice(&row_lo[..p.m]);
-        sub.row_up.copy_from_slice(&row_up[..p.m]);
         // 知りたいのは整数の実行可能解があるかだけなので、目的を 0 にして実行可能性の問題として解く (最初の整数解で
         // 下界 0 = 暫定解 0 となり探索が終わる。元の目的のままだと最適性を示すまで木を探索していた)。
         // `ENOMOTO_MIP_INTERCEPT_KEEP_OBJ` なら以前どおり元の目的で解く
@@ -21225,18 +21243,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
             sub.offset = 0.0;
         }
         let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+        // 区別を求められていない (`ENOMOTO_MIP_UNB_FEAS` だけで来た) ときは、実行可能性の問題に使う時間を
+        // `ENOMOTO_T_MIP_UNB_FEAS_SECS` (既定 60 秒) までにし、結論が出なければ以前どおり `InfeasibleOrUnbounded` にする
+        // (上限のない整数列の木の探索が終わらないことがある)
+        let capped = !self.params.distinguish;
+        let remaining = if capped { remaining.min(tunable!("ENOMOTO_T_MIP_UNB_FEAS_SECS", 60.0, f64)) } else { remaining };
         let params = MipParams { time_limit: remaining, distinguish: false, restarts: 0, skip_heurs: 0, cutoff: f64::INFINITY, ..self.params };
         if self.params.verbose {
             eprintln!("MIP: root relaxation unbounded; solving the intercept problem with integrality ({:.2}s)", self.start.elapsed().as_secs_f64());
         }
         user_log!("Solving the intercept problem with integer variables to tell infeasible from unbounded");
+        let prev = super::UNB_CHECK.with(|f| f.replace(feas));
         let r = crate::log::suspend(|| super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()));
+        super::UNB_CHECK.with(|f| f.set(prev));
         if self.params.verbose {
             eprintln!("MIP: intercept problem {:?} ({:.2}s)", r.status, self.start.elapsed().as_secs_f64());
         }
         match r.status {
             _ if r.x.is_some() => MipStatus::Unbounded,
             MipStatus::Infeasible => MipStatus::Infeasible,
+            MipStatus::TimeLimit if capped => MipStatus::InfeasibleOrUnbounded,
             MipStatus::TimeLimit => MipStatus::TimeLimit,
             _ => MipStatus::InfeasibleOrUnbounded,
         }

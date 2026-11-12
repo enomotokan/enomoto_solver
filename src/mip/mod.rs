@@ -1147,7 +1147,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     let pre_submip = params.submip && !submip_highs('p');
     FEAS_FJ_SOL.with(|s| *s.borrow_mut() = None);
     FEAS_FJ_EARLY.with(|c| {
-        c.set((feas_fj_early_on() && lp_probe_secs.is_some()).then(|| {
+        c.set((feas_fj_early_on() && lp_probe_secs.is_some() && !UNB_CHECK.with(|f| f.get())).then(|| {
             let cap = if params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_FEAS_FJ_EARLY_FRAC", 0.1, f64) * params.time_limit } else { 10.0 };
             (params.threads.max(1), cap)
         }))
@@ -1946,6 +1946,12 @@ thread_local! {
 /// 残りの前処理 (LP による固定・プロービング・クリーク行の拡張・対称性) も根の LP も飛ばして最適で終える。
 /// ns1116954 (4 スレッド・60 秒) は既定で 27〜33 秒のうち、前処理の LP による固定が 11〜13 秒 (固定 0)、根の LP の解き直しが 12 秒で、
 /// FJ のスレッドは根の LP の途中で解を見つけているのに主が根の LP の終わりまで受け取らない (analysis/ns1116954_20261101.md)
+thread_local! {
+    /// 根の緩和が非有界のときの実行可能性の問題 ([`solver::Solver::resolve_unbounded_root`]) を解いている間だけ真。早めの FJ/Local-MIP
+    /// ([`feas_fj_early_on`]、時間の上限がなければ 10 秒) を飛ばす: 整数解のない問題ではそれだけ空回りしていた (slack240 で 10 秒)
+    pub(crate) static UNB_CHECK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub(crate) fn feas_fj_early_on() -> bool {
     env_def!("ENOMOTO_MIP_FEAS_FJ_EARLY", "fl").is_some()
 }
@@ -8448,6 +8454,43 @@ mod tests {
         let p = MipProblem::from_rows(lo, up, cost, 0.0, 1.0, is_int, rows, vec![-0.5, 0.0, 2.0, -inf], vec![inf, inf, inf, 19.0]);
         let r = solve_problem(&p, MipParams { rel_gap: 1e-9, ..MipParams::default() }, true);
         assert_eq!(r.status, MipStatus::Infeasible, "seed14: objective {:?}", r.objective);
+    }
+
+    /// 根の緩和が非有界で終わる問題を、区別を求められていなくても実行不能と非有界に分ける (`ENOMOTO_MIP_UNB_FEAS`、
+    /// analysis/cand1113_20261112/slack240.py、analysis/wrongans_20261112.md §5)。等式 `7.5 x1 - 4.5 x2 - 7.5 x4 - 7.5 x5 - x8 = 7` は
+    /// 整数解がない (左辺の x8 以外は 1.5 の倍数) が、緩和は x2・x9・x11 で目的が下に伸びる。前処理 (HNF の合同式) を通さずに解く。
+    /// 右辺を 6 にすると整数解 (x1 = 2、x2 = 2) があり、x11 (行に出ない、上限なし、費用 -3) で非有界
+    #[test]
+    fn unbounded_root_relaxation_is_split_into_infeasible_or_unbounded() {
+        let inf = f64::INFINITY;
+        let build = |rhs: f64| {
+            let lo = vec![0.0, -5.0, 2.0, -2.0, 0.0, 0.0, 0.0, -5.0, 0.0, -3.0, -1.0, -1.0];
+            let up = vec![1.0, inf, inf, 34.0, 5.0, 1.0, 15.0, 48.0, 1.0, inf, 20.0, inf];
+            let cost = vec![-5.0, 0.0, -4.0, 0.0, 0.0, 8.0, 0.0, 0.0, -5.0, -6.0, 9.0, -3.0];
+            let is_int = vec![true, true, true, false, true, true, true, false, true, true, true, true];
+            let rows = vec![
+                vec![(6, 4.5)],
+                vec![(1, -7.5), (3, 1.0), (5, -2.0), (7, -3.0)],
+                vec![(4, 7.5), (5, 7.5), (6, 2.0), (10, 7.5)],
+                vec![(10, -1.0)],
+                vec![(1, 7.5), (2, -4.5), (4, -7.5), (5, -7.5), (8, -1.0)],
+                vec![(0, -1.0), (1, 3.0), (3, 2.0), (5, 7.5), (9, 4.5)],
+            ];
+            MipProblem::from_rows(lo, up, cost, 0.0, 1.0, is_int, rows, vec![-5.0, -inf, -2.0, 0.0, rhs, -inf], vec![3.0, -8.0, 1.0, 7.0, rhs, 6.0])
+        };
+        let r = solve_problem(&build(7.0), MipParams { rel_gap: 1e-9, ..MipParams::default() }, false);
+        assert_eq!(r.status, MipStatus::Infeasible);
+        let r = solve_problem(&build(7.0), MipParams { rel_gap: 1e-9, ..MipParams::default() }, true);
+        assert_eq!(r.status, MipStatus::Infeasible);
+        let r = solve_problem(&build(6.0), MipParams { rel_gap: 1e-9, ..MipParams::default() }, false);
+        assert_eq!(r.status, MipStatus::Unbounded);
+        // 2 x - 2 y = 1 (x、y は上限のない整数、目的 -x): 緩和は非有界、整数解はない。木の探索だけでは終わらない形なので、
+        // 実行可能性の問題では HNF の合同式 (`ENOMOTO_MIP_HNFPRE=0` でも) で実行不能を示す
+        let p = MipProblem::from_rows(vec![0.0, 0.0], vec![inf, inf], vec![-1.0, 0.0], 0.0, 1.0, vec![true, true], vec![vec![(0, 2.0), (1, -2.0)]], vec![1.0], vec![1.0]);
+        let t = std::time::Instant::now();
+        let r = solve_problem(&p, MipParams { rel_gap: 1e-9, ..MipParams::default() }, false);
+        assert_eq!(r.status, MipStatus::Infeasible);
+        assert!(t.elapsed().as_secs_f64() < 30.0);
     }
 
     /// 幅が許容誤差以下の列の固定 ([`fix_tiny_width_columns`]): 区間の整数 (0) に固定し、整数がなければ下限。幅が許容誤差を
