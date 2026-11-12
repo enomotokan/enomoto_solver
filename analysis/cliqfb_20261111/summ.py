@@ -12,7 +12,8 @@ B = "cp"
 if "--cfg" in args:
     i = args.index("--cfg"); B = args[i + 1]; del args[i:i + 2]
 kind = args[0] if args else "p58"
-files = sorted(D.glob("p58_k*.jsonl")) if kind == "p58" else sorted(D.glob("cq600_k*.jsonl"))
+pre = {"p58": "p58_k", "p58r": "p58r_k", "cq600": "cq600_k", "cq600r": "cq600r_k"}[kind]
+files = sorted(D.glob(pre + "*.jsonl"))
 raw = [json.loads(l) for f in files for l in open(f) if l.strip()]
 
 
@@ -27,7 +28,7 @@ def decision(r):
     return "-"
 
 
-if kind == "p58":
+if kind.startswith("p58"):
     R = bl.table(bl.load(files))
     keys = sorted(k for k in R if "def" in R[k] and B in R[k])
     try:

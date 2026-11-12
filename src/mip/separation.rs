@@ -740,7 +740,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `probe_s` (試作 `probe` の余分を減らす形): (1) 始めの LP 解で破れるクリークカットがなければ比べない (使わない)。(2) 「あり」の側を
         // 先に回し、選ばれたクリークカットが 0 本なら「なし」の側は同じ道筋になるので回さない (その終わりの状態から使わずに続ける)。
         // 58 問の根だけの回では、既定でクリークカットの破れが 0 本の 42 問でも比べを回し、nw04 5.8 秒・mzzv42z 4.7 秒を使っていた
-        let skip = clique_cuts_mode() == Some("probe_s");
+        let skip = matches!(clique_cuts_mode(), Some("probe_s") | Some("probe_r"));
+        // `probe_r` (`probe_s` に足す形): 使わないと決めたら、どちらの側の状態も捨てて比べの前の状態のまま続け、負けた側のカットもプールに
+        // 入れない (既定のループと同じ道筋にする。比べの時間は呼び出し側で時間の上限の起点をずらす)。roll3000 は `probe_s` で使わない判定なのに、
+        // 比べの「なし」の側の状態とプールに入れた「あり」の側のカットで道筋が変わり、種 1〜3 とも 23〜33 秒 -> 49〜60 秒に遅くなった
+        let rest = clique_cuts_mode() == Some("probe_r");
         if skip && self.clique_graph_get().separate(&self.lp.col_values(), 1).is_empty() {
             self.clique_auto = Some(false);
             if self.params.verbose {
@@ -763,7 +767,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if skip && nclq == 0 {
             PROBE_NO_FLAT_STOP.with(|c| c.set(false));
             let mut nr = 0;
-            if let Some(e) = e1 {
+            if let Some(e) = e1.filter(|_| !rest) {
                 nr = e.rounds;
                 self.probe_restore(e);
             }
@@ -797,6 +801,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let by_frac = frac_r > 0.0 && flat && (f1 as f64) <= frac_r * f0 as f64 && f1 < f0;
         let on = by_gain || by_frac;
         let (win, lose) = if on { (e1, e0) } else { (e0, e1) };
+        let (win, lose) = if rest && !on { (None, None) } else { (win, lose) };
         if let Some(e) = lose {
             for (c, _, r) in &e.rows {
                 self.add_to_pool(c, *r);
@@ -1240,7 +1245,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         // 試作 `probe` (課題 CLIQFB、analysis/cliqfb_20261111.md): ループの始めの比べで判定する ([`Self::clique_probe`])。再スタートの後は最初の判定を引き継ぐ
-        let mut clique_probe_pending = matches!(clique_cuts_mode(), Some("probe") | Some("probe_s")) && self.clique_auto.is_none() && !self.params.submip;
+        let mut clique_probe_pending = matches!(clique_cuts_mode(), Some("probe") | Some("probe_s") | Some("probe_r")) && self.clique_auto.is_none() && !self.params.submip;
         if clique_probe_pending && self.params.restarts > 0 {
             if let Some(v) = CLIQUE_AUTO_FIRST.with(|c| c.get()) {
                 self.clique_auto = Some(v);
@@ -2023,7 +2028,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // あり・なしで k ラウンドずつ回して比べ、勝った側の終わりの状態からループを続ける ([`Self::clique_probe`])
             if round == 0 && clique_probe_pending && job.is_none() && self.snap.is_none() && self.cut_cont.is_none() && !self.time_up() {
                 clique_probe_pending = false;
+                let c0 = super::cap_clock();
                 let (on, nr) = self.clique_probe();
+                // `probe_r` で使わない (比べの状態を捨てた) ときは、時間の上限の起点を比べにかかった時間だけ後ろにずらす (比べがなかったのと同じ判定)
+                if !on && nr == 0 && clique_cuts_mode() == Some("probe_r") {
+                    cap_base += super::cap_clock() - c0;
+                }
                 if self.params.restarts == 0 {
                     CLIQUE_AUTO_FIRST.with(|c| c.set(Some(on)));
                 }
@@ -5496,7 +5506,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::zerohalf::zh_trial_used(light) || super::cutmix::zh_on()) && zh_where && self.sep_src_on(sepprof::SRC_ZH, light);
         // clique カットの使い方は下の説明を参照
         let clique_on = clique_cuts_mode().is_some_and(|m| {
-            let probe = m == "probe" || m == "probe_s";
+            let probe = m == "probe" || m == "probe_s" || m == "probe_r";
             let judged = m == "auto" || m == "fallback" || probe;
             !(light && (m == "root" || ((m == "fallback" || probe) && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && (!judged || self.clique_auto == Some(true))
         });
