@@ -1181,6 +1181,11 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             int_census(prob, &prob.col_lo, &prob.col_up, None, "b_probing");
         }
     }
+    if let (Some(_), Some(Presolved::Reduced { prob, .. })) = (env_str!("ENOMOTO_MIP_DEBUG_CLQACT"), &presolved) {
+        if !params.submip && params.restarts == 0 {
+            clqact_census(prob, "b_probing");
+        }
+    }
     if let (Some(path), Some(Presolved::Reduced { prob, .. })) = (env_str!("ENOMOTO_MIP_DEBUG_PRESOLVE_COLS"), &presolved) {
         if !params.submip && params.restarts == 0 && prob.n == p.n {
             use std::io::Write;
@@ -5056,6 +5061,158 @@ pub(crate) fn int_census(p: &MipProblem, lo: &[f64], up: &[f64], base: Option<(&
         cnt(&prd),
         cnt(&prf),
         cnt(&prdf)
+    );
+}
+
+/// 診断 `ENOMOTO_MIP_DEBUG_CLQACT` (CLQACT の数え上げ、analysis/clqprb_20261112.md §10): 前処理の後の問題と含意 (`conflict_edges`) で
+/// 衝突グラフを作り、行ごと・向きごと (`a x <= b` の形) に 0-1 の項の文字を寄与の大きい順に貪欲にクリークに分け、クリークごとの寄与を
+/// 「最大の 1 つ」にしたとき、(1) 最大の活動量が下がる行、(2) それで冗長になる行、(3) 係数の締め付け (0-1 列 x_k を 0 にしたとき
+/// 行が冗長になる) が新しく効く係数、(4) 最小の活動量が上がる行、(5) それで境界が締まる列 (0-1 列の固定を含む) を数え、
+/// `CLQACT {json}` の 1 行を出す (求解は変えない)。文字の数が `ENOMOTO_T_MIP_CLQACT_MAXLITS` (既定 1000) を超える行は見ない
+pub(crate) fn clqact_census(prob: &MipProblem, tag: &str) {
+    let t0 = std::time::Instant::now();
+    let n = prob.n;
+    let (lo, up) = (&prob.col_lo, &prob.col_up);
+    let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && lo[j] == 0.0 && up[j] == 1.0).collect();
+    let g = clique::CliqueGraph::build_with(n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, lo, up, &prob.conflict_edges);
+    let maxlits = tunable!("ENOMOTO_T_MIP_CLQACT_MAXLITS", 1000usize, usize);
+    // 文字と重み (正) の列を貪欲にクリークに分け、(クリークごとの最大の和, 文字ごとの「その文字を除いたときの和の減り」) を返す
+    // `own`: この行 (の同じ向き) 自身が 2 文字の衝突を導く余裕 (重みの和がこれを超える組は行そのものから出る組なので使わない。
+    // 使うと集合詰め込みの行が自分の辺で冗長に見える)
+    let partition = |lits: &mut Vec<(f64, u32)>, own: f64| -> (f64, Vec<f64>) {
+        lits.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut cls: Vec<Vec<usize>> = Vec::new();
+        let mut of = vec![0usize; lits.len()];
+        for (q, &(w, l)) in lits.iter().enumerate() {
+            let mut put = None;
+            for (c, cl) in cls.iter().enumerate().take(64) {
+                if cl.iter().all(|&o| w + lits[o].0 <= own && g.adjacent(l, lits[o].1)) {
+                    put = Some(c);
+                    break;
+                }
+            }
+            match put {
+                Some(c) => {
+                    cls[c].push(q);
+                    of[q] = c;
+                }
+                None => {
+                    of[q] = cls.len();
+                    cls.push(vec![q]);
+                }
+            }
+        }
+        // 重みの大きい順に入れたので、クリークの先頭が最大、2 番目が次
+        let total: f64 = cls.iter().map(|cl| lits[cl[0]].0).sum();
+        let dec: Vec<f64> = (0..lits.len())
+            .map(|q| {
+                let cl = &cls[of[q]];
+                if cl[0] == q { lits[q].0 - cl.get(1).map_or(0.0, |&o| lits[o].0) } else { 0.0 }
+            })
+            .collect();
+        (total, dec)
+    };
+    let (mut rows_max, mut rows_red, mut coefs, mut rows_min, mut bnd_cont, mut bnd_int, mut fix_bin, mut skipped) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut seen_red = vec![false; prob.m];
+    for (i, r) in prob.rows.iter().enumerate() {
+        for (sign, b, b_other) in [(1.0, prob.row_up[i], -prob.row_lo[i]), (-1.0, -prob.row_lo[i], prob.row_up[i])] {
+            if !b.is_finite() {
+                continue;
+            }
+            let tol = 1e-9 * (1.0 + b.abs());
+            // 最大の活動量: 0-1 の項は「寄与が増える文字」(a > 0 なら x、a < 0 なら 1 - x) と増分 |a|、ほかの列は端
+            let (mut base_max, mut base_min, mut oth_span, mut fin) = (0.0, 0.0, 0.0, true);
+            let (mut up_lits, mut dn_lits): (Vec<(f64, u32)>, Vec<(f64, u32)>) = (Vec::new(), Vec::new());
+            let mut other: Vec<(usize, f64)> = Vec::new();
+            for &(j, a0) in r {
+                let a = sign * a0;
+                if lo[j] == up[j] {
+                    base_max += a * lo[j];
+                    base_min += a * lo[j];
+                } else if binary[j] {
+                    if a > 0.0 {
+                        up_lits.push((a, 2 * j as u32));
+                        dn_lits.push((a, 2 * j as u32 + 1));
+                        base_min += a;
+                    } else {
+                        up_lits.push((-a, 2 * j as u32 + 1));
+                        dn_lits.push((-a, 2 * j as u32));
+                        base_max += a;
+                    }
+                } else {
+                    let (mx, mn) = if a > 0.0 { (a * up[j], a * lo[j]) } else { (a * lo[j], a * up[j]) };
+                    if !mx.is_finite() || !mn.is_finite() {
+                        fin = false;
+                    }
+                    base_max += mx;
+                    base_min += mn;
+                    oth_span += mx - mn;
+                    other.push((j, a));
+                }
+            }
+            if !fin || up_lits.len() < 2 {
+                continue;
+            }
+            if up_lits.len() > maxlits {
+                skipped += 1;
+                continue;
+            }
+            let old_up: f64 = up_lits.iter().map(|t| t.0).sum();
+            // この向きで行自身が導く組: 文字を全部偽・ほかの列を最小の端にした活動量 (base_max - oth_span) からの余裕を重みの和が超える組
+            let own_up = b - (base_max - oth_span) + tol;
+            let (new_up, dec_up) = partition(&mut up_lits, own_up);
+            let (max_old, max_new) = (base_max + old_up, base_max + new_up);
+            if max_new < max_old - tol {
+                rows_max += 1;
+                if max_new <= b + tol && max_old > b + tol && !seen_red[i] {
+                    rows_red += 1;
+                    seen_red[i] = true;
+                }
+                // 係数の締め付け: 文字 l を偽にしたときの最大の活動量が b を下回れば、l の係数を減らせる (新しく効くものだけ)
+                if max_new > b + tol {
+                    for (q, &(w, _)) in up_lits.iter().enumerate() {
+                        let old_wo = max_old - w;
+                        let new_wo = max_new - dec_up[q];
+                        if new_wo < b - tol && old_wo >= b - tol {
+                            coefs += 1;
+                        }
+                    }
+                }
+            }
+            // 最小の活動量: 0-1 の項は「寄与が減る文字」と減り |a| (base_min は全部が増える側の値)
+            let old_dn: f64 = dn_lits.iter().map(|t| t.0).sum();
+            // 減る側の文字の組は、逆の向き (-a x <= b_other) から出うる。その向きの最小の活動量は -(この向きの最大の活動量)
+            let own_dn = if b_other.is_finite() { b_other + base_min + oth_span + tol } else { f64::INFINITY };
+            let (new_dn, dec_dn) = partition(&mut dn_lits, own_dn);
+            let (min_old, min_new) = (base_min - old_dn, base_min - new_dn);
+            if min_new > min_old + tol {
+                rows_min += 1;
+                for &(j, a) in &other {
+                    // a x_j <= b - (min - a の端)
+                    let cmin = if a > 0.0 { a * lo[j] } else { a * up[j] };
+                    let (bo, bn) = ((b - (min_old - cmin)) / a, (b - (min_new - cmin)) / a);
+                    let improved = if a > 0.0 { bn < bo - 1e-9 * (1.0 + bo.abs()) && bn < up[j] - 1e-9 * (1.0 + up[j].abs()) } else { bn > bo + 1e-9 * (1.0 + bo.abs()) && bn > lo[j] + 1e-9 * (1.0 + lo[j].abs()) };
+                    if improved {
+                        if prob.is_int[j] { bnd_int += 1 } else { bnd_cont += 1 }
+                    }
+                }
+                // 0-1 列: 文字 l を真 (寄与 +w) にすると最小の活動量が b を超えるなら固定できる (新しく効くものだけ)
+                for (q, &(w, _)) in dn_lits.iter().enumerate() {
+                    // dn_lits の文字 l の補を真にすると寄与が w 増える: 最小の活動量は (l を除いた最小) + w
+                    let old_with = min_old + w;
+                    let new_with = min_new + dec_dn[q];
+                    if new_with > b + tol && old_with <= b + tol {
+                        fix_bin += 1;
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "CLQACT {{\"at\":\"{tag}\",\"m\":{},\"edges\":{},\"rows_max_down\":{rows_max},\"rows_redundant\":{rows_red},\"coefs_tighten\":{coefs},\"rows_min_up\":{rows_min},\"bounds_cont\":{bnd_cont},\"bounds_int\":{bnd_int},\"fix_bin\":{fix_bin},\"rows_skipped\":{skipped},\"secs\":{:.2}}}",
+        prob.m,
+        g.num_edges(),
+        t0.elapsed().as_secs_f64()
     );
 }
 

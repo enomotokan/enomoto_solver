@@ -9,7 +9,7 @@ WT = D.parents[1]
 sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
 lst, k, nk = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-cfg = sys.argv[4] if len(sys.argv) > 4 else "def"
+cfg = sys.argv[4] if len(sys.argv) > 4 else "def"   # act = CLQPRB=1 で CLQACT の数え上げ (前処理の後の CLQACT 行が出たら止める)
 probs = [l.strip() for l in open(D / lst) if l.strip()][k::nk]
 out = D / f"census_{Path(lst).stem}_{cfg}_s{k}.jsonl"
 done = {json.loads(l)["problem"] for l in open(out)} if out.exists() else set()
@@ -21,7 +21,9 @@ for p in probs:
         with open(out, "a") as f: f.write(json.dumps({"problem": p, "error": str(e)[:200]}) + "\n")
         continue
     env = {key: v for key, v in os.environ.items() if not key.startswith("ENOMOTO_")}
-    env.update(ENOMOTO_MIP_THREADS="4", ENOMOTO_T_MIP_SEED="1", ENOMOTO_MIP_LOG="1", ENOMOTO_MIP_DEBUG_INTCENSUS="1")
+    env.update(ENOMOTO_MIP_THREADS="4", ENOMOTO_T_MIP_SEED="1", ENOMOTO_MIP_LOG="1")
+    if cfg == "act": env.update(ENOMOTO_MIP_CLQPRB="1", ENOMOTO_MIP_DEBUG_CLQACT="1")
+    else: env["ENOMOTO_MIP_DEBUG_INTCENSUS"] = "1"
     if cfg == "clq": env["ENOMOTO_MIP_CLQPRB"] = "1"
     t0 = time.time()
     pr = subprocess.Popen([sys.executable, "-u", str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", str(TL), "--threads", "4"],
@@ -32,6 +34,8 @@ for p in probs:
         if line.startswith("INTCENSUS "):
             c = json.loads(line[10:]); c["t"] = round(time.time() - t0, 1); res["census"].append(c)
             if c["at"].startswith("c_root"): break
+        elif line.startswith("CLQACT "):
+            c = json.loads(line[7:]); c["t"] = round(time.time() - t0, 1); res["census"].append(c); break
         elif line.startswith("{"):
             try: res["final"] = json.loads(line)
             except Exception: pass  # noqa: BLE001
