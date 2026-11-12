@@ -11,6 +11,8 @@ CFGS = {
     "def": {},
     # 試作 u: interior rounding の内点法の双対のラグランジュ下界で被約費用の固定 (src/mip/fixmore.rs)
     "u": {"ENOMOTO_MIP_FIXMORE": "u"},
+    # 診断 c: u と同じ内点法の双対を作るが表に足さない (解き方は既定と同じはず)
+    "c": {"ENOMOTO_MIP_FIXMORE": "c"},
 }
 cfg, p, tl, rep, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 OUT = D / out

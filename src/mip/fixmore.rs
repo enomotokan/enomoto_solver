@@ -11,6 +11,7 @@
 //!   `MipProblem::conflict_edges`) (3) それに打ち切り値つきの目的関数の行、で伝播した閉包の固定の数を 1 行出す。
 //! - `p` 閉包の結果を大域的な範囲に入れる (整数列と目的関数の列だけ)。`i` で含意を、`o` で目的関数の行を伝播に入れる。
 //!
+//! - `c` (診断) `u` と同じ双対を作るが表に足さず、締まる列の数だけ出す。
 //! - `u` 根のヒューリスティクス「interior rounding」(`Solver::interior_rounding`) が解く費用つきの内点法の点の双対 `y` から、
 //!   ラグランジュ下界 `L(y)` と被約費用 `d = c - A^T y` を作り、被約費用による固定の表 (`Solver::t4_rc_extra`) に足す
 //!   (IPMRC の `u` と同じ形。IPMRC は根の LP の同時実行で内点法が走ったときだけ効き、根の LP を基底から温め直す問題
@@ -198,7 +199,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `u`: 内点法の双対のラグランジュ下界 `l` (元の単位、定数項なし) と被約費用 `d` を被約費用による固定の表に足して締める。
     pub(super) fn fixmore_ipm_rc(&mut self, l: f64, d: Vec<f64>) {
-        if self.params.submip || self.snap.is_some() || !flag('u') {
+        if self.params.submip || self.snap.is_some() || !(flag('u') || flag('c')) {
             return;
         }
         let p = self.p;
@@ -229,6 +230,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let fixed0 = self.newly_fixed_ints();
         let nv = v.len();
+        // `c` (診断、解き方は変えない): 足さずに、今の打ち切り値で固定できる列の数だけ出す
+        if !flag('u') {
+            let gap = self.prune_limit() - lb;
+            let n = if gap.is_finite() && gap >= 0.0 {
+                v.iter().filter(|&&(j, lo, d, b)| if lo { b + gap / d < self.dom.global_up[j] - 0.5 } else { b - gap / (-d) > self.dom.global_lo[j] + 0.5 }).count()
+            } else {
+                0
+            };
+            if self.params.verbose {
+                eprintln!("MIP: FIXMORE c: interior-point bound {lb:.10e} (LP {z:.10e}), {nv} columns with reduced costs, {n} would be tightened");
+            }
+            return;
+        }
         self.t4_rc_extra.push((lb, v));
         // 暫定解がもうあれば、すぐ締める (根の被約費用の記録がまだなら次の呼び出しで締まる)
         if self.root_redcost.is_some() {
