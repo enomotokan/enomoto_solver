@@ -344,6 +344,9 @@ pub struct InteriorPoint {
     /// クロスオーバーの押し出しで作った (基底 (標準形の列番号), 頂点 (主実行可能でなければ `None`))。
     /// 基底は双対実行可能とは限らない。
     pub vertex: Option<(Vec<usize>, Option<Vec<f64>>)>,
+    /// 試作 `ENOMOTO_MIP_FIXMORE` の `u`: 費用つきの点の双対 `y` のラグランジュ下界 `L(y)` (元の単位、MIP の定数項は含まない) と
+    /// 構造列の被約費用 `c - A^T y` (`lagrange_std`)。どの `y` でも正しい下界。
+    pub lag: Option<(f64, Vec<f64>)>,
 }
 
 /// 状態の保存 (強分岐用)。
@@ -1265,7 +1268,9 @@ impl TwoStageLp {
         let to_orig = |z: &[f64]| -> Vec<f64> { (0..n).map(|j| z[j] + self.shift[j]).collect() };
         let x = to_orig(&r.x);
         let vertex = r.vertex.map(|(b, xv)| (b, xv.map(|v| to_orig(&v))));
-        Some(InteriorPoint { x, vertex })
+        // 標準形の目的は平行移動した列 `x' = x - shift` のもの: 元の単位は `c·shift` を足す (`xolazy_duals` と同じ)
+        let lag = r.y.as_deref().and_then(|y| lagrange_std(&self.std, n, y)).map(|(l, d)| (l + (0..n).map(|j| self.std.c[j] * self.shift[j]).sum::<f64>(), d));
+        Some(InteriorPoint { x, vertex, lag })
     }
 
     /// 基底を標準形の列番号 (長さ m) で直接与える (特異なら修復する)。`x` を渡すと、次の求解の非基底列の

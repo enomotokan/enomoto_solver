@@ -11,6 +11,13 @@
 //!   `MipProblem::conflict_edges`) (3) それに打ち切り値つきの目的関数の行、で伝播した閉包の固定の数を 1 行出す。
 //! - `p` 閉包の結果を大域的な範囲に入れる (整数列と目的関数の列だけ)。`i` で含意を、`o` で目的関数の行を伝播に入れる。
 //!
+//! - `u` 根のヒューリスティクス「interior rounding」(`Solver::interior_rounding`) が解く費用つきの内点法の点の双対 `y` から、
+//!   ラグランジュ下界 `L(y)` と被約費用 `d = c - A^T y` を作り、被約費用による固定の表 (`Solver::t4_rc_extra`) に足す
+//!   (IPMRC の `u` と同じ形。IPMRC は根の LP の同時実行で内点法が走ったときだけ効き、根の LP を基底から温め直す問題
+//!   (satellites2-60-fs) では効かない)。単体法の頂点の双対は退化して被約費用が 0 になる列 (satellites2 で LP の実行可能領域
+//!   全体で 0 の 0-1 列 1 万本) も、内点法の双対 (厳密な相補性に近い) では大きな被約費用を持つ。
+//!   正しさ: `L(y)` はどの `y` でも LP の下界 (`lagrange_std`、IPMRC の記録)。確かめの LP は要らない。
+//!
 //! 正しさ: 行と含意の伝播は全ての実行可能解で成り立つ推論。目的関数の行 `c x <= U` は打ち切り値より良い解の推論で、
 //! 被約費用による固定と同じ扱い (暫定解を持ったまま、より良い解だけを探す)。
 
@@ -186,6 +193,54 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     t0.elapsed().as_secs_f64()
                 );
             }
+        }
+    }
+
+    /// `u`: 内点法の双対のラグランジュ下界 `l` (元の単位、定数項なし) と被約費用 `d` を被約費用による固定の表に足して締める。
+    pub(super) fn fixmore_ipm_rc(&mut self, l: f64, d: Vec<f64>) {
+        if self.params.submip || self.snap.is_some() || !flag('u') {
+            return;
+        }
+        let p = self.p;
+        if d.len() != p.n || !l.is_finite() {
+            return;
+        }
+        let lb = l + p.offset;
+        let z = self.lp.objective() + p.offset;
+        // あり得ないが、LP の値を越える下界は使わない (`ipmrc_store` と同じ)
+        if lb > z + 1e-6 * (1.0 + z.abs()) {
+            if self.params.verbose {
+                eprintln!("MIP: FIXMORE u: the interior-point bound {lb:.10e} exceeds the LP value {z:.10e}; not used");
+            }
+            return;
+        }
+        let tol = tunable!("ENOMOTO_T_MIP_FIXMORE_RC_TOL", 1e-7, f64);
+        let mut v = Vec::new();
+        for j in 0..p.n {
+            if !p.is_int[j] || self.dom.global_lo[j] >= self.dom.global_up[j] {
+                continue;
+            }
+            let dj = d[j];
+            if dj > tol && self.dom.global_lo[j].is_finite() {
+                v.push((j, true, dj, self.dom.global_lo[j]));
+            } else if dj < -tol && self.dom.global_up[j].is_finite() {
+                v.push((j, false, dj, self.dom.global_up[j]));
+            }
+        }
+        let fixed0 = self.newly_fixed_ints();
+        let nv = v.len();
+        self.t4_rc_extra.push((lb, v));
+        // 暫定解がもうあれば、すぐ締める (根の被約費用の記録がまだなら次の呼び出しで締まる)
+        if self.root_redcost.is_some() {
+            self.root_redcost_fixing();
+        }
+        if self.params.verbose {
+            eprintln!(
+                "MIP: FIXMORE u: interior-point bound {lb:.10e} (LP {z:.10e}, cutoff {:.10e}), {nv} columns with reduced costs, newly fixed {} -> {}",
+                self.prune_limit(),
+                fixed0,
+                self.newly_fixed_ints()
+            );
         }
     }
 }

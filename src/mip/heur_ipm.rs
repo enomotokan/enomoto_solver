@@ -55,7 +55,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let t0 = Instant::now();
         if mode != 1 {
             match self.lp.interior_point(false, env_str!("ENOMOTO_MIP_IPM_NO_VERTEX").is_none(), deadline) {
-                Some(ip) => {
+                Some(mut ip) => {
+                    // 試作 `ENOMOTO_MIP_FIXMORE` の `u` (src/mip/fixmore.rs): この点の双対のラグランジュ下界と被約費用で固定する
+                    if let Some((l, d)) = ip.lag.take() {
+                        self.fixmore_ipm_rc(l, d);
+                    }
                     centers.push(("optimal face", ip.x));
                     if let Some((b, Some(xv))) = ip.vertex {
                         vertex = Some((b, xv));

@@ -671,6 +671,8 @@ pub(crate) struct InteriorResult {
     /// クロスオーバーの押し出しで作った (基底 (列番号、長さ m), 頂点 (全列、主実行可能でなければ `None`))。
     /// 基底は双対実行可能とは限らない (仕上げの単体法を走らせていない) ので、最適基底として扱わないこと。
     pub vertex: Option<(Vec<usize>, Option<Vec<f64>>)>,
+    /// 費用つきのときの内点法の双対 (標準形の行、近似)。試作 `ENOMOTO_MIP_FIXMORE` の `u` (src/mip/fixmore.rs) が使う。
+    pub y: Option<Vec<f64>>,
 }
 
 /// `std` を内点法で解き (`zero_cost` なら費用 0、つまり実行可能領域の中心付近の点)、`want_vertex` なら
@@ -701,7 +703,9 @@ pub(crate) fn interior_point(std: &StdForm, zero_cost: bool, want_vertex: bool) 
         let _ = solve_ipm_crossover_with(std, &XoOptions { given_point: Some((&x, &ipm.y, secs)), vertex_only: true, ..Default::default() });
         vertex = XO_VERTEX.with(|v| v.borrow_mut().take());
     }
-    Some(InteriorResult { x, vertex })
+    // 試作 `ENOMOTO_MIP_FIXMORE` の `u` (src/mip/fixmore.rs): 費用つきの点の双対 (行は標準形のまま。固定列を除いても行は同じ)
+    let y = (!zero_cost && ipm.y.len() == std.n_rows).then(|| ipm.y.clone());
+    Some(InteriorResult { x, vertex, y })
 }
 
 /// 費用 0 の実行可能性問題を内点法で解く (`y = 0` が双対実行可能なので、結論は「実行可能」か「双対の発散
