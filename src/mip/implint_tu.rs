@@ -547,6 +547,8 @@ pub fn debug_count(p: &MipProblem, stop: bool) {
         nh,
         (0..p.n).filter(|&j| p.cost[j] != 0.0 && !h[j]).count()
     );
+    // 課題 OBJINT の `c`: 整数部の刻みと連続部の幅 (前処理の直後の境界)
+    eprintln!("OBJGAP pre {:?}", p.objective_split_gap(&h, &p.col_lo, &p.col_up));
     eprintln!(
         "IMPLINTCOUNT n {} m {} cont {} rowrule {} tu {} tu2nob {} tu2 {} tu_not_in_tu2 {} costed_cont {} costed_cont_left_tu2 {} step0 {:?} step_tu2 {:?} stats {:?} ({:.3}s)",
         p.n,

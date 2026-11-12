@@ -444,28 +444,59 @@ impl MipProblem {
                 coefs.push(self.cost[j].abs());
             }
         }
-        if coefs.is_empty() {
-            return None;
-        }
-        // 係数を最小値で割ったものが整数に近ければ、最小値を刻みとし、その gcd を取る。
-        let minc = coefs.iter().cloned().fold(f64::INFINITY, f64::min);
-        // 有理数の刻みを小さな分母で探す (1, 2, ..., 1000 倍して整数になるか)。
-        for mult in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 100.0, 1000.0] {
-            let scaled: Vec<f64> = coefs.iter().map(|&c| c * mult).collect();
-            if scaled.iter().all(|&s| (s - s.round()).abs() <= 1e-9 * s.max(1.0)) {
-                let mut g = 0i64;
-                for s in &scaled {
-                    let v = s.round() as i64;
-                    g = gcd(g, v);
+        step_of_coefs(&coefs)
+    }
+
+    /// 課題 OBJINT の `c` (連続列の混ざった目的の刻み、analysis/objint_20261112.md): 費用のある列を、整数部 (`int_mask` の列と、境界
+    /// `(lo, up)` で整数値に固定された列) と連続部 (それ以外) に分ける。整数部に刻み `s` があり、連続部の列が全部有界なら
+    /// `(s, m, M, 連続部の列の数)` を返す (`m`・`M` は連続部 `Σ c_j x_j` の最小・最大)。目的値は `offset + k s + [m, M]` にしか乗らない。
+    /// 整数部の費用がなければ `None` (連続部だけの目的は刻みがない)
+    pub fn objective_split_gap(&self, int_mask: &[bool], lo: &[f64], up: &[f64]) -> Option<(f64, f64, f64, usize)> {
+        let (mut coefs, mut m, mut mm, mut nc) = (Vec::new(), 0.0f64, 0.0f64, 0usize);
+        for j in 0..self.n {
+            let c = self.cost[j];
+            if c == 0.0 {
+                continue;
+            }
+            if int_mask[j] || (lo[j] == up[j] && lo[j] == lo[j].round()) {
+                coefs.push(c.abs());
+            } else {
+                if !lo[j].is_finite() || !up[j].is_finite() {
+                    return None;
                 }
-                if g > 0 {
-                    return Some(g as f64 / mult);
-                }
+                let (a, b) = (c * lo[j], c * up[j]);
+                m += a.min(b);
+                mm += a.max(b);
+                nc += 1;
             }
         }
-        let _ = minc;
-        None
+        step_of_coefs(&coefs).map(|s| (s, m, mm, nc))
     }
+}
+
+/// 係数 (絶対値) の共通の刻み: 1〜1000 倍 (11 通り) して全部整数になれば、その gcd を倍率で割ったもの。
+fn step_of_coefs(coefs: &[f64]) -> Option<f64> {
+    if coefs.is_empty() {
+        return None;
+    }
+    // 係数を最小値で割ったものが整数に近ければ、最小値を刻みとし、その gcd を取る。
+    let minc = coefs.iter().cloned().fold(f64::INFINITY, f64::min);
+    // 有理数の刻みを小さな分母で探す (1, 2, ..., 1000 倍して整数になるか)。
+    for mult in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 100.0, 1000.0] {
+        let scaled: Vec<f64> = coefs.iter().map(|&c| c * mult).collect();
+        if scaled.iter().all(|&s| (s - s.round()).abs() <= 1e-9 * s.max(1.0)) {
+            let mut g = 0i64;
+            for s in &scaled {
+                let v = s.round() as i64;
+                g = gcd(g, v);
+            }
+            if g > 0 {
+                return Some(g as f64 / mult);
+            }
+        }
+    }
+    let _ = minc;
+    None
 }
 
 fn gcd(a: i64, b: i64) -> i64 {

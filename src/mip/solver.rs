@@ -20938,6 +20938,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if (self.params.verbose || end_diag()) && !self.params.submip && self.snap.is_none() {
             eprintln!("MIP: finish start {status:?} ({:.2}s)", self.start.elapsed().as_secs_f64());
         }
+        // 診断 `ENOMOTO_MIP_DEBUG_OBJGAP` (課題 OBJINT の `c`、analysis/objint_20261112.md): 終わりの大域的な境界で、整数部の刻みと
+        // 連続部の幅 ([`MipProblem::objective_split_gap`]) を出す (前処理の直後の値は `ENOMOTO_MIP_DEBUG_IMPLINTCOUNT` の行)
+        if env_str!("ENOMOTO_MIP_DEBUG_OBJGAP").is_some() && !self.params.submip && self.snap.is_none() {
+            let h = self.p.implied_integers_ho2();
+            eprintln!(
+                "OBJGAP end {:?} (restarts {}, {:.2}s)",
+                self.p.objective_split_gap(&h, &self.dom.global_lo, &self.dom.global_up),
+                self.params.restarts,
+                self.start.elapsed().as_secs_f64()
+            );
+        }
         // `ENOMOTO_MIP_SYM_ORIG_CUT`: 打ち切り値にだけ使った解が暫定解より良ければ、それを答えにする (元の問題で実行可能)
         if let Some((zo, xo)) = self.orig_best.take() {
             if self.incumbent.as_ref().is_none_or(|(z, _)| zo < *z) {
