@@ -4,5 +4,7 @@ clq = このセッションの試作 ENOMOTO_MIP_CLQPRB=1 (プロービングで
 CFGS = {
     "def": {},
     "clq": {"ENOMOTO_MIP_CLQPRB": "1"},
+    # clqd = clq + 何も固定・締め付けできなければ増やした含意を捨てる (air03 の対策の試し)
+    "clqd": {"ENOMOTO_MIP_CLQPRB": "d"},
 }
 LOGENV = {"ENOMOTO_MIP_LOG": "1"}

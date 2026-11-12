@@ -5066,6 +5066,11 @@ pub(crate) fn clqprb_on() -> bool {
     env_str!("ENOMOTO_MIP_CLQPRB").is_some_and(|v| v != "0")
 }
 
+/// [`clqprb_on`] の値に文字 `c` を含むか (`d`: 何も固定できなければ増やした含意を捨てる)。
+pub(crate) fn clqprb_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_CLQPRB").is_some_and(|v| v.contains(c))
+}
+
 /// 試作 `ENOMOTO_MIP_PREPAR` (既定では使わない。analysis/prepar_20261107.md): 前処理の並列化。値の文字で選ぶ
 /// (`p`: 含意を集めるプロービング ([`probe`]) の候補を投機的に並べる、`e`: プロービングの同値な組の巡を並べる、
 /// `l`: LP による固定 ([`lp_probe`]) の 1 巡の列の試しを並べる)
@@ -5733,6 +5738,18 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
         if verbose {
             eprintln!("MIP: probing: equivalence pass with implications: {found2} pairs found ({:.2}s){}", tq.elapsed().as_secs_f64(), if equiv2 { if PROBE_EQUIV_FORCE.with(|f| f.get()) { ", used" } else { ", not used" } } else { "" });
+        }
+    }
+    // `ENOMOTO_MIP_CLQPRB=d` (試作、`clqprb_has('d')`): このプロービングで何も固定・締め付けられなければ、広げた上限で増えた含意を捨てて
+    // 既定の上限 (非零数の 10 倍 + 1 万本) に戻す (air03 は何も固定できないのに含意が 92 万 → 267 万本に増え、後段で 1.2〜1.5 倍遅くなった)。
+    // 残すのは集めた順の先頭 (重複を除いて詰めた後は列の番号順) で、既定と同じ組とは限らない
+    if clqprb && clqprb_has('d') && fixed == 0 && tightened == 0 {
+        let cap0 = 10 * nnz + 10_000;
+        if edges.len() > cap0 {
+            if verbose {
+                eprintln!("MIP: probing: nothing fixed; implications {} -> {cap0} (CLQPRB=d)", edges.len());
+            }
+            edges.truncate(cap0);
         }
     }
     // 固定した列を含む組は捨てる (固定後は意味がない)
