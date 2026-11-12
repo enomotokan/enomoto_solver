@@ -29,4 +29,6 @@ CFGS = {
     "ns250s": {"ENOMOTO_T_MIP_SUBMIP_NOSOL_CAP": "250", "ENOMOTO_MIP_SUBMIP_NOSOL_CAP_SERIAL": "1"},
     # 面の LP の適応 (analysis/sepspeed_20261023.md: 10teams 27→5 秒、単独では未測定)
     "face": {"ENOMOTO_MIP_FACE_ADAPT": "1"},
+    # 既定どうしの比べ (A/A、2026-11-12 に足した): 種 3 で候補がそろって速く出たので、def の種 3 の 1 回が運悪く遅かったかを見る。shards_Z.json だけで回す
+    "defz": {},
 }
