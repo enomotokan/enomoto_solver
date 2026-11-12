@@ -19,7 +19,7 @@ for mps in sys.argv[4:]:
     try:
         r = subprocess.run([sys.executable, str(WT / "scripts" / "run_miplib_benchmark.py"), "--worker-ours", mps, "--time-limit", "10", "--threads", "1"],
                            env=env, capture_output=True, text=True, timeout=900)
-        lines = [l for l in r.stderr.splitlines() if l.startswith("MIP_FOLD")]
+        lines = [l for l in r.stderr.splitlines() if l.startswith(("MIP_FOLD", "IMPLDIAG"))]
     except subprocess.TimeoutExpired:
         lines = ["timeout"]
     with open(out, "a") as f:

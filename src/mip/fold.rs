@@ -414,6 +414,7 @@ pub fn try_fold_with(p: &MipProblem, verbose: bool, fl: &str) -> Option<MipFold>
     }
     impl_diag(p, "fold in");
     impl_diag(&q, "fold out");
+    impl_diag_members(p, &q, &f);
     Some(MipFold { fold: f, q, int_groups, secs })
 }
 
@@ -525,6 +526,54 @@ pub fn impl_diag(p: &MipProblem, tag: &str) {
         st_hf,
         t0.elapsed().as_secs_f64()
     );
+}
+
+/// 診断 `ENOMOTO_MIP_FOLD_IMPLDIAG` の続き: 畳んだ問題の連続列ごとに、元の列 (組の仲間) が全部 (HO2 までの) 暗黙の整数なのに畳んだ列が
+/// 暗黙の整数にならない (失われた) 本数と、暗黙の整数とふつうの連続列が混ざった (まとめたせいで失われうる) 本数を出す。
+fn impl_diag_members(p: &MipProblem, q: &MipProblem, f: &Fold) {
+    if env_str!("ENOMOTO_MIP_FOLD_IMPLDIAG").is_none() {
+        return;
+    }
+    let mp = p.implied_integers_ho2();
+    let mq = q.implied_integers_ho2();
+    let mut all_impl = vec![true; q.n];
+    let mut any_impl = vec![false; q.n];
+    let mut size = vec![0usize; q.n];
+    for w in 0..p.n {
+        let c = f.col_red[w];
+        if c == u32::MAX || p.is_int[w] {
+            continue;
+        }
+        let c = c as usize;
+        size[c] += 1;
+        if mp[w] {
+            any_impl[c] = true;
+        } else {
+            all_impl[c] = false;
+        }
+    }
+    let (mut lost, mut lost_cost, mut mixed, mut kept, mut merged) = (0, 0, 0, 0, 0);
+    for c in 0..q.n {
+        if q.is_int[c] || size[c] == 0 {
+            continue;
+        }
+        if size[c] >= 2 && any_impl[c] {
+            merged += 1;
+        }
+        if all_impl[c] && any_impl[c] {
+            if mq[c] {
+                kept += 1;
+            } else {
+                lost += 1;
+                if q.cost[c] != 0.0 {
+                    lost_cost += 1;
+                }
+            }
+        } else if any_impl[c] {
+            mixed += 1;
+        }
+    }
+    eprintln!("IMPLDIAG members: implied-integer continuous columns of the fold: kept {kept}, lost {lost} (with cost {lost_cost}), mixed with plain continuous {mixed}, merged groups {merged}");
 }
 
 /// `ENOMOTO_MIP_FOLD`: 畳んで `solve` で解き、元に戻す。畳まないなら `None`。安全網に外れたら残りの時間で元を `solve` で解く。
