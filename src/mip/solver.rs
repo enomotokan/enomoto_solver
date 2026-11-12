@@ -2828,6 +2828,7 @@ fn tree_restart_on() -> bool {
 /// - `r`: 木の中の再スタートを HiGHS 式の判定 ([`Solver::tree_restart_due`]、固定の数を問わない `force` と同じ) で行い、損の型を
 ///   `ENOMOTO_MIP_TREE_RESTART_GUARD` の `KR` で見送る (ガードを別に置いたらそちらを使う)。加えて、効いているカットの行が問題の行の
 ///   `ENOMOTO_T_MIP_TREEEFF_CRATIO` (0.3) 倍以上なら `R` (木がほぼ閉じている) を当てない (カットを持ち込む再スタートは閉じかけでも通す)。
+///   `K` の「新たな固定が少ない」のしきい値は自由な整数列の `ENOMOTO_T_MIP_TREEEFF_FIX_FRAC` (0.05) 倍 (既存の 0.01 では 10teams の 2.5% の固定で通った)。
 /// - `p`: 木の中の再スタートで、擬似費用 (`ENOMOTO_MIP_RESTART_PC` と同じ)・カットプール・木の下界 (`ENOMOTO_MIP_RESTART_ROOT_CUTS` の
 ///   `p`・`l` と同じ) を持ち越す (HiGHS の `performRestart` は下界とカットプールを持ち越す)。
 /// - `s`: 木の中の再スタートの後の根では、カットのループを `ENOMOTO_T_MIP_TREEEFF_ROUNDS` (5) ラウンドまでにする (カットは行として持ち込む)。
@@ -20533,7 +20534,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let newly = self.newly_fixed_ints();
         // 今の LP (最後のノードの LP) のカットの行の数。再スタートでは、このうち効いているものが問題の行になる
         let cuts = self.lp.num_rows().saturating_sub(self.p.m);
-        let fix_min = (tunable!("ENOMOTO_T_MIP_TREE_RESTART_FIX_FRAC", 0.01, f64) * free0 as f64).max(tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_FIX", 1usize, usize).max(1) as f64);
+        // `ENOMOTO_MIP_TREEEFF` の `r` (試作): `K`・`k` の固定のしきい値は `ENOMOTO_T_MIP_TREEEFF_FIX_FRAC` (0.05)。10teams は暫定解が
+        // 良くなった直後に固定 40/1600 (2.5%)・効くカット 3 本で再スタートし、3 種とも 1.5〜4 倍遅くなった (analysis/treeeff_20261111.md)
+        let fix_frac = if treeeff('r') { tunable!("ENOMOTO_T_MIP_TREEEFF_FIX_FRAC", 0.05, f64) } else { tunable!("ENOMOTO_T_MIP_TREE_RESTART_FIX_FRAC", 0.01, f64) };
+        let fix_min = (fix_frac * free0 as f64).max(tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_FIX", 1usize, usize).max(1) as f64);
         // presolve で落ちる見込みの行: 全体の上下限で固定されていない列が 1 本以下になった問題の行 (固定で空・1 列の行になる。
         // 活動の上下限で冗長になる行は数えないので、実際に減る行より少なめ)
         let rowdrop = self

@@ -23,9 +23,9 @@ git pull --rebase --autostash origin ccr-1beed81b-ex0uhq && git push -u origin c
 
 ## D: 診断 (600 秒、9 問 × 8 設定 × 種 1・2、144 回、18 分担)
 
-- コミット: **9fde6ff6** (解く側のソースは既定のまま)。
+- コミット: **下の P2 節と同じコミット** (2026-11-12 に差し替え。`all` をやめ `tenc` を入れた。9fde6ff6 では回さない)。
 - 設定 (`cfg.py`): `def` 既定 / `trf` 木の中の再スタート (force + GUARD KR) / `nc` ノードの経路集約 (NODECNT=hr) /
-  `sd` 退化でも強分岐 / `ca` HiGHS 式のカットの年齢 + 木の LP のカットの行の上限 / `pl` 下界最小の番に共有の待ち行列も見る (TREE1_POOL) / `all` 5 つ全部 / `highs` HiGHS 1.15.1 (random_seed = 種)。
+  `sd` 退化でも強分岐 / `ca` HiGHS 式のカットの年齢 + 木の LP のカットの行の上限 / `pl` 下界最小の番に共有の待ち行列も見る (TREE1_POOL) / `tenc` = TREEEFF=rpsh + NODECNT=hr / `highs` HiGHS 1.15.1 (random_seed = 種)。
 - 見積り: 1 分担 0.2〜1.4 時間 (`shards_D.json` の `est_hours`)。
 
 | 分担 | 命令 |
@@ -41,3 +41,12 @@ git pull --rebase --autostash origin ccr-1beed81b-ex0uhq && git push -u origin c
 | 分担 | 命令 |
 |---|---|
 | P0〜P5 | `python run.py P 0` 〜 `python run.py P 5` |
+
+## P2: 直した版の 58 問の対 (60 秒、58 問 × 種 1〜3 × {def, tenc}、348 回、4 分担)
+
+- コミット: **(下で書き足す)** (TREEEFF の `K` の固定のしきい値を 5% にした版。10teams の害の直し)。D もこのコミットで回す。
+- 見積り: 1 分担 約 0.75 時間。集計は `SET=P2 python summP.py`。
+
+| 分担 | 命令 |
+|---|---|
+| P2_0〜P2_3 | `python run.py P2 0` 〜 `python run.py P2 3` |

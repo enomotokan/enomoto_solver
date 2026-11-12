@@ -22,10 +22,10 @@ def balance(tasks, n, out, tl):
     (D / out).write_text(json.dumps({"shards": shards, "est_hours": [round(x / 3600, 2) for x in load]}, indent=0))
     print(out, len(tasks), "回", "見積り (時間):", min(round(x / 3600, 2) for x in load), "〜", max(round(x / 3600, 2) for x in load))
 if sys.argv[1] == "D":
-    cfgs = ["def", "trf", "nc", "sd", "ca", "pl", "all", "highs"]
+    cfgs = ["def", "trf", "nc", "sd", "ca", "pl", "tenc", "highs"]
     balance([(p, c, s) for p in PROBS_D for s in (1, 2) for c in cfgs], int(sys.argv[2]), "shards_D.json", 600)
 # P (58 問 × 種 1〜3、60 秒): 既定と候補を同じ分担で対にして回す。使い方: python plan.py P N 候補 [候補 ...]
-if sys.argv[1] == "P":
+if sys.argv[1].startswith("P"):
     import glob
     WT = D.parents[1]
     sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
@@ -38,4 +38,4 @@ if sys.argv[1] == "P":
     E = {p: (sum(T2[p]) / len(T2[p]) if T2[p] else 40) + 6 for p in PROBS}
     cands = sys.argv[3:]
     EST.clear(); EST.update({p: {"*": E[p]} for p in PROBS})
-    balance([(p, c, s) for p in PROBS for s in (1, 2, 3) for c in ["def"] + cands], int(sys.argv[2]), "shards_P.json", 60)
+    balance([(p, c, s) for p in PROBS for s in (1, 2, 3) for c in ["def"] + cands], int(sys.argv[2]), f"shards_{sys.argv[1]}.json", 60)
