@@ -1195,7 +1195,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 診断用: [`Self::add_to_pool`] で非零数の上限を見ない (`ENOMOTO_MIP_ORACLE_CUTS` を入れる間だけ真)
     pub(super) pool_nocap: bool,
     /// 求解の開始時 (根の伝播の後) に固定されていた整数列の数 (再スタートの判定用)。
-    root_fixed0: usize,
+    pub(super) root_fixed0: usize,
     /// ノードでのダイビングの LP 反復数・呼び出し回数・解を見つけた回数。
     dive_iters: u64,
     dive_calls: u64,
@@ -17943,6 +17943,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // 試作 `ENOMOTO_MIP_FIXMORE` (src/mip/fixmore.rs): 大域的な範囲で伝播した閉包の固定を数える・入れる
+        self.fixmore_root("restart_check");
         let nint = p.nint;
         let fixed = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
         let newly = fixed.saturating_sub(self.root_fixed0);

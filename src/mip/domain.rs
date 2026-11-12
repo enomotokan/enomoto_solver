@@ -409,6 +409,24 @@ impl Domain {
         }
     }
 
+    /// 試作 `ENOMOTO_MIP_FIXMORE` (src/mip/fixmore.rs): 今固定されている 0-1 列を含意の伝播の待ち行列に積む ([`Self::add_implications`]
+    /// より前に固定されていた列の含意も伝播させる)。
+    pub fn queue_fixed_binaries(&mut self, p: &MipProblem) {
+        if self.impl_adj.is_none() {
+            return;
+        }
+        for j in 0..p.n {
+            if p.is_int[j] && self.lo[j] == self.up[j] && (self.lo[j] == 0.0 || self.lo[j] == 1.0) {
+                self.impl_queue.push(j);
+            }
+        }
+    }
+
+    /// 伝播を待っている行・含意が残っているか (`propagate` が手間の上限で打ち切ったか)。
+    pub fn has_pending(&self) -> bool {
+        !self.queue.is_empty() || !self.impl_queue.is_empty()
+    }
+
     /// 記録を `pos` まで巻き戻す (境界と活動量を戻し、矛盾の印を消す)。
     pub fn backtrack_to(&mut self, p: &MipProblem, pos: usize) {
         self.low_water = self.low_water.min(pos);
