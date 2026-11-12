@@ -10,6 +10,12 @@ sys.path.insert(0, str(WT / "analysis" / "implint_tu_20261110"))
 from probs_all import P58  # noqa: E402
 CFGS = {
     "tubr": {"ENOMOTO_MIP_TUBR": "1"},
+    # 文字 (e6bfd8ba): l 解の持ち上げ、s サブ MIP で I' を連続に、g Gomory の元の行から I' を外す、c カットで I' を連続扱い
+    "t1l": {"ENOMOTO_MIP_TUBR": "1l"},
+    "t1s": {"ENOMOTO_MIP_TUBR": "1s"},
+    "t1g": {"ENOMOTO_MIP_TUBR": "1g"},
+    "t1c": {"ENOMOTO_MIP_TUBR": "1c"},
+    "t1lsgc": {"ENOMOTO_MIP_TUBR": "1lsgc"},
     "net": {"ENOMOTO_MIP_FOLD": "rinq"},
     "def": {},
     "fold": {"ENOMOTO_MIP_FOLD": "1"},
