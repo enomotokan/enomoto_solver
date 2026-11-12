@@ -85,6 +85,22 @@ pub(super) fn cutstall_gap() -> Option<(f64, bool)> {
     })
 }
 
+/// 試作 `ENOMOTO_MIP_CUTRND=<文字>` (課題 CUTRND、既定では使わない。analysis/cutrnd_20261112.md): 外側の主の根のカットのループ
+/// (サブ MIP・裏のカットの写し・主が続けるループでない) の止め方を、固定のラウンド数でなく「伸びと時間の比」で決める。
+/// - `e`: ラウンドの上限に当たったとき、(1) ループの経過 (このスレッドの CPU 時間) が `ENOMOTO_T_MIP_CUTRND_TIME_FRAC` (0.03) × 時間の上限
+///   (上限なしは `ENOMOTO_T_MIP_CUTRND_TIME_INF` 秒) 未満、(2) 直近 5 ラウンドの伸びが 5 × `ENOMOTO_T_MIP_CUTRND_GAIN` (1e-3) × 尺度
+///   (尺度 = min(ループで上げた分, 暫定解の打ち切り値との残りの差)) を超える、(3) 伸びと時間の比 (直近 5 ラウンドで閉じた尺度の割合 ÷
+///   その 5 ラウンドに使った時間の枠に対する割合) が `ENOMOTO_T_MIP_CUTRND_RATE` (0.1) 以上、の 3 つがそろえば 25 ラウンド延ばす
+///   (`ENOMOTO_T_MIP_CUTRND_MAX_ROUNDS` (200) まで)。ループ全体の平均の速さとは比べない (tr12-30 は伸びが等比で減るので、最初の
+///   ラウンドの大きな伸びに引かれて平均との比はすぐ 2% を切る)
+/// - `s`: ループの経過が `ENOMOTO_T_MIP_CUTRND_STOP_FRAC` (0.05) × 時間の上限を超え、伸びと時間の比 ((3) と同じ形、時間の枠は
+///   この経過の上限) が `ENOMOTO_T_MIP_CUTRND_STOP_RATE` (0.25) 未満なら止める (伸びが細ったまま長く回る hypothyroid-k1 向け)
+/// - `f`: 経過が `e` の時間の枠の内なら、下界も分数の列の数も動かないラウンドを停滞 1 回と数える (既定は 2 回。neos-1456979 は
+///   下界が最初の数ラウンド動かず、続ければ上がる)
+pub(super) fn cutrnd(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_CUTRND").is_some_and(|v| v.contains(c))
+}
+
 /// `ENOMOTO_MIP_HO6_STALL` (試作、既定では使わない): 根のカットのループの停滞を、カットで上げた分に対する割合で判定する
 /// (根のカットのループ `root_cut_loop` の停滞の判定)。値が数なら割合、ほかの値なら 1e-3。あわせて、ラウンドの上限に当たったときの延長
 /// (`ENOMOTO_MIP_CUT_ADAPT_ROUNDS` と同じ、上限 `ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP`) を、直近 5 ラウンドの伸びが今までの伸びの
@@ -1548,6 +1564,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
             v => v.is_some(),
         };
         let mut round_obj: Vec<f64> = Vec::new();
+        // 試作 `ENOMOTO_MIP_CUTRND` ([`cutrnd`]): `round_obj` と同じ時に積むループの経過 (このスレッドの CPU 時間)
+        let mut round_t: Vec<f64> = Vec::new();
+        let cutrnd_main = !self.params.submip && self.snap.is_none() && job.is_none() && self.cut_cont.is_none();
+        let cr_budget = if self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_CUTRND_TIME_FRAC", 0.03, f64) * self.params.time_limit } else { tunable!("ENOMOTO_T_MIP_CUTRND_TIME_INF", 30.0, f64) };
+        // ループの経過・直近 5 ラウンドの伸び・その 5 ラウンドの時間・尺度 (`e`・`s` の判定に使う)。5 ラウンドに満たなければ None。
+        // 尺度 = min(ループで上げた分, 打ち切り値との残りの差)
+        let cr_rates = |ro: &[f64], rt: &[f64], cut: f64| -> Option<(f64, f64, f64, f64)> {
+            let k = ro.len();
+            (k > 5).then(|| {
+                let o = ro[k - 1];
+                let mut scale = o - first_obj;
+                if cut.is_finite() {
+                    scale = scale.min(cut - o);
+                }
+                (rt[k - 1] - t_loop0, o - ro[k - 6], (rt[k - 1] - rt[k - 6]).max(1e-6), scale.max(1e-9 * o.abs().max(1.0)))
+            })
+        };
         let extend_on = (env_str!("ENOMOTO_MIP_CUT_EXTEND").is_some() || self.cut_agg_has('e')) && !self.params.submip && job.is_none() && self.params.time_limit.is_finite();
         let extend_max = tunable!("ENOMOTO_T_MIP_CUT_EXTEND_MAX", 0.3, f64) * self.params.time_limit;
         CUT_EXTENDED.with(|c| c.set(false));
@@ -1719,6 +1752,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let o = round_obj[kr - 1];
                             o - round_obj[kr - 6] > 5.0 * t * cs_scale(self, o)
                         }
+                    });
+                // 試作 `ENOMOTO_MIP_CUTRND` の `e` ([`cutrnd`]): 伸びが続き、時間が枠の内なら延ばす
+                let extend = extend
+                    || (cutrnd_main && cutrnd('e') && !phase2 && max_rounds < tunable!("ENOMOTO_T_MIP_CUTRND_MAX_ROUNDS", 200usize, usize) && {
+                        let ok = cr_rates(&round_obj, &round_t, self.prune_limit()).is_some_and(|(el, recent, t5, scale)| {
+                            let ratio = (recent / scale) / (t5 / cr_budget);
+                            let ok = el < cr_budget
+                                && recent > 5.0 * tunable!("ENOMOTO_T_MIP_CUTRND_GAIN", 1e-3, f64) * scale
+                                && ratio >= tunable!("ENOMOTO_T_MIP_CUTRND_RATE", 0.1, f64);
+                            if self.params.verbose {
+                                eprintln!(
+                                    "MIP: cut round {round_ctr}: CUTRND e: loop {el:.2}s (budget {cr_budget:.2}s), recent gain {recent:.3e} of scale {scale:.3e} in {t5:.2}s, gain/time ratio {ratio:.3}, LP rows {} -> {}",
+                                    self.lp.num_rows(),
+                                    if ok { "extend" } else { "stop" }
+                                );
+                            }
+                            ok
+                        });
+                        ok
                     });
                 // `ENOMOTO_MIP_CUT_PHASE2_AT_CAP`: 第 1 段階がラウンドの上限に当たって止まるときは (停滞していなくても)、
                 // 第 2 段階 (HiGHS のスコア) へ進む (`ENOMOTO_MIP_CUT_PHASE2` がなくても。停滞で止まるときは既定のまま止める)。
@@ -3325,6 +3377,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             obj_hist.push(obj);
             round_obj.push(obj);
+            round_t.push(super::cap_clock());
+            // 試作 `ENOMOTO_MIP_CUTRND` の `s`: 長く回って伸びが細ったら止める
+            if cutrnd_main && cutrnd('s') && self.params.time_limit.is_finite() {
+                if let Some((el, recent, t5, scale)) = cr_rates(&round_obj, &round_t, self.prune_limit()) {
+                    let lim = tunable!("ENOMOTO_T_MIP_CUTRND_STOP_FRAC", 0.05, f64) * self.params.time_limit;
+                    let rho = tunable!("ENOMOTO_T_MIP_CUTRND_STOP_RATE", 0.25, f64);
+                    let ratio = (recent / scale) / (t5 / lim);
+                    if el > lim && ratio < rho {
+                        if self.params.verbose {
+                            eprintln!("MIP: cut round {round}: CUTRND s: loop {el:.2}s > {lim:.2}s, gain/time ratio {ratio:.3} (recent gain {recent:.3e} of scale {scale:.3e} in {t5:.2}s) < {rho}; stop (obj {:.10e})", obj + p.offset);
+                        }
+                        break;
+                    }
+                }
+            }
             // `ENOMOTO_T_MIP_CUT_FLAT_STOP`: 根の LP の値から動かないラウンドが最初から k 回続いたら止める
             // (`moved` は `ENOMOTO_MIP_CUT_LP_CAP_STOP=flat` も使う)
             if !moved && obj - first_obj > flat_eps * first_obj.abs().max(1.0) {
@@ -3482,7 +3549,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     }
                     if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 && !saturated && !widen_now {
-                        stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened { 2 } else { 1 };
+                        let cr_one = cutrnd_main && cutrnd('f') && super::cap_clock() - t_loop0 < cr_budget;
+                        stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened && !cr_one { 2 } else { 1 };
                         if stall >= if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip && !sub_hc { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
                             if !phase2_on && veto_own(&job) {
                                 if self.params.verbose {
