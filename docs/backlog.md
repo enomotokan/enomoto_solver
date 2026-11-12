@@ -31,6 +31,9 @@
   - 束 (prepar + ncm、± ns250s) を 58 問 × 4 種と Mittelmann 47 問 × 600 秒 × 2 種で確かめる。
   - 洗い出しで見つけた次の候補を測る: ROOTSTOP=r、DUAL_BOUND2=1、MC11FIX2=b、NODE_CUT_ADAPT。
   - 誤った答えの記録 (PROBE_REPRESOLVE の traininstance6 など) を今のソースで確かめる。
+    → 2026-11-12 に確かめた (`analysis/wrongans_20261112.md`): 3 件とも再現せず (traininstance6 既定 4 スレッド 600 秒 × 種 1〜4・1 スレッド 1 回、
+    binkar10_1 stallrw 2 回、mc11 SUBMIP_CUTS 系 4 回)。traininstance6・binkar10_1 は 11-05 の直し (CONFLICT_INT_TOL・POSTSOLVE_CLIP、既定) で
+    原因ごと直っており、既知解つきの診断でも既定は誤った衝突 0 件 (直す前の形は 3 件)。mc11 は原因不明のまま。既定に害は見えない。
 - 手順の教訓: 種 3 で def の 1 回が運悪く遅く、全候補が −3〜−12% に見えた。A/A では def 2 回の差が −8.6% あった。
   種を足すときは def を 2 回回すと安全である。
 
