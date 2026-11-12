@@ -1,12 +1,18 @@
 #!/bin/sh
-# 計測中の結果ファイルに 1 行足された直後 (次の書き込みまで約 60 秒ある) にコミットして push する
+# 計測中の live ファイル (追跡しない) の行を res_sK.jsonl に写してコミットし push する
 # (pull --rebase の間に追記されて行を失う事故を避ける)。使い方: sh safe_commit.sh "メッセージ"
 cd "$(dirname "$0")/../.."
-cnt() { cat analysis/rstcrit_20261111/res_s*.jsonl 2>/dev/null | wc -l; }
-n=$(cnt)
-if pgrep -f run_share.py >/dev/null; then
-  until [ "$(cnt)" -gt "$n" ]; do sleep 2; done
-fi
+
+# live ファイルの行を res_sK.jsonl に写す (まだないものだけ)
+python3 - <<'P'
+import glob
+for lv in glob.glob("analysis/rstcrit_20261111/res_s*.live.jsonl"):
+    f = lv.replace(".live", "")
+    have = set(open(f).read().splitlines()) if __import__("os").path.exists(f) else set()
+    new = [l for l in open(lv).read().splitlines() if l.strip() and l not in have]
+    if new:
+        open(f, "a").write("\n".join(new) + "\n")
+P
 git add analysis/rstcrit_20261111 analysis/rstcrit_20261111.md docs/backlog.md 2>/dev/null
 git commit -qm "$1
 

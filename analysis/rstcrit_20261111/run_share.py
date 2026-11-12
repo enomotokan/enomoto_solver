@@ -6,13 +6,15 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 k = int(sys.argv[1])
 mine = json.loads((D / "shards.json").read_text())["shards"][k]
-out = f"res_s{k}.jsonl"
+# 計測中は追跡しない live ファイルに書き、コミットのときに res_sK.jsonl へ写す (safe_commit.sh。git の取り込みが追記とぶつからないように)
+out = f"res_s{k}.live.jsonl" if "--live" in sys.argv else f"res_s{k}.jsonl"
 done = set()
-if (D / out).exists():
-    for l in (D / out).read_text().splitlines():
-        if l.strip():
-            r = json.loads(l)
-            done.add((r["cfg"], r["problem"], int(r["tl"]), r["rep"]))
+for o in {out, f"res_s{k}.jsonl"}:
+    if (D / o).exists():
+        for l in (D / o).read_text().splitlines():
+            if l.strip():
+                r = json.loads(l)
+                done.add((r["cfg"], r["problem"], int(r["tl"]), r["rep"]))
 for c, p, tl, s in mine:
     if (c, p, int(tl), s) in done:
         continue
