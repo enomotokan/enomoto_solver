@@ -23,7 +23,7 @@ git pull --rebase --autostash origin ccr-1beed81b-ex0uhq && git push -u origin c
 
 ## P: 58 問の対 (60 秒、58 問 × 種 1〜3 × {def, spl, enum, deq}、696 回、6 分担)
 
-- コミット: **COMMIT** (`ENOMOTO_MIP_DUALEQ` の試作を足したソース。既定の動きは変わらない)。
+- コミット: **6296354a** (`ENOMOTO_MIP_DUALEQ` の試作を足したソース。既定の動きは変わらない)。
 - 設定 (`cfg.py`): `def` 既定 / `spl` = `ENOMOTO_MIP_SPARSIFY_LATE=1` / `enum` = `ENOMOTO_MIP_HO3_ENUM=1` / `deq` = `ENOMOTO_MIP_DUALEQ=1`。
   同じ (問題, 種) は同じ分担で続けて回す。
 - 見積り: 1 分担 約 1.0 時間。集計は `python summP.py`。
