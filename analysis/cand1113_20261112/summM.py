@@ -10,7 +10,9 @@ H = {}
 for r in rows:
     if r["cfg"] == "highs": H[r["problem"]] = r
 def st(r): return str(r["result"].get("status", "")).lower()
-def solved(r): return (st(r).startswith("optimal") or st(r).startswith("infeasible")) and (r["result"].get("time") or 1e9) <= TL + 5
+# 誤答 (正しい解のある問題を実行不能と返した回)。TREE2_FORCEQ の許容誤差の誤り (直し 40e80904)、解けていない扱いにする
+WRONG = {("unitcal_7", "cand1113", 1), ("unitcal_7", "cand1113", 2)}
+def solved(r): return (r["problem"], r["cfg"], r["seed"]) not in WRONG and (st(r).startswith("optimal") or st(r).startswith("infeasible")) and (r["result"].get("time") or 1e9) <= TL + 5
 def t(r): return min(r["result"]["time"], TL) if solved(r) else TL
 hs = {p for p, r in H.items() if solved(r)}
 probs = sorted({p for p, c, s in R if c != "highs"}); seeds = [1, 2]
@@ -41,7 +43,7 @@ def ratio(ps):
     return math.exp(sum(v) / len(v))
 ps = list(logr); random.seed(0)
 bs = sorted(ratio([random.choice(ps) for _ in ps]) for _ in range(4000))
-print(f"行数 {len(rows)} (対 {pair})、crash {crash}、食い違い {len(bad)} {bad}")
+print(f"行数 {len(rows)} (対 {pair})、crash {crash} (HiGHS の germanrr が -9)、食い違い {len(bad)} {bad}、誤答 {len(WRONG)} {sorted(WRONG)} (解けていない扱い)")
 print(f"解けた (372 回): def {ns['def']} / cand1113 {ns['cand1113']}")
 print(f"SGM (shift 10、全 372 回): def {sgm_all('def'):.2f} / cand1113 {sgm_all('cand1113'):.2f}")
 print(f"対の比 (どちらかが解けた {len(ps)} 問): {ratio(ps)-1:+.1%} [{bs[100]-1:+.1%}, {bs[3899]-1:+.1%}]")
@@ -60,3 +62,15 @@ for p in ps:
 for c in ("def", "cand1113"):
     m = [r["max_rss_mb"] for r in rows if r["cfg"] == c and r.get("max_rss_mb")]
     print(c, "最大 RSS", max(m), "MB、5 GB 超", sum(x > 5000 for x in m))
+
+# HiGHS (種 1、同じ分担・同じ機械) との比べ
+hp = [p for p in probs if p in H and (p, "def", 1) in R and (p, "cand1113", 1) in R]
+def tl(r, L): return solved(r) and t(r) <= L
+for L in (60, 600):
+    print(f"{L} 秒までに解けた (種 1、{len(hp)} 問): HiGHS {sum(tl(H[p], L) for p in hp)} / def {sum(tl(R[(p,'def',1)], L) for p in hp)} / cand1113 {sum(tl(R[(p,'cand1113',1)], L) for p in hp)}")
+    for c in ("def", "cand1113"):
+        v = [math.log((min(t(R[(p, c, 1)]), L) + 10) / (min(t(H[p]), L) + 10)) for p in hp if tl(H[p], L) or tl(R[(p, c, 1)], L)]
+        print(f"  {c} / HiGHS の時間の比 (SGM shift 10、{L} 秒で打ち切り、どちらかが解けた {len(v)} 問): {math.exp(sum(v)/len(v)):.2f}")
+print("HiGHS だけが解く (種 1、cand1113 は 600 秒で解けない): ", [(p, round(t(H[p]))) for p in hp if solved(H[p]) and not solved(R[(p, 'cand1113', 1)])])
+print("cand1113 だけが解く (種 1、HiGHS は解けない): ", [(p, round(t(R[(p, 'cand1113', 1)]))) for p in hp if solved(R[(p, 'cand1113', 1)]) and not solved(H[p])])
+print("両方解けて cand1113 が HiGHS の 2 倍以上遅い (種 1): ", [(p, round(t(R[(p, 'cand1113', 1)])), round(t(H[p]))) for p in hp if solved(H[p]) and solved(R[(p, 'cand1113', 1)]) and t(R[(p, 'cand1113', 1)]) + 10 > 2 * (t(H[p]) + 10)])
