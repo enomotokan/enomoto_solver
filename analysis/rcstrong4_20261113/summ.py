@@ -30,7 +30,9 @@ for p in sorted({p for p, c, s in T}):
     rat = [f"{math.exp(sum(logs[c]) / len(logs[c])):.2f}" if logs[c] else "-" for c in ("ik", "gk")]
     print(f"| {p} | " + " | ".join(cells) + " | " + " | ".join(rat) + " |")
 P = load("P" + SUF)
-print(f"\n(P) 58 問 × 種 1・2、60 秒 ({len(P)} 行)")
+if SUF == "2":  # 2 回目の P は種 1・2 (P2) と種 3・4 (P3) を合わせる
+    P.update(load("P3"))
+print(f"\n(P) 58 問 × 種 1〜4 (P2 + P3)、60 秒 ({len(P)} 行)")
 probs = sorted({p for p, c, s in P}); seeds = sorted({s for p, c, s in P})
 for c in [c for c in FORMS if any(cc == c for (_, cc, _) in P)]:
     print(f"  {c}: 解けた {sum(solved(r) for (p, cc, s), r in P.items() if cc == c)}、最大 RSS {max([(r.get('max_rss_mb') or 0) for (p, cc, s), r in P.items() if cc == c] or [0])} MB")

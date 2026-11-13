@@ -27,3 +27,16 @@ python analysis/rcstrong4_20261113/run.py {T2|P2} K     # K = 0〜2
 
 - T2 (狙いの 10 問 × 種 1〜4 × {k, gk}、600 秒、80 回): 3 分担 (各 0.95 時間)。P2 (58 問 × 種 1・2 × {k, gk}、60 秒、232 回): 3 分担 (各 0.7 時間)。
 - 集計は `python summ.py 2 > summ2.txt`。
+
+## 3 回目 (P3: 2 回目の P に種 3・4 を足す)
+
+固定するコミットは 2 回目と同じ d857365d (ソースは同じ)。台本だけ新しくする:
+
+```sh
+git checkout --detach d857365d
+git checkout origin/ccr-1beed81b-ex0uhq -- analysis/rcstrong4_20261113
+pip install maturin highspy==1.15.1 && pip install -e .
+python analysis/rcstrong4_20261113/run.py P3 K      # K = 0〜2 (58 問 × 種 3・4 × {k, gk}、60 秒、232 回、各 0.7 時間)
+```
+
+集計は `python summ.py 2 > summ2.txt` (P は P2 と P3 を合わせて種 1〜4)。
