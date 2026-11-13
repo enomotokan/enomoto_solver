@@ -3711,6 +3711,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 sepprof::add(sepprof::T_ROUND, t_round0.elapsed().as_secs_f64());
             }
         }
+        // 診断 `ENOMOTO_MIP_DEBUG_CUTEXIT` (振る舞いは変えない、analysis/dualeq2_20261113.md): 根のカットのループを抜けたときの状態
+        if env_str!("ENOMOTO_MIP_DEBUG_CUTEXIT").is_some() && !self.params.submip {
+            eprintln!(
+                "MIP: CUTEXIT: job {} rounds {round_ctr} (max {max_rounds}), stall {stall}, intobj_stall {intobj_stall}, phase2 {phase2}, nfrac {}, obj {:.10e}",
+                job.is_some(),
+                self.fractional(&self.lp.col_values()).len(),
+                self.lp.objective() + p.offset
+            );
+        }
         if prof {
             sepprof::report(&format!("restarts {}", self.params.restarts));
         }
