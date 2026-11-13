@@ -3650,6 +3650,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                         }
                     }
+                    if env_str!("ENOMOTO_MIP_DEBUG_CUTEXIT").is_some() && !self.params.submip {
+                        eprintln!("MIP: CUTEXIT round {round}: job {} obj {obj:.10e} prev {prev_obj:.10e} reldiff {reldiff:.3e} nfrac {nfrac} prev {prev_nfrac} stall {stall} saturated {saturated} widen {widen_now}", job.is_some());
+                    }
                     if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 && !saturated && !widen_now {
                         let cr_one = cutrnd_main && cutrnd('f') && super::cap_clock() - t_loop0 < cr_budget;
                         stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened && !cr_one { 2 } else { 1 };

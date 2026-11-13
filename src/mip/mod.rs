@@ -1274,8 +1274,19 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                     // かけ直しで行か固定でない列が減ったときだけ使う。減らなければ等式にする前の問題に戻す (等式は縮約の
                     // きっかけとしてだけ意味があり、縮まないまま等式を残すと LP の基底の引き継ぎを失い遅くなる: ns1116954 は 741 行を
                     // 等式にしても何も減らず、60 秒の回で 3〜6 秒 -> 26〜51 秒、メモリ 359 -> 2340 MB)
+                    // `ENOMOTO_T_MIP_DUALEQ_MINRED` = f (試作、既定 0 = 見ない。analysis/dualeq2_20261113.md): 減った行の割合と固定でない列の
+                    // 割合の大きい方が f 未満なら使わない。binkar10_1 は 822 行のうち 1 行 (C792 + C2147 ≥ 1 を等式にして連続列 1 本を代入) だけで、
+                    // 等式の問題は既定でもノードが約 1.7 倍になる (カットのループの回り方は原因ではない)
                     Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 })
-                        if sc2.d.iter().all(|&d| d == 1.0) && (prob2.m < prob.m || free_cols(&prob2) < free_cols(&prob)) =>
+                        if sc2.d.iter().all(|&d| d == 1.0) && (prob2.m < prob.m || free_cols(&prob2) < free_cols(&prob)) && {
+                            let f = tunable!("ENOMOTO_T_MIP_DUALEQ_MINRED", 0.0, f64);
+                            let (fc, fc2) = (free_cols(&prob), free_cols(&prob2));
+                            let red = ((prob.m - prob2.m.min(prob.m)) as f64 / prob.m.max(1) as f64).max((fc - fc2.min(fc)) as f64 / fc.max(1) as f64);
+                            if params.verbose {
+                                eprintln!("MIP: presolve: DUALEQ: presolve again: rows {} -> {}, free columns {fc} -> {fc2} (reduction {red:.4}, min {f})", prob.m, prob2.m);
+                            }
+                            red >= f
+                        } =>
                     {
                         let mut postsolve = postsolve;
                         postsolve.extend(post2);
