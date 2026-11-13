@@ -155,11 +155,14 @@ pub(super) fn cutrnd(c: char) -> bool {
 /// (max(|obj|, |prev|, 1))。試作 `ENOMOTO_MIP_STALL_SCALE` (既定では使わない、analysis/dualeq2_20261113.md): `u` は offset を含めた
 /// 目的値 (利用者の目的値) で測る、`m` は内部の値と offset 込みの値の小さい方で測る。binkar10_1 は offset が −9.986e5 で内部の値が
 /// 1.005e6 (利用者の値 6.7e3) になり、1 周に 0.1% 伸びても毎回停滞と数えられて 6 周で止まる (offset の置き方で打ち切りが変わる)
-pub(super) fn stall_scale(obj: f64, prev: f64, off: f64) -> f64 {
+/// 値に `o` を足すと外側 (サブ MIP でない) だけ、`s` を足すとサブ MIP の中だけで使う (例 `uo`)。
+pub(super) fn stall_scale(obj: f64, prev: f64, off: f64, submip: bool) -> f64 {
     let internal = obj.abs().max(prev.abs()).max(1.0);
+    let user = (obj + off).abs().max((prev + off).abs()).max(1.0);
     match env_str!("ENOMOTO_MIP_STALL_SCALE") {
-        Some("u") => (obj + off).abs().max((prev + off).abs()).max(1.0),
-        Some("m") => internal.min((obj + off).abs().max((prev + off).abs()).max(1.0)),
+        Some(v) if (v.contains('o') && submip) || (v.contains('s') && !submip) => internal,
+        Some(v) if v.contains('u') => user,
+        Some(v) if v.contains('m') => internal.min(user),
         _ => internal,
     }
 }
@@ -3388,7 +3391,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_CUT_WIDEN_DOUBLE` (既定): 一気に行の数 (1000 本まで) に広げるのでなく、採り切っても動かないラウンドのたびに
             // 2 倍にする (50 -> 100 -> 200 -> ... -> 1000)。physiciansched6-2 では 50 本から一気に広げたラウンドで 247〜308 本が入り、
             // LP が 1 回の時間の上限に当たって全部外されていた (`ENOMOTO_MIP_CUT_LP_HALVE` の半分化と対になる)
-            let widen_now = widen_on && (!widened || widen_double_on) && quota_full && (obj - prev_obj) / stall_scale(obj, prev_obj, p.offset) <= 1e-4;
+            let widen_now = widen_on && (!widened || widen_double_on) && quota_full && (obj - prev_obj) / stall_scale(obj, prev_obj, p.offset, self.params.submip) <= 1e-4;
             if widen_now {
                 let wide_max = p.m.min(tunable!("ENOMOTO_T_MIP_CUT_WIDE_MAX", 1000usize, usize));
                 if !widened {
@@ -3575,7 +3578,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 停滞。根では 10 回分で止める (サブ MIP では 3 回)。目的値も分数の列の数もまったく減らない
                 // ラウンドは 2 回分と数える (何も進まない問題で長く回さない。分数の列が減っている間は続ける)。
                 let nfrac = self.fractional(&self.lp.col_values()).len();
-                let reldiff = (obj - prev_obj) / stall_scale(obj, prev_obj, p.offset);
+                let reldiff = (obj - prev_obj) / stall_scale(obj, prev_obj, p.offset, self.params.submip);
                 // `ENOMOTO_MIP_HO6_STALL=割合` (試作、既定では使わない。`1` なら 1e-3): 根 (サブ MIP でない) の停滞の判定の
                 // 「目的値の相対変化」を、目的値の大きさではなくカットで上げた分 (今の値 - カットの前の値) で測る (HiGHS の
                 // 「下界の伸びが今までの伸びの 0.1% 以下」と同じ尺度)。unitcal_7 は目的値 1.96e7 に対して根のギャップが 0.35% しかなく、
@@ -3663,7 +3666,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                         }
                     }
-                    if env_str!("ENOMOTO_MIP_DEBUG_CUTEXIT").is_some() && !self.params.submip {
+                    if env_str!("ENOMOTO_MIP_DEBUG_CUTEXIT").is_some_and(|v| !self.params.submip || v.contains('s')) {
                         eprintln!("MIP: CUTEXIT round {round}: job {} obj {obj:.10e} prev {prev_obj:.10e} reldiff {reldiff:.3e} nfrac {nfrac} prev {prev_nfrac} stall {stall} saturated {saturated} widen {widen_now}", job.is_some());
                     }
                     if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 && !saturated && !widen_now {
@@ -3730,10 +3733,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 sepprof::add(sepprof::T_ROUND, t_round0.elapsed().as_secs_f64());
             }
         }
-        // 診断 `ENOMOTO_MIP_DEBUG_CUTEXIT` (振る舞いは変えない、analysis/dualeq2_20261113.md): 根のカットのループを抜けたときの状態
-        if env_str!("ENOMOTO_MIP_DEBUG_CUTEXIT").is_some() && !self.params.submip {
+        // 診断 `ENOMOTO_MIP_DEBUG_CUTEXIT` (振る舞いは変えない、analysis/dualeq2_20261113.md): 根のカットのループを抜けたときの状態 (値に `s` を含めばサブ MIP も)
+        if env_str!("ENOMOTO_MIP_DEBUG_CUTEXIT").is_some_and(|v| !self.params.submip || v.contains('s')) {
             eprintln!(
-                "MIP: CUTEXIT: job {} rounds {round_ctr} (max {max_rounds}), stall {stall}, intobj_stall {intobj_stall}, phase2 {phase2}, nfrac {}, obj {:.10e}",
+                "MIP: CUTEXIT: submip {} job {} rounds {round_ctr} (max {max_rounds}), stall {stall}, intobj_stall {intobj_stall}, phase2 {phase2}, nfrac {}, obj {:.10e}",
+                self.params.submip,
                 job.is_some(),
                 self.fractional(&self.lp.col_values()).len(),
                 self.lp.objective() + p.offset
