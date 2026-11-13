@@ -5,7 +5,7 @@
 //! 値の文字: `r` 反転も使う、`i` 整数列もまとめる (段階 3)、`n` 整数の組の TU の判定にネットワーク行列 (とその転置) の一般の判定も使う
 //! (試作、既定では使わない。analysis/drcrtu_20261111.md)、`q` ログを出さない、`c` 畳んだ数を出すだけで解かない (数える用)、
 //! `p` 行が 1 本もまとまらない (平行な列だけの) 畳みと、列が 1 本もまとまらない (平行な行だけの) 畳みも使う (既定では使わない。
-//! 前処理が同じ列・同じ行をまとめるので)、`P` 前処理 → 畳む・`Q` 前処理 → 畳む → 前処理・`B` 畳む → 前処理 → 畳む・`N` それを畳めなくなるまで繰り返す (試作、[`solve_folded_any`])。`1` は連続列だけ・反転なし。
+//! 前処理が同じ列・同じ行をまとめるので)、`P` 前処理 → 畳む・`Q` 前処理 → 畳む → 前処理・`B` 畳む → 前処理 → 畳む・`N` それを畳めなくなるまで繰り返す・`A` 2 段目は縮むときだけ (試作、[`solve_folded_any`])。`1` は連続列だけ・反転なし。
 //!
 //! - 連続列だけ (段階 2): 整数列はどれも 1 列だけの組にする (論文の Lemma 28)。和の等しい行は整数列の係数が同じになるので、
 //!   畳んだ MIP と元の MIP は解が行き来でき (x_w = δ_w + λ_w z_Q、整数列は δ が整数)、最適値も同じ。
@@ -584,6 +584,11 @@ pub fn solve_folded(p: &MipProblem, time_limit: f64, verbose: bool, solve: &dyn 
         return Some(MipResult { status: MipStatus::NotSolved, x: None, objective: None, best_bound: f64::NEG_INFINITY, nodes: 0, lp_iterations: 0 });
     }
     let mf = try_fold(p, verbose)?;
+    Some(solve_folded_mf(p, mf, time_limit, verbose, solve))
+}
+
+/// [`solve_folded`] の本体 (畳んだ `mf` を受け取る)。
+fn solve_folded_mf(p: &MipProblem, mf: MipFold, time_limit: f64, verbose: bool, solve: &dyn Fn(&MipProblem, f64) -> MipResult) -> MipResult {
     let t0 = std::time::Instant::now();
     let mut r = solve(&mf.q, (time_limit - mf.secs).max(0.0));
     let left = || (time_limit - mf.secs - t0.elapsed().as_secs_f64()).max(0.0);
@@ -592,9 +597,9 @@ pub fn solve_folded(p: &MipProblem, time_limit: f64, verbose: bool, solve: &dyn 
         solve(p, left())
     };
     match r.status {
-        MipStatus::Infeasible => return Some(r),
-        MipStatus::Unbounded | MipStatus::InfeasibleOrUnbounded if !mf.int_groups => return Some(r),
-        MipStatus::Unbounded | MipStatus::InfeasibleOrUnbounded | MipStatus::NotSolved if r.x.is_none() => return Some(fallback("the folded problem gave no solution")),
+        MipStatus::Infeasible => return r,
+        MipStatus::Unbounded | MipStatus::InfeasibleOrUnbounded if !mf.int_groups => return r,
+        MipStatus::Unbounded | MipStatus::InfeasibleOrUnbounded | MipStatus::NotSolved if r.x.is_none() => return fallback("the folded problem gave no solution"),
         _ => {}
     }
     if let Some(y) = r.x.take() {
@@ -608,16 +613,16 @@ pub fn solve_folded(p: &MipProblem, time_limit: f64, verbose: bool, solve: &dyn 
                 if z > zr + 1e-6 * (1.0 + zr.abs()) {
                     // 整数の組で戻した解が畳んだ問題の値より悪い: 最適の証明にならない
                     if r.status == MipStatus::Optimal {
-                        return Some(fallback("the lifted solution is worse than the folded optimum"));
+                        return fallback("the lifted solution is worse than the folded optimum");
                     }
                 }
                 r.objective = Some(z);
                 r.x = Some(x);
             }
-            None => return Some(fallback("the lifted solution is not feasible")),
+            None => return fallback("the lifted solution is not feasible"),
         }
     }
-    Some(r)
+    r
 }
 
 /// 試作 (既定では使わない): 値の文字 `P` (前処理 → 畳む。畳んだ問題は前処理をかけずに解く) と `Q` (前処理 → 畳む → 前処理) で、
@@ -635,6 +640,27 @@ pub fn solve_folded_any(
     let pre_p = fl.contains('P');
     // 後の求解: P は前処理なし、Q (と既定) は前処理あり
     let leaf: &dyn Fn(&MipProblem, f64) -> MipResult = if fl.contains('Q') || !pre_p && !fl.contains('B') { solve } else { solve_np };
+    if fl.contains('A') {
+        // 試作 `A` (analysis/foldpre_20261112.md、既定では使わない): 前後 (`BQ`) の 2 段目を、前処理した問題を畳んでみて自由な列が
+        // `ENOMOTO_T_FOLD_STAGE2_MIN` (既定 0.05) 以上減るときだけかける。減らなければ前処理をもう一度かける今の求解に戻す
+        // (畳むための前処理 1 回分が無駄になる)。前で畳めなくても後の判定はする
+        let min: f64 = tunable!("ENOMOTO_T_FOLD_STAGE2_MIN", 0.05, f64);
+        let inner = |q: &MipProblem, t: f64| -> MipResult {
+            let t1 = std::time::Instant::now();
+            match solve_folded_gated(q, t, verbose, solve, min) {
+                Some(r) => r,
+                None => solve(q, (t - t1.elapsed().as_secs_f64()).max(0.0)),
+            }
+        };
+        if let Some(r) = solve_folded(p, time_limit, verbose, &inner) {
+            return Some(r);
+        }
+        let t1 = std::time::Instant::now();
+        return Some(match solve_folded_gated(p, time_limit, verbose, solve, min) {
+            Some(r) => r,
+            None => solve(p, (time_limit - t1.elapsed().as_secs_f64()).max(0.0)),
+        });
+    }
     if fl.contains('N') {
         // 試作 `N` (analysis/foldpre_20261112.md、既定では使わない): 畳む → 前処理 → 畳む → 前処理 → … を畳めなくなるまで (畳みの比が
         // 小さくならない、または段数 `ENOMOTO_T_FOLD_STAGES` (既定 8)) 繰り返す。最後は前処理ありで解く。戻すときは段を逆にたどる
@@ -724,6 +750,43 @@ fn count_stages(p: &MipProblem, maxd: usize) {
             None => break,
         }
     }
+}
+
+/// `A` の後の段: 前処理して畳んでみて、自由な列が `min` の割合以上減るなら畳んだ問題を前処理ありで解いて戻す。減らない・畳めないなら `None`。
+fn solve_folded_gated(p: &MipProblem, time_limit: f64, verbose: bool, solve: &dyn Fn(&MipProblem, f64) -> MipResult, min: f64) -> Option<MipResult> {
+    let fl = flags()?;
+    let t0 = std::time::Instant::now();
+    let (prob, unpre) = super::presolve_for_fold(p, false)?;
+    let free = |q: &MipProblem| (0..q.n).filter(|&j| q.col_lo[j] < q.col_up[j]).count();
+    let mf = try_fold(&prob, verbose)?;
+    let (f0, f1) = (free(&prob), free(&mf.q));
+    let ok = (f1 as f64) <= (1.0 - min) * f0 as f64;
+    if verbose || !fl.contains('q') || env_str!("ENOMOTO_MIP_LOG").is_some() {
+        eprintln!("MIP_FOLD: stage 2 gate: free cols {f0} -> {f1} ({}) after the presolve in {:.3}s", if ok { "fold" } else { "skip" }, t0.elapsed().as_secs_f64());
+    }
+    if !ok {
+        return None;
+    }
+    let mut r = solve_folded_mf(&prob, mf, (time_limit - t0.elapsed().as_secs_f64()).max(0.0), verbose, solve);
+    if let Some(xr) = r.x.take() {
+        let mut x = unpre(&xr);
+        for j in 0..p.n {
+            if p.is_int[j] {
+                x[j] = x[j].round();
+            }
+        }
+        if p.is_feasible(&x, 1e-6) {
+            let z = p.objective(&x);
+            r.best_bound += z - prob.objective(&xr);
+            r.objective = Some(z);
+            r.x = Some(x);
+        } else {
+            let left = (time_limit - t0.elapsed().as_secs_f64()).max(0.0);
+            eprintln!("MIP_FOLD: safety net: the solution mapped back through the presolve is not feasible; solving the original ({left:.2}s left)");
+            return Some(solve(p, left));
+        }
+    }
+    Some(r)
 }
 
 /// `P`・`Q` の本体: 前処理してから畳み、畳んだ問題を `inner` で解く (P は前処理なし、Q は前処理あり)。畳まないなら `None`。

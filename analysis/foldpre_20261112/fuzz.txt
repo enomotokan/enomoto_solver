@@ -14,3 +14,13 @@ bad 0 of 2000 time 12.9
 ENOMOTO_MIP_FOLD=riBQ bad 0 of 2000 time 10.0 folded=1407 intgroups=975 accepted_groups=5823 safety=0
 == fuzz_fold riBQ
 bad 0 of 2000 time 11.2
+== 2026-11-13 試作 A (wheel は作業中の木、fold.rs の A を足したもの)
+== fuzz_net riA
+ENOMOTO_MIP_FOLD=riA bad 0 of 2000 time 9.5 folded=975 intgroups=975 accepted_groups=5823 safety=0
+== fuzz_fold riA
+bad 0 of 2000 time 10.4
+== fuzz_tiny riA
+bad 0 of 400 time 2.4 (strict 17: 値の一致だけの以前の判定)
+== mip_fuzz_vs_highs riA
+bad 0 of 300 time 3.6
+(fuzz_tiny の strict 17 は既定でも 17)
