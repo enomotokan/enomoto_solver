@@ -16597,7 +16597,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 丸めの伝播の手間の上限を `ENOMOTO_T_MIP_OBJPROBE_RR_WORK` (既定 200) x 非零数に上げる (既定の 20 倍では hypothyroid-k1 の
                 // 密な行 (43 万非零) で丸めの途中で手間を使い切り、解が出なかった)
                 self.objp.work_mult = tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_WORK", 200u64, u64);
+                self.objp_swap_rng();
                 let found = self.randomized_rounding(&x, tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_TRIES", 2usize, usize));
+                self.objp_swap_rng();
                 self.objp.work_mult = 0;
                 let dt = t0.elapsed().as_secs_f64();
                 self.objp.rr_secs += dt;
@@ -16755,6 +16757,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let t0 = Instant::now();
         let before = self.incumbent.as_ref().map(|(z, _)| *z);
         self.objp.work_mult = tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_WORK", 200u64, u64);
+        self.objp_swap_rng();
         let mut found: Vec<&str> = Vec::new();
         if self.simple_rounding(&x) {
             found.push("simple");
@@ -16784,6 +16787,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !self.time_up() && self.randomized_rounding(&x, tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_TRIES", 2usize, usize)) {
             found.push("randomized rounding");
         }
+        self.objp_swap_rng();
         self.objp.work_mult = 0;
         let dt = t0.elapsed().as_secs_f64();
         self.objp.h_secs += dt;
@@ -16802,6 +16806,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.start.elapsed().as_secs_f64()
             );
         }
+    }
+
+    /// OBJPROBE の乱択丸めには本体と別の乱数列を使う (前後で 2 回呼んで入れ替える)。本体の乱数列を進めると、後の根のヒューリスティクスの
+    /// 乱択丸めなどの流れが変わる (p200x1188c 種 3: 根の乱択丸めが 15550 を出さず再スタートが起きず、3.4 秒 → 時間切れ)
+    fn objp_swap_rng(&mut self) {
+        if self.objp.rng == 0 {
+            self.objp.rng = (self.rng ^ 0x9E37_79B9_7F4A_7C15) | 1;
+        }
+        std::mem::swap(&mut self.rng, &mut self.objp.rng);
     }
 
     /// [`Self::objprobe_round`] の `c`: 今の LP (根、最適に解いた後) の被約費用と打ち切り値で整数列の大域的な境界を締める。
@@ -22186,6 +22199,8 @@ pub(super) struct ObjProbeState {
     resets: usize,
     nfix_reset: usize,
     p_zero_streak: usize,
+    /// OBJPROBE の乱択丸めの乱数列 ([`Solver::objp_swap_rng`])
+    rng: u64,
     rr_secs: f64,
     rr_calls: usize,
     rr_found: usize,
