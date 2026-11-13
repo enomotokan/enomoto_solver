@@ -6,6 +6,8 @@ from cfg import CFGS
 D = Path(__file__).resolve().parent
 TL = 600.0
 rows = [json.loads(l) for f in sorted(glob.glob(str(D / "res_M_s*.jsonl"))) for l in open(f) if l.strip()]
+# unitcal_7 は直す前のビルド (a6a28867) で TREE2_FORCEQ の誤答が出るので外す (記録の「誤答」の節)
+rows = [r for r in rows if r["problem"] != "unitcal_7"]
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
 def st(r): return str(r["result"].get("status", "")).lower()
 def solved(r): return (st(r).startswith("optimal") or st(r).startswith("infeasible")) and (r["result"].get("time") or 1e9) <= TL + 5
