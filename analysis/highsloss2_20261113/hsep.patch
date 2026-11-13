@@ -1,0 +1,112 @@
+--- a/highs/mip/HighsSeparation.cpp
++++ b/highs/mip/HighsSeparation.cpp
+@@ -10,6 +10,10 @@
+ #include <algorithm>
+ #include <cassert>
+ #include <queue>
++#include <cstdlib>
++#include <cstdio>
++#include <cstring>
++static bool hsepOff(char c){const char* e=getenv("HSEP_OFF");return e && strchr(e,c);}
+ 
+ #include "mip/HighsCliqueTable.h"
+ #include "mip/HighsDomain.h"
+@@ -45,6 +49,11 @@
+   const HighsSolution& sol = lp->getLpSolver().getSolution();
+ 
+   HighsMipSolverData& mipdata = *lp->getMipSolver().mipdata_;
++  const bool hlog = getenv("HSEP_LOG") && !lp->getMipSolver().submip && &propdomain == &mipdata.getDomain() && mipdata.num_nodes == 0;
++  const double hobj0 = lp->getObjective();
++  auto hfix = [&]() { HighsInt nf = 0; const HighsDomain& g = mipworker_.getGlobalDomain(); for (size_t j = 0; j < g.col_lower_.size(); ++j) if (g.col_lower_[j] == g.col_upper_[j]) ++nf; return (int)nf; };
++  auto hfixl = [&]() { HighsInt nf = 0; for (size_t j = 0; j < propdomain.col_lower_.size(); ++j) if (propdomain.col_lower_[j] == propdomain.col_upper_[j]) ++nf; return (int)nf; };
++  if (hlog) fprintf(stderr, "HSEP step start obj %.6f fixed global %d local %d ub %g\n", hobj0, hfix(), hfixl(), mipworker_.upper_limit);
+ 
+   auto propagateAndResolve = [&]() {
+     if (propdomain.infeasible() || mipworker_.getGlobalDomain().infeasible()) {
+@@ -86,11 +95,15 @@
+       }
+     }
+ 
++    if (hlog) fprintf(stderr, "HSEP step propagate: %d bound changes, obj %.6f fixed global %d local %d\n", numBoundChgs, lp->getObjective(), hfix(), hfixl());
+     return numBoundChgs;
+   };
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(implBoundClock);
++  HighsInt hp0 = mipworker_.getCutPool().getNumCuts();
++  HighsInt hpi = 0, hpc = 0, hps[3] = {0, 0, 0};
++  if (!hsepOff('i'))
+   mipdata.implications.separateImpliedBounds(
+       *lp, lp->getSolution().col_value, mipworker_.getCutPool(),
+       mipdata.feastol, mipworker_.getGlobalDomain(),
+@@ -98,6 +111,7 @@
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->stop(implBoundClock);
+ 
++  hpi = mipworker_.getCutPool().getNumCuts() - hp0; hp0 += hpi;
+   HighsInt ncuts = 0;
+   HighsInt numboundchgs = propagateAndResolve();
+   if (numboundchgs == -1)
+@@ -107,6 +121,7 @@
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(cliqueClock);
++  if (!hsepOff('c'))
+   mipdata.cliquetable.separateCliques(
+       lp->getMipSolver(), sol.col_value, mipworker_.getCutPool(),
+       mipdata.feastol,
+@@ -118,6 +133,22 @@
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->stop(cliqueClock);
+ 
++  hpc = mipworker_.getCutPool().getNumCuts() - hp0;
++  if (hlog && getenv("HSEP_DUMP")) {
++    const HighsCutPool& cp = mipworker_.getCutPool();
++    const auto& M = cp.getMatrix();
++    for (HighsInt r = hp0; r < hp0 + hpc; ++r) {
++      double act = 0;
++      fprintf(stderr, "HSEP clqcut len %d rhs %g :", (int)(M.getRowEnd(r) - M.getRowStart(r)), cp.getRhs()[r]);
++      for (HighsInt k = M.getRowStart(r); k < M.getRowEnd(r); ++k) {
++        HighsInt j = M.getARindex()[k];
++        act += M.getARvalue()[k] * sol.col_value[j];
++        fprintf(stderr, " %s:%g(%.3f)", lp->getMipSolver().model_->col_names_.empty() ? "?" : lp->getMipSolver().model_->col_names_[j].c_str(), M.getARvalue()[k], sol.col_value[j]);
++      }
++      fprintf(stderr, " | act %g\n", act);
++    }
++  }
++  hp0 += hpc;
+   numboundchgs = propagateAndResolve();
+   if (numboundchgs == -1)
+     return 0;
+@@ -137,8 +168,12 @@
+   }
+   HighsLpAggregator lpAggregator(*lp);
+ 
++  int hk = 0;
+   for (const std::unique_ptr<HighsSeparator>& separator : separators) {
++    const char hc = "tpm"[hk];
++    if (!hsepOff(hc))
+     separator->run(*lp, lpAggregator, transLp, mipworker_.getCutPool());
++    hps[hk] = mipworker_.getCutPool().getNumCuts() - hp0; hp0 += hps[hk]; ++hk;
+     if (mipworker_.getGlobalDomain().infeasible()) {
+       status = HighsLpRelaxation::Status::kInfeasible;
+       return 0;
+@@ -159,6 +194,7 @@
+                                   mipdata.feastol, mipdata.cutpools, true);
+   }
+ 
++  const HighsInt hset = cutset.numCuts();
+   if (cutset.numCuts() > 0) {
+     ncuts += cutset.numCuts();
+     lp->addCuts(cutset);
+@@ -175,6 +211,10 @@
+     }
+   }
+ 
++  if (hlog)
++    fprintf(stderr, "HSEP round: obj %.6f -> %.6f pool+ impl %d clq %d tab %d path %d modk %d; to LP %d; pool %d\n",
++            hobj0, lp->getObjective(), (int)hpi, (int)hpc, (int)hps[0], (int)hps[1], (int)hps[2], (int)hset,
++            (int)mipworker_.getCutPool().getNumCuts());
+   return ncuts;
+ }
+ 
