@@ -951,6 +951,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) tsd: [u64; 6],
     /// 診断の前回の出力の (秒, ノードの LP の数, 反復, 行の和, ノードの分離の秒)
     pub(super) tsd_last: (f64, u64, u64, u64, f64),
+    /// 診断 `ENOMOTO_MIP_DENSECUT_DIAG` (analysis/densecut_20261113.md): [ノードの分離で加えた行, その非零の和,
+    /// ノードの LP の数 (数えた回), 根の後に入ったカットの行の和, その非零の和, カットの行の非零の和 (全部), 伸びの比の和 (打ち切りは 1),
+    /// 伸びを測った回, 密と判定されて深さの規則で始めたラウンド, 密の判定で止めた回 (始め・続き)]
+    pub(super) dcd: [f64; 10],
     /// `ENOMOTO_MIP_TREESEP2` の b: 探索全体の下界の最良値と、それが (打ち切り値までの差の 1% を超えて) 最後に伸びた時刻
     pub(super) ts2_glb: (f64, f64),
     /// `ENOMOTO_MIP_TREESEP2` の b・c で分離したノードの数
@@ -4850,6 +4854,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         ts_rows0: 0,
         tsd: [0; 6],
         tsd_last: (0.0, 0, 0, 0, 0.0),
+        dcd: [0.0; 10],
         ts2_glb: (f64::NEG_INFINITY, 0.0),
         ts2_forced: 0,
         ts2_id0: u64::MAX,
@@ -5202,6 +5207,11 @@ static GAP1_ROOT_X: std::sync::Mutex<Option<std::sync::Arc<Vec<f64>>>> = std::sy
 #[inline]
 fn gap1_proof_tol(rhs: f64) -> f64 {
     if super::pseudocost::gap1().contains('p') { 1e-6 * (1.0 + 1e-3 * rhs.abs()) } else { 1e-6 * (1.0 + rhs.abs()) }
+}
+
+/// 診断 `ENOMOTO_MIP_DENSECUT_DIAG` (analysis/densecut_20261113.md)
+pub(super) fn densecut_diag() -> bool {
+    env_str!("ENOMOTO_MIP_DENSECUT_DIAG").is_some()
 }
 
 fn tree_log() -> bool {
@@ -6061,6 +6071,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
         l
     }
 
+    /// 診断 `ENOMOTO_MIP_DENSECUT_DIAG`: ノードの LP ごとに、根の後に入ったカットの行と非零、カットの行の非零を足し込む
+    pub(super) fn densecut_sample(&mut self) {
+        let m0 = self.p.m;
+        let (mut nr, mut nz, mut call) = (0usize, 0usize, 0usize);
+        for (k, &id) in self.cut_ids.iter().enumerate() {
+            if m0 + k >= self.lp.num_rows() {
+                break;
+            }
+            let l = self.lp.row_ref(m0 + k).len();
+            call += l;
+            if id >= self.ts2_id0 {
+                nr += 1;
+                nz += l;
+            }
+        }
+        self.dcd[2] += 1.0;
+        self.dcd[3] += nr as f64;
+        self.dcd[4] += nz as f64;
+        self.dcd[5] += call as f64;
+    }
+
     /// 診断 `ENOMOTO_MIP_TREESEP_DIAG=秒` (既定では出さない): スレッドごとに、前回からの間のノードの LP の平均の行数・反復、
     /// 木の分離のラウンド・加えた行、LP のカットの行 (うち木の分離で加えたもの)、年齢で外した行、探索全体の下界を出す
     pub(super) fn treesep_diag(&mut self) {
@@ -6216,6 +6247,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return depth_rule;
         }
         if self.nca_dense() {
+            if densecut_diag() {
+                self.dcd[8] += depth_rule as u8 as f64;
+                self.dcd[9] += 1.0;
+            }
             return depth_rule;
         }
         // `ENOMOTO_T_MIP_TREE_SEP_HEAVY` = h (> 0): LP の行が最初の取り出したノードの h 倍を超えて重くなったら、毎回分離するのに
@@ -11447,6 +11482,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let ok = match st {
                         LpStatus::Infeasible | LpStatus::ObjectiveBound => {
                             self.nca_hist[0] += 1;
+                            if densecut_diag() {
+                                self.dcd[6] += 1.0;
+                                self.dcd[7] += 1.0;
+                            }
                             true
                         }
                         LpStatus::Optimal => {
@@ -11455,6 +11494,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let gap = if lim.is_finite() { (lim - o0).max(1e-9) } else { o0.abs().max(1.0) };
                             let r = (o - o0) / gap;
                             self.nca_hist[if o >= lim { 0 } else if r < 0.02 { 1 } else if r < 0.1 { 2 } else if r < 0.3 { 3 } else { 4 }] += 1;
+                            if densecut_diag() {
+                                self.dcd[6] += if o >= lim { 1.0 } else { r.clamp(0.0, 1.0) };
+                                self.dcd[7] += 1.0;
+                            }
                             o >= lim || o - o0 >= tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_GAIN", 0.02, f64) * gap
                         }
                         _ => false,
@@ -11507,6 +11550,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 self.node_lps += 1;
                 self.node_lp_rows += self.lp.num_rows() as u64;
+                if densecut_diag() && !self.params.submip {
+                    self.densecut_sample();
+                }
                 if self.node_lps % 32 == 0 && !self.params.submip {
                     self.treesep_diag();
                 }
@@ -22232,6 +22278,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`: このスレッドの分離器ごとの集計 (根の分は根のループの終わりに出している)
         if self.sl.stat && !self.params.submip && self.sl.st[1].iter().any(|e| e.cands > 0) {
             eprint!("{}", self.sl.report(&format!("tree t{}", self.pool_tid)));
+        }
+        // `ENOMOTO_MIP_DENSECUT_DIAG`: スレッドごとのノードのカットの密度・LP の重さ・伸び (analysis/densecut_20261113.md)
+        if !self.params.submip && densecut_diag() {
+            let d = &self.dcd;
+            let rowavg = self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / self.p.m.max(1) as f64;
+            let orig_nnz: usize = self.p.rows.iter().map(|r| r.len()).sum();
+            let nl = d[2].max(1.0);
+            eprintln!(
+                "DENSECUT tid {} nodes {} lps {} rows/lp {:.1} it/lp {:.1} lpsecs {:.3} cutsecs {:.3} | rounds {} added {} | ncuts {} nnz/cut {:.1} rowavg {:.2} m {} orignnz {} | post rows/lp {:.1} post nnz/lp {:.0} cut nnz/lp {:.0} | gain n {} mean {:.4} hist {:?} | dense depth {} dense hits {} ema {:?} n {}",
+                self.pool_tid, self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_cut_secs,
+                self.node_sep_stats[0], self.node_sep_stats[1], d[0], d[1] / d[0].max(1.0), rowavg, self.p.m, orig_nnz,
+                d[3] / nl, d[4] / nl, d[5] / nl, d[7], d[6] / d[7].max(1.0), self.nca_hist, d[8], d[9], self.nca_cut_nnz, self.p.n
+            );
         }
         // `ENOMOTO_MIP_NCA_DIAG`: 木の従のスレッドの分も出す (診断用)
         if !self.params.verbose && !self.params.submip && env_str!("ENOMOTO_MIP_NCA_DIAG").is_some() {
