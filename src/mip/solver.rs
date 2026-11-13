@@ -2900,6 +2900,14 @@ pub(super) fn treeeff(c: char) -> bool {
 /// `ENOMOTO_T_MIP_TRNOFIX_ALLOW` で通した固定の少ない木の中の再スタートの数 (過程全体、試作)
 static TRNOFIX_PASSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// `ENOMOTO_MIP_TRNOFIX=g` で前に通した固定の少ない木の中の再スタートの時点の (根の下界, 暫定解) (元の問題の尺度、試作)
+static TRNOFIX_PREV: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+
+/// `ENOMOTO_MIP_TRNOFIX=g` (試作): 固定の少ない木の中の再スタートを、1 回目は通し、その後の根の下界が伸びなければ止める
+fn trnofix_gain_mode() -> bool {
+    env_str!("ENOMOTO_MIP_TRNOFIX").is_some_and(|v| v.contains('g'))
+}
+
 fn trnofix_on() -> bool {
     env_str!("ENOMOTO_MIP_TRNOFIX").is_some_and(|v| v != "0")
 }
@@ -21401,7 +21409,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_T_MIP_TRNOFIX_ALLOW` = k (既定 0): 固定の少ない再スタートを、この過程で k 回までは通す (rococoC10-001000 は 144 秒の
                 // 固定 0 列・効くカット 188 本の 1 回目の再スタートで下界が伸び、止めると 600 秒の下界が 11071 → 10450 に下がった。supportcase26 は 60 秒で 2〜4 回続く)
                 let allow = tunable!("ENOMOTO_T_MIP_TRNOFIX_ALLOW", 0usize, usize);
-                if TRNOFIX_PASSED.load(std::sync::atomic::Ordering::Relaxed) < allow {
+                if trnofix_gain_mode() {
+                    // `ENOMOTO_MIP_TRNOFIX=g` (試作): 固定の少ない再スタートの 1 回目は通し、2 回目からは、前に通した再スタートの後の根の下界の伸び
+                    // (今の求解の根の下界 − 前の求解の根の下界) が、前に通した時点のギャップ (暫定解 − 前の求解の根の下界) の
+                    // `ENOMOTO_T_MIP_TRNOFIX_GAIN` (0.05) 倍に満たなければ止める (rococoC10-001000 は 1 回目 26%・2 回目 12%・3 回目 1.7%、
+                    // supportcase26 は 1.5%・0.9%・1.4%)。値は前処理の定数を足した元の問題の尺度で比べる
+                    let off = self.p.offset;
+                    let (rb, ubo) = (self.tr_root_lb + off, ub + off);
+                    let mut g = TRNOFIX_PREV.lock().unwrap();
+                    let pass = match *g {
+                        None => true,
+                        Some((rb0, ub0)) => {
+                            let den = if ub0.is_finite() { (ub0 - rb0).max(1e-9 * ub0.abs().max(1.0)) } else { rb0.abs().max(1.0) };
+                            let gain = (rb - rb0) / den;
+                            let ok = gain >= tunable!("ENOMOTO_T_MIP_TRNOFIX_GAIN", 0.05, f64);
+                            if log {
+                                eprintln!("MIP: TRNOFIX g: root lb {rb0:.10e} -> {rb:.10e} after the last pass (gap {den:.4e}), gain {gain:.4}; {}", if ok { "pass" } else { "stop" });
+                            }
+                            ok
+                        }
+                    };
+                    if pass {
+                        *g = Some((rb, ubo));
+                    } else {
+                        stop = Some('z');
+                    }
+                } else if TRNOFIX_PASSED.load(std::sync::atomic::Ordering::Relaxed) < allow {
                     TRNOFIX_PASSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 } else {
                     stop = Some('z');

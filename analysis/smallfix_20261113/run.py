@@ -15,7 +15,7 @@ mine = json.loads((D / f"shards_{SET}.json").read_text())["shards"][k]
 OUT = D / f"res_{SET}_s{k}.jsonl"
 LOGD = D / f"logs_{SET}"
 LOGD.mkdir(exist_ok=True)
-KEEP = re.compile(r"clique fallback|TREE restart|tree restart|TRSTAT|restart check|MIP: restart \d|root LP -?\d|presolve:")
+KEEP = re.compile(r"clique fallback|TRNOFIX|TREE restart|tree restart|TRSTAT|restart check|MIP: restart \d|root LP -?\d|presolve:")
 done = set()
 if OUT.exists():
     for l in OUT.read_text().splitlines():

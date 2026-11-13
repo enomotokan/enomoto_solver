@@ -20,3 +20,10 @@ python analysis/smallfix_20261113/run.py {P|H} K              # 途中から再�
   再スタートと clique fallback の行だけのログは `logs_{P|H}/<問題>.<設定>.s<種>.txt.gz`。両方をコミットする
   (名指しの git add、`git pull --rebase --autostash` の後 push)。
 - 誤答の確かめは `bash analysis/smallfix_20261113/fuzz.sh` (このセッションで回す)。
+
+## 追加: d1g (2026-11-13、`ENOMOTO_MIP_TRNOFIX=g`)
+
+- Q (58 問 x 種 1〜3 x {base, d1g} 60 秒): 3 分担 (K = 0〜2、見積り各 1.19 時間、`plan_q.py`)。`python analysis/smallfix_20261113/run.py Q K`。
+  コンテナの再起動などで止まっても、同じ命令で `res_Q_sK.jsonl` の済んだ回を飛ばして続きから再開する。
+- 手元: `run.py L2 0` (supportcase26・timtab1・noswot x 種 1〜3 x {base, d1, d1g} 60 秒と rococoC10-001000 x 種 1・2 x {d1g, base} 600 秒)、
+  `FUZZCFG=d1g bash analysis/smallfix_20261113/fuzz.sh`。
