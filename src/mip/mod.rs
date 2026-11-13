@@ -3485,7 +3485,11 @@ fn tree2_forceq_rows(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64],
             hi += u;
             mag += l.abs() + u.abs();
         }
-        let tol = 1e-9 * mag.max(1.0);
+        // 一致の許容誤差は絶対値 1e-9 (和の丸めの分だけ `mag` に比例して広げる)。以前は `1e-9 * mag` で、unitcal_7 (DUALEQ が
+        // `x_a + x_b - 1000 y <= 0` を等式にした行、x_b の上限 1.002e-6) で上限との差 1.002e-6 を一致と見なし、y = 1 で
+        // `x_b = 1.002e-6` と決めつけて実行可能な点 (x_b = 0, x_a = 1000) を切り、根の LP が実行不能になった
+        // (analysis/review2_20261113.md の誤答の節)
+        let tol = 1e-9f64.max(8.0 * f64::EPSILON * mag);
         let (r0, r1) = (b, b - ay);
         // `y = 0` で下側に強制されるか (`r0 = L`, `r1 = U`)、上側か (`r0 = U`, `r1 = L`)
         let low_at_0 = if (r0 - lo).abs() <= tol && (r1 - hi).abs() <= tol {
@@ -7880,6 +7884,19 @@ fn merge_parallel_rows(rows: &mut Vec<Vec<(usize, f64)>>, row_lo: &mut Vec<f64>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TREE2_FORCEQ ([`tree2_forceq_rows`]): 本当に強制される行 (`x_a + x_b = 1000 y`、x_a・x_b ∈ [0, 500]) は 2 項等式を作り、
+    /// 上限との差が小さいだけの行 (x_b の上限 1.002e-6、unitcal_7 の DUALEQ の後の行) は作らない (作ると y = 1, x_b = 0 の点を切る)
+    #[test]
+    fn tree2_forceq_rejects_near_forcing_rows() {
+        let rows = vec![vec![(0, -1000.0), (1, 1.0), (2, 1.0)]];
+        let is_int = vec![true, false, false];
+        let eqs = tree2_forceq_rows(&rows, &[0.0], &[0.0], &[0.0, 0.0, 0.0], &[1.0, 500.0, 500.0], &is_int);
+        assert_eq!(eqs.len(), 2);
+        assert!(eqs.iter().all(|(r, rhs)| *rhs == 0.0 && r.contains(&(0, -500.0))));
+        let eqs = tree2_forceq_rows(&rows, &[0.0], &[0.0], &[0.0, 0.0, 0.0], &[1.0, 1000.0, 1.001999987900842e-06], &is_int);
+        assert!(eqs.is_empty(), "{eqs:?}");
+    }
 
     /// 後処理した解を境界に収める ([`postsolve_clip`]): 費用の大きい列が許容誤差の中で下限 0 を下回る (-1.2e-8) と目的値が
     /// 0.012 下がる (binkar10_1)。収めると目的値は正しい値に戻る。収めると行を許容誤差を越えて破る解は収めない
