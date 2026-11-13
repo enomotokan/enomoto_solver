@@ -6,7 +6,7 @@ D = Path(__file__).resolve().parent
 SET = sys.argv[1] if len(sys.argv) > 1 else "P"
 rows = [json.loads(l) for f in sorted(glob.glob(str(D / f"res_{SET}_s*.jsonl"))) for l in open(f) if l.strip()]
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
-CF = [c for c in ("base", "c1", "c2", "c12") if any(k[1] == c for k in R)]
+CF = [c for c in ("base", "c1", "c2", "c12", "c12h") if any(k[1] == c for k in R)]
 def solved(r): return r["result"].get("status") in ("optimal", "infeasible")
 def t(r): return min(r["result"]["time"], r["tl"]) if solved(r) else r["tl"]
 probs = sorted({p for p, c, s in R}); seeds = sorted({s for p, c, s in R})
@@ -43,7 +43,7 @@ for c in CF[1:]:
         v = logr[p]
         if len(v) >= 2 and all(x > math.log(1.25) for x in v): print("   遅", p, [round(math.exp(x), 2) for x in v])
         if len(v) >= 2 and all(x < math.log(0.8) for x in v): print("   速", p, [round(math.exp(x), 2) for x in v])
-if SET == "H":
+if SET in ("H", "G"):
     print("\n| 問題 | " + " | ".join(f"{c} 状態 / 秒 / 暫定解 / 下界" for c in CF) + " |")
     print("|---|" + "---|" * len(CF))
     for p in probs:

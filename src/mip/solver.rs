@@ -16552,6 +16552,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     ///   乱択丸めで −2692 (ギャップ 7.3%) を得て、それを上限にした目的のプロービングで根を閉じる (analysis/highsloss2_20261113.md)。
     ///   乱択丸めの時間の合計は時間上限の `ENOMOTO_T_MIP_OBJPROBE_RR_TIME_FRAC` (既定 0.02) 倍まで、ラウンド `ENOMOTO_T_MIP_OBJPROBE_RR_ROUNDS`
     ///   (既定 10) 回目まで。
+    /// - `h`: `r` の一般化。軽いヒューリスティクスの束 ([`Self::objprobe_heur_bundle`]) を回す (`r` と一緒なら乱択丸めは束の中だけ)。
     /// - `p` (C1): 打ち切り値があり、LP とのギャップが `ENOMOTO_T_MIP_OBJPROBE_GAP` (既定 0.1) 以下なら、LP で分数値の 0-1 列のうち
     ///   今の打ち切り値でまだ試していないものを目的の伝播つきでプロービングする ([`Self::obj_probe_core`]、HiGHS の
     ///   `separateImpliedBounds` と同じく 1 列 1 回、打ち切り値が良くなったら試し直す)。1 回に `ENOMOTO_T_MIP_OBJPROBE_MAX_COLS` 列
@@ -16579,8 +16580,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             (cut_z - lp_z).max(0.0) / cut_z.abs().max(lp_z.abs()).max(1.0)
         };
-        // C2: 乱択丸め
-        if v.contains('r')
+        // `h`: 軽いヒューリスティクスの束 (乱択丸めを含む、`r` の一般化)
+        if v.contains('h') {
+            self.objprobe_heur_bundle(round, tl);
+        }
+        // C2: 乱択丸め (`h` があれば束の中で行う)
+        if v.contains('r') && !v.contains('h')
             && round < tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_ROUNDS", 10usize, usize)
             && self.objp.rr_secs < tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_TIME_FRAC", 0.02, f64) * tl
             && (self.incumbent.is_none() || rel_gap(self) > tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_GAP", 0.02, f64))
@@ -16680,6 +16685,110 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if both { ", no solution better than the cutoff" } else { "" },
                 self.lp.objective() + p.offset,
                 self.objp.secs,
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    /// [`Self::objprobe_round`] の `h` (試作): そのラウンドの LP 解で軽いヒューリスティクス (1 回あたり非零数程度の手間のもの) を束で回す:
+    /// 単純丸め・ZI 丸め (`ENOMOTO_MIP_NO_ZIROUND` で外す)・lock 丸め・シフト・整数シフト (`ENOMOTO_MIP_SHIFT_HEURS` が使うとき)・
+    /// 自明な解 (暫定解がないとき)・乱択丸め (`ENOMOTO_T_MIP_OBJPROBE_RR_TRIES` 回)。丸めの伝播の手間の上限は `r` と同じく非零数の
+    /// `ENOMOTO_T_MIP_OBJPROBE_RR_WORK` (200) 倍。回す条件:
+    /// - 暫定解がないか、暫定解と LP の相対ギャップが `ENOMOTO_T_MIP_OBJPROBE_RR_GAP` (0.02) を越える
+    /// - 前に束を回した LP 解から動いている: 分数値の整数列の集合が変わったか、整数列の |x - x_前| の和が `ENOMOTO_T_MIP_OBJPROBE_H_MOVE`
+    ///   (1.0) 以上 (初回は回す)。hypothyroid-k1 では round 0 → 1 の動きは和 10.6 (分数の列 2434 本) だが、round 1 の乱択丸めで最適解が出る
+    ///   ので、分数の列の数に比べた閾値にはしない
+    /// - 束の時間の合計が、求解の始めからの経過時間の `ENOMOTO_T_MIP_OBJPROBE_H_FRAC` (0.05) 倍 + `ENOMOTO_T_MIP_OBJPROBE_H_BASE_SECS` (2 秒) 以下、かつ時間上限の
+    ///   `ENOMOTO_T_MIP_OBJPROBE_H_TIME_FRAC` (0.03) 倍以下 (初回は回す)
+    fn objprobe_heur_bundle(&mut self, round: usize, tl: f64) {
+        let p = self.p;
+        if round == 0 {
+            self.objp.h_prev_x.clear();
+        }
+        let lp_z = self.lp.objective() + p.offset;
+        if let Some((z, _)) = self.incumbent.as_ref() {
+            let gap = (z - lp_z).max(0.0) / z.abs().max(lp_z.abs()).max(1.0);
+            if !(gap > tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_GAP", 0.02, f64)) {
+                return;
+            }
+        }
+        let x = self.lp.col_values();
+        let nfrac = self.fractional(&x).len();
+        if nfrac == 0 {
+            return;
+        }
+        if self.objp.h_calls > 0 {
+            let el = self.start.elapsed().as_secs_f64();
+            let allow = tunable!("ENOMOTO_T_MIP_OBJPROBE_H_FRAC", 0.05, f64) * el + tunable!("ENOMOTO_T_MIP_OBJPROBE_H_BASE_SECS", 2.0, f64);
+            if self.objp.h_secs > allow || self.objp.h_secs > tunable!("ENOMOTO_T_MIP_OBJPROBE_H_TIME_FRAC", 0.03, f64) * tl {
+                self.objp.h_skip_time += 1;
+                if self.params.verbose {
+                    eprintln!("MIP: OBJPROBE h: round {round}: skipped (time {:.2}s)", self.objp.h_secs);
+                }
+                return;
+            }
+        }
+        if self.objp.h_prev_x.len() == p.n {
+            let px = &self.objp.h_prev_x;
+            let mv: f64 = (0..p.n).filter(|&j| p.is_int[j]).map(|j| (x[j] - px[j]).abs()).sum();
+            let isf = |v: f64| (v - v.round()).abs() > FEASTOL;
+            let same_set = (0..p.n).filter(|&j| p.is_int[j]).all(|j| isf(x[j]) == isf(px[j]));
+            let thr = tunable!("ENOMOTO_T_MIP_OBJPROBE_H_MOVE", 1.0, f64);
+            if mv < thr && same_set {
+                self.objp.h_skip_move += 1;
+                if self.params.verbose {
+                    eprintln!("MIP: OBJPROBE h: round {round}: skipped (LP solution moved {mv:.3} < {thr:.3})");
+                }
+                return;
+            }
+        }
+        let t0 = Instant::now();
+        let before = self.incumbent.as_ref().map(|(z, _)| *z);
+        self.objp.work_mult = tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_WORK", 200u64, u64);
+        let mut found: Vec<&str> = Vec::new();
+        if self.simple_rounding(&x) {
+            found.push("simple");
+        }
+        if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() && self.zi_round(&x) {
+            found.push("ZI");
+        }
+        if shift_heurs_on() {
+            if self.lock_rounding(&x) {
+                found.push("rounding");
+            }
+            if self.shifting(&x) {
+                found.push("shifting");
+            }
+            if shift_heurs_int() && self.int_shifting(&x) {
+                found.push("int shifting");
+            }
+        }
+        // 自明な解は初回だけ、伝播の手間の上限は既定のまま (4 通りの全列の固定で重い)
+        if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_TRIVIAL").is_none() && self.objp.h_calls == 0 {
+            self.objp.work_mult = 0;
+            if self.trivial() {
+                found.push("trivial");
+            }
+            self.objp.work_mult = tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_WORK", 200u64, u64);
+        }
+        if !self.time_up() && self.randomized_rounding(&x, tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_TRIES", 2usize, usize)) {
+            found.push("randomized rounding");
+        }
+        self.objp.work_mult = 0;
+        let dt = t0.elapsed().as_secs_f64();
+        self.objp.h_secs += dt;
+        self.objp.h_calls += 1;
+        self.objp.h_found += !found.is_empty() as usize;
+        self.objp.h_prev_x = x;
+        if self.params.verbose {
+            eprintln!(
+                "MIP: OBJPROBE h: round {round}: {} fractional, found {found:?} (incumbent {before:?} -> {:?}, {dt:.2}s, total {:.2}s in {} calls, skipped move {} time {}, {:.2}s)",
+                nfrac,
+                self.incumbent.as_ref().map(|(z, _)| *z),
+                self.objp.h_secs,
+                self.objp.h_calls,
+                self.objp.h_skip_move,
+                self.objp.h_skip_time,
                 self.start.elapsed().as_secs_f64()
             );
         }
@@ -22069,6 +22178,12 @@ pub(super) struct ObjProbeState {
     rr_secs: f64,
     rr_calls: usize,
     rr_found: usize,
+    h_prev_x: Vec<f64>,
+    h_secs: f64,
+    h_calls: usize,
+    h_found: usize,
+    h_skip_move: usize,
+    h_skip_time: usize,
     /// 0 でなければ、丸めの伝播 ([`Solver::propagate_rounding_from`]) の手間の上限を非零数のこの倍にする (既定は 20 倍)
     pub(super) work_mult: u64,
 }

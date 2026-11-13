@@ -10,6 +10,10 @@ WT = D.parents[1]
 sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
 NP, NH = int(sys.argv[1]), int(sys.argv[2])
+# 3 番目の引数が h なら h の確かめの組: Q (58 問 × 種 1〜3 × {base, c12, c12h} 60 秒) と G (12 問 × 種 1 × {base, c12, c12h} 600 秒)
+HSET = len(sys.argv) > 3 and sys.argv[3] == "h"
+CP, CH = (("base", "c12", "c12h"),) * 2 if HSET else (("base", "c1", "c2", "c12"), ("base", "c12"))
+OP, OH = ("shards_Q.json", "shards_G.json") if HSET else ("shards_P.json", "shards_H.json")
 def balance(groups, est, n, out, tl):
     gl = sorted(groups.items(), key=lambda kv: -sum(est(t[0]) for t in kv[1]))
     load = [0.0] * n; shards = [[] for _ in range(n)]
@@ -24,8 +28,8 @@ for f in glob.glob(str(WT / "analysis/cand1114_20261113/res_P_s*.jsonl")):
         if r["cfg"] == "cand1114":
             TP[r["problem"]].append(min(r.get("wall") or 70.0, 75.0))
 estP = lambda p: (sum(TP[p]) / len(TP[p]) if TP[p] else 70.0) + 2  # noqa: E731
-gP = {(p, s): [(p, c, s) for c in ("base", "c1", "c2", "c12")] for p in PROBS for s in (1, 2, 3)}
-balance(gP, estP, NP, "shards_P.json", 60)
+gP = {(p, s): [(p, c, s) for c in CP] for p in PROBS for s in (1, 2, 3)}
+balance(gP, estP, NP, OP, 60)
 HL = sorted({p for s in json.loads((WT / "analysis/highsloss_20261113/shards.json").read_text())["shards"] for p, _ in s})
 TH = defaultdict(list)
 for f in glob.glob(str(WT / "analysis/highsloss_20261113/res_s*.jsonl")):
@@ -34,5 +38,5 @@ for f in glob.glob(str(WT / "analysis/highsloss_20261113/res_s*.jsonl")):
         if r.get("cfg") == "cand":
             TH[r["problem"]].append(min(r.get("wall") or 650.0, 660.0))
 estH = lambda p: (sum(TH[p]) / len(TH[p]) if TH[p] else 650.0) + 10  # noqa: E731
-gH = {p: [(p, c, 1) for c in ("base", "c12")] for p in HL}
-balance(gH, estH, NH, "shards_H.json", 600)
+gH = {p: [(p, c, 1) for c in CH] for p in HL}
+balance(gH, estH, NH, OH, 600)

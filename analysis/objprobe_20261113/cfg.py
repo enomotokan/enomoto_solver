@@ -12,4 +12,5 @@ CFGS = {
     "c1": dict(CAND1114, ENOMOTO_MIP_OBJPROBE="pc"),
     "c2": dict(CAND1114, ENOMOTO_MIP_OBJPROBE="r"),
     "c12": dict(CAND1114, ENOMOTO_MIP_OBJPROBE="rpc"),
+    "c12h": dict(CAND1114, ENOMOTO_MIP_OBJPROBE="rpch"),   # h = 軽いヒューリスティクスの束 (追加の試作)
 }
