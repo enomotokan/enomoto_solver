@@ -991,6 +991,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         symdyn::reset();
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
         EQUIV2_USED.with(|f| f.set(false));
+        CLQPRB_STICKY.with(|f| f.set(false));
         zerohalf::zh_trial_reset();
         cutmix::reset();
     }
@@ -5537,6 +5538,19 @@ pub(crate) fn clqprb_has(c: char) -> bool {
     env_str!("ENOMOTO_MIP_CLQPRB").is_some_and(|v| v.contains(c))
 }
 
+thread_local! {
+    /// `ENOMOTO_MIP_CLQPRB` の `n`・`g` (試作、analysis/prbimp_20261113.md): 既定の形でプロービングを回す間だけ立てる
+    /// (このあいだ [`probe`] は `CLQPRB` を使わない)
+    static CLQPRB_SUPPRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// `ENOMOTO_MIP_CLQPRB` の `g`: 既定の形で何か得られたので、含意を使う形でやり直す間だけ立てる (このあいだ `g` の判定をしない)
+    static CLQPRB_FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// `ENOMOTO_MIP_CLQPRB` の `g`: この求解で一度含意を使う形に切り替えたら、後のプロービング (前処理のかけ直し・再スタート) でも判定せずに使う
+    /// (neos8 は 2 回目のプロービングで既定の形では同値な組が 0 組、含意を使うと 1152 組)。求解の始めに戻す
+    static CLQPRB_STICKY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 最後の [`probe`] の成果 (固定, 締め付け, 同値な組)。`ENOMOTO_MIP_CLQPRB` の `g` の判定に使う
+    static PROBE_GAIN: std::cell::Cell<(usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0)) };
+}
+
 /// 試作 `ENOMOTO_MIP_PREPAR` (既定では使わない。analysis/prepar_20261107.md): 前処理の並列化。値の文字で選ぶ
 /// (`p`: 含意を集めるプロービング ([`probe`]) の候補を投機的に並べる、`e`: プロービングの同値な組の巡を並べる、
 /// `l`: LP による固定 ([`lp_probe`]) の 1 巡の列の試しを並べる)
@@ -5592,7 +5606,40 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // `ENOMOTO_T_MIP_CLQPRB_EDGE_MULT` 倍 (既定 40) と `ENOMOTO_T_MIP_CLQPRB_EDGE_MAX` 本 (既定 600 万) の小さい方にする (非零数の 10 倍は下回らない)。
     // 上限に届いたら重複を除いて詰める (2 巡目は同じ含意をもう一度集めるので、重複込みで数えると上限に早く届く)。mzzv11 は 10 倍 (136 万本) では
     // 足りず、後ろの候補の含意が落ちて、含意を使う伝播で見つかるはずの固定 (HiGHS の probing の固定の大半) を逃していた
-    let clqprb = clqprb_on() && !submip;
+    let clqprb = clqprb_on() && !submip && !CLQPRB_SUPPRESS.with(|f| f.get());
+    // `ENOMOTO_MIP_CLQPRB` の `g` (試作、analysis/prbimp_20261113.md): まず既定の形でプロービングを回し、固定・締め付け・同値な組が
+    // `ENOMOTO_T_MIP_CLQPRB_G_MIN` (既定 1) 個以上出たときだけ、問題を元に戻して含意を使う形でやり直す。何も得られない問題
+    // (roll3000・cbs-cta・air03・nw04 など。含意を使っても固定は出ず、含意の数・同値な組・プロービングの時間だけが変わって後の流れが変わる) では
+    // 既定とまったく同じになり、余分な時間もかからない。得られた問題では既定の形の分の時間が余分にかかる
+    if clqprb && clqprb_has('g') && !CLQPRB_FORCE.with(|f| f.get()) && !CLQPRB_STICKY.with(|f| f.get()) {
+        let saved = prob.clone();
+        let flags = (PROBE_EQUIV_FORCE.with(|f| f.get()), EQUIV2_USED.with(|f| f.get()));
+        let tg = std::time::Instant::now();
+        CLQPRB_SUPPRESS.with(|f| f.set(true));
+        PROBE_GAIN.with(|f| f.set((0, 0, 0)));
+        let r = probe(prob, verbose, submip);
+        CLQPRB_SUPPRESS.with(|f| f.set(false));
+        let (gf, gt, ge) = PROBE_GAIN.with(|f| f.get());
+        if r == Some(false) || gf + gt + ge < tunable!("ENOMOTO_T_MIP_CLQPRB_G_MIN", 1usize, usize) {
+            return r;
+        }
+        if verbose {
+            eprintln!("MIP: probing: CLQPRB=g: the default probing found {gf} fixed, {gt} tightened, {ge} equivalent pairs ({:.2}s); redoing it with the implications", tg.elapsed().as_secs_f64());
+        }
+        *prob = saved;
+        PROBE_EQUIV.with(|e| e.borrow_mut().clear());
+        PROBE_EQUIV_FORCE.with(|f| f.set(flags.0));
+        EQUIV2_USED.with(|f| f.set(flags.1));
+        CLQPRB_FORCE.with(|f| f.set(true));
+        CLQPRB_STICKY.with(|f| f.set(true));
+        let r = probe(prob, verbose, submip);
+        CLQPRB_FORCE.with(|f| f.set(false));
+        return r;
+    }
+    // `ENOMOTO_MIP_CLQPRB` の `n` (試作、analysis/prbimp_20261113.md): 何も固定・締め付けられなければ既定の形でやり直すので、
+    // 引き継いだ含意の写しを残しておく
+    let clqprb_n = clqprb && clqprb_has('n');
+    let edges_in: Vec<(u32, u32)> = if clqprb_n { prob.conflict_edges.clone() } else { Vec::new() };
     let edge_cap = if clqprb {
         (tunable!("ENOMOTO_T_MIP_CLQPRB_EDGE_MULT", 40usize, usize) * nnz).min(tunable!("ENOMOTO_T_MIP_CLQPRB_EDGE_MAX", 6_000_000usize, usize)).max(10 * nnz) + 10_000
     } else {
@@ -6049,6 +6096,25 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             break;
         }
     }
+    // `ENOMOTO_MIP_CLQPRB` の `n` (試作、analysis/prbimp_20261113.md): 含意を使っても何も固定・締め付けられなければ (固定・締め付けの数が
+    // 候補の `ENOMOTO_T_MIP_CLQPRB_N_FRAC` (既定 0) 以下なら)、集めた含意・同値な組を捨てて既定の形でプロービングをやり直す。
+    // roll3000・cbs-cta は含意を使っても何も固定できず、増えた含意 (クリークのグラフ・implied bound) と同値な組 (cbs-cta の 3 組) で後の流れだけが変わって遅くなった。
+    // やり直しの分の時間 (何も固定できない間の上限 `ENOMOTO_T_MIP_PROBE_ADAPT_TIME0` 秒まで) が余分にかかる
+    if clqprb_n && ((fixed + tightened) as f64) <= tunable!("ENOMOTO_T_MIP_CLQPRB_N_FRAC", 0.0, f64) * cands.len() as f64 {
+        if verbose {
+            eprintln!(
+                "MIP: probing: CLQPRB=n: {probed} probed, {fixed} fixed, {tightened} tightened, {} implications, {} equivalent pairs with implications ({:.2}s); redoing the default probing",
+                edges.len(),
+                equiv.len(),
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        prob.conflict_edges = edges_in;
+        CLQPRB_SUPPRESS.with(|f| f.set(true));
+        let r = probe(prob, verbose, submip);
+        CLQPRB_SUPPRESS.with(|f| f.set(false));
+        return r;
+    }
     // `ENOMOTO_MIP_ENUM_PRESOLVE` (試作): HiGHS の Enumeration 前処理 ([`enumerate_rows`])。`=impl` ならプロービングの含意も伝播に使う
     // `ENOMOTO_MIP_HO3_ENUM` (試作、既定では使わない。analysis/highs_only_20261105/G3.md): 同じ列挙を、行の数の上限 (400 行) と
     // 空振りでやめる規則 (6 行) を外して全部の候補の行に回す (時間の上限 `ENOMOTO_T_MIP_HO3_ENUM_TIME` 秒、既定 1 秒)。
@@ -6259,6 +6325,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     }
     // 固定した列を含む含意は捨てる
     implied.retain(|&(j, _, k, _, _)| dom.lo[j as usize] < dom.up[j as usize] && dom.lo[k as usize] < dom.up[k as usize]);
+    // 診断 `ENOMOTO_MIP_DEBUG_PROBE_IMPLIED` (analysis/prbimp_20261113.md): implied bound の本数
+    if verbose && env_str!("ENOMOTO_MIP_DEBUG_PROBE_IMPLIED").is_some() {
+        eprintln!("MIP: probing: {} implied bounds kept", implied.len());
+    }
     prob.implied_bounds = implied;
     // `ENOMOTO_MIP_PROBE_STRENGTHEN`: 集めた行の置き換えを当てる (列 j が固定された行は飛ばす。固定で行から消える)
     if want_strengthen && !st_best.is_empty() {
@@ -6299,6 +6369,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             eprintln!("MIP: probing: strengthened {k} rows (PROBE_STRENGTHEN)");
         }
     }
+    PROBE_GAIN.with(|f| f.set((fixed, tightened, if want_equiv { PROBE_EQUIV.with(|e| e.borrow().len()) } else { 0 })));
     if fixed == 0 && tightened == 0 {
         return None;
     }
