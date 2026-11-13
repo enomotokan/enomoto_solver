@@ -2190,7 +2190,7 @@ thread_local! {
     pub(crate) static EQUIV2_USED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`tighten_coefficients`] が許容誤差の範囲で冗長として縮めなかった係数の数 (ログ用)
     static COEF_TIGHTEN_SKIPPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// 再スタート後の求解の前処理の間か ([`probe`] の `ENOMOTO_MIP_PROBE_EQUIV2_NORESTART` などの判定)
+    /// 再スタート後の求解の前処理の間か ([`probe`] の `ENOMOTO_MIP_PROBE_EQUIV2_RESTART` などの判定)
     static RESTART_PRESOLVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -5770,13 +5770,13 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // `ENOMOTO_MIP_PROBE_CLIQUE=equiv`: 含意は同値な列を見つけるためだけに使う (下の 2 巡目。固定・締め付け・含意の表は変えない)。
     // `ENOMOTO_MIP_PROBE_EQUIV2` (既定 1、`0` で外す。計測 23 で既定化): 同じ 2 巡目を回し、見つけた組が候補の `ENOMOTO_T_MIP_PROBE_EQUIV2_MIN_FRAC` (既定 5%) 以上のときだけ使い、
     // そのときは境界を締めていても代入まで進む ([`probe_equiv_fix`])。少なければ捨てる (既定と同じ問題になる)
-    // 再スタート後の問題でも使う (`ENOMOTO_MIP_PROBE_EQUIV2_NORESTART` で以前どおり使わない。`ENOMOTO_MIP_PROBE_EQUIV2_RESTART` は
-    // 以前の「使う」の指定で、今は既定と同じ)。以前は uccase12 の再スタート後の問題で組を代入した問題の根の LP が 12043.6 と最適値
-    // 11507.405 を越え、誤った最適値 11507.90 を返したので使わなかった。原因は組ではなく、組の後の前処理の係数の強化が、幅 1e-9 の
-    // 連続列を持つ許容誤差の範囲で冗長な行を縮めて最適解を切ったこと (analysis/equiv2_bug_20261022.md)。係数の強化の防御
-    // ([`tighten_coefficients`]) と幅の小さな列の固定 ([`fix_tiny_width_columns`]) で直っていて、再スタート後に組を使う乱数の
-    // 問題・uccase12 で誤りは出ない (analysis/eqrst_20261113.md)
-    let equiv2 = env_def!("ENOMOTO_MIP_PROBE_EQUIV2", "1").is_some() && !submip && !(RESTART_PRESOLVE.with(|f| f.get()) && env_str!("ENOMOTO_MIP_PROBE_EQUIV2_NORESTART").is_some());
+    // 再スタート後の問題では既定では使わない (`ENOMOTO_MIP_PROBE_EQUIV2_RESTART` で使う。束の候補、analysis/eqrst_20261113.md)。
+    // 以前は uccase12 の再スタート後の問題で組を代入した問題の根の LP が 12043.6 と最適値 11507.405 を越え、誤った最適値 11507.90 を
+    // 返したので外した。原因は組ではなく、組の後の前処理の係数の強化が、幅 1e-9 の連続列を持つ許容誤差の範囲で冗長な行を縮めて
+    // 最適解を切ったこと (analysis/equiv2_bug_20261022.md)。係数の強化の防御 ([`tighten_coefficients`]) と幅の小さな列の固定
+    // ([`fix_tiny_width_columns`]) で直っていて、`ENOMOTO_MIP_PROBE_EQUIV2_RESTART` で再スタート後に組を使う乱数の問題・uccase12・
+    // MIPLIB 58 問で誤りは出ない。既定にしないのは計測 (58 問 × 2 種以上) を通していないため
+    let equiv2 = env_def!("ENOMOTO_MIP_PROBE_EQUIV2", "1").is_some() && !submip && !(RESTART_PRESOLVE.with(|f| f.get()) && env_str!("ENOMOTO_MIP_PROBE_EQUIV2_RESTART").is_none());
     let pclique_equiv = (equiv2 || env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some_and(|v| v == "equiv")) && !submip;
     // 試作 `ENOMOTO_MIP_GAP4` の `q` (既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): `PROBE_CLIQUE` と同じく見つけた含意を
     // 後の列のプロービングの伝播に使う (EQUIV2 の 2 巡目は残す)。HiGHS の probing はクリークの表で伝播するので、neos-3216931-puriri では
