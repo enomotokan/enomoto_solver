@@ -151,6 +151,19 @@ pub(super) fn cutrnd(c: char) -> bool {
 /// (根のカットのループ `root_cut_loop` の停滞の判定)。値が数なら割合、ほかの値なら 1e-3。あわせて、ラウンドの上限に当たったときの延長
 /// (`ENOMOTO_MIP_CUT_ADAPT_ROUNDS` と同じ、上限 `ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP`) を、直近 5 ラウンドの伸びが今までの伸びの
 /// `ENOMOTO_T_MIP_HO6_STALL_EXT` (既定 0.01) 以上なら行う
+/// 根のカットのループの停滞の判定 (相対変化 1e-4) の分母。既定は前処理の定数項 (offset) を除いた内部の目的値
+/// (max(|obj|, |prev|, 1))。試作 `ENOMOTO_MIP_STALL_SCALE` (既定では使わない、analysis/dualeq2_20261113.md): `u` は offset を含めた
+/// 目的値 (利用者の目的値) で測る、`m` は内部の値と offset 込みの値の小さい方で測る。binkar10_1 は offset が −9.986e5 で内部の値が
+/// 1.005e6 (利用者の値 6.7e3) になり、1 周に 0.1% 伸びても毎回停滞と数えられて 6 周で止まる (offset の置き方で打ち切りが変わる)
+pub(super) fn stall_scale(obj: f64, prev: f64, off: f64) -> f64 {
+    let internal = obj.abs().max(prev.abs()).max(1.0);
+    match env_str!("ENOMOTO_MIP_STALL_SCALE") {
+        Some("u") => (obj + off).abs().max((prev + off).abs()).max(1.0),
+        Some("m") => internal.min((obj + off).abs().max((prev + off).abs()).max(1.0)),
+        _ => internal,
+    }
+}
+
 pub(super) fn ho6_stall_frac() -> Option<f64> {
     env_str!("ENOMOTO_MIP_HO6_STALL").map(|v| v.parse::<f64>().ok().filter(|t| *t > 0.0 && *t < 1.0).unwrap_or(1e-3))
 }
@@ -3375,7 +3388,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_CUT_WIDEN_DOUBLE` (既定): 一気に行の数 (1000 本まで) に広げるのでなく、採り切っても動かないラウンドのたびに
             // 2 倍にする (50 -> 100 -> 200 -> ... -> 1000)。physiciansched6-2 では 50 本から一気に広げたラウンドで 247〜308 本が入り、
             // LP が 1 回の時間の上限に当たって全部外されていた (`ENOMOTO_MIP_CUT_LP_HALVE` の半分化と対になる)
-            let widen_now = widen_on && (!widened || widen_double_on) && quota_full && (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0) <= 1e-4;
+            let widen_now = widen_on && (!widened || widen_double_on) && quota_full && (obj - prev_obj) / stall_scale(obj, prev_obj, p.offset) <= 1e-4;
             if widen_now {
                 let wide_max = p.m.min(tunable!("ENOMOTO_T_MIP_CUT_WIDE_MAX", 1000usize, usize));
                 if !widened {
@@ -3562,7 +3575,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 停滞。根では 10 回分で止める (サブ MIP では 3 回)。目的値も分数の列の数もまったく減らない
                 // ラウンドは 2 回分と数える (何も進まない問題で長く回さない。分数の列が減っている間は続ける)。
                 let nfrac = self.fractional(&self.lp.col_values()).len();
-                let reldiff = (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0);
+                let reldiff = (obj - prev_obj) / stall_scale(obj, prev_obj, p.offset);
                 // `ENOMOTO_MIP_HO6_STALL=割合` (試作、既定では使わない。`1` なら 1e-3): 根 (サブ MIP でない) の停滞の判定の
                 // 「目的値の相対変化」を、目的値の大きさではなくカットで上げた分 (今の値 - カットの前の値) で測る (HiGHS の
                 // 「下界の伸びが今までの伸びの 0.1% 以下」と同じ尺度)。unitcal_7 は目的値 1.96e7 に対して根のギャップが 0.35% しかなく、
