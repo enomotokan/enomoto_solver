@@ -12524,7 +12524,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut v = Vec::new();
         for j in 0..self.p.n {
             // 試作 `ENOMOTO_MIP_RCSTRONG` の `i`・`c`: 暗黙の整数の連続列も入れる (src/mip/rcstrong.rs)
-            if !self.p.is_int[j] && !self.rcs_store_col(j) {
+            if !self.p.is_int[j] && !self.rcs_store_col(j) && !super::rcstrong::kroot_all() {
                 continue;
             }
             match b.col[j] {
@@ -12541,6 +12541,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let Some((z, list)) = self.root_redcost.take() else { return };
         let gap = self.prune_limit() - z;
         if gap.is_finite() && gap >= 0.0 {
+            // `ENOMOTO_MIP_RCSTRONG_KROOT`: 連続列はこの 1 回だけ (下の `kroot_done`)
+            let kroot_first = super::rcstrong::kroot_all() && !self.rcs.kroot_done;
             for &(j, at_lower, d, bound) in &list {
                 // 根の LP で変数がいた境界 `bound` を基準にする: z(x_j) >= z + d (x_j - bound)
                 // (暗黙の整数の連続列は試作 `ENOMOTO_MIP_RCSTRONG` で切り捨てる、src/mip/rcstrong.rs)
@@ -12551,6 +12553,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else if let Some(v) = self.rcs_root_round(j, false, bound - gap / (-d)) {
                     self.dom.tighten_global(self.p, j, false, v);
                 }
+            }
+            if kroot_first {
+                self.rcs.kroot_done = true;
             }
         }
         self.root_redcost = Some((z, list));

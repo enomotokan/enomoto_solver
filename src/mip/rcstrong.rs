@@ -34,6 +34,14 @@ pub(crate) fn flag(c: char) -> bool {
     env_str!("ENOMOTO_MIP_RCSTRONG").is_some_and(|v| v.contains(c))
 }
 
+/// 試作 `ENOMOTO_MIP_RCSTRONG_KROOT` (既定では使わない、analysis/rcstrong4_20261113.md): 根の被約費用の表に連続列も全部入れ、最初の
+/// 根の大域的な固定 (打ち切り値が有限になった最初の 1 回) だけ、連続列の境界も被約費用で大域的に締める (切り捨てなし)。それ以降の固定と
+/// `k` の行は整数列 (と `i`・`g` の暗黙の整数の扱い) だけ。`k` の行の最初の伝播を大域的な境界でかけたのと同じ締め付け (各項の最小は 0)。
+/// pk1 の害が「根で連続列の境界が締まる」ことか「ノードの伝播に連続列が入る」ことかを切り分ける
+pub(crate) fn kroot_all() -> bool {
+    env_str!("ENOMOTO_MIP_RCSTRONG_KROOT").is_some()
+}
+
 /// 暗黙の整数を使う (`i`) か、数える (`c`) か。
 pub(crate) fn implint_on() -> bool {
     flag('i') || flag('c') || flag('g')
@@ -73,11 +81,17 @@ pub(crate) struct RcsState {
     kroot: Option<RootRc>,
     /// `g`: 保留した切り捨て (列ごとの (下限, 上限) の候補。空なら未使用)。
     pend: Vec<(f64, f64)>,
+    /// `ENOMOTO_MIP_RCSTRONG_KROOT`: 連続列の 1 回目の固定を済ませたか、その固定で締めた連続列の本数。
+    pub kroot_done: bool,
+    pub kroot_cnt: usize,
 }
 
 impl Drop for RcsState {
     /// 数を 1 行出す (再スタートで求解の途中で捨てるものも出す。ノードの数は全スレッド・全ての求解の累計)。
     fn drop(&mut self) {
+        if kroot_all() && self.kroot_done {
+            eprintln!("MIP: RCSTRONG KROOT: continuous columns tightened at the first root fixing {}", self.kroot_cnt);
+        }
         if !self.report {
             return;
         }
@@ -207,6 +221,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if gk_int && !self.p.is_int[j] {
                     continue;
                 }
+                // `ENOMOTO_MIP_RCSTRONG_KROOT`: 印のない連続列は 1 回目の根の固定だけに使い、`k` の行には入れない
+                if kroot_all() && !self.p.is_int[j] && !self.rcs_store_col(j) {
+                    continue;
+                }
                 let w = self.dom.global_up[j] - self.dom.global_lo[j];
                 if !(w > 0.0) {
                     continue;
@@ -268,6 +286,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 根の大域的な固定の 1 列分: 締める値 (整数列・印のない列は `v` のまま)。暗黙の整数の連続列は、`i` なら切り捨てた値、`c` だけなら
     /// 締めない (`None`)。数も取る。
     pub(super) fn rcs_root_round(&mut self, j: usize, upper: bool, v: f64) -> Option<f64> {
+        if !self.p.is_int[j] && !self.rcs_store_col(j) && kroot_all() {
+            // `ENOMOTO_MIP_RCSTRONG_KROOT`: 印のない連続列は最初の 1 回だけ、切り捨てずに締める
+            if self.rcs.kroot_done {
+                return None;
+            }
+            let g = if upper { self.dom.global_up[j] } else { self.dom.global_lo[j] };
+            if if upper { v < g - 1e-9 * (1.0 + g.abs()) } else { v > g + 1e-9 * (1.0 + g.abs()) } {
+                self.rcs.kroot_cnt += 1;
+            }
+            return Some(v);
+        }
         if self.p.is_int[j] || !self.rcs_store_col(j) {
             return Some(v);
         }
