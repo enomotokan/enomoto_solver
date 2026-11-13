@@ -16623,6 +16623,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !(gap <= tunable!("ENOMOTO_T_MIP_OBJPROBE_GAP", 0.1, f64)) {
             return;
         }
+        // 固定が出ないラウンドが `ENOMOTO_T_MIP_OBJPROBE_P_STREAK` (既定 3) 回続いたら、以後このループでは p を止める
+        // (kasai のようにプロービングが効かない問題では、毎ラウンドの試しが根のカットのループの時間を食い、根のカットが減って
+        // 下界が弱くなる。gap が下がって試し直しが起きたら数え直す)
+        let streak_max = tunable!("ENOMOTO_T_MIP_OBJPROBE_P_STREAK", 3usize, usize);
+        if streak_max > 0 && self.objp.p_zero_streak >= streak_max {
+            return;
+        }
         let lim = self.prune_limit();
         // 大域的に固定された整数列の数 (試し直しの判定に使う)
         let nfix = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
@@ -16630,6 +16637,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 打ち切り値が良くなった: 前に固定できなかった列も試し直す
             self.objp.tried.iter_mut().for_each(|t| *t = false);
             self.objp.nfix_reset = nfix;
+            self.objp.p_zero_streak = 0;
         } else if self.objp.tried.len() == p.n {
             // 分数値の 0-1 列を全て試し終えていて、その後に固定が増えていれば (前の試し・被約費用による固定)、試し直す
             let x = self.lp.col_values();
@@ -16638,6 +16646,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.objp.tried.iter_mut().for_each(|t| *t = false);
                 self.objp.nfix_reset = nfix;
                 self.objp.resets += 1;
+                self.objp.p_zero_streak = 0;
             }
         }
         self.objp.cut = lim;
@@ -16679,6 +16688,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.objp.probed += probed;
         self.objp.fixed += fixed;
         self.objp.rc_fixed += rc_fixed;
+        self.objp.p_zero_streak = if fixed + rc_fixed > 0 || both { 0 } else { self.objp.p_zero_streak + 1 };
         if self.params.verbose {
             eprintln!(
                 "MIP: OBJPROBE p: round {round}: gap {gap:.3e}, {probed} probed, {fixed} fixed, {rc_fixed} fixed by reduced costs{}, LP {z0:.10e} -> {:.10e} ({st:?}), cutoff {lim:.10e} ({dt:.2}s, total {:.2}s, {:.2}s)",
@@ -22175,6 +22185,7 @@ pub(super) struct ObjProbeState {
     rc_fixed: usize,
     resets: usize,
     nfix_reset: usize,
+    p_zero_streak: usize,
     rr_secs: f64,
     rr_calls: usize,
     rr_found: usize,
