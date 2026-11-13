@@ -73,3 +73,17 @@ cand1114 の P (54a057b8、analysis/cand1114_20261113/) で、blend2 種 3 の c
 
 **直し (既定、`ENOMOTO_MIP_CONFLICT_CONT_TOL=0` で以前の形)**: 連続列の変更の説明の許容を、伝播の緩めの 1/10 (0.1 |a| 1e-9 (1 + |v|)) 以下に抑える。
 足りなければ関わる変更を全部にするので、安全側。
+
+### 確かめ (54a057b8 + conflict_pool.rs・domain.rs の直し、4 スレッド)
+
+| | 既定 | CAND1114 |
+|---|---|---|
+| `cargo test --release --lib` | 415 通過・0 失敗・19 無視 (新しいテスト 2 本を含む) | — |
+| `ENOMOTO_MIP_REL_GAP=1e-9 fuzz_tiny.py 400 0` | bad 0 (strict 13) | bad 0 (strict 13) |
+| `fuzz_tiny.py 400 5000` | bad 0 (strict 11) | bad 0 (strict 11) |
+| `mip_fuzz_vs_highs.py 600` | bad 0 | bad 0 |
+| `fuzz_slack.py 1000 0` | 食い違い 0 | 食い違い 0 |
+| blend2 種 3 を同じプロセスで繰り返す | — | 0 / 1200 回 (直す前の率なら 2 回ほど。conflict_pool.rs だけの直しで 0 / 2400 回) |
+
+fuzz は `ENOMOTO_MIP_THREADS=4`。説明の許容を抑えた分、衝突が長くなる (関わる変更を全部にする) 回が増えうる。速さへの影響は測っていない
+(次の束の 58 問・Mittelmann の回で見る)。
