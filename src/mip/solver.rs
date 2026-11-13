@@ -2897,6 +2897,9 @@ pub(super) fn treeeff(c: char) -> bool {
 }
 
 /// `ENOMOTO_MIP_TRNOFIX=1` (試作 SMALLFIX の D1、既定では使わない): 新たな固定のない木の中の再スタートを止める ([`Solver::tree_restart_guard_ok`] の `z`)。
+/// `ENOMOTO_T_MIP_TRNOFIX_ALLOW` で通した固定の少ない木の中の再スタートの数 (過程全体、試作)
+static TRNOFIX_PASSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn trnofix_on() -> bool {
     env_str!("ENOMOTO_MIP_TRNOFIX").is_some_and(|v| v != "0")
 }
@@ -21395,7 +21398,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if stop.is_none() && trnofix_on() {
             let thr = (tunable!("ENOMOTO_T_MIP_TRNOFIX_FRAC", 0.0, f64) * free0 as f64).max(tunable!("ENOMOTO_T_MIP_TRNOFIX_MIN", 1usize, usize) as f64);
             if (newly as f64) < thr {
-                stop = Some('z');
+                // `ENOMOTO_T_MIP_TRNOFIX_ALLOW` = k (既定 0): 固定の少ない再スタートを、この過程で k 回までは通す (rococoC10-001000 は 144 秒の
+                // 固定 0 列・効くカット 188 本の 1 回目の再スタートで下界が伸び、止めると 600 秒の下界が 11071 → 10450 に下がった。supportcase26 は 60 秒で 2〜4 回続く)
+                let allow = tunable!("ENOMOTO_T_MIP_TRNOFIX_ALLOW", 0usize, usize);
+                if TRNOFIX_PASSED.load(std::sync::atomic::Ordering::Relaxed) < allow {
+                    TRNOFIX_PASSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    stop = Some('z');
+                }
             }
         }
         self.tr_qprev = (tree_t, q);
