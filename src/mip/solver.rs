@@ -1162,6 +1162,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) hcm_auto: bool,
     /// [`Self::root_obj_probe`] の (試した列, 固定した列)
     root_obj_probe_stats: [u64; 2],
+    /// 試作 `ENOMOTO_MIP_OBJPROBE` ([`Self::objprobe_round`]) の状態
+    pub(super) objp: ObjProbeState,
     sb_prop_stats: [u64; 2],
     /// 強分岐の子の LP 値から凸性で締めた一般整数の境界の数 (`ENOMOTO_MIP_SB_TIGHTEN`)
     sb_tighten_count: u64,
@@ -4979,6 +4981,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         cpp: CutPropState::default(),
         hcm_auto: snap.as_ref().is_some_and(|sn| sn.hcm_auto),
         root_obj_probe_stats: [0; 2],
+        objp: ObjProbeState::default(),
         sb_prop_stats: [0; 2],
         sb_tighten_count: 0,
         sb_of_count: 0,
@@ -16524,27 +16527,231 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// どちらの値でも矛盾する列が見つかった (打ち切り値より良い解がない) なら真。
     fn root_obj_probe(&mut self) -> bool {
+        let o = ObjProbeOpts {
+            tmax: tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_TIME_FRAC", 0.2, f64) * if self.params.time_limit.is_finite() { self.params.time_limit } else { 300.0 },
+            giveup: tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_GIVEUP", 200usize, usize),
+            max_gap: tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MAX_GAP", 0.05, f64),
+            min_cands: tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MIN_CANDS", 500usize, usize),
+            passes: tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_PASSES", 3usize, usize).max(1),
+            max_cols: usize::MAX,
+            in_loop: false,
+        };
+        self.obj_probe_core(&o).0
+    }
+
+    /// 試作 `ENOMOTO_MIP_OBJPROBE` (既定では使わない。analysis/objprobe_20261113.md): 外側の主の根のカットのループで、各ラウンドの
+    /// LP を解いた後に呼ぶ (カットの写し・サブ MIP では呼ばない)。値の文字:
+    /// - `r` (C2): 暫定解がないか、暫定解と LP の相対ギャップが `ENOMOTO_T_MIP_OBJPROBE_RR_GAP` (既定 0.02) を越えるとき、そのラウンドの
+    ///   LP 解で乱択丸め ([`Self::randomized_rounding`]、`ENOMOTO_T_MIP_OBJPROBE_RR_TRIES` 回、既定 2) を試す。HiGHS は根の LP の直後に
+    ///   乱択丸めを 1 回行い (暫定解があっても)、暫定解がなければ分離のラウンドごとにも行う。hypothyroid-k1 では根の LP の直後の
+    ///   乱択丸めで −2692 (ギャップ 7.3%) を得て、それを上限にした目的のプロービングで根を閉じる (analysis/highsloss2_20261113.md)。
+    ///   乱択丸めの時間の合計は時間上限の `ENOMOTO_T_MIP_OBJPROBE_RR_TIME_FRAC` (既定 0.02) 倍まで、ラウンド `ENOMOTO_T_MIP_OBJPROBE_RR_ROUNDS`
+    ///   (既定 10) 回目まで。
+    /// - `p` (C1): 打ち切り値があり、LP とのギャップが `ENOMOTO_T_MIP_OBJPROBE_GAP` (既定 0.1) 以下なら、LP で分数値の 0-1 列のうち
+    ///   今の打ち切り値でまだ試していないものを目的の伝播つきでプロービングする ([`Self::obj_probe_core`]、HiGHS の
+    ///   `separateImpliedBounds` と同じく 1 列 1 回、打ち切り値が良くなったら試し直す)。1 回に `ENOMOTO_T_MIP_OBJPROBE_MAX_COLS` 列
+    ///   (既定 1000) まで、1 回の時間は `ENOMOTO_T_MIP_OBJPROBE_CALL_SECS` 秒 (既定 5) まで、合計は時間上限の
+    ///   `ENOMOTO_T_MIP_OBJPROBE_TIME_FRAC` (既定 0.1) 倍まで、`ENOMOTO_T_MIP_OBJPROBE_EVERY` (既定 1) ラウンドごと。固定が出たら
+    ///   LP に入れて解き直す。両側矛盾 (打ち切り値より良い解がない) なら根の下界を打ち切り値にする (ループの頭の
+    ///   [`Self::root_gap_closed`] で根を閉じる)。
+    pub(super) fn objprobe_round(&mut self, round: usize) {
+        let Some(v) = objprobe_flags() else { return };
+        if self.params.submip || self.snap.is_some() || self.dom.infeasible || self.time_up() {
+            return;
+        }
+        let p = self.p;
+        if round == 0 || self.objp.tried.len() != p.n {
+            // ループの始め (再スタートの後を含む): 試した列の記録を捨てる
+            self.objp.tried = vec![false; p.n];
+            self.objp.cut = f64::INFINITY;
+        }
+        let tl = if self.params.time_limit.is_finite() { self.params.time_limit } else { 300.0 };
+        let rel_gap = |s: &Self| -> f64 {
+            let lp_z = s.lp.objective() + p.offset;
+            let cut_z = s.incumbent.as_ref().map_or(s.prune_limit(), |(z, _)| *z);
+            if !cut_z.is_finite() {
+                return f64::INFINITY;
+            }
+            (cut_z - lp_z).max(0.0) / cut_z.abs().max(lp_z.abs()).max(1.0)
+        };
+        // C2: 乱択丸め
+        if v.contains('r')
+            && round < tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_ROUNDS", 10usize, usize)
+            && self.objp.rr_secs < tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_TIME_FRAC", 0.02, f64) * tl
+            && (self.incumbent.is_none() || rel_gap(self) > tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_GAP", 0.02, f64))
+        {
+            let x = self.lp.col_values();
+            if !self.fractional(&x).is_empty() {
+                let t0 = Instant::now();
+                let before = self.incumbent.as_ref().map(|(z, _)| *z);
+                // 丸めの伝播の手間の上限を `ENOMOTO_T_MIP_OBJPROBE_RR_WORK` (既定 200) x 非零数に上げる (既定の 20 倍では hypothyroid-k1 の
+                // 密な行 (43 万非零) で丸めの途中で手間を使い切り、解が出なかった)
+                self.objp.work_mult = tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_WORK", 200u64, u64);
+                let found = self.randomized_rounding(&x, tunable!("ENOMOTO_T_MIP_OBJPROBE_RR_TRIES", 2usize, usize));
+                self.objp.work_mult = 0;
+                let dt = t0.elapsed().as_secs_f64();
+                self.objp.rr_secs += dt;
+                self.objp.rr_calls += 1;
+                self.objp.rr_found += found as usize;
+                if self.params.verbose {
+                    eprintln!(
+                        "MIP: OBJPROBE r: round {round}: randomized rounding {} (incumbent {before:?} -> {:?}, {dt:.2}s, {:.2}s)",
+                        if found { "found a solution" } else { "none" },
+                        self.incumbent.as_ref().map(|(z, _)| *z),
+                        self.start.elapsed().as_secs_f64()
+                    );
+                }
+            }
+        }
+        // C1: 目的の上限つきプロービング
+        let every = tunable!("ENOMOTO_T_MIP_OBJPROBE_EVERY", 1usize, usize).max(1);
+        let budget = tunable!("ENOMOTO_T_MIP_OBJPROBE_TIME_FRAC", 0.1, f64) * tl;
+        if !v.contains('p') || round % every != 0 || self.objp.secs >= budget || !self.prune_limit().is_finite() {
+            return;
+        }
+        let gap = rel_gap(self);
+        if !(gap <= tunable!("ENOMOTO_T_MIP_OBJPROBE_GAP", 0.1, f64)) {
+            return;
+        }
+        let lim = self.prune_limit();
+        // 大域的に固定された整数列の数 (試し直しの判定に使う)
+        let nfix = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
+        if lim < self.objp.cut {
+            // 打ち切り値が良くなった: 前に固定できなかった列も試し直す
+            self.objp.tried.iter_mut().for_each(|t| *t = false);
+            self.objp.nfix_reset = nfix;
+        } else if self.objp.tried.len() == p.n {
+            // 分数値の 0-1 列を全て試し終えていて、その後に固定が増えていれば (前の試し・被約費用による固定)、試し直す
+            let x = self.lp.col_values();
+            let untried = (0..p.n).any(|j| p.is_int[j] && !self.objp.tried[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0 && x[j] > FEASTOL && x[j] < 1.0 - FEASTOL);
+            if !untried && nfix > self.objp.nfix_reset {
+                self.objp.tried.iter_mut().for_each(|t| *t = false);
+                self.objp.nfix_reset = nfix;
+                self.objp.resets += 1;
+            }
+        }
+        self.objp.cut = lim;
+        let o = ObjProbeOpts {
+            tmax: tunable!("ENOMOTO_T_MIP_OBJPROBE_CALL_SECS", 5.0, f64).min(budget - self.objp.secs),
+            giveup: tunable!("ENOMOTO_T_MIP_OBJPROBE_GIVEUP", 400usize, usize),
+            max_gap: f64::INFINITY,
+            min_cands: 1,
+            passes: 1,
+            max_cols: tunable!("ENOMOTO_T_MIP_OBJPROBE_MAX_COLS", 1000usize, usize).max(1),
+            in_loop: true,
+        };
+        let t0 = Instant::now();
+        let z0 = self.lp.objective() + p.offset;
+        let (mut both, fixed, probed) = self.obj_probe_core(&o);
+        // 値に `c` があれば、このラウンドの LP の被約費用でも大域的に固定する (HiGHS は根の LP を解くたびに被約費用による固定をする)
+        let rc_fixed = if !both && v.contains('c') { self.objprobe_rc_fix() } else { 0 };
+        let mut st = None;
+        if !both && fixed + rc_fixed > 0 {
+            if !self.dom.propagate(p) {
+                both = true;
+            } else {
+                self.sync_lp();
+                let s = self.lp.solve(&self.limits(u64::MAX));
+                st = Some(s);
+                if matches!(s, LpStatus::Infeasible | LpStatus::ObjectiveBound) {
+                    both = true;
+                }
+            }
+        }
+        if both {
+            // 打ち切り値より良い解はない: 根の下界を打ち切り値にする (カットの LP の値と同じく問題全体の下界)
+            self.root_cut_lb = self.root_cut_lb.max(lim);
+            self.objp.proved = true;
+        }
+        let dt = t0.elapsed().as_secs_f64();
+        self.objp.secs += dt;
+        self.objp.calls += 1;
+        self.objp.probed += probed;
+        self.objp.fixed += fixed;
+        self.objp.rc_fixed += rc_fixed;
+        if self.params.verbose {
+            eprintln!(
+                "MIP: OBJPROBE p: round {round}: gap {gap:.3e}, {probed} probed, {fixed} fixed, {rc_fixed} fixed by reduced costs{}, LP {z0:.10e} -> {:.10e} ({st:?}), cutoff {lim:.10e} ({dt:.2}s, total {:.2}s, {:.2}s)",
+                if both { ", no solution better than the cutoff" } else { "" },
+                self.lp.objective() + p.offset,
+                self.objp.secs,
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    /// [`Self::objprobe_round`] の `c`: 今の LP (根、最適に解いた後) の被約費用と打ち切り値で整数列の大域的な境界を締める。
+    /// 締めた列の数を返す (伝播と LP への反映は呼ぶ側)
+    fn objprobe_rc_fix(&mut self) -> usize {
+        let p = self.p;
+        let gap = self.prune_limit() - (self.lp.objective() + p.offset);
+        if !(gap.is_finite() && gap >= 0.0) {
+            return 0;
+        }
+        let b = self.lp.basis_ref();
+        let d = self.lp.reduced_costs_ref();
+        let mut list: Vec<(usize, bool, f64)> = Vec::new();
+        for j in 0..p.n {
+            if !p.is_int[j] || self.dom.lo[j] == self.dom.up[j] {
+                continue;
+            }
+            match b.col[j] {
+                VarStatus::Lower if d[j] > 1e-7 && self.dom.lo[j].is_finite() => {
+                    let v = self.dom.lo[j] + gap / d[j];
+                    if (v + FEASTOL).floor() < self.dom.up[j] {
+                        list.push((j, true, v));
+                    }
+                }
+                VarStatus::Upper if d[j] < -1e-7 && self.dom.up[j].is_finite() => {
+                    let v = self.dom.up[j] - gap / (-d[j]);
+                    if (v - FEASTOL).ceil() > self.dom.lo[j] {
+                        list.push((j, false, v));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for &(j, upper, v) in &list {
+            self.dom.tighten_global(p, j, upper, v);
+        }
+        list.len()
+    }
+
+    /// [`Self::root_obj_probe`] の本体。`o.in_loop` なら根のカットのループの中の試し ([`Self::objprobe_round`]): 試した列を
+    /// `self.objp.tried` に記録して同じ打ち切り値では 2 度試さない (HiGHS の implied bound 分離と同じく 1 列 1 回)、一般整数の試しはしない。
+    /// (両側矛盾, 固定した列, 試した列) を返す
+    fn obj_probe_core(&mut self, o: &ObjProbeOpts) -> (bool, usize, usize) {
         let p = self.p;
         let sub_cutoff = self.params.submip && self.params.cutoff.is_finite();
         if !(self.has_cutoff_value() || sub_cutoff) || !self.prune_limit().is_finite() || self.dom.infeasible || self.time_up() {
-            return false;
+            return (false, 0, 0);
         }
         let t0 = Instant::now();
-        let tmax = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_TIME_FRAC", 0.2, f64) * if self.params.time_limit.is_finite() { self.params.time_limit } else { 300.0 };
-        let giveup = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_GIVEUP", 200usize, usize);
+        let tmax = o.tmax;
+        let giveup = o.giveup;
         let x = self.lp.col_values();
-        let cands: Vec<usize> = (0..p.n)
+        if o.in_loop && self.objp.tried.len() != p.n {
+            self.objp.tried = vec![false; p.n];
+        }
+        let mut cands: Vec<usize> = (0..p.n)
             .filter(|&j| p.is_int[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0 && x[j] > FEASTOL && x[j] < 1.0 - FEASTOL)
+            .filter(|&j| !o.in_loop || !self.objp.tried[j])
             .collect();
+        // ループの中では 1 回に試す列の数に上限 (`o.max_cols`)。0.5 に近い (LP で迷っている) 列から
+        if o.in_loop && cands.len() > o.max_cols {
+            cands.sort_by(|&a, &b| (x[a] - 0.5).abs().total_cmp(&(x[b] - 0.5).abs()).then(a.cmp(&b)));
+            cands.truncate(o.max_cols);
+            cands.sort_unstable();
+        }
         // 効きそうなときだけ回す: 暫定解 (打ち切り値) と根の LP 値の相対ギャップが `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MAX_GAP`
         // 以下 (既定 0.05) で、候補 (分数値の 0-1 列) が `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MIN_CANDS` 本以上 (既定 500)
         // のときだけ。ギャップ = (打ち切り値 - LP 値) / max(|打ち切り値|, |LP 値|, 1)
         let lp_z = self.lp.objective() + p.offset;
         let cut_z = self.incumbent.as_ref().map_or(self.prune_limit(), |(z, _)| *z);
         let rel_gap = (cut_z - lp_z).max(0.0) / cut_z.abs().max(lp_z.abs()).max(1.0);
-        let max_gap = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MAX_GAP", 0.05, f64);
-        let min_cands = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MIN_CANDS", 500usize, usize);
-        let log = self.params.verbose || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some());
+        let max_gap = o.max_gap;
+        let min_cands = o.min_cands;
+        let log = (self.params.verbose && !o.in_loop) || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some());
         if rel_gap > max_gap || cands.len() < min_cands {
             if log {
                 eprintln!(
@@ -16554,7 +16761,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     cands.len()
                 );
             }
-            return false;
+            return (false, 0, 0);
         }
         let (mut probed, mut fixed, mut both) = (0usize, 0usize, false);
         let learn = env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_NO_IMPL").is_none();
@@ -16595,7 +16802,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // もう一回り試す (前の回りの固定と含意が後の回りの伝播に効く)。hypothyroid-k1 では根のカットの組によって、
         // 1 回りで 351〜482 列を試して両側矛盾で証明する回と、全 2300〜2440 列を試して 17〜37 列を固定するだけで終わり、
         // 再スタートして 15〜35 秒遅れる回がある
-        let passes = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_PASSES", 3usize, usize).max(1);
+        let passes = o.passes;
         let mut npass = 0usize;
         for _ in 0..passes {
             npass += 1;
@@ -16608,6 +16815,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     continue;
                 }
                 probed += 1;
+                if o.in_loop {
+                    self.objp.tried[j] = true;
+                }
                 let mut bad = [false; 2];
                 for (k, v) in [0.0f64, 1.0].into_iter().enumerate() {
                     let pos = self.dom.stack_len();
@@ -16675,7 +16885,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 上の側: `x >= m` が矛盾する最小の m を探し (矛盾は m について単調とみなす)、上限を m - 1 にする。下の側も同じ。
         // 試しは片側 ceil(log2(上限 - 下限)) 回程度。下限の側 (`x >= 下限`) から矛盾すれば打ち切り値より良い解はない
         let (mut gi_probed, mut gi_tight, mut gi_probes) = (0usize, 0usize, 0usize);
-        if env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_GENINT").is_some() && !both {
+        if env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_GENINT").is_some() && !both && !o.in_loop {
             let gcands: Vec<usize> = (0..p.n)
                 .filter(|&j| p.is_int[j] && self.dom.lo[j].is_finite() && self.dom.up[j].is_finite() && self.dom.up[j] - self.dom.lo[j] >= 2.0)
                 .collect();
@@ -16746,6 +16956,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 );
             }
         }
+        if o.in_loop {
+            return (both, fixed, probed);
+        }
         self.root_obj_probe_stats = [probed as u64, fixed as u64];
         if self.params.verbose || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some()) {
             eprintln!(
@@ -16760,7 +16973,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 t0.elapsed().as_secs_f64()
             );
         }
-        both
+        (both, fixed, probed)
     }
 
     /// 衝突 (同時には成り立たない境界の組) が 0-1 列だけなら、`sum_{x_j >= 1} x_j - sum_{x_j <= 0} x_j <= |{x_j >= 1}| - 1`
@@ -21811,6 +22024,43 @@ pub(super) fn nodecnt(c: char) -> bool {
 
 fn nodecnt_on() -> bool {
     nodecnt('d')
+}
+
+/// [`Solver::obj_probe_core`] の設定。
+struct ObjProbeOpts {
+    tmax: f64,
+    giveup: usize,
+    max_gap: f64,
+    min_cands: usize,
+    passes: usize,
+    max_cols: usize,
+    in_loop: bool,
+}
+
+/// 試作 `ENOMOTO_MIP_OBJPROBE` ([`Solver::objprobe_round`]) の状態と数。
+#[derive(Default)]
+pub(super) struct ObjProbeState {
+    /// 今の打ち切り値 `cut` で試した列
+    tried: Vec<bool>,
+    cut: f64,
+    secs: f64,
+    calls: usize,
+    probed: usize,
+    fixed: usize,
+    proved: bool,
+    rc_fixed: usize,
+    resets: usize,
+    nfix_reset: usize,
+    rr_secs: f64,
+    rr_calls: usize,
+    rr_found: usize,
+    /// 0 でなければ、丸めの伝播 ([`Solver::propagate_rounding_from`]) の手間の上限を非零数のこの倍にする (既定は 20 倍)
+    pub(super) work_mult: u64,
+}
+
+/// 試作 `ENOMOTO_MIP_OBJPROBE` の値 (`0` は切)。
+pub(crate) fn objprobe_flags() -> Option<&'static str> {
+    env_str!("ENOMOTO_MIP_OBJPROBE").filter(|v| *v != "0")
 }
 
 fn prune_limit_of(eff: Option<f64>, outer: f64, obj_step: Option<f64>, lat: Option<ObjLat>, off: f64, rel_gap: f64, abs_gap: f64, cutoff: f64) -> f64 {

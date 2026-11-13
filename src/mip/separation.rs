@@ -3375,6 +3375,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
+            // 試作 `ENOMOTO_MIP_OBJPROBE` ([`Solver::objprobe_round`]): 外側の主の根で、乱択丸め (`r`) と目的の上限つきプロービング (`p`)
+            if job.is_none() && super::solver::objprobe_flags().is_some() {
+                self.objprobe_round(round);
+            }
             obj_hist.push(obj);
             round_obj.push(obj);
             round_t.push(super::cap_clock());

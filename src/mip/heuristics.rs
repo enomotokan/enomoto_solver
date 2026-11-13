@@ -148,7 +148,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         all.extend((0..p.n).filter(|&j| p.is_int[j] && !in_order[j]));
         let work0 = self.dom.debug_work();
-        let work_cap = 20 * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
+        let work_cap = if self.objp.work_mult > 0 { self.objp.work_mult } else { 20 } * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
         for (cnt, &j) in all.iter().enumerate() {
             if !p.is_int[j] {
                 continue;
