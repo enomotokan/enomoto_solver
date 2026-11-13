@@ -1172,6 +1172,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let cap = cap * LOSE6_2_PROBE_CAP_MULT.with(|c| c.get());
         let mut gain = 0.0;
         let mut hist: Vec<(f64, f64)> = Vec::new();
+        // ラウンドごとの足したカットの本数の累計 (試作 `ENOMOTO_MIP_CUTSEL_PROBE_TIE_FEWER` の比べに使う)
+        let mut nadd_hist: Vec<usize> = Vec::new();
         let mut nadd = 0usize;
         let mut all_rows: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
         let alt_has = |c: char| env_def!("ENOMOTO_MIP_CUTSEL_PROBE_ALT", "NS").is_none_or(|v| v.contains(c));
@@ -1219,6 +1221,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             gain = self.lp.objective() - obj0;
             hist.push((gain, t0.elapsed().as_secs_f64()));
+            nadd_hist.push(nadd);
             if stop(r, gain, t0.elapsed().as_secs_f64()) {
                 break;
             }
@@ -1249,6 +1252,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (self.face_secs, self.face_used, self.face_off_loop, self.sep_par_cpu, self.last_cut_lp_secs) = keep_face;
         self.lp.set_total_iterations(keep_iters);
         let _ = gain;
+        PROBE_NADD_HIST.with(|h| h.borrow_mut()[pool as usize] = nadd_hist);
         (hist, nadd, end)
     }
 
@@ -2154,12 +2158,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_T_MIP_CUTSEL_PROBE_MIN_GAIN` = g (既定 1e-6、計測 23 で既定化。0 で外す): POOL の伸びが g x max(1, |根の LP|) 以下なら既定を選ぶ
                 // (drayage-25-23 では両方の伸びが ±1.5e-11 で、`rate` が誤差で POOL を選び 10 -> 26 秒 (ALT=NS のとき) になっていた)
                 let min_gain = tunable!("ENOMOTO_T_MIP_CUTSEL_PROBE_MIN_GAIN", 1e-6, f64) * self.lp.objective().abs().max(1.0);
+                // 試作 `ENOMOTO_MIP_CUTSEL_PROBE_TIE_FEWER` (既定では使わない): 比べたラウンドでの伸びが同じ (差が許容誤差以内) なら、
+                // 時間あたりの伸び (`rate`) ではなく、そのラウンドまでに足したカットが少ない側を選ぶ (本数が同じなら今まで通り)。
+                // 伸びが同じとき `rate` は 1 ラウンドの時間 (0.7 秒前後で 0.01〜0.05 秒の差) の揺れで決まる
+                // (nw04: PARALLEL_INT の有無・種で default 4 本 / pool 1 本の同点が入れ替わり、default では根が 16852 で止まる。analysis/parint2_20261113.md)
+                let tie_fewer = if m > 0 && env_str!("ENOMOTO_MIP_CUTSEL_PROBE_TIE_FEWER").is_some_and(|v| v != "0") && (d_def - d_pool).abs() <= tol + 1e-9 * d_def.abs().max(d_pool.abs()) {
+                    let (cd, cp) = PROBE_NADD_HIST.with(|h| {
+                        let h = h.borrow();
+                        (h[0].get(m - 1).copied(), h[1].get(m - 1).copied())
+                    });
+                    match (cd, cp) {
+                        (Some(a), Some(b)) if a != b => Some(b < a),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let (Some(tf), true) = (tie_fewer, self.params.verbose) {
+                    eprintln!("MIP: cut selection probe: tie at {m} rounds, the side with fewer cuts -> {}", if tf { "pool" } else { "default" });
+                }
                 let pick_pool = d_pool > min_gain
-                    && match rule {
+                    && tie_fewer.unwrap_or_else(|| match rule {
                         // 時間あたりの伸び
                         "rate" => d_pool / t_pool.max(1e-3) > d_def / t_def.max(1e-3) + 1e-12,
                         _ => d_pool > d_def + tol,
-                    };
+                    });
                 if self.params.verbose && ratio > 0.0 {
                     eprintln!("MIP: cut selection probe: compared at {m} rounds ({early}), probe wall {:.2}s (budget {budget:.1}s)", t_probe0.elapsed().as_secs_f64());
                 }
@@ -7879,6 +7902,12 @@ fn sep_threads(threads: usize) -> usize {
 /// (POOL は 2 ラウンドで伸び 117、既定は 4.29。analysis/phys6_20261101.md の 2 節の 4)。
 pub(crate) fn lose6_2_tie() -> bool {
     env_str!("ENOMOTO_MIP_LOSE6_2_TIE").is_some_and(|v| v != "0")
+}
+
+thread_local! {
+    /// [`Solver::probe_cut_mode`] の最後の呼び出しのラウンドごとの足したカットの本数の累計 (添字 0: 既定、1: POOL)。
+    /// 試作 `ENOMOTO_MIP_CUTSEL_PROBE_TIE_FEWER` の同点の比べに使う
+    static PROBE_NADD_HIST: std::cell::RefCell<[Vec<usize>; 2]> = const { std::cell::RefCell::new([Vec::new(), Vec::new()]) };
 }
 
 thread_local! {
