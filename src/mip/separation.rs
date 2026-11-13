@@ -23,6 +23,22 @@ thread_local! {
     static PROBE_CLIQUE_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// `ENOMOTO_MIP_CUT_EXTEND` で根のカットの時間の上限を延ばした後か (延ばした後は面の頂点での分離を止める)
     static CUT_EXTENDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 試作 `ENOMOTO_MIP_CLQFB_CAP` 用: clique fallback の試しの前の根のカットのループの (LP の秒の合計, LP の反復の合計, ラウンド数)
+    static CLQFB_LOOP: std::cell::Cell<(f64, u64, usize)> = const { std::cell::Cell::new((0.0, 0, 0)) };
+}
+
+/// 試作 `ENOMOTO_MIP_CLQFB_CAP=文字` (SMALLFIX の C3、既定では使わない。analysis/smallfix_20261113.md): 根のカットのループの後の
+/// clique fallback の試し ([`Solver::clique_fallback_trial`]) の LP に上限を置く。上限で止まったら使わない。
+/// - `i`: 反復の上限を max(`ENOMOTO_T_MIP_CLQFB_CAP_MINIT` (2000), `ENOMOTO_T_MIP_CLQFB_CAP_MULT` (3) x max(ループの 1 ラウンドの平均の LP の反復, 根の LP の反復)) にする
+///   (既定は 10 x 根の LP の反復 + 1 万。hypothyroid-k1 は根の LP が前処理の基底から 1 反復なので、上限はラウンドの平均から決まる)。
+/// - `t`: 時間の上限を max(`ENOMOTO_T_MIP_CLQFB_CAP_MIN` (4 秒), `ENOMOTO_T_MIP_CLQFB_CAP_MULT` (3) x max(ループの 1 ラウンドの平均の LP の秒, 根の LP の秒)) にする。
+/// - `s`: ループで目的値が動いたとき、試しの前に、破れる clique カットの効き目 (破れ / ノルム) の最大が `ENOMOTO_T_MIP_CLQFB_CAP_EFF` (0.2) 未満なら試さない
+///   (cand1114 の根で「使う」になった drayage-25-23・drayage-100-23・neos-827175 は 0.31〜0.38、「使わない」の puriri 0.100・hypothyroid-k1 0.0086・
+///   30n20b8 0.085・mzzv42z 0.088・traininstance6 0.053。ただし neos-3656078-kumeu 0.71・supportcase18 0.60 も「使わない」で、効き目だけでは分けられない)。
+/// 過去のログ (2026-11-05 以降の 5297 回) で「使う」になった試しは 0.01〜3.2 秒 (neos-3656078-kumeu の 15.5 秒はラウンドの LP が 7〜26 秒)、
+/// 遅い試し (puriri 8〜119 秒、hypothyroid-k1 24.7 秒、mushroom 55 秒) はどれも「使わない」だった
+fn clqfb_cap() -> &'static str {
+    env_str!("ENOMOTO_MIP_CLQFB_CAP").unwrap_or("")
 }
 use super::lp_api::MipLp;
 
@@ -702,11 +718,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 今の LP 解で破れる clique カットだけを LP に入れて解き直し、(目的値, 入れた後の目的値, 分数の列の数, 入れた後の数, カットの数)
     /// を返す (破れるカットがなければ `None`)。試した行は外し、LP の状態を戻す
     fn clique_trial_lp(&mut self, root_iters: u64) -> Option<(f64, f64, usize, usize, usize)> {
+        self.clique_trial_lp_cap(root_iters, None, 0.0)
+    }
+
+    /// [`Self::clique_trial_lp`] に上限 (反復, 秒) と効き目の下限をつけたもの (`ENOMOTO_MIP_CLQFB_CAP`)。効き目の下限で試さないときは
+    /// 入れた後の目的値を入れる前と同じにして返す (使わない側に倒れる)
+    fn clique_trial_lp_cap(&mut self, root_iters: u64, cap: Option<(u64, f64)>, min_eff: f64) -> Option<(f64, f64, usize, usize, usize)> {
         let g = self.clique_graph_get();
         let x = self.lp.col_values();
         let cuts = g.separate(&x, tunable!("ENOMOTO_T_MIP_CLIQUE_MAX", 100usize, usize));
         if cuts.is_empty() {
             return None;
+        }
+        let eff_max = cuts
+            .iter()
+            .map(|c| {
+                let act: f64 = c.coefs.iter().map(|&(j, a)| a * x[j]).sum();
+                let norm = c.coefs.iter().map(|&(_, a)| a * a).sum::<f64>().sqrt();
+                if norm > 0.0 { (act - c.rhs) / norm } else { 0.0 }
+            })
+            .fold(0.0f64, f64::max);
+        if cap.is_some() && self.params.verbose {
+            eprintln!("MIP: clique fallback: {} cuts, max efficacy {eff_max:.3e}", cuts.len());
+        }
+        if eff_max < min_eff {
+            let obj0 = self.lp.objective();
+            let nf = self.fractional(&x).len();
+            if self.params.verbose {
+                eprintln!("MIP: clique fallback: max efficacy {eff_max:.3e} < {min_eff:.3e}; the trial skipped (ENOMOTO_MIP_CLQFB_CAP)");
+            }
+            return Some((obj0, obj0, nf, nf, cuts.len()));
         }
         let obj0 = self.lp.objective();
         let nfrac0 = self.fractional(&x).len();
@@ -717,16 +758,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_TREE3_CLIQUECAP` (試作、既定では使わない。analysis/tree_close3_20261104.md): 試しの LP に時間の上限
         // max(`ENOMOTO_T_MIP_TREE3_CLIQUECAP_MIN` (1 秒), `ENOMOTO_T_MIP_TREE3_CLIQUECAP_MULT` (2) x 根の LP の秒) を置く (超えたら使わない)。
         // neos-3216931-puriri ではこの LP 1 回が 285〜388 秒 (根の LP は 11.7 秒) かかり、伸びは 0 で使われなかった
-        let deadline = if env_str!("ENOMOTO_MIP_TREE3_CLIQUECAP").is_some_and(|v| v != "0") {
+        let deadline = if let Some((_, secs)) = cap.filter(|c| c.1.is_finite()) {
+            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs.min(1e6));
+            Some(self.deadline.map_or(d, |g| g.min(d)))
+        } else if env_str!("ENOMOTO_MIP_TREE3_CLIQUECAP").is_some_and(|v| v != "0") {
             let secs = tunable!("ENOMOTO_T_MIP_TREE3_CLIQUECAP_MIN", 1.0, f64).max(tunable!("ENOMOTO_T_MIP_TREE3_CLIQUECAP_MULT", 2.0, f64) * self.root_lp_secs);
             let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs.min(1e6));
             Some(self.deadline.map_or(d, |g| g.min(d)))
         } else {
             self.deadline
         };
-        let st = self.lp.solve(&SolveLimits { iteration_limit: 10 * root_iters.max(100) + 10_000, cutoff: f64::INFINITY, deadline });
-        if self.params.verbose && st != LpStatus::Optimal && deadline != self.deadline {
-            eprintln!("MIP: clique fallback: the trial LP stopped ({st:?}, ENOMOTO_MIP_TREE3_CLIQUECAP)");
+        let it_lim = cap.map_or(10 * root_iters.max(100) + 10_000, |c| c.0);
+        let it0 = self.lp.total_iterations();
+        let st = self.lp.solve(&SolveLimits { iteration_limit: it_lim, cutoff: f64::INFINITY, deadline });
+        if self.params.verbose && st != LpStatus::Optimal && (deadline != self.deadline || cap.is_some()) {
+            eprintln!("MIP: clique fallback: the trial LP stopped ({st:?}, {} iters, ENOMOTO_MIP_TREE3_CLIQUECAP / CLQFB_CAP)", self.lp.total_iterations() - it0);
+        } else if self.params.verbose && cap.is_some() {
+            eprintln!("MIP: clique fallback: the trial LP {} iters (cap {it_lim})", self.lp.total_iterations() - it0);
         }
         let obj1 = if st == LpStatus::Optimal { self.lp.objective() } else { obj0 };
         let nfrac1 = if st == LpStatus::Optimal { self.fractional(&self.lp.col_values()).len() } else { nfrac0 };
@@ -872,7 +920,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// なら使う (ほかのカットで伸びない問題でだけ使う)。drayage-25-23 は g_d = 0、30n20b8 は g_d = 15 に対し g_c は 1 程度
     fn clique_fallback_trial(&mut self, root_iters: u64, first_obj: f64) -> bool {
         let t0 = std::time::Instant::now();
-        let Some((obj0, obj1, nfrac0, nfrac1, ncuts)) = self.clique_trial_lp(root_iters) else {
+        let mode = clqfb_cap();
+        let cap = if mode.is_empty() {
+            None
+        } else {
+            let (lp_s, lp_it, nr) = CLQFB_LOOP.with(|c| c.get());
+            let mult = tunable!("ENOMOTO_T_MIP_CLQFB_CAP_MULT", 3.0, f64);
+            let it_ref = (lp_it as f64 / nr.max(1) as f64).max(root_iters as f64);
+            let s_ref = (lp_s / nr.max(1) as f64).max(self.root_lp_secs);
+            let its = if mode.contains('i') { ((mult * it_ref) as u64).max(tunable!("ENOMOTO_T_MIP_CLQFB_CAP_MINIT", 2000u64, u64)) } else { 10 * root_iters.max(100) + 10_000 };
+            let secs = if mode.contains('t') { (mult * s_ref).max(tunable!("ENOMOTO_T_MIP_CLQFB_CAP_MIN", 4.0, f64)) } else { f64::INFINITY };
+            if self.params.verbose {
+                eprintln!("MIP: clique fallback: cap {its} iters / {secs:.2}s (loop: {nr} rounds, LP {lp_it} iters {lp_s:.2}s; root LP {root_iters} iters {:.2}s)", self.root_lp_secs);
+            }
+            Some((its, secs))
+        };
+        // `s` はループで目的値が動いたとき (g_d > 1e-9 x max(1, |目的値|)) だけ: 動かないときは分数の列の数の規則 (`ENOMOTO_T_MIP_CLIQUE_FB_FRAC`) で
+        // 使う問題がある (drayage-100-23・neos-827175 は効き目 0.19〜0.38 で、目的値は動かず分数の列が減って使う)
+        let gd0 = self.lp.objective() - first_obj;
+        let min_eff = if mode.contains('s') && gd0 > 1e-9 * self.lp.objective().abs().max(1.0) { tunable!("ENOMOTO_T_MIP_CLQFB_CAP_EFF", 0.2, f64) } else { 0.0 };
+        let Some((obj0, obj1, nfrac0, nfrac1, ncuts)) = self.clique_trial_lp_cap(root_iters, cap, min_eff) else {
             if self.params.verbose {
                 eprintln!("MIP: clique fallback: no violated clique cuts; not used ({:.2}s)", t0.elapsed().as_secs_f64());
             }
@@ -2175,6 +2242,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 6.5 秒かかる)。ここで使わないと決まらなければループの後でもう一度判定する
             let fb_early = tunable!("ENOMOTO_T_MIP_CLIQUE_FB_EARLY", 0usize, usize);
             if clique_fb && fb_early > 0 && round == fb_early && job.is_none() && self.lp.objective() - first_obj <= 1e-9 * self.lp.objective().abs().max(1.0) {
+                CLQFB_LOOP.with(|c| c.set((lp_tot, loop_iters, nrounds)));
                 if self.clique_fallback_trial(root_iters, first_obj) {
                     if self.params.restarts == 0 {
                         CLIQUE_AUTO_FIRST.with(|c| c.set(Some(true)));
@@ -3662,6 +3730,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         if clique_fb && st == LpStatus::Optimal && job.is_none() && !self.time_up() {
+            CLQFB_LOOP.with(|c| c.set((lp_tot, loop_iters, nrounds)));
             let on = self.clique_fallback_trial(root_iters, first_obj);
             if self.params.restarts == 0 {
                 CLIQUE_AUTO_FIRST.with(|c| c.set(Some(on)));

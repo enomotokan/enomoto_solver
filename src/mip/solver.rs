@@ -2891,6 +2891,11 @@ pub(super) fn treeeff(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TREEEFF").is_some_and(|v| v.contains(c))
 }
 
+/// `ENOMOTO_MIP_TRNOFIX=1` (試作 SMALLFIX の D1、既定では使わない): 新たな固定のない木の中の再スタートを止める ([`Solver::tree_restart_guard_ok`] の `z`)。
+fn trnofix_on() -> bool {
+    env_str!("ENOMOTO_MIP_TRNOFIX").is_some_and(|v| v != "0")
+}
+
 thread_local! {
     /// 木の中の再スタートの後の求解の中か ([`treeeff`] の `s`。[`Solver::maybe_restart`] が求解の間だけ立てる)
     pub(super) static TREE_RESTART_CHILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -21059,7 +21064,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         use std::sync::atomic::Ordering;
         let guard = env_str!("ENOMOTO_MIP_TREE_RESTART_GUARD").unwrap_or(if treeeff('r') { "KR" } else { "" });
         let log = self.params.verbose || env_str!("ENOMOTO_MIP_TREE_RESTART_LOG").is_some();
-        if guard.is_empty() && !log {
+        if guard.is_empty() && !log && !trnofix_on() {
             return true;
         }
         let solve_t = self.start.elapsed().as_secs_f64();
@@ -21155,6 +21160,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if hit {
                 stop = Some(c);
                 break;
+            }
+        }
+        // `ENOMOTO_MIP_TRNOFIX` (試作 SMALLFIX の D1、既定では使わない。analysis/smallfix_20261113.md): 新たな固定が
+        // max(`ENOMOTO_T_MIP_TRNOFIX_MIN` (1), `ENOMOTO_T_MIP_TRNOFIX_FRAC` (0) × 根で自由な整数列) 本に満たない木の中の再スタートは、
+        // ガードの文字によらず止める (`z`)。再スタートしても前処理で問題が縮む見込みがなく、木を捨てるだけになる。kasai (1 スレッド) は
+        // 317 秒に固定 0 列・効くカット 541 本で `R` を外れて再スタートし、600 秒の下界が 988417 (再スタートなし) → 988234 に下がった
+        if stop.is_none() && trnofix_on() {
+            let thr = (tunable!("ENOMOTO_T_MIP_TRNOFIX_FRAC", 0.0, f64) * free0 as f64).max(tunable!("ENOMOTO_T_MIP_TRNOFIX_MIN", 1usize, usize) as f64);
+            if (newly as f64) < thr {
+                stop = Some('z');
             }
         }
         self.tr_qprev = (tree_t, q);
