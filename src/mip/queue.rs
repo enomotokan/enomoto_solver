@@ -552,7 +552,7 @@ impl NodeQueue {
         }
         // `ENOMOTO_MIP_HL2_D2` の `b` (D2b): 取り出したノードの基底を置くときに効いていたカットの番号を使うので、番号はノードに残す
         // (参照数は外す)。ほかでは従来どおり外す
-        if super::separation::hl2_d2('b') {
+        if super::separation::hl2_d2('b') || super::separation::hl2_d2('B') {
             if let Some(pr) = node.prot.clone() {
                 self.unprotect(&pr);
             }

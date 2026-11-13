@@ -50,6 +50,9 @@ use super::lp_api::MipLp;
 ///   max(`ENOMOTO_T_MIP_HL2_PROT_ROWS` (0.5) × 元の行の数, 50) まで (年齢の若い順)
 /// - `b` (D2b): 待ち行列から取り出したノードの保存した基底で効いていたカットが LP から消えていたら、消えた行を足し直してから
 ///   保存した基底をそのまま置く (消すときに守られている行の中身を取っておく、[`Solver::d2b_store_deleted`])
+/// - `B` (D2b の適応版、analysis/d2adapt_20261113.md): 始めは使わず、木の探索の中で待ち行列から取ったノードの基底の不一致が重いと
+///   分かった (スレッドごと) ときから `b` と同じにする ([`Solver::d2b_adapt_check`])。消した行の中身は始めから取っておく
+///   (使い始めてからにすると、kasai では使い始める (46〜81 秒) 前に消えた行が多く、足し直しがほとんど失敗した)
 /// 保護のデータ (ノードの効いていたカットの番号と待ち行列の参照数) はどの文字でも作る。年齢での削除が保護を守るのは
 /// 従来どおり `ENOMOTO_MIP_PROTECT_QUEUE_CUTS` のときだけ
 pub(super) fn hl2_d2(c: char) -> bool {
@@ -66,7 +69,7 @@ pub(super) fn hl2_d2(c: char) -> bool {
 
 /// `ENOMOTO_MIP_HL2_D2` のどれかを使うか
 pub(super) fn hl2_d2_any() -> bool {
-    hl2_d2('p') || hl2_d2('a') || hl2_d2('b')
+    hl2_d2('p') || hl2_d2('a') || hl2_d2('b') || hl2_d2('B')
 }
 
 /// LP に加える前のカット (構造変数の係数、右辺、効き目)。
@@ -4227,7 +4230,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// の中身 (係数, 下限, 上限) をカットの番号で取っておく。取り出したノードの基底を置く前に足し直す ([`Solver::d2b_readd`])。
     /// 保護の参照がなくなったものは、取っておく数が LP の行の 2 倍 + 1000 を超えたときに捨てる
     pub(super) fn d2b_store_deleted(&mut self, remove: &[bool]) {
-        if !hl2_d2('b') || self.params.submip {
+        if !(hl2_d2('b') || hl2_d2('B')) || self.params.submip {
             return;
         }
         let m0 = self.p.m;

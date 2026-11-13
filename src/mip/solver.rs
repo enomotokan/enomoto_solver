@@ -832,6 +832,14 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_HL2_D2` の計数: [一括削除で守った, D2a の上限で外した, D2b で取っておいた行, D2b で足し直した復元, 足し直した行,
     /// 取っておいた行がなく足し直せなかった, 効いていたカットの番号と保存した基底の数が合わない, 足し直した後も基底の数が合わない]
     pub(super) d2_stats: [u64; 8],
+    /// `ENOMOTO_MIP_HL2_D2` の `B` (D2b の適応版、[`Self::d2b_adapt_check`]): このスレッドで D2b を使い始めたか
+    pub(super) d2b_live: bool,
+    /// D2b の適応版の計数: [待ち行列から取って基底を復元したノード, その最初の LP の反復, うち基底の数が合わなかったノード, その反復,
+    /// 行の上限で足し直さなかった復元, 使い始めたときのカットの行の数]
+    d2b_adapt: [u64; 6],
+    /// 今のノードの基底の復元で基底の数が合わなかったか、今のノードで基底の復元を試みたか (D2b の適応版の計数用)
+    d2b_mm_now: bool,
+    d2b_tried_now: bool,
     restored_now: bool,
     /// 試作 `ENOMOTO_MIP_NODELP2` の `x`: 今のノードで選んだ腕 (Some(true) 厳密な DSE 重み・Some(false) 保存した重み) と、腕ごとの [回数, 秒の指数移動平均]
     nl2_arm: Option<bool>,
@@ -1450,6 +1458,8 @@ fn tree_root_basis() -> bool {
 /// 3 再スタートの後の主、4 最初の主) の (回数、反復、マイクロ秒)。プロセス全体で数える
 pub(crate) static BASIS_NB_ROOT: [std::sync::atomic::AtomicU64; 15] = [const { std::sync::atomic::AtomicU64::new(0) }; 15];
 /// 診断: 木 (サブ MIP の外) のノードの最初の LP の (基底を復元した直後の回数、反復、それ以外の回数、反復)。プロセス全体で数える
+/// `ENOMOTO_MIP_HL2_D2` の `B` (D2b の適応版): D2b を使い始めたスレッドの数 (全スレッド、終わりの統計用)
+static D2B_ADAPT_ON: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub(crate) static BASIS_NB_TREE: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
 fn print_basis_nb_diag() {
@@ -4781,6 +4791,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         restore_stats: (0, 0, 0),
         d2b_rows: std::collections::HashMap::new(),
         d2_stats: [0; 8],
+        d2b_live: false,
+        d2b_adapt: [0; 6],
+        d2b_mm_now: false,
+        d2b_tried_now: false,
         restored_now: false,
         nl2_arm: None,
         nl2_stat: [(0, 0.0); 2],
@@ -10841,6 +10855,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.nodelp_sib = from_sibling;
             let mut pre_qlb = f64::NAN;
             self.tp_kind = 0;
+            self.d2b_tried_now = false;
             let node = match plunge.take().or(sibling) {
                 Some(n) if !from_sibling => n,
                 Some(n) => {
@@ -11474,6 +11489,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let e = &mut self.nl2_stat[arm as usize];
                         e.1 = if e.0 == 0 { it } else { (1.0 - a) * e.1 + a * it };
                         e.0 += 1;
+                    }
+                    // `ENOMOTO_MIP_HL2_D2` の `B`: 待ち行列から取って基底の復元を試みたノード (合わずに今の基底のまま解いたものも含む)
+                    if std::mem::take(&mut self.d2b_tried_now) && k == 1 {
+                        self.d2b_adapt_check(self.lp.total_iterations() - it0);
                     }
                     if std::mem::take(&mut self.restored_now) {
                         self.restore_stats.2 += self.lp.total_iterations() - it0;
@@ -14880,6 +14899,42 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.add_proof_from(&y, true);
     }
 
+    /// `ENOMOTO_MIP_HL2_D2` の `B` (D2b の適応版): 待ち行列から取って基底を復元したノードの最初の LP の後に呼ぶ (`it` はその反復)。
+    /// まだ使っていなければ、待ち行列のノードが `ENOMOTO_T_MIP_D2B_MINQ` (既定 30) 以上あり、そのうち基底の数が合わなかった割合が
+    /// `ENOMOTO_T_MIP_D2B_FRAC` (既定 0.1) 以上、合わなかったノードの最初の LP の反復の平均が潜り・兄弟の子 (前の LP の続き) の平均の
+    /// `ENOMOTO_T_MIP_D2B_K` (既定 6) 倍以上かつ `ENOMOTO_T_MIP_D2B_MINIT` (既定 100) 以上なら、このスレッドで D2b を使い始める
+    /// (切り替えの重い問題だけで使う。主スレッドの 60〜120 秒の下調べで、不一致のノードの反復 / 潜りの子の反復は kasai 18 倍、
+    /// noswot 2.8・neos5 2.8・mc11 4.4・rout 4.6・neos-911970 4.5・eil33-2 6.3 倍。noswot では D2b で LP の行が膨らみ遅くなった。
+    /// 反復の平均の下限 100 は、少ない標本で比が大きく出る eil33-2 (不一致のノード 56〜67 反復、潜りの子 8 反復) を外すため)
+    fn d2b_adapt_check(&mut self, it: u64) {
+        let a = &mut self.d2b_adapt;
+        a[0] += 1;
+        a[1] += it;
+        if self.d2b_mm_now {
+            a[2] += 1;
+            a[3] += it;
+        }
+        if self.d2b_live {
+            return;
+        }
+        let minq = tunable!("ENOMOTO_T_MIP_D2B_MINQ", 30u64, u64);
+        if a[0] < minq {
+            return;
+        }
+        let frac = a[2] as f64 / a[0] as f64;
+        let mm_it = a[3] as f64 / a[2].max(1) as f64;
+        let dive_it = self.tprof.kind_it[0] as f64 / self.tprof.kind_n[0].max(1) as f64;
+        if frac >= tunable!("ENOMOTO_T_MIP_D2B_FRAC", 0.1, f64) && mm_it >= tunable!("ENOMOTO_T_MIP_D2B_K", 6.0, f64) * dive_it.max(1.0) && mm_it >= tunable!("ENOMOTO_T_MIP_D2B_MINIT", 100.0, f64) {
+            self.d2b_live = true;
+            D2B_ADAPT_ON.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if env_str!("ENOMOTO_MIP_LOG").is_some() {
+                eprintln!("MIP: D2BADAPT: tid {} on at {:.2}s nodes {}: queue restores {} ({:.1}it), mismatched {} ({:.1}it), dive {} ({:.1}it)",
+                    self.pool_tid, self.start.elapsed().as_secs_f64(), self.nodes, a[0], a[1] as f64 / a[0] as f64, a[2], mm_it, self.tprof.kind_n[0], dive_it);
+            }
+            self.d2b_adapt[5] = self.lp.num_rows().saturating_sub(self.p.m) as u64;
+        }
+    }
+
     /// `ENOMOTO_MIP_HL2_D2` の `b` (D2b): 待ち行列から取り出したノードの保存した基底 `b` (行の世代 `epoch`) で効いていた (非基底の) カットの行の
     /// うち、今の LP から消えているものを、消すときに取っておいた中身 ([`Self::d2b_store_deleted`]) から LP の最後に足し直す。
     /// 足した行の保存した基底での状態を返す (足さなければ空)。`prot` はノードを作ったときの効いていたカットの番号 (保存した基底の
@@ -14939,6 +14994,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.d2_stats[5] += 1;
             return Vec::new();
         }
+        // `B` (適応版): 足し直した行が残って LP が膨らむのを抑える (noswot では行の平均が 363 → 810 になり潜りの子の LP も 3 倍遅くなった)。
+        // カットの行が使い始めたときの `ENOMOTO_T_MIP_D2B_ROWCAP` (既定 2) 倍 (少なくとも 50 本) を超えるなら足さない
+        if !super::separation::hl2_d2('b') && !add_ids.is_empty() {
+            let cap = (tunable!("ENOMOTO_T_MIP_D2B_ROWCAP", 2.0, f64) * self.d2b_adapt[5].max(50) as f64) as usize;
+            if self.lp.num_rows() - m0 + add_ids.len() > cap {
+                self.d2b_adapt[4] += 1;
+                return Vec::new();
+            }
+        }
         if !add_ids.is_empty() {
             let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = add_ids.iter().map(|id| self.d2b_rows[id].clone()).collect();
             self.add_cut_rows(&rows);
@@ -14960,7 +15024,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 待ち行列のノードの基底を LP に置く (保存した後の行の追加・削除を当てはめる)。
     fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize, dse: Option<&[(u32, f32)]>, changes: &[BoundChange], prot: Option<&[u64]>) {
         // `ENOMOTO_MIP_HL2_D2` の `b` (D2b): 保存した基底で効いていたカットが消えていれば足し直す (足した行と、保存した基底でのその行の状態)
-        let readd = if super::separation::hl2_d2('b') && !self.params.submip && self.tp_kind != 2 { self.d2b_readd(b, epoch, prot) } else { Vec::new() };
+        // `B` (適応版): このスレッドで使い始めた後だけ
+        self.d2b_mm_now = false;
+        self.d2b_tried_now = super::separation::hl2_d2('B') && !self.params.submip;
+        let d2b = super::separation::hl2_d2('b') || (self.d2b_live && super::separation::hl2_d2('B'));
+        let readd = if d2b && !self.params.submip && self.tp_kind != 2 { self.d2b_readd(b, epoch, prot) } else { Vec::new() };
         let mr = self.lp.num_rows();
         // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `t`): 保存した基底の上限・下限の置き場所も渡す。根からの分枝で締めた列は推し量りのまま
         let nb_skip: Option<Vec<usize>> = (crate::simplex::mip_lp::basis_nb_on('t') || self.nl2_on('b')).then(|| changes.iter().map(|c| c.col).collect());
@@ -15066,6 +15134,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let nb = b2.col.iter().chain(b2.row.iter()).filter(|&&s| s == VarStatus::Basic).count();
         if nb != mr {
             self.restore_diag.2 = true;
+            self.d2b_mm_now = true;
             self.restore_stats.1 += 1;
             // 保存した基底で非基底だった (効いていた) カットの行が削除されていると基底変数が多すぎる。既定では
             // set_basis の修復 (構造変数を後ろから外す) に任せる。`ENOMOTO_MIP_RESTORE_KEEP_CURRENT` なら今の LP の
@@ -22102,6 +22171,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if super::separation::hl2_d2_any() {
                 let d = &self.d2_stats;
                 eprintln!("MIP: HL2_D2: protected inactive cuts kept {} (dropped by the D2a limits {}); D2b: rows stored {}, restores with re-added rows {} ({} rows), failed for missing rows {}, protection count mismatch {}, still mismatched {}", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+                if super::separation::hl2_d2('B') {
+                    let a = &self.d2b_adapt;
+                    eprintln!("MIP: D2BADAPT: threads switched on {} (all); this thread: on {}, queue restores {} ({:.1}it), mismatched {} ({:.1}it), skipped by the row cap {} (cut rows at the switch {})", D2B_ADAPT_ON.load(std::sync::atomic::Ordering::Relaxed), self.d2b_live, a[0], a[1] as f64 / a[0].max(1) as f64, a[2], a[3] as f64 / a[2].max(1) as f64, a[4], a[5]);
+                }
             }
             if mem1_siblu_keep().is_some() {
                 let st: Vec<u64> = MEM1_SIBLU_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
