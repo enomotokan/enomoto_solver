@@ -1641,6 +1641,14 @@ pub(crate) fn probe_basis_guard_has(c: char) -> bool {
 /// 支配される行の削除など) 列の状態だけを渡し、`set_basis` の修復が行 0, 1, 2, ... の論理変数で基底を埋める。restart は
 /// 中身の合わない行の論理変数をすべて基底に入れ、多すぎる分を修復が構造列から外す。どちらも基底が特異になりやすく
 /// (58 問で root_probe の 69%、restart の 89%)、全スラック基底から解き直していた (analysis/basis_nb_diag_20261102.md の 3 節)
+/// 試作 `ENOMOTO_MIP_ROOT_BASIS_FIX_BIG` (analysis/highsloss_20261113.md、既定では使わない): `ENOMOTO_MIP_ROOT_BASIS_FIX` の根 (前処理の LP
+/// プロービングの基底を、行が変わっていたら中身で照らし合わせて作り直す) の部分だけを、問題の非零が `ENOMOTO_T_MIP_ROOT_BASIS_FIX_BIG_NNZ`
+/// (既定 200000) 以上のときに使う。neos-873061 (非零 34 万) で根の LP 35018 反復 72 秒 → 4943 反復 10 秒。小さい問題では根の頂点が変わる揺れ
+/// (neos-960392・physiciansched6-2、analysis/singular_fix_c_20261102.md) が害になったので、大きい LP だけに絞る
+pub(crate) fn root_basis_fix_big(p: &MipProblem) -> bool {
+    env_str!("ENOMOTO_MIP_ROOT_BASIS_FIX_BIG").is_some_and(|v| v != "0") && p.nnz >= tunable!("ENOMOTO_T_MIP_ROOT_BASIS_FIX_BIG_NNZ", 200000usize, usize)
+}
+
 pub(crate) fn root_basis_fix_on() -> bool {
     env_str!("ENOMOTO_MIP_ROOT_BASIS_FIX").is_some()
 }
@@ -8106,7 +8114,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let rows_same = |b: &super::lp::Basis| !b.row.is_empty() && b.row.len() <= self.p.m && fp.is_some_and(|f| super::rows_fingerprint(&self.p.rows[..b.row.len()]) == f);
             let mut rebuilt = false;
             let rb = match (rb, saved) {
-                (Some(b), Some((rows, x))) if (root_basis_fix_on() || probe_basis_guard_has('f')) && b.col.len() == self.p.n && !rows_same(&b) => {
+                (Some(b), Some((rows, x))) if (root_basis_fix_on() || probe_basis_guard_has('f') || root_basis_fix_big(&self.p)) && b.col.len() == self.p.n && !rows_same(&b) => {
                     let t0 = std::time::Instant::now();
                     match root_basis_rebuild(&self.lp, self.p.n, &b.col, &rows, &x) {
                         Some((nb, st)) => {

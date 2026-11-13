@@ -4762,7 +4762,8 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
         }
         // `ENOMOTO_MIP_ROOT_BASIS_FIX` (試作): 行の中身と状態・解も渡す (根の LP の行が変わっていたら中身で照らし合わせて基底を作る)
         // 文字 `s` (再スタートの後の根だけ) なら置かない (root_probe は今まで通り)
-        if ((solver::root_basis_fix_on() && !solver::root_basis_fix_has('s')) || solver::probe_basis_guard_has('f')) && b.row.len() == prob.m {
+        // 試作 `ENOMOTO_MIP_ROOT_BASIS_FIX_BIG` ([`solver::root_basis_fix_big`]): 非零の多い問題だけ同じく置く
+        if ((solver::root_basis_fix_on() && !solver::root_basis_fix_has('s')) || solver::probe_basis_guard_has('f') || solver::root_basis_fix_big(&prob)) && b.row.len() == prob.m {
             let rows: Vec<(Vec<(usize, f64)>, lp::VarStatus)> = prob.rows.iter().cloned().zip(b.row.iter().copied()).collect();
             solver::ROOT_BASIS_SAVED.with(|s| *s.borrow_mut() = Some((rows, lp.col_values())));
         }
