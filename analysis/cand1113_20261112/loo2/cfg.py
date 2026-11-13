@@ -5,3 +5,5 @@ from pathlib import Path
 _sp = importlib.util.spec_from_file_location("cfg_loo", Path(__file__).resolve().parents[1] / "loo" / "cfg.py")
 _m = importlib.util.module_from_spec(_sp); _sp.loader.exec_module(_m)
 CFGS = {c: v for c, v in _m.CFGS.items() if not c.startswith("-P:")}
+# 追加の確かめ用: prune1112 の 5 部品を 1 つずつ外した形 ("-P:X")
+CFGS2 = {c: v for c, v in _m.CFGS.items() if c.startswith("-P:")}

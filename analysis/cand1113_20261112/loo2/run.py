@@ -8,7 +8,8 @@ WT = D.parents[2]
 sys.path.insert(0, str(WT / "scripts"))
 sys.path.insert(0, str(D))
 import run_miplib_benchmark as rb  # noqa: E402
-from cfg import CFGS  # noqa: E402
+from cfg import CFGS, CFGS2  # noqa: E402
+CFGS = {**CFGS, **CFGS2}
 SET, k = sys.argv[1], int(sys.argv[2])
 mine = json.loads((D / f"shards_{SET}.json").read_text())["shards"][k]
 OUT = D / f"res_{SET}_s{k}.jsonl"
