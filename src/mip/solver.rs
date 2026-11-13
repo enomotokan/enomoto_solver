@@ -18497,7 +18497,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let (cols, nnz_new, nnz_free, gone, live) = self.restart_shrink();
         let lpv = if self.lp.num_rows() > 0 { self.lp.objective() + p.offset } else { f64::NAN };
         eprintln!(
-            "RSTCRIT {tag} restarts {} outer {:.3} solve {:.3} nodes {} nint {} free0 {} newly {} m {} n {} nnz {} lprows {} newcols {cols} nnznew {nnz_new} nnzfree {nnz_free} rowsgone {gone} rowslive {live} lp {:.10e} rootlb {:.10e} inc {:.10e} rootlp {:.3}",
+            "RSTCRIT {tag} restarts {} outer {:.3} solve {:.3} nodes {} nint {} free0 {} newly {} m {} n {} nnz {} lprows {} newcols {cols} nnznew {nnz_new} nnzfree {nnz_free} rowsgone {gone} rowslive {live} lp {:.10e} rootlb {:.10e} inc {:.10e} rootlp {:.3} pendnnz {}",
             self.params.restarts,
             super::outer_elapsed().unwrap_or(f64::NAN),
             self.start.elapsed().as_secs_f64(),
@@ -18512,7 +18512,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             lpv,
             self.root_lb,
             self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z),
-            self.root_lp_secs
+            self.root_lp_secs,
+            self.rcs_pending_nnz()
         );
     }
 
@@ -18567,13 +18568,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let free = nint.saturating_sub(self.root_fixed0);
         let newly = self.newly_fixed_ints();
         let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
-        newly > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * nint as f64 && self.rstcrit_gate(false)
+        ((newly > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * nint as f64) || self.rstcrit_all_nnz_ok()) && self.rstcrit_gate(false)
+    }
+
+    /// 試作 `ENOMOTO_MIP_RSTCRIT` の `a` (analysis/rstcrit_a_20261113.md): 整数列の固定の数の条件を満たさなくても、新たに固定された列
+    /// (整数・連続とも、[`Self::restart_shrink`] の数え方。`ENOMOTO_MIP_RCSTRONG` の `g` の保留分も含む) の非零が、根の始めに自由だった列の非零の
+    /// `ENOMOTO_T_MIP_RSTCRIT_ALL_NNZ` (既定 0.15) 以上なら、再スタートの数の条件を満たしたとみなす (rmatr100-p10 は暗黙の整数の連続列が
+    /// 大量に固定されても、整数列の固定が 0 本で再スタートしない)。`ENOMOTO_MIP_RSTCRIT` に `a` がなければ偽
+    pub(super) fn rstcrit_all_nnz_ok(&self) -> bool {
+        if !env_str!("ENOMOTO_MIP_RSTCRIT").is_some_and(|v| v.contains('a')) {
+            return false;
+        }
+        let (_, nnz_new, nnz_free, _, _) = self.restart_shrink();
+        let s = (nnz_new + self.rcs_pending_nnz()) as f64 / nnz_free.max(1) as f64;
+        s >= tunable!("ENOMOTO_T_MIP_RSTCRIT_ALL_NNZ", 0.15, f64)
     }
 
     /// 試作 `ENOMOTO_MIP_RSTCRIT` (既定では使わない。analysis/rstcrit_20261111.md): 固定の数の閾値を越えた再スタートを、縮みの効き目で
     /// さらに選ぶ。再スタートしてよいなら true (`ENOMOTO_MIP_RSTCRIT` がなければ常に true)。文字:
     /// - `n`: 新たに固定された列 (整数・連続とも) の非零が、この根の始めに自由だった列の非零 (元の行のみ) の
     ///   `ENOMOTO_T_MIP_RSTCRIT_NNZ` (0.05) 以上でなければ再スタートしない (LP がほとんど縮まない再スタートを見送る)
+    /// - `a`: 数の条件の代わりに非零の割合でも再スタートを許す ([`Self::rstcrit_all_nnz_ok`])
     /// - `m`: SCIP の `presolving/restartminred` に倣い、直前の再スタートで新たに固定された整数列が、その根の始めに自由だった整数列の
     ///   `ENOMOTO_T_MIP_RSTCRIT_MINRED` (0.10) 未満なら、それ以上再スタートしない
     /// `verbose` なら見送ったときに理由を出す
@@ -18755,7 +18770,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.rstcrit_diag("check");
         // `ENOMOTO_MIP_TREE_RESTART` (試作): 木の中の再スタートは固定の数をここでは見ない ([`Self::tree_restart_due`] が見る。`force` なら
         // HiGHS と同じく見ない)
-        if nint == 0 || (!self.force_restart && (newly == 0 || (newly as f64) < fac * denom as f64)) {
+        if nint == 0 || (!self.force_restart && (newly == 0 || (newly as f64) < fac * denom as f64) && !self.rstcrit_all_nnz_ok()) {
             return None;
         }
         // 試作 `ENOMOTO_MIP_RSTCRIT` ([`Self::rstcrit_gate`]): 縮みの小さい再スタートを見送る
