@@ -11,7 +11,8 @@ WT = D.parents[1]
 sys.path.insert(0, str(WT / "analysis" / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
 NT, NP = int(sys.argv[1]), int(sys.argv[2])
-FORMS_T = ["k", "ik", "gk"]
+SUF = sys.argv[3] if len(sys.argv) > 3 else ""  # "2": 直した gk (GK_INT) の 2 回目。T も {k, gk} だけ
+FORMS_T = ["k", "ik", "gk"] if not (len(sys.argv) > 3) else ["k", "gk"]
 FORMS_P = ["k", "gk"]
 T_PROBS = ["rmatr100-p10", "neos-2978193-inde", "fiball", "pk1", "neos-911970", "swath1", "physiciansched6-2", "mc11", "10teams", "neos5"]
 def times(pat, cap):
@@ -32,8 +33,8 @@ TP, TM = times("res_P_s*.jsonl", 60), times("res_M_s*.jsonl", 600)
 def est_t(p):
     v = TM.get(p) or [min(4 * x, 600) for x in TP.get(p, [])] or [300]
     return min(sum(v) / len(v) * 1.5, 600) + 20
-balance({(p, s): FORMS_T for p in T_PROBS for s in (1, 2, 3, 4)}, est_t, NT, "shards_T.json", 600)
+balance({(p, s): FORMS_T for p in T_PROBS for s in (1, 2, 3, 4)}, est_t, NT, f"shards_T{SUF}.json", 600)
 def est_p(p):
     v = TP.get(p) or [40]
     return sum(v) / len(v) + 8
-balance({(p, s): FORMS_P for p in PROBS for s in (1, 2)}, est_p, NP, "shards_P.json", 60)
+balance({(p, s): FORMS_P for p in PROBS for s in (1, 2)}, est_p, NP, f"shards_P{SUF}.json", 60)

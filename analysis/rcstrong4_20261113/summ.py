@@ -1,7 +1,8 @@
-"""RCSTRONG4 の集計: python summ.py > summ.txt
+"""RCSTRONG4 の集計: python summ.py [2] > summ[2].txt
 (T) 狙いの問題の表 (形ごとに種 1〜4 の秒、* は時間切れ) と、問題ごとの形の比 (k に対する、shift 10 の幾何平均)。
 (P) 58 問 × 種 1〜3 の対の比 (ik/k・gk/k、shift 1、時間切れは 60 秒、問題単位のブートストラップ)、解けた数、揃って遅い/速い問題。"""
-import json, glob, math, random, collections
+import json, glob, math, random, collections, sys
+SUF = sys.argv[1] if len(sys.argv) > 1 else ""  # "2": 直した gk の 2 回目 (res_T2・res_P2)
 from pathlib import Path
 D = Path(__file__).resolve().parent
 FORMS = ["k", "ik", "gk"]
@@ -13,7 +14,7 @@ def load(s):
     return R
 def solved(r): return r["result"].get("status") in ("optimal", "infeasible")
 def t(r): return min(r["result"]["time"], r["tl"]) if solved(r) else r["tl"]
-T = load("T")
+T = load("T" + SUF)
 print(f"(T) 狙いの問題、600 秒 ({len(T)} 行)\n")
 print("| 問題 | " + " | ".join(FORMS) + " | ik/k | gk/k |\n|---|---|---|---|---|---|")
 for p in sorted({p for p, c, s in T}):
@@ -28,7 +29,7 @@ for p in sorted({p for p, c, s in T}):
         cells.append(" ".join(v))
     rat = [f"{math.exp(sum(logs[c]) / len(logs[c])):.2f}" if logs[c] else "-" for c in ("ik", "gk")]
     print(f"| {p} | " + " | ".join(cells) + " | " + " | ".join(rat) + " |")
-P = load("P")
+P = load("P" + SUF)
 print(f"\n(P) 58 問 × 種 1・2、60 秒 ({len(P)} 行)")
 probs = sorted({p for p, c, s in P}); seeds = sorted({s for p, c, s in P})
 for c in [c for c in FORMS if any(cc == c for (_, cc, _) in P)]:

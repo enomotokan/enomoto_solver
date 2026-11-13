@@ -200,7 +200,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let frac = tunable!("ENOMOTO_T_MIP_RCSTRONG_KFRAC", 0.05, f64);
             let kmax = tunable!("ENOMOTO_T_MIP_RCSTRONG_KMAX", 2000usize, usize);
             let mut v: Vec<(f64, usize, f64, f64)> = Vec::new();
+            // `g` (と `ENOMOTO_MIP_RCSTRONG_GK_INT`、既定で入る。`=0` で以前の形): `k` の行には整数列と、印のない列だけを入れる
+            // (暗黙の整数の連続列は `g` の保留のために根の表に入るが、`k` の行に入れると pk1 が 2 倍遅くなった。analysis/rcstrong4_20261113.md)
+            let gk_int = flag('g') && env_def!("ENOMOTO_MIP_RCSTRONG_GK_INT", "1").is_some();
             for &(j, _, d, bound) in list {
+                if gk_int && !self.p.is_int[j] {
+                    continue;
+                }
                 let w = self.dom.global_up[j] - self.dom.global_lo[j];
                 if !(w > 0.0) {
                     continue;
