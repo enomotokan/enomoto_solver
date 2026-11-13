@@ -9,7 +9,7 @@ sys.path.insert(0, str(WT / "scripts"))
 sys.path.insert(0, str(WT / "analysis" / "cand1113_20261112"))
 import run_miplib_benchmark as rb  # noqa: E402
 from cfg import CAND1113  # noqa: E402
-CFG = {"cand": dict(CAND1113, ENOMOTO_MIP_RCSTRONG="k", ENOMOTO_MIP_LOG="1"), "highs": {"ENOMOTO_BENCH_HIGHS_LOG": "1"}}
+CFG = {"cand": dict(CAND1113, ENOMOTO_MIP_RCSTRONG="k", ENOMOTO_MIP_LOG="1", ENOMOTO_MIP_DEBUG_PRETIME="1"), "highs": {"ENOMOTO_BENCH_HIGHS_LOG": "1"}}
 k = int(sys.argv[1])
 plan = json.loads((D / "shards.json").read_text())
 TL, SEED = plan["tl"], plan["seed"]
