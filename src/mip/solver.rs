@@ -18549,8 +18549,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let newly = self.newly_fixed_ints() + extra;
         let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
-        let denom = if env_str!("ENOMOTO_MIP_RESTART_FRAC_FREE").is_some() || super::gr_restart_ff_for(p) { p.nint.saturating_sub(self.root_fixed0) } else { p.nint };
+        let denom = self.restart_denom();
         newly > 0 && newly as f64 >= fac * denom as f64
+    }
+
+    /// 根の終わりの再スタートの割合の分母 ([`Self::maybe_restart`]・[`Self::restart_expected`]、`p` なら早めの再スタートの数の条件も):
+    /// 既定は全部の整数列 (`p.nint`、根の始めに固定済みの列も含む)。`ENOMOTO_MIP_RESTART_FRAC_FREE`・[`super::gr_restart_ff_for`] なら
+    /// 根の始めに自由だった整数列。試作 `ENOMOTO_MIP_RSTDEN` (analysis/rstden_20261113.md、既定では使わない) の文字:
+    /// `1` = 1 回目の再スタートで自由な整数列にする、`2` = 2 回目以降で自由な整数列にする
+    /// (HiGHS の `percentageInactiveIntegers` は前処理の後の自由な整数列に対する割合)
+    fn restart_denom(&self) -> usize {
+        let nint = self.p.nint;
+        let free = nint.saturating_sub(self.root_fixed0);
+        if env_str!("ENOMOTO_MIP_RESTART_FRAC_FREE").is_some() || super::gr_restart_ff_for(self.p) {
+            return free;
+        }
+        if let Some(v) = env_str!("ENOMOTO_MIP_RSTDEN") {
+            if v.contains(if self.params.restarts == 0 { '1' } else { '2' }) {
+                return free;
+            }
+        }
+        nint
+    }
+
+    /// 早めの再スタート・木の中の再スタートの「全部の整数列の割合」の条件の分母 (試作 `ENOMOTO_MIP_RSTDEN` に `p` があれば
+    /// [`Self::restart_denom`]、なければ全部の整数列)
+    fn proto_restart_denom(&self) -> usize {
+        if env_str!("ENOMOTO_MIP_RSTDEN").is_some_and(|v| v.contains('p')) {
+            self.restart_denom()
+        } else {
+            self.p.nint
+        }
     }
 
     /// 早めの再スタート ([`super::early_restart_on`])・木の中の再スタート (`ENOMOTO_MIP_TREE_RESTART=inc`、試作) の判定: 新たな固定が、根の始めに固定されて
@@ -18568,7 +18597,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let free = nint.saturating_sub(self.root_fixed0);
         let newly = self.newly_fixed_ints();
         let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
-        ((newly > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * nint as f64) || self.rstcrit_all_nnz_ok()) && self.rstcrit_gate(false)
+        ((newly > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * self.proto_restart_denom() as f64) || self.rstcrit_all_nnz_ok()) && self.rstcrit_gate(false)
     }
 
     /// 試作 `ENOMOTO_MIP_RSTCRIT` の `a` (analysis/rstcrit_a_20261113.md): 整数列の固定の数の条件を満たさなくても、新たに固定された列
@@ -18661,7 +18690,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let newly = self.newly_fixed_ints() + would;
         let frac = tunable!("ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_FRAC", 0.1, f64);
         let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
-        (would > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * nint as f64).then_some(would)
+        (would > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * self.proto_restart_denom() as f64).then_some(would)
     }
 
     /// 根での再スタート (SCIP の `restartfac`): 根の処理で新たに大域固定された整数列が全体の 1% (初回、`ENOMOTO_T_MIP_RESTART_FIRST_FAC`)・
@@ -18763,7 +18792,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 固定した列として持ったままなので、分母が全体 (h80x6320d では 6320 本) だと、自由な整数列 (約 1000 本) の 16% 近くを
         // 固定しないと 2 回目の再スタートが起きない
         // `ENOMOTO_MIP_GR_RESTART=ff` も同じ ([`super::gr_restart_ff_for`])
-        let denom = if env_str!("ENOMOTO_MIP_RESTART_FRAC_FREE").is_some() || super::gr_restart_ff_for(p) { nint.saturating_sub(self.root_fixed0) } else { nint };
+        // 試作 `ENOMOTO_MIP_RSTDEN` も ([`Self::restart_denom`])
+        let denom = self.restart_denom();
         if self.params.verbose {
             eprintln!("MIP: restart check: newly fixed {newly}, integer columns {nint}, free at the root {}, threshold {:.1}, root LP {:.2}s", nint.saturating_sub(self.root_fixed0), fac * denom as f64, self.root_lp_secs);
         }
