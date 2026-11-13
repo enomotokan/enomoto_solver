@@ -1,7 +1,7 @@
 #!/bin/bash
 # SMALLFIX の誤答の確かめ。cand1114 の fuzz.sh と同じ組を、CAND1114 + C3 + D1 (cfg.py の c3d1) で回す。
 # 加えて C3 の上限で止まった試しの LP の後始末を通すため、上限を 1 反復・0 秒にした組 (stress) でも fuzz_tiny・fuzz_highs を回す。
-# リポジトリの根から: bash analysis/smallfix_20261113/fuzz.sh   ログは analysis/smallfix_20261113/fuzz_logs/ (コミットしない)。
+# リポジトリの根から: bash analysis/smallfix_20261113/fuzz.sh   ログは analysis/smallfix_20261113/fuzz_logs/ (gzip にしてコミット)。
 set -u
 cd "$(dirname "$0")/../.."
 L=analysis/smallfix_20261113/fuzz_logs; mkdir -p $L
