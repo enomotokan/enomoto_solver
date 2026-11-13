@@ -1,4 +1,4 @@
-"""OBJPROBE の計測の分担を回す: python run.py SET K (SET は P (58 問 × 種 1〜3 × {base, c1, c2, c12} 60 秒)、H (HIGHSLOSS の 12 問 種 1 × {base, c12} 600 秒)、Q (58 問 × 種 1〜3 × {base, c12, c12h} 60 秒)、G (12 問 × {base, c12, c12h} 600 秒))。
+"""OBJPROBE の計測の分担を回す: python run.py SET K (SET は P (58 問 × 種 1〜3 × {base, c1, c2, c12} 60 秒)、H (HIGHSLOSS の 12 問 種 1 × {base, c12} 600 秒)、Q (58 問 × 種 1〜3 × {base, c12, c12h} 60 秒)、G (12 問 × {base, c12, c12h} 600 秒)、R (Q の取り直し、d24ffbeb))。
 shards_SET.json の K 番目の (問題, 設定, 種, 秒) を順に 4 スレッドで解き、res_SET_sK.jsonl に足す。途中から再開できる。ソルバーは同時に 1 つ。
 行の形は analysis/mitt600_20261103/run9.py と同じ (+ "cfg")。設定は cfg.py の CFGS。"""
 import json, os, subprocess, sys, time

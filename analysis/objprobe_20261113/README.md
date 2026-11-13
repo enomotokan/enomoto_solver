@@ -27,6 +27,8 @@ python analysis/objprobe_20261113/run.py {P|H} K              # 途中から再�
 - 追加 (h の確かめ、固定するコミットは d24ffbeb (乱択丸めの乱数列を分けた後)。b79bbaee で始めた分担はそのまま続けてよい):
   - Q (58 問 × 種 1〜3 × {base, c12, c12h} 60 秒、522 回): 3 分担 (K = 0〜2、各 1.32 時間)。`python analysis/objprobe_20261113/run.py Q K`
   - G (12 問 × 種 1 × {base, c12, c12h} 600 秒、36 回): 5 分担 (K = 0〜4、各 0.88〜1.02 時間)。`python analysis/objprobe_20261113/run.py G K`
-- 終わったら res_{P|H|Q|G}_sK.jsonl だけを名指しで add してコミットし、`git pull --rebase --autostash` の後 push する (`git add -A` は使わない)。
+- R (Q の取り直し、固定するコミットは d24ffbeb、乱択丸めの乱数列を分けた後): 58 問 × 種 1〜3 × {base, c12, c12h} 60 秒、3 分担 (K = 0〜2、各 1.32 時間)。
+  shards_R.json は shards_Q.json と同じ中身。`python analysis/objprobe_20261113/run.py R K`
+- 終わったら res_{P|H|Q|G|R}_sK.jsonl だけを名指しで add してコミットし、`git pull --rebase --autostash` の後 push する (`git add -A` は使わない)。
 - 集計: `python analysis/objprobe_20261113/summ.py P > summ_P.txt` (H・Q・G も同じ)。
 - 誤答の確かめ (済み、この分担には入らない): `bash analysis/objprobe_20261113/fuzz.sh` (結果は ../objprobe_20261113.md)。
