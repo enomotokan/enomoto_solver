@@ -835,8 +835,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_HL2_D2` の `B` (D2b の適応版、[`Self::d2b_adapt_check`]): このスレッドで D2b を使い始めたか
     pub(super) d2b_live: bool,
     /// D2b の適応版の計数: [待ち行列から取って基底を復元したノード, その最初の LP の反復, うち基底の数が合わなかったノード, その反復,
-    /// 行の上限で足し直さなかった復元, 使い始めたときのカットの行の数]
-    d2b_adapt: [u64; 6],
+    /// 行の上限で足し直さなかった復元, 使い始めたときのカットの行の数, `r` で外した足し直した行]
+    pub(super) d2b_adapt: [u64; 7],
+    /// `ENOMOTO_MIP_HL2_D2` の `r`: D2b で足し直して LP にあるカットの番号
+    pub(super) d2b_readd_ids: std::collections::HashSet<u64>,
     /// 今のノードの基底の復元で基底の数が合わなかったか、今のノードで基底の復元を試みたか (D2b の適応版の計数用)
     d2b_mm_now: bool,
     d2b_tried_now: bool,
@@ -4792,7 +4794,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         d2b_rows: std::collections::HashMap::new(),
         d2_stats: [0; 8],
         d2b_live: false,
-        d2b_adapt: [0; 6],
+        d2b_adapt: [0; 7],
+        d2b_readd_ids: std::collections::HashSet::new(),
         d2b_mm_now: false,
         d2b_tried_now: false,
         restored_now: false,
@@ -15014,6 +15017,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let n = self.cut_ids.len();
             for (t, &id) in add_ids.iter().enumerate() {
                 self.cut_ids[n - add_ids.len() + t] = id;
+                if super::separation::hl2_d2('r') {
+                    self.d2b_readd_ids.insert(id);
+                }
             }
             let mr = self.lp.num_rows();
             for (t, &st) in add_sts.iter().enumerate() {
@@ -22176,9 +22182,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if super::separation::hl2_d2_any() {
                 let d = &self.d2_stats;
                 eprintln!("MIP: HL2_D2: protected inactive cuts kept {} (dropped by the D2a limits {}); D2b: rows stored {}, restores with re-added rows {} ({} rows), failed for missing rows {}, protection count mismatch {}, still mismatched {}", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
-                if super::separation::hl2_d2('B') {
+                if super::separation::hl2_d2('B') || super::separation::hl2_d2('r') {
                     let a = &self.d2b_adapt;
-                    eprintln!("MIP: D2BADAPT: threads switched on {} (all); this thread: on {}, queue restores {} ({:.1}it), mismatched {} ({:.1}it), skipped by the row cap {} (cut rows at the switch {})", D2B_ADAPT_ON.load(std::sync::atomic::Ordering::Relaxed), self.d2b_live, a[0], a[1] as f64 / a[0].max(1) as f64, a[2], a[3] as f64 / a[2].max(1) as f64, a[4], a[5]);
+                    eprintln!("MIP: D2BADAPT: threads switched on {} (all); this thread: on {}, queue restores {} ({:.1}it), mismatched {} ({:.1}it), skipped by the row cap {} (cut rows at the switch {}), re-added rows removed by r {}", D2B_ADAPT_ON.load(std::sync::atomic::Ordering::Relaxed), self.d2b_live, a[0], a[1] as f64 / a[0].max(1) as f64, a[2], a[3] as f64 / a[2].max(1) as f64, a[4], a[5], a[6]);
                 }
             }
             if mem1_siblu_keep().is_some() {

@@ -53,6 +53,7 @@ use super::lp_api::MipLp;
 /// - `B` (D2b の適応版、analysis/d2adapt_20261113.md): 始めは使わず、木の探索の中で待ち行列から取ったノードの基底の不一致が重いと
 ///   分かった (スレッドごと) ときから `b` と同じにする ([`Solver::d2b_adapt_check`])。消した行の中身は始めから取っておく
 ///   (使い始めてからにすると、kasai では使い始める (46〜81 秒) 前に消えた行が多く、足し直しがほとんど失敗した)
+/// - `r` (`b`・`B` と一緒に): 足し直した行が効かなくなったら年齢 `ENOMOTO_T_MIP_D2B_AGE` (5) で外す ([`Solver::remove_aged_cuts`])
 /// 保護のデータ (ノードの効いていたカットの番号と待ち行列の参照数) はどの文字でも作る。年齢での削除が保護を守るのは
 /// 従来どおり `ENOMOTO_MIP_PROTECT_QUEUE_CUTS` のときだけ
 pub(super) fn hl2_d2(c: char) -> bool {
@@ -4550,6 +4551,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.delete_lp_rows(&remove);
                     removed += cnt;
                 }
+            }
+        }
+        // `ENOMOTO_MIP_HL2_D2` の `r` ([`hl2_d2`]): D2b で足し直した行は、効かなくなって (論理変数が基底) 年齢が
+        // `ENOMOTO_T_MIP_D2B_AGE` (既定 5) を超えたらすぐ外す (年齢の上限まで残って LP が膨らむのを防ぐ。待ち行列のノードで効いていれば
+        // 外すときにまた取っておくので、そのノードを取り出すときにまた足し直せる)
+        if hl2_d2('r') && !self.d2b_readd_ids.is_empty() {
+            self.sync_cut_age();
+            let a = tunable!("ENOMOTO_T_MIP_D2B_AGE", 5u32, u32);
+            let m0 = self.p.m;
+            let mut remove = vec![false; self.lp.num_rows()];
+            let mut cnt = 0;
+            {
+                let b = self.lp.basis_ref();
+                for (k, &age) in self.cut_age.iter().enumerate() {
+                    if age > a && b.row[m0 + k] == VarStatus::Basic && self.d2b_readd_ids.contains(&self.cut_ids[k]) {
+                        remove[m0 + k] = true;
+                        cnt += 1;
+                    }
+                }
+            }
+            if cnt > 0 {
+                for k in 0..self.cut_ids.len() {
+                    if remove[m0 + k] {
+                        self.d2b_readd_ids.remove(&self.cut_ids[k]);
+                    }
+                }
+                self.delete_lp_rows(&remove);
+                removed += cnt;
+                self.d2b_adapt[6] += cnt as u64;
+            }
+            if self.d2b_readd_ids.len() > 2 * self.cut_ids.len() + 100 {
+                let live: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
+                self.d2b_readd_ids.retain(|id| live.contains(id));
             }
         }
         removed
