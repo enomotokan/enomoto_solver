@@ -18591,6 +18591,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if v.contains('n') {
             let (_, nnz_new, nnz_free, _, _) = self.restart_shrink();
+            // 試作 `ENOMOTO_MIP_RCSTRONG` の `g`: 保留した暗黙の整数の切り捨てで固定される列も数える (再スタートを決めたら当てる)
+            let nnz_new = nnz_new + self.rcs_pending_nnz();
             let s = nnz_new as f64 / nnz_free.max(1) as f64;
             let thr = tunable!("ENOMOTO_T_MIP_RSTCRIT_NNZ", 0.05, f64);
             if s < thr {
@@ -18791,6 +18793,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 return None;
             }
+        }
+        // 試作 `ENOMOTO_MIP_RCSTRONG` の `g`: 保留した暗黙の整数の連続列の切り捨てを、再スタートを決めたここで大域的な境界に当てる
+        let ng = self.rcs_apply_pending();
+        if ng > 0 && self.params.verbose {
+            eprintln!("MIP: RCSTRONG g: applied {ng} pending implied-integer roundings before the restart");
         }
         // 新しい問題: 大域的な境界 + 元の行 + LP に残ったカット (どれも大域的に成り立つ)
         let mut rows = p.rows.clone();

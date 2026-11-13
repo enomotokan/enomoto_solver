@@ -15,6 +15,11 @@
 //!   (既定 2000) 本まで。打ち切り値が変わるたびに作り直す。
 //! - `r` (`i` と一緒に) 切り捨てを根の大域的な固定だけにし、ノードの局所的な固定では切り捨てない (pk1 でノードの切り捨てが
 //!   揃って遅くしたため。ノードでは数えるだけ)。
+//! - `g` (`ENOMOTO_MIP_RCSTRONG=gk` など、analysis/rcstrong3_20261113.md): 根の大域的な固定での暗黙の整数の連続列の切り捨てを、すぐには
+//!   当てずに保留し、根の再スタートを決めたときだけ当てる ([`Solver::rcs_apply_pending`])。再スタートの判定 (`ENOMOTO_MIP_RSTCRIT` の `n`) では、
+//!   保留の切り捨てで固定される列の非零も数える ([`Solver::rcs_pending_nnz`])。`i` の効き (neos-2978193-inde: 切り捨てで早い再スタートが起き、
+//!   問題が縮む) を残し、再スタートしないときの害 (rmatr100-p10: 根の固定で LP の点・部分 MIP が変わる) とノードの切り捨ての害 (pk1) を
+//!   避ける狙い。ノードでは切り捨てない。`i` より優先する。
 //! - `c` (診断、解き方は変えない): `i` で切り捨てたら新たに締まる・固定される本数を数えて、終わりに 1 行出す (`i` と一緒なら
 //!   実際に締めた数)。
 
@@ -31,7 +36,7 @@ pub(crate) fn flag(c: char) -> bool {
 
 /// 暗黙の整数を使う (`i`) か、数える (`c`) か。
 pub(crate) fn implint_on() -> bool {
-    flag('i') || flag('c')
+    flag('i') || flag('c') || flag('g')
 }
 
 /// 全スレッドのノードでの数: [見た列 (印のない列も), 切り捨てで新たに締まった列 (切り捨てなしでは締めない), 切り捨てで境界に固定された列,
@@ -66,6 +71,8 @@ pub(crate) struct RcsState {
     klim: f64,
     /// `k` で使う根の被約費用の表 (主は自分の表の写し、従は主から受け取ったもの)。
     kroot: Option<RootRc>,
+    /// `g`: 保留した切り捨て (列ごとの (下限, 上限) の候補。空なら未使用)。
+    pend: Vec<(f64, f64)>,
 }
 
 impl Drop for RcsState {
@@ -150,7 +157,7 @@ pub(crate) fn node_round(st: &RcsState, j: usize, upper: bool, v: f64, lo: f64, 
             NODE_CNT[2].fetch_add(1, Relaxed);
         }
     }
-    if flag('i') && !flag('r') && tight {
+    if flag('i') && !flag('g') && !flag('r') && tight {
         Some(r)
     } else {
         None
@@ -284,10 +291,67 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 bit(8, 3, c);
             }
         }
+        if flag('g') {
+            // 保留する (締まるものだけ。打ち切り値が下がるたびに呼ばれるので、きつい方を残す)
+            if tight {
+                let n = self.p.n;
+                let pend = &mut self.rcs.pend;
+                if pend.len() != n {
+                    *pend = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
+                }
+                if upper {
+                    pend[j].1 = pend[j].1.min(r);
+                } else {
+                    pend[j].0 = pend[j].0.max(r);
+                }
+            }
+            return None;
+        }
         if flag('i') {
             Some(r)
         } else {
             None
         }
+    }
+
+    /// `g`: 保留した切り捨てを当てると新たに固定される列 (今は大域的に固定されていない、元から自由な列) の非零 (元の行のみ、
+    /// [`Self::restart_shrink`] と同じ数え方)。
+    pub(super) fn rcs_pending_nnz(&self) -> usize {
+        if !flag('g') || self.rcs.pend.len() != self.p.n {
+            return 0;
+        }
+        let p = self.p;
+        let eps = |b: f64| 1e-9 * (1.0 + b.abs());
+        let mut nnz = 0;
+        for (j, &(pl, pu)) in self.rcs.pend.iter().enumerate() {
+            let (glo, gup) = (self.dom.global_lo[j], self.dom.global_up[j]);
+            if !(p.col_lo[j] < p.col_up[j]) || glo == gup {
+                continue;
+            }
+            if pu <= glo + eps(glo) || pl >= gup - eps(gup) {
+                nnz += p.cols[j].iter().filter(|&&(i, _)| i < p.m).count();
+            }
+        }
+        nnz
+    }
+
+    /// `g`: 保留した切り捨てを大域的な境界に当てる (根の再スタートを決めた後に呼ぶ)。当てた列の数を返し、保留を空にする。
+    pub(super) fn rcs_apply_pending(&mut self) -> usize {
+        if !flag('g') || self.rcs.pend.len() != self.p.n {
+            return 0;
+        }
+        let pend = std::mem::take(&mut self.rcs.pend);
+        let mut k = 0;
+        for (j, &(pl, pu)) in pend.iter().enumerate() {
+            if pu < self.dom.global_up[j] {
+                self.dom.tighten_global(self.p, j, true, pu.max(self.dom.global_lo[j]));
+                k += 1;
+            }
+            if pl > self.dom.global_lo[j] {
+                self.dom.tighten_global(self.p, j, false, pl.min(self.dom.global_up[j]));
+                k += 1;
+            }
+        }
+        k
     }
 }
