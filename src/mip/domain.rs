@@ -1016,7 +1016,18 @@ impl Domain {
             } else {
                 v
             };
-            let tol_cap = if int && mode == b't' { 0.1 * a_c.abs() * FEASTOL } else { f64::INFINITY };
+            // 連続列 (WRONGANS blend2 の監査、2026-11-13 から既定、`ENOMOTO_MIP_CONFLICT_CONT_TOL=0` で以前の形): 連続列の境界は伝播で
+            // 1e-9 (1 + |v|) だけ緩めて置かれる ([`Self::propose_upper`]) ので、説明が足りるかの判定の許容 1e-9 (1 + |必要量|) は、行のほかの項が
+            // 大きいと余裕 |a| 1e-9 (1 + |v|) を大きく越え、寄与の小さい局所的な変更を落として成り立たない衝突を作る (x0 + y1 + y2 <= 1e7 で
+            // y2 >= 0.005 を落とし、x0 <= 9.995 を y1 >= 9999990 だけで説明した: domain.rs のテスト)。許容を余裕の 1/10 以下に抑える
+            // (足りなければ関わる変更を全部にする安全側)
+            let tol_cap = if int && mode == b't' {
+                0.1 * a_c.abs() * FEASTOL
+            } else if !int && conflict_cont_tol() {
+                0.1 * a_c.abs() * 1e-9 * (1.0 + v.abs())
+            } else {
+                f64::INFINITY
+            };
             let min_side = (a_c > 0.0) == c.upper;
             if min_side {
                 let u = p.row_up[r];
@@ -1305,6 +1316,12 @@ fn bound_tol(v: f64) -> f64 {
     FEASTOL * (1.0 + v.abs()).min(1e3)
 }
 
+/// `ENOMOTO_MIP_CONFLICT_CONT_TOL` (2026-11-13 から既定、`=0` で以前の形): 衝突解析で連続列の境界の変更を説明するとき、足りるかの判定の
+/// 許容を伝播の緩めの 1/10 以下に抑える ([`Domain::analyze_multi_bumps`]、analysis/wrongans_blend2_20261113.md)
+fn conflict_cont_tol() -> bool {
+    env_def!("ENOMOTO_MIP_CONFLICT_CONT_TOL", "1").is_some()
+}
+
 #[inline]
 /// `ENOMOTO_MIP_CONFLICT_INT_TOL` (2026-11-05 から既定 `t`、`=0` で以前の形): HiGHS 式の衝突解析で整数列の境界の変更を説明するとき、
 /// 足りるかの判定の許容誤差を丸めの余裕の 1/10 以下に抑える (`t`)、または余裕を 1/2 にする (`h`) ([`Domain::analyze_multi_bumps`])。
@@ -1378,4 +1395,37 @@ mod tests {
         assert_eq!(d.lo, vec![0.0; 3]);
         assert_eq!(d.up, vec![1.0; 3]);
     }
+
+    /// 衝突解析で連続列の境界の変更を説明するときの許容 (analysis/wrongans_blend2_20261113.md の監査): 行 x0 + y1 + y2 <= 1e7 で
+    /// y2 >= 0.005 (先の決定)・y1 >= 9999990 (最後の決定) から x0 <= 9.995 (+ 緩め 1e-8) を導いた変更を、許容 1e-9 (1 + |必要量|) ≈ 0.01 で
+    /// 説明すると、寄与 0.005 の y2 を落として「y1 >= 9999990 だけで足りる」と読む。y1 から w >= 1 (行 w - 1e-7 y1 >= 0)、x0 >= 9.997
+    /// (行 x0 - 9.997 w >= 0) とつながる矛盾の衝突が {y1 >= 9999990} だけになり、実行可能な点 (x0, y1, y2, w) = (9.998, 9999990, 0, 1) を切る
+    #[test]
+    fn conflict_explanation_of_continuous_bound_keeps_small_contributions() {
+        let p = MipProblem::from_rows(
+            vec![0.0; 4],
+            vec![20.0, 1e7, 1.0, 1.0],
+            vec![0.0; 4],
+            0.0,
+            1.0,
+            vec![false, false, false, true],
+            vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)], vec![(0, 1.0), (3, -9.997)], vec![(3, 1.0), (1, -1e-7)]],
+            vec![f64::NEG_INFINITY, 0.0, 0.0],
+            vec![1e7, f64::INFINITY, f64::INFINITY],
+        );
+        let mut d = Domain::new(&p);
+        assert!(d.propagate(&p));
+        d.tighten_lower(&p, 2, 0.005);
+        assert!(d.propagate(&p));
+        d.tighten_lower(&p, 1, 9999990.0);
+        assert!(!d.propagate(&p));
+        let src = d.conflict.expect("矛盾の出どころ");
+        let confs = d.analyze_multi(&p, ConflictStart::Src(src), 100, true);
+        let x = [9.998, 9999990.0, 0.0, 1.0];
+        for c in &confs {
+            let cuts = c.iter().all(|&(j, upper, v)| if upper { x[j] <= v } else { x[j] >= v });
+            assert!(!cuts, "衝突 {c:?} が実行可能な点を切る");
+        }
+    }
+
 }
