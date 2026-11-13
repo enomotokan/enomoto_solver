@@ -1,0 +1,21 @@
+== ENOMOTO_MIP_TREE2_INTAGG=d (wheel は作業中の木)
+== fuzz_tiny 400
+bad 0 of 400 time 2.4 (strict 17: 値の一致だけの以前の判定)
+== mip_fuzz_vs_highs 300
+bad 0 of 300 time 3.7
+== fuzz_fold 2000 mip
+bad 0 of 2000 time 10.5
+== fuzz_net 2000
+ENOMOTO_MIP_FOLD=(既定) bad 0 of 2000 time 9.3 folded=0 intgroups=0 accepted_groups=0 safety=0
+== fuzz_cap 3000 (INTAGG=d)
+     0.0s          0         0    -8.000000000e0    -8.000000000e0     0.00%
+Result: optimal, objective -8, best bound -8, gap 0.00%, nodes 0 (0.00s)
+bad 1 of 3000 time 25.4
+== fuzz_cap 3000 (既定)
+     0.0s          0         0    -8.000000000e0    -8.000000000e0     0.00%
+Result: optimal, objective -8, best bound -8, gap 0.00%, nodes 0 (0.00s)
+bad 7 of 3000 time 31.7
+== cargo test --release --lib
+test result: ok. 414 passed; 0 failed; 19 ignored; 0 measured; 0 filtered out; finished in 1.91s
+(注) fuzz_cap の不一致は INTAGG=d でも既定でも 3000 問中 7 件 (同じ seed でも回によって出たり出なかったりする)。どれも HiGHS 0 対こちら −4e−06 の形で、
+seed 611 では連続列が 4.4e−07 だけ正になり容量の行を 4.4e−07 破る (実行可能性の許容 1e−6 の内側) 分だけ目的値が良く見える。INTAGG=d とは関係しない既定の許容の扱い。
