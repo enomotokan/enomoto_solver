@@ -827,6 +827,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     node_iters_first: u64,
     /// 基底の復元の回数、そのうち基底の数が行数と合わなかった回数、復元後の最初の LP の反復数 (診断用)
     restore_stats: (u64, u64, u64),
+    /// `ENOMOTO_MIP_HL2_D2` の `b` ([`super::separation::hl2_d2`]): LP から消した、待ち行列のノードの基底で効いているカットの行 (番号 → (係数, 下限, 上限))
+    pub(super) d2b_rows: std::collections::HashMap<u64, (Vec<(usize, f64)>, f64, f64)>,
+    /// `ENOMOTO_MIP_HL2_D2` の計数: [一括削除で守った, D2a の上限で外した, D2b で取っておいた行, D2b で足し直した復元, 足し直した行,
+    /// 取っておいた行がなく足し直せなかった, 効いていたカットの番号と保存した基底の数が合わない, 足し直した後も基底の数が合わない]
+    pub(super) d2_stats: [u64; 8],
     restored_now: bool,
     /// 試作 `ENOMOTO_MIP_NODELP2` の `x`: 今のノードで選んだ腕 (Some(true) 厳密な DSE 重み・Some(false) 保存した重み) と、腕ごとの [回数, 秒の指数移動平均]
     nl2_arm: Option<bool>,
@@ -4763,6 +4768,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         node_iters: 0,
         node_iters_first: 0,
         restore_stats: (0, 0, 0),
+        d2b_rows: std::collections::HashMap::new(),
+        d2_stats: [0; 8],
         restored_now: false,
         nl2_arm: None,
         nl2_stat: [(0, 0.0); 2],
@@ -10849,7 +10856,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     if let Some(b) = &n.basis {
-                        self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &n.changes);
+                        self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &n.changes, n.prot.as_deref().map(|v| v.as_slice()));
                         // 置いた基底が親の LP の最適基底のままなら、その LU を使う (行が変わっていれば使わない)
                         if let Some(s) = &sib_lu {
                             if n.basis_epoch == self.row_log.len() {
@@ -10953,7 +10960,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if ok {
                             if let Some(b) = &n.basis {
-                                self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &n.changes);
+                                self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &n.changes, n.prot.as_deref().map(|v| v.as_slice()));
                             }
                         }
                         if !ok {
@@ -14862,9 +14869,87 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.add_proof_from(&y, true);
     }
 
+    /// `ENOMOTO_MIP_HL2_D2` の `b` (D2b): 待ち行列から取り出したノードの保存した基底 `b` (行の世代 `epoch`) で効いていた (非基底の) カットの行の
+    /// うち、今の LP から消えているものを、消すときに取っておいた中身 ([`Self::d2b_store_deleted`]) から LP の最後に足し直す。
+    /// 足した行の保存した基底での状態を返す (足さなければ空)。`prot` はノードを作ったときの効いていたカットの番号 (保存した基底の
+    /// 非基底のカットの行と同じ順)。番号は元のものに戻すので、ほかの待ち行列のノードの保護とも合う
+    fn d2b_readd(&mut self, b: &super::lp::Basis, epoch: usize, prot: Option<&[u64]>) -> Vec<(usize, VarStatus)> {
+        let Some(prot) = prot else { return Vec::new() };
+        let m0 = self.p.m;
+        let m_saved = b.row.len();
+        if epoch >= self.row_log.len() || m_saved <= m0 {
+            return Vec::new();
+        }
+        let nb_saved: Vec<usize> = (m0..m_saved).filter(|&i| b.row[i] != VarStatus::Basic).collect();
+        if nb_saved.len() != prot.len() {
+            self.d2_stats[6] += 1;
+            return Vec::new();
+        }
+        // 保存した行の番号を今の行に写す (行の追加・削除の記録を当てはめる)
+        let mut orig: Vec<usize> = (0..m_saved).collect();
+        for e in &self.row_log[epoch..] {
+            match e {
+                RowEdit::Add(k) => orig.extend(std::iter::repeat_n(usize::MAX, *k)),
+                _ => e.retain_rows(&mut orig),
+            }
+        }
+        let mut present = vec![false; m_saved];
+        for &o in &orig {
+            if o < m_saved {
+                present[o] = true;
+            }
+        }
+        let mut ids = Vec::new();
+        let mut sts = Vec::new();
+        for (k, &i) in nb_saved.iter().enumerate() {
+            if !present[i] {
+                ids.push(prot[k]);
+                sts.push(b.row[i]);
+            }
+        }
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        // 同じ番号のカットが (前の足し直しで) 別の位置にあれば足さず、その行の状態だけ合わせる
+        self.sync_cut_age();
+        let pos: std::collections::HashMap<u64, usize> = self.cut_ids.iter().enumerate().map(|(k, &id)| (id, m0 + k)).collect();
+        let mut out: Vec<(usize, VarStatus)> = Vec::new();
+        let mut add_ids = Vec::new();
+        let mut add_sts = Vec::new();
+        for (&id, &st) in ids.iter().zip(sts.iter()) {
+            if let Some(&r) = pos.get(&id) {
+                out.push((r, st));
+            } else {
+                add_ids.push(id);
+                add_sts.push(st);
+            }
+        }
+        if !add_ids.iter().all(|id| self.d2b_rows.contains_key(id)) {
+            self.d2_stats[5] += 1;
+            return Vec::new();
+        }
+        if !add_ids.is_empty() {
+            let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = add_ids.iter().map(|id| self.d2b_rows[id].clone()).collect();
+            self.add_cut_rows(&rows);
+            let n = self.cut_ids.len();
+            for (t, &id) in add_ids.iter().enumerate() {
+                self.cut_ids[n - add_ids.len() + t] = id;
+            }
+            let mr = self.lp.num_rows();
+            for (t, &st) in add_sts.iter().enumerate() {
+                out.push((mr - add_ids.len() + t, st));
+            }
+        }
+        self.d2_stats[3] += 1;
+        self.d2_stats[4] += add_ids.len() as u64;
+        out
+    }
+
     /// 完全オービトープの固定と伝播を、固定が出なくなるまで (最大 10 回) 繰り返す。矛盾したら偽。
     /// 待ち行列のノードの基底を LP に置く (保存した後の行の追加・削除を当てはめる)。
-    fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize, dse: Option<&[(u32, f32)]>, changes: &[BoundChange]) {
+    fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize, dse: Option<&[(u32, f32)]>, changes: &[BoundChange], prot: Option<&[u64]>) {
+        // `ENOMOTO_MIP_HL2_D2` の `b` (D2b): 保存した基底で効いていたカットが消えていれば足し直す (足した行と、保存した基底でのその行の状態)
+        let readd = if super::separation::hl2_d2('b') && !self.params.submip && self.tp_kind != 2 { self.d2b_readd(b, epoch, prot) } else { Vec::new() };
         let mr = self.lp.num_rows();
         // 試作 `ENOMOTO_MIP_BASIS_NB` (場所 `t`): 保存した基底の上限・下限の置き場所も渡す。根からの分枝で締めた列は推し量りのまま
         let nb_skip: Option<Vec<usize>> = (crate::simplex::mip_lp::basis_nb_on('t') || self.nl2_on('b')).then(|| changes.iter().map(|c| c.col).collect());
@@ -14930,7 +15015,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         b2.row.resize(mr, VarStatus::Basic);
+        // D2b: 足し直した行 (LP の最後の `readd.len()` 行) は保存した基底での状態にする
+        for &(r, st) in &readd {
+            if r < b2.row.len() {
+                b2.row[r] = st;
+            }
+        }
         let nb = b2.col.iter().chain(b2.row.iter()).filter(|&&s| s == VarStatus::Basic).count();
+        if !readd.is_empty() && nb != mr {
+            self.d2_stats[7] += 1;
+        }
         self.restore_stats.0 += 1;
         // `ENOMOTO_MIP_HCM_REPAIR`: HiGHS 流のカット管理でも今の基底のままにせず、この修復で保存した基底を使う
         let hcm_repair = self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_REPAIR").is_some();
@@ -21910,6 +22004,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: branching: strong branching vs pseudocost: {} of {} agreed, {} nodes without strong branching", self.sb_agree_stats[1], self.sb_agree_stats[0], self.sb_agree_stats[2]);
             }
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
+            if super::separation::hl2_d2_any() {
+                let d = &self.d2_stats;
+                eprintln!("MIP: HL2_D2: protected inactive cuts kept {} (dropped by the D2a limits {}); D2b: rows stored {}, restores with re-added rows {} ({} rows), failed for missing rows {}, protection count mismatch {}, still mismatched {}", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+            }
             if mem1_siblu_keep().is_some() {
                 let st: Vec<u64> = MEM1_SIBLU_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!("MIP: mem1 sibling LU (all threads): held at most {}, pushed {}, dropped {}, adopted {}", st[0], st[1], st[2], st[3]);

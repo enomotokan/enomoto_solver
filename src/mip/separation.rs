@@ -42,9 +42,31 @@ fn clqfb_cap() -> &'static str {
 }
 use super::lp_api::MipLp;
 
-/// 試作 `ENOMOTO_MIP_HL2_PROTECT_INACTIVE` (既定では使わない): [`Solver::inactive_cut_mask`] で待ち行列の保護を守るか
-fn hl2_protect_inactive() -> bool {
-    env_str!("ENOMOTO_MIP_HL2_PROTECT_INACTIVE").is_some()
+/// 試作 `ENOMOTO_MIP_HL2_D2` = 文字 (既定では使わない、analysis/highsloss2_20261113.md の D2)。待ち行列のノードの保存した基底と
+/// LP のカットの行が合わなくなる (取り出したときに基底を戻せず、直前のノードの基底から解き直す) のを防ぐ。
+/// - `p`: [`Solver::inactive_cut_mask`] (ノードの分離の前の効いていないカットの一括削除) で、待ち行列のノードの保存した基底で効いている
+///   カットを外さない (`ENOMOTO_MIP_HL2_PROTECT_INACTIVE` と同じ)
+/// - `a` (D2a): `p` の対象を絞る。守るのは年齢 (効いていない回数) が `ENOMOTO_T_MIP_HL2_PROT_AGE` (30) 以下のものだけ、本数は
+///   max(`ENOMOTO_T_MIP_HL2_PROT_ROWS` (0.5) × 元の行の数, 50) まで (年齢の若い順)
+/// - `b` (D2b): 待ち行列から取り出したノードの保存した基底で効いていたカットが LP から消えていたら、消えた行を足し直してから
+///   保存した基底をそのまま置く (消すときに守られている行の中身を取っておく、[`Solver::d2b_store_deleted`])
+/// 保護のデータ (ノードの効いていたカットの番号と待ち行列の参照数) はどの文字でも作る。年齢での削除が保護を守るのは
+/// 従来どおり `ENOMOTO_MIP_PROTECT_QUEUE_CUTS` のときだけ
+pub(super) fn hl2_d2(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        let mut s = env_str!("ENOMOTO_MIP_HL2_D2").unwrap_or("").to_string();
+        if env_str!("ENOMOTO_MIP_HL2_PROTECT_INACTIVE").is_some() {
+            s.push('p');
+        }
+        s
+    })
+    .contains(c)
+}
+
+/// `ENOMOTO_MIP_HL2_D2` のどれかを使うか
+pub(super) fn hl2_d2_any() -> bool {
+    hl2_d2('p') || hl2_d2('a') || hl2_d2('b')
 }
 
 /// LP に加える前のカット (構造変数の係数、右辺、効き目)。
@@ -4168,6 +4190,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn replace_cut_rows(&mut self, remove: &[bool], rows: &[(Vec<(usize, f64)>, f64, f64)]) {
         self.debug_check_cut_rows(rows);
         self.sync_cut_age();
+        self.d2b_store_deleted(remove);
         let m0 = self.p.m;
         let mut k = m0;
         self.cut_age.retain(|_| {
@@ -4191,9 +4214,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.row_log.push(super::solver::RowEdit::Add(rows.len()));
     }
 
+    /// `ENOMOTO_MIP_HL2_D2` の `b` (D2b、[`hl2_d2`]): 消すカットの行のうち、待ち行列のノードの保存した基底で効いているもの (保護の参照のあるもの)
+    /// の中身 (係数, 下限, 上限) をカットの番号で取っておく。取り出したノードの基底を置く前に足し直す ([`Solver::d2b_readd`])。
+    /// 保護の参照がなくなったものは、取っておく数が LP の行の 2 倍 + 1000 を超えたときに捨てる
+    pub(super) fn d2b_store_deleted(&mut self, remove: &[bool]) {
+        if !hl2_d2('b') || self.params.submip {
+            return;
+        }
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows().min(remove.len());
+        for i in m0..mr {
+            if remove[i] {
+                let id = self.cut_ids[i - m0];
+                if self.queue.is_protected(id) && !self.d2b_rows.contains_key(&id) {
+                    let (lo, up) = self.lp.row_bounds(i);
+                    self.d2b_rows.insert(id, (self.lp.row(i), lo, up));
+                    self.d2_stats[2] += 1;
+                }
+            }
+        }
+        if self.d2b_rows.len() > 2 * self.lp.num_rows() + 1000 {
+            let q = &self.queue;
+            self.d2b_rows.retain(|id, _| q.is_protected(*id));
+        }
+    }
+
     /// LP の行を消す (カットの年齢も合わせて消す)。
     pub(super) fn delete_lp_rows(&mut self, remove: &[bool]) {
         self.sync_cut_age();
+        self.d2b_store_deleted(remove);
         let m0 = self.p.m;
         let mut k = m0;
         self.cut_age.retain(|_| {
@@ -4232,6 +4281,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 年齢での削除 ([`Self::remove_aged_cuts`]) が待ち行列のノードの保護を守るか (従来の `ENOMOTO_MIP_PROTECT_QUEUE_CUTS` の条件)
+    pub(super) fn prot_aging_on(&self) -> bool {
+        !(env_str!("ENOMOTO_MIP_PROTECT_QUEUE_CUTS").is_none() || env_str!("ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS").is_some() || self.params.submip || (self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_PROTECT").is_none()))
+    }
+
+    /// 年齢での削除で、カット `id` を守るか
+    fn prot_aging(&self, id: u64) -> bool {
+        self.prot_aging_on() && self.queue.is_protected(id)
+    }
+
     /// 今の LP の基底で効いている (論理変数が非基底の) カットの番号 (待ち行列に入れるノードに持たせ、その間は年齢で
     /// 外さない。取り出したときに保存した基底が必ず合う)。既定では使わない (`ENOMOTO_MIP_PROTECT_QUEUE_CUTS` で使う)。
     /// 以前は既定で使っていた (40 問: 19 問 27.04 -> 19 問 26.89、保護して年齢の上限を一律 30 にすると 17 問 27.55) が、待ち行列の
@@ -4241,7 +4300,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn basis_protected_cuts(&mut self) -> Option<std::rc::Rc<Vec<u64>>> {
         // HiGHS 流のカット管理では保護しない (HiGHS と同じく、取り出したノードの基底が LP の行と合わなければ今の基底から解く。
         // 保護すると待ち行列のノードが数千あるときほぼ全てのカットが外せず、neos-911970 では LP が行数の上限 607 に張り付いた)
-        if env_str!("ENOMOTO_MIP_PROTECT_QUEUE_CUTS").is_none() || env_str!("ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS").is_some() || self.params.submip || (self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_PROTECT").is_none()) {
+        // `ENOMOTO_MIP_HL2_D2` ([`hl2_d2`]): 年齢での削除で守らなくても、保護のデータ (効いていたカットの番号) は作る
+        if !(self.prot_aging_on() || (hl2_d2_any() && !self.params.submip)) {
             return None;
         }
         self.sync_cut_age();
@@ -4400,7 +4460,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut cnt = 0;
             for (k, &age) in self.cut_age.iter().enumerate() {
                 let tree = if ts2a { self.cut_ids[k] >= self.ts2_id0 && self.lp.basis_ref().row[m0 + k] == VarStatus::Basic } else { self.ts_cut_ids.contains(&self.cut_ids[k]) };
-                if age > ts_age && tree && !self.queue.is_protected(self.cut_ids[k]) {
+                if age > ts_age && tree && !self.prot_aging(self.cut_ids[k]) {
                     remove[m0 + k] = true;
                     cnt += 1;
                 }
@@ -4419,7 +4479,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.ts2_has('d') && self.ts2_id0 != u64::MAX {
             self.sync_cut_age();
             let cap = self.ts2_rows_cap();
-            let mut tree: Vec<(u32, usize)> = (0..self.cut_ids.len()).filter(|&k| self.cut_ids[k] >= self.ts2_id0 && !self.queue.is_protected(self.cut_ids[k])).map(|k| (self.cut_age[k], k)).collect();
+            let mut tree: Vec<(u32, usize)> = (0..self.cut_ids.len()).filter(|&k| self.cut_ids[k] >= self.ts2_id0 && !self.prot_aging(self.cut_ids[k])).map(|k| (self.cut_age[k], k)).collect();
             // 外すのは基底の (効いていない) 行だけ (上の a と同じ)
             let basic_of: std::collections::HashMap<usize, bool> = { let b = self.lp.basis_ref(); tree.iter().map(|&(_, k)| (k, b.row[self.p.m + k] == VarStatus::Basic)).collect() };
             if tree.len() > cap {
@@ -4450,7 +4510,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let m0 = self.p.m;
                 let mut remove = vec![false; self.lp.num_rows()];
                 let mut cnt = 0;
-                for &(_, k) in order.iter().filter(|&&(_, k)| !self.queue.is_protected(self.cut_ids[k])).take(ncut - cap) {
+                for &(_, k) in order.iter().filter(|&&(_, k)| !self.prot_aging(self.cut_ids[k])).take(ncut - cap) {
                     remove[m0 + k] = true;
                     cnt += 1;
                 }
@@ -4483,7 +4543,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn remove_cuts_older_than(&mut self, limit: u32) -> usize {
         self.sync_cut_age();
         let m0 = self.p.m;
-        let old = |k: usize, age: u32| age > limit && !self.queue.is_protected(self.cut_ids[k]);
+        let old = |k: usize, age: u32| age > limit && !self.prot_aging(self.cut_ids[k]);
         // 外すカットがなければ印の配列を作らない
         if !self.cut_age.iter().enumerate().any(|(k, &age)| old(k, age)) {
             return 0;
@@ -4594,18 +4654,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let act = self.lp.row_activities_ref();
         let mut remove = vec![false; mr];
         let mut any = false;
+        // `ENOMOTO_MIP_HL2_D2` の `p`・`a`: 守った (外さなかった) 効いていないカット (年齢, 行)
+        let mut kept: Vec<(u32, usize)> = Vec::new();
         for i in m0..mr {
             if b.row[i] == VarStatus::Basic {
                 let (_, up) = self.lp.row_bounds(i);
                 // 試作 `ENOMOTO_MIP_HL2_PROTECT_INACTIVE` (既定では使わない、analysis/highsloss2_20261113.md の D2): 待ち行列のノードの
                 // 保存した基底で効いているカット (`ENOMOTO_MIP_PROTECT_QUEUE_CUTS` で付ける保護) はここでも外さない。外すと取り出したときに
                 // 基底の数が合わず、木の中の分離では直前のノードの基底から解き直す (neos-3627168-kasai で 1 本約 390 反復)
-                let prot = hl2_protect_inactive() && self.queue.is_protected(self.cut_ids[i - m0]);
-                if act[i] < up - 1e-6 * (1.0 + up.abs()) && !self.merged_cuts.contains(&self.cut_ids[i - m0]) && !prot {
-                    remove[i] = true;
-                    any = true;
+                let prot = (hl2_d2('p') || hl2_d2('a')) && self.queue.is_protected(self.cut_ids[i - m0]);
+                if act[i] < up - 1e-6 * (1.0 + up.abs()) && !self.merged_cuts.contains(&self.cut_ids[i - m0]) {
+                    if prot {
+                        kept.push((self.cut_age[i - m0], i));
+                    } else {
+                        remove[i] = true;
+                        any = true;
+                    }
                 }
             }
+        }
+        // D2a: 年齢の上限と本数の上限 (年齢の若い順に残す) を超えた分は外す
+        if hl2_d2('a') && !hl2_d2('p') && !kept.is_empty() {
+            let amax = tunable!("ENOMOTO_T_MIP_HL2_PROT_AGE", 30u32, u32);
+            let cap = ((tunable!("ENOMOTO_T_MIP_HL2_PROT_ROWS", 0.5, f64) * m0 as f64) as usize).max(50);
+            kept.sort_unstable();
+            for (r, &(age, i)) in kept.iter().enumerate() {
+                if age > amax || r >= cap {
+                    remove[i] = true;
+                    any = true;
+                    self.d2_stats[1] += 1;
+                } else {
+                    self.d2_stats[0] += 1;
+                }
+            }
+        } else {
+            self.d2_stats[0] += kept.len() as u64;
         }
         any.then_some(remove)
     }

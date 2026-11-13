@@ -550,7 +550,13 @@ impl NodeQueue {
         if let Some(p) = self.packed.get_mut(id).and_then(|x| x.take()) {
             node.basis = Some(Rc::new(Basis { col: p.0.unpack(), row: p.1.unpack() }));
         }
-        if let Some(pr) = node.prot.take() {
+        // `ENOMOTO_MIP_HL2_D2` の `b` (D2b): 取り出したノードの基底を置くときに効いていたカットの番号を使うので、番号はノードに残す
+        // (参照数は外す)。ほかでは従来どおり外す
+        if super::separation::hl2_d2('b') {
+            if let Some(pr) = node.prot.clone() {
+                self.unprotect(&pr);
+            }
+        } else if let Some(pr) = node.prot.take() {
             self.unprotect(&pr);
         }
         let est = self.est_of(&node);
