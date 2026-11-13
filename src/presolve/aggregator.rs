@@ -685,7 +685,14 @@ pub(crate) fn tree2_intagg() -> bool {
 }
 
 fn tree2_intagg_general_only() -> bool {
-    env_str!("ENOMOTO_MIP_TREE2_INTAGG") == Some("g")
+    matches!(env_str!("ENOMOTO_MIP_TREE2_INTAGG"), Some("g") | Some("d"))
+}
+
+/// `ENOMOTO_MIP_TREE2_INTAGG=d` (試作、analysis/presolvegap_20261113.md): `g` に加えて、ピボット行の残りが全て 0-1 列で、消す列の出る行が
+/// `ENOMOTO_T_MIP_TREE2_INTAGG_MAXROWS` (既定 2) 本までのときだけ消す (rococo の容量 `z = Σ c y` と容量の行 `Σ d x <= z` の形)。
+/// `g` は neos-3083819-nubu の流量の保存式の一般整数も消して根が弱くなった (analysis/tree_close2_20261104.md)
+fn tree2_intagg_def_only() -> bool {
+    env_str!("ENOMOTO_MIP_TREE2_INTAGG") == Some("d")
 }
 
 /// 等式行 `row · x = rhs` を整数列 `j` (係数 `coeff`) のピボットに使って、代入式 `x_j = (rhs - Σ a_k x_k) / coeff` が
@@ -1011,6 +1018,14 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
             // (このときは代入が整数の係数で厳密なので、ピボット比の判定はしない。rococoC10-001000 の `z - 34000 y1 - ... = 0` は比 1/34000)
             if int_mask.as_ref().is_some_and(|m| m[j]) {
                 if tree2_intagg_general_only() && lb[j] == 0.0 && ub[j] == 1.0 {
+                    return false;
+                }
+                // `d` (analysis/presolvegap_20261113.md): 容量の定義 `z = Σ c y` の形だけ。行の残りが全て 0-1 列で、`j` の出る行が
+                // `ENOMOTO_T_MIP_TREE2_INTAGG_MAXROWS` (既定 2) 本まで。流量の保存式 (neos-3083819-nubu の一般整数の流量) は消さない
+                if tree2_intagg_def_only()
+                    && (la.len() + lg.len() > tunable!("ENOMOTO_T_MIP_TREE2_INTAGG_MAXROWS", 2usize, usize)
+                        || !a_rows[i].iter().all(|&(k, _)| k == j || (lb[k] == 0.0 && ub[k] == 1.0)))
+                {
                     return false;
                 }
                 return int_pivot_row(&a_rows[i], j, coeff, b[i], int_mask.as_ref().unwrap());
