@@ -1264,6 +1264,11 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 Some(Presolved::Reduced { prob, postsolve, scaling })
             } else {
                 let q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
+                // 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_DUALEQ=<接頭辞>`): 等式にする前 (`<接頭辞>_pre.mps`) と後 (`<接頭辞>_eq.mps`) の問題を書き出す
+                if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_DUALEQ") {
+                    dump_mps(&prob, &format!("{f}_pre.mps"));
+                    dump_mps(&q, &format!("{f}_eq.mps"));
+                }
                 match presolve_mip(&q, params.verbose, pre_submip, None) {
                     Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
                     // かけ直しで行か固定でない列が減ったときだけ使う。減らなければ等式にする前の問題に戻す (等式は縮約の
