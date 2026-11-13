@@ -25,3 +25,6 @@ def balance(groups, n, out):
     print(out, sum(len(s) for s in shards), "回", "見積り (時間):", [round(x / 3600, 2) for x in load])
 balance({(p, s): [(p, "cand1114", s), (p, "pint", s)] if s % 2 else [(p, "pint", s), (p, "cand1114", s)] for p in DUP for s in (1, 2, 3, 4)}, ND, "shards_D.json")
 balance({(p, s): [(p, "cand1114", s), (p, "pint", s)] if s % 2 else [(p, "pint", s), (p, "cand1114", s)] for p in PROBS for s in (1, 2)}, NP, "shards_P.json")
+# T: TIE_FEWER 単独 (c14t と tf)。python plan.py ND NP NT
+if len(sys.argv) > 3:
+    balance({(p, s): [(p, "c14t", s), (p, "tf", s)] if s % 2 else [(p, "tf", s), (p, "c14t", s)] for p in PROBS for s in (1, 2)}, int(sys.argv[3]), "shards_T.json")

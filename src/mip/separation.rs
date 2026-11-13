@@ -2162,17 +2162,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 時間あたりの伸び (`rate`) ではなく、そのラウンドまでに足したカットが少ない側を選ぶ (本数が同じなら今まで通り)。
                 // 伸びが同じとき `rate` は 1 ラウンドの時間 (0.7 秒前後で 0.01〜0.05 秒の差) の揺れで決まる
                 // (nw04: PARALLEL_INT の有無・種で default 4 本 / pool 1 本の同点が入れ替わり、default では根が 16852 で止まる。analysis/parint2_20261113.md)
-                let tie_fewer = if m > 0 && env_str!("ENOMOTO_MIP_CUTSEL_PROBE_TIE_FEWER").is_some_and(|v| v != "0") && (d_def - d_pool).abs() <= tol + 1e-9 * d_def.abs().max(d_pool.abs()) {
-                    let (cd, cp) = PROBE_NADD_HIST.with(|h| {
+                // 診断 `ENOMOTO_MIP_CUTSEL_PROBE_TIE_LOG`: 同点かどうかと両側の本数を (詳しい表示でなくても) 標準エラーに出す (TIE_FEWER の有無によらない)
+                let tie_log = env_str!("ENOMOTO_MIP_CUTSEL_PROBE_TIE_LOG").is_some();
+                let tie_counts = if m > 0 && (d_def - d_pool).abs() <= tol + 1e-9 * d_def.abs().max(d_pool.abs()) {
+                    PROBE_NADD_HIST.with(|h| {
                         let h = h.borrow();
-                        (h[0].get(m - 1).copied(), h[1].get(m - 1).copied())
-                    });
-                    match (cd, cp) {
-                        (Some(a), Some(b)) if a != b => Some(b < a),
-                        _ => None,
-                    }
+                        h[0].get(m - 1).copied().zip(h[1].get(m - 1).copied())
+                    })
                 } else {
                     None
+                };
+                let tie_fewer = match tie_counts {
+                    Some((a, b)) if a != b && env_str!("ENOMOTO_MIP_CUTSEL_PROBE_TIE_FEWER").is_some_and(|v| v != "0") => Some(b < a),
+                    _ => None,
                 };
                 if let (Some(tf), true) = (tie_fewer, self.params.verbose) {
                     eprintln!("MIP: cut selection probe: tie at {m} rounds, the side with fewer cuts -> {}", if tf { "pool" } else { "default" });
@@ -2187,6 +2189,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: cut selection probe: compared at {m} rounds ({early}), probe wall {:.2}s (budget {budget:.1}s)", t_probe0.elapsed().as_secs_f64());
                 }
                 CUT_PROBE_CHOICE.store(if pick_pool { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+                if tie_log && ratio > 0.0 {
+                    eprintln!("CUTSEL_TIE: tie {} rounds {m} gain {d_def:.6e} / {d_pool:.6e} cuts {:?} time {t_def:.3} / {t_pool:.3} -> {}{}", tie_counts.is_some(), tie_counts, if pick_pool { "pool" } else { "default" }, if tie_fewer.is_some() { " (fewer)" } else { "" });
+                }
                 if self.params.verbose {
                     eprintln!("MIP: cut selection probe ({k} rounds): default {n_def} cuts gain {d_def:.6e} ({t_def:.2}s), pool {n_pool} cuts gain {d_pool:.6e} ({t_pool:.2}s) -> {} (rule {rule}, probe {:.2}s in total, {:.2}s)", if pick_pool { "pool" } else { "default" }, t_def + t_pool, self.start.elapsed().as_secs_f64());
                 }

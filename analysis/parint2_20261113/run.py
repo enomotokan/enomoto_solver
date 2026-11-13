@@ -1,4 +1,5 @@
-"""PARALLEL_INT の確かめの分担を回す: python run.py SET K (SET は D (重複の整数列のある 8 問 × 種 1〜4) か P (58 問 × 種 1・2)、どちらも 60 秒)。
+"""PARALLEL_INT の確かめの分担を回す: python run.py SET K (SET は D (重複の整数列のある 8 問 × 種 1〜4) か P (58 問 × 種 1・2) か T (58 問 × 種 1・2、c14t と tf)、どれも 60 秒)。
+標準エラーの CUTSEL_TIE の行 (同点の診断) を結果の "cutsel_tie" に残す。
 shards_SET.json の K 番目の (問題, 設定, 種, 秒) を順に 4 スレッドで解き、res_SET_sK.jsonl に足す。途中から再開できる。ソルバーは同時に 1 つ。
 行の形は analysis/mitt600_20261103/run9.py と同じ (+ "cfg")。cfg が highs なら HiGHS 1.15.1 (--worker-highs) で解く。"""
 import json, os, subprocess, sys, time
@@ -28,14 +29,17 @@ def run(cfg, seed, mps, tl):
     env = {key: v for key, v in os.environ.items() if not key.startswith("ENOMOTO_")}
     env.update(CFGS[cfg]); env["ENOMOTO_MIP_THREADS"] = "4"; env["ENOMOTO_T_MIP_SEED"] = str(seed)
     t0 = time.time(); peak = 0.0
+    errf = open(OUT.with_suffix(".err.tmp"), "w+")
     pr = subprocess.Popen([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-highs" if cfg == "highs" else "--worker-ours", str(mps), "--time-limit", str(tl), "--threads", "4"],
-                          cwd=WT, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                          cwd=WT, env=env, stdout=subprocess.PIPE, stderr=errf, text=True)
     while pr.poll() is None:
         peak = max(peak, rss_mb(pr.pid)); time.sleep(0.5)
         if time.time() - t0 > tl + 300: pr.kill(); break
     out, _ = pr.communicate()
+    errf.seek(0); ties = [l.strip() for l in errf if l.startswith("CUTSEL_TIE")][:8]; errf.close()
     try: res = json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
     except Exception: res = {"status": "crash", "returncode": pr.returncode}  # noqa: BLE001
+    res["cutsel_tie"] = ties
     return res, round(peak), round(time.time() - t0, 1)
 for p, cfg, seed, tl in mine:
     if (p, cfg, seed) in done: continue
