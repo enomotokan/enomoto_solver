@@ -18,7 +18,7 @@ def ours(txt):
     if tr: d["tree"] = [(float(a), float(b), int(c), float(e), float(f)) for a, b, c, e, f in tr]
     prog = re.findall(r"MIP:\s+([0-9.]+)s nodes\s+(\d+) open\s+(\d+) lb (" + F + r") ub (" + F + r")", txt)
     if prog: d["prog"] = [(float(a), int(b), float(c), float(e)) for a, b, _, c, e in prog]
-    d["restarts"] = len(tr) - 1 if tr else 0
+    d["restarts"] = len(re.findall(r"^MIP: restart \d+ \(", txt, re.M))
     return d
 def highs(txt):
     d = {}
