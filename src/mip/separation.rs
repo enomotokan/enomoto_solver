@@ -26,6 +26,11 @@ thread_local! {
 }
 use super::lp_api::MipLp;
 
+/// 試作 `ENOMOTO_MIP_HL2_PROTECT_INACTIVE` (既定では使わない): [`Solver::inactive_cut_mask`] で待ち行列の保護を守るか
+fn hl2_protect_inactive() -> bool {
+    env_str!("ENOMOTO_MIP_HL2_PROTECT_INACTIVE").is_some()
+}
+
 /// LP に加える前のカット (構造変数の係数、右辺、効き目)。
 /// lifted flow cover を使うか (`ENOMOTO_MIP_NO_FLOWCOVER` で無効)。
 /// HiGHS の lifted cover を CMIR と並べて試すか (`ENOMOTO_MIP_LIFTED_COVER` で有効)。qnet1 では根の下界が
@@ -4523,7 +4528,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for i in m0..mr {
             if b.row[i] == VarStatus::Basic {
                 let (_, up) = self.lp.row_bounds(i);
-                if act[i] < up - 1e-6 * (1.0 + up.abs()) && !self.merged_cuts.contains(&self.cut_ids[i - m0]) {
+                // 試作 `ENOMOTO_MIP_HL2_PROTECT_INACTIVE` (既定では使わない、analysis/highsloss2_20261113.md の D2): 待ち行列のノードの
+                // 保存した基底で効いているカット (`ENOMOTO_MIP_PROTECT_QUEUE_CUTS` で付ける保護) はここでも外さない。外すと取り出したときに
+                // 基底の数が合わず、木の中の分離では直前のノードの基底から解き直す (neos-3627168-kasai で 1 本約 390 反復)
+                let prot = hl2_protect_inactive() && self.queue.is_protected(self.cut_ids[i - m0]);
+                if act[i] < up - 1e-6 * (1.0 + up.abs()) && !self.merged_cuts.contains(&self.cut_ids[i - m0]) && !prot {
                     remove[i] = true;
                     any = true;
                 }

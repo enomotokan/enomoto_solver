@@ -110,3 +110,49 @@
    return ncuts;
  }
  
+--- a/highs/mip/HighsSearch.cpp
++++ b/highs/mip/HighsSearch.cpp
+@@ -6,6 +6,21 @@
+ /*                                                                       */
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ #include "mip/HighsSearch.h"
++#include <cstdio>
++#include <cstdlib>
++namespace {
++struct HNodeStat {
++  long long n[2] = {0, 0}, it[2] = {0, 0}, rows[2] = {0, 0};
++  ~HNodeStat() {
++    if (getenv("HSEP_LOG"))
++      fprintf(stderr, "HNODE stat: queue-installed node LPs %lld iters %lld (%.1f/LP, rows %.0f) | other node LPs %lld iters %lld (%.1f/LP, rows %.0f)\n",
++              n[1], it[1], n[1] ? double(it[1]) / n[1] : 0.0, n[1] ? double(rows[1]) / n[1] : 0.0,
++              n[0], it[0], n[0] ? double(it[0]) / n[0] : 0.0, n[0] ? double(rows[0]) / n[0] : 0.0);
++  }
++};
++HNodeStat g_hnode;
++thread_local bool g_fromQueue = false;
++}
+ 
+ #include <numeric>
+ 
+@@ -869,6 +884,7 @@
+       globalSymmetriesValid ? mipsolver.mipdata_->globalOrbits : nullptr);
+   subrootsol.clear();
+   depthoffset = node.depth - 1;
++  if (!mipsolver.submip) g_fromQueue = true;
+ }
+ 
+ HighsSearch::NodeResult HighsSearch::evaluateNode() {
+@@ -936,6 +952,13 @@
+     int64_t oldnumiters = lp->getNumLpIterations();
+     HighsLpRelaxation::Status status = lp->resolveLp(&localdom);
+     lpiterations += lp->getNumLpIterations() - oldnumiters;
++    if (!mipsolver.submip) {
++      const int k = g_fromQueue ? 1 : 0;
++      g_hnode.n[k] += 1;
++      g_hnode.it[k] += lp->getNumLpIterations() - oldnumiters;
++      g_hnode.rows[k] += lp->numRows();
++      g_fromQueue = false;
++    }
+ 
+     currnode.lower_bound =
+         std::max(localdom.getObjectiveLowerBound(), currnode.lower_bound);
