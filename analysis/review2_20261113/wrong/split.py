@@ -1,5 +1,5 @@
-"""unitcal_7 の誤答 (実行可能なのに infeasible) の切り分け: python bisect.py [種] [設定...]。
-設定: def・base・cand1113 (RCSTRONG=irk)・base から 1 項目を外した形 (-KEY)、それぞれに +KEY=VAL で足す (例 base+ENOMOTO_MIP_UNB_FEAS=0)。結果は bisect.jsonl に足す。"""
+"""unitcal_7 の誤答 (実行可能なのに infeasible) の切り分け: python split.py [種] [設定...]。
+設定: def・base・cand1113 (RCSTRONG=irk)・base から 1 項目を外した形 (-KEY)、それぞれに +KEY=VAL で足す (例 base+ENOMOTO_MIP_UNB_FEAS=0)。結果は split.jsonl に足す。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -33,5 +33,5 @@ for n in names:
     try: res = json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
     except Exception: res = {"status": "crash"}  # noqa: BLE001
     row = {"problem": P, "cfg": n, "seed": seed, "status": res.get("status"), "time": res.get("time"), "nodes": res.get("nodes"), "obj": res.get("objective"), "wall": round(time.time() - t0, 1)}
-    with open(D / "bisect.jsonl", "a") as f: f.write(json.dumps(row) + "\n")
+    with open(D / "split.jsonl", "a") as f: f.write(json.dumps(row) + "\n")
     print(row, flush=True)
