@@ -7418,6 +7418,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if user {
             self.user_progress_line(ub);
         }
+        // 診断用 (`ENOMOTO_MIP_TCTRACE`、analysis/treeclose_20261114.md): 全体の下界・打ち切り値・ノード数を外側の経過時間で 1 行
+        // (経過の行の lb・nodes は主スレッドの分なので、木の閉じ方を時間に沿って比べるときはこちらを使う)。解く側は変えない
+        if self.params.verbose && env_str!("ENOMOTO_MIP_TCTRACE").is_some() && !self.params.submip {
+            let lb = self.final_lb.unwrap_or_else(|| self.step_lb(self.global_lower_bound()));
+            let (done, open) = if self.final_lb.is_some() { (self.nodes + self.worker_totals.0, 0) } else { self.global_node_counts() };
+            eprintln!(
+                "TCTRACE outer {:.2} solve {:.2} restarts {} nodes {done} open {open} glb {:.10e} ub {:.10e} cutoff {:.10e} lp_iters {} sb_iters {}",
+                super::outer_elapsed().unwrap_or(f64::NAN),
+                self.start.elapsed().as_secs_f64(),
+                self.params.restarts,
+                lb + self.p.offset,
+                ub + self.p.offset,
+                self.params.cutoff + self.p.offset,
+                self.lp.total_iterations(),
+                self.sb_iters
+            );
+        }
         if !self.params.verbose {
             return;
         }
