@@ -3792,6 +3792,8 @@ pub(crate) struct ResumeCmd {
     pub(crate) secs: f64,
     /// 新しい打ち切り値 (外側の刈り込みの上限)
     pub(crate) cutoff: f64,
+    /// 試作 `ENOMOTO_MIP_TIMEDEP` の `u`: 続きで使ってよい LP の反復 (0 なら上限を変えない)
+    pub(crate) iters: u64,
     /// 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 継続の間のこのスレッドの道筋 ([`super::heuristics::SUBMIP_TAG`])
     pub(crate) tag: Option<String>,
 }
@@ -3915,6 +3917,7 @@ pub(crate) struct SubmipTls {
     fj_p3: bool,
     fj_nosol_cap: f64,
     fj_has_inc: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    iter_cap: u64,
 }
 
 impl SubmipTls {
@@ -3933,6 +3936,7 @@ impl SubmipTls {
             fj_p3: crate::fj_p3_force(),
             fj_nosol_cap: h::FJ_NOSOL_CAP.with(|c| c.get()),
             fj_has_inc: h::FJ_HAS_INC.with(|f| f.borrow().clone()),
+            iter_cap: SUBMIP_ITER_CAP.with(|c| c.replace(0)),
         }
     }
     /// 今のスレッド (サブ MIP のスレッド) に置く。
@@ -3949,6 +3953,7 @@ impl SubmipTls {
         crate::set_fj_p3_force(self.fj_p3);
         h::FJ_NOSOL_CAP.with(|c| c.set(self.fj_nosol_cap));
         h::FJ_HAS_INC.with(|f| *f.borrow_mut() = self.fj_has_inc);
+        SUBMIP_ITER_CAP.with(|c| c.set(self.iter_cap));
     }
 }
 
@@ -15212,6 +15217,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.params.time_limit = self.start.elapsed().as_secs_f64() + secs;
         if c.cutoff < self.params.cutoff {
             self.params.cutoff = c.cutoff;
+        }
+        if c.iters > 0 {
+            self.iter_cap = self.lp.total_iterations() + c.iters;
         }
         if let Some(tag) = c.tag {
             super::heuristics::SUBMIP_TAG.with(|t| *t.borrow_mut() = tag);

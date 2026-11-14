@@ -1516,6 +1516,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 今からサブ MIP を始めるときの時間の上限と、解のないうちの上限 (`ENOMOTO_MIP_SUBMIP_HIGHS_NOSOL`) ([`Self::solve_submip_problem`]。
     /// `ENOMOTO_MIP_RENS_RESUME` の継続も同じ決め方で今の残り時間から決め直す)。
+    /// 試作 `ENOMOTO_MIP_TIMEDEP` の `u`: 外側の求解のサブ MIP の LP の反復の上限 (`u` でないとき・サブ MIP の中では 0)。
+    /// `ENOMOTO_T_MIP_TIMEDEP_SUBMIP_C` (既定 5) x max(根の LP の反復, 1000) x (時間の上限の決め方の秒 / 6)。秒は残り時間の代わりに
+    /// 元の時間の上限 ([`super::solver::MipParams::frac_tl`]) で数え (割合 x 上限、最大 `submip_time_max`)、6 秒 (既定の最大) を 1 とする。
+    pub(super) fn submip_iter_cap_u(&self) -> u64 {
+        if !super::timedep('u') || self.params.submip || self.snap.is_some() {
+            return 0;
+        }
+        let t = (self.submip_time_frac * self.params.frac_tl()).min(self.submip_time_max);
+        let c = tunable!("ENOMOTO_T_MIP_TIMEDEP_SUBMIP_C", 5.0, f64) * self.root_lp_iters.max(1000) as f64 * (t / 6.0);
+        (c as u64).max(1)
+    }
+
     pub(super) fn submip_time_limit(&self) -> (f64, Option<f64>) {
         let remaining = match self.deadline {
             Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
@@ -1647,6 +1659,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some((n, t)) => (time_limit.min(t), node_limit.min(n)),
             None => (time_limit, node_limit),
         };
+        // 試作 `ENOMOTO_MIP_TIMEDEP` の `u` (analysis/timedep_20261114.md): 外側の求解のサブ MIP (木の大近傍探索の `n` が上限を決めたもの以外) を
+        // 時間でなく LP の反復の上限 ([`Self::submip_iter_cap_u`]) で止め、時間の上限は 10 倍の安全網にする
+        let u_cap = self.submip_iter_cap_u();
+        let u_set = u_cap > 0 && !self.parallel_submips && super::solver::SUBMIP_ITER_CAP.with(|c| c.get()) == 0;
+        let time_limit = if u_set {
+            super::solver::SUBMIP_ITER_CAP.with(|c| c.set(u_cap));
+            let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+            (10.0 * time_limit).min(remaining)
+        } else {
+            time_limit
+        };
         let params = super::solver::MipParams {
             time_limit,
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
@@ -1765,6 +1788,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none())
         };
+        if u_set {
+            // 前処理だけで終わって求解が上限を受け取らなかったときに残さない
+            super::solver::SUBMIP_ITER_CAP.with(|c| c.set(0));
+        }
         if let Some((id, prev)) = &trace {
             SUBMIP_TAG.with(|t| *t.borrow_mut() = prev.clone());
             eprintln!("MIP: SMT end id={id} status={:?} nodes={} objective={:?} secs={:.3} T={:.3}{}", r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64(), submip_trace_secs(), if paused.is_some() { " paused=1" } else { "" });
@@ -1781,7 +1808,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         SUBMIP_HS_DROP.with(|f| f.set(hs_drop_prev));
         SUBMIP_R0.with(|f| f.set(r0_prev));
         if self.params.verbose {
-            eprintln!("MIP:   sub-MIP: {nfree_all} free columns of {}, status {:?}, nodes {}, objective {:?}, {:.2}s{}", p.n, r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64(), if paused.is_some() { " (paused at the node limit)" } else { "" });
+            eprintln!("MIP:   sub-MIP: {nfree_all} free columns of {}, status {:?}, nodes {}, objective {:?}, {:.2}s, {} LP iterations{}", p.n, r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64(), r.lp_iterations, if paused.is_some() { " (paused at the node limit)" } else { "" });
         }
         if let Some((h, nfi, z0)) = frag {
             eprintln!(
@@ -1875,7 +1902,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             );
         }
         let t0 = Instant::now();
-        let r = ps.resume(super::solver::ResumeCmd { node_limit, secs, cutoff, tag: trace.as_ref().map(|t| t.1.clone()) });
+        let iters = self.submip_iter_cap_u();
+        let secs = if iters > 0 { secs * 10.0 } else { secs };
+        let r = ps.resume(super::solver::ResumeCmd { node_limit, secs, cutoff, iters, tag: trace.as_ref().map(|t| t.1.clone()) });
         let Some(r) = r else {
             if let Some((id, _)) = &trace {
                 eprintln!("MIP: SMT end id={id} status=NotSolved nodes={nodes0} objective=None secs={:.3} T={:.3}", t0.elapsed().as_secs_f64(), submip_trace_secs());

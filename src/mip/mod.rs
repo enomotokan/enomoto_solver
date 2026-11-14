@@ -281,6 +281,8 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// - `t`: 木の中の分離をするか・続けるか (`tree_sep_budget_ok`) を秒でなく LP の反復で比べる
 /// - `y`: 前処理の対称性の探り (`ENOMOTO_MIP_SYMPRE=probe`) を手間の上限だけで止める (時間は 10 倍の安全網)
 /// - `b`: 割合で決める量 (時間の上限 x 割合) の基準を、前処理・再スタートの後の残り時間でなく元の時間の上限にする ([`solver::MipParams::frac_tl`])
+/// - `u`: 外側の求解のサブ MIP (根の RENS・RINS など。木の大近傍探索は `n`) を時間でなく LP の反復の上限で止める (時間は 10 倍の安全網。
+///   `heuristics::Solver::submip_iter_cap_u`、係数 `ENOMOTO_T_MIP_TIMEDEP_SUBMIP_C` 既定 5)
 pub(crate) fn timedep(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains(c))
 }
