@@ -1852,7 +1852,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_TIMEDEP` の `p`: 第 2 段階の上限を手間で決める (`p2_work_cap`、時間の上限 `phase2_deadline` は 10 倍の安全網)
         let td_p = super::timedep('p');
         let mut p2_work_cap = f64::INFINITY;
-        let cut_work = |li: u64, wr: usize| li as f64 / root_iters.max(1) as f64 + 0.05 * wr as f64;
+        let round_w = tunable!("ENOMOTO_T_MIP_TIMEDEP_ROUND_W", 0.05, f64);
+        let cut_work = |li: u64, wr: usize| li as f64 / root_iters.max(1) as f64 + round_w * wr as f64;
         // `ENOMOTO_MIP_LOSE6_3_CUTRESTART` (試作、既定では使わない): 主の根のカットのループで、`ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_MIN` (既定 3)
         // ラウンド目以降、暫定解による被約費用の固定が再スタートの判定を通るなら ([`Solver::lose6_3_cut_restart_due`])、ループを抜けて
         // 根のヒューリスティクスを飛ばし早めの再スタートへ進む (HiGHS は根の分離のラウンドごとに被約費用で固定し、再スタートを判定する)。
