@@ -2994,6 +2994,7 @@ pub(super) fn treeeff(c: char) -> bool {
 ///   (`ENOMOTO_T_MIP_TC_W_WORK`・`ENOMOTO_T_MIP_TC_W_RATE`)。`c` とは一緒に使わない。
 /// - `v`: カットプールの伝播を止めずに間引く (効き目の低い区切りが続けば呼ぶ間隔を倍々に、最大 `ENOMOTO_T_MIP_TC_V_MAX` (32) ノードに 1 回)。
 /// - `r`: ノードの局所的な被約費用の固定を子のノードの変更に足して引き継ぐ (待ち行列から取り出しても効く)。
+/// - `a`: `r` に加えて、強分枝・双対証明・リテラルの衝突・目的関数の伝播・カットプールの伝播による局所的な固定も引き継ぐ。
 /// - `g`: 木の中で `ENOMOTO_T_MIP_TC_G_EVERY` (100) ノードごとに、開いたノード全てに共通の整数列の境界を大域的な境界にし、打ち切り値つきの
 ///   大域の伝播を回す (不動点まで最大 `ENOMOTO_T_MIP_TC_G_ROUNDS` (5) 回)。伝播が矛盾すれば残りの開いたノードに打ち切り値より良い解は
 ///   ないので木を閉じる ([`Solver::tc_open_tighten`])。HiGHS の `HighsNodeQueue::pruneInfeasibleNodes` (sct2 で開いたノード 3000 余りが
@@ -12805,9 +12806,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut of_fixes = std::mem::take(&mut self.of_node_fixes);
             // 試作 `ENOMOTO_MIP_TC` の `r`: このノードの局所的な被約費用の固定 (理由 -3) を子に引き継ぐ (分枝ではない変更として `sym` を立てる)。
             // HiGHS はノードの定義域の変更を子に持たせ、mcsched で HiGHS の分枝をなぞった同じノードの被約費用の固定は HiGHS 34 本・こちら 1.4 本
-            if tc_on('r') {
+            if tc_on('r') || tc_on('a') {
+                // `a`: 被約費用 (−3) に加えて強分枝 (−4)・双対証明 (−6)・リテラルの衝突 (−7)・目的関数の伝播 (−8)・カットプールの伝播 (−9) の固定も
+                // (行の伝播は分枝から積み直せば同じになるので除く。オービトープ (−5) は対称性の推論なので除く)
+                let reasons: &[i32] = if tc_on('a') { &[-3, -4, -6, -7, -8, -9] } else { &[-3] };
                 let mut have: Vec<(usize, bool, f64)> = node.changes.iter().chain(of_fixes.iter()).map(|c| (c.col, c.upper, c.value)).collect();
-                for (j, upper, v) in self.dom.tagged_int_changes(self.p, -3) {
+                for (j, upper, v) in self.dom.tagged_int_changes(self.p, reasons) {
                     let tighter = match have.iter().filter(|e| e.0 == j && e.1 == upper).map(|e| e.2).reduce(|a, b| if upper { a.min(b) } else { a.max(b) }) {
                         Some(w) => if upper { v < w - 0.5 } else { v > w + 0.5 },
                         None => true,
@@ -22782,7 +22786,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if tc_on('c') {
                     eprintln!("MIP: TC c: cut pool propagation retried {} times, off now {}", self.tc_c.3, self.cpp.off);
                 }
-                if tc_on('r') {
+                if tc_on('r') || tc_on('a') {
                     eprintln!("MIP: TC r: reduced-cost fixings passed to children {}", self.tc_r_stats);
                 }
                 if tc_on('v') {
