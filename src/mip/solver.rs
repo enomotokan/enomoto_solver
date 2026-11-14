@@ -741,6 +741,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     tc_g_stats: [u64; 4],
     /// 試作 `ENOMOTO_MIP_TC` の `c`: カットプールの伝播を止めている間に飛ばした回数・次に試し直す回数・試しの区切りの始めの統計・試し直した回数
     tc_c: (u64, u64, [u64; 4], u64),
+    /// 試作 `ENOMOTO_MIP_TC` の `v`: 呼ぶ間隔・呼ばれた回数・区切りの始めの (手間, 効き目)・間隔の最大
+    tc_v: (u64, u64, (u64, u64), u64),
     tr_last: (u64, f64, f64, f64),
     /// 木の中の再スタートの記帳 (`TRSTAT`、ログだけ) と `ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、[`Self::tree_restart_guard_ok`]) 用:
     /// この求解で木のループに入った時刻 (この求解の始めからの秒)、そのときの全体の下界、[`Self::tree_restart_due`] の最後の木の大きさの見積もり。
@@ -2986,6 +2988,7 @@ pub(super) fn treeeff(c: char) -> bool {
 ///   (試し直すたびに倍) に着いたら、もう一度 `ENOMOTO_T_MIP_CUTPOOL_PROP_TRIAL` 回試す。
 /// - `w`: カットプールの伝播の止め方を、呼び出し回数の区切りの効き目から手間 (更新した項 + 候補の非零) の区切りの効き目に変える
 ///   (`ENOMOTO_T_MIP_TC_W_WORK`・`ENOMOTO_T_MIP_TC_W_RATE`)。`c` とは一緒に使わない。
+/// - `v`: カットプールの伝播を止めずに間引く (効き目の低い区切りが続けば呼ぶ間隔を倍々に、最大 `ENOMOTO_T_MIP_TC_V_MAX` (32) ノードに 1 回)。
 /// - `g`: 木の中で `ENOMOTO_T_MIP_TC_G_EVERY` (100) ノードごとに、開いたノード全てに共通の整数列の境界を大域的な境界にし、打ち切り値つきの
 ///   大域の伝播を回す (不動点まで最大 `ENOMOTO_T_MIP_TC_G_ROUNDS` (5) 回)。伝播が矛盾すれば残りの開いたノードに打ち切り値より良い解は
 ///   ないので木を閉じる ([`Solver::tc_open_tighten`])。HiGHS の `HighsNodeQueue::pruneInfeasibleNodes` (sct2 で開いたノード 3000 余りが
@@ -4850,6 +4853,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tc_g_next: 0,
         tc_g_stats: [0; 4],
         tc_c: (0, 0, [0; 4], 0),
+        tc_v: (1, 0, (0, 0), 1),
         tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
         tr_t0: 0.0,
         tr_w0: (0.0, 0),
@@ -17866,6 +17870,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return true;
             }
         }
+        // 試作 `ENOMOTO_MIP_TC` の `v`: 止めずに間引く。手間 `ENOMOTO_T_MIP_TC_V_WORK` (1e7) ごとの区切りの効き目が手間 100 万あたり
+        // `ENOMOTO_T_MIP_TC_W_RATE` (5) 未満なら呼ぶ間隔を倍 (最大 `ENOMOTO_T_MIP_TC_V_MAX` (32) ノードに 1 回)、以上なら半分にする
+        // (neos5 は木の始めの数万回は効かず後で効く。pk1 は最後まで効かず重い)
+        if tc_on('v') {
+            self.tc_v.1 += 1;
+            if self.tc_v.1 % self.tc_v.0 != 0 {
+                return true;
+            }
+            let work = self.cpp.work[0] + self.cpp.work[2];
+            let useful = self.cutpool_prop_stats[2] + 10 * self.cutpool_prop_stats[1];
+            let (w0, u0) = self.tc_v.2;
+            if work.saturating_sub(w0) as f64 >= tunable!("ENOMOTO_T_MIP_TC_V_WORK", 1e7, f64) {
+                let rate = 1e6 * useful.saturating_sub(u0) as f64 / work.saturating_sub(w0).max(1) as f64;
+                self.tc_v.2 = (work, useful);
+                self.tc_v.0 = if rate < tunable!("ENOMOTO_T_MIP_TC_W_RATE", 5.0, f64) {
+                    (2 * self.tc_v.0).min(tunable!("ENOMOTO_T_MIP_TC_V_MAX", 32u64, u64).max(1))
+                } else {
+                    (self.tc_v.0 / 2).max(1)
+                };
+                self.tc_v.3 = self.tc_v.3.max(self.tc_v.0);
+            }
+        }
         // 試作 `ENOMOTO_MIP_TC` の `w`: 呼び出しの回数ではなく手間 (更新した項 + 候補のカットの非零) で区切り、区切りごとの効き目
         // (締めた境界 + 10 × 刈ったノード) が手間 100 万あたり `ENOMOTO_T_MIP_TC_W_RATE` (5) 未満なら止める。区切りは
         // `ENOMOTO_T_MIP_TC_W_WORK` (1e8)。木の始めの手間の小さいうちは判定しない (neos5: 既定は始めの 1000 回 (0.01 秒) で効き目 0 で止まり、
@@ -17890,7 +17916,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 効き目は今の試しの区切り (`TC=c` で試し直した後はそこから) で数える
         let base = self.tc_c.2;
         let calls = self.cutpool_prop_stats[0] - base[0];
-        if !tc_on('w') && calls >= trial && calls % trial == 0 {
+        if !tc_on('w') && !tc_on('v') && calls >= trial && calls % trial == 0 {
             let useful = (self.cutpool_prop_stats[2] - base[2]) + 10 * (self.cutpool_prop_stats[1] - base[1]);
             if (useful as f64) < tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_MIN_RATE", 0.01, f64) * calls as f64 {
                 self.cpp.off = true;
@@ -22722,6 +22748,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: cut pool propagation: calls {}, pruned {} nodes, tightened {} bounds, {:.2}s, pool {} cuts ({} nonzeros); updated terms {}, candidates {} ({} nonzeros), rebuilds {}", self.cutpool_prop_stats[0], self.cutpool_prop_stats[1], self.cutpool_prop_stats[2], self.cutpool_prop_stats[3] as f64 * 1e-9, self.cut_pool.len(), self.cut_pool_nnz, self.cpp.work[0], self.cpp.work[1], self.cpp.work[2], self.cpp.work[3]);
                 if tc_on('c') {
                     eprintln!("MIP: TC c: cut pool propagation retried {} times, off now {}", self.tc_c.3, self.cpp.off);
+                }
+                if tc_on('v') {
+                    eprintln!("MIP: TC v: cut pool propagation interval now {}, max {}", self.tc_v.0, self.tc_v.3);
                 }
             }
             if !super::pseudocost::gap1().is_empty() {
