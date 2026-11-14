@@ -876,7 +876,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let saved = self.lp.save_state();
-        let budget = 1000 + 5 * root_iters;
+        let budget = self.fp_iter_cap.map_or(1000 + 5 * root_iters, |c| c.min(1000 + 5 * root_iters));
         let it_start = self.lp.total_iterations();
         let mut seen: HashSet<Vec<i64>> = HashSet::new();
         let ints: Vec<usize> = (0..n).filter(|&j| p.is_int[j]).collect();

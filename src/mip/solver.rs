@@ -178,6 +178,22 @@ fn rootcap_heavy(name: &str) -> bool {
         || matches!(name, "local search" | "repair" | "interior rounding" | "objective support" | "root Local-MIP" | "local branching 2" | "proximity 2" | "min relaxation")
 }
 
+/// 診断用 `ENOMOTO_MIP_DEBUG_RHSTAT`: 外側の根のヒューリスティクスごとの秒・LP 反復・暫定解の変化を `RHSTAT` の行で出す (analysis/rootheur_20261114.md)
+pub(super) fn rhstat_on() -> bool {
+    env_str!("ENOMOTO_MIP_DEBUG_RHSTAT").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_RHEUR=<文字>` (既定では使わない。analysis/rootheur_20261114.md): 根のヒューリスティクスの順と手間の配り方。
+/// - `e`: 並列モードで暫定解がなければ、サブ MIP を別スレッドに出す安いもの (locks・clique・vbounds) を Feasibility Pump・ダイビングの前に出す
+///   (主のスレッドが Pump・ダイビングを回す間に別スレッドで解く。元の位置では回さない)
+/// - `b`: 暫定解なし用の Feasibility Pump と 3 つのダイビングの LP 反復の予算を共有にする。全体 = `ENOMOTO_T_MIP_RHEUR_POOL` (4) × 根の LP の反復 + 4000
+///   (既定はそれぞれ 5・2・2・2 倍 + 1000 で計 11 倍 + 4000)。1 本の取り分は min(既定の予算, 残り / 残りの本数) (下限 1000)、使い残しは後に回る
+/// - `s`: `b` に加えて、取り分を使い切って何も見つけず、近さ ([`Solver::heur_close`]) が `ENOMOTO_T_MIP_RHEUR_CLOSE` (0.5) 未満なら、
+///   残りのダイビングの取り分を半分にする (停滞の判定を手間で)
+pub(super) fn rheur(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_RHEUR").is_some_and(|v| v.contains(c))
+}
+
 fn light_root_heur(name: &str) -> bool {
     matches!(name, "trivial" | "simple rounding" | "ZI round" | "randomized rounding" | "shift-and-propagate")
 }
@@ -762,6 +778,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) rootcap_each: f64,
     /// [`rootcap`] の `h`: 全体の期限の後も回す安いヒューリスティクス 1 本の上限の秒
     pub(super) rootcap_late: f64,
+    /// 試作 `ENOMOTO_MIP_RHEUR` の `b` ([`rheur`]): 根の Feasibility Pump の LP 反復の予算の上限 (共有の予算の取り分)
+    pub(super) fp_iter_cap: Option<u64>,
     /// [`rootcap`] の `w`: 根のヒューリスティクスの終わりに残っていた期限 (裏のカットを待つ上限に使う)
     pub(super) rootcap_end: Option<Instant>,
     /// `ENOMOTO_MIP_BG_CUTS_PROOF_STOP` (既定で使う。`0` で止める): 根のヒューリスティクスの間に見る裏のカットの求解 ([`Solver::bg_proved`])
@@ -4794,6 +4812,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         rootcap_until: None,
         rootcap_each: 0.0,
         rootcap_late: 0.0,
+        fp_iter_cap: None,
         rootcap_end: None,
         bg_watch: None,
         bg_proved_seen: std::cell::Cell::new(false),
@@ -6857,6 +6876,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if !lim.is_finite() || z < lim - 1e-9 * lim.abs().max(1.0) {
                     c.note_found();
                 }
+            }
+            // 診断用 (`ENOMOTO_MIP_DEBUG_RHSTAT`): 外側の求解の暫定解の更新 (出どころの名前・時刻・ノード)
+            if !self.params.submip && self.snap.is_none() && rhstat_on() {
+                eprintln!("RHSTAT inc\t{}\t{z}\t{:.3}\t{}\t{}", if self.heur_label.is_empty() { "tree" } else { self.heur_label }, self.start.elapsed().as_secs_f64(), self.nodes, self.params.restarts);
             }
             self.incumbent = Some((z, x));
             if good {
@@ -9405,6 +9428,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 self.poll_find_thread();
                             }
                             let t = Instant::now();
+                            let rh_it0 = self.lp.total_iterations();
                             // 近さ ([`Solver::heur_close`]) を記録しない関数 (旧来の RENS など) を見分けるため負にしておく
                             self.heur_close = -1.0;
                             let z_before = self.incumbent.as_ref().map(|(z, _)| *z);
@@ -9431,6 +9455,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 self.heur_stop = Some(self.heur_stop.map_or(d, |h| h.min(d)));
                             }
                             let found = $e;
+                            // 診断用 (`ENOMOTO_MIP_DEBUG_RHSTAT`): 外側の根のヒューリスティクス 1 本ごとに、名前・秒・LP 反復・前後の暫定解を 1 行で出す
+                            // (並列のサブ MIP は出しただけの時点。結果は受け取りの `RHSTAT par` の行。analysis/rootheur_20261114.md)
+                            if !self.params.submip && rhstat_on() {
+                                eprintln!("RHSTAT main\t{}\t{:.3}\t{}\t{}\t{:?}\t{:?}\t{:.3}\t{}", $name, t.elapsed().as_secs_f64(), self.lp.total_iterations() - rh_it0, found as u8,
+                                    z_before, self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64(), self.params.restarts);
+                            }
                             if self.rootcap_until.is_some() && self.params.verbose && self.heur_stop.is_some_and(|d| Instant::now() >= d) {
                                 eprintln!("MIP: root heuristic {}: stopped at the time cap (ROOTCAP)", $name);
                             }
@@ -9605,6 +9635,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 作った求解でそれぞれ別スレッドで同時に行い、元の順の位置で結果を受け取る (先のもので暫定解が見つかっても、
                 // 後のものの解も受け取る)
                 let mut par_dives: Vec<Option<std::thread::JoinHandle<MipResult>>> = Vec::new();
+                let mut early_scip = false;
                 if self.incumbent.is_none() && !light && mip_threads() > 1 && !self.params.submip && env_str!("ENOMOTO_MIP_PAR_DIVES").is_some() {
                     let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                     let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
@@ -9636,17 +9667,67 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     heur!("vector length diving", take_dive(self, &mut par_dives, 2));
                     heur!("coefficient diving", take_dive(self, &mut par_dives, 3));
                 } else {
+                    // 試作 `ENOMOTO_MIP_RHEUR` の `e` ([`rheur`]): サブ MIP を別スレッドに出す安いものを Pump・ダイビングの前に出す
+                    if rheur('e') && self.parallel_submips && self.noinc_like() && !self.params.submip && self.snap.is_none() {
+                        early_scip = true;
+                        if env_str!("ENOMOTO_MIP_NO_LOCKS_HEUR").is_none() {
+                            heur!("locks", self.locks_heur());
+                        }
+                        if env_str!("ENOMOTO_MIP_NO_CLIQUE_HEUR").is_none() {
+                            heur!("clique", self.clique_heur(&x));
+                        }
+                        if env_str!("ENOMOTO_MIP_NO_VBOUNDS_HEUR").is_none() {
+                            heur!("vbounds (loose)", self.vbounds_heur(true));
+                            heur!("vbounds (tight)", self.vbounds_heur(false));
+                        }
+                    }
+                    // 試作 `ENOMOTO_MIP_RHEUR` の `b`・`s` ([`rheur`]): Pump と 3 つのダイビングの LP 反復の予算を共有にする
+                    let pool = (rheur('b') || rheur('s')) && !self.params.submip && self.snap.is_none();
+                    let mut pool_left = (tunable!("ENOMOTO_T_MIP_RHEUR_POOL", 4.0, f64) * root_iters as f64) as u64 + 4000;
+                    let mut pool_k = 4u64;
+                    let mut dive_scale = 1.0f64;
+                    let share = |left: u64, k: u64, own: u64, scale: f64| -> u64 { own.min(((left / k.max(1)) as f64 * scale) as u64).max(1000) };
+                    // 1 本を回した後: 使った反復を引き、停滞 (`s`) を見る
+                    macro_rules! pool_after {
+                        ($it0:expr, $cap:expr, $found:expr) => {
+                            if pool {
+                                let used = self.lp.total_iterations() - $it0;
+                                pool_left = pool_left.saturating_sub(used);
+                                pool_k = pool_k.saturating_sub(1);
+                                if rheur('s') && !$found && used + 1000 >= $cap && self.heur_close >= 0.0 && self.heur_close < tunable!("ENOMOTO_T_MIP_RHEUR_CLOSE", 0.5, f64) {
+                                    dive_scale *= 0.5;
+                                }
+                                if self.params.verbose {
+                                    eprintln!("MIP: RHEUR pool: {used} iterations used (cap {}), {pool_left} left, closeness {:.2}, dive scale {dive_scale}", $cap, self.heur_close);
+                                }
+                            }
+                        };
+                    }
                     if self.noinc_like() && !light && !(self.incumbent.is_some() && self.fj_poor() && env_str!("ENOMOTO_MIP_FJ_POOR_NOINC").is_some_and(|v| v == "nopump")) {
+                        let cap = share(pool_left, pool_k, 1000 + 5 * root_iters, 1.0);
+                        self.fp_iter_cap = pool.then_some(cap);
+                        let it0 = self.lp.total_iterations();
+                        let before = self.incumbent.as_ref().map(|(z, _)| *z);
                         heur!("feasibility pump", self.feasibility_pump(root_iters));
+                        self.fp_iter_cap = None;
+                        let f = self.incumbent.as_ref().map(|(z, _)| *z) != before;
+                        pool_after!(it0, cap, f);
                     }
-                    if self.noinc_like() && !light {
-                        heur!("fractional diving", self.fractional_dive(dive_budget));
-                    }
-                    if self.noinc_like() && !light {
-                        heur!("vector length diving", self.dive(super::heuristics::DiveKind::VectorLength, dive_budget, f64::INFINITY));
-                    }
-                    if self.noinc_like() && !light && env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_none() {
-                        heur!("coefficient diving", self.dive(super::heuristics::DiveKind::Coefficient, dive_budget, f64::INFINITY));
+                    let kinds: [(&'static str, super::heuristics::DiveKind); 3] = [
+                        ("fractional diving", super::heuristics::DiveKind::Fractional),
+                        ("vector length diving", super::heuristics::DiveKind::VectorLength),
+                        ("coefficient diving", super::heuristics::DiveKind::Coefficient),
+                    ];
+                    for (name, kind) in kinds {
+                        if !(self.noinc_like() && !light) || (kind == super::heuristics::DiveKind::Coefficient && env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_some()) {
+                            continue;
+                        }
+                        let cap = if pool { share(pool_left, pool_k, dive_budget, dive_scale) } else { dive_budget };
+                        let it0 = self.lp.total_iterations();
+                        let before = self.incumbent.as_ref().map(|(z, _)| *z);
+                        heur!(name, self.dive(kind, cap, f64::INFINITY));
+                        let f = self.incumbent.as_ref().map(|(z, _)| *z) != before;
+                        pool_after!(it0, cap, f);
                     }
                 }
                 // LP を使わない最後の手段 (先に使うと質の悪い解で他の暫定解探しを止めてしまう)
@@ -9655,13 +9736,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // SCIP 由来 (locks・clique・vbounds)。暫定解がないか、根の LP との差が 1% 以上なら使う
                 let scip_heur_ok = |s: &Self| s.incumbent.as_ref().is_none_or(|(z, _)| *z - root_obj > 0.01 * root_obj.abs().max(1.0));
-                if scip_heur_ok(self) && env_str!("ENOMOTO_MIP_NO_LOCKS_HEUR").is_none() {
+                if !early_scip && scip_heur_ok(self) && env_str!("ENOMOTO_MIP_NO_LOCKS_HEUR").is_none() {
                     heur!("locks", self.locks_heur());
                 }
-                if scip_heur_ok(self) && env_str!("ENOMOTO_MIP_NO_CLIQUE_HEUR").is_none() {
+                if !early_scip && scip_heur_ok(self) && env_str!("ENOMOTO_MIP_NO_CLIQUE_HEUR").is_none() {
                     heur!("clique", self.clique_heur(&x));
                 }
-                if scip_heur_ok(self) && env_str!("ENOMOTO_MIP_NO_VBOUNDS_HEUR").is_none() {
+                if !early_scip && scip_heur_ok(self) && env_str!("ENOMOTO_MIP_NO_VBOUNDS_HEUR").is_none() {
                     heur!("vbounds (loose)", self.vbounds_heur(true));
                     if scip_heur_ok(self) {
                         heur!("vbounds (tight)", self.vbounds_heur(false));
@@ -19829,12 +19910,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let mut acc = false;
                 let infeasible = r.status == MipStatus::Infeasible;
+                let rh_z0 = self.incumbent.as_ref().map(|(z, _)| *z);
                 if let Some(x) = r.x {
                     let keep = std::mem::replace(&mut self.heur_label, label);
                     let child = super::heuristics::SUBMIP_CHILD.with(|c| c.replace(trace_id));
                     acc = self.try_incumbent(x);
                     super::heuristics::SUBMIP_CHILD.with(|c| c.set(child));
                     self.heur_label = keep;
+                }
+                // 診断用 (`ENOMOTO_MIP_DEBUG_RHSTAT`): 並列のサブ MIP の受け取り (秒はサブ MIP を出してから受け取るまで)
+                if !self.params.submip && rhstat_on() {
+                    eprintln!("RHSTAT par\t{label}\t{:.3}\t{}\t{}\t{rh_z0:?}\t{:?}\t{:.3}\t{}\t{:?}\t{}", t0.elapsed().as_secs_f64(), r.lp_iterations, acc as u8,
+                        self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64(), self.params.restarts, r.status, r.nodes);
                 }
                 if trace_id > 0 {
                     eprintln!("MIP: SMT acc id={trace_id} accepted={} T={:.3}", acc as u8, super::heuristics::submip_trace_secs());
