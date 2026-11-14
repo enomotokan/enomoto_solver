@@ -1014,7 +1014,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
         EQUIV2_USED.with(|f| f.set(false));
         CLQPRB_STICKY.with(|f| f.set(false));
-    CLQPRB_REVERTED.with(|f| f.set(false));
+        CLQPRB_REVERTED.with(|f| f.set(false));
         zerohalf::zh_trial_reset();
         cutmix::reset();
     }
@@ -1197,6 +1197,14 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         sympre0::diag(p, "before");
     }
     let presolved = if use_presolve { presolve_mip(p, params.verbose, pre_submip, lp_probe_secs) } else { None };
+    // `ENOMOTO_MIP_CLQPRB` の `h` (試作、analysis/prbimp_20261113.md §4): `g` で含意を使う形に切り替えた外側の求解では、既定の形の前処理を
+    // もう一度回した問題で locks の sub-MIP を解き、元の空間に戻した解を最初の暫定解の候補にする ([`clqprb_shadow_locks`])。
+    // 前処理後の空間に写して実行可能なときだけ使う (下の `start` の扱い)
+    let start = if start.is_none() && use_presolve && clqprb_on() && clqprb_has('h') && !params.submip && params.restarts == 0 && CLQPRB_STICKY.with(|f| f.get()) && matches!(presolved, Some(Presolved::Reduced { .. })) {
+        clqprb_shadow_locks(p, params, pre_submip, lp_probe_secs)
+    } else {
+        start
+    };
     pretime::mark("presolve_mip");
     // 診断 `ENOMOTO_MIP_DEBUG_PRESOLVE_COLS=ファイル` (CLQPRB、analysis/clqprb_20261112.md): 最初の前処理の後の列ごとに
     // (番号, 下限, 上限, 残った行の非零の数) を書く。前処理は列の番号を保つので、HiGHS の前処理で消えた列と突き合わせられる
@@ -3707,6 +3715,123 @@ fn hnf_subst(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::Postsolve
 }
 
 /// 整数を考慮した前処理をかけた問題を作る。前処理が何も減らさなければ `None` (元の問題で解く)。
+/// `ENOMOTO_MIP_CLQPRB` の `h` (試作): 既定の形 (含意を使わない) のプロビングで前処理をやり直した問題で locks (lock の多い整数列から
+/// lock の少ない側に固定して伝播し、固定率 `ENOMOTO_T_MIP_CLQPRB_H_RATE` (0.65) で止める。[`heur_scip`] の locks と同じ形) の
+/// sub-MIP を解き、解を元の問題の空間に戻して返す (元の問題で実行可能なときだけ)。
+/// neos-3216931-puriri: 含意を使う形の前処理で締まった問題では locks の固定が 3 割台でも実行不能の組に入り、解が出なくなる。
+/// 既定の形の問題では locks の sub-MIP が 81380 前後を出す
+fn clqprb_shadow_locks(p: &MipProblem, params: MipParams, pre_submip: bool, lp_probe_secs: Option<f64>) -> Option<Vec<f64>> {
+    let t0 = std::time::Instant::now();
+    // 前処理が触る印を退避して戻す (外側の前処理の結果は変えない)
+    let saved = (PROBE_EQUIV.with(|e| e.borrow().clone()), PROBE_EQUIV_FORCE.with(|f| f.get()), EQUIV2_USED.with(|f| f.get()), CLQPRB_STICKY.with(|f| f.get()), CLQPRB_REVERTED.with(|f| f.get()));
+    CLQPRB_SUPPRESS.with(|f| f.set(true));
+    let pd = presolve_mip(p, false, pre_submip, lp_probe_secs);
+    CLQPRB_SUPPRESS.with(|f| f.set(false));
+    PROBE_EQUIV.with(|e| *e.borrow_mut() = saved.0);
+    PROBE_EQUIV_FORCE.with(|f| f.set(saved.1));
+    EQUIV2_USED.with(|f| f.set(saved.2));
+    CLQPRB_STICKY.with(|f| f.set(saved.3));
+    CLQPRB_REVERTED.with(|f| f.set(saved.4));
+    let t_pre = t0.elapsed().as_secs_f64();
+    let Some(Presolved::Reduced { prob: q, postsolve, scaling }) = pd else {
+        if params.verbose {
+            eprintln!("MIP: CLQPRB=h: the default presolve gave no reduced problem ({t_pre:.2}s)");
+        }
+        return None;
+    };
+    let locks = heuristics::compute_locks(&q);
+    let mut dom = domain::Domain::new(&q);
+    if !dom.propagate(&q) {
+        return None;
+    }
+    let ints: Vec<usize> = (0..q.n).filter(|&j| q.is_int[j] && dom.lo[j] < dom.up[j]).collect();
+    if ints.is_empty() {
+        return None;
+    }
+    let mut order: Vec<(u32, usize)> = ints.iter().map(|&j| (locks[j].0 + locks[j].1, j)).collect();
+    order.sort_by(|a, b| b.0.cmp(&a.0));
+    let stop_rate = tunable!("ENOMOTO_T_MIP_CLQPRB_H_RATE", 0.65, f64);
+    let nint = ints.len() as f64;
+    let rate = |d: &domain::Domain| ints.iter().filter(|&&j| d.lo[j] == d.up[j]).count() as f64 / nint;
+    let work_cap = 20 * q.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
+    let work0 = dom.debug_work();
+    for (k, &(_, j)) in order.iter().enumerate() {
+        if k % 64 == 0 && dom.debug_work() - work0 > work_cap {
+            break;
+        }
+        let (dl, ul) = locks[j];
+        let (lo, up) = (dom.lo[j], dom.up[j]);
+        if lo == up {
+            continue;
+        }
+        let v = if dl <= ul { lo } else { up };
+        let v = if v.is_finite() { v } else if lo.is_finite() { lo } else { up };
+        if !v.is_finite() {
+            continue;
+        }
+        let before = dom.stack_len();
+        dom.tighten_lower(&q, j, v);
+        dom.tighten_upper(&q, j, v);
+        if !dom.propagate(&q) {
+            dom.backtrack_to(&q, before);
+            continue;
+        }
+        if k % 16 == 0 && rate(&dom) >= stop_rate {
+            break;
+        }
+    }
+    let fr = rate(&dom);
+    if fr < 0.3 {
+        if params.verbose {
+            eprintln!("MIP: CLQPRB=h: fixing rate {fr:.2} on the default problem; no sub-MIP");
+        }
+        return None;
+    }
+    let mut sub = q.clone();
+    sub.col_lo = dom.lo.clone();
+    sub.col_up = dom.up.clone();
+    for j in 0..sub.n {
+        if sub.col_lo[j] > sub.col_up[j] {
+            let v = if sub.is_int[j] { sub.col_lo[j].round() } else { 0.5 * (sub.col_lo[j] + sub.col_up[j]) };
+            sub.col_lo[j] = v;
+            sub.col_up[j] = v;
+        }
+    }
+    let sp = MipParams {
+        time_limit: tunable!("ENOMOTO_T_MIP_CLQPRB_H_SECS", 30.0, f64).min(0.1 * params.time_limit),
+        node_limit: tunable!("ENOMOTO_T_MIP_CLQPRB_H_NODES", 500u64, u64),
+        rel_gap: params.rel_gap.max(1e-4),
+        abs_gap: params.abs_gap.max(1e-6),
+        verbose: false,
+        submip: true,
+        cutoff: f64::INFINITY,
+        restarts: 0,
+        skip_heurs: 0,
+        threads: 1,
+        distinguish: false,
+        fc_submip: false,
+        tl_base: f64::NAN,
+    };
+    let r = solve_problem(&sub, sp, true);
+    let found = r.x.filter(|x| x.len() == q.n).map(|mut x| {
+        for step in postsolve.iter().rev() {
+            step.apply(&mut x);
+        }
+        crate::presolve::scaling::unscale_x(&scaling, &x)
+    });
+    let ok = found.as_ref().is_some_and(|x| x.len() == p.n && p.is_feasible(x, 1e-6));
+    if params.verbose {
+        eprintln!(
+            "MIP: CLQPRB=h: locks on the default problem: fixing rate {fr:.2}, sub-MIP {:?}, {} nodes, objective {:?}, feasible in the original problem {ok} (presolve {t_pre:.2}s, total {:.2}s)",
+            r.status,
+            r.nodes,
+            found.as_ref().filter(|_| ok).map(|x| p.objective(x)),
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    found.filter(|_| ok)
+}
+
 fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Option<f64>) -> Option<Presolved> {
     presolve_mip_depth(p, verbose, submip, lp_probe_secs, 0)
 }
