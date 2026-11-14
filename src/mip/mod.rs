@@ -522,12 +522,16 @@ pub fn solve_mip(
         Some(r) => r,
         None => dispatch(pr, params.time_limit),
     };
-    if let (Some((_, cp)), Some(x)) = (&canon, r.x.take()) {
-        let mut y = vec![0.0; p.n];
-        for (q, &j) in cp.iter().enumerate() {
-            y[j] = x[q];
+    // 注意: `if let (Some(..), Some(x)) = (&canon, r.x.take())` と書くと、canon が None (既定) でも `r.x.take()` が評価されて
+    // 解が捨てられる (af29a20a の形。既定ですべての問題が「最適・解なし」になっていた。analysis/wrong3470_20261114.md)
+    if let Some((_, cp)) = &canon {
+        if let Some(x) = r.x.take() {
+            let mut y = vec![0.0; p.n];
+            for (q, &j) in cp.iter().enumerate() {
+                y[j] = x[q];
+            }
+            r.x = Some(y);
         }
-        r.x = Some(y);
     }
     let r = r;
     if solver::end_diag() || params.verbose {
