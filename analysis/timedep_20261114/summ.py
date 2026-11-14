@@ -58,7 +58,7 @@ def feats(txt):
 
 rows = defaultdict(list)
 for p in sorted(D.glob("*.log")):
-    m = re.match(r"(.+)_t(\d+)_([ns])(\d+)\.log", p.name)
+    m = re.match(r"(.+)_t(\d+)_([a-z]+)(\d+)\.log", p.name)
     if not m: continue
     if probs and m.group(1) not in probs: continue
     rows[(m.group(1), int(m.group(2)))].append((m.group(3) + m.group(4), feats(p.read_text(errors="replace"))))
