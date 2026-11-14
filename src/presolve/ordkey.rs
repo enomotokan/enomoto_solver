@@ -23,6 +23,9 @@ thread_local! {
 /// - `p`: 平行列の併合で、正規化を最大の係数で行い、比べを相対 1e-12 の許容誤差にする (先頭の行の係数で割った値の
 ///   ビット比べは、行の順で丸めが変わって見落とす)。併合先の同点も鍵で崩す
 /// - `q`: クリーク行の拡張で、候補の文字を鍵の順に見る
+/// - `c`: 求解の入口で、問題の行・列を鍵の順に並べ直してから解き、解を元の並びに戻す (正準化。前処理から先の全部が、
+///   入力の行・列の並びに依らなくなる。鍵が同じ列・行どうしの順だけは入力の順が残る)。`ENOMOTO_T_MIP_ORDINV_SALT` (既定 0) で
+///   鍵に塩を混ぜると、別の (やはり並びに依らない) 順になる (揺れを測る用)
 pub(crate) fn ordinv(c: char) -> bool {
     env_str!("ENOMOTO_MIP_ORDINV").is_some_and(|v| v.contains(c))
 }
@@ -56,11 +59,18 @@ fn qf(v: f64) -> u64 {
 /// 列の鍵を作る。`rows` は (行, 下限, 上限) の並び (等式・不等式とも)、`c` は費用、`lb`・`ub` は列の境界、`is_int` は整数性。
 /// 行の色・列の色を交互に 2 回精密化する。和で集めるので行の中・列の中の並びに依らない
 pub(crate) fn column_keys(n: usize, rows: &[(Vec<(usize, f64)>, f64, f64)], c: &[f64], lb: &[f64], ub: &[f64], is_int: &[bool]) -> Vec<u64> {
+    row_and_column_keys(n, rows, c, lb, ub, is_int, 0, 2).1
+}
+
+/// 行の鍵と列の鍵 ([`column_keys`] と同じ作り方、精密化を `rounds` 回)。`salt` を混ぜると別の (やはり並びに依らない) 鍵になる
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn row_and_column_keys(n: usize, rows: &[(Vec<(usize, f64)>, f64, f64)], c: &[f64], lb: &[f64], ub: &[f64], is_int: &[bool], salt: u64, rounds: usize) -> (Vec<u64>, Vec<u64>) {
+    let salt = if salt == 0 { 0 } else { mix(salt ^ 0x5a5a_5a5a) };
     let mut col: Vec<u64> = (0..n)
-        .map(|j| mix(qf(c[j]) ^ mix(qf(lb[j]).wrapping_add(0x9e37)) ^ mix(qf(ub[j]).wrapping_add(0x7f4a)) ^ (is_int.get(j).copied().unwrap_or(false) as u64) << 1))
+        .map(|j| mix(qf(c[j]) ^ mix(qf(lb[j]).wrapping_add(0x9e37)) ^ mix(qf(ub[j]).wrapping_add(0x7f4a)) ^ (is_int.get(j).copied().unwrap_or(false) as u64) << 1 ^ salt))
         .collect();
     let mut row: Vec<u64> = rows.iter().map(|(r, l, u)| mix(qf(*l) ^ mix(qf(*u) ^ 0x1234) ^ (r.len() as u64) << 7)).collect();
-    for _ in 0..2 {
+    for _ in 0..rounds {
         // 行の色 = 前の行の色 + Σ mix(係数, 列の色)
         for (i, (r, _, _)) in rows.iter().enumerate() {
             let mut s = 0u64;
@@ -80,7 +90,15 @@ pub(crate) fn column_keys(n: usize, rows: &[(Vec<(usize, f64)>, f64, f64)], c: &
             col[j] = mix(col[j] ^ acc[j].rotate_left(11));
         }
     }
-    col
+    // 行の色を最後の列の色でもう一度精密化する
+    for (i, (r, _, _)) in rows.iter().enumerate() {
+        let mut s = 0u64;
+        for &(j, v) in r {
+            s = s.wrapping_add(mix(qf(v) ^ col[j].rotate_left(17)));
+        }
+        row[i] = mix(row[i] ^ s.rotate_left(5));
+    }
+    (row, col)
 }
 
 /// 前処理の行列の形 (`A x = b`、`G x <= h`) から列の鍵を作って設定する ([`clear`] で外す)。`G` の 1 項の行 (境界) も行として数える

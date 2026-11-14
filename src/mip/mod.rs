@@ -505,10 +505,21 @@ pub fn solve_mip(
     };
     // `ENOMOTO_MIP_FOLD` (2026-11-10 から既定、`0` で止める。analysis/drcr_20261110.md): 色の細分化で畳んで解き、元に戻す ([`fold`])
     let dispatch_np = |q: &MipProblem, tl: f64| solve_problem(q, MipParams { time_limit: tl, ..params }, false);
-    let r = match fold::solve_folded_any(&p, params.time_limit, params.verbose, &dispatch, &dispatch_np) {
+    // 試作 `ENOMOTO_MIP_ORDINV` の `c` ([`canonical_problem`]): 行・列を鍵の順に並べ直して解き、解を元の並びに戻す
+    let canon = crate::presolve::ordkey::ordinv('c').then(|| canonical_problem(&p));
+    let pr = canon.as_ref().map_or(&p, |(q, _)| q);
+    let mut r = match fold::solve_folded_any(pr, params.time_limit, params.verbose, &dispatch, &dispatch_np) {
         Some(r) => r,
-        None => dispatch(&p, params.time_limit),
+        None => dispatch(pr, params.time_limit),
     };
+    if let (Some((_, cp)), Some(x)) = (&canon, r.x.take()) {
+        let mut y = vec![0.0; p.n];
+        for (q, &j) in cp.iter().enumerate() {
+            y[j] = x[q];
+        }
+        r.x = Some(y);
+    }
+    let r = r;
     if solver::end_diag() || params.verbose {
         eprintln!("MIP: solve returned {:?} after {:.2}s (time limit {:.2}s)", r.status, t_solve.elapsed().as_secs_f64(), params.time_limit);
     }
@@ -684,6 +695,12 @@ fn polish_solution(variables: &[VariableData], objective: &Objective, constraint
 /// 行・列を種 `seed` の乱数で並べ替えた同値な問題と、列の対応 (新しい列 q は元の列 `cp[q]`) を作る
 /// (試作 `ENOMOTO_MIP_PERMRACE` の 2 本目の求解用)
 fn permuted_problem(p: &MipProblem, seed: u64) -> (MipProblem, Vec<usize>) {
+    let (cp, rp) = random_orders(p, seed);
+    (reorder_problem(p, &cp, &rp), cp)
+}
+
+/// 種 `seed` の乱数の列の順・行の順
+fn random_orders(p: &MipProblem, seed: u64) -> (Vec<usize>, Vec<usize>) {
     let mut st = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15).wrapping_add(0x1234_5678);
     let mut next = move || {
         st ^= st << 13;
@@ -701,6 +718,30 @@ fn permuted_problem(p: &MipProblem, seed: u64) -> (MipProblem, Vec<usize>) {
         let k = (next() % (i as u64 + 1)) as usize;
         rp.swap(i, k);
     }
+    (cp, rp)
+}
+
+/// 試作 `ENOMOTO_MIP_ORDINV` の `c` (crate::presolve::ordkey): 行・列を鍵 (並びに依らないハッシュ) の順に並べ直した問題と列の対応
+/// (新しい列 q は元の列 `cp[q]`)。鍵が同じなら元の番号の順
+fn canonical_problem(p: &MipProblem) -> (MipProblem, Vec<usize>) {
+    let rr: Vec<(Vec<(usize, f64)>, f64, f64)> = (0..p.m).map(|i| (p.rows[i].clone(), p.row_lo[i], p.row_up[i])).collect();
+    let salt = tunable!("ENOMOTO_T_MIP_ORDINV_SALT", 0u64, u64);
+    // 精密化は `ENOMOTO_T_MIP_ORDINV_ROUNDS` 回 (既定 8。色の数が増えなくなれば打ち切る代わりに固定回数)
+    let rounds = tunable!("ENOMOTO_T_MIP_ORDINV_ROUNDS", 8usize, usize);
+    let (rk, ck) = crate::presolve::ordkey::row_and_column_keys(p.n, &rr, &p.cost, &p.col_lo, &p.col_up, &p.is_int, salt, rounds);
+    if env_str!("ENOMOTO_MIP_LOG").is_some() {
+        let distinct = |v: &[u64]| v.iter().collect::<std::collections::HashSet<_>>().len();
+        eprintln!("MIP: ORDINV c: canonical order by keys ({rounds} rounds): {} distinct column keys of {}, {} distinct row keys of {}", distinct(&ck), p.n, distinct(&rk), p.m);
+    }
+    let mut cp: Vec<usize> = (0..p.n).collect();
+    cp.sort_by_key(|&j| (ck[j], j));
+    let mut rp: Vec<usize> = (0..p.m).collect();
+    rp.sort_by_key(|&i| (rk[i], i));
+    (reorder_problem(p, &cp, &rp), cp)
+}
+
+/// 列を `cp` (新しい列 q は元の列 `cp[q]`)、行を `rp` の順に並べ直した同値な問題
+fn reorder_problem(p: &MipProblem, cp: &[usize], rp: &[usize]) -> MipProblem {
     let mut inv = vec![0usize; p.n];
     for (q, &j) in cp.iter().enumerate() {
         inv[j] = q;
@@ -728,7 +769,7 @@ fn permuted_problem(p: &MipProblem, seed: u64) -> (MipProblem, Vec<usize>) {
     let lit = |l: u32| -> u32 { 2 * inv[(l / 2) as usize] as u32 + (l % 2) };
     q.conflict_edges = p.conflict_edges.iter().map(|&(a, b)| (lit(a), lit(b))).collect();
     q.implied_bounds = p.implied_bounds.iter().map(|&(j, v, k, u, b)| (inv[j as usize] as u32, v, inv[k as usize] as u32, u, b)).collect();
-    (q, cp)
+    q
 }
 
 /// 試作 `ENOMOTO_MIP_PERMRACE` (既定では使わない。analysis/robust2_20261114.md の「4」): スレッドを半分ずつに分け、元の問題と
