@@ -2535,8 +2535,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.age_pool();
             }
             // 候補はすべてカットプールに入れる (選択で落ちたものも、ノードで違反すれば使う)
+            // 試作 `ENOMOTO_MIP_POOL_TAB` (既定では使わない。analysis/dualeq2_20261113.md): 選択で落ちた tableau 行の候補をプールに入れない。
+            // `x` = すべて、`d` = 非零が `ENOMOTO_T_MIP_POOL_TAB_MAXLEN` (100) を超えるものだけ。binkar10_1 は DUALEQ や停滞の尺度 (`u`) で
+            // 根のループが長くなると、1 本 約 300 非零の tableau 行の候補 (根では 1 本も採られない) でプールが上限 (20 万非零) まで埋まり、
+            // 木のノードが約 2 倍になる
+            let pool_tab = env_str!("ENOMOTO_MIP_POOL_TAB");
+            let tab_maxlen = if pool_tab.is_some_and(|v| v.contains('x')) { 0 } else if pool_tab.is_some_and(|v| v.contains('d')) { tunable!("ENOMOTO_T_MIP_POOL_TAB_MAXLEN", 100usize, usize) } else { usize::MAX };
             if !self.params.submip && env_str!("ENOMOTO_MIP_POOL_SELECTED_ONLY").is_none() {
                 for c in cands.iter().chain(face_cands.iter()) {
+                    if c.src % sepprof::SRC_FACE == sepprof::SRC_TAB && c.coefs.len() > tab_maxlen {
+                        continue;
+                    }
                     self.add_to_pool(&c.coefs, c.rhs);
                 }
             }
@@ -6352,8 +6361,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let nint = p.nint;
         // 根の tableau 行の数の上限: `ENOMOTO_T_MIP_TAB_ROWS_BASE` (200) + `ENOMOTO_T_MIP_TAB_ROWS_FRAC` (0.1) x min(行, 整数列)
         // (試作で変えられるようにしたもの。mzzv42z では 1200 行から候補 1295 本を作り、選択で採るのは 27 本)
+        // 診断用 (`ENOMOTO_MIP_DEBUG_TAB_ROOT_OFF`、analysis/dualeq2_20261113.md): 根の (light でない) 分離で tableau 行を使わない。
+        // 値に `m` を含めば主の根、`s` を含めばサブ MIP の根
+        let tab_root_off = !light && env_str!("ENOMOTO_MIP_DEBUG_TAB_ROOT_OFF").is_some_and(|v| v.contains(if self.params.submip { 's' } else { 'm' }));
         let limit = if light {
             tunable!("ENOMOTO_T_MIP_NODE_TAB_ROWS", 50usize, usize)
+        } else if tab_root_off {
+            0
         } else {
             tunable!("ENOMOTO_T_MIP_TAB_ROWS_BASE", 200usize, usize) + (tunable!("ENOMOTO_T_MIP_TAB_ROWS_FRAC", 0.1, f64) * (mr.min(nint)) as f64) as usize
         };

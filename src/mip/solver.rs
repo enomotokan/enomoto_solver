@@ -13998,6 +13998,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.poly_diag_raised.clear();
         let r = self.select_branch_inner(frac, node_obj, depth);
         self.sb_secs += t0.elapsed().as_secs_f64();
+        // 診断用 (`ENOMOTO_MIP_DEBUG_BRCOL`、analysis/dualeq2_20261113.md): 分枝した列を、前処理で番号が変わっても見分けられるよう
+        // 費用・境界・非零の数と一緒に出す
+        if !self.params.submip && env_str!("ENOMOTO_MIP_DEBUG_BRCOL").is_some() {
+            if let BranchAction::Branch { col, value } = r {
+                let nz: Vec<String> = self.p.cols[col].iter().take(4).map(|&(i, a)| format!("{a}@{}", self.p.rows[i].len())).collect();
+                eprintln!("BRCOL depth {depth} col {col} value {value:.4} cost {:.6e} nnz {} [{}] obj {:.6e} sb {}", self.p.cost[col], self.p.cols[col].len(), nz.join(" "), node_obj, self.last_sb.is_some());
+            }
+        }
         if sb_ancestor() {
             if let BranchAction::Branch { col, .. } = r {
                 self.poly_diag[6] += 1;
