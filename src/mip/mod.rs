@@ -495,7 +495,13 @@ pub fn solve_mip(
     }
     let dispatch = |q: &MipProblem, tl: f64| {
         let params = MipParams { time_limit: tl, ..params };
-        if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() { solve_portfolio(q, params) } else { solve_problem(q, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()) }
+        if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() {
+            solve_portfolio(q, params)
+        } else if env_str!("ENOMOTO_MIP_PERMRACE").is_some() && params.threads >= 2 && !params.submip {
+            solve_permrace(q, params)
+        } else {
+            solve_problem(q, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none())
+        }
     };
     // `ENOMOTO_MIP_FOLD` (2026-11-10 から既定、`0` で止める。analysis/drcr_20261110.md): 色の細分化で畳んで解き、元に戻す ([`fold`])
     let dispatch_np = |q: &MipProblem, tl: f64| solve_problem(q, MipParams { time_limit: tl, ..params }, false);
@@ -673,6 +679,149 @@ fn polish_solution(variables: &[VariableData], objective: &Objective, constraint
         }
     }
     z
+}
+
+/// 行・列を種 `seed` の乱数で並べ替えた同値な問題と、列の対応 (新しい列 q は元の列 `cp[q]`) を作る
+/// (試作 `ENOMOTO_MIP_PERMRACE` の 2 本目の求解用)
+fn permuted_problem(p: &MipProblem, seed: u64) -> (MipProblem, Vec<usize>) {
+    let mut st = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15).wrapping_add(0x1234_5678);
+    let mut next = move || {
+        st ^= st << 13;
+        st ^= st >> 7;
+        st ^= st << 17;
+        st
+    };
+    let mut cp: Vec<usize> = (0..p.n).collect();
+    for i in (1..p.n).rev() {
+        let k = (next() % (i as u64 + 1)) as usize;
+        cp.swap(i, k);
+    }
+    let mut rp: Vec<usize> = (0..p.m).collect();
+    for i in (1..p.m).rev() {
+        let k = (next() % (i as u64 + 1)) as usize;
+        rp.swap(i, k);
+    }
+    let mut inv = vec![0usize; p.n];
+    for (q, &j) in cp.iter().enumerate() {
+        inv[j] = q;
+    }
+    let pick = |v: &Vec<f64>| cp.iter().map(|&j| v[j]).collect::<Vec<f64>>();
+    let rows: Vec<Vec<(usize, f64)>> = rp
+        .iter()
+        .map(|&i| {
+            let mut r: Vec<(usize, f64)> = p.rows[i].iter().map(|&(j, a)| (inv[j], a)).collect();
+            r.sort_unstable_by_key(|e| e.0);
+            r
+        })
+        .collect();
+    let mut q = MipProblem::from_rows(
+        pick(&p.col_lo),
+        pick(&p.col_up),
+        pick(&p.cost),
+        p.offset,
+        p.sense_sign,
+        cp.iter().map(|&j| p.is_int[j]).collect(),
+        rows,
+        rp.iter().map(|&i| p.row_lo[i]).collect(),
+        rp.iter().map(|&i| p.row_up[i]).collect(),
+    );
+    let lit = |l: u32| -> u32 { 2 * inv[(l / 2) as usize] as u32 + (l % 2) };
+    q.conflict_edges = p.conflict_edges.iter().map(|&(a, b)| (lit(a), lit(b))).collect();
+    q.implied_bounds = p.implied_bounds.iter().map(|&(j, v, k, u, b)| (inv[j as usize] as u32, v, inv[k as usize] as u32, u, b)).collect();
+    (q, cp)
+}
+
+/// 試作 `ENOMOTO_MIP_PERMRACE` (既定では使わない。analysis/robust2_20261114.md の「4」): スレッドを半分ずつに分け、元の問題と
+/// 行・列を並べ替えた同値な問題 ([`permuted_problem`]) を同時に解く。並べ替えると前処理の後の列の順・同点の崩し方・候補の順が
+/// 変わり、流れ (崖のどちら側に落ちるか) が別になる (analysis/robust_20261114.md: 揺れの元は種より並べ替えのほうが大きい)。
+/// 見つけた解の目的値は [`solver::Portfolio`] で共有して互いの打ち切りに使い、片方が探索を終えたら (最適・実行不能) もう片方を止める
+/// ([`solve_portfolio`] と同じ)。並べ替えた側の解は元の列の並びに戻して返す。値の数字 k があれば並べ替えの種を k にする (既定 1)
+fn solve_permrace(p: &MipProblem, params: MipParams) -> solver::MipResult {
+    use std::sync::atomic::Ordering;
+    let shared = std::sync::Arc::new(solver::Portfolio::new());
+    let use_presolve = env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none();
+    let proven: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+    let seed = env_str!("ENOMOTO_MIP_PERMRACE").and_then(|v| v.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u64>().ok()).unwrap_or(1);
+    let (pp, cp) = permuted_problem(p, seed);
+    let t0 = params.threads.div_ceil(2);
+    let t1 = (params.threads - t0).max(1);
+    if params.verbose {
+        eprintln!("MIP: PERMRACE: the original problem with {t0} threads and a permuted copy (seed {seed}) with {t1} threads");
+    }
+    let results: Vec<solver::MipResult> = std::thread::scope(|sc| {
+        let hs: Vec<_> = [(p, t0, 0usize), (&pp, t1, 1usize)]
+            .into_iter()
+            .map(|(q, th, k)| {
+                let shared = shared.clone();
+                let proven = &proven;
+                let params = MipParams { verbose: params.verbose && k == 0, threads: th, ..params };
+                std::thread::Builder::new()
+                    .stack_size(256 << 20)
+                    .spawn_scoped(sc, move || {
+                        solver::MIP_THREADS_TL.with(|c| c.set(th));
+                        solver::set_thread_portfolio(Some(shared.clone()));
+                        let r = solve_problem(q, params, use_presolve);
+                        solver::set_thread_portfolio(None);
+                        let stopped = shared.stop.load(Ordering::Relaxed);
+                        if !stopped && matches!(r.status, MipStatus::Optimal | MipStatus::Infeasible) {
+                            let own = r.objective.unwrap_or(f64::INFINITY);
+                            *proven.lock().unwrap() = Some(own.min(shared.best()));
+                            shared.stop.store(true, Ordering::Relaxed);
+                        }
+                        r
+                    })
+                    .expect("failed to spawn a PERMRACE thread")
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    // 並べ替えた側の解を元の列の並びに戻す
+    let mut results = results;
+    if let Some(x) = results[1].x.take() {
+        let mut y = vec![0.0; p.n];
+        for (q, &j) in cp.iter().enumerate() {
+            y[j] = x[q];
+        }
+        results[1].x = Some(y);
+    }
+    if params.verbose {
+        for (k, r) in results.iter().enumerate() {
+            eprintln!("MIP: PERMRACE: solve {k} returned {:?} objective {:?} bound {:.10e} nodes {}", r.status, r.objective, r.best_bound, r.nodes);
+        }
+    }
+    let proven = *proven.lock().unwrap();
+    let tree_bound = results.iter().map(|r| r.best_bound).fold(f64::NEG_INFINITY, f64::max);
+    let mut best: Option<&solver::MipResult> = None;
+    for r in &results {
+        if let Some(z) = r.objective {
+            if best.is_none_or(|b| z < b.objective.unwrap()) {
+                best = Some(r);
+            }
+        }
+    }
+    let nodes = results.iter().map(|r| r.nodes).sum();
+    let lp_iterations = results.iter().map(|r| r.lp_iterations).sum();
+    match (best, proven) {
+        (Some(b), Some(_)) => {
+            let z = b.objective.unwrap();
+            let sb = shared.best();
+            if sb < z - 1e-9 * z.abs().max(1.0) {
+                eprintln!("MIP: WARNING: PERMRACE: the shared best value {sb:.10e} is better than the best returned solution {z:.10e}; not reporting optimality");
+                return solver::MipResult { status: MipStatus::NotSolved, x: b.x.clone(), objective: Some(z), best_bound: tree_bound.min(z), nodes, lp_iterations };
+            }
+            solver::MipResult { status: MipStatus::Optimal, x: b.x.clone(), objective: Some(z), best_bound: z, nodes, lp_iterations }
+        }
+        (None, Some(_)) => {
+            let r = results.iter().find(|r| matches!(r.status, MipStatus::Infeasible | MipStatus::Optimal)).unwrap();
+            solver::MipResult { status: r.status, x: None, objective: None, best_bound: r.best_bound, nodes, lp_iterations }
+        }
+        (Some(b), None) => {
+            let z = b.objective.unwrap();
+            let status = results.iter().map(|r| r.status).find(|s| *s != MipStatus::Optimal).unwrap_or(b.status);
+            solver::MipResult { status, x: b.x.clone(), objective: Some(z), best_bound: tree_bound.min(z), nodes, lp_iterations }
+        }
+        (None, None) => solver::MipResult { status: results[0].status, x: None, objective: None, best_bound: tree_bound, nodes, lp_iterations },
+    }
 }
 
 /// ポートフォリオ並列 (`ENOMOTO_MIP_PORTFOLIO`): 設定の違う 2 つの求解を別スレッドで同時に走らせる

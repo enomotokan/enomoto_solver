@@ -2,7 +2,8 @@
 python run2.py 設定 スレッド数 枠 枠の数 [秒=60] [問題,...|@ファイル]
 設定は CFGS の名前 (束 cand1114 に足す環境変数)。58 問 (既定) か指定の問題 × 変種 VARIANTS (並べ替え, 種) を解き、
 res_<設定>_t<スレッド>.jsonl に足す (途中から再開できる)。枠 i は通し番号 % 枠の数 == i の回を受け持ち、
-1 スレッドは CPU i、4 スレッドは CPU 0-3 を使う。ログ (ENOMOTO_MIP_LOG=1) は logs/ に gz で残す。"""
+1 スレッドは CPU i、4 スレッドは CPU 0-3 を使う。ログ (ENOMOTO_MIP_LOG=1) は logs/ に gz で残す。
+環境変数 ROBUST2_PKG に enomoto_solver の写しを置いた場所を入れると、それを PYTHONPATH にして解く (計測中の build の入れ替えを避ける)。"""
 import gzip, json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -27,7 +28,7 @@ if len(sys.argv) > 6:
     probs = (Path(a[1:]).read_text().split() if a.startswith("@") else a.split(","))
 OUT = D / f"res_{CFG}_t{TH}.jsonl"
 LOGS = D / "logs"; LOGS.mkdir(exist_ok=True)
-CPUS = str(SLOT) if TH == 1 else f"0-{os.cpu_count() - 1}"
+CPUS = os.environ.get("ROBUST2_CPUS") or (str(SLOT) if TH == 1 else f"0-{os.cpu_count() - 1}")  # ROBUST2_CPUS で CPU を指定できる
 def done_set():
     s = set()
     if OUT.exists():
@@ -48,6 +49,7 @@ for p, k, s in mine:
     if (p, k, s) in done: continue
     mps = mps_of(p, k)
     env = {key: v for key, v in os.environ.items() if not key.startswith("ENOMOTO_")}
+    if os.environ.get("ROBUST2_PKG"): env["PYTHONPATH"] = os.environ["ROBUST2_PKG"]  # 計測中に build し直しても変わらないよう、固定した写しを使う
     env.update(CAND1114); env.update(CFGS[CFG]); env["ENOMOTO_MIP_THREADS"] = str(TH); env["ENOMOTO_T_MIP_SEED"] = str(s); env["ENOMOTO_MIP_LOG"] = "1"
     log = LOGS / f"{p}_{CFG}_t{TH}_p{k}s{s}.log.gz"
     t0 = time.time()

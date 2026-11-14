@@ -3566,7 +3566,17 @@ fn thread_watch() -> Option<(f64, f64)> {
     PORTFOLIOS.lock().unwrap().iter().find(|(i, _, _, _)| *i == id).and_then(|e| e.2)
 }
 
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_PERMRACE` ([`super::solve_permrace`]): このスレッドの求解が使うスレッドの数 (0 なら指定なし)。
+    /// 2 つの求解を同時に走らせるとき、`ENOMOTO_MIP_THREADS` の値をそれぞれが丸ごと使わないように半分にする
+    pub(crate) static MIP_THREADS_TL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn mip_threads() -> usize {
+    let tl = MIP_THREADS_TL.with(|c| c.get());
+    if tl > 0 {
+        return tl;
+    }
     let env = tunable!("ENOMOTO_MIP_THREADS", 0usize, usize);
     if env > 0 { env } else { MIP_THREADS_DEFAULT.load(std::sync::atomic::Ordering::Relaxed).max(1) }
 }
@@ -19039,6 +19049,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let free = nint.saturating_sub(self.root_fixed0);
         let newly = self.newly_fixed_ints();
         let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
+        // 試作 `ENOMOTO_MIP_RSTROB` ([`rstrob_band`]): 固定の数が「根の始めに自由な整数列の frac」の帯の中なら帯の向きで決める
+        // (全部の整数列の割合の条件は満たすときだけ)
+        if newly as f64 >= fac * self.proto_restart_denom() as f64 {
+            if let Some(go) = rstrob_band(newly as f64 / (frac * free as f64).max(1e-9)) {
+                return go && self.rstcrit_gate(false);
+            }
+        }
         ((newly > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * self.proto_restart_denom() as f64) || self.rstcrit_all_nnz_ok()) && self.rstcrit_gate(false)
     }
 
