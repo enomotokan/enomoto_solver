@@ -7,7 +7,7 @@ def norm(l):
     l = re.sub(r"(secs?\"?[:=]\s*)[\d.]+", r"\1T", l)
     return l
 def load(p):
-    return [l.rstrip("\n") for l in open(p, errors="replace") if "slope-intercept" not in l and not l.startswith(("TRSTAT", "MIP: MEMCAP", "Running HiGHS", "Includes"))
+    return [l.rstrip("\n") for l in open(p, errors="replace") if "slope-intercept" not in l and not l.startswith(("TRSTAT", "MIP: MEMCAP", "MIP: FJ problem", "Running HiGHS", "Includes"))
             and not re.match(r"\s+[\d.]+s\s", l) and not re.match(r"MIP:\s+[\d.]+s nodes", l)]
 a, b = load(sys.argv[1]), load(sys.argv[2]); k = int(sys.argv[3]) if len(sys.argv) > 3 else 2
 for i, (x, y) in enumerate(zip(a, b)):
