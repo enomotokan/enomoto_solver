@@ -9,7 +9,7 @@ def td(v): return {**CAND1114, "ENOMOTO_MIP_TIMEDEP": v}
 CFGS = {
     "base": dict(CAND1114),
     "td1": td("mpl"),        # (1) C9・C2・D5
-    "td1x": td("mplwne"),    # (1) + C1・B1・B7 (1 スレッドの A/A で次に分かれた所)
+    "td1x": td("mplwneb"),   # (1) + C1・B1・B7・B19 (1 スレッドの A/A で次に分かれた所)
     "td2": td("r"),          # (2) E1
     "td3": td("cb"),         # (3) C7・B19
     "tdall": td("mplwnercb"),
