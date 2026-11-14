@@ -6699,7 +6699,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 試作 `ENOMOTO_MIP_ROBUST` の `f` ([`robust`]、型 B): 外側の根の軽い丸めまでで暫定解がないとき、根の境界の上で
     /// 種を変えた FJ2 と Local-MIP (前処理の早めの探索 [`super::feas_fj_lmip_early`] と同じ組み合わせ、種は重ならないようにずらす) を
-    /// min(`ENOMOTO_T_MIP_ROBUST_FJ_SECS` (6) 秒, 残りの `ENOMOTO_T_MIP_ROBUST_FJ_FRAC` (0.15)) 回す。スレッドは求解のスレッドの数。
+    /// min(`ENOMOTO_T_MIP_ROBUST_FJ_SECS` (6) 秒, 残りの `ENOMOTO_T_MIP_ROBUST_FJ_FRAC` (0.15)) 回す (実行可能性問題は残りの 0.5)。スレッドは求解のスレッドの数。
     /// ns1116954 (目的 0 の実行可能性問題) の 1 スレッドでは、解を出すのは前処理の早めの FJ (6 秒の上限) だけで、外れた 5 回は
     /// 根のヒューリスティクスも全部外れて時間切れだった (4 スレッドは FJ 3 本で 6 回とも 1.7〜5.3 秒)。再スタートの後の根では回さない
     fn robust_fj_retry(&mut self) -> bool {
@@ -6707,7 +6707,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let left = self.params.frac_tl() - self.start.elapsed().as_secs_f64();
-        let cap = tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64).min(if left.is_finite() { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FRAC", 0.15, f64) * left } else { f64::INFINITY });
+        // 目的が全部 0 (実行可能性問題) なら解が見つかれば最適で、ほかの根のヒューリスティクスはほとんど当たらないので、
+        // 残りの `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC` (0.5) まで回す (秒の上限なし)。ns1116954 では残り 16 秒の 0.15 倍 (2.5 秒、FJ 2〜3 回) では足りなかった
+        let feas = super::heuristics::fj_feas_extend(&self.p);
+        let frac = if feas { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC", 0.5, f64) } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FRAC", 0.15, f64) };
+        let secs = if feas { f64::INFINITY } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64) };
+        let cap = secs.min(if left.is_finite() { frac * left } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64) });
         if cap <= 0.1 {
             return false;
         }
