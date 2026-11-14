@@ -1177,7 +1177,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let (td_c, _, _) = PROBE_WORK.with(|c| c.get());
         let cap = if td_c { 5.0 * cap } else { cap };
         let mut w_side = 0.0f64;
-        let root_it = self.root_lp_iters.max(1) as f64;
+        // 単位は max(根の LP の反復, 行の数) (根の LP が受け継いだ基底で 1 反復のときに小さくなりすぎないように。`w` と同じ)
+        let root_it = self.root_lp_iters.max(self.p.m as u64).max(1) as f64;
         // 試作 `ENOMOTO_MIP_LOSE6_2_TIE`: 同点の比べ直しでは 1 回の LP の上限も `ENOMOTO_T_MIP_LOSE6_2_TIE_BUDGET` 倍にする
         let cap = cap * LOSE6_2_PROBE_CAP_MULT.with(|c| c.get());
         let mut gain = 0.0;
@@ -1788,8 +1789,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let race_y = env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('y'));
         let mut race_extra: Vec<(f64, Vec<(usize, f64)>, f64)> = Vec::new();
         let mut cont_stop = false;
+        // 試作 `ENOMOTO_MIP_TIMEDEP` の `w`: 手間の単位を max(根の LP の反復, 行の数) にする (前処理の LP プロービングの基底を受け継ぐと根の LP は
+        // 1 反復で終わり、単位が 1 になって 1 ラウンドで上限に当たる。hypothyroid-k1 は 4 スレッドで 106 反復の 1 ラウンドで止まり 2 種とも解けなかった)
+        let wnorm = if super::timedep('w') { root_iters.max(self.p.m as u64).max(1) } else { root_iters.max(1) };
         if let Some((w, _, _)) = self.cut_cont {
-            work_cap = w as f64 / root_iters.max(1) as f64;
+            work_cap = w as f64 / wnorm as f64;
             work_round = 0.0;
         }
         if work_cap > 0.0 {
@@ -2349,7 +2353,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // `ENOMOTO_T_MIP_CUT_WORK_CAP`: 手間の上限
             if work_cap > 0.0 && round >= min_rounds {
-                let work = loop_iters as f64 / root_iters.max(1) as f64 + work_round * work_rounds as f64;
+                let work = loop_iters as f64 / wnorm as f64 + work_round * work_rounds as f64;
                 if self.params.verbose && round > 0 {
                     eprintln!("MIP: cut round {round}: root cut work cap check: work {work:.3} ({loop_iters} LP iters, {work_rounds} rounds) of cap {work_cap:.3}{}", if work > work_cap { " -> stop" } else { "" });
                 }
