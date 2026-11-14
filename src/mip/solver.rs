@@ -908,6 +908,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     node_lps: u64,
     /// ノードの LP にかかった時間の合計 (秒)。1 回の LP の時間の上限に使う。
     node_lp_secs: f64,
+    /// 試作 `ENOMOTO_MIP_TIMEDEP` の `t`: ノードの分離の手間 (分離の後の LP の反復 + 1 回の分離に平均のノードの LP の反復の半分)
+    node_cut_work: f64,
     /// 解けなかったノード (LP が失敗し、分枝もできなかった)。最適性を主張できなくなる。
     unresolved: bool,
     last_log: Instant,
@@ -4854,6 +4856,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         restored_dse: false,
         node_lps: 0,
         node_lp_secs: 0.0,
+        node_cut_work: 0.0,
         unresolved: false,
         last_log: start,
         t4_last: 0.0,
@@ -6306,6 +6309,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// [`Self::tree_sep_start`] の時間の予算 (2 ラウンド目以降もこれを見る)
     fn tree_sep_budget_ok(&self) -> bool {
         let f = tunable!("ENOMOTO_T_MIP_TREE_SEP_LP_FRAC", 0.25, f64);
+        // 試作 `ENOMOTO_MIP_TIMEDEP` の `t` (analysis/timedep_20261114.md): 秒の代わりに手間で比べる (経過 → この求解の LP の反復 + ヒューリスティクスの
+        // 反復、ノードの LP の秒 → ノードの LP の反復)
+        if super::timedep('t') {
+            let all = (self.lp.total_iterations() + self.heur_iters) as f64;
+            return self.node_cut_work < tunable!("ENOMOTO_T_MIP_TREE_SEP_TIME_FRAC", 0.1, f64) * all
+                && (f <= 0.0 || self.node_cut_work < f * (self.node_iters as f64).max(1000.0));
+        }
         self.node_cut_secs < tunable!("ENOMOTO_T_MIP_TREE_SEP_TIME_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64()
             && (f <= 0.0 || self.node_cut_secs < f * self.node_lp_secs.max(0.05))
     }
@@ -11306,6 +11316,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut resolves = 0;
             // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
             let mut node_cut_resolve: Option<Instant> = None;
+            let mut nc_res_it = 0u64;
             // ノードの分離 ([`Solver::node_cuts_due`]) の前の LP の値 (解き直しの後に効き目を測る)
             let mut fc_obj0: Option<f64> = None;
             // HiGHS 流のカット管理: このノードでの分離のラウンド数と、前のラウンドの前の目的値
@@ -11504,6 +11515,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.node_lp_secs += t_lp.elapsed().as_secs_f64();
                 if let Some(t) = node_cut_resolve.take() {
                     self.node_cut_secs += t.elapsed().as_secs_f64();
+                    self.node_cut_work += self.lp.total_iterations().saturating_sub(nc_res_it) as f64;
                 }
                 // `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`: ノードの分離で加えたカットの伸び・生き残りを数える
                 if self.sl.stat && !self.params.submip {
@@ -12092,10 +12104,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         && (hcm_sep_rounds == 0 || node_obj - self.hcm_root_obj > 1.01 * (hcm_sep_last_obj - self.hcm_root_obj).max(feastol));
                     if go {
                         let t_nc = Instant::now();
+                        let it_nc = self.lp.total_iterations();
                         let rows0 = self.lp.num_rows();
                         let added = self.hcm_node_sep_round(&x, fresh);
                         if fresh {
                             self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                            self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
                         }
                         if env_str!("ENOMOTO_MIP_DEBUG_HCM").is_some() {
                             eprintln!("HCM node {} depth {} round {} obj {:.6} rows {} -> {} added {} pool {}", self.nodes, node.depth, hcm_sep_rounds, node_obj, rows0, self.lp.num_rows(), added, self.cut_pool.len());
@@ -12106,6 +12120,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             resolves += 1;
                             if fresh {
                                 node_cut_resolve = Some(Instant::now());
+                                nc_res_it = self.lp.total_iterations();
                             }
                             continue;
                         }
@@ -12115,12 +12130,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             hcm_sep_last_obj = node_obj;
                             if self.node_cut_secs < tunable!("ENOMOTO_T_MIP_HCM_NODE_SEP_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64() {
                                 let t_nc = Instant::now();
+                                let it_nc = self.lp.total_iterations();
                                 let added = self.hcm_node_sep_round(&x, true);
                                 self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                                self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
                                 if added {
                                     hcm_sep_rounds = 2;
                                     resolves += 1;
                                     node_cut_resolve = Some(Instant::now());
+                                    nc_res_it = self.lp.total_iterations();
                                     continue;
                                 }
                             }
@@ -12174,14 +12192,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         r2.extend((0..y.len()).filter(|&i| y[i].abs() > 1e-12).map(|i| (n + i, -y[i])));
                         self.extra_sep_rows = vec![(r1, rhs), (r2, rhs)];
                         let t_nc = Instant::now();
+                        let it_nc = self.lp.total_iterations();
                         let added = self.node_cut_round(&x);
                         self.extra_sep_rows.clear();
                         self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                        self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
                         self.obj_cut_stats[0] += 1;
                         if added {
                             self.obj_cut_stats[1] += 1;
                             resolves += 1;
                             node_cut_resolve = Some(Instant::now());
+                            nc_res_it = self.lp.total_iterations();
                             continue;
                         }
                     }
@@ -12194,12 +12215,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if (plunge_depth == 0 || mode == "all") && t4pc_rounds < tunable!("ENOMOTO_T_MIP_TREE4_PROOFCUT_ROUNDS", 3usize, usize) {
                         t4pc_rounds += 1;
                         let t_nc = Instant::now();
+                        let it_nc = self.lp.total_iterations();
                         let added = self.tree4_proof_cuts(&x);
                         self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                        self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
                         if added {
                             t4pc_added = true;
                             resolves += 1;
                             node_cut_resolve = Some(Instant::now());
+                            nc_res_it = self.lp.total_iterations();
                             continue;
                         }
                     }
@@ -12235,6 +12259,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     ts_last = node_obj;
                     let t_nc = Instant::now();
+                    let it_nc = self.lp.total_iterations();
                     // 加えたカットは新しい番号 (`next_cut_id` 以降) で見分ける (`node_cut_round` は加える前に年齢で行を外すので、
                     // 行の位置では見分けられない)
                     self.sync_cut_age();
@@ -12247,6 +12272,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.tsd[3] += 1;
                     self.tsd[4] += added as u64;
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                    self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
                     self.node_sep_stats[0] += 1;
                     self.node_sep_stats[1] += added as u64;
                     ts_rounds = if added { ts_rounds + 1 } else { usize::MAX };
@@ -12254,6 +12280,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.nca_pending = Some(node_obj);
                         resolves += 1;
                         node_cut_resolve = Some(Instant::now());
+                        nc_res_it = self.lp.total_iterations();
                         continue;
                     }
                 }
@@ -12262,20 +12289,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     nca_rounds += 1;
                     nca_last_ok = false;
                     let t_nc = Instant::now();
+                    let it_nc = self.lp.total_iterations();
                     let added = self.node_cut_round(&x);
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                    self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
                     self.node_sep_stats[0] += 1;
                     self.node_sep_stats[1] += added as u64;
                     if added {
                         self.nca_pending = Some(node_obj);
                         resolves += 1;
                         node_cut_resolve = Some(Instant::now());
+                        nc_res_it = self.lp.total_iterations();
                         continue;
                     }
                 } else if fc2_due || (!(self.fc_node_sep && self.fc_sep2) && !self.tree_sep && !nca && !hcm_sep && resolves == 0 && node.depth > 0 && plunge_depth == 0 && self.node_cuts_due(node.depth)) {
                     let t_nc = Instant::now();
+                    let it_nc = self.lp.total_iterations();
                     let added = self.node_cut_round(&x);
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                    self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
                     self.node_sep_stats[0] += 1;
                     self.node_sep_stats[1] += added as u64;
                     if fc2_due {
@@ -12290,6 +12322,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         resolves += 1;
                         // 解き直しの時間もノードの分離の時間に数える
                         node_cut_resolve = Some(Instant::now());
+                        nc_res_it = self.lp.total_iterations();
                         continue;
                     }
                 }

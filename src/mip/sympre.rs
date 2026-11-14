@@ -392,6 +392,9 @@ pub(super) fn probe(
 ) {
     use symmetry::{find, mix};
     let (t0, time_cap, work_end) = caps;
+    // 試作 `ENOMOTO_MIP_TIMEDEP` の `y` (analysis/timedep_20261114.md): 探りは手間の上限 (`work_end`) で止め、時間は 10 倍の安全網にする
+    // (physiciansched6-2 は探りが 1.29 秒で上限 約 1.5 秒の際にあり、遅い機械では 67 本の生成元が 39 本で止まった)
+    let time_cap = if super::timedep('y') { 10.0 * time_cap } else { time_cap };
     let t1 = std::time::Instant::now();
     let n = p.n;
     let g0 = generators.len();
