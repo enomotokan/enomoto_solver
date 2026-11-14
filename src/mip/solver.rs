@@ -4432,6 +4432,23 @@ pub(crate) fn small1(p: &MipProblem, c: char) -> bool {
     env_str!("ENOMOTO_MIP_SMALL1").is_some_and(|v| v.contains(c)) && p.nnz <= tunable!("ENOMOTO_T_MIP_SMALL1_NNZ", 20000usize, usize)
 }
 
+/// 試作 `ENOMOTO_MIP_RSTROB` (既定では使わない。analysis/robust2_20261114.md の型 C): 再スタートの判定の量 (固定の数・RSTCRIT n の非零の割合) が
+/// 閾値の帯 `[1/B, B)` (`B` = `ENOMOTO_T_MIP_RSTROB_BAND`、既定 1.5) の中なら、閾値のどちら側かでなく値の文字で決める:
+/// `+` = 帯の中は再スタートする、`-` = 帯の中は再スタートしない。`ratio` は 量 / 閾値。帯の外なら `None` (従来の判定)。
+/// 並べ替えで固定の数が閾値をまたぐかどうかで流れごと変わる (p200x1188c の 2 回目以降の判定は 23〜46 本 / 閾値 29.7 本)
+pub(super) fn rstrob_band(ratio: f64) -> Option<bool> {
+    let v = env_str!("ENOMOTO_MIP_RSTROB")?;
+    let go = if v.contains('+') {
+        true
+    } else if v.contains('-') {
+        false
+    } else {
+        return None;
+    };
+    let b = tunable!("ENOMOTO_T_MIP_RSTROB_BAND", 1.5, f64);
+    (ratio >= 1.0 / b && ratio < b).then_some(go)
+}
+
 /// 再スタートの回数の上限 (`ENOMOTO_T_MIP_MAX_RESTARTS`、既定 4。[`small1`] の `r` なら `ENOMOTO_T_MIP_SMALL1_RESTARTS`)。
 fn max_restarts(p: &MipProblem) -> u32 {
     if small1(p, 'r') {
@@ -19059,6 +19076,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nnz_new = nnz_new + self.rcs_pending_nnz();
             let s = nnz_new as f64 / nnz_free.max(1) as f64;
             let thr = tunable!("ENOMOTO_T_MIP_RSTCRIT_NNZ", 0.05, f64);
+            // 試作 `ENOMOTO_MIP_RSTROB` ([`rstrob_band`]): 縮みが閾値の帯の中なら帯の向きで決める
+            if let Some(go) = rstrob_band(s / thr) {
+                if verbose && self.params.verbose {
+                    eprintln!("MIP: RSTROB: RSTCRIT n share {:.1}% within the band around {:.1}%: restart {go}", 100.0 * s, 100.0 * thr);
+                }
+                return go;
+            }
             if s < thr {
                 if verbose && self.params.verbose {
                     eprintln!("MIP: RSTCRIT n: restart skipped (newly fixed columns hold {nnz_new} of {nnz_free} nonzeros, {:.1}% < {:.1}%)", 100.0 * s, 100.0 * thr);
@@ -19220,12 +19244,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.rstcrit_diag("check");
         // `ENOMOTO_MIP_TREE_RESTART` (試作): 木の中の再スタートは固定の数をここでは見ない ([`Self::tree_restart_due`] が見る。`force` なら
         // HiGHS と同じく見ない)
-        if nint == 0 || (!self.force_restart && (newly == 0 || (newly as f64) < fac * denom as f64) && !self.rstcrit_all_nnz_ok()) {
-            return None;
-        }
-        // 試作 `ENOMOTO_MIP_RSTCRIT` ([`Self::rstcrit_gate`]): 縮みの小さい再スタートを見送る
-        if !self.force_restart && !self.rstcrit_gate(true) {
-            return None;
+        // 試作 `ENOMOTO_MIP_RSTROB` ([`rstrob_band`]): 固定の数が閾値の帯の中なら、数の条件と RSTCRIT の縮みの条件を帯の向きで決める
+        let band = if self.force_restart || nint == 0 { None } else { rstrob_band(newly as f64 / (fac * denom as f64).max(1e-9)) };
+        if let Some(go) = band {
+            if self.params.verbose {
+                eprintln!("MIP: RSTROB: newly fixed {newly} within the band around the threshold {:.1}: restart {go}", fac * denom as f64);
+            }
+            if !go {
+                return None;
+            }
+        } else {
+            if nint == 0 || (!self.force_restart && (newly == 0 || (newly as f64) < fac * denom as f64) && !self.rstcrit_all_nnz_ok()) {
+                return None;
+            }
+            // 試作 `ENOMOTO_MIP_RSTCRIT` ([`Self::rstcrit_gate`]): 縮みの小さい再スタートを見送る
+            if !self.force_restart && !self.rstcrit_gate(true) {
+                return None;
+            }
         }
         // `ENOMOTO_MIP_S4_TINYGAP` (試作、既定では使わない。analysis/highs_slow_20261106/S4.md): 暫定解と根の LP 値の相対ギャップが
         // `ENOMOTO_T_MIP_S4_TINYGAP_REL` (既定 1e-5) 以下なら、`ENOMOTO_MIP_S4_TINYGAP` の値 k (既定 1) 回目以降の再スタートをせずに木に進む。

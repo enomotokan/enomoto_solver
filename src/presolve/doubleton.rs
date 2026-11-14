@@ -186,12 +186,36 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &FaerCsr, b: &[f64], gv: GVi
     let is_int = |j: usize| int_mask.as_ref().is_some_and(|m| m[j]);
     let int_pairs = env_str!("ENOMOTO_PRESOLVE_NO_INT_DOUBLETON").is_none();
     let is_integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
-    for (i, row) in a_rows.iter().enumerate() {
+    // 試作 `ENOMOTO_MIP_ORDINV` の `d` ([`super::ordkey`]): 行を見る順と、係数の絶対値が同じときにどちらを消すかを、列番号でなく
+    // 列の鍵で決める (鍵が同じなら従来どおり列番号)。切なら行の番号の順・行の中の列番号の順で従来と同じ
+    let okeys = if super::ordkey::ordinv('d') { super::ordkey::keys() } else { None };
+    let pair = |row: &Vec<(usize, f64)>| -> ((usize, f64), (usize, f64)) {
+        if okeys.is_some() && super::ordkey::sort_key(&okeys, row[1].0) < super::ordkey::sort_key(&okeys, row[0].0) {
+            (row[1], row[0])
+        } else {
+            (row[0], row[1])
+        }
+    };
+    let mut order: Vec<usize> = (0..a_rows.len()).collect();
+    if okeys.is_some() {
+        let rk = |i: usize| -> (u64, u64, u32, u32, u64, usize) {
+            let row = &a_rows[i];
+            if row.len() != 2 {
+                return (u64::MAX, u64::MAX, 0, 0, 0, i);
+            }
+            let (t0, t1) = pair(row);
+            let (k0, k1) = (super::ordkey::sort_key(&okeys, t0.0).0, super::ordkey::sort_key(&okeys, t1.0).0);
+            (k0, k1, (t0.1 as f32).to_bits(), (t1.1 as f32).to_bits(), (b[i] as f32).to_bits() as u64, i)
+        };
+        order.sort_by_cached_key(|&i| rk(i));
+    }
+    for i in order {
+        let row = &a_rows[i];
         if row.len() != 2 {
             continue;
         }
         // 絶対値の大きい方を消去側 (term_elim)、小さい方を残す側 (term_keep) に並べる
-        let (mut term_elim, mut term_keep) = (row[0], row[1]);
+        let (mut term_elim, mut term_keep) = pair(row);
         if term_elim.1.abs() < term_keep.1.abs() {
             std::mem::swap(&mut term_elim, &mut term_keep);
         }

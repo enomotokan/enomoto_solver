@@ -3195,6 +3195,11 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     }
     let (mut ext_rows, mut added, mut fixed) = (0usize, 0usize, 0usize);
     let mut fix_lits: Vec<u32> = Vec::new();
+    // 試作 `ENOMOTO_MIP_ORDINV` の `q`: 列の鍵 (行・列の並びに依らないハッシュ)
+    let okeys: Option<Vec<u64>> = crate::presolve::ordkey::ordinv('q').then(|| {
+        let rr: Vec<(Vec<(usize, f64)>, f64, f64)> = rows.iter().zip(row_lo.iter().zip(&row_up)).map(|(r, (&l, &u))| (r.clone(), l, u)).collect();
+        crate::presolve::ordkey::column_keys(n, &rr, &cost, &col_lo, &col_up, &is_int)
+    });
     // 片側の集合詰め込み行の文字の集合 (拡張の後)。ほかの片側の集合詰め込み行に含まれる行は冗長なので消す
     // (`ENOMOTO_MIP_CLIQUE_EXTEND_KEEP_DOMINATED` で消さない)。HiGHS のクリークの統合も含まれるクリークを消す
     let mut clique_rows: Vec<(usize, Vec<u32>)> = Vec::new();
@@ -3247,8 +3252,33 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
             }
         }
         // 候補: 隣接の最も少ない文字の隣接から
-        let &l0 = lits.iter().min_by_key(|&&x| g.neighbors(x).len()).unwrap();
-        for &c in g.neighbors(l0) {
+        // 試作 `ENOMOTO_MIP_ORDINV` の `q` (crate::presolve::ordkey): 同点の文字と候補の順を列番号でなく列の鍵の順にする
+        // (候補を番号順に貪欲に足すと、並べ替えで足す文字が変わる: roll3000・ns1116954・physiciansched6-2)
+        let l0 = match &okeys {
+            Some(k) => *lits.iter().min_by_key(|&&x| (g.neighbors(x).len(), k[(x / 2) as usize], x % 2, x)).unwrap(),
+            None => *lits.iter().min_by_key(|&&x| g.neighbors(x).len()).unwrap(),
+        };
+        // 候補 (行の全部の文字と隣接するもの) を、候補どうしの隣接の数の多い順 (同点は列の鍵) に並べる。番号の順の貪欲より
+        // 大きなクリークを作りやすく、同じ鍵の列どうしの同点も減る。候補が多すぎるときは鍵の順だけ
+        let cand_sorted: Option<Vec<u32>> = okeys.as_ref().map(|k| {
+            let mut v: Vec<u32> = g
+                .neighbors(l0)
+                .iter()
+                .copied()
+                .filter(|&c| {
+                    let jc = (c / 2) as usize;
+                    !in_row.contains(&jc) && col_lo[jc] != col_up[jc] && lits.iter().all(|&x| x == l0 || g.adjacent(x, c))
+                })
+                .collect();
+            if v.len() <= tunable!("ENOMOTO_T_MIP_ORDINV_CLQ_DEG_MAX", 2000usize, usize) {
+                let deg: std::collections::HashMap<u32, usize> = v.iter().map(|&c| (c, v.iter().filter(|&&d| d / 2 != c / 2 && g.adjacent(c, d)).count())).collect();
+                v.sort_by_key(|&x| (std::cmp::Reverse(deg[&x]), k[(x / 2) as usize], x % 2, x));
+            } else {
+                v.sort_by_key(|&x| (k[(x / 2) as usize], x % 2, x));
+            }
+            v
+        });
+        for &c in cand_sorted.as_deref().unwrap_or(g.neighbors(l0)) {
             if add.len() >= max_add {
                 break;
             }

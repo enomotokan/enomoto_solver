@@ -33,6 +33,7 @@ pub mod forcingcol;
 pub mod slackcol;
 pub mod freevar;
 pub mod ineqsingleton;
+pub mod ordkey;
 pub mod parallelcols;
 pub mod parallelrows;
 pub mod propagate;
@@ -101,8 +102,13 @@ fn round_int_bounds(lb: &mut [f64], ub: &mut [f64]) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub fn run_extended_mip(n: usize, a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], c: &[f64], is_int: &[bool], prop_passes: usize, rounds: usize, inner_rounds: usize) -> ExtendedPresolveResult {
     INT_MASK.with(|m| *m.borrow_mut() = Some(std::rc::Rc::new(is_int.to_vec())));
+    // 試作 `ENOMOTO_MIP_ORDINV` ([`ordkey`]): 列の並びに依らない列の鍵を作る
+    if ordkey::ordinv_any() {
+        ordkey::set_from_ag(n, a, b, g, h, c, is_int);
+    }
     let r = run_extended(n, a, b, g, h, c, 0, prop_passes, rounds, inner_rounds, false);
     INT_MASK.with(|m| *m.borrow_mut() = None);
+    ordkey::clear();
     r
 }
 
@@ -513,6 +519,9 @@ pub fn run_extended(
     // 1 回の上下限伝播も有意な変化がなくなるまで回すか (`PROPAGATION_FIXPOINT`、既定は無効で `prop_passes` パスごとに
     // 他の段と交互に回す)。
     let prop_fixpoint = fixpoint_mode && tunable!("ENOMOTO_T_PROPAGATION_FIXPOINT", PROPAGATION_FIXPOINT, usize) != 0;
+    // 試作 `ENOMOTO_MIP_ORDINV` の `e` ([`ordkey::ordinv`]): 整数最適化の前処理では上下限の伝播も不動点 (作業量の予算まで) 回す
+    // (行の順に回す伝播をパス数で打ち切ると、行の並びで締まる境界が変わる: physiciansched6-2 は最初の伝播で固定の数が 84442 対 85486)
+    let prop_fixpoint = prop_fixpoint || (fixpoint_mode && int_mask().is_some() && ordkey::ordinv('e'));
     // 作業量の予算 (読んだ非零の延べ数)。問題の大きさ (等式行と多変数の不等式行の非零数 + 列数 + 行数) に比例させる。
     let work_budget = if fixpoint_mode {
         let size = a.compute_nnz() + first_rows.iter().map(|r| r.len()).sum::<usize>() + n + b.len() + first_rows.len();
@@ -634,6 +643,7 @@ pub fn run_extended(
         if round_int_bounds(&mut lb, &mut ub) {
             return extended_infeasible(sc, a, b, c, n);
         }
+        debug_presolve_dump(round_idx, "prop", &lb, &ub);
         // 現在の G の多変数行とその右辺。代入による行の書き換えを反映して随時更新する。
         let mut cur_real_rows = prop.real_rows;
         let mut cur_real_rhs = prop.real_rhs;
@@ -671,6 +681,13 @@ pub fn run_extended(
         if round_idx < tunable!("ENOMOTO_T_EQPROP_ROUNDS", EQPROP_ROUNDS, usize) && !eqprop_idle && !dbg_skip("eqprop") {
             // 等式行伝播は不動点モードでも従来どおり `prop_passes` パスまで (`EQPROP_FIXPOINT` 参照)。
             let eq_limit = if tunable!("ENOMOTO_T_EQPROP_FIXPOINT", EQPROP_FIXPOINT, usize) != 0 { pass_limit(prop_passes, work_used) } else { propagate::PassLimit::fixed(prop_passes) };
+            // 試作 `ENOMOTO_MIP_ORDINV` の `e` ([`ordkey::ordinv`]): 整数最適化の前処理では等式行の伝播を不動点 (作業量の予算まで) 回す。
+            // 行の順に回す伝播をパス数で打ち切ると、行の並びで締まる境界が変わる (binkar10_1)
+            let eq_limit = if int_mask().is_some() && ordkey::ordinv('e') {
+                propagate::PassLimit { min_passes: prop_passes, max_passes: usize::MAX, sig_reltol: tunable!("ENOMOTO_T_FIXPOINT_RELTOL", FIXPOINT_RELTOL, f64), max_work: work_budget.saturating_sub(work_used) }
+            } else {
+                eq_limit
+            };
             let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, eq_limit));
             if eq.infeasible || round_int_bounds(&mut lb, &mut ub) {
                 return extended_infeasible(sc, a, b, c, n);
@@ -682,6 +699,7 @@ pub fn run_extended(
             }
         }
 
+        debug_presolve_dump(round_idx, "eqprop", &lb, &ub);
         // 符号を反転しただけで右辺が釣り合う不等式行の組 (等式を 2 本の `<=` で表したもの) を等式 1 本にして A へ移す
         // (不動点モードのみ、`OPPOSITE_PAIR_EQUALITY`)。
         if fixpoint_mode && tunable!("ENOMOTO_T_OPPOSITE_PAIR_EQUALITY", OPPOSITE_PAIR_EQUALITY, usize) != 0 && !dbg_skip("oppositepairs") {
@@ -713,6 +731,7 @@ pub fn run_extended(
             }
         }
 
+        debug_presolve_dump(round_idx, "opp", &lb, &ub);
         // 双対による固定: 目的係数の向きを妨げる行がない変数を上下限に固定する。
         let fixes = if dbg_skip("dualfix") { Vec::new() } else { timed_step!("dualfix", dualfix::fix_by_lock_count(n, &a, &cur_real_rows, &c, &lb, &ub)) };
         for &(j, value) in &fixes {
@@ -720,6 +739,7 @@ pub fn run_extended(
             ub[j] = value;
         }
 
+        debug_presolve_dump(round_idx, "dualfix", &lb, &ub);
         // 強制列 (`forcingcol`): 費用 0 で、現れるすべての不等式行を緩める向きに無限に動ける列を、
         // その行ごと取り除く (値は後処理で決める)。消去した列は `[0, 0]` に固定する。
         // `ENOMOTO_MIP_FORCING_COL` (試作、既定では使わない): 整数最適化の前処理でも使う。強制列は主問題の議論 (費用 0 の列を
@@ -743,6 +763,7 @@ pub fn run_extended(
             }
         }
 
+        debug_presolve_dump(round_idx, "forcing", &lb, &ub);
         // 費用 0 のスラック列 (`slackcol`、既定 2026-10-29、`ENOMOTO_PRESOLVE_NO_SLACK_COL` で止める): 1 行 (範囲制約なら反転した 2 行) にだけ現れる
         // 費用 0・有界の連続列を消し、行をその項の値域だけ緩める。消去した列は `[0, 0]` に固定する。
         if env_str!("ENOMOTO_PRESOLVE_NO_SLACK_COL").is_none() && !dbg_skip("slackcol") {
@@ -765,6 +786,7 @@ pub fn run_extended(
             }
         }
 
+        debug_presolve_dump(round_idx, "slack", &lb, &ub);
         // 双対実行可能性の伝播による 2 つの縮小 (`dualpropagate`):
         // 全最適解で等号成立する不等式行を等式系へ昇格し、被約費用の符号が確定する列を固定する。
         if dualpropagate_active && int_mask().is_none() && tunable!("ENOMOTO_T_DUALPROPAGATE", crate::params::presolve::DUALPROPAGATE, usize) != 0 && !dbg_skip("dualpropagate") {
@@ -823,6 +845,7 @@ pub fn run_extended(
             }
         }
 
+        debug_presolve_dump(round_idx, "dualprop", &lb, &ub);
         // 不等式行の列シングルトン (`ineqsingleton`、大きな問題か `ENOMOTO_INEQ_SINGLETON` 設定時):
         // 列を上下限に固定するか、その行を等式に変えて後段の colsingleton に消去させる。
         // 整数最適化の前処理では使わない (`ENOMOTO_MIP_INEQ_SINGLETON` で使う。整数列は固定だけ、連続列は等式化も。
@@ -864,6 +887,7 @@ pub fn run_extended(
             }
         }
 
+        debug_presolve_dump(round_idx, "ineqsing", &lb, &ub);
         // 固定済みの列 (lb == ub) を A と G の多変数行から取り除き、右辺へ移す (`foldfixed`)。
         // 行の項数を減らすことで rowsingleton/doubleton/aggregator の候補が見えるようにする。
         // 何も変わらない場合 (空行なし・零要素なし・固定列なし) は省略する (結果は同一)。
@@ -914,6 +938,7 @@ pub fn run_extended(
             }
             a = rs.a;
             b = rs.b;
+            debug_presolve_dump(round_idx, &format!("rs{inner_idx}"), &lb, &ub);
 
             set_g_from_split!("rebuild_g(inner)");
             // `(g, h)` がまだ `rebuild_g_ref(cur_real_rows, cur_real_rhs, lb, ub)` そのものか
@@ -947,6 +972,7 @@ pub fn run_extended(
                     }
                     postsolve_log.extend(dbl.substitutions.into_iter().map(PostsolveStep::Sub));
                 }
+                debug_presolve_dump(round_idx, "dbl", &lb, &ub);
             }
 
             // 列シングルトン等式の代入消去。
@@ -1069,6 +1095,7 @@ pub fn run_extended(
             }
         }
 
+        debug_presolve_dump(round_idx, "inner", &lb, &ub);
         // Aggregator (HiGHS の `HPresolve::aggregator`): 等式行から implied-free と
         // 分かる列を代入消去する (境界保存行は不要)。HiGHS と同様、高速な
         // singleton/doubleton ループの後に置く。
@@ -1107,6 +1134,7 @@ pub fn run_extended(
             }
         }
 
+        debug_presolve_dump(round_idx, "aggr", &lb, &ub);
         // 平行列の併合 (`parallelcols`)。aggregator の直後に置く (HiGHS と同様)。
         // `PARALLELCOLS_STRIKES` 回連続で空振りすると以降停止する。
         // `ENOMOTO_DISABLE_PARALLELCOLS` で無効化。
@@ -1138,6 +1166,7 @@ pub fn run_extended(
             }
         }
 
+        debug_presolve_dump(round_idx, "parcols", &lb, &ub);
         // 不等式行の重複削除 (ハッシュによる O(nnz) の安価な処理) を毎ラウンド再実行する。
         // 代入で行が書き換わり、元は異なる 2 行が重複になることがあるため。
         if g_split {
@@ -1185,6 +1214,7 @@ pub fn run_extended(
             ext_last_round_structural = ext_prev_struct.is_some_and(|p| p != st);
             ext_prev_struct = Some(st);
         }
+        debug_presolve_dump(round_idx, "redund", &lb, &ub);
         // このラウンドの伝播以外の段の作業量 (各段はほぼ非零数に比例する)。
         let round_nnz = a.compute_nnz() + if g_split { cur_real_rows.iter().map(|r| r.len()).sum::<usize>() } else { g.compute_nnz() } + n;
         work_used = work_used.saturating_add(round_nnz);
@@ -1353,6 +1383,7 @@ pub fn run_extended(
         }
     }
 
+    debug_presolve_dump(usize::MAX, "final", &lb, &ub);
     if env_str!("ENOMOTO_DEBUG_PRESOLVE_HASH").is_some() {
         let (g, h) = propagate::rebuild_g_ref(n, &free.real_rows, &free.real_rhs, &lb, &ub);
         // 等式行の非零数・多変数の不等式行の本数と非零数 (前処理後の問題の形の比較用)。
@@ -1552,4 +1583,17 @@ mod tests {
             }
         }
     }
+}
+
+/// 診断 `ENOMOTO_DEBUG_PRESOLVE_DUMP=ファイル` (振る舞いは変えない。analysis/robust2_20261114.md): 前処理の外側ラウンドの各段の後の
+/// 列の境界を 1 行ずつファイルに足す (並べ替えた問題どうしで、どの段から結果が分かれるかを突き合わせる)
+pub(crate) fn debug_presolve_dump(round: usize, label: &str, lb: &[f64], ub: &[f64]) {
+    let Some(path) = env_str!("ENOMOTO_DEBUG_PRESOLVE_DUMP") else { return };
+    use std::io::Write;
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) else { return };
+    let mut line = format!("{round}\t{label}\t");
+    for j in 0..lb.len() {
+        line.push_str(&format!("{:e},{:e};", lb[j], ub[j]));
+    }
+    let _ = writeln!(f, "{line}");
 }
