@@ -2071,7 +2071,13 @@ fn feas_fj_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> 
 ///   Local-MIP の初期化 (行の左辺の計算・集合の行の表) は止めを見ないので、始める前に一度見る。
 /// - FJ2 は止めの合図が立った後に LP 修復をしない (`fj::SKIP_REPAIR_ON_STOP`、[`heuristics::fj_lmip_mix`] と同じ)。
 /// - 問題は `=1` と同じ (前処理後、LP による固定の前。FJ_P3 の前処理はかけない)。
-fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> Option<Vec<f64>> {
+pub(crate) fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> Option<Vec<f64>> {
+    feas_fj_lmip_early_salt(prob, threads, cap, verbose, 0)
+}
+
+/// [`feas_fj_lmip_early`] の種をずらせる形 (`salt` = 0 なら同じ)。試作 `ENOMOTO_MIP_ROBUST` の `f` (根を暫定解なしで終えるときの
+/// 追加の FJ・Local-MIP、[`solver::robust`]) が、最初の早めの探索と重ならない種で回すのに使う
+pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f64, verbose: bool, salt: u64) -> Option<Vec<f64>> {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant};
     let t0 = Instant::now();
@@ -2088,6 +2094,7 @@ fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool
     let t_end = deadline.map_or(t0 + Duration::from_secs_f64(cap.max(0.0)), |d| d.min(t0 + Duration::from_secs_f64(cap.max(0.0))));
     let slice = tunable!("ENOMOTO_T_MIP_FEAS_EARLY_LMIP_SLICE", 0.2, f64).max(0.01);
     let base = tunable!("ENOMOTO_T_MIP_FEAS_FJ_EARLY_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03) ^ 0x2545_F491_4F6C_DD1D;
+    let base = if salt == 0 { base } else { base ^ salt.wrapping_mul(0x94D0_49BB_1331_11EB) };
     let done = |x: Vec<f64>, who: u8| {
         let mut g = found.lock().unwrap();
         if g.is_none() {

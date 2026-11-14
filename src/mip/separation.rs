@@ -1675,6 +1675,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (40 問で悪化した) のと違い他の問題は変わらない
         let mut widen_on = env_str!("ENOMOTO_MIP_NO_CUT_WIDEN").is_none() && !self.params.submip && !self.cut_agg_has('w') && !self.rch_part('W');
         let mut widened = false;
+        // 試作 `ENOMOTO_MIP_ROBUST` の `s` ([`super::solver::robust`]): 停滞で止める所での延長 (残りのラウンド数・使った回数)
+        let robust_ext = super::solver::robust('s') && !self.params.submip && job.is_none() && !heavy;
+        let mut ext_left = 0usize;
+        let mut ext_used = 0usize;
         // 既定 (2026-10-30、`ENOMOTO_MIP_CUT_WIDEN_DOUBLE=0` で以前の一気に広げる形): 下の 2 倍ずつ広げる形。58 問 × 2 回 (4 スレッド・60 秒) で
         // SGM -2.0%・-4.5%、解けた数 ±0・+2 (physiciansched6-2・qiu)、解けなくなった問題なし (analysis/halve_submip_20261030.md)
         let widen_double_on = env_def!("ENOMOTO_MIP_CUT_WIDEN_DOUBLE", "1").is_some();
@@ -3763,7 +3767,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if env_str!("ENOMOTO_MIP_DEBUG_CUTEXIT").is_some_and(|v| !self.params.submip || v.contains('s')) {
                         eprintln!("MIP: CUTEXIT round {round}: job {} obj {obj:.10e} prev {prev_obj:.10e} reldiff {reldiff:.3e} nfrac {nfrac} prev {prev_nfrac} stall {stall} saturated {saturated} widen {widen_now}", job.is_some());
                     }
-                    if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 && !saturated && !widen_now {
+                    if ext_left > 0 {
+                        // 延長の途中: 目的値が上がれば停滞を数え直して続け、上がらないまま使い切れば止める
+                        if reldiff > 1e-4 {
+                            if self.params.verbose {
+                                eprintln!("MIP: cut round {round}: ROBUST s: extension {ext_used} moved the objective ({obj:.10e}); continue");
+                            }
+                            ext_left = 0;
+                            stall = 0;
+                        } else {
+                            ext_left -= 1;
+                            if ext_left == 0 {
+                                if self.params.verbose {
+                                    eprintln!("MIP: cut round {round}: ROBUST s: extension {ext_used} did not move the objective; stop");
+                                }
+                                break;
+                            }
+                        }
+                    } else if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 && !saturated && !widen_now {
                         let cr_one = cutrnd_main && cutrnd('f') && super::cap_clock() - t_loop0 < cr_budget;
                         stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened && !cr_one { 2 } else { 1 };
                         if stall >= if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip && !sub_hc { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
@@ -3772,6 +3793,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     eprintln!("MIP: cut round {round}: own stall vetoed (ENOMOTO_MIP_BG_DETERM_ROBUST)");
                                 }
                                 stall = 0;
+                            } else if !phase2_on && robust_ext && ext_used < tunable!("ENOMOTO_T_MIP_ROBUST_EXT_MAX", 3usize, usize) {
+                                ext_used += 1;
+                                ext_left = tunable!("ENOMOTO_T_MIP_ROBUST_EXT_ROUNDS", 3usize, usize).max(1);
+                                stall = 0;
+                                if self.params.verbose {
+                                    eprintln!("MIP: cut round {round}: ROBUST s: stall stop deferred, extension {ext_used} of up to {ext_left} rounds (obj {obj:.10e})");
+                                }
                             } else if !phase2_on {
                                 if cs_gap.is_some() && self.params.verbose {
                                     eprintln!("MIP: cut round {round}: stall stop (ENOMOTO_MIP_CUTSTALL_GAP, obj {obj:.10e})");

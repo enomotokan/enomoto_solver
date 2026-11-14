@@ -194,6 +194,19 @@ pub(super) fn rheur(c: char) -> bool {
     env_str!("ENOMOTO_MIP_RHEUR").is_some_and(|v| v.contains(c))
 }
 
+/// 試作 `ENOMOTO_MIP_ROBUST=<文字>` (既定では使わない。analysis/robust_20261114.md): 行・列の並べ替えで流れが変わっても結果が崖のように
+/// 変わらないようにする手当て。
+/// - `s` (型 A): 根のカットのループが停滞で止まる所で、止める代わりに `ENOMOTO_T_MIP_ROBUST_EXT_ROUNDS` (3) ラウンドだけ延ばして試す。
+///   その間に目的値が上がれば (相対 1e-4 超) 停滞を数え直して続け、上がらなければ止める。延長は 1 回のループで
+///   `ENOMOTO_T_MIP_ROBUST_EXT_MAX` (3) 回まで。小数の列の数がたまたま減ったかどうかで 5 ラウンドか それ以上かが分かれ、
+///   neos-911970 は 5 ラウンド目で突破する回 (16.6 秒) と手前で止まる回 (時間切れ) に分かれていた
+/// - `p` (型 A'): 根の目的値のプロービングの見切り (`ENOMOTO_T_MIP_ROOT_OBJ_PROBE_GIVEUP` 本試して固定 0 ならやめる) を、
+///   候補の数の `ENOMOTO_T_MIP_ROBUST_OBJP_FRAC` (0.25) 倍まで延ばす。候補は列の番号の順なので、並べ替えで最初の 200 本が
+///   外れ続けることがある (hypothyroid-k1 の 4 スレッドの 1 回: 200 本で見切って時間切れ、ほかの回は 465 本以上試して最適を示した)
+pub(crate) fn robust(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_ROBUST").is_some_and(|v| v.contains(c))
+}
+
 fn light_root_heur(name: &str) -> bool {
     matches!(name, "trivial" | "simple rounding" | "ZI round" | "randomized rounding" | "shift-and-propagate")
 }
@@ -6666,6 +6679,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 試作 `ENOMOTO_MIP_ROBUST` の `f` ([`robust`]、型 B): 外側の根のヒューリスティクスを暫定解なしで終えるとき、根の境界の上で
+    /// 種を変えた FJ2 と Local-MIP (前処理の早めの探索 [`super::feas_fj_lmip_early`] と同じ組み合わせ、種は重ならないようにずらす) を
+    /// min(`ENOMOTO_T_MIP_ROBUST_FJ_SECS` (6) 秒, 残りの `ENOMOTO_T_MIP_ROBUST_FJ_FRAC` (0.15)) 回す。スレッドは求解のスレッドの数。
+    /// ns1116954 (目的 0 の実行可能性問題) の 1 スレッドでは、解を出すのは前処理の早めの FJ (6 秒の上限) だけで、外れた 5 回は
+    /// 根のヒューリスティクスも全部外れて時間切れだった (4 スレッドは FJ 3 本で 6 回とも 1.7〜5.3 秒)。再スタートの後の根では回さない
+    fn robust_fj_retry(&mut self) -> bool {
+        if self.params.restarts > 0 {
+            return false;
+        }
+        let left = self.params.frac_tl() - self.start.elapsed().as_secs_f64();
+        let cap = tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64).min(if left.is_finite() { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FRAC", 0.15, f64) * left } else { f64::INFINITY });
+        if cap <= 0.1 {
+            return false;
+        }
+        let mut pc = self.p.clone();
+        pc.col_lo.clone_from(&self.dom.lo);
+        pc.col_up.clone_from(&self.dom.up);
+        let salt = 0x5EED_0000_0000_0001u64 ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
+        let r = super::feas_fj_lmip_early_salt(&pc, self.params.threads.max(1), cap, self.params.verbose, salt);
+        match r {
+            Some(x) => self.try_incumbent(x),
+            None => false,
+        }
+    }
+
     /// 解 `x` (整数列は丸める) を暫定解として試す。採用したら真。
     pub(super) fn try_incumbent(&mut self, mut x: Vec<f64>) -> bool {
         // 試作 `ENOMOTO_MIP_TUBR` の `l`・`s`: I' が丸めで行に反するなら、I' 以外を固定した繊維の LP で I' を整数の頂点にする
@@ -9894,6 +9932,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.force_fix_cap = false;
                         (self.submip_time_frac, self.submip_time_max) = keep;
                     }
+                }
+                // 試作 `ENOMOTO_MIP_ROBUST` の `f` ([`robust`]): 根のヒューリスティクスを暫定解なしで終えるなら、種を変えた FJ・Local-MIP をもう一度回す
+                if robust('f') && !self.params.submip && self.incumbent.is_none() {
+                    heur!("robust FJ", self.robust_fj_retry());
                 }
                 if self.params.verbose && share_x {
                     eprintln!("MIP: root heuristics used {shared_x_used} LP solutions from the background cuts");
@@ -17414,6 +17456,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 1 回りで 351〜482 列を試して両側矛盾で証明する回と、全 2300〜2440 列を試して 17〜37 列を固定するだけで終わり、
         // 再スタートして 15〜35 秒遅れる回がある
         let passes = o.passes;
+        // 試作 `ENOMOTO_MIP_ROBUST` の `p` ([`robust`]): 外側の根では見切りを候補の数の割合まで延ばす
+        let giveup = if robust('p') && !o.in_loop {
+            giveup.max((tunable!("ENOMOTO_T_MIP_ROBUST_OBJP_FRAC", 0.25, f64) * cands.len() as f64) as usize)
+        } else {
+            giveup
+        };
         let mut npass = 0usize;
         for _ in 0..passes {
             npass += 1;
