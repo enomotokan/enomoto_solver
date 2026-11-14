@@ -2975,6 +2975,12 @@ pub(super) fn treeeff(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TREEEFF").is_some_and(|v| v.contains(c))
 }
 
+/// 試作 `ENOMOTO_MIP_TC=文字` (既定では使わない。analysis/treeclose_20261114.md): 木を閉じる力の手当て。
+/// - `i`: 再スタートの後の求解で暫定解がなくても、打ち切り値があれば木の中の再スタートを判定する ([`Solver::tree_restart_due`])。
+pub(super) fn tc_on(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_TC").is_some_and(|v| v.contains(c))
+}
+
 /// `ENOMOTO_MIP_TRNOFIX=1` (試作 SMALLFIX の D1、既定では使わない): 新たな固定のない木の中の再スタートを止める ([`Solver::tree_restart_guard_ok`] の `z`)。
 /// `ENOMOTO_T_MIP_TRNOFIX_ALLOW` で通した固定の少ない木の中の再スタートの数 (過程全体、試作)
 static TRNOFIX_PASSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -21751,7 +21757,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// csched008 で暫定解が悪くなった (analysis/tree_close1_20261104.md)。`=force` は HiGHS と同じく固定の数を問わない。
     fn tree_restart_due(&mut self, plunge: Option<&OpenNode>) -> bool {
         use std::sync::atomic::Ordering;
-        if self.params.submip || self.snap.is_some() || self.watch.is_some() || self.pool_tid != 0 || self.incumbent.is_none() {
+        // 試作 `ENOMOTO_MIP_TC` の `i` ([`tc_on`]): 再スタートの後の求解で、前の暫定解が打ち切り値の固定で問題から外れて暫定解がないときも、
+        // 打ち切り値があれば木の中の再スタートを判定する (HiGHS は暫定解を持ったまま何度でも再スタートする。sct2 は 2 回目の再スタートの後
+        // 暫定解なしで 300 秒、再スタートが止まっていた。analysis/treeclose_20261114.md)
+        let no_inc = self.incumbent.is_none() && !(tc_on('i') && self.params.restarts > 0 && self.params.cutoff.is_finite());
+        if self.params.submip || self.snap.is_some() || self.watch.is_some() || self.pool_tid != 0 || no_inc {
             return false;
         }
         // 木を分け合うスレッドが同じ木を別々に解く間 (`race_done` の前) は重みが重なるので数えない
