@@ -276,6 +276,7 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// - `c`: カット選びの比べ (CUTSEL_PROBE) の伸びの速さ・合計の予算を手間で数える (予算 `ENOMOTO_T_MIP_TIMEDEP_PROBE_WORK` (既定 5) 回分の根の LP)
 /// - `w`: 根のカットのループの上限 (CPU 時間で全体の 0.1 倍) を手間 (`ENOMOTO_T_MIP_CUT_WORK_CAP` の形、既定 12。時間は 2 倍の安全網) にする
 /// - `n`: 木の大近傍探索の予算を木の LP の反復の割合で数え、1 回のサブ MIP を LP の反復の上限で止める
+/// - `N` (`n` と一緒に): 木の大近傍探索のサブ MIP の時間の上限を残り時間によらず `submip_time_max` (既定 6 秒) にする
 /// - `e`: 木の中の再スタートのガード (`TREEEFF` の `r`) の木の秒・根の秒を LP の反復で数える
 /// - `b`: 割合で決める量 (時間の上限 x 割合) の基準を、前処理・再スタートの後の残り時間でなく元の時間の上限にする ([`solver::MipParams::frac_tl`])
 pub(crate) fn timedep(c: char) -> bool {

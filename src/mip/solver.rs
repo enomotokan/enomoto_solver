@@ -11839,9 +11839,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // (`ENOMOTO_MIP_LNS_NO_CAP` で上限なし)
                         let keep_max = self.submip_time_max;
                         let hi0 = self.heur_iters;
+                        let keep_frac = self.submip_time_frac;
                         if td_n {
                             let cap = (2.0 * lns_avail_it).max(tunable!("ENOMOTO_T_MIP_TIMEDEP_LNS_MIN", 5.0, f64) * self.root_lp_iters.max(1000) as f64);
                             SUBMIP_ITER_CAP.with(|c| c.set(cap as u64));
+                            // `N`: サブ MIP の時間の上限を残り時間によらず `submip_time_max` (既定 6 秒) にする (サブ MIP の中の「時間の上限 x 割合」の量が
+                            // 外側の経過で変わらないように。期限は外側の期限で頭打ち)
+                            if super::timedep('N') {
+                                self.submip_time_frac = 1.0;
+                            }
                         } else if lns_time && env_str!("ENOMOTO_MIP_LNS_NO_CAP").is_none() {
                             let cap = (tunable!("ENOMOTO_T_MIP_LNS_CALL_MULT", 2.0, f64) * lns_avail).max(tunable!("ENOMOTO_T_MIP_LNS_CALL_MIN", 0.3, f64));
                             self.submip_time_max = self.submip_time_max.min(cap);
@@ -11867,6 +11873,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                         }
                         self.submip_time_max = keep_max;
+                        self.submip_time_frac = keep_frac;
                         if td_n {
                             SUBMIP_ITER_CAP.with(|c| c.set(0));
                         }
