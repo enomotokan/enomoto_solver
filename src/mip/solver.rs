@@ -200,6 +200,7 @@ pub(super) fn rheur(c: char) -> bool {
 ///   その間に目的値が上がれば (相対 1e-4 超) 停滞を数え直して続け、上がらなければ止める。延長は 1 回のループで
 ///   `ENOMOTO_T_MIP_ROBUST_EXT_MAX` (3) 回まで。小数の列の数がたまたま減ったかどうかで 5 ラウンドか それ以上かが分かれ、
 ///   neos-911970 は 5 ラウンド目で突破する回 (16.6 秒) と手前で止まる回 (時間切れ) に分かれていた
+/// - `f` (型 B): 外側の根で軽い丸めまでに暫定解がなければ、種を変えた FJ・Local-MIP をもう一度回す ([`Solver::robust_fj_retry`])
 /// - `p` (型 A'): 根の目的値のプロービングの見切り (`ENOMOTO_T_MIP_ROOT_OBJ_PROBE_GIVEUP` 本試して固定 0 ならやめる) を、
 ///   候補の数の `ENOMOTO_T_MIP_ROBUST_OBJP_FRAC` (0.25) 倍まで延ばす。候補は列の番号の順なので、並べ替えで最初の 200 本が
 ///   外れ続けることがある (hypothyroid-k1 の 4 スレッドの 1 回: 200 本で見切って時間切れ、ほかの回は 465 本以上試して最適を示した)
@@ -6679,7 +6680,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
-    /// 試作 `ENOMOTO_MIP_ROBUST` の `f` ([`robust`]、型 B): 外側の根のヒューリスティクスを暫定解なしで終えるとき、根の境界の上で
+    /// 試作 `ENOMOTO_MIP_ROBUST` の `f` ([`robust`]、型 B): 外側の根の軽い丸めまでで暫定解がないとき、根の境界の上で
     /// 種を変えた FJ2 と Local-MIP (前処理の早めの探索 [`super::feas_fj_lmip_early`] と同じ組み合わせ、種は重ならないようにずらす) を
     /// min(`ENOMOTO_T_MIP_ROBUST_FJ_SECS` (6) 秒, 残りの `ENOMOTO_T_MIP_ROBUST_FJ_FRAC` (0.15)) 回す。スレッドは求解のスレッドの数。
     /// ns1116954 (目的 0 の実行可能性問題) の 1 スレッドでは、解を出すのは前処理の早めの FJ (6 秒の上限) だけで、外れた 5 回は
@@ -9618,6 +9619,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     heur!("trivial", self.trivial());
                 }
                 heur!("randomized rounding", self.randomized_rounding(&x, 3));
+                // 試作 `ENOMOTO_MIP_ROBUST` の `f` ([`robust`]): 軽い丸めまでで暫定解がなければ、重いもの (interior rounding・サブ MIP・
+                // ダイビング) の前に種を変えた FJ・Local-MIP をもう一度回す (ns1116954 は後ろの重いもので時間を使い切る: interior rounding 10 秒、
+                // RENS 9 秒、暫定解なしの RENS 19 秒で、根のヒューリスティクスの終わりには時間が残らない)
+                if robust('f') && !self.params.submip && self.incumbent.is_none() {
+                    heur!("robust FJ", self.robust_fj_retry());
+                }
                 // 試作 `ENOMOTO_MIP_FPR` の `r` (既定では使わない): 暫定解がなければ fix-propagate-repair ([`super::fpr`])
                 if self.incumbent.is_none() && super::fpr::fpr_on('r') {
                     let secs = if self.params.frac_tl().is_finite() { (0.02 * self.params.frac_tl()).min(2.0) } else { 2.0 };
@@ -9932,10 +9939,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.force_fix_cap = false;
                         (self.submip_time_frac, self.submip_time_max) = keep;
                     }
-                }
-                // 試作 `ENOMOTO_MIP_ROBUST` の `f` ([`robust`]): 根のヒューリスティクスを暫定解なしで終えるなら、種を変えた FJ・Local-MIP をもう一度回す
-                if robust('f') && !self.params.submip && self.incumbent.is_none() {
-                    heur!("robust FJ", self.robust_fj_retry());
                 }
                 if self.params.verbose && share_x {
                     eprintln!("MIP: root heuristics used {shared_x_used} LP solutions from the background cuts");
