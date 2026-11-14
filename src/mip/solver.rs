@@ -736,6 +736,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 前に数え直したときの (全体のノード数, 刈った木の重み, 打ち切り値, 全体の下界)、[`Self::maybe_restart`] で固定の数の閾値を見ないか。
     tr_next: u64,
     tr_huge: u32,
+    /// 試作 `ENOMOTO_MIP_TC` の `g`: 次に開いたノードの共通の境界を見るノード数と、統計 [呼んだ, 締めた列, 伝播で締めた列, 矛盾で閉じた]
+    tc_g_next: u64,
+    tc_g_stats: [u64; 4],
     tr_last: (u64, f64, f64, f64),
     /// 木の中の再スタートの記帳 (`TRSTAT`、ログだけ) と `ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、[`Self::tree_restart_guard_ok`]) 用:
     /// この求解で木のループに入った時刻 (この求解の始めからの秒)、そのときの全体の下界、[`Self::tree_restart_due`] の最後の木の大きさの見積もり。
@@ -2977,6 +2980,10 @@ pub(super) fn treeeff(c: char) -> bool {
 
 /// 試作 `ENOMOTO_MIP_TC=文字` (既定では使わない。analysis/treeclose_20261114.md): 木を閉じる力の手当て。
 /// - `i`: 再スタートの後の求解で暫定解がなくても、打ち切り値があれば木の中の再スタートを判定する ([`Solver::tree_restart_due`])。
+/// - `g`: 木の中で `ENOMOTO_T_MIP_TC_G_EVERY` (100) ノードごとに、開いたノード全てに共通の整数列の境界を大域的な境界にし、打ち切り値つきの
+///   大域の伝播を回す (不動点まで最大 `ENOMOTO_T_MIP_TC_G_ROUNDS` (5) 回)。伝播が矛盾すれば残りの開いたノードに打ち切り値より良い解は
+///   ないので木を閉じる ([`Solver::tc_open_tighten`])。HiGHS の `HighsNodeQueue::pruneInfeasibleNodes` (sct2 で開いたノード 3000 余りが
+///   10 秒で消えて閉じる)。木を分け合わないとき (1 スレッド) だけ。
 pub(super) fn tc_on(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TC").is_some_and(|v| v.contains(c))
 }
@@ -4834,6 +4841,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tree_restart_check: false,
         tr_next: 0,
         tr_huge: 0,
+        tc_g_next: 0,
+        tc_g_stats: [0; 4],
         tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
         tr_t0: 0.0,
         tr_w0: (0.0, 0),
@@ -10831,6 +10840,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 判定で時間と回数を確かめているので普通はここに来ない。従は止めたので、主だけで続ける
                 if self.params.verbose {
                     eprintln!("MIP: TREE restart refused; continuing with the main thread only");
+                }
+            }
+            // 試作 `ENOMOTO_MIP_TC` の `g` ([`Self::tc_open_tighten`])
+            if tc_on('g') && self.pool.is_none() && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.nodes >= self.tc_g_next {
+                self.tc_g_next = self.nodes + tunable!("ENOMOTO_T_MIP_TC_G_EVERY", 100u64, u64).max(1);
+                if self.tc_open_tighten(plunge.as_ref()) {
+                    let _ = self.queue.take_all();
+                    plunge = None;
                 }
             }
             // `ENOMOTO_MIP_TREEFIX` (試作): 仕事が根で矛盾を見つけたら最適として終える。`R` の合図なら下の再スタートの判定を立てる
@@ -19242,6 +19259,111 @@ impl<'a, L: MipLp> Solver<'a, L> {
         k
     }
 
+    /// 試作 `ENOMOTO_MIP_TC` の `g`: 大域的な境界と矛盾しない開いたノード (待ち行列と潜りの子) の全てで締まっている整数列の境界を
+    /// 大域的に締め、打ち切り値つきの大域の伝播 ([`Self::global_obj_prop`]) を回す。締まらなくなるまで最大 `ENOMOTO_T_MIP_TC_G_ROUNDS` 回。
+    /// 開いたノードが全て矛盾するか、大域の伝播が矛盾したら真 (残りに打ち切り値より良い解はない)。ノードの境界は分枝の変更
+    /// ([`OpenNode::changes`]) だけ (HiGHS はノードの伝播の結果も持つ)。手間は変更の総数に比例する
+    fn tc_open_tighten(&mut self, plunge: Option<&OpenNode>) -> bool {
+        let p = self.p;
+        let u = self.prune_limit();
+        if !u.is_finite() {
+            return false;
+        }
+        self.tc_g_stats[0] += 1;
+        let t0 = Instant::now();
+        for _ in 0..tunable!("ENOMOTO_T_MIP_TC_G_ROUNDS", 5usize, usize).max(1) {
+            // 列ごとに: 下限を締めているノードの数とその最小、上限を締めているノードの数とその最大
+            let mut lo_cnt: std::collections::HashMap<usize, (usize, f64)> = std::collections::HashMap::new();
+            let mut up_cnt: std::collections::HashMap<usize, (usize, f64)> = std::collections::HashMap::new();
+            let mut valid = 0usize;
+            for n in self.queue.iter().chain(plunge) {
+                // ノードの中の列ごとの最終の境界 (同じ列の変更は後のものほど締まっている)
+                let mut ok = true;
+                let mut lo_m: Vec<(usize, f64)> = Vec::new();
+                let mut up_m: Vec<(usize, f64)> = Vec::new();
+                for c in &n.changes {
+                    if !p.is_int[c.col] {
+                        continue;
+                    }
+                    if c.upper {
+                        if c.value < self.dom.global_lo[c.col] - 0.5 {
+                            ok = false;
+                            break;
+                        }
+                        match up_m.iter_mut().find(|e| e.0 == c.col) {
+                            Some(e) => e.1 = e.1.min(c.value),
+                            None => up_m.push((c.col, c.value)),
+                        }
+                    } else {
+                        if c.value > self.dom.global_up[c.col] + 0.5 {
+                            ok = false;
+                            break;
+                        }
+                        match lo_m.iter_mut().find(|e| e.0 == c.col) {
+                            Some(e) => e.1 = e.1.max(c.value),
+                            None => lo_m.push((c.col, c.value)),
+                        }
+                    }
+                }
+                if !ok || n.lower_bound >= u {
+                    continue;
+                }
+                valid += 1;
+                for &(j, v) in &lo_m {
+                    if v > self.dom.global_lo[j] + 0.5 {
+                        let e = lo_cnt.entry(j).or_insert((0, f64::INFINITY));
+                        e.0 += 1;
+                        e.1 = e.1.min(v);
+                    }
+                }
+                for &(j, v) in &up_m {
+                    if v < self.dom.global_up[j] - 0.5 {
+                        let e = up_cnt.entry(j).or_insert((0, f64::NEG_INFINITY));
+                        e.0 += 1;
+                        e.1 = e.1.max(v);
+                    }
+                }
+            }
+            if valid == 0 {
+                self.tc_g_stats[3] += 1;
+                if self.params.verbose {
+                    eprintln!("MIP: TC g: no open node is consistent with the global bounds; closing the tree ({:.2}s)", self.start.elapsed().as_secs_f64());
+                }
+                return true;
+            }
+            let mut k = 0usize;
+            for (&j, &(cnt, v)) in &lo_cnt {
+                if cnt == valid && v > self.dom.global_lo[j] + 0.5 {
+                    self.dom.tighten_global(p, j, false, v);
+                    k += 1;
+                }
+            }
+            for (&j, &(cnt, v)) in &up_cnt {
+                if cnt == valid && v < self.dom.global_up[j] - 0.5 {
+                    self.dom.tighten_global(p, j, true, v);
+                    k += 1;
+                }
+            }
+            if k == 0 {
+                break;
+            }
+            self.tc_g_stats[1] += k as u64;
+            let r = self.global_obj_prop(true, "TC_g");
+            self.tc_g_stats[2] += r[0] as u64;
+            if self.params.verbose {
+                eprintln!("MIP: TC g: {k} integer columns tightened by the bounds common to all {valid} open nodes, propagation tightened {} ({:.3}s, {:.2}s)", r[0], t0.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
+            }
+            if r[3] == 1 {
+                self.tc_g_stats[3] += 1;
+                return true;
+            }
+            if r[0] == 0 {
+                break;
+            }
+        }
+        false
+    }
+
     /// 今の LP のカットの行 (問題の行より後) のうち、活動量が上限か下限にあるもの (行, 下限, 上限)。
     /// [`Self::maybe_restart`] の「効いているカット」と同じ判定
     fn tight_cut_rows(&self) -> Vec<(Vec<(usize, f64)>, f64, f64)> {
@@ -22616,6 +22738,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: NODECNT degenerate duals (tid {}): nodes {}, candidates {}, btran {}, fixed by theta >= gap {}, fixed by theta = inf {}, nodes changed {}, sign mismatch {}", self.pool_tid, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
             }
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
+            if tc_on('g') {
+                let g = self.tc_g_stats;
+                eprintln!("MIP: TC g: calls {}, columns tightened by the open nodes {}, by the propagation {}, trees closed {}", g[0], g[1], g[2], g[3]);
+            }
             if super::plsb::plsb_cfg().is_some() {
                 let c = &self.plsb_stats;
                 eprintln!("MIP: PLSB (tid {}): undecided {} (few samples {}, no gap {}, depth>=50 {}), continue {}, stop {}, continued past lookahead {}, stopped before lookahead {}; tree gains n {} zero {}", self.pool_tid, c[0], c[5], c[6], c[7], c[1], c[2], c[3], c[4], self.plsb_tree.n, self.plsb_tree.nzero);

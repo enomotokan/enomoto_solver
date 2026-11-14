@@ -31,7 +31,8 @@ HV = ""
 for item in plan["shards"][k]:
     p, c = item[0], item[1]
     seed = item[2] if len(item) > 2 else SEED
-    extra = item[3] if len(item) > 3 else {}  # この回だけ足す環境変数 (問題ごとの打ち切り値など)
+    extra = dict(item[3]) if len(item) > 3 else {}  # この回だけ足す環境変数 (問題ごとの打ち切り値など)。"_threads" はスレッド数 (既定 4)
+    nth = str(extra.pop("_threads", 4))
     if (p, c, seed) in done:
         continue
     mps = rb.fetch(p, WT / ".miplib_cache")
@@ -46,12 +47,12 @@ for item in plan["shards"][k]:
         env.update(plan.get("cfgs", {}).get(c, {}), **extra)
         kind = "--worker-highs"
     else:
-        env.update(ENOMOTO_MIP_THREADS="4", ENOMOTO_T_MIP_SEED=str(seed), **CFG[c])
+        env.update(ENOMOTO_MIP_THREADS=nth, ENOMOTO_T_MIP_SEED=str(seed), **CFG[c])
         env.update(extra)
         kind = "--worker-ours"
     t0 = time.time()
     r = subprocess.run([sys.executable, str(WT / "scripts" / "run_miplib_benchmark.py"), kind, str(mps),
-                        "--time-limit", str(TL), "--threads", "4"], cwd=WT, env=env, capture_output=True, text=True, timeout=TL + 900)
+                        "--time-limit", str(TL), "--threads", nth], cwd=WT, env=env, capture_output=True, text=True, timeout=TL + 900)
     try:
         res = json.loads([l for l in r.stdout.splitlines() if l.startswith("{")][-1])
     except Exception:  # noqa: BLE001
@@ -64,5 +65,5 @@ for item in plan["shards"][k]:
     with open(OUT, "a") as f:
         f.write(json.dumps({"problem": p, "cfg": c, "seed": seed, "tl": TL, "result": res, "max_rss_mb": rss, "wall": round(time.time() - t0, 1), "shard": k,
                             "cpu": next((l.split(":", 1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name")), ""),
-                            "nproc": os.cpu_count(), "highs": HV if c.startswith("highs") else "", "extra": extra, "at": time.strftime("%m-%d %H:%M:%S")}) + "\n")
+                            "nproc": os.cpu_count(), "highs": HV if c.startswith("highs") else "", "extra": extra, "threads": nth, "at": time.strftime("%m-%d %H:%M:%S")}) + "\n")
     print(p, c, seed, res.get("status"), res.get("time"), flush=True)
