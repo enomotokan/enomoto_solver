@@ -4199,6 +4199,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
         // 加えるカットの非零の数の平均を効き目で続けるノードの分離の密度の判定 ([`Solver::nca_dense`]) に入れる
         let d = rows.iter().map(|r| r.0.len()).sum::<usize>() as f64 / rows.len() as f64;
+        self.dcut_last_nnz = d;
         if super::solver::densecut_diag() {
             self.dcd[0] += rows.len() as f64;
             self.dcd[1] += d * rows.len() as f64;
@@ -4606,6 +4607,45 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.ts_cut_ids.len() > 4 * self.cut_ids.len() + 1000 {
                 let live: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
                 self.ts_cut_ids.retain(|id| live.contains(id));
+            }
+        }
+        // 試作 `ENOMOTO_MIP_DENSECUT` の `a`・`g` ([`super::solver::densecut_has`]): 根の後に入った密なカット・伸びの小さかった密なラウンドのカットを、
+        // 基底にあれば短い年齢で外す
+        let (dca, dcg) = (super::solver::densecut_has('a'), super::solver::densecut_has('g'));
+        if (dca || dcg) && self.ts2_id0 != u64::MAX && !self.params.submip {
+            self.sync_cut_age();
+            let m0 = self.p.m;
+            let thr = tunable!("ENOMOTO_T_MIP_DENSECUT_RATIO", 5.0, f64) * self.row_nnz_mean();
+            let age_a = tunable!("ENOMOTO_T_MIP_DENSECUT_AGE", 10u32, u32);
+            let age_g = tunable!("ENOMOTO_T_MIP_DENSECUT_WEAK_AGE", 1u32, u32);
+            let mut remove = vec![false; self.lp.num_rows()];
+            let (mut ca, mut cg) = (0u64, 0u64);
+            {
+                let b = self.lp.basis_ref();
+                for k in 0..self.cut_ids.len() {
+                    let id = self.cut_ids[k];
+                    if id < self.ts2_id0 || b.row[m0 + k] != VarStatus::Basic || self.prot_aging(id) {
+                        continue;
+                    }
+                    let age = self.cut_age[k];
+                    if dcg && age > age_g && self.dcut_weak.contains(&id) {
+                        remove[m0 + k] = true;
+                        cg += 1;
+                    } else if dca && age > age_a && self.lp.row_ref(m0 + k).len() as f64 > thr {
+                        remove[m0 + k] = true;
+                        ca += 1;
+                    }
+                }
+            }
+            if ca + cg > 0 {
+                self.delete_lp_rows(&remove);
+                removed += (ca + cg) as usize;
+                self.dcut_stats[0] += ca;
+                self.dcut_stats[1] += cg;
+            }
+            if self.dcut_weak.len() > 4 * self.cut_ids.len() + 1000 {
+                let live: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
+                self.dcut_weak.retain(|id| live.contains(id));
             }
         }
         // `ENOMOTO_MIP_TREESEP2` の d: 木の分離で加えたカットの行が上限を超えたら、年齢の高い (今効いていない) ものから外す

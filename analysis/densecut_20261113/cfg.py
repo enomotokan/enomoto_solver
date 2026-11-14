@@ -15,5 +15,9 @@ CFGS = {
     "ckR": dict(CAND1114, ENOMOTO_MIP_RCSTRONG_KROOT="1"),       # k + KROOT (rcstrong4)
     "ci0": dict(CAND1114, ENOMOTO_MIP_RCSTRONG="irk", ENOMOTO_T_MIP_TREE_SEP_ROUNDS="0"),
     "ckR0": dict(CAND1114, ENOMOTO_MIP_RCSTRONG_KROOT="1", ENOMOTO_T_MIP_TREE_SEP_ROUNDS="0"),
+    # 試作 ENOMOTO_MIP_DENSECUT (src/mip/solver.rs の densecut_has)
+    "ca": dict(CAND1114, ENOMOTO_MIP_DENSECUT="a"),
+    "cg": dict(CAND1114, ENOMOTO_MIP_DENSECUT="g"),
+    "cag": dict(CAND1114, ENOMOTO_MIP_DENSECUT="ag"),
 }
 MSET = plan_m.M

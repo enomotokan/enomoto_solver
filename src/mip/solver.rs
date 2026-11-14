@@ -978,6 +978,14 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ノードの LP の数 (数えた回), 根の後に入ったカットの行の和, その非零の和, カットの行の非零の和 (全部), 伸びの比の和 (打ち切りは 1),
     /// 伸びを測った回, 密と判定されて深さの規則で始めたラウンド, 密の判定で止めた回 (始め・続き)]
     pub(super) dcd: [f64; 10],
+    /// 試作 `ENOMOTO_MIP_DENSECUT` (analysis/densecut_20261113.md): 直前のノードの分離のラウンドで加えたカットの非零の平均
+    pub(super) dcut_last_nnz: f64,
+    /// 同: 伸びを測っているラウンドのカットの番号の範囲 [id0, id1)
+    pub(super) dcut_round: Option<(u64, u64)>,
+    /// 同 `g`: 伸びの小さかった密なラウンドのカットの番号 (基底にあれば年齢 `ENOMOTO_T_MIP_DENSECUT_WEAK_AGE` で外す)
+    pub(super) dcut_weak: std::collections::HashSet<u64>,
+    /// 同: [`a` で外した行, `g` で外した行, 伸びの小さかった密なラウンド, 密なラウンド]
+    pub(super) dcut_stats: [u64; 4],
     /// `ENOMOTO_MIP_TREESEP2` の b: 探索全体の下界の最良値と、それが (打ち切り値までの差の 1% を超えて) 最後に伸びた時刻
     pub(super) ts2_glb: (f64, f64),
     /// `ENOMOTO_MIP_TREESEP2` の b・c で分離したノードの数
@@ -4887,6 +4895,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tsd: [0; 6],
         tsd_last: (0.0, 0, 0, 0, 0.0),
         dcd: [0.0; 10],
+        dcut_last_nnz: 0.0,
+        dcut_round: None,
+        dcut_weak: std::collections::HashSet::new(),
+        dcut_stats: [0; 4],
         ts2_glb: (f64::NEG_INFINITY, 0.0),
         ts2_forced: 0,
         ts2_id0: u64::MAX,
@@ -5239,6 +5251,16 @@ static GAP1_ROOT_X: std::sync::Mutex<Option<std::sync::Arc<Vec<f64>>>> = std::sy
 #[inline]
 fn gap1_proof_tol(rhs: f64) -> f64 {
     if super::pseudocost::gap1().contains('p') { 1e-6 * (1.0 + 1e-3 * rhs.abs()) } else { 1e-6 * (1.0 + rhs.abs()) }
+}
+
+/// 試作 `ENOMOTO_MIP_DENSECUT` (既定では使わない、analysis/densecut_20261113.md) の形の文字 `c` を含むか。
+/// `a` = 根の後に LP に入ったカットのうち、非零の数が元の行の平均の `ENOMOTO_T_MIP_DENSECUT_RATIO` 倍 (既定 5) を超えるものは、
+/// 基底にあって (効いていない) 年齢が `ENOMOTO_T_MIP_DENSECUT_AGE` (既定 10) を超えたら外す (ほかのカットは今の年齢の上限のまま)。
+/// `g` = ノードの分離のラウンドで加えたカットが密 (平均が同じ倍率を超える) で、解き直しの LP の値の伸びが打ち切り値までの差の
+/// `ENOMOTO_T_MIP_DENSECUT_GAIN` 倍 (既定 0.02) に届かなければ (打ち切りは届いたと数える)、そのラウンドのカットを基底にあって年齢が
+/// `ENOMOTO_T_MIP_DENSECUT_WEAK_AGE` (既定 1) を超えたら外す。外したカットはプールに残り、違反すれば戻る
+pub(super) fn densecut_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_DENSECUT").is_some_and(|v| v.contains(c))
 }
 
 /// 診断 `ENOMOTO_MIP_DENSECUT_DIAG` (analysis/densecut_20261113.md)
@@ -6102,6 +6124,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             crate::simplex::mip_lp::set_nodecut_src(Some(crate::simplex::mip_lp::NodecutSrc { cutoff_bits: l.cutoff.to_bits(), f: self.nodecut_fn(), kind }));
         }
         l
+    }
+
+    /// 元の行の非零の数の平均 (1 以上)
+    pub(super) fn row_nnz_mean(&self) -> f64 {
+        (self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / self.p.m.max(1) as f64).max(1.0)
     }
 
     /// 診断 `ENOMOTO_MIP_DENSECUT_DIAG`: ノードの LP ごとに、根の後に入ったカットの行と非零、カットの行の非零を足し込む
@@ -11522,6 +11549,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.sl_after_lp(st);
                 }
                 if let Some(o0) = self.nca_pending.take() {
+                    // 試作 `ENOMOTO_MIP_DENSECUT` の `g`: 密なラウンドで伸びが `ENOMOTO_T_MIP_DENSECUT_GAIN` 倍 (打ち切り値までの差に対し、既定 0.02) に
+                    // 届かなければ、そのカットを早く外す印を付ける
+                    if let Some((a, b)) = self.dcut_round.take() {
+                        if self.dcut_last_nnz > tunable!("ENOMOTO_T_MIP_DENSECUT_RATIO", 5.0, f64) * self.row_nnz_mean() {
+                            self.dcut_stats[3] += 1;
+                            let weak = match st {
+                                LpStatus::Infeasible | LpStatus::ObjectiveBound => false,
+                                LpStatus::Optimal => {
+                                    let o = self.lp.objective() + self.p.offset;
+                                    let lim = self.prune_limit();
+                                    let gap = if lim.is_finite() { (lim - o0).max(1e-9) } else { o0.abs().max(1.0) };
+                                    o < lim && o - o0 < tunable!("ENOMOTO_T_MIP_DENSECUT_GAIN", 0.02, f64) * gap
+                                }
+                                _ => true,
+                            };
+                            if weak {
+                                self.dcut_stats[2] += 1;
+                                self.dcut_weak.extend(a..b);
+                            }
+                        }
+                    }
                     let ok = match st {
                         LpStatus::Infeasible | LpStatus::ObjectiveBound => {
                             self.nca_hist[0] += 1;
@@ -12265,6 +12313,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.sync_cut_age();
                     let id0 = self.next_cut_id;
                     let added = self.node_cut_round(&x);
+                    if added && densecut_has('g') {
+                        self.dcut_round = Some((id0, self.next_cut_id));
+                    }
                     if added {
                         self.mark_tree_sep_cuts(id0);
                         self.tsd[0] += self.next_cut_id - id0;
@@ -22380,10 +22431,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let orig_nnz: usize = self.p.rows.iter().map(|r| r.len()).sum();
             let nl = d[2].max(1.0);
             eprintln!(
-                "DENSECUT tid {} nodes {} lps {} rows/lp {:.1} it/lp {:.1} lpsecs {:.3} cutsecs {:.3} | rounds {} added {} | ncuts {} nnz/cut {:.1} rowavg {:.2} m {} orignnz {} | post rows/lp {:.1} post nnz/lp {:.0} cut nnz/lp {:.0} | gain n {} mean {:.4} hist {:?} | dense depth {} dense hits {} ema {:?} n {}",
+                "DENSECUT tid {} nodes {} lps {} rows/lp {:.1} it/lp {:.1} lpsecs {:.3} cutsecs {:.3} | rounds {} added {} | ncuts {} nnz/cut {:.1} rowavg {:.2} m {} orignnz {} | post rows/lp {:.1} post nnz/lp {:.0} cut nnz/lp {:.0} | gain n {} mean {:.4} hist {:?} | dense depth {} dense hits {} ema {:?} n {} | dcut {:?}",
                 self.pool_tid, self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_cut_secs,
                 self.node_sep_stats[0], self.node_sep_stats[1], d[0], d[1] / d[0].max(1.0), rowavg, self.p.m, orig_nnz,
-                d[3] / nl, d[4] / nl, d[5] / nl, d[7], d[6] / d[7].max(1.0), self.nca_hist, d[8], d[9], self.nca_cut_nnz, self.p.n
+                d[3] / nl, d[4] / nl, d[5] / nl, d[7], d[6] / d[7].max(1.0), self.nca_hist, d[8], d[9], self.nca_cut_nnz, self.p.n, self.dcut_stats
             );
         }
         // `ENOMOTO_MIP_NCA_DIAG`: 木の従のスレッドの分も出す (診断用)
