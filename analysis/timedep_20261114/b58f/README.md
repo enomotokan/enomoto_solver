@@ -7,7 +7,7 @@
 ## 1 分担の回し方 (4 CPU の機械で、ほかの計測と重ねない)
 
 ```bash
-git fetch origin ccr-1beed81b-ex0uhq && git checkout <依頼に書いた固定コミット>   # 解が捨てられる不具合 (af29a20a 以降) の直しが入った版
+git fetch origin ccr-1beed81b-ex0uhq && git checkout fc072e3b   # 解が捨てられる不具合 (af29a20a 以降) の直し 7917d993 が入った版
 python -m venv .venv && .venv/bin/pip install maturin highspy
 source .venv/bin/activate && maturin develop --release
 python analysis/cbcimpl_20261029/probs.py          # 58 問を .miplib_cache に取得
