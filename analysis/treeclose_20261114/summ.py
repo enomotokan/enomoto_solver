@@ -13,10 +13,11 @@ for f in files:
 probs = sorted({p for p, _ in res})
 
 
-def rgap(lb, ub):
+def rgap(lb, ub, den=None):
+    # ENOMOTO の TCTRACE は再スタートの後の問題の定数項で値がずれるので、差を最終の目的値で割る
     if lb is None or ub is None or lb != lb or abs(ub) == float("inf") or abs(lb) == float("inf"):
         return "-"
-    return f"{(ub - lb) / max(abs(ub), 1e-9):.1e}"
+    return f"{(ub - lb) / max(abs(den if den else ub), 1e-9):.1e}"
 
 
 def num(pat, s, k=1, cast=float):
@@ -42,7 +43,8 @@ for p in probs:
     for c, (r, d) in out.items():
         rr = r["result"]
         pts = d["pts"]
-        ck = " ".join(f"{t}s:{rgap(*(parse.at(pts, t) or (0, None, None))[1:3])}" for t in (30, 60, 120, 240, 400, 600))
+        den = rr.get("objective") if isinstance(rr.get("objective"), (int, float)) else None
+        ck = " ".join(f"{t}s:{rgap(*(parse.at(pts, t) or (0, None, None))[1:3], den)}" for t in (30, 60, 120, 240, 400, 600))
         tbest = next((t for t, z, _ in d["inc"] if z <= zbest + 1e-6 * max(1, abs(zbest))), None)
         print(f"  {c:5} {rr.get('status')} {rr.get('time', 0):.0f}s nodes {rr.get('nodes')} restarts {d['restarts']} best-inc-at {tbest} | gap {ck}")
         st = d["stats"]
