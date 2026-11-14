@@ -1,10 +1,10 @@
-"""res_P.jsonl の対の比較: python summ.py [基準] [比べる設定] (既定 c14 c14u)。SGM は shift 1 秒、時間切れは 60 秒で数える。CI は問題単位のブートストラップ (4000 回)。
+"""res_P.jsonl と res_X.jsonl (あれば) の対の比較: python summ.py [基準] [比べる設定] (既定 c14 c14u)。SGM は shift 1 秒、時間切れは 60 秒で数える。CI は問題単位のブートストラップ (4000 回)。
 「揃って遅い/速い」はその問題の全種で比 > 1.25 / < 0.8。"""
 import json, math, random, collections, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 A, B = (sys.argv[1], sys.argv[2]) if len(sys.argv) > 2 else ("c14", "c14u")
-rows = [json.loads(l) for l in open(D / "res_P.jsonl") if l.strip()]
+rows = [json.loads(l) for f in ("res_P.jsonl", "res_X.jsonl") if (D / f).exists() for l in open(D / f) if l.strip()]
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
 def ok(r): return r["result"].get("status") in ("optimal", "infeasible")
 def t(r): return min(r["result"]["time"], r["tl"]) if ok(r) else r["tl"]
