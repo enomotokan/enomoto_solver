@@ -1824,6 +1824,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut cl_last_ok_cuts = 0usize;
         let mut loop_iters = 0u64;
         let mut work_rounds = 0usize;
+        // 試作 `ENOMOTO_MIP_TIMEDEP` の `p`: 第 2 段階の上限を手間で決める (`p2_work_cap`、時間の上限 `phase2_deadline` は 10 倍の安全網)
+        let td_p = super::timedep('p');
+        let mut p2_work_cap = f64::INFINITY;
+        let cut_work = |li: u64, wr: usize| li as f64 / root_iters.max(1) as f64 + 0.05 * wr as f64;
         // `ENOMOTO_MIP_LOSE6_3_CUTRESTART` (試作、既定では使わない): 主の根のカットのループで、`ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_MIN` (既定 3)
         // ラウンド目以降、暫定解による被約費用の固定が再スタートの判定を通るなら ([`Solver::lose6_3_cut_restart_due`])、ループを抜けて
         // 根のヒューリスティクスを飛ばし早めの再スタートへ進む (HiGHS は根の分離のラウンドごとに被約費用で固定し、再スタートを判定する)。
@@ -1926,6 +1930,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     max_rounds = round_ctr + tunable!("ENOMOTO_T_MIP_CUT_PHASE2_ROUNDS", 60usize, usize);
                     let t1 = super::cap_clock() - t_loop0;
                     phase2_deadline = t1 + (tunable!("ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT", 3.0, f64) * t1).max(0.2);
+                    if td_p {
+                        let w1 = cut_work(loop_iters, work_rounds);
+                        p2_work_cap = w1 + (tunable!("ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT", 3.0, f64) * w1).max(tunable!("ENOMOTO_T_MIP_TIMEDEP_PHASE2_MIN", 1.0, f64));
+                        phase2_deadline = t1 + 10.0 * (phase2_deadline - t1);
+                        if self.params.verbose {
+                            eprintln!("MIP: TIMEDEP p: phase 2 work cap {p2_work_cap:.3} (phase 1 work {w1:.3}, {loop_iters} LP iters, {work_rounds} rounds)");
+                        }
+                    }
                     if self.params.verbose {
                         eprintln!("MIP: cut loop phase 2 (HiGHS cut score) at the round limit {round_ctr} ({:.2}s)", self.start.elapsed().as_secs_f64());
                     }
@@ -2293,7 +2305,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if now - cap_base > time_cap && round >= min_rounds { " -> stop" } else { "" }
                 );
             }
+            if self.params.verbose && job.is_none() && phase2 && now - t_loop0 > phase2_deadline && !heavy && !determ_job {
+                eprintln!("MIP: cut round {round}: phase 2 time cap reached ({:.3}s of {phase2_deadline:.3}s, {loop_iters} LP iters, {work_rounds} rounds) -> stop", now - t_loop0);
+            }
             if self.time_up() || (now - cap_base > time_cap && round >= min_rounds) || (phase2 && now - t_loop0 > phase2_deadline && !heavy && !determ_job) || stopped(&job) || cont_stop {
+                break;
+            }
+            if phase2 && td_p && !heavy && !determ_job && cut_work(loop_iters, work_rounds) > p2_work_cap {
+                if self.params.verbose {
+                    eprintln!("MIP: cut round {round}: TIMEDEP p: phase 2 work cap reached ({:.3} of {p2_work_cap:.3}) -> stop", cut_work(loop_iters, work_rounds));
+                }
                 break;
             }
             // `ENOMOTO_T_MIP_CUT_WORK_CAP`: 手間の上限
@@ -3728,6 +3749,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             max_rounds = round_ctr + tunable!("ENOMOTO_T_MIP_CUT_PHASE2_ROUNDS", 60usize, usize);
                             let t1 = super::cap_clock() - t_loop0;
                             phase2_deadline = t1 + (tunable!("ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT", 3.0, f64) * t1).max(0.2);
+                            if td_p {
+                                let w1 = cut_work(loop_iters, work_rounds);
+                                p2_work_cap = w1 + (tunable!("ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT", 3.0, f64) * w1).max(tunable!("ENOMOTO_T_MIP_TIMEDEP_PHASE2_MIN", 1.0, f64));
+                                phase2_deadline = t1 + 10.0 * (phase2_deadline - t1);
+                                if self.params.verbose {
+                                    eprintln!("MIP: TIMEDEP p: phase 2 work cap {p2_work_cap:.3} (phase 1 work {w1:.3}, {loop_iters} LP iters, {work_rounds} rounds)");
+                                }
+                            }
                             if self.params.verbose {
                                 eprintln!("MIP: cut loop phase 2 (HiGHS cut score) from round {} ({:.2}s)", round + 1, self.start.elapsed().as_secs_f64());
                             }
@@ -5301,6 +5330,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nv = tunable!("ENOMOTO_T_MIP_MPSEP_NV", 1usize, usize);
             let cap = tunable!("ENOMOTO_T_MIP_MPSEP_MOVE_SECS", (0.25 * self.root_lp_secs).clamp(0.01, 0.1), f64);
             let piv = tunable!("ENOMOTO_T_MIP_MPSEP_PIVOTS", 1000usize, usize);
+            // 試作 `ENOMOTO_MIP_TIMEDEP` の `m`: 入れ替えの数で止める (時間は安全網)。移動の 1 入れ替えは ftran 約 8 回で、
+            // 10teams では今の時間の上限 (0.25 x 根の LP の秒) で 20〜28 入れ替え、noswot では候補が尽きて 119 入れ替えで終わっていた
+            let (cap, piv) = if super::timedep('m') {
+                let p0 = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0", 125.0, f64);
+                let c = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_C", 0.03, f64);
+                let k = p0.max(c * self.root_lp_iters as f64).ceil() as usize;
+                (tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_SAFE", 1.0, f64), piv.min(k))
+            } else {
+                (cap, piv)
+            };
             let mode = if f.contains('d') { 'd' } else if f.contains('r') { 'r' } else { 'f' };
             let dbg = f.contains('v') && self.params.verbose;
             for k in 0..nv {

@@ -264,6 +264,17 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
     env_str!("ENOMOTO_MIP_RESTART_REF").is_some() || gr_restart_for(p)
 }
 
+/// 試作 `ENOMOTO_MIP_TIMEDEP` = 文字の並び (既定では使わない、analysis/timedep_20261114.md): 経過時間で決めていた分かれ道・量を
+/// 手間 (LP の反復・入れ替えの数・ラウンド数・触った非零の数) で決める。時間の上限は安全網として大きくして残す。
+/// - `m`: 多点分離 (MPSEP `o`) の最適面の上の移動を、入れ替えの数の上限 max(`ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0` (既定 125),
+///   `ENOMOTO_T_MIP_TIMEDEP_MPSEP_C` (既定 0.03) x 根の LP の反復) で止める (時間は `ENOMOTO_T_MIP_TIMEDEP_MPSEP_SAFE` 秒 (既定 1) の安全網)
+/// - `p`: 根のカットのループの第 2 段階の上限を、手間 (カットの LP の反復 / 根の LP の反復 + 0.05 x ラウンド数) で第 1 段階の
+///   `ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT` 倍 (最低 `ENOMOTO_T_MIP_TIMEDEP_PHASE2_MIN` (既定 1)) にする (時間は 10 倍の安全網)
+/// - `l`: 根の局所探索を、触った非零の数 `ENOMOTO_T_MIP_TIMEDEP_LS_RATE` (既定 1.5e8) x 今の時間の枠の秒 で止める (時間は 10 倍の安全網)
+pub(crate) fn timedep(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains(c))
+}
+
 pub(crate) fn cap_clock() -> f64 {
     #[cfg(target_os = "linux")]
     {

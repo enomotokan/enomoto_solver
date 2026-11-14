@@ -1001,6 +1001,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
 /// [`local_search`] の結果 (実行可能解、違反最小の点とその違反量)。
 pub(super) type LocalSearchResult = (Option<Vec<f64>>, Option<(Vec<f64>, f64)>);
 
+thread_local! {
+    /// [`local_search`] の手間の上限 (試作 `ENOMOTO_MIP_TIMEDEP` の `l`、呼び出し側のスレッドで置く。既定は無制限)
+    pub(super) static LS_MAX_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+    /// 最後の [`local_search`] の (歩数, 手間, 時間で止まったか)。表示用
+    pub(super) static LS_LAST: std::cell::Cell<(u64, u64, bool)> = const { std::cell::Cell::new((0, 0, false)) };
+}
+
 pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, max_steps: u64, seed: u64) -> LocalSearchResult {
     let (n, m) = (p.n, p.m);
     let mut rng = seed | 1;
@@ -1051,6 +1058,10 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
     let mut best_feas: Option<Vec<f64>> = None;
     let mut best_inf: Option<(Vec<f64>, f64)> = None;
     let mut steps_total = 0u64;
+    // 試作 `ENOMOTO_MIP_TIMEDEP` の `l`: 触った非零の数 (`work`) で止める。上限は呼び出し側が `max_work` に入れる
+    let max_work = LS_MAX_WORK.with(|c| c.get());
+    let mut work = 0u64;
+    let mut by_time = false;
     'restart: for round in 0..1000 {
         let mut x = if round == 0 { (0..n).map(|j| { let v = 0.0f64.max(lo[j]).min(up[j].max(lo[j])); if v.is_finite() { v } else { 0.0 } }).collect() } else { start(&mut rand) };
         if let Some(b) = &best_feas {
@@ -1060,6 +1071,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
         }
         let mut act: Vec<f64> = (0..m).map(|i| p.rows[i].iter().map(|&(j, a)| a * x[j]).sum()).collect();
         act.push((0..n).map(|j| p.cost[j] * x[j]).sum());
+        work += act.len() as u64 + p.rows.iter().map(|r| r.len() as u64).sum::<u64>();
         let mut w = vec![1.0f64; m + 1];
         let mut tabu_until = vec![0u64; n];
         let mut vset: Vec<usize> = Vec::new();
@@ -1076,7 +1088,11 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
         loop {
             step += 1;
             steps_total += 1;
-            if steps_total >= max_steps || (step % 128 == 0 && Instant::now() >= t_end) {
+            if steps_total >= max_steps || work >= max_work {
+                break 'restart;
+            }
+            if step % 128 == 0 && Instant::now() >= t_end {
+                by_time = true;
                 break 'restart;
             }
             if vset.is_empty() {
@@ -1115,6 +1131,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
             for _ in 0..3.min(vset.len()) {
                 let i = vset[(rand() * vset.len() as f64) as usize % vset.len()];
                 let row: &[(usize, f64)] = if i < m { &p.rows[i] } else { &[] };
+                work += if i < m { row.len() as u64 } else { n as u64 };
                 let obj_row: Vec<(usize, f64)>;
                 let row = if i == m {
                     obj_row = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
@@ -1137,6 +1154,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
                         continue;
                     }
                     let d = v - x[j];
+                    work += cols[j].len() as u64;
                     let mut gain = 0.0;
                     for &(r, b) in &cols[j] {
                         let before = viol(r, act[r], obj_bound);
@@ -1152,6 +1170,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
                 Some((j, v, g)) if g > 1e-12 => Some((j, v)),
                 _ => {
                     // 改善する手がない: 重みを更新し (平滑化: 確率 0.3 で満たされた行の重みを減らす)、ランダムな手
+                    work += (m + 1) as u64;
                     if rand() < 0.3 {
                         for r in 0..=m {
                             if vpos[r] == usize::MAX && w[r] > 1.0 {
@@ -1167,6 +1186,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
                 }
             };
             let Some((j, v)) = mv else { continue };
+            work += cols[j].len() as u64;
             let d = v - x[j];
             x[j] = v;
             tabu_until[j] = step + 3 + (rand() * 10.0) as u64;
@@ -1188,8 +1208,9 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
             }
         }
     }
+    LS_LAST.with(|c| c.set((steps_total, work, by_time)));
     if env_str!("ENOMOTO_MIP_LS_DEBUG").is_some() {
-        eprintln!("MIP:   [ls debug] n {n} m {m} steps {steps_total} (max {max_steps}), cap {time_cap:.2}s, best {:?}, least violation {:?}", best_feas.as_ref().map(|x| p.objective(x)), best_inf.as_ref().map(|b| b.1));
+        eprintln!("MIP:   [ls debug] n {n} m {m} steps {steps_total} (max {max_steps}), work {work} (max {max_work}), by time {by_time}, cap {time_cap:.2}s, best {:?}, least violation {:?}", best_feas.as_ref().map(|x| p.objective(x)), best_inf.as_ref().map(|b| b.1));
     }
     (best_feas, best_inf)
 }
