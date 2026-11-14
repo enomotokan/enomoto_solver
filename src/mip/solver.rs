@@ -9369,6 +9369,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (light root after a restart)", $name);
                             }
+                        } else if !self.params.submip && env_str!("ENOMOTO_MIP_DEBUG_SKIP_HEURS").is_some_and(|l| l.split(',').any(|n| n == $name)) {
+                            // 診断用 (`ENOMOTO_MIP_DEBUG_SKIP_HEURS` = 名前,名前,...): 外側の根で名前のヒューリスティクスを回さない (analysis/prbimp_20261113.md §4)
+                            if self.params.verbose {
+                                eprintln!("MIP: root heuristic {}: skipped (ENOMOTO_MIP_DEBUG_SKIP_HEURS)", $name);
+                            }
                         } else if self.params.skip_heurs & bit != 0 && env_str!("ENOMOTO_MIP_RESTART_ALL_HEURS").is_none() && !(restart_light_heurs() && light_root_heur($name)) {
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (no solution before the restart)", $name);
