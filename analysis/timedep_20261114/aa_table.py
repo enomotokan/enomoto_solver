@@ -3,6 +3,7 @@
 import re, sys, subprocess, math
 from pathlib import Path
 D = Path(__file__).resolve().parent
+TH = __import__("os").environ.get("AA_TH", "1")
 groups = [g.split(",") for g in sys.argv[1].split(":")]; probs = sys.argv[2].split(",")
 def res(f):
     r = [l for l in open(f, errors="replace") if l.startswith("RESULT")]
@@ -15,7 +16,7 @@ print("| 問題 | " + " | ".join("/".join(g) for g in groups) + " |"); print("|-
 for p in probs:
     cells = []
     for g in groups:
-        runs = {t: sorted(D.glob(f"logs/{p}_t1_{t}[0-9].log")) for t in g}
+        runs = {t: sorted(D.glob(f"logs/{p}_t{TH}_{t}[0-9].log")) for t in g}
         txt = []
         for t, fs in runs.items():
             rs = [(f, res(f)) for f in fs if res(f)]

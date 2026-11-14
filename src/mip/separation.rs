@@ -5360,11 +5360,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nv = tunable!("ENOMOTO_T_MIP_MPSEP_NV", 1usize, usize);
             let cap = tunable!("ENOMOTO_T_MIP_MPSEP_MOVE_SECS", (0.25 * self.root_lp_secs).clamp(0.01, 0.1), f64);
             let piv = tunable!("ENOMOTO_T_MIP_MPSEP_PIVOTS", 1000usize, usize);
-            // 試作 `ENOMOTO_MIP_TIMEDEP` の `m`: 入れ替えの数で止める (時間は安全網)。移動の 1 入れ替えは ftran 約 8 回で、
-            // 10teams では今の時間の上限 (0.25 x 根の LP の秒) で 20〜28 入れ替え、noswot では候補が尽きて 119 入れ替えで終わっていた
+            // 試作 `ENOMOTO_MIP_TIMEDEP` の `m`: 入れ替えの数で止める (時間は安全網)。今の時間の上限 (0.25 x 根の LP の秒) では、1 回の移動は
+            // 10teams 20〜28、neos-960392 11〜17、neos-827175 14〜15、neos-3083819-nubu 13〜22 入れ替えで、根の LP の反復には比例しない
+            // (入れ替え 1 回の重さが問題で 10〜100 倍違う)。初版の上限 max(125, 0.03 x 根の反復) は 58 問でこれらを約 2 倍遅くした
             let (cap, piv) = if super::timedep('m') {
-                let p0 = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0", 125.0, f64);
-                let c = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_C", 0.03, f64);
+                let p0 = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0", 16.0, f64);
+                let c = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_C", 0.0, f64);
                 let k = p0.max(c * self.root_lp_iters as f64).ceil() as usize;
                 (tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_SAFE", 1.0, f64), piv.min(k))
             } else {
