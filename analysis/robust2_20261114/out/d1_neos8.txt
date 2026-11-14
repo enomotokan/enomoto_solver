@@ -1,0 +1,102 @@
+Running HiGHS 1.16.0 (git hash: f3f113d): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+== neos8 [MIP_ORDINV=edpq]
+   presolve: rows 46324 -> 46156, free columns 23228 -> 23116, nonzeros 313180 -> 312788, (parallel columns merged: 0 integer, 0 continuous)
+   presolve: rows 46156 -> 46100, free columns 23116 -> 23060, nonzeros 312788 -> 312613, (parallel columns merged: 0 integer, 0 continuous)
+   presolve: rows 46100 -> 6774, free columns 1660 -> 1660, nonzeros 312613 -> 24181, (parallel columns merged: 0 integer, 0 continuous)
+   probing: 1656 of 1656 binaries probed (1 passes), 0 fixed
+ * presolve: rows 7376 -> 6438, free columns 1660 -> 1464, nonzeros 25385 -> 23173, (parallel columns merged: 0 integer, 0 continuous)
+   p1 presolve: rows 7447 -> 6318, free columns 1660 -> 1394, nonzeros 25527 -> 22813, (parallel columns merged: 0 integer, 0 continuous)
+   p2 presolve: rows 7465 -> 6306, free columns 1660 -> 1387, nonzeros 25563 -> 22777, (parallel columns merged: 0 integer, 0 continuous)
+   p3 presolve: rows 7461 -> 6294, free columns 1660 -> 1380, nonzeros 25555 -> 22741, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 1460 of 1460 binaries probed (1 passes), 0 fixed
+   p1 probing: 1390 of 1390 binaries probed (1 passes), 0 fixed
+   p2 probing: 1383 of 1383 binaries probed (1 passes), 0 fixed
+   p3 probing: 1376 of 1376 binaries probed (1 passes), 0 fixed
+ * presolve: rows 7178 -> 5862, free columns 1464 -> 1128, nonzeros 24653 -> 21445, (parallel columns merged: 0 integer, 0 continuous)
+   p1 presolve: rows 7012 -> 5712, free columns 1394 -> 1053, nonzeros 24201 -> 20845, (parallel columns merged: 0 integer, 0 continuous)
+   p2 presolve: rows 6988 -> 5732, free columns 1387 -> 1063, nonzeros 24141 -> 20925, (parallel columns merged: 0 integer, 0 continuous)
+   p3 presolve: rows 6969 -> 5662, free columns 1380 -> 1028, nonzeros 24091 -> 20645, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 1124 of 1124 binaries probed (1 passes), 0 fixed
+   p1 probing: 1049 of 1049 binaries probed (1 passes), 0 fixed
+   p2 probing: 1059 of 1059 binaries probed (1 passes), 0 fixed
+   p3 probing: 1024 of 1024 binaries probed (1 passes), 0 fixed
+ * clique extension: 278 rows extended, 15284 nonzeros added, 0 columns fixed, 0 duplicate and 22 dominated rows removed
+   p1 clique extension: 278 rows extended, 15080 nonzeros added, 0 columns fixed, 0 duplicate and 46 dominated rows removed
+   p2 clique extension: 278 rows extended, 15426 nonzeros added, 0 columns fixed, 0 duplicate and 22 dominated rows removed
+   p3 clique extension: 278 rows extended, 13822 nonzeros added, 0 columns fixed, 0 duplicate and 27 dominated rows removed
+   root LP -3.7250000000e3 
+ * root LP size: rows 5840, free columns 1128, nonzeros 35402
+   p1 root LP size: rows 5666, free columns 1053, nonzeros 33161
+   p2 root LP size: rows 5710, free columns 1063, nonzeros 35011
+   p3 root LP size: rows 5635, free columns 1028, nonzeros 33008
+   diff lines 6; results [('optimal', 7.8, -3719.0), ('optimal', 10.2, -3719.0), ('optimal', 10.2, -3719.0), ('optimal', 9.8, -3719.0)]
+== neos-960392 [MIP_ORDINV=edpq]
+   presolve: rows 3999 -> 2022, free columns 3329 -> 1709, nonzeros 19282 -> 12935, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 1629 of 1709 binaries probed (1 passes), 4 fixed
+   p1 probing: 1629 of 1709 binaries probed (1 passes), 4 fixed
+   p2 presolve: rows 2022 -> 2022, free columns 1707 -> 1707, nonzeros 12935 -> 12917, (parallel columns merged: 0 integer, 0 continuous)
+   p3 probing: 1629 of 1709 binaries probed (1 passes), 4 fixed
+ * presolve: rows 2022 -> 1938, free columns 1625 -> 1603, nonzeros 12935 -> 12241, (parallel columns merged: 0 integer, 0 continuous)
+   p1 presolve: rows 2022 -> 1938, free columns 1625 -> 1603, nonzeros 12935 -> 12241, (parallel columns merged: 0 integer, 0 continuous)
+   p2 probing: 1627 of 1707 binaries probed (1 passes), 4 fixed
+   p3 presolve: rows 2022 -> 1938, free columns 1625 -> 1603, nonzeros 12935 -> 12241, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 1603 of 1603 binaries probed (1 passes), 0 fixed
+   p1 probing: 1603 of 1603 binaries probed (1 passes), 0 fixed
+   p2 presolve: rows 2022 -> 1938, free columns 1623 -> 1601, nonzeros 12917 -> 12223, (parallel columns merged: 0 integer, 0 continuous)
+   p3 probing: 1603 of 1603 binaries probed (1 passes), 0 fixed
+ * clique extension: 651 rows extended, 1752 nonzeros added, 0 columns fixed, 0 duplicate and 143 dominated rows removed
+   p1 clique extension: 651 rows extended, 1752 nonzeros added, 0 columns fixed, 0 duplicate and 151 dominated rows removed
+   p2 probing: 1601 of 1601 binaries probed (1 passes), 0 fixed
+   p3 clique extension: 651 rows extended, 1681 nonzeros added, 0 columns fixed, 0 duplicate and 185 dominated rows removed
+ * root LP -2.3800000000e2 
+   p1 root LP -2.3800000000e2 
+   p2 clique extension: 651 rows extended, 1641 nonzeros added, 0 columns fixed, 0 duplicate and 197 dominated rows removed
+   p3 root LP -2.3800000000e2 
+ * root LP size: rows 1879, free columns 1625, nonzeros 13150
+   p1 root LP size: rows 1871, free columns 1625, nonzeros 13082
+   p2 root LP -2.3800000000e2 
+   p3 root LP size: rows 1837, free columns 1625, nonzeros 12779
+ * -
+   p1 -
+   p2 root LP size: rows 1825, free columns 1623, nonzeros 12688
+   p3 -
+   diff lines 7; results [('optimal', 3.9, -238.0), ('optimal', 5.2, -238.0), ('optimal', 5.6, -238.0), ('optimal', 7.1, -238.0)]
+== roll3000 [MIP_ORDINV=edpq]
+   presolve: rows 2295 -> 1617, free columns 1166 -> 878, nonzeros 29386 -> 26640, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 624 of 624 binaries probed (1 passes), 0 fixed
+   p1 probing: 624 of 624 binaries probed (1 passes), 0 fixed
+   p2 presolve: rows 1617 -> 1614, free columns 877 -> 877, nonzeros 26640 -> 26628, (parallel columns merged: 0 integer, 0 continuous)
+   p3 probing: 624 of 624 binaries probed (1 passes), 0 fixed
+ * clique extension: 110 rows extended, 334 nonzeros added, 0 columns fixed, 0 duplicate and 7 dominated rows removed
+   p1 clique extension: 110 rows extended, 332 nonzeros added, 0 columns fixed, 0 duplicate and 7 dominated rows removed
+   p2 probing: 623 of 623 binaries probed (1 passes), 0 fixed
+   p3 clique extension: 110 rows extended, 334 nonzeros added, 0 columns fixed, 0 duplicate and 7 dominated rows removed
+ * root LP 1.1098057347e4 
+   p1 root LP 1.1097885882e4 
+   p2 presolve: rows 1615 -> 1612, free columns 877 -> 876, nonzeros 26630 -> 26609, (parallel columns merged: 0 integer, 0 continuous)
+   p3 root LP 1.1098057347e4 
+ * root LP size: rows 1610, free columns 878, nonzeros 26918
+   p1 root LP size: rows 1610, free columns 878, nonzeros 26912
+   p2 probing: 622 of 622 binaries probed (1 passes), 0 fixed
+   p3 root LP size: rows 1610, free columns 878, nonzeros 26918
+ * -
+   p1 -
+   p2 clique extension: 109 rows extended, 330 nonzeros added, 0 columns fixed, 0 duplicate and 6 dominated rows removed
+   p3 -
+ * -
+   p1 -
+   p2 root LP 1.1098170998e4 
+   p3 -
+ * -
+   p1 -
+   p2 root LP size: rows 1606, free columns 876, nonzeros 26885
+   p3 -
+   diff lines 7; results [('time_limit', 25.1, 13102.0), ('time_limit', 25.1, 13219.99999999999), ('time_limit', 25.0, 13314.000000000005), ('time_limit', 25.0, 13255.99999963302)]
+== binkar10_1 [MIP_ORDINV=edpq]
+   presolve: rows 1026 -> 822, free columns 2298 -> 1477, nonzeros 4496 -> 3471, (parallel columns merged: 0 integer, 0 continuous)
+   probing: 170 of 170 binaries probed (1 passes), 0 fixed
+   clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed
+   root LP 6.6371880269e3 
+   root LP size: rows 822, free columns 1477, nonzeros 3471
+   diff lines 0; results [('time_limit', 25.0, 6742.200024004671), ('optimal', 24.2, 6742.200024), ('optimal', 20.7, 6742.200024), ('optimal', 23.7, 6742.200024)]

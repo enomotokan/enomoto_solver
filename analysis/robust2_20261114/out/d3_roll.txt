@@ -1,0 +1,62 @@
+== roll3000 [MIP_ORDINV=edpq]
+   presolve: rows 2295 -> 1617, free columns 1166 -> 878, nonzeros 29386 -> 26640, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 624 of 624 binaries probed (1 passes), 0 fixed
+   p1 probing: 624 of 624 binaries probed (1 passes), 0 fixed
+   p2 presolve: rows 1617 -> 1614, free columns 877 -> 877, nonzeros 26640 -> 26628, (parallel columns merged: 0 integer, 0 continuous)
+   p3 probing: 624 of 624 binaries probed (1 passes), 0 fixed
+ * clique extension: 110 rows extended, 385 nonzeros added, 0 columns fixed, 0 duplicate and 28 dominated rows removed
+   p1 clique extension: 110 rows extended, 385 nonzeros added, 0 columns fixed, 0 duplicate and 26 dominated rows removed
+   p2 probing: 623 of 623 binaries probed (1 passes), 0 fixed
+   p3 clique extension: 110 rows extended, 385 nonzeros added, 0 columns fixed, 0 duplicate and 28 dominated rows removed
+ * root LP 1.1098170998e4 
+   p1 root LP 1.1098170998e4 
+   p2 presolve: rows 1615 -> 1612, free columns 877 -> 876, nonzeros 26630 -> 26609, (parallel columns merged: 0 integer, 0 continuous)
+   p3 root LP 1.1098170998e4 
+ * root LP size: rows 1589, free columns 878, nonzeros 26773
+   p1 root LP size: rows 1591, free columns 878, nonzeros 26787
+   p2 probing: 622 of 622 binaries probed (1 passes), 0 fixed
+   p3 root LP size: rows 1589, free columns 878, nonzeros 26773
+ * -
+   p1 -
+   p2 clique extension: 109 rows extended, 384 nonzeros added, 0 columns fixed, 0 duplicate and 27 dominated rows removed
+   p3 -
+ * -
+   p1 -
+   p2 root LP 1.1098170998e4 
+   p3 -
+ * -
+   p1 -
+   p2 root LP size: rows 1585, free columns 876, nonzeros 26747
+   p3 -
+   diff lines 7; results [('time_limit', 8.0, 13262.99999974031), ('time_limit', 8.0, 13415.999999999705), ('time_limit', 8.0, 13565.0), ('time_limit', 8.0, 13248.999999999967)]
+== neos-960392 [MIP_ORDINV=edpq]
+   presolve: rows 3999 -> 2022, free columns 3329 -> 1709, nonzeros 19282 -> 12935, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 1629 of 1709 binaries probed (1 passes), 4 fixed
+   p1 probing: 1629 of 1709 binaries probed (1 passes), 4 fixed
+   p2 presolve: rows 2022 -> 2022, free columns 1707 -> 1707, nonzeros 12935 -> 12917, (parallel columns merged: 0 integer, 0 continuous)
+   p3 probing: 1629 of 1709 binaries probed (1 passes), 4 fixed
+ * presolve: rows 2022 -> 1938, free columns 1625 -> 1603, nonzeros 12935 -> 12241, (parallel columns merged: 0 integer, 0 continuous)
+   p1 presolve: rows 2022 -> 1938, free columns 1625 -> 1603, nonzeros 12935 -> 12241, (parallel columns merged: 0 integer, 0 continuous)
+   p2 probing: 1627 of 1707 binaries probed (1 passes), 4 fixed
+   p3 presolve: rows 2022 -> 1938, free columns 1625 -> 1603, nonzeros 12935 -> 12241, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 1603 of 1603 binaries probed (1 passes), 0 fixed
+   p1 probing: 1603 of 1603 binaries probed (1 passes), 0 fixed
+   p2 presolve: rows 2022 -> 1938, free columns 1623 -> 1601, nonzeros 12917 -> 12223, (parallel columns merged: 0 integer, 0 continuous)
+   p3 probing: 1603 of 1603 binaries probed (1 passes), 0 fixed
+ * clique extension: 651 rows extended, 1764 nonzeros added, 0 columns fixed, 0 duplicate and 139 dominated rows removed
+   p1 clique extension: 651 rows extended, 1764 nonzeros added, 0 columns fixed, 0 duplicate and 139 dominated rows removed
+   p2 probing: 1601 of 1601 binaries probed (1 passes), 0 fixed
+   p3 clique extension: 651 rows extended, 1764 nonzeros added, 0 columns fixed, 0 duplicate and 137 dominated rows removed
+ * root LP -2.3800000000e2 
+   p1 root LP -2.3800000000e2 
+   p2 clique extension: 651 rows extended, 1764 nonzeros added, 0 columns fixed, 0 duplicate and 139 dominated rows removed
+   p3 root LP -2.3800000000e2 
+ * root LP size: rows 1883, free columns 1625, nonzeros 13178
+   p1 root LP size: rows 1883, free columns 1625, nonzeros 13178
+   p2 root LP -2.3800000000e2 
+   p3 root LP size: rows 1885, free columns 1625, nonzeros 13186
+ * -
+   p1 -
+   p2 root LP size: rows 1883, free columns 1623, nonzeros 13160
+   p3 -
+   diff lines 7; results [('optimal', 1.9, -238.0), ('optimal', 2.9, -238.0), ('optimal', 5.0, -238.0), ('optimal', 2.7, -238.0)]

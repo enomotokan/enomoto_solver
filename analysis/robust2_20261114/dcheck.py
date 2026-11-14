@@ -17,7 +17,7 @@ while args:
     if a == "-e": k, v = args.pop(0).split("=", 1); extra[k] = v
     elif a == "-k": K = int(args.pop(0))
     else: probs.append(a)
-PAT = re.compile(r"^MIP: (presolve: rows.*|root LP [-0-9.e+]+ |root LP size.*|clique extension: .*?removed|probing: \d+ of \d+ binaries probed \(\d+ passes\), \d+ fixed)")
+PAT = re.compile(r"^MIP: (presolve: rows.*|root LP [-0-9.e+]+ \(\d+ iters|root LP size.*|clique extension: .*?removed|probing: \d+ of \d+ binaries probed \(\d+ passes\), \d+ fixed)")
 tag = re.sub(r"[^A-Za-z0-9=_.,-]", "", "_".join(f"{k.replace('ENOMOTO_','')}={v.split('/')[-1]}" for k, v in sorted(extra.items()))) or "base"
 (D / "logs_d").mkdir(exist_ok=True)
 def mps_of(p, k):
@@ -38,7 +38,7 @@ for p in probs:
         for l in pr.stderr.splitlines():
             m = PAT.match(l)
             if m:
-                s = re.sub(r"postsolve steps \d+ ", "", m.group(1)); s = re.sub(r"\(\d+ iters.*", "", s); L.append(s)
+                s = re.sub(r"postsolve steps \d+ ", "", m.group(1)); L.append(s)
             if l.startswith("MIP: root LP size"): break
         try: res = json.loads([l for l in pr.stdout.splitlines() if l.startswith("{")][-1])
         except Exception: res = {"status": "crash"}

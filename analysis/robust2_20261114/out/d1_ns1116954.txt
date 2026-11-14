@@ -1,0 +1,22 @@
+Running HiGHS 1.16.0 (git hash: f3f113d): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+== ns1116954 [MIP_ORDINV=edpq]
+   presolve: rows 131991 -> 131865, free columns 12648 -> 11928, nonzeros 410582 -> 409850, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 4032 of 7482 binaries probed (1 passes), 0 fixed
+   p1 probing: 4032 of 7482 binaries probed (1 passes), 0 fixed
+   p2 probing: 4032 of 7482 binaries probed (1 passes), 0 fixed
+   p3 -
+ * clique extension: 6882 rows extended, 73319 nonzeros added, 0 columns fixed, 0 duplicate and 3558 dominated rows removed
+   p1 clique extension: 6882 rows extended, 72421 nonzeros added, 0 columns fixed, 0 duplicate and 3558 dominated rows removed
+   p2 clique extension: 6882 rows extended, 72436 nonzeros added, 0 columns fixed, 0 duplicate and 3558 dominated rows removed
+   p3 -
+   diff lines 2; results [('time_limit', 25.5, None), ('time_limit', 25.8, None), ('time_limit', 25.9, None), ('optimal', 3.9, 0.0)]
+== timtab1 [MIP_ORDINV=edpq]
+   presolve: rows 171 -> 197, free columns 384 -> 212, nonzeros 829 -> 719, (parallel columns merged: 0 integer, 1 continuous)
+   probing: 64 of 64 binaries probed (1 passes), 0 fixed
+   presolve: rows 219 -> 194, free columns 212 -> 200, nonzeros 763 -> 713, (parallel columns merged: 0 integer, 0 continuous)
+   probing: 52 of 52 binaries probed (1 passes), 0 fixed
+   clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed
+   root LP 1.6327720692e5 
+   root LP size: rows 194, free columns 200, nonzeros 713
+   diff lines 0; results [('time_limit', 25.0, 903826.9999996198), ('time_limit', 25.0, 966822.9999997802), ('time_limit', 25.0, 900309.99999983), ('time_limit', 25.0, 997034.9999998698)]

@@ -510,6 +510,14 @@ pub fn solve_mip(
     // 試作 `ENOMOTO_MIP_ORDINV` の `c` ([`canonical_problem`]): 行・列を鍵の順に並べ直して解き、解を元の並びに戻す
     let canon = crate::presolve::ordkey::ordinv('c').then(|| canonical_problem(&p));
     let pr = canon.as_ref().map_or(&p, |(q, _)| q);
+    // 診断用の開始解 (`ENOMOTO_MIP_START_FILE`) も並べ直す
+    if let Some((_, cp)) = &canon {
+        RESTART_SOL.with(|s| {
+            if let Some(x) = s.borrow_mut().as_mut().filter(|x| x.len() == cp.len()) {
+                *x = cp.iter().map(|&j| x[j]).collect();
+            }
+        });
+    }
     let mut r = match fold::solve_folded_any(pr, params.time_limit, params.verbose, &dispatch, &dispatch_np) {
         Some(r) => r,
         None => dispatch(pr, params.time_limit),
