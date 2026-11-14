@@ -1243,7 +1243,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             gain = self.lp.objective() - obj0;
             hist.push((gain, if td_c { w_side } else { t0.elapsed().as_secs_f64() }));
             nadd_hist.push(nadd);
-            if stop(r, gain, t0.elapsed().as_secs_f64()) {
+            if stop(r, gain, if td_c { w_side } else { t0.elapsed().as_secs_f64() }) {
                 break;
             }
             if self.lp.objective() <= before + 1e-9 * before.abs().max(1.0) && r > 0 && !PROBE_NO_FLAT_STOP.with(|c| c.get()) {
