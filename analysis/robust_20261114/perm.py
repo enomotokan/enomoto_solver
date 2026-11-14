@@ -3,7 +3,7 @@
 
 HiGHS (highspy) で読み、行と列の順 (と各列の中の非零の順) を種 k の乱数で入れ替えた LP を `passModel` → `writeModel` で書く。
 名前は一緒に並べ替える (名前で列を見分ける処理があっても同じ列を指す)。書いたあと読み直し、逆の並べ替えで元と
-目的・境界・整数性・行の範囲・非零 (値まで完全一致)・目的の定数・向きが同じことを確かめる (違えば例外)。
+目的・境界・整数性・行の範囲・非零 (値は完全一致か、書き出しの丸めの相対 1e-14 以内)・目的の定数・向きが同じことを確かめる (違えば例外)。
 並べ替えは名前以外の情報を変えないので最適値は不変 (計測でも全回の目的値が一致することを summ.py で確かめる)。"""
 import os
 import random
@@ -61,10 +61,11 @@ def make(src, k, out):
         nl.integrality_ = [integ[c] for c in cp]
     nl.offset_ = lp.offset_
     nl.sense_ = lp.sense_
-    if len(lp.col_names_) == n:
-        nl.col_names_ = [lp.col_names_[c] for c in cp]
-    if len(lp.row_names_) == m:
-        nl.row_names_ = [lp.row_names_[r] for r in rp]
+    cn, rn = list(lp.col_names_), list(lp.row_names_)  # highspy は属性を読むたびに全体を複製するので 1 回だけ読む
+    if len(cn) == n:
+        nl.col_names_ = [cn[c] for c in cp]
+    if len(rn) == m:
+        nl.row_names_ = [rn[r] for r in rp]
     starts, idx, val = [0], [], []
     for c in cp:
         ent = [(rinv[r], v) for r, v in cols[c].items()]
@@ -91,6 +92,11 @@ def make(src, k, out):
     return out
 
 
+def _eq(x, y):
+    """同じか、MPS の書き出しの丸め (最後の桁、supportcase26 の行の境界など) の範囲 (相対 1e-14)。"""
+    return x == y or abs(x - y) <= 1e-14 * max(1.0, abs(x))
+
+
 def check(src, permuted, cp, rp):
     """読み直して、逆の並べ替えで元と一致することを確かめる。"""
     _, a = _read(src)
@@ -98,20 +104,30 @@ def check(src, permuted, cp, rp):
     n, m = a.num_col_, a.num_row_
     assert (b.num_col_, b.num_row_) == (n, m), "大きさが違う"
     assert str(a.sense_) == str(b.sense_), "向きが違う"
-    assert a.offset_ == b.offset_, f"目的の定数が違う {a.offset_} {b.offset_}"
+    assert _eq(a.offset_, b.offset_), f"目的の定数が違う {a.offset_} {b.offset_}"
     for name, f in (("cost", "col_cost_"), ("lower", "col_lower_"), ("upper", "col_upper_")):
         x, y = list(getattr(a, f)), list(getattr(b, f))
-        assert all(x[cp[j]] == y[j] for j in range(n)), f"列の {name} が違う"
+        assert all(_eq(x[cp[j]], y[j]) for j in range(n)), f"列の {name} が違う"
     ia, ib = list(a.integrality_), list(b.integrality_)
     ia = ia or [highspy.HighsVarType.kContinuous] * n
     ib = ib or [highspy.HighsVarType.kContinuous] * n
-    assert all(ia[cp[j]] == ib[j] for j in range(n)), "整数性が違う"
+    # HiGHS の MPS の書き出しは、非零も費用もない列の整数性を保たないことがある (physiciansched6-2 の 1 に固定の連続列 316 本が
+    # 整数で書かれる)。境界が同じ整数に固定されていれば同値なので許す
+    ca0 = _cols(a)
+    cl0, cu0, co0 = list(a.col_lower_), list(a.col_upper_), list(a.col_cost_)
+    def same_int(j):
+        c = cp[j]
+        if ia[c] == ib[j]: return True
+        lo, up = cl0[c], cu0[c]
+        return not ca0[c] and co0[c] == 0 and lo == up and float(lo).is_integer()
+    assert all(same_int(j) for j in range(n)), "整数性が違う"
     for name, f in (("lower", "row_lower_"), ("upper", "row_upper_")):
         x, y = list(getattr(a, f)), list(getattr(b, f))
-        assert all(x[rp[i]] == y[i] for i in range(m)), f"行の {name} が違う"
+        assert all(_eq(x[rp[i]], y[i]) for i in range(m)), f"行の {name} が違う"
     ca, cb = _cols(a), _cols(b)
     for j in range(n):
-        assert {rp[i]: v for i, v in cb[j].items()} == ca[cp[j]], f"列 {j} の非零が違う"
+        cj = {rp[i]: v for i, v in cb[j].items()}
+        assert cj.keys() == ca[cp[j]].keys() and all(_eq(ca[cp[j]][r], v) for r, v in cj.items()), f"列 {j} の非零が違う"
 
 
 if __name__ == "__main__":
