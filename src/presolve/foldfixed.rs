@@ -10,7 +10,7 @@
 //! 次ラウンドで処理される。
 
 use crate::types::RowSense;
-use crate::params::presolve::TOL;
+use crate::params::presolve::{EMPTY_ROW_FEAS_TOL, TOL};
 use super::infeas_tol;
 
 /// [`fold_fixed_columns`] の結果。
@@ -38,6 +38,7 @@ pub struct FoldFixedResult {
 pub fn fold_fixed_columns(rows: &[Vec<(usize, f64)>], rhs: &[f64], lb: &[f64], ub: &[f64], sense: RowSense) -> FoldFixedResult {
     let mut new_rows = Vec::with_capacity(rows.len());
     let mut new_rhs = Vec::with_capacity(rhs.len());
+    let empty_tol = tunable!("ENOMOTO_T_EMPTY_ROW_FEAS_TOL", EMPTY_ROW_FEAS_TOL, f64);
     for (row, &r) in rows.iter().zip(rhs.iter()) {
         // 固定されていない (生きている) 項
         let mut live = Vec::with_capacity(row.len());
@@ -58,8 +59,12 @@ pub fn fold_fixed_columns(rows: &[Vec<(usize, f64)>], rhs: &[f64], lb: &[f64], u
             }
         }
         if live.is_empty() {
-            // 既定は相対形 `TOL * (1 + scale)` (`ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対 `TOL`)
-            let tol = infeas_tol(TOL, scale);
+            // 既定は相対形 `TOL * (1 + scale)` (`ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対 `TOL`)。
+            // ただし主実行可能性の許容誤差 [`EMPTY_ROW_FEAS_TOL`] (1e-7) より厳しくはしない (HiGHS の空行の判定と同じ)。
+            // 代入 (doubleton など) で書き換わった行は元の右辺の大きさ (丸め・固定の誤差の基準) を失っており、
+            // `scale` が誤差そのもの (1e-9 程度) になって、許容誤差内の幅の固定の誤差だけで実行不能と判定していた
+            // (fuzz の seed 3470、analysis/wrong3470_20261114.md)
+            let tol = infeas_tol(TOL, scale).max(empty_tol);
             let ok = match sense {
                 RowSense::Eq => folded.abs() <= tol,
                 RowSense::Le => folded >= -tol,
@@ -67,6 +72,15 @@ pub fn fold_fixed_columns(rows: &[Vec<(usize, f64)>], rhs: &[f64], lb: &[f64], u
             };
             if !ok {
                 return FoldFixedResult { rows: Vec::new(), rhs: Vec::new(), infeasible: true };
+            }
+            // 診断用 (`ENOMOTO_DEBUG_EMPTY_ROW`): 下限 `empty_tol` で初めて通った (従来なら実行不能とした) 空行を出す
+            if env_str!("ENOMOTO_DEBUG_EMPTY_ROW").is_some() && match sense {
+                RowSense::Eq => folded.abs(),
+                RowSense::Le => -folded,
+                RowSense::Ge => folded,
+            } > infeas_tol(TOL, scale)
+            {
+                eprintln!("EMPTY_ROW: kept an empty row with residual {folded:e} ({sense:?}, scale {scale:e}, tol {:e})", infeas_tol(TOL, scale));
             }
             continue;
         }

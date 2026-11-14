@@ -894,6 +894,11 @@ pub(crate) mod presolve {
     /// はみ出しが `TOL * (1 + |値|)` 以内 (丸めの範囲) なら従来どおり値そのもの (行を厳密に満たす) で固定し、クランプはしない。
     pub(crate) const ROWSINGLETON_CLAMP_TOL: f64 = 1e-7;
 
+    /// foldfixed の空行 (項がすべて固定・消去された行) の残差を実行不能とみなす下限 (`ENOMOTO_T_EMPTY_ROW_FEAS_TOL`、0 で従来の
+    /// `TOL * (1 + scale)` だけ)。HiGHS `HPresolve` の空行の判定 (`primal_feasibility_tolerance` 1e-7) と同じ。前処理が単体法より
+    /// 厳しい基準で実行不能を宣言しないため ([`ROWSINGLETON_CLAMP_TOL`] と同じ考え方、analysis/wrong3470_20261114.md)
+    pub(crate) const EMPTY_ROW_FEAS_TOL: f64 = 1e-7;
+
     /// 伝播 (`propagate_split`・`propagate_equalities`) で「列 k を除いた最小/最大活動度」
     /// `l_s = finite_sum - a_ik * bound_k` の桁落ちを避ける閾値 (`ENOMOTO_T_PROP_CANCEL_GUARD`、0 で無効)。
     /// 桁落ち誤差の見積もり `項数 * eps * |a_ik * bound_k|` を `|a_ik|` で割った境界候補の誤差 `項数 * eps * |bound_k|` が、
