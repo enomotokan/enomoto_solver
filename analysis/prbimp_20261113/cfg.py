@@ -11,3 +11,4 @@ CFGS = {
 }
 CFGS["c14clqn"] = dict(CAND1114, ENOMOTO_MIP_CLQPRB="1dn")
 CFGS["c14clqg"] = dict(CAND1114, ENOMOTO_MIP_CLQPRB="1dg")
+CFGS["c14clqr"] = dict(CAND1114, ENOMOTO_MIP_CLQPRB="1dgr")  # g + r: 含意を使う形が既定の形より多く得なければ既定の結果に戻す

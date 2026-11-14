@@ -1014,6 +1014,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
         EQUIV2_USED.with(|f| f.set(false));
         CLQPRB_STICKY.with(|f| f.set(false));
+    CLQPRB_REVERTED.with(|f| f.set(false));
         zerohalf::zh_trial_reset();
         cutmix::reset();
     }
@@ -5569,6 +5570,8 @@ thread_local! {
     /// `ENOMOTO_MIP_CLQPRB` の `g`: この求解で一度含意を使う形に切り替えたら、後のプロービング (前処理のかけ直し・再スタート) でも判定せずに使う
     /// (neos8 は 2 回目のプロービングで既定の形では同値な組が 0 組、含意を使うと 1152 組)。求解の始めに戻す
     static CLQPRB_STICKY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// `CLQPRB` の `r`: 含意を使う形が既定の形より多く得ず、既定の結果に戻した。その求解の残りでは既定の形を使う
+    static CLQPRB_REVERTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 最後の [`probe`] の成果 (固定, 締め付け, 同値な組)。`ENOMOTO_MIP_CLQPRB` の `g` の判定に使う
     static PROBE_GAIN: std::cell::Cell<(usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0)) };
 }
@@ -5628,7 +5631,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // `ENOMOTO_T_MIP_CLQPRB_EDGE_MULT` 倍 (既定 40) と `ENOMOTO_T_MIP_CLQPRB_EDGE_MAX` 本 (既定 600 万) の小さい方にする (非零数の 10 倍は下回らない)。
     // 上限に届いたら重複を除いて詰める (2 巡目は同じ含意をもう一度集めるので、重複込みで数えると上限に早く届く)。mzzv11 は 10 倍 (136 万本) では
     // 足りず、後ろの候補の含意が落ちて、含意を使う伝播で見つかるはずの固定 (HiGHS の probing の固定の大半) を逃していた
-    let clqprb = clqprb_on() && !submip && !CLQPRB_SUPPRESS.with(|f| f.get());
+    let clqprb = clqprb_on() && !submip && !CLQPRB_SUPPRESS.with(|f| f.get()) && !CLQPRB_REVERTED.with(|f| f.get());
     // `ENOMOTO_MIP_CLQPRB` の `g` (試作、analysis/prbimp_20261113.md): まず既定の形でプロービングを回し、固定・締め付け・同値な組が
     // `ENOMOTO_T_MIP_CLQPRB_G_MIN` (既定 1) 個以上出たときだけ、問題を元に戻して含意を使う形でやり直す。何も得られない問題
     // (roll3000・cbs-cta・air03・nw04 など。含意を使っても固定は出ず、含意の数・同値な組・プロービングの時間だけが変わって後の流れが変わる) では
@@ -5648,14 +5651,39 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         if verbose {
             eprintln!("MIP: probing: CLQPRB=g: the default probing found {gf} fixed, {gt} tightened, {ge} equivalent pairs ({:.2}s); redoing it with the implications", tg.elapsed().as_secs_f64());
         }
+        // `r` (試作): 含意を使う形が既定の形より多く (固定 + 締め付け + 同値な組) 得なければ、既定の形の結果に戻す。
+        // neos-860300 (どちらも固定 165)・timtab1 (どちらも同値な組 22)・neos-4722843-widden (含意を使う形は予算を使い切って固定 1) で、
+        // 得たものは同じか少ないのに含意の数だけが変わって後の流れが変わり、種をまたいで遅くなっていた
+        let revert = clqprb_has('r');
+        let def_state = if revert {
+            Some((prob.clone(), PROBE_EQUIV.with(|e| e.borrow().clone()), PROBE_EQUIV_FORCE.with(|f| f.get()), EQUIV2_USED.with(|f| f.get()), r))
+        } else {
+            None
+        };
         *prob = saved;
         PROBE_EQUIV.with(|e| e.borrow_mut().clear());
         PROBE_EQUIV_FORCE.with(|f| f.set(flags.0));
         EQUIV2_USED.with(|f| f.set(flags.1));
         CLQPRB_FORCE.with(|f| f.set(true));
-        CLQPRB_STICKY.with(|f| f.set(true));
+        PROBE_GAIN.with(|f| f.set((0, 0, 0)));
         let r = probe(prob, verbose, submip);
         CLQPRB_FORCE.with(|f| f.set(false));
+        let (cf, ct, ce) = PROBE_GAIN.with(|f| f.get());
+        if let Some((dp, de, dff, deu, dr)) = def_state {
+            if r != Some(false) && cf + ct + ce <= gf + gt + ge {
+                if verbose {
+                    eprintln!("MIP: probing: CLQPRB=r: the implications found {cf} fixed, {ct} tightened, {ce} equivalent pairs, not more than the default; the default result is used");
+                }
+                *prob = dp;
+                PROBE_EQUIV.with(|e| *e.borrow_mut() = de);
+                PROBE_EQUIV_FORCE.with(|f| f.set(dff));
+                EQUIV2_USED.with(|f| f.set(deu));
+                // その求解の後のプロービング (前処理のかけ直し・再スタート) でも判定せずに既定の形を使う
+                CLQPRB_REVERTED.with(|f| f.set(true));
+                return dr;
+            }
+        }
+        CLQPRB_STICKY.with(|f| f.set(true));
         return r;
     }
     // `ENOMOTO_MIP_CLQPRB` の `n` (試作、analysis/prbimp_20261113.md): 何も固定・締め付けられなければ既定の形でやり直すので、
