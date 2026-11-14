@@ -2984,6 +2984,8 @@ pub(super) fn treeeff(c: char) -> bool {
 /// - `i`: 再スタートの後の求解で暫定解がなくても、打ち切り値があれば木の中の再スタートを判定する ([`Solver::tree_restart_due`])。
 /// - `c`: カットプールの伝播 ([`Solver::propagate_cut_pool`]) を効き目で止めた後も、飛ばした回数が止めた時の呼び出し回数の 2 倍
 ///   (試し直すたびに倍) に着いたら、もう一度 `ENOMOTO_T_MIP_CUTPOOL_PROP_TRIAL` 回試す。
+/// - `w`: カットプールの伝播の止め方を、呼び出し回数の区切りの効き目から手間 (更新した項 + 候補の非零) の区切りの効き目に変える
+///   (`ENOMOTO_T_MIP_TC_W_WORK`・`ENOMOTO_T_MIP_TC_W_RATE`)。`c` とは一緒に使わない。
 /// - `g`: 木の中で `ENOMOTO_T_MIP_TC_G_EVERY` (100) ノードごとに、開いたノード全てに共通の整数列の境界を大域的な境界にし、打ち切り値つきの
 ///   大域の伝播を回す (不動点まで最大 `ENOMOTO_T_MIP_TC_G_ROUNDS` (5) 回)。伝播が矛盾すれば残りの開いたノードに打ち切り値より良い解は
 ///   ないので木を閉じる ([`Solver::tc_open_tighten`])。HiGHS の `HighsNodeQueue::pruneInfeasibleNodes` (sct2 で開いたノード 3000 余りが
@@ -17864,10 +17866,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return true;
             }
         }
+        // 試作 `ENOMOTO_MIP_TC` の `w`: 呼び出しの回数ではなく手間 (更新した項 + 候補のカットの非零) で区切り、区切りごとの効き目
+        // (締めた境界 + 10 × 刈ったノード) が手間 100 万あたり `ENOMOTO_T_MIP_TC_W_RATE` (5) 未満なら止める。区切りは
+        // `ENOMOTO_T_MIP_TC_W_WORK` (1e8)。木の始めの手間の小さいうちは判定しない (neos5: 既定は始めの 1000 回 (0.01 秒) で効き目 0 で止まり、
+        // 止めなければ 1 スレッドで 4 種とも解ける。pk1 は効き目 1.0〜1.2 で止める側)
+        if tc_on('w') {
+            let work = self.cpp.work[0] + self.cpp.work[2];
+            let (w0, u0) = (self.tc_c.2[0], self.tc_c.2[1]);
+            let useful = self.cutpool_prop_stats[2] + 10 * self.cutpool_prop_stats[1];
+            if work.saturating_sub(w0) as f64 >= tunable!("ENOMOTO_T_MIP_TC_W_WORK", 1e8, f64) {
+                let rate = 1e6 * useful.saturating_sub(u0) as f64 / work.saturating_sub(w0).max(1) as f64;
+                self.tc_c.2[0] = work;
+                self.tc_c.2[1] = useful;
+                if rate < tunable!("ENOMOTO_T_MIP_TC_W_RATE", 5.0, f64) {
+                    self.cpp.off = true;
+                    if self.params.verbose {
+                        eprintln!("MIP: TC w: cut pool propagation stopped after {} calls (useful {rate:.2} per 1e6 work)", self.cutpool_prop_stats[0]);
+                    }
+                    return true;
+                }
+            }
+        }
         // 効き目は今の試しの区切り (`TC=c` で試し直した後はそこから) で数える
         let base = self.tc_c.2;
         let calls = self.cutpool_prop_stats[0] - base[0];
-        if calls >= trial && calls % trial == 0 {
+        if !tc_on('w') && calls >= trial && calls % trial == 0 {
             let useful = (self.cutpool_prop_stats[2] - base[2]) + 10 * (self.cutpool_prop_stats[1] - base[1]);
             if (useful as f64) < tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_MIN_RATE", 0.01, f64) * calls as f64 {
                 self.cpp.off = true;
