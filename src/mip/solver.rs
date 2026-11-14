@@ -9377,6 +9377,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         && s.params.time_limit.is_finite()
                         && rh_t0.elapsed().as_secs_f64() > if s.incumbent.is_some() { rh_frac } else { rh_frac_noinc } * s.params.time_limit
                 };
+                // 試作 `ENOMOTO_MIP_RHEUR` の `e` ([`rheur`]): locks などを Pump・ダイビングの前に出したか
+                let mut early_scip = false;
                 macro_rules! heur {
                     ($name:expr, $e:expr) => {{
                         let bit = heur_bit($name);
@@ -9486,7 +9488,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                             // `ENOMOTO_MIP_POLL_SUBMIPS`: 別スレッドのサブ MIP のうち終わったものの結果をすぐ受け取る (以前は根の
                             // ヒューリスティクスを一通り回し終えてから受け取ったので、見つかった解が後のヒューリスティクスに使われなかった)
-                            if env_str!("ENOMOTO_MIP_POLL_SUBMIPS").is_some() {
+                            if env_str!("ENOMOTO_MIP_POLL_SUBMIPS").is_some() || (early_scip && self.incumbent.is_none()) {
                                 self.poll_submips();
                             }
                             if !found {
@@ -9635,7 +9637,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 作った求解でそれぞれ別スレッドで同時に行い、元の順の位置で結果を受け取る (先のもので暫定解が見つかっても、
                 // 後のものの解も受け取る)
                 let mut par_dives: Vec<Option<std::thread::JoinHandle<MipResult>>> = Vec::new();
-                let mut early_scip = false;
                 if self.incumbent.is_none() && !light && mip_threads() > 1 && !self.params.submip && env_str!("ENOMOTO_MIP_PAR_DIVES").is_some() {
                     let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                     let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());

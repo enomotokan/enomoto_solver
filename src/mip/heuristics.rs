@@ -2565,7 +2565,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_MIP_POLL_SUBMIPS`: 暫定解のない根の Feasibility Pump・ダイビングの途中で、別スレッドのサブ MIP のうち
     /// 終わったものの結果を受け取り、暫定解ができたら真 (呼び出し側は打ち切る)。
     pub(super) fn poll_found_solution(&mut self) -> bool {
-        if self.pending_submips.is_empty() || self.incumbent.is_some() || env_str!("ENOMOTO_MIP_POLL_SUBMIPS").is_none() {
+        // 試作 `ENOMOTO_MIP_RHEUR` の `e` ([`super::solver::rheur`]): 先に出した locks などのサブ MIP の解を Pump・ダイビングの途中で受け取る
+        if self.pending_submips.is_empty() || self.incumbent.is_some() || (env_str!("ENOMOTO_MIP_POLL_SUBMIPS").is_none() && !(super::solver::rheur('e') && !self.params.submip)) {
             return false;
         }
         self.poll_submips();
