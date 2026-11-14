@@ -430,6 +430,8 @@ pub fn solve_mip(
     }
     // 試作 `ENOMOTO_MIP_LPSCALE=h`: 重い LP を見て立てた印は外側の求解ごとに下ろす
     crate::simplex::mip_lp::lpscale_disarm();
+    // `ENOMOTO_MIP_WORK_LIMIT` の手間の数えは外側の求解ごとに 0 から
+    solver::WORK_BASE.store(0, std::sync::atomic::Ordering::Relaxed);
     // 既定値 < 環境変数 < 引数の順に優先する。
     let env_f64 = |v: Option<&str>| v.and_then(|s| s.parse::<f64>().ok());
     let d = MipParams::default();

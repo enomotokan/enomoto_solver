@@ -3579,6 +3579,12 @@ pub(crate) fn rens_more_nodes_real() -> bool {
     env_def!("ENOMOTO_MIP_RENS_MORE_NODES_REAL", "1").is_some() || rens_resume_on()
 }
 
+/// [`Solver::work_counted`] の前の求解 (再スタートの前) の手間の合計
+pub(super) static WORK_BASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(super) fn work_limit() -> Option<u64> {
+    env_str!("ENOMOTO_MIP_WORK_LIMIT").and_then(|v| v.parse::<f64>().ok()).map(|v| v as u64)
+}
+
 thread_local! {
     /// 試作 `ENOMOTO_MIP_TIMEDEP` の `n`: 次に作るサブ MIP の LP の反復の上限 (作るときに受け取って 0 に戻す。[`Solver::iter_cap`])
     pub(super) static SUBMIP_ITER_CAP: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -6085,8 +6091,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.rootcap_until.map(|d| self.rootcap_each.min(d.saturating_duration_since(Instant::now()).as_secs_f64().max(self.rootcap_late)))
     }
 
+    /// 診断・計測用 `ENOMOTO_MIP_WORK_LIMIT` = N (analysis/timedep_20261114.md の 5 節・6 節、既定では使わない): 外側の主の求解の手間
+    /// (LP の反復 + ヒューリスティクスの LP の反復、再スタートの前の分を含む) が N を超えたら時間切れとして止める。時間の上限の代わりに
+    /// 手間で止めて、時間切れの回も決定的にする
+    fn work_counted(&self) -> bool {
+        !self.params.submip && self.snap.is_none() && self.pool_tid == 0 && self.watch.is_none() && work_limit().is_some()
+    }
+
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
+            || (self.work_counted() && WORK_BASE.load(std::sync::atomic::Ordering::Relaxed) + self.lp.total_iterations() + self.heur_iters >= work_limit().unwrap_or(u64::MAX))
             || (self.iter_cap > 0 && self.lp.total_iterations() >= self.iter_cap)
             || self.heur_stop.is_some_and(|d| Instant::now() >= d)
             || ((self.bg_watch.is_some() || self.root_submip.is_some()) && self.bg_proved())
@@ -19301,6 +19315,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
             None => f64::INFINITY,
         };
+        // `ENOMOTO_MIP_WORK_LIMIT`: この求解の手間を次の求解 (再スタートの後) に引き継ぐ
+        if self.work_counted() {
+            WORK_BASE.fetch_add(self.lp.total_iterations() + self.heur_iters, std::sync::atomic::Ordering::Relaxed);
+        }
         let params = MipParams {
             time_limit: remaining,
             node_limit: self.params.node_limit.saturating_sub(self.nodes),
