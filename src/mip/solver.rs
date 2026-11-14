@@ -12258,7 +12258,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let added = self.hcm_node_sep_round(&x, fresh);
                         if fresh {
                             self.node_cut_secs += t_nc.elapsed().as_secs_f64();
-                            self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
+                            self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                         }
                         if env_str!("ENOMOTO_MIP_DEBUG_HCM").is_some() {
                             eprintln!("HCM node {} depth {} round {} obj {:.6} rows {} -> {} added {} pool {}", self.nodes, node.depth, hcm_sep_rounds, node_obj, rows0, self.lp.num_rows(), added, self.cut_pool.len());
@@ -12282,7 +12282,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 let it_nc = self.lp.total_iterations();
                                 let added = self.hcm_node_sep_round(&x, true);
                                 self.node_cut_secs += t_nc.elapsed().as_secs_f64();
-                                self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
+                                self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                                 if added {
                                     hcm_sep_rounds = 2;
                                     resolves += 1;
@@ -12345,7 +12345,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let added = self.node_cut_round(&x);
                         self.extra_sep_rows.clear();
                         self.node_cut_secs += t_nc.elapsed().as_secs_f64();
-                        self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
+                        self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                         self.obj_cut_stats[0] += 1;
                         if added {
                             self.obj_cut_stats[1] += 1;
@@ -12367,7 +12367,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let it_nc = self.lp.total_iterations();
                         let added = self.tree4_proof_cuts(&x);
                         self.node_cut_secs += t_nc.elapsed().as_secs_f64();
-                        self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
+                        self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                         if added {
                             t4pc_added = true;
                             resolves += 1;
@@ -12424,7 +12424,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.tsd[3] += 1;
                     self.tsd[4] += added as u64;
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
-                    self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
+                    self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                     self.node_sep_stats[0] += 1;
                     self.node_sep_stats[1] += added as u64;
                     ts_rounds = if added { ts_rounds + 1 } else { usize::MAX };
@@ -12444,7 +12444,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let it_nc = self.lp.total_iterations();
                     let added = self.node_cut_round(&x);
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
-                    self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
+                    self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                     self.node_sep_stats[0] += 1;
                     self.node_sep_stats[1] += added as u64;
                     if added {
@@ -12459,7 +12459,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let it_nc = self.lp.total_iterations();
                     let added = self.node_cut_round(&x);
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
-                    self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + 0.5 * self.avg_node_iters() as f64;
+                    self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                     self.node_sep_stats[0] += 1;
                     self.node_sep_stats[1] += added as u64;
                     if fc2_due {
