@@ -1,9 +1,10 @@
 """決定的な 1 スレッドの計測の道具 (analysis/timedep_20261114.md の 5・6 節): 4 CPU に 1 本ずつ、4 本同時に解く。
-python tool.py OUT.jsonl TAG 問題,... 種,... [--wl 上限.json] [--wlmult x] [--tl 秒] [--log] [K=V ...]
+python tool.py OUT.jsonl TAG 問題,... 種,... [--wl 上限.json] [--wlmult x] [--tl 秒] [--log] [--slow] [K=V ...]
 - 設定は束 cand1114 + K=V (例 ENOMOTO_MIP_TIMEDEP=mplb)。1 スレッド。
 - --wl: 問題ごとの手間の上限 (ENOMOTO_MIP_WORK_LIMIT、外側の求解の LP の反復 + ヒューリスティクスの LP の反復) の JSON {問題: 反復}。
   --wlmult で倍率。上限のある問題は時間の上限を --tl (既定 600 秒) にして安全網にする。上限のない問題は --tl (既定 60 秒)。
 - 行: problem, tag, seed, status, objective, nodes, lp_iterations, time, wl。--log なら logs_tool/<TAG>/<問題>_s<種>.log に ENOMOTO_MIP_LOG=1 のログ。
+--slow: 同じ CPU で `yes` を回して遅い機械を真似る (壁時計は約半分の速さ、CPU 時間は変わらない)。
 済んだ (問題, 種) は飛ばす (OUT に TAG の行があれば)。"""
 import json, os, subprocess, sys, threading, queue
 from pathlib import Path
@@ -12,12 +13,13 @@ sys.path.insert(0, str(WT / "analysis/cand1114_20261113"))
 from cfg import CAND1114  # noqa: E402
 args = sys.argv[1:]
 out, tag, probs, seeds = Path(args[0]), args[1], args[2].split(","), [int(s) for s in args[3].split(",")]
-opts = {"--wl": None, "--wlmult": "1", "--tl": None}; log = False; kv = []
+opts = {"--wl": None, "--wlmult": "1", "--tl": None}; log = False; slow = False; kv = []
 i = 4
 while i < len(args):
     a = args[i]
     if a in opts: opts[a] = args[i + 1]; i += 2; continue
     if a == "--log": log = True; i += 1; continue
+    if a == "--slow": slow = True; i += 1; continue
     kv.append(a); i += 1
 wl = json.loads(Path(opts["--wl"]).read_text()) if opts["--wl"] else {}
 mult = float(opts["--wlmult"])
@@ -56,8 +58,10 @@ def worker(cpu):
         lf = None
         if log:
             (D / "logs_tool" / tag).mkdir(parents=True, exist_ok=True); lf = open(D / "logs_tool" / tag / f"{p}_s{s}.log", "w")
+        hog = subprocess.Popen(["taskset", "-c", str(cpu), "yes"], stdout=subprocess.DEVNULL) if slow else None
         pr = subprocess.run(["taskset", "-c", str(cpu), sys.executable, "-c", CODE, str(WT / ".miplib_cache" / f"{p}.mps"), str(tl)],
                             env=env, cwd=WT, stdout=subprocess.PIPE, stderr=lf or subprocess.DEVNULL, text=True)
+        if hog: hog.kill(); hog.wait()
         if lf: lf.close()
         res = [l for l in pr.stdout.splitlines() if l.startswith("TOOLRES ")]
         r = json.loads(res[-1][8:]) if res else {"status": "crash"}
