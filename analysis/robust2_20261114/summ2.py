@@ -10,10 +10,12 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 a = sys.argv[1:]; only = None
 if "-p" in a: i = a.index("-p"); only = set(a[i + 1].split(",")); del a[i:i + 2]
+tags = None  # -t タグ,...: pair.py の分担の結果のうち、このタグのものだけを読む (例: -t s0f,s1f,s2f,s3f)
+if "-t" in a: i = a.index("-t"); tags = a[i + 1].split(","); del a[i:i + 2]
 TH, BASE, CFGS = a[0], a[1], a[2:]
 def load(c):
     R = {}
-    lines = [l for f in sorted(D.glob(f"res_{c}_t{TH}.jsonl")) + sorted(D.glob(f"res_{c}_t{TH}_*.jsonl")) for l in f.read_text().splitlines()]
+    lines = [l for f in sorted(D.glob(f"res_{c}_t{TH}.jsonl")) + sorted(f for f in D.glob(f"res_{c}_t{TH}_*.jsonl") if tags is None or f.stem.split(f"_t{TH}_", 1)[1] in tags) for l in f.read_text().splitlines()]
     for l in lines:
         if not l.strip(): continue
         r = json.loads(l)
