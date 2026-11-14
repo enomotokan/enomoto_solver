@@ -230,3 +230,39 @@ ENOMOTO_MIP_THREADS=1 ENOMOTO_MIP_CUTOFF=-230.98915 ENOMOTO_MIP_TC=g ENOMOTO_MIP
 - 次に見るべき所 (未着手): 分枝 1 回あたりの下界の伸びを、HiGHS の分枝をなぞる既存の仕組み (`ENOMOTO_MIP_BRANCH_REPLAY`、tree_replay_20261022) で
   mcsched について確かめる (なぞっても深さが 2 倍なら、ノードの LP・伝播・衝突の側。そうでなければ分枝の選び方)。HiGHS の葉の計数は
   `/tmp` の改造 venv (この記録の 4.2) で、パッチは HighsSearch.cpp の `HtcStats` (再現には同じ箇所に足す)。
+
+## 6. 切り分け: mcsched で HiGHS の分枝をなぞる (親の指示、2026-11-14 夜)
+
+- HiGHS 1.15.1 に tree_replay_20261022 の計装パッチ (`highs_instrument_replay.patch`、`HIGHS_PATH_LOG`) を当てた版で、mcsched を 1 スレッド・
+  打ち切り値 211913.0001・**再スタートなし** (`mip_allow_restart=false`) で解く: 最適 889 秒・30373 ノード (`replay/highs_mcsched_norestart.out`)。
+  再スタートありの回 (29128 ノード) はなぞりの対応が再スタートで崩れるので使わない。
+- `highs_to_replay.py` で作ったなぞりのファイル (`replay/rp_mcsched_norestart.txt.gz`) で ENOMOTO (cand1114、1 スレッド、同じ打ち切り値、
+  `ENOMOTO_MIP_NO_RESTART=1`、`ENOMOTO_MIP_BRANCH_REPLAY`・`ENOMOTO_MIP_REPLAY_LOG`) を 900 秒: **24873 ノードで閉じない、下界 194129** (根 193788)。
+  分枝の選び方をそろえても閉じないので、差はノードの側。
+- 両方の木にあるノード (`ER` 行、258 本で LP 値がそろうもの) で、根の LP 値は同じ (差 −0.7) だが、HiGHS の LP 値が深さとともに上:
+  中央値で深さ 5〜9 は +448、10〜14 は +940、15〜19 は +1090、20〜24 は +1649。固定した整数列は HiGHS が中央値で 54 本多い。
+- 固定の理由 (同じ 316 ノードの平均、1 ノードの整数列の境界の変更): 行・クリーク HiGHS 381 / こちら 310、**被約費用 HiGHS 34.1 / こちら 1.4**、
+  分枝 11.8 / 8.4、衝突プール 1.8 / リテラルの衝突 0.1。HiGHS はノードの定義域の変更 (伝播・被約費用の固定を含む) を子に持たせるので、
+  祖先の被約費用の固定が子孫の LP で効き、深さとともに差が開く。こちらは局所的な被約費用の固定 (`local_redcost_fixing`) を子のノードに
+  持たせない (待ち行列・兄弟から取り出すと根から分枝だけを積み直す。analysis/tree_close4_20261104.md の 5 章で未着手とされた点)。
+
+### 試作 `ENOMOTO_MIP_TC=r` (既定では使わない)
+
+- 子を作るとき、今のノードの定義域の変更の記録にある局所的な被約費用の固定 (理由 −3) を、分枝ではない変更 (`BoundChange::sym` を立てる、
+  orbital fixing の変更と同じ扱い) として子の変更に足す (`Domain::tagged_int_changes`、solver.rs の子を作る `mk` の前)。固定は打ち切り値に対して
+  部分木で成り立ち、打ち切り値は下がるだけなので、子孫でも成り立つ。
+- 1 スレッド・600 秒 (秒、* は時間切れ):
+
+| 問題 | 既定 b1 | `TC=r` |
+|---|---|---|
+| neos5 (種 1〜4) | 372・461・174・600* | **120・169・255・430** |
+| neos-3627168-kasai (種 1〜3) | 447・600*・421 | **322・445・275** |
+| csched008 (種 1) | ギャップ 6.6% | **1.2%** |
+| mcsched (種 1) | 4.5% | 4.1% |
+| sct2 (種 1、打ち切り値つき) | 下界 −231.0409 | −231.0583 (変わらず) |
+
+- 子に引き継いだ固定の数 (600 秒): sct2 20 万、csched008 6.5 万、kasai 4 万、neos5 2.4 万、mcsched 1.8 万 (mcsched は 1 ノード 0.8 本で、
+  HiGHS の 34 本に遠い。こちらの局所的な被約費用の固定そのものが少ない)。
+- 誤答の確かめ (cand1114 + `TC=r`): fuzz_tiny 400・mip_fuzz_vs_highs 300・mip_fuzz_symmetric 300・mip_fuzz_fixed_charge 200 で誤答 0 (ただし木に入る回は少ない)。
+  `cargo test --release --lib` は既定・`ENOMOTO_MIP_TC=r` とも 416 通過。
+- 次: 58 問 x 種 1〜2 (60 秒・4 スレッド) の対 (`b58r/`、base 対 tcr)。
