@@ -228,6 +228,21 @@ impl Domain {
         l
     }
 
+    /// 試作 `ENOMOTO_MIP_TC` の `r`: 変更の記録のうち理由が `reason` の整数列の境界の変更を、列と向きごとに最後の (最も締まった) 値で返す
+    pub fn tagged_int_changes(&self, p: &MipProblem, reason: i32) -> Vec<(usize, bool, f64)> {
+        let mut out: Vec<(usize, bool, f64)> = Vec::new();
+        for ch in &self.stack {
+            if ch.reason != reason || !p.is_int[ch.col] {
+                continue;
+            }
+            match out.iter_mut().find(|e| e.0 == ch.col && e.1 == ch.upper) {
+                Some(e) => e.2 = ch.new,
+                None => out.push((ch.col, ch.upper, ch.new)),
+            }
+        }
+        out
+    }
+
     pub fn stack_len(&self) -> usize {
         self.stack.len()
     }

@@ -745,6 +745,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     tc_c: (u64, u64, [u64; 4], u64),
     /// 試作 `ENOMOTO_MIP_TC` の `v`: 呼ぶ間隔・呼ばれた回数・区切りの始めの (手間, 効き目)・間隔の最大
     tc_v: (u64, u64, (u64, u64), u64),
+    /// 試作 `ENOMOTO_MIP_TC` の `r`: 子に引き継いだ被約費用の固定の数
+    tc_r_stats: u64,
     tr_last: (u64, f64, f64, f64),
     /// 木の中の再スタートの記帳 (`TRSTAT`、ログだけ) と `ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、[`Self::tree_restart_guard_ok`]) 用:
     /// この求解で木のループに入った時刻 (この求解の始めからの秒)、そのときの全体の下界、[`Self::tree_restart_due`] の最後の木の大きさの見積もり。
@@ -2991,6 +2993,7 @@ pub(super) fn treeeff(c: char) -> bool {
 /// - `w`: カットプールの伝播の止め方を、呼び出し回数の区切りの効き目から手間 (更新した項 + 候補の非零) の区切りの効き目に変える
 ///   (`ENOMOTO_T_MIP_TC_W_WORK`・`ENOMOTO_T_MIP_TC_W_RATE`)。`c` とは一緒に使わない。
 /// - `v`: カットプールの伝播を止めずに間引く (効き目の低い区切りが続けば呼ぶ間隔を倍々に、最大 `ENOMOTO_T_MIP_TC_V_MAX` (32) ノードに 1 回)。
+/// - `r`: ノードの局所的な被約費用の固定を子のノードの変更に足して引き継ぐ (待ち行列から取り出しても効く)。
 /// - `g`: 木の中で `ENOMOTO_T_MIP_TC_G_EVERY` (100) ノードごとに、開いたノード全てに共通の整数列の境界を大域的な境界にし、打ち切り値つきの
 ///   大域の伝播を回す (不動点まで最大 `ENOMOTO_T_MIP_TC_G_ROUNDS` (5) 回)。伝播が矛盾すれば残りの開いたノードに打ち切り値より良い解は
 ///   ないので木を閉じる ([`Solver::tc_open_tighten`])。HiGHS の `HighsNodeQueue::pruneInfeasibleNodes` (sct2 で開いたノード 3000 余りが
@@ -4856,6 +4859,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tc_g_stats: [0; 4],
         tc_c: (0, 0, [0; 4], 0),
         tc_v: (1, 0, (0, 0), 1),
+        tc_r_stats: 0,
         tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
         tr_t0: 0.0,
         tr_w0: (0.0, 0),
@@ -12798,7 +12802,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let prot = if keep_basis { self.basis_protected_cuts() } else { None };
             // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
             let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
-            let of_fixes = std::mem::take(&mut self.of_node_fixes);
+            let mut of_fixes = std::mem::take(&mut self.of_node_fixes);
+            // 試作 `ENOMOTO_MIP_TC` の `r`: このノードの局所的な被約費用の固定 (理由 -3) を子に引き継ぐ (分枝ではない変更として `sym` を立てる)。
+            // HiGHS はノードの定義域の変更を子に持たせ、mcsched で HiGHS の分枝をなぞった同じノードの被約費用の固定は HiGHS 34 本・こちら 1.4 本
+            if tc_on('r') {
+                let mut have: Vec<(usize, bool, f64)> = node.changes.iter().chain(of_fixes.iter()).map(|c| (c.col, c.upper, c.value)).collect();
+                for (j, upper, v) in self.dom.tagged_int_changes(self.p, -3) {
+                    let tighter = match have.iter().filter(|e| e.0 == j && e.1 == upper).map(|e| e.2).reduce(|a, b| if upper { a.min(b) } else { a.max(b) }) {
+                        Some(w) => if upper { v < w - 0.5 } else { v > w + 0.5 },
+                        None => true,
+                    };
+                    if tighter {
+                        of_fixes.push(BoundChange { col: j, upper, value: v, sym: true });
+                        have.push((j, upper, v));
+                        self.tc_r_stats += 1;
+                    }
+                }
+            }
             let sb_child = self.sb_child_inherit(&node);
             let mk = |c: BoundChange| {
                 let mut ch = node.changes.clone();
@@ -22761,6 +22781,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: cut pool propagation: calls {}, pruned {} nodes, tightened {} bounds, {:.2}s, pool {} cuts ({} nonzeros); updated terms {}, candidates {} ({} nonzeros), rebuilds {}", self.cutpool_prop_stats[0], self.cutpool_prop_stats[1], self.cutpool_prop_stats[2], self.cutpool_prop_stats[3] as f64 * 1e-9, self.cut_pool.len(), self.cut_pool_nnz, self.cpp.work[0], self.cpp.work[1], self.cpp.work[2], self.cpp.work[3]);
                 if tc_on('c') {
                     eprintln!("MIP: TC c: cut pool propagation retried {} times, off now {}", self.tc_c.3, self.cpp.off);
+                }
+                if tc_on('r') {
+                    eprintln!("MIP: TC r: reduced-cost fixings passed to children {}", self.tc_r_stats);
                 }
                 if tc_on('v') {
                     eprintln!("MIP: TC v: cut pool propagation interval now {}, max {}", self.tc_v.0, self.tc_v.3);
