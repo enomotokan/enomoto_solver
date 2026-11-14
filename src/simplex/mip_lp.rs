@@ -2061,6 +2061,17 @@ impl TwoStageLp {
             return self.solve_once(lim);
         };
         let debug = env_str!("ENOMOTO_DEBUG_RACE").is_some();
+        // 試作 `ENOMOTO_MIP_TIMEDEP` の `r` (analysis/timedep_20261114.md): 勝ち手を時間でなく手間で決める。二段解法に反復の上限
+        // L = `ENOMOTO_T_MIP_TIMEDEP_RACE_C` (既定 1) x (行 + 列) を付け、内点法側からは止めさせない。L 以内に結論を出せば二段解法、
+        // 出せなければ内点法 + クロスオーバーの頂点を待って採る (頂点が得られなければ二段解法を続ける)。内点法は二段解法の書く
+        // 共有の下界を読まない (止まる反復が二段解法の進みで変わるため)
+        let td = !force_ipm && env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains('r'));
+        let td_lim = if td {
+            let l = (tunable!("ENOMOTO_T_MIP_TIMEDEP_RACE_C", 1.0, f64) * (self.rows.len() + self.n) as f64).max(100.0) as u64;
+            SolveLimits { iteration_limit: lim.iteration_limit.min(l), ..*lim }
+        } else {
+            *lim
+        };
         let t0 = std::time::Instant::now();
         let cancel = Arc::new(AtomicBool::new(false));
         let bound = crate::cancel::SharedBound::new(self.std.n_total, self.std.n_rows);
@@ -2079,15 +2090,15 @@ impl TwoStageLp {
                     // 仕上げの二段解法の最適基底と双対を記録させる
                     sid::request_duals(true);
                     let r = crate::cancel::with_deadline(deadline, || {
-                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || ipm_crossover_run(&std, sc.as_deref())))
+                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound((!td).then_some(bound), || ipm_crossover_run(&std, sc.as_deref())))
                     });
                     let duals = sid::take_duals();
                     sid::request_duals(false);
                     super::crossover::XO_STAMP.with(|s| *s.borrow_mut() = None);
                     r.filter(|r| r.status == Status::Optimal).and_then(|r| r.x).map(|x| (x, duals))
                 });
-                // 最適な頂点が得られ、二段解法より先なら合図を立てて二段解法を止める
-                let won = r.is_some() && !cancel.swap(true, Ordering::SeqCst);
+                // 最適な頂点が得られ、二段解法より先なら合図を立てて二段解法を止める (`td` では止めず、結果を渡すだけ)
+                let won = r.is_some() && (td || !cancel.swap(true, Ordering::SeqCst));
                 let _ = tx.send(if won { r } else { None });
             });
         }
@@ -2097,13 +2108,38 @@ impl TwoStageLp {
         let (st, flags, y_mid) = pool_s.install(|| {
             sid::set_tl_flags(flags);
             let _ = stamp.is_some().then(sid::take_bound_duals);
-            let st = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || self.solve_once(lim)));
+            let st = if td {
+                crate::cancel::with_bound(Some(bound), || self.solve_once(&td_lim))
+            } else {
+                crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || self.solve_once(lim)))
+            };
             // 診断 `ENOMOTO_MIP_XOLAZY_LOG`: 二段解法が最後に下界を計算した途中の基底の双対
             let y_mid = stamp.is_some().then(sid::take_bound_duals);
             (st, sid::tl_flags(), y_mid)
         });
         sid::set_tl_flags(flags);
         let conclusive = matches!(st, LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded | LpStatus::ObjectiveBound | LpStatus::TimeLimit);
+        if td {
+            if conclusive {
+                cancel.store(true, Ordering::SeqCst);
+                user_log!("Root LP: the two-phase method concluded within the iteration cap {} ({:.2}s, TIMEDEP r)", td_lim.iteration_limit, t0.elapsed().as_secs_f64());
+                return st;
+            }
+            let r = match lim.deadline {
+                Some(d) => rx.recv_timeout(d.saturating_duration_since(std::time::Instant::now())).ok(),
+                None => rx.recv().ok(),
+            };
+            cancel.store(true, Ordering::SeqCst);
+            let Some((x, duals)) = r.flatten() else {
+                if lim.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    return LpStatus::TimeLimit;
+                }
+                user_log!("Root LP: no vertex from the interior-point method; the two-phase method continues ({:.2}s, TIMEDEP r)", t0.elapsed().as_secs_f64());
+                return self.solve_once(lim);
+            };
+            user_log!("Root LP: the two-phase method hit the iteration cap {}; took the interior-point method + crossover vertex ({:.2}s, TIMEDEP r)", td_lim.iteration_limit, t0.elapsed().as_secs_f64());
+            return self.adopt_ipm_vertex(&x, duals, lim, debug, t0);
+        }
         // `ENOMOTO_MIP_ROOT_LP_IPM` (診断用、既定では使わない): 二段解法が先に最適で終わっても内点法 + クロスオーバーの頂点を待って採る。
         // beasleyC3 では、どちらが先かで根の頂点が変わり、背景のカットの後の下界が 741.96 (二段解法) と 746.3 (内点法) に分かれ、
         // 解けるかどうかがほぼこれで決まった (analysis/beasleyC3_r3_20261020.md)

@@ -271,6 +271,13 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// - `p`: 根のカットのループの第 2 段階の上限を、手間 (カットの LP の反復 / 根の LP の反復 + 0.05 x ラウンド数) で第 1 段階の
 ///   `ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT` 倍 (最低 `ENOMOTO_T_MIP_TIMEDEP_PHASE2_MIN` (既定 1)) にする (時間は 10 倍の安全網)
 /// - `l`: 根の局所探索を、触った非零の数 `ENOMOTO_T_MIP_TIMEDEP_LS_RATE` (既定 1.5e8) x 今の時間の枠の秒 で止める (時間は 10 倍の安全網)
+/// - `r`: 根の LP (基底のない求解) の同時実行の勝ち手を、二段解法の反復の上限 (`ENOMOTO_T_MIP_TIMEDEP_RACE_C` (既定 1) x (行 + 列)) 以内に
+///   結論が出たかで決める (出なければ内点法 + クロスオーバーの頂点。simplex/mip_lp.rs の `solve_race_ext`)
+/// - `c`: カット選びの比べ (CUTSEL_PROBE) の伸びの速さ・合計の予算を手間で数える (予算 `ENOMOTO_T_MIP_TIMEDEP_PROBE_WORK` (既定 5) 回分の根の LP)
+/// - `w`: 根のカットのループの上限 (CPU 時間で全体の 0.1 倍) を手間 (`ENOMOTO_T_MIP_CUT_WORK_CAP` の形、既定 12。時間は 2 倍の安全網) にする
+/// - `n`: 木の大近傍探索の予算を木の LP の反復の割合で数え、1 回のサブ MIP を LP の反復の上限で止める
+/// - `e`: 木の中の再スタートのガード (`TREEEFF` の `r`) の木の秒・根の秒を LP の反復で数える
+/// - `b`: 割合で決める量 (時間の上限 x 割合) の基準を、前処理・再スタートの後の残り時間でなく元の時間の上限にする ([`solver::MipParams::frac_tl`])
 pub(crate) fn timedep(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains(c))
 }
@@ -437,6 +444,7 @@ pub fn solve_mip(
         cutoff: env_f64(env_str!("ENOMOTO_MIP_CUTOFF")).map_or(d.cutoff, |v| p.sense_sign * v),
         ..d
     };
+    let params = MipParams { tl_base: params.time_limit, ..params };
     // 診断用 (`ENOMOTO_MIP_DEBUG_AS_SUBMIP`): 書き出したサブ MIP (`ENOMOTO_MIP_SUBMIP_DUMP`) を、根のサブ MIP と同じ形
     // (入れ子の深さ 1・1 スレッド・ギャップ 1e-4) で解く。打ち切り値は `ENOMOTO_MIP_CUTOFF` で与える
     let params = if env_str!("ENOMOTO_MIP_DEBUG_AS_SUBMIP").is_some() {

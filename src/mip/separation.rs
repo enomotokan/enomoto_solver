@@ -12,6 +12,11 @@ use super::lp::{LpStatus, SolveLimits, VarStatus};
 use super::solver::Solver;
 
 thread_local! {
+    /// 試作 `ENOMOTO_MIP_TIMEDEP` の `c`: カット選びの比べの (手間で数えるか, 使った手間, 予算)。根の LP の反復を 1 とする
+    static PROBE_WORK: std::cell::Cell<(bool, f64, f64)> = const { std::cell::Cell::new((false, 0.0, f64::INFINITY)) };
+}
+
+thread_local! {
     /// `ENOMOTO_MIP_CLIQUE_CUTS=auto` の、最初の求解 (再スタート前) の判定。再スタートの後の求解が引き継ぐ
     static CLIQUE_AUTO_FIRST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// `ENOMOTO_MIP_CLIQUE_CUTS=fallback` で clique カットを加えて回す 2 回目のループの中か (時間の上限をループの始めから数える)
@@ -841,7 +846,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let t_all = std::time::Instant::now();
         let k = tunable!("ENOMOTO_T_MIP_CLIQUE_PROBE_ROUNDS", 5usize, usize).max(1);
         let tfrac = tunable!("ENOMOTO_T_MIP_CLIQUE_PROBE_TIME_FRAC", 0.05, f64);
-        let budget = if tfrac > 0.0 && self.params.time_limit.is_finite() { tfrac * self.params.time_limit } else { f64::INFINITY };
+        let budget = if tfrac > 0.0 && self.params.frac_tl().is_finite() { tfrac * self.params.frac_tl() } else { f64::INFINITY };
         let deadline = t_all + std::time::Duration::from_secs_f64(budget.min(1e6));
         let pool = self.probe_pool_on();
         let never = |_: usize, _: f64, _: f64| false;
@@ -1167,7 +1172,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let keep_tab = (self.tab_memo.clone(), self.tab_memo_mode, self.tab_memo_stats, self.tab_calls, self.tab_tries);
         let keep_face = (self.face_secs, self.face_used, self.face_off_loop, self.sep_par_cpu, self.last_cut_lp_secs);
         let keep_iters = self.lp.total_iterations();
-        let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
+        let cap = if self.params.frac_tl().is_finite() { (self.cut_lp_time_frac() * self.params.frac_tl()).max(1.0) } else { f64::INFINITY };
+        // 試作 `ENOMOTO_MIP_TIMEDEP` の `c`: 比べの時間を手間で数える ([`PROBE_WORK`])。LP 1 回の時間の上限は 5 倍の安全網
+        let (td_c, _, _) = PROBE_WORK.with(|c| c.get());
+        let cap = if td_c { 5.0 * cap } else { cap };
+        let mut w_side = 0.0f64;
+        let root_it = self.root_lp_iters.max(1) as f64;
         // 試作 `ENOMOTO_MIP_LOSE6_2_TIE`: 同点の比べ直しでは 1 回の LP の上限も `ENOMOTO_T_MIP_LOSE6_2_TIE_BUDGET` 倍にする
         let cap = cap * LOSE6_2_PROBE_CAP_MULT.with(|c| c.get());
         let mut gain = 0.0;
@@ -1178,7 +1188,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut all_rows: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
         let alt_has = |c: char| env_def!("ENOMOTO_MIP_CUTSEL_PROBE_ALT", "NS").is_none_or(|v| v.contains(c));
         for r in 0..k {
-            if self.time_up() || (r > 0 && std::time::Instant::now() >= deadline) {
+            let over = if td_c { PROBE_WORK.with(|c| { let (_, u, b) = c.get(); u >= b }) } else { std::time::Instant::now() >= deadline };
+            if self.time_up() || (r > 0 && over) {
                 break;
             }
             let (cands, forced_r): (Vec<Candidate>, Vec<Candidate>) = {
@@ -1215,12 +1226,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap.min(1e6));
             let d = Some(self.deadline.map_or(d, |g| g.min(d)));
+            let it_r0 = self.lp.total_iterations();
             let st = self.lp.solve(&SolveLimits { iteration_limit: 10 * self.avg_node_iters().max(1000) + 10_000, cutoff: f64::INFINITY, deadline: d });
+            if td_c {
+                // 手間 = LP の反復 x (今の行の数 / 比べの始めの行の数) / 根の LP の反復 + 1 ラウンドに 0.05 (分離の分)
+                let w = (self.lp.total_iterations() - it_r0) as f64 * (self.lp.num_rows() as f64 / m0.max(1) as f64) / root_it + 0.05;
+                w_side += w;
+                PROBE_WORK.with(|c| {
+                    let (on, u, b) = c.get();
+                    c.set((on, u + w, b));
+                });
+            }
             if st != LpStatus::Optimal {
                 break;
             }
             gain = self.lp.objective() - obj0;
-            hist.push((gain, t0.elapsed().as_secs_f64()));
+            hist.push((gain, if td_c { w_side } else { t0.elapsed().as_secs_f64() }));
             nadd_hist.push(nadd);
             if stop(r, gain, t0.elapsed().as_secs_f64()) {
                 break;
@@ -1437,7 +1458,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let eq2c = self.equiv2_cuts();
         let cut_frac = if sub_agg { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_AGG_TIME_FRAC", 0.5, f64) } else if eq2c { tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC", 0.3, f64) } else { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) };
-        let mut time_cap = if self.params.time_limit.is_finite() { cut_frac * self.params.time_limit } else { f64::INFINITY };
+        let mut time_cap = if self.params.frac_tl().is_finite() { cut_frac * self.params.frac_tl() } else { f64::INFINITY };
         // 根のヒューリスティクスの間にカットを強める求解: 止めの合図まで続ける (ラウンド数・時間の上限なし)
         let job = super::solver::CUT_JOB.with(|j| j.borrow().clone()).filter(|_| self.snap.is_some());
         // `ENOMOTO_MIP_SYM_CUTS` ([`super::sym_cuts`]): 根のカットの像を作る生成元と、列ごとにその列を動かす生成元の番号
@@ -1538,8 +1559,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // neos-3216931-puriri (根の LP 10 秒) では比べが 1 ラウンドの LP も終えられず予算 29.7 秒を超えて 43.5 秒使い、0 ラウンドで比べて捨てていた
         let probe_pending = probe_pending
             && !(super::solver::gap4('p')
-                && self.params.time_limit.is_finite()
-                && self.root_lp_secs > tunable!("ENOMOTO_T_MIP_GAP4_PROBE_FRAC", 0.25, f64) * tunable!("ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC", 0.05, f64) * self.params.time_limit
+                && self.params.frac_tl().is_finite()
+                && self.root_lp_secs > tunable!("ENOMOTO_T_MIP_GAP4_PROBE_FRAC", 0.25, f64) * tunable!("ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC", 0.05, f64) * self.params.frac_tl()
                 && {
                     if self.params.verbose {
                         eprintln!("MIP: GAP4 p: cut selection probe skipped (root LP {:.2}s)", self.root_lp_secs);
@@ -1685,7 +1706,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_CUTRND` ([`cutrnd`]): `round_obj` と同じ時に積むループの経過 (このスレッドの CPU 時間)
         let mut round_t: Vec<f64> = Vec::new();
         let cutrnd_main = !self.params.submip && self.snap.is_none() && job.is_none() && self.cut_cont.is_none();
-        let cr_budget = if self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_CUTRND_TIME_FRAC", 0.03, f64) * self.params.time_limit } else { tunable!("ENOMOTO_T_MIP_CUTRND_TIME_INF", 30.0, f64) };
+        let cr_budget = if self.params.frac_tl().is_finite() { tunable!("ENOMOTO_T_MIP_CUTRND_TIME_FRAC", 0.03, f64) * self.params.frac_tl() } else { tunable!("ENOMOTO_T_MIP_CUTRND_TIME_INF", 30.0, f64) };
         // ループの経過・直近 5 ラウンドの伸び・その 5 ラウンドの時間・尺度 (`e`・`s` の判定に使う)。5 ラウンドに満たなければ None。
         // 尺度 = min(ループで上げた分, 打ち切り値との残りの差)
         let cr_rates = |ro: &[f64], rt: &[f64], cut: f64| -> Option<(f64, f64, f64, f64)> {
@@ -1699,8 +1720,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 (rt[k - 1] - t_loop0, o - ro[k - 6], (rt[k - 1] - rt[k - 6]).max(1e-6), scale.max(1e-9 * o.abs().max(1.0)))
             })
         };
-        let extend_on = (env_str!("ENOMOTO_MIP_CUT_EXTEND").is_some() || self.cut_agg_has('e')) && !self.params.submip && job.is_none() && self.params.time_limit.is_finite();
-        let extend_max = tunable!("ENOMOTO_T_MIP_CUT_EXTEND_MAX", 0.3, f64) * self.params.time_limit;
+        let extend_on = (env_str!("ENOMOTO_MIP_CUT_EXTEND").is_some() || self.cut_agg_has('e')) && !self.params.submip && job.is_none() && self.params.frac_tl().is_finite();
+        let extend_max = tunable!("ENOMOTO_T_MIP_CUT_EXTEND_MAX", 0.3, f64) * self.params.frac_tl();
         CUT_EXTENDED.with(|c| c.set(false));
         // ラウンドごとの目的値 (`ENOMOTO_MIP_CUT_EXTEND` の判定用。最初は根の LP の値)
         let mut ext_hist: Vec<f64> = vec![first_obj];
@@ -1744,7 +1765,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut flat_rounds = 0usize;
         let mut moved = false;
         let lpcap_stop = if cs_outer { env_def!("ENOMOTO_MIP_CUT_LP_CAP_STOP", "flat").filter(|v| *v != "0") } else { None };
-        let mut work_cap = if cs_outer { tunable!("ENOMOTO_T_MIP_CUT_WORK_CAP", 0.0, f64) } else { 0.0 };
+        let mut work_cap = if cs_outer { tunable!("ENOMOTO_T_MIP_CUT_WORK_CAP", if super::timedep('w') { 12.0 } else { 0.0 }, f64) } else { 0.0 };
         let mut work_round = tunable!("ENOMOTO_T_MIP_CUT_WORK_ROUND", 0.05, f64);
         // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` の `c`: 手間の上限は LP の反復だけで数える ([`Solver::cut_cont`])
         let mut obj_cont: Vec<f64> = Vec::new();
@@ -2104,9 +2125,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 決める。比べの合計時間の上限は全体の `ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC` (0.05)。既定 3 (計測 23 で既定化)、0 で打ち切らない (§10 の形)
                 let ratio = tunable!("ENOMOTO_T_MIP_CUTSEL_PROBE_RATIO", 3.0, f64);
                 let tfrac = tunable!("ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC", if ratio > 0.0 { 0.05 } else { 0.0 }, f64);
-                let budget = if tfrac > 0.0 && self.params.time_limit.is_finite() { tfrac * self.params.time_limit } else { f64::INFINITY };
+                let budget = if tfrac > 0.0 && self.params.frac_tl().is_finite() { tfrac * self.params.frac_tl() } else { f64::INFINITY };
                 let t_probe0 = std::time::Instant::now();
                 let deadline = t_probe0 + std::time::Duration::from_secs_f64(budget.min(1e6));
+                // 試作 `ENOMOTO_MIP_TIMEDEP` の `c` (analysis/timedep_20261114.md): 伸びの速さ・合計の予算を時間でなく手間 (根の LP の反復を 1)
+                // で数える。予算は `ENOMOTO_T_MIP_TIMEDEP_PROBE_WORK` (既定 5) 回分の根の LP
+                let td_c = super::timedep('c');
+                PROBE_WORK.with(|c| c.set((td_c, 0.0, tunable!("ENOMOTO_T_MIP_TIMEDEP_PROBE_WORK", 5.0, f64))));
+                let probe_over = || if td_c { PROBE_WORK.with(|c| { let (_, u, b) = c.get(); u >= b }) } else { std::time::Instant::now() >= deadline };
                 let rate = |g: f64, t: f64| g.max(0.0) / t.max(1e-3);
                 let decisive = |a: (f64, f64), b: (f64, f64)| -> bool {
                     if ratio <= 0.0 {
@@ -2132,8 +2158,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let first_ok = !hd.is_empty() && !hp.is_empty();
                     if first_ok && decisive(hd[0], hp[0]) {
                         early = "after round 1";
-                    } else if std::time::Instant::now() >= deadline {
-                        early = "time budget";
+                    } else if probe_over() {
+                        early = if td_c { "work budget" } else { "time budget" };
                     } else if first_ok && lose6_2_tie() && (hd[0].0 - hp[0].0).abs() <= tol + 1e-9 * hd[0].0.abs().max(hp[0].0.abs()) {
                         // 試作 `ENOMOTO_MIP_LOSE6_2_TIE` ([`lose6_2_tie`]): 1 ラウンド目の伸びが同じなら、両方を同じラウンド数
                         // (`ENOMOTO_T_MIP_LOSE6_2_TIE_ROUNDS`、既定 2) だけ回して比べ直す (時間の予算は比べの始めから元の
@@ -2201,6 +2227,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: cut selection probe: compared at {m} rounds ({early}), probe wall {:.2}s (budget {budget:.1}s)", t_probe0.elapsed().as_secs_f64());
                 }
                 CUT_PROBE_CHOICE.store(if pick_pool { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+                if td_c && self.params.verbose {
+                    eprintln!("MIP: TIMEDEP c: probe work {:.3} of budget {:.1} (root LP {} iters)", PROBE_WORK.with(|c| c.get().1), PROBE_WORK.with(|c| c.get().2), self.root_lp_iters);
+                }
+                PROBE_WORK.with(|c| c.set((false, 0.0, f64::INFINITY)));
                 if tie_log && ratio > 0.0 {
                     eprintln!("CUTSEL_TIE: tie {} rounds {m} gain {d_def:.6e} / {d_pool:.6e} cuts {:?} time {t_def:.3} / {t_pool:.3} -> {}{}", tie_counts.is_some(), tie_counts, if pick_pool { "pool" } else { "default" }, if tie_fewer.is_some() { " (fewer)" } else { "" });
                 }
@@ -2282,7 +2312,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // (48633・48757) の後でまた伸びる (HiGHS も同じ) ので、3 ラウンドでは平らな所で止まる回がある
                 let w = (k.saturating_sub(1)).min(tunable!("ENOMOTO_T_MIP_CUT_EXTEND_WIN", 3usize, usize).max(1));
                 if w >= 1 && ext_hist[k - 1] - ext_hist[k - 1 - w] >= tunable!("ENOMOTO_T_MIP_CUT_EXTEND_MIN_GAIN", 1e-3, f64) * obj.abs().max(1.0) {
-                    let step = tunable!("ENOMOTO_T_MIP_CUT_EXTEND_STEP", 0.05, f64) * self.params.time_limit;
+                    let step = tunable!("ENOMOTO_T_MIP_CUT_EXTEND_STEP", 0.05, f64) * self.params.frac_tl();
                     // `ENOMOTO_MIP_CUT_EXTEND_CATCHUP` (試作、既定では使わない): 延ばした上限が今の経過に届かなければ、経過 + 1 段まで
                     // 延ばす (上限 `ENOMOTO_T_MIP_CUT_EXTEND_MAX` は同じ)。physiciansched6-2 (`ENOMOTO_MIP_CUT_AGG`) では、ときどき 1 ラウンドの
                     // LP が 7000 反復・6 秒と重くなり、伸びている判定が通って 1 段 (3 秒) 延ばしても経過がそれを超えたままで、ループが
@@ -2979,7 +3009,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: cut round {round}: ENOMOTO_MIP_HO4_CUT0: iteration cap {lim}, no progress check");
             }
             // 1 回の LP の時間の上限 (全体の 2%、最低 1 秒): 数値的に悪条件の LP が残り時間を使い切るのを防ぐ
-            let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
+            let cap = if self.params.frac_tl().is_finite() { (self.cut_lp_time_frac() * self.params.frac_tl()).max(1.0) } else { f64::INFINITY };
             let cap = cap.max(lp_cap_mult * ok_lp_secs);
             let cap = if lp_work > 0.0 { cap * tunable!("ENOMOTO_T_MIP_CUT_LP_WORK_TIME_MULT", 5.0, f64) } else { cap };
             // 裏のカットの写しの 1 回の LP の上限 (analysis/bgx_check1_20261102.md)。写しの `time_limit` は主の残り時間なので、
@@ -3556,9 +3586,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             round_obj.push(obj);
             round_t.push(super::cap_clock());
             // 試作 `ENOMOTO_MIP_CUTRND` の `s`: 長く回って伸びが細ったら止める
-            if cutrnd_main && cutrnd('s') && self.params.time_limit.is_finite() {
+            if cutrnd_main && cutrnd('s') && self.params.frac_tl().is_finite() {
                 if let Some((el, recent, t5, scale)) = cr_rates(&round_obj, &round_t, self.prune_limit()) {
-                    let lim = tunable!("ENOMOTO_T_MIP_CUTRND_STOP_FRAC", 0.05, f64) * self.params.time_limit;
+                    let lim = tunable!("ENOMOTO_T_MIP_CUTRND_STOP_FRAC", 0.05, f64) * self.params.frac_tl();
                     let rho = tunable!("ENOMOTO_T_MIP_CUTRND_STOP_RATE", 0.25, f64);
                     let ratio = (recent / scale) / (t5 / lim);
                     if el > lim && ratio < rho {
@@ -5365,7 +5395,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if f.contains('c') || f.contains('a') {
             if center.is_none() && !*center_tried {
                 *center_tried = true;
-                let tl = if self.params.time_limit.is_finite() { 0.03 * self.params.time_limit } else { 10.0 };
+                let tl = if self.params.frac_tl().is_finite() { 0.03 * self.params.frac_tl() } else { 10.0 };
                 let secs = tunable!("ENOMOTO_T_MIP_MPSEP_IPM_SECS", (3.0 * self.root_lp_secs).clamp(0.2, tl.max(0.2)), f64);
                 let t1 = std::time::Instant::now();
                 let dl = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs);
@@ -5552,7 +5582,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut used = 0usize;
         // 面の LP 1 回の時間の上限 (カットを加えた LP と同じ、全体の 2%、最低 1 秒)。neos-3656078-kumeu・neos-933966 では
         // 根の最初のラウンドの面の LP が数値的に破綻して解き直しを繰り返し、残り時間 (50 秒以上) を使い切っていた
-        let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
+        let cap = if self.params.frac_tl().is_finite() { (self.cut_lp_time_frac() * self.params.frac_tl()).max(1.0) } else { f64::INFINITY };
         // 最初のラウンド (直前のカットの LP がない) は `ENOMOTO_T_MIP_FACE_ADAPT_FIRST` 秒 (既定 0.25) まで
         let cap = if !face_adapt {
             cap

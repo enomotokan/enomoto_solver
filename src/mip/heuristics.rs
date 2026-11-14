@@ -1687,6 +1687,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             threads: 1,
             distinguish: false,
             fc_submip: self.fc_submip,
+            tl_base: f64::NAN,
         };
         // 今の LP の基底 (列の状態) をサブ MIP の根の LP の初めの基底にする (HiGHS の `rootbasis`。`ENOMOTO_MIP_NO_SUBMIP_BASIS` で
         // 使わない)。停滞による打ち切り (`ENOMOTO_T_MIP_SUBMIP_STALL`) と合わせて 93 問 (4 スレッド・60 秒、2 回): 主ギャップの和

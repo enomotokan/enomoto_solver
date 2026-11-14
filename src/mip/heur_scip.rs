@@ -359,6 +359,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             threads: 1,
             distinguish: false,
             fc_submip: false,
+            tl_base: f64::NAN,
         };
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         self.heur_iters += r.lp_iterations;
@@ -460,7 +461,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn ls_base_cap(&self) -> f64 {
-        if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LS_TIME_FRAC", 0.05, f64) * self.params.time_limit).min(5.0) } else { 5.0 }
+        if self.params.frac_tl().is_finite() { (tunable!("ENOMOTO_T_MIP_LS_TIME_FRAC", 0.05, f64) * self.params.frac_tl()).min(5.0) } else { 5.0 }
     }
 
     fn ls_time_cap(&self) -> f64 {
@@ -590,6 +591,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             threads: 1,
             distinguish: false,
             fc_submip: false,
+            tl_base: f64::NAN,
         };
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         self.heur_iters += r.lp_iterations;

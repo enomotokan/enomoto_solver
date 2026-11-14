@@ -25,7 +25,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 時間の上限: 全体の 5% (時間制限がなければ 10 秒)、残り時間の半分まで
         let frac = tunable!("ENOMOTO_T_MIP_IPM_TIME_FRAC", 0.05, f64);
-        let mut budget = if self.params.time_limit.is_finite() { frac * self.params.time_limit } else { 10.0 };
+        let mut budget = if self.params.frac_tl().is_finite() { frac * self.params.frac_tl() } else { 10.0 };
         if let Some(d) = self.deadline {
             budget = budget.min(0.5 * d.saturating_duration_since(Instant::now()).as_secs_f64());
         }
