@@ -204,6 +204,8 @@ pub(super) fn rheur(c: char) -> bool {
 /// - `p` (型 A'): 根の目的値のプロービングの見切り (`ENOMOTO_T_MIP_ROOT_OBJ_PROBE_GIVEUP` 本試して固定 0 ならやめる) を、
 ///   候補の数の `ENOMOTO_T_MIP_ROBUST_OBJP_FRAC` (0.25) 倍まで延ばす。候補は列の番号の順なので、並べ替えで最初の 200 本が
 ///   外れ続けることがある (hypothyroid-k1 の 4 スレッドの 1 回: 200 本で見切って時間切れ、ほかの回は 465 本以上試して最適を示した)
+/// - `g` (型 B): `f` と同じやり直しを、安い根のヒューリスティクスと並列のサブ MIP の後ろで回す (`f` より優先)
+/// - `q` (型 A'): 根の目的値のプロービングの候補を、列の番号の順ではなく 0.5 に近い順に試す
 pub(crate) fn robust(c: char) -> bool {
     env_str!("ENOMOTO_MIP_ROBUST").is_some_and(|v| v.contains(c))
 }
@@ -9702,7 +9704,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 試作 `ENOMOTO_MIP_ROBUST` の `f` ([`robust`]): 軽い丸めまでで暫定解がなければ、重いもの (interior rounding・サブ MIP・
                 // ダイビング) の前に種を変えた FJ・Local-MIP をもう一度回す (ns1116954 は後ろの重いもので時間を使い切る: interior rounding 10 秒、
                 // RENS 9 秒、暫定解なしの RENS 19 秒で、根のヒューリスティクスの終わりには時間が残らない)
-                if robust('f') && !self.params.submip && self.incumbent.is_none() {
+                if robust('f') && !robust('g') && !self.params.submip && self.incumbent.is_none() {
                     heur!("robust FJ", self.robust_fj_retry());
                 }
                 // 試作 `ENOMOTO_MIP_FPR` の `r` (既定では使わない): 暫定解がなければ fix-propagate-repair ([`super::fpr`])
@@ -9889,6 +9891,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 試作 `ENOMOTO_MIP_GAP4` の `k`: 並列の locks が根で実行不能だったら、ここで主のスレッドでやり直す
                 if self.gap4_locks.1 && self.incumbent.is_none() {
                     heur!("locks (GAP4 retry)", self.locks_retry());
+                }
+                // 試作 `ENOMOTO_MIP_ROBUST` の `g` ([`robust`]): `f` の FJ・Local-MIP のやり直しを、安い根のヒューリスティクス
+                // (ダイビング・FP・locks・clique・vbounds) と並列のサブ MIP の後ろへ回す (`f` の位置では blend2・flugpl のように
+                // 後ろの安いものがすぐ見つける問題でも FJ が最大 6 秒空回りした)
+                if robust('g') && !self.params.submip && self.incumbent.is_none() {
+                    heur!("robust FJ", self.robust_fj_retry());
                 }
                 self.poll_find_thread();
                 // `ENOMOTO_MIP_EARLY_RESTART_JOIN` (試作、既定では使わない): 別スレッドのサブ MIP (RENS など)・解探しのスレッドの解を
@@ -17551,6 +17559,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 再スタートして 15〜35 秒遅れる回がある
         let passes = o.passes;
         // 試作 `ENOMOTO_MIP_ROBUST` の `p` ([`robust`]): 外側の根では見切りを候補の数の割合まで延ばす
+        // 試作 `ENOMOTO_MIP_ROBUST` の `q` ([`robust`]): 外側の根では候補を 0.5 に近い (LP で迷っている) 順に並べる。列の番号の順は
+        // 列の並べ替えで変わり、見切りまでに試す列が回ごとに入れ替わる
+        if robust('q') && !o.in_loop {
+            cands.sort_by(|&a, &b| (x[a] - 0.5).abs().total_cmp(&(x[b] - 0.5).abs()).then(a.cmp(&b)));
+        }
         let giveup = if robust('p') && !o.in_loop {
             giveup.max((tunable!("ENOMOTO_T_MIP_ROBUST_OBJP_FRAC", 0.25, f64) * cands.len() as f64) as usize)
         } else {
