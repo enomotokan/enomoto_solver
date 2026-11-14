@@ -185,6 +185,7 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &FaerCsr, b: &[f64], gv: GVi
     let int_mask = crate::presolve::int_mask();
     let is_int = |j: usize| int_mask.as_ref().is_some_and(|m| m[j]);
     let int_pairs = env_str!("ENOMOTO_PRESOLVE_NO_INT_DOUBLETON").is_none();
+    let snap_int_pairs = env_str!("ENOMOTO_PRESOLVE_NO_INT_DOUBLETON_SNAP").is_none();
     let is_integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
     // 試作 `ENOMOTO_MIP_ORDINV` の `d` ([`super::ordkey`]): 行を見る順と、係数の絶対値が同じときにどちらを消すかを、列番号でなく
     // 列の鍵で決める (鍵が同じなら従来どおり列番号)。切なら行の番号の順・行の中の列番号の順で従来と同じ
@@ -219,12 +220,27 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &FaerCsr, b: &[f64], gv: GVi
         if term_elim.1.abs() < term_keep.1.abs() {
             std::mem::swap(&mut term_elim, &mut term_keep);
         }
+        let mut rhs = b[i];
         if is_int(term_elim.0) {
             if is_int(term_keep.0) {
                 // 係数の絶対値の小さい方を消せば比が整数になりうる
                 std::mem::swap(&mut term_elim, &mut term_keep);
                 if !int_pairs || term_elim.1.abs() < TOL || !is_integral(term_keep.1 / term_elim.1) || !is_integral(b[i] / term_elim.1) {
                     continue;
+                }
+                // 整数と判定した比・右辺は丸めた値で代入する (既定。`ENOMOTO_PRESOLVE_NO_INT_DOUBLETON_SNAP` で従来の丸めない値)。
+                // 丸めないと `x = 3.0000000003 - y` のような代入が残り、整数行の正規化 (`floor(b + 1e-9)`) が 1e-9 を超えて
+                // 積もったずれで右辺を 1 下げ、最適解を切っていた (fuzz の seed 7545: 幅の小さい列の固定の誤差 1.2e-9 が
+                // `8 x8 + 8 x15 = 24.0000000025` を作り、`4 x15 + ... <= 26` が `<= 17` (正しくは 18) になった。analysis/wrong3470_20261114.md)
+                if snap_int_pairs {
+                    let e = term_elim.1;
+                    let (k0, r0) = (term_keep.1, rhs);
+                    term_keep.1 = (term_keep.1 / e).round() * e;
+                    rhs = (rhs / e).round() * e;
+                    // 診断用 (`ENOMOTO_DEBUG_INT_DOUBLETON_SNAP`): 丸めで値が変わった組を出す
+                    if (k0 != term_keep.1 || r0 != rhs) && env_str!("ENOMOTO_DEBUG_INT_DOUBLETON_SNAP").is_some() {
+                        eprintln!("INT_DOUBLETON_SNAP: row {i}: coefficient {k0:e} -> {:e}, rhs {r0:e} -> {rhs:e} (divisor {e:e})", term_keep.1);
+                    }
                 }
             } else if term_keep.1.abs() < 1e-3 * term_elim.1.abs() {
                 continue;
@@ -237,7 +253,6 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &FaerCsr, b: &[f64], gv: GVi
         if coeff_elim.abs() < TOL || claimed.contains(&var_elim) || claimed.contains(&var_keep) || var_elim == var_keep {
             continue;
         }
-        let rhs = b[i];
 
         claimed.insert(var_elim);
         by_var[var_elim] = Some(subs.len());

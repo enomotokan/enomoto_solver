@@ -1,0 +1,39 @@
+NAME presolved
+ROWS
+ N OBJ
+ L R0
+ L R1
+COLUMNS
+    C0 OBJ -9.07e0
+    M1 'MARKER' 'INTORG'
+    C1 OBJ -9.01e0
+    C1 R0 7e0
+    C1 R1 1e0
+    C2 OBJ 3.94e0
+    C2 R0 -3e0
+    C2 R1 1e0
+    C3 OBJ -9.36e0
+    C4 OBJ 6.51e0
+    C5 OBJ -4.11e0
+    C5 R1 1e0
+    C6 OBJ 0
+    C7 OBJ -6.98e0
+    C7 R0 3e0
+    C7 R1 1e0
+    MEND 'MARKER' 'INTEND'
+RHS
+    RHS R0 1.7e1
+    RHS R1 5.6e1
+RANGES
+BOUNDS
+ FX BND C0 2.326036143981722e-1
+ UP BND C1 1e0
+ LO BND C2 -4e0
+ UP BND C2 -2e0
+ FX BND C3 1e0
+ FX BND C4 -0e0
+ LO BND C5 -5e0
+ UP BND C5 6e1
+ FX BND C6 -0e0
+ UP BND C7 4e0
+ENDATA
