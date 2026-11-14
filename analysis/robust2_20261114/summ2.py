@@ -1,5 +1,5 @@
 """設定どうしの揺れと平均の比べ: python summ2.py スレッド数 基準 設定... [-p 問題,...]
-res_<設定>_t<スレッド>.jsonl を読み、両方にある (問題, 並べ替え, 種) の回だけで比べる。
+res_<設定>_t<スレッド>.jsonl と res_<設定>_t<スレッド>_<タグ>.jsonl (pair.py の分担) を読み、両方にある (問題, 並べ替え, 種) の回だけで比べる。
 - 解けた回の数、問題ごとの最大/最小 (1 秒を足した時間の比、1 回でも解けて最大が 1 秒を超える問題)、gsd (1 秒を足した時間の対数の標準偏差の exp)
 - SGM (ずらし 10 秒、時間切れは上限) の比と、問題で重みを揃えたブートストラップの 95% 区間
 - 最遅の回 (問題ごとの最大) の SGM の比
@@ -13,9 +13,8 @@ if "-p" in a: i = a.index("-p"); only = set(a[i + 1].split(",")); del a[i:i + 2]
 TH, BASE, CFGS = a[0], a[1], a[2:]
 def load(c):
     R = {}
-    f = D / f"res_{c}_t{TH}.jsonl"
-    if not f.exists(): return R
-    for l in f.read_text().splitlines():
+    lines = [l for f in sorted(D.glob(f"res_{c}_t{TH}.jsonl")) + sorted(D.glob(f"res_{c}_t{TH}_*.jsonl")) for l in f.read_text().splitlines()]
+    for l in lines:
         if not l.strip(): continue
         r = json.loads(l)
         if only and r["problem"] not in only: continue

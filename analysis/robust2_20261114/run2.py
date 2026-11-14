@@ -8,18 +8,11 @@ import gzip, json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
 WT = D.parents[1]
-sys.path.insert(0, str(WT / "analysis/cbcimpl_20261029")); sys.path.insert(0, str(WT / "analysis/cand1114_20261113")); sys.path.insert(0, str(WT / "analysis/robust_20261114"))
+sys.path.insert(0, str(WT / "analysis/cbcimpl_20261029")); sys.path.insert(0, str(WT / "analysis/cand1114_20261113")); sys.path.insert(0, str(WT / "analysis/robust_20261114")); sys.path.insert(0, str(D))
 from probs import PROBS, rb  # noqa: E402
 from cfg import CAND1114  # noqa: E402
 import perm as pm  # noqa: E402
-CFGS = {
-    "base": {},
-    "oi": {"ENOMOTO_MIP_ORDINV": "edpq"},            # 型 D: 前処理を列の鍵の順に
-    "rbp": {"ENOMOTO_MIP_RSTROB": "+"},              # 型 C: 再スタートの判定の帯の中は再スタートする
-    "rbm": {"ENOMOTO_MIP_RSTROB": "-"},              # 型 C: 帯の中は再スタートしない
-    "race": {"ENOMOTO_MIP_TREE_RACING": "1"},        # 4: 木の競争 (既存の試作)
-}
-VARIANTS = [(0, 1), (1, 1), (2, 1), (3, 1), (0, 2), (0, 3)]
+from cfgs2 import CFGS, VARIANTS  # noqa: E402
 CFG, TH, SLOT, NSLOT = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 TL = float(sys.argv[5]) if len(sys.argv) > 5 else 60.0
 probs = PROBS
