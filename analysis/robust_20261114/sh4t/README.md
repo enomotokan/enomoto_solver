@@ -19,3 +19,9 @@ python analysis/robust_20261114/sh4t/run.py K          # K = 0〜7。res_sK.json
 終わったら `analysis/robust_20261114/sh4t/res_sK.jsonl` と `analysis/robust_20261114/sh4t/logs/` をコミットして push する
 (ログは延長・やり直しが効いた所を見るのに使う)。計測中に `git pull --autostash` をしない。
 まとめは `python analysis/robust_20261114/sh4t/merge.py` のあと、`../summ.py res_t4_spgq.jsonl` と `../quick.py 4 spgq base2` で行う。
+
+## 2 回目: base2 と pgq (s を外した組)
+
+分担表は `shards_pgq.json` (`python plan.py 8 base2 pgq`、8 分担、1 分担 37 分ほど)。手順は上と同じで、最後の行だけ
+`python analysis/robust_20261114/sh4t/run.py K pgq` (K = 0〜7) にする。結果は `res_pgq_sK.jsonl`、ログは `logs/pgq_base2/`・`logs/pgq_pgq/`。
+コミットとまとめも同じ (`python analysis/robust_20261114/sh4t/merge.py pgq` → `../res_t4_base2_pgq.jsonl`・`../res_t4_pgq_pgq.jsonl`)。

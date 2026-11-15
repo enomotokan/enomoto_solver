@@ -1,6 +1,6 @@
-"""4 スレッドの base2・spgq の分担を回す: python run.py K (shards.json の K 番目を順に 4 スレッドで解き、res_sK.jsonl に足す。途中から再開できる。ソルバーは同時に 1 つ)。
+"""4 スレッドの 2 組の分担を回す: python run.py K [名前] (shards[_名前].json の K 番目を順に 4 スレッドで解き、res[_名前]_sK.jsonl に足す。途中から再開できる。ソルバーは同時に 1 つ)。
 行の形は ../run.py と同じ (problem, threads, perm, seed, cfg, result, ...)。並べ替え k ≥ 1 は ../perm.py で .miplib_cache/perm/<問題>_p<k>.mps を作る
-(種 k の乱数で決まる)。ログ (ENOMOTO_MIP_LOG=1、表示だけ) は logs/<組>/<問題>_t4_p<k>s<種>.log.gz。"""
+(種 k の乱数で決まる)。ログ (ENOMOTO_MIP_LOG=1、表示だけ) は logs/[<名前>_]<組>/<問題>_t4_p<k>s<種>.log.gz。"""
 import gzip, json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -11,8 +11,9 @@ from cfg import CAND1114  # noqa: E402
 import perm as pm  # noqa: E402
 from cfgs import CFGS  # noqa: E402
 K = int(sys.argv[1]); TL = 60.0; TH = 4
-mine = json.loads((D / "shards.json").read_text())["shards"][K]
-OUT = D / f"res_s{K}.jsonl"
+TAG = sys.argv[2] if len(sys.argv) > 2 else ""
+mine = json.loads((D / (f"shards_{TAG}.json" if TAG else "shards.json")).read_text())["shards"][K]
+OUT = D / (f"res_{TAG}_s{K}.jsonl" if TAG else f"res_s{K}.jsonl")
 done = set()
 if OUT.exists():
     for l in OUT.read_text().splitlines():
@@ -33,7 +34,7 @@ for p, k, s, cfg in mine:
     mps = mps_of(p, k)
     env = {key: v for key, v in os.environ.items() if not key.startswith("ENOMOTO_")}
     env.update(CAND1114); env.update(CFGS[cfg]); env["ENOMOTO_MIP_THREADS"] = str(TH); env["ENOMOTO_T_MIP_SEED"] = str(s); env["ENOMOTO_MIP_LOG"] = "1"
-    logd = D / "logs" / cfg; logd.mkdir(parents=True, exist_ok=True)
+    logd = D / "logs" / (f"{TAG}_{cfg}" if TAG else cfg); logd.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     with gzip.open(logd / f"{p}_t{TH}_p{k}s{s}.log.gz", "wt") as lf:
         pr = subprocess.Popen([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", str(TL), "--threads", str(TH)],

@@ -8,3 +8,4 @@ CFGS = {
 CFGS.update({"f": {"ENOMOTO_MIP_ROBUST": "f"}, "spf": {"ENOMOTO_MIP_ROBUST": "spf"}})
 CFGS.update({"spgq": {"ENOMOTO_MIP_ROBUST": "spgq"}})
 CFGS.update({"base2": {}})
+CFGS.update({"pgq": {"ENOMOTO_MIP_ROBUST": "pgq"}})
