@@ -6,3 +6,4 @@ CFGS = {
     "sp": {"ENOMOTO_MIP_ROBUST": "sp"},
 }
 CFGS.update({"f": {"ENOMOTO_MIP_ROBUST": "f"}, "spf": {"ENOMOTO_MIP_ROBUST": "spf"}})
+CFGS.update({"spgq": {"ENOMOTO_MIP_ROBUST": "spgq"}})

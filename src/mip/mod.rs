@@ -2376,8 +2376,11 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                     }
                 } else if let Some(mut lm) = lm_new() {
                     // Local-MIP は中でやり直し (restart) をするので、上限まで 1 本を回し続ける
+                    // 試作 `ENOMOTO_MIP_ROBUST` のやり直し (`salt != 0`) では `slice` ごとに見つけたかを見る。1 本で回し続けると、
+                    // 途中で実行可能解を見つけても上限まで改善を続けてから返す (blend2 の 4 スレッド: 見つけたのに 6 秒使い切る)
+                    let piece = |now: Instant| if salt == 0 { t_end } else { now + Duration::from_secs_f64(slice) };
                     while !over() && !lm.done {
-                        if lm_run(&mut lm, t_end) {
+                        if lm_run(&mut lm, piece(Instant::now())) {
                             break;
                         }
                     }
