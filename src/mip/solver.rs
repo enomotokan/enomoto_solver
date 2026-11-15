@@ -20242,8 +20242,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     RESUME_LINK.with(|s| *s.borrow_mut() = Some(c));
                 }
                 // `ENOMOTO_MIP_SUBMIP_HALT` ([`submip_halt`]): 止めの合図をこのスレッドの LP の止める合図 ([`crate::cancel::with_halt`]) にもする
+                // 内点法・クロスオーバーなどトークンと期限しか見ない計算も止まるように、合図を `is_cancelled` にも含める
+                crate::cancel::set_halt_cancels(halt_flag.is_some());
                 let halt = halt_flag;
                 let r = crate::cancel::with_halt(halt, || super::solve_problem(&sub, params, presolve));
+                crate::cancel::set_halt_cancels(false);
                 RESUME_LINK.with(|s| *s.borrow_mut() = None);
                 // 一時停止の後に継続したサブ MIP は、呼び出し側が継続の分の終わりを出す (道筋が継続の番号に変わっている)
                 let resumed = resumable && trace_tag.as_ref().is_some_and(|t| super::heuristics::SUBMIP_TAG.with(|s| *s.borrow() != *t));

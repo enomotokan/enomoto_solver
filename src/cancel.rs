@@ -22,6 +22,7 @@ thread_local! {
     static TOKEN: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
     static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
     static HALT: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+    static HALT_CANCELS: Cell<bool> = const { Cell::new(false) };
 }
 
 /// このスレッドの「止める合図」が立ったか ([`with_halt`])。MIP の LP の反復の確認 (`slope_intercept_dual::ext_check`) が
@@ -42,7 +43,13 @@ pub fn with_halt<R>(flag: Option<Arc<AtomicBool>>, f: impl FnOnce() -> R) -> R {
 /// このスレッドの求解が打ち切りを求められているか (トークンが立った、または期限を過ぎた)。
 #[inline]
 pub fn is_cancelled() -> bool {
-    TOKEN.with(|t| t.borrow().as_ref().is_some_and(|a| a.load(Ordering::Relaxed))) || deadline_passed()
+    TOKEN.with(|t| t.borrow().as_ref().is_some_and(|a| a.load(Ordering::Relaxed))) || deadline_passed() || (HALT_CANCELS.with(|h| h.get()) && halted())
+}
+
+/// このスレッドで、止める合図 ([`halted`]) を [`is_cancelled`] にも含めるか (既定は含めない)。トークンや期限しか見ない計算
+/// (内点法・クロスオーバー・根の LP の救済) も止める合図で止まる。別スレッドのサブ MIP (`ENOMOTO_MIP_SUBMIP_HALT`) が自分のスレッドで立てる。
+pub fn set_halt_cancels(on: bool) {
+    HALT_CANCELS.with(|h| h.set(on));
 }
 
 /// このスレッドの期限 (なければ `None`)。
