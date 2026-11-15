@@ -13,7 +13,7 @@ use super::lp::{LpStatus, SolveLimits, VarStatus};
 use super::lp_api::MipLp;
 use super::problem::MipProblem;
 use super::pseudocost::Pseudocost;
-use super::queue::{BoundChange, NodeDse, NodeQueue, OpenNode, SbInherit, SbLine};
+use super::queue::{BoundChange, InhChain, NodeDse, NodeQueue, OpenNode, SbInherit, SbLine};
 use std::rc::Rc;
 
 /// 試作 `ENOMOTO_MIP_TREEFIX` (木の中で暫定解が良くなったら大域的な範囲を締める仕事)
@@ -2073,7 +2073,7 @@ impl SnapNode {
             Some(w) => super::queue::unpack_changes(w),
             None => self.changes,
         };
-        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None }
+        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: None }
     }
 }
 
@@ -10782,12 +10782,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(snap) = self.snap.clone() {
             for (k, n) in snap.nodes.iter().enumerate() {
                 let tags = Some(Rc::new(vec![snap.serial << 32 | k as u64]));
-                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None });
+                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: None });
             }
             self.snap_alive = vec![true; snap.nodes.len()];
             first = false;
         } else {
-            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None });
+            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None, inh: None });
         }
         // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 木の始まり (根の前処理・LP・カット・ヒューリスティクスの終わり) を道筋つきで出す
         // (サブ MIP の時間のうち根の割合を見る。analysis/rens_resume_20261101.md)
@@ -11247,6 +11247,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             break;
                         }
                     }
+                    if ok {
+                        ok = self.apply_inh_chain(&n.inh);
+                    }
                     if !ok {
                         self.nodes += 1;
                         if replay.is_some() {
@@ -11356,6 +11359,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 ok = false;
                                 break;
                             }
+                        }
+                        if ok {
+                            ok = self.apply_inh_chain(&n.inh);
                         }
                         if ok {
                             if let Some(b) = &n.basis {
@@ -12827,18 +12833,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_TC` の `r`: このノードの局所的な被約費用の固定 (理由 -3) を子に引き継ぐ (分枝ではない変更として `sym` を立てる)。
             // HiGHS はノードの定義域の変更を子に持たせ、mcsched で HiGHS の分枝をなぞった同じノードの被約費用の固定は HiGHS 34 本・こちら 1.4 本
             // サブ MIP (根のヒューリスティクス) では使わない (根の道筋を既定と同じにする。physiciansched6-2 は根のサブ MIP の結果が変わって 2 種とも遅れた)
+            // `TC` の `s`: 引き継ぎの固定 (`of_fixes[tc_base_len..]`) を子の並びに写さず、親の鎖に環を足して共有する
+            let mut tc_base_len = usize::MAX;
             if (tc_on('r') || tc_on('a') || tc_on('b')) && !self.params.submip {
                 // `a`: 被約費用 (−3) に加えて強分枝 (−4)・双対証明 (−6)・リテラルの衝突 (−7)・目的関数の伝播 (−8)・カットプールの伝播 (−9) の固定も
                 // (行の伝播は分枝から積み直せば同じになるので除く。オービトープ (−5) は対称性の推論なので除く)
                 // `b`: 親の LP に依るので子で作り直せない被約費用 (−3)・強分枝 (−4) だけ。−6〜−9 は大域的な制約 (双対証明・衝突・カット) の
                 // 伝播なので子の伝播で作り直せる。`a` は fiball で開いたノード 1 本の持ち物が 2.3〜3.5 倍になり、600 秒で 11 GB に達した
                 let reasons: &[i32] = if tc_on('a') { &[-3, -4, -6, -7, -8, -9] } else if tc_on('b') { &[-3, -4] } else { &[-3] };
+                tc_base_len = of_fixes.len();
                 // 重複判定: (列, 向き) ごとの一番きつい値の表 (以前は have の二重ループで 1 ノード O(長さ^2))
                 let mut have: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::with_capacity(node.changes.len() + of_fixes.len());
-                for c in node.changes.iter().chain(of_fixes.iter()) {
+                let mut put = |c: &BoundChange| {
                     let e = have.entry((c.col, c.upper)).or_insert(c.value);
                     *e = if c.upper { e.min(c.value) } else { e.max(c.value) };
+                };
+                for c in node.changes.iter().chain(of_fixes.iter()) {
+                    put(c);
                 }
+                InhChain::for_each(&node.inh, &mut put);
                 for (j, upper, v) in self.dom.tagged_int_changes(self.p, reasons) {
                     let tighter = match have.get(&(j, upper)) {
                         Some(&w) => if upper { v < w - 0.5 } else { v > w + 0.5 },
@@ -12851,12 +12864,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 // 診断: 子の変更の並びの長さ (親の並び + 引き継ぎ + 分枝) と深さ
-                self.tc_len[0] += (node.changes.len() + of_fixes.len() + 1) as u64;
+                let own = if tc_on('s') { node.changes.len() + tc_base_len + 1 } else { node.changes.len() + of_fixes.len() + 1 };
+                self.tc_len[0] += own as u64;
                 self.tc_len[1] += 1;
-                self.tc_len[2] = self.tc_len[2].max((node.changes.len() + of_fixes.len() + 1) as u64);
+                self.tc_len[2] = self.tc_len[2].max(own as u64);
                 self.tc_len[3] += node.depth as u64 + 1;
             }
             let sb_child = self.sb_child_inherit(&node);
+            let child_inh = if tc_on('s') && tc_base_len != usize::MAX {
+                let tail = of_fixes.split_off(tc_base_len);
+                if tail.is_empty() { node.inh.clone() } else { Some(Rc::new(InhChain { parent: node.inh.clone(), fixes: tail })) }
+            } else {
+                node.inh.clone()
+            };
             let mk = |c: BoundChange| {
                 let mut ch = node.changes.clone();
                 ch.extend_from_slice(&of_fixes);
@@ -12877,6 +12897,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     prot: prot.clone(),
                     tags: node.tags.clone(),
                     sb: sb_child.clone(),
+                    inh: child_inh.clone(),
                 }
             };
             let mut sec = mk(second_c);
@@ -14050,6 +14071,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
             );
         }
         res
+    }
+
+    /// 試作 `ENOMOTO_MIP_TC` の `s`: ノードの引き継ぎの鎖 ([`OpenNode::inh`]) の固定を定義域に当てる。矛盾なら偽。
+    fn apply_inh_chain(&mut self, inh: &Option<Rc<InhChain>>) -> bool {
+        if inh.is_none() {
+            return true;
+        }
+        let mut all: Vec<BoundChange> = Vec::new();
+        InhChain::for_each(inh, |c| all.push(*c));
+        for c in all {
+            if c.upper {
+                self.dom.tighten_upper(self.p, c.col, c.value);
+            } else {
+                self.dom.tighten_lower(self.p, c.col, c.value);
+            }
+            if self.dom.infeasible {
+                return false;
+            }
+        }
+        true
     }
 
     fn local_redcost_fixing(&mut self, node_obj: f64) -> bool {

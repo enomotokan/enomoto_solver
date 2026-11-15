@@ -61,6 +61,33 @@ pub struct OpenNode {
     /// 強分岐で得た、部分木で成り立つ境界 (`ENOMOTO_MIP_SB_TIGHTEN_INHERIT`) と凸性の直線 (`ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR`)。
     /// 親から子へ引き継ぎ、ノードの処理の始めに定義域に当てる ([`super::solver`] の `apply_sb_inherit`)
     pub sb: Option<Rc<SbInherit>>,
+    /// 試作 `ENOMOTO_MIP_TC` の `s`: 祖先から引き継いだ固定 (`TC` の `a`・`b`・`r`) を、親の鎖を共有する連結で持つ ([`InhChain`])。
+    /// 待ち行列から取り出して根から積み直すときだけ当てる (ほかの使い道では見えないが、見落としても定義域が広いだけで正しさは変わらない)
+    pub inh: Option<Rc<InhChain>>,
+}
+
+/// [`OpenNode::inh`] の鎖の 1 つの環: このノードで足した引き継ぎの固定と、親の環。
+#[derive(Debug)]
+pub struct InhChain {
+    pub parent: Option<Rc<InhChain>>,
+    pub fixes: Vec<BoundChange>,
+}
+
+impl InhChain {
+    /// 鎖の全部の固定を、根に近い環から順に `f` に渡す。
+    pub fn for_each(this: &Option<Rc<InhChain>>, mut f: impl FnMut(&BoundChange)) {
+        let mut rings: Vec<&InhChain> = Vec::new();
+        let mut cur = this.as_deref();
+        while let Some(r) = cur {
+            rings.push(r);
+            cur = r.parent.as_deref();
+        }
+        for r in rings.iter().rev() {
+            for c in &r.fixes {
+                f(c);
+            }
+        }
+    }
 }
 
 /// 待ち行列のノードに保存する DSE 重み ([`OpenNode::dse`])。
@@ -860,7 +887,7 @@ mod tests {
         let mut q = NodeQueue::new();
         q.pack_basis = true;
         let b = Rc::new(Basis { col: vec![VarStatus::Basic, VarStatus::Upper], row: vec![VarStatus::Lower] });
-        let mk = |lb: f64| OpenNode { changes: Vec::new(), lower_bound: lb, estimate: lb, depth: 1, basis: Some(b.clone()), basis_epoch: 0, dse: None, branch: None, prot: None, tags: None, sb: None };
+        let mk = |lb: f64| OpenNode { changes: Vec::new(), lower_bound: lb, estimate: lb, depth: 1, basis: Some(b.clone()), basis_epoch: 0, dse: None, branch: None, prot: None, tags: None, sb: None, inh: None };
         q.push(mk(1.0));
         q.push(mk(2.0));
         assert!(q.iter().all(|n| n.basis.is_none()));
