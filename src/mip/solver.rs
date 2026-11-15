@@ -767,6 +767,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     tc_e_secs: f64,
     /// 試作 `ENOMOTO_MIP_NODESEL_BANDIT` の状態 ([`NodeselBandit`])。主のスレッドの木だけ
     nb: Option<NodeselBandit>,
+    /// 試作 `ENOMOTO_MIP_TC` の `q` の状態と数 ([`TcQ`])
+    tc_q: TcQ,
+    tc_q_force: bool,
     tr_last: (u64, f64, f64, f64),
     /// 木の中の再スタートの記帳 (`TRSTAT`、ログだけ) と `ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、[`Self::tree_restart_guard_ok`]) 用:
     /// この求解で木のループに入った時刻 (この求解の始めからの秒)、そのときの全体の下界、[`Self::tree_restart_due`] の最後の木の大きさの見積もり。
@@ -2095,6 +2098,17 @@ pub(super) struct NodeselBandit {
     /// [`ENOMOTO_T_MIP_NB3_MIN`, 1 − MIN] (既定 0.2) に収め、選ばれた割合が目標を下回る腕を選ぶ (どちらの腕も最低 2 割は使う。`=2` は
     /// mcsched で最初の 1 回の悪い報酬から腕 0 に 28 区間張り付いた)
     v3: bool,
+}
+
+/// 試作 `ENOMOTO_MIP_TC` の `q` の状態: 次に掛ける手間、掛けた回数、プロービングで固定した列・矛盾で刈ったノード、試した列、秒
+#[derive(Debug, Default)]
+pub(super) struct TcQ {
+    next: u64,
+    calls: u64,
+    fixes: u64,
+    prunes: u64,
+    probed: u64,
+    secs: f64,
 }
 
 /// ノードの境界の変更の全部 (並び + 引き継ぎの鎖)。鎖がなければ並びをそのまま (写さない) 返す。`TC` の `s` で鎖に移した固定も、
@@ -4967,6 +4981,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tc_e_skip: 0,
         tc_e_secs: 0.0,
         nb: None,
+        tc_q: TcQ::default(),
+        tc_q_force: false,
         tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
         tr_t0: 0.0,
         tr_w0: (0.0, 0),
@@ -11718,6 +11734,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 ok
             });
+            // 試作 `ENOMOTO_MIP_TC` の `q` (既定では使わない、treeclose 9.16 節): 潜りの途中でも、主のスレッドの LP の反復が
+            // `ENOMOTO_T_MIP_TC_Q_WORK` (既定 5 万) 進むごとに、そのノードで (a) 2 値変数の伝播によるプロービング、(b) 止めていても
+            // カットプールの伝播、(c) 潜りの始めとして数え直して分離・木の中のヒューリスティクスを呼ぶ。全体の秒の
+            // `ENOMOTO_T_MIP_TC_Q_FRAC` (既定 0.05) を越えたら (a)(b) は飛ばす
+            let prop_ok = if prop_ok && plunge_depth > 0 && tc_on('q') && !self.params.submip && self.node_iters + self.sb_iters >= self.tc_q.next {
+                self.tc_q.next = self.node_iters + self.sb_iters + tunable!("ENOMOTO_T_MIP_TC_Q_WORK", 50000u64, u64);
+                self.tc_q.calls += 1;
+                plunge_depth = 0;
+                if self.tc_q.secs < tunable!("ENOMOTO_T_MIP_TC_Q_FRAC", 0.05, f64) * self.start.elapsed().as_secs_f64() {
+                    let t0 = Instant::now();
+                    self.tc_q_force = true;
+                    let ok = self.propagate_cut_pool() && self.node_prop_fixpoint(&full_changes(&node)) && self.tc_q_probe();
+                    self.tc_q_force = false;
+                    self.tc_q.secs += t0.elapsed().as_secs_f64();
+                    if !ok {
+                        self.tc_q.prunes += 1;
+                        if rp_stage.is_empty() {
+                            rp_stage = "p_tcq";
+                        }
+                    }
+                    ok
+                } else {
+                    true
+                }
+            } else {
+                prop_ok
+            };
             if !prop_ok {
                 if replay.is_some() {
                     self.rp_log(&node, rp_stage, f64::NAN, f64::NAN, -1, &mut rp_stats);
@@ -14268,6 +14311,61 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.dom.infeasible {
                 return false;
+            }
+        }
+        true
+    }
+
+    /// 試作 `TC` の `q` の (a): 固定されていない 2 値列のうち擬似費用のスコア (分数 0.5 で数えた積) の大きいものを
+    /// `ENOMOTO_T_MIP_TC_Q_PROBES` (既定 10) 本、0 と 1 に仮に固定して伝播し、片方が矛盾したらもう一方に固定する (両方矛盾ならノードは
+    /// 矛盾で偽)。伝播は定義域だけ (行・含意。LP は解かない)。
+    fn tc_q_probe(&mut self) -> bool {
+        let p = self.p;
+        let k = tunable!("ENOMOTO_T_MIP_TC_Q_PROBES", 10usize, usize);
+        let mut cand: Vec<(f64, usize)> = (0..p.n)
+            .filter(|&j| p.is_int[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0)
+            .map(|j| (self.pc.score(j, 0.5), j))
+            .collect();
+        if cand.is_empty() {
+            return true;
+        }
+        let k = k.min(cand.len());
+        cand.select_nth_unstable_by(k - 1, |a, b| b.0.total_cmp(&a.0));
+        cand.truncate(k);
+        cand.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        for (_, j) in cand {
+            if self.dom.lo[j] == self.dom.up[j] {
+                continue;
+            }
+            self.tc_q.probed += 1;
+            let mut bad = [false; 2];
+            for (v, side) in [(0.0, 0usize), (1.0, 1usize)] {
+                let pos = self.dom.stack_len();
+                if v == 0.0 {
+                    self.dom.tighten_upper(p, j, 0.0);
+                } else {
+                    self.dom.tighten_lower(p, j, 1.0);
+                }
+                bad[side] = self.dom.infeasible || !self.dom.propagate(p);
+                self.dom.backtrack_to(p, pos);
+            }
+            match bad {
+                [true, true] => return false,
+                [true, false] => {
+                    self.dom.tighten_lower(p, j, 1.0);
+                    self.tc_q.fixes += 1;
+                    if !self.dom.propagate(p) {
+                        return false;
+                    }
+                }
+                [false, true] => {
+                    self.dom.tighten_upper(p, j, 0.0);
+                    self.tc_q.fixes += 1;
+                    if !self.dom.propagate(p) {
+                        return false;
+                    }
+                }
+                _ => {}
             }
         }
         true
@@ -18313,7 +18411,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_TC` の `f` (利用者の案): 止めてあっても、整数列のうち固定済みの割合が `ENOMOTO_T_MIP_TC_F_FRAC` (0.5) 以上で、
         // 根の始めの固定の割合より `ENOMOTO_T_MIP_TC_F_GAIN` (0.2) 以上増えたノードでは掛ける (固定がたまったノードでは伝播が効きやすい)
         let mut force = false;
-        if self.cpp.off && tc_on('f') && self.p.nint > 0 {
+        if self.cpp.off && self.tc_q_force {
+            force = true;
+            self.cpp.valid = false;
+        }
+        if self.cpp.off && !force && tc_on('f') && self.p.nint > 0 {
             let p = self.p;
             let fixed = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] == self.dom.up[j]).count();
             let fr = fixed as f64 / p.nint as f64;
@@ -23270,6 +23372,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if let Some(b) = &self.nb {
                     eprintln!("MIP: NODESEL_BANDIT: version {}, pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", if b.v3 { 3 } else if b.v2 { 2 } else { 1 }, b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);
+                }
+                if tc_on('q') {
+                    let q = &self.tc_q;
+                    eprintln!("MIP: TC q: interval nodes {}, probed columns {}, fixed by probing {}, pruned {}, {:.2}s", q.calls, q.probed, q.fixes, q.prunes, q.secs);
                 }
                 if tc_on('e') {
                     eprintln!("MIP: TC e: degenerate-dual candidates skipped by the row ratio test {}, degenerate-dual fixing {:.2}s, solve {:.2}s", self.tc_e_skip, self.tc_e_secs, self.start.elapsed().as_secs_f64());
