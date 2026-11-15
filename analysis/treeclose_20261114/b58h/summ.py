@@ -9,7 +9,7 @@ rows = [json.loads(l) for f in sorted(glob.glob(str(D / f"{NAME}_s*.jsonl"))) fo
 by = {}
 for r in rows:
     by.setdefault(r["problem"], {}).setdefault(r["cfg"], {})[r["seed"]] = r["result"]
-cfgs = ["nb1", "nb2"]
+cfgs = ["nb1", "nb2", "nb3"]
 tl = max((r.get("tl", 600) for r in rows), default=600)
 for p in sorted(by):
     print(f"## {p}")
