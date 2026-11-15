@@ -3699,6 +3699,8 @@ pub(crate) struct SubmipCtl {
     /// `ENOMOTO_MIP_LOSE6_1_STOP` (試作、既定では使わない。[`lose6_1_stop`]): 外側が早めの再スタートを決めた後、まだ走っているサブ MIP を
     /// 止める合図 (サブ MIP の [`Solver::time_up`] が真になり、時間切れとしてその時点の解を返す)
     pub(crate) abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 止めの合図を出した時刻 (`t0` からのナノ秒、なければ `u64::MAX`。診断用: 合図から止まるまでの秒をログに出す)
+    pub(crate) abort_at: std::sync::atomic::AtomicU64,
     /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB` ([`lose6_2_sublb`]): 外側の大域的な下界 (作った時点の根の下界と、外側の裏のカットの LP の値)。
     /// 目的関数を変えないサブ MIP だけに付ける
     pub(super) outer_lb: Option<(f64, Option<std::sync::Arc<CutJob>>)>,
@@ -3771,7 +3773,7 @@ pub(crate) fn erwait_diag() -> bool {
 
 impl SubmipCtl {
     pub(crate) fn new(z: f64) -> Self {
-        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), outer_lb: None, cap_leaves: 0, cap_node_secs: 0.0, t0: Instant::now(), found_at: std::sync::atomic::AtomicU64::new(u64::MAX), cap_t: 0.0 }
+        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), abort_at: std::sync::atomic::AtomicU64::new(u64::MAX), outer_lb: None, cap_leaves: 0, cap_node_secs: 0.0, t0: Instant::now(), found_at: std::sync::atomic::AtomicU64::new(u64::MAX), cap_t: 0.0 }
     }
     /// [`subcap`] の `n`・`w` の上限を付ける (`root_lp_secs` は外側の根の LP の秒)
     /// 改良 (11-08) の `T` の上限を付ける (`tl` は外側の時間の上限)
@@ -3780,6 +3782,19 @@ impl SubmipCtl {
             self.cap_t = subcap_time_cap(tl);
         }
         self
+    }
+    /// 止めの合図を出す (前の値を返す)。時刻を記す
+    pub(crate) fn abort_now(&self) -> bool {
+        let prev = self.abort.swap(true, std::sync::atomic::Ordering::Relaxed);
+        if !prev {
+            self.abort_at.store(self.t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        prev
+    }
+    /// 止めの合図から今までの秒 (合図がなければ `None`)
+    pub(crate) fn since_abort(&self) -> Option<f64> {
+        let a = self.abort_at.load(std::sync::atomic::Ordering::Relaxed);
+        (a != u64::MAX).then(|| self.t0.elapsed().as_secs_f64() - a as f64 * 1e-9)
     }
     /// 外側の上限より良い解を見つけたと記す
     pub(crate) fn note_found(&self) {
@@ -6168,7 +6183,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if el <= c.cap_t || c.found_within(tunable!("ENOMOTO_T_MIP_SUBCAP_EXT", 1.0, f64) * c.cap_t) {
             return false;
         }
-        if !c.abort.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        if !c.abort_now() {
             SUBCAP_STOPS[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             eprintln!("MIP: SUBCAP T: stopping a root sub-MIP after {el:.2}s, {} nodes (cap {:.2}s)", self.nodes, c.cap_t);
         }
@@ -6199,7 +6214,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         for it in &self.subcap_deferred {
             if let Some(c) = &it.5 {
-                c.abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                c.abort_now();
             }
         }
         eprintln!("MIP: SUBCAP B: stopping {} deferred sub-MIPs ({why}, node {})", self.subcap_deferred.len(), self.nodes);
@@ -6218,7 +6233,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let el = t1.elapsed().as_secs_f64();
         let dn = self.nodes.saturating_sub(n1).max(tunable!("ENOMOTO_T_MIP_SUBCAP_W_NODES", 10u64, u64));
         let heavy = el > tunable!("ENOMOTO_T_MIP_SUBCAP_W_SECS", 1.0, f64).max(c.cap_node_secs * dn as f64);
-        if heavy && !c.abort.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        if heavy && !c.abort_now() {
             SUBCAP_STOPS[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             eprintln!("MIP: SUBCAP w: stopping a root sub-MIP after {} tree nodes in {el:.2}s (cap {:.3}s per node)", self.nodes.saturating_sub(n1), c.cap_node_secs);
         }
@@ -9230,9 +9245,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     .spawn(move || {
                         DIVE_ONLY.with(|d| d.set((5, dive_budget, ri)));
                         FIND_OUT.with(|o| *o.borrow_mut() = Some(out));
+                        // `ENOMOTO_MIP_SUBMIP_HALT`: 止めの合図を LP の止める合図にもする (既定では木の区切りでだけ見る)
+                        let halt = submip_halt().then(|| stop.clone());
                         FIND_STOP.with(|o| *o.borrow_mut() = Some(stop));
                         BG_ROOT_BASIS.with(|b| *b.borrow_mut() = Some(basis));
-                        solve_worker(snap, None, params)
+                        crate::cancel::with_halt(halt, || solve_worker(snap, None, params))
                     })
                     .expect("failed to spawn the find thread"),
             );
@@ -14885,13 +14902,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let lp0 = &self.lp;
                 let saved0 = saved;
                 let batch_ref = &batch;
+                // `ENOMOTO_MIP_SUBMIP_HALT`: 止める合図を強分枝のスレッドに引き継ぐ (既定では何もしない)
+                let sb_inherit = crate::cancel::inherit();
                 let outs: Vec<Vec<(usize, [SbSide; 2])>> = std::thread::scope(|sc| {
                     let hs: Vec<_> = (0..nth.min(batch.len()))
                         .map(|t| {
                             let mut lpc = lp0.clone();
                             let saved_c = saved0.clone();
                             let lim_c = lim.clone();
+                            let ih = sb_inherit.clone();
                             sc.spawn(move || {
+                                ih.install();
                                 let mut out = Vec::new();
                                 let mut k = t;
                                 while k < batch_ref.len() {
@@ -20308,7 +20329,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if stop {
                             if let Some(c) = &it.5 {
-                                c.abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                                c.abort_now();
                             }
                             SUBCAP_STOPS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             eprintln!("MIP: SUBCAP J: stopping the parallel sub-MIP ({}) after waiting {:.2}s (cap {jb_cap:.2}s, {:.2}s)", it.2, l63_t0.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
@@ -20325,7 +20346,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     for it in &self.pending_submips {
                         if let Some(c) = &it.5 {
                             if !it.0.is_finished() {
-                                c.abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                                c.abort_now();
                                 n += 1;
                             }
                         }
@@ -20414,7 +20435,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut n = 0;
         for it in &self.pending_submips {
             if let Some(c) = &it.5 {
-                c.abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                c.abort_now();
                 n += 1;
             }
         }
@@ -20439,6 +20460,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 別スレッドのサブ MIP 1 本の結果を受け取る。
     fn take_submip(&mut self, item: (std::thread::JoinHandle<MipResult>, bool, &'static str, std::time::Instant, Option<f64>, Option<std::sync::Arc<SubmipCtl>>, u64, Option<ResumeParent>)) {
         let (h, is_rens, label, t0, fix_rate, ctl, trace_id, link) = item;
+        // 診断: 止めの合図から止まるまでの秒 (合図がなければ `None`。受け取った時点で測る)
+        let ctl_keep = ctl.clone();
         {
             // `ENOMOTO_MIP_RENS_RESUME` ([`rens_resume_on`]): ノード上限で一時停止したサブ MIP は、その時点の結果を受け取り、スレッドは
             // 一時停止のまま取っておく ([`Self::rens_paused`])
@@ -20463,6 +20486,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let (nfree, nint) = l.info;
                 self.rens_paused = Some(PausedSubmip { handle: Some(h), link: l, ctl, node_limit: self.rens_spawn_node_limit, nodes, iters, objective, nfree, nint, at: Instant::now(), parallel: true });
             }
+            let ctl_since = ctl_keep.as_ref().and_then(|c| c.since_abort());
             if let Ok(r) = res {
                 self.heur_iters += r.lp_iterations;
                 // 根の RENS がノード上限で止まったら、ノード上限を増やしてやり直す判断に使う (逐次のときは rens が立てる。
@@ -20475,7 +20499,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP:   RENS (more nodes) skipped: the parallel sub-MIP stopped at {} of {} nodes", r.nodes, self.rens_spawn_node_limit);
                 }
                 if self.params.verbose {
-                    eprintln!("MIP:   parallel sub-MIP ({label}): status {:?}, nodes {}, objective {:?}, {:.2}s", r.status, r.nodes, r.objective, t0.elapsed().as_secs_f64());
+                    eprintln!("MIP:   parallel sub-MIP ({label}): status {:?}, nodes {}, objective {:?}, {:.2}s{}", r.status, r.nodes, r.objective, t0.elapsed().as_secs_f64(), ctl_since.map_or(String::new(), |d| format!(" (stopped {d:.2}s after the stop request)")));
                 }
                 if super::debug_submip_components() && !self.params.submip {
                     eprintln!("SUBMIP_COMP: {label} result: status {:?}, nodes {}, {:.2}s", r.status, r.nodes, t0.elapsed().as_secs_f64());

@@ -1890,9 +1890,11 @@ fn solve_std_form_decomposed(std: &StdForm, opts: &crate::types::LpOptions) -> S
 fn par_components<T: Sync, R: Send>(items: &[T], sizes: &[usize], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let token = crate::cancel::current();
     let deadline = crate::cancel::deadline();
+    // `ENOMOTO_MIP_SUBMIP_HALT`: 止める合図も各成分のスレッドに引き継ぐ (既定では何もしない)
+    let ih = crate::cancel::inherit();
     if tunable!("ENOMOTO_T_SPLIT_DEDICATED", 0u8, u8) == 0 {
         use rayon::prelude::*;
-        return items.par_iter().map(|it| crate::cancel::with_deadline(deadline, || crate::cancel::with_token(token.clone(), || f(it)))).collect();
+        return items.par_iter().map(|it| crate::cancel::with_deadline(deadline, || crate::cancel::with_token(token.clone(), || ih.clone().run(|| f(it))))).collect();
     }
     let total = rayon::current_num_threads().max(1);
     let k = total.min(items.len());
@@ -1908,14 +1910,14 @@ fn par_components<T: Sync, R: Send>(items: &[T], sizes: &[usize], f: impl Fn(&T)
         for w in 0..k {
             // スレッド数を k 本に分ける (余りは先頭のスレッドに 1 本ずつ)。
             let p = total / k + usize::from(w < total % k);
-            let (token, next, slots, order, f) = (token.clone(), &next, &slots, &order, &f);
+            let (token, next, slots, order, f, ih) = (token.clone(), &next, &slots, &order, &f, &ih);
             std::thread::Builder::new()
                 .name(format!("enomoto-c{w}"))
                 .spawn_scoped(sc, move || {
                     let run = || loop {
                         let t = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some(&i) = order.get(t) else { break };
-                        let r = crate::cancel::with_deadline(deadline, || crate::cancel::with_token(token.clone(), || f(&items[i])));
+                        let r = crate::cancel::with_deadline(deadline, || crate::cancel::with_token(token.clone(), || ih.clone().run(|| f(&items[i]))));
                         *slots[i].lock().unwrap() = Some(r);
                     };
                     match rayon::ThreadPoolBuilder::new().num_threads(p).thread_name(move |j| format!("enomoto-c{w}-{j}")).build() {

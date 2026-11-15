@@ -4944,7 +4944,8 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     let lpar_blocks = tunable!("ENOMOTO_T_MIP_PREPAR_BLOCKS", 4usize, usize).max(1);
     let it_extra = std::cell::Cell::new(0u64);
     let tot_it = |lp: &crate::simplex::mip_lp::TwoStageLp| lp.total_iterations() + it_extra.get();
-    let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| tot_it(lp) - root_iters < iter_budget && tot_it(lp) < lp_iter_cap && t0.elapsed().as_secs_f64() < secs;
+    // `ENOMOTO_MIP_SUBMIP_HALT`: 止める合図が立ったら残りの試しをやめる (各 LP は合図で止まるが、ループは予算まで回っていた)
+    let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| tot_it(lp) - root_iters < iter_budget && tot_it(lp) < lp_iter_cap && t0.elapsed().as_secs_f64() < secs && !crate::cancel::halt_requested();
     let (mut n_lps, mut n_fixed, mut n_tried) = (0usize, 0usize, 0usize);
     // 窓の数と、試した列の反復の和と数 (窓の候補の数の見積もりに使う)
     let (mut n_lwin, mut it_lc, mut n_lc) = (0usize, 0u64, 0usize);

@@ -2444,7 +2444,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 分離の間に求解の期限を過ぎたら、このラウンドを捨てて抜ける (ラウンドの頭の `time_up` で抜けるのと同じ状態)。
             // 裏のカットの求解のラウンド (rail507 で 1 回 3〜9 秒) の候補のプールへの追加・選択が期限の後も回り、主がその終わりを
             // 待って時間の上限を 5 秒過ぎていた (analysis/overrun_crypt_20261101.md)
-            if sep_deadline(self.deadline).is_some_and(|d| std::time::Instant::now() >= d) {
+            if sep_deadline(self.deadline).is_some_and(|d| std::time::Instant::now() >= d) || crate::cancel::halt_requested() {
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: the time limit passed during the separation ({:.2}s); round dropped", t_sep.elapsed().as_secs_f64());
                 }
@@ -6758,6 +6758,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nb = bases.len();
             let nth = par_threads.min(nb.max(1));
             let deadline = sep_deadline(self.deadline);
+            // `ENOMOTO_MIP_SUBMIP_HALT`: 止める合図も見る (別スレッドには引き継がれないので取り出して渡す)
+            let halt_flag = crate::cancel::inherit().flag();
+            let halt_ref = &halt_flag;
             // 行をスレッドに交互に割り当てる (行はスコア順で、重さが偏らないように)
             let parts: Vec<(Vec<(usize, Vec<Candidate>)>, f64)> = std::thread::scope(|sc| {
                 let hs: Vec<_> = (0..nth)
@@ -6769,7 +6772,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let mut out = Vec::new();
                             let mut k = t;
                             // 求解の期限 ([`sep_deadline`]) を過ぎたら残りの行は作らない (逐次の形は行ごとに `time_up` を見る)
-                            while k < nb && !deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                            while k < nb && !deadline.is_some_and(|d| std::time::Instant::now() >= d) && !halt_ref.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
                                 let base = &bases_ref[k];
                                 let neg: Vec<(usize, f64)> = base.iter().map(|&(j, a)| (j, -a)).collect();
                                 let mut cs: Vec<Candidate> = Vec::new();
@@ -7528,6 +7531,8 @@ fn gen_cuts_parallel(
     let nth = nth.min(nb.max(1));
     let hnfcut_st = super::hnfcut::snapshot();
     let hnfcut_ref = &hnfcut_st;
+    let halt_flag = crate::cancel::inherit().flag();
+    let halt_ref = &halt_flag;
     let parts: Vec<(Vec<(usize, Vec<Candidate>)>, f64)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nth)
             .map(|t| {
@@ -7538,7 +7543,7 @@ fn gen_cuts_parallel(
                     let mut out = Vec::new();
                     let mut k = t;
                     // 求解の期限 ([`sep_deadline`]) を過ぎたら残りの行は作らない
-                    while k < nb && !deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    while k < nb && !deadline.is_some_and(|d| std::time::Instant::now() >= d) && !halt_ref.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
                         let base = &bases[k];
                         let neg: Vec<(usize, f64)> = base.iter().map(|&(j, a)| (j, -a)).collect();
                         let mut cs: Vec<Candidate> = Vec::new();

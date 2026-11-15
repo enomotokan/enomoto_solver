@@ -2082,6 +2082,7 @@ impl TwoStageLp {
         {
             let (std, cancel, bound) = (Arc::new(self.std.clone()), cancel.clone(), bound.clone());
             let sc = self.ipm_scale();
+            let ih = crate::cancel::inherit();
             let deadline = lim.deadline;
             let stamp = stamp.clone();
             std::thread::spawn(move || {
@@ -2090,7 +2091,7 @@ impl TwoStageLp {
                     // 仕上げの二段解法の最適基底と双対を記録させる
                     sid::request_duals(true);
                     let r = crate::cancel::with_deadline(deadline, || {
-                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound((!td).then_some(bound), || ipm_crossover_run(&std, sc.as_deref())))
+                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound((!td).then_some(bound), || ih.clone().run(|| ipm_crossover_run(&std, sc.as_deref()))))
                     });
                     let duals = sid::take_duals();
                     sid::request_duals(false);
@@ -2104,14 +2105,15 @@ impl TwoStageLp {
         }
         // 二段解法は 1 スレッドのプールで解く。スレッドごとの設定 (MIP のポートフォリオの設定など) を持ち込み、持ち帰る
         let flags = sid::tl_flags();
+        let ihs = crate::cancel::inherit();
         let shared_lb = bound.clone();
         let (st, flags, y_mid) = pool_s.install(|| {
             sid::set_tl_flags(flags);
             let _ = stamp.is_some().then(sid::take_bound_duals);
             let st = if td {
-                crate::cancel::with_bound(Some(bound), || self.solve_once(&td_lim))
+                crate::cancel::with_bound(Some(bound), || ihs.clone().run(|| self.solve_once(&td_lim)))
             } else {
-                crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || self.solve_once(lim)))
+                crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || ihs.clone().run(|| self.solve_once(lim))))
             };
             // 診断 `ENOMOTO_MIP_XOLAZY_LOG`: 二段解法が最後に下界を計算した途中の基底の双対
             let y_mid = stamp.is_some().then(sid::take_bound_duals);
@@ -2261,12 +2263,13 @@ impl TwoStageLp {
         {
             let (std, bound) = (Arc::new(self.std.clone()), bound.clone());
             let sc = self.ipm_scale();
+            let ih = crate::cancel::inherit();
             let deadline = lim.deadline;
             std::thread::spawn(move || {
                 let r = pool.install(|| {
                     super::crossover::XO_IPM_END.with(|t| t.set(None));
                     sid::request_duals(true);
-                    let r = crate::cancel::with_deadline(deadline, || crate::cancel::with_bound(Some(bound), || ipm_crossover_run(&std, sc.as_deref())));
+                    let r = crate::cancel::with_deadline(deadline, || crate::cancel::with_bound(Some(bound), || ih.clone().run(|| ipm_crossover_run(&std, sc.as_deref()))));
                     let duals = sid::take_duals();
                     sid::request_duals(false);
                     let t_ipm = super::crossover::XO_IPM_END.with(|t| t.get()).map(|e| e.saturating_duration_since(t0).as_secs_f64());
@@ -2280,9 +2283,10 @@ impl TwoStageLp {
         // (二段解法の下界の共有もない。`st_s` は `IterationLimit`)
         let ipm_only = env_str!("ENOMOTO_MIP_ROOTLP_IPM_ONLY").is_some();
         let flags = sid::tl_flags();
+        let ihs = crate::cancel::inherit();
         let (st_s, flags) = pool_s.install(|| {
             sid::set_tl_flags(flags);
-            let st = if ipm_only { LpStatus::IterationLimit } else { crate::cancel::with_bound(Some(bound), || lp_s.solve_once(lim)) };
+            let st = if ipm_only { LpStatus::IterationLimit } else { crate::cancel::with_bound(Some(bound), || ihs.clone().run(|| lp_s.solve_once(lim))) };
             (st, sid::tl_flags())
         });
         sid::set_tl_flags(flags);
@@ -2322,12 +2326,13 @@ impl TwoStageLp {
         {
             let (std, cancel, bound, tx) = (Arc::new(self.std.clone()), cancel_i.clone(), bound.clone(), tx.clone());
             let sc = self.ipm_scale();
+            let ih = crate::cancel::inherit();
             let deadline = lim.deadline;
             std::thread::spawn(move || {
                 let r = pool.install(|| {
                     sid::request_duals(true);
                     let r = crate::cancel::with_deadline(deadline, || {
-                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || ipm_crossover_run(&std, sc.as_deref())))
+                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || ih.clone().run(|| ipm_crossover_run(&std, sc.as_deref()))))
                     });
                     let duals = sid::take_duals();
                     sid::request_duals(false);
@@ -2338,13 +2343,14 @@ impl TwoStageLp {
         }
         {
             let (mut lp, cancel, bound, tx, lim) = (Box::new(self.clone()), cancel_s.clone(), bound, tx, *lim);
+            let ihs = crate::cancel::inherit();
             let flags = sid::tl_flags();
             std::thread::Builder::new()
                 .stack_size(64 << 20)
                 .spawn(move || {
                     let (st, flags) = pool_s.install(|| {
                         sid::set_tl_flags(flags);
-                        let st = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || lp.solve_once(&lim)));
+                        let st = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || ihs.run(|| lp.solve_once(&lim))));
                         (st, sid::tl_flags())
                     });
                     let _ = tx.send(BothMsg::Simplex(st, lp, flags));

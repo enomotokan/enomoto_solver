@@ -25,6 +25,56 @@ thread_local! {
     static HALT_CANCELS: Cell<bool> = const { Cell::new(false) };
 }
 
+/// 試作 `ENOMOTO_MIP_SUBMIP_HALT` (analysis/timedep_20261114.md の 9 節): 別スレッドに仕事を渡す箇所で、止める合図 ([`with_halt`]) と
+/// それを [`is_cancelled`] に含めるか ([`set_halt_cancels`]) を引き継ぐ。既定 (環境変数なし) では何も引き継がない。
+#[derive(Clone, Default)]
+pub struct Inherit(Option<(Arc<AtomicBool>, bool)>);
+
+fn inherit_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("ENOMOTO_MIP_SUBMIP_HALT").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// `ENOMOTO_MIP_SUBMIP_HALT` のときだけ、このスレッドの止める合図 ([`halted`]) を返す (既定では常に偽。期限しか見ない計算に足す確認)。
+#[inline]
+pub fn halt_requested() -> bool {
+    inherit_on() && halted()
+}
+
+/// 今のスレッドの止める合図を取り出す (別スレッドで [`Inherit::run`] する)。
+pub fn inherit() -> Inherit {
+    if !inherit_on() {
+        return Inherit(None);
+    }
+    Inherit(HALT.with(|h| h.borrow().clone()).map(|a| (a, HALT_CANCELS.with(|c| c.get()))))
+}
+
+impl Inherit {
+    /// 取り出した止める合図をこのスレッドに置いて `f` を実行し、元に戻す。
+    pub fn run<R>(self, f: impl FnOnce() -> R) -> R {
+        match self.0 {
+            None => f(),
+            Some((a, c)) => {
+                let prev = HALT_CANCELS.with(|h| h.replace(c));
+                let r = with_halt(Some(a), f);
+                HALT_CANCELS.with(|h| h.set(prev));
+                r
+            }
+        }
+    }
+    /// 取り出した止める合図をこのスレッドに置いたままにする (戻さない。終わりまでこの仕事だけをするスレッドの頭で使う)。
+    pub fn install(self) {
+        if let Some((a, c)) = self.0 {
+            HALT.with(|h| *h.borrow_mut() = Some(a));
+            HALT_CANCELS.with(|h| h.set(c));
+        }
+    }
+    /// 止める合図 (なければ `None`)。
+    pub fn flag(&self) -> Option<Arc<AtomicBool>> {
+        self.0.as_ref().map(|(a, _)| a.clone())
+    }
+}
+
 /// このスレッドの「止める合図」が立ったか ([`with_halt`])。MIP の LP の反復の確認 (`slope_intercept_dual::ext_check`) が
 /// 期限に達したのと同じに扱う (状態は `TimeLimit`)。トークン ([`is_cancelled`]) と違い、同時実行の負けの扱いにはならない。
 #[inline]
