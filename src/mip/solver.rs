@@ -2098,6 +2098,9 @@ pub(super) struct NodeselBandit {
     /// [`ENOMOTO_T_MIP_NB3_MIN`, 1 − MIN] (既定 0.2) に収め、選ばれた割合が目標を下回る腕を選ぶ (どちらの腕も最低 2 割は使う。`=2` は
     /// mcsched で最初の 1 回の悪い報酬から腕 0 に 28 区間張り付いた)
     v3: bool,
+    /// `=4`: 学習なし。区間 k で腕 1 を選ぶのは floor((k+1) s) > floor(k s) のとき (s = `ENOMOTO_T_MIP_NB4_SHARE`、既定 0.5 なら 0101…)。
+    /// b58h で寄せる形 (`=2`・`=3`) ほど悪く、ほぼ交互の `=1` が一番だったので、決定的な交互にした
+    v4: bool,
 }
 
 /// 試作 `ENOMOTO_MIP_TC` の `q` の状態: 次に掛ける手間、掛けた回数、プロービングで固定した列・矛盾で刈ったノード、試した列、秒
@@ -10931,7 +10934,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_NODESEL_BANDIT`: 主のスレッドの木だけで使う (サブ MIP・従のスレッドは既定のまま)
         if env_str!("ENOMOTO_MIP_NODESEL_BANDIT").is_some() && !self.params.submip && self.snap.is_none() && self.nb.is_none() {
             let v = env_str!("ENOMOTO_MIP_NODESEL_BANDIT");
-            self.nb = Some(NodeselBandit { v2: v == Some("2"), v3: v == Some("3"), ..Default::default() });
+            self.nb = Some(NodeselBandit { v2: v == Some("2"), v3: v == Some("3"), v4: v == Some("4"), ..Default::default() });
         }
         let mut plunge_start = 0u64;
         // 診断用 (`ENOMOTO_MIP_BRANCH_REPLAY`): HiGHS の木の分枝をなぞる ([`super::replay`])
@@ -14434,7 +14437,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             b.sum[b.arm] += r;
             b.cnt[b.arm] += 1.0;
             // 次の腕: まだ選んでいない腕を先に、あとは割引付き UCB (同点は腕 0)
-            b.arm = if b.pulls[1] == 0 {
+            b.arm = if b.v4 {
+                let k = (b.pulls[0] + b.pulls[1]) as f64;
+                let sh = tunable!("ENOMOTO_T_MIP_NB4_SHARE", 0.5, f64);
+                if ((k + 1.0) * sh).floor() > (k * sh).floor() { 1 } else { 0 }
+            } else if b.pulls[1] == 0 {
                 1
             } else if b.v3 {
                 let m = |k: usize| if b.cnt[k] > 0.0 { b.sum[k] / b.cnt[k] } else { 0.0 };
@@ -23371,7 +23378,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: TC p: pool now {n} cuts, mean nonzeros {:.1}, integer share {:.2}; added at root {} (nonzeros {}), in the tree {} (nonzeros {}); used by propagation: root cuts tightened {} pruned {}, tree cuts tightened {} pruned {}, unknown origin {}, mean nonzeros of used {:.1}", nnz as f64 / n.max(1) as f64, ni as f64 / nnz.max(1) as f64, a[0], a[1], a[2], a[3], u[0], u[1], u[2], u[3], u[5], u[4] as f64 / (u[0] + u[1] + u[2] + u[3]).max(1) as f64);
                 }
                 if let Some(b) = &self.nb {
-                    eprintln!("MIP: NODESEL_BANDIT: version {}, pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", if b.v3 { 3 } else if b.v2 { 2 } else { 1 }, b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);
+                    eprintln!("MIP: NODESEL_BANDIT: version {}, pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", if b.v4 { 4 } else if b.v3 { 3 } else if b.v2 { 2 } else { 1 }, b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);
                 }
                 if tc_on('q') {
                     let q = &self.tc_q;
