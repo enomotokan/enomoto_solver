@@ -765,6 +765,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     tc_e_skip: u64,
     /// 基底の退化した列の固定 ([`Self::degen_dual_fixing`]) にかかった秒 (診断、`TC` の `e` で出す)
     tc_e_secs: f64,
+    /// 試作 `ENOMOTO_MIP_NODESEL_BANDIT` の状態 ([`NodeselBandit`])。主のスレッドの木だけ
+    nb: Option<NodeselBandit>,
     tr_last: (u64, f64, f64, f64),
     /// 木の中の再スタートの記帳 (`TRSTAT`、ログだけ) と `ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、[`Self::tree_restart_guard_ok`]) 用:
     /// この求解で木のループに入った時刻 (この求解の始めからの秒)、そのときの全体の下界、[`Self::tree_restart_due`] の最後の木の大きさの見積もり。
@@ -2064,6 +2066,28 @@ fn flat_changes(n: &OpenNode) -> Vec<BoundChange> {
     let mut v = n.changes.clone();
     InhChain::for_each(&n.inh, |c| v.push(*c));
     v
+}
+
+/// 試作 `ENOMOTO_MIP_NODESEL_BANDIT` (既定では使わない、analysis/treeclose_20261114.md 9.12 節): ノードの選び方 (潜り方) を、区間ごとに 2 本の腕から
+/// 割引付き UCB で選ぶ。腕 0 = 既定 (`PLUNGE_QUOT`・`SIBLING_QUOT` は既定の値)、腕 1 = 深さ優先寄り (d3: 潜りを子の下界で打ち切らず、
+/// 兄弟へも下界の条件なしで戻る。潜りのノード数の上限は既定のまま。兄弟へ戻ったときも潜りの始めとして数える (`TC` の `k`))。
+/// 区間は主のスレッドの LP の反復 (ノード + 強分枝) で `ENOMOTO_T_MIP_NB_WORK` (既定 20000) ずつ (時刻に依らない)。
+/// 報酬 = 区間のギャップ (打ち切り値 − 全体の下界) の縮みの割合 − `ENOMOTO_T_MIP_NB_OPEN_PEN` (既定 0.2) × 開いたノードの増え ÷ 処理したノード。
+/// 暫定解がない間は、ギャップの代わりに全体の下界の伸びを根の下界の大きさで割ったもの。
+#[derive(Debug, Default)]
+pub(super) struct NodeselBandit {
+    arm: usize,
+    next_work: u64,
+    gap0: f64,
+    lb0: f64,
+    open0: usize,
+    nodes0: u64,
+    /// 腕ごとの割引付きの報酬の和と回数
+    sum: [f64; 2],
+    cnt: [f64; 2],
+    /// 腕ごとの選ばれた回数 (割引なし) と、選んだ腕の並び (記録用、先頭 64 個)
+    pulls: [u64; 2],
+    seq: String,
 }
 
 /// ノードの境界の変更の全部 (並び + 引き継ぎの鎖)。鎖がなければ並びをそのまま (写さない) 返す。`TC` の `s` で鎖に移した固定も、
@@ -4935,6 +4959,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tc_len: [0; 4],
         tc_e_skip: 0,
         tc_e_secs: 0.0,
+        nb: None,
         tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
         tr_t0: 0.0,
         tr_w0: (0.0, 0),
@@ -10879,6 +10904,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 潜っている子ノード (定義域に分枝を積んだ状態で次に処理する)。
         let mut plunge: Option<OpenNode> = None;
         let mut plunge_depth = 0usize;
+        // 試作 `ENOMOTO_MIP_NODESEL_BANDIT`: 主のスレッドの木だけで使う (サブ MIP・従のスレッドは既定のまま)
+        if env_str!("ENOMOTO_MIP_NODESEL_BANDIT").is_some() && !self.params.submip && self.snap.is_none() && self.nb.is_none() {
+            self.nb = Some(NodeselBandit::default());
+        }
         let mut plunge_start = 0u64;
         // 診断用 (`ENOMOTO_MIP_BRANCH_REPLAY`): HiGHS の木の分枝をなぞる ([`super::replay`])
         let replay = super::replay::get().filter(|_| !self.params.submip && !parallel_tree && self.snap.is_none());
@@ -11285,7 +11314,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             {
                 let cutoff = self.prune_limit();
                 let glb = self.queue.best_lower_bound();
-                let limit = if cutoff.is_finite() { glb + tunable!("ENOMOTO_T_MIP_SIBLING_QUOT", 0.25, f64) * (cutoff - glb) } else { f64::INFINITY };
+                let limit = if cutoff.is_finite() { glb + self.nb_sibling_quot() * (cutoff - glb) } else { f64::INFINITY };
                 // `ENOMOTO_MIP_MEM2` の `d`: 兄弟へ戻る下界の条件も外す (打ち切り値未満なら戻る)
                 let limit = if (self.mem2_press && mem2('d')) || memcap_level() >= 2 { f64::INFINITY } else { limit };
                 let mut got = None;
@@ -11305,6 +11334,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.nodelp_sib = from_sibling;
             let mut pre_qlb = f64::NAN;
             self.tp_kind = 0;
+            // 試作 `ENOMOTO_MIP_NODESEL_BANDIT`: 区間 (LP の反復で数えた手間) ごとに潜り方の腕を選ぶ
+            if self.nb.is_some() {
+                self.nb_tick();
+            }
             self.d2b_tried_now = false;
             let node = match plunge.take().or(sibling) {
                 Some(n) if !from_sibling => n,
@@ -11314,7 +11347,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 試作 `ENOMOTO_MIP_TC` の `k` (既定では使わない、treeclose 9.6 節): 兄弟へ戻ったときも潜りの始めとして数える
                     // (`plunge_depth` は待ち行列から取り出したときだけ 0 に戻るので、深さ優先寄りでは潜りの始めだけで呼ぶ木の中の
                     // ヒューリスティクス・ノードの分離がほとんど呼ばれず、潜りの深さの上限 200 にも通算で当たる)
-                    if tc_on('k') {
+                    if tc_on('k') || self.nb_arm() == Some(1) {
                         plunge_depth = 0;
                     }
                     self.dom.reset_to_root(self.p);
@@ -13073,7 +13106,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let cutoff = self.prune_limit();
                 if cutoff.is_finite() && env_str!("ENOMOTO_MIP_NO_PLUNGE_ABORT").is_none() {
                     let glb = self.queue.best_lower_bound().min(node_obj);
-                    child.lower_bound <= glb + tunable!("ENOMOTO_T_MIP_PLUNGE_QUOT", 0.25, f64) * (cutoff - glb)
+                    child.lower_bound <= glb + self.nb_plunge_quot() * (cutoff - glb)
                 } else {
                     true
                 }
@@ -14229,6 +14262,80 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         true
+    }
+
+    /// [`NodeselBandit`] の今の腕 (使っていなければ `None`)。
+    fn nb_arm(&self) -> Option<usize> {
+        self.nb.as_ref().map(|b| b.arm)
+    }
+
+    /// 潜りの打ち切りの割合 (`ENOMOTO_T_MIP_PLUNGE_QUOT`、バンディットの腕 1 なら 1)。
+    fn nb_plunge_quot(&self) -> f64 {
+        if self.nb_arm() == Some(1) { 1.0 } else { tunable!("ENOMOTO_T_MIP_PLUNGE_QUOT", 0.25, f64) }
+    }
+
+    /// 兄弟へ戻る下界の割合 (`ENOMOTO_T_MIP_SIBLING_QUOT`、バンディットの腕 1 なら 1)。
+    fn nb_sibling_quot(&self) -> f64 {
+        if self.nb_arm() == Some(1) { 1.0 } else { tunable!("ENOMOTO_T_MIP_SIBLING_QUOT", 0.25, f64) }
+    }
+
+    /// 今の区間の物差し: (ギャップの割合 (暫定解がなければ無限大), 全体の下界, 開いたノード, 処理したノード)
+    fn nb_measure(&self) -> (f64, f64, usize, u64) {
+        let lb = self.global_lower_bound();
+        let ub = self.prune_limit();
+        let gap = if ub.is_finite() && lb.is_finite() { ((ub - lb) / ub.abs().max(1e-9)).max(0.0) } else { f64::INFINITY };
+        let (done, open) = self.global_node_counts();
+        (gap, lb, open, done)
+    }
+
+    /// 区間の終わりなら報酬を足して次の腕を選ぶ。
+    fn nb_tick(&mut self) {
+        let work = self.node_iters + self.sb_iters;
+        let Some(b) = self.nb.as_ref() else { return };
+        if work < b.next_work {
+            return;
+        }
+        let (gap1, lb1, open1, nodes1) = self.nb_measure();
+        let root = self.root_lb.abs().max(1.0);
+        let pen = tunable!("ENOMOTO_T_MIP_NB_OPEN_PEN", 0.2, f64);
+        let gamma = tunable!("ENOMOTO_T_MIP_NB_GAMMA", 0.9, f64);
+        let c = tunable!("ENOMOTO_T_MIP_NB_UCB_C", 0.5, f64);
+        let wlen = tunable!("ENOMOTO_T_MIP_NB_WORK", 20000u64, u64).max(1);
+        let b = self.nb.as_mut().unwrap();
+        if b.next_work > 0 {
+            let closed = if b.gap0.is_finite() && gap1.is_finite() && b.gap0 > 0.0 {
+                (b.gap0 - gap1) / b.gap0
+            } else if lb1.is_finite() && b.lb0.is_finite() {
+                (lb1 - b.lb0) / root
+            } else {
+                0.0
+            };
+            let grow = (open1 as f64 - b.open0 as f64).max(0.0) / ((nodes1.saturating_sub(b.nodes0)) as f64).max(1.0);
+            let r = closed - pen * grow;
+            for k in 0..2 {
+                b.sum[k] *= gamma;
+                b.cnt[k] *= gamma;
+            }
+            b.sum[b.arm] += r;
+            b.cnt[b.arm] += 1.0;
+            // 次の腕: まだ選んでいない腕を先に、あとは割引付き UCB (同点は腕 0)
+            b.arm = if b.pulls[1] == 0 {
+                1
+            } else {
+                let tot: f64 = b.cnt.iter().sum::<f64>().max(1.0);
+                let score = |k: usize| if b.cnt[k] <= 0.0 { f64::INFINITY } else { b.sum[k] / b.cnt[k] + c * (2.0 * tot.ln().max(0.0) / b.cnt[k]).sqrt() };
+                if score(1) > score(0) { 1 } else { 0 }
+            };
+        }
+        b.pulls[b.arm] += 1;
+        if b.seq.len() < 64 {
+            b.seq.push(if b.arm == 0 { '0' } else { '1' });
+        }
+        b.next_work = work + wlen;
+        b.gap0 = gap1;
+        b.lb0 = lb1;
+        b.open0 = open1;
+        b.nodes0 = nodes1;
     }
 
     fn local_redcost_fixing(&mut self, node_obj: f64) -> bool {
@@ -23137,6 +23244,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let a = &self.tc_pool_add;
                     let u = &self.tc_pool_use;
                     eprintln!("MIP: TC p: pool now {n} cuts, mean nonzeros {:.1}, integer share {:.2}; added at root {} (nonzeros {}), in the tree {} (nonzeros {}); used by propagation: root cuts tightened {} pruned {}, tree cuts tightened {} pruned {}, unknown origin {}, mean nonzeros of used {:.1}", nnz as f64 / n.max(1) as f64, ni as f64 / nnz.max(1) as f64, a[0], a[1], a[2], a[3], u[0], u[1], u[2], u[3], u[5], u[4] as f64 / (u[0] + u[1] + u[2] + u[3]).max(1) as f64);
+                }
+                if let Some(b) = &self.nb {
+                    eprintln!("MIP: NODESEL_BANDIT: pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);
                 }
                 if tc_on('e') {
                     eprintln!("MIP: TC e: degenerate-dual candidates skipped by the row ratio test {}, degenerate-dual fixing {:.2}s, solve {:.2}s", self.tc_e_skip, self.tc_e_secs, self.start.elapsed().as_secs_f64());
