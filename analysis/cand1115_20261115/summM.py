@@ -2,7 +2,7 @@
 SGM は shift 1 秒、時間切れは制限時間で数える。CI は問題単位のブートストラップ。最後に、組み直しで外した項目の問題の比を cand1113 の P と並べる。"""
 import json, glob, math, random, collections, sys
 from pathlib import Path
-D = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent
+D = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent  # TC=a の回は python summP.py tca
 C13 = Path(__file__).resolve().parents[1] / "cand1113_20261112"
 rows = [json.loads(l) for f in sorted(glob.glob(str(D / "res_M_s*.jsonl"))) for l in open(f)]
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
