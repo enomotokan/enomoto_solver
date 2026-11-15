@@ -19760,13 +19760,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return true;
             }
             let mut k = 0usize;
-            for (&j, &(cnt, v)) in &lo_cnt {
+            for (j, (cnt, v)) in super::hm_entries(&lo_cnt) {
                 if cnt == valid && v > self.dom.global_lo[j] + 0.5 {
                     self.dom.tighten_global(p, j, false, v);
                     k += 1;
                 }
             }
-            for (&j, &(cnt, v)) in &up_cnt {
+            for (j, (cnt, v)) in super::hm_entries(&up_cnt) {
                 if cnt == valid && v < self.dom.global_up[j] - 0.5 {
                     self.dom.tighten_global(p, j, true, v);
                     k += 1;

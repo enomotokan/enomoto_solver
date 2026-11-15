@@ -206,7 +206,7 @@ fn map_restart_cut_subst(c: &[(usize, f64)], r: f64, p: &MipProblem, prob: &MipP
         }
     }
     let mut out: Vec<(usize, f64)> = Vec::new();
-    for (j, a) in coef {
+    for (j, a) in hm_entries(&coef) {
         if a.abs() <= 1e-12 {
             continue;
         }
@@ -293,6 +293,22 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// - `c`: CUTSEL_PROBE の比べの経過・打ち切り・LP の上限を手間の秒にする
 /// - `f`: 前処理の早い FJ・Local-MIP (1 本のとき) の全体の上限と Local-MIP の 1 切れを手間で数える
 /// - `l`: 局所探索の時間の上限を同じ量の手間の上限にする
+/// 試作 `ENOMOTO_MIP_DETHASH` (既定では使わない。analysis/timedep_20261114.md の 12 節): 結果に効く `HashMap` の走査を鍵の順にする
+/// (既定の `RandomState` はプロセスごとに種が変わり、走査順で implied bound カットの順・同値の組の順・足し合わせの順が変わる)。
+pub(crate) fn dethash() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("ENOMOTO_MIP_DETHASH").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// `m` の組を取り出す ([`dethash`] なら鍵の順に並べる。そうでなければ今までと同じ走査順)。
+pub(crate) fn hm_entries<K: Ord + Copy + std::hash::Hash + Eq, V: Copy, S: std::hash::BuildHasher>(m: &std::collections::HashMap<K, V, S>) -> Vec<(K, V)> {
+    let mut v: Vec<(K, V)> = m.iter().map(|(k, x)| (*k, *x)).collect();
+    if dethash() {
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    v
+}
+
 pub(crate) fn ticks_on(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TICKS").is_some_and(|v| v.contains(c))
 }
@@ -6115,7 +6131,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             let e = best.entry((k, upper)).or_insert(val);
             *e = if upper { e.min(val) } else { e.max(val) };
         }
-        for ((k, upper), val) in best {
+        for ((k, upper), val) in hm_entries(&best) {
             if implied.len() >= edge_cap {
                 return;
             }
@@ -6502,7 +6518,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     // 同値な 0-1 列 (既定で集める。`ENOMOTO_MIP_NO_PROBE_EQUIV` で集めない): x_j = 0 で x_k = 0、x_j = 1 で x_k = 1 なら x_k = x_j。
                     // 逆向きなら x_k = 1 - x_j。等式の行として足して前処理をかけ直す ([`presolve_mip`]、HiGHS の probing の代入)
                     if want_equiv {
-                        for (&(k, upper), &v0) in &first {
+                        for ((k, upper), v0) in hm_entries(&first) {
                             if k == j || !bin0[k] || dom.lo[k] == dom.up[k] {
                                 continue;
                             }
@@ -6515,7 +6531,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                         }
                     }
                     let mut any = false;
-                    for (&(k, upper), &v0) in &first {
+                    for ((k, upper), v0) in hm_entries(&first) {
                         if k == j {
                             continue;
                         }
@@ -6701,7 +6717,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             if !(ok0 && ok1) {
                 continue;
             }
-            for (&(k, upper), &v0) in &ch0 {
+            for ((k, upper), v0) in hm_entries(&ch0) {
                 if k == j || !bin0[k] || d2.lo[k] == d2.up[k] {
                     continue;
                 }
@@ -7040,7 +7056,7 @@ fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool, submip: bool) -> Op
                     last1.insert((k, upper), v);
                 }
                 let mut any = false;
-                for (&(k, upper), &v0) in &first {
+                for ((k, upper), v0) in hm_entries(&first) {
                     if k == j {
                         continue;
                     }
