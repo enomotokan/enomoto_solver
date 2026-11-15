@@ -114,6 +114,10 @@ pub trait MipLp: Clone + Send {
     /// 直前の求解が実行不能だったときの双対射線 (元の行の向き、行の重み)。なければ `None`。
     fn farkas_ray(&self) -> Option<Vec<f64>>;
     fn basis_inverse_row(&mut self, s: usize) -> Vec<f64>;
+    /// [`Self::basis_inverse_row`] の非零 (行, 値) だけ。既定は密な版から拾う ([`TwoStageLp::basis_inverse_row_sparse`] は超疎の BTRAN の非零をそのまま返す)。
+    fn basis_inverse_row_sparse(&mut self, s: usize) -> Vec<(usize, f64)> {
+        self.basis_inverse_row(s).into_iter().enumerate().filter(|&(_, v)| v != 0.0).collect()
+    }
     /// 今の LP を内点法で解いた点と、クロスオーバーの押し出しの頂点・基底 ([`TwoStageLp::interior_point`])。
     /// 基底は双対実行可能とは限らない。
     fn interior_point(&self, zero_cost: bool, want_vertex: bool, deadline: std::time::Instant) -> Option<InteriorPoint>;
@@ -202,6 +206,9 @@ macro_rules! forward_impl {
 forward_impl!(
     TwoStageLp,
     TwoStageState,
+    fn basis_inverse_row_sparse(&mut self, s: usize) -> Vec<(usize, f64)> {
+        TwoStageLp::basis_inverse_row_sparse(self, s)
+    },
     fn basis_ref(&self) -> Cow<'_, Basis> {
         Cow::Borrowed(TwoStageLp::basis_ref(self))
     },

@@ -3460,6 +3460,81 @@ impl TwoStageLp {
         Some(st)
     }
 
+    /// [`Self::basis_inverse_row`] の非零だけ (行, 値) を返す版。超疎の単位 BTRAN の非零の行の記録をそのまま使うので、
+    /// 呼び手は行の全部 (m 個) を回さずに済む (値は密な版とビット一致)。
+    pub fn basis_inverse_row_sparse(&mut self, s: usize) -> Vec<(usize, f64)> {
+        let m = self.rows.len();
+        if env_str!("ENOMOTO_MIP_BINV_ROW_DENSE").is_some_and(|v| v != "0") {
+            let r = self.basis_inverse_row(s);
+            return r.into_iter().enumerate().filter(|&(_, v)| v != 0.0).collect();
+        }
+        self.binv_ensure_lu();
+        let Some(lu) = &self.lu else { return Vec::new() };
+        let k = self.basic_var(s);
+        let sc = if k >= self.n { -self.sigma[k - self.n] } else { 1.0 };
+        let tick0 = lu.synth_tick();
+        let r = BINV_ROW_WORK.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.as_ref().is_none_or(|w| w.0 != m) {
+                *c = Some((m, super::lu::UnitBtranWork::new(m), vec![0.0; m], vec![0.0; m]));
+            }
+            let (_, work, out, et) = c.as_mut().unwrap();
+            work.set_density(0.0);
+            lu.solve_transpose_unit_work_sparse(s, out, et, work, None);
+            let mut r: Vec<(usize, f64)> = Vec::new();
+            match work.nonzero_rows() {
+                Some(rows) => {
+                    for &i in rows {
+                        let v = out[i] * self.sigma[i] / sc;
+                        if v != 0.0 {
+                            r.push((i, v));
+                        }
+                    }
+                }
+                None => {
+                    for i in 0..m {
+                        let v = out[i] * self.sigma[i] / sc;
+                        if v != 0.0 {
+                            r.push((i, v));
+                        }
+                    }
+                }
+            }
+            r
+        });
+        lu.restore_synth_tick(tick0);
+        r
+    }
+
+    /// [`Self::basis_inverse_row`] の前段: 今の基底の LU がなければ (最適基底の LU を共有するか) 分解する。
+    fn binv_ensure_lu(&mut self) {
+        let m = self.rows.len();
+        if self.lu.is_none() {
+            if let (Some(c), Some(b)) = (&self.lu_cache, &self.basis) {
+                if c.basis == *b {
+                    self.lu = Some(c.lu.clone());
+                }
+            }
+        }
+        if self.lu.is_none() {
+            let n_total = self.n + m;
+            let mut pos: Vec<Option<usize>> = vec![None; n_total];
+            match &self.basis {
+                Some(b) => {
+                    for (k, &v) in b.iter().enumerate() {
+                        pos[v] = Some(k);
+                    }
+                }
+                None => {
+                    for i in 0..m {
+                        pos[self.n + i] = Some(i);
+                    }
+                }
+            }
+            self.lu = super::basis_kernel::factorize_basis(&self.std, &pos, None).map(Arc::new);
+        }
+    }
+
     pub fn basis_inverse_row(&mut self, s: usize) -> Vec<f64> {
         let m = self.rows.len();
         if self.lu.is_none() {

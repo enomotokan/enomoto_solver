@@ -761,6 +761,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     tc_len: [u64; 4],
     /// 試作 `ENOMOTO_MIP_TC` の `e`: 行だけの比で飛ばした基底の退化した列の候補の数
     tc_e_skip: u64,
+    /// 基底の退化した列の固定 ([`Self::degen_dual_fixing`]) にかかった秒 (診断、`TC` の `e` で出す)
+    tc_e_secs: f64,
     tr_last: (u64, f64, f64, f64),
     /// 木の中の再スタートの記帳 (`TRSTAT`、ログだけ) と `ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、[`Self::tree_restart_guard_ok`]) 用:
     /// この求解で木のループに入った時刻 (この求解の始めからの秒)、そのときの全体の下界、[`Self::tree_restart_due`] の最後の木の大きさの見積もり。
@@ -4892,6 +4894,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tc_pool_use: [0; 6],
         tc_len: [0; 4],
         tc_e_skip: 0,
+        tc_e_secs: 0.0,
         tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
         tr_t0: 0.0,
         tr_w0: (0.0, 0),
@@ -12051,7 +12054,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 被約費用による局所的な固定。LP 解が新しい境界から外れたら解き直す。
                 let rc_fixed = self.has_cutoff_value() && self.local_redcost_fixing(node_obj);
                 // 試作 `ENOMOTO_MIP_NODECNT`: 基底にあって境界に張り付いた整数列の被約費用による固定 ([`Self::degen_dual_fixing`])
+                let t_dd = std::time::Instant::now();
                 let dd_fixed = nodecnt_on() && !self.dom.infeasible && self.degen_dual_fixing(node_obj);
+                self.tc_e_secs += t_dd.elapsed().as_secs_f64();
                 if rc_fixed || dd_fixed {
                     if dn && !self.dbg_contains() {
                         self.dbg_lost("local redcost fixing", true);
@@ -14258,9 +14263,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 双対の符号の許容誤差 (これより大きく食い違う候補は数値が怪しいので使わない)
         let dtol = 1e-7;
         for (s, k, sigma) in cands {
-            let w = self.lp.basis_inverse_row(s);
+            // B^-1 の行は超疎の BTRAN の非零 (行, 値) だけ受け取り、行のループもその非零だけを回す (以前は m 個の密な配列を毎回作って全部回した)
+            let w = self.lp.basis_inverse_row_sparse(s);
             self.nodecnt_stats[2] += 1;
-            let wmax = w.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+            let wmax = w.iter().fold(0.0f64, |a, v| a.max(v.1.abs()));
             if !(wmax > 0.0 && wmax.is_finite()) {
                 continue;
             }
@@ -14271,8 +14277,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // ギャップ未満なら列の行 (B^-1 A) を作らずに次の候補へ (固定する列は変わらない、手間だけ減る)
             if tc_on('e') {
                 let mut th = f64::INFINITY;
-                for i in 0..m {
-                    let wi = w[i];
+                for &(i, wi) in &w {
                     if wi.abs() <= eps * wmax.max(1.0) {
                         continue;
                     }
@@ -14298,8 +14303,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             // 論理変数 (行)
-            for i in 0..m {
-                let wi = w[i];
+            for &(i, wi) in &w {
                 if wi.abs() <= eps * wmax.max(1.0) {
                     continue;
                 }
@@ -22989,7 +22993,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: TC p: pool now {n} cuts, mean nonzeros {:.1}, integer share {:.2}; added at root {} (nonzeros {}), in the tree {} (nonzeros {}); used by propagation: root cuts tightened {} pruned {}, tree cuts tightened {} pruned {}, unknown origin {}, mean nonzeros of used {:.1}", nnz as f64 / n.max(1) as f64, ni as f64 / nnz.max(1) as f64, a[0], a[1], a[2], a[3], u[0], u[1], u[2], u[3], u[5], u[4] as f64 / (u[0] + u[1] + u[2] + u[3]).max(1) as f64);
                 }
                 if tc_on('e') {
-                    eprintln!("MIP: TC e: degenerate-dual candidates skipped by the row ratio test {}", self.tc_e_skip);
+                    eprintln!("MIP: TC e: degenerate-dual candidates skipped by the row ratio test {}, degenerate-dual fixing {:.2}s, solve {:.2}s", self.tc_e_skip, self.tc_e_secs, self.start.elapsed().as_secs_f64());
                 }
                 if tc_on('f') {
                     eprintln!("MIP: TC f: cut pool propagation forced at {} nodes with many fixed columns", self.tc_f_calls);
