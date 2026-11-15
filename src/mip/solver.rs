@@ -749,6 +749,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     tc_r_stats: u64,
     /// 試作 `ENOMOTO_MIP_TC` の `f`: 止めてあるカットプールの伝播を固定の多いノードで掛けた回数
     tc_f_calls: u64,
+    /// 診断用 `ENOMOTO_MIP_TC` の `d`: 局所的な被約費用の固定の中身 ([呼び出し, gap の和, 固定されていない整数列, うち非基底で |d| > 1e-7,
+    /// うち |d| x 幅 > gap (固定できる), 締めた数, 基底の整数列, 非基底で d が 0 か向きと合わない整数列])
+    tc_d: [f64; 8],
     tr_last: (u64, f64, f64, f64),
     /// 木の中の再スタートの記帳 (`TRSTAT`、ログだけ) と `ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、[`Self::tree_restart_guard_ok`]) 用:
     /// この求解で木のループに入った時刻 (この求解の始めからの秒)、そのときの全体の下界、[`Self::tree_restart_due`] の最後の木の大きさの見積もり。
@@ -4866,6 +4869,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tc_v: (1, 0, (0, 0), 1),
         tc_r_stats: 0,
         tc_f_calls: 0,
+        tc_d: [0.0; 8],
         tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
         tr_t0: 0.0,
         tr_w0: (0.0, 0),
@@ -14043,6 +14047,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
         xp("r_d");
         let cont_frac = tunable!("ENOMOTO_T_MIP_REDCOST_CONT_FRAC", 0.1, f64);
         let mut changed = false;
+        // 診断用 `ENOMOTO_MIP_TC` の `d` (固定は変えない)
+        if tc_on('d') {
+            let mut st = [1.0, gap, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+            for j in 0..self.p.n {
+                if !self.p.is_int[j] || self.dom.is_fixed(j) {
+                    continue;
+                }
+                st[2] += 1.0;
+                let w = self.dom.up[j] - self.dom.lo[j];
+                match b.col[j] {
+                    VarStatus::Lower | VarStatus::Upper => {
+                        let ok = if b.col[j] == VarStatus::Lower { d[j] > 1e-7 } else { d[j] < -1e-7 };
+                        if ok {
+                            st[3] += 1.0;
+                            if d[j].abs() * w > gap {
+                                st[4] += 1.0;
+                            }
+                        } else {
+                            st[7] += 1.0;
+                        }
+                    }
+                    _ => {
+                        st[6] += 1.0;
+                    }
+                }
+            }
+            for k in 0..8 {
+                self.tc_d[k] += st[k];
+            }
+        }
         for j in 0..self.p.n {
             if self.dom.is_fixed(j) {
                 continue;
@@ -14062,6 +14096,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let c = self.dom.tighten_upper(self.p, j, v);
                     changed |= c;
                     self.t4_rc[1] += c as u64;
+                    if c && self.p.is_int[j] { self.tc_d[5] += 1.0; }
                     self.dom.set_external(false);
                 }
                 VarStatus::Upper if d[j] < -1e-7 => {
@@ -14074,6 +14109,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let c = self.dom.tighten_lower(self.p, j, v);
                     changed |= c;
                     self.t4_rc[1] += c as u64;
+                    if c && self.p.is_int[j] { self.tc_d[5] += 1.0; }
                     self.dom.set_external(false);
                 }
                 _ => {}
@@ -22808,6 +22844,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if tc_on('r') || tc_on('a') {
                     eprintln!("MIP: TC r: reduced-cost fixings passed to children {}", self.tc_r_stats);
+                }
+                if tc_on('d') {
+                    let d = &self.tc_d;
+                    let c = d[0].max(1.0);
+                    eprintln!("MIP: TC d: local redcost fixing calls {}, mean gap {:.4e}, per call: free int {:.1}, nonbasic int with |d|>0 {:.1}, fixable {:.2}, tightened {:.2}, basic int {:.1}, nonbasic int with d = 0 or wrong sign {:.1}", d[0], d[1] / c, d[2] / c, d[3] / c, d[4] / c, d[5] / c, d[6] / c, d[7] / c);
                 }
                 if tc_on('f') {
                     eprintln!("MIP: TC f: cut pool propagation forced at {} nodes with many fixed columns", self.tc_f_calls);
