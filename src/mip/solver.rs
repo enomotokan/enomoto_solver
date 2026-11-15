@@ -3698,7 +3698,7 @@ pub(crate) struct SubmipCtl {
     pub(crate) nosol_deadline: Option<Instant>,
     /// `ENOMOTO_MIP_LOSE6_1_STOP` (試作、既定では使わない。[`lose6_1_stop`]): 外側が早めの再スタートを決めた後、まだ走っているサブ MIP を
     /// 止める合図 (サブ MIP の [`Solver::time_up`] が真になり、時間切れとしてその時点の解を返す)
-    pub(crate) abort: std::sync::atomic::AtomicBool,
+    pub(crate) abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB` ([`lose6_2_sublb`]): 外側の大域的な下界 (作った時点の根の下界と、外側の裏のカットの LP の値)。
     /// 目的関数を変えないサブ MIP だけに付ける
     pub(super) outer_lb: Option<(f64, Option<std::sync::Arc<CutJob>>)>,
@@ -3757,13 +3757,21 @@ pub(crate) fn erwait(c: char) -> bool {
 
 /// 診断 `ENOMOTO_MIP_ERWAIT_DIAG` (振る舞いは変えない): 早めの再スタートを決めてから再スタートするまでの区切りの時刻を
 /// `MIP: ERWAIT_DIAG: <区切り> +<決めてからの秒>s (<通しの秒>s)` の形で出す
+/// 試作 `ENOMOTO_MIP_SUBMIP_HALT` (既定では使わない。analysis/timedep_20261114.md の 9 節): 別スレッドのサブ MIP の止めの合図
+/// ([`SubmipCtl::abort`]) を、そのスレッドの LP の止める合図 ([`crate::cancel::with_halt`]) にもする。今までは止めの合図を木の探索の
+/// 区切り ([`Solver::time_up`]) でしか見ないので、長い根の LP の途中のサブ MIP は時間の上限まで走った (tbfp-network: 早めの再スタートの後、
+/// 根の被約費用のサブ MIP の 26 万反復の LP が 534 秒走り、主の求解が再スタートできなかった)。
+pub(crate) fn submip_halt() -> bool {
+    env_str!("ENOMOTO_MIP_SUBMIP_HALT").is_some_and(|v| v != "0")
+}
+
 pub(crate) fn erwait_diag() -> bool {
     env_str!("ENOMOTO_MIP_ERWAIT_DIAG").is_some_and(|v| v != "0")
 }
 
 impl SubmipCtl {
     pub(crate) fn new(z: f64) -> Self {
-        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::atomic::AtomicBool::new(false), outer_lb: None, cap_leaves: 0, cap_node_secs: 0.0, t0: Instant::now(), found_at: std::sync::atomic::AtomicU64::new(u64::MAX), cap_t: 0.0 }
+        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), outer_lb: None, cap_leaves: 0, cap_node_secs: 0.0, t0: Instant::now(), found_at: std::sync::atomic::AtomicU64::new(u64::MAX), cap_t: 0.0 }
     }
     /// [`subcap`] の `n`・`w` の上限を付ける (`root_lp_secs` は外側の根の LP の秒)
     /// 改良 (11-08) の `T` の上限を付ける (`tl` は外側の時間の上限)
@@ -20191,6 +20199,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             std::sync::Arc::new(c)
         });
         let ctl2 = ctl.clone();
+        let halt_flag = ctl.as_ref().filter(|_| submip_halt()).map(|c| c.abort.clone());
         // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 番号を振ってサブ MIP の始めを出す (スレッドの中で道筋を受け継ぐ)
         let (trace_id, trace_tag) = if self.params.verbose && super::heuristics::submip_trace() {
             let parent = super::heuristics::SUBMIP_TAG.with(|t| t.borrow().clone());
@@ -20232,7 +20241,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if let Some(c) = resume_child {
                     RESUME_LINK.with(|s| *s.borrow_mut() = Some(c));
                 }
-                let r = super::solve_problem(&sub, params, presolve);
+                // `ENOMOTO_MIP_SUBMIP_HALT` ([`submip_halt`]): 止めの合図をこのスレッドの LP の止める合図 ([`crate::cancel::with_halt`]) にもする
+                let halt = halt_flag;
+                let r = crate::cancel::with_halt(halt, || super::solve_problem(&sub, params, presolve));
                 RESUME_LINK.with(|s| *s.borrow_mut() = None);
                 // 一時停止の後に継続したサブ MIP は、呼び出し側が継続の分の終わりを出す (道筋が継続の番号に変わっている)
                 let resumed = resumable && trace_tag.as_ref().is_some_and(|t| super::heuristics::SUBMIP_TAG.with(|s| *s.borrow() != *t));
