@@ -747,6 +747,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     tc_v: (u64, u64, (u64, u64), u64),
     /// 試作 `ENOMOTO_MIP_TC` の `r`: 子に引き継いだ被約費用の固定の数
     tc_r_stats: u64,
+    /// 試作 `ENOMOTO_MIP_TC` の `f`: 止めてあるカットプールの伝播を固定の多いノードで掛けた回数
+    tc_f_calls: u64,
     tr_last: (u64, f64, f64, f64),
     /// 木の中の再スタートの記帳 (`TRSTAT`、ログだけ) と `ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、[`Self::tree_restart_guard_ok`]) 用:
     /// この求解で木のループに入った時刻 (この求解の始めからの秒)、そのときの全体の下界、[`Self::tree_restart_due`] の最後の木の大きさの見積もり。
@@ -2995,6 +2997,8 @@ pub(super) fn treeeff(c: char) -> bool {
 /// - `v`: カットプールの伝播を止めずに間引く (効き目の低い区切りが続けば呼ぶ間隔を倍々に、最大 `ENOMOTO_T_MIP_TC_V_MAX` (32) ノードに 1 回)。
 /// - `r`: ノードの局所的な被約費用の固定を子のノードの変更に足して引き継ぐ (待ち行列から取り出しても効く)。
 /// - `a`: `r` に加えて、強分枝・双対証明・リテラルの衝突・目的関数の伝播・カットプールの伝播による局所的な固定も引き継ぐ。
+/// - `f`: カットプールの伝播を止めた後も、固定済みの整数列の割合が `ENOMOTO_T_MIP_TC_F_FRAC` (0.5) 以上で根より `ENOMOTO_T_MIP_TC_F_GAIN` (0.2)
+///   以上増えたノードでは掛ける。
 /// - `g`: 木の中で `ENOMOTO_T_MIP_TC_G_EVERY` (100) ノードごとに、開いたノード全てに共通の整数列の境界を大域的な境界にし、打ち切り値つきの
 ///   大域の伝播を回す (不動点まで最大 `ENOMOTO_T_MIP_TC_G_ROUNDS` (5) 回)。伝播が矛盾すれば残りの開いたノードに打ち切り値より良い解は
 ///   ないので木を閉じる ([`Solver::tc_open_tighten`])。HiGHS の `HighsNodeQueue::pruneInfeasibleNodes` (sct2 で開いたノード 3000 余りが
@@ -4861,6 +4865,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tc_c: (0, 0, [0; 4], 0),
         tc_v: (1, 0, (0, 0), 1),
         tc_r_stats: 0,
+        tc_f_calls: 0,
         tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
         tr_t0: 0.0,
         tr_w0: (0.0, 0),
@@ -17890,7 +17895,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 呼び出しの `ENOMOTO_T_MIP_CUTPOOL_PROP_MIN_RATE` (既定 0.01) 倍未満なら、この求解ではもう呼ばない。pk1 は候補が毎回
         // プールの半分 (2 千本) になり、1 スレッド 120 秒中 81 秒かけて 1 本も締めなかった
         let trial = tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_TRIAL", 1000u64, u64);
-        if self.cpp.off {
+        // 試作 `ENOMOTO_MIP_TC` の `f` (利用者の案): 止めてあっても、整数列のうち固定済みの割合が `ENOMOTO_T_MIP_TC_F_FRAC` (0.5) 以上で、
+        // 根の始めの固定の割合より `ENOMOTO_T_MIP_TC_F_GAIN` (0.2) 以上増えたノードでは掛ける (固定がたまったノードでは伝播が効きやすい)
+        let mut force = false;
+        if self.cpp.off && tc_on('f') && self.p.nint > 0 {
+            let p = self.p;
+            let fixed = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] == self.dom.up[j]).count();
+            let fr = fixed as f64 / p.nint as f64;
+            let fr0 = self.root_fixed0 as f64 / p.nint as f64;
+            if fr >= tunable!("ENOMOTO_T_MIP_TC_F_FRAC", 0.5, f64) && fr - fr0 >= tunable!("ENOMOTO_T_MIP_TC_F_GAIN", 0.2, f64) {
+                force = true;
+                self.cpp.valid = false;
+                self.tc_f_calls += 1;
+            }
+        }
+        if self.cpp.off && !force {
             // 試作 `ENOMOTO_MIP_TC` の `c`: 止めた後も、飛ばした回数が次の区切り (止めた時の呼び出し回数の 2 倍、試し直すたびに倍) に
             // 着いたら試し直す。木の始めは証明のカットが少なく効かなくても、後で効く (neos5・kasai は止めないと 1 スレッドで 2.8・1.2 倍速い)
             if tc_on('c') {
@@ -22789,6 +22808,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if tc_on('r') || tc_on('a') {
                     eprintln!("MIP: TC r: reduced-cost fixings passed to children {}", self.tc_r_stats);
+                }
+                if tc_on('f') {
+                    eprintln!("MIP: TC f: cut pool propagation forced at {} nodes with many fixed columns", self.tc_f_calls);
                 }
                 if tc_on('v') {
                     eprintln!("MIP: TC v: cut pool propagation interval now {}, max {}", self.tc_v.0, self.tc_v.3);
