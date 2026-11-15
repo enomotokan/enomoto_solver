@@ -1,4 +1,4 @@
-"""TREECLOSE (analysis/treeclose_20261114.md): cand1114 (base) と dfs (b58d/cfgs.py: 束 cand1115 + 深さ優先寄り + TC=as + 基底の退化した列の固定) を 58 問 (analysis/implint_tu_20261110/probs_all.py の P58) x 種 1〜2 で対にして測る分担表 shards_dfs58.json を作る。
+"""TREECLOSE (analysis/treeclose_20261114.md): cand1114 (base) と dfs (b58d/cfgs.py: 束 cand1115 + 深さ優先寄り) を 58 問 (analysis/implint_tu_20261110/probs_all.py の P58) x 種 1〜2 で対にして測る分担表 shards_dfs58.json を作る。
 60 秒・4 スレッド。時間の見積りは drcr_20261110/b58*.jsonl の既定の回 (解けなければ 60 秒) + 15 秒。同じ (問題, 種) の base と rch は同じ分担に入れる。
 使い方: python plan.py NS (回すのは python run_shard.py K dfs58)"""
 import json, glob, sys
