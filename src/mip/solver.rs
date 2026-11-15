@@ -11298,6 +11298,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 Some(n) => {
                     // 兄弟ノード: 定義域を根から積み直す (下の共通の処理と同じ)
                     self.sibling_backtracks += 1;
+                    // 試作 `ENOMOTO_MIP_TC` の `k` (既定では使わない、treeclose 9.6 節): 兄弟へ戻ったときも潜りの始めとして数える
+                    // (`plunge_depth` は待ち行列から取り出したときだけ 0 に戻るので、深さ優先寄りでは潜りの始めだけで呼ぶ木の中の
+                    // ヒューリスティクス・ノードの分離がほとんど呼ばれず、潜りの深さの上限 200 にも通算で当たる)
+                    if tc_on('k') {
+                        plunge_depth = 0;
+                    }
                     self.dom.reset_to_root(self.p);
                     let mut ok = true;
                     for c in &n.changes {
