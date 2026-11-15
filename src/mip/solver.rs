@@ -13059,7 +13059,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     true
                 }
             };
-            if plunge_depth <= 200 && plunge_ok {
+            // 1 回の潜りの深さの上限 `ENOMOTO_T_MIP_PLUNGE_DEPTH_MAX` (既定 200)。`plunge_depth` は待ち行列から取り出したときだけ 0 に戻る
+            // (兄弟へ戻っても戻らない) ので、通算で上限を越えると潜らなくなり、子は 2 つとも待ち行列に積まれる (treeclose 9.3 節)
+            if plunge_depth <= tunable!("ENOMOTO_T_MIP_PLUNGE_DEPTH_MAX", 200usize, usize) && plunge_ok {
                 // 潜る: 定義域に分枝を積む (LP は今の基底から続ける)
                 if first_c.upper {
                     self.dom.tighten_upper(self.p, first_c.col, first_c.value);
