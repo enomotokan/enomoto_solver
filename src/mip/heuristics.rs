@@ -1664,6 +1664,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 時間でなく LP の反復の上限 ([`Self::submip_iter_cap_u`]) で止め、時間の上限は 10 倍の安全網にする
         let u_cap = self.submip_iter_cap_u();
         let u_set = u_cap > 0 && !self.parallel_submips && super::solver::SUBMIP_ITER_CAP.with(|c| c.get()) == 0;
+        // 試作 `ENOMOTO_MIP_TICKS` の `u` (analysis/timedep_20261114.md の 11 節): 外側の求解のサブ MIP (木の大近傍探索の `n` が手間の期限を
+        // 決めたもの以外) を、時間の規則と同じ量の手間 (割合 x (元の時間の上限 - 手間で数えた経過)、最大 `submip_time_max`) の期限で止め、
+        // 時間の上限は 10 倍の安全網にする。別スレッドで続きから解く RENS は使わない (手間はスレッドごとなので)
+        let tk_u = super::ticks_on('u') && !self.params.submip && self.snap.is_none() && !self.parallel_submips && !crate::ticks::has_budget();
+        let tk_u_budget = if tk_u {
+            let el = (crate::ticks::total() - self.ticks0) * 1e-9;
+            Some(((self.submip_time_frac * (self.params.frac_tl() - el)).min(self.submip_time_max)).max(0.05) * 1e9)
+        } else {
+            None
+        };
+        let time_limit = match tk_u_budget {
+            Some(b) => {
+                let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                (10.0 * b * 1e-9).min(remaining)
+            }
+            None => time_limit,
+        };
         let time_limit = if u_set {
             super::solver::SUBMIP_ITER_CAP.with(|c| c.set(u_cap));
             let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
@@ -1772,7 +1789,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         });
         // `ENOMOTO_MIP_RENS_RESUME` ([`super::solver::rens_resume_on`]): 根の RENS は専用のスレッドで解き、ノード上限まで進んだら
         // その時点の結果を受け取ってスレッドを一時停止のまま取っておく (やり直しはその続きから。[`Self::rens_resume`])
-        let resumable = self.submip_is_rens && super::solver::rens_resume_on() && self.nodes <= 1;
+        let resumable = self.submip_is_rens && super::solver::rens_resume_on() && self.nodes <= 1 && tk_u_budget.is_none();
+        let tk_prev = tk_u_budget.map(crate::ticks::push_budget);
         let mut paused = None;
         let (nfree_all, nint_all) = ((0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count(), sub.is_int.iter().filter(|&&b| b).count());
         let nfree_int = (0..sub.n).filter(|&j| sub.is_int[j] && sub.col_lo[j] < sub.col_up[j]).count();
@@ -1791,6 +1809,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none())
         };
+        if let Some(prev) = tk_prev {
+            crate::ticks::pop_budget(prev);
+        }
         if u_set {
             // 前処理だけで終わって求解が上限を受け取らなかったときに残さない
             super::solver::SUBMIP_ITER_CAP.with(|c| c.set(0));

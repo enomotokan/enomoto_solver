@@ -974,7 +974,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 試作 `ENOMOTO_MIP_TICKS` の `t` ([`super::ticks_on`]): ノードの分離・ノードの LP に使った手間 ([`crate::ticks`]) と、この求解の始めの手間
     node_cut_ticks: f64,
     node_lp_ticks: f64,
-    ticks0: f64,
+    pub(super) ticks0: f64,
     /// 解けなかったノード (LP が失敗し、分枝もできなかった)。最適性を主張できなくなる。
     unresolved: bool,
     last_log: Instant,

@@ -86,3 +86,8 @@ pub fn push_budget(budget: f64) -> f64 {
 pub fn pop_budget(prev: f64) {
     DEADLINE.with(|d| d.set(prev));
 }
+
+/// このスレッドに手間の期限があるか。
+pub fn has_budget() -> bool {
+    DEADLINE.with(|d| d.get()).is_finite()
+}

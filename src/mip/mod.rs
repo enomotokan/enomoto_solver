@@ -287,6 +287,8 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// 当てはめた重みで 1 手間 ≒ 1 ns) で、時間の規則と同じ式で決める。文字:
 /// - `t`: 木の分離の予算 (`tree_sep_budget_ok`・`node_cut_adapt_due`・`nca_lp_budget_ok`)
 /// - `n`: 木の大近傍探索の予算と 1 回の上限 (サブ MIP は手間の期限で止める)
+/// - `w`: [`cap_clock`] (スレッドの CPU 時間) を手間の秒にする (根のカットのループ・CUTSEL_PROBE・局所探索など)
+/// - `u`: 外側の求解のサブ MIP (根の RENS など) を時間の規則と同じ量の手間の期限で止める
 pub(crate) fn ticks_on(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TICKS").is_some_and(|v| v.contains(c))
 }
@@ -296,6 +298,11 @@ pub(crate) fn timedep(c: char) -> bool {
 }
 
 pub(crate) fn cap_clock() -> f64 {
+    // 試作 `ENOMOTO_MIP_TICKS` の `w`: このスレッドの CPU 時間の代わりに手間の単位 ([`crate::ticks`]、1 手間 ≒ 1 ns) の秒を返す
+    // (根のカットのループ・CUTSEL_PROBE・局所探索などの CPU 時間の上限がまとめて手間になる)
+    if ticks_on('w') {
+        return crate::ticks::total() * 1e-9;
+    }
     #[cfg(target_os = "linux")]
     {
         if env_str!("ENOMOTO_MIP_WALL_CAPS").is_none() {
