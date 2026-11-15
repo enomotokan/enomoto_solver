@@ -1,0 +1,44 @@
+CROSSOVER ipm status=Optimal iters=43 rel_res=(0.0004368467481084608, 0.17026948901667593, 0.7073373369132908) t=1.721s
+CROSSOVER resid after ipm=1.061e-5 (before clamping 6.475e-6, max bound violation 4.137e-6, |b|max=6.554e4)
+CROSSOVER resid after ipm=1.061e-5
+CROSSOVER resid after detect=8.042e-2
+CROSSOVER m=24303 n=29477 basic_after_detect=20596 t=1.724s
+CROSSOVER resid after primal push=8.042e-2
+CROSSOVER primal_push steps=0 basic=20596 t=1.724s
+CROSSOVER dual push skipped (|D|=21516 < 0.7 m)
+CROSSOVER after dual push: max|s_D|=5.38e-2 (#>1e-6: 20331) dual-infeasible non-D=0
+CROSSOVER dual_push steps=0 active 21516->21516 t=1.724s
+CROSSOVER basis from_B=19867 from_D=0 slack=4436 (m=24303) t=1.727s
+CROSSOVER basis selector: reach=29671 elim=83828 nnz(L)=2545 scanned=62144
+CROSSOVER leftover superbasics=729 (|B|-m after primal push=-3707)
+CROSSOVER megiddo prof: total=0.13s ftran=0.03 rows=0.02 btran=0.00 update=0.01 refactor=0.05 (5x, 1 by verify, 2 by x_B residual) avg_nz=2455
+CROSSOVER megiddo pivots=622 to_bound=107 unresolved=0 t=1.870s
+CROSSOVER repair: start primal_infeas=2609 (max 5000)
+CROSSOVER repair: gave up (status None) t=2.341s
+CROSSOVER stats Stats { ipm_iters: 43, basic_after_detect: 20596, primal_steps: 0, basic_after_push: 20596, dual_active_start: 21516, dual_steps: 0, primal_corrections: 0, dual_corrections: 0, dual_active_end: 21516, li_from_b: 19867, li_from_d: 0, li_slack: 4436, factors: 0, solves: 0, factor_secs: 0.0 }
+CROSSOVER basis quality: primal violations relative to row size: max 9.65e-1, #>1e-9: 2606
+CROSSOVER basis quality: primal_infeas=2615 (max 7.37e10) dual_infeas=810 (max 7.67e8)
+CROSSOVER cleanup status=None total t=4.235s
+CROSSOVER ipm status=NotSolved iters=200 rel_res=(0.0018558169459578027, 0.0001914804272642774, 20.739635847663795) t=8.508s
+CROSSOVER resid after ipm=5.502e-5 (before clamping 2.751e-5, max bound violation 2.751e-5, |b|max=6.554e4)
+CROSSOVER resid after ipm=5.502e-5
+CROSSOVER resid after detect=7.366e-4
+CROSSOVER m=20438 n=25612 basic_after_detect=14472 t=8.511s
+CROSSOVER resid after primal push=7.366e-4
+CROSSOVER primal_push steps=0 basic=14472 t=8.512s
+CROSSOVER dual push skipped (|D|=15561 < 0.7 m)
+CROSSOVER after dual push: max|s_D|=1.17e-3 (#>1e-6: 225) dual-infeasible non-D=64
+CROSSOVER dual_push steps=0 active 15561->15561 t=8.512s
+CROSSOVER basis from_B=14372 from_D=0 slack=6066 (m=20438) t=8.514s
+CROSSOVER basis selector: reach=20066 elim=78407 nnz(L)=7956 scanned=54732
+CROSSOVER leftover superbasics=100 (|B|-m after primal push=-5966)
+CROSSOVER megiddo prof: total=0.02s ftran=0.01 rows=0.00 btran=0.00 update=0.00 refactor=0.00 (0x, 0 by verify, 0 by x_B residual) avg_nz=6561
+CROSSOVER megiddo pivots=94 to_bound=6 unresolved=0 t=8.554s
+CROSSOVER repair: start primal_infeas=349 (max 5000)
+CROSSOVER repair: primal_infeas=349 cost shifts=1267 obj=5.137254474414e4 lower bound=5.087755057416e4 rel gap=9.635e-3 t=1.036s
+CROSSOVER stats Stats { ipm_iters: 200, basic_after_detect: 14472, primal_steps: 0, basic_after_push: 14472, dual_active_start: 15561, dual_steps: 0, primal_corrections: 0, dual_corrections: 0, dual_active_end: 15561, li_from_b: 14372, li_from_d: 0, li_slack: 6066, factors: 0, solves: 0, factor_secs: 0.0 }
+CROSSOVER basis quality: primal violations relative to row size: max 6.18e-1, #>1e-9: 525
+CROSSOVER basis quality: primal_infeas=526 (max 5.41e3) dual_infeas=836 (max 1.01e5)
+CROSSOVER cleanup status=None total t=293.699s
+ROOTLP_BOTH {"n":5174,"m":20438,"n_int":2349,"threads":4,"main_cold":false,"st_s":"IterationLimit","st_i":"None","obj_s":-5.714285714312e-1,"obj_i":null,"t_simplex":0.0105,"t_ipm":8.5174,"t_xo":293.7086,"t_adopt":0.0000,"t_i":293.7086,"winner":"none","ndiff":0,"ndiff_int":0,"frac_s":0,"frac_i":0,"frac_both":0,"basis_diff_cols":-1,"basis_diff_rows":-1,"iters_s":0,"iters_i":0,"t_presolve":293.734}
+MIP: MEMCAP: tid 0 limit 13082 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0

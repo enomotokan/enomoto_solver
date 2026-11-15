@@ -1,0 +1,4 @@
+cd /home/user/enomoto_solver/analysis/highs_only_20261105/G1
+D="ENOMOTO_MIP_MEMBQ_HDIAG=1 ENOMOTO_MIP_HEUR_TRIG_DEBUG=1 ENOMOTO_MIP_HEUR_ROLE_VERBOSE=1"
+echo "neos-933966 tn10: $(./run1.sh tn10 neos-933966 $D ENOMOTO_T_MIP_HEUR_TRIG_NODES=10)"
+echo ALLDONE

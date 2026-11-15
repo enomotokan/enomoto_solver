@@ -1,0 +1,43 @@
+MIP: presolve: tightened 17631 coefficients (skipped 0 in rows redundant within tolerance), normalized 1812 integer rows
+MIP: presolve: merged 35 parallel rows (5 new equations)
+MIP: presolve: rows 38884 -> 15744, free columns 21805 -> 8901, nonzeros 239608 -> 72225, postsolve steps 2 (parallel columns merged: 0 integer, 0 continuous)
+MIP: presolve: tightened 0 coefficients (skipped 0 in rows redundant within tolerance), normalized 51 integer rows
+MIP: presolve: merged 30 parallel rows (0 new equations)
+MIP: presolve: rows 15744 -> 15739, free columns 8901 -> 8896, nonzeros 72225 -> 72215, postsolve steps 5 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 34 of 8896 free columns fixed (0.00s), not used
+MIP: LP probing pass 1: 1677 candidates, 0 fixings (6 LPs, 561 iters, 0.38s)
+MIP: LP probing: tried 3 columns, fixed 0, LP 4.3611111111e0 -> 4.3611111111e0 (6 LPs, 561 iters, 0.38s)
+MIP: LP probing: root LP 0.27s (2045 iters, size 109759), tried 3, fixed 0, basis passed true, total 2606 iters 0.38s
+MIP: probing: equivalence pass with implications: 18718 pairs found (0.38s), used
+MIP: probing: 8586 of 8723 binaries probed (1 passes), 38 fixed, 35 bounds tightened, 290911 implications (0.73s, cpu 0.65s, work 29279232, pwork 380508886, chg 1350572)
+MIP: probing: 9589 equivalent binary pairs
+MIP: presolve: tightened 2868 coefficients (skipped 0 in rows redundant within tolerance), normalized 38 integer rows
+MIP: presolve: merged 58 parallel rows (2 new equations)
+MIP: presolve: rows 25328 -> 15145, free columns 8721 -> 7223, nonzeros 91393 -> 70213, postsolve steps 1439 (parallel columns merged: 0 integer, 0 continuous)
+MIP: probing: equivalence pass with implications: 0 pairs found (0.23s), not used
+MIP: probing: 7050 of 7050 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 60286 implications (0.36s, cpu 0.35s, work 6514526, pwork 162803421, chg 359092)
+MIP: probing: 0 equivalent binary pairs
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (31609 edges, 0.01s)
+MIP: symmetry: orbital fixing with 0 of 25 generators
+MIP: symmetry: 19 full orbitopes (1x2, 1x2, 1x2, 1x2, 1x2, 1x2, 1x2, 1x2, 1x3, 1x3, 1x3, 1x3, 1x2, 1x2, 1x3, 1x2, 1x3, 1x2, 1x2)
+MIP: symmetry: 25 generators, 19 orbits on 44 columns, 0 lex-leader rows (0.45s, work 25427632, search 1090250, verify 5358150, detect 0.45s, refine 0.29s, log work 93647408)
+MIP: root LP: the rows changed after LP probing; the row statuses are not used
+MIP: root LP basis from the presolve LP probing: used (columns only)
+MIP: solving the root LP (0.01s)
+MIP: root LP 8.6944444444e0 (1551 iters, 0.17s)
+MCF detect: rows 15145 cols 21805 | flow cands 57 flow rows 10 commodities 3 cap cands 2574 arcs 10 nodes 8 incons 0.50 directed | fail 'inconsistent' | networks [] fc_network false | 0.001s
+MIP: FJ problem (FJ_P3): rows 15145 -> 15144, free columns 7223 -> 7221, 0 continuous bounds tightened (0.81s)
+MIP: cut selection probe: compared at 0 rounds (pool stopped early), probe wall 5.33s (budget 2.9s)
+MIP: cut selection probe (6 rounds): default 902 cuts gain 0.000000e0 (0.00s), pool 1498 cuts gain 0.000000e0 (0.00s) -> default (rule rate, probe 0.00s in total, 5.49s)
+MIP: cut round 0: LP status IterationLimit, removed the cuts (Optimal)
+MIP: cut round 0: the cut LP hit the per-LP cap (IterationLimit); stop (ENOMOTO_MIP_CUT_LP_CAP_STOP)
+MIP: clique graph: 31609 edges (111 from rows, probing implications 60286)
+MIP: clique fallback: 100 cuts, LP 8.6944444444e0 -> 8.6944444444e0 (g_c 0.000e0, g_d 0.000e0 relative), fractional 1162 -> 2934; not used (2.41s)
+MIP: cut loop done: 902 cuts added, 0 in LP, pool 4961 cuts (24069 nonzeros), obj 8.6944444444e0 -> 8.6944444444e0
+MIP: twoopt improved 4.9000000000e1 -> 4.3000000000e1
+MIP:   global fixed integers 14582 of 21805 (newly 0 since the root LP)
+MIP: new incumbent 4.3000000000e1 at node 0 (8.29s) [Local-MIP]
+MIP: Local-MIP solution accepted true (8.29s)
+MIP: find thread started (budget 14.9s, 8.30s)
+MIP: the incumbent is a poor feasibility jump solution; background cuts use 1 threads
+MIP: background cuts: basis with the column values not passed (root LP 0.16s)

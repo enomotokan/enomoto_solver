@@ -1,0 +1,45 @@
+CROSSOVER ipm status=Optimal iters=43 rel_res=(0.0004368467481084608, 0.17026948901667593, 0.7073373369132908) t=2.095s
+CROSSOVER resid after ipm=1.061e-5 (before clamping 6.475e-6, max bound violation 4.137e-6, |b|max=6.554e4)
+CROSSOVER resid after ipm=1.061e-5
+CROSSOVER resid after detect=8.042e-2
+CROSSOVER m=24303 n=29477 basic_after_detect=20596 t=2.098s
+CROSSOVER resid after primal push=8.042e-2
+CROSSOVER primal_push steps=0 basic=20596 t=2.098s
+CROSSOVER dual push skipped (|D|=21516 < 0.7 m)
+CROSSOVER after dual push: max|s_D|=5.38e-2 (#>1e-6: 20331) dual-infeasible non-D=0
+CROSSOVER dual_push steps=0 active 21516->21516 t=2.099s
+CROSSOVER basis from_B=19867 from_D=0 slack=4436 (m=24303) t=2.101s
+CROSSOVER basis selector: reach=29671 elim=83828 nnz(L)=2545 scanned=62144
+CROSSOVER leftover superbasics=729 (|B|-m after primal push=-3707)
+CROSSOVER megiddo prof: total=0.12s ftran=0.03 rows=0.02 btran=0.00 update=0.00 refactor=0.04 (5x, 1 by verify, 2 by x_B residual) avg_nz=2455
+CROSSOVER megiddo pivots=622 to_bound=107 unresolved=0 t=2.229s
+CROSSOVER stats Stats { ipm_iters: 43, basic_after_detect: 20596, primal_steps: 0, basic_after_push: 20596, dual_active_start: 21516, dual_steps: 0, primal_corrections: 0, dual_corrections: 0, dual_active_end: 21516, li_from_b: 19867, li_from_d: 0, li_slack: 4436, factors: 0, solves: 0, factor_secs: 0.0 }
+CROSSOVER basis quality: primal violations relative to row size: max 9.65e-1, #>1e-9: 2606
+CROSSOVER basis quality: primal_infeas=2615 (max 7.37e10) dual_infeas=810 (max 7.67e8)
+CROSSOVER cleanup status=None total t=3.644s
+CROSSOVER ipm status=NotSolved iters=46 rel_res=(1.727031467584686e-5, 1.5839977283167903e-8, 23.354133284107615) t=11.954s
+CROSSOVER resid after ipm=2.560e-7 (before clamping 2.560e-7, max bound violation 3.181e-9, |b|max=6.554e4)
+CROSSOVER resid after ipm=2.560e-7
+CROSSOVER resid after detect=5.439e-2
+CROSSOVER m=20438 n=25612 basic_after_detect=14895 t=11.957s
+CROSSOVER resid after primal push=5.439e-2
+CROSSOVER primal_push steps=0 basic=14895 t=11.957s
+CROSSOVER dual push skipped (|D|=15815 < 0.7 m)
+CROSSOVER after dual push: max|s_D|=5.70e-2 (#>1e-6: 14350) dual-infeasible non-D=66
+CROSSOVER dual_push steps=0 active 15815->15815 t=11.958s
+CROSSOVER basis from_B=14592 from_D=0 slack=5846 (m=20438) t=11.960s
+CROSSOVER basis selector: reach=26365 elim=148726 nnz(L)=7686 scanned=64793
+CROSSOVER leftover superbasics=303 (|B|-m after primal push=-5543)
+CROSSOVER megiddo prof: total=0.06s ftran=0.01 rows=0.01 btran=0.00 update=0.00 refactor=0.03 (5x, 0 by verify, 1 by x_B residual) avg_nz=2731
+CROSSOVER megiddo pivots=288 to_bound=15 unresolved=0 t=12.029s
+CROSSOVER stats Stats { ipm_iters: 46, basic_after_detect: 14895, primal_steps: 0, basic_after_push: 14895, dual_active_start: 15815, dual_steps: 0, primal_corrections: 0, dual_corrections: 0, dual_active_end: 15815, li_from_b: 14592, li_from_d: 0, li_slack: 5846, factors: 0, solves: 0, factor_secs: 0.0 }
+CROSSOVER basis quality: primal violations relative to row size: max 9.65e-1, #>1e-9: 3659
+CROSSOVER basis quality: primal_infeas=3679 (max 1.33e11) dual_infeas=872 (max 7.86e7)
+CROSSOVER cleanup status=Some(Optimal) total t=13.471s
+CROSSOVER final x (presolved): len=5174 n_struct=5174 row viol max=8.500e-10 (#>1e-9: 0) col viol max=1.629e-9 (#>1e-9: 2)
+CROSSOVER final basis LU: |rhs - B x_B|=1.251e-12 x_B bound viol max=8.500e-10 (#>1e-9: 0) max|x_B - returned|=2.788e-9 obj(presolved)=5.136639628560e4 nonbasic off-bound=0
+CROSSOVER final basis refine0: |rhs - B x_B|=2.444e-12 x_B bound viol max=8.500e-10 (#>1e-9: 0) max|x_B - returned|=2.791e-9 obj(presolved)=5.136639628560e4 nonbasic off-bound=0
+CROSSOVER final basis refine1: |rhs - B x_B|=1.819e-12 x_B bound viol max=8.500e-10 (#>1e-9: 0) max|x_B - returned|=2.791e-9 obj(presolved)=5.136639628560e4 nonbasic off-bound=0
+CROSSOVER final basis refine2: |rhs - B x_B|=1.819e-12 x_B bound viol max=8.500e-10 (#>1e-9: 0) max|x_B - returned|=2.790e-9 obj(presolved)=5.136639628560e4 nonbasic off-bound=0
+ROOTLP_BOTH {"n":5174,"m":20438,"n_int":2349,"threads":4,"main_cold":false,"st_s":"IterationLimit","st_i":"Some(Optimal)","obj_s":-5.714285714312e-1,"obj_i":9.624684036491e4,"t_simplex":0.0182,"t_ipm":11.9717,"t_xo":13.5003,"t_adopt":0.0005,"t_i":13.5007,"winner":"ipm","ndiff":0,"ndiff_int":0,"frac_s":0,"frac_i":0,"frac_both":0,"basis_diff_cols":-1,"basis_diff_rows":-1,"iters_s":0,"iters_i":0,"t_presolve":13.524}
+MIP: MEMCAP: tid 0 limit 12881 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0

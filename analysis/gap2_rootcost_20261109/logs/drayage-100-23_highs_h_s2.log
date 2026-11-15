@@ -1,0 +1,64 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Number of BV entries in BOUNDS section is 11025
+MIP drayage-100-23 has 4630 rows; 11090 cols; 41550 nonzeros; 11025 integer variables (11025 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 6e+04]
+  Cost    [3e+02, 2e+04]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 5e+04]
+Presolving model
+4370 rows, 11090 cols, 38690 nonzeros 0s
+3197 rows, 7749 cols, 25091 nonzeros 0s
+686 rows, 7716 cols, 16853 nonzeros 0s
+Presolve reductions: rows 686(-3944); columns 7716(-3374); nonzeros 16853(-24697) 
+
+Solving MIP model with:
+   686 rows
+   7716 cols (7684 binary, 0 integer, 0 implied int., 32 continuous, 0 domain fixed)
+   16853 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            302780.82756       Large        0      0      0         0     0.2s
+         0       0         0   0.00%   103333.874073   302780.82756      65.87%        0      0      4       577     0.2s
+ L       0       0         0   0.00%   103333.874073   103333.874073      0.00%      863     72     10      1755     0.8s
+         1       0         1 100.00%   103333.874073   103333.874073      0.00%      716     72     10      2000     0.8s
+
+Solving report
+  Model             drayage-100-23
+  Status            Optimal
+  Primal bound      103333.874073
+  Dual bound        103333.874073
+  Gap               0%
+  P-D integral      0.439147184984
+  Solution status   feasible
+                    103333.874073 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            0.83
+                    0.16 (Presolve)
+                        MIP    time [calls] = 0.13 [1]
+                        subMIP time [calls] = 0.03 [1]
+                    0.67 (Solve)
+                        MIP    time [calls] = 0.64 [1]
+                        subMIP time [calls] = 0.03 [1]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [1]
+  Max sub-MIP depth 2
+  Nodes             1
+  Repair LPs        0
+  LP iterations     2000
+                    0 (strong br.)
+                    1178 (separation)
+                    245 (heuristics)
+{"status": "Optimal", "objective": 103333.87407302856, "bound": 103333.87407302856, "nodes": 1, "time": 0.8294641269999943}

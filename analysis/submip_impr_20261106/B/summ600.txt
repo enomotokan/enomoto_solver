@@ -1,0 +1,93 @@
+
+## fiball
+
+| 回 | 暫定解 | 下界 | ノード | 最後の改善 | 外側のサブ MIP | 同じ指紋 | 広げ/狭め/連続 | プール 交差/変異 | 変えた回の改善 | 木のサブ MIP (HDIAG) | サブ MIP の検出 (対称性あり) | 生成元 | オービトープ (列) | 固定 (orbitopal) | 検出の秒 |
+|---|---:|---:|---:|---|---:|---:|---|---|---:|---:|---|---:|---|---:|---:|
+| all1 | 140.0 | 138.0 | 200171 | 70 秒 other thread: tree local branching | 72 | 19 | 4/42/27 | 6/5 | 1 | 68 | 87 (79) | 287 | 7703 (46905) | 905 | 15.09 |
+    2s 311 [Local-MIP], 3s 175 [interior rounding], 5s 153 [clique], 5s 149 [find thread], 48s 148 [other thread: tree local branching], 53s 146 [other thread: tree mutation], 70s 140 [other thread: tree local branching]
+| all2 | 140.00000000000003 | 138.0 | 201066 | 103 秒 other thread: tree local branching | 67 | 16 | 8/36/28 | 6/4 | 2 | 63 | 76 (69) | 257 | 7143 (47061) | 751 | 16.49 |
+    2s 311 [Local-MIP], 3s 175 [interior rounding], 3s 149 [find thread], 5s 147 [clique], 10s 144 [tree RINS], 86s 142 [other thread: tree local branching], 103s 140 [other thread: tree local branching]
+| allv2_1 | 142.0 | 138.0 | 184226 | 570 秒 other thread: tree DINS | 79 | 22 | 13/44/35 | 7/5 | 2 | 75 | 66 (63) | 290 | 5714 (34608) | 973 | 10.60 |
+    2s 311 [Local-MIP], 3s 175 [interior rounding], 3s 149 [find thread], 5s 147 [clique], 7s 144 [RINS], 567s 143 [tree proximity], 570s 142 [other thread: tree DINS]
+| def1 | 142.0 | 138.0 | 175071 | 64 秒 other thread: tree proximity | - | - | - | - | - | 16 | - | - | - | - | - |
+    1s 311 [Local-MIP], 3s 175 [interior rounding], 5s 153 [clique], 5s 149 [find thread], 42s 146 [other thread: tree RINS], 64s 145 [other thread: tree proximity]
+| def2 | 140.0 | 138.0 | 195880 | 224 秒 tree | 51 | 11 | 0/0/0 | 0/0 | 0 | 47 | - | - | - | - | - |
+    2s 311 [Local-MIP], 3s 175 [interior rounding], 3s 149 [find thread], 5s 147 [clique], 6s 144 [RINS], 10s 143 [tree RINS], 224s 140 [tree]
+| div1 | 139.0 | 138.0 | 154006 | 204 秒 other thread: tree proximity | 89 | 24 | 4/46/26 | 6/5 | 6 | 85 | - | - | - | - | - |
+    3s 149 [find thread], 12s 146 [tree RINS], 80s 145 [other thread: tree proximity], 100s 144 [other thread: tree proximity], 122s 142 [other thread: tree local branching], 147s 141 [other thread: tree local branching], 194s 140 [other thread: tree proximity], 204s 139 [other thread: tree proximity]
+| sym1 | 142.0 | 138.0 | 207045 | 170 秒 other thread: tree mutation | 65 | 10 | 0/0/0 | 0/0 | 0 | 61 | 72 (61) | 278 | 6710 (49327) | 1302 | 13.58 |
+    2s 311 [Local-MIP], 3s 175 [interior rounding], 3s 149 [find thread], 5s 147 [clique], 97s 144 [other thread: tree RINS], 110s 143 [other thread: tree crossover], 170s 142 [other thread: tree mutation]
+
+## neos-933966
+
+| 回 | 暫定解 | 下界 | ノード | 最後の改善 | 外側のサブ MIP | 同じ指紋 | 広げ/狭め/連続 | プール 交差/変異 | 変えた回の改善 | 木のサブ MIP (HDIAG) | サブ MIP の検出 (対称性あり) | 生成元 | オービトープ (列) | 固定 (orbitopal) | 検出の秒 |
+|---|---:|---:|---:|---|---:|---:|---|---|---:|---:|---|---:|---|---:|---:|
+| all1 | 331.0 | 318.0 | 4906 | 581 秒 other thread: tree local branching | 82 | 25 | 5/28/8 | 4/3 | 7 | 78 | 110 (42) | 36 | 374 (5708) | 41 | 5.32 |
+    538s 345 [other thread: tree local branching], 552s 344 [other thread: tree local branching], 556s 343 [other thread: tree local branching], 566s 340 [other thread: tree pool crossover], 574s 337 [other thread: tree local branching], 575s 334 [other thread: tree local branching], 578s 332 [other thread: tree local branching], 581s 331 [other thread: tree local branching]
+| all2 | 319.0 | 318.0 | 4653 | 569 秒 other thread: tree local branching | 54 | 18 | 4/18/4 | 2/1 | 1 | 50 | 74 (32) | 26 | 263 (4184) | 70 | 4.18 |
+    548s 339 [other thread: tree local branching], 559s 335 [other thread: tree local branching], 559s 332 [other thread: tree local branching], 560s 329 [other thread: tree local branching], 563s 326 [other thread: tree local branching], 565s 323 [other thread: tree local branching], 567s 320 [other thread: tree local branching], 569s 319 [other thread: tree local branching]
+| allv2_1 | 334.0 | 318.0 | 4235 | 566 秒 other thread: tree local branching | 36 | 9 | 0/10/1 | 1/1 | 2 | 32 | 56 (21) | 14 | 109 (2687) | 69 | 2.22 |
+    557s 355 [other thread: tree local branching], 558s 351 [other thread: tree local branching], 559s 346 [other thread: tree local branching], 560s 343 [other thread: tree local branching], 561s 340 [other thread: tree local branching], 561s 337 [other thread: tree local branching], 565s 335 [other thread: tree local branching], 566s 334 [other thread: tree local branching]
+| def1 | 346.0 | 318.0 | 3892 | 543 秒 other thread: tree local branching | 42 | 13 | 0/0/0 | 0/0 | 0 | 38 | - | - | - | - | - |
+    503s 362 [other thread: tree local branching], 509s 358 [other thread: tree local branching], 514s 356 [other thread: tree local branching], 519s 352 [other thread: tree local branching], 529s 351 [other thread: tree local branching], 534s 349 [other thread: tree local branching], 538s 347 [other thread: tree local branching], 543s 346 [other thread: tree local branching]
+| def2 | 352.0 | 318.0 | 908 | 577 秒 other thread: tree local branching | 42 | 12 | 0/0/0 | 0/0 | 0 | 38 | - | - | - | - | - |
+    573s 366 [other thread: tree local branching], 573s 365 [other thread: tree local branching], 574s 362 [other thread: tree local branching], 575s 360 [other thread: tree local branching], 576s 358 [other thread: tree local branching], 576s 356 [other thread: tree local branching], 576s 354 [other thread: tree local branching], 577s 352 [other thread: tree local branching]
+| div1 | 323.0 | 318.0 | 4428 | 564 秒 other thread: tree DINS | 41 | 3 | 0/3/0 | 1/1 | 1 | 37 | - | - | - | - | - |
+    545s 344 [other thread: tree local branching], 551s 340 [other thread: tree local branching], 552s 336 [other thread: tree local branching], 553s 332 [other thread: tree local branching], 554s 328 [other thread: tree local branching], 560s 327 [other thread: tree local branching], 562s 325 [other thread: tree local branching], 564s 323 [other thread: tree DINS]
+| sym1 | 322.0 | 318.0 | 4049 | 592 秒 other thread: tree local branching | 43 | 12 | 0/0/0 | 0/0 | 0 | 39 | 51 (24) | 22 | 226 (4724) | 59 | 3.01 |
+    524s 335 [other thread: tree local branching], 528s 331 [other thread: tree local branching], 528s 328 [other thread: tree local branching], 536s 326 [other thread: tree local branching], 540s 325 [other thread: tree local branching], 544s 324 [other thread: tree local branching], 592s 323 [other thread: tree local branching], 592s 322 [other thread: tree local branching]
+
+## trento1
+
+| 回 | 暫定解 | 下界 | ノード | 最後の改善 | 外側のサブ MIP | 同じ指紋 | 広げ/狭め/連続 | プール 交差/変異 | 変えた回の改善 | 木のサブ MIP (HDIAG) | サブ MIP の検出 (対称性あり) | 生成元 | オービトープ (列) | 固定 (orbitopal) | 検出の秒 |
+|---|---:|---:|---:|---|---:|---:|---|---|---:|---:|---|---:|---|---:|---:|
+| all1 | 35876489.0 | 5183038.437886351 | 556 | 398 秒 root reduced cost | 3 | 0 | 0/0/0 | 0/0 | 0 | 0 | 4 (4) | 931 | 0 (0) | 0 | 2.06 |
+    11s 2.96147e+08 [Local-MIP], 31s 6.57827e+07 [RENS], 398s 3.58765e+07 [root reduced cost]
+| all2 | 5692009.000001808 | 5183146.802268935 | 1321 | 493 秒 other thread: tree pool mutation | 40 | 9 | 6/13/10 | 5/4 | 3 | 37 | 62 (62) | 5537 | 801 (1697) | 0 | 15.38 |
+    12s 2.66006e+08 [Local-MIP], 31s 6.6341e+07 [RENS], 253s 5.56494e+07 [root reduced cost], 429s 5.7924e+06 [other thread (tree)], 455s 5.7724e+06 [other thread: tree mutation], 455s 5.69241e+06 [other thread: tree local branching], 461s 5.69241e+06 [other thread: tree local branching], 493s 5.69201e+06 [other thread: tree pool mutation]
+| allof1 | 56242200.01349983 | 5183129.859315218 | 935 | 306 秒 root reduced cost | 3 | 0 | 0/0/0 | 0/0 | 0 | 0 | 4 (0) | 0 | 0 (0) | 0 | 2.06 |
+    12s 2.86067e+08 [Local-MIP], 13s 2.76084e+08 [Local-MIP], 14s 2.76041e+08 [Local-MIP], 32s 6.57798e+07 [RENS], 306s 5.62422e+07 [root reduced cost]
+| def1 | 15418807.999999994 | 5183149.348292448 | 1891 | 314 秒 other thread: tree local branching | 11 | 1 | 0/0/0 | 0/0 | 0 | 8 | - | - | - | - | - |
+    11s 2.55972e+08 [Local-MIP], 31s 1.55189e+07 [RENS], 314s 1.54188e+07 [other thread: tree local branching]
+| def2 | 16580135.018900001 | 5183129.859315218 | 985 | 475 秒 other thread: tree mutation | 30 | 5 | 0/0/0 | 0/0 | 0 | 27 | - | - | - | - | - |
+    11s 2.45963e+08 [Local-MIP], 32s 2.53507e+07 [RENS], 450s 1.82838e+07 [other thread: tree local branching], 458s 1.77638e+07 [other thread: tree mutation], 475s 1.65801e+07 [other thread: tree mutation]
+| div1 | 36700115.01530034 | 5183038.437886351 | 650 | 368 秒 root reduced cost | 3 | 0 | 0/0/0 | 0/0 | 0 | 0 | - | - | - | - | - |
+    11s 1.95887e+08 [Local-MIP], 31s 4.57752e+07 [RENS], 368s 3.67001e+07 [root reduced cost]
+| sym1 | 35282551.00000016 | 5183129.859315218 | 952 | 539 秒 other thread: tree mutation | 26 | 0 | 0/0/0 | 0/0 | 0 | 23 | 29 (29) | 2559 | 443 (937) | 0 | 6.65 |
+    535s 3.55844e+07 [other thread: tree mutation], 535s 3.54847e+07 [other thread: tree mutation], 535s 3.54843e+07 [other thread: tree mutation], 535s 3.54836e+07 [other thread: tree mutation], 535s 3.53835e+07 [other thread: tree mutation], 535s 3.53825e+07 [other thread: tree mutation], 535s 3.53825e+07 [other thread: tree mutation], 539s 3.52826e+07 [other thread: tree mutation]
+
+## nexp-150-20-8-5
+
+| 回 | 暫定解 | 下界 | ノード | 最後の改善 | 外側のサブ MIP | 同じ指紋 | 広げ/狭め/連続 | プール 交差/変異 | 変えた回の改善 | 木のサブ MIP (HDIAG) | サブ MIP の検出 (対称性あり) | 生成元 | オービトープ (列) | 固定 (orbitopal) | 検出の秒 |
+|---|---:|---:|---:|---|---:|---:|---|---|---:|---:|---|---:|---|---:|---:|
+| all1 | 251.0 | 197.0 | 21807 | 121 秒 other thread: tree RINS | 54 | 12 | 4/28/20 | 5/3 | 0 | 48 | 71 (23) | 4 | 151 (327) | 0 | 1.46 |
+    3s 434 [Local-MIP], 5s 418 [Local-MIP], 31s 411 [Local-MIP], 36s 335 [LP face], 37s 260 [find thread], 57s 256 [RINS], 121s 251 [other thread: tree RINS]
+| all2 | 251.0 | 198.0 | 19511 | 124 秒 other thread: tree RINS | 50 | 10 | 4/25/19 | 4/4 | 0 | 44 | 76 (24) | 2 | 168 (351) | 0 | 1.48 |
+    3s 406 [Local-MIP], 38s 335 [LP face], 39s 260 [find thread], 59s 256 [RINS], 124s 251 [other thread: tree RINS]
+| allv2_1 | 242.0 | 198.0 | 18238 | 272 秒 other thread: tree RINS | 65 | 8 | 4/27/23 | 6/5 | 2 | 59 | 105 (31) | 4 | 183 (385) | 0 | 1.83 |
+    12s 387 [Local-MIP], 27s 382 [Local-MIP], 47s 260 [find thread], 58s 256 [RINS], 125s 251 [other thread: tree RINS], 253s 246 [tree pool crossover], 257s 244 [other thread: tree proximity], 272s 242 [other thread: tree RINS]
+| def1 | 248.0 | 196.0 | 16695 | 313 秒 tree crossover | 60 | 8 | 0/0/0 | 0/0 | 0 | 54 | - | - | - | - | - |
+    3s 406 [Local-MIP], 35s 335 [LP face], 36s 260 [find thread], 56s 256 [RINS], 146s 250 [other thread: tree RINS], 162s 249 [other thread: tree DINS], 313s 248 [tree crossover]
+| def2 | 238.0 | 208.0 | 17718 | 456 秒 other thread: tree RINS | 103 | 19 | 0/0/0 | 0/0 | 0 | 97 | - | - | - | - | - |
+    108s 255 [other thread: tree RINS], 123s 252 [other thread: tree RINS], 124s 248 [other thread: tree RINS], 233s 246 [tree crossover], 303s 242 [other thread: tree RINS], 409s 240 [tree crossover], 426s 239 [other thread: tree DINS], 456s 238 [other thread: tree RINS]
+| div1 | 241.0 | 215.0 | 14018 | 284 秒 other thread: tree RINS | 55 | 5 | 5/18/18 | 3/3 | 1 | 49 | - | - | - | - | - |
+    26s 387 [Local-MIP], 46s 260 [find thread], 54s 253 [RINS], 152s 250 [tree RINS], 195s 249 [other thread: tree proximity], 204s 244 [other thread: tree RINS], 205s 243 [other thread: tree RINS], 284s 241 [other thread: tree RINS]
+| sym1 | 242.0 | 199.0 | 20541 | 159 秒 other thread: tree RINS | 66 | 17 | 0/0/0 | 0/0 | 0 | 60 | 94 (31) | 8 | 192 (419) | 0 | 1.78 |
+    3s 416 [Local-MIP], 8s 405 [Local-MIP], 9s 401 [Local-MIP], 47s 260 [find thread], 58s 256 [RINS], 126s 248 [other thread: tree RINS], 158s 246 [other thread: tree RINS], 159s 242 [other thread: tree RINS]
+
+## thor50dday
+
+| 回 | 暫定解 | 下界 | ノード | 最後の改善 | 外側のサブ MIP | 同じ指紋 | 広げ/狭め/連続 | プール 交差/変異 | 変えた回の改善 | 木のサブ MIP (HDIAG) | サブ MIP の検出 (対称性あり) | 生成元 | オービトープ (列) | 固定 (orbitopal) | 検出の秒 |
+|---|---:|---:|---:|---|---:|---:|---|---|---:|---:|---|---:|---|---:|---:|
+| all1 | 85527.0 | 31747.011854432396 | 35 | 578 秒 tree rounding | 7 | 0 | 0/0/0 | 0/0 | 0 | 0 | 8 (0) | 0 | 0 (0) | 0 | 0.23 |
+    4s 192075 [tree], 20s 190078 [LP face], 438s 162115 [tree rounding], 527s 152742 [tree rounding], 548s 108630 [tree rounding], 578s 85527 [tree rounding]
+| all2 | 85527.0 | 31747.011854432396 | 38 | 574 秒 tree rounding | 7 | 0 | 0/0/0 | 0/0 | 0 | 0 | 8 (0) | 0 | 0 (0) | 0 | 0.22 |
+    5s 192075 [tree], 21s 190078 [LP face], 436s 162115 [tree rounding], 524s 152742 [tree rounding], 544s 108630 [tree rounding], 574s 85527 [tree rounding]
+| def1 | 136383.0 | 31758.0 | 8 | 597 秒 tree rounding | 7 | 0 | 0/0/0 | 0/0 | 0 | 0 | - | - | - | - | - |
+    4s 192075 [tree], 19s 190078 [LP face], 438s 168026 [tree rounding], 532s 159270 [tree rounding], 558s 153559 [tree rounding], 578s 151431 [tree rounding], 591s 150713 [tree rounding], 597s 136383 [tree rounding]
+| def2 | 85527.0 | 31747.011854432396 | 35 | 579 秒 tree rounding | 7 | 0 | 0/0/0 | 0/0 | 0 | 0 | - | - | - | - | - |
+    4s 192075 [tree], 20s 190078 [LP face], 440s 162115 [tree rounding], 529s 152742 [tree rounding], 550s 108630 [tree rounding], 579s 85527 [tree rounding]
+| div1 | 123297.0 | 31659.0 | 5 | 596 秒 tree rounding | 7 | 0 | 0/0/0 | 0/0 | 0 | 0 | - | - | - | - | - |
+    4s 192075 [tree], 20s 190078 [LP face], 446s 151870 [tree rounding], 473s 149446 [tree rounding], 525s 148066 [tree rounding], 576s 138067 [tree rounding], 596s 123297 [tree rounding]
+| sym1 | 85527.0 | 31747.011854432396 | 24 | 591 秒 tree rounding | 7 | 0 | 0/0/0 | 0/0 | 0 | 0 | 8 (0) | 0 | 0 (0) | 0 | 0.29 |
+    4s 192075 [tree], 21s 190078 [LP face], 448s 162115 [tree rounding], 539s 152742 [tree rounding], 560s 108630 [tree rounding], 591s 85527 [tree rounding]

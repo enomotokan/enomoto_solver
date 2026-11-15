@@ -1,0 +1,18 @@
+CROSSOVER ipm status=NotSolved iters=200 rel_res=(0.13721572938482665, 2.85530585489589e-6, 1022.2728588472002) t=18.690s
+CROSSOVER resid after ipm=1.384e-7 (before clamping 6.919e-8, max bound violation 6.919e-8, |b|max=9.976e0)
+CROSSOVER resid after ipm=1.384e-7
+CROSSOVER resid after detect=2.861e-3
+CROSSOVER m=20438 n=25612 basic_after_detect=13574 t=18.692s
+CROSSOVER resid after primal push=2.861e-3
+CROSSOVER primal_push steps=0 basic=13574 t=18.693s
+CROSSOVER dual push skipped (|D|=14494 < 0.7 m)
+CROSSOVER after dual push: max|s_D|=4.97e-4 (#>1e-6: 3614) dual-infeasible non-D=233
+CROSSOVER dual_push steps=0 active 14494->14494 t=18.693s
+CROSSOVER basis from_B=13551 from_D=0 slack=6887 (m=20438) t=18.695s
+CROSSOVER basis selector: reach=15520 elim=27221 nnz(L)=6485 scanned=46169
+CROSSOVER leftover superbasics=23 (|B|-m after primal push=-6864)
+CROSSOVER megiddo prof: total=0.00s ftran=0.00 rows=0.00 btran=0.00 update=0.00 refactor=0.00 (0x, 0 by verify, 0 by x_B residual) avg_nz=5805
+CROSSOVER megiddo pivots=22 to_bound=1 unresolved=0 t=18.708s
+CROSSOVER vertex from an unconverged interior point has 580 primal infeasibilities; handing the pushed vertex to the MIP LP (ENOMOTO_XO_MIP_VERTEX_FALLBACK)
+ROOTLP_BOTH {"n":5174,"m":20438,"n_int":2349,"threads":4,"main_cold":false,"st_s":"IterationLimit","st_i":"Some(TimeLimit)","obj_s":-5.714285714312e-1,"obj_i":null,"t_simplex":0.0067,"t_ipm":18.6913,"t_xo":18.7104,"t_adopt":274.8250,"t_i":293.5354,"winner":"none","ndiff":0,"ndiff_int":0,"frac_s":0,"frac_i":0,"frac_both":0,"basis_diff_cols":-1,"basis_diff_rows":-1,"iters_s":0,"iters_i":60902,"t_presolve":293.588}
+MIP: MEMCAP: tid 0 limit 13123 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0

@@ -1,0 +1,201 @@
+PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=8214 lu_nnz=25946 fill=0 upd=0 col_aq=0.0000
+PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=611 lu_nnz=29158 fill=2234 upd=164 col_aq=0.0002
+PROGRESS main iter=2000 t=0.1s phase=B infeasible_rows=612 lu_nnz=32353 fill=4462 upd=246 col_aq=0.0015
+PROGRESS main iter=3000 t=0.1s phase=B infeasible_rows=561 lu_nnz=37297 fill=4152 upd=31 col_aq=0.0005
+PROGRESS main iter=4000 t=0.2s phase=B infeasible_rows=581 lu_nnz=39845 fill=9452 upd=460 col_aq=0.0024
+PROGRESS main iter=5000 t=0.2s phase=B infeasible_rows=493 lu_nnz=46469 fill=9247 upd=232 col_aq=0.0008
+PROGRESS main iter=6000 t=0.3s phase=B infeasible_rows=466 lu_nnz=51382 fill=14051 upd=547 col_aq=0.0005
+PROGRESS main iter=7000 t=0.3s phase=B infeasible_rows=359 lu_nnz=55426 fill=18885 upd=807 col_aq=0.0014
+PROGRESS main iter=8000 t=0.4s phase=B infeasible_rows=513 lu_nnz=42670 fill=21232 upd=220 col_aq=0.0009
+PROGRESS main iter=9000 t=0.5s phase=B infeasible_rows=499 lu_nnz=44653 fill=19059 upd=21 col_aq=0.0007
+PROGRESS main iter=10000 t=0.6s phase=B infeasible_rows=446 lu_nnz=49135 fill=25074 upd=430 col_aq=0.0031
+PROGRESS main iter=11000 t=0.7s phase=B infeasible_rows=294 lu_nnz=55289 fill=24810 upd=31 col_aq=0.0002
+PROGRESS main iter=12000 t=0.8s phase=B infeasible_rows=252 lu_nnz=57801 fill=30514 upd=298 col_aq=0.0011
+PROGRESS main iter=13000 t=0.9s phase=B infeasible_rows=289 lu_nnz=61587 fill=36159 upd=541 col_aq=0.0015
+PROGRESS main iter=14000 t=1.1s phase=B infeasible_rows=468 lu_nnz=64533 fill=44716 upd=727 col_aq=0.0019
+PROGRESS main iter=15000 t=1.2s phase=B infeasible_rows=470 lu_nnz=71269 fill=36228 upd=91 col_aq=0.0028
+PROGRESS main iter=16000 t=1.5s phase=B infeasible_rows=644 lu_nnz=72023 fill=39462 upd=301 col_aq=0.0028
+PROGRESS main iter=17000 t=1.7s phase=B infeasible_rows=873 lu_nnz=76262 fill=47081 upd=420 col_aq=0.0058
+PROGRESS main iter=18000 t=2.1s phase=B infeasible_rows=641 lu_nnz=79207 fill=56602 upd=581 col_aq=0.0040
+PROGRESS main iter=19000 t=2.5s phase=B infeasible_rows=1080 lu_nnz=58270 fill=30340 upd=70 col_aq=0.0080
+PROGRESS main iter=20000 t=2.7s phase=B infeasible_rows=1138 lu_nnz=59879 fill=39593 upd=312 col_aq=0.0055
+PROF_PHASES_EXT wall=3028.412ms iters=20827 (145.4us/iter) accounted=83.9% of wall refactor_count=28 (verify=0 try_update=0 bump=0 drift=0 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=28) max_update_streak=918
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=3.6us/iter
+  avg_bfrt_flips/iter=0.358 avg_infeasible_pool/iter=590.1
+  pivot_order_reuse: attempts=24 accepted=22 (91.7%) attempt_time=100.643ms row_repicks=13220 fail(singular=0 fill=2) backoff_skips=4 nnz_reuse_avg=54452 nnz_full_avg=51015
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=0 final_expected_density col_aq=0.003 bfrt=0.006
+  btran_l scatter=21040 gather=34
+  pivot_search steps=155676 search_limit_hits=5188 (3.3%) candidates=613338 (avg 3.94/step) scan=6.760ms
+  col_max_abs rescan_entries=11839 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=38 (0.2% of iters) avg_harris_window_size=1.107
+  pool_grew=5413 (26.0%) pool_shrank=6737 (32.3%) pool_same=8676 (41.7%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)          373.902ms   12.3% of wall  17.953us/iter
+  price                 157.959ms    5.2% of wall  7.584us/iter
+  chuzr                  59.796ms    2.0% of wall  2.871us/iter
+  chuzc1                136.125ms    4.5% of wall  6.536us/iter
+  bfrt                   75.499ms    2.5% of wall  3.625us/iter
+  ftran                1260.233ms   41.6% of wall  60.510us/iter
+  xb_update              45.717ms    1.5% of wall  2.195us/iter
+  dse_update             18.961ms    0.6% of wall  0.910us/iter
+  dual_update            36.123ms    1.2% of wall  1.734us/iter
+  ft_update              46.329ms    1.5% of wall  2.224us/iter
+  refactor              329.772ms   10.9% of wall  15.834us/iter
+PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15218 lu_nnz=127065 fill=72782 upd=0 col_aq=0.0000
+PROGRESS main iter=1000 t=1.1s phase=B infeasible_rows=10068 lu_nnz=144361 fill=112995 upd=406 col_aq=0.0005
+PROGRESS main iter=2000 t=1.7s phase=B infeasible_rows=8604 lu_nnz=154719 fill=114468 upd=590 col_aq=0.0003
+PROGRESS main iter=3000 t=2.4s phase=B infeasible_rows=7326 lu_nnz=157056 fill=117586 upd=403 col_aq=0.0003
+PROGRESS main iter=4000 t=3.4s phase=B infeasible_rows=6404 lu_nnz=158711 fill=153667 upd=444 col_aq=0.0255
+PROGRESS main iter=5000 t=4.7s phase=B infeasible_rows=4512 lu_nnz=165186 fill=166465 upd=362 col_aq=0.0033
+PROGRESS main iter=6000 t=5.9s phase=B infeasible_rows=4677 lu_nnz=163796 fill=192402 upd=657 col_aq=0.0002
+PROGRESS main iter=7000 t=7.1s phase=B infeasible_rows=3638 lu_nnz=166213 fill=111868 upd=89 col_aq=0.2987
+PROGRESS main iter=8000 t=8.6s phase=B infeasible_rows=2944 lu_nnz=166353 fill=146609 upd=314 col_aq=0.1410
+PROGRESS main iter=9000 t=10.3s phase=B infeasible_rows=1573 lu_nnz=172055 fill=233107 upd=704 col_aq=0.0874
+PROGRESS main iter=10000 t=11.6s phase=B infeasible_rows=1291 lu_nnz=174246 fill=135362 upd=174 col_aq=0.1178
+PROGRESS main iter=11000 t=13.4s phase=B infeasible_rows=834 lu_nnz=172181 fill=163773 upd=403 col_aq=0.1679
+PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=7914 lu_nnz=25722 fill=0 upd=0 col_aq=0.0000
+PROGRESS main iter=1000 t=0.1s phase=B infeasible_rows=614 lu_nnz=28538 fill=1988 upd=166 col_aq=0.0001
+PROGRESS main iter=2000 t=0.1s phase=B infeasible_rows=646 lu_nnz=31619 fill=4184 upd=258 col_aq=0.0003
+PROGRESS main iter=3000 t=0.2s phase=B infeasible_rows=624 lu_nnz=35365 fill=4606 upd=176 col_aq=0.0004
+PROGRESS main iter=4000 t=0.2s phase=B infeasible_rows=561 lu_nnz=41939 fill=5686 upd=8 col_aq=0.0014
+PROGRESS main iter=5000 t=0.2s phase=B infeasible_rows=510 lu_nnz=46125 fill=10789 upd=382 col_aq=0.0005
+PROGRESS main iter=6000 t=0.3s phase=B infeasible_rows=481 lu_nnz=52766 fill=15791 upd=710 col_aq=0.0031
+PROGRESS main iter=7000 t=0.4s phase=B infeasible_rows=484 lu_nnz=38610 fill=15457 upd=157 col_aq=0.0003
+PROGRESS main iter=8000 t=0.4s phase=B infeasible_rows=538 lu_nnz=40210 fill=15102 upd=36 col_aq=0.0007
+PROGRESS main iter=9000 t=0.5s phase=B infeasible_rows=454 lu_nnz=44100 fill=23957 upd=495 col_aq=0.0007
+PROGRESS main iter=10000 t=0.6s phase=B infeasible_rows=642 lu_nnz=49565 fill=22114 upd=242 col_aq=0.0034
+PROGRESS main iter=11000 t=0.7s phase=B infeasible_rows=389 lu_nnz=52036 fill=28901 upd=574 col_aq=0.0012
+PROGRESS main iter=12000 t=0.8s phase=B infeasible_rows=350 lu_nnz=56830 fill=25025 upd=138 col_aq=0.0004
+PROGRESS main iter=13000 t=0.9s phase=B infeasible_rows=324 lu_nnz=62912 fill=35649 upd=415 col_aq=0.0003
+PROGRESS main iter=14000 t=1.0s phase=B infeasible_rows=376 lu_nnz=65879 fill=44182 upd=568 col_aq=0.0004
+PROGRESS main iter=15000 t=1.1s phase=B infeasible_rows=528 lu_nnz=67563 fill=44434 upd=720 col_aq=0.0020
+PROGRESS main iter=16000 t=1.3s phase=B infeasible_rows=630 lu_nnz=74881 fill=36218 upd=34 col_aq=0.0030
+PROGRESS main iter=17000 t=1.6s phase=B infeasible_rows=923 lu_nnz=53574 fill=29411 upd=164 col_aq=0.0019
+PROGRESS main iter=18000 t=1.8s phase=B infeasible_rows=631 lu_nnz=54041 fill=45542 upd=509 col_aq=0.0045
+PROGRESS main iter=19000 t=2.0s phase=B infeasible_rows=1283 lu_nnz=62062 fill=33337 upd=216 col_aq=0.0008
+PROGRESS main iter=20000 t=2.4s phase=B infeasible_rows=1457 lu_nnz=66021 fill=49834 upd=509 col_aq=0.0232
+PROGRESS main iter=21000 t=2.7s phase=B infeasible_rows=1732 lu_nnz=70359 fill=54197 upd=757 col_aq=0.0075
+PROGRESS main iter=22000 t=3.1s phase=B infeasible_rows=2491 lu_nnz=82041 fill=41460 upd=41 col_aq=0.0331
+PROGRESS main iter=23000 t=3.6s phase=B infeasible_rows=1557 lu_nnz=84558 fill=50775 upd=279 col_aq=0.0403
+PROGRESS main iter=24000 t=4.1s phase=B infeasible_rows=1738 lu_nnz=90189 fill=69783 upd=500 col_aq=0.0007
+PROGRESS main iter=25000 t=4.7s phase=B infeasible_rows=1786 lu_nnz=93093 fill=74067 upd=684 col_aq=0.0721
+PROGRESS main iter=26000 t=5.2s phase=B infeasible_rows=2408 lu_nnz=67894 fill=37685 upd=74 col_aq=0.0102
+PROGRESS main iter=27000 t=5.7s phase=B infeasible_rows=1543 lu_nnz=69089 fill=44731 upd=415 col_aq=0.0107
+PROGRESS main iter=28000 t=6.4s phase=B infeasible_rows=3012 lu_nnz=80591 fill=42605 upd=15 col_aq=0.0026
+PROGRESS main iter=29000 t=7.0s phase=B infeasible_rows=3498 lu_nnz=87399 fill=62036 upd=248 col_aq=0.0314
+PROGRESS main iter=30000 t=7.8s phase=B infeasible_rows=2313 lu_nnz=91796 fill=95416 upd=569 col_aq=0.1203
+PROGRESS main iter=31000 t=8.6s phase=B infeasible_rows=2853 lu_nnz=103028 fill=76203 upd=182 col_aq=0.0670
+PROGRESS main iter=32000 t=9.3s phase=B infeasible_rows=3555 lu_nnz=100307 fill=78150 upd=527 col_aq=0.0151
+PROGRESS main iter=33000 t=10.0s phase=B infeasible_rows=3556 lu_nnz=106344 fill=107829 upd=671 col_aq=0.1523
+PROGRESS main iter=34000 t=10.8s phase=B infeasible_rows=3961 lu_nnz=77791 fill=50388 upd=154 col_aq=0.0011
+PROGRESS main iter=35000 t=11.3s phase=B infeasible_rows=4679 lu_nnz=78177 fill=54332 upd=454 col_aq=0.0242
+PROGRESS main iter=36000 t=12.2s phase=B infeasible_rows=3251 lu_nnz=97721 fill=56477 upd=31 col_aq=0.1258
+PROGRESS main iter=37000 t=13.0s phase=B infeasible_rows=4357 lu_nnz=102620 fill=97081 upd=372 col_aq=0.1358
+PROGRESS main iter=38000 t=14.1s phase=B infeasible_rows=5124 lu_nnz=103318 fill=139066 upd=687 col_aq=0.2109
+PROGRESS main iter=39000 t=15.0s phase=B infeasible_rows=3635 lu_nnz=117030 fill=93884 upd=245 col_aq=0.0475
+PROGRESS main iter=40000 t=16.1s phase=B infeasible_rows=3260 lu_nnz=109164 fill=113265 upd=549 col_aq=0.0955
+PROGRESS main iter=41000 t=17.1s phase=B infeasible_rows=4853 lu_nnz=84004 fill=47987 upd=79 col_aq=0.0916
+PROGRESS main iter=42000 t=17.8s phase=B infeasible_rows=4658 lu_nnz=84995 fill=58380 upd=369 col_aq=0.0527
+PROGRESS main iter=43000 t=18.6s phase=B infeasible_rows=2836 lu_nnz=96095 fill=103648 upd=587 col_aq=0.0665
+PROGRESS main iter=44000 t=19.6s phase=B infeasible_rows=3264 lu_nnz=105271 fill=81461 upd=314 col_aq=0.0058
+PROGRESS main iter=45000 t=20.7s phase=B infeasible_rows=5449 lu_nnz=114735 fill=132832 upd=581 col_aq=0.1724
+PROGRESS main iter=46000 t=21.7s phase=B infeasible_rows=5027 lu_nnz=89073 fill=57525 upd=214 col_aq=0.0395
+PROGRESS main iter=47000 t=22.6s phase=B infeasible_rows=5037 lu_nnz=90169 fill=73946 upd=482 col_aq=0.0797
+PROGRESS main iter=48000 t=23.6s phase=B infeasible_rows=5709 lu_nnz=107312 fill=66704 upd=121 col_aq=0.0803
+PROGRESS main iter=49000 t=24.7s phase=B infeasible_rows=3596 lu_nnz=110823 fill=97100 upd=385 col_aq=0.1422
+PROGRESS main iter=50000 t=25.7s phase=B infeasible_rows=2742 lu_nnz=118884 fill=111005 upd=690 col_aq=0.0305
+PROGRESS main iter=51000 t=26.8s phase=B infeasible_rows=4947 lu_nnz=136275 fill=111406 upd=198 col_aq=0.0106
+PROGRESS main iter=52000 t=27.8s phase=B infeasible_rows=4966 lu_nnz=91152 fill=86288 upd=552 col_aq=0.1352
+PROGRESS main iter=53000 t=28.8s phase=B infeasible_rows=4572 lu_nnz=92240 fill=57560 upd=128 col_aq=0.0269
+PROGRESS main iter=54000 t=29.8s phase=B infeasible_rows=7411 lu_nnz=103188 fill=93483 upd=433 col_aq=0.0472
+PROGRESS main iter=55000 t=30.9s phase=B infeasible_rows=3957 lu_nnz=115029 fill=66842 upd=121 col_aq=0.0017
+PROGRESS main iter=56000 t=31.9s phase=B infeasible_rows=5047 lu_nnz=125603 fill=119493 upd=420 col_aq=0.2479
+PROGRESS main iter=57000 t=33.0s phase=B infeasible_rows=5122 lu_nnz=95555 fill=53120 upd=26 col_aq=0.0516
+PROGRESS main iter=58000 t=34.0s phase=B infeasible_rows=7678 lu_nnz=96020 fill=69718 upd=338 col_aq=0.0932
+PROGRESS main iter=59000 t=35.2s phase=B infeasible_rows=4963 lu_nnz=112952 fill=95750 upd=297 col_aq=0.3124
+PROGRESS main iter=60000 t=36.2s phase=B infeasible_rows=4897 lu_nnz=115050 fill=102476 upd=374 col_aq=0.2428
+PROGRESS main iter=61000 t=37.4s phase=B infeasible_rows=3924 lu_nnz=123159 fill=93025 upd=221 col_aq=0.0773
+PROGRESS main iter=62000 t=38.8s phase=B infeasible_rows=6639 lu_nnz=131935 fill=120374 upd=328 col_aq=0.1906
+PROGRESS main iter=63000 t=40.4s phase=B infeasible_rows=4284 lu_nnz=140447 fill=155378 upd=473 col_aq=0.2914
+PROGRESS main iter=64000 t=41.7s phase=B infeasible_rows=5560 lu_nnz=96832 fill=110934 upd=462 col_aq=0.0868
+PROGRESS main iter=65000 t=42.9s phase=B infeasible_rows=5113 lu_nnz=97407 fill=105771 upd=468 col_aq=0.1039
+PROGRESS main iter=66000 t=44.2s phase=B infeasible_rows=4404 lu_nnz=113093 fill=75457 upd=147 col_aq=0.1587
+PROGRESS main iter=67000 t=45.6s phase=B infeasible_rows=9133 lu_nnz=125440 fill=84594 upd=110 col_aq=0.1877
+PROGRESS main iter=68000 t=46.9s phase=B infeasible_rows=5234 lu_nnz=136238 fill=139344 upd=433 col_aq=0.1698
+PROGRESS main iter=69000 t=48.4s phase=B infeasible_rows=6490 lu_nnz=140052 fill=113778 upd=281 col_aq=0.2088
+PROGRESS main iter=70000 t=49.9s phase=B infeasible_rows=6957 lu_nnz=144176 fill=84331 upd=22 col_aq=0.1319
+PROGRESS main iter=71000 t=51.5s phase=B infeasible_rows=5059 lu_nnz=99305 fill=60655 upd=89 col_aq=0.1648
+PROGRESS main iter=72000 t=52.7s phase=B infeasible_rows=5609 lu_nnz=99362 fill=83591 upd=454 col_aq=0.1217
+PROGRESS main iter=73000 t=53.9s phase=B infeasible_rows=7851 lu_nnz=110026 fill=84836 upd=304 col_aq=0.0850
+PROGRESS main iter=74000 t=55.2s phase=B infeasible_rows=5801 lu_nnz=123517 fill=94620 upd=238 col_aq=0.1786
+PROGRESS main iter=75000 t=56.4s phase=B infeasible_rows=5312 lu_nnz=132480 fill=75937 upd=17 col_aq=0.1998
+PROGRESS main iter=76000 t=57.7s phase=B infeasible_rows=5559 lu_nnz=142322 fill=84046 upd=30 col_aq=0.2108
+PROGRESS main iter=77000 t=59.0s phase=B infeasible_rows=6088 lu_nnz=146168 fill=88068 upd=34 col_aq=0.2443
+PROGRESS main iter=78000 t=60.5s phase=B infeasible_rows=6084 lu_nnz=148066 fill=177112 upd=533 col_aq=0.1920
+PROGRESS main iter=79000 t=61.7s phase=B infeasible_rows=7118 lu_nnz=98950 fill=63921 upd=160 col_aq=0.2828
+PROGRESS main iter=80000 t=62.9s phase=B infeasible_rows=7474 lu_nnz=110420 fill=75254 upd=161 col_aq=0.0461
+PROGRESS main iter=81000 t=64.2s phase=B infeasible_rows=7606 lu_nnz=118747 fill=84441 upd=192 col_aq=0.1134
+PROGRESS main iter=82000 t=65.6s phase=B infeasible_rows=5864 lu_nnz=138320 fill=105940 upd=170 col_aq=0.2396
+PROGRESS main iter=83000 t=67.1s phase=B infeasible_rows=4345 lu_nnz=135568 fill=79210 upd=19 col_aq=0.0677
+PROGRESS main iter=84000 t=68.5s phase=B infeasible_rows=5766 lu_nnz=139400 fill=172263 upd=604 col_aq=0.1350
+PROGRESS main iter=85000 t=70.0s phase=B infeasible_rows=4983 lu_nnz=143794 fill=168947 upd=474 col_aq=0.1250
+PROGRESS main iter=86000 t=71.5s phase=B infeasible_rows=5356 lu_nnz=147240 fill=143902 upd=376 col_aq=0.2608
+PROGRESS main iter=87000 t=72.9s phase=B infeasible_rows=3572 lu_nnz=101093 fill=69131 upd=168 col_aq=0.0442
+PROGRESS main iter=88000 t=74.3s phase=B infeasible_rows=3677 lu_nnz=101722 fill=87575 upd=461 col_aq=0.1672
+PROGRESS main iter=89000 t=75.9s phase=B infeasible_rows=4108 lu_nnz=119501 fill=77851 upd=99 col_aq=0.0787
+PROGRESS main iter=90000 t=77.3s phase=B infeasible_rows=3356 lu_nnz=126650 fill=136363 upd=462 col_aq=0.0656
+PROGRESS main iter=91000 t=78.8s phase=B infeasible_rows=4188 lu_nnz=143301 fill=115093 upd=253 col_aq=0.1023
+PROGRESS main iter=92000 t=80.3s phase=B infeasible_rows=3782 lu_nnz=150329 fill=157791 upd=526 col_aq=0.0600
+PROGRESS main iter=93000 t=81.8s phase=B infeasible_rows=5796 lu_nnz=103495 fill=88390 upd=376 col_aq=0.1212
+PROGRESS main iter=94000 t=83.4s phase=B infeasible_rows=5434 lu_nnz=116869 fill=134818 upd=473 col_aq=0.0784
+PROGRESS main iter=95000 t=84.9s phase=B infeasible_rows=4276 lu_nnz=129320 fill=140851 upd=488 col_aq=0.1259
+PROGRESS main iter=96000 t=86.5s phase=B infeasible_rows=4582 lu_nnz=133323 fill=94655 upd=154 col_aq=0.0159
+PROGRESS main iter=97000 t=88.2s phase=B infeasible_rows=3988 lu_nnz=142184 fill=124589 upd=258 col_aq=0.1021
+PROGRESS main iter=98000 t=90.0s phase=B infeasible_rows=5403 lu_nnz=154671 fill=145680 upd=267 col_aq=0.1297
+PROGRESS main iter=99000 t=91.4s phase=B infeasible_rows=7702 lu_nnz=108199 fill=73279 upd=156 col_aq=0.2726
+PROGRESS main iter=100000 t=92.8s phase=B infeasible_rows=5923 lu_nnz=114269 fill=92771 upd=303 col_aq=0.2004
+PROGRESS main iter=101000 t=94.1s phase=B infeasible_rows=4385 lu_nnz=126189 fill=106697 upd=288 col_aq=0.1748
+PROGRESS main iter=102000 t=95.5s phase=B infeasible_rows=4685 lu_nnz=137988 fill=147785 upd=396 col_aq=0.1948
+PROGRESS main iter=103000 t=97.1s phase=B infeasible_rows=3476 lu_nnz=143121 fill=142378 upd=323 col_aq=0.1972
+PROGRESS main iter=104000 t=98.7s phase=B infeasible_rows=3459 lu_nnz=109839 fill=77063 upd=300 col_aq=0.0775
+PROGRESS main iter=105000 t=100.0s phase=B infeasible_rows=2497 lu_nnz=109297 fill=89790 upd=561 col_aq=0.0664
+PROGRESS main iter=106000 t=101.3s phase=B infeasible_rows=2765 lu_nnz=109336 fill=103883 upd=710 col_aq=0.0669
+PROGRESS main iter=107000 t=102.8s phase=B infeasible_rows=2785 lu_nnz=141322 fill=120401 upd=262 col_aq=0.1194
+PROGRESS main iter=108000 t=104.4s phase=B infeasible_rows=3420 lu_nnz=140302 fill=130024 upd=377 col_aq=0.1095
+PROGRESS main iter=109000 t=105.9s phase=B infeasible_rows=3181 lu_nnz=139316 fill=131925 upd=373 col_aq=0.1351
+PROGRESS main iter=110000 t=107.3s phase=B infeasible_rows=4029 lu_nnz=111269 fill=69262 upd=156 col_aq=0.0951
+PROGRESS main iter=111000 t=108.6s phase=B infeasible_rows=2632 lu_nnz=110550 fill=83142 upd=386 col_aq=0.1964
+PROGRESS main iter=112000 t=110.1s phase=B infeasible_rows=1756 lu_nnz=138889 fill=105661 upd=224 col_aq=0.1603
+PROGRESS main iter=113000 t=111.5s phase=B infeasible_rows=1434 lu_nnz=142281 fill=87675 upd=43 col_aq=0.1890
+PROGRESS main iter=114000 t=113.1s phase=B infeasible_rows=1125 lu_nnz=156964 fill=155500 upd=378 col_aq=0.0656
+PROGRESS main iter=115000 t=114.9s phase=B infeasible_rows=391 lu_nnz=162352 fill=97956 upd=21 col_aq=0.0475
+PROF_PHASES_EXT wall=116167.202ms iters=115973 (1001.7us/iter) accounted=97.6% of wall refactor_count=185 (verify=0 try_update=0 bump=0 drift=0 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=185) max_update_streak=908
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=15.2us/iter
+  avg_bfrt_flips/iter=0.531 avg_infeasible_pool/iter=3882.3
+  pivot_order_reuse: attempts=233 accepted=208 (89.3%) attempt_time=2130.816ms row_repicks=127914 fail(singular=0 fill=25) backoff_skips=50 nnz_reuse_avg=108568 nnz_full_avg=89320
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=637 final_expected_density col_aq=0.028 bfrt=0.165
+  btran_l scatter=163029 gather=979
+  pivot_search steps=1934974 search_limit_hits=705365 (36.5%) candidates=53261655 (avg 27.53/step) scan=594.646ms
+  col_max_abs rescan_entries=1187304 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=104 (0.1% of iters) avg_harris_window_size=1.063
+  pool_grew=35081 (30.2%) pool_shrank=50934 (43.9%) pool_same=29957 (25.8%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)         16606.522ms   14.3% of wall  143.193us/iter
+  price                16981.620ms   14.6% of wall  146.427us/iter
+  chuzr                3796.149ms    3.3% of wall  32.733us/iter
+  chuzc1               6976.905ms    6.0% of wall  60.160us/iter
+  bfrt                 5723.306ms    4.9% of wall  49.350us/iter
+  ftran                43822.531ms   37.7% of wall  377.868us/iter
+  xb_update            8306.682ms    7.2% of wall  71.626us/iter
+  dse_update           2228.295ms    1.9% of wall  19.214us/iter
+  dual_update          3122.764ms    2.7% of wall  26.927us/iter
+  ft_update            1391.395ms    1.2% of wall  11.998us/iter
+  refactor             4421.500ms    3.8% of wall  38.125us/iter
+PROGRESS primal iter=0 t=0.0s obj=-9.0941041465e1 dual_infeas=0 bland=false
+PROF_HANDOFF run_phase=467.946ms ok=true
+ROOTLP_SIMPLEX {"n":117527,"m":25722,"nnz":319884,"st":"Optimal","obj":-9.094104777604e1,"t":116.7917,"iters":116246,"polish":2,"offset":0.00000000000000000e0,"t_start":0.852,"pivlog":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}
+MIP: MEMCAP: tid 0 limit 13566 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0

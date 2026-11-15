@@ -1,0 +1,57 @@
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 4725 -> 510, free columns 8644 -> 4429, nonzeros 24048 -> 15526, postsolve steps 4215 (parallel columns merged: 0 integer, 0 continuous)
+MIP: LP probing: root LP 0.05s (576 iters, size 24680), tried 50, fixed 1, basis passed true, total 2547 iters 0.33s
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 510 -> 510, free columns 4429 -> 4429, nonzeros 15526 -> 15526, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: root LP: the rows changed after LP probing; the row statuses are not used
+MIP: root LP basis from the presolve LP probing: used (columns only)
+MIP: solving the root LP (0.00s)
+MIP: root LP 6.2998405939e6 (535 iters, 0.02s)
+MIP:   global fixed integers 4761 of 8644 (newly 0 since the root LP)
+MIP: clique fallback: no violated clique cuts; not used (0.00s)
+MIP: zh trial (r): continuing the root cut loop with zerohalf (0.41s)
+MIP:   global fixed integers 4761 of 8644 (newly 0 since the root LP)
+MIP:   global fixed integers 4761 of 8644 (newly 0 since the root LP)
+MIP: cut loop done: 24 cuts added, 11 in LP, pool 200 cuts (268296 nonzeros), obj 6.3059463301e6 -> 6.3061057918e6
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1000, work_iters: 20000, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 535 iters)
+MIP: background cuts: basis with the column values not passed (root LP 0.01s)
+MIP:   global fixed integers 4761 of 8644 (newly 0 since the root LP)
+MIP:   global fixed integers 5985 of 8644 (newly 1224 since the root LP)
+MIP: early restart: 1224 newly fixed integer columns after RENS (1.24s)
+MIP: root heuristic RINS: skipped (early restart)
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (1.48s)
+MIP:   global fixed integers 6448 of 8644 (newly 1687 since the root LP)
+MIP: restart check: newly fixed 1687, integer columns 8644, free at the root 3883, threshold 86.4, root LP 0.01s
+MIP: restart 1 (1687 of 8644 integer columns newly fixed at the root, 10 cuts kept) (1.58s)
+MIP: restart 1: pseudocost observations: columns up 0, down 0, both 0 (free integer columns 2196); observations up 0, down 0; nodes 0
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 454 -> 342, free columns 2196 -> 1728, nonzeros 23146 -> 8540, postsolve steps 13 (parallel columns merged: 0 integer, 0 continuous)
+MIP: presolve again after probing (round 1)
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: merged 4 parallel rows (0 new equations)
+MIP: presolve: rows 342 -> 330, free columns 1647 -> 1647, nonzeros 8540 -> 8280, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: presolve again after probing: rows 342 -> 330 (less than 10% fewer), the result is not used
+MIP:   global fixed integers 7292 of 8644 (newly 7292 since the root LP)
+MIP: start solution from before the restart: accepted true
+MIP: root LP basis from the presolve LP probing: none
+MIP: root LP basis from before the restart: 31 of 278 rows matched; not used (ENOMOTO_MIP_TREE3_RBASIS)
+MIP: solving the root LP (0.00s)
+MIP: root LP 6.3066497081e6 (452 iters, 0.02s)
+MIP: cut loop done: 15 cuts added, 7 in LP, pool 298 cuts (199772 nonzeros), obj 6.3066497081e6 -> 6.3069157073e6
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1000, work_iters: 20000, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 452 iters)
+MIP: background cuts: basis with the column values not passed (root LP 0.01s)
+MIP: root heuristic rounding: skipped (no solution before the restart)
+MIP: root heuristic shifting: skipped (no solution before the restart)
+MIP: root heuristic int shifting: skipped (no solution before the restart)
+MIP: root heuristic interior rounding: skipped (no solution before the restart)
+MIP: root heuristic root reduced cost: skipped (no solution before the restart)
+MIP: root heuristic LP face: skipped (no solution before the restart)
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (0.58s)
+MIP: restart check: newly fixed 122, integer columns 8644, free at the root 1352, threshold 216.1, root LP 0.01s
+TRSTAT: tree start outer 2.66 solve 0.65 restarts 1 lb 6.3066497081e6 ub 6.3115700000e6
+MIP:   global fixed integers 7835 of 8644 (newly 543 since the root LP)
+MIP:     1.04s nodes       45 open       0 lb inf ub 6.30799600e6 lp_iters 3306 sb_iters 1285 sb_lps 56 sb_secs 0.07 node_iters 496 (first 451, lps 48) heur_iters 5591 dive_iters 1006 lp_rows 327 node_cut_secs 0.01 pool_len 0 pool_idle 4
+MIP: basis nb diag: tree first LPs restored 61 iters 1254 (20.6/LP), others 54 iters 506 (9.4/LP); root LPs: submip 12 lps 1081 iters (90.1/LP) 0.02s, bgcopy 2 lps 2 iters (1.0/LP) 0.00s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 1 lps 452 iters (452.0/LP) 0.01s, main 1 lps 535 iters (535.0/LP) 0.01s; nb hints applied 214 solves, 92445 given, 1403 changed
+MIP: node diag: nodes 45 node LPs 48 mean rows 300.8 iters 496 (10.3/LP) LP secs 0.06 sep rounds 2 added 2 node cut secs 0.01 final rows 327
+MIP: adaptive node cuts: rounds 2 effective 2 skipped 0 (rate 1.000), node cut secs 0.01, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [2, 0, 0, 0, 0], cut nnz Some(607.4200000000001) (rows mean 25.7)
+MIP: solve returned Optimal after 3.05s (time limit 60.00s)

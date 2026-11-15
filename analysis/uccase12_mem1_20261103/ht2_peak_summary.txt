@@ -1,0 +1,144 @@
+total runtime: 334.82s.
+calls to allocation functions: 5781824 (17268/s)
+temporary memory allocations: 2690232 (8034/s)
+peak heap memory consumption: 5.95G
+peak RSS (including heaptrack overhead): 7.56G
+total memory leaked: 19.38M
+suppressed leaks: 87.41K
+
+分類ごとの合計 [MB] (最大のときに生きていた確保):
+     2136.4  LU の写し (mip_lp.rs:1219、共有中の FtLu の複製)
+     1870.0  FT の更新の eta (lu.rs commit_update_tracked)
+      686.9  そのほか
+
+上位 10 の確保の場所 (src の枠だけ、最初の 12 枠):
+- 1870.0 MB (176710 回) FT の更新の eta (lu.rs commit_update_tracked)
+    push_scaled_list @src/simplex/lu.rs:3799
+    commit_update_tracked @src/simplex/lu.rs:7693
+    try_update_tracked @src/simplex/lu.rs:7536
+    update_and_check_with @src/simplex/basis_kernel.rs:474
+    solve_slope_intercept_dual_impl<> @src/simplex/slope_intercept_dual.rs:7083
+    solve_slope_intercept_dual::solve_slope_intercept_dual_retry @src/simplex/slope_intercept_dual.rs:3827
+    solve_slope_intercept_dual::solve_slope_intercept_dual_retry @src/simplex/slope_intercept_dual.rs:3765
+    solve_slope_intercept_dual @src/simplex/slope_intercept_dual.rs:3751
+    solve_once::solve_inner::solve_slope_intercept_dual_from_bas @src/simplex/slope_intercept_dual.rs:1518
+    solve_once::solve_inner @src/simplex/mip_lp.rs:1262
+    solve_once @src/simplex/mip_lp.rs:917
+    solve @src/simplex/mip_lp.rs:0
+- 624.1 MB (29995 回) LU の写し (mip_lp.rs:1219、共有中の FtLu の複製)
+    {closure#4}::clone::clone::clone<>::to_vec_in<>::to_vec<>::w @src/lib.rs:122
+    {closure#4}::clone::clone::clone<>::to_vec_in<>::to_vec<>::w @src/lib.rs:168
+    {closure#4}::clone::clone @src/simplex/lu.rs:1856
+    {closure#4}::clone @src/simplex/lu.rs:4595
+    {closure#4} @src/simplex/mip_lp.rs:1219
+    solve_once::solve_inner @src/simplex/mip_lp.rs:1219
+    solve_once @src/simplex/mip_lp.rs:917
+    solve @src/simplex/mip_lp.rs:0
+    run<>::solve @src/mip/lp_api.rs:142
+    run<> @src/mip/solver.rs:7043
+    solve_with<> @src/mip/solver.rs:3304
+    with_halt<>::{closure#1}<>::solve_worker @src/mip/solver.rs:2853
+- 425.5 MB (6651 回) LU の写し (mip_lp.rs:1219、共有中の FtLu の複製)
+    clone<>::to_vec_in<>::to_vec<>::with_capacity_in<>::with_cap @src/lib.rs:122
+    clone<>::to_vec_in<>::to_vec<>::with_capacity_in<>::with_cap @src/lib.rs:168
+    {closure#4}::clone::clone @src/simplex/lu.rs:1849
+    {closure#4}::clone @src/simplex/lu.rs:4595
+    {closure#4} @src/simplex/mip_lp.rs:1219
+    solve_once::solve_inner @src/simplex/mip_lp.rs:1219
+    solve_once @src/simplex/mip_lp.rs:917
+    solve @src/simplex/mip_lp.rs:0
+    run<>::solve @src/mip/lp_api.rs:142
+    run<> @src/mip/solver.rs:7043
+    solve_with<> @src/mip/solver.rs:3304
+    with_halt<>::{closure#1}<>::solve_worker @src/mip/solver.rs:2853
+- 374.5 MB (17997 回) LU の写し (mip_lp.rs:1219、共有中の FtLu の複製)
+    {closure#4}::clone::clone<>::to_vec_in<>::to_vec<>::with_cap @src/lib.rs:122
+    {closure#4}::clone::clone<>::to_vec_in<>::to_vec<>::with_cap @src/lib.rs:168
+    {closure#4}::clone @src/simplex/lu.rs:4609
+    {closure#4} @src/simplex/mip_lp.rs:1219
+    solve_once::solve_inner @src/simplex/mip_lp.rs:1219
+    solve_once @src/simplex/mip_lp.rs:917
+    solve @src/simplex/mip_lp.rs:0
+    run<>::solve @src/mip/lp_api.rs:142
+    run<> @src/mip/solver.rs:7043
+    solve_with<> @src/mip/solver.rs:3304
+    with_halt<>::{closure#1}<>::solve_worker @src/mip/solver.rs:2853
+    with_halt<>::{closure#1}<> @src/mip/solver.rs:13637
+- 278.0 MB (21101 回) そのほか
+    clone<>::to_vec_in<>::to_vec<>::with_capacity_in<>::with_cap @src/lib.rs:122
+    clone<>::to_vec_in<>::to_vec<>::with_capacity_in<>::with_cap @src/lib.rs:168
+    solve_once::solve_inner @src/simplex/mip_lp.rs:1318
+    solve_once @src/simplex/mip_lp.rs:917
+    solve @src/simplex/mip_lp.rs:0
+    run<>::solve @src/mip/lp_api.rs:142
+    run<> @src/mip/solver.rs:7043
+    solve_with<> @src/mip/solver.rs:3304
+    with_halt<>::{closure#1}<>::solve_worker @src/mip/solver.rs:2853
+    with_halt<>::{closure#1}<> @src/mip/solver.rs:13637
+    with_halt<> @src/cancel.rs:37
+    __rust_begin_short_backtrace<>::{closure#3}<> @src/mip/solver.rs:13637
+- 277.9 MB (14370 回) LU の写し (mip_lp.rs:1219、共有中の FtLu の複製)
+    clone::clone<>::to_vec_in<>::to_vec<>::with_capacity_in<>::w @src/lib.rs:122
+    clone::clone<>::to_vec_in<>::to_vec<>::with_capacity_in<>::w @src/lib.rs:168
+    clone @src/mip/domain.rs:55
+    {closure#4}::clone::clone @src/simplex/lu.rs:1845
+    {closure#4}::clone @src/simplex/lu.rs:4595
+    {closure#4} @src/simplex/mip_lp.rs:1219
+    solve_once::solve_inner @src/simplex/mip_lp.rs:1219
+    solve_once @src/simplex/mip_lp.rs:917
+    solve @src/simplex/mip_lp.rs:0
+    run<>::solve @src/mip/lp_api.rs:142
+    run<> @src/mip/solver.rs:7043
+    solve_with<> @src/mip/solver.rs:3304
+- 273.1 MB (33716 回) そのほか
+    finish_grow<>::allocate::alloc_impl::alloc_impl_runtime::all @src/lib.rs:122
+    finish_grow<>::allocate::alloc_impl::alloc_impl_runtime::all @src/lib.rs:168
+    with<>::try_with<>::{closure#5} @src/simplex/slope_intercept_dual.rs:1083
+    fast_finish @src/simplex/slope_intercept_dual.rs:1079
+    solve_slope_intercept_dual_impl<> @src/simplex/slope_intercept_dual.rs:5437
+    solve_slope_intercept_dual::solve_slope_intercept_dual_retry @src/simplex/slope_intercept_dual.rs:3827
+    solve_slope_intercept_dual::solve_slope_intercept_dual_retry @src/simplex/slope_intercept_dual.rs:3765
+    solve_slope_intercept_dual @src/simplex/slope_intercept_dual.rs:3751
+    solve_once::solve_inner::solve_slope_intercept_dual_from_bas @src/simplex/slope_intercept_dual.rs:1518
+    solve_once::solve_inner @src/simplex/mip_lp.rs:1262
+    solve_once @src/simplex/mip_lp.rs:917
+    solve @src/simplex/mip_lp.rs:0
+- 249.7 MB (11998 回) LU の写し (mip_lp.rs:1219、共有中の FtLu の複製)
+    {closure#4}::clone::clone<>::to_vec_in<>::to_vec<>::with_cap @src/lib.rs:122
+    {closure#4}::clone::clone<>::to_vec_in<>::to_vec<>::with_cap @src/lib.rs:168
+    {closure#4}::clone @src/simplex/lu.rs:4605
+    {closure#4} @src/simplex/mip_lp.rs:1219
+    solve_once::solve_inner @src/simplex/mip_lp.rs:1219
+    solve_once @src/simplex/mip_lp.rs:917
+    solve @src/simplex/mip_lp.rs:0
+    run<>::solve @src/mip/lp_api.rs:142
+    run<> @src/mip/solver.rs:7043
+    solve_with<> @src/mip/solver.rs:3304
+    with_halt<>::{closure#1}<>::solve_worker @src/mip/solver.rs:2853
+    with_halt<>::{closure#1}<> @src/mip/solver.rs:13637
+- 184.8 MB (5999 回) LU の写し (mip_lp.rs:1219、共有中の FtLu の複製)
+    {closure#4}::clone::clone<>::to_vec_in<>::to_vec<>::with_cap @src/lib.rs:122
+    {closure#4}::clone::clone<>::to_vec_in<>::to_vec<>::with_cap @src/lib.rs:168
+    {closure#4}::clone @src/simplex/lu.rs:4603
+    {closure#4} @src/simplex/mip_lp.rs:1219
+    solve_once::solve_inner @src/simplex/mip_lp.rs:1219
+    solve_once @src/simplex/mip_lp.rs:917
+    solve @src/simplex/mip_lp.rs:0
+    run<>::solve @src/mip/lp_api.rs:142
+    run<> @src/mip/solver.rs:7043
+    solve_with<> @src/mip/solver.rs:3304
+    with_halt<>::{closure#1}<>::solve_worker @src/mip/solver.rs:2853
+    with_halt<>::{closure#1}<> @src/mip/solver.rs:13637
+- 135.8 MB (6869 回) そのほか
+    with<>::try_with<>::{closure#63}<>::clone<>::to_vec_in<>::to @src/lib.rs:122
+    with<>::try_with<>::{closure#63}<>::clone<>::to_vec_in<>::to @src/lib.rs:168
+    with<>::try_with<>::{closure#63}<> @src/simplex/slope_intercept_dual.rs:5445
+    solve_slope_intercept_dual_impl<> @src/simplex/slope_intercept_dual.rs:5445
+    solve_slope_intercept_dual::solve_slope_intercept_dual_retry @src/simplex/slope_intercept_dual.rs:3827
+    solve_slope_intercept_dual::solve_slope_intercept_dual_retry @src/simplex/slope_intercept_dual.rs:3765
+    solve_slope_intercept_dual @src/simplex/slope_intercept_dual.rs:3751
+    solve_once::solve_inner::solve_slope_intercept_dual_from_bas @src/simplex/slope_intercept_dual.rs:1518
+    solve_once::solve_inner @src/simplex/mip_lp.rs:1262
+    solve_once @src/simplex/mip_lp.rs:917
+    solve @src/simplex/mip_lp.rs:0
+    run<>::solve @src/mip/lp_api.rs:142

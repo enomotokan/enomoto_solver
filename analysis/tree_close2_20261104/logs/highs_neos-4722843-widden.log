@@ -1,0 +1,54 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP neos-4722843-widden has 113555 rows; 77723 cols; 311529 nonzeros; 73369 integer variables (73349 binary)
+Coefficient ranges:
+  Matrix  [1e-01, 1e+05]
+  Cost    [1e+00, 5e+03]
+  Bound   [1e-01, 2e+02]
+  RHS     [1e-01, 2e+02]
+Presolving model
+113458 rows, 75769 cols, 310483 nonzeros 2s
+106073 rows, 58129 cols, 289021 nonzeros 41s
+Presolve reductions: rows 106073(-7482); columns 58129(-19594); nonzeros 289021(-22508) 
+
+Solving MIP model with:
+   106073 rows
+   58129 cols (55909 binary, 22 integer, 5 implied int., 2193 continuous, 0 domain fixed)
+   289021 nonzeros
+   Thread count 1 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   -17666          inf                  inf        0      0      0         0    45.1s
+         0       0         0   0.00%   494.7750221     inf                  inf        0      0      4      4294    52.2s
+         0       0         0   0.00%   8406.040709     inf                  inf      373     95     10      5600    63.8s
+         0       0         0   0.00%   9058.240851     inf                  inf      713    150     18      7258    71.2s
+         0       0         0   0.00%   10338.579834    inf                  inf      873    180     23      9029    77.5s
+         0       0         0   0.00%   10598.718083    inf                  inf     1032    214     82      9505   112.0s
+
+Solving report
+  Model             neos-4722843-widden
+  Status            Time limit reached
+  Primal bound      inf
+  Dual bound        10598.7180834
+  Gap               inf
+  P-D integral      0
+  Solution status   -
+  Timing            111.99
+                    41.81 (Presolve)
+                    70.16 (Solve)
+                    0.00 (Postsolve)
+  Max sub-MIP depth 0
+  Nodes             0
+  Repair LPs        0
+  LP iterations     9505
+                    0 (strong br.)
+                    5211 (separation)
+                    0 (heuristics)
+{"status": "Time limit reached", "objective": Infinity, "bound": 10598.718083432237, "nodes": 0, "time": 112.021873428}

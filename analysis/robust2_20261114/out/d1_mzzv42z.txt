@@ -1,0 +1,85 @@
+Running HiGHS 1.16.0 (git hash: f3f113d): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+== mzzv42z [MIP_ORDINV=edpq]
+   presolve: rows 10460 -> 10460, free columns 11717 -> 11717, nonzeros 151261 -> 151261, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 11941 of 11482 binaries probed (2 passes), 355 fixed
+   p1 probing: 11954 of 11482 binaries probed (2 passes), 340 fixed
+   p2 probing: 11969 of 11482 binaries probed (2 passes), 339 fixed
+   p3 probing: 11993 of 11482 binaries probed (2 passes), 341 fixed
+ * presolve: rows 10460 -> 10039, free columns 10693 -> 10587, nonzeros 151261 -> 136272, (parallel columns merged: 0 integer, 0 continuous)
+   p1 presolve: rows 10460 -> 10029, free columns 10685 -> 10569, nonzeros 151261 -> 136091, (parallel columns merged: 0 integer, 0 continuous)
+   p2 presolve: rows 10460 -> 10020, free columns 10675 -> 10551, nonzeros 151261 -> 136032, (parallel columns merged: 0 integer, 0 continuous)
+   p3 presolve: rows 10460 -> 10025, free columns 10678 -> 10559, nonzeros 151261 -> 136023, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 10344 of 10352 binaries probed (1 passes), 24 fixed
+   p1 probing: 10320 of 10334 binaries probed (1 passes), 16 fixed
+   p2 probing: 10306 of 10316 binaries probed (1 passes), 19 fixed
+   p3 probing: 10311 of 10324 binaries probed (1 passes), 17 fixed
+ * presolve: rows 10039 -> 10006, free columns 10550 -> 10521, nonzeros 136272 -> 135629, (parallel columns merged: 0 integer, 0 continuous)
+   p1 presolve: rows 10029 -> 10002, free columns 10538 -> 10515, nonzeros 136091 -> 135620, (parallel columns merged: 0 integer, 0 continuous)
+   p2 presolve: rows 10020 -> 9992, free columns 10522 -> 10498, nonzeros 136032 -> 135583, (parallel columns merged: 0 integer, 0 continuous)
+   p3 presolve: rows 10025 -> 9992, free columns 10527 -> 10498, nonzeros 136023 -> 135583, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 10280 of 10286 binaries probed (1 passes), 3 fixed
+   p1 probing: 10276 of 10280 binaries probed (1 passes), 3 fixed
+   p2 probing: 10263 of 10263 binaries probed (1 passes), 0 fixed
+   p3 probing: 10263 of 10263 binaries probed (1 passes), 0 fixed
+ * clique extension: 1270 rows extended, 19635 nonzeros added, 0 columns fixed, 0 duplicate and 151 dominated rows removed
+   p1 clique extension: 1270 rows extended, 20033 nonzeros added, 0 columns fixed, 0 duplicate and 152 dominated rows removed
+   p2 presolve: rows 9996 -> 9988, free columns 10498 -> 10494, nonzeros 135591 -> 135575, (parallel columns merged: 0 integer, 0 continuous)
+   p3 -
+ * root LP -2.1450498481e4 
+   p1 -
+   p2 probing: 10259 of 10259 binaries probed (1 passes), 0 fixed
+   p3 -
+ * root LP size: rows 10309, free columns 10693, nonzeros 150313
+   p1 -
+   p2 -
+   p3 -
+   diff lines 8; results [('time_limit', 25.1, -780.0), ('time_limit', 25.1, 0.0), ('time_limit', 25.4, 0.0), ('time_limit', 25.3, 0.0)]
+== drayage-100-23 [MIP_ORDINV=edpq]
+   presolve: rows 4552 -> 3119, free columns 4421 -> 3305, nonzeros 25677 -> 18428, (parallel columns merged: 0 integer, 0 continuous)
+   presolve: rows 3119 -> 597, free columns 1088 -> 1024, nonzeros 18428 -> 3563, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 982 of 990 binaries probed (1 passes), 0 fixed
+   p1 probing: 982 of 990 binaries probed (1 passes), 0 fixed
+   p2 probing: 982 of 990 binaries probed (1 passes), 0 fixed
+   p3 presolve: rows 597 -> 594, free columns 1021 -> 1021, nonzeros 3563 -> 3548, (parallel columns merged: 0 integer, 0 continuous)
+ * clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed
+   p1 clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed
+   p2 clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed
+   p3 probing: 982 of 987 binaries probed (1 passes), 0 fixed
+ * root LP 1.0333387407e5 
+   p1 root LP 1.0333387407e5 
+   p2 root LP 1.0333387407e5 
+   p3 clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed
+ * root LP size: rows 597, free columns 1016, nonzeros 3539
+   p1 root LP size: rows 597, free columns 1016, nonzeros 3539
+   p2 root LP size: rows 597, free columns 1016, nonzeros 3539
+   p3 root LP 1.0333387407e5 
+ * -
+   p1 -
+   p2 -
+   p3 root LP size: rows 594, free columns 1016, nonzeros 3533
+   diff lines 5; results [('optimal', 0.7, 103333.87407302856), ('optimal', 0.4, 103333.87407302856), ('optimal', 0.5, 103333.87407302856), ('optimal', 1.0, 103333.87407302856)]
+== drayage-25-23 [MIP_ORDINV=edpq]
+   presolve: rows 4552 -> 3173, free columns 4421 -> 3355, nonzeros 25677 -> 18744, (parallel columns merged: 0 integer, 0 continuous)
+   presolve: rows 3173 -> 645, free columns 1114 -> 1056, nonzeros 18744 -> 3767, (parallel columns merged: 0 integer, 0 continuous)
+ * probing: 1011 of 1019 binaries probed (1 passes), 0 fixed
+   p1 probing: 1011 of 1019 binaries probed (1 passes), 0 fixed
+   p2 probing: 1011 of 1019 binaries probed (1 passes), 0 fixed
+   p3 presolve: rows 645 -> 642, free columns 1053 -> 1053, nonzeros 3767 -> 3752, (parallel columns merged: 0 integer, 0 continuous)
+ * clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed
+   p1 clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed
+   p2 clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed
+   p3 probing: 1011 of 1016 binaries probed (1 passes), 0 fixed
+ * root LP 9.9718790531e4 
+   p1 root LP 9.9718790531e4 
+   p2 root LP 9.9718790531e4 
+   p3 clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed
+ * root LP size: rows 645, free columns 1048, nonzeros 3743
+   p1 root LP size: rows 645, free columns 1048, nonzeros 3743
+   p2 root LP size: rows 645, free columns 1048, nonzeros 3743
+   p3 root LP 9.9718790531e4 
+ * -
+   p1 -
+   p2 -
+   p3 root LP size: rows 642, free columns 1048, nonzeros 3737
+   diff lines 5; results [('optimal', 17.0, 101282.64701843262), ('optimal', 1.1, 101282.64701843262), ('optimal', 2.3, 101282.64701843262), ('optimal', 3.1, 101282.64701843262)]

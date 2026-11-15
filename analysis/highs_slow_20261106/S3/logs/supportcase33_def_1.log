@@ -1,0 +1,395 @@
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: tightened 3339 coefficients (skipped 0 in rows redundant within tolerance), normalized 39 integer rows
+MIP: presolve: merged 55 parallel rows (0 new equations)
+MIP: presolve: rows 20489 -> 3624, free columns 20196 -> 7405, nonzeros 211915 -> 60096, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 264 of 7405 free columns fixed (0.01s), not used
+MIP: LP probing pass 1: 259 candidates, 0 fixings (4 LPs, 1396 iters, 0.43s)
+MIP: LP probing: tried 2 columns, fixed 0, LP -5.5250000000e2 -> -5.5250000000e2 (4 LPs, 1396 iters, 0.43s)
+MIP: LP probing: root LP 0.15s (1393 iters, size 83923), tried 2, fixed 0, basis passed false, total 2789 iters 0.43s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.35s), not used
+MIP: probing: 8560 of 7305 binaries probed (2 passes), 615 fixed, 640 bounds tightened, 553251 implications (2.36s, cpu 2.35s, work 58206688, pwork 2532919473, chg 20660366)
+MIP: probing: 0 equivalent binary pairs
+MIP: clique extension: 70 rows extended, 181 nonzeros added, 0 columns fixed, 0 duplicate and 54 dominated rows removed (926138 edges, 0.14s)
+MIP: symmetry: none (0.01s, work 431547, search 0, verify 0, detect 0.01s, refine 0.00s, log work 2119635)
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.00s)
+MIP: root LP -4.6300000000e2 (1052 iters, 0.10s)
+MIP: robust cut LP cap: size false, double false, progress true
+MCF detect: rows 3570 cols 20203 | flow cands 396 flow rows 126 commodities 1 cap cands 3036 arcs 1955 nodes 126 incons 39.24 directed | fail 'inconsistent' | networks [] fc_network false | 0.002s
+MIP: cut selection probe: compared at 1 rounds (after round 1), probe wall 0.33s (budget 29.8s)
+MIP: cut selection probe (6 rounds): default 22 cuts gain 5.968559e-12 (0.17s), pool 38 cuts gain 8.109461e0 (0.15s) -> pool (rule rate, probe 0.33s in total, 0.43s)
+MIP: cut round 0: 38 cuts (of 287, sep 0.04s, LP 792 iters), LP rows 3608 (cut rows mean nnz 129), obj -4.5489053948e2 (0.61s)
+MIP: cut round 1: root cut time cap check: clock 0.171s of cap 59.70s (min rounds 0)
+MIP: cut round 1: 39 cuts (of 357, sep 0.07s, LP 543 iters), LP rows 3625 (cut rows mean nnz 105), obj -4.4250000000e2 (0.78s)
+MIP: cut round 2: root cut time cap check: clock 0.307s of cap 59.70s (min rounds 0)
+MIP: cut round 2: 14 cuts (of 314, sep 0.06s, LP 789 iters), LP rows 3623 (cut rows mean nnz 249), obj -4.4000000000e2 (0.99s)
+MIP: cut round 3: root cut time cap check: clock 0.479s of cap 59.70s (min rounds 0)
+MIP: cut round 3: 22 cuts (of 319, sep 0.09s, LP 774 iters), LP rows 3624 (cut rows mean nnz 259), obj -4.4000000000e2 (1.25s)
+MIP: cut round 4: root cut time cap check: clock 0.694s of cap 59.70s (min rounds 0)
+MIP: cut round 4: 18 cuts (of 100, sep 0.06s, LP 447 iters), LP rows 3623 (cut rows mean nnz 242), obj -4.4000000000e2 (1.39s)
+MIP: cut round 5: root cut time cap check: clock 0.806s of cap 59.70s (min rounds 0)
+MIP: cut round 5: 11 cuts (of 113, sep 0.07s, LP 441 iters), LP rows 3620 (cut rows mean nnz 327), obj -4.4000000000e2 (1.55s)
+MIP: cut loop: integral objective, LP bound unchanged for 3 rounds; stop
+MIP: FJ problem (FJ_P3): rows 3570 -> 2334, free columns 6119 -> 6119, 0 continuous bounds tightened (1.58s)
+MIP: clique graph: 926138 edges (460836 from rows, probing implications 553251)
+MIP: clique fallback: 11 cuts, LP -4.4000000000e2 -> -4.4000000000e2 (g_c 0.000e0, g_d 5.227e-2 relative), fractional 113 -> 110; not used (0.23s)
+MIP: cut loop done: 142 cuts added, 43 in LP, pool 752 cuts (1200760 nonzeros), obj -4.6300000000e2 -> -4.4000000000e2
+MIP:   global fixed integers 14084 of 20203 (newly 0 since the root LP)
+MIP: new incumbent -1.5000000000e1 at node 0 (1.79s) [Local-MIP]
+MIP: Local-MIP solution accepted true (1.79s)
+MIP: find thread started (budget 20.0s, 1.80s)
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1052, work_iters: 21040, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 1052 iters)
+MIP: the incumbent is a poor feasibility jump solution; background cuts use 1 threads
+MIP: background cuts: basis with the column values not passed (root LP 0.10s)
+MIP: early root reduced costs stored (0 newly fixed integer columns, 1.82s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+MIP: root heuristic shifting: none (0.00s)
+MIP: root heuristic int shifting: none (0.00s)
+MIP: root heuristic randomized rounding: none (0.01s)
+MCF detect: rows 3570 cols 20203 | flow cands 396 flow rows 126 commodities 1 cap cands 3036 arcs 1955 nodes 126 incons 39.24 directed | fail 'inconsistent' | networks [] fc_network false | 0.003s
+MIP:   interior rounding: 1 interior points, vertex true (1.53s)
+MIP:   interior rounding: 6 rounded points tried, found false
+MIP: root heuristic interior rounding: none (1.56s)
+MIP:   global fixed integers 14084 of 20203 (newly 0 since the root LP)
+MIP: new incumbent -5.5000000000e1 at node 0 (3.39s) [find thread]
+MIP: find thread solution: accepted true (incumbent Some(-15.0)) (3.39s, node 0)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 526 of 6119 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   RENS: fixing rate 0.80 (target 0.80, 0 backtracks)
+MIP:   parallel sub-MIP started (RENS): 1208 free columns of 20203
+MIP:   no-incumbent RENS (sub-MIP depth 0) try 1: target 0.80, fixing rate 0.80, found false (3.44s)
+MIP: root heuristic RENS: none (0.05s)
+MIP:   locks: fixing rate 0.84
+MIP:   parallel sub-MIP started (locks): 995 free columns of 20203
+MIP: root heuristic locks: none (0.00s)
+MIP:   clique: fixing rate 0.79
+MIP:   parallel sub-MIP started (clique): 1256 free columns of 20203
+MIP: root heuristic clique: none (0.00s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.04s
+MIP:   parallel sub-MIP (locks): status Optimal, nodes 0, objective Some(-130.0), 0.14s
+MIP:   global fixed integers 14084 of 20203 (newly 0 since the root LP)
+MIP: new incumbent -1.3000000000e2 at node 0 (3.59s) [locks]
+MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 50, objective Some(-35.0), 0.87s
+MIP:   RINS (HiGHS fill): fixing rate 0.97 from agreeing columns, 0.97 after fill (6119 free integer columns)
+MIP:   sub-MIP: 184 free columns of 20203, status Infeasible, nodes 0, objective None, 0.02s
+MIP: root heuristic RINS: none (0.02s)
+MIP: after root heuristics: incumbent Some(-130.0) (4.33s)
+MIP: background cuts: determ: waited 0.00s (safety cap 177.80s, done, background end own stall), 5 rounds, 1756 LP iters (1.67 x 1052 of cap 21040), obj Some(-440.0) (4.33s)
+MIP: background cuts: rounds so far [-440.0 at 2.23s, -440.0 at 2.32s, -440.0 at 2.37s, -440.0 at 2.41s, -440.0 at 2.45s]
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (4.34s)
+MIP: background cuts: 5 rounds, obj -4.4000000000e2 not above -4.4000000000e2; not used (waited 0.00s)
+MIP: root objective probing: skipped (gap 7.045e-1 (LP -4.4000000000e2, incumbent -1.3000000000e2), 89 fractional binaries)
+MIP: restart check: newly fixed 0, integer columns 20203, free at the root 6119, threshold 202.0, root LP 0.10s
+MIP:     4.34s nodes        1 open       0 lb inf ub -1.30000000e2 lp_iters 5169 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 6998 dive_iters 0 lp_rows 3613 node_cut_secs 0.00
+MIP: find thread done: objective Some(-55.0), accepted false (incumbent Some(-130.0)) (6.68s, node 1)
+MIP: 1 of 4 tree threads take the heuristic role once a solution exists
+MIP: tree search with 4 threads (9.61s)
+MIP:     9.61s nodes        2 open       1 lb -4.40000000e2 ub -1.30000000e2 lp_iters 31023 sb_iters 25279 sb_lps 180 sb_secs 5.13 node_iters 575 (first 1, lps 5) heur_iters 6998 dive_iters 0 lp_rows 3613 node_cut_secs 0.00 pool_len 0 pool_idle 0
+MIP:    11.63s nodes       72 open      67 lb -4.40000000e2 ub -1.30000000e2 lp_iters 39854 sb_iters 25909 sb_lps 188 sb_secs 5.26 node_iters 6957 (first 6190, lps 76) heur_iters 10636 dive_iters 1819 lp_rows 3613 node_cut_secs 0.00 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 156 free columns of 20203, status Infeasible, nodes 0, objective None, 0.02s
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP:    13.65s nodes      148 open     137 lb -4.40000000e2 ub -1.30000000e2 lp_iters 49931 sb_iters 27019 sb_lps 200 sb_secs 5.47 node_iters 15924 (first 14446, lps 157) heur_iters 10636 dive_iters 1819 lp_rows 3635 node_cut_secs 0.04 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 1.32s
+MIP:   local branching k=18: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+MIP:    15.89s nodes      175 open     164 lb -4.40000000e2 ub -1.30000000e2 lp_iters 54603 sb_iters 27617 sb_lps 204 sb_secs 5.58 node_iters 19998 (first 17488, lps 189) heur_iters 10639 dive_iters 1819 lp_rows 3655 node_cut_secs 0.15 pool_len 0 pool_idle 0
+MIP:    18.13s nodes      217 open     180 lb -4.40000000e2 ub -1.30000000e2 lp_iters 64441 sb_iters 28743 sb_lps 214 sb_secs 5.82 node_iters 28710 (first 25012, lps 230) heur_iters 10639 dive_iters 1819 lp_rows 3681 node_cut_secs 0.33 pool_len 0 pool_idle 0
+MIP:    20.26s nodes      242 open     189 lb -4.40000000e2 ub -1.30000000e2 lp_iters 73162 sb_iters 29721 sb_lps 218 sb_secs 6.07 node_iters 36431 (first 31801, lps 258) heur_iters 10683 dive_iters 1841 lp_rows 3707 node_cut_secs 0.54 pool_len 0 pool_idle 0
+MIP:    22.28s nodes      270 open     201 lb -4.40000000e2 ub -1.30000000e2 lp_iters 80955 sb_iters 30477 sb_lps 232 sb_secs 6.27 node_iters 43468 (first 36828, lps 295) heur_iters 10683 dive_iters 1841 lp_rows 3774 node_cut_secs 0.99 pool_len 0 pool_idle 0
+MIP:    24.30s nodes      291 open     215 lb -4.40000000e2 ub -1.30000000e2 lp_iters 88558 sb_iters 31466 sb_lps 260 sb_secs 6.57 node_iters 50082 (first 43243, lps 321) heur_iters 10683 dive_iters 1841 lp_rows 3777 node_cut_secs 0.99 pool_len 0 pool_idle 0
+MIP:    26.76s nodes      309 open     227 lb -4.40000000e2 ub -1.30000000e2 lp_iters 97319 sb_iters 32273 sb_lps 272 sb_secs 6.77 node_iters 58018 (first 50803, lps 346) heur_iters 10719 dive_iters 1859 lp_rows 3786 node_cut_secs 1.18 pool_len 0 pool_idle 0
+MIP:   global fixed integers 14084 of 20203 (newly 0 since the root LP)
+MIP: new incumbent -3.0500000000e2 at node 311 (27.34s) [other thread (tree)]
+MIP:    29.46s nodes      317 open     227 lb -4.40000000e2 ub -3.05000000e2 lp_iters 106608 sb_iters 33321 sb_lps 288 sb_secs 7.07 node_iters 66259 (first 57984, lps 359) heur_iters 10719 dive_iters 1859 lp_rows 3807 node_cut_secs 1.44 pool_len 0 pool_idle 0
+MIP:    31.57s nodes      331 open     234 lb -4.40000000e2 ub -3.05000000e2 lp_iters 113525 sb_iters 34409 sb_lps 294 sb_secs 7.37 node_iters 72088 (first 63804, lps 373) heur_iters 10719 dive_iters 1859 lp_rows 3807 node_cut_secs 1.44 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 0.33s
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 1, 0, 0, 0])
+MIP:    34.00s nodes      349 open     248 lb -4.40000000e2 ub -3.05000000e2 lp_iters 120341 sb_iters 35139 sb_lps 300 sb_secs 7.55 node_iters 78072 (first 69776, lps 391) heur_iters 10926 dive_iters 1961 lp_rows 3807 node_cut_secs 1.44 pool_len 0 pool_idle 0
+MIP:   global fixed integers 14084 of 20203 (newly 0 since the root LP)
+MIP: new incumbent -3.3500000000e2 at node 353 (35.03s) [other thread (tree)]
+MIP:    36.01s nodes      359 open     228 lb -4.40000000e2 ub -3.35000000e2 lp_iters 127483 sb_iters 35668 sb_lps 306 sb_secs 7.69 node_iters 84685 (first 76206, lps 402) heur_iters 10926 dive_iters 1961 lp_rows 3811 node_cut_secs 1.44 pool_len 0 pool_idle 0
+MIP:   global fixed integers 14084 of 20203 (newly 0 since the root LP)
+MIP: new incumbent -3.4500000000e2 at node 362 (36.99s) [other thread (tree)]
+MIP:    38.49s nodes      372 open     226 lb -4.40000000e2 ub -3.45000000e2 lp_iters 135691 sb_iters 36439 sb_lps 322 sb_secs 7.93 node_iters 92122 (first 83468, lps 415) heur_iters 10926 dive_iters 1961 lp_rows 3813 node_cut_secs 1.44 pool_len 0 pool_idle 0
+MIP:    40.52s nodes      382 open     233 lb -4.39805784e2 ub -3.45000000e2 lp_iters 142562 sb_iters 37413 sb_lps 334 sb_secs 8.20 node_iters 98004 (first 88955, lps 429) heur_iters 10956 dive_iters 1976 lp_rows 3817 node_cut_secs 1.49 pool_len 0 pool_idle 0
+MIP:    42.81s nodes      385 open     235 lb -4.36584699e2 ub -3.45000000e2 lp_iters 149780 sb_iters 39192 sb_lps 336 sb_secs 8.70 node_iters 103443 (first 92755, lps 434) heur_iters 10956 dive_iters 1976 lp_rows 3826 node_cut_secs 1.60 pool_len 2 pool_idle 0
+MIP:    45.17s nodes      393 open     237 lb -4.36584699e2 ub -3.45000000e2 lp_iters 157390 sb_iters 39192 sb_lps 336 sb_secs 8.70 node_iters 111053 (first 100361, lps 443) heur_iters 10956 dive_iters 1976 lp_rows 3827 node_cut_secs 1.60 pool_len 2 pool_idle 0
+MIP:   sub-MIP: 1843 free columns of 20203, status Infeasible, nodes 0, objective None, 0.02s
+MIP:   mutation (14152 fixed): Some((Infeasible, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [1, 1, 1, 1, 0, 0])
+MIP:    47.30s nodes      400 open     238 lb -4.28571429e2 ub -3.45000000e2 lp_iters 164604 sb_iters 40194 sb_lps 338 sb_secs 8.96 node_iters 117265 (first 106530, lps 451) heur_iters 10958 dive_iters 1976 lp_rows 3831 node_cut_secs 1.60 pool_len 4 pool_idle 0
+MIP:    49.38s nodes      426 open     255 lb -4.28484100e2 ub -3.45000000e2 lp_iters 172105 sb_iters 40875 sb_lps 342 sb_secs 9.11 node_iters 123986 (first 112941, lps 478) heur_iters 11156 dive_iters 2075 lp_rows 3829 node_cut_secs 1.66 pool_len 3 pool_idle 0
+MIP:    51.58s nodes      449 open     269 lb -4.27687500e2 ub -3.45000000e2 lp_iters 179802 sb_iters 41420 sb_lps 352 sb_secs 9.27 node_iters 131138 (first 119755, lps 502) heur_iters 11156 dive_iters 2075 lp_rows 3835 node_cut_secs 1.73 pool_len 4 pool_idle 0
+MIP:   sub-MIP: 116 free columns of 20203, status Infeasible, nodes 0, objective None, 0.03s
+MIP:   crossover (20087 of 20203 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [1, 1, 1, 1, 1, 0])
+MIP:    53.62s nodes      463 open     273 lb -4.21573767e2 ub -3.45000000e2 lp_iters 186389 sb_iters 42369 sb_lps 356 sb_secs 9.53 node_iters 136776 (first 125108, lps 515) heur_iters 11202 dive_iters 2075 lp_rows 3837 node_cut_secs 1.73 pool_len 4 pool_idle 0
+MIP:    55.62s nodes      486 open     293 lb -4.21573767e2 ub -3.45000000e2 lp_iters 193585 sb_iters 43375 sb_lps 360 sb_secs 9.77 node_iters 142966 (first 131078, lps 538) heur_iters 11202 dive_iters 2075 lp_rows 3837 node_cut_secs 1.73 pool_len 2 pool_idle 0
+MIP:    57.76s nodes      508 open     307 lb -4.21573767e2 ub -3.45000000e2 lp_iters 201052 sb_iters 43901 sb_lps 364 sb_secs 9.92 node_iters 149907 (first 137910, lps 559) heur_iters 11202 dive_iters 2075 lp_rows 3837 node_cut_secs 1.73 pool_len 2 pool_idle 0
+MIP:   sub-MIP: 86 free columns of 20203, status Infeasible, nodes 0, objective None, 0.00s
+MIP:   DINS (20112 of 20203 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [1, 1, 1, 1, 1, 1])
+MIP:    59.86s nodes      533 open     301 lb -4.16121795e2 ub -3.45000000e2 lp_iters 207393 sb_iters 44500 sb_lps 368 sb_secs 10.08 node_iters 155185 (first 142774, lps 574) heur_iters 12130 dive_iters 2539 lp_rows 3838 node_cut_secs 1.73 pool_len 2 pool_idle 0
+MIP:    63.35s nodes      546 open     307 lb -4.15986082e2 ub -3.45000000e2 lp_iters 218190 sb_iters 45669 sb_lps 380 sb_secs 10.45 node_iters 164813 (first 150557, lps 588) heur_iters 12130 dive_iters 2539 lp_rows 3848 node_cut_secs 2.11 pool_len 1 pool_idle 0
+MIP:   sub-MIP: 81 free columns of 20203, status Infeasible, nodes 0, objective None, 0.00s
+MIP:   DINS (20102 of 20203 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [1, 1, 1, 1, 1, 2])
+MIP:    65.49s nodes      569 open     298 lb -4.14768062e2 ub -3.45000000e2 lp_iters 225216 sb_iters 46671 sb_lps 382 sb_secs 10.78 node_iters 170837 (first 156417, lps 601) heur_iters 12130 dive_iters 2539 lp_rows 3835 node_cut_secs 2.11 pool_len 3 pool_idle 0
+MIP:    67.54s nodes      590 open     302 lb -4.12462323e2 ub -3.45000000e2 lp_iters 231937 sb_iters 47581 sb_lps 390 sb_secs 11.04 node_iters 176648 (first 162020, lps 619) heur_iters 12130 dive_iters 2539 lp_rows 3819 node_cut_secs 2.11 pool_len 2 pool_idle 0
+MIP:    72.73s nodes      596 open     306 lb -4.12462323e2 ub -3.45000000e2 lp_iters 250972 sb_iters 49687 sb_lps 406 sb_secs 11.64 node_iters 193577 (first 177533, lps 628) heur_iters 12130 dive_iters 2539 lp_rows 3821 node_cut_secs 2.11 pool_len 2 pool_idle 0
+MIP:    74.90s nodes      608 open     314 lb -4.12462323e2 ub -3.45000000e2 lp_iters 258722 sb_iters 51441 sb_lps 408 sb_secs 12.13 node_iters 199573 (first 183529, lps 639) heur_iters 12130 dive_iters 2539 lp_rows 3811 node_cut_secs 2.11 pool_len 4 pool_idle 0
+MIP:   sub-MIP: 97 free columns of 20203, status Infeasible, nodes 0, objective None, 0.03s
+MIP:   crossover (20106 of 20203 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [1, 1, 1, 1, 2, 2])
+MIP:    77.41s nodes      624 open     326 lb -4.12462323e2 ub -3.45000000e2 lp_iters 267412 sb_iters 51441 sb_lps 408 sb_secs 12.13 node_iters 208263 (first 191708, lps 654) heur_iters 12176 dive_iters 2539 lp_rows 3815 node_cut_secs 2.26 pool_len 3 pool_idle 0
+MIP:    79.44s nodes      639 open     337 lb -4.12462323e2 ub -3.45000000e2 lp_iters 274384 sb_iters 51929 sb_lps 410 sb_secs 12.26 node_iters 214747 (first 197623, lps 669) heur_iters 12176 dive_iters 2539 lp_rows 3818 node_cut_secs 2.26 pool_len 2 pool_idle 0
+MIP:    83.46s nodes      652 open     341 lb -4.12462323e2 ub -3.45000000e2 lp_iters 287282 sb_iters 53297 sb_lps 424 sb_secs 12.61 node_iters 226277 (first 208525, lps 684) heur_iters 12176 dive_iters 2539 lp_rows 3817 node_cut_secs 2.26 pool_len 2 pool_idle 0
+MIP:    85.48s nodes      666 open     349 lb -4.12462323e2 ub -3.45000000e2 lp_iters 294786 sb_iters 54131 sb_lps 430 sb_secs 12.81 node_iters 232947 (first 215105, lps 700) heur_iters 12176 dive_iters 2539 lp_rows 3806 node_cut_secs 2.26 pool_len 1 pool_idle 0
+MIP:   sub-MIP: 1894 free columns of 20203, status Infeasible, nodes 0, objective None, 0.01s
+MIP:   mutation (14099 fixed): Some((Infeasible, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [1, 1, 1, 2, 2, 2])
+MIP:    87.49s nodes      688 open     350 lb -4.10833333e2 ub -3.45000000e2 lp_iters 301736 sb_iters 55312 sb_lps 440 sb_secs 13.13 node_iters 238716 (first 220511, lps 721) heur_iters 12178 dive_iters 2539 lp_rows 3814 node_cut_secs 2.33 pool_len 1 pool_idle 0
+MIP:    89.66s nodes      707 open     356 lb -4.08333333e2 ub -3.45000000e2 lp_iters 309340 sb_iters 55460 sb_lps 442 sb_secs 13.17 node_iters 246172 (first 227870, lps 738) heur_iters 12178 dive_iters 2539 lp_rows 3815 node_cut_secs 2.37 pool_len 3 pool_idle 0
+MIP:    91.67s nodes      718 open     365 lb -4.07363281e2 ub -3.45000000e2 lp_iters 316356 sb_iters 56659 sb_lps 448 sb_secs 13.45 node_iters 251978 (first 232984, lps 753) heur_iters 12200 dive_iters 2550 lp_rows 3823 node_cut_secs 2.48 pool_len 1 pool_idle 0
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 1.53s
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 2, 2, 2, 2])
+MIP:    95.19s nodes      730 open     363 lb -4.06222222e2 ub -3.45000000e2 lp_iters 322784 sb_iters 57379 sb_lps 456 sb_secs 13.66 node_iters 257686 (first 238041, lps 766) heur_iters 12203 dive_iters 2550 lp_rows 3832 node_cut_secs 2.55 pool_len 1 pool_idle 0
+MIP:    97.21s nodes      754 open     380 lb -4.04833333e2 ub -3.45000000e2 lp_iters 329550 sb_iters 58014 sb_lps 468 sb_secs 13.85 node_iters 263817 (first 244000, lps 794) heur_iters 12203 dive_iters 2550 lp_rows 3833 node_cut_secs 2.55 pool_len 1 pool_idle 0
+MIP:    99.25s nodes      787 open     392 lb -4.04210526e2 ub -3.45000000e2 lp_iters 336616 sb_iters 58819 sb_lps 486 sb_secs 14.06 node_iters 270078 (first 249950, lps 827) heur_iters 12203 dive_iters 2550 lp_rows 3823 node_cut_secs 2.55 pool_len 1 pool_idle 0
+MIP:   101.34s nodes      814 open     406 lb -4.03899329e2 ub -3.45000000e2 lp_iters 344395 sb_iters 59968 sb_lps 496 sb_secs 14.33 node_iters 276708 (first 255997, lps 854) heur_iters 12203 dive_iters 2550 lp_rows 3841 node_cut_secs 2.70 pool_len 1 pool_idle 0
+MIP:   103.34s nodes      843 open     412 lb -4.00495130e2 ub -3.45000000e2 lp_iters 351148 sb_iters 60557 sb_lps 500 sb_secs 14.47 node_iters 282749 (first 261894, lps 879) heur_iters 12449 dive_iters 2673 lp_rows 3842 node_cut_secs 2.70 pool_len 1 pool_idle 0
+MIP:   105.95s nodes      856 open     409 lb -3.97500000e2 ub -3.45000000e2 lp_iters 360926 sb_iters 61708 sb_lps 508 sb_secs 14.74 node_iters 291376 (first 268643, lps 895) heur_iters 12449 dive_iters 2673 lp_rows 3862 node_cut_secs 2.80 pool_len 0 pool_idle 0
+MIP:   108.01s nodes      870 open     420 lb -3.96166300e2 ub -3.45000000e2 lp_iters 367965 sb_iters 62250 sb_lps 514 sb_secs 14.87 node_iters 297873 (first 274300, lps 916) heur_iters 12449 dive_iters 2673 lp_rows 3878 node_cut_secs 3.02 pool_len 0 pool_idle 0
+MIP:   110.12s nodes      896 open     430 lb -3.95833333e2 ub -3.45000000e2 lp_iters 375130 sb_iters 63087 sb_lps 520 sb_secs 15.08 node_iters 304201 (first 279855, lps 941) heur_iters 12449 dive_iters 2673 lp_rows 3896 node_cut_secs 3.15 pool_len 0 pool_idle 0
+MIP:   112.24s nodes      916 open     441 lb -3.94659533e2 ub -3.45000000e2 lp_iters 382215 sb_iters 63933 sb_lps 522 sb_secs 15.30 node_iters 310440 (first 284796, lps 967) heur_iters 12449 dive_iters 2673 lp_rows 3911 node_cut_secs 3.32 pool_len 0 pool_idle 0
+MIP:   114.40s nodes      957 open     463 lb -3.94402985e2 ub -3.45000000e2 lp_iters 389961 sb_iters 64743 sb_lps 530 sb_secs 15.52 node_iters 317376 (first 291318, lps 1007) heur_iters 12449 dive_iters 2673 lp_rows 3911 node_cut_secs 3.32 pool_len 0 pool_idle 0
+MIP:   116.54s nodes      965 open     466 lb -3.94128990e2 ub -3.45000000e2 lp_iters 397070 sb_iters 65758 sb_lps 538 sb_secs 15.83 node_iters 323470 (first 296552, lps 1021) heur_iters 12449 dive_iters 2673 lp_rows 3914 node_cut_secs 3.32 pool_len 1 pool_idle 0
+MIP:   119.21s nodes      983 open     474 lb -3.94128990e2 ub -3.45000000e2 lp_iters 406162 sb_iters 66669 sb_lps 546 sb_secs 16.08 node_iters 331651 (first 304028, lps 1038) heur_iters 12449 dive_iters 2673 lp_rows 3915 node_cut_secs 3.32 pool_len 2 pool_idle 0
+MIP:   121.29s nodes     1004 open     484 lb -3.94000000e2 ub -3.45000000e2 lp_iters 413042 sb_iters 67194 sb_lps 548 sb_secs 16.23 node_iters 337959 (first 310286, lps 1058) heur_iters 12543 dive_iters 2720 lp_rows 3920 node_cut_secs 3.32 pool_len 1 pool_idle 0
+MIP:   123.42s nodes     1018 open     490 lb -3.94000000e2 ub -3.45000000e2 lp_iters 420754 sb_iters 68227 sb_lps 562 sb_secs 16.49 node_iters 344638 (first 316622, lps 1073) heur_iters 12543 dive_iters 2720 lp_rows 3921 node_cut_secs 3.32 pool_len 1 pool_idle 0
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 0.34s
+MIP:   local branching k=12: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 2, 2, 2, 2, 2])
+MIP:   130.30s nodes     1037 open     496 lb -3.93195597e2 ub -3.45000000e2 lp_iters 441365 sb_iters 70180 sb_lps 598 sb_secs 16.97 node_iters 363296 (first 335100, lps 1096) heur_iters 12546 dive_iters 2720 lp_rows 3919 node_cut_secs 3.36 pool_len 0 pool_idle 0
+MIP:   138.65s nodes     1045 open     492 lb -3.92641089e2 ub -3.45000000e2 lp_iters 461891 sb_iters 73448 sb_lps 612 sb_secs 17.89 node_iters 380554 (first 348754, lps 1105) heur_iters 12546 dive_iters 2720 lp_rows 3925 node_cut_secs 3.36 pool_len 0 pool_idle 0
+MIP:   141.64s nodes     1057 open     497 lb -3.92546256e2 ub -3.45000000e2 lp_iters 472357 sb_iters 73926 sb_lps 614 sb_secs 18.04 node_iters 390542 (first 358742, lps 1114) heur_iters 12546 dive_iters 2720 lp_rows 3925 node_cut_secs 3.36 pool_len 1 pool_idle 0
+MIP:   143.80s nodes     1067 open     503 lb -3.92546256e2 ub -3.45000000e2 lp_iters 479423 sb_iters 74588 sb_lps 622 sb_secs 18.24 node_iters 396889 (first 364573, lps 1128) heur_iters 12660 dive_iters 2777 lp_rows 3921 node_cut_secs 3.36 pool_len 0 pool_idle 0
+MIP:   146.21s nodes     1084 open     518 lb -3.92546256e2 ub -3.45000000e2 lp_iters 488095 sb_iters 75739 sb_lps 626 sb_secs 18.52 node_iters 404410 (first 372094, lps 1145) heur_iters 12660 dive_iters 2777 lp_rows 3920 node_cut_secs 3.36 pool_len 0 pool_idle 0
+MIP:   148.46s nodes     1113 open     528 lb -3.92356322e2 ub -3.45000000e2 lp_iters 496374 sb_iters 76562 sb_lps 634 sb_secs 18.73 node_iters 411866 (first 379187, lps 1170) heur_iters 12660 dive_iters 2777 lp_rows 3917 node_cut_secs 3.36 pool_len 1 pool_idle 0
+MIP:   sub-MIP: 106 free columns of 20203, status Infeasible, nodes 0, objective None, 0.01s
+MIP:   ALNS arm 0 reward 0.000 (counts [2, 2, 2, 2, 2, 2])
+MIP:   150.77s nodes     1132 open     529 lb -3.92252747e2 ub -3.45000000e2 lp_iters 504313 sb_iters 77481 sb_lps 648 sb_secs 18.98 node_iters 418886 (first 385211, lps 1193) heur_iters 12660 dive_iters 2777 lp_rows 3922 node_cut_secs 3.36 pool_len 1 pool_idle 0
+MIP:   152.79s nodes     1191 open     550 lb -3.91319861e2 ub -3.45000000e2 lp_iters 511546 sb_iters 78188 sb_lps 656 sb_secs 19.14 node_iters 425412 (first 391415, lps 1244) heur_iters 12660 dive_iters 2777 lp_rows 3909 node_cut_secs 3.36 pool_len 2 pool_idle 0
+MIP:   sub-MIP: 68 free columns of 20203, status Infeasible, nodes 0, objective None, 0.00s
+MIP:   DINS (20114 of 20203 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [2, 2, 2, 2, 2, 3])
+MIP:   158.68s nodes     1201 open     546 lb -3.91319861e2 ub -3.45000000e2 lp_iters 531716 sb_iters 80332 sb_lps 668 sb_secs 19.71 node_iters 443438 (first 409422, lps 1251) heur_iters 12660 dive_iters 2777 lp_rows 3906 node_cut_secs 3.36 pool_len 0 pool_idle 0
+MIP:   161.31s nodes     1207 open     546 lb -3.91125000e2 ub -3.45000000e2 lp_iters 542114 sb_iters 81587 sb_lps 670 sb_secs 20.11 node_iters 452581 (first 418290, lps 1257) heur_iters 12660 dive_iters 2777 lp_rows 3908 node_cut_secs 3.36 pool_len 0 pool_idle 0
+MIP:   168.31s nodes     1219 open     547 lb -3.91091151e2 ub -3.45000000e2 lp_iters 562901 sb_iters 82543 sb_lps 676 sb_secs 20.38 node_iters 472412 (first 437602, lps 1273) heur_iters 12660 dive_iters 2777 lp_rows 3912 node_cut_secs 3.36 pool_len 1 pool_idle 0
+MIP:   175.06s nodes     1220 open     548 lb -3.91091151e2 ub -3.45000000e2 lp_iters 582941 sb_iters 86568 sb_lps 702 sb_secs 21.56 node_iters 488427 (first 453251, lps 1276) heur_iters 12660 dive_iters 2777 lp_rows 3912 node_cut_secs 3.36 pool_len 0 pool_idle 0
+MIP:   177.09s nodes     1229 open     554 lb -3.90833333e2 ub -3.45000000e2 lp_iters 589264 sb_iters 86981 sb_lps 704 sb_secs 21.68 node_iters 494031 (first 458659, lps 1287) heur_iters 13272 dive_iters 3083 lp_rows 3907 node_cut_secs 3.48 pool_len 0 pool_idle 0
+MIP:   179.15s nodes     1239 open     563 lb -3.90833333e2 ub -3.45000000e2 lp_iters 595848 sb_iters 87622 sb_lps 708 sb_secs 21.88 node_iters 499974 (first 464554, lps 1298) heur_iters 13272 dive_iters 3083 lp_rows 3907 node_cut_secs 3.48 pool_len 0 pool_idle 0
+MIP:   181.44s nodes     1253 open     571 lb -3.90757576e2 ub -3.45000000e2 lp_iters 604213 sb_iters 88975 sb_lps 712 sb_secs 22.23 node_iters 506986 (first 471160, lps 1312) heur_iters 13272 dive_iters 3083 lp_rows 3905 node_cut_secs 3.48 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 116 free columns of 20203, status Infeasible, nodes 0, objective None, 0.03s
+MIP:   crossover (20087 of 20203 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [2, 2, 2, 2, 3, 3])
+MIP:   183.44s nodes     1281 open     575 lb -3.90146789e2 ub -3.45000000e2 lp_iters 611082 sb_iters 89409 sb_lps 716 sb_secs 22.34 node_iters 513421 (first 477503, lps 1340) heur_iters 13318 dive_iters 3083 lp_rows 3904 node_cut_secs 3.48 pool_len 1 pool_idle 0
+MIP:   185.45s nodes     1305 open     580 lb -3.90027473e2 ub -3.45000000e2 lp_iters 618494 sb_iters 90172 sb_lps 734 sb_secs 22.55 node_iters 520070 (first 483866, lps 1365) heur_iters 13318 dive_iters 3083 lp_rows 3906 node_cut_secs 3.48 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 1823 free columns of 20203, status Infeasible, nodes 0, objective None, 0.03s
+MIP:   mutation (14084 fixed): Some((Infeasible, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [2, 2, 2, 3, 3, 3])
+MIP:   187.65s nodes     1340 open     585 lb -3.90000000e2 ub -3.45000000e2 lp_iters 626366 sb_iters 90930 sb_lps 750 sb_secs 22.75 node_iters 527184 (first 490482, lps 1397) heur_iters 13320 dive_iters 3083 lp_rows 3909 node_cut_secs 3.48 pool_len 0 pool_idle 0
+MIP:   189.72s nodes     1360 open     591 lb -3.89431438e2 ub -3.45000000e2 lp_iters 633956 sb_iters 91724 sb_lps 758 sb_secs 22.94 node_iters 533980 (first 496455, lps 1421) heur_iters 13320 dive_iters 3083 lp_rows 3897 node_cut_secs 3.57 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 1.92s
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [2, 2, 3, 3, 3, 3])
+MIP:   192.72s nodes     1384 open     590 lb -3.89431438e2 ub -3.45000000e2 lp_iters 637632 sb_iters 92353 sb_lps 766 sb_secs 23.09 node_iters 537027 (first 499424, lps 1438) heur_iters 14086 dive_iters 3083 lp_rows 3900 node_cut_secs 3.57 pool_len 1 pool_idle 0
+MIP:   194.81s nodes     1408 open     600 lb -3.89431438e2 ub -3.45000000e2 lp_iters 645395 sb_iters 93215 sb_lps 772 sb_secs 23.31 node_iters 543600 (first 504749, lps 1465) heur_iters 14742 dive_iters 3411 lp_rows 3906 node_cut_secs 3.66 pool_len 0 pool_idle 0
+MIP:   196.99s nodes     1439 open     620 lb -3.89431438e2 ub -3.45000000e2 lp_iters 652985 sb_iters 94035 sb_lps 776 sb_secs 23.49 node_iters 550370 (first 511519, lps 1493) heur_iters 14742 dive_iters 3411 lp_rows 3904 node_cut_secs 3.66 pool_len 0 pool_idle 0
+MIP:   199.05s nodes     1453 open     619 lb -3.89431438e2 ub -3.45000000e2 lp_iters 660313 sb_iters 94694 sb_lps 782 sb_secs 23.66 node_iters 557039 (first 518034, lps 1506) heur_iters 14742 dive_iters 3411 lp_rows 3903 node_cut_secs 3.66 pool_len 1 pool_idle 0
+MIP:   201.16s nodes     1480 open     631 lb -3.89166667e2 ub -3.45000000e2 lp_iters 668594 sb_iters 95599 sb_lps 794 sb_secs 23.89 node_iters 564415 (first 525034, lps 1530) heur_iters 14742 dive_iters 3411 lp_rows 3903 node_cut_secs 3.66 pool_len 2 pool_idle 0
+MIP:   203.24s nodes     1492 open     631 lb -3.89166667e2 ub -3.45000000e2 lp_iters 676284 sb_iters 96424 sb_lps 802 sb_secs 24.09 node_iters 571280 (first 531439, lps 1542) heur_iters 14742 dive_iters 3411 lp_rows 3905 node_cut_secs 3.66 pool_len 0 pool_idle 0
+MIP:   205.39s nodes     1522 open     644 lb -3.89166667e2 ub -3.45000000e2 lp_iters 684391 sb_iters 97584 sb_lps 810 sb_secs 24.37 node_iters 578227 (first 537731, lps 1572) heur_iters 14742 dive_iters 3411 lp_rows 3908 node_cut_secs 3.66 pool_len 0 pool_idle 0
+MIP:   207.61s nodes     1538 open     650 lb -3.88418539e2 ub -3.45000000e2 lp_iters 691634 sb_iters 98335 sb_lps 812 sb_secs 24.54 node_iters 584719 (first 543561, lps 1587) heur_iters 14742 dive_iters 3411 lp_rows 3920 node_cut_secs 3.89 pool_len 0 pool_idle 0
+MIP:   209.62s nodes     1553 open     659 lb -3.87826355e2 ub -3.45000000e2 lp_iters 698407 sb_iters 98934 sb_lps 820 sb_secs 24.69 node_iters 590893 (first 549355, lps 1604) heur_iters 14742 dive_iters 3411 lp_rows 3928 node_cut_secs 3.97 pool_len 0 pool_idle 0
+MIP:   211.75s nodes     1565 open     663 lb -3.87826355e2 ub -3.45000000e2 lp_iters 705220 sb_iters 100065 sb_lps 824 sb_secs 25.01 node_iters 596575 (first 554466, lps 1618) heur_iters 14742 dive_iters 3411 lp_rows 3929 node_cut_secs 3.97 pool_len 1 pool_idle 0
+MIP:   213.84s nodes     1583 open     671 lb -3.87820164e2 ub -3.45000000e2 lp_iters 712630 sb_iters 100693 sb_lps 828 sb_secs 25.17 node_iters 603357 (first 560885, lps 1636) heur_iters 14742 dive_iters 3411 lp_rows 3932 node_cut_secs 3.97 pool_len 0 pool_idle 0
+MIP:   215.84s nodes     1601 open     680 lb -3.87500000e2 ub -3.45000000e2 lp_iters 720546 sb_iters 101655 sb_lps 834 sb_secs 25.40 node_iters 610311 (first 567467, lps 1656) heur_iters 14742 dive_iters 3411 lp_rows 3919 node_cut_secs 3.97 pool_len 2 pool_idle 0
+MIP:   217.90s nodes     1609 open     678 lb -3.87500000e2 ub -3.45000000e2 lp_iters 727362 sb_iters 102079 sb_lps 840 sb_secs 25.54 node_iters 616703 (first 573340, lps 1667) heur_iters 14742 dive_iters 3411 lp_rows 3925 node_cut_secs 3.97 pool_len 0 pool_idle 0
+MIP:   220.00s nodes     1627 open     678 lb -3.86010754e2 ub -3.45000000e2 lp_iters 734815 sb_iters 102935 sb_lps 852 sb_secs 25.75 node_iters 623300 (first 579658, lps 1686) heur_iters 14742 dive_iters 3411 lp_rows 3926 node_cut_secs 3.97 pool_len 0 pool_idle 0
+MIP:   222.06s nodes     1636 open     680 lb -3.85654580e2 ub -3.45000000e2 lp_iters 741363 sb_iters 103833 sb_lps 858 sb_secs 25.98 node_iters 628950 (first 584464, lps 1698) heur_iters 14742 dive_iters 3411 lp_rows 3930 node_cut_secs 4.02 pool_len 0 pool_idle 0
+MIP:   224.06s nodes     1652 open     678 lb -3.85077586e2 ub -3.45000000e2 lp_iters 748416 sb_iters 104503 sb_lps 866 sb_secs 26.16 node_iters 635333 (first 590141, lps 1713) heur_iters 14742 dive_iters 3411 lp_rows 3931 node_cut_secs 4.02 pool_len 0 pool_idle 0
+MIP:   226.65s nodes     1663 open     678 lb -3.84843981e2 ub -3.45000000e2 lp_iters 757365 sb_iters 105662 sb_lps 876 sb_secs 26.45 node_iters 643123 (first 597279, lps 1727) heur_iters 14742 dive_iters 3411 lp_rows 3939 node_cut_secs 4.02 pool_len 0 pool_idle 0
+MIP:   228.71s nodes     1677 open     679 lb -3.84494342e2 ub -3.45000000e2 lp_iters 764248 sb_iters 106621 sb_lps 882 sb_secs 26.70 node_iters 649047 (first 603138, lps 1744) heur_iters 14742 dive_iters 3411 lp_rows 3943 node_cut_secs 4.02 pool_len 0 pool_idle 0
+MIP:   230.85s nodes     1699 open     691 lb -3.84462963e2 ub -3.45000000e2 lp_iters 772243 sb_iters 107321 sb_lps 888 sb_secs 26.87 node_iters 656342 (first 610118, lps 1766) heur_iters 14742 dive_iters 3411 lp_rows 3941 node_cut_secs 4.02 pool_len 1 pool_idle 0
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 0.33s
+MIP:   local branching k=8: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [2, 3, 3, 3, 3, 3])
+MIP:   233.11s nodes     1714 open     691 lb -3.84462963e2 ub -3.45000000e2 lp_iters 779041 sb_iters 107769 sb_lps 900 sb_secs 27.03 node_iters 662692 (first 616427, lps 1780) heur_iters 14745 dive_iters 3411 lp_rows 3941 node_cut_secs 4.02 pool_len 0 pool_idle 0
+MIP:   235.11s nodes     1725 open     691 lb -3.84445145e2 ub -3.45000000e2 lp_iters 786179 sb_iters 108642 sb_lps 906 sb_secs 27.25 node_iters 668957 (first 622037, lps 1794) heur_iters 14745 dive_iters 3411 lp_rows 3945 node_cut_secs 4.02 pool_len 0 pool_idle 0
+MIP:   237.37s nodes     1734 open     691 lb -3.83591151e2 ub -3.45000000e2 lp_iters 793605 sb_iters 109528 sb_lps 908 sb_secs 27.47 node_iters 675497 (first 628102, lps 1804) heur_iters 14745 dive_iters 3411 lp_rows 3950 node_cut_secs 4.16 pool_len 1 pool_idle 1
+MIP:   240.47s nodes     1757 open     704 lb -3.83591151e2 ub -3.45000000e2 lp_iters 803849 sb_iters 110704 sb_lps 914 sb_secs 27.79 node_iters 684531 (first 635828, lps 1832) heur_iters 14813 dive_iters 3445 lp_rows 3950 node_cut_secs 4.16 pool_len 2 pool_idle 2
+MIP:   242.48s nodes     1771 open     710 lb -3.83275583e2 ub -3.45000000e2 lp_iters 811054 sb_iters 111590 sb_lps 918 sb_secs 27.99 node_iters 690850 (first 641586, lps 1849) heur_iters 14813 dive_iters 3445 lp_rows 3953 node_cut_secs 4.16 pool_len 0 pool_idle 0
+MIP:   244.52s nodes     1786 open     704 lb -3.83077738e2 ub -3.45000000e2 lp_iters 818226 sb_iters 112241 sb_lps 924 sb_secs 28.16 node_iters 697371 (first 648071, lps 1862) heur_iters 14813 dive_iters 3445 lp_rows 3953 node_cut_secs 4.16 pool_len 0 pool_idle 0
+MIP:   246.58s nodes     1806 open     707 lb -3.82766707e2 ub -3.45000000e2 lp_iters 825122 sb_iters 112969 sb_lps 928 sb_secs 28.36 node_iters 703539 (first 653337, lps 1882) heur_iters 14813 dive_iters 3445 lp_rows 3973 node_cut_secs 4.29 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 131 free columns of 20203, status Infeasible, nodes 0, objective None, 0.01s
+MIP:   ALNS arm 0 reward 0.000 (counts [3, 3, 3, 3, 3, 3])
+MIP:   248.73s nodes     1827 open     694 lb -3.82500000e2 ub -3.45000000e2 lp_iters 831885 sb_iters 113475 sb_lps 940 sb_secs 28.49 node_iters 709796 (first 659199, lps 1903) heur_iters 14813 dive_iters 3445 lp_rows 3982 node_cut_secs 4.39 pool_len 0 pool_idle 0
+MIP:   250.91s nodes     1840 open     702 lb -3.81940789e2 ub -3.45000000e2 lp_iters 839152 sb_iters 114619 sb_lps 944 sb_secs 28.78 node_iters 715919 (first 665322, lps 1916) heur_iters 14813 dive_iters 3445 lp_rows 3982 node_cut_secs 4.39 pool_len 0 pool_idle 0
+MIP:   253.19s nodes     1850 open     695 lb -3.81909824e2 ub -3.45000000e2 lp_iters 846037 sb_iters 114883 sb_lps 946 sb_secs 28.85 node_iters 722540 (first 671652, lps 1927) heur_iters 14813 dive_iters 3445 lp_rows 3985 node_cut_secs 4.47 pool_len 0 pool_idle 0
+MIP:   256.06s nodes     1864 open     705 lb -3.81500000e2 ub -3.45000000e2 lp_iters 853695 sb_iters 116250 sb_lps 958 sb_secs 29.35 node_iters 728831 (first 677555, lps 1944) heur_iters 14813 dive_iters 3445 lp_rows 3987 node_cut_secs 4.47 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 78 free columns of 20203, status Infeasible, nodes 0, objective None, 0.00s
+MIP:   DINS (20121 of 20203 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [3, 3, 3, 3, 3, 4])
+MIP:   258.29s nodes     1880 open     706 lb -3.81010102e2 ub -3.45000000e2 lp_iters 860745 sb_iters 116872 sb_lps 972 sb_secs 29.58 node_iters 734597 (first 683042, lps 1964) heur_iters 16137 dive_iters 4107 lp_rows 3987 node_cut_secs 4.47 pool_len 0 pool_idle 0
+MIP:   260.33s nodes     1894 open     707 lb -3.81000000e2 ub -3.45000000e2 lp_iters 867630 sb_iters 117386 sb_lps 974 sb_secs 29.73 node_iters 740968 (first 689267, lps 1976) heur_iters 16137 dive_iters 4107 lp_rows 3975 node_cut_secs 4.47 pool_len 0 pool_idle 0
+MIP:   262.34s nodes     1914 open     706 lb -3.80364160e2 ub -3.45000000e2 lp_iters 874303 sb_iters 118517 sb_lps 984 sb_secs 30.02 node_iters 746510 (first 694376, lps 2000) heur_iters 16137 dive_iters 4107 lp_rows 3973 node_cut_secs 4.52 pool_len 0 pool_idle 0
+MIP:   264.51s nodes     1943 open     714 lb -3.80000000e2 ub -3.45000000e2 lp_iters 881655 sb_iters 119369 sb_lps 990 sb_secs 30.25 node_iters 753010 (first 700196, lps 2027) heur_iters 16137 dive_iters 4107 lp_rows 3972 node_cut_secs 4.52 pool_len 1 pool_idle 1
+MIP:   266.52s nodes     1968 open     722 lb -3.80000000e2 ub -3.45000000e2 lp_iters 888988 sb_iters 120423 sb_lps 994 sb_secs 30.50 node_iters 759289 (first 706443, lps 2047) heur_iters 16137 dive_iters 4107 lp_rows 3968 node_cut_secs 4.52 pool_len 1 pool_idle 0
+MIP:   sub-MIP: 127 free columns of 20203, status Infeasible, nodes 0, objective None, 0.03s
+MIP:   crossover (20076 of 20203 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [3, 3, 3, 3, 4, 4])
+MIP:   268.79s nodes     1989 open     725 lb -3.80000000e2 ub -3.45000000e2 lp_iters 896792 sb_iters 120846 sb_lps 996 sb_secs 30.60 node_iters 766670 (first 713711, lps 2066) heur_iters 16186 dive_iters 4107 lp_rows 3960 node_cut_secs 4.52 pool_len 1 pool_idle 0
+MIP:   270.80s nodes     2004 open     736 lb -3.79657271e2 ub -3.45000000e2 lp_iters 903546 sb_iters 121552 sb_lps 1006 sb_secs 30.81 node_iters 772718 (first 719241, lps 2087) heur_iters 16186 dive_iters 4107 lp_rows 3962 node_cut_secs 4.57 pool_len 0 pool_idle 0
+MIP:   272.86s nodes     2012 open     733 lb -3.79501523e2 ub -3.45000000e2 lp_iters 910392 sb_iters 122357 sb_lps 1022 sb_secs 31.06 node_iters 778759 (first 724568, lps 2100) heur_iters 16186 dive_iters 4107 lp_rows 3971 node_cut_secs 4.63 pool_len 0 pool_idle 0
+MIP:   275.21s nodes     2020 open     728 lb -3.79265092e2 ub -3.45000000e2 lp_iters 917981 sb_iters 123765 sb_lps 1028 sb_secs 31.49 node_iters 784940 (first 730526, lps 2108) heur_iters 16186 dive_iters 4107 lp_rows 3972 node_cut_secs 4.63 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 1839 free columns of 20203, status Infeasible, nodes 0, objective None, 0.01s
+MIP:   mutation (14176 fixed): Some((Infeasible, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [3, 3, 3, 4, 4, 4])
+MIP:   277.54s nodes     2048 open     727 lb -3.79210526e2 ub -3.45000000e2 lp_iters 925722 sb_iters 123903 sb_lps 1034 sb_secs 31.55 node_iters 792543 (first 737959, lps 2132) heur_iters 16188 dive_iters 4107 lp_rows 3974 node_cut_secs 4.63 pool_len 0 pool_idle 0
+MIP:   280.18s nodes     2055 open     722 lb -3.79152910e2 ub -3.45000000e2 lp_iters 934190 sb_iters 125074 sb_lps 1044 sb_secs 31.84 node_iters 799840 (first 744688, lps 2142) heur_iters 16188 dive_iters 4107 lp_rows 3984 node_cut_secs 4.74 pool_len 0 pool_idle 0
+MIP:   282.20s nodes     2073 open     715 lb -3.78240741e2 ub -3.45000000e2 lp_iters 940011 sb_iters 126037 sb_lps 1050 sb_secs 32.11 node_iters 804698 (first 749459, lps 2159) heur_iters 16188 dive_iters 4107 lp_rows 3985 node_cut_secs 4.74 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 1.15s
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [3, 3, 4, 4, 4, 4])
+MIP:   284.36s nodes     2081 open     711 lb -3.78065561e2 ub -3.45000000e2 lp_iters 942337 sb_iters 126037 sb_lps 1050 sb_secs 32.11 node_iters 807024 (first 751724, lps 2165) heur_iters 16191 dive_iters 4107 lp_rows 3976 node_cut_secs 4.74 pool_len 0 pool_idle 0
+MIP:   286.64s nodes     2101 open     717 lb -3.77936696e2 ub -3.45000000e2 lp_iters 950171 sb_iters 127037 sb_lps 1058 sb_secs 32.39 node_iters 813858 (first 758031, lps 2187) heur_iters 16191 dive_iters 4107 lp_rows 3984 node_cut_secs 4.85 pool_len 0 pool_idle 0
+MIP:   288.78s nodes     2112 open     720 lb -3.77727273e2 ub -3.45000000e2 lp_iters 956240 sb_iters 127599 sb_lps 1064 sb_secs 32.57 node_iters 819365 (first 763079, lps 2200) heur_iters 16191 dive_iters 4107 lp_rows 3989 node_cut_secs 4.91 pool_len 0 pool_idle 0
+MIP:   291.21s nodes     2123 open     719 lb -3.76825094e2 ub -3.45000000e2 lp_iters 963788 sb_iters 128239 sb_lps 1068 sb_secs 32.72 node_iters 826273 (first 769606, lps 2211) heur_iters 16191 dive_iters 4107 lp_rows 3990 node_cut_secs 4.91 pool_len 0 pool_idle 0
+MIP:   293.35s nodes     2131 open     720 lb -3.76633989e2 ub -3.45000000e2 lp_iters 970264 sb_iters 129241 sb_lps 1070 sb_secs 33.05 node_iters 831747 (first 774785, lps 2219) heur_iters 16191 dive_iters 4107 lp_rows 3991 node_cut_secs 4.91 pool_len 0 pool_idle 0
+MIP:   295.48s nodes     2167 open     712 lb -3.75467042e2 ub -3.45000000e2 lp_iters 976885 sb_iters 129773 sb_lps 1080 sb_secs 33.22 node_iters 837836 (first 780646, lps 2244) heur_iters 16191 dive_iters 4107 lp_rows 3990 node_cut_secs 4.91 pool_len 1 pool_idle 1
+MIP:   297.78s nodes     2180 open     704 lb -3.75000000e2 ub -3.45000000e2 lp_iters 984374 sb_iters 130619 sb_lps 1092 sb_secs 33.44 node_iters 844479 (first 786963, lps 2253) heur_iters 16191 dive_iters 4107 lp_rows 3994 node_cut_secs 4.91 pool_len 0 pool_idle 0
+MIP:   299.79s nodes     2203 open     703 lb -3.75000000e2 ub -3.45000000e2 lp_iters 991129 sb_iters 131330 sb_lps 1098 sb_secs 33.62 node_iters 850523 (first 792974, lps 2274) heur_iters 16191 dive_iters 4107 lp_rows 3984 node_cut_secs 4.91 pool_len 0 pool_idle 0
+MIP:   301.80s nodes     2228 open     699 lb -3.74829545e2 ub -3.45000000e2 lp_iters 997869 sb_iters 131980 sb_lps 1112 sb_secs 33.83 node_iters 856613 (first 798834, lps 2296) heur_iters 16191 dive_iters 4107 lp_rows 3984 node_cut_secs 4.91 pool_len 0 pool_idle 0
+MIP:   304.00s nodes     2249 open     699 lb -3.74750000e2 ub -3.45000000e2 lp_iters 1005450 sb_iters 132919 sb_lps 1124 sb_secs 34.05 node_iters 863255 (first 804647, lps 2318) heur_iters 16191 dive_iters 4107 lp_rows 3985 node_cut_secs 4.91 pool_len 0 pool_idle 0
+MIP:   306.10s nodes     2276 open     694 lb -3.74225184e2 ub -3.45000000e2 lp_iters 1012791 sb_iters 133742 sb_lps 1130 sb_secs 34.25 node_iters 869773 (first 810801, lps 2337) heur_iters 16191 dive_iters 4107 lp_rows 3984 node_cut_secs 4.91 pool_len 1 pool_idle 0
+MIP:   308.30s nodes     2293 open     698 lb -3.74000000e2 ub -3.45000000e2 lp_iters 1020673 sb_iters 134949 sb_lps 1136 sb_secs 34.59 node_iters 876448 (first 817307, lps 2354) heur_iters 16191 dive_iters 4107 lp_rows 3983 node_cut_secs 4.91 pool_len 0 pool_idle 0
+MIP:   310.55s nodes     2314 open     682 lb -3.73248106e2 ub -3.45000000e2 lp_iters 1027596 sb_iters 135487 sb_lps 1138 sb_secs 34.74 node_iters 882833 (first 823372, lps 2373) heur_iters 16191 dive_iters 4107 lp_rows 3999 node_cut_secs 5.01 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 0.32s
+MIP:   local branching k=5: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [3, 4, 4, 4, 4, 4])
+MIP:   312.60s nodes     2317 open     681 lb -3.73109472e2 ub -3.45000000e2 lp_iters 1033150 sb_iters 136293 sb_lps 1144 sb_secs 34.93 node_iters 887581 (first 827871, lps 2379) heur_iters 16194 dive_iters 4107 lp_rows 4002 node_cut_secs 5.01 pool_len 0 pool_idle 0
+MIP:   314.61s nodes     2331 open     677 lb -3.72669279e2 ub -3.45000000e2 lp_iters 1039838 sb_iters 136599 sb_lps 1146 sb_secs 35.01 node_iters 893963 (first 834175, lps 2394) heur_iters 16194 dive_iters 4107 lp_rows 4004 node_cut_secs 5.01 pool_len 0 pool_idle 0
+MIP:   316.62s nodes     2355 open     663 lb -3.72421991e2 ub -3.45000000e2 lp_iters 1046471 sb_iters 137491 sb_lps 1156 sb_secs 35.25 node_iters 899704 (first 839063, lps 2409) heur_iters 16194 dive_iters 4107 lp_rows 4005 node_cut_secs 5.01 pool_len 0 pool_idle 0
+MIP:   318.62s nodes     2378 open     657 lb -3.71750121e2 ub -3.45000000e2 lp_iters 1053013 sb_iters 138057 sb_lps 1158 sb_secs 35.39 node_iters 905680 (first 844849, lps 2430) heur_iters 16194 dive_iters 4107 lp_rows 4006 node_cut_secs 5.01 pool_len 1 pool_idle 1
+MIP:   320.74s nodes     2388 open     648 lb -3.70714286e2 ub -3.45000000e2 lp_iters 1060240 sb_iters 139150 sb_lps 1164 sb_secs 35.66 node_iters 911814 (first 850475, lps 2440) heur_iters 16194 dive_iters 4107 lp_rows 4006 node_cut_secs 5.01 pool_len 0 pool_idle 0
+MIP:   323.18s nodes     2410 open     625 lb -3.70000000e2 ub -3.45000000e2 lp_iters 1067767 sb_iters 140388 sb_lps 1176 sb_secs 36.02 node_iters 918103 (first 856251, lps 2457) heur_iters 16194 dive_iters 4107 lp_rows 4011 node_cut_secs 5.01 pool_len 0 pool_idle 0
+MIP:   325.30s nodes     2427 open     615 lb -3.70000000e2 ub -3.45000000e2 lp_iters 1074480 sb_iters 140482 sb_lps 1178 sb_secs 36.05 node_iters 924722 (first 862693, lps 2466) heur_iters 16194 dive_iters 4107 lp_rows 4012 node_cut_secs 5.01 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 104 free columns of 20203, status Infeasible, nodes 0, objective None, 0.02s
+MIP:   ALNS arm 0 reward 0.000 (counts [4, 4, 4, 4, 4, 4])
+MIP:   327.96s nodes     2456 open     605 lb -3.69760274e2 ub -3.45000000e2 lp_iters 1082393 sb_iters 141754 sb_lps 1184 sb_secs 36.41 node_iters 931363 (first 869123, lps 2490) heur_iters 16194 dive_iters 4107 lp_rows 4012 node_cut_secs 5.01 pool_len 1 pool_idle 1
+MIP:   329.99s nodes     2471 open     603 lb -3.69207048e2 ub -3.45000000e2 lp_iters 1089059 sb_iters 142085 sb_lps 1186 sb_secs 36.49 node_iters 937698 (first 875395, lps 2506) heur_iters 16194 dive_iters 4107 lp_rows 4007 node_cut_secs 5.01 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 80 free columns of 20203, status Infeasible, nodes 0, objective None, 0.00s
+MIP:   DINS (20104 of 20203 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [4, 4, 4, 4, 4, 5])
+MIP:   332.22s nodes     2493 open     587 lb -3.68888889e2 ub -3.45000000e2 lp_iters 1095787 sb_iters 142968 sb_lps 1196 sb_secs 36.77 node_iters 943543 (first 881040, lps 2520) heur_iters 16194 dive_iters 4107 lp_rows 4007 node_cut_secs 5.01 pool_len 0 pool_idle 0
+MIP:   334.32s nodes     2516 open     571 lb -3.68604167e2 ub -3.45000000e2 lp_iters 1101731 sb_iters 143804 sb_lps 1200 sb_secs 36.97 node_iters 948651 (first 885906, lps 2532) heur_iters 16194 dive_iters 4107 lp_rows 4012 node_cut_secs 5.01 pool_len 0 pool_idle 0
+MIP:   336.35s nodes     2542 open     573 lb -3.68262582e2 ub -3.45000000e2 lp_iters 1108087 sb_iters 144427 sb_lps 1204 sb_secs 37.16 node_iters 954384 (first 891505, lps 2553) heur_iters 16194 dive_iters 4107 lp_rows 4012 node_cut_secs 5.01 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 79 free columns of 20203, status Infeasible, nodes 0, objective None, 0.03s
+MIP:   crossover (20124 of 20203 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [4, 4, 4, 4, 5, 5])
+MIP:   338.56s nodes     2557 open     565 lb -3.68195597e2 ub -3.45000000e2 lp_iters 1115250 sb_iters 145337 sb_lps 1206 sb_secs 37.39 node_iters 960637 (first 897758, lps 2562) heur_iters 16239 dive_iters 4107 lp_rows 4012 node_cut_secs 5.01 pool_len 0 pool_idle 0
+MIP:   340.74s nodes     2574 open     549 lb -3.67820513e2 ub -3.45000000e2 lp_iters 1121509 sb_iters 145514 sb_lps 1214 sb_secs 37.46 node_iters 966719 (first 903614, lps 2575) heur_iters 16239 dive_iters 4107 lp_rows 4030 node_cut_secs 5.12 pool_len 0 pool_idle 0
+MIP:   342.74s nodes     2592 open     535 lb -3.67290210e2 ub -3.45000000e2 lp_iters 1127591 sb_iters 146340 sb_lps 1234 sb_secs 37.71 node_iters 971975 (first 908493, lps 2588) heur_iters 16239 dive_iters 4107 lp_rows 4031 node_cut_secs 5.12 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 1850 free columns of 20203, status Infeasible, nodes 0, objective None, 0.01s
+MIP:   mutation (14142 fixed): Some((Infeasible, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [4, 4, 4, 5, 5, 5])
+MIP:   344.83s nodes     2627 open     510 lb -3.66548299e2 ub -3.45000000e2 lp_iters 1133650 sb_iters 147174 sb_lps 1248 sb_secs 37.93 node_iters 977200 (first 913535, lps 2606) heur_iters 16241 dive_iters 4107 lp_rows 4034 node_cut_secs 5.12 pool_len 0 pool_idle 0
+MIP:   348.01s nodes     2649 open     499 lb -3.65232954e2 ub -3.45000000e2 lp_iters 1143398 sb_iters 148264 sb_lps 1268 sb_secs 38.27 node_iters 985858 (first 921832, lps 2628) heur_iters 16241 dive_iters 4107 lp_rows 4043 node_cut_secs 5.20 pool_len 0 pool_idle 0
+MIP:   350.10s nodes     2664 open     506 lb -3.65232954e2 ub -3.45000000e2 lp_iters 1150119 sb_iters 148998 sb_lps 1270 sb_secs 38.49 node_iters 991845 (first 927819, lps 2643) heur_iters 16241 dive_iters 4107 lp_rows 4041 node_cut_secs 5.20 pool_len 1 pool_idle 1
+MIP:   352.17s nodes     2701 open     503 lb -3.65232954e2 ub -3.45000000e2 lp_iters 1156539 sb_iters 149789 sb_lps 1284 sb_secs 38.76 node_iters 997449 (first 933291, lps 2677) heur_iters 16291 dive_iters 4132 lp_rows 4041 node_cut_secs 5.20 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 0.81s
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [4, 4, 5, 5, 5, 5])
+MIP:   354.39s nodes     2713 open     498 lb -3.65000000e2 ub -3.45000000e2 lp_iters 1161126 sb_iters 150244 sb_lps 1286 sb_secs 38.90 node_iters 1001581 (first 937305, lps 2687) heur_iters 16294 dive_iters 4132 lp_rows 4041 node_cut_secs 5.20 pool_len 0 pool_idle 0
+MIP:   356.54s nodes     2743 open     477 lb -3.65000000e2 ub -3.45000000e2 lp_iters 1166816 sb_iters 150361 sb_lps 1288 sb_secs 38.95 node_iters 1007154 (first 942803, lps 2709) heur_iters 16294 dive_iters 4132 lp_rows 4041 node_cut_secs 5.20 pool_len 0 pool_idle 0
+MIP:   358.67s nodes     2756 open     472 lb -3.65000000e2 ub -3.45000000e2 lp_iters 1174076 sb_iters 151317 sb_lps 1320 sb_secs 39.25 node_iters 1013458 (first 948687, lps 2723) heur_iters 16294 dive_iters 4132 lp_rows 4043 node_cut_secs 5.20 pool_len 0 pool_idle 0
+MIP:   360.93s nodes     2767 open     460 lb -3.64839830e2 ub -3.45000000e2 lp_iters 1181206 sb_iters 153251 sb_lps 1338 sb_secs 39.81 node_iters 1018654 (first 953381, lps 2733) heur_iters 16294 dive_iters 4132 lp_rows 4045 node_cut_secs 5.20 pool_len 0 pool_idle 0
+MIP:   363.10s nodes     2791 open     447 lb -3.64207048e2 ub -3.45000000e2 lp_iters 1187605 sb_iters 153251 sb_lps 1338 sb_secs 39.81 node_iters 1025053 (first 959569, lps 2747) heur_iters 16294 dive_iters 4132 lp_rows 4047 node_cut_secs 5.30 pool_len 0 pool_idle 0
+MIP:   365.19s nodes     2814 open     437 lb -3.63907641e2 ub -3.45000000e2 lp_iters 1193645 sb_iters 153251 sb_lps 1338 sb_secs 39.81 node_iters 1031093 (first 965367, lps 2763) heur_iters 16294 dive_iters 4132 lp_rows 4053 node_cut_secs 5.36 pool_len 0 pool_idle 0
+MIP:   367.24s nodes     2832 open     425 lb -3.63119181e2 ub -3.45000000e2 lp_iters 1198964 sb_iters 154511 sb_lps 1362 sb_secs 40.17 node_iters 1035152 (first 969235, lps 2781) heur_iters 16294 dive_iters 4132 lp_rows 4055 node_cut_secs 5.36 pool_len 0 pool_idle 0
+MIP:   369.62s nodes     2847 open     414 lb -3.62652714e2 ub -3.45000000e2 lp_iters 1206611 sb_iters 155168 sb_lps 1378 sb_secs 40.36 node_iters 1042142 (first 976020, lps 2794) heur_iters 16294 dive_iters 4132 lp_rows 4057 node_cut_secs 5.36 pool_len 0 pool_idle 0
+MIP:   371.65s nodes     2879 open     387 lb -3.62260274e2 ub -3.45000000e2 lp_iters 1212539 sb_iters 155852 sb_lps 1382 sb_secs 40.52 node_iters 1047386 (first 980833, lps 2813) heur_iters 16294 dive_iters 4132 lp_rows 4052 node_cut_secs 5.45 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 0.32s
+MIP:   local branching k=4: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [4, 5, 5, 5, 5, 5])
+MIP:   373.76s nodes     2897 open     374 lb -3.61573092e2 ub -3.45000000e2 lp_iters 1217763 sb_iters 155921 sb_lps 1386 sb_secs 40.55 node_iters 1052541 (first 985352, lps 2825) heur_iters 16297 dive_iters 4132 lp_rows 4068 node_cut_secs 5.64 pool_len 0 pool_idle 0
+MIP:   376.16s nodes     2920 open     354 lb -3.60589520e2 ub -3.45000000e2 lp_iters 1224717 sb_iters 157000 sb_lps 1406 sb_secs 40.86 node_iters 1058416 (first 991009, lps 2840) heur_iters 16297 dive_iters 4132 lp_rows 4069 node_cut_secs 5.64 pool_len 0 pool_idle 0
+MIP:   378.24s nodes     2936 open     340 lb -3.60000000e2 ub -3.45000000e2 lp_iters 1230847 sb_iters 157000 sb_lps 1406 sb_secs 40.86 node_iters 1064546 (first 996924, lps 2851) heur_iters 16297 dive_iters 4132 lp_rows 4070 node_cut_secs 5.68 pool_len 0 pool_idle 0
+MIP:   380.60s nodes     2950 open     328 lb -3.59894052e2 ub -3.45000000e2 lp_iters 1238073 sb_iters 158978 sb_lps 1436 sb_secs 41.48 node_iters 1069708 (first 1001855, lps 2863) heur_iters 16469 dive_iters 4218 lp_rows 4071 node_cut_secs 5.68 pool_len 3 pool_idle 3
+MIP:   383.85s nodes     2975 open     308 lb -3.59433638e2 ub -3.45000000e2 lp_iters 1248240 sb_iters 160158 sb_lps 1444 sb_secs 41.82 node_iters 1078695 (first 1009966, lps 2884) heur_iters 16469 dive_iters 4218 lp_rows 4073 node_cut_secs 5.68 pool_len 3 pool_idle 3
+MIP:   385.89s nodes     2995 open     302 lb -3.59240047e2 ub -3.45000000e2 lp_iters 1253636 sb_iters 160530 sb_lps 1446 sb_secs 41.91 node_iters 1083719 (first 1014990, lps 2898) heur_iters 16469 dive_iters 4218 lp_rows 4070 node_cut_secs 5.68 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 145 free columns of 20203, status Infeasible, nodes 0, objective None, 0.01s
+MIP:   ALNS arm 0 reward 0.000 (counts [5, 5, 5, 5, 5, 5])
+MIP:   388.77s nodes     3016 open     291 lb -3.58478261e2 ub -3.45000000e2 lp_iters 1262117 sb_iters 161094 sb_lps 1456 sb_secs 42.07 node_iters 1091636 (first 1022538, lps 2916) heur_iters 16469 dive_iters 4218 lp_rows 4078 node_cut_secs 5.73 pool_len 0 pool_idle 0
+MIP:   390.79s nodes     3037 open     268 lb -3.57889752e2 ub -3.45000000e2 lp_iters 1267449 sb_iters 161094 sb_lps 1456 sb_secs 42.08 node_iters 1096968 (first 1027805, lps 2929) heur_iters 16469 dive_iters 4218 lp_rows 4085 node_cut_secs 5.80 pool_len 0 pool_idle 0
+MIP:   393.75s nodes     3053 open     242 lb -3.57500000e2 ub -3.45000000e2 lp_iters 1275608 sb_iters 161094 sb_lps 1456 sb_secs 42.08 node_iters 1105127 (first 1035931, lps 2937) heur_iters 16469 dive_iters 4218 lp_rows 4087 node_cut_secs 5.80 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 87 free columns of 20203, status Infeasible, nodes 0, objective None, 0.00s
+MIP:   DINS (20098 of 20203 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [5, 5, 5, 5, 5, 6])
+MIP:   395.87s nodes     3074 open     211 lb -3.56666667e2 ub -3.45000000e2 lp_iters 1281232 sb_iters 161094 sb_lps 1456 sb_secs 42.08 node_iters 1110751 (first 1041441, lps 2948) heur_iters 16469 dive_iters 4218 lp_rows 4093 node_cut_secs 5.88 pool_len 0 pool_idle 0
+MIP:   398.20s nodes     3077 open     207 lb -3.56404605e2 ub -3.45000000e2 lp_iters 1288222 sb_iters 164634 sb_lps 1488 sb_secs 43.18 node_iters 1114201 (first 1044768, lps 2954) heur_iters 16469 dive_iters 4218 lp_rows 4094 node_cut_secs 5.88 pool_len 3 pool_idle 3
+MIP:   400.23s nodes     3118 open     196 lb -3.55193662e2 ub -3.45000000e2 lp_iters 1293139 sb_iters 164783 sb_lps 1498 sb_secs 43.26 node_iters 1118969 (first 1049521, lps 2985) heur_iters 16469 dive_iters 4218 lp_rows 4090 node_cut_secs 5.93 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 102 free columns of 20203, status Infeasible, nodes 0, objective None, 0.04s
+MIP:   crossover (20101 of 20203 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [5, 5, 5, 5, 6, 6])
+MIP:   402.25s nodes     3160 open     174 lb -3.55000000e2 ub -3.45000000e2 lp_iters 1296929 sb_iters 164907 sb_lps 1508 sb_secs 43.34 node_iters 1122635 (first 1053178, lps 3014) heur_iters 16517 dive_iters 4218 lp_rows 4089 node_cut_secs 5.93 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 1848 free columns of 20203, status Infeasible, nodes 0, objective None, 0.01s
+MIP:   mutation (14174 fixed): Some((Infeasible, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [5, 5, 5, 6, 6, 6])
+MIP:   404.32s nodes     3183 open     162 lb -3.54877618e2 ub -3.45000000e2 lp_iters 1301896 sb_iters 165778 sb_lps 1526 sb_secs 43.63 node_iters 1126731 (first 1056730, lps 3032) heur_iters 16519 dive_iters 4218 lp_rows 4093 node_cut_secs 5.93 pool_len 0 pool_idle 0
+MIP:   406.60s nodes     3194 open     148 lb -3.54375000e2 ub -3.45000000e2 lp_iters 1308420 sb_iters 166461 sb_lps 1550 sb_secs 43.89 node_iters 1132572 (first 1062488, lps 3042) heur_iters 16519 dive_iters 4218 lp_rows 4094 node_cut_secs 5.93 pool_len 3 pool_idle 3
+MIP:   409.25s nodes     3202 open     136 lb -3.54166667e2 ub -3.45000000e2 lp_iters 1315987 sb_iters 167420 sb_lps 1554 sb_secs 44.19 node_iters 1139180 (first 1068975, lps 3048) heur_iters 16519 dive_iters 4218 lp_rows 4096 node_cut_secs 5.93 pool_len 3 pool_idle 3
+MIP:   sub-MIP: 6119 free columns of 20203, status TimeLimit, nodes 0, objective None, 0.64s
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [5, 5, 6, 6, 6, 6])
+MIP:   411.53s nodes     3225 open     112 lb -3.53326882e2 ub -3.45000000e2 lp_iters 1319647 sb_iters 167559 sb_lps 1556 sb_secs 44.22 node_iters 1142701 (first 1071979, lps 3066) heur_iters 16522 dive_iters 4218 lp_rows 4095 node_cut_secs 5.99 pool_len 1 pool_idle 1
+MIP:   413.60s nodes     3246 open      82 lb -3.52547710e2 ub -3.45000000e2 lp_iters 1325157 sb_iters 168141 sb_lps 1566 sb_secs 44.37 node_iters 1147629 (first 1076827, lps 3079) heur_iters 16522 dive_iters 4218 lp_rows 4096 node_cut_secs 5.99 pool_len 3 pool_idle 3
+MIP:   415.72s nodes     3270 open      50 lb -3.52235852e2 ub -3.45000000e2 lp_iters 1331190 sb_iters 169099 sb_lps 1580 sb_secs 44.66 node_iters 1152704 (first 1081353, lps 3092) heur_iters 16522 dive_iters 4218 lp_rows 4096 node_cut_secs 5.99 pool_len 0 pool_idle 0
+MIP:   417.74s nodes     3298 open      12 lb -3.51155882e2 ub -3.45000000e2 lp_iters 1336478 sb_iters 169942 sb_lps 1590 sb_secs 44.89 node_iters 1157149 (first 1085597, lps 3105) heur_iters 16522 dive_iters 4218 lp_rows 4097 node_cut_secs 5.99 pool_len 0 pool_idle 0
+MIP: MEMCAP: tid 3 limit 11525 MB peak rss 1691 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: MEMCAP: tid 1 limit 11525 MB peak rss 1691 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: MEMCAP: tid 2 limit 11525 MB peak rss 1691 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: tree thread 0 joined 0.008s after the stop signal (418.96s)
+MIP: tree thread 1 joined 0.008s after the stop signal (418.96s)
+MIP: tree thread 2 joined 0.011s after the stop signal (418.97s)
+MIP: finish start Optimal (418.97s)
+MIP: MEMCAP: tid 0 limit 11525 MB peak rss 1691 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: tree search threads: worker nodes 14069, nodes given away 557, taken 0, global bounds taken from other threads 0, proofs 2686 and conflicts 1567 taken from other threads
+MIP:   418.97s nodes     3308 open       0 lb inf ub -3.45000000e2 lp_iters 1337735 sb_iters 169942 sb_lps 1590 sb_secs 44.89 node_iters 1158406 (first 1086845, lps 3111) heur_iters 16522 dive_iters 4218 lp_rows 4098 node_cut_secs 5.99 pool_len 0 pool_idle 4
+MIP: dual proofs and conflicts 944 (conflicts added 24 (from proofs 836), Farkas 449, pruned 461 nodes, tightened 2813192 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 3602, no 1-UIP 144, 1-UIP not a row 1, no decision set 145, decision set not a row 0; not a row because continuous 0, general integer 6, both sides 0
+MIP: cut pool propagation: calls 7439, pruned 175 nodes, tightened 131609 bounds, 9.91s, pool 1747 cuts (2311714 nonzeros); updated terms 1008058569, candidates 304746 (172926767 nonzeros), rebuilds 15
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 5279, in pool 1945 (aged out 3334), pruned 147 nodes, tightened 12880 bounds
+MIP: proof CMIR cuts: tried 1087, added 997, entered the cut pool 995
+MIP: conflict analysis (HiGHS style): calls 4781, conflicts 10441, added 3707, mean length 286.0, max length 6160, 4.63s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 4822, reason row lacks column 0, empty 0, too long at the end 1051 (total length 175123), max length 50
+MIP: branching: 2258 selections, 547 without strong branching for dual degeneracy; sb LPs 1590 iters 169942
+MIP: sibling backtracks 820; basis restores 2258 (basic count mismatch 310), first LP iterations after a restore 767216
+MIP: mem1 sibling LU (all threads): held at most 1, pushed 8803, dropped 4060, adopted 1180
+MIP: memc (all threads): packed nodes 890, changes 40872 (176584 bytes packed, 980928 unpacked), bases 890 (2819840 bytes packed, 21157970 unpacked)
+MIP: basis nb diag: tree first LPs restored 7302 iters 3335706 (456.8/LP), others 5020 iters 812970 (161.9/LP); root LPs: submip 49 lps 2042 iters (41.7/LP) 0.25s, bgcopy 1 lps 419 iters (419.0/LP) 0.08s, find 1 lps 419 iters (419.0/LP) 0.08s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 1052 iters (1052.0/LP) 0.10s; nb hints applied 0 solves, 0 given, 0 changed
+MIP: node diag: nodes 3308 node LPs 3111 mean rows 3914.7 iters 1158406 (372.4/LP) LP secs 315.98 sep rounds 86 added 86 node cut secs 5.99 final rows 4098
+MIP: adaptive node cuts: rounds 86 effective 28 skipped 0 (rate 0.405), node cut secs 5.99, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [4, 58, 14, 6, 4], cut nnz Some(1874.638339837246) (rows mean 16.8)
+MIP: finish done (418.97s)
+MIP: solve returned Optimal after 422.02s (time limit 600.00s)
+MIP: polished the solution (422.02s)
+{"status": "optimal", "objective": -345.0, "bound": -345.0, "nodes": 17377, "time": 422.03623976099993, "root_bound": -440.0, "first_solution_time": 4.800198697, "first_solution_objective": -15.0}

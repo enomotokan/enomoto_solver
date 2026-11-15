@@ -1,0 +1,81 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+LP neos-933966 has 7154 rows; 31762 cols; 43881 nonzeros
+Coefficient ranges:
+  Matrix  [1e+00, 1e+00]
+  Cost    [1e+00, 1e+03]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 1e+01]
+Not presolved: solving the LP
+IPX model has 7154 rows, 31762 columns and 43881 nonzeros
+Input
+    Number of variables:                                31762
+    Number of free variables:                           0
+    Number of constraints:                              7154
+    Number of equality constraints:                     0
+    Number of matrix entries:                           43881
+    Matrix range:                                       [1e+00, 1e+00]
+    RHS range:                                          [1e+00, 1e+01]
+    Objective range:                                    [1e+00, 1e+03]
+    Bounds range:                                       [1e+00, 1e+00]
+Preprocessing
+    Dualized model:                                     no
+    Number of dense columns:                            0
+    Range of scaling factors:                           [1.00e+00, 1.00e+00]
+    Scaled cost norm:                                   1000
+    Scaled bounds norm:                                 14
+IPX version 1.0
+Interior point solve
+ Iter       primal obj         dual obj       pinf       dinf       gap      time
+   0   -5.82243402e+04  -8.48750840e+06   3.20e-01   1.13e+00  1.97e+00       0.0
+   1    4.33244193e+05  -7.87806423e+06   1.23e-01   6.61e-01  2.23e+00       0.0
+   2    4.71781806e+05  -7.04388635e+06   7.07e-02   2.05e-01  2.29e+00       0.0
+   3    1.14826859e+05  -3.79674235e+06   1.51e-02   1.97e-02  2.12e+00       0.0
+   4    8.65315805e+04  -2.49078826e+06   3.06e-03   6.26e-03  2.14e+00       0.0
+   5    4.83849010e+04  -7.18025612e+05   1.32e-03   1.31e-03  2.29e+00       0.0
+   6    2.64590237e+04  -2.57088832e+05   6.06e-04   4.63e-05  2.46e+00       0.1
+   7    1.88765236e+04  -1.11325521e+05   2.94e-04   3.16e-06  2.82e+00       0.1
+   8    5.07976972e+03  -3.10289302e+04   4.62e-05   1.30e-07  2.78e+00       0.1
+   9    1.29130160e+03  -3.26954481e+03   7.43e-06   1.30e-13  4.61e+00       0.1
+  10    5.40248076e+02  -7.34461162e+02   1.00e-06   3.85e-14  1.30e+01       0.2
+ Constructing starting basis...
+ Iter       primal obj         dual obj       pinf       dinf       gap      time
+  11    4.63908098e+02   8.28927955e+01   5.15e-07   5.00e-15  1.39e+00       0.3
+  12    3.71105929e+02   2.04860431e+02   1.58e-07   4.54e-16  5.75e-01       0.4
+  13    3.28172820e+02   2.95152955e+02   2.87e-08   2.98e-16  1.06e-01       0.5
+  14    3.19500381e+02   3.13197393e+02   4.19e-09   2.90e-16  1.99e-02       0.6
+  15    3.18044713e+02   3.16224947e+02   9.22e-11   2.75e-16  5.72e-03       0.6
+  16    3.18027132e+02   3.17734217e+02   3.28e-16   3.00e-16  9.19e-04       0.6
+  17    3.18000900e+02   3.17907161e+02   3.96e-16   2.76e-16  2.94e-04       0.7
+  18    3.18002828e+02   3.17991467e+02   4.11e-16   2.94e-16  3.56e-05       0.7
+  19    3.18000001e+02   3.17999063e+02   4.64e-16   3.09e-16  2.94e-06       0.7
+  20    3.18000002e+02   3.17999744e+02   3.29e-16   2.66e-16  8.09e-07       0.7
+  21    3.18000001e+02   3.17999970e+02   2.65e-16   2.52e-16  1.00e-07       0.8
+  22    3.18000001e+02   3.17999990e+02   3.15e-16   3.07e-16  3.58e-08       0.8
+  23    3.18000001e+02   3.17999997e+02   2.58e-16   3.21e-16  1.12e-08       0.8
+  24*   3.18000000e+02   3.17999999e+02   2.89e-16   3.25e-16  4.20e-09       0.8
+Running crossover as requested
+    Primal residual before push phase:                  4.47e-09
+    Dual residual before push phase:                    4.70e-09
+    Number of dual pushes required:                     795
+    Number of primal pushes required:                   3172
+Summary
+    Runtime:                                            1.33s
+    Status interior point solve:                        optimal
+    Status crossover:                                   optimal
+    objective value:                                    3.18000000e+02
+    interior solution primal residual (abs/rel):        4.47e-09 / 2.98e-10
+    interior solution dual residual (abs/rel):          3.77e-10 / 3.77e-13
+    interior solution objective gap (abs/rel):          1.34e-06 / 4.19e-09
+    basic solution primal infeasibility:                6.37e-13
+    basic solution dual infeasibility:                  1.15e-08
+Ipx: IPM       optimal
+Ipx: Crossover optimal
+
+Model name          : neos-933966
+Model status        : Optimal
+IPM       iterations: 24
+Crossover iterations: 2884
+Objective value     :  3.1800000000e+02
+P-D objective error :  9.3260686109e-13
+HiGHS run time      :          1.33

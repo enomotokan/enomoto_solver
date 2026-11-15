@@ -1,0 +1,43 @@
+MIP: presolve: rows 50781 -> 48880, free columns 55156 -> 53255, nonzeros 268173 -> 264321, postsolve steps 1901 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 0 of 53255 free columns fixed (0.02s), not used
+MIP: LP probing: root LP 6.35s (17600 iters, size 368357), tried 0, fixed 0, basis passed true, total 17600 iters 6.35s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.11s), not used
+MIP: probing: 38105 of 38109 binaries probed (1 passes), 8 fixed, 4 bounds tightened, 2118713 implications (2.02s, cpu 1.98s, work 96473821, pwork 1354957579, chg 5477694)
+MIP: probing: 8 equivalent binary pairs
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (1469416 edges, 0.43s)
+MIP: symmetry: orbital fixing with 0 of 1 generators
+MIP: symmetry: 1 full orbitopes (1484x2)
+MIP: symmetry: 1 generators, 2156 orbits on 4312 columns, 0 lex-leader rows (0.57s, work 33113604, search 110312, verify 736714, detect 0.57s, refine 0.47s, log work 128805312)
+MIP: fixed-charge check: vb rows 29956 of 48880, continuous with vb 14978 of 15146
+MIP: root LP basis from the presolve LP probing: used (with rows)
+MIP: solving the root LP (0.08s)
+MIP: root LP 7.7176748012e6 (435 iters, 0.73s)
+MIP: fixed-charge check: vb rows 29956 of 48880, continuous with vb 14978 of 15146
+MIP: fixed-charge check: vb rows 29956 of 48880, continuous with vb 14978 of 15146
+MIP: fixed-charge check: vb rows 29956 of 48880, continuous with vb 14978 of 15146
+MIP: fixed-charge check: vb rows 29956 of 48880, continuous with vb 14978 of 15146
+MCF detect: rows 48880 cols 55156 | flow cands 18756 flow rows 2941 commodities 11 cap cands 2773 arcs 1747 nodes 1522 incons 35.00 undirected | fail 'inconsistent' | networks [] fc_network false | 0.060s
+MIP: FJ problem (FJ_P3): rows 48880 -> 48866, free columns 53243 -> 53061, 0 continuous bounds tightened (3.38s)
+MIP: cut selection probe: compared at 0 rounds (time budget), probe wall 4.52s (budget 2.5s)
+MIP: cut selection probe (6 rounds): default 16 cuts gain 0.000000e0 (0.00s), pool 90 cuts gain 0.000000e0 (0.00s) -> default (rule rate, probe 0.00s in total, 5.25s)
+MIP: cut round 0: 16 cuts (of 1442, sep 1.67s, LP 621 iters), LP rows 48896 (cut rows mean nnz 19), obj 7.7186765655e6 (7.69s)
+MIP: fixed-integer LP dual check: c x 4.6622993949e8, dual bound 1.2114085388e7 -> solve
+MIP: fixed-integer LP: TimeLimit (1921 iters)
+MIP:   global fixed integers 1913 of 40010 (newly 0 since the root LP)
+MIP: new incumbent 4.6713594954e8 at node 0 (8.72s) [Local-MIP]
+MIP: Local-MIP solution accepted true (8.72s)
+MIP: cut round 1: root cut time cap check: clock 3.218s of cap 5.03s (min rounds 0)
+MIP: cut round 1: LP status IterationLimit, removed the cuts (Optimal)
+MIP: fixed-integer LP dual check: c x 4.6615211179e8, dual bound 1.2114717953e7 -> solve
+MIP: fixed-integer LP: TimeLimit (1793 iters)
+MIP:   global fixed integers 1913 of 40010 (newly 0 since the root LP)
+MIP: new incumbent 4.6705812184e8 at node 0 (16.18s) [Local-MIP]
+MIP: Local-MIP solution accepted true (16.18s)
+MIP: cut round 2: root cut time cap check: clock 10.423s of cap 5.03s (min rounds 0) -> stop
+MIP: clique graph: 1469416 edges (327323 from rows, probing implications 2118713)
+MIP: clique fallback: no violated clique cuts; not used (0.57s)
+MIP: cut loop done: 51 cuts added, 16 in LP, pool 1858 cuts (2304058 nonzeros), obj 7.7176748012e6 -> 7.7186765655e6
+MIP: find thread started (budget 10.0s, 16.87s)
+MIP: fixed-charge check: vb rows 29956 of 48880, continuous with vb 14978 of 15146
+MIP: the incumbent is a poor feasibility jump solution; background cuts use 1 threads
+MIP: background cuts: basis with the column values not passed (root LP 0.65s)

@@ -1,0 +1,68 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP neos-1445765 has 2147 rows; 20617 cols; 40230 nonzeros; 2150 integer variables (2150 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 5e+01]
+  Cost    [1e+01, 5e+01]
+  Bound   [1e+00, 1e+00]
+  RHS     [2e+01, 2e+01]
+Presolving model
+1001 rows, 2146 cols, 20613 nonzeros 0s
+999 rows, 2133 cols, 20524 nonzeros 0s
+Presolve reductions: rows 999(-1148); columns 2133(-18484); nonzeros 20524(-19706) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   999 rows
+   2133 cols (2133 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   20524 nonzeros
+   Thread count 1 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ z       0       0         0   0.00%   -inf            0                  Large        0      0      0         0     0.9s
+ J       0       0         0   0.00%   -inf            -49                Large        0      0      0         0     1.0s
+ R       0       0         0   0.00%   -18811.492536   -5659            232.42%        0      0      0      4033     3.9s
+         0       0         0   0.00%   -18671.258943   -5659            229.94%     1144     15     26      4785     9.4s
+         0       0         0   0.00%   -18642.655769   -5659            229.43%     2517     26     26      5736    14.8s
+ L       0       0         0   0.00%   -18636.649444   -13124            42.00%     1899     43     26      7028    32.4s
+ L       0       0         0   0.00%   -18636.649444   -14723            26.58%     1398     32     26     14256    47.1s
+         2       2         1   0.00%   -18636.649444   -14723            26.58%     1398     32     26    109959    90.0s
+         2       2         1   0.00%   -18636.649444   -14723            26.58%     1398     32     26    109959    90.0s
+
+Solving report
+  Model             neos-1445765
+  Status            Time limit reached
+  Primal bound      -14723
+  Dual bound        -18636
+  Gap               26.58%
+  P-D integral      1881.4762779
+  Solution status   feasible
+                    -14723 (objective)
+                    0 (bound viol.)
+                    1.23207051632e-13 (int. viol.)
+                    0 (row viol.)
+  Timing            90.00
+                    1.54 (Presolve)
+                        MIP    time [calls] = 0.84 [1]
+                        subMIP time [calls] = 0.69 [6]
+                    88.43 (Solve)
+                        MIP    time [calls] = 61.22 [1]
+                        subMIP time [calls] = 27.22 [2]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [6]
+  Max sub-MIP depth 4
+  Nodes             2
+  Repair LPs        0
+  LP iterations     109959
+                    84169 (strong br.)
+                    2995 (separation)
+                    18762 (heuristics)
+{"status": "Time limit reached", "objective": -14723.00000000001, "bound": -18636.0, "nodes": 2, "time": 90.007743723}

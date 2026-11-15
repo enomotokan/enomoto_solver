@@ -1,0 +1,79 @@
+total runtime: 174.50s.
+calls to allocation functions: 4640353 (26591/s)
+temporary memory allocations: 2333185 (13370/s)
+peak heap memory consumption: 2.63G
+peak RSS (including heaptrack overhead): 2.80G
+total memory leaked: 2.91M
+suppressed leaks: 87.41K
+
+分類ごとの合計 [MB] (最大のときに生きていた確保):
+     2197.9  内点法 (multifrontal、gemm の作業領域を含む)
+      161.6  そのほか
+       72.7  FT の更新の eta (lu.rs commit_update_tracked)
+
+上位 5 の確保の場所 (src の枠だけ、最初の 12 枠):
+- 2180.0 MB (31 回) 内点法 (multifrontal、gemm の作業領域を含む)
+    __rust_alloc::alloc @src/lib.rs:122
+    __rust_alloc @src/lib.rs:168
+    gemm @src/lib.rs:1300
+    gemm_sub @src/interior_point/multifrontal.rs:347
+    {closure#0} @src/interior_point/multifrontal.rs:445
+    {closure#1} @src/interior_point/multifrontal.rs:447
+    sub_update @src/interior_point/multifrontal.rs:462
+    finish @src/interior_point/multifrontal.rs:999
+    run_seq @src/interior_point/multifrontal.rs:793
+    run @src/interior_point/multifrontal.rs:726
+    consume_iter<>::consume<>::{closure#0} @src/interior_point/multifrontal.rs:740
+    wait_until_cold::execute::execute @src/job.rs:64
+- 72.7 MB (86512 回) FT の更新の eta (lu.rs commit_update_tracked)
+    new @src/interior_point/kkt.rs:899
+    solve_box_lp_scaled::new @src/interior_point/kkt.rs:1788
+    solve_box_lp_scaled @src/interior_point/boxed.rs:393
+    solve_box_lp_warm @src/interior_point/boxed.rs:298
+    solve_ipm_crossover_with @src/simplex/crossover.rs:886
+    solve_ipm_crossover @src/simplex/crossover.rs:707
+    with_deadline<>::{closure#0}::with_token<>::{closure#0}::wit @src/simplex/mip_lp.rs:969
+    with_deadline<>::{closure#0}::with_token<>::{closure#0}::wit @src/cancel.rs:140
+    with_deadline<>::{closure#0}::with_token<>::{closure#0} @src/simplex/mip_lp.rs:969
+    with_deadline<>::{closure#0}::with_token<> @src/cancel.rs:80
+    with_deadline<>::{closure#0} @src/simplex/mip_lp.rs:969
+    with_deadline<> @src/cancel.rs:67
+- 64.6 MB (31350 回) そのほか
+    new::from_elem<>::from_elem<>::with_capacity_zeroed_in<>::wi @src/lib.rs:131
+    new::from_elem<>::from_elem<>::with_capacity_zeroed_in<>::wi @src/lib.rs:168
+    new @src/sparse.rs:622
+    new @src/interior_point/kkt.rs:961
+    solve_box_lp_scaled::new @src/interior_point/kkt.rs:1788
+    solve_box_lp_scaled @src/interior_point/boxed.rs:393
+    solve_box_lp_warm @src/interior_point/boxed.rs:298
+    solve_ipm_crossover_with @src/simplex/crossover.rs:886
+    solve_ipm_crossover @src/simplex/crossover.rs:707
+    with_deadline<>::{closure#0}::with_token<>::{closure#0}::wit @src/simplex/mip_lp.rs:969
+    with_deadline<>::{closure#0}::with_token<>::{closure#0}::wit @src/cancel.rs:140
+    with_deadline<>::{closure#0}::with_token<>::{closure#0} @src/simplex/mip_lp.rs:969
+- 20.6 MB (17285 回) そのほか
+    finish_grow<>::allocate::alloc_impl::alloc_impl_runtime::all @src/lib.rs:122
+    finish_grow<>::allocate::alloc_impl::alloc_impl_runtime::all @src/lib.rs:168
+    solve_refined @src/interior_point/kkt.rs:1841
+    solve_box_lp_scaled @src/interior_point/boxed.rs:485
+    solve_box_lp_warm @src/interior_point/boxed.rs:298
+    solve_ipm_crossover_with @src/simplex/crossover.rs:886
+    solve_ipm_crossover @src/simplex/crossover.rs:707
+    with_deadline<>::{closure#0}::with_token<>::{closure#0}::wit @src/simplex/mip_lp.rs:969
+    with_deadline<>::{closure#0}::with_token<>::{closure#0}::wit @src/cancel.rs:140
+    with_deadline<>::{closure#0}::with_token<>::{closure#0} @src/simplex/mip_lp.rs:969
+    with_deadline<>::{closure#0}::with_token<> @src/cancel.rs:80
+    with_deadline<>::{closure#0} @src/simplex/mip_lp.rs:969
+- 17.9 MB (53936 回) 内点法 (multifrontal、gemm の作業領域を含む)
+    take_buf::from_elem<>::from_elem<>::with_capacity_zeroed_in< @src/lib.rs:131
+    take_buf::from_elem<>::from_elem<>::with_capacity_zeroed_in< @src/lib.rs:168
+    take_buf @src/interior_point/multifrontal.rs:605
+    ensure_u @src/interior_point/multifrontal.rs:839
+    finish @src/interior_point/multifrontal.rs:896
+    run @src/interior_point/multifrontal.rs:742
+    consume_iter<>::consume<>::{closure#0} @src/interior_point/multifrontal.rs:740
+    run @src/interior_point/multifrontal.rs:740
+    callback<>::bridge_producer_consumer<>::helper<>::fold_with< @src/interior_point/multifrontal.rs:717
+    factor @src/interior_point/multifrontal.rs:716
+    factor @src/interior_point/kkt.rs:1484
+    solve_box_lp_scaled::factor @src/interior_point/kkt.rs:1827

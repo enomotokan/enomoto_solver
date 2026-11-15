@@ -1,0 +1,60 @@
+diff --git a/src/mip/rcstrong.rs b/src/mip/rcstrong.rs
+index f11cc5df..49dcafa2 100644
+--- a/src/mip/rcstrong.rs
++++ b/src/mip/rcstrong.rs
+@@ -15,6 +15,15 @@
+ //!   (既定 2000) 本まで。打ち切り値が変わるたびに作り直す。
+ //! - `r` (`i` と一緒に) 切り捨てを根の大域的な固定だけにし、ノードの局所的な固定では切り捨てない (pk1 でノードの切り捨てが
+ //!   揃って遅くしたため。ノードでは数えるだけ)。
++//! - `g` (`i` と一緒に、RCSTRONG2 の試作。analysis/rcstrong2_20261112.md): 根の大域的な固定で、暗黙の整数の連続列は切り捨てで
++//!   境界に**固定される**ときだけ締める (固定にならない締め付けは捨てる)。rmatr100-p10 では締め付けのほとんどが 0 への固定で、
++//!   遅れは消えなかった。
++//! - `n` (`i` と一緒に、RCSTRONG2 の試作): カットを作るときの境界 (`Solver::separate` の `lo`・`up`) では、暗黙の整数の連続列
++//!   (印の列) の大域的な境界を前処理の後の境界 (`p.col_lo`・`p.col_up`) まで広げる (広い境界で作ったカットも有効なので、正しさは
++//!   変わらない)。根の固定は伝播・LP には効かせ、カットの強まりだけを止める。rmatr100-p10 では根の固定で連続列 約 7000 本が
++//!   大域的に 0 に固定され、tableau 行の CMIR がノードで効き始めて (既定は候補 0) ノードの LP に行が足された。従のスレッドも
++//!   共有の大域的な境界を取り込むので、締める前の値を覚えるのではなく印の列を一律に広げる (印の列は根の伝播による締め付けも
++//!   カットでは使わなくなる。既定と少し違う)。
+ //! - `c` (診断、解き方は変えない): `i` で切り捨てたら新たに締まる・固定される本数を数えて、終わりに 1 行出す (`i` と一緒なら
+ //!   実際に締めた数)。
+ 
+@@ -284,10 +293,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
+                 bit(8, 3, c);
+             }
+         }
+-        if flag('i') {
++        // `g` (RCSTRONG2): 大域的に締めるのは切り捨てで境界に固定されるときだけ (固定にならない締め付けは捨てる)
++        if flag('i') && (!flag('g') || fixed) {
+             Some(r)
+         } else {
+             None
+         }
+     }
+ }
++
++/// `n`: カットを作るときの境界 (`lo`・`up`、長さは列の数以上) で、印の列を前処理の後の境界まで広げる。
++pub(crate) fn sep_bounds(st: &RcsState, p: &MipProblem, lo: &mut [f64], up: &mut [f64]) {
++    let Some(m) = st.mask.as_ref().filter(|m| m.len() == p.n) else { return };
++    if !(flag('i') && flag('n')) {
++        return;
++    }
++    for j in 0..p.n {
++        if m[j] {
++            lo[j] = lo[j].min(p.col_lo[j]);
++            up[j] = up[j].max(p.col_up[j]);
++        }
++    }
++}
+diff --git a/src/mip/separation.rs b/src/mip/separation.rs
+index 7f26f522..78f2adbb 100644
+--- a/src/mip/separation.rs
++++ b/src/mip/separation.rs
+@@ -5437,6 +5437,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
+         // カットは木全体で有効にするため、大域的な境界から作る
+         let mut lo = self.dom.global_lo.clone();
+         let mut up = self.dom.global_up.clone();
++        // 試作 `ENOMOTO_MIP_RCSTRONG` の `n` (RCSTRONG2): 暗黙の整数の連続列は前処理の後の境界でカットを作る
++        super::rcstrong::sep_bounds(&self.rcs, p, &mut lo, &mut up);
+         let mut is_int = self.cut_int.clone();
+         // 暗黙の整数列の境界も整数に丸める (整数列は丸め済み)
+         for j in 0..n {

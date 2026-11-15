@@ -1,0 +1,78 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+LP cryptanalysiskb128n5obj14 has 53750 rows; 48950 cols; 183749 nonzeros
+Coefficient ranges:
+  Matrix  [1e+00, 8e+00]
+  Cost    [0e+00, 0e+00]
+  Bound   [1e+00, 8e+00]
+  RHS     [1e+00, 1e+01]
+Not presolved: solving the LP
+IPX model has 53750 rows, 48950 columns and 183749 nonzeros
+Input
+    Number of variables:                                48950
+    Number of free variables:                           0
+    Number of constraints:                              53750
+    Number of equality constraints:                     2907
+    Number of matrix entries:                           183749
+    Matrix range:                                       [1e+00, 8e+00]
+    RHS range:                                          [1e+00, 1e+01]
+    Objective range:                                    [0e+00, 0e+00]
+    Bounds range:                                       [1e+00, 8e+00]
+Preprocessing
+    Dualized model:                                     no
+    Number of dense columns:                            0
+    Range of scaling factors:                           [5.00e-01, 1.00e+00]
+    Scaled cost norm:                                   0
+    Scaled bounds norm:                                 14
+IPX version 1.0
+Interior point solve
+ Iter       primal obj         dual obj       pinf       dinf       gap      time
+   0    0.00000000e+00  -4.64701224e+04   2.42e-01   2.02e+00  2.00e+00       0.1
+   1    0.00000000e+00  -5.71038781e+04   1.59e-01   2.07e-01  2.00e+00       0.2
+   2    0.00000000e+00  -5.29523586e+04   5.70e-02   2.07e-07  2.00e+00       0.3
+   3    0.00000000e+00  -3.22162745e+04   1.01e-02   2.95e-08  2.00e+00       0.5
+   4    0.00000000e+00  -1.14747139e+04   3.34e-03   5.33e-09  2.00e+00       1.1
+ Constructing starting basis...
+ Iter       primal obj         dual obj       pinf       dinf       gap      time
+   5    0.00000000e+00  -5.15298415e+03   4.20e-04   2.26e-09  2.00e+00       2.0
+   6    0.00000000e+00  -1.15015582e+03   4.85e-05   3.39e-10  2.00e+00       2.5
+   7    0.00000000e+00  -3.84702362e+02   5.32e-06   1.08e-10  1.99e+00       2.8
+   8    0.00000000e+00  -7.98659359e+01   9.53e-07   1.37e-11  1.95e+00       3.1
+   9    0.00000000e+00  -2.28137363e+01   1.10e-07   3.79e-12  1.84e+00       3.4
+  10    0.00000000e+00  -3.22612462e+00   2.30e-08   3.14e-13  1.23e+00       3.8
+  11    0.00000000e+00  -1.02689801e+00   2.83e-09   9.40e-14  6.79e-01       4.1
+  12    0.00000000e+00  -1.62570821e-01   3.53e-10   1.57e-14  1.50e-01       4.4
+  13    0.00000000e+00  -4.71851132e-02   1.43e-10   2.43e-14  4.61e-02       4.8
+  14    0.00000000e+00  -1.15193808e-02   2.10e-11   3.98e-14  1.15e-02       5.2
+  15    0.00000000e+00  -2.66368832e-03   1.15e-11   3.75e-14  2.66e-03       5.5
+  16    0.00000000e+00  -3.85883978e-04   7.18e-12   4.12e-14  3.86e-04       5.9
+  17    0.00000000e+00  -8.50420937e-05   3.12e-12   2.53e-14  8.50e-05       6.3
+  18    0.00000000e+00  -9.43027543e-06   2.96e-16   3.28e-14  9.43e-06       6.6
+  19    0.00000000e+00  -1.70068519e-06   3.26e-16   3.23e-14  1.70e-06       7.2
+  20    0.00000000e+00  -2.17323542e-07   1.78e-16   2.24e-14  2.17e-07       7.8
+  21*   0.00000000e+00   2.11139575e-14   1.78e-16   2.13e-14  2.11e-14       7.9
+Running crossover as requested
+    Primal residual before push phase:                  3.55e-15
+    Dual residual before push phase:                    2.13e-14
+    Number of dual pushes required:                     40
+    Number of primal pushes required:                   21974
+Summary
+    Runtime:                                            9.79s
+    Status interior point solve:                        optimal
+    Status crossover:                                   optimal
+    objective value:                                    0.00000000e+00
+    interior solution primal residual (abs/rel):        3.55e-15 / 2.37e-16
+    interior solution dual residual (abs/rel):          1.43e-14 / 1.43e-14
+    interior solution objective gap (abs/rel):          2.52e-13 / 2.52e-13
+    basic solution primal infeasibility:                9.77e-15
+    basic solution dual infeasibility:                  0.00e+00
+Ipx: IPM       optimal
+Ipx: Crossover optimal
+
+Model name          : cryptanalysiskb128n5obj14
+Model status        : Optimal
+IPM       iterations: 21
+Crossover iterations: 4895
+Objective value     :  0.0000000000e+00
+P-D objective error :  0.0000000000e+00
+HiGHS run time      :          9.81

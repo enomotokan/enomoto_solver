@@ -1,0 +1,32 @@
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: tightened 0 coefficients (skipped 0 in rows redundant within tolerance), normalized 5 integer rows
+MIP: presolve: rows 212 -> 211, free columns 260 -> 253, nonzeros 8619 -> 8344, postsolve steps 1 (parallel columns merged: 0 integer, 0 continuous)
+MIP: LP probing: root LP 0.01s (121 iters, size 8815), tried 8, fixed 0, basis passed false, total 505 iters 0.02s
+MIP: presolve again after probing (round 1)
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 211 -> 211, free columns 232 -> 232, nonzeros 8344 -> 8260, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: presolve again after probing: rows 211 -> 211 (less than 10% fewer), the result is not used
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.00s)
+MIP: root LP 1.4150000000e3 (73 iters, 0.01s)
+MIP:   global fixed integers 27 of 259 (newly 0 since the root LP)
+MIP: clique fallback: no violated clique cuts; not used (0.00s)
+MIP: zh trial (r): continuing the root cut loop with zerohalf (0.06s)
+MIP:   global fixed integers 27 of 259 (newly 0 since the root LP)
+MIP: cut loop done: 169 cuts added, 34 in LP, pool 1334 cuts (199999 nonzeros), obj 1.4250000000e3 -> 1.5268265076e3
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1000, work_iters: 20000, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 73 iters)
+MIP: background cuts: basis with the column values not passed (root LP 0.01s)
+MIP:   global fixed integers 27 of 259 (newly 0 since the root LP)
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (0.60s)
+MIP: restart check: newly fixed 0, integer columns 259, free at the root 232, threshold 2.6, root LP 0.01s
+TRSTAT: tree start outer 0.65 solve 0.60 restarts 0 lb 1.4150000000e3 ub 3.0750000000e3
+MIP:   global fixed integers 27 of 259 (newly 0 since the root LP)
+MIP:     2.00s nodes      200 open      47 lb 1.81757143e3 ub 2.81000000e3 lp_iters 33398 sb_iters 25665 sb_lps 292 sb_secs 0.77 node_iters 4885 (first 4015, lps 180) heur_iters 17435 dive_iters 1039 lp_rows 375 node_cut_secs 0.05 pool_len 2 pool_idle 0
+MIP:     4.00s nodes      983 open     445 lb 2.43400000e3 ub 2.81000000e3 lp_iters 62431 sb_iters 28505 sb_lps 436 sb_secs 0.91 node_iters 30954 (first 26909, lps 1106) heur_iters 17674 dive_iters 1154 lp_rows 387 node_cut_secs 0.36 pool_len 3 pool_idle 0
+MIP:     6.00s nodes     2024 open     606 lb 2.59175000e3 ub 2.81000000e3 lp_iters 85025 sb_iters 29221 sb_lps 512 sb_secs 0.95 node_iters 52732 (first 46573, lps 2210) heur_iters 17808 dive_iters 1188 lp_rows 402 node_cut_secs 0.61 pool_len 3 pool_idle 0
+MIP:     8.01s nodes     2730 open     449 lb 2.67900000e3 ub 2.81000000e3 lp_iters 99540 sb_iters 29623 sb_lps 556 sb_secs 0.98 node_iters 66725 (first 59453, lps 2927) heur_iters 21570 dive_iters 1206 lp_rows 440 node_cut_secs 0.78 pool_len 0 pool_idle 0
+MIP:     9.55s nodes     3325 open       0 lb inf ub 2.81000000e3 lp_iters 110613 sb_iters 29786 sb_lps 578 sb_secs 0.99 node_iters 77539 (first 69351, lps 3531) heur_iters 21685 dive_iters 1225 lp_rows 451 node_cut_secs 0.95 pool_len 0 pool_idle 4
+MIP: basis nb diag: tree first LPs restored 6102 iters 138554 (22.7/LP), others 4402 iters 129670 (29.5/LP); root LPs: submip 19 lps 705 iters (37.1/LP) 0.01s, bgcopy 1 lps 1 iters (1.0/LP) 0.00s, find 1 lps 1 iters (1.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 73 iters (73.0/LP) 0.01s; nb hints applied 6150 solves, 415941 given, 66867 changed
+MIP: node diag: nodes 3325 node LPs 3531 mean rows 403.4 iters 77539 (22.0/LP) LP secs 3.93 sep rounds 335 added 335 node cut secs 0.95 final rows 451
+MIP: adaptive node cuts: rounds 335 effective 317 skipped 0 (rate 1.000), node cut secs 0.95, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [95, 18, 61, 95, 66], cut nnz Some(127.60404168288758) (rows mean 39.5)
+MIP: solve returned Optimal after 9.60s (time limit 100.00s)

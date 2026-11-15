@@ -1,0 +1,20 @@
+== fuzz_tiny: env ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0
+rc=0
+     time      nodes      open        best bound         incumbent       gap
+     0.0s          0         0    -7.120000000e0    -7.120000000e0     0.00%
+Presolve: the problem is infeasible (0.00s)
+Result: optimal, objective -7.12, best bound -7.12, gap 0.00%, nodes 0 (0.01s)
+bad 0 of 400 time 5.4 (strict 13: 値の一致だけの以前の判定)
+== fuzz_highs: env ENOMOTO_MIP_REL_GAP=1e-9 python3 scripts/mip_fuzz_vs_highs.py 300
+rc=0
+     0.0s          0         0    -7.837836523e1    -7.837836523e1     0.00%
+Presolve: 17 rows, 14 columns -> 2 rows, 2 columns (0.00s)
+Solving with the slope-intercept dual two-phase method
+Result: optimal, objective -78.37836523, best bound -78.37836523, gap 0.00%, nodes 0 (0.01s)
+bad 0 of 300 time 7.9
+== fuzz_objint: python3 analysis/objint_20261112/fuzz_objint.py 1000 0
+rc=0
+bad 0 of 1000 status {'optimal': 967, 'infeasible': 33} with nodes>0 348 new step 0 new step and nodes>0 0 c range with width 0 c and nodes>0 0 time 104.4
+== fuzz_slack: python3 analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 0
+rc=0
+done 1000 (seeds 0..999): mismatches 0, HiGHS statuses {'Infeasible': 614, 'Optimal': 268, 'Primal infeasible or unbounded': 115, 'Unbounded': 3}

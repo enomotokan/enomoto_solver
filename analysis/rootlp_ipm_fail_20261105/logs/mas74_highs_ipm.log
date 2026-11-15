@@ -1,0 +1,75 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+LP mas74 has 13 rows; 151 cols; 1705 nonzeros
+Coefficient ranges:
+  Matrix  [1e+00, 1e+04]
+  Cost    [1e-05, 1e+00]
+  Bound   [1e+00, 1e+12]
+  RHS     [2e+01, 2e+05]
+WARNING: Problem has some excessively small costs
+WARNING: Problem has some excessively large column bounds
+WARNING:    Consider scaling the    bounds by 1e-6, or setting the user_bound_scale option to -20
+Not presolved: solving the LP
+IPX model has 13 rows, 151 columns and 1705 nonzeros
+Input
+    Number of variables:                                151
+    Number of free variables:                           0
+    Number of constraints:                              13
+    Number of equality constraints:                     0
+    Number of matrix entries:                           1705
+    Matrix range:                                       [1e+00, 1e+04]
+    RHS range:                                          [2e+01, 2e+05]
+    Objective range:                                    [1e-05, 1e+00]
+    Bounds range:                                       [1e+00, 1e+12]
+Preprocessing
+    Dualized model:                                     no
+    Number of dense columns:                            0
+    Range of scaling factors:                           [1.56e-02, 3.20e+01]
+    Scaled cost norm:                                   32
+    Scaled bounds norm:                                 3.125e+10
+IPX version 1.0
+Interior point solve
+ Iter       primal obj         dual obj       pinf       dinf       gap      time
+   0    1.09877477e+02  -4.20660163e+11   5.71e-04   8.91e-01  2.00e+00       0.0
+   1    6.41956639e+07  -5.07406885e+09   1.86e-05   1.09e-02  2.05e+00       0.0
+   2    4.24387059e+06  -4.28132058e+05   8.33e-07   1.09e-08  2.45e+00       0.0
+   3    2.08348250e+04  -1.65417894e+05   4.09e-09   1.09e-14  2.58e+00       0.0
+   4    2.98274463e+03  -1.11616785e+05   5.19e-10   3.77e-16  2.11e+00       0.0
+   5    2.04499421e+03  -4.53183320e+04   3.18e-10   8.61e-16  2.19e+00       0.0
+   6    1.56422443e+03  -1.46156085e+04   1.52e-10   1.72e-15  2.48e+00       0.0
+   7    3.02342186e+03  -4.89228374e+03   1.01e-10   1.72e-15  8.46e+00       0.0
+   8    8.76774438e+03  -1.22757702e+02   5.56e-11   2.58e-15  2.06e+00       0.0
+   9    1.05932944e+04   8.13985451e+03   1.63e-11   2.58e-15  2.62e-01       0.0
+ Constructing starting basis...
+ Iter       primal obj         dual obj       pinf       dinf       gap      time
+  10    1.06980505e+04   9.65636637e+03   3.72e-12   3.45e-15  1.02e-01       0.0
+  11    1.05738490e+04   1.02700563e+04   8.89e-13   4.31e-15  2.91e-02       0.0
+  12    1.05106772e+04   1.04355449e+04   1.24e-13   3.45e-15  7.17e-03       0.0
+  13    1.04882537e+04   1.04716382e+04   1.98e-14   2.58e-15  1.59e-03       0.0
+  14    1.04830000e+04   1.04804644e+04   1.22e-16   2.58e-15  2.42e-04       0.0
+  15    1.04827953e+04   1.04827936e+04   1.22e-16   3.45e-15  1.67e-07       0.0
+  16*   1.04827953e+04   1.04827953e+04   1.22e-16   5.17e-15  1.77e-13       0.0
+Running crossover as requested
+    Primal residual before push phase:                  6.14e-12
+    Dual residual before push phase:                    2.43e-12
+    Number of dual pushes required:                     0
+    Number of primal pushes required:                   0
+Summary
+    Runtime:                                            0.01s
+    Status interior point solve:                        optimal
+    Status crossover:                                   optimal
+    objective value:                                    1.04827953e+04
+    interior solution primal residual (abs/rel):        1.22e-04 / 1.22e-16
+    interior solution dual residual (abs/rel):          2.93e-12 / 1.47e-12
+    interior solution objective gap (abs/rel):          1.86e-09 / 1.77e-13
+    basic solution primal infeasibility:                0.00e+00
+    basic solution dual infeasibility:                  0.00e+00
+Ipx: IPM       optimal
+Ipx: Crossover optimal
+
+Model name          : mas74
+Model status        : Optimal
+IPM       iterations: 16
+Objective value     :  1.0482795280e+04
+P-D objective error :  2.1689141569e-15
+HiGHS run time      :          0.01

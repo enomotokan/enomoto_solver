@@ -42,6 +42,29 @@ pub struct MipProblem {
 }
 
 impl MipProblem {
+    /// 含意 (`conflict_edges`・`implied_bounds`) を除いた写し (試作 `ENOMOTO_MIP_GAP4` の `o`: 対称性の扱いの前の問題 `orig` は実行可能性の
+    /// 確かめにしか使わないのに、木の各スレッドが深く写していた。neos-957323 では含意が大きく、写し 1 つで数百 MB)
+    pub fn clone_without_implications(&self) -> MipProblem {
+        MipProblem {
+            n: self.n,
+            m: self.m,
+            col_lo: self.col_lo.clone(),
+            col_up: self.col_up.clone(),
+            cost: self.cost.clone(),
+            offset: self.offset,
+            sense_sign: self.sense_sign,
+            is_int: self.is_int.clone(),
+            rows: self.rows.clone(),
+            row_lo: self.row_lo.clone(),
+            row_up: self.row_up.clone(),
+            cols: self.cols.clone(),
+            conflict_edges: Vec::new(),
+            implied_bounds: Vec::new(),
+            nnz: self.nnz,
+            nint: self.nint,
+        }
+    }
+
     /// 診断用: 自由 MPS 形式で書き出す (最小化形の費用と定数項、行の範囲は RANGES、整数列は MARKER)。
     pub fn write_mps(&self, path: &str) -> std::io::Result<()> {
         use std::fmt::Write as _;
@@ -213,8 +236,12 @@ impl MipProblem {
     /// 他の列が同じ条件を満たせば暗黙の整数 (どの最適解でも整数値。`ENOMOTO_MIP_NO_DUAL_IMPLINT` で使わない)。
     /// 新しく印のついた列から更に判定が進むので、変化がなくなるまで繰り返す。
     pub fn implied_integers(&self) -> Vec<bool> {
+        self.implied_integers_opt(env_str!("ENOMOTO_MIP_NO_DUAL_IMPLINT").is_none())
+    }
+
+    /// [`Self::implied_integers`] の本体 (`dual` で双対側の判定を使うか。診断で主側だけの本数を数えるのにも使う)。
+    pub fn implied_integers_opt(&self, dual: bool) -> Vec<bool> {
         let integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
-        let dual = env_str!("ENOMOTO_MIP_NO_DUAL_IMPLINT").is_none();
         let mut mark = self.is_int.clone();
         loop {
             let mut changed = false;
@@ -233,6 +260,39 @@ impl MipProblem {
                     let side = if (self.cost[j] > 0.0) == (a > 0.0) { self.row_lo[i] } else { self.row_up[i] };
                     [self.col_lo[j], self.col_up[j]].iter().all(|&v| !v.is_finite() || integral(v))
                         && (!side.is_finite() || integral(side / a))
+                        && self.rows[i].iter().all(|&(k, b)| k == j || (mark[k] && integral(b / a)))
+                });
+                if ok {
+                    mark[j] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return mark;
+            }
+        }
+    }
+
+    /// `ENOMOTO_MIP_HO2_IMPLINT` (試作、既定では使わない。analysis/highs_only_20261105/G2.md): [`Self::implied_integers`] に、HiGHS の
+    /// 双対側の暗黙の整数の規則 (`HPresolve::isImpliedInteger` の後半) を足す。連続列 `j` の出てくる行が全部、ほかの列が (暗に)
+    /// 整数で、`a_ij` で割った係数・有限の左辺と右辺が整数、列の有限の境界も整数なら、整数列を整数値に固定したとき `x_j` の
+    /// 取りうる範囲は端が整数の区間なので、整数の最適解がある。[`Self::implied_integers`] の双対の規則は出てくる行が 1 本の列
+    /// だけ。csched008 の目的関数の列 (メイクスパン、8 行) は HiGHS では暗に整数 (「Objective function is integral with scale 1」)
+    /// だが、こちらでは刻みが付かない。印を付けた列を前提に繰り返す (HiGHS と同じ)。
+    pub fn implied_integers_ho2(&self) -> Vec<bool> {
+        let integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
+        let mut mark = self.implied_integers();
+        loop {
+            let mut changed = false;
+            for j in 0..self.n {
+                if mark[j] || self.cols[j].is_empty() {
+                    continue;
+                }
+                if ![self.col_lo[j], self.col_up[j]].iter().all(|&v| !v.is_finite() || integral(v)) {
+                    continue;
+                }
+                let ok = self.cols[j].iter().all(|&(i, a)| {
+                    [self.row_lo[i], self.row_up[i]].iter().all(|&v| !v.is_finite() || integral(v / a))
                         && self.rows[i].iter().all(|&(k, b)| k == j || (mark[k] && integral(b / a)))
                 });
                 if ok {
@@ -388,28 +448,64 @@ impl MipProblem {
                 coefs.push(self.cost[j].abs());
             }
         }
-        if coefs.is_empty() {
-            return None;
-        }
-        // 係数を最小値で割ったものが整数に近ければ、最小値を刻みとし、その gcd を取る。
-        let minc = coefs.iter().cloned().fold(f64::INFINITY, f64::min);
-        // 有理数の刻みを小さな分母で探す (1, 2, ..., 1000 倍して整数になるか)。
-        for mult in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 100.0, 1000.0] {
-            let scaled: Vec<f64> = coefs.iter().map(|&c| c * mult).collect();
-            if scaled.iter().all(|&s| (s - s.round()).abs() <= 1e-9 * s.max(1.0)) {
-                let mut g = 0i64;
-                for s in &scaled {
-                    let v = s.round() as i64;
-                    g = gcd(g, v);
+        step_of_coefs(&coefs)
+    }
+
+    /// 課題 OBJINT の `c` (連続列の混ざった目的の刻み、analysis/objint_20261112.md): 費用のある列を、整数部 (`int_mask` の列と、境界
+    /// `(lo, up)` で整数値に固定された列) と連続部 (それ以外) に分ける。整数部に刻み `s` があり、連続部の列が全部有界なら
+    /// `(s, m, M, 連続部の列の数)` を返す (`m`・`M` は連続部 `Σ c_j x_j` の最小・最大)。目的値は `offset + k s + [m, M]` にしか乗らない。
+    /// 整数部の費用がなければ `None` (連続部だけの目的は刻みがない)
+    /// 係数 (絶対値) の共通の刻み ([`step_of_coefs`])
+    pub fn step_of(coefs: &[f64]) -> Option<f64> {
+        step_of_coefs(coefs)
+    }
+
+    pub fn objective_split_gap(&self, int_mask: &[bool], lo: &[f64], up: &[f64]) -> Option<(f64, f64, f64, usize)> {
+        let (mut coefs, mut m, mut mm, mut nc) = (Vec::new(), 0.0f64, 0.0f64, 0usize);
+        for j in 0..self.n {
+            let c = self.cost[j];
+            if c == 0.0 {
+                continue;
+            }
+            if int_mask[j] || (lo[j] == up[j] && lo[j] == lo[j].round()) {
+                coefs.push(c.abs());
+            } else {
+                if !lo[j].is_finite() || !up[j].is_finite() {
+                    return None;
                 }
-                if g > 0 {
-                    return Some(g as f64 / mult);
-                }
+                let (a, b) = (c * lo[j], c * up[j]);
+                m += a.min(b);
+                mm += a.max(b);
+                nc += 1;
             }
         }
-        let _ = minc;
-        None
+        step_of_coefs(&coefs).map(|s| (s, m, mm, nc))
     }
+}
+
+/// 係数 (絶対値) の共通の刻み: 1〜1000 倍 (11 通り) して全部整数になれば、その gcd を倍率で割ったもの。
+fn step_of_coefs(coefs: &[f64]) -> Option<f64> {
+    if coefs.is_empty() {
+        return None;
+    }
+    // 係数を最小値で割ったものが整数に近ければ、最小値を刻みとし、その gcd を取る。
+    let minc = coefs.iter().cloned().fold(f64::INFINITY, f64::min);
+    // 有理数の刻みを小さな分母で探す (1, 2, ..., 1000 倍して整数になるか)。
+    for mult in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 100.0, 1000.0] {
+        let scaled: Vec<f64> = coefs.iter().map(|&c| c * mult).collect();
+        if scaled.iter().all(|&s| (s - s.round()).abs() <= 1e-9 * s.max(1.0)) {
+            let mut g = 0i64;
+            for s in &scaled {
+                let v = s.round() as i64;
+                g = gcd(g, v);
+            }
+            if g > 0 {
+                return Some(g as f64 / mult);
+            }
+        }
+    }
+    let _ = minc;
+    None
 }
 
 fn gcd(a: i64, b: i64) -> i64 {
@@ -449,6 +545,26 @@ mod tests {
             vec![7.0, 4.0, 1.0],
         );
         assert_eq!(p.implied_integers(), vec![true, true, true, false, true]);
+    }
+
+    #[test]
+    fn implied_integers_ho2_makespan() {
+        // x0, x1 整数。c (列 2) はメイクスパン: 3 x0 - c <= 0、2 x1 - c <= -1 (2 行に出るので既存の双対の規則では外れる)。
+        // HiGHS の規則では暗黙の整数。w (列 3) は 2 x0 - 2 w <= 1 で右辺を係数で割ると 0.5 なので外れる
+        let inf = f64::INFINITY;
+        let p = MipProblem::from_rows(
+            vec![0.0; 4],
+            vec![10.0, 10.0, inf, inf],
+            vec![0.0, 0.0, 1.0, 0.0],
+            0.0,
+            1.0,
+            vec![true, true, false, false],
+            vec![vec![(0, 3.0), (2, -1.0)], vec![(1, 2.0), (2, -1.0)], vec![(0, 2.0), (3, -2.0)]],
+            vec![-inf, -inf, -inf],
+            vec![0.0, -1.0, 1.0],
+        );
+        assert_eq!(p.implied_integers(), vec![true, true, false, false]);
+        assert_eq!(p.implied_integers_ho2(), vec![true, true, true, false]);
     }
 
     #[test]

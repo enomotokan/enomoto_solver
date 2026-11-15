@@ -1,0 +1,91 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP satellites2-60-fs has 16516 rows; 35378 cols; 125048 nonzeros; 34324 integer variables (34324 binary)
+Coefficient ranges:
+  Matrix  [4e-01, 2e+05]
+  Cost    [1e+00, 1e+02]
+  Bound   [1e+00, 2e+05]
+  RHS     [1e+00, 2e+05]
+Presolving model
+15876 rows, 34706 cols, 123735 nonzeros 0s
+12852 rows, 31721 cols, 112542 nonzeros 3s
+Presolve reductions: rows 12852(-3664); columns 31721(-3657); nonzeros 112542(-12506) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   12852 rows
+   31721 cols (31648 binary, 0 integer, 0 implied int., 73 continuous, 0 domain fixed)
+   112542 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   -39             inf                  inf        0      0      0         0     3.9s
+         0       0         0   0.00%   -29.875         inf                  inf        0      0     26     26803    20.5s
+         0       0         0   0.00%   -29             inf                  inf      722     24     30     69852    60.7s
+         0       0         0   0.00%   -29             inf                  inf     1171    103     32     94582    85.0s
+         0       0         0   0.00%   -29             inf                  inf     1324    131     36    118565   110.5s
+         0       0         0   0.00%   -29             inf                  inf     1434    262     40    142467   136.9s
+ C       0       0         0   0.00%   -29             94               130.85%     1116    273     42    157727   153.9s
+ L       0       0         0   0.00%   -29             25               216.00%     1116    273     42    157727   166.7s
+         0       0         0   0.00%   -29             25               216.00%     1139    281     42    177226   172.2s
+
+40.3% inactive integer columns, restarting
+Model after restart has 6047 rows, 12408 cols (12335 bin., 0 int., 0 impl., 73 cont., 0 dom.fix.), and 53142 nonzeros
+
+         0       0         0   0.00%   -29             25               216.00%       45      0      0    177226   196.3s
+         0       0         0   0.00%   -29             25               216.00%       45     17      4    201033   204.9s
+         0       0         0   0.00%   -28.5           25               214.00%     1295    110      4    207305   210.3s
+         0       0         0   0.00%   -27.05384094    25               208.22%     2498    223      4    214244   215.4s
+         0       0         0   0.00%   -25             25               200.00%     3219     81      4    237635   232.8s
+        20       0         5  23.44%   -25             25               200.00%     3222     81     72    263877   243.4s
+ T      20       0         5  23.44%   -25             21               219.05%     3225     81     81    263877   246.0s
+        35       2         9  24.46%   -25             21               219.05%     3232     81    282    285955   254.2s
+        46       4        13  24.61%   -25             21               219.05%     3235     81    368    297964   260.2s
+ T      51       4        15  24.67%   -25             20               225.00%     3240     81    574    307082   272.8s
+ T      64       0        17  24.90%   -25             19               231.58%     3245     81    630    325886   280.5s
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+        83       1        21  33.59%   -25             19               231.58%     3248     81    678    352645   285.7s
+ T      97       1        27  36.08%   -25             -19               31.58%     3252     81    782    361036   292.2s
+       116       7        33  51.72%   -25             -19               31.58%     3552     99    843    375515   297.3s
+       129      11        38  53.67%   -25             -19               31.58%     3553     99    893    381485   300.0s
+
+Solving report
+  Model             satellites2-60-fs
+  Status            Time limit reached
+  Primal bound      -19
+  Dual bound        -25
+  Gap               31.58%
+  P-D integral      288.618092214
+  Solution status   feasible
+                    -19 (objective)
+                    0 (bound viol.)
+                    8.77076189454e-15 (int. viol.)
+                    0 (row viol.)
+  Timing            300.01
+                    6.65 (Presolve)
+                        MIP    time [calls] = 3.66 [1]
+                        subMIP time [calls] = 2.99 [49]
+                    293.33 (Solve)
+                        MIP    time [calls] = 272.74 [1]
+                        subMIP time [calls] = 20.59 [15]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [49]
+  Max sub-MIP depth 8
+  Nodes             129
+  Repair LPs        1 (1 feasible; 42 iterations)
+  LP iterations     381485
+                    55470 (strong br.)
+                    151704 (separation)
+                    36202 (heuristics)
+{"status": "Time limit reached", "objective": -19.00000000000001, "bound": -25.0, "nodes": 129, "time": 300.2383741399999}

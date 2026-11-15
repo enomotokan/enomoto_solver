@@ -1,0 +1,84 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP neos-4722843-widden has 113555 rows; 77723 cols; 311529 nonzeros; 73369 integer variables (73349 binary)
+Coefficient ranges:
+  Matrix  [1e-01, 1e+05]
+  Cost    [1e+00, 5e+03]
+  Bound   [1e-01, 2e+02]
+  RHS     [1e-01, 2e+02]
+Presolving model
+113458 rows, 75769 cols, 310483 nonzeros 0s
+106073 rows, 58129 cols, 289021 nonzeros 9s
+Presolve reductions: rows 106073(-7482); columns 58129(-19594); nonzeros 289021(-22508) 
+
+Solving MIP model with:
+   106073 rows
+   58129 cols (55909 binary, 22 integer, 5 implied int., 2193 continuous, 0 domain fixed)
+   289021 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   -17666          inf                  inf        0      0      0         0    10.0s
+         0       0         0   0.00%   494.7750221     inf                  inf        0      0      4      4294    11.7s
+         0       0         0   0.00%   10338.579834    inf                  inf      873    180     23      9029    17.6s
+ C       0       0         0   0.00%   10598.718083    38362.828571      72.37%     1032    214     82      9505    20.6s
+ L       0       0         0   0.00%   10652.920399    26340.789769      59.56%     1234    261    149     10287    32.9s
+
+0.2% inactive integer columns, restarting
+Model after restart has 105550 rows, 57941 cols (55795 bin., 22 int., 5 impl., 2119 cont., 0 dom.fix.), and 287668 nonzeros
+
+         0       0         0   0.00%   10655.017738    26340.789769      59.55%      128      0      0     20068    37.4s
+         0       0         0   0.00%   11329.689232    26340.789769      56.99%      128     92      4     23812    39.3s
+         0       0         0   0.00%   11871.634518    26340.789769      54.93%      656    226      4     24844    44.3s
+ L       0       0         0   0.00%   11887.007556    25109.663366      52.66%      729    240      4     25458    47.7s
+
+Symmetry detection completed in 48.4s
+Found 343 generator(s) and 7 full orbitope(s) acting on 18060 columns
+
+         0       1         0   0.00%   11887.007556    25109.663366      52.66%      729    188      4     26578    85.9s
+ L       0       0         0   0.00%   11887.007556    25009.663366      52.47%      729    188      4     26578    89.5s
+        39       3        15  21.39%   11887.007556    25009.663366      52.47%      735    188    107     33267    94.6s
+        77       8        28  69.84%   11887.007556    25009.663366      52.47%      742    188    185     40765    99.7s
+       125      16        49  69.92%   16612.650778    25009.663366      33.58%     1186    190    541     43405   104.8s
+       143       7        61  95.78%   21802.126286    25009.663366      12.83%     2462    230    640     49625   110.1s
+       234      14        96  96.11%   21802.126286    25009.663366      12.83%     2497    171   1157     50056   115.2s
+ T     269       7       117  99.30%   22191.652999    25009.663366      11.27%     2579    188   1314     50919   118.2s
+       319       0       140 100.00%   25009.663366    25009.663366       0.00%     2957    183   1540     52872   121.9s
+
+Solving report
+  Model             neos-4722843-widden
+  Status            Optimal
+  Primal bound      25009.6633663
+  Dual bound        25009.6633663
+  Gap               0%
+  P-D integral      49.7808623296
+  Solution status   feasible
+                    25009.6633663 (objective)
+                    0 (bound viol.)
+                    1.30928601294e-12 (int. viol.)
+                    0 (row viol.)
+  Timing            121.91
+                    12.38 (Presolve)
+                        MIP    time [calls] = 9.16 [1]
+                        subMIP time [calls] = 3.23 [8]
+                    109.51 (Solve)
+                        MIP    time [calls] = 104.10 [1]
+                        subMIP time [calls] = 5.42 [8]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [8]
+  Max sub-MIP depth 6
+  Nodes             319
+  Repair LPs        0
+  LP iterations     52872
+                    0 (strong br.)
+                    9761 (separation)
+                    12329 (heuristics)
+{"status": "Optimal", "objective": 25009.663366336536, "bound": 25009.663366336536, "nodes": 319, "time": 121.94929215500008}

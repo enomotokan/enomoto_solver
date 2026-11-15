@@ -15,7 +15,7 @@
 
 use super::problem::MipProblem;
 
-fn mix(a: u64, b: u64) -> u64 {
+pub(crate) fn mix(a: u64, b: u64) -> u64 {
     // splitmix64 の混ぜ方
     let mut z = a ^ b.wrapping_add(0x9E37_79B9_7F4A_7C15).wrapping_add(a << 6).wrapping_add(a >> 2);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -98,8 +98,146 @@ fn refine_unit(p: &MipProblem) -> usize {
     u
 }
 
+/// 探索の色の細分化の回数の上限。既定 50。`ENOMOTO_MIP_HO6_SYMREFINE` (2026-11-06 から既定、`=0` で止める) なら
+/// `ENOMOTO_T_MIP_HO6_SYMREFINE_ITERS` (既定 100000、実質は不動点まで)。時刻で鎖のようにつながる模型 (unit commitment の
+/// uccase12 など) では、1 回の細分化で区別が鎖を 1 段しか伝わらないので、50 回では不動点 (等しい分割) に届かない
+pub(super) fn refine_iters() -> usize {
+    if env_def!("ENOMOTO_MIP_HO6_SYMREFINE", "1").is_some() {
+        tunable!("ENOMOTO_T_MIP_HO6_SYMREFINE_ITERS", 100000usize, usize)
+    } else {
+        50
+    }
+}
+
+thread_local! {
+    /// 診断 (`ENOMOTO_MIP_HO6_SYMWORK` のログ): 細分化が回数の上限で止まった (不動点の前) 回数と、呼んだ回数
+    static REFINE_CAPPED: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
 /// 色の細分化。色の種類の数が増えなくなるまで (最大 `max_iter` 回) 繰り返す。
 fn refine(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize) {
+    let mut capped = true;
+    refine_body(p, col, row, max_iter, &mut capped);
+    REFINE_CAPPED.with(|c| {
+        let (a, b) = c.get();
+        c.set((a + capped as u64, b + 1));
+    });
+}
+
+/// `ENOMOTO_MIP_HO6_SYMREFINE` (2026-11-06 から既定): 探索の中の細分化を、色が変わった列 `seeds` から始めて、前の回で色が変わった要素の隣だけを
+/// 塗り直す形 (作業リスト) で行う。全ての行・列を毎回塗り直す [`refine`] と同じく、行は列の色から、列は新しい行の色から作る。
+/// 色の種類の数 (列と行の色ごとの数を持って数える) が増えなくなるか、塗り直す要素がなくなれば止める。A と B の両方に同じ手順を
+/// 使うので、同型な組では対応する結果になる (見つけた置換は呼び出し側が [`verify`] で確かめる)
+pub(super) fn refine_inc(p: &MipProblem, col: &mut [u64], row: &mut [u64], seeds: &[usize], max_iter: usize) {
+    let tr = std::time::Instant::now();
+    let mut cnt: std::collections::HashMap<u64, u32> = std::collections::HashMap::with_capacity(p.n + p.m);
+    for &c in col.iter().chain(row.iter()) {
+        *cnt.entry(c).or_insert(0) += 1;
+    }
+    let mut classes = cnt.len();
+    let mut changed_cols: Vec<usize> = seeds.to_vec();
+    let mut stamp_r = vec![u32::MAX; p.m];
+    let mut stamp_c = vec![u32::MAX; p.n];
+    let mut buf: Vec<u64> = Vec::new();
+    let mut capped = true;
+    let mut upd = |cnt: &mut std::collections::HashMap<u64, u32>, old: u64, new: u64| {
+        if let Some(k) = cnt.get_mut(&old) {
+            *k -= 1;
+            if *k == 0 {
+                cnt.remove(&old);
+            }
+        }
+        *cnt.entry(new).or_insert(0) += 1;
+    };
+    for it in 0..max_iter as u32 {
+        let mut rows_to: Vec<usize> = Vec::new();
+        for &j in &changed_cols {
+            for &(i, _) in &p.cols[j] {
+                if stamp_r[i] != it {
+                    stamp_r[i] = it;
+                    rows_to.push(i);
+                }
+            }
+        }
+        let mut work = 0usize;
+        let new_rows: Vec<u64> = rows_to
+            .iter()
+            .map(|&i| {
+                buf.clear();
+                buf.extend(p.rows[i].iter().map(|&(j, a)| mix(col[j], fbits(a))));
+                work += buf.len();
+                buf.sort_unstable();
+                buf.iter().fold(row[i], |h, &v| mix(h, v))
+            })
+            .collect();
+        let rows_ch = relabel_filter(&rows_to, &new_rows, row, &cnt);
+        for &(i, v) in &rows_ch {
+            upd(&mut cnt, row[i], v);
+            row[i] = v;
+        }
+        let mut cols_to: Vec<usize> = Vec::new();
+        for &(i, _) in &rows_ch {
+            for &(j, _) in &p.rows[i] {
+                if stamp_c[j] != it {
+                    stamp_c[j] = it;
+                    cols_to.push(j);
+                }
+            }
+        }
+        let new_cols: Vec<u64> = cols_to
+            .iter()
+            .map(|&j| {
+                buf.clear();
+                buf.extend(p.cols[j].iter().map(|&(i, a)| mix(row[i], fbits(a))));
+                work += buf.len();
+                buf.sort_unstable();
+                buf.iter().fold(col[j], |h, &v| mix(h, v))
+            })
+            .collect();
+        let cols_ch = relabel_filter(&cols_to, &new_cols, col, &cnt);
+        for &(j, v) in &cols_ch {
+            upd(&mut cnt, col[j], v);
+            col[j] = v;
+        }
+        add_work(work + rows_to.len() + cols_to.len());
+        LWORK.with(|c| c.set(c.get() + (work + rows_to.len() + cols_to.len()) as u64));
+        changed_cols = cols_ch.iter().map(|&(j, _)| j).collect();
+        if changed_cols.is_empty() || cnt.len() == classes {
+            capped = false;
+            break;
+        }
+        classes = cnt.len();
+    }
+    REFINE_CAPPED.with(|c| {
+        let (a, b) = c.get();
+        c.set((a + capped as u64, b + 1));
+    });
+    RTIME.with(|c| c.set(c.get() + tr.elapsed().as_secs_f64()));
+}
+
+/// [`refine_inc`] の 1 段: 塗り直した要素 `idx` (新しい値 `new`) のうち、分割を変えるものだけを返す。元の色のクラスの要素が全て
+/// 塗り直され、全て同じ新しい値になったなら、それはただの付け替え (分割は変わらない) なので元の値のままにする
+fn relabel_filter(idx: &[usize], new: &[u64], cur: &[u64], cnt: &std::collections::HashMap<u64, u32>) -> Vec<(usize, u64)> {
+    // 元の色 -> (塗り直した数, 最初の新しい値, 全て同じか)
+    let mut g: std::collections::HashMap<u64, (u32, u64, bool)> = std::collections::HashMap::new();
+    for (&k, &v) in idx.iter().zip(new) {
+        let e = g.entry(cur[k]).or_insert((0, v, true));
+        e.0 += 1;
+        if e.1 != v {
+            e.2 = false;
+        }
+    }
+    idx.iter()
+        .zip(new)
+        .filter(|&(&k, _)| {
+            let (c, _, same) = g[&cur[k]];
+            !(same && cnt.get(&cur[k]).copied().unwrap_or(0) == c)
+        })
+        .map(|(&k, &v)| (k, v))
+        .collect()
+}
+
+fn refine_body(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize, capped: &mut bool) {
     let mut prev = usize::MAX;
     let mut buf: Vec<u64> = Vec::new();
     let unit = refine_unit(p);
@@ -128,6 +266,7 @@ fn refine(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize) {
         all.sort_unstable();
         all.dedup();
         if all.len() == prev {
+            *capped = false;
             break;
         }
         prev = all.len();
@@ -136,9 +275,14 @@ fn refine(p: &MipProblem, col: &mut [u64], row: &mut [u64], max_iter: usize) {
 }
 
 /// 行の中身 (境界と (列, 係数) の並び) のハッシュ。
-fn row_hash(lo: f64, up: f64, entries: &mut [(usize, f64)]) -> u64 {
+pub(crate) fn row_hash(lo: f64, up: f64, entries: &mut [(usize, f64)]) -> u64 {
     entries.sort_unstable_by_key(|&(j, _)| j);
     entries.iter().fold(mix(fbits(lo), fbits(up)), |h, &(j, a)| mix(mix(h, j as u64), fbits(a)))
+}
+
+/// [`verify`] を外から呼ぶ形 (`ENOMOTO_MIP_SYMPRE`、[`super::sympre`])。
+pub(crate) fn verify_perm(p: &MipProblem, perm: &[usize], row_counts: &std::collections::HashMap<u64, i64>) -> bool {
+    verify(p, perm, row_counts)
 }
 
 /// 置換 `perm` が問題の対称性か確かめる。
@@ -166,7 +310,99 @@ fn verify(p: &MipProblem, perm: &[usize], row_counts: &std::collections::HashMap
     true
 }
 
-fn find(uf: &mut [usize], mut x: usize) -> usize {
+/// 行の向きの比べ (`ENOMOTO_MIP_HO3_SYMNORM` と同じ): (下限, 上限, 係数を並べた列) と (-上限, -下限, -係数を並べた列) の比べ。
+/// `Greater` なら -1 倍した向きの方が小さく、`Equal` なら -1 倍しても形が同じ (同点の行)。
+fn orient_cmp(lo: f64, up: f64, row: &[(usize, f64)]) -> std::cmp::Ordering {
+    let mut a: Vec<f64> = row.iter().map(|t| t.1).collect();
+    a.sort_by(f64::total_cmp);
+    let mut b: Vec<f64> = row.iter().map(|t| -t.1).collect();
+    b.sort_by(f64::total_cmp);
+    // -0.0 を 0.0 にそろえて比べる (`total_cmp` は -0.0 < 0.0 とするので、右辺 0 の等式 (`a + b - c - d = 0`) は係数によらず
+    // 必ず `Greater` になり、同点にもならない。既定の `ENOMOTO_MIP_HO3_SYMNORM` はこの形のまま)
+    let (lo, up) = (lo + 0.0, up + 0.0);
+    lo.total_cmp(&(-up + 0.0)).then(up.total_cmp(&(-lo + 0.0))).then_with(|| {
+        for (x, y) in a.iter().zip(&b) {
+            let c = x.total_cmp(y);
+            if c != std::cmp::Ordering::Equal {
+                return c;
+            }
+        }
+        std::cmp::Ordering::Equal
+    })
+}
+
+/// 仮数を 40 ビットに丸める (`ENOMOTO_MIP_SYMSCALE`): 倍率で割った係数の 1 ulp 程度の違い (前処理で 1/3 倍した行など) を
+/// 吸収する。相対で約 1e-12 より近い値は同じ値になる。無限・0 はそのまま。
+fn snap40(x: f64) -> f64 {
+    if x == 0.0 || !x.is_finite() {
+        return x;
+    }
+    const DROP: u32 = 52 - 40;
+    let b = x.to_bits();
+    let r = (b + (1u64 << (DROP - 1))) & !((1u64 << DROP) - 1);
+    let y = f64::from_bits(r);
+    if y.is_finite() { y } else { x }
+}
+
+/// 試作 `ENOMOTO_MIP_SYMSIGN`・`ENOMOTO_MIP_SYMSCALE`・`ENOMOTO_MIP_SYMZERO` (analysis/symsign_20261106.md) の検出に渡す写し。どれかが立つときだけ
+/// 使い、`ENOMOTO_MIP_HO3_SYMNORM` の向きのそろえ (-1 倍) も必ず合わせて行う (`HO3_SYMNORM=0` は効かない)。
+/// - `scale`: 各行を係数の絶対値の最大で割り (正の倍率なので実行可能な集合は同じ)、係数と有限の左右辺を [`snap40`] で丸める。
+///   2 倍・1/3 倍などで写る行が同じ係数になる。丸めで相対 1e-12 より近い値は同じとみなすので、見つかる置換は
+///   その誤差の範囲での対称性 (確かめ ([`verify`]) も丸めた写しの上で行う)
+/// - `sign`: 向きをそろえても -1 倍で形が変わらない行 (同点の行、例 `-2 <= a + b - c - d <= 2`) に、-1 倍した行を写しに
+///   足す。足した行は元の行と同じ実行可能な集合を持つ冗長な行なので、写しの対称性 (行の多重集合を保つ列の置換) は元の問題の
+///   対称性。列の置換が同点の行 r を r' の -1 倍に写すとき、写しでは r → (r' の -1 倍の行)、(r の -1 倍の行) → r' と対応し、
+///   係数をそのまま比べる今の検出・確かめで見つかる (符号つきの置換を行の側で扱うのと同じ)
+/// - どちらでもなければ (`ENOMOTO_MIP_SYMZERO`) 向きのそろえだけ。`HO3_SYMNORM` と違い、右辺 0 の等式も係数で向きを決める ([`orient_cmp`])
+/// 返す値は (写し, [-1 倍した行, 倍率で割った行, 同点の行])。
+pub fn detection_copy(p: &MipProblem, scale: bool, sign: bool) -> (MipProblem, [usize; 3]) {
+    let mut rows = p.rows.clone();
+    let (mut lo, mut up) = (p.row_lo.clone(), p.row_up.clone());
+    let (mut flipped, mut scaled, mut ties) = (0usize, 0usize, Vec::new());
+    for i in 0..p.m {
+        if scale {
+            let f = rows[i].iter().fold(0.0f64, |m, t| m.max(t.1.abs()));
+            if f > 0.0 && f.is_finite() && f != 1.0 {
+                scaled += 1;
+                for t in rows[i].iter_mut() {
+                    t.1 = snap40(t.1 / f);
+                }
+                lo[i] = snap40(lo[i] / f);
+                up[i] = snap40(up[i] / f);
+            } else {
+                for t in rows[i].iter_mut() {
+                    t.1 = snap40(t.1);
+                }
+                lo[i] = snap40(lo[i]);
+                up[i] = snap40(up[i]);
+            }
+        }
+        match orient_cmp(lo[i], up[i], &rows[i]) {
+            std::cmp::Ordering::Greater => {
+                flipped += 1;
+                let (l, u) = (-up[i] + 0.0, -lo[i] + 0.0);
+                lo[i] = l;
+                up[i] = u;
+                for t in rows[i].iter_mut() {
+                    t.1 = -t.1;
+                }
+            }
+            std::cmp::Ordering::Equal if sign && !rows[i].is_empty() => ties.push(i),
+            _ => {}
+        }
+    }
+    for &i in &ties {
+        let r: Vec<(usize, f64)> = rows[i].iter().map(|&(j, a)| (j, -a)).collect();
+        rows.push(r);
+        lo.push(-up[i] + 0.0);
+        up.push(-lo[i] + 0.0);
+    }
+    let nt = ties.len();
+    let q = MipProblem::from_rows(p.col_lo.clone(), p.col_up.clone(), p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, lo, up);
+    (q, [flipped, scaled, nt])
+}
+
+pub(super) fn find(uf: &mut [usize], mut x: usize) -> usize {
     while uf[x] != x {
         uf[x] = uf[uf[x]];
         x = uf[x];
@@ -258,13 +494,24 @@ impl Symmetry {
     }
 }
 
+/// 診断: 細分化が回数の上限で止まった回数と呼んだ回数 (`ENOMOTO_MIP_HO6_SYMWORK`・`ENOMOTO_MIP_HO6_SYMREFINE` のログ用)
+pub fn refine_capped() -> (u64, u64) {
+    REFINE_CAPPED.with(|c| c.get())
+}
+
+/// `ENOMOTO_MIP_HO6_SYMWORK` (2026-11-06 から既定): 対称性の検出の上限を細分化の後の探索の分だけに数えるか ([`detect_inner`])。
+fn ho6_symwork() -> bool {
+    env_def!("ENOMOTO_MIP_HO6_SYMWORK", "1").is_some()
+}
+
 /// 手間の上限 (`WORK` の終わり, `LWORK` の終わり) を越えたか。
-fn over(end: (u64, u64)) -> bool {
+pub(super) fn over(end: (u64, u64)) -> bool {
     work() > end.0 || log_work() > end.1
 }
 
 fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64, u64), twins: &[Vec<usize>]) -> Option<Symmetry> {
-    let t0 = std::time::Instant::now();
+    let mut t0 = std::time::Instant::now();
+    let mut work_end = work_end;
     let n = p.n;
     if n < 2 || p.m == 0 {
         return None;
@@ -289,7 +536,18 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64,
         }
     }
     let mut row: Vec<u64> = (0..p.m).map(|i| mix(fbits(p.row_lo[i]), fbits(p.row_up[i]))).collect();
-    refine(p, &mut col, &mut row, 50);
+    let (rw0, rl0, rt0) = (work(), log_work(), std::time::Instant::now());
+    refine(p, &mut col, &mut row, refine_iters());
+    // `ENOMOTO_MIP_HO6_SYMWORK` (2026-11-06 から既定、`=0` で止める): 時間・手間の上限を、色の細分化の後の探索の分だけに数える (細分化に
+    // 使った分を上限に足す)。uccase12 (前処理の後 8.9 万行・34 万非零) は細分化だけで手間 8.97e7 を使い、上限 2.5e7
+    // (`ENOMOTO_T_MIP_PRESOLVE_WORK_SYM`) を越えて探索に 1 度も入らず「対称性なし」になっていた (HiGHS は同じ模型で生成元 33 個)
+    if ho6_symwork() {
+        work_end = (work_end.0.saturating_add(work() - rw0), work_end.1.saturating_add(log_work() - rl0));
+        t0 += rt0.elapsed();
+        if env_str!("ENOMOTO_MIP_LOG").is_some() {
+            eprintln!("MIP: symmetry: refinement {:.2}s, work {} (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)", rt0.elapsed().as_secs_f64(), work() - rw0);
+        }
+    }
     // 同じ色の列の組 (2 列以上)
     let mut cells: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
     for j in 0..n {
@@ -328,6 +586,19 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64,
     let ext_rate = tunable!("ENOMOTO_T_MIP_SYM_EXT_RATE", 0.5, f64);
     let ext_min = tunable!("ENOMOTO_T_MIP_SYM_EXT_MIN_GENS", 100usize, usize);
     let mut time_cap = time_cap;
+    // `ENOMOTO_MIP_SYMPRE` の (3) (試作): 深い探索の前に、全ての色の組で浅い探り (個別化 1 回と細分化) の疎な置換を集める
+    // 探りは自分の上限 (残りの時間・手間の `ENOMOTO_T_MIP_SYMPRE_PROBE_FRAC` 倍、既定 0.5) で止め、使った分は深い探索の上限に足す
+    // (探りが上限を先に使うと、深い探索で拾えた生成元を落とす: cod105・mushroom-best。analysis/sassy_20261110.md)
+    if super::sympre::probe_on() {
+        let (tp, w0, l0) = (std::time::Instant::now(), work(), log_work());
+        let frac = tunable!("ENOMOTO_T_MIP_SYMPRE_PROBE_FRAC", 0.5, f64);
+        let part = |end: u64, now: u64| now.saturating_add((end.saturating_sub(now) as f64 * frac).min(u64::MAX as f64) as u64);
+        let pend = (part(work_end.0, w0), part(work_end.1, l0));
+        let ptime = (time_cap - t0.elapsed().as_secs_f64()).max(0.0) * frac;
+        super::sympre::probe(p, &col, &row, &cells, &mut uf, &mut generators, &row_counts, (tp, ptime, pend));
+        work_end = (work_end.0.saturating_add(work() - w0), work_end.1.saturating_add(log_work() - l0));
+        t0 += tp.elapsed();
+    }
     'cells: for cell in &cells {
         let a = cell[0];
         for &b in &cell[1..] {
@@ -390,7 +661,7 @@ fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64,
 /// 問題 (neos-3381206-awhea: 同じ箱が 475 個) で、箱 a と b の入れ替えは最初の細分化の直後にこれで得られる
 /// (A 側の残りの箱の色は {b, 他}、B 側は {a, 他} なので、他は動かさず b -> a)。個別化を全ての色が
 /// 1 列になるまで続けると 1 回の試行に数百回の細分化が要り、時間の上限 (0.3 秒) までに生成元が 1 つしか見つからなかった
-fn shortcut_perm(n: usize, ma: &std::collections::HashMap<u64, Vec<usize>>, mb: &std::collections::HashMap<u64, Vec<usize>>) -> Option<Vec<usize>> {
+pub(super) fn shortcut_perm(n: usize, ma: &std::collections::HashMap<u64, Vec<usize>>, mb: &std::collections::HashMap<u64, Vec<usize>>) -> Option<Vec<usize>> {
     let mut perm = vec![usize::MAX; n];
     for (c, va) in ma {
         let vb = mb.get(c)?;
@@ -425,6 +696,10 @@ fn shortcut_perm(n: usize, ma: &std::collections::HashMap<u64, Vec<usize>>, mb: 
 
 #[allow(clippy::too_many_arguments)]
 fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: std::time::Instant, time_cap: f64, work_end: (u64, u64), row_counts: &std::collections::HashMap<u64, i64>) -> Option<Vec<usize>> {
+    // `ENOMOTO_MIP_HO3_SYMBT` (試作、既定では使わない。analysis/highs_only_20261105/G3.md): 後戻りのある探索 ([`search_bt`])
+    if env_str!("ENOMOTO_MIP_HO3_SYMBT").is_some() {
+        return search_bt(p, col0, row0, a, b, t0, time_cap, work_end, row_counts);
+    }
     let use_shortcut = env_str!("ENOMOTO_MIP_SYM_NO_SHORTCUT").is_none();
     let n = p.n;
     let (mut ca, mut ra) = (col0.to_vec(), row0.to_vec());
@@ -433,8 +708,14 @@ fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: st
     let indiv = |c: &mut [u64], j: usize, level: u64| c[j] = mix(c[j], 0xA5A5_0000 ^ level);
     indiv(&mut ca, a, level);
     indiv(&mut cb, b, level);
-    refine(p, &mut ca, &mut ra, 50);
-    refine(p, &mut cb, &mut rb, 50);
+    let inc = env_def!("ENOMOTO_MIP_HO6_SYMREFINE", "1").is_some();
+    if inc {
+        refine_inc(p, &mut ca, &mut ra, &[a], refine_iters());
+        refine_inc(p, &mut cb, &mut rb, &[b], refine_iters());
+    } else {
+        refine(p, &mut ca, &mut ra, refine_iters());
+        refine(p, &mut cb, &mut rb, refine_iters());
+    }
     for _ in 0..n {
         if t0.elapsed().as_secs_f64() > time_cap || over(work_end) {
             return None;
@@ -485,10 +766,111 @@ fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: st
         level += 1;
         indiv(&mut ca, x, level);
         indiv(&mut cb, y, level);
-        refine(p, &mut ca, &mut ra, 50);
-        refine(p, &mut cb, &mut rb, 50);
+        if inc {
+            refine_inc(p, &mut ca, &mut ra, &[x], refine_iters());
+            refine_inc(p, &mut cb, &mut rb, &[y], refine_iters());
+        } else {
+            refine(p, &mut ca, &mut ra, refine_iters());
+            refine(p, &mut cb, &mut rb, refine_iters());
+        }
     }
     None
+}
+
+/// [`search`] の後戻りのある形 (`ENOMOTO_MIP_HO3_SYMBT`、試作)。A 側は今と同じく最小の列 x を個別化し、B 側は x の色の列を
+/// 1 本ずつ試す (x と同じ列を先に)。細分化の後に色の数・大きさが合わなければその枝をやめ、全部の色が 1 列になったら確かめて、
+/// 合わなければ後戻りする。HiGHS の `HighsSymmetryDetection` は探索木を後戻りしながら辿る。貪欲に 1 本だけ辿る今の探索では、
+/// fastxgemm-n2r6s0t2 の生成元が 1 個しか見つからない (HiGHS は 39 個)。1 回の探索の枝の数の上限は
+/// `ENOMOTO_T_MIP_HO3_SYMBT_NODES` (既定 2000)
+#[allow(clippy::too_many_arguments)]
+fn search_bt(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: std::time::Instant, time_cap: f64, work_end: (u64, u64), row_counts: &std::collections::HashMap<u64, i64>) -> Option<Vec<usize>> {
+    let use_shortcut = env_str!("ENOMOTO_MIP_SYM_NO_SHORTCUT").is_none();
+    let max_nodes = tunable!("ENOMOTO_T_MIP_HO3_SYMBT_NODES", 2000usize, usize);
+    let indiv = |c: &mut [u64], j: usize, level: u64| c[j] = mix(c[j], 0xA5A5_0000 ^ level);
+    let (mut ca, mut ra) = (col0.to_vec(), row0.to_vec());
+    let (mut cb, mut rb) = (col0.to_vec(), row0.to_vec());
+    indiv(&mut ca, a, 1);
+    indiv(&mut cb, b, 1);
+    refine(p, &mut ca, &mut ra, 50);
+    refine(p, &mut cb, &mut rb, 50);
+    // A 側の列は後戻りしても同じなので、段ごとの (A の色、個別化した列 x) を覚える
+    let mut a_stack: Vec<(Vec<u64>, Vec<u64>)> = vec![(ca, ra)];
+    let mut nodes = 0usize;
+    #[allow(clippy::too_many_arguments)]
+    fn rec(
+        p: &MipProblem, a_stack: &mut Vec<(Vec<u64>, Vec<u64>)>, depth: usize, cb: &[u64], rb: &[u64], nodes: &mut usize, max_nodes: usize, t0: std::time::Instant, time_cap: f64,
+        work_end: (u64, u64), row_counts: &std::collections::HashMap<u64, i64>, use_shortcut: bool,
+    ) -> Option<Vec<usize>> {
+        let n = p.n;
+        *nodes += 1;
+        if *nodes > max_nodes || t0.elapsed().as_secs_f64() > time_cap || over(work_end) {
+            return None;
+        }
+        add_work(2 * n);
+        SWORK.with(|c| c.set(c.get() + 2 * n as u64));
+        LWORK.with(|c| c.set(c.get() + 2 * n as u64));
+        let ca = &a_stack[depth].0;
+        let mut ma: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+        let mut mb: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+        for j in 0..n {
+            ma.entry(ca[j]).or_default().push(j);
+            mb.entry(cb[j]).or_default().push(j);
+        }
+        if ma.len() != mb.len() {
+            return None;
+        }
+        for (c, va) in &ma {
+            if mb.get(c).is_none_or(|vb| vb.len() != va.len()) {
+                return None;
+            }
+        }
+        if use_shortcut {
+            if let Some(perm) = shortcut_perm(n, &ma, &mb) {
+                if verify(p, &perm, row_counts) {
+                    return Some(perm);
+                }
+            }
+        }
+        let mut pick: Option<(usize, u64)> = None;
+        for (c, va) in &ma {
+            if va.len() >= 2 && pick.is_none_or(|(px, _)| va[0] < px) {
+                pick = Some((va[0], *c));
+            }
+        }
+        let Some((x, cx)) = pick else {
+            let mut perm = vec![0usize; n];
+            for (c, va) in &ma {
+                perm[va[0]] = mb[c][0];
+            }
+            return if verify(p, &perm, row_counts) { Some(perm) } else { None };
+        };
+        let level = depth as u64 + 2;
+        if a_stack.len() <= depth + 1 {
+            let (mut ca2, mut ra2) = a_stack[depth].clone();
+            ca2[x] = mix(ca2[x], 0xA5A5_0000 ^ level);
+            refine(p, &mut ca2, &mut ra2, 50);
+            a_stack.push((ca2, ra2));
+        }
+        let vb = &mb[&cx];
+        let mut ys: Vec<usize> = Vec::with_capacity(vb.len());
+        if vb.contains(&x) {
+            ys.push(x);
+        }
+        ys.extend(vb.iter().copied().filter(|&y| y != x));
+        for y in ys {
+            let (mut cb2, mut rb2) = (cb.to_vec(), rb.to_vec());
+            cb2[y] = mix(cb2[y], 0xA5A5_0000 ^ level);
+            refine(p, &mut cb2, &mut rb2, 50);
+            if let Some(perm) = rec(p, a_stack, depth + 1, &cb2, &rb2, nodes, max_nodes, t0, time_cap, work_end, row_counts, use_shortcut) {
+                return Some(perm);
+            }
+            if *nodes > max_nodes || t0.elapsed().as_secs_f64() > time_cap || over(work_end) {
+                return None;
+            }
+        }
+        None
+    }
+    rec(p, &mut a_stack, 0, &cb, &rb, &mut nodes, max_nodes, t0, time_cap, work_end, row_counts, use_shortcut)
 }
 
 /// 完全オービトープ: 0-1 列の行列 `vars[行][列]` で、列をどう並べ替えても問題が変わらないもの (列の入れ替えが
@@ -601,8 +983,9 @@ impl Orbitope {
 
 /// 既定 (2026-10-29、`ENOMOTO_MIP_NO_ORBITOPE_TWO_COL` で止める): 生成元 1 本の 2 列の入れ替えもオービトープにする ([`find_orbitopes`])。
 /// (検出 1 回に 1 度しか呼ばないので値を控えない。単体テストで切り替える)
+/// 0.1.7 から既定で止める (束 cand1114 の prune1112)。`ENOMOTO_MIP_NO_ORBITOPE_TWO_COL=0` で使う
 pub(crate) fn orbitope_two_col() -> bool {
-    std::env::var_os("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL").is_none()
+    matches!(std::env::var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL").as_deref(), Ok("0") | Ok("off"))
 }
 
 /// 生成元のうち、0-1 列の 2-巡回だけからなるもの (列の入れ替え) をまとめて完全オービトープを作る。
@@ -1571,8 +1954,9 @@ mod tests {
         assert_eq!(sym.generators.len(), 1);
         std::env::set_var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL", "1");
         assert!(find_orbitopes(&p, &sym).0.is_empty());
-        std::env::remove_var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL");
+        std::env::set_var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL", "0");
         let (orbs, used) = find_orbitopes(&p, &sym);
+        std::env::remove_var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL");
         assert_eq!(orbs.len(), 1);
         assert_eq!(orbs[0].vars, vec![vec![0, 1], vec![2, 3], vec![4, 5]]);
         assert!(used[0]);
@@ -1767,5 +2151,69 @@ mod tests {
                 assert!(verify(&p, g, &counts));
             }
         }
+    }
+
+    /// `ENOMOTO_MIP_SYMSIGN`: 同点の行 `-2 <= a + b - c - d <= 2` と `-2 <= -e - f + g + h <= 2` (費用は a, b, e, f が 1、c, d, g, h が 2)。
+    /// a -> e, b -> f, c -> g, d -> h は行 1 を行 2 の -1 倍に写す対称性。係数をそのまま比べる検出 (向きのそろえだけ) では
+    /// 見つからず、同点の行を -1 倍の行で二重にした写しでは見つかる
+    #[test]
+    fn symsign_tie_rows_map_with_negation() {
+        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, -1.0), (3, -1.0)], vec![(4, -1.0), (5, -1.0), (6, 1.0), (7, 1.0)]];
+        let p = MipProblem::from_rows(vec![0.0; 8], vec![1.0; 8], vec![1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0], 0.0, 1.0, vec![true; 8], rows, vec![-2.0; 2], vec![2.0; 2]);
+        let (q0, [_, _, t0]) = detection_copy(&p, false, false);
+        assert_eq!(t0, 0);
+        let s0 = detect(&q0, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_ne!(s0.orbit[0], s0.orbit[4]);
+        let (q1, [_, _, t1]) = detection_copy(&p, false, true);
+        assert_eq!(t1, 2);
+        assert_eq!(q1.m, 4);
+        let s1 = detect(&q1, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_eq!(s1.orbit[0], s1.orbit[4]);
+        assert_eq!(s1.orbit[2], s1.orbit[6]);
+        assert_ne!(s1.orbit[0], s1.orbit[2]);
+        // 生成元は元の問題の行を (+1 倍か -1 倍の) 行に写す
+        for g in &s1.generators {
+            for i in 0..p.m {
+                let mut img: Vec<(usize, f64)> = p.rows[i].iter().map(|&(j, a)| (g[j], a)).collect();
+                img.sort_by_key(|t| t.0);
+                let neg: Vec<(usize, f64)> = img.iter().map(|&(j, a)| (j, -a)).collect();
+                assert!(p.rows.iter().any(|r| *r == img || *r == neg));
+            }
+        }
+    }
+
+    /// 右辺 0 の等式 `a + b - c = 0` と `-d - e + f = 0` (費用 a, b, d, e が 1、c, f が 2): 既定の向きのそろえ (`HO3_SYMNORM`) は
+    /// -0.0 < 0.0 で両方を反転して向きがそろわないが、[`detection_copy`] はそろえて a -> d を見つける。
+    /// 同点の行 `a + b - c - d = 0` (右辺 0) も同点として二重にする
+    #[test]
+    fn symzero_orients_zero_rhs_equalities() {
+        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, -1.0)], vec![(3, -1.0), (4, -1.0), (5, 1.0)]];
+        let p = MipProblem::from_rows(vec![0.0; 6], vec![1.0; 6], vec![1.0, 1.0, 2.0, 1.0, 1.0, 2.0], 0.0, 1.0, vec![true; 6], rows, vec![0.0; 2], vec![0.0; 2]);
+        let s0 = detect(&p, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_ne!(s0.orbit[0], s0.orbit[3]);
+        let (q, [flipped, _, ties]) = detection_copy(&p, false, false);
+        assert_eq!((flipped, ties), (1, 0));
+        let s1 = detect(&q, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_eq!(s1.orbit[0], s1.orbit[3]);
+        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, -1.0), (3, -1.0)]];
+        let p = MipProblem::from_rows(vec![0.0; 4], vec![1.0; 4], vec![1.0; 4], 0.0, 1.0, vec![true; 4], rows, vec![0.0], vec![0.0]);
+        assert_eq!(detection_copy(&p, false, true).0.m, 2);
+        assert!(detection_copy(&p, false, true).0.row_lo.iter().all(|v| v.is_sign_positive()));
+    }
+
+    /// `ENOMOTO_MIP_SYMSCALE`: `(1/3) a + (1/3) b <= 1/3` と `c + d <= 1`、`2 e + 2 f <= 2` は正の倍率で同じ形
+    #[test]
+    fn symscale_rows_map_with_positive_factor() {
+        let th = 1.0 / 3.0;
+        let rows = vec![vec![(0, th), (1, th)], vec![(2, 1.0), (3, 1.0)], vec![(4, 2.0), (5, 2.0)]];
+        let p = MipProblem::from_rows(vec![0.0; 6], vec![1.0; 6], vec![1.0; 6], 0.0, 1.0, vec![true; 6], rows, vec![-f64::INFINITY; 3], vec![th, 1.0, 2.0]);
+        let s0 = detect(&detection_copy(&p, false, false).0, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_ne!(s0.orbit[0], s0.orbit[2]);
+        let (q, [_, scaled, _]) = detection_copy(&p, true, false);
+        assert_eq!(scaled, 2);
+        let s1 = detect(&q, 10.0, 100, u64::MAX).0.expect("symmetry");
+        assert_eq!(s1.orbit[0], s1.orbit[2]);
+        assert_eq!(s1.orbit[0], s1.orbit[4]);
+        assert_eq!(snap40(0.1 * 3.0), snap40(0.3));
     }
 }

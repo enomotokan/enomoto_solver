@@ -1,0 +1,38 @@
+MIP: presolve: tightened 2631 coefficients (skipped 0 in rows redundant within tolerance), normalized 18 integer rows
+MIP: presolve: rows 15603 -> 5473, free columns 12878 -> 2747, nonzeros 41531 -> 21189, postsolve steps 10101 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 24 of 2747 free columns fixed (0.00s), not used
+MIP: LP probing pass 1: 108 candidates, 0 fixings (16 LPs, 1068 iters, 0.16s)
+MIP: LP probing: tried 8 columns, fixed 0, LP 0.0000000000e0 -> 0.0000000000e0 (16 LPs, 1068 iters, 0.16s)
+MIP: LP probing: root LP 0.02s (240 iters, size 39552), tried 8, fixed 0, basis passed false, total 1308 iters 0.16s
+MIP: probing: equivalence pass with implications: 35 pairs found (0.38s), not used
+MIP: probing: 2784 of 2652 binaries probed (2 passes), 132 fixed, 0 bounds tightened, 220883 implications (0.86s, cpu 0.85s, work 23231965, pwork 718530164, chg 5133904)
+MIP: probing: 19 equivalent binary pairs
+MIP: clique extension: 39 rows extended, 53 nonzeros added, 0 columns fixed, 0 duplicate and 1 dominated rows removed (267705 edges, 0.04s)
+MIP: symmetry: none (0.01s, work 243360, search 0, verify 0, detect 0.01s, refine 0.00s, log work 1017668)
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.00s)
+MIP: root LP 0.0000000000e0 (215 iters, 0.03s)
+MCF detect: rows 5472 cols 12890 | flow cands 231 flow rows 28 commodities 1 cap cands 1185 arcs 48 nodes 28 incons 1.00 directed | fail 'inconsistent' | networks [] fc_network false | 0.000s
+MIP: cut selection probe: compared at 1 rounds (after round 1), probe wall 0.07s (budget 2.9s)
+MIP: cut selection probe (6 rounds): default 366 cuts gain 0.000000e0 (0.03s), pool 368 cuts gain 0.000000e0 (0.03s) -> default (rule rate, probe 0.07s in total, 0.10s)
+MIP: cut round 0: 366 cuts (of 430, sep 0.01s, LP 114 iters), LP rows 5838 (cut rows mean nnz 2), obj 0.0000000000e0 (0.12s)
+MIP: cut round 1: root cut time cap check: clock 0.025s of cap 5.89s (min rounds 0)
+MIP: cut round 1: 11 cuts (of 28, sep 0.01s, LP 32 iters), LP rows 5535 (cut rows mean nnz 2), obj 0.0000000000e0 (0.14s)
+MIP: cut round 2: root cut time cap check: clock 0.044s of cap 5.89s (min rounds 0)
+MIP: cut round 2: 10 cuts (of 25, sep 0.01s, LP 541 iters), LP rows 5539 (cut rows mean nnz 2), obj 0.0000000000e0 (0.26s)
+MIP: cut round 3: root cut time cap check: clock 0.159s of cap 5.89s (min rounds 0)
+MIP: cut round 3: 265 cuts (of 271, sep 0.04s, LP 395 iters), LP rows 5787 (cut rows mean nnz 6), obj 0.0000000000e0 (0.37s)
+MIP: cut round 4: root cut time cap check: clock 0.262s of cap 5.89s (min rounds 0)
+MIP: cut round 4: 20 cuts (of 151, sep 0.02s, LP 257 iters), LP rows 5787 (cut rows mean nnz 4), obj 0.0000000000e0 (0.45s)
+MIP: cut round 5: root cut time cap check: clock 0.333s of cap 5.89s (min rounds 0)
+MIP: cut round 5: 10 cuts (of 92, sep 0.02s, LP 13 iters), LP rows 5779 (cut rows mean nnz 4), obj 0.0000000000e0 (0.48s)
+MIP: clique graph: 267705 edges (193782 from rows, probing implications 220883)
+MIP: clique fallback: 11 cuts, LP 0.0000000000e0 -> 0.0000000000e0 (g_c 0.000e0, g_d 0.000e0 relative), fractional 733 -> 562; used (0.16s)
+MIP: cut selection probe: compared at 1 rounds (after round 1), probe wall 0.45s (budget 2.9s)
+MIP: cut selection probe (6 rounds): default 5 cuts gain 0.000000e0 (0.21s), pool 13 cuts gain 0.000000e0 (0.24s) -> default (rule rate, probe 0.45s in total, 1.10s)
+MIP: cut round 0: LP status IterationLimit, removed the cuts (Optimal)
+MIP: cut round 0: the cut LP hit the per-LP cap (IterationLimit); stop (ENOMOTO_MIP_CUT_LP_CAP_STOP)
+MIP: cut loop done: 5 cuts added, 300 in LP, pool 764 cuts (16927 nonzeros), obj 0.0000000000e0 -> 0.0000000000e0
+MIP: FJ problem (FJ_P3): rows 5472 -> 5205, free columns 2615 -> 2596, 0 continuous bounds tightened (1.50s)
+MIP: FJ thread joined 0.23s after the stop signal (1.50s)
+MIP: background cuts: basis with the column values not passed (root LP 0.03s)
