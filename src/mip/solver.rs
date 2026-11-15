@@ -757,6 +757,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) tc_pool_born: std::collections::HashMap<u64, (u64, u32, u32)>,
     pub(super) tc_pool_add: [u64; 4],
     tc_pool_use: [u64; 6],
+    /// 試作 `ENOMOTO_MIP_TC` の `r`・`a`・`b`: 子の変更の並びの長さの和・子の数・最大・深さの和
+    tc_len: [u64; 4],
     tr_last: (u64, f64, f64, f64),
     /// 木の中の再スタートの記帳 (`TRSTAT`、ログだけ) と `ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、[`Self::tree_restart_guard_ok`]) 用:
     /// この求解で木のループに入った時刻 (この求解の始めからの秒)、そのときの全体の下界、[`Self::tree_restart_due`] の最後の木の大きさの見積もり。
@@ -4878,6 +4880,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tc_pool_born: std::collections::HashMap::new(),
         tc_pool_add: [0; 4],
         tc_pool_use: [0; 6],
+        tc_len: [0; 4],
         tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
         tr_t0: 0.0,
         tr_w0: (0.0, 0),
@@ -12830,18 +12833,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `b`: 親の LP に依るので子で作り直せない被約費用 (−3)・強分枝 (−4) だけ。−6〜−9 は大域的な制約 (双対証明・衝突・カット) の
                 // 伝播なので子の伝播で作り直せる。`a` は fiball で開いたノード 1 本の持ち物が 2.3〜3.5 倍になり、600 秒で 11 GB に達した
                 let reasons: &[i32] = if tc_on('a') { &[-3, -4, -6, -7, -8, -9] } else if tc_on('b') { &[-3, -4] } else { &[-3] };
-                let mut have: Vec<(usize, bool, f64)> = node.changes.iter().chain(of_fixes.iter()).map(|c| (c.col, c.upper, c.value)).collect();
+                // 重複判定: (列, 向き) ごとの一番きつい値の表 (以前は have の二重ループで 1 ノード O(長さ^2))
+                let mut have: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::with_capacity(node.changes.len() + of_fixes.len());
+                for c in node.changes.iter().chain(of_fixes.iter()) {
+                    let e = have.entry((c.col, c.upper)).or_insert(c.value);
+                    *e = if c.upper { e.min(c.value) } else { e.max(c.value) };
+                }
                 for (j, upper, v) in self.dom.tagged_int_changes(self.p, reasons) {
-                    let tighter = match have.iter().filter(|e| e.0 == j && e.1 == upper).map(|e| e.2).reduce(|a, b| if upper { a.min(b) } else { a.max(b) }) {
-                        Some(w) => if upper { v < w - 0.5 } else { v > w + 0.5 },
+                    let tighter = match have.get(&(j, upper)) {
+                        Some(&w) => if upper { v < w - 0.5 } else { v > w + 0.5 },
                         None => true,
                     };
                     if tighter {
                         of_fixes.push(BoundChange { col: j, upper, value: v, sym: true });
-                        have.push((j, upper, v));
+                        have.insert((j, upper), v);
                         self.tc_r_stats += 1;
                     }
                 }
+                // 診断: 子の変更の並びの長さ (親の並び + 引き継ぎ + 分枝) と深さ
+                self.tc_len[0] += (node.changes.len() + of_fixes.len() + 1) as u64;
+                self.tc_len[1] += 1;
+                self.tc_len[2] = self.tc_len[2].max((node.changes.len() + of_fixes.len() + 1) as u64);
+                self.tc_len[3] += node.depth as u64 + 1;
             }
             let sb_child = self.sb_child_inherit(&node);
             let mk = |c: BoundChange| {
@@ -22861,7 +22874,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: TC c: cut pool propagation retried {} times, off now {}", self.tc_c.3, self.cpp.off);
                 }
                 if tc_on('r') || tc_on('a') || tc_on('b') {
-                    eprintln!("MIP: TC r: reduced-cost fixings passed to children {}", self.tc_r_stats);
+                    eprintln!("MIP: TC r: reduced-cost fixings passed to children {}; child change lists: mean length {:.1} (mean depth {:.1}), max {}, open nodes now {}", self.tc_r_stats, self.tc_len[0] as f64 / self.tc_len[1].max(1) as f64, self.tc_len[3] as f64 / self.tc_len[1].max(1) as f64, self.tc_len[2], self.queue.len());
                 }
                 if tc_on('d') {
                     let d = &self.tc_d;
