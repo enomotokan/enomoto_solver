@@ -1017,7 +1017,10 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
         rng ^= rng >> 27;
         ((rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64) / ((1u64 << 53) as f64)
     };
-    let t_end = Instant::now() + Duration::from_secs_f64(time_cap);
+    // 試作 `ENOMOTO_MIP_TICKS` の `l` ([`super::ticks_on`]): 時間の上限 `time_cap` 秒を同じ量の手間 (ヒューリスティクスの重みで割った work) の
+    // 上限にし、時間は 10 倍の安全網にする
+    let tk_l = super::ticks_on('l');
+    let t_end = Instant::now() + Duration::from_secs_f64(time_cap * if tk_l { 10.0 } else { 1.0 });
     if n == 0 {
         return (None, None);
     }
@@ -1060,6 +1063,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
     let mut steps_total = 0u64;
     // 試作 `ENOMOTO_MIP_TIMEDEP` の `l`: 触った非零の数 (`work`) で止める。上限は呼び出し側が `max_work` に入れる
     let max_work = LS_MAX_WORK.with(|c| c.get());
+    let max_work = if tk_l { max_work.min((time_cap * 1e9 / crate::ticks::weight(crate::ticks::HEUR).max(1e-9)) as u64) } else { max_work };
     let mut work = 0u64;
     let mut by_time = false;
     'restart: for round in 0..1000 {

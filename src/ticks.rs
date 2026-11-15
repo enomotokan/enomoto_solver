@@ -105,3 +105,8 @@ impl Drop for BudgetGuard {
 pub fn budget_guard(budget: f64) -> BudgetGuard {
     BudgetGuard(push_budget(budget))
 }
+
+/// 部分 `k` の重み (ns / 手間)。
+pub fn weight(k: usize) -> f64 {
+    weights()[k]
+}

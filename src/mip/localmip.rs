@@ -617,6 +617,11 @@ impl<'a> LocalMip<'a> {
         }
         let sample_rows = tunable!("ENOMOTO_T_MIP_LOCALMIP_SAMPLE_ROWS", 3usize, usize).max(1);
         let sample_cols = tunable!("ENOMOTO_T_MIP_LOCALMIP_SAMPLE_COLS", 64usize, usize).max(1);
+        let step_work = {
+            let p = self.s.p;
+            let nnz: usize = p.rows.iter().map(|r| r.len()).sum();
+            ((nnz / p.m.max(1) + nnz / p.n.max(1) + 1) * sample_cols) as u64
+        };
         let sp = tunable!("ENOMOTO_T_MIP_LOCALMIP_SP", 0.0003, f64);
         let restart_after = tunable!("ENOMOTO_T_MIP_LOCALMIP_RESTART", 300_000u64, u64);
         let pair = env_str!("ENOMOTO_MIP_LOCALMIP_PAIR").is_some();
@@ -663,8 +668,12 @@ impl<'a> LocalMip<'a> {
         loop {
             step += 1;
             // 止める合図と時間は 16 手ごとに見る (連鎖の手は 1 手が重く、256 手ごとでは mzzv42z で 2 秒ほど遅れて時間の上限を超えた)
-            if step % 16 == 0 && (Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))) {
-                break;
+            if step % 16 == 0 {
+                // 手間の単位 ([`crate::ticks`]): 1 手 = (行の平均の長さ + 列の平均の長さ) x 見る列の数 (の見当)
+                crate::ticks::add(crate::ticks::HEUR, 16 * step_work);
+                if Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) || crate::ticks::over() {
+                    break;
+                }
             }
             // 実行可能 (目的の行を除いて違反なし)
             let nviol = s.vset.len() - usize::from(s.vpos[m] != usize::MAX);

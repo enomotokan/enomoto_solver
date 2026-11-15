@@ -291,6 +291,8 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// - `u`: 外側の求解のサブ MIP (根の RENS など) を時間の規則と同じ量の手間の期限で止める
 /// - `m`: MPSEP の最適面の移動の時間の上限を手間の期限にする
 /// - `c`: CUTSEL_PROBE の比べの経過・打ち切り・LP の上限を手間の秒にする
+/// - `f`: 前処理の早い FJ・Local-MIP (1 本のとき) の全体の上限と Local-MIP の 1 切れを手間で数える
+/// - `l`: 局所探索の時間の上限を同じ量の手間の上限にする
 pub(crate) fn ticks_on(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TICKS").is_some_and(|v| v.contains(c))
 }
@@ -2312,7 +2314,14 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
     // 見つけた解と、見つけた方 (1 = FJ、2 = Local-MIP) と時刻
     let found: std::sync::Mutex<Option<(Vec<f64>, u8, f64)>> = std::sync::Mutex::new(None);
     let deadline = PRESOLVE_DEADLINE.with(|d| d.get());
-    let t_end = deadline.map_or(t0 + Duration::from_secs_f64(cap.max(0.0)), |d| d.min(t0 + Duration::from_secs_f64(cap.max(0.0))));
+    // 試作 `ENOMOTO_MIP_TICKS` の `f` ([`ticks_on`]): 1 本のときは、全体の上限と Local-MIP の 1 切れを手間 ([`crate::ticks`]) で数え、
+    // 時間は 10 倍の安全網にする (前処理の期限は見ない)。FJ・Local-MIP の交互の回し方が時刻によらなくなる
+    let tk_f = ticks_on('f') && threads == 1;
+    let t_end = if tk_f {
+        t0 + Duration::from_secs_f64(10.0 * cap.max(0.0))
+    } else {
+        deadline.map_or(t0 + Duration::from_secs_f64(cap.max(0.0)), |d| d.min(t0 + Duration::from_secs_f64(cap.max(0.0))))
+    };
     let slice = tunable!("ENOMOTO_T_MIP_FEAS_EARLY_LMIP_SLICE", 0.2, f64).max(0.01);
     let base = tunable!("ENOMOTO_T_MIP_FEAS_FJ_EARLY_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03) ^ 0x2545_F491_4F6C_DD1D;
     let base = if salt == 0 { base } else { base ^ salt.wrapping_mul(0x94D0_49BB_1331_11EB) };
@@ -2323,7 +2332,7 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
         }
         stop.store(true, Ordering::Relaxed);
     };
-    let over = || stop.load(Ordering::Relaxed) || Instant::now() + Duration::from_millis(50) >= t_end;
+    let over = || stop.load(Ordering::Relaxed) || Instant::now() + Duration::from_millis(50) >= t_end || (tk_f && crate::ticks::over());
     std::thread::scope(|s| {
         for t in 0..threads {
             let (fj_tries, lm_steps, done, over, stop) = (&fj_tries, &lm_steps, &done, &over, &stop);
@@ -2369,7 +2378,8 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                     }
                 };
                 if threads == 1 {
-                    // 1 本: FJ2 を 1 回と Local-MIP の 1 切れを交互に
+                    // 1 本: FJ2 を 1 回と Local-MIP の 1 切れを交互に (`f` なら全体の上限は手間の期限)
+                    let _tk_all = tk_f.then(|| crate::ticks::budget_guard(cap.max(0.0) * 1e9));
                     let mut lm = lm_new();
                     let mut k = 0u64;
                     while !over() {
@@ -2378,7 +2388,9 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                         }
                         k += 1;
                         if let Some(l) = lm.as_mut().filter(|l| !l.done) {
-                            if !over() && lm_run(l, Instant::now() + Duration::from_secs_f64(slice)) {
+                            let _tk_slice = tk_f.then(|| crate::ticks::budget_guard(slice * 1e9));
+                            let until = if tk_f { t_end } else { Instant::now() + Duration::from_secs_f64(slice) };
+                            if !over() && lm_run(l, until) {
                                 break;
                             }
                         }
