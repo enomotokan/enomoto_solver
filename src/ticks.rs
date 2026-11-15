@@ -22,7 +22,6 @@ pub const NAMES: [&str; NK] = ["lp", "prop", "sep", "pre", "heur", "node", "lpit
 
 thread_local! {
     static RAW: [Cell<u64>; NK] = const { [const { Cell::new(0) }; NK] };
-    static TOTAL: Cell<f64> = const { Cell::new(0.0) };
     static DEADLINE: Cell<f64> = const { Cell::new(f64::INFINITY) };
 }
 
@@ -43,16 +42,17 @@ fn weights() -> &'static [f64; NK] {
 }
 
 /// 部分 `k` の手間を `n` 足す。
+/// 足すのは部分ごとの数だけ (重み付きの合計は読むときに計算する。数えの負荷を小さくするため)。
 #[inline]
 pub fn add(k: usize, n: u64) {
-    RAW.with(|r| r[k].set(r[k].get() + n));
-    TOTAL.with(|t| t.set(t.get() + weights()[k] * n as f64));
+    RAW.with(|r| r[k].set(r[k].get().wrapping_add(n)));
 }
 
 /// このスレッドの重み付きの手間の合計。
 #[inline]
 pub fn total() -> f64 {
-    TOTAL.with(|t| t.get())
+    let w = weights();
+    RAW.with(|r| (0..NK).map(|k| w[k] * r[k].get() as f64).sum())
 }
 
 /// このスレッドの部分ごとの手間 (診断用)。
