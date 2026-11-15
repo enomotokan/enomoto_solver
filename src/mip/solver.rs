@@ -12215,7 +12215,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let hi0 = self.heur_iters;
                         let keep_frac = self.submip_time_frac;
                         if td_n {
-                            let cap = (2.0 * lns_avail_it).max(tunable!("ENOMOTO_T_MIP_TIMEDEP_LNS_MIN", 5.0, f64) * self.root_lp_iters.max(1000) as f64);
+                            // 下限: `ENOMOTO_T_MIP_TIMEDEP_LNS_FLOOR_WORK` = K (> 0) なら問題の大きさの関数 K / (行 + 非零) 反復 (1 反復の重さを行 + 非零と見て、
+                            // 時間の規則の下限 `LNS_CALL_MIN` (0.3 秒) と同じ量の手間にする。K = 3e7 で 1 秒に約 1e8 の重さ)。0 なら
+                            // `ENOMOTO_T_MIP_TIMEDEP_LNS_MIN` x max(根の LP の反復, 1000) (cand1115 の eil33-2 では 1 回 6 秒・9393 反復に当たり、時間の規則の 1 秒より重かった)
+                            let fw = tunable!("ENOMOTO_T_MIP_TIMEDEP_LNS_FLOOR_WORK", 0.0, f64);
+                            let floor = if fw > 0.0 {
+                                let nnz: usize = self.p.rows.iter().map(|r| r.len()).sum();
+                                fw / (self.p.m + nnz).max(1) as f64
+                            } else {
+                                tunable!("ENOMOTO_T_MIP_TIMEDEP_LNS_MIN", 5.0, f64) * self.root_lp_iters.max(1000) as f64
+                            };
+                            let cap = (2.0 * lns_avail_it).max(floor);
                             SUBMIP_ITER_CAP.with(|c| c.set(cap as u64));
                             // `N`: サブ MIP の時間の上限を残り時間によらず `submip_time_max` (既定 6 秒) にする (サブ MIP の中の「時間の上限 x 割合」の量が
                             // 外側の経過で変わらないように。期限は外側の期限で頭打ち)
