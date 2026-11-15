@@ -266,3 +266,17 @@ ENOMOTO_MIP_THREADS=1 ENOMOTO_MIP_CUTOFF=-230.98915 ENOMOTO_MIP_TC=g ENOMOTO_MIP
 - 誤答の確かめ (cand1114 + `TC=r`): fuzz_tiny 400・mip_fuzz_vs_highs 300・mip_fuzz_symmetric 300・mip_fuzz_fixed_charge 200 で誤答 0 (ただし木に入る回は少ない)。
   `cargo test --release --lib` は既定・`ENOMOTO_MIP_TC=r` とも 416 通過。
 - 次: 58 問 x 種 1〜2 (60 秒・4 スレッド) の対 (`b58r/`、base 対 tcr)。
+
+### 58 問 x 種 1〜2 (`b58r/`、base 対 tcr、60 秒・4 スレッド、232 回、crash 0・誤答 0)
+
+- SGM 16.33 → 16.33 (±0.0%、対の比 [−5.2%, +5.8%])、解けた回 86 → 84 (base だけ: noswot 種 1・physiciansched6-2 種 1・2、tcr だけ: timtab1 種 2)。
+  2 種そろった差は 10teams (速い、×0.61) と physiciansched6-2 (遅い)。
+- physiciansched6-2 は手元の 4 スレッドでは base・tcr とも根で解ける (17〜30 秒、0 ノード)。`TC=r` が根のヒューリスティクスのサブ MIP の木にも
+  効いて根の道筋を変えていたので、**サブ MIP では使わない**ように直した (このあとの回はこの形)。
+- 60 秒の組では得も損もない。効きが見えた neos5・kasai (1 スレッドで数百秒) は 60 秒の組に出ない形。
+
+### `ENOMOTO_MIP_TC=a` (利用者の案 (2) の一部、既定では使わない)
+
+- `r` (被約費用) に加えて、強分枝 (−4)・双対証明 (−6)・リテラルの衝突 (−7)・目的関数の伝播 (−8)・カットプールの伝播 (−9) で得た局所的な固定も
+  子に引き継ぐ (行の伝播は分枝から積み直せば同じになるので除く、オービトープ (−5) は対称性の推論なので除く)。
+- 1 スレッド・600 秒・種 1: neos5 89 秒 (tcr 120・既定 372)、kasai 285 秒 (322・447)、csched008 ギャップ 1.7% (1.2%・6.6%)、mcsched 4.1% (4.1%・4.5%)、sct2 変わらず。
