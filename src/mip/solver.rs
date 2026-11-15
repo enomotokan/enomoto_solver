@@ -2066,6 +2066,16 @@ fn flat_changes(n: &OpenNode) -> Vec<BoundChange> {
     v
 }
 
+/// ノードの境界の変更の全部 (並び + 引き継ぎの鎖)。鎖がなければ並びをそのまま (写さない) 返す。`TC` の `s` で鎖に移した固定も、
+/// `b` と同じく伝播・オービトープ・木の中の再スタートの共通の境界などに見せるために使う (既定では鎖がないので今までと同じ)
+fn full_changes(n: &OpenNode) -> std::borrow::Cow<'_, [BoundChange]> {
+    if n.inh.is_some() {
+        std::borrow::Cow::Owned(flat_changes(n))
+    } else {
+        std::borrow::Cow::Borrowed(&n.changes)
+    }
+}
+
 impl SnapNode {
     fn of(n: &OpenNode) -> Self {
         SnapNode { changes: flat_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None }
@@ -11331,7 +11341,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     if let Some(b) = &n.basis {
-                        self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &n.changes, n.prot.as_deref().map(|v| v.as_slice()));
+                        self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &full_changes(&n), n.prot.as_deref().map(|v| v.as_slice()));
                         // 置いた基底が親の LP の最適基底のままなら、その LU を使う (行が変わっていれば使わない)
                         if let Some(s) = &sib_lu {
                             if n.basis_epoch == self.row_log.len() {
@@ -11438,7 +11448,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if ok {
                             if let Some(b) = &n.basis {
-                                self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &n.changes, n.prot.as_deref().map(|v| v.as_slice()));
+                                self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &full_changes(&n), n.prot.as_deref().map(|v| v.as_slice()));
                             }
                         }
                         if !ok {
@@ -11635,7 +11645,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.dbg_trace("after dual proofs and literal conflicts");
             // 完全オービトープの固定 (列を辞書式で減少に並べた解だけを残す)
             let prop_ok = prop_ok && {
-                let ok = self.orbitope_propagate(&node.changes);
+                let ok = self.orbitope_propagate(&full_changes(&node));
                 if !ok {
                     if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
                         self.add_conflict();
@@ -11651,7 +11661,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // orbital fixing (`ENOMOTO_MIP_SYM_OF`): 子に渡す固定はこのノードで新たに数え直す
             self.of_node_fixes.clear();
             self.of_node_orbits = None;
-            let prop_ok = prop_ok && self.orbital_fixing_checked(&node.changes);
+            let prop_ok = prop_ok && self.orbital_fixing_checked(&full_changes(&node));
             if !prop_ok && rp_stage.is_empty() {
                 rp_stage = "p_of";
             }
@@ -11660,7 +11670,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // (HiGHS は対称性の固定・行・カットプール・衝突プールを 1 つの伝播の不動点まで回す。こちらは各段を 1 回ずつ順に回すので、
             // 後の段 (オービトープ) で締まった境界が前の段 (カットプール・証明) に戻らない)
             let prop_ok = prop_ok && (!prop_fixpoint() || {
-                let ok = self.node_prop_fixpoint(&node.changes);
+                let ok = self.node_prop_fixpoint(&full_changes(&node));
                 if !ok && rp_stage.is_empty() {
                     rp_stage = "p_fix";
                 }
@@ -19643,14 +19653,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut lo = self.dom.global_lo.clone();
         let mut up = self.dom.global_up.clone();
         for n in &nodes {
-            for c in &n.changes {
+            let ch = full_changes(n);
+            for c in ch.iter() {
                 if c.upper { up[c.col] = up[c.col].min(c.value) } else { lo[c.col] = lo[c.col].max(c.value) }
             }
             for j in 0..p.n {
                 min_lo[j] = min_lo[j].min(lo[j]);
                 max_up[j] = max_up[j].max(up[j]);
             }
-            for c in &n.changes {
+            for c in ch.iter() {
                 lo[c.col] = self.dom.global_lo[c.col];
                 up[c.col] = self.dom.global_up[c.col];
             }
@@ -19698,7 +19709,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let mut ok = true;
                 let mut lo_m: Vec<(usize, f64)> = Vec::new();
                 let mut up_m: Vec<(usize, f64)> = Vec::new();
-                for c in &n.changes {
+                for c in full_changes(n).iter() {
                     if !p.is_int[c.col] {
                         continue;
                     }
