@@ -105,7 +105,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-15]
+        # ubuntu-latest (26.04) には Python 3.9 がないので、テストは 24.04 で回す
+        os: [ubuntu-24.04, windows-latest, macos-15]
         python: ["3.9", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
