@@ -523,6 +523,7 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             repaired = if best_x.is_some() { " (LP repair: found)" } else { " (LP repair: failed)" };
         }
     }
+    crate::ticks::add(crate::ticks::HEUR, s.effort as u64);
     if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
         eprintln!(
             "MIP:   FJ2{repaired}: {} rows (as inequalities), {} nonzeros, {steps} steps, effort {} (max {max_total}), least violated rows {best_viol}, found {} (objective {best_obj:.6e}), stopped by {why}, chain {chain_ok}/{chain_tries} ({chain_cols} columns), {:.2}s",

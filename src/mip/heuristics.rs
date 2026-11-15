@@ -1209,6 +1209,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
         }
     }
     LS_LAST.with(|c| c.set((steps_total, work, by_time)));
+    crate::ticks::add(crate::ticks::HEUR, work);
     if env_str!("ENOMOTO_MIP_LS_DEBUG").is_some() {
         eprintln!("MIP:   [ls debug] n {n} m {m} steps {steps_total} (max {max_steps}), work {work} (max {max_work}), by time {by_time}, cap {time_cap:.2}s, best {:?}, least violation {:?}", best_feas.as_ref().map(|x| p.objective(x)), best_inf.as_ref().map(|b| b.1));
     }
@@ -1747,6 +1748,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             crate::set_fj_p3_force(true);
         }
         let t_sub = Instant::now();
+        // 手間の単位の診断: このスレッドで解くサブ MIP の手間と CPU の秒
+        let (tk0, cpu0) = (crate::ticks::raw(), super::cap_clock());
         // 診断 `ENOMOTO_MIP_DEBUG_SUBMIP_COMPONENTS`: 外側の根から出したサブ MIP の自由な列の連結成分 (前処理の前。後は `solve_problem` の中で出す)
         let comp_diag = super::debug_submip_components() && depth == 0;
         if comp_diag {
@@ -1808,7 +1811,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         SUBMIP_HS_DROP.with(|f| f.set(hs_drop_prev));
         SUBMIP_R0.with(|f| f.set(r0_prev));
         if self.params.verbose {
-            eprintln!("MIP:   sub-MIP: {nfree_all} free columns of {}, status {:?}, nodes {}, objective {:?}, {:.2}s, {} LP iterations{}", p.n, r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64(), r.lp_iterations, if paused.is_some() { " (paused at the node limit)" } else { "" });
+            let tk1 = crate::ticks::raw();
+            eprintln!("MIP:   sub-MIP: {nfree_all} free columns of {}, status {:?}, nodes {}, objective {:?}, {:.2}s, {} LP iterations, TICKS cpu {:.3} {}{}", p.n, r.status, r.nodes, r.objective, t_sub.elapsed().as_secs_f64(), r.lp_iterations, super::cap_clock() - cpu0, (0..crate::ticks::NK).map(|k| format!("{} {}", crate::ticks::NAMES[k], tk1[k] - tk0[k])).collect::<Vec<_>>().join(" "), if paused.is_some() { " (paused at the node limit)" } else { "" });
         }
         if let Some((h, nfi, z0)) = frag {
             eprintln!(

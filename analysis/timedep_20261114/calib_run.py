@@ -7,7 +7,7 @@ sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
 sp = importlib.util.spec_from_file_location("cfg1115", WT / "analysis/cand1115_20261115/cfg.py"); m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
 H = {"ENOMOTO_MIP_SUBMIP_HALT": "1"}
-CFG = {"c": {**m.CAND1115C, **H}, "td": {**m.CAND1115, **H}, "tdf": {**m.CAND1115, **H, "ENOMOTO_T_MIP_TIMEDEP_LNS_FLOOR_WORK": "3e7"}}
+CFG = {"c": {**m.CAND1115C, **H}, "td": {**m.CAND1115, **H}, "tdf": {**m.CAND1115, **H, "ENOMOTO_T_MIP_TIMEDEP_LNS_FLOOR_WORK": "3e7"}, "tk": {**m.CAND1115C, **H, "ENOMOTO_MIP_TICKS": "nt"}}
 probs, seeds, cfgs = sys.argv[1].split(","), sys.argv[2].split(","), sys.argv[3].split(",")
 for s in seeds:
     for p in probs:

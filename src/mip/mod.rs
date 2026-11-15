@@ -283,6 +283,14 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// - `b`: 割合で決める量 (時間の上限 x 割合) の基準を、前処理・再スタートの後の残り時間でなく元の時間の上限にする ([`solver::MipParams::frac_tl`])
 /// - `u`: 外側の求解のサブ MIP (根の RENS・RINS など。木の大近傍探索は `n`) を時間でなく LP の反復の上限で止める (時間は 10 倍の安全網。
 ///   `heuristics::Solver::submip_iter_cap_u`、係数 `ENOMOTO_T_MIP_TIMEDEP_SUBMIP_C` 既定 5)
+/// 試作 `ENOMOTO_MIP_TICKS` (既定では使わない。analysis/timedep_20261114.md の 11 節): 秒の代わりに手間の単位 ([`crate::ticks`]、
+/// 当てはめた重みで 1 手間 ≒ 1 ns) で、時間の規則と同じ式で決める。文字:
+/// - `t`: 木の分離の予算 (`tree_sep_budget_ok`・`node_cut_adapt_due`・`nca_lp_budget_ok`)
+/// - `n`: 木の大近傍探索の予算と 1 回の上限 (サブ MIP は手間の期限で止める)
+pub(crate) fn ticks_on(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_TICKS").is_some_and(|v| v.contains(c))
+}
+
 pub(crate) fn timedep(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains(c))
 }
@@ -3261,7 +3269,7 @@ thread_local! {
 /// 主の止めの合図の後も 4.8 秒回り、主がその従を待つ間に時間の上限を 2.7 秒過ぎていた (neos-960392、analysis/bgw_overrun_20261031.md)。
 /// `ENOMOTO_MIP_NO_PRESOLVE_STOP` で使わない (切り分け用)
 pub(super) fn presolve_stop() -> bool {
-    (crate::cancel::halted() || PRESOLVE_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d)) && env_str!("ENOMOTO_MIP_NO_PRESOLVE_STOP").is_none()
+    (crate::cancel::halted() || crate::ticks::over() || PRESOLVE_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d)) && env_str!("ENOMOTO_MIP_NO_PRESOLVE_STOP").is_none()
 }
 
 /// `deadline` を過ぎたか ([`with_presolve_deadline`] と同じく `ENOMOTO_MIP_NO_FJ_P3_DEADLINE` なら常に偽)。

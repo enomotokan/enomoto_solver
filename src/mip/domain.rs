@@ -317,6 +317,7 @@ impl Domain {
     /// 列 `j` の境界を `old` から `new` に変えたときの活動量の更新。
     fn update_activity(&mut self, p: &MipProblem, j: usize, upper: bool, old: f64, new: f64) {
         ACT_WORK.with(|w| w.set(w.get() + p.cols[j].len() as u64 + 1));
+        crate::ticks::add(crate::ticks::PROP, p.cols[j].len() as u64 + 1);
         CHG_COUNT.with(|w| w.set(w.get() + 1));
         for &(i, a) in &p.cols[j] {
             // a > 0 なら下限は最小活動量、上限は最大活動量に効く (a < 0 なら逆)。
@@ -623,6 +624,7 @@ impl Domain {
         }
         // 走査した行の長さはまとめて足す (伝播の途中では読まないので、行ごとに足すのと同じ)
         DEBUG_WORK.with(|w| w.set(w.get() + work as u64));
+        crate::ticks::add(crate::ticks::PROP, work as u64);
         !self.infeasible
     }
 

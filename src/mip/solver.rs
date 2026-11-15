@@ -663,6 +663,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) repair_start: Option<Vec<f64>>,
     /// 大近傍探索 (サブ MIP) に使った時間の合計 (秒)。
     pub(super) lns_secs: f64,
+    /// 試作 `ENOMOTO_MIP_TICKS` の `n`: 木の大近傍探索に使った手間 ([`crate::ticks`])
+    pub(super) lns_ticks: f64,
     /// 試作 `ENOMOTO_MIP_TIMEDEP` の `n`: 大近傍探索に使った LP の反復の合計 (`heur_iters` の増え)
     pub(super) lns_iters: u64,
     /// 試作 `ENOMOTO_MIP_TIMEDEP` の `n`: このサブ MIP の LP の反復の上限 (0 なら使わない。[`SUBMIP_ITER_CAP`] を作るときに受け取る)
@@ -969,6 +971,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     node_lp_secs: f64,
     /// 試作 `ENOMOTO_MIP_TIMEDEP` の `t`: ノードの分離の手間 (分離の後の LP の反復 + 1 回の分離に平均のノードの LP の反復の半分)
     node_cut_work: f64,
+    /// 試作 `ENOMOTO_MIP_TICKS` の `t` ([`super::ticks_on`]): ノードの分離・ノードの LP に使った手間 ([`crate::ticks`]) と、この求解の始めの手間
+    node_cut_ticks: f64,
+    node_lp_ticks: f64,
+    ticks0: f64,
     /// 解けなかったノード (LP が失敗し、分枝もできなかった)。最適性を主張できなくなる。
     unresolved: bool,
     last_log: Instant,
@@ -4870,6 +4876,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sol_pool: Vec::new(),
         repair_start: None,
         lns_secs: 0.0,
+        lns_ticks: 0.0,
         lns_iters: 0,
         iter_cap: if params.submip { SUBMIP_ITER_CAP.with(|c| c.replace(0)) } else { 0 },
         node_cut_secs: 0.0,
@@ -5026,6 +5033,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         node_lps: 0,
         node_lp_secs: 0.0,
         node_cut_work: 0.0,
+        node_cut_ticks: 0.0,
+        node_lp_ticks: 0.0,
+        ticks0: crate::ticks::total(),
         unresolved: false,
         last_log: start,
         t4_last: 0.0,
@@ -6257,6 +6267,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || (self.work_counted() && WORK_BASE.load(std::sync::atomic::Ordering::Relaxed) + self.lp.total_iterations() + self.heur_iters >= work_limit().unwrap_or(u64::MAX))
             || (self.iter_cap > 0 && self.lp.total_iterations() >= self.iter_cap)
+            || crate::ticks::over()
             || self.heur_stop.is_some_and(|d| Instant::now() >= d)
             || ((self.bg_watch.is_some() || self.root_submip.is_some()) && self.bg_proved())
             || (self.incumbent.is_none() && self.root_submip.as_ref().is_some_and(|c| c.nosol_deadline.is_some_and(|d| Instant::now() >= d)))
@@ -6507,6 +6518,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let f = tunable!("ENOMOTO_T_MIP_TREE_SEP_LP_FRAC", 0.25, f64);
         // 試作 `ENOMOTO_MIP_TIMEDEP` の `t` (analysis/timedep_20261114.md): 秒の代わりに手間で比べる (経過 → この求解の LP の反復 + ヒューリスティクスの
         // 反復、ノードの LP の秒 → ノードの LP の反復)
+        // 試作 `ENOMOTO_MIP_TICKS` の `t` ([`super::ticks_on`]): 秒の代わりに手間の単位 ([`crate::ticks`]) で、時間の規則と同じ式で比べる
+        if super::ticks_on('t') {
+            let el = crate::ticks::total() - self.ticks0;
+            return self.node_cut_ticks < tunable!("ENOMOTO_T_MIP_TREE_SEP_TIME_FRAC", 0.1, f64) * el
+                && (f <= 0.0 || self.node_cut_ticks < f * self.node_lp_ticks.max(0.05e9));
+        }
         if super::timedep('t') {
             let all = (self.lp.total_iterations() + self.heur_iters) as f64;
             return self.node_cut_work < tunable!("ENOMOTO_T_MIP_TREE_SEP_TIME_FRAC", 0.1, f64) * all
@@ -6525,7 +6542,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// そこで費用の側を 2 つ足した: カットが密なら止める ([`Self::nca_dense`])、分離の時間がノードの LP の時間に比べて
     /// 大きければ止める ([`Self::nca_lp_budget_ok`])。analysis/node_cut_adapt_fix_20261020.md
     fn node_cut_adapt_due(&mut self) -> bool {
-        if self.node_cut_secs >= tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64() || !self.nca_lp_budget_ok() {
+        let over = if super::ticks_on('t') {
+            self.node_cut_ticks >= tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_FRAC", 0.1, f64) * (crate::ticks::total() - self.ticks0)
+        } else {
+            self.node_cut_secs >= tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64()
+        };
+        if over || !self.nca_lp_budget_ok() {
             return false;
         }
         if self.nca_ema >= tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_RATE", 0.3, f64) {
@@ -6541,6 +6563,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (misc07・mas76・eil33-2・mik-250 が 15〜30% 遅い)。neos-911970 では 0.04〜0.08 倍
     fn nca_lp_budget_ok(&self) -> bool {
         let f = tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_LP_FRAC", 0.1, f64);
+        if super::ticks_on('t') {
+            return f <= 0.0 || self.node_cut_ticks < f * self.node_lp_ticks;
+        }
         f <= 0.0 || self.node_cut_secs < f * self.node_lp_secs
     }
 
@@ -11469,6 +11494,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             first = false;
             self.nodes += 1;
             self.tprof.nodes += 1;
+            // 手間の単位 ([`crate::ticks`]): ノード 1 つの固定の手間 (行 + 列)
+            crate::ticks::add(crate::ticks::NODE, (self.p.m + self.p.n) as u64);
             if self.find_thread.is_some() {
                 self.poll_find_thread();
             }
@@ -11656,6 +11683,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
             let mut node_cut_resolve: Option<Instant> = None;
             let mut nc_res_it = 0u64;
+            let mut nc_res_tk = 0.0f64;
             // ノードの分離 ([`Solver::node_cuts_due`]) の前の LP の値 (解き直しの後に効き目を測る)
             let mut fc_obj0: Option<f64> = None;
             // HiGHS 流のカット管理: このノードでの分離のラウンド数と、前のラウンドの前の目的値
@@ -11688,6 +11716,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 1 回の LP の時間の上限 (平均の 50 倍、最低 0.5 秒): 数値的に悪条件の LP が再分解を繰り返して
                 // 残り時間を使い切るのを防ぐ。超えたら全論理変数基底から解き直し、それも超えたら LP なしで分枝する
                 let t_lp = Instant::now();
+                let tk_lp = crate::ticks::total();
                 let cap = Duration::from_secs_f64((50.0 * self.node_lp_secs / self.node_lps.max(1) as f64).max(0.5));
                 // 試作 `ENOMOTO_MIP_HO4_NODECAP` (analysis/highs_only_20261105/G4.md、既定では使わない): 上限を
                 // `ENOMOTO_T_MIP_HO4_NODECAP_MULT` (既定 1) x 主の根の LP の秒より短くしない。まだノードの LP を解いていないスレッドでは
@@ -11852,8 +11881,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     );
                 }
                 self.node_lp_secs += t_lp.elapsed().as_secs_f64();
+                self.node_lp_ticks += crate::ticks::total() - tk_lp;
                 if let Some(t) = node_cut_resolve.take() {
                     self.node_cut_secs += t.elapsed().as_secs_f64();
+                    self.node_cut_ticks += crate::ticks::total() - nc_res_tk;
                     self.node_cut_work += self.lp.total_iterations().saturating_sub(nc_res_it) as f64;
                 }
                 // `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`: ノードの分離で加えたカットの伸び・生き残りを数える
@@ -12157,10 +12188,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lns_time = env_str!("ENOMOTO_MIP_LNS_ITERS").is_none();
                     // 試作 `ENOMOTO_MIP_TIMEDEP` の `n` (analysis/timedep_20261114.md): 予算を時間でなく木の LP の反復 (ノード + 強分枝) の割合で数え、
                     // 1 回のサブ MIP は時間でなく LP の反復の上限 max(2 x 予算, `ENOMOTO_T_MIP_TIMEDEP_LNS_MIN` (既定 5) x 根の LP の反復) で止める
-                    let td_n = lns_time && super::timedep('n') && !self.params.submip;
+                    // 試作 `ENOMOTO_MIP_TICKS` の `n` ([`super::ticks_on`]): 時間の規則と同じ式を手間の単位 ([`crate::ticks`]) で数える (`TIMEDEP` の `n` より先)
+                    let tk_n = lns_time && super::ticks_on('n') && !self.params.submip;
+                    let lns_avail_tk = frac * (crate::ticks::total() - self.ticks0) - self.lns_ticks;
+                    let td_n = !tk_n && lns_time && super::timedep('n') && !self.params.submip;
                     let lns_avail_it = frac * (self.node_iters + self.sb_iters) as f64 - self.lns_iters as f64;
                     let lns_avail = frac * self.start.elapsed().as_secs_f64() - self.lns_secs;
-                    let lns_ok = if td_n { lns_avail_it > 0.0 } else if lns_time { lns_avail > 0.0 } else { self.heur_iters - self.heur_iters_root < budget };
+                    let lns_ok = if tk_n { lns_avail_tk > 0.0 } else if td_n { lns_avail_it > 0.0 } else if lns_time { lns_avail > 0.0 } else { self.heur_iters - self.heur_iters_root < budget };
                     // `ENOMOTO_MIP_HO1_LNSBANK` ([`ho1_lnsbank`]): 1 回の上限が下限に届くまで貯める (根の段・サブ MIP の中は今のまま)
                     let lns_ok = lns_ok
                         && match ho1_lnsbank().filter(|_| lns_time && !self.params.submip) {
@@ -12214,7 +12248,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let keep_max = self.submip_time_max;
                         let hi0 = self.heur_iters;
                         let keep_frac = self.submip_time_frac;
-                        if td_n {
+                        let tk_lns0 = crate::ticks::total();
+                        let mut tk_prev = None;
+                        if tk_n {
+                            // 1 回の上限 = max(2 x 予算の残り, `LNS_CALL_MIN` 秒に当たる手間)。サブ MIP は手間の期限で止め、時間の上限は 10 倍の安全網
+                            let cap = (2.0 * lns_avail_tk).max(tunable!("ENOMOTO_T_MIP_LNS_CALL_MIN", 0.3, f64) * 1e9);
+                            self.submip_time_max = self.submip_time_max.min(10.0 * cap * 1e-9);
+                            tk_prev = Some(crate::ticks::push_budget(cap));
+                        } else if td_n {
                             // 下限: `ENOMOTO_T_MIP_TIMEDEP_LNS_FLOOR_WORK` = K (> 0) なら問題の大きさの関数 K / (行 + 非零) 反復 (1 反復の重さを行 + 非零と見て、
                             // 時間の規則の下限 `LNS_CALL_MIN` (0.3 秒) と同じ量の手間にする。K = 3e7 で 1 秒に約 1e8 の重さ)。0 なら
                             // `ENOMOTO_T_MIP_TIMEDEP_LNS_MIN` x max(根の LP の反復, 1000) (cand1115 の eil33-2 では 1 回 6 秒・9393 反復に当たり、時間の規則の 1 秒より重かった)
@@ -12261,6 +12302,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if td_n {
                             SUBMIP_ITER_CAP.with(|c| c.set(0));
                         }
+                        if let Some(prev) = tk_prev {
+                            crate::ticks::pop_budget(prev);
+                        }
+                        self.lns_ticks += crate::ticks::total() - tk_lns0;
                         self.lns_iters += self.heur_iters - hi0;
                         self.lns_secs += t_lns.elapsed().as_secs_f64();
                         if let Some((ev, z0)) = mu0 {
@@ -12476,11 +12521,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         && (hcm_sep_rounds == 0 || node_obj - self.hcm_root_obj > 1.01 * (hcm_sep_last_obj - self.hcm_root_obj).max(feastol));
                     if go {
                         let t_nc = Instant::now();
+                        let tk_nc = crate::ticks::total();
                         let it_nc = self.lp.total_iterations();
                         let rows0 = self.lp.num_rows();
                         let added = self.hcm_node_sep_round(&x, fresh);
                         if fresh {
                             self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                            self.node_cut_ticks += crate::ticks::total() - tk_nc;
                             self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                         }
                         if env_str!("ENOMOTO_MIP_DEBUG_HCM").is_some() {
@@ -12493,6 +12540,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             if fresh {
                                 node_cut_resolve = Some(Instant::now());
                                 nc_res_it = self.lp.total_iterations();
+                                nc_res_tk = crate::ticks::total();
                             }
                             continue;
                         }
@@ -12502,15 +12550,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             hcm_sep_last_obj = node_obj;
                             if self.node_cut_secs < tunable!("ENOMOTO_T_MIP_HCM_NODE_SEP_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64() {
                                 let t_nc = Instant::now();
+                                let tk_nc = crate::ticks::total();
                                 let it_nc = self.lp.total_iterations();
                                 let added = self.hcm_node_sep_round(&x, true);
                                 self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                                self.node_cut_ticks += crate::ticks::total() - tk_nc;
                                 self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                                 if added {
                                     hcm_sep_rounds = 2;
                                     resolves += 1;
                                     node_cut_resolve = Some(Instant::now());
                                     nc_res_it = self.lp.total_iterations();
+                                    nc_res_tk = crate::ticks::total();
                                     continue;
                                 }
                             }
@@ -12564,10 +12615,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         r2.extend((0..y.len()).filter(|&i| y[i].abs() > 1e-12).map(|i| (n + i, -y[i])));
                         self.extra_sep_rows = vec![(r1, rhs), (r2, rhs)];
                         let t_nc = Instant::now();
+                        let tk_nc = crate::ticks::total();
                         let it_nc = self.lp.total_iterations();
                         let added = self.node_cut_round(&x);
                         self.extra_sep_rows.clear();
                         self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                        self.node_cut_ticks += crate::ticks::total() - tk_nc;
                         self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                         self.obj_cut_stats[0] += 1;
                         if added {
@@ -12575,6 +12628,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             resolves += 1;
                             node_cut_resolve = Some(Instant::now());
                             nc_res_it = self.lp.total_iterations();
+                            nc_res_tk = crate::ticks::total();
                             continue;
                         }
                     }
@@ -12587,15 +12641,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if (plunge_depth == 0 || mode == "all") && t4pc_rounds < tunable!("ENOMOTO_T_MIP_TREE4_PROOFCUT_ROUNDS", 3usize, usize) {
                         t4pc_rounds += 1;
                         let t_nc = Instant::now();
+                        let tk_nc = crate::ticks::total();
                         let it_nc = self.lp.total_iterations();
                         let added = self.tree4_proof_cuts(&x);
                         self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                        self.node_cut_ticks += crate::ticks::total() - tk_nc;
                         self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                         if added {
                             t4pc_added = true;
                             resolves += 1;
                             node_cut_resolve = Some(Instant::now());
                             nc_res_it = self.lp.total_iterations();
+                            nc_res_tk = crate::ticks::total();
                             continue;
                         }
                     }
@@ -12631,6 +12688,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     ts_last = node_obj;
                     let t_nc = Instant::now();
+                    let tk_nc = crate::ticks::total();
                     let it_nc = self.lp.total_iterations();
                     // 加えたカットは新しい番号 (`next_cut_id` 以降) で見分ける (`node_cut_round` は加える前に年齢で行を外すので、
                     // 行の位置では見分けられない)
@@ -12647,6 +12705,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.tsd[3] += 1;
                     self.tsd[4] += added as u64;
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                    self.node_cut_ticks += crate::ticks::total() - tk_nc;
                     self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                     self.node_sep_stats[0] += 1;
                     self.node_sep_stats[1] += added as u64;
@@ -12656,6 +12715,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         resolves += 1;
                         node_cut_resolve = Some(Instant::now());
                         nc_res_it = self.lp.total_iterations();
+                        nc_res_tk = crate::ticks::total();
                         continue;
                     }
                 }
@@ -12664,9 +12724,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     nca_rounds += 1;
                     nca_last_ok = false;
                     let t_nc = Instant::now();
+                    let tk_nc = crate::ticks::total();
                     let it_nc = self.lp.total_iterations();
                     let added = self.node_cut_round(&x);
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                    self.node_cut_ticks += crate::ticks::total() - tk_nc;
                     self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                     self.node_sep_stats[0] += 1;
                     self.node_sep_stats[1] += added as u64;
@@ -12675,13 +12737,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         resolves += 1;
                         node_cut_resolve = Some(Instant::now());
                         nc_res_it = self.lp.total_iterations();
+                        nc_res_tk = crate::ticks::total();
                         continue;
                     }
                 } else if fc2_due || (!(self.fc_node_sep && self.fc_sep2) && !self.tree_sep && !nca && !hcm_sep && resolves == 0 && node.depth > 0 && plunge_depth == 0 && self.node_cuts_due(node.depth)) {
                     let t_nc = Instant::now();
+                    let tk_nc = crate::ticks::total();
                     let it_nc = self.lp.total_iterations();
                     let added = self.node_cut_round(&x);
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                    self.node_cut_ticks += crate::ticks::total() - tk_nc;
                     self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
                     self.node_sep_stats[0] += 1;
                     self.node_sep_stats[1] += added as u64;
@@ -12698,6 +12763,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // 解き直しの時間もノードの分離の時間に数える
                         node_cut_resolve = Some(Instant::now());
                         nc_res_it = self.lp.total_iterations();
+                        nc_res_tk = crate::ticks::total();
                         continue;
                     }
                 }
@@ -18926,6 +18992,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.proof_snap.is_none() || self.nodes >= self.proof_snap_nodes + 200 || self.prune_limit() < self.proof_snap_limit || env_str!("ENOMOTO_MIP_PROOF_FULL_SCAN").is_some() {
             let (lo, up) = self.dom.root_bounds();
             self.proof_base = self.dual_proofs.iter().map(|(c, _, _)| proof_min_activity(c, &lo, &up)).collect();
+            crate::ticks::add(crate::ticks::PROP, self.dual_proofs.iter().map(|(c, _, _)| 2 * c.len() as u64).sum::<u64>() + p.n as u64);
             self.proof_col_index = [vec![Vec::new(); p.n], vec![Vec::new(); p.n]];
             for (k, (c, _, _)) in self.dual_proofs.iter().enumerate() {
                 let id = self.proof_first_id + k as u64;
@@ -18967,10 +19034,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.proof_val_lo.clone_from(slo);
             self.proof_val_up.clone_from(sup);
             let _ = self.dom.take_changed_for_proofs();
+            crate::ticks::add(crate::ticks::PROP, 2 * p.n as u64 + npool as u64);
             (0..p.n).filter(|&j| self.dom.lo[j] != slo[j] || self.dom.up[j] != sup[j]).collect()
         } else {
             self.dom.take_changed_for_proofs()
         };
+        crate::ticks::add(crate::ticks::PROP, cols.len() as u64 + self.proof_touched.len() as u64);
         if full {
             self.proof_touched.clear();
             self.proof_touched.extend(0..npool);
@@ -19237,6 +19306,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let stamp = self.proof_chg_stamp;
         for &j in cols {
+            // 手間の単位 ([`crate::ticks`]): 列に関わる証明の数
+            crate::ticks::add(crate::ticks::PROP, (self.proof_col_index[0].get(j).map_or(0, |v| v.len()) + self.proof_col_index[1].get(j).map_or(0, |v| v.len()) + 1) as u64);
             for upper in [false, true] {
                 let (old_v, new_v) = if upper { (self.proof_val_up[j], self.dom.up[j]) } else { (self.proof_val_lo[j], self.dom.lo[j]) };
                 if old_v == new_v {
@@ -23009,6 +23080,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_LPSCALE`: `ENOMOTO_MIP_LPSCALE_LOG` で数を出す (サブ MIP を含む全体の数)
         if env_str!("ENOMOTO_MIP_LPSCALE_LOG").is_some() && self.snap.is_none() && !self.params.submip && self.pool_tid == 0 {
             crate::simplex::mip_lp::lpscale_report();
+        }
+        // 手間の単位 ([`crate::ticks`]) の診断: このスレッド (外側の主) の部分ごとの手間と CPU の秒 (当てはめ用。サブ MIP を含む)
+        if self.params.verbose && self.snap.is_none() && !self.params.submip && self.pool_tid == 0 {
+            let r = crate::ticks::raw();
+            eprintln!("MIP: TICKS cpu {:.3} total {:.0} {}", super::cap_clock(), crate::ticks::total(), (0..crate::ticks::NK).map(|k| format!("{} {}", crate::ticks::NAMES[k], r[k])).collect::<Vec<_>>().join(" "));
         }
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds, rejected as numerically unreliable {})", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings, self.proof_numeric_rejects);

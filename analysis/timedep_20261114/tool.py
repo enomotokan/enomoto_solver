@@ -11,6 +11,11 @@ from pathlib import Path
 D = Path(__file__).resolve().parent; WT = D.parents[1]
 sys.path.insert(0, str(WT / "analysis/cand1114_20261113"))
 from cfg import CAND1114  # noqa: E402
+# `TOOL_BASE=1115c`: 束を cand1115c (analysis/cand1115_20261115/cfg.py の CAND1115C) にする
+if os.environ.get("TOOL_BASE") == "1115c":
+    import importlib.util as _iu
+    _sp = _iu.spec_from_file_location("cfg1115", WT / "analysis/cand1115_20261115/cfg.py"); _m = _iu.module_from_spec(_sp); _sp.loader.exec_module(_m)
+    CAND1114 = _m.CAND1115C
 args = sys.argv[1:]
 out, tag, probs, seeds = Path(args[0]), args[1], args[2].split(","), [int(s) for s in args[3].split(",")]
 opts = {"--wl": None, "--wlmult": "1", "--tl": None}; log = False; slow = False; kv = []

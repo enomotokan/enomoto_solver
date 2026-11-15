@@ -4863,7 +4863,11 @@ impl FtLu {
             scratch_a_tilde: vec![0.0; m],
             scratch_e_tilde: vec![0.0; m],
             fill,
-            tick: TickCell::new(0),
+            tick: TickCell::new({
+                // 手間の単位 ([`crate::ticks`]): 分解の構築の手間
+                crate::ticks::add(crate::ticks::LU, build_tick);
+                0
+            }),
             build_tick,
             fill_baseline,
             lu_nnz: fill_baseline,
@@ -4952,6 +4956,8 @@ impl FtLu {
     #[inline]
     fn add_tick(&self, n: u64) {
         self.tick.add(TICK_SOLVE_NNZ_COEF * n);
+        // 手間の単位 ([`crate::ticks`]): LU の求解段の非ゼロ
+        crate::ticks::add(crate::ticks::LU, n);
     }
 
     /// 非ゼロ `rhs_nnz` 個の FTRAN 右辺が十分密で、[`Self::solve_sparse_into`] でなく

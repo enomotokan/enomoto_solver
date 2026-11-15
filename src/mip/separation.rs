@@ -5852,6 +5852,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SEP_NO_ROWCLONE`: 行の写しと整数の行の印を使い回す ([`SepRowsCache`])
         let (lp_rows_rc, row_integral) = self.sep_lp_rows();
         let lp_rows: &[Vec<(usize, f64)>] = &lp_rows_rc;
+        // 手間の単位 ([`crate::ticks`]): 分離の 1 回 = LP の行の非零 + 行 + 列
+        crate::ticks::add(crate::ticks::SEP, (lp_rows.iter().map(|r| r.len()).sum::<usize>() + mr + n) as u64);
         // 試作 `ENOMOTO_MIP_MPSEP` の in-out の点 (LP の頂点でない点) では、その点での行の活動量を使う
         let act = match self.sep_act_override.take() {
             Some(a) if a.len() == mr => a,

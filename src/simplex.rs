@@ -994,6 +994,8 @@ fn run_phase(
     let ratio_pivot_tol = if env_str!("ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD").is_some() { TOL } else { tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64) };
     let max_iters = max_iters_for(m, std.n_total);
     for iter_idx in 0..max_iters {
+        crate::ticks::add(crate::ticks::LP, (2 * m) as u64);
+        crate::ticks::add(crate::ticks::LPIT, 1);
         // 分枝限定法の LP の時刻・反復の上限 (`ExtControl`)。打ち切りは `None` (理由は `ext_stop` に記録される)
         if slope_intercept_dual::ext_primal_stop(iter_idx) {
             return None;
