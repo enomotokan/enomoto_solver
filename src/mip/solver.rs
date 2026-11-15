@@ -5921,7 +5921,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut alt = self.lp.clone();
         let sample = tunable!("ENOMOTO_T_MIP_OPTFACE_SAMPLE", 8usize, usize);
         // 試作 `ENOMOTO_MIP_TICKS` の `m` ([`super::ticks_on`]): 移動の時間の上限 `cap` 秒を同じ量の手間の期限にし、時間は 10 倍の安全網にする
-        let tk_m = super::ticks_on('m');
+        // (`ENOMOTO_MIP_TICKS` の `m` は、呼び手 (`mpsep_extra`) が入れ替えの数で止めるので、ここでは手間の期限を付けない)
+        let tk_m = false;
         let _tk_guard = tk_m.then(|| crate::ticks::budget_guard(cap.max(0.0) * 1e9));
         let d = Instant::now() + Duration::from_secs_f64(cap.max(0.0) * if tk_m { 10.0 } else { 1.0 });
         let dl = self.deadline.map_or(d, |g| g.min(d));

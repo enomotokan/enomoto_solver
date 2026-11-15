@@ -5452,7 +5452,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_TIMEDEP` の `m`: 入れ替えの数で止める (時間は安全網)。今の時間の上限 (0.25 x 根の LP の秒) では、1 回の移動は
             // 10teams 20〜28、neos-960392 11〜17、neos-827175 14〜15、neos-3083819-nubu 13〜22 入れ替えで、根の LP の反復には比例しない
             // (入れ替え 1 回の重さが問題で 10〜100 倍違う)。初版の上限 max(125, 0.03 x 根の反復) は 58 問でこれらを約 2 倍遅くした
-            let (cap, piv) = if super::timedep('m') {
+            // 試作 `ENOMOTO_MIP_TICKS` の `m` も同じ入れ替えの数の上限にする (手間の期限にした初版は、根の LP の秒から決めた上限を手間に
+            // 直したため移動が長くなり、neos-960392 が 4 スレッドで根で解けなくなった: k58c で 1.9〜3.6 倍)
+            let (cap, piv) = if super::timedep('m') || super::ticks_on('m') {
                 let p0 = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0", 16.0, f64);
                 let c = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_C", 0.0, f64);
                 let k = p0.max(c * self.root_lp_iters as f64).ceil() as usize;

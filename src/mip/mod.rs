@@ -289,7 +289,7 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// - `n`: 木の大近傍探索の予算と 1 回の上限 (サブ MIP は手間の期限で止める)
 /// - `w`: [`cap_clock`] (スレッドの CPU 時間) を手間の秒にする (根のカットのループ・CUTSEL_PROBE・局所探索など)
 /// - `u`: 外側の求解のサブ MIP (根の RENS など) を時間の規則と同じ量の手間の期限で止める
-/// - `m`: MPSEP の最適面の移動の時間の上限を手間の期限にする
+/// - `m`: MPSEP の最適面の移動を入れ替えの数 (`ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0`、既定 16) で止める (時間は 1 秒の安全網。TIMEDEP の `m` と同じ)
 /// - `c`: CUTSEL_PROBE の比べの経過・打ち切り・LP の上限を手間の秒にする
 /// - `f`: 前処理の早い FJ・Local-MIP (1 本のとき) の全体の上限と Local-MIP の 1 切れを手間で数える
 /// - `l`: 局所探索の時間の上限を同じ量の手間の上限にする
