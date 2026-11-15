@@ -12824,10 +12824,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_TC` の `r`: このノードの局所的な被約費用の固定 (理由 -3) を子に引き継ぐ (分枝ではない変更として `sym` を立てる)。
             // HiGHS はノードの定義域の変更を子に持たせ、mcsched で HiGHS の分枝をなぞった同じノードの被約費用の固定は HiGHS 34 本・こちら 1.4 本
             // サブ MIP (根のヒューリスティクス) では使わない (根の道筋を既定と同じにする。physiciansched6-2 は根のサブ MIP の結果が変わって 2 種とも遅れた)
-            if (tc_on('r') || tc_on('a')) && !self.params.submip {
+            if (tc_on('r') || tc_on('a') || tc_on('b')) && !self.params.submip {
                 // `a`: 被約費用 (−3) に加えて強分枝 (−4)・双対証明 (−6)・リテラルの衝突 (−7)・目的関数の伝播 (−8)・カットプールの伝播 (−9) の固定も
                 // (行の伝播は分枝から積み直せば同じになるので除く。オービトープ (−5) は対称性の推論なので除く)
-                let reasons: &[i32] = if tc_on('a') { &[-3, -4, -6, -7, -8, -9] } else { &[-3] };
+                // `b`: 親の LP に依るので子で作り直せない被約費用 (−3)・強分枝 (−4) だけ。−6〜−9 は大域的な制約 (双対証明・衝突・カット) の
+                // 伝播なので子の伝播で作り直せる。`a` は fiball で開いたノード 1 本の持ち物が 2.3〜3.5 倍になり、600 秒で 11 GB に達した
+                let reasons: &[i32] = if tc_on('a') { &[-3, -4, -6, -7, -8, -9] } else if tc_on('b') { &[-3, -4] } else { &[-3] };
                 let mut have: Vec<(usize, bool, f64)> = node.changes.iter().chain(of_fixes.iter()).map(|c| (c.col, c.upper, c.value)).collect();
                 for (j, upper, v) in self.dom.tagged_int_changes(self.p, reasons) {
                     let tighter = match have.iter().filter(|e| e.0 == j && e.1 == upper).map(|e| e.2).reduce(|a, b| if upper { a.min(b) } else { a.max(b) }) {
@@ -22858,7 +22860,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if tc_on('c') {
                     eprintln!("MIP: TC c: cut pool propagation retried {} times, off now {}", self.tc_c.3, self.cpp.off);
                 }
-                if tc_on('r') || tc_on('a') {
+                if tc_on('r') || tc_on('a') || tc_on('b') {
                     eprintln!("MIP: TC r: reduced-cost fixings passed to children {}", self.tc_r_stats);
                 }
                 if tc_on('d') {
