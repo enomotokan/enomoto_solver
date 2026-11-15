@@ -40,3 +40,10 @@ if len({k[0] for k in keys}) <= 20:
             v = by[p].get(c, {})
             cells.append(c + ": " + " / ".join(f"{(x.get('status') or '?')[:4]} {x.get('time', 0):.0f}s {x.get('nodes')}" for s, x in sorted(v.items())))
         print(f"{p:24} " + "  |  ".join(cells))
+    # 解けた数と時間のずらし幾何平均 (ずらし 10 秒、時間切れは制限時間で頭打ち)。benchlib の report は 60 秒で頭打ちにするので 600 秒の回はここで見る
+    import math
+    tl = max(r.get("tl", 60) for r in raw)
+    for c in ("base", "dfs"):
+        ts = [min(tl, x.get("time", tl)) for p in by for x in by[p].get(c, {}).values()]
+        ok = sum((x.get("status") or "").lower() == "optimal" for p in by for x in by[p].get(c, {}).values())
+        print(f"{c}: 解けた {ok}/{len(ts)}、ずらし幾何平均 {math.exp(sum(math.log(t + 10) for t in ts) / len(ts)) - 10:.1f} 秒 (制限 {tl} 秒)")
