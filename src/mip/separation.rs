@@ -4010,6 +4010,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let norm = coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
         self.cut_pool_nnz += coefs.len();
         self.cut_pool.push((coefs.to_vec(), rhs, norm));
+        // 診断用 `ENOMOTO_MIP_TC` の `p`: 作ったときのノード数・非零・整数列の非零を覚える
+        if super::solver::tc_on('p') {
+            let ni = coefs.iter().filter(|&&(j, _)| self.p.is_int[j]).count() as u32;
+            self.tc_pool_born.insert(key, (self.nodes, coefs.len() as u32, ni));
+            let t = 2 * (self.nodes > 0) as usize;
+            self.tc_pool_add[t] += 1;
+            self.tc_pool_add[t + 1] += coefs.len() as u64;
+        }
         for &(j, v) in coefs {
             self.pool_idx.push(j as u32);
             self.pool_val.push(v);

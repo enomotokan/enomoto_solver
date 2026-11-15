@@ -752,6 +752,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 診断用 `ENOMOTO_MIP_TC` の `d`: 局所的な被約費用の固定の中身 ([呼び出し, gap の和, 固定されていない整数列, うち非基底で |d| > 1e-7,
     /// うち |d| x 幅 > gap (固定できる), 締めた数, 基底の整数列, 非基底で d が 0 か向きと合わない整数列])
     tc_d: [f64; 8],
+    /// 診断用 `ENOMOTO_MIP_TC` の `p`: カットプールに入れたカットの (作ったときのノード数, 非零, 整数列の非零) と、伝播で締めた・刈った回数
+    /// ([根で作ったカット, 木で作ったカット] x [締めた, 刈った]、効いたカットの非零の和)
+    pub(super) tc_pool_born: std::collections::HashMap<u64, (u64, u32, u32)>,
+    pub(super) tc_pool_add: [u64; 4],
+    tc_pool_use: [u64; 6],
     tr_last: (u64, f64, f64, f64),
     /// 木の中の再スタートの記帳 (`TRSTAT`、ログだけ) と `ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、[`Self::tree_restart_guard_ok`]) 用:
     /// この求解で木のループに入った時刻 (この求解の始めからの秒)、そのときの全体の下界、[`Self::tree_restart_due`] の最後の木の大きさの見積もり。
@@ -4870,6 +4875,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tc_r_stats: 0,
         tc_f_calls: 0,
         tc_d: [0.0; 8],
+        tc_pool_born: std::collections::HashMap::new(),
+        tc_pool_add: [0; 4],
+        tc_pool_use: [0; 6],
         tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
         tr_t0: 0.0,
         tr_w0: (0.0, 0),
@@ -18062,6 +18070,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let kk = k as usize;
                     super::cutconf::note_range(&self.dom, cc_pos0, &mut None, || (self.cut_pool[kk].0.clone(), self.cut_pool[kk].1));
                 }
+                if tc_on('p') && !matches!(r, Ok(false)) {
+                    let kk = k as usize;
+                    let (born, len, _) = self.tc_pool_born.get(&self.pool_hash[kk]).copied().unwrap_or((u64::MAX, 0, 0));
+                    let tree = (born != 0 && born != u64::MAX) as usize;
+                    self.tc_pool_use[2 * tree + matches!(r, Err(())) as usize] += 1;
+                    self.tc_pool_use[4] += len as u64;
+                    self.tc_pool_use[5] += (born == u64::MAX) as u64;
+                }
                 match r {
                     Ok(c) => {
                         if c {
@@ -22849,6 +22865,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let d = &self.tc_d;
                     let c = d[0].max(1.0);
                     eprintln!("MIP: TC d: local redcost fixing calls {}, mean gap {:.4e}, per call: free int {:.1}, nonbasic int with |d|>0 {:.1}, fixable {:.2}, tightened {:.2}, basic int {:.1}, nonbasic int with d = 0 or wrong sign {:.1}", d[0], d[1] / c, d[2] / c, d[3] / c, d[4] / c, d[5] / c, d[6] / c, d[7] / c);
+                }
+                if tc_on('p') {
+                    let (mut n, mut nnz, mut ni) = (0usize, 0usize, 0usize);
+                    for (c, _, _) in &self.cut_pool {
+                        n += 1;
+                        nnz += c.len();
+                        ni += c.iter().filter(|&&(j, _)| self.p.is_int[j]).count();
+                    }
+                    let a = &self.tc_pool_add;
+                    let u = &self.tc_pool_use;
+                    eprintln!("MIP: TC p: pool now {n} cuts, mean nonzeros {:.1}, integer share {:.2}; added at root {} (nonzeros {}), in the tree {} (nonzeros {}); used by propagation: root cuts tightened {} pruned {}, tree cuts tightened {} pruned {}, unknown origin {}, mean nonzeros of used {:.1}", nnz as f64 / n.max(1) as f64, ni as f64 / nnz.max(1) as f64, a[0], a[1], a[2], a[3], u[0], u[1], u[2], u[3], u[5], u[4] as f64 / (u[0] + u[1] + u[2] + u[3]).max(1) as f64);
                 }
                 if tc_on('f') {
                     eprintln!("MIP: TC f: cut pool propagation forced at {} nodes with many fixed columns", self.tc_f_calls);
