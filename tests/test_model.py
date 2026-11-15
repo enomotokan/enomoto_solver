@@ -265,7 +265,8 @@ def test_mip_infeasible_or_unbounded_distinguished_by_integer_intercept_problem(
         M.add_constraint(x - y - z >= 0)
         return M
 
-    assert build().solve(threads=threads).status == "infeasible_or_unbounded"
+    # 既定 (区別を頼まない) でも、前処理 (HNF の前処理) や整数解と LP の非有界な向きから決まるときは区別した状態を返してよい
+    assert build().solve(threads=threads).status in ("infeasible_or_unbounded", expected)
     sol = build().solve(distinguish_infeasible_unbounded=True, threads=threads)
     assert sol.status == expected
     assert sol.objective is None
