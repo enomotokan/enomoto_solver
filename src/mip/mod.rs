@@ -289,6 +289,8 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// - `n`: 木の大近傍探索の予算と 1 回の上限 (サブ MIP は手間の期限で止める)
 /// - `w`: [`cap_clock`] (スレッドの CPU 時間) を手間の秒にする (根のカットのループ・CUTSEL_PROBE・局所探索など)
 /// - `u`: 外側の求解のサブ MIP (根の RENS など) を時間の規則と同じ量の手間の期限で止める
+/// - `m`: MPSEP の最適面の移動の時間の上限を手間の期限にする
+/// - `c`: CUTSEL_PROBE の比べの経過・打ち切り・LP の上限を手間の秒にする
 pub(crate) fn ticks_on(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TICKS").is_some_and(|v| v.contains(c))
 }

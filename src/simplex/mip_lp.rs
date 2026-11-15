@@ -3259,7 +3259,7 @@ impl TwoStageLp {
             (xv - xv.round()).abs() > 1e-6
         };
         while st.pivots + st.flips < k {
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) || crate::ticks::over() {
                 st.stopped = true;
                 break;
             }

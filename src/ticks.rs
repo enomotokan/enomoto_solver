@@ -91,3 +91,17 @@ pub fn pop_budget(prev: f64) {
 pub fn has_budget() -> bool {
     DEADLINE.with(|d| d.get()).is_finite()
 }
+
+/// [`push_budget`] して、捨てるときに元の期限に戻す見張り (途中で戻る関数で使う)。
+pub struct BudgetGuard(f64);
+
+impl Drop for BudgetGuard {
+    fn drop(&mut self) {
+        pop_budget(self.0);
+    }
+}
+
+/// 今から `budget` を手間の期限にし、戻り値を捨てるときに戻す。
+pub fn budget_guard(budget: f64) -> BudgetGuard {
+    BudgetGuard(push_budget(budget))
+}

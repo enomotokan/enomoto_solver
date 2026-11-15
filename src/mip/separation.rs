@@ -1176,6 +1176,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_TIMEDEP` の `c`: 比べの時間を手間で数える ([`PROBE_WORK`])。LP 1 回の時間の上限は 5 倍の安全網
         let (td_c, _, _) = PROBE_WORK.with(|c| c.get());
         let cap = if td_c { 5.0 * cap } else { cap };
+        // 試作 `ENOMOTO_MIP_TICKS` の `c` ([`super::ticks_on`]): 比べの経過・打ち切り・1 回の LP の上限を手間の秒 ([`crate::ticks`]) で数える
+        // (秒あたりの伸びの比べが回ごとに変わっていた。neos5 では伸びが同じで default と pool の選びが回ごとに違った)
+        let tk_c = !td_c && super::ticks_on('c');
+        let tk0 = crate::ticks::total();
+        let tk_budget = deadline.saturating_duration_since(t0).as_secs_f64();
+        let tk_el = || (crate::ticks::total() - tk0) * 1e-9;
         let mut w_side = 0.0f64;
         // 単位は max(根の LP の反復, 行の数) (根の LP が受け継いだ基底で 1 反復のときに小さくなりすぎないように。`w` と同じ)
         let root_it = self.root_lp_iters.max(self.p.m as u64).max(1) as f64;
@@ -1189,7 +1195,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut all_rows: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
         let alt_has = |c: char| env_def!("ENOMOTO_MIP_CUTSEL_PROBE_ALT", "NS").is_none_or(|v| v.contains(c));
         for r in 0..k {
-            let over = if td_c { PROBE_WORK.with(|c| { let (_, u, b) = c.get(); u >= b }) } else { std::time::Instant::now() >= deadline };
+            let over = if td_c { PROBE_WORK.with(|c| { let (_, u, b) = c.get(); u >= b }) } else if tk_c { tk_el() >= tk_budget } else { std::time::Instant::now() >= deadline };
             if self.time_up() || (r > 0 && over) {
                 break;
             }
@@ -1225,7 +1231,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if keep {
                 all_rows.extend(rows.iter().cloned());
             }
-            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap.min(1e6));
+            let _tk_guard = tk_c.then(|| crate::ticks::budget_guard(cap.min(1e6) * 1e9));
+            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap.min(1e6) * if tk_c { 10.0 } else { 1.0 });
             let d = Some(self.deadline.map_or(d, |g| g.min(d)));
             let it_r0 = self.lp.total_iterations();
             let st = self.lp.solve(&SolveLimits { iteration_limit: 10 * self.avg_node_iters().max(1000) + 10_000, cutoff: f64::INFINITY, deadline: d });
@@ -1242,9 +1249,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             gain = self.lp.objective() - obj0;
-            hist.push((gain, if td_c { w_side } else { t0.elapsed().as_secs_f64() }));
+            let el = if td_c { w_side } else if tk_c { tk_el() } else { t0.elapsed().as_secs_f64() };
+            hist.push((gain, el));
             nadd_hist.push(nadd);
-            if stop(r, gain, if td_c { w_side } else { t0.elapsed().as_secs_f64() }) {
+            if stop(r, gain, el) {
                 break;
             }
             if self.lp.objective() <= before + 1e-9 * before.abs().max(1.0) && r > 0 && !PROBE_NO_FLAT_STOP.with(|c| c.get()) {
