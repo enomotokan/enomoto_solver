@@ -759,6 +759,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     tc_pool_use: [u64; 6],
     /// 試作 `ENOMOTO_MIP_TC` の `r`・`a`・`b`: 子の変更の並びの長さの和・子の数・最大・深さの和
     tc_len: [u64; 4],
+    /// 試作 `ENOMOTO_MIP_TC` の `e`: 行だけの比で飛ばした基底の退化した列の候補の数
+    tc_e_skip: u64,
     tr_last: (u64, f64, f64, f64),
     /// 木の中の再スタートの記帳 (`TRSTAT`、ログだけ) と `ENOMOTO_MIP_TREE_RESTART_GUARD` (試作、[`Self::tree_restart_guard_ok`]) 用:
     /// この求解で木のループに入った時刻 (この求解の始めからの秒)、そのときの全体の下界、[`Self::tree_restart_due`] の最後の木の大きさの見積もり。
@@ -4889,6 +4891,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tc_pool_add: [0; 4],
         tc_pool_use: [0; 6],
         tc_len: [0; 4],
+        tc_e_skip: 0,
         tr_last: (0, 0.0, f64::INFINITY, f64::NEG_INFINITY),
         tr_t0: 0.0,
         tr_w0: (0.0, 0),
@@ -14148,6 +14151,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for k in 0..8 {
                 self.tc_d[k] += st[k];
             }
+            // 打ち切り値に近いノード (gap < `ENOMOTO_T_MIP_TC_D_GAP`、既定 0 = 出さない) では 1 行ずつ出す
+            let dgap = tunable!("ENOMOTO_T_MIP_TC_D_GAP", 0.0, f64);
+            if gap < dgap {
+                // 基底にあって境界に張り付いた整数列 (HiGHS の computeBasicDegenerateDuals の候補)
+                let x = self.lp.col_values();
+                let atb = (0..self.p.n).filter(|&j| self.p.is_int[j] && !self.dom.is_fixed(j) && matches!(b.col[j], VarStatus::Basic) && (x[j] <= self.dom.lo[j] + 1e-6 || x[j] >= self.dom.up[j] - 1e-6)).count();
+                eprintln!("TCD node {} gap {:.1} free_int {} nonbasic_d>0 {} fixable {} basic_int {} basic_at_bound {}", self.nodes, gap, st[2], st[3], st[4], st[6], atb);
+            }
         }
         for j in 0..self.p.n {
             if self.dom.is_fixed(j) {
@@ -14236,6 +14247,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         self.nodecnt_stats[1] += cands.len() as u64;
+        let (ncand, dd_before) = (cands.len(), self.nodecnt_stats[3] + self.nodecnt_stats[4]);
         let basis = self.lp.basis_ref().into_owned();
         let d = self.lp.reduced_costs_ref().into_owned();
         let y = self.lp.row_duals();
@@ -14255,6 +14267,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let eps = 1e-9;
             let mut theta = f64::INFINITY;
             let mut bad = false;
+            // 試作 `ENOMOTO_MIP_TC` の `e`: HiGHS の computeBasicDegenerateDuals と同じく、先に行 (論理変数) だけで比を見て、
+            // ギャップ未満なら列の行 (B^-1 A) を作らずに次の候補へ (固定する列は変わらない、手間だけ減る)
+            if tc_on('e') {
+                let mut th = f64::INFINITY;
+                for i in 0..m {
+                    let wi = w[i];
+                    if wi.abs() <= eps * wmax.max(1.0) {
+                        continue;
+                    }
+                    let (rlo, rup) = self.lp.row_bounds(i);
+                    if rlo == rup {
+                        continue;
+                    }
+                    let e = sigma * -wi;
+                    let r = match (basis.row[i], e) {
+                        (VarStatus::Lower, e) if e < 0.0 => y[i].max(0.0) / -e,
+                        (VarStatus::Upper, e) if e > 0.0 => (-y[i]).max(0.0) / e,
+                        (VarStatus::Zero, _) => 0.0,
+                        _ => continue,
+                    };
+                    th = th.min(r);
+                    if th < gap {
+                        break;
+                    }
+                }
+                if th < gap {
+                    self.tc_e_skip += 1;
+                    continue;
+                }
+            }
             // 論理変数 (行)
             for i in 0..m {
                 let wi = w[i];
@@ -14339,6 +14381,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.nodecnt_stats[5] += changed as u64;
+        // 診断用 `ENOMOTO_MIP_TC` の `d`: 打ち切り値に近いノードでは 1 行ずつ出す (`ENOMOTO_T_MIP_TC_D_GAP`)
+        if tc_on('d') && gap < tunable!("ENOMOTO_T_MIP_TC_D_GAP", 0.0, f64) {
+            let fixed = self.nodecnt_stats[3] + self.nodecnt_stats[4] - dd_before;
+            eprintln!("TCDD node {} gap {:.1} candidates {} fixed {}", self.nodes, gap, ncand, fixed);
+        }
         changed
     }
 
@@ -22940,6 +22987,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let a = &self.tc_pool_add;
                     let u = &self.tc_pool_use;
                     eprintln!("MIP: TC p: pool now {n} cuts, mean nonzeros {:.1}, integer share {:.2}; added at root {} (nonzeros {}), in the tree {} (nonzeros {}); used by propagation: root cuts tightened {} pruned {}, tree cuts tightened {} pruned {}, unknown origin {}, mean nonzeros of used {:.1}", nnz as f64 / n.max(1) as f64, ni as f64 / nnz.max(1) as f64, a[0], a[1], a[2], a[3], u[0], u[1], u[2], u[3], u[5], u[4] as f64 / (u[0] + u[1] + u[2] + u[3]).max(1) as f64);
+                }
+                if tc_on('e') {
+                    eprintln!("MIP: TC e: degenerate-dual candidates skipped by the row ratio test {}", self.tc_e_skip);
                 }
                 if tc_on('f') {
                     eprintln!("MIP: TC f: cut pool propagation forced at {} nodes with many fixed columns", self.tc_f_calls);
