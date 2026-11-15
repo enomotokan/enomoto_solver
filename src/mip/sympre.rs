@@ -55,7 +55,7 @@ use super::symmetry::{self, Symmetry};
 
 /// `ENOMOTO_MIP_SYMPRE` (試作、既定では使わない): 値が `1`・`all` なら (1) と (3) の両方、`d1` なら (1) だけ、`probe` なら (3) だけ。
 fn sympre_mode() -> (bool, bool) {
-    match env_str!("ENOMOTO_MIP_SYMPRE").as_deref() {
+    match env_def!("ENOMOTO_MIP_SYMPRE", "probe").as_deref() {
         Some("d1") => (true, false),
         Some("probe") => (false, true),
         Some("0") | None => (false, false),

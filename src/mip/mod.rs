@@ -2665,7 +2665,7 @@ pub(crate) fn sym_twins() -> bool {
 /// 整数列の組を、生成元を作らずに 1xk のオービトープ (`local`、列の入れ替えが組の中だけ) として直接扱う。0-1 列のまま
 /// 残り、LP の行も足さない。生成元が動かす組は [`sym_twins`] と同じく入れ替えを生成元に足す。
 pub(crate) fn sym_twin_orbitope() -> bool {
-    env_str!("ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE").is_none()
+    env_def!("ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE", "1").is_none()
 }
 
 /// 双子の組 `classes` をそれぞれ先頭の列に併合した問題を返し、後処理の手順を `postsolve` に足す (`parallelcols` と同じ
@@ -4816,8 +4816,10 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     // 値が `late` なら、最初の LP が期限 `secs` を過ぎて解けたときだけ (期限の中で解けたときは行の状態・DSE 重みを渡さない)。
     // neos-960392 は最初の LP が 2.1〜2.3 秒 (期限 3 秒) で解け、重みを引き継いだ根の LP が別の頂点に着くと根の RENS が
     // 最適値を出さず時間切れになる (analysis/cand9bisect_20261024.md)
-    let mut finish = env_def!("ENOMOTO_MIP_LP_PROBE_FINISH", "1").is_some();
-    let finish_late = env_def!("ENOMOTO_MIP_LP_PROBE_FINISH", "1") == Some("late");
+    // 0.1.7 から既定で使わない (束 cand1114 の prune1112)。`1`・`late` で使う
+    let lpf = env_str!("ENOMOTO_MIP_LP_PROBE_FINISH").filter(|v| *v != "0" && *v != "off");
+    let mut finish = lpf.is_some();
+    let finish_late = lpf == Some("late");
     // `ENOMOTO_MIP_PRESOLVE_WORK` (試作): 時間 `secs` の代わりに LP の手間 (反復の数 x (行 + 列 + 非零)) の上限で打ち切る。
     // `ENOMOTO_T_MIP_PRESOLVE_WORK_LP` は `secs` (60 秒で 3 秒) に、`_LP_GIVEUP` は 0.1 秒 (反復 x (行 + 列)) に、`_LP_BASIS` は 1 秒に当たる値。
     // `secs` はここでは安全網 (呼び出し側で大きくしてある)
@@ -5951,7 +5953,7 @@ thread_local! {
 /// (`p`: 含意を集めるプロービング ([`probe`]) の候補を投機的に並べる、`e`: プロービングの同値な組の巡を並べる、
 /// `l`: LP による固定 ([`lp_probe`]) の 1 巡の列の試しを並べる)
 pub(crate) fn prepar_has(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_PREPAR").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_PREPAR", "ple").is_some_and(|v| v.contains(c))
 }
 
 thread_local! {

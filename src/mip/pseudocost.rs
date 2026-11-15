@@ -1,10 +1,10 @@
 //! pseudocost (分枝による目的値の増加の単位あたりの平均) と分枝スコア
 //! (HiGHS の `HighsPseudocost` を簡略化したもの)。
 
-/// 試作 `ENOMOTO_MIP_GAP1` の値 (既定では空)。analysis/gap1_tree_20261109.md
+/// `ENOMOTO_MIP_GAP1` の値 (0.1.7 から既定 `u`、束 cand1114。`0` で空)。analysis/gap1_tree_20261109.md
 pub fn gap1() -> &'static str {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP1").unwrap_or_default())
+    V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP1").map(|v| if v == "0" || v == "off" { String::new() } else { v }).unwrap_or_else(|_| "u".to_string()))
 }
 
 /// 列ごとの pseudocost と観測回数。

@@ -17,7 +17,7 @@ use std::cell::Cell;
 
 /// `ENOMOTO_MIP_ROOTSTOP` に文字 `c` が入っているか
 pub(crate) fn on(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_ROOTSTOP").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_ROOTSTOP", "b").is_some_and(|v| v.contains(c))
 }
 
 thread_local! {

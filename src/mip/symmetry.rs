@@ -983,8 +983,9 @@ impl Orbitope {
 
 /// 既定 (2026-10-29、`ENOMOTO_MIP_NO_ORBITOPE_TWO_COL` で止める): 生成元 1 本の 2 列の入れ替えもオービトープにする ([`find_orbitopes`])。
 /// (検出 1 回に 1 度しか呼ばないので値を控えない。単体テストで切り替える)
+/// 0.1.7 から既定で止める (束 cand1114 の prune1112)。`ENOMOTO_MIP_NO_ORBITOPE_TWO_COL=0` で使う
 pub(crate) fn orbitope_two_col() -> bool {
-    std::env::var_os("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL").is_none()
+    matches!(std::env::var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL").as_deref(), Ok("0") | Ok("off"))
 }
 
 /// 生成元のうち、0-1 列の 2-巡回だけからなるもの (列の入れ替え) をまとめて完全オービトープを作る。
@@ -1953,8 +1954,9 @@ mod tests {
         assert_eq!(sym.generators.len(), 1);
         std::env::set_var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL", "1");
         assert!(find_orbitopes(&p, &sym).0.is_empty());
-        std::env::remove_var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL");
+        std::env::set_var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL", "0");
         let (orbs, used) = find_orbitopes(&p, &sym);
+        std::env::remove_var("ENOMOTO_MIP_NO_ORBITOPE_TWO_COL");
         assert_eq!(orbs.len(), 1);
         assert_eq!(orbs[0].vars, vec![vec![0, 1], vec![2, 3], vec![4, 5]]);
         assert!(used[0]);

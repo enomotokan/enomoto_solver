@@ -58,7 +58,8 @@ pub(crate) struct PlsbCfg {
 pub(crate) fn plsb_cfg() -> Option<PlsbCfg> {
     static V: std::sync::OnceLock<Option<PlsbCfg>> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        let s = std::env::var("ENOMOTO_MIP_PLSB").ok()?;
+        // 0.1.7 から既定で `gxu` (束 cand1114)
+        let s = std::env::var("ENOMOTO_MIP_PLSB").unwrap_or_else(|_| "gxu".to_string());
         if s == "0" || s == "off" {
             return None;
         }

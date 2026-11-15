@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 /// 値の文字 `c` を含むか。
 pub(crate) fn flag(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_RCSTRONG").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_RCSTRONG", "k").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_RCSTRONG_KROOT` (既定では使わない、analysis/rcstrong4_20261113.md): 根の被約費用の表に連続列も全部入れ、最初の

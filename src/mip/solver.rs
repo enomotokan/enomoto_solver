@@ -2304,7 +2304,7 @@ fn mem2(c: char) -> bool {
 /// `o`: 木のスレッドに渡す対称性の前の問題 (`orig`) の写しから含意を除く。`c`: 密なカットをカットのプールの伝播に入れない (HiGHS と同じ規則)。
 pub(super) fn gap4(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP4").ok().filter(|v| v != "0").unwrap_or_default()).contains(c)
+    V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP4").map(|v| if v == "0" || v == "off" { String::new() } else { v }).unwrap_or_else(|_| "rocn".to_string())).contains(c)
 }
 
 /// 診断用 `ENOMOTO_MIP_GAP4_RSS=<秒>` (既定では出さない。analysis/gap4_rootstuck_mem_20261109.md): その秒おきに RSS と生きている
@@ -3003,7 +3003,7 @@ fn tree_restart_on() -> bool {
 /// - `s`: 木の中の再スタートの後の根では、カットのループを `ENOMOTO_T_MIP_TREEEFF_ROUNDS` (5) ラウンドまでにする (カットは行として持ち込む)。
 /// - `h`: 木の中の再スタートの後の根では、軽いヒューリスティクスだけを回す (暫定解があるとき)。
 pub(super) fn treeeff(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_TREEEFF").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_TREEEFF", "rpsh").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_TC=文字` (既定では使わない。analysis/treeclose_20261114.md): 木を閉じる力の手当て。
@@ -3649,7 +3649,7 @@ pub(crate) fn thread_budget_on() -> bool {
 /// - 並列のサブ MIP は終わった順に受け取る (`ENOMOTO_MIP_SUBMIP_FIRST_DONE` と同じ)
 /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、既定では使わない): [`Solver::lmip_boost`]。
 fn lmboost_on() -> bool {
-    env_str!("ENOMOTO_MIP_LMBOOST").is_some()
+    env_def!("ENOMOTO_MIP_LMBOOST", "1").is_some()
 }
 
 /// 試作 `ENOMOTO_MIP_FJKEEP` (COMP07、既定では使わない): 根のカットのループの後も FJ のスレッドを根のヒューリスティクスの終わりまで続ける。
@@ -3748,7 +3748,7 @@ pub(crate) fn lose6_1_stop() -> bool {
 /// tbfp-network は `LOSE6_1_STOP=w` でもサブ MIP を止めた後、裏のカットの回っているラウンドの終わりを 25 秒待ち、続けて主のカットのループを
 /// 59 秒回してから再スタートしていた (analysis/hiloss_20261111.md の 5.3)
 pub(crate) fn erwait(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_ERWAIT").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_ERWAIT", "sbkc").is_some_and(|v| v.contains(c))
 }
 
 /// 診断 `ENOMOTO_MIP_ERWAIT_DIAG` (振る舞いは変えない): 早めの再スタートを決めてから再スタートするまでの区切りの時刻を
@@ -11163,11 +11163,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // (analysis/submip_nodes_20261101.md。計測のときの名前は `ENOMOTO_T_MIP_SUBMIP_NOSOL_NODES`・`ENOMOTO_MIP_SUBMIP_NOSOL_NODES_ROOT`・
             // `_SERIAL` で、上の試作の調整値と重なったので改名した)
             if self.params.submip && self.last_improve_node.is_none() {
-                let k = tunable!("ENOMOTO_T_MIP_SUBMIP_NOSOL_CAP", 0u64, u64);
+                let k = tunable!("ENOMOTO_T_MIP_SUBMIP_NOSOL_CAP", 250u64, u64);
                 if k > 0
                     && self.nodes >= k
                     && (self.root_submip.is_some() || env_str!("ENOMOTO_MIP_SUBMIP_NOSOL_CAP_ROOT").is_none())
-                    && !(SUBMIP_IN_THREAD.with(|f| f.get()) && env_str!("ENOMOTO_MIP_SUBMIP_NOSOL_CAP_SERIAL").is_some())
+                    && !(SUBMIP_IN_THREAD.with(|f| f.get()) && env_def!("ENOMOTO_MIP_SUBMIP_NOSOL_CAP_SERIAL", "1").is_some())
                 {
                     self.dbg_submip_stop("no solution");
                     return self.finish_limit(MipStatus::NodeLimit, plunge.as_ref());
@@ -19266,7 +19266,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 固定された列の非零がこの根の始めに自由だった列の非零の `ENOMOTO_T_MIP_RSTCRIT_TREE_NNZ` (0.2) 以上なら、主のノード数の上限
     /// (`ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES`) を見ずに再スタートを許す (sct2 は 9522 ノードで自由な整数列の 22.6% が固定されていた)
     fn rstcrit_tree_big(&self) -> bool {
-        if !env_str!("ENOMOTO_MIP_RSTCRIT").is_some_and(|v| v.contains('t')) {
+        if !env_def!("ENOMOTO_MIP_RSTCRIT", "n").is_some_and(|v| v.contains('t')) {
             return false;
         }
         let (_, nnz_new, nnz_free, _, _) = self.restart_shrink();
@@ -19357,7 +19357,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_T_MIP_RSTCRIT_ALL_NNZ` (既定 0.15) 以上なら、再スタートの数の条件を満たしたとみなす (rmatr100-p10 は暗黙の整数の連続列が
     /// 大量に固定されても、整数列の固定が 0 本で再スタートしない)。`ENOMOTO_MIP_RSTCRIT` に `a` がなければ偽
     pub(super) fn rstcrit_all_nnz_ok(&self) -> bool {
-        if !env_str!("ENOMOTO_MIP_RSTCRIT").is_some_and(|v| v.contains('a')) {
+        if !env_def!("ENOMOTO_MIP_RSTCRIT", "n").is_some_and(|v| v.contains('a')) {
             return false;
         }
         let (_, nnz_new, nnz_free, _, _) = self.restart_shrink();
@@ -19374,7 +19374,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     ///   `ENOMOTO_T_MIP_RSTCRIT_MINRED` (0.10) 未満なら、それ以上再スタートしない
     /// `verbose` なら見送ったときに理由を出す
     pub(super) fn rstcrit_gate(&self, verbose: bool) -> bool {
-        let Some(v) = env_str!("ENOMOTO_MIP_RSTCRIT") else { return true };
+        let Some(v) = env_def!("ENOMOTO_MIP_RSTCRIT", "n") else { return true };
         if v.contains('m') && self.params.restarts >= 1 {
             let last = RSTCRIT_LAST_RED.with(|c| c.get());
             let thr = tunable!("ENOMOTO_T_MIP_RSTCRIT_MINRED", 0.10, f64);
@@ -23287,7 +23287,7 @@ fn obj_step_lattice() -> bool {
 /// 報告の下界は格子に切り上げ (`ENOMOTO_MIP_BOUND_STEP`、既定)
 pub(super) fn objint(c: char) -> bool {
     // `1` は計測した形 `hf` (`c` は含めない)
-    env_str!("ENOMOTO_MIP_OBJINT").is_some_and(|v| v != "0" && v != "off" && (v.contains(c) || (v == "1" && matches!(c, 'h' | 'f'))))
+    env_def!("ENOMOTO_MIP_OBJINT", "hfc").is_some_and(|v| v != "0" && v != "off" && (v.contains(c) || (v == "1" && matches!(c, 'h' | 'f'))))
 }
 
 fn objint_on() -> bool {
@@ -23300,7 +23300,7 @@ fn objint_on() -> bool {
 /// `p` 固定費用ネットワーク型でなくてもノードの分離で経路集約を使う (始点は `ENOMOTO_T_MIP_NODE_FC_PATH_STARTS`)、
 /// `h` `p` に加えノードでも HiGHS の経路集約の移植を使う
 pub(super) fn nodecnt(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_NODECNT").is_some_and(|v| v.contains(c) || (c == 'd' && v == "1"))
+    env_def!("ENOMOTO_MIP_NODECNT", "hr").is_some_and(|v| v.contains(c) || (c == 'd' && v == "1"))
 }
 
 fn nodecnt_on() -> bool {

@@ -24,10 +24,10 @@ use super::problem::MipProblem;
 use super::solver::{MipResult, MipStatus};
 use crate::simplex::lp_fold::{Fold, FoldIn, FoldOpts};
 
-/// `ENOMOTO_MIP_FOLD` の値。2026-11-10 から既定で使う (既定の値 `riq` = 反転・整数の組・ログなし。`0` か `off` で止める。
+/// `ENOMOTO_MIP_FOLD` の値。2026-11-10 から既定で使う (既定の値 `rinq` = 反転・整数の組・ログなし (0.1.7 で `n` を足した、束 cand1114)。`0` か `off` で止める。
 /// analysis/drcr_20261110.md の既定化の節)。
 pub fn flags() -> Option<&'static str> {
-    env_def!("ENOMOTO_MIP_FOLD", "riq")
+    env_def!("ENOMOTO_MIP_FOLD", "rinq")
 }
 
 /// 畳み方と畳んだ問題。

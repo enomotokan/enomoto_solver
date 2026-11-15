@@ -4320,7 +4320,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 超えるものを捨てる (CglGomory の `dynamicLimitInTree_`。プールから戻すカットは捨てない)。加えるカットの非零の平均
     /// (ノードの分離を続けるかの密度の判定 [`Solver::nca_dense`] が見る `nca_cut_nnz`) は残ったカットで数える
     fn node_cut_maxlen(&self, cands: &mut Vec<Candidate>) {
-        if env_str!("ENOMOTO_MIP_NODE_CUT_MAXLEN").is_none() {
+        if env_def!("ENOMOTO_MIP_NODE_CUT_MAXLEN", "1").is_none() {
             return;
         }
         let maxlen = tunable!("ENOMOTO_T_MIP_NODE_CUT_MAXLEN_MIN", 50usize, usize).max(self.p.n / tunable!("ENOMOTO_T_MIP_NODE_CUT_MAXLEN_DIV", 40usize, usize).max(1));

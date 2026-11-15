@@ -650,7 +650,7 @@ impl<'a> LocalMip<'a> {
         // `ENOMOTO_MIP_LMIP_SWAP` (試作、既定では使わない): 集合分割の行の中で 1 を立てる列を入れ替える組の手を候補に足す ([`swap`])
         let swap_rows = tunable!("ENOMOTO_T_MIP_LMIP_SWAP_ROWS", 2usize, usize);
         let (swap_cols, swap_partners) = (tunable!("ENOMOTO_T_MIP_LMIP_SWAP_COLS", 16usize, usize).max(1), tunable!("ENOMOTO_T_MIP_LMIP_SWAP_PARTNERS", 4usize, usize));
-        let swap = swap.get_or_insert_with(|| env_str!("ENOMOTO_MIP_LMIP_SWAP").and_then(|_| swap::SwapIdx::build(s)));
+        let swap = swap.get_or_insert_with(|| env_def!("ENOMOTO_MIP_LMIP_SWAP", "1").and_then(|_| swap::SwapIdx::build(s)));
         let (chain, t0) = (*chain, *t0);
         let p = s.p;
         let (n, m) = (p.n, p.m);
