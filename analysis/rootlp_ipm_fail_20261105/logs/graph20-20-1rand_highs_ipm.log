@@ -1,0 +1,70 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+LP graph20-20-1rand has 4810 rows; 2183 cols; 17020 nonzeros
+Coefficient ranges:
+  Matrix  [1e+00, 1e+00]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 2e+00]
+Not presolved: solving the LP
+IPX model has 4810 rows, 2183 columns and 17020 nonzeros
+Input
+    Number of variables:                                2183
+    Number of free variables:                           0
+    Number of constraints:                              4810
+    Number of equality constraints:                     37
+    Number of matrix entries:                           17020
+    Matrix range:                                       [1e+00, 1e+00]
+    RHS range:                                          [1e+00, 2e+00]
+    Objective range:                                    [1e+00, 1e+00]
+    Bounds range:                                       [1e+00, 1e+00]
+Preprocessing
+    Dualized model:                                     yes
+    Number of dense columns:                            0
+    Range of scaling factors:                           [1.00e+00, 1.00e+00]
+    Scaled cost norm:                                   2
+    Scaled bounds norm:                                 1
+IPX version 1.0
+Interior point solve
+ Iter       primal obj         dual obj       pinf       dinf       gap      time
+   0    4.59912210e+01   4.56322310e+01   1.21e+00   2.26e+00  7.67e-03       0.0
+   1    8.97446446e+03   3.14083066e+01   1.21e-06   2.63e+00  1.99e+00       0.0
+   2    4.22770792e+03   2.32821036e+01   1.21e-12   6.38e-01  1.98e+00       0.0
+   3    1.14866422e+03   2.50821914e+01   2.10e-13   1.11e-01  1.91e+00       0.0
+   4    3.22926608e+02   3.44849717e+01   1.95e-14   4.71e-03  1.61e+00       0.0
+   5    7.18453546e+01   3.64442762e+01   2.82e-15   7.18e-04  6.42e-01       0.0
+   6    3.79427187e+01   3.69352899e+01   3.96e-16   2.97e-05  2.62e-02       0.0
+   7    3.72749204e+01   3.69978536e+01   1.10e-16   9.90e-07  7.27e-03       0.0
+   8    3.70898537e+01   3.69998250e+01   1.47e-16   3.00e-08  2.37e-03       0.0
+   9    3.70134034e+01   3.69998283e+01   9.56e-17   2.27e-09  3.57e-04       0.0
+  10    3.70010817e+01   3.69999988e+01   1.97e-16   1.58e-11  2.85e-05       0.0
+  11    3.70001843e+01   3.70000000e+01   1.39e-16   5.92e-16  4.85e-06       0.0
+  12    3.70001728e+01   3.70000000e+01   1.35e-16   5.18e-16  4.55e-06       0.0
+ Constructing starting basis...
+ Iter       primal obj         dual obj       pinf       dinf       gap      time
+  13*   3.70000000e+01   3.70000000e+01   2.27e-16   1.11e-16  9.80e-10       0.1
+Running crossover as requested
+    Primal residual before push phase:                  9.78e-12
+    Dual residual before push phase:                    1.01e-09
+    Number of dual pushes required:                     1814
+    Number of primal pushes required:                   223
+Summary
+    Runtime:                                            0.19s
+    Status interior point solve:                        optimal
+    Status crossover:                                   optimal
+    objective value:                                    -3.70000000e+01
+    interior solution primal residual (abs/rel):        5.05e-10 / 1.68e-10
+    interior solution dual residual (abs/rel):          4.55e-16 / 2.27e-16
+    interior solution objective gap (abs/rel):          3.76e-08 / 9.89e-10
+    basic solution primal infeasibility:                3.09e-14
+    basic solution dual infeasibility:                  0.00e+00
+Ipx: IPM       optimal
+Ipx: Crossover optimal
+
+Model name          : graph20-20-1rand
+Model status        : Optimal
+IPM       iterations: 13
+Crossover iterations: 1510
+Objective value     : -3.7000000000e+01
+P-D objective error :  0.0000000000e+00
+HiGHS run time      :          0.20

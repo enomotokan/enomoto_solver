@@ -1,0 +1,22 @@
+== def tiny
+== def vs_highs
+== def fuzz_snf
+bad 0 of 1000 optimal 218 time 7.3
+== snf tiny
+bad 13 of 400 time 2.7
+== snf vs_highs
+bad 0 of 300 time 4.2
+== snf fuzz_snf
+bad 0 of 1000 optimal 218 time 7.3
+== snfcv tiny
+bad 13 of 400 time 2.6
+== snfcv vs_highs
+bad 0 of 300 time 4.1
+== snfcv fuzz_snf
+bad 0 of 1000 optimal 218 time 7.3
+FUZZ_DONE
+== def tiny (再実行): bad 13 of 400 / def vs_highs (再実行): bad 0 of 300
+== snf fuzz_snf 5000 (開始 1000)
+bad 0 of 5000 optimal 1076 time 36.1
+== snfcv fuzz_snf 5000 (開始 1000)
+bad 0 of 5000 optimal 1076 time 35.9

@@ -43,12 +43,18 @@ pub struct LitConflictPool {
     pub stats: [[u64; 4]; 2],
 }
 
+/// リテラルが今の定義域で成り立つか。整数列は境界が整数なので許容 1e-9 で比べる。連続列は許容なしで比べる
+/// (WRONGANS blend2、analysis/wrongans_blend2_20261113.md): 連続列の境界は伝播で 1e-9 (1 + |v|) だけ緩めて置かれる
+/// ([`Domain::propose_upper`]) ので、同じ大きさの許容で比べると、上限 2127.999997871 (= 2128 − 1e-9 × 2129) の下で作った衝突
+/// `x ≤ 2127.999997871` を上限 2128 のノードでも「成り立つ」と読み、x = 2128 の最適解を含むノードで残りのリテラルの否定を課して
+/// 最適解を捨てていた。リテラルの値は定義域の境界そのものなので、許容なしの比べで足りる (成り立つと読む場合が減るだけで、安全側)
 #[inline]
-fn holds(dom: &Domain, &(j, upper, v): &Lit) -> bool {
+fn holds(p: &MipProblem, dom: &Domain, &(j, upper, v): &Lit) -> bool {
+    let tol = if p.is_int[j] { 1e-9 * (1.0 + v.abs()) } else { 0.0 };
     if upper {
-        dom.up[j] <= v + 1e-9 * (1.0 + v.abs())
+        dom.up[j] <= v + tol
     } else {
-        dom.lo[j] >= v - 1e-9 * (1.0 + v.abs())
+        dom.lo[j] >= v - tol
     }
 }
 
@@ -195,7 +201,7 @@ impl LitConflictPool {
                     let mut open: Option<&Lit> = None;
                     let mut nopen = 0;
                     for lit in c {
-                        if !holds(dom, lit) {
+                        if !holds(p, dom, lit) {
                             nopen += 1;
                             if nopen > 1 {
                                 break;
@@ -270,5 +276,45 @@ impl LitConflictPool {
             }
         }
         Ok(tightened)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WRONGANS blend2 (analysis/wrongans_blend2_20261113.md): 連続列の上限 2128 は、衝突のリテラル `x0 ≤ 2128 − 1e-9 × 2129`
+    /// (伝播の緩めと同じ大きさだけ締まった上限の下で作ったもの) を満たさない。旧い比べ (許容 1e-9 (1 + |v|)) は満たすと読み、
+    /// 残りのリテラル x1 ≥ 1 の否定 x1 ≤ 0 を課していた (x0 = 2128, x1 = 1 の解を捨てる)
+    #[test]
+    fn continuous_literal_is_compared_without_tolerance() {
+        // x0 連続 [0, 2128]、x1・x2 は 0-1 整数。x0 + x1 + x2 <= 1e6 (何も伝播しない)
+        let p = MipProblem::from_rows(
+            vec![0.0; 3],
+            vec![2128.0, 1.0, 1.0],
+            vec![1.0, 1.0, 1.0],
+            0.0,
+            1.0,
+            vec![false, true, true],
+            vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)]],
+            vec![f64::NEG_INFINITY],
+            vec![1e6],
+        );
+        let v = 2128.0 - 1e-9 * 2129.0;
+        let mut pool = LitConflictPool::new(p.n, 100);
+        assert!(pool.add(&[(0, true, v), (1, false, 1.0), (2, false, 1.0)], false));
+        let mut d = Domain::new(&p);
+        assert!(d.propagate(&p));
+        let pos = d.stack_len();
+        d.tighten_lower(&p, 2, 1.0);
+        assert!(d.propagate(&p));
+        // 上限 2128 では x0 のリテラルは成り立たないので、x1 は締めない
+        assert_eq!(pool.propagate(&p, &mut d, pos), Ok(0));
+        assert_eq!(d.up[1], 1.0);
+        // 上限をリテラルの値まで締めれば成り立ち、x1 ≤ 0 を課す
+        let pos = d.stack_len();
+        d.tighten_upper(&p, 0, v);
+        assert_eq!(pool.propagate(&p, &mut d, pos), Ok(1));
+        assert_eq!(d.up[1], 0.0);
     }
 }

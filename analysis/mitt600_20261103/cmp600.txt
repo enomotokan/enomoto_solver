@@ -1,0 +1,60 @@
+問題数 186
+解けた数: ENOMOTO 67  HiGHS 86
+SGM (ずらし 10 秒): ENOMOTO 220.33  HiGHS 232.48  比 0.948
+片方以上が解いた 91 問の SGM: ENOMOTO 73.33  HiGHS 82.56
+勝ち負け: ENOMOTO 55  HiGHS 57  互角 74
+両方解けた問題の勝ち負け: ENOMOTO 33  HiGHS 20  互角 9
+
+片方だけ解けた:
+  30n20b8                      ENOMOTO time_limit gap 5.00e-01  HiGHS 592.9
+  comp07-2idx                  ENOMOTO 25.0  HiGHS time limit reached gap 8.33e-01
+  csched008                    ENOMOTO time_limit gap 1.72e-02  HiGHS 196.7
+  fastxgemm-n2r6s0t2           ENOMOTO time_limit gap 4.48e-01  HiGHS 459.5
+  fhnw-binpack4-48             ENOMOTO 1.3  HiGHS time limit reached
+  fiball                       ENOMOTO time_limit gap 2.82e-02  HiGHS 128.5
+  gen-ip054                    ENOMOTO 533.6  HiGHS time limit reached gap 5.28e-03
+  mas74                        ENOMOTO 173.6  HiGHS time limit reached gap 5.80e-02
+  mcsched                      ENOMOTO time_limit gap 3.52e-02  HiGHS 476.5
+  mushroom-best                ENOMOTO time_limit gap 3.00e-03  HiGHS 307.1
+  mzzv11                       ENOMOTO time_limit gap 9.82e-03  HiGHS 113.2
+  neos-1445765                 ENOMOTO time_limit gap 1.60e+00  HiGHS 87.9
+  neos-1456979                 ENOMOTO time_limit gap 5.11e-02  HiGHS 446.4
+  neos-3216931-puriri          ENOMOTO time_limit  HiGHS 484.8
+  neos-3627168-kasai           ENOMOTO time_limit gap 4.44e-03  HiGHS 84.2
+  neos-4722843-widden          ENOMOTO time_limit gap 1.53e-01  HiGHS 234.4
+  neos-873061                  ENOMOTO time_limit gap 8.94e-02  HiGHS 296.1
+  neos-933966                  ENOMOTO time_limit gap 9.35e-03  HiGHS 298.4
+  net12                        ENOMOTO time_limit gap 4.00e-01  HiGHS 407.0
+  ns1830653                    ENOMOTO time_limit gap 1.55e-01  HiGHS 316.0
+  rococoC10-001000             ENOMOTO time_limit gap 1.05e-01  HiGHS 257.0
+  satellites2-60-fs            ENOMOTO time_limit gap 3.09e+01  HiGHS 392.4
+  sct2                         ENOMOTO time_limit gap 1.68e-04  HiGHS 428.3
+  swath3                       ENOMOTO time_limit gap 8.33e-02  HiGHS 190.8
+  tbfp-network                 ENOMOTO time_limit gap 2.00e-02  HiGHS 268.3
+  traininstance6               ENOMOTO time_limit gap 6.85e-01  HiGHS 440.9
+  uccase12                     ENOMOTO crash  HiGHS 487.7
+  unitcal_7                    ENOMOTO time_limit gap 7.67e-04  HiGHS 179.7
+  wachplan                     ENOMOTO 289.2  HiGHS time limit reached gap 1.25e-01
+
+crash:
+  app1-2                       ENOMOTO returncode -9 最大 RSS 13274 MB
+  chromaticindex1024-7         ENOMOTO returncode -9 最大 RSS 13420 MB
+  neos-4763324-toguru          ENOMOTO returncode -9 最大 RSS 13293 MB
+  radiationm40-10-02           ENOMOTO returncode -9 最大 RSS 13533 MB
+  supportcase18                ENOMOTO returncode -9 最大 RSS 13631 MB
+  uccase12                     ENOMOTO returncode -9 最大 RSS 13538 MB
+
+600 秒を 5 秒超えて返った回:
+  chromaticindex1024-7         HiGHS time limit reached 613.8
+  chromaticindex512-7          HiGHS time limit reached 629.2
+  germanrr                     HiGHS time limit reached 667.2
+
+食い違い (両方最適で目的値が相対 1e-6 を超えて違う、片方だけ実行不能):
+  計 0
+
+最大 RSS の比 (ENOMOTO / HiGHS): 中央値 3.94、ENOMOTO が 5 GB 超: 26 問、HiGHS が 5 GB 超: 0 問
+  比の大きい 8 問: neos-3656078-kumeu 3314/171MB, gmu-35-50 6095/309MB, uccase9 13334/610MB, app1-2 13274/556MB, chromaticindex1024-7 13420/506MB, CMS750_4 12583/354MB, chromaticindex512-7 12171/290MB, germanrr 7829/169MB
+
+勝ち (ENOMOTO): CMS750_4, app1-1, beasleyC3, binkar10_1, blp-ar98, cbs-cta, cmflsp50-24-8-8, comp07-2idx, decomp2, eil33-2, enlight_hard, fhnw-binpack4-48, gen-ip002, gen-ip054, germanrr, irp, istanbul-no-cutoff, markshare_4_0, mas74, mas76, mc11, mik-250-20-75-4, n2seq36q, neos-1122047, neos-1171448, neos-1171737, neos-1582420, neos-3004026-krka, neos-3024952-loue, neos-3083819-nubu, neos-3381206-awhea, neos-3656078-kumeu, neos-4738912-atrato, neos-911970, neos-950242, neos5, ns1208400, nu25-pr12, nursesched-sprint02, piperout-08, piperout-27, pk1, qap10, radiationm18-12-05, rmatr100-p10, roll3000, satellites2-40, seymour1, sing326, sing44, sorrell3, sp97ar, supportcase40, uccase9, wachplan
+
+負け (HiGHS): 30n20b8, air05, chromaticindex1024-7, cod105, csched008, drayage-100-23, drayage-25-23, exp-1-500-5-5, fastxgemm-n2r6s0t2, fiball, gmu-35-50, graph20-20-1rand, h80x6320d, hypothyroid-k1, ic97_potential, lotsize, mcsched, mushroom-best, mzzv11, mzzv42z, neos-1445765, neos-1456979, neos-2978193-inde, neos-3216931-puriri, neos-3627168-kasai, neos-4722843-widden, neos-4763324-toguru, neos-4954672-berkel, neos-662469, neos-860300, neos-873061, neos-933966, neos-957323, neos-960392, neos8, neos859080, net12, nexp-150-20-8-5, ns1830653, p200x1188c, pg, pg5_34, physiciansched6-2, rococoC10-001000, satellites2-60-fs, sct2, supportcase18, supportcase33, supportcase42, swath3, tbfp-network, thor50dday, tr12-30, traininstance6, trento1, uccase12, unitcal_7

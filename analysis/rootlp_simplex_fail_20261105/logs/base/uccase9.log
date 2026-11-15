@@ -1,0 +1,52 @@
+PROF_PHASES_EXT wall=18365.205ms iters=26634 (689.5us/iter) accounted=191.3% of wall refactor_count=47 (verify=0 try_update=0 bump=0 drift=32 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=15) max_update_streak=1362
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=0.4us/iter
+  avg_bfrt_flips/iter=0.744 avg_infeasible_pool/iter=4117.1
+  pivot_order_reuse: attempts=20 accepted=9 (45.0%) attempt_time=357.432ms row_repicks=11027 fail(singular=0 fill=11) backoff_skips=54 nnz_reuse_avg=132063 nnz_full_avg=168519
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=0 final_expected_density col_aq=0.242 bfrt=0.135
+  btran_l scatter=37160 gather=828
+  pivot_search steps=1805382 search_limit_hits=66693 (3.7%) candidates=11765975 (avg 6.52/step) scan=360.756ms
+  col_max_abs rescan_entries=1203823 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=2 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=157 (0.6% of iters) avg_harris_window_size=1.012
+  pool_grew=8180 (30.7%) pool_shrank=14828 (55.7%) pool_same=3625 (13.6%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)         4750.901ms   25.9% of wall  178.377us/iter
+  price                2358.817ms   12.8% of wall  88.564us/iter
+  chuzr                3114.225ms   17.0% of wall  116.927us/iter
+  chuzc1                750.146ms    4.1% of wall  28.165us/iter
+  bfrt                 2083.713ms   11.3% of wall  78.235us/iter
+  ftran                14235.995ms   77.5% of wall  534.505us/iter
+  xb_update            3995.336ms   21.8% of wall  150.009us/iter
+  dse_update            889.943ms    4.8% of wall  33.414us/iter
+  dual_update           369.812ms    2.0% of wall  13.885us/iter
+  ft_update             564.291ms    3.1% of wall  21.187us/iter
+  refactor             2022.138ms   11.0% of wall  75.923us/iter
+PROF_HANDOFF run_phase=101.222ms ok=true
+PROF_PHASES_EXT wall=24475.956ms iters=22047 (1110.2us/iter) accounted=96.3% of wall refactor_count=36 (verify=0 try_update=0 bump=0 drift=20 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=16) max_update_streak=1463
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=0.5us/iter
+  avg_bfrt_flips/iter=1.275 avg_infeasible_pool/iter=3789.8
+  pivot_order_reuse: attempts=31 accepted=13 (41.9%) attempt_time=496.002ms row_repicks=16796 fail(singular=0 fill=18) backoff_skips=80 nnz_reuse_avg=130365 nnz_full_avg=169311
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=0 final_expected_density col_aq=0.238 bfrt=0.130
+  btran_l scatter=58627 gather=1702
+  pivot_search steps=2942104 search_limit_hits=112999 (3.8%) candidates=19735721 (avg 6.71/step) scan=572.336ms
+  col_max_abs rescan_entries=1965428 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=29 (0.1% of iters) avg_harris_window_size=1.005
+  pool_grew=6918 (31.4%) pool_shrank=12080 (54.8%) pool_same=3048 (13.8%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)         2955.673ms   12.1% of wall  134.062us/iter
+  price                1629.816ms    6.7% of wall  73.925us/iter
+  chuzr                2205.646ms    9.0% of wall  100.043us/iter
+  chuzc1                507.096ms    2.1% of wall  23.001us/iter
+  bfrt                 1395.051ms    5.7% of wall  63.276us/iter
+  ftran                9761.858ms   39.9% of wall  442.775us/iter
+  xb_update            2637.209ms   10.8% of wall  119.618us/iter
+  dse_update            592.548ms    2.4% of wall  26.877us/iter
+  dual_update           230.700ms    0.9% of wall  10.464us/iter
+  ft_update             353.840ms    1.4% of wall  16.049us/iter
+  refactor             1300.004ms    5.3% of wall  58.965us/iter
+PROF_HANDOFF run_phase=59.352ms ok=true
+ROOTLP_SIMPLEX {"n":33242,"m":33433,"nnz":257723,"st":"Optimal","obj":1.081958288193e4,"t":24.5843,"iters":22056,"polish":2,"offset":3.80141973999500042e6,"t_start":0.216}
+MIP: MEMCAP: tid 0 limit 11441 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0

@@ -1,0 +1,10 @@
+== fuzz_tiny ri
+bad 0 of 400 time 3.8 (strict 13: 値の一致だけの以前の判定)
+folded 0 safety 0
+== mip_fuzz_vs_highs ri
+bad 0 of 300 time 5.3
+ENOMOTO_MIP_FOLD=ri mip: bad 0 of 2000 time 15.2 folded=697 intgroups=679 safety=0
+ENOMOTO_MIP_FOLD=r mip: bad 0 of 2000 time 34.2 folded=74 intgroups=0 safety=0
+ENOMOTO_MIP_FOLD=rip mip: bad 0 of 2000 time 15.0 folded=881 intgroups=782 safety=0
+ENOMOTO_LP_FOLD=rv lp: bad 0 of 2000 time 3.6 folded=1836 intgroups=0 safety=0
+test result: ok. 400 passed; 0 failed; 19 ignored; 0 measured; 0 filtered out; finished in 2.21s

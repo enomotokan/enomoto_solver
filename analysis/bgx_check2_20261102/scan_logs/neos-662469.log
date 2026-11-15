@@ -1,0 +1,44 @@
+MIP: presolve: tightened 2312 coefficients (skipped 0 in rows redundant within tolerance), normalized 1 integer rows
+MIP: presolve: rows 1085 -> 1085, free columns 18235 -> 18235, nonzeros 200055 -> 200055, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 0 of 18235 free columns fixed (0.01s), not used
+MIP: LP probing pass 1: 341 candidates, 0 fixings (12 LPs, 1171 iters, 0.90s)
+MIP: LP probing: tried 6 columns, fixed 0, LP 1.8434078216e5 -> 1.8434078216e5 (12 LPs, 1171 iters, 0.90s)
+MIP: LP probing: root LP 0.48s (2560 iters, size 219375), tried 6, fixed 0, basis passed true, total 3731 iters 0.90s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.14s), not used
+MIP: probing: 14256 of 17907 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 2010550 implications (1.33s, cpu 1.31s, work 91958922, pwork 1243522069, chg 4780248)
+MIP: probing: 0 equivalent binary pairs
+MIP: clique extension: 39 rows extended, 2016 nonzeros added, 0 columns fixed, 0 duplicate and 2 dominated rows removed (1218065 edges, 0.26s)
+MIP: symmetry: none (0.04s, work 1270140, search 0, verify 0, detect 0.04s, refine 0.02s, log work 8301294)
+MIP: root LP: the rows changed after LP probing; the row statuses are not used
+MIP: root LP basis from the presolve LP probing: used (columns only)
+MIP: solving the root LP (0.02s)
+MIP: root LP 1.8434256956e5 (4890 iters, 1.11s)
+MCF detect: rows 1083 cols 18235 | flow cands 1008 flow rows 286 commodities 59 cap cands 715 arcs 78 nodes 13 incons 1.58 undirected | fail 'inconsistent' | networks [] fc_network false | 0.006s
+MIP: FJ problem (FJ_P3): rows 1083 -> 1083, free columns 18235 -> 18235, 0 continuous bounds tightened (1.50s)
+MIP: cut selection probe: compared at 1 rounds (after round 1), probe wall 1.72s (budget 2.9s)
+MIP: cut selection probe (6 rounds): default 1 cuts gain 1.290666e0 (0.75s), pool 34 cuts gain 1.373211e1 (0.97s) -> pool (rule rate, probe 1.71s in total, 2.84s)
+MIP: cut round 0: 34 cuts (of 786, sep 0.89s, LP 561 iters), LP rows 1117 (cut rows mean nnz 1165), obj 1.8435630167e5 (3.95s)
+MIP:   global fixed integers 0 of 18235 (newly 0 since the root LP)
+MIP: new incumbent 1.5071955000e6 at node 0 (3.99s) [Local-MIP]
+MIP: Local-MIP solution accepted true (3.99s)
+MIP: cut round 1: root cut time cap check: clock 0.721s of cap 5.74s (min rounds 0)
+MIP: cut round 1: 31 cuts (of 193, sep 0.69s, LP 301 iters), LP rows 1139 (cut rows mean nnz 575), obj 1.8435857075e5 (4.82s)
+MIP: oneopt improved 1.2921140000e6 -> 1.2861140000e6
+MIP:   global fixed integers 0 of 18235 (newly 0 since the root LP)
+MIP: new incumbent 1.2861140000e6 at node 0 (4.85s) [Local-MIP]
+MIP: Local-MIP solution accepted true (4.85s)
+MIP: cut round 2: root cut time cap check: clock 1.133s of cap 5.74s (min rounds 0)
+MIP: cut round 2: 17 cuts (of 132, sep 0.74s, LP 411 iters), LP rows 1141 (cut rows mean nnz 343), obj 1.8436167179e5 (5.76s)
+MIP: cut round 3: root cut time cap check: clock 1.526s of cap 5.74s (min rounds 0)
+MIP: cut round 3: 20 cuts (of 145, sep 0.65s, LP 230 iters), LP rows 1148 (cut rows mean nnz 365), obj 1.8436234003e5 (6.51s)
+MIP: cut round 4: root cut time cap check: clock 1.855s of cap 5.74s (min rounds 0)
+MIP: cut round 4: 15 cuts (of 148, sep 0.67s, LP 266 iters), LP rows 1154 (cut rows mean nnz 393), obj 1.8436404928e5 (7.29s)
+MIP: cut round 5: root cut time cap check: clock 2.205s of cap 5.74s (min rounds 0)
+MIP: cut round 5: 11 cuts (of 116, sep 0.73s, LP 152 iters), LP rows 1153 (cut rows mean nnz 439), obj 1.8436439291e5 (8.10s)
+MIP: clique graph: 1217738 edges (1038161 from rows, probing implications 2010550)
+MIP: clique fallback: 1 cuts, LP 1.8436439291e5 -> 1.8436461666e5 (g_c 1.214e-6, g_d 1.184e-4 relative), fractional 439 -> 430; not used (0.40s)
+MIP: cut loop done: 128 cuts added, 62 in LP, pool 451 cuts (4040611 nonzeros), obj 1.8434256956e5 -> 1.8436439291e5
+MIP: Local-MIP solution accepted false (8.51s)
+MIP: find thread started (budget 14.7s, 8.57s)
+MIP: the incumbent is a poor feasibility jump solution; background cuts use 1 threads
+MIP: background cuts: basis with the column values passed (root LP 1.09s)

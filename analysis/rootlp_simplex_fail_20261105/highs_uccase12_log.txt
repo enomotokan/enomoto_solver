@@ -1,0 +1,101 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+readMPS: Trying to open file /tmp/rootlp_mps/uccase12.mps
+readMPS: Read NAME    OK
+readMPS: Read ROWS    OK
+readMPS: Read COLUMNS OK
+readMPS: Read RHS     OK
+readMPS: Read RANGES  OK
+readMPS: Read BOUNDS  OK
+  LP      : uccase12
+Rows      : 88584
+Cols      : 62529
+Nonzeros  : 343635
+Coefficient ranges:
+  Matrix  [9e-05, 4e+02]
+  Cost    [1e+00, 7e+00]
+  Bound   [1e+00, 6e+03]
+  RHS     [2e-09, 6e+03]
+WARNING: Problem has some excessively small row bounds
+Solving LP without presolve or useful basis
+Scaling: Original equilibration: min/mean/max     0.08607/      1.192/      9.477 (cols); min/mean/max      0.0488/      2.149/      104.4 (rows)
+Scaling: Final    equilibration: min/mean/max      0.6319/      1.123/          2 (cols); min/mean/max       0.517/      1.001/      1.848 (rows)
+Scaling: Extreme equilibration improvement =      (       110.1 +        2140) / (       3.165 +       3.573)  =             2250 /       6.738  =       333.9
+Scaling: Mean    equilibration improvement = sqrt((       1.192 *       2.149) / (       1.123 *       1.001)) = sqrt(      2.562 /       1.124) =        1.51
+Scaling: Yields [min, max, ratio] matrix values of [0.04695, 13.17, 280.4]; Originally [9.17e-05, 420, 4.58e+06]: Improvement of 1.633e+04
+Scaling: Improves    mean equilibration by a factor 1.51
+Scaling: Improves extreme equilibration by a factor 333.9
+Scaling: Improves max/min matrix values by a factor 1.633e+04
+Scaling: Factors are in [0.03125, 64] for columns and in [0.003906, 64] for rows
+Scaling: Improvement factor is 8.234e+06 >= 1 so scale LP
+Using dual simplex solver
+Cost perturbation for uccase12
+   Initially have 22344 nonzero costs ( 35%) with min / average / max = 0.03125 / 0.502131 / 64
+   Perturbation column base = 3.2e-05
+   Perturbation row    base = 1e-12
+       Iteration        Objective     Infeasibilities num(sum)
+DuPh1          0     0.0000000000e+00 Ph1: 0(0) No reason
+DuPh2          0    -3.8805757909e+01 Pr: 359(50159.7) No reason
+DuPh2        796     7.1127276730e+01 Pr: 39662(303394); Du: 0(7.53248e-07) Synthetic clock
+DuPh2       1553     1.0934996284e+03 Pr: 43020(289551); Du: 0(4.79778e-07) Synthetic clock
+DuPh2       2299     2.4380834530e+03 Pr: 43045(249027); Du: 0(5.27905e-07) Synthetic clock
+DuPh2       3041     3.8093127983e+03 Pr: 43010(205303); Du: 0(2.539e-07) Synthetic clock
+DuPh2       3740     4.7111292341e+03 Pr: 43474(178229) Synthetic clock
+DuPh2       4460     5.4615868485e+03 Pr: 42043(154994); Du: 0(3.49053e-08) Synthetic clock
+DuPh2       5261     6.3162528053e+03 Pr: 39701(127955); Du: 0(3.49053e-08) Synthetic clock
+DuPh2       6086     7.2137161037e+03 Pr: 37194(98693); Du: 0(3.49053e-08) Synthetic clock
+DuPh2       6923     8.1240158460e+03 Pr: 34479(69963.1); Du: 0(3.49053e-08) Synthetic clock
+DuPh2       7764     8.7563282430e+03 Pr: 33956(52796.1) Synthetic clock
+DuPh2       8486     8.9857414934e+03 Pr: 33904(48508.6); Du: 0(1.36844e-07) Synthetic clock
+DuPh2       9384     9.3659750292e+03 Pr: 32670(40838.6); Du: 0(1.36844e-07) Synthetic clock
+DuPh2      10337     9.7628248728e+03 Pr: 31224(109183); Du: 0(1.36844e-07) Synthetic clock
+DuPh2      11251     1.0118804193e+04 Pr: 28041(27277.1); Du: 0(1.25156e-07) Synthetic clock
+DuPh2      12100     1.0366382836e+04 Pr: 26586(21300.2); Du: 0(5.8117e-08) Synthetic clock
+DuPh2      13015     1.0794844382e+04 Pr: 24293(23896.2); Du: 0(7.491e-08) Synthetic clock
+DuPh2      14023     1.0986615676e+04 Pr: 20741(11343.7); Du: 0(8.13428e-08) Synthetic clock
+DuPh2      14804     1.1103922522e+04 Pr: 19635(10882.2); Du: 0(6.83345e-08) Synthetic clock
+DuPh2      15634     1.1235812399e+04 Pr: 18875(6582.44); Du: 0(6.83345e-08) Synthetic clock
+DuPh2      16511     1.1280426243e+04 Pr: 17977(6034.56); Du: 0(1.75523e-07) Synthetic clock
+DuPh2      17654     1.1282322586e+04 Pr: 16914(5937.77); Du: 0(1.07188e-07) Synthetic clock
+DuPh2      18697     1.1311270155e+04 Pr: 15408(3995.68); Du: 0(9.21036e-08) Synthetic clock
+DuPh2      19743     1.1348497072e+04 Pr: 14371(2676.38); Du: 0(7.41501e-14) Synthetic clock
+DuPh2      20795     1.1371420551e+04 Pr: 14662(3118.73) Synthetic clock
+DuPh2      21964     1.1405314635e+04 Pr: 13998(3320.55); Du: 0(4.29708e-16) Synthetic clock
+DuPh2      23201     1.1421110118e+04 Pr: 13187(2836.62); Du: 0(1.83084e-08) Synthetic clock
+DuPh2      24408     1.1445029163e+04 Pr: 11522(4580.46) Synthetic clock
+DuPh2      25669     1.1451018687e+04 Pr: 8909(3521.41) Synthetic clock
+DuPh2      26751     1.1460131267e+04 Pr: 8064(2382.64) Synthetic clock
+DuPh2      28097     1.1463306399e+04 Pr: 4237(1549.13) Synthetic clock
+DuPh2      29037     1.1467008088e+04 Pr: 3141(2193.91) Synthetic clock
+DuPh2      30106     1.1471367156e+04 Pr: 2357(1864.27) Synthetic clock
+DuPh2      30969     1.1473109398e+04 Pr: 1284(2436.06); Du: 0(3.88823e-08) Synthetic clock
+DuPh2      31911     1.1474330742e+04 Pr: 614(220.844) Synthetic clock
+DuPh2      32309     1.1474593038e+04 Pr: 0(0) Possibly optimal
+DuPh2      32309     1.1468489819e+04 Pr: 0(0); Du: 2(0.000179455) Perturbation cleanup
+HEkkDual:: Using primal simplex to try to clean up num / max / sum = 2 / 0.00011875 / 0.000179455 dual infeasibilities
+PrPh2      32309     1.1468489819e+04 Pr: 0(0); Du: 2(0.000179455) No reason
+PrPh2      32311     1.1468489819e+04 Pr: 0(0); Du: 0(8.07032e-12) Possibly optimal
+Simplex iterations: DuPh2 32309; PrPh2 2; Total 32311
+dual simplex solver returns 0 primal and 0 dual infeasibilities: Status Optimal
+getKktFailures:: cost norm =     7.16; bound norm =    6e+03
+getKktFailures:                      LP  (abs / rel)         Col (abs / rel)         Row (abs / rel)
+getKktFailures: primal infeasibility  6.8e-08 / 1.13e-11        5e-09 / 8.33e-13      6.8e-08 / 1.13e-11
+getKktFailures:   dual infeasibility 5.87e-12 / 7.19e-13      2.9e-14 / 3.56e-15     5.87e-12 / 7.19e-13
+getKktFailures: objective gap        1.27e-14
+Solution optimality conditions
+num/max      0 /  6.8e-08 (relative      0 / 1.13e-11) primal infeasibilities     (tolerance = 1e-07)
+num/max      0 / 5.87e-12 (relative      0 / 7.19e-13)   dual infeasibilities     (tolerance = 1e-07)
+                                         0 / 1.27e-14  P-D objective error        (tolerance = 1e-07)
+
+Postsolve  : 
+Time           :     1.93
+Time OriginalLP:     1.92
+For LP         uccase12    : Solve original LP     1.92 ( 99%)
+Model name          : uccase12
+Model status        : Optimal
+Simplex   iterations: 32311
+Objective value     :  1.1468489819e+04
+P-D objective error :  1.2688053140e-14
+HiGHS run time      :          1.93
+
+MIP sub-solver profiling: number of threads used = 1

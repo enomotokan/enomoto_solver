@@ -1,0 +1,454 @@
+Running HiGHS 1.16.0 (git hash: f3f113d): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP_FOLD: integer groups: 0 accepted, 0 rejected (V_R rows 1920; rejected for V_R 0, non-±1 0, TU 0; net true accepted by net 0 work 0 over 0, panics 0, cert fails 0)
+MIP_FOLD: no fold (n 3040 m 1920) in 0.009s (reason line 526, ratio 0.969)
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 1920 -> 1916, free columns 3040 -> 3034, nonzeros 6080 -> 6074, postsolve steps 2 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 0 of 3034 free columns fixed (0.00s), not used
+MIP: LP probing pass 1: 363 candidates, 0 fixings (16 LPs, 612 iters, 0.20s)
+MIP: LP probing: tried 8 columns, fixed 0, LP 6.0884433962e2 -> 6.0884433962e2 (16 LPs, 612 iters, 0.20s, PREPAR 1 threads, 1 windows)
+MIP: LP probing: root LP 0.08s (1220 iters, size 11030), tried 8, fixed 0, basis passed false, total 1832 iters 0.20s
+MIP: probing: 1518 of 1518 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 0 implications (0.02s, cpu 0.00s, work 0, pwork 755732, chg 0)
+MIP: probing: PREPAR 1 threads, 7 windows, 1518 of 1518 probes from the windows
+MIP: probing: 0 equivalent binary pairs
+HNFPRE: round 0 eq 398 int_eq 0 rat_skip 0 comps 0 done 0 gave_up 0 cols 0 rank 0 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.000s) gave_up_why 0/0/0
+HNFPRE: round 0 tightened 0 columns
+Presolve: 1920 rows, 3040 columns -> 1916 rows, 3034 columns (0.22s)
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 1518
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (0 edges, 0.00s)
+MIP: symmetry: SYMSIGN true SYMSCALE false: flipped 210, scaled 0, tie rows doubled 187 of 1916 rows for the detection
+MIP: symmetry: refinement 0.00s, work 100575 (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)
+MIP: symmetry: refinements stopped by the iteration cap 0 of 1 (ENOMOTO_MIP_HO6_SYMREFINE true)
+MIP: symmetry: none (0.00s, work 100575, search 0, verify 0, detect 0.00s, refine 0.00s, log work 240795)
+MIP: objective step with implied integers: Some(1.0) (without: Some(1.0)); costed non-integer columns 0 (e.g. [])
+MIP: OBJINT c: lattice Some(ObjLat { s: 1.0, base: 0.0, m: 0.0, mm: 1e-9 }) (offset 0.0000000000e0), step Some(1.0)
+MIP: fixed-charge check: vb rows 1516 of 1916, continuous with vb 1516 of 1516
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.06s)
+Root LP: objective 6.0884433962e2 (0.13s)
+MIP: root LP 6.0884433962e2 (1220 iters, 0.13s)
+MIP: root LP size: rows 1916, free columns 3034, nonzeros 6074
+MIP: fixed-integer LP dual check: c x 1.3548000000e4, dual bound 6.0884433962e2 -> solve
+MIP:   global fixed integers 2 of 1520 (newly 0 since the root LP)
+MIP: new incumbent 1.3548000000e4 at node 0 (0.21s) [tree]
+MIP: fixed-charge check: vb rows 1516 of 1916, continuous with vb 1516 of 1516
+MIP: fixed-charge check: vb rows 1516 of 1916, continuous with vb 1516 of 1516
+CUTMIX types restarts 0 m 1916 n 3034 vbrow 0.791 vbcol 1.000 fc 1 fcnode 1 cont 0.500 genint 0.000 knap 0.000 knaptight 0.000 knapgub 0.000 knapgubcol 0.000 mixknap 0.000 setp 0.000 introw 0.000 intsmall 0.000 flow 0.208
+MIP: fixed-charge check: vb rows 1516 of 1916, continuous with vb 1516 of 1516
+MIP: fixed-charge network structure: relaxed root cut selection
+MIP: robust cut LP cap: size false, double false, progress true
+MIP: fixed-charge check: vb rows 1516 of 1916, continuous with vb 1516 of 1516
+MIP: cut round 0: 50 cuts (of 1554, sep 0.02s, LP 646 iters), LP rows 1966 (cut rows mean nnz 4), obj 5.5204103774e3 (0.28s)
+MIP: cut round 1: root cut time cap check: clock 0.033s of cap 12.00s (min rounds 0)
+MIP: cut round 1: root cut work cap check: work 0.580 (646 LP iters, 1 rounds) of cap 12.000
+MIP: cut round 1: 50 cuts (of 1541, sep 0.02s, LP 337 iters), LP rows 2016 (cut rows mean nnz 4), obj 6.8820896226e3 (0.32s)
+MIP: cut round 2: root cut time cap check: clock 0.053s of cap 12.00s (min rounds 0)
+MIP: cut round 2: root cut work cap check: work 0.906 (983 LP iters, 2 rounds) of cap 12.000
+MIP: cut round 2: 50 cuts (of 1446, sep 0.02s, LP 354 iters), LP rows 2066 (cut rows mean nnz 4), obj 7.9877272798e3 (0.36s)
+MIP: cut round 3: root cut time cap check: clock 0.075s of cap 12.00s (min rounds 0)
+MIP: cut round 3: root cut work cap check: work 1.246 (1337 LP iters, 3 rounds) of cap 12.000
+MIP: cut round 3: 50 cuts (of 1449, sep 0.02s, LP 115 iters), LP rows 2116 (cut rows mean nnz 4), obj 8.3028917027e3 (0.39s)
+MIP: cut round 4: root cut time cap check: clock 0.087s of cap 12.00s (min rounds 0)
+MIP: cut round 4: root cut work cap check: work 1.390 (1452 LP iters, 4 rounds) of cap 12.000
+MIP: cut round 4: 50 cuts (of 1465, sep 0.01s, LP 233 iters), LP rows 2166 (cut rows mean nnz 4), obj 8.7095575424e3 (0.42s)
+MIP: cut round 5: root cut time cap check: clock 0.105s of cap 12.00s (min rounds 0)
+MIP: cut round 5: root cut work cap check: work 1.631 (1685 LP iters, 5 rounds) of cap 12.000
+MIP: cut round 5: 50 cuts (of 1477, sep 0.02s, LP 197 iters), LP rows 2213 (cut rows mean nnz 4), obj 9.1376676985e3 (0.46s)
+MIP: cut round 6: root cut time cap check: clock 0.122s of cap 12.00s (min rounds 0)
+MIP: cut round 6: root cut work cap check: work 1.843 (1882 LP iters, 6 rounds) of cap 12.000
+MIP: cut round 6: 50 cuts (of 1485, sep 0.02s, LP 198 iters), LP rows 2256 (cut rows mean nnz 4), obj 9.3734990368e3 (0.50s)
+MIP: cut round 7: root cut time cap check: clock 0.142s of cap 12.00s (min rounds 0)
+MIP: cut round 7: root cut work cap check: work 2.055 (2080 LP iters, 7 rounds) of cap 12.000
+MIP: cut round 7: 50 cuts (of 1533, sep 0.03s, LP 138 iters), LP rows 2297 (cut rows mean nnz 5), obj 9.5675148003e3 (0.54s)
+MIP: cut round 8: root cut time cap check: clock 0.161s of cap 12.00s (min rounds 0)
+MIP: cut round 8: root cut work cap check: work 2.218 (2218 LP iters, 8 rounds) of cap 12.000
+MIP: cut round 8: 50 cuts (of 1546, sep 0.03s, LP 113 iters), LP rows 2331 (cut rows mean nnz 5), obj 9.7597050451e3 (0.58s)
+MIP: cut round 9: root cut time cap check: clock 0.181s of cap 12.00s (min rounds 0)
+MIP: cut round 9: root cut work cap check: work 2.361 (2331 LP iters, 9 rounds) of cap 12.000
+MIP: cut round 9: 50 cuts (of 1627, sep 0.03s, LP 77 iters), LP rows 2375 (cut rows mean nnz 5), obj 9.8424315855e3 (0.61s)
+MIP: cut round 10: root cut time cap check: clock 0.199s of cap 12.00s (min rounds 0)
+MIP: cut round 10: root cut work cap check: work 2.474 (2408 LP iters, 10 rounds) of cap 12.000
+MIP: cut round 10: 50 cuts (of 1585, sep 0.03s, LP 97 iters), LP rows 2407 (cut rows mean nnz 5), obj 9.9741719653e3 (0.65s)
+MIP: cut round 11: root cut time cap check: clock 0.219s of cap 12.00s (min rounds 0)
+MIP: cut round 11: root cut work cap check: work 2.603 (2505 LP iters, 11 rounds) of cap 12.000
+MIP: cut round 11: 50 cuts (of 1538, sep 0.03s, LP 76 iters), LP rows 2437 (cut rows mean nnz 5), obj 1.0056188151e4 (0.70s)
+MIP: cut round 12: root cut time cap check: clock 0.239s of cap 12.00s (min rounds 0)
+MIP: cut round 12: root cut work cap check: work 2.716 (2581 LP iters, 12 rounds) of cap 12.000
+MIP: cut round 12: 50 cuts (of 1434, sep 0.03s, LP 132 iters), LP rows 2472 (cut rows mean nnz 5), obj 1.0186171845e4 (0.74s)
+MIP: cut round 13: root cut time cap check: clock 0.262s of cap 12.00s (min rounds 0)
+MIP: cut round 13: root cut work cap check: work 2.874 (2713 LP iters, 13 rounds) of cap 12.000
+MIP: cut round 13: 50 cuts (of 1482, sep 0.03s, LP 146 iters), LP rows 2496 (cut rows mean nnz 6), obj 1.0301933122e4 (0.79s)
+MIP: cut round 14: root cut time cap check: clock 0.286s of cap 12.00s (min rounds 0)
+MIP: cut round 14: root cut work cap check: work 3.043 (2859 LP iters, 14 rounds) of cap 12.000
+MIP: cut round 14: 50 cuts (of 1405, sep 0.03s, LP 111 iters), LP rows 2520 (cut rows mean nnz 6), obj 1.0465130726e4 (0.83s)
+MIP: cut round 15: root cut time cap check: clock 0.307s of cap 12.00s (min rounds 0)
+MIP: cut round 15: root cut work cap check: work 3.184 (2970 LP iters, 15 rounds) of cap 12.000
+MIP: cut round 15: 50 cuts (of 1536, sep 0.03s, LP 50 iters), LP rows 2547 (cut rows mean nnz 6), obj 1.0501031458e4 (0.87s)
+MIP: cut round 16: root cut time cap check: clock 0.327s of cap 12.00s (min rounds 0)
+MIP: cut round 16: root cut work cap check: work 3.275 (3020 LP iters, 16 rounds) of cap 12.000
+MIP: cut round 16: 50 cuts (of 1483, sep 0.04s, LP 149 iters), LP rows 2574 (cut rows mean nnz 6), obj 1.0559900671e4 (0.92s)
+MIP: cut round 17: root cut time cap check: clock 0.354s of cap 12.00s (min rounds 0)
+MIP: cut round 17: root cut work cap check: work 3.448 (3169 LP iters, 17 rounds) of cap 12.000
+MIP: cut round 17: 50 cuts (of 1455, sep 0.04s, LP 79 iters), LP rows 2600 (cut rows mean nnz 6), obj 1.0590626109e4 (0.97s)
+MIP: cut round 18: root cut time cap check: clock 0.378s of cap 12.00s (min rounds 0)
+MIP: cut round 18: root cut work cap check: work 3.562 (3248 LP iters, 18 rounds) of cap 12.000
+MIP: cut round 18: 50 cuts (of 1349, sep 0.04s, LP 195 iters), LP rows 2637 (cut rows mean nnz 7), obj 1.0706652118e4 (1.04s)
+MIP: cut round 19: root cut time cap check: clock 0.410s of cap 12.00s (min rounds 0)
+MIP: cut round 19: root cut work cap check: work 3.772 (3443 LP iters, 19 rounds) of cap 12.000
+MIP: cut round 19: 50 cuts (of 1476, sep 0.04s, LP 91 iters), LP rows 2649 (cut rows mean nnz 7), obj 1.0748062087e4 (1.09s)
+MIP: cut round 20: root cut time cap check: clock 0.436s of cap 12.00s (min rounds 0)
+MIP: cut round 20: root cut work cap check: work 3.897 (3534 LP iters, 20 rounds) of cap 12.000
+MIP: cut round 20: 50 cuts (of 1496, sep 0.04s, LP 96 iters), LP rows 2653 (cut rows mean nnz 7), obj 1.0775719512e4 (1.14s)
+MIP: cut round 21: root cut time cap check: clock 0.464s of cap 12.00s (min rounds 0)
+MIP: cut round 21: root cut work cap check: work 4.025 (3630 LP iters, 21 rounds) of cap 12.000
+MIP: cut round 21: 50 cuts (of 1379, sep 0.04s, LP 62 iters), LP rows 2649 (cut rows mean nnz 7), obj 1.0809038934e4 (1.19s)
+MIP: cut round 22: root cut time cap check: clock 0.489s of cap 12.00s (min rounds 0)
+MIP: cut round 22: root cut work cap check: work 4.126 (3692 LP iters, 22 rounds) of cap 12.000
+MIP: cut round 22: 50 cuts (of 1511, sep 0.05s, LP 208 iters), LP rows 2657 (cut rows mean nnz 10), obj 1.0867219851e4 (1.28s)
+MIP: cut round 23: root cut time cap check: clock 0.532s of cap 12.00s (min rounds 0)
+MIP: cut round 23: root cut work cap check: work 4.347 (3900 LP iters, 23 rounds) of cap 12.000
+MIP: cut round 23: 50 cuts (of 1508, sep 0.06s, LP 276 iters), LP rows 2658 (cut rows mean nnz 9), obj 1.1020539545e4 (1.39s)
+MIP: cut round 24: root cut time cap check: clock 0.588s of cap 12.00s (min rounds 0)
+MIP: cut round 24: root cut work cap check: work 4.623 (4176 LP iters, 24 rounds) of cap 12.000
+MIP: cut round 24: 50 cuts (of 1344, sep 0.06s, LP 131 iters), LP rows 2655 (cut rows mean nnz 8), obj 1.1070463148e4 (1.47s)
+MIP: strong cuts at the round limit: LP 6.088443e2 -> 1.107046e4, HiGHS cut management true
+MIP: TIMEDEP p: phase 2 work cap 19.121 (phase 1 work 4.780, 4307 LP iters, 25 rounds)
+MIP: cut loop phase 2 (HiGHS cut score) at the round limit 25 (1.47s)
+MIP: cut round 25: root cut time cap check: clock 0.625s of cap 12.00s (min rounds 0)
+MIP: cut round 25: root cut work cap check: work 4.780 (4307 LP iters, 25 rounds) of cap 12.000
+MIP: cut round 25: 50 cuts (of 1266, sep 0.06s, LP 197 iters), LP rows 2672 (cut rows mean nnz 8), obj 1.1103840534e4 (1.57s)
+MIP: cut round 26: root cut time cap check: clock 0.675s of cap 12.00s (min rounds 0)
+MIP: cut round 26: root cut work cap check: work 4.992 (4504 LP iters, 26 rounds) of cap 12.000
+MIP: cut round 26: 50 cuts (of 1419, sep 0.05s, LP 241 iters), LP rows 2697 (cut rows mean nnz 8), obj 1.1158655966e4 (1.67s)
+MIP: cut round 27: root cut time cap check: clock 0.728s of cap 12.00s (min rounds 0)
+MIP: cut round 27: root cut work cap check: work 5.239 (4745 LP iters, 27 rounds) of cap 12.000
+MIP: cut round 27: 50 cuts (of 1357, sep 0.08s, LP 150 iters), LP rows 2719 (cut rows mean nnz 8), obj 1.1205352207e4 (1.79s)
+MIP: cut round 28: root cut time cap check: clock 0.788s of cap 12.00s (min rounds 0)
+MIP: cut round 28: root cut work cap check: work 5.412 (4895 LP iters, 28 rounds) of cap 12.000
+MIP: cut round 28: 50 cuts (of 1389, sep 0.09s, LP 157 iters), LP rows 2735 (cut rows mean nnz 8), obj 1.1224010392e4 (1.91s)
+MIP: cut round 29: root cut time cap check: clock 0.847s of cap 12.00s (min rounds 0)
+MIP: cut round 29: root cut work cap check: work 5.591 (5052 LP iters, 29 rounds) of cap 12.000
+MIP: cut round 29: 43 cuts (of 1050, sep 0.06s, LP 204 iters), LP rows 2741 (cut rows mean nnz 9), obj 1.1268379960e4 (2.02s)
+MIP: cut round 30: root cut time cap check: clock 0.900s of cap 12.00s (min rounds 0)
+MIP: cut round 30: root cut work cap check: work 5.808 (5256 LP iters, 30 rounds) of cap 12.000
+MIP: cut round 30: 41 cuts (of 1244, sep 0.07s, LP 167 iters), LP rows 2738 (cut rows mean nnz 9), obj 1.1298093021e4 (2.13s)
+MIP: cut round 31: root cut time cap check: clock 0.954s of cap 12.00s (min rounds 0)
+MIP: cut round 31: root cut work cap check: work 5.995 (5423 LP iters, 31 rounds) of cap 12.000
+MIP: cut round 31: 33 cuts (of 1136, sep 0.06s, LP 197 iters), LP rows 2733 (cut rows mean nnz 9), obj 1.1321887958e4 (2.23s)
+MIP: cut round 32: root cut time cap check: clock 1.007s of cap 12.00s (min rounds 0)
+MIP: cut round 32: root cut work cap check: work 6.207 (5620 LP iters, 32 rounds) of cap 12.000
+MIP: cut round 32: 49 cuts (of 1338, sep 0.08s, LP 142 iters), LP rows 2753 (cut rows mean nnz 9), obj 1.1338321438e4 (2.36s)
+MIP: cut round 33: root cut time cap check: clock 1.070s of cap 12.00s (min rounds 0)
+MIP: cut round 33: root cut work cap check: work 6.373 (5762 LP iters, 33 rounds) of cap 12.000
+MIP: cut round 33: 33 cuts (of 1199, sep 0.10s, LP 114 iters), LP rows 2753 (cut rows mean nnz 9), obj 1.1354421796e4 (2.50s)
+MIP: cut round 34: root cut time cap check: clock 1.139s of cap 12.00s (min rounds 0)
+MIP: cut round 34: root cut work cap check: work 6.516 (5876 LP iters, 34 rounds) of cap 12.000
+MIP: cut round 34: 33 cuts (of 1321, sep 0.09s, LP 141 iters), LP rows 2755 (cut rows mean nnz 9), obj 1.1365195673e4 (2.63s)
+MIP: cut round 35: root cut time cap check: clock 1.206s of cap 12.00s (min rounds 0)
+MIP: cut round 35: root cut work cap check: work 6.682 (6017 LP iters, 35 rounds) of cap 12.000
+MIP: cut round 35: 38 cuts (of 1322, sep 0.09s, LP 151 iters), LP rows 2770 (cut rows mean nnz 9), obj 1.1372618757e4 (2.76s)
+MIP: cut round 36: root cut time cap check: clock 1.273s of cap 12.00s (min rounds 0)
+MIP: cut round 36: root cut work cap check: work 6.856 (6168 LP iters, 36 rounds) of cap 12.000
+MIP: cut round 36: 31 cuts (of 1138, sep 0.09s, LP 170 iters), LP rows 2769 (cut rows mean nnz 9), obj 1.1386927869e4 (2.91s)
+MIP: cut round 37: root cut time cap check: clock 1.347s of cap 12.00s (min rounds 0)
+MIP: cut round 37: root cut work cap check: work 7.045 (6338 LP iters, 37 rounds) of cap 12.000
+MIP: cut round 37: 24 cuts (of 1046, sep 0.10s, LP 91 iters), LP rows 2771 (cut rows mean nnz 9), obj 1.1394042393e4 (3.04s)
+MIP: cut round 38: root cut time cap check: clock 1.411s of cap 12.00s (min rounds 0)
+MIP: cut round 38: root cut work cap check: work 7.170 (6429 LP iters, 38 rounds) of cap 12.000
+MIP: cut round 38: 26 cuts (of 1074, sep 0.09s, LP 89 iters), LP rows 2772 (cut rows mean nnz 9), obj 1.1399520342e4 (3.16s)
+MIP: cut round 39: root cut time cap check: clock 1.469s of cap 12.00s (min rounds 0)
+MIP: cut round 39: root cut work cap check: work 7.293 (6518 LP iters, 39 rounds) of cap 12.000
+MIP: cut round 39: 18 cuts (of 1009, sep 0.09s, LP 103 iters), LP rows 2769 (cut rows mean nnz 9), obj 1.1410081000e4 (3.27s)
+MIP: cut round 40: root cut time cap check: clock 1.525s of cap 12.00s (min rounds 0)
+MIP: cut round 40: root cut work cap check: work 7.427 (6621 LP iters, 40 rounds) of cap 12.000
+MIP: cut round 40: 27 cuts (of 1170, sep 0.09s, LP 166 iters), LP rows 2779 (cut rows mean nnz 9), obj 1.1422832805e4 (3.41s)
+MIP: cut round 41: root cut time cap check: clock 1.594s of cap 12.00s (min rounds 0)
+MIP: cut round 41: root cut work cap check: work 7.613 (6787 LP iters, 41 rounds) of cap 12.000
+MIP: cut round 41: 28 cuts (of 1043, sep 0.11s, LP 126 iters), LP rows 2781 (cut rows mean nnz 9), obj 1.1428524988e4 (3.56s)
+MIP: cut round 42: root cut time cap check: clock 1.668s of cap 12.00s (min rounds 0)
+MIP: cut round 42: root cut work cap check: work 7.766 (6913 LP iters, 42 rounds) of cap 12.000
+MIP: cut round 42: 26 cuts (of 868, sep 0.08s, LP 72 iters), LP rows 2785 (cut rows mean nnz 9), obj 1.1432562211e4 (3.66s)
+MIP: cut round 43: root cut time cap check: clock 1.719s of cap 12.00s (min rounds 0)
+MIP: cut round 43: root cut work cap check: work 7.875 (6985 LP iters, 43 rounds) of cap 12.000
+MIP: cut round 43: 29 cuts (of 994, sep 0.09s, LP 82 iters), LP rows 2793 (cut rows mean nnz 9), obj 1.1434519830e4 (3.77s)
+MIP: cut round 44: root cut time cap check: clock 1.773s of cap 12.00s (min rounds 0)
+MIP: cut round 44: root cut work cap check: work 7.993 (7067 LP iters, 44 rounds) of cap 12.000
+MIP: cut round 44: 15 cuts (of 800, sep 0.08s, LP 75 iters), LP rows 2787 (cut rows mean nnz 9), obj 1.1440740517e4 (3.88s)
+MIP: cut round 45: root cut time cap check: clock 1.830s of cap 12.00s (min rounds 0)
+MIP: cut round 45: root cut work cap check: work 8.104 (7142 LP iters, 45 rounds) of cap 12.000
+MIP: cut round 45: 17 cuts (of 817, sep 0.08s, LP 44 iters), LP rows 2789 (cut rows mean nnz 9), obj 1.1441307084e4 (3.98s)
+MIP: cut round 46: root cut time cap check: clock 1.882s of cap 12.00s (min rounds 0)
+MIP: cut round 46: root cut work cap check: work 8.190 (7186 LP iters, 46 rounds) of cap 12.000
+MIP: cut round 46: mpsep gate: optimal face width 476 (threshold 958, 1916 rows) -> narrow; stop
+MIP: cut round 46: 12 cuts (of 721, sep 0.09s, LP 84 iters), LP rows 2792 (cut rows mean nnz 9), obj 1.1453130040e4 (4.10s)
+MIP: cut round 47: root cut time cap check: clock 1.939s of cap 12.00s (min rounds 0)
+MIP: cut round 47: root cut work cap check: work 8.309 (7270 LP iters, 47 rounds) of cap 12.000
+MIP: cut round 47: 20 cuts (of 902, sep 0.07s, LP 101 iters), LP rows 2797 (cut rows mean nnz 9), obj 1.1453623697e4 (4.19s)
+MIP: cut round 48: root cut time cap check: clock 1.986s of cap 12.00s (min rounds 0)
+MIP: cut round 48: root cut work cap check: work 8.442 (7371 LP iters, 48 rounds) of cap 12.000
+MIP: cut round 48: 12 cuts (of 699, sep 0.08s, LP 24 iters), LP rows 2784 (cut rows mean nnz 9), obj 1.1453905079e4 (4.29s)
+MIP: cut round 49: root cut time cap check: clock 2.032s of cap 12.00s (min rounds 0)
+MIP: cut round 49: root cut work cap check: work 8.511 (7395 LP iters, 49 rounds) of cap 12.000
+MIP: cut round 49: 8 cuts (of 676, sep 0.08s, LP 31 iters), LP rows 2783 (cut rows mean nnz 9), obj 1.1455838294e4 (4.38s)
+MIP: cut round 50: root cut time cap check: clock 2.079s of cap 12.00s (min rounds 0)
+MIP: cut round 50: root cut work cap check: work 8.587 (7426 LP iters, 50 rounds) of cap 12.000
+MIP: cut round 50: 11 cuts (of 643, sep 0.07s, LP 38 iters), LP rows 2784 (cut rows mean nnz 9), obj 1.1456561197e4 (4.47s)
+MIP: cut round 51: root cut time cap check: clock 2.125s of cap 12.00s (min rounds 0)
+MIP: cut round 51: root cut work cap check: work 8.668 (7464 LP iters, 51 rounds) of cap 12.000
+MIP: cut round 51: 8 cuts (of 645, sep 0.07s, LP 40 iters), LP rows 2781 (cut rows mean nnz 9), obj 1.1456784227e4 (4.57s)
+MIP: cut round 52: root cut time cap check: clock 2.171s of cap 12.00s (min rounds 0)
+MIP: cut round 52: root cut work cap check: work 8.751 (7504 LP iters, 52 rounds) of cap 12.000
+MIP: cut round 52: 8 cuts (of 703, sep 0.07s, LP 27 iters), LP rows 2786 (cut rows mean nnz 9), obj 1.1457394186e4 (4.65s)
+MIP: cut round 53: root cut time cap check: clock 2.213s of cap 12.00s (min rounds 0)
+MIP: cut round 53: root cut work cap check: work 8.823 (7531 LP iters, 53 rounds) of cap 12.000
+MIP: cut round 53: 11 cuts (of 705, sep 0.07s, LP 42 iters), LP rows 2792 (cut rows mean nnz 9), obj 1.1460383339e4 (4.74s)
+MIP: cut round 54: root cut time cap check: clock 2.259s of cap 12.00s (min rounds 0)
+MIP: cut round 54: root cut work cap check: work 8.907 (7573 LP iters, 54 rounds) of cap 12.000
+MIP: cut round 54: 16 cuts (of 642, sep 0.08s, LP 51 iters), LP rows 2799 (cut rows mean nnz 9), obj 1.1462326768e4 (4.84s)
+MIP: cut round 55: root cut time cap check: clock 2.307s of cap 12.00s (min rounds 0)
+MIP: cut round 55: root cut work cap check: work 8.999 (7624 LP iters, 55 rounds) of cap 12.000
+MIP: cut round 55: 17 cuts (of 744, sep 0.09s, LP 34 iters), LP rows 2797 (cut rows mean nnz 9), obj 1.1462646769e4 (4.95s)
+MIP: cut round 56: root cut time cap check: clock 2.363s of cap 12.00s (min rounds 0)
+MIP: cut round 56: root cut work cap check: work 9.077 (7658 LP iters, 56 rounds) of cap 12.000
+MIP: cut round 56: 12 cuts (of 739, sep 0.12s, LP 30 iters), LP rows 2798 (cut rows mean nnz 9), obj 1.1463712314e4 (5.09s)
+MIP: cut round 57: root cut time cap check: clock 2.432s of cap 12.00s (min rounds 0)
+MIP: cut round 57: root cut work cap check: work 9.152 (7688 LP iters, 57 rounds) of cap 12.000
+MIP: cut round 57: 14 cuts (of 666, sep 0.11s, LP 161 iters), LP rows 2803 (cut rows mean nnz 9), obj 1.1474862414e4 (5.25s)
+MIP: cut round 58: root cut time cap check: clock 2.511s of cap 12.00s (min rounds 0)
+MIP: cut round 58: root cut work cap check: work 9.334 (7849 LP iters, 58 rounds) of cap 12.000
+MIP: cut round 58: 24 cuts (of 1053, sep 0.10s, LP 138 iters), LP rows 2802 (cut rows mean nnz 8), obj 1.1485916922e4 (5.38s)
+MIP: cut round 59: root cut time cap check: clock 2.579s of cap 12.00s (min rounds 0)
+MIP: cut round 59: root cut work cap check: work 9.497 (7987 LP iters, 59 rounds) of cap 12.000
+MIP: cut round 59: 21 cuts (of 1011, sep 0.12s, LP 108 iters), LP rows 2806 (cut rows mean nnz 8), obj 1.1494078646e4 (5.53s)
+MIP: cut round 60: root cut time cap check: clock 2.653s of cap 12.00s (min rounds 0)
+MIP: cut round 60: root cut work cap check: work 9.635 (8095 LP iters, 60 rounds) of cap 12.000
+MIP: cut round 60: 15 cuts (of 949, sep 0.09s, LP 52 iters), LP rows 2800 (cut rows mean nnz 8), obj 1.1497461831e4 (5.65s)
+MIP: cut round 61: root cut time cap check: clock 2.708s of cap 12.00s (min rounds 0)
+MIP: cut round 61: root cut work cap check: work 9.728 (8147 LP iters, 61 rounds) of cap 12.000
+MIP: cut round 61: 20 cuts (of 873, sep 0.09s, LP 42 iters), LP rows 2799 (cut rows mean nnz 8), obj 1.1498604770e4 (5.76s)
+MIP: cut round 62: root cut time cap check: clock 2.765s of cap 12.00s (min rounds 0)
+MIP: cut round 62: root cut work cap check: work 9.812 (8189 LP iters, 62 rounds) of cap 12.000
+MIP: cut round 62: 13 cuts (of 727, sep 0.12s, LP 60 iters), LP rows 2802 (cut rows mean nnz 8), obj 1.1500597419e4 (5.91s)
+MIP: cut round 63: root cut time cap check: clock 2.840s of cap 12.00s (min rounds 0)
+MIP: cut round 63: root cut work cap check: work 9.911 (8249 LP iters, 63 rounds) of cap 12.000
+MIP: cut round 63: 16 cuts (of 759, sep 0.13s, LP 64 iters), LP rows 2802 (cut rows mean nnz 8), obj 1.1513830578e4 (6.09s)
+MIP: cut round 64: root cut time cap check: clock 2.928s of cap 12.00s (min rounds 0)
+MIP: cut round 64: root cut work cap check: work 10.014 (8313 LP iters, 64 rounds) of cap 12.000
+MIP: cut round 64: 15 cuts (of 648, sep 0.12s, LP 70 iters), LP rows 2799 (cut rows mean nnz 8), obj 1.1516170290e4 (6.23s)
+MIP: cut round 65: root cut time cap check: clock 3.001s of cap 12.00s (min rounds 0)
+MIP: cut round 65: root cut work cap check: work 10.121 (8383 LP iters, 65 rounds) of cap 12.000
+MIP: cut round 65: 12 cuts (of 677, sep 0.09s, LP 22 iters), LP rows 2800 (cut rows mean nnz 8), obj 1.1516841560e4 (6.33s)
+MIP: cut round 66: root cut time cap check: clock 3.050s of cap 12.00s (min rounds 0)
+MIP: cut round 66: root cut work cap check: work 10.189 (8405 LP iters, 66 rounds) of cap 12.000
+MIP: cut round 66: 10 cuts (of 678, sep 0.09s, LP 26 iters), LP rows 2803 (cut rows mean nnz 8), obj 1.1517776744e4 (6.45s)
+MIP: cut round 67: root cut time cap check: clock 3.102s of cap 12.00s (min rounds 0)
+MIP: cut round 67: root cut work cap check: work 10.261 (8431 LP iters, 67 rounds) of cap 12.000
+MIP: cut round 67: 14 cuts (of 764, sep 0.09s, LP 54 iters), LP rows 2808 (cut rows mean nnz 8), obj 1.1518756147e4 (6.55s)
+MIP: cut round 68: root cut time cap check: clock 3.156s of cap 12.00s (min rounds 0)
+MIP: cut round 68: root cut work cap check: work 10.355 (8485 LP iters, 68 rounds) of cap 12.000
+MIP: cut round 68: 12 cuts (of 708, sep 0.08s, LP 54 iters), LP rows 2811 (cut rows mean nnz 8), obj 1.1520643138e4 (6.65s)
+MIP: cut round 69: root cut time cap check: clock 3.205s of cap 12.00s (min rounds 0)
+MIP: cut round 69: root cut work cap check: work 10.449 (8539 LP iters, 69 rounds) of cap 12.000
+MIP: cut round 69: 50 cuts did not move the objective; up to 100 cuts per round from now
+MIP: cut round 69: 50 cuts (of 694, sep 0.09s, LP 79 iters), LP rows 2853 (cut rows mean nnz 9), obj 1.1521540961e4 (6.76s)
+MIP: cut round 70: root cut time cap check: clock 3.260s of cap 12.00s (min rounds 0)
+MIP: cut round 70: root cut work cap check: work 10.564 (8618 LP iters, 70 rounds) of cap 12.000
+MIP: cut round 70: 35 cuts (of 475, sep 0.08s, LP 68 iters), LP rows 2859 (cut rows mean nnz 9), obj 1.1522651161e4 (6.86s)
+MIP: cut round 71: root cut time cap check: clock 3.310s of cap 12.00s (min rounds 0)
+MIP: cut round 71: root cut work cap check: work 10.670 (8686 LP iters, 71 rounds) of cap 12.000
+MIP: cut round 71: 43 cuts (of 677, sep 0.09s, LP 70 iters), LP rows 2871 (cut rows mean nnz 9), obj 1.1522974875e4 (6.97s)
+MIP: cut round 72: root cut time cap check: clock 3.366s of cap 12.00s (min rounds 0)
+MIP: cut round 72: root cut work cap check: work 10.777 (8756 LP iters, 72 rounds) of cap 12.000
+MIP: cut round 72: 29 cuts (of 564, sep 0.11s, LP 68 iters), LP rows 2866 (cut rows mean nnz 9), obj 1.1524186382e4 (7.11s)
+MIP: cut round 73: root cut time cap check: clock 3.435s of cap 12.00s (min rounds 0)
+MIP: cut round 73: root cut work cap check: work 10.883 (8824 LP iters, 73 rounds) of cap 12.000
+MIP: cut round 73: 28 cuts (of 468, sep 0.12s, LP 81 iters), LP rows 2866 (cut rows mean nnz 9), obj 1.1526477932e4 (7.26s)
+MIP: cut round 74: root cut time cap check: clock 3.508s of cap 12.00s (min rounds 0)
+MIP: cut round 74: root cut work cap check: work 10.999 (8905 LP iters, 74 rounds) of cap 12.000
+MIP: cut round 74: 23 cuts (of 342, sep 0.11s, LP 98 iters), LP rows 2855 (cut rows mean nnz 9), obj 1.1528657445e4 (7.41s)
+MIP: cut round 75: root cut time cap check: clock 3.577s of cap 12.00s (min rounds 0)
+MIP: cut round 75: root cut work cap check: work 11.130 (9003 LP iters, 75 rounds) of cap 12.000
+MIP: cut round 75: 24 cuts (of 455, sep 0.11s, LP 121 iters), LP rows 2848 (cut rows mean nnz 9), obj 1.1531000040e4 (7.55s)
+MIP: cut round 76: root cut time cap check: clock 3.648s of cap 12.00s (min rounds 0)
+MIP: cut round 76: root cut work cap check: work 11.279 (9124 LP iters, 76 rounds) of cap 12.000
+MIP: cut round 76: 34 cuts (of 414, sep 0.11s, LP 148 iters), LP rows 2857 (cut rows mean nnz 9), obj 1.1536301654e4 (7.70s)
+MIP: cut round 77: root cut time cap check: clock 3.728s of cap 12.00s (min rounds 0)
+MIP: cut round 77: root cut work cap check: work 11.450 (9272 LP iters, 77 rounds) of cap 12.000
+MIP: cut round 77: 33 cuts (of 562, sep 0.11s, LP 121 iters), LP rows 2858 (cut rows mean nnz 9), obj 1.1538956807e4 (7.86s)
+MIP: cut round 78: root cut time cap check: clock 3.801s of cap 12.00s (min rounds 0)
+MIP: cut round 78: root cut work cap check: work 11.599 (9393 LP iters, 78 rounds) of cap 12.000
+MIP: cut round 78: 35 cuts (of 438, sep 0.10s, LP 89 iters), LP rows 2860 (cut rows mean nnz 9), obj 1.1541821146e4 (7.99s)
+MIP: cut round 79: root cut time cap check: clock 3.871s of cap 12.00s (min rounds 0)
+MIP: cut round 79: root cut work cap check: work 11.722 (9482 LP iters, 79 rounds) of cap 12.000
+MIP: cut round 79: 24 cuts (of 439, sep 0.10s, LP 54 iters), LP rows 2847 (cut rows mean nnz 9), obj 1.1541913981e4 (8.12s)
+MIP: cut round 80: root cut time cap check: clock 3.933s of cap 12.00s (min rounds 0)
+MIP: cut round 80: root cut work cap check: work 11.816 (9536 LP iters, 80 rounds) of cap 12.000
+MIP: cut round 80: 16 cuts (of 365, sep 0.12s, LP 79 iters), LP rows 2845 (cut rows mean nnz 9), obj 1.1542705172e4 (8.27s)
+MIP: cut round 81: root cut time cap check: clock 4.007s of cap 12.00s (min rounds 0)
+MIP: cut round 81: root cut work cap check: work 11.931 (9615 LP iters, 81 rounds) of cap 12.000
+MIP: cut round 81: 31 cuts (of 572, sep 0.16s, LP 74 iters), LP rows 2851 (cut rows mean nnz 9), obj 1.1543988812e4 (8.47s)
+MIP: cut round 82: root cut time cap check: clock 4.103s of cap 12.00s (min rounds 0)
+MIP: cut round 82: root cut work cap check: work 12.042 (9689 LP iters, 82 rounds) of cap 12.000 -> stop
+MIP: mpsep: 0 rounds with extra points, 0 points, 0 extra candidates, chosen 0 cuts (0 do not cut x*), 0.000s
+MIP: clique graph: 0 edges (0 from rows, probing implications 0)
+MIP: clique fallback: no violated clique cuts; not used (0.00s)
+Root cuts: objective 6.0884433962e2 -> 1.1543988812e4, 915 cuts in the LP (8.48s)
+SEP cmirdelta: calls 81413 with_new 8064 new_deltas 21034 wins 383 (g 0 c 374 l 9, no_old 0) mean_gain 1.578 cands_new 378 chosen 1/2687 eff_new 0.0074 eff_all 0.2416 time 0.044s
+MIP: cut loop done: 2687 cuts added, 915 in LP, pool 7865 cuts (200000 nonzeros), obj 6.0884433962e2 -> 1.1543988812e4
+MIP: LMBOOST: not used (Local-MIP improvements 0, last at 0.00s, incumbent only from the FJ thread false, gap 0.148, 8.48s)
+MIP: early root reduced costs stored (0 newly fixed integer columns, 8.48s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+MIP: root heuristic shifting: none (0.00s)
+MIP: root heuristic int shifting: none (0.01s)
+MIP: root heuristic randomized rounding: none (0.00s)
+MIP:   interior rounding: 1 interior points, vertex true (0.35s)
+MIP:   interior rounding: 6 rounded points tried, found false
+MIP: root heuristic interior rounding: none (0.44s)
+MIP:   root reduced cost: 665 lurking bounds, fixing rate 0.46
+CUTMIX clique edges total 17 rows 0 implonly 17 implpairs 28 bin 730
+MIP: fixed-charge check: vb rows 709 of 1048, continuous with vb 709 of 804
+CUTMIX clique edges total 14 rows 0 implonly 14 implpairs 23 bin 176
+MIP: fixed-charge check: vb rows 170 of 265, continuous with vb 155 of 163
+MIP:   sub-MIP: 2330 free columns of 3040, status NodeLimit, nodes 54, objective Some(11797.0), 1.96s
+MIP: fixed-integer LP dual check: c x 1.1797000000e4, dual bound 1.1543988812e4 -> solve
+MIP:   global fixed integers 2 of 1520 (newly 0 since the root LP)
+MIP: new incumbent 1.1797000000e4 at node 0 (10.98s) [root reduced cost]
+MIP: root heuristic root reduced cost: found (2.04s)
+CUTMIX clique edges total 47 rows 0 implonly 47 implpairs 89 bin 326
+MIP: fixed-charge check: vb rows 305 of 466, continuous with vb 270 of 272
+CUTMIX clique edges total 11 rows 0 implonly 11 implpairs 20 bin 83
+MIP: fixed-charge check: vb rows 77 of 123, continuous with vb 70 of 74
+MIP:   sub-MIP: 1998 free columns of 3040, status NodeLimit, nodes 61, objective Some(11794.0), 0.62s
+MIP: fixed-integer LP dual check: c x 1.1794000000e4, dual bound 1.1543988812e4 -> solve
+MIP:   global fixed integers 2 of 1520 (newly 0 since the root LP)
+MIP: new incumbent 1.1794000000e4 at node 0 (11.69s) [LP face]
+MIP:   LP face: 665 of 1518 integer columns fixed, found true
+MIP: root heuristic LP face: found (0.71s)
+CUTMIX clique edges total 5 rows 0 implonly 5 implpairs 10 bin 817
+MIP: fixed-charge check: vb rows 806 of 1187, continuous with vb 805 of 928
+CUTMIX clique edges total 19 rows 0 implonly 19 implpairs 24 bin 102
+MIP: fixed-charge check: vb rows 93 of 159, continuous with vb 85 of 102
+MIP:   sub-MIP: 2374 free columns of 3040, status NodeLimit, nodes 67, objective Some(11910.0), 1.41s
+MIP:   SUBFIX RENS try 1: target 0.43, fixing rate 0.43, depth 656, 0 backtracks, 858 free integer columns of 1518, status Some(NodeLimit), nodes 67, accepted false, 1.41s (dive+sub 1.42s)
+MIP:   SUBFIX RENS found nothing; running the default RENS as well
+CUTMIX clique edges total 15 rows 0 implonly 15 implpairs 29 bin 207
+MIP: fixed-charge check: vb rows 190 of 304, continuous with vb 174 of 184
+CUTMIX clique edges total 5 rows 0 implonly 5 implpairs 8 bin 73
+MIP: fixed-charge check: vb rows 71 of 107, continuous with vb 64 of 64
+MIP:   sub-MIP: 1833 free columns of 3040, status NodeLimit, nodes 88, objective Some(11751.0), 0.89s
+MIP: fixed-integer LP dual check: c x 1.1751000000e4, dual bound 1.1543988812e4 -> solve
+MIP:   global fixed integers 17 of 1520 (newly 15 since the root LP)
+MIP: new incumbent 1.1751000000e4 at node 0 (14.09s) [RENS]
+MIP:   RENS (more nodes) skipped: the sub-MIP stopped before its node limit
+MIP: root heuristic RENS: found (2.40s)
+MIP:   locks: fixing rate 0.65
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 526
+MIP:   sub-MIP: 2042 free columns of 3040, status Optimal, nodes 0, objective Some(87085.0), 0.06s
+MIP: root heuristic locks: none (0.06s)
+MIP: root heuristic clique: none (0.00s)
+MIP:   vbounds (loose): fixing rate 1.00
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 2
+MIP:   sub-MIP: 1518 free columns of 3040, status Infeasible, nodes 0, objective None, 0.02s
+MIP: root heuristic vbounds (loose): none (0.02s)
+MIP:   vbounds (tight): fixing rate 0.99
+MIP:   sub-MIP: 1524 free columns of 3040, status Infeasible, nodes 0, objective None, 0.00s
+MIP: root heuristic vbounds (tight): none (0.01s)
+MIP:   RINS (HiGHS fill): fixing rate 0.79 from agreeing columns, 0.79 after fill (1503 free integer columns)
+CUTMIX clique edges total 11 rows 0 implonly 11 implpairs 17 bin 286
+MIP: fixed-charge check: vb rows 281 of 477, continuous with vb 281 of 351
+CUTMIX clique edges total 14 rows 0 implonly 14 implpairs 19 bin 81
+MIP: fixed-charge check: vb rows 75 of 126, continuous with vb 67 of 76
+MIP:   sub-MIP: 1832 free columns of 3040, status NodeLimit, nodes 53, objective Some(12073.0), 1.05s
+MIP: root heuristic RINS: none (1.05s)
+MIP: after root heuristics: incumbent Some(11751.0) (15.23s)
+MIP: root objective probing: skipped (gap 1.762e-2 (LP 1.1543988812e4, incumbent 1.1751000000e4), 317 fractional binaries)
+MIP: GAP1 u: LP probing skipped (gap 1.762e-2)
+MIP: restart check: newly fixed 15, integer columns 1520, free at the root 1518, threshold 15.2, root LP 0.07s
+TRSTAT: tree start outer 15.46 solve 15.23 restarts 0 lb 6.0884433962e2 ub 1.1751000000e4
+     time      nodes      open        best bound         incumbent       gap
+    15.2s          1         0     1.154400000e4     1.175100000e4     1.76%
+MIP:    15.23s nodes        1 open       0 lb inf ub 1.17510000e4 lp_iters 11005 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 20378 dive_iters 0 lp_rows 2831 node_cut_secs 0.00
+    17.9s          2         1     1.154700000e4     1.175100000e4     1.74%
+MIP:    17.92s nodes        2 open       1 lb 1.15475663e4 ub 1.17510000e4 lp_iters 21764 sb_iters 10758 sb_lps 200 sb_secs 2.67 node_iters 1 (first 1, lps 1) heur_iters 20378 dive_iters 0 lp_rows 2831 node_cut_secs 0.00
+    21.0s          3         2     1.154800000e4     1.175100000e4     1.73%
+MIP:    20.96s nodes        3 open       2 lb 1.15475663e4 ub 1.17510000e4 lp_iters 33287 sb_iters 22242 sb_lps 400 sb_secs 5.69 node_iters 40 (first 40, lps 2) heur_iters 20378 dive_iters 0 lp_rows 2831 node_cut_secs 0.00
+    23.0s         55        54     1.154800000e4     1.175100000e4     1.73%
+MIP:    22.97s nodes       55 open      54 lb 1.15475663e4 ub 1.17510000e4 lp_iters 39445 sb_iters 25330 sb_lps 452 sb_secs 6.63 node_iters 2084 (first 2084, lps 54) heur_iters 22430 dive_iters 1026 lp_rows 2831 node_cut_secs 0.00
+CUTMIX clique edges total 13 rows 0 implonly 13 implpairs 20 bin 480
+MIP: fixed-charge check: vb rows 468 of 791, continuous with vb 468 of 626
+CUTMIX clique edges total 2 rows 0 implonly 2 implpairs 4 bin 80
+MIP: fixed-charge check: vb rows 80 of 124, continuous with vb 71 of 79
+MIP:   sub-MIP: 2058 free columns of 3040, status NodeLimit, nodes 159, objective Some(12322.0), 1.82s
+MIP:   SUBFIX tree RINS try 1: target 0.53, fixing rate 0.54, depth 608, 0 backtracks, 542 free integer columns of 1180, status Some(NodeLimit), nodes 159, accepted false, 1.82s (dive+sub 1.84s)
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+    26.0s        102       101     1.154800000e4     1.175100000e4     1.73%
+MIP:    25.97s nodes      102 open     101 lb 1.15475663e4 ub 1.17510000e4 lp_iters 42143 sb_iters 25599 sb_lps 458 sb_secs 6.68 node_iters 4501 (first 4112, lps 109) heur_iters 27929 dive_iters 1031 lp_rows 2888 node_cut_secs 0.58
+    28.1s        111       110     1.156900000e4     1.175100000e4     1.55%
+MIP:    28.12s nodes      111 open     110 lb 1.15688057e4 ub 1.17510000e4 lp_iters 46700 sb_iters 26126 sb_lps 468 sb_secs 6.81 node_iters 8512 (first 7002, lps 138) heur_iters 27967 dive_iters 1050 lp_rows 3033 node_cut_secs 1.62
+    30.2s        121       120     1.158700000e4     1.175100000e4     1.40%
+MIP:    30.21s nodes      121 open     120 lb 1.15872770e4 ub 1.17510000e4 lp_iters 53007 sb_iters 26869 sb_lps 492 sb_secs 7.01 node_iters 14040 (first 12132, lps 161) heur_iters 28003 dive_iters 1050 lp_rows 3140 node_cut_secs 1.90
+    32.3s        130       125     1.158900000e4     1.175100000e4     1.38%
+MIP:    32.25s nodes      130 open     125 lb 1.15889537e4 ub 1.17510000e4 lp_iters 58906 sb_iters 27437 sb_lps 514 sb_secs 7.15 node_iters 19295 (first 17118, lps 181) heur_iters 28112 dive_iters 1083 lp_rows 3192 node_cut_secs 2.16
+    34.3s        138       133     1.159900000e4     1.175100000e4     1.29%
+MIP:    34.34s nodes      138 open     133 lb 1.15982056e4 ub 1.17510000e4 lp_iters 64539 sb_iters 28044 sb_lps 526 sb_secs 7.33 node_iters 24232 (first 21735, lps 202) heur_iters 28263 dive_iters 1145 lp_rows 3226 node_cut_secs 2.35
+    36.3s        150       141     1.159900000e4     1.175100000e4     1.29%
+MIP:    36.34s nodes      150 open     141 lb 1.15982691e4 ub 1.17510000e4 lp_iters 68452 sb_iters 28454 sb_lps 548 sb_secs 7.45 node_iters 27690 (first 24578, lps 237) heur_iters 28308 dive_iters 1145 lp_rows 3281 node_cut_secs 3.17
+    38.4s        166       153     1.160200000e4     1.175100000e4     1.27%
+MIP:    38.35s nodes      166 open     153 lb 1.16017698e4 ub 1.17510000e4 lp_iters 72483 sb_iters 28953 sb_lps 560 sb_secs 7.57 node_iters 31187 (first 27616, lps 277) heur_iters 28343 dive_iters 1145 lp_rows 3282 node_cut_secs 3.84
+    40.4s        188       161     1.162800000e4     1.175100000e4     1.05%
+MIP:    40.43s nodes      188 open     161 lb 1.16271712e4 ub 1.17510000e4 lp_iters 78313 sb_iters 29639 sb_lps 574 sb_secs 7.77 node_iters 36308 (first 32499, lps 307) heur_iters 28371 dive_iters 1150 lp_rows 3301 node_cut_secs 4.01
+    42.4s        245       200     1.163800000e4     1.175100000e4     0.96%
+MIP:    42.45s nodes      245 open     200 lb 1.16373323e4 ub 1.17510000e4 lp_iters 83607 sb_iters 30192 sb_lps 580 sb_secs 7.95 node_iters 41037 (first 37197, lps 360) heur_iters 28395 dive_iters 1162 lp_rows 3257 node_cut_secs 4.10
+    44.5s        301       222     1.164400000e4     1.175100000e4     0.91%
+MIP:    44.45s nodes      301 open     222 lb 1.16438871e4 ub 1.17510000e4 lp_iters 89081 sb_iters 30803 sb_lps 592 sb_secs 8.14 node_iters 45889 (first 41880, lps 411) heur_iters 28417 dive_iters 1173 lp_rows 3213 node_cut_secs 4.19
+    46.5s        389       310     1.164400000e4     1.175100000e4     0.91%
+MIP:    46.46s nodes      389 open     310 lb 1.16438871e4 ub 1.17510000e4 lp_iters 95606 sb_iters 31585 sb_lps 604 sb_secs 8.37 node_iters 51629 (first 47620, lps 499) heur_iters 28423 dive_iters 1176 lp_rows 3152 node_cut_secs 4.19
+    48.5s        437       358     1.164500000e4     1.175100000e4     0.90%
+MIP:    48.49s nodes      437 open     358 lb 1.16440263e4 ub 1.17510000e4 lp_iters 101550 sb_iters 32173 sb_lps 614 sb_secs 8.54 node_iters 56970 (first 52917, lps 551) heur_iters 28453 dive_iters 1191 lp_rows 3132 node_cut_secs 4.19
+    50.5s        491       412     1.164500000e4     1.175100000e4     0.90%
+MIP:    50.49s nodes      491 open     412 lb 1.16440263e4 ub 1.17510000e4 lp_iters 108291 sb_iters 32972 sb_lps 630 sb_secs 8.79 node_iters 62907 (first 58854, lps 605) heur_iters 28463 dive_iters 1196 lp_rows 3129 node_cut_secs 4.19
+    52.5s        549       470     1.164500000e4     1.175100000e4     0.90%
+MIP:    52.49s nodes      549 open     470 lb 1.16440263e4 ub 1.17510000e4 lp_iters 113858 sb_iters 33513 sb_lps 648 sb_secs 8.97 node_iters 67931 (first 63705, lps 671) heur_iters 28467 dive_iters 1198 lp_rows 3169 node_cut_secs 4.48
+MIP: oneopt improved 1.1726000000e4 -> 1.1711000000e4
+MIP: fixed-integer LP dual check: c x 1.1711000000e4, dual bound 1.0400779687e4 -> solve
+MIP:   global fixed integers 228 of 1520 (newly 226 since the root LP)
+MIP: new incumbent 1.1711000000e4 at node 602 (54.27s) [tree randomized rounding]
+    54.5s        606       360     1.164500000e4     1.171100000e4     0.56%
+MIP:    54.53s nodes      606 open     360 lb 1.16443848e4 ub 1.17110000e4 lp_iters 119962 sb_iters 34146 sb_lps 664 sb_secs 9.20 node_iters 72914 (first 68677, lps 731) heur_iters 29066 dive_iters 1309 lp_rows 3131 node_cut_secs 4.48
+    57.0s        636       366     1.165000000e4     1.171100000e4     0.52%
+MIP:    56.99s nodes      636 open     366 lb 1.16495075e4 ub 1.17110000e4 lp_iters 126677 sb_iters 35073 sb_lps 688 sb_secs 9.45 node_iters 78673 (first 74211, lps 771) heur_iters 29095 dive_iters 1309 lp_rows 3181 node_cut_secs 4.57
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 1262
+MIP: fixed-charge check: vb rows 1260 of 1648, continuous with vb 1260 of 1260
+MIP:   sub-MIP: 2808 free columns of 3040, status TimeLimit, nodes 0, objective Some(11711.0), 1.01s
+MIP:   local branching k=18: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+MIP: finish start TimeLimit (59.79s)
+MIP: MEMCAP: tid 0 limit 11416 MB peak rss 97 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+    59.8s        668         0     1.165100000e4     1.171100000e4     0.51%
+MIP:    59.79s nodes      668 open     380 lb 1.16507128e4 ub 1.17110000e4 lp_iters 130772 sb_iters 35323 sb_lps 698 sb_secs 9.53 node_iters 82460 (first 77824, lps 811) heur_iters 32431 dive_iters 1309 lp_rows 3216 node_cut_secs 4.85
+MIP: dual proofs and conflicts 105 (conflicts added 0 (from proofs 53), Farkas 0, pruned 20 nodes, tightened 38360 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 330, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: cut pool propagation: calls 1488, pruned 1 nodes, tightened 20811 bounds, 0.46s, pool 7917 cuts (212295 nonzeros); updated terms 17630736, candidates 101578 (1248473 nonzeros), rebuilds 3
+MIP: GAP1 u: child selection down 0 up 0; branching selections 0, with ties 0 (candidates in ties 0), changed by the queue counts 0; objective proofs not violated beyond the tolerance 0
+MIP: objective propagation: pruned 0 nodes, tightened 1437 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 545, in pool 545 (aged out 0), pruned 3 nodes, tightened 686 bounds
+MIP: proof CMIR cuts: tried 53, added 52, entered the cut pool 52
+MIP: conflict analysis (HiGHS style): calls 384, conflicts 1075, added 545, mean length 8.4, max length 556, 0.03s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 623 selections, 0 without strong branching for dual degeneracy; sb LPs 698 iters 35323
+MIP: PLSB (tid 0): undecided 2579 (few samples 10, no gap 2298, depth>=50 271), continue 11657, stop 5, continued past lookahead 360, stopped before lookahead 5; tree gains n 329 zero 3
+MIP: sibling backtracks 216; basis restores 374 (basic count mismatch 117), first LP iterations after a restore 40338
+MIP: mem1 sibling LU (all threads): held at most 1, pushed 821, dropped 438, adopted 15
+MIP: GAP4 c: dense cuts kept out of the cut pool propagation (all threads, counted per rebuild): 57
+MIP: memc (all threads): packed nodes 0, changes 0 (0 bytes packed, 0 unpacked), bases 0 (0 bytes packed, 0 unpacked)
+MIP: basis nb diag: tree first LPs restored 255 iters 40338 (158.2/LP), others 389 iters 37486 (96.4/LP); root LPs: submip 15 lps 6173 iters (411.5/LP) 0.20s, bgcopy 0 lps 0 iters (0.0/LP) 0.00s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 1220 iters (1220.0/LP) 0.07s; nb hints applied 477 solves, 764579 given, 14027 changed
+MIP: node diag: nodes 668 node LPs 811 mean rows 3135.4 iters 82460 (101.7/LP) LP secs 25.04 sep rounds 0 added 0 node cut secs 4.85 final rows 3216
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 4.85, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 3.2)
+MIP: finish done (59.79s)
+MIP: RCSTRONG: knapsack row (all threads, cumulative): calls 1511, pruned 0, tightened 2874, built 2 (mean length 416.0)
+MIP: SUBFIX summary: dives 2 sub-MIPs 2 accepted 0 root-infeasible retries 0 below 0.1 0; success 1 (mean rate 0.46), infeasible 0 (mean rate NaN)
+MIP: solve returned TimeLimit after 60.03s (time limit 60.00s)
+MIP: polished the solution (60.03s)
+RESULT time_limit 11711.0 11651.0 668 11543.988811838191 60.03

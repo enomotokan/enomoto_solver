@@ -62,6 +62,82 @@ fn coef_gcd(r: &[(usize, f64)]) -> f64 {
 /// 右辺が奇数ならそれだけで zerohalf カットになるので残す)。(3) 列の奇偶の並びと右辺の奇偶が同じ行は、余裕の最も小さい 1 本だけ
 /// 残す (ハッシュで集める)。(4) 消去で、列ごとにその列を持つ行の一覧を持ち (足し合わせで増えた列は一覧に足す)、列ごとに
 /// 全部の行をなめない ((4) だけなら結果は変わらない)
+thread_local! {
+    /// このスレッドの zerohalf の分離の期限 ([`with_zh_deadline`])。過ぎたら消去の途中でやめ、カットを返さない
+    static ZH_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// `ENOMOTO_MIP_OVERRUN3` の `z` (試作、analysis/mittelmann_ready_20261103/overrun.md): `deadline` をこのスレッドの zerohalf の分離の期限にして
+/// `f` を実行する。mod 2 の消去は大きな問題で 1 回 数秒かかり (radiationm40-10-02 の裏のカットのスレッド)、止めの合図・期限を見ないので、
+/// 主が `BgCuts::finish` で期限の後も待っていた。期限を過ぎた後だけ効く (その回のカットを捨てる。ラウンドも期限で捨てられる)
+pub(crate) fn with_zh_deadline<R>(deadline: Option<std::time::Instant>, f: impl FnOnce() -> R) -> R {
+    let prev = ZH_DEADLINE.with(|d| d.replace(deadline));
+    let r = f();
+    ZH_DEADLINE.with(|d| d.set(prev));
+    r
+}
+
+/// `ENOMOTO_MIP_OVERRUN3` (試作、既定では使わない。analysis/mittelmann_ready_20261103/overrun.md): 時間の上限の超過を減らす直しを文字で選ぶ。
+/// `z`: zerohalf の分離が期限を見る ([`with_zh_deadline`])。`i`: 期限を過ぎた後に受け取った解の twoopt などをしない (`o` は oneopt も)。
+/// `l`: 双対単体法の破綻の後の解き直しを期限の後にしない。`h`: 根の局所探索の時間の枠を期限までの残りで頭打ちにする。
+/// `d`: 求解の後の木の待ち行列の片付けを裏のスレッドに回す。`r`: 期限の直前 (残りが max(1 秒, 根の LP の 2 倍) 未満) には再スタートしない。
+/// `t`: 解の受け取りの各手順の時間をログに出す (診断用)
+pub(crate) fn overrun3(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_OVERRUN3").is_some_and(|v| v.contains(c))
+}
+
+/// zerohalf の分離が求解の期限・止めの合図を見るか (`ENOMOTO_MIP_ZH_DEADLINE`、既定 1、`=0` で以前の形 = `ENOMOTO_MIP_OVERRUN3` の `z` の
+/// ときだけ)。chromaticindex512-7 では mod 2 の消去が 1 回 約 21 秒かかり、根の LP が早く終わる設定 (内点法 + クロスオーバーの試作 ipmx) で
+/// カットの選び方の比べと根のカットの 0 ラウンド目が期限を 11〜14 秒越えていた (analysis/ipmx_harm_20261106.md)。期限を過ぎた後だけ効く
+pub(crate) fn zh_deadline_on() -> bool {
+    overrun3('z') || env_def!("ENOMOTO_MIP_ZH_DEADLINE", "1").is_some()
+}
+
+/// `ENOMOTO_MIP_ZH_TRIAL` (試作、既定では使わない。analysis/gap3_zhtrial_20261109.md): 既定 (`ENOMOTO_MIP_NO_ZEROHALF` の既定 1) で zerohalf を
+/// 使わないとき、根のカットのループを zerohalf なしで回し終えた LP で zerohalf だけのカットを短く試し
+/// ([`super::solver::Solver::zh_trial`])、根のギャップを十分に閉じる問題でだけ、根の続き・木・再スタート後に zerohalf を使う。
+/// 値: `1` (か `on`) = 判定して使う、`log` = 判定と記録だけして使わない (計測用)、`r` = 試しの LP をせず、根のループを zerohalf なしで
+/// 回し終えた後 (clique の fallback の判定の後) の根の続き・裏のカット (と根の分離、サブ MIP の根) でだけ zerohalf を使い、木のノードの分離
+/// (`light`) では使わない。`0` で使わない
+pub(crate) fn zh_trial_mode() -> Option<&'static str> {
+    match env_str!("ENOMOTO_MIP_ZH_TRIAL") {
+        None | Some("0") => None,
+        Some("log") => Some("log"),
+        Some("r") => Some("r"),
+        Some(_) => Some("on"),
+    }
+}
+
+/// [`zh_trial_mode`] の判定 (0 = 未判定、1 = 使わない、2 = 使う)。木の探索・裏のカット・サブ MIP のスレッドも読むのでプロセスで 1 つ
+/// (外側の求解の始めに [`zh_trial_reset`] で戻す。同じプロセスで同時に別の求解をすると混ざる: `ENOMOTO_MIP_ZH_TRIAL` を付けたときだけ)
+static ZH_TRIAL_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub(crate) fn zh_trial_reset() {
+    ZH_TRIAL_STATE.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn zh_trial_decided() -> bool {
+    ZH_TRIAL_STATE.load(std::sync::atomic::Ordering::Relaxed) != 0
+}
+
+pub(crate) fn zh_trial_set(on: bool) {
+    ZH_TRIAL_STATE.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 試しの判定で zerohalf を使うことになったか (`light` = 木のノードの分離。`r` では使わない)
+pub(crate) fn zh_trial_used(light: bool) -> bool {
+    ZH_TRIAL_STATE.load(std::sync::atomic::Ordering::Relaxed) == 2 && match zh_trial_mode() {
+        Some("on") => true,
+        Some("r") => !light,
+        _ => false,
+    }
+}
+
+fn zh_past_deadline() -> bool {
+    // 止めの合図 ([`crate::cancel::halted`]、木の探索の従のスレッド) も期限と同じに扱う
+    ZH_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d) || crate::cancel::halted()
+}
+
 pub fn zerohalf_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], is_int: &[bool], lo: &[f64], up: &[f64], x: &[f64], max_cuts: usize) -> Vec<RawCut> {
     zerohalf_cuts_with(rows, row_lo, row_up, is_int, lo, up, x, max_cuts, env_str!("ENOMOTO_MIP_ZH_PRE").is_some())
 }
@@ -194,7 +270,11 @@ fn zerohalf_cuts_with(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]
             }
         }
     }
+    let check = ZH_DEADLINE.with(|d| d.get()).is_some();
     for &c in &order {
+        if check && zh_past_deadline() {
+            return Vec::new();
+        }
         if pre {
             // 一覧を番号の順に並べ、今この列を持つ行だけにする (軸は今までと同じく番号の最も小さい行)
             let mut lst = std::mem::take(&mut col_rows[c]);
@@ -268,6 +348,9 @@ fn zerohalf_cuts_with(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]
     for (_, combo) in cands {
         if out.len() >= max_cuts {
             break;
+        }
+        if check && zh_past_deadline() {
+            return Vec::new();
         }
         if seen.contains(&combo) {
             continue;

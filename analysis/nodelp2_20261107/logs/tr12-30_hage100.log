@@ -1,0 +1,39 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP tr12-30 has 750 rows; 1080 cols; 2508 nonzeros; 360 integer variables (360 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+03]
+  Cost    [1e+00, 1e+03]
+  Bound   [1e+00, 1e+00]
+  RHS     [8e+01, 2e+03]
+Presolving model
+738 rows, 1060 cols, 2468 nonzeros 0s
+722 rows, 1052 cols, 2444 nonzeros 0s
+Presolve reductions: rows 722(-28); columns 1052(-28); nonzeros 2444(-64) 
+
+Solving MIP model with:
+   722 rows
+   1052 cols (352 binary, 0 integer, 0 implied int., 700 continuous, 0 domain fixed)
+   2444 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   -4180           inf                  inf        0      0      0         0     0.0s
+         0       0         0   0.00%   18124.174518    inf                  inf        0      0      4       680     0.0s
+ C       0       0         0   0.00%   121044.133797   225089            46.22%     2777    628     43      1510     0.1s
+ L       0       0         0   0.00%   130231.923781   132771             1.91%     7521    876     43      2306     0.8s
+ L       0       0         0   0.00%   130231.923781   131521             0.98%     7521    876     43      3973     1.4s
+ L       0       0         0   0.00%   130231.923781   131275             0.79%     7521    526     43      5584     2.1s
+ L     101      31        33   0.00%   130244.152692   131203             0.73%     7772    571    334     26052     6.4s
+ L     204      53        64   0.00%   130244.152692   131090             0.65%     7969    599    622     41094     9.7s
+ L     304      62       101   0.00%   130244.152692   130986             0.57%     7627    615    973     52182    12.1s
+ L     607      56       218   0.05%   130244.152692   130728             0.37%     4531    646   1734     71589    17.9s
+ L     616      53       223   0.07%   130244.152692   130718             0.36%     3178    669   1769     74963    19.0s
+ L     819      50       308   0.10%   130244.152692   130652             0.31%     2339    706   2171     87536    23.2s

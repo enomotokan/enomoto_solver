@@ -61,7 +61,8 @@ def worker_highs(mps: str, time_limit: float, threads: int) -> None:
     import highspy
 
     h = highspy.Highs()
-    h.setOptionValue("output_flag", False)
+    # `ENOMOTO_BENCH_HIGHS_LOG=1`: HiGHS のログを出す (調べるとき用。結果の JSON は最後の行なのでそのまま読める)
+    h.setOptionValue("output_flag", bool(os.environ.get("ENOMOTO_BENCH_HIGHS_LOG")))
     h.setOptionValue("time_limit", time_limit)
     h.setOptionValue("threads", threads)
     # このクレートの既定 (相対ギャップ 0) にそろえる。HiGHS の既定 1e-4 のままだと、根の LP と最適値の差が 1e-5 しかない
@@ -71,6 +72,19 @@ def worker_highs(mps: str, time_limit: float, threads: int) -> None:
     # 与えても木の探索が 1 本。on で "Parallel search on" になり、neos-911970 で CPU 時間 / 経過時間 1.04 -> 4.40)
     if os.environ.get("ENOMOTO_BENCH_HIGHS_PARALLEL"):
         h.setOptionValue("parallel", os.environ["ENOMOTO_BENCH_HIGHS_PARALLEL"])
+    # `ENOMOTO_BENCH_HIGHS_OPT=名前=値,名前=値`: 調べるとき用に HiGHS のオプションを足す (例: mip_detect_symmetry=false)。
+    # 値は true/false・整数・小数・文字列の順に読む
+    for kv in filter(None, os.environ.get("ENOMOTO_BENCH_HIGHS_OPT", "").split(",")):
+        k, v = kv.split("=", 1)
+        val = {"true": True, "false": False}.get(v.lower(), v)
+        if isinstance(val, str):
+            for conv in (int, float):
+                try:
+                    val = conv(v)
+                    break
+                except ValueError:
+                    pass
+        h.setOptionValue(k, val)
     h.readModel(mps)
     t = time.perf_counter()
     h.run()

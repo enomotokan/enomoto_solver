@@ -1,0 +1,96 @@
+neos5 def 1 optimal 34.231332436 15.0 15.0
+neos5 nots 1 optimal 28.965184539000006 15.0 15.0
+neos5 every 1 optimal 27.57334446599998 15.0 15.0
+neos5 frac10 1 optimal 33.632838625999966 15.0 15.0
+misc07 frac10 1 optimal 7.597319146000018 2809.999999999999 2809.999999999999
+misc07 every 1 optimal 5.685573692999924 2809.999999999999 2809.999999999999
+misc07 nots 1 optimal 5.353410904000043 2809.9999999999986 2809.9999999999986
+misc07 def 1 optimal 10.140290687999936 2809.999999999999 2809.999999999999
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.13/urllib/request.py", line 1331, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+              encode_chunked=req.has_header('Transfer-encoding'))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/http/client.py", line 1386, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/http/client.py", line 1432, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/http/client.py", line 1381, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/http/client.py", line 1141, in _send_output
+    self.send(msg)
+    ~~~~~~~~~^^^^^
+  File "/usr/local/lib/python3.13/http/client.py", line 1085, in send
+    self.connect()
+    ~~~~~~~~~~~~^^
+  File "/usr/local/lib/python3.13/http/client.py", line 1051, in connect
+    self.sock = self._create_connection(
+                ~~~~~~~~~~~~~~~~~~~~~~~^
+        (self.host,self.port), self.timeout, self.source_address)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/socket.py", line 844, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/socket.py", line 983, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno -2] Name or service not known
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/user/enomoto_solver/analysis/treesep_20261107/bench.py", line 39, in <module>
+    mps = rb.fetch(p, WT / ".miplib_cache")
+  File "/home/user/enomoto_solver/scripts/run_miplib_benchmark.py", line 52, in fetch
+    with urllib.request.urlopen(BASE_URL + f"{name}.mps.gz", timeout=120) as r, open(gz, "wb") as f:
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/urllib/request.py", line 189, in urlopen
+    return opener.open(url, data, timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/urllib/request.py", line 495, in open
+    response = meth(req, response)
+  File "/usr/local/lib/python3.13/urllib/request.py", line 604, in http_response
+    response = self.parent.error(
+        'http', request, response, code, msg, hdrs)
+  File "/usr/local/lib/python3.13/urllib/request.py", line 527, in error
+    result = self._call_chain(*args)
+  File "/usr/local/lib/python3.13/urllib/request.py", line 466, in _call_chain
+    result = func(*args)
+  File "/usr/local/lib/python3.13/urllib/request.py", line 720, in http_error_302
+    return self.parent.open(new, timeout=req.timeout)
+           ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/urllib/request.py", line 489, in open
+    response = self._open(req, data)
+  File "/usr/local/lib/python3.13/urllib/request.py", line 506, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+                              '_open', req)
+  File "/usr/local/lib/python3.13/urllib/request.py", line 466, in _call_chain
+    result = func(*args)
+  File "/usr/local/lib/python3.13/urllib/request.py", line 1360, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/urllib/request.py", line 1334, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno -2] Name or service not known>
+neos5 a 1 optimal 34.96061608299999 15.0 15.0
+misc07 a 1 optimal 8.800071572000093 2809.999999999999 2809.999999999999
+mik-250-20-75-4 def 1 optimal 9.420148391999987 -52300.99999999998 -52300.99999999998
+mik-250-20-75-4 nots 1 optimal 5.10709650900003 -52300.99999999998 -52300.99999999998
+mik-250-20-75-4 every 1 optimal 8.125187614999959 -52300.99999999998 -52300.99999999998
+mik-250-20-75-4 a 1 optimal 10.835065756000063 -52300.99999999998 -52300.99999999998
+neos5 def 2 optimal 37.33316076299991 15.0 15.0
+neos5 nots 2 optimal 34.743181091999986 15.0 15.0
+neos5 every 2 optimal 41.38900025800001 15.0 15.0
+neos5 a 2 optimal 42.38425990399992 15.0 15.0
+misc07 a 2 optimal 10.74340632999997 2809.999999999999 2809.999999999999
+misc07 every 2 optimal 7.373682708999922 2809.999999999999 2809.999999999999
+misc07 nots 2 optimal 5.402630679999902 2809.999999999999 2809.999999999999
+misc07 def 2 optimal 12.736999932999879 2809.999999999999 2809.999999999999
+mik-250-20-75-4 def 2 optimal 3.752191928000002 -52300.99999999998 -52300.99999999998
+mik-250-20-75-4 nots 2 optimal 2.7392144329999155 -52300.99999999998 -52300.99999999998
+mik-250-20-75-4 every 2 optimal 3.1308811940000396 -52300.99999999998 -52300.99999999998
+mik-250-20-75-4 a 2 optimal 4.200707444000045 -52300.99999999998 -52300.99999999998

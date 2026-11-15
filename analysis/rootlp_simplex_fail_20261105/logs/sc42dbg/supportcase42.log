@@ -1,0 +1,188 @@
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: initial fresh_d skipped (c_B = 0)
+DEBUG_EXT: DSE weights: unit (warm_started=false, passed=none, warm_dse_on=false, once=false)
+DEBUG_EXT_BAILOUT: x_B[17507] inconsistent with rho^T(b - N x_N) (rel 1.305e-1) at iter=511 -> restart with re-perturbed costs
+DEBUG_EXT: broken-basis/max-iters bailout, retrying with safe_pivot and full cost perturbation
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: initial fresh_d skipped (c_B = 0)
+DEBUG_EXT: DSE weights: unit (warm_started=false, passed=none, warm_dse_on=false, once=false)
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: singular-pivot probe rejected iter=534 q=18972 r=2571 alpha_r=-5.974e-9
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: singular-pivot probe rejected iter=774 q=19198 r=10560 alpha_r=-2.082e-9
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=18170 q=19199) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=18170 q=19199, banned 1), rollbacks=1
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: singular-pivot probe rejected iter=801 q=19491 r=17436 alpha_r=-1.126e-9
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: singular-pivot probe rejected iter=833 q=21551 r=17094 alpha_r=-1.196e-9
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: singular-pivot probe rejected iter=1160 q=26704 r=300 alpha_r=-9.256e-9
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=17469 q=710) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=17469 q=710, banned 1), rollbacks=2
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=16504 q=1109) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=16504 q=1109, banned 1), rollbacks=3
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=631 q=1109) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=631 q=1109, banned 1), rollbacks=4
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=17531 q=1792) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=17531 q=1792, banned 1), rollbacks=5
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=1215 q=1664) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=1215 q=1664, banned 1), rollbacks=6
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=236 q=1017) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=236 q=1017, banned 1), rollbacks=7
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=109 q=1017) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=109 q=1017, banned 1), rollbacks=8
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=236 q=1664) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=236 q=1664, banned 1), rollbacks=9
+PROF_PHASES_EXT wall=30182.446ms iters=2400 (12576.0us/iter) accounted=90.5% of wall refactor_count=279 (verify=163 try_update=14 bump=0 drift=3 d_drift=0 illcond=99 max_updates=0 infeas_check=0 clock=0) max_update_streak=317
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=0.3us/iter
+  avg_bfrt_flips/iter=0.000 avg_infeasible_pool/iter=8492.5
+  pivot_order_reuse: attempts=70 accepted=29 (41.4%) attempt_time=1606.405ms row_repicks=4070 fail(singular=28 fill=13) backoff_skips=282 nnz_reuse_avg=262549 nnz_full_avg=407887
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=1647 final_expected_density col_aq=0.866 bfrt=0.000
+  btran_l scatter=3237 gather=0
+  pivot_search steps=6084868 search_limit_hits=79178 (1.3%) candidates=21052948 (avg 3.46/step) scan=1952.428ms
+  col_max_abs rescan_entries=17597148 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=1170 (48.8% of iters) avg_harris_window_size=1.000
+  pool_grew=887 (37.0%) pool_shrank=1390 (57.9%) pool_same=122 (5.1%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)          325.508ms    1.1% of wall  135.628us/iter
+  price                 143.598ms    0.5% of wall  59.833us/iter
+  chuzr                 254.088ms    0.8% of wall  105.870us/iter
+  chuzc1                 57.592ms    0.2% of wall  23.997us/iter
+  bfrt                    1.450ms    0.0% of wall  0.604us/iter
+  ftran                2185.404ms    7.2% of wall  910.585us/iter
+  xb_update             327.900ms    1.1% of wall  136.625us/iter
+  dse_update             60.030ms    0.2% of wall  25.012us/iter
+  dual_update            30.574ms    0.1% of wall  12.739us/iter
+  ft_update             357.364ms    1.2% of wall  148.902us/iter
+  refactor             23579.750ms   78.1% of wall  9824.896us/iter
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: initial fresh_d skipped (c_B = 0)
+DEBUG_EXT: DSE weights: unit (warm_started=false, passed=none, warm_dse_on=true, once=false)
+DEBUG_EXT_BAILOUT: x_B[17507] inconsistent with rho^T(b - N x_N) (rel 1.305e-1) at iter=511 -> restart with re-perturbed costs
+DEBUG_EXT: broken-basis/max-iters bailout, retrying with safe_pivot and full cost perturbation
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: initial fresh_d skipped (c_B = 0)
+DEBUG_EXT: DSE weights: unit (warm_started=false, passed=none, warm_dse_on=true, once=false)
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: singular-pivot probe rejected iter=534 q=18972 r=2571 alpha_r=-5.974e-9
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: singular-pivot probe rejected iter=774 q=19198 r=10560 alpha_r=-2.082e-9
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=18170 q=19199) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=18170 q=19199, banned 1), rollbacks=1
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: singular-pivot probe rejected iter=801 q=19491 r=17436 alpha_r=-1.126e-9
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: singular-pivot probe rejected iter=833 q=21551 r=17094 alpha_r=-1.196e-9
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: singular-pivot probe rejected iter=1160 q=26704 r=300 alpha_r=-9.256e-9
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=17469 q=710) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=17469 q=710, banned 1), rollbacks=2
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=16504 q=1109) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=16504 q=1109, banned 1), rollbacks=3
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=631 q=1109) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=631 q=1109, banned 1), rollbacks=4
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=17531 q=1792) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=17531 q=1792, banned 1), rollbacks=5
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=1215 q=1664) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=1215 q=1664, banned 1), rollbacks=6
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=236 q=1017) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=236 q=1017, banned 1), rollbacks=7
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=109 q=1017) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=109 q=1017, banned 1), rollbacks=8
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=236 q=1664) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=236 q=1664, banned 1), rollbacks=9
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=4642 q=3345) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=4642 q=3345, banned 1), rollbacks=10
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=2904 q=14525) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=2904 q=14525, banned 1), rollbacks=11
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=2904 q=3132) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=2904 q=3132, banned 1), rollbacks=12
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=14462 q=6299) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=14462 q=6299, banned 1), rollbacks=13
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=17745 q=2845) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=17745 q=2845, banned 1), rollbacks=14
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=17585 q=2206) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=17585 q=2206, banned 1), rollbacks=15
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=16412 q=3830) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=16412 q=3830, banned 1), rollbacks=16
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=16454 q=3830) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=16454 q=3830, banned 1), rollbacks=17
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=16432 q=2611) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=16432 q=2611, banned 1), rollbacks=18
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=1209 q=2611) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=1209 q=2611, banned 1), rollbacks=19
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=2.500e-1 (last r=17459 q=17459) refactor_ok=false
+DEBUG_EXT: rollback stage=1 undone=1 threshold=5.000e-1 (last r=17459 q=17459) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=17459 q=17459, banned 1), rollbacks=20
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=5.000e-1 (last r=3676 q=65) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=3676 q=65, banned 1), rollbacks=21
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=5.000e-1 (last r=3803 q=65) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=3803 q=65, banned 1), rollbacks=22
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=5.000e-1 (last r=3675 q=65) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=3675 q=65, banned 1), rollbacks=23
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=5.000e-1 (last r=3868 q=4561) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=3868 q=4561, banned 1), rollbacks=24
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=5.000e-1 (last r=3632 q=21) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=3632 q=21, banned 1), rollbacks=25
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=5.000e-1 (last r=16594 q=36060) refactor_ok=false
+DEBUG_EXT: rollback stage=2 undone=3 threshold=5.000e-1 (last r=16594 q=36060) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=16594 q=36060, banned 3), rollbacks=26
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=5.000e-1 (last r=16565 q=4440) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=16565 q=4440, banned 1), rollbacks=27
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: singular-pivot probe rejected iter=2759 q=193 r=2108 alpha_r=-8.059e-8
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=5.000e-1 (last r=3265 q=17401) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=3265 q=17401, banned 1), rollbacks=28
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=5.000e-1 (last r=1845 q=9524) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=1845 q=9524, banned 1), rollbacks=29
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: singular-pivot probe rejected iter=2790 q=1202 r=16439 alpha_r=-2.511e-9
+DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)
+DEBUG_EXT: rollback stage=0 undone=1 threshold=5.000e-1 (last r=711 q=16430) refactor_ok=true
+DEBUG_EXT: singular refactor -> rolled back pivots (last r=711 q=16430, banned 1), rollbacks=30
+DEBUG_EXT_BAILOUT: 50 discarded pivots in a row without a confirmed pivot at iter=2896 (last r=3803 q=36801) -> retry
+ROOTLP_SIMPLEX {"n":19466,"m":18439,"nnz":435653,"st":"Error","obj":null,"t":46.1628,"iters":3409,"polish":0,"offset":0.00000000000000000e0,"t_start":0.994}
+MIP: MEMCAP: tid 0 limit 11735 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0

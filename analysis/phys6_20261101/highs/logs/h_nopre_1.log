@@ -1,0 +1,54 @@
+[   0.00] Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+[   0.00] Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+[   1.03] Number of BV entries in BOUNDS section is 109346
+[   0.00] MIP physiciansched6-2 has 168336 rows; 111827 cols; 480259 nonzeros; 109346 integer variables (109346 binary)
+[   0.00] Coefficient ranges:
+[   0.00]   Matrix  [2e-01, 1e+03]
+[   0.00]   Cost    [1e+00, 1e+00]
+[   0.00]   Bound   [1e+00, 1e+00]
+[   0.00]   RHS     [1e+00, 3e+02]
+[   0.13] 
+[   0.13] Presolve is switched off
+[   0.21] 
+[   0.21] Solving MIP model with:
+[   0.21]    168336 rows
+[   0.21]    111827 cols (18211 binary, 0 integer, 0 implied int., 1102 continuous, 92514 domain fixed)
+[   0.21]    480259 nonzeros
+[   0.21]    Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+[   2.93] 
+[   2.93] Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+[   2.93]      I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+[   2.93]      S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+[   2.93]      Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+[   2.93] 
+[   2.93]         Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+[   2.93] Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+[   2.93]          0       0         0   0.00%   12916.5         inf                  inf        0      0      0         0     2.9s
+[   9.35]          0       0         0   0.00%   46419.25        inf                  inf        0      0      8     12267     9.3s
+[  17.99]          0       0         0   0.00%   46619.25        inf                  inf     2928    668     13     16387    18.0s
+[  26.99]          0       0         0   0.00%   46619.5         inf                  inf     5159   1170     20     20186    27.0s
+[  36.55]          0       0         0   0.00%   46620.5         inf                  inf     6821   1621     25     23868    36.5s
+[  44.17]          0       0         0   0.00%   46621.5         inf                  inf     8274   1938     31     26863    44.2s
+[  53.09]          0       0         0   0.00%   46622           inf                  inf     8904   2172    338     29605    53.1s
+[  60.06]          0       0         0   0.00%   46622           inf                  inf     9361   2338    345     31478    60.1s
+[  60.07]          0       0         0   0.00%   46622           inf                  inf     9361   2338    345     31478    60.1s
+[  60.07] 
+[  60.07] Solving report
+[  60.07]   Model             physiciansched6-2
+[  60.07]   Status            Time limit reached
+[  60.07]   Primal bound      inf
+[  60.07]   Dual bound        46622
+[  60.07]   Gap               inf
+[  60.07]   P-D integral      0
+[  60.07]   Solution status   -
+[  60.07]   Timing            60.07
+[  60.07]                     0.14 (Presolve)
+[  60.07]                     59.92 (Solve)
+[  60.07]                     0.00 (Postsolve)
+[  60.07]   Max sub-MIP depth 0
+[  60.07]   Nodes             0
+[  60.07]   Repair LPs        0
+[  60.07]   LP iterations     31478
+[  60.07]                     0 (strong br.)
+[  60.07]                     19211 (separation)
+[  60.07]                     0 (heuristics)

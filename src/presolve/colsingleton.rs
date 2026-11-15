@@ -146,7 +146,13 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
     // 変えない)。timtab1 は 171 本の等式すべてに有界の連続のスラック (目的の費用つき) があり、消すと等式が範囲制約になる
     // (HiGHS は残す: 161 行 360 列)
     let keep_bounded = int_mask.is_some() && env_str!("ENOMOTO_MIP_KEEP_BOUNDED_SLACK").is_some();
-    for j in 0..n {
+    // 試作 `ENOMOTO_MIP_ORDINV` の `d` ([`super::ordkey`]): 1 行に列シングルトンが複数あるとき、どれで行を使うかを列番号でなく列の鍵の順で決める
+    let okeys = if super::ordkey::ordinv('d') { super::ordkey::keys() } else { None };
+    let mut col_order: Vec<usize> = (0..n).collect();
+    if okeys.is_some() {
+        col_order.sort_by_key(|&j| super::ordkey::sort_key(&okeys, j));
+    }
+    for j in col_order {
         if appearances[j] != 1 || int_mask.as_ref().is_some_and(|m| m[j]) {
             continue;
         }

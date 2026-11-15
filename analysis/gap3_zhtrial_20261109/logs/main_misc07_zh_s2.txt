@@ -1,0 +1,31 @@
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: tightened 0 coefficients (skipped 0 in rows redundant within tolerance), normalized 5 integer rows
+MIP: presolve: rows 212 -> 211, free columns 260 -> 253, nonzeros 8619 -> 8344, postsolve steps 1 (parallel columns merged: 0 integer, 0 continuous)
+MIP: LP probing: root LP 0.00s (121 iters, size 8815), tried 8, fixed 0, basis passed false, total 505 iters 0.02s
+MIP: presolve again after probing (round 1)
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 211 -> 211, free columns 232 -> 232, nonzeros 8344 -> 8260, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: presolve again after probing: rows 211 -> 211 (less than 10% fewer), the result is not used
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.00s)
+MIP: root LP 1.4150000000e3 (73 iters, 0.01s)
+MIP:   global fixed integers 27 of 259 (newly 0 since the root LP)
+MIP: clique fallback: no violated clique cuts; not used (0.00s)
+MIP: cut loop done: 47 cuts added, 21 in LP, pool 900 cuts (120805 nonzeros), obj 1.4150000000e3 -> 1.4800000000e3
+MIP:   global fixed integers 27 of 259 (newly 0 since the root LP)
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1000, work_iters: 20000, rate: 0.0, cont: true, robust: None, gap_eps: 0.0 } (root LP 73 iters)
+MIP: background cuts: basis with the column values not passed (root LP 0.00s)
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (0.23s)
+MIP: restart check: newly fixed 0, integer columns 259, free at the root 232, threshold 2.6, root LP 0.00s
+TRSTAT: tree start outer 0.27 solve 0.23 restarts 0 lb 1.4150000000e3 ub 3.2150000000e3
+MIP:   global fixed integers 27 of 259 (newly 0 since the root LP)
+MIP:     2.01s nodes      322 open     245 lb 1.86644271e3 ub 2.81000000e3 lp_iters 39651 sb_iters 26425 sb_lps 534 sb_secs 0.78 node_iters 11534 (first 9722, lps 374) heur_iters 7025 dive_iters 1127 lp_rows 476 node_cut_secs 0.14 pool_len 2 pool_idle 0
+MIP:     4.01s nodes      535 open     296 lb 2.05289474e3 ub 2.81000000e3 lp_iters 64399 sb_iters 29214 sb_lps 644 sb_secs 0.98 node_iters 33441 (first 29105, lps 682) heur_iters 7129 dive_iters 1179 lp_rows 546 node_cut_secs 0.39 pool_len 0 pool_idle 0
+MIP:     6.02s nodes      966 open     483 lb 2.31000000e3 ub 2.81000000e3 lp_iters 84413 sb_iters 30470 sb_lps 706 sb_secs 1.07 node_iters 52176 (first 45535, lps 1168) heur_iters 12167 dive_iters 1202 lp_rows 560 node_cut_secs 0.60 pool_len 0 pool_idle 0
+MIP:     8.02s nodes     1447 open     593 lb 2.49000000e3 ub 2.81000000e3 lp_iters 107471 sb_iters 31001 sb_lps 736 sb_secs 1.10 node_iters 74462 (first 65345, lps 1710) heur_iters 12625 dive_iters 1419 lp_rows 605 node_cut_secs 0.80 pool_len 0 pool_idle 0
+MIP:    10.02s nodes     1943 open     418 lb 2.65214495e3 ub 2.81000000e3 lp_iters 129809 sb_iters 31540 sb_lps 772 sb_secs 1.14 node_iters 96231 (first 84923, lps 2286) heur_iters 12655 dive_iters 1419 lp_rows 644 node_cut_secs 1.00 pool_len 1 pool_idle 0
+MIP:    11.51s nodes     2264 open       0 lb inf ub 2.81000000e3 lp_iters 143161 sb_iters 31588 sb_lps 778 sb_secs 1.15 node_iters 109521 (first 97057, lps 2650) heur_iters 12669 dive_iters 1419 lp_rows 727 node_cut_secs 1.14 pool_len 0 pool_idle 4
+MIP: basis nb diag: tree first LPs restored 5547 iters 171112 (30.8/LP), others 3499 iters 123392 (35.3/LP); root LPs: submip 11 lps 259 iters (23.5/LP) 0.01s, bgcopy 1 lps 1 iters (1.0/LP) 0.00s, find 1 lps 1 iters (1.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 73 iters (73.0/LP) 0.00s; nb hints applied 5612 solves, 414319 given, 66708 changed
+MIP: node diag: nodes 2264 node LPs 2650 mean rows 562.5 iters 109521 (41.3/LP) LP secs 6.85 sep rounds 265 added 245 node cut secs 1.14 final rows 727
+MIP: adaptive node cuts: rounds 245 effective 219 skipped 0 (rate 0.999), node cut secs 1.14, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [47, 26, 43, 59, 70], cut nnz Some(120.49245895058701) (rows mean 39.5)
+MIP: solve returned Optimal after 11.55s (time limit 100.00s)

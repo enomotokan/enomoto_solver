@@ -1,0 +1,71 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Number of BV entries in BOUNDS section is 13410
+MIP supportcase18 has 240 rows; 13410 cols; 28920 nonzeros; 13410 integer variables (13410 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 2e+02]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 1e+00]
+Presolving model
+240 rows, 13410 cols, 28920 nonzeros 0s
+240 rows, 13410 cols, 28920 nonzeros 0s
+Presolve reductions: rows 240(-0); columns 13410(-0); nonzeros 28920(-0) - Not reduced
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   240 rows
+   13410 cols (13410 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   28920 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            57                 Large        0      0      0         0     0.3s
+         0       0         0   0.00%   47.18666667     57                17.22%        0      0      5       960     0.4s
+ L       0       0         0   0.00%   47.18666667     53                10.97%     3252    623      9      7915     6.2s
+
+Symmetry detection completed in 0.0s
+Found 2 full orbitope(s) acting on 11200 columns
+
+ L       0       0         0   0.00%   47.18666667     50                 5.63%     3055    237      9     12341     9.9s
+ L     100      43        13   0.00%   47.18666667     49                 3.70%     3123    291    198     24655    24.8s
+       345     123        74   0.00%   47.18666667     49                 3.70%     3342    219   1632     55853    39.3s
+       400     181        94   0.00%   47.18666667     49                 3.70%     3353    219   2166     78507    40.0s
+
+Solving report
+  Model             supportcase18
+  Status            Time limit reached
+  Primal bound      49
+  Dual bound        48
+  Gap               2.04%
+  P-D integral      2.94442444048
+  Solution status   feasible
+                    49 (objective)
+                    0 (bound viol.)
+                    2.19757545494e-12 (int. viol.)
+                    0 (row viol.)
+  Timing            40.05
+                    1.21 (Presolve)
+                        MIP    time [calls] = 0.22 [1]
+                        subMIP time [calls] = 0.99 [88]
+                    38.81 (Solve)
+                        MIP    time [calls] = 18.33 [1]
+                        subMIP time [calls] = 20.49 [84]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [88]
+  Max sub-MIP depth 12
+  Nodes             400
+  Repair LPs        0
+  LP iterations     78507
+                    0 (strong br.)
+                    8020 (separation)
+                    54108 (heuristics)
+{"status": "Time limit reached", "objective": 48.9999999999997, "bound": 48.0, "nodes": 400, "time": 40.05571803600003}

@@ -1,6 +1,12 @@
 //! pseudocost (分枝による目的値の増加の単位あたりの平均) と分枝スコア
 //! (HiGHS の `HighsPseudocost` を簡略化したもの)。
 
+/// `ENOMOTO_MIP_GAP1` の値 (0.1.7 から既定 `u`、束 cand1114。`0` で空)。analysis/gap1_tree_20261109.md
+pub fn gap1() -> &'static str {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP1").map(|v| if v == "0" || v == "off" { String::new() } else { v }).unwrap_or_else(|_| "u".to_string()))
+}
+
 /// 列ごとの pseudocost と観測回数。
 #[derive(Clone)]
 pub struct Pseudocost {
@@ -31,6 +37,12 @@ pub struct Pseudocost {
     conflict: [Vec<f64>; 2],
     conflict_inc: f64,
     conflict_total: f64,
+    /// 試作 `ENOMOTO_MIP_S4_DEGSCORE` (既定では使わない): 今のノードの LP の退化の度合い (HiGHS の `computeLPDegneracy` に倣う。1 = 退化なし)。
+    /// [`Self::hybrid`] の擬似費用の項をこれで割る (退化したノードでは推論・打ち切りの点数で選ぶ)
+    pub degen_fac: f64,
+    /// 試作 `ENOMOTO_MIP_BRCUT` (既定では使わない): [`Self::hybrid`] に tableau 行のカットの効き目の履歴 ([`super::brcut::term`]) を足すか
+    /// (外側の求解でだけ立てる。サブ MIP は列の番号が違う)
+    pub brcut: bool,
 }
 
 impl Pseudocost {
@@ -56,6 +68,8 @@ impl Pseudocost {
             conflict: [vec![0.0; n], vec![0.0; n]],
             conflict_inc: 1.0,
             conflict_total: 0.0,
+            degen_fac: 1.0,
+            brcut: false,
         }
     }
 
@@ -316,7 +330,15 @@ impl Pseudocost {
         let conf = self.conflict[0][j].max(eps * conf_avg) * self.conflict[1][j].max(eps * conf_avg);
         let wc = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT", 0.0, f64);
         let conf_term = if self.conflict_total > 0.0 { wc * s(conf, conf_avg * conf_avg) } else { 0.0 };
-        dynw * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01) + conf_term) + s(ps, ps_avg) / dynw
+        // `ENOMOTO_MIP_GAP1` (試作、既定では使わない。analysis/gap1_tree_20261109.md): 文字で部品を選ぶ。
+        // `s`: 擬似費用の項の正規化の下限を 0.1 から 1e-6 にする (HiGHS の `getScore` は `max(1e-6, cost_total^2)`)。目的値の刻みが
+        // 1e-4 程度の問題 (neos-957323) では、0.1 の下限で擬似費用の項が 1e-9 程度に潰れ、推論の項 (1e-4) だけで列を選んでいた。
+        // `w`: SCIP の動的な重み `dynw` を 1 にする (HiGHS にはない)。
+        let g1 = gap1();
+        let dynw = if g1.contains('w') { 1.0 } else { dynw };
+        let ps_s = if g1.contains('s') { 1.0 - 1.0 / (1.0 + ps / ps_avg.max(1e-6)) } else { s(ps, ps_avg) };
+        let bc = if self.brcut { super::brcut::term(j) } else { 0.0 };
+        dynw * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01) + conf_term + bc) + ps_s / (dynw * self.degen_fac.max(1.0))
     }
 
     /// pseudocost による [`Self::hybrid`] スコア (小数部 `frac`)。

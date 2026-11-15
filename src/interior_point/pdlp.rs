@@ -37,6 +37,22 @@ const BETA_NECESSARY: f64 = 0.8;
 const BETA_ARTIFICIAL: f64 = 0.36;
 const PRIMAL_WEIGHT_SMOOTHING: f64 = 0.5;
 
+/// [`with_check_hook`] で付ける、確認点ごとに呼ぶ関数の型 (反復回数, 元の尺度の双対 `y`)。
+pub type CheckHook = Box<dyn FnMut(usize, &[f64])>;
+
+thread_local! {
+    /// 確認点 (`CHECK_EVERY` 反復ごと) で今の点と平均の点の双対を渡す関数 (試作 `ENOMOTO_MIP_PDLRC`、src/simplex/mip_lp/pdlrc.rs)。
+    static CHECK_HOOK: std::cell::RefCell<Option<CheckHook>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `f` の間 (このスレッドの [`solve_pdlp`])、確認点ごとに `hook` を呼ぶ (解く道は変えない)。
+pub fn with_check_hook<R>(hook: CheckHook, f: impl FnOnce() -> R) -> R {
+    let prev = CHECK_HOOK.with(|h| h.borrow_mut().replace(hook));
+    let r = f();
+    CHECK_HOOK.with(|h| *h.borrow_mut() = prev);
+    r
+}
+
 /// PDLP の設定。
 pub struct PdlpOptions {
     /// 停止の相対許容誤差。
@@ -405,6 +421,14 @@ pub fn solve_pdlp(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], opts:
         s.a.mul(&x_avg, &mut ax_avg);
         s.at.mul(&y_avg, &mut aty_avg);
         let ea = evaluate(&s, &x_avg, &y_avg, &ax_avg, &aty_avg, nb, nc);
+        CHECK_HOOK.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                for yy in [&y, &y_avg] {
+                    let yo: Vec<f64> = (0..m).map(|i| yy[i] * s.dr[i]).collect();
+                    f(total, &yo);
+                }
+            }
+        });
         for (e, xx, yy) in [(&ec, &x, &y), (&ea, &x_avg, &y_avg)] {
             let worst = e.rel.0.max(e.rel.1).max(e.rel.2);
             if worst < best.0 {

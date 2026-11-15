@@ -10255,3 +10255,149 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   (`analysis/neos960392_20261101.md`・`neos960392_cutstop_20261101.md`)。bench12 (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −3.5%・
   解けた数 83 -> 87、Mittelmann −0.6%・46 -> 46、neos-960392 0/3 -> 3/3。既定だけが解けた 2 問は揺れ (`analysis/cs2_check_20261101.md`)。
 - 記録は `analysis/cs2_default_20261101.md`。
+
+## 2026-11-02: 目的関数 0 の早めの探索と裏のカットの写しの列の値 (flbgx) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方): `ENOMOTO_MIP_FEAS_FJ_EARLY` の既定 `fl` (実行可能性問題で前処理の LP による固定の前に FJ2 と
+  Local-MIP を 3 対 1 のスレッドで並べ、見つかれば最適で終える、`0`)、`ENOMOTO_MIP_BG_CUTS_BASIS_X` の既定 `lpw` (根の LP が 1 秒以上の
+  問題で、裏のカットの写しの根の LP に主の列の値も渡す、`0`)。
+- 根拠: ns1116954 (`analysis/ns1116954_20261101.md`・`feas_early_lmip_20261102.md`)、physiciansched6-2 (`analysis/phys6_20261101.md`)。
+  bench14 (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −4.0%・解けた数 82 -> 88、Mittelmann −2.4%・47 -> 49、片方だけ解けた回は
+  flbgx 側だけ (ns1116954・physiciansched6-2 3/3・fhnw-binpack4-48 など)。
+- 記録は `analysis/flbgx_default_20261102.md`。
+
+## 2026-11-02: 共有の待ち行列のノードの基底の直しと DSE 重み・FJSTOP・裏のカットの止め方 (canddet) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方 `=0`): `ENOMOTO_MIP_POOL_BASIS_FIX` (受け取ったノードの基底を正則に直す)、`ENOMOTO_MIP_POOL_DSE` (DSE 重みも渡す)、
+  `ENOMOTO_MIP_SMALL2_FJSTOP` (FJ_P3 の前処理にも止めの合図)、`ENOMOTO_MIP_BG_CUTS_LP_WORK=1` (裏のカットのカットの LP の上限を反復で)、
+  `ENOMOTO_MIP_BG_CUTS_DETERM=c` (裏のカットを自分の停滞・手間の上限で止め、主は停滞まで待つ)。
+- 根拠: bench18 (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −0.4%・解けた数 85 -> 86、Mittelmann −0.6%・45 -> 46。揺れの範囲だが害はなく、
+  裏のカットの結果を機械の速さ・根のヒューリスティクスの長さから切り離す (mc11 の遅い機械の真似で 1/3 -> 3/3)。速い機械では mc11・hypothyroid-k1 が待ちの分遅い。
+- 記録は `analysis/canddet_default_20261102.md`。
+
+## 2026-11-03: 根のカットのループのカットの LP を、伸びている間は反復の上限で外さない形 (p) を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_CUT_LP_CAP_ROBUST=p` (戻し方 `=0`)。上限に達した後も双対の目的値の窓ごとの伸びを見て、伸びていれば続ける。
+- 根拠: 上限が「それまでの最大の 5 倍」に引きずられ、道が変わって長めの LP が来ると外れていた (analysis/robust_cap_20261102.md)。bench20
+  (`analysis/halve_submip_20261030.md`): 58 問 2 回 SGM −2.3%・88 -> 88、Mittelmann +0.7%・49 -> 50、def だけが解けた回なし。
+- 記録は `analysis/robust_cap_default_20261103.md`。
+
+## 2026-11-04: メモリの試作 (memall) と修復の下界の直し (FZ3_REPAIR_BOUND) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて run.py の `prememall`): `ENOMOTO_MIP_MEM1_SIBLU=1` (`SIBLU_ROWS` 既定 1000、潜りの兄弟の LU は新しい 1 個だけ)、
+  `ENOMOTO_MIP_MEM2=p` (ノードの DSE 重みを f32 の並びに)、`ENOMOTO_MIP_MEM3_TINY_MARGIN` (幅の小さい列の固定の余裕を小さく)、
+  `ENOMOTO_MIP_FZ3_REPAIR_BOUND` (修復の下界のずれの式・時間の上限なしの panic)。
+- 根拠: bench22 (60 秒) で ±2% の中、600 秒でメモリ不足の 6 問中 5 問が落ちなくなり最大 RSS 1.6〜9.0 GB (`analysis/mitt600_20261103.md`)。
+- 記録は `analysis/mem_default_20261104.md`。
+- 追記 (同日): `ENOMOTO_MIP_MEM3_TINY_MARGIN` の既定を `m` に直す (小さい余裕は外側の求解と再スタートだけ、サブ MIP は以前の余裕)。サブ MIP でも小さくすると
+  qiu が系統的に遅くなった (bench23・bench24)。
+- 訂正 (同日): `m` は既定の構成ではサブ MIP の前処理でも小さい余裕のまま (サブ MIP の前処理に `submip = false` が渡る) で、qiu の回復は運だった。
+  qiu の遅れの元は解発見スレッドを止める時刻の競争 (`analysis/qiu_margin_20261104.md`、試作 `ENOMOTO_MIP_QIU_FIND_STOP_GAP`)。
+
+## 2026-11-04: メモリの試作 (mem3)・前処理の強制等式 (forceq)・解発見スレッドの止め方 (fstop) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて run.py の `preall4`): `ENOMOTO_MIP_MEMB=rcq` (ノードの基底・DSE 重みを詰める)、`ENOMOTO_MIP_MEMC` (共有の待ち行列の
+  ノードの変更の並び・基底を詰める)、`ENOMOTO_MIP_MEMCAP` (RSS を見て持ち物を捨てる安全弁)、`ENOMOTO_MIP_TREE2_FORCEQ` (`Σ x = K y` から `x = y`)、
+  `ENOMOTO_MIP_QIU_FIND_STOP_GAP` (ギャップが大きい間は解発見スレッドを止めない)。
+- 根拠: bench25 (60 秒) で 4 設定とも害なし (58 問 −1.0〜−5.3%、Mittelmann all4 49 → 50)。mem3 は 600 秒でメモリ不足の 6 問を含む 9 問が 1200 秒を
+  最大 RSS 1.3〜5.0 GB で走り切る (`analysis/mitt600_20261103.md`)。
+- 記録は `analysis/mem3_default_20261104.md`。
+
+## 2026-11-04: 報告の下界を目的値の刻みで切り上げる (BOUND_STEP) を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_BOUND_STEP` (戻し方 `=0`)。報告だけの変更 (探索は変えない)。supportcase18 で 47.187 → 48 (HiGHS と同じ)、58 問・fuzz で
+  最適値を越える下界・食い違い 0。記録は `analysis/bound_step_default_20261104.md`。
+
+## 2026-11-05: 誤答の芽 2 件を直す (POSTSOLVE_CLIP・CONFLICT_INT_TOL を既定に、採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて戻すには `ENOMOTO_MIP_POSTSOLVE_CLIP=0 ENOMOTO_MIP_CONFLICT_INT_TOL=0`):
+  `ENOMOTO_MIP_POSTSOLVE_CLIP` (後処理した解を元の問題の境界に収めてから確かめる)、`ENOMOTO_MIP_CONFLICT_INT_TOL` (HiGHS 式の衝突解析で
+  整数列の境界の変更を説明するときの「足りるか」の許容誤差を、丸めの余裕 |a|·1e-6 の 1/10 以下に抑える)。
+- 根拠: binkar10_1 で許容誤差の中で境界を越えた解の後処理が費用 1e6 の列に移り、最適値より 0.012 小さい値を「最適」と返していた
+  (縮約後の解をずらす診断で直す前 25/25 誤答、直した後 0/25)。traininstance6 では右辺の大きい行で説明の許容誤差 (1e-9 (1+|必要量|)) が
+  余裕 1e-6 を越え、局所的な変更を落とした成り立たない衝突で最適解を切っていた (prr で「最適」28420。既知解つきの診断で誤った衝突 3/3 回 → 0/2 回)。
+  58 問・60 秒で害なし (15.76 秒・45 問 対 直す前 16.46 秒・44 問)。余裕を 1/2 にする形 (`=h`) は neos5・physiciansched6-2 が遅く採らなかった。
+- 記録は `analysis/wrongans_20261105.md`。
+
+## 2026-11-06: 対称性の検出の直し (sym) と基底の受け渡しの直し (lp) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて run.py の `presymlp`): `ENOMOTO_MIP_HO3_SYMNORM` (検出に渡す行の向きをそろえる)、`ENOMOTO_MIP_HO6_SYMWORK`
+  (検出の上限を細分化の後の探索だけに数える)、`ENOMOTO_MIP_HO6_SYMREFINE` (探索の中の細分化を増分で)、`ENOMOTO_MIP_HO4_BGNB` (裏のカットの LP を
+  主に入れ替えるとき非基底の置き場所も渡す)、`ENOMOTO_MIP_TREE3_RBASIS` (再スタートの後に合わない基底を捨てる)。
+- 根拠: bench28 (60 秒) で sym は 58 問 −0.7%・Mittelmann 50 → 51、lp は 58 問 +1.2%・Mittelmann 50 → 52 (解けた問題の SGM −4.1%)。どちらも既定だけ解けた回なし。
+  担当の問題で fastxgemm-n2r6s0t2 (600 秒で最適)・satellites2-60-fs (主の解き直し 385 秒 → 1 反復)・mzzv11 (再スタート後の根の LP 約 1/3) に効く。
+- 記録は `analysis/symlp_default_20261106.md`。prr (`PROBE_REPRESOLVE`) は momentum1 で `not_solved` に止まるので既定にせず調べる。
+
+## 2026-11-06: zerohalf の分離と解の研磨が期限を見るようにする (ZH_DEADLINE・POLISH_DEADLINE を既定に、採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて run.py の `prezhpol`): `ENOMOTO_MIP_ZH_DEADLINE` (zerohalf の分離 (mod 2 の消去) が求解の期限と止めの合図を見る)、
+  `ENOMOTO_MIP_POLISH_DEADLINE` (返す前の解の研磨の LP に求解の期限を渡し、間に合わなければ研磨しない)。どちらも期限を過ぎた後だけ効く。
+- 根拠: bench27 の ipmx で chromaticindex512-7 (zerohalf 1 回 約 21 秒) と dano3_3 (研磨の LP 16〜17 秒) が 60 秒の上限を約 14 秒越えた。直した後は 60.01〜60.1 秒。
+  dano3_3 の目的値は研磨ありと 1e-12 で同じ。
+- 記録は `analysis/ipmx_harm_20261106.md` (同じ記録で、ipmx の mc11 の悪化は `T_XO_CLEANUP_HINT=3` が根の頂点を変えるためと分かり、大きい LP だけに絞った ipmxm を作った。ipmxm は既定にしていない)。
+
+## 2026-11-06: 根の RINS の固定率の下限 (S4_RINSRATE) と、上がらない裏のカットを待たない形 (S4_BGZERO) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて run.py の `pres4c`): `ENOMOTO_MIP_S4_RINSRATE` (既定 0.5、外側の根の RINS は固定率が 0.5 未満ならサブ MIP を作らない)、
+  `ENOMOTO_MIP_S4_BGZERO` (既定 2、裏のカットが 2 ラウンド回って目的値が全く上がらなければ待たない)。
+- 根拠: cod105 (600 秒) 200 → 140 秒 (3 回)。58 問 2 回で SGM 17.08 → 16.11・17.18 → 16.62、解けた数 44 → 44・40 → 42 (drayage-25-23・noswot・neos5 が良い)。
+- 記録は `analysis/s4c_default_20261106.md` (元は `analysis/highs_slow_20261106/S4.md`)。
+
+## 2026-11-07: 根の LP を尺度を調整した写しで解く ROOTLP_SCALE を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_ROOTLP_SCALE` (戻し方 `=0`、run.py の `prerootscale`)。主の根の LP (最初・再スタートの後) と前処理の LP による固定の
+  最初の LP を、基底があっても行と列の尺度を調整した写しで解く。条件 (行 `ENOMOTO_T_MIP_ROOTLP_SCALE_MIN_M` 10000 以上・係数の幅
+  `ENOMOTO_T_MIP_ROOTLP_SCALE_MIN_RANGE` 1e4 以上) は変えていない。
+- 根拠: 条件に当たるのは数えた 161 問 (MIPLIB benchmark・Mittelmann の行 1 万以上 103 問と collection の 58 問) のうち 37 問。300 秒 (4 スレッド) で
+  momentum1 は下界・解なし → ギャップ 81.8%、neos-2987310-joes は最適 31 → 10 秒 (2 回とも)、satellites2-40・satellites2-60-fs は根の LP 68 → 0.16 秒・
+  38〜42 → 6〜8 秒。ほかの問題の差は 2 回で向きが入れ替わる揺れ。58 問には条件に当たる問題がない (1 回回して尺度の調整は一度も働かない)。
+- 試して採らなかった: 幅の閾値 1e3 (neos-1367061 で最初の LP 5.5 → 12.8 秒・根の LP 0.12 → 9.6 秒・最適 32 → 61 秒。尺度なしで最適な基底が
+  写しでは最適でなく 2924 反復かかる)。記録は `analysis/rootlp_scale_20261106.md`。
+
+## 2026-11-06: 根の LP が壊れたら尺度を調整した写しで解き直す安全網 (ROOTLP_SCALE_RESCUE を既定に、採用)
+
+- 既定にした: `ENOMOTO_MIP_ROOTLP_SCALE_RESCUE` (戻し方 `=0`、run.py の `prerescue`)。根の LP が `Error`・`IterationLimit` で終わったら、内点法 + クロスオーバーの
+  前に、行と列の尺度を調整した写しを基底なしの二段解法で解いて解き直す。根の LP が解けると、これまでは `not_solved` で諦めていた。
+- 根拠: MIP の根の LP (`TwoStageLp`) は尺度を調整しない。momentum1 (係数の幅 7.9e9) は尺度なしの二段解法が基底なしでも 114 秒で終わらず、尺度を調整した写しなら
+  0.7 秒。prr で前処理をかけ直した momentum1 の根の LP の `Error` (`analysis/prr_harm_20261106.md`) は、安全網で 0.53 秒で立ち直る。似た問題 6 問・ほかの問題では
+  安全網は働かない (根の LP が壊れない限り何もしない)。
+- 同じ記録の試作 `ENOMOTO_MIP_ROOTLP_SCALE=1` (基底があっても根の LP を尺度を調整した写しで解く。momentum1 の根の LP 594 秒 → 0.68 秒) は既定にしていない。
+  記録は `analysis/momentum1_rootlp_20261106.md`。
+
+## 2026-11-06: 対称性の検出の同点の行の ±1 倍 (SYMSIGN) と右辺 0 の向き (SYMZERO) を既定にする (採用)
+
+- 既定にした (それぞれ戻し方 `=0`、まとめて run.py の `presymsign`): `ENOMOTO_MIP_SYMSIGN` (-1 倍しても形が同じ行を写しで二重にし、-1 倍で対応する対称性も見つける)、
+  `ENOMOTO_MIP_SYMZERO` (向きのそろえで -0.0 を 0.0 にそろえる)。
+- 根拠: 生成元が増えるのは neos-827175 (57 → 66)・neos-2746589-doon (31 → 33)・neos859080 (0 → 1) の 3 問。neos859080 は 60 秒で 2/5 回 → 5/5 回 (1.0〜15.7 秒)。
+  58 問 2 回 +1.3% (揺れの範囲、検出が変わるのは 1 問)。記録は `analysis/symsign_default_20261106.md` (元は `analysis/symsign_20261106.md`)。
+
+## 2026-11-09: cand1108zd (cand1108 + zerohalf なし + 厳密な DSE 重みから始める DSE_INIT=umr) を既定にする (採用)
+
+- 既定にした (20 個、戻し方は `=0` か元の値。まとめて run.py の `precand1108zd`): `ENOMOTO_SIMPLEX_SCALE=1` (+ `_MIN_M` 10000・`_MIN_RANGE` 1e4)・`ENOMOTO_SIMPLEX_HARRIS2=r`・
+  `ENOMOTO_MIP_MPSEP=oqmgs` (+ `_NV` 1・`_EXTRA` 5)・`ENOMOTO_MIP_MUSHAGG=cover`・`ENOMOTO_MIP_PROBE_REPRESOLVE`・`ENOMOTO_MIP_SUBFIX=rtcqf`・
+  `ENOMOTO_MIP_NODELP_PERTURB=phg`・`ENOMOTO_MIP_BASIS_NB=t`・`ENOMOTO_MIP_PROBE_BASIS_GUARD=g`・`ENOMOTO_MIP_HNFPRE=bounds`・`ENOMOTO_MIP_CUTLPCAP=ac`・
+  `ENOMOTO_MIP_CMIRDELTA=n`・`ENOMOTO_MIP_LPSCALE=h` (+ `_MIN_RANGE` 1e4)・`ENOMOTO_MIP_NO_ZEROHALF=1`・`ENOMOTO_MIP_DSE_INIT=umr`。
+- 根拠: Mittelmann の HiGHS に負ける 47 問 (600 秒・2 種、res8): SGM −8.3% (区間 −17.3%〜+0.5%)、解けた 54 → 56 回、1 種でも解く 28 → 30 問。
+  res7 (186 問) の cand1108z は既定より解けた +6・SGM −1.7%。遅くなる問題: hypothyroid-k1・enlight_hard・mzzv42z (zerohalf なし)、ns1208400。
+- 記録は `analysis/cand1108zd_default_20261109.md`。
+
+## 2026-11-10: 色の細分化で MIP を畳む ENOMOTO_MIP_FOLD=ri を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_FOLD` (既定の値 `riq` = 反転 (R-DRCR)・整数の組 (アフィンな TU の分解の簡単な十分条件)・ログなし。止めるのは `=0` か `off`)。
+  van der Hulst「Folding Mixed-Integer Linear Programs and Reflection Symmetries」(arXiv 2603.12136、2026) の第 3・4 節の試作。
+  行も列もまとまる畳みだけを使い、平行な列だけ・平行な行だけの畳み (前処理と同じ仕事) はしない。戻した解は全部の回で元の問題で確かめる。
+- 根拠: 58 問 (60 秒・4 種): SGM −1.7% (区間 −9.4%〜+4.5%)、解けた 167 → 171 回。Mittelmann の HiGHS に負ける 47 問のうち畳める 10 問
+  (600 秒・2 種): SGM 103.6 → 61.3 秒、解けた 12 → 16 回 (neos-957323 は時間切れ → 15 秒)。誤答 0 (fuzz_tiny 400・mip_fuzz_vs_highs 300・
+  対称な乱数の fuzz 2000・cargo test)。遅くなる問題: physiciansched6-2 (25 → 40 秒)。
+- LP の `ENOMOTO_LP_FOLD` は既定にしていない。記録は `analysis/drcr_20261110.md`。
+
+## 2026-11-11: 動的な辞書式の縮小 ENOMOTO_MIP_SYMDYN=f を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_SYMDYN` (既定の値 `f` = 既定の orbital fixing の後に、分枝の順の動的な辞書式の縮小 (LexRed) を足す。止めるのは `=0` か `off`)。
+  van Doornmalen・Hojny「A Unified Framework for Symmetry Handling」(arXiv 2211.01295) の 4.1 節の LexRed と例 11 の分枝の順。補題 6・24・25 から
+  orbital fixing と同じ規則に収まるので併用する (SCIP 9 の設定と同じ)。`src/mip/symdyn.rs`。
+- 根拠 (既定 = cand1108zd + DRCR): 58 問のうち働く 8 問 (60 秒・4 種): SGM −3.2% (区間 −12.0%〜+4.3%)、解けた 22 → 23 回 (残り 50 問は同じ道、58 問に直すと約 −0.4%)。
+  47 問のうち働く 8 問 (600 秒・2 種): SGM +2.4% (区間 +0.2%〜+5.3%、p=0.127)、解けた 10 → 10 回 (悪い向きの差の一部は試作が作られない問題の揺れ)。
+  誤答 0 (fuzz_tiny 400・mip_fuzz_vs_highs 300・対称な乱数の fuzz 約 860 問・cargo test 400 件)。効き目ははっきりしない。
+- 既定にしていない: `=1` (orbital fixing の代わり、cod105 で弱い)・`o` (軌道の比べ、小さい群で遅い)・`ENOMOTO_MIP_SYMREFL` (反転、MIPLIB で効く問題がない)。
+  記録は `analysis/symdyn_20261110.md`。

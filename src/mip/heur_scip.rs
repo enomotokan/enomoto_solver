@@ -139,6 +139,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let nint = ints.len() as f64;
         let rate = |s: &Self| ints.iter().filter(|&&j| s.dom.lo[j] == s.dom.up[j]).count() as f64 / nint;
+        // 試作 `ENOMOTO_MIP_GAP4` の `k`: locks の固定の伝播に前処理の含意 (`conflict_edges`) も使う (写しの定義域で固定し、終わったら戻す)。
+        // 行の伝播だけでは、`q` の前処理が含意で見つけた矛盾を見落とし、サブ MIP の前処理ですぐ実行不能になっていた (neos-3216931-puriri)
+        let saved_dom = if label == "locks" && super::solver::gap4('k') && !p.conflict_edges.is_empty() {
+            let mut d = self.dom.clone();
+            d.add_implications(p.n, &p.conflict_edges);
+            if !d.propagate(p) {
+                return false;
+            }
+            Some(std::mem::replace(&mut self.dom, d))
+        } else {
+            None
+        };
         let pos = self.dom.stack_len();
         let work0 = self.dom.debug_work();
         let work_cap = 20 * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
@@ -162,7 +174,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let fr = rate(self);
         let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
-        self.dom.backtrack_to(p, pos);
+        match saved_dom {
+            Some(d) => self.dom = d,
+            None => self.dom.backtrack_to(p, pos),
+        }
+        if label == "locks" {
+            self.gap4_locks.0 = fr;
+        }
         if self.params.verbose && self.nodes <= 1 {
             eprintln!("MIP:   {label}: fixing rate {fr:.2}");
         }
@@ -175,6 +193,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// locks (SCIP の heur_locks): lock の多い整数列から、lock の少ない側の境界に固定して伝播し、固定率 65% で
     /// サブ MIP を解く。
     pub(super) fn locks_heur(&mut self) -> bool {
+        self.locks_heur_with(0.65)
+    }
+
+    /// 試作 `ENOMOTO_MIP_GAP4` の `k` (既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): 根の並列の locks のサブ MIP が根で実行不能
+    /// (ノード 1 以下) だったら、並列のサブ MIP を受け取った後に主のスレッドで固定率の目標を「達した固定率 × 0.5」にしてやり直す
+    /// (`SUBFIX` の RENS のやり直しと同じ形)。neos-3216931-puriri では `q` で締まった問題の locks の固定 (固定率 0.73) が
+    /// サブ MIP の前処理ですぐ実行不能になり、既定で 81480 を出す locks が何も出さなかった
+    pub(super) fn locks_retry(&mut self) -> bool {
+        let fr = std::mem::replace(&mut self.gap4_locks, (0.0, false)).0;
+        if self.time_up() || 0.5 * fr < 0.3 {
+            return false;
+        }
+        let keep = self.parallel_submips;
+        self.parallel_submips = false;
+        if self.params.verbose {
+            eprintln!("MIP:   GAP4 k: locks sub-MIP was infeasible at the root at fixing rate {fr:.2}; retrying on the main thread with target {:.2}", 0.5 * fr);
+        }
+        let r = self.locks_heur_with(0.5 * fr);
+        self.parallel_submips = keep;
+        r
+    }
+
+    fn locks_heur_with(&mut self, stop_rate: f64) -> bool {
         let p = self.p;
         // `ENOMOTO_MIP_SUBMIP_NESTED` の `l` なら深さ 1 のサブ MIP の中でも ([`Self::submip_nested`])
         if self.params.submip && !self.submip_nested('l') {
@@ -192,7 +233,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 v.is_finite().then_some((j, v))
             })
             .collect();
-        self.fix_then_submip(&fixes, 0.65, 0.3, "locks")
+        self.fix_then_submip(&fixes, stop_rate, stop_rate.min(0.3), "locks")
     }
 
     /// clique (SCIP の heur_clique の簡略版): 集合パッキング・分割の行 (2 値列だけ、係数が同じ正の値で上限がその値)
@@ -318,6 +359,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             threads: 1,
             distinguish: false,
             fc_submip: false,
+            tl_base: f64::NAN,
         };
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         self.heur_iters += r.lp_iterations;
@@ -390,7 +432,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 局所探索を別スレッドで始める (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`)。引数は [`Self::local_search_heur`] と同じ。
     pub(super) fn spawn_local_search(&mut self) {
         let p = self.p;
-        let cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LS_TIME_FRAC", 0.05, f64) * self.params.time_limit).min(5.0) } else { 5.0 };
+        let cap = self.ls_time_cap();
         let nnz: u64 = p.rows.iter().map(|r| r.len() as u64).sum();
         let seed = self.rng ^ 0xD1B5_4A32_D192_ED03;
         self.rand();
@@ -399,7 +441,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => (p.clone(), self.dom.lo.clone(), self.dom.up.clone()),
         };
         let steps = (200 * nnz).clamp(200_000, 100_000_000);
-        self.ls_thread = Some(std::thread::spawn(move || super::heuristics::local_search(&q, &lo, &up, cap, steps, seed)));
+        let mw = self.ls_max_work();
+        self.ls_thread = Some(std::thread::spawn(move || {
+            super::heuristics::LS_MAX_WORK.with(|c| c.set(mw));
+            super::heuristics::local_search(&q, &lo, &up, cap, steps, seed)
+        }));
+    }
+
+    /// 局所探索の時間の枠 (上限の `ENOMOTO_T_MIP_LS_TIME_FRAC` (0.05) 倍、最大 5 秒)。`ENOMOTO_MIP_OVERRUN3` の `h` (試作): 期限までの残りで
+    /// 頭打ちにする (app1-2 では期限の 1 秒前に始めた局所探索が 3 秒の枠を使い切り、期限を 2 秒過ぎていた)
+    /// 試作 `ENOMOTO_MIP_TIMEDEP` の `l`: 局所探索の手間 (触った非零の数) の上限 = `ENOMOTO_T_MIP_TIMEDEP_LS_RATE` (既定 1.5e8、
+    /// この記録の機械で 1 秒に触る数。10teams で 3 秒 4.5e8) x 今の時間の枠の秒。使わないなら無制限
+    fn ls_max_work(&self) -> u64 {
+        if super::timedep('l') {
+            (tunable!("ENOMOTO_T_MIP_TIMEDEP_LS_RATE", 1.5e8, f64) * self.ls_base_cap()) as u64
+        } else {
+            u64::MAX
+        }
+    }
+
+    fn ls_base_cap(&self) -> f64 {
+        if self.params.frac_tl().is_finite() { (tunable!("ENOMOTO_T_MIP_LS_TIME_FRAC", 0.05, f64) * self.params.frac_tl()).min(5.0) } else { 5.0 }
+    }
+
+    fn ls_time_cap(&self) -> f64 {
+        let cap = self.ls_base_cap();
+        // `ENOMOTO_MIP_TIMEDEP` の `l`: 時間は 10 倍の安全網 (止めるのは手間)
+        let cap = if super::timedep('l') { 10.0 * cap } else { cap };
+        match self.deadline.filter(|_| super::zerohalf::overrun3('h')) {
+            Some(d) => cap.min(d.saturating_duration_since(std::time::Instant::now()).as_secs_f64()),
+            None => cap,
+        }
     }
 
     pub(super) fn local_search_heur(&mut self) -> bool {
@@ -420,14 +492,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 None => false,
             };
         }
-        let cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LS_TIME_FRAC", 0.05, f64) * self.params.time_limit).min(5.0) } else { 5.0 };
+        let cap = self.ls_time_cap();
         let nnz: u64 = p.rows.iter().map(|r| r.len() as u64).sum();
         let seed = self.rng ^ 0xD1B5_4A32_D192_ED03;
         self.rand();
+        super::heuristics::LS_MAX_WORK.with(|c| c.set(self.ls_max_work()));
         let (feas, inf) = match self.orig.clone() {
             Some(o) => super::heuristics::local_search(&o, &o.col_lo, &o.col_up, cap, (200 * nnz).clamp(200_000, 100_000_000), seed),
             None => super::heuristics::local_search(p, &self.dom.lo, &self.dom.up, cap, (200 * nnz).clamp(200_000, 100_000_000), seed),
         };
+        super::heuristics::LS_MAX_WORK.with(|c| c.set(u64::MAX));
+        if self.params.verbose && self.nodes <= 1 {
+            let (st, w, bt) = super::heuristics::LS_LAST.with(|c| c.get());
+            eprintln!("MIP:   local search: {st} steps, work {w} ({:.1} x nnz {nnz}), stopped by time {bt}, cap {cap:.2}s", w as f64 / nnz.max(1) as f64);
+        }
         if let Some((x, v)) = inf {
             if self.params.verbose && self.nodes <= 1 {
                 eprintln!("MIP:   local search: least violation {v:.3e}");
@@ -513,6 +591,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             threads: 1,
             distinguish: false,
             fc_submip: false,
+            tl_base: f64::NAN,
         };
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         self.heur_iters += r.lp_iterations;

@@ -1,7 +1,7 @@
 //! 分枝限定法が LP に求める操作 ([`MipLp`])。実装は
 //! [`crate::simplex::mip_lp::TwoStageLp`] (既存の傾き・切片二段解法を warm start で使うもの)。
 
-use super::lp::{Basis, LpStatus, SolveLimits};
+use super::lp::{Basis, LpStatus, SolveLimits, VarStatus};
 use crate::simplex::mip_lp::{InteriorPoint, LuSnapshot, TwoStageLp, TwoStageState};
 use std::borrow::Cow;
 
@@ -16,6 +16,8 @@ pub trait MipLp: Clone + Send {
     fn col_bounds(&self, j: usize) -> (f64, f64);
     fn row_bounds(&self, i: usize) -> (f64, f64);
     fn row(&self, i: usize) -> Vec<(usize, f64)>;
+    /// 行 `i` の係数を複製せずに見る ([`Self::row`] と同じ中身)
+    fn row_ref(&self, i: usize) -> &[(usize, f64)];
     fn set_col_bounds(&mut self, j: usize, lo: f64, up: f64);
     fn set_costs(&mut self, c: &[f64]);
     fn costs(&self) -> Vec<f64>;
@@ -32,6 +34,11 @@ pub trait MipLp: Clone + Send {
     }
     fn basis(&self) -> Basis;
     fn set_basis(&mut self, b: &Basis);
+    /// 試作 (`ENOMOTO_MIP_BASIS_NB`): 基底と一緒に非基底の上限・下限の置き場所も次の求解に渡す ([`TwoStageLp::set_basis_nb`])。
+    /// 対応しない実装は [`Self::set_basis`] と同じ。
+    fn set_basis_nb(&mut self, b: &Basis, _skip: &[usize]) {
+        self.set_basis(b)
+    }
     fn basic_var(&self, s: usize) -> usize;
     fn dse_weight(&self, s: usize) -> f64;
     fn save_state(&self) -> Self::State;
@@ -42,6 +49,49 @@ pub trait MipLp: Clone + Send {
     /// ([`TwoStageLp::solve_ipm_rescue`])。対応しない実装は `Error`。
     fn solve_rescue(&mut self, _lim: &SolveLimits) -> LpStatus {
         LpStatus::Error
+    }
+    /// 根の LP の安全網: 尺度を調整した写しを基底なしで解いて元の LP を解き直す ([`TwoStageLp::solve_scaled_rescue`])。
+    /// 試さない (係数の幅が狭い・対応しない実装) なら `None`。
+    fn solve_scaled_rescue(&mut self, _lim: &SolveLimits) -> Option<LpStatus> {
+        None
+    }
+    /// `ENOMOTO_MIP_ROOTLP_SCALE` (既定で使う): 次の求解 1 回だけ尺度を調整した写しで解く ([`TwoStageLp::request_scale_once`])。
+    fn request_scale_once(&mut self) {}
+    /// 試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` (analysis/probe_basis_20261106.md): 基底を捨てる ([`TwoStageLp::drop_basis`])。
+    fn drop_basis(&mut self) {}
+    /// 同: 基底があっても基底なしの内点法 + クロスオーバーと同時に解く ([`TwoStageLp::solve_race_warm`])。対応しない実装は [`Self::solve`]。
+    fn solve_race_warm(&mut self, lim: &SolveLimits, _threads: usize) -> LpStatus {
+        self.solve(lim)
+    }
+    /// 同: 今の基底の出発の点の性質 ([`TwoStageLp::basis_start_info`])。特異・対応しない実装は `None`。
+    fn basis_start_info(&self, _col: &[VarStatus]) -> Option<(usize, f64)> {
+        None
+    }
+    /// 試作 `ENOMOTO_MIP_ROOTLP3`: 次の求解が warm start する基底 (行の数の大きさ) を持つか。対応しない実装は偽。
+    fn has_warm_basis(&self) -> bool {
+        false
+    }
+    /// 同: その基底の LU が特異か ([`TwoStageLp::warm_basis_singular`])。対応しない実装は偽。
+    fn warm_basis_singular(&self) -> bool {
+        false
+    }
+    /// 同: 基底からの単体法・全スラック基底からの二段解法・内点法 + クロスオーバーの 3 本同時 ([`TwoStageLp::solve_race3`])。
+    /// 対応しない実装は [`Self::solve`]。
+    fn solve_race3(&mut self, lim: &SolveLimits, _threads: usize) -> LpStatus {
+        self.solve(lim)
+    }
+    /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE` ([`TwoStageLp::optface_move`]): 最適面の上の別の最適基底へ移る。対応しない実装は `None`。
+    fn optface_move(&mut self, _k: usize, _sample: usize, _mode: char, _seed: u64, _is_int: &[bool], _deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
+        None
+    }
+    /// 試作 `ENOMOTO_MIP_ROOTLP_BOTH`: 根の LP の同時実行の負けた側の LP ([`crate::simplex::mip_lp::BothLoser`]) をこの LP に
+    /// 置き換える。対応しない実装は `false`。
+    fn adopt_two_stage(&mut self, _lp: TwoStageLp) -> bool {
+        false
+    }
+    /// 試作 `ENOMOTO_MIP_PDLRC` ([`TwoStageLp::pdlrc_start`]): 今の LP の写しを裏の PDLP で解き、ラグランジュ下界を控える。対応しない実装は `None`。
+    fn pdlrc_start(&self) -> Option<std::sync::Arc<crate::simplex::mip_lp::PdlrcJob>> {
+        None
     }
     fn objective(&self) -> f64;
     fn col_values(&self) -> Vec<f64>;
@@ -91,6 +141,14 @@ pub trait MipLp: Clone + Send {
     fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>>;
     /// DSE 重みを今の基底に当てはめる ([`TwoStageLp::set_dse_vars`])。
     fn set_dse_vars(&mut self, w: &[(u32, f32)]);
+    /// 今の基底の DSE 重みの育ち具合 ([`TwoStageLp::dse_age`])。対応しない実装は `None`。
+    fn dse_age(&self) -> Option<u64> {
+        None
+    }
+    /// 今の基底の厳密な DSE 重みを計算し直す ([`TwoStageLp::recompute_dse_exact`])。対応しない実装は `None`。
+    fn recompute_dse_exact(&mut self, _stop: &dyn Fn() -> bool) -> Option<bool> {
+        None
+    }
     /// 今の基底の LU キャッシュを取り出す ([`TwoStageLp::lu_snapshot`])。対応しない実装は `None`。
     fn lu_snapshot(&self) -> Option<LuSnapshot> {
         None
@@ -115,6 +173,7 @@ macro_rules! forward_impl {
             fn col_bounds(&self, j: usize) -> (f64, f64) { <$t>::col_bounds(self, j) }
             fn row_bounds(&self, i: usize) -> (f64, f64) { <$t>::row_bounds(self, i) }
             fn row(&self, i: usize) -> Vec<(usize, f64)> { <$t>::row(self, i) }
+            fn row_ref(&self, i: usize) -> &[(usize, f64)] { <$t>::row_ref(self, i) }
             fn set_col_bounds(&mut self, j: usize, lo: f64, up: f64) { <$t>::set_col_bounds(self, j, lo, up) }
             fn set_costs(&mut self, c: &[f64]) { <$t>::set_costs(self, c) }
             fn costs(&self) -> Vec<f64> { <$t>::costs(self) }
@@ -155,11 +214,48 @@ forward_impl!(
     fn interior_point(&self, zero_cost: bool, want_vertex: bool, deadline: std::time::Instant) -> Option<InteriorPoint> {
         TwoStageLp::interior_point(self, zero_cost, want_vertex, deadline)
     },
+    fn pdlrc_start(&self) -> Option<std::sync::Arc<crate::simplex::mip_lp::PdlrcJob>> {
+        TwoStageLp::pdlrc_start(self)
+    },
     fn solve_rescue(&mut self, lim: &SolveLimits) -> LpStatus {
         TwoStageLp::solve_ipm_rescue(self, lim)
     },
+    fn solve_scaled_rescue(&mut self, lim: &SolveLimits) -> Option<LpStatus> {
+        TwoStageLp::solve_scaled_rescue(self, lim)
+    },
+    fn request_scale_once(&mut self) {
+        TwoStageLp::request_scale_once(self)
+    },
+    fn drop_basis(&mut self) {
+        TwoStageLp::drop_basis(self)
+    },
+    fn solve_race_warm(&mut self, lim: &SolveLimits, threads: usize) -> LpStatus {
+        TwoStageLp::solve_race_warm(self, lim, threads)
+    },
+    fn basis_start_info(&self, col: &[VarStatus]) -> Option<(usize, f64)> {
+        TwoStageLp::basis_start_info(self, col)
+    },
+    fn has_warm_basis(&self) -> bool {
+        TwoStageLp::has_warm_basis(self)
+    },
+    fn warm_basis_singular(&self) -> bool {
+        TwoStageLp::warm_basis_singular(self)
+    },
+    fn solve_race3(&mut self, lim: &SolveLimits, threads: usize) -> LpStatus {
+        TwoStageLp::solve_race3(self, lim, threads)
+    },
+    fn optface_move(&mut self, k: usize, sample: usize, mode: char, seed: u64, is_int: &[bool], deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
+        TwoStageLp::optface_move(self, k, sample, mode, seed, is_int, deadline)
+    },
+    fn adopt_two_stage(&mut self, lp: TwoStageLp) -> bool {
+        *self = lp;
+        true
+    },
     fn set_basis_cols(&mut self, b: &[usize], x: Option<&[f64]>) {
         TwoStageLp::set_basis_cols(self, b, x)
+    },
+    fn set_basis_nb(&mut self, b: &Basis, skip: &[usize]) {
+        TwoStageLp::set_basis_nb(self, b, skip)
     },
     fn basis_cols(&self) -> Option<Vec<usize>> {
         TwoStageLp::basis_cols(self)
@@ -184,6 +280,12 @@ forward_impl!(
     },
     fn set_dse_vars(&mut self, w: &[(u32, f32)]) {
         TwoStageLp::set_dse_vars(self, w)
+    },
+    fn dse_age(&self) -> Option<u64> {
+        TwoStageLp::dse_age(self)
+    },
+    fn recompute_dse_exact(&mut self, stop: &dyn Fn() -> bool) -> Option<bool> {
+        TwoStageLp::recompute_dse_exact(self, stop)
     },
     fn lu_snapshot(&self) -> Option<LuSnapshot> {
         TwoStageLp::lu_snapshot(self)

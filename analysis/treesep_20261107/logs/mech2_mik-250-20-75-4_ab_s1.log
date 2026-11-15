@@ -1,0 +1,12 @@
+MIP: tree search with 4 threads (0.43s)
+MIP:     2.00s nodes      522 open     271 lb -5.29193597e4 ub -5.23010000e4 lp_iters 42761 sb_iters 12793 sb_lps 908 sb_secs 0.25 node_iters 27756 (first 21256, lps 822) heur_iters 28318 dive_iters 1106 lp_rows 310 node_cut_secs 0.14 pool_len 1 pool_idle 0
+MIP:     4.00s nodes     1284 open     427 lb -5.26814877e4 ub -5.23010000e4 lp_iters 76816 sb_iters 14067 sb_lps 992 sb_secs 0.28 node_iters 59705 (first 42341, lps 2327) heur_iters 29185 dive_iters 1141 lp_rows 221 node_cut_secs 0.71 pool_len 1 pool_idle 0
+TSDIAG tid 0 t 5.4 nodes 1655 lb -5.2346301870e4 rows 223 cuts 85 treecuts 19 postroot 78 | dt 5.4 lps 2848 rows/lp 265.3 it/lp 24.1 cutsecs 0.93 | ts rounds 911 added 841 rows 2311 del tree 2292 other 7413 aged-tree 9663 forced 204
+TSDIAG tid 1 t 5.0 nodes 1494 lb -5.2324213933e4 rows 246 cuts 108 treecuts 36 postroot 94 | dt 5.0 lps 2912 rows/lp 263.5 it/lp 24.6 cutsecs 1.18 | ts rounds 1056 added 980 rows 2521 del tree 2485 other 8549 aged-tree 10999 forced 247
+MIP: node diag (thread 3): nodes 1297 node LPs 2507 mean rows 280.5 iters 73513 (29.3/LP) LP secs 1.80 sep rounds 793 added 694 node cut secs 1.00 final rows 239; adaptive rounds 694 effective 343 cut nnz Some(41.684598703557484)
+MIP: node diag (thread 2): nodes 1823 node LPs 3115 mean rows 263.6 iters 75332 (24.2/LP) LP secs 1.65 sep rounds 959 added 871 node cut secs 1.03 final rows 250; adaptive rounds 871 effective 416 cut nnz Some(48.42303669449295)
+MIP: node diag (thread 1): nodes 1497 node LPs 2912 mean rows 263.5 iters 71532 (24.6/LP) LP secs 1.67 sep rounds 1056 added 980 node cut secs 1.18 final rows 246; adaptive rounds 980 effective 466 cut nnz Some(38.609727010670376)
+MIP: tree search threads: worker nodes 4617, nodes given away 269, taken 0, global bounds taken from other threads 0, proofs 927 and conflicts 70 taken from other threads
+MIP:     5.44s nodes     1664 open       0 lb inf ub -5.23010000e4 lp_iters 86387 sb_iters 14195 sb_lps 1004 sb_secs 0.29 node_iters 68714 (first 47979, lps 2848) heur_iters 35946 dive_iters 1152 lp_rows 223 node_cut_secs 0.93 pool_len 0 pool_idle 4
+MIP: node diag: nodes 1664 node LPs 2848 mean rows 265.3 iters 68714 (24.1/LP) LP secs 1.65 sep rounds 911 added 841 node cut secs 0.93 final rows 223
+MIP: adaptive node cuts: rounds 841 effective 311 skipped 120 (rate 0.491), node cut secs 0.93, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [12, 530, 233, 44, 22], cut nnz Some(27.274880162227007) (rows mean 18.8)

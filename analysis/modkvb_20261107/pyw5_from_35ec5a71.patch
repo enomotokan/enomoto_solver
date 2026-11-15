@@ -1,0 +1,89 @@
+diff --git a/src/mip/modkvb.rs b/src/mip/modkvb.rs
+index 914ab29b..f73ec18a 100644
+--- a/src/mip/modkvb.rs
++++ b/src/mip/modkvb.rs
+@@ -309,8 +309,11 @@ fn gfk_solutions(sys: &[SysRow], k: u32, ncol: usize, max_sols: usize, max_comb:
+ 
+ /// 試作 `ENOMOTO_MIP_MODKVB` の分離。`vars` は [`super::separation`] の分離と同じ (列 0..n は構造変数、n..n+m は LP の行の
+ /// 活動量で、境界は行の上下限)、`lp_rows` は LP の行。返り値は (解ごとのカット, 記録)
+-pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize, mode: u8, flow_cover: bool, deadline: std::time::Instant) -> (Vec<Vec<RawCut>>, ModkStats) {
++pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize, m_orig: usize, mode: u8, flow_cover: bool, deadline: std::time::Instant) -> (Vec<Vec<RawCut>>, ModkStats) {
+     const FT: f64 = 1e-6;
++    let no_vb = env_str!("ENOMOTO_MIP_MODKVB_NOVB").is_some();
++    let no_cutrows = env_str!("ENOMOTO_MIP_MODKVB_NOCUTROWS").is_some();
++    let only_k2 = env_str!("ENOMOTO_MIP_MODKVB_K2").is_some();
+     let mut st = ModkStats::default();
+     let m = lp_rows.len();
+     let x = vars.x;
+@@ -352,7 +355,7 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
+                 }
+             }
+             match best {
+-                Some((dist, y, d, e, _)) if dist <= FT => sub.push(Sub::Vb(y, d, e)),
++                Some((dist, y, d, e, _)) if dist <= FT && !no_vb => sub.push(Sub::Vb(y, d, e)),
+                 _ => sub.push(Sub::Off),
+             }
+             continue;
+@@ -362,7 +365,7 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
+             continue;
+         }
+         // 一般整数列の変数上下限 (LP 値が整数で単純な上下限の内側、ちょうど効いているもの)
+-        if u - l > 1.5 && dl > FT && du > FT && (x[j] - x[j].round()).abs() < FT {
++        if !no_vb && u - l > 1.5 && dl > FT && du > FT && (x[j] - x[j].round()).abs() < FT {
+             let mut found: Option<Sub> = None;
+             if let Some(vb) = vars.vb {
+                 if j < vb.ivub.len() {
+@@ -397,6 +400,9 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
+     let mut sys: Vec<SysRow> = Vec::new();
+     let (mut nvc, mut nvi) = (0usize, 0usize);
+     'rows: for (i, row) in lp_rows.iter().enumerate() {
++        if no_cutrows && i >= m_orig {
++            break;
++        }
+         let (rl, ru, ra) = (vars.lo[n + i], vars.up[n + i], x[n + i]);
+         let sg = if ru.is_finite() && ru - ra <= FT {
+             1.0
+@@ -512,7 +518,8 @@ pub(crate) fn modkvb_cuts(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usiz
+     let mut out: Vec<Vec<RawCut>> = Vec::new();
+     let mut aggv = vec![0.0f64; n + m];
+     let mut atouch: Vec<usize> = Vec::new();
+-    for k in [2u32, 3, 5, 7] {
++    let ks: &[u32] = if only_k2 { &[2] } else { &[2, 3, 5, 7] };
++    for &k in ks {
+         st.k = k;
+         if std::time::Instant::now() >= deadline {
+             st.timed_out = true;
+@@ -756,7 +763,7 @@ mod tests {
+                 ex.push(rows[i].iter().map(|&(j, c)| c * x[j]).sum());
+             }
+             let vars = CutVars { lo: &elo, up: &eup, is_int: &eint, x: &ex, vb: Some(&vb) };
+-            let (groups, _st) = modkvb_cuts(&vars, &rows, n, 3, true, far);
++            let (groups, _st) = modkvb_cuts(&vars, &rows, n, rows.len(), 3, true, far);
+             for cut in groups.into_iter().flatten() {
+                 ncuts += 1;
+                 if cut.coefs.iter().any(|&(k, _)| k >= n) {
+diff --git a/src/mip/separation.rs b/src/mip/separation.rs
+index 61aa0579..8e414aef 100644
+--- a/src/mip/separation.rs
++++ b/src/mip/separation.rs
+@@ -4981,7 +4981,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
+                 if let Some(d) = sep_deadline(self.deadline) {
+                     dl = dl.min(d);
+                 }
+-                let (groups, st) = super::modkvb::modkvb_cuts(&vars, lp_rows, n, mode, use_flow_cover(), dl);
++                let (groups, st) = super::modkvb::modkvb_cuts(&vars, lp_rows, n, p.m, mode, use_flow_cover(), dl);
+                 let c0 = cands.len();
+                 for g in groups {
+                     let n0 = cands.len();
+@@ -4990,6 +4990,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
+                     }
+                     keep_best(&mut cands, n0, self.p);
+                 }
++                let maxc = tunable!("ENOMOTO_T_MIP_MODKVB_MAXCANDS", 0usize, usize);
++                if maxc > 0 && cands.len() - c0 > maxc {
++                    cands[c0..].sort_by(|a, b| b.efficacy.total_cmp(&a.efficacy));
++                    cands.truncate(c0 + maxc);
++                }
+                 if dbg_sep || env_str!("ENOMOTO_MIP_MODKVB_LOG").is_some() {
+                     eprintln!(
+                         "SEP modkvb {:.3}s tight {} sys {} cols {} vbsub {}/{} k {} sols {} solrows {} dense {} timeout {} cands {}",

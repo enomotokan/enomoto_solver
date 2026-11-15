@@ -27,6 +27,8 @@ for job in S["shards"][k]:
         if (p, c, rep) in done:
             continue
         env = dict(os.environ, ENOMOTO_MIP_THREADS="4", **CFGS[c])
+        if S.get("seed_from_rep"):  # 分担表に "seed_from_rep" があれば回の番号を乱数の種にする (bench30 から)
+            env["ENOMOTO_T_MIP_SEED"] = str(rep)
         try:
             r = subprocess.run([sys.executable, str(WT / "scripts" / "run_miplib_benchmark.py"), "--worker-ours", str(mps),
                                 "--time-limit", "60", "--threads", "4"], cwd=WT, env=env, capture_output=True, text=True, timeout=300)

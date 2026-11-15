@@ -150,7 +150,39 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
     let mut group_members: Vec<Vec<usize>> = Vec::new();
     let mut group_next: Vec<usize> = Vec::new();
     let mut heads: std::collections::HashMap<u64, usize, std::hash::BuildHasherDefault<crate::presolve::redundancy::IdentityU64Hasher>> = std::collections::HashMap::default();
-    for j in 0..n {
+    // 試作 `ENOMOTO_MIP_ORDINV` の `p` ([`super::ordkey`]): 正規化を「先頭の行の係数」でなく「絶対値の最大の係数 (符号は値の和の向き)」で行い、
+    // ハッシュは正規化した値を 1e-9 の格子に丸めて取り、比べは相対 1e-12 の許容誤差にする。先頭の行の係数で割った値のビット比べは、
+    // 行の並びで先頭の行が変わると丸めが変わり、同じ平行列の組を見落とす (physiciansched6-2 で併合が 100 本対 51〜56 本)
+    let tol_mode = super::ordkey::ordinv('p');
+    let okeys = if tol_mode { super::ordkey::keys() } else { None };
+    let norm_inv = |col: &[(usize, f64)]| -> f64 {
+        if !tol_mode {
+            return 1.0 / col[0].1;
+        }
+        let m = col.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
+        let sum: f64 = col.iter().map(|&(_, v)| v / m).sum();
+        let sg = if sum.abs() > 1e-9 * col.len() as f64 { sum.signum() } else { col.iter().find(|&&(_, v)| v.abs() == m).map_or(1.0, |&(_, v)| v.signum()) };
+        sg / m
+    };
+    let sig_hash_tol = |col: &[(usize, f64)], inv: f64| -> u64 {
+        let mut hash = col.len() as u64;
+        for &(row_id, v) in col {
+            hash = (hash.rotate_left(5) ^ row_id as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+            hash = (hash.rotate_left(5) ^ ((v * inv * 1e9).round() as i64) as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        hash
+    };
+    let same_sig = |rep: &[(usize, f64)], rep_inv: f64, col: &[(usize, f64)], inv: f64| -> bool {
+        rep.len() == col.len()
+            && rep.iter().zip(col).all(|(&(ri, rv), &(ci, cv))| {
+                ri == ci && if tol_mode { let (x, y) = (rv * rep_inv, cv * inv); (x - y).abs() <= 1e-12 * x.abs().max(1.0) } else { (rv * rep_inv).to_bits() == (cv * inv).to_bits() }
+            })
+    };
+    let mut scan: Vec<usize> = (0..n).collect();
+    if okeys.is_some() {
+        scan.sort_by_key(|&j| super::ordkey::sort_key(&okeys, j));
+    }
+    for j in scan {
         let col = columns.col(j);
         if dbg_col == Some(j) {
             eprintln!("DEBUG_PARALLELCOLS_COL {j}: nnz {} lb {} ub {} int {} c {} col {:?}", col.len(), lb[j], ub[j], crate::presolve::is_int_col(j), c[j], &col[..col.len().min(6)]);
@@ -160,15 +192,15 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
             continue;
         }
         // 先頭係数の逆数 (正規化用)
-        let inv = 1.0 / col[0].1;
-        let hash = sig_hash(col, inv);
+        let inv = norm_inv(col);
+        let hash = if tol_mode { sig_hash_tol(col, inv) } else { sig_hash(col, inv) };
         let head = heads.get(&hash).copied().unwrap_or(usize::MAX);
         let mut found = None;
         let mut gid = head;
         while gid != usize::MAX {
             let rep = columns.col(group_members[gid][0]);
-            let rep_inv = 1.0 / rep[0].1;
-            if rep.len() == col.len() && rep.iter().zip(col).all(|(&(ri, rv), &(ci, cv))| ri == ci && (rv * rep_inv).to_bits() == (cv * inv).to_bits()) {
+            let rep_inv = norm_inv(rep);
+            if same_sig(rep, rep_inv, col, inv) {
                 found = Some(gid);
                 break;
             }
@@ -211,7 +243,8 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
             continue;
         }
         let mut members = members.clone();
-        members.sort_unstable();
+        // 試作 `p`: 併合先の同点を列の鍵で崩す (切なら列番号の順)
+        members.sort_unstable_by_key(|&j| super::ordkey::sort_key(&okeys, j));
         let mut tries = 0usize;
         for ki in 0..members.len() - 1 {
             let kept = members[ki];

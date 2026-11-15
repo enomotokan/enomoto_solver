@@ -1,0 +1,31 @@
+| 問題 | 二段 既定 (秒, 状態) | 二段 組み合わせ | 内点法+XO 既定 | 組み合わせ | 勝ち 既定 → 組み合わせ |
+|---|---|---|---:|---:|---|
+| momentum1 | 10.81 Optimal | 0.71 Optimal | 17.59 | 14.31 | simplex → simplex |
+| rmatr200-p5 | 10.02 Optimal | 9.67 Optimal | 6.88 | 6.21 | ipm → ipm |
+| unitcal_7 | 1.73 Optimal | 1.64 Optimal | 4.94 | 4.67 | simplex → simplex |
+| tbfp-network | 6.62 Optimal | 6.71 Optimal | 2.95 | 2.84 | ipm → ipm |
+| neos-933966 | 5.91 Optimal | 5.73 Optimal | 34.38 | 34.63 | simplex → simplex |
+| chromaticindex512-7 | 59.14 Optimal | 58.63 Optimal | 63.84 | 62.18 | simplex → simplex |
+| satellites2-40 | 83.22 Optimal | 7.43 Optimal | 114.68 | 137.53 | simplex → simplex |
+| academictimetablesmall | 2.00 Optimal | 2.01 Optimal | 25.01 | 25.57 | simplex → simplex |
+| fast0507 | 2.78 Optimal | 2.79 Optimal | 1.36 | 1.48 | ipm → ipm |
+| atlanta-ip | 9.90 Optimal | 10.19 Optimal | 29.37 | 31.64 | simplex → simplex |
+| neos-2746589-doon | 9.51 Optimal | 8.22 Optimal | 13.09 | 12.73 | simplex → simplex |
+| sing326 | 20.83 Optimal | 20.19 Optimal | 7.61 | 6.97 | ipm → ipm |
+| sing44 | 25.77 Optimal | 22.42 Optimal | 8.93 | 6.89 | ipm → ipm |
+| neos-4722843-widden | 2.94 Optimal | 2.86 Optimal | 11.59 | 13.08 | simplex → simplex |
+| cryptanalysiskb128n5obj16 | 49.95 Optimal | 48.15 Optimal | 90.40 | 77.07 | simplex → simplex |
+| cryptanalysiskb128n5obj14 | 53.60 Optimal | 51.53 Optimal | 88.13 | 78.98 | simplex → simplex |
+| rail507 | 3.38 Optimal | 3.04 Optimal | 1.96 | 1.71 | ipm → ipm |
+| thor50dday | 63.97 Optimal | 61.10 Optimal | 2.30 | 2.15 | ipm → ipm |
+| uccase9 | 23.46 Optimal | 11.95 Optimal | 19.69 | 17.33 | ipm → simplex |
+| neos-957323 | 4.84 Optimal | 4.75 Optimal | 5.11 | 4.95 | simplex → simplex |
+| rail01 | 113.65 TimeLimit | 114.16 TimeLimit | 32.50 | 30.00 | ipm → ipm |
+| opm2-z10-s4 | 76.57 Optimal | 69.29 Optimal | 115.43 | 115.72 | simplex → simplex |
+| supportcase42 | 36.60 Error | 121.91 TimeLimit | 29.62 | 28.42 | ipm → ipm |
+| sorrell3 | 52.22 Optimal | 48.16 Optimal | 126.72 | 131.52 | simplex → simplex |
+| neos-873061 | 117.91 TimeLimit | 106.78 Optimal | 12.06 | 10.34 | ipm → ipm |
+| neos-4763324-toguru | 13.43 Optimal | 12.53 Optimal | 10.26 | 8.70 | ipm → ipm |
+| uccase12 | 140.41 TimeLimit | 5.37 Optimal | 7.22 | 6.87 | ipm → simplex |
+| radiationm40-10-02 | 2.15 Optimal | 2.02 Optimal | 3.34 | 3.16 | simplex → simplex |
+| snp-02-004-104 | 19.36 Optimal | 12.27 Optimal | 11.55 | 10.20 | ipm → ipm |

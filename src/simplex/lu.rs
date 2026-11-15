@@ -405,6 +405,11 @@ pub(crate) static PROF_BTRAN_L_SCATTER: AtomicUsize = AtomicUsize::new(0);
 /// BTRAN の `L^{-T}` 段で列優先ギャザー形式にフォールバックした回数。
 pub(crate) static PROF_BTRAN_L_GATHER: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    /// 診断 `ENOMOTO_SIMPLEX_LUCLOCK_LOG` (analysis/luclock_20261111.md): このスレッドで作った分解の数。
+    pub static LU_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Markowitz 消去が作業する活性部分行列のフラット格納 (HiGHS `HFactor` の
 /// `mc_*`/`mr_*` 方式を行・列を入れ替えて採用)。
 ///
@@ -1901,8 +1906,20 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
     let row_perm: Vec<usize> = fwd.iter().map(|&idx| usize::from(idx)).collect();
     let col_perm: Vec<usize> = (0..m).collect();
 
+    // 特異の判定: 対角が厳密な 0 か、元の列の最大の絶対値の `ENOMOTO_T_LU_DENSE_SING_TOL` (既定 1e-11) 倍以下 (部分ピボットは
+    // 残りの列の最大を選ぶので、それがこれほど小さければ列は数値的に従属)。以前は厳密な 0 だけを見ていて、構造的に特異な
+    // 基底の消去の打ち消しで残った 6.7e-17 を軸に取り、基底解が 1e17 になって単体法が誤った「最適」を返していた
+    // (analysis/hnfpre_20261107.md §9、`wrong_q4.mps`)
+    let sing_tol = tunable!("ENOMOTO_T_LU_DENSE_SING_TOL", 1e-11, f64);
+    let mut col_max = vec![0.0f64; m];
+    for row in rows_in {
+        for &(j, v) in row {
+            col_max[j] = col_max[j].max(v.abs());
+        }
+    }
     for step in 0..m {
-        if u[(step, step)] == 0.0 {
+        let d = u[(step, step)];
+        if d == 0.0 || d.abs() <= sing_tol * col_max[col_perm[step]] {
             return None;
         }
     }
@@ -4510,6 +4527,12 @@ impl UnitBtranWork {
         }
     }
 
+    /// 結果の非零率の移動平均を `d` にする ([`super::DseState`] の厳密な重みの計算は行ごとに独立なので、毎回 0 にして超疎経路を試す)。
+    #[inline]
+    pub fn set_density(&mut self, d: f64) {
+        self.density = d;
+    }
+
     /// `out` に渡すベクトルを [`FtLu::solve_transpose_unit_work`] の外で書いた後に呼ぶ
     /// (次回の超疎書き出しが全体を 0 に戻すようにする)。
     #[inline]
@@ -4592,7 +4615,9 @@ impl Default for FtranDensity {
 #[derive(Clone)]
 pub struct FtLu {
     /// 元の分解 (`L` と置換。`L` は更新で変わらない)。
-    base: LuFactors,
+    /// 分解そのもの (L・元の U・置換)。分解のあとは書き換えないので共有する (LU の複製 (強分岐の子・兄弟のノードへの受け渡し)
+    /// で L と U をまるごと写さない。Forrest-Tomlin の更新で変わるのは `u_seq` などの残りの部分)
+    base: std::sync::Arc<LuFactors>,
     /// `U` の非シングルトン eta を **作成順** (= 三角順) に格納したもの。
     /// FTRAN/BTRAN の `U` 段はこれを順に走査する。
     u_seq: EtaFile,
@@ -4719,6 +4744,7 @@ impl FtLu {
         // `U` の非対角非ゼロ数 (`u_row[s]` は対角を 1 個含むので長さ - 1。HiGHS の
         // `u_countX` と同じく非対角だけを数える)。
         let u_off: u64 = base.u_row.iter().map(|v| v.len().saturating_sub(1) as u64).sum();
+        LU_BUILDS.with(|c| c.set(c.get() + 1));
         let mut build_tick = tunable!("ENOMOTO_T_TICK_BUILD_M_COEF", TICK_BUILD_M_COEF, u64) * m as u64 + tunable!("ENOMOTO_T_TICK_BUILD_LU_COEF", TICK_BUILD_LU_COEF, u64) * (l_nnz + u_off);
         if s0 < m {
             // 密行列の分解 #7: 密ブロック (k x k) の分解は稠密 LU で疎な消去より桁違いに安いので、構築 tick の
@@ -4813,7 +4839,7 @@ impl FtLu {
         }
         let fill = total_off;
         FtLu {
-            base,
+            base: std::sync::Arc::new(base),
             u_seq,
             singles,
             singles_pos,
@@ -4909,6 +4935,12 @@ impl FtLu {
     /// `CLOCK` 再分解トリガが読む。
     pub fn synth_tick(&self) -> u64 {
         self.tick.get()
+    }
+
+    /// 決定的演算量カウンタを `v` に戻す。厳密な DSE 重みの計算 ([`super::DseState`]、超疎の単位 BTRAN を m 回) の作業を
+    /// 再分解の判断 (`CLOCK` トリガ、分解の劣化の見積もり) に数えないために使う。
+    pub fn restore_synth_tick(&self, v: u64) {
+        self.tick.set(v);
     }
 
     /// この分解自体の構築コスト ([`Self::synth_tick`] と同じ単位)。
@@ -5611,6 +5643,12 @@ impl FtLu {
         self.ftran_through_l_and_r_into(rhs, scratch);
         self.u_solve_into(scratch);
         self.permute_out(scratch, out)
+    }
+
+    /// `(L R_1...R_k)^-1 rhs` (FT 更新に渡す `a_tilde`) だけを `out` (長さ `m`、全体を書く) に求める。`U` 段は解かない
+    /// (`B^-1 rhs` の値が要らず FT 更新だけをしたい呼び出し用: クロスオーバーの双対の押し出し)。
+    pub fn ftran_a_tilde_into(&self, rhs: &[f64], out: &mut [f64]) {
+        self.ftran_through_l_and_r_into(rhs, out);
     }
 
     /// [`Self::solve_into`] と同じだが、`L`/`R` 適用後・`U` 適用前の中間値
@@ -7182,7 +7220,9 @@ impl FtLu {
     /// 次のキーから全走査に切り替えて `false` を返す (`touch` は不完全になる)。
     fn u_transpose_sweep_heap<Q: PosQueue>(&self, z: &mut [f64], touch: &mut Vec<usize>, marks: &mut EpochMarks, heap: &mut Q) -> bool {
         let m = self.base.m;
-        self.add_tick(m as u64);
+        // tick は関数の中で足し合わせて最後に 1 回だけ加える (合計は同じ。複数スレッドからの BTRAN (クロスオーバーの双対の押し出しの
+        // 先読み) で、行ごとの不可分な加算が共有のキャッシュ行を取り合わないように)
+        let mut tk = m as u64;
         let limit = (tunable!("ENOMOTO_T_BTRAN_HYPER_FRACTION", BTRAN_HYPER_FRACTION, f64) * m as f64) as usize;
         marks.begin();
         heap.qclear();
@@ -7199,7 +7239,7 @@ impl FtLu {
             let zp = zp / pivot;
             z[p] = zp;
             let orow = self.row_owners.row(p);
-            self.add_tick(orow.len() as u64);
+            tk += orow.len() as u64;
             let mut visit = |q: usize, v: f64| {
                 z[q] -= v * zp;
                 if !marks.is_marked(q) {
@@ -7234,7 +7274,7 @@ impl FtLu {
                     let zp = zp / pivot;
                     z[p] = zp;
                     let orow = self.row_owners.row(p);
-                    self.add_tick(orow.len() as u64);
+                    tk += orow.len() as u64;
                     for (&q, &v) in orow.idx.iter().zip(orow.val) {
                         z[q as usize] -= v * zp;
                     }
@@ -7242,9 +7282,11 @@ impl FtLu {
                         *zq -= v * zp;
                     }
                 }
+                self.add_tick(tk);
                 return false;
             }
         }
+        self.add_tick(tk);
         true
     }
 
@@ -9610,5 +9652,40 @@ mod tests {
         let mut out = vec![0.0; m];
         state.solve_sparse_into(&to_sparse(&rhs), &mut scratch, &mut gp, &mut out);
         assert!(approx_vec(&out, &x_full), "sparse-rhs path ft={out:?} full={x_full:?}");
+    }
+}
+
+#[cfg(test)]
+mod hnf_singular_tests {
+    use super::*;
+
+    /// 構造的に特異 (行 3〜6 の 4 行に非零を持つ列が 3 本) な 7x7 の基底 (analysis/hnfpre_20261107.md §9、`wrong_q4.mps` の根の LP の
+    /// 列だけの基底)。分解は `None` (特異) を返すべき。
+    #[test]
+    fn structurally_singular_basis_is_rejected() {
+        let cols: Vec<Vec<(usize, f64)>> = vec![
+            vec![(0, 8.0), (1, 1.0), (4, -1.0), (5, 1.0), (6, -1.0)],
+            vec![(0, 1.0), (1, 1.0), (2, -2.0), (3, -1.0)],
+            vec![(0, 15.0), (1, 1.0), (2, 1.0), (4, 3.0), (5, -4.0), (6, -2.0)],
+            vec![(2, -1.0)],
+            vec![(0, 1.0)],
+            vec![(1, 1.0)],
+            vec![(2, 1.0)],
+        ];
+        let m = 7;
+        let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+        for (c, col) in cols.iter().enumerate() {
+            for &(i, v) in col {
+                rows[i].push((c, v));
+            }
+        }
+        // 疎な Markowitz の経路も特異と判定すること
+        assert!(factorize_flat_markowitz_routed(m, &rows, false, 0.0).is_none(), "sparse path accepted a singular basis");
+        let r = factorize(m, &rows);
+        if let Some(lu) = &r {
+            let x = lu.solve(&[7.0, 6.0, -10.0, -5.0, 0.0, 0.0, 1.0]);
+            eprintln!("factorize accepted: x = {x:?}");
+        }
+        assert!(r.is_none());
     }
 }
