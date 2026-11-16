@@ -1474,11 +1474,11 @@ cand1118 の 12 個をソースの既定値に書き換えた (前回の cand111
 | `ENOMOTO_MIP_DETHASH` | `1` | `=0` (または空) | `mip/mod.rs` `dethash` |
 | `ENOMOTO_MIP_DFSBB` | `2` | `=0` | `solver.rs` `dfsbb_env` |
 | `ENOMOTO_MIP_TREE2_INTAGG` | `d` | `=0` | `presolve/aggregator.rs` `tree2_intagg_env` |
-| `ENOMOTO_T_MIP_CUT_MIN_ROUNDS` | 8 | `=0` (元は 0、`ROOTCHAIN` の `T` では 10) | `separation.rs` (2 か所) |
+| `ENOMOTO_T_MIP_CUT_MIN_ROUNDS` | 8 | `=0` (元は 0、`ROOT_CUT_HIGHS` かカット選びの `T` では 10) | `separation.rs` (2 か所) |
 | `ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0` | 8 | `=16` | `separation.rs` |
 
 - `0`・`off` で切る (`env_def!`)。`SUBMIP_HALT`・`DETHASH` は `std::env::var` で読む所なので、`0`・`off`・空で切る形にした。
-- `CUT_MIN_ROUNDS` は元は「`ENOMOTO_MIP_ROOTCHAIN` の `T` なら 10、それ以外 0」だったが、cand1118 (環境変数 8) と同じになるよう両方とも 8 にした
+- `CUT_MIN_ROUNDS` は元は「`ENOMOTO_MIP_ROOT_CUT_HIGHS` かカット選びの部品 `T` (`rch_part`) なら 10、それ以外 0」だったが、cand1118 (環境変数 8) と同じになるよう両方とも 8 にした
   (`T` を使うときの元の 10 には `=10` で戻る)。
 - `cargo test --release --lib` 416 通過・0 失敗。`cargo clippy --release --lib` の警告・誤りの数は変更前と同じ (変更前からある 2 件の誤りで止まる)。
 - 手元の試し (1 スレッド・60 秒・種 1): misc07 は環境変数なし・cand1118 を明示とも 11537 節点・最適 2810 で一致 (2 回ずつ)。
