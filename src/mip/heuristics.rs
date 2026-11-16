@@ -710,6 +710,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             let (j, v, up_first, _) = pick.unwrap();
+            if verbose && env_str!("ENOMOTO_MIP_DEBUG_DIVESTEP").is_some() {
+                eprintln!("DIVESTEP {steps} j={j} v={v:.9} up={up_first} nfrac={} it={} obj={:.9e}", frac.len(), self.lp.total_iterations() - it_start, self.lp.objective());
+                if steps <= 2 {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    format!("{:?}", self.lp.basis()).hash(&mut h);
+                    let hb = h.finish();
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    for (a, b) in self.dom.lo.iter().zip(&self.dom.up) { a.to_bits().hash(&mut h); b.to_bits().hash(&mut h); }
+                    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+                    for v in &x { v.to_bits().hash(&mut h2); }
+                    eprintln!("DIVESTEP hash basis {hb:x} dom {:x} x {:x} rows {}", h.finish(), h2.finish(), self.lp.num_rows());
+                }
+            }
             let before = self.dom.stack_len();
             // まとめて固定する分 (最良の列は後で LP を解きながら固定する)
             let mut extras = 0usize;

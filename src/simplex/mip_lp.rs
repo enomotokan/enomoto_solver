@@ -1586,6 +1586,8 @@ impl TwoStageLp {
             sid::xprof_enable(true);
         }
         let t0 = std::time::Instant::now();
+        // 試作 `ENOMOTO_MIP_TICKS` の `h`: 重い求解の判定 (`LPSCALE` の `h`) を、この求解の手間 (1e9 手間 ≒ 1 秒) で決める
+        let tk0 = (self.tw_lazy && crate::mip::ticks_on('h')).then(crate::ticks::total);
         let it0 = self.iters;
         let pol0 = sid::ext_polish_iterations();
         let scale_once = std::mem::take(&mut self.scale_once);
@@ -1610,7 +1612,10 @@ impl TwoStageLp {
         // 以後に作る LP も双子を持つ印を立てる。破綻ならすぐ双子で解き直す
         let mut st = st;
         if self.tw_lazy && self.tw.is_none() {
-            let secs = t0.elapsed().as_secs_f64();
+            let secs = match tk0 {
+                Some(k0) => (crate::ticks::total() - k0) * 1e-9,
+                None => t0.elapsed().as_secs_f64(),
+            };
             let failed = st == LpStatus::Error;
             if failed || secs >= tunable!("ENOMOTO_T_MIP_LPSCALE_HEAVY_SECS", 1.0f64, f64) {
                 self.tw_lazy = false;
@@ -2772,6 +2777,9 @@ impl TwoStageLp {
                     // Forrest-Tomlin の更新が積み重なった LU は FTRAN/BTRAN が遅いので、分解し直させる
                     // (主ループの上限 3m に任せると、再分解は減るがノードの処理数はかえって減った)
                     Some(c) if c.basis == b && c.lu.update_count() < tunable!("ENOMOTO_T_MIP_LU_MAX_UPD", 64usize, usize) => {
+                        if env_str!("ENOMOTO_MIP_DEBUG_LP2").is_some() {
+                            eprintln!("TSLP2 warm lu upd {}", c.lu.update_count());
+                        }
                         let warm_d = env_str!("ENOMOTO_MIP_WARM_D").is_some();
                         let (lu, d) = match Arc::try_unwrap(c) {
                             Ok(c) => (c.lu, c.d),
@@ -2847,6 +2855,9 @@ impl TwoStageLp {
         }
         let last_lu = sid::take_last_lu();
         let last_d = sid::take_last_d();
+        if env_str!("ENOMOTO_MIP_DEBUG_LP2").is_some() {
+            eprintln!("TSLP2 r={} st={:?} duals={} last_lu={} last_dse={} stop={stop:?}", r.is_some(), r.as_ref().map(|x| x.status.clone()), duals.is_some(), last_lu.is_some(), last_dse.as_ref().map(|w| w.len()).unwrap_or(0));
+        }
         let ray = sid::take_last_ray();
         self.ray = None;
         let intercept = sid::take_intercept();

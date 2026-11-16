@@ -295,6 +295,8 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// - `l`: 局所探索の時間の上限を同じ量の手間の上限にする
 /// - `s`: 手間の期限の中のサブ MIP の中で作るサブ MIP (入れ子) の時間の上限を、壁時計の残りでなく手間の残りから同じ式で決め、手間の期限で止める
 ///   (時間の上限は 10 倍の安全網)
+/// - `h`: LP の重い求解の判定 (`ENOMOTO_MIP_LPSCALE` の `h`: 尺度なしの求解が `ENOMOTO_T_MIP_LPSCALE_HEAVY_SECS` (1) 秒以上なら尺度をかけた双子に
+///   切り替え、以後に作る LP も双子を持つ) を、その求解の手間で決める
 /// 試作 `ENOMOTO_MIP_DETHASH` (既定では使わない。analysis/timedep_20261114.md の 12 節): 結果に効く `HashMap` の走査を鍵の順にする
 /// (既定の `RandomState` はプロセスごとに種が変わり、走査順で implied bound カットの順・同値の組の順・足し合わせの順が変わる)。
 pub(crate) fn dethash() -> bool {
