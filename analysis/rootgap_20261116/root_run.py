@@ -1,7 +1,7 @@
 """根の比べのログを取る (analysis/rootgap_20261116/README.md): python root_run.py 問題,... [highs|ours|both] [K=V ...]
 - highs: highspy (HiGHS 1.15.1)、4 スレッド・600 秒・mip_max_nodes=1 (根まで)、ログを logs/highs_<問題>.log に。
 - ours: CAND1118 (analysis/cand1118_20261116/cfg.py) + K=V、ENOMOTO_MIP_LOG=1、4 スレッド・600 秒・node_limit=1、ログを logs/ours<札>_<問題>.log に
-  (札は環境変数 TAG、既定は空)。1 問ずつ順に解く (同時に 1 つ)。結果の 1 行を res.jsonl に足す。"""
+  (札は環境変数 TAG、既定は空。HiGHS の追加の設定は環境変数 HOPTS = "名=値;名=値")。1 問ずつ順に解く (同時に 1 つ)。結果の 1 行を res.jsonl に足す。"""
 import json, os, subprocess, sys, time, importlib.util
 from pathlib import Path
 D = Path(__file__).resolve().parent; WT = D.parents[1]
@@ -13,6 +13,8 @@ import json, sys, time, highspy
 h = highspy.Highs()
 h.setOptionValue("output_flag", True); h.setOptionValue("log_to_console", False); h.setOptionValue("log_file", sys.argv[2])
 h.setOptionValue("threads", 4); h.setOptionValue("time_limit", 600.0); h.setOptionValue("mip_max_nodes", 1); h.setOptionValue("mip_rel_gap", 0.0)
+for kv in (sys.argv[3].split(";") if len(sys.argv) > 3 and sys.argv[3] else []):
+    k, v = kv.split("=", 1); h.setOptionValue(k, int(v) if v.lstrip("-").isdigit() else v)
 h.readModel(sys.argv[1]); t = time.perf_counter(); h.run(); t = time.perf_counter() - t
 i = h.getInfo()
 print("RES " + json.dumps({"status": h.modelStatusToString(h.getModelStatus()), "objective": i.objective_function_value, "bound": i.mip_dual_bound, "nodes": i.mip_node_count, "time": t}))
@@ -38,10 +40,10 @@ for p in probs:
             with open(lf, "w") as f:
                 pr = subprocess.run([sys.executable, "-c", OCODE, mps], env=env, cwd=WT, stdout=subprocess.PIPE, stderr=f, text=True)
         else:
-            lf = D / "logs" / f"highs_{p}.log"
-            pr = subprocess.run([sys.executable, "-c", HCODE, mps, str(lf)], env=env, cwd=WT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            lf = D / "logs" / f"highs{TAG}_{p}.log"
+            pr = subprocess.run([sys.executable, "-c", HCODE, mps, str(lf), os.environ.get("HOPTS", "")], env=env, cwd=WT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         res = [l for l in pr.stdout.splitlines() if l.startswith("RES ")]
         r = json.loads(res[-1][4:]) if res else {"status": "crash"}
-        row = {"problem": p, "who": who + TAG, "env": kv if who == "ours" else []} | r
+        row = {"problem": p, "who": who + TAG, "env": kv if who == "ours" else os.environ.get("HOPTS", "")} | r
         with open(D / "res.jsonl", "a") as f: f.write(json.dumps(row) + "\n")
         print(row, flush=True)
