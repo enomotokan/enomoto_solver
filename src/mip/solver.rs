@@ -11805,7 +11805,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     let n = match pinned.or(pooled).or_else(|| match self.dfsbb_kind() {
                         2 | 3 => self.queue.pop_hgs(tunable!("ENOMOTO_T_MIP_HGS_BB_EVERY", 10u64, u64)),
-                        1 | 4 => self.queue.pop_best(),
+                        // `ENOMOTO_T_MIP_DFSBB_BB_EVERY` (既定 1 = いつも下界最小): k > 1 なら HiGHS と同じく k 回に 1 回下界最小、ほかは 0.5 下界 + 0.5 推定値
+                        1 | 4 => match tunable!("ENOMOTO_T_MIP_DFSBB_BB_EVERY", 1u64, u64) {
+                            0 | 1 => self.queue.pop_best(),
+                            k => self.queue.pop_hgs(k),
+                        },
                         _ if force3 => self.queue.pop_best(),
                         _ => self.queue.pop(bb_every),
                     }) {

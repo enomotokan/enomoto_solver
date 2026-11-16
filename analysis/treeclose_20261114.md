@@ -1250,3 +1250,9 @@ b58q (9.35 節) で =5 の学習が効かず「混ぜ方」の効果と見られ
   fjg (base + `FJSUB=1` + `RHO=0` = 候補を置かず全体の FJ・Local-MIP を回し続けるだけ)、fjs (base + `FJSUB=1` + `RHO=1.0` = 分数値が根以下なら候補) ×
   15 問 + 最初の解が遅い 3 問 (neos-1456979・30n20b8・physiciansched6-2) × 種 1・2、600 秒 (108 回・28 分担、1 分担 3〜4 回で違う問題・設定を混ぜる)。
   `python run_shard.py K fs18` (K=0〜27)、集計 `python summ.py fs18` (解けた数・ずらし幾何平均・対の比と 95% 区間・FJSUB の統計の合計)。b58s の後に回す。
+
+#### 9.39.1 dfsbb で「下界最小以外を混ぜる」調整 (b58u の準備)
+
+- `ENOMOTO_T_MIP_DFSBB_BB_EVERY` (既定 1 = 今までどおり、待ち行列からはいつも下界最小): `DFSBB=1`・`4` で k > 1 なら HiGHS と同じ取り方
+  (`NodeQueue::pop_hgs`: k 回に 1 回下界最小、ほかは 0.5 下界 + 0.5 推定値が最小) にする。b58r の結果で dfsbb が勝った場合の頻度の掃引 (b58u) に使う。
+  HiGHS 型 (`=2`・`3`) の k は `ENOMOTO_T_MIP_HGS_BB_EVERY`。
