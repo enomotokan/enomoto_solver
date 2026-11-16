@@ -1458,3 +1458,29 @@ fjs = base + `FJSUB=1`・`RHO=1.0` (部分問題の候補も置く)。
   対 cand1114 −5.8% [−10.0, −1.6] (初めて区間が 0 をまたがない)、全種で遅い問題なし。M は解けた 68 (cand1117 67・HiGHS 66)、
   対 cand1117 −0.9% [−7.4, +5.9]、**対 HiGHS −36.5% [−53.3, −14.0]**。全種で遅い (対 cand1117): neos5 1.57 (短い問題、対 HiGHS は 0.25) → 種 3・4 の X (2 分担)。
   最大 RSS の増加は fast0507 ではなく snp-02-004-104 種 2 (cand1118 3760 MB、cand1117 は同じ問題で 2950 MB)。採用の判断は利用者に仰ぐ (親)。
+
+### 9.51 cand1118 を既定にする (利用者の判断、2026-11-16)
+cand1118 の 12 個をソースの既定値に書き換えた (前回の cand1114 → 0.1.7 と同じく `env_def!`・tunable の既定値)。戻すと 0.1.7 の既定の動き:
+
+| 設定 | 新しい既定 | 元に戻す | 読む所 |
+|---|---|---|---|
+| `ENOMOTO_MIP_OBJPROBE` | `rpc` | `=0` | `solver.rs` `objprobe_flags` |
+| `ENOMOTO_MIP_POOL_TAB` | `x` | `=0` | `separation.rs` |
+| `ENOMOTO_MIP_RHEUR` | `es` | `=0` | `solver.rs` `rheur` |
+| `ENOMOTO_MIP_ROBUST` | `pgq` | `=0` | `solver.rs` `robust` |
+| `ENOMOTO_MIP_SUBMIP_HALT` | `1` | `=0` | `solver.rs` `submip_halt`・`cancel.rs` `inherit_on` |
+| `ENOMOTO_MIP_TC` | `bs` | `=0` | `solver.rs` `tc_on` |
+| `ENOMOTO_MIP_TICKS` | `ntwumcflshk` | `=0` (または空) | `mip/mod.rs` `ticks_on` |
+| `ENOMOTO_MIP_DETHASH` | `1` | `=0` (または空) | `mip/mod.rs` `dethash` |
+| `ENOMOTO_MIP_DFSBB` | `2` | `=0` | `solver.rs` `dfsbb_env` |
+| `ENOMOTO_MIP_TREE2_INTAGG` | `d` | `=0` | `presolve/aggregator.rs` `tree2_intagg_env` |
+| `ENOMOTO_T_MIP_CUT_MIN_ROUNDS` | 8 | `=0` (元は 0、`ROOTCHAIN` の `T` では 10) | `separation.rs` (2 か所) |
+| `ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0` | 8 | `=16` | `separation.rs` |
+
+- `0`・`off` で切る (`env_def!`)。`SUBMIP_HALT`・`DETHASH` は `std::env::var` で読む所なので、`0`・`off`・空で切る形にした。
+- `CUT_MIN_ROUNDS` は元は「`ENOMOTO_MIP_ROOTCHAIN` の `T` なら 10、それ以外 0」だったが、cand1118 (環境変数 8) と同じになるよう両方とも 8 にした
+  (`T` を使うときの元の 10 には `=10` で戻る)。
+- `cargo test --release --lib` 416 通過・0 失敗。`cargo clippy --release --lib` の警告・誤りの数は変更前と同じ (変更前からある 2 件の誤りで止まる)。
+- 手元の試し (1 スレッド・60 秒・種 1): misc07 は環境変数なし・cand1118 を明示とも 11537 節点・最適 2810 で一致 (2 回ずつ)。
+  4 スレッドでは節点数・時間は揺れる (pk1: なし 27.3 秒・明示 21.6 秒、どちらも 11)。
+- 確かめの台本 `cand1118_default_20261116/` (P 58 問 × 種 1 × {def_t1, c1118_t1, def, rev}、6 分担)。リリース 0.1.8 (ファズ・版上げ) は利用者と相談 (親)。

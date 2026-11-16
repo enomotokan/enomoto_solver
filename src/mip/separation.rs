@@ -1550,11 +1550,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 上限をこのループの始めから数える (drayage-25-23 では 1 回目に 6.9 秒かかり、2 回目が 1 ラウンドも回らなかった)
         // `ENOMOTO_MIP_CUT_CAP_FROM_LOOP` (既定で使う。`0` で止める。2026-11-01 に cs2 として既定化、analysis/halve_submip_20261030.md の bench12・
         // analysis/cs2_check_20261101.md): 外側の根のカットの時間の上限を、求解の開始からではなくこのループの
-        // 始めから数える。また `ENOMOTO_T_MIP_CUT_MIN_ROUNDS` (既定 0) ラウンドまでは時間の上限で止めない (全体の時間切れでは止める)。
+        // 始めから数える。また `ENOMOTO_T_MIP_CUT_MIN_ROUNDS` (既定 8、cand1118 で 0 → 8。`0` で 0.1.7 までの動き) ラウンドまでは時間の上限で止めない (全体の時間切れでは止める)。
         // physiciansched6-2 (60 秒) は前処理と根の LP で 6〜7 秒かかり、上限 (開始から全体の 1 割 = 6 秒) を超えていて前景のカットが
         // 0 ラウンドだった。HiGHS は根のカットを 11〜13 ラウンド回して下界を 49324 (最適値) にする (analysis/highstree_phys_20261024.md)
         let cap_from_loop = (env_def!("ENOMOTO_MIP_CUT_CAP_FROM_LOOP", "1").is_some() || self.rch_part('T')) && !self.params.submip;
-        let mut min_rounds = if cap_from_loop { tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", if self.rch_part('T') { 10usize } else { 0 }, usize) } else { 0 };
+        let mut min_rounds = if cap_from_loop { tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", 8usize, usize) } else { 0 };
         // `ENOMOTO_MIP_CUTSEL_PROBE`: 比べを 0 ラウンド目の始めに行う (時間の上限の判定より前なので、既定では前景のカットが 0 ラウンドの
         // physiciansched6-2 でも比べる)
         let min_rounds0 = min_rounds;
@@ -2259,7 +2259,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // (`ENOMOTO_MIP_CUTSEL_PROBE_ALT` では挙げた部品だけ)
                     if self.rch_part('T') {
                         cap_base = t_loop0;
-                        min_rounds = tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", 10usize, usize);
+                        min_rounds = tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", 8usize, usize);
                     } else {
                         min_rounds = min_rounds0;
                         if !keep {
@@ -2607,7 +2607,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `x` = すべて、`d` = 非零が `ENOMOTO_T_MIP_POOL_TAB_MAXLEN` (100) を超えるものだけ。binkar10_1 は DUALEQ や停滞の尺度 (`u`) で
             // 根のループが長くなると、1 本 約 300 非零の tableau 行の候補 (根では 1 本も採られない) でプールが上限 (20 万非零) まで埋まり、
             // 木のノードが約 2 倍になる
-            let pool_tab = env_str!("ENOMOTO_MIP_POOL_TAB");
+            // (cand1118 で既定 `x` にした。`0`・`off` で 0.1.7 までの動き)
+            let pool_tab = env_def!("ENOMOTO_MIP_POOL_TAB", "x");
             let tab_maxlen = if pool_tab.is_some_and(|v| v.contains('x')) { 0 } else if pool_tab.is_some_and(|v| v.contains('d')) { tunable!("ENOMOTO_T_MIP_POOL_TAB_MAXLEN", 100usize, usize) } else { usize::MAX };
             if !self.params.submip && env_str!("ENOMOTO_MIP_POOL_SELECTED_ONLY").is_none() {
                 for c in cands.iter().chain(face_cands.iter()) {
@@ -5461,7 +5462,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (cap, piv) = if tk_budget.is_some() {
                 (tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_SAFE", 1.0, f64), piv)
             } else if super::timedep('m') || super::ticks_on('m') {
-                let p0 = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0", 16.0, f64);
+                let p0 = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0", 8.0, f64);
                 let c = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_C", 0.0, f64);
                 let k = p0.max(c * self.root_lp_iters as f64).ceil() as usize;
                 (tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_SAFE", 1.0, f64), piv.min(k))

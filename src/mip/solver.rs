@@ -190,8 +190,10 @@ pub(super) fn rhstat_on() -> bool {
 ///   (既定はそれぞれ 5・2・2・2 倍 + 1000 で計 11 倍 + 4000)。1 本の取り分は min(既定の予算, 残り / 残りの本数) (下限 1000)、使い残しは後に回る
 /// - `s`: `b` に加えて、取り分を使い切って何も見つけず、近さ ([`Solver::heur_close`]) が `ENOMOTO_T_MIP_RHEUR_CLOSE` (0.5) 未満なら、
 ///   残りのダイビングの取り分を半分にする (停滞の判定を手間で)
+///
+/// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `es`。`0`・`off` で 0.1.7 までの動き (使わない)。**
 pub(super) fn rheur(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_RHEUR").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_RHEUR", "es").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_ROBUST=<文字>` (既定では使わない。analysis/robust_20261114.md): 行・列の並べ替えで流れが変わっても結果が崖のように
@@ -206,8 +208,10 @@ pub(super) fn rheur(c: char) -> bool {
 ///   外れ続けることがある (hypothyroid-k1 の 4 スレッドの 1 回: 200 本で見切って時間切れ、ほかの回は 465 本以上試して最適を示した)
 /// - `g` (型 B): `f` と同じやり直しを、安い根のヒューリスティクスと並列のサブ MIP の後ろで回す (`f` より優先)
 /// - `q` (型 A'): 根の目的値のプロービングの候補を、列の番号の順ではなく 0.5 に近い順に試す
+///
+/// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `pgq`。`0`・`off` で 0.1.7 までの動き (使わない)。**
 pub(crate) fn robust(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_ROBUST").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_ROBUST", "pgq").is_some_and(|v| v.contains(c))
 }
 
 fn light_root_heur(name: &str) -> bool {
@@ -3385,8 +3389,10 @@ pub(super) fn treeeff(c: char) -> bool {
 ///   大域の伝播を回す (不動点まで最大 `ENOMOTO_T_MIP_TC_G_ROUNDS` (5) 回)。伝播が矛盾すれば残りの開いたノードに打ち切り値より良い解は
 ///   ないので木を閉じる ([`Solver::tc_open_tighten`])。HiGHS の `HighsNodeQueue::pruneInfeasibleNodes` (sct2 で開いたノード 3000 余りが
 ///   10 秒で消えて閉じる)。木を分け合わないとき (1 スレッド) だけ。
+///
+/// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `bs`。`0`・`off` で 0.1.7 までの動き (使わない)。**
 pub(super) fn tc_on(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_TC").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_TC", "bs").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_TRNOFIX=1` (試作 SMALLFIX の D1、既定では使わない): 新たな固定のない木の中の再スタートを止める ([`Solver::tree_restart_guard_ok`] の `z`)。
@@ -4123,8 +4129,10 @@ pub(crate) fn erwait(c: char) -> bool {
 /// ([`SubmipCtl::abort`]) を、そのスレッドの LP の止める合図 ([`crate::cancel::with_halt`]) にもする。今までは止めの合図を木の探索の
 /// 区切り ([`Solver::time_up`]) でしか見ないので、長い根の LP の途中のサブ MIP は時間の上限まで走った (tbfp-network: 早めの再スタートの後、
 /// 根の被約費用のサブ MIP の 26 万反復の LP が 534 秒走り、主の求解が再スタートできなかった)。
+///
+/// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `1`。`0`・`off` で 0.1.7 までの動き (使わない)。**
 pub(crate) fn submip_halt() -> bool {
-    env_str!("ENOMOTO_MIP_SUBMIP_HALT").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_SUBMIP_HALT", "1").is_some_and(|v| !v.is_empty())
 }
 
 pub(crate) fn erwait_diag() -> bool {
@@ -5874,6 +5882,11 @@ fn membq_diag() -> bool {
 /// (兄弟のノードでも分離・木の中のヒューリスティクスを回す)
 fn hgs_opt(c: char) -> bool {
     env_str!("ENOMOTO_MIP_HGS_OPT").is_some_and(|v| v.contains(c))
+}
+
+/// `ENOMOTO_MIP_DFSBB` の値 (既定 `2` = HiGHS 型、cand1118 で既定にした。`0`・`off` で切る = 0.1.7 までの既定の潜り方)
+fn dfsbb_env() -> Option<&'static str> {
+    env_def!("ENOMOTO_MIP_DFSBB", "2")
 }
 
 fn dse_all() -> bool {
@@ -14830,7 +14843,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 潜りのノード数の上限なし、兄弟へ戻っても潜りの始めとして数える)。1 回の潜り (兄弟への戻りを含む) の手間が W を越えたら打ち切り、
     /// 待ち行列からは必ず下界最小を取る。サブ MIP では使わない
     fn dfsbb_on(&self) -> bool {
-        !self.params.submip && env_str!("ENOMOTO_MIP_DFSBB").is_some_and(|v| v != "0")
+        !self.params.submip && dfsbb_env().is_some_and(|v| !v.is_empty())
     }
 
     /// `ENOMOTO_MIP_DFSBB` の型: 1 = 手間の上限 W・待ち行列からは下界最小、2 = HiGHS と同じ (1 回の潜りのノード数の上限
@@ -14840,7 +14853,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !self.dfsbb_on() {
             return 0;
         }
-        match env_str!("ENOMOTO_MIP_DFSBB") {
+        match dfsbb_env() {
             Some("2") => 2,
             Some("3") => 3,
             Some("4") => 4,
@@ -24488,8 +24501,10 @@ pub(super) struct ObjProbeState {
 }
 
 /// 試作 `ENOMOTO_MIP_OBJPROBE` の値 (`0` は切)。
+///
+/// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `rpc`。`0`・`off` で 0.1.7 までの動き (使わない)。**
 pub(crate) fn objprobe_flags() -> Option<&'static str> {
-    env_str!("ENOMOTO_MIP_OBJPROBE").filter(|v| *v != "0")
+    env_def!("ENOMOTO_MIP_OBJPROBE", "rpc")
 }
 
 fn prune_limit_of(eff: Option<f64>, outer: f64, obj_step: Option<f64>, lat: Option<ObjLat>, off: f64, rel_gap: f64, abs_gap: f64, cutoff: f64) -> f64 {

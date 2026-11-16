@@ -30,9 +30,11 @@ thread_local! {
 #[derive(Clone, Default)]
 pub struct Inherit(Option<(Arc<AtomicBool>, bool)>);
 
+///
+/// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `1`。`0`・`off` で 0.1.7 までの動き (使わない)。** (`ENOMOTO_MIP_SUBMIP_HALT`)
 fn inherit_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("ENOMOTO_MIP_SUBMIP_HALT").is_ok_and(|v| !v.is_empty() && v != "0"))
+    *V.get_or_init(|| std::env::var("ENOMOTO_MIP_SUBMIP_HALT").map_or(true, |v| !v.is_empty() && v != "0" && v != "off"))
 }
 
 /// `ENOMOTO_MIP_SUBMIP_HALT` のときだけ、このスレッドの止める合図 ([`halted`]) を返す (既定では常に偽。期限しか見ない計算に足す確認)。

@@ -305,9 +305,11 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 ///   前に許してからの主のスレッドの手間を次に許す。主の暫定解の有無はスレッドに伝えない。LMBOOST は使わない
 /// 試作 `ENOMOTO_MIP_DETHASH` (既定では使わない。analysis/timedep_20261114.md の 12 節): 結果に効く `HashMap` の走査を鍵の順にする
 /// (既定の `RandomState` はプロセスごとに種が変わり、走査順で implied bound カットの順・同値の組の順・足し合わせの順が変わる)。
+///
+/// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `1`。`0`・`off` で 0.1.7 までの動き (使わない)。**
 pub(crate) fn dethash() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("ENOMOTO_MIP_DETHASH").is_ok_and(|v| !v.is_empty() && v != "0"))
+    *V.get_or_init(|| std::env::var("ENOMOTO_MIP_DETHASH").map_or(true, |v| !v.is_empty() && v != "0" && v != "off"))
 }
 
 /// `m` の組を取り出す ([`dethash`] なら鍵の順に並べる。そうでなければ今までと同じ走査順)。
@@ -319,8 +321,10 @@ pub(crate) fn hm_entries<K: Ord + Copy + std::hash::Hash + Eq, V: Copy, S: std::
     v
 }
 
+///
+/// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `ntwumcflshk`。`0`・`off` で 0.1.7 までの動き (使わない)。**
 pub(crate) fn ticks_on(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_TICKS").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_TICKS", "ntwumcflshk").is_some_and(|v| v.contains(c))
 }
 
 pub(crate) fn timedep(c: char) -> bool {
