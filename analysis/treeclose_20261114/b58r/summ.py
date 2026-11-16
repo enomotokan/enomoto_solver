@@ -1,29 +1,50 @@
-"""TREECLOSE の 58 問 x 種 1〜2 の対の計測 (tc58_s*.jsonl、base 対 tcr) を analysis/benchlib.py の report で集計する。
-誤答 (目的値・下界の矛盾) も見る。
-使い方: python summ_tubr58.py"""
-import glob, json, re, sys
+"""b58r (analysis/treeclose_20261114.md 9.36 節) の集計: python summ.py [NAME=dfs15]。問題 x 設定ごとに種ごとの (状態, 秒) と、
+主のスレッドの開いたノードの最大・兄弟への戻り・基底の戻し (≒ 待ち行列から取り出し)・ノードの分離のラウンドを並べ、設定ごとの解けた数と
+ずらし幾何平均 (ずらし 10 秒、時間切れは制限時間) を出す。"""
+import glob, json, math, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
-sys.path.insert(0, str(D.parents[1]))
-import benchlib as bl  # noqa: E402
-rows = bl.load(sorted(glob.glob(str(D / "tcr58_s*.jsonl"))))
-R = bl.table(rows)
-keys = sorted(R)
-for c in ("tcr",):
-    bl.report(R, "base", c, keys, noise=bl.load_noise(), label=f"58 問 x 種 1〜2 ({c})")
-# 誤答: 最適と言った回どうしの目的値の差、下界が他の回の最適値を越えるもの (最小化)
-bad = 0
-for p in {k[0] for k in keys}:
-    res = [R[k][c] for k in keys if k[0] == p for c in R[k]]
-    opt = [x["objective"] for x in res if (x.get("status") or "").lower() == "optimal" and x.get("objective") is not None]
-    if not opt:
+NAME = sys.argv[1] if len(sys.argv) > 1 else "dfs15"
+rows = [json.loads(l) for f in sorted(glob.glob(str(D / f"{NAME}_s*.jsonl"))) for l in open(f) if l.strip()]
+by = {}
+for r in rows:
+    by.setdefault(r["problem"], {}).setdefault(r["cfg"], {})[r["seed"]] = r["result"]
+cfgs = ["w1", "w5", "w25", "hgs", "hgsw", "nb1", "d2n"]
+tl = max((r.get("tl", 600) for r in rows), default=600)
+for p in sorted(by):
+    print(f"## {p}")
+    for c in cfgs:
+        v = by[p].get(c, {})
+        cells = []
+        for s, x in sorted(v.items()):
+            st = x.get("stats", {})
+            cells.append(f"s{s} {(x.get('status') or '?')[:4]} {x.get('time', 0):.0f}s open_max {st.get('open_max', '-')} sib {st.get('sibling_backtracks', '-')} restore {st.get('basis_restores', '-')} sep {st.get('node_cut_rounds', '-')} W {st.get('dfsbb_w', '-')} plunges {st.get('dfsbb_plunges', '-')} wcut {st.get('dfsbb_wcut', '-')} leaf {st.get('dfsbb_leaf', '-')}")
+        print(f"  {c:5} " + "  |  ".join(cells))
+for c in cfgs:
+    xs = [x for p in by for x in by[p].get(c, {}).values()]
+    if not xs:
         continue
-    lo, hi = min(opt), max(opt)
-    tol = 1e-6 * max(1.0, abs(lo))
-    if hi - lo > tol:
-        bad += 1; print("目的値の不一致", p, lo, hi)
-    for x in res:
-        b = x.get("bound")
-        if b is not None and b > lo + tol:
-            bad += 1; print("下界が最適値を越える", p, b, lo)
-print("誤答", bad)
+    ts = [min(tl, x.get("time", tl)) for x in xs]
+    ok = sum((x.get("status") or "").lower() == "optimal" for x in xs)
+    print(f"{c}: 解けた {ok}/{len(xs)}、ずらし幾何平均 {math.exp(sum(math.log(t + 10) for t in ts) / len(ts)) - 10:.1f} 秒")
+
+# 対の比 (同じ問題・種、時間切れは制限時間、ずらし 10 秒の比の幾何平均) と 95% 区間 (組の再標本 4000 回)
+import random
+random.seed(1)
+for a in ("w1", "w5", "w25", "hgs", "hgsw"):
+    for b in ("nb1", "d2n"):
+        rs = [math.log((min(tl, by[p][a][s].get("time", tl)) + 10) / (min(tl, by[p][b][s].get("time", tl)) + 10))
+              for p in by for s in by[p].get(a, {}) if s in by[p].get(b, {})]
+        if not rs:
+            continue
+        ms = sorted(sum(random.choice(rs) for _ in rs) / len(rs) for _ in range(4000))
+        print(f"対の比 {a}/{b}: {math.exp(sum(rs) / len(rs)):.3f} [{math.exp(ms[100]):.3f}, {math.exp(ms[3899]):.3f}] ({len(rs)} 組、{a} が速い {sum(r < -0.05 for r in rs)}・遅い {sum(r > 0.05 for r in rs)})")
+# 潜りの統計 (設定ごとに合計)
+for c in ("w1", "w5", "w25", "hgs", "hgsw"):
+    t = [0, 0, 0]
+    for p in by:
+        for x in by[p].get(c, {}).values():
+            st = x.get("stats", {})
+            for j, k in enumerate(("dfsbb_plunges", "dfsbb_wcut", "dfsbb_leaf")):
+                t[j] += st.get(k, 0) or 0
+    print(f"{c}: 潜り {t[0]}、W で打ち切り {t[1]} ({t[1] / max(t[0], 1):.0%})、葉・刈り込みで終わり {t[2]}")

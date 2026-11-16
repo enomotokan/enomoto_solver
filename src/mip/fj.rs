@@ -332,6 +332,9 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         return None;
     }
     let t_end = Instant::now() + Duration::from_secs_f64(time_cap.max(0.0));
+    // 試作 `ENOMOTO_MIP_TICKS` の `j` ([`crate::ticks::vclock`]): 終わりを手間で数える
+    let tk_end = crate::ticks::vclock().then(|| crate::ticks::total() + time_cap.max(0.0) * 1e9);
+    let past_end = || match tk_end { Some(e) => crate::ticks::total() >= e, None => Instant::now() >= t_end };
     let feastol = 1e-6;
     let mut lb = vec![0.0; n];
     let mut ub = vec![0.0; n];
@@ -456,12 +459,15 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             }
         }
         if check {
+            // 手間の単位 ([`crate::ticks`]): 前の確認からの effort を足す (手間の期限も見る)
+            crate::ticks::add(crate::ticks::HEUR, s.effort - effort_last_check);
             effort_last_check = s.effort;
             if s.effort - effort_last_improve > max_since || s.effort > max_total {
                 why = "effort";
                 break;
             }
-            if Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+            // 手間の期限・門 (`over`) を先に見る (門で止まっている間に出た止めの合図は `over` が受け取る)
+            if crate::ticks::over() || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
                 why = "time/stop";
                 break;
             }
@@ -471,7 +477,12 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             let r = cons_row[s.violated[k] as usize] as usize;
             chain_tries += 1;
             let mut view = FjView { fj: &mut s, p, row_cons: &row_cons };
-            let abort = || Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+            let abort = || {
+                if tk_end.is_some() && crate::ticks::over() {
+                    return true;
+                }
+                past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+            };
             let res = super::localmip::chain_move(&mut view, r, chain_depth, 64, &set_of, &abort);
             if let Some((_, mv, eff)) = res {
                 s.effort += eff;
@@ -523,6 +534,7 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             repaired = if best_x.is_some() { " (LP repair: found)" } else { " (LP repair: failed)" };
         }
     }
+    crate::ticks::add(crate::ticks::HEUR, s.effort.saturating_sub(effort_last_check));
     if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
         eprintln!(
             "MIP:   FJ2{repaired}: {} rows (as inequalities), {} nonzeros, {steps} steps, effort {} (max {max_total}), least violated rows {best_viol}, found {} (objective {best_obj:.6e}), stopped by {why}, chain {chain_ok}/{chain_tries} ({chain_cols} columns), {:.2}s",

@@ -22,6 +22,59 @@ thread_local! {
     static TOKEN: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
     static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
     static HALT: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+    static HALT_CANCELS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 試作 `ENOMOTO_MIP_SUBMIP_HALT` (analysis/timedep_20261114.md の 9 節): 別スレッドに仕事を渡す箇所で、止める合図 ([`with_halt`]) と
+/// それを [`is_cancelled`] に含めるか ([`set_halt_cancels`]) を引き継ぐ。既定 (環境変数なし) では何も引き継がない。
+#[derive(Clone, Default)]
+pub struct Inherit(Option<(Arc<AtomicBool>, bool)>);
+
+///
+/// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `1`。`0`・`off` で 0.1.7 までの動き (使わない)。** (`ENOMOTO_MIP_SUBMIP_HALT`)
+fn inherit_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("ENOMOTO_MIP_SUBMIP_HALT").map_or(true, |v| !v.is_empty() && v != "0" && v != "off"))
+}
+
+/// `ENOMOTO_MIP_SUBMIP_HALT` のときだけ、このスレッドの止める合図 ([`halted`]) を返す (既定では常に偽。期限しか見ない計算に足す確認)。
+#[inline]
+pub fn halt_requested() -> bool {
+    inherit_on() && halted()
+}
+
+/// 今のスレッドの止める合図を取り出す (別スレッドで [`Inherit::run`] する)。
+pub fn inherit() -> Inherit {
+    if !inherit_on() {
+        return Inherit(None);
+    }
+    Inherit(HALT.with(|h| h.borrow().clone()).map(|a| (a, HALT_CANCELS.with(|c| c.get()))))
+}
+
+impl Inherit {
+    /// 取り出した止める合図をこのスレッドに置いて `f` を実行し、元に戻す。
+    pub fn run<R>(self, f: impl FnOnce() -> R) -> R {
+        match self.0 {
+            None => f(),
+            Some((a, c)) => {
+                let prev = HALT_CANCELS.with(|h| h.replace(c));
+                let r = with_halt(Some(a), f);
+                HALT_CANCELS.with(|h| h.set(prev));
+                r
+            }
+        }
+    }
+    /// 取り出した止める合図をこのスレッドに置いたままにする (戻さない。終わりまでこの仕事だけをするスレッドの頭で使う)。
+    pub fn install(self) {
+        if let Some((a, c)) = self.0 {
+            HALT.with(|h| *h.borrow_mut() = Some(a));
+            HALT_CANCELS.with(|h| h.set(c));
+        }
+    }
+    /// 止める合図 (なければ `None`)。
+    pub fn flag(&self) -> Option<Arc<AtomicBool>> {
+        self.0.as_ref().map(|(a, _)| a.clone())
+    }
 }
 
 /// このスレッドの「止める合図」が立ったか ([`with_halt`])。MIP の LP の反復の確認 (`slope_intercept_dual::ext_check`) が
@@ -42,7 +95,13 @@ pub fn with_halt<R>(flag: Option<Arc<AtomicBool>>, f: impl FnOnce() -> R) -> R {
 /// このスレッドの求解が打ち切りを求められているか (トークンが立った、または期限を過ぎた)。
 #[inline]
 pub fn is_cancelled() -> bool {
-    TOKEN.with(|t| t.borrow().as_ref().is_some_and(|a| a.load(Ordering::Relaxed))) || deadline_passed()
+    TOKEN.with(|t| t.borrow().as_ref().is_some_and(|a| a.load(Ordering::Relaxed))) || deadline_passed() || (HALT_CANCELS.with(|h| h.get()) && halted())
+}
+
+/// このスレッドで、止める合図 ([`halted`]) を [`is_cancelled`] にも含めるか (既定は含めない)。トークンや期限しか見ない計算
+/// (内点法・クロスオーバー・根の LP の救済) も止める合図で止まる。別スレッドのサブ MIP (`ENOMOTO_MIP_SUBMIP_HALT`) が自分のスレッドで立てる。
+pub fn set_halt_cancels(on: bool) {
+    HALT_CANCELS.with(|h| h.set(on));
 }
 
 /// このスレッドの期限 (なければ `None`)。

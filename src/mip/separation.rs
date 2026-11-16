@@ -1176,6 +1176,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_TIMEDEP` の `c`: 比べの時間を手間で数える ([`PROBE_WORK`])。LP 1 回の時間の上限は 5 倍の安全網
         let (td_c, _, _) = PROBE_WORK.with(|c| c.get());
         let cap = if td_c { 5.0 * cap } else { cap };
+        // 試作 `ENOMOTO_MIP_TICKS` の `c` ([`super::ticks_on`]): 比べの経過・打ち切り・1 回の LP の上限を手間の秒 ([`crate::ticks`]) で数える
+        // (秒あたりの伸びの比べが回ごとに変わっていた。neos5 では伸びが同じで default と pool の選びが回ごとに違った)
+        let tk_c = !td_c && super::ticks_on('c');
+        let tk0 = crate::ticks::total();
+        let tk_budget = deadline.saturating_duration_since(t0).as_secs_f64();
+        let tk_el = || (crate::ticks::total() - tk0) * 1e-9;
         let mut w_side = 0.0f64;
         // 単位は max(根の LP の反復, 行の数) (根の LP が受け継いだ基底で 1 反復のときに小さくなりすぎないように。`w` と同じ)
         let root_it = self.root_lp_iters.max(self.p.m as u64).max(1) as f64;
@@ -1189,7 +1195,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut all_rows: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
         let alt_has = |c: char| env_def!("ENOMOTO_MIP_CUTSEL_PROBE_ALT", "NS").is_none_or(|v| v.contains(c));
         for r in 0..k {
-            let over = if td_c { PROBE_WORK.with(|c| { let (_, u, b) = c.get(); u >= b }) } else { std::time::Instant::now() >= deadline };
+            let over = if td_c { PROBE_WORK.with(|c| { let (_, u, b) = c.get(); u >= b }) } else if tk_c { tk_el() >= tk_budget } else { std::time::Instant::now() >= deadline };
             if self.time_up() || (r > 0 && over) {
                 break;
             }
@@ -1225,7 +1231,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if keep {
                 all_rows.extend(rows.iter().cloned());
             }
-            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap.min(1e6));
+            let _tk_guard = tk_c.then(|| crate::ticks::budget_guard(cap.min(1e6) * 1e9));
+            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap.min(1e6) * if tk_c { 10.0 } else { 1.0 });
             let d = Some(self.deadline.map_or(d, |g| g.min(d)));
             let it_r0 = self.lp.total_iterations();
             let st = self.lp.solve(&SolveLimits { iteration_limit: 10 * self.avg_node_iters().max(1000) + 10_000, cutoff: f64::INFINITY, deadline: d });
@@ -1242,9 +1249,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             gain = self.lp.objective() - obj0;
-            hist.push((gain, if td_c { w_side } else { t0.elapsed().as_secs_f64() }));
+            let el = if td_c { w_side } else if tk_c { tk_el() } else { t0.elapsed().as_secs_f64() };
+            hist.push((gain, el));
             nadd_hist.push(nadd);
-            if stop(r, gain, if td_c { w_side } else { t0.elapsed().as_secs_f64() }) {
+            if stop(r, gain, el) {
                 break;
             }
             if self.lp.objective() <= before + 1e-9 * before.abs().max(1.0) && r > 0 && !PROBE_NO_FLAT_STOP.with(|c| c.get()) {
@@ -1542,11 +1550,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 上限をこのループの始めから数える (drayage-25-23 では 1 回目に 6.9 秒かかり、2 回目が 1 ラウンドも回らなかった)
         // `ENOMOTO_MIP_CUT_CAP_FROM_LOOP` (既定で使う。`0` で止める。2026-11-01 に cs2 として既定化、analysis/halve_submip_20261030.md の bench12・
         // analysis/cs2_check_20261101.md): 外側の根のカットの時間の上限を、求解の開始からではなくこのループの
-        // 始めから数える。また `ENOMOTO_T_MIP_CUT_MIN_ROUNDS` (既定 0) ラウンドまでは時間の上限で止めない (全体の時間切れでは止める)。
+        // 始めから数える。また `ENOMOTO_T_MIP_CUT_MIN_ROUNDS` (既定 8、cand1118 で 0 → 8。`0` で 0.1.7 までの動き) ラウンドまでは時間の上限で止めない (全体の時間切れでは止める)。
         // physiciansched6-2 (60 秒) は前処理と根の LP で 6〜7 秒かかり、上限 (開始から全体の 1 割 = 6 秒) を超えていて前景のカットが
         // 0 ラウンドだった。HiGHS は根のカットを 11〜13 ラウンド回して下界を 49324 (最適値) にする (analysis/highstree_phys_20261024.md)
         let cap_from_loop = (env_def!("ENOMOTO_MIP_CUT_CAP_FROM_LOOP", "1").is_some() || self.rch_part('T')) && !self.params.submip;
-        let mut min_rounds = if cap_from_loop { tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", if self.rch_part('T') { 10usize } else { 0 }, usize) } else { 0 };
+        let mut min_rounds = if cap_from_loop { tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", 8usize, usize) } else { 0 };
         // `ENOMOTO_MIP_CUTSEL_PROBE`: 比べを 0 ラウンド目の始めに行う (時間の上限の判定より前なので、既定では前景のカットが 0 ラウンドの
         // physiciansched6-2 でも比べる)
         let min_rounds0 = min_rounds;
@@ -2251,7 +2259,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // (`ENOMOTO_MIP_CUTSEL_PROBE_ALT` では挙げた部品だけ)
                     if self.rch_part('T') {
                         cap_base = t_loop0;
-                        min_rounds = tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", 10usize, usize);
+                        min_rounds = tunable!("ENOMOTO_T_MIP_CUT_MIN_ROUNDS", 8usize, usize);
                     } else {
                         min_rounds = min_rounds0;
                         if !keep {
@@ -2444,7 +2452,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 分離の間に求解の期限を過ぎたら、このラウンドを捨てて抜ける (ラウンドの頭の `time_up` で抜けるのと同じ状態)。
             // 裏のカットの求解のラウンド (rail507 で 1 回 3〜9 秒) の候補のプールへの追加・選択が期限の後も回り、主がその終わりを
             // 待って時間の上限を 5 秒過ぎていた (analysis/overrun_crypt_20261101.md)
-            if sep_deadline(self.deadline).is_some_and(|d| std::time::Instant::now() >= d) {
+            if sep_deadline(self.deadline).is_some_and(|d| std::time::Instant::now() >= d) || crate::cancel::halt_requested() {
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: the time limit passed during the separation ({:.2}s); round dropped", t_sep.elapsed().as_secs_f64());
                 }
@@ -2599,7 +2607,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `x` = すべて、`d` = 非零が `ENOMOTO_T_MIP_POOL_TAB_MAXLEN` (100) を超えるものだけ。binkar10_1 は DUALEQ や停滞の尺度 (`u`) で
             // 根のループが長くなると、1 本 約 300 非零の tableau 行の候補 (根では 1 本も採られない) でプールが上限 (20 万非零) まで埋まり、
             // 木のノードが約 2 倍になる
-            let pool_tab = env_str!("ENOMOTO_MIP_POOL_TAB");
+            // (cand1118 で既定 `x` にした。`0`・`off` で 0.1.7 までの動き)
+            let pool_tab = env_def!("ENOMOTO_MIP_POOL_TAB", "x");
             let tab_maxlen = if pool_tab.is_some_and(|v| v.contains('x')) { 0 } else if pool_tab.is_some_and(|v| v.contains('d')) { tunable!("ENOMOTO_T_MIP_POOL_TAB_MAXLEN", 100usize, usize) } else { usize::MAX };
             if !self.params.submip && env_str!("ENOMOTO_MIP_POOL_SELECTED_ONLY").is_none() {
                 for c in cands.iter().chain(face_cands.iter()) {
@@ -5444,8 +5453,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_TIMEDEP` の `m`: 入れ替えの数で止める (時間は安全網)。今の時間の上限 (0.25 x 根の LP の秒) では、1 回の移動は
             // 10teams 20〜28、neos-960392 11〜17、neos-827175 14〜15、neos-3083819-nubu 13〜22 入れ替えで、根の LP の反復には比例しない
             // (入れ替え 1 回の重さが問題で 10〜100 倍違う)。初版の上限 max(125, 0.03 x 根の反復) は 58 問でこれらを約 2 倍遅くした
-            let (cap, piv) = if super::timedep('m') {
-                let p0 = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0", 16.0, f64);
+            // 試作 `ENOMOTO_MIP_TICKS` の `m` も同じ入れ替えの数の上限にする (手間の期限にした初版は、根の LP の秒から決めた上限を手間に
+            // 直したため移動が長くなり、neos-960392 が 4 スレッドで根で解けなくなった: k58c で 1.9〜3.6 倍)
+            // 試作 `ENOMOTO_MIP_TICKS` の `m` の別の形 (`ENOMOTO_T_MIP_TICKS_MPSEP_MOVE_FRAC` = f > 0、既定 0 = 使わない。12.11 節): 1 回の移動を、
+            // 時間版と同じ式の手間の期限 clamp(f x 根の LP の手間, 1e7, 1e8) で止める (入れ替えの上限は時間版と同じ、時間は 1 秒の安全網)
+            let tk_move = tunable!("ENOMOTO_T_MIP_TICKS_MPSEP_MOVE_FRAC", 0.0, f64);
+            let tk_budget = (super::ticks_on('m') && tk_move > 0.0).then(|| (tk_move * self.root_lp_ticks).clamp(1e7, 1e8));
+            let (cap, piv) = if tk_budget.is_some() {
+                (tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_SAFE", 1.0, f64), piv)
+            } else if super::timedep('m') || super::ticks_on('m') {
+                let p0 = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0", 8.0, f64);
                 let c = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_C", 0.0, f64);
                 let k = p0.max(c * self.root_lp_iters as f64).ceil() as usize;
                 (tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_SAFE", 1.0, f64), piv.min(k))
@@ -5459,7 +5476,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     break;
                 }
                 let seed = 7919 * (round as u64 + 1) + k as u64 + 1;
+                let _tk_guard = tk_budget.map(crate::ticks::budget_guard);
                 let (alt, _) = self.optface_alt_ext("mpsep", mode, seed, cap, piv, dbg);
+                drop(_tk_guard);
                 let Some(mut alt) = alt else { continue };
                 let xa = alt.col_values();
                 if xa.len() != n {
@@ -5852,6 +5871,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SEP_NO_ROWCLONE`: 行の写しと整数の行の印を使い回す ([`SepRowsCache`])
         let (lp_rows_rc, row_integral) = self.sep_lp_rows();
         let lp_rows: &[Vec<(usize, f64)>] = &lp_rows_rc;
+        // 手間の単位 ([`crate::ticks`]): 分離の 1 回 = LP の行の非零 + 行 + 列
+        crate::ticks::add(crate::ticks::SEP, (lp_rows.iter().map(|r| r.len()).sum::<usize>() + mr + n) as u64);
         // 試作 `ENOMOTO_MIP_MPSEP` の in-out の点 (LP の頂点でない点) では、その点での行の活動量を使う
         let act = match self.sep_act_override.take() {
             Some(a) if a.len() == mr => a,
@@ -6758,6 +6779,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nb = bases.len();
             let nth = par_threads.min(nb.max(1));
             let deadline = sep_deadline(self.deadline);
+            // `ENOMOTO_MIP_SUBMIP_HALT`: 止める合図も見る (別スレッドには引き継がれないので取り出して渡す)
+            let halt_flag = crate::cancel::inherit().flag();
+            let halt_ref = &halt_flag;
             // 行をスレッドに交互に割り当てる (行はスコア順で、重さが偏らないように)
             let parts: Vec<(Vec<(usize, Vec<Candidate>)>, f64)> = std::thread::scope(|sc| {
                 let hs: Vec<_> = (0..nth)
@@ -6769,7 +6793,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let mut out = Vec::new();
                             let mut k = t;
                             // 求解の期限 ([`sep_deadline`]) を過ぎたら残りの行は作らない (逐次の形は行ごとに `time_up` を見る)
-                            while k < nb && !deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                            while k < nb && !deadline.is_some_and(|d| std::time::Instant::now() >= d) && !halt_ref.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
                                 let base = &bases_ref[k];
                                 let neg: Vec<(usize, f64)> = base.iter().map(|&(j, a)| (j, -a)).collect();
                                 let mut cs: Vec<Candidate> = Vec::new();
@@ -7528,6 +7552,8 @@ fn gen_cuts_parallel(
     let nth = nth.min(nb.max(1));
     let hnfcut_st = super::hnfcut::snapshot();
     let hnfcut_ref = &hnfcut_st;
+    let halt_flag = crate::cancel::inherit().flag();
+    let halt_ref = &halt_flag;
     let parts: Vec<(Vec<(usize, Vec<Candidate>)>, f64)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nth)
             .map(|t| {
@@ -7538,7 +7564,7 @@ fn gen_cuts_parallel(
                     let mut out = Vec::new();
                     let mut k = t;
                     // 求解の期限 ([`sep_deadline`]) を過ぎたら残りの行は作らない
-                    while k < nb && !deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    while k < nb && !deadline.is_some_and(|d| std::time::Instant::now() >= d) && !halt_ref.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
                         let base = &bases[k];
                         let neg: Vec<(usize, f64)> = base.iter().map(|&(j, a)| (j, -a)).collect();
                         let mut cs: Vec<Candidate> = Vec::new();

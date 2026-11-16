@@ -445,6 +445,8 @@ pub struct NodeQueue {
     by_lb: BTreeSet<(Key, usize)>,
     by_est: BTreeSet<(Key, Key, usize)>,
     pops: u64,
+    /// [`Self::pop_hgs`]: 前に下界最小を取ってからの取り出しの回数
+    hgs_since: u64,
     /// 枠ごとの世代 (push のたびに増やす。取り出した枠が使い回されても、古い (枠, 世代) では取り出せない)。
     gen: Vec<u64>,
     /// カットの番号ごとの、そのカットが効いている基底を持つ待ち行列のノードの数 (カットの番号は 0 からの連番なので
@@ -468,7 +470,7 @@ pub type PackedBasis = (super::lp::PackedStatus, super::lp::PackedStatus);
 
 impl NodeQueue {
     pub fn new() -> Self {
-        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new(), protect: Vec::new(), prio_only: false, pack_basis: super::solver::memb('c'), packed: Vec::new(), pack_last: None, col_cnt: Vec::new() }
+        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, hgs_since: 0, gen: Vec::new(), protect: Vec::new(), prio_only: false, pack_basis: super::solver::memb('c'), packed: Vec::new(), pack_last: None, col_cnt: Vec::new() }
     }
 
     pub fn len(&self) -> usize {
@@ -631,6 +633,25 @@ impl NodeQueue {
     /// [`Self::pop`] の番を 1 つ進める (取り出しを別の待ち行列から行ったとき。`ENOMOTO_MIP_TREE1_POOL`)。
     pub fn skip_pop(&mut self) {
         self.pops += 1;
+    }
+
+    /// HiGHS の取り出し方 (試作 `ENOMOTO_MIP_DFSBB=2`・`3`、HighsMipSolver の prepareNodes): 前に下界最小を取ってから `bb_every` 回
+    /// 以上取り出していれば下界最小 (popBestBoundNode)、それ以外は 0.5 × 下界 + 0.5 × 推定値 が最小 (同じなら深い方) のノード
+    /// (popBestNode)。それがたまたま下界最小なら数え直す
+    pub fn pop_hgs(&mut self, bb_every: u64) -> Option<OpenNode> {
+        if self.hgs_since >= bb_every.max(1) {
+            self.hgs_since = 0;
+            return self.pop_best();
+        }
+        let id = self.by_est.iter().next().map(|&(_, _, id)| id)?;
+        let best = self.best_lower_bound();
+        let n = self.remove(id);
+        if n.lower_bound <= best {
+            self.hgs_since = 0;
+        } else {
+            self.hgs_since += 1;
+        }
+        Some(n)
     }
 
     pub fn pop_best(&mut self) -> Option<OpenNode> {

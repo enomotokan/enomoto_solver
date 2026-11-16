@@ -60,7 +60,9 @@ pub fn get() -> Option<&'static Replay> {
 }
 
 pub fn key(changes: &[BoundChange]) -> Vec<(u32, bool)> {
-    let mut k: Vec<(u32, bool)> = changes.iter().map(|c| (c.col as u32, !c.upper)).collect();
+    // 分枝ではない変更 (`sym`: orbital fixing・引き継いだ固定) は HiGHS の道筋にないので鍵に入れない (sct2 は orbital fixing で
+    // 深さ 6 から鍵がずれ、HiGHS の木と 7 ノードしか対応が取れなかった)
+    let mut k: Vec<(u32, bool)> = changes.iter().filter(|c| !c.sym).map(|c| (c.col as u32, !c.upper)).collect();
     k.sort();
     k.dedup();
     k

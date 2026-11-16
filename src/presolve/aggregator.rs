@@ -680,19 +680,24 @@ pub fn eliminate_implied_free_columns_v2_if_any_scaled(n: usize, a: &FaerCsr, b:
 /// 一般整数列 `z = Σ c y` (82 本) が残り、容量の行 `Σ d x <= z` が 0-1 だけの行にならない (HiGHS は消して 0-1 のナップサック行にする)
 /// 値が `g` なら一般整数列 (境界が [0, 1] でない列) だけを消す (0-1 列を `y = 1 - y'` などで消すと、固定費用型の `x <= u y` の行の
 /// 形が崩れる。h80x6320d で 0-1 列 68 本が消えて VUB の行が 6241 -> 6173 本になり、根の下界が 6359 -> 6338、60 秒で解けなくなった)
+/// `ENOMOTO_MIP_TREE2_INTAGG` の値 (既定 `d`、cand1118 で既定にした。`0`・`off` で切る = 0.1.7 までの動き)
+fn tree2_intagg_env() -> Option<&'static str> {
+    env_def!("ENOMOTO_MIP_TREE2_INTAGG", "d")
+}
+
 pub(crate) fn tree2_intagg() -> bool {
-    env_str!("ENOMOTO_MIP_TREE2_INTAGG").is_some() && crate::presolve::int_mask().is_some()
+    tree2_intagg_env().is_some() && crate::presolve::int_mask().is_some()
 }
 
 fn tree2_intagg_general_only() -> bool {
-    matches!(env_str!("ENOMOTO_MIP_TREE2_INTAGG"), Some("g") | Some("d"))
+    matches!(tree2_intagg_env(), Some("g") | Some("d"))
 }
 
 /// `ENOMOTO_MIP_TREE2_INTAGG=d` (試作、analysis/presolvegap_20261113.md): `g` に加えて、ピボット行の残りが全て 0-1 列で、消す列の出る行が
 /// `ENOMOTO_T_MIP_TREE2_INTAGG_MAXROWS` (既定 2) 本までのときだけ消す (rococo の容量 `z = Σ c y` と容量の行 `Σ d x <= z` の形)。
 /// `g` は neos-3083819-nubu の流量の保存式の一般整数も消して根が弱くなった (analysis/tree_close2_20261104.md)
 fn tree2_intagg_def_only() -> bool {
-    env_str!("ENOMOTO_MIP_TREE2_INTAGG") == Some("d")
+    tree2_intagg_env() == Some("d")
 }
 
 /// 等式行 `row · x = rhs` を整数列 `j` (係数 `coeff`) のピボットに使って、代入式 `x_j = (rhs - Σ a_k x_k) / coeff` が

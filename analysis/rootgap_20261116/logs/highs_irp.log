@@ -1,0 +1,76 @@
+MIP irp has 39 rows; 20315 cols; 98254 nonzeros; 20315 integer variables (20315 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+00]
+  Cost    [1e+01, 7e+03]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 1e+00]
+Presolving model
+39 rows, 20315 cols, 98254 nonzeros 0s
+39 rows, 19370 cols, 93161 nonzeros 0s
+Presolve reductions: rows 39(-0); columns 19370(-945); nonzeros 93161(-5093) 
+
+Solving MIP model with:
+   39 rows
+   19370 cols (19370 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   93161 nonzeros
+   Thread count: 4 available cores, 4 logical processors, using up to 4 workers across 4 threads.
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            13870.674791       Large        0      0      0         0     4.5s
+         0       0         0   0.00%   12123.530222    13870.674791      12.60%        0      0      4       268     4.6s
+         0       0         0   0.00%   12141.597819    13870.674791      12.47%     2435     55     29      1250     9.7s
+ L       0       0         0   0.00%   12142.269476    12159.492836       0.14%     3083     78     29      2369    17.9s
+
+70.7% inactive integer columns, restarting
+Model after restart has 35 rows, 4722 cols (4722 bin., 0 int., 0 impl., 0 cont., 0 dom.fix.), and 22345 nonzeros
+
+         0       0         0   0.00%   12142.308752    12159.492836       0.14%       35      0      0      2939    20.3s
+         0       0         0   0.00%   12144.97802     12159.492836       0.12%       35     18      2      3118    20.3s
+
+26.3% inactive integer columns, restarting
+Model after restart has 34 rows, 3318 cols (3318 bin., 0 int., 0 impl., 0 cont., 0 dom.fix.), and 15585 nonzeros
+
+         0       0         0   0.00%   12148.367033    12159.492836       0.09%       15      0      0      3209    21.3s
+         0       0         0   0.00%   12148.654354    12159.492836       0.09%       15     12      2      3316    21.3s
+
+76.6% inactive integer columns, restarting
+Model after restart has 18 rows, 626 cols (626 bin., 0 int., 0 impl., 0 cont., 0 dom.fix.), and 2833 nonzeros
+
+         0       0         0   0.00%   12158.282799    12159.492836       0.01%        7      0      0      3435    21.6s
+         0       0         0   0.00%   12158.282799    12159.492836       0.01%        7      6      2      3559    21.6s
+         1       0         1 100.00%   12159.492836    12159.492836       0.00%        7      6      2      3621    21.6s
+
+Solving report
+  Model             irp
+  Status            Optimal
+  Primal bound      12159.492836
+  Dual bound        12159.492836
+  Gap               0%
+  P-D integral      6.26
+  Solution status   feasible
+                    12159.492836 (objective)
+                    7.39211161418e-13 (integrality violation)
+  Timing            21.58
+                    7.93 (Presolve)
+                        MIP    time [calls] = 4.36 [1]
+                        subMIP time [calls] = 3.57 [9]
+                    13.65 (Solve)
+                        MIP    time [calls] = 12.19 [1]
+                        subMIP time [calls] = 1.46 [9]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [9]
+  Max sub-MIP depth 8
+  Nodes             1
+  Repair LPs        0
+  LP iterations     3621
+                    0 (strong br.)
+                    2348 (separation)
+                    567 (heuristics)

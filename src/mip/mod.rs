@@ -28,6 +28,7 @@ pub(crate) mod brcut;
 pub(crate) mod solver;
 pub(crate) mod fj;
 pub(crate) mod localmip;
+pub(crate) mod fjsub;
 pub(crate) mod fpr;
 pub(crate) mod fpr_paper;
 mod heuristics;
@@ -206,7 +207,7 @@ fn map_restart_cut_subst(c: &[(usize, f64)], r: f64, p: &MipProblem, prob: &MipP
         }
     }
     let mut out: Vec<(usize, f64)> = Vec::new();
-    for (j, a) in coef {
+    for (j, a) in hm_entries(&coef) {
         if a.abs() <= 1e-12 {
             continue;
         }
@@ -283,11 +284,59 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// - `b`: 割合で決める量 (時間の上限 x 割合) の基準を、前処理・再スタートの後の残り時間でなく元の時間の上限にする ([`solver::MipParams::frac_tl`])
 /// - `u`: 外側の求解のサブ MIP (根の RENS・RINS など。木の大近傍探索は `n`) を時間でなく LP の反復の上限で止める (時間は 10 倍の安全網。
 ///   `heuristics::Solver::submip_iter_cap_u`、係数 `ENOMOTO_T_MIP_TIMEDEP_SUBMIP_C` 既定 5)
+/// 試作 `ENOMOTO_MIP_TICKS` (既定では使わない。analysis/timedep_20261114.md の 11 節): 秒の代わりに手間の単位 ([`crate::ticks`]、
+/// 当てはめた重みで 1 手間 ≒ 1 ns) で、時間の規則と同じ式で決める。文字:
+/// - `t`: 木の分離の予算 (`tree_sep_budget_ok`・`node_cut_adapt_due`・`nca_lp_budget_ok`)
+/// - `n`: 木の大近傍探索の予算と 1 回の上限 (サブ MIP は手間の期限で止める)
+/// - `w`: [`cap_clock`] (スレッドの CPU 時間) を手間の秒にする (根のカットのループ・CUTSEL_PROBE・局所探索など)
+/// - `u`: 外側の求解のサブ MIP (根の RENS など) を時間の規則と同じ量の手間の期限で止める
+/// - `m`: MPSEP の最適面の移動を入れ替えの数 (`ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0`、既定 16) で止める (時間は 1 秒の安全網。TIMEDEP の `m` と同じ)
+/// - `c`: CUTSEL_PROBE の比べの経過・打ち切り・LP の上限を手間の秒にする
+/// - `f`: 前処理の早い FJ・Local-MIP (1 本のとき) の全体の上限と Local-MIP の 1 切れを手間で数える
+/// - `l`: 局所探索の時間の上限を同じ量の手間の上限にする
+/// - `s`: 手間の期限の中のサブ MIP の中で作るサブ MIP (入れ子) の時間の上限を、壁時計の残りでなく手間の残りから同じ式で決め、手間の期限で止める
+///   (時間の上限は 10 倍の安全網)
+/// - `h`: LP の重い求解の判定 (`ENOMOTO_MIP_LPSCALE` の `h`: 尺度なしの求解が `ENOMOTO_T_MIP_LPSCALE_HEAVY_SECS` (1) 秒以上なら尺度をかけた双子に
+///   切り替え、以後に作る LP も双子を持つ) を、その求解の手間で決める
+/// - `k`: ノードの分離の時間の割合の判定のうち `t` の外のもの (HiGHS 流のカット管理のノードの分離・TREESEP2・FC の分離) を手間で比べる
+/// - `r`: 根の LP の同時解き (`solve_race_ext`) の勝ち手を、先に終わった方でなく二段解法の反復の上限で決める (TIMEDEP の `r` と同じ)
+/// - `j`: FJ・Local-MIP のスレッド (4 スレッドの根) の時計を手間にし (FJ と Local-MIP の取り分・切れ・上限。上限は元の時間の上限から)、
+///   主とは手間の門 ([`crate::ticks::Gate`]) で受け渡す: 主は受け渡し箱を見る所でスレッドが許された手間に着くまで待って読み、
+///   前に許してからの主のスレッドの手間を次に許す。主の暫定解の有無はスレッドに伝えない。LMBOOST は使わない
+/// 試作 `ENOMOTO_MIP_DETHASH` (既定では使わない。analysis/timedep_20261114.md の 12 節): 結果に効く `HashMap` の走査を鍵の順にする
+/// (既定の `RandomState` はプロセスごとに種が変わり、走査順で implied bound カットの順・同値の組の順・足し合わせの順が変わる)。
+///
+/// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `1`。`0`・`off` で 0.1.7 までの動き (使わない)。**
+pub(crate) fn dethash() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("ENOMOTO_MIP_DETHASH").map_or(true, |v| !v.is_empty() && v != "0" && v != "off"))
+}
+
+/// `m` の組を取り出す ([`dethash`] なら鍵の順に並べる。そうでなければ今までと同じ走査順)。
+pub(crate) fn hm_entries<K: Ord + Copy + std::hash::Hash + Eq, V: Copy, S: std::hash::BuildHasher>(m: &std::collections::HashMap<K, V, S>) -> Vec<(K, V)> {
+    let mut v: Vec<(K, V)> = m.iter().map(|(k, x)| (*k, *x)).collect();
+    if dethash() {
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    v
+}
+
+///
+/// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `ntwumcflshk`。`0`・`off` で 0.1.7 までの動き (使わない)。**
+pub(crate) fn ticks_on(c: char) -> bool {
+    env_def!("ENOMOTO_MIP_TICKS", "ntwumcflshk").is_some_and(|v| v.contains(c))
+}
+
 pub(crate) fn timedep(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains(c))
 }
 
 pub(crate) fn cap_clock() -> f64 {
+    // 試作 `ENOMOTO_MIP_TICKS` の `w`: このスレッドの CPU 時間の代わりに手間の単位 ([`crate::ticks`]、1 手間 ≒ 1 ns) の秒を返す
+    // (根のカットのループ・CUTSEL_PROBE・局所探索などの CPU 時間の上限がまとめて手間になる)
+    if ticks_on('w') {
+        return crate::ticks::total() * 1e-9;
+    }
     #[cfg(target_os = "linux")]
     {
         if env_str!("ENOMOTO_MIP_WALL_CAPS").is_none() {
@@ -1207,6 +1256,9 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     // `ENOMOTO_MIP_SUBB_SYM` (試作、既定では使わない): サブ MIP の求解の間は外側の対称性の表を退避し、サブ MIP が自分で検出した表を使う
     // (終わりに外側の表を戻す。[`subb::SymScope`])
     let _subb_sym = (params.submip && params.restarts == 0 && subb::sym_on()).then(subb::SymScope::enter);
+    // 診断用のデバッグ解 (`ENOMOTO_MIP_DEBUG_SOL`) は外側の縮約後の空間の解なので、同じスレッドで走るサブ MIP の間は退避する
+    // (退避しないと、サブ MIP の行・列に外側の解を当てて「デバッグ解を切った」と誤って出す。終わりに戻す)
+    let _dbg_sol = params.submip.then(DebugSolScope::enter);
     if outer {
         subb::reset();
         heur_subfix::reset();
@@ -2295,7 +2347,14 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
     // 見つけた解と、見つけた方 (1 = FJ、2 = Local-MIP) と時刻
     let found: std::sync::Mutex<Option<(Vec<f64>, u8, f64)>> = std::sync::Mutex::new(None);
     let deadline = PRESOLVE_DEADLINE.with(|d| d.get());
-    let t_end = deadline.map_or(t0 + Duration::from_secs_f64(cap.max(0.0)), |d| d.min(t0 + Duration::from_secs_f64(cap.max(0.0))));
+    // 試作 `ENOMOTO_MIP_TICKS` の `f` ([`ticks_on`]): 1 本のときは、全体の上限と Local-MIP の 1 切れを手間 ([`crate::ticks`]) で数え、
+    // 時間は 10 倍の安全網にする (前処理の期限は見ない)。FJ・Local-MIP の交互の回し方が時刻によらなくなる
+    let tk_f = ticks_on('f') && threads == 1;
+    let t_end = if tk_f {
+        t0 + Duration::from_secs_f64(10.0 * cap.max(0.0))
+    } else {
+        deadline.map_or(t0 + Duration::from_secs_f64(cap.max(0.0)), |d| d.min(t0 + Duration::from_secs_f64(cap.max(0.0))))
+    };
     let slice = tunable!("ENOMOTO_T_MIP_FEAS_EARLY_LMIP_SLICE", 0.2, f64).max(0.01);
     let base = tunable!("ENOMOTO_T_MIP_FEAS_FJ_EARLY_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03) ^ 0x2545_F491_4F6C_DD1D;
     let base = if salt == 0 { base } else { base ^ salt.wrapping_mul(0x94D0_49BB_1331_11EB) };
@@ -2306,7 +2365,7 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
         }
         stop.store(true, Ordering::Relaxed);
     };
-    let over = || stop.load(Ordering::Relaxed) || Instant::now() + Duration::from_millis(50) >= t_end;
+    let over = || stop.load(Ordering::Relaxed) || Instant::now() + Duration::from_millis(50) >= t_end || (tk_f && crate::ticks::over());
     std::thread::scope(|s| {
         for t in 0..threads {
             let (fj_tries, lm_steps, done, over, stop) = (&fj_tries, &lm_steps, &done, &over, &stop);
@@ -2352,7 +2411,8 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                     }
                 };
                 if threads == 1 {
-                    // 1 本: FJ2 を 1 回と Local-MIP の 1 切れを交互に
+                    // 1 本: FJ2 を 1 回と Local-MIP の 1 切れを交互に (`f` なら全体の上限は手間の期限)
+                    let _tk_all = tk_f.then(|| crate::ticks::budget_guard(cap.max(0.0) * 1e9));
                     let mut lm = lm_new();
                     let mut k = 0u64;
                     while !over() {
@@ -2361,7 +2421,9 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                         }
                         k += 1;
                         if let Some(l) = lm.as_mut().filter(|l| !l.done) {
-                            if !over() && lm_run(l, Instant::now() + Duration::from_secs_f64(slice)) {
+                            let _tk_slice = tk_f.then(|| crate::ticks::budget_guard(slice * 1e9));
+                            let until = if tk_f { t_end } else { Instant::now() + Duration::from_secs_f64(slice) };
+                            if !over() && lm_run(l, until) {
                                 break;
                             }
                         }
@@ -3261,7 +3323,7 @@ thread_local! {
 /// 主の止めの合図の後も 4.8 秒回り、主がその従を待つ間に時間の上限を 2.7 秒過ぎていた (neos-960392、analysis/bgw_overrun_20261031.md)。
 /// `ENOMOTO_MIP_NO_PRESOLVE_STOP` で使わない (切り分け用)
 pub(super) fn presolve_stop() -> bool {
-    (crate::cancel::halted() || PRESOLVE_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d)) && env_str!("ENOMOTO_MIP_NO_PRESOLVE_STOP").is_none()
+    (crate::cancel::halted() || crate::ticks::over() || PRESOLVE_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d)) && env_str!("ENOMOTO_MIP_NO_PRESOLVE_STOP").is_none()
 }
 
 /// `deadline` を過ぎたか ([`with_presolve_deadline`] と同じく `ENOMOTO_MIP_NO_FJ_P3_DEADLINE` なら常に偽)。
@@ -4944,7 +5006,8 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     let lpar_blocks = tunable!("ENOMOTO_T_MIP_PREPAR_BLOCKS", 4usize, usize).max(1);
     let it_extra = std::cell::Cell::new(0u64);
     let tot_it = |lp: &crate::simplex::mip_lp::TwoStageLp| lp.total_iterations() + it_extra.get();
-    let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| tot_it(lp) - root_iters < iter_budget && tot_it(lp) < lp_iter_cap && t0.elapsed().as_secs_f64() < secs;
+    // `ENOMOTO_MIP_SUBMIP_HALT`: 止める合図が立ったら残りの試しをやめる (各 LP は合図で止まるが、ループは予算まで回っていた)
+    let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| tot_it(lp) - root_iters < iter_budget && tot_it(lp) < lp_iter_cap && t0.elapsed().as_secs_f64() < secs && !crate::cancel::halt_requested();
     let (mut n_lps, mut n_fixed, mut n_tried) = (0usize, 0usize, 0usize);
     // 窓の数と、試した列の反復の和と数 (窓の候補の数の見積もりに使う)
     let (mut n_lwin, mut it_lc, mut n_lc) = (0usize, 0u64, 0usize);
@@ -6085,7 +6148,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             let e = best.entry((k, upper)).or_insert(val);
             *e = if upper { e.min(val) } else { e.max(val) };
         }
-        for ((k, upper), val) in best {
+        for ((k, upper), val) in hm_entries(&best) {
             if implied.len() >= edge_cap {
                 return;
             }
@@ -6472,7 +6535,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     // 同値な 0-1 列 (既定で集める。`ENOMOTO_MIP_NO_PROBE_EQUIV` で集めない): x_j = 0 で x_k = 0、x_j = 1 で x_k = 1 なら x_k = x_j。
                     // 逆向きなら x_k = 1 - x_j。等式の行として足して前処理をかけ直す ([`presolve_mip`]、HiGHS の probing の代入)
                     if want_equiv {
-                        for (&(k, upper), &v0) in &first {
+                        for ((k, upper), v0) in hm_entries(&first) {
                             if k == j || !bin0[k] || dom.lo[k] == dom.up[k] {
                                 continue;
                             }
@@ -6485,7 +6548,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                         }
                     }
                     let mut any = false;
-                    for (&(k, upper), &v0) in &first {
+                    for ((k, upper), v0) in hm_entries(&first) {
                         if k == j {
                             continue;
                         }
@@ -6671,7 +6734,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             if !(ok0 && ok1) {
                 continue;
             }
-            for (&(k, upper), &v0) in &ch0 {
+            for ((k, upper), v0) in hm_entries(&ch0) {
                 if k == j || !bin0[k] || d2.lo[k] == d2.up[k] {
                     continue;
                 }
@@ -7010,7 +7073,7 @@ fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool, submip: bool) -> Op
                     last1.insert((k, upper), v);
                 }
                 let mut any = false;
-                for (&(k, upper), &v0) in &first {
+                for ((k, upper), v0) in hm_entries(&first) {
                     if k == j {
                         continue;
                     }
@@ -9105,6 +9168,23 @@ mod tests {
             let x = crate::presolve::scaling::unscale_x(&scaling, &x);
             let (zr, z) = (prob.objective(&xr), p.objective(&x));
             assert!((zr - z).abs() <= 1e-6 * z.abs().max(1.0), "reduced objective {zr} != original {z}");
+        }
+    }
+}
+
+/// サブ MIP の求解の間、外側のデバッグ解 ([`solver::DEBUG_SOL`]) を退避し、終わりに戻す (診断用、`ENOMOTO_MIP_DEBUG_SOL`)
+struct DebugSolScope(Option<Vec<f64>>);
+
+impl DebugSolScope {
+    fn enter() -> Self {
+        Self(solver::DEBUG_SOL.with(|d| d.borrow_mut().take()))
+    }
+}
+
+impl Drop for DebugSolScope {
+    fn drop(&mut self) {
+        if let Some(x) = self.0.take() {
+            solver::DEBUG_SOL.with(|d| *d.borrow_mut() = Some(x));
         }
     }
 }
