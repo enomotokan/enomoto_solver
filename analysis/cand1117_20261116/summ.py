@@ -5,9 +5,9 @@ import json, glob, math, random, collections, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 SET = sys.argv[1] if len(sys.argv) > 1 else "P"
-rows = [json.loads(l) for f in sorted(glob.glob(str(D / f"res_{SET}_s*.jsonl"))) for l in open(f) if l.strip()]
+rows = [json.loads(l) for S in (("M", "X") if SET == "MX" else (SET,)) for f in sorted(glob.glob(str(D / f"res_{S}_s*.jsonl"))) for l in open(f) if l.strip()]  # MX = M と追加の X を合わせる
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
-CF = ["cand1116", "cand1117", "highs"] if SET == "M" else ["cand1114", "cand1116", "cand1117"]
+CF = ["cand1116", "cand1117", "highs"] if SET in ("M", "X", "MX") else ["cand1114", "cand1116", "cand1117"]
 def st(r): return str(r["result"].get("status") or "").lower()  # HiGHS は "Optimal"・"Time limit reached"
 def solved(r): return st(r) in ("optimal", "infeasible")
 def t(r): return min(r["result"]["time"], r["tl"]) if solved(r) else r["tl"]
@@ -39,7 +39,7 @@ def cmp(ca, cb):
         v = logr[p]; g = math.exp(sum(v) / len(v))
         tag = " 全種で遅" if len(v) >= 2 and all(x > math.log(1.25) for x in v) else (" 全種で速" if len(v) >= 2 and all(x < math.log(0.8) for x in v) else "")
         if g > 1.15 or g < 0.87: print(f"  {p}: {g:.2f} {[round(math.exp(x), 2) for x in v]}{tag}")
-if SET == "M":
+if SET in ("M", "X", "MX"):
     cmp("cand1116", "cand1117"); cmp("highs", "cand1117"); cmp("highs", "cand1116")
 else:
     cmp("cand1116", "cand1117"); cmp("cand1114", "cand1117"); cmp("cand1114", "cand1116")
