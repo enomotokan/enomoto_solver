@@ -1,6 +1,6 @@
 """(analysis/treeclose_20261114.md 9.38 節、b58r/run_shard.py の写しで DFSBB=4 の d・L も stats に。ENOMOTO_MIP_DFSBB=4 のある版で回す) 分担 K を回す: shards_NAME.json の K 番目の (問題, 設定, 種) を 4 スレッド・制限時間で 1 回ずつ解き、NAME_sK.jsonl に足す。ログは logs/<問題>_<設定>_s<種>_<組>.log.gz に (組の名前を付けてほかの組と衝突しないようにする)、開いたノード・兄弟への戻り・基底の戻し・ノードの分離のラウンドは行の result.stats に。
 使い方: python run_shard.py K NAME (b58s/ で、NAME は dl15)。途中から再開できる。ソルバーは同時に 1 つ。
-設定は cfgs.py (f1・f3・f10・対照 2 つ)。"""
+設定は cfgs.py (f03・f1・l1・l3・対照 2 つ)。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -56,9 +56,9 @@ def stats_of(err):
     m = re.search(r"MIP: DFSBB: (?:kind \d+, )?W (\d+) \(root LP iterations (\d+)\), plunges (\d+), ended by the work limit (\d+), ended at a leaf or by pruning (\d+)", err)
     if m:
         st["dfsbb_w"], st["root_iters"], st["dfsbb_plunges"], st["dfsbb_wcut"], st["dfsbb_leaf"] = (int(m.group(i)) for i in range(1, 6))
-    m = re.search(r"MIP: DFSBB4: d ([\d.]+) \((\w+)\), L (\d+), root fractional (\d+), integers (\d+), mean depth of plunges ended at a leaf or by pruning ([\d.]+)", err)
+    m = re.search(r"MIP: DFSBB4: d ([\d.]+) \((\w+)\), L (\d+), root fractional (\d+), integers (\d+), mean depth of dive bottoms ([\d.]+) \((\d+) dives\)", err)
     if m:
-        st["dfsbb_d"], st["dfsbb_l"], st["root_frac"], st["n_int"], st["leaf_depth"] = float(m.group(1)), int(m.group(3)), int(m.group(4)), int(m.group(5)), float(m.group(6))
+        st["dfsbb_d"], st["dfsbb_l"], st["root_frac"], st["n_int"], st["leaf_depth"], st["dives"] = float(m.group(1)), int(m.group(3)), int(m.group(4)), int(m.group(5)), float(m.group(6)), int(m.group(7))
     m = re.search(r"MIP: adaptive node cuts: rounds (\d+) effective (\d+)", err)
     if m:
         st["node_cut_rounds"], st["node_cut_effective"] = int(m.group(1)), int(m.group(2))

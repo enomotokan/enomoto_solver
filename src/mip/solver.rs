@@ -847,6 +847,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     dfsbb_stats: [u64; 3],
     /// `DFSBB=4`: 葉・刈り込みで終わった潜りの深さの和と、今の潜りでいちばん最近潜った子の深さ
     dfsbb_leaf_depth_sum: u64,
+    dfsbb_leaf_cnt: u64,
     dfsbb_last_depth: u64,
     /// 根の LP (カットの前) を解くのにかかった秒 (再スタートの判定 `ENOMOTO_MIP_RESTART_FIRST_LPW` に使う)
     pub(super) root_lp_secs: f64,
@@ -5315,6 +5316,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dfsbb_abort: false,
         dfsbb_stats: [0; 3],
         dfsbb_leaf_depth_sum: 0,
+        dfsbb_leaf_cnt: 0,
         dfsbb_last_depth: 0,
         root_lp_secs: 0.0,
         inc_only_fj: false,
@@ -11695,6 +11697,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 Some(n) => {
                     // 兄弟ノード: 定義域を根から積み直す (下の共通の処理と同じ)
                     self.sibling_backtracks += 1;
+                    // `DFSBB=4` の d = leaf: 兄弟へ戻る = 直前の潜りが底 (葉・刈り込み) に着いた。その深さを数える
+                    if self.dfsbb_on() && self.dfsbb_last_depth > 0 {
+                        self.dfsbb_leaf_depth_sum += self.dfsbb_last_depth;
+                        self.dfsbb_leaf_cnt += 1;
+                    }
                     // 試作 `ENOMOTO_MIP_TC` の `k` (既定では使わない、treeclose 9.6 節): 兄弟へ戻ったときも潜りの始めとして数える
                     // (`plunge_depth` は待ち行列から取り出したときだけ 0 に戻るので、深さ優先寄りでは潜りの始めだけで呼ぶ木の中の
                     // ヒューリスティクス・ノードの分離がほとんど呼ばれず、潜りの深さの上限 200 にも通算で当たる)
@@ -11753,6 +11760,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.dfsbb_stats[0] += 1;
                             self.dfsbb_stats[2] += 1;
                             self.dfsbb_leaf_depth_sum += self.dfsbb_last_depth;
+                            self.dfsbb_leaf_cnt += 1;
                         }
                         self.dfsbb_start = self.node_iters + self.sb_iters;
                     }
@@ -14791,13 +14799,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// `DFSBB=4` の葉までの深さの目安 d (`ENOMOTO_MIP_DFSBB_D`): "frac" (既定) = 根の LP 解 (根のカットの後) で分数値の整数変数の数
-    /// (再スタートすると新しい根で取り直す)、"nint" = 前処理後の整数変数の数、"leaf" = これまでに葉・刈り込みで終わった潜りの深さの平均
+    /// (再スタートすると新しい根で取り直す)、"nint" = 前処理後の整数変数の数、"leaf" = これまでの潜りが底 (葉・刈り込み) に着いた深さの平均 (兄弟へ戻る直前と潜りの終わりの、いちばん最近潜った子の深さ)
     /// (5 回に満たないうちは frac)
     fn dfsbb_d(&self) -> f64 {
         let frac = self.noinc_root_frac as f64;
         match env_str!("ENOMOTO_MIP_DFSBB_D") {
             Some("nint") => self.p.is_int.iter().filter(|&&b| b).count() as f64,
-            Some("leaf") if self.dfsbb_stats[2] >= 5 => self.dfsbb_leaf_depth_sum as f64 / self.dfsbb_stats[2] as f64,
+            Some("leaf") if self.dfsbb_leaf_cnt >= 5 => self.dfsbb_leaf_depth_sum as f64 / self.dfsbb_leaf_cnt as f64,
             _ => frac,
         }
     }
@@ -23922,7 +23930,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if self.dfsbb_kind() == 4 {
-                    eprintln!("MIP: DFSBB4: d {:.1} ({}), L {}, root fractional {}, integers {}, mean depth of plunges ended at a leaf or by pruning {:.1}", self.dfsbb_d(), env_str!("ENOMOTO_MIP_DFSBB_D").unwrap_or("frac"), self.dfsbb_l(), self.noinc_root_frac, self.p.is_int.iter().filter(|&&b| b).count(), self.dfsbb_leaf_depth_sum as f64 / self.dfsbb_stats[2].max(1) as f64);
+                    eprintln!("MIP: DFSBB4: d {:.1} ({}), L {}, root fractional {}, integers {}, mean depth of dive bottoms {:.1} ({} dives)", self.dfsbb_d(), env_str!("ENOMOTO_MIP_DFSBB_D").unwrap_or("frac"), self.dfsbb_l(), self.noinc_root_frac, self.p.is_int.iter().filter(|&&b| b).count(), self.dfsbb_leaf_depth_sum as f64 / self.dfsbb_leaf_cnt.max(1) as f64, self.dfsbb_leaf_cnt);
                 }
                 if self.dfsbb_on() {
                     let s = self.dfsbb_stats;

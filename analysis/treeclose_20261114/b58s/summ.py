@@ -12,7 +12,7 @@ for r in rows:
     by.setdefault(r["problem"], {}).setdefault(r["cfg"], {})[r["seed"]] = r["result"]
 from cfgs import CFGS
 cfgs = list(CFGS)
-CTRL = [c for c in cfgs if not c.startswith("f")]
+CTRL = cfgs[-2:]
 tl = max((r.get("tl", 600) for r in rows), default=600)
 for p in sorted(by):
     print(f"## {p}")
@@ -34,7 +34,7 @@ for c in cfgs:
 # 対の比 (同じ問題・種、時間切れは制限時間、ずらし 10 秒の比の幾何平均) と 95% 区間 (組の再標本 4000 回)
 import random
 random.seed(1)
-for a in ("f1", "f3", "f10"):
+for a in [c for c in cfgs if c not in CTRL]:
     for b in CTRL:
         rs = [math.log((min(tl, by[p][a][s].get("time", tl)) + 10) / (min(tl, by[p][b][s].get("time", tl)) + 10))
               for p in by for s in by[p].get(a, {}) if s in by[p].get(b, {})]
