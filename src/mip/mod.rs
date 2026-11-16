@@ -293,6 +293,8 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// - `c`: CUTSEL_PROBE の比べの経過・打ち切り・LP の上限を手間の秒にする
 /// - `f`: 前処理の早い FJ・Local-MIP (1 本のとき) の全体の上限と Local-MIP の 1 切れを手間で数える
 /// - `l`: 局所探索の時間の上限を同じ量の手間の上限にする
+/// - `s`: 手間の期限の中のサブ MIP の中で作るサブ MIP (入れ子) の時間の上限を、壁時計の残りでなく手間の残りから同じ式で決め、手間の期限で止める
+///   (時間の上限は 10 倍の安全網)
 /// 試作 `ENOMOTO_MIP_DETHASH` (既定では使わない。analysis/timedep_20261114.md の 12 節): 結果に効く `HashMap` の走査を鍵の順にする
 /// (既定の `RandomState` はプロセスごとに種が変わり、走査順で implied bound カットの順・同値の組の順・足し合わせの順が変わる)。
 pub(crate) fn dethash() -> bool {

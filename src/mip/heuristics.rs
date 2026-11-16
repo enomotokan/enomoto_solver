@@ -1538,6 +1538,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
             None => f64::INFINITY,
         };
+        // 試作 `ENOMOTO_MIP_TICKS` の `s`: 手間の期限の中のサブ MIP では、残り時間を手間の残り (秒に直したもの) にする
+        let remaining = match self.tk_s_left() {
+            Some(l) => l,
+            None => remaining,
+        };
         // `ENOMOTO_MIP_SUBMIP_HIGHS` の `t`: 根 (外側の求解) のサブ MIP の時間の上限を残り時間の `ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_FRAC` (1)
         // 倍、最大 `ENOMOTO_T_MIP_SUBMIP_HIGHS_TIME_MAX` (上限なし) にする (HiGHS の `solveSubMip` は残り時間を渡し、ノード数で止める)。
         // 木の中 (大近傍探索の予算で上限を絞る) とサブ MIP の中のサブ MIP は今のまま
@@ -1675,6 +1680,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let tk_u_budget = if tk_u {
             let el = (crate::ticks::total() - self.ticks0) * 1e-9;
             Some(((self.submip_time_frac * (self.params.frac_tl() - el)).min(self.submip_time_max)).max(0.05) * 1e9)
+        } else if self.tk_s_left().is_some() && !self.parallel_submips {
+            // 試作 `ENOMOTO_MIP_TICKS` の `s`: 入れ子のサブ MIP は、手間の残りから決めた上限 (上の `time_limit`) を手間の期限にする
+            Some(time_limit.max(0.05) * 1e9)
         } else {
             None
         };
@@ -2133,6 +2141,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 根のサブ MIP の形では clique を回さず 473 ノードかかる (analysis/neos960392_nested_20261101.md)。
     /// 作るサブ MIP は小さくする: ノード上限 `ENOMOTO_T_MIP_SUBMIP_NESTED_NODES` (既定 100)、時間は残りの
     /// `ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_FRAC` (既定 0.1) 倍で最大 `ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_MAX` (既定 2 秒) ([`Self::nested_budget`])
+    /// 試作 `ENOMOTO_MIP_TICKS` の `s`: 手間の期限の中で解いているサブ MIP なら、このスレッドの手間の残り (秒に直したもの)
+    pub(super) fn tk_s_left(&self) -> Option<f64> {
+        (super::ticks_on('s') && self.params.submip && crate::ticks::has_budget()).then(|| crate::ticks::left() * 1e-9)
+    }
+
     pub(super) fn submip_nested(&self, c: char) -> bool {
         self.params.submip && SUBMIP_DEPTH.with(|d| d.get()) == 1 && env_str!("ENOMOTO_MIP_SUBMIP_NESTED").is_some_and(|v| v.contains(c))
     }
@@ -2155,7 +2168,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !self.submip_nested(c) {
             return None;
         }
-        let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+        let remaining = self.tk_s_left().unwrap_or_else(|| self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64()));
         let t = (tunable!("ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_FRAC", 0.1, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_SUBMIP_NESTED_TIME_MAX", 2.0, f64));
         Some((tunable!("ENOMOTO_T_MIP_SUBMIP_NESTED_NODES", 100u64, u64), t))
     }

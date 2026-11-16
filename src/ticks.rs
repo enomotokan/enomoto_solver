@@ -66,6 +66,11 @@ pub fn over() -> bool {
     total() >= DEADLINE.with(|d| d.get())
 }
 
+/// このスレッドの手間の期限までの残り (重み付き、期限がなければ +inf)。
+pub fn left() -> f64 {
+    (DEADLINE.with(|d| d.get()) - total()).max(0.0)
+}
+
 /// 今から `budget` (重み付き) を手間の期限にして `f` を実行し、元に戻す (今の期限より早いときだけ縮める)。
 pub fn with_budget<R>(budget: f64, f: impl FnOnce() -> R) -> R {
     let prev = DEADLINE.with(|d| d.get());
