@@ -42,3 +42,9 @@ def _minus16(k):
     return d
 WRONG = {"w16_m_" + _k.replace("ENOMOTO_MIP_", "").lower(): _minus16(_k) for _k in _DIFF16}
 CFGS.update(WRONG)
+
+# supportcase40 の切り分け S (planS.py): cand1117 で証明 (下界) が遅い。DFSBB を外す・下界最小を取る頻度 k を 5・3 に上げる・cand1116 + DFSBB
+SC40 = {"s_nodfsbb": _minus("ENOMOTO_MIP_DFSBB"),
+        "s_k5": {**CAND1117, "ENOMOTO_T_MIP_HGS_BB_EVERY": "5"},
+        "s_k3": {**CAND1117, "ENOMOTO_T_MIP_HGS_BB_EVERY": "3"}}
+CFGS.update(SC40)
