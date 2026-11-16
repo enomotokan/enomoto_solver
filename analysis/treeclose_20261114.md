@@ -1226,3 +1226,26 @@ b58q (9.35 節) で =5 の学習が効かず「混ぜ方」の効果と見られ
 - b58s の設定 (親の指示): f03・f1 (frac、c = 0.3・1)、l1・l3 (leaf、c = 1・3) + 対照 2 つ (CTRL1 = b58r でいちばん良い設定、CTRL2 = nb1。CTRL1 は b58r の
   追加分担 (hgs・hgsw) がそろってから決める、今は仮に w5)。15 問 × 種 1・2、600 秒、180 回・46 分担 (1 分担 3〜4 回、違う問題・設定を混ぜる、≤ 40 分)。
   `python run_shard.py K dl15` (K=0〜45)。
+
+### 9.39 背景の FJ・Local-MIP を有望な部分問題に差し替える `ENOMOTO_MIP_FJSUB` (利用者の案、b58t の実装と台本)
+
+新しいファイル `src/mip/fjsub.rs`。既定では使わない (サブ MIP・従のスレッドでも使わない)。
+- 今の根の FJ・Local-MIP のスレッド (`fj_lmip_mix`) は根のカットのループの終わりで止める (`join_fj_thread`) ので、木の探索の間は別のスレッドとして立てる
+  (木の始めに主の問題 `self.p` と暫定解を渡す)。主のスレッドの時間は使わない (主は箱に置くのと、ノードごとに解の箱を見て `try_incumbent` するだけ)。
+- 背景のスレッド: 全体の問題で Local-MIP (連鎖の手あり) と FJ2 を `ENOMOTO_T_MIP_FJSUB_SLICE` (0.2) 秒ずつ交互に回し、良くなった解を箱に入れる。
+  候補の箱に部分問題があり、全体で `ENOMOTO_T_MIP_FJSUB_STALL` (2) 秒良くならなければ (`h` なら停滞を待たず時間を半分ずつ) 差し替える:
+  部分問題の範囲で FJ2 を予算の半分、見つからなければ LP 解を丸めた点 (`LocalMip::set_start`) から Local-MIP を残りまで
+  (予算 `ENOMOTO_T_MIP_FJSUB_BUDGET` 1 秒)。FJ2 は出発点を受け取れないので、FJ2 は自分の出発点から (依頼の「LP 解を丸めた点から FJ」とは違う)。
+  部分問題の解は元の問題でも実行可能なので同じ箱で主へ渡し、全体の Local-MIP にも入れる。
+- 主が候補を置く: `DFSBB` の潜りを上限 (L・W) で打ち切ったノード (`w` なら `ENOMOTO_T_MIP_FJSUB_WORK` (5 万) 反復ごとにも)。条件は分数値の整数列の数
+  ≤ `ENOMOTO_T_MIP_FJSUB_RHO` (0.3) × 根の LP 解の数、かつ暫定解がないかノードの下界 ≤ 全体の下界 + 0.5 × ギャップ。中身はノードの定義域と LP 解。
+  `r` なら暫定解があるとき RINS 型 (暫定解と LP 解が一致する整数列を固定)。箱は最新の 1 つだけ。
+- ログ `MIP: FJSUB: offered … (not offered: too many fractional …, bound outside the window …), swapped …, sub solutions …, incumbent improved by sub … / by whole …, sub share …%`。
+  `ENOMOTO_MIP_FJSUB_DEBUG` で候補を置くかの判断を 1 行ずつ。決定性は気にしていない (壁時計)。受け渡しは箱 2 つなので、`TICKS` の `j` の区切りに後で載せられる。
+- 試し (種 1・`DFSBB=4` leaf c = 3 + `FJSUB`): **部分問題の候補はほとんど置かれない**。打ち切ったノードの分数値の整数列が根と同じくらい多い
+  (mcsched: 根 1263 に対し 830〜1273、下界も打ち切り値の近く 213000〜216000 で範囲の外)。neos-1456979 (120 秒): 8 回とも分数値が多くて置かず、
+  背景の全体の問題の FJ・Local-MIP が暫定解を 4 回更新 (最初の解 20 秒、最後 183)。supportcase40: 6 回とも分数値が多くて置かず。
+  ρ = 0.3 は厳しすぎる (潜りの途中のノードは分数値が減らない)。「木の間も全体の FJ・Local-MIP を回し続ける」部分だけでも効く問題はありそう (neos-1456979)。
+- 台本 `b58t/`: base (cand1116 + `DFSBB=4` leaf c = 3、b58s の結果で決め直す) 対 fjsub (base + `FJSUB=1`) × 15 問 + 最初の解が遅い 3 問
+  (neos-1456979・30n20b8・physiciansched6-2) × 種 1・2、600 秒 (72 回・19 分担、1 分担 3〜4 回で違う問題・両方の設定を混ぜる)。
+  `python run_shard.py K fs18` (K=0〜18)、集計 `python summ.py fs18` (解けた数・ずらし幾何平均・対の比と 95% 区間・FJSUB の統計の合計)。b58s の後に回す。

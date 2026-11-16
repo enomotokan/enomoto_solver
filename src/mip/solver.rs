@@ -843,6 +843,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 試作 `ENOMOTO_MIP_DFSBB` (既定では使わない、treeclose 9.36 節): 今の潜りを始めたときの手間 (主のスレッドの LP の反復)、
     /// 手間の上限で潜りを打ち切ったか、統計 [潜りの回数, 上限で打ち切った回数, 葉・刈り込みで終わった回数]
     dfsbb_start: u64,
+    /// 試作 `ENOMOTO_MIP_FJSUB` ([`super::fjsub`]): 背景のスレッドとの受け渡し、次に手間で候補を置く反復、受け取った解で暫定解を更新した数
+    /// (全体の問題から, 部分問題から)
+    fjsub: Option<std::sync::Arc<super::fjsub::FjSubShared>>,
+    fjsub_next: u64,
+    fjsub_imp: [u64; 2],
     dfsbb_abort: bool,
     dfsbb_stats: [u64; 3],
     /// `DFSBB=4`: 葉・刈り込みで終わった潜りの深さの和と、今の潜りでいちばん最近潜った子の深さ
@@ -5313,6 +5318,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_same_obj: false,
         root_lp_iters: 0,
         dfsbb_start: 0,
+        fjsub: None,
+        fjsub_next: 0,
+        fjsub_imp: [0; 2],
         dfsbb_abort: false,
         dfsbb_stats: [0; 3],
         dfsbb_leaf_depth_sum: 0,
@@ -11252,6 +11260,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 潜っている子ノード (定義域に分枝を積んだ状態で次に処理する)。
         let mut plunge: Option<OpenNode> = None;
         let mut plunge_depth = 0usize;
+        // 試作 `ENOMOTO_MIP_FJSUB` ([`super::fjsub`]): 背景の FJ・Local-MIP のスレッドを立てる (主の木だけ、サブ MIP では使わない)
+        if super::fjsub::fjsub_on('*') && !self.params.submip && self.snap.is_none() && self.fjsub.is_none() {
+            let (sh, _h) = super::fjsub::spawn(self.p.clone(), self.incumbent.as_ref().map(|i| i.1.clone()), self.rng ^ 0x1F83_D9AB_FB41_BD6B);
+            self.fjsub = Some(sh);
+        }
         // 試作 `ENOMOTO_MIP_NODESEL_BANDIT`: 主のスレッドの木だけで使う (サブ MIP・従のスレッドは既定のまま)
         if env_str!("ENOMOTO_MIP_NODESEL_BANDIT").is_some() && !self.params.submip && self.snap.is_none() && self.nb.is_none() {
             let v = env_str!("ENOMOTO_MIP_NODESEL_BANDIT");
@@ -11690,6 +11703,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_NODESEL_BANDIT`: 区間 (LP の反復で数えた手間) ごとに潜り方の腕を選ぶ
             if self.nb.is_some() {
                 self.nb_tick();
+            }
+            if self.fjsub.is_some() {
+                self.fjsub_poll();
             }
             self.d2b_tried_now = false;
             let node = match plunge.take().or(sibling) {
@@ -13519,7 +13535,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             // 1 回の潜りの深さの上限 `ENOMOTO_T_MIP_PLUNGE_DEPTH_MAX` (既定 200)。`plunge_depth` は待ち行列から取り出したときだけ 0 に戻る
             // (兄弟へ戻っても戻らない) ので、通算で上限を越えると潜らなくなり、子は 2 つとも待ち行列に積まれる (treeclose 9.3 節)
-            if plunge_depth <= tunable!("ENOMOTO_T_MIP_PLUNGE_DEPTH_MAX", 200usize, usize) && plunge_ok && self.dfsbb_budget_ok(self.nodes - plunge_start) {
+            let dfsbb_ok = self.dfsbb_budget_ok(self.nodes - plunge_start);
+            // 試作 `ENOMOTO_MIP_FJSUB`: 潜りを上限 (L・W) で打ち切ったとき (と `w` なら手間ごと) に、このノードを部分問題の候補として置く
+            if self.fjsub.is_some() {
+                let work = self.node_iters + self.sb_iters;
+                let by_work = super::fjsub::fjsub_on('w') && work >= self.fjsub_next;
+                if !dfsbb_ok || by_work {
+                    if by_work {
+                        self.fjsub_next = work + tunable!("ENOMOTO_T_MIP_FJSUB_WORK", 50000u64, u64);
+                    }
+                    self.fjsub_offer(node_obj);
+                }
+            }
+            if plunge_depth <= tunable!("ENOMOTO_T_MIP_PLUNGE_DEPTH_MAX", 200usize, usize) && plunge_ok && dfsbb_ok {
                 // 潜る: 定義域に分枝を積む (LP は今の基底から続ける)
                 if first_c.upper {
                     self.dom.tighten_upper(self.p, first_c.col, first_c.value);
@@ -14813,6 +14841,65 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `DFSBB=4` の 1 回の潜りのノード数の上限 L = max(`ENOMOTO_T_MIP_DFSBB_LMIN` (既定 10), round(`ENOMOTO_T_MIP_DFSBB_C` (既定 3) × d))
     fn dfsbb_l(&self) -> u64 {
         (tunable!("ENOMOTO_T_MIP_DFSBB_C", 3.0, f64) * self.dfsbb_d()).round().max(tunable!("ENOMOTO_T_MIP_DFSBB_LMIN", 10u64, u64) as f64) as u64
+    }
+
+    /// 試作 `ENOMOTO_MIP_FJSUB`: 今のノード (定義域と LP 解) を部分問題の候補として箱に置く。分数値の整数列の数が
+    /// `ENOMOTO_T_MIP_FJSUB_RHO` (既定 0.3) × 根の LP 解の数以下で、暫定解がないか、ノードの下界が [全体の下界, 全体の下界 + 0.5 × ギャップ] に入るものだけ。
+    /// `r` なら暫定解があるとき RINS 型 (暫定解と LP 解が一致する整数列をその値に固定) にする
+    fn fjsub_offer(&mut self, node_obj: f64) {
+        let Some(sh) = self.fjsub.clone() else { return };
+        let x = self.lp.col_values();
+        let dbg = env_str!("ENOMOTO_MIP_FJSUB_DEBUG").is_some();
+        if dbg {
+            eprintln!("FJSUBD offer? n {} p.n {} nfrac {} rootfrac {} node_obj {node_obj} ub {} glb {}", x.len(), self.p.n, self.fractional(&x).len(), self.noinc_root_frac, self.prune_limit(), self.global_lower_bound());
+        }
+        if x.len() != self.p.n {
+            return;
+        }
+        let nfrac = self.fractional(&x).len();
+        if nfrac as f64 > tunable!("ENOMOTO_T_MIP_FJSUB_RHO", 0.3, f64) * self.noinc_root_frac.max(1) as f64 {
+            sh.n_rej_frac.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        let ub = self.prune_limit();
+        if ub.is_finite() {
+            let glb = self.global_lower_bound();
+            if !(node_obj <= glb + 0.5 * (ub - glb)) {
+                sh.n_rej_win.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        }
+        let (mut lo, mut up) = (self.dom.lo.clone(), self.dom.up.clone());
+        if super::fjsub::fjsub_on('r') {
+            if let Some((_, inc)) = &self.incumbent {
+                if inc.len() == self.p.n {
+                    for j in 0..self.p.n {
+                        if self.p.is_int[j] && (inc[j] - x[j]).abs() < 1e-6 && inc[j] >= lo[j] - 1e-9 && inc[j] <= up[j] + 1e-9 {
+                            lo[j] = inc[j];
+                            up[j] = inc[j];
+                        }
+                    }
+                }
+            }
+        }
+        *sh.cand.lock().unwrap() = Some(super::fjsub::FjSubCand { lo, up, x });
+        sh.n_offer.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 試作 `ENOMOTO_MIP_FJSUB`: 背景のスレッドが見つけた解を受け取る (新しい順に試し、受け付けたら止める)
+    fn fjsub_poll(&mut self) {
+        let Some(sh) = self.fjsub.clone() else { return };
+        let got: Vec<(Vec<f64>, bool)> = std::mem::take(&mut *sh.sols.lock().unwrap());
+        for (x, sub) in got.into_iter().rev() {
+            let before = self.incumbent.as_ref().map_or(f64::INFINITY, |i| i.0);
+            self.heur_label = if sub { "FJSUB (sub)" } else { "FJSUB" };
+            let ok = self.try_incumbent(x);
+            self.heur_label = "";
+            if ok && self.incumbent.as_ref().is_some_and(|i| i.0 < before) {
+                self.fjsub_imp[sub as usize] += 1;
+                break;
+            }
+        }
     }
 
     /// 今の潜りの手間が W 未満なら真。越えていたら打ち切りの印を付けて偽 (`DFSBB` を使っていなければいつも真)
@@ -23929,6 +24016,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let last = v.hyp.map(|h| format!("{}/{}/{}~{}", h.0[0], h.0[1], h.0[2], h.1)).unwrap_or_else(|| "-".into());
                         eprintln!("MIP: NODESEL_BANDIT5 hyp: last {last}, refits {}, counts (ell_p/ell_s/ell_u~noise:n) {}", hc.iter().map(|h| h.2).sum::<u64>(), list.join(" "));
                     }
+                }
+                if let Some(sh) = self.fjsub.take() {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    sh.stop.store(true, Relaxed);
+                    let (ts, ta) = (sh.ns_sub.load(Relaxed) as f64 * 1e-9, sh.ns_all.load(Relaxed) as f64 * 1e-9);
+                    eprintln!(
+                        "MIP: FJSUB: offered {} (not offered: too many fractional {}, bound outside the window {}), swapped {}, sub solutions {}, incumbent improved by sub {} / by whole {}, sub share {:.0}% ({:.1}s of {:.1}s)",
+                        sh.n_offer.load(Relaxed),
+                        sh.n_rej_frac.load(Relaxed),
+                        sh.n_rej_win.load(Relaxed),
+                        sh.n_swap.load(Relaxed),
+                        sh.n_subsol.load(Relaxed),
+                        self.fjsub_imp[1],
+                        self.fjsub_imp[0],
+                        100.0 * ts / (ts + ta).max(1e-9),
+                        ts,
+                        ts + ta
+                    );
                 }
                 if self.dfsbb_kind() == 4 {
                     eprintln!("MIP: DFSBB4: d {:.1} ({}), L {}, root fractional {}, integers {}, mean depth of dive bottoms {:.1} ({} dives)", self.dfsbb_d(), env_str!("ENOMOTO_MIP_DFSBB_D").unwrap_or("frac"), self.dfsbb_l(), self.noinc_root_frac, self.p.is_int.iter().filter(|&&b| b).count(), self.dfsbb_leaf_depth_sum as f64 / self.dfsbb_leaf_cnt.max(1) as f64, self.dfsbb_leaf_cnt);
