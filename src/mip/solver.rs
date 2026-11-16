@@ -2315,6 +2315,8 @@ impl Nb5 {
             .collect();
         cand.extend_from_slice(&init);
         let mut pick = (f64::NEG_INFINITY, self.cur, 0.0);
+        // 予測の平均が最大の候補 (= GP が今いちばん良いと見る点)。獲得関数の選ぶ点 (探索込み) とは別
+        let mut mbest = (f64::NEG_INFINITY, self.cur);
         for c in cand {
             let kv: Vec<f64> = obs.iter().map(|o| kern(&c, &o.0, &ell)).collect();
             let mu = kv.iter().zip(&al).map(|(p, q)| p * q).sum::<f64>();
@@ -2332,9 +2334,13 @@ impl Nb5 {
             if score > pick.0 {
                 pick = (score, c, mu * ys + ym);
             }
+            if mu > mbest.0 {
+                mbest = (mu, c);
+            }
         }
         self.cur = pick.1;
-        self.best = (pick.1, pick.2);
+        // 以前は best に獲得関数の選んだ点 (= 次に試す点) を入れていた (9.31 節で直した)。今は予測の平均の最大の点
+        self.best = (mbest.1, mbest.0 * ys + ym);
         self.secs += t0.elapsed().as_secs_f64();
     }
 }
@@ -23715,7 +23721,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
                     eprintln!("MIP: NODESEL_BANDIT5: intervals {}, GP best point PLUNGE_QUOT {:.3} SIBLING_QUOT {:.3} u {:.3} (predicted reward {:.3e}), trajectory {}", v.k, 0.25 + 0.75 * v.best.0[0], 0.25 + 0.75 * v.best.0[1], v.best.0[2], v.best.1, v.traj);
-                    eprintln!("MIP: NODESEL_BANDIT5 time: choose {:.2}s, skipped without incumbent {}, dims {}, reward {}, window {}, decay work {}, refit {}", v.secs, v.skipped, env_str!("ENOMOTO_MIP_NB5_DIMS").unwrap_or("psu"), env_str!("ENOMOTO_MIP_NB5_REWARD").unwrap_or("q10"), tunable!("ENOMOTO_T_MIP_NB5_WINDOW", 40usize, usize), tunable!("ENOMOTO_T_MIP_NB5_DECAY_WORK", 0.0, f64), tunable!("ENOMOTO_T_MIP_NB5_REFIT", 1u64, u64));
+                    eprintln!("MIP: NODESEL_BANDIT5 time: choose {:.2}s, skipped without incumbent {}, dims {}, reward {}, window {}, decay work {}, refit {}, last proposal PLUNGE_QUOT {:.3} SIBLING_QUOT {:.3} u {:.3} (GP best point = posterior mean max)", v.secs, v.skipped, env_str!("ENOMOTO_MIP_NB5_DIMS").unwrap_or("psu"), env_str!("ENOMOTO_MIP_NB5_REWARD").unwrap_or("q10"), tunable!("ENOMOTO_T_MIP_NB5_WINDOW", 40usize, usize), tunable!("ENOMOTO_T_MIP_NB5_DECAY_WORK", 0.0, f64), tunable!("ENOMOTO_T_MIP_NB5_REFIT", 1u64, u64), 0.25 + 0.75 * v.cur[0], 0.25 + 0.75 * v.cur[1], v.cur[2]);
                 }
                 if let Some(b) = &self.nb {
                     eprintln!("MIP: NODESEL_BANDIT: version {}, pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", if b.v5.is_some() { 5 } else if b.v4 { 4 } else if b.v3 { 3 } else if b.v2 { 2 } else { 1 }, b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);
