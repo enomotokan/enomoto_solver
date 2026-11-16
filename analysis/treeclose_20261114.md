@@ -836,3 +836,19 @@ tbfp-network はどの設定でも 1/2 の揺れ。nb15 (診断の 15 問) は�
   floor((k+1) s) > floor(k s) のとき (s = `ENOMOTO_T_MIP_NB4_SHARE`、既定 0.5 なら 0101…)。決定的で単純。
 - 台本 `b58j/` (nb1 = cand1116 + `=1`、nb4 = cand1116 + `=4`): `python run_shard.py K nbx4` (損の 3 問 + mcsched × 種 1〜2、16 回、4 分担・各 0.69 時間)、
   `python run_shard.py K nbx15` (診断の 15 問 × 種 1〜2、60 回、4 分担・各 2.1 時間)。集計 `python summ.py nbx4` / `python summ.py nbx15`。
+
+### 9.20 深さ優先寄りのパラメータのベイズ最適化の台本 (利用者の案、b58k、b58j の後に回す)
+
+- ソルバー側: 腕 1 (深さ優先寄り) の値を環境変数で変えられるようにした (既定は今と同じ): `ENOMOTO_T_MIP_NB_ARM1_PQ` (1)・`_SQ` (1)・
+  `_NODES_MAX` (1000)・`_NODES_DIV` (10) (`nb_plunge_quot`・`nb_sibling_quot`・`nb_plunge_nodes_cap`)。
+- 探索空間 (`b58k/space.py`、[0, 1]^5): s = 腕 1 を選ぶ区間の割合 (`NB4_SHARE` 0〜1)、w = 区間の長さ (`NB_WORK`、対数で 5e3〜1e5)、
+  pq1 = 腕 1 の `PLUNGE_QUOT` (0.25〜1)、sq1 = 腕 1 の `SIBLING_QUOT` (0.25〜1)、u = 腕 1 の潜りのノード数の上限 (u = 0 で既定 1000・10、u = 1 で 1e9・1)。
+  すべて cand1116 + `NODESEL_BANDIT=4` の上。
+- 評価 (`plan.py`): mcsched・supportcase40・CMS750_4・kasai・rococoC10-001000・unitcal_7・traininstance6・tbfp-network × 種 1〜2・600 秒・4 スレッド
+  (fiball は解のくじ引きなので外す)。1 設定 = 1 分担 (16 回・約 2.8 時間)。
+- 目的値 (`propose.py`、小さいほど良い): 回ごとの log(秒 + 10) の平均 (秒は 600 で頭打ち、解けない回は 1200 秒の罰)。
+  ラウンド 0 は今の `=4` の既定 + ラテン超方格の 5 点 (`proposals_r0.json`)。ラウンド 1 以降は GP (RBF、長さのスケール・ノイズは格子で周辺尤度最大)
+  + 期待改善量の Kriging believer で K 点。乱数の種はラウンドで固定。numpy だけ (scipy・sklearn・optuna は入っていない)。
+- 手順: ラウンド R の分担表 `python plan.py R` → `python run_shard.py K boR` (K = 0〜K−1) → 集計 `python summ.py boR` →
+  次の提案 `python propose.py R+1 5` → `python plan.py R+1` … を 4〜5 ラウンド (合わせて 20〜30 設定)。最後に最良の設定を 58 問・15 問・Mittelmann で。
+- 仮の結果で `propose.py 1 5` が動くことを確かめた (s が小さいほど良い結果を作ると、提案は s ≈ 0.01〜0.09 に寄る)。

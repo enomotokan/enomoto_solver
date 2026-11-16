@@ -11336,7 +11336,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 分離は待ち行列から取り出したノードでしか行わないので、潜りが 1000 ノード続くと分離がほとんど起きない
                 // (neos-911970: 14000 ノード中、待ち行列からの取り出しは 70 回)
                 // `ENOMOTO_MIP_MEM2` の `d` (試作): 持ち物が上限の 1/2 を超えていたら、潜りのノード数の上限を外す (深さ優先に寄せる)
-                && (self.nodes - plunge_start < if self.highs_cutmgmt() { tunable!("ENOMOTO_T_MIP_HCM_PLUNGE_NODES", 100u64, u64) } else { (self.nodes / tunable!("ENOMOTO_T_MIP_PLUNGE_NODES_DIV", 10u64, u64)).min(tunable!("ENOMOTO_T_MIP_PLUNGE_NODES_MAX", 1000u64, u64)) }
+                && (self.nodes - plunge_start < if self.highs_cutmgmt() { tunable!("ENOMOTO_T_MIP_HCM_PLUNGE_NODES", 100u64, u64) } else { self.nb_plunge_nodes_cap() }
                     || (self.mem2_press && mem2('d'))
                     || memcap_level() >= 2)
             {
@@ -14379,14 +14379,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.nb.as_ref().map(|b| b.arm)
     }
 
-    /// 潜りの打ち切りの割合 (`ENOMOTO_T_MIP_PLUNGE_QUOT`、バンディットの腕 1 なら 1)。
+    /// 潜りの打ち切りの割合 (`ENOMOTO_T_MIP_PLUNGE_QUOT`。バンディットの腕 1 なら `ENOMOTO_T_MIP_NB_ARM1_PQ`、既定 1)。
     fn nb_plunge_quot(&self) -> f64 {
-        if self.nb_arm() == Some(1) { 1.0 } else { tunable!("ENOMOTO_T_MIP_PLUNGE_QUOT", 0.25, f64) }
+        if self.nb_arm() == Some(1) { tunable!("ENOMOTO_T_MIP_NB_ARM1_PQ", 1.0, f64) } else { tunable!("ENOMOTO_T_MIP_PLUNGE_QUOT", 0.25, f64) }
     }
 
-    /// 兄弟へ戻る下界の割合 (`ENOMOTO_T_MIP_SIBLING_QUOT`、バンディットの腕 1 なら 1)。
+    /// 兄弟へ戻る下界の割合 (`ENOMOTO_T_MIP_SIBLING_QUOT`。バンディットの腕 1 なら `ENOMOTO_T_MIP_NB_ARM1_SQ`、既定 1)。
     fn nb_sibling_quot(&self) -> f64 {
-        if self.nb_arm() == Some(1) { 1.0 } else { tunable!("ENOMOTO_T_MIP_SIBLING_QUOT", 0.25, f64) }
+        if self.nb_arm() == Some(1) { tunable!("ENOMOTO_T_MIP_NB_ARM1_SQ", 1.0, f64) } else { tunable!("ENOMOTO_T_MIP_SIBLING_QUOT", 0.25, f64) }
+    }
+
+    /// 1 回の潜りのノード数の上限 min(ノード数 / DIV, MAX) (`ENOMOTO_T_MIP_PLUNGE_NODES_DIV`・`_MAX`。バンディットの腕 1 なら
+    /// `ENOMOTO_T_MIP_NB_ARM1_NODES_DIV`・`_MAX`、既定は既定と同じ 10・1000)
+    fn nb_plunge_nodes_cap(&self) -> u64 {
+        if self.nb_arm() == Some(1) {
+            (self.nodes / tunable!("ENOMOTO_T_MIP_NB_ARM1_NODES_DIV", 10u64, u64).max(1)).min(tunable!("ENOMOTO_T_MIP_NB_ARM1_NODES_MAX", 1000u64, u64))
+        } else {
+            (self.nodes / tunable!("ENOMOTO_T_MIP_PLUNGE_NODES_DIV", 10u64, u64)).min(tunable!("ENOMOTO_T_MIP_PLUNGE_NODES_MAX", 1000u64, u64))
+        }
     }
 
     /// 今の区間の物差し: (ギャップの割合 (暫定解がなければ無限大), 全体の下界, 開いたノード, 処理したノード)
