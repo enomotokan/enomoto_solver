@@ -21,3 +21,5 @@ analysis/treeclose_20261114.md 9.44・9.45 節)。設定は cfg.py (cand1114 / c
   18 分担 (各最大約 42 分): `python run.py W K` (K = 0〜17)。デバッグ解 (unitcal_7_pre.sol.gz) を渡し、logs/ に MIP_DEBUG_SOL の行を残す。集計 `python summW.py > summ_W.txt`。
 - S (supportcase40 の切り分け): cand1116・cand1117・s_nodfsbb・s_k5・s_k3・c16+dfsbb × 種 1〜4、600 秒 (24 回)、8 分担 (各最大約 32 分):
   `python run.py S K` (K = 0〜7)、集計 `python summ.py S`。
+- W2 (誤答の再現、回数を増やす): cand1116・cand1117 × unitcal_7 × 種 1〜16、600 秒 (32 回)、8 分担: `python run.py W2 K` (K = 0〜7)、
+  集計 `python summW.py W2 > summ_W2.txt`。最新の版でビルドして回す (デバッグ解の検査の誤検知を直し、落とした所の説明を足した版)。

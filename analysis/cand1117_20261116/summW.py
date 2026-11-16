@@ -1,10 +1,11 @@
 """誤答の切り分け W の集計: python summW.py > summ_W.txt"""
-import json, glob
+import json, glob, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 OPT = 19635558.2440195
-rows = [json.loads(l) for f in sorted(glob.glob(str(D / "res_W_s*.jsonl"))) for l in open(f) if l.strip()]
-CF = json.loads((D / "shards_W.json").read_text())["cfgs"]
+SET = sys.argv[1] if len(sys.argv) > 1 else "W"  # W または W2
+rows = [json.loads(l) for f in sorted(glob.glob(str(D / f"res_{SET}_s*.jsonl"))) for l in open(f) if l.strip()]
+CF = json.loads((D / f"shards_{SET}.json").read_text())["cfgs"]
 def bad(x):
     tol = 1e-6 * abs(OPT)
     st = str(x.get("status") or "").lower()

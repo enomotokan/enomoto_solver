@@ -26,7 +26,7 @@ def rss_mb(pid):
     return 0.0
 LOGS = D / "logs"
 DSOL = Path(tempfile.gettempdir()) / "unitcal_7_pre.sol"
-if SET == "W" and not DSOL.exists():
+if SET.startswith("W") and not DSOL.exists():
     DSOL.write_bytes(gzip.decompress((D / "unitcal_7_pre.sol.gz").read_bytes()))
 def wlog(f):
     """ログから MIP_DEBUG_SOL の行 (最初の 200 行) と最後の 60 行を残して gzip にする (全部は大きい)"""
@@ -38,9 +38,9 @@ def run(cfg, seed, mps, tl):
     env = {key: v for key, v in os.environ.items() if not key.startswith("ENOMOTO_")}
     env.update(CFGS[cfg]); env["ENOMOTO_MIP_THREADS"] = "4"; env["ENOMOTO_T_MIP_SEED"] = str(seed)
     err = subprocess.DEVNULL
-    if SET == "W":  # 誤答の切り分け: デバッグ解 (前処理の後の問題の最適解) を渡し、標準エラーを logs/ に残す
+    if SET.startswith("W"):  # 誤答の切り分け: デバッグ解 (前処理の後の問題の最適解) を渡し、標準エラーを logs/ に残す
         env["ENOMOTO_MIP_DEBUG_SOL"] = str(DSOL); env["ENOMOTO_MIP_LOG"] = "1"
-        LOGS.mkdir(exist_ok=True); err = open(LOGS / f"W_{cfg}_s{seed}.log", "w")
+        LOGS.mkdir(exist_ok=True); err = open(LOGS / f"{SET}_{cfg}_s{seed}.log", "w")
     t0 = time.time(); peak = 0.0
     pr = subprocess.Popen([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-highs" if cfg == "highs" else "--worker-ours", str(mps), "--time-limit", str(tl), "--threads", "4"],
                           cwd=WT, env=env, stdout=subprocess.PIPE, stderr=err, text=True)
@@ -50,8 +50,8 @@ def run(cfg, seed, mps, tl):
     out, _ = pr.communicate()
     try: res = json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
     except Exception: res = {"status": "crash", "returncode": pr.returncode}  # noqa: BLE001
-    if SET == "W":
-        err.close(); wlog(LOGS / f"W_{cfg}_s{seed}.log")
+    if SET.startswith("W"):
+        err.close(); wlog(LOGS / f"{SET}_{cfg}_s{seed}.log")
     return res, round(peak), round(time.time() - t0, 1)
 for p, cfg, seed, tl in mine:
     if (p, cfg, seed) in done: continue
