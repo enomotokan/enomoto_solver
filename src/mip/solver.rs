@@ -845,6 +845,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     dfsbb_start: u64,
     dfsbb_abort: bool,
     dfsbb_stats: [u64; 3],
+    /// `DFSBB=4`: 葉・刈り込みで終わった潜りの深さの和と、今の潜りでいちばん最近潜った子の深さ
+    dfsbb_leaf_depth_sum: u64,
+    dfsbb_last_depth: u64,
     /// 根の LP (カットの前) を解くのにかかった秒 (再スタートの判定 `ENOMOTO_MIP_RESTART_FIRST_LPW` に使う)
     pub(super) root_lp_secs: f64,
     /// 暫定解が Feasibility Jump で見つけたものだけか (`ENOMOTO_MIP_FJ2_KEEP_NOINC` の判定に使う)
@@ -5311,6 +5314,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dfsbb_start: 0,
         dfsbb_abort: false,
         dfsbb_stats: [0; 3],
+        dfsbb_leaf_depth_sum: 0,
+        dfsbb_last_depth: 0,
         root_lp_secs: 0.0,
         inc_only_fj: false,
         ref_sol: None,
@@ -11693,7 +11698,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 試作 `ENOMOTO_MIP_TC` の `k` (既定では使わない、treeclose 9.6 節): 兄弟へ戻ったときも潜りの始めとして数える
                     // (`plunge_depth` は待ち行列から取り出したときだけ 0 に戻るので、深さ優先寄りでは潜りの始めだけで呼ぶ木の中の
                     // ヒューリスティクス・ノードの分離がほとんど呼ばれず、潜りの深さの上限 200 にも通算で当たる)
-                    if tc_on('k') || self.nb_arm() == Some(1) || self.nb.as_ref().is_some_and(|b| b.v5.is_some()) || self.dfsbb_kind() == 1 {
+                    if tc_on('k') || self.nb_arm() == Some(1) || self.nb.as_ref().is_some_and(|b| b.v5.is_some()) || matches!(self.dfsbb_kind(), 1 | 4) {
                         // (`DFSBB` の 2・3 は HiGHS と同じく、分離・木の中のヒューリスティクスは待ち行列から取ったノードでだけ)
                         plunge_depth = 0;
                     }
@@ -11740,8 +11745,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.dive_stack.clear();
                     // `ENOMOTO_MIP_DFSBB`: 潜りが終わった (上限で打ち切ったか、葉・刈り込みで終わったか) ので、次の潜りを数え始める
                     if self.dfsbb_on() {
-                        self.dfsbb_stats[0] += 1;
-                        self.dfsbb_stats[if std::mem::take(&mut self.dfsbb_abort) { 1 } else { 2 }] += 1;
+                        // (最初の取り出し (まだ潜っていない) は数えない)
+                        if std::mem::take(&mut self.dfsbb_abort) {
+                            self.dfsbb_stats[0] += 1;
+                            self.dfsbb_stats[1] += 1;
+                        } else if self.dfsbb_last_depth > 0 {
+                            self.dfsbb_stats[0] += 1;
+                            self.dfsbb_stats[2] += 1;
+                            self.dfsbb_leaf_depth_sum += self.dfsbb_last_depth;
+                        }
                         self.dfsbb_start = self.node_iters + self.sb_iters;
                     }
                     let lim = self.prune_limit();
@@ -11769,7 +11781,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     let n = match pinned.or(pooled).or_else(|| match self.dfsbb_kind() {
                         2 | 3 => self.queue.pop_hgs(tunable!("ENOMOTO_T_MIP_HGS_BB_EVERY", 10u64, u64)),
-                        1 => self.queue.pop_best(),
+                        1 | 4 => self.queue.pop_best(),
                         _ if force3 => self.queue.pop_best(),
                         _ => self.queue.pop(bb_every),
                     }) {
@@ -13479,6 +13491,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             let mut child = mk(first_c);
+            self.dfsbb_last_depth = child.depth as u64;
             if replay.is_some() {
                 child.estimate = rp_prio(first_c);
             }
@@ -14767,6 +14780,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         match env_str!("ENOMOTO_MIP_DFSBB") {
             Some("2") => 2,
             Some("3") => 3,
+            Some("4") => 4,
             _ => 1,
         }
     }
@@ -14776,11 +14790,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (tunable!("ENOMOTO_T_MIP_DFSBB_W", 5.0, f64) * self.root_lp_iters.max(tunable!("ENOMOTO_T_MIP_DFSBB_MIN_ITERS", 1000u64, u64)) as f64) as u64
     }
 
+    /// `DFSBB=4` の葉までの深さの目安 d (`ENOMOTO_MIP_DFSBB_D`): "frac" (既定) = 根の LP 解 (根のカットの後) で分数値の整数変数の数
+    /// (再スタートすると新しい根で取り直す)、"nint" = 前処理後の整数変数の数、"leaf" = これまでに葉・刈り込みで終わった潜りの深さの平均
+    /// (5 回に満たないうちは frac)
+    fn dfsbb_d(&self) -> f64 {
+        let frac = self.noinc_root_frac as f64;
+        match env_str!("ENOMOTO_MIP_DFSBB_D") {
+            Some("nint") => self.p.is_int.iter().filter(|&&b| b).count() as f64,
+            Some("leaf") if self.dfsbb_stats[2] >= 5 => self.dfsbb_leaf_depth_sum as f64 / self.dfsbb_stats[2] as f64,
+            _ => frac,
+        }
+    }
+
+    /// `DFSBB=4` の 1 回の潜りのノード数の上限 L = max(`ENOMOTO_T_MIP_DFSBB_LMIN` (既定 10), round(`ENOMOTO_T_MIP_DFSBB_C` (既定 3) × d))
+    fn dfsbb_l(&self) -> u64 {
+        (tunable!("ENOMOTO_T_MIP_DFSBB_C", 3.0, f64) * self.dfsbb_d()).round().max(tunable!("ENOMOTO_T_MIP_DFSBB_LMIN", 10u64, u64) as f64) as u64
+    }
+
     /// 今の潜りの手間が W 未満なら真。越えていたら打ち切りの印を付けて偽 (`DFSBB` を使っていなければいつも真)
     fn dfsbb_budget_ok(&mut self, plunge_nodes: u64) -> bool {
         let ok = match self.dfsbb_kind() {
             0 => return true,
             2 => plunge_nodes < tunable!("ENOMOTO_T_MIP_HGS_PLUNGE_NODES", 100u64, u64),
+            4 => plunge_nodes < self.dfsbb_l(),
             _ => (self.node_iters + self.sb_iters).saturating_sub(self.dfsbb_start) < self.dfsbb_w(),
         };
         if ok {
@@ -23888,6 +23920,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let last = v.hyp.map(|h| format!("{}/{}/{}~{}", h.0[0], h.0[1], h.0[2], h.1)).unwrap_or_else(|| "-".into());
                         eprintln!("MIP: NODESEL_BANDIT5 hyp: last {last}, refits {}, counts (ell_p/ell_s/ell_u~noise:n) {}", hc.iter().map(|h| h.2).sum::<u64>(), list.join(" "));
                     }
+                }
+                if self.dfsbb_kind() == 4 {
+                    eprintln!("MIP: DFSBB4: d {:.1} ({}), L {}, root fractional {}, integers {}, mean depth of plunges ended at a leaf or by pruning {:.1}", self.dfsbb_d(), env_str!("ENOMOTO_MIP_DFSBB_D").unwrap_or("frac"), self.dfsbb_l(), self.noinc_root_frac, self.p.is_int.iter().filter(|&&b| b).count(), self.dfsbb_leaf_depth_sum as f64 / self.dfsbb_stats[2].max(1) as f64);
                 }
                 if self.dfsbb_on() {
                     let s = self.dfsbb_stats;
