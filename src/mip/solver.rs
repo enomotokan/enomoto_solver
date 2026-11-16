@@ -856,6 +856,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     dfsbb_last_depth: u64,
     /// 根の LP (カットの前) を解くのにかかった秒 (再スタートの判定 `ENOMOTO_MIP_RESTART_FIRST_LPW` に使う)
     pub(super) root_lp_secs: f64,
+    /// 根の LP の手間 (主のスレッド、[`crate::ticks::total`] の差。`ENOMOTO_T_MIP_TICKS_MPSEP_MOVE_FRAC` の基準)
+    pub(super) root_lp_ticks: f64,
     /// 暫定解が Feasibility Jump で見つけたものだけか (`ENOMOTO_MIP_FJ2_KEEP_NOINC` の判定に使う)
     pub(super) inc_only_fj: bool,
     /// 暫定解がないときに RINS の相手に使う参照解 ([`REF_SOL`]、`ENOMOTO_MIP_RESTART_REF`)
@@ -5327,6 +5329,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dfsbb_leaf_cnt: 0,
         dfsbb_last_depth: 0,
         root_lp_secs: 0.0,
+        root_lp_ticks: 0.0,
         inc_only_fj: false,
         ref_sol: None,
         fj_poor_lb: f64::NEG_INFINITY,
@@ -9145,6 +9148,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let t_root_lp = Instant::now();
+        let tk_root_lp = crate::ticks::total();
         // 診断 ([`BASIS_NB_ROOT`]): 根の LP の種類 (0 サブ MIP、1 裏のカットの写し、2 解探索のスレッド、3 再スタートの後の主、4 最初の主)
         let root_kind = if self.params.submip {
             Some(0)
@@ -9408,6 +9412,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let root_iters = self.lp.total_iterations();
         self.root_lp_iters = root_iters;
         self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
+        self.root_lp_ticks = crate::ticks::total() - tk_root_lp;
         if !self.params.submip {
             // 最大を残す (裏のカットの写しの根の LP は主の基底から 1 反復で終わり、0 秒で上書きしてしまうので)。正の f64 のビットは
             // 大小の順が整数と同じ

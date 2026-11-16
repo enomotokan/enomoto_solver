@@ -5454,7 +5454,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // (入れ替え 1 回の重さが問題で 10〜100 倍違う)。初版の上限 max(125, 0.03 x 根の反復) は 58 問でこれらを約 2 倍遅くした
             // 試作 `ENOMOTO_MIP_TICKS` の `m` も同じ入れ替えの数の上限にする (手間の期限にした初版は、根の LP の秒から決めた上限を手間に
             // 直したため移動が長くなり、neos-960392 が 4 スレッドで根で解けなくなった: k58c で 1.9〜3.6 倍)
-            let (cap, piv) = if super::timedep('m') || super::ticks_on('m') {
+            // 試作 `ENOMOTO_MIP_TICKS` の `m` の別の形 (`ENOMOTO_T_MIP_TICKS_MPSEP_MOVE_FRAC` = f > 0、既定 0 = 使わない。12.11 節): 1 回の移動を、
+            // 時間版と同じ式の手間の期限 clamp(f x 根の LP の手間, 1e7, 1e8) で止める (入れ替えの上限は時間版と同じ、時間は 1 秒の安全網)
+            let tk_move = tunable!("ENOMOTO_T_MIP_TICKS_MPSEP_MOVE_FRAC", 0.0, f64);
+            let tk_budget = (super::ticks_on('m') && tk_move > 0.0).then(|| (tk_move * self.root_lp_ticks).clamp(1e7, 1e8));
+            let (cap, piv) = if tk_budget.is_some() {
+                (tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_SAFE", 1.0, f64), piv)
+            } else if super::timedep('m') || super::ticks_on('m') {
                 let p0 = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_P0", 16.0, f64);
                 let c = tunable!("ENOMOTO_T_MIP_TIMEDEP_MPSEP_C", 0.0, f64);
                 let k = p0.max(c * self.root_lp_iters as f64).ceil() as usize;
@@ -5469,7 +5475,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     break;
                 }
                 let seed = 7919 * (round as u64 + 1) + k as u64 + 1;
+                let _tk_guard = tk_budget.map(crate::ticks::budget_guard);
                 let (alt, _) = self.optface_alt_ext("mpsep", mode, seed, cap, piv, dbg);
+                drop(_tk_guard);
                 let Some(mut alt) = alt else { continue };
                 let xa = alt.col_values();
                 if xa.len() != n {
