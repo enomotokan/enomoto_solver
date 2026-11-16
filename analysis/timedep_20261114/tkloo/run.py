@@ -4,7 +4,7 @@ neos-827175 は ENOMOTO_MIP_LOG=1 のログを logs/<設定>_<問題>_s<種>.log
 import gzip, json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
-WT = D.parents[1]
+WT = D.parents[2]
 sys.path.insert(0, str(WT / "scripts"))
 sys.path.insert(0, str(D))
 import run_miplib_benchmark as rb  # noqa: E402
