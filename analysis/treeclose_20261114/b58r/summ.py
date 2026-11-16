@@ -9,7 +9,7 @@ rows = [json.loads(l) for f in sorted(glob.glob(str(D / f"{NAME}_s*.jsonl"))) fo
 by = {}
 for r in rows:
     by.setdefault(r["problem"], {}).setdefault(r["cfg"], {})[r["seed"]] = r["result"]
-cfgs = ["w1", "w5", "w25", "nb1", "d2n"]
+cfgs = ["w1", "w5", "w25", "hgs", "hgsw", "nb1", "d2n"]
 tl = max((r.get("tl", 600) for r in rows), default=600)
 for p in sorted(by):
     print(f"## {p}")
@@ -31,7 +31,7 @@ for c in cfgs:
 # 対の比 (同じ問題・種、時間切れは制限時間、ずらし 10 秒の比の幾何平均) と 95% 区間 (組の再標本 4000 回)
 import random
 random.seed(1)
-for a in ("w1", "w5", "w25"):
+for a in ("w1", "w5", "w25", "hgs", "hgsw"):
     for b in ("nb1", "d2n"):
         rs = [math.log((min(tl, by[p][a][s].get("time", tl)) + 10) / (min(tl, by[p][b][s].get("time", tl)) + 10))
               for p in by for s in by[p].get(a, {}) if s in by[p].get(b, {})]
@@ -40,7 +40,7 @@ for a in ("w1", "w5", "w25"):
         ms = sorted(sum(random.choice(rs) for _ in rs) / len(rs) for _ in range(4000))
         print(f"対の比 {a}/{b}: {math.exp(sum(rs) / len(rs)):.3f} [{math.exp(ms[100]):.3f}, {math.exp(ms[3899]):.3f}] ({len(rs)} 組、{a} が速い {sum(r < -0.05 for r in rs)}・遅い {sum(r > 0.05 for r in rs)})")
 # 潜りの統計 (設定ごとに合計)
-for c in ("w1", "w5", "w25"):
+for c in ("w1", "w5", "w25", "hgs", "hgsw"):
     t = [0, 0, 0]
     for p in by:
         for x in by[p].get(c, {}).values():

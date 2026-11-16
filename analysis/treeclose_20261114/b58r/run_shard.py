@@ -1,6 +1,6 @@
 """(analysis/treeclose_20261114.md 9.36 節、b58q/run_shard.py の写しで DFSBB の潜りの統計も stats に。ENOMOTO_MIP_DFSBB のある版で回す) 分担 K を回す: shards_NAME.json の K 番目の (問題, 設定, 種) を 4 スレッド・制限時間で 1 回ずつ解き、NAME_sK.jsonl に足す。ログは logs/<問題>_<設定>_s<種>_<組>.log.gz に (組の名前を付けてほかの組と衝突しないようにする)、開いたノード・兄弟への戻り・基底の戻し・ノードの分離のラウンドは行の result.stats に。
 使い方: python run_shard.py K NAME (b58r/ で、NAME は dfs15)。途中から再開できる。ソルバーは同時に 1 つ。
-設定は cfgs.py (w1・w5・w25・nb1・d2n)。"""
+設定は cfgs.py (w1・w5・w25・nb1・d2n、追加の分担 38〜52 は hgs・hgsw)。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -53,7 +53,7 @@ def stats_of(err):
     if m:
         st["nb5_hyp_last"], st["nb5_refits"] = m.group(1), int(m.group(2))
         st["nb5_hyp_counts"] = {t.rsplit(":", 1)[0]: int(t.rsplit(":", 1)[1]) for t in m.group(3).split()}
-    m = re.search(r"MIP: DFSBB: W (\d+) \(root LP iterations (\d+)\), plunges (\d+), ended by the work limit (\d+), ended at a leaf or by pruning (\d+)", err)
+    m = re.search(r"MIP: DFSBB: (?:kind \d+, )?W (\d+) \(root LP iterations (\d+)\), plunges (\d+), ended by the work limit (\d+), ended at a leaf or by pruning (\d+)", err)
     if m:
         st["dfsbb_w"], st["root_iters"], st["dfsbb_plunges"], st["dfsbb_wcut"], st["dfsbb_leaf"] = (int(m.group(i)) for i in range(1, 6))
     m = re.search(r"MIP: adaptive node cuts: rounds (\d+) effective (\d+)", err)

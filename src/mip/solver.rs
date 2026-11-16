@@ -11656,7 +11656,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 && (self.nodes - plunge_start < if self.highs_cutmgmt() { tunable!("ENOMOTO_T_MIP_HCM_PLUNGE_NODES", 100u64, u64) } else { self.nb_plunge_nodes_cap() }
                     || (self.mem2_press && mem2('d'))
                     || memcap_level() >= 2)
-                && self.dfsbb_budget_ok()
+                && self.dfsbb_budget_ok(self.nodes - plunge_start)
             {
                 let cutoff = self.prune_limit();
                 let glb = self.queue.best_lower_bound();
@@ -11693,7 +11693,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 試作 `ENOMOTO_MIP_TC` の `k` (既定では使わない、treeclose 9.6 節): 兄弟へ戻ったときも潜りの始めとして数える
                     // (`plunge_depth` は待ち行列から取り出したときだけ 0 に戻るので、深さ優先寄りでは潜りの始めだけで呼ぶ木の中の
                     // ヒューリスティクス・ノードの分離がほとんど呼ばれず、潜りの深さの上限 200 にも通算で当たる)
-                    if tc_on('k') || self.nb_arm() == Some(1) || self.nb.as_ref().is_some_and(|b| b.v5.is_some()) || self.dfsbb_on() {
+                    if tc_on('k') || self.nb_arm() == Some(1) || self.nb.as_ref().is_some_and(|b| b.v5.is_some()) || self.dfsbb_kind() == 1 {
+                        // (`DFSBB` の 2・3 は HiGHS と同じく、分離・木の中のヒューリスティクスは待ち行列から取ったノードでだけ)
                         plunge_depth = 0;
                     }
                     self.dom.reset_to_root(self.p);
@@ -11766,7 +11767,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if pooled.is_some() {
                         self.queue.skip_pop();
                     }
-                    let n = match pinned.or(pooled).or_else(|| if force3 || self.dfsbb_on() { self.queue.pop_best() } else { self.queue.pop(bb_every) }) {
+                    let n = match pinned.or(pooled).or_else(|| match self.dfsbb_kind() {
+                        2 | 3 => self.queue.pop_hgs(tunable!("ENOMOTO_T_MIP_HGS_BB_EVERY", 10u64, u64)),
+                        1 => self.queue.pop_best(),
+                        _ if force3 => self.queue.pop_best(),
+                        _ => self.queue.pop(bb_every),
+                    }) {
                         Some(n) => {
                             self.tp_kind = 1;
                             // `ENOMOTO_T_MIP_SUBMIP_STALL` (サブ MIP の中だけ、既定 12、0 なら使わない): 暫定解があり、待ち行列から取ったノードの
@@ -13492,7 +13498,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             // 1 回の潜りの深さの上限 `ENOMOTO_T_MIP_PLUNGE_DEPTH_MAX` (既定 200)。`plunge_depth` は待ち行列から取り出したときだけ 0 に戻る
             // (兄弟へ戻っても戻らない) ので、通算で上限を越えると潜らなくなり、子は 2 つとも待ち行列に積まれる (treeclose 9.3 節)
-            if plunge_depth <= tunable!("ENOMOTO_T_MIP_PLUNGE_DEPTH_MAX", 200usize, usize) && plunge_ok && self.dfsbb_budget_ok() {
+            if plunge_depth <= tunable!("ENOMOTO_T_MIP_PLUNGE_DEPTH_MAX", 200usize, usize) && plunge_ok && self.dfsbb_budget_ok(self.nodes - plunge_start) {
                 // 潜る: 定義域に分枝を積む (LP は今の基底から続ける)
                 if first_c.upper {
                     self.dom.tighten_upper(self.p, first_c.col, first_c.value);
@@ -14751,17 +14757,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
         !self.params.submip && env_str!("ENOMOTO_MIP_DFSBB").is_some_and(|v| v != "0")
     }
 
+    /// `ENOMOTO_MIP_DFSBB` の型: 1 = 手間の上限 W・待ち行列からは下界最小、2 = HiGHS と同じ (1 回の潜りのノード数の上限
+    /// `ENOMOTO_T_MIP_HGS_PLUNGE_NODES` (既定 100)、取り出しは [`NodeQueue::pop_hgs`] で `ENOMOTO_T_MIP_HGS_BB_EVERY` (既定 10))、
+    /// 3 = 2 のノード数の上限を手間の上限 W に置き換えたもの
+    fn dfsbb_kind(&self) -> u8 {
+        if !self.dfsbb_on() {
+            return 0;
+        }
+        match env_str!("ENOMOTO_MIP_DFSBB") {
+            Some("2") => 2,
+            Some("3") => 3,
+            _ => 1,
+        }
+    }
+
     /// W = `ENOMOTO_T_MIP_DFSBB_W` (既定 5) × max(根の LP の反復, `ENOMOTO_T_MIP_DFSBB_MIN_ITERS` (既定 1000))
     fn dfsbb_w(&self) -> u64 {
         (tunable!("ENOMOTO_T_MIP_DFSBB_W", 5.0, f64) * self.root_lp_iters.max(tunable!("ENOMOTO_T_MIP_DFSBB_MIN_ITERS", 1000u64, u64)) as f64) as u64
     }
 
     /// 今の潜りの手間が W 未満なら真。越えていたら打ち切りの印を付けて偽 (`DFSBB` を使っていなければいつも真)
-    fn dfsbb_budget_ok(&mut self) -> bool {
-        if !self.dfsbb_on() {
-            return true;
-        }
-        if (self.node_iters + self.sb_iters).saturating_sub(self.dfsbb_start) < self.dfsbb_w() {
+    fn dfsbb_budget_ok(&mut self, plunge_nodes: u64) -> bool {
+        let ok = match self.dfsbb_kind() {
+            0 => return true,
+            2 => plunge_nodes < tunable!("ENOMOTO_T_MIP_HGS_PLUNGE_NODES", 100u64, u64),
+            _ => (self.node_iters + self.sb_iters).saturating_sub(self.dfsbb_start) < self.dfsbb_w(),
+        };
+        if ok {
             return true;
         }
         self.dfsbb_abort = true;
@@ -23869,7 +23891,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if self.dfsbb_on() {
                     let s = self.dfsbb_stats;
-                    eprintln!("MIP: DFSBB: W {} (root LP iterations {}), plunges {}, ended by the work limit {}, ended at a leaf or by pruning {}", self.dfsbb_w(), self.root_lp_iters, s[0], s[1], s[2]);
+                    eprintln!("MIP: DFSBB: kind {}, W {} (root LP iterations {}), plunges {}, ended by the work limit {}, ended at a leaf or by pruning {}", self.dfsbb_kind(), self.dfsbb_w(), self.root_lp_iters, s[0], s[1], s[2]);
                 }
                 if let Some(b) = &self.nb {
                     eprintln!("MIP: NODESEL_BANDIT: version {}, pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", if b.v5.is_some() { 5 } else if b.v4 { 4 } else if b.v3 { 3 } else if b.v2 { 2 } else { 1 }, b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);
