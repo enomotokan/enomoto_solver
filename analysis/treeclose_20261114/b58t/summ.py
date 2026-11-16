@@ -52,10 +52,10 @@ for c in [c for c in cfgs if c != "nb1"]:
                 t[j] += st.get(k, 0) or 0
     print(f"{c}: 潜り {t[0]}、上限で打ち切り {t[1]} ({t[1] / max(t[0], 1):.0%})、葉・刈り込みで終わり {t[2]}")
 
-# FJSUB の統計 (fjsub の回の合計): [置いた, 置かなかった (分数値が多い), 置かなかった (範囲の外), 差し替え, 部分問題の解, 部分問題で更新, 全体で更新, 部分問題の割合%]
+# FJSUB の統計 (fjg・fjs の回の合計): [置いた, 置かなかった (分数値が多い), 置かなかった (範囲の外), 差し替え, 部分問題の解, 部分問題で更新, 全体で更新, 部分問題の割合%]
 t = [0] * 8
 for p in by:
-    for x in by[p].get("fjsub", {}).values():
+    for x in [v for c in ("fjg", "fjs") for v in by[p].get(c, {}).values()]:
         for i, v in enumerate(x.get("stats", {}).get("fjsub") or []):
             t[i] += v
 print("FJSUB 合計: 置いた {0}、置かなかった (分数値が多い {1}・範囲の外 {2})、差し替え {3}、部分問題の解 {4}、暫定解の更新 部分問題 {5}・全体 {6}".format(*t))

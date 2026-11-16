@@ -1,6 +1,6 @@
 """(analysis/treeclose_20261114.md 9.39 節、b58s/run_shard.py の写しで FJSUB の統計も stats に。ENOMOTO_MIP_FJSUB のある版で回す) 分担 K を回す: shards_NAME.json の K 番目の (問題, 設定, 種) を 4 スレッド・制限時間で 1 回ずつ解き、NAME_sK.jsonl に足す。ログは logs/<問題>_<設定>_s<種>_<組>.log.gz に (組の名前を付けてほかの組と衝突しないようにする)、開いたノード・兄弟への戻り・基底の戻し・ノードの分離のラウンドは行の result.stats に。
 使い方: python run_shard.py K NAME (b58t/ で、NAME は fs18)。途中から再開できる。ソルバーは同時に 1 つ。
-設定は cfgs.py (base・fjsub)。"""
+設定は cfgs.py (base・fjg・fjs)。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
