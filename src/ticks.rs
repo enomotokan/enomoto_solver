@@ -15,10 +15,13 @@ pub const HEUR: usize = 4;
 pub const NODE: usize = 5;
 /// LP の 1 反復ごとに 1 (反復の決まった手間の分)
 pub const LPIT: usize = 6;
-/// LU の分解・求解・更新 (`FtLu` の tick と同じ数え)
+/// LU の分解・求解・更新 (`FtLu` の tick と同じ数え。触った非零の数)
 pub const LU: usize = 7;
-pub const NK: usize = 8;
-pub const NAMES: [&str; NK] = ["lp", "prop", "sep", "pre", "heur", "node", "lpit", "lu"];
+/// LU の求解の、1 回ごとに行の数に比例する分 (配列を順に流す: 密な右辺の掃き出し・作業配列の片付けなど。非零 1 つより安い。
+/// analysis/timedep_20261114.md の 12.9 節: 行の多い neos-827175 では [`LU`] と同じ重みだと CPU 時間の 2 倍に数えていた)
+pub const LUM: usize = 8;
+pub const NK: usize = 9;
+pub const NAMES: [&str; NK] = ["lp", "prop", "sep", "pre", "heur", "node", "lpit", "lu", "lum"];
 
 thread_local! {
     static RAW: [Cell<u64>; NK] = const { [const { Cell::new(0) }; NK] };
@@ -34,7 +37,7 @@ fn weights() -> &'static [f64; NK] {
     static W: std::sync::OnceLock<[f64; NK]> = std::sync::OnceLock::new();
     W.get_or_init(|| {
         // 既定は 58 問の 1 スレッドの時間の規則のログ (analysis/timedep_20261114/tool/ticks_fit.py、cal4) で当てはめた重み x 1e9 (1 手間 ≒ 1 ns)
-        let mut w = [3.48, 5.55, 31.7, 84.0, 16.6, 235.0, 9063.0, 2.11];
+        let mut w = [3.48, 5.55, 31.7, 84.0, 16.6, 235.0, 9063.0, 2.11, 2.11];
         for (k, n) in NAMES.iter().enumerate() {
             if let Ok(v) = std::env::var(format!("ENOMOTO_T_TICKS_W_{}", n.to_uppercase())) {
                 if let Ok(x) = v.parse::<f64>() {
