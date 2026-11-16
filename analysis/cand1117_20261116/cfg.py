@@ -33,3 +33,12 @@ for _k in _ADD17:
     ISO["c16+" + _k.replace("ENOMOTO_MIP_", "").lower()] = {**CAND1116, _k: CAND1117[_k]}  # cand1116 に _k だけ足す
 # (cand1116 + TICKS + DETHASH は m_dfsbb と同じ)
 CFGS.update(ISO)
+
+# 誤答の切り分け W (unitcal_7 種 2 で cand1116 が最適値を切り落とした、planW.py): cand1116 から cand1114 → cand1116 で変わった鍵を 1 つずつ外す
+def _minus16(k):
+    d = dict(CAND1116)
+    if k in CAND1114: d[k] = CAND1114[k]
+    else: d.pop(k, None)
+    return d
+WRONG = {"w16_m_" + _k.replace("ENOMOTO_MIP_", "").lower(): _minus16(_k) for _k in _DIFF16}
+CFGS.update(WRONG)
