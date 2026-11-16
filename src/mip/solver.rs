@@ -2130,6 +2130,10 @@ pub(super) struct Nb5 {
     hyp: Option<([f64; 3], f64)>,
     /// `ENOMOTO_MIP_NB5_NOINC` で捨てた (暫定解がない) 区間の数
     skipped: u64,
+    /// 前の区間の終わりのギャップ (`nb_measure` の相対ギャップ)。`ENOMOTO_MIP_NB5_REWARD=gap`・`mix` で使う
+    g0: f64,
+    /// `mix` の正規化に使う |報酬| の指数移動平均 (q10, gap)
+    ema: [f64; 2],
 }
 
 /// `=5` で学習する次元 (`ENOMOTO_MIP_NB5_DIMS`、既定 "psu" = 3 次元とも。p = PLUNGE_QUOT、s = SIBLING_QUOT、u = ノード数の上限の尺度)
@@ -14694,6 +14698,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if b.v5.is_some() {
             let q1 = self.nb5_quantile();
+            let (g1, _, _, _) = self.nb_measure();
             let lb = self.global_lower_bound();
             let ub = self.prune_limit();
             let scale = if ub.is_finite() && lb.is_finite() { (ub - lb).abs().max(1e-9) } else { self.root_lb.abs().max(1.0) };
@@ -14707,7 +14712,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !first && !ub.is_finite() && env_str!("ENOMOTO_MIP_NB5_NOINC").is_some_and(|v| v != "0") {
                 v.skipped += 1;
             } else if !first {
-                let r = if q1.is_finite() && v.q0.is_finite() { (q1 - v.q0) / scale } else { 0.0 };
+                let rq = if q1.is_finite() && v.q0.is_finite() { (q1 - v.q0) / scale } else { 0.0 };
+                // `ENOMOTO_MIP_NB5_REWARD`: 既定 "q10" = 上の (下界の下位 10% 点の伸び) / ギャップ。"gap" = ギャップの縮み (g0 − g1) / g0
+                // (`=1` の closed と同じ形、上界の改善も数える。区間の長さでは割らない、q10 と同じ)。"mix" = 両者をそれぞれ |報酬| の指数移動平均で割って平均
+                let rg = if v.g0.is_finite() && v.g0 > 1e-12 && g1.is_finite() { (v.g0 - g1) / v.g0 } else { 0.0 };
+                let r = match env_str!("ENOMOTO_MIP_NB5_REWARD") {
+                    Some("gap") => rg,
+                    Some("mix") => {
+                        for (e, x) in v.ema.iter_mut().zip([rq, rg]) {
+                            *e = if *e > 0.0 { 0.9 * *e + 0.1 * x.abs() } else { x.abs() };
+                        }
+                        0.5 * (rq / v.ema[0].max(1e-12) + rg / v.ema[1].max(1e-12))
+                    }
+                    _ => rq,
+                };
                 v.obs.push((v.cur, r, v.k, work));
                 v.work = work;
                 // 軌跡は全区間を残す (9.23 節の集計で最後の 1/4 の平均・手間の重みを取るため。以前は 600 文字で切っていた)
@@ -14718,6 +14736,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 v.choose();
             }
             v.q0 = q1;
+            v.g0 = g1;
             b.pulls[0] += 1;
             b.next_work = work + wlen;
             return;
@@ -23696,7 +23715,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
                     eprintln!("MIP: NODESEL_BANDIT5: intervals {}, GP best point PLUNGE_QUOT {:.3} SIBLING_QUOT {:.3} u {:.3} (predicted reward {:.3e}), trajectory {}", v.k, 0.25 + 0.75 * v.best.0[0], 0.25 + 0.75 * v.best.0[1], v.best.0[2], v.best.1, v.traj);
-                    eprintln!("MIP: NODESEL_BANDIT5 time: choose {:.2}s, skipped without incumbent {}, dims {}, window {}, decay work {}, refit {}", v.secs, v.skipped, env_str!("ENOMOTO_MIP_NB5_DIMS").unwrap_or("psu"), tunable!("ENOMOTO_T_MIP_NB5_WINDOW", 40usize, usize), tunable!("ENOMOTO_T_MIP_NB5_DECAY_WORK", 0.0, f64), tunable!("ENOMOTO_T_MIP_NB5_REFIT", 1u64, u64));
+                    eprintln!("MIP: NODESEL_BANDIT5 time: choose {:.2}s, skipped without incumbent {}, dims {}, reward {}, window {}, decay work {}, refit {}", v.secs, v.skipped, env_str!("ENOMOTO_MIP_NB5_DIMS").unwrap_or("psu"), env_str!("ENOMOTO_MIP_NB5_REWARD").unwrap_or("q10"), tunable!("ENOMOTO_T_MIP_NB5_WINDOW", 40usize, usize), tunable!("ENOMOTO_T_MIP_NB5_DECAY_WORK", 0.0, f64), tunable!("ENOMOTO_T_MIP_NB5_REFIT", 1u64, u64));
                 }
                 if let Some(b) = &self.nb {
                     eprintln!("MIP: NODESEL_BANDIT: version {}, pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", if b.v5.is_some() { 5 } else if b.v4 { 4 } else if b.v3 { 3 } else if b.v2 { 2 } else { 1 }, b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);

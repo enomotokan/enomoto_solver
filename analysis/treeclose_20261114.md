@@ -963,9 +963,14 @@ cand1116 の上。集計 `b58j/summ_nbx4.txt`。
     暫定解が出た後の区間から学習が始まる。捨てた区間の数はログの `MIP: NODESEL_BANDIT5 time: … skipped without incumbent N, dims …`。
   - 軌跡は 3 値のまま (固定した次元は固定値) 書くので、`nb5final.py` はそのまま使える。
 - 試し (mcsched・種 1・60 秒、区間 5000): dims=s は 70 区間・choose 0.03 秒・最良点 SQ 0.625、dims=ps は 75 区間・0.05 秒・最良点 PQ 0.75・SQ 0.98。
-- 台本 `b58o/` (cand1116 + `=5` EI + `NB5_NOINC=1`): d3 = psu、d2 = ps、d1 = s。損の 3 問 + mcsched × 種 1・2、600 秒 (24 回・8 分担・各 3 回 ≤ 30 分)。
+- 報酬も選べるようにした (利用者の指示): `ENOMOTO_MIP_NB5_REWARD` 既定 "q10" = 今まで (下界の下位 10% 点の伸び / ギャップ)、
+  "gap" = ギャップの縮み (g0 − g1) / g0 (`=1` の closed と同じ相対ギャップ、上界の改善も数える、区間の長さでは割らない)、
+  "mix" = 両者をそれぞれ |報酬| の指数移動平均 (0.9) で割って平均 (b58o では使わない)。ログの `… dims …, reward …`。
+  試し (mcsched・60 秒・dims=ps): gap で 18 区間・最良点 PQ 0.40・SQ 0.95、mix で 19 区間・PQ 0.68・SQ 0.77。
+- 台本 `b58o/` (cand1116 + `=5` EI + `NB5_NOINC=1`): 次元 d3 = psu・d2 = ps・d1 = s × 報酬 q = q10・g = gap の 6 設定 (d3q・d3g・d2q・d2g・d1q・d1g)。
+  損の 3 問 + mcsched × 種 1・2、600 秒 (48 回・12 分担・各 4 回 ≤ 40 分。1 分担に違う 4 設定・違う 4 問を混ぜ、機械の速さの差が設定に偏らないようにする)。
   区間の長さ・窓・REFIT は b58n の集計の後に `cfgs.py` の `WIN` で決める (今は仮に区間 20000・窓 40)。
-  `python run_shard.py K nbo4` (K=0〜7)、集計 `python summ.py nbo4` と `python nb5final.py`。
+  `python run_shard.py K nbo4` (K=0〜11)、集計 `python summ.py nbo4` と `python nb5final.py`。
 
 ### 9.27 =5 の取り直し (b58m、軌跡を全区間残す版 c9e0afeb7、16 回・crash 0) と全区間での最終値
 
