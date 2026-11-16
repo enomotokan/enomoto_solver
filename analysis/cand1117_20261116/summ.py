@@ -8,7 +8,7 @@ SET = sys.argv[1] if len(sys.argv) > 1 else "P"
 rows = [json.loads(l) for f in sorted(glob.glob(str(D / f"res_{SET}_s*.jsonl"))) for l in open(f) if l.strip()]
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
 CF = ["cand1116", "cand1117", "highs"] if SET == "M" else ["cand1114", "cand1116", "cand1117"]
-def st(r): return r["result"].get("status")
+def st(r): return str(r["result"].get("status") or "").lower()  # HiGHS は "Optimal"・"Time limit reached"
 def solved(r): return st(r) in ("optimal", "infeasible")
 def t(r): return min(r["result"]["time"], r["tl"]) if solved(r) else r["tl"]
 probs = sorted({p for p, c, s in R}); seeds = sorted({s for p, c, s in R})
