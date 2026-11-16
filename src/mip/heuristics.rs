@@ -3800,13 +3800,15 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
     }
     if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
         eprintln!(
-            "MIP:   FJ/Local-MIP mix: FJ {n_fj} runs {t_fj:.2}s ({} improvements), Local-MIP {n_lm} slices {t_lm:.2}s ({} improvements, least violated rows {}), leader {}, first {:?}, best {}",
+            "MIP:   FJ/Local-MIP mix: FJ {n_fj} runs {t_fj:.2}s ({} improvements), Local-MIP {n_lm} slices {t_lm:.2}s ({} improvements, least violated rows {}), leader {}, first {:?}, best {} (wall {:.2}s, ticks {:.2}s)",
             wins[0],
             wins[1],
             lm.as_ref().map_or(usize::MAX, |l| l.res.least_viol),
             ["none", "FJ", "Local-MIP"][leader as usize],
             first.map(|(t, w)| (format!("{t:.2}s"), ["none", "FJ", "Local-MIP"][w as usize])),
-            best.as_ref().map_or("none".to_string(), |b| format!("{:.6e}", b.0))
+            best.as_ref().map_or("none".to_string(), |b| format!("{:.6e}", b.0)),
+            t0.elapsed().as_secs_f64(),
+            crate::ticks::total() * 1e-9 - if crate::ticks::vclock() { c0 } else { 0.0 }
         );
     }
     super::fj::SKIP_REPAIR_ON_STOP.with(|c| c.set(false));

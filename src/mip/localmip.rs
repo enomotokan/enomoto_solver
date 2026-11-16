@@ -993,7 +993,13 @@ impl<'a> LocalMip<'a> {
                 let kk = s.below(s.vset.len());
                 let i = s.vset[kk];
                 chain_tries += 1;
-                let abort = || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+                // `j` (手間の時計): 連鎖の手の探索の中でも手間の期限・門 (`over`) を見る (手間は [`chain_move`] が手数から足す)
+                let abort = || {
+                    if tk_end.is_some() && crate::ticks::over() {
+                        return true;
+                    }
+                    past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+                };
                 if let Some((_, mv)) = s.chain_move(i, chain_depth, sample_cols, &set_of, &abort) {
                     for &(k, v) in &mv {
                         s.apply(k, v, step);
@@ -1295,9 +1301,20 @@ pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: 
     // 手の評価の回数 (`abort` を見る間隔に使う)
     let mut evals = 0u32;
     let use_abort = env_str!("ENOMOTO_MIP_NO_CHAIN_ABORT").is_none();
-    let aborted = |evals: &mut u32| {
+    // 試作 `ENOMOTO_MIP_TICKS` の `j` (手間の時計): 打ち切りを見るたびに、その間の手数 (`effort`) × `ENOMOTO_T_MIP_CHAIN_EFFORT_TICKS` (4) を
+    // ヒューリスティクスの手間に足す (連鎖の手の探索は他に手間を数えない)
+    let vc = crate::ticks::vclock();
+    let effort_seen = std::cell::Cell::new(0u64);
+    let chain_k = tunable!("ENOMOTO_T_MIP_CHAIN_EFFORT_TICKS", 4u64, u64);
+    let aborted = |evals: &mut u32, effort: u64| {
         *evals += 1;
-        use_abort && *evals % 32 == 0 && abort()
+        if use_abort && *evals % 32 == 0 {
+            if vc {
+                crate::ticks::add(crate::ticks::HEUR, chain_k * effort.saturating_sub(effort_seen.replace(effort)));
+            }
+            return abort();
+        }
+        false
     };
     let mut newv: HashMap<usize, f64> = HashMap::new();
     let mut dl: HashMap<usize, f64> = HashMap::new();
@@ -1328,6 +1345,16 @@ pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: 
         }
         *effort += loc.len() as u64;
         let mut g = 0.0;
+        // 試作 `ENOMOTO_MIP_DETHASH`: 和の順 (浮動小数の丸め) が `HashMap` の走査順で変わらないよう、行の番号の順に足す
+        if super::dethash() {
+            let mut e: Vec<(usize, f64)> = loc.iter().map(|(&r, &dd)| (r, dd)).collect();
+            e.sort_unstable_by_key(|t| t.0);
+            for (r, dd) in e {
+                let d0 = dl.get(&r).copied().unwrap_or(0.0);
+                g += contrib(v, r, d0 + dd) - contrib(v, r, d0);
+            }
+            return g;
+        }
         for (&r, &dd) in &loc {
             let d0 = dl.get(&r).copied().unwrap_or(0.0);
             g += contrib(v, r, d0 + dd) - contrib(v, r, d0);
@@ -1354,7 +1381,7 @@ pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: 
             if first.is_none_or(|f| g > f.0) {
                 first = Some((g, j, val));
             }
-            if aborted(&mut evals) {
+            if aborted(&mut evals, effort) {
                 return None;
             }
         }
@@ -1431,7 +1458,7 @@ pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: 
             if bc.is_none_or(|b| g > b.0) {
                 bc = Some((g, ci));
             }
-            if aborted(&mut evals) {
+            if aborted(&mut evals, effort) {
                 return None;
             }
         }

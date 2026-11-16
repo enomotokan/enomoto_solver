@@ -2113,7 +2113,8 @@ impl TwoStageLp {
         let flags = sid::tl_flags();
         let ihs = crate::cancel::inherit();
         let shared_lb = bound.clone();
-        let (st, flags, y_mid) = pool_s.install(|| {
+        let (st, flags, y_mid, tk_d) = pool_s.install(|| {
+            let tk0 = crate::ticks::raw();
             sid::set_tl_flags(flags);
             let _ = stamp.is_some().then(sid::take_bound_duals);
             let st = if td {
@@ -2123,9 +2124,12 @@ impl TwoStageLp {
             };
             // 診断 `ENOMOTO_MIP_XOLAZY_LOG`: 二段解法が最後に下界を計算した途中の基底の双対
             let y_mid = stamp.is_some().then(sid::take_bound_duals);
-            (st, sid::tl_flags(), y_mid)
+            let tk1 = crate::ticks::raw();
+            (st, sid::tl_flags(), y_mid, std::array::from_fn(|k| tk1[k].wrapping_sub(tk0[k])))
         });
         sid::set_tl_flags(flags);
+        // 二段解法の手間 (1 スレッドのプールで解いた分) を呼び手のスレッドに数える (試作 `ENOMOTO_MIP_TICKS` の `j` で主の進みを測るため)
+        crate::ticks::add_raw(&tk_d);
         let conclusive = matches!(st, LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded | LpStatus::ObjectiveBound | LpStatus::TimeLimit);
         if td {
             if conclusive {

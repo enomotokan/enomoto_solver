@@ -901,8 +901,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     lmip_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// `ENOMOTO_MIP_LOCALMIP` のスレッドが良くなった解を入れる箱
     lmip_mailbox: Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>,
-    /// 試作 `ENOMOTO_MIP_TICKS` の `j`: FJ のスレッドの手間の門 ([`crate::ticks::Gate`])、前に許したときの主の LP の反復、最後に待ったときの状態
-    fj_gate: Option<(std::sync::Arc<crate::ticks::Gate>, u64, crate::ticks::GateState)>,
+    /// 試作 `ENOMOTO_MIP_TICKS` の `j`: FJ のスレッドの手間の門 ([`crate::ticks::Gate`])、前に許したときの主のスレッドの手間、最後に待ったときの状態
+    fj_gate: Option<(std::sync::Arc<crate::ticks::Gate>, f64, crate::ticks::GateState)>,
     /// 試作 `ENOMOTO_MIP_FPR` (fix-propagate-repair、[`super::fpr`]) の別スレッドと受け渡し箱
     pub(super) fpr: super::fpr::FprState,
     /// `ENOMOTO_MIP_FJ_NOSOL_EXTEND`: 暫定解を持ったら立てて、FJ のスレッドの延長をやめさせる印
@@ -8771,8 +8771,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if nosol_cap > 0.0 {
                     self.fj_has_inc = Some(has_inc.clone());
                 }
-                // `j`: 最初に許す手間は、根の LP の反復の見積り (行 + 列) の分 ([`Self::fj_grant_per_iter`])
-                let gate = tk_j.then(|| crate::ticks::Gate::new(self.fj_grant_per_iter() * (self.p.m + self.p.n) as f64));
+                // `j`: 最初に許す手間は下限の分 (根の LP の手間は、`r` で別スレッドで解いても主のスレッドに数える)
+                let gate = tk_j.then(|| crate::ticks::Gate::new(tunable!("ENOMOTO_T_MIP_FJDET_MIN", 2e6, f64)));
                 let gate2 = gate.clone();
                 let h = std::thread::spawn(move || {
                     crate::ticks::set_vclock(gate2.is_some());
@@ -8846,7 +8846,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if let Some((g, _, _)) = self.fj_gate.take() {
                     g.stop();
                 }
-                self.fj_gate = gate.map(|g| (g, self.lp.total_iterations() + self.heur_iters, crate::ticks::GateState::default()));
+                self.fj_gate = gate.map(|g| (g, crate::ticks::total(), crate::ticks::GateState::default()));
             } else if !self.params.submip && !proof_only() && self.feasibility_jump(effort, cap) && self.params.verbose {
                 eprintln!("MIP: feasibility jump found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
             }
@@ -21650,31 +21650,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 別スレッドの Feasibility Jump を止めて結果を受け取る。
-    /// 試作 `ENOMOTO_MIP_TICKS` の `j`: 主の LP の反復 1 回あたりにスレッドに許す手間 (LP の 1 反復の手間の見積り:
-    /// 反復の決まった分 + 3 × 行 × 行あたりの重み、× `ENOMOTO_T_MIP_FJDET_K` (1))
-    fn fj_grant_per_iter(&self) -> f64 {
-        let m = self.lp.num_rows().max(self.p.m) as f64;
-        tunable!("ENOMOTO_T_MIP_FJDET_K", 1.0, f64) * (crate::ticks::weight(crate::ticks::LPIT) + 3.0 * crate::ticks::weight(crate::ticks::LP) * m)
-    }
-
     /// `j`: FJ のスレッドが門で止まるか終わるまで待ち、その状態を覚える (門がなければ何もしない)
     fn fj_gate_wait(&mut self) {
+        let verbose = self.params.verbose;
+        let t_all = self.start;
         if let Some((g, _, st)) = self.fj_gate.as_mut() {
+            let t = Instant::now();
             *st = g.wait_paused();
+            let w = t.elapsed().as_secs_f64();
+            if verbose && w >= 0.01 {
+                eprintln!("MIP: TICKS j: waited {w:.3}s for the FJ thread at the gate (granted {:.3e}, thread at {:.3e}, done {}, {:.2}s)", st.granted, st.progress, st.done, t_all.elapsed().as_secs_f64());
+            }
         }
     }
 
-    /// `j`: 前に許してからの主の LP の反復 (+ ヒューリスティクスの反復) に見合う手間を許す
-    /// (`ENOMOTO_T_MIP_FJDET_MIN` (2e6) 〜 `_MAX` (5e8) 手間)
+    /// `j`: 前に許してからの主のスレッドの手間 ([`crate::ticks::total`]) × `ENOMOTO_T_MIP_FJDET_K` (1) を許す
+    /// (`ENOMOTO_T_MIP_FJDET_MIN` (2e6) 〜 `_MAX` (5e8) 手間)。主のスレッドの手間は、同じ道なら回によらず同じ
+    /// (det4 の 7 問で 2 回・遅い機械の真似とも一致。並列の部分を主が受け持つ割合で変わる手間は数えていない)
     fn fj_gate_grant(&mut self) {
-        let it = self.lp.total_iterations() + self.heur_iters;
-        let per = self.fj_grant_per_iter();
+        let now = crate::ticks::total();
+        let k = tunable!("ENOMOTO_T_MIP_FJDET_K", 1.0, f64);
         if let Some((g, last, st)) = self.fj_gate.as_mut() {
             if st.done {
                 return;
             }
-            let add = (per * it.saturating_sub(*last) as f64).clamp(tunable!("ENOMOTO_T_MIP_FJDET_MIN", 2e6, f64), tunable!("ENOMOTO_T_MIP_FJDET_MAX", 5e8, f64));
-            *last = it;
+            let add = (k * (now - *last)).clamp(tunable!("ENOMOTO_T_MIP_FJDET_MIN", 2e6, f64), tunable!("ENOMOTO_T_MIP_FJDET_MAX", 5e8, f64));
+            *last = now;
             g.grant(add);
         }
     }

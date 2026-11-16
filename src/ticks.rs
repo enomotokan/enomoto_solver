@@ -65,6 +65,15 @@ pub fn raw() -> [u64; NK] {
     RAW.with(|r| std::array::from_fn(|k| r[k].get()))
 }
 
+/// 部分ごとの手間 `d` (別スレッドで測った [`raw`] の差) をこのスレッドに足す (別スレッドに任せて待った仕事の手間を呼び手に数える)。
+pub fn add_raw(d: &[u64; NK]) {
+    RAW.with(|r| {
+        for k in 0..NK {
+            r[k].set(r[k].get().wrapping_add(d[k]));
+        }
+    });
+}
+
 /// このスレッドの手間の期限 (重み付きの合計) を過ぎたか (期限がなければ偽)。
 #[inline]
 pub fn over() -> bool {
