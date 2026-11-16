@@ -20,7 +20,8 @@ def near(p):
 pat = re.compile(r"intervals (\d+), GP best point PLUNGE_QUOT ([\d.]+) SIBLING_QUOT ([\d.]+) u ([\d.]+) \(predicted reward ([^)]+)\), trajectory (.*)")
 R = []
 for f in files:
-    m = re.match(r"(.+)_([a-z0-9]+)_s(\d+)\.log(\.gz)?$", Path(f).name)
+    # ログ名は <問題>_<設定>_s<種>[_<組>].log.gz (b58o からは組の名前 nbo4 を付けて、ほかの組のログと衝突しないようにする)
+    m = re.match(r"(.+)_([a-z0-9]+)_s(\d+)(?:_[a-z0-9]+)?\.log(\.gz)?$", Path(f).name)
     if not m:
         continue
     line = None

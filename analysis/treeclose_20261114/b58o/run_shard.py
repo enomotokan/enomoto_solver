@@ -1,4 +1,4 @@
-"""(analysis/treeclose_20261114.md 9.26 節、b58n/run_shard.py の写し。NB5_DIMS・NB5_NOINC のある版で回す) 分担 K を回す: shards_NAME.json の K 番目の (問題, 設定, 種) を 4 スレッド・制限時間で 1 回ずつ解き、NAME_sK.jsonl に足す。ログは logs/ に、開いたノード・兄弟への戻り・基底の戻し・ノードの分離のラウンドは行の result.stats に。
+"""(analysis/treeclose_20261114.md 9.26 節、b58n/run_shard.py の写し。NB5_DIMS・NB5_NOINC のある版で回す) 分担 K を回す: shards_NAME.json の K 番目の (問題, 設定, 種) を 4 スレッド・制限時間で 1 回ずつ解き、NAME_sK.jsonl に足す。ログは logs/<問題>_<設定>_s<種>_<組>.log.gz に (組の名前を付けてほかの組と衝突しないようにする)、開いたノード・兄弟への戻り・基底の戻し・ノードの分離のラウンドは行の result.stats に。
 使い方: python run_shard.py K NAME (b58o/ で、NAME は nbo4)。途中から再開できる。ソルバーは同時に 1 つ。
 設定は cfgs.py (d3q・d3g・d2q・d2g・d1q・d1g)。"""
 import json, os, subprocess, sys, time
@@ -73,7 +73,7 @@ for p, c, seed in plan["shards"][k]:
         res = json.loads([l for l in r.stdout.splitlines() if l.startswith("{")][-1])
         fold = [l for l in r.stderr.splitlines() if l.startswith("MIP_FOLD") or "TUBR" in l][:8]
         import gzip
-        with gzip.open(D / "logs" / f"{p}_{c}_s{seed}.log.gz", "wt") as lf:
+        with gzip.open(D / "logs" / f"{p}_{c}_s{seed}_{NAME}.log.gz", "wt") as lf:
             lf.write(r.stderr)
         res["stats"] = stats_of(r.stderr)
     except Exception as e:  # noqa: BLE001
