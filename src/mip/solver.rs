@@ -2116,11 +2116,18 @@ pub(super) struct NodeselBandit {
 #[derive(Debug, Default)]
 pub(super) struct Nb5 {
     cur: [f64; 3],
-    obs: Vec<([f64; 3], f64, u64)>,
+    /// (点, 報酬, 区間の番号, 区間の終わりの手間)
+    obs: Vec<([f64; 3], f64, u64, u64)>,
     k: u64,
     traj: String,
     q0: f64,
     best: ([f64; 3], f64),
+    /// 区間の終わりの手間 (LP の反復の累計)。`ENOMOTO_T_MIP_NB5_DECAY_WORK` > 0 のとき、割引をこの差で測る
+    work: u64,
+    /// choose (GP の当てはめと獲得関数) に掛かった秒
+    secs: f64,
+    /// 前に周辺尤度で選んだ (長さの尺度, 雑音)。`ENOMOTO_T_MIP_NB5_REFIT` 回に 1 回だけ選び直す
+    hyp: Option<([f64; 3], f64)>,
 }
 
 const NB5_INIT: [[f64; 3]; 4] = [[0.0, 0.0, 1.0 / 7.0], [1.0, 1.0, 1.0 / 7.0], [1.0, 1.0, 1.0], [0.5, 0.5, 0.5]];
@@ -2194,40 +2201,55 @@ impl Nb5 {
             return;
         }
         let win = tunable!("ENOMOTO_T_MIP_NB5_WINDOW", 40usize, usize).max(4);
-        let obs: Vec<&([f64; 3], f64, u64)> = self.obs.iter().rev().take(win).collect();
+        let t0 = std::time::Instant::now();
+        let obs: Vec<&([f64; 3], f64, u64, u64)> = self.obs.iter().rev().take(win).collect();
         let n = obs.len();
         let ym = obs.iter().map(|o| o.1).sum::<f64>() / n as f64;
         let ys = (obs.iter().map(|o| (o.1 - ym).powi(2)).sum::<f64>() / n as f64).sqrt().max(1e-12);
         let z: Vec<f64> = obs.iter().map(|o| (o.1 - ym) / ys).collect();
         let decay = tunable!("ENOMOTO_T_MIP_NB5_DECAY", 1.05, f64);
         let now = self.k;
+        // 割引の年齢: 既定は経過した区間の数。`NB5_DECAY_WORK` > 0 なら経過した反復 / NB5_DECAY_WORK (区間の長さによらず同じ割引にする)
+        let dw = tunable!("ENOMOTO_T_MIP_NB5_DECAY_WORK", 0.0, f64);
+        let age = |o: &([f64; 3], f64, u64, u64)| if dw > 0.0 { self.work.saturating_sub(o.3) as f64 / dw } else { (now - o.2) as f64 };
         let kern = |a: &[f64; 3], b: &[f64; 3], ell: &[f64; 3]| (-0.5 * (0..3).map(|d| ((a[d] - b[d]) / ell[d]).powi(2)).sum::<f64>()).exp();
         // 周辺尤度で長さの尺度・雑音を選ぶ
         let grid = [0.15, 0.4, 1.0];
-        let mut best: Option<(f64, [f64; 3], Vec<f64>, Vec<f64>)> = None;
-        for &a in &grid {
-            for &b in &grid {
-                for &c in &grid {
-                    for &nz in &[0.05, 0.3] {
-                        let ell = [a, b, c];
-                        let mut kk = vec![0.0; n * n];
-                        for i in 0..n {
-                            for j in 0..n {
-                                kk[i * n + j] = kern(&obs[i].0, &obs[j].0, &ell);
+        // 選び直さない区間は前の (尺度, 雑音) だけで当てはめる (既定 1 = 毎回選び直す、今までと同じ)
+        let refit = tunable!("ENOMOTO_T_MIP_NB5_REFIT", 1u64, u64).max(1);
+        let mut hyps: Vec<([f64; 3], f64)> = Vec::new();
+        match self.hyp {
+            Some(h) if self.k % refit != 0 => hyps.push(h),
+            _ => {
+                for &a in &grid {
+                    for &b in &grid {
+                        for &c in &grid {
+                            for &nz in &[0.05, 0.3] {
+                                hyps.push(([a, b, c], nz));
                             }
-                            kk[i * n + i] += nz * decay.powf((now - obs[i].2) as f64);
-                        }
-                        let Some(l) = chol(&kk, n) else { continue };
-                        let al = chol_solve(&l, n, &z);
-                        let ll = -0.5 * z.iter().zip(&al).map(|(p, q)| p * q).sum::<f64>() - (0..n).map(|i| l[i * n + i].ln()).sum::<f64>();
-                        if best.as_ref().is_none_or(|b| ll > b.0) {
-                            best = Some((ll, ell, l, al));
                         }
                     }
                 }
             }
         }
-        let Some((_, ell, l, al)) = best else { return };
+        let mut best: Option<(f64, [f64; 3], f64, Vec<f64>, Vec<f64>)> = None;
+        for &(ell, nz) in &hyps {
+            let mut kk = vec![0.0; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    kk[i * n + j] = kern(&obs[i].0, &obs[j].0, &ell);
+                }
+                kk[i * n + i] += nz * decay.powf(age(obs[i]));
+            }
+            let Some(l) = chol(&kk, n) else { continue };
+            let al = chol_solve(&l, n, &z);
+            let ll = -0.5 * z.iter().zip(&al).map(|(p, q)| p * q).sum::<f64>() - (0..n).map(|i| l[i * n + i].ln()).sum::<f64>();
+            if best.as_ref().is_none_or(|b| ll > b.0) {
+                best = Some((ll, ell, nz, l, al));
+            }
+        }
+        let Some((_, ell, nzb, l, al)) = best else { return };
+        self.hyp = Some((ell, nzb));
         let ei = env_str!("ENOMOTO_MIP_NB5_ACQ") == Some("ei");
         let kappa = tunable!("ENOMOTO_T_MIP_NB5_KAPPA", 1.0, f64);
         let zbest = z.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -2254,6 +2276,7 @@ impl Nb5 {
         }
         self.cur = pick.1;
         self.best = (pick.1, pick.2);
+        self.secs += t0.elapsed().as_secs_f64();
     }
 }
 
@@ -14627,7 +14650,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let v = b.v5.as_mut().unwrap();
             if !first {
                 let r = if q1.is_finite() && v.q0.is_finite() { (q1 - v.q0) / scale } else { 0.0 };
-                v.obs.push((v.cur, r, v.k));
+                v.obs.push((v.cur, r, v.k, work));
+                v.work = work;
                 // 軌跡は全区間を残す (9.23 節の集計で最後の 1/4 の平均・手間の重みを取るため。以前は 600 文字で切っていた)
                 if v.traj.len() < 1 << 20 {
                     v.traj.push_str(&format!("{:.2}/{:.2}/{:.2}:{:+.3e}@{} ", 0.25 + 0.75 * v.cur[0], 0.25 + 0.75 * v.cur[1], v.cur[2], r, iw));
@@ -23614,6 +23638,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
                     eprintln!("MIP: NODESEL_BANDIT5: intervals {}, GP best point PLUNGE_QUOT {:.3} SIBLING_QUOT {:.3} u {:.3} (predicted reward {:.3e}), trajectory {}", v.k, 0.25 + 0.75 * v.best.0[0], 0.25 + 0.75 * v.best.0[1], v.best.0[2], v.best.1, v.traj);
+                    eprintln!("MIP: NODESEL_BANDIT5 time: choose {:.2}s, window {}, decay work {}, refit {}", v.secs, tunable!("ENOMOTO_T_MIP_NB5_WINDOW", 40usize, usize), tunable!("ENOMOTO_T_MIP_NB5_DECAY_WORK", 0.0, f64), tunable!("ENOMOTO_T_MIP_NB5_REFIT", 1u64, u64));
                 }
                 if let Some(b) = &self.nb {
                     eprintln!("MIP: NODESEL_BANDIT: version {}, pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", if b.v5.is_some() { 5 } else if b.v4 { 4 } else if b.v3 { 3 } else if b.v2 { 2 } else { 1 }, b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);
