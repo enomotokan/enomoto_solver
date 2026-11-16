@@ -840,6 +840,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_same_obj: bool,
     /// 最初の根の LP の反復数 (丸め系のヒューリスティクスの連続部分の LP の反復上限に使う)
     pub(super) root_lp_iters: u64,
+    /// 試作 `ENOMOTO_MIP_DFSBB` (既定では使わない、treeclose 9.36 節): 今の潜りを始めたときの手間 (主のスレッドの LP の反復)、
+    /// 手間の上限で潜りを打ち切ったか、統計 [潜りの回数, 上限で打ち切った回数, 葉・刈り込みで終わった回数]
+    dfsbb_start: u64,
+    dfsbb_abort: bool,
+    dfsbb_stats: [u64; 3],
     /// 根の LP (カットの前) を解くのにかかった秒 (再スタートの判定 `ENOMOTO_MIP_RESTART_FIRST_LPW` に使う)
     pub(super) root_lp_secs: f64,
     /// 暫定解が Feasibility Jump で見つけたものだけか (`ENOMOTO_MIP_FJ2_KEEP_NOINC` の判定に使う)
@@ -5303,6 +5308,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sublb_seen: std::cell::Cell::new(false),
         submip_same_obj: false,
         root_lp_iters: 0,
+        dfsbb_start: 0,
+        dfsbb_abort: false,
+        dfsbb_stats: [0; 3],
         root_lp_secs: 0.0,
         inc_only_fj: false,
         ref_sol: None,
@@ -11648,6 +11656,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 && (self.nodes - plunge_start < if self.highs_cutmgmt() { tunable!("ENOMOTO_T_MIP_HCM_PLUNGE_NODES", 100u64, u64) } else { self.nb_plunge_nodes_cap() }
                     || (self.mem2_press && mem2('d'))
                     || memcap_level() >= 2)
+                && self.dfsbb_budget_ok()
             {
                 let cutoff = self.prune_limit();
                 let glb = self.queue.best_lower_bound();
@@ -11684,7 +11693,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 試作 `ENOMOTO_MIP_TC` の `k` (既定では使わない、treeclose 9.6 節): 兄弟へ戻ったときも潜りの始めとして数える
                     // (`plunge_depth` は待ち行列から取り出したときだけ 0 に戻るので、深さ優先寄りでは潜りの始めだけで呼ぶ木の中の
                     // ヒューリスティクス・ノードの分離がほとんど呼ばれず、潜りの深さの上限 200 にも通算で当たる)
-                    if tc_on('k') || self.nb_arm() == Some(1) || self.nb.as_ref().is_some_and(|b| b.v5.is_some()) {
+                    if tc_on('k') || self.nb_arm() == Some(1) || self.nb.as_ref().is_some_and(|b| b.v5.is_some()) || self.dfsbb_on() {
                         plunge_depth = 0;
                     }
                     self.dom.reset_to_root(self.p);
@@ -11728,6 +11737,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     plunge_depth = 0;
                     plunge_start = self.nodes;
                     self.dive_stack.clear();
+                    // `ENOMOTO_MIP_DFSBB`: 潜りが終わった (上限で打ち切ったか、葉・刈り込みで終わったか) ので、次の潜りを数え始める
+                    if self.dfsbb_on() {
+                        self.dfsbb_stats[0] += 1;
+                        self.dfsbb_stats[if std::mem::take(&mut self.dfsbb_abort) { 1 } else { 2 }] += 1;
+                        self.dfsbb_start = self.node_iters + self.sb_iters;
+                    }
                     let lim = self.prune_limit();
                     self.prune_queue(lim);
                     // 下界最小のノードを選ぶ頻度: 暫定解があれば上げる (下界を押し上げる)
@@ -11751,7 +11766,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if pooled.is_some() {
                         self.queue.skip_pop();
                     }
-                    let n = match pinned.or(pooled).or_else(|| if force3 { self.queue.pop_best() } else { self.queue.pop(bb_every) }) {
+                    let n = match pinned.or(pooled).or_else(|| if force3 || self.dfsbb_on() { self.queue.pop_best() } else { self.queue.pop(bb_every) }) {
                         Some(n) => {
                             self.tp_kind = 1;
                             // `ENOMOTO_T_MIP_SUBMIP_STALL` (サブ MIP の中だけ、既定 12、0 なら使わない): 暫定解があり、待ち行列から取ったノードの
@@ -13477,7 +13492,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             // 1 回の潜りの深さの上限 `ENOMOTO_T_MIP_PLUNGE_DEPTH_MAX` (既定 200)。`plunge_depth` は待ち行列から取り出したときだけ 0 に戻る
             // (兄弟へ戻っても戻らない) ので、通算で上限を越えると潜らなくなり、子は 2 つとも待ち行列に積まれる (treeclose 9.3 節)
-            if plunge_depth <= tunable!("ENOMOTO_T_MIP_PLUNGE_DEPTH_MAX", 200usize, usize) && plunge_ok {
+            if plunge_depth <= tunable!("ENOMOTO_T_MIP_PLUNGE_DEPTH_MAX", 200usize, usize) && plunge_ok && self.dfsbb_budget_ok() {
                 // 潜る: 定義域に分枝を積む (LP は今の基底から続ける)
                 if first_c.upper {
                     self.dom.tighten_upper(self.p, first_c.col, first_c.value);
@@ -14690,6 +14705,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 潜りの打ち切りの割合 (`ENOMOTO_T_MIP_PLUNGE_QUOT`。バンディットの腕 1 なら `ENOMOTO_T_MIP_NB_ARM1_PQ`、既定 1)。
     fn nb_plunge_quot(&self) -> f64 {
+        if self.dfsbb_on() {
+            return 1.0;
+        }
         if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
             return 0.25 + 0.75 * v.cur[0];
         }
@@ -14698,6 +14716,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 兄弟へ戻る下界の割合 (`ENOMOTO_T_MIP_SIBLING_QUOT`。バンディットの腕 1 なら `ENOMOTO_T_MIP_NB_ARM1_SQ`、既定 1)。
     fn nb_sibling_quot(&self) -> f64 {
+        if self.dfsbb_on() {
+            return 1.0;
+        }
         if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
             return 0.25 + 0.75 * v.cur[1];
         }
@@ -14707,6 +14728,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 1 回の潜りのノード数の上限 min(ノード数 / DIV, MAX) (`ENOMOTO_T_MIP_PLUNGE_NODES_DIV`・`_MAX`。バンディットの腕 1 なら
     /// `ENOMOTO_T_MIP_NB_ARM1_NODES_DIV`・`_MAX`、既定は既定と同じ 10・1000)
     fn nb_plunge_nodes_cap(&self) -> u64 {
+        if self.dfsbb_on() {
+            return u64::MAX;
+        }
         if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
             let u = v.cur[2];
             let div = 10f64.powf(1.0 - u).round().max(1.0) as u64;
@@ -14718,6 +14742,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             (self.nodes / tunable!("ENOMOTO_T_MIP_PLUNGE_NODES_DIV", 10u64, u64)).min(tunable!("ENOMOTO_T_MIP_PLUNGE_NODES_MAX", 1000u64, u64))
         }
+    }
+
+    /// 試作 `ENOMOTO_MIP_DFSBB=1` (既定では使わない、treeclose 9.36 節、利用者の案): 潜りは常に深さ優先 (PLUNGE_QUOT・SIBLING_QUOT = 1、
+    /// 潜りのノード数の上限なし、兄弟へ戻っても潜りの始めとして数える)。1 回の潜り (兄弟への戻りを含む) の手間が W を越えたら打ち切り、
+    /// 待ち行列からは必ず下界最小を取る。サブ MIP では使わない
+    fn dfsbb_on(&self) -> bool {
+        !self.params.submip && env_str!("ENOMOTO_MIP_DFSBB").is_some_and(|v| v != "0")
+    }
+
+    /// W = `ENOMOTO_T_MIP_DFSBB_W` (既定 5) × max(根の LP の反復, `ENOMOTO_T_MIP_DFSBB_MIN_ITERS` (既定 1000))
+    fn dfsbb_w(&self) -> u64 {
+        (tunable!("ENOMOTO_T_MIP_DFSBB_W", 5.0, f64) * self.root_lp_iters.max(tunable!("ENOMOTO_T_MIP_DFSBB_MIN_ITERS", 1000u64, u64)) as f64) as u64
+    }
+
+    /// 今の潜りの手間が W 未満なら真。越えていたら打ち切りの印を付けて偽 (`DFSBB` を使っていなければいつも真)
+    fn dfsbb_budget_ok(&mut self) -> bool {
+        if !self.dfsbb_on() {
+            return true;
+        }
+        if (self.node_iters + self.sb_iters).saturating_sub(self.dfsbb_start) < self.dfsbb_w() {
+            return true;
+        }
+        self.dfsbb_abort = true;
+        false
     }
 
     /// 今の区間の物差し: (ギャップの割合 (暫定解がなければ無限大), 全体の下界, 開いたノード, 処理したノード)
@@ -23818,6 +23866,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let last = v.hyp.map(|h| format!("{}/{}/{}~{}", h.0[0], h.0[1], h.0[2], h.1)).unwrap_or_else(|| "-".into());
                         eprintln!("MIP: NODESEL_BANDIT5 hyp: last {last}, refits {}, counts (ell_p/ell_s/ell_u~noise:n) {}", hc.iter().map(|h| h.2).sum::<u64>(), list.join(" "));
                     }
+                }
+                if self.dfsbb_on() {
+                    let s = self.dfsbb_stats;
+                    eprintln!("MIP: DFSBB: W {} (root LP iterations {}), plunges {}, ended by the work limit {}, ended at a leaf or by pruning {}", self.dfsbb_w(), self.root_lp_iters, s[0], s[1], s[2]);
                 }
                 if let Some(b) = &self.nb {
                     eprintln!("MIP: NODESEL_BANDIT: version {}, pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", if b.v5.is_some() { 5 } else if b.v4 { 4 } else if b.v3 { 3 } else if b.v2 { 2 } else { 1 }, b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);
