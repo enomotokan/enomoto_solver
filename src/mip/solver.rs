@@ -6598,7 +6598,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// [`Self::ts2_has`] の b・c の分離の時間の予算 (と d の行の上限)
     fn ts2_budget_ok(&mut self) -> bool {
-        if self.node_cut_secs >= tunable!("ENOMOTO_T_MIP_TREESEP2_FRAC", 0.3, f64) * self.start.elapsed().as_secs_f64() {
+        if !self.node_cut_frac_ok(tunable!("ENOMOTO_T_MIP_TREESEP2_FRAC", 0.3, f64)) {
             return false;
         }
         if self.ts2_has('d') && self.ts2_tree_rows() > self.ts2_rows_cap() {
@@ -6669,7 +6669,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let warm = self.fc_stats.0 < tunable!("ENOMOTO_T_MIP_FC_SEP_WARM", 30u64, u64);
             let eff_ok = self.fc_stats.1 >= tunable!("ENOMOTO_T_MIP_FC_SEP_MIN_GAIN", 0.05, f64);
-            let time_ok = self.node_cut_secs < tunable!("ENOMOTO_T_MIP_FC_SEP_TIME_FRAC", 0.3, f64) * self.start.elapsed().as_secs_f64();
+            let time_ok = self.node_cut_frac_ok(tunable!("ENOMOTO_T_MIP_FC_SEP_TIME_FRAC", 0.3, f64));
             let go = if time_ok && (warm || eff_ok) {
                 true
             } else {
@@ -6695,7 +6695,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // f = 0.1 でも 40 問では 17 問 28.67 (既定 19 問 27.81): neos5・neos-860300 が時間切れ、misc07 13.7 -> 22.7 秒、
         // mik-250 34.9 -> 48.6 秒 (加えたカットの行が残ってノードの LP が重くなる) ので既定では使わない
         let f = tunable!("ENOMOTO_T_MIP_NODE_CUT_TIME_FRAC", 0.0, f64);
-        if f > 0.0 && self.node_cut_secs < f * self.start.elapsed().as_secs_f64() {
+        if f > 0.0 && self.node_cut_frac_ok(f) {
             return true;
         }
         freq > 0 && depth % freq == 0
@@ -6769,6 +6769,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 伸びで数える効き目は qiu・misc07・mas76 でも 0.9 以上になり、遅くなる問題を止められない (neos-911970 は 0.3〜0.5)。
     /// そこで費用の側を 2 つ足した: カットが密なら止める ([`Self::nca_dense`])、分離の時間がノードの LP の時間に比べて
     /// 大きければ止める ([`Self::nca_lp_budget_ok`])。analysis/node_cut_adapt_fix_20261020.md
+    /// ノードの分離 (解き直しを含む) に使った時間が経過時間の `frac` 倍より少ないか。試作 `ENOMOTO_MIP_TICKS` の `k` なら手間で比べる
+    /// (TREESEP2・FC_NODE_SEP_ADAPT・FC_NODE_SEP2・NODE_CUT_TIME_FRAC・HiGHS 流のカット管理のノードの分離の予算)
+    fn node_cut_frac_ok(&self, frac: f64) -> bool {
+        if super::ticks_on('k') {
+            self.node_cut_ticks < frac * (crate::ticks::total() - self.ticks0)
+        } else {
+            self.node_cut_secs < frac * self.start.elapsed().as_secs_f64()
+        }
+    }
+
     fn node_cut_adapt_due(&mut self) -> bool {
         let over = if super::ticks_on('t') {
             self.node_cut_ticks >= tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_FRAC", 0.1, f64) * (crate::ticks::total() - self.ticks0)
@@ -12788,7 +12798,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if hcm_sep {
                     let feastol = 1e-6 * self.hcm_root_obj.abs().max(1.0);
                     let fresh = hcm_sep_rounds > 0;
-                    let budget_ok = !fresh || self.node_cut_secs < tunable!("ENOMOTO_T_MIP_HCM_NODE_SEP_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64();
+                    let budget_ok = !fresh || self.node_cut_frac_ok(tunable!("ENOMOTO_T_MIP_HCM_NODE_SEP_FRAC", 0.1, f64));
                     let go = budget_ok
                         && hcm_sep_rounds < tunable!("ENOMOTO_T_MIP_HCM_NODE_SEP_ROUNDS", 10usize, usize)
                         && (hcm_sep_rounds == 0 || node_obj - self.hcm_root_obj > 1.01 * (hcm_sep_last_obj - self.hcm_root_obj).max(feastol));
@@ -12821,7 +12831,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if !fresh {
                             hcm_sep_rounds = 1;
                             hcm_sep_last_obj = node_obj;
-                            if self.node_cut_secs < tunable!("ENOMOTO_T_MIP_HCM_NODE_SEP_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64() {
+                            if self.node_cut_frac_ok(tunable!("ENOMOTO_T_MIP_HCM_NODE_SEP_FRAC", 0.1, f64)) {
                                 let t_nc = Instant::now();
                                 let tk_nc = crate::ticks::total();
                                 let it_nc = self.lp.total_iterations();
@@ -12940,7 +12950,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let feastol = 1e-6 * node_obj.abs().max(1.0);
                     fc2_rounds < tunable!("ENOMOTO_T_MIP_FC_SEP_ROUNDS", 5usize, usize)
                         && (fc2_rounds == 0 || node_obj - fc2_first > 1.01 * (fc2_last - fc2_first).max(feastol))
-                        && self.node_cut_secs < tunable!("ENOMOTO_T_MIP_FC_SEP2_TIME_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64()
+                        && self.node_cut_frac_ok(tunable!("ENOMOTO_T_MIP_FC_SEP2_TIME_FRAC", 0.1, f64))
                 };
                 // `ENOMOTO_MIP_TREE_SEP`: 取り出したノードでは、プールのラウンドの後でも分離し ([`Solver::tree_sep_start`] で始めるか
                 // を決める)、LP の値が前のラウンドまでの伸びの 1.01 倍を超えて伸び、時間の予算に収まる間
