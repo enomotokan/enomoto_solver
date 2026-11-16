@@ -2134,6 +2134,8 @@ pub(super) struct Nb5 {
     g0: f64,
     /// `mix` の正規化に使う |報酬| の指数移動平均 (q10, gap)
     ema: [f64; 2],
+    /// 周辺尤度の格子から選び直したときに選ばれた (長さの尺度, 雑音) と回数 (ログ用)
+    hyp_counts: Vec<([f64; 3], f64, u64)>,
 }
 
 /// `=5` で学習する次元 (`ENOMOTO_MIP_NB5_DIMS`、既定 "psu" = 3 次元とも。p = PLUNGE_QUOT、s = SIBLING_QUOT、u = ノード数の上限の尺度)
@@ -2243,6 +2245,21 @@ impl Nb5 {
             return;
         }
         let on = nb5_dims();
+        // `ENOMOTO_MIP_NB5_NOGP=1` (対照): GP・獲得関数を使わず、初期点の後は Halton の候補を決まった順に試すだけ (学習なしで空間を均等に試す)
+        if env_str!("ENOMOTO_MIP_NB5_NOGP").is_some_and(|v| v != "0") {
+            let i = (k - init.len()) % 256 + 1;
+            let bases = [2usize, 3, 5];
+            let mut x = [0.0; 3];
+            let mut bi = 0;
+            for d in 0..3 {
+                if on[d] {
+                    x[d] = halton(i, bases[bi]);
+                    bi += 1;
+                }
+            }
+            self.cur = nb5_project(x);
+            return;
+        }
         let win = tunable!("ENOMOTO_T_MIP_NB5_WINDOW", 40usize, usize).max(4);
         let t0 = std::time::Instant::now();
         let obs: Vec<&([f64; 3], f64, u64, u64)> = self.obs.iter().rev().take(win).collect();
@@ -2294,6 +2311,12 @@ impl Nb5 {
             }
         }
         let Some((_, ell, nzb, l, al)) = best else { return };
+        if hyps.len() > 1 {
+            match self.hyp_counts.iter_mut().find(|h| h.0 == ell && h.1 == nzb) {
+                Some(h) => h.2 += 1,
+                None => self.hyp_counts.push((ell, nzb, 1)),
+            }
+        }
         self.hyp = Some((ell, nzb));
         let ei = env_str!("ENOMOTO_MIP_NB5_ACQ") == Some("ei");
         let kappa = tunable!("ENOMOTO_T_MIP_NB5_KAPPA", 1.0, f64);
@@ -23722,6 +23745,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
                     eprintln!("MIP: NODESEL_BANDIT5: intervals {}, GP best point PLUNGE_QUOT {:.3} SIBLING_QUOT {:.3} u {:.3} (predicted reward {:.3e}), trajectory {}", v.k, 0.25 + 0.75 * v.best.0[0], 0.25 + 0.75 * v.best.0[1], v.best.0[2], v.best.1, v.traj);
                     eprintln!("MIP: NODESEL_BANDIT5 time: choose {:.2}s, skipped without incumbent {}, dims {}, reward {}, window {}, decay work {}, refit {}, last proposal PLUNGE_QUOT {:.3} SIBLING_QUOT {:.3} u {:.3} (GP best point = posterior mean max)", v.secs, v.skipped, env_str!("ENOMOTO_MIP_NB5_DIMS").unwrap_or("psu"), env_str!("ENOMOTO_MIP_NB5_REWARD").unwrap_or("q10"), tunable!("ENOMOTO_T_MIP_NB5_WINDOW", 40usize, usize), tunable!("ENOMOTO_T_MIP_NB5_DECAY_WORK", 0.0, f64), tunable!("ENOMOTO_T_MIP_NB5_REFIT", 1u64, u64), 0.25 + 0.75 * v.cur[0], 0.25 + 0.75 * v.cur[1], v.cur[2]);
+                    {
+                        let mut hc = v.hyp_counts.clone();
+                        hc.sort_by(|a, b| b.2.cmp(&a.2));
+                        let list: Vec<String> = hc.iter().map(|h| format!("{}/{}/{}~{}:{}", h.0[0], h.0[1], h.0[2], h.1, h.2)).collect();
+                        let last = v.hyp.map(|h| format!("{}/{}/{}~{}", h.0[0], h.0[1], h.0[2], h.1)).unwrap_or_else(|| "-".into());
+                        eprintln!("MIP: NODESEL_BANDIT5 hyp: last {last}, refits {}, counts (ell_p/ell_s/ell_u~noise:n) {}", hc.iter().map(|h| h.2).sum::<u64>(), list.join(" "));
+                    }
                 }
                 if let Some(b) = &self.nb {
                     eprintln!("MIP: NODESEL_BANDIT: version {}, pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", if b.v5.is_some() { 5 } else if b.v4 { 4 } else if b.v3 { 3 } else if b.v2 { 2 } else { 1 }, b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);
