@@ -19,7 +19,8 @@ def near(p):
 pat = re.compile(r"intervals (\d+), GP best point PLUNGE_QUOT ([\d.]+) SIBLING_QUOT ([\d.]+) u ([\d.]+) \(predicted reward ([^)]+)\), trajectory (.*)")
 R = []
 for f in files:
-    m = re.match(r"(.+)_(nb5[ue])_s(\d+)\.log(\.gz)?$", Path(f).name)
+    # nbl15 の分は、nbl4 と同じ名前のログ (mcsched・tbfp-network) だけ <名前>_nbl15[s0].log.gz に置いた
+    m = re.match(r"(.+)_(nb5[ue])_s(\d+)(?:_nbl15(?:s0)?)?\.log(\.gz)?$", Path(f).name)
     if not m:
         continue
     line = None
