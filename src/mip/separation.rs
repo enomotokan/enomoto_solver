@@ -21,6 +21,9 @@ thread_local! {
     static CLIQUE_AUTO_FIRST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// `ENOMOTO_MIP_CLIQUE_CUTS=fallback` で clique カットを加えて回す 2 回目のループの中か (時間の上限をループの始めから数える)
     static CLIQUE_FB_SECOND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 試作 `ENOMOTO_T_MIP_CLIQUE_FB_MARGINAL` (analysis/rootgap_20261116 の 3 節): 外側の主の根のカットのループのラウンドごとの目的値 (fallback の判定で、
+    /// 最後の k ラウンドの伸びと比べる)
+    static CLQFB_HIST: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
     /// [`Solver::probe_cut_mode`] で、目的値が動かないラウンドでも止めずに k ラウンド回すか (試作 `ENOMOTO_MIP_CLIQUE_CUTS=probe` の比べ。
     /// neos-1456979 はクリークカットを入れても 3 ラウンド目までは目的値が 154 のままで、4 ラウンド目から伸びる)
     static PROBE_NO_FLAT_STOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -994,7 +997,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let (gc, gd) = (obj1 - obj0, obj0 - first_obj);
         let scale = obj0.abs().max(1.0);
-        let on = gc > tunable!("ENOMOTO_T_MIP_CLIQUE_FB_GAIN", 1e-4, f64) * scale && gc > tunable!("ENOMOTO_T_MIP_CLIQUE_FB_RATIO", 0.5, f64) * gd;
+        // 試作 `ENOMOTO_T_MIP_CLIQUE_FB_MARGINAL` = k (> 0、既定 0 = 使わない。analysis/rootgap_20261116 の 3 節): 比べる相手を、ループ全体の伸び g_d でなく
+        // ループの最後の k ラウンドの伸び (限界の伸び) にし、clique カット 1 回の伸びがその `ENOMOTO_T_MIP_CLIQUE_FB_MRATIO` (1) 倍を超えたら使う。
+        // ループ全体の伸びと比べると、ほかのカットでよく伸びた問題ほど使われない (mzzv11: g_c 4.6e-4・g_d 3.8e-2 で使わないが、最後の 5 ラウンドの伸びは
+        // 6e-5。根で回すと根の下界 −22007 → −21887 で HiGHS (前処理の列挙・プロービングなし) の −21884 と同じ)
+        let marg_k = tunable!("ENOMOTO_T_MIP_CLIQUE_FB_MARGINAL", 0usize, usize);
+        let gd_cmp = if marg_k > 0 {
+            let h = CLQFB_HIST.with(|h| std::mem::take(&mut *h.borrow_mut()));
+            match h.len() {
+                0 => gd,
+                n => obj0 - if n > marg_k { h[n - 1 - marg_k] } else { first_obj },
+            }
+        } else {
+            gd
+        };
+        let ratio = if marg_k > 0 { tunable!("ENOMOTO_T_MIP_CLIQUE_FB_MRATIO", 1.0, f64) } else { tunable!("ENOMOTO_T_MIP_CLIQUE_FB_RATIO", 0.5, f64) };
+        let on = gc > tunable!("ENOMOTO_T_MIP_CLIQUE_FB_GAIN", 1e-4, f64) * scale && gc > ratio * gd_cmp;
+        if marg_k > 0 && self.params.verbose {
+            eprintln!("MIP: clique fallback (MARGINAL {marg_k}): the last {marg_k} rounds gained {:.3e} relative", gd_cmp / scale);
+        }
         // `ENOMOTO_T_MIP_CLIQUE_FB_FRAC` = r (> 0、既定 0.9。0 で使わない): ほかのカットで目的値がまったく動かず (g_d <= 1e-9)、clique カットで分数の列の数が
         // r 倍以下に減るときも使う (drayage-100-23 は根の LP 値が最適値で g_c = 0。clique カットで LP 解が整数に近づき根の RENS が効く)
         let frac_r = tunable!("ENOMOTO_T_MIP_CLIQUE_FB_FRAC", 0.9, f64);
@@ -1382,6 +1403,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut prev_obj = self.lp.objective();
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
         let first_obj = prev_obj;
+        // 試作 `ENOMOTO_T_MIP_CLIQUE_FB_MARGINAL`: このループのラウンドの目的値だけを持つ
+        CLQFB_HIST.with(|h| h.borrow_mut().clear());
         // `ENOMOTO_MIP_CUTSTALL_GAP` ([`cutstall_gap`]): 外側の根 (裏のカットの写しを含む) だけ
         let cs_gap = cutstall_gap().filter(|_| !self.params.submip);
         // 試作 `ENOMOTO_MIP_ROOTSTOP` の `r` ([`super::rootstop::RateStop`]): 外側の主の根だけ
@@ -2375,6 +2398,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             self.bg_cut_rounds = round_ctr;
+            // 試作 `ENOMOTO_T_MIP_CLIQUE_FB_SECOND_ROUNDS` = r (> 0、既定 0 = 上限なし): clique の fallback で続ける 2 回目のループを r ラウンドまでにする
+            // (根の時間の増えを抑える)
+            let second_cap = tunable!("ENOMOTO_T_MIP_CLIQUE_FB_SECOND_ROUNDS", 0usize, usize);
+            if second_cap > 0 && job.is_none() && CLIQUE_FB_SECOND.with(|c| c.get()) && round >= second_cap {
+                if self.params.verbose {
+                    eprintln!("MIP: cut round {round}: clique fallback second loop round cap {second_cap} -> stop");
+                }
+                break;
+            }
             // `ENOMOTO_T_MIP_CLIQUE_FB_EARLY` = k (> 0): fallback の判定を、k ラウンド回っても目的値がまったく動かないときは
             // k ラウンド目で行い、使うならこのループの続きで clique カットを加える (drayage-25-23 では clique なしの 6 ラウンドに
             // 6.5 秒かかる)。ここで使わないと決まらなければループの後でもう一度判定する
@@ -3569,6 +3601,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if env_str!("ENOMOTO_MIP_DEBUG_FC").is_some() && !self.params.submip {
                 super::cuts::FC_STATS.with(|s| eprintln!("FC stats (calls, cuts, no SNF): {:?}", s.borrow()));
+            }
+            if job.is_none() && !self.params.submip && tunable!("ENOMOTO_T_MIP_CLIQUE_FB_MARGINAL", 0usize, usize) > 0 {
+                CLQFB_HIST.with(|h| h.borrow_mut().push(obj));
             }
             if self.params.verbose {
                 let cut_nnz: usize = (p.m..self.lp.num_rows()).map(|i| self.lp.row_ref(i).len()).sum();
