@@ -2070,7 +2070,8 @@ impl TwoStageLp {
         // L = `ENOMOTO_T_MIP_TIMEDEP_RACE_C` (既定 1) x (行 + 列) を付け、内点法側からは止めさせない。L 以内に結論を出せば二段解法、
         // 出せなければ内点法 + クロスオーバーの頂点を待って採る (頂点が得られなければ二段解法を続ける)。内点法は二段解法の書く
         // 共有の下界を読まない (止まる反復が二段解法の進みで変わるため)
-        let td = !force_ipm && env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains('r'));
+        // 試作 `ENOMOTO_MIP_TICKS` の `r` (analysis/timedep_20261114.md の 12.5 節) も同じ形
+        let td = !force_ipm && (env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains('r')) || crate::mip::ticks_on('r'));
         let td_lim = if td {
             let l = (tunable!("ENOMOTO_T_MIP_TIMEDEP_RACE_C", 1.0, f64) * (self.rows.len() + self.n) as f64).max(100.0) as u64;
             SolveLimits { iteration_limit: lim.iteration_limit.min(l), ..*lim }

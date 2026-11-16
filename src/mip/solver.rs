@@ -892,6 +892,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     lmip_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// `ENOMOTO_MIP_LOCALMIP` のスレッドが良くなった解を入れる箱
     lmip_mailbox: Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>,
+    /// 試作 `ENOMOTO_MIP_TICKS` の `j`: FJ のスレッドの手間の門 ([`crate::ticks::Gate`])、前に許したときの主の LP の反復、最後に待ったときの状態
+    fj_gate: Option<(std::sync::Arc<crate::ticks::Gate>, u64, crate::ticks::GateState)>,
     /// 試作 `ENOMOTO_MIP_FPR` (fix-propagate-repair、[`super::fpr`]) の別スレッドと受け渡し箱
     pub(super) fpr: super::fpr::FprState,
     /// `ENOMOTO_MIP_FJ_NOSOL_EXTEND`: 暫定解を持ったら立てて、FJ のスレッドの延長をやめさせる印
@@ -2687,6 +2689,10 @@ pub(super) fn gap4_rss_start() {
 
 impl<L: MipLp> Drop for Solver<'_, L> {
     fn drop(&mut self) {
+        // 試作 `ENOMOTO_MIP_TICKS` の `j`: 門で止まって待っている FJ のスレッドを残さない
+        if let Some((g, _, _)) = self.fj_gate.take() {
+            g.stop();
+        }
         if let Some(b) = self.gap4_live {
             GAP4_LIVE[b as usize].fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -5324,6 +5330,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         lmip_imps: Vec::new(),
         lmip_thread: None,
         lmip_mailbox: None,
+        fj_gate: None,
         fpr: Default::default(),
         fj_has_inc: None,
         prechain: None,
@@ -8662,7 +8669,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_T_MIP_FJ_SEED` (診断用): FJ の種をずらす (FJ の当たり外れが種の運かを見る)
                 let seed = (self.rng ^ 0x9E37_79B9_7F4A_7C15).wrapping_add(tunable!("ENOMOTO_T_MIP_FJ_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
                 // 実行可能性問題では FJ を根のカットのループの終わりまで (時間上限の半分まで) 回し続ける
-                let cap = if super::heuristics::fj_feas_extend(&pc) && self.params.frac_tl().is_finite() { tunable!("ENOMOTO_T_MIP_FJ_FEAS_FRAC", 0.5, f64) * self.params.frac_tl() } else { cap };
+                // 試作 `ENOMOTO_MIP_TICKS` の `j` ([`Self::fj_gate_wait`]): FJ のスレッドの時計を手間にし、手間の門で主と受け渡す。上限は
+                // 前処理の壁時計の秒で変わらない元の時間の上限 (`tl_base`) から決める
+                let tk_j = super::ticks_on('j') && self.params.tl_base.is_finite();
+                let ftl = if tk_j { self.params.tl_base } else { self.params.frac_tl() };
+                let cap = if tk_j { (0.05 * ftl).min(5.0) } else { cap };
+                let cap = if super::heuristics::fj_feas_extend(&pc) && ftl.is_finite() { tunable!("ENOMOTO_T_MIP_FJ_FEAS_FRAC", 0.5, f64) * ftl } else { cap };
                 // `ENOMOTO_MIP_FJ_P3` (既定、`ENOMOTO_MIP_NO_FJ_P3` で止める): FJ だけ、p5s の前処理の変更をかけ直した問題で探す ([`super::fj_p3_problem`])
                 let fj_p3 = super::fj_p3_on();
                 // FJ・Local-MIP のスレッドの FJ_P3 の前処理 ([`super::fj_p3_problem`]) の期限: この求解の時間の上限
@@ -8724,7 +8736,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_FJ_LMIP_MIX` (試作): FJ のスレッドで FJ と Local-MIP + 連鎖に時間を分け合う ([`super::heuristics::fj_lmip_mix`])。
                 // 時間の上限は Local-MIP と同じ。実行可能性問題 (目的が全部 0) では今までどおり
                 let mix = fj_lmip_mix_on() && lmip == 0 && !fjl;
-                let fjl_cap = if self.params.frac_tl().is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * self.params.frac_tl()).min(10.0) } else { 10.0 };
+                let fjl_cap = if ftl.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * ftl).min(10.0) } else { 10.0 };
                 let fjl_box: std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>> = Default::default();
                 if fjl || mix {
                     self.lmip_mailbox = Some(fjl_box.clone());
@@ -8734,8 +8746,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 終わり (止める合図) か `ENOMOTO_T_MIP_FJ_NOSOL_FRAC` (0.25) × 時間上限まで種を変えた FJ2 を続ける。主のスレッドが
                 // FJ のスレッド以外から暫定解を得たら (`fj_has_inc`) 延長をやめる。`=2` は混ぜる形 (FJ_LMIP_MIX) で、FJ のスレッドの解しか
                 // ない間は解があっても同じ秒数まで続ける (Local-MIP の改善)
-                let nosol_cap = if env_def!("ENOMOTO_MIP_FJ_NOSOL_EXTEND", "2").is_some() && self.params.frac_tl().is_finite() {
-                    tunable!("ENOMOTO_T_MIP_FJ_NOSOL_FRAC", 0.25, f64) * self.params.frac_tl() - self.start.elapsed().as_secs_f64()
+                let nosol_cap = if env_def!("ENOMOTO_MIP_FJ_NOSOL_EXTEND", "2").is_some() && ftl.is_finite() {
+                    // `j`: スレッドの手間の時計はスレッドの始めから数えるので、主の経過秒は引かない
+                    tunable!("ENOMOTO_T_MIP_FJ_NOSOL_FRAC", 0.25, f64) * ftl - if tk_j { 0.0 } else { self.start.elapsed().as_secs_f64() }
                 } else {
                     0.0
                 };
@@ -8743,7 +8756,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if nosol_cap > 0.0 {
                     self.fj_has_inc = Some(has_inc.clone());
                 }
+                // `j`: 最初に許す手間は、根の LP の反復の見積り (行 + 列) の分 ([`Self::fj_grant_per_iter`])
+                let gate = tk_j.then(|| crate::ticks::Gate::new(self.fj_grant_per_iter() * (self.p.m + self.p.n) as f64));
+                let gate2 = gate.clone();
                 let h = std::thread::spawn(move || {
+                    crate::ticks::set_vclock(gate2.is_some());
+                    let _gate = gate2.map(crate::ticks::install_gate);
                     if lmip == 2 {
                         return None;
                     }
@@ -8810,6 +8828,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     super::heuristics::fj_search_fb(&pc, &lo, &up, effort, cap, seed, Some(&stop2), if fjl { Some(&fb) } else { None })
                 });
                 self.fj_thread = Some((h, stop));
+                if let Some((g, _, _)) = self.fj_gate.take() {
+                    g.stop();
+                }
+                self.fj_gate = gate.map(|g| (g, self.lp.total_iterations() + self.heur_iters, crate::ticks::GateState::default()));
             } else if !self.params.submip && !proof_only() && self.feasibility_jump(effort, cap) && self.params.verbose {
                 eprintln!("MIP: feasibility jump found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
             }
@@ -21283,7 +21305,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 呼ぶ。HiGHS 流の FJ は多くの問題で 1 秒以内に終わるので、カットのループの終わりまで待たずに暫定解にする)。
     pub(super) fn poll_fj_thread(&mut self) {
         self.poll_lmip_thread();
-        if self.fj_thread.as_ref().is_some_and(|(h, _)| h.is_finished()) && env_str!("ENOMOTO_MIP_NO_FJ2").is_none() {
+        // `j`: 終わったかは、待った時点 ([`Self::fj_gate_wait`]) の状態で決める
+        let finished = match &self.fj_gate {
+            Some((_, _, st)) => st.done,
+            None => self.fj_thread.as_ref().is_some_and(|(h, _)| h.is_finished()),
+        };
+        if finished && env_str!("ENOMOTO_MIP_NO_FJ2").is_none() {
             self.join_fj_thread();
         }
     }
@@ -21295,6 +21322,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 受け渡し箱には良くなった解を全部ためてあり、新しい (良い) 順に試して、受け付けられたらそこで止める。最良の解が受け付け
         // られなくても (対称性の行に反するなど。neos-950242 で最良の解だけを残していたときは全部失った)、前の解が暫定解になれる。
         // 古い順に全部試すと、uccase12 では受け付けるたびの oneopt・連続列の解き直しに 1 回 1 秒かかり、根で 20 秒を失った
+        // `j`: FJ のスレッドが門で止まるか終わるまで待ってから読む (読んだ後に次の手間を許す)
+        self.fj_gate_wait();
         let got: Vec<Vec<f64>> = self.lmip_mailbox.as_ref().map(|mb| std::mem::take(&mut *mb.lock().unwrap())).unwrap_or_default();
         for x in got.into_iter().rev() {
             self.heur_label = "Local-MIP";
@@ -21307,6 +21336,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
         }
+        self.fj_gate_grant();
         if self.lmip_thread.as_ref().is_some_and(|(h, _)| h.is_finished()) {
             let (h, _) = self.lmip_thread.take().unwrap();
             if let Ok(Some(x)) = h.join() {
@@ -21411,7 +21441,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_T_MIP_LMBOOST_GAP` (0.1) 以上のときだけ
         let lpz = self.lp.objective() + self.p.offset;
         let gap = self.incumbent.as_ref().map_or(0.0, |(z, _)| (z - lpz) / z.abs().max(1.0));
+        // 試作 `ENOMOTO_MIP_TICKS` の `j`: 経過秒で決める足し方なので使わない
         let ok = self.fj_thread.is_some()
+            && !super::ticks_on('j')
             && self.inc_only_fj
             && imps >= 2
             && last >= tunable!("ENOMOTO_T_MIP_LMBOOST_RECENT", 0.5, f64) * t_now
@@ -21508,7 +21540,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 別スレッドの Feasibility Jump を止めて結果を受け取る。
+    /// 試作 `ENOMOTO_MIP_TICKS` の `j`: 主の LP の反復 1 回あたりにスレッドに許す手間 (LP の 1 反復の手間の見積り:
+    /// 反復の決まった分 + 3 × 行 × 行あたりの重み、× `ENOMOTO_T_MIP_FJDET_K` (1))
+    fn fj_grant_per_iter(&self) -> f64 {
+        let m = self.lp.num_rows().max(self.p.m) as f64;
+        tunable!("ENOMOTO_T_MIP_FJDET_K", 1.0, f64) * (crate::ticks::weight(crate::ticks::LPIT) + 3.0 * crate::ticks::weight(crate::ticks::LP) * m)
+    }
+
+    /// `j`: FJ のスレッドが門で止まるか終わるまで待ち、その状態を覚える (門がなければ何もしない)
+    fn fj_gate_wait(&mut self) {
+        if let Some((g, _, st)) = self.fj_gate.as_mut() {
+            *st = g.wait_paused();
+        }
+    }
+
+    /// `j`: 前に許してからの主の LP の反復 (+ ヒューリスティクスの反復) に見合う手間を許す
+    /// (`ENOMOTO_T_MIP_FJDET_MIN` (2e6) 〜 `_MAX` (5e8) 手間)
+    fn fj_gate_grant(&mut self) {
+        let it = self.lp.total_iterations() + self.heur_iters;
+        let per = self.fj_grant_per_iter();
+        if let Some((g, last, st)) = self.fj_gate.as_mut() {
+            if st.done {
+                return;
+            }
+            let add = (per * it.saturating_sub(*last) as f64).clamp(tunable!("ENOMOTO_T_MIP_FJDET_MIN", 2e6, f64), tunable!("ENOMOTO_T_MIP_FJDET_MAX", 5e8, f64));
+            *last = it;
+            g.grant(add);
+        }
+    }
+
     fn join_fj_thread(&mut self) {
+        // `j`: 門で止まったのを確かめてから止めの合図を出す (止まる点が手間で決まる)
+        if let Some((g, _, _)) = self.fj_gate.take() {
+            g.wait_paused();
+            g.stop();
+        }
         if let Some((h, stop)) = self.fj_thread.take() {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
             let tj = Instant::now();

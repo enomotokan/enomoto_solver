@@ -23,6 +23,11 @@ pub const NAMES: [&str; NK] = ["lp", "prop", "sep", "pre", "heur", "node", "lpit
 thread_local! {
     static RAW: [Cell<u64>; NK] = const { [const { Cell::new(0) }; NK] };
     static DEADLINE: Cell<f64> = const { Cell::new(f64::INFINITY) };
+    /// [`vclock`]: このスレッドの時計を手間にするか
+    static VCLOCK: Cell<bool> = const { Cell::new(false) };
+    /// [`Gate`]: このスレッドの手間の門 (あれば [`over`] の中で許された手間まで止まって待つ)
+    static GATE: std::cell::RefCell<Option<std::sync::Arc<Gate>>> = const { std::cell::RefCell::new(None) };
+    static HAS_GATE: Cell<bool> = const { Cell::new(false) };
 }
 
 fn weights() -> &'static [f64; NK] {
@@ -63,7 +68,129 @@ pub fn raw() -> [u64; NK] {
 /// このスレッドの手間の期限 (重み付きの合計) を過ぎたか (期限がなければ偽)。
 #[inline]
 pub fn over() -> bool {
-    total() >= DEADLINE.with(|d| d.get())
+    let t = total();
+    if HAS_GATE.with(|g| g.get()) && gate_check(t) {
+        return true;
+    }
+    t >= DEADLINE.with(|d| d.get())
+}
+
+/// 試作 `ENOMOTO_MIP_TICKS` の `j` (analysis/timedep_20261114.md の 12.5 節): このスレッドの時計を手間にするか ([`set_vclock`])。
+/// 真なら、FJ・Local-MIP・旧来の局所探索の時間の上限・取り分を秒の代わりに手間 ([`total`] × 1e-9 秒) で数える
+pub fn vclock() -> bool {
+    VCLOCK.with(|v| v.get())
+}
+
+pub fn set_vclock(on: bool) {
+    VCLOCK.with(|v| v.set(on));
+}
+
+/// [`vclock`] なら手間の秒 ([`total`] × 1e-9)、そうでなければ `t0` からの壁時計の秒 (経過の比べに使う。基準は呼ぶ側で引く)。
+pub fn clock_secs(t0: std::time::Instant) -> f64 {
+    if vclock() { total() * 1e-9 } else { t0.elapsed().as_secs_f64() }
+}
+
+/// 手間の門 (試作 `ENOMOTO_MIP_TICKS` の `j`): 別スレッド (FJ・Local-MIP) が許された手間 (`granted`、そのスレッドの [`total`]) に
+/// 着いたら [`over`] の中で止まって待ち、主が [`Gate::wait_paused`] で止まったのを確かめてから受け渡し箱を読み、[`Gate::grant`] で
+/// 次の手間を許す。スレッドの計算は許し方によらず同じで、主が読む時点のスレッドの状態も決まる (止まる点は手間で決まる)。
+#[derive(Default)]
+pub struct Gate {
+    st: std::sync::Mutex<GateState>,
+    cv: std::sync::Condvar,
+    /// `st.granted` の写し (f64 のビット) と止めの合図 (スレッドの速い道: ロックを取らずに比べる)
+    granted_bits: std::sync::atomic::AtomicU64,
+    stopped: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct GateState {
+    pub granted: f64,
+    /// 止まった (か終わった) ときのスレッドの手間
+    pub progress: f64,
+    pub paused: bool,
+    pub done: bool,
+    pub stop: bool,
+}
+
+impl Gate {
+    pub fn new(granted: f64) -> std::sync::Arc<Gate> {
+        std::sync::Arc::new(Gate {
+            st: std::sync::Mutex::new(GateState { granted, ..Default::default() }),
+            cv: std::sync::Condvar::new(),
+            granted_bits: std::sync::atomic::AtomicU64::new(granted.to_bits()),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+    /// 主: スレッドが門で止まるか終わるまで待ち、その時点の状態を返す
+    pub fn wait_paused(&self) -> GateState {
+        let mut g = self.st.lock().unwrap();
+        while !(g.paused || g.done) {
+            g = self.cv.wait(g).unwrap();
+        }
+        *g
+    }
+    /// 主: 許す手間を `add` 足す (止まっていれば動き出す)
+    pub fn grant(&self, add: f64) {
+        let mut g = self.st.lock().unwrap();
+        g.granted += add.max(0.0);
+        self.granted_bits.store(g.granted.to_bits(), std::sync::atomic::Ordering::Release);
+        self.cv.notify_all();
+    }
+    /// 主: 止めの合図 (門で止まっているスレッドは [`over`] が真を返して抜ける)
+    pub fn stop(&self) {
+        let mut g = self.st.lock().unwrap();
+        g.stop = true;
+        self.stopped.store(true, std::sync::atomic::Ordering::Release);
+        self.cv.notify_all();
+    }
+    /// スレッド: 終わった印 ([`GateGuard`] が捨てるときに呼ぶ)
+    fn finish(&self) {
+        let mut g = self.st.lock().unwrap();
+        g.done = true;
+        g.progress = total();
+        self.cv.notify_all();
+    }
+}
+
+/// スレッドに門を付ける ([`over`] で止まる)。捨てるときに門を外し、終わった印を付ける (途中で戻っても・panic しても)
+pub struct GateGuard(std::sync::Arc<Gate>);
+
+pub fn install_gate(g: std::sync::Arc<Gate>) -> GateGuard {
+    GATE.with(|x| *x.borrow_mut() = Some(g.clone()));
+    HAS_GATE.with(|h| h.set(true));
+    GateGuard(g)
+}
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        GATE.with(|x| *x.borrow_mut() = None);
+        HAS_GATE.with(|h| h.set(false));
+        self.0.finish();
+    }
+}
+
+/// 門を見る: 許された手間に着いていれば止まって待つ。止めの合図なら真 (手間の期限を過ぎたのと同じに扱う)
+fn gate_check(t: f64) -> bool {
+    let Some(gate) = GATE.with(|x| x.borrow().clone()) else { return false };
+    // 速い道: まだ許された手間の内で、止めの合図もない
+    if !gate.stopped.load(std::sync::atomic::Ordering::Acquire) && t < f64::from_bits(gate.granted_bits.load(std::sync::atomic::Ordering::Acquire)) {
+        return false;
+    }
+    let mut g = gate.st.lock().unwrap();
+    if g.stop {
+        return true;
+    }
+    if t < g.granted {
+        return false;
+    }
+    g.paused = true;
+    g.progress = t;
+    gate.cv.notify_all();
+    while t >= g.granted && !g.stop {
+        g = gate.cv.wait(g).unwrap();
+    }
+    g.paused = false;
+    g.stop
 }
 
 /// このスレッドの手間の期限までの残り (重み付き、期限がなければ +inf)。

@@ -612,6 +612,9 @@ impl<'a> LocalMip<'a> {
 
     /// `t_end` まで (か `stop` が立つまで) 探す。`on_sol` は実行可能解が良くなるたびに呼ぶ。
     pub(super) fn run(&mut self, t_end: Instant, stop: Option<&std::sync::atomic::AtomicBool>, on_sol: &dyn Fn(&[f64])) {
+        // 試作 `ENOMOTO_MIP_TICKS` の `j` ([`crate::ticks::vclock`]): 終わりを手間で数える (`t_end` までの秒を同じ量の手間にする)
+        let tk_end = crate::ticks::vclock().then(|| crate::ticks::total() + t_end.saturating_duration_since(Instant::now()).as_secs_f64() * 1e9);
+        let past_end = || match tk_end { Some(e) => crate::ticks::total() >= e, None => Instant::now() >= t_end };
         if self.done {
             return;
         }
@@ -671,7 +674,7 @@ impl<'a> LocalMip<'a> {
             if step % 16 == 0 {
                 // 手間の単位 ([`crate::ticks`]): 1 手 = (行の平均の長さ + 列の平均の長さ) x 見る列の数 (の見当)
                 crate::ticks::add(crate::ticks::HEUR, 16 * step_work);
-                if Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) || crate::ticks::over() {
+                if crate::ticks::over() || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
                     break;
                 }
             }
@@ -990,7 +993,7 @@ impl<'a> LocalMip<'a> {
                 let kk = s.below(s.vset.len());
                 let i = s.vset[kk];
                 chain_tries += 1;
-                let abort = || Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+                let abort = || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
                 if let Some((_, mv)) = s.chain_move(i, chain_depth, sample_cols, &set_of, &abort) {
                     for &(k, v) in &mv {
                         s.apply(k, v, step);

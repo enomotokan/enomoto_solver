@@ -83,6 +83,10 @@ fn lnsgrow_on() -> bool {
 }
 
 fn main_has_incumbent() -> bool {
+    // 試作 `ENOMOTO_MIP_TICKS` の `j` (時計を手間にしたスレッド): 主の暫定解の有無は時刻で変わるので見ない
+    if crate::ticks::vclock() {
+        return false;
+    }
     FJ_HAS_INC.with(|f| f.borrow().as_ref().is_some_and(|a| a.load(std::sync::atomic::Ordering::Relaxed)))
 }
 
@@ -1284,8 +1288,10 @@ pub(super) fn fj_search_fb(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, 
     // 時間の上限が残っていれば (`ENOMOTO_MIP_FJ2_ONLY` でなければ)、種を変えた FJ2 と旧来の局所探索を続けて回し、
     // 目的値の最良のものを返す
     if env_str!("ENOMOTO_MIP_NO_FJ2").is_none() {
+        // 時計: 壁時計、試作 `ENOMOTO_MIP_TICKS` の `j` ([`crate::ticks::vclock`]) なら手間
         let t0 = Instant::now();
-        let left = |cap: f64| (cap - t0.elapsed().as_secs_f64()).max(0.0);
+        let c0 = crate::ticks::clock_secs(t0);
+        let left = |cap: f64| (cap - (crate::ticks::clock_secs(t0) - c0)).max(0.0);
         let stopped = || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
         let mut best = super::fj::fj2_search(p, lo, up, time_cap, seed, stop);
         if env_str!("ENOMOTO_MIP_FJ2_ONLY").is_some() {
@@ -1369,6 +1375,10 @@ fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: 
             return None;
         }
         let t_end = Instant::now() + Duration::from_secs_f64(time_cap);
+        // 試作 `ENOMOTO_MIP_TICKS` の `j` ([`crate::ticks::vclock`]): 手間で数えて止める (手間の門も見る)
+        let vc = crate::ticks::vclock();
+        let tk_end = crate::ticks::total() + time_cap.max(0.0) * 1e9;
+        let mut work_last = 0u64;
         let lo = lo.to_vec();
         let up = up.to_vec();
         // 初期点: 0 に最も近い境界内の値
@@ -1405,7 +1415,13 @@ fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: 
         let mut cand: Vec<f64> = Vec::new();
         while work < effort {
             step += 1;
-            if step % 256 == 0 && (Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))) {
+            if step % 256 == 0 && vc {
+                crate::ticks::add(crate::ticks::HEUR, work - work_last);
+                work_last = work;
+                if crate::ticks::over() || crate::ticks::total() >= tk_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+                    break;
+                }
+            } else if step % 256 == 0 && (Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))) {
                 break;
             }
             if vset.is_empty() {
@@ -3714,8 +3730,11 @@ pub(super) fn ls_obj_step_pub(p: &MipProblem, z: f64) -> f64 {
 /// - 良くなった解は `on_sol` に渡す。`cap` 秒か `stop` まで回し、最良の解を返す。
 pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed: u64, stop: &std::sync::atomic::AtomicBool, on_sol: &dyn Fn(&[f64])) -> Option<Vec<f64>> {
     use std::sync::atomic::Ordering;
+    // 時計 (秒): 壁時計、試作 `ENOMOTO_MIP_TICKS` の `j` ([`crate::ticks::vclock`]) なら手間。`c0` からの経過で比べる
     let t0 = Instant::now();
-    let t_end = t0 + Duration::from_secs_f64(cap.max(0.0));
+    let c0 = crate::ticks::clock_secs(t0);
+    let now = || crate::ticks::clock_secs(t0) - c0;
+    let t_end = cap.max(0.0);
     super::fj::SKIP_REPAIR_ON_STOP.with(|c| c.set(true));
     let slice = tunable!("ENOMOTO_T_MIP_FJ_MIX_SLICE", 0.2, f64).max(0.01);
     let lead = tunable!("ENOMOTO_T_MIP_FJ_MIX_LEAD", 0.75, f64).clamp(0.0, 1.0);
@@ -3729,12 +3748,12 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
     let mut first: Option<(f64, u8)> = None;
     // `FJ_NOSOL_CAP` があれば、解がない間はその秒数まで続ける
     let ext = FJ_NOSOL_CAP.with(|c| c.get());
-    let t_ext = t0 + Duration::from_secs_f64(ext.max(cap.max(0.0)));
+    let t_ext = ext.max(cap.max(0.0));
     // `ENOMOTO_MIP_FJ_NOSOL_EXTEND=2`: 主のスレッドの暫定解が FJ のスレッドの解だけなら、解があっても同じ秒数まで続ける
     // (Local-MIP の改善を根のカットのループの終わりまで)
     let ext_all = env_def!("ENOMOTO_MIP_FJ_NOSOL_EXTEND", "2") == Some("2");
     let end_now = |b: &Option<(f64, Vec<f64>)>| if (b.is_none() || ext_all) && !main_has_incumbent() { t_ext } else { t_end };
-    while Instant::now() < end_now(&best) && !stop.load(Ordering::Relaxed) {
+    while now() < end_now(&best) && !stop.load(Ordering::Relaxed) {
         let t_end = end_now(&best);
         let lm_share = match leader {
             0 => 0.5,
@@ -3742,19 +3761,19 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
             _ => 1.0 - lead,
         };
         let use_lm = lm.as_ref().is_some_and(|l| !l.done) && t_lm < lm_share * (t_fj + t_lm) - 1e-9;
-        let t = Instant::now();
+        let t = now();
         let got: Option<Vec<f64>> = if use_lm {
             let l = lm.as_mut().unwrap();
             let before = l.best_obj();
-            l.run((t + Duration::from_secs_f64(slice)).min(t_end), Some(stop), &|_| {});
-            t_lm += t.elapsed().as_secs_f64();
+            l.run(Instant::now() + Duration::from_secs_f64(slice.min((t_end - t).max(0.0))), Some(stop), &|_| {});
+            t_lm += now() - t;
             n_lm += 1;
             if l.best_obj() < before { l.res.best.clone() } else { None }
         } else {
-            let left = t_end.saturating_duration_since(t).as_secs_f64();
+            let left = (t_end - t).max(0.0);
             let r = super::fj::fj2_search(p, lo, up, left, seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15)), Some(stop));
             k += 1;
-            t_fj += t.elapsed().as_secs_f64();
+            t_fj += now() - t;
             n_fj += 1;
             r
         };
@@ -3764,7 +3783,7 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
                 let who = if use_lm { 2 } else { 1 };
                 leader = who;
                 wins[(who - 1) as usize] += 1;
-                first.get_or_insert((t0.elapsed().as_secs_f64(), who));
+                first.get_or_insert((now(), who));
                 on_sol(&x);
                 if !use_lm {
                     if let Some(l) = lm.as_mut() {
@@ -3775,7 +3794,7 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
             }
         }
         // 何も回せない (Local-MIP が終わり、FJ の時間も尽きた) なら抜ける
-        if lm.as_ref().is_none_or(|l| l.done) && t_end.saturating_duration_since(Instant::now()).as_secs_f64() < 1e-3 {
+        if lm.as_ref().is_none_or(|l| l.done) && t_end - now() < 1e-3 {
             break;
         }
     }

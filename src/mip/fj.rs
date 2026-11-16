@@ -332,6 +332,9 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         return None;
     }
     let t_end = Instant::now() + Duration::from_secs_f64(time_cap.max(0.0));
+    // 試作 `ENOMOTO_MIP_TICKS` の `j` ([`crate::ticks::vclock`]): 終わりを手間で数える
+    let tk_end = crate::ticks::vclock().then(|| crate::ticks::total() + time_cap.max(0.0) * 1e9);
+    let past_end = || match tk_end { Some(e) => crate::ticks::total() >= e, None => Instant::now() >= t_end };
     let feastol = 1e-6;
     let mut lb = vec![0.0; n];
     let mut ub = vec![0.0; n];
@@ -463,7 +466,8 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
                 why = "effort";
                 break;
             }
-            if Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) || crate::ticks::over() {
+            // 手間の期限・門 (`over`) を先に見る (門で止まっている間に出た止めの合図は `over` が受け取る)
+            if crate::ticks::over() || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
                 why = "time/stop";
                 break;
             }
@@ -473,7 +477,7 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             let r = cons_row[s.violated[k] as usize] as usize;
             chain_tries += 1;
             let mut view = FjView { fj: &mut s, p, row_cons: &row_cons };
-            let abort = || Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+            let abort = || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
             let res = super::localmip::chain_move(&mut view, r, chain_depth, 64, &set_of, &abort);
             if let Some((_, mv, eff)) = res {
                 s.effort += eff;

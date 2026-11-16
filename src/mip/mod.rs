@@ -298,6 +298,10 @@ pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
 /// - `h`: LP の重い求解の判定 (`ENOMOTO_MIP_LPSCALE` の `h`: 尺度なしの求解が `ENOMOTO_T_MIP_LPSCALE_HEAVY_SECS` (1) 秒以上なら尺度をかけた双子に
 ///   切り替え、以後に作る LP も双子を持つ) を、その求解の手間で決める
 /// - `k`: ノードの分離の時間の割合の判定のうち `t` の外のもの (HiGHS 流のカット管理のノードの分離・TREESEP2・FC の分離) を手間で比べる
+/// - `r`: 根の LP の同時解き (`solve_race_ext`) の勝ち手を、先に終わった方でなく二段解法の反復の上限で決める (TIMEDEP の `r` と同じ)
+/// - `j`: FJ・Local-MIP のスレッド (4 スレッドの根) の時計を手間にし (FJ と Local-MIP の取り分・切れ・上限。上限は元の時間の上限から)、
+///   主とは手間の門 ([`crate::ticks::Gate`]) で受け渡す: 主は受け渡し箱を見る所でスレッドが許された手間に着くまで待って読み、
+///   主の LP の反復に見合う手間を次に許す。主の暫定解の有無はスレッドに伝えない。LMBOOST は使わない
 /// 試作 `ENOMOTO_MIP_DETHASH` (既定では使わない。analysis/timedep_20261114.md の 12 節): 結果に効く `HashMap` の走査を鍵の順にする
 /// (既定の `RandomState` はプロセスごとに種が変わり、走査順で implied bound カットの順・同値の組の順・足し合わせの順が変わる)。
 pub(crate) fn dethash() -> bool {
