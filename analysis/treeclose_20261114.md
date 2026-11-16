@@ -852,3 +852,20 @@ tbfp-network はどの設定でも 1/2 の揺れ。nb15 (診断の 15 問) は�
 - 手順: ラウンド R の分担表 `python plan.py R` → `python run_shard.py K boR` (K = 0〜K−1) → 集計 `python summ.py boR` →
   次の提案 `python propose.py R+1 5` → `python plan.py R+1` … を 4〜5 ラウンド (合わせて 20〜30 設定)。最後に最良の設定を 58 問・15 問・Mittelmann で。
 - 仮の結果で `propose.py 1 5` が動くことを確かめた (s が小さいほど良い結果を作ると、提案は s ≈ 0.01〜0.09 に寄る)。
+
+### 9.21 解きながらのベイズ最適化 `ENOMOTO_MIP_NODESEL_BANDIT=5` (利用者の指示、既定では使わない)
+
+- b58k (事前のベイズ最適化) は親の判断で回さず保留 (腕 1 の値の環境変数 `NB_ARM1_*` はそのまま使える)。
+- `=5` (src/mip/solver.rs `Nb5`): 1 回の求解の中で、区間 (主のスレッドの LP の反復 `ENOMOTO_T_MIP_NB_WORK` = 2 万ずつ) ごとに潜り方の 3 つの値
+  x = (PLUNGE_QUOT, SIBLING_QUOT, 潜りのノード数の上限の尺度 u) ∈ [0, 1]^3 を選び直す。PLUNGE_QUOT・SIBLING_QUOT = 0.25 + 0.75 x、
+  上限 = min(ノード数 / 10^(1−u), 10^(2+7u)) (u = 1/7 で既定の 1000・約 10)。兄弟へ戻ったときは潜りの始めとして数える (`TC` の `k`)。
+- 観測 = 区間の報酬: 手元の待ち行列の開いたノードの下界の下位 10% 点の伸び ÷ ギャップ (暫定解がなければ ÷ |根の下界|)。解の発見に左右されにくい
+  物差しとしてこれにした。木の重み (閉じた部分木の 2^−depth) は、4 スレッドでは共有の待ち行列へ出したノードが見えず偏るので使っていない。
+- GP: RBF・ARD (長さの尺度 {0.15, 0.4, 1.0}^3)・雑音 {0.05, 0.3} を周辺尤度最大で選ぶ。古い観測は雑音の分散を `ENOMOTO_T_MIP_NB5_DECAY` (1.05) の
+  (経過区間) 乗にして効きを薄め、直近 `ENOMOTO_T_MIP_NB5_WINDOW` (40) 個を使う。獲得は UCB (κ = `ENOMOTO_T_MIP_NB5_KAPPA` 1.0) か
+  `ENOMOTO_MIP_NB5_ACQ=ei` で EI。候補は Halton 列 256 点 + 初期点 (乱数なし)。最初の 4 区間は既定 (0, 0, 1/7)・d3 (1, 1, 1/7)・d1 (1, 1, 1)・中ほど。
+  ログに区間ごとの (PLUNGE_QUOT/SIBLING_QUOT/u:報酬) の軌跡と、最後の GP の最良点。
+- 試し (mcsched・1 スレッド・120 秒、`c16/mcsched_nb5_1t.log.gz`): 40 区間、GP の最良点 PLUNGE_QUOT 1.0・SIBLING_QUOT 1.0・u 0.14 (= d3)。
+- 比べの台本 `b58l/` (cand1116 の上で nb1 = `=1`・nb4 = `=4`・nb5u = `=5` UCB・nb5e = `=5` EI): `python run_shard.py K nbl4` (損の 3 問 + mcsched ×
+  種 1〜2 × 4 設定、32 回・8 分担・各 0.69 時間)、`python run_shard.py K nbl15` (15 問 × 種 1〜2、nb5u・nb5e だけ 60 回・4 分担・各 2.1 時間。
+  nb1・nb4 の 15 問は b58j の nbx15 と並べる)。集計 `python summ.py nbl4` / `nbl15` (stats に腕の回数と GP の最良点)。

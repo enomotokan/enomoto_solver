@@ -2101,6 +2101,169 @@ pub(super) struct NodeselBandit {
     /// `=4`: 学習なし。区間 k で腕 1 を選ぶのは floor((k+1) s) > floor(k s) のとき (s = `ENOMOTO_T_MIP_NB4_SHARE`、既定 0.5 なら 0101…)。
     /// b58h で寄せる形 (`=2`・`=3`) ほど悪く、ほぼ交互の `=1` が一番だったので、決定的な交互にした
     v4: bool,
+    /// `=5`: 解きながらのベイズ最適化 ([`Nb5`])
+    v5: Option<Nb5>,
+}
+
+/// 試作 `ENOMOTO_MIP_NODESEL_BANDIT=5` (既定では使わない、analysis/treeclose_20261114.md 9.21 節): 1 回の求解の中で、区間 (主のスレッドの LP の反復
+/// `ENOMOTO_T_MIP_NB_WORK` ずつ) ごとに潜り方の 3 つの値 x = (PLUNGE_QUOT, SIBLING_QUOT, 潜りのノード数の上限の尺度 u) ∈ [0, 1]^3 を選び直す。
+/// PLUNGE_QUOT・SIBLING_QUOT = 0.25 + 0.75 x、上限 = min(ノード数 / 10^(1 − u), 10^(2 + 7u))。兄弟へ戻ったときは潜りの始めとして数える (`TC` の `k`)。
+/// 観測 = 区間の報酬 (手元の待ち行列の開いたノードの下界の下位 10% 点の伸び ÷ ギャップ。暫定解がなければ ÷ |根の下界|)。解の発見に左右されにくい。
+/// ガウス過程: RBF・次元ごとの長さの尺度 (ARD、{0.15, 0.4, 1.0}^3 から周辺尤度最大)・雑音 (周辺尤度で {0.05, 0.3})、古い観測は雑音の分散を
+/// `ENOMOTO_T_MIP_NB5_DECAY` (既定 1.05) の (経過した区間) 乗に増やして効きを薄める。直近 `ENOMOTO_T_MIP_NB5_WINDOW` (既定 40) 個だけ使う。
+/// 獲得: UCB (μ + κσ、κ = `ENOMOTO_T_MIP_NB5_KAPPA` 既定 1.0) か、`ENOMOTO_MIP_NB5_ACQ=ei` で EI。候補は Halton 列 256 点 + 初期点 (乱数なし、決定的)。
+/// 最初の 4 区間は決まった点: 既定 (0, 0, 1/7)・d3 (1, 1, 1/7)・d1 (1, 1, 1)・中ほど (0.5, 0.5, 0.5)。
+#[derive(Debug, Default)]
+pub(super) struct Nb5 {
+    cur: [f64; 3],
+    obs: Vec<([f64; 3], f64, u64)>,
+    k: u64,
+    traj: String,
+    q0: f64,
+    best: ([f64; 3], f64),
+}
+
+const NB5_INIT: [[f64; 3]; 4] = [[0.0, 0.0, 1.0 / 7.0], [1.0, 1.0, 1.0 / 7.0], [1.0, 1.0, 1.0], [0.5, 0.5, 0.5]];
+
+fn halton(i: usize, b: usize) -> f64 {
+    let (mut f, mut r, mut n) = (1.0, 0.0, i);
+    while n > 0 {
+        f /= b as f64;
+        r += f * (n % b) as f64;
+        n /= b;
+    }
+    r
+}
+
+/// 小さな密行列のコレスキー分解 (下三角、行優先)。正定値でなければ `None`
+fn chol(a: &[f64], n: usize) -> Option<Vec<f64>> {
+    let mut l = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..=i {
+            let mut s = a[i * n + j];
+            for k in 0..j {
+                s -= l[i * n + k] * l[j * n + k];
+            }
+            if i == j {
+                if s <= 0.0 {
+                    return None;
+                }
+                l[i * n + i] = s.sqrt();
+            } else {
+                l[i * n + j] = s / l[j * n + j];
+            }
+        }
+    }
+    Some(l)
+}
+
+fn chol_solve(l: &[f64], n: usize, b: &[f64]) -> Vec<f64> {
+    let mut y = b.to_vec();
+    for i in 0..n {
+        for k in 0..i {
+            y[i] -= l[i * n + k] * y[k];
+        }
+        y[i] /= l[i * n + i];
+    }
+    for i in (0..n).rev() {
+        for k in i + 1..n {
+            y[i] -= l[k * n + i] * y[k];
+        }
+        y[i] /= l[i * n + i];
+    }
+    y
+}
+
+fn fwd_solve(l: &[f64], n: usize, b: &[f64]) -> Vec<f64> {
+    let mut y = b.to_vec();
+    for i in 0..n {
+        for k in 0..i {
+            y[i] -= l[i * n + k] * y[k];
+        }
+        y[i] /= l[i * n + i];
+    }
+    y
+}
+
+impl Nb5 {
+    /// 次の点を選ぶ (観測を足した後に呼ぶ)
+    fn choose(&mut self) {
+        let k = self.k as usize;
+        if k < NB5_INIT.len() {
+            self.cur = NB5_INIT[k];
+            return;
+        }
+        let win = tunable!("ENOMOTO_T_MIP_NB5_WINDOW", 40usize, usize).max(4);
+        let obs: Vec<&([f64; 3], f64, u64)> = self.obs.iter().rev().take(win).collect();
+        let n = obs.len();
+        let ym = obs.iter().map(|o| o.1).sum::<f64>() / n as f64;
+        let ys = (obs.iter().map(|o| (o.1 - ym).powi(2)).sum::<f64>() / n as f64).sqrt().max(1e-12);
+        let z: Vec<f64> = obs.iter().map(|o| (o.1 - ym) / ys).collect();
+        let decay = tunable!("ENOMOTO_T_MIP_NB5_DECAY", 1.05, f64);
+        let now = self.k;
+        let kern = |a: &[f64; 3], b: &[f64; 3], ell: &[f64; 3]| (-0.5 * (0..3).map(|d| ((a[d] - b[d]) / ell[d]).powi(2)).sum::<f64>()).exp();
+        // 周辺尤度で長さの尺度・雑音を選ぶ
+        let grid = [0.15, 0.4, 1.0];
+        let mut best: Option<(f64, [f64; 3], Vec<f64>, Vec<f64>)> = None;
+        for &a in &grid {
+            for &b in &grid {
+                for &c in &grid {
+                    for &nz in &[0.05, 0.3] {
+                        let ell = [a, b, c];
+                        let mut kk = vec![0.0; n * n];
+                        for i in 0..n {
+                            for j in 0..n {
+                                kk[i * n + j] = kern(&obs[i].0, &obs[j].0, &ell);
+                            }
+                            kk[i * n + i] += nz * decay.powf((now - obs[i].2) as f64);
+                        }
+                        let Some(l) = chol(&kk, n) else { continue };
+                        let al = chol_solve(&l, n, &z);
+                        let ll = -0.5 * z.iter().zip(&al).map(|(p, q)| p * q).sum::<f64>() - (0..n).map(|i| l[i * n + i].ln()).sum::<f64>();
+                        if best.as_ref().is_none_or(|b| ll > b.0) {
+                            best = Some((ll, ell, l, al));
+                        }
+                    }
+                }
+            }
+        }
+        let Some((_, ell, l, al)) = best else { return };
+        let ei = env_str!("ENOMOTO_MIP_NB5_ACQ") == Some("ei");
+        let kappa = tunable!("ENOMOTO_T_MIP_NB5_KAPPA", 1.0, f64);
+        let zbest = z.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let mut cand: Vec<[f64; 3]> = (1..=256).map(|i| [halton(i, 2), halton(i, 3), halton(i, 5)]).collect();
+        cand.extend_from_slice(&NB5_INIT);
+        let mut pick = (f64::NEG_INFINITY, self.cur, 0.0);
+        for c in cand {
+            let kv: Vec<f64> = obs.iter().map(|o| kern(&c, &o.0, &ell)).collect();
+            let mu = kv.iter().zip(&al).map(|(p, q)| p * q).sum::<f64>();
+            let v = fwd_solve(&l, n, &kv);
+            let sd = (1.0 - v.iter().map(|x| x * x).sum::<f64>()).max(1e-12).sqrt();
+            let score = if ei {
+                let d = mu - zbest;
+                let t = d / sd;
+                let cdf = 0.5 * (1.0 + erf_approx(t / std::f64::consts::SQRT_2));
+                let pdf = (-0.5 * t * t).exp() / (2.0 * std::f64::consts::PI).sqrt();
+                d * cdf + sd * pdf
+            } else {
+                mu + kappa * sd
+            };
+            if score > pick.0 {
+                pick = (score, c, mu * ys + ym);
+            }
+        }
+        self.cur = pick.1;
+        self.best = (pick.1, pick.2);
+    }
+}
+
+/// 誤差関数の近似 (Abramowitz・Stegun 7.1.26、誤差 1.5e-7)
+fn erf_approx(x: f64) -> f64 {
+    let s = x.signum();
+    let x = x.abs();
+    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x * x).exp();
+    s * y
 }
 
 /// 試作 `ENOMOTO_MIP_TC` の `q` の状態: 次に掛ける手間、掛けた回数、プロービングで固定した列・矛盾で刈ったノード、試した列、秒
@@ -10934,7 +11097,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_NODESEL_BANDIT`: 主のスレッドの木だけで使う (サブ MIP・従のスレッドは既定のまま)
         if env_str!("ENOMOTO_MIP_NODESEL_BANDIT").is_some() && !self.params.submip && self.snap.is_none() && self.nb.is_none() {
             let v = env_str!("ENOMOTO_MIP_NODESEL_BANDIT");
-            self.nb = Some(NodeselBandit { v2: v == Some("2"), v3: v == Some("3"), v4: v == Some("4"), ..Default::default() });
+            self.nb = Some(NodeselBandit { v2: v == Some("2"), v3: v == Some("3"), v4: v == Some("4"), v5: (v == Some("5")).then(Nb5::default), ..Default::default() });
+            if let Some(v5) = self.nb.as_mut().and_then(|b| b.v5.as_mut()) {
+                v5.choose();
+            }
         }
         let mut plunge_start = 0u64;
         // 診断用 (`ENOMOTO_MIP_BRANCH_REPLAY`): HiGHS の木の分枝をなぞる ([`super::replay`])
@@ -11375,7 +11541,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 試作 `ENOMOTO_MIP_TC` の `k` (既定では使わない、treeclose 9.6 節): 兄弟へ戻ったときも潜りの始めとして数える
                     // (`plunge_depth` は待ち行列から取り出したときだけ 0 に戻るので、深さ優先寄りでは潜りの始めだけで呼ぶ木の中の
                     // ヒューリスティクス・ノードの分離がほとんど呼ばれず、潜りの深さの上限 200 にも通算で当たる)
-                    if tc_on('k') || self.nb_arm() == Some(1) {
+                    if tc_on('k') || self.nb_arm() == Some(1) || self.nb.as_ref().is_some_and(|b| b.v5.is_some()) {
                         plunge_depth = 0;
                     }
                     self.dom.reset_to_root(self.p);
@@ -14381,17 +14547,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 潜りの打ち切りの割合 (`ENOMOTO_T_MIP_PLUNGE_QUOT`。バンディットの腕 1 なら `ENOMOTO_T_MIP_NB_ARM1_PQ`、既定 1)。
     fn nb_plunge_quot(&self) -> f64 {
+        if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
+            return 0.25 + 0.75 * v.cur[0];
+        }
         if self.nb_arm() == Some(1) { tunable!("ENOMOTO_T_MIP_NB_ARM1_PQ", 1.0, f64) } else { tunable!("ENOMOTO_T_MIP_PLUNGE_QUOT", 0.25, f64) }
     }
 
     /// 兄弟へ戻る下界の割合 (`ENOMOTO_T_MIP_SIBLING_QUOT`。バンディットの腕 1 なら `ENOMOTO_T_MIP_NB_ARM1_SQ`、既定 1)。
     fn nb_sibling_quot(&self) -> f64 {
+        if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
+            return 0.25 + 0.75 * v.cur[1];
+        }
         if self.nb_arm() == Some(1) { tunable!("ENOMOTO_T_MIP_NB_ARM1_SQ", 1.0, f64) } else { tunable!("ENOMOTO_T_MIP_SIBLING_QUOT", 0.25, f64) }
     }
 
     /// 1 回の潜りのノード数の上限 min(ノード数 / DIV, MAX) (`ENOMOTO_T_MIP_PLUNGE_NODES_DIV`・`_MAX`。バンディットの腕 1 なら
     /// `ENOMOTO_T_MIP_NB_ARM1_NODES_DIV`・`_MAX`、既定は既定と同じ 10・1000)
     fn nb_plunge_nodes_cap(&self) -> u64 {
+        if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
+            let u = v.cur[2];
+            let div = 10f64.powf(1.0 - u).round().max(1.0) as u64;
+            let max = 10f64.powf(2.0 + 7.0 * u) as u64;
+            return (self.nodes / div).min(max);
+        }
         if self.nb_arm() == Some(1) {
             (self.nodes / tunable!("ENOMOTO_T_MIP_NB_ARM1_NODES_DIV", 10u64, u64).max(1)).min(tunable!("ENOMOTO_T_MIP_NB_ARM1_NODES_MAX", 1000u64, u64))
         } else {
@@ -14409,10 +14587,44 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 区間の終わりなら報酬を足して次の腕を選ぶ。
+    /// `=5` の物差し: 手元の待ち行列の開いたノードの下界の下位 10% 点 (開いたノードがなければ全体の下界)
+    fn nb5_quantile(&self) -> f64 {
+        let mut v: Vec<f64> = self.queue.iter().map(|n| n.lower_bound).filter(|x| x.is_finite()).collect();
+        if v.is_empty() {
+            return self.global_lower_bound();
+        }
+        let i = (v.len() / 10).min(v.len() - 1);
+        v.select_nth_unstable_by(i, |a, b| a.total_cmp(b));
+        v[i]
+    }
+
     fn nb_tick(&mut self) {
         let work = self.node_iters + self.sb_iters;
         let Some(b) = self.nb.as_ref() else { return };
         if work < b.next_work {
+            return;
+        }
+        if b.v5.is_some() {
+            let q1 = self.nb5_quantile();
+            let lb = self.global_lower_bound();
+            let ub = self.prune_limit();
+            let scale = if ub.is_finite() && lb.is_finite() { (ub - lb).abs().max(1e-9) } else { self.root_lb.abs().max(1.0) };
+            let wlen = tunable!("ENOMOTO_T_MIP_NB_WORK", 20000u64, u64).max(1);
+            let b = self.nb.as_mut().unwrap();
+            let first = b.next_work == 0;
+            let v = b.v5.as_mut().unwrap();
+            if !first {
+                let r = if q1.is_finite() && v.q0.is_finite() { (q1 - v.q0) / scale } else { 0.0 };
+                v.obs.push((v.cur, r, v.k));
+                if v.traj.len() < 600 {
+                    v.traj.push_str(&format!("{:.2}/{:.2}/{:.2}:{:+.3e} ", 0.25 + 0.75 * v.cur[0], 0.25 + 0.75 * v.cur[1], v.cur[2], r));
+                }
+                v.k += 1;
+                v.choose();
+            }
+            v.q0 = q1;
+            b.pulls[0] += 1;
+            b.next_work = work + wlen;
             return;
         }
         let (gap1, lb1, open1, nodes1) = self.nb_measure();
@@ -23387,8 +23599,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let u = &self.tc_pool_use;
                     eprintln!("MIP: TC p: pool now {n} cuts, mean nonzeros {:.1}, integer share {:.2}; added at root {} (nonzeros {}), in the tree {} (nonzeros {}); used by propagation: root cuts tightened {} pruned {}, tree cuts tightened {} pruned {}, unknown origin {}, mean nonzeros of used {:.1}", nnz as f64 / n.max(1) as f64, ni as f64 / nnz.max(1) as f64, a[0], a[1], a[2], a[3], u[0], u[1], u[2], u[3], u[5], u[4] as f64 / (u[0] + u[1] + u[2] + u[3]).max(1) as f64);
                 }
+                if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
+                    eprintln!("MIP: NODESEL_BANDIT5: intervals {}, GP best point PLUNGE_QUOT {:.3} SIBLING_QUOT {:.3} u {:.3} (predicted reward {:.3e}), trajectory {}", v.k, 0.25 + 0.75 * v.best.0[0], 0.25 + 0.75 * v.best.0[1], v.best.0[2], v.best.1, v.traj);
+                }
                 if let Some(b) = &self.nb {
-                    eprintln!("MIP: NODESEL_BANDIT: version {}, pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", if b.v4 { 4 } else if b.v3 { 3 } else if b.v2 { 2 } else { 1 }, b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);
+                    eprintln!("MIP: NODESEL_BANDIT: version {}, pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", if b.v5.is_some() { 5 } else if b.v4 { 4 } else if b.v3 { 3 } else if b.v2 { 2 } else { 1 }, b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);
                 }
                 if tc_on('q') {
                     let q = &self.tc_q;
