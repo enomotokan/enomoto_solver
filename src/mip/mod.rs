@@ -1252,6 +1252,9 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     // `ENOMOTO_MIP_SUBB_SYM` (試作、既定では使わない): サブ MIP の求解の間は外側の対称性の表を退避し、サブ MIP が自分で検出した表を使う
     // (終わりに外側の表を戻す。[`subb::SymScope`])
     let _subb_sym = (params.submip && params.restarts == 0 && subb::sym_on()).then(subb::SymScope::enter);
+    // 診断用のデバッグ解 (`ENOMOTO_MIP_DEBUG_SOL`) は外側の縮約後の空間の解なので、同じスレッドで走るサブ MIP の間は退避する
+    // (退避しないと、サブ MIP の行・列に外側の解を当てて「デバッグ解を切った」と誤って出す。終わりに戻す)
+    let _dbg_sol = params.submip.then(DebugSolScope::enter);
     if outer {
         subb::reset();
         heur_subfix::reset();
@@ -9161,6 +9164,23 @@ mod tests {
             let x = crate::presolve::scaling::unscale_x(&scaling, &x);
             let (zr, z) = (prob.objective(&xr), p.objective(&x));
             assert!((zr - z).abs() <= 1e-6 * z.abs().max(1.0), "reduced objective {zr} != original {z}");
+        }
+    }
+}
+
+/// サブ MIP の求解の間、外側のデバッグ解 ([`solver::DEBUG_SOL`]) を退避し、終わりに戻す (診断用、`ENOMOTO_MIP_DEBUG_SOL`)
+struct DebugSolScope(Option<Vec<f64>>);
+
+impl DebugSolScope {
+    fn enter() -> Self {
+        Self(solver::DEBUG_SOL.with(|d| d.borrow_mut().take()))
+    }
+}
+
+impl Drop for DebugSolScope {
+    fn drop(&mut self) {
+        if let Some(x) = self.0.take() {
+            solver::DEBUG_SOL.with(|d| *d.borrow_mut() = Some(x));
         }
     }
 }

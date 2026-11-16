@@ -12142,7 +12142,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if tree_log() && !self.params.submip {
                     eprintln!("ENODE d={} r=prop lp={} rows={}", node.depth, node.lower_bound, self.lp.num_rows());
                 }
-                self.dbg_lost("node propagation", dn);
+                // 診断用: どの段 (p_dom = 行・p_obj = 目的関数・p_proof = 証明・p_lit = リテラル衝突・p_cpool = カットのプール・
+                // p_orb / p_of = 対称性・p_fix = 不動点・p_tcq = TC の q) で行き詰まったかと、デバッグ解を外した境界の出どころ
+                if self.dbg_on {
+                    self.dbg_lost(&format!("node propagation (stage {})", if rp_stage.is_empty() { "?" } else { rp_stage }), dn);
+                    if dn {
+                        self.dbg_explain_exclusion(&node.changes);
+                    }
+                }
                 if let Some((j, up, _, _)) = node.branch {
                     self.pc.add_cutoff(j, up);
                 }
@@ -12593,6 +12600,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if rc_fixed || dd_fixed {
                     if dn && !self.dbg_contains() {
                         self.dbg_lost("local redcost fixing", true);
+                        // 診断用: 被約費用の固定が最適解を外すのは、LP の行 (カット) か境界が最適解を外しているとき。どちらかを出す
+                        self.dbg_check_rows("local redcost fixing");
+                        self.dbg_explain_exclusion(&node.changes);
                     }
                     xp("r_fix");
                     if !self.dom.propagate(self.p) {
