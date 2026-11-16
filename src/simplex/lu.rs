@@ -4960,6 +4960,13 @@ impl FtLu {
         crate::ticks::add(crate::ticks::LU, n);
     }
 
+    /// [`Self::add_tick`] と同じ tick を加えるが、手間の単位では行の数に比例する分 ([`crate::ticks::LUM`]) に数える
+    #[inline]
+    fn add_tick_m(&self, n: u64) {
+        self.tick.add(TICK_SOLVE_NNZ_COEF * n);
+        crate::ticks::add(crate::ticks::LUM, n);
+    }
+
     /// 非ゼロ `rhs_nnz` 個の FTRAN 右辺が十分密で、[`Self::solve_sparse_into`] でなく
     /// 密な [`Self::solve_into`] を使うべきか (`rhs_nnz > DENSE_RHS_FRACTION * m`)。
     pub fn should_use_dense_solve(&self, rhs_nnz: usize) -> bool {
@@ -4997,7 +5004,7 @@ impl FtLu {
             return self.u_transpose_sweep_live(z);
         }
         // CLOCK トリガ用: 全スロット走査の `m` と、散布した各行の長さを tick に加える。
-        self.add_tick(self.base.m as u64);
+        self.add_tick_m(self.base.m as u64);
         // シングルトンが先 (そのスロットに書く eta は無いので値は掃引前に確定)。
         for (p, pivot) in self.u_transpose_order() {
             let zp = z[p];
@@ -5038,7 +5045,7 @@ impl FtLu {
         let cap = self.base.m;
         // まだ記録を続けているか
         let mut ok = true;
-        self.add_tick(self.base.m as u64);
+        self.add_tick_m(self.base.m as u64);
         for (p, pivot) in self.u_transpose_order() {
             let zp = z[p];
             if zp == 0.0 {
@@ -5093,7 +5100,7 @@ impl FtLu {
     /// 死んだヘッダがあるときの [`Self::u_transpose_sweep`] (演算・順序・tick は同じ)。
     #[inline(never)]
     fn u_transpose_sweep_live(&self, z: &mut [f64]) {
-        self.add_tick(self.base.m as u64);
+        self.add_tick_m(self.base.m as u64);
         for (p, pivot) in self.u_transpose_order_live() {
             let zp = z[p];
             if zp == 0.0 {
@@ -5120,7 +5127,7 @@ impl FtLu {
     fn u_transpose_sweep_track_live(&self, z: &mut [f64], touch: &mut Vec<usize>) -> bool {
         let cap = self.base.m;
         let mut ok = true;
-        self.add_tick(self.base.m as u64);
+        self.add_tick_m(self.base.m as u64);
         for (p, pivot) in self.u_transpose_order_live() {
             let zp = z[p];
             if zp == 0.0 {
@@ -5183,7 +5190,7 @@ impl FtLu {
     fn u_solve_into(&self, x: &mut [f64]) {
         // CLOCK トリガ用: 全 eta の除算分として一律 `m`、非対角更新分は
         // `xp` がスキップされなかった eta についてだけ加える。
-        self.add_tick(self.base.m as u64);
+        self.add_tick_m(self.base.m as u64);
         if !self.u_zero_skip {
             // `ENOMOTO_FTRAN_U_ZERO_SKIP=0`: 以前のループそのまま (A/B 用)。
             for eta in self.u_seq.iter().rev() {
@@ -5632,7 +5639,7 @@ impl FtLu {
     fn ftran_through_l_and_r_into(&self, rhs: &[f64], z: &mut [f64]) {
         self.base.l_solve_into(&self.l_active, rhs, z);
         // CLOCK トリガ用: 密 `L` 段は fill に関係なく `O(m)`。
-        self.add_tick(self.base.m as u64);
+        self.add_tick_m(self.base.m as u64);
         for reta in self.r_etas.iter() {
             let dot = self.r_etas.dot(reta.k, z);
             // `R` eta は `z` の疎性に関係なく全部訪れる (ゼロスキップなし) ので、
@@ -5712,7 +5719,7 @@ impl FtLu {
             self.base.l_solve_into_pair(&self.l_active, rhs_a, rhs_b, scratch_a, scratch_b);
             None
         };
-        self.add_tick(2 * m);
+        self.add_tick_m(2 * m);
         let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out, None, hyper_b);
         (na, nb)
     }
@@ -5757,7 +5764,7 @@ impl FtLu {
                 None
             }
         };
-        self.add_tick(self.base.m as u64);
+        self.add_tick_m(self.base.m as u64);
         let hyper = if self.u_hyper_ok(gp) { Some(gp) } else { None };
         let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out, hyper, hyper_b);
         scratch_a.fill(0.0);
@@ -5803,7 +5810,7 @@ impl FtLu {
             self.base.l_solve_into_triple(&self.l_active, rhs_a, rhs_b, rhs_c, scratch_a, scratch_b, scratch_c);
             None
         };
-        self.add_tick(3 * m);
+        self.add_tick_m(3 * m);
         self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out, None, hyper_b)
     }
 
@@ -5846,7 +5853,7 @@ impl FtLu {
             self.base.l_solve_into_pair(&self.l_active, rhs_b, rhs_c, scratch_b, scratch_c);
             None
         };
-        self.add_tick(2 * self.base.m as u64);
+        self.add_tick_m(2 * self.base.m as u64);
         let hyper = if self.u_hyper_ok(gp) { Some(gp) } else { None };
         let r = self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out, hyper, hyper_b);
         scratch_a.fill(0.0);
@@ -5878,7 +5885,7 @@ impl FtLu {
             scratch_c[reta.slot] -= dot_c;
         }
         a_tilde_out.copy_from_slice(scratch_a);
-        self.add_tick(3 * m);
+        self.add_tick_m(3 * m);
         // C5: ベクトル `a` の `U` 段だけを超疎に行う (ベクトルは独立なので、
         // `a` を融合走査から外しても `b`/`c` の演算は変わらない)。
         // 超疎 `U` 段が成功したときの `a` の到達スロット一覧
@@ -5963,7 +5970,7 @@ impl FtLu {
         a_tilde_out.copy_from_slice(scratch_a);
         // `U` 段: ベクトルごとに `u_solve_into` の `u_zero_skip` ループ
         // (C5 なら超疎形式、`triple_r_u_permute` 参照)。
-        self.add_tick(2 * m);
+        self.add_tick_m(2 * m);
         let a_list = match hyper_a {
             Some(gp) => {
                 if self.u_solve_hyper(scratch_a, gp) {
@@ -6087,7 +6094,7 @@ impl FtLu {
             take_b_clean(&mut track);
             None
         };
-        self.add_tick(2 * m);
+        self.add_tick_m(2 * m);
         let (na, nb, _) = self.pair_r_u_permute_tracked(scratch_a, scratch_b, out_a, out_b, a_tilde_out, None, gp_b, track);
         (na, nb)
     }
@@ -6138,7 +6145,7 @@ impl FtLu {
                 None
             }
         };
-        self.add_tick(self.base.m as u64);
+        self.add_tick_m(self.base.m as u64);
         let (na, nb, a_hyper) = self.pair_r_u_permute_tracked(scratch_a, scratch_b, out_a, out_b, a_tilde_out, Some(&mut *gp), gp_b, track);
         clear_after_hyper(scratch_a, a_hyper, gp);
         (na, nb)
@@ -6208,7 +6215,7 @@ impl FtLu {
             take_b_clean(&mut track);
             None
         };
-        self.add_tick(3 * m);
+        self.add_tick_m(3 * m);
         let (na, nb, nc, _) = self.triple_r_u_permute_tracked(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out, None, gp_b, track);
         (na, nb, nc)
     }
@@ -6258,7 +6265,7 @@ impl FtLu {
             take_b_clean(&mut track);
             None
         };
-        self.add_tick(2 * self.base.m as u64);
+        self.add_tick_m(2 * self.base.m as u64);
         let (na, nb, nc, a_hyper) = self.triple_r_u_permute_tracked(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out, Some(&mut *gp), gp_b, track);
         clear_after_hyper(scratch_a, a_hyper, gp);
         (na, nb, nc)
@@ -6449,7 +6456,7 @@ impl FtLu {
             Self::note_r_seed(&mut gp_b, reta.slot, dot_b);
         }
         self.capture_a_tilde(scratch_a, a_tilde_out, gp_a.as_deref_mut(), track.as_deref_mut());
-        self.add_tick(3 * m);
+        self.add_tick_m(3 * m);
         // C5: ベクトル `a`/`b` の `U` 段を超疎に行う (ベクトルは独立なので、
         // 融合走査から外しても他のベクトルの演算は変わらない)。
         let a_u = self.try_u_hyper(scratch_a, gp_a.as_deref_mut());
@@ -6531,7 +6538,7 @@ impl FtLu {
         self.capture_a_tilde(scratch_a, a_tilde_out, gp_a.as_deref_mut(), track.as_deref_mut());
         // `U` 段: ベクトルごとに `u_solve_into` の `u_zero_skip` ループ
         // (C5 なら超疎形式、`triple_r_u_permute` 参照)。
-        self.add_tick(2 * m);
+        self.add_tick_m(2 * m);
         let a_u = self.try_u_hyper(scratch_a, gp_a.as_deref_mut());
         // 策12: 要求があり `a` が超疎に解けたら、`tau` は `a` の非ゼロのスロットでだけ求める。
         // 作業 #10 (B): 部分 `tau` と通常の `tau` の手間 (決定的な作業量) の移動平均を比べて安いほうを選ぶ
@@ -6726,7 +6733,7 @@ impl FtLu {
         }
         if self.u_hyper_ok(gp) {
             // `gp.u_hyper` の要求があれば `U` 段を超疎に試みる (BFRT の合成フリップ列など。値・tick はビット一致)。
-            self.add_tick(self.base.m as u64);
+            self.add_tick_m(self.base.m as u64);
             match self.u_solve_hyper_heap(scratch, gp) {
                 UHyper::Hyper => {
                     let nnz = self.permute_list(scratch, out, &gp.u_list);
@@ -6771,7 +6778,7 @@ impl FtLu {
             }
         }
         if self.u_hyper_ok(gp) {
-            self.add_tick(self.base.m as u64);
+            self.add_tick_m(self.base.m as u64);
             match self.u_solve_hyper_heap(scratch, gp) {
                 UHyper::Hyper => {
                     let nnz = self.permute_list_tracked(scratch, out, &gp.u_list, track);
@@ -6836,7 +6843,7 @@ impl FtLu {
         }
         a_tilde_out.copy_from_slice(scratch);
         if self.u_hyper_ok(gp) {
-            self.add_tick(self.base.m as u64);
+            self.add_tick_m(self.base.m as u64);
             if self.u_solve_hyper(scratch, gp) {
                 let nnz = self.permute_list(scratch, out, &gp.u_list);
                 scratch.fill(0.0);
@@ -6892,7 +6899,7 @@ impl FtLu {
         }
         self.capture_a_tilde(scratch, a_tilde_out, Some(&mut *gp), Some(&mut *track));
         if self.u_hyper_ok(gp) {
-            self.add_tick(self.base.m as u64);
+            self.add_tick_m(self.base.m as u64);
             if self.u_solve_hyper(scratch, gp) {
                 let nnz = self.permute_list_tracked(scratch, out, &gp.u_list, &mut track.alpha);
                 clear_after_hyper(scratch, true, gp);
@@ -6962,7 +6969,7 @@ impl FtLu {
             self.r_etas.axpy(reta.k, -yp, scratch);
         }
         // CLOCK トリガ用: `L^{-T}` 段は一律 `m` として数える。
-        self.add_tick(self.base.m as u64);
+        self.add_tick_m(self.base.m as u64);
         self.l_transpose_solve_into_cap(scratch, out, cap);
     }
 

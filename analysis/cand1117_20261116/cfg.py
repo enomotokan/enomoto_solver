@@ -57,3 +57,8 @@ HGS = {"g_p10": {**CAND1117, "ENOMOTO_T_MIP_HGS_PLUNGE_NODES": "10"},
        "g_sq": {**CAND1117, "ENOMOTO_MIP_HGS_OPT": "q"},          # 兄弟へ戻る割合を既定に戻す
        "g_sib": {**CAND1117, "ENOMOTO_MIP_HGS_OPT": "s"}}         # 兄弟のノードでも分離・木の中のヒューリスティクス
 CFGS.update(HGS)
+
+# 誤答の再現 W3 (planW3.py): 対称性を切る (ENOMOTO_MIP_NO_SYMMETRY)。orbital fixing が対称な最適解の写しを正当に除くので、
+# 対称性があるとデバッグ解の検査の「lost」(理由 -5) が見かけで出る。切れば「lost」はどれも本物 (前処理の後の問題は同じことを確かめた)
+NOSYM = {"w16_nosym": {**CAND1116, "ENOMOTO_MIP_NO_SYMMETRY": "1"}, "w17_nosym": {**CAND1117, "ENOMOTO_MIP_NO_SYMMETRY": "1"}}
+CFGS.update(NOSYM)
