@@ -14612,12 +14612,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let wlen = tunable!("ENOMOTO_T_MIP_NB_WORK", 20000u64, u64).max(1);
             let b = self.nb.as_mut().unwrap();
             let first = b.next_work == 0;
+            // この区間の実際の手間 (LP の反復)。区間は next_work を越えた最初のノードで切るので wlen より少し長い
+            let iw = work.saturating_sub(b.next_work.saturating_sub(wlen));
             let v = b.v5.as_mut().unwrap();
             if !first {
                 let r = if q1.is_finite() && v.q0.is_finite() { (q1 - v.q0) / scale } else { 0.0 };
                 v.obs.push((v.cur, r, v.k));
-                if v.traj.len() < 600 {
-                    v.traj.push_str(&format!("{:.2}/{:.2}/{:.2}:{:+.3e} ", 0.25 + 0.75 * v.cur[0], 0.25 + 0.75 * v.cur[1], v.cur[2], r));
+                // 軌跡は全区間を残す (9.23 節の集計で最後の 1/4 の平均・手間の重みを取るため。以前は 600 文字で切っていた)
+                if v.traj.len() < 1 << 20 {
+                    v.traj.push_str(&format!("{:.2}/{:.2}/{:.2}:{:+.3e}@{} ", 0.25 + 0.75 * v.cur[0], 0.25 + 0.75 * v.cur[1], v.cur[2], r, iw));
                 }
                 v.k += 1;
                 v.choose();
