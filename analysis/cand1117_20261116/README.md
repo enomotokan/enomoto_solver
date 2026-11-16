@@ -23,3 +23,6 @@ analysis/treeclose_20261114.md 9.44・9.45 節)。設定は cfg.py (cand1114 / c
   `python run.py S K` (K = 0〜7)、集計 `python summ.py S`。
 - W2 (誤答の再現、回数を増やす): cand1116・cand1117 × unitcal_7 × 種 1〜16、600 秒 (32 回)、8 分担: `python run.py W2 K` (K = 0〜7)、
   集計 `python summW.py W2 > summ_W2.txt`。最新の版でビルドして回す (デバッグ解の検査の誤検知を直し、落とした所の説明を足した版)。
+- G (DFSBB=2 の部品の切り分け): supportcase40・rocI-4-11・mcsched (600 秒) と noswot・timtab1・roll3000 (60 秒) × 種 1〜4 × 8 設定
+  (cand1117・s_nodfsbb・g_p10・g_p30・g_k1・g_pq・g_sq・g_sib、cfg.py の HGS)、192 回、16 分担 (見積り各 35〜41 分): `python run.py G K` (K = 0〜15)、
+  集計 `python summ.py G`。ENOMOTO_MIP_HGS_OPT を足した版 (このコミット以降) でビルドして回す。

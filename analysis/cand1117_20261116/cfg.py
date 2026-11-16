@@ -48,3 +48,12 @@ SC40 = {"s_nodfsbb": _minus("ENOMOTO_MIP_DFSBB"),
         "s_k5": {**CAND1117, "ENOMOTO_T_MIP_HGS_BB_EVERY": "5"},
         "s_k3": {**CAND1117, "ENOMOTO_T_MIP_HGS_BB_EVERY": "3"}}
 CFGS.update(SC40)
+
+# DFSBB=2 の部品の切り分け G (planG.py、treeclose 9.48 節): 損 (supportcase40) を避けて得 (noswot・timtab1・roll3000・rocI-4-11・mcsched) を残せる形を探す
+HGS = {"g_p10": {**CAND1117, "ENOMOTO_T_MIP_HGS_PLUNGE_NODES": "10"},
+       "g_p30": {**CAND1117, "ENOMOTO_T_MIP_HGS_PLUNGE_NODES": "30"},
+       "g_k1": {**CAND1117, "ENOMOTO_T_MIP_HGS_BB_EVERY": "1"},   # 待ち行列からはいつも下界最小 (= 選び方を下界のみ)、潜りは残す
+       "g_pq": {**CAND1117, "ENOMOTO_MIP_HGS_OPT": "p"},          # 潜りの打ち切りの割合を既定 (0.25) に戻す = 子の下界で潜りを状況で縮める
+       "g_sq": {**CAND1117, "ENOMOTO_MIP_HGS_OPT": "q"},          # 兄弟へ戻る割合を既定に戻す
+       "g_sib": {**CAND1117, "ENOMOTO_MIP_HGS_OPT": "s"}}         # 兄弟のノードでも分離・木の中のヒューリスティクス
+CFGS.update(HGS)

@@ -5865,6 +5865,14 @@ fn membq_diag() -> bool {
     env_str!("ENOMOTO_MIP_MEMBQ_DIAG").is_some()
 }
 
+/// 試作 `ENOMOTO_MIP_HGS_OPT` (既定では使わない、treeclose 9.48 節): `DFSBB=2` (HiGHS 型) の部品を 1 つずつ既定の動きに戻して切り分ける文字。
+/// `p` = 潜りの打ち切りの割合を既定 (`ENOMOTO_T_MIP_PLUNGE_QUOT`、0.25) に戻す (子の下界が悪ければ潜りを状況で打ち切る)、
+/// `q` = 兄弟へ戻る割合を既定 (`ENOMOTO_T_MIP_SIBLING_QUOT`) に戻す、`s` = 兄弟へ戻ったときも潜りの始めとして数える
+/// (兄弟のノードでも分離・木の中のヒューリスティクスを回す)
+fn hgs_opt(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_HGS_OPT").is_some_and(|v| v.contains(c))
+}
+
 fn dse_all() -> bool {
     env_str!("ENOMOTO_MIP_NO_DSE_ALL").is_none() && crate::simplex::slope_intercept_dual::mip_profile() != 1
 }
@@ -11721,7 +11729,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 試作 `ENOMOTO_MIP_TC` の `k` (既定では使わない、treeclose 9.6 節): 兄弟へ戻ったときも潜りの始めとして数える
                     // (`plunge_depth` は待ち行列から取り出したときだけ 0 に戻るので、深さ優先寄りでは潜りの始めだけで呼ぶ木の中の
                     // ヒューリスティクス・ノードの分離がほとんど呼ばれず、潜りの深さの上限 200 にも通算で当たる)
-                    if tc_on('k') || self.nb_arm() == Some(1) || self.nb.as_ref().is_some_and(|b| b.v5.is_some()) || matches!(self.dfsbb_kind(), 1 | 4) {
+                    if tc_on('k') || self.nb_arm() == Some(1) || self.nb.as_ref().is_some_and(|b| b.v5.is_some()) || matches!(self.dfsbb_kind(), 1 | 4) || (self.dfsbb_kind() == 2 && hgs_opt('s')) {
                         // (`DFSBB` の 2・3 は HiGHS と同じく、分離・木の中のヒューリスティクスは待ち行列から取ったノードでだけ)
                         plunge_depth = 0;
                     }
@@ -14774,7 +14782,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 潜りの打ち切りの割合 (`ENOMOTO_T_MIP_PLUNGE_QUOT`。バンディットの腕 1 なら `ENOMOTO_T_MIP_NB_ARM1_PQ`、既定 1)。
     fn nb_plunge_quot(&self) -> f64 {
-        if self.dfsbb_on() {
+        if self.dfsbb_on() && !(self.dfsbb_kind() == 2 && hgs_opt('p')) {
             return 1.0;
         }
         if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
@@ -14785,7 +14793,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 兄弟へ戻る下界の割合 (`ENOMOTO_T_MIP_SIBLING_QUOT`。バンディットの腕 1 なら `ENOMOTO_T_MIP_NB_ARM1_SQ`、既定 1)。
     fn nb_sibling_quot(&self) -> f64 {
-        if self.dfsbb_on() {
+        if self.dfsbb_on() && !(self.dfsbb_kind() == 2 && hgs_opt('q')) {
             return 1.0;
         }
         if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
