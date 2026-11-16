@@ -17,3 +17,7 @@ analysis/treeclose_20261114.md 9.44・9.45 節)。設定は cfg.py (cand1114 / c
 - I (切り分け): P で cand1117 が cand1114 より全種で遅かった 10teams (3.54)・neos-827175 (1.59) の原因を分ける。cand1114・cand1116・cand1117 と、
   cand1117 から 1 つずつ外した 10 通り (m_*)・cand1116 に 1 つずつ足した 3 通り (c16+*) (cfg.py の ISO) × 2 問 × 種 1〜8、60 秒 (256 回)。
   `python run.py I K` (K = 0〜3、各約 30 分)、集計 `python summI.py > summ_I.txt`。
+- W (誤答の切り分け): unitcal_7 種 2 で cand1116 が最適値を切り落とした件。cand1116・cand1117・cand1116 から鍵を 1 つずつ外した 7 通り × 種 1〜8、600 秒 (72 回)、
+  18 分担 (各最大約 42 分): `python run.py W K` (K = 0〜17)。デバッグ解 (unitcal_7_pre.sol.gz) を渡し、logs/ に MIP_DEBUG_SOL の行を残す。集計 `python summW.py > summ_W.txt`。
+- S (supportcase40 の切り分け): cand1116・cand1117・s_nodfsbb・s_k5・s_k3・c16+dfsbb × 種 1〜4、600 秒 (24 回)、8 分担 (各最大約 32 分):
+  `python run.py S K` (K = 0〜7)、集計 `python summ.py S`。
