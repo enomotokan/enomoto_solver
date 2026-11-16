@@ -11,3 +11,6 @@ analysis/treeclose_20261114.md 9.44・9.45 節)。設定は cfg.py (cand1114 / c
 集計は `python summ.py P > summ_P.txt` / `python summ.py M > summ_M.txt` (SGM shift 1・問題単位のブートストラップの 95% CI、解けた数、
 食い違い、最大 RSS、比 >1.15 / <0.87 の問題と「全種で遅/速」(全種で比 >1.25 / <0.8))。
 準備: pip install maturin highspy==1.15.1 && pip install -e . 、python analysis/cbcimpl_20261029/probs.py (問題の取得)。
+- X (追加): M で cand1117 / cand1116 が全種で > 1.25 だった問題に種 3・4 を足す (cand1116 の shards_X と同じ形、{cand1116, cand1117, highs}、600 秒)。
+  M がそろってから `python planX.py` (問題を手で与えるなら `python planX.py 問題 ...`) で shards_X.json を作る。1 分担 = 1 (問題, 種) で最大約 32 分。
+  `python run.py X K`、集計は `python summ.py MX` (M と X を合わせる)。
