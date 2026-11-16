@@ -17,3 +17,19 @@ CAND1114 = _c16.CAND1114
 CAND1116 = _c16.CAND1116
 CAND1117 = {**CAND1116, "ENOMOTO_MIP_TICKS": "ntwumcflshk", "ENOMOTO_MIP_DETHASH": "1", "ENOMOTO_MIP_DFSBB": "2"}
 CFGS = {"cand1114": CAND1114, "cand1116": CAND1116, "cand1117": CAND1117, "highs": {}}
+
+# 切り分け I (10teams・neos-827175 が cand1114 より全種で遅い理由、planI.py): cand1117 から 1 つずつ外した設定と、cand1116 に 1 つずつ足した設定
+_DIFF16 = [k for k in sorted(set(CAND1114) | set(CAND1116)) if CAND1114.get(k) != CAND1116.get(k)]  # cand1114 → cand1116 で変わった鍵
+_ADD17 = ["ENOMOTO_MIP_TICKS", "ENOMOTO_MIP_DETHASH", "ENOMOTO_MIP_DFSBB"]                         # cand1116 → cand1117 で足した鍵
+def _minus(k):
+    d = dict(CAND1117)
+    if k in CAND1114: d[k] = CAND1114[k]
+    else: d.pop(k, None)
+    return d
+ISO = {}
+for _k in _DIFF16 + _ADD17:
+    ISO["m_" + _k.replace("ENOMOTO_MIP_", "").lower()] = _minus(_k)          # cand1117 から _k を外す (cand1114 の値に戻す)
+for _k in _ADD17:
+    ISO["c16+" + _k.replace("ENOMOTO_MIP_", "").lower()] = {**CAND1116, _k: CAND1117[_k]}  # cand1116 に _k だけ足す
+# (cand1116 + TICKS + DETHASH は m_dfsbb と同じ)
+CFGS.update(ISO)

@@ -14,3 +14,6 @@ analysis/treeclose_20261114.md 9.44・9.45 節)。設定は cfg.py (cand1114 / c
 - X (追加): M で cand1117 / cand1116 が全種で > 1.25 だった問題に種 3・4 を足す (cand1116 の shards_X と同じ形、{cand1116, cand1117, highs}、600 秒)。
   M がそろってから `python planX.py` (問題を手で与えるなら `python planX.py 問題 ...`) で shards_X.json を作る。1 分担 = 1 (問題, 種) で最大約 32 分。
   `python run.py X K`、集計は `python summ.py MX` (M と X を合わせる)。
+- I (切り分け): P で cand1117 が cand1114 より全種で遅かった 10teams (3.54)・neos-827175 (1.59) の原因を分ける。cand1114・cand1116・cand1117 と、
+  cand1117 から 1 つずつ外した 10 通り (m_*)・cand1116 に 1 つずつ足した 3 通り (c16+*) (cfg.py の ISO) × 2 問 × 種 1〜8、60 秒 (256 回)。
+  `python run.py I K` (K = 0〜3、各約 30 分)、集計 `python summI.py > summ_I.txt`。
