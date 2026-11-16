@@ -41,7 +41,7 @@ for p, opt, integ in PROBS:
         marks = []
         if g0 and g0 > 0:
             for fr in (2, 4, 10, 100):
-                hit = next(((n, t) for n, lb, t in pts if (opt - lb) / abs(opt) <= g0 / fr), None)
+                hit = next(((n, t) for n, lb, t in pts if abs(lb) < 1e300 and (opt - lb) / abs(opt) <= g0 / fr), None)
                 marks.append(f"1/{fr}: " + (f"{hit[0]}節点 {hit[1]:.0f}s" if hit else "-"))
         last = pts[-1] if pts else None
         print(f"  {c:10s} {str(x.get('status'))[:9]:9s} {x.get('time', 0):6.1f}s 節点 {x.get('nodes')} 根の下界 {root} (ギャップ {g0:.3e})" if g0 is not None else f"  {c:10s} {str(x.get('status'))[:9]:9s} {x.get('time', 0):6.1f}s 節点 {x.get('nodes')} 根の下界 {root}",
