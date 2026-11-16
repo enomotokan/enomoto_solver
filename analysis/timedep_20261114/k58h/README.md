@@ -8,7 +8,7 @@
 58 問 × 種 1〜4、4 スレッド・60 秒、4 分担 (`python plan.py 4`)。1 分担 116 回で、k58f・k58g の実績からは約 43 分。
 
 ```bash
-git fetch origin ccr-1beed81b-ex0uhq && git checkout <依頼に書いたコミット>
+git fetch origin ccr-1beed81b-ex0uhq && git checkout <依頼に書いたコミット>   # 11bd3931b 以降の版 (4653707a0 の結果は old_4653707a0/ にあり、使わない)
 python -m venv .venv && .venv/bin/pip install maturin highspy
 source .venv/bin/activate && maturin develop --release
 python analysis/cbcimpl_20261029/probs.py
