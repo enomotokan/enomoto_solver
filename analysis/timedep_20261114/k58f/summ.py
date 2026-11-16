@@ -6,7 +6,8 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D))
 from cfg import CFGS_ALL  # noqa: E402
-rows = [json.loads(l) for f in sorted(glob.glob(str(D / ("res_loo_s*.jsonl" if sys.argv[1:] == ["loo"] else "res_s*.jsonl")))) for l in open(f) if l.strip()]
+REF = sys.argv[sys.argv.index("--ref") + 1] if "--ref" in sys.argv else "base"  # 比べる相手 (`--ref K3D` で K3DS 対 K3D)
+rows = [json.loads(l) for f in sorted(glob.glob(str(D / ("res_loo_s*.jsonl" if sys.argv[1:2] == ["loo"] else "res_s*.jsonl")))) for l in open(f) if l.strip()]
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
 CFGS = {c: v for c, v in CFGS_ALL.items() if any(k[1] == c for k in R)}
 def t(r):
@@ -18,11 +19,11 @@ print(f"行数 {len(rows)}、問題 {len(probs)}、種 {seeds}")
 crash = [(p, c, s) for (p, c, s), r in R.items() if "error" in r["result"] or r["result"].get("status") in (None, "crash", "error")]
 print(f"crash {len(crash)} {crash[:10]}")
 for c in CFGS:
-    if c == "base": continue
+    if c == REF or (REF != "base" and c == "base"): continue
     logr = collections.defaultdict(list); ns = [0, 0]; bad = []; npair = 0
     for p in probs:
         for s in seeds:
-            a, b = R.get((p, "base", s)), R.get((p, c, s))
+            a, b = R.get((p, REF, s)), R.get((p, c, s))
             if not a or not b: continue
             npair += 1; ns[0] += solved(a); ns[1] += solved(b)
             sa, sb = a["result"].get("status"), b["result"].get("status")
@@ -37,14 +38,14 @@ for c in CFGS:
         return math.exp(sum(v) / len(v)) if v else 1.0
     est = sgm(ps); random.seed(0)
     bs = sorted(sgm([random.choice(ps) for _ in ps]) for _ in range(4000))
-    print(f"\n## {c} ({CFGS[c].get('ENOMOTO_MIP_TIMEDEP')}) 対 {npair}: 解けた base {ns[0]} / {c} {ns[1]}、食い違い {len(bad)} {bad}")
+    print(f"\n## {c} ({CFGS[c].get('ENOMOTO_MIP_TIMEDEP')}) 対 {npair}: 解けた {REF} {ns[0]} / {c} {ns[1]}、食い違い {len(bad)} {bad}")
     print(f"  SGM 比 (どちらかが解けた {len(ps)} 問): {est - 1:+.1%} [{bs[100] - 1:+.1%}, {bs[3899] - 1:+.1%}]")
     for p in ps:
         v = logr[p]
         if len(v) >= len(seeds) and all(x > math.log(1.25) for x in v): print("  遅", p, [round(math.exp(x), 2) for x in v])
         if len(v) >= len(seeds) and all(x < math.log(0.8) for x in v): print("  速", p, [round(math.exp(x), 2) for x in v])
-    one = [(p, s) for p in probs for s in seeds if R.get((p, "base", s)) and R.get((p, c, s)) and solved(R[p, "base", s]) != solved(R[p, c, s])]
-    print("  片方だけ解けた:", [(p, s, "base" if solved(R[p, "base", s]) else c) for p, s in one])
+    one = [(p, s) for p in probs for s in seeds if R.get((p, REF, s)) and R.get((p, c, s)) and solved(R[p, REF, s]) != solved(R[p, c, s])]
+    print("  片方だけ解けた:", [(p, s, REF if solved(R[p, REF, s]) else c) for p, s in one])
 print("\n種 1・2 の時間の比 |log| の平均 (種の間の揺れ、両方の種がある問題):")
 for c in CFGS:
     v = [abs(math.log((t(R[p, c, 1]) + 1) / (t(R[p, c, 2]) + 1))) for p in probs if (p, c, 1) in R and (p, c, 2) in R]
