@@ -2128,6 +2128,43 @@ pub(super) struct Nb5 {
     secs: f64,
     /// 前に周辺尤度で選んだ (長さの尺度, 雑音)。`ENOMOTO_T_MIP_NB5_REFIT` 回に 1 回だけ選び直す
     hyp: Option<([f64; 3], f64)>,
+    /// `ENOMOTO_MIP_NB5_NOINC` で捨てた (暫定解がない) 区間の数
+    skipped: u64,
+}
+
+/// `=5` で学習する次元 (`ENOMOTO_MIP_NB5_DIMS`、既定 "psu" = 3 次元とも。p = PLUNGE_QUOT、s = SIBLING_QUOT、u = ノード数の上限の尺度)
+fn nb5_dims() -> [bool; 3] {
+    let d = env_str!("ENOMOTO_MIP_NB5_DIMS").unwrap_or("psu");
+    [d.contains('p'), d.contains('s'), d.contains('u')]
+}
+
+/// 学習しない次元を固定値 (探索空間 [0,1] の座標) にする。固定値は `ENOMOTO_T_MIP_NB5_FIX_PQ/SQ/U` (PQ・SQ は 0.25〜1 の値、u は 0〜1)、
+/// 既定は PQ 0.25・SQ 0.25・u 1/7 (= 既定の潜り方)
+fn nb5_project(mut x: [f64; 3]) -> [f64; 3] {
+    let on = nb5_dims();
+    let fix = [
+        (tunable!("ENOMOTO_T_MIP_NB5_FIX_PQ", 0.25, f64) - 0.25) / 0.75,
+        (tunable!("ENOMOTO_T_MIP_NB5_FIX_SQ", 0.25, f64) - 0.25) / 0.75,
+        tunable!("ENOMOTO_T_MIP_NB5_FIX_U", 1.0 / 7.0, f64),
+    ];
+    for d in 0..3 {
+        if !on[d] {
+            x[d] = fix[d].clamp(0.0, 1.0);
+        }
+    }
+    x
+}
+
+/// 初期点 (NB5_INIT を学習する次元へ射影し、重なりを除く)
+fn nb5_init_points() -> Vec<[f64; 3]> {
+    let mut v: Vec<[f64; 3]> = Vec::new();
+    for p in NB5_INIT {
+        let q = nb5_project(p);
+        if !v.iter().any(|w| (0..3).all(|d| (w[d] - q[d]).abs() < 1e-12)) {
+            v.push(q);
+        }
+    }
+    v
 }
 
 const NB5_INIT: [[f64; 3]; 4] = [[0.0, 0.0, 1.0 / 7.0], [1.0, 1.0, 1.0 / 7.0], [1.0, 1.0, 1.0], [0.5, 0.5, 0.5]];
@@ -2196,10 +2233,12 @@ impl Nb5 {
     /// 次の点を選ぶ (観測を足した後に呼ぶ)
     fn choose(&mut self) {
         let k = self.k as usize;
-        if k < NB5_INIT.len() {
-            self.cur = NB5_INIT[k];
+        let init = nb5_init_points();
+        if k < init.len() {
+            self.cur = init[k];
             return;
         }
+        let on = nb5_dims();
         let win = tunable!("ENOMOTO_T_MIP_NB5_WINDOW", 40usize, usize).max(4);
         let t0 = std::time::Instant::now();
         let obs: Vec<&([f64; 3], f64, u64, u64)> = self.obs.iter().rev().take(win).collect();
@@ -2221,9 +2260,11 @@ impl Nb5 {
         match self.hyp {
             Some(h) if self.k % refit != 0 => hyps.push(h),
             _ => {
-                for &a in &grid {
-                    for &b in &grid {
-                        for &c in &grid {
+                // 学習しない次元は全部の点で同じ値なので尺度は効かない: 1 つ (1.0) だけにして同じ当てはめを繰り返さない
+                let g = |d: usize| if on[d] { &grid[..] } else { &grid[2..] };
+                for &a in g(0) {
+                    for &b in g(1) {
+                        for &c in g(2) {
                             for &nz in &[0.05, 0.3] {
                                 hyps.push(([a, b, c], nz));
                             }
@@ -2253,8 +2294,22 @@ impl Nb5 {
         let ei = env_str!("ENOMOTO_MIP_NB5_ACQ") == Some("ei");
         let kappa = tunable!("ENOMOTO_T_MIP_NB5_KAPPA", 1.0, f64);
         let zbest = z.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let mut cand: Vec<[f64; 3]> = (1..=256).map(|i| [halton(i, 2), halton(i, 3), halton(i, 5)]).collect();
-        cand.extend_from_slice(&NB5_INIT);
+        // 候補: 学習する次元だけの Halton 列 (底 2・3・5 を学習する次元へ順に割り当てる。3 次元のときは今までと同じ点) + 初期点
+        let bases = [2usize, 3, 5];
+        let mut cand: Vec<[f64; 3]> = (1..=256)
+            .map(|i| {
+                let mut x = [0.0; 3];
+                let mut bi = 0;
+                for d in 0..3 {
+                    if on[d] {
+                        x[d] = halton(i, bases[bi]);
+                        bi += 1;
+                    }
+                }
+                nb5_project(x)
+            })
+            .collect();
+        cand.extend_from_slice(&init);
         let mut pick = (f64::NEG_INFINITY, self.cur, 0.0);
         for c in cand {
             let kv: Vec<f64> = obs.iter().map(|o| kern(&c, &o.0, &ell)).collect();
@@ -14648,7 +14703,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // この区間の実際の手間 (LP の反復)。区間は next_work を越えた最初のノードで切るので wlen より少し長い
             let iw = work.saturating_sub(b.next_work.saturating_sub(wlen));
             let v = b.v5.as_mut().unwrap();
-            if !first {
+            // `NB5_NOINC`: 暫定解がない区間 (打ち切り値 = ∞ で PLUNGE_QUOT・SIBLING_QUOT の閾値が効かない) は観測を捨て、点も選び直さない
+            if !first && !ub.is_finite() && env_str!("ENOMOTO_MIP_NB5_NOINC").is_some_and(|v| v != "0") {
+                v.skipped += 1;
+            } else if !first {
                 let r = if q1.is_finite() && v.q0.is_finite() { (q1 - v.q0) / scale } else { 0.0 };
                 v.obs.push((v.cur, r, v.k, work));
                 v.work = work;
@@ -23638,7 +23696,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if let Some(v) = self.nb.as_ref().and_then(|b| b.v5.as_ref()) {
                     eprintln!("MIP: NODESEL_BANDIT5: intervals {}, GP best point PLUNGE_QUOT {:.3} SIBLING_QUOT {:.3} u {:.3} (predicted reward {:.3e}), trajectory {}", v.k, 0.25 + 0.75 * v.best.0[0], 0.25 + 0.75 * v.best.0[1], v.best.0[2], v.best.1, v.traj);
-                    eprintln!("MIP: NODESEL_BANDIT5 time: choose {:.2}s, window {}, decay work {}, refit {}", v.secs, tunable!("ENOMOTO_T_MIP_NB5_WINDOW", 40usize, usize), tunable!("ENOMOTO_T_MIP_NB5_DECAY_WORK", 0.0, f64), tunable!("ENOMOTO_T_MIP_NB5_REFIT", 1u64, u64));
+                    eprintln!("MIP: NODESEL_BANDIT5 time: choose {:.2}s, skipped without incumbent {}, dims {}, window {}, decay work {}, refit {}", v.secs, v.skipped, env_str!("ENOMOTO_MIP_NB5_DIMS").unwrap_or("psu"), tunable!("ENOMOTO_T_MIP_NB5_WINDOW", 40usize, usize), tunable!("ENOMOTO_T_MIP_NB5_DECAY_WORK", 0.0, f64), tunable!("ENOMOTO_T_MIP_NB5_REFIT", 1u64, u64));
                 }
                 if let Some(b) = &self.nb {
                     eprintln!("MIP: NODESEL_BANDIT: version {}, pulls {:?}, discounted mean reward [{:.4}, {:.4}], sequence {}", if b.v5.is_some() { 5 } else if b.v4 { 4 } else if b.v3 { 3 } else if b.v2 { 2 } else { 1 }, b.pulls, b.sum[0] / b.cnt[0].max(1e-9), b.sum[1] / b.cnt[1].max(1e-9), b.seq);

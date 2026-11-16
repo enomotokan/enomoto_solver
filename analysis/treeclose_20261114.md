@@ -951,3 +951,18 @@ cand1116 の上。集計 `b58j/summ_nbx4.txt`。
 - 台本 `b58n/` (cand1116 + `=5` EI + `NB5_DECAY_WORK=20000`): w20 = 区間 20000・窓 40・毎回選び直し、w5 = 5000・100・4 回に 1 回、
   w2 = 2000・150・10 回に 1 回。損の 3 問 + mcsched × 種 1・2、600 秒 (24 回・6 分担・各約 0.7 時間)。
   `python run_shard.py K nbn4` (K=0〜5)、集計 `python summ.py nbn4` と `python nb5final.py` (最後の 1/4 の平均・種 1・2 の距離・図)。
+
+### 9.26 =5 の次元を減らす (利用者の指示、b58o の実装と台本)
+
+- 足した調整 (どれも既定は今までと同じ):
+  - `ENOMOTO_MIP_NB5_DIMS` (既定 "psu" = 3 次元): 学習する次元を文字で選ぶ (p = PLUNGE_QUOT、s = SIBLING_QUOT、u = ノード数の上限の尺度)。
+    学習しない次元は固定値 (`ENOMOTO_T_MIP_NB5_FIX_PQ`・`_SQ` は 0.25〜1、`_U` は 0〜1。既定 0.25・0.25・1/7 = 既定の潜り方)。
+    初期点は NB5_INIT を射影して重なりを除いたもの (s だけなら SQ 0.25・1・0.625 の 3 点)。Halton の候補は学習する次元だけで作る
+    (底 2・3・5 を順に割り当て、3 次元では今までと同じ点)。学習しない次元の尺度は 1 つだけにして、周辺尤度の格子を 54 → 18 (2 次元)・6 (1 次元) 通りに減らす。
+  - `ENOMOTO_MIP_NB5_NOINC` (既定オフ): 暫定解がない区間 (打ち切り値 = ∞ で PLUNGE_QUOT・SIBLING_QUOT の閾値が効かない) の観測を捨て、点も選び直さない。
+    暫定解が出た後の区間から学習が始まる。捨てた区間の数はログの `MIP: NODESEL_BANDIT5 time: … skipped without incumbent N, dims …`。
+  - 軌跡は 3 値のまま (固定した次元は固定値) 書くので、`nb5final.py` はそのまま使える。
+- 試し (mcsched・種 1・60 秒、区間 5000): dims=s は 70 区間・choose 0.03 秒・最良点 SQ 0.625、dims=ps は 75 区間・0.05 秒・最良点 PQ 0.75・SQ 0.98。
+- 台本 `b58o/` (cand1116 + `=5` EI + `NB5_NOINC=1`): d3 = psu、d2 = ps、d1 = s。損の 3 問 + mcsched × 種 1・2、600 秒 (24 回・8 分担・各 3 回 ≤ 30 分)。
+  区間の長さ・窓・REFIT は b58n の集計の後に `cfgs.py` の `WIN` で決める (今は仮に区間 20000・窓 40)。
+  `python run_shard.py K nbo4` (K=0〜7)、集計 `python summ.py nbo4` と `python nb5final.py`。
