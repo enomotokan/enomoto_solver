@@ -24039,7 +24039,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         ts + ta
                     );
                 }
-                if self.dfsbb_kind() == 4 {
+                // (`=4` 以外でも、問題の特徴 (根の分数値・整数変数の数・潜りの底の深さ) を出す。頻度を特徴の関数にするための集計用)
+                if self.dfsbb_on() {
                     eprintln!("MIP: DFSBB4: d {:.1} ({}), L {}, root fractional {}, integers {}, mean depth of dive bottoms {:.1} ({} dives)", self.dfsbb_d(), env_str!("ENOMOTO_MIP_DFSBB_D").unwrap_or("frac"), self.dfsbb_l(), self.noinc_root_frac, self.p.is_int.iter().filter(|&&b| b).count(), self.dfsbb_leaf_depth_sum as f64 / self.dfsbb_leaf_cnt.max(1) as f64, self.dfsbb_leaf_cnt);
                 }
                 if self.dfsbb_on() {
