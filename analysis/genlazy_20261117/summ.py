@@ -67,3 +67,14 @@ for p in probs:
         v = L[c].get(p)
         cells.append(f"{dg[0]:.2f} / " + (f"{math.exp(sum(v) / len(v)):.2f}" if v else "-") if dg else "- / " + (f"{math.exp(sum(v) / len(v)):.2f}" if v else "-"))
     print(p, "|", " | ".join(cells))
+# M は (問題, 種) ごとに全設定の秒・終わりの下界を並べる (時間切れの問題 (puriri など) の下界の比べ)
+if SET.startswith("M"):
+    print("\n== (問題, 種) ごとの秒 (時間切れは「TL 下界」)")
+    for p in probs:
+        for s in seeds:
+            cells = []
+            for c in CF:
+                r = R.get((p, c, s))
+                if r is None: cells.append(f"{c} -"); continue
+                cells.append(f"{c} {t(r):.0f}" if solved(r) else f"{c} TL {r['result'].get('bound')}")
+            print(f"  {p} 種 {s}: " + " / ".join(cells))
