@@ -6898,6 +6898,48 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         eprintln!("MIP: probing: PREPAR {par_threads} threads, {n_windows} windows, {n_spec_used} of {probed} probes from the windows");
     }
     PROBE_FIXED.with(|f| f.set(fixed));
+    // 診断 `ENOMOTO_MIP_DEBUG_PROBE_SUBST` (振る舞いは変えない、analysis/prbsubst_20261117): HiGHS の probing の代入
+    // (`HighsImplications::runProbing`: 0-1 列 x の両側で列 y がそれぞれ違う値に固定されれば y = a + (b − a) x) に当たる組を、
+    // プロービングの後の定義域で数える (y の種類別: 0-1・一般の整数・連続)
+    if verbose && env_str!("ENOMOTO_MIP_DEBUG_PROBE_SUBST").is_some() {
+        let ts = std::time::Instant::now();
+        let mut d = dom.clone();
+        let (mut nb, mut ni, mut nc, mut nx) = (0usize, 0usize, 0usize, 0usize);
+        let mut subst = vec![false; n];
+        for &j in &cands {
+            if d.lo[j] == d.up[j] || subst[j] {
+                continue;
+            }
+            let pos = d.stack_len();
+            d.tighten_upper(prob, j, 0.0);
+            let ok0 = d.propagate(prob);
+            let (lo0, up0) = (d.lo.clone(), d.up.clone());
+            d.backtrack_to(prob, pos);
+            d.tighten_lower(prob, j, 1.0);
+            let ok1 = d.propagate(prob);
+            if ok0 && ok1 {
+                for k in 0..n {
+                    if k == j || subst[k] || dom.lo[k] == dom.up[k] {
+                        continue;
+                    }
+                    if lo0[k] == up0[k] && d.lo[k] == d.up[k] && (lo0[k] - d.lo[k]).abs() > 1e-6 {
+                        subst[k] = true;
+                        if bin0[k] {
+                            nb += 1;
+                        } else if prob.is_int[k] {
+                            ni += 1;
+                        } else {
+                            nc += 1;
+                        }
+                    }
+                }
+            } else {
+                nx += 1;
+            }
+            d.backtrack_to(prob, pos);
+        }
+        eprintln!("MIP: probing: PROBE_SUBST diag: {nb} binary, {ni} general integer, {nc} continuous columns substitutable ({} candidates, {nx} one-sided, {:.2}s)", cands.len(), ts.elapsed().as_secs_f64());
+    }
     prob.conflict_edges = edges;
     if want_equiv {
         let mut seen = std::collections::HashSet::new();

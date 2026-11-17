@@ -8031,6 +8031,132 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
+    /// 診断 `ENOMOTO_MIP_DIAG_HIDCLQ` (treeclose 9.81 節、既定では使わない。値 `stop` で数えたら止める、`nolp` で LP を解き直さない): 前処理の後の
+    /// 問題 (根の LP の直後) で、2 値列だけの片側の行 (固定された列は右辺に移し、負の係数は否定の文字にして `sum a_k l_k <= b`、a_k > 0) を分ける:
+    /// (A) どの 1 文字も右辺に収まり、どの 2 文字も右辺を超える (最小の 2 係数の和 > b + tol) のに係数が全部同じでない行 (0-1 解ではクリーク不等式と同じ
+    /// なのに LP では弱い。例 5x + 4y + 3z <= 6)、(B) 係数が全部同じで b / a > 1 の行 (2x + 2y <= 3 など、和 <= 1 に直っていない)、
+    /// (C) 既にクリーク型 (係数が全部同じで b / a = 1)、(P) 一部の文字だけがクリークを成す行 (係数の大きい順に k 個で、その中の最小の 2 係数の和 > b、
+    /// 2 <= k < 行の長さ)。(A)(B) をクリーク型の行 (文字の和 <= 1) にした場合と、(P) のクリーク部分を行として足した場合の LP の下界を、行を足して解き直して出す。
+    fn diag_hidden_cliques(&mut self) {
+        let t0 = Instant::now();
+        let p = self.p;
+        let n = p.n;
+        let binary: Vec<bool> = (0..n).map(|j| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0).collect();
+        let free: Vec<bool> = (0..n).map(|j| p.col_lo[j] < p.col_up[j]).collect();
+        let tol = 1e-9;
+        let (mut nrow, mut nnz_all, mut n_bin1, mut n_a, mut n_b, mut n_c, mut n_p) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+        let (mut nnz_a, mut nnz_b, mut ksum_p, mut len_p) = (0usize, 0usize, 0usize, 0usize);
+        let mut n_two_sided = 0usize;
+        let mut add_ab: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
+        let mut add_p: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
+        let mut examples: Vec<String> = Vec::new();
+        let lit_row = |lits: &[(u32, f64)]| -> (Vec<(usize, f64)>, f64, f64) {
+            let mut nneg = 0.0;
+            let mut r: Vec<(usize, f64)> = lits.iter().map(|&(q, _)| if q % 2 == 0 { ((q / 2) as usize, 1.0) } else { nneg += 1.0; ((q / 2) as usize, -1.0) }).collect();
+            r.sort_by_key(|e| e.0);
+            (r, f64::NEG_INFINITY, 1.0 - nneg)
+        };
+        for (i, r0) in p.rows.iter().enumerate() {
+            let r: Vec<(usize, f64)> = r0.iter().copied().filter(|e| free[e.0]).collect();
+            nrow += 1;
+            nnz_all += r.len();
+            if r.len() < 2 || !r.iter().all(|&(j, _)| binary[j]) {
+                continue;
+            }
+            n_bin1 += 1;
+            let (l, u) = (p.row_lo[i], p.row_up[i]);
+            if l.is_finite() && u.is_finite() {
+                n_two_sided += 1;
+                continue;
+            }
+            let shift: f64 = r0.iter().filter(|e| !free[e.0]).map(|&(j, a)| a * p.col_lo[j]).sum();
+            let (sg, b0) = if u.is_finite() { (1.0, u - shift) } else { (-1.0, -(l - shift)) };
+            // sum sg a_j x_j <= b0 -> 負の係数は 1 - x の文字に: |a| (1 - x) - |a| ... b = b0 + sum |a_neg|
+            let mut b = b0;
+            let mut lits: Vec<(u32, f64)> = Vec::with_capacity(r.len());
+            for &(j, a0) in &r {
+                let a = sg * a0;
+                if a > 0.0 {
+                    lits.push((2 * j as u32, a));
+                } else {
+                    b -= a;
+                    lits.push((2 * j as u32 + 1, -a));
+                }
+            }
+            lits.sort_by(|x, y| y.1.total_cmp(&x.1));
+            let k_len = lits.len();
+            if lits[0].1 > b + tol * (1.0 + b.abs()) {
+                continue; // 1 文字で右辺を超える (前処理で固定されるはずの列)。数えない
+            }
+            let amin = lits[k_len - 1].1;
+            let all_eq = (lits[0].1 - amin).abs() <= 1e-9 * lits[0].1.abs().max(1.0);
+            let two_min = lits[k_len - 1].1 + lits[k_len - 2].1;
+            if two_min > b + tol * (1.0 + b.abs()) {
+                if all_eq && (b / amin - 1.0).abs() <= 1e-9 {
+                    n_c += 1;
+                } else if all_eq {
+                    n_b += 1;
+                    nnz_b += k_len;
+                    add_ab.push(lit_row(&lits));
+                } else {
+                    n_a += 1;
+                    nnz_a += k_len;
+                    if examples.len() < 3 {
+                        examples.push(format!("row {i}: {} <= {b}", lits.iter().take(6).map(|&(q, a)| format!("{a}{}x{}", if q % 2 == 1 { "~" } else { "" }, q / 2)).collect::<Vec<_>>().join(" + ")));
+                    }
+                    add_ab.push(lit_row(&lits));
+                }
+                continue;
+            }
+            // 一部の文字だけのクリーク: 係数の大きい順に k 個、その中の最小の 2 係数の和 > b となる最大の k
+            let mut k = 0;
+            for kk in 2..=k_len {
+                if lits[kk - 1].1 + lits[kk - 2].1 > b + tol * (1.0 + b.abs()) {
+                    k = kk;
+                } else {
+                    break;
+                }
+            }
+            if k >= 2 {
+                n_p += 1;
+                ksum_p += k;
+                len_p += k_len;
+                add_p.push(lit_row(&lits[..k]));
+            }
+        }
+        // LP の下界: (A)(B) のクリーク型の行を足す / (P) のクリーク部分を足す / 両方
+        let obj0 = self.lp.objective();
+        let mut gains: Vec<String> = Vec::new();
+        if env_str!("ENOMOTO_MIP_DIAG_HIDCLQ").is_some_and(|v| v != "nolp") {
+            for (name, rows) in [("AB", add_ab.clone()), ("P", add_p.clone()), ("AB+P", add_ab.iter().chain(add_p.iter()).cloned().collect::<Vec<_>>())] {
+                if rows.is_empty() {
+                    gains.push(format!("{name} -"));
+                    continue;
+                }
+                let saved = self.lp.save_state();
+                let m0 = self.lp.num_rows();
+                self.lp.add_rows(&rows);
+                let it0 = self.lp.total_iterations();
+                let lim = 10 * self.root_lp_iters.max(100) + 10_000;
+                let st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: self.deadline });
+                let its = self.lp.total_iterations() - it0;
+                let obj1 = if st == LpStatus::Optimal { self.lp.objective() } else { f64::NAN };
+                gains.push(format!("{name} {:.10e} (gain {:.3e} rel, {its} iters, {st:?})", obj1 + p.offset, (obj1 - obj0) / (obj0 + p.offset).abs().max(1.0)));
+                let mut remove = vec![false; self.lp.num_rows()];
+                for r in remove.iter_mut().skip(m0) {
+                    *r = true;
+                }
+                self.lp.delete_rows(&remove);
+                self.lp.restore_state(&saved);
+            }
+        }
+        eprintln!(
+            "MIP: HIDCLQ: rows {nrow} nnz {nnz_all}; binary rows {n_bin1} (two-sided {n_two_sided}); hidden clique (A, unequal coefs) {n_a} (nnz {nnz_a}); equal coefs b/a > 1 (B) {n_b} (nnz {nnz_b}); clique form (C) {n_c}; partial clique (P) {n_p} (mean k {:.1} of len {:.1}); root LP {:.10e}; LP with {} ({:.2}s){}",
+            if n_p > 0 { ksum_p as f64 / n_p as f64 } else { 0.0 }, if n_p > 0 { len_p as f64 / n_p as f64 } else { 0.0 }, obj0 + p.offset, gains.join("; "), t0.elapsed().as_secs_f64(),
+            if examples.is_empty() { String::new() } else { format!("; e.g. {}", examples.join(" | ")) }
+        );
+    }
+
     /// 診断 `ENOMOTO_MIP_DIAG_CLQROWS` (treeclose 9.78 節、既定では使わない): 根の LP (カットの前) で、クリーク型の行 (2 値列の文字の和 ≤ 1 / = 1)
     /// の数・割合・非零の割合、LP 解で余裕のある行、小さい行 (`ENOMOTO_T_MIP_DIAG_CLQROWS_K` 文字以下、既定 8) を極大クリークでまとめられる余地と、
     /// まとめたクリークのうち LP 解を破るものを足したときの下界の伸びを 1 行ずつ出す。LP は試したあと元に戻す。
@@ -9804,6 +9930,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nnz: usize = self.p.rows.iter().map(|r| r.iter().filter(|e| free[e.0]).count()).sum();
             eprintln!("MIP: root LP size: rows {}, free columns {}, nonzeros {nnz}", self.lp.num_rows(), free.iter().filter(|&&f| f).count());
         }
+        if env_str!("ENOMOTO_MIP_DIAG_HIDCLQ").is_some() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 {
+            self.diag_hidden_cliques();
+            if env_str!("ENOMOTO_MIP_DIAG_HIDCLQ").is_some_and(|v| v == "stop") {
+                self.join_fj_thread();
+                return self.finish(MipStatus::TimeLimit, root_obj);
+            }
+        }
         if env_str!("ENOMOTO_MIP_DIAG_CLQROWS").is_some() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 {
             self.diag_clqrows();
             // 値 `stop`: 数えたら止める (根の LP の後の手間を省く。状態は時間切れ)
@@ -10580,7 +10713,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         heur!("int shifting", self.int_shifting(&x));
                     }
                 }
-                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_TRIVIAL").is_none() {
+                // 試作 `ENOMOTO_MIP_SUBMIP_HEUR` の `t` ([`super::heuristics::subheur`]): サブ MIP の中では trivial を根のヒューリスティクスの最後に回す
+                let triv_late = self.params.submip && super::heuristics::subheur('t');
+                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_TRIVIAL").is_none() && !triv_late {
                     heur!("trivial", self.trivial());
                 }
                 heur!("randomized rounding", self.randomized_rounding(&x, 3));
@@ -10913,6 +11048,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if self.params.verbose && share_x {
                     eprintln!("MIP: root heuristics used {shared_x_used} LP solutions from the background cuts");
+                }
+                // 試作 `ENOMOTO_MIP_SUBMIP_HEUR` ([`super::heuristics::subheur`]): `t` の後回しの trivial、`l` の深さ 1 のサブ MIP の Local-MIP
+                if triv_late && self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_TRIVIAL").is_none() {
+                    heur!("trivial", self.trivial());
+                }
+                if self.params.submip && super::heuristics::subheur('l') && super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1 {
+                    heur!("sub-MIP Local-MIP", self.subheur_local_mip());
                 }
                 self.rootcap_end = self.rootcap_until.take();
                 if self.params.verbose {
@@ -24988,6 +25130,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
             eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
+            if super::domain::conflict_lev_diag() {
+                let c: Vec<u64> = super::domain::CONFLICT_LEV.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: conflict levels (all threads): examined {}, 1-UIP {}, stopped with >= 2 left {} (with non-row reasons {}); left by reason: decision {}, external {}, local redcost {}, strong branching {}, orbitope {}, dual proof {}, literal conflict {}, objective {}, implication {}, -10 {}, other {}", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14]);
+                let d: Vec<u64> = super::domain::CONFLICT_STOP.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: conflict analyses (all threads): {}, stopped: first level not resolved {}, set too large {}, not explained by a row {}, no conflict {}, 5-level rule {}, all levels {}; dropped as too long {}, conflicts {}, levels {}", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9]);
+            }
             if self.par_sb_stats[0] > 0 {
                 eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
             }
