@@ -189,6 +189,7 @@ impl LitConflictPool {
             }
             let mut fixes: Vec<(usize, bool, f64, usize, usize)> = Vec::new();
             for (j, _, _) in changed {
+                crate::ticks::add(crate::ticks::PROP, self.col_index[j].len() as u64 + 1);
                 for &s in &self.col_index[j] {
                     let s = s as usize;
                     if self.seen[s] == self.stamp {

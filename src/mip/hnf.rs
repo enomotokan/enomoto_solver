@@ -496,7 +496,12 @@ pub(crate) fn analyze(p: &MipProblem, int_ok: &[bool]) -> HnfResult {
         comp_rows.entry(c).or_default().push(k);
     }
     let mut comps: Vec<Vec<usize>> = comp_rows.into_values().collect();
-    comps.sort_by_key(|c| c.len());
+    // `ENOMOTO_MIP_DETHASH` ([`super::dethash`]): 長さが同じ成分は最初の行の番号で並べる (`HashMap` の走査順によらない)
+    if super::dethash() {
+        comps.sort_by_key(|c| (c.len(), c[0]));
+    } else {
+        comps.sort_by_key(|c| c.len());
+    }
     st.comps = comps.len();
     let mut work: i64 = tunable!("ENOMOTO_T_MIP_HNFPRE_WORK", 300_000_000.0, f64) as i64;
     // 時間の上限 (`ENOMOTO_T_MIP_HNFPRE_SECS`、既定 1 秒。手間の上限と早い方で諦める)

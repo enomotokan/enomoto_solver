@@ -96,6 +96,7 @@ mod presolve;
 mod simplex;
 mod solver;
 mod sparse;
+mod ticks;
 mod types;
 
 use pyo3::prelude::*;

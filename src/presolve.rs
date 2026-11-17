@@ -1278,6 +1278,8 @@ pub fn run_extended(
         b = nb;
     }
 
+    // 手間の単位 ([`crate::ticks`]): 前処理のラウンドの手間
+    crate::ticks::add(crate::ticks::PRE, work_used as u64);
     // 最終の上下限伝播。
     let prop = timed_step!(
         "final propagate",

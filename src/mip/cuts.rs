@@ -722,6 +722,8 @@ impl MirEval {
 /// [`cmir_terms`] の速い版 (`ENOMOTO_MIP_SEP_FAST`): 効き目の評価に [`MirEval`] を使う。`ENOMOTO_MIP_CMIR_DELTAS_HIGHS` なら
 /// δ の候補の 1/2・1/4・1/8 は (全ての候補ではなく) 最良の δ についてだけ試す (HiGHS は最良の δ の 2・4・8 倍を試す)
 fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
+    // 手間の単位 ([`crate::ticks`]): 項の数
+    crate::ticks::add(crate::ticks::SEP, terms.len() as u64);
     let mut deltas: Vec<f64> = Vec::new();
     for t in &terms {
         if t.int && t.yv > 1e-6 && t.yv < t.yu - 1e-6 && t.a.abs() > 1e-6 {
@@ -916,6 +918,8 @@ fn raw_efficacy(vars: &CutVars, c: &RawCut) -> f64 {
 /// 元の空間の両方で CMIR を作り、効き目の大きい方を返す (表がなければ [`cmir_terms`] と同じ)
 /// 試作 `ENOMOTO_MIP_HNFCUT` の `p`: 置き換えた方を選ばず、両方 (違反するもの) を候補として返す (選びは呼び出し側の既定の仕組みに任せる)
 fn cmir_terms_hnfcut(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Vec<RawCut> {
+    // 手間の単位 ([`crate::ticks`]): 項の数
+    crate::ticks::add(crate::ticks::SEP, terms.len() as u64);
     let ct = super::hnfcut::with_cmir_table(|t| t.and_then(|t| cong_terms(vars, t, &terms, beta)));
     let Some((cterms, cbeta)) = ct else {
         return cmir_terms(vars, terms, beta).into_iter().collect();
@@ -959,6 +963,8 @@ fn cmir_terms_hnfcut(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Vec<RawCut>
 
 /// [`cmir`] の本体 (置き換え済みの項と右辺から)。
 fn cmir_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
+    // 手間の単位 ([`crate::ticks`]): 項の数
+    crate::ticks::add(crate::ticks::SEP, terms.len() as u64);
     if !terms.iter().any(|t| t.int) {
         return None;
     }
@@ -1529,6 +1535,7 @@ fn snf_relaxation(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Ve
 }
 
 fn snf_relaxation_with(vars: &CutVars, base: &[(usize, f64)], rhs: f64, mark: &mut [u8], used: &mut Vec<usize>) -> Option<(Vec<SnfItem>, f64)> {
+    crate::ticks::add(crate::ticks::SEP, base.len() as u64);
     let mut b = rhs;
     let mut items: Vec<SnfItem> = Vec::with_capacity(base.len());
     // 先に連続変数 (変数上限で 0-1 変数を使うかを決める)
@@ -2825,6 +2832,7 @@ fn generate_cuts_prof(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
 }
 
 fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover: bool, ext_cover: bool, mut prof: Option<(&mut [f64; 4], &mut bool)>) -> Vec<RawCut> {
+    crate::ticks::add(crate::ticks::SEP, base.len() as u64);
     let mut out = Vec::new();
     let mut lap = std::time::Instant::now();
     let mut mark = |k: usize, prof: &mut Option<(&mut [f64; 4], &mut bool)>| {
@@ -2910,6 +2918,8 @@ fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
 /// 床関数で効き目は区分的だが、区分の中では δ について連続なので局所探索が効く。
 /// 上位 `k` 個の δ (互いに 1e-6 以上離れたもの) それぞれで補変数化の向きの反転を試してカットを作る。
 fn cmir_terms_multi(vars: &CutVars, terms: Vec<Term>, beta: f64, k: usize) -> Vec<RawCut> {
+    // 手間の単位 ([`crate::ticks`]): 項の数
+    crate::ticks::add(crate::ticks::SEP, terms.len() as u64);
     let mut out = Vec::new();
     if !terms.iter().any(|t| t.int) {
         return out;

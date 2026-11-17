@@ -505,8 +505,9 @@ fn ho6_symwork() -> bool {
 }
 
 /// 手間の上限 (`WORK` の終わり, `LWORK` の終わり) を越えたか。
+/// 手間の上限を越えたか (`ENOMOTO_MIP_SUBMIP_HALT` なら止める合図でも真)
 pub(super) fn over(end: (u64, u64)) -> bool {
-    work() > end.0 || log_work() > end.1
+    work() > end.0 || log_work() > end.1 || crate::cancel::halt_requested()
 }
 
 fn detect_inner(p: &MipProblem, time_cap: f64, max_tries: usize, work_end: (u64, u64), twins: &[Vec<usize>]) -> Option<Symmetry> {

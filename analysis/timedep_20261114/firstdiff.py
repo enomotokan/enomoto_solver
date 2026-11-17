@@ -6,6 +6,8 @@ def norm(l):
     l = re.sub(r"\(\d+\.\d+\)", "(T)", l)
     l = re.sub(r"(secs?\"?[:=]\s*)[\d.]+", r"\1T", l)
     l = re.sub(r"(secs) [\d.]+", r"\1 T", l)
+    l = re.sub(r"\b([tT]|secs|cpu)=[\d.]+", r"\1=T", l)
+    l = re.sub(r"TICKS cpu [\d.]+", "TICKS cpu T", l)
     return l
 def load(p):
     return [l.rstrip("\n") for l in open(p, errors="replace") if "slope-intercept" not in l and not l.startswith(("TRSTAT", "MIP: MEMCAP", "MIP: FJ problem", "Running HiGHS", "Includes"))

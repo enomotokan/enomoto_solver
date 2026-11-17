@@ -1217,8 +1217,9 @@ fn ext_check(iter_idx: usize, stage_b: bool, bound: impl FnOnce() -> f64) -> boo
                 return true;
             }
         }
-        // 木の探索の従のスレッドで主が止める合図を出した (`ENOMOTO_MIP_WORKER_HALT`): 期限に達したのと同じに止める
-        if crate::cancel::halted() {
+        // 木の探索の従のスレッドで主が止める合図を出した (`ENOMOTO_MIP_WORKER_HALT`): 期限に達したのと同じに止める。
+        // 手間の期限 ([`crate::ticks::over`]、既定ではない) も同じに扱う
+        if crate::cancel::halted() || crate::ticks::over() {
             EXT_STOP.with(|x| x.set(ExtStop::TimeLimit));
             return true;
         }
@@ -5508,6 +5509,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         v
     };
     for iter_idx in 0..max_iters {
+        // 手間の単位 ([`crate::ticks`]): 1 反復 = 行の数 + 前の反復の BTRAN の非零 + 価格付けで触った数
+        crate::ticks::add(crate::ticks::LP, (m + last_rho_nnz + last_price_entries) as u64);
+        crate::ticks::add(crate::ticks::LPIT, 1);
         if let Some(l) = &luclock_log {
             l.iters.set(iter_idx + 1);
         }

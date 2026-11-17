@@ -1586,6 +1586,8 @@ impl TwoStageLp {
             sid::xprof_enable(true);
         }
         let t0 = std::time::Instant::now();
+        // 試作 `ENOMOTO_MIP_TICKS` の `h`: 重い求解の判定 (`LPSCALE` の `h`) を、この求解の手間 (1e9 手間 ≒ 1 秒) で決める
+        let tk0 = (self.tw_lazy && crate::mip::ticks_on('h')).then(crate::ticks::total);
         let it0 = self.iters;
         let pol0 = sid::ext_polish_iterations();
         let scale_once = std::mem::take(&mut self.scale_once);
@@ -1610,7 +1612,10 @@ impl TwoStageLp {
         // 以後に作る LP も双子を持つ印を立てる。破綻ならすぐ双子で解き直す
         let mut st = st;
         if self.tw_lazy && self.tw.is_none() {
-            let secs = t0.elapsed().as_secs_f64();
+            let secs = match tk0 {
+                Some(k0) => (crate::ticks::total() - k0) * 1e-9,
+                None => t0.elapsed().as_secs_f64(),
+            };
             let failed = st == LpStatus::Error;
             if failed || secs >= tunable!("ENOMOTO_T_MIP_LPSCALE_HEAVY_SECS", 1.0f64, f64) {
                 self.tw_lazy = false;
@@ -2065,7 +2070,8 @@ impl TwoStageLp {
         // L = `ENOMOTO_T_MIP_TIMEDEP_RACE_C` (既定 1) x (行 + 列) を付け、内点法側からは止めさせない。L 以内に結論を出せば二段解法、
         // 出せなければ内点法 + クロスオーバーの頂点を待って採る (頂点が得られなければ二段解法を続ける)。内点法は二段解法の書く
         // 共有の下界を読まない (止まる反復が二段解法の進みで変わるため)
-        let td = !force_ipm && env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains('r'));
+        // 試作 `ENOMOTO_MIP_TICKS` の `r` (analysis/timedep_20261114.md の 12.5 節) も同じ形
+        let td = !force_ipm && (env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains('r')) || crate::mip::ticks_on('r'));
         let td_lim = if td {
             let l = (tunable!("ENOMOTO_T_MIP_TIMEDEP_RACE_C", 1.0, f64) * (self.rows.len() + self.n) as f64).max(100.0) as u64;
             SolveLimits { iteration_limit: lim.iteration_limit.min(l), ..*lim }
@@ -2082,6 +2088,7 @@ impl TwoStageLp {
         {
             let (std, cancel, bound) = (Arc::new(self.std.clone()), cancel.clone(), bound.clone());
             let sc = self.ipm_scale();
+            let ih = crate::cancel::inherit();
             let deadline = lim.deadline;
             let stamp = stamp.clone();
             std::thread::spawn(move || {
@@ -2090,7 +2097,7 @@ impl TwoStageLp {
                     // 仕上げの二段解法の最適基底と双対を記録させる
                     sid::request_duals(true);
                     let r = crate::cancel::with_deadline(deadline, || {
-                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound((!td).then_some(bound), || ipm_crossover_run(&std, sc.as_deref())))
+                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound((!td).then_some(bound), || ih.clone().run(|| ipm_crossover_run(&std, sc.as_deref()))))
                     });
                     let duals = sid::take_duals();
                     sid::request_duals(false);
@@ -2104,20 +2111,25 @@ impl TwoStageLp {
         }
         // 二段解法は 1 スレッドのプールで解く。スレッドごとの設定 (MIP のポートフォリオの設定など) を持ち込み、持ち帰る
         let flags = sid::tl_flags();
+        let ihs = crate::cancel::inherit();
         let shared_lb = bound.clone();
-        let (st, flags, y_mid) = pool_s.install(|| {
+        let (st, flags, y_mid, tk_d) = pool_s.install(|| {
+            let tk0 = crate::ticks::raw();
             sid::set_tl_flags(flags);
             let _ = stamp.is_some().then(sid::take_bound_duals);
             let st = if td {
-                crate::cancel::with_bound(Some(bound), || self.solve_once(&td_lim))
+                crate::cancel::with_bound(Some(bound), || ihs.clone().run(|| self.solve_once(&td_lim)))
             } else {
-                crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || self.solve_once(lim)))
+                crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || ihs.clone().run(|| self.solve_once(lim))))
             };
             // 診断 `ENOMOTO_MIP_XOLAZY_LOG`: 二段解法が最後に下界を計算した途中の基底の双対
             let y_mid = stamp.is_some().then(sid::take_bound_duals);
-            (st, sid::tl_flags(), y_mid)
+            let tk1 = crate::ticks::raw();
+            (st, sid::tl_flags(), y_mid, std::array::from_fn(|k| tk1[k].wrapping_sub(tk0[k])))
         });
         sid::set_tl_flags(flags);
+        // 二段解法の手間 (1 スレッドのプールで解いた分) を呼び手のスレッドに数える (試作 `ENOMOTO_MIP_TICKS` の `j` で主の進みを測るため)
+        crate::ticks::add_raw(&tk_d);
         let conclusive = matches!(st, LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded | LpStatus::ObjectiveBound | LpStatus::TimeLimit);
         if td {
             if conclusive {
@@ -2261,12 +2273,13 @@ impl TwoStageLp {
         {
             let (std, bound) = (Arc::new(self.std.clone()), bound.clone());
             let sc = self.ipm_scale();
+            let ih = crate::cancel::inherit();
             let deadline = lim.deadline;
             std::thread::spawn(move || {
                 let r = pool.install(|| {
                     super::crossover::XO_IPM_END.with(|t| t.set(None));
                     sid::request_duals(true);
-                    let r = crate::cancel::with_deadline(deadline, || crate::cancel::with_bound(Some(bound), || ipm_crossover_run(&std, sc.as_deref())));
+                    let r = crate::cancel::with_deadline(deadline, || crate::cancel::with_bound(Some(bound), || ih.clone().run(|| ipm_crossover_run(&std, sc.as_deref()))));
                     let duals = sid::take_duals();
                     sid::request_duals(false);
                     let t_ipm = super::crossover::XO_IPM_END.with(|t| t.get()).map(|e| e.saturating_duration_since(t0).as_secs_f64());
@@ -2280,9 +2293,10 @@ impl TwoStageLp {
         // (二段解法の下界の共有もない。`st_s` は `IterationLimit`)
         let ipm_only = env_str!("ENOMOTO_MIP_ROOTLP_IPM_ONLY").is_some();
         let flags = sid::tl_flags();
+        let ihs = crate::cancel::inherit();
         let (st_s, flags) = pool_s.install(|| {
             sid::set_tl_flags(flags);
-            let st = if ipm_only { LpStatus::IterationLimit } else { crate::cancel::with_bound(Some(bound), || lp_s.solve_once(lim)) };
+            let st = if ipm_only { LpStatus::IterationLimit } else { crate::cancel::with_bound(Some(bound), || ihs.clone().run(|| lp_s.solve_once(lim))) };
             (st, sid::tl_flags())
         });
         sid::set_tl_flags(flags);
@@ -2322,12 +2336,13 @@ impl TwoStageLp {
         {
             let (std, cancel, bound, tx) = (Arc::new(self.std.clone()), cancel_i.clone(), bound.clone(), tx.clone());
             let sc = self.ipm_scale();
+            let ih = crate::cancel::inherit();
             let deadline = lim.deadline;
             std::thread::spawn(move || {
                 let r = pool.install(|| {
                     sid::request_duals(true);
                     let r = crate::cancel::with_deadline(deadline, || {
-                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || ipm_crossover_run(&std, sc.as_deref())))
+                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || ih.clone().run(|| ipm_crossover_run(&std, sc.as_deref()))))
                     });
                     let duals = sid::take_duals();
                     sid::request_duals(false);
@@ -2338,13 +2353,14 @@ impl TwoStageLp {
         }
         {
             let (mut lp, cancel, bound, tx, lim) = (Box::new(self.clone()), cancel_s.clone(), bound, tx, *lim);
+            let ihs = crate::cancel::inherit();
             let flags = sid::tl_flags();
             std::thread::Builder::new()
                 .stack_size(64 << 20)
                 .spawn(move || {
                     let (st, flags) = pool_s.install(|| {
                         sid::set_tl_flags(flags);
-                        let st = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || lp.solve_once(&lim)));
+                        let st = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || ihs.run(|| lp.solve_once(&lim))));
                         (st, sid::tl_flags())
                     });
                     let _ = tx.send(BothMsg::Simplex(st, lp, flags));
@@ -2766,6 +2782,9 @@ impl TwoStageLp {
                     // Forrest-Tomlin の更新が積み重なった LU は FTRAN/BTRAN が遅いので、分解し直させる
                     // (主ループの上限 3m に任せると、再分解は減るがノードの処理数はかえって減った)
                     Some(c) if c.basis == b && c.lu.update_count() < tunable!("ENOMOTO_T_MIP_LU_MAX_UPD", 64usize, usize) => {
+                        if env_str!("ENOMOTO_MIP_DEBUG_LP2").is_some() {
+                            eprintln!("TSLP2 warm lu upd {}", c.lu.update_count());
+                        }
                         let warm_d = env_str!("ENOMOTO_MIP_WARM_D").is_some();
                         let (lu, d) = match Arc::try_unwrap(c) {
                             Ok(c) => (c.lu, c.d),
@@ -2841,6 +2860,9 @@ impl TwoStageLp {
         }
         let last_lu = sid::take_last_lu();
         let last_d = sid::take_last_d();
+        if env_str!("ENOMOTO_MIP_DEBUG_LP2").is_some() {
+            eprintln!("TSLP2 r={} st={:?} duals={} last_lu={} last_dse={} stop={stop:?}", r.is_some(), r.as_ref().map(|x| x.status.clone()), duals.is_some(), last_lu.is_some(), last_dse.as_ref().map(|w| w.len()).unwrap_or(0));
+        }
         let ray = sid::take_last_ray();
         self.ray = None;
         let intercept = sid::take_intercept();
@@ -3253,7 +3275,7 @@ impl TwoStageLp {
             (xv - xv.round()).abs() > 1e-6
         };
         while st.pivots + st.flips < k {
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) || crate::ticks::over() {
                 st.stopped = true;
                 break;
             }
@@ -3458,6 +3480,81 @@ impl TwoStageLp {
         st.ok = stt == LpStatus::Optimal && st.obj_diff.abs() <= 1e-7 * obj0.abs().max(1.0);
         st.secs = t0.elapsed().as_secs_f64();
         Some(st)
+    }
+
+    /// [`Self::basis_inverse_row`] の非零だけ (行, 値) を返す版。超疎の単位 BTRAN の非零の行の記録をそのまま使うので、
+    /// 呼び手は行の全部 (m 個) を回さずに済む (値は密な版とビット一致)。
+    pub fn basis_inverse_row_sparse(&mut self, s: usize) -> Vec<(usize, f64)> {
+        let m = self.rows.len();
+        if env_str!("ENOMOTO_MIP_BINV_ROW_DENSE").is_some_and(|v| v != "0") {
+            let r = self.basis_inverse_row(s);
+            return r.into_iter().enumerate().filter(|&(_, v)| v != 0.0).collect();
+        }
+        self.binv_ensure_lu();
+        let Some(lu) = &self.lu else { return Vec::new() };
+        let k = self.basic_var(s);
+        let sc = if k >= self.n { -self.sigma[k - self.n] } else { 1.0 };
+        let tick0 = lu.synth_tick();
+        let r = BINV_ROW_WORK.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.as_ref().is_none_or(|w| w.0 != m) {
+                *c = Some((m, super::lu::UnitBtranWork::new(m), vec![0.0; m], vec![0.0; m]));
+            }
+            let (_, work, out, et) = c.as_mut().unwrap();
+            work.set_density(0.0);
+            lu.solve_transpose_unit_work_sparse(s, out, et, work, None);
+            let mut r: Vec<(usize, f64)> = Vec::new();
+            match work.nonzero_rows() {
+                Some(rows) => {
+                    for &i in rows {
+                        let v = out[i] * self.sigma[i] / sc;
+                        if v != 0.0 {
+                            r.push((i, v));
+                        }
+                    }
+                }
+                None => {
+                    for i in 0..m {
+                        let v = out[i] * self.sigma[i] / sc;
+                        if v != 0.0 {
+                            r.push((i, v));
+                        }
+                    }
+                }
+            }
+            r
+        });
+        lu.restore_synth_tick(tick0);
+        r
+    }
+
+    /// [`Self::basis_inverse_row`] の前段: 今の基底の LU がなければ (最適基底の LU を共有するか) 分解する。
+    fn binv_ensure_lu(&mut self) {
+        let m = self.rows.len();
+        if self.lu.is_none() {
+            if let (Some(c), Some(b)) = (&self.lu_cache, &self.basis) {
+                if c.basis == *b {
+                    self.lu = Some(c.lu.clone());
+                }
+            }
+        }
+        if self.lu.is_none() {
+            let n_total = self.n + m;
+            let mut pos: Vec<Option<usize>> = vec![None; n_total];
+            match &self.basis {
+                Some(b) => {
+                    for (k, &v) in b.iter().enumerate() {
+                        pos[v] = Some(k);
+                    }
+                }
+                None => {
+                    for i in 0..m {
+                        pos[self.n + i] = Some(i);
+                    }
+                }
+            }
+            self.lu = super::basis_kernel::factorize_basis(&self.std, &pos, None).map(Arc::new);
+        }
     }
 
     pub fn basis_inverse_row(&mut self, s: usize) -> Vec<f64> {

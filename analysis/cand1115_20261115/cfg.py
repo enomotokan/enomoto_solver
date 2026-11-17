@@ -31,4 +31,8 @@ ADD1115 = {
     "ENOMOTO_MIP_TC": "b",
 }
 CAND1115 = {**CAND1114, **ADD1115}
-CFGS = {"cand1114": CAND1114, "cand1115": CAND1115, "highs": {}}
+_TD = ("ENOMOTO_MIP_TIMEDEP", "ENOMOTO_T_MIP_TIMEDEP_SEP_COST", "ENOMOTO_T_MIP_TIMEDEP_LNS_MIN")
+# 切り分け (loo_summ.txt・loom_summ.txt) の後の組み直し: c = TIMEDEP を外す、d = TIMEDEP と rmc150 を外す
+CAND1115C = {k: v for k, v in CAND1115.items() if k not in _TD}
+CAND1115D = {k: v for k, v in CAND1115C.items() if k != "ENOMOTO_T_MIP_ROOT_MAX_CUTS"}
+CFGS = {"cand1114": CAND1114, "cand1115": CAND1115, "cand1115c": CAND1115C, "cand1115d": CAND1115D, "highs": {}}
