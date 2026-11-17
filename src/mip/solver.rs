@@ -888,6 +888,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     fjsub_imp: [u64; 2],
     dfsbb_abort: bool,
     dfsbb_stats: [u64; 3],
+    /// 試作 `ENOMOTO_MIP_DFSPQ` (gate2 候補 3): 潜りの判定での子の下界のギャップの中の位置 u の集計
+    /// [判定の数, u の和, u > 0.25 の数, u > 0.5 の数]
+    dfspq: [f64; 4],
     /// `DFSBB=4`: 葉・刈り込みで終わった潜りの深さの和と、今の潜りでいちばん最近潜った子の深さ
     dfsbb_leaf_depth_sum: u64,
     dfsbb_leaf_cnt: u64,
@@ -5474,6 +5477,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         fjsub_imp: [0; 2],
         dfsbb_abort: false,
         dfsbb_stats: [0; 3],
+        dfspq: [0.0; 4],
         dfsbb_leaf_depth_sum: 0,
         dfsbb_leaf_cnt: 0,
         dfsbb_last_depth: 0,
@@ -6033,6 +6037,11 @@ fn membq_diag() -> bool {
 /// (兄弟のノードでも分離・木の中のヒューリスティクスを回す)
 fn hgs_opt(c: char) -> bool {
     env_str!("ENOMOTO_MIP_HGS_OPT").is_some_and(|v| v.contains(c))
+}
+
+/// 試作 `ENOMOTO_MIP_DFSPQ` の値 ([`Solver::dfspq_quot`]、既定では使わない)
+fn dfspq_env() -> Option<&'static str> {
+    env_str!("ENOMOTO_MIP_DFSPQ").filter(|v| !v.is_empty() && *v != "0")
 }
 
 /// `ENOMOTO_MIP_DFSBB` の値 (既定 `2` = HiGHS 型、cand1118 で既定にした。`0`・`off` で切る = 0.1.7 までの既定の潜り方)
@@ -14619,7 +14628,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let cutoff = self.prune_limit();
                 if cutoff.is_finite() && env_str!("ENOMOTO_MIP_NO_PLUNGE_ABORT").is_none() {
                     let glb = self.queue.best_lower_bound().min(node_obj);
-                    child.lower_bound <= glb + self.nb_plunge_quot() * (cutoff - glb)
+                    if dfspq_env().is_some() && self.dfsbb_kind() == 2 && cutoff > glb {
+                        let u = ((child.lower_bound - glb) / (cutoff - glb)).clamp(0.0, 1.0);
+                        self.dfspq[0] += 1.0;
+                        self.dfspq[1] += u;
+                        self.dfspq[2] += (u > 0.25) as u8 as f64;
+                        self.dfspq[3] += (u > 0.5) as u8 as f64;
+                    }
+                    child.lower_bound <= glb + self.dfspq_quot().unwrap_or_else(|| self.nb_plunge_quot()) * (cutoff - glb)
                 } else {
                     true
                 }
@@ -15955,6 +15971,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return 0.25 + 0.75 * v.cur[0];
         }
         if self.nb_arm() == Some(1) { tunable!("ENOMOTO_T_MIP_NB_ARM1_PQ", 1.0, f64) } else { tunable!("ENOMOTO_T_MIP_PLUNGE_QUOT", 0.25, f64) }
+    }
+
+    /// 試作 `ENOMOTO_MIP_DFSPQ` (既定では使わない、analysis/gate2_20261117/dfspq/README.md): `DFSBB=2` の潜りの打ち切りの割合
+    /// (既定 1 = 子の下界が打ち切り値以下なら潜り続ける) を、潜りの判定で見た子の下界のギャップの中の位置 u の集計 x の
+    /// シグモイド q = Q0 + (1 − Q0) σ((θ − x) / s) にする (x が大きい = 子の下界が悪い問題ほど潜りを状況で打ち切る)。
+    /// 値の文字: `u` = x を u の平均、`r` = x を u > 0.25 の割合 (既定 `r`)、`d` = 集計の行を出すだけ (割合は変えない)。
+    /// 判定が `ENOMOTO_T_MIP_DFSPQ_MIN` (既定 500) 回に満たないうちは 1。Q0 = `ENOMOTO_T_MIP_DFSPQ_Q0` (0.25)、
+    /// θ = `ENOMOTO_T_MIP_DFSPQ_THETA` (0.5)、s = `ENOMOTO_T_MIP_DFSPQ_S` (0.05)
+    fn dfspq_quot(&self) -> Option<f64> {
+        let v = dfspq_env()?;
+        if self.dfsbb_kind() != 2 || v.contains('d') || self.dfspq[0] < tunable!("ENOMOTO_T_MIP_DFSPQ_MIN", 500.0, f64) {
+            return None;
+        }
+        let x = self.dfspq_x();
+        let q0 = tunable!("ENOMOTO_T_MIP_DFSPQ_Q0", 0.25, f64);
+        let th = tunable!("ENOMOTO_T_MIP_DFSPQ_THETA", 0.5, f64);
+        let sc = tunable!("ENOMOTO_T_MIP_DFSPQ_S", 0.05, f64);
+        Some(q0 + (1.0 - q0) / (1.0 + ((x - th) / sc).exp()))
+    }
+
+    /// [`Self::dfspq_quot`] の特徴 x
+    fn dfspq_x(&self) -> f64 {
+        let n = self.dfspq[0].max(1.0);
+        if dfspq_env().is_some_and(|v| v.contains('u')) { self.dfspq[1] / n } else { self.dfspq[2] / n }
     }
 
     /// 兄弟へ戻る下界の割合 (`ENOMOTO_T_MIP_SIBLING_QUOT`。バンディットの腕 1 なら `ENOMOTO_T_MIP_NB_ARM1_SQ`、既定 1)。
@@ -25757,6 +25797,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // (`=4` 以外でも、問題の特徴 (根の分数値・整数変数の数・潜りの底の深さ) を出す。頻度を特徴の関数にするための集計用)
                 if self.dfsbb_on() {
                     eprintln!("MIP: DFSBB4: d {:.1} ({}), L {}, root fractional {}, integers {}, mean depth of dive bottoms {:.1} ({} dives)", self.dfsbb_d(), env_str!("ENOMOTO_MIP_DFSBB_D").unwrap_or("frac"), self.dfsbb_l(), self.noinc_root_frac, self.p.is_int.iter().filter(|&&b| b).count(), self.dfsbb_leaf_depth_sum as f64 / self.dfsbb_leaf_cnt.max(1) as f64, self.dfsbb_leaf_cnt);
+                }
+                if dfspq_env().is_some() && self.dfsbb_kind() == 2 {
+                    let d = self.dfspq;
+                    let n = d[0].max(1.0);
+                    eprintln!("MIP: DFSPQ: decisions {}, mean u {:.4}, u > 0.25 {:.4}, u > 0.5 {:.4}, x {:.4}, quot {:.3}", d[0], d[1] / n, d[2] / n, d[3] / n, self.dfspq_x(), self.dfspq_quot().unwrap_or(1.0));
                 }
                 if self.dfsbb_on() {
                     let s = self.dfsbb_stats;
