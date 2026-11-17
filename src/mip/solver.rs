@@ -1250,6 +1250,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cut_imp: Vec<bool>,
     /// 根で作ったカット (係数, 右辺, ノルム)。大域的に成り立つ。ノードで違反していれば LP に戻す。
     pub(super) cut_pool: Vec<(Vec<(usize, f64)>, f64, f64)>,
+    /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN`: カットのプールの伝播で使ったカットの写し (係数, 右辺。追加だけで番号は変わらない) と、
+    /// カットのハッシュから写しの番号への表。
+    cut_arena: Vec<(Vec<(usize, f64)>, f64)>,
+    cut_arena_idx: std::collections::HashMap<u64, u32>,
     /// 双対証明 (衝突分析): `sum coefs x <= U - konst` (U は打ち切り値から定数項を引いたもの、最新の値を使う)。
     pub(super) dual_proofs: std::collections::VecDeque<(Vec<(usize, f64)>, f64, bool)>,
     pub(super) dual_proof_nnz: usize,
@@ -5658,6 +5662,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             Vec::new()
         },
         cut_pool: Vec::new(),
+        cut_arena: Vec::new(),
+        cut_arena_idx: std::collections::HashMap::new(),
         dual_proofs: std::collections::VecDeque::new(),
         dual_proof_nnz: 0,
         proof_first_id: 0,
@@ -18700,7 +18706,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 上げる (作れた衝突のリテラルでは上げない)
         let hcs = highs_conflict_score();
         let mut bumps: Vec<(usize, bool)> = Vec::new();
-        let confs = self.dom.analyze_multi_bumps(self.p, start, max_len, reconv, hcs.then_some(&mut bumps));
+        // 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN`: 双対証明で締めた変更も証明の行から説明する (HiGHS の explainBoundChange が
+        // カットのプールの行を遡るのと同じ)。証明が捨てられた・番号が付け直された後は遡らない (従来と同じ葉)
+        let first = self.proof_first_id;
+        let obj_lim = self.prune_limit() - self.p.offset;
+        let (dp, st) = (&self.dual_proofs, &self.proof_state);
+        let arena = &self.cut_arena;
+        let lookup = move |r: i32| -> Option<(Vec<(usize, f64)>, f64)> {
+            if let Some(i) = super::domain::cut_reason_id(r) {
+                return arena.get(i).cloned();
+            }
+            let id = super::domain::proof_reason_id(r)?;
+            let k = usize::try_from(id.checked_sub(first)?).ok()?;
+            let (c, konst, obj) = dp.get(k)?;
+            if st.get(k).is_none_or(|x| *x == ProofState::Dead) || c.is_empty() {
+                return None;
+            }
+            let rhs = if *obj { obj_lim - konst } else { *konst };
+            rhs.is_finite().then(|| (c.clone(), rhs))
+        };
+        let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() { Some(&lookup) } else { None };
+        let confs = self.dom.analyze_multi_bumps(self.p, start, max_len, reconv, hcs.then_some(&mut bumps), lk);
         if hcs && !bumps.is_empty() {
             self.pc.bump_conflict(&bumps);
         }
@@ -19842,6 +19868,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for (i, &k) in cand.iter().enumerate() {
                 self.cpp.work[2] += (self.pool_start[k as usize + 1] - self.pool_start[k as usize]) as u64;
                 let cc_pos0 = self.dom.stack_len();
+                if conflict_proof_explain() {
+                    // 試作: このカットで締めた変更に、写しの表の番号を残す (カットのプールは詰め直すと番号が変わるので、写しは変えない)
+                    let kk = k as usize;
+                    let h = self.pool_hash[kk];
+                    // 同じハッシュでも中身が違えば (詰め直しの後に丸めて同じになる別のカットが入ったとき) 新しく写す
+                    let same = |a: &(Vec<(usize, f64)>, f64), c: &(Vec<(usize, f64)>, f64, f64)| a.1 == c.1 && a.0 == c.0;
+                    let idx = match self.cut_arena_idx.get(&h) {
+                        Some(&i) if same(&self.cut_arena[i as usize], &self.cut_pool[kk]) => i as usize,
+                        _ => {
+                            self.cut_arena.push((self.cut_pool[kk].0.clone(), self.cut_pool[kk].1));
+                            self.cut_arena_idx.insert(h, (self.cut_arena.len() - 1) as u32);
+                            self.cut_arena.len() - 1
+                        }
+                    };
+                    self.dom.set_cut_tag(idx);
+                }
                 let r = self.cutpool_prop_cut(k as usize, cont_frac);
                 if super::cutconf::mode().is_some() && !self.params.submip {
                     let kk = k as usize;
@@ -20698,7 +20740,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.dbg_on {
                         self.proof_diag_tighten(k, j, upper, v, rhs, minact);
                     }
-                    self.dom.set_external_tag(4);
+                    if conflict_proof_explain() {
+                        self.dom.set_proof_tag(self.proof_first_id + k as u64);
+                    } else {
+                        self.dom.set_external_tag(4);
+                    }
                     let cc_pos0 = self.dom.stack_len();
                     let ch = if upper { self.dom.tighten_upper(p, j, v) } else { self.dom.tighten_lower(p, j, v) };
                     self.dom.set_external(false);
@@ -25580,4 +25626,11 @@ pub(super) fn tubr_on() -> bool {
 /// 連続列にする (`l` も入る)、`c` カットで I' を連続として扱う、`g` I' を Gomory の元の行から外す、`h` ネットワークの判定なし、`F` 診断
 pub(super) fn tubr_letter(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TUBR").is_some_and(|v| v != "0" && v.contains(c))
+}
+
+/// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
+/// 通し番号を残し、HiGHS 式の衝突解析でその証明の行から説明して遡る。
+pub(super) fn conflict_proof_explain() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN").is_some())
 }
