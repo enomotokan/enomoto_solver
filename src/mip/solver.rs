@@ -13079,6 +13079,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 while st == LpStatus::Optimal && !self.clq_lazy.is_empty() && self.clq_lazy_restore() {
                     st = self.lp.solve(&capped(self, u64::MAX));
                     self.clq_lazy_stats[3] += 1;
+                    // ノードの LP の時間の上限に当たっただけなら全体の時間切れにしない (LP なしで分枝する。上の解き直しと同じ扱い)
+                    if st == LpStatus::TimeLimit && !self.time_up() {
+                        st = LpStatus::Error;
+                    }
                 }
                 match st {
                     LpStatus::Optimal => {}
