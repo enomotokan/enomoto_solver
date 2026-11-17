@@ -1220,6 +1220,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 診断用 (`ENOMOTO_PROF_TREE_PAR`): 木の探索の内訳と、今のノードの種類 ([`TreeProf::kind_n`])。
     tprof: TreeProf,
     tp_kind: usize,
+    /// 診断用 (`ENOMOTO_MIP_TREE_LOG`): 今のノードの出どころ (0 潜り・1 自分の待ち行列・2 共有の待ち行列) と、取り出したときの下界。
+    tl_src: u8,
+    tl_plb: f64,
     lbd: LbNodeDiag,
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
@@ -5623,6 +5626,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool_stats: [0; 3],
         tprof: TreeProf::default(),
         tp_kind: 0,
+        tl_src: 0,
+        tl_plb: f64::NEG_INFINITY,
         lbd: LbNodeDiag::default(),
         proof_conflicts: 0,
         orbitopes: match &snap {
@@ -12784,6 +12789,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             first = false;
             self.nodes += 1;
             self.tprof.nodes += 1;
+            if tree_log() {
+                self.tl_src = self.tp_kind as u8;
+                self.tl_plb = node.lower_bound;
+            }
             // 手間の単位 ([`crate::ticks`]): ノード 1 つの固定の手間 (行 + 列)
             crate::ticks::add(crate::ticks::NODE, (self.p.m + self.p.n) as u64);
             if self.find_thread.is_some() {
@@ -12810,7 +12819,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.rp_log(&node, "lb", f64::NAN, f64::NAN, -1, &mut rp_stats);
                 }
                 if tree_log() && !self.params.submip {
-                    eprintln!("ENODE d={} r=pop_lb lp={} rows={}", node.depth, node.lower_bound, self.lp.num_rows());
+                    eprintln!("ENODE d={} r=pop_lb lp={} rows={}{}", node.depth, node.lower_bound, self.lp.num_rows(), self.tl_tail());
                 }
                 continue;
             }
@@ -12822,7 +12831,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.node_lp_opt = false;
             if !self.apply_sb_inherit() {
                 if tree_log() && !self.params.submip {
-                    eprintln!("ENODE d={} r=sbinherit rows={}", node.depth, self.lp.num_rows());
+                    eprintln!("ENODE d={} r=sbinherit rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                 }
                 continue;
             }
@@ -12980,7 +12989,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 self.pc.infeasible_leaves += 1;
                 if tree_log() && !self.params.submip {
-                    eprintln!("ENODE d={} r=prop lp={} rows={}", node.depth, node.lower_bound, self.lp.num_rows());
+                    eprintln!("ENODE d={} r=prop lp={} rows={}{}", node.depth, node.lower_bound, self.lp.num_rows(), self.tl_tail());
                 }
                 // 診断用: どの段 (p_dom = 行・p_obj = 目的関数・p_proof = 証明・p_lit = リテラル衝突・p_cpool = カットのプール・
                 // p_orb / p_of = 対称性・p_fix = 不動点・p_tcq = TC の q) で行き詰まったかと、デバッグ解を外した境界の出どころ
@@ -13353,7 +13362,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             rp_obj0 = f64::INFINITY;
                         }
                         if tree_log() && !self.params.submip {
-                            eprintln!("ENODE d={} r={} lp={} rows={}", node.depth, if st == LpStatus::Infeasible { "lpinf" } else { "lpobj" }, self.lp.objective() + self.p.offset, self.lp.num_rows());
+                            eprintln!("ENODE d={} r={} lp={} rows={}{}", node.depth, if st == LpStatus::Infeasible { "lpinf" } else { "lpobj" }, self.lp.objective() + self.p.offset, self.lp.num_rows(), self.tl_tail());
                         }
                         if st == LpStatus::Infeasible {
                             self.pc.infeasible_leaves += 1;
@@ -13404,7 +13413,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if node_obj >= self.prune_limit() {
                     if tree_log() && !self.params.submip {
-                        eprintln!("ENODE d={} r=lpobj lp={node_obj} rows={}", node.depth, self.lp.num_rows());
+                        eprintln!("ENODE d={} r=lpobj lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                     }
                     self.add_dual_proof();
                     self.pc.objlim_leaves += 1;
@@ -13421,7 +13430,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         Some(f) => f,
                         None => {
                             if tree_log() && !self.params.submip {
-                                eprintln!("ENODE d={} r=tubr lp={node_obj} rows={}", node.depth, self.lp.num_rows());
+                                eprintln!("ENODE d={} r=tubr lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                             }
                             break None;
                         }
@@ -13431,7 +13440,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 };
                 if frac.is_empty() {
                     if tree_log() && !self.params.submip {
-                        eprintln!("ENODE d={} r=int lp={node_obj} rows={}", node.depth, self.lp.num_rows());
+                        eprintln!("ENODE d={} r=int lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                     }
                     if self.try_lp_solution() {
                         break None;
@@ -13472,7 +13481,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     xp("r_fix");
                     if !self.dom.propagate(self.p) {
                         if tree_log() && !self.params.submip {
-                            eprintln!("ENODE d={} r=redcost lp={node_obj} rows={}", node.depth, self.lp.num_rows());
+                            eprintln!("ENODE d={} r=redcost lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                         }
                         self.add_conflict();
                         self.dbg_lost("propagation after local redcost fixing", dn && self.dbg_contains());
@@ -14150,7 +14159,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         resolves += 1;
                         if !self.dom.propagate(self.p) {
                             if tree_log() && !self.params.submip {
-                                eprintln!("ENODE d={} r=sbprop lp={node_obj} rows={}", node.depth, self.lp.num_rows());
+                                eprintln!("ENODE d={} r=sbprop lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                             }
                             self.add_conflict();
                             break None;
@@ -14160,7 +14169,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     BranchAction::Prune => {
                         if tree_log() && !self.params.submip {
-                            eprintln!("ENODE d={} r=sb lp={node_obj} rows={}", node.depth, self.lp.num_rows());
+                            eprintln!("ENODE d={} r=sb lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                         }
                         break None;
                     }
@@ -14175,7 +14184,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let dist = |v: f64| (v - v.floor()).min(v.ceil() - v);
                             let n01 = frac.iter().filter(|&&(_, v)| dist(v) >= 0.1).count();
                             let dmax = frac.iter().map(|&(_, v)| dist(v)).fold(0.0f64, f64::max);
-                            eprintln!("EBR d={} col={col} val={value} lp={node_obj} rows={} resolves={resolves} nfrac={} n01={n01} dmax={dmax:.4}", node.depth, self.lp.num_rows(), frac.len());
+                            eprintln!("EBR d={} col={col} val={value} lp={node_obj} rows={} resolves={resolves} nfrac={} n01={n01} dmax={dmax:.4} pcd={:.6e} pcu={:.6e}{}", node.depth, self.lp.num_rows(), frac.len(), self.pc.cost_down(col), self.pc.cost_up(col), self.tl_tail());
                         }
                         break Some(Some((col, value, node_obj, frac)));
                     }
@@ -18956,6 +18965,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_TREE_LOG`): `ENODE`・`EBR` の行の後ろに足す、取り出したときの下界・出どころ・経過秒・ノードの通し番号。
+    fn tl_tail(&self) -> String {
+        format!(" plb={} src={} t={:.3} n={}", self.tl_plb, ["dive", "queue", "shared"][self.tl_src.min(2) as usize], self.start.elapsed().as_secs_f64(), self.nodes)
     }
 
     /// 衝突解析の上限の長さ。
