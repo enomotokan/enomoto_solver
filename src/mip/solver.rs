@@ -770,6 +770,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     gen_lazy: genlazy::GenLazy,
     gen_lazy_stats: [u64; 10],
     gen_lazy_secs: f64,
+    /// 診断 `ENOMOTO_MIP_FIXROW` ([`genlazy`]): LP に足した中身のない固定の行 (0 = 0) のカットの番号
+    fixrow_id: Option<u64>,
     /// 診断 `ENOMOTO_MIP_DIAG_ROWTYPES` の木の途中の数え上げを済ませたか
     rowtypes_mid_done: bool,
     /// 試作 `ENOMOTO_MIP_GREDUNDANT` (treeclose 9.84 節): 大域の境界の下で冗長になって LP から外した元の行 (番号)、最後に調べたときの大域で固定された整数列の数、
@@ -5398,6 +5400,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         gen_lazy: Default::default(),
         gen_lazy_stats: [0; 10],
         gen_lazy_secs: 0.0,
+        fixrow_id: None,
         rowtypes_mid_done: false,
         gred_rows: Vec::new(),
         gred_fixed: usize::MAX,
@@ -13070,6 +13073,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let action = loop {
                 // 試作 `ENOMOTO_MIP_GEN_LAZY` の外し直し (年齢が上限を超えた戻した行。`ENOMOTO_T_MIP_GEN_LAZY_AGE`)
                 self.gen_lazy_redrop();
+                if genlazy::fixrow_on() && !self.params.submip {
+                    self.fixrow_keep();
+                }
                 let it0 = self.lp.total_iterations();
                 let iter_limit = (10 * self.avg_node_iters()).max(20_000);
                 // 1 回の LP の時間の上限 (平均の 50 倍、最低 0.5 秒): 数値的に悪条件の LP が再分解を繰り返して
