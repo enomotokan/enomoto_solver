@@ -8100,11 +8100,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if cand.is_empty() {
             return;
         }
+        // 外す行の非零 / LP の元の行の非零 (問題の特徴、ログに出す)。`ENOMOTO_T_MIP_CLQ_LAZY_GATE_F0` = f0 > 0 (既定 0 = 使わない) なら、
+        // 割合 f のシグモイド σ(k (f − f0)) (k = `ENOMOTO_T_MIP_CLQ_LAZY_GATE_K`、既定 20) の分だけ候補を外す (主のみ。文字の和の小さい = 余裕の大きい順)。
+        // 外す量が少ない (LP が軽くならない) 問題では外さず道筋を変えない
+        let nnz_all: usize = (0..m0).map(|i| self.lp.row_ref(i).len()).sum::<usize>().max(1);
+        let nnz_c: usize = cand.iter().map(|c| c.1.len()).sum();
+        let frac = nnz_c as f64 / nnz_all as f64;
+        let f0 = tunable!("ENOMOTO_T_MIP_CLQ_LAZY_GATE_F0", 0.0, f64);
+        let mut cand = cand;
+        if f0 > 0.0 && self.snap.is_none() {
+            let k = tunable!("ENOMOTO_T_MIP_CLQ_LAZY_GATE_K", 20.0, f64);
+            let share = 1.0 / (1.0 + (-k * (frac - f0)).exp());
+            let x = self.lp.col_values();
+            let sum = |lits: &[u32]| -> f64 { lits.iter().map(|&q| { let v = x[(q / 2) as usize]; if q % 2 == 0 { v } else { 1.0 - v } }).sum() };
+            cand.sort_by(|a, b| sum(&a.1).total_cmp(&sum(&b.1)));
+            cand.truncate((share * cand.len() as f64).floor() as usize);
+            if self.params.verbose && self.pool_tid == 0 {
+                eprintln!("MIP: CLQ_LAZY gate: nonzero share {frac:.4} (f0 {f0}, k {k}) -> keep {:.3} of the candidates ({} rows)", share, cand.len());
+            }
+            if cand.is_empty() {
+                return;
+            }
+        }
         let ch: Vec<(usize, f64, f64)> = cand.iter().map(|(i, _)| (*i, f64::NEG_INFINITY, f64::INFINITY)).collect();
         self.lp.set_row_bounds_many(&ch);
         self.clq_lazy_stats[0] += cand.len() as u64;
         if self.params.verbose && self.pool_tid == 0 {
-            eprintln!("MIP: CLQ_LAZY: {} clique rows dropped from the LP (of {} rows, {} nonzeros) ({:.2}s)", cand.len(), m0, cand.iter().map(|c| c.1.len()).sum::<usize>(), t0.elapsed().as_secs_f64());
+            eprintln!("MIP: CLQ_LAZY: {} clique rows dropped from the LP (of {} rows, {} nonzeros) (nonzero share of the candidates {frac:.4} of {nnz_all}) ({:.2}s)", cand.len(), m0, cand.iter().map(|c| c.1.len()).sum::<usize>(), t0.elapsed().as_secs_f64());
         }
         self.clq_lazy = cand;
     }
