@@ -6,3 +6,8 @@ def = 既定 (環境変数なし)、cand1119 = 上を足したもの。"""
 CAND1119 = {"ENOMOTO_MIP_CLIQUE_CUTS": "sigmoid", "ENOMOTO_T_MIP_CLIQUE_SIG_A": "1.8", "ENOMOTO_T_MIP_CLIQUE_SIG_B": "0.41",
             "ENOMOTO_MIP_SYM_TWINS": "1", "ENOMOTO_MIP_CUTSEL_PROBE_AFFORD": "1"}
 CFGS = {"def": {}, "cand1119": CAND1119}
+# 切り分け (A の組、README の 2 節): cand1119 から部品を 1 つずつ抜く
+SIG_KEYS = ("ENOMOTO_MIP_CLIQUE_CUTS", "ENOMOTO_T_MIP_CLIQUE_SIG_A", "ENOMOTO_T_MIP_CLIQUE_SIG_B")
+CFGS |= {"no_sig": {k: v for k, v in CAND1119.items() if k not in SIG_KEYS},
+         "no_twins": {k: v for k, v in CAND1119.items() if k != "ENOMOTO_MIP_SYM_TWINS"},
+         "no_aff": {k: v for k, v in CAND1119.items() if k != "ENOMOTO_MIP_CUTSEL_PROBE_AFFORD"}}

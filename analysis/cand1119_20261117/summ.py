@@ -55,7 +55,25 @@ def table(rs):
         print(f"| {r['S']} | {r['g']:+.1%} [{r['lo']:+.1%}, {r['hi']:+.1%}] | {r['hi']:+.1%} | {r['nsol']['def']} → {r['nsol']['cand1119']} | {', '.join(r['slow']) or 'なし'} | {len(r['bad'])} | {r['crash']} |")
     a, b = sum(r["nsol"]["def"] for r in rs), sum(r["nsol"]["cand1119"] for r in rs)
     print(f"\n解けた数の合計: def {a} → cand1119 {b} ({'減らない' if b >= a else '減る'})")
-if ARG == "PM":
+if ARG == "A":
+    # 切り分け: 問題・種ごとの秒 (時間切れは TL) を 5 設定で並べ、def に対する比の幾何平均を問題ごとに出す
+    rows, R = load("A")
+    CA = ["def", "cand1119", "no_sig", "no_twins", "no_aff"]
+    probs = sorted({p for p, c, s in R}); seeds = sorted({s for p, c, s in R})
+    print(f"A: 行数 {len(rows)}、crash {sum(1 for r in rows if st(r) in ('', 'none', 'crash', 'error', 'fetch_error'))}")
+    print("| 問題 | 種 | " + " | ".join(CA) + " |"); print("|---" * (len(CA) + 2) + "|")
+    for p in probs:
+        for s in seeds:
+            if all((p, c, s) in R for c in CA):
+                print(f"| {p} | {s} | " + " | ".join(f"{t(R[(p, c, s)]):.0f}" + ("" if solved(R[(p, c, s)]) else " TL") for c in CA) + " |")
+    print("\n問題ごとの比 (設定 / def の幾何平均、shift 1 秒):")
+    for p in probs:
+        out = []
+        for c in CA[1:]:
+            v = [math.log((t(R[(p, c, s)]) + 1) / (t(R[(p, "def", s)]) + 1)) for s in seeds if (p, c, s) in R and (p, "def", s) in R]
+            out.append(f"{c} {math.exp(sum(v) / len(v)):.2f}" if v else f"{c} -")
+        print(f"  {p}: " + "、".join(out))
+elif ARG == "PM":
     table([summ("P", False), summ("M", False)])
 else:
     table([summ(ARG)])

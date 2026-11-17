@@ -31,6 +31,18 @@ def balance(groups, est, n, out):
 CF = ["def", "cand1119"]
 def order(p, s, tl):
     return [[p, c, s, tl] for c in (CF if s % 2 else CF[::-1])]
+if len(sys.argv) > 2 and sys.argv[2] == "A":
+    # 切り分け: python plan.py NA A → shards_A.json (4 問 × 種 1〜3 × 5 設定、600 秒。同じ (問題, 種) の 5 設定は同じ分担で、順は種で回す)
+    CA = ["def", "cand1119", "no_sig", "no_twins", "no_aff"]
+    TA = defaultdict(list)
+    for f in glob.glob(str(D / "res_M_s*.jsonl")):
+        for l in open(f):
+            r = json.loads(l); st = str(r["result"].get("status") or "").lower()
+            TA[r["problem"]].append(min(r["result"].get("time") or 600, 600) if st in ("optimal", "infeasible") else 600)
+    est = lambda p: sum(TA[p]) / len(TA[p]) + 40 if TA[p] else 640
+    groups = [((p, s), [[p, c, s, 600] for c in CA[s % 5:] + CA[:s % 5]]) for p in ["csched008", "neos-933966", "CMS750_4", "supportcase33"] for s in (1, 2, 3)]
+    balance(groups, lambda p: est(p), int(sys.argv[1]), "shards_A.json")
+    sys.exit()
 NP, NM = int(sys.argv[1]), int(sys.argv[2])
 TP = times(D.parent / "cand1118_default_20261116/res_P_s*.jsonl", "def", 60)
 balance([((p, s), order(p, s, 60)) for p in PROBS for s in range(1, 7)], lambda p: TP.get(p, 60.0) + 8, NP, "shards_P.json")
