@@ -4896,6 +4896,16 @@ pub(crate) fn lp_probe_after_ext_has(c: char) -> bool {
 }
 
 /// `try_fix` が偽なら LP を解いて基底を渡すだけ (列の固定は試さない。`ENOMOTO_MIP_LP_PROBE_AFTER_EXT=r` のかけ直しの後)。
+/// LP のプロービングの LP が実行不能と出たとき、その証明が際どく信用しないか ([`solver::lp_farkas_marginal`]、`ENOMOTO_MIP_NO_LPINF_CHECK` で止める)。
+/// 信用しないときは数える (根の LP・LP のプロービングの欄)
+fn lp_inf_untrusted<L: lp_api::MipLp>(lp: &L, n: usize) -> bool {
+    let u = solver::lpinf_check_on() && solver::lp_farkas_marginal(lp, n);
+    if u {
+        solver::lpinf_count(3);
+    }
+    u
+}
+
 fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> Option<usize> {
     let _pt = pretime::guard("lpprobe");
     use lp::{LpStatus, SolveLimits};
@@ -4949,6 +4959,8 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     }
     match lp.solve(&SolveLimits { deadline: first_deadline, iteration_limit: first_iters, ..Default::default() }) {
         LpStatus::Optimal => {}
+        // 際どい実行不能 ([`solver::lp_farkas_marginal`]) は信用しない: 固定をせずに終える (根の LP で解き直す)
+        LpStatus::Infeasible if lp_inf_untrusted(&lp, prob.n) => return Some(0),
         LpStatus::Infeasible => return None,
         st => {
             if verbose {
@@ -4970,7 +4982,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                 if verbose {
                     eprintln!("MIP: LP probing: ROOTCAP q: continued the first LP: {st:?} (+{} iters, {:.2}s)", lp.total_iterations() - it0, t1.elapsed().as_secs_f64());
                 }
-                if st == LpStatus::Infeasible {
+                if st == LpStatus::Infeasible && !lp_inf_untrusted(&lp, prob.n) {
                     return None;
                 }
             }
@@ -5104,6 +5116,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                     let rem = if work { lp_iter_cap.saturating_sub(tot_it(&lp)).max(1) } else { u64::MAX };
                     let blocks: Vec<&[(usize, f64)]> = cands[ci..end].chunks((end - ci).div_ceil(nb).max(1)).collect();
                     let (col_lo, col_up, saved_r) = (&prob.col_lo, &prob.col_up, &saved);
+                    let n_cols = prob.n;
                     let res: Vec<Vec<(bool, bool, u64)>> = pool.install(|| {
                         use rayon::prelude::*;
                         wk.par_iter_mut()
@@ -5119,7 +5132,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                                             } else {
                                                 w.set_col_bounds(j, col_lo[j], v.floor());
                                             }
-                                            c[side] = w.solve(&SolveLimits { iteration_limit: per_lp.min(rem), deadline, ..Default::default() }) == LpStatus::Infeasible;
+                                            c[side] = w.solve(&SolveLimits { iteration_limit: per_lp.min(rem), deadline, ..Default::default() }) == LpStatus::Infeasible && !lp_inf_untrusted(&*w, n_cols);
                                             w.restore_state(saved_r);
                                         }
                                         (c[0], c[1], w.total_iterations() - it0)
@@ -5148,7 +5161,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                     }
                     // `ENOMOTO_MIP_PRESOLVE_WORK`: 反復の上限 `lp_iter_cap` を越えない (時間の期限で途中で止まる分を手間で決める)
                     let lim = if work { per_lp.min(lp_iter_cap.saturating_sub(tot_it(&lp)).max(1)) } else { per_lp };
-                    cut[side] = lp.solve(&SolveLimits { iteration_limit: lim, deadline, ..Default::default() }) == LpStatus::Infeasible;
+                    cut[side] = lp.solve(&SolveLimits { iteration_limit: lim, deadline, ..Default::default() }) == LpStatus::Infeasible && !lp_inf_untrusted(&lp, prob.n);
                     n_lps += 1;
                     lp.restore_state(&saved);
                 }
@@ -5194,7 +5207,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
         let lim = if work { lp_iter_cap.saturating_sub(tot_it(&lp)).max(root_iters) } else { u64::MAX };
         match lp.solve(&SolveLimits { iteration_limit: lim, deadline, ..Default::default() }) {
             LpStatus::Optimal => {}
-            LpStatus::Infeasible => {
+            LpStatus::Infeasible if !lp_inf_untrusted(&lp, prob.n) => {
                 ok = false;
                 break;
             }
