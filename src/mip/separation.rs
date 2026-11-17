@@ -33,6 +33,20 @@ thread_local! {
     static CUT_EXTENDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 試作 `ENOMOTO_MIP_CLQFB_CAP` 用: clique fallback の試しの前の根のカットのループの (LP の秒の合計, LP の反復の合計, ラウンド数)
     static CLQFB_LOOP: std::cell::Cell<(f64, u64, usize)> = const { std::cell::Cell::new((0.0, 0, 0)) };
+    /// 試作 `ENOMOTO_MIP_CLIQUE_CUTS=sigmoid`・`sigmoid_a` の、最初の求解 (再スタート前) の割合 f。再スタートの後の求解が引き継ぐ
+    static CLIQUE_SIG_FIRST: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+    /// 同じく、最初の求解の根で測った点数 s (`sigmoid_a` の決め直しで使う)
+    static CLIQUE_SIG_S: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// 試作 `ENOMOTO_MIP_CLIQUE_CUTS=sigmoid`・`sigmoid_a` か (analysis/rootgap_20261116/clq の README、[`Solver::clique_sig_init`])
+fn clique_sig_mode() -> bool {
+    matches!(clique_cuts_mode(), Some("sigmoid") | Some("sigmoid_a"))
+}
+
+/// シグモイド 1 / (1 + exp(-z))
+fn sigmoid(z: f64) -> f64 {
+    1.0 / (1.0 + (-z.clamp(-50.0, 50.0)).exp())
 }
 
 /// 試作 `ENOMOTO_MIP_CLQFB_CAP=文字` (SMALLFIX の C3、既定では使わない。analysis/smallfix_20261113.md): 根のカットのループの後の
@@ -89,7 +103,8 @@ pub(super) fn hl2_d2_any() -> bool {
 /// clique カットの使い方 (`ENOMOTO_MIP_CLIQUE_CUTS`)。既定は `fallback` (根のループを clique なしで回し、ほかのカットで伸びず
 /// clique カットで伸びる問題でだけ根の続きで使う、[`Solver::clique_fallback_trial`])。`off` (か `0`) で使わない。
 /// 40 問 + 16 問 (4 スレッド・60 秒、`ENOMOTO_T_MIP_CLIQUE_FB_FRAC=0.9` と組んで 2 組) で drayage-25-23 が 2 組とも解け、
-/// 40 問は解けた数・不一致とも変わらない。手元 16 スレッドでも確かめて既定にした
+/// 40 問は解けた数・不一致とも変わらない。手元 16 スレッドでも確かめて既定にした。
+/// 試作 `sigmoid`・`sigmoid_a`: 根の点数からシグモイドで 1 ラウンドの本数の割合を連続に決める ([`Solver::clique_sig_score`])
 pub(super) fn clique_cuts_mode() -> Option<&'static str> {
     match env_str!("ENOMOTO_MIP_CLIQUE_CUTS") {
         Some("off") | Some("0") => None,
@@ -968,6 +983,109 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// カットだけを入れた LP の伸び g_c を測り、ループ全体の伸び g_d (clique なしのカットでの伸び) と比べる。
     /// g_c > `ENOMOTO_T_MIP_CLIQUE_FB_GAIN` (既定 1e-4) x max(1, |目的値|) かつ g_c > `ENOMOTO_T_MIP_CLIQUE_FB_RATIO` (既定 0.5) x g_d
     /// なら使う (ほかのカットで伸びない問題でだけ使う)。drayage-25-23 は g_d = 0、30n20b8 は g_d = 15 に対し g_c は 1 程度
+    /// 試作 `ENOMOTO_MIP_CLIQUE_CUTS=sigmoid` (analysis/rootgap_20261116/clq の README): 使う・使わないの 2 択でなく、根の LP 解で測る点数 s から
+    /// f = 1 / (1 + exp(-a (s - b))) を求め、根の clique カットの 1 ラウンドの本数の上限を round(f x `ENOMOTO_T_MIP_CLIQUE_MAX`) にする (0 本なら使わない、
+    /// ノードでは使わない)。a = `ENOMOTO_T_MIP_CLIQUE_SIG_A`、b = `ENOMOTO_T_MIP_CLIQUE_SIG_B`。s は次の 4 つの [0, 1] の量の平均:
+    /// - sp: 元の行のうち集合詰め込み・分割の形 (2 値列だけ、係数がすべて同じ c、c > 0 なら上限 = c、c < 0 なら下限 = c) の行の割合
+    /// - ed: 衝突グラフの辺の数 / 2 値列の数 を ln(1 + 辺/列) / ln(101) で [0, 1] に (100 で 1)
+    /// - fr: LP 解で分数の 2 値列のうち、衝突グラフに辺を持つものの割合
+    /// - vi: LP 解で破れる clique カットの数 (最大 100) / 100
+    ///
+    /// `ENOMOTO_MIP_DEBUG_CLQSIG` なら、どの設定でも根で s と 4 つの量を出す (a・b を合わせるための記録)。(s, f) を返す
+    pub(super) fn clique_sig_score(&mut self) -> (f64, f64) {
+        let p = self.p;
+        let binary: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && self.dom.global_lo[j] >= 0.0 && self.dom.global_up[j] <= 1.0).collect();
+        let nbin = binary.iter().filter(|&&b| b).count();
+        let mut nsp = 0usize;
+        for (i, r) in p.rows.iter().enumerate() {
+            if r.len() < 2 || !r.iter().all(|&(j, _)| binary[j]) {
+                continue;
+            }
+            let c = r[0].1;
+            if c == 0.0 || !r.iter().all(|&(_, a)| (a - c).abs() <= 1e-12 * c.abs()) {
+                continue;
+            }
+            let tol = 1e-9 * c.abs().max(1.0);
+            if (c > 0.0 && (p.row_up[i] - c).abs() <= tol) || (c < 0.0 && (p.row_lo[i] - c).abs() <= tol) {
+                nsp += 1;
+            }
+        }
+        let sp = nsp as f64 / p.m.max(1) as f64;
+        let g = self.clique_graph_get();
+        let ed = ((1.0 + g.num_edges() as f64 / nbin.max(1) as f64).ln() / 101f64.ln()).min(1.0);
+        let x = self.lp.col_values();
+        let fracs: Vec<usize> = self.fractional(&x).into_iter().map(|(j, _)| j).filter(|&j| binary[j]).collect();
+        let fr = if fracs.is_empty() {
+            0.0
+        } else {
+            fracs.iter().filter(|&&j| !g.neighbors(2 * j as u32).is_empty() || !g.neighbors(2 * j as u32 + 1).is_empty()).count() as f64 / fracs.len() as f64
+        };
+        let vi = g.separate(&x, 100).len().min(100) as f64 / 100.0;
+        let s = (sp + ed + fr + vi) / 4.0;
+        let (a, b) = (tunable!("ENOMOTO_T_MIP_CLIQUE_SIG_A", 10.0, f64), tunable!("ENOMOTO_T_MIP_CLIQUE_SIG_B", 0.5, f64));
+        let f = sigmoid(a * (s - b));
+        if self.params.verbose || env_str!("ENOMOTO_MIP_DEBUG_CLQSIG").is_some() {
+            eprintln!("CLQSIG s {s:.4} sp {sp:.4} ed {ed:.4} fr {fr:.4} vi {vi:.4} (rows {} bin {nbin} edges {} frac {}) a {a} b {b} f {f:.4}", p.m, g.num_edges(), fracs.len());
+        }
+        (s, f)
+    }
+
+    /// `sigmoid`・`sigmoid_a` の f を決め、本数の上限が 1 本以上なら `clique_auto` を真にする (再スタートの後は最初の求解の f を引き継ぐ)
+    fn clique_sig_init(&mut self) {
+        let f = match CLIQUE_SIG_FIRST.with(|c| c.get()) {
+            Some(v) if self.params.restarts > 0 => v,
+            _ => {
+                let (s, f) = self.clique_sig_score();
+                CLIQUE_SIG_S.with(|c| c.set(s));
+                f
+            }
+        };
+        if self.params.restarts == 0 {
+            CLIQUE_SIG_FIRST.with(|c| c.set(Some(f)));
+        }
+        self.clique_sig_set(f);
+    }
+
+    fn clique_sig_set(&mut self, f: f64) {
+        self.clique_sig = Some(f);
+        self.clique_auto = Some(self.clique_sig_max().is_some_and(|k| k > 0));
+        if self.params.verbose {
+            eprintln!("MIP: clique sigmoid: f {f:.4}, clique cuts per root round {}", self.clique_sig_max().unwrap_or(0));
+        }
+    }
+
+    /// `sigmoid`・`sigmoid_a` の 1 ラウンドの clique カットの本数の上限 (それ以外は `None`)
+    fn clique_sig_max(&self) -> Option<usize> {
+        let f = self.clique_sig.filter(|_| clique_sig_mode())?;
+        Some((f * tunable!("ENOMOTO_T_MIP_CLIQUE_MAX", 100usize, usize) as f64).round() as usize)
+    }
+
+    /// 試作 `sigmoid_a` (適応): 根のループの `ENOMOTO_T_MIP_CLIQUE_SIG_ADAPT_ROUND` (3) ラウンド目の始めに、今の LP 解で破れる clique カットだけを
+    /// 1 回入れた LP の伸び g_c ([`Self::clique_trial_lp_cap`]、行は外して戻す) を、直前のラウンドの伸び g_r (LP の解き直し 1 回分。どちらも
+    /// LP を 1 回解く仕事なので仕事あたりの伸びの比になる) と比べ、z = a (s - b) + β ln(ρ) (s は根の始めの点数) (ρ = (g_c + ε) / (g_r + ε)、ln ρ は ±5 に切る、
+    /// β = `ENOMOTO_T_MIP_CLIQUE_SIG_BETA` (1)、ε = 1e-9 x max(1, |目的値|)) で f を決め直す
+    fn clique_sig_adapt(&mut self, root_iters: u64, prev_obj: f64) {
+        let obj = self.lp.objective();
+        let scale = obj.abs().max(1.0);
+        let eps = 1e-9 * scale;
+        let gr = (obj - prev_obj).max(0.0);
+        let gc = match self.clique_trial_lp_cap(root_iters, None, 0.0) {
+            Some((o0, o1, ..)) => (o1 - o0).max(0.0),
+            None => 0.0,
+        };
+        let lr = ((gc + eps) / (gr + eps)).ln().clamp(-5.0, 5.0);
+        let s = CLIQUE_SIG_S.with(|c| c.get());
+        let (a, b) = (tunable!("ENOMOTO_T_MIP_CLIQUE_SIG_A", 10.0, f64), tunable!("ENOMOTO_T_MIP_CLIQUE_SIG_B", 0.5, f64));
+        let f = sigmoid(a * (s - b) + tunable!("ENOMOTO_T_MIP_CLIQUE_SIG_BETA", 1.0, f64) * lr);
+        if self.params.verbose || env_str!("ENOMOTO_MIP_DEBUG_CLQSIG").is_some() {
+            eprintln!("CLQSIG adapt: g_c {:.3e} g_r {:.3e} relative, ln rho {lr:.3}, f {:.4} -> {f:.4}", gc / scale, gr / scale, self.clique_sig.unwrap_or(0.0));
+        }
+        if self.params.restarts == 0 {
+            CLIQUE_SIG_FIRST.with(|c| c.set(Some(f)));
+        }
+        self.clique_sig_set(f);
+    }
+
     fn clique_fallback_trial(&mut self, root_iters: u64, first_obj: f64) -> bool {
         let t0 = std::time::Instant::now();
         let mode = clqfb_cap();
@@ -1439,6 +1557,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             self.clique_auto = Some(on);
         }
+        // 試作 `sigmoid`・`sigmoid_a` ([`Self::clique_sig_score`])
+        if clique_sig_mode() && self.clique_auto.is_none() && !self.params.submip {
+            self.clique_sig_init();
+        } else if env_str!("ENOMOTO_MIP_DEBUG_CLQSIG").is_some() && !self.params.submip && self.params.restarts == 0 && self.snap.is_none() && !clique_sig_mode() {
+            self.clique_sig_score();
+        }
+        let mut clique_sig_adapt = clique_cuts_mode() == Some("sigmoid_a") && !self.params.submip && self.params.restarts == 0;
         // `fallback`: ループの後で判定する ([`Self::clique_fallback_trial`])。再スタートの後は最初の求解の判定を引き継ぐ
         let mut clique_fb = clique_cuts_mode() == Some("fallback") && self.clique_auto.is_none() && !self.params.submip;
         if clique_fb && self.params.restarts > 0 {
@@ -2410,6 +2535,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_T_MIP_CLIQUE_FB_EARLY` = k (> 0): fallback の判定を、k ラウンド回っても目的値がまったく動かないときは
             // k ラウンド目で行い、使うならこのループの続きで clique カットを加える (drayage-25-23 では clique なしの 6 ラウンドに
             // 6.5 秒かかる)。ここで使わないと決まらなければループの後でもう一度判定する
+            if clique_sig_adapt && job.is_none() && round == tunable!("ENOMOTO_T_MIP_CLIQUE_SIG_ADAPT_ROUND", 3usize, usize) {
+                clique_sig_adapt = false;
+                let prev = CLQFB_HIST.with(|h| {
+                    let h = h.borrow();
+                    if h.len() >= 2 { h[h.len() - 2] } else { first_obj }
+                });
+                self.clique_sig_adapt(root_iters, prev);
+            }
             let fb_early = tunable!("ENOMOTO_T_MIP_CLIQUE_FB_EARLY", 0usize, usize);
             if clique_fb && fb_early > 0 && round == fb_early && job.is_none() && self.lp.objective() - first_obj <= 1e-9 * self.lp.objective().abs().max(1.0) {
                 CLQFB_LOOP.with(|c| c.set((lp_tot, loop_iters, nrounds)));
@@ -3602,7 +3735,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if env_str!("ENOMOTO_MIP_DEBUG_FC").is_some() && !self.params.submip {
                 super::cuts::FC_STATS.with(|s| eprintln!("FC stats (calls, cuts, no SNF): {:?}", s.borrow()));
             }
-            if job.is_none() && !self.params.submip && tunable!("ENOMOTO_T_MIP_CLIQUE_FB_MARGINAL", 0usize, usize) > 0 {
+            if job.is_none() && !self.params.submip && (tunable!("ENOMOTO_T_MIP_CLIQUE_FB_MARGINAL", 0usize, usize) > 0 || clique_cuts_mode() == Some("sigmoid_a")) {
                 CLQFB_HIST.with(|h| h.borrow_mut().push(obj));
             }
             if self.params.verbose {
@@ -6076,8 +6209,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // clique カットの使い方は下の説明を参照
         let clique_on = clique_cuts_mode().is_some_and(|m| {
             let probe = m == "probe" || m == "probe_s" || m == "probe_r" || m == "probe_f";
-            let judged = m == "auto" || m == "fallback" || probe;
-            !(light && (m == "root" || ((m == "fallback" || probe) && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && (!judged || self.clique_auto == Some(true))
+            let sig = m == "sigmoid" || m == "sigmoid_a";
+            let judged = m == "auto" || m == "fallback" || probe || sig;
+            !(light && (m == "root" || sig || ((m == "fallback" || probe) && env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_none()))) && (!judged || self.clique_auto == Some(true))
         });
         let clique_on = clique_on && self.sep_src_on(sepprof::SRC_CLIQUE, light);
         // `ENOMOTO_MIP_SEP_PARALLEL` (試作、既定では使わない): 根の分離 (木を分け合う前、サブ MIP でない) で、元の行 1 本ずつ・zerohalf・
@@ -6279,10 +6413,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 根の続きのラウンドで使う ([`Self::clique_fallback_trial`])。ノードでは使わない (`ENOMOTO_MIP_CLIQUE_FB_NODES` で使う)
         // (判定は上の `clique_on`)
         if let Some(pp) = par_parts.as_mut() {
+            if let Some(k) = self.clique_sig_max() {
+                pp.clique.truncate(k);
+            }
             cands.append(&mut pp.clique);
         } else if clique_on {
             let g = self.clique_graph_get();
-            for raw in g.separate(x, tunable!("ENOMOTO_T_MIP_CLIQUE_MAX", 100usize, usize)) {
+            for raw in g.separate(x, self.clique_sig_max().unwrap_or_else(|| tunable!("ENOMOTO_T_MIP_CLIQUE_MAX", 100usize, usize))) {
                 push(Some(raw), &mut cands, self);
             }
         }
