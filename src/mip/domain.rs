@@ -1129,6 +1129,8 @@ impl Domain {
         let mut out: Vec<Vec<(usize, bool, f64)>> = Vec::new();
         let mut lev = dec.len();
         let mut done = 0usize;
+        let ld = conflict_lev_diag();
+        let mut stop_k = 6usize;
         'outer: while lev >= 1 {
             let lo = dec[lev - 1];
             let hi = if lev < dec.len() { dec[lev] } else { end };
@@ -1137,10 +1139,14 @@ impl Domain {
             let mut cnt = set.range(lo..hi).count();
             while cnt > 1 {
                 if set.len() > cap {
+                    stop_k = 2;
                     break 'outer;
                 }
                 let Some(&k) = set.range(lo..hi).rev().find(|&&k| self.stack[k].reason >= 0) else { break };
-                let Some(ex) = explain_change(k) else { break 'outer };
+                let Some(ex) = explain_change(k) else {
+                    stop_k = 3;
+                    break 'outer;
+                };
                 if self.dbg_sol.is_some() {
                     trace.borrow_mut().push(format!("lev {lev} resolve {} <- {}", desc(k), ex.iter().map(|&e| desc(e)).collect::<Vec<_>>().join(" ")));
                 }
@@ -1164,6 +1170,27 @@ impl Domain {
                 lev -= 1;
                 continue;
             }
+            if conflict_lev_diag() {
+                // 診断 `ENOMOTO_MIP_CONFLICT_LEV_DIAG`: 深さごとに 1-UIP まで解けたか、解けずに残った変更の理由
+                use std::sync::atomic::Ordering::Relaxed;
+                CONFLICT_LEV[0].fetch_add(1, Relaxed);
+                if inlev.len() <= 1 {
+                    CONFLICT_LEV[1].fetch_add(1, Relaxed);
+                } else {
+                    CONFLICT_LEV[2].fetch_add(1, Relaxed);
+                    let mut nonrow = false;
+                    for &k in &inlev {
+                        let r = self.stack[k].reason;
+                        if r < 0 {
+                            CONFLICT_LEV[4 + ((-r) as usize).min(11) - 1].fetch_add(1, Relaxed);
+                            nonrow |= r < -1;
+                        }
+                    }
+                    if nonrow {
+                        CONFLICT_LEV[3].fetch_add(1, Relaxed);
+                    }
+                }
+            }
             done += 1;
             let before = out.len();
             // HiGHS と同じく、この段で置き換えが起きたときだけ衝突にする (最初の段で置き換えがなければ今の組を 1 つ作って
@@ -1173,11 +1200,14 @@ impl Domain {
                 if !lits.is_empty() && lits.len() <= max_len {
                     out.push(lits);
                 }
+                stop_k = 1;
                 break;
             }
             let lits = to_lits(&set);
             if resolved > 0 && !lits.is_empty() && lits.len() <= max_len {
                 out.push(lits);
+            } else if ld && resolved > 0 && lits.len() > max_len {
+                CONFLICT_STOP[7].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             // 再収束: UIP u (伝播による変更) を同じ段の理由で置き換えた組 R は u を導く。R かつ (u の否定) は矛盾
             if reconv && inlev.len() == 1 && self.stack[inlev[0]].reason >= 0 {
@@ -1220,9 +1250,17 @@ impl Domain {
             let new_here = out.len() - before;
             // HiGHS と同じ打ち切り: 最初の段で衝突が出なければ止める。5 段以上調べて新しい衝突がなければ止める
             if out.is_empty() || (done >= 5 && new_here == 0) {
+                stop_k = if out.is_empty() { 4 } else { 5 };
                 break;
             }
             lev -= 1;
+        }
+        if ld {
+            use std::sync::atomic::Ordering::Relaxed;
+            CONFLICT_STOP[0].fetch_add(1, Relaxed);
+            CONFLICT_STOP[stop_k].fetch_add(1, Relaxed);
+            CONFLICT_STOP[8].fetch_add(out.len() as u64, Relaxed);
+            CONFLICT_STOP[9].fetch_add(done as u64, Relaxed);
         }
         if let Some(x) = &self.dbg_sol {
             for (n, c) in out.iter().enumerate() {
@@ -1340,6 +1378,17 @@ impl Domain {
 
 /// 診断用: 衝突解析が失敗した理由の回数 [決定なし, 途中で長すぎ, 理由の行に列がない, 空, 最後に長すぎ, その長さの和]
 pub static CONFLICT_FAIL: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+/// 診断 `ENOMOTO_MIP_CONFLICT_LEV_DIAG` の数: [調べた深さ, 1-UIP まで解けた深さ, 解けずに 2 つ以上残った深さ, そのうち行でない理由
+/// (決定以外) の変更が残った深さ, 残った変更の理由ごとの数 (-1 決定, -2 外から, -3 局所の被約費用, -4 強分岐, -5 orbitope,
+/// -6 双対証明, -7 リテラルの衝突, -8 目的関数の伝播, -9 含意, -10, -11 以下)]
+pub static CONFLICT_LEV: [std::sync::atomic::AtomicU64; 15] = [const { std::sync::atomic::AtomicU64::new(0) }; 15];
+/// 同じ診断の、解析 1 回ごとの止まり方: [解析, 最初の深さで解けず (衝突 1 本で終わり), 衝突の組が大きすぎる (cap), 行で説明できない,
+/// 衝突が 0 本で止まる, 5 段の規則で止まる, 決定の深さを全部遡った, 衝突の長さの上限で捨てた衝突, 作った衝突, 遡った深さの合計]
+pub static CONFLICT_STOP: [std::sync::atomic::AtomicU64; 10] = [const { std::sync::atomic::AtomicU64::new(0) }; 10];
+pub fn conflict_lev_diag() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("ENOMOTO_MIP_CONFLICT_LEV_DIAG").is_some())
+}
 
 #[inline]
 fn bound_tol(v: f64) -> f64 {
