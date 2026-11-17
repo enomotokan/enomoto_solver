@@ -6,9 +6,9 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D.parent / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
-CF_P = ["def", "t03", "t05", "t10", "t05sb"]
-CF_M = ["def", "t03", "t05", "t10", "t05sb"]
-MPROBS = ["mzzv11", "neos-933966", "supportcase33", "neos-3216931-puriri", "irp", "satellites2-60-fs"]
+CF_P = ["def", "t01", "t03", "t05", "s00", "sm03", "s00c"]
+CF_M = ["def", "t01", "t03", "t05", "s00", "sm03", "s00c"]
+MPROBS = ["mzzv11", "neos-933966", "supportcase33", "neos-3216931-puriri", "neos-1456979", "neos-3627168-kasai", "irp"]
 T = defaultdict(list)
 for f in glob.glob(str(D.parent / "cand1118_default_20261116/res_P_s*.jsonl")):
     for l in open(f):

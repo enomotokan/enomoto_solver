@@ -14,7 +14,7 @@ def g(theta, kinds="1", sb=False, tau=None, age=0):
     return e
 CFGS = {
     "def": {},
-    "t03": g(0.3), "t05": g(0.5), "t08": g(0.8), "t10": g(1.0),
+    "t01": g(0.1), "t03": g(0.3), "t05": g(0.5), "t08": g(0.8), "t10": g(1.0),
     "t05sb": g(0.5, sb=True), "t10sb": g(1.0, sb=True),
     "clq": g(1.0, "clq"),
     "s00": g(0, tau=0.0), "sm01": g(0, tau=-0.1), "sm03": g(0, tau=-0.3),

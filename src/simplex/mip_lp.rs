@@ -884,6 +884,9 @@ impl TwoStageLp {
         }
         self.has_free_rows = (0..self.rows.len()).any(|i| self.free_row(i));
         self.rebuild();
+        // 空にした行のスラックを基底に入れる (今の基底で非基底だった行)
+        self.repair_basis();
+        self.lu = None;
         self.status = None;
         let sync = self.tw_sync;
         self.clear_memo();
@@ -1098,6 +1101,16 @@ impl TwoStageLp {
         let Some(b) = self.basis.as_mut() else { return };
         let mut used = vec![false; n + m];
         b.retain(|&v| v < n + m && !std::mem::replace(&mut used[v], true));
+        // 両側とも無限の境界の行 (標準形では空の行、試作 `ENOMOTO_MIP_CLQ_LAZY`) のスラックは必ず基底に入れる (非基底だと基底が特異になり、
+        // 分解の修復でスラックに置き換えられる列が増えて解き直しが重くなる)。余った分は下で構造列を後ろから外す
+        if self.has_free_rows {
+            for i in 0..m {
+                if !used[n + i] && self.row_lo[i] == f64::NEG_INFINITY && self.row_up[i] == f64::INFINITY {
+                    used[n + i] = true;
+                    b.insert(0, n + i);
+                }
+            }
+        }
         while b.len() > m {
             if let Some(pos) = b.iter().rposition(|&v| v < n) {
                 let v = b.remove(pos);
