@@ -20,6 +20,10 @@ use std::rc::Rc;
 #[path = "treefix.rs"]
 mod treefix;
 
+/// 試作 `ENOMOTO_MIP_GEN_LAZY` (余裕のある一般の不等式の行を LP から外し、破られたら戻す)
+#[path = "genlazy.rs"]
+pub(crate) mod genlazy;
+
 /// 証明 `sum a_j x_j` の境界 `lo`/`up` での最小活動量 (有限部分, 無限の項の数) と `max_j |a_j| (u_j - l_j)`
 /// (余裕がこれ以上ならどの境界も締まらない。境界は締まるだけなので以後も上界)。
 fn proof_min_activity(coefs: &[(usize, f64)], lo: &[f64], up: &[f64]) -> (f64, u32, f64) {
@@ -761,6 +765,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ノードの LP 解が破れば、その行をカットの行として LP に戻す ([`Self::clq_lazy_restore`])。`clq_lazy_stats` は (外した数, 確かめた回数, 戻した行の数, 解き直した回数)
     clq_lazy: Vec<(usize, Vec<u32>)>,
     clq_lazy_stats: [u64; 4],
+    /// 試作 `ENOMOTO_MIP_GEN_LAZY` ([`genlazy`]): 外した一般の不等式の行。`gen_lazy_stats` は (外した数, 確かめた回数, 戻した行の数,
+    /// 解き直した回数, 2 度目以降の戻し, 外した非零の数, 強分岐の子から戻した行, その解き直し)、`gen_lazy_secs` は確かめの秒
+    gen_lazy: genlazy::GenLazy,
+    gen_lazy_stats: [u64; 8],
+    gen_lazy_secs: f64,
     /// 診断 `ENOMOTO_MIP_DIAG_ROWTYPES` の木の途中の数え上げを済ませたか
     rowtypes_mid_done: bool,
     /// 試作 `ENOMOTO_MIP_GREDUNDANT` (treeclose 9.84 節): 大域の境界の下で冗長になって LP から外した元の行 (番号)、最後に調べたときの大域で固定された整数列の数、
@@ -1547,6 +1556,8 @@ pub(crate) struct TreeSnapshot {
     root_basis: Option<super::lp::Basis>,
     /// 試作 `ENOMOTO_MIP_CLQ_LAZY`: 写しを作ったときに LP で外していた元の行 (番号) と、その行の文字
     clq_lazy: Vec<(usize, Vec<u32>)>,
+    /// 試作 `ENOMOTO_MIP_GEN_LAZY`: 写しを作ったときに LP で外していた一般の行
+    gen_lazy: genlazy::GenLazy,
 }
 
 /// `ENOMOTO_MIP_TREE_ROOT_BASIS` (試作、inv/mzzv42z-r4-20261021、既定では使わない): 木を分け合う従が写しの根の LP を、主の LP の
@@ -5369,6 +5380,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tr_tk0: 0.0,
         clq_lazy: Vec::new(),
         clq_lazy_stats: [0; 4],
+        gen_lazy: Default::default(),
+        gen_lazy_stats: [0; 8],
+        gen_lazy_secs: 0.0,
         rowtypes_mid_done: false,
         gred_rows: Vec::new(),
         gred_fixed: usize::MAX,
@@ -8086,11 +8100,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if cand.is_empty() {
             return;
         }
+        // 外す行の非零 / LP の元の行の非零 (問題の特徴、ログに出す)。`ENOMOTO_T_MIP_CLQ_LAZY_GATE_F0` = f0 > 0 (既定 0 = 使わない) なら、
+        // 割合 f のシグモイド σ(k (f − f0)) (k = `ENOMOTO_T_MIP_CLQ_LAZY_GATE_K`、既定 20) の分だけ候補を外す (主のみ。文字の和の小さい = 余裕の大きい順)。
+        // 外す量が少ない (LP が軽くならない) 問題では外さず道筋を変えない
+        let nnz_all: usize = (0..m0).map(|i| self.lp.row_ref(i).len()).sum::<usize>().max(1);
+        let nnz_c: usize = cand.iter().map(|c| c.1.len()).sum();
+        let frac = nnz_c as f64 / nnz_all as f64;
+        let f0 = tunable!("ENOMOTO_T_MIP_CLQ_LAZY_GATE_F0", 0.0, f64);
+        let mut cand = cand;
+        if f0 > 0.0 && self.snap.is_none() {
+            let k = tunable!("ENOMOTO_T_MIP_CLQ_LAZY_GATE_K", 20.0, f64);
+            let share = 1.0 / (1.0 + (-k * (frac - f0)).exp());
+            let x = self.lp.col_values();
+            let sum = |lits: &[u32]| -> f64 { lits.iter().map(|&q| { let v = x[(q / 2) as usize]; if q % 2 == 0 { v } else { 1.0 - v } }).sum() };
+            cand.sort_by(|a, b| sum(&a.1).total_cmp(&sum(&b.1)));
+            cand.truncate((share * cand.len() as f64).floor() as usize);
+            if self.params.verbose && self.pool_tid == 0 {
+                eprintln!("MIP: CLQ_LAZY gate: nonzero share {frac:.4} (f0 {f0}, k {k}) -> keep {:.3} of the candidates ({} rows)", share, cand.len());
+            }
+            if cand.is_empty() {
+                return;
+            }
+        }
         let ch: Vec<(usize, f64, f64)> = cand.iter().map(|(i, _)| (*i, f64::NEG_INFINITY, f64::INFINITY)).collect();
         self.lp.set_row_bounds_many(&ch);
         self.clq_lazy_stats[0] += cand.len() as u64;
         if self.params.verbose && self.pool_tid == 0 {
-            eprintln!("MIP: CLQ_LAZY: {} clique rows dropped from the LP (of {} rows, {} nonzeros) ({:.2}s)", cand.len(), m0, cand.iter().map(|c| c.1.len()).sum::<usize>(), t0.elapsed().as_secs_f64());
+            eprintln!("MIP: CLQ_LAZY: {} clique rows dropped from the LP (of {} rows, {} nonzeros) (nonzero share of the candidates {frac:.4} of {nnz_all}) ({:.2}s)", cand.len(), m0, cand.iter().map(|c| c.1.len()).sum::<usize>(), t0.elapsed().as_secs_f64());
         }
         self.clq_lazy = cand;
     }
@@ -12057,6 +12093,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if clq_lazy_on() && !self.params.submip && self.watch.is_none() {
             self.clq_lazy_drop();
         }
+        // 試作 `ENOMOTO_MIP_GEN_LAZY`: 根の LP 解で余裕のある一般の不等式の行を LP から外す (従は写しの一覧を使う)
+        if genlazy::on() && !self.params.submip && self.watch.is_none() {
+            self.gen_lazy_drop();
+        }
         // 試作 `ENOMOTO_MIP_GREDUNDANT`: 大域の境界の下で冗長な元の行を LP から外す (どのスレッドも自分の LP で)
         if gredundant_on() && !self.params.submip && self.watch.is_none() {
             self.gred_drop();
@@ -13285,9 +13325,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 // 試作 `ENOMOTO_MIP_CLQ_LAZY`: 外した行を LP 解が破れば戻して解き直す (破るものがなくなるまで)
-                while st == LpStatus::Optimal && !self.clq_lazy.is_empty() && self.clq_lazy_restore() {
+                // 試作 `ENOMOTO_MIP_GEN_LAZY` も同じ (戻した行も一覧に残し毎回確かめる)
+                while st == LpStatus::Optimal && (!self.clq_lazy.is_empty() || !self.gen_lazy.is_empty()) && {
+                    let a = !self.clq_lazy.is_empty() && self.clq_lazy_restore();
+                    let b = !self.gen_lazy.is_empty() && self.gen_lazy_restore();
+                    a || b
+                } {
                     st = self.lp.solve(&capped(self, u64::MAX));
                     self.clq_lazy_stats[3] += 1;
+                    self.gen_lazy_stats[3] += 1;
                     // ノードの LP の時間の上限に当たっただけなら全体の時間切れにしない (LP なしで分枝する。上の解き直しと同じ扱い)
                     if st == LpStatus::TimeLimit && !self.time_up() {
                         st = LpStatus::Error;
@@ -16429,6 +16475,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.last_sb = None;
         self.poly_diag_raised.clear();
         let r = self.select_branch_inner(frac, node_obj, depth);
+        // 試作 `ENOMOTO_MIP_GEN_LAZY_SB`: 強分岐の子の LP 解が破った外した行を戻し、分枝せずにノードの LP を解き直す
+        let r = if self.gen_lazy.has_pending() {
+            match r {
+                BranchAction::Prune => {
+                    self.gen_lazy.clear_pending();
+                    r
+                }
+                _ => {
+                    if self.gen_lazy_sb_flush() {
+                        BranchAction::Resolve
+                    } else {
+                        r
+                    }
+                }
+            }
+        } else {
+            r
+        };
         self.sb_secs += t0.elapsed().as_secs_f64();
         // 診断用 (`ENOMOTO_MIP_DEBUG_BRCOL`、analysis/dualeq2_20261113.md): 分枝した列を、前処理で番号が変わっても見分けられるよう
         // 費用・境界・非零の数と一緒に出す
@@ -16823,6 +16887,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     self.sb_child_proof_y(j, is_up, v, false, y);
                                 }
                             } else if let Some(x) = r.x {
+                                if !self.gen_lazy.is_empty() {
+                                    self.gen_lazy_sb_note(&x);
+                                }
                                 if self.fractional(&x).is_empty() {
                                     self.try_incumbent(x);
                                 }
@@ -16911,6 +16978,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.sb_child_proof(j, is_up, v, false);
                         } else {
                             let x = self.lp.col_values();
+                            if !self.gen_lazy.is_empty() {
+                                self.gen_lazy_sb_note(&x);
+                            }
                             if self.fractional(&x).is_empty() {
                                 self.try_lp_solution();
                             }
@@ -17189,6 +17259,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         } else {
                             // 強分岐の LP 解が整数なら暫定解の候補
                             let x = self.lp.col_values();
+                            if !self.gen_lazy.is_empty() {
+                                self.gen_lazy_sb_note(&x);
+                            }
                             if self.fractional(&x).is_empty() {
                                 self.try_lp_solution();
                             }
@@ -23168,7 +23241,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new(if gap4('o') { o.clone_without_implications() } else { (**o).clone() }));
         let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis, clq_lazy: self.clq_lazy.clone() };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis, clq_lazy: self.clq_lazy.clone(), gen_lazy: self.gen_lazy.clone() };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
@@ -25251,6 +25324,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let r = crate::ticks::raw();
             eprintln!("MIP: TICKS cpu {:.3} total {:.0} {}", super::cap_clock(), crate::ticks::total(), (0..crate::ticks::NK).map(|k| format!("{} {}", crate::ticks::NAMES[k], r[k])).collect::<Vec<_>>().join(" "));
         }
+        // 試作 `ENOMOTO_MIP_GEN_LAZY` の数 (詳しい表示でなくても診断 `ENOMOTO_MIP_DIAG_GENLAZY` なら出す。計測の台本が拾う)
+        if genlazy::on() && !self.params.verbose && env_str!("ENOMOTO_MIP_DIAG_GENLAZY").is_some() && self.gen_lazy_stats[0] > 0 && !self.params.submip {
+            self.gen_lazy_report();
+        }
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds, rejected as numerically unreliable {})", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings, self.proof_numeric_rejects);
             if proof_verify() {
@@ -25458,6 +25535,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if clq_lazy_on() && self.clq_lazy_stats[0] > 0 {
                 let s = self.clq_lazy_stats;
                 eprintln!("MIP: CLQ_LAZY stats tid {}: dropped {} checks {} restored {} resolves {} still dropped {}", self.pool_tid, s[0], s[1], s[2], s[3], self.clq_lazy.len());
+            }
+            if genlazy::on() && self.gen_lazy_stats[0] > 0 {
+                self.gen_lazy_report();
             }
             if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() || self.tree_sep {
                 eprintln!("MIP: adaptive node cuts: rounds {} effective {} skipped {} (rate {:.3}), node cut secs {:.2}, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 {:?}, cut nnz {:?} (rows mean {:.1})", self.nca_stats[0], self.nca_stats[1], self.nca_stats[2], self.nca_ema, self.node_cut_secs, self.nca_hist, self.nca_cut_nnz, self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / self.p.m.max(1) as f64);
