@@ -595,7 +595,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cut_clique_adj: std::collections::HashMap<u32, Vec<u32>>,
     /// `ENOMOTO_MIP_CLIQUE_CUTS=auto` の判定 (根で一度だけ試す。`None` は未判定)。
     pub(super) clique_auto: Option<bool>,
-    /// 試作 `ENOMOTO_MIP_CLIQUE_CUTS=sigmoid`・`sigmoid_a` の割合 f (根の clique カットの 1 ラウンドの本数の上限を f x `ENOMOTO_T_MIP_CLIQUE_MAX` にする。
+    /// `ENOMOTO_MIP_CLIQUE_CUTS=sigmoid` (既定)・`sigmoid_a` の割合 f (根の clique カットの 1 ラウンドの本数の上限を f x `ENOMOTO_T_MIP_CLIQUE_MAX` にする。
     /// `None` は未計算。[`Solver::clique_sig_init`])
     pub(super) clique_sig: Option<f64>,
     /// ヒューリスティクスに使った LP 反復数。

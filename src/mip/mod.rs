@@ -2719,11 +2719,13 @@ fn postsolve_diag(p: &MipProblem, prob: &MipProblem, xr: &[f64], x: &[f64], post
     }
 }
 
-/// `ENOMOTO_MIP_SYM_TWINS` (試作): 対称性の検出の前に同じ列 (双子、[`symmetry::twin_classes`]) を列のハッシュで見つけ、
+/// `ENOMOTO_MIP_SYM_TWINS`: 対称性の検出の前に同じ列 (双子、[`symmetry::twin_classes`]) を列のハッシュで見つけ、
 /// 探索ではその組を探さない。探索で見つけた生成元が動かさない双子の組は 1 列に併合し (後処理の `ParallelCol`)、動かす組
 /// (より大きな対称性の一部) は隣どうしの入れ替えを生成元に足して対称性の扱いに回す。
+///
+/// **cand1119 (2026-11-17、analysis/treeclose_20261114.md 9.74 節) で既定にした。`0`・`off` で以前の動き (使わない)。**
 pub(crate) fn sym_twins() -> bool {
-    env_str!("ENOMOTO_MIP_SYM_TWINS").is_some()
+    env_def!("ENOMOTO_MIP_SYM_TWINS", "1").is_some()
 }
 
 /// 既定 (2026-10-29、`ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE` で止める): 双子の組 ([`symmetry::twin_classes`]) を併合せず、探索で見つけた生成元が動かさない

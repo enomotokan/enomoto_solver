@@ -1986,3 +1986,15 @@ cargo test 416 通過、clippy の警告の数は変わらず。
   種 2 は 519 → 550 秒)。supportcase33 0.81・irp 0.67 は速く、kasai 1.45 (164 → 310・187 → 209 秒) は遅い (どれも揺れの大きい問題)。
 - 見立て: tbfp-network の根の段は手元の 1 回で 31 秒縮んだが、全体の時間には出ない (最適解を見つける時刻と根の段の揺れのほうが大きい、9.66 節)。
   P は中立で、効く問題が見えない。**採用の根拠はない**ので試作のまま残すのが妥当 (判断は親)。
+
+### 9.74 cand1119 を既定にする (利用者の判断、2026-11-17)
+
+- 既定にしたもの (コードの既定値を書き換え): クリークのカットの使い方 `ENOMOTO_MIP_CLIQUE_CUTS` の既定を `fallback` → **`sigmoid`**、係数
+  `ENOMOTO_T_MIP_CLIQUE_SIG_A` 10 → **1.8**・`ENOMOTO_T_MIP_CLIQUE_SIG_B` 0.5 → **0.41** (試作 `sigmoid_a` と共有)、双子の併合
+  **`ENOMOTO_MIP_SYM_TWINS`**、カットの選び方の下見の手間の見込み **`ENOMOTO_MIP_CUTSEL_PROBE_AFFORD`** (9.64・9.68 節)。
+- 戻し方: `ENOMOTO_MIP_CLIQUE_CUTS=fallback`・`ENOMOTO_MIP_SYM_TWINS=0`・`ENOMOTO_MIP_CUTSEL_PROBE_AFFORD=0` で cand1118 の動き (係数は `fallback` では使わない)。
+- 採否の根拠 (`cand1119_20261117`、親の集計): P (58 問) **−2.9% [−8.1%, +1.5%]**、解けた数 319 → 319。csched008 などの遅れは揺れ
+  (根の段は既定と同じで根の下界 171・木に入る時刻 12 秒、手元の 5 形の比べ)。supportcase33 はシグモイドで約 1.3 倍遅い既知の弱点 (rootgap の clq の README)。
+  mzzv11 が 3 種とも解ける。
+- cargo test 416 通過、clippy の警告の数は変わらず (767)。確かめの台本 `cand1119_default_20261117/` (P 58 問 × 種 1 × {def_t1, c1119_t1, def, rev}、
+  60 秒、6 分担、`python run.py P K`、集計 `python check.py > check.txt`)。手元: misc07 は def_t1・c1119_t1・rev とも 11537 節点で一致。
