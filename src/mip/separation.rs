@@ -1413,8 +1413,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for rr in remove.iter_mut().skip(m0) {
             *rr = true;
         }
+        let t_rounds = t0.elapsed().as_secs_f64();
         self.lp.delete_rows(&remove);
         self.lp.restore_state(&st0);
+        // 診断 `ENOMOTO_MIP_DEBUG_CUTSEL_PROBE` (treeclose 9.64 節): 比べの 1 回の壁時計の内訳 (ラウンド、行を消して状態を戻す所)
+        if env_str!("ENOMOTO_MIP_DEBUG_CUTSEL_PROBE").is_some() {
+            eprintln!("MIP: CUTSEL_PROBE_DIAG: pool {pool} k {k}: rounds {} in {t_rounds:.2}s (last el {:.2}), restore {:.2}s", hist.len(), hist.last().map_or(0.0, |h| h.1), t0.elapsed().as_secs_f64() - t_rounds);
+        }
         (self.cutsel_best, self.cutsel_factor) = keep_sel;
         self.rng = keep_rng;
         (self.tab_memo, self.tab_memo_mode, self.tab_memo_stats, self.tab_calls, self.tab_tries) = keep_tab;
@@ -2341,6 +2346,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         (hd, nd, hp, np, ed, ep) = (hd2, nd2, hp2, np2, ed2, ep2);
                         early = if hd.len().min(hp.len()) < r2 { "tie, stopped early" } else { "tie" };
+                    } else if first_ok
+                        && env_str!("ENOMOTO_MIP_CUTSEL_PROBE_AFFORD").is_some()
+                        && (hd[0].1 + hp[0].1) * k as f64 > deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f64()
+                    {
+                        // 試作 `ENOMOTO_MIP_CUTSEL_PROBE_AFFORD` (treeclose 9.64 節、既定では使わない): 1 ラウンド目の両側の時間から、k ラウンドの比べが
+                        // 残りの予算に収まらないと見込めるときは、1 ラウンド目の値で決める (tbfp-network: 1 ラウンド 3〜6 秒、k ラウンドの比べに 31 秒使い、
+                        // 片側が早く止まって結局 1 ラウンド目の値で比べていた)
+                        early = "unaffordable";
+                    } else if env_str!("ENOMOTO_MIP_CUTSEL_PROBE_POOLFIRST").is_some() {
+                        // 試作 `ENOMOTO_MIP_CUTSEL_PROBE_POOLFIRST` (treeclose 9.64 節、既定では使わない): k ラウンドの比べで POOL の側を先に回し、
+                        // 既定の側は POOL の側のラウンド数を超えたら (比べに使えないので) 止める。比べは両方がそろったラウンド数の値で行うので、
+                        // 既定の側だけ先に k ラウンド回すと、POOL の側が早く止まったときに余りが無駄になる (tbfp-network: 既定の側 5 ラウンド 31.6 秒、
+                        // POOL の側 1 ラウンドで止まり、比べは 1 ラウンド目の値)
+                        let (hp2, np2, ep2) = self.probe_cut_mode(true, k, deadline, &never, keep);
+                        let hp_ref = hp2.clone();
+                        let stop = move |r: usize, g: f64, t: f64| r + 1 >= hp_ref.len() || decisive((g, t), hp_ref[r]);
+                        let (hd2, nd2, ed2) = self.probe_cut_mode(false, k, deadline, &stop, keep);
+                        for e in [ed.take(), ep.take()].into_iter().flatten() {
+                            to_pool.extend(e.rows.into_iter().map(|(c, _, r)| (c, r)));
+                        }
+                        (hd, nd, hp, np, ed, ep) = (hd2, nd2, hp2, np2, ed2, ep2);
+                        early = if hd.len() < k { "default stopped early" } else { "full" };
                     } else {
                         let (hd2, nd2, ed2) = self.probe_cut_mode(false, k, deadline, &never, keep);
                         let hd_ref = hd2.clone();
