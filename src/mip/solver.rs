@@ -21759,6 +21759,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if label == super::heur_subfix::SUBFIX_PAR_LABEL && infeasible && r.nodes <= 1 && !self.params.submip {
                         self.subfix_retry.push(fr);
                     }
+                    // 試作 `ENOMOTO_MIP_PRIMAL` の `r` (C2、[`super::heuristics::primal`]): 並列の暫定解なしの RENS が根で実行不能なら同じくやり直す
+                    if super::heuristics::primal('r') && label == "RENS" && infeasible && r.nodes <= 1 && !self.params.submip && self.nodes <= 1 {
+                        self.subfix_retry.push(fr);
+                    }
                 }
                 // 試作 `ENOMOTO_MIP_GAP4` の `k`: 根の並列の locks のサブ MIP が根で実行不能なら、主のスレッドでやり直す印 ([`Self::locks_retry`])
                 if label == "locks" && infeasible && r.nodes <= 1 && !self.params.submip && self.nodes <= 1 && gap4('k') {

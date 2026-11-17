@@ -55,6 +55,23 @@ pub(super) fn submip_trace_begin(parent: &str, kind: &str, caller_node: u64, nfr
     (id, prev)
 }
 
+/// 試作 `ENOMOTO_MIP_PRIMAL=<文字>` (調べ C、analysis/primal_20261117、既定では使わない): 解の見つけ方。
+/// - `r` (C2): 外側の根の暫定解なしの RENS (並列のサブ MIP) が根 (1 ノード以下) で実行不能なら、受け取りの後に主のスレッドで固定率を半分にした
+///   ダイブでやり直す ([`super::heur_subfix`] の `p` と同じやり直し)
+/// - `i` (C2): 外側の根の RINS で暫定解が悪い (間隙が大きい) なら、一致する列の固定を目標の固定率で止める
+/// - `c` (C3): 暫定解がない (か悪い) まま根のカットのループの LP の反復が根の LP の k 倍を超えたら、その時点の LP 解で RENS を 1 回回す
+///   ([`super::separation`] の根のカットのループ)
+/// - `x` (C4): 外側の根の被約費用のサブ MIP の時間を根の時間の何倍かで切る
+pub(crate) fn primal(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_PRIMAL").unwrap_or("").to_string()).contains(c)
+}
+
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_PRIMAL` の `x`: 今出すサブ MIP の時間の上限 (秒)
+    static PRIMAL_TIME_CAP: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
 thread_local! {
     /// 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE` のログ `SMT ...`): このスレッドで解いているサブ MIP の番号の道筋 (`M` は外側の求解、
     /// `M/3/7` は 3 番のサブ MIP の中の 7 番)。並列のサブ MIP のスレッドは出した側の道筋を受け継ぐ
@@ -1603,6 +1620,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             time_limit
         };
+        // 試作 `ENOMOTO_MIP_PRIMAL` の `x` (C4): 根の被約費用のサブ MIP の時間の上限 ([`Self::root_reduced_cost`])
+        let time_limit = match PRIMAL_TIME_CAP.with(|c| c.get()) {
+            Some(c) => time_limit.min(c),
+            None => time_limit,
+        };
         // 試作 `ENOMOTO_MIP_ROOTCAP` の `h` ([`super::solver::rootcap`]): 外側の根のヒューリスティクスの間は、1 本の上限と全体の期限までにする
         let time_limit = match self.rootcap_left().filter(|_| !self.params.submip && self.snap.is_none() && self.nodes <= 1) {
             Some(l) => time_limit.min(l.max(0.05)),
@@ -2616,6 +2638,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP:   RENS: {added} cuts added to the sub-MIP");
             }
         }
+        // 試作 `ENOMOTO_MIP_PRIMAL` の `r` (C2): 外側の根の RENS を並列のサブ MIP で出すとき、固定率を受け取りに渡す (根で実行不能なら
+        // 受け取りの後に主のスレッドで固定率を半分にしてやり直す。[`super::solver::Solver::subfix_par_retry`])
+        if primal('r') && inc.is_none() && self.nodes <= 1 && !self.params.submip && self.parallel_submips {
+            self.submip_fix_rate = Some(fr);
+        }
         let r = self.solve_submip_problem(sub, 500, None);
         // 近さの指標 ([`Solver::heur_close`]): 固定率。サブ MIP が実行不能なら 0、制限で止まったら半分
         self.heur_close = match r {
@@ -3021,7 +3048,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SUBA_RATE` の `i`・`t` ([`suba_rate`]): 一致する列の固定を乱数の順に目標の固定率で止める
         let suba = !self.params.submip && if self.nodes <= 1 { suba_rate('i') } else { suba_rate('t') };
         let suba_target = suba.then(|| self.target_fix_rate());
-        if suba {
+        // 試作 `ENOMOTO_MIP_PRIMAL` の `i` (C2、[`primal`]): 外側の根の RINS で、暫定解と根の LP の値の差 / max(1, |暫定解|, |LP|) が
+        // `ENOMOTO_T_MIP_PRIMAL_RINS_GAP` (0.5) を超える (暫定解が悪い) なら、一致する列の固定を乱数の順に `ENOMOTO_T_MIP_PRIMAL_RINS_CAP` (0.7) で止める
+        // (satellites2-60-fs: 暫定解 1・LP −29 で一致による固定率 0.94 のサブ MIP が暫定解 1 を返すだけ。analysis/primal_20261117)
+        let pcap = (primal('i') && !self.params.submip && self.nodes <= 1 && !suba)
+            .then(|| {
+                let z = self.incumbent.as_ref().map(|(z, _)| *z)?;
+                let lp = self.lp.objective();
+                ((z - lp).abs() / z.abs().max(lp.abs()).max(1.0) > tunable!("ENOMOTO_T_MIP_PRIMAL_RINS_GAP", 0.5, f64)).then(|| tunable!("ENOMOTO_T_MIP_PRIMAL_RINS_CAP", 0.7, f64))
+            })
+            .flatten();
+        let suba_target = suba_target.or(pcap);
+        if suba || pcap.is_some() {
             self.shuffle_fixes(&mut fixes);
         }
         let agree = fixes.clone();
@@ -3544,6 +3582,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (矛盾する固定は飛ばす)。整数列の固定率が 5 割に達したら止め、3 割に届かなければ何もしない。残った問題を
     /// サブ MIP として解く。LP は根の最適解の状態で呼ぶ。
     pub(super) fn root_reduced_cost(&mut self) -> bool {
+        let p = self.p;
+        // 試作 `ENOMOTO_MIP_PRIMAL` の `x` (C4、[`primal`]): 外側の根の被約費用のサブ MIP の時間を、根の時間 (外側の求解の始めから最初の
+        // 根のヒューリスティクスまで) の `ENOMOTO_T_MIP_PRIMAL_RRC_MULT` (0.5) 倍、最低 `ENOMOTO_T_MIP_PRIMAL_RRC_MIN` (5) 秒までにする
+        if primal('x') && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
+            let cap = tunable!("ENOMOTO_T_MIP_PRIMAL_RRC_MIN", 5.0, f64).max(tunable!("ENOMOTO_T_MIP_PRIMAL_RRC_MULT", 0.5, f64) * super::solver::subcap_root_secs());
+            PRIMAL_TIME_CAP.with(|c| c.set(Some(cap)));
+            let r = self.root_reduced_cost_inner();
+            PRIMAL_TIME_CAP.with(|c| c.set(None));
+            return r;
+        }
+        self.root_reduced_cost_inner()
+    }
+
+    fn root_reduced_cost_inner(&mut self) -> bool {
         let p = self.p;
         if self.params.submip && !self.submip_nested('x') {
             return false;

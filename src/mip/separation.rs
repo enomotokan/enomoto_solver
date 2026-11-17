@@ -1569,6 +1569,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.clique_sig_score();
         }
         let mut clique_sig_adapt = clique_cuts_mode() == Some("sigmoid_a") && !self.params.submip && self.params.restarts == 0;
+        // 試作 `ENOMOTO_MIP_PRIMAL` の `c` (C3、[`super::heuristics::primal`]): 外側の主の根のループで 1 回だけ
+        let mut primal_mid = super::heuristics::primal('c') && !self.params.submip && self.params.restarts == 0 && self.snap.is_none();
         // `fallback`: ループの後で判定する ([`Self::clique_fallback_trial`])。再スタートの後は最初の求解の判定を引き継ぐ
         let mut clique_fb = clique_cuts_mode() == Some("fallback") && self.clique_auto.is_none() && !self.params.submip;
         if clique_fb && self.params.restarts > 0 {
@@ -2569,6 +2571,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if h.len() >= 2 { h[h.len() - 2] } else { first_obj }
                 });
                 self.clique_sig_adapt(root_iters, prev);
+            }
+            // 試作 `ENOMOTO_MIP_PRIMAL` の `c` (C3): 暫定解がない (FJ の質の悪い解だけか、暫定解と LP の値の差 / max(1, |暫定解|) が
+            // `ENOMOTO_T_MIP_PRIMAL_MID_GAP` (0.1) を超える) まま、このループの LP の反復が根の LP の反復の `ENOMOTO_T_MIP_PRIMAL_MID_K` (5) 倍
+            // (最低 `ENOMOTO_T_MIP_PRIMAL_MID_MIN_ITERS` (2000) 反復) を超えたら、今の LP 解で RENS を 1 回、主のスレッドで回す (HiGHS は根の
+            // 分離のラウンドの合間に RENS を回し、neos-873061 では 40 秒・neos-3216931-puriri では 55 秒に最初の良い解を出す。当方はループの後)
+            if primal_mid && job.is_none() && round >= 1 {
+                let need = (tunable!("ENOMOTO_T_MIP_PRIMAL_MID_K", 5.0, f64) * root_iters as f64).max(tunable!("ENOMOTO_T_MIP_PRIMAL_MID_MIN_ITERS", 2000.0, f64));
+                let obj = self.lp.objective();
+                let poor = match self.incumbent.as_ref() {
+                    None => true,
+                    Some((z, _)) => self.fj_poor() || (z - obj) / z.abs().max(1.0) > tunable!("ENOMOTO_T_MIP_PRIMAL_MID_GAP", 0.1, f64),
+                };
+                if loop_iters as f64 > need && poor {
+                    primal_mid = false;
+                    let x = self.lp.col_values();
+                    let (keep_done, keep_par) = (self.noinc_rens_done, self.parallel_submips);
+                    self.parallel_submips = false;
+                    let t0 = std::time::Instant::now();
+                    let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
+                    let found = self.rens(&x);
+                    (self.noinc_rens_done, self.parallel_submips) = (keep_done, keep_par);
+                    if self.params.verbose {
+                        eprintln!(
+                            "MIP: cut round {round}: PRIMAL c: RENS in the cut loop (loop LP {loop_iters} iters > {need:.0}): found {found}, incumbent {z0:?} -> {:?} ({:.2}s)",
+                            self.incumbent.as_ref().map(|(z, _)| *z),
+                            t0.elapsed().as_secs_f64()
+                        );
+                    }
+                }
             }
             let fb_early = tunable!("ENOMOTO_T_MIP_CLIQUE_FB_EARLY", 0usize, usize);
             if clique_fb && fb_early > 0 && round == fb_early && job.is_none() && self.lp.objective() - first_obj <= 1e-9 * self.lp.objective().abs().max(1.0) {
