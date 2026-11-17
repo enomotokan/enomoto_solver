@@ -42,3 +42,24 @@ sat_rens の形の乱数問題 (`analysis/dualfree_20261117/gen.py`) で、HiGHS
 
 → 案: 既定にするなら rtc (`PROP_RELTOL_CONT = 1e-10`)。整数最適化の前処理の連続列だけに効き、整数列の締めは変えない
 (LP の前処理では整数の印がないので全列にかかる点に注意。LP の計測は別に要る)。既定に入れるかは P/M の計測の後で判断。
+
+## 5. P/M の計測 (def / rtc、`plan_pm.py 3 12`)
+
+同じ (問題, 種) の 2 設定は同じ分担で続けて解く (順は種で入れ替える)。4 スレッド。`cfg.py` の rtc = `ENOMOTO_T_PROP_RELTOL_CONT=1e-10`。
+- P: 58 問 × 種 1〜3、60 秒、3 分担 (計 348 回、見積り各約 0.92 時間): `python analysis/proptol_20261117/run.py PX K` (K = 0〜2)
+- M: analysis/pcd_20261117 の M と同じ 26 問 × 種 1・2、600 秒、12 分担 (計 104 回、見積り各 0.93〜0.99 時間):
+  `python analysis/proptol_20261117/run.py MX K` (K = 0〜11)
+- 準備は analysis/pcd_20261117/README.md と同じ (venv・maturin develop・probs.py)。終わったら `res_PX_sK.jsonl`・`res_MX_sK.jsonl` をコミットして push。
+- 集計: `python summ.py PX > summ_PX.txt`・`python summ.py MX > summ_MX.txt`・`python summ.py PXMX > summ_PXMX.txt`。
+
+## 6. LP の計測 (LP の前処理には整数の印がないので、rtc の閾値が全列にかかる)
+
+既存の A/B の台本 `scripts/ab_bench.py` (NETLIB の問題を 2 つの腕で交互に解き、時間の中央値と状態・目的値の違いを出す) を、同じ python で
+片方にだけ環境変数を付けて回す。NETLIB は `python scripts/setup_netlib_data.py` で一度取得する (docs/netlib-data.md)。
+
+```bash
+python scripts/setup_netlib_data.py
+python scripts/ab_bench.py --base .venv/bin/python --new .venv/bin/python --new-env ENOMOTO_T_PROP_RELTOL_CONT=1e-10 \
+    --rounds 3 --out analysis/proptol_20261117/ab_lp.json > analysis/proptol_20261117/ab_lp.txt
+```
+1 分担。状態・目的値の違い (台本が出す) が 0 で、時間の中央値の比に目立つ悪化がないことを見る。
