@@ -1,0 +1,44 @@
+diff --git a/highs/presolve/HPresolve.cpp b/highs/presolve/HPresolve.cpp
+index 4c20fac..fa9b3a3 100644
+--- a/highs/presolve/HPresolve.cpp
++++ b/highs/presolve/HPresolve.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -6685,6 +6686,8 @@ HPresolve::Result HPresolve::removeDependentFreeCols(
+   //  return Result::kOk;
+ }
+ 
++
++static bool aggLogOn() { static int v = std::getenv("HIGHS_AGG_LOG") ? 1 : 0; return v; }
+ HPresolve::Result HPresolve::aggregator(HighsPostsolveStack& postsolve_stack) {
+   assert(analysis_.allow_rule_[kPresolveRuleAggregator]);
+   const bool logging_on = analysis_.logging_on_;
+@@ -6749,6 +6752,12 @@ HPresolve::Result HPresolve::aggregator(HighsPostsolveStack& postsolve_stack) {
+     // in the case where the row has length two or the column has length two
+     // we always do the substitution since the fillin can never be problematic
+     if (rowsize[row] == 2 || colsize[col] == 2) {
++    if (aggLogOn()) {
++      fprintf(stderr, "AGGLOG row %d col %d origrow %d origcol %d eq %d rowsize %d colsize %d int %d lb %.6g ub %.6g impl %.6g %.6g rowlo %.6g rowup %.6g dual %.6g %.6g cost %.6g\n",
++              (int)row, (int)col, (int)postsolve_stack.getOrigRowIndex(row), (int)postsolve_stack.getOrigColIndex(col), (int)isEquation(row), (int)rowsize[row], (int)colsize[col],
++              (int)(model->integrality_[col] == HighsVarType::kInteger), model->col_lower_[col], model->col_upper_[col], implColLower[col], implColUpper[col],
++              model->row_lower_[row], model->row_upper_[row], implRowDualLower[row], implRowDualUpper[row], model->col_cost_[col]);
++    }
+       storeRow(row);
+       substituteFreeCol(postsolve_stack, row, col, true);
+       substitutionOpportunities[i].first = -1;
+@@ -6788,6 +6797,12 @@ HPresolve::Result HPresolve::aggregator(HighsPostsolveStack& postsolve_stack) {
+     }
+ 
+     nfail = 0;
++    if (aggLogOn()) {
++      fprintf(stderr, "AGGLOG row %d col %d origrow %d origcol %d eq %d rowsize %d colsize %d int %d lb %.6g ub %.6g impl %.6g %.6g rowlo %.6g rowup %.6g dual %.6g %.6g cost %.6g\n",
++              (int)row, (int)col, (int)postsolve_stack.getOrigRowIndex(row), (int)postsolve_stack.getOrigColIndex(col), (int)isEquation(row), (int)rowsize[row], (int)colsize[col],
++              (int)(model->integrality_[col] == HighsVarType::kInteger), model->col_lower_[col], model->col_upper_[col], implColLower[col], implColUpper[col],
++              model->row_lower_[row], model->row_upper_[row], implRowDualLower[row], implRowDualUpper[row], model->col_cost_[col]);
++    }
+     substituteFreeCol(postsolve_stack, row, col, true);
+     substitutionOpportunities[i].first = -1;
+     HPRESOLVE_CHECKED_CALL(removeRowSingletons(postsolve_stack));
