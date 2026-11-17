@@ -188,3 +188,36 @@
 - 正しさ: cargo test 419 通過、fuzz 1500 問 (`ENOMOTO_T_MIP_SUBWAIT=0.001`・`_MIN=0`) bad 0。
 - 対の比べ (cfg の `sw` = k=0.5): P `python run.py PSW K` (K=0〜3、各約 0.75 時間)、M `python run.py MSW K` (K=0〜11、各約 1.4 時間)、
   集計 `python summ.py PSW sw`・`python summ.py MSW sw`。分担表は `python plan.py 12 4 sw` で作ったもの。
+
+## 9. 同じ点での分離の比べと試作 `ENOMOTO_MIP_VB_IMPL` (unitcal_7、親の指示 (2)、既定は変えない)
+
+- 道具: 計装版 HiGHS に各ラウンドの LP 解の書き出し (`HIGHS_CUTSRC_XDUMP`、`hcutsrc.patch` に追記予定の差分は下の注) を足し、当方には診断
+  `ENOMOTO_MIP_DEBUG_SEP_AT=<接頭辞>` (外側の最初の根の 0 ラウンド目に `<接頭辞>_r<k>.txt` の点で分離器を回し、候補を `<接頭辞>_e<k>.txt` に書く。
+  動きは変えない) を足した。`sepat_cmp.py` は、HiGHS がその時点までに出したカットを足した LP に、(a) HiGHS が次のラウンドに出したカット、
+  (b) 同じ点での当方の候補、をさらに足したときの LP の伸びを比べる (HiGHS の前処理後の問題)。
+- 結果 (経路のカットだけの LP の伸び): 点 0 (HiGHS 1 ラウンド目の後) HiGHS +4725・当方 +7675、点 2 HiGHS +13.8k・当方 +6174、点 7 HiGHS +1977・当方 +582、
+  点 11 HiGHS +945・当方 +214。当方の候補は破る量の和はむしろ大きいのに LP を押し上げない。カットの形は HiGHS が 1 本あたり 0-1 列が 1.3〜1.6 本多く
+  連続列が少ない (点 2: 0-1 列 3.46 対 2.18、連続列 7.90 対 8.68)。
+- 原因: 当方の経路の集約は連続列を置き換える変数上下限 (VUB/VLB) を「連続 1 列 + 整数 1 列」の 2 項の行からだけ作り、プロービングで得た含意
+  (`p.implied_bounds`、unitcal_7 で 50 万本) を使わない。HiGHS はプロービングで学んだ変数上下限も `HighsTransformedLp` の置き換えに使う。
+- **試作 `ENOMOTO_MIP_VB_IMPL=1`**: プロービングの含意 `y = v ⇒ x_k <= b` / `x_k >= b` (y は 0-1 列、x_k は連続列) を VUB/VLB にも足す
+  (列ごと最大 `ENOMOTO_T_MIP_VB_IMPL_MAX` = 8 本。unitcal_7 で 74508 本)。同じ点での経路のカットの伸びは点 2 で +6174 → +7761、点 7 で +582 → +1228。
+- 根だけ (元の問題): 既定 1.95670e7 → VB_IMPL 1.95983e7、+ implied bound も選択に通す・`MIN_REL=0.1`・200 本・60 ラウンド・第 2 段階 (vbis) 1.96003e7
+  (HiGHS 1.9608〜1.9610e7)。根の下界の差の約 8 割を埋める。
+- 600 秒 (秒、種 1・種 2):
+
+| 形 | 種 1 | 種 2 |
+|---|---|---|
+| 既定 | 301.6 | 220.1 |
+| vb (VB_IMPL だけ) | 381.2 (主の木 1467 ノード) | 533.3 (4016) |
+| vbsel (VB_IMPL + IMPLBD_SELECT) | 275.6 | 270.7 |
+| **vbis** | **218.2** (738) | **153.4** (588) |
+| HiGHS | 186.2 | 202.8 |
+
+- VB_IMPL だけでは LP のカット行が増え (2700 行) 木が重くなる。vbis は LP のカット行が約半分 (1300〜1400 行) で、主の木のノードも少ない。
+  unitcal_7 は回ごとのゆれが大きい (既定でも 220〜368 秒) ので 2 種では確定ではない。
+- 正しさ: cargo test 419 通過 (既定)、vbis の設定で `mip_fuzz_vs_highs.py 1500 9000` bad 0・`mip_fuzz_fixed_charge.py 400 0` bad 0。
+- 対の比べ (cfg の `vbis`): P `python run.py PVBIS K` (K=0〜3、各約 0.75 時間)、M `python run.py MVBIS K` (K=0〜11、各約 1.4 時間)、
+  集計 `python summ.py PVBIS vbis`・`python summ.py MVBIS vbis`。
+- 注: HiGHS 側の LP 解の書き出しは scratchpad のソースに当てた追加の差分 (`HighsSeparation.cpp` の CUTSRC の行の後で `HIGHS_CUTSRC_XDUMP` のとき
+  `lp->getSolution().col_value` を `<接頭辞>_r<ラウンド>.txt` に書く) で、`hcutsrc.patch` に反映済み。
