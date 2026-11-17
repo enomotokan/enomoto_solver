@@ -1,0 +1,82 @@
+== fuzz_tiny: env ENOMOTO_MIP_REL_GAP=1e-9 .venv/bin/python benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0
+rc=0
+bad 0 of 400 time 2.7 (strict 17: 値の一致だけの以前の判定)
+== fuzz_highs: env ENOMOTO_MIP_REL_GAP=1e-9 .venv/bin/python scripts/mip_fuzz_vs_highs.py 300
+rc=0
+bad 0 of 300 time 5.0
+== fuzz_objint: .venv/bin/python analysis/objint_20261112/fuzz_objint.py 1000 0
+rc=0
+bad 0 of 1000 status {'optimal': 967, 'infeasible': 33} with nodes>0 311 new step 71 new step and nodes>0 3 c range with width 27 c and nodes>0 6 time 63.9
+== fuzz_slack: .venv/bin/python analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 0
+rc=0
+done 1000 (seeds 0..999): mismatches 0, HiGHS statuses {'Infeasible': 614, 'Optimal': 268, 'Primal infeasible or unbounded': 115, 'Unbounded': 3}
+== fuzz_tiny2: env ENOMOTO_MIP_REL_GAP=1e-9 .venv/bin/python benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 1000
+rc=0
+bad 0 of 400 time 2.8 (strict 15: 値の一致だけの以前の判定)
+== fuzz_objint2: .venv/bin/python analysis/objint_20261112/fuzz_objint.py 1000 5000
+rc=0
+bad 0 of 1000 status {'optimal': 971, 'infeasible': 29} with nodes>0 303 new step 75 new step and nodes>0 5 c range with width 27 c and nodes>0 2 time 63.0
+== fuzz_slack2: .venv/bin/python analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 5000
+rc=0
+done 1000 (seeds 5000..5999): mismatches 0, HiGHS statuses {'Infeasible': 655, 'Unbounded': 3, 'Primal infeasible or unbounded': 102, 'Optimal': 240}
+== dfi_def_0: .venv/bin/python analysis/dualfree_20261117/fuzz.py 10000 0 off
+rc=0
+seed 941 highs Optimal 4054.302820941157 ours optimal 4181.150796920854 最適値
+seed 1668 highs Optimal -19.99326182616243 ours optimal -19.993288513893116 最適値
+seed 2667 highs Optimal 0.009726176100895035 ours optimal 0.009724569508291259 最適値
+seed 4609 highs Optimal -13.657859205581746 ours optimal -13.657882180740698 最適値
+seed 4855 highs Optimal 80986.60014213776 ours optimal 80967.73150576916 最適値
+seed 4943 highs Optimal -2.2159207422924867 ours optimal -2.2159252592038285 最適値
+seed 5292 highs Solve error 0.0 ours optimal -1850.907745750329 
+seed 5679 highs Optimal -2.302665567778334 ours optimal -2.3026753816214747 最適値
+seed 6122 highs Optimal 1.290359665478099 ours optimal 1.2903507515755193 最適値
+seed 6589 highs Optimal 0.8109777417981905 ours optimal 0.8109757343918451 最適値
+seed 6829 highs Optimal -4.893646525996676 ours optimal -4.893667523236915 最適値
+seed 7032 highs Optimal 234990.39496411695 ours optimal 234973.611744844 最適値
+seed 7562 highs Optimal -0.1343597893913187 ours optimal -0.13436260318030135 最適値
+seed 8693 highs Solve error 0.0 ours optimal 22879.19191240807 
+seed 8780 highs Optimal -0.1573640785633157 ours optimal -0.11326503757856554 最適値
+bad 15 of 10000 HiGHS の状態 {'optimal': 9998, 'Solve error': 2} time 106.4
+== dfi_pcd_0: env ENOMOTO_AGG_PIVOT_COL=1 .venv/bin/python analysis/dualfree_20261117/fuzz.py 10000 0
+rc=0
+seed 286 highs Optimal -1.9291199577729514 ours optimal -1.9291233611821244 最適値
+seed 941 highs Optimal 4054.302820941157 ours optimal 4181.150796920855 最適値
+seed 2667 highs Optimal 0.009726176100895035 ours optimal 0.009724569508291259 最適値
+seed 4609 highs Optimal -13.657859205581746 ours optimal -13.657882180740698 最適値
+seed 4855 highs Optimal 80986.60014213776 ours optimal 80967.73150576914 最適値
+seed 4943 highs Optimal -2.2159207422924867 ours optimal -2.2159252592038285 最適値
+seed 5292 highs Solve error 0.0 ours optimal -1850.907745750329 
+seed 7032 highs Optimal 234990.39496411695 ours optimal 234973.611744844 最適値
+seed 7562 highs Optimal -0.1343597893913187 ours optimal -0.13436260318030135 最適値
+seed 8693 highs Solve error 0.0 ours optimal 22879.191912408067 
+seed 8780 highs Optimal -0.1573640785633157 ours optimal -0.11326503757856554 最適値
+seed 9271 highs Optimal -1288.3255368224015 ours optimal -1287.1242316497073 最適値
+bad 12 of 10000 HiGHS の状態 {'optimal': 9998, 'Solve error': 2} time 96.9
+== dfi_def_10000: .venv/bin/python analysis/dualfree_20261117/fuzz.py 10000 10000 off
+rc=0
+seed 11480 highs Infeasible inf ours optimal -19730.933305037313 
+seed 11988 highs Infeasible -17.2033975462621 ours optimal -12.203397546262098 
+seed 12020 highs Infeasible inf ours optimal -245330.17082012602 
+seed 13302 highs Solve error 0.0 ours optimal -97023.78966727277 
+seed 14600 highs Optimal 1.530106972705571 ours optimal 1.53010322324953 最適値
+seed 17087 highs Optimal -138.04812998565873 ours optimal -136.04813358555305 最適値
+seed 17394 highs Solve error 0.0 ours optimal 45356.470825353965 
+seed 17657 highs Optimal 21.655092123607925 ours optimal 13.660103058748302 最適値
+seed 18017 highs Optimal -19.147281894147714 ours optimal -19.142099474832428 最適値
+seed 18299 highs Optimal 1.619905233197929 ours optimal 1.6199015560205565 最適値
+bad 10 of 10000 HiGHS の状態 {'optimal': 9995, 'infeasible': 3, 'Solve error': 2} time 100.2
+== dfi_pcd_10000: env ENOMOTO_AGG_PIVOT_COL=1 .venv/bin/python analysis/dualfree_20261117/fuzz.py 10000 10000
+rc=0
+seed 11480 highs Infeasible inf ours optimal -19730.933305037313 
+seed 11988 highs Infeasible -17.2033975462621 ours optimal -12.20339754626115 
+seed 12020 highs Infeasible inf ours optimal -245330.17082012602 
+seed 12914 highs Optimal -3403.913998694036 ours optimal -3401.9139986940363 最適値
+seed 13302 highs Solve error 0.0 ours optimal -97023.78966727277 
+seed 17087 highs Optimal -138.04812998565873 ours optimal -136.04813358555305 最適値
+seed 17394 highs Solve error 0.0 ours optimal 45356.470825353965 
+seed 17657 highs Optimal 21.655092123607925 ours optimal 13.660103058748302 最適値
+seed 18017 highs Optimal -19.147281894147714 ours optimal -19.142099474832428 最適値
+bad 9 of 10000 HiGHS の状態 {'optimal': 9995, 'infeasible': 3, 'Solve error': 2} time 93.5
+== cargo test
+rc=0
+test result: ok. 419 passed; 0 failed; 19 ignored; 0 measured; 0 filtered out; finished in 2.19s
