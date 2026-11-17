@@ -3616,7 +3616,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): Local Branching・Proximity Search のサブ MIP が解を出さずに
         // 時間の上限で止まったら (n2seq36q では根の LP・カットを終える前に 5 秒で止まり続ける)、その腕の次の時間の上限を 2 倍にする
         // (最大 `ENOMOTO_T_MIP_MEMBQ_LNSGROW_MAX` (8) 倍)。Local Branching の近さ k は時間切れでは狭めない。既定では使わない
-        let grow = lnsgrow_on() && (arm == 1 || arm == 2);
+        let grow = (lnsgrow_on() && (arm == 1 || arm == 2)) || super::solver::heurgap('t');
         let (keep_max, keep_frac, keep_k) = (self.submip_time_max, self.submip_time_frac, self.lb_k);
         if grow {
             self.submip_time_max *= self.lns_grow[arm];
