@@ -1,4 +1,4 @@
-"""共有の診断の集計: python summ.py > summ.txt。問題・設定ごとに種 1・2 を並べ、時間 (時間切れは上限、* 付き)、節点 N、
+"""共有の診断の集計: python summ.py [SETS] > summ.txt (SETS は M・P・L の組、既定 MP。L は同じ機械での比べ)。問題・設定ごとに種 1・2 を並べ、時間 (時間切れは上限、* 付き)、節点 N、
 最後の木の lb≥opt の節点 (最終の暫定解で刈れた分)、木の段の 1 節点あたりのスレッド ms (4 × (T − R) / N)、潜りの LP の平均反復・ms、
 待ち行列・共有から取ったノードの割合を出し、最後に設定ごとに def との比 (時間・節点・1 節点の手間の幾何平均) をまとめる。"""
 import gzip, json, glob, math, re, collections
@@ -9,7 +9,8 @@ sys.path.insert(0, str(D))
 from cfg import CFG  # noqa: E402
 def solved(r): return (r["result"].get("status") or "").lower() in ("optimal", "infeasible")
 recs = {}
-for f in sorted(glob.glob(str(D / "res_*_s*.jsonl"))):
+SETS = sys.argv[1] if len(sys.argv) > 1 else "MP"
+for f in sorted(x for x in glob.glob(str(D / "res_*_s*.jsonl")) if Path(x).name.split("_")[1] in SETS):
     S = Path(f).name.split("_")[1]
     for l in open(f):
         if not l.strip(): continue
