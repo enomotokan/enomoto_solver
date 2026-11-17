@@ -167,6 +167,37 @@ impl LitConflictPool {
         true
     }
 
+    /// 試作 `ENOMOTO_MIP_TC` の `l` (treeclose 9.58 節): 全部の衝突を定義域 `dom` (大域的な境界の写し) で 1 巡見る。全部のリテラルが
+    /// 成り立つ衝突があれば `Err`、1 つだけ成り立たないものは、その否定を `out` に足す (年齢・統計は変えない)
+    pub fn scan_global(&self, p: &MipProblem, dom: &Domain, out: &mut Vec<(usize, bool, f64)>) -> Result<(), ()> {
+        for c in self.slots.iter().flatten() {
+            let mut open: Option<&Lit> = None;
+            let mut nopen = 0;
+            for lit in c {
+                if !holds(p, dom, lit) {
+                    nopen += 1;
+                    if nopen > 1 {
+                        break;
+                    }
+                    open = Some(lit);
+                }
+            }
+            match (nopen, open) {
+                (0, _) => return Err(()),
+                (1, Some(&(k, upper, v))) => {
+                    let int = p.is_int[k];
+                    if upper {
+                        out.push((k, false, if int { v.floor() + 1.0 } else { v }));
+                    } else {
+                        out.push((k, true, if int { v.ceil() - 1.0 } else { v }));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// 定義域の記録の位置 `start` より後に境界が変わった列を含む衝突で伝播する (固定点まで、各回の後に行の伝播も)。
     /// 矛盾なら `Err`、そうでなければ締めた境界の数。
     pub fn propagate(&mut self, p: &MipProblem, dom: &mut Domain, start: usize) -> Result<usize, ()> {
