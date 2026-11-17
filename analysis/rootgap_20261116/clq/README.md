@@ -19,3 +19,40 @@ python analysis/rootgap_20261116/clq/run.py P K     # または M K
 ```
 
 終わったら `res_<P|M>_sK.jsonl` (とログがあればそれも) をコミットして push する。集計は `python summ.py P > summ_P.txt`・`python summ.py M > summ_M.txt`。
+
+## 1. P・M (3 設定) の結果 (`summ_P.txt`・`summ_M.txt`)
+
+- P (58 問 × 種 4、60 秒): 解けた数 c18 179・root 177・marg 179 (232 組)、食い違い 0、crash 0。
+  root / c18 = +0.8% [−5.7%, +8.8%] (noswot が全種で 5.1 倍遅、10teams 0.45・physiciansched6-2 0.78)。
+  marg / c18 = +3.4% [+0.1%, +7.4%] (悪い)。
+- M (5 問 × 種 2、600 秒): 解けた数 c18 8・root 9・marg 8。root / c18 = −1.7% [−23.8%, +27.1%] (mzzv11 0.64、irp は全種で 1.52 倍遅)。
+
+## 2. シグモイドで割合を連続に決める形 (`ENOMOTO_MIP_CLIQUE_CUTS=sigmoid`・`sigmoid_a`、試作)
+
+使う・使わないの 2 択でなく、根の点数 s から f = 1 / (1 + exp(−a (s − b))) を求め、根の 1 ラウンドの clique カットを round(f × 100) 本までにする
+(0 本なら使わない。ノードでは使わない)。s は根の LP 解での 4 つの [0, 1] の量の平均
+(`src/mip/separation.rs` の `clique_sig_score`):
+- sp: 集合詰め込み・分割の形の行の割合
+- ed: 衝突グラフの辺の数 / 2 値列の数 (ln(1 + 辺/列) / ln 101、100 で 1)
+- fr: 分数の 2 値列のうち衝突グラフに辺を持つものの割合
+- vi: 破れる clique カットの数 (最大 100) / 100
+
+`sigmoid_a` (適応): 根の 3 ラウンド目の始めに、破れる clique カットだけを 1 回入れた LP の伸び g_c を直前のラウンドの伸び g_r と比べ
+(どちらも LP を 1 回解く仕事)、z = a (s − b) + β ln((g_c + ε) / (g_r + ε)) で f を決め直す (ln は ±5 で切る、β = 1)。
+
+a・b の合わせ方 (`sigfit.py` → `sigfit.txt`):
+- `sigfit_run.py`: 58 問 + mzzv11・irp・tbfp-network を c18 (fallback) と root で根まで (node_limit 1) 解き、根の下界・時間と s を `sigfit.jsonl` に。
+  根の下界の差での回帰は a = 3.16・b = 0.44 (当たり 9/15。差が出たのは 15 問だけ。多くは根で解けるか差が 1e-4 未満)。
+- 1 節の P・M の結果の時間の比 root / c18 (問題ごとの幾何平均) で y = 1 (< 0.87)・0 (> 1.15) とした回帰は a = 1.79・b = 0.41 (当たり 8/12)。
+  4 つの量ごとでは fr が最もよく (9/12) 、sp は逆向き (irp・mzzv42z は sp が大きいのに root で遅い)。
+- **s と得の関係は弱い**: root で速いのは qiu (s 0)・neos-960392・drayage-25-23・neos-911970・physiciansched6-2・10teams・mzzv11 (s 0.35〜0.78)、
+  遅いのは noswot (s 0.01)・pk1 (0)・qnet1 (0.32)・irp (0.57)・mzzv42z (0.78)。時間の比で合わせた a = 1.8・b = 0.41 を使う
+  (f は s = 0 で 0.32、s = 0.8 で 0.67 と緩い。本数を半分程度に絞る形に近い)。
+
+比べ (P2・M2。`cfg.py` の c18_sig・c18_siga だけを回し、c18・root は 1 節の P・M の結果を使う。別の機械の結果を並べるので機械の差が混ざる):
+- P2: 58 問 × 種 1〜4、60 秒、4 分担 (見積り各約 59 分): `python run.py P2 K` (K = 0〜3)
+- M2: 5 問 × 種 1・2、600 秒、2 分担 (見積り各約 52 分): `python run.py M2 K` (K = 0・1)
+- 集計: `python summ.py P2 > summ_P2.txt`・`python summ.py M2 > summ_M2.txt`
+
+tbfp-network は根の下界ではなく、解の見つけ方と被約費用の固定による再スタートの差 (rootgap の README の 2.3 節)。別の調べとして記録だけ残す
+(s 0.44、根の下界・時間は fallback と root で同じ)。
