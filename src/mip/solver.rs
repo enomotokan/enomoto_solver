@@ -11438,7 +11438,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: TREE_RESTART_INC2: node {} newly fixed {} of {} free at the root, left_ok {left_ok}, count ok {pr}, guard ok {gd}, restarts {} of {}", self.nodes, self.newly_fixed_ints(), self.p.nint.saturating_sub(self.root_fixed0), self.params.restarts, max_restarts(self.p));
                 }
                 // 試作 `ENOMOTO_MIP_RSTCRIT` の `t` ([`Self::rstcrit_tree_big`]): 縮みが大きければノード数の上限を見ない
-                if left_ok && (inc2 || self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) || self.treefix_restart_mode() || self.rstcrit_tree_big()) && self.proto_restart_ok(frac) && self.tree_restart_guard_ok(plunge.as_ref(), "inc") {
+                // INC2: 新たな固定が `ENOMOTO_T_MIP_TREE_RESTART_INC2_NOGUARD` (既定 0.25) 以上ならガードを見ない (ガード `R` は刈った重みの伸びで
+                // 木の残りを見積もるが、暫定解が良くなった直後は待ち行列を刈って重みが急に増え、残りを短く見誤る。tbfp-network は最適解の直後に
+                // 残り 5.9 秒と見て止めたが、実際は残り約 400 秒かかった)
+                let inc2_big = inc2 && (self.newly_fixed_ints() as f64) >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_INC2_NOGUARD", 0.25, f64) * self.p.nint.saturating_sub(self.root_fixed0).max(1) as f64;
+                if left_ok && (inc2 || self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) || self.treefix_restart_mode() || self.rstcrit_tree_big()) && self.proto_restart_ok(frac) && (inc2_big || self.tree_restart_guard_ok(plunge.as_ref(), "inc")) {
                     if self.params.verbose {
                         eprintln!("MIP: tree restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
                     }
