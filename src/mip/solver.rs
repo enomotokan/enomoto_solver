@@ -1084,6 +1084,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     parord_from_pool: bool,
     /// カット生成に使う変数上下限 (最初の分離で作る)。
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
+    /// 試作 `ENOMOTO_MIP_VB_IMPL` ([`Self::separate`]): `vbounds` にプロービングの含意の変数上下限を足したもの (最初の分離で作る)
+    pub(super) vbounds_impl: Option<Rc<super::cuts::VarBounds>>,
     /// 診断 `ENOMOTO_MIP_INTVUB_DUMP` を出したか
     pub(super) intvub_dumped: bool,
     /// 根で解を見つけなかったヒューリスティクス ([`heur_bit`] のビット)。再スタートで引き継ぐ。
@@ -5574,6 +5576,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         parord_c_off: false,
         parord_from_pool: false,
         vbounds: None,
+        vbounds_impl: None,
         intvub_dumped: false,
         failed_heurs: 0,
         cut_age: Vec::new(),

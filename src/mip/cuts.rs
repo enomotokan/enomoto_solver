@@ -26,7 +26,7 @@ pub struct CutVars<'a> {
 /// 連続変数 `x_k` の変数上下限 `x_k <= d y + e` (VUB) / `x_k >= d y + e` (VLB) (`y` は整数変数)。
 /// 2 変数の行から集める。CMIR の置き換えで単純な上下限より近ければこちらを使う (HiGHS の
 /// `HighsTransformedLp` と同じ)。
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct VarBounds {
     pub vub: Vec<Vec<(usize, f64, f64)>>,
     pub vlb: Vec<Vec<(usize, f64, f64)>>,
