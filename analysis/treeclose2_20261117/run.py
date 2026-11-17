@@ -17,7 +17,10 @@ CFGS = {
     "ours_cut": (False, {}),
     "ours_cut_nosym": (False, {"ENOMOTO_MIP_NO_SYMMETRY": "1"}),
     # リテラルの衝突を HiGHS のように長く持つ (年齢で消さない・枠 1 万。HiGHS は 1 万本を超えたときだけ年齢で消す)
-    "ours_cut_keep": (False, {"ENOMOTO_T_MIP_LIT_CONFLICT_AGE": "4000000000", "ENOMOTO_T_MIP_LIT_CONFLICT_POOL": "10000"}),
+    "ours_cut_keep": (False, {"ENOMOTO_T_MIP_LIT_CONFLICT_AGE": "4000000000", "ENOMOTO_T_MIP_LIT_CONFLICT_POOL": "10000",
+                              "ENOMOTO_MIP_CONFLICT_LEV_DIAG": "1"}),
+    # 診断だけ (衝突解析で深さごとに 1-UIP まで解けたか、解けずに残った変更の理由)
+    "ours_cut_diag": (False, {"ENOMOTO_MIP_CONFLICT_LEV_DIAG": "1"}),
 }
 OUT = D / "res.jsonl"; LOGS = D / "logs"; LOGS.mkdir(exist_ok=True)
 done = {(json.loads(l)["problem"], json.loads(l)["cfg"]) for l in open(OUT)} if OUT.exists() else set()
