@@ -125,6 +125,9 @@ pub fn find_dual_free_inequalities(n: usize, a_rows: &[Vec<(usize, f64)>], real_
         if used_as_witness[r] {
             continue;
         }
+        if env_str!("ENOMOTO_DEBUG_DUALFREE_INEQ").is_some() {
+            eprintln!("DFI: col {j} [{}, {}] implied [{lo}, {hi}] c {} -> row {r} {:?} <= {} ; rows {:?}", lb[j], ub[j], c[j], real_rows[r], real_rhs[r], rows);
+        }
         promoted[r] = true;
         out.push(r);
         for &(i, _) in rows {
