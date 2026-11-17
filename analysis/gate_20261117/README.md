@@ -50,3 +50,18 @@ slow2 の batch12 (P の 11 問 × 種 1・2、60 秒) のログを `rootfeat.py
   良くなるのは nubu (木 811 → 73 ノード) くらいで、木の大きい neos17 は閉じた割合が上がっても遅く、timtab1 は変わらない。
 - → 根の時点で取れる特徴 (閉じた割合・大きさ・整数の割合) で「延ばすと得をする」問題を分ける手がかりは、この 11 問では nubu 1 問しかない。
   見込みは低い。
+
+## 結論と次 (親の方針、2026-11-17)
+
+- B (選び方の変更のシグモイドの入り切り) は**打ち切り**。一番の得 (hypothyroid-k1) は 0 ラウンド目の LP の点で丸めが最適解を当てた
+  ことによるもので、カットの強さではない。延ばして得をする問題を根の特徴で分ける根拠がない。
+- A (sw) は**ゲートを作らず**、k=0.5 のまま、slow2 で使っていない種で測り直す (遅い群では止めが入らず、遅れは揺れと見たため)。
+
+## 対の比べ (sw、別の種)
+
+- 設定は `cfg.py` (def・sw)。分担表は `python plan.py 12 4 sw` で作った `shards_PSW.json`・`shards_MSW.json`
+  (`plan.py`・`run.py`・`summ.py` は slow2 の写しで、種だけ変えた)。
+- ビルドの基点: この節を足したコミット (README の更新と同時)。準備: `pip install maturin highspy==1.15.1 && pip install -e .`。
+- P: 58 問 × 種 4〜6 × {def, sw}、60 秒、4 分担 (各約 0.74 時間): `python run.py PSW K` (K = 0〜3)。
+- M: 48 問 × 種 3・4 × {def, sw}、600 秒、12 分担 (各約 1.4 時間): `python run.py MSW K` (K = 0〜11)。
+- 集計: `python summ.py PSW sw > summ_PSW.txt`・`python summ.py MSW sw > summ_MSW.txt`。
