@@ -6173,10 +6173,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         eprintln!("MIP_DEBUG_SOL {label}: LP row {i} violated: {lo} <= {act} <= {up} (orig rows {})", self.p.m);
                     }
                 }
-                // 列の境界 (LP の上の境界と定義域の食い違いも見る)
+                // 列の境界: 定義域はデバッグ解を含むのに LP の境界が外しているもの
                 for j in 0..self.p.n {
                     let (lo, up) = self.lp.col_bounds(j);
-                    if x[j] < lo - 1e-6 || x[j] > up + 1e-6 {
+                    let in_dom = x[j] >= self.dom.lo[j] - 1e-6 && x[j] <= self.dom.up[j] + 1e-6;
+                    if in_dom && (x[j] < lo - 1e-6 || x[j] > up + 1e-6) {
                         eprintln!("MIP_DEBUG_SOL {label}: LP col {j} bound violated: {lo} <= {} <= {up} (dom [{}, {}])", x[j], self.dom.lo[j], self.dom.up[j]);
                     }
                 }
