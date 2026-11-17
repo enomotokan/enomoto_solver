@@ -757,6 +757,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     tr_outer0: f64,
     /// 同じく、木に入った時点のこのスレッドの手間の累計 ([`crate::ticks::total`])
     tr_tk0: f64,
+    /// 試作 `ENOMOTO_MIP_CLQ_LAZY` (treeclose 9.79 節): LP で両側とも無限の境界にした (外した) クリーク型の元の行 (番号、行の文字)。
+    /// ノードの LP 解が破れば、その行をカットの行として LP に戻す ([`Self::clq_lazy_restore`])。`clq_lazy_stats` は (外した数, 確かめた回数, 戻した行の数, 解き直した回数)
+    clq_lazy: Vec<(usize, Vec<u32>)>,
+    clq_lazy_stats: [u64; 4],
     tc_l_stats: [u64; 4],
     tc_g_stats: [u64; 4],
     /// 試作 `ENOMOTO_MIP_TC` の `c`: カットプールの伝播を止めている間に飛ばした回数・次に試し直す回数・試しの区切りの始めの統計・試し直した回数
@@ -1530,6 +1534,8 @@ pub(crate) struct TreeSnapshot {
     refl_gens: Vec<super::symdyn::SignedGen>,
     /// 写しを作ったときの LP の基底 (`ENOMOTO_MIP_TREE_ROOT_BASIS`、試作。列と、元の行 + `rows` の行)
     root_basis: Option<super::lp::Basis>,
+    /// 試作 `ENOMOTO_MIP_CLQ_LAZY`: 写しを作ったときに LP で外していた元の行 (番号) と、その行の文字
+    clq_lazy: Vec<(usize, Vec<u32>)>,
 }
 
 /// `ENOMOTO_MIP_TREE_ROOT_BASIS` (試作、inv/mzzv42z-r4-20261021、既定では使わない): 木を分け合う従が写しの根の LP を、主の LP の
@@ -3450,6 +3456,12 @@ fn tree1_sb() -> bool {
     env_str!("ENOMOTO_MIP_TREE1_SB").is_some()
 }
 
+/// 試作 `ENOMOTO_MIP_CLQ_LAZY` (treeclose 9.79 節、既定では使わない): 木に入るとき、根の LP 解で余裕のあるクリーク型の行 (不等式) を LP から
+/// 外し (境界を両側とも無限にする)、ノードの LP 解が破ればカットの行として戻す。
+fn clq_lazy_on() -> bool {
+    env_str!("ENOMOTO_MIP_CLQ_LAZY").is_some_and(|v| v != "0")
+}
+
 /// 共有の待ち行列だけで探索するか (`ENOMOTO_MIP_TREE_SHARED_QUEUE`): 各スレッドは潜りの子だけを自分で持ち、兄弟などのノードは
 /// 全て共有の待ち行列に出して、取るときは自分の待ち行列と同じ選び方 ([`PoolNodes::pop_hybrid`]) をする。
 fn tree_shared_queue() -> bool {
@@ -5338,6 +5350,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         lmboost_bg: None,
         tr_outer0: f64::NAN,
         tr_tk0: 0.0,
+        clq_lazy: Vec::new(),
+        clq_lazy_stats: [0; 4],
         tc_l_stats: [0; 4],
         tc_g_stats: [0; 4],
         tc_c: (0, 0, [0; 4], 0),
@@ -7920,6 +7934,102 @@ impl<'a, L: MipLp> Solver<'a, L> {
         Some(ok)
     }
 
+    /// 試作 `ENOMOTO_MIP_CLQ_LAZY` の外し: 主 (写しなし) は今の LP 解で余裕 (1 − 文字の和 > `ENOMOTO_T_MIP_CLQ_LAZY_TOL`、既定 1e-6) があり
+    /// スラックが基底にあるクリーク型の元の行を選び、従は写しの一覧を使う (自分の基底でスラックが基底にない行は外さない: 空の行で基底が
+    /// 特異にならないように)。選んだ行の LP の境界を両側とも無限にする (行の番号は変えない。標準形では空の行)。外した行は
+    /// 問題 (`self.p`) にも衝突グラフにも残るので、伝播・クリークカット・解の実行可能性の確かめ (`try_incumbent`) は今までどおり。
+    fn clq_lazy_drop(&mut self) {
+        let t0 = Instant::now();
+        let m0 = self.p.rows.len();
+        if self.lp.num_rows() < m0 {
+            return;
+        }
+        let basis = self.lp.basis();
+        let slack_basic = |i: usize| basis.row.get(i).is_none_or(|s| *s == VarStatus::Basic) || basis.row.is_empty();
+        let cand: Vec<(usize, Vec<u32>)> = if let Some(sn) = self.snap.as_ref() {
+            sn.clq_lazy.iter().filter(|(i, _)| *i < m0 && slack_basic(*i)).cloned().collect()
+        } else {
+            let p = self.p;
+            let n = p.n;
+            let x = self.lp.col_values();
+            let tol = tunable!("ENOMOTO_T_MIP_CLQ_LAZY_TOL", 1e-6, f64);
+            let binary: Vec<bool> = (0..n).map(|j| p.is_int[j] && self.dom.global_lo[j] >= 0.0 && self.dom.global_up[j] <= 1.0).collect();
+            let free: Vec<bool> = (0..n).map(|j| self.dom.global_lo[j] < self.dom.global_up[j]).collect();
+            let mut out = Vec::new();
+            for (i, r) in p.rows.iter().enumerate() {
+                let (l, u) = self.lp.row_bounds(i);
+                if l == f64::NEG_INFINITY && u == f64::INFINITY || !slack_basic(i) {
+                    continue;
+                }
+                // 固定された列の分を右辺に移し、残りが 2 値列の ±1 で文字の和 <= 1 の形か (等式も <= の向きで見る)
+                let rr: Vec<(usize, f64)> = r.iter().copied().filter(|e| free[e.0]).collect();
+                if rr.len() < 2 {
+                    continue;
+                }
+                let shift: f64 = r.iter().filter(|e| !free[e.0]).map(|&(j, a)| a * self.dom.global_lo[j]).sum();
+                for (sg, b) in [(1.0, u - shift), (-1.0, -(l - shift))] {
+                    if !b.is_finite() {
+                        continue;
+                    }
+                    if !rr.iter().all(|&(j, a)| binary[j] && ((sg * a).abs() - 1.0).abs() <= 1e-12) {
+                        break;
+                    }
+                    let nneg = rr.iter().filter(|&&(_, a)| sg * a < 0.0).count() as f64;
+                    if ((b + nneg) - 1.0).abs() > 1e-9 {
+                        continue;
+                    }
+                    // 行の全部の列 (固定された列も含めて、境界が変わっても確かめられるよう元の行で持つ) ではなく、文字で持つ:
+                    // 固定された列の分は右辺に移した値と同じ (大域の固定は木の中で緩まない)
+                    let lits: Vec<u32> = rr.iter().map(|&(j, a)| if sg * a > 0.0 { 2 * j as u32 } else { 2 * j as u32 + 1 }).collect();
+                    let sv: f64 = lits.iter().map(|&q| { let v = x[(q / 2) as usize]; if q % 2 == 0 { v } else { 1.0 - v } }).sum();
+                    // 等式の行は両側の確かめが要るので外さない
+                    if l != u && 1.0 - sv > tol {
+                        out.push((i, lits));
+                    }
+                    break;
+                }
+            }
+            out
+        };
+        if cand.is_empty() {
+            return;
+        }
+        let ch: Vec<(usize, f64, f64)> = cand.iter().map(|(i, _)| (*i, f64::NEG_INFINITY, f64::INFINITY)).collect();
+        self.lp.set_row_bounds_many(&ch);
+        self.clq_lazy_stats[0] += cand.len() as u64;
+        if self.params.verbose && self.pool_tid == 0 {
+            eprintln!("MIP: CLQ_LAZY: {} clique rows dropped from the LP (of {} rows, {} nonzeros) ({:.2}s)", cand.len(), m0, cand.iter().map(|c| c.1.len()).sum::<usize>(), t0.elapsed().as_secs_f64());
+        }
+        self.clq_lazy = cand;
+    }
+
+    /// 試作 `ENOMOTO_MIP_CLQ_LAZY` の戻し: 今の LP 解が外した行 (文字の和 <= 1) を破れば、その行をカットの行として LP に加え、外した一覧から
+    /// 除く。戻したら真 (呼び手が解き直す)。
+    fn clq_lazy_restore(&mut self) -> bool {
+        self.clq_lazy_stats[1] += 1;
+        let x = self.lp.col_values();
+        let tol = tunable!("ENOMOTO_T_MIP_CLQ_LAZY_VIOL", 1e-9, f64);
+        let mut back: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
+        self.clq_lazy.retain(|(_, lits)| {
+            let sv: f64 = lits.iter().map(|&q| { let v = x[(q / 2) as usize]; if q % 2 == 0 { v } else { 1.0 - v } }).sum();
+            if sv > 1.0 + tol {
+                let mut nneg = 0.0;
+                let mut r: Vec<(usize, f64)> = lits.iter().map(|&q| if q % 2 == 0 { ((q / 2) as usize, 1.0) } else { nneg += 1.0; ((q / 2) as usize, -1.0) }).collect();
+                r.sort_by_key(|e| e.0);
+                back.push((r, f64::NEG_INFINITY, 1.0 - nneg));
+                false
+            } else {
+                true
+            }
+        });
+        if back.is_empty() {
+            return false;
+        }
+        self.clq_lazy_stats[2] += back.len() as u64;
+        self.add_cut_rows(&back);
+        true
+    }
+
     /// 診断 `ENOMOTO_MIP_DIAG_CLQROWS` (treeclose 9.78 節、既定では使わない): 根の LP (カットの前) で、クリーク型の行 (2 値列の文字の和 ≤ 1 / = 1)
     /// の数・割合・非零の割合、LP 解で余裕のある行、小さい行 (`ENOMOTO_T_MIP_DIAG_CLQROWS_K` 文字以下、既定 8) を極大クリークでまとめられる余地と、
     /// まとめたクリークのうち LP 解を破るものを足したときの下界の伸びを 1 行ずつ出す。LP は試したあと元に戻す。
@@ -7989,16 +8099,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let cost = self.lp.costs();
             let lim = SolveLimits { iteration_limit: 50 * self.root_lp_iters.max(1000), cutoff: f64::INFINITY, deadline: self.deadline };
             let mut res = Vec::new();
-            for keep_all in [true, false] {
+            // 3 つ目: 行は残して境界を外す (自由な行にする、行の番号を変えない形)
+            for (keep_all, free_rows) in [(true, false), (false, false), (true, true)] {
                 let idx: Vec<usize> = (0..m).filter(|&i| keep_all || !drop[i]).collect();
                 let rows: Vec<Vec<(usize, f64)>> = idx.iter().map(|&i| self.lp.row(i)).collect();
-                let (rlo, rup): (Vec<f64>, Vec<f64>) = idx.iter().map(|&i| self.lp.row_bounds(i)).unzip();
+                let (rlo, rup): (Vec<f64>, Vec<f64>) = idx.iter().map(|&i| if free_rows && drop[i] { (f64::NEG_INFINITY, f64::INFINITY) } else { self.lp.row_bounds(i) }).unzip();
                 let t = Instant::now();
                 let mut lp2 = L::new(&clo, &cup, &cost, &rows, &rlo, &rup);
                 let st = lp2.solve(&lim);
                 let secs = t.elapsed().as_secs_f64();
                 let x2 = lp2.col_values();
-                let nviol = if keep_all {
+                let nviol = if keep_all && !free_rows {
                     0
                 } else {
                     cl.iter().filter(|(i, lits, _)| drop[*i] && lits.iter().map(|&l| { let v = x2[(l / 2) as usize]; if l % 2 == 0 { v } else { 1.0 - v } }).sum::<f64>() > 1.0 + 1e-6).count()
@@ -8006,8 +8117,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 res.push((idx.len(), st, lp2.total_iterations(), secs, lp2.objective() + p.offset, nviol));
             }
             eprintln!(
-                "MIP: CLQROWS drop slack rows: full {} rows {:?} {} iters {:.2}s obj {:.10e}; without {} slack clique rows: {} rows {:?} {} iters {:.2}s obj {:.10e}, dropped rows violated {}",
-                res[0].0, res[0].1, res[0].2, res[0].3, res[0].4, m - res[1].0, res[1].0, res[1].1, res[1].2, res[1].3, res[1].4, res[1].5
+                "MIP: CLQROWS drop slack rows: full {} rows {:?} {} iters {:.2}s obj {:.10e}; without {} slack clique rows: {} rows {:?} {} iters {:.2}s obj {:.10e}, dropped rows violated {}; slack rows made free: {:?} {} iters {:.2}s obj {:.10e}, violated {}",
+                res[0].0, res[0].1, res[0].2, res[0].3, res[0].4, m - res[1].0, res[1].0, res[1].1, res[1].2, res[1].3, res[1].4, res[1].5, res[2].1, res[2].2, res[2].3, res[2].4, res[2].5
             );
         }
         let len_b = [cl.iter().filter(|c| c.1.len() == 2).count(), cl.iter().filter(|c| (3..=8).contains(&c.1.len())).count(), cl.iter().filter(|c| c.1.len() > 8).count()];
@@ -11616,6 +11727,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if crate::simplex::mip_lp::xolazy_log() && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
             eprintln!("XOLAZY {{\"ev\":\"tree\",\"restarts\":{},\"t\":{:.4}{}}}", self.params.restarts, super::outer_elapsed().unwrap_or(f64::NAN), self.xolazy_fix_counts());
         }
+        // 試作 `ENOMOTO_MIP_CLQ_LAZY`: 根の LP 解で余裕のあるクリーク型の行を LP から外す (木を分け合う従は写しの一覧を使う)
+        if clq_lazy_on() && !self.params.submip && self.watch.is_none() {
+            self.clq_lazy_drop();
+        }
         if self.params.verbose && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
             eprintln!("TRSTAT: tree start outer {:.2} solve {:.2} restarts {} lb {:.10e} ub {:.10e}", super::outer_elapsed().unwrap_or(f64::NAN), self.tr_t0, self.params.restarts, self.tr_root_lb, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z));
         }
@@ -12816,6 +12931,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if self.node_lps % 32 == 0 && !self.params.submip {
                     self.treesep_diag();
+                }
+                // 試作 `ENOMOTO_MIP_CLQ_LAZY`: 外した行を LP 解が破れば戻して解き直す (破るものがなくなるまで)
+                while st == LpStatus::Optimal && !self.clq_lazy.is_empty() && self.clq_lazy_restore() {
+                    st = self.lp.solve(&capped(self, u64::MAX));
+                    self.clq_lazy_stats[3] += 1;
                 }
                 match st {
                     LpStatus::Optimal => {}
@@ -22652,7 +22772,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new(if gap4('o') { o.clone_without_implications() } else { (**o).clone() }));
         let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis, clq_lazy: self.clq_lazy.clone() };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
@@ -24926,6 +25046,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 print_basis_nb_diag();
             }
             eprintln!("MIP: node diag: nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}", self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows());
+            if clq_lazy_on() && self.clq_lazy_stats[0] > 0 {
+                let s = self.clq_lazy_stats;
+                eprintln!("MIP: CLQ_LAZY stats tid {}: dropped {} checks {} restored {} resolves {} still dropped {}", self.pool_tid, s[0], s[1], s[2], s[3], self.clq_lazy.len());
+            }
             if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() || self.tree_sep {
                 eprintln!("MIP: adaptive node cuts: rounds {} effective {} skipped {} (rate {:.3}), node cut secs {:.2}, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 {:?}, cut nnz {:?} (rows mean {:.1})", self.nca_stats[0], self.nca_stats[1], self.nca_stats[2], self.nca_ema, self.node_cut_secs, self.nca_hist, self.nca_cut_nnz, self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / self.p.m.max(1) as f64);
             }
