@@ -6,7 +6,7 @@ import json, glob, math, random, collections, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 ARG = sys.argv[1] if len(sys.argv) > 1 else "P"
-BS = ("rtc",) if ARG == "P2" else ("rt",)
+BS = ("rtc",) if ARG in ("P2", "PX", "MX", "PXMX") else ("rt",)
 CF = ["def", "rt", "rtc"]
 def st(r): return str(r["result"].get("status") or "").lower()
 def solved(r): return st(r) in ("optimal", "infeasible")
@@ -58,7 +58,7 @@ def table(rs):
         q = [r for r in rs if r["B"] == B]
         a, b = sum(r["nsol"]["def"] for r in q), sum(r["nsol"][B] for r in q)
         print(f"解けた数の合計 ({B}): def {a} → {B} {b} ({'減らない' if b >= a else '減る'})")
-if ARG == "PM":
-    table([summ(S, B, False) for S in ("P", "M") for B in BS])
+if ARG in ("PM", "PXMX"):
+    table([summ(S, B, False) for S in (("P", "M") if ARG == "PM" else ("PX", "MX")) for B in BS])
 else:
     table([summ(ARG, B) for B in BS])

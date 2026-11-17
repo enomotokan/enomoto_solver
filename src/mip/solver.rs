@@ -23618,6 +23618,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if b.col.len() != n || b.row.len() != mr {
             return false;
         }
+        // 両側とも無限の境界の行 (試作 `ENOMOTO_MIP_CLQ_LAZY` で LP から外した行、標準形では空の行) はスラックを基底にし、列で覆う行から外す
+        // (元の係数で覆うと、標準形では特異な基底になり、分解の修復で全スラック基底近くから解き直すことになる)
+        for i in 0..mr {
+            if self.lp.row_bounds(i) == (f64::NEG_INFINITY, f64::INFINITY) {
+                b.row[i] = VarStatus::Basic;
+            }
+        }
         let cur = self.lp.basis();
         let rows: Vec<usize> = (0..mr).filter(|&i| b.row[i] != VarStatus::Basic).collect();
         let nr = rows.len();
@@ -25235,6 +25242,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.pool_dse_stats.iter().any(|&x| x > 0) && (crate::simplex::nb_diag::on() || prof_tree_par()) {
             let d = self.pool_dse_stats;
             eprintln!("POOL_DSE: tid {} sent {} nodes {} weights ({:.1} KB) received {} applied {} basic with weight {} without {}", self.pool_tid, d[0], d[1], d[1] as f64 * 8.0 / 1024.0, d[2], d[3], d[4], d[5]);
+        }
+        if self.snap.is_some() && clq_lazy_on() && self.params.verbose {
+            let s = self.clq_lazy_stats;
+            eprintln!("MIP: CLQ_LAZY stats tid {}: dropped {} checks {} restored {} resolves {} still dropped {} (worker)", self.pool_tid, s[0], s[1], s[2], s[3], self.clq_lazy.len());
         }
         if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some() && prof_tree_par()) {
             self.tprof.tid = self.pool_tid;
