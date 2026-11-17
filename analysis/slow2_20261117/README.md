@@ -221,3 +221,13 @@
   集計 `python summ.py PVBIS vbis`・`python summ.py MVBIS vbis`。
 - 注: HiGHS 側の LP 解の書き出しは scratchpad のソースに当てた追加の差分 (`HighsSeparation.cpp` の CUTSRC の行の後で `HIGHS_CUTSRC_XDUMP` のとき
   `lp->getSolution().col_value` を `<接頭辞>_r<ラウンド>.txt` に書く) で、`hcutsrc.patch` に反映済み。
+
+## 10. vbis の害の元 (batch12、P で遅かった・速かった問題、60 秒・種 1・2、`summ_p60.py`)
+
+- 親の P (PVBIS) は vbis/def +12.0% [+3.3%, +21.1%]、M (MVBIS) は +13.9% [−1.9%, +33.5%]・最大 RSS 3458 → 5260 MB で不採用。
+- 部品を分けると、**害は選び方の変更 (IMPLBD_SELECT・MIN_REL 0.1・200 本・60 ラウンド・第 2 段階) から来る**: sel/def +43.7% (18 組)、
+  10teams 種 2 8.1 → 32.6 秒、neos-960392 1.7 → 6.2 秒、qnet1 3.5 → 8.7 秒、neos17 5.1 → 10.2 秒、h80x6320d 34 → 42〜56 秒。
+  **VB_IMPL だけは vb/def −12.8% (17 組)**: h80x6320d 33.7・34.6 → 26.3・27.0 秒、10teams 種 1 30.3 → 5.8 秒、timtab1 33.0・29.2 → 24.7・25.1 秒、
+  ほかはほぼ同じ。blp-ar98 は 3 形とも時間切れ (sel は 1 ノードで根から出ない)。
+- unitcal_7 の根の下界も VB_IMPL があれば 1.9598〜1.9601e7、なければ 1.9584e7 で、下界を上げるのは VB_IMPL。
+- → 新しい候補は **VB_IMPL だけ** (cfg の `vb`)。P `python run.py PVB K` (K=0〜3)、M `python run.py MVB K` (K=0〜11)、集計 `python summ.py PVB vb`・`MVB vb`。
