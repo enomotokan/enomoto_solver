@@ -11,10 +11,12 @@
 //!   `ENOMOTO_MIP_GEN_LAZY` の値に種類をコンマで並べるとその種類だけ外す (`1` か `all` は全部)。
 //! - 外した行は問題 (`self.p`) に残るので、伝播・暫定解の確かめ (`try_incumbent`) は元の行で行う。LP の空の行の双対・Farkas・tableau の
 //!   重み・被約費用は [`crate::simplex::mip_lp`] が 0 として扱う (CLQ_LAZY と同じ)。
-//! - 戻し: ノードの LP を解くたびに (整数の判定の前に) 外した行を全部確かめ (行を詰めて持つ疎な形で、手間は外した行の非零の数)、
-//!   `c·x > b + tol·max(1, |b|)` (`ENOMOTO_T_MIP_GEN_LAZY_VIOL`、既定 1e-7、FEASTOL より小さい) の行をカットの行として加えて解き直す。
-//!   カットの行は年齢で消されたりノードの切り替えで消えたりしうるので、**戻した行も一覧に残して毎回確かめる** (消えていれば
-//!   また戻す)。同じノードの解き直しの中で同じ行を 2 度は戻さない (LP の誤差で破り続ける行で回り続けないように)。
+//! - 戻し: ノードの LP を解くたびに (整数の判定の前に) 外したままの行を全部確かめ (行を詰めて持つ疎な形で、手間は外した行の非零の数)、
+//!   `c·x > b + tol·max(1, |b|)` (`ENOMOTO_T_MIP_GEN_LAZY_VIOL`、既定 1e-7、FEASTOL より小さい) の行を戻して解き直す。
+//!   既定は**元の行の境界を戻す** (行の番号のまま。カットの年齢で消されず、LP の行も増えない。標準形の作り直しはカットの行を加えるのと同じ 1 回)。
+//!   `ENOMOTO_MIP_GEN_LAZY_BACK=cut` ならカットの行として加える (CLQ_LAZY と同じ)。カットの行は年齢で消されたりノードの切り替えで
+//!   消えたりしうるので、その形では**戻した行も一覧に残して毎回確かめる** (消えていればまた戻す。neos-933966 で θ = 0.5 のとき
+//!   戻し 569 回のうち 270 回がこの戻し直しだった)。同じノードの解き直しの中で同じ行を 2 度は戻さない (LP の誤差で破り続ける行で回り続けないように)。
 //! - 強分岐の子 (`ENOMOTO_MIP_GEN_LAZY_SB=1`、既定では使わない): 子の LP は外した行を確かめないので子の下界が弱くなりうる。この切り替えで、
 //!   打ち切られなかった子の LP 解が破る外した行を覚え、分枝の選びの後に戻して (カットの行として加え) 分枝せずにノードの LP を解き直す
 //!   (子の下界・擬費用の観測はその前の弱い LP のまま)。
@@ -74,14 +76,20 @@ pub(crate) struct GenLazy {
     restores: Vec<u32>,
     /// 強分岐の子の LP 解が破った行 (まだ戻していない)
     pending: Vec<u32>,
+    /// 元の行の向き (`<=` なら 1、`>=` なら −1。`val`・`rhs` はこれを掛けたもの)
+    sgn: Vec<f64>,
+    /// まだ LP から外しているか (境界を戻した行は偽にして確かめない)
+    active: Vec<bool>,
+    n_active: usize,
 }
 
 impl GenLazy {
     pub(super) fn len(&self) -> usize {
         self.rows.len()
     }
+    /// 外したままの行がないか (戻しの確かめを省く)
     pub(super) fn is_empty(&self) -> bool {
-        self.rows.is_empty()
+        self.n_active == 0
     }
     fn push(&mut self, i: usize, r: &[(usize, f64)], sg: f64, b: f64, kind: u8) {
         if self.start.is_empty() {
@@ -97,6 +105,18 @@ impl GenLazy {
         self.kind.push(kind);
         self.stamp.push(u64::MAX);
         self.restores.push(0);
+        self.sgn.push(sg);
+        self.active.push(true);
+        self.n_active += 1;
+    }
+    /// 行 `k` の元の境界 (LP に戻すとき)
+    fn orig_bounds(&self, k: usize) -> (usize, f64, f64) {
+        let i = self.rows[k] as usize;
+        if self.sgn[k] > 0.0 {
+            (i, f64::NEG_INFINITY, self.rhs[k])
+        } else {
+            (i, -self.rhs[k], f64::INFINITY)
+        }
     }
     pub(super) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
@@ -127,10 +147,11 @@ impl GenLazy {
     fn filter(&self, keep: impl Fn(usize) -> bool) -> GenLazy {
         let mut g = GenLazy::default();
         for k in 0..self.len() {
-            if keep(self.rows[k] as usize) {
+            if self.active[k] && keep(self.rows[k] as usize) {
                 let (s, e) = (self.start[k] as usize, self.start[k + 1] as usize);
-                let r: Vec<(usize, f64)> = (s..e).map(|t| (self.col[t] as usize, self.val[t])).collect();
-                g.push(self.rows[k] as usize, &r, 1.0, self.rhs[k], self.kind[k]);
+                let sg = self.sgn[k];
+                let r: Vec<(usize, f64)> = (s..e).map(|t| (self.col[t] as usize, sg * self.val[t])).collect();
+                g.push(self.rows[k] as usize, &r, sg, self.rhs[k], self.kind[k]);
             }
         }
         g
@@ -266,24 +287,43 @@ impl<L: MipLp> Solver<'_, L> {
         let stamp = self.node_lps;
         let g = &mut self.gen_lazy;
         g.pending.clear();
-        let mut back: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
+        let mut idx: Vec<usize> = Vec::new();
         for k in 0..g.rows.len() {
-            if g.stamp[k] != stamp && g.violated(k, &x, tol) {
+            if g.active[k] && g.stamp[k] != stamp && g.violated(k, &x, tol) {
                 g.stamp[k] = stamp;
                 if g.restores[k] > 0 {
                     self.gen_lazy_stats[4] += 1;
                 }
                 g.restores[k] += 1;
-                back.push(g.cut_row(k));
+                idx.push(k);
             }
         }
         self.gen_lazy_secs += t0.elapsed().as_secs_f64();
-        if back.is_empty() {
+        if idx.is_empty() {
             return false;
         }
-        self.gen_lazy_stats[2] += back.len() as u64;
-        self.add_cut_rows(&back);
+        self.gen_lazy_stats[2] += idx.len() as u64;
+        self.gen_lazy_put_back(&idx);
         true
+    }
+
+    /// 行 (一覧の番号) を LP に戻す。既定は元の行の境界を戻す (行の番号のまま。カットの年齢で消されない。一覧では外したままでなくする)、
+    /// `ENOMOTO_MIP_GEN_LAZY_BACK=cut` ならカットの行として加える (CLQ_LAZY と同じ。一覧に残して毎回確かめる)
+    fn gen_lazy_put_back(&mut self, idx: &[usize]) {
+        let g = &mut self.gen_lazy;
+        if env_str!("ENOMOTO_MIP_GEN_LAZY_BACK") == Some("cut") {
+            let back: Vec<(Vec<(usize, f64)>, f64, f64)> = idx.iter().map(|&k| g.cut_row(k)).collect();
+            self.add_cut_rows(&back);
+        } else {
+            let ch: Vec<(usize, f64, f64)> = idx.iter().map(|&k| g.orig_bounds(k)).collect();
+            for &k in idx {
+                if g.active[k] {
+                    g.active[k] = false;
+                    g.n_active -= 1;
+                }
+            }
+            self.lp.set_row_bounds_many(&ch);
+        }
     }
 
     /// 強分岐の子の LP 解 `x` が破る外した行を覚える (`ENOMOTO_MIP_GEN_LAZY_SB`)
@@ -296,7 +336,7 @@ impl<L: MipLp> Solver<'_, L> {
         let stamp = self.node_lps;
         let g = &mut self.gen_lazy;
         for k in 0..g.rows.len() {
-            if g.stamp[k] != stamp && g.violated(k, x, tol) {
+            if g.active[k] && g.stamp[k] != stamp && g.violated(k, x, tol) {
                 // 同じノードで 2 度覚えない (戻すときに stamp を付け直す)
                 g.stamp[k] = stamp;
                 g.pending.push(k as u32);
@@ -312,19 +352,19 @@ impl<L: MipLp> Solver<'_, L> {
             return false;
         }
         let pend = std::mem::take(&mut g.pending);
-        let mut back = Vec::with_capacity(pend.len());
+        let mut idx = Vec::with_capacity(pend.len());
         for &k in &pend {
             let k = k as usize;
             if g.restores[k] > 0 {
                 self.gen_lazy_stats[4] += 1;
             }
             g.restores[k] += 1;
-            back.push(g.cut_row(k));
+            idx.push(k);
         }
-        self.gen_lazy_stats[2] += back.len() as u64;
-        self.gen_lazy_stats[6] += back.len() as u64;
+        self.gen_lazy_stats[2] += idx.len() as u64;
+        self.gen_lazy_stats[6] += idx.len() as u64;
         self.gen_lazy_stats[7] += 1;
-        self.add_cut_rows(&back);
+        self.gen_lazy_put_back(&idx);
         true
     }
 
@@ -341,8 +381,8 @@ impl<L: MipLp> Solver<'_, L> {
             }
         }
         eprintln!(
-            "MIP: GEN_LAZY stats tid {}: dropped {} (nnz {}) checks {} restored {} (distinct rows {}, by kind {:?}) re-restored {} resolves {} sb restored {} sb resolves {} check secs {:.3}",
-            self.pool_tid, s[0], s[5], s[1], s[2], rows_back, by_kind, s[4], s[3], s[6], s[7], self.gen_lazy_secs
+            "MIP: GEN_LAZY stats tid {}: dropped {} (nnz {}) checks {} restored {} (distinct rows {}, by kind {:?}) re-restored {} resolves {} sb restored {} sb resolves {} still dropped {} check secs {:.3}",
+            self.pool_tid, s[0], s[5], s[1], s[2], rows_back, by_kind, s[4], s[3], s[6], s[7], g.n_active, self.gen_lazy_secs
         );
     }
 }
