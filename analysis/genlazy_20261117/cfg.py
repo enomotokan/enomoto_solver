@@ -21,5 +21,9 @@ CFGS = {
     "sm1": g(0, tau=-1.0), "sm3": g(0, tau=-3.0), "sm100": g(0, tau=-100.0), "sm1000": g(0, tau=-1000.0),
     "s00c": g(0, "clq", tau=0.0), "sm01c": g(0, "clq", tau=-0.1),
     "s00a50": g(0, tau=0.0, age=50), "t05a50": g(0.5, age=50),
+    "sm1touch": {**g(0, tau=-1.0), "ENOMOTO_MIP_GEN_LAZY_TOUCH": "1"}, "sm03touch": {**g(0, tau=-0.3), "ENOMOTO_MIP_GEN_LAZY_TOUCH": "1"},
+    # mzzv11 の切り分け: 1 行外す形 (sm1) で、空の行の扱いを 1 つずつ元に戻す (`ENOMOTO_MIP_FREEROW_OFF`)
+    **{f"sm1off{c}": {**g(0, tau=-1.0), "ENOMOTO_MIP_FREEROW_OFF": c} for c in "rdsp"},
+    "fixrow": {"ENOMOTO_MIP_FIXROW": "1"},
     "diag": {"ENOMOTO_MIP_GEN_LAZY": "1", "ENOMOTO_MIP_DIAG_GENLAZY": "stop"},
 }
