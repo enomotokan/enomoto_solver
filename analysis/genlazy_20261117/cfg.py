@@ -18,7 +18,7 @@ CFGS = {
     "t05sb": g(0.5, sb=True), "t10sb": g(1.0, sb=True),
     "clq": g(1.0, "clq"),
     "s00": g(0, tau=0.0), "sm01": g(0, tau=-0.1), "sm03": g(0, tau=-0.3),
-    "sm100": g(0, tau=-100.0), "sm1000": g(0, tau=-1000.0),
+    "sm1": g(0, tau=-1.0), "sm3": g(0, tau=-3.0), "sm100": g(0, tau=-100.0), "sm1000": g(0, tau=-1000.0),
     "s00c": g(0, "clq", tau=0.0), "sm01c": g(0, "clq", tau=-0.1),
     "s00a50": g(0, tau=0.0, age=50), "t05a50": g(0.5, age=50),
     "diag": {"ENOMOTO_MIP_GEN_LAZY": "1", "ENOMOTO_MIP_DIAG_GENLAZY": "stop"},
