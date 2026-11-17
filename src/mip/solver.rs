@@ -1052,6 +1052,14 @@ pub(super) struct Solver<'a, L: MipLp> {
     pool3_diag_at: Option<Instant>,
     /// `ENOMOTO_MIP_POOL3_BEST` (1 スレッド): 最後に下界最小を処理させた時刻。
     pool3_diag_at_best: Option<Instant>,
+    /// 試作 `ENOMOTO_MIP_PARORD` の数: [a: 共有の待ち行列から取った, a: 自分の待ち行列の下界最小を取った, a: ほかのスレッドに合図した,
+    /// a: 合図を受けて出した, c: 役に就いた回数, c: 役の Local-MIP の回数, c: 役の FJ の回数, c: 役で解を見つけた回数]
+    parord_stats: [u64; 8],
+    /// 試作 `ENOMOTO_MIP_PARORD` の `c`: 役に就いていた秒数の和と、上限 (`ENOMOTO_T_MIP_PARORD_C_SECS`) に当たって役をやめたか
+    parord_c_secs: f64,
+    parord_c_off: bool,
+    /// 試作 `ENOMOTO_MIP_PARORD` の `a`: 直前の取り出しが共有の待ち行列からだった (診断の数え分け `tp_kind` 用)
+    parord_from_pool: bool,
     /// カット生成に使う変数上下限 (最初の分離で作る)。
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
     /// 診断 `ENOMOTO_MIP_INTVUB_DUMP` を出したか
@@ -2514,6 +2522,8 @@ pub(crate) struct WorkPool {
     fin: std::sync::atomic::AtomicBool,
     /// 今ヒューリスティクス役に就いているスレッドの数。
     in_role: std::sync::atomic::AtomicUsize,
+    /// 試作 `ENOMOTO_MIP_PARORD` の `c`: 暫定解のない間のヒューリスティクス役に就いているスレッドの数 (`in_role` にも数える)。
+    in_role_c: std::sync::atomic::AtomicUsize,
     /// 大近傍探索の価値の指数移動平均 ([`MuStats`])。
     mu: std::sync::Mutex<MuStats>,
     /// 証明の段階に入った (`ENOMOTO_MIP_PROOF_SWITCH`、[`Solver::proof_phase_check`])。主が立て、各スレッドが読む。
@@ -3102,6 +3112,9 @@ struct ThreadSlot {
     dlb_set: std::sync::atomic::AtomicBool,
     /// `ENOMOTO_MIP_POOL3_BEST` (試作): このスレッドの手元に全体の最小の下界のノードがあるので、次は潜りを止めて下界最小を処理する合図。
     force: std::sync::atomic::AtomicBool,
+    /// 試作 `ENOMOTO_MIP_PARORD` の `a`: 作業者 0 が、このスレッドの手元に自分より小さい下界のノードがあるので、下界最小の 1 個を
+    /// 共有の待ち行列に出してほしいという合図 ([`Solver::parord_a_pop`])。
+    give: std::sync::atomic::AtomicBool,
 }
 
 /// 刈れる重みの分布 ([`ThreadSlot::wcuts`]) の境の位置 (ギャップに対する割合)。
@@ -3857,6 +3870,7 @@ impl WorkPool {
             lp_x: std::sync::Mutex::new(None),
             fin: std::sync::atomic::AtomicBool::new(false),
             in_role: std::sync::atomic::AtomicUsize::new(0),
+            in_role_c: std::sync::atomic::AtomicUsize::new(0),
             mu: std::sync::Mutex::new(MuStats::default()),
             proof_phase: std::sync::atomic::AtomicBool::new(false),
             pc: std::sync::Mutex::new(pc),
@@ -5480,6 +5494,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool3_stats: [0; 3],
         pool3_diag_at: None,
         pool3_diag_at_best: None,
+        parord_stats: [0; 8],
+        parord_c_secs: 0.0,
+        parord_c_off: false,
+        parord_from_pool: false,
         vbounds: None,
         intvub_dumped: false,
         failed_heurs: 0,
@@ -11801,6 +11819,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if pool3_best_secs() > 0.0 {
                     self.pool3_tick();
                 }
+                // 試作 `ENOMOTO_MIP_PARORD` の `a`: 作業者 0 の合図があれば、手元の下界最小の 1 個を共有の待ち行列に出す
+                if parord('a') && self.pool_tid != 0 {
+                    self.parord_a_give();
+                }
                 // `ENOMOTO_MIP_POOL2_TAKE` の `i`: 取ったノードをすぐ処理する (潜りの子は待ち行列に戻す)
                 if self.pool2_interrupt {
                     self.pool2_interrupt = false;
@@ -12086,6 +12108,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.queue.skip_pop();
                     }
                     let n = match pinned.or(pooled).or_else(|| match self.dfsbb_kind() {
+                        // 試作 `ENOMOTO_MIP_PARORD` の `a`・`e` ([`parord`]): 作業者 0 は大域の下界最小、ほかは推定値だけ
+                        2 | 3 if parord('a') && self.pool.is_some() && self.pool_tid == 0 => self.parord_a_pop(),
+                        2 | 3 if parord('e') && self.pool.is_some() && self.pool_tid != 0 => self.queue.pop_hgs(u64::MAX),
                         2 | 3 => self.queue.pop_hgs(tunable!("ENOMOTO_T_MIP_HGS_BB_EVERY", 10u64, u64)),
                         // `ENOMOTO_T_MIP_DFSBB_BB_EVERY` (既定 1 = いつも下界最小): k > 1 なら HiGHS と同じく k 回に 1 回下界最小、ほかは 0.5 下界 + 0.5 推定値
                         1 | 4 => match tunable!("ENOMOTO_T_MIP_DFSBB_BB_EVERY", 1u64, u64) {
@@ -12096,7 +12121,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         _ => self.queue.pop(bb_every),
                     }) {
                         Some(n) => {
-                            self.tp_kind = 1;
+                            self.tp_kind = if std::mem::take(&mut self.parord_from_pool) { 2 } else { 1 };
                             // `ENOMOTO_T_MIP_SUBMIP_STALL` (サブ MIP の中だけ、既定 12、0 なら使わない): 暫定解があり、待ち行列から取ったノードの
                             // 推定値が打ち切り値以上のことが続けてこの回数あれば止める (HiGHS の `mip_max_stall_nodes`、サブ MIP では 12。
                             // 改善の見込みのないサブ MIP を早く切り、1 回の時間の上限を短くしなくて済むようにする)
@@ -14435,7 +14460,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // ヒューリスティクス役を分けるとき: 解があれば (役のスレッドが大近傍探索を回すので) 木の探索のスレッドは回さない
         // (`ENOMOTO_MIP_HEUR_ROLE_TREE_LNS` なら以前と同じく回す)
         // (起動の判定 `ENOMOTO_MIP_HEUR_ROLE_TRIGGER` を使うときは、役に就いているスレッドがある間だけ止める)
-        let role_on = if heur_trigger_mode() { pool.in_role.load(std::sync::atomic::Ordering::Relaxed) > 0 } else { pool.has_x.load(std::sync::atomic::Ordering::Acquire) };
+        // (試作 `ENOMOTO_MIP_PARORD` の `c` の役 (暫定解がない間の Local-MIP・FJ) は数えない: 木のスレッドの大近傍探索・ダイビングは既定どおり)
+        let c_roles = if self.incumbent.is_none() { pool.in_role_c.load(std::sync::atomic::Ordering::Relaxed) } else { 0 };
+        let role_on = if heur_trigger_mode() { pool.in_role.load(std::sync::atomic::Ordering::Relaxed) > c_roles } else { pool.has_x.load(std::sync::atomic::Ordering::Acquire) };
         if pool.heur_k > 0 && role_on && env_str!("ENOMOTO_MIP_HEUR_ROLE_TREE_LNS").is_none() {
             return false;
         }
@@ -14450,6 +14477,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 終え、共有の解があるとき。
     fn heur_role_mine(&mut self) -> bool {
         let Some(pool) = &self.pool else { return false };
+        // 試作 `ENOMOTO_MIP_PARORD` の `c`・`g` ([`Self::parord_c_mode`]): 番号の最も大きいスレッドは、暫定解がない間
+        // (`g` なら相対の間隙が大きい間も) 役に就く
+        if self.parord_c_mode() != 0 {
+            return true;
+        }
         if !(pool.heur_k > 0 && self.snap.is_some() && self.race_done && (self.pool_tid as usize) >= pool.threads - pool.heur_k && pool.has_x.load(std::sync::atomic::Ordering::Acquire)) {
             return false;
         }
@@ -14806,10 +14838,73 @@ impl<'a, L: MipLp> Solver<'a, L> {
         false
     }
 
+    /// 試作 `ENOMOTO_MIP_PARORD` の `c`・`g` ([`parord`]): このスレッドが今その役に就くか。0 = 就かない、1 = 暫定解がない (`c`)、
+    /// 2 = 暫定解はあるが相対の間隙 (最良値 − 全体の下界) / max(|最良値|, 1) が `ENOMOTO_T_MIP_PARORD_C_GAP` (既定 0.05) を超える (`g`)。
+    /// 番号の最も大きいスレッド (2 スレッド以上)、木を分け合った後、サブ MIP でないとき。`g` は役から戻った後の待ち (既定の役と同じ
+    /// `heur_role_retired` の秒数) を守る。`ENOMOTO_T_MIP_PARORD_C_SECS` (既定 0 = 上限なし) 秒を役で使ったら以後は就かない
+    fn parord_c_mode(&self) -> u8 {
+        let Some(pool) = &self.pool else { return 0 };
+        if self.parord_c_off || self.params.submip || !(parord('c') || parord('g')) || !self.race_done || self.snap.is_none() || pool.threads < 2 || self.pool_tid as usize != pool.threads - 1 {
+            return 0;
+        }
+        let has = pool.has_x.load(std::sync::atomic::Ordering::Acquire) || self.incumbent.is_some();
+        if !has {
+            return if parord('c') { 1 } else { 0 };
+        }
+        if !parord('g') || self.heur_role_retired.is_some_and(|(t, _, cool)| t.elapsed().as_secs_f64() < cool) {
+            return 0;
+        }
+        if self.parord_gap() > tunable!("ENOMOTO_T_MIP_PARORD_C_GAP", 0.05, f64) {
+            2
+        } else {
+            0
+        }
+    }
+
+    /// 相対の間隙 (共有の最良値 − 全体の下界) / max(|最良値|, 1)。最良値がなければ +inf。
+    fn parord_gap(&self) -> f64 {
+        let z = self.shared.as_ref().map_or(f64::INFINITY, |s| s.best());
+        let lb = self.global_lower_bound();
+        if !z.is_finite() {
+            return f64::INFINITY;
+        }
+        if !lb.is_finite() {
+            return f64::INFINITY;
+        }
+        ((z - lb) / z.abs().max(1.0)).max(0.0)
+    }
+
+    /// 試作 `ENOMOTO_MIP_PARORD` の `c`: 暫定解がない間の役の 1 回分。Local-MIP を 0.5 秒 ([`Self::role_lmip_slice`]、続きから回す)、
+    /// Local-MIP が使えなければ (終わった・作れない) FJ (`ENOMOTO_T_MIP_PARORD_C_FJ_SECS` 秒、既定 1) を種を変えて回す。
+    fn parord_c_slice(&mut self) {
+        let had = self.incumbent.is_some();
+        if !self.role_lm_off {
+            self.parord_stats[5] += 1;
+            self.role_lmip_slice();
+        } else {
+            self.parord_stats[6] += 1;
+            self.rand();
+            let cap = tunable!("ENOMOTO_T_MIP_PARORD_C_FJ_SECS", 1.0, f64);
+            let effort = tunable!("ENOMOTO_T_MIP_PARORD_C_FJ_EFFORT", 50_000_000u64, u64);
+            self.heur_label = "FJ (PARORD heuristic role)";
+            self.feasibility_jump(effort, cap);
+            self.heur_label = "";
+        }
+        if !had && self.incumbent.is_some() {
+            self.parord_stats[7] += 1;
+        }
+    }
+
     fn heur_role_run(&mut self) -> Option<bool> {
         use std::sync::atomic::Ordering;
         let pool = self.pool.clone()?;
         let t_role = Instant::now();
+        // 試作 `ENOMOTO_MIP_PARORD` の `c`・`g`: この回が試作の役か (1 = 暫定解なし、2 = 間隙が大きい)
+        let c_mode = self.parord_c_mode();
+        if c_mode != 0 {
+            self.parord_stats[4] += 1;
+            pool.in_role_c.fetch_add(1, Ordering::Relaxed);
+        }
         self.heur_role_entries += 1;
         self.in_heur_role = true;
         pool.in_role.fetch_add(1, Ordering::Relaxed);
@@ -14858,6 +14953,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.time_up() {
                 break Some(false);
+            }
+            // 試作 `ENOMOTO_MIP_PARORD` の `c`・`g`: 役の上限の秒数、`c` は解が出たら、`g` は間隙が小さくなったら木に戻る
+            if c_mode != 0 {
+                let cap = tunable!("ENOMOTO_T_MIP_PARORD_C_SECS", 0.0, f64);
+                if cap > 0.0 && self.parord_c_secs + t_role.elapsed().as_secs_f64() >= cap {
+                    self.parord_c_off = true;
+                    break None;
+                }
+                if c_mode == 1 {
+                    self.heur_role_import(&pool);
+                    if self.incumbent.is_some() || pool.has_x.load(Ordering::Acquire) {
+                        break None;
+                    }
+                    self.parord_c_slice();
+                    continue;
+                }
+                if self.parord_gap() <= tunable!("ENOMOTO_T_MIP_PARORD_C_GAP", 0.05, f64) {
+                    break None;
+                }
             }
             // 証明の段階に入ったら木の探索に戻る (役には戻らない、[`Self::heur_role_mine`])
             if proof_phase_stops_role() && pool.proof_phase.load(Ordering::Relaxed) {
@@ -14941,6 +15055,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         ROLE_POOL.with(|r| *r.borrow_mut() = None);
         pool.in_role.fetch_sub(1, Ordering::Relaxed);
+        if c_mode != 0 {
+            pool.in_role_c.fetch_sub(1, Ordering::Relaxed);
+            self.parord_c_secs += t_role.elapsed().as_secs_f64();
+        }
         self.in_heur_role = false;
         if prof_tree_par() || heur_role_verbose() {
             eprintln!(
@@ -23588,6 +23706,87 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 試作 `ENOMOTO_MIP_PARORD` の `a` ([`parord`]): 作業者 0 が待ち行列から取る。共有の待ち行列の下界最小が自分の待ち行列の最小より
+    /// 小さければそちらを取り、ほかのスレッドの下界 ([`ThreadSlot::lb`]) が両方より小さければそのスレッドに出す合図 ([`ThreadSlot::give`]) を
+    /// 送り (次の取り出しで共有の待ち行列から取れる)、自分の待ち行列の下界最小を取る。木を分け合う前 (racing ramp-up) は下界最小を取るだけ。
+    fn parord_a_pop(&mut self) -> Option<OpenNode> {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone().filter(|_| self.race_done) else {
+            return self.queue.pop_best();
+        };
+        let t = self.pool_tid as usize;
+        let mine = self.queue.best_lower_bound();
+        let tol = 1e-9 * mine.abs().max(1.0);
+        let mut g = pool.inner.lock().unwrap();
+        let pmin = g.nodes.min_lower_bound();
+        if pmin < mine - tol || (self.queue.is_empty() && pmin.is_finite()) {
+            let sn = g.nodes.pop_best()?;
+            pool.len.store(g.nodes.len(), Ordering::Relaxed);
+            pool.wtree_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
+            // 取ったノードの下界を同じ錠の中で書き、待っている側に数えられていれば戻す ([`Self::tree1_pool_take`] と同じ)
+            if let Some(sl) = pool.slots.get(t) {
+                sl.lb.store(mine.min(sn.lower_bound).to_bits(), Ordering::Relaxed);
+            }
+            if !self.pool_busy {
+                g.busy += 1;
+                pool.idle.fetch_sub(1, Ordering::Relaxed);
+                self.pool_busy = true;
+            }
+            drop(g);
+            self.pool_stats[1] += 1;
+            self.parord_stats[0] += 1;
+            self.parord_from_pool = true;
+            return Some(self.open_from_pool(sn));
+        }
+        drop(g);
+        let here = mine.min(pmin);
+        let mut other = (f64::INFINITY, usize::MAX);
+        for (i, sl) in pool.slots.iter().enumerate() {
+            if i != t {
+                let v = f64::from_bits(sl.lb.load(Ordering::Relaxed));
+                if v < other.0 {
+                    other = (v, i);
+                }
+            }
+        }
+        if other.0 < here - tol {
+            if let Some(sl) = pool.slots.get(other.1) {
+                if !sl.give.swap(true, Ordering::Relaxed) {
+                    self.parord_stats[2] += 1;
+                }
+            }
+        }
+        let n = self.queue.pop_best();
+        if n.is_some() {
+            self.parord_stats[1] += 1;
+        }
+        n
+    }
+
+    /// 試作 `ENOMOTO_MIP_PARORD` の `a`: 作業者 0 から合図 ([`ThreadSlot::give`]) があり、手元の待ち行列の下界最小が作業者 0 の下界より
+    /// 小さければ、その 1 個を共有の待ち行列に出す。
+    fn parord_a_give(&mut self) {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone() else { return };
+        let Some(sl) = pool.slots.get(self.pool_tid as usize) else { return };
+        if !sl.give.swap(false, Ordering::Relaxed) || self.queue.is_empty() || self.pool_hold.is_some() || !self.race_done {
+            return;
+        }
+        let lb0 = pool.slots.first().map_or(f64::INFINITY, |s| f64::from_bits(s.lb.load(Ordering::Relaxed)));
+        let mine = self.queue.best_lower_bound();
+        if mine < lb0 - 1e-9 * mine.abs().max(1.0) {
+            let n = self.queue.pop_best().unwrap();
+            let sn = self.snap_of(&n);
+            self.pool_stats[0] += 1;
+            let mut g = pool.inner.lock().unwrap();
+            pool.wtree_shift(self.pool_tid, -snap_weight(std::slice::from_ref(&sn)));
+            g.nodes.push(sn);
+            pool.len.store(g.nodes.len(), Ordering::Relaxed);
+            drop(g);
+            self.parord_stats[3] += 1;
+        }
+    }
+
     fn pool_balance(&mut self) {
         use std::sync::atomic::Ordering;
         let Some(pool) = self.pool.clone() else { return };
@@ -24450,6 +24649,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if (self.params.verbose || pool3_diag()) && (pool3_best_secs() > 0.0 || pool3_taken()) && !self.params.submip {
             eprintln!("MIP: pool3 (tid {}): forced best-bound picks {}, taken from the shared queue {}, signals to other threads {}", self.pool_tid, self.pool3_stats[0], self.pool3_stats[1], self.pool3_stats[2]);
         }
+        if (self.params.verbose || prof_tree_par()) && env_str!("ENOMOTO_MIP_PARORD").is_some() && !self.params.submip {
+            let s = &self.parord_stats;
+            eprintln!(
+                "PARORD: tid {} a: from shared {} own best {} signals {} gave {} | c: role entries {} Local-MIP slices {} FJ calls {} found first {} role secs {:.2}{}",
+                self.pool_tid, s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], self.parord_c_secs, if self.parord_c_off { " (cap reached)" } else { "" }
+            );
+        }
         if self.params.verbose && self.snap_stats[0] > 0 {
             eprintln!("MIP: tree snapshots {}: node lower bounds raised {}, solutions received {}", self.snap_stats[0], self.snap_stats[1], self.snap_stats[2]);
         }
@@ -24802,6 +25008,16 @@ fn pool3_best_secs() -> f64 {
 /// 潜り・兄弟をやめて次に処理する。
 fn pool3_taken() -> bool {
     env_str!("ENOMOTO_MIP_POOL3_TAKEN").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_PARORD=文字` (既定では使わない、analysis/parorder_20261117/): 並列の木の探索の順。
+/// `a` = 作業者 0 (主) は待ち行列から取るとき常に大域の下界最小のノードを取る (HiGHS 1.15.1 の作業者 0 と同じ役。共有の待ち行列の方が
+/// 小さければそちらから取り、ほかのスレッドの手元の方が小さければそのスレッドに下界最小の 1 個を共有の待ち行列へ出させる)、
+/// `e` = 作業者 0 以外は下界最小を取る番をなくし、0.5 下界 + 0.5 推定値の最小だけを取る (HiGHS のほかの作業者と同じ。`a` と組む)、
+/// `c` = 暫定解がない間、番号の最も大きいスレッドが木を離れてヒューリスティクス役 (Local-MIP、使えなければ FJ) を回し、
+/// どれかのスレッドが解を見つけたら木に戻る ([`Solver::heur_role_run`])。`a`・`e` は HiGHS 型の取り出し (`DFSBB=2`・`3`、既定) のときだけ効く。
+fn parord(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_PARORD").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_BOUND_STEP` (2026-11-04 から既定、`=0` で切り上げない。analysis/bound_step_20261104.md): 報告の下界を目的値の刻みで切り上げる ([`Solver::step_lb`])。
