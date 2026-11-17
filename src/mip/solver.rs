@@ -751,6 +751,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     tc_g_next: u64,
     /// 試作 `ENOMOTO_MIP_TC` の `l`: 次に大域の伝播をするノード数と、[呼んだ回数, 締めた整数列, 固定した整数列, 矛盾]
     tc_l_next: u64,
+    /// 試作 `ENOMOTO_MIP_LMBOOST_ASYNC` ([`lmboost_async`]): 裏で回っている LMBOOST のスレッド
+    lmboost_bg: Option<LmboostBg>,
     /// 試作 `ENOMOTO_MIP_TREE_RESTART_INC2` 用: この求解で木に入った時刻 (外側の時計の秒)
     tr_outer0: f64,
     /// 同じく、木に入った時点のこのスレッドの手間の累計 ([`crate::ticks::total`])
@@ -4031,6 +4033,34 @@ pub(crate) fn thread_budget_on() -> bool {
 ///   最適解を見つけるので、時間で一律に絞る `ENOMOTO_MIP_ROOT_SUBMIP_REL` はそれを切っていた
 /// - 並列のサブ MIP には外側の刈り込みの上限 (ほかのサブ MIP・主のスレッドが見つけた解による) を打ち切り値として渡し続ける ([`SubmipCtl::outer_best`])
 /// - 並列のサブ MIP は終わった順に受け取る (`ENOMOTO_MIP_SUBMIP_FIRST_DONE` と同じ)
+/// 試作 `ENOMOTO_MIP_LMBOOST_ASYNC` (treeclose 9.72 節、既定では使わない): LMBOOST の Local-MIP のスレッドを裏で回したまま、主は待たずに
+/// 根のヒューリスティクスへ進む ([`Solver::lmip_boost`])。止める条件 (ギャップが閉じた・時間の上限・改善がない・別の暫定解) は主が解を受け取るたび
+/// ([`Solver::poll_lmip_thread`]) に見て、木に入るときと求解の終わり (Drop) には必ず止める
+fn lmboost_async() -> bool {
+    env_str!("ENOMOTO_MIP_LMBOOST_ASYNC").is_some()
+}
+
+/// [`lmboost_async`] の裏で回っている LMBOOST のスレッド
+pub(super) struct LmboostBg {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    hs: Vec<std::thread::JoinHandle<()>>,
+    t0: Instant,
+    cap: f64,
+    stall: f64,
+    last_imp: Instant,
+    inc: f64,
+    k: usize,
+}
+
+impl Drop for LmboostBg {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for h in self.hs.drain(..) {
+            let _ = h.join();
+        }
+    }
+}
+
 /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、既定では使わない): [`Solver::lmip_boost`]。
 fn lmboost_on() -> bool {
     env_def!("ENOMOTO_MIP_LMBOOST", "1").is_some()
@@ -5291,6 +5321,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tr_huge: 0,
         tc_g_next: 0,
         tc_l_next: 0,
+        lmboost_bg: None,
         tr_outer0: f64::NAN,
         tr_tk0: 0.0,
         tc_l_stats: [0; 4],
@@ -11355,6 +11386,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_TREE_RESTART` (試作): 木に入る前の暫定解の印は消しておく (木の中で良くなったときだけ判定する)
         self.tree_restart_check = false;
         // 木の中の再スタートの記帳 (`TRSTAT`) 用: 木に入った時刻と下界 (ログを出すだけで解き方は変えない)
+        // 試作 `ENOMOTO_MIP_LMBOOST_ASYNC`: 木に入る前に裏の LMBOOST を止める
+        self.lmboost_bg_tick(Some("tree start"));
         self.tr_t0 = self.start.elapsed().as_secs_f64();
         self.tr_outer0 = super::outer_elapsed().unwrap_or(f64::NAN);
         self.tr_tk0 = crate::ticks::total();
@@ -21778,6 +21811,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッドが終わっていれば結果を受け取る (待たない)。
     pub(super) fn poll_lmip_thread(&mut self) {
+        self.lmboost_bg_tick(None);
         self.poll_fpr();
         self.post_prechain();
         // 受け渡し箱には良くなった解を全部ためてあり、新しい (良い) 順に試して、受け付けられたらそこで止める。最良の解が受け付け
@@ -21885,6 +21919,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// [`lmboost_async`]: 裏の LMBOOST の止める条件を見る (`force` なら理由をつけて必ず止める)。止めたら残りの解を受け取る
+    fn lmboost_bg_tick(&mut self, force: Option<&'static str>) {
+        let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+        let (gap_closed, time_up, elapsed, only_fj) = (self.root_gap_closed(), self.time_up(), self.start.elapsed().as_secs_f64(), self.inc_only_fj);
+        let Some(bg) = self.lmboost_bg.as_mut() else { return };
+        if z < bg.inc {
+            bg.inc = z;
+            bg.last_imp = Instant::now();
+        }
+        let why = if let Some(w) = force {
+            w
+        } else if gap_closed {
+            "gap closed"
+        } else if time_up || elapsed >= bg.cap {
+            "time cap"
+        } else if bg.last_imp.elapsed().as_secs_f64() >= bg.stall {
+            "stalled"
+        } else if !only_fj {
+            "other incumbent"
+        } else {
+            return;
+        };
+        let bg = self.lmboost_bg.take().unwrap();
+        let (k, secs) = (bg.k, bg.t0.elapsed().as_secs_f64());
+        drop(bg);
+        if self.params.verbose {
+            eprintln!("MIP: LMBOOST: background threads stopped ({why}) after {secs:.2}s with {k} extra Local-MIP threads, incumbent {:?} ({:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
+        }
+        self.poll_lmip_thread();
+    }
+
     /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、analysis/comp07_20261111.md、既定では使わない): 根のカットのループの終わりで、暫定解が
     /// FJ のスレッドの Local-MIP の解だけで、それがまだ下がり続けている (Local-MIP の改善が 2 回以上あり、最後の改善がループの後半) なら、
     /// 根のヒューリスティクスの前に Local-MIP を増やして回す: FJ のスレッドは止めず、スレッド数 − 2 本 (`ENOMOTO_T_MIP_LMBOOST_THREADS`) の
@@ -21969,6 +22034,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let stall_k = tunable!("ENOMOTO_T_MIP_LMBOOST_STALL", 0.5, f64);
         let mut last_imp = t0;
         let mut inc = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+        if lmboost_async() {
+            if self.params.verbose {
+                eprintln!("MIP: LMBOOST: {k} extra Local-MIP threads keep running in the background (ENOMOTO_MIP_LMBOOST_ASYNC, {:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+            self.lmboost_bg = Some(LmboostBg { stop, hs, t0, cap, stall: (stall_k * t_now).max(2.0), last_imp, inc, k });
+            return;
+        }
         let why = loop {
             std::thread::sleep(Duration::from_millis(20));
             self.poll_lmip_thread();
