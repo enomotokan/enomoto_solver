@@ -6634,6 +6634,8 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         // `ENOMOTO_MIP_ENUM_EDGES`: 列挙で分かった衝突の組を含意の表 (クリークのグラフ、クリーク行の拡張が使う) に足す
         let want_edges = env_str!("ENOMOTO_MIP_ENUM_EDGES").is_some();
         let mut new_edges: Vec<(u32, u32)> = Vec::new();
+        // 列挙の前の境界 ([`enumerate_rows`] は見つけた締め付けをその場で `dom` に入れるので、下で入れ直すときに「締まった」と数えるため)
+        let (pre_lo, pre_up) = (dom.lo.clone(), dom.up.clone());
         let res = enumerate_rows(prob, d2.as_mut().unwrap_or(&mut dom), &bin0, if want_equiv { Some(&mut equiv) } else { None }, if want_edges { Some(&mut new_edges) } else { None });
         if want_edges {
             let have: std::collections::HashSet<(u32, u32)> = edges.iter().map(|&(a, b)| (a.min(b), a.max(b))).collect();
@@ -6648,8 +6650,11 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         let Some((wc, rows_done, sols)) = res else { return Some(false) };
         // 見つけた境界を元の定義域に入れる (`impl` の写しで見つけたものも大域的に成り立つ)
         for (k, upper, v) in wc {
-            let was_fixed = dom.lo[k] == dom.up[k];
+            let was_fixed = pre_lo[k] == pre_up[k];
             let ch = if upper { dom.tighten_upper(prob, k, v) } else { dom.tighten_lower(prob, k, v) };
+            // 列挙の中で入れ済みの締め付け (`ch` が偽) も、列挙の前より締まっていれば数える (以前は数えず、neos-960392 で 84 本の締め付けを
+            // 「0 固定・0 締め付け」と出し、`HO3_ENUM` の `a` が「何も見つからなかった」と誤って次の回を飛ばしていた。treeclose 9.57 節)
+            let ch = ch || if upper { dom.up[k] < pre_up[k] } else { dom.lo[k] > pre_lo[k] };
             if ch {
                 if !was_fixed && dom.lo[k] == dom.up[k] {
                     fixed += 1;
