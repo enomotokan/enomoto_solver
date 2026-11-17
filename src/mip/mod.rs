@@ -4430,6 +4430,13 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     let shift = p.objective(&x_orig) - (pre.c.iter().zip(&x_red).map(|(c, x)| c * x).sum::<f64>() + p.offset);
     let offset = if shift.is_finite() { p.offset + shift } else { p.offset };
     let mut prob = MipProblem::from_rows(pre.lb.clone(), pre.ub.clone(), pre.c.clone(), offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
+    // 診断 `ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED=接頭辞` (振る舞いは変えない): 前処理の後の問題を `接頭辞_番号.mps` に書く (サブ MIP は除く)
+    if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED").filter(|_| !submip) {
+        static CNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = format!("{f}_{}.mps", CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        dump_mps(&prob, &id);
+        eprintln!("MIP: presolve: dumped the presolved problem to {id} (offset {})", prob.offset);
+    }
     // `ENOMOTO_MIP_ROWNORM` (試作、既定では使わない。analysis/rownorm_20261106.md): 行の向き (-1 倍するか) を列の順・行の順に
     // よらない形にそろえる ([`normalize_row_signs`])。[`merge_parallel_rows`] は `<= u` と `>= l` の 2 本を、組の中で先に来た行の向きの
     // まま 1 本の幅つきの行にまとめるので、向きが行ごとにばらばらになる (fastxgemm-n2r6s0t2。analysis/highs_only_20261105/G3.md)。
