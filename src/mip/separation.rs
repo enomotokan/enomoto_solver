@@ -754,6 +754,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.params.verbose && !self.params.submip {
                 let g0 = super::clique::CliqueGraph::build(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &self.dom.global_lo, &self.dom.global_up);
                 eprintln!("MIP: clique graph: {} edges ({} from rows, probing implications {})", g.num_edges(), g0.num_edges(), p.conflict_edges.len());
+                // 診断 `ENOMOTO_MIP_DEBUG_CLQINF` (調べ C の 12 節): HiGHS のクリークの表の `processNewEdge` の規則に当たる文字の数。
+                // (a) 文字 l が y と ¬y の両方と衝突 (または ¬l と衝突) → l = 0 に固定できる、(b) l と y、¬l と ¬y がどちらも衝突 → y = ¬l と代入できる
+                if env_str!("ENOMOTO_MIP_DEBUG_CLQINF").is_some() {
+                    let (mut ninf, mut nsub) = (0usize, 0usize);
+                    for l in 0..2 * p.n as u32 {
+                        let nb = g.neighbors(l);
+                        if nb.binary_search(&(l ^ 1)).is_ok() || nb.iter().any(|&y| y & 1 == 0 && nb.binary_search(&(y ^ 1)).is_ok()) {
+                            ninf += 1;
+                        }
+                        if l & 1 == 0 {
+                            nsub += nb.iter().filter(|&&y| y / 2 > l / 2 && g.adjacent(l ^ 1, y ^ 1)).count();
+                        }
+                    }
+                    eprintln!("MIP: CLQINF: literals fixable by the clique rule {ninf}, substitutable pairs {nsub} (columns {})", p.n);
+                }
             }
             self.clique_graph = Some(std::rc::Rc::new(g));
         }
