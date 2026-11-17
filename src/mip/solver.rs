@@ -24988,6 +24988,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
             eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
+            if super::domain::conflict_lev_diag() {
+                let c: Vec<u64> = super::domain::CONFLICT_LEV.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: conflict levels (all threads): examined {}, 1-UIP {}, stopped with >= 2 left {} (with non-row reasons {}); left by reason: decision {}, external {}, local redcost {}, strong branching {}, orbitope {}, dual proof {}, literal conflict {}, objective {}, implication {}, -10 {}, other {}", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14]);
+                let d: Vec<u64> = super::domain::CONFLICT_STOP.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: conflict analyses (all threads): {}, stopped: first level not resolved {}, set too large {}, not explained by a row {}, no conflict {}, 5-level rule {}, all levels {}; dropped as too long {}, conflicts {}, levels {}", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9]);
+            }
             if self.par_sb_stats[0] > 0 {
                 eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
             }
