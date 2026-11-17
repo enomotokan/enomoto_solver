@@ -7902,6 +7902,156 @@ impl<'a, L: MipLp> Solver<'a, L> {
         Some(ok)
     }
 
+    /// 診断 `ENOMOTO_MIP_DIAG_CLQROWS` (treeclose 9.78 節、既定では使わない): 根の LP (カットの前) で、クリーク型の行 (2 値列の文字の和 ≤ 1 / = 1)
+    /// の数・割合・非零の割合、LP 解で余裕のある行、小さい行 (`ENOMOTO_T_MIP_DIAG_CLQROWS_K` 文字以下、既定 8) を極大クリークでまとめられる余地と、
+    /// まとめたクリークのうち LP 解を破るものを足したときの下界の伸びを 1 行ずつ出す。LP は試したあと元に戻す。
+    fn diag_clqrows(&mut self) {
+        let t0 = Instant::now();
+        let p = self.p;
+        let n = p.n;
+        let binary: Vec<bool> = (0..n).map(|j| p.is_int[j] && p.col_lo[j] == 0.0 && p.col_up[j] == 1.0).collect();
+        let free: Vec<bool> = (0..n).map(|j| p.col_lo[j] < p.col_up[j]).collect();
+        let x = self.lp.col_values();
+        let litv = |l: u32| -> f64 { let v = x[(l / 2) as usize]; if l % 2 == 0 { v } else { 1.0 - v } };
+        let (mut nrow, mut nnz_all) = (0usize, 0usize);
+        // (行, 文字, 等式か)
+        let mut cl: Vec<(usize, Vec<u32>, bool)> = Vec::new();
+        for (i, r0) in p.rows.iter().enumerate() {
+            let r: Vec<(usize, f64)> = r0.iter().copied().filter(|e| free[e.0]).collect();
+            nrow += 1;
+            nnz_all += r.len();
+            let (l, u) = (p.row_lo[i], p.row_up[i]);
+            let eq = l == u;
+            // 固定された列の分を右辺に移す
+            let shift: f64 = r0.iter().filter(|e| !free[e.0]).map(|&(j, a)| a * p.col_lo[j]).sum();
+            for (sg, b) in [(1.0, u - shift), (-1.0, -(l - shift))] {
+                if !b.is_finite() || r.len() < 2 {
+                    continue;
+                }
+                if !r.iter().all(|&(j, a)| binary[j] && ((sg * a).abs() - 1.0).abs() <= 1e-12) {
+                    break;
+                }
+                let nneg = r.iter().filter(|&&(_, a)| sg * a < 0.0).count() as f64;
+                if ((b + nneg) - 1.0).abs() > 1e-9 {
+                    continue;
+                }
+                cl.push((i, r.iter().map(|&(j, a)| if sg * a > 0.0 { 2 * j as u32 } else { 2 * j as u32 + 1 }).collect(), eq));
+                break;
+            }
+        }
+        let ncl = cl.len();
+        let neq = cl.iter().filter(|c| c.2).count();
+        let nnz_cl: usize = cl.iter().map(|c| c.1.len()).sum();
+        let (mut slack_n, mut slack_nnz, mut zero_n, mut slack_eq) = (0usize, 0usize, 0usize, 0usize);
+        for (_, lits, eq) in &cl {
+            let s: f64 = lits.iter().map(|&l| litv(l)).sum();
+            if 1.0 - s > 1e-6 {
+                slack_n += 1;
+                slack_nnz += lits.len();
+                if *eq {
+                    slack_eq += 1;
+                }
+                if s < 1e-6 {
+                    zero_n += 1;
+                }
+            }
+        }
+        let len_b = [cl.iter().filter(|c| c.1.len() == 2).count(), cl.iter().filter(|c| (3..=8).contains(&c.1.len())).count(), cl.iter().filter(|c| c.1.len() > 8).count()];
+        eprintln!(
+            "MIP: CLQROWS: rows {nrow} nnz {nnz_all}; clique rows {ncl} ({:.1}% of rows, eq {neq}, len 2 / 3-8 / 9+ = {} / {} / {}), nnz {nnz_cl} ({:.1}%); slack at the root LP {slack_n} ({:.1}% of clique rows, nnz {slack_nnz} = {:.1}% of all, eq {slack_eq}, all-zero {zero_n}); root LP {} iters {:.2}s",
+            100.0 * ncl as f64 / nrow.max(1) as f64, len_b[0], len_b[1], len_b[2], 100.0 * nnz_cl as f64 / nnz_all.max(1) as f64,
+            100.0 * slack_n as f64 / ncl.max(1) as f64, 100.0 * slack_nnz as f64 / nnz_all.max(1) as f64, self.root_lp_iters, self.root_lp_secs
+        );
+        // まとめる余地: 小さい不等式の行を極大クリークに広げ、同じクリークに入る行を組にする
+        let kmax = tunable!("ENOMOTO_T_MIP_DIAG_CLQROWS_K", 8usize, usize);
+        let small: Vec<&(usize, Vec<u32>, bool)> = cl.iter().filter(|c| !c.2 && c.1.len() <= kmax).collect();
+        if small.is_empty() {
+            eprintln!("MIP: CLQROWS: no small inequality clique rows (len <= {kmax}) ({:.2}s)", t0.elapsed().as_secs_f64());
+            return;
+        }
+        let g = super::clique::CliqueGraph::build_with(n, &p.rows, &p.row_lo, &p.row_up, &binary, &p.col_lo, &p.col_up, &p.conflict_edges);
+        let mut cliques: Vec<std::collections::HashSet<u32>> = Vec::new();
+        let mut members: Vec<Vec<usize>> = Vec::new();
+        let mut of_lit: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+        let (mut grown, mut stopped) = (0usize, false);
+        for (k, (_, lits, _)) in small.iter().enumerate() {
+            if t0.elapsed().as_secs_f64() > tunable!("ENOMOTO_T_MIP_DIAG_CLQROWS_SECS", 60.0, f64) {
+                stopped = true;
+                break;
+            }
+            let found = of_lit.get(&lits[0]).and_then(|ids| ids.iter().copied().find(|&c| lits.iter().all(|l| cliques[c].contains(l))));
+            if let Some(c) = found {
+                members[c].push(k);
+                continue;
+            }
+            let mut cq: Vec<u32> = lits.clone();
+            let &l0 = lits.iter().min_by_key(|&&l| g.neighbors(l).len()).unwrap();
+            for &c in g.neighbors(l0) {
+                if cq.len() >= 1000 {
+                    break;
+                }
+                if cq.iter().any(|&y| y / 2 == c / 2) || !free[(c / 2) as usize] {
+                    continue;
+                }
+                if cq.iter().all(|&y| y == l0 || g.adjacent(y, c)) {
+                    cq.push(c);
+                }
+            }
+            if cq.len() > lits.len() {
+                grown += 1;
+            }
+            let id = cliques.len();
+            for &l in &cq {
+                of_lit.entry(l).or_default().push(id);
+            }
+            cliques.push(cq.into_iter().collect());
+            members.push(vec![k]);
+        }
+        let groups: Vec<usize> = (0..cliques.len()).filter(|&c| members[c].len() >= 2).collect();
+        let rows_before: usize = groups.iter().map(|&c| members[c].len()).sum();
+        let nnz_before: usize = groups.iter().map(|&c| members[c].iter().map(|&k| small[k].1.len()).sum::<usize>()).sum();
+        let nnz_after: usize = groups.iter().map(|&c| cliques[c].len()).sum();
+        let act = |c: &std::collections::HashSet<u32>| -> f64 { c.iter().map(|&l| litv(l)).sum() };
+        let viol: Vec<usize> = (0..cliques.len()).filter(|&c| act(&cliques[c]) > 1.0 + 1e-6).collect();
+        let viol_g = viol.iter().filter(|&&c| members[c].len() >= 2).count();
+        // 破るクリークを足して LP を解き直す (反復の上限つき) と、下界の伸び
+        let obj0 = self.lp.objective();
+        let (mut obj1, mut its, mut st_s) = (obj0, 0u64, String::from("-"));
+        if !viol.is_empty() && env_str!("ENOMOTO_MIP_DIAG_CLQROWS").is_some_and(|v| v != "nolp") {
+            let saved = self.lp.save_state();
+            let m0 = self.lp.num_rows();
+            let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = viol
+                .iter()
+                .map(|&c| {
+                    let mut nneg = 0.0;
+                    let mut r: Vec<(usize, f64)> = cliques[c].iter().map(|&l| if l % 2 == 0 { ((l / 2) as usize, 1.0) } else { nneg += 1.0; ((l / 2) as usize, -1.0) }).collect();
+                    r.sort_by_key(|e| e.0);
+                    (r, f64::NEG_INFINITY, 1.0 - nneg)
+                })
+                .collect();
+            self.lp.add_rows(&rows);
+            let it0 = self.lp.total_iterations();
+            let lim = 10 * self.root_lp_iters.max(100) + 10_000;
+            let st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: self.deadline });
+            its = self.lp.total_iterations() - it0;
+            st_s = format!("{st:?}");
+            if st == LpStatus::Optimal {
+                obj1 = self.lp.objective();
+            }
+            let mut remove = vec![false; self.lp.num_rows()];
+            for r in remove.iter_mut().skip(m0) {
+                *r = true;
+            }
+            self.lp.delete_rows(&remove);
+            self.lp.restore_state(&saved);
+        }
+        eprintln!(
+            "MIP: CLQROWS merge (len <= {kmax}): small rows {} -> {} maximal cliques ({} grown beyond the row); groups of >= 2 rows {} covering {rows_before} rows (rows -{}, nnz {nnz_before} -> {nnz_after}); cliques violated by the root LP {} (in groups {viol_g}); LP with them {:.10e} -> {:.10e} (gain {:.3e} rel, {its} iters, {st_s}); graph {} edges{} ({:.2}s)",
+            small.len(), cliques.len(), grown, groups.len(), rows_before - groups.len(), viol.len(), obj0 + p.offset, obj1 + p.offset,
+            (obj1 - obj0) / (obj0 + p.offset).abs().max(1.0), g.num_edges(), if stopped { ", stopped by the time cap" } else { "" }, t0.elapsed().as_secs_f64()
+        );
+    }
+
     /// 現在の LP 解で整数でない整数列の (列, 値) の一覧。
     /// `ENOMOTO_MIP_HNFBR` (改良 11-08、試作) なら、合同式 x ≡ r (mod m) の列は y = (x - r)/m が整数でないときも入れる
     /// (x が整数でも合同式に合わなければ分枝の候補。整数列がすべて整数なら行から合同式は成り立つので、一覧が空かどうかは変わらない)
@@ -9487,6 +9637,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let free: Vec<bool> = (0..self.p.n).map(|j| self.p.col_lo[j] < self.p.col_up[j]).collect();
             let nnz: usize = self.p.rows.iter().map(|r| r.iter().filter(|e| free[e.0]).count()).sum();
             eprintln!("MIP: root LP size: rows {}, free columns {}, nonzeros {nnz}", self.lp.num_rows(), free.iter().filter(|&&f| f).count());
+        }
+        if env_str!("ENOMOTO_MIP_DIAG_CLQROWS").is_some() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 {
+            self.diag_clqrows();
+            // 値 `stop`: 数えたら止める (根の LP の後の手間を省く。状態は時間切れ)
+            if env_str!("ENOMOTO_MIP_DIAG_CLQROWS").is_some_and(|v| v == "stop") {
+                self.join_fj_thread();
+                return self.finish(MipStatus::TimeLimit, root_obj);
+            }
         }
         // カットを加える前の根の LP 解 (RENS の 2 つ目の近傍に使う)
         let x_root0 = self.lp.col_values();
