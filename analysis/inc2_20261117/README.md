@@ -10,4 +10,4 @@
 - P: 58 問 × 種 1〜3 × 2 設定、4 スレッド・60 秒 (348 回)、6 分担 (見積り各約 29 分): `python run.py P K` (K = 0〜5)
 - M: tbfp-network・irp・neos-3627168-kasai・supportcase33・unitcal_7・rococoC10-001000 × 種 1・2 × 2 設定、4 スレッド・600 秒 (24 回)、
   6 分担 (各 4 回、最大約 41 分): `python run.py M K` (K = 0〜5)
-- **d81002098 以降でビルドして回す。** 集計 `python summ.py P > summ_P.txt`、`python summ.py M > summ_M.txt`。
+- **534261f49 以降でビルドして回す。** 集計 `python summ.py P > summ_P.txt`、`python summ.py M > summ_M.txt`。
