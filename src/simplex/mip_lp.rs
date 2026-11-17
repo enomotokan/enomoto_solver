@@ -772,6 +772,9 @@ impl TwoStageLp {
                 (1.0, u, f64::INFINITY, false)
             } else if l.is_finite() {
                 (-1.0, -l, f64::INFINITY, false)
+            } else if freerow_off('s') {
+                // 診断 `ENOMOTO_MIP_FREEROW_OFF` の `s`: 空の行にせず、係数を残してスラックを自由変数にする (a·x + s = 0、s は無限の範囲)
+                (1.0, 0.0, f64::NEG_INFINITY, false)
             } else {
                 // 制約のない行: 空の行 (0 = 0) にする
                 (1.0, 0.0, 0.0, true)
@@ -787,8 +790,13 @@ impl TwoStageLp {
             r.push((n + i, 1.0));
             std_rows.push(r);
             b.push(rhs);
-            slb[n + i] = 0.0;
-            sub[n + i] = s_up.max(0.0);
+            if s_up == f64::NEG_INFINITY {
+                slb[n + i] = f64::NEG_INFINITY;
+                sub[n + i] = f64::INFINITY;
+            } else {
+                slb[n + i] = 0.0;
+                sub[n + i] = s_up.max(0.0);
+            }
             sigma.push(sg);
         }
         let mut c = vec![0.0; n_total];
@@ -871,6 +879,11 @@ impl TwoStageLp {
     /// 試作 `ENOMOTO_MIP_CLQ_LAZY` が余裕のあるクリーク型の行をこの形にする)
     fn free_row(&self, i: usize) -> bool {
         self.row_lo[i] == f64::NEG_INFINITY && self.row_up[i] == f64::INFINITY
+    }
+
+    /// 双対・Farkas・tableau の重み・被約費用で空の行を 0 として扱うか (診断 `ENOMOTO_MIP_FREEROW_OFF` の `d` で扱わない)
+    fn zero_free(&self) -> bool {
+        self.has_free_rows && !freerow_off('d')
     }
 
     /// 行の境界をまとめて変える (標準形の作り直しは 1 回)。試作 `ENOMOTO_MIP_CLQ_LAZY` 用。
@@ -1103,7 +1116,7 @@ impl TwoStageLp {
         b.retain(|&v| v < n + m && !std::mem::replace(&mut used[v], true));
         // 両側とも無限の境界の行 (標準形では空の行、試作 `ENOMOTO_MIP_CLQ_LAZY`) のスラックは必ず基底に入れる (非基底だと基底が特異になり、
         // 分解の修復でスラックに置き換えられる列が増えて解き直しが重くなる)。余った分は下で構造列を後ろから外す
-        if self.has_free_rows {
+        if self.has_free_rows && !freerow_off('r') {
             for i in 0..m {
                 if !used[n + i] && self.row_lo[i] == f64::NEG_INFINITY && self.row_up[i] == f64::INFINITY {
                     used[n + i] = true;
@@ -3245,7 +3258,7 @@ impl TwoStageLp {
         let mut d = self.cost.clone();
         for (i, r) in self.rows.iter().enumerate() {
             let yi = self.y.get(i).copied().unwrap_or(0.0) * self.sigma[i];
-            if yi != 0.0 && !(self.has_free_rows && self.free_row(i)) {
+            if yi != 0.0 && !(self.zero_free() && self.free_row(i)) {
                 for &(j, a) in r {
                     d[j] -= yi * a;
                 }
@@ -3257,7 +3270,7 @@ impl TwoStageLp {
     /// 行の双対値 (元の行の向き)。
     pub fn farkas_ray(&self) -> Option<Vec<f64>> {
         let mut r = self.ray.clone();
-        if self.has_free_rows {
+        if self.zero_free() {
             if let Some(r) = r.as_mut() {
                 for (i, v) in r.iter_mut().enumerate().take(self.rows.len()) {
                     if self.free_row(i) {
@@ -3270,7 +3283,7 @@ impl TwoStageLp {
     }
 
     pub fn row_duals(&self) -> Vec<f64> {
-        (0..self.rows.len()).map(|i| if self.has_free_rows && self.free_row(i) { 0.0 } else { self.y.get(i).copied().unwrap_or(0.0) * self.sigma[i] }).collect()
+        (0..self.rows.len()).map(|i| if self.zero_free() && self.free_row(i) { 0.0 } else { self.y.get(i).copied().unwrap_or(0.0) * self.sigma[i] }).collect()
     }
 
     /// 基底位置 `s` の `e_s^T B^{-1}` を、元の行に掛ける重みとして返す
@@ -3540,7 +3553,7 @@ impl TwoStageLp {
     /// 呼び手は行の全部 (m 個) を回さずに済む (値は密な版とビット一致)。
     pub fn basis_inverse_row_sparse(&mut self, s: usize) -> Vec<(usize, f64)> {
         let mut r = self.basis_inverse_row_sparse_raw(s);
-        if self.has_free_rows {
+        if self.zero_free() {
             r.retain(|&(i, _)| !self.free_row(i));
         }
         r
@@ -3621,7 +3634,7 @@ impl TwoStageLp {
 
     pub fn basis_inverse_row(&mut self, s: usize) -> Vec<f64> {
         let mut r = self.basis_inverse_row_raw(s);
-        if self.has_free_rows {
+        if self.zero_free() {
             for (i, v) in r.iter_mut().enumerate() {
                 if self.free_row(i) {
                     *v = 0.0;
@@ -3823,4 +3836,11 @@ pub(crate) fn nodecut_report() {
             v[0], v[1], v[2], v[3], v[18], v[19], v[4], v[5], v[6], v[7], v[16], v[17], v[8], v[9], v[10], v[21], v[11], v[12], v[13], v[14], v[15], v[22], v[23], v[20], v[24], v[25], v[26], v[27], v[28], v[29]
         );
     }
+}
+
+/// 診断 `ENOMOTO_MIP_FREEROW_OFF` (GENLAZY の mzzv11 の切り分け、既定では使わない): 両側とも無限の境界の行 (空の行) の扱いを文字で 1 つずつ元に戻す。
+/// `r` 基底の修復で空の行のスラックを基底に入れない、`d` 双対・Farkas・tableau の重み・被約費用で 0 にしない、
+/// `s` 標準形で空の行にせず係数を残してスラックを自由変数にする、`p` 受け渡しの基底の直し (`fix_pool_basis`) で空の行を特別に扱わない
+pub(crate) fn freerow_off(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_FREEROW_OFF").is_some_and(|v| v.contains(c))
 }
