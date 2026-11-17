@@ -1,9 +1,10 @@
 """LPINF の対の比べの分担を回す (slow2_20261117/run.py の写し): python run.py SET K (SET は M (Mittelmann 48 問 600 秒) か P (MIPLIB の 58 問 60 秒))。
 shards_SET.json の K 番目の (問題, 設定, 種, 秒) を順に 4 スレッドで解き、res_SET_sK.jsonl に足す。途中から再開できる。ソルバーは同時に 1 つ。
-行の形は analysis/vshighs_20261117/run.py と同じに、"lpinf": [際どい実行不能で解き直した数, 解き直しても際どく LP 値なしで分枝した数]
-(old は判定しないので [0, 0]) を足す。数えるためにログ (ENOMOTO_MIP_LOG=1) を一時ファイルに出し、その行だけ拾って消す (両設定とも)。
+行の形は analysis/vshighs_20261117/run.py と同じに、"lpinf": [ノードの LP を解き直した数, 解き直しても際どく LP 値なしで分枝した数,
+強分枝の子を不明扱いにした数, 根の LP・LP のプロービング (前処理の LP プロービングを含む) で信用しなかった数] (全スレッド・サブ MIP 込みの累計。
+old は判定しないので全部 0。ログの統計の行が出ない回 (木の探索の前に終わった回) は null) を足す。数えるためにログ (ENOMOTO_MIP_LOG=1) を一時ファイルに出し、その行だけ拾って消す (両設定とも)。
 設定は cfg.py (def = 直しあり、old = ENOMOTO_MIP_NO_LPINF_CHECK=1)。"""
-import json, os, subprocess, sys, tempfile, time
+import json, os, re, subprocess, sys, tempfile, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
 WT = D.parents[1]
@@ -43,8 +44,8 @@ def run(cfg, seed, mps, tl):
     err.close()
     li = None
     for l in lf.read_text(errors="replace").splitlines():  # 最後の行 (再スタートがあっても累計)
-        if "marginal node LP infeasibility" in l:
-            w = l.split(); li = [int(w[-6].rstrip(",")), int(w[-1])]
+        if "marginal LP infeasibility" in l:
+            li = [int(v) for v in re.findall(r"\d+", l.split("cumulative):")[1])]
     lf.unlink()
     res["lpinf"] = li
     return res, round(peak), round(time.time() - t0, 1)
