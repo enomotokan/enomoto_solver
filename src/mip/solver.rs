@@ -8208,6 +8208,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let basis = self.lp.basis();
         let slack_basic = |i: usize| basis.row.get(i).is_none_or(|s| *s == VarStatus::Basic) || basis.row.is_empty();
+        // 候補にならなかった余裕のある (1 − 文字の和 > 1e-6) クリーク型の行の非零 (主のみ)
+        let mut nnz_slack = 0usize;
         let cand: Vec<(usize, Vec<u32>)> = if let Some(sn) = self.snap.as_ref() {
             // 従は主と同じ行を外す (スレッドの間で受け渡す基底で、外した行のスラックがどれも基底にあるように。基底に入れるのは LP の基底の修復が行う)
             sn.clq_lazy.iter().filter(|(i, _)| *i < m0).cloned().collect()
@@ -8248,6 +8250,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 等式の行は両側の確かめが要るので外さない
                     if l != u && 1.0 - sv > tol {
                         out.push((i, lits));
+                    } else if l != u && 1.0 - sv > 1e-6 {
+                        // 門 (LAZYFRAC) の f を余裕のある行全部で数えるときのため (θ を小さくすると f が問題を分けなくなる)
+                        nnz_slack += lits.len();
                     }
                     break;
                 }
@@ -8259,24 +8264,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 外す行の非零 / LP の元の行の非零 (問題の特徴、ログに出す)。`ENOMOTO_T_MIP_CLQ_LAZY_GATE_F0` = f0 > 0 (既定 0 = 使わない) なら、
         // 割合 f のシグモイド σ(k (f − f0)) (k = `ENOMOTO_T_MIP_CLQ_LAZY_GATE_K`、既定 20) の分だけ候補を外す (主のみ。文字の和の小さい = 余裕の大きい順)。
-        // 外す量が少ない (LP が軽くならない) 問題では外さず道筋を変えない
+        // 外す量が少ない (LP が軽くならない) 問題では外さず道筋を変えない。`ENOMOTO_MIP_LAZY_GATE_ONE=1` は f >= f0 のとき 1 行だけ外す対照
+        // ([`genlazy::gate_keep`]、試作 LAZYFRAC)
         let nnz_all: usize = (0..m0).map(|i| self.lp.row_ref(i).len()).sum::<usize>().max(1);
         let nnz_c: usize = cand.iter().map(|c| c.1.len()).sum();
         let frac = nnz_c as f64 / nnz_all as f64;
-        let f0 = tunable!("ENOMOTO_T_MIP_CLQ_LAZY_GATE_F0", 0.0, f64);
+        // 余裕のある (1 − 文字の和 > 1e-6) クリーク型の行全部の非零の割合 (θ = 1 の候補)。`ENOMOTO_MIP_CLQ_LAZY_GATE_FALL=1` なら門はこちらで決める
+        let frac_all = (nnz_c + nnz_slack) as f64 / nnz_all as f64;
+        let diag = self.snap.is_none() && env_str!("ENOMOTO_MIP_DIAG_GENLAZY").is_some();
+        if diag {
+            eprintln!("CLQLAZY_F {{\"m\":{m0},\"nnz\":{nnz_all},\"tol\":{},\"rows\":{},\"dropnnz\":{nnz_c},\"f\":{frac:.5},\"f_all\":{frac_all:.5}}}", tunable!("ENOMOTO_T_MIP_CLQ_LAZY_TOL", 1e-6, f64), cand.len());
+        }
+        let frac = if env_str!("ENOMOTO_MIP_CLQ_LAZY_GATE_FALL").is_some_and(|v| v != "0") { frac_all } else { frac };
+        if genlazy::diag_nodrop() {
+            return;
+        }
         let mut cand = cand;
-        if f0 > 0.0 && self.snap.is_none() {
-            let k = tunable!("ENOMOTO_T_MIP_CLQ_LAZY_GATE_K", 20.0, f64);
-            let share = 1.0 / (1.0 + (-k * (frac - f0)).exp());
-            let x = self.lp.col_values();
-            let sum = |lits: &[u32]| -> f64 { lits.iter().map(|&q| { let v = x[(q / 2) as usize]; if q % 2 == 0 { v } else { 1.0 - v } }).sum() };
-            cand.sort_by(|a, b| sum(&a.1).total_cmp(&sum(&b.1)));
-            cand.truncate((share * cand.len() as f64).floor() as usize);
-            if self.params.verbose && self.pool_tid == 0 {
-                eprintln!("MIP: CLQ_LAZY gate: nonzero share {frac:.4} (f0 {f0}, k {k}) -> keep {:.3} of the candidates ({} rows)", share, cand.len());
-            }
-            if cand.is_empty() {
-                return;
+        if self.snap.is_none() {
+            if let Some((keep, share)) = genlazy::gate_keep("CLQ", frac, cand.len()) {
+                let x = self.lp.col_values();
+                let sum = |lits: &[u32]| -> f64 { lits.iter().map(|&q| { let v = x[(q / 2) as usize]; if q % 2 == 0 { v } else { 1.0 - v } }).sum() };
+                cand.sort_by(|a, b| sum(&a.1).total_cmp(&sum(&b.1)).then(a.0.cmp(&b.0)));
+                cand.truncate(keep);
+                if diag || (self.params.verbose && self.pool_tid == 0) {
+                    eprintln!("MIP: CLQ_LAZY gate: nonzero share {frac:.4} -> share {share:.3}, keep {keep} rows");
+                }
+                if cand.is_empty() {
+                    return;
+                }
             }
         }
         let ch: Vec<(usize, f64, f64)> = cand.iter().map(|(i, _)| (*i, f64::NEG_INFINITY, f64::INFINITY)).collect();
@@ -25694,6 +25709,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_GEN_LAZY` の数 (詳しい表示でなくても診断 `ENOMOTO_MIP_DIAG_GENLAZY` なら出す。計測の台本が拾う)
         if genlazy::on() && !self.params.verbose && env_str!("ENOMOTO_MIP_DIAG_GENLAZY").is_some() && self.gen_lazy_stats[0] > 0 && !self.params.submip {
             self.gen_lazy_report();
+        }
+        if clq_lazy_on() && !self.params.verbose && env_str!("ENOMOTO_MIP_DIAG_GENLAZY").is_some() && self.clq_lazy_stats[0] > 0 && !self.params.submip {
+            let s = self.clq_lazy_stats;
+            eprintln!("MIP: CLQ_LAZY stats tid {}: dropped {} checks {} restored {} resolves {} still dropped {}", self.pool_tid, s[0], s[1], s[2], s[3], self.clq_lazy.len());
         }
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds, rejected as numerically unreliable {})", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings, self.proof_numeric_rejects);
