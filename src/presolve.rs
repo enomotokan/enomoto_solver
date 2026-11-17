@@ -394,7 +394,12 @@ impl PostsolveStep {
 }
 
 /// 実行不能と判定したときの [`ExtendedPresolveResult`] を作る (`_n` は未使用)。
+/// 診断 `ENOMOTO_DEBUG_PRESOLVE_INFEAS`: 判定した箇所 (呼び出し元の行) を stderr に出す。
+#[track_caller]
 fn extended_infeasible(sc: Scaling, a: FaerCsr, b: Vec<f64>, c: Vec<f64>, _n: usize) -> ExtendedPresolveResult {
+    if env_str!("ENOMOTO_DEBUG_PRESOLVE_INFEAS").is_some() {
+        eprintln!("PRESOLVE_INFEAS: at {}", std::panic::Location::caller());
+    }
     ExtendedPresolveResult {
         scaling: sc,
         a,
@@ -1155,6 +1160,18 @@ pub fn run_extended(
                 postsolve_log.extend(agg.substitutions.into_iter().map(PostsolveStep::Sub));
                 cur_real_rows = agg.real_rows;
                 cur_real_rhs = agg.real_rhs;
+                // 試作 `ENOMOTO_AGG_DUALFREE_INEQ` のときだけ: 代入で項が打ち消し合って空になった不等式行を、固定列の折り込みと
+                // 同じ許容 (空の行は主実行可能性の許容 1e-7 より厳しくしない) でここで取り除く。次のラウンドの伝播が先に
+                // 見ると、行の大きさの手がかりを失った 1e-9 程度の許容で実行不能と判定する (乱数問題の seed 378:
+                // 大きい M の行 `x0 + 2e7 z + t ≤ h` の右辺が丸めで −2e-9 残る)。
+                if env_str!("ENOMOTO_AGG_DUALFREE_INEQ").is_some() && cur_real_rows.iter().any(|r| r.is_empty()) {
+                    let fold = foldfixed::fold_fixed_columns(&cur_real_rows, &cur_real_rhs, &lb, &ub, RowSense::Le);
+                    if fold.infeasible {
+                        return extended_infeasible(sc, a, b, c, n);
+                    }
+                    cur_real_rows = fold.rows;
+                    cur_real_rhs = fold.rhs;
+                }
                 // 後段の重複削除と次ラウンドの伝播が今回の変更を見るよう G を再設定する。
                 set_g_from_split!("rebuild_g(agg)");
             }
