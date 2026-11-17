@@ -1960,6 +1960,9 @@ impl TwoStageLp {
             }
         }
         let tol = 1e-9 * (1.0 + mag);
+        if env_str!("ENOMOTO_MIP_DEBUG_LPINF").is_some() {
+            eprintln!("LPINF farkas: yb {yb:.10e} zlo {zlo:.10e} zhi {zhi:.10e} lo_inf {lo_inf} hi_inf {hi_inf} tol {tol:.3e} ymax {ymax:.3e} mag {mag:.3e}");
+        }
         (!hi_inf && yb > zhi + tol) || (!lo_inf && yb < zlo - tol)
     }
 
@@ -2964,6 +2967,24 @@ impl TwoStageLp {
                     LpStatus::Optimal
                 }
                 Status::Infeasible => {
+                    if env_str!("ENOMOTO_MIP_DEBUG_LPINF").is_some() {
+                        let ok = ray.as_ref().filter(|r| r.len() >= self.rows.len()).map(|r| self.std_farkas_ok(&r[..self.rows.len()]));
+                        // 今の行・境界から標準形を作り直して比べる (増分の更新のずれ・同期漏れを見る)
+                        let (f, _) = Self::build_std(self.n, &self.rows, &self.row_lo, &self.row_up, &self.cost, &self.lo, &self.up, &self.shift);
+                        let db = f.b.iter().zip(&self.std.b).enumerate().map(|(i, (a, b))| ((a - b).abs(), i)).fold((0.0f64, 0), |m, v| if v.0 > m.0 { v } else { m });
+                        let dl = (0..f.n_total).filter(|&j| f.lb[j] != self.std.lb[j] || f.ub[j] != self.std.ub[j]).count();
+                        let fresh_ok = ray.as_ref().filter(|r| r.len() >= self.rows.len()).map(|r| {
+                            let mut g = self.std.clone();
+                            g.b = f.b.clone();
+                            g.lb = f.lb.clone();
+                            g.ub = f.ub.clone();
+                            let me = std::mem::replace(&mut self.std, g);
+                            let ok = self.std_farkas_ok(&r[..self.rows.len()]);
+                            self.std = me;
+                            ok
+                        });
+                        eprintln!("LPINF ray: farkas check {ok:?} on the rebuilt std {fresh_ok:?} (warm basis {}); max |b - b_rebuilt| {:.3e} at row {} (b {:.6e}), bound mismatches {dl}, n_rows {} vs {}", self.basis.is_some(), db.0, db.1, self.std.b.get(db.1).copied().unwrap_or(f64::NAN), self.std.n_rows, f.n_rows);
+                    }
                     // 標準形の行は元の行に符号 σ を掛けたもの
                     self.ray = ray.filter(|r| r.len() >= self.rows.len()).map(|r| (0..self.rows.len()).map(|i| r[i] * self.sigma[i]).collect());
                     LpStatus::Infeasible
