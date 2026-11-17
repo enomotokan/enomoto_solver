@@ -59,6 +59,12 @@ pub(super) fn on() -> bool {
     env_str!("ENOMOTO_MIP_GEN_LAZY").is_some_and(|v| v != "0")
 }
 
+/// 診断 `ENOMOTO_MIP_FIXROW` (mzzv11 の切り分け、TREECLOSE の提案): 行を外さず、LP に中身のない固定の行 (0 = 0、標準形ではスラックが
+/// [0, 0] に固定された基底変数) を 1 本足す (カットの行として。年齢で消されたら足し直す)。空の行と同じ「固定された基底変数」だけを作る
+pub(super) fn fixrow_on() -> bool {
+    env_str!("ENOMOTO_MIP_FIXROW").is_some()
+}
+
 /// 強分岐の子の LP 解でも外した行を確かめるか (`ENOMOTO_MIP_GEN_LAZY_SB`)
 fn sb_on() -> bool {
     env_str!("ENOMOTO_MIP_GEN_LAZY_SB").is_some_and(|v| v != "0")
@@ -369,6 +375,16 @@ impl<L: MipLp> Solver<'_, L> {
             }
             self.lp.set_row_bounds_many(&ch);
         }
+    }
+
+    /// 診断 `ENOMOTO_MIP_FIXROW`: 中身のない固定の行が LP になければ足す (ノードの LP の前)
+    pub(super) fn fixrow_keep(&mut self) {
+        if self.fixrow_id.is_some_and(|id| self.cut_ids.contains(&id)) {
+            return;
+        }
+        let empty: Vec<(Vec<(usize, f64)>, f64, f64)> = vec![(Vec::new(), 0.0, 0.0)];
+        self.add_cut_rows(&empty);
+        self.fixrow_id = Some(self.next_cut_id - 1);
     }
 
     /// 戻した行の年齢 (`ENOMOTO_T_MIP_GEN_LAZY_AGE` > 0 のとき、ノードの LP が最適に解けた後に呼ぶ): 今の LP 解で張り付いている
