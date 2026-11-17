@@ -43,12 +43,13 @@ def cmp(ca, cb):
 cmp("def", ALT)
 
 # def の際どい実行不能の回数 (run.py の "lpinf")
-L = collections.defaultdict(lambda: [0, 0, 0])
+L = collections.defaultdict(lambda: [0, 0, 0, 0, 0])
 for r in rows:
     if r["cfg"] == "def" and r["result"].get("lpinf"):
-        a, b = r["result"]["lpinf"]; L[r["problem"]][0] += a; L[r["problem"]][1] += b; L[r["problem"]][2] += 1
-nz = {p: v for p, v in L.items() if v[0] > 0}
-print(f"\n== def の際どい実行不能: 発動した問題 {len(nz)} / {len(L)} (解き直し, LP 値なしの分枝, 回数)")
-for p, v in sorted(nz.items(), key=lambda kv: -kv[1][0]):
-    nd = [(R[(p, c, s)]["result"].get("nodes") for c in CF) for s in seeds if all((p, c, s) in R for c in CF)]
-    print(f"  {p}: {v[0]} {v[1]} ({v[2]} 回) ノード def/old {nd}")
+        for i, a in enumerate(r["result"]["lpinf"][:4]): L[r["problem"]][i] += a
+        L[r["problem"]][4] += 1
+nz = {p: v for p, v in L.items() if sum(v[:4]) > 0}
+print(f"\n== def の際どい実行不能: 発動した問題 {len(nz)} / {len(L)} (ノードの解き直し, LP 値なしの分枝, 強分枝の子の不明, 根・プロービング, 回数)")
+for p, v in sorted(nz.items(), key=lambda kv: -sum(kv[1][:4])):
+    nd = [tuple(R[(p, c, s)]["result"].get("nodes") for c in CF) for s in seeds if all((p, c, s) in R for c in CF)]
+    print(f"  {p}: {v[:4]} ({v[4]} 回) ノード def/old {nd}")
