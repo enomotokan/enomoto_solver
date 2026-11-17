@@ -506,7 +506,20 @@ impl Domain {
     }
 
     /// 大域的に (すべてのノードで) 有効な締め付け。根にいればすぐ、そうでなければ次に根へ戻ったときに適用する。
+    ///
+    /// 診断 `ENOMOTO_MIP_GFIX_LOG` (treeclose 9.57 節、解き方は変えない): 整数列が大域的に新たに固定されるたびに、呼び出した場所と時刻を
+    /// `GFIX t=外側の秒 at=ファイル:行 j=列 root=根にいるか` で標準エラーに出す
+    #[track_caller]
     pub fn tighten_global(&mut self, p: &MipProblem, j: usize, upper: bool, v: f64) {
+        let gfix_before = gfix_log() && p.is_int[j] && self.global_lo[j] != self.global_up[j];
+        self.tighten_global_inner(p, j, upper, v);
+        if gfix_before && self.global_lo[j] == self.global_up[j] {
+            let at = std::panic::Location::caller();
+            eprintln!("GFIX t={:.3} at={}:{} j={j} root={} sub={}", super::outer_elapsed().unwrap_or(f64::NAN), at.file(), at.line(), self.stack.is_empty(), GFIX_SUB.with(|c| c.get()));
+        }
+    }
+
+    fn tighten_global_inner(&mut self, p: &MipProblem, j: usize, upper: bool, v: f64) {
         let v = if p.is_int[j] {
             if upper {
                 (v + FEASTOL).floor()
@@ -1445,4 +1458,30 @@ mod tests {
         }
     }
 
+}
+
+thread_local! {
+    /// 診断 `ENOMOTO_MIP_GFIX_LOG` 用: このスレッドで走っているサブ MIP の入れ子の深さ ([`GfixSubScope`])
+    static GFIX_SUB: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// 診断 `ENOMOTO_MIP_GFIX_LOG` 用: サブ MIP の求解の間だけ [`GFIX_SUB`] を 1 増やす (Drop で戻す)
+pub(crate) struct GfixSubScope;
+
+impl GfixSubScope {
+    pub(crate) fn enter() -> Self {
+        GFIX_SUB.with(|c| c.set(c.get() + 1));
+        GfixSubScope
+    }
+}
+
+impl Drop for GfixSubScope {
+    fn drop(&mut self) {
+        GFIX_SUB.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+/// 診断 `ENOMOTO_MIP_GFIX_LOG` ([`Domain::tighten_global`])
+fn gfix_log() -> bool {
+    env_str!("ENOMOTO_MIP_GFIX_LOG").is_some()
 }
