@@ -1,5 +1,6 @@
 """θ の掃引の集計: python summ.py > summ.txt。設定ごとに解けた数・def とのずらし幾何平均の比 (1 秒ずらし、どれかが解けた (問題, 種)、95% 区間は問題単位のブートストラップ)、
-問題ごとに設定別の時間 (2 種の幾何平均、時間切れは * ) と、主スレッドの外した行・戻した行の数 (2 種の平均)、外した非零の割合を出す。"""
+問題ごとに設定別の時間 (2 種の幾何平均、時間切れは * ) と、主スレッドの外した行・戻した行の数 (2 種の平均) を出す。
+最後に、問題の特徴 (t1 = 今の lazy で外す行の非零 / 根の LP の非零、`clqrows_20261117` の根の LP の非零で割る) と θ ごとの効き目 (def との比) の表。"""
 import json, glob, math, random, re, collections, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -48,3 +49,27 @@ for p in probs:
         dr = sum(x[0] for x in st) / len(st); rs_ = sum(x[2] for x in st) / len(st)
         cells.append(f"{g:6.1f}{'*' if not all(ok(r) for r in rs) else ' '}{'' if c == 'def' else f'{dr:.0f}/{rs_:.0f}':>6s}")
     print(f"{p:22s} " + " ".join(f"{x:>13s}" for x in cells))
+
+# 特徴と効き目: 外す非零の割合 (t1 の主の外した非零 / 根の LP の非零) と θ ごとの比
+NNZ = {}
+for l in open(D.parent / "clqrows_20261117/res.jsonl"):
+    r = json.loads(l)
+    for x in r["lines"]:
+        m = re.search(r"CLQROWS: rows (\d+) nnz (\d+)", x)
+        if m: NNZ[r["problem"]] = (int(m.group(1)), int(m.group(2)))
+print("\n## 特徴 (t1 で外す行の数・非零の割合、戻した行 / 外した行) と θ ごとの比 (def との時間の比、2 種の幾何平均)")
+print(f"{'問題':22s} {'外す行%':>7s} {'非零%':>6s} {'戻し率':>6s} | " + " ".join(f"{c:>6s}" for c in cfgs if c != "def"))
+feat = []
+for p in probs:
+    rs = [R[(p, "t1", s)] for s in seeds if (p, "t1", s) in R]
+    if not rs or p not in NNZ: continue
+    st = [stats(r) for r in rs]
+    dr = sum(x[0] for x in st) / len(st); dn = sum(x[1] for x in st) / len(st); rb = sum(x[2] for x in st) / len(st)
+    rows_, nnz_ = NNZ[p]
+    ratios = []
+    for c in cfgs:
+        if c == "def": continue
+        v = [math.log((t(R[(p, c, s)]) + 1) / (t(R[(p, "def", s)]) + 1)) for s in seeds if (p, c, s) in R and (p, "def", s) in R]
+        ratios.append(math.exp(sum(v) / len(v)) if v else float("nan"))
+    feat.append((dn / nnz_, p))
+    print(f"{p:22s} {100*dr/rows_:6.1f}% {100*dn/nnz_:5.1f}% {rb/max(dr,1):6.2f} | " + " ".join(f"{x:6.2f}" for x in ratios))
