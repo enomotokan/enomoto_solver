@@ -6930,7 +6930,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // HiGHS の fill の予算を超える行の割合 fw を測る。W のシグモイド σ((ln W − ln `ENOMOTO_T_MIP_TAB_SIG_W` (2.5)) / `ENOMOTO_T_MIP_TAB_SIG_WIDTH` (0.25))
         // が 0.5 以上なら、以後の呼び出し (ノードを含む) で HiGHS の選び方を使う。58 問では W が大きい問題 (qnet1 7.1・10teams 18.8・neos-911970 7.0・
         // mc11 2.6) で速く、W が小さい問題 (roll3000 1.2・nw04 0.66・mik-250 0.98・mas76 0.84) で遅かった。fw が `ENOMOTO_T_MIP_TAB_SIG_FW` (0.9) 以上なら
-        // (30n20b8・nw04 のように fill の予算で tableau 行が全部外れ、その密なカットで下界を得る問題) 値 `1` は fill の予算を外し、値 `d` は既定の選び方のまま
+        // (30n20b8・nw04 のように fill の予算で tableau 行が全部外れ、その密なカットで下界を得る問題) 既定の選び方のまま (値 `n` なら HiGHS の選び方で
+        // fill の予算だけ外す。根だけの試しで 30n20b8 の根の下界が 139.9 → 129.8 と悪く、既定のまま (`1`) は 139.9)
         let tab_sig_mode = env_str!("ENOMOTO_MIP_TAB_HIGHS_SIG");
         let tab_sig_measure = tab_sig_mode.is_some() && self.tab_sig == 0 && !light;
         let tab_rules = env_str!("ENOMOTO_MIP_TAB_HIGHS_RULES").is_some()
@@ -7519,7 +7520,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.tab_sig = if sig < 0.5 {
                 1
             } else if fw >= tunable!("ENOMOTO_T_MIP_TAB_SIG_FW", 0.9, f64) {
-                if tab_sig_mode == Some("d") { 1 } else { 3 }
+                if tab_sig_mode == Some("n") { 3 } else { 1 }
             } else {
                 2
             };

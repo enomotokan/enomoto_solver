@@ -566,7 +566,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) tab_calls: u64,
     pub(super) tab_tries: u64,
     /// 試作 `ENOMOTO_MIP_TAB_HIGHS_SIG` (gate2、analysis/gate2_20261117/tab): 根の最初の tableau の分離で測った作業量から決めた
-    /// 行の選び方。0 = まだ決めていない、1 = 既定、2 = HiGHS の選び方、3 = HiGHS の選び方で fill の予算なし
+    /// 行の選び方。0 = まだ決めていない、1 = 既定、2 = HiGHS の選び方、3 = HiGHS の選び方で fill の予算なし (値 `n`)
     pub(super) tab_sig: u8,
     /// 直前のカットのラウンドの LP の時間 (秒、`ENOMOTO_MIP_FACE_ADAPT` で面の LP の時間の上限に使う。未知なら無限大)
     pub(super) last_cut_lp_secs: f64,
