@@ -11421,13 +11421,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_TREE_RESTART=inc` (試作): 木の中で暫定解が良くなり、根の被約費用で新たに固定された整数列が
             // `ENOMOTO_T_MIP_TREE_RESTART_FRAC` (0.05) 以上、主のノード数が `ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES` (2000) 以下、
             // 残り時間が時間上限の `ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT` (0.1) 以上なら、従を止めて再スタートする
-            if std::mem::take(&mut self.tree_restart_check) && (tree_restart_mode() == 3 || self.treefix_restart_mode()) && self.watch.is_none() {
+            // 試作 `ENOMOTO_MIP_TREE_RESTART_INC2` (treeclose 9.63 節、既定では使わない): 既定の木の中の再スタートの判定 (刈った重み、mode 2) に
+            // 足して、暫定解が良くなり根の被約費用で新たに固まった整数列が、この根の始めに自由だった整数列の `ENOMOTO_T_MIP_TREE_RESTART_INC2_FRAC`
+            // (既定 0.1) 以上なら再スタートする (ノード数の上限なし)。HiGHS は新しい解のたびに根の被約費用で固め、動かない整数列の割合で再スタートする
+            // (tbfp-network は最適解の後に 79.5%・19%・11.4%・5.1% で 4 回再スタートして 1 節点で閉じる。当方は木の中で最適解を見つけても再スタートしない)
+            let inc2 = env_str!("ENOMOTO_MIP_TREE_RESTART_INC2").is_some() && tree_restart_mode() != 3 && !self.treefix_restart_mode();
+            if std::mem::take(&mut self.tree_restart_check) && (tree_restart_mode() == 3 || self.treefix_restart_mode() || inc2) && self.watch.is_none() {
                 let left_ok = match self.deadline {
                     Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT", 0.1, f64) * self.params.frac_tl(),
                     None => true,
                 };
+                let frac = if inc2 { tunable!("ENOMOTO_T_MIP_TREE_RESTART_INC2_FRAC", 0.1, f64) } else { tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64) };
+                if inc2 && self.params.verbose {
+                    let pr = self.proto_restart_ok(frac);
+                    let gd = pr && self.tree_restart_guard_ok(plunge.as_ref(), "inc2diag");
+                    eprintln!("MIP: TREE_RESTART_INC2: node {} newly fixed {} of {} free at the root, left_ok {left_ok}, count ok {pr}, guard ok {gd}, restarts {} of {}", self.nodes, self.newly_fixed_ints(), self.p.nint.saturating_sub(self.root_fixed0), self.params.restarts, max_restarts(self.p));
+                }
                 // 試作 `ENOMOTO_MIP_RSTCRIT` の `t` ([`Self::rstcrit_tree_big`]): 縮みが大きければノード数の上限を見ない
-                if left_ok && (self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) || self.treefix_restart_mode() || self.rstcrit_tree_big()) && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64)) && self.tree_restart_guard_ok(plunge.as_ref(), "inc") {
+                if left_ok && (inc2 || self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) || self.treefix_restart_mode() || self.rstcrit_tree_big()) && self.proto_restart_ok(frac) && self.tree_restart_guard_ok(plunge.as_ref(), "inc") {
                     if self.params.verbose {
                         eprintln!("MIP: tree restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
                     }
