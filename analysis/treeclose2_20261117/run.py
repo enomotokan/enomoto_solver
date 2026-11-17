@@ -21,6 +21,8 @@ CFGS = {
                               "ENOMOTO_MIP_CONFLICT_LEV_DIAG": "1"}),
     # 診断だけ (衝突解析で深さごとに 1-UIP まで解けたか、解けずに残った変更の理由)
     "ours_cut_diag": (False, {"ENOMOTO_MIP_CONFLICT_LEV_DIAG": "1"}),
+    # 試作: 双対証明・カットのプールの伝播で締めた変更も衝突解析で遡る
+    "ours_cut_pe": (False, {"ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN": "1", "ENOMOTO_MIP_CONFLICT_LEV_DIAG": "1"}),
 }
 OUT = D / "res.jsonl"; LOGS = D / "logs"; LOGS.mkdir(exist_ok=True)
 done = {(json.loads(l)["problem"], json.loads(l)["cfg"]) for l in open(OUT)} if OUT.exists() else set()
