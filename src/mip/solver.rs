@@ -888,6 +888,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     fjsub_imp: [u64; 2],
     dfsbb_abort: bool,
     dfsbb_stats: [u64; 3],
+    /// 試作 `ENOMOTO_MIP_DFSPQ` (gate2 候補 3): 潜りの判定での子の下界のギャップの中の位置 u の集計
+    /// [判定の数, u の和, u > 0.25 の数, u > 0.5 の数]
+    dfspq: [f64; 4],
     /// `DFSBB=4`: 葉・刈り込みで終わった潜りの深さの和と、今の潜りでいちばん最近潜った子の深さ
     dfsbb_leaf_depth_sum: u64,
     dfsbb_leaf_cnt: u64,
@@ -3510,8 +3513,63 @@ fn tree_keep_siblings() -> bool {
     env_str!("ENOMOTO_MIP_TREE_KEEP_SIBLINGS").is_some()
 }
 
-/// ノードの LP の際どい実行不能 ([`Solver::lp_infeasible_marginal`]) で解き直した数と、解き直しても際どかった数 (全スレッド)
-pub(super) static LPINF_RETRY: [std::sync::atomic::AtomicU64; 2] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+/// 際どい LP の実行不能 ([`lp_farkas_marginal`]) の数 (全スレッド・サブ MIP 込みの累計): [ノードの LP を解き直した, 解き直しても際どく
+/// LP 値なしで分枝した, 強分枝の子を不明扱いにした, 根の LP・LP のプロービングで信用しなかった]
+pub(super) static LPINF_RETRY: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+pub(super) fn lpinf_count(k: usize) {
+    LPINF_RETRY[k].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 直前の LP の実行不能の証明 (Farkas の射線 y、元の行の向き) が際どいか: z = yᵀA として、行の活動の組 yᵀr の範囲
+/// (行の境界) と zᵀx の範囲 (列の境界) の隙間が、どの行・列も [`FEASTOL`] まで破ってよい場合に埋まる
+/// (隙間 <= FEASTOL (Σ|y_i| + Σ|z_j|)) なら真。射線がない・範囲が開いているときも真 (証明として使えない)。
+pub(super) fn lp_farkas_marginal<L: MipLp>(lp: &L, n: usize) -> bool {
+    let Some(y) = lp.farkas_ray() else { return true };
+    let m = lp.num_rows().min(y.len());
+    let ymax = y[..m].iter().fold(0.0f64, |a, v| a.max(v.abs()));
+    if !(ymax > 0.0) || !ymax.is_finite() {
+        return true;
+    }
+    let mut z = vec![0.0; n];
+    let (mut rlo, mut rhi, mut ysum) = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..m {
+        let yi = y[i];
+        if yi == 0.0 {
+            continue;
+        }
+        ysum += yi.abs();
+        for &(j, a) in lp.row_ref(i) {
+            z[j] += yi * a;
+        }
+        let (lo, up) = lp.row_bounds(i);
+        let (a, b) = if yi > 0.0 { (yi * lo, yi * up) } else { (yi * up, yi * lo) };
+        rlo += a;
+        rhi += b;
+    }
+    let tiny = 1e-9 * (1.0 + ymax);
+    let (mut zlo, mut zhi, mut zsum) = (0.0f64, 0.0f64, 0.0f64);
+    for (j, &zj) in z.iter().enumerate() {
+        if zj.abs() <= tiny {
+            continue;
+        }
+        zsum += zj.abs();
+        let (lo, up) = lp.col_bounds(j);
+        let (a, b) = if zj > 0.0 { (zj * lo, zj * up) } else { (zj * up, zj * lo) };
+        zlo += a;
+        zhi += b;
+    }
+    // 区間 [rlo, rhi] と [zlo, zhi] の隙間 (NaN・無限は際どいとみなす)
+    let gap = (rlo - zhi).max(zlo - rhi);
+    !(gap.is_finite() && gap > super::domain::FEASTOL * (ysum + zsum))
+}
+
+
+/// LP の際どい実行不能の確かめ ([`lp_farkas_marginal`]) を使うか (既定で使う。`ENOMOTO_MIP_NO_LPINF_CHECK` で全部まとめて止める:
+/// ノードの LP・根の LP・強分枝の子・LP のプロービング)
+pub(super) fn lpinf_check_on() -> bool {
+    env_str!("ENOMOTO_MIP_NO_LPINF_CHECK").is_none()
+}
 
 /// 木を分け合うスレッドの間で、カットプールに入れたカットを共有するか (`ENOMOTO_MIP_TREE_SHARE_CUTS`)。カットは大域的な
 /// 境界で作るので、どのスレッドのどのノードでも成り立つ (被約費用による固定で締めた境界のものは、共有の打ち切り値未満の解で)。
@@ -5474,6 +5532,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         fjsub_imp: [0; 2],
         dfsbb_abort: false,
         dfsbb_stats: [0; 3],
+        dfspq: [0.0; 4],
         dfsbb_leaf_depth_sum: 0,
         dfsbb_leaf_cnt: 0,
         dfsbb_last_depth: 0,
@@ -6035,6 +6094,11 @@ fn hgs_opt(c: char) -> bool {
     env_str!("ENOMOTO_MIP_HGS_OPT").is_some_and(|v| v.contains(c))
 }
 
+/// 試作 `ENOMOTO_MIP_DFSPQ` の値 ([`Solver::dfspq_quot`]、既定では使わない)
+fn dfspq_env() -> Option<&'static str> {
+    env_str!("ENOMOTO_MIP_DFSPQ").filter(|v| !v.is_empty() && *v != "0")
+}
+
 /// `ENOMOTO_MIP_DFSBB` の値 (既定 `2` = HiGHS 型、cand1118 で既定にした。`0`・`off` で切る = 0.1.7 までの既定の潜り方)
 fn dfsbb_env() -> Option<&'static str> {
     env_def!("ENOMOTO_MIP_DFSBB", "2")
@@ -6171,48 +6235,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         DEBUG_SOL.with(|d| d.borrow().as_ref().is_some_and(|x| (0..self.p.n).all(|j| x[j] >= self.dom.lo[j] - 1e-6 && x[j] <= self.dom.up[j] + 1e-6)))
     }
 
-    /// 直前の LP の実行不能の証明 (Farkas の射線 y、元の行の向き) が際どいか: z = yᵀA として、行の活動の組 yᵀr の範囲
-    /// (行の境界) と zᵀx の範囲 (列の境界) の隙間が、どの行・列も [`FEASTOL`] まで破ってよい場合に埋まる
-    /// (隙間 <= FEASTOL (Σ|y_i| + Σ|z_j|)) なら真。射線がない・範囲が開いているときも真 (証明として使えない)。
+    /// 直前の LP (`self.lp`) の実行不能の証明が際どいか ([`lp_farkas_marginal`])。
     fn lp_infeasible_marginal(&self) -> bool {
-        let Some(y) = self.lp.farkas_ray() else { return true };
-        let m = self.lp.num_rows().min(y.len());
-        let n = self.p.n;
-        let ymax = y[..m].iter().fold(0.0f64, |a, v| a.max(v.abs()));
-        if !(ymax > 0.0) || !ymax.is_finite() {
-            return true;
-        }
-        let mut z = vec![0.0; n];
-        let (mut rlo, mut rhi, mut ysum) = (0.0f64, 0.0f64, 0.0f64);
-        for i in 0..m {
-            let yi = y[i];
-            if yi == 0.0 {
-                continue;
-            }
-            ysum += yi.abs();
-            for &(j, a) in self.lp.row_ref(i) {
-                z[j] += yi * a;
-            }
-            let (lo, up) = self.lp.row_bounds(i);
-            let (a, b) = if yi > 0.0 { (yi * lo, yi * up) } else { (yi * up, yi * lo) };
-            rlo += a;
-            rhi += b;
-        }
-        let tiny = 1e-9 * (1.0 + ymax);
-        let (mut zlo, mut zhi, mut zsum) = (0.0f64, 0.0f64, 0.0f64);
-        for (j, &zj) in z.iter().enumerate() {
-            if zj.abs() <= tiny {
-                continue;
-            }
-            zsum += zj.abs();
-            let (lo, up) = self.lp.col_bounds(j);
-            let (a, b) = if zj > 0.0 { (zj * lo, zj * up) } else { (zj * up, zj * lo) };
-            zlo += a;
-            zhi += b;
-        }
-        // 区間 [rlo, rhi] と [zlo, zhi] の隙間 (NaN・無限は際どいとみなす)
-        let gap = (rlo - zhi).max(zlo - rhi);
-        !(gap.is_finite() && gap > super::domain::FEASTOL * (ysum + zsum))
+        lp_farkas_marginal(&self.lp, self.p.n)
+    }
+
+    /// 実行不能の判定を信用しないか: 確かめが有効 (`ENOMOTO_MIP_NO_LPINF_CHECK` でない) で、直前の LP が実行不能で、その証明が際どい。
+    fn lpinf_untrusted(&self, st: LpStatus) -> bool {
+        st == LpStatus::Infeasible && lpinf_check_on() && self.lp_infeasible_marginal()
     }
 
     /// 診断用 (`ENOMOTO_MIP_DEBUG_LPINF`): ノードの LP が実行不能と出たとき、(a) LP の列の境界と定義域の食い違い、(b) 同じ行・境界で
@@ -8208,6 +8238,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let basis = self.lp.basis();
         let slack_basic = |i: usize| basis.row.get(i).is_none_or(|s| *s == VarStatus::Basic) || basis.row.is_empty();
+        // 候補にならなかった余裕のある (1 − 文字の和 > 1e-6) クリーク型の行の非零 (主のみ)
+        let mut nnz_slack = 0usize;
         let cand: Vec<(usize, Vec<u32>)> = if let Some(sn) = self.snap.as_ref() {
             // 従は主と同じ行を外す (スレッドの間で受け渡す基底で、外した行のスラックがどれも基底にあるように。基底に入れるのは LP の基底の修復が行う)
             sn.clq_lazy.iter().filter(|(i, _)| *i < m0).cloned().collect()
@@ -8248,6 +8280,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 等式の行は両側の確かめが要るので外さない
                     if l != u && 1.0 - sv > tol {
                         out.push((i, lits));
+                    } else if l != u && 1.0 - sv > 1e-6 {
+                        // 門 (LAZYFRAC) の f を余裕のある行全部で数えるときのため (θ を小さくすると f が問題を分けなくなる)
+                        nnz_slack += lits.len();
                     }
                     break;
                 }
@@ -8259,24 +8294,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 外す行の非零 / LP の元の行の非零 (問題の特徴、ログに出す)。`ENOMOTO_T_MIP_CLQ_LAZY_GATE_F0` = f0 > 0 (既定 0 = 使わない) なら、
         // 割合 f のシグモイド σ(k (f − f0)) (k = `ENOMOTO_T_MIP_CLQ_LAZY_GATE_K`、既定 20) の分だけ候補を外す (主のみ。文字の和の小さい = 余裕の大きい順)。
-        // 外す量が少ない (LP が軽くならない) 問題では外さず道筋を変えない
+        // 外す量が少ない (LP が軽くならない) 問題では外さず道筋を変えない。`ENOMOTO_MIP_LAZY_GATE_ONE=1` は f >= f0 のとき 1 行だけ外す対照
+        // ([`genlazy::gate_keep`]、試作 LAZYFRAC)
         let nnz_all: usize = (0..m0).map(|i| self.lp.row_ref(i).len()).sum::<usize>().max(1);
         let nnz_c: usize = cand.iter().map(|c| c.1.len()).sum();
         let frac = nnz_c as f64 / nnz_all as f64;
-        let f0 = tunable!("ENOMOTO_T_MIP_CLQ_LAZY_GATE_F0", 0.0, f64);
+        // 余裕のある (1 − 文字の和 > 1e-6) クリーク型の行全部の非零の割合 (θ = 1 の候補)。`ENOMOTO_MIP_CLQ_LAZY_GATE_FALL=1` なら門はこちらで決める
+        let frac_all = (nnz_c + nnz_slack) as f64 / nnz_all as f64;
+        let diag = self.snap.is_none() && env_str!("ENOMOTO_MIP_DIAG_GENLAZY").is_some();
+        if diag {
+            eprintln!("CLQLAZY_F {{\"m\":{m0},\"nnz\":{nnz_all},\"tol\":{},\"rows\":{},\"dropnnz\":{nnz_c},\"f\":{frac:.5},\"f_all\":{frac_all:.5}}}", tunable!("ENOMOTO_T_MIP_CLQ_LAZY_TOL", 1e-6, f64), cand.len());
+        }
+        let frac = if env_str!("ENOMOTO_MIP_CLQ_LAZY_GATE_FALL").is_some_and(|v| v != "0") { frac_all } else { frac };
+        if genlazy::diag_nodrop() {
+            return;
+        }
         let mut cand = cand;
-        if f0 > 0.0 && self.snap.is_none() {
-            let k = tunable!("ENOMOTO_T_MIP_CLQ_LAZY_GATE_K", 20.0, f64);
-            let share = 1.0 / (1.0 + (-k * (frac - f0)).exp());
-            let x = self.lp.col_values();
-            let sum = |lits: &[u32]| -> f64 { lits.iter().map(|&q| { let v = x[(q / 2) as usize]; if q % 2 == 0 { v } else { 1.0 - v } }).sum() };
-            cand.sort_by(|a, b| sum(&a.1).total_cmp(&sum(&b.1)));
-            cand.truncate((share * cand.len() as f64).floor() as usize);
-            if self.params.verbose && self.pool_tid == 0 {
-                eprintln!("MIP: CLQ_LAZY gate: nonzero share {frac:.4} (f0 {f0}, k {k}) -> keep {:.3} of the candidates ({} rows)", share, cand.len());
-            }
-            if cand.is_empty() {
-                return;
+        if self.snap.is_none() {
+            if let Some((keep, share)) = genlazy::gate_keep("CLQ", frac, cand.len()) {
+                let x = self.lp.col_values();
+                let sum = |lits: &[u32]| -> f64 { lits.iter().map(|&q| { let v = x[(q / 2) as usize]; if q % 2 == 0 { v } else { 1.0 - v } }).sum() };
+                cand.sort_by(|a, b| sum(&a.1).total_cmp(&sum(&b.1)).then(a.0.cmp(&b.0)));
+                cand.truncate(keep);
+                if diag || (self.params.verbose && self.pool_tid == 0) {
+                    eprintln!("MIP: CLQ_LAZY gate: nonzero share {frac:.4} -> share {share:.3}, keep {keep} rows");
+                }
+                if cand.is_empty() {
+                    return;
+                }
             }
         }
         let ch: Vec<(usize, f64, f64)> = cand.iter().map(|(i, _)| (*i, f64::NEG_INFINITY, f64::INFINITY)).collect();
@@ -10234,6 +10279,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if self.params.verbose && self.snap.is_some() {
             eprintln!("MIP: [snapshot] root LP {root_st:?} ({} iters, {:.2}s)", self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
+        }
+        // 根の LP が際どく実行不能 ([`lp_farkas_marginal`]) なら信用しない: 全論理変数基底から解き直し、それでも際どければ結論なし
+        // として下の安全網 (尺度を調整した二段解法・内点法) に回す (analysis/wrong_widden_20261117)
+        if self.lpinf_untrusted(root_st) && !self.time_up() {
+            lpinf_count(3);
+            let b = self.lp.basis();
+            let slack = super::lp::Basis { col: b.col.iter().map(|_| VarStatus::Lower).collect(), row: vec![VarStatus::Basic; b.row.len()] };
+            self.lp.set_basis(&slack);
+            root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+            if self.lpinf_untrusted(root_st) {
+                root_st = LpStatus::Error;
+            }
+            if self.params.verbose {
+                eprintln!("MIP: root LP marginally infeasible; re-solved from the slack basis: {root_st:?}");
+            }
         }
         // 根の LP の安全網 (既定で使う。`ENOMOTO_MIP_ROOTLP_SCALE_RESCUE=0` で使わない、analysis/momentum1_rootlp_20261106.md):
         // 結論を出せなかった (数値的な破綻など) ら、まず尺度を調整した写しを基底なしの二段解法で解いて元の LP を解き直す
@@ -13379,7 +13439,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 実行不能を信用しない: 全論理変数基底から解き直し、それでも際どく実行不能なら LP が解けないものとして扱う
                 // (LP 値なしで分枝する。`ENOMOTO_MIP_LPINF_LOOSE` なら解き直しの結果をそのまま使う)。温め始動の双対単体法が 1e-8 程度だけ実行不能な (許容誤差の範囲で実行可能な) LP を
                 // 実行不能と判定し、最適解を含むノードを刈っていた (neos-4722843-widden の誤答、analysis/wrong_widden_20261117)
-                if st == LpStatus::Infeasible && env_str!("ENOMOTO_MIP_NO_LPINF_CHECK").is_none() && self.lp_infeasible_marginal() {
+                if self.lpinf_untrusted(st) {
                     LPINF_RETRY[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let b = self.lp.basis();
                     let slack = super::lp::Basis { col: b.col.iter().map(|_| VarStatus::Lower).collect(), row: vec![VarStatus::Basic; b.row.len()] };
@@ -14619,7 +14679,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let cutoff = self.prune_limit();
                 if cutoff.is_finite() && env_str!("ENOMOTO_MIP_NO_PLUNGE_ABORT").is_none() {
                     let glb = self.queue.best_lower_bound().min(node_obj);
-                    child.lower_bound <= glb + self.nb_plunge_quot() * (cutoff - glb)
+                    if dfspq_env().is_some() && self.dfsbb_kind() == 2 && cutoff > glb {
+                        let u = ((child.lower_bound - glb) / (cutoff - glb)).clamp(0.0, 1.0);
+                        self.dfspq[0] += 1.0;
+                        self.dfspq[1] += u;
+                        self.dfspq[2] += (u > 0.25) as u8 as f64;
+                        self.dfspq[3] += (u > 0.5) as u8 as f64;
+                    }
+                    child.lower_bound <= glb + self.dfspq_quot().unwrap_or_else(|| self.nb_plunge_quot()) * (cutoff - glb)
                 } else {
                     true
                 }
@@ -15957,6 +16024,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.nb_arm() == Some(1) { tunable!("ENOMOTO_T_MIP_NB_ARM1_PQ", 1.0, f64) } else { tunable!("ENOMOTO_T_MIP_PLUNGE_QUOT", 0.25, f64) }
     }
 
+    /// 試作 `ENOMOTO_MIP_DFSPQ` (既定では使わない、analysis/gate2_20261117/dfspq/README.md): `DFSBB=2` の潜りの打ち切りの割合
+    /// (既定 1 = 子の下界が打ち切り値以下なら潜り続ける) を、潜りの判定で見た子の下界のギャップの中の位置 u の集計 x の
+    /// シグモイド q = Q0 + (1 − Q0) σ((θ − x) / s) にする (x が大きい = 子の下界が悪い問題ほど潜りを状況で打ち切る)。
+    /// 値の文字: `u` = x を u の平均、`r` = x を u > 0.25 の割合 (既定 `r`)、`d` = 集計の行を出すだけ (割合は変えない)。
+    /// 判定が `ENOMOTO_T_MIP_DFSPQ_MIN` (既定 500) 回に満たないうちは 1。Q0 = `ENOMOTO_T_MIP_DFSPQ_Q0` (0.25)、
+    /// θ = `ENOMOTO_T_MIP_DFSPQ_THETA` (0.5)、s = `ENOMOTO_T_MIP_DFSPQ_S` (0.05)
+    fn dfspq_quot(&self) -> Option<f64> {
+        let v = dfspq_env()?;
+        if self.dfsbb_kind() != 2 || v.contains('d') || self.dfspq[0] < tunable!("ENOMOTO_T_MIP_DFSPQ_MIN", 500.0, f64) {
+            return None;
+        }
+        let x = self.dfspq_x();
+        let q0 = tunable!("ENOMOTO_T_MIP_DFSPQ_Q0", 0.25, f64);
+        let th = tunable!("ENOMOTO_T_MIP_DFSPQ_THETA", 0.5, f64);
+        let sc = tunable!("ENOMOTO_T_MIP_DFSPQ_S", 0.05, f64);
+        Some(q0 + (1.0 - q0) / (1.0 + ((x - th) / sc).exp()))
+    }
+
+    /// [`Self::dfspq_quot`] の特徴 x
+    fn dfspq_x(&self) -> f64 {
+        let n = self.dfspq[0].max(1.0);
+        if dfspq_env().is_some_and(|v| v.contains('u')) { self.dfspq[1] / n } else { self.dfspq[2] / n }
+    }
+
     /// 兄弟へ戻る下界の割合 (`ENOMOTO_T_MIP_SIBLING_QUOT`。バンディットの腕 1 なら `ENOMOTO_T_MIP_NB_ARM1_SQ`、既定 1)。
     fn nb_sibling_quot(&self) -> f64 {
         if self.dfsbb_on() && !(self.dfsbb_kind() == 2 && hgs_opt('q')) {
@@ -17132,6 +17223,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let orbs: Vec<Vec<usize>> = batch.iter().map(|&(jj, ..)| self.sb_down_orbit(jj)).collect();
                 let orbs_ref = &orbs;
                 let lp0 = &self.lp;
+                let lpc_n = self.p.n;
                 let saved0 = saved;
                 let batch_ref = &batch;
                 // `ENOMOTO_MIP_SUBMIP_HALT`: 止める合図を強分枝のスレッドに引き継ぐ (既定では何もしない)
@@ -17160,9 +17252,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                             }
                                         }
                                         let it0 = lpc.total_iterations();
-                                        let st = lpc.solve(&lim_c);
+                                        let mut st = lpc.solve(&lim_c);
                                         let iters = lpc.total_iterations() - it0;
-                                        let obj = lpc.objective() + offset;
+                                        let mut obj = lpc.objective() + offset;
+                                        // 際どい実行不能 ([`lp_farkas_marginal`]) は信用しない: 不明 (子の値は親の値、切らない)
+                                        if st == LpStatus::Infeasible && lpinf_check_on() && lp_farkas_marginal(&lpc, lpc_n) {
+                                            lpinf_count(2);
+                                            st = LpStatus::Error;
+                                            obj = f64::NAN;
+                                        }
                                         let x = (st == LpStatus::Optimal).then(|| lpc.col_values());
                                         let y = match st {
                                             LpStatus::Infeasible => lpc.farkas_ray(),
@@ -17232,7 +17330,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                         }
                         _ => {
-                            gains[side] = (r.obj - node_obj).max(0.0);
+                            // 反復上限は途中の値、際どい実行不能の不明 (obj = NaN) は増分 0
+                            gains[side] = if r.obj.is_nan() { 0.0 } else { (r.obj - node_obj).max(0.0) };
                         }
                     }
                 }
@@ -17286,7 +17385,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let st = self.lp.solve(&self.limits_k(sb_iter_limit, 1));
                 self.sb_iters += self.lp.total_iterations() - it0;
                 self.sb_lps += 1;
+                // 際どい実行不能 ([`lp_farkas_marginal`]) は信用しない: 不明 (子の値は親の値、切らない、証明も作らない)
+                let sb_untrusted = self.lpinf_untrusted(st);
+                if sb_untrusted {
+                    lpinf_count(2);
+                }
                 match st {
+                    _ if sb_untrusted => {}
                     LpStatus::Optimal => {
                         let o = self.lp.objective() + self.p.offset;
                         gains[side] = (o - node_obj).max(0.0);
@@ -17470,6 +17575,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.sb_new_node = Some((o, nf));
                         continue;
                     }
+                    // 際どい実行不能は信用せず、呼び出し側でノードの LP として解き直す (そちらの確かめを通る)
+                    LpStatus::Infeasible if self.lpinf_untrusted(st) => {
+                        lpinf_count(2);
+                        return BranchAction::Resolve;
+                    }
                     LpStatus::Infeasible | LpStatus::ObjectiveBound => {
                         if st == LpStatus::Infeasible {
                             self.add_farkas_proof();
@@ -17571,7 +17681,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if env_str!("ENOMOTO_MIP_DEBUG_SB").is_some() {
                     eprintln!("SB j={j} up={is_up} st={st:?} iters={} limit={sb_iter_limit}", self.lp.total_iterations() - it0);
                 }
+                // 際どい実行不能 ([`lp_farkas_marginal`]) は信用しない: 不明 (切らない)
+                let sb_untrusted = self.lpinf_untrusted(st);
+                if sb_untrusted {
+                    lpinf_count(2);
+                }
                 match st {
+                    _ if sb_untrusted => {}
                     LpStatus::Optimal => {
                         let o = self.lp.objective() + self.p.offset;
                         gains[side] = (o - node_obj).max(0.0);
@@ -19570,7 +19686,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if st == LpStatus::Optimal {
                         max_rise = max_rise.max(self.lp.objective() + p.offset - z);
                     }
+                    // 際どい実行不能 ([`lp_farkas_marginal`]) は信用しない (固定しない)
+                    let untrusted = self.lpinf_untrusted(st);
+                    if untrusted {
+                        lpinf_count(3);
+                    }
                     bad[k] = match st {
+                        _ if untrusted => false,
                         LpStatus::Infeasible | LpStatus::ObjectiveBound => true,
                         LpStatus::Optimal => self.lp.objective() + p.offset >= self.prune_limit(),
                         _ => false,
@@ -19610,7 +19732,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.sync_lp();
             let st = self.lp.solve(&self.limits(u64::MAX));
             if st != LpStatus::Optimal {
-                if matches!(st, LpStatus::Infeasible | LpStatus::ObjectiveBound) {
+                if self.lpinf_untrusted(st) {
+                    lpinf_count(3);
+                } else if matches!(st, LpStatus::Infeasible | LpStatus::ObjectiveBound) {
                     self.dom.infeasible = true;
                 }
                 break;
@@ -19776,7 +19900,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.sync_lp();
                 let s = self.lp.solve(&self.limits(u64::MAX));
                 st = Some(s);
-                if matches!(s, LpStatus::Infeasible | LpStatus::ObjectiveBound) {
+                if self.lpinf_untrusted(s) {
+                    lpinf_count(3);
+                } else if matches!(s, LpStatus::Infeasible | LpStatus::ObjectiveBound) {
                     both = true;
                 }
             }
@@ -25695,6 +25821,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if genlazy::on() && !self.params.verbose && env_str!("ENOMOTO_MIP_DIAG_GENLAZY").is_some() && self.gen_lazy_stats[0] > 0 && !self.params.submip {
             self.gen_lazy_report();
         }
+        if clq_lazy_on() && !self.params.verbose && env_str!("ENOMOTO_MIP_DIAG_GENLAZY").is_some() && self.clq_lazy_stats[0] > 0 && !self.params.submip {
+            let s = self.clq_lazy_stats;
+            eprintln!("MIP: CLQ_LAZY stats tid {}: dropped {} checks {} restored {} resolves {} still dropped {}", self.pool_tid, s[0], s[1], s[2], s[3], self.clq_lazy.len());
+        }
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds, rejected as numerically unreliable {})", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings, self.proof_numeric_rejects);
             if proof_verify() {
@@ -25757,6 +25887,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // (`=4` 以外でも、問題の特徴 (根の分数値・整数変数の数・潜りの底の深さ) を出す。頻度を特徴の関数にするための集計用)
                 if self.dfsbb_on() {
                     eprintln!("MIP: DFSBB4: d {:.1} ({}), L {}, root fractional {}, integers {}, mean depth of dive bottoms {:.1} ({} dives)", self.dfsbb_d(), env_str!("ENOMOTO_MIP_DFSBB_D").unwrap_or("frac"), self.dfsbb_l(), self.noinc_root_frac, self.p.is_int.iter().filter(|&&b| b).count(), self.dfsbb_leaf_depth_sum as f64 / self.dfsbb_leaf_cnt.max(1) as f64, self.dfsbb_leaf_cnt);
+                }
+                if dfspq_env().is_some() && self.dfsbb_kind() == 2 {
+                    let d = self.dfspq;
+                    let n = d[0].max(1.0);
+                    eprintln!("MIP: DFSPQ: decisions {}, mean u {:.4}, u > 0.25 {:.4}, u > 0.5 {:.4}, x {:.4}, quot {:.3}", d[0], d[1] / n, d[2] / n, d[3] / n, self.dfspq_x(), self.dfspq_quot().unwrap_or(1.0));
                 }
                 if self.dfsbb_on() {
                     let s = self.dfsbb_stats;
@@ -25860,9 +25995,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: branching: strong branching vs pseudocost: {} of {} agreed, {} nodes without strong branching", self.sb_agree_stats[1], self.sb_agree_stats[0], self.sb_agree_stats[2]);
             }
             eprintln!(
-                "MIP: marginal node LP infeasibility (all threads, cumulative): re-solved from the slack basis {}, still marginal after that {}",
+                "MIP: marginal LP infeasibility (all threads, cumulative): node LPs re-solved {} branched without the LP {} strong branching children unknown {} root and LP probing {}",
                 LPINF_RETRY[0].load(std::sync::atomic::Ordering::Relaxed),
-                LPINF_RETRY[1].load(std::sync::atomic::Ordering::Relaxed)
+                LPINF_RETRY[1].load(std::sync::atomic::Ordering::Relaxed),
+                LPINF_RETRY[2].load(std::sync::atomic::Ordering::Relaxed),
+                LPINF_RETRY[3].load(std::sync::atomic::Ordering::Relaxed)
             );
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
             if super::separation::hl2_d2_any() {
