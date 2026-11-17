@@ -1,0 +1,103 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP tbfp-network_2 has 2436 rows; 72747 cols; 215837 nonzeros; 72747 integer variables (29086 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+00]
+  Cost    [2e-01, 2e+01]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 1e+00]
+Presolving model
+2415 rows, 29086 cols, 84875 nonzeros 0s
+2360 rows, 29015 cols, 85203 nonzeros 1s
+Presolve reductions: rows 2360(-76); columns 29015(-43732); nonzeros 85203(-130634) 
+
+Solving MIP model with:
+   2360 rows
+   29015 cols (29015 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   85203 nonzeros
+   Thread count 1 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            134.1215278        Large        0      0      0         0     2.4s
+         0       0         0   0.00%   23.38126855     134.1215278       82.57%        0      0      9      6479     4.3s
+ L       0       0         0   0.00%   23.51575008     29.20833333       19.49%       67     18     12      8622    71.8s
+
+21.5% inactive integer columns, restarting
+Model after restart has 2351 rows, 22752 cols (22752 bin., 0 int., 0 impl., 0 cont., 0 dom.fix.), and 66313 nonzeros
+
+         0       0         0   0.00%   23.51575008     29.20833333       19.49%       12      0      0    109086    76.4s
+         0       0         0   0.00%   23.51575008     29.20833333       19.49%       12     11      5    121235    78.4s
+        10       0         1   0.20%   23.51575008     29.20833333       19.49%       14     11    139    247784   125.0s
+        49       0        20   0.95%   23.51575008     29.20833333       19.49%       26     11   1396    252166   130.0s
+ T      55       0        23   1.03%   23.51575008     28.99652778       18.90%       31     11   1686    253272   131.4s
+ T      59       0        26   1.17%   23.51575008     28.25             16.76%       35     11   1848    253427   132.5s
+        89       0        41   2.98%   23.51575008     28.25             16.76%       54     11   2987    260624   138.2s
+       109       6        51   3.03%   23.51932264     28.25             16.75%       72     12   3787    263256   143.2s
+       117       4        54   3.52%   23.51932264     28.25             16.75%       86     14   3937    288481   154.1s
+       145       4        66   5.68%   23.51932264     28.25             16.75%       99     14   4783    301696   161.0s
+       169       4        78   5.72%   23.51932264     28.25             16.75%      113     14   6213    309216   167.2s
+       202       5        96   6.05%   23.51932264     28.25             16.75%      124     14   7045    317775   173.0s
+       216       8       101   6.15%   23.51932264     28.25             16.75%      139     16   7483    328851   178.2s
+ T     216       8       101   6.15%   23.51932264     28.24652778       16.74%      139     16   7500    328851   178.2s
+ T     226       7       106   6.18%   23.51932264     28.04513889       16.14%      146     16   8283    330522   181.2s
+ B     228       7       108   6.20%   23.51932264     28                16.00%      149     16   8342    331125   182.3s
+       240       5       114   7.03%   23.51932264     28                16.00%      184     21   9013    356606   192.0s
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+       257       7       120   7.24%   23.51932264     28                16.00%      198     21   9476    364518   197.1s
+       283       8       133   7.31%   23.51932264     28                16.00%      219     21   6914    370971   202.9s
+       305       8       143   7.36%   23.51932264     28                16.00%      226     21   7858    378108   208.0s
+       317      11       148   7.66%   23.51932264     28                16.00%      242     21   8503    397099   217.5s
+       330      11       155   7.91%   23.51932264     28                16.00%      255     21   9773    403682   223.1s
+       345      14       160   8.02%   23.51932264     28                16.00%      233     22   9944    415193   228.8s
+       367      15       169   8.14%   23.51932264     28                16.00%      246     22   7565    427367   236.7s
+       379      16       175   8.19%   23.51932264     28                16.00%      259     22   8387    435461   242.6s
+       389      17       180   8.20%   23.51932264     28                16.00%      283     22   9250    448875   250.9s
+       405      17       188   8.21%   23.51932264     28                16.00%      312     22   9856    459150   258.0s
+       433      17       201   8.52%   23.51932264     28                16.00%      325     22   8769    470569   264.4s
+       439      20       204   8.54%   23.51932264     28                16.00%      339     22   9712    474453   269.8s
+       444      20       205   8.54%   23.51932264     28                16.00%      333     21   9959    490532   276.5s
+       462      20       214   8.58%   23.51932264     28                16.00%      348     21   9355    500776   282.6s
+       481      21       223   8.58%   23.51932264     28                16.00%      366     21   6737    505422   287.8s
+       492      21       228   8.58%   23.51932264     28                16.00%      383     21   7474    510106   292.9s
+       513      21       239   8.58%   23.51932264     28                16.00%      403     21   8648    515944   299.0s
+       520      25       243   8.58%   23.51932264     28                16.00%      404     21   8925    517484   300.1s
+
+Solving report
+  Model             tbfp-network_2
+  Status            Time limit reached
+  Primal bound      28
+  Dual bound        23.5193226354
+  Gap               16% (tolerance: 0.01%)
+  P-D integral      96.5635310709
+  Solution status   feasible
+                    28 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            300.09
+                    11.22 (Presolve)
+                        MIP    time [calls] = 2.17 [1]
+                        subMIP time [calls] = 9.05 [19]
+                    288.84 (Solve)
+                        MIP    time [calls] = 235.04 [1]
+                        subMIP time [calls] = 53.81 [9]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [19]
+  Max sub-MIP depth 8
+  Nodes             520
+  Repair LPs        0
+  LP iterations     517484
+                    205860 (strong br.)
+                    7359 (separation)
+                    100464 (heuristics)
