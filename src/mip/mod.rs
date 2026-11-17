@@ -1259,6 +1259,8 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     // 診断用のデバッグ解 (`ENOMOTO_MIP_DEBUG_SOL`) は外側の縮約後の空間の解なので、同じスレッドで走るサブ MIP の間は退避する
     // (退避しないと、サブ MIP の行・列に外側の解を当てて「デバッグ解を切った」と誤って出す。終わりに戻す)
     let _dbg_sol = params.submip.then(DebugSolScope::enter);
+    // 診断 `ENOMOTO_MIP_GFIX_LOG`: 大域の固定の記録にサブ MIP の中かどうかを付ける
+    let _gfix_sub = params.submip.then(domain::GfixSubScope::enter);
     if outer {
         ENUM_IDLE.with(|f| f.set(false));
         subb::reset();
