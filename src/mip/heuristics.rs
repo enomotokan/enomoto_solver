@@ -3710,6 +3710,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 _ => {}
             }
         }
+        // 試作 `ENOMOTO_MIP_HEURGAP` の `d` ([`super::solver::heurgap`]): 基底にあって境界に張り付いた整数列も、退化した双対の θ を
+        // 被約費用の代わりにして候補にする (最大 `ENOMOTO_T_MIP_HEURGAP_DEGEN_MAXC` (2000) 本)。動けない列 (θ = ∞) は先頭に置く
+        let ndeg0 = lurking.len();
+        if super::solver::heurgap('d') && !self.params.submip {
+            let maxc = tunable!("ENOMOTO_T_MIP_HEURGAP_DEGEN_MAXC", 2000usize, usize);
+            for (th, k, sigma) in self.degen_thetas(maxc) {
+                let th = if th.is_finite() { th } else { f64::MAX };
+                if sigma > 0.0 {
+                    lurking.push((th, k, true, self.dom.lo[k]));
+                } else {
+                    lurking.push((th, k, false, self.dom.up[k]));
+                }
+            }
+            if self.params.verbose {
+                eprintln!("MIP:   HEURGAP d: root reduced cost: {} lurking bounds from reduced costs, {} from degenerate duals ({} to the upper bound)", ndeg0, lurking.len() - ndeg0, lurking[ndeg0..].iter().filter(|t| !t.2).count());
+            }
+        }
         // HiGHS は lurking bound が整数列の 1 割未満なら使わない
         if 10 * lurking.len() < ints.len() {
             return false;
