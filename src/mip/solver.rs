@@ -751,6 +751,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     tc_g_next: u64,
     /// 試作 `ENOMOTO_MIP_TC` の `l`: 次に大域の伝播をするノード数と、[呼んだ回数, 締めた整数列, 固定した整数列, 矛盾]
     tc_l_next: u64,
+    /// 試作 `ENOMOTO_MIP_TREE_RESTART_INC2` 用: この求解で木に入った時刻 (外側の時計の秒)
+    tr_outer0: f64,
     tc_l_stats: [u64; 4],
     tc_g_stats: [u64; 4],
     /// 試作 `ENOMOTO_MIP_TC` の `c`: カットプールの伝播を止めている間に飛ばした回数・次に試し直す回数・試しの区切りの始めの統計・試し直した回数
@@ -5287,6 +5289,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tr_huge: 0,
         tc_g_next: 0,
         tc_l_next: 0,
+        tr_outer0: f64::NAN,
         tc_l_stats: [0; 4],
         tc_g_stats: [0; 4],
         tc_c: (0, 0, [0; 4], 0),
@@ -11350,6 +11353,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.tree_restart_check = false;
         // 木の中の再スタートの記帳 (`TRSTAT`) 用: 木に入った時刻と下界 (ログを出すだけで解き方は変えない)
         self.tr_t0 = self.start.elapsed().as_secs_f64();
+        self.tr_outer0 = super::outer_elapsed().unwrap_or(f64::NAN);
         self.tr_w0 = ((self.lp.total_iterations() + self.heur_iters) as f64, self.node_iters + self.sb_iters);
         self.tr_root_lb = self.global_lower_bound().min(plunge.as_ref().map_or(f64::INFINITY, |n| n.lower_bound));
         self.tr_qprev = (0.0, 0.0);
@@ -11425,7 +11429,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 足して、暫定解が良くなり根の被約費用で新たに固まった整数列が、この根の始めに自由だった整数列の `ENOMOTO_T_MIP_TREE_RESTART_INC2_FRAC`
             // (既定 0.1) 以上なら再スタートする (ノード数の上限なし)。HiGHS は新しい解のたびに根の被約費用で固め、動かない整数列の割合で再スタートする
             // (tbfp-network は最適解の後に 79.5%・19%・11.4%・5.1% で 4 回再スタートして 1 節点で閉じる。当方は木の中で最適解を見つけても再スタートしない)
-            let inc2 = env_str!("ENOMOTO_MIP_TREE_RESTART_INC2").is_some() && tree_restart_mode() != 3 && !self.treefix_restart_mode();
+            // 木に入ってからの秒 (外側の時計) が、根の段の秒 (外側の始めから木に入るまで) の `ENOMOTO_T_MIP_TREE_RESTART_INC2_TREEMULT` (既定 1) 倍に
+            // 満たなければ使わない (再スタートの根のやり直しの費用が勝つ短い問題を外す。neos-3083819-nubu: 根の段 2.5 秒・木 1.3 秒で再スタートし 1.3 倍遅い)
+            let inc2_tree_ok = || {
+                let now = super::outer_elapsed().unwrap_or(f64::NAN);
+                !(now - self.tr_outer0 < tunable!("ENOMOTO_T_MIP_TREE_RESTART_INC2_TREEMULT", 1.0, f64) * self.tr_outer0)
+            };
+            let inc2 = env_str!("ENOMOTO_MIP_TREE_RESTART_INC2").is_some() && tree_restart_mode() != 3 && !self.treefix_restart_mode() && (!self.tree_restart_check || inc2_tree_ok());
             if std::mem::take(&mut self.tree_restart_check) && (tree_restart_mode() == 3 || self.treefix_restart_mode() || inc2) && self.watch.is_none() {
                 let left_ok = match self.deadline {
                     Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT", 0.1, f64) * self.params.frac_tl(),
