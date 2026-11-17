@@ -1,0 +1,68 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP trento1 has 1265 rows; 7687 cols; 93571 nonzeros; 6415 integer variables (6415 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+08]
+  Cost    [2e+02, 1e+08]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 1e+10]
+WARNING: Problem has some excessively large costs
+WARNING: Problem has some excessively large row bounds
+WARNING:    Consider scaling the objective by 1e-2, or setting the user_objective_scale option to -7
+WARNING:    Consider scaling the    bounds by 1e-4, or setting the user_bound_scale option to -14
+Presolving model
+1264 rows, 7678 cols, 93396 nonzeros 0s
+1192 rows, 7606 cols, 89185 nonzeros 0s
+Presolve reductions: rows 1192(-73); columns 7606(-81); nonzeros 89185(-4386) 
+
+Solving MIP model with:
+   1192 rows
+   7606 cols (6415 binary, 0 integer, 1178 implied int., 13 continuous, 0 domain fixed)
+   89185 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     0.8s
+ R       0       0         0   0.00%   5182758.848056  1727990335        99.70%        0      0      0     12361     5.0s
+ C       0       0         0   0.00%   5182758.848056  1576796656        99.67%        0      0      0     12361     5.7s
+ L       0       0         0   0.00%   5182758.848056  5585032            7.20%        0      0      0     12361    12.9s
+         0       0         0   0.00%   5182758.848056  5585032            7.20%        0      0      0     47397    39.6s
+         2       2         1   0.00%   5182807.052387  5585032            7.20%        1      0     39    102118    60.0s
+         2       2         1   0.00%   5182807.052387  5585032            7.20%        1      0     39    102118    60.0s
+
+Solving report
+  Model             trento1
+  Status            Time limit reached
+  Primal bound      5585032
+  Dual bound        5182807.05239
+  Gap               7.2%
+  P-D integral      11.2949030787
+  Solution status   feasible
+                    5585032 (objective)
+                    0 (bound viol.)
+                    9.43689570931e-14 (int. viol.)
+                    0 (row viol.)
+  Timing            60.01
+                    2.45 (Presolve)
+                        MIP    time [calls] = 0.42 [1]
+                        subMIP time [calls] = 2.03 [30]
+                    57.55 (Solve)
+                        MIP    time [calls] = 26.44 [1]
+                        subMIP time [calls] = 31.11 [13]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [30]
+  Max sub-MIP depth 10
+  Nodes             2
+  Repair LPs        0
+  LP iterations     102118
+                    54563 (strong br.)
+                    0 (separation)
+                    35036 (heuristics)
