@@ -140,6 +140,8 @@ pub struct TwoStageLp {
     /// `ENOMOTO_MIP_ROOTLP_SCALE` (既定で使う) ([`Self::request_scale_once`]): 次の求解 1 回だけ、基底があっても行と列の尺度を調整した写しで解く
     /// ([`Self::solve_scaled`])。求解の始めに使い切る
     scale_once: bool,
+    /// 両側とも無限の境界の行があるか ([`Self::free_row`]、試作 `ENOMOTO_MIP_CLQ_LAZY`)。偽なら双対・tableau の重みの確かめを省く
+    has_free_rows: bool,
     /// 試作 `ENOMOTO_MIP_LPSCALE` (analysis/mip_lp_scale_20261106.md): 行と列の尺度をかけた双子 (係数 `r_i a_ij c_j`)。
     /// 本体を変える操作は双子にも写し、求解は双子で解いてから本体 (元の尺度) で確かめる ([`Self::solve_tw`])。
     tw: Option<Box<TwoStageLp>>,
@@ -720,6 +722,7 @@ impl TwoStageLp {
             rc_memo: OnceCell::new(),
             act_memo: OnceCell::new(),
             scale_once: false,
+            has_free_rows: row_lo.iter().zip(row_up).any(|(&l, &u)| l == f64::NEG_INFINITY && u == f64::INFINITY),
             tw: None,
             tw_rs: Vec::new(),
             tw_cs: Arc::new(Vec::new()),
@@ -864,9 +867,37 @@ impl TwoStageLp {
         }
     }
 
+    /// 行 `i` が両側とも無限の境界か (標準形では空の行 0 = 0 になり、双対・tableau の重みは意味を持たないので 0 として返す。
+    /// 試作 `ENOMOTO_MIP_CLQ_LAZY` が余裕のあるクリーク型の行をこの形にする)
+    fn free_row(&self, i: usize) -> bool {
+        self.row_lo[i] == f64::NEG_INFINITY && self.row_up[i] == f64::INFINITY
+    }
+
+    /// 行の境界をまとめて変える (標準形の作り直しは 1 回)。試作 `ENOMOTO_MIP_CLQ_LAZY` 用。
+    pub fn set_row_bounds_many(&mut self, ch: &[(usize, f64, f64)]) {
+        if ch.is_empty() {
+            return;
+        }
+        for &(i, lo, up) in ch {
+            self.row_lo[i] = lo;
+            self.row_up[i] = up;
+        }
+        self.has_free_rows = (0..self.rows.len()).any(|i| self.free_row(i));
+        self.rebuild();
+        self.status = None;
+        let sync = self.tw_sync;
+        self.clear_memo();
+        let ch2: Vec<(usize, f64, f64)> = ch.iter().map(|&(i, lo, up)| (i, lo * self.tw_rs.get(i).copied().unwrap_or(1.0), up * self.tw_rs.get(i).copied().unwrap_or(1.0))).collect();
+        if let Some(t) = self.tw.as_mut() {
+            t.set_row_bounds_many(&ch2);
+            self.tw_sync = sync;
+        }
+    }
+
     pub fn set_row_bounds(&mut self, i: usize, lo: f64, up: f64) {
         self.row_lo[i] = lo;
         self.row_up[i] = up;
+        self.has_free_rows = (0..self.rows.len()).any(|k| self.free_row(k));
         self.rebuild();
         self.status = None;
         let sync = self.tw_sync;
@@ -3201,7 +3232,7 @@ impl TwoStageLp {
         let mut d = self.cost.clone();
         for (i, r) in self.rows.iter().enumerate() {
             let yi = self.y.get(i).copied().unwrap_or(0.0) * self.sigma[i];
-            if yi != 0.0 {
+            if yi != 0.0 && !(self.has_free_rows && self.free_row(i)) {
                 for &(j, a) in r {
                     d[j] -= yi * a;
                 }
@@ -3212,11 +3243,21 @@ impl TwoStageLp {
 
     /// 行の双対値 (元の行の向き)。
     pub fn farkas_ray(&self) -> Option<Vec<f64>> {
-        self.ray.clone()
+        let mut r = self.ray.clone();
+        if self.has_free_rows {
+            if let Some(r) = r.as_mut() {
+                for (i, v) in r.iter_mut().enumerate().take(self.rows.len()) {
+                    if self.free_row(i) {
+                        *v = 0.0;
+                    }
+                }
+            }
+        }
+        r
     }
 
     pub fn row_duals(&self) -> Vec<f64> {
-        (0..self.rows.len()).map(|i| self.y.get(i).copied().unwrap_or(0.0) * self.sigma[i]).collect()
+        (0..self.rows.len()).map(|i| if self.has_free_rows && self.free_row(i) { 0.0 } else { self.y.get(i).copied().unwrap_or(0.0) * self.sigma[i] }).collect()
     }
 
     /// 基底位置 `s` の `e_s^T B^{-1}` を、元の行に掛ける重みとして返す
@@ -3485,6 +3526,14 @@ impl TwoStageLp {
     /// [`Self::basis_inverse_row`] の非零だけ (行, 値) を返す版。超疎の単位 BTRAN の非零の行の記録をそのまま使うので、
     /// 呼び手は行の全部 (m 個) を回さずに済む (値は密な版とビット一致)。
     pub fn basis_inverse_row_sparse(&mut self, s: usize) -> Vec<(usize, f64)> {
+        let mut r = self.basis_inverse_row_sparse_raw(s);
+        if self.has_free_rows {
+            r.retain(|&(i, _)| !self.free_row(i));
+        }
+        r
+    }
+
+    fn basis_inverse_row_sparse_raw(&mut self, s: usize) -> Vec<(usize, f64)> {
         let m = self.rows.len();
         if env_str!("ENOMOTO_MIP_BINV_ROW_DENSE").is_some_and(|v| v != "0") {
             let r = self.basis_inverse_row(s);
@@ -3558,6 +3607,18 @@ impl TwoStageLp {
     }
 
     pub fn basis_inverse_row(&mut self, s: usize) -> Vec<f64> {
+        let mut r = self.basis_inverse_row_raw(s);
+        if self.has_free_rows {
+            for (i, v) in r.iter_mut().enumerate() {
+                if self.free_row(i) {
+                    *v = 0.0;
+                }
+            }
+        }
+        r
+    }
+
+    fn basis_inverse_row_raw(&mut self, s: usize) -> Vec<f64> {
         let m = self.rows.len();
         if self.lu.is_none() {
             // 最適基底の LU を共有する (解くだけなので複製しない)

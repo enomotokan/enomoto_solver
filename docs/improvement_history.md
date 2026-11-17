@@ -10401,3 +10401,21 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   誤答 0 (fuzz_tiny 400・mip_fuzz_vs_highs 300・対称な乱数の fuzz 約 860 問・cargo test 400 件)。効き目ははっきりしない。
 - 既定にしていない: `=1` (orbital fixing の代わり、cod105 で弱い)・`o` (軌道の比べ、小さい群で遅い)・`ENOMOTO_MIP_SYMREFL` (反転、MIPLIB で効く問題がない)。
   記録は `analysis/symdyn_20261110.md`。
+
+## 2026-11-17: cand1119 (クリークのカットのシグモイド・双子の対称性・プローブの見積り) を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_CLIQUE_CUTS=sigmoid` (`_SIG_A` 1.8・`_SIG_B` 0.41)・`ENOMOTO_MIP_SYM_TWINS`・`ENOMOTO_MIP_CUTSEL_PROBE_AFFORD`。
+  戻し方は `CLIQUE_CUTS=fallback`・`SYM_TWINS=0`・`CUTSEL_PROBE_AFFORD=0`。
+- 根拠: P (58 問) SGM −2.9% (区間 −8.1%〜+1.5%)、解けた 319 → 319 回、誤答 0。遅くなる問題: supportcase33 (約 1.3 倍、シグモイドによる)。
+  記録は `analysis/cand1119_20261117/`・`analysis/cand1119_default_20261117/`。
+
+## 2026-11-17: 木を分け合うスレッドの間でカットプールを共有する ENOMOTO_MIP_TREE_SHARE_CUTS を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_TREE_SHARE_CUTS` (止めるのは `=0` か `off`)。あるスレッドがカットプールに入れたカットを学習の記録
+  (双対証明・衝突と同じ列) に流し、ほかのスレッドが取り込んで自分のカットプールに入れる。カットは大域的な境界で作るので、どのスレッドの
+  どのノードでも成り立つ。
+- 根拠 (4 スレッド、同じ問題・種の設定は同じ機械): P (58 問 × 3 種・60 秒) SGM −3.1% (区間 −7.4%〜+0.4%)、解けた 132 → 135 回。
+  M (6 問 × 2 種・600 秒) SGM −12.7% (区間 −25.4%〜−0.3%)、解けた 7 → 8 回 (kasai 0.69 倍、csched008 0.79 倍で種 1 を 476 秒)。
+  全種で 1.25 倍を超える遅れなし (physiciansched6-2 1.19・mc11 1.17)、誤答 0。M の最大 RSS は 2706 → 3354 MB (+24%)。
+- 既定にしていない: `ENOMOTO_MIP_TREE_NO_BALANCE` (M の区間の上限 +13.3%、mzzv11 が 1.17 倍)。
+  記録は `analysis/sharecuts_20261117/`・treeclose 9.79 節。

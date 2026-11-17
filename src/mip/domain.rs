@@ -22,6 +22,25 @@ struct Change {
     reason: i32,
 }
 
+/// 双対証明の通し番号を入れた理由の値の始まり ([`Domain::set_proof_tag`])。
+const PROOF_REASON_BASE: i32 = -1001;
+/// カットのプールの伝播の、写しの表の番号を入れた理由の値の始まり ([`Domain::set_cut_tag`])。
+const CUT_REASON_BASE: i32 = -1_000_000_001;
+
+/// 理由の値が双対証明の通し番号を持てば、その番号。
+pub fn proof_reason_id(r: i32) -> Option<u64> {
+    (r <= PROOF_REASON_BASE && r > CUT_REASON_BASE).then(|| (PROOF_REASON_BASE - r) as u64)
+}
+
+/// 理由の値がカットの写しの表の番号を持てば、その番号。
+pub fn cut_reason_id(r: i32) -> Option<usize> {
+    (r <= CUT_REASON_BASE).then(|| (CUT_REASON_BASE - r) as usize)
+}
+
+/// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN`: 衝突解析で、理由の値 (双対証明の通し番号・カットの写しの番号を入れたもの) から
+/// 行を引く関数 (係数と右辺 `sum a_j x_j <= rhs`。もうなければ `None`)。
+pub type ProofLookup<'a> = &'a dyn Fn(i32) -> Option<(Vec<(usize, f64)>, f64)>;
+
 /// 伝播で見つかった矛盾の出どころ (衝突解析用)。
 #[derive(Clone, Copy, Debug)]
 pub enum ConflictSrc {
@@ -506,7 +525,20 @@ impl Domain {
     }
 
     /// 大域的に (すべてのノードで) 有効な締め付け。根にいればすぐ、そうでなければ次に根へ戻ったときに適用する。
+    ///
+    /// 診断 `ENOMOTO_MIP_GFIX_LOG` (treeclose 9.57 節、解き方は変えない): 整数列が大域的に新たに固定されるたびに、呼び出した場所と時刻を
+    /// `GFIX t=外側の秒 at=ファイル:行 j=列 root=根にいるか` で標準エラーに出す
+    #[track_caller]
     pub fn tighten_global(&mut self, p: &MipProblem, j: usize, upper: bool, v: f64) {
+        let gfix_before = gfix_log() && p.is_int[j] && self.global_lo[j] != self.global_up[j];
+        self.tighten_global_inner(p, j, upper, v);
+        if gfix_before && self.global_lo[j] == self.global_up[j] {
+            let at = std::panic::Location::caller();
+            eprintln!("GFIX t={:.3} at={}:{} j={j} root={} sub={}", super::outer_elapsed().unwrap_or(f64::NAN), at.file(), at.line(), self.stack.is_empty(), GFIX_SUB.with(|c| c.get()));
+        }
+    }
+
+    fn tighten_global_inner(&mut self, p: &MipProblem, j: usize, upper: bool, v: f64) {
         let v = if p.is_int[j] {
             if upper {
                 (v + FEASTOL).floor()
@@ -802,6 +834,17 @@ impl Domain {
         self.cur_reason = -2 - tag;
     }
 
+    /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない): 以後の変更を「通し番号 `id` の双対証明で締めた」として記録する
+    /// (理由 `PROOF_REASON_BASE - id`。番号が大きすぎれば従来の `-6`)。衝突解析で証明の行から説明できるようにする。
+    pub fn set_proof_tag(&mut self, id: u64) {
+        self.cur_reason = if id < 999_000_000 { PROOF_REASON_BASE - id as i32 } else { -6 };
+    }
+
+    /// 同じ試作: 以後の変更を「カットのプールの伝播で、写しの表の `idx` 番のカットで締めた」として記録する (番号が大きすぎれば従来の `-9`)。
+    pub fn set_cut_tag(&mut self, idx: usize) {
+        self.cur_reason = if idx < 1_000_000_000 { CUT_REASON_BASE - idx as i32 } else { -9 };
+    }
+
     /// 診断用 (`ENOMOTO_MIP_REPLAY_LOG`): 変更の記録にある整数列の境界の変更を理由ごとに数える
     /// (B 決定 (分枝・含意を含む -1)、R 行の伝播、L 被約費用の局所的な固定、S 強分岐、O オービトープ、P 双対証明、
     /// F リテラルの衝突、J 目的関数の伝播、E その他の外からの変更、C カットプールの伝播、
@@ -899,13 +942,18 @@ impl Domain {
     /// 置き換えた組と UIP の否定から「再収束」の衝突も作る。各衝突は同時には成り立たない境界のリテラルの組
     /// (列, 上限か, 値)。長さ `max_len` を超える衝突は作らない。
     pub fn analyze_multi(&self, p: &MipProblem, start: ConflictStart, max_len: usize, reconv: bool) -> Vec<Vec<(usize, bool, f64)>> {
-        self.analyze_multi_bumps(p, start, max_len, reconv, None)
+        self.analyze_multi_bumps(p, start, max_len, reconv, None, None)
     }
 
     /// [`Self::analyze_multi`] と同じだが、`bumps` があれば HiGHS が衝突スコアを上げる境界の変更 (列, 上限か) を足す:
     /// 矛盾の最初の説明に使った変更全部 (長さの上限を調べる前) と、段ごとの置き換えで新しく加わった変更
     /// (HiGHS `conflictAnalysis` と `resolveDepth(.., increaseConflictScore = true)`。再収束の衝突の分は数えない)。
-    pub fn analyze_multi_bumps(&self, p: &MipProblem, start: ConflictStart, max_len: usize, reconv: bool, mut bumps: Option<&mut Vec<(usize, bool)>>) -> Vec<Vec<(usize, bool, f64)>> {
+    pub fn analyze_multi_bumps(&self, p: &MipProblem, start: ConflictStart, max_len: usize, reconv: bool, mut bumps: Option<&mut Vec<(usize, bool)>>, proofs: Option<ProofLookup>) -> Vec<Vec<(usize, bool, f64)>> {
+        // 遡れる変更: 行の伝播 (`>= 0`)、試作では双対証明の締め付け (通し番号つき) も
+        let resolvable = |k: usize| -> bool {
+            let r = self.stack[k].reason;
+            r >= 0 || (proofs.is_some() && r <= PROOF_REASON_BASE)
+        };
         let end = self.stack.len();
         let dec: Vec<usize> = (0..end).filter(|&k| self.stack[k].reason == -1).collect();
         if dec.is_empty() {
@@ -1011,11 +1059,18 @@ impl Domain {
         // 伝播による変更 `k` の説明
         let explain_change = |k: usize| -> Option<Vec<usize>> {
             let c = &self.stack[k];
-            if c.reason < 0 {
-                return None;
-            }
-            let r = c.reason as usize;
-            let a_c = p.rows[r].iter().find(|&&(j, _)| j == c.col).map(|&(_, a)| a)?;
+            // 理由の行 (問題の行、または試作では双対証明 `sum a_j x_j <= rhs`)
+            let owned: Option<(Vec<(usize, f64)>, f64)>;
+            let (terms, row_up, row_lo): (&[(usize, f64)], f64, f64) = if c.reason >= 0 {
+                let r = c.reason as usize;
+                (&p.rows[r][..], p.row_up[r], p.row_lo[r])
+            } else {
+                let Some(f) = proofs.filter(|_| c.reason <= PROOF_REASON_BASE) else { return None };
+                owned = f(c.reason);
+                let (cf, rhs) = owned.as_ref()?;
+                (&cf[..], *rhs, f64::NEG_INFINITY)
+            };
+            let a_c = terms.iter().find(|&&(j, _)| j == c.col).map(|&(_, a)| a)?;
             let v = c.new;
             // 整数列の境界は丸めてある: 上限 v は (rhs - rest)/a < v + 1 - FEASTOL から、下限 v は > v - 1 + FEASTOL から。
             // `ENOMOTO_MIP_CONFLICT_INT_TOL` (2026-11-05 から既定、`=0` で以前の形): 以前の形では、説明が足りるかの判定の許容誤差
@@ -1046,12 +1101,14 @@ impl Domain {
                 f64::INFINITY
             };
             let min_side = (a_c > 0.0) == c.upper;
+            // 双対証明は `<=` の片側だけ (逆側の締め付けは証明から出ない)
+            if c.reason < 0 && !min_side {
+                return None;
+            }
             if min_side {
-                let u = p.row_up[r];
-                explain(&mut p.rows[r].iter().copied(), u - a_c * w, k, c.col, tol_cap)
+                explain(&mut terms.iter().copied(), row_up - a_c * w, k, c.col, tol_cap)
             } else {
-                let l = p.row_lo[r];
-                explain(&mut p.rows[r].iter().map(|&(j, a)| (j, -a)), -l + a_c * w, k, c.col, tol_cap)
+                explain(&mut terms.iter().map(|&(j, a)| (j, -a)), -row_lo + a_c * w, k, c.col, tol_cap)
             }
         };
         let init: Vec<usize> = match start {
@@ -1116,6 +1173,8 @@ impl Domain {
         let mut out: Vec<Vec<(usize, bool, f64)>> = Vec::new();
         let mut lev = dec.len();
         let mut done = 0usize;
+        let ld = conflict_lev_diag();
+        let mut stop_k = 6usize;
         'outer: while lev >= 1 {
             let lo = dec[lev - 1];
             let hi = if lev < dec.len() { dec[lev] } else { end };
@@ -1124,10 +1183,14 @@ impl Domain {
             let mut cnt = set.range(lo..hi).count();
             while cnt > 1 {
                 if set.len() > cap {
+                    stop_k = 2;
                     break 'outer;
                 }
-                let Some(&k) = set.range(lo..hi).rev().find(|&&k| self.stack[k].reason >= 0) else { break };
-                let Some(ex) = explain_change(k) else { break 'outer };
+                let Some(&k) = set.range(lo..hi).rev().find(|&&k| resolvable(k)) else { break };
+                let Some(ex) = explain_change(k) else {
+                    stop_k = 3;
+                    break 'outer;
+                };
                 if self.dbg_sol.is_some() {
                     trace.borrow_mut().push(format!("lev {lev} resolve {} <- {}", desc(k), ex.iter().map(|&e| desc(e)).collect::<Vec<_>>().join(" ")));
                 }
@@ -1151,6 +1214,27 @@ impl Domain {
                 lev -= 1;
                 continue;
             }
+            if conflict_lev_diag() {
+                // 診断 `ENOMOTO_MIP_CONFLICT_LEV_DIAG`: 深さごとに 1-UIP まで解けたか、解けずに残った変更の理由
+                use std::sync::atomic::Ordering::Relaxed;
+                CONFLICT_LEV[0].fetch_add(1, Relaxed);
+                if inlev.len() <= 1 {
+                    CONFLICT_LEV[1].fetch_add(1, Relaxed);
+                } else {
+                    CONFLICT_LEV[2].fetch_add(1, Relaxed);
+                    let mut nonrow = false;
+                    for &k in &inlev {
+                        let r = self.stack[k].reason;
+                        if r < 0 {
+                            CONFLICT_LEV[4 + ((-r) as usize).min(11) - 1].fetch_add(1, Relaxed);
+                            nonrow |= r < -1;
+                        }
+                    }
+                    if nonrow {
+                        CONFLICT_LEV[3].fetch_add(1, Relaxed);
+                    }
+                }
+            }
             done += 1;
             let before = out.len();
             // HiGHS と同じく、この段で置き換えが起きたときだけ衝突にする (最初の段で置き換えがなければ今の組を 1 つ作って
@@ -1160,14 +1244,17 @@ impl Domain {
                 if !lits.is_empty() && lits.len() <= max_len {
                     out.push(lits);
                 }
+                stop_k = 1;
                 break;
             }
             let lits = to_lits(&set);
             if resolved > 0 && !lits.is_empty() && lits.len() <= max_len {
                 out.push(lits);
+            } else if ld && resolved > 0 && lits.len() > max_len {
+                CONFLICT_STOP[7].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             // 再収束: UIP u (伝播による変更) を同じ段の理由で置き換えた組 R は u を導く。R かつ (u の否定) は矛盾
-            if reconv && inlev.len() == 1 && self.stack[inlev[0]].reason >= 0 {
+            if reconv && inlev.len() == 1 && resolvable(inlev[0]) {
                 let u = inlev[0];
                 let mut r: std::collections::BTreeSet<usize> = std::iter::once(u).collect();
                 let mut ok = true;
@@ -1176,7 +1263,7 @@ impl Domain {
                         ok = false;
                         break;
                     }
-                    let Some(&k) = r.range(lo..hi).rev().find(|&&k| self.stack[k].reason >= 0) else { break };
+                    let Some(&k) = r.range(lo..hi).rev().find(|&&k| resolvable(k)) else { break };
                     let Some(ex) = explain_change(k) else {
                         ok = false;
                         break;
@@ -1207,9 +1294,17 @@ impl Domain {
             let new_here = out.len() - before;
             // HiGHS と同じ打ち切り: 最初の段で衝突が出なければ止める。5 段以上調べて新しい衝突がなければ止める
             if out.is_empty() || (done >= 5 && new_here == 0) {
+                stop_k = if out.is_empty() { 4 } else { 5 };
                 break;
             }
             lev -= 1;
+        }
+        if ld {
+            use std::sync::atomic::Ordering::Relaxed;
+            CONFLICT_STOP[0].fetch_add(1, Relaxed);
+            CONFLICT_STOP[stop_k].fetch_add(1, Relaxed);
+            CONFLICT_STOP[8].fetch_add(out.len() as u64, Relaxed);
+            CONFLICT_STOP[9].fetch_add(done as u64, Relaxed);
         }
         if let Some(x) = &self.dbg_sol {
             for (n, c) in out.iter().enumerate() {
@@ -1327,6 +1422,17 @@ impl Domain {
 
 /// 診断用: 衝突解析が失敗した理由の回数 [決定なし, 途中で長すぎ, 理由の行に列がない, 空, 最後に長すぎ, その長さの和]
 pub static CONFLICT_FAIL: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+/// 診断 `ENOMOTO_MIP_CONFLICT_LEV_DIAG` の数: [調べた深さ, 1-UIP まで解けた深さ, 解けずに 2 つ以上残った深さ, そのうち行でない理由
+/// (決定以外) の変更が残った深さ, 残った変更の理由ごとの数 (-1 決定, -2 外から, -3 局所の被約費用, -4 強分岐, -5 orbitope,
+/// -6 双対証明, -7 リテラルの衝突, -8 目的関数の伝播, -9 含意, -10, -11 以下)]
+pub static CONFLICT_LEV: [std::sync::atomic::AtomicU64; 15] = [const { std::sync::atomic::AtomicU64::new(0) }; 15];
+/// 同じ診断の、解析 1 回ごとの止まり方: [解析, 最初の深さで解けず (衝突 1 本で終わり), 衝突の組が大きすぎる (cap), 行で説明できない,
+/// 衝突が 0 本で止まる, 5 段の規則で止まる, 決定の深さを全部遡った, 衝突の長さの上限で捨てた衝突, 作った衝突, 遡った深さの合計]
+pub static CONFLICT_STOP: [std::sync::atomic::AtomicU64; 10] = [const { std::sync::atomic::AtomicU64::new(0) }; 10];
+pub fn conflict_lev_diag() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("ENOMOTO_MIP_CONFLICT_LEV_DIAG").is_some())
+}
 
 #[inline]
 fn bound_tol(v: f64) -> f64 {
@@ -1445,4 +1551,30 @@ mod tests {
         }
     }
 
+}
+
+thread_local! {
+    /// 診断 `ENOMOTO_MIP_GFIX_LOG` 用: このスレッドで走っているサブ MIP の入れ子の深さ ([`GfixSubScope`])
+    static GFIX_SUB: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// 診断 `ENOMOTO_MIP_GFIX_LOG` 用: サブ MIP の求解の間だけ [`GFIX_SUB`] を 1 増やす (Drop で戻す)
+pub(crate) struct GfixSubScope;
+
+impl GfixSubScope {
+    pub(crate) fn enter() -> Self {
+        GFIX_SUB.with(|c| c.set(c.get() + 1));
+        GfixSubScope
+    }
+}
+
+impl Drop for GfixSubScope {
+    fn drop(&mut self) {
+        GFIX_SUB.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+/// 診断 `ENOMOTO_MIP_GFIX_LOG` ([`Domain::tighten_global`])
+fn gfix_log() -> bool {
+    env_str!("ENOMOTO_MIP_GFIX_LOG").is_some()
 }

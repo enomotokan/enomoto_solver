@@ -19,6 +19,8 @@ pub trait MipLp: Clone + Send {
     /// 行 `i` の係数を複製せずに見る ([`Self::row`] と同じ中身)
     fn row_ref(&self, i: usize) -> &[(usize, f64)];
     fn set_col_bounds(&mut self, j: usize, lo: f64, up: f64);
+    /// 行の境界をまとめて変える (試作 `ENOMOTO_MIP_CLQ_LAZY`: 両側とも無限にした行は双対・tableau の重みが 0 になる)
+    fn set_row_bounds_many(&mut self, ch: &[(usize, f64, f64)]);
     fn set_costs(&mut self, c: &[f64]);
     fn costs(&self) -> Vec<f64>;
     fn add_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]);
@@ -179,6 +181,7 @@ macro_rules! forward_impl {
             fn row(&self, i: usize) -> Vec<(usize, f64)> { <$t>::row(self, i) }
             fn row_ref(&self, i: usize) -> &[(usize, f64)] { <$t>::row_ref(self, i) }
             fn set_col_bounds(&mut self, j: usize, lo: f64, up: f64) { <$t>::set_col_bounds(self, j, lo, up) }
+            fn set_row_bounds_many(&mut self, ch: &[(usize, f64, f64)]) { <$t>::set_row_bounds_many(self, ch) }
             fn set_costs(&mut self, c: &[f64]) { <$t>::set_costs(self, c) }
             fn costs(&self) -> Vec<f64> { <$t>::costs(self) }
             fn add_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]) { <$t>::add_rows(self, rows) }

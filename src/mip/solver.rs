@@ -595,6 +595,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cut_clique_adj: std::collections::HashMap<u32, Vec<u32>>,
     /// `ENOMOTO_MIP_CLIQUE_CUTS=auto` の判定 (根で一度だけ試す。`None` は未判定)。
     pub(super) clique_auto: Option<bool>,
+    /// `ENOMOTO_MIP_CLIQUE_CUTS=sigmoid` (既定)・`sigmoid_a` の割合 f (根の clique カットの 1 ラウンドの本数の上限を f x `ENOMOTO_T_MIP_CLIQUE_MAX` にする。
+    /// `None` は未計算。[`Solver::clique_sig_init`])
+    pub(super) clique_sig: Option<f64>,
     /// ヒューリスティクスに使った LP 反復数。
     pub(super) heur_iters: u64,
     /// 根のヒューリスティクスを終えた時点の `heur_iters` (木の中の予算は、これを引いた分で数える)。
@@ -746,6 +749,19 @@ pub(super) struct Solver<'a, L: MipLp> {
     tr_huge: u32,
     /// 試作 `ENOMOTO_MIP_TC` の `g`: 次に開いたノードの共通の境界を見るノード数と、統計 [呼んだ, 締めた列, 伝播で締めた列, 矛盾で閉じた]
     tc_g_next: u64,
+    /// 試作 `ENOMOTO_MIP_TC` の `l`: 次に大域の伝播をするノード数と、[呼んだ回数, 締めた整数列, 固定した整数列, 矛盾]
+    tc_l_next: u64,
+    /// 試作 `ENOMOTO_MIP_LMBOOST_ASYNC` ([`lmboost_async`]): 裏で回っている LMBOOST のスレッド
+    lmboost_bg: Option<LmboostBg>,
+    /// 試作 `ENOMOTO_MIP_TREE_RESTART_INC2` 用: この求解で木に入った時刻 (外側の時計の秒)
+    tr_outer0: f64,
+    /// 同じく、木に入った時点のこのスレッドの手間の累計 ([`crate::ticks::total`])
+    tr_tk0: f64,
+    /// 試作 `ENOMOTO_MIP_CLQ_LAZY` (treeclose 9.80 節): LP で両側とも無限の境界にした (外した) クリーク型の元の行 (番号、行の文字)。
+    /// ノードの LP 解が破れば、その行をカットの行として LP に戻す ([`Self::clq_lazy_restore`])。`clq_lazy_stats` は (外した数, 確かめた回数, 戻した行の数, 解き直した回数)
+    clq_lazy: Vec<(usize, Vec<u32>)>,
+    clq_lazy_stats: [u64; 4],
+    tc_l_stats: [u64; 4],
     tc_g_stats: [u64; 4],
     /// 試作 `ENOMOTO_MIP_TC` の `c`: カットプールの伝播を止めている間に飛ばした回数・次に試し直す回数・試しの区切りの始めの統計・試し直した回数
     tc_c: (u64, u64, [u64; 4], u64),
@@ -1040,6 +1056,14 @@ pub(super) struct Solver<'a, L: MipLp> {
     pool3_diag_at: Option<Instant>,
     /// `ENOMOTO_MIP_POOL3_BEST` (1 スレッド): 最後に下界最小を処理させた時刻。
     pool3_diag_at_best: Option<Instant>,
+    /// 試作 `ENOMOTO_MIP_PARORD` の数: [a: 共有の待ち行列から取った, a: 自分の待ち行列の下界最小を取った, a: ほかのスレッドに合図した,
+    /// a: 合図を受けて出した, c: 役に就いた回数, c: 役の Local-MIP の回数, c: 役の FJ の回数, c: 役で解を見つけた回数]
+    parord_stats: [u64; 8],
+    /// 試作 `ENOMOTO_MIP_PARORD` の `c`: 役に就いていた秒数の和と、上限 (`ENOMOTO_T_MIP_PARORD_C_SECS`) に当たって役をやめたか
+    parord_c_secs: f64,
+    parord_c_off: bool,
+    /// 試作 `ENOMOTO_MIP_PARORD` の `a`: 直前の取り出しが共有の待ち行列からだった (診断の数え分け `tp_kind` 用)
+    parord_from_pool: bool,
     /// カット生成に使う変数上下限 (最初の分離で作る)。
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
     /// 診断 `ENOMOTO_MIP_INTVUB_DUMP` を出したか
@@ -1226,6 +1250,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cut_imp: Vec<bool>,
     /// 根で作ったカット (係数, 右辺, ノルム)。大域的に成り立つ。ノードで違反していれば LP に戻す。
     pub(super) cut_pool: Vec<(Vec<(usize, f64)>, f64, f64)>,
+    /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN`: カットのプールの伝播で使ったカットの写し (係数, 右辺。追加だけで番号は変わらない) と、
+    /// カットのハッシュから写しの番号への表。
+    cut_arena: Vec<(Vec<(usize, f64)>, f64)>,
+    cut_arena_idx: std::collections::HashMap<u64, u32>,
     /// 双対証明 (衝突分析): `sum coefs x <= U - konst` (U は打ち切り値から定数項を引いたもの、最新の値を使う)。
     pub(super) dual_proofs: std::collections::VecDeque<(Vec<(usize, f64)>, f64, bool)>,
     pub(super) dual_proof_nnz: usize,
@@ -1510,6 +1538,8 @@ pub(crate) struct TreeSnapshot {
     refl_gens: Vec<super::symdyn::SignedGen>,
     /// 写しを作ったときの LP の基底 (`ENOMOTO_MIP_TREE_ROOT_BASIS`、試作。列と、元の行 + `rows` の行)
     root_basis: Option<super::lp::Basis>,
+    /// 試作 `ENOMOTO_MIP_CLQ_LAZY`: 写しを作ったときに LP で外していた元の行 (番号) と、その行の文字
+    clq_lazy: Vec<(usize, Vec<u32>)>,
 }
 
 /// `ENOMOTO_MIP_TREE_ROOT_BASIS` (試作、inv/mzzv42z-r4-20261021、既定では使わない): 木を分け合う従が写しの根の LP を、主の LP の
@@ -2502,6 +2532,8 @@ pub(crate) struct WorkPool {
     fin: std::sync::atomic::AtomicBool,
     /// 今ヒューリスティクス役に就いているスレッドの数。
     in_role: std::sync::atomic::AtomicUsize,
+    /// 試作 `ENOMOTO_MIP_PARORD` の `c`: 暫定解のない間のヒューリスティクス役に就いているスレッドの数 (`in_role` にも数える)。
+    in_role_c: std::sync::atomic::AtomicUsize,
     /// 大近傍探索の価値の指数移動平均 ([`MuStats`])。
     mu: std::sync::Mutex<MuStats>,
     /// 証明の段階に入った (`ENOMOTO_MIP_PROOF_SWITCH`、[`Solver::proof_phase_check`])。主が立て、各スレッドが読む。
@@ -3090,6 +3122,9 @@ struct ThreadSlot {
     dlb_set: std::sync::atomic::AtomicBool,
     /// `ENOMOTO_MIP_POOL3_BEST` (試作): このスレッドの手元に全体の最小の下界のノードがあるので、次は潜りを止めて下界最小を処理する合図。
     force: std::sync::atomic::AtomicBool,
+    /// 試作 `ENOMOTO_MIP_PARORD` の `a`: 作業者 0 が、このスレッドの手元に自分より小さい下界のノードがあるので、下界最小の 1 個を
+    /// 共有の待ち行列に出してほしいという合図 ([`Solver::parord_a_pop`])。
+    give: std::sync::atomic::AtomicBool,
 }
 
 /// 刈れる重みの分布 ([`ThreadSlot::wcuts`]) の境の位置 (ギャップに対する割合)。
@@ -3376,6 +3411,7 @@ pub(super) fn treeeff(c: char) -> bool {
 
 /// 試作 `ENOMOTO_MIP_TC=文字` (既定では使わない。analysis/treeclose_20261114.md): 木を閉じる力の手当て。
 /// - `i`: 再スタートの後の求解で暫定解がなくても、打ち切り値があれば木の中の再スタートを判定する ([`Solver::tree_restart_due`])。
+/// - `j`: 最初の求解でも、暫定解がなく打ち切り値だけあるときに木の中の再スタートを判定する (`i` を広げたもの、treeclose 9.56 節)。
 /// - `c`: カットプールの伝播 ([`Solver::propagate_cut_pool`]) を効き目で止めた後も、飛ばした回数が止めた時の呼び出し回数の 2 倍
 ///   (試し直すたびに倍) に着いたら、もう一度 `ENOMOTO_T_MIP_CUTPOOL_PROP_TRIAL` 回試す。
 /// - `w`: カットプールの伝播の止め方を、呼び出し回数の区切りの効き目から手間 (更新した項 + 候補の非零) の区切りの効き目に変える
@@ -3385,6 +3421,9 @@ pub(super) fn treeeff(c: char) -> bool {
 /// - `a`: `r` に加えて、強分枝・双対証明・リテラルの衝突・目的関数の伝播・カットプールの伝播による局所的な固定も引き継ぐ。
 /// - `f`: カットプールの伝播を止めた後も、固定済みの整数列の割合が `ENOMOTO_T_MIP_TC_F_FRAC` (0.5) 以上で根より `ENOMOTO_T_MIP_TC_F_GAIN` (0.2)
 ///   以上増えたノードでは掛ける。
+/// - `l`: 木の中で `ENOMOTO_T_MIP_TC_G_EVERY` (100) ノードごとに、大域的な境界の写しで行・証明のプール・カットのプール・リテラルの衝突を
+///   不動点まで伝播し、締まった整数列の境界を大域的に締める。矛盾すれば木を閉じる ([`Solver::tc_global_pool_prop`]、treeclose 9.58 節)。
+///   HiGHS は大域の定義域にカットのプールと衝突のプールを登録していて、同期のたびの大域の伝播で衝突から列が固まる。1 スレッドのときだけ。
 /// - `g`: 木の中で `ENOMOTO_T_MIP_TC_G_EVERY` (100) ノードごとに、開いたノード全てに共通の整数列の境界を大域的な境界にし、打ち切り値つきの
 ///   大域の伝播を回す (不動点まで最大 `ENOMOTO_T_MIP_TC_G_ROUNDS` (5) 回)。伝播が矛盾すれば残りの開いたノードに打ち切り値より良い解は
 ///   ないので木を閉じる ([`Solver::tc_open_tighten`])。HiGHS の `HighsNodeQueue::pruneInfeasibleNodes` (sct2 で開いたノード 3000 余りが
@@ -3421,6 +3460,12 @@ fn tree1_sb() -> bool {
     env_str!("ENOMOTO_MIP_TREE1_SB").is_some()
 }
 
+/// 試作 `ENOMOTO_MIP_CLQ_LAZY` (treeclose 9.80 節、既定では使わない): 木に入るとき、根の LP 解で余裕のあるクリーク型の行 (不等式) を LP から
+/// 外し (境界を両側とも無限にする)、ノードの LP 解が破ればカットの行として戻す。
+fn clq_lazy_on() -> bool {
+    env_str!("ENOMOTO_MIP_CLQ_LAZY").is_some_and(|v| v != "0")
+}
+
 /// 共有の待ち行列だけで探索するか (`ENOMOTO_MIP_TREE_SHARED_QUEUE`): 各スレッドは潜りの子だけを自分で持ち、兄弟などのノードは
 /// 全て共有の待ち行列に出して、取るときは自分の待ち行列と同じ選び方 ([`PoolNodes::pop_hybrid`]) をする。
 fn tree_shared_queue() -> bool {
@@ -3435,8 +3480,9 @@ fn tree_keep_siblings() -> bool {
 
 /// 木を分け合うスレッドの間で、カットプールに入れたカットを共有するか (`ENOMOTO_MIP_TREE_SHARE_CUTS`)。カットは大域的な
 /// 境界で作るので、どのスレッドのどのノードでも成り立つ (被約費用による固定で締めた境界のものは、共有の打ち切り値未満の解で)。
+/// sharecuts (treeclose 9.79 節) で既定にした。`0`・`off` で以前の動き (共有しない)。
 pub(super) fn tree_share_cuts() -> bool {
-    env_str!("ENOMOTO_MIP_TREE_SHARE_CUTS").is_some()
+    env_def!("ENOMOTO_MIP_TREE_SHARE_CUTS", "1").is_some()
 }
 
 /// 学習の記録に加える (古いものから捨てて `ENOMOTO_T_MIP_TREE_LEARNED_MAX` 件まで残す)。
@@ -3841,6 +3887,7 @@ impl WorkPool {
             lp_x: std::sync::Mutex::new(None),
             fin: std::sync::atomic::AtomicBool::new(false),
             in_role: std::sync::atomic::AtomicUsize::new(0),
+            in_role_c: std::sync::atomic::AtomicUsize::new(0),
             mu: std::sync::Mutex::new(MuStats::default()),
             proof_phase: std::sync::atomic::AtomicBool::new(false),
             pc: std::sync::Mutex::new(pc),
@@ -4017,6 +4064,34 @@ pub(crate) fn thread_budget_on() -> bool {
 ///   最適解を見つけるので、時間で一律に絞る `ENOMOTO_MIP_ROOT_SUBMIP_REL` はそれを切っていた
 /// - 並列のサブ MIP には外側の刈り込みの上限 (ほかのサブ MIP・主のスレッドが見つけた解による) を打ち切り値として渡し続ける ([`SubmipCtl::outer_best`])
 /// - 並列のサブ MIP は終わった順に受け取る (`ENOMOTO_MIP_SUBMIP_FIRST_DONE` と同じ)
+/// 試作 `ENOMOTO_MIP_LMBOOST_ASYNC` (treeclose 9.72 節、既定では使わない): LMBOOST の Local-MIP のスレッドを裏で回したまま、主は待たずに
+/// 根のヒューリスティクスへ進む ([`Solver::lmip_boost`])。止める条件 (ギャップが閉じた・時間の上限・改善がない・別の暫定解) は主が解を受け取るたび
+/// ([`Solver::poll_lmip_thread`]) に見て、木に入るときと求解の終わり (Drop) には必ず止める
+fn lmboost_async() -> bool {
+    env_str!("ENOMOTO_MIP_LMBOOST_ASYNC").is_some()
+}
+
+/// [`lmboost_async`] の裏で回っている LMBOOST のスレッド
+pub(super) struct LmboostBg {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    hs: Vec<std::thread::JoinHandle<()>>,
+    t0: Instant,
+    cap: f64,
+    stall: f64,
+    last_imp: Instant,
+    inc: f64,
+    k: usize,
+}
+
+impl Drop for LmboostBg {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for h in self.hs.drain(..) {
+            let _ = h.join();
+        }
+    }
+}
+
 /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、既定では使わない): [`Solver::lmip_boost`]。
 fn lmboost_on() -> bool {
     env_def!("ENOMOTO_MIP_LMBOOST", "1").is_some()
@@ -5189,6 +5264,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         clique_graph: None,
         cut_clique_adj: std::collections::HashMap::new(),
         clique_auto: None,
+        clique_sig: None,
         heur_iters: 0,
         heur_iters_root: 0,
         locks: super::heuristics::compute_locks(p),
@@ -5275,6 +5351,13 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tr_next: 0,
         tr_huge: 0,
         tc_g_next: 0,
+        tc_l_next: 0,
+        lmboost_bg: None,
+        tr_outer0: f64::NAN,
+        tr_tk0: 0.0,
+        clq_lazy: Vec::new(),
+        clq_lazy_stats: [0; 4],
+        tc_l_stats: [0; 4],
         tc_g_stats: [0; 4],
         tc_c: (0, 0, [0; 4], 0),
         tc_v: (1, 0, (0, 0), 1),
@@ -5430,6 +5513,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool3_stats: [0; 3],
         pool3_diag_at: None,
         pool3_diag_at_best: None,
+        parord_stats: [0; 8],
+        parord_c_secs: 0.0,
+        parord_c_off: false,
+        parord_from_pool: false,
         vbounds: None,
         intvub_dumped: false,
         failed_heurs: 0,
@@ -5575,6 +5662,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             Vec::new()
         },
         cut_pool: Vec::new(),
+        cut_arena: Vec::new(),
+        cut_arena_idx: std::collections::HashMap::new(),
         dual_proofs: std::collections::VecDeque::new(),
         dual_proof_nnz: 0,
         proof_first_id: 0,
@@ -7852,6 +7941,415 @@ impl<'a, L: MipLp> Solver<'a, L> {
         Some(ok)
     }
 
+    /// 試作 `ENOMOTO_MIP_CLQ_LAZY` の外し: 主 (写しなし) は今の LP 解で余裕 (1 − 文字の和 > `ENOMOTO_T_MIP_CLQ_LAZY_TOL`、既定 1e-6) があり
+    /// スラックが基底にあるクリーク型の元の行を選び、従は写しの一覧を使う (自分の基底でスラックが基底にない行は外さない: 空の行で基底が
+    /// 特異にならないように)。選んだ行の LP の境界を両側とも無限にする (行の番号は変えない。標準形では空の行)。外した行は
+    /// 問題 (`self.p`) にも衝突グラフにも残るので、伝播・クリークカット・解の実行可能性の確かめ (`try_incumbent`) は今までどおり。
+    fn clq_lazy_drop(&mut self) {
+        let t0 = Instant::now();
+        let m0 = self.p.rows.len();
+        if self.lp.num_rows() < m0 {
+            return;
+        }
+        let basis = self.lp.basis();
+        let slack_basic = |i: usize| basis.row.get(i).is_none_or(|s| *s == VarStatus::Basic) || basis.row.is_empty();
+        let cand: Vec<(usize, Vec<u32>)> = if let Some(sn) = self.snap.as_ref() {
+            sn.clq_lazy.iter().filter(|(i, _)| *i < m0 && slack_basic(*i)).cloned().collect()
+        } else {
+            let p = self.p;
+            let n = p.n;
+            let x = self.lp.col_values();
+            let tol = tunable!("ENOMOTO_T_MIP_CLQ_LAZY_TOL", 1e-6, f64);
+            let binary: Vec<bool> = (0..n).map(|j| p.is_int[j] && self.dom.global_lo[j] >= 0.0 && self.dom.global_up[j] <= 1.0).collect();
+            let free: Vec<bool> = (0..n).map(|j| self.dom.global_lo[j] < self.dom.global_up[j]).collect();
+            let mut out = Vec::new();
+            for (i, r) in p.rows.iter().enumerate() {
+                let (l, u) = self.lp.row_bounds(i);
+                if l == f64::NEG_INFINITY && u == f64::INFINITY || !slack_basic(i) {
+                    continue;
+                }
+                // 固定された列の分を右辺に移し、残りが 2 値列の ±1 で文字の和 <= 1 の形か (等式も <= の向きで見る)
+                let rr: Vec<(usize, f64)> = r.iter().copied().filter(|e| free[e.0]).collect();
+                if rr.len() < 2 {
+                    continue;
+                }
+                let shift: f64 = r.iter().filter(|e| !free[e.0]).map(|&(j, a)| a * self.dom.global_lo[j]).sum();
+                for (sg, b) in [(1.0, u - shift), (-1.0, -(l - shift))] {
+                    if !b.is_finite() {
+                        continue;
+                    }
+                    if !rr.iter().all(|&(j, a)| binary[j] && ((sg * a).abs() - 1.0).abs() <= 1e-12) {
+                        break;
+                    }
+                    let nneg = rr.iter().filter(|&&(_, a)| sg * a < 0.0).count() as f64;
+                    if ((b + nneg) - 1.0).abs() > 1e-9 {
+                        continue;
+                    }
+                    // 行の全部の列 (固定された列も含めて、境界が変わっても確かめられるよう元の行で持つ) ではなく、文字で持つ:
+                    // 固定された列の分は右辺に移した値と同じ (大域の固定は木の中で緩まない)
+                    let lits: Vec<u32> = rr.iter().map(|&(j, a)| if sg * a > 0.0 { 2 * j as u32 } else { 2 * j as u32 + 1 }).collect();
+                    let sv: f64 = lits.iter().map(|&q| { let v = x[(q / 2) as usize]; if q % 2 == 0 { v } else { 1.0 - v } }).sum();
+                    // 等式の行は両側の確かめが要るので外さない
+                    if l != u && 1.0 - sv > tol {
+                        out.push((i, lits));
+                    }
+                    break;
+                }
+            }
+            out
+        };
+        if cand.is_empty() {
+            return;
+        }
+        let ch: Vec<(usize, f64, f64)> = cand.iter().map(|(i, _)| (*i, f64::NEG_INFINITY, f64::INFINITY)).collect();
+        self.lp.set_row_bounds_many(&ch);
+        self.clq_lazy_stats[0] += cand.len() as u64;
+        if self.params.verbose && self.pool_tid == 0 {
+            eprintln!("MIP: CLQ_LAZY: {} clique rows dropped from the LP (of {} rows, {} nonzeros) ({:.2}s)", cand.len(), m0, cand.iter().map(|c| c.1.len()).sum::<usize>(), t0.elapsed().as_secs_f64());
+        }
+        self.clq_lazy = cand;
+    }
+
+    /// 試作 `ENOMOTO_MIP_CLQ_LAZY` の戻し: 今の LP 解が外した行 (文字の和 <= 1) を破れば、その行をカットの行として LP に加え、外した一覧から
+    /// 除く。戻したら真 (呼び手が解き直す)。
+    fn clq_lazy_restore(&mut self) -> bool {
+        self.clq_lazy_stats[1] += 1;
+        let x = self.lp.col_values();
+        let tol = tunable!("ENOMOTO_T_MIP_CLQ_LAZY_VIOL", 1e-9, f64);
+        let mut back: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
+        self.clq_lazy.retain(|(_, lits)| {
+            let sv: f64 = lits.iter().map(|&q| { let v = x[(q / 2) as usize]; if q % 2 == 0 { v } else { 1.0 - v } }).sum();
+            if sv > 1.0 + tol {
+                let mut nneg = 0.0;
+                let mut r: Vec<(usize, f64)> = lits.iter().map(|&q| if q % 2 == 0 { ((q / 2) as usize, 1.0) } else { nneg += 1.0; ((q / 2) as usize, -1.0) }).collect();
+                r.sort_by_key(|e| e.0);
+                back.push((r, f64::NEG_INFINITY, 1.0 - nneg));
+                false
+            } else {
+                true
+            }
+        });
+        if back.is_empty() {
+            return false;
+        }
+        self.clq_lazy_stats[2] += back.len() as u64;
+        self.add_cut_rows(&back);
+        true
+    }
+
+    /// 診断 `ENOMOTO_MIP_DIAG_HIDCLQ` (treeclose 9.81 節、既定では使わない。値 `stop` で数えたら止める、`nolp` で LP を解き直さない): 前処理の後の
+    /// 問題 (根の LP の直後) で、2 値列だけの片側の行 (固定された列は右辺に移し、負の係数は否定の文字にして `sum a_k l_k <= b`、a_k > 0) を分ける:
+    /// (A) どの 1 文字も右辺に収まり、どの 2 文字も右辺を超える (最小の 2 係数の和 > b + tol) のに係数が全部同じでない行 (0-1 解ではクリーク不等式と同じ
+    /// なのに LP では弱い。例 5x + 4y + 3z <= 6)、(B) 係数が全部同じで b / a > 1 の行 (2x + 2y <= 3 など、和 <= 1 に直っていない)、
+    /// (C) 既にクリーク型 (係数が全部同じで b / a = 1)、(P) 一部の文字だけがクリークを成す行 (係数の大きい順に k 個で、その中の最小の 2 係数の和 > b、
+    /// 2 <= k < 行の長さ)。(A)(B) をクリーク型の行 (文字の和 <= 1) にした場合と、(P) のクリーク部分を行として足した場合の LP の下界を、行を足して解き直して出す。
+    fn diag_hidden_cliques(&mut self) {
+        let t0 = Instant::now();
+        let p = self.p;
+        let n = p.n;
+        let binary: Vec<bool> = (0..n).map(|j| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0).collect();
+        let free: Vec<bool> = (0..n).map(|j| p.col_lo[j] < p.col_up[j]).collect();
+        let tol = 1e-9;
+        let (mut nrow, mut nnz_all, mut n_bin1, mut n_a, mut n_b, mut n_c, mut n_p) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+        let (mut nnz_a, mut nnz_b, mut ksum_p, mut len_p) = (0usize, 0usize, 0usize, 0usize);
+        let mut n_two_sided = 0usize;
+        let mut add_ab: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
+        let mut add_p: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
+        let mut examples: Vec<String> = Vec::new();
+        let lit_row = |lits: &[(u32, f64)]| -> (Vec<(usize, f64)>, f64, f64) {
+            let mut nneg = 0.0;
+            let mut r: Vec<(usize, f64)> = lits.iter().map(|&(q, _)| if q % 2 == 0 { ((q / 2) as usize, 1.0) } else { nneg += 1.0; ((q / 2) as usize, -1.0) }).collect();
+            r.sort_by_key(|e| e.0);
+            (r, f64::NEG_INFINITY, 1.0 - nneg)
+        };
+        for (i, r0) in p.rows.iter().enumerate() {
+            let r: Vec<(usize, f64)> = r0.iter().copied().filter(|e| free[e.0]).collect();
+            nrow += 1;
+            nnz_all += r.len();
+            if r.len() < 2 || !r.iter().all(|&(j, _)| binary[j]) {
+                continue;
+            }
+            n_bin1 += 1;
+            let (l, u) = (p.row_lo[i], p.row_up[i]);
+            if l.is_finite() && u.is_finite() {
+                n_two_sided += 1;
+                continue;
+            }
+            let shift: f64 = r0.iter().filter(|e| !free[e.0]).map(|&(j, a)| a * p.col_lo[j]).sum();
+            let (sg, b0) = if u.is_finite() { (1.0, u - shift) } else { (-1.0, -(l - shift)) };
+            // sum sg a_j x_j <= b0 -> 負の係数は 1 - x の文字に: |a| (1 - x) - |a| ... b = b0 + sum |a_neg|
+            let mut b = b0;
+            let mut lits: Vec<(u32, f64)> = Vec::with_capacity(r.len());
+            for &(j, a0) in &r {
+                let a = sg * a0;
+                if a > 0.0 {
+                    lits.push((2 * j as u32, a));
+                } else {
+                    b -= a;
+                    lits.push((2 * j as u32 + 1, -a));
+                }
+            }
+            lits.sort_by(|x, y| y.1.total_cmp(&x.1));
+            let k_len = lits.len();
+            if lits[0].1 > b + tol * (1.0 + b.abs()) {
+                continue; // 1 文字で右辺を超える (前処理で固定されるはずの列)。数えない
+            }
+            let amin = lits[k_len - 1].1;
+            let all_eq = (lits[0].1 - amin).abs() <= 1e-9 * lits[0].1.abs().max(1.0);
+            let two_min = lits[k_len - 1].1 + lits[k_len - 2].1;
+            if two_min > b + tol * (1.0 + b.abs()) {
+                if all_eq && (b / amin - 1.0).abs() <= 1e-9 {
+                    n_c += 1;
+                } else if all_eq {
+                    n_b += 1;
+                    nnz_b += k_len;
+                    add_ab.push(lit_row(&lits));
+                } else {
+                    n_a += 1;
+                    nnz_a += k_len;
+                    if examples.len() < 3 {
+                        examples.push(format!("row {i}: {} <= {b}", lits.iter().take(6).map(|&(q, a)| format!("{a}{}x{}", if q % 2 == 1 { "~" } else { "" }, q / 2)).collect::<Vec<_>>().join(" + ")));
+                    }
+                    add_ab.push(lit_row(&lits));
+                }
+                continue;
+            }
+            // 一部の文字だけのクリーク: 係数の大きい順に k 個、その中の最小の 2 係数の和 > b となる最大の k
+            let mut k = 0;
+            for kk in 2..=k_len {
+                if lits[kk - 1].1 + lits[kk - 2].1 > b + tol * (1.0 + b.abs()) {
+                    k = kk;
+                } else {
+                    break;
+                }
+            }
+            if k >= 2 {
+                n_p += 1;
+                ksum_p += k;
+                len_p += k_len;
+                add_p.push(lit_row(&lits[..k]));
+            }
+        }
+        // LP の下界: (A)(B) のクリーク型の行を足す / (P) のクリーク部分を足す / 両方
+        let obj0 = self.lp.objective();
+        let mut gains: Vec<String> = Vec::new();
+        if env_str!("ENOMOTO_MIP_DIAG_HIDCLQ").is_some_and(|v| v != "nolp") {
+            for (name, rows) in [("AB", add_ab.clone()), ("P", add_p.clone()), ("AB+P", add_ab.iter().chain(add_p.iter()).cloned().collect::<Vec<_>>())] {
+                if rows.is_empty() {
+                    gains.push(format!("{name} -"));
+                    continue;
+                }
+                let saved = self.lp.save_state();
+                let m0 = self.lp.num_rows();
+                self.lp.add_rows(&rows);
+                let it0 = self.lp.total_iterations();
+                let lim = 10 * self.root_lp_iters.max(100) + 10_000;
+                let st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: self.deadline });
+                let its = self.lp.total_iterations() - it0;
+                let obj1 = if st == LpStatus::Optimal { self.lp.objective() } else { f64::NAN };
+                gains.push(format!("{name} {:.10e} (gain {:.3e} rel, {its} iters, {st:?})", obj1 + p.offset, (obj1 - obj0) / (obj0 + p.offset).abs().max(1.0)));
+                let mut remove = vec![false; self.lp.num_rows()];
+                for r in remove.iter_mut().skip(m0) {
+                    *r = true;
+                }
+                self.lp.delete_rows(&remove);
+                self.lp.restore_state(&saved);
+            }
+        }
+        eprintln!(
+            "MIP: HIDCLQ: rows {nrow} nnz {nnz_all}; binary rows {n_bin1} (two-sided {n_two_sided}); hidden clique (A, unequal coefs) {n_a} (nnz {nnz_a}); equal coefs b/a > 1 (B) {n_b} (nnz {nnz_b}); clique form (C) {n_c}; partial clique (P) {n_p} (mean k {:.1} of len {:.1}); root LP {:.10e}; LP with {} ({:.2}s){}",
+            if n_p > 0 { ksum_p as f64 / n_p as f64 } else { 0.0 }, if n_p > 0 { len_p as f64 / n_p as f64 } else { 0.0 }, obj0 + p.offset, gains.join("; "), t0.elapsed().as_secs_f64(),
+            if examples.is_empty() { String::new() } else { format!("; e.g. {}", examples.join(" | ")) }
+        );
+    }
+
+    /// 診断 `ENOMOTO_MIP_DIAG_CLQROWS` (treeclose 9.78 節、既定では使わない): 根の LP (カットの前) で、クリーク型の行 (2 値列の文字の和 ≤ 1 / = 1)
+    /// の数・割合・非零の割合、LP 解で余裕のある行、小さい行 (`ENOMOTO_T_MIP_DIAG_CLQROWS_K` 文字以下、既定 8) を極大クリークでまとめられる余地と、
+    /// まとめたクリークのうち LP 解を破るものを足したときの下界の伸びを 1 行ずつ出す。LP は試したあと元に戻す。
+    fn diag_clqrows(&mut self) {
+        let t0 = Instant::now();
+        let p = self.p;
+        let n = p.n;
+        let binary: Vec<bool> = (0..n).map(|j| p.is_int[j] && p.col_lo[j] == 0.0 && p.col_up[j] == 1.0).collect();
+        let free: Vec<bool> = (0..n).map(|j| p.col_lo[j] < p.col_up[j]).collect();
+        let x = self.lp.col_values();
+        let litv = |l: u32| -> f64 { let v = x[(l / 2) as usize]; if l % 2 == 0 { v } else { 1.0 - v } };
+        let (mut nrow, mut nnz_all) = (0usize, 0usize);
+        // (行, 文字, 等式か)
+        let mut cl: Vec<(usize, Vec<u32>, bool)> = Vec::new();
+        for (i, r0) in p.rows.iter().enumerate() {
+            let r: Vec<(usize, f64)> = r0.iter().copied().filter(|e| free[e.0]).collect();
+            nrow += 1;
+            nnz_all += r.len();
+            let (l, u) = (p.row_lo[i], p.row_up[i]);
+            let eq = l == u;
+            // 固定された列の分を右辺に移す
+            let shift: f64 = r0.iter().filter(|e| !free[e.0]).map(|&(j, a)| a * p.col_lo[j]).sum();
+            for (sg, b) in [(1.0, u - shift), (-1.0, -(l - shift))] {
+                if !b.is_finite() || r.len() < 2 {
+                    continue;
+                }
+                if !r.iter().all(|&(j, a)| binary[j] && ((sg * a).abs() - 1.0).abs() <= 1e-12) {
+                    break;
+                }
+                let nneg = r.iter().filter(|&&(_, a)| sg * a < 0.0).count() as f64;
+                if ((b + nneg) - 1.0).abs() > 1e-9 {
+                    continue;
+                }
+                cl.push((i, r.iter().map(|&(j, a)| if sg * a > 0.0 { 2 * j as u32 } else { 2 * j as u32 + 1 }).collect(), eq));
+                break;
+            }
+        }
+        let ncl = cl.len();
+        let neq = cl.iter().filter(|c| c.2).count();
+        let nnz_cl: usize = cl.iter().map(|c| c.1.len()).sum();
+        let (mut slack_n, mut slack_nnz, mut zero_n, mut slack_eq) = (0usize, 0usize, 0usize, 0usize);
+        for (_, lits, eq) in &cl {
+            let s: f64 = lits.iter().map(|&l| litv(l)).sum();
+            if 1.0 - s > 1e-6 {
+                slack_n += 1;
+                slack_nnz += lits.len();
+                if *eq {
+                    slack_eq += 1;
+                }
+                if s < 1e-6 {
+                    zero_n += 1;
+                }
+            }
+        }
+        // 余裕のある行を LP から外した場合: 今の LP の行・列の境界・費用から LP を 2 つ作り直し (全部 / 余裕のあるクリーク型の行を除く)、
+        // 基底なしで解いて反復・秒・目的値と、除いた行を破る数を比べる (`ENOMOTO_MIP_DIAG_CLQROWS` が `nolp` 以外、LP の行と問題の行が同じ数のとき)
+        if env_str!("ENOMOTO_MIP_DIAG_CLQROWS").is_some_and(|v| v != "nolp") && self.lp.num_rows() == p.rows.len() {
+            let m = self.lp.num_rows();
+            let mut drop = vec![false; m];
+            for (i, lits, _) in &cl {
+                let sv: f64 = lits.iter().map(|&l| litv(l)).sum();
+                if 1.0 - sv > 1e-6 {
+                    drop[*i] = true;
+                }
+            }
+            let (clo, cup): (Vec<f64>, Vec<f64>) = (0..n).map(|j| self.lp.col_bounds(j)).unzip();
+            let cost = self.lp.costs();
+            let lim = SolveLimits { iteration_limit: 50 * self.root_lp_iters.max(1000), cutoff: f64::INFINITY, deadline: self.deadline };
+            let mut res = Vec::new();
+            // 3 つ目: 行は残して境界を外す (自由な行にする、行の番号を変えない形)
+            for (keep_all, free_rows) in [(true, false), (false, false), (true, true)] {
+                let idx: Vec<usize> = (0..m).filter(|&i| keep_all || !drop[i]).collect();
+                let rows: Vec<Vec<(usize, f64)>> = idx.iter().map(|&i| self.lp.row(i)).collect();
+                let (rlo, rup): (Vec<f64>, Vec<f64>) = idx.iter().map(|&i| if free_rows && drop[i] { (f64::NEG_INFINITY, f64::INFINITY) } else { self.lp.row_bounds(i) }).unzip();
+                let t = Instant::now();
+                let mut lp2 = L::new(&clo, &cup, &cost, &rows, &rlo, &rup);
+                let st = lp2.solve(&lim);
+                let secs = t.elapsed().as_secs_f64();
+                let x2 = lp2.col_values();
+                let nviol = if keep_all && !free_rows {
+                    0
+                } else {
+                    cl.iter().filter(|(i, lits, _)| drop[*i] && lits.iter().map(|&l| { let v = x2[(l / 2) as usize]; if l % 2 == 0 { v } else { 1.0 - v } }).sum::<f64>() > 1.0 + 1e-6).count()
+                };
+                res.push((idx.len(), st, lp2.total_iterations(), secs, lp2.objective() + p.offset, nviol));
+            }
+            eprintln!(
+                "MIP: CLQROWS drop slack rows: full {} rows {:?} {} iters {:.2}s obj {:.10e}; without {} slack clique rows: {} rows {:?} {} iters {:.2}s obj {:.10e}, dropped rows violated {}; slack rows made free: {:?} {} iters {:.2}s obj {:.10e}, violated {}",
+                res[0].0, res[0].1, res[0].2, res[0].3, res[0].4, m - res[1].0, res[1].0, res[1].1, res[1].2, res[1].3, res[1].4, res[1].5, res[2].1, res[2].2, res[2].3, res[2].4, res[2].5
+            );
+        }
+        let len_b = [cl.iter().filter(|c| c.1.len() == 2).count(), cl.iter().filter(|c| (3..=8).contains(&c.1.len())).count(), cl.iter().filter(|c| c.1.len() > 8).count()];
+        eprintln!(
+            "MIP: CLQROWS: rows {nrow} nnz {nnz_all}; clique rows {ncl} ({:.1}% of rows, eq {neq}, len 2 / 3-8 / 9+ = {} / {} / {}), nnz {nnz_cl} ({:.1}%); slack at the root LP {slack_n} ({:.1}% of clique rows, nnz {slack_nnz} = {:.1}% of all, eq {slack_eq}, all-zero {zero_n}); root LP {} iters {:.2}s",
+            100.0 * ncl as f64 / nrow.max(1) as f64, len_b[0], len_b[1], len_b[2], 100.0 * nnz_cl as f64 / nnz_all.max(1) as f64,
+            100.0 * slack_n as f64 / ncl.max(1) as f64, 100.0 * slack_nnz as f64 / nnz_all.max(1) as f64, self.root_lp_iters, self.root_lp_secs
+        );
+        // まとめる余地: 小さい不等式の行を極大クリークに広げ、同じクリークに入る行を組にする
+        let kmax = tunable!("ENOMOTO_T_MIP_DIAG_CLQROWS_K", 8usize, usize);
+        let small: Vec<&(usize, Vec<u32>, bool)> = cl.iter().filter(|c| !c.2 && c.1.len() <= kmax).collect();
+        if small.is_empty() {
+            eprintln!("MIP: CLQROWS: no small inequality clique rows (len <= {kmax}) ({:.2}s)", t0.elapsed().as_secs_f64());
+            return;
+        }
+        let g = super::clique::CliqueGraph::build_with(n, &p.rows, &p.row_lo, &p.row_up, &binary, &p.col_lo, &p.col_up, &p.conflict_edges);
+        let mut cliques: Vec<std::collections::HashSet<u32>> = Vec::new();
+        let mut members: Vec<Vec<usize>> = Vec::new();
+        let mut of_lit: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+        let (mut grown, mut stopped) = (0usize, false);
+        for (k, (_, lits, _)) in small.iter().enumerate() {
+            if t0.elapsed().as_secs_f64() > tunable!("ENOMOTO_T_MIP_DIAG_CLQROWS_SECS", 60.0, f64) {
+                stopped = true;
+                break;
+            }
+            let found = of_lit.get(&lits[0]).and_then(|ids| ids.iter().copied().find(|&c| lits.iter().all(|l| cliques[c].contains(l))));
+            if let Some(c) = found {
+                members[c].push(k);
+                continue;
+            }
+            let mut cq: Vec<u32> = lits.clone();
+            let &l0 = lits.iter().min_by_key(|&&l| g.neighbors(l).len()).unwrap();
+            for &c in g.neighbors(l0) {
+                if cq.len() >= 1000 {
+                    break;
+                }
+                if cq.iter().any(|&y| y / 2 == c / 2) || !free[(c / 2) as usize] {
+                    continue;
+                }
+                if cq.iter().all(|&y| y == l0 || g.adjacent(y, c)) {
+                    cq.push(c);
+                }
+            }
+            if cq.len() > lits.len() {
+                grown += 1;
+            }
+            let id = cliques.len();
+            for &l in &cq {
+                of_lit.entry(l).or_default().push(id);
+            }
+            cliques.push(cq.into_iter().collect());
+            members.push(vec![k]);
+        }
+        let groups: Vec<usize> = (0..cliques.len()).filter(|&c| members[c].len() >= 2).collect();
+        let rows_before: usize = groups.iter().map(|&c| members[c].len()).sum();
+        let nnz_before: usize = groups.iter().map(|&c| members[c].iter().map(|&k| small[k].1.len()).sum::<usize>()).sum();
+        let nnz_after: usize = groups.iter().map(|&c| cliques[c].len()).sum();
+        let act = |c: &std::collections::HashSet<u32>| -> f64 { c.iter().map(|&l| litv(l)).sum() };
+        let viol: Vec<usize> = (0..cliques.len()).filter(|&c| act(&cliques[c]) > 1.0 + 1e-6).collect();
+        let viol_g = viol.iter().filter(|&&c| members[c].len() >= 2).count();
+        // 破るクリークを足して LP を解き直す (反復の上限つき) と、下界の伸び
+        let obj0 = self.lp.objective();
+        let (mut obj1, mut its, mut st_s) = (obj0, 0u64, String::from("-"));
+        if !viol.is_empty() && env_str!("ENOMOTO_MIP_DIAG_CLQROWS").is_some_and(|v| v != "nolp") {
+            let saved = self.lp.save_state();
+            let m0 = self.lp.num_rows();
+            let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = viol
+                .iter()
+                .map(|&c| {
+                    let mut nneg = 0.0;
+                    let mut r: Vec<(usize, f64)> = cliques[c].iter().map(|&l| if l % 2 == 0 { ((l / 2) as usize, 1.0) } else { nneg += 1.0; ((l / 2) as usize, -1.0) }).collect();
+                    r.sort_by_key(|e| e.0);
+                    (r, f64::NEG_INFINITY, 1.0 - nneg)
+                })
+                .collect();
+            self.lp.add_rows(&rows);
+            let it0 = self.lp.total_iterations();
+            let lim = 10 * self.root_lp_iters.max(100) + 10_000;
+            let st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: self.deadline });
+            its = self.lp.total_iterations() - it0;
+            st_s = format!("{st:?}");
+            if st == LpStatus::Optimal {
+                obj1 = self.lp.objective();
+            }
+            let mut remove = vec![false; self.lp.num_rows()];
+            for r in remove.iter_mut().skip(m0) {
+                *r = true;
+            }
+            self.lp.delete_rows(&remove);
+            self.lp.restore_state(&saved);
+        }
+        eprintln!(
+            "MIP: CLQROWS merge (len <= {kmax}): small rows {} -> {} maximal cliques ({} grown beyond the row); groups of >= 2 rows {} covering {rows_before} rows (rows -{}, nnz {nnz_before} -> {nnz_after}); cliques violated by the root LP {} (in groups {viol_g}); LP with them {:.10e} -> {:.10e} (gain {:.3e} rel, {its} iters, {st_s}); graph {} edges{} ({:.2}s)",
+            small.len(), cliques.len(), grown, groups.len(), rows_before - groups.len(), viol.len(), obj0 + p.offset, obj1 + p.offset,
+            (obj1 - obj0) / (obj0 + p.offset).abs().max(1.0), g.num_edges(), if stopped { ", stopped by the time cap" } else { "" }, t0.elapsed().as_secs_f64()
+        );
+    }
+
     /// 現在の LP 解で整数でない整数列の (列, 値) の一覧。
     /// `ENOMOTO_MIP_HNFBR` (改良 11-08、試作) なら、合同式 x ≡ r (mod m) の列は y = (x - r)/m が整数でないときも入れる
     /// (x が整数でも合同式に合わなければ分枝の候補。整数列がすべて整数なら行から合同式は成り立つので、一覧が空かどうかは変わらない)
@@ -9438,6 +9936,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nnz: usize = self.p.rows.iter().map(|r| r.iter().filter(|e| free[e.0]).count()).sum();
             eprintln!("MIP: root LP size: rows {}, free columns {}, nonzeros {nnz}", self.lp.num_rows(), free.iter().filter(|&&f| f).count());
         }
+        if env_str!("ENOMOTO_MIP_DIAG_HIDCLQ").is_some() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 {
+            self.diag_hidden_cliques();
+            if env_str!("ENOMOTO_MIP_DIAG_HIDCLQ").is_some_and(|v| v == "stop") {
+                self.join_fj_thread();
+                return self.finish(MipStatus::TimeLimit, root_obj);
+            }
+        }
+        if env_str!("ENOMOTO_MIP_DIAG_CLQROWS").is_some() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 {
+            self.diag_clqrows();
+            // 値 `stop`: 数えたら止める (根の LP の後の手間を省く。状態は時間切れ)
+            if env_str!("ENOMOTO_MIP_DIAG_CLQROWS").is_some_and(|v| v == "stop") {
+                self.join_fj_thread();
+                return self.finish(MipStatus::TimeLimit, root_obj);
+            }
+        }
         // カットを加える前の根の LP 解 (RENS の 2 つ目の近傍に使う)
         let x_root0 = self.lp.col_values();
         // 試作 `ENOMOTO_MIP_ROOTLP_BOTH`: 2 つ目の頂点と比べる根の LP の基底
@@ -10206,7 +10719,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         heur!("int shifting", self.int_shifting(&x));
                     }
                 }
-                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_TRIVIAL").is_none() {
+                // 試作 `ENOMOTO_MIP_SUBMIP_HEUR` の `t` ([`super::heuristics::subheur`]): サブ MIP の中では trivial を根のヒューリスティクスの最後に回す
+                let triv_late = self.params.submip && super::heuristics::subheur('t');
+                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_TRIVIAL").is_none() && !triv_late {
                     heur!("trivial", self.trivial());
                 }
                 heur!("randomized rounding", self.randomized_rounding(&x, 3));
@@ -10539,6 +11054,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if self.params.verbose && share_x {
                     eprintln!("MIP: root heuristics used {shared_x_used} LP solutions from the background cuts");
+                }
+                // 試作 `ENOMOTO_MIP_SUBMIP_HEUR` ([`super::heuristics::subheur`]): `t` の後回しの trivial、`l` の深さ 1 のサブ MIP の Local-MIP
+                if triv_late && self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_TRIVIAL").is_none() {
+                    heur!("trivial", self.trivial());
+                }
+                if self.params.submip && super::heuristics::subheur('l') && super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1 {
+                    heur!("sub-MIP Local-MIP", self.subheur_local_mip());
                 }
                 self.rootcap_end = self.rootcap_until.take();
                 if self.params.verbose {
@@ -11282,7 +11804,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         // 木を分け合う従のスレッドは、未処理のノードが 2 つ以上になってから (根を分枝してから) 始める (根で解ける問題では
         // 始めない。nw04: 根で閉じるのに、従の準備 (8.7 万列の定義域・LP と根の LP) を待って 4 本で 2-3 秒遅かった)
-        let parallel_tree = self.params.threads > 1 && !self.params.submip && self.watch.is_none() && self.snap.is_none();
+        // 診断 `ENOMOTO_MIP_DIAG_NO_PARTREE` (treeclose 9.60 節、既定では使わない): スレッド数はそのままで木だけを分け合わない
+        // (1 本の木の LP の速さが、木を分け合うことで落ちるのか、同時に走るほかの部品で落ちるのかを分ける)
+        let parallel_tree = self.params.threads > 1 && !self.params.submip && self.watch.is_none() && self.snap.is_none() && env_str!("ENOMOTO_MIP_DIAG_NO_PARTREE").is_none();
         // 潜っている子ノード (定義域に分枝を積んだ状態で次に処理する)。
         let mut plunge: Option<OpenNode> = None;
         let mut plunge_depth = 0usize;
@@ -11334,7 +11858,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_TREE_RESTART` (試作): 木に入る前の暫定解の印は消しておく (木の中で良くなったときだけ判定する)
         self.tree_restart_check = false;
         // 木の中の再スタートの記帳 (`TRSTAT`) 用: 木に入った時刻と下界 (ログを出すだけで解き方は変えない)
+        // 試作 `ENOMOTO_MIP_LMBOOST_ASYNC`: 木に入る前に裏の LMBOOST を止める
+        self.lmboost_bg_tick(Some("tree start"));
         self.tr_t0 = self.start.elapsed().as_secs_f64();
+        self.tr_outer0 = super::outer_elapsed().unwrap_or(f64::NAN);
+        self.tr_tk0 = crate::ticks::total();
         self.tr_w0 = ((self.lp.total_iterations() + self.heur_iters) as f64, self.node_iters + self.sb_iters);
         self.tr_root_lb = self.global_lower_bound().min(plunge.as_ref().map_or(f64::INFINITY, |n| n.lower_bound));
         self.tr_qprev = (0.0, 0.0);
@@ -11347,6 +11875,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if crate::simplex::mip_lp::xolazy_log() && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
             eprintln!("XOLAZY {{\"ev\":\"tree\",\"restarts\":{},\"t\":{:.4}{}}}", self.params.restarts, super::outer_elapsed().unwrap_or(f64::NAN), self.xolazy_fix_counts());
+        }
+        // 試作 `ENOMOTO_MIP_CLQ_LAZY`: 根の LP 解で余裕のあるクリーク型の行を LP から外す (木を分け合う従は写しの一覧を使う)
+        if clq_lazy_on() && !self.params.submip && self.watch.is_none() {
+            self.clq_lazy_drop();
         }
         if self.params.verbose && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
             eprintln!("TRSTAT: tree start outer {:.2} solve {:.2} restarts {} lb {:.10e} ub {:.10e}", super::outer_elapsed().unwrap_or(f64::NAN), self.tr_t0, self.params.restarts, self.tr_root_lb, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z));
@@ -11384,6 +11916,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             // 試作 `ENOMOTO_MIP_TC` の `g` ([`Self::tc_open_tighten`])
+            // 試作 `ENOMOTO_MIP_TC` の `l` ([`Self::tc_global_pool_prop`])
+            if tc_on('l') && self.pool.is_none() && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.nodes >= self.tc_l_next {
+                self.tc_l_next = self.nodes + tunable!("ENOMOTO_T_MIP_TC_G_EVERY", 100u64, u64).max(1);
+                if self.tc_global_pool_prop() {
+                    let _ = self.queue.take_all();
+                    plunge = None;
+                }
+            }
             if tc_on('g') && self.pool.is_none() && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.nodes >= self.tc_g_next {
                 self.tc_g_next = self.nodes + tunable!("ENOMOTO_T_MIP_TC_G_EVERY", 100u64, u64).max(1);
                 if self.tc_open_tighten(plunge.as_ref()) {
@@ -11398,13 +11938,45 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_TREE_RESTART=inc` (試作): 木の中で暫定解が良くなり、根の被約費用で新たに固定された整数列が
             // `ENOMOTO_T_MIP_TREE_RESTART_FRAC` (0.05) 以上、主のノード数が `ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES` (2000) 以下、
             // 残り時間が時間上限の `ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT` (0.1) 以上なら、従を止めて再スタートする
-            if std::mem::take(&mut self.tree_restart_check) && (tree_restart_mode() == 3 || self.treefix_restart_mode()) && self.watch.is_none() {
+            // 試作 `ENOMOTO_MIP_TREE_RESTART_INC2` (treeclose 9.63 節、既定では使わない): 既定の木の中の再スタートの判定 (刈った重み、mode 2) に
+            // 足して、暫定解が良くなり根の被約費用で新たに固まった整数列が、この根の始めに自由だった整数列の `ENOMOTO_T_MIP_TREE_RESTART_INC2_FRAC`
+            // (既定 0.1) 以上なら再スタートする (ノード数の上限なし)。HiGHS は新しい解のたびに根の被約費用で固め、動かない整数列の割合で再スタートする
+            // (tbfp-network は最適解の後に 79.5%・19%・11.4%・5.1% で 4 回再スタートして 1 節点で閉じる。当方は木の中で最適解を見つけても再スタートしない)
+            // 木に入ってからの秒 (外側の時計) が、根の段の秒 (外側の始めから木に入るまで) の `ENOMOTO_T_MIP_TREE_RESTART_INC2_TREEMULT` (既定 1) 倍に
+            // 満たなければ使わない (再スタートの根のやり直しの費用が勝つ短い問題を外す。neos-3083819-nubu: 根の段 2.5 秒・木 1.3 秒で再スタートし 1.3 倍遅い)
+            // (`TREEMULT` は既定 0 = 見ない。rococoC10-001000 の早い時期の再スタートの効き目も消えたため、9.66 節)
+            // 仕事量の条件 `ENOMOTO_T_MIP_TREE_RESTART_INC2_WORKMULT` (既定 1、9.67 節): この求解で木に入ってからの主の木の LP の反復 (ノード + 強分枝) が、
+            // 木に入るまでの LP の反復 (根の LP・カット・ヒューリスティクス、再スタートでやり直す仕事の目安) の c 倍に満たなければ使わない
+            let inc2_tree_ok = || {
+                let now = super::outer_elapsed().unwrap_or(f64::NAN);
+                let time_ok = !(now - self.tr_outer0 < tunable!("ENOMOTO_T_MIP_TREE_RESTART_INC2_TREEMULT", 0.0, f64) * self.tr_outer0);
+                // 仕事量は手間の数え ([`crate::ticks`]、このスレッドの累計。前処理・プロービング・分離も入る)。根の段の仕事 = 木に入った時点の累計
+                // (この求解より前の再スタートの分も含む)。LP の反復だけで数えると根の段の仕事を小さく見て、neos-3083819-nubu で通ってしまった
+                let tree_w = crate::ticks::total() - self.tr_tk0;
+                let work_ok = tree_w >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_INC2_WORKMULT", 1.0, f64) * self.tr_tk0;
+                if self.params.verbose {
+                    eprintln!("MIP: TREE_RESTART_INC2 work: tree {:.3e} root {:.3e} (time ok {time_ok}, work ok {work_ok})", tree_w, self.tr_tk0);
+                }
+                time_ok && work_ok
+            };
+            let inc2 = env_str!("ENOMOTO_MIP_TREE_RESTART_INC2").is_some() && tree_restart_mode() != 3 && !self.treefix_restart_mode() && (!self.tree_restart_check || inc2_tree_ok());
+            if std::mem::take(&mut self.tree_restart_check) && (tree_restart_mode() == 3 || self.treefix_restart_mode() || inc2) && self.watch.is_none() {
                 let left_ok = match self.deadline {
                     Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT", 0.1, f64) * self.params.frac_tl(),
                     None => true,
                 };
+                let frac = if inc2 { tunable!("ENOMOTO_T_MIP_TREE_RESTART_INC2_FRAC", 0.1, f64) } else { tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64) };
+                if inc2 && self.params.verbose {
+                    let pr = self.proto_restart_ok(frac);
+                    let gd = pr && self.tree_restart_guard_ok(plunge.as_ref(), "inc2diag");
+                    eprintln!("MIP: TREE_RESTART_INC2: node {} newly fixed {} of {} free at the root, left_ok {left_ok}, count ok {pr}, guard ok {gd}, restarts {} of {}", self.nodes, self.newly_fixed_ints(), self.p.nint.saturating_sub(self.root_fixed0), self.params.restarts, max_restarts(self.p));
+                }
                 // 試作 `ENOMOTO_MIP_RSTCRIT` の `t` ([`Self::rstcrit_tree_big`]): 縮みが大きければノード数の上限を見ない
-                if left_ok && (self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) || self.treefix_restart_mode() || self.rstcrit_tree_big()) && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64)) && self.tree_restart_guard_ok(plunge.as_ref(), "inc") {
+                // INC2: 新たな固定が `ENOMOTO_T_MIP_TREE_RESTART_INC2_NOGUARD` (既定 0.25) 以上ならガードを見ない (ガード `R` は刈った重みの伸びで
+                // 木の残りを見積もるが、暫定解が良くなった直後は待ち行列を刈って重みが急に増え、残りを短く見誤る。tbfp-network は最適解の直後に
+                // 残り 5.9 秒と見て止めたが、実際は残り約 400 秒かかった)
+                let inc2_big = inc2 && (self.newly_fixed_ints() as f64) >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_INC2_NOGUARD", 0.25, f64) * self.p.nint.saturating_sub(self.root_fixed0).max(1) as f64;
+                if left_ok && (inc2 || self.nodes <= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MAX_NODES", 2000u64, u64) || self.treefix_restart_mode() || self.rstcrit_tree_big()) && self.proto_restart_ok(frac) && (inc2_big || self.tree_restart_guard_ok(plunge.as_ref(), "inc")) {
                     if self.params.verbose {
                         eprintln!("MIP: tree restart: {} newly fixed integer columns at node {} ({:.2}s)", self.newly_fixed_ints(), self.nodes, self.start.elapsed().as_secs_f64());
                     }
@@ -11474,12 +12046,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 木を分け合う: 大域的な境界の締め付けを共有する (64 ノードおき)
             let t_sync = Instant::now();
-            if self.pool.is_some() && self.nodes % 64 == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_BOUNDS").is_none() {
+            // 診断 `ENOMOTO_T_MIP_TREE_SYNC_EVERY` (treeclose 9.75 節、既定 64): 大域の境界と双対証明・衝突を取り込む間隔 (ノード数)
+            let sync_every = tunable!("ENOMOTO_T_MIP_TREE_SYNC_EVERY", 64u64, u64).max(1);
+            if self.pool.is_some() && self.nodes % sync_every == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_BOUNDS").is_none() {
                 self.sync_global_bounds();
                 self.treefix_count_dead();
             }
             // 木を分け合う: ほかのスレッドの双対証明・衝突を取り込む (64 ノードおき)
-            if self.pool.is_some() && self.nodes % 64 == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
+            if self.pool.is_some() && self.nodes % sync_every == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
                 self.sync_learned();
             }
             // ヒューリスティクス役の起動の判定のため、自分の未処理のノードの重みを知らせる (64 ノードおき)
@@ -11544,6 +12118,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if pool3_best_secs() > 0.0 {
                     self.pool3_tick();
+                }
+                // 試作 `ENOMOTO_MIP_PARORD` の `a`: 作業者 0 の合図があれば、手元の下界最小の 1 個を共有の待ち行列に出す
+                if parord('a') && self.pool_tid != 0 {
+                    self.parord_a_give();
                 }
                 // `ENOMOTO_MIP_POOL2_TAKE` の `i`: 取ったノードをすぐ処理する (潜りの子は待ち行列に戻す)
                 if self.pool2_interrupt {
@@ -11830,6 +12408,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.queue.skip_pop();
                     }
                     let n = match pinned.or(pooled).or_else(|| match self.dfsbb_kind() {
+                        // 試作 `ENOMOTO_MIP_PARORD` の `a`・`e` ([`parord`]): 作業者 0 は大域の下界最小、ほかは推定値だけ
+                        2 | 3 if parord('a') && self.pool.is_some() && self.pool_tid == 0 => self.parord_a_pop(),
+                        2 | 3 if parord('e') && self.pool.is_some() && self.pool_tid != 0 => self.queue.pop_hgs(u64::MAX),
                         2 | 3 => self.queue.pop_hgs(tunable!("ENOMOTO_T_MIP_HGS_BB_EVERY", 10u64, u64)),
                         // `ENOMOTO_T_MIP_DFSBB_BB_EVERY` (既定 1 = いつも下界最小): k > 1 なら HiGHS と同じく k 回に 1 回下界最小、ほかは 0.5 下界 + 0.5 推定値
                         1 | 4 => match tunable!("ENOMOTO_T_MIP_DFSBB_BB_EVERY", 1u64, u64) {
@@ -11840,7 +12421,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         _ => self.queue.pop(bb_every),
                     }) {
                         Some(n) => {
-                            self.tp_kind = 1;
+                            self.tp_kind = if std::mem::take(&mut self.parord_from_pool) { 2 } else { 1 };
                             // `ENOMOTO_T_MIP_SUBMIP_STALL` (サブ MIP の中だけ、既定 12、0 なら使わない): 暫定解があり、待ち行列から取ったノードの
                             // 推定値が打ち切り値以上のことが続けてこの回数あれば止める (HiGHS の `mip_max_stall_nodes`、サブ MIP では 12。
                             // 改善の見込みのないサブ MIP を早く切り、1 回の時間の上限を短くしなくて済むようにする)
@@ -12499,6 +13080,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if self.node_lps % 32 == 0 && !self.params.submip {
                     self.treesep_diag();
+                }
+                // 試作 `ENOMOTO_MIP_CLQ_LAZY`: 外した行を LP 解が破れば戻して解き直す (破るものがなくなるまで)
+                while st == LpStatus::Optimal && !self.clq_lazy.is_empty() && self.clq_lazy_restore() {
+                    st = self.lp.solve(&capped(self, u64::MAX));
+                    self.clq_lazy_stats[3] += 1;
+                    // ノードの LP の時間の上限に当たっただけなら全体の時間切れにしない (LP なしで分枝する。上の解き直しと同じ扱い)
+                    if st == LpStatus::TimeLimit && !self.time_up() {
+                        st = LpStatus::Error;
+                    }
                 }
                 match st {
                     LpStatus::Optimal => {}
@@ -14179,7 +14769,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // ヒューリスティクス役を分けるとき: 解があれば (役のスレッドが大近傍探索を回すので) 木の探索のスレッドは回さない
         // (`ENOMOTO_MIP_HEUR_ROLE_TREE_LNS` なら以前と同じく回す)
         // (起動の判定 `ENOMOTO_MIP_HEUR_ROLE_TRIGGER` を使うときは、役に就いているスレッドがある間だけ止める)
-        let role_on = if heur_trigger_mode() { pool.in_role.load(std::sync::atomic::Ordering::Relaxed) > 0 } else { pool.has_x.load(std::sync::atomic::Ordering::Acquire) };
+        // (試作 `ENOMOTO_MIP_PARORD` の `c` の役 (暫定解がない間の Local-MIP・FJ) は数えない: 木のスレッドの大近傍探索・ダイビングは既定どおり)
+        let c_roles = if self.incumbent.is_none() { pool.in_role_c.load(std::sync::atomic::Ordering::Relaxed) } else { 0 };
+        let role_on = if heur_trigger_mode() { pool.in_role.load(std::sync::atomic::Ordering::Relaxed) > c_roles } else { pool.has_x.load(std::sync::atomic::Ordering::Acquire) };
         if pool.heur_k > 0 && role_on && env_str!("ENOMOTO_MIP_HEUR_ROLE_TREE_LNS").is_none() {
             return false;
         }
@@ -14194,6 +14786,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 終え、共有の解があるとき。
     fn heur_role_mine(&mut self) -> bool {
         let Some(pool) = &self.pool else { return false };
+        // 試作 `ENOMOTO_MIP_PARORD` の `c`・`g` ([`Self::parord_c_mode`]): 番号の最も大きいスレッドは、暫定解がない間
+        // (`g` なら相対の間隙が大きい間も) 役に就く
+        if self.parord_c_mode() != 0 {
+            return true;
+        }
         if !(pool.heur_k > 0 && self.snap.is_some() && self.race_done && (self.pool_tid as usize) >= pool.threads - pool.heur_k && pool.has_x.load(std::sync::atomic::Ordering::Acquire)) {
             return false;
         }
@@ -14550,10 +15147,73 @@ impl<'a, L: MipLp> Solver<'a, L> {
         false
     }
 
+    /// 試作 `ENOMOTO_MIP_PARORD` の `c`・`g` ([`parord`]): このスレッドが今その役に就くか。0 = 就かない、1 = 暫定解がない (`c`)、
+    /// 2 = 暫定解はあるが相対の間隙 (最良値 − 全体の下界) / max(|最良値|, 1) が `ENOMOTO_T_MIP_PARORD_C_GAP` (既定 0.05) を超える (`g`)。
+    /// 番号の最も大きいスレッド (2 スレッド以上)、木を分け合った後、サブ MIP でないとき。`g` は役から戻った後の待ち (既定の役と同じ
+    /// `heur_role_retired` の秒数) を守る。`ENOMOTO_T_MIP_PARORD_C_SECS` (既定 0 = 上限なし) 秒を役で使ったら以後は就かない
+    fn parord_c_mode(&self) -> u8 {
+        let Some(pool) = &self.pool else { return 0 };
+        if self.parord_c_off || self.params.submip || !(parord('c') || parord('g')) || !self.race_done || self.snap.is_none() || pool.threads < 2 || self.pool_tid as usize != pool.threads - 1 {
+            return 0;
+        }
+        let has = pool.has_x.load(std::sync::atomic::Ordering::Acquire) || self.incumbent.is_some();
+        if !has {
+            return if parord('c') { 1 } else { 0 };
+        }
+        if !parord('g') || self.heur_role_retired.is_some_and(|(t, _, cool)| t.elapsed().as_secs_f64() < cool) {
+            return 0;
+        }
+        if self.parord_gap() > tunable!("ENOMOTO_T_MIP_PARORD_C_GAP", 0.05, f64) {
+            2
+        } else {
+            0
+        }
+    }
+
+    /// 相対の間隙 (共有の最良値 − 全体の下界) / max(|最良値|, 1)。最良値がなければ +inf。
+    fn parord_gap(&self) -> f64 {
+        let z = self.shared.as_ref().map_or(f64::INFINITY, |s| s.best());
+        let lb = self.global_lower_bound();
+        if !z.is_finite() {
+            return f64::INFINITY;
+        }
+        if !lb.is_finite() {
+            return f64::INFINITY;
+        }
+        ((z - lb) / z.abs().max(1.0)).max(0.0)
+    }
+
+    /// 試作 `ENOMOTO_MIP_PARORD` の `c`: 暫定解がない間の役の 1 回分。Local-MIP を 0.5 秒 ([`Self::role_lmip_slice`]、続きから回す)、
+    /// Local-MIP が使えなければ (終わった・作れない) FJ (`ENOMOTO_T_MIP_PARORD_C_FJ_SECS` 秒、既定 1) を種を変えて回す。
+    fn parord_c_slice(&mut self) {
+        let had = self.incumbent.is_some();
+        if !self.role_lm_off {
+            self.parord_stats[5] += 1;
+            self.role_lmip_slice();
+        } else {
+            self.parord_stats[6] += 1;
+            self.rand();
+            let cap = tunable!("ENOMOTO_T_MIP_PARORD_C_FJ_SECS", 1.0, f64);
+            let effort = tunable!("ENOMOTO_T_MIP_PARORD_C_FJ_EFFORT", 50_000_000u64, u64);
+            self.heur_label = "FJ (PARORD heuristic role)";
+            self.feasibility_jump(effort, cap);
+            self.heur_label = "";
+        }
+        if !had && self.incumbent.is_some() {
+            self.parord_stats[7] += 1;
+        }
+    }
+
     fn heur_role_run(&mut self) -> Option<bool> {
         use std::sync::atomic::Ordering;
         let pool = self.pool.clone()?;
         let t_role = Instant::now();
+        // 試作 `ENOMOTO_MIP_PARORD` の `c`・`g`: この回が試作の役か (1 = 暫定解なし、2 = 間隙が大きい)
+        let c_mode = self.parord_c_mode();
+        if c_mode != 0 {
+            self.parord_stats[4] += 1;
+            pool.in_role_c.fetch_add(1, Ordering::Relaxed);
+        }
         self.heur_role_entries += 1;
         self.in_heur_role = true;
         pool.in_role.fetch_add(1, Ordering::Relaxed);
@@ -14602,6 +15262,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.time_up() {
                 break Some(false);
+            }
+            // 試作 `ENOMOTO_MIP_PARORD` の `c`・`g`: 役の上限の秒数、`c` は解が出たら、`g` は間隙が小さくなったら木に戻る
+            if c_mode != 0 {
+                let cap = tunable!("ENOMOTO_T_MIP_PARORD_C_SECS", 0.0, f64);
+                if cap > 0.0 && self.parord_c_secs + t_role.elapsed().as_secs_f64() >= cap {
+                    self.parord_c_off = true;
+                    break None;
+                }
+                if c_mode == 1 {
+                    self.heur_role_import(&pool);
+                    if self.incumbent.is_some() || pool.has_x.load(Ordering::Acquire) {
+                        break None;
+                    }
+                    self.parord_c_slice();
+                    continue;
+                }
+                if self.parord_gap() <= tunable!("ENOMOTO_T_MIP_PARORD_C_GAP", 0.05, f64) {
+                    break None;
+                }
             }
             // 証明の段階に入ったら木の探索に戻る (役には戻らない、[`Self::heur_role_mine`])
             if proof_phase_stops_role() && pool.proof_phase.load(Ordering::Relaxed) {
@@ -14685,6 +15364,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         ROLE_POOL.with(|r| *r.borrow_mut() = None);
         pool.in_role.fetch_sub(1, Ordering::Relaxed);
+        if c_mode != 0 {
+            pool.in_role_c.fetch_sub(1, Ordering::Relaxed);
+            self.parord_c_secs += t_role.elapsed().as_secs_f64();
+        }
         self.in_heur_role = false;
         if prof_tree_par() || heur_role_verbose() {
             eprintln!(
@@ -18027,7 +18710,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 上げる (作れた衝突のリテラルでは上げない)
         let hcs = highs_conflict_score();
         let mut bumps: Vec<(usize, bool)> = Vec::new();
-        let confs = self.dom.analyze_multi_bumps(self.p, start, max_len, reconv, hcs.then_some(&mut bumps));
+        // 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN`: 双対証明で締めた変更も証明の行から説明する (HiGHS の explainBoundChange が
+        // カットのプールの行を遡るのと同じ)。証明が捨てられた・番号が付け直された後は遡らない (従来と同じ葉)
+        let first = self.proof_first_id;
+        let obj_lim = self.prune_limit() - self.p.offset;
+        let (dp, st) = (&self.dual_proofs, &self.proof_state);
+        let arena = &self.cut_arena;
+        let lookup = move |r: i32| -> Option<(Vec<(usize, f64)>, f64)> {
+            if let Some(i) = super::domain::cut_reason_id(r) {
+                return arena.get(i).cloned();
+            }
+            let id = super::domain::proof_reason_id(r)?;
+            let k = usize::try_from(id.checked_sub(first)?).ok()?;
+            let (c, konst, obj) = dp.get(k)?;
+            if st.get(k).is_none_or(|x| *x == ProofState::Dead) || c.is_empty() {
+                return None;
+            }
+            let rhs = if *obj { obj_lim - konst } else { *konst };
+            rhs.is_finite().then(|| (c.clone(), rhs))
+        };
+        let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() { Some(&lookup) } else { None };
+        let confs = self.dom.analyze_multi_bumps(self.p, start, max_len, reconv, hcs.then_some(&mut bumps), lk);
         if hcs && !bumps.is_empty() {
             self.pc.bump_conflict(&bumps);
         }
@@ -19169,6 +19872,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for (i, &k) in cand.iter().enumerate() {
                 self.cpp.work[2] += (self.pool_start[k as usize + 1] - self.pool_start[k as usize]) as u64;
                 let cc_pos0 = self.dom.stack_len();
+                if conflict_proof_explain() {
+                    // 試作: このカットで締めた変更に、写しの表の番号を残す (カットのプールは詰め直すと番号が変わるので、写しは変えない)
+                    let kk = k as usize;
+                    let h = self.pool_hash[kk];
+                    // 同じハッシュでも中身が違えば (詰め直しの後に丸めて同じになる別のカットが入ったとき) 新しく写す
+                    let same = |a: &(Vec<(usize, f64)>, f64), c: &(Vec<(usize, f64)>, f64, f64)| a.1 == c.1 && a.0 == c.0;
+                    let idx = match self.cut_arena_idx.get(&h) {
+                        Some(&i) if same(&self.cut_arena[i as usize], &self.cut_pool[kk]) => i as usize,
+                        _ => {
+                            self.cut_arena.push((self.cut_pool[kk].0.clone(), self.cut_pool[kk].1));
+                            self.cut_arena_idx.insert(h, (self.cut_arena.len() - 1) as u32);
+                            self.cut_arena.len() - 1
+                        }
+                    };
+                    self.dom.set_cut_tag(idx);
+                }
                 let r = self.cutpool_prop_cut(k as usize, cont_frac);
                 if super::cutconf::mode().is_some() && !self.params.submip {
                     let kk = k as usize;
@@ -20025,7 +20744,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.dbg_on {
                         self.proof_diag_tighten(k, j, upper, v, rhs, minact);
                     }
-                    self.dom.set_external_tag(4);
+                    if conflict_proof_explain() {
+                        self.dom.set_proof_tag(self.proof_first_id + k as u64);
+                    } else {
+                        self.dom.set_external_tag(4);
+                    }
                     let cc_pos0 = self.dom.stack_len();
                     let ch = if upper { self.dom.tighten_upper(p, j, v) } else { self.dom.tighten_lower(p, j, v) };
                     self.dom.set_external(false);
@@ -20548,6 +21271,167 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: RESTART_ROOT_CUTS: {k} integer columns tightened by the bounds common to all {} open nodes", nodes.len());
         }
         k
+    }
+
+    /// 試作 `ENOMOTO_MIP_TC` の `l`: 大域的な境界の写しで、行 ([`Domain::propagate`])、証明のプール (双対証明・衝突の行、目的の証明は
+    /// 今の打ち切り値で)、カットのプール、リテラルの衝突 ([`super::conflict_pool::LitConflictPool::scan_global`]) を不動点まで
+    /// (最大 `ENOMOTO_T_MIP_TC_L_ROUNDS` (5) 巡) 伝播し、締まった整数列の境界を大域的に締める。矛盾したら真 (残りの開いたノードに
+    /// 打ち切り値より良い解はない)。連続列の境界は大域にしない (写しの中の伝播にだけ使う)
+    fn tc_global_pool_prop(&mut self) -> bool {
+        let p = self.p;
+        let t0 = Instant::now();
+        self.tc_l_stats[0] += 1;
+        let lim = self.prune_limit() - p.offset;
+        let mut d = Domain::new(p);
+        for j in 0..p.n {
+            if self.dom.global_lo[j] > d.lo[j] {
+                d.tighten_lower(p, j, self.dom.global_lo[j]);
+            }
+            if self.dom.global_up[j] < d.up[j] {
+                d.tighten_upper(p, j, self.dom.global_up[j]);
+            }
+        }
+        let mut ok = !d.infeasible && d.propagate(p);
+        // 線形の行 sum a_j x_j <= rhs を d で 1 回伝播する。矛盾なら偽
+        fn row_prop(p: &MipProblem, d: &mut Domain, coefs: &[(usize, f64)], rhs: f64, changed: &mut bool) -> bool {
+            if !rhs.is_finite() || coefs.is_empty() {
+                return true;
+            }
+            let (mut minact, mut ninf, mut infj) = (0.0f64, 0usize, usize::MAX);
+            for &(j, a) in coefs {
+                let b = if a > 0.0 { d.lo[j] } else { d.up[j] };
+                if b.is_finite() {
+                    minact += a * b;
+                } else {
+                    ninf += 1;
+                    infj = j;
+                }
+            }
+            if ninf > 1 {
+                return true;
+            }
+            let tol = 1e-6 * (1.0 + rhs.abs());
+            if ninf == 0 && minact > rhs + tol {
+                return false;
+            }
+            for &(j, a) in coefs {
+                let b = if a > 0.0 { d.lo[j] } else { d.up[j] };
+                if ninf == 1 && j != infj {
+                    continue;
+                }
+                let rest = if ninf == 0 { minact - a * b } else { minact };
+                let v = (rhs - rest) / a;
+                if !v.is_finite() {
+                    continue;
+                }
+                if a > 0.0 {
+                    let v = if p.is_int[j] { (v + 1e-6).floor() } else { v + tol / a };
+                    if v < d.up[j] - 1e-9 * (1.0 + v.abs()) {
+                        if v < d.lo[j] - 1e-6 {
+                            return false;
+                        }
+                        d.tighten_upper(p, j, v.max(d.lo[j]));
+                        *changed = true;
+                    }
+                } else {
+                    let v = if p.is_int[j] { (v - 1e-6).ceil() } else { v + tol / a };
+                    if v > d.lo[j] + 1e-9 * (1.0 + v.abs()) {
+                        if v > d.up[j] + 1e-6 {
+                            return false;
+                        }
+                        d.tighten_lower(p, j, v.min(d.up[j]));
+                        *changed = true;
+                    }
+                }
+                if d.infeasible {
+                    return false;
+                }
+            }
+            true
+        }
+        let mut lits: Vec<(usize, bool, f64)> = Vec::new();
+        for _ in 0..tunable!("ENOMOTO_T_MIP_TC_L_ROUNDS", 5usize, usize) {
+            if !ok {
+                break;
+            }
+            let mut changed = false;
+            for (coefs, konst, obj) in self.dual_proofs.iter() {
+                let rhs = if *obj { lim - konst } else { *konst };
+                if !row_prop(p, &mut d, coefs, rhs, &mut changed) {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                for (coefs, rhs, _) in self.cut_pool.iter() {
+                    if !row_prop(p, &mut d, coefs, *rhs, &mut changed) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                lits.clear();
+                if self.lit_conflicts.scan_global(p, &d, &mut lits).is_err() {
+                    ok = false;
+                } else {
+                    for &(k, upper, v) in &lits {
+                        if upper && v < d.up[k] {
+                            if v < d.lo[k] {
+                                ok = false;
+                                break;
+                            }
+                            d.tighten_upper(p, k, v);
+                            changed = true;
+                        } else if !upper && v > d.lo[k] {
+                            if v > d.up[k] {
+                                ok = false;
+                                break;
+                            }
+                            d.tighten_lower(p, k, v);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            ok = ok && !d.infeasible && d.propagate(p);
+            if !changed {
+                break;
+            }
+        }
+        if !ok {
+            self.tc_l_stats[3] += 1;
+            if self.params.verbose {
+                eprintln!("MIP: TC l: global propagation with the pools is infeasible at node {} ({:.3}s): closing the tree", self.nodes, t0.elapsed().as_secs_f64());
+            }
+            return true;
+        }
+        let (mut nt, mut nf) = (0u64, 0u64);
+        for j in 0..p.n {
+            if !p.is_int[j] {
+                continue;
+            }
+            let (gl, gu) = (self.dom.global_lo[j], self.dom.global_up[j]);
+            let (l, u) = (d.lo[j].max(gl), d.up[j].min(gu));
+            if l > gl + 0.5 || u < gu - 0.5 {
+                if l > gl + 0.5 {
+                    self.dom.tighten_global(p, j, false, l);
+                }
+                if u < gu - 0.5 {
+                    self.dom.tighten_global(p, j, true, u);
+                }
+                nt += 1;
+                if self.dom.global_lo[j] == self.dom.global_up[j] {
+                    nf += 1;
+                }
+            }
+        }
+        self.tc_l_stats[1] += nt;
+        self.tc_l_stats[2] += nf;
+        if self.params.verbose && nt > 0 {
+            eprintln!("MIP: TC l: node {}: {nt} integer columns tightened globally ({nf} fixed) by the global propagation with the pools ({} proofs, {} pool cuts, {} literal conflicts, {:.3}s)", self.nodes, self.dual_proofs.len(), self.cut_pool.len(), self.lit_conflicts.len(), t0.elapsed().as_secs_f64());
+        }
+        false
     }
 
     /// 試作 `ENOMOTO_MIP_TC` の `g`: 大域的な境界と矛盾しない開いたノード (待ち行列と潜りの子) の全てで締まっている整数列の境界を
@@ -21399,7 +22283,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         let mut n = 0;
+        // 試作 `ENOMOTO_MIP_PRIMAL` の `s` ([`super::heuristics::primal`]): 暫定解と根の LP の値の差 / max(1, |暫定解|) が
+        // `ENOMOTO_T_MIP_PRIMAL_KEEP_GAP` (0.02) を超える間は、RENS のサブ MIP は止めずに受け取りまで待つ
+        let keep_rens = super::heuristics::primal('s')
+            && self.incumbent.as_ref().is_none_or(|(z, _)| (z - self.lp.objective()) / z.abs().max(1.0) > tunable!("ENOMOTO_T_MIP_PRIMAL_KEEP_GAP", 0.02, f64));
         for it in &self.pending_submips {
+            if keep_rens && it.2 == "RENS" {
+                continue;
+            }
             if let Some(c) = &it.5 {
                 c.abort_now();
                 n += 1;
@@ -21502,6 +22393,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if label == super::heur_subfix::SUBFIX_PAR_LABEL && infeasible && r.nodes <= 1 && !self.params.submip {
                         self.subfix_retry.push(fr);
                     }
+                    // 試作 `ENOMOTO_MIP_PRIMAL` の `r` (C2、[`super::heuristics::primal`]): 並列の暫定解なしの RENS が根で実行不能なら同じくやり直す
+                    if super::heuristics::primal('r') && label == "RENS" && infeasible && r.nodes <= 1 && !self.params.submip && self.nodes <= 1 {
+                        self.subfix_retry.push(fr);
+                    }
                 }
                 // 試作 `ENOMOTO_MIP_GAP4` の `k`: 根の並列の locks のサブ MIP が根で実行不能なら、主のスレッドでやり直す印 ([`Self::locks_retry`])
                 if label == "locks" && infeasible && r.nodes <= 1 && !self.params.submip && self.nodes <= 1 && gap4('k') {
@@ -21554,6 +22449,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッドが終わっていれば結果を受け取る (待たない)。
     pub(super) fn poll_lmip_thread(&mut self) {
+        self.lmboost_bg_tick(None);
         self.poll_fpr();
         self.post_prechain();
         // 受け渡し箱には良くなった解を全部ためてあり、新しい (良い) 順に試して、受け付けられたらそこで止める。最良の解が受け付け
@@ -21661,6 +22557,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// [`lmboost_async`]: 裏の LMBOOST の止める条件を見る (`force` なら理由をつけて必ず止める)。止めたら残りの解を受け取る
+    fn lmboost_bg_tick(&mut self, force: Option<&'static str>) {
+        let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+        let (gap_closed, time_up, elapsed, only_fj) = (self.root_gap_closed(), self.time_up(), self.start.elapsed().as_secs_f64(), self.inc_only_fj);
+        let Some(bg) = self.lmboost_bg.as_mut() else { return };
+        if z < bg.inc {
+            bg.inc = z;
+            bg.last_imp = Instant::now();
+        }
+        let why = if let Some(w) = force {
+            w
+        } else if gap_closed {
+            "gap closed"
+        } else if time_up || elapsed >= bg.cap {
+            "time cap"
+        } else if bg.last_imp.elapsed().as_secs_f64() >= bg.stall {
+            "stalled"
+        } else if !only_fj {
+            "other incumbent"
+        } else {
+            return;
+        };
+        let bg = self.lmboost_bg.take().unwrap();
+        let (k, secs) = (bg.k, bg.t0.elapsed().as_secs_f64());
+        drop(bg);
+        if self.params.verbose {
+            eprintln!("MIP: LMBOOST: background threads stopped ({why}) after {secs:.2}s with {k} extra Local-MIP threads, incumbent {:?} ({:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
+        }
+        self.poll_lmip_thread();
+    }
+
     /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、analysis/comp07_20261111.md、既定では使わない): 根のカットのループの終わりで、暫定解が
     /// FJ のスレッドの Local-MIP の解だけで、それがまだ下がり続けている (Local-MIP の改善が 2 回以上あり、最後の改善がループの後半) なら、
     /// 根のヒューリスティクスの前に Local-MIP を増やして回す: FJ のスレッドは止めず、スレッド数 − 2 本 (`ENOMOTO_T_MIP_LMBOOST_THREADS`) の
@@ -21745,6 +22672,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let stall_k = tunable!("ENOMOTO_T_MIP_LMBOOST_STALL", 0.5, f64);
         let mut last_imp = t0;
         let mut inc = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+        if lmboost_async() {
+            if self.params.verbose {
+                eprintln!("MIP: LMBOOST: {k} extra Local-MIP threads keep running in the background (ENOMOTO_MIP_LMBOOST_ASYNC, {:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+            self.lmboost_bg = Some(LmboostBg { stop, hs, t0, cap, stall: (stall_k * t_now).max(2.0), last_imp, inc, k });
+            return;
+        }
         let why = loop {
             std::thread::sleep(Duration::from_millis(20));
             self.poll_lmip_thread();
@@ -22031,7 +22965,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new(if gap4('o') { o.clone_without_implications() } else { (**o).clone() }));
         let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis, clq_lazy: self.clq_lazy.clone() };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
@@ -23121,6 +24055,87 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 試作 `ENOMOTO_MIP_PARORD` の `a` ([`parord`]): 作業者 0 が待ち行列から取る。共有の待ち行列の下界最小が自分の待ち行列の最小より
+    /// 小さければそちらを取り、ほかのスレッドの下界 ([`ThreadSlot::lb`]) が両方より小さければそのスレッドに出す合図 ([`ThreadSlot::give`]) を
+    /// 送り (次の取り出しで共有の待ち行列から取れる)、自分の待ち行列の下界最小を取る。木を分け合う前 (racing ramp-up) は下界最小を取るだけ。
+    fn parord_a_pop(&mut self) -> Option<OpenNode> {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone().filter(|_| self.race_done) else {
+            return self.queue.pop_best();
+        };
+        let t = self.pool_tid as usize;
+        let mine = self.queue.best_lower_bound();
+        let tol = 1e-9 * mine.abs().max(1.0);
+        let mut g = pool.inner.lock().unwrap();
+        let pmin = g.nodes.min_lower_bound();
+        if pmin < mine - tol || (self.queue.is_empty() && pmin.is_finite()) {
+            let sn = g.nodes.pop_best()?;
+            pool.len.store(g.nodes.len(), Ordering::Relaxed);
+            pool.wtree_shift(self.pool_tid, snap_weight(std::slice::from_ref(&sn)));
+            // 取ったノードの下界を同じ錠の中で書き、待っている側に数えられていれば戻す ([`Self::tree1_pool_take`] と同じ)
+            if let Some(sl) = pool.slots.get(t) {
+                sl.lb.store(mine.min(sn.lower_bound).to_bits(), Ordering::Relaxed);
+            }
+            if !self.pool_busy {
+                g.busy += 1;
+                pool.idle.fetch_sub(1, Ordering::Relaxed);
+                self.pool_busy = true;
+            }
+            drop(g);
+            self.pool_stats[1] += 1;
+            self.parord_stats[0] += 1;
+            self.parord_from_pool = true;
+            return Some(self.open_from_pool(sn));
+        }
+        drop(g);
+        let here = mine.min(pmin);
+        let mut other = (f64::INFINITY, usize::MAX);
+        for (i, sl) in pool.slots.iter().enumerate() {
+            if i != t {
+                let v = f64::from_bits(sl.lb.load(Ordering::Relaxed));
+                if v < other.0 {
+                    other = (v, i);
+                }
+            }
+        }
+        if other.0 < here - tol {
+            if let Some(sl) = pool.slots.get(other.1) {
+                if !sl.give.swap(true, Ordering::Relaxed) {
+                    self.parord_stats[2] += 1;
+                }
+            }
+        }
+        let n = self.queue.pop_best();
+        if n.is_some() {
+            self.parord_stats[1] += 1;
+        }
+        n
+    }
+
+    /// 試作 `ENOMOTO_MIP_PARORD` の `a`: 作業者 0 から合図 ([`ThreadSlot::give`]) があり、手元の待ち行列の下界最小が作業者 0 の下界より
+    /// 小さければ、その 1 個を共有の待ち行列に出す。
+    fn parord_a_give(&mut self) {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone() else { return };
+        let Some(sl) = pool.slots.get(self.pool_tid as usize) else { return };
+        if !sl.give.swap(false, Ordering::Relaxed) || self.queue.is_empty() || self.pool_hold.is_some() || !self.race_done {
+            return;
+        }
+        let lb0 = pool.slots.first().map_or(f64::INFINITY, |s| f64::from_bits(s.lb.load(Ordering::Relaxed)));
+        let mine = self.queue.best_lower_bound();
+        if mine < lb0 - 1e-9 * mine.abs().max(1.0) {
+            let n = self.queue.pop_best().unwrap();
+            let sn = self.snap_of(&n);
+            self.pool_stats[0] += 1;
+            let mut g = pool.inner.lock().unwrap();
+            pool.wtree_shift(self.pool_tid, -snap_weight(std::slice::from_ref(&sn)));
+            g.nodes.push(sn);
+            pool.len.store(g.nodes.len(), Ordering::Relaxed);
+            drop(g);
+            self.parord_stats[3] += 1;
+        }
+    }
+
     fn pool_balance(&mut self) {
         use std::sync::atomic::Ordering;
         let Some(pool) = self.pool.clone() else { return };
@@ -23227,7 +24242,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_TC` の `i` ([`tc_on`]): 再スタートの後の求解で、前の暫定解が打ち切り値の固定で問題から外れて暫定解がないときも、
         // 打ち切り値があれば木の中の再スタートを判定する (HiGHS は暫定解を持ったまま何度でも再スタートする。sct2 は 2 回目の再スタートの後
         // 暫定解なしで 300 秒、再スタートが止まっていた。analysis/treeclose_20261114.md)
-        let no_inc = self.incumbent.is_none() && !(tc_on('i') && self.params.restarts > 0 && self.params.cutoff.is_finite());
+        // `j` (試作、treeclose 9.56 節): 最初の求解 (再スタート 0 回) でも、暫定解がなく打ち切り値だけあるときに判定する (csched008 の
+        // 打ち切り値つきの診断で、HiGHS は 37 秒・76 秒に木の中で再スタートするが、当方は暫定解がないため一度も判定しなかった)
+        let no_inc = self.incumbent.is_none() && !(((tc_on('i') && self.params.restarts > 0) || tc_on('j')) && self.params.cutoff.is_finite());
         if self.params.submip || self.snap.is_some() || self.watch.is_some() || self.pool_tid != 0 || no_inc {
             return false;
         }
@@ -23246,7 +24263,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.tr_next = first;
             return false;
         }
-        self.tr_next = done + tunable!("ENOMOTO_T_MIP_TREE_RESTART_EVERY", 100u64, u64);
+        // 試作 `ENOMOTO_MIP_TREE_RESTART_PAR` (treeclose 9.60 節、既定では使わない): 木を分け合うとき、ほかのスレッドの重みは 64 ノードおきにしか
+        // 届かず q が飛び飛びに増えるので、`w` なら判定の間隔をスレッド数倍に、`d` なら「木が大きい」の連続を途切れさせず 1 ずつ減らす
+        // (kasai の 4 スレッドは連続が 3 回ほどで途切れて必要な 11 回に届かず、1 スレッドで 24 秒に起きる再スタートが一度も起きない)
+        let trpar = if self.pool.is_some() { env_str!("ENOMOTO_MIP_TREE_RESTART_PAR") } else { None };
+        let every = tunable!("ENOMOTO_T_MIP_TREE_RESTART_EVERY", 100u64, u64);
+        let every = if trpar.is_some_and(|v| v.contains('w')) { every * self.pool.as_ref().map_or(1, |pl| pl.threads as u64) } else { every };
+        self.tr_next = done + every;
         // 未処理のノードの重み: 自分の待ち行列と潜りの子、共有の待ち行列、ほかのスレッドが知らせた重み。ほかのスレッドの重みは
         // 共有の待ち行列との受け渡しのたびに同じ錠の中で動かす ([`WorkPool::wtree_shift`]、`wtree`) ので、錠を持って一緒に読めば、
         // 受け渡しの間のノードを二重に数えたり落としたりしない (残る誤差は知らせた後 64 ノードまでの分枝・処理の分だけ)
@@ -23283,6 +24306,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let huge = gap_red < 1.0 + 0.05 / r.max(1e-9) && est >= r * 20.0 * done as f64;
         if huge {
             self.tr_huge += 1;
+        } else if trpar.is_some_and(|v| v.contains('d')) && self.tr_huge > 0 {
+            self.tr_huge -= 1;
         } else {
             self.tr_huge = 0;
             self.tr_last = (done, q, ub, lb);
@@ -23973,6 +24998,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if (self.params.verbose || pool3_diag()) && (pool3_best_secs() > 0.0 || pool3_taken()) && !self.params.submip {
             eprintln!("MIP: pool3 (tid {}): forced best-bound picks {}, taken from the shared queue {}, signals to other threads {}", self.pool_tid, self.pool3_stats[0], self.pool3_stats[1], self.pool3_stats[2]);
         }
+        if (self.params.verbose || prof_tree_par()) && env_str!("ENOMOTO_MIP_PARORD").is_some() && !self.params.submip {
+            let s = &self.parord_stats;
+            eprintln!(
+                "PARORD: tid {} a: from shared {} own best {} signals {} gave {} | c: role entries {} Local-MIP slices {} FJ calls {} found first {} role secs {:.2}{}",
+                self.pool_tid, s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], self.parord_c_secs, if self.parord_c_off { " (cap reached)" } else { "" }
+            );
+        }
         if self.params.verbose && self.snap_stats[0] > 0 {
             eprintln!("MIP: tree snapshots {}: node lower bounds raised {}, solutions received {}", self.snap_stats[0], self.snap_stats[1], self.snap_stats[2]);
         }
@@ -24148,6 +25180,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
             eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
+            if super::domain::conflict_lev_diag() {
+                let c: Vec<u64> = super::domain::CONFLICT_LEV.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: conflict levels (all threads): examined {}, 1-UIP {}, stopped with >= 2 left {} (with non-row reasons {}); left by reason: decision {}, external {}, local redcost {}, strong branching {}, orbitope {}, dual proof {}, literal conflict {}, objective {}, implication {}, -10 {}, other {}", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14]);
+                let d: Vec<u64> = super::domain::CONFLICT_STOP.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: conflict analyses (all threads): {}, stopped: first level not resolved {}, set too large {}, not explained by a row {}, no conflict {}, 5-level rule {}, all levels {}; dropped as too long {}, conflicts {}, levels {}", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9]);
+            }
             if self.par_sb_stats[0] > 0 {
                 eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
             }
@@ -24207,6 +25245,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 print_basis_nb_diag();
             }
             eprintln!("MIP: node diag: nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}", self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows());
+            if clq_lazy_on() && self.clq_lazy_stats[0] > 0 {
+                let s = self.clq_lazy_stats;
+                eprintln!("MIP: CLQ_LAZY stats tid {}: dropped {} checks {} restored {} resolves {} still dropped {}", self.pool_tid, s[0], s[1], s[2], s[3], self.clq_lazy.len());
+            }
             if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() || self.tree_sep {
                 eprintln!("MIP: adaptive node cuts: rounds {} effective {} skipped {} (rate {:.3}), node cut secs {:.2}, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 {:?}, cut nnz {:?} (rows mean {:.1})", self.nca_stats[0], self.nca_stats[1], self.nca_stats[2], self.nca_ema, self.node_cut_secs, self.nca_hist, self.nca_cut_nnz, self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / self.p.m.max(1) as f64);
             }
@@ -24325,6 +25367,16 @@ fn pool3_best_secs() -> f64 {
 /// 潜り・兄弟をやめて次に処理する。
 fn pool3_taken() -> bool {
     env_str!("ENOMOTO_MIP_POOL3_TAKEN").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_PARORD=文字` (既定では使わない、analysis/parorder_20261117/): 並列の木の探索の順。
+/// `a` = 作業者 0 (主) は待ち行列から取るとき常に大域の下界最小のノードを取る (HiGHS 1.15.1 の作業者 0 と同じ役。共有の待ち行列の方が
+/// 小さければそちらから取り、ほかのスレッドの手元の方が小さければそのスレッドに下界最小の 1 個を共有の待ち行列へ出させる)、
+/// `e` = 作業者 0 以外は下界最小を取る番をなくし、0.5 下界 + 0.5 推定値の最小だけを取る (HiGHS のほかの作業者と同じ。`a` と組む)、
+/// `c` = 暫定解がない間、番号の最も大きいスレッドが木を離れてヒューリスティクス役 (Local-MIP、使えなければ FJ) を回し、
+/// どれかのスレッドが解を見つけたら木に戻る ([`Solver::heur_role_run`])。`a`・`e` は HiGHS 型の取り出し (`DFSBB=2`・`3`、既定) のときだけ効く。
+fn parord(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_PARORD").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_BOUND_STEP` (2026-11-04 から既定、`=0` で切り上げない。analysis/bound_step_20261104.md): 報告の下界を目的値の刻みで切り上げる ([`Solver::step_lb`])。
@@ -24578,4 +25630,11 @@ pub(super) fn tubr_on() -> bool {
 /// 連続列にする (`l` も入る)、`c` カットで I' を連続として扱う、`g` I' を Gomory の元の行から外す、`h` ネットワークの判定なし、`F` 診断
 pub(super) fn tubr_letter(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TUBR").is_some_and(|v| v != "0" && v.contains(c))
+}
+
+/// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
+/// 通し番号を残し、HiGHS 式の衝突解析でその証明の行から説明して遡る。
+pub(super) fn conflict_proof_explain() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN").is_some())
 }
