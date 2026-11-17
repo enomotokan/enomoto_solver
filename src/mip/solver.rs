@@ -25243,6 +25243,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let d = self.pool_dse_stats;
             eprintln!("POOL_DSE: tid {} sent {} nodes {} weights ({:.1} KB) received {} applied {} basic with weight {} without {}", self.pool_tid, d[0], d[1], d[1] as f64 * 8.0 / 1024.0, d[2], d[3], d[4], d[5]);
         }
+        if self.snap.is_some() && clq_lazy_on() && self.params.verbose {
+            let s = self.clq_lazy_stats;
+            eprintln!("MIP: CLQ_LAZY stats tid {}: dropped {} checks {} restored {} resolves {} still dropped {} (worker)", self.pool_tid, s[0], s[1], s[2], s[3], self.clq_lazy.len());
+        }
         if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some() && prof_tree_par()) {
             self.tprof.tid = self.pool_tid;
             self.tprof.end_s = pool.t0.elapsed().as_secs_f64();
