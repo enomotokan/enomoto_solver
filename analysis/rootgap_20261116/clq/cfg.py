@@ -14,4 +14,5 @@ C18 = dict(_m.CAND1118)
 CFGS = {"c18": C18, "c18_clqroot": {**C18, "ENOMOTO_MIP_CLIQUE_CUTS": "root"},
         "c18_clqmarg": {**C18, "ENOMOTO_T_MIP_CLIQUE_FB_MARGINAL": "5", "ENOMOTO_T_MIP_CLIQUE_FB_SECOND_ROUNDS": "10"}}
 SIG_AB = {"ENOMOTO_T_MIP_CLIQUE_SIG_A": "1.8", "ENOMOTO_T_MIP_CLIQUE_SIG_B": "0.41"}
+CFGS |= {"c18_parint": {**C18, "ENOMOTO_PRESOLVE_PARALLEL_INT": "1"}, "c18_twins": {**C18, "ENOMOTO_MIP_SYM_TWINS": "1"}}  # 双子の併合 (rootgap README の 5 節、P5・M5)
 CFGS |= {"c18_sig": {**C18, "ENOMOTO_MIP_CLIQUE_CUTS": "sigmoid", **SIG_AB}, "c18_siga": {**C18, "ENOMOTO_MIP_CLIQUE_CUTS": "sigmoid_a", **SIG_AB}}

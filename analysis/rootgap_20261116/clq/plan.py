@@ -1,4 +1,5 @@
 """分担表: python plan.py NM NP → shards_M.json・shards_P.json (c18・c18_clqroot・c18_clqmarg)。
+python plan.py NM NP 5 → shards_M5.json・shards_P5.json (双子の併合: c18・c18_parint・c18_twins、M5 は 8 問 × 種 1〜4。README の 6 節)。
 python plan.py NM 0 4 → shards_M4.json (M の 5 問 + clique の効きそうな 600 秒級の 7 問 × 種 1〜4、c18 と c18_sig。README の 5 節)。
 python plan.py NM NP 3 → shards_M3.json・shards_P3.json (c18 と c18_sig を同じ分担で並べる確かめ。README の 4 節)。
 python plan.py NM NP 2 → shards_M2.json・shards_P2.json (シグモイドの比べの c18_sig・c18_siga だけ。c18・c18_clqroot は P・M の結果を使う。README の 2 節)
@@ -14,7 +15,7 @@ from probs import PROBS  # noqa: E402
 from cfg import CFGS  # noqa: E402
 NM, NP = int(sys.argv[1]), int(sys.argv[2])
 SUF = sys.argv[3] if len(sys.argv) > 3 else ""
-CF = {"2": ["c18_sig", "c18_siga"], "3": ["c18", "c18_sig"], "4": ["c18", "c18_sig"]}.get(SUF, ["c18", "c18_clqroot", "c18_clqmarg"])
+CF = {"2": ["c18_sig", "c18_siga"], "3": ["c18", "c18_sig"], "4": ["c18", "c18_sig"], "5": ["c18", "c18_parint", "c18_twins"]}.get(SUF, ["c18", "c18_clqroot", "c18_clqmarg"])
 MPROBS = ["mzzv11", "mzzv42z", "irp", "hypothyroid-k1", "tbfp-network"]
 def times(pat, cfg, cap):
     T = defaultdict(list)
@@ -37,6 +38,12 @@ def order(p, s):
 TM = times(C18 / "res_M_s*.jsonl", "cand1118", 600)
 # M4 に足す 7 問 (集合詰め込み・分割の行が多いか衝突の多い問題で、cand1118 か HiGHS が 600 秒で解いたもの)
 M4ADD = ["neos-933966", "mcsched", "csched008", "neos-1456979", "neos-3216931-puriri", "traininstance6", "satellites2-60-fs"]
+if SUF == "5":
+    M5 = ["irp", "mzzv11", "mzzv42z", "hypothyroid-k1", "neos-933966", "mcsched", "neos-1456979", "traininstance6"]
+    balance({(p, s): order(p, s) for p in M5 for s in (1, 2, 3, 4)}, lambda p: TM.get(p, 600.0) + 40, NM, "shards_M5.json", 600)
+    TP = times(C18 / "res_P_s*.jsonl", "cand1118", 60)
+    balance({(p, s): order(p, s) for p in PROBS for s in (1, 2, 3, 4)}, lambda p: TP.get(p, 48.0) + 8, NP, "shards_P5.json", 60)
+    sys.exit()
 if SUF == "4":
     balance({(p, s): order(p, s) for p in MPROBS + M4ADD for s in (1, 2, 3, 4)}, lambda p: TM.get(p, 600.0) + 40, NM, "shards_M4.json", 600)
     sys.exit()

@@ -141,3 +141,16 @@ irp で sig が遅くなる元 (`irp_chk.py` → `irp_chk.jsonl`、手元・4 �
   (適応の g_c) が 0 なら f を 0 にする形 (sigmoid_a は ln ρ を ±5 で切るので f は 0 まで下がらない) がよい。
 
 結論 (利用者の判断): シグモイド版はこれ以上手を入れず、a 1.8・b 0.41 のまま cand1119 の束に入れる (clique カットの長さの上限・g_c = 0 で f = 0 の案は行わない)。
+
+## 6. 双子の併合の測り直し (P5・M5、rootgap README の 5 節の (a))
+
+irp の前処理の差 (同じ 0-1 列 833 組・945 列) を消す試作の鍵を、cand1118 の上で並べる (どれも環境変数だけ、既定は変えない):
+- c18: CAND1118
+- c18_parint: + `ENOMOTO_PRESOLVE_PARALLEL_INT=1` (前処理の平行列の併合を整数列にも)
+- c18_twins: + `ENOMOTO_MIP_SYM_TWINS=1` (対称性の扱いの前に双子を併合)
+
+同じ (問題, 種) の 3 設定は同じ分担で続けて解く (`python plan.py 8 6 5`):
+- P5: 58 問 × 種 1〜4、60 秒、6 分担 (見積り各約 59 分): `python run.py P5 K` (K = 0〜5)
+- M5: irp・mzzv11・mzzv42z・hypothyroid-k1・neos-933966・mcsched・neos-1456979・traininstance6 × 種 1〜4、600 秒、8 分担 (見積り各約 60 分):
+  `python run.py M5 K` (K = 0〜7)
+- 集計: `python summ.py P5 > summ_P5.txt`・`python summ.py M5 > summ_M5.txt`

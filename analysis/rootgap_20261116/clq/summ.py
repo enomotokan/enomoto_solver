@@ -8,7 +8,7 @@ D = Path(__file__).resolve().parent
 SET = sys.argv[1] if len(sys.argv) > 1 else "P"
 rows = [json.loads(l) for S in (("M", "X") if SET == "MX" else (SET[0], SET) if SET.endswith("2") else (SET,)) for f in sorted(glob.glob(str(D / f"res_{S}_s*.jsonl"))) for l in open(f) if l.strip()]  # MX = M と追加の X を合わせる
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
-CF = ["c18", "c18_sig"] if SET[-1] in "34" else ["c18", "c18_clqroot", "c18_sig", "c18_siga"] if SET.endswith("2") else ["c18", "c18_clqroot", "c18_clqmarg"]
+CF = ["c18", "c18_parint", "c18_twins"] if SET[-1] == "5" else ["c18", "c18_sig"] if SET[-1] in "34" else ["c18", "c18_clqroot", "c18_sig", "c18_siga"] if SET.endswith("2") else ["c18", "c18_clqroot", "c18_clqmarg"]
 def st(r): return str(r["result"].get("status") or "").lower()  # HiGHS は "Optimal"・"Time limit reached"
 def solved(r): return st(r) in ("optimal", "infeasible")
 def t(r): return min(r["result"]["time"], r["tl"]) if solved(r) else r["tl"]
@@ -40,7 +40,9 @@ def cmp(ca, cb):
         v = logr[p]; g = math.exp(sum(v) / len(v))
         tag = " 全種で遅" if len(v) >= 2 and all(x > math.log(1.25) for x in v) else (" 全種で速" if len(v) >= 2 and all(x < math.log(0.8) for x in v) else "")
         if g > 1.15 or g < 0.87: print(f"  {p}: {g:.2f} {[round(math.exp(x), 2) for x in v]}{tag}")
-if SET[-1] in "34":
+if SET[-1] == "5":
+    cmp("c18", "c18_parint"); cmp("c18", "c18_twins"); cmp("c18_parint", "c18_twins")
+elif SET[-1] in "34":
     cmp("c18", "c18_sig")
 elif SET.endswith("2"):
     cmp("c18", "c18_clqroot"); cmp("c18", "c18_sig"); cmp("c18", "c18_siga"); cmp("c18_clqroot", "c18_sig"); cmp("c18_sig", "c18_siga")
