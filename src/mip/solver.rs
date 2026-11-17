@@ -8058,7 +8058,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let basis = self.lp.basis();
         let slack_basic = |i: usize| basis.row.get(i).is_none_or(|s| *s == VarStatus::Basic) || basis.row.is_empty();
         let cand: Vec<(usize, Vec<u32>)> = if let Some(sn) = self.snap.as_ref() {
-            sn.clq_lazy.iter().filter(|(i, _)| *i < m0 && slack_basic(*i)).cloned().collect()
+            // 従は主と同じ行を外す (スレッドの間で受け渡す基底で、外した行のスラックがどれも基底にあるように。基底に入れるのは LP の基底の修復が行う)
+            sn.clq_lazy.iter().filter(|(i, _)| *i < m0).cloned().collect()
         } else {
             let p = self.p;
             let n = p.n;
