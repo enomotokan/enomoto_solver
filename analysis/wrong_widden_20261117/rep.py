@@ -15,12 +15,17 @@ tl = float(os.environ.get("TL", "120"))
 for r in range(reps):
     for s in range(a, b + 1):
         env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
-        env.update(extra); env["ENOMOTO_MIP_THREADS"] = th; env["ENOMOTO_T_MIP_SEED"] = str(s)
+        env.update(extra)
+        if "ENOMOTO_MIP_DEBUG_SOL" in extra: env["ENOMOTO_MIP_LOG"] = "1"
+        env["ENOMOTO_MIP_THREADS"] = th; env["ENOMOTO_T_MIP_SEED"] = str(s)
         t0 = time.time()
         p = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", str(tl), "--threads", th],
                            cwd=WT, env=env, capture_output=True, text=True)
         try: res = json.loads([l for l in p.stdout.splitlines() if l.startswith("{")][-1])
         except Exception: res = {"status": "crash", "rc": p.returncode, "err": p.stderr[-300:]}  # noqa: BLE001
+        if "ENOMOTO_MIP_DEBUG_SOL" in extra:  # デバッグ解つき: MIP_DEBUG_SOL の行 (最初の 300 行) と最後の 40 行を logs/ に残す
+            ls = p.stderr.splitlines(); (D / "logs").mkdir(exist_ok=True)
+            (D / "logs" / f"{tag}_s{s}_r{r}.log").write_text("\n".join([l for l in ls if "MIP_DEBUG_SOL" in l][:300] + ["---- 最後の 40 行 ----"] + ls[-40:]) + "\n")
         o = res.get("objective")
         wrong = res.get("status") == "optimal" and o is not None and o > 25009.67
         row = {"tag": tag, "seed": s, "rep": r, "th": th, "env": extra, "status": res.get("status"), "obj": o, "bound": res.get("bound"),
