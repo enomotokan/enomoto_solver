@@ -154,3 +154,17 @@ irp の前処理の差 (同じ 0-1 列 833 組・945 列) を消す試作の鍵�
 - M5: irp・mzzv11・mzzv42z・hypothyroid-k1・neos-933966・mcsched・neos-1456979・traininstance6 × 種 1〜4、600 秒、8 分担 (見積り各約 60 分):
   `python run.py M5 K` (K = 0〜7)
 - 集計: `python summ.py P5 > summ_P5.txt`・`python summ.py M5 > summ_M5.txt`
+
+結果 (`summ_P5.txt`・`summ_M5.txt`):
+- P5 (58 問 × 種 4、232 組): 解けた数 c18 179・parint 178・twins 179、食い違い 0、crash 0。
+  - parint / c18 = −0.1% [−4.0%, +4.2%]。遅: ns1116954 1.69 (種 1 だけ 8.6 倍)・10teams 1.56・nw04 1.23 (4 種とも 1.11〜1.33)・timtab1 1.19。
+    速: noswot 0.65・neos-911970 0.83。最大 RSS 2084 MB (c18 1382 MB)。
+  - twins / c18 = −0.9% [−3.6%, +1.4%]。遅: nw04 1.19 (4 種とも 1.14〜1.23、2026-10-28 の 3 倍からは小さい)・physiciansched6-2 1.15 (種 4 だけ 2.24)。
+    速: neos-911970 0.73・10teams 0.73・noswot 0.85。最大 RSS 1533 MB。
+- M5 (8 問 × 種 4、600 秒、32 組): 解けた数 c18 26・parint 28・twins 28、食い違い 0、crash 0。
+  - parint / c18 = −3.5% [−39.4%, +35.7%]。irp 0.25 (全種で速)・mzzv11 0.75、遅: traininstance6 1.77 (全種で遅)・neos-1456979 1.51・mzzv42z 1.45。
+  - twins / c18 = −16.0% [−45.6%, +11.4%]。irp 0.24 (全種で速、45〜86 秒 → 11〜20 秒)、遅: traininstance6 1.32 (種 4 だけ 2.44)。他はほぼ同じ。
+  - twins / parint = −11.6% [−23.1%, +1.6%] (parint は前処理で列を併合するので、併合しない問題でも前処理の後の経路が変わり mzzv42z・
+    traininstance6・neos-1456979 で遅い。twins は対称性の扱いの前に双子だけを併合する)。
+- まとめ: twins (`ENOMOTO_MIP_SYM_TWINS`) は P で中立 (−0.9%、全種で 1.25 倍を超える問題なし)、M で −16.0% (irp を 4 倍速く、
+  解けた数 +2)。parint は M で遅い問題が多く、twins の方がよい。
