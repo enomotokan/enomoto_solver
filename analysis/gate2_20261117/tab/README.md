@@ -46,3 +46,9 @@
   P = MIPLIB 58 問 × 種 4〜6 × 60 秒 (`shards_P.json`、3 分担 × 約 1.0 時間)、M = Mittelmann 48 問 × 種 3・4 × 600 秒
   (`shards_M.json`、8 分担 × 約 2.1 時間)。回し方: リポジトリの根で `sh analysis/revisit_20261112/build.sh` の後、
   `python analysis/gate2_20261117/tab/run.py P K` (K = 0〜2)、`... run.py M K` (K = 0〜7)。集計 `python summ.py P > summ_P.txt`。
+
+## 4. 誤答の確かめ (2026-11-17)
+
+- cargo test (`--release`): 419 通過・0 失敗・19 無視。
+- `fuzz.sh` (`ENOMOTO_T_MIP_TAB_SIG_W=0.01`): fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 0/1000・fuzz_tiny2 0/400、
+  値 `n`: fuzz_tiny 0/400・fuzz_highs 0/150。誤答 0。
