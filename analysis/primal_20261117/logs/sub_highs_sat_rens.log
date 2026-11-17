@@ -1,0 +1,79 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP satellites2-60-fs_0 has 15847 rows; 35378 cols; 123135 nonzeros; 34324 integer variables (12481 binary)
+Coefficient ranges:
+  Matrix  [4e-01, 2e+05]
+  Cost    [1e+00, 1e+02]
+  Bound   [1e+00, 5e+05]
+  RHS     [1e+00, 2e+05]
+Presolving model
+8901 rows, 13468 cols, 50272 nonzeros 0s
+6198 rows, 12339 cols, 43153 nonzeros 0s
+5629 rows, 9977 cols, 36180 nonzeros 0s
+4595 rows, 8485 cols, 31541 nonzeros 0s
+4009 rows, 6553 cols, 26009 nonzeros 1s
+3445 rows, 5359 cols, 22057 nonzeros 2s
+2862 rows, 4424 cols, 19039 nonzeros 2s
+2650 rows, 3446 cols, 15443 nonzeros 3s
+2103 rows, 3061 cols, 13858 nonzeros 3s
+2062 rows, 1970 cols, 9072 nonzeros 4s
+1511 rows, 1885 cols, 8518 nonzeros 4s
+1444 rows, 1686 cols, 7823 nonzeros 4s
+Presolve reductions: rows 1444(-14403); columns 1686(-33692); nonzeros 7823(-115312) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   1444 rows
+   1686 cols (1619 binary, 0 integer, 0 implied int., 67 continuous, 0 domain fixed)
+   7823 nonzeros
+   Thread count 1 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            21                 Large        0      0      0         0     4.9s
+         0       0         0   0.00%   2.135090925     21                89.83%        0      0      2      1508     4.9s
+ L       0       0         0   0.00%   5               9                 44.44%     1166     97      2      2844     5.7s
+
+1.2% inactive integer columns, restarting
+Model after restart has 1329 rows, 1579 cols (1518 bin., 0 int., 0 impl., 61 cont., 0 dom.fix.), and 7243 nonzeros
+
+         0       0         0   0.00%   5               9                 44.44%       33      0      0      2916     5.9s
+         0       0         0   0.00%   5               9                 44.44%       33     10      4      3611     5.9s
+ L       0       0         0   0.00%   5               5                  0.00%     1536    107      4      4156     6.6s
+         1       0         1 100.00%   5               5                  0.00%     1401    107      4      4496     6.6s
+
+Solving report
+  Model             satellites2-60-fs_0
+  Status            Optimal
+  Primal bound      5
+  Dual bound        5
+  Gap               0% (tolerance: 0.01%)
+  P-D integral      1.14010786432
+  Solution status   feasible
+                    5 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            6.57
+                    4.88 (Presolve)
+                        MIP    time [calls] = 4.83 [1]
+                        subMIP time [calls] = 0.05 [3]
+                    1.68 (Solve)
+                        MIP    time [calls] = 1.48 [1]
+                        subMIP time [calls] = 0.20 [2]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [3]
+  Max sub-MIP depth 2
+  Nodes             1
+  Repair LPs        0
+  LP iterations     4496
+                    0 (strong br.)
+                    1891 (separation)
+                    402 (heuristics)

@@ -22,7 +22,7 @@
 //! 開発経緯・並列化を見送った理由などは改良履歴メモを参照。
 
 use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
-use crate::params::presolve::{EQPROP_RELTOL, FORCING_SLACK_REL, PROPAGATE_EPS, PROP_CANCEL_GUARD, PROP_RELTOL};
+use crate::params::presolve::{EMPTY_ROW_FEAS_TOL, EQPROP_RELTOL, FORCING_SLACK_REL, PROPAGATE_EPS, PROP_CANCEL_GUARD, PROP_RELTOL};
 use super::infeas_tol;
 
 /// 伝播のパスの打ち切り条件 ([`propagate_split`]・[`propagate_equalities`])。
@@ -207,8 +207,19 @@ fn crossing_tol(lb: f64, ub: f64) -> f64 {
 /// 呼び出し側の主ループのコード生成を乱さないよう別関数 (cold) にする (インライン化すると fit2d で伝播が 2 割遅くなった)。
 #[cold]
 #[inline(never)]
+///
+/// 項のない行 (代入で項が打ち消し合った行) は、固定列の折り込み ([`super::foldfixed`]) と同じく主実行可能性の許容
+/// `EMPTY_ROW_FEAS_TOL` (1e-7) より厳しくしない。行の大きさの手がかり (消えた項・折り込んだ定数) を失っており、
+/// 右辺に残る丸め (大きい M の行 `x0 + x2 + 2e7 z ≥ h` で −1.3e-9) だけで実行不能と判定していた
+/// (乱数問題の seed 9981・378、analysis/wrongans_20261117)。`ENOMOTO_T_EMPTY_ROW_FEAS_TOL=0` で従来の判定。
 fn violation_exceeds_tol(violation: f64, b: f64, row: impl Iterator<Item = (usize, f64)>, lb: &[f64], ub: &[f64], upper: bool) -> bool {
-    violation > infeas_tol(PROPAGATE_EPS, abs_activity(row, lb, ub, upper).max(b.abs()))
+    let mut row = row.peekable();
+    let tol = if row.peek().is_none() {
+        infeas_tol(PROPAGATE_EPS, b.abs()).max(tunable!("ENOMOTO_T_EMPTY_ROW_FEAS_TOL", EMPTY_ROW_FEAS_TOL, f64))
+    } else {
+        infeas_tol(PROPAGATE_EPS, abs_activity(row, lb, ub, upper).max(b.abs()))
+    };
+    violation > tol
 }
 
 /// 強制行の判定: 最小活動度 (`upper == false`、上側の強制なら最大活動度 `upper == true`) が右辺に届いているか。`slack` は
@@ -433,6 +444,9 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
             // 絶対 `PROPAGATE_EPS` を超えるがこの範囲に収まる違反は、下の強制行として扱う。
             // Σ|項| は絶対の判定を超えたとき (まれ) だけ行を走査し直して求める (主ループの積算に足すと fit2d などの長い行で目に見えて遅い)。
             if min_activity > b + PROPAGATE_EPS && violation_exceeds_tol(min_activity - b, b, row.iter().copied(), &lb, &ub, false) {
+                if env_str!("ENOMOTO_DEBUG_PRESOLVE_INFEAS").is_some() {
+                    eprintln!("PROP_INFEAS: row {:?} <= {b:e}, min activity {min_activity:e}, bounds {:?}", row, row.iter().map(|&(j, _)| (lb[j], ub[j])).collect::<Vec<_>>());
+                }
                 infeasible = true;
                 break;
             }
@@ -525,6 +539,13 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
     // 行ごとの判定では検出されなくても、別々の行が lb/ub を互いに逆側へ
     // 押して交差させることがあるので、全パス後にもう一度確認する。
     if !infeasible && bounds_inconsistent(n, &lb, &ub) {
+        if env_str!("ENOMOTO_DEBUG_PRESOLVE_INFEAS").is_some() {
+            for j in 0..n {
+                if lb[j] > ub[j] + PROPAGATE_EPS && lb[j] > ub[j] + crossing_tol(lb[j], ub[j]) {
+                    eprintln!("PROP_INFEAS: column {j} bounds crossed [{:e}, {:e}]", lb[j], ub[j]);
+                }
+            }
+        }
         infeasible = true;
     }
     if !infeasible {

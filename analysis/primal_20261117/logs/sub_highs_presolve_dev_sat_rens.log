@@ -1,0 +1,87 @@
+readMPS: Trying to open file /tmp/claude-0/-home-user-enomoto-solver/73209653-cdfc-5b02-bb33-6c7c58ae73d8/scratchpad/subdump/satellites2-60-fs_0.mps
+readMPS: Read NAME    OK
+readMPS: Read ROWS    OK
+readMPS: Read COLUMNS OK
+readMPS: Read RHS     OK
+readMPS: Read RANGES  OK
+readMPS: Read BOUNDS  OK
+MIP       : satellites2-60-fs_0
+Rows      : 15847
+Cols      : 35378
+Nonzeros  : 123135
+Integer   : 34324 (12481 binary)
+Scheduler initialized: 1 threads (physical cores: 4)
+Running with 1 thread(s)
+Permitted suppression of presolve rules via presolve_rule_off option:
+ * Rule  0 (set bit  0 =       1): Empty row
+ * Rule  1 (set bit  1 =       2): Singleton row
+ * Rule  2 (set bit  2 =       4): Redundant row
+ * Rule  3 (set bit  3 =       8): Empty column
+ * Rule  4 (set bit  4 =      16): Fixed column
+   Rule  5 (set bit  5 =      32): Dominated column
+   Rule  6 (set bit  6 =      64): Forcing row
+   Rule  7 (set bit  7 =     128): Forcing column
+   Rule  8 (set bit  8 =     256): Free column substitution
+   Rule  9 (set bit  9 =     512): Doubleton equation
+   Rule 10 (set bit 10 =    1024): Dependent equations
+   Rule 11 (set bit 11 =    2048): Dependent free columns
+   Rule 12 (set bit 12 =    4096): Aggregator
+   Rule 13 (set bit 13 =    8192): Parallel rows and columns
+   Rule 14 (set bit 14 =   16384): Sparsify
+   Rule 15 (set bit 15 =   32768): Probing
+   Rule 16 (set bit 16 =   65536): Enumeration
+   Rule 17 (set bit 17 =  131072): Dual fixing
+   Rule 18 (set bit 18 =  262144): Zero cost singleton
+   Rule 19 (set bit 19 =  524288): Column stuffing
+   Rule 20 (set bit 20 = 1048576): Dual-fixing probing
+   Rule 21 (set bit 21 = 2097152): Initial sweep
+   Rule 22 (set bit 22 = 4194304): Fourier-Motzkin
+   Rule 23 (set bit 23 = 8388608): Weakly dominated column
+ * Only in initial sweep
+Presolving model
+15847 rows, 35378 cols, 123135 nonzeros 0s
+8901 rows, 13468 cols, 50272 nonzeros 0s
+6198 rows, 12339 cols, 43153 nonzeros 0s
+Sparsify removed 2.1% of nonzeros
+Fixed 152 dominated columns and strengthened 0 bounds
+Enumeration presolve: 2007 deleted columns, 0 tightened bounds, 0 substitutions, 842 deleted rows, 0 lifted nonzeros
+5030 rows, 9609 cols, 34970 nonzeros 0s
+Enumeration presolve: 0 deleted columns, 0 tightened bounds, 0 substitutions, 1 deleted rows, 0 lifted nonzeros
+3140 probing evaluations: 42 deleted rows, 1435 deleted columns, 6 lifted nonzeros
+4385 rows, 7971 cols, 30393 nonzeros 1s
+Sparsify removed 0.8% of nonzeros
+Enumeration presolve: 868 deleted columns, 0 tightened bounds, 455 substitutions, 18 deleted rows, 4 lifted nonzeros
+3723 rows, 6453 cols, 25892 nonzeros 1s
+Strengthened 4 coefficients
+Enumeration presolve: 218 deleted columns, 0 tightened bounds, 113 substitutions, 4 deleted rows, 0 lifted nonzeros
+Enumeration presolve: 40 deleted columns, 0 tightened bounds, 0 substitutions, 0 deleted rows, 0 lifted nonzeros
+2609 probing evaluations: 5 deleted rows, 624 deleted columns, 2 lifted nonzeros
+3251 rows, 5197 cols, 22264 nonzeros 2s
+Sparsify removed 3.0% of nonzeros
+Enumeration presolve: 133 deleted columns, 0 tightened bounds, 42 substitutions, 5 deleted rows, 0 lifted nonzeros
+Enumeration presolve: 69 deleted columns, 0 tightened bounds, 32 substitutions, 2 deleted rows, 0 lifted nonzeros
+Enumeration presolve: 2 deleted columns, 0 tightened bounds, 0 substitutions, 0 deleted rows, 0 lifted nonzeros
+2500 probing evaluations: 4 deleted rows, 873 deleted columns, 8 lifted nonzeros
+3023 rows, 3964 cols, 17519 nonzeros 3s
+Sparsify removed 2.9% of nonzeros
+Enumeration presolve: 395 deleted columns, 0 tightened bounds, 47 substitutions, 28 deleted rows, 0 lifted nonzeros
+2503 rows, 3367 cols, 14931 nonzeros 3s
+Enumeration presolve: 24 deleted columns, 0 tightened bounds, 2 substitutions, 2 deleted rows, 0 lifted nonzeros
+3207 probing evaluations: 0 deleted rows, 202 deleted columns, 14 lifted nonzeros
+Sparsify removed 2.6% of nonzeros
+Enumeration presolve: 56 deleted columns, 0 tightened bounds, 0 substitutions, 1 deleted rows, 0 lifted nonzeros
+2500 probing evaluations: 0 deleted rows, 657 deleted columns, 16 lifted nonzeros
+2071 rows, 2354 cols, 10911 nonzeros 5s
+Sparsify removed 2.5% of nonzeros
+Enumeration presolve: 370 deleted columns, 0 tightened bounds, 3 substitutions, 1 deleted rows, 1 lifted nonzeros
+1664 rows, 1900 cols, 8692 nonzeros 5s
+1764 probing evaluations: 0 deleted rows, 73 deleted columns, 65 lifted nonzeros
+Sparsify removed 0.8% of nonzeros
+Enumeration presolve: 0 deleted columns, 0 tightened bounds, 0 substitutions, 0 deleted rows, 4 lifted nonzeros
+1659 probing evaluations: 0 deleted rows, 0 deleted columns, 0 lifted nonzeros
+Fixed 111 dominated columns and strengthened 0 bounds
+1439 rows, 1685 cols, 7826 nonzeros 5s
+Presolve reductions: rows 1439(-14408); columns 1685(-33693); nonzeros 7826(-115309) 
+presolve_.run() returns status: Reduced
+Presolve reductions: rows 1439(-14408); columns 1685(-33693); nonzeros 7826(-115309) 
+Presolve status: Reduced
