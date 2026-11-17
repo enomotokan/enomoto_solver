@@ -11295,7 +11295,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         // 木を分け合う従のスレッドは、未処理のノードが 2 つ以上になってから (根を分枝してから) 始める (根で解ける問題では
         // 始めない。nw04: 根で閉じるのに、従の準備 (8.7 万列の定義域・LP と根の LP) を待って 4 本で 2-3 秒遅かった)
-        let parallel_tree = self.params.threads > 1 && !self.params.submip && self.watch.is_none() && self.snap.is_none();
+        // 診断 `ENOMOTO_MIP_DIAG_NO_PARTREE` (treeclose 9.60 節、既定では使わない): スレッド数はそのままで木だけを分け合わない
+        // (1 本の木の LP の速さが、木を分け合うことで落ちるのか、同時に走るほかの部品で落ちるのかを分ける)
+        let parallel_tree = self.params.threads > 1 && !self.params.submip && self.watch.is_none() && self.snap.is_none() && env_str!("ENOMOTO_MIP_DIAG_NO_PARTREE").is_none();
         // 潜っている子ノード (定義域に分枝を積んだ状態で次に処理する)。
         let mut plunge: Option<OpenNode> = None;
         let mut plunge_depth = 0usize;
@@ -23430,7 +23432,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.tr_next = first;
             return false;
         }
-        self.tr_next = done + tunable!("ENOMOTO_T_MIP_TREE_RESTART_EVERY", 100u64, u64);
+        // 試作 `ENOMOTO_MIP_TREE_RESTART_PAR` (treeclose 9.60 節、既定では使わない): 木を分け合うとき、ほかのスレッドの重みは 64 ノードおきにしか
+        // 届かず q が飛び飛びに増えるので、`w` なら判定の間隔をスレッド数倍に、`d` なら「木が大きい」の連続を途切れさせず 1 ずつ減らす
+        // (kasai の 4 スレッドは連続が 3 回ほどで途切れて必要な 11 回に届かず、1 スレッドで 24 秒に起きる再スタートが一度も起きない)
+        let trpar = if self.pool.is_some() { env_str!("ENOMOTO_MIP_TREE_RESTART_PAR") } else { None };
+        let every = tunable!("ENOMOTO_T_MIP_TREE_RESTART_EVERY", 100u64, u64);
+        let every = if trpar.is_some_and(|v| v.contains('w')) { every * self.pool.as_ref().map_or(1, |pl| pl.threads as u64) } else { every };
+        self.tr_next = done + every;
         // 未処理のノードの重み: 自分の待ち行列と潜りの子、共有の待ち行列、ほかのスレッドが知らせた重み。ほかのスレッドの重みは
         // 共有の待ち行列との受け渡しのたびに同じ錠の中で動かす ([`WorkPool::wtree_shift`]、`wtree`) ので、錠を持って一緒に読めば、
         // 受け渡しの間のノードを二重に数えたり落としたりしない (残る誤差は知らせた後 64 ノードまでの分枝・処理の分だけ)
@@ -23467,6 +23475,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let huge = gap_red < 1.0 + 0.05 / r.max(1e-9) && est >= r * 20.0 * done as f64;
         if huge {
             self.tr_huge += 1;
+        } else if trpar.is_some_and(|v| v.contains('d')) && self.tr_huge > 0 {
+            self.tr_huge -= 1;
         } else {
             self.tr_huge = 0;
             self.tr_last = (done, q, ub, lb);
