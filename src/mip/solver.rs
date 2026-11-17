@@ -6173,6 +6173,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         eprintln!("MIP_DEBUG_SOL {label}: LP row {i} violated: {lo} <= {act} <= {up} (orig rows {})", self.p.m);
                     }
                 }
+                // 列の境界: 定義域はデバッグ解を含むのに LP の境界が外しているもの
+                for j in 0..self.p.n {
+                    let (lo, up) = self.lp.col_bounds(j);
+                    let in_dom = x[j] >= self.dom.lo[j] - 1e-6 && x[j] <= self.dom.up[j] + 1e-6;
+                    if in_dom && (x[j] < lo - 1e-6 || x[j] > up + 1e-6) {
+                        eprintln!("MIP_DEBUG_SOL {label}: LP col {j} bound violated: {lo} <= {} <= {up} (dom [{}, {}])", x[j], self.dom.lo[j], self.dom.up[j]);
+                    }
+                }
             }
         });
     }
@@ -13407,7 +13415,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.add_dual_proof();
                         }
                         if self.dbg_on {
-                            self.dbg_lost(&format!("node LP {st:?}"), dn && self.dbg_contains());
+                            let c = dn && self.dbg_contains();
+                            self.dbg_lost(&format!("node LP {st:?}"), c);
+                            if c && !self.params.submip {
+                                self.dbg_check_rows(&format!("node {} thread {} LP {st:?}", self.nodes, self.pool_tid));
+                            }
                         }
                         if let Some((j, up, _, _)) = node.branch {
                             self.pc.add_cutoff(j, up);
