@@ -2648,6 +2648,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if sl_on {
                 self.sl.begin_call(false);
             }
+            // 診断 (`ENOMOTO_MIP_DEBUG_SEP_AT=<接頭辞>`、analysis/slow2_20261117): 外側の最初の根の 0 ラウンド目に、ほかのソルバー (計装した HiGHS) の
+            // 各ラウンドの LP 解 `<接頭辞>_r<k>.txt` (1 行 1 値、この問題と同じ列の番号) を k = 0, 1, ... の順に読み、その点で分離器を回した候補を
+            // `<接頭辞>_e<k>.txt` (`ENOMOTO_MIP_DEBUG_DUMP_CANDS` と同じ形) に書く。動きは変えない (候補は捨てる)
+            if round == 0 && !self.params.submip && job.is_none() && self.params.restarts == 0 {
+                if let Some(pre) = env_str!("ENOMOTO_MIP_DEBUG_SEP_AT") {
+                    for k in 0.. {
+                        let Ok(txt) = std::fs::read_to_string(format!("{pre}_r{k}.txt")) else { break };
+                        let xk: Vec<f64> = txt.lines().filter_map(|l| l.trim().parse().ok()).collect();
+                        if xk.len() != x.len() {
+                            eprintln!("MIP: SEP_AT: {pre}_r{k}.txt has {} values, expected {}; stop", xk.len(), x.len());
+                            break;
+                        }
+                        let (c1, c2) = self.separate_face_split(&xk, false);
+                        let out: String = c1.iter().chain(c2.iter()).map(|c| format!("{} {:.6e} {:.17e} {}\n", c.src, c.efficacy, c.rhs, c.coefs.iter().map(|&(j, a)| format!("{j}:{a:.17e}")).collect::<Vec<_>>().join(" "))).collect();
+                        let _ = std::fs::write(format!("{pre}_e{k}.txt"), out);
+                        eprintln!("MIP: SEP_AT: point {k}: {} candidates", c1.len() + c2.len());
+                    }
+                }
+            }
             let (mut cands, mut fcands) = self.separate_face_split(&x, false);
             if sl_on {
                 // 予算は 1 ラウンドの本数の上限の目安 (正確な上限はこの後で決まる)
@@ -6148,6 +6167,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if self.vbounds.is_none() {
             let mut vbs = VarBounds::from_rows(n, &p.is_int, &p.rows, &p.row_lo, &p.row_up);
+            // 試作 `ENOMOTO_MIP_VB_IMPL` (既定では使わない、analysis/slow2_20261117): プロービングの含意 `y = v ⇒ x_k <= b` / `x_k >= b`
+            // (`p.implied_bounds`、y は 0-1 列、x_k は連続列で大域的な境界が有限) を連続列の変数上下限 (VUB/VLB) にも足す (HiGHS は
+            // プロービングで学んだ変数上下限 (`HighsImplications` の vubs/vlbs) を `HighsTransformedLp` の境界の置き換えに使う)。
+            // 上限 U の列で y = 1 ⇒ x <= b なら x <= (b - U) y + U、y = 0 ⇒ x <= b なら x <= (U - b) y + b (下限も同じ形)。
+            // unitcal_7 では同じ LP 解で作った経路のカットの LP の伸びが HiGHS の 1/2〜1/3 で、HiGHS のカットは 0-1 列が 1 本あたり 1.3〜1.6 本多い
+            if env_str!("ENOMOTO_MIP_VB_IMPL").is_some_and(|v| v != "0") {
+                let cap = tunable!("ENOMOTO_T_MIP_VB_IMPL_MAX", 8usize, usize);
+                let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
+                let mut added = 0usize;
+                for &(y, v, k, upper, b) in &p.implied_bounds {
+                    let (y, k) = (y as usize, k as usize);
+                    if k >= n || y >= n || p.is_int[k] || !p.is_int[y] || glo[y] != 0.0 || gup[y] != 1.0 {
+                        continue;
+                    }
+                    let bound = if upper { gup[k] } else { glo[k] };
+                    if !bound.is_finite() || (upper && b >= bound - 1e-9) || (!upper && b <= bound + 1e-9) {
+                        continue;
+                    }
+                    let (d, e) = if v { (b - bound, bound) } else { (bound - b, b) };
+                    let list = if upper { &mut vbs.vub[k] } else { &mut vbs.vlb[k] };
+                    if list.len() < cap && !list.iter().any(|&(yy, dd, ee)| yy == y && (dd - d).abs() <= 1e-9 && (ee - e).abs() <= 1e-9) {
+                        list.push((y, d, e));
+                        added += 1;
+                    }
+                }
+                if self.params.verbose && !self.params.submip {
+                    eprintln!("MIP: VB_IMPL: {added} variable bounds from {} probing implications", p.implied_bounds.len());
+                }
+            }
             // 試作 `ENOMOTO_MIP_INTVUB`: 一般整数列と 0-1 列の変数上下限も集める (`ENOMOTO_MIP_INTVUB_IMPL` ならプロービングの含意も)
             if super::cuts::intvub_mode() > 0 || mushagg_mode().is_some() || super::modkvb::modkvb_mode().is_some() {
                 let implied: &[(u32, bool, u32, bool, f64)] = if env_str!("ENOMOTO_MIP_INTVUB_IMPL").is_some() { &p.implied_bounds } else { &[] };
