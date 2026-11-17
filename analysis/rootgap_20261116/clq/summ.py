@@ -1,5 +1,5 @@
 """クリークのカットの判定の確かめの比較。python summ.py P (または M) > summ_P.txt (c18・c18_clqroot・c18_clqmarg)、
-python summ.py P2 (または M2) > summ_P2.txt (P・M の c18・c18_clqroot に P2・M2 の c18_sig・c18_siga を合わせる。別の機械の結果を並べるので、機械の差が混ざる)
+python summ.py P3 (または M3) > summ_P3.txt (同じ分担の c18・c18_sig)、python summ.py P2 (または M2) > summ_P2.txt (P・M の c18・c18_clqroot に P2・M2 の c18_sig・c18_siga を合わせる。別の機械の結果を並べるので、機械の差が混ざる)
 設定は cfg.py。
 SGM は shift 1 秒、時間切れは制限時間で数える。CI は問題単位のブートストラップ (summP.py と同じ)。"""
 import json, glob, math, random, collections, sys
@@ -8,7 +8,7 @@ D = Path(__file__).resolve().parent
 SET = sys.argv[1] if len(sys.argv) > 1 else "P"
 rows = [json.loads(l) for S in (("M", "X") if SET == "MX" else (SET[0], SET) if SET.endswith("2") else (SET,)) for f in sorted(glob.glob(str(D / f"res_{S}_s*.jsonl"))) for l in open(f) if l.strip()]  # MX = M と追加の X を合わせる
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
-CF = ["c18", "c18_clqroot", "c18_sig", "c18_siga"] if SET.endswith("2") else ["c18", "c18_clqroot", "c18_clqmarg"]
+CF = ["c18", "c18_sig"] if SET.endswith("3") else ["c18", "c18_clqroot", "c18_sig", "c18_siga"] if SET.endswith("2") else ["c18", "c18_clqroot", "c18_clqmarg"]
 def st(r): return str(r["result"].get("status") or "").lower()  # HiGHS は "Optimal"・"Time limit reached"
 def solved(r): return st(r) in ("optimal", "infeasible")
 def t(r): return min(r["result"]["time"], r["tl"]) if solved(r) else r["tl"]
@@ -40,7 +40,9 @@ def cmp(ca, cb):
         v = logr[p]; g = math.exp(sum(v) / len(v))
         tag = " 全種で遅" if len(v) >= 2 and all(x > math.log(1.25) for x in v) else (" 全種で速" if len(v) >= 2 and all(x < math.log(0.8) for x in v) else "")
         if g > 1.15 or g < 0.87: print(f"  {p}: {g:.2f} {[round(math.exp(x), 2) for x in v]}{tag}")
-if SET.endswith("2"):
+if SET.endswith("3"):
+    cmp("c18", "c18_sig")
+elif SET.endswith("2"):
     cmp("c18", "c18_clqroot"); cmp("c18", "c18_sig"); cmp("c18", "c18_siga"); cmp("c18_clqroot", "c18_sig"); cmp("c18_sig", "c18_siga")
 else:
     cmp("c18", "c18_clqroot"); cmp("c18", "c18_clqmarg"); cmp("c18_clqroot", "c18_clqmarg")

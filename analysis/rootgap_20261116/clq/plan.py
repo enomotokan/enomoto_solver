@@ -1,4 +1,5 @@
 """分担表: python plan.py NM NP → shards_M.json・shards_P.json (c18・c18_clqroot・c18_clqmarg)。
+python plan.py NM NP 3 → shards_M3.json・shards_P3.json (c18 と c18_sig を同じ分担で並べる確かめ。README の 4 節)。
 python plan.py NM NP 2 → shards_M2.json・shards_P2.json (シグモイドの比べの c18_sig・c18_siga だけ。c18・c18_clqroot は P・M の結果を使う。README の 2 節)
 P: 58 問 × 種 1〜4 × 設定、60 秒。M: mzzv11・mzzv42z・irp・hypothyroid-k1・tbfp-network × 種 1・2 × 設定、600 秒。
 同じ (問題, 種) の 3 設定は同じ分担で続けて解き、順は種で回す。見積りは cand1118 の回の cand1118 の時間 (+ 立ち上げ)。"""
@@ -12,7 +13,7 @@ from probs import PROBS  # noqa: E402
 from cfg import CFGS  # noqa: E402
 NM, NP = int(sys.argv[1]), int(sys.argv[2])
 SUF = sys.argv[3] if len(sys.argv) > 3 else ""
-CF = ["c18_sig", "c18_siga"] if SUF == "2" else ["c18", "c18_clqroot", "c18_clqmarg"]
+CF = {"2": ["c18_sig", "c18_siga"], "3": ["c18", "c18_sig"]}.get(SUF, ["c18", "c18_clqroot", "c18_clqmarg"])
 MPROBS = ["mzzv11", "mzzv42z", "irp", "hypothyroid-k1", "tbfp-network"]
 def times(pat, cfg, cap):
     T = defaultdict(list)
