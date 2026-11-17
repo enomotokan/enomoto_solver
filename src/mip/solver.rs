@@ -1216,6 +1216,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     dbg_alive: bool,
     /// 診断用: デバッグ解があり (サブ MIP でない) 診断を行うか (構築時に決める)。偽なら診断の文字列を作らない。
     pub(super) dbg_on: bool,
+    /// 診断用 (`ENOMOTO_MIP_DEBUG_ROWS_ALL`): 表示済みの行 (カットの番号)
+    pub(super) dbg_rows_seen: std::collections::HashSet<u64>,
     workers: Vec<std::thread::JoinHandle<MipResult>>,
     worker_totals: (u64, u64),
     pool_stats: [u64; 3],
@@ -5635,6 +5637,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dbg_prev_has: false,
         dbg_alive: true,
         dbg_on: !params.submip && DEBUG_SOL.with(|d| d.borrow().is_some()),
+        dbg_rows_seen: Default::default(),
         pool,
         workers: Vec::new(),
         worker_totals: (0, 0),
@@ -6159,6 +6162,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         DEBUG_SOL.with(|d| d.borrow().as_ref().is_some_and(|x| (0..self.p.n).all(|j| x[j] >= self.dom.lo[j] - 1e-6 && x[j] <= self.dom.up[j] + 1e-6)))
     }
 
+    /// 診断用 (`ENOMOTO_MIP_DEBUG_ROWS_ALL`): ノードの LP の行がデバッグ解を破っていれば、行の出どころ (元の行・カットの番号と年齢) を表示する
+    /// (デバッグ解の目的値が打ち切り値未満のときだけ。同じカットの番号は 1 度だけ)
+    fn dbg_rows_all(&mut self, st: LpStatus, resolves: usize) {
+        let Some(x) = DEBUG_SOL.with(|d| d.borrow().clone()) else { return };
+        if self.p.objective(&x) >= self.prune_limit() - 1e-6 {
+            return;
+        }
+        let m0 = self.lp.num_rows().saturating_sub(self.cut_ids.len());
+        for i in 0..self.lp.num_rows() {
+            let act: f64 = self.lp.row_ref(i).iter().map(|&(j, v)| v * x[j]).sum();
+            let (lo, up) = self.lp.row_bounds(i);
+            if act < lo - 1e-6 * (1.0 + lo.abs()) || act > up + 1e-6 * (1.0 + up.abs()) {
+                let id = if i >= m0 { self.cut_ids.get(i - m0).copied() } else { None };
+                let key = id.map_or(u64::MAX - i as u64, |v| v as u64);
+                if !self.dbg_rows_seen.insert(key) {
+                    continue;
+                }
+                let terms: Vec<String> = self.lp.row_ref(i).iter().take(8).map(|&(j, a)| format!("{a:+.4}*x{j}[{:.4}]", x[j])).collect();
+                eprintln!(
+                    "MIP_DEBUG_SOL ROWS_ALL: node {} thread {} LP {st:?} resolve {resolves}: LP row {i} (base rows {m0}, orig {}, cut id {id:?}) violated: {lo} <= {act:.10e} <= {up}, len {}: {}",
+                    self.nodes, self.pool_tid, self.p.m, self.lp.row_ref(i).len(), terms.join(" ")
+                );
+            }
+        }
+    }
+
     /// 診断用: LP の行 (カットを含む) がデバッグ解で満たされているか調べる。
     pub(super) fn dbg_check_rows(&self, label: &str) {
         if !self.dbg_on {
@@ -6173,10 +6202,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         eprintln!("MIP_DEBUG_SOL {label}: LP row {i} violated: {lo} <= {act} <= {up} (orig rows {})", self.p.m);
                     }
                 }
-                // 列の境界 (LP の上の境界と定義域の食い違いも見る)
+                // 列の境界: 定義域はデバッグ解を含むのに LP の境界が外しているもの
                 for j in 0..self.p.n {
                     let (lo, up) = self.lp.col_bounds(j);
-                    if x[j] < lo - 1e-6 || x[j] > up + 1e-6 {
+                    let in_dom = x[j] >= self.dom.lo[j] - 1e-6 && x[j] <= self.dom.up[j] + 1e-6;
+                    if in_dom && (x[j] < lo - 1e-6 || x[j] > up + 1e-6) {
                         eprintln!("MIP_DEBUG_SOL {label}: LP col {j} bound violated: {lo} <= {} <= {up} (dom [{}, {}])", x[j], self.dom.lo[j], self.dom.up[j]);
                     }
                 }
@@ -13389,6 +13419,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if st == LpStatus::Optimal && !self.gen_lazy.rows.is_empty() {
                     self.gen_lazy_age();
+                }
+                // 診断用 (`ENOMOTO_MIP_DEBUG_ROWS_ALL`、デバッグ解のとき): どのノードでも LP の行は打ち切り値より良い解で成り立つはずなので、
+                // ノードの LP を解くたびにデバッグ解で確かめる (ノードがデバッグ解を含むかによらず、誤った行を早く見つける)
+                if self.dbg_on && !self.params.submip && env_str!("ENOMOTO_MIP_DEBUG_ROWS_ALL").is_some() {
+                    self.dbg_rows_all(st, resolves);
                 }
                 match st {
                     LpStatus::Optimal => {}
