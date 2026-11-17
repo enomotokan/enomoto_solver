@@ -65,6 +65,17 @@ pub(super) fn submip_trace_begin(parent: &str, kind: &str, caller_node: u64, nfr
 /// - `h` (C5): 外側の根の暫定解なしの RENS を HiGHS 1.15.1 の形 (目標の固定率で止めるダイブ、根で実行不能なら目標を半分にしてやり直す、
 ///   主のスレッドで解き、時間でなく節点の数で止める) にする。`g` を足すと LP で整数値の列を全部固定する形
 /// - `s` (C5 と組む): 早い再スタートで並列のサブ MIP を止めるとき、暫定解の間隙が大きければ RENS は止めずに待つ
+/// 試作 `ENOMOTO_MIP_SUBMIP_HEUR=<文字の並び>` (既定では使わない、analysis/subheur_20261117): サブ MIP の中の解探しを強める。
+/// サブ MIP の根では trivial (全部の列を境界に置く) が質の悪い解をすぐ出すことが多く、そうなると暫定解なし用の手 (入れ子の RENS、
+/// Feasibility Pump、ダイビング) がどれも呼ばれない。FJ・Local-MIP はサブ MIP の中では元から回さない。
+/// - `t`: サブ MIP の根で trivial を根のヒューリスティクスの最後に回す (先に入れ子の RENS・ポンプ・ダイビングを回す)
+/// - `l`: 深さ 1 のサブ MIP の根のヒューリスティクスの最後に、Local-MIP (連鎖の手あり) を仕事量の予算で回す
+///   ([`Solver::subheur_local_mip`]。予算は `ENOMOTO_T_MIP_SUBHEUR_LM_WORK` (既定 200) × 非零の数、Local-MIP の 1 手の仕事量で割った手数)
+pub(crate) fn subheur(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBMIP_HEUR").unwrap_or("").to_string()).contains(c)
+}
+
 pub(crate) fn primal(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_PRIMAL").unwrap_or("").to_string()).contains(c)
@@ -2199,6 +2210,58 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 試作 `ENOMOTO_MIP_TICKS` の `s`: 手間の期限の中で解いているサブ MIP なら、このスレッドの手間の残り (秒に直したもの)
     pub(super) fn tk_s_left(&self) -> Option<f64> {
         (super::ticks_on('s') && self.params.submip && crate::ticks::has_budget()).then(|| crate::ticks::left() * 1e-9)
+    }
+
+    /// 試作 `ENOMOTO_MIP_SUBMIP_HEUR` の `l` ([`subheur`]): サブ MIP の根の終わりに Local-MIP (連鎖の手あり) を回し、見つけた解を
+    /// 暫定解の候補にする。時間でなく手数で止める: 予算の仕事量 `ENOMOTO_T_MIP_SUBHEUR_LM_WORK` × 非零の数を、Local-MIP の 1 手の
+    /// 仕事量の見積もり ([`super::localmip::LocalMip::run`] の `step_work` と同じ式) で割った手数まで。Local-MIP は短い切れ
+    /// (`ENOMOTO_T_MIP_SUBHEUR_LM_SLICE` 秒、既定 0.05) ずつ回し、切れの間に手数を見る (時間の期限と止めの合図も見る)。
+    /// `s` も付けば、暫定解 (trivial などの解) を出発点にする
+    pub(super) fn subheur_local_mip(&mut self) -> bool {
+        let p = self.p;
+        if p.n == 0 || p.m == 0 {
+            return false;
+        }
+        let nnz: usize = p.rows.iter().map(|r| r.len()).sum::<usize>().max(1);
+        let cols = tunable!("ENOMOTO_T_MIP_LOCALMIP_SAMPLE_COLS", 64usize, usize).max(1);
+        let step_work = ((nnz / p.m.max(1) + nnz / p.n.max(1) + 1) * cols) as f64;
+        let budget = tunable!("ENOMOTO_T_MIP_SUBHEUR_LM_WORK", 200.0, f64) * nnz as f64;
+        let max_steps = (budget / step_work).ceil().max(1.0) as u64;
+        let slice = tunable!("ENOMOTO_T_MIP_SUBHEUR_LM_SLICE", 0.05, f64).max(0.001);
+        let seed = self.rng ^ 0x6A09_E667_F3BC_C909;
+        let t0 = Instant::now();
+        let Some(mut lm) = super::localmip::LocalMip::new(p, &self.dom.global_lo, &self.dom.global_up, seed, true) else { return false };
+        if subheur('s') {
+            if let Some((_, inc)) = self.incumbent.as_ref() {
+                lm.set_start(inc);
+            }
+        }
+        let mut found = false;
+        let mut slices = 0u64;
+        while !lm.done && lm.res.steps < max_steps && !self.time_up() {
+            let mut until = Instant::now() + std::time::Duration::from_secs_f64(slice);
+            if let Some(d) = self.deadline {
+                until = until.min(d);
+            }
+            lm.run(until, None, &|_| {});
+            slices += 1;
+            if let Some(x) = lm.res.best.take() {
+                if p.is_feasible(&x, 1e-6) && self.try_incumbent(x) {
+                    found = true;
+                }
+            }
+        }
+        if self.params.verbose || env_str!("ENOMOTO_MIP_DEBUG_SUBHEUR").is_some() {
+            eprintln!(
+                "MIP:   SUBHEUR Local-MIP (sub-MIP depth {}): steps {} of {max_steps} (work {:.3e}, step work {step_work:.0}), {slices} slices, found {found}, incumbent {:?} ({:.2}s)",
+                SUBMIP_DEPTH.with(|d| d.get()),
+                lm.res.steps,
+                budget,
+                self.incumbent.as_ref().map(|(z, _)| *z),
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        found
     }
 
     pub(super) fn submip_nested(&self, c: char) -> bool {
