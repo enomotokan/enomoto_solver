@@ -29,3 +29,19 @@ pc / def と pcd / def のそれぞれで、採用条件の表 (SGM と 95% CI �
 誤答・数値の害の確かめ (`fuzz.sh`、リポジトリの根から `bash analysis/pcd_20261117/fuzz.sh`): release019 と同じ 7 本 (fuzz_tiny・mip_fuzz_vs_highs・
 fuzz_objint・fuzz_slack と種を変えた 3 本) を pcd の環境変数で回し、sat_rens の形の乱数問題 (`analysis/dualfree_20261117/fuzz.py`: 大きい M の行
 (係数 1e3〜2e7)・境界が導ける値ちょうどと ±1e-10〜1e-6 の許容の境目) を pcd で 2 万問・pc で 1 万問足す。cargo test は既定のまま。
+
+## 1. fuzz の結果 (手元、`fuzz_res.txt`、2026-11-17)
+
+- release019 と同じ 7 本 (pcd): すべて bad 0 (fuzz_tiny 400×2・mip_fuzz_vs_highs 300・fuzz_objint 1000×2・fuzz_slack 1000×2)。cargo test (既定) 419 件通過。
+- sat_rens の形の乱数問題 (`analysis/dualfree_20261117/fuzz.py`): pcd 2 万問 bad 22、pc 1 万問 bad 15 (試作なしの 1 万問と同じ 15 件)。
+  種 10000〜19999 を試作なし・pcd で並べると (どちらも 1 万問):
+  - 試作なしだけで食い違う: 12422・15631 (当方が実行不能)、14600・18299 (相対 1e-6 前後の差)。
+  - pcd だけで食い違う: 11185 (当方が実行不能)、12914 (当方が 2 だけ悪い。HiGHS の解は列 3 を 3.2e-7 はみ出す。seed 9271 と同じ型の見込み)。
+  - 両方: 11480・11988・12020 (HiGHS が実行不能、当方は最適)、17087・17657 (当方が悪い)、18017 (小さな差)、13302・17394 (HiGHS の Solve error)。
+- 当方が実行不能とする 3 問 (pcd の 11185、試作なしの 12422・15631) は同じ型 (既定の経路の数値の問題、`analysis/wrongans_20261117`):
+  前処理の伝播で連続列の範囲が幅 1e-4〜5e-3 まで締められ (境界が導ける値ちょうど付近の退化に近い問題)、丸めで締めすぎて (HiGHS の最適解が
+  相対 4e-10 ほどはみ出す) 実行不能になる。11185 は前処理の後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED`) が HiGHS でも実行不能、
+  12422 も同じ、15631 は伝播で 2 列が 1 点に固まって残りの行が 1.2e-4 破れる。pcd で上げた行 (11185 の 4 本) はどれも最適解で等号
+  (元の行 26 を等式にした問題を HiGHS で解いても最適値は同じ)。試作は締めすぎが起きる種を入れ替えるだけ。
+- 診断を足した (振る舞いは変えない): `ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED=接頭辞` (前処理の後の問題を MPS に書く)、
+  `ENOMOTO_DEBUG_DFI_MAX=k` (上げる行を k 本までにする)。
