@@ -595,6 +595,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cut_clique_adj: std::collections::HashMap<u32, Vec<u32>>,
     /// `ENOMOTO_MIP_CLIQUE_CUTS=auto` の判定 (根で一度だけ試す。`None` は未判定)。
     pub(super) clique_auto: Option<bool>,
+    /// 試作 `ENOMOTO_MIP_CLIQUE_CUTS=sigmoid`・`sigmoid_a` の割合 f (根の clique カットの 1 ラウンドの本数の上限を f x `ENOMOTO_T_MIP_CLIQUE_MAX` にする。
+    /// `None` は未計算。[`Solver::clique_sig_init`])
+    pub(super) clique_sig: Option<f64>,
     /// ヒューリスティクスに使った LP 反復数。
     pub(super) heur_iters: u64,
     /// 根のヒューリスティクスを終えた時点の `heur_iters` (木の中の予算は、これを引いた分で数える)。
@@ -5189,6 +5192,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         clique_graph: None,
         cut_clique_adj: std::collections::HashMap::new(),
         clique_auto: None,
+        clique_sig: None,
         heur_iters: 0,
         heur_iters_root: 0,
         locks: super::heuristics::compute_locks(p),
