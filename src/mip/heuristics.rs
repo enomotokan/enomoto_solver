@@ -1610,7 +1610,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SUBMIP_HIGHS_TRIM`・`_RESTART` で文字を抜くサブ MIP ([`Self::hs_drop`]) は、抜いた `t`・`g` も使わない
         let hs_drop = self.hs_drop();
         let hs_on = |c: char| super::submip_highs(c) && hs_drop & super::submip_hs_bit(c) == 0;
-        let time_highs = hs_on('t') && !self.params.submip && self.nodes <= 1;
+        // `ENOMOTO_MIP_HEURGAP` の `r` ([`super::solver::heurgap`]): ヒューリスティクス役のスレッドはノードを処理する前に役に就くと
+        // `nodes <= 1` のままで、根とみなされて残り時間を全部渡していた (役の 1 回の上限 `ENOMOTO_T_MIP_HEUR_ROLE_CALL_MAX` が効かない)。役の間は根とみなさない
+        let time_highs = hs_on('t') && !self.params.submip && self.nodes <= 1 && !(super::solver::heurgap('r') && self.in_heur_role);
         // `t` がないときの時間の上限
         let t_plain = {
             let t = (self.submip_time_frac * remaining).min(self.submip_time_max);

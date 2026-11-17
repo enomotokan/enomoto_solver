@@ -3799,6 +3799,7 @@ fn robust_import() -> bool {
 /// 木の大近傍探索の最初の失敗 (6 秒の上限で 0 ノードの時間切れ) で主解への寄与が 0 になり、初めて改善が出るまで就かなかった。
 /// `t` ALNS のどの腕も、サブ MIP が解なしで時間切れになったら次の時間の上限を 2 倍にする (最大 `ENOMOTO_T_MIP_MEMBQ_LNSGROW_MAX` 倍、
 /// `ENOMOTO_MIP_MEMBQ_LNSGROW` は local branching・proximity だけ)。
+/// `r` ヒューリスティクス役のスレッドのサブ MIP を根とみなさない ([`Solver::submip_time_limit`] の `SUBMIP_HIGHS` の `t`)。
 pub(super) fn heurgap(c: char) -> bool {
     env_str!("ENOMOTO_MIP_HEURGAP").is_some_and(|v| v.contains(c))
 }
