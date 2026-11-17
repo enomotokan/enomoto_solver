@@ -99,6 +99,45 @@ def worker_highs(mps: str, time_limit: float, threads: int) -> None:
     }))
 
 
+# SCIP の状態を worker_ours の名前にそろえる (HiGHS は "Optimal" など別の名前のまま。summ 側で両方を読む)
+SCIP_STATUS = {"optimal": "optimal", "infeasible": "infeasible", "unbounded": "unbounded", "inforunbd": "infeasible_or_unbounded",
+               "timelimit": "time_limit", "memlimit": "memory_limit", "nodelimit": "node_limit", "gaplimit": "gap_limit",
+               "userinterrupt": "interrupted"}
+
+
+def worker_scip(mps: str, time_limit: float, threads: int) -> None:
+    """SCIP (pyscipopt の wheel に同梱) で解く。SCIP は既定で逐次 (1 スレッド) なので threads は使わない (記録だけ)。
+    時間の上限 limits/time、相対ギャップ limits/gap = 0 (HiGHS の mip_rel_gap = 0・このクレートの既定にそろえる。SCIP の既定も 0)。
+    メモリの上限は付けない (limits/memory は既定の無限大のまま)。
+    `ENOMOTO_BENCH_SCIP_SEED=N`: randomization/randomseedshift = N。`ENOMOTO_BENCH_SCIP_LOG=1`: SCIP のログを出す。"""
+    import pyscipopt
+
+    m = pyscipopt.Model()
+    if not os.environ.get("ENOMOTO_BENCH_SCIP_LOG"):
+        m.hideOutput()
+    m.setParam("limits/time", time_limit)
+    m.setParam("limits/gap", 0.0)
+    seed = int(os.environ.get("ENOMOTO_BENCH_SCIP_SEED", "0"))
+    if seed:
+        m.setParam("randomization/randomseedshift", seed)
+    m.readProblem(mps)
+    t = time.perf_counter()
+    m.optimize()
+    t = time.perf_counter() - t
+    st = m.getStatus()
+    has = m.getNSols() > 0
+    print(json.dumps({
+        "status": SCIP_STATUS.get(st, st),
+        "objective": m.getObjVal() if has else None,
+        "bound": m.getDualbound(),
+        "nodes": m.getNTotalNodes(),
+        "time": t,
+        "scip_time": m.getSolvingTime(),
+        "scip_version": f"{m.getMajorVersion()}.{m.getMinorVersion()}.{m.getTechVersion()}",
+        "pyscipopt_version": pyscipopt.__version__,
+    }))
+
+
 def worker_ours(mps: str, time_limit: float, threads: int) -> None:
     from enomoto_solver import benchmark_highs as bh
 
@@ -231,12 +270,15 @@ def main() -> None:
     ap.add_argument("--rerun-highs", action="store_true", help="このクレートの結果は再利用し、HiGHS だけ解き直す")
     ap.add_argument("--worker-highs")
     ap.add_argument("--worker-ours")
+    ap.add_argument("--worker-scip")
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")  # 表の ✓ を cp932 のコンソールでも出せるように
     if a.worker_highs:
         return worker_highs(a.worker_highs, a.time_limit, a.threads)
     if a.worker_ours:
         return worker_ours(a.worker_ours, a.time_limit, a.threads)
+    if a.worker_scip:
+        return worker_scip(a.worker_scip, a.time_limit, a.threads)
     results = json.loads(a.out.read_text(encoding="utf-8")) if a.out.exists() else {}
     if not a.table:
         names = a.only or PROBLEMS
