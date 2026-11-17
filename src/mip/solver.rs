@@ -757,7 +757,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     tr_outer0: f64,
     /// 同じく、木に入った時点のこのスレッドの手間の累計 ([`crate::ticks::total`])
     tr_tk0: f64,
-    /// 試作 `ENOMOTO_MIP_CLQ_LAZY` (treeclose 9.79 節): LP で両側とも無限の境界にした (外した) クリーク型の元の行 (番号、行の文字)。
+    /// 試作 `ENOMOTO_MIP_CLQ_LAZY` (treeclose 9.80 節): LP で両側とも無限の境界にした (外した) クリーク型の元の行 (番号、行の文字)。
     /// ノードの LP 解が破れば、その行をカットの行として LP に戻す ([`Self::clq_lazy_restore`])。`clq_lazy_stats` は (外した数, 確かめた回数, 戻した行の数, 解き直した回数)
     clq_lazy: Vec<(usize, Vec<u32>)>,
     clq_lazy_stats: [u64; 4],
@@ -3456,7 +3456,7 @@ fn tree1_sb() -> bool {
     env_str!("ENOMOTO_MIP_TREE1_SB").is_some()
 }
 
-/// 試作 `ENOMOTO_MIP_CLQ_LAZY` (treeclose 9.79 節、既定では使わない): 木に入るとき、根の LP 解で余裕のあるクリーク型の行 (不等式) を LP から
+/// 試作 `ENOMOTO_MIP_CLQ_LAZY` (treeclose 9.80 節、既定では使わない): 木に入るとき、根の LP 解で余裕のあるクリーク型の行 (不等式) を LP から
 /// 外し (境界を両側とも無限にする)、ノードの LP 解が破ればカットの行として戻す。
 fn clq_lazy_on() -> bool {
     env_str!("ENOMOTO_MIP_CLQ_LAZY").is_some_and(|v| v != "0")

@@ -1,4 +1,4 @@
-"""試作 ENOMOTO_MIP_CLQ_LAZY の手元の確かめ (treeclose 9.79 節): python local.py > local.out。6 問 × {def, lazy} × 4 スレッド・種 1、
+"""試作 ENOMOTO_MIP_CLQ_LAZY の手元の確かめ (treeclose 9.80 節): python local.py > local.out。6 問 × {def, lazy} × 4 スレッド・種 1、
 res_local.jsonl に結果と CLQ_LAZY・node diag の行を残す。途中から再開できる。"""
 import json, os, re, subprocess, sys, tempfile, time
 from pathlib import Path
