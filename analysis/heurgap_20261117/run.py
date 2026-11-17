@@ -7,6 +7,7 @@ from pathlib import Path
 D = Path(__file__).resolve().parent; WT = D.parents[1]
 # 環境変数 TAG (ログ・結果の札) と OURS_ENV ("名=値;名=値"、当方に足す環境変数) で試作を回す
 TAG = os.environ.get("TAG", ""); XENV = dict(kv.split("=", 1) for kv in os.environ.get("OURS_ENV", "").split(";") if kv)
+TL = os.environ.get("TL", "600")  # 時間の上限 [秒] (当方だけ)
 probs = sys.argv[1].split(","); seed = int(sys.argv[2]) if len(sys.argv) > 2 else 1; which = sys.argv[3] if len(sys.argv) > 3 else "both"
 H115 = os.environ.get("H115", sys.executable)
 HCODE = """
@@ -31,7 +32,7 @@ for p in probs:
             env.update({"ENOMOTO_MIP_THREADS": "4", "ENOMOTO_T_MIP_SEED": str(seed), "ENOMOTO_MIP_LOG": "1"}); env.update(XENV)
             # 当方のログの時刻は再スタートごとに 0 に戻るので、標準エラーの各行の頭に起動からの実時間 [秒] を付ける
             t0 = time.time()
-            pr = subprocess.Popen([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", "600", "--threads", "4"],
+            pr = subprocess.Popen([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", TL, "--threads", "4"],
                                   cwd=WT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
             out = []
             th = __import__("threading").Thread(target=lambda: out.append(pr.stdout.read())); th.start()
@@ -41,6 +42,6 @@ for p in probs:
             pr.wait(); th.join()
             try: r = json.loads([l for l in out[0].splitlines() if l.startswith("{")][-1])
             except Exception: r = {"status": "crash"}  # noqa: BLE001
-        row = {"problem": p, "who": who + TAG, "env": XENV if who == "ours" else {}, "seed": seed, "at": time.strftime("%H:%M:%S")} | {k: r.get(k) for k in ("status", "objective", "bound", "best_bound", "nodes", "time", "version")}
+        row = {"problem": p, "who": who + TAG, "env": XENV if who == "ours" else {}, "tl": TL if who == "ours" else "600", "seed": seed, "at": time.strftime("%H:%M:%S")} | {k: r.get(k) for k in ("status", "objective", "bound", "best_bound", "nodes", "time", "version")}
         with open(D / "res.jsonl", "a") as f: f.write(json.dumps(row) + "\n")
         print(row, flush=True)
