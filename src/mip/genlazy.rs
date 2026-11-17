@@ -20,6 +20,13 @@
 //! - 強分岐の子 (`ENOMOTO_MIP_GEN_LAZY_SB=1`、既定では使わない): 子の LP は外した行を確かめないので子の下界が弱くなりうる。この切り替えで、
 //!   打ち切られなかった子の LP 解が破る外した行を覚え、分枝の選びの後に戻して (カットの行として加え) 分枝せずにノードの LP を解き直す
 //!   (子の下界・擬費用の観測はその前の弱い LP のまま)。
+//! - 点数の判定 (`ENOMOTO_MIP_GEN_LAZY_MODE=score`、利用者の指示): 外すかを余裕ではなくカットの選び方と同じ点数
+//!   (`separation.rs` の `cut_quality`: 効き目 + 0.1 × 目的関数との平行度 + 0.1 × 整数台の割合) で見る。効き目は根の LP 解 x で
+//!   `<=` の向きに揃えた (c·x − b)/|c| (満たされている行は負 = −距離)。点数が τ (`ENOMOTO_T_MIP_GEN_LAZY_TAU`、既定 0) より低い行を外す。
+//!   戻すのは同じく破られたとき (効き目 > 0)。
+//! - 外し直し (`ENOMOTO_T_MIP_GEN_LAZY_AGE` = A > 0、既定 0 = しない): 戻した行の年齢をカットの年齢と同じに数え (ノードの LP 解で
+//!   張り付いていなければ 1 足し、張り付けば 0)、A を超えたら次のノードの LP の前に外し直す (スラックが基底にある行だけ)。
+//!   元の行もカットと同じ物差しで LP に出し入れする形。外し直した行はまた確かめの対象になる。
 //! - 診断 `ENOMOTO_MIP_DIAG_GENLAZY` (または詳しい表示): 種類ごとの片側の行の数・スラックが基底の数・非零の数と、正規化した活動の分布を
 //!   `GENLAZY {...}` の 1 行 (JSON) で出す。値 `stop` なら数えるだけで外さない。
 
@@ -33,6 +40,19 @@ pub(super) const KINDS: [&str; 7] = ["clq", "one", "vb", "knap", "int", "mix", "
 
 /// 正規化した活動の分布の区切り (この値未満、最後は張り付き)
 const BINS: [f64; 7] = [0.1, 0.25, 0.5, 0.75, 0.9, 0.99, 1.0 - 1e-9];
+
+/// 点数 (カットの質と同じ物差し) の分布の区切り (この値未満、最後は 0.2 以上)
+const QBINS: [f64; 7] = [-1.0, -0.3, -0.1, -0.03, 0.0, 0.1, 0.2];
+
+/// 外す行の判定が点数か (`ENOMOTO_MIP_GEN_LAZY_MODE=score`)。既定は余裕 (正規化した活動)
+fn score_mode() -> bool {
+    env_str!("ENOMOTO_MIP_GEN_LAZY_MODE") == Some("score")
+}
+
+/// 戻した行を外し直すまでの年齢 (`ENOMOTO_T_MIP_GEN_LAZY_AGE`、0 = 外し直さない)
+fn redrop_age() -> u32 {
+    tunable!("ENOMOTO_T_MIP_GEN_LAZY_AGE", 0u32, u32)
+}
 
 /// 試作 `ENOMOTO_MIP_GEN_LAZY` が使われているか
 pub(super) fn on() -> bool {
@@ -81,6 +101,10 @@ pub(crate) struct GenLazy {
     /// まだ LP から外しているか (境界を戻した行は偽にして確かめない)
     active: Vec<bool>,
     n_active: usize,
+    /// 戻した行の年齢 (ノードの LP 解で張り付いていない回数が続いた数。`ENOMOTO_T_MIP_GEN_LAZY_AGE`)
+    age: Vec<u32>,
+    /// 年齢が上限を超えた、次のノードの LP の前に外し直す行
+    redrop: Vec<u32>,
 }
 
 impl GenLazy {
@@ -106,6 +130,7 @@ impl GenLazy {
         self.stamp.push(u64::MAX);
         self.restores.push(0);
         self.sgn.push(sg);
+        self.age.push(0);
         self.active.push(true);
         self.n_active += 1;
     }
@@ -177,6 +202,10 @@ impl<L: MipLp> Solver<'_, L> {
             let n = p.n;
             let x = self.lp.col_values();
             let theta = tunable!("ENOMOTO_T_MIP_GEN_LAZY_THETA", 0.5, f64);
+            let tau = tunable!("ENOMOTO_T_MIP_GEN_LAZY_TAU", 0.0, f64);
+            let score = score_mode();
+            let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
+            let mut qhist = [[0usize; 8]; 7];
             let mask = kind_mask();
             let glo = &self.dom.global_lo;
             let gup = &self.dom.global_up;
@@ -252,15 +281,23 @@ impl<L: MipLp> Solver<'_, L> {
                 };
                 let bin = BINS.iter().position(|&t| na < t).unwrap_or(7);
                 hist[kk][bin] += 1;
-                if mask[kk] && na <= theta && s > 1e-9 * b.abs().max(1.0) {
+                // 点数 (カットの質 `cut_quality` と同じ: 効き目 + 0.1 × 目的関数との平行度 + 0.1 × 整数台の割合)。効き目は `<=` の向きで
+                // (c·x − b) / |c| (満たされている行は負 = −距離)
+                let nc = r.iter().map(|e| e.1 * e.1).sum::<f64>().sqrt().max(1e-300);
+                let objpar = if cnorm > 0.0 { r.iter().map(|&(j, a)| a * p.cost[j]).sum::<f64>().abs() / (cnorm * nc) } else { 0.0 };
+                let intsup = r.iter().filter(|e| p.is_int[e.0]).count() as f64 / r.len().max(1) as f64;
+                let q = -s / nc + 0.1 * objpar + 0.1 * intsup;
+                qhist[kk][QBINS.iter().position(|&t| q < t).unwrap_or(7)] += 1;
+                let pick = if score { q < tau } else { na <= theta };
+                if mask[kk] && pick && s > 1e-9 * b.abs().max(1.0) {
                     cnt[kk][4] += 1;
                     cnt[kk][5] += r.len();
                     out.push(i, r, sg, b, kind);
                 }
             }
             if diag.is_some() || (self.params.verbose && self.pool_tid == 0) {
-                let ks: Vec<String> = (0..7).map(|k| format!("\"{}\":{{\"rows\":{},\"basic\":{},\"nnz\":{},\"infrange\":{},\"drop\":{},\"dropnnz\":{},\"hist\":{:?}}}", KINDS[k], cnt[k][0], cnt[k][1], cnt[k][2], cnt[k][3], cnt[k][4], cnt[k][5], hist[k])).collect();
-                eprintln!("GENLAZY {{\"m\":{m0},\"nnz\":{nnz_all},\"two_sided\":{n_two},\"theta\":{theta},\"bins\":{BINS:?},{}}}", ks.join(","));
+                let ks: Vec<String> = (0..7).map(|k| format!("\"{}\":{{\"rows\":{},\"basic\":{},\"nnz\":{},\"infrange\":{},\"drop\":{},\"dropnnz\":{},\"hist\":{:?},\"qhist\":{:?}}}", KINDS[k], cnt[k][0], cnt[k][1], cnt[k][2], cnt[k][3], cnt[k][4], cnt[k][5], hist[k], qhist[k])).collect();
+                eprintln!("GENLAZY {{\"m\":{m0},\"nnz\":{nnz_all},\"two_sided\":{n_two},\"mode\":\"{}\",\"theta\":{theta},\"tau\":{tau},\"bins\":{BINS:?},\"qbins\":{QBINS:?},{}}}", if score { "score" } else { "slack" }, ks.join(","));
             }
             out
         };
@@ -321,9 +358,70 @@ impl<L: MipLp> Solver<'_, L> {
                     g.active[k] = false;
                     g.n_active -= 1;
                 }
+                g.age[k] = 0;
             }
             self.lp.set_row_bounds_many(&ch);
         }
+    }
+
+    /// 戻した行の年齢 (`ENOMOTO_T_MIP_GEN_LAZY_AGE` > 0 のとき、ノードの LP が最適に解けた後に呼ぶ): 今の LP 解で張り付いている
+    /// (余裕 <= 1e-6·max(1, |b|)) 行は年齢 0、そうでなければ 1 足す。上限を超えた行は次のノードの LP の前に外し直す (カットの年齢と同じ扱い)
+    pub(super) fn gen_lazy_age(&mut self) {
+        let amax = redrop_age();
+        if amax == 0 || self.gen_lazy.n_active == self.gen_lazy.len() {
+            return;
+        }
+        let t0 = Instant::now();
+        let x = self.lp.col_values();
+        let g = &mut self.gen_lazy;
+        g.redrop.clear();
+        for k in 0..g.rows.len() {
+            if g.active[k] {
+                continue;
+            }
+            let (s, e) = (g.start[k] as usize, g.start[k + 1] as usize);
+            let mut act = 0.0;
+            for t in s..e {
+                act += g.val[t] * x[g.col[t] as usize];
+            }
+            let b = g.rhs[k];
+            if act >= b - 1e-6 * b.abs().max(1.0) {
+                g.age[k] = 0;
+            } else {
+                g.age[k] += 1;
+                if g.age[k] > amax {
+                    g.redrop.push(k as u32);
+                }
+            }
+        }
+        self.gen_lazy_secs += t0.elapsed().as_secs_f64();
+    }
+
+    /// 年齢が上限を超えた戻した行を外し直す (ノードの LP を解く前。今の基底でスラックが基底にある行だけ: 空の行で基底が特異にならないように)
+    pub(super) fn gen_lazy_redrop(&mut self) {
+        if self.gen_lazy.redrop.is_empty() {
+            return;
+        }
+        let basis = self.lp.basis();
+        let g = &mut self.gen_lazy;
+        let mut ch = Vec::new();
+        for &k in &g.redrop {
+            let k = k as usize;
+            let i = g.rows[k] as usize;
+            if !g.active[k] && basis.row.get(i).is_none_or(|s| *s == VarStatus::Basic) {
+                g.active[k] = true;
+                g.n_active += 1;
+                g.age[k] = 0;
+                ch.push((i, f64::NEG_INFINITY, f64::INFINITY));
+            }
+        }
+        g.redrop.clear();
+        if ch.is_empty() {
+            return;
+        }
+        self.gen_lazy_stats[8] += ch.len() as u64;
+        self.gen_lazy_stats[9] += 1;
+        self.lp.set_row_bounds_many(&ch);
     }
 
     /// 強分岐の子の LP 解 `x` が破る外した行を覚える (`ENOMOTO_MIP_GEN_LAZY_SB`)
@@ -381,8 +479,8 @@ impl<L: MipLp> Solver<'_, L> {
             }
         }
         eprintln!(
-            "MIP: GEN_LAZY stats tid {}: dropped {} (nnz {}) checks {} restored {} (distinct rows {}, by kind {:?}) re-restored {} resolves {} sb restored {} sb resolves {} still dropped {} check secs {:.3}",
-            self.pool_tid, s[0], s[5], s[1], s[2], rows_back, by_kind, s[4], s[3], s[6], s[7], g.n_active, self.gen_lazy_secs
+            "MIP: GEN_LAZY stats tid {}: dropped {} (nnz {}) checks {} restored {} (distinct rows {}, by kind {:?}) re-restored {} resolves {} sb restored {} sb resolves {} redropped {} ({} times) still dropped {} check secs {:.3}",
+            self.pool_tid, s[0], s[5], s[1], s[2], rows_back, by_kind, s[4], s[3], s[6], s[7], s[8], s[9], g.n_active, self.gen_lazy_secs
         );
     }
 }
