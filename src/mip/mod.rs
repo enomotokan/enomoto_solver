@@ -4704,7 +4704,8 @@ fn substitute_probe_equiv(prob: &MipProblem, mut postsolve: Vec<crate::presolve:
 /// (HiGHS は前処理の中で 732 行まで減らす)。かけ直した前処理は新しい問題でプロービングをやり直す (含意はそちらで集め直す)。
 /// 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
 fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, verbose: bool, submip: bool, depth: u32) -> Option<Presolved> {
-    let max = tunable!("ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX", 2u32, u32);
+    // 試作 `ENOMOTO_MIP_PRB_TABLE` の `b` ([`prb_table`]): かけ直しを `ENOMOTO_T_MIP_PRB_TABLE_ROUNDS` (8) 回まで、行の減り方によらず使う
+    let max = if prb_table('b') { tunable!("ENOMOTO_T_MIP_PRB_TABLE_ROUNDS", 8u32, u32) } else { tunable!("ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX", 2u32, u32) };
     if !prr_active(submip) || depth >= max {
         return Some(Presolved::Reduced { prob, postsolve, scaling });
     }
@@ -4726,7 +4727,7 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
     // 減らさないのに、根の LP の解がずれて根の clique のサブ MIP が解を出さなくなり、根の被約費用の固定が再スタートの閾値に届かずに
     // 6 秒 -> 13〜60 秒になっていた。かけ直しが効く momentum1・traininstance6 は行を 38〜43% 減らす (analysis/prr_harm_20261106.md)。
     // 捨てるときは、かけ直しの中のプロービングが置いた同値な組を元に戻す
-    let min_frac = tunable!("ENOMOTO_T_MIP_PRR_MIN_ROW_FRAC", 0.1, f64);
+    let min_frac = if prb_table('b') { 0.0 } else { tunable!("ENOMOTO_T_MIP_PRR_MIN_ROW_FRAC", 0.1, f64) };
     let saved_equiv = (min_frac > 0.0).then(|| (PROBE_EQUIV.with(|e| e.borrow().clone()), PROBE_EQUIV_FORCE.with(|f| f.get())));
     let r = presolve_mip_depth(&prob, verbose, submip, None, depth + 1);
     if let (Some((eq, force)), Some(Presolved::Reduced { prob: prob2, .. })) = (&saved_equiv, &r) {
@@ -6033,6 +6034,18 @@ thread_local! {
     static PREPAR_THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
 }
 
+/// 試作 `ENOMOTO_MIP_PRB_TABLE=<文字>` (調べ C の 13 節、analysis/primal_20261117、既定では使わない): HiGHS 1.15.1 の前処理のプロービング
+/// (`HighsImplications::runProbing`・`HighsCliqueTable::processNewEdge`) にならう。HiGHS は MIT ライセンス (Copyright (c) 2024 HiGHS)。
+/// 規則を読んで当方の作りで書き直したもので、コードは写していない (これまでの HiGHS の移植と同じ扱い)。
+/// - `a` (P1): プロービングの前に行から衝突の表 (2 値の文字の組) を作り、1 列のプロービングで見つけた含意 (x = v ⇒ y = w を「文字 (x = v) と
+///   文字 (y = 1 − w) の衝突」として) を表に足すたびに、`processNewEdge` の規則を回す: 新しい衝突 (a, b) について、(¬a, b) も衝突なら b は偽 (固定)、
+///   (¬b, a) も衝突なら a は偽、(¬a, ¬b) も衝突なら a と b のちょうど一方が真 (同値な組として代入)。含意は後の伝播にも使う (`ENOMOTO_MIP_PROBE_CLIQUE` と同じ)
+/// - `b` (P2): プロービングの後の前処理のかけ直しを `ENOMOTO_T_MIP_PRB_TABLE_ROUNDS` (8) 回まで、行の減り方によらず使う
+pub(crate) fn prb_table(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_PRB_TABLE").unwrap_or("").to_string()).contains(c)
+}
+
 fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let _pt = pretime::guard("probe");
     use domain::Domain;
@@ -6276,7 +6289,25 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // 後の列のプロービングの伝播に使う (EQUIV2 の 2 巡目は残す)。HiGHS の probing はクリークの表で伝播するので、neos-3216931-puriri では
     // ENOMOTO の前処理の後でもさらに 2 値列を 203 本固定し、根の LP が 58940 → 60272 (HiGHS) と開いていた。`q` で根の LP 60237
     // `ENOMOTO_MIP_CLQPRB` も同じく含意を伝播に使う
-    let want_pclique = ((env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !pclique_equiv) || solver::gap4('q') || clqprb) && !submip;
+    let prbt = prb_table('a') && !submip;
+    let want_pclique = ((env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !pclique_equiv) || solver::gap4('q') || clqprb || prbt) && !submip;
+    // 試作 `ENOMOTO_MIP_PRB_TABLE` の `a` ([`prb_table`]): 衝突の表 (文字の組、小さい方を上位 32 ビットに)。行から作る衝突と、引き継いだ含意で始める
+    let tkey = |a: u32, b: u32| -> u64 { ((a.min(b) as u64) << 32) | a.max(b) as u64 };
+    let mut tset: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let (mut t_fix, mut t_sub) = (0usize, 0usize);
+    if prbt {
+        let g = clique::CliqueGraph::build(n, &prob.rows, &prob.row_lo, &prob.row_up, &bin0, &prob.col_lo, &prob.col_up);
+        for u in 0..2 * n as u32 {
+            for &v in g.neighbors(u) {
+                if v > u {
+                    tset.insert(tkey(u, v));
+                }
+            }
+        }
+        for &(a, b) in &edges {
+            tset.insert(tkey(a, b));
+        }
+    }
     let mut equiv: Vec<(usize, usize, bool)> = Vec::new();
     // `ENOMOTO_MIP_PROBE_STRENGTHEN` (試作、既定では使わない。サブ MIP では使わない): プロービングによる行の係数の強化
     // ([`probe_strengthen_collect`])。CBC の前処理 (CglPreProcess が CglProbing を `setRowCuts(3)` で使い、`strengthenRow`
@@ -6524,6 +6555,48 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                         add_edges(j, 1, &ch1, &mut edges);
                         if want_pclique {
                             dom.add_implications(n, &edges[e0..]);
+                        }
+                        // 試作 `ENOMOTO_MIP_PRB_TABLE` の `a`: 新しい衝突ごとに HiGHS の `processNewEdge` の規則 (固定・同値な組)
+                        if prbt {
+                            let mut tfix: Vec<u32> = Vec::new();
+                            for &(a, b) in &edges[e0..] {
+                                if a / 2 == b / 2 {
+                                    if a == b {
+                                        tfix.push(a);
+                                    }
+                                    continue;
+                                }
+                                if tset.contains(&tkey(a ^ 1, b)) {
+                                    tfix.push(b);
+                                } else if tset.contains(&tkey(b ^ 1, a)) {
+                                    tfix.push(a);
+                                } else if want_equiv && tset.contains(&tkey(a ^ 1, b ^ 1)) {
+                                    // a・b のちょうど一方が真: 文字の向きが同じなら x_b = 1 − x_a、違えば x_b = x_a
+                                    equiv.push(((a / 2) as usize, (b / 2) as usize, (a & 1) == (b & 1)));
+                                    t_sub += 1;
+                                }
+                                tset.insert(tkey(a, b));
+                            }
+                            let mut anyfix = false;
+                            for l in tfix {
+                                let k = (l / 2) as usize;
+                                // 文字 l は偽: l = 2k (x_k = 1) なら x_k = 0、l = 2k + 1 (x_k = 0) なら x_k = 1
+                                let v = if l & 1 == 0 { 0.0 } else { 1.0 };
+                                if dom.lo[k] == dom.up[k] {
+                                    continue;
+                                }
+                                dom.tighten_lower(prob, k, v);
+                                dom.tighten_upper(prob, k, v);
+                                fixed += 1;
+                                t_fix += 1;
+                                anyfix = true;
+                            }
+                            if anyfix {
+                                ver += 1;
+                                if !dom.propagate(prob) {
+                                    return Some(false);
+                                }
+                            }
                         }
                         // implied bound カットを使うときだけ集める (既定は相手が連続変数のものだけ使う。`ENOMOTO_MIP_NO_IMPLBD_CONT` で使わない)
                         if env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() || env_str!("ENOMOTO_MIP_NO_IMPLBD_CONT").is_none() {
@@ -6805,6 +6878,9 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     edges.dedup();
     if verbose && env_str!("ENOMOTO_MIP_DEBUG_PROBE_WORKCUT").is_some() {
         eprintln!("MIP: probing: {} propagations stopped by the work limit", domain::work_cuts() - wcut0);
+    }
+    if verbose && prbt {
+        eprintln!("MIP: probing: PRB_TABLE a: {t_fix} columns fixed and {t_sub} equivalent pairs by the conflict table rules ({} table entries)", tset.len());
     }
     if verbose {
         eprintln!(
