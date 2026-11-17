@@ -1,5 +1,5 @@
 """分担表: python plan.py NM NP → shards_M.json (2 問 × 10 設定 × 種 1・2、600 秒、40 回) と shards_P.json (6 問 × 10 設定 × 種 1・2、120 秒、120 回)。
-見積りは parprof_20261117 の 4 スレッドの時間 (時間切れは上限) + 起動の分。"""
+同じ (問題, 種) の 10 設定は同じ分担に入れる。見積りは parprof_20261117 の 4 スレッドの時間 (時間切れは上限) + 起動の分。"""
 import json, glob, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -16,10 +16,11 @@ def est(p, s, tl):
     t = T.get((p, s)); return (tl if t is None else min(t * 1.5, tl)) + 15
 def balance(probs, n, SET):
     tl = TL[SET]; load = [0.0] * n; shards = [[] for _ in range(n)]
-    runs = [[p, c, s, tl] for p in probs for c in CFG for s in SEEDS]
-    for r in sorted(runs, key=lambda r: -est(r[0], r[2], tl)):
-        i = min(range(n), key=lambda j: load[j]); shards[i].append(r); load[i] += est(r[0], r[2], tl)
+    # 同じ (問題, 種) の全設定を同じ分担 (= 同じ機械) に入れる (設定の比べに機械の速さの差を混ぜない。最初の版は設定の組が分担ごとに分かれていた)
+    groups = [[[p, c, s, tl] for c in CFG] for p in probs for s in SEEDS]
+    for g in sorted(groups, key=lambda g: -est(g[0][0], g[0][2], tl)):
+        i = min(range(n), key=lambda j: load[j]); shards[i] += g; load[i] += sum(est(r[0], r[2], tl) for r in g)
     (D / f"shards_{SET}.json").write_text(json.dumps({"shards": shards, "est_hours": [round(x / 3600, 2) for x in load]}, indent=0))
-    print(f"shards_{SET}.json", n, "分担、", len(runs), "回、見積り (時間)", [round(x / 3600, 2) for x in load])
+    print(f"shards_{SET}.json", n, "分担、", sum(len(x) for x in shards), "回、見積り (時間)", [round(x / 3600, 2) for x in load])
 balance(M, int(sys.argv[1]), "M")
 balance(P, int(sys.argv[2]), "P")
