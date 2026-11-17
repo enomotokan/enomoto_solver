@@ -22494,7 +22494,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let jb = keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && (subcap('J') || subcap('B'));
             let jb_cap = subcap_wait_cap(self.params.frac_tl());
             let jb_ext = tunable!("ENOMOTO_T_MIP_SUBCAP_EXT", 1.0, f64) * jb_cap;
+            // 試作 `ENOMOTO_T_MIP_SUBWAIT` = k (既定 0 = 使わない、analysis/slow2_20261117): 外側の根で主が並列のサブ MIP を全部待つとき、
+            // 走り始めてから max(`ENOMOTO_T_MIP_SUBWAIT_MIN` (1 秒), k x 根の段の秒 ([`subcap_root_secs`]: 始めから根のヒューリスティクスに
+            // 入るまで)) を過ぎ、直近その秒のうちに外側の上限より良い解を見つけていないサブ MIP を止める (時間の上限による床は置かない)。
+            // unitcal_7 では根の被約費用のサブ MIP が 47〜60 秒・500 ノード何も見つけず、主は 0.003% の解を持ったまま 40〜75 秒待っていた
+            let sw_k = if keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 { tunable!("ENOMOTO_T_MIP_SUBWAIT", 0.0, f64) } else { 0.0 };
+            let sw_cap = (sw_k * subcap_root_secs()).max(tunable!("ENOMOTO_T_MIP_SUBWAIT_MIN", 1.0, f64));
             while self.pending_submips.len() > keep {
+                if sw_k > 0.0 && sw_cap.is_finite() {
+                    for it in &self.pending_submips {
+                        if let Some(c) = &it.5 {
+                            let age = c.t0.elapsed().as_secs_f64();
+                            if !it.0.is_finished() && !c.abort.load(std::sync::atomic::Ordering::Relaxed) && age >= sw_cap && !c.found_within(sw_cap) {
+                                c.abort_now();
+                                if self.params.verbose {
+                                    eprintln!(
+                                        "MIP: SUBWAIT: stopping the parallel sub-MIP ({}) after {age:.2}s without a better solution (cap {sw_cap:.2}s = {sw_k} x root stage {:.2}s, waited {:.2}s, {:.2}s)",
+                                        it.2,
+                                        subcap_root_secs(),
+                                        l63_t0.elapsed().as_secs_f64(),
+                                        self.start.elapsed().as_secs_f64()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 if jb && l63_t0.elapsed().as_secs_f64() >= jb_cap {
                     let mut k = 0;
                     while k < self.pending_submips.len() {
