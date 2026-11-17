@@ -11570,12 +11570,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 木を分け合う: 大域的な境界の締め付けを共有する (64 ノードおき)
             let t_sync = Instant::now();
-            if self.pool.is_some() && self.nodes % 64 == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_BOUNDS").is_none() {
+            // 診断 `ENOMOTO_T_MIP_TREE_SYNC_EVERY` (treeclose 9.75 節、既定 64): 大域の境界と双対証明・衝突を取り込む間隔 (ノード数)
+            let sync_every = tunable!("ENOMOTO_T_MIP_TREE_SYNC_EVERY", 64u64, u64).max(1);
+            if self.pool.is_some() && self.nodes % sync_every == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_BOUNDS").is_none() {
                 self.sync_global_bounds();
                 self.treefix_count_dead();
             }
             // 木を分け合う: ほかのスレッドの双対証明・衝突を取り込む (64 ノードおき)
-            if self.pool.is_some() && self.nodes % 64 == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
+            if self.pool.is_some() && self.nodes % sync_every == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
                 self.sync_learned();
             }
             // ヒューリスティクス役の起動の判定のため、自分の未処理のノードの重みを知らせる (64 ノードおき)
