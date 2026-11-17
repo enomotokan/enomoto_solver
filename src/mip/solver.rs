@@ -749,6 +749,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     tr_huge: u32,
     /// 試作 `ENOMOTO_MIP_TC` の `g`: 次に開いたノードの共通の境界を見るノード数と、統計 [呼んだ, 締めた列, 伝播で締めた列, 矛盾で閉じた]
     tc_g_next: u64,
+    /// 試作 `ENOMOTO_MIP_TC` の `l`: 次に大域の伝播をするノード数と、[呼んだ回数, 締めた整数列, 固定した整数列, 矛盾]
+    tc_l_next: u64,
+    tc_l_stats: [u64; 4],
     tc_g_stats: [u64; 4],
     /// 試作 `ENOMOTO_MIP_TC` の `c`: カットプールの伝播を止めている間に飛ばした回数・次に試し直す回数・試しの区切りの始めの統計・試し直した回数
     tc_c: (u64, u64, [u64; 4], u64),
@@ -3389,6 +3392,9 @@ pub(super) fn treeeff(c: char) -> bool {
 /// - `a`: `r` に加えて、強分枝・双対証明・リテラルの衝突・目的関数の伝播・カットプールの伝播による局所的な固定も引き継ぐ。
 /// - `f`: カットプールの伝播を止めた後も、固定済みの整数列の割合が `ENOMOTO_T_MIP_TC_F_FRAC` (0.5) 以上で根より `ENOMOTO_T_MIP_TC_F_GAIN` (0.2)
 ///   以上増えたノードでは掛ける。
+/// - `l`: 木の中で `ENOMOTO_T_MIP_TC_G_EVERY` (100) ノードごとに、大域的な境界の写しで行・証明のプール・カットのプール・リテラルの衝突を
+///   不動点まで伝播し、締まった整数列の境界を大域的に締める。矛盾すれば木を閉じる ([`Solver::tc_global_pool_prop`]、treeclose 9.58 節)。
+///   HiGHS は大域の定義域にカットのプールと衝突のプールを登録していて、同期のたびの大域の伝播で衝突から列が固まる。1 スレッドのときだけ。
 /// - `g`: 木の中で `ENOMOTO_T_MIP_TC_G_EVERY` (100) ノードごとに、開いたノード全てに共通の整数列の境界を大域的な境界にし、打ち切り値つきの
 ///   大域の伝播を回す (不動点まで最大 `ENOMOTO_T_MIP_TC_G_ROUNDS` (5) 回)。伝播が矛盾すれば残りの開いたノードに打ち切り値より良い解は
 ///   ないので木を閉じる ([`Solver::tc_open_tighten`])。HiGHS の `HighsNodeQueue::pruneInfeasibleNodes` (sct2 で開いたノード 3000 余りが
@@ -5280,6 +5286,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tr_next: 0,
         tr_huge: 0,
         tc_g_next: 0,
+        tc_l_next: 0,
+        tc_l_stats: [0; 4],
         tc_g_stats: [0; 4],
         tc_c: (0, 0, [0; 4], 0),
         tc_v: (1, 0, (0, 0), 1),
@@ -11389,6 +11397,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             // 試作 `ENOMOTO_MIP_TC` の `g` ([`Self::tc_open_tighten`])
+            // 試作 `ENOMOTO_MIP_TC` の `l` ([`Self::tc_global_pool_prop`])
+            if tc_on('l') && self.pool.is_none() && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.nodes >= self.tc_l_next {
+                self.tc_l_next = self.nodes + tunable!("ENOMOTO_T_MIP_TC_G_EVERY", 100u64, u64).max(1);
+                if self.tc_global_pool_prop() {
+                    let _ = self.queue.take_all();
+                    plunge = None;
+                }
+            }
             if tc_on('g') && self.pool.is_none() && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.nodes >= self.tc_g_next {
                 self.tc_g_next = self.nodes + tunable!("ENOMOTO_T_MIP_TC_G_EVERY", 100u64, u64).max(1);
                 if self.tc_open_tighten(plunge.as_ref()) {
@@ -20553,6 +20569,167 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: RESTART_ROOT_CUTS: {k} integer columns tightened by the bounds common to all {} open nodes", nodes.len());
         }
         k
+    }
+
+    /// 試作 `ENOMOTO_MIP_TC` の `l`: 大域的な境界の写しで、行 ([`Domain::propagate`])、証明のプール (双対証明・衝突の行、目的の証明は
+    /// 今の打ち切り値で)、カットのプール、リテラルの衝突 ([`super::conflict_pool::LitConflictPool::scan_global`]) を不動点まで
+    /// (最大 `ENOMOTO_T_MIP_TC_L_ROUNDS` (5) 巡) 伝播し、締まった整数列の境界を大域的に締める。矛盾したら真 (残りの開いたノードに
+    /// 打ち切り値より良い解はない)。連続列の境界は大域にしない (写しの中の伝播にだけ使う)
+    fn tc_global_pool_prop(&mut self) -> bool {
+        let p = self.p;
+        let t0 = Instant::now();
+        self.tc_l_stats[0] += 1;
+        let lim = self.prune_limit() - p.offset;
+        let mut d = Domain::new(p);
+        for j in 0..p.n {
+            if self.dom.global_lo[j] > d.lo[j] {
+                d.tighten_lower(p, j, self.dom.global_lo[j]);
+            }
+            if self.dom.global_up[j] < d.up[j] {
+                d.tighten_upper(p, j, self.dom.global_up[j]);
+            }
+        }
+        let mut ok = !d.infeasible && d.propagate(p);
+        // 線形の行 sum a_j x_j <= rhs を d で 1 回伝播する。矛盾なら偽
+        fn row_prop(p: &MipProblem, d: &mut Domain, coefs: &[(usize, f64)], rhs: f64, changed: &mut bool) -> bool {
+            if !rhs.is_finite() || coefs.is_empty() {
+                return true;
+            }
+            let (mut minact, mut ninf, mut infj) = (0.0f64, 0usize, usize::MAX);
+            for &(j, a) in coefs {
+                let b = if a > 0.0 { d.lo[j] } else { d.up[j] };
+                if b.is_finite() {
+                    minact += a * b;
+                } else {
+                    ninf += 1;
+                    infj = j;
+                }
+            }
+            if ninf > 1 {
+                return true;
+            }
+            let tol = 1e-6 * (1.0 + rhs.abs());
+            if ninf == 0 && minact > rhs + tol {
+                return false;
+            }
+            for &(j, a) in coefs {
+                let b = if a > 0.0 { d.lo[j] } else { d.up[j] };
+                if ninf == 1 && j != infj {
+                    continue;
+                }
+                let rest = if ninf == 0 { minact - a * b } else { minact };
+                let v = (rhs - rest) / a;
+                if !v.is_finite() {
+                    continue;
+                }
+                if a > 0.0 {
+                    let v = if p.is_int[j] { (v + 1e-6).floor() } else { v + tol / a };
+                    if v < d.up[j] - 1e-9 * (1.0 + v.abs()) {
+                        if v < d.lo[j] - 1e-6 {
+                            return false;
+                        }
+                        d.tighten_upper(p, j, v.max(d.lo[j]));
+                        *changed = true;
+                    }
+                } else {
+                    let v = if p.is_int[j] { (v - 1e-6).ceil() } else { v + tol / a };
+                    if v > d.lo[j] + 1e-9 * (1.0 + v.abs()) {
+                        if v > d.up[j] + 1e-6 {
+                            return false;
+                        }
+                        d.tighten_lower(p, j, v.min(d.up[j]));
+                        *changed = true;
+                    }
+                }
+                if d.infeasible {
+                    return false;
+                }
+            }
+            true
+        }
+        let mut lits: Vec<(usize, bool, f64)> = Vec::new();
+        for _ in 0..tunable!("ENOMOTO_T_MIP_TC_L_ROUNDS", 5usize, usize) {
+            if !ok {
+                break;
+            }
+            let mut changed = false;
+            for (coefs, konst, obj) in self.dual_proofs.iter() {
+                let rhs = if *obj { lim - konst } else { *konst };
+                if !row_prop(p, &mut d, coefs, rhs, &mut changed) {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                for (coefs, rhs, _) in self.cut_pool.iter() {
+                    if !row_prop(p, &mut d, coefs, *rhs, &mut changed) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                lits.clear();
+                if self.lit_conflicts.scan_global(p, &d, &mut lits).is_err() {
+                    ok = false;
+                } else {
+                    for &(k, upper, v) in &lits {
+                        if upper && v < d.up[k] {
+                            if v < d.lo[k] {
+                                ok = false;
+                                break;
+                            }
+                            d.tighten_upper(p, k, v);
+                            changed = true;
+                        } else if !upper && v > d.lo[k] {
+                            if v > d.up[k] {
+                                ok = false;
+                                break;
+                            }
+                            d.tighten_lower(p, k, v);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            ok = ok && !d.infeasible && d.propagate(p);
+            if !changed {
+                break;
+            }
+        }
+        if !ok {
+            self.tc_l_stats[3] += 1;
+            if self.params.verbose {
+                eprintln!("MIP: TC l: global propagation with the pools is infeasible at node {} ({:.3}s): closing the tree", self.nodes, t0.elapsed().as_secs_f64());
+            }
+            return true;
+        }
+        let (mut nt, mut nf) = (0u64, 0u64);
+        for j in 0..p.n {
+            if !p.is_int[j] {
+                continue;
+            }
+            let (gl, gu) = (self.dom.global_lo[j], self.dom.global_up[j]);
+            let (l, u) = (d.lo[j].max(gl), d.up[j].min(gu));
+            if l > gl + 0.5 || u < gu - 0.5 {
+                if l > gl + 0.5 {
+                    self.dom.tighten_global(p, j, false, l);
+                }
+                if u < gu - 0.5 {
+                    self.dom.tighten_global(p, j, true, u);
+                }
+                nt += 1;
+                if self.dom.global_lo[j] == self.dom.global_up[j] {
+                    nf += 1;
+                }
+            }
+        }
+        self.tc_l_stats[1] += nt;
+        self.tc_l_stats[2] += nf;
+        if self.params.verbose && nt > 0 {
+            eprintln!("MIP: TC l: node {}: {nt} integer columns tightened globally ({nf} fixed) by the global propagation with the pools ({} proofs, {} pool cuts, {} literal conflicts, {:.3}s)", self.nodes, self.dual_proofs.len(), self.cut_pool.len(), self.lit_conflicts.len(), t0.elapsed().as_secs_f64());
+        }
+        false
     }
 
     /// 試作 `ENOMOTO_MIP_TC` の `g`: 大域的な境界と矛盾しない開いたノード (待ち行列と潜りの子) の全てで締まっている整数列の境界を
