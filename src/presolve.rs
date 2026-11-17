@@ -740,6 +740,10 @@ pub fn run_extended(
         debug_presolve_dump(round_idx, "opp", &lb, &ub);
         // 双対による固定: 目的係数の向きを妨げる行がない変数を上下限に固定する。
         let fixes = if dbg_skip("dualfix") { Vec::new() } else { timed_step!("dualfix", dualfix::fix_by_lock_count(n, &a, &cur_real_rows, &c, &lb, &ub)) };
+        // 診断 `ENOMOTO_DEBUG_DUALFIX`: 固定した列と値・費用
+        if env_str!("ENOMOTO_DEBUG_DUALFIX").is_some() && !fixes.is_empty() {
+            eprintln!("DUALFIX: round {round_idx} int_mask {} fixes {:?}", int_mask().is_some(), fixes.iter().map(|&(j, v)| (j, v, c[j])).collect::<Vec<_>>());
+        }
         for &(j, value) in &fixes {
             lb[j] = value;
             ub[j] = value;
