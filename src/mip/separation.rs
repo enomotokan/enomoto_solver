@@ -6167,35 +6167,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if self.vbounds.is_none() {
             let mut vbs = VarBounds::from_rows(n, &p.is_int, &p.rows, &p.row_lo, &p.row_up);
-            // 試作 `ENOMOTO_MIP_VB_IMPL` (既定では使わない、analysis/slow2_20261117): プロービングの含意 `y = v ⇒ x_k <= b` / `x_k >= b`
-            // (`p.implied_bounds`、y は 0-1 列、x_k は連続列で大域的な境界が有限) を連続列の変数上下限 (VUB/VLB) にも足す (HiGHS は
-            // プロービングで学んだ変数上下限 (`HighsImplications` の vubs/vlbs) を `HighsTransformedLp` の境界の置き換えに使う)。
-            // 上限 U の列で y = 1 ⇒ x <= b なら x <= (b - U) y + U、y = 0 ⇒ x <= b なら x <= (U - b) y + b (下限も同じ形)。
-            // unitcal_7 では同じ LP 解で作った経路のカットの LP の伸びが HiGHS の 1/2〜1/3 で、HiGHS のカットは 0-1 列が 1 本あたり 1.3〜1.6 本多い
-            if env_str!("ENOMOTO_MIP_VB_IMPL").is_some_and(|v| v != "0") {
-                let cap = tunable!("ENOMOTO_T_MIP_VB_IMPL_MAX", 8usize, usize);
-                let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
-                let mut added = 0usize;
-                for &(y, v, k, upper, b) in &p.implied_bounds {
-                    let (y, k) = (y as usize, k as usize);
-                    if k >= n || y >= n || p.is_int[k] || !p.is_int[y] || glo[y] != 0.0 || gup[y] != 1.0 {
-                        continue;
-                    }
-                    let bound = if upper { gup[k] } else { glo[k] };
-                    if !bound.is_finite() || (upper && b >= bound - 1e-9) || (!upper && b <= bound + 1e-9) {
-                        continue;
-                    }
-                    let (d, e) = if v { (b - bound, bound) } else { (bound - b, b) };
-                    let list = if upper { &mut vbs.vub[k] } else { &mut vbs.vlb[k] };
-                    if list.len() < cap && !list.iter().any(|&(yy, dd, ee)| yy == y && (dd - d).abs() <= 1e-9 && (ee - e).abs() <= 1e-9) {
-                        list.push((y, d, e));
-                        added += 1;
-                    }
-                }
-                if self.params.verbose && !self.params.submip {
-                    eprintln!("MIP: VB_IMPL: {added} variable bounds from {} probing implications", p.implied_bounds.len());
-                }
-            }
             // 試作 `ENOMOTO_MIP_INTVUB`: 一般整数列と 0-1 列の変数上下限も集める (`ENOMOTO_MIP_INTVUB_IMPL` ならプロービングの含意も)
             if super::cuts::intvub_mode() > 0 || mushagg_mode().is_some() || super::modkvb::modkvb_mode().is_some() {
                 let implied: &[(u32, bool, u32, bool, f64)] = if env_str!("ENOMOTO_MIP_INTVUB_IMPL").is_some() { &p.implied_bounds } else { &[] };
@@ -6208,7 +6179,47 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             self.vbounds = Some(std::rc::Rc::new(vbs));
         }
-        let vb = self.vbounds.clone();
+        // 試作 `ENOMOTO_MIP_VB_IMPL` (既定では使わない、analysis/slow2_20261117): プロービングの含意 `y = v ⇒ x_k <= b` / `x_k >= b`
+        // (`p.implied_bounds`、y は 0-1 列、x_k は連続列で大域的な境界が有限) を連続列の変数上下限 (VUB/VLB) にも足す (HiGHS は
+        // プロービングで学んだ変数上下限 (`HighsImplications` の vubs/vlbs) を `HighsTransformedLp` の境界の置き換えに使う)。
+        // 上限 U の列で y = 1 ⇒ x <= b なら x <= (b - U) y + U、y = 0 ⇒ x <= b なら x <= (U - b) y + b (下限も同じ形)。
+        // unitcal_7 では同じ LP 解で作った経路のカットの LP の伸びが HiGHS の 1/2〜1/3 で、HiGHS のカットは 0-1 列が 1 本あたり 1.3〜1.6 本多い。
+        // 値に `r` を含めば外側の根 (ノードの分離でなく、ノード数 1 以下) でだけ使う。`ENOMOTO_T_MIP_VB_IMPL_MINREL` = τ (既定 0) なら、
+        // 締め幅 |境界 - b| が列の幅 (U - L、有限のとき) の τ 倍以上の含意だけを使う
+        let vb_impl_mode = env_str!("ENOMOTO_MIP_VB_IMPL").filter(|v| *v != "0");
+        let use_impl = vb_impl_mode.is_some_and(|m| !m.contains('r') || (!light && self.nodes <= 1 && self.snap.is_none()));
+        if use_impl && self.vbounds_impl.is_none() {
+            let mut vbs: VarBounds = (**self.vbounds.as_ref().unwrap()).clone();
+            let cap = tunable!("ENOMOTO_T_MIP_VB_IMPL_MAX", 8usize, usize);
+            let minrel = tunable!("ENOMOTO_T_MIP_VB_IMPL_MINREL", 0.0, f64);
+            let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
+            let mut added = 0usize;
+            for &(y, v, k, upper, b) in &p.implied_bounds {
+                let (y, k) = (y as usize, k as usize);
+                if k >= n || y >= n || p.is_int[k] || !p.is_int[y] || glo[y] != 0.0 || gup[y] != 1.0 {
+                    continue;
+                }
+                let bound = if upper { gup[k] } else { glo[k] };
+                if !bound.is_finite() || (upper && b >= bound - 1e-9) || (!upper && b <= bound + 1e-9) {
+                    continue;
+                }
+                let width = gup[k] - glo[k];
+                if minrel > 0.0 && width.is_finite() && (bound - b).abs() < minrel * width {
+                    continue;
+                }
+                let (d, e) = if v { (b - bound, bound) } else { (bound - b, b) };
+                let list = if upper { &mut vbs.vub[k] } else { &mut vbs.vlb[k] };
+                if list.len() < cap && !list.iter().any(|&(yy, dd, ee)| yy == y && (dd - d).abs() <= 1e-9 && (ee - e).abs() <= 1e-9) {
+                    list.push((y, d, e));
+                    added += 1;
+                }
+            }
+            if self.params.verbose && !self.params.submip {
+                eprintln!("MIP: VB_IMPL: {added} variable bounds from {} probing implications (mode {}, min rel {minrel})", p.implied_bounds.len(), vb_impl_mode.unwrap_or(""));
+            }
+            self.vbounds_impl = Some(std::rc::Rc::new(vbs));
+        }
+        let vb = if use_impl { self.vbounds_impl.clone() } else { self.vbounds.clone() };
         // 試作 `ENOMOTO_MIP_IMPLINT_TU2` の `a` ([`Solver::cut_imp`]): TU2 で足した暗に整数の列は連続の印に戻し、`imp` で渡す
         if !self.cut_imp.is_empty() {
             for j in 0..n {
