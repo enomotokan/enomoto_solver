@@ -3476,8 +3476,9 @@ fn tree_keep_siblings() -> bool {
 
 /// 木を分け合うスレッドの間で、カットプールに入れたカットを共有するか (`ENOMOTO_MIP_TREE_SHARE_CUTS`)。カットは大域的な
 /// 境界で作るので、どのスレッドのどのノードでも成り立つ (被約費用による固定で締めた境界のものは、共有の打ち切り値未満の解で)。
+/// sharecuts (treeclose 9.79 節) で既定にした。`0`・`off` で以前の動き (共有しない)。
 pub(super) fn tree_share_cuts() -> bool {
-    env_str!("ENOMOTO_MIP_TREE_SHARE_CUTS").is_some()
+    env_def!("ENOMOTO_MIP_TREE_SHARE_CUTS", "1").is_some()
 }
 
 /// 学習の記録に加える (古いものから捨てて `ENOMOTO_T_MIP_TREE_LEARNED_MAX` 件まで残す)。
