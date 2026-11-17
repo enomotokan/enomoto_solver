@@ -1,0 +1,29 @@
+"""widden の誤答の頻度: python rep.py TAG 種の範囲 回数 [THREADS] [KEY=VAL ...]
+例: python rep.py def 1-8 2 4。res_TAG.jsonl に 1 行ずつ足す。正しい最適は 25009.6634 (誤答は 25009.67 より大きい optimal)。"""
+import json, os, subprocess, sys, time
+from pathlib import Path
+D = Path(__file__).resolve().parent
+WT = D.parents[1]
+sys.path.insert(0, str(WT / "scripts"))
+import run_miplib_benchmark as rb  # noqa: E402
+tag, rng, reps = sys.argv[1], sys.argv[2], int(sys.argv[3])
+th = sys.argv[4] if len(sys.argv) > 4 else "4"
+extra = dict(a.split("=", 1) for a in sys.argv[5:])
+a, b = map(int, rng.split("-"))
+mps = rb.fetch("neos-4722843-widden", WT / ".miplib_cache")
+tl = float(os.environ.get("TL", "120"))
+for r in range(reps):
+    for s in range(a, b + 1):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
+        env.update(extra); env["ENOMOTO_MIP_THREADS"] = th; env["ENOMOTO_T_MIP_SEED"] = str(s)
+        t0 = time.time()
+        p = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", str(tl), "--threads", th],
+                           cwd=WT, env=env, capture_output=True, text=True)
+        try: res = json.loads([l for l in p.stdout.splitlines() if l.startswith("{")][-1])
+        except Exception: res = {"status": "crash", "rc": p.returncode, "err": p.stderr[-300:]}  # noqa: BLE001
+        o = res.get("objective")
+        wrong = res.get("status") == "optimal" and o is not None and o > 25009.67
+        row = {"tag": tag, "seed": s, "rep": r, "th": th, "env": extra, "status": res.get("status"), "obj": o, "bound": res.get("bound"),
+               "nodes": res.get("nodes"), "time": res.get("time"), "wrong": wrong}
+        with open(D / f"res_{tag}.jsonl", "a") as f: f.write(json.dumps(row) + "\n")
+        print(tag, s, r, res.get("status"), o, res.get("nodes"), round(time.time() - t0, 1), "WRONG" if wrong else "", flush=True)
