@@ -1084,6 +1084,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     parord_from_pool: bool,
     /// カット生成に使う変数上下限 (最初の分離で作る)。
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
+    /// 試作 `ENOMOTO_MIP_VB_IMPL` ([`Self::separate`]): `vbounds` にプロービングの含意の変数上下限を足したもの (最初の分離で作る)
+    pub(super) vbounds_impl: Option<Rc<super::cuts::VarBounds>>,
     /// 診断 `ENOMOTO_MIP_INTVUB_DUMP` を出したか
     pub(super) intvub_dumped: bool,
     /// 根で解を見つけなかったヒューリスティクス ([`heur_bit`] のビット)。再スタートで引き継ぐ。
@@ -3807,6 +3809,9 @@ fn robust_import() -> bool {
 /// `t` ALNS のどの腕も、サブ MIP が解なしで時間切れになったら次の時間の上限を 2 倍にする (最大 `ENOMOTO_T_MIP_MEMBQ_LNSGROW_MAX` 倍、
 /// `ENOMOTO_MIP_MEMBQ_LNSGROW` は local branching・proximity だけ)。
 /// `r` ヒューリスティクス役のスレッドのサブ MIP を根とみなさない ([`Solver::submip_time_limit`] の `SUBMIP_HIGHS` の `t`)。
+/// `d` 根の被約費用の近傍 ([`Solver::root_reduced_cost`]) の候補に、基底にあって境界に張り付いた整数列を足す。被約費用の代わりに
+/// HiGHS の `computeBasicDegenerateDuals` と同じ双対単体法の 1 歩の比 θ ([`Solver::degen_thetas`]) を使い、上限に張り付いた列 (1 への固定) も候補にする。
+/// trento1 では HiGHS の候補 226 本のうち 61 本がこの形 (うち 19 本は値 1 の列を 1 に固定する) で、その伝播で固定率 0.5 に届いていた。
 pub(super) fn heurgap(c: char) -> bool {
     env_str!("ENOMOTO_MIP_HEURGAP").is_some_and(|v| v.contains(c))
 }
@@ -5571,6 +5576,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         parord_c_off: false,
         parord_from_pool: false,
         vbounds: None,
+        vbounds_impl: None,
         intvub_dumped: false,
         failed_heurs: 0,
         cut_age: Vec::new(),
@@ -16341,6 +16347,116 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// x_k は境界に固定できる。効く j が 1 本もなければ (θ = ∞) x_k は LP の中で動けないので、打ち切り値がなくても固定できる。
     /// 等式行の論理変数・固定された列は動けないので数えない。1 ノードで見る候補は `ENOMOTO_T_MIP_NODECNT_MAXC` (既定 100) 本まで。
     /// 締めたら真。
+    /// 試作 `ENOMOTO_MIP_HEURGAP` の `d` ([`heurgap`]): 今の LP で基底にあって境界に張り付いた整数列 k (最大 `maxc` 本) ごとに、
+    /// [`Self::degen_dual_fixing`] と同じ比の判定で θ (k を境界から 1 単位動かす費用の下界、動けなければ ∞) を求め、
+    /// (θ, 列 k, 向き σ (+1: 下限に張り付き、-1: 上限に張り付き)) を返す。双対の符号が怪しい候補と θ ≤ 1e-7 は返さない。
+    pub(super) fn degen_thetas(&mut self, maxc: usize) -> Vec<(f64, usize, f64)> {
+        let n = self.p.n;
+        let m = self.lp.num_rows();
+        let x = self.lp.col_values();
+        let mut cands: Vec<(usize, usize, f64)> = Vec::new();
+        for s in 0..m {
+            let k = self.lp.basic_var(s);
+            if k >= n || !self.p.is_int[k] {
+                continue;
+            }
+            let (lo, up) = (self.dom.lo[k], self.dom.up[k]);
+            if up - lo < 0.5 {
+                continue;
+            }
+            if x[k] - lo <= FEASTOL {
+                cands.push((s, k, 1.0));
+            } else if up - x[k] <= FEASTOL {
+                cands.push((s, k, -1.0));
+            }
+            if cands.len() >= maxc {
+                break;
+            }
+        }
+        let mut out = Vec::new();
+        if cands.is_empty() {
+            return out;
+        }
+        let basis = self.lp.basis_ref().into_owned();
+        let d = self.lp.reduced_costs_ref().into_owned();
+        let y = self.lp.row_duals();
+        let col_b: Vec<(f64, f64)> = (0..n).map(|j| self.lp.col_bounds(j)).collect();
+        let mut alpha = vec![0.0f64; n];
+        let mut touched: Vec<usize> = Vec::new();
+        let (dtol, eps) = (1e-7, 1e-9);
+        for (s, k, sigma) in cands {
+            let w = self.lp.basis_inverse_row_sparse(s);
+            let wmax = w.iter().fold(0.0f64, |a, v| a.max(v.1.abs()));
+            if !(wmax > 0.0 && wmax.is_finite()) {
+                continue;
+            }
+            let mut theta = f64::INFINITY;
+            let mut bad = false;
+            for &(i, wi) in &w {
+                if wi.abs() <= eps * wmax.max(1.0) {
+                    continue;
+                }
+                let (rlo, rup) = self.lp.row_bounds(i);
+                for &(j, a) in self.lp.row_ref(i) {
+                    if alpha[j] == 0.0 {
+                        touched.push(j);
+                    }
+                    alpha[j] += wi * a;
+                    if alpha[j] == 0.0 {
+                        alpha[j] = 1e-300;
+                    }
+                }
+                if rlo == rup {
+                    continue;
+                }
+                let e = sigma * -wi;
+                let r = match basis.row[i] {
+                    VarStatus::Lower if e < 0.0 => {
+                        bad |= y[i] < -dtol;
+                        y[i].max(0.0) / -e
+                    }
+                    VarStatus::Upper if e > 0.0 => {
+                        bad |= y[i] > dtol;
+                        (-y[i]).max(0.0) / e
+                    }
+                    VarStatus::Zero => 0.0,
+                    _ => continue,
+                };
+                theta = theta.min(r);
+            }
+            for &j in &touched {
+                let a = alpha[j];
+                alpha[j] = 0.0;
+                if j == k || a.abs() <= eps || bad {
+                    continue;
+                }
+                let (lo, up) = col_b[j];
+                if lo == up {
+                    continue;
+                }
+                let e = sigma * a;
+                let r = match basis.col[j] {
+                    VarStatus::Lower if e < 0.0 => {
+                        bad |= d[j] < -dtol;
+                        d[j].max(0.0) / -e
+                    }
+                    VarStatus::Upper if e > 0.0 => {
+                        bad |= d[j] > dtol;
+                        (-d[j]).max(0.0) / e
+                    }
+                    VarStatus::Zero => 0.0,
+                    _ => continue,
+                };
+                theta = theta.min(r);
+            }
+            touched.clear();
+            if !bad && theta > 1e-7 {
+                out.push((theta, k, sigma));
+            }
+        }
+        out
+    }
+
     fn degen_dual_fixing(&mut self, node_obj: f64) -> bool {
         let gap = if self.has_cutoff_value() { self.prune_limit() - node_obj } else { f64::INFINITY };
         if !(gap >= 0.0) {
