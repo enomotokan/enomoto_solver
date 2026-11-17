@@ -1,13 +1,14 @@
-"""SLOW2: 既定 (def) と試作 (wst) の対の比較 (M: Mittelmann 48 問、P: MIPLIB の 58 問)。python summ.py P (または M) > summ_P.txt
+"""SLOW2: 既定 (def) と試作 (wst) の対の比較 (M: Mittelmann 48 問、P: MIPLIB の 58 問)。python summ.py P (または M) [wst|sw] > summ_P.txt
 設定は cfg.py。
 SGM は shift 1 秒、時間切れは制限時間で数える。CI は問題単位のブートストラップ (summP.py と同じ)。"""
 import json, glob, math, random, collections, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 SET = sys.argv[1] if len(sys.argv) > 1 else "P"
+ALT = sys.argv[2] if len(sys.argv) > 2 else "wst"  # 既定と比べる設定 (wst か sw)
 rows = [json.loads(l) for S in (("M", "A") if SET == "MA" else (SET,)) for f in sorted(glob.glob(str(D / f"res_{S}_s*.jsonl"))) for l in open(f) if l.strip()]  # MA = M (48 問 × 2 種) と残りの A (138 問 × 種 1) を合わせた Mittelmann 186 問
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
-CF = ["def", "wst"]
+CF = ["def", ALT]
 def st(r): return str(r["result"].get("status") or "").lower()  # 当方は小文字
 def solved(r): return st(r) in ("optimal", "infeasible")
 def t(r): return min(r["result"]["time"], r["tl"]) if solved(r) else r["tl"]
@@ -39,4 +40,4 @@ def cmp(ca, cb):
         v = logr[p]; g = math.exp(sum(v) / len(v))
         tag = " 全種で遅" if len(v) >= 2 and all(x > math.log(1.25) for x in v) else (" 全種で速" if len(v) >= 2 and all(x < math.log(0.8) for x in v) else "")
         if g > 1.15 or g < 0.87: print(f"  {p}: {g:.2f} {[round(math.exp(x), 2) for x in v]}{tag}")
-cmp("def", "wst")
+cmp("def", ALT)
