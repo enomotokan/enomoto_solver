@@ -304,6 +304,13 @@ impl<L: MipLp> Solver<'_, L> {
         if diag == Some("stop") || cand.is_empty() {
             return;
         }
+        // 診断 `ENOMOTO_MIP_GEN_LAZY_TOUCH` (mzzv11 の切り分け): 行を外さず、選んだ行の境界を今の値のまま設定し直す (標準形の作り直しだけ)
+        if env_str!("ENOMOTO_MIP_GEN_LAZY_TOUCH").is_some() {
+            let ch: Vec<(usize, f64, f64)> = cand.rows.iter().map(|&i| { let (l, u) = self.lp.row_bounds(i as usize); (i as usize, l, u) }).collect();
+            self.lp.set_row_bounds_many(&ch);
+            eprintln!("MIP: GEN_LAZY_TOUCH: rebuilt the LP with {} rows' bounds unchanged", ch.len());
+            return;
+        }
         let ch: Vec<(usize, f64, f64)> = cand.rows.iter().map(|&i| (i as usize, f64::NEG_INFINITY, f64::INFINITY)).collect();
         self.lp.set_row_bounds_many(&ch);
         self.gen_lazy_stats[0] += cand.len() as u64;

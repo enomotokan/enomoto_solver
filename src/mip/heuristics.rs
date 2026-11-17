@@ -1610,7 +1610,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SUBMIP_HIGHS_TRIM`・`_RESTART` で文字を抜くサブ MIP ([`Self::hs_drop`]) は、抜いた `t`・`g` も使わない
         let hs_drop = self.hs_drop();
         let hs_on = |c: char| super::submip_highs(c) && hs_drop & super::submip_hs_bit(c) == 0;
-        let time_highs = hs_on('t') && !self.params.submip && self.nodes <= 1;
+        // `ENOMOTO_MIP_HEURGAP` の `r` ([`super::solver::heurgap`]): ヒューリスティクス役のスレッドはノードを処理する前に役に就くと
+        // `nodes <= 1` のままで、根とみなされて残り時間を全部渡していた (役の 1 回の上限 `ENOMOTO_T_MIP_HEUR_ROLE_CALL_MAX` が効かない)。役の間は根とみなさない
+        let time_highs = hs_on('t') && !self.params.submip && self.nodes <= 1 && !(super::solver::heurgap('r') && self.in_heur_role);
         // `t` がないときの時間の上限
         let t_plain = {
             let t = (self.submip_time_frac * remaining).min(self.submip_time_max);
@@ -3616,7 +3618,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): Local Branching・Proximity Search のサブ MIP が解を出さずに
         // 時間の上限で止まったら (n2seq36q では根の LP・カットを終える前に 5 秒で止まり続ける)、その腕の次の時間の上限を 2 倍にする
         // (最大 `ENOMOTO_T_MIP_MEMBQ_LNSGROW_MAX` (8) 倍)。Local Branching の近さ k は時間切れでは狭めない。既定では使わない
-        let grow = lnsgrow_on() && (arm == 1 || arm == 2);
+        let grow = (lnsgrow_on() && (arm == 1 || arm == 2)) || super::solver::heurgap('t');
         let (keep_max, keep_frac, keep_k) = (self.submip_time_max, self.submip_time_frac, self.lb_k);
         if grow {
             self.submip_time_max *= self.lns_grow[arm];
