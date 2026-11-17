@@ -23673,7 +23673,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 両側とも無限の境界の行 (試作 `ENOMOTO_MIP_CLQ_LAZY` で LP から外した行、標準形では空の行) はスラックを基底にし、列で覆う行から外す
         // (元の係数で覆うと、標準形では特異な基底になり、分解の修復で全スラック基底近くから解き直すことになる)
         for i in 0..mr {
-            if self.lp.row_bounds(i) == (f64::NEG_INFINITY, f64::INFINITY) {
+            if self.lp.row_bounds(i) == (f64::NEG_INFINITY, f64::INFINITY) && !crate::simplex::mip_lp::freerow_off('p') {
                 b.row[i] = VarStatus::Basic;
             }
         }
