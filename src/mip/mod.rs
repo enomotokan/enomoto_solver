@@ -1260,6 +1260,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     // (退避しないと、サブ MIP の行・列に外側の解を当てて「デバッグ解を切った」と誤って出す。終わりに戻す)
     let _dbg_sol = params.submip.then(DebugSolScope::enter);
     if outer {
+        ENUM_IDLE.with(|f| f.set(false));
         subb::reset();
         heur_subfix::reset();
     }
@@ -5998,6 +5999,9 @@ pub(crate) fn clqprb_has(c: char) -> bool {
 }
 
 thread_local! {
+    /// `ENOMOTO_MIP_HO3_ENUM` の `a` (試作、treeclose 9.54 節): この求解の前の回の列挙で何も見つからなかったら立て、次の回 (前処理の
+    /// かけ直し・再スタート) の列挙を飛ばす。外側の求解の始めに下ろす
+    static ENUM_IDLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `ENOMOTO_MIP_CLQPRB` の `n`・`g` (試作、analysis/prbimp_20261113.md): 既定の形でプロービングを回す間だけ立てる
     /// (このあいだ [`probe`] は `CLQPRB` を使わない)
     static CLQPRB_SUPPRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -6607,8 +6611,15 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // `ENOMOTO_MIP_HO3_ENUM` (試作、既定では使わない。analysis/highs_only_20261105/G3.md): 同じ列挙を、行の数の上限 (400 行) と
     // 空振りでやめる規則 (6 行) を外して全部の候補の行に回す (時間の上限 `ENOMOTO_T_MIP_HO3_ENUM_TIME` 秒、既定 1 秒)。
     // net12 では上限つきだと先頭の 400 行に効く行がなく何も見つからないが、全 953 行では同値な組 154 組が出て根の LP が 68.7 -> 128.7
+    // 値の文字 (treeclose 9.54 節、neos8 で何も見つけずに 3 回 2.2 秒使う費用を削る): `a` = 前の回で何も見つからなければ次の回は列挙しない、
+    // `b` = 最後に見つけてから `ENOMOTO_T_MIP_HO3_ENUM_GIVEUP` 秒 (既定 0.2 秒) 見つからなければやめる ([`enumerate_rows`])。`1` は元の形
     let ho3_enum = env_str!("ENOMOTO_MIP_HO3_ENUM").is_some() && !submip;
-    if let Some(mode) = env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").or(if ho3_enum { Some("1") } else { None }).filter(|_| !submip) {
+    let enum_idle_skip = ho3_enum && env_str!("ENOMOTO_MIP_HO3_ENUM").is_some_and(|v| v.contains('a'));
+    let enum_skip = enum_idle_skip && ENUM_IDLE.with(|f| f.get());
+    if enum_skip && verbose {
+        eprintln!("MIP: enumeration presolve: skipped (nothing found in the previous round)");
+    }
+    if let Some(mode) = env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").or(if ho3_enum { Some("1") } else { None }).filter(|_| !submip && !enum_skip) {
         let te = std::time::Instant::now();
         let (f0, t0n, e0) = (fixed, tightened, equiv.len());
         let mut d2 = if mode == "impl" && !edges.is_empty() {
@@ -6647,6 +6658,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
         if !dom.propagate(prob) {
             return Some(false);
+        }
+        if enum_idle_skip {
+            let nothing = fixed == f0 && tightened == t0n && equiv.len() == e0;
+            ENUM_IDLE.with(|f| f.set(nothing));
         }
         if verbose {
             eprintln!(
@@ -7132,6 +7147,13 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
     let max_fails = tunable!("ENOMOTO_T_MIP_ENUM_FAILS", if ho3 { usize::MAX } else { 6usize }, usize);
     let t_enum = std::time::Instant::now();
     let time_cap = if ho3 { tunable!("ENOMOTO_T_MIP_HO3_ENUM_TIME", 1.0, f64) } else { f64::INFINITY };
+    // `ENOMOTO_MIP_HO3_ENUM` の `b`: 最後に見つけてから (始めからも) この秒数見つからなければやめる
+    let giveup = if ho3 && env_str!("ENOMOTO_MIP_HO3_ENUM").is_some_and(|v| v.contains('b')) {
+        tunable!("ENOMOTO_T_MIP_HO3_ENUM_GIVEUP", 0.2, f64)
+    } else {
+        f64::INFINITY
+    };
+    let mut last_find = 0.0f64;
     let row_vars = |dom: &domain::Domain, i: usize| -> Option<Vec<usize>> {
         let mut v = Vec::new();
         for &(j, _) in &prob.rows[i] {
@@ -7269,7 +7291,10 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
     let mut out: Vec<(usize, bool, f64)> = Vec::new();
     let (mut fails, mut done, mut nsol) = (0usize, 0usize, 0usize);
     for (i, _) in &keep {
-        if done % 16 == 0 && (t_enum.elapsed().as_secs_f64() > time_cap || presolve_stop()) {
+        if done % 16 == 0 && {
+            let el = t_enum.elapsed().as_secs_f64();
+            el > time_cap || el - last_find > giveup || presolve_stop()
+        } {
             break;
         }
         let Some(vars) = row_vars(dom, *i) else { continue };
@@ -7345,6 +7370,7 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
             }
         } else {
             fails = 0;
+            last_find = t_enum.elapsed().as_secs_f64();
         }
     }
     Some((out, done, nsol))
