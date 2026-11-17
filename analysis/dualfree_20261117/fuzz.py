@@ -31,7 +31,7 @@ def ours(lp):
         else:
             if l > -inf: M.add_constraint(e >= l)
             if u < inf: M.add_constraint(e <= u)
-    s = M.solve(mip_rel_gap=1e-9)
+    s = M.solve(mip_rel_gap=1e-9, time_limit=20.0, threads=1, log=False)
     return s.status, s.objective, [x.value for x in xs] if s.status == "optimal" else None
 
 def feasible(lp, x):
@@ -49,7 +49,8 @@ N = int(sys.argv[1]); start = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 bad = 0; t0 = time.time(); cnt = {}
 for seed in range(start, start + N):
     lp = gen(seed)
-    hs, ho = highs(lp); os_, oo, x = ours(lp)
+    hs, ho = highs(lp); t1 = time.time(); os_, oo, x = ours(lp); dt = time.time() - t1
+    if dt > 5: print("slow seed", seed, "%.1f s" % dt, os_, flush=True)
     hmap = {'Optimal': 'optimal', 'Infeasible': 'infeasible', 'Unbounded': 'unbounded', 'Primal infeasible or unbounded': 'inf_or_unb'}.get(hs, hs)
     cnt[hmap] = cnt.get(hmap, 0) + 1
     ok = (hmap == os_) or (hmap in ('unbounded', 'inf_or_unb') and os_ in ('unbounded', 'infeasible', 'inf_or_unb', 'infeasible_or_unbounded'))
