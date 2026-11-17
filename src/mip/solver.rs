@@ -3792,6 +3792,17 @@ fn robust_import() -> bool {
     env_str!("ENOMOTO_MIP_ROBUST_IMPORT").is_some()
 }
 
+/// `ENOMOTO_MIP_HEURGAP` (試作、既定では使わない。analysis/heurgap_20261117/): 暫定解の間隙が大きい間の木の中の改善ヒューリスティクス。
+/// 値の文字: `g` 全体の間隙 (最良値 − 全体の下界) / max(|最良値|, 1) が `ENOMOTO_T_MIP_HEURGAP_GAP` (既定 0.05) 以上の間は、
+/// ヒューリスティクス役の起動の判定 (限界効用 [`Solver::mu_worth`]・木の予測) を飛ばして就き、判定で退かない (失敗が続いて退いた後も
+/// 冷却の秒数が過ぎれば戻る)。academictimetablesmall (下界 0) では暫定解が良くなっても木が刈れないので判定が就かせず、trento1 では
+/// 木の大近傍探索の最初の失敗 (6 秒の上限で 0 ノードの時間切れ) で主解への寄与が 0 になり、初めて改善が出るまで就かなかった。
+/// `t` ALNS のどの腕も、サブ MIP が解なしで時間切れになったら次の時間の上限を 2 倍にする (最大 `ENOMOTO_T_MIP_MEMBQ_LNSGROW_MAX` 倍、
+/// `ENOMOTO_MIP_MEMBQ_LNSGROW` は local branching・proximity だけ)。
+pub(super) fn heurgap(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_HEURGAP").is_some_and(|v| v.contains(c))
+}
+
 fn heur_trigger_mode() -> bool {
     env_str!("ENOMOTO_MIP_HEUR_ROLE_TRIGGER").is_none_or(|v| v != "off")
 }
@@ -9194,6 +9205,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         lb
+    }
+
+    /// `ENOMOTO_MIP_HEURGAP` の `g` ([`heurgap`]): 全体の間隙 (共有の最良値 − 全体の下界) / max(|最良値|, 1) が
+    /// `ENOMOTO_T_MIP_HEURGAP_GAP` (既定 0.05) 以上か。最良値がなければ偽、下界がなければ真。
+    fn heurgap_big(&self) -> bool {
+        let z = self.shared.as_ref().map_or(f64::INFINITY, |s| s.best());
+        if !z.is_finite() {
+            return false;
+        }
+        let lb = self.global_lower_bound();
+        !lb.is_finite() || (z - lb) / z.abs().max(1.0) >= tunable!("ENOMOTO_T_MIP_HEURGAP_GAP", 0.05, f64)
     }
 
     /// 探索全体の (処理したノード数, 未処理のノード数)。木を分け合うときは他のスレッドの分と共有の待ち行列も足す。
@@ -15066,6 +15088,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if ho1_role_early() && self.heur_role_retired.is_none() {
             return true;
         }
+        // `ENOMOTO_MIP_HEURGAP` の `g`: 間隙が大きい間は判定なしで就く (退いた後は冷却の秒数が過ぎてから)
+        if heurgap('g') && self.heurgap_big() {
+            return self.heur_role_retired.is_none_or(|(t, _, cool)| t.elapsed().as_secs_f64() >= cool);
+        }
         if heur_trigger_mode() {
             if self.trig_eval_at.is_some_and(|t| t.elapsed().as_secs_f64() < 0.25) || self.heur_role_retired.is_some_and(|(t, _, cool)| t.elapsed().as_secs_f64() < cool) {
                 return false;
@@ -15606,7 +15632,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 起動の判定を使うとき: 木の証明が時間内に終わりそうになったら木の探索に戻る
             // (予測の残り時間 < `ENOMOTO_T_MIP_HEUR_TRIG_STOP` (既定 0.7) × 残り時間)
-            if heur_trigger_mode() {
+            if heur_trigger_mode() && !(heurgap('g') && self.heurgap_big()) {
                 if let Some(ev) = self.heur_trigger_eval() {
                     let stop = if heur_mu_mode() { ev.warm && !self.mu_worth(&ev, true) } else { ev.warm && ev.est < tunable!("ENOMOTO_T_MIP_HEUR_TRIG_STOP", 0.7, f64) * ev.left };
                     if stop {
