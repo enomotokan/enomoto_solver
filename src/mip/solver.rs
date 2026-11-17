@@ -10580,7 +10580,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         heur!("int shifting", self.int_shifting(&x));
                     }
                 }
-                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_TRIVIAL").is_none() {
+                // 試作 `ENOMOTO_MIP_SUBMIP_HEUR` の `t` ([`super::heuristics::subheur`]): サブ MIP の中では trivial を根のヒューリスティクスの最後に回す
+                let triv_late = self.params.submip && super::heuristics::subheur('t');
+                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_TRIVIAL").is_none() && !triv_late {
                     heur!("trivial", self.trivial());
                 }
                 heur!("randomized rounding", self.randomized_rounding(&x, 3));
@@ -10913,6 +10915,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if self.params.verbose && share_x {
                     eprintln!("MIP: root heuristics used {shared_x_used} LP solutions from the background cuts");
+                }
+                // 試作 `ENOMOTO_MIP_SUBMIP_HEUR` ([`super::heuristics::subheur`]): `t` の後回しの trivial、`l` の深さ 1 のサブ MIP の Local-MIP
+                if triv_late && self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_TRIVIAL").is_none() {
+                    heur!("trivial", self.trivial());
+                }
+                if self.params.submip && super::heuristics::subheur('l') && super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1 {
+                    heur!("sub-MIP Local-MIP", self.subheur_local_mip());
                 }
                 self.rootcap_end = self.rootcap_until.take();
                 if self.params.verbose {
