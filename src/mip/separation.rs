@@ -6977,6 +6977,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 診断 (`ENOMOTO_MIP_DEBUG_SEP`): tableau 行の内訳の時間 (BTRAN, 集約, カット生成 + finish_cut) と行の非零数
         let (mut t_btran, mut t_agg, mut t_gen) = (0.0f64, 0.0f64, 0.0f64);
         let (mut n_rows_used, mut w_nnz_total, mut base_nnz_total, mut n_fill_skip) = (0usize, 0usize, 0usize, 0usize);
+        let mut n_fill_would = 0usize;
         let cands_before_tab = cands.len();
         // 試作 `ENOMOTO_MIP_BRCUT`: 行 (元の基底の列) ごとの候補のカットの効き目の最大 ([`super::brcut::record`])
         let brcut_on = super::brcut::on() && !self.params.submip;
@@ -7071,6 +7072,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 n_rows_used += 1;
                 base_nnz_total += base.len();
+                if dbg_sep && 10 * base.iter().filter(|e| e.0 < n).count() > 10_000 + n {
+                    n_fill_would += 1;
+                }
                 bases.push(base);
                 if brcut_on {
                     brcut_src.push(self.lp.basic_var(s));
@@ -7272,6 +7276,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 n_rows_used += 1;
                 base_nnz_total += base.len();
+                if dbg_sep && 10 * base.iter().filter(|e| e.0 < n).count() > 10_000 + n {
+                    n_fill_would += 1;
+                }
                 if rs_b {
                     rs_bases.push(base.clone());
                 }
@@ -7436,7 +7443,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if dbg_sep {
             eprintln!(
-                "SEP tableau {:.3}s cands {} (rows {} of {} candidates, fill-skipped {}, budget-skipped {} (work {:.0} / {:.0}), btran {:.3}s agg {:.3}s gen+finish {:.3}s (finish total this call {:.3}s), mean w nnz {:.0}, mean agg nnz {:.0}, LP rows {} nnz {})",
+                "SEP tableau {:.3}s cands {} (rows {} of {} candidates, fill-skipped {}, budget-skipped {} (work {:.0} / {:.0}), btran {:.3}s agg {:.3}s gen+finish {:.3}s (finish total this call {:.3}s), mean w nnz {:.0}, mean agg nnz {:.0}, LP rows {} nnz {}, cols {} light {} submip {} pass {} fill_would {})",
                 sep_t0.elapsed().as_secs_f64(),
                 cands.len(),
                 n_rows_used,
@@ -7452,7 +7459,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 w_nnz_total as f64 / basics.len().max(1) as f64,
                 base_nnz_total as f64 / n_rows_used.max(1) as f64,
                 mr,
-                lp_rows.iter().map(|r| r.len()).sum::<usize>()
+                lp_rows.iter().map(|r| r.len()).sum::<usize>(),
+                n,
+                light,
+                self.params.submip,
+                self.sep_pass,
+                n_fill_would
             );
         }
         if brcut_on {
