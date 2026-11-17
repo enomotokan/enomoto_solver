@@ -3379,6 +3379,7 @@ pub(super) fn treeeff(c: char) -> bool {
 
 /// 試作 `ENOMOTO_MIP_TC=文字` (既定では使わない。analysis/treeclose_20261114.md): 木を閉じる力の手当て。
 /// - `i`: 再スタートの後の求解で暫定解がなくても、打ち切り値があれば木の中の再スタートを判定する ([`Solver::tree_restart_due`])。
+/// - `j`: 最初の求解でも、暫定解がなく打ち切り値だけあるときに木の中の再スタートを判定する (`i` を広げたもの、treeclose 9.56 節)。
 /// - `c`: カットプールの伝播 ([`Solver::propagate_cut_pool`]) を効き目で止めた後も、飛ばした回数が止めた時の呼び出し回数の 2 倍
 ///   (試し直すたびに倍) に着いたら、もう一度 `ENOMOTO_T_MIP_CUTPOOL_PROP_TRIAL` 回試す。
 /// - `w`: カットプールの伝播の止め方を、呼び出し回数の区切りの効き目から手間 (更新した項 + 候補の非零) の区切りの効き目に変える
@@ -23231,7 +23232,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_TC` の `i` ([`tc_on`]): 再スタートの後の求解で、前の暫定解が打ち切り値の固定で問題から外れて暫定解がないときも、
         // 打ち切り値があれば木の中の再スタートを判定する (HiGHS は暫定解を持ったまま何度でも再スタートする。sct2 は 2 回目の再スタートの後
         // 暫定解なしで 300 秒、再スタートが止まっていた。analysis/treeclose_20261114.md)
-        let no_inc = self.incumbent.is_none() && !(tc_on('i') && self.params.restarts > 0 && self.params.cutoff.is_finite());
+        // `j` (試作、treeclose 9.56 節): 最初の求解 (再スタート 0 回) でも、暫定解がなく打ち切り値だけあるときに判定する (csched008 の
+        // 打ち切り値つきの診断で、HiGHS は 37 秒・76 秒に木の中で再スタートするが、当方は暫定解がないため一度も判定しなかった)
+        let no_inc = self.incumbent.is_none() && !(((tc_on('i') && self.params.restarts > 0) || tc_on('j')) && self.params.cutoff.is_finite());
         if self.params.submip || self.snap.is_some() || self.watch.is_some() || self.pool_tid != 0 || no_inc {
             return false;
         }
