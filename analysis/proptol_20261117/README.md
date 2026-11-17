@@ -26,4 +26,40 @@ sat_rens の形の乱数問題 (`analysis/dualfree_20261117/gen.py`) で、HiGHS
 - release019 の 7 本: すべて bad 0。cargo test 419 件通過。
 - sat_rens の形の乱数問題 (種 0〜19999): 12422・15631 (既定)・11185 (pcd) が直り、新しい食い違いはない。
   既定: 種 0〜9999 は 15 件で直す前と同じ、10000〜19999 は 12 → 10 件。pcd: 0〜9999 は 12 件で同じ、10000〜19999 は 10 → 9 件。
-- 手元の P (58 問 × 種 1、60 秒、def と rt = 1e-10): 2 節の下に追記。
+
+## 4. 手元の P (58 問 × 種 1、60 秒、4 スレッド。`summ_P.txt`・`summ_P2.txt`)
+
+| 設定 | SGM 設定/def [95% CI] | 解けた数 def → 設定 | 目立って遅い | 食い違い |
+|---|---|---|---|---|
+| rt (`ENOMOTO_T_PROP_RELTOL=1e-10`、全列) | +1.5% [−3.5%, +9.0%] | 45 → 44 | noswot 3.09 (時間切れ)・neos-911970 1.37 | 0 |
+| rtc (`ENOMOTO_T_PROP_RELTOL_CONT=1e-10`、連続列だけ) | +1.1% [−2.6%, +6.2%] | 45 → 45 | noswot 2.25・rout 1.21 | 0 |
+
+- rt の noswot を種 2・3 でも解くと既定 13.8・14.2 秒、rt 32.2・30.4 秒 (`res_Q_s0.jsonl`)。整数列の小さな締めを失うためと見て、連続列だけにかける
+  rtc を足した (`ENOMOTO_T_PROP_RELTOL_CONT`、既定 0)。
+- rtc で noswot・neos-911970 を種 1〜3 (`res_R_s0.jsonl`): noswot は既定 44.2・57.0・時間切れ / rtc 37.1・7.9・17.4 秒、
+  neos-911970 は既定 18.9・18.4・15.4 / rtc 24.6・19.4・11.4 秒。noswot は既定の側も大きく揺れる。
+- rtc の fuzz (`fuzz_res_cont.txt`): rt と同じ (7 本 bad 0、cargo test 通過、3 問が直り新しい食い違いなし)。
+
+→ 案: 既定にするなら rtc (`PROP_RELTOL_CONT = 1e-10`)。整数最適化の前処理の連続列だけに効き、整数列の締めは変えない
+(LP の前処理では整数の印がないので全列にかかる点に注意。LP の計測は別に要る)。既定に入れるかは P/M の計測の後で判断。
+
+## 5. P/M の計測 (def / rtc、`plan_pm.py 3 12`)
+
+同じ (問題, 種) の 2 設定は同じ分担で続けて解く (順は種で入れ替える)。4 スレッド。`cfg.py` の rtc = `ENOMOTO_T_PROP_RELTOL_CONT=1e-10`。
+- P: 58 問 × 種 1〜3、60 秒、3 分担 (計 348 回、見積り各約 0.92 時間): `python analysis/proptol_20261117/run.py PX K` (K = 0〜2)
+- M: analysis/pcd_20261117 の M と同じ 26 問 × 種 1・2、600 秒、12 分担 (計 104 回、見積り各 0.93〜0.99 時間):
+  `python analysis/proptol_20261117/run.py MX K` (K = 0〜11)
+- 準備は analysis/pcd_20261117/README.md と同じ (venv・maturin develop・probs.py)。終わったら `res_PX_sK.jsonl`・`res_MX_sK.jsonl` をコミットして push。
+- 集計: `python summ.py PX > summ_PX.txt`・`python summ.py MX > summ_MX.txt`・`python summ.py PXMX > summ_PXMX.txt`。
+
+## 6. LP の計測 (LP の前処理には整数の印がないので、rtc の閾値が全列にかかる)
+
+既存の A/B の台本 `scripts/ab_bench.py` (NETLIB の問題を 2 つの腕で交互に解き、時間の中央値と状態・目的値の違いを出す) を、同じ python で
+片方にだけ環境変数を付けて回す。NETLIB は `python scripts/setup_netlib_data.py` で一度取得する (docs/netlib-data.md)。
+
+```bash
+python scripts/setup_netlib_data.py
+python scripts/ab_bench.py --base .venv/bin/python --new .venv/bin/python --new-env ENOMOTO_T_PROP_RELTOL_CONT=1e-10 \
+    --rounds 3 --out analysis/proptol_20261117/ab_lp.json > analysis/proptol_20261117/ab_lp.txt
+```
+1 分担。状態・目的値の違い (台本が出す) が 0 で、時間の中央値の比に目立つ悪化がないことを見る。
