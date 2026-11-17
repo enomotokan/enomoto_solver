@@ -1212,6 +1212,9 @@ thread_local! {
     pub(crate) static ROOT_LP_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 最後のプロービング ([`probe`]) が固定した列の数 ([`represolve_after_probe`] の条件に使う)
     pub(crate) static PROBE_FIXED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// 試作 `ENOMOTO_MIP_PRR_PRECHECK` ([`represolve_after_probe`]): かけ直しの前処理の深さ・入る前の行の数・捨てる割合。その深さの
+    /// [`presolve_mip_depth`] はプロービングの前に行の減り方を見て、捨てられると決まっていればプロービングせずに返す
+    pub(crate) static PRR_PRECHECK: std::cell::Cell<Option<(u32, usize, f64)>> = const { std::cell::Cell::new(None) };
     /// 今の前処理がサブ MIP のものか ([`solve_problem_inner`] が `params.submip` で立てる)。既定の `ENOMOTO_MIP_SUBMIP_HIGHS` の `p` では
     /// サブ MIP の前処理にも `submip = false` が渡るので、[`prr_active`] はこちらを見る
     pub(crate) static PRESOLVE_IN_SUBMIP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -3934,7 +3937,9 @@ fn hnf_presolve(mut prob: MipProblem, mut postsolve: Vec<crate::presolve::Postso
         if !quiet {
             eprintln!("HNFPRE: round {round} tightened {k} columns");
         }
-        if k == 0 || round == 3 {
+        // 試作 `ENOMOTO_T_MIP_HNFPRE_REPRE_MIN` (既定 1 = 今まで通り、analysis/slow2_20261117): 締めた列がこの本数より少なければ、
+        // 前処理を (プロービングごと) かけ直さず、締めた境界だけ置いて返す。mzzv42z の再スタートでは 1 列締めるたびのかけ直しが 2 回で 11.6 秒
+        if k == 0 || round == 3 || k < tunable!("ENOMOTO_T_MIP_HNFPRE_REPRE_MIN", 1usize, usize) {
             if k > 0 {
                 prob.col_lo = lo;
                 prob.col_up = up;
@@ -4603,6 +4608,17 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             Some(_) => {}
         }
     }
+    // 試作 `ENOMOTO_MIP_PRR_PRECHECK` (既定では使わない、analysis/slow2_20261117): プロービングの後のかけ直しの前処理で、
+    // プロービングの前の時点で行が捨てる割合ほど減っていなければ、ここで返す (呼び手 [`represolve_after_probe`] は行の減り方を見て
+    // 結果を捨てる)。mzzv42z ではかけ直しが 10460 -> 10039 -> 10006 行 (4%) で捨てられ、中の 2 回のプロービングに 10.7 秒使っていた
+    if let Some((d, m_in, frac)) = PRR_PRECHECK.with(|c| c.get()) {
+        if d == depth && (m_in as f64 - prob.m as f64) < frac * m_in as f64 {
+            if verbose {
+                eprintln!("MIP: presolve again after probing: rows {m_in} -> {} before probing (less than {:.0}% fewer), probing skipped (ENOMOTO_MIP_PRR_PRECHECK)", prob.m, 100.0 * frac);
+            }
+            return Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling });
+        }
+    }
     if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() {
         match probe(&mut prob, verbose, submip) {
             Some(false) => return Some(Presolved::Infeasible),
@@ -4736,7 +4752,10 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
     // 捨てるときは、かけ直しの中のプロービングが置いた同値な組を元に戻す
     let min_frac = if prb_table('b') { 0.0 } else { tunable!("ENOMOTO_T_MIP_PRR_MIN_ROW_FRAC", 0.1, f64) };
     let saved_equiv = (min_frac > 0.0).then(|| (PROBE_EQUIV.with(|e| e.borrow().clone()), PROBE_EQUIV_FORCE.with(|f| f.get())));
+    let precheck = min_frac > 0.0 && env_str!("ENOMOTO_MIP_PRR_PRECHECK").is_some_and(|v| v != "0");
+    let prev_pc = PRR_PRECHECK.with(|c| c.replace(precheck.then_some((depth + 1, prob.m, min_frac))));
     let r = presolve_mip_depth(&prob, verbose, submip, None, depth + 1);
+    PRR_PRECHECK.with(|c| c.set(prev_pc));
     if let (Some((eq, force)), Some(Presolved::Reduced { prob: prob2, .. })) = (&saved_equiv, &r) {
         if (prob.m as f64 - prob2.m as f64) < min_frac * prob.m as f64 {
             if verbose {
