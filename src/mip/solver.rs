@@ -7974,6 +7974,42 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // 余裕のある行を LP から外した場合: 今の LP の行・列の境界・費用から LP を 2 つ作り直し (全部 / 余裕のあるクリーク型の行を除く)、
+        // 基底なしで解いて反復・秒・目的値と、除いた行を破る数を比べる (`ENOMOTO_MIP_DIAG_CLQROWS` が `nolp` 以外、LP の行と問題の行が同じ数のとき)
+        if env_str!("ENOMOTO_MIP_DIAG_CLQROWS").is_some_and(|v| v != "nolp") && self.lp.num_rows() == p.rows.len() {
+            let m = self.lp.num_rows();
+            let mut drop = vec![false; m];
+            for (i, lits, _) in &cl {
+                let sv: f64 = lits.iter().map(|&l| litv(l)).sum();
+                if 1.0 - sv > 1e-6 {
+                    drop[*i] = true;
+                }
+            }
+            let (clo, cup): (Vec<f64>, Vec<f64>) = (0..n).map(|j| self.lp.col_bounds(j)).unzip();
+            let cost = self.lp.costs();
+            let lim = SolveLimits { iteration_limit: 50 * self.root_lp_iters.max(1000), cutoff: f64::INFINITY, deadline: self.deadline };
+            let mut res = Vec::new();
+            for keep_all in [true, false] {
+                let idx: Vec<usize> = (0..m).filter(|&i| keep_all || !drop[i]).collect();
+                let rows: Vec<Vec<(usize, f64)>> = idx.iter().map(|&i| self.lp.row(i)).collect();
+                let (rlo, rup): (Vec<f64>, Vec<f64>) = idx.iter().map(|&i| self.lp.row_bounds(i)).unzip();
+                let t = Instant::now();
+                let mut lp2 = L::new(&clo, &cup, &cost, &rows, &rlo, &rup);
+                let st = lp2.solve(&lim);
+                let secs = t.elapsed().as_secs_f64();
+                let x2 = lp2.col_values();
+                let nviol = if keep_all {
+                    0
+                } else {
+                    cl.iter().filter(|(i, lits, _)| drop[*i] && lits.iter().map(|&l| { let v = x2[(l / 2) as usize]; if l % 2 == 0 { v } else { 1.0 - v } }).sum::<f64>() > 1.0 + 1e-6).count()
+                };
+                res.push((idx.len(), st, lp2.total_iterations(), secs, lp2.objective() + p.offset, nviol));
+            }
+            eprintln!(
+                "MIP: CLQROWS drop slack rows: full {} rows {:?} {} iters {:.2}s obj {:.10e}; without {} slack clique rows: {} rows {:?} {} iters {:.2}s obj {:.10e}, dropped rows violated {}",
+                res[0].0, res[0].1, res[0].2, res[0].3, res[0].4, m - res[1].0, res[1].0, res[1].1, res[1].2, res[1].3, res[1].4, res[1].5
+            );
+        }
         let len_b = [cl.iter().filter(|c| c.1.len() == 2).count(), cl.iter().filter(|c| (3..=8).contains(&c.1.len())).count(), cl.iter().filter(|c| c.1.len() > 8).count()];
         eprintln!(
             "MIP: CLQROWS: rows {nrow} nnz {nnz_all}; clique rows {ncl} ({:.1}% of rows, eq {neq}, len 2 / 3-8 / 9+ = {} / {} / {}), nnz {nnz_cl} ({:.1}%); slack at the root LP {slack_n} ({:.1}% of clique rows, nnz {slack_nnz} = {:.1}% of all, eq {slack_eq}, all-zero {zero_n}); root LP {} iters {:.2}s",
