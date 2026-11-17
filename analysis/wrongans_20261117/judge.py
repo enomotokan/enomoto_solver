@@ -1,8 +1,8 @@
 """既定の経路で HiGHS と食い違う乱数問題 (analysis/dualfree_20261117/gen.py) の、どちらが正しいかを確かめる。
-python judge.py seed ...  (試作は使わない)。HiGHS の解を元の問題で確かめて目的値を計算し、当方の解も同じく確かめる。"""
+python judge.py seed ... [--env]  (--env なしでは試作 ENOMOTO_AGG_DUALFREE_INEQ を外す。--env では環境変数のまま)。HiGHS の解を元の問題で確かめて目的値を計算し、当方の解も同じく確かめる。"""
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../dualfree_20261117"))
-os.environ.pop("ENOMOTO_AGG_DUALFREE_INEQ", None)
+if "--env" not in sys.argv: os.environ.pop("ENOMOTO_AGG_DUALFREE_INEQ", None)
 import highspy
 from gen import gen
 from enomoto_solver import Model, Variable
@@ -48,7 +48,7 @@ def ours(lp):
     return s.status, s.objective, [x.value for x in xs] if s.status == "optimal" else None
 
 if __name__ == "__main__":
-    for seed in map(int, sys.argv[1:]):
+    for seed in [int(a) for a in sys.argv[1:] if a != "--env"]:
         lp = gen(seed); lo, up, c, it = lp[:4]
         hs, ho, hx = highs(lp)
         os_, oo, ox = ours(lp)
