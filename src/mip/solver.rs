@@ -21656,7 +21656,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         let mut n = 0;
+        // 試作 `ENOMOTO_MIP_PRIMAL` の `s` ([`super::heuristics::primal`]): 暫定解と根の LP の値の差 / max(1, |暫定解|) が
+        // `ENOMOTO_T_MIP_PRIMAL_KEEP_GAP` (0.02) を超える間は、RENS のサブ MIP は止めずに受け取りまで待つ
+        let keep_rens = super::heuristics::primal('s')
+            && self.incumbent.as_ref().is_none_or(|(z, _)| (z - self.lp.objective()) / z.abs().max(1.0) > tunable!("ENOMOTO_T_MIP_PRIMAL_KEEP_GAP", 0.02, f64));
         for it in &self.pending_submips {
+            if keep_rens && it.2 == "RENS" {
+                continue;
+            }
             if let Some(c) = &it.5 {
                 c.abort_now();
                 n += 1;

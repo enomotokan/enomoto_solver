@@ -62,6 +62,9 @@ pub(super) fn submip_trace_begin(parent: &str, kind: &str, caller_node: u64, nfr
 /// - `c` (C3): 暫定解がない (か悪い) まま根のカットのループの LP の反復が根の LP の k 倍を超えたら、その時点の LP 解で RENS を 1 回回す
 ///   ([`super::separation`] の根のカットのループ)
 /// - `x` (C4): 外側の根の被約費用のサブ MIP の時間を根の時間の何倍かで切る
+/// - `h` (C5): 外側の根の暫定解なしの RENS を HiGHS 1.15.1 の形 (目標の固定率で止めるダイブ、根で実行不能なら目標を半分にしてやり直す、
+///   主のスレッドで解き、時間でなく節点の数で止める) にする。`g` を足すと LP で整数値の列を全部固定する形
+/// - `s` (C5 と組む): 早い再スタートで並列のサブ MIP を止めるとき、暫定解の間隙が大きければ RENS は止めずに待つ
 pub(crate) fn primal(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_PRIMAL").unwrap_or("").to_string()).contains(c)
@@ -2293,6 +2296,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if (((self.incumbent.is_none() && (self.prune_limit_ex(false).is_infinite() || rens_cut)) || self.fj_poor()) || rens_highs) && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
             // 根の 2 回目の呼び出し (カット前の LP 解) はダイビング式では同じ LP から始めるので、この形は 1 回だけ
             self.noinc_rens_done = true;
+            // 試作 `ENOMOTO_MIP_PRIMAL` の `h` (C5、[`primal`]、analysis/primal_20261117): 外側の根の暫定解なしの RENS を HiGHS の形にする。
+            // ダイブで目標の固定率まで固定する代わりに、LP 解で整数値の列だけを固定し、分数の列は切り下げ・切り上げの範囲に締める ([`Self::rens_old`])。
+            // 止めるのは時間でなく節点の数: 時間の上限を残りの `ENOMOTO_T_MIP_PRIMAL_RENS_TIME_FRAC` (0.5) 倍 (最大の上限なし) にし、節点の上限を
+            // `ENOMOTO_T_MIP_PRIMAL_RENS_NODES_MULT` (1) 倍にする (HiGHS は tbfp-network で暫定解なしの根のサブ MIP を約 190 秒回して最適解を出す)
+            if primal('h') && !nested && self.nodes <= 1 {
+                let keep = (self.submip_time_frac, self.submip_time_max, self.submip_node_mult);
+                self.submip_time_frac = tunable!("ENOMOTO_T_MIP_PRIMAL_RENS_TIME_FRAC", 0.5, f64);
+                self.submip_time_max = f64::INFINITY;
+                self.submip_node_mult *= tunable!("ENOMOTO_T_MIP_PRIMAL_RENS_NODES_MULT", 1.0, f64);
+                // `g`: LP で整数値の列を全部固定する形 ([`Self::rens_old`])。tbfp-network では自由な列が 263 本しか残らず 0.2 秒で実行不能
+                // (analysis/primal_20261117 の 7 節)。既定の `h` は HiGHS 1.15.1 の RENS と同じダイブ ([`Self::subfix_dive`]: lock の順に締め、
+                // 目標の固定率 (初め 0.6) で止め、根で実行不能なら目標を半分にしてやり直す) を主のスレッドで解く
+                let r = if primal('g') {
+                    self.rens_old(_x)
+                } else {
+                    let keep_par = self.parallel_submips;
+                    self.parallel_submips = false;
+                    let r = self.subfix_dive(None, "RENS");
+                    self.parallel_submips = keep_par;
+                    r
+                };
+                (self.submip_time_frac, self.submip_time_max, self.submip_node_mult) = keep;
+                if self.params.verbose {
+                    eprintln!("MIP:   PRIMAL h: HiGHS-style RENS ({}): found {r} ({:.2}s)", if primal('g') { "LP-integral columns fixed" } else { "dive to the target fixing rate" }, self.start.elapsed().as_secs_f64());
+                }
+                return r;
+            }
             let keep = (self.submip_time_frac, self.submip_time_max, self.submip_node_mult);
             self.submip_time_frac = tunable!("ENOMOTO_T_MIP_NOINC_SUBMIP_FRAC", 0.4, f64);
             self.submip_time_max = tunable!("ENOMOTO_T_MIP_NOINC_SUBMIP_MAX", 20.0, f64);
