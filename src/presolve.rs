@@ -27,6 +27,7 @@ pub mod colsingleton;
 pub mod doubleton;
 pub mod dominatedcol;
 pub mod dualfix;
+pub mod dualfreeineq;
 pub mod dualpropagate;
 pub mod foldfixed;
 pub mod forcingcol;
@@ -1096,6 +1097,31 @@ pub fn run_extended(
         }
 
         debug_presolve_dump(round_idx, "inner", &lb, &ub);
+        // 試作 `ENOMOTO_AGG_DUALFREE_INEQ` (既定では使わない): 双対で陰に自由な不等式行を等式に上げ、
+        // 直後の集約がその行で陰に自由な列を代入できるようにする (HiGHS の集約の不等式の行の規則。[`dualfreeineq`])。
+        if env_str!("ENOMOTO_AGG_DUALFREE_INEQ").is_some() && env_str!("ENOMOTO_DISABLE_AGGREGATOR").is_none() && !dbg_skip("dualfreeineq") {
+            let mask = int_mask();
+            let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
+            let up = timed_step!("dualfreeineq", dualfreeineq::find_dual_free_inequalities(n, &a_rows, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub, mask.as_deref().map(|v| v.as_slice())));
+            if env_str!("ENOMOTO_DEBUG_AGGREGATOR").is_some() {
+                eprintln!("DEBUG_DUALFREE_INEQ: round={round_idx} promoted={}", up.len());
+            }
+            if !up.is_empty() {
+                let mut a_rows = a_rows;
+                let mut promoted = vec![false; cur_real_rows.len()];
+                for &gi in &up {
+                    promoted[gi] = true;
+                    a_rows.push(cur_real_rows[gi].clone());
+                    b.push(cur_real_rhs[gi]);
+                }
+                a = csr_from_rows(&a_rows, n);
+                let mut i = 0;
+                cur_real_rows.retain(|_| { i += 1; !promoted[i - 1] });
+                let mut i = 0;
+                cur_real_rhs.retain(|_| { i += 1; !promoted[i - 1] });
+                set_g_from_split!("rebuild_g(dfi)");
+            }
+        }
         // Aggregator (HiGHS の `HPresolve::aggregator`): 等式行から implied-free と
         // 分かる列を代入消去する (境界保存行は不要)。HiGHS と同様、高速な
         // singleton/doubleton ループの後に置く。
