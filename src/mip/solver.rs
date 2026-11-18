@@ -3632,10 +3632,11 @@ pub(super) fn lp_farkas_ratio<L: MipLp>(lp: &L, n: usize) -> f64 {
 }
 
 
-/// LexRed と併用する orbital fixing (`ENOMOTO_MIP_SYMDYN=f`、既定) を、分枝で 0 にした列から始まる固定だけに絞るか (既定で絞る。
-/// `ENOMOTO_MIP_OF_ANY_FIXED` で以前の動き = どの固定された列からも軌道を固定する)。[`Solver::orbital_fixing`] 参照
+/// 試作 `ENOMOTO_MIP_OF_BRANCH_ONLY` (既定では使わない): LexRed と併用する orbital fixing (`ENOMOTO_MIP_SYMDYN=f`) を、分枝で 0 にした
+/// 列から始まる固定だけに絞る。p0201・fuzz_of の種 1293 の誤答を併用のせいと見て入れたが、本当の原因は LexRed の「等号を除く」締めの
+/// 誤り ([`super::symdyn`]) で、それを直せば絞らなくても誤答は出ない (analysis/lexred_20261118) ので既定から外した
 fn of_branch_only() -> bool {
-    env_str!("ENOMOTO_MIP_OF_ANY_FIXED").is_none()
+    env_str!("ENOMOTO_MIP_OF_BRANCH_ONLY").is_some()
 }
 
 thread_local! {
@@ -6241,6 +6242,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     for (_, _, perm) in &o.swaps {
                         let mut y = vec![0.0; imgs[k].len()];
                         for (j, &t) in perm.iter().enumerate() {
+                            y[t] = imgs[k][j];
+                        }
+                        if !imgs.contains(&y) {
+                            imgs.push(y);
+                        }
+                    }
+                }
+                // orbital fixing・LexRed の生成元 (`ENOMOTO_MIP_DEBUG_TRACE` のとき) でも閉じる
+                if env_str!("ENOMOTO_MIP_DEBUG_TRACE").is_some() {
+                    for g in self.of_gens.gens.iter() {
+                        if g.len() != imgs[k].len() {
+                            continue;
+                        }
+                        let mut y = vec![0.0; imgs[k].len()];
+                        for (j, &t) in g.iter().enumerate() {
                             y[t] = imgs[k][j];
                         }
                         if !imgs.contains(&y) {
@@ -10603,12 +10619,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if !cut_ok {
                     // カットを外した LP も解けなかった。期限に当たったのなら時間切れ (カットを加える前の根の LP の値は下界)
+                    // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                    // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                    if self.root_gap_closed() {
+                        self.join_fj_thread();
+                        return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                    }
                     self.join_fj_thread();
                     let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                     return self.finish(st, root_obj);
                 }
                 if let Some(l) = both_loser.take().filter(|_| !self.time_up()) {
                     if !self.root_both_vertex(l, &x_root0, root_basis0.as_deref(), root_obj, root_iters, &mut root_cut_secs, false) {
+                        // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                        // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                        if self.root_gap_closed() {
+                            self.join_fj_thread();
+                            return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                        }
                         self.join_fj_thread();
                         let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                         return self.finish(st, root_obj);
@@ -10658,6 +10686,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     eprintln!("MIP: robust root IPM: second cut loop {}, obj {:.10e} ({:.2}s)", if ok { "done" } else { "failed" }, self.lp.objective() + self.p.offset, t2.elapsed().as_secs_f64());
                                 }
                                 if !ok {
+                                    // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                                    // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                                    if self.root_gap_closed() {
+                                        self.join_fj_thread();
+                                        return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                                    }
                                     self.join_fj_thread();
                                     let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                                     return self.finish(st, root_obj);
@@ -10678,6 +10712,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let post = self.lp.objective() + self.p.offset;
                     let flat = post - root_obj <= tunable!("ENOMOTO_T_MIP_OPTFACE_FLAT", 1e-6, f64) * root_obj.abs().max(1.0);
                     if flat && (self.obj_step.is_some() || v.contains('a')) && !self.time_up() && !self.optface_second_loop(v, post, root_iters, &mut root_cut_secs) {
+                        // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                        // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                        if self.root_gap_closed() {
+                            self.join_fj_thread();
+                            return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                        }
                         self.join_fj_thread();
                         let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                         return self.finish(st, root_obj);
@@ -12035,6 +12075,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let ok = self.root_cut_loop(root_iters);
                             self.cut_cont = None;
                             if !ok {
+                                // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                                // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                                if self.root_gap_closed() {
+                                    self.join_fj_thread();
+                                    return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                                }
                                 self.join_fj_thread();
                                 let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                                 return self.finish(st, root_obj);
@@ -12060,6 +12106,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let ok = self.root_cut_loop(root_iters);
                             self.cut_cont = None;
                             if !ok {
+                                // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                                // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                                if self.root_gap_closed() {
+                                    self.join_fj_thread();
+                                    return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                                }
                                 self.join_fj_thread();
                                 let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                                 return self.finish(st, root_obj);
@@ -12103,6 +12155,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     self.cut_cont = None;
                                     self.cut_cont_p2 = 0;
                                     if !ok {
+                                        // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                                        // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                                        if self.root_gap_closed() {
+                                            self.join_fj_thread();
+                                            return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                                        }
                                         self.join_fj_thread();
                                         let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                                         return self.finish(st, root_obj);
@@ -13160,9 +13218,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.log(false);
             let dn = self.dbg_changes(&node.changes);
             // 診断用 (`ENOMOTO_MIP_DEBUG_TRACE`、デバッグ解のとき): デバッグ解を含むノードの処理の始まりを出す (どのスレッドのどのノードまで続いたか)
-            DBG_TRACE_NODE.with(|c| c.set(dn && self.dbg_on && env_str!("ENOMOTO_MIP_DEBUG_TRACE").is_some()));
-            if dn && self.dbg_on && env_str!("ENOMOTO_MIP_DEBUG_TRACE").is_some() {
-                eprintln!("DBGTRACE: tid {} node {} depth {} lb {:.6e} prune limit {:.6e} changes {}", self.pool_tid, self.nodes, node.depth, node.lower_bound, self.prune_limit(), node.changes.len());
+            let trace_on = self.dbg_on && env_str!("ENOMOTO_MIP_DEBUG_TRACE").is_some() && !self.params.submip;
+            let has_img = trace_on && self.dbg_node_has_image(&node);
+            DBG_TRACE_NODE.with(|c| c.set(has_img));
+            if has_img {
+                let order = super::symdyn::branch_order(&node.changes, self.p.n);
+                eprintln!("DBGTRACE: tid {} node {} depth {} lb {:.6e} prune limit {:.6e} changes {} debug sol itself {} order {:?}", self.pool_tid, self.nodes, node.depth, node.lower_bound, self.prune_limit(), node.changes.len(), dn, order);
             }
             let rp_entry = replay.and_then(|_| super::replay::lookup(&node.changes));
             let mut rp_stage = "";
@@ -18768,9 +18829,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 親が固定したもの (`sym` の印) は分枝に数えない。固定のあと行を伝播し、伝播で新たに固定されたら軌道を見直す。
     /// 固定はこのノードの部分木で成り立つので、[`Self::of_node_fixes`] に入れて子の分枝の列に足す。矛盾なら偽。
     ///
-    /// `branch_only` (LexRed と併用するとき、[`of_branch_only`]): 分枝で 0 にした 0-1 列 (`sym` でない上限の変更) を含む軌道だけを
-    /// 0 に固定する。伝播・被約費用などで固定された列から軌道を固定するのは分枝の順の辞書式の規則から出ない固定で、LexRed と
-    /// 重ねると最適解の像を全部切ることがある (p0201 で 7675 を最適と返した、analysis/wrong_widden_20261117 の 12 節)
+    /// `branch_only` (試作 [`of_branch_only`]): 分枝で 0 にした 0-1 列 (`sym` でない上限の変更) を含む軌道だけを 0 に固定する
     fn orbital_fixing(&mut self, changes: &[BoundChange], branch_only: bool) -> bool {
         let of = self.of_gens.clone();
         let p = self.p;

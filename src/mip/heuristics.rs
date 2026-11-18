@@ -2469,6 +2469,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 return self.rens_old(_x);
             }
+            // 試作 `ENOMOTO_MIP_HEUR4` の `r` (群 4 の解探し、analysis/vsscip_slow_20261118/heur4/、既定では使わない): ダイブが解を出しても
+            // 暫定解と根の LP の値に差が残るなら、既定の RENS (LP で整数値の列を全部固定、SCIP の RENS と同じ近傍) も 1 回回す。
+            // neos-1171448 の遅い回は、ダイブのサブ MIP が打ち切りで止まって -308 (下界 -309) のまま木に入り、木で 1 段を詰めるのに数百秒かかる。
+            // ダイブの道は `rens_node_limited` を立てないので、`RENS (more nodes)` のやり直しも走らない
+            if r && heur4_on('r') && !self.time_up() {
+                let lpz = self.lp.objective() + self.p.offset;
+                if let Some((z, _)) = self.incumbent.as_ref() {
+                    let gap = (z - lpz) / z.abs().max(1.0);
+                    if gap > tunable!("ENOMOTO_T_MIP_HEUR4_RENS_GAP", 1e-6, f64) {
+                        if self.params.verbose {
+                            eprintln!("MIP:   HEUR4 r: SUBFIX RENS found a solution with gap {gap:.2e}; running the default RENS as well");
+                        }
+                        return self.rens_old(_x) || r;
+                    }
+                }
+            }
             return r;
         }
         if env_str!("ENOMOTO_MIP_RENS_DIVE").is_none() {
@@ -4013,6 +4029,14 @@ pub(super) fn suba_rate(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let v = V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBA_RATE").map_or(String::new(), |v| if v == "1" { "inz".to_string() } else { v.to_string() }));
     v.contains(c)
+}
+
+/// `ENOMOTO_MIP_HEUR4=<文字の並び>` (試作、群 4 の解探し、analysis/vsscip_slow_20261118/heur4/、既定では使わない)
+/// - `r`: 外側の根の SUBFIX の RENS (ダイブ) が解を出しても暫定解と根の LP の値の差が `ENOMOTO_T_MIP_HEUR4_RENS_GAP` (1e-6) を超えるなら、
+///   既定の RENS (LP で整数値の列を全部固定) も 1 回回す ([`Solver::rens`])
+pub(super) fn heur4_on(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR4").map_or(String::new(), |v| v.to_string())).contains(c)
 }
 
 /// `ENOMOTO_MIP_S1_RINSWIDE=k` (試作、[`Solver::rins`]): 根の RINS が短く空振りしたときのやり直しの回数 (0 なら使わない)
