@@ -1510,10 +1510,37 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             } else {
                 sparsify_rows_highs(&mut rows, &mut row_lo, &mut row_up, &is_int, &col_lo, &col_up, prob.n)
             };
+            // gate2 候補 6 (analysis/gate2_20261117/sparsify/README.md): 書き換えた行のうち 0-1 列だけの行・1 列以下に縮んだ (行が消えて境界になる) 行、
+            // 非零の増減を数える。`ENOMOTO_MIP_SPARSIFY_LATE=s` なら、縮んだ割合 f = 縮んだ行 / 書き換えた行 のシグモイド
+            // σ((f − `ENOMOTO_T_MIP_SPL_C` (0.5)) / `ENOMOTO_T_MIP_SPL_W` (0.1)) が 1/2 以上のときだけ疎化した問題を使う
+            // (kasai は 462 行が全部縮む。air03・nw04 は集合分割の 0-1 の行を書き換えるだけで 1 行も縮まず、遅くなる・メモリが増える)
+            let bin = |j: usize| is_int[j] && col_lo[j] == 0.0 && col_up[j] == 1.0;
+            let (mut ch, mut chb, mut el) = (0usize, 0usize, 0usize);
+            for (i, r) in rows.iter().enumerate() {
+                if *r != prob.rows[i] {
+                    ch += 1;
+                    chb += prob.rows[i].iter().all(|e| bin(e.0)) as usize;
+                    el += (r.iter().filter(|e| e.1 != 0.0).count() <= 1) as usize;
+                }
+            }
+            let gate = if env_str!("ENOMOTO_MIP_SPARSIFY_LATE").is_some_and(|v| v.contains('s')) && ch > 0 {
+                let c = tunable!("ENOMOTO_T_MIP_SPL_C", 0.5, f64);
+                let w = tunable!("ENOMOTO_T_MIP_SPL_W", 0.1, f64).max(1e-6);
+                1.0 / (1.0 + (-(el as f64 / ch as f64 - c) / w).exp())
+            } else {
+                1.0
+            };
             if params.verbose {
                 eprintln!("MIP: presolve: sparsified {k} rows (late)");
+                let nz0: usize = prob.rows.iter().map(|r| r.len()).sum();
+                let nz1: usize = rows.iter().map(|r| r.iter().filter(|e| e.1 != 0.0).count()).sum();
+                let nbin = (0..prob.n).filter(|&j| bin(j)).count();
+                eprintln!(
+                    "MIP: sparsify-late stats m {} n {} bincols {nbin} changed {ch} binonly {chb} shrunk<=1 {el} nnz {nz0} -> {nz1} gate {gate:.3}",
+                    prob.m, prob.n
+                );
             }
-            if k == 0 {
+            if k == 0 || gate < 0.5 {
                 Some(Presolved::Reduced { prob, postsolve, scaling })
             } else {
                 let q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
@@ -6200,7 +6227,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         // `r` (試作): 含意を使う形が既定の形より多く (固定 + 締め付け + 同値な組) 得なければ、既定の形の結果に戻す。
         // neos-860300 (どちらも固定 165)・timtab1 (どちらも同値な組 22)・neos-4722843-widden (含意を使う形は予算を使い切って固定 1) で、
         // 得たものは同じか少ないのに含意の数だけが変わって後の流れが変わり、種をまたいで遅くなっていた
-        let revert = clqprb_has('r');
+        let revert = clqprb_has('r') || clqprb_has('s');
         let def_state = if revert {
             Some((prob.clone(), PROBE_EQUIV.with(|e| e.borrow().clone()), PROBE_EQUIV_FORCE.with(|f| f.get()), EQUIV2_USED.with(|f| f.get()), r))
         } else {
@@ -6216,9 +6243,26 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         CLQPRB_FORCE.with(|f| f.set(false));
         let (cf, ct, ce) = PROBE_GAIN.with(|f| f.get());
         if let Some((dp, de, dff, deu, dr)) = def_state {
-            if r != Some(false) && cf + ct + ce <= gf + gt + ge {
+            // `s` (試作、gate2 候補 2、analysis/gate2_20261117/clqprb_s/README.md): 戻すかを、成果の比 ρ = (含意の形の成果) / (既定の形の成果)
+            // のシグモイド σ(k (ln ρ − ln ρ0)) で決め、0.5 未満なら戻す (`ENOMOTO_T_MIP_CLQPRB_S_RHO` = ρ0、既定 2、`_S_K` = k、既定 8)。
+            // `r` は ρ ≤ 1 で戻す形。puriri (ρ 1.77) は含意で増えた固定で locks の sub-MIP が実行不能になり解を失い、mzzv11 (ρ ≥ 3.6)・
+            // neos8 (4.0)・mzzv42z (≥ 2.5) は効く (prbimp_20261113 §4。6 問から選んだしきい値で楽観的)
+            let (dsum, csum) = ((gf + gt + ge) as f64, (cf + ct + ce) as f64);
+            let keep = if clqprb_has('s') {
+                let rho0: f64 = tunable!("ENOMOTO_T_MIP_CLQPRB_S_RHO", 2.0f64, f64);
+                let k: f64 = tunable!("ENOMOTO_T_MIP_CLQPRB_S_K", 8.0f64, f64);
+                let z = k * ((csum.max(0.5) / dsum.max(0.5)).ln() - rho0.max(1e-9).ln());
+                let p = 1.0 / (1.0 + (-z).exp());
                 if verbose {
-                    eprintln!("MIP: probing: CLQPRB=r: the implications found {cf} fixed, {ct} tightened, {ce} equivalent pairs, not more than the default; the default result is used");
+                    eprintln!("MIP: probing: CLQPRB=s: gain ratio {:.3}, sigmoid {:.3}", csum.max(0.5) / dsum.max(0.5), p);
+                }
+                p >= 0.5
+            } else {
+                csum > dsum
+            };
+            if r != Some(false) && !keep {
+                if verbose {
+                    eprintln!("MIP: probing: CLQPRB=r: the implications found {cf} fixed, {ct} tightened, {ce} equivalent pairs, not enough over the default; the default result is used");
                 }
                 *prob = dp;
                 PROBE_EQUIV.with(|e| *e.borrow_mut() = de);
