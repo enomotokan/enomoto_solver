@@ -19590,12 +19590,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if super::cutconf::secs() > tunable!("ENOMOTO_T_MIP_CUTCONF_TIME_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64() + 0.05 {
             return false;
         }
+        // 試作 ENOMOTO_MIP_CUTCONF_LGATE: 作った制約の平均の長さで入れる割合を決める。割合がほぼ 0 なら解析もしない
+        let lgate = super::cutconf::lgate_weight();
+        if lgate.is_some_and(|w| w < 1e-3) {
+            return false;
+        }
         let t0 = Instant::now();
         // 診断用: デバッグ解が打ち切り値より良ければ、解析の段ごとにデバッグ解を切らないか確かめる
         let dbg_x: Option<Vec<f64>> = if self.dbg_on { DEBUG_SOL.with(|dd| dd.borrow().as_ref().filter(|xd| super::cutconf::check_mode() || self.p.objective(xd) < self.prune_limit() - 1e-6).cloned()) } else { None };
         let r = super::cutconf::analyze(&self.dom, self.p, start, self.conflict_max_len_multi(), dbg_x.as_deref());
         super::cutconf::add_secs(t0.elapsed().as_secs_f64());
         let Some((coefs, rhs)) = r else { return false };
+        if let Some(w) = lgate {
+            if !super::cutconf::lgate_take(w) {
+                return false;
+            }
+        }
         // 診断用: デバッグ解を切っていないか (打ち切り値による大域的な固定を使うので、デバッグ解が打ち切り値より良いときだけ)
         if self.dbg_on {
             DEBUG_SOL.with(|dd| {
