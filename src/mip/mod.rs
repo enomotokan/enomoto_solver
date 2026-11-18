@@ -71,13 +71,8 @@ use solver::{MipParams, MipStatus};
 /// プロセスに CPU を取られている間は進まないので、マシンの負荷で打ち切りの位置が変わりにくい (nw04: 負荷で根のカットの
 /// 1 ラウンドが 1.9 -> 4.0 秒になり、時間の上限で 2 ラウンドで止まって根で閉じず 9 -> 17 秒)。Linux 以外と
 /// `ENOMOTO_MIP_WALL_CAPS` では経過時間。差だけを使う。
-/// `ENOMOTO_MIP_IMPLBD_GENINT` (試作、[`separation`] の implied bound カット): 一般整数の列への含意も使う。
-pub(crate) fn implbd_genint() -> bool {
-    env_str!("ENOMOTO_MIP_IMPLBD_GENINT").is_some()
-}
-
 /// `ENOMOTO_MIP_GR_AUTO` (試作、inv/gfrsplit-20261021): 一般整数 (0-1 でない整数) の列がある問題だけで
-/// `ENOMOTO_MIP_IMPLBD_GENINT` と `ENOMOTO_T_MIP_CUT_LP_RETRY=4` を働かせる。一般整数がなければ G はカットを増やさない
+/// 一般整数の列への含意の implied bound カット (全体で使う試作 `ENOMOTO_MIP_IMPLBD_GENINT` は 2026-11-18 に削除) と `ENOMOTO_T_MIP_CUT_LP_RETRY=4` を働かせる。一般整数がなければ G はカットを増やさない
 /// (プロービングで 0-1 の相手の含意を集めなくなるだけ) が、R はカットを入れた LP の時間の上限を延ばして根の経路を変える
 /// (neos-960392 (全部 0-1) では根の RENS が解を出すかが根のカットの経路で決まり、gfr では 4 回とも -2 だった)。
 /// `=2` なら一般整数がある問題では根の面の頂点の分離も止める (`ENOMOTO_MIP_FACE_SEP=off` と同じ。mzzv42z・roll3000 は
@@ -96,14 +91,11 @@ pub(crate) fn gr_auto_face_off() -> bool {
     }
 }
 
-/// この問題で G (一般整数の含意の implied bound カット) を働かせるか ([`implbd_genint`] か、[`gr_auto`] で一般整数があるとき)
+/// この問題で G (一般整数の含意の implied bound カット) を働かせるか ([`gr_auto`] で一般整数があるとき)
 /// `ENOMOTO_T_MIP_GR_AUTO_MIN_FRAC` (既定 0.01): 一般整数の列が固定されていない列のこの割合に満たない問題では働かせない。
 /// nursesched-sprint02 (一般整数 20 / 10250 列) では根の頂点が変わって根のヒューリスティクスが外れ (71、既定は 59)、再スタートで
 /// 固まる列が 7000 本前後 -> 1382 本になり時間切れになる回がある。mzzv42z は 235 / 11717 列 (2.0%)
 pub(crate) fn implbd_genint_for(is_int: &[bool], lo: &[f64], up: &[f64]) -> bool {
-    if implbd_genint() {
-        return true;
-    }
     if !gr_auto() {
         return false;
     }
@@ -253,9 +245,9 @@ pub(crate) fn gr_restart_ff_for(p: &MipProblem) -> bool {
     env_def!("ENOMOTO_MIP_GR_RESTART", "1") == Some("ff") && gr_restart_for(p)
 }
 
-/// `ENOMOTO_MIP_RESTART_REF` か [`gr_restart_for`]
+/// 再スタート前の暫定解を参照解として残すか ([`gr_restart_for`] の (1)。全体で使う試作 `ENOMOTO_MIP_RESTART_REF` は 2026-11-18 に削除)
 pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
-    env_str!("ENOMOTO_MIP_RESTART_REF").is_some() || gr_restart_for(p)
+    gr_restart_for(p)
 }
 
 /// 試作 `ENOMOTO_MIP_TIMEDEP` = 文字の並び (既定では使わない、analysis/timedep_20261114.md): 経過時間で決めていた分かれ道・量を
@@ -1254,16 +1246,9 @@ thread_local! {
     /// `ENOMOTO_MIP_RESTART_HCM_KEEP` (試作): 再スタート前の求解が HiGHS 流のカット管理を自動で選んだ (`hcm_auto`) か。新しい求解は
     /// 根の LP がカット込みの値から始まるので、強いカットの判定 (カットが根の LP を 3 割以上上げる) がまず立たない
     pub(crate) static RESTART_HCM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// `ENOMOTO_MIP_RESTART_PC` (試作): 再スタート前の pseudocost。再スタートが [`solve_problem`] に渡す問題の空間で置き、前処理後の空間に
+    /// 再スタート前の pseudocost (木の中の再スタートで引き継ぐとき。全体で使う試作 `ENOMOTO_MIP_RESTART_PC` は 2026-11-18 に削除)。再スタートが [`solve_problem`] に渡す問題の空間で置き、前処理後の空間に
     /// 写して置き直し ([`pseudocost::Pseudocost::remap_for_restart`])、再スタート後の求解の開始時に取り出す (static TLS の領域のため Box)
     pub(crate) static RESTART_PC: std::cell::RefCell<Option<Box<pseudocost::Pseudocost>>> = const { std::cell::RefCell::new(None) };
-}
-
-/// `ENOMOTO_MIP_RESTART_PC` (試作、既定では使わない): 外側の求解の再スタートで、再スタート前の pseudocost を前処理の後の問題の列へ写し、
-/// 新しい求解の初めの pseudocost にする (再スタートを繰り返しても続けて写す)。既定では再スタート後の求解は空の pseudocost から始まり、
-/// `ENOMOTO_MIP_SUBMIP_PC_INHERIT` でも再スタート後の根のサブ MIP に引き継ぐ観測がない (analysis/restart_pc_20261031.md)
-pub(crate) fn restart_pc_on() -> bool {
-    env_str!("ENOMOTO_MIP_RESTART_PC").is_some()
 }
 
 pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {

@@ -9397,7 +9397,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_RESTART_CUTS_READD`: 再スタート前に効いていたカットを、根の LP を解く前にカットの行として加える
             // (問題の行ではないので木の中で年齢により外せる。プールにもあるので外れても違反すれば戻る)
             let readd_mark = super::RESTART_CUTS_READD.with(|f| f.replace(false));
-            if (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt() || self.watch.is_some() || super::gr_restart_readd_for(self.p) || readd_mark) && !self.params.submip {
+            if (self.highs_cutmgmt() || self.watch.is_some() || super::gr_restart_readd_for(self.p) || readd_mark) && !self.params.submip {
                 let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = cuts.iter().filter(|(c, _)| c.iter().all(|&(j, _)| j < self.p.n)).map(|(c, r)| (c.clone(), f64::NEG_INFINITY, *r)).collect();
                 if !rows.is_empty() {
                     self.add_cut_rows(&rows);
@@ -22166,7 +22166,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (効いているものだけ残しても)、木の LP は 405 -> 822 行、ノードの LP は 1 回平均 187 反復 (行が 190 程度なら 47)。
         // neos-911970 (60 秒) では暫定解 56.23 -> 54.83 (最適値 54.76)・下界 53.69 -> 53.62 で解けるには至らず、再スタート後の
         // カットのループが進まなくなる (47.26 のまま。カットの行の上に作る次のカットが変わる) ので既定では使わない
-        let readd = (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt() || super::gr_restart_readd_for(p)) && !keep_all;
+        let readd = (self.highs_cutmgmt() || super::gr_restart_readd_for(p)) && !keep_all;
         // `ENOMOTO_MIP_RESTART_CUTS_ROWS` (試作、既定では使わない): 再スタートで新たに固定される整数列が、根の始めに自由だった整数列の
         // `ENOMOTO_T_MIP_RESTART_CUTS_ROWS_FRAC` (0.3) 以上なら、readd でも問題の行として持ち込む (前処理が列を別の列で置き換えると、
         // カットを写せずに捨てていた頃の回避。今は [`super::restart_cuts_subst`] で写すので要らず、前処理が効かなくなる分遅くなりうる)
@@ -22426,9 +22426,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let free = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] < self.dom.global_up[j]).count();
             eprintln!("MIP: restart {}: pseudocost observations: columns up {up}, down {down}, both {both} (free integer columns {free}); observations up {su}, down {sd}; nodes {}", params.restarts, self.nodes);
         }
-        // `ENOMOTO_MIP_RESTART_PC` (試作、既定では使わない): 今の pseudocost を再スタート後の求解の初めの pseudocost にする
+        // 木の中の再スタートで、今の pseudocost を再スタート後の求解の初めの pseudocost にする
         // (前処理の後の列へ写すのは [`super::solve_problem`] の中、受け取りは [`Self::run`])
-        if super::restart_pc_on() || tree_carry {
+        if tree_carry {
             super::RESTART_PC.with(|s| *s.borrow_mut() = Some(Box::new(self.pc.clone())));
         }
         super::RESTART_HCM.with(|f| f.set(self.hcm_auto && super::restart_hcm_keep()));
