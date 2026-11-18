@@ -14,7 +14,7 @@ def apply(m, name):
         return
     if name == "nosep":  m.setSeparating(PS.OFF)
     elif name == "nosepnode":  m.setParam("separating/maxrounds", 0)  # 根だけ分離
-    elif name == "noprop":  m.setPropagating(PS.OFF)
+    elif name == "noprop":  m.setParam("propagating/maxrounds", 0); m.setParam("propagating/maxroundsroot", 0)
     elif name == "nopre":  m.setPresolve(PS.OFF)
     elif name == "noheur":  m.setHeuristics(PS.OFF)
     elif name == "nosym":  m.setParam("misc/usesymmetry", 0)
