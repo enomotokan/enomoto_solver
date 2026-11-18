@@ -438,6 +438,37 @@ pub(super) struct SepRowsCache {
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
+    /// 診断 `ENOMOTO_MIP_FRACCUT=d` (振る舞いは変えない): 根のカットのループの 1 ラウンドの進み。`prev_rows` は前のラウンドの
+    /// 終わりの LP のカットの行 (効いていないカットを外す前の写し)。今の LP 解がそれをすべて満たし目的値も変わらなければ、
+    /// 前の LP の最適面の上の別の頂点に移っただけ (`face`)。目的値が変わらず前のカットの行を破るなら多面体が最適面の側で締まった
+    /// (`flat_tight`)。目的値が上がれば `up`。戻り値は今の LP のカットの行の写し
+    #[allow(clippy::too_many_arguments)]
+    fn fraccut_diag(&self, round: usize, dobj: f64, reldiff: f64, nf0: usize, nf1: usize, fs0: f64, fs1: f64,
+                    prev_rows: &[(Vec<(usize, f64)>, f64, f64)]) -> Vec<(Vec<(usize, f64)>, f64, f64)> {
+        let m0 = self.p.m;
+        let nr = self.lp.num_rows();
+        let y = self.lp.row_duals();
+        let active = (m0..nr.min(y.len())).filter(|&i| y[i].abs() > 1e-9).count();
+        let x = self.lp.col_values();
+        let mut nviol = 0usize;
+        let mut viol = 0.0f64;
+        for (r, lo, up) in prev_rows {
+            let a: f64 = r.iter().map(|&(j, c)| c * x[j]).sum();
+            let v = ((lo - a) / (1.0 + lo.abs())).max((a - up) / (1.0 + up.abs()));
+            if v > 1e-6 {
+                nviol += 1;
+            }
+            viol = viol.max(v);
+        }
+        let kind = if reldiff > 1e-4 { "up" } else if nviol == 0 { "face" } else { "flat_tight" };
+        eprintln!(
+            "MIP: FRACCUT round {round}: dobj {dobj:.6e} reldiff {reldiff:.3e} nfrac {nf0} -> {nf1} fsum {fs0:.4} -> {fs1:.4} active {active}/{} prev_viol {nviol}/{} maxviol {viol:.3e} {kind}",
+            nr - m0,
+            prev_rows.len()
+        );
+        (m0..nr).map(|i| { let (lo, up) = self.lp.row_bounds(i); (self.lp.row(i).to_vec(), lo, up) }).collect()
+    }
+
     /// `ENOMOTO_MIP_SEP_ADAPTIVE` を使うか (根の外側の求解・背景のカットの求解。サブ MIP と 500 列未満の問題では使わない)
     fn sep_adapt_on(&self) -> bool {
         env_str!("ENOMOTO_MIP_SEP_ADAPTIVE").is_some() && !self.params.submip && self.p.n >= 500
@@ -1543,6 +1574,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             .flatten();
         let mut prev_obj = self.lp.objective();
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
+        // 試作 `ENOMOTO_MIP_FRACCUT` (analysis/fraccut_20261118): 非整数の度合い Σ min(f, 1−f) と前のラウンドの LP 解
+        let fc_mode = fraccut_env().filter(|_| !self.params.submip);
+        let mut prev_fsum = frac_sum(&self.fractional(&self.lp.col_values()));
+        let mut prev_rows: Vec<(Vec<(usize, f64)>, f64, f64)> = if fc_mode.is_some_and(|v| v.contains('d')) {
+            (self.p.m..self.lp.num_rows()).map(|i| { let (lo, up) = self.lp.row_bounds(i); (self.lp.row(i).to_vec(), lo, up) }).collect()
+        } else {
+            Vec::new()
+        };
         let first_obj = prev_obj;
         // 試作 `ENOMOTO_T_MIP_CLIQUE_FB_MARGINAL`: このループのラウンドの目的値だけを持つ
         CLQFB_HIST.with(|h| h.borrow_mut().clear());
@@ -4041,8 +4080,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // SCIP の停滞判定 (solve.c): 目的値の相対変化が 1e-4 以下で、分数の列の数も十分に減っていなければ
                 // 停滞。根では 10 回分で止める (サブ MIP では 3 回)。目的値も分数の列の数もまったく減らない
                 // ラウンドは 2 回分と数える (何も進まない問題で長く回さない。分数の列が減っている間は続ける)。
-                let nfrac = self.fractional(&self.lp.col_values()).len();
+                let fr_now = self.fractional(&self.lp.col_values());
+                let nfrac = fr_now.len();
+                let fsum = frac_sum(&fr_now);
                 let reldiff = (obj - prev_obj) / stall_scale(obj, prev_obj, p.offset, self.params.submip);
+                if fc_mode.is_some_and(|v| v.contains('d')) {
+                    prev_rows = self.fraccut_diag(round, obj - prev_obj, reldiff, prev_nfrac, nfrac, prev_fsum, fsum, &prev_rows);
+                }
+                // 'o': 非整数の列の数の減りでは停滞を打ち消さない (目的値だけで数える)。'c': 非整数の度合いが
+                // `ENOMOTO_T_MIP_FRACCUT_FDROP` (既定 0.1) の割合以上減ったラウンドも停滞と数えない
+                let fc_frac_ok = match fc_mode {
+                    Some(v) if v.contains('o') => false,
+                    Some(v) if v.contains('c') => fsum < (1.0 - tunable!("ENOMOTO_T_MIP_FRACCUT_FDROP", 0.1, f64)) * prev_fsum,
+                    _ => false,
+                };
+                let fc_only_obj = fc_mode.is_some_and(|v| v.contains('o'));
+                prev_fsum = fsum;
                 // `ENOMOTO_MIP_HO6_STALL=割合` (試作、既定では使わない。`1` なら 1e-3): 根 (サブ MIP でない) の停滞の判定の
                 // 「目的値の相対変化」を、目的値の大きさではなくカットで上げた分 (今の値 - カットの前の値) で測る (HiGHS の
                 // 「下界の伸びが今までの伸びの 0.1% 以下」と同じ尺度)。unitcal_7 は目的値 1.96e7 に対して根のギャップが 0.35% しかなく、
@@ -4150,7 +4203,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 break;
                             }
                         }
-                    } else if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 && !saturated && !widen_now {
+                    } else if reldiff <= 1e-4 && (fc_only_obj || nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64) && !fc_frac_ok && !saturated && !widen_now {
                         let cr_one = cutrnd_main && cutrnd('f') && super::cap_clock() - t_loop0 < cr_budget;
                         stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened && !cr_one { 2 } else { 1 };
                         if stall >= if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip && !sub_hc { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
@@ -8731,4 +8784,17 @@ mod mushagg_tests {
         // 右辺が 0 なら (w = 0 で満たせる) カットはない
         assert!(super::super::cuts::vb_cover_cut(&vars, &[(0, 1.0), (1, -1.0)], 0.0).is_none());
     }
+}
+
+/// 試作 `ENOMOTO_MIP_FRACCUT` (analysis/fraccut_20261118、既定では使わない): 根のカットのループの、非整数の部分の扱い。
+/// 値の文字: `d` 診断 (毎ラウンド Δ下界・Δ非整数の列の数・Δ非整数の度合い・効いているカットの数・前の LP 解が切られたか)、
+/// `o` 非整数の列の数の減りで停滞を打ち消さない、`c` 非整数の度合い Σ min(f, 1−f) が十分減ったラウンドも停滞と数えない
+pub(super) fn fraccut_env() -> Option<&'static str> {
+    static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::env::var("ENOMOTO_MIP_FRACCUT").ok().filter(|v| !v.is_empty() && v != "0")).as_deref()
+}
+
+/// 非整数の度合い Σ min(f, 1−f) (f は値の小数部)
+fn frac_sum(fr: &[(usize, f64)]) -> f64 {
+    fr.iter().map(|&(_, v)| { let f = v - v.floor(); f.min(1.0 - f) }).sum()
 }
