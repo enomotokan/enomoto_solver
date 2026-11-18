@@ -131,7 +131,7 @@ graph20-20-1rand が大きく速く、ほかは変わらない。
 misc07 (63×3、1 列固定)・graph20-20-1rand (37×37、666 列固定) だけ。ほかのオービトープ (neos-1456979 884×5、neos-827175 175×122、
 uccase12 168×14 など) はパッキングでなく動的のまま。VUBAGG が組を作るのは neos-787933 (234612)・physiciansched6-2 (2283)・neos8 (16) だけ。
 列の数は 3・6 と 37 の間が広く空いているので、普通の if で「10 列以上のオービトープだけ静的」にした (neos-911970・misc07 は動的に戻り、
-graph20 は変わらない)。cargo test 419 通過、fuzz_g1 c 400 (下限 0 で ORBPP を働かせて)・v 400 bad 0。
+graph20 は変わらない)。cargo test 417 通過 (merge 前の木)、fuzz_g1 c 400 (下限 0 で ORBPP を働かせて)・v 400 bad 0。
 短い比べ S (`planS.py` → `shards_S.json`、1 分担 約 1.1 時間): M の CMS750_4・rococoC10-001000・timtab1・neos-787933 (600 秒) と P の neos-911970・
 graph20-20-1rand (60 秒) × 種 1〜3 × {def, g1}。`python run.py S 0`、集計 `python summ.py S`。
 
