@@ -219,7 +219,8 @@ fn cut_quality(c: &Candidate, p: &MipProblem, cnorm: f64) -> f64 {
     let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
     let objpar = if cnorm > 0.0 && nc > 0.0 { c.coefs.iter().map(|&(j, v)| v * p.cost[j]).sum::<f64>().abs() / (cnorm * nc) } else { 0.0 };
     let intsup = c.coefs.iter().filter(|&&(j, _)| p.is_int[j]).count() as f64 / c.coefs.len().max(1) as f64;
-    c.efficacy + 0.1 * objpar + 0.1 * intsup
+    // 係数は `ENOMOTO_T_CUTSEL_W_OBJPAR`・`ENOMOTO_T_CUTSEL_W_INTSUP` (既定 0.1・0.1、cutcoef_20261118 の格子の計測用)
+    c.efficacy + tunable!("ENOMOTO_T_CUTSEL_W_OBJPAR", 0.1, f64) * objpar + tunable!("ENOMOTO_T_CUTSEL_W_INTSUP", 0.1, f64) * intsup
 }
 
 /// `cands[n0..]` のうち質 ([`cut_quality`]、`ENOMOTO_MIP_KEEP_BEST_EFF` なら効き目だけ) の最も大きい 1 本だけ残す。
