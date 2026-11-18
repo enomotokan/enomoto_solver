@@ -953,9 +953,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07): Local-MIP の解で暫定解が良くなった時刻 (この求解の経過秒)
     lmip_imps: Vec<f64>,
-    /// `ENOMOTO_MIP_LOCALMIP` の別スレッド (試作)
-    lmip_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
-    /// `ENOMOTO_MIP_LOCALMIP` のスレッドが良くなった解を入れる箱
+    /// FJ のスレッドの Local-MIP (`ENOMOTO_MIP_FJ_LOCALMIP`・`ENOMOTO_MIP_FJ_LMIP_MIX`) が良くなった解を入れる箱
     lmip_mailbox: Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>,
     /// 試作 `ENOMOTO_MIP_TICKS` の `j`: FJ のスレッドの手間の門 ([`crate::ticks::Gate`])、前に許したときの主のスレッドの手間、最後に待ったときの状態
     fj_gate: Option<(std::sync::Arc<crate::ticks::Gate>, f64, crate::ticks::GateState)>,
@@ -5548,7 +5546,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         subfix_retry: Vec::new(),
         fj_thread: None,
         lmip_imps: Vec::new(),
-        lmip_thread: None,
         lmip_mailbox: None,
         fj_gate: None,
         fj_has_inc: None,
@@ -7548,7 +7545,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 根の解発見スレッドの解も FJ の解と同じに扱う (質の悪い解なら、暫定解なし用の RENS・解発見スレッドを続ける)。
             // 局所探索の刻みを直した後、hypothyroid-k1 では解発見スレッドの局所探索が -27 を返し、それで「FJ の解だけ」でなくなって
             // 暫定解なし用の RENS (-2851 = 最適値を出す) が回らなくなった
-            // FJ のスレッドの Local-MIP (`ENOMOTO_MIP_FJ_LMIP_MIX`・`ENOMOTO_MIP_FJ_LOCALMIP`・`ENOMOTO_MIP_LOCALMIP`) の解も同じに扱う。
+            // FJ のスレッドの Local-MIP (`ENOMOTO_MIP_FJ_LMIP_MIX`・`ENOMOTO_MIP_FJ_LOCALMIP`) の解も同じに扱う。
             // そうしないと、混ぜた形では FJ の解も受け渡し箱を通って「Local-MIP」の名で入り、hypothyroid-k1 で RENS が回らず -3 のまま終わった
             self.inc_only_fj = self.heur_label.starts_with("feasibility jump") || self.heur_label.starts_with("find thread") || self.heur_label == "Local-MIP";
             if self.heur_label == "Local-MIP" {
@@ -9441,60 +9438,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // FJ・Local-MIP のスレッドの FJ_P3 の前処理 ([`super::fj_p3_problem`]) の期限: この求解の時間の上限
                 // ([`super::with_presolve_deadline`]。過ぎたらプロービングなどを打ち切る。時間内の動きは変わらない)
                 let fj_deadline = self.deadline;
-                // `ENOMOTO_MIP_LOCALMIP` (試作): 1 = FJ と並べて別スレッドで Local-MIP 風の局所探索 ([`super::localmip`]) を回す、
-                // 2 = FJ の代わりに Local-MIP だけ。時間の上限は `ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC` (0.1) × 時間上限、最大 10 秒。
-                // 結果は根のカットのループの各ラウンドと木の各ノードで (待たずに) 受け取る
-                let lmip = env_str!("ENOMOTO_MIP_LOCALMIP").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-                if lmip > 0 {
-                    let lcap = if self.params.frac_tl().is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * self.params.frac_tl()).min(10.0) } else { 10.0 };
-                    let t_start = self.start;
-                    let pl = pc.clone();
-                    let (llo, lup) = (lo.clone(), up.clone());
-                    let lstop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                    let lstop2 = lstop.clone();
-                    let lseed = seed ^ 0x6A09_E667_F3BC_C909;
-                    let mailbox: std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>> = Default::default();
-                    let mb2 = mailbox.clone();
-                    self.lmip_mailbox = Some(mailbox);
-                    let hl = std::thread::spawn(move || {
-                        let post_sc = if fj_p3 { super::with_presolve_deadline(fj_deadline, || super::fj_p3_problem(&pl)) } else { None };
-                        let run = |q: &super::problem::MipProblem, lo: &[f64], up: &[f64]| {
-                            let t = std::time::Instant::now();
-                            // 良くなった解はその場で受け渡し箱に入れる (元の問題の空間に戻して)
-                            let on_sol = |x: &[f64]| {
-                                let y = match &post_sc {
-                                    Some((_, post, sc)) => super::fj_p3_solution(x.to_vec(), post, sc),
-                                    None => x.to_vec(),
-                                };
-                                mb2.lock().unwrap().push(y);
-                            };
-                            let lr = super::localmip::local_mip(q, lo, up, lcap, lseed, Some(&lstop2), &on_sol);
-                            eprintln!(
-                                "MIP: Local-MIP: {} steps, least violated rows {}, pair/chain moves {}, found {} (first at {:?}s of {:.2}s), started at {:.2}s",
-                                lr.steps,
-                                lr.least_viol,
-                                lr.pair_moves,
-                                lr.best.as_ref().map_or("none".to_string(), |x| format!("{:.6e}", q.objective(x))),
-                                lr.first_time.map(|v| (v * 100.0).round() / 100.0),
-                                t.elapsed().as_secs_f64(),
-                                (t - t_start).as_secs_f64()
-                            );
-                            lr.best
-                        };
-                        match &post_sc {
-                            Some((q, post, sc)) => run(q, &q.col_lo, &q.col_up).map(|x| super::fj_p3_solution(x, post, sc)),
-                            None => run(&pl, &llo, &lup),
-                        }
-                    });
-                    self.lmip_thread = Some((hl, lstop));
-                }
                 // `ENOMOTO_MIP_FJ_LOCALMIP` (試作): FJ のスレッドで、FJ2 が続けて解なしなら Local-MIP + 連鎖の手に切り替える
                 // ([`super::heuristics::fj_search_fb`])。Local-MIP は時間の上限 (`ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC` × 時間上限、最大 10 秒) か、
                 // FJ のスレッドを止める合図 (根のカットのループの終わり) まで回り、良くなった解はその場で受け渡し箱に入れる
-                let fjl = env_str!("ENOMOTO_MIP_FJ_LOCALMIP").is_some() && lmip == 0;
+                let fjl = env_str!("ENOMOTO_MIP_FJ_LOCALMIP").is_some();
                 // `ENOMOTO_MIP_FJ_LMIP_MIX` (試作): FJ のスレッドで FJ と Local-MIP + 連鎖に時間を分け合う ([`super::heuristics::fj_lmip_mix`])。
                 // 時間の上限は Local-MIP と同じ。実行可能性問題 (目的が全部 0) では今までどおり
-                let mix = fj_lmip_mix_on() && lmip == 0 && !fjl;
+                let mix = fj_lmip_mix_on() && !fjl;
                 let fjl_cap = if ftl.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * ftl).min(10.0) } else { 10.0 };
                 let fjl_box: std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>> = Default::default();
                 if fjl || mix {
@@ -9521,9 +9471,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let h = std::thread::spawn(move || {
                     crate::ticks::set_vclock(gate2.is_some());
                     let _gate = gate2.map(crate::ticks::install_gate);
-                    if lmip == 2 {
-                        return None;
-                    }
                     super::heuristics::FJ_NOSOL_CAP.with(|c| c.set(nosol_cap.max(0.0)));
                     super::heuristics::FJ_HAS_INC.with(|f| *f.borrow_mut() = Some(has_inc));
                     // Local-MIP に切り替える探索。`map` で解を `pc` の空間に戻して受け渡し箱に入れる
@@ -22858,7 +22805,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
-    /// `ENOMOTO_MIP_LOCALMIP` の別スレッドが終わっていれば結果を受け取る (待たない)。
+    /// FJ のスレッドの Local-MIP の受け渡し箱の解を受け取る (待たない。別スレッドで回す試作 `ENOMOTO_MIP_LOCALMIP` は 2026-11-18 に削除)。
     pub(super) fn poll_lmip_thread(&mut self) {
         self.lmboost_bg_tick(None);
         self.post_prechain();
@@ -22880,15 +22827,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.fj_gate_grant();
-        if self.lmip_thread.as_ref().is_some_and(|(h, _)| h.is_finished()) {
-            let (h, _) = self.lmip_thread.take().unwrap();
-            if let Ok(Some(x)) = h.join() {
-                self.heur_label = "Local-MIP";
-                let ok = self.try_incumbent(x);
-                self.heur_label = "";
-                eprintln!("MIP: Local-MIP solution accepted {ok} ({:.2}s)", self.start.elapsed().as_secs_f64());
-            }
-        }
     }
 
     /// 試作 `ENOMOTO_MIP_PRECHAIN` ([`super::prechain`]): 前処理の間に立てた FJ・Local-MIP のスレッドに根の問題 (対称性の行を足す前の
