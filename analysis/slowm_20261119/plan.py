@@ -1,4 +1,5 @@
 """P2-SCIP-M の分担表: python plan.py P NP → shards_P.json (MIPLIB の 58 問 × 種 1〜3 × {def, fix, fixis}、60 秒)。
+python plan.py Q NQ → shards_Q.json (58 問 × 種 1〜3 × {def, st5}、60 秒)。
 python plan.py M NM → shards_M.json (scan_s*.jsonl で前処理が変わった Mittelmann の問題 + 対象 6 問 × 種 1・2 × {def, fixis}、600 秒)。
 見積りは analysis/final_20261118 の def の時間 (解けなかった回は上限) + P は 8 秒・M は 30 秒。"""
 import json, glob, sys
@@ -28,6 +29,10 @@ if SET == "P":
     CF = ["def", "fix", "fixis"]; TP = times("res_P_s*.jsonl", 60)
     balance({(p, s): [(p, c, s) for c in (CF[(i + s) % 3:] + CF[:(i + s) % 3])] for i, p in enumerate(PROBS) for s in (1, 2, 3)},
             lambda p, c, s: TP.get((p, 1), 60) + 8, NS, "shards_P.json", 60)
+elif SET == "Q":
+    CF = ["def", "st5"]; TP = times("res_P_s*.jsonl", 60)
+    balance({(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, p in enumerate(PROBS) for s in (1, 2, 3)},
+            lambda p, c, s: TP.get((p, 1), 60) + 8, NS, "shards_Q.json", 60)
 else:
     CF = ["def", "fixis"]; TM = times("res_M_s*.jsonl", 600)
     ch = {r["problem"] for f in glob.glob(str(D / "scan_s*.jsonl")) for l in open(f) if l.strip() for r in [json.loads(l)] if r.get("changed")}
