@@ -54,6 +54,37 @@ fn redrop_age() -> u32 {
     tunable!("ENOMOTO_T_MIP_GEN_LAZY_AGE", 0u32, u32)
 }
 
+/// 試作 LAZYFRAC (analysis/lazyfrac_20261117/、既定では使わない): 外す候補の非零の割合 `frac` (候補の非零 / 元の行の非零) の
+/// シグモイドで、外す候補の数を決める。`pre` は `GEN` か `CLQ` で、`ENOMOTO_T_MIP_{pre}_LAZY_GATE_F0` = f0 > 0 (既定 0 = 門を使わない) なら
+/// 割合 `share = σ(k (frac − f0))` (k = `ENOMOTO_T_MIP_{pre}_LAZY_GATE_K`、既定 20) を返し、候補のうち余裕の大きい順に `floor(share × 候補)` 行を外す。
+/// `ENOMOTO_MIP_LAZY_GATE_ONE=1` (対照、mzzv11 の「1 行外すだけで速い」偶然の分を測る) なら share >= 0.5 (= frac >= f0) のとき余裕の最も大きい 1 行だけ、
+/// そうでなければ 0 行。門を使わないときは `None` (候補を全部外す)。戻り値は (外す行の数, share)
+pub(super) fn gate_keep(pre: &str, frac: f64, n: usize) -> Option<(usize, f64)> {
+    let f0 = match pre {
+        "GEN" => tunable!("ENOMOTO_T_MIP_GEN_LAZY_GATE_F0", 0.0, f64),
+        _ => tunable!("ENOMOTO_T_MIP_CLQ_LAZY_GATE_F0", 0.0, f64),
+    };
+    if f0 <= 0.0 {
+        return None;
+    }
+    let k = match pre {
+        "GEN" => tunable!("ENOMOTO_T_MIP_GEN_LAZY_GATE_K", 20.0, f64),
+        _ => tunable!("ENOMOTO_T_MIP_CLQ_LAZY_GATE_K", 20.0, f64),
+    };
+    let share = 1.0 / (1.0 + (-k * (frac - f0)).exp());
+    let keep = if env_str!("ENOMOTO_MIP_LAZY_GATE_ONE").is_some_and(|v| v != "0") {
+        usize::from(share >= 0.5).min(n)
+    } else {
+        ((share * n as f64).floor() as usize).min(n)
+    };
+    Some((keep, share))
+}
+
+/// 診断 `ENOMOTO_MIP_DIAG_GENLAZY` の値が `stop` か `exit` (数えるだけで外さない。`exit` は GENLAZY の診断を出した後に終える)
+pub(super) fn diag_nodrop() -> bool {
+    matches!(env_str!("ENOMOTO_MIP_DIAG_GENLAZY"), Some("stop") | Some("exit"))
+}
+
 /// 試作 `ENOMOTO_MIP_GEN_LAZY` が使われているか
 pub(super) fn on() -> bool {
     env_str!("ENOMOTO_MIP_GEN_LAZY").is_some_and(|v| v != "0")
@@ -223,6 +254,8 @@ impl<L: MipLp> Solver<'_, L> {
             let nnz_all: usize = p.rows.iter().map(|r| r.len()).sum();
             let mut n_two = 0usize;
             let mut out = GenLazy::default();
+            // 候補ごとの余裕の物差し (小さいほど余裕が大きい: 点数の判定なら点数、余裕の判定なら正規化した活動)。門 (LAZYFRAC) で絞るときの順
+            let mut keys: Vec<f64> = Vec::new();
             for (i, r) in p.rows.iter().enumerate() {
                 let (l, u) = self.lp.row_bounds(i);
                 if l == f64::NEG_INFINITY && u == f64::INFINITY {
@@ -299,15 +332,31 @@ impl<L: MipLp> Solver<'_, L> {
                     cnt[kk][4] += 1;
                     cnt[kk][5] += r.len();
                     out.push(i, r, sg, b, kind);
+                    keys.push(if score { q } else { na });
                 }
             }
             if diag.is_some() || (self.params.verbose && self.pool_tid == 0) {
                 let ks: Vec<String> = (0..7).map(|k| format!("\"{}\":{{\"rows\":{},\"basic\":{},\"nnz\":{},\"infrange\":{},\"drop\":{},\"dropnnz\":{},\"hist\":{:?},\"qhist\":{:?}}}", KINDS[k], cnt[k][0], cnt[k][1], cnt[k][2], cnt[k][3], cnt[k][4], cnt[k][5], hist[k], qhist[k])).collect();
                 eprintln!("GENLAZY {{\"m\":{m0},\"nnz\":{nnz_all},\"two_sided\":{n_two},\"mode\":\"{}\",\"theta\":{theta},\"tau\":{tau},\"bins\":{BINS:?},\"qbins\":{QBINS:?},{}}}", if score { "score" } else { "slack" }, ks.join(","));
             }
+            if diag == Some("exit") {
+                // 診断だけ (Mittelmann の問題の f を数える): 木に入らずに終える
+                std::process::exit(0);
+            }
+            // 試作 LAZYFRAC: 外す候補の非零の割合 f のシグモイドで外す行の数を決める (主のみ。従は主の一覧を使う)
+            let frac = out.nnz() as f64 / nnz_all.max(1) as f64;
+            if let Some((keep, share)) = gate_keep("GEN", frac, out.len()) {
+                let mut ord: Vec<usize> = (0..out.len()).collect();
+                ord.sort_by(|&a, &b| keys[a].total_cmp(&keys[b]).then(a.cmp(&b)));
+                let set: std::collections::HashSet<u32> = ord[..keep].iter().map(|&k| out.rows[k]).collect();
+                if diag.is_some() || (self.params.verbose && self.pool_tid == 0) {
+                    eprintln!("GEN_LAZY gate: nonzero share {frac:.4} -> share {share:.3}, keep {keep} of {} rows", out.len());
+                }
+                out = out.filter(|i| set.contains(&(i as u32)));
+            }
             out
         };
-        if diag == Some("stop") || cand.is_empty() {
+        if diag_nodrop() || cand.is_empty() {
             return;
         }
         // 診断 `ENOMOTO_MIP_GEN_LAZY_TOUCH` (mzzv11 の切り分け): 行を外さず、選んだ行の境界を今の値のまま設定し直す (標準形の作り直しだけ)
