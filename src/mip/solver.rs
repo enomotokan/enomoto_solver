@@ -565,6 +565,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_TAB_BUDGET`: tableau の分離の呼び出し回数と、試した行の数の累計 (HiGHS の `numTries`)
     pub(super) tab_calls: u64,
     pub(super) tab_tries: u64,
+    /// 試作 `ENOMOTO_MIP_TAB_HIGHS_SIG` (gate2、analysis/gate2_20261117/tab): 根の最初の tableau の分離で測った作業量から決めた
+    /// 行の選び方。0 = まだ決めていない、1 = 既定、2 = HiGHS の選び方、3 = HiGHS の選び方で fill の予算なし (値 `n`)
+    pub(super) tab_sig: u8,
     /// 直前のカットのラウンドの LP の時間 (秒、`ENOMOTO_MIP_FACE_ADAPT` で面の LP の時間の上限に使う。未知なら無限大)
     pub(super) last_cut_lp_secs: f64,
     /// 再スタート前の暫定解 (`START_SOL`) を受け取っている間か ([`Self::try_incumbent`] の `ENOMOTO_MIP_RESTART_REF` の判定を飛ばす)
@@ -992,6 +995,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 試作 `ENOMOTO_MIP_NODELP2` の `x`: 今のノードで選んだ腕 (Some(true) 厳密な DSE 重み・Some(false) 保存した重み) と、腕ごとの [回数, 秒の指数移動平均]
     nl2_arm: Option<bool>,
     nl2_stat: [(u64, f64); 2],
+    /// 試作 `ENOMOTO_MIP_NODELP2` の `s` (gate2 候補 4): `x` を使う割合の積算 (1 を越えたら 1 回使う)
+    nl2_acc: f64,
     /// 診断用 (`ENOMOTO_MIP_RESTORE_DIAG`): 直前に戻した基底の (保存後に足された行, 消えた行, 基底の数の不一致)
     restore_diag: (usize, usize, bool),
     /// 診断用: 共有の待ち行列から受け取ったノードの基底の、基底変数の余り (受け取ったときに数える)
@@ -1590,6 +1595,9 @@ static HO4_ROOT_LP_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 /// その後も 1/`ENOMOTO_T_MIP_NODELP2_EXPLORE` (16) で他方を試す)。`X`: 兄弟も含めていつも厳密な重み (`ENOMOTO_MIP_RESTORE_EXACT_DSE`
 /// と同じ。HiGHS は基底を置き直すと重みを捨て、near optimal でなければ厳密な重みを計算し直す。行の多い LP では計算が重い)。`g`: `p`・`b`・`x`・`X` を、このスレッドの
 /// ノードの LP の平均の反復が `ENOMOTO_T_MIP_NODELP2_HEAVY` (既定 100) 以上のときだけ使う。
+/// `s` (gate2 候補 4、analysis/gate2_20261117/nodelp2s/): `x` の入り切りを `g` の段 (平均 100) でなく、このスレッドのノードの LP の平均の反復 a の
+/// 連続関数 w = σ((ln a − ln `ENOMOTO_T_MIP_NODELP2S_C` (150)) / `ENOMOTO_T_MIP_NODELP2S_W` (0.3)) にし、取り出したノードの割合 w で `x` を使う
+/// (積算で決める。ノードの LP が `ENOMOTO_T_MIP_NODELP2S_MIN` (32) 回に満たないうちは使わない)。`p`・`b`・`X` には効かない。
 /// `q` (比べ用): 待ち行列・共有の待ち行列から取ったノード (兄弟でない) では保存した基底を戻さず、今の LP の基底 (直前のノードの最適基底) から
 /// 解く (HiGHS の `HighsSearch::installNode` はノードに基底を持たせない。ENOMOTO では待ち行列のノードが重くなった)。
 fn nodelp2(c: char) -> bool {
@@ -5354,6 +5362,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sep_act_override: None,
         tab_calls: 0,
         tab_tries: 0,
+        tab_sig: 0,
         last_cut_lp_secs: f64::INFINITY,
         accepting_start: false,
         par_sb_stats: [0; 2],
@@ -5588,6 +5597,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         restored_now: false,
         nl2_arm: None,
         nl2_stat: [(0, 0.0); 2],
+        nl2_acc: 0.0,
         restore_diag: (0, 0, false),
         pool_excess: 0,
         pool_basis_stats: 0,
@@ -13303,7 +13313,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 探索の順が変わって下界 54.23 -> 53.09。40 問: 19 問 25.05 -> 25.90 (binkar10_1 21 -> 33 秒、mik-250 22 -> 28 秒、
                 // neos5 37 -> 49 秒: 行ごとの BTRAN m 回の分が重い)。既定では使わない
                 // 試作 `ENOMOTO_MIP_NODELP2` の `x` ([`nodelp2`]): 取り出したノードの最初の LP の重みを時間の移動平均で選ぶ
-                let nl2x = resolves == 0 && self.restored_now && self.tp_kind >= 1 && self.nl2_on('x') && {
+                let nl2x = resolves == 0 && self.restored_now && self.tp_kind >= 1 && self.nl2x_gate() && {
                     let warm = tunable!("ENOMOTO_T_MIP_NODELP2_WARM", 8u64, u64);
                     let explore = tunable!("ENOMOTO_T_MIP_NODELP2_EXPLORE", 16u64, u64).max(2);
                     let [(n0, e0), (n1, e1)] = self.nl2_stat;
@@ -16760,6 +16770,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.noinc_reward[arm] += reward;
         self.noinc_count[arm] += 1;
         self.noinc_cost[arm] += secs;
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODELP2` の `x` をこのノードで使うか (`s` ならノードの LP の平均の反復のシグモイドの割合で。[`nodelp2`])
+    fn nl2x_gate(&mut self) -> bool {
+        if !nodelp2('s') {
+            return self.nl2_on('x');
+        }
+        if !nodelp2('x') || self.params.submip || self.node_lps < tunable!("ENOMOTO_T_MIP_NODELP2S_MIN", 32u64, u64) {
+            return false;
+        }
+        let c = tunable!("ENOMOTO_T_MIP_NODELP2S_C", 150.0, f64).max(1.0);
+        let w = tunable!("ENOMOTO_T_MIP_NODELP2S_W", 0.3, f64).max(1e-3);
+        let a = (self.node_iters as f64 / self.node_lps as f64).max(1.0);
+        self.nl2_acc += 1.0 / (1.0 + (-(a.ln() - c.ln()) / w).exp());
+        if self.nl2_acc >= 1.0 {
+            self.nl2_acc -= 1.0;
+            true
+        } else {
+            false
+        }
     }
 
     /// 試作 `ENOMOTO_MIP_NODELP2` の文字 `c` をこのノードで使うか (サブ MIP では使わない。`g` なら重い LP のスレッドだけ)
