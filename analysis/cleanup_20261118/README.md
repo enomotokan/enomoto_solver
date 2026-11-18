@@ -74,7 +74,7 @@ fuzz_slack 1000 5000 mismatches 0。cargo test 413 通過・0 失敗。7 本と�
 |---|---|---|---|---|---|---|
 | `ZH_ONLY`・`ZH_PRE`・`ZH_TRIAL` (`T_MIP_ZH_TRIAL_*`) | (このコミット) | 298 | 74 | 411/0/19 (`random_validity_pre` が消えた) | 一致 | analysis/gap3_zhtrial_20261109.md (ZH_TRIAL=r は 58 問で既定に負ける、=1 は見分けにならない。ZH_ONLY は木で使う害)、analysis/cbcimpl_20261029.md (ZH_PRE は揺れの範囲)。zerohalf.rs の `coef_gcd` は ZH_PRE だけが使っていた |
 | `RESTORE_EXACT_DSE`・`RESTORE_NEVER`・`SMALL3_SUBMIP_LIGHT`・`SMALL2_SUBLIGHT`・`LNS_NO_CAP`・`EARLY_RESTART_SKIP_LIGHT` | (このコミット) | 23 | 74 | 411/0/19 | 一致 | analysis/nodelp2_20261107.md (EXACT_DSE は行の多い LP で重い、NEVER は親の基底を戻す方が良い)、small_overhead3・2_20261102.md (58 問全体で悪い)、mip_primal_weakness_20261016.md (LNS_NO_CAP 不採用)、skiplight_20261029.md (SGM 同じか遅く解けた数が減る)。厳密な DSE 重みの経路は `NODELP2` の `X`・`x` が使うので残し、環境変数の判定だけ消した |
-| `NODE_CUTS`・`TREE1_SB` (`T_MIP_TREE1_MINREL`)・`SUBMIP_FIRST_DONE`・`OPTFACE_FIRST`・`SB_POLY_SCORE` | (このコミット) | 110 | 74 | 411/0/19 | 一致 | beasleyC3_mc11_20261019.md (NODE_CUTS は一律にすると他の問題が悪化)、tree_close1_20261104.md (TREE1_SB は効かなかった)、smallprob_overhead_20261028.md (FIRST_DONE は単独で SGM が悪い)、optface_cuts_20261105.md (OPTFACE_FIRST はどちらも悪い)、cbcimpl_20261029.md (折れ線のスコアは効かない)。終わった順に受け取る経路は `submip_outcome_stop` (既定) が使うので残し、環境変数の判定だけ消した。折れ線の `poly_child_gains` は SB_TIGHTEN の診断が使うので残した |
+| `NODE_CUTS`・`TREE1_SB` (`T_MIP_TREE1_MINREL`)・`SUBMIP_FIRST_DONE`・`OPTFACE_FIRST`・~~`SB_POLY_SCORE`~~ (後で戻した、下の表) | (このコミット) | 110 | 74 | 411/0/19 | 一致 | beasleyC3_mc11_20261019.md (NODE_CUTS は一律にすると他の問題が悪化)、tree_close1_20261104.md (TREE1_SB は効かなかった)、smallprob_overhead_20261028.md (FIRST_DONE は単独で SGM が悪い)、optface_cuts_20261105.md (OPTFACE_FIRST はどちらも悪い)、cbcimpl_20261029.md (折れ線のスコアは効かない)。終わった順に受け取る経路は `submip_outcome_stop` (既定) が使うので残し、環境変数の判定だけ消した。折れ線の `poly_child_gains` は SB_TIGHTEN の診断が使うので残した |
 | `TREE_SHARED_QUEUE`・`TREE_KEEP_SIBLINGS`・`TREE3_JOINCAP` (`T_MIP_TREE3_JOINCAP_*`)・`LOSE6_2_PROBE_WAIT`・`LOSE6_2_BGPROOF` | (このコミット) | 142 | 74 | 411/0/19 | 一致 | mip_primal_weakness_20261016.md (共有の待ち行列・兄弟を残す形は不採用、解けた数が 2 減る)、tree_close3_20261104.md (JOINCAP は待ったサブ MIP が良い解を出す問題で損)、halve_submip_20261030.md (LOSE6_2 の 2 件は drayage-25-23 の悪化で採らない)。共有の待ち行列の専用の部品 (`pop_hybrid`・`pool_donate_all`・`pool_donate_except_siblings`・`take_all_except`・`pops`) も消した。サブ MIP を止める仕組みは `SUBCAP` の `j` が使うので残した。`LOSE6_2_SUBLB` は対象外なので残した |
 | `COST_PRIORITY`・`BG_RETURN_DSE` | (このコミット) | 66 | 74 | 411/0/19 | 一致 | cbcimpl_20261029.md (COST_PRIORITY は揺れの範囲)、halve_submip_20261030.md (BG_RETURN_DSE は得が揺れを超えない、採らない)。裏のカットの DSE 重みの受け渡し (`CutJob::dse`) は BG_RETURN_DSE だけが値を入れていたので一緒に消した (`set_dse_vars`・`dse_snapshot` は他が使うので残る) |
 | `FC_NODE_SEP`・`FC_NODE_SEP2`・`FC_NODE_SEP_ADAPT` (それにしか効かない `FC_NODE_PATH_HIGHS`・`FC_SEP2_REPAIR`・`T_MIP_FC_SEP_*` を含む) | (このコミット) | 105 | 74 | 411/0/19 | 一致 | beasleyC3_mc11_20261019.md・20261020.md (FC_NODE_SEP は不採用、SEP2 は rout が 2〜3 倍・40 問未計測のまま、ADAPT は分離がほとんど走らない・方向を捨てた、PATH_HIGHS は mc11 で悪い)。木の中の分離は後の `TREE_SEP` (`tree_sep_fc`) が引き継いでいるので、その経路は残した |
@@ -92,7 +92,7 @@ fuzz_slack 1000 5000 mismatches 0。cargo test 413 通過・0 失敗。7 本と�
 | `LP_PROBE_AFTER_EXT` | (このコミット) | 87 | 74 | 409/0/19 | 一致 | lp_probe_after_ext_20261102.md (58 問 2 回: SGM +2.7%・解けた 87 → 86、常に基底を渡す形は +9.4%・87 → 80。根の頂点が変わる揺れに負ける)。クリーク行の拡張の後の LP による固定とかけ直しの道を消した。`lp_probe` の引数 `try_fix` は今はいつも真 (注記した) |
 | `BG_DETERM_ROBUST` (`T_MIP_BG_DETERM_RATIO`・`_LEN`・`_GAP`・`_WAIT_MULT`) | (このコミット) | 121 | 74 | 409/0/19 | 一致 | robust_stall_20261102.md・halve_submip_20261030.md (=o は h80x6320d が 3 回とも時間切れ・58 問 −1.6%・解けた −3、=ao は待ちすぎの費用、=p+o の組も h80x6320d の揃った損で採らない)。`BgRobust`・裏のカットの拒否 (`veto_own_stall`)・第 2 段階の強制 (`robust_phase2`)・その状態 (`flat_run`・`robust_stalled`・`vetoes`) と、`wait_determ` の使われなくなった引数を消した。裏のカットを始めたときの値 (`start_bits`) は `HO5_BGSTALL`・`CUTSTALL_GAP`・`S4_BGZERO` が使うので残した |
 
-## 飛ばしたもの (第 2 弾、12 件)
+## 飛ばしたもの (第 2 弾、13 件)
 
 | 試作 | 理由 |
 |---|---|
@@ -107,6 +107,7 @@ fuzz_slack 1000 5000 mismatches 0。cargo test 413 通過・0 失敗。7 本と�
 | `CUTSEL_HIGHS` | 単独の不採用の記録がない (組み合わせでの不採用と「採否なし」だけ)。既定の `CUTSEL_PROBE` の `S` と部品を共用する |
 | `CUTSEL_HIGHS_GUARD` | `fc` の形は既定 (`CUTSEL_PROBE=rate` の `cutsel_guard_fc`) に取り込まれていて、残る「混ぜる形」の不採用の記録がない |
 | `NODESEL_BANDIT` | analysis/treeclose_20261114.md 9.13・9.30 で 60 秒は中立、600 秒では既定より速い面があり (`=1` は解けた数 +3)、不採用とは書かれていない (後の DFSBB に移ったが判断の記録がない) |
+| `SB_POLY_SCORE` | **一度消してから戻した**: 親から「条件付きで入れ直す候補 (sbt = SB_TIGHTEN・SB_POLY_RC など) と同じ部品に触れうるので消さない」と追加の注意があり (消した後に読んだ)、select_branch_inner の分岐を元のとおりに戻した (戻した後も ident.py の 12 問が一致・cargo test 409 通過) |
 | `HNFCUT` | `HNFPRE` (PRUNE の受け持ちの既定の外し) と部品 (`hnf::mode`・`cuts.rs` の `Sub::Cong`・分離の `set_kind`) を共用し、HNFPRE の前処理の起動にも関わる |
 
 依頼書の除外 4 件 (`SYMREFL`・`SYM_LEX_CANON`・`IMPLINT_TU2`・`ROOTLP3`) は触っていない。
@@ -127,7 +128,7 @@ fuzz_slack 1000 5000 mismatches 0。cargo test 413 通過・0 失敗。7 本と�
 
 ## まとめ (第 2 弾)
 
-- 対象 84 件のうち、依頼書の除外 4 件を除く 80 件を処理した。**消したのは 68 件** (19 コミット)、src の正味 **−1904 行**。飛ばしたのは 12 件 (上の表)。
+- 対象 84 件のうち、依頼書の除外 4 件を除く 80 件を処理した。**消したのは 67 件** (19 コミット + SB_POLY_SCORE を戻した 1 コミット)、src の正味 **約 −1892 行**。飛ばしたのは 13 件 (上の表)。
 - 多くは「全体で有効にする環境変数」だけを消し、既定の経路や他の試作が使う本体は残した (FJ_P3 の前処理 4 件、GR の再スタート・
   一般整数の含意 4 件、固定率の止め方、終わった順の受け取り、Harris2Scope、CUT_AGG の `e` の延長、ProbeEnd、MUSHAGG の
   `with_intvub_mode`、PROBE_CLIQUE の含意の表など。行ごとの備考に書いた)。
