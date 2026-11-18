@@ -803,11 +803,11 @@ pub struct NormalKkt {
 /// (組 1 つにつき行き先の `u32` 4 バイト。1.5 億で 600 MB。scpm1 は 5000 行・50 万列で約 4,200 万組だが、正規方程式は
 /// 5000 x 5000 で済み、拡大系 (記号分解 105 秒、数値分解 1 回 3.6 秒) よりはるかに軽い。試験用 `ENOMOTO_T_NORMAL_MAX_TRIPLETS`)。
 const NORMAL_MAX_TRIPLETS: usize = 150_000_000;
-/// 試作 `ENOMOTO_IPM_G5CANCEL` (既定では使わない。analysis/vsscip_slow_20261118/g5/README.md): 正規方程式・拡大系を作る途中でも止めの合図
+/// `ENOMOTO_IPM_G5CANCEL` (2026-11-18 から既定、`=0` で使わない。analysis/vsscip_slow_20261118/g5/README.md): 正規方程式・拡大系を作る途中でも止めの合図
 /// ([`crate::cancel::is_cancelled`]) を見て、立っていれば作るのをやめる (`None`)。sorrell3 の前処理の LP プロービングの根の LP の同時実行では、
 /// 二段解法が 0.9 秒で勝った後も内点法側が 169162 行の正規方程式 (型の非零 6000 万) を作って並べ替え続け、RSS が 5.3 GB に達していた
 fn g5cancel() -> bool {
-    let hit = env_str!("ENOMOTO_IPM_G5CANCEL").is_some_and(|v| !v.is_empty() && v != "0") && crate::cancel::is_cancelled();
+    let hit = env_def!("ENOMOTO_IPM_G5CANCEL", "1").is_some() && crate::cancel::is_cancelled();
     if hit {
         g5cancel_note("kkt");
     }
