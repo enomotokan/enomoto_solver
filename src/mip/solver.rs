@@ -7565,8 +7565,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         })
     }
 
-    /// 暫定解があり、その値が下界 `lb` (の切り上げ) より目的関数の刻み (なければ相対 1e-6) 以上悪いか
-    /// ([`Self::obj_support`] を呼ぶ条件)。
     /// `ENOMOTO_MIP_BOUND_STEP` (2026-11-04 から既定、`=0` で使わない): 目的値が刻み `obj_step` の格子 (`offset + k * step`) にしか乗らないとき、
     /// 利用者に返す下界 (と経過の行の下界) を格子の点に切り上げる ([`round_lb_to_step`])。暫定解があればその値で上から抑える。
     /// 本体の求解 (サブ MIP でなく、木の従でもない) だけで使う。暗黙の整数列で刻みを取ったとき (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`) も、
@@ -7622,24 +7620,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: OBJINT c: lattice refreshed {:?} -> {l:?}", self.obj_lat);
             }
             self.obj_lat = Some(l);
-        }
-    }
-
-    pub(super) fn obj_support_gap(&self, lb: f64) -> bool {
-        if let Some(l) = self.obj_lat {
-            let Some((z, _)) = self.incumbent.as_ref() else { return false };
-            return l.round_up(lb) < *z - 1e-6 * z.abs().max(1.0);
-        }
-        if obj_step_lattice() && self.obj_step.is_some() {
-            // 暫定解が格子に乗らないときも、格子の点で比べる
-            let Some((z, _)) = self.incumbent.as_ref() else { return false };
-            let step = self.obj_step.unwrap();
-            return *z - self.p.offset - step * ((lb - self.p.offset) / step - 1e-6).ceil() > 1e-6 * z.abs().max(1.0);
-        }
-        let Some((z, _)) = self.incumbent.as_ref() else { return false };
-        match self.obj_step {
-            Some(step) => *z - step * ((lb - self.p.offset) / step - 1e-6).ceil() - self.p.offset >= step - 1e-9,
-            None => *z - lb > 1e-6 * z.abs().max(1.0),
         }
     }
 
@@ -11590,11 +11570,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // Local-MIP を回して磨く ([`Self::root_lmip`])
                 if root_lmip_on() && !self.params.submip && self.incumbent.is_some() {
                     heur!("root Local-MIP", self.root_lmip());
-                }
-                // 目的関数の台のサブ MIP (`ENOMOTO_MIP_OBJ_SUPPORT`、試作、[`Solver::obj_support`])。暫定解が根の LP の値から
-                // 目的関数の刻み以上離れているときだけ
-                if env_str!("ENOMOTO_MIP_OBJ_SUPPORT").is_some() && self.obj_support_gap(root_obj) {
-                    heur!("objective support", self.obj_support(&x));
                 }
                 if par_late {
                     self.parallel_submips = false;
