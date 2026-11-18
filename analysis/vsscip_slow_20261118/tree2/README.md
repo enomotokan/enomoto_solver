@@ -100,3 +100,22 @@ y_j も入る)。固定の条件は (c) と同じ (worst_case_ok か y_j の上�
   始点 10000 は根 75.5・466.6 秒と悪い。始点を「境界から離れた連続変数の距離の和」の順・行の逆順に並べても根 68.9・72.6 で効かず (入れていない)、
   効くのは始点の数 (全部の行を回してラウンドが続くこと)。
 - 広い計測の候補 pst = `ENOMOTO_T_MIP_PATH_STARTS=1000000` (domrev/cfg.py、shards_MPST・PPST、M には istanbul-no-cutoff を足した)。
+
+## 6. supportcase42: 1 ノードの重さ (1 スレッド・200 秒、logs/ours_supportcase42_prof_s1_t1.log)
+
+- 前処理は当方・SCIP とも行をほとんど減らさない (当方 18439 行のまま、SCIP 18157 行・19183 列、整数 1026・連続 18157)。
+- **根の LP**: 当方 22692 反復・28.9 秒、SCIP (SoPlex) の最初の LP 2008 反復・0.78 秒 (同じ値 7.3435)。反復が 11 倍。
+- **木の LP**: 当方は 201 ノードで 50001 反復 (1 ノード 248.8 反復・0.30 秒、LU の手間が全体の ticks の 41%)。SCIP は 150 秒で 3380 ノード、
+  dual LP 4726 回で 10994 反復 (1 回 2.3 反復)。1 反復の時間は同じくらい (当方 1.2 ms、SCIP 3.2 ms) なので、差は**反復の数**。
+- ほかに、根の強分枝 44 LP で 30 秒、根のヒューリスティクスの interior rounding 27 秒。
+- 見立て: 当方の LP (双対単体法) が、この問題 (連続 18440 列・変数上下限 1772 本) で始めの基底・子の暖かい再開から多くの反復を要する。
+  分枝や木の作りではなく LP の側の問題なので、LP の担当に回すのがよい (SCIP の切り分けでも、どの機能を切っても 300 秒で下界 7.751 に
+  届き、ノードが軽いことが決め手)。
+
+## 7. seymour: zero-half
+
+- 当方の根の分離 (`ENOMOTO_MIP_SEPSTAT=1`、4 スレッド): 既定では tableau だけ (根 405.47 → 408.48、20 本)。zero-half は既定で切ってある
+  (`ENOMOTO_MIP_NO_ZEROHALF` の既定 `1`、analysis/cand1108zd_default_20261109.md)。
+- `ENOMOTO_MIP_NO_ZEROHALF=0` で根 **412.91** (SCIP 411.05、zero-half を切った SCIP 408.79)。伸び 6.13 のうち zerohalf 83%。根の時間 15.1 → 20.0 秒。
+- 既存の試作 `ENOMOTO_MIP_CUTMIX=z` (全部整数で係数が小さい行の割合 `intsmall` が 0.5 以上の問題でだけ zero-half) は seymour (intsmall 1.0) で入る。
+  58 問・Mittelmann では測られていない (analysis/cutmix_20261111.md)。

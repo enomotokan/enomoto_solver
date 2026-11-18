@@ -6241,12 +6241,24 @@ pub(crate) fn clqact_on() -> bool {
 /// (クリーク表の 2 文字のクリークにあたる) を後の列の伝播に使い (HiGHS の probing はクリーク表で伝播する)、含意の本数の上限を広げ、
 /// 試す回数の予算と時間の上限を広げる
 pub(crate) fn clqprb_on() -> bool {
-    env_str!("ENOMOTO_MIP_CLQPRB").is_some_and(|v| v != "0")
+    clqprb_val().is_some()
 }
+
+/// `ENOMOTO_MIP_CLQPRB` の値 (`0`・`off` なら `None`)。[`CLQPRB_DEFAULT_ON`] が真なら、付けていないときは `1dgrs` (gate2 候補 2 の形)
+fn clqprb_val() -> Option<&'static str> {
+    if CLQPRB_DEFAULT_ON {
+        env_def!("ENOMOTO_MIP_CLQPRB", "1dgrs")
+    } else {
+        env_str!("ENOMOTO_MIP_CLQPRB").filter(|v| *v != "0" && *v != "off")
+    }
+}
+
+/// `ENOMOTO_MIP_CLQPRB` を既定で入れるか (既定化するときに真にする。analysis/gate2_20261117/clqprb_s/README.md)
+const CLQPRB_DEFAULT_ON: bool = false;
 
 /// [`clqprb_on`] の値に文字 `c` を含むか (`d`: 何も固定できなければ増やした含意を捨てる)。
 pub(crate) fn clqprb_has(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_CLQPRB").is_some_and(|v| v.contains(c))
+    clqprb_val().is_some_and(|v| v.contains(c))
 }
 
 thread_local! {
@@ -6373,20 +6385,17 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         CLQPRB_FORCE.with(|f| f.set(false));
         let (cf, ct, ce) = PROBE_GAIN.with(|f| f.get());
         if let Some((dp, de, dff, deu, dr)) = def_state {
-            // `s` (試作、gate2 候補 2、analysis/gate2_20261117/clqprb_s/README.md): 戻すかを、成果の比 ρ = (含意の形の成果) / (既定の形の成果)
-            // のシグモイド σ(k (ln ρ − ln ρ0)) で決め、0.5 未満なら戻す (`ENOMOTO_T_MIP_CLQPRB_S_RHO` = ρ0、既定 2、`_S_K` = k、既定 8)。
-            // `r` は ρ ≤ 1 で戻す形。puriri (ρ 1.77) は含意で増えた固定で locks の sub-MIP が実行不能になり解を失い、mzzv11 (ρ ≥ 3.6)・
-            // neos8 (4.0)・mzzv42z (≥ 2.5) は効く (prbimp_20261113 §4。6 問から選んだしきい値で楽観的)
+            // `s` (gate2 候補 2、analysis/gate2_20261117/clqprb_s/README.md): 成果の比 ρ = (含意の形の成果) / (既定の形の成果) が
+            // `ENOMOTO_T_MIP_CLQPRB_S_RHO` (既定 2) 未満なら戻す。`r` は ρ ≤ 1 で戻す形。puriri (ρ 1.77) は含意で増えた固定で locks の sub-MIP が
+            // 実行不能になり解を失い、mzzv11 (3.84)・neos8 (4.04)・mzzv42z (3.42) は効く。M・P の 106 問で ρ は ≤ 1.77 と ≥ 3.42 に分かれる
+            // (シグモイドの形で測ったが、0.5 で切るので同じ働きの if にした)
             let (dsum, csum) = ((gf + gt + ge) as f64, (cf + ct + ce) as f64);
             let keep = if clqprb_has('s') {
-                let rho0: f64 = tunable!("ENOMOTO_T_MIP_CLQPRB_S_RHO", 2.0f64, f64);
-                let k: f64 = tunable!("ENOMOTO_T_MIP_CLQPRB_S_K", 8.0f64, f64);
-                let z = k * ((csum.max(0.5) / dsum.max(0.5)).ln() - rho0.max(1e-9).ln());
-                let p = 1.0 / (1.0 + (-z).exp());
+                let rho = csum.max(0.5) / dsum.max(0.5);
                 if verbose {
-                    eprintln!("MIP: probing: CLQPRB=s: gain ratio {:.3}, sigmoid {:.3}", csum.max(0.5) / dsum.max(0.5), p);
+                    eprintln!("MIP: probing: CLQPRB=s: gain ratio {rho:.3}");
                 }
-                p >= 0.5
+                rho >= tunable!("ENOMOTO_T_MIP_CLQPRB_S_RHO", 2.0f64, f64)
             } else {
                 csum > dsum
             };
