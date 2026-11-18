@@ -113,3 +113,10 @@ noswot・neos-933966・traininstance6・tbfp-network・mzzv11 など、どの機
 - 判定: fb が irp・supportcase33 で全種 0.8 倍未満 (つまり sigmoid が全種 1.25 倍超遅い) かつ速い側 4 問で sigmoid の得が残るときだけ、
   特徴の if (sp と根の clique の伸び) を作る。そうでなければこの件も「二極化なし」で閉じる。
 - 場合分けの if を作ったら、得は別の種で消えやすいので、さらに種 8・9 と P の 58 問 (60 秒) で中立を確かめる。
+
+### 段階 2 の A の台本 (`clq/`)
+
+- `clq/cfg.py` (def・fb・sa)、`clq/shards_A.json` (上の 9 分担、各 7 回。設定の順は種で入れ替え)、`clq/run.py`、`clq/summ.py`。
+- 回し方 (リポジトリの根で `maturin develop --release` の後): `cd analysis/ablate_20261118/clq && python run.py A K` (K = 0〜8)。
+  結果は `res_A_sK.jsonl` に足し、途中から再開できる。ソルバーは同時に 1 つ (4 スレッド)。
+- 集計: `python summ.py > summ_A.txt` (問題・種ごとの秒の表、遅い側・速い側に分けた def/fb・sa/fb の比、判定)。
