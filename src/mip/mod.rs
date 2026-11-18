@@ -56,7 +56,6 @@ pub(crate) mod seplearn;
 pub(crate) mod cutmix;
 pub(crate) mod mcf;
 pub(crate) mod clique;
-pub(crate) mod cutsel_ens;
 pub(crate) mod pretime;
 pub(crate) mod plsb;
 pub(crate) mod prechain;
