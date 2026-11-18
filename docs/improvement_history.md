@@ -10582,6 +10582,25 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
     区間の上端 +5% の目安は満たさない (7 問・3 種で区間が広い) が、利用者の判断で採用。
 - 確かめ: cargo test 409 通過・0 失敗 (既定化した木)、mip_fuzz_vs_highs 300 bad 0。
 
+## 2026-11-18: 不採用の試作 67 件を削除 (片付け 第 2 弾)
+
+- 棚卸しの候補 A の残り 84 件 (analysis/cleanup_20261118/cands2.txt) のうち、計測中・判断待ちの 4 件 (SYMREFL・SYM_LEX_CANON・IMPLINT_TU2・ROOTLP3)
+  を除く 80 件を 1 件ずつ記録 (主に analysis/revisit_20261112/inventory.tsv と元の記録) で確かめ、67 件を消した (src の正味 約 −1892 行)。
+  手順・確かめは第 1 弾と同じ: 毎回 cargo test 全通過・警告が増えない・1 スレッドの 12 問の状態・目的値・ノード数が消す前と完全に一致、
+  およそ 10 件ごとと最後に fuzz 7 本で bad 0 (7 回)。
+- 消したもの (環境変数): ZH_ONLY・ZH_PRE・ZH_TRIAL、RESTORE_EXACT_DSE・RESTORE_NEVER、SMALL3_SUBMIP_LIGHT・SMALL2_SUBLIGHT、LNS_NO_CAP、
+  EARLY_RESTART_SKIP_LIGHT、NODE_CUTS、TREE1_SB、SUBMIP_FIRST_DONE、OPTFACE_FIRST、OPTFACE_MOVE、TREE_SHARED_QUEUE・TREE_KEEP_SIBLINGS、
+  TREE3_JOINCAP、LOSE6_2_PROBE_WAIT・LOSE6_2_BGPROOF、COST_PRIORITY、BG_RETURN_DSE、FC_NODE_SEP・FC_NODE_SEP2・FC_NODE_SEP_ADAPT (と FC_NODE_PATH_HIGHS・
+  FC_SEP2_REPAIR)、MC11FIX1_RACE、DIVE_RCFIX、ROOT_SUBMIP_REL、ROOT_WIDE_SUBMIP、FIX_CAP、CMIR_DELTA1・CMIR_DELTAS_HIGHS、CUT_AGE_HIGHS、CUT_EXTEND・
+  CUT_EXTEND_CATCHUP、CUT_LP_CONTINUE、CUT_KEEP_LU、CUT_HARRIS2、ORIGROW_TIGHT、RINS_ROOT_BOOST・RINS_DIVE・RENS_DIVE、RR_HIGHS、SUBMIP_NESTED、
+  INEQ_SINGLETON・CS_OBJ_PIVOT・DUAL_UB・FJ_LP_REPAIR・IMPL_PROP、DUPCOL・PROBE_EQUIV_FIX・ROWNORM・HO3_ENUM、RESTART_PC・RESTART_REF・RESTART_CUTS_READD・
+  IMPLBD_GENINT、NODE_PERTURB・SIMPLEX_POLISH_DSE・POOL1_DONATE、CUTSEL_PROBE_KEEP・INTVUB・FACE_ADAPT、LOCALMIP・LOCALMIP_CHAIN、LP_PROBE_AFTER_EXT、
+  BG_DETERM_ROBUST。これらの環境変数は今は何もしない (削除済み、2026-11-18)。多くは「全体で有効にする環境変数」だけで、既定の経路 (FJ_P3・GR_AUTO・
+  GR_RESTART など) や他の試作が使う本体は残した。
+- 飛ばした (13 件、理由は README): SB_POLY_SCORE (一度消したが、入れ直す候補の sbt と同じ部品に触れうるので戻した)、NODELP2・DFSPQ (gate2 が残すと決めた)、MC11FIX2 (revisit の次の候補)、ROOT_BASIS_FIX (highsloss の効き目と派生の試作)、
+  SUBA_RATE・FOCUS (一部の値しか不採用の記録がない)、FACE_SEP (既定の形を選ぶ変数)、SYNTH_CLOCK_FACTOR (再較正のつまみ)、CUTSEL_HIGHS・
+  CUTSEL_HIGHS_GUARD (単独の不採用の記録がない・一部が既定)、NODESEL_BANDIT (600 秒で既定より速い面があり不採用と書かれていない)、HNFCUT (HNFPRE と共用)。
+
 
 ## 2026-11-18: 支配される 0-1 列の固定を、支配される側から候補を探す形で既定にする (drevmf、採用)
 
