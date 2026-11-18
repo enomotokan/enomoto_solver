@@ -1,5 +1,6 @@
 //! Local-MIP (Lin・Zou・Cai, CP 2024「Local-MIP: Efficient Local Search for Mixed Integer Programming」) 風の局所探索
-//! (`ENOMOTO_MIP_LOCALMIP`、試作・既定では使わない)。論文は手元にないので、覚えている範囲の手順で組んだ。論文どおりの所:
+//! (FJ のスレッドの Local-MIP `ENOMOTO_MIP_FJ_LMIP_MIX` (既定) などが使う。別スレッドで回す試作 `ENOMOTO_MIP_LOCALMIP` は
+//! 2026-11-18 に削除)。論文は手元にないので、覚えている範囲の手順で組んだ。論文どおりの所:
 //!
 //! - **tight move** (mixed tight move): 違反している行を 1 本とり、その行の列 1 本を「その行をちょうど満たす境界 (等式なら右辺)」まで
 //!   動かす。整数列は満たす向きに丸める。FJ の「跳び先」(その列の全部の行の重み付き違反の和を最小にする値) とは違い、1 本の行だけを見る。
@@ -452,12 +453,6 @@ impl St<'_> {
         self.lift_at = self.moves;
         true
     }
-}
-
-/// Local-MIP 風の局所探索で実行可能な点を探す。`lo`/`up` は列の境界、`time_cap` は秒、`stop` が立ったら止める。
-/// `on_sol` は実行可能解が良くなるたびに呼ぶ (別スレッドから本体へ渡す)。
-pub(super) fn local_mip(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>, on_sol: &dyn Fn(&[f64])) -> LocalMipResult {
-    local_mip_opts(p, lo, up, time_cap, seed, stop, on_sol, env_str!("ENOMOTO_MIP_LOCALMIP_CHAIN").is_some())
 }
 
 /// 途中で止めて続きから再開できる Local-MIP の探索 ([`LocalMip::run`])。FJ と時間を分け合うとき (`ENOMOTO_MIP_FJ_LMIP_MIX`) に使う。
@@ -1284,7 +1279,25 @@ pub(super) trait ChainView {
     }
 }
 
-/// 連鎖の手 (`ENOMOTO_MIP_LOCALMIP_CHAIN`・`ENOMOTO_MIP_FJ_CHAIN`、試作): 違反行 `i` の tight move から始め、その手で新たに
+thread_local! {
+    /// 連鎖の手の手間 (`effort`) を手間の単位 ([`crate::ticks`]) に数えるか ([`count_chain_guard`])。`ENOMOTO_MIP_TICKS` の `j` (手間の時計) でなくても
+    /// 手間の上限で止める呼び出し側 (前処理・根の後の早めの探索の 1 スレッド、`ENOMOTO_MIP_TICKS` の `f`) が真にする
+    static COUNT_CHAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`COUNT_CHAIN`] を真にし、戻り値を落とすと元に戻す。数えなかった版では Local-MIP の手間が連鎖の手の分だけ抜け、実時間の 1/8 程度にしか
+/// ならない問題があった (neos859080: 46 秒を 5.5 秒と数え、上限 6 秒の早めの探索が 46 秒回った。analysis/hang_20261117/README.md)
+pub(crate) fn count_chain_guard() -> impl Drop {
+    struct G(bool);
+    impl Drop for G {
+        fn drop(&mut self) {
+            COUNT_CHAIN.with(|c| c.set(self.0));
+        }
+    }
+    G(COUNT_CHAIN.with(|c| c.replace(true)))
+}
+
+/// 連鎖の手 (`ENOMOTO_MIP_FJ_CHAIN`・FJ のスレッドの Local-MIP、試作。Local-MIP の別スレッドで使う試作 `ENOMOTO_MIP_LOCALMIP_CHAIN` は 2026-11-18 に削除): 違反行 `i` の tight move から始め、その手で新たに
 /// 悪くなった行 (等式を先に、同じなら重みの大きい方) を元に戻す手 (その行の 1 列の tight move か、その行の 1 の 0-1 列を
 /// 集合分割の行の中の 0 の列と入れ替える 2 列の手) を次々に足す (ejection chain)。途中でスコアの合計が最良だった所までの
 /// 手を返す (正のときだけ)。`set_of` は 0-1 列ごとの集合分割 (パッキング) の行。3 つ目は評価で触った非零の数 (手間)。
@@ -1303,7 +1316,7 @@ pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: 
     let use_abort = env_str!("ENOMOTO_MIP_NO_CHAIN_ABORT").is_none();
     // 試作 `ENOMOTO_MIP_TICKS` の `j` (手間の時計): 打ち切りを見るたびに、その間の手数 (`effort`) × `ENOMOTO_T_MIP_CHAIN_EFFORT_TICKS` (4) を
     // ヒューリスティクスの手間に足す (連鎖の手の探索は他に手間を数えない)
-    let vc = crate::ticks::vclock();
+    let vc = crate::ticks::vclock() || COUNT_CHAIN.with(|c| c.get());
     let effort_seen = std::cell::Cell::new(0u64);
     let chain_k = tunable!("ENOMOTO_T_MIP_CHAIN_EFFORT_TICKS", 4u64, u64);
     let aborted = |evals: &mut u32, effort: u64| {

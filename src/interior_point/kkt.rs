@@ -803,6 +803,23 @@ pub struct NormalKkt {
 /// (組 1 つにつき行き先の `u32` 4 バイト。1.5 億で 600 MB。scpm1 は 5000 行・50 万列で約 4,200 万組だが、正規方程式は
 /// 5000 x 5000 で済み、拡大系 (記号分解 105 秒、数値分解 1 回 3.6 秒) よりはるかに軽い。試験用 `ENOMOTO_T_NORMAL_MAX_TRIPLETS`)。
 const NORMAL_MAX_TRIPLETS: usize = 150_000_000;
+/// `ENOMOTO_IPM_G5CANCEL` (2026-11-18 から既定、`=0` で使わない。analysis/vsscip_slow_20261118/g5/README.md): 正規方程式・拡大系を作る途中でも止めの合図
+/// ([`crate::cancel::is_cancelled`]) を見て、立っていれば作るのをやめる (`None`)。sorrell3 の前処理の LP プロービングの根の LP の同時実行では、
+/// 二段解法が 0.9 秒で勝った後も内点法側が 169162 行の正規方程式 (型の非零 6000 万) を作って並べ替え続け、RSS が 5.3 GB に達していた
+fn g5cancel() -> bool {
+    let hit = env_def!("ENOMOTO_IPM_G5CANCEL", "1").is_some() && crate::cancel::is_cancelled();
+    if hit {
+        g5cancel_note("kkt");
+    }
+    hit
+}
+
+/// 診断 `ENOMOTO_IPM_G5CANCEL_LOG` (振る舞いは変えない): `G5CANCEL` で作るのをやめた所を標準エラーへ 1 行出す
+pub(crate) fn g5cancel_note(at: &str) {
+    if env_str!("ENOMOTO_IPM_G5CANCEL_LOG").is_some() {
+        eprintln!("G5CANCEL: stopped in {at}");
+    }
+}
 /// 正規方程式の三つ組の行き先を p x p の位置表で引く行数の上限 (p^2 の要素数、`u32` で 128 MB)。
 const DENSE_POS_MAX: usize = 32_000_000;
 /// 稠密な列とみなす非零数: `max(DENSE_COL_MIN, DENSE_COL_AVG_FACTOR * 平均)` を超える列。
@@ -895,6 +912,9 @@ impl NormalKkt {
         {
             let mut mark = vec![usize::MAX; p];
             for c in 0..p {
+                if c % 1024 == 0 && g5cancel() {
+                    return None;
+                }
                 let start = m_rows.len();
                 mark[c] = c;
                 m_rows.push(c);
@@ -934,6 +954,9 @@ impl NormalKkt {
             let seg = &row_idx[col_ptrs[c]..col_ptrs[c + 1]];
             (col_ptrs[c] + seg.binary_search(&r).expect("entry in pattern")) as u32
         };
+        if g5cancel() {
+            return None;
+        }
         let mut dest: Vec<u32> = Vec::with_capacity(n_trip);
         for &j in &sparse_cols {
             let e = &col_ent[col_ptr[j]..col_ptr[j + 1]];
@@ -955,7 +978,13 @@ impl NormalKkt {
         }
         // 0: faer、1: MKL PARDISO (試験用)、2: 自前のマルチフロンタル法 (既定、第 61 回の比較で決めた)。
         let backend = tunable!("ENOMOTO_T_CHOL_BACKEND", 2u8, u8);
+        if g5cancel() {
+            return None;
+        }
         let chol_symbolic = symbolic_with_ordering(&symbolic_base, dbg, max_factor_nnz())?;
+        if g5cancel() {
+            return None;
+        }
         if dbg {
             eprintln!("NormalKkt: symbolic (AMD) nnz(L)={} at {:.2}s", chol_symbolic.len_values(), t0.elapsed().as_secs_f64());
         }
@@ -1813,6 +1842,9 @@ impl IpmKkt {
                 }
                 return Some(IpmKkt::Normal(nk));
             }
+        }
+        if g5cancel() {
+            return None;
         }
         AugKkt::try_new(a, max_factor_nnz()).map(IpmKkt::Aug)
     }

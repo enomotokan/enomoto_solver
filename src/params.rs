@@ -866,6 +866,11 @@ pub(crate) mod presolve {
     /// 0 で無効 (絶対閾値 `PROPAGATE_EPS` のみ)。
     pub(crate) const PROP_RELTOL: f64 = 0.0;
 
+    /// 不等式伝播の、整数最適化の前処理での連続列だけの相対改善閾値 (`ENOMOTO_T_PROP_RELTOL_CONT`、0 で無効)。
+    /// `PROP_RELTOL` が 0 のときだけ使う。analysis/proptol_20261117 (P +0.7% [-4.1, +6.7]・M -5.2% [-15.5, +5.5]、
+    /// 解けた数 P 134→134・M 32→34、乱数問題の誤った実行不能 3 件を直す) で 1e-10 を既定にした。
+    pub(crate) const PROP_RELTOL_CONT: f64 = 1e-10;
+
     /// 等式伝播 (`propagate_equalities`) の相対改善閾値 (`ENOMOTO_T_EQPROP_RELTOL`)。
     /// 有限の境界は変化量が `reltol * (1 + |old|)` を超えるときだけ更新する。0 で無効。
     pub(crate) const EQPROP_RELTOL: f64 = 0.0;

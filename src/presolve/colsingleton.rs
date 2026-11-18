@@ -159,7 +159,20 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
         if keep_bounded && lb[j].is_finite() && ub[j].is_finite() {
             continue;
         }
+        // 試作 `ENOMOTO_MIP_KEEP_COSTED_SINGLETON` (群 2、analysis/vsscip_slow_20261118/tree2/README.md 10 節): 整数最適化の前処理で、
+        // 費用のついた連続の列シングルトンは消さない (費用を等式の他の列へ移さない)。neos-5107597-kakapo の完了時刻の列
+        // 値 `c` なら、等式のほかの列がすべて連続のときだけ残す (費用が連続列に移る形。markshare_4_0 は費用が 0-1 列に移る形で、
+        // 残すとノードが 26.5 万 → 43.2 万に増え 2〜3 倍遅い)
+        let keep_costed = int_mask.is_some() && env_str!("ENOMOTO_MIP_KEEP_COSTED_SINGLETON").is_some();
+        let keep_costed_cont = env_str!("ENOMOTO_MIP_KEEP_COSTED_SINGLETON") == Some("c");
+        if keep_costed && c[j] != 0.0 && !keep_costed_cont {
+            continue;
+        }
         let Some(i) = owning_a_row[j] else { continue }; // 唯一の出現が G 側
+        // (`c` はさらに上下限の片方が無限の列だけ。timtab1 の有界のスラック 6 本を残すと 1 スレッドで 44.6 → 64.2 秒)
+        if keep_costed && keep_costed_cont && c[j] != 0.0 && !(lb[j].is_finite() && ub[j].is_finite()) && int_mask.as_ref().is_some_and(|m| a_rows[i].iter().all(|&(k, _)| k == j || !m[k])) {
+            continue;
+        }
         if eliminated_rows[i] {
             // この行は既に別のシングルトン列の消去に使われた (1 行で解けるのは 1 変数のみ)。
             // `j` は変数として残り、その代入式の項になる。
@@ -176,11 +189,11 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
         // ただし整数最適化の前処理で、行の他の列がすべて整数列なら、復元に使う値は整数 (丸め済み) なので誤差は
         // 増幅されない。この場合は判定しない (qnet1: 目的値を定義する連続列 `s = 132.55 y1 + 934.75 y2` を消せる)
         let others_int = int_mask.as_ref().is_some_and(|m| row.iter().all(|&(k, _)| k == j || m[k])) && env_str!("ENOMOTO_MIP_CS_PIVOT_ALWAYS").is_none();
-        // `ENOMOTO_MIP_CS_OBJ_PIVOT` (既定では使わない): 整数最適化の前処理で、費用のある連続列 (目的を定める列) は比の下限を
+        // FJ の問題の前処理 (`ENOMOTO_MIP_FJ_P3`) では、費用のある連続列 (目的を定める列) は比の下限を
         // `ENOMOTO_T_MIP_CS_OBJ_PIVOT_RATIO` (既定 1e-6) まで下げる。physiciansched6-2 は目的の費用を 1 本の連続列
         // (`0.000999 y = Σ (罰則の列) + …` の 37 列の等式、行の最大係数 1) が持ち、この列が残ると Feasibility Jump が解を
         // 見つけられない (HiGHS は Free col substitution で消し、費用を行の列に配る)。復元の誤差は 1/0.000999 倍程度
-        let ratio = if int_mask.is_some() && new_c[j] != 0.0 && (env_str!("ENOMOTO_MIP_CS_OBJ_PIVOT").is_some() || crate::fj_p3_force()) {
+        let ratio = if int_mask.is_some() && new_c[j] != 0.0 && crate::fj_p3_force() {
             tunable!("ENOMOTO_T_MIP_CS_OBJ_PIVOT_RATIO", 1e-6, f64)
         } else {
             tunable!("ENOMOTO_T_CS_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64)

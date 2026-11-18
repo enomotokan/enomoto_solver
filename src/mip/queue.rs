@@ -659,37 +659,12 @@ impl NodeQueue {
         Some(self.remove(id))
     }
 
-    /// `ENOMOTO_MIP_POOL1_DONATE` (試作): 共有の待ち行列に出すノードを 1 つ取り出す。`mode` は 0 = 下界最小 (既定と同じ)、
-    /// 1 = 下界最大、2 = 「下界と推定値の平均」が最大 (自分の選び方で最後に選ぶもの)、3 = 最も深い (同じ深さなら下界の大きいもの、
-    /// 全ノードを走査する)、4 = 最も浅い (同じ深さなら下界の大きいもの)。
-    pub fn pop_for_donate(&mut self, mode: u8) -> Option<OpenNode> {
-        let id = match mode {
-            1 => self.by_lb.iter().next_back().map(|&(_, id)| id),
-            2 => self.by_est.iter().next_back().map(|&(_, _, id)| id),
-            3 | 4 => self
-                .nodes
-                .iter()
-                .enumerate()
-                .filter_map(|(i, n)| n.as_ref().map(|n| (i, n.depth, n.lower_bound)))
-                .max_by(|a, b| if mode == 3 { a.1.cmp(&b.1) } else { b.1.cmp(&a.1) }.then(a.2.total_cmp(&b.2)))
-                .map(|x| x.0),
-            _ => self.by_lb.iter().next().map(|&(_, id)| id),
-        }?;
-        Some(self.remove(id))
-    }
-
     /// 下界が `cutoff` 以上のノードを捨てる。
     pub fn prune(&mut self, cutoff: f64) {
         // 下界の小さい順に外す (外した枠を使い回す順を以前と同じにする)
         while let Some(&(_, id)) = self.by_lb.range((Key(cutoff), 0)..).next() {
             self.remove(id);
         }
-    }
-
-    /// `keep` の (枠, 世代) 以外のノードを下界の小さい順にすべて取り出す。
-    pub fn take_all_except(&mut self, keep: &[(usize, u64)]) -> Vec<OpenNode> {
-        let ids: Vec<usize> = self.by_lb.iter().map(|&(_, id)| id).filter(|&id| !keep.iter().any(|&(k, g)| k == id && self.gen[id] == g)).collect();
-        ids.into_iter().map(|id| self.remove(id)).collect()
     }
 
     /// ノードをすべて取り出す (枠の世代は保つので、取り出す前の (枠, 世代) ではもう取り出せない)。

@@ -888,6 +888,9 @@ pub struct Orbitope {
     /// 列の入れ替えがオービトープの変数だけを動かす (双子の組から作った 1xk、既定、`ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE` で止める)。`swaps` は
     /// 持たず、[`Self::canonicalize`] は値を直接入れ替える。
     pub local: bool,
+    /// `ENOMOTO_MIP_ORBPP` (既定で使う。`=0` で切る) で静的と決めたオービトープ (構築時は偽): このオービトープだけを静的に扱う (全ての行を固定の順で使い、根で x_{i,c} = 0 (c > i) を
+    /// 固定し、オービトープの分枝はしない)。パッキング・分割の行が 3 行以上のオービトープに付ける (van Doornmalen・Hojny の 5.1 節、SCIP の orbitope_pp)。
+    pub static_pp: bool,
 }
 
 /// 置換 `perm` (`perm[j] = σ(j)`) で解を写す: `y[σ(j)] = x[j]`。
@@ -908,6 +911,7 @@ impl Orbitope {
             row_packing: rows.iter().map(|&i| self.row_packing[i]).collect(),
             swaps: Vec::new(),
             local: self.local,
+            static_pp: self.static_pp,
         }
     }
 
@@ -1108,7 +1112,7 @@ pub fn find_orbitopes(p: &MipProblem, sym: &Symmetry) -> (Vec<Orbitope>, Vec<boo
             }
             used[k] = true;
             let nrows = mat.len();
-            out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps: vec![(0, 1, std::sync::Arc::new(g.clone()))], local: false });
+            out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps: vec![(0, 1, std::sync::Arc::new(g.clone()))], local: false, static_pp: false });
             continue;
         }
         // 列 c (1 行目の c 番目) を動かす生成元の組
@@ -1220,7 +1224,7 @@ pub fn find_orbitopes(p: &MipProblem, sym: &Symmetry) -> (Vec<Orbitope>, Vec<boo
                 eprintln!("SYM orbitope other row: {} cols {:?} int {:?} col positions {:?}", v.len(), v, v.iter().map(|&j| p.is_int[j]).collect::<Vec<_>>(), sigs);
             }
         }
-        out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps, local: false });
+        out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps, local: false, static_pp: false });
     }
     (out, used)
 }
@@ -1573,6 +1577,87 @@ pub fn lex_leader_pairs_except(sym: &Symmetry, skip: &[bool], orbitope_vars: &[b
     pairs.sort_unstable();
     pairs.dedup();
     pairs
+}
+
+/// 試作 `ENOMOTO_MIP_SYM_SST`: Schreier-Sims の表のカット (SST cuts、Salvagnin 2018・SCIP の `misc/usesymmetry` の 4) の組 `(l, k)`
+/// (`x_l - x_k >= 0`)。群 `G_1` = [`lex_leader_pairs_except`] と同じく選んだ生成元の群から始め、各段で
+/// - 今の群 `G_t` が動かす最小の番号 `l_t` (leader) をとり、その軌道の全ての列 `k` について `x_{l_t} >= x_k` を足す
+/// - `G_{t+1}` = `l_t` の固定部分群 (Schreier の補題の生成元 `u_{s(o)}^{-1} s u_o`、重複と恒等を除き `max_gens` 本まで)
+///
+/// を群が自明になるまで繰り返す。leader を「動かす最小の番号」にとるので、列の番号の順の辞書式で最大の解 (lex-leader) は
+/// 全ての段のカットを満たす (`G_t` の元は `l_t` より前の列を全て固定するので、lex-leader の性質から `x_{l_t} >= x_{h^{-1}(l_t)}`)。
+/// なので lex-leader の行・`SYM_LEX_GENS` での並べ替えと矛盾しない。固定部分群の生成元を上限で間引くと部分群になるが、
+/// 部分群でも上の議論はそのまま成り立つ (カットが減るだけ)。手間 (置換の合成で触る列の数) が `work_cap` を越えたらそこまでの段で止める
+pub fn sst_pairs_except(sym: &Symmetry, skip: &[bool], orbitope_vars: &[bool], max_gens: usize, work_cap: u64) -> (Vec<(usize, usize)>, usize) {
+    let n = sym.orbit.len();
+    let mut gens: Vec<Vec<usize>> = sym.generators.iter().enumerate().filter(|&(k, g)| !skip[k] && !(0..g.len()).any(|j| g[j] != j && orbitope_vars[j])).map(|(_, g)| g.clone()).collect();
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    let mut work = 0u64;
+    let mut levels = 0usize;
+    // 合成 (a∘b)(j) = a[b[j]]
+    let compose = |a: &[usize], b: &[usize]| -> Vec<usize> { b.iter().map(|&j| a[j]).collect() };
+    let inverse = |a: &[usize]| -> Vec<usize> {
+        let mut r = vec![0; a.len()];
+        for (j, &t) in a.iter().enumerate() {
+            r[t] = j;
+        }
+        r
+    };
+    while !gens.is_empty() {
+        let Some(l) = (0..n).find(|&j| gens.iter().any(|g| g[j] != j)) else { break };
+        // 軌道と遷移 (`trans[o]` は l を o に写す元)
+        let mut trans: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+        let mut order = vec![l];
+        trans.insert(l, (0..n).collect());
+        let mut head = 0;
+        while head < order.len() {
+            let o = order[head];
+            head += 1;
+            for g in &gens {
+                let t = g[o];
+                if !trans.contains_key(&t) {
+                    let u = compose(g, &trans[&o]);
+                    work += n as u64;
+                    trans.insert(t, u);
+                    order.push(t);
+                }
+            }
+            if work > work_cap {
+                break;
+            }
+        }
+        if work > work_cap {
+            break;
+        }
+        for &k in &order[1..] {
+            pairs.push((l, k));
+        }
+        levels += 1;
+        // l の固定部分群の Schreier の生成元
+        let mut next: Vec<Vec<usize>> = Vec::new();
+        let mut seen: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
+        'outer: for &o in &order {
+            for g in &gens {
+                let so = g[o];
+                let Some(us) = trans.get(&so) else { continue };
+                // u_{s(o)}^{-1} s u_o
+                let h = compose(&inverse(us), &compose(g, &trans[&o]));
+                work += 3 * n as u64;
+                if (0..n).all(|j| h[j] == j) || seen.contains(&h) {
+                    continue;
+                }
+                seen.insert(h.clone());
+                next.push(h);
+                if next.len() >= max_gens || work > work_cap {
+                    break 'outer;
+                }
+            }
+        }
+        gens = next;
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+    (pairs, levels)
 }
 
 /// 対称性を崩す不等式 `x_i - x_k >= 0` の組 `(i, k)` (lex-leader、モジュールの説明を参照)。
@@ -1929,7 +2014,7 @@ mod tests {
     #[test]
     fn local_orbitope_canonicalize_sorts_twins_in_place() {
         // 双子の組 {1, 3, 4} の 1x3 のオービトープ: 値を降順に並べ替え、組の外の列は動かさない
-        let orb = Orbitope { vars: vec![vec![1, 3, 4]], packing: false, row_packing: vec![false], swaps: Vec::new(), local: true };
+        let orb = Orbitope { vars: vec![vec![1, 3, 4]], packing: false, row_packing: vec![false], swaps: Vec::new(), local: true, static_pp: false };
         let mut x = vec![7.0, 0.0, 9.0, 1.0, 1.0];
         assert!(orb.canonicalize(&mut x));
         assert_eq!(x, vec![7.0, 1.0, 9.0, 1.0, 0.0]);
@@ -2005,7 +2090,7 @@ mod tests {
     #[test]
     fn orbitopal_fixing_small_cases() {
         // 2 行 3 列。何も固定がなければ: 最大 [11,11,11]、最小 [00,00,00] で固定なし
-        let orb = Orbitope { vars: vec![vec![0, 1, 2], vec![3, 4, 5]], packing: false, row_packing: vec![false; 2], swaps: Vec::new(), local: false };
+        let orb = Orbitope { vars: vec![vec![0, 1, 2], vec![3, 4, 5]], packing: false, row_packing: vec![false; 2], swaps: Vec::new(), local: false, static_pp: false };
         let (lo, up) = (vec![0.0; 6], vec![1.0; 6]);
         assert_eq!(orbitopal_fixing(&orb, &lo, &up), Some(vec![]));
         // x_{0,1} = 1 (列 1 の 1 行目): 列 0 >=_lex 列 1 なので x_{0,0} = 1 に固定される
@@ -2034,7 +2119,7 @@ mod tests {
             let r = 1 + (rnd() * 3.0) as usize;
             let s = 2 + (rnd() * 2.0) as usize;
             let vars: Vec<Vec<usize>> = (0..r).map(|i| (0..s).map(|c| i * s + c).collect()).collect();
-            let orb = Orbitope { vars: vars.clone(), packing: false, row_packing: vec![false; r], swaps: Vec::new(), local: false };
+            let orb = Orbitope { vars: vars.clone(), packing: false, row_packing: vec![false; r], swaps: Vec::new(), local: false, static_pp: false };
             let nv = r * s;
             let mut lo = vec![0.0; nv];
             let mut up = vec![1.0; nv];
@@ -2088,7 +2173,7 @@ mod tests {
             let r = 1 + (rnd() * 4.0) as usize;
             let s = 2 + (rnd() * 2.0) as usize;
             let vars: Vec<Vec<usize>> = (0..r).map(|i| (0..s).map(|c| i * s + c).collect()).collect();
-            let orb = Orbitope { vars: vars.clone(), packing: true, row_packing: vec![true; r], swaps: Vec::new(), local: false };
+            let orb = Orbitope { vars: vars.clone(), packing: true, row_packing: vec![true; r], swaps: Vec::new(), local: false, static_pp: false };
             let nv = r * s;
             let mut lo = vec![0.0; nv];
             let mut up = vec![1.0; nv];

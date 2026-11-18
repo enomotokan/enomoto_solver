@@ -22,7 +22,7 @@
 //! 開発経緯・並列化を見送った理由などは改良履歴メモを参照。
 
 use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
-use crate::params::presolve::{EMPTY_ROW_FEAS_TOL, EQPROP_RELTOL, FORCING_SLACK_REL, PROPAGATE_EPS, PROP_CANCEL_GUARD, PROP_RELTOL};
+use crate::params::presolve::{EMPTY_ROW_FEAS_TOL, EQPROP_RELTOL, FORCING_SLACK_REL, PROPAGATE_EPS, PROP_CANCEL_GUARD, PROP_RELTOL, PROP_RELTOL_CONT};
 use super::infeas_tol;
 
 /// 伝播のパスの打ち切り条件 ([`propagate_split`]・[`propagate_equalities`])。
@@ -364,6 +364,13 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
     // `reltol * (1 + |bound|)` を超えるときだけ更新する (HiGHS 流、巡回構造での
     // 境界の幾何級数的な削り込みを止める)。
     let reltol = tunable!("ENOMOTO_T_PROP_RELTOL", PROP_RELTOL, f64);
+    // 連続列だけの相対改善閾値 (`ENOMOTO_T_PROP_RELTOL_CONT`、0 で無効、analysis/proptol_20261117): 整数最適化の前処理の連続列
+    // (整数の印のない列) の有限の境界は、締めの幅が `reltol_cont × (1 + |境界|)` を超えるときだけ締める。連続列が循環でつながった行で、
+    // 伝播が回るたびに丸めの誤差のぶん境界を締めすぎ、それがたまって実行不能と判定するのを止める (乱数問題の seed 12422・15631)。
+    // 整数列は境界が整数に丸められるので削り続けは起きず、閾値をかけると小さな締めを失って遅くなる (noswot が 2 倍遅い)
+    let reltol_cont = tunable!("ENOMOTO_T_PROP_RELTOL_CONT", PROP_RELTOL_CONT, f64);
+    let imask = if reltol_cont > 0.0 { crate::presolve::int_mask() } else { None };
+    let rt_of = |k: usize| if reltol > 0.0 { reltol } else if reltol_cont > 0.0 && !imask.as_ref().is_some_and(|m| m.get(k).copied().unwrap_or(false)) { reltol_cont } else { 0.0 };
     // 桁落ち回避の閾値 (`ENOMOTO_T_PROP_CANCEL_GUARD`、0 で無効)
     let cancel_guard = tunable!("ENOMOTO_T_PROP_CANCEL_GUARD", PROP_CANCEL_GUARD, f64);
 
@@ -492,8 +499,9 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
                 }
                 let candidate = (b - l_s) / aik;
                 // 候補 c が境界 old を (有意に) 締めるか
-                let tightens_ub = |old: f64, c: f64| c < old - PROPAGATE_EPS && (reltol == 0.0 || !old.is_finite() || c < old - reltol * (1.0 + old.abs())) && (!strict || significant_change(old, c, limit.sig_reltol));
-                let tightens_lb = |old: f64, c: f64| c > old + PROPAGATE_EPS && (reltol == 0.0 || !old.is_finite() || c > old + reltol * (1.0 + old.abs())) && (!strict || significant_change(old, c, limit.sig_reltol));
+                let rt = rt_of(k);
+                let tightens_ub = |old: f64, c: f64| c < old - PROPAGATE_EPS && (rt == 0.0 || !old.is_finite() || c < old - rt * (1.0 + old.abs())) && (!strict || significant_change(old, c, limit.sig_reltol));
+                let tightens_lb = |old: f64, c: f64| c > old + PROPAGATE_EPS && (rt == 0.0 || !old.is_finite() || c > old + rt * (1.0 + old.abs())) && (!strict || significant_change(old, c, limit.sig_reltol));
                 if aik > 0.0 {
                     // 新しい上限候補 (締めるときだけ桁落ちを見て精緻化し、判定し直す)
                     if tightens_ub(ub[k], candidate) {

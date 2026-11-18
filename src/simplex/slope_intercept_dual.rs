@@ -90,14 +90,14 @@ fn pivlog_tiny_skip(k: usize) {
 }
 
 thread_local! {
-    /// 試作 `ENOMOTO_MIP_CUT_HARRIS2` (既定では使わない、analysis/puriri_cutlp_20261106.md): このスレッドの求解で、
-    /// `ENOMOTO_SIMPLEX_HARRIS2` が無いときに代わりに使う値 (前向きの Harris)。根のカットのループが LP を解くあいだだけ置く ([`Harris2Scope`])
+    /// このスレッドの求解で、`ENOMOTO_SIMPLEX_HARRIS2` が無いときに代わりに使う値 (前向きの Harris)。試作 `ENOMOTO_MIP_NODELP_PERTURB` の `h` が
+    /// ノードの LP を解くあいだだけ置く ([`Harris2Scope`]。根のカットのループで置く試作 `ENOMOTO_MIP_CUT_HARRIS2` は 2026-11-18 に削除)
     pub(crate) static HARRIS2_SCOPE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
 thread_local! {
     /// 試作 `ENOMOTO_MIP_NODELP_PERTURB` (analysis/node_lp_20261106.md): 木のノードの LP を解くあいだだけ、warm start の近道でも費用を
-    /// 摂動する (`ENOMOTO_NODE_PERTURB` と同じ処理)。0 = 使わない (既定)、1 = `ENOMOTO_NODE_PERTURB` と同じ判定 (費用の絶対値の種類が少ない)、
+    /// 摂動する (削除した試作 `ENOMOTO_NODE_PERTURB` と同じ処理)。0 = 使わない (既定)、1 = 費用の絶対値の種類が少ないときだけ ([`node_perturb_criterion`])、
     /// 2 = 判定なしで摂動する
     pub(crate) static NODE_PERTURB_SCOPE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
@@ -1364,6 +1364,33 @@ pub(crate) fn dse_init_has(c: char) -> bool {
 }
 
 /// 診断 `ENOMOTO_MIP_NODELP_DIAG` (analysis/node_lp_20261106.md、解き方は変えない) が有効か。
+/// 診断 `ENOMOTO_DEBUG_EXT_ITERLOG` (analysis/lpwarm_20261118、解き方は変えない) が有効か。
+fn iterlog_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_DEBUG_EXT_ITERLOG").is_some())
+}
+
+thread_local! {
+    /// 試作 `ENOMOTO_SIMPLEX_BFRT_GROUP` をこのスレッドで一時的に使う印 (0 = 環境変数に従う、1 = `gz` を使う、2 = 使わない)。
+    /// 木のノードの LP だけで使う試作 `ENOMOTO_MIP_NODELP_BFRT_GROUP` が [`BfrtGroupScope`] で置く
+    pub(crate) static BFRT_GROUP_SCOPE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// 試作 `ENOMOTO_SIMPLEX_BFRT_GROUP=<文字>` (既定では使わない、analysis/lpwarm_20261118) の文字 `c` が有効か。
+/// `g`: BFRT を Harris の組ごとに進め、最後の組で |alpha| 最大を入れる。`z`: `Zero` (自由) の非基底列を入れるとき、最小添字でなく |alpha| 最大を選ぶ。
+/// `1` は `gz` と同じ。[`BFRT_GROUP_SCOPE`] が 1 なら `gz`、2 なら使わない
+fn bfrt_group_mode(c: char) -> bool {
+    static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    match BFRT_GROUP_SCOPE.with(|s| s.get()) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    V.get_or_init(|| env_str!("ENOMOTO_SIMPLEX_BFRT_GROUP").filter(|v| *v != "0").map(|v| if v == "1" { "gz".to_string() } else { v.to_string() }))
+        .as_deref()
+        .is_some_and(|v| v.contains(c))
+}
+
 pub(crate) fn nodelp_diag() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_NODELP_DIAG").is_some_and(|v| v != "0"))
@@ -1861,6 +1888,21 @@ thread_local! {
 
 /// 試作 `ENOMOTO_MIP_DSE_INIT` の `r` ([`dse_init_has`]): 木のノードの LP を解くあいだだけ、渡した基底が特異なら特異な列だけを
 /// スラックに替えて warm start する ([`warm_sing_repair`] を真にする。全スラック基底からの解き直しを避ける)。手放すときに前の値へ戻す。
+/// 試作 `ENOMOTO_MIP_NODELP_BFRT_GROUP` (analysis/lpwarm_20261118): このスレッドで、生きているあいだ [`BFRT_GROUP_SCOPE`] を 1 (`gz`) にする
+pub(crate) struct BfrtGroupScope(u8);
+
+impl BfrtGroupScope {
+    pub(crate) fn new() -> Self {
+        BfrtGroupScope(BFRT_GROUP_SCOPE.with(|c| c.replace(1)))
+    }
+}
+
+impl Drop for BfrtGroupScope {
+    fn drop(&mut self) {
+        BFRT_GROUP_SCOPE.with(|c| c.set(self.0));
+    }
+}
+
 pub(crate) struct SingRepairScope(Option<bool>);
 
 impl SingRepairScope {
@@ -4289,7 +4331,7 @@ thread_local! {
     static NODE_PERTURB_CACHE: std::cell::Cell<Option<(u64, usize, bool)>> = const { std::cell::Cell::new(None) };
 }
 
-/// `ENOMOTO_NODE_PERTURB` の判定: 構造列の費用の絶対値の種類の数 (0 を含む) の 4 倍が構造列の数以下か
+/// 費用の摂動の判定 (`NODELP_PERTURB` の `p`): 構造列の費用の絶対値の種類の数 (0 を含む) の 4 倍が構造列の数以下か
 /// (CLP `ClpSimplexDual::perturb` の「number * 4 > numberColumns なら摂動しない」)。行列の識別子 `key` があれば
 /// 同じ識別子の間は結果を使い回す (分枝限定法の LP は行列を作り直すまで費用も同じ)。
 fn node_perturb_criterion(std: &StdForm, key: Option<u64>) -> bool {
@@ -4878,7 +4920,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }
         NODELP_INF3.with(|c| c.set(c3));
     }
-    // `ENOMOTO_NODE_PERTURB` (試作、既定では使わない): 再最適化の近道 (分枝限定法の warm start) でも、主実行不能な行があり、
+    // 試作 `ENOMOTO_MIP_NODELP_PERTURB` の `p`・`P` ([`NODE_PERTURB_SCOPE`]。いつも使う試作 `ENOMOTO_NODE_PERTURB` は 2026-11-18 に削除):
+    // 再最適化の近道 (分枝限定法の warm start) でも、主実行不能な行があり、
     // 構造列の費用の絶対値の種類が少なければ (種類の数 x 4 <= 構造列の数) 費用を摂動する。CLP の双対単体法
     // (ClpSimplexDual.cpp 336-365 の startupSolve: CBC の中では主実行不能なときだけ `perturb()`、6650-6662 の判定) にならう。
     // 費用の種類が少ない問題 (0-1 の組合せ問題など) は双対退化が強く、真の費用のままだと退化ピボットが続く。
@@ -4890,7 +4933,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         && !infeasible_rows.rows.is_empty()
         && {
             let sc = NODE_PERTURB_SCOPE.with(|c| c.get());
-            sc == 2 || ((env_str!("ENOMOTO_NODE_PERTURB").is_some() || sc == 1) && node_perturb_criterion(std, PRICE_KEY.with(|k| k.get())))
+            sc == 2 || (sc == 1 && node_perturb_criterion(std, PRICE_KEY.with(|k| k.get())))
         };
     if node_perturbed {
         if nl_diag {
@@ -5155,7 +5198,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let tiny_td = tunable!("ENOMOTO_T_SIMPLEX_TINY_TD", 1e-7, f64);
     // 試作 `ENOMOTO_SIMPLEX_HARRIS2` (既定では使わない): 前向きの Harris (パス 2)
     // `r`: 安全モード (`safe_pivot`。数値の破綻で解き直した求解、または特異の検査で切り替わった後) のときだけ使う
-    // 試作 `ENOMOTO_MIP_CUT_HARRIS2` (analysis/puriri_cutlp_20261106.md): 根のカットのループの LP だけ、[`HARRIS2_SCOPE`] で同じ値を使う
+    // [`HARRIS2_SCOPE`] (試作 `ENOMOTO_MIP_NODELP_PERTURB` の `h`) があれば同じ値を使う
     let harris2_mode = env_def!("ENOMOTO_SIMPLEX_HARRIS2", "r").filter(|v| *v != "0").or_else(|| HARRIS2_SCOPE.with(|c| c.get()));
     let harris2_safe_only = harris2_mode.is_some_and(|v| v.contains('r'));
     let harris2_any = harris2_mode.is_some();
@@ -5172,6 +5215,12 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let h2_small = tunable!("ENOMOTO_T_SIMPLEX_H2_SMALL", 1e30, f64);
     let h2_td = tunable!("ENOMOTO_T_SIMPLEX_H2_TD", 1e-8, f64);
     let mut harris2_skip: Vec<usize> = Vec::new();
+    // 試作 `ENOMOTO_SIMPLEX_BFRT_GROUP` (既定では使わない、analysis/lpwarm_20261118): BFRT を Harris の組ごとに進める (主ループの比のテスト)
+    let bfrt_group_on = bfrt_group_mode('g');
+    let zero_pick_alpha = bfrt_group_mode('z');
+    let bg_td = tunable!("ENOMOTO_T_SIMPLEX_BG_TD", 1e-9, f64);
+    let mut group_buf: Vec<Cand> = Vec::new();
+    let mut group_rest: Vec<Cand> = Vec::new();
     let mut diag_h2_shifts = 0usize;
     // 試作 `ENOMOTO_SIMPLEX_HARRIS_WIDE` (既定では使わない): 窓の中の軸が小さいとき Harris の窓を広げる (パス 2)
     let harris_wide_on = env_str!("ENOMOTO_SIMPLEX_HARRIS_WIDE").is_some_and(|v| v != "0");
@@ -6398,7 +6447,14 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             zero_pick = None;
             if n_zero_nonbasic > 0 {
                 for c in kept {
-                    if nb_status[c.j] == Some(NbStatus::Zero) && zero_pick.map_or(true, |z: Cand| c.j < z.j) && !(ban_active && discard_banned_cols.contains(&c.j)) {
+                    // 試作 `ENOMOTO_SIMPLEX_BFRT_GROUP` の `z` (analysis/lpwarm_20261118): 最小添字でなく |alpha| 最大の `Zero` 列を選ぶ
+                    // (最小添字では |alpha| = 1e-8 の列を入れて歩みが 1e9 を越え、数値の破綻で解き直しになっていた: supportcase42 の根の LP)
+                    let better = match zero_pick {
+                        None => true,
+                        Some(z) if zero_pick_alpha => c.hat_alpha.abs() > z.hat_alpha.abs() || (c.hat_alpha.abs() == z.hat_alpha.abs() && c.j < z.j),
+                        Some(z) => c.j < z.j,
+                    };
+                    if nb_status[c.j] == Some(NbStatus::Zero) && better && !(ban_active && discard_banned_cols.contains(&c.j)) {
                         zero_pick = Some(*c);
                     }
                 }
@@ -6719,6 +6775,115 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 }
             }
         }
+        // 試作 `ENOMOTO_SIMPLEX_BFRT_GROUP=1` (既定では使わない、analysis/lpwarm_20261118): HiGHS (`HEkkDualRow::chooseFinal`) と同じく、
+        // BFRT を Harris の組ごとに進める。組 = まだ見ていない候補のうち比が `theta_max = min (比 + Td / |alpha|)` 以下のもの
+        // (`Td` = `ENOMOTO_T_SIMPLEX_BG_TD`、既定 1e-9。1e-7 では supportcase42 の根の LP が 22692 → 7499 反復に減るが、neos-827175 の根の LP で飛ばした候補の費用のずらしが積もり、仕上げの主単体法が 1.3 万反復になる)。組を丸ごとフリップしても `w_r` に届かなければ組を丸ごとフリップして次の組へ、
+        // 届く (または幅が無限の候補を含む) 組を最後の組とし、その中の |alpha| 最大の候補を入れる列にする (最後の組の他の候補はフリップしない)。
+        // 今までの歩進は比の同点を列番号で切り、同点の中の候補を列番号順にフリップしてから、その位置で止まった (双対退化の強い LP、
+        // supportcase42 では |alpha| の小さい列を入れたり、同点の箱型の列を何十本もフリップして主の値を壊し、出発の主実行不能 1 行から
+        // 数百反復かかった)。最後の組で飛ばした候補の被約費用の符号の誤り (高々 `Td` 程度) は `harris2_skip` と同じく費用をずらして戻す
+        let mut group_done = false;
+        if bfrt_group_on && zero_pick.is_none() && !bland_mode && harris2_k > 0 && k_star.is_some() {
+            // 並べ替えずに組を 1 つずつ取り出す (組 1 つに候補全体を 1 回なめる。組の数はフリップの数 + 1 で普通は少ない)。
+            // `group_buf` にフリップする組の候補を順に積み、最後の組をその後ろに積む
+            group_buf.clear();
+            let all = &cand_scratch[..harris2_k];
+            // 前の組までの比の上限 (これ以下の比の候補は見た)
+            let mut lo = f64::NEG_INFINITY;
+            let mut gcum = Affine1::ZERO;
+            let mut out_len = 0usize;
+            let mut final_pick: Option<(usize, usize)> = None;
+            // 組を取り出した数。2 組を越えたら残りの候補を 1 回だけ比の順に並べ、前から順に組を切る (組が多い反復で候補全体を何度もなめない)
+            let mut groups = 0usize;
+            // 並べた残りの候補 (`group_rest`) の次に見る位置。`None` は並べる前
+            let mut rest_pos: Option<usize> = None;
+            loop {
+                let start = group_buf.len();
+                let mut ncum = gcum;
+                let mut fin = false;
+                let tmax;
+                if let Some(pos) = rest_pos {
+                    // 並べた残りから: 比の順に、比が組の上限以下のあいだ足す (上限は足した候補の `比 + Td / |alpha|` の最小。
+                    // 後ろの候補はそれより大きい比なので上限を下げない)
+                    let mut t = f64::INFINITY;
+                    let mut e = pos;
+                    while e < group_rest.len() && group_rest[e].ratio <= t {
+                        let c = group_rest[e];
+                        t = t.min(c.ratio + bg_td / c.hat_alpha.abs());
+                        group_buf.push(c);
+                        match cache.width[c.j] {
+                            None => fin = true,
+                            Some(w) => ncum = ncum.add(w.scale(c.hat_alpha.abs())),
+                        }
+                        e += 1;
+                    }
+                    rest_pos = Some(e);
+                    tmax = t;
+                } else {
+                    let mut t = f64::INFINITY;
+                    for c in all {
+                        if c.ratio > lo {
+                            t = t.min(c.ratio + bg_td / c.hat_alpha.abs());
+                        }
+                    }
+                    if !t.is_finite() {
+                        break;
+                    }
+                    for c in all {
+                        if c.ratio > lo && c.ratio <= t {
+                            group_buf.push(*c);
+                            match cache.width[c.j] {
+                                None => fin = true,
+                                Some(w) => ncum = ncum.add(w.scale(c.hat_alpha.abs())),
+                            }
+                        }
+                    }
+                    tmax = t;
+                }
+                let end = group_buf.len();
+                if end == start {
+                    break;
+                }
+                groups += 1;
+                if !fin && !bfrt_reached(w_r, ncum, x_b_base[r]) {
+                    // 組の中は比の順に並べる (フリップの順は結果に効かないが、`sorted_prefix` の比の昇順の前提を保つ)
+                    group_buf[start..end].sort_unstable();
+                    gcum = ncum;
+                    out_len = end;
+                    lo = tmax;
+                    if rest_pos.is_none() && groups >= 2 {
+                        group_rest.clear();
+                        group_rest.extend(all.iter().filter(|c| c.ratio > lo).copied());
+                        group_rest.sort_unstable();
+                        rest_pos = Some(0);
+                    }
+                    continue;
+                }
+                let mut best = start;
+                for idx in start..end {
+                    let (a, b) = (group_buf[idx].hat_alpha.abs(), group_buf[best].hat_alpha.abs());
+                    if a > b || (a == b && group_buf[idx] < group_buf[best]) {
+                        best = idx;
+                    }
+                }
+                final_pick = Some((best, end));
+                break;
+            }
+            if let Some((best, end)) = final_pick {
+                harris2_skip.clear();
+                for idx in out_len..end {
+                    if idx != best && group_buf[idx].ratio < group_buf[best].ratio {
+                        harris2_skip.push(group_buf[idx].j);
+                    }
+                }
+                sorted_prefix.clear();
+                sorted_prefix.extend_from_slice(&group_buf[..out_len]);
+                sorted_prefix.push(group_buf[best]);
+                k_star = Some(out_len);
+                cum = gcum;
+                group_done = true;
+            }
+        }
         let sorted: &[Cand] = if bland_mode && zero_pick.is_none() { &candidates[..] } else { &sorted_prefix[..] };
         let Some(k_star) = k_star else {
             for &j in &touched_cols {
@@ -6834,6 +6999,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 }
             }
         });
+        // 試作 `ENOMOTO_SIMPLEX_BFRT_GROUP`: 組ごとの選び方で決めた候補をそのまま入れる (後ろ向きの窓で選び直さない)
+        if group_done {
+            best_idx = k_star;
+        }
 
         // BFRT 結合フリップ: フリップする全候補の境界変化量(符号付きの `width_affine`)を
         // `Affine1` のチャネルごとに 1 本の疎右辺へ集約し、各チャネル 1 回の FTRAN で解く
@@ -7555,6 +7724,19 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // このピボットの目的関数への寄与 `theta_q(M) * dj_q`(`dj_q` は `M` に依存しない)。
         // 下の停滞判定で使う。
         let contribution_base = theta_base * dj_q;
+        // 診断 `ENOMOTO_DEBUG_EXT_ITERLOG` (analysis/lpwarm_20261118、解き方は変えない): 反復ごとに出る行・入る列・ピボット・ステップ・
+        // 被約費用・フリップの数・この反復の後の主実行不能の行の数を出す
+        if iterlog_on() {
+            eprintln!(
+                "ITERLOG it={iter_idx} r={r} out={} q={q} {} alpha={alpha_q:.3e} theta={theta_base:.3e} dj={dj_q:.3e} xr={:.3e} flips={} inf={} w_r={:.3e}",
+                basis[r],
+                if q < n_orig { "col" } else { "slack" },
+                x_r.base,
+                pivot_flips.len(),
+                infeasible_rows.rows.len(),
+                w_r.base
+            );
+        }
         if debug_ext_iters_verbose {
             trace_obj_base += contribution_base;
             trace_obj_slope += theta_slope * dj_q;
@@ -8339,15 +8521,6 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
     // 可能になるようにする (cont1 分析の策5 前半)。`ENOMOTO_POLISH_PERTURB_SLACK=1` で旧動作
     // (`super::perturb_costs` をそのまま使い、スラック列も摂動する。A/B 用)。
     let active_cost = if tunable!("ENOMOTO_POLISH_PERTURB_SLACK", 0u8, u8) != 0 { super::perturb_costs(std) } else { dual_active_costs(std) };
-    // 試作 `ENOMOTO_SIMPLEX_POLISH_DSE` (既定では使わない): 仕上げの chuzr を DSE の規則にする
-    // `2`: 引き継いだ重みを捨てて 1 から始める (重みが壊れていることがある: supportcase42 は最大 1e64)
-    let polish_dse_mode = env_str!("ENOMOTO_SIMPLEX_POLISH_DSE").filter(|v| *v != "0");
-    let polish_dse_on = polish_dse_mode.is_some();
-    if polish_dse_mode == Some("2") {
-        if let Some(d) = dse.as_deref_mut() {
-            d.w.iter_mut().for_each(|v| *v = 1.0);
-        }
-    }
 
     let mut lu = lu;
     // 入る列の FTRAN・ピボット行の BTRAN・FT 更新・再分解トリガ (主単体法と共有する部品)。
@@ -8553,19 +8726,11 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
         }
         // chuzr: 重みなしの最大逸脱 (Dantzig) 規則。`infeasible_rows.rows` のみを走査する。
         // 同値のときは小さい行番号、`bland_mode` では常に最小行番号を選ぶ。
-        // 試作 `ENOMOTO_SIMPLEX_POLISH_DSE=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): 引き継いだ DSE 重みが
-        // 有限なら、逸脱の 2 乗 / 重み (主ループと同じ DSE の規則) で選ぶ。重みが未知 (`NaN`) の行がある間は従来の最大逸脱。
         let mut best: Option<(usize, i32, f64)> = None;
         let mut best_key = f64::NEG_INFINITY;
-        let use_w = polish_dse_on && dse.as_deref().is_some_and(|d| d.w.first().is_some_and(|w| w.is_finite()));
         for &i in &infeasible_rows.rows {
             let Some((d_dir, mag)) = row_deviation_plain(std, basis, &x_b, &noise_feasible, i, tol_floor) else { continue };
-            let key = if use_w {
-                let w = dse.as_deref().map_or(1.0, |d| d.weight(i));
-                if w.is_finite() && w > 0.0 { mag * mag / w } else { mag * mag }
-            } else {
-                mag
-            };
+            let key = mag;
             let better = match best {
                 None => true,
                 Some((br, _, _)) => {
