@@ -748,11 +748,11 @@ impl Domain {
         } else {
             // 数値誤差で実行可能点を切らないよう少し緩める。
             let nv = v + 1e-9 * (1.0 + v.abs());
-            // 連続変数は、無限から有限になるか、幅の 30% 以上締まるときだけ採る (細かい締め付けの連鎖を防ぐ)。
+            // 連続変数は、無限から有限になるか、幅の 30% ([`cont_step_frac`]) 以上締まるときだけ採る (細かい締め付けの連鎖を防ぐ)。
             if cur.is_finite() {
                 let range = cur - self.lo[j];
                 let gain = cur - nv;
-                if !(gain > 0.3 * range.max(1e-9) || (range.is_infinite() && gain > 1e-3 * (1.0 + cur.abs()))) {
+                if !(gain > cont_step_frac() * range.max(1e-9) || (range.is_infinite() && gain > 1e-3 * (1.0 + cur.abs()))) {
                     return;
                 }
             }
@@ -775,7 +775,7 @@ impl Domain {
             if cur.is_finite() {
                 let range = self.up[j] - cur;
                 let gain = nv - cur;
-                if !(gain > 0.3 * range.max(1e-9) || (range.is_infinite() && gain > 1e-3 * (1.0 + cur.abs()))) {
+                if !(gain > cont_step_frac() * range.max(1e-9) || (range.is_infinite() && gain > 1e-3 * (1.0 + cur.abs()))) {
                     return;
                 }
             }
@@ -1568,4 +1568,11 @@ impl Drop for GfixSubScope {
 /// 診断 `ENOMOTO_MIP_GFIX_LOG` ([`Domain::tighten_global`])
 fn gfix_log() -> bool {
     env_str!("ENOMOTO_MIP_GFIX_LOG").is_some()
+}
+
+/// 試作 `ENOMOTO_T_MIP_S3PROP_CONT_FRAC` (既定 0.3。analysis/vsscip_slow_20261118/small3/ 11 節): 行の伝播で連続列の境界を採る最小の締め幅
+/// (今の幅に対する割合)。SCIP の numerics/boundstreps は 0.05。swath1 は MTZ 型の行 (u_i - u_j + 20 x_ij <= 19) が多く、
+/// 連続列の小さい締め付けが積み重なって 0-1 列が固定・矛盾になる (SCIP は 141 ノードで行の伝播の打ち切り 258)
+pub(crate) fn cont_step_frac() -> f64 {
+    tunable!("ENOMOTO_T_MIP_S3PROP_CONT_FRAC", 0.3, f64)
 }
