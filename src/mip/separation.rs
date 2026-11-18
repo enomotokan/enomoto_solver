@@ -1613,10 +1613,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 40 問 (同時に測った既定 19 問 27.81 に対し) 18 問 28.64: nw04 33 -> 21 秒、h80x6320d の上界は良くなるが、
         // neos5 が時間切れ、10teams 4.2 -> 9.1 秒、qnet1 9.4 -> 14.7 秒、misc07 13.7 -> 18.8 秒 (根の LP 解が変わって木が
         // 変わる)。neos-911970 も 60 秒では解けない (根は 52.1 になるが暫定解が悪くなる) ので既定では使わない
-        // 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` の `p` ([`super::solver::CutJob::robust_phase2`]): 裏のカットのスレッドでも第 2 段階を使う
-        let phase2_on = (heavy || env_str!("ENOMOTO_MIP_CUT_PHASE2").is_some() || (self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_NO_PHASE2").is_none()) || job.as_ref().is_some_and(|j| j.robust_phase2())) && !self.params.submip;
-        // 試作 `ENOMOTO_MIP_BG_DETERM_ROBUST` の `o` ([`super::solver::CutJob::veto_own_stall`]): 今までの停滞の判定で止まるところで、試作の判定が停滞と言わなければ続ける
-        let veto_own = |j: &Option<std::sync::Arc<super::solver::CutJob>>| j.as_ref().is_some_and(|j| j.veto_own_stall());
+        let phase2_on = (heavy || env_str!("ENOMOTO_MIP_CUT_PHASE2").is_some() || (self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_NO_PHASE2").is_none())) && !self.params.submip;
         let mut phase2 = false;
         // 試作 `ENOMOTO_MIP_MC11FIX2` の `c` ([`super::solver::mc11fix2`]、[`Solver::cut_cont_p2`]): 主が続けるループを初めから第 2 段階で決まったラウンド数だけ回す
         let cont_p2 = if self.cut_cont.is_some() { self.cut_cont_p2 } else { 0 };
@@ -3894,14 +3891,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if reldiff <= 1e-4 {
                         stall += 1;
                         if stall >= tunable!("ENOMOTO_T_MIP_CUT_PHASE2_STALL", 10usize, usize) {
-                            if veto_own(&job) {
-                                if self.params.verbose {
-                                    eprintln!("MIP: cut round {round}: phase-2 stall vetoed (ENOMOTO_MIP_BG_DETERM_ROBUST)");
-                                }
-                                stall = 0;
-                            } else {
-                                break;
-                            }
+                            break;
                         }
                     } else {
                         stall = 0;
@@ -3971,12 +3961,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let cr_one = cutrnd_main && cutrnd('f') && super::cap_clock() - t_loop0 < cr_budget;
                         stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened && !cr_one { 2 } else { 1 };
                         if stall >= if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip && !sub_hc { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
-                            if !phase2_on && veto_own(&job) {
-                                if self.params.verbose {
-                                    eprintln!("MIP: cut round {round}: own stall vetoed (ENOMOTO_MIP_BG_DETERM_ROBUST)");
-                                }
-                                stall = 0;
-                            } else if !phase2_on && robust_ext && ext_used < tunable!("ENOMOTO_T_MIP_ROBUST_EXT_MAX", 3usize, usize) {
+                            if !phase2_on && robust_ext && ext_used < tunable!("ENOMOTO_T_MIP_ROBUST_EXT_MAX", 3usize, usize) {
                                 ext_used += 1;
                                 ext_left = tunable!("ENOMOTO_T_MIP_ROBUST_EXT_ROUNDS", 3usize, usize).max(1);
                                 stall = 0;
