@@ -36,3 +36,52 @@ f の大きい問題は中立〜速い。利用者の方針 (パラメータは�
 - **neos-933966 は種 4 では外すと遅い** (def 145 秒が gs・cs で時間切れ)。genlazy・clqtheta の種 1・2 では速かった問題で、種で向きが変わる (def 自身も種で 2 倍動く)。
 - noswot は cs で何も外さないのに def の 60 秒切れが 10 秒になる (4 スレッドの揺れ)。
 - 門は supportcase33・timtab1 (の最初の入り) で狙いどおりほぼ何も外さない。
+
+## Mittelmann 186 問の f (`count_f.py mitt`、`count_f_0of2.jsonl`・`count_f_1of2.jsonl`、2 スレッド × 2 本並べて・150 秒、木に入るときに数えて終える)
+
+156 問が木に入った (残りは根で解けたか 150 秒内に木に届かず)。GEN = GENLAZY 点数 τ 0 の候補の非零の割合、CLQ = 余裕のあるクリーク型の行全部の非零の割合 (f_all)。
+GEN ≥ 0.3 か CLQ ≥ 0.12 の問題は 66 問 (多くは def が 600 秒で解けない)。主なもの:
+
+- GEN が大きい: supportcase42 0.98、seymour1 0.89、ns1830653 0.86、app1-1 0.85、glass4 0.83、seymour 0.76、graphdraw-domain 0.75、rocII-5-11 0.74、bnatt400/500 0.74、
+  app1-2 0.72、net12 0.70、glass-sc 0.67、istanbul-no-cutoff 0.64、neos-1456979 0.61、rocI-4-11 0.59、mzzv11 0.59、puriri 0.53、mzzv42z 0.36、kasai 0.36、
+  neos-4722843-widden 0.43、CMS750_4 0.42、neos-787933 0.40、tr12-30 0.33、unitcal_7 0.32、fiball 0.31。
+- CLQ が大きい: sorrell3 0.99 (GEN は 0.05: 余裕は小さいが 1e-6 は超える行ばかり)、mzzv11 0.70、mzzv42z 0.49、nexp-150-20-8-5 0.42、gmu-35-40 0.35、mcsched 0.26、
+  puriri 0.24、reblock115 0.21、rail01 0.20、comp21-2idx 0.17、neos-933966 0.15。
+
+M に足した 12 問 (`mprobs_extra.json`): f が門を越え、def (vshighs_20261117 の 600 秒) で解けて比が測れる問題 — ns1830653・graphdraw-domain・istanbul-no-cutoff・
+rocI-4-11・mzzv42z・neos-4722843-widden・CMS750_4・tr12-30・unitcal_7・mcsched (CLQ 0.26)・neos-787933・fiball。genlazy の M の 7 問と合わせて 19 問。
+
+## 正しさ
+
+- cargo test 419 通過 (既定、GENLAZY 点数 τ 0 + 門 f0 0.1、CLQ_LAZY θ 0.1 + FALL + 門 f0 0.05 + 1 行だけ)。
+- fuzz (`fuzz.sh`、`fuzz_*.txt`。門がよく働くよう f0 を小さく: GEN f0 0.1・k 20、CLQ f0 0.05・k 20): GENLAZY 前処理・カットなし 1・4 スレッド、既定 4 スレッド、
+  1 行だけ 4 スレッド、一般 (`mip_fuzz_vs_highs.py`) 1 スレッド、CLQ_LAZY (`mip_fuzz_clique.py`) 前処理なし 4 スレッド・既定 4 スレッド・1 行だけ 1 スレッド、各 300 問。
+  **誤答 0**。ただし前処理なし 1 スレッドの 2 組で「最適値は合っているが状態が not_solved」が 1・3 問出た。**既定 (環境変数なし) でも同じ種 (vs_highs 136・256・276) で出る**
+  (`fuzz_vs_nopre_t1_default_only.txt`) もので、他の分担のコミット ec54d0cb0 (際どい LP の実行不能の確かめ。強分岐の子を「不明」にしてノードを LP なしで分枝) 由来:
+  `ENOMOTO_MIP_NO_LPINF_CHECK=1` で消え、その形で回し直した 2 組 (`*_nolpinf.txt`) は食い違い 0。
+- 門の行の数 (`gate lines`) と外した行: 前処理なしの GENLAZY では 300 問中 220 問で外し、戻しも起きる (232 本)。
+
+## 計測の依頼 (P 6 分担・M 10 分担)
+
+設定は def・gs・cs・g1 (`cfg.py`)。同じ (問題, 種) の 4 設定は同じ分担で続けて解く。**この README のコミット以降でビルドして回す** (`maturin develop --release`)。ソルバーは同時に 1 つ。
+
+- P: 58 問 × 種 4〜6 × 4 設定・60 秒 (696 回)、6 分担 (各約 0.95 時間): `python run.py P K` (K = 0〜5)。
+- M: 19 問 × 種 3・4 × 4 設定・600 秒 (152 回)、10 分担 (各約 1.4〜1.5 時間、def の秒 × 1.3 で見積り): `python run.py M K` (K = 0〜9)。
+- 集計: `python summ.py P > summ_P.txt`、`python summ.py M > summ_M.txt` (各設定を def と比べ、問題ごとの f・外した行・比、M は (問題, 種) ごとの秒と時間切れの下界)。
+- 分担表を作り直すなら `python plan.py 6 10`。
+
+## P の結果 (`summ_P.txt`、6 分担・696 回・crash 0・食い違い 0。ビルド 835e65c95、種 4〜6、60 秒)
+
+| 設定 | 解けた (174 組) | def 比 [95%] |
+|---|---|---|
+| def | 135 | — |
+| gs (GENLAZY 点数 τ0 + 門) | 135 | −1.1% [−3.2, +1.0] |
+| cs (CLQ_LAZY θ0.1 + 門) | 135 | −0.9% [−2.8, +0.9] |
+| g1 (門 + 1 行だけ) | 135 | +0.2% [−2.0, +2.5] |
+
+- 3 設定とも中立で、P の採用基準 (95% 上限 ≲ +5%、解けた数を減らさない、誤答 0) は満たす。全種で 1.25 倍超の遅れはない (目立つのは neos5 の gs 0.80・2.22・1.18、
+  neos-911970 の g1 0.83・1.82・1.61 で、どちらも種で向きが変わる)。
+- **門は P のほとんどで何も外さない**: gs で外したのは f ≥ 0.3 前後の問題だけ (neos-1456979 5968 行、mzzv42z 1902、roll3000 572、neos17 200、graph20-20-1rand 94、noswot 65、
+  misc07 35、mik 24、neos5 16 など)。genlazy の s00 で遅れた timtab1 (f 0.18、0 行、0.90 倍)・qiu (f 0.25、4 行、0.97 倍)・mc11 (f 0.12、0 行、0.89 倍) は門で外れず遅れも消えた。
+  cs は mzzv42z (1621 行) 以外ではほぼ何も外さない (P にクリーク型の行の多い問題が少ない)。
+- つまり P は「門が f の小さい問題を荒らさない」ことの確かめで、効き目 (f の大きい問題で速くなるか) は M で見るしかない。
