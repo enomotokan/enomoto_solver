@@ -2759,6 +2759,14 @@ pub(super) fn gap4(c: char) -> bool {
     V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP4").map(|v| if v == "0" || v == "off" { String::new() } else { v }).unwrap_or_else(|_| "rocn".to_string())).contains(c)
 }
 
+/// 試作 `ENOMOTO_MIP_G5POOL=<文字>` (既定では使わない。analysis/vsscip_slow_20261118/g5/README.md): カットのプールの持ち物を抑える。
+/// - `d`: 上限を見ずにプールに入れる経路 (`pool_nocap`: 双対証明の CMIR (`ENOMOTO_MIP_PROOF_CMIR_POOL` の既定 `nocap`) など) でも、密なカットは
+///   非零の上限を見る。n3div36 (4 スレッド・600 秒) は双対証明の CMIR が 1996 本入り、主のプールが上限 (問題の非零の 20 倍) を越えて 1621 万非零になっていた
+pub(super) fn g5pool(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_G5POOL").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
 /// 診断用 `ENOMOTO_MIP_GAP4_RSS=<秒>` (既定では出さない。analysis/gap4_rootstuck_mem_20261109.md): その秒おきに RSS と生きている
 /// `Solver` の数 (外側・サブ MIP、作った累計) を `GAP4RSS:` の行で標準エラーに出す (ログの時刻と並べて RSS の行き先を見る)
 pub(super) fn gap4_rss_secs() -> Option<f64> {
