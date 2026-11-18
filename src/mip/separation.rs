@@ -4190,7 +4190,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.pool_age[k] = 0;
             return;
         }
-        if self.cut_pool_nnz + coefs.len() > nnz_cap && !self.pool_nocap {
+        // 試作 `ENOMOTO_MIP_G5POOL` の `d` ([`super::solver::g5pool`]): 上限を見ずに入れる経路 (`pool_nocap`、既定の双対証明の CMIR など) でも、
+        // 密なカット (非零が max(2 x 行の平均の非零, 0.1 x 列) を超える。`GAP4` の `c` で伝播に使わないのと同じ基準) は上限を見る
+        let nocap = self.pool_nocap && !(super::solver::g5pool('d') && coefs.len() as f64 > (2.0 * self.p.nnz as f64 / self.p.m.max(1) as f64).max(0.1 * self.p.n as f64));
+        if self.cut_pool_nnz + coefs.len() > nnz_cap && !nocap {
             if env_str!("ENOMOTO_MIP_POOL_EVICT").is_none() {
                 return;
             }
