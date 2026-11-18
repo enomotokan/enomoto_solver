@@ -89,3 +89,14 @@ ablate (2026-11-18) は 0.1.9 の後に入った機能と cand1108zd を対の�
 - 運への依存をむしろ減らす直し (CUT_LP_CAP_ROBUST・canddet・cs2 の反復で数える部分): 時間・機械の速さで道が分かれるのを、反復・手間で決める形に
   変えたもの。これは「運への対策」ではあるが、偶然速くなった道に合わせたのではなく、道の分かれ目を取り除いた形。
 - 正しさ・メモリ・期限の直し (PROP_RELTOL_CONT・POSTSOLVE_CLIP・CONFLICT_INT_TOL・memall・ZH_DEADLINE・G5FIN)。
+
+## 確かめの計測 (台本、利用者の承認 2026-11-19)
+
+- 設定 (`cfg.py`): def = 今の既定、sw0 (`ENOMOTO_T_MIP_SUBWAIT=0`)、rins (`ENOMOTO_MIP_S4_RINSRATE=0`・`ENOMOTO_MIP_S4_BGZERO=0`)、
+  qiu (`ENOMOTO_MIP_QIU_FIND_STOP_GAP=0`)、cs2 (`ENOMOTO_MIP_CUT_LP_CAP_STOP=0`)。`=0` が採用前の動きになることは cfg.py のコメントに。
+- A (`shards_A.json`、5 分担・各約 1.4 時間): SUBWAIT が働く 5 問 (csched008・neos-1456979・neos-2746589-doon・neos-662469・ran14x18-disj-8) +
+  unitcal_7 × 種 3〜6 × {def, sw0}、600 秒・4 スレッド。
+- B (`shards_B.json`、4 分担・各約 1.4 時間): MIPLIB の 58 問 × 種 1〜3 × {def, rins, qiu, cs2}、60 秒・4 スレッド。
+- 回し方 (この台本のコミット以降でビルド、`pip install -e .`): `cd analysis/audit_20261119 && python run.py A K` (K = 0〜4)・`python run.py B K` (K = 0〜3)。
+- 集計: `python summ.py A sw0 > summ_A.txt`、`python summ.py B rins > summ_B_rins.txt` (qiu・cs2 も)。各案/def の SGM と 95% 区間、解けた数、
+  全種で 1.25 倍超、食い違い (誤答)。
