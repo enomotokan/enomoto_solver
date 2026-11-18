@@ -18969,7 +18969,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 診断用 (`ENOMOTO_MIP_TREE_LOG`): `ENODE`・`EBR` の行の後ろに足す、取り出したときの下界・出どころ・経過秒・ノードの通し番号。
     fn tl_tail(&self) -> String {
-        format!(" plb={} src={} t={:.3} n={}", self.tl_plb, ["dive", "queue", "shared"][self.tl_src.min(2) as usize], self.start.elapsed().as_secs_f64(), self.nodes)
+        let nfix = (0..self.p.n).filter(|&j| self.p.is_int[j] && self.dom.lo[j] == self.dom.up[j]).count();
+        format!(" plb={} src={} t={:.3} n={} nfix={nfix} nint={}", self.tl_plb, ["dive", "queue", "shared"][self.tl_src.min(2) as usize], self.start.elapsed().as_secs_f64(), self.nodes, self.p.nint)
     }
 
     /// 衝突解析の上限の長さ。
