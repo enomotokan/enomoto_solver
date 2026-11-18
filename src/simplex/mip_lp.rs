@@ -239,7 +239,7 @@ thread_local! {
     pub(crate) static PROGRESS_STOP_ONCE: std::cell::Cell<Option<(usize, usize, f64, f64)>> = const { std::cell::Cell::new(None) };
     /// このスレッドの基底のない求解を同時実行にするときのスレッド数 ([`TwoStageLp::solve`]。1 なら同時実行しない)。
     static COLD_RACE_THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
-    /// 試作 `ENOMOTO_MIP_G5SEQ` (既定では使わない。analysis/vsscip_slow_20261118/g5/README.md): 1 スレッドの MIP の入口
+    /// `ENOMOTO_MIP_G5SEQ` (2026-11-18 から既定、`=0` で使わない。analysis/vsscip_slow_20261118/g5/README.md): 1 スレッドの MIP の入口
     /// ([`crate::mip::solve_mip`]) が立てる。立っていて同時実行をしない (`COLD_RACE_THREADS` が 1) 基底のない大きい求解は、
     /// 二段解法に反復の上限を付け、上限に当たれば同じスレッドで内点法 + クロスオーバーに切り替える ([`TwoStageLp::solve_seq_ipm`])
     static SEQ_IPM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -250,9 +250,9 @@ pub(crate) fn set_seq_ipm(on: bool) -> bool {
     SEQ_IPM.with(|c| c.replace(on))
 }
 
-/// 試作 `ENOMOTO_MIP_G5SEQ` が有効か (値が空でなく `0` でない)。
+/// `ENOMOTO_MIP_G5SEQ` が有効か (既定で有効、`0`・`off` で無効)。
 pub(crate) fn g5seq_on() -> bool {
-    env_str!("ENOMOTO_MIP_G5SEQ").is_some_and(|v| !v.is_empty() && v != "0")
+    env_def!("ENOMOTO_MIP_G5SEQ", "1").is_some()
 }
 
 thread_local! {
@@ -1639,12 +1639,12 @@ impl TwoStageLp {
         self.solve_once(lim)
     }
 
-    /// 試作 `ENOMOTO_MIP_G5SEQ` (1 スレッドの基底のない大きい求解): 二段解法を反復の上限
-    /// L = `ENOMOTO_T_MIP_G5SEQ_C` (既定 1) x (行 + 列) で解き、L 以内に結論が出なければ同じスレッドで内点法 + クロスオーバーを解いて
+    /// `ENOMOTO_MIP_G5SEQ` (既定、1 スレッドの基底のない大きい求解): 二段解法を反復の上限
+    /// L = `ENOMOTO_T_MIP_G5SEQ_C` (既定 0.5) x (行 + 列) で解き、L 以内に結論が出なければ同じスレッドで内点法 + クロスオーバーを解いて
     /// その頂点を採る (TIMEDEP の `r` を 1 スレッドで順に回す形)。頂点が得られなければ二段解法を続ける。
     fn solve_seq_ipm(&mut self, lim: &SolveLimits) -> LpStatus {
         let debug = env_str!("ENOMOTO_DEBUG_RACE").is_some();
-        let l = (tunable!("ENOMOTO_T_MIP_G5SEQ_C", 1.0, f64) * (self.rows.len() + self.n) as f64).max(100.0) as u64;
+        let l = (tunable!("ENOMOTO_T_MIP_G5SEQ_C", 0.5, f64) * (self.rows.len() + self.n) as f64).max(100.0) as u64;
         let cap = SolveLimits { iteration_limit: lim.iteration_limit.min(l), ..*lim };
         let t0 = std::time::Instant::now();
         let st = self.solve_once(&cap);
