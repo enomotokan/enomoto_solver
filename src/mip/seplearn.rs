@@ -19,7 +19,7 @@
 //!     (既定 20) の大きい方まで、効き目の大きい順に残す (得点が `..._NOCAP` (既定 0.5) 以上の分離器にはかけない)
 //! 根で学んだ値を木の探索の写しへ引き継ぎ ([`SepLearn::for_tree`])、木の中ではノードの観測で更新する (スレッドごと)。
 //! 時刻を判断に使わないので、スレッド数・種が同じなら判断は同じ (`ENOMOTO_MIP_SEPLEARN=t` なら仕事の代わりに時間を使う。決定的でない)。
-//! 対象は元の行 (CMIR・flow cover・cover)・zerohalf・clique・implied bound・経路集約 (2 種)・mcf・mod-k (MODKVB)。
+//! 対象は元の行 (CMIR・flow cover・cover)・zerohalf・clique・implied bound・経路集約 (2 種)・mcf・mod-k (MODKVB、2026-11-18 に削除)。
 //! tableau 行 (Gomory) とプールは計測だけ (`ENOMOTO_MIP_SEPLEARN` の値に `g` を含めば tableau 行にも候補の上限をかける)。
 
 use super::separation::sepprof::{self, NSRC};

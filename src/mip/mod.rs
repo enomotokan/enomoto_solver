@@ -46,7 +46,6 @@ pub(crate) mod cuts;
 pub(crate) mod separation;
 pub(crate) mod snfmodk;
 pub(crate) mod zerohalf;
-pub(crate) mod modkvb;
 pub(crate) mod hnf;
 pub(crate) mod hnflat;
 pub(crate) mod hnfcut;
