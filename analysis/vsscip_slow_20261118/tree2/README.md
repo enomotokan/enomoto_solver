@@ -111,3 +111,11 @@ y_j も入る)。固定の条件は (c) と同じ (worst_case_ok か y_j の上�
 - 見立て: 当方の LP (双対単体法) が、この問題 (連続 18440 列・変数上下限 1772 本) で始めの基底・子の暖かい再開から多くの反復を要する。
   分枝や木の作りではなく LP の側の問題なので、LP の担当に回すのがよい (SCIP の切り分けでも、どの機能を切っても 300 秒で下界 7.751 に
   届き、ノードが軽いことが決め手)。
+
+## 7. seymour: zero-half
+
+- 当方の根の分離 (`ENOMOTO_MIP_SEPSTAT=1`、4 スレッド): 既定では tableau だけ (根 405.47 → 408.48、20 本)。zero-half は既定で切ってある
+  (`ENOMOTO_MIP_NO_ZEROHALF` の既定 `1`、analysis/cand1108zd_default_20261109.md)。
+- `ENOMOTO_MIP_NO_ZEROHALF=0` で根 **412.91** (SCIP 411.05、zero-half を切った SCIP 408.79)。伸び 6.13 のうち zerohalf 83%。根の時間 15.1 → 20.0 秒。
+- 既存の試作 `ENOMOTO_MIP_CUTMIX=z` (全部整数で係数が小さい行の割合 `intsmall` が 0.5 以上の問題でだけ zero-half) は seymour (intsmall 1.0) で入る。
+  58 問・Mittelmann では測られていない (analysis/cutmix_20261111.md)。
