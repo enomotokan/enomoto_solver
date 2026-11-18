@@ -319,3 +319,21 @@
   def と sst は根の LP の反復数まで同じ道をたどる (SST の行 19 本は行 12.8 万の LP にほぼ効かない)。計測機の sst の「時間切れ・下界 −∞・RSS 2120 MB」は、
   早めの FJ が外れて根の LP (行 12.8 万) に入り、計測機ではそれが 60 秒で終わらなかった回 (def の 7.3 秒は早めの FJ が当たった回) と見られる。
   RSS 2120 MB は根の LP と根の競争の分、wall 63.1 秒は読み込み (約 2.7 秒) を含み、求解の中の超過は 0.43 秒。SST の不具合ではない。
+
+## 16. ns1116954 で早めの FJ が外れたときの空費 (親の依頼、2026-11-18、事実)
+
+- 親から: pst の P 分担 2 で**既定側**の ns1116954 も 60 秒で解なし・下界 −∞・RSS 2108 MB (FJ の当たり外れは既定の弱点)。
+- 早めの FJ を切って (`ENOMOTO_MIP_FEAS_FJ_EARLY=0`) 4 スレッド・60 秒・種 3 の内訳 (`logs/ns1116954_nofj_def_t4_s3.log`):
+  前処理の LP による固定の最初の LP が 29.8 秒 (「the first LP stopped: TimeLimit (29.84s, limit 29.84s)」、何も固定せず基底も渡さない)、
+  プロービング 2 秒、根の LP 14.8 秒 (4085 反復)、並列の FJ が 49.8 秒で解を見つけて 49.2 秒 (求解の時計) で optimal。計測機ではこの 49 秒が 60 秒に収まらない。
+- gdb (12〜20 秒、`lp_probe` の中): 主は `TwoStageLp::solve_race_ext` で内点法側の結果を `recv` で待っていた。`ENOMOTO_MIP_PRESOLVE_WORK` (既定) の
+  手間の上限で、最初の LP の二段解法は約 2270 反復 (手間 1.25e9 / (行 + 列 + 非零)) で `IterationLimit` で止まるが、競争の主は「二段解法が結論を
+  出せなかった」(数値的な破綻のための枝、leo1・leo2) として内点法 + クロスオーバーを期限 (時間の安全網 30 秒) まで待ち、内点法側も間に合わず何も得ない。
+  RSS 2 GB は内点法 + クロスオーバー (行 12.8 万) と根の LP の分。
+- 試作 `ENOMOTO_MIP_RACE_ITERCAP_NOWAIT=1` (既定では使わない、`src/simplex/mip_lp.rs`): 二段解法が呼び手の反復の上限で止まったら内点法側を止めて
+  `IterationLimit` を返す (待たない)。手間の予算で止めるという方針どおり、時間の安全網まで空費しない。
+  - ns1116954 (早めの FJ を切る、4 スレッド・60 秒・種 3): 48.67 秒 → **22.06 秒** (最初の LP は 5.75 秒で反復の上限、`nofj_nowait_t4`)。
+  - mip_fuzz_vs_highs 300 で bad 0 (`fuzz/vs_highs_nowait.txt`)。
+- 影響の範囲: 反復の上限を渡す根の LP の競争 (主に前処理の LP による固定の最初の LP。根の LP は上限なし)。最初の LP が手間の上限に当たる大きい問題で
+  前処理が短くなる。対の比べ: `cfg.py` の `rin`、`shards_MRIN.json` (12 分担、各 1.4 時間)・`shards_PRIN.json` (4 分担、各 0.74 時間):
+  `python analysis/hang_20261117/run.py MRIN K`・`python analysis/hang_20261117/run.py PRIN K`、集計 `python summ.py MRIN def rin`・`python summ.py PRIN def rin`。
