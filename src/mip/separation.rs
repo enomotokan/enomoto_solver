@@ -6933,6 +6933,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (30n20b8・nw04 のように fill の予算で tableau 行が全部外れ、その密なカットで下界を得る問題) 既定の選び方のまま (値 `n` なら HiGHS の選び方で
         // fill の予算だけ外す。根だけの試しで 30n20b8 の根の下界が 139.9 → 129.8 と悪く、既定のまま (`1`) は 139.9)
         let tab_sig_mode = env_str!("ENOMOTO_MIP_TAB_HIGHS_SIG");
+        // 裏のカットの写しは主の決めた選び方を使う ([`super::solver::BG_TAB_SIG`])
+        if tab_sig_mode.is_some() && self.tab_sig == 0 {
+            self.tab_sig = super::solver::BG_TAB_SIG.with(|c| c.get());
+        }
         let tab_sig_measure = tab_sig_mode.is_some() && self.tab_sig == 0 && !light;
         let tab_rules = env_str!("ENOMOTO_MIP_TAB_HIGHS_RULES").is_some()
             || (super::solver::gap4('t') && p.m >= tunable!("ENOMOTO_T_MIP_GAP4_TAB_M", 20000usize, usize))
