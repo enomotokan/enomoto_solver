@@ -17503,7 +17503,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // (CBC の `CBCNODE_TIGHTEN_BOUNDS`、CbcNode.cpp)。LP の値は x_j の境界の凸関数なので、下の子の値 o_d から
                     // 1 単位あたりの増分 (o_d − z)/(v − ⌊v⌋) を取ると、x_j <= t の値は z + (v − t)·増分 以上。これが打ち切り値を
                     // 超える t は除ける。今の LP 解は新しい境界の内側にあるので、解き直しは要らない
-                    if (env_str!("ENOMOTO_MIP_SB_TIGHTEN").is_some() || sb_ancestor()) && self.dom.up[j] - self.dom.lo[j] > 1.5 {
+                    if (sb_tighten() || sb_ancestor()) && self.dom.up[j] - self.dom.lo[j] > 1.5 {
                         let cutoff = self.prune_limit();
                         for (side, is_up) in [(0usize, false), (1usize, true)] {
                             let o = child_obj[side];
@@ -17530,7 +17530,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             if sb_ancestor() {
                                 self.sb_node_lines.push(line);
                             }
-                            if env_str!("ENOMOTO_MIP_SB_TIGHTEN").is_none() || !cutoff.is_finite() {
+                            if !sb_tighten() || !cutoff.is_finite() {
                                 continue;
                             }
                             {
@@ -18512,7 +18512,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let fixes = std::mem::take(&mut self.sb_node_fixes);
         let mut lines = std::mem::take(&mut self.sb_node_lines);
-        if sb_ancestor() && env_str!("ENOMOTO_MIP_SB_POLY_RC").is_some() && self.node_lp_opt {
+        if sb_ancestor() && (env_str!("ENOMOTO_MIP_SB_POLY_RC").is_some() && !super::condrev::sbt_off()) && self.node_lp_opt {
             let mut cols: Vec<u32> = self.sb_cur.as_ref().map_or_else(Vec::new, |sb| sb.polys.keys().map(|k| k.0).collect());
             cols.extend(lines.iter().map(|l| l.col));
             cols.sort_unstable();
@@ -26435,7 +26435,12 @@ fn prune_limit_of(eff: Option<f64>, outer: f64, obj_step: Option<f64>, lat: Opti
 /// `ENOMOTO_MIP_SB_TIGHTEN`) を両方の子に引き継ぐ。既定では定義域にだけ置くので、潜る子にしか残らず、兄弟や待ち行列から取り出した
 /// ノードでは (根から分枝だけを積み直すので) 失われる
 fn sb_inherit() -> bool {
-    env_str!("ENOMOTO_MIP_SB_TIGHTEN_INHERIT").is_some()
+    env_str!("ENOMOTO_MIP_SB_TIGHTEN_INHERIT").is_some() && !super::condrev::sbt_off()
+}
+
+/// `ENOMOTO_MIP_SB_TIGHTEN` (試作、既定では使わない)。試作 `ENOMOTO_MIP_SBT_GENINT_MIN` で切った問題では使わない ([`super::condrev`])
+fn sb_tighten() -> bool {
+    env_str!("ENOMOTO_MIP_SB_TIGHTEN").is_some() && !super::condrev::sbt_off()
 }
 
 /// 診断: 木の従のスレッドの `poly_diag`・`poly_diag_f` の和 (終わるときに足し、主が出力する)
@@ -26445,7 +26450,7 @@ static POLY_DIAG_WORKERS: std::sync::Mutex<([u64; 9], [f64; 4])> = std::sync::Mu
 /// 折れ線 ([`SbInherit::polys`]) にして子孫に引き継ぎ、子孫のノードの始めにその時の打ち切り値で締め直す (暫定解が良くなるほど
 /// 強く締まる。CBC は強分岐したノードでしか使わない)
 fn sb_ancestor() -> bool {
-    env_str!("ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR").is_some()
+    env_str!("ENOMOTO_MIP_SB_TIGHTEN_ANCESTOR").is_some() && !super::condrev::sbt_off()
 }
 
 /// `ENOMOTO_MIP_SB_RC` (試作、既定では使わない): 強分岐の凸性の締め付けと折れ線の直線に、割線の代わりに子の LP の被約費用を使う
