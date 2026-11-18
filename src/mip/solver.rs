@@ -579,7 +579,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 根の面の頂点の分離 (面の LP とその頂点での分離) に使った時間の合計と、使った面の頂点の数 (`ENOMOTO_MIP_DEBUG_FACETIME`)
     pub(super) face_secs: f64,
     pub(super) face_used: usize,
-    /// `ENOMOTO_MIP_FACE_ADAPT`: このカットのループでは面の頂点の分離をもうしない (面の LP が解けなかった)
+    /// (削除した試作 `ENOMOTO_MIP_FACE_ADAPT` が立てていた。今は立たない) このカットのループでは面の頂点の分離をもうしない (面の LP が解けなかった)
     pub(super) face_off_loop: bool,
     /// 試作 `ENOMOTO_MIP_MPSEP` (既定では使わない、analysis/mpsep_20261106.md): 分離する点が LP の頂点でないとき、[`Self::separate`] が
     /// LP の行の活動量の代わりに使う値 (その点での行の活動量。1 回使うと消す)
@@ -590,7 +590,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 試作 `ENOMOTO_MIP_TAB_HIGHS_SIG` (gate2、analysis/gate2_20261117/tab): 根の最初の tableau の分離で測った作業量から決めた
     /// 行の選び方。0 = まだ決めていない、1 = 既定、2 = HiGHS の選び方、3 = HiGHS の選び方で fill の予算なし (値 `n`)
     pub(super) tab_sig: u8,
-    /// 直前のカットのラウンドの LP の時間 (秒、`ENOMOTO_MIP_FACE_ADAPT` で面の LP の時間の上限に使う。未知なら無限大)
+    /// 直前のカットのラウンドの LP の時間 (秒、削除した試作 `ENOMOTO_MIP_FACE_ADAPT` で面の LP の時間の上限に使う。未知なら無限大)
     pub(super) last_cut_lp_secs: f64,
     /// 再スタート前の暫定解 (`START_SOL`) を受け取っている間か ([`Self::try_incumbent`] の `ENOMOTO_MIP_RESTART_REF` の判定を飛ばす)
     accepting_start: bool,
