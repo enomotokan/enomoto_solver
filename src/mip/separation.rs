@@ -1752,6 +1752,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_CUTLEN` (下の説明): 外側の根の主のループだけ (サブ MIP・裏のカット・続きのループでは使わない)
         let cutlen_on = env_str!("ENOMOTO_MIP_CUTLEN").is_some_and(|v| v != "0") && !self.params.submip && job.is_none() && cont_p2 == 0 && self.snap.is_none();
         let cutlen_at = tunable!("ENOMOTO_T_MIP_CUTLEN_AT", 8usize, usize);
+        let cutlen_strong = cutlen_on && env_str!("ENOMOTO_MIP_CUTLEN").is_some_and(|v| v.contains('s'));
         let mut cutlen_done = false;
         let mut cutlen_c1: Option<f64> = None;
         // fallback の 2 回目のループ: 1 回目で根のカットの時間の上限 (`ENOMOTO_T_MIP_CUT_TIME_FRAC`) を使い切っていても回るよう、
@@ -2621,7 +2622,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lo = tunable!("ENOMOTO_T_MIP_CUTLEN_LO", 8.0, f64);
                     let hi = tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) as f64;
                     let s = 1.0 / (1.0 + (-tunable!("ENOMOTO_T_MIP_CUTLEN_K", 4.0, f64) * (r.max(1e-12).ln() - tunable!("ENOMOTO_T_MIP_CUTLEN_R0", 1.0, f64).ln())).exp());
-                    let target = (lo + (hi - lo) * s).round() as usize;
+                    let mut target = (lo + (hi - lo) * s).round() as usize;
+                    // 値に `s` (例 `1s`): まだ強く伸びている (第 2 段階へ進む `CUT_STRONG_AUTO` と同じ判定: 根の LP からの伸びが
+                    // `ENOMOTO_T_MIP_CUT_STRONG_FRAC` × |目的値| 以上、直近 5 ラウンドの伸びがその `ENOMOTO_T_MIP_CUT_STRONG_RECENT` 倍以上) なら縮めない。
+                    // tr12-30 (r 0.58) は 8 ラウンド目でも 1 ラウンドに 1 割近く伸びていて、上限 10 で早く第 2 段階に入り (第 2 段階の時間の上限は
+                    // 第 1 段階の 3 倍なので短い)、M の 2 種で 1.47・1.40 倍遅くなった (analysis/featconst_20261118/cutlen/README.md の (5))
+                    if cutlen_strong {
+                        let (hist, kh) = if strong_win5 { (&round_obj, round_obj.len()) } else { (&obj_hist, obj_hist.len()) };
+                        let strong_now = kh > 5 && {
+                            let (z0, z1) = (cut_lp0 + p.offset, hist[kh - 1] + p.offset);
+                            let gain = z1 - z0;
+                            z0.is_finite()
+                                && gain >= tunable!("ENOMOTO_T_MIP_CUT_STRONG_FRAC", 0.3, f64) * z0.abs().max(z1.abs()).max(1.0)
+                                && hist[kh - 1] - hist[kh - 6] >= tunable!("ENOMOTO_T_MIP_CUT_STRONG_RECENT", 0.01, f64) * gain
+                        };
+                        if strong_now {
+                            target = target.max(hi as usize);
+                        }
+                    }
                     if self.params.verbose {
                         eprintln!("MIP: cut round {round}: CUTLEN: r {r:.3} (sigmoid {s:.3}) -> round limit {max_rounds} -> {}", target.min(max_rounds));
                     }
