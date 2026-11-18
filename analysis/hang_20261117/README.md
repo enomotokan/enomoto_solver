@@ -337,3 +337,5 @@
 - 影響の範囲: 反復の上限を渡す根の LP の競争 (主に前処理の LP による固定の最初の LP。根の LP は上限なし)。最初の LP が手間の上限に当たる大きい問題で
   前処理が短くなる。対の比べ: `cfg.py` の `rin`、`shards_MRIN.json` (12 分担、各 1.4 時間)・`shards_PRIN.json` (4 分担、各 0.74 時間):
   `python analysis/hang_20261117/run.py MRIN K`・`python analysis/hang_20261117/run.py PRIN K`、集計 `python summ.py MRIN def rin`・`python summ.py PRIN def rin`。
+- **採用 (2026-11-18、利用者の判断)**: `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS` の既定を 30 にした (66da54e5a、`=inf` で従来)。以後の `def` は rfs30 と同じ。
+  docs/improvement_history.md に節を足した。cargo test 409 通過、mip_fuzz_vs_highs 300 bad 0。
