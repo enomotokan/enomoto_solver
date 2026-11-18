@@ -125,6 +125,16 @@ g1/def −8.4% [−33.7%, +12.6%]、解けた数 71 → 73、食い違い 0、cr
 rocI-4-11 (0.68)・neos-4738912-atrato (0.75)。P (`summ_P.txt`): −1.2% [−4.6%, +2.6%]、解けた数 135 → 137。T: 種 1・2 とも neos-787933 と
 graph20-20-1rand が大きく速く、ほかは変わらない。
 
+## 直した版: ORBPP の列の数の下限 10 (`ENOMOTO_T_MIP_ORBPP_MIN_COLS`、試作の中の既定)
+
+洗い出し (`scan.py` → `scan.txt`、P 58・T 5・M 48 問を g1 で 1 スレッド 20 秒) で、ORBPP が静的にするのは neos-911970 (35×3 が 6 つ・35×6、33 列固定)・
+misc07 (63×3、1 列固定)・graph20-20-1rand (37×37、666 列固定) だけ。ほかのオービトープ (neos-1456979 884×5、neos-827175 175×122、
+uccase12 168×14 など) はパッキングでなく動的のまま。VUBAGG が組を作るのは neos-787933 (234612)・physiciansched6-2 (2283)・neos8 (16) だけ。
+列の数は 3・6 と 37 の間が広く空いているので、普通の if で「10 列以上のオービトープだけ静的」にした (neos-911970・misc07 は動的に戻り、
+graph20 は変わらない)。cargo test 417 通過 (merge 前の木)、fuzz_g1 c 400 (下限 0 で ORBPP を働かせて)・v 400 bad 0。
+短い比べ S (`planS.py` → `shards_S.json`、1 分担 約 1.1 時間): M の CMS750_4・rococoC10-001000・timtab1・neos-787933 (600 秒) と P の neos-911970・
+graph20-20-1rand (60 秒) × 種 1〜3 × {def, g1}。`python run.py S 0`、集計 `python summ.py S`。
+
 ## 広い計測の台本 (slow2_20261117 の写し)
 
 - 設定 (`cfg.py`): def (既定)、g1 = `ENOMOTO_MIP_VUBAGG=1` + `ENOMOTO_MIP_ORBPP=1` (vub・opp は単独の切り分け用)。4 スレッド。

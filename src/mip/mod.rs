@@ -3298,8 +3298,9 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     if !static_orbitope && env_str!("ENOMOTO_MIP_ORBPP").is_some_and(|v| v != "0") {
         let min_rows = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_ROWS", 3usize, usize);
         // 列 (入れ替える組) の数の下限。列の少ないオービトープを静的にすると、固定は少ないのに動的な固定の柔らかさを失う
-        // (neos-911970: 35x3 が 6 つと 35x6 が 1 つで 33 列の固定、P で 1.74 倍遅い。graph20-20-1rand は 52x37)
-        let min_cols = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_COLS", 0usize, usize);
+        // (neos-911970: 35x3 が 6 つと 35x6 が 1 つで 33 列の固定、P で 1.74 倍遅い。graph20-20-1rand は 37x37)。P・T・M の 106 問で ORBPP が
+        // 働くのは 3・6 列 (neos-911970・misc07) と 37 列 (graph20) だけなので、間の 10 にする (analysis/vsscip_slow_20261118/g1/scan.txt)
+        let min_cols = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_COLS", 10usize, usize);
         for o in orbs.iter_mut() {
             let binary = o.vars.iter().flatten().all(|&j| prob.is_int[j] && prob.col_lo[j] >= 0.0 && prob.col_up[j] <= 1.0);
             // パッキング・分割の行に含まれる行だけのオービトープ (行の部分集合でも列の入れ替えは対称性。`ORBITOPE_STATIC` と同じく過半のときだけ)
@@ -8536,6 +8537,52 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
                     // y_k = 0: sk = +1 なら x_k = 0、sk = -1 なら x_k = 1
                     fixed[k] = true;
                     out.push((k, if sk > 0.0 { 0.0 } else { 1.0 }));
+                }
+            }
+        }
+    }
+    // `ENOMOTO_MIP_DOMCOL_REV` (試作、`ENOMOTO_MIP_DOMCOL_PRED` と併せて使う): 支配される側 y_k から候補を探す。上の (c) は
+    // 支配する側 y_j の最も短い行から y_k を探すが、y_j が y_k を支配するなら、y_k が行を「助ける」向き (下限側で係数が正、
+    // 上限側で負) の行には必ず y_j も (同じ向きにより大きく) 入るので、y_k のそういう行で最も短いものから y_j を探せば漏れがない。
+    // 集合被覆 (rail507・fast0507。Σ x ≥ 1 の行だけ) では y_j の列が y_k の列を含むのが支配で、上の探し方では候補がほとんど
+    // 出ない (rail507 で 26 本、上限を外しても 9428 本・13 秒。SCIP の domcol は 42278 本・0.6 秒)。
+    // 固定は (c) と同じく worst_case_ok (か y_j の上限 1 が行から導ける) のときだけ。y_j に固定済みの列は使わない。
+    // 調べる組は `ENOMOTO_T_MIP_DOMCOL_REV_MAX_PAIRS` まで (既定 5000 万)。
+    if pred && env_str!("ENOMOTO_MIP_DOMCOL_REV").is_some() {
+        let max_rev = tunable!("ENOMOTO_T_MIP_DOMCOL_REV_MAX_PAIRS", 50_000_000usize, usize);
+        let mut rev_pairs = 0usize;
+        'rev: for k in 0..n {
+            if !binary[k] {
+                continue;
+            }
+            for sk in [1.0, -1.0] {
+                if fixed[k] {
+                    continue 'rev;
+                }
+                // 文字 y_k の費用が負なら worst_case_ok が通らないので飛ばす
+                if sk * prob.cost[k] < -1e-9 * (1.0 + prob.cost[k].abs()) {
+                    continue;
+                }
+                let best = cols[k]
+                    .iter()
+                    .filter(|&&(i, a)| (prob.row_lo[i].is_finite() && a * sk > 0.0) || (prob.row_up[i].is_finite() && a * sk < 0.0))
+                    .min_by_key(|&&(i, _)| prob.rows[i].len());
+                let Some(&(i0, _)) = best else { continue };
+                for &(j, _) in &prob.rows[i0] {
+                    if j == k || !binary[j] || fixed[j] {
+                        continue;
+                    }
+                    for sj in [1.0, -1.0] {
+                        rev_pairs += 1;
+                        if rev_pairs > max_rev {
+                            break 'rev;
+                        }
+                        if dominates(j, sj, k, sk) && (worst_case_ok(j, sj, k, sk) || implied_up(j, sj)) {
+                            fixed[k] = true;
+                            out.push((k, if sk > 0.0 { 0.0 } else { 1.0 }));
+                            continue 'rev;
+                        }
+                    }
                 }
             }
         }
