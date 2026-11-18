@@ -426,7 +426,7 @@ thread_local! {
     /// 裏のカットの写しの根の LP に上限・下限の置き場所も渡す
     static BG_ROOT_NB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 試作 `ENOMOTO_MIP_TAB_HIGHS_SIG`: 裏のカットの写しに渡す、主が決めた tableau の行の選び方 ([`Solver::tab_sig`]。0 なら写しが自分で決める)。
-    /// 写しが別に決めて主と違う選び方になると、p0201 で最適解を失った (種 5 など 40 回中 13 回、主の orbitope の固定が最後の像を消す。
+    /// 写しが別に決めて主と違う選び方になると、p0201 で最適解を失った (種 5 など 40 回中 13 回、本体は対称性の固定 (SYMDYN=f) の側。
     /// analysis/gate2_20261117/tab/README.md 6 節)
     pub(super) static BG_TAB_SIG: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     pub(super) static CUT_JOB: std::cell::RefCell<Option<std::sync::Arc<CutJob>>> = const { std::cell::RefCell::new(None) };
