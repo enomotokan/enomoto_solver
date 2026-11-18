@@ -47,4 +47,19 @@
 
 `cargo test --release --lib` (RUSTFLAGS に `-L/usr/local/lib -lpython3.13`): 412 通過、0 失敗。
 
-(結果は後で書く)
+## 4. 誤答の確かめ (`fuzz.sh`)
+
+analysis/release019_20261117/fuzz.sh と同じ 7 本を、3 件の試作を全部入れて回した (sbt + `SBT_GENINT_MIN=1`・`SUBFIX_CAP=0.05`・`ROOTSTOP=rb`・`RATE=0.02`。
+`SBT_GENINT_MIN=1` は、一般整数の列のある問題で sbt を入れ、ない問題で切る両方の道を通すため)。ビルドは d72c9e6c7。
+
+| 本 | 結果 |
+|---|---|
+| fuzz_tiny 400 0 | bad 0 of 400 |
+| mip_fuzz_vs_highs 300 | bad 0 of 300 |
+| fuzz_objint 1000 0 | bad 0 of 1000 |
+| fuzz_slack 1000 0 | mismatches 0 |
+| fuzz_tiny 400 1000 | bad 0 of 400 |
+| fuzz_objint 1000 5000 | bad 0 of 1000 |
+| fuzz_slack 1000 5000 | mismatches 0 |
+
+(S の結果は後で書く)
