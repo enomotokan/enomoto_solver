@@ -566,7 +566,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cut_cont_p2: usize,
     /// 分離器ごとの適応的な飛ばしの状態 (`ENOMOTO_MIP_SEP_ADAPTIVE`、[`super::separation::SepAdapt`])
     pub(super) sep_adapt: super::separation::SepAdapt,
-    /// 分離器ごとの効き目の計測と学習 (`ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`、[`super::seplearn::SepLearn`])
+    /// 分離器ごとの効き目の計測 (`ENOMOTO_MIP_SEPSTAT`、[`super::seplearn::SepLearn`])
     pub(super) sl: super::seplearn::SepLearn,
     /// 根のカットのループの今のラウンド (`ENOMOTO_MIP_TAB_NNZ_CBC` の最初のラウンドの判定用。ループの始めに 0)
     pub(super) sep_pass: usize,
@@ -678,10 +678,6 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) last_rins: u64,
     /// Local Branching の近傍の大きさ (結果で調整する)。
     pub(super) lb_k: f64,
-    /// LB2・PROX2 の状態 ([`super::heur_lns2`])。
-    pub(super) hsub: super::heur_lns2::HsubState,
-    /// サブ MIP の相対ギャップを一時的に決める (LB2・PROX2)。
-    pub(super) submip_gap: Option<f64>,
     /// ノードで回す改善ヒューリスティクスの順番。
     pub(super) improve_turn: u64,
     /// ALNS の腕ごとの報酬の合計と試した回数。
@@ -976,8 +972,6 @@ pub(super) struct Solver<'a, L: MipLp> {
     lmip_mailbox: Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>,
     /// 試作 `ENOMOTO_MIP_TICKS` の `j`: FJ のスレッドの手間の門 ([`crate::ticks::Gate`])、前に許したときの主のスレッドの手間、最後に待ったときの状態
     fj_gate: Option<(std::sync::Arc<crate::ticks::Gate>, f64, crate::ticks::GateState)>,
-    /// 試作 `ENOMOTO_MIP_FPR` (fix-propagate-repair、[`super::fpr`]) の別スレッドと受け渡し箱
-    pub(super) fpr: super::fpr::FprState,
     /// `ENOMOTO_MIP_FJ_NOSOL_EXTEND`: 暫定解を持ったら立てて、FJ のスレッドの延長をやめさせる印
     fj_has_inc: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// 試作 `ENOMOTO_MIP_PRECHAIN` ([`super::prechain`]): 前処理から続く FJ・Local-MIP のスレッドの分け合う状態と、渡した暫定解の値・境界の数
@@ -1581,7 +1575,7 @@ pub(crate) struct TreeSnapshot {
     hcm_auto: bool,
     /// 根で 1 本も採られなかったのでノードで使わない分離器 (`ENOMOTO_MIP_SEP_ADAPTIVE`、[`super::separation::SepAdapt::node_off`])。
     sep_node_off: u16,
-    /// 根で学んだ分離器の効き目 (`ENOMOTO_MIP_SEPLEARN`、[`super::seplearn::SepLearn::for_tree`])
+    /// 根で測った分離器の効き目 (`ENOMOTO_MIP_SEPSTAT`、[`super::seplearn::SepLearn::for_tree`])
     sepl: super::seplearn::SepLearn,
     /// 完全オービトープと、対称性の行・固定を加える前の問題 (写しから解く求解も orbitopal fixing をし、ヒューリスティクスの
     /// 解を並べ替えて使えるように)。
@@ -5491,8 +5485,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         fc_probe: 0,
         last_rins: 0,
         lb_k: 18.0,
-        hsub: Default::default(),
-        submip_gap: None,
         improve_turn: 0,
         alns_reward: [0.0; 6],
         alns_count: [0; 6],
@@ -5645,7 +5637,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         lmip_thread: None,
         lmip_mailbox: None,
         fj_gate: None,
-        fpr: Default::default(),
         fj_has_inc: None,
         prechain: None,
         prechain_posted: (f64::INFINITY, 0),
@@ -6019,10 +6010,7 @@ fn proof_only() -> bool {
 
 /// 暫定解がない間の木の中のヒューリスティクスの腕の数 (0: RENS、1: Feasibility Pump、2..8: ダイビング
 /// 分数・ベクトル長・係数・擬似費用・Farkas・衝突、8: 何もせず木を進める ([`NOINC_TREE_ARM`]))。
-const NOINC_ARMS: usize = 10;
-
-/// 試作 `ENOMOTO_MIP_FPR` の `b`: fix-propagate-repair の腕 (`b` のときだけ選ぶ)。
-const NOINC_FPR_ARM: usize = 9;
+const NOINC_ARMS: usize = 9;
 
 /// 「木を進める」腕 (`ENOMOTO_MIP_NOINC_TREE_ARM` のときだけ選ぶ)。
 const NOINC_TREE_ARM: usize = 8;
@@ -6036,7 +6024,6 @@ fn noinc_root_arm(name: &str) -> Option<usize> {
         "fractional diving" => Some(2),
         "vector length diving" => Some(3),
         "coefficient diving" => Some(4),
-        "FPR" => Some(NOINC_FPR_ARM),
         _ => None,
     }
 }
@@ -7738,8 +7725,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 捨てられていた (以前は対称性なしで 4 を見つけていた)
             // FJ と Local-MIP を混ぜる形 (`ENOMOTO_MIP_FJ_LMIP_MIX`) の解には既定で使う: Local-MIP は対称性の行のない問題で探すので、
             // neos-950242 では最適解 4 が lex-leader の行に反して拒まれ 5〜8 で止まっていた (並べ替えると 3 回とも根で最適)
-            // 試作 `ENOMOTO_MIP_FPR` のスレッドの解 (対称性の行のない問題で探す) にも使う
-            let lex_canon = env_str!("ENOMOTO_MIP_SYM_LEX_CANON").is_some() || (fj_lmip_mix_on() && self.heur_label == "Local-MIP") || self.heur_label == "FPR (thread)";
+            let lex_canon = env_str!("ENOMOTO_MIP_SYM_LEX_CANON").is_some() || (fj_lmip_mix_on() && self.heur_label == "Local-MIP");
             if !self.lex_gens.is_empty() && !self.p.is_feasible(&x, FEASTOL) && lex_canon {
                 super::symmetry::lex_canonicalize(&self.lex_gens, &mut x, 4 * self.lex_gens.len() * 64 + 1000);
             }
@@ -7892,10 +7878,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 暫定解なし用の RENS (-2851 = 最適値を出す) が回らなくなった
             // FJ のスレッドの Local-MIP (`ENOMOTO_MIP_FJ_LMIP_MIX`・`ENOMOTO_MIP_FJ_LOCALMIP`・`ENOMOTO_MIP_LOCALMIP`) の解も同じに扱う。
             // そうしないと、混ぜた形では FJ の解も受け渡し箱を通って「Local-MIP」の名で入り、hypothyroid-k1 で RENS が回らず -3 のまま終わった
-            // 試作 `ENOMOTO_MIP_FPR` の別スレッドの解も同じに扱う (10teams・hypothyroid-k1 で、その早くて質の悪い解が FJ のスレッドの延長と暫定解なし用の
-            // ヒューリスティクスを止めていた。analysis/fpr_20261110.md)
-            self.inc_only_fj = self.heur_label.starts_with("feasibility jump") || self.heur_label.starts_with("find thread") || self.heur_label == "Local-MIP"
-                || self.heur_label == "FPR (thread)";
+            self.inc_only_fj = self.heur_label.starts_with("feasibility jump") || self.heur_label.starts_with("find thread") || self.heur_label == "Local-MIP";
             if self.heur_label == "Local-MIP" {
                 self.lmip_imps.push(self.start.elapsed().as_secs_f64());
             }
@@ -9838,8 +9821,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     });
                     self.lmip_thread = Some((hl, lstop));
                 }
-                // 試作 `ENOMOTO_MIP_FPR` の `t` (既定では使わない): 別スレッドで LP を使わない fix-propagate-repair
-                self.spawn_fpr_thread(pc.clone(), seed ^ 0x3C6E_F372_FE94_F82B);
                 // `ENOMOTO_MIP_FJ_LOCALMIP` (試作): FJ のスレッドで、FJ2 が続けて解なしなら Local-MIP + 連鎖の手に切り替える
                 // ([`super::heuristics::fj_search_fb`])。Local-MIP は時間の上限 (`ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC` × 時間上限、最大 10 秒) か、
                 // FJ のスレッドを止める合図 (根のカットのループの終わり) まで回り、良くなった解はその場で受け渡し箱に入れる
@@ -11338,11 +11319,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if robust('f') && !robust('g') && !self.params.submip && self.incumbent.is_none() {
                     heur!("robust FJ", self.robust_fj_retry());
                 }
-                // 試作 `ENOMOTO_MIP_FPR` の `r` (既定では使わない): 暫定解がなければ fix-propagate-repair ([`super::fpr`])
-                if self.incumbent.is_none() && super::fpr::fpr_on('r') {
-                    let secs = if self.params.frac_tl().is_finite() { (0.02 * self.params.frac_tl()).min(2.0) } else { 2.0 };
-                    heur!("FPR", self.fpr_heur(&x, 8, secs));
-                }
                 if env_str!("ENOMOTO_MIP_NO_IPM_HEUR").is_none() {
                     // `ENOMOTO_MIP_S1_IPMFIND` (試作、既定では使わない。analysis/highs_slow_20261106/S1.md): 解発見スレッドが走っている間は、
                     // それが解を出したら内点法を止める (解は内点法の丸めが終わるまで取り込まれない。hypothyroid-k1 では内点法が 7〜9 秒
@@ -11623,18 +11599,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if par_late {
                     self.parallel_submips = false;
                     self.join_submips(0);
-                }
-                // `ENOMOTO_MIP_LB2`・`ENOMOTO_MIP_PROX2`: 繰り返しの Local Branching・中心を移す Proximity Search ([`super::heur_lns2`])
-                if super::heur_lns2::lb2_on("root") || super::heur_lns2::prox2_on("root") {
-                    let keep = self.parallel_submips;
-                    self.parallel_submips = false;
-                    if super::heur_lns2::lb2_on("root") && self.hsub_root_ok(self.root_bound_now(root_obj)) {
-                        heur!("local branching 2", self.local_branching2(self.root_bound_now(root_obj)));
-                    }
-                    if super::heur_lns2::prox2_on("root") && self.hsub_root_ok(self.root_bound_now(root_obj)) {
-                        heur!("proximity 2", self.proximity2(self.root_bound_now(root_obj)));
-                    }
-                    self.parallel_submips = keep;
                 }
                 // 根の広い近傍のサブ MIP (`ENOMOTO_MIP_ROOT_WIDE_SUBMIP` で使う。既定では使わない。h80x6320d を時間切れにするため): 根の RENS・RINS の後も暫定解と根の LP の差が大きい
                 // (既定 0.5% 超) なら、固定を目標の固定率 (初期 0.6) で止めた広い近傍 (`ENOMOTO_MIP_FIX_CAP` と同じ) で、
@@ -13655,7 +13619,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.node_cut_ticks += crate::ticks::total() - nc_res_tk;
                     self.node_cut_work += self.lp.total_iterations().saturating_sub(nc_res_it) as f64;
                 }
-                // `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`: ノードの分離で加えたカットの伸び・生き残りを数える
+                // `ENOMOTO_MIP_SEPSTAT`: ノードの分離で加えたカットの伸び・生き残りを数える
                 if self.sl.stat && !self.params.submip {
                     self.sl_after_lp(st);
                 }
@@ -14063,14 +14027,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             *pool.lp_x.lock().unwrap() = Some(std::sync::Arc::new(x.clone()));
                         }
                     }
-                    // `ENOMOTO_MIP_LB2`・`ENOMOTO_MIP_PROX2` の木の段 ([`super::heur_lns2`]): 前に呼んだときより良い暫定解があれば
-                    if heur_ok && plunge_depth == 0 && self.incumbent.is_some() && (super::heur_lns2::lb2_on("tree") || super::heur_lns2::prox2_on("tree")) {
-                        let lb = self.global_lower_bound();
-                        self.hsub_note_gap(lb);
-                        if self.hsub_tree_ok(lb) {
-                            self.hsub_tree(lb);
-                        }
-                    }
                     // `ENOMOTO_MIP_ROBUST_TSTALL` (試作、既定では使わない): 最良値が長く良くならないとき、時間で改善ヒューリスティクスを呼ぶ
                     if node.depth > 0 && plunge_depth == 0 && robust_tstall_on() {
                         self.robust_tstall_tick(&x);
@@ -14242,14 +14198,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let bandit = env_str!("ENOMOTO_MIP_NOINC_BANDIT").is_some();
                         let arm = if bandit {
                             self.noinc_select_arm()
-                        } else if super::fpr::fpr_on('b') {
-                            // 試作 `ENOMOTO_MIP_FPR` の `b`: RENS → FP → ダイビング → FPR を回す
-                            match self.noinc_calls % 4 {
-                                0 => 0,
-                                1 => 1,
-                                2 => 2 + (self.noinc_calls / 4) as usize % 6,
-                                _ => NOINC_FPR_ARM,
-                            }
                         } else {
                             match self.noinc_calls % 3 {
                                 0 => 0,
@@ -14270,9 +14218,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             NOINC_TREE_ARM => {}
                             0 => {
                                 self.rens_dive();
-                            }
-                            NOINC_FPR_ARM => {
-                                self.fpr_heur(&x, 4, 1.0);
                             }
                             1 => {
                                 let r = 4 * self.avg_node_iters();
@@ -16968,8 +16913,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let w = if env_str!("ENOMOTO_MIP_NOINC_ROOT_PRIOR").is_some() { tunable!("ENOMOTO_T_MIP_NOINC_PRIOR_W", 1.0, f64) } else { 0.0 };
         let prior = |a: usize| if w > 0.0 { self.noinc_prior[a] } else { None };
         let tree_arm = env_str!("ENOMOTO_MIP_NOINC_TREE_ARM").is_some();
-        let fpr_arm = super::fpr::fpr_on('b');
-        let arms: Vec<usize> = (0..NOINC_ARMS).filter(|&a| (a != NOINC_TREE_ARM || tree_arm) && (a != NOINC_FPR_ARM || fpr_arm)).collect();
+        let arms: Vec<usize> = (0..NOINC_ARMS).filter(|&a| a != NOINC_TREE_ARM || tree_arm).collect();
         if let Some(&a) = arms.iter().find(|&&a| self.noinc_count[a] == 0 && prior(a).is_none()) {
             return a;
         }
@@ -23480,7 +23424,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_MIP_LOCALMIP` の別スレッドが終わっていれば結果を受け取る (待たない)。
     pub(super) fn poll_lmip_thread(&mut self) {
         self.lmboost_bg_tick(None);
-        self.poll_fpr();
         self.post_prechain();
         // 受け渡し箱には良くなった解を全部ためてあり、新しい (良い) 順に試して、受け付けられたらそこで止める。最良の解が受け付け
         // られなくても (対称性の行に反するなど。neos-950242 で最良の解だけを残していたときは全部失った)、前の解が暫定解になれる。
@@ -26344,7 +26287,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: symmetry: {} heuristic solutions mapped to the symmetry-reduced problem, {} could not be", self.sym_canon.0, self.sym_canon.1);
             }
         }
-        // `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`: このスレッドの分離器ごとの集計 (根の分は根のループの終わりに出している)
+        // `ENOMOTO_MIP_SEPSTAT`: このスレッドの分離器ごとの集計 (根の分は根のループの終わりに出している)
         if self.sl.stat && !self.params.submip && self.sl.st[1].iter().any(|e| e.cands > 0) {
             eprint!("{}", self.sl.report(&format!("tree t{}", self.pool_tid)));
         }
