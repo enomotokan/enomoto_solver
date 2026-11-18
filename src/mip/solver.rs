@@ -1623,10 +1623,11 @@ fn print_nodelp_stats(tid: usize, st: &[[u64; 22]; 5]) {
     }
 }
 
-/// 試作 `ENOMOTO_MIP_NODELP_BFRT_GROUP` (既定では使わない、analysis/lpwarm_20261118): 木のノードの LP だけ `ENOMOTO_SIMPLEX_BFRT_GROUP=gz` で解く
-fn nodelp_bfrt_group() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| env_str!("ENOMOTO_MIP_NODELP_BFRT_GROUP").is_some_and(|v| v != "0"))
+/// 試作 `ENOMOTO_MIP_NODELP_BFRT_GROUP` (既定では使わない、analysis/lpwarm_20261118): 木のノードの LP だけ `ENOMOTO_SIMPLEX_BFRT_GROUP=gz` で解く。
+/// `None` = 使わない、`Some(false)` = 深さ 1 以上・部分 MIP の外だけ (`1`)、`Some(true)` = 深さ 0・部分 MIP も含む (`a`)
+fn nodelp_bfrt_group() -> Option<bool> {
+    static V: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_NODELP_BFRT_GROUP").filter(|v| *v != "0").map(|v| v == "a"))
 }
 
 fn ho4_diag() -> bool {
@@ -12862,9 +12863,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // 試作 `ENOMOTO_MIP_DSE_INIT` の `r`: 特異な基底は列を差し替えて warm start する
                 let _nl_sr = crate::simplex::slope_intercept_dual::dse_init_has('r').then(crate::simplex::slope_intercept_dual::SingRepairScope::new);
-                // 試作 `ENOMOTO_MIP_NODELP_BFRT_GROUP=1` (既定では使わない、analysis/lpwarm_20261118): 木のノードの LP (解き直しを含む) だけ、
-                // 双対の比のテストを `ENOMOTO_SIMPLEX_BFRT_GROUP=gz` にする (根・カット・強分枝・ヒューリスティクスの LP は変えない)
-                let _nl_bg = nodelp_bfrt_group().then(crate::simplex::slope_intercept_dual::BfrtGroupScope::new);
+                // 試作 `ENOMOTO_MIP_NODELP_BFRT_GROUP` (既定では使わない、analysis/lpwarm_20261118): 木のノードの LP (解き直しを含む) だけ、
+                // 双対の比のテストを `ENOMOTO_SIMPLEX_BFRT_GROUP=gz` にする (カット・強分枝・ヒューリスティクスの LP は変えない)。
+                // `1`: 深さ 1 以上のノードで、部分 MIP の外だけ (根のノード (深さ 0) の LP と部分 MIP の木は変えない)。`a`: 深さ 0 と部分 MIP も含む
+                let _nl_bg = nodelp_bfrt_group()
+                    .is_some_and(|all| all || (node.depth > 0 && !self.params.submip))
+                    .then(crate::simplex::slope_intercept_dual::BfrtGroupScope::new);
                 let mut st = self.lp.solve(&capped(self, iter_limit));
                 drop(_nl_sr);
                 drop(_nl_bg);
