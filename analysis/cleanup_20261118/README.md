@@ -73,3 +73,4 @@ fuzz_slack 1000 5000 mismatches 0。cargo test 413 通過・0 失敗。7 本と�
 | 試作 | コミット | 減った行 (src) | 警告 | cargo test | ident | 根拠・備考 |
 |---|---|---|---|---|---|---|
 | `ZH_ONLY`・`ZH_PRE`・`ZH_TRIAL` (`T_MIP_ZH_TRIAL_*`) | (このコミット) | 298 | 74 | 411/0/19 (`random_validity_pre` が消えた) | 一致 | analysis/gap3_zhtrial_20261109.md (ZH_TRIAL=r は 58 問で既定に負ける、=1 は見分けにならない。ZH_ONLY は木で使う害)、analysis/cbcimpl_20261029.md (ZH_PRE は揺れの範囲)。zerohalf.rs の `coef_gcd` は ZH_PRE だけが使っていた |
+| `RESTORE_EXACT_DSE`・`RESTORE_NEVER`・`SMALL3_SUBMIP_LIGHT`・`SMALL2_SUBLIGHT`・`LNS_NO_CAP`・`EARLY_RESTART_SKIP_LIGHT` | (このコミット) | 23 | 74 | 411/0/19 | 一致 | analysis/nodelp2_20261107.md (EXACT_DSE は行の多い LP で重い、NEVER は親の基底を戻す方が良い)、small_overhead3・2_20261102.md (58 問全体で悪い)、mip_primal_weakness_20261016.md (LNS_NO_CAP 不採用)、skiplight_20261029.md (SGM 同じか遅く解けた数が減る)。厳密な DSE 重みの経路は `NODELP2` の `X`・`x` が使うので残し、環境変数の判定だけ消した |
