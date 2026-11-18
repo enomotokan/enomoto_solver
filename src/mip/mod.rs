@@ -555,7 +555,16 @@ pub fn solve_mip(
         if params.verbose {
             eprintln!("MIP: VUBAGG {} columns x = y from variable upper bound rows ({:.2}s)", pairs.len(), t0.elapsed().as_secs_f64());
         }
-        (!pairs.is_empty()).then(|| (vub_dual_agg_problem(pr, &pairs), pairs))
+        // 試作 `ENOMOTO_T_MIP_VUBAGG_MIN_FRAC` = f (既定 0 = 従来どおり。analysis/regv019_20261119): まとめる列が全部の列の f に満たなければ
+        // まとめない。働く問題でまとめる割合は neos-787933 99% (200〜470 秒 → 0.4 秒)・neos-4722843-widden 6.9% (中立) と、
+        // physiciansched6-2 2.0% (前処理の後は同じ大きさになり、根のカットの道が変わって 4 スレッドで 3 種とも 0.61〜0.90 倍遅い)・
+        // piperout-27 0.5%・neos8 0.07% (中立) に分かれる
+        let min_frac = tunable!("ENOMOTO_T_MIP_VUBAGG_MIN_FRAC", 0.0, f64);
+        let small = (pairs.len() as f64) < min_frac * pr.n as f64;
+        if params.verbose && small && !pairs.is_empty() {
+            eprintln!("MIP: VUBAGG not used ({} of {} columns < {min_frac})", pairs.len(), pr.n);
+        }
+        (!pairs.is_empty() && !small).then(|| (vub_dual_agg_problem(pr, &pairs), pairs))
     } else {
         None
     };
