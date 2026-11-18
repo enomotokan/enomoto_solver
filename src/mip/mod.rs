@@ -361,7 +361,7 @@ pub(crate) struct RunStats {
     pub(crate) first_sol: Option<(f64, f64)>,
     /// 根の切除平面ループを終えた時点の LP の目的値 (再スタート後の根があれば最後のもの)。暫定解の目的値で上から切り詰める ([`record_root_bound`])。
     pub(crate) root_bound: Option<f64>,
-    /// 最初の根のヒューリスティクスを始めた時刻 (求解の開始からの秒。`ENOMOTO_MIP_ROOT_SUBMIP_REL` の基準)。
+    /// 最初の根のヒューリスティクスを始めた時刻 (求解の開始からの秒。[`root_submip_ref_secs`] の基準)。
     pub(crate) root_heur_t: Option<f64>,
     /// 最後に暫定解が良くなった時刻 (求解の開始からの秒。`ENOMOTO_MIP_ROBUST_LNSFREQ` の停滞の判定に使う)。
     pub(crate) last_sol: Option<f64>,
@@ -406,18 +406,9 @@ pub(crate) fn record_root_heur_start() {
     }
 }
 
-/// [`root_submip_rel`] の基準の秒: 最初の根のヒューリスティクスを始めた時刻 (記録がなければ今の経過秒)。
+/// 根の時間の基準の秒 (`ENOMOTO_MIP_SUBCAP` の [`super::solver::subcap_root_secs`]): 最初の根のヒューリスティクスを始めた時刻 (記録がなければ今の経過秒)。
 pub(crate) fn root_submip_ref_secs() -> Option<f64> {
     RUN_STATS.lock().ok().and_then(|s| s.root_heur_t).or_else(outer_elapsed)
-}
-
-/// `ENOMOTO_MIP_ROOT_SUBMIP_REL` = k (試作、既定では使わない): 根 (外側の求解の根と再スタート後の根) のサブ MIP の時間の上限を、
-/// 外側の求解の始まりから最初の根のヒューリスティクスに入るまでの秒 ([`root_submip_ref_secs`]) の k 倍 (最小 `ENOMOTO_T_MIP_ROOT_SUBMIP_REL_MIN` 秒、既定 0.5 秒) までに絞る。暫定解のある
-/// ときだけ (暫定解なし用の RENS などは今のまま)。既定の上限 (残り時間の 7%、最大 6 秒) は時間上限 60 秒で約 4 秒で、根の LP が
-/// 0.02 秒の neos17 でも根のサブ MIP が 1 本 3〜4 秒使い、根のヒューリスティクスが 11 秒になっていた
-/// (analysis/smallprob_overhead_20261028.md)。根に入るまでの時間に比べて重すぎる手間を、問題の重さに合わせて縮める
-pub(crate) fn root_submip_rel() -> Option<f64> {
-    env_str!("ENOMOTO_MIP_ROOT_SUBMIP_REL").and_then(|v| v.parse::<f64>().ok()).filter(|&k| k > 0.0)
 }
 
 /// 根の下界の記録 ([`RUN_STATS`])。暫定解があれば、その目的値 (`best_z`) より大きくは記録しない (`ENOMOTO_MIP_ROOT_BOUND_CLAMP=0` で
