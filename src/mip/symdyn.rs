@@ -50,8 +50,8 @@ impl SignedGen {
 }
 
 /// `ENOMOTO_MIP_SYMDYN` の値。既定では使わない (orbital fixing だけ)。2026-11-11〜11-18 は既定 `f` (orbital fixing + LexRed、
-/// analysis/symdyn_20261110.md の 11 節) だったが、orbital fixing (または `o` の軌道の比べ) と LexRed を重ねると最適解の像を全部切る
-/// ことがあり (p0201・fuzz_of の種 1293、analysis/wrong_widden_20261117 の 12 節)、片方だけなら誤答が出ないので既定から外した。
+/// analysis/symdyn_20261110.md の 11 節) だったが、p0201・fuzz_of の種 1293 で最適解を切る誤答が出たので既定から外した。原因は
+/// LexRed の「等号を除く」締め ([`DynSym::prop_one`]) の誤りで、直した (analysis/lexred_20261118)。既定に戻すかは計測の後で決める。
 /// `=f` で併用、`=1` は orbital fixing の代わりに LexRed、`o` を含めば軌道の比べも足す
 fn symdyn_value() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_SYMDYN").filter(|v| *v != "0" && *v != "off")
@@ -609,16 +609,28 @@ impl DynSym {
                 i += 1;
                 continue;
             }
-            // 等号は値 c = alo = yup でしか成り立たない。仮に置くと後ろで破れるなら等号を除く (整数列のみ)
+            // 等号は値 c = alo = yup でしか成り立たない。仮に置くと後ろで破れるなら等号を除く (整数列のみ)。等号を除くことは
+            // 「x_v ≥ c + 1 または γ(x)_v ≤ c − 1」(どちらか一方) なので、締めてよいのは片側が c に固定されているときのもう片側だけ:
+            // x_v = c (aup = c) なら γ(x)_v ≤ c − 1、γ(x)_v = c (ylo = c) なら x_v ≥ c + 1。両方を締めると、x_v が分枝で c に固定された
+            // ノードで x_v ≥ c + 1 となって矛盾し、最適解の代表を含むノードを刈っていた (fuzz_of の種 1293、analysis/lexred_20261118)。
+            // `ENOMOTO_MIP_SYMDYN_STRICT_BOTH` で以前の (両方を締める) 動き
             if feq(alo, yup) && p.is_int[v] && b != v && (!r || self.lsum[v].fract() == 0.0) && !self.peek_equal_feasible(dom, order, i, g, alo) {
-                stats[3] += 1;
                 let c = alo;
-                if !Self::tighten(p, dom, v, false, c + 1.0, &mut changed) {
-                    return None;
+                let both = env_str!("ENOMOTO_MIP_SYMDYN_STRICT_BOTH").is_some();
+                let x_fixed = feq(dom.up[v], c);
+                let y_fixed = feq(ylo, c);
+                if both || y_fixed {
+                    stats[3] += 1;
+                    if !Self::tighten(p, dom, v, false, c + 1.0, &mut changed) {
+                        return None;
+                    }
                 }
-                let ok = if r { Self::tighten(p, dom, b, false, self.lsum[v] - c + 1.0, &mut changed) } else { Self::tighten(p, dom, b, true, c - 1.0, &mut changed) };
-                if !ok {
-                    return None;
+                if both || x_fixed {
+                    stats[3] += 1;
+                    let ok = if r { Self::tighten(p, dom, b, false, self.lsum[v] - c + 1.0, &mut changed) } else { Self::tighten(p, dom, b, true, c - 1.0, &mut changed) };
+                    if !ok {
+                        return None;
+                    }
                 }
             }
             let _ = aup;
