@@ -22,7 +22,26 @@ ABL = {
     "norestart": lambda m: m.setParam("presolving/maxrestarts", 0),
     "pscost": lambda m: m.setParam("branching/pscost/priority", 100000),  # 信頼度つきの強い分枝の代わりに擬費用だけ
     "nodual": lambda m: m.setParam("misc/allowstrongdualreds", False) or m.setParam("misc/allowweakdualreds", False),
+    # 2 段目 (群 1 の結果を受けて): 対称性の種類 (misc/usesymmetry のビット 1 = 多面体 (symresack・オービトープ)、2 = 軌道の縮小、4 = SST)、
+    # 前処理の各部品、制約ごとの双対の前処理
+    "sym1": lambda m: m.setParam("misc/usesymmetry", 1),
+    "sym2": lambda m: m.setParam("misc/usesymmetry", 2),
+    "sym4": lambda m: m.setParam("misc/usesymmetry", 4),
+    "sym3": lambda m: m.setParam("misc/usesymmetry", 3),
+    "nodynprop": lambda m: m.setParam("propagating/symmetry/usedynamicprop", False),
+    "nodualcons": lambda m: [m.setParam(f"constraints/{c}/{n}", False) for c, n in (("linear", "dualpresolving"), ("knapsack", "dualpresolving"), ("logicor", "dualpresolving"), ("setppc", "dualpresolving"))],
+    "nodual_linear": lambda m: m.setParam("constraints/linear/dualpresolving", False),
+    "nodual_knapsack": lambda m: m.setParam("constraints/knapsack/dualpresolving", False),
+    "nodual_logicor": lambda m: m.setParam("constraints/logicor/dualpresolving", False),
+    "nodual_setppc": lambda m: m.setParam("constraints/setppc/dualpresolving", False),
+    "nolinpresolpair": lambda m: m.setParam("constraints/linear/presolpairwise", False),
+    "nosetppcclq": lambda m: m.setParam("constraints/setppc/cliquelifting", False),
+    "noprobing": lambda m: m.setParam("propagating/probing/maxprerounds", 0),
+    "noconflag": lambda m: m.setParam("constraints/linear/aggregatevariables", False),
 }
+for _p in ['boundshift', 'convertinttobin', 'domcol', 'dualagg', 'dualcomp', 'dualinfer', 'dualsparsify', 'gateextraction', 'implics', 'implint',
+           'inttobinary', 'redvub', 'sparsify', 'stuffing', 'trivial', 'tworowbnd']:
+    ABL["no_" + _p] = (lambda q: lambda m: m.setParam(f"presolving/{q}/maxrounds", 0))(_p)
 prob = sys.argv[1]; tl = float(sys.argv[2]) if len(sys.argv) > 2 else 120
 names = sys.argv[3].split(",") if len(sys.argv) > 3 else list(ABL)
 mps = rb.fetch(prob, WT / ".miplib_cache")
