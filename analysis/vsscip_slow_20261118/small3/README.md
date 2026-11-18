@@ -48,3 +48,14 @@
   重い根のヒューリスティクス (RENS・RINS・ダイビング・Feasibility Pump・interior rounding など、`rootcap_heavy`) を回さない。
   exp-1-500-5-5 (g = 0.002): 4 スレッド 4.7 → 3.9 秒、1 スレッド 6.9 → 3.9 秒。
 - **er1** (既存の `ENOMOTO_T_MIP_PROBE_EQUIV_ROUNDS=1`): neos8 は 4 スレッド 5.1 → 4.0 秒、1 スレッド 8.0 → 6.0 秒 (`=0` なら 3.1・4.3 秒だが、同値な組を使わなくなる)。
+
+## 4. 確かめ
+
+- cargo test (リポジトリの既定の形): 419 通過・0 失敗 (d50a9a9e3、マージの前)。
+- fuzz (`ENOMOTO_MIP_S3GAP=0.002` + `ENOMOTO_T_MIP_PROBE_EQUIV_ROUNDS=1` を両方つけて、release019_20261117/fuzz.sh の前半 4 つ、2eb72570b): fuzz_tiny 400・fuzz_highs 300・fuzz_objint 1000・fuzz_slack 1000 で誤り 0。
+  小さい問題なので S3GAP が働く回は少ないはず (働いた回数は数えていない)。
+
+## 5. 広い計測の依頼 (未実施)
+
+`python run.py PS3G K` (K = 0〜3、各約 0.74 時間)・`python run.py MS3G K` (K = 0〜11、各約 1.4 時間)。er1 も同じく `PER1`・`MER1`。
+集計は `python summ.py PS3G s3g` など。
