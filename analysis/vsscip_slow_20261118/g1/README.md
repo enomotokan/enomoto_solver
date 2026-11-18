@@ -77,6 +77,13 @@ SCIP のログ (graph20-20-1rand): 「36 generators found (log10 of symmetry gro
 | neos-787933 | TL (38 / 下界 29、907 ノード) | **0.32 秒** で最適 30 (0 ノード) |
 | neos-3381206-awhea | 5.7 秒 (0 ノード) | 3.9 秒 (0 ノード、どちらの試作も働かない。ゆれ) |
 
+- (追記、親の注意 (a) を受けて) WRONG の直し (8f4a55ebd、SYMDYN=f を既定から外す) を含む木 (e2b0bf14c) でビルドし直し、ORBPP + VUBAGG 付きで:
+  p0201 を 1・4 スレッド × 種 1〜20 (60 秒) で誤答 0/40 (全て 7615)、fuzz_of.py 600 問 bad 0 (ORBPP は働かない形: オービトープにならない対称性)、
+  mip_fuzz_symmetric.py 300 問 (1 スレッド) と 300 問 (4 スレッド、種 300〜) bad 0 (ORBPP が働いた回は 100 問中 34 問)。
+- 二重掛けについて: ORBPP で静的にするのはオービトープの成分だけで、その列はもともと orbital fixing の生成元 (SYM_OF_GENS、LexRed も同じ
+  生成元) から除かれている (オービトープの生成元が動かす列を動かす生成元は使わない)。静的にした成分には動的な orbitopal fixing と
+  オービトープの分枝を掛けず、根のカットの対称な像 (SYM_CUT_GENS) も止める。よって成分ごとに扱いは 1 つ。
+
 ## 広い計測の台本 (slow2_20261117 の写し)
 
 - 設定 (`cfg.py`): def (既定)、g1 = `ENOMOTO_MIP_VUBAGG=1` + `ENOMOTO_MIP_ORBPP=1` (vub・opp は単独の切り分け用)。4 スレッド。
