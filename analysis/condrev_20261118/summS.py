@@ -1,6 +1,6 @@
 """短い計測 S の集計: python summS.py > summS.txt
 試作ごとに、問題 × 種の時間 (秒、時間切れは T) と、def に対する対の SGM の比 (shift 1 秒、時間切れは上限で数える、
-どれかの設定が解けた問題だけ。区間は問題単位のブートストラップ 95%) を出す。"""
+どれかの設定が解けた問題だけ。区間は問題単位のブートストラップ 95%) を出す。600 秒の問題は名前に @600 を付ける。"""
 import json, glob, math, random
 from collections import defaultdict
 from pathlib import Path
@@ -9,7 +9,9 @@ R = {}
 for f in sorted(glob.glob(str(D / "res_S_s*.jsonl"))):
     for l in open(f):
         if l.strip():
-            r = json.loads(l); R[(r["problem"], r["cfg"], r["seed"])] = r
+            r = json.loads(l)
+            # mzzv42z は 60 秒 (sbt) と 600 秒 (SUBFIX) の両方にあるので、600 秒の問題は名前に印を付けて分ける
+            R[(r["problem"] + ("@600" if r["tl"] == 600 else ""), r["cfg"], r["seed"])] = r
 def ok(r): return str(r["result"].get("status", "")).lower() in ("optimal", "infeasible")
 def t(r): return min(r["result"].get("time", r["tl"]), r["tl"]) if ok(r) else r["tl"]
 def cell(r):
