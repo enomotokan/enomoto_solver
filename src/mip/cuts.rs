@@ -657,9 +657,11 @@ pub fn cmir(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
     cmir_terms(vars, terms, beta)
 }
 
+/// `ENOMOTO_MIP_SEP_FAST` (既定で入れる、`=0` で切る): CMIR の効き目の評価を前計算で速くする (作るカットは同じ)。
+/// analysis/gate2_20261117/sepfast (P 58 問 × 種 1〜3: −0.7% [−2.8, +1.4]、解けた 135→135、食い違い 0) で既定にした。
 fn sep_fast() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| env_str!("ENOMOTO_MIP_SEP_FAST").is_some())
+    *ON.get_or_init(|| env_def!("ENOMOTO_MIP_SEP_FAST", "1").is_some())
 }
 
 fn cmir_deltas_highs() -> bool {

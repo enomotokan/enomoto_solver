@@ -84,6 +84,26 @@ SCIP のログ (graph20-20-1rand): 「36 generators found (log10 of symmetry gro
   生成元) から除かれている (オービトープの生成元が動かす列を動かす生成元は使わない)。静的にした成分には動的な orbitopal fixing と
   オービトープの分枝を掛けず、根のカットの対称な像 (SYM_CUT_GENS) も止める。よって成分ごとに扱いは 1 つ。
 
+- (追記) HANG の `ENOMOTO_MIP_SYM_SST` との重なり (HANG との確認、2026-11-18): SST はオービトープが使った生成元とオービトープの列を
+  1 本でも動かす生成元を除いた残りで行 x_l − x_k ≥ 0 を作り、オービトープの列には行を足さない。ORBPP の固定 (根の x_{i,c} = 0 と木の中の
+  orbitopal fixing) は静的にしたオービトープの行列の列だけに掛かる。よって成分は重ならず、併用してよい (lex-leader の行と同じ扱い)。
+
+- (追記) WRONG の LexRed の直し (6e0cf3bce) を含む木 (d232708f5) でビルドし直し、g1 (VUBAGG + ORBPP) 付きで: p0201 を
+  `ENOMOTO_MIP_TAB_HIGHS_SIG=1` (gate2_20261117/tab の 6 節の再現手順) で 4 スレッド × 種 1〜40 → 誤答 0/40、さらに `ENOMOTO_MIP_SYMDYN=f` も
+  付けて 0/40。fuzz_g1 の c を 800 問 × 1・4 スレッド (種 2000〜)・SYMDYN=f 付き 800 問 (種 3000〜) で bad 0、mip_fuzz_symmetric 300 問 (種 600〜) bad 0。
+
+## T の結果 (分担 0 = 種 1、ビルド 9c98b720c、`res_T_s0.jsonl`)
+
+| 問題 | def (秒) | g1 (秒) |
+|---|---|---|
+| graph20-20-1rand | TL | **66.5** |
+| neos-787933 | 228.9 | **0.37** |
+| neos-3381206-awhea | 3.96 | 3.73 |
+| bnatt400 | TL | TL |
+| bnatt500 | TL | TL |
+
+解けた数 def 2・g1 3、食い違い 0、crash 0。最大 RSS def 1350 MB (neos-787933) → g1 408 MB。
+
 ## 広い計測の台本 (slow2_20261117 の写し)
 
 - 設定 (`cfg.py`): def (既定)、g1 = `ENOMOTO_MIP_VUBAGG=1` + `ENOMOTO_MIP_ORBPP=1` (vub・opp は単独の切り分け用)。4 スレッド。

@@ -28,5 +28,5 @@ for p in sys.argv[2:]:
         if line.startswith("{"):
             res["final"] = json.loads(line); res["t"] = round(time.time() - t0, 2)
     killer.cancel(); pr.kill(); pr.wait()
-    with open(D / "pscreen.jsonl", "a") as f: f.write(json.dumps(res) + "\n")
+    with open(D / os.environ.get("PSOUT", "pscreen.jsonl"), "a") as f: f.write(json.dumps(res) + "\n")
     print(p, name, res.get("rows"), res.get("cols"), res.get("root_lp"), res.get("t"), flush=True)
