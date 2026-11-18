@@ -29,8 +29,6 @@ pub(crate) mod solver;
 pub(crate) mod fj;
 pub(crate) mod localmip;
 pub(crate) mod fjsub;
-pub(crate) mod fpr;
-pub(crate) mod fpr_paper;
 mod heuristics;
 mod subb;
 pub(crate) mod sympre;
@@ -41,27 +39,22 @@ pub(crate) mod rootlp3;
 pub(crate) mod xolazy;
 pub(crate) mod heur_ipm;
 pub(crate) mod heur_shift;
-pub(crate) mod heur_lns2;
 pub(crate) mod symmetry;
 pub(crate) mod symdyn;
 pub(crate) mod cuts;
 pub(crate) mod separation;
 pub(crate) mod snfmodk;
 pub(crate) mod zerohalf;
-pub(crate) mod modkvb;
 pub(crate) mod hnf;
 pub(crate) mod hnflat;
 pub(crate) mod hnfcut;
 pub(crate) mod hnfsubst;
-pub(crate) mod gcdforce;
 pub(crate) mod implint_tu;
-pub(crate) mod redsplit;
 pub(crate) mod cmirdelta;
 pub(crate) mod seplearn;
 pub(crate) mod cutmix;
 pub(crate) mod mcf;
 pub(crate) mod clique;
-pub(crate) mod cutsel_ens;
 pub(crate) mod pretime;
 pub(crate) mod plsb;
 pub(crate) mod prechain;
@@ -465,6 +458,8 @@ pub fn solve_mip(
     opts: LpOptions,
     settings: MipSettings,
 ) -> SolveResult {
+    // 時間の上限はここから数える (問題の組み立て・畳み込みの判定の時間も含める。[`fold::solve_folded_any`] の後の `dispatch` を参照)
+    let t_entry = std::time::Instant::now();
     let has_discrete = variables.iter().any(|v| v.vtype != VarType::Continuous);
     if !has_discrete {
         // 制限時間: 期限を過ぎると各解法は結論なしで戻る ([`crate::cancel::with_deadline`])。そのときは `TimeLimit`
@@ -582,9 +577,14 @@ pub fn solve_mip(
         None
     };
     let pr = vub.as_ref().map_or(pr, |(q, _)| q);
-    let mut r = match fold::solve_folded_any(pr, params.time_limit, params.verbose, &dispatch, &dispatch_np) {
+    // 時間の上限から、入口からここまで (問題の組み立てなど) と畳み込みの判定 (畳まないと決めるまで) の時間を引いて渡す。引かなかった版では
+    // highschool1-aigio (列 32 万) で畳み込みの判定に 2.7 秒かかり、その分だけ時間の上限を越えていた (4 スレッド 600 秒で 603〜606 秒。
+    // analysis/hang_20261117/README.md)。`ENOMOTO_MIP_NO_ENTRY_DEADLINE` で引かない (直す前と同じ、切り分け用)
+    let entry_off = env_str!("ENOMOTO_MIP_NO_ENTRY_DEADLINE").is_none();
+    let left = |tl: f64| if entry_off && tl.is_finite() { (tl - t_entry.elapsed().as_secs_f64()).max(0.0) } else { tl };
+    let mut r = match fold::solve_folded_any(pr, left(params.time_limit), params.verbose, &dispatch, &dispatch_np) {
         Some(r) => r,
-        None => dispatch(pr, params.time_limit),
+        None => dispatch(pr, left(params.time_limit)),
     };
     if let (Some((_, pairs)), Some(x)) = (&vub, r.x.as_mut()) {
         for &(j, y, _) in pairs {
@@ -1790,21 +1790,6 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                     eprintln!("MIP: presolve: tightened {k} continuous column bounds by dual arguments");
                 }
             }
-            // 診断 `ENOMOTO_MIP_DEBUG_GCDCOUNT` ([`gcdforce::count`]): 前処理の最後の問題を数える。`=stop` なら数えた後にプロセスを終える
-            if let Some(v) = env_str!("ENOMOTO_MIP_DEBUG_GCDCOUNT").filter(|_| !params.submip && params.restarts == 0) {
-                let c = gcdforce::count(&prob.rows, &prob.row_lo, &prob.row_up, &prob.col_lo, &prob.col_up, &prob.is_int);
-                eprintln!("GCDCOUNT final: rows {} {} ({:.2}s)", prob.m, c.line(), t_pre.elapsed().as_secs_f64());
-                // 暗黙の整数列 ([`MipProblem::implied_integers`]、主側と双対側) も整数列として数えた場合 (双対側は最適解でだけ整数なので、
-                // 問題を変える判定には使えない。数えるだけ)
-                let mask: Vec<bool> = prob.implied_integers();
-                if mask != prob.is_int {
-                    let c2 = gcdforce::count(&prob.rows, &prob.row_lo, &prob.row_up, &prob.col_lo, &prob.col_up, &mask);
-                    eprintln!("GCDCOUNT final_impl: rows {} {} (implied {})", prob.m, c2.line(), mask.iter().zip(&prob.is_int).filter(|(a, b)| **a && !**b).count());
-                }
-                if v == "stop" {
-                    std::process::exit(0);
-                }
-            }
             // 診断 `ENOMOTO_MIP_DEBUG_IMPLINTCOUNT` (src/mip/implint_tu.rs): 暗黙の整数の数を判定ごとに数える。`=stop` なら終える
             if let Some(v) = env_str!("ENOMOTO_MIP_DEBUG_IMPLINTCOUNT").filter(|_| !params.submip && params.restarts == 0) {
                 implint_tu::debug_count(&prob, v == "stop");
@@ -2563,8 +2548,6 @@ thread_local! {
     static VUBS_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`presolve_mip`] の 行をまとめた後のかけ直し (`ENOMOTO_MIP_NO_MERGE_REPRESOLVE` で使わない) の 2 回目の前処理の中か。
     static MERGE_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// 試作 `ENOMOTO_MIP_GCDFORCE` のかけ直しの中か (1 回だけ)
-    static GCDFORCE_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`presolve_mip`] の `ENOMOTO_MIP_DOMCOL` のかけ直しの中か。
     static DOMCOL_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`presolve_mip`] の `ENOMOTO_MIP_SPARSIFY` のかけ直しの中か。
@@ -3296,11 +3279,15 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     // 違う規則の代表を残してよい (群が直積に分かれる)。graph20-20-1rand で SCIP は usesymmetry=0 だと解けず、静的な固定で 2183 列が 340 列になる
     if !static_orbitope && env_str!("ENOMOTO_MIP_ORBPP").is_some_and(|v| v != "0") {
         let min_rows = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_ROWS", 3usize, usize);
+        // 列 (入れ替える組) の数の下限。列の少ないオービトープを静的にすると、固定は少ないのに動的な固定の柔らかさを失う
+        // (neos-911970: 35x3 が 6 つと 35x6 が 1 つで 33 列の固定、P で 1.74 倍遅い。graph20-20-1rand は 37x37)。P・T・M の 106 問で ORBPP が
+        // 働くのは 3・6 列 (neos-911970・misc07) と 37 列 (graph20) だけなので、間の 10 にする (analysis/vsscip_slow_20261118/g1/scan.txt)
+        let min_cols = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_COLS", 10usize, usize);
         for o in orbs.iter_mut() {
             let binary = o.vars.iter().flatten().all(|&j| prob.is_int[j] && prob.col_lo[j] >= 0.0 && prob.col_up[j] <= 1.0);
             // パッキング・分割の行に含まれる行だけのオービトープ (行の部分集合でも列の入れ替えは対称性。`ORBITOPE_STATIC` と同じく過半のときだけ)
             let rows: Vec<usize> = (0..o.vars.len()).filter(|&i| o.row_packing[i]).collect();
-            if o.local || 2 * rows.len() < o.vars.len() || rows.len() < min_rows || !binary {
+            if o.local || 2 * rows.len() < o.vars.len() || rows.len() < min_rows || o.vars[0].len() < min_cols || !binary {
                 continue;
             }
             let swaps = std::mem::take(&mut o.swaps);
@@ -3322,7 +3309,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         }
         if verbose {
             let k = orbs.iter().filter(|o| o.static_pp).count();
-            eprintln!("MIP: symmetry: ORBPP {k} of {} orbitopes static (packing, >= {min_rows} rows), fixed {static_fix} columns to 0", orbs.len());
+            eprintln!("MIP: symmetry: ORBPP {k} of {} orbitopes static (packing, >= {min_rows} rows, >= {min_cols} columns), fixed {static_fix} columns to 0", orbs.len());
         }
     }
     if verbose && static_fix > 0 {
@@ -4497,36 +4484,11 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         COEF_TIGHTEN_SKIPPED.with(|c| c.set(0));
         let tightened = tighten_coefficients(&mut rows, &mut row_lo, &mut row_up, &pre.lb, &pre.ub, &is_int_now, env_str!("ENOMOTO_MIP_COEF_TIGHTEN_GENERAL").is_some());
         let skipped = COEF_TIGHTEN_SKIPPED.with(|c| c.get());
-        // 診断 `ENOMOTO_MIP_DEBUG_GCDCOUNT` ([`gcdforce::count`]): 丸めの直前の行を数える (問題は変えない)
-        if env_str!("ENOMOTO_MIP_DEBUG_GCDCOUNT").is_some() && !submip {
-            let c = gcdforce::count(&rows, &row_lo, &row_up, &pre.lb, &pre.ub, &is_int_now);
-            eprintln!("GCDCOUNT presolve depth {depth}: {}", c.line());
-        }
         let normalized = normalize_integer_rows(&mut rows, &mut row_lo, &mut row_up, &is_int_now);
         if verbose && (tightened > 0 || normalized > 0 || skipped > 0) {
             eprintln!("MIP: presolve: tightened {tightened} coefficients (skipped {skipped} in rows redundant within tolerance), normalized {normalized} integer rows");
         }
     }
-    // 試作 `ENOMOTO_MIP_GCDFORCE` (既定では使わない。[`gcdforce::apply`]、analysis/gcdforce_20261107.md): 最大公約数で丸めた右辺と
-    // 上下限から決まる活動値の範囲を合わせ、値が 1 つに決まる行を等式に、冗長な行を消す。変わった行があれば下で前処理をかけ直す
-    let gcdforced = if env_str!("ENOMOTO_MIP_GCDFORCE").is_some() && !GCDFORCE_REPRESOLVING.with(|f| f.get()) {
-        match gcdforce::apply(&mut rows, &mut row_lo, &mut row_up, &pre.lb, &pre.ub, &p.is_int) {
-            None => {
-                if verbose {
-                    eprintln!("MIP: presolve: GCDFORCE: infeasible");
-                }
-                return Some(Presolved::Infeasible);
-            }
-            Some((neq, nred)) => {
-                if verbose {
-                    eprintln!("MIP: presolve: GCDFORCE: {neq} rows made equations, {nred} redundant rows removed");
-                }
-                neq + nred
-            }
-        }
-    } else {
-        0
-    };
     // 係数が定数倍の関係にある行をまとめる (上限側と下限側の組は範囲制約 1 本に、同じ向きはきつい方に)。
     // 前処理は範囲制約を 2 本の不等式で表すので、そのままだと LP の行が倍になる
     let eq0 = (0..rows.len()).filter(|&i| row_lo[i] == row_up[i]).count();
@@ -4616,16 +4578,14 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // こうしてできた 0-1 列どうしの `x - y = 0` が 3482 本、`x + y = 1` が 46 本残り (HiGHS の前処理後は等式 283 本)、
     // Feasibility Jump が解を見つけられない。後処理は内側の手順の後に外側の手順を並べる (LP による固定と同じ)
     let merge_rp = new_eq > 0 && env_str!("ENOMOTO_MIP_NO_MERGE_REPRESOLVE").is_none() && !MERGE_REPRESOLVING.with(|f| f.get());
-    if merge_rp || sparsified > 0 || gcdforced > 0 {
-        // 疎化のかけ直しの中では疎化しない (1 回だけ)。GCDFORCE のかけ直しも 1 回だけ
-        let (was_m, was_s, was_g) = (MERGE_REPRESOLVING.with(|f| f.get()), SPARSIFY_REPRESOLVING.with(|f| f.get()), GCDFORCE_REPRESOLVING.with(|f| f.get()));
+    if merge_rp || sparsified > 0 {
+        // 疎化のかけ直しの中では疎化しない (1 回だけ)
+        let (was_m, was_s) = (MERGE_REPRESOLVING.with(|f| f.get()), SPARSIFY_REPRESOLVING.with(|f| f.get()));
         MERGE_REPRESOLVING.with(|f| f.set(was_m || merge_rp));
         SPARSIFY_REPRESOLVING.with(|f| f.set(was_s || sparsified > 0));
-        GCDFORCE_REPRESOLVING.with(|f| f.set(was_g || gcdforced > 0));
         let r = presolve_mip(&prob, verbose, submip, lp_probe_secs);
         MERGE_REPRESOLVING.with(|f| f.set(was_m));
         SPARSIFY_REPRESOLVING.with(|f| f.set(was_s));
-        GCDFORCE_REPRESOLVING.with(|f| f.set(was_g));
         match r {
             Some(Presolved::Infeasible) => return Some(Presolved::Infeasible),
             Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0) => {
@@ -8532,6 +8492,52 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
                     // y_k = 0: sk = +1 なら x_k = 0、sk = -1 なら x_k = 1
                     fixed[k] = true;
                     out.push((k, if sk > 0.0 { 0.0 } else { 1.0 }));
+                }
+            }
+        }
+    }
+    // `ENOMOTO_MIP_DOMCOL_REV` (試作、`ENOMOTO_MIP_DOMCOL_PRED` と併せて使う): 支配される側 y_k から候補を探す。上の (c) は
+    // 支配する側 y_j の最も短い行から y_k を探すが、y_j が y_k を支配するなら、y_k が行を「助ける」向き (下限側で係数が正、
+    // 上限側で負) の行には必ず y_j も (同じ向きにより大きく) 入るので、y_k のそういう行で最も短いものから y_j を探せば漏れがない。
+    // 集合被覆 (rail507・fast0507。Σ x ≥ 1 の行だけ) では y_j の列が y_k の列を含むのが支配で、上の探し方では候補がほとんど
+    // 出ない (rail507 で 26 本、上限を外しても 9428 本・13 秒。SCIP の domcol は 42278 本・0.6 秒)。
+    // 固定は (c) と同じく worst_case_ok (か y_j の上限 1 が行から導ける) のときだけ。y_j に固定済みの列は使わない。
+    // 調べる組は `ENOMOTO_T_MIP_DOMCOL_REV_MAX_PAIRS` まで (既定 5000 万)。
+    if pred && env_str!("ENOMOTO_MIP_DOMCOL_REV").is_some() {
+        let max_rev = tunable!("ENOMOTO_T_MIP_DOMCOL_REV_MAX_PAIRS", 50_000_000usize, usize);
+        let mut rev_pairs = 0usize;
+        'rev: for k in 0..n {
+            if !binary[k] {
+                continue;
+            }
+            for sk in [1.0, -1.0] {
+                if fixed[k] {
+                    continue 'rev;
+                }
+                // 文字 y_k の費用が負なら worst_case_ok が通らないので飛ばす
+                if sk * prob.cost[k] < -1e-9 * (1.0 + prob.cost[k].abs()) {
+                    continue;
+                }
+                let best = cols[k]
+                    .iter()
+                    .filter(|&&(i, a)| (prob.row_lo[i].is_finite() && a * sk > 0.0) || (prob.row_up[i].is_finite() && a * sk < 0.0))
+                    .min_by_key(|&&(i, _)| prob.rows[i].len());
+                let Some(&(i0, _)) = best else { continue };
+                for &(j, _) in &prob.rows[i0] {
+                    if j == k || !binary[j] || fixed[j] {
+                        continue;
+                    }
+                    for sj in [1.0, -1.0] {
+                        rev_pairs += 1;
+                        if rev_pairs > max_rev {
+                            break 'rev;
+                        }
+                        if dominates(j, sj, k, sk) && (worst_case_ok(j, sj, k, sk) || implied_up(j, sj)) {
+                            fixed[k] = true;
+                            out.push((k, if sk > 0.0 { 0.0 } else { 1.0 }));
+                            continue 'rev;
+                        }
+                    }
                 }
             }
         }
