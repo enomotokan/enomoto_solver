@@ -86,3 +86,20 @@ python analysis/gate2_20261117/clqprb_s/run.py M K   # K = 0〜7 (各 2.07 時�
 # 終わったら analysis/gate2_20261117/clqprb_s/res_{P,M}_sK.jsonl だけを名指しで add してコミットし push する
 python analysis/gate2_20261117/clqprb_s/summ.py P > analysis/gate2_20261117/clqprb_s/summ_P.txt   # 集計
 ```
+
+## 5. 漏れの修正 (2026-11-18、M 分担 6・7 の害の調べから)
+
+M 分担 6・7 (種 3・4) で clqs だけ時間切れ: snp-02-004-104 (2 種とも)・supportcase40 (種 4、種 3 は 494.7 → 597.2)・net12・tbfp-network。親の依頼で調べた。
+
+- **漏れ (事実)**: 前処理のかけ直し (プロービングの後の `depth` > 0) で含意を引き継ぐ処理 (`presolve_mip_depth` の `keep_impl`) が `clqprb_on()` だけで入っていて、
+  `g` で判定が入らない問題・`r`/`s` で既定の形に戻した問題でも働いていた。既定と前処理の結果が変わるのは、前処理のかけ直しのある問題
+  (`pscreen_def.jsonl` と `pscreen.jsonl` の見比べ: blend2 の根の LP 6.916 → 7.044、neos-4722843-widden 13920×4459 → 14217×4648。再スタートの後のかけ直しでも同じ)。
+- **修正**: `keep_impl` を、含意の形に切り替えた求解 (`CLQPRB_STICKY`) で、戻していない (`CLQPRB_REVERTED` でない) ときだけにした (`g` を使わない形は以前のまま)。
+  修正後 (`pscreen_fix.jsonl`): blend2・widden は既定と同じ前処理。mzzv11・neos8 は含意の形のまま (5496×6488・4457×560)。
+  cargo test 419 通過、fuzz_tiny 400・mip_fuzz_vs_highs 300・fuzz_slack 1000 で誤答 0。
+- **4 問の読み (事実 + 解釈)**: supportcase40・net12・tbfp-network は、同じ種なら根の下界と最初の解 (時刻・値) が def と clqs で完全に同じ
+  (`res_M_s6・s7.jsonl` の `root_bound`・`first_solution_*`)。プロービングで何も得ない (supportcase40 は判定も入らない) ので、違いは木の中の 4 スレッドのゆれ。
+  どれも def が 600 秒近く (494.7〜588.7 秒) で解けている境目の問題。snp-02-004-104 は `g` の判定が入るが ρ = 1.0 で戻り、修正前でも前処理は 1 回で
+  かけ直しがない。**同じ設定・同じ種 3 でも根の下界・最初の解が大きく変わる** (90 秒で 2 回ずつ、`res_R0〜R3_s0.jsonl`: def の根の下界 5.6049e8・5.8678e8)。
+  satellites2-60-fs・snp は def どうしでも前処理の列の数が時間でゆれる (33980・33969)。害の仕組みは見つからず、ゆれの大きい問題と読む。
+- **計測への影響**: M 分担 6・7 と P 分担 0 (と P 分担 1 の最初の 5 行) は修正前のビルド。漏れで変わるのは前処理のかけ直しのある問題で、`g` で何も得ない問題も含む。
