@@ -6150,7 +6150,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         // `r` (試作): 含意を使う形が既定の形より多く (固定 + 締め付け + 同値な組) 得なければ、既定の形の結果に戻す。
         // neos-860300 (どちらも固定 165)・timtab1 (どちらも同値な組 22)・neos-4722843-widden (含意を使う形は予算を使い切って固定 1) で、
         // 得たものは同じか少ないのに含意の数だけが変わって後の流れが変わり、種をまたいで遅くなっていた
-        let revert = clqprb_has('r');
+        let revert = clqprb_has('r') || clqprb_has('s');
         let def_state = if revert {
             Some((prob.clone(), PROBE_EQUIV.with(|e| e.borrow().clone()), PROBE_EQUIV_FORCE.with(|f| f.get()), EQUIV2_USED.with(|f| f.get()), r))
         } else {
@@ -6166,9 +6166,26 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         CLQPRB_FORCE.with(|f| f.set(false));
         let (cf, ct, ce) = PROBE_GAIN.with(|f| f.get());
         if let Some((dp, de, dff, deu, dr)) = def_state {
-            if r != Some(false) && cf + ct + ce <= gf + gt + ge {
+            // `s` (試作、gate2 候補 2、analysis/gate2_20261117/clqprb_s/README.md): 戻すかを、成果の比 ρ = (含意の形の成果) / (既定の形の成果)
+            // のシグモイド σ(k (ln ρ − ln ρ0)) で決め、0.5 未満なら戻す (`ENOMOTO_T_MIP_CLQPRB_S_RHO` = ρ0、既定 2、`_S_K` = k、既定 8)。
+            // `r` は ρ ≤ 1 で戻す形。puriri (ρ 1.77) は含意で増えた固定で locks の sub-MIP が実行不能になり解を失い、mzzv11 (ρ ≥ 3.6)・
+            // neos8 (4.0)・mzzv42z (≥ 2.5) は効く (prbimp_20261113 §4。6 問から選んだしきい値で楽観的)
+            let (dsum, csum) = ((gf + gt + ge) as f64, (cf + ct + ce) as f64);
+            let keep = if clqprb_has('s') {
+                let rho0: f64 = tunable!("ENOMOTO_T_MIP_CLQPRB_S_RHO", 2.0f64, f64);
+                let k: f64 = tunable!("ENOMOTO_T_MIP_CLQPRB_S_K", 8.0f64, f64);
+                let z = k * ((csum.max(0.5) / dsum.max(0.5)).ln() - rho0.max(1e-9).ln());
+                let p = 1.0 / (1.0 + (-z).exp());
                 if verbose {
-                    eprintln!("MIP: probing: CLQPRB=r: the implications found {cf} fixed, {ct} tightened, {ce} equivalent pairs, not more than the default; the default result is used");
+                    eprintln!("MIP: probing: CLQPRB=s: gain ratio {:.3}, sigmoid {:.3}", csum.max(0.5) / dsum.max(0.5), p);
+                }
+                p >= 0.5
+            } else {
+                csum > dsum
+            };
+            if r != Some(false) && !keep {
+                if verbose {
+                    eprintln!("MIP: probing: CLQPRB=r: the implications found {cf} fixed, {ct} tightened, {ce} equivalent pairs, not enough over the default; the default result is used");
                 }
                 *prob = dp;
                 PROBE_EQUIV.with(|e| *e.borrow_mut() = de);
