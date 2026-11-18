@@ -23,9 +23,11 @@ for s in seeds:
     for l in lf.read_text(errors="replace").splitlines():
         if "marginal LP infeasibility" in l:
             li = [int(v) for v in re.findall(r"\d+", l.split("cumulative):")[1])]
+        if "LP infeasibility certificates" in l:
+            keep.append("hist " + l.split(":")[-1].strip())
         if l.startswith("Result:") or "Root LP:" in l:
             keep.append(l[:200])
     lf.unlink()
-    row = {"problem": prob, "tag": tag, "seed": s, "tl": tl, "env": extra, "result": res, "lpinf": li, "log": keep[-3:], "wall": round(time.time() - t0, 1)}
+    row = {"problem": prob, "tag": tag, "seed": s, "tl": tl, "env": extra, "result": res, "lpinf": li, "log": keep[-4:], "wall": round(time.time() - t0, 1)}
     with open(D / "res_one.jsonl", "a") as f: f.write(json.dumps(row) + "\n")
     print(prob, tag, s, res.get("status"), res.get("objective"), res.get("bound"), res.get("nodes"), res.get("time"), li, flush=True)
