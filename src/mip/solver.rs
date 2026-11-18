@@ -6652,88 +6652,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (Some(alt), st.cands0)
     }
 
-    /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE` (値に `p` を含まない形): 根のカットのループが目的値をほとんど上げなかったとき、カット入りの LP の
-    /// 最適面の上の別の最適基底へ移り ([`Self::optface_alt`])、副作用のない比べ ([`Self::probe_cut_mode`]、`ENOMOTO_T_MIP_OPTFACE_ROUNDS`
-    /// (既定 3) ラウンド) で下界が上がるときだけ 2 回目のカットのループを回す。上がらなければ元の LP に戻し、種を変えて
-    /// `ENOMOTO_T_MIP_OPTFACE_TRIES` (既定 3) 回まで試す。カットのループが失敗したら `false`。
-    fn optface_second_loop(&mut self, v: &str, post: f64, root_iters: u64, root_cut_secs: &mut f64) -> bool {
-        let mode = optface_mode(v);
-        let tries = tunable!("ENOMOTO_T_MIP_OPTFACE_TRIES", 3usize, usize).max(1);
-        let k = tunable!("ENOMOTO_T_MIP_OPTFACE_ROUNDS", 3usize, usize).max(1);
-        let cap = (2.0 * self.root_lp_secs).clamp(0.5, tunable!("ENOMOTO_T_MIP_OPTFACE_SECS", 3.0, f64).max(0.5));
-        for t in 0..tries {
-            if self.time_up() {
-                break;
-            }
-            let (alt, cands) = self.optface_alt("after the cut loop", mode, t as u64 + 1, cap);
-            let Some(alt) = alt else {
-                if cands == 0 {
-                    break;
-                }
-                continue;
-            };
-            let keep = std::mem::replace(&mut self.lp, alt);
-            let t1 = Instant::now();
-            let dl = Instant::now() + Duration::from_secs_f64(cap);
-            let (hist, nadd, _) = self.probe_cut_mode(false, k, dl, &|_, _, _| false, false);
-            let gain = hist.last().map_or(0.0, |h| h.0);
-            let good = gain > 1e-6 * post.abs().max(1.0);
-            if self.params.verbose {
-                eprintln!(
-                    "MIP: optface move: probe at the moved vertex (try {}): {} rounds, {nadd} cuts, gain {gain:.6e} -> {} ({:.2}s)",
-                    t + 1,
-                    hist.len(),
-                    if good { "second cut loop" } else { "back to the first vertex" },
-                    t1.elapsed().as_secs_f64()
-                );
-            }
-            if good {
-                let t2 = Instant::now();
-                let ok = self.root_cut_loop(root_iters);
-                *root_cut_secs += t2.elapsed().as_secs_f64();
-                if self.params.verbose {
-                    eprintln!("MIP: optface move: second cut loop {}, obj {:.10e} ({:.2}s)", if ok { "done" } else { "failed" }, self.lp.objective() + self.p.offset, t2.elapsed().as_secs_f64());
-                }
-                return ok;
-            }
-            self.lp = keep;
-        }
-        true
-    }
-
-    /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE` の `p`: 根のカットのループの前に、今の頂点と最適面の上の別の頂点からの比べ
-    /// ([`Self::probe_cut_mode`]) で、別の頂点の伸びが今の頂点の伸びの `ENOMOTO_T_MIP_OPTFACE_GAIN` (既定 1.2) 倍を超えるときだけ
-    /// 別の頂点からループを始める (`ENOMOTO_MIP_ROOTLP_BOTH` と同じ形で、競争の負けた側の代わりに軸の入れ替えで作った頂点を使う)
-    fn optface_pre(&mut self, v: &str) {
-        let mode = optface_mode(v);
-        let k = tunable!("ENOMOTO_T_MIP_OPTFACE_ROUNDS", 3usize, usize).max(1);
-        let cap = (2.0 * self.root_lp_secs).clamp(0.2, tunable!("ENOMOTO_T_MIP_OPTFACE_SECS", 3.0, f64).max(0.2));
-        let (alt, _) = self.optface_alt("before the cut loop", mode, 1, cap);
-        let Some(alt) = alt else { return };
-        let post = self.lp.objective() + self.p.offset;
-        let t1 = Instant::now();
-        let dl = Instant::now() + Duration::from_secs_f64(cap);
-        let (ha, _, _) = self.probe_cut_mode(false, k, dl, &|_, _, _| false, false);
-        let gain_a = ha.last().map_or(0.0, |h| h.0);
-        let keep = std::mem::replace(&mut self.lp, alt);
-        let dl = Instant::now() + Duration::from_secs_f64(cap);
-        let (hb, nadd, _) = self.probe_cut_mode(false, k, dl, &|_, _, _| false, false);
-        let gain_b = hb.last().map_or(0.0, |h| h.0);
-        let eps = 1e-6 * post.abs().max(1.0);
-        let good = gain_b > eps && gain_b > tunable!("ENOMOTO_T_MIP_OPTFACE_GAIN", 1.2, f64) * gain_a + eps;
-        if self.params.verbose {
-            eprintln!(
-                "MIP: optface move: probe gain at the current vertex {gain_a:.6e}, at the moved vertex {gain_b:.6e} ({} rounds, {nadd} cuts, {:.2}s) -> {}",
-                hb.len(),
-                t1.elapsed().as_secs_f64(),
-                if good { "cut loop from the moved vertex" } else { "back to the first vertex" }
-            );
-        }
-        if !good {
-            self.lp = keep;
-        }
-    }
-
     /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS`: 裏のカットの写しそれぞれの結果をまとめる。目的値が最も高い写しの行を使い、値に `u` を
     /// 含めば、今の LP の値を上げた他の写しの行も重複を除いて足す (足すときは返された基底は使わない)。`main` は最初の写し (主の
     /// 基底か、1 本だけなら別の基底から始めたもの)、`extra` は別の基底から始めた写し。
@@ -10321,13 +10239,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     }
                 }
-                // 試作 `ENOMOTO_MIP_OPTFACE_MOVE` の `p` (既定では使わない、analysis/optface_cuts_20261105.md): ループの前に、最適面の上の
-                // 別の頂点 (軸の入れ替えで作る) からの比べで伸びるならそこからループを始める
-                if let Some(v) = env_str!("ENOMOTO_MIP_OPTFACE_MOVE").filter(|v| v.contains('p') && !self.params.submip && self.snap.is_none() && self.params.restarts == 0) {
-                    if !self.time_up() {
-                        self.optface_pre(v);
-                    }
-                }
                 let t_cut = Instant::now();
                 let cut_ok = env_str!("ENOMOTO_MIP_NO_CUTS").is_some() || self.root_cut_loop(root_iters);
                 root_cut_secs = t_cut.elapsed().as_secs_f64();
@@ -10419,25 +10330,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if !kept {
                             self.lp = keep_lp;
                         }
-                    }
-                }
-                // 試作 `ENOMOTO_MIP_OPTFACE_MOVE` (値に `p` を含まない形、既定では使わない、analysis/optface_cuts_20261105.md): 外側の最初の根の
-                // カットのループが目的値をほとんど上げなかったら (相対 `ENOMOTO_T_MIP_OPTFACE_FLAT`、既定 1e-6。目的値が整数刻みの問題だけ。
-                // 値に `a` を含めば刻みによらず)、`ROBUST_ROOTIPM` の内点法の代わりに、カット入りの LP の最適面の上で被約費用 0 の非基底を
-                // 入れる軸の入れ替えで別の最適基底へ移り、比べで伸びるときだけ 2 回目のループを回す ([`Self::optface_second_loop`])
-                if let Some(v) = env_str!("ENOMOTO_MIP_OPTFACE_MOVE").filter(|v| !v.contains('p') && !self.params.submip && self.snap.is_none() && self.params.restarts == 0) {
-                    let post = self.lp.objective() + self.p.offset;
-                    let flat = post - root_obj <= tunable!("ENOMOTO_T_MIP_OPTFACE_FLAT", 1e-6, f64) * root_obj.abs().max(1.0);
-                    if flat && (self.obj_step.is_some() || v.contains('a')) && !self.time_up() && !self.optface_second_loop(v, post, root_iters, &mut root_cut_secs) {
-                        // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
-                        // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
-                        if self.root_gap_closed() {
-                            self.join_fj_thread();
-                            return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
-                        }
-                        self.join_fj_thread();
-                        let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
-                        return self.finish(st, root_obj);
                     }
                 }
                 root_obj = self.lp.objective() + self.p.offset;
