@@ -182,6 +182,47 @@ widden、1 本ずつ (4 スレッド、600 秒、デバッグ解なし)、種 1�
 (時間切れは 暫定 / 下界。) rocI-4-11 (数万回) ほどの発動はなく、旧方式で目立つのは rococoC10・mas74・neos-662469 (100〜250 回)。
 旧方式で計測された a9d7bae3d 系の結果は、rocI-4-11 型 (LP 値なしの分枝の連鎖) と not_solved の型 (葉の結論なし) の影響を受けうる。
 
+## 12. p0201 の誤答 (gate2-1 の TAB_HIGHS_SIG の旧版) と、orbital fixing + LexRed の併用 (SYMDYN=f) の既定からの撤回
+
+- 事象: gate2-1 の 61d034858^ (TAB_HIGHS_SIG=1 で主と裏のカットの写しの tableau の選び方が混ざる) で p0201 が 7675 (最適 7615)。
+  ノード 4 の reason −5 の固定でデバッグ解が消える。reason −5 (タグ 3) は orbitope ではなく orbital fixing・SYMDYN の印。
+- 切り分け (旧版を /tmp/wt_tab に作って `dbgrun.py`、4 スレッド・60 秒、TAB_HIGHS_SIG=1):
+
+| 設定 | 誤答 |
+|---|---|
+| 既定 (SYMDYN=f = orbital fixing + LexRed) | 6/20・7/20・11/40 |
+| NO_SYM_OF=1 | 0/20 |
+| SYMDYN=0 (orbital fixing だけ) | 0/20 |
+| SYMDYN=1 (LexRed だけ)・1o | 0/40・0/40 |
+| SYMDYN=fo | 17/40 |
+| NO_ORBITOPE=1 | 7/20 |
+| 1 スレッド | 3/20 |
+
+  カットの選び方の混ざりは木の道筋を変えただけで、本体は orbital fixing と LexRed の併用。並列固有ではない。
+- 1 つ目の直し (3a496c0cb): 併用時の orbital fixing を「分枝で 0 にした列を含む軌道だけ 0 に固定」に絞る (伝播などで固定された列から
+  軌道を固定するのは分枝の順の辞書式の規則から出ないため)。p0201 (旧版) は 11/40 → 0/40 になったが、fuzz_of.py の種 1293 (支配集合、
+  大きさ 2、orbitope・カットなし) は直しの後も 8 回中 7 回誤答 (7、正しくは 6)。種 1293 は SYMDYN=1o (LexRed + 軌道の比べ) でも 8 回中 7 回、
+  SYMDYN=0・1・NO_SYM_OF・NO_SYMMETRY では 0。0.1.9 (main) でも 4 回中 2 回。つまり「軌道による固定と LexRed を重ねる」こと自体が危ない。
+- 2 つ目の直し (既定の変更): `ENOMOTO_MIP_SYMDYN` の既定を外し、orbital fixing だけ (2026-11-11 より前の既定) に戻した (`=f` で以前の既定)。
+  f を既定にしたときの効果は P の 8 問で −3.2% (58 問換算約 −0.4%)・M の 8 問で +2.4% と小さい (symdyn_20261110.md の 11 節)。
+- 確かめ (新しい既定): 種 1293 は 10 回とも正解。fuzz_of.py 600 問・mip_fuzz_symmetric.py 300 問を (orbitope なし + カットなし)・(orbitope なし)・
+  (orbitope なし 1 スレッド) の 3 組で、すべて bad 0 (`symfuzz/symdyn0.txt`)。HEAD の既定の p0201 は 1・2・4・8 スレッド各 40 種で誤答 0。
+  cargo test・fuzz 7 本は 13 節。
+- 既定で再現する例の探索: P の 58 問のうち orbital fixing の生成元があるのは 13 問 (`symscan.txt`)、併用で両方が効くのは neos5・qiu。
+  直しなし (OF_ANY_FIXED=1、併用) で qiu を種 1〜20 (60 秒) 回して誤答 0 (`ofold.out`)。neos5 は途中で既定を変えたビルドに入れ替わったので SYMDYN=f を明示して回し直し (`ofold2.out`)。対称性の fuzz の既定の形 (orbitope あり) では誤答は出ていない。
+- 速さの計測の台本: cfg.py の `symf` (= 以前の既定 SYMDYN=f) と def (新しい既定) の対の比べ。
+  SP = P の生成元のある 12 問 × 種 1〜4 × 2 設定・60 秒 (`shards_SP.json` 2 分担、各 48 回・最大約 0.8 時間)、
+  SM = symdyn の 11 節の M の 8 問 × 種 1・2 × 2 設定・600 秒 (`shards_SM.json` 4 分担、各 8 回・最大約 1.3 時間)。
+  `python run.py SP K` (K = 0・1)・`python run.py SM K` (K = 0〜3)、集計 `python summ.py SP symf`・`python summ.py SM symf`。
+
+## 13. 既存の別の誤答 (未解決): fuzz_symdyn.py の種 91 (大きさ 2、同じ機械への割り当て、28 列)
+
+- `ENOMOTO_MIP_NO_CUTS=1` と `ENOMOTO_MIP_NO_RESTART=1` の組 (既定外) で、4 スレッドだと 12 種中 8 回 −90 (正しくは −93)。0.1.9 でも 8/12。
+  1 スレッド 0/12、2 スレッド 4/12。カットあり・再スタートありのどちらかだけなら 0。対称性を全部止める (NO_SYMMETRY) と 0 だが、動的な対称性
+  (orbital fixing・LexRed・orbitope) を全部止めても 7/12 (前処理の対称性の行は残る)。LPINF の確かめとは無関係 (NO_LPINF_CHECK でも、旧ビルドでも出る)。
+- デバッグ解 (動的な対称性を全部止めた設定の前処理後の問題、`/tmp/sf91_alldyn.sol` の作り方は `mkdbg2.py`) を付けても、誤答の回では喪失の
+  診断が出ない (並列の木の、喪失を検査していない経路で消えている疑い)。MPS は `symfuzz_mps.py 91 2 out.mps`。
+
 ## 残り
 
 - 他の問題での性能の影響 (LP 値なしの分枝が増える問題があるか) は P・M の対の比べで確かめるのがよい。
