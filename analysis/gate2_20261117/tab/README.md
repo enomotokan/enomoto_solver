@@ -131,3 +131,16 @@
 - パッチを当てたビルド (`check_default.sh`、nice 19): cargo test 411 通過。fuzz はしきい値 0.01・連続の条件なし (ほぼ全部で HiGHS の選び方) で
   fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 0/1000、既定のしきい値で fuzz_tiny 0/400・fuzz_highs 0/150。
   p0201 (4 スレッド・既定のしきい値) 40 種で誤答 0。
+
+## 12. 確かめの計測 (既定化の前、親の依頼)
+
+- 対象: 連続列の割合 < 0.6 を足した判定 (2f6a971c9 以降) で、主の根が HiGHS の選び方になる問題だけ (`feat.jsonl` の札 dec2、根だけ 60 秒):
+  M 10 問 (csched008・fiball・mcsched・mzzv11・mzzv42z・neos-873061・neos-933966・ran14x18-disj-8・rococoC10-001000・satellites2-60-fs)、
+  P 13 問 (assign1-5-8・blp-ar98・bppc4-08・cvs16r128-89・graph20-20-1rand・mc11・mzzv42z・nubu・neos-911970・physiciansched6-2・qnet1・
+  ran14x18-disj-8・rout)。kasai (連続 0.66)・10teams・eil33-2 (fw ≥ 0.9) は既定側。enlight_hard・neos-787933・blend2・ns1116954 は 60 秒で
+  判定まで届かなかった (neos-787933 は defM で W 0.63 → 既定側)。
+- 種は今までに使っていないもの: HM = M × 種 5・6 × {def, tsig2} × 600 秒 (`shards_HM.json`、3 分担 × 約 1.5 時間)、
+  HP = P × 種 7・8 × {def, tsig2} × 60 秒 (`shards_HP.json`、1 分担 × 約 0.7 時間)。`plan_h.py`。
+- 回し方 (リポジトリの根、固定するコミットを checkout した作業木で): `rm -f target/wheels/*.whl; sh analysis/revisit_20261112/build.sh` の後、
+  `python analysis/gate2_20261117/tab/run.py HM K` (K = 0〜2)、`... run.py HP 0`。集計 `python analysis/gate2_20261117/tab/summ.py HM tsig2`
+  (HP も同じ)。見るもの: HiGHS 側の問題で全種 1.25 倍超の遅れがないこと・SGM が悪くないこと・食い違い 0。
