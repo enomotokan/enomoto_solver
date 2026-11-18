@@ -465,6 +465,8 @@ pub fn solve_mip(
     opts: LpOptions,
     settings: MipSettings,
 ) -> SolveResult {
+    // 時間の上限はここから数える (問題の組み立て・畳み込みの判定の時間も含める。[`fold::solve_folded_any`] の後の `dispatch` を参照)
+    let t_entry = std::time::Instant::now();
     let has_discrete = variables.iter().any(|v| v.vtype != VarType::Continuous);
     if !has_discrete {
         // 制限時間: 期限を過ぎると各解法は結論なしで戻る ([`crate::cancel::with_deadline`])。そのときは `TimeLimit`
@@ -582,9 +584,14 @@ pub fn solve_mip(
         None
     };
     let pr = vub.as_ref().map_or(pr, |(q, _)| q);
-    let mut r = match fold::solve_folded_any(pr, params.time_limit, params.verbose, &dispatch, &dispatch_np) {
+    // 時間の上限から、入口からここまで (問題の組み立てなど) と畳み込みの判定 (畳まないと決めるまで) の時間を引いて渡す。引かなかった版では
+    // highschool1-aigio (列 32 万) で畳み込みの判定に 2.7 秒かかり、その分だけ時間の上限を越えていた (4 スレッド 600 秒で 603〜606 秒。
+    // analysis/hang_20261117/README.md)。`ENOMOTO_MIP_NO_ENTRY_DEADLINE` で引かない (直す前と同じ、切り分け用)
+    let entry_off = env_str!("ENOMOTO_MIP_NO_ENTRY_DEADLINE").is_none();
+    let left = |tl: f64| if entry_off && tl.is_finite() { (tl - t_entry.elapsed().as_secs_f64()).max(0.0) } else { tl };
+    let mut r = match fold::solve_folded_any(pr, left(params.time_limit), params.verbose, &dispatch, &dispatch_np) {
         Some(r) => r,
-        None => dispatch(pr, params.time_limit),
+        None => dispatch(pr, left(params.time_limit)),
     };
     if let (Some((_, pairs)), Some(x)) = (&vub, r.x.as_mut()) {
         for &(j, y, _) in pairs {
