@@ -536,6 +536,8 @@ pub fn solve_mip(
     // `ENOMOTO_MIP_THREAD_BUDGET`: 根の LP の同時実行は FJ のスレッドの分を 1 本引く
     let race_threads = if solver::thread_budget_on() && params.threads > 1 { params.threads - 1 } else { params.threads };
     let prev_race = crate::simplex::mip_lp::set_cold_race_threads(race_threads);
+    // 試作 `ENOMOTO_MIP_G5SEQ`: 1 スレッドでは基底のない大きい求解を二段解法 → 内点法 + クロスオーバーの順に回す
+    let prev_seq = crate::simplex::mip_lp::set_seq_ipm(race_threads < 2 && !params.submip && crate::simplex::mip_lp::g5seq_on());
     // 根のサブ MIP・Feasibility Jump を別スレッドで回すかなどの判定 ([`solver::mip_threads`]) も、`ENOMOTO_MIP_THREADS` が
     // なければこのスレッド数にする
     let prev_mt = solver::MIP_THREADS_DEFAULT.swap(params.threads, std::sync::atomic::Ordering::Relaxed);
@@ -594,6 +596,7 @@ pub fn solve_mip(
         crate::simplex::nb_diag::print(t_solve.elapsed().as_secs_f64());
     }
     crate::simplex::mip_lp::set_cold_race_threads(prev_race);
+    crate::simplex::mip_lp::set_seq_ipm(prev_seq);
     solver::MIP_THREADS_DEFAULT.store(prev_mt, std::sync::atomic::Ordering::Relaxed);
     if env_str!("ENOMOTO_MIP_XPROF").is_some() {
         crate::simplex::slope_intercept_dual::xprof("tail");
@@ -2381,10 +2384,18 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
     let found: std::sync::Mutex<Option<(Vec<f64>, u8, f64)>> = std::sync::Mutex::new(None);
     let deadline = PRESOLVE_DEADLINE.with(|d| d.get());
     // 試作 `ENOMOTO_MIP_TICKS` の `f` ([`ticks_on`]): 1 本のときは、全体の上限と Local-MIP の 1 切れを手間 ([`crate::ticks`]) で数え、
-    // 時間は 10 倍の安全網にする (前処理の期限は見ない)。FJ・Local-MIP の交互の回し方が時刻によらなくなる
+    // 時間は 10 倍の安全網にする。FJ・Local-MIP の交互の回し方が時刻によらなくなる。
+    // ただし前処理の期限 (= 求解の時間の上限) は安全網の中でも守る (期限に掛かるのは時間の上限で止まるときだけなので、決定性は崩さない)。
+    // 見なかった版では、根の後のやり直し ([`solver`] の robust の `g`、実行可能性問題は残りの 0.5 = cap 155 秒) の安全網が 1550 秒になり、
+    // 手間の数えが実時間の約 5 分の 1 だった fhnw-binpack4-4 の 1 スレッドが時間の上限 600 秒を越えて 900 秒で kill された
+    // (analysis/hang_20261117/README.md)。`ENOMOTO_MIP_FEAS_EARLY_NO_DEADLINE` で見ない (直す前と同じ、切り分け用)
     let tk_f = ticks_on('f') && threads == 1;
     let t_end = if tk_f {
-        t0 + Duration::from_secs_f64(10.0 * cap.max(0.0))
+        let safe = t0 + Duration::from_secs_f64(10.0 * cap.max(0.0));
+        match deadline {
+            Some(d) if env_str!("ENOMOTO_MIP_FEAS_EARLY_NO_DEADLINE").is_none() => d.min(safe),
+            _ => safe,
+        }
     } else {
         deadline.map_or(t0 + Duration::from_secs_f64(cap.max(0.0)), |d| d.min(t0 + Duration::from_secs_f64(cap.max(0.0))))
     };
@@ -2446,20 +2457,38 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                 if threads == 1 {
                     // 1 本: FJ2 を 1 回と Local-MIP の 1 切れを交互に (`f` なら全体の上限は手間の期限)
                     let _tk_all = tk_f.then(|| crate::ticks::budget_guard(cap.max(0.0) * 1e9));
+                    // 連鎖の手の手間も数える (数えないと Local-MIP の手間が実時間の 1/8 程度になり、上限の数倍回る。
+                    // `ENOMOTO_MIP_FEAS_EARLY_NO_CHAIN_TICKS` で数えない (直す前と同じ、切り分け用))
+                    let _tk_chain = (tk_f && env_str!("ENOMOTO_MIP_FEAS_EARLY_NO_CHAIN_TICKS").is_none()).then(localmip::count_chain_guard);
                     let mut lm = lm_new();
                     let mut k = 0u64;
+                    // 診断 (ログ): FJ と Local-MIP の実時間と手間 ([`crate::ticks::total`]、1 手間 ≒ 1 ns のつもり) の合計
+                    let mut diag = [0.0f64; 4];
+                    let mut timed = |i: usize, f: &mut dyn FnMut() -> bool| -> bool {
+                        let (ti, ki) = (Instant::now(), crate::ticks::total());
+                        let r = f();
+                        diag[i] += ti.elapsed().as_secs_f64();
+                        diag[i + 1] += (crate::ticks::total() - ki) * 1e-9;
+                        r
+                    };
                     while !over() {
-                        if fj_once(k) {
+                        if timed(0, &mut || fj_once(k)) {
                             break;
                         }
                         k += 1;
                         if let Some(l) = lm.as_mut().filter(|l| !l.done) {
                             let _tk_slice = tk_f.then(|| crate::ticks::budget_guard(slice * 1e9));
                             let until = if tk_f { t_end } else { Instant::now() + Duration::from_secs_f64(slice) };
-                            if !over() && lm_run(l, until) {
+                            if !over() && timed(2, &mut || lm_run(l, until)) {
                                 break;
                             }
                         }
+                    }
+                    if verbose {
+                        eprintln!(
+                            "MIP:   early FJ/Local-MIP (1 thread): FJ {:.2}s ({:.2}s in ticks), Local-MIP {:.2}s ({:.2}s in ticks), budget in ticks {}",
+                            diag[0], diag[1], diag[2], diag[3], tk_f
+                        );
                     }
                 } else if t < n_fj {
                     let mut k = 0u64;
@@ -2563,6 +2592,11 @@ pub(crate) fn sym_cuts() -> bool {
 /// 既定 (2026-10-29、`ENOMOTO_MIP_NO_SYM_OF` で以前の lex-leader の行): オービトープにならない対称性を、lex-leader の行 (`x_i - x_k >= 0`) の代わりに探索中の
 /// orbital fixing (HiGHS の `StabilizerOrbits::orbitalFixing`) で扱う。行を足さないので LP が重くならず、ヒューリスティクスの
 /// 解が対称性の行に反して捨てられることもない。
+/// 試作 `ENOMOTO_MIP_SYM_SST`: 対称性を orbital fixing でなく Schreier-Sims の表のカットで扱う ([`symmetry::sst_pairs_except`])
+pub(crate) fn sym_sst() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v != "0")
+}
+
 pub(crate) fn sym_of() -> bool {
     env_str!("ENOMOTO_MIP_NO_SYM_OF").is_none()
 }
@@ -3122,8 +3156,27 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
             }
         }
     }
-    let of = sym_of();
-    let pairs = if of { Vec::new() } else { symmetry::lex_leader_pairs_except(&sym, &used, &in_orb) };
+    // 試作 `ENOMOTO_MIP_SYM_SST` ([`symmetry::sst_pairs_except`]): orbital fixing の代わりに Schreier-Sims の表のカットの行を足す
+    // (SCIP 10 は fhnw-binpack4-4 をこれで 10 秒で実行不能と示す。analysis/hang_20261117/README.md)。サブ MIP では使わない
+    let sst = sym_sst() && !in_sub;
+    let of = sym_of() && !sst;
+    let pairs = if of {
+        Vec::new()
+    } else if sst {
+        let (pairs, levels) = symmetry::sst_pairs_except(
+            &sym,
+            &used,
+            &in_orb,
+            tunable!("ENOMOTO_T_MIP_SYM_SST_GENS", 64usize, usize),
+            tunable!("ENOMOTO_T_MIP_SYM_SST_WORK", 50_000_000u64, u64),
+        );
+        if verbose {
+            eprintln!("MIP: symmetry: SST cuts: {} rows in {levels} levels", pairs.len());
+        }
+        pairs
+    } else {
+        symmetry::lex_leader_pairs_except(&sym, &used, &in_orb)
+    };
     if sym_cuts() && pairs.is_empty() && env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_none() && !sym.generators.is_empty() {
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(sym.generators.clone())));
     }
