@@ -33,6 +33,7 @@ mod subb;
 pub(crate) mod sympre;
 mod sympre0;
 pub(crate) mod heur_subfix;
+pub(crate) mod condrev;
 pub(crate) mod heur_scip;
 pub(crate) mod rootlp3;
 pub(crate) mod xolazy;
@@ -563,9 +564,9 @@ pub fn solve_mip(
             }
         });
     }
-    // 試作 `ENOMOTO_MIP_VUBAGG` (既定では使わない。analysis/vsscip_slow_20261118/g1): 双対の集約 ([`vub_dual_agg_pairs`])。畳み込み・前処理の前に
+    // `ENOMOTO_MIP_VUBAGG` (既定で使う。`=0` で切る。analysis/vsscip_slow_20261118/g1): 双対の集約 ([`vub_dual_agg_pairs`])。畳み込み・前処理の前に
     // x_j を y に置き換えた問題を解き、解の x_j を y の値で埋める。畳み込み (既定) は平行な x を先に束ねて形を崩すので、その前に見る
-    let vub = if env_str!("ENOMOTO_MIP_VUBAGG").is_some_and(|v| v != "0") && !params.submip {
+    let vub = if env_def!("ENOMOTO_MIP_VUBAGG", "1").is_some() && !params.submip {
         let t0 = std::time::Instant::now();
         let pairs = vub_dual_agg_pairs(pr);
         if params.verbose {
@@ -1288,6 +1289,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         ENUM_IDLE.with(|f| f.set(false));
         subb::reset();
         heur_subfix::reset();
+        condrev::decide(p, params.verbose);
     }
     if outer {
         ORBITOPES.with(|t| *t.borrow_mut() = None);
@@ -3271,11 +3273,11 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
             }
         }
     }
-    // 試作 `ENOMOTO_MIP_ORBPP` (既定では使わない。analysis/vsscip_slow_20261118/g1): 成分ごとに扱いを選ぶ。全ての行がパッキング・分割の行に
+    // `ENOMOTO_MIP_ORBPP` (既定で使う。`=0` で切る。analysis/vsscip_slow_20261118/g1): 成分ごとに扱いを選ぶ。全ての行がパッキング・分割の行に
     // 含まれ、行が 3 行以上の 0-1 のオービトープだけを静的に扱い (根で x_{i,c} = 0 (c > i) を固定し、木では全ての行を固定の順で使う)、
     // ほかは動的なまま (van Doornmalen・Hojny の 5.1 節 (c)、SCIP の orbitope_pp)。オービトープどうしは列が交わらないので、成分ごとに
     // 違う規則の代表を残してよい (群が直積に分かれる)。graph20-20-1rand で SCIP は usesymmetry=0 だと解けず、静的な固定で 2183 列が 340 列になる
-    if !static_orbitope && env_str!("ENOMOTO_MIP_ORBPP").is_some_and(|v| v != "0") {
+    if !static_orbitope && env_def!("ENOMOTO_MIP_ORBPP", "1").is_some() {
         let min_rows = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_ROWS", 3usize, usize);
         // 列 (入れ替える組) の数の下限。列の少ないオービトープを静的にすると、固定は少ないのに動的な固定の柔らかさを失う
         // (neos-911970: 35x3 が 6 つと 35x6 が 1 つで 33 列の固定、P で 1.74 倍遅い。graph20-20-1rand は 37x37)。P・T・M の 106 問で ORBPP が
@@ -4738,9 +4740,22 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // `ENOMOTO_MIP_DOMCOL`: 支配される 0-1 列を固定し ([`dominated_binary_fixings`])、前処理をかけ直す (LP による固定と同じ形、1 回だけ)
     if env_str!("ENOMOTO_MIP_DOMCOL").is_some() && !submip && !DOMCOL_REPRESOLVING.with(|f| f.get()) {
         let t0 = std::time::Instant::now();
-        let fix = dominated_binary_fixings(&prob);
+        let mut fix = dominated_binary_fixings(&prob);
         if verbose {
             eprintln!("MIP: presolve: {} dominated binaries fixed ({:.2}s)", fix.len(), t0.elapsed().as_secs_f64());
+        }
+        // `ENOMOTO_T_MIP_DOMCOL_MIN_FRAC` (試作、既定 0 = 使わない): 固定が自由な列のこの割合に満たなければ固定を捨てる。drev の P
+        // (analysis/vsscip_slow_20261118/tree2/README.md 4 節) で遅くなった nw04 (3440 / 87482 列 = 3.9%、2.35 倍)・nu25-pr12 (3.6%、1.58 倍)・
+        // fiber (2.4%、1.35 倍) は固定が少なく、効いた rail507・fast0507 (58%)・air03 (21%) と分かれる
+        let min_frac = tunable!("ENOMOTO_T_MIP_DOMCOL_MIN_FRAC", 0.0, f64);
+        if min_frac > 0.0 && !fix.is_empty() {
+            let nfree0 = (0..n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count();
+            if (fix.len() as f64) < min_frac * nfree0 as f64 {
+                if verbose {
+                    eprintln!("MIP: presolve: the dominated binary fixings dropped ({} < {min_frac} x {nfree0} free columns)", fix.len());
+                }
+                fix.clear();
+            }
         }
         for &(j, v) in &fix {
             prob.col_lo[j] = v;
@@ -4770,7 +4785,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     }
 }
 
-/// 試作 `ENOMOTO_MIP_VUBAGG` の双対の集約 (SCIP の setppc・linear の双対の前処理に当たる。neos-787933 で SCIP は 236376 列を 1764 列にして根で解く)。
+/// `ENOMOTO_MIP_VUBAGG` (既定で使う) の双対の集約 (SCIP の setppc・linear の双対の前処理に当たる。neos-787933 で SCIP は 236376 列を 1764 列にして根で解く)。
 /// 行 `Σ a_j x_j − M y ≤ 0` (≥ の形は符号を反転して同じ。右辺 0、y は 0-1、x_j は全て 0-1 で a_j > 0、`Σ a_j ≤ M`) は、y = 0 なら x = 0、
 /// y = 1 なら冗長なので、`x_j ≤ y` (j ごと) と同じ。x_j の費用が 0 以下で、x_j を増やして苦しくなる行 (上向きの錠) がこの行だけなら、
 /// x_j を y まで上げても実行可能で目的は悪くならないので、`x_j = y` の最適解がある (列ごとに独立に上げてよい)。組 `(x_j, y, false)` を返す。
@@ -4824,7 +4839,7 @@ fn vub_dual_agg_pairs(prob: &MipProblem) -> Vec<(usize, usize, bool)> {
     out
 }
 
-/// 試作 `ENOMOTO_MIP_VUBAGG`: 組 `x_j = y` ([`vub_dual_agg_pairs`]) で x_j を全ての行から y に置き換え、x_j の費用を y に足し、x_j を 0 に固定した問題。
+/// `ENOMOTO_MIP_VUBAGG` (既定で使う): 組 `x_j = y` ([`vub_dual_agg_pairs`]) で x_j を全ての行から y に置き換え、x_j の費用を y に足し、x_j を 0 に固定した問題。
 /// 解は `x_j = x_y` で戻す。列の番号は変えない。
 fn vub_dual_agg_problem(p: &MipProblem, pairs: &[(usize, usize, bool)]) -> MipProblem {
     let mut rep: Vec<usize> = (0..p.n).collect();
@@ -6226,12 +6241,24 @@ pub(crate) fn clqact_on() -> bool {
 /// (クリーク表の 2 文字のクリークにあたる) を後の列の伝播に使い (HiGHS の probing はクリーク表で伝播する)、含意の本数の上限を広げ、
 /// 試す回数の予算と時間の上限を広げる
 pub(crate) fn clqprb_on() -> bool {
-    env_str!("ENOMOTO_MIP_CLQPRB").is_some_and(|v| v != "0")
+    clqprb_val().is_some()
 }
+
+/// `ENOMOTO_MIP_CLQPRB` の値 (`0`・`off` なら `None`)。[`CLQPRB_DEFAULT_ON`] が真なら、付けていないときは `1dgrs` (gate2 候補 2 の形)
+fn clqprb_val() -> Option<&'static str> {
+    if CLQPRB_DEFAULT_ON {
+        env_def!("ENOMOTO_MIP_CLQPRB", "1dgrs")
+    } else {
+        env_str!("ENOMOTO_MIP_CLQPRB").filter(|v| *v != "0" && *v != "off")
+    }
+}
+
+/// `ENOMOTO_MIP_CLQPRB` を既定で入れるか (既定化するときに真にする。analysis/gate2_20261117/clqprb_s/README.md)
+const CLQPRB_DEFAULT_ON: bool = false;
 
 /// [`clqprb_on`] の値に文字 `c` を含むか (`d`: 何も固定できなければ増やした含意を捨てる)。
 pub(crate) fn clqprb_has(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_CLQPRB").is_some_and(|v| v.contains(c))
+    clqprb_val().is_some_and(|v| v.contains(c))
 }
 
 thread_local! {
@@ -6358,20 +6385,17 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         CLQPRB_FORCE.with(|f| f.set(false));
         let (cf, ct, ce) = PROBE_GAIN.with(|f| f.get());
         if let Some((dp, de, dff, deu, dr)) = def_state {
-            // `s` (試作、gate2 候補 2、analysis/gate2_20261117/clqprb_s/README.md): 戻すかを、成果の比 ρ = (含意の形の成果) / (既定の形の成果)
-            // のシグモイド σ(k (ln ρ − ln ρ0)) で決め、0.5 未満なら戻す (`ENOMOTO_T_MIP_CLQPRB_S_RHO` = ρ0、既定 2、`_S_K` = k、既定 8)。
-            // `r` は ρ ≤ 1 で戻す形。puriri (ρ 1.77) は含意で増えた固定で locks の sub-MIP が実行不能になり解を失い、mzzv11 (ρ ≥ 3.6)・
-            // neos8 (4.0)・mzzv42z (≥ 2.5) は効く (prbimp_20261113 §4。6 問から選んだしきい値で楽観的)
+            // `s` (gate2 候補 2、analysis/gate2_20261117/clqprb_s/README.md): 成果の比 ρ = (含意の形の成果) / (既定の形の成果) が
+            // `ENOMOTO_T_MIP_CLQPRB_S_RHO` (既定 2) 未満なら戻す。`r` は ρ ≤ 1 で戻す形。puriri (ρ 1.77) は含意で増えた固定で locks の sub-MIP が
+            // 実行不能になり解を失い、mzzv11 (3.84)・neos8 (4.04)・mzzv42z (3.42) は効く。M・P の 106 問で ρ は ≤ 1.77 と ≥ 3.42 に分かれる
+            // (シグモイドの形で測ったが、0.5 で切るので同じ働きの if にした)
             let (dsum, csum) = ((gf + gt + ge) as f64, (cf + ct + ce) as f64);
             let keep = if clqprb_has('s') {
-                let rho0: f64 = tunable!("ENOMOTO_T_MIP_CLQPRB_S_RHO", 2.0f64, f64);
-                let k: f64 = tunable!("ENOMOTO_T_MIP_CLQPRB_S_K", 8.0f64, f64);
-                let z = k * ((csum.max(0.5) / dsum.max(0.5)).ln() - rho0.max(1e-9).ln());
-                let p = 1.0 / (1.0 + (-z).exp());
+                let rho = csum.max(0.5) / dsum.max(0.5);
                 if verbose {
-                    eprintln!("MIP: probing: CLQPRB=s: gain ratio {:.3}, sigmoid {:.3}", csum.max(0.5) / dsum.max(0.5), p);
+                    eprintln!("MIP: probing: CLQPRB=s: gain ratio {rho:.3}");
                 }
-                p >= 0.5
+                rho >= tunable!("ENOMOTO_T_MIP_CLQPRB_S_RHO", 2.0f64, f64)
             } else {
                 csum > dsum
             };
