@@ -1,6 +1,6 @@
-//! 分離器ごとの効き目の計測と、効き目で分離器に配分を振る試作 (analysis/seplearn_20261108.md)。
+//! 分離器ごとの効き目の計測 (analysis/seplearn_20261108.md)。
 //!
-//! 計測 (`ENOMOTO_MIP_SEPSTAT`、または `ENOMOTO_MIP_SEPLEARN`。既定では使わない): 分離器 ([`sepprof`] の `SRC_*`) ごとに、
+//! 計測 (`ENOMOTO_MIP_SEPSTAT`。既定では使わない): 分離器 ([`sepprof`] の `SRC_*`) ごとに、
 //! 作った候補の数・LP に入った本数・LP の目的値の伸びへの寄与・生き残り・使った時間を、根とノードに分けて数え、根のループの終わりと
 //! 求解の終わりに `ENOMOTO_MIP_LOG` (verbose) で出す。
 //! - 伸びへの寄与: カットを加えてから次の LP を解いたときの目的値の伸び Δ を、加えたカット i の |双対値 y_i| × (加える前の点での
@@ -9,18 +9,12 @@
 //! - 生き残り: 加えてから `ENOMOTO_T_MIP_SEPLEARN_SURV_K` (既定 3) 回あとの LP (同じスレッドの根のラウンドかノードの LP) で、
 //!   まだ LP にあり |双対値| > 1e-9 のカットの割合 (それまでに外れたものは生き残らなかったと数える)
 //!
-//! 学習 (`ENOMOTO_MIP_SEPLEARN`、既定では使わない): 分離器ごとに 1 回の呼び出しあたりの伸び・仕事 (決定的な量: 候補の非零の数 +
-//! `ENOMOTO_T_MIP_SEPLEARN_LPW` × LP に入れたカットの非零の数)・生き残りの指数移動平均を持ち、得点 = 0.5 × 伸び (最良を 1 に
-//! そろえる) + 0.3 × 伸び / 仕事 (同) + 0.2 × 生き残り とする。呼び出しごと (根のラウンド・ノードの分離) に、
-//! (a) 呼ぶか: 最初の W 回 (根 `..._WARM` 3、ノードは根で学んだ値を引き継ぐ) は呼び、得点が `..._SKIP` (既定 0.1) 未満なら飛ばす。
-//!     飛ばす長さは 2 から外れるたびに倍 (最大 `..._MAXSKIP` 16)、飛ばし終えたら 1 回試す (ε-greedy の試しを決定的にしたもの)。
-//!     また仕事の割合が得点の割合の `..._WORKF` (既定 3) 倍 + 0.05 を超えた分離器も飛ばす (時間の上限の代わり。時刻は使わない)
-//! (b) 候補の上限: 得点の割合 × 予算 (根は 1 ラウンドの本数の上限 × `..._CAPMULT` (既定 2)、ノードは 20 × 同) と `..._CAPMIN`
-//!     (既定 20) の大きい方まで、効き目の大きい順に残す (得点が `..._NOCAP` (既定 0.5) 以上の分離器にはかけない)
-//! 根で学んだ値を木の探索の写しへ引き継ぎ ([`SepLearn::for_tree`])、木の中ではノードの観測で更新する (スレッドごと)。
-//! 時刻を判断に使わないので、スレッド数・種が同じなら判断は同じ (`ENOMOTO_MIP_SEPLEARN=t` なら仕事の代わりに時間を使う。決定的でない)。
-//! 対象は元の行 (CMIR・flow cover・cover)・zerohalf・clique・implied bound・経路集約 (2 種)・mcf・mod-k (MODKVB)。
-//! tableau 行 (Gomory) とプールは計測だけ (`ENOMOTO_MIP_SEPLEARN` の値に `g` を含めば tableau 行にも候補の上限をかける)。
+//! 得点 (表に出すだけ): 分離器ごとに 1 回の呼び出しあたりの伸び・仕事 (候補の非零の数 + `ENOMOTO_T_MIP_SEPLEARN_LPW` × LP に入れた
+//! カットの非零の数)・生き残りの指数移動平均を持ち、0.5 × 伸び (最良を 1 にそろえる) + 0.3 × 伸び / 仕事 (同) + 0.2 × 生き残り とする。
+//! 根の平均は木の探索の写しへ引き継ぐ ([`SepLearn::for_tree`])。
+//! 得点で分離器を飛ばし候補に上限をかける学習の試作 (`ENOMOTO_MIP_SEPLEARN`) は、58 問で解けた数 85 → 81 と既定に勝たなかったので
+//! 削除した (2026-11-18、analysis/seplearn_20261108.md・analysis/cleanup_20261118/)。計測の調整値 (`ENOMOTO_T_MIP_SEPLEARN_ALPHA`・
+//! `_SURV_K`・`_LPW`) と表の行の頭 `SEPLEARN` は、記録の台本と合わせるため名前を変えずに残した。
 
 use super::separation::sepprof::{self, NSRC};
 use std::cell::RefCell;
@@ -52,18 +46,10 @@ pub(super) fn add_src_time(src: u8, secs: f64) {
     SLT.with(|t| t.borrow_mut()[src as usize] += secs);
 }
 
-/// 計測を使うか (`ENOMOTO_MIP_SEPSTAT` か `ENOMOTO_MIP_SEPLEARN`)
+/// 計測を使うか (`ENOMOTO_MIP_SEPSTAT`)
 pub(super) fn stat_on() -> bool {
-    env_str!("ENOMOTO_MIP_SEPSTAT").is_some() || learn_mode().is_some()
+    env_str!("ENOMOTO_MIP_SEPSTAT").is_some()
 }
-
-/// 学習の値 (`ENOMOTO_MIP_SEPLEARN`、`0` は使わない)
-pub(super) fn learn_mode() -> Option<&'static str> {
-    env_str!("ENOMOTO_MIP_SEPLEARN").filter(|v| *v != "0")
-}
-
-/// 学習で呼ぶか・候補の上限を決める分離器 (tableau 行・プール・一時的な行は除く)
-pub(super) const LEARN_SRCS: [u8; 9] = [sepprof::SRC_ROWS, sepprof::SRC_ZH, sepprof::SRC_CLIQUE, sepprof::SRC_IMPLBD, sepprof::SRC_PATHH, sepprof::SRC_PATH, sepprof::SRC_MCF, sepprof::SRC_MODK, sepprof::SRC_TAB];
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct Stat {
@@ -76,7 +62,7 @@ pub(super) struct Stat {
     pub gain: f64,
     pub surv_n: u64,
     pub surv_ok: u64,
-    /// 学習で飛ばした呼び出しの数・候補の上限で捨てた候補の数
+    /// (削除した学習の試作が飛ばした呼び出しの数・候補の上限で捨てた候補の数。今は 0)
     pub skipped: u64,
     pub capped: u64,
 }
@@ -93,9 +79,6 @@ struct Pending {
 #[derive(Clone)]
 pub(super) struct SepLearn {
     pub stat: bool,
-    pub learn: bool,
-    use_time: bool,
-    tab: bool,
     /// [根, ノード][分離器]
     pub st: [[Stat; NSRC]; 2],
     /// 学習の指数移動平均 [根, ノード][分離器]: 伸び、仕事、生き残り、観測の数
@@ -103,12 +86,7 @@ pub(super) struct SepLearn {
     ema_work: [[f64; NSRC]; 2],
     ema_surv: [[f64; NSRC]; 2],
     nobs: [[u32; NSRC]; 2],
-    /// 呼び出しの数 (飛ばしたものも含む) [根, ノード]
-    ncalls: [u64; 2],
-    skip_left: [[u32; NSRC]; 2],
-    skip_len: [[u32; NSRC]; 2],
-    /// この呼び出しで使わない分離器 (ビット) と、今が根かノードか
-    pub off: u32,
+    /// 今が根かノードか
     cur_node: bool,
     /// この呼び出しの分離器ごとの候補の数・仕事・時間 (加えた後の伸びの観測に合わせて EMA に入れる)
     call_cands: [u64; NSRC],
@@ -124,21 +102,13 @@ pub(super) struct SepLearn {
 
 impl Default for SepLearn {
     fn default() -> Self {
-        let m = learn_mode();
         SepLearn {
             stat: stat_on(),
-            learn: m.is_some(),
-            use_time: m.is_some_and(|v| v.contains('t')),
-            tab: m.is_some_and(|v| v.contains('g')),
             st: [[Stat::default(); NSRC]; 2],
             ema_gain: [[0.0; NSRC]; 2],
             ema_work: [[0.0; NSRC]; 2],
             ema_surv: [[0.5; NSRC]; 2],
             nobs: [[0; NSRC]; 2],
-            ncalls: [0; 2],
-            skip_left: [[0; NSRC]; 2],
-            skip_len: [[0; NSRC]; 2],
-            off: 0,
             cur_node: false,
             call_cands: [0; NSRC],
             call_work: [0.0; NSRC],
@@ -160,10 +130,6 @@ impl SepLearn {
     /// 木の探索の写し (別のスレッド) に引き継ぐ状態: 学んだ平均 (根の値をノードの初めの値にもする) だけを持つ
     pub(super) fn for_tree(&self) -> SepLearn {
         let mut s = SepLearn::default();
-        // `ENOMOTO_T_MIP_SEPLEARN_NODE_WARM` > 0: ノードは根の値を引き継がず、自分の観測がこの数たまるまで飛ばさない
-        if tunable!("ENOMOTO_T_MIP_SEPLEARN_NODE_WARM", 0u32, u32) > 0 {
-            return s;
-        }
         s.ema_gain = self.ema_gain;
         s.ema_work = self.ema_work;
         s.ema_surv = self.ema_surv;
@@ -202,64 +168,18 @@ impl SepLearn {
         out
     }
 
-    /// 呼び出しの初め (根のラウンド・ノードの分離): 使わない分離器 `off` を決める (学習のときだけ。決定的)
+    /// 呼び出しの初め (根のラウンド・ノードの分離)
     pub(super) fn begin_call(&mut self, node: bool) {
         self.cur_node = node;
         self.call_cands = [0; NSRC];
         self.call_work = [0.0; NSRC];
         self.call_secs = [0.0; NSRC];
         self.last_secs = SLT.with(|t| *t.borrow());
-        self.off = 0;
-        if !self.learn {
-            return;
-        }
-        let w = node as usize;
-        self.ncalls[w] += 1;
-        let nw = tunable!("ENOMOTO_T_MIP_SEPLEARN_NODE_WARM", 0u32, u32);
-        let warm = if node && nw > 0 { nw } else { tunable!("ENOMOTO_T_MIP_SEPLEARN_WARM", 3u32, u32) };
-        // `ENOMOTO_T_MIP_SEPLEARN_ROOT_SKIP` = 0: 根では飛ばさない (候補の上限だけ)。misc07 は根の最初の 3 ラウンドで zerohalf の伸びが 0 と
-        // 出て飛ばし、根の下界が弱くなった (既定では根の伸びの 63% が zerohalf)
-        let no_skip = !node && tunable!("ENOMOTO_T_MIP_SEPLEARN_ROOT_SKIP", 1u32, u32) == 0;
-        let thr = tunable!("ENOMOTO_T_MIP_SEPLEARN_SKIP", 0.1, f64);
-        let workf = tunable!("ENOMOTO_T_MIP_SEPLEARN_WORKF", 3.0, f64);
-        let maxskip = tunable!("ENOMOTO_T_MIP_SEPLEARN_MAXSKIP", 16u32, u32);
-        let sc = self.scores(w);
-        let ssum: f64 = LEARN_SRCS.iter().filter_map(|&s| sc[s as usize]).sum();
-        let wsum: f64 = LEARN_SRCS.iter().filter(|&&s| sc[s as usize].is_some()).map(|&s| self.ema_work[w][s as usize]).sum();
-        for &s in &LEARN_SRCS {
-            let k = s as usize;
-            if s == sepprof::SRC_TAB {
-                continue;
-            }
-            if self.skip_left[w][k] > 0 {
-                self.skip_left[w][k] -= 1;
-                self.off |= 1 << k;
-                self.st[w][k].skipped += 1;
-                continue;
-            }
-            let Some(score) = sc[k] else { continue };
-            if self.nobs[w][k] < warm || no_skip {
-                continue;
-            }
-            let wshare = if wsum > 0.0 { self.ema_work[w][k] / wsum } else { 0.0 };
-            let sshare = if ssum > 0.0 { score / ssum } else { 0.0 };
-            let bad = score < thr || wshare > workf * sshare + 0.05;
-            if bad {
-                // 飛ばす長さを倍にして (最初は 2)、この呼び出しから飛ばす。飛ばし終えた次の呼び出しで 1 回試す
-                let l = if self.skip_len[w][k] == 0 { 2 } else { (2 * self.skip_len[w][k]).min(maxskip) };
-                self.skip_len[w][k] = l;
-                self.skip_left[w][k] = l - 1;
-                self.off |= 1 << k;
-                self.st[w][k].skipped += 1;
-            } else {
-                self.skip_len[w][k] = 0;
-            }
-        }
     }
 
-    /// 分離の後の候補を数え (分離器ごと)、学習なら候補の上限をかける。`budget` は 1 ラウンドに採る本数の上限
-    pub(super) fn after_separate(&mut self, srcs: &mut [Vec<(u8, f64, usize)>], budget: usize) -> Vec<Vec<bool>> {
-        // srcs: 候補の (分離器、効き目、非零の数) の並び (候補の束ごと)。返り値は残す印
+    /// 分離の後の候補を数える (分離器ごと)
+    pub(super) fn after_separate(&mut self, srcs: &[Vec<(u8, usize)>]) {
+        // srcs: 候補の (分離器、非零の数) の並び (候補の束ごと)
         let w = self.cur_node as usize;
         let now = SLT.with(|t| *t.borrow());
         for k in 0..NSRC {
@@ -269,49 +189,10 @@ impl SepLearn {
         let mut cnt = [0u64; NSRC];
         let mut nnz = [0f64; NSRC];
         for v in srcs.iter() {
-            for &(s, _, z) in v {
+            for &(s, z) in v {
                 let k = (s % sepprof::SRC_FACE) as usize;
                 cnt[k] += 1;
                 nnz[k] += z as f64;
-            }
-        }
-        let mut keep: Vec<Vec<bool>> = srcs.iter().map(|v| vec![true; v.len()]).collect();
-        if self.learn {
-            let sc = self.scores(w);
-            let ssum: f64 = LEARN_SRCS.iter().filter_map(|&s| sc[s as usize]).sum();
-            let mult = tunable!("ENOMOTO_T_MIP_SEPLEARN_CAPMULT", 2.0, f64);
-            let cmin = tunable!("ENOMOTO_T_MIP_SEPLEARN_CAPMIN", 20usize, usize);
-            let warm = tunable!("ENOMOTO_T_MIP_SEPLEARN_WARM", 3u32, u32);
-            for &s in &LEARN_SRCS {
-                let k = s as usize;
-                if s == sepprof::SRC_TAB && !self.tab {
-                    continue;
-                }
-                let Some(score) = sc[k] else { continue };
-                // 得点が `ENOMOTO_T_MIP_SEPLEARN_NOCAP` (既定 0.5) 以上の分離器には上限をかけない
-                if self.nobs[w][k] < warm || ssum <= 0.0 || score >= tunable!("ENOMOTO_T_MIP_SEPLEARN_NOCAP", 0.5, f64) {
-                    continue;
-                }
-                let cap = ((score / ssum) * mult * budget as f64).ceil().max(cmin as f64) as usize;
-                if (cnt[k] as usize) <= cap {
-                    continue;
-                }
-                // 効き目の大きい順 (同じなら並びの順) に cap 本残す
-                let mut ord: Vec<(f64, usize, usize)> = Vec::new();
-                for (b, v) in srcs.iter().enumerate() {
-                    for (i, &(s2, e, _)) in v.iter().enumerate() {
-                        if (s2 % sepprof::SRC_FACE) as usize == k {
-                            ord.push((e, b, i));
-                        }
-                    }
-                }
-                ord.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-                for &(_, b, i) in &ord[cap..] {
-                    keep[b][i] = false;
-                    nnz[k] -= srcs[b][i].2 as f64;
-                }
-                self.st[w][k].capped += (ord.len() - cap) as u64;
-                cnt[k] = cap as u64;
             }
         }
         for k in 0..NSRC {
@@ -319,7 +200,6 @@ impl SepLearn {
             self.call_work[k] += nnz[k];
             self.st[w][k].cands += cnt[k];
         }
-        keep
     }
 
     /// 選んだカットを LP に加える直前: 加える前の目的値 `obj0` と、(分離器、違反) の並び
@@ -408,7 +288,7 @@ impl SepLearn {
             if !ran {
                 continue;
             }
-            let work = if self.use_time { self.call_secs[k] * 1e6 } else { self.call_work[k] } + 1.0;
+            let work = self.call_work[k] + 1.0;
             self.st[w][k].calls += 1;
             self.st[w][k].secs += self.call_secs[k];
             self.st[w][k].work += work;

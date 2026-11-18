@@ -20,10 +20,14 @@ full = [p for p in P if len(SP[p]) >= 2]
 print(f"行 {len(R)}、crash {crash}、2 種以上そろった問題 {len(full)}/{len(P)}、設定 {len(C)}、種 {S}")
 def sgm(ts): return math.exp(sum(math.log(t + 1) for t in ts) / len(ts)) - 1
 base = sgm([R[(p, "def", s)][0] for p in full for s in SP[p]])
-print(f"\n設定ごと (SGM の def 比、解けた数 / {sum(len(SP[p]) for p in full)}):")
+print(f"\n設定ごと (SGM の def 比、解けた数 / {sum(len(SP[p]) for p in full)}、害: def 比の最大・1.25 倍超の回数・def が解けて自分が解けない回数。害は全部の (問題, 種) で数える):")
 for c in C:
     ts = [R[(p, c, s)][0] for p in full for s in SP[p]]
-    print(f"  {c:10s} {sgm(ts) / base:6.3f}  {sum(R[(p, c, s)][1] for p in full for s in SP[p])}")
+    pr = [(p, s) for (p, cc, s) in R if cc == c and (p, "def", s) in R]
+    rt = [((R[(p, c, s)][0] + 1) / (R[(p, "def", s)][0] + 1), p, s) for p, s in pr]
+    mx = max(rt) if rt else (0, "", 0)
+    lost = sum(1 for p, s in pr if R[(p, "def", s)][1] and not R[(p, c, s)][1])
+    print(f"  {c:10s} {sgm(ts) / base:6.3f}  {sum(R[(p, c, s)][1] for p in full for s in SP[p]):3d}   最大 {mx[0]:5.2f} ({mx[1]} 種 {mx[2]})  1.25 倍超 {sum(1 for r in rt if r[0] > 1.25):2d}/{len(rt)}  解けなくなる {lost}")
 m = {(p, c): sum(math.log(R[(p, c, s)][0] + 1) for s in SP[p]) / len(SP[p]) for p in full for c in C}
 best = {p: min(C, key=lambda c: m[(p, c)]) for p in full}
 print(f"\n上限 (種の平均で最良の組): {sgm([R[(p, best[p], s)][0] for p in full for s in SP[p]]) / base:.3f}")
