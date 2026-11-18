@@ -32,7 +32,7 @@ for p in P:
     except subprocess.TimeoutExpired as e:
         out = (e.stdout or b"").decode(errors="replace") + (e.stderr or b"").decode(errors="replace")
     ls = out.splitlines()
-    tab = [l for l in ls if (l.startswith("SEP tableau") and "CBC" not in l) or "tableau rule sigmoid" in l]
+    tab = [l for l in ls if (l.startswith("SEP tableau") and "CBC" not in l) or "tableau rule" in l]
     (D / "logs" / f"feat_{p}_{tag}.log.gz").write_bytes(gzip.compress("\n".join([l for l in ls if not l.startswith("SEP ")][:400] + tab[:200]).encode()))
     res = [l for l in ls if l.startswith("RES ")]
     r = json.loads(res[-1][4:]) if res else {"status": "crash"}
