@@ -220,3 +220,14 @@
 - 期限の直後のスタック (`hs_t4.gdb`) では、根の LP の競争の内点法 + クロスオーバーの側 (`BasisSelector::try_add`) が期限の後も回り続けていた。
   主は待たない (競争の負けは置き去り) ので時間には効かないが、CPU を 1 本使い続ける。別の直しの候補 (未着手)。
 - 推測: 大きい問題で 600 秒をわずかに越える回 (例えば 600.5〜6 秒) のうち、畳み込みの判定が数秒かかるものはこれで説明がつく。
+
+### 13.1 負けた内点法 + クロスオーバーが期限の後も回る件 (群 5 の試作 `ENOMOTO_IPM_G5CANCEL` に足した)
+
+- 群 5 の `ENOMOTO_IPM_G5CANCEL` (33433b0a7) は正規方程式・拡大系の組み立ての中だけで止めの合図を見ていて、クロスオーバーの基底の選び直し
+  (`BasisSelector::try_add` を列ごとに回すループ、`src/simplex/crossover.rs`) では見ていなかった (止まらない)。
+- 直し (新しい環境変数は足さない): 同じ `ENOMOTO_IPM_G5CANCEL` のとき、基底の選び直しの 5 か所のループで列を試す前に毎回
+  `crate::cancel::is_cancelled()` を見て、立っていれば `None` (クロスオーバー失敗と同じ扱い) で抜ける。1 列の消去が重い (この問題では
+  9.8 万列で 156 秒) ので毎列見る。止まったら `ENOMOTO_MIP_LOG` で「CROSSOVER: basis selection stopped by the cancel signal …」と出す。
+- 確認 (highschool1-aigio、4 スレッド・200 秒、`logs/highschool1-aigio_hs200g5_t4_s1.log`): 期限 (200.0 秒) の直後に
+  「stopped … after 98486 columns」、求解は 200.08 秒。G5CANCEL つきの mip_fuzz_vs_highs 300・lp_fuzz_vs_highs 300 で bad 0
+  (`fuzz/vs_highs_g5xo.txt`・`fuzz/lp_g5xo.txt`)、cargo test 417 通過 (他の群の変更を取り込んだ後の数)。

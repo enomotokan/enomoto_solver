@@ -2033,6 +2033,23 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // ただしマッチングの順の最大の強連結成分が `ENOMOTO_T_XO_LI_MATCH_MAX_BLOCK` (既定 1000) 列を超えるなら、ブロック上三角に
     // ならず (成分の中は従来どおり消去する) 選んだ基底も悪くなるので、従来の順をそのまま続ける (cont11: 最大の成分 29,434 列、
     // 超基底が 19 → 112 本に増え、クロスオーバーが 900 秒で終わらなかった。rmine15 は 8 列)。
+    // 試作 `ENOMOTO_IPM_G5CANCEL` (群 5、[`crate::interior_point`] の正規方程式・拡大系の組み立てと同じ合図): 基底の選び直し (列を
+    // 1 本ずつ試す [`BasisSelector::try_add`]) の途中でも止めの合図 ([`crate::cancel::is_cancelled`]) を見て、立っていれば
+    // やめる (`None`、1 列の消去が重いので毎列見る)。highschool1-aigio (列 32 万) の根の LP の競争で、二段解法の側が期限で止まった後も内点法 + クロスオーバーの側が
+    // ここを数秒以上回り続け、CPU を 1 本使っていた (analysis/hang_20261117/README.md の 13 節)
+    let g5 = env_str!("ENOMOTO_IPM_G5CANCEL").is_some_and(|v| !v.is_empty() && v != "0");
+    let mut g5_n = 0usize;
+    macro_rules! g5_tick {
+        () => {
+            g5_n += 1;
+            if g5 && crate::cancel::is_cancelled() {
+                if env_str!("ENOMOTO_MIP_LOG").is_some() {
+                    eprintln!("CROSSOVER: basis selection stopped by the cancel signal after {g5_n} columns (ENOMOTO_IPM_G5CANCEL, {:.2}s)", t0.elapsed().as_secs_f64());
+                }
+                return None;
+            }
+        };
+    }
     let match_min_m = tunable!("ENOMOTO_T_XO_LI_MATCH_MIN_M", 50_000usize, usize);
     let match_max_block = tunable!("ENOMOTO_T_XO_LI_MATCH_MAX_BLOCK", 1000usize, usize);
     let mut li_match_ok = match_min_m > 0 && m >= match_min_m && cand_d.is_empty();
@@ -2050,7 +2067,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             }
             li_match_ok = false;
         }
-        if sel.try_add(j, col(std, j)) {
+        if { g5_tick!(); sel.try_add(j, col(std, j)) } {
             st.li_from_b += 1;
         }
     }
@@ -2071,7 +2088,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 }
             }
             for i in 0..m {
-                if !matched[i] && sel.try_add(n_orig + i, col(std, n_orig + i)) {
+                if !matched[i] && { g5_tick!(); sel.try_add(n_orig + i, col(std, n_orig + i)) } {
                     st.li_slack += 1;
                 }
             }
@@ -2081,7 +2098,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 break;
             }
             sel.pref_row = pref;
-            if sel.try_add(j, col(std, j)) {
+            if { g5_tick!(); sel.try_add(j, col(std, j)) } {
                 st.li_from_b += 1;
             }
         }
@@ -2104,7 +2121,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             if sel.full() {
                 break;
             }
-            if sel.try_add(j, col(std, j)) {
+            if { g5_tick!(); sel.try_add(j, col(std, j)) } {
                 if j >= n_orig {
                     st.li_slack += 1;
                 } else {
@@ -2119,7 +2136,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         }
         if !sel.row_pivoted(i) {
             let j = n_orig + i;
-            if !sel.is_chosen[j] && sel.try_add(j, col(std, j)) {
+            if !sel.is_chosen[j] && { g5_tick!(); sel.try_add(j, col(std, j)) } {
                 st.li_slack += 1;
             }
         }
