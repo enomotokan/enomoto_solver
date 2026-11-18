@@ -10448,3 +10448,14 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 根拠 (analysis/gate2_20261117/sepfast、ビルド 4a164d8d2、4 スレッド): P (58 問 × 種 1〜3・60 秒) SGM −0.7% (区間 −2.8%〜+1.4%)、解けた 135 → 135、
   全種で 1.25 倍を超えて遅い問題なし (全種で速いのは neos-911970 0.66〜0.83)、食い違い 0、crash 0、最大 RSS 1653 → 1565 MB。
   作るカットが同じ速さだけの変更なので M は測っていない。
+
+## 2026-11-18: 不採用の試作 12 件を削除 (片付け 第 1 弾)
+
+- 記録で不採用と確かめられた試作を 1 件ずつ消した (依頼書・1 件ごとの結果は analysis/cleanup_20261118/)。既定の振る舞いは変えていない:
+  1 件ごとに cargo test 全通過・警告が増えない・1 スレッド・既定の種で 12 問 (p0201・mas76・rout・noswot・misc07・fiber・qnet1・dcmulti・
+  blend2・exp-1-500-5-5・neos-860300・khb05250) の状態・目的値・ノード数が消す前と完全に一致、4 件ごとと最後に fuzz 7 本で bad 0。
+- 消したもの (src の正味 −4510 行): `QIU_MARGIN_DEPTH`、`FPR` 一式 (fpr.rs・fpr_paper.rs)、`MODKVB` 一式 (modkvb.rs、hnfcut.rs の写し `map_cutvars`)、
+  `SEPLEARN` の学習の部分 (計測 `SEPSTAT` は残す)、`REDSPLIT` 一式 (redsplit.rs、cuts.rs の `cmir_with_deltas`)、`LB2`・`PROX2`・`HSUB_STALL` (heur_lns2.rs)、
+  `CUTSEL_ENS` (cutsel_ens.rs)、`GCDFORCE` と診断 `DEBUG_GCDCOUNT` (gcdforce.rs)、`OBJ_SUPPORT`、`BRCUT` (brcut.rs)、`IMPLINT_TU` の旧版の分岐
+  (判定 `implied_integers_tu` は TU2 の診断が使うので残す)。これらの環境変数は今は何もしない (削除済み、2026-11-18)。
+- 飛ばした: `PROBE_EQUIV2_RESTART`。誤答の原因は既定で直っていて (analysis/eqrst_20261113.md)、「要らなくなった制限を外す」束の候補として残っている。
