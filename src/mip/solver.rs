@@ -10619,12 +10619,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if !cut_ok {
                     // カットを外した LP も解けなかった。期限に当たったのなら時間切れ (カットを加える前の根の LP の値は下界)
+                    // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                    // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                    if self.root_gap_closed() {
+                        self.join_fj_thread();
+                        return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                    }
                     self.join_fj_thread();
                     let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                     return self.finish(st, root_obj);
                 }
                 if let Some(l) = both_loser.take().filter(|_| !self.time_up()) {
                     if !self.root_both_vertex(l, &x_root0, root_basis0.as_deref(), root_obj, root_iters, &mut root_cut_secs, false) {
+                        // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                        // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                        if self.root_gap_closed() {
+                            self.join_fj_thread();
+                            return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                        }
                         self.join_fj_thread();
                         let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                         return self.finish(st, root_obj);
@@ -10674,6 +10686,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     eprintln!("MIP: robust root IPM: second cut loop {}, obj {:.10e} ({:.2}s)", if ok { "done" } else { "failed" }, self.lp.objective() + self.p.offset, t2.elapsed().as_secs_f64());
                                 }
                                 if !ok {
+                                    // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                                    // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                                    if self.root_gap_closed() {
+                                        self.join_fj_thread();
+                                        return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                                    }
                                     self.join_fj_thread();
                                     let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                                     return self.finish(st, root_obj);
@@ -10694,6 +10712,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let post = self.lp.objective() + self.p.offset;
                     let flat = post - root_obj <= tunable!("ENOMOTO_T_MIP_OPTFACE_FLAT", 1e-6, f64) * root_obj.abs().max(1.0);
                     if flat && (self.obj_step.is_some() || v.contains('a')) && !self.time_up() && !self.optface_second_loop(v, post, root_iters, &mut root_cut_secs) {
+                        // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                        // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                        if self.root_gap_closed() {
+                            self.join_fj_thread();
+                            return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                        }
                         self.join_fj_thread();
                         let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                         return self.finish(st, root_obj);
@@ -12051,6 +12075,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let ok = self.root_cut_loop(root_iters);
                             self.cut_cont = None;
                             if !ok {
+                                // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                                // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                                if self.root_gap_closed() {
+                                    self.join_fj_thread();
+                                    return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                                }
                                 self.join_fj_thread();
                                 let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                                 return self.finish(st, root_obj);
@@ -12076,6 +12106,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let ok = self.root_cut_loop(root_iters);
                             self.cut_cont = None;
                             if !ok {
+                                // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                                // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                                if self.root_gap_closed() {
+                                    self.join_fj_thread();
+                                    return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                                }
                                 self.join_fj_thread();
                                 let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                                 return self.finish(st, root_obj);
@@ -12119,6 +12155,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     self.cut_cont = None;
                                     self.cut_cont_p2 = 0;
                                     if !ok {
+                                        // カットのループの中で根の下界が打ち切り値に届いた (目的の上限つきプロービングが「打ち切り値より良い解はない」を示して LP が
+                                        // 実行不能になった、など) なら最適で終える (以前は NotSolved で終えていた。fuzz_symdyn の種 1013・1082、analysis/lexred_20261118)
+                                        if self.root_gap_closed() {
+                                            self.join_fj_thread();
+                                            return self.finish_root_gap("root bound after the cut loop", self.root_bound_now(root_obj));
+                                        }
                                         self.join_fj_thread();
                                         let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                                         return self.finish(st, root_obj);
