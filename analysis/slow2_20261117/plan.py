@@ -1,4 +1,4 @@
-"""SLOW2 の対の比べの分担表: python plan.py NM NP [wst|sw] → shards_M<札>.json・shards_P<札>.json (札は wst なら空、sw なら SW)
+"""SLOW2 の対の比べの分担表: python plan.py NM NP [設定 [M に足す問題,...]] → shards_M<札>.json・shards_P<札>.json (札は wst なら空、sw なら SW)
 M: Mittelmann 48 問 (vshighs の M と同じ) × 種 1・2 × {def, wst}、600 秒。P: MIPLIB の 58 問 × 種 1〜3 × {def, wst}、60 秒。
 同じ (問題, 種) の 2 組は同じ分担で続けて解き、順は種で入れ替える。見積り: vshighs_20261117 の def の時間 (+ 30 秒・8 秒)。"""
 import json, glob, sys
@@ -11,6 +11,7 @@ from probs import PROBS  # noqa: E402
 NM, NP = int(sys.argv[1]), int(sys.argv[2])
 ALT = sys.argv[3] if len(sys.argv) > 3 else "wst"  # 既定と対にする設定
 SUF = "" if ALT == "wst" else ALT.upper()
+XM = sys.argv[4].split(",") if len(sys.argv) > 4 else []  # M に足す問題 (例: neos-2746589-doon、見積りは 600 秒)
 def times(pat, cfg, cap):
     T = defaultdict(list)
     for f in glob.glob(str(pat)):
@@ -31,7 +32,7 @@ def order(p, s, c):
     k = s % 2
     return [(p, x, s) for x in c[k:] + c[:k]]
 TM = times(VS / "res_M_s*.jsonl", "def", 600)
-MPROBS = sorted(TM)
+MPROBS = sorted(TM) + [x for x in XM if x not in TM]
 def estM(p, c): return TM.get(p, 600.0) + 30
 balance({(p, s): order(p, s, ["def", ALT]) for p in MPROBS for s in (1, 2)}, estM, NM, f"shards_M{SUF}.json", 600)
 TP = times(VS / "res_P_s*.jsonl", "def", 60)
