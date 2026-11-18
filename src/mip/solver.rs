@@ -1413,8 +1413,6 @@ pub(super) struct Solver<'a, L: MipLp> {
     node_lp_opt: bool,
     /// 木の ZI round の (呼んだ回数, 成功した回数, `ENOMOTO_MIP_ZIROUND_ADAPT` で省いた回数)
     zi_stats: [u64; 3],
-    /// 費用を持つ整数列を先に分枝するか (`ENOMOTO_MIP_COST_PRIORITY`)
-    cost_prio: bool,
     /// ダイビングの被約費用による固定の数 (`ENOMOTO_MIP_DIVE_RCFIX`)
     pub(super) dive_rcfix_count: u64,
     /// 強分岐の固定のあとの、その場での LP の解き直しの回数 (`ENOMOTO_MIP_SB_FIX_RESOLVE`)
@@ -4735,9 +4733,6 @@ pub(super) struct CutJob {
     pub(super) latest_x: std::sync::Mutex<Option<Vec<f64>>>,
     /// 結果の LP の最後の基底 (既定で返す。`ENOMOTO_MIP_NO_BG_CUTS_BASIS` で返さない。主がカットの行を置き換えた後の LP に入れる)
     pub(super) basis: std::sync::Mutex<Option<super::lp::Basis>>,
-    /// 試作 `ENOMOTO_MIP_BG_RETURN_DSE=1` ([`bg_return_dse_on`]): 結果の LP の最後の基底の DSE 重み (基底変数の番号との組、
-    /// [`super::lp_api::MipLp::dse_snapshot`])。主がカットの行を置き換えて基底を入れた後に当てはめる (analysis/bg_return_dse_20261102.md)
-    pub(super) dse: std::sync::Mutex<Option<Vec<(u32, f32)>>>,
     /// 各ラウンドの後の LP の目的値 (offset 込み)。`ENOMOTO_MIP_BG_CUTS_WAIT` で、主が止めの合図を出す前にまだ上がっているかを見る
     pub(super) prog: std::sync::Mutex<Vec<f64>>,
     /// `prog` の各ラウンドを記録した時刻 (ログで、主の待ちの判定とラウンドの進み方を並べるため)
@@ -4911,7 +4906,6 @@ impl CutJob {
             out: std::sync::Mutex::new(None),
             latest_x: std::sync::Mutex::new(None),
             basis: std::sync::Mutex::new(None),
-            dse: std::sync::Mutex::new(None),
             prog: std::sync::Mutex::new(Vec::new()),
             prog_at: std::sync::Mutex::new(Vec::new()),
             prog_it: std::sync::Mutex::new(Vec::new()),
@@ -5084,13 +5078,6 @@ impl CutJob {
 /// `ENOMOTO_T_MIP_BG_CUTS_BASIS_X_SECS` (既定 1 秒) 以上) だけで渡す
 pub(crate) fn bg_cuts_basis_x_on() -> bool {
     env_def!("ENOMOTO_MIP_BG_CUTS_BASIS_X", "lpw").is_some()
-}
-
-/// 試作 `ENOMOTO_MIP_BG_RETURN_DSE=1` (既定では使わない): 裏のカットのスレッドが終わるとき、最終基底と一緒にその LP の DSE 重みも返し、
-/// 主がカットの行を置き換えて基底を入れた後の LP の解き直しで引き継ぐ (`WARM_DSE_ONCE`)。今までは単位に近い重みから解き直していた
-/// (physiciansched6-2 で 1212 反復の回がある)。analysis/bg_return_dse_20261102.md
-pub(crate) fn bg_return_dse_on() -> bool {
-    env_str!("ENOMOTO_MIP_BG_RETURN_DSE") == Some("1")
 }
 
 /// `ENOMOTO_MIP_SMALL1` (試作、既定では使わない。analysis/small_overhead1_20261102.md): 小さい問題 (非零が
@@ -5855,17 +5842,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         poly_diag_raised: Vec::new(),
         node_lp_opt: false,
         zi_stats: [0; 3],
-        cost_prio: !params.submip && env_str!("ENOMOTO_MIP_COST_PRIORITY").is_some() && {
-            // CBC の条件: 費用を持つ連続列がなく、費用を持つ整数列が 100 本以下で整数列の 1/5 未満、行が 100 を超える
-            let n_cont_obj = (0..p.n).filter(|&j| !p.is_int[j] && p.cost[j] != 0.0 && p.col_lo[j] < p.col_up[j]).count();
-            let n_int_obj = (0..p.n).filter(|&j| p.is_int[j] && p.cost[j] != 0.0 && p.col_lo[j] < p.col_up[j]).count();
-            let n_int = p.is_int.iter().filter(|&&b| b).count();
-            let on = n_cont_obj == 0 && n_int_obj > 0 && n_int_obj <= 100 && n_int_obj * 5 < n_int && p.m > 100;
-            if on && params.verbose {
-                eprintln!("MIP: branching priority on {n_int_obj} costed integer columns of {n_int} (ENOMOTO_MIP_COST_PRIORITY)");
-            }
-            on
-        },
         dive_rcfix_count: 0,
         sb_fix_resolve_count: 0,
         sb_new_node: None,
@@ -6867,9 +6843,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 返された基底は、選んだ写しの行だけを使うときに限り主の LP に入れる
         *main.job.basis.lock().unwrap() = if added == 0 { best_basis } else { None };
-        if bi != 0 || added > 0 {
-            main.job.dse.lock().unwrap().take();
-        }
         if self.params.verbose {
             eprintln!("MIP: optface parcuts: use copy {bi} (obj {obj:.10e}){}", if union { format!(", {added} rows added from the other copies") } else { String::new() });
         }
@@ -10569,9 +10542,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             {
                 if env_str!("ENOMOTO_MIP_NO_BG_CUTS_BASIS").is_none() {
                     *job.basis.lock().unwrap() = Some(self.lp.basis());
-                    if bg_return_dse_on() {
-                        *job.dse.lock().unwrap() = self.lp.dse_snapshot();
-                    }
                 }
                 *job.out.lock().unwrap() = Some((rows, self.lp.objective() + self.p.offset, self.bg_cut_rounds));
             }
@@ -11627,7 +11597,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 last.map(|(rows, obj, rounds, basis)| {
                     *bg.job.basis.lock().unwrap() = Some(basis);
-                    *bg.job.dse.lock().unwrap() = None;
                     (rows, obj, rounds)
                 })
             } else if er_halt {
@@ -11716,7 +11685,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let saved_state = env_str!("ENOMOTO_MIP_CUT_FAIL_RESTORE").is_some().then(|| self.lp.save_state());
                     self.delete_lp_rows(&remove);
                     self.add_cut_rows(&rows);
-                    let mut ret_dse = false;
                     if let Some(b) = bg.job.basis.lock().unwrap().take() {
                         if ho4_diag() && !(b.col.len() == self.p.n && b.row.len() == self.lp.num_rows()) {
                             eprintln!("HO4DIAG: background cuts: returned basis not used (cols {} / {}, rows {} / {})", b.col.len(), self.p.n, b.row.len(), self.lp.num_rows());
@@ -11734,25 +11702,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 let nbas = b.col.iter().chain(b.row.iter()).filter(|&&s| s == VarStatus::Basic).count();
                                 eprintln!("HO4DIAG: background cuts: returned basis set (cols {}, rows {}, basic {nbas})", b.col.len(), b.row.len());
                             }
-                            // 試作 `ENOMOTO_MIP_BG_RETURN_DSE=1`: 裏のカットのスレッドの LP の DSE 重みも当てはめる。写しの LP は主と同じ
-                            // 元の行 (0..m) の後にカットの行が並び、主は自分のカットの行を消してから返されたカットの行を同じ順で末尾に
-                            // 足すので、行の数が合えば変数番号 (列 j、行 n + i) はそのまま主の LP の番号になる
-                            if let Some(w) = bg.job.dse.lock().unwrap().take() {
-                                let lim = (self.p.n + self.lp.num_rows()) as u32;
-                                if w.len() == self.lp.num_rows() && w.iter().all(|p| p.0 < lim) {
-                                    self.lp.set_dse_vars(&w);
-                                    ret_dse = true;
-                                }
-                                if self.params.verbose {
-                                    let hit = self.lp.dse_snapshot().map_or(0, |v| {
-                                        let m: std::collections::HashSet<u32> = w.iter().map(|p| p.0).collect();
-                                        v.iter().filter(|p| m.contains(&p.0)).count()
-                                    });
-                                    eprintln!("MIP: background cuts: returned DSE weights {} ({} weights, {hit} / {} basic variables matched)", if ret_dse { "applied" } else { "not applied" }, w.len(), self.lp.num_rows());
-                                }
-                            } else if bg_return_dse_on() && self.params.verbose {
-                                eprintln!("MIP: background cuts: returned DSE weights not available");
-                            }
                         }
                     }
                     for (c, l, u) in &rows {
@@ -11762,9 +11711,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     let it1 = self.lp.total_iterations();
                     let t1 = Instant::now();
-                    if ret_dse {
-                        crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
                     // `ENOMOTO_MIP_TREE3_BGCAP` (試作、既定では使わない。analysis/tree_close3_20261104.md): この LP に時間の上限
                     // max(`ENOMOTO_T_MIP_TREE3_BGCAP_MIN` (1 秒), `ENOMOTO_T_MIP_TREE3_BGCAP_MULT` (1) x 根の LP の秒) を置く (超えたら下の
                     // 既定の道で元のカットに戻す)。satellites2-60-fs では 157395 反復 359 秒 (根の LP は 62 秒) で時間の上限に当たり、木に入らなかった
@@ -11776,15 +11722,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.deadline
                     };
                     let st = self.lp.solve(&SolveLimits { deadline: bg_deadline, ..Default::default() });
-                    if ret_dse {
-                        crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
-                    }
                     if self.params.verbose && st != LpStatus::Optimal && bg_deadline != self.deadline {
                         eprintln!("MIP: background cuts: the LP with the replaced cuts stopped ({st:?}, ENOMOTO_MIP_TREE3_BGCAP)");
                     }
                     let new = self.lp.objective() + self.p.offset;
                     if self.params.verbose {
-                        eprintln!("MIP: background cuts: LP solve time with the replaced cuts {:.3}s (returned DSE {})", t1.elapsed().as_secs_f64(), if ret_dse { "used" } else { "not used" });
+                        eprintln!("MIP: background cuts: LP solve time with the replaced cuts {:.3}s", t1.elapsed().as_secs_f64());
                         eprintln!("MIP: background cuts: LP with the replaced cuts: {st:?}, {} iters ({:.2}s)", self.lp.total_iterations() - it1, self.start.elapsed().as_secs_f64());
                     }
                     if st == LpStatus::Optimal && new >= cur - 1e-9 * cur.abs().max(1.0) {
@@ -16902,15 +16845,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return self.select_branch_old(frac, node_obj);
         }
         let mut node_obj = node_obj;
-        // `ENOMOTO_MIP_COST_PRIORITY` (試作、既定では使わない): 費用を持つ整数列が少ない問題では、分数の値の費用を持つ整数列が
-        // あればそれだけを候補にする (CBC の `CbcModel::analyzeObjective` の `iType`: 費用のある整数列の優先度を上げる)
-        let prio_frac: Vec<(usize, f64)>;
-        let frac = if self.cost_prio && frac.iter().any(|&(j, _)| self.p.cost[j] != 0.0) {
-            prio_frac = frac.iter().copied().filter(|&(j, _)| self.p.cost[j] != 0.0).collect();
-            &prio_frac[..]
-        } else {
-            frac
-        };
         // `ENOMOTO_MIP_SB_FIX_RESOLVE` (試作、既定では使わない): 強分岐で片側が打ち切られて列を固定したら、その場でノードの LP を
         // 解き直し、新しい LP 解で残りの候補の強分岐を続ける (CBC の CbcNode.cpp の `chooseDynamicBranch` と HiGHS)。既定では
         // 固定を定義域にだけ置き、残りの候補は固定を含まない LP で強分岐し、固定が 5 個たまったら `Resolve` で強分岐を全部やり直す。
