@@ -90,8 +90,8 @@ fn pivlog_tiny_skip(k: usize) {
 }
 
 thread_local! {
-    /// 試作 `ENOMOTO_MIP_CUT_HARRIS2` (既定では使わない、analysis/puriri_cutlp_20261106.md): このスレッドの求解で、
-    /// `ENOMOTO_SIMPLEX_HARRIS2` が無いときに代わりに使う値 (前向きの Harris)。根のカットのループが LP を解くあいだだけ置く ([`Harris2Scope`])
+    /// このスレッドの求解で、`ENOMOTO_SIMPLEX_HARRIS2` が無いときに代わりに使う値 (前向きの Harris)。試作 `ENOMOTO_MIP_NODELP_PERTURB` の `h` が
+    /// ノードの LP を解くあいだだけ置く ([`Harris2Scope`]。根のカットのループで置く試作 `ENOMOTO_MIP_CUT_HARRIS2` は 2026-11-18 に削除)
     pub(crate) static HARRIS2_SCOPE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
@@ -5155,7 +5155,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let tiny_td = tunable!("ENOMOTO_T_SIMPLEX_TINY_TD", 1e-7, f64);
     // 試作 `ENOMOTO_SIMPLEX_HARRIS2` (既定では使わない): 前向きの Harris (パス 2)
     // `r`: 安全モード (`safe_pivot`。数値の破綻で解き直した求解、または特異の検査で切り替わった後) のときだけ使う
-    // 試作 `ENOMOTO_MIP_CUT_HARRIS2` (analysis/puriri_cutlp_20261106.md): 根のカットのループの LP だけ、[`HARRIS2_SCOPE`] で同じ値を使う
+    // [`HARRIS2_SCOPE`] (試作 `ENOMOTO_MIP_NODELP_PERTURB` の `h`) があれば同じ値を使う
     let harris2_mode = env_def!("ENOMOTO_SIMPLEX_HARRIS2", "r").filter(|v| *v != "0").or_else(|| HARRIS2_SCOPE.with(|c| c.get()));
     let harris2_safe_only = harris2_mode.is_some_and(|v| v.contains('r'));
     let harris2_any = harris2_mode.is_some();
