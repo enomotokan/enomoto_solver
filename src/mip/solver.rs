@@ -2490,6 +2490,10 @@ fn full_changes(n: &OpenNode) -> std::borrow::Cow<'_, [BoundChange]> {
 }
 
 impl SnapNode {
+    /// 変更の並びを空にした [`Self::of`] (呼び手が並びを入れる。`G5FIN` 用)
+    fn of_thin(n: &OpenNode) -> Self {
+        SnapNode { changes: Vec::new(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None }
+    }
     fn of(n: &OpenNode) -> Self {
         SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None }
     }
@@ -17503,9 +17507,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn finish_limit(&mut self, status: MipStatus, current: Option<&OpenNode>) -> MipResult {
         // 木を分け合う従: 残ったノードを共有の待ち行列に返す (主がそれも含めて下界を出す)
         if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some()) {
-            let mut back: Vec<SnapNode> = self.queue.iter().map(SnapNode::of).collect();
+            // 試作 `ENOMOTO_MIP_G5FIN` (既定では使わない。analysis/vsscip_slow_20261118/g5/README.md): 時間切れで終わるときは、返すノードを主が下界を
+            // 出すのにしか使わないので、引き継ぎの鎖 (`TC` の `s`) を平らに展開しない (並びだけ)。n3div36 (4 スレッド・400 秒、heaptrack) では
+            // ヒープの最大 3.08 GB のうち 2.38 GB がここの展開だった
+            let thin = status == MipStatus::TimeLimit && env_str!("ENOMOTO_MIP_G5FIN").is_some_and(|v| v != "0");
+            let of = |n: &OpenNode| if thin { SnapNode { changes: n.changes.clone(), ..SnapNode::of_thin(n) } } else { SnapNode::of(n) };
+            let mut back: Vec<SnapNode> = self.queue.iter().map(of).collect();
             if let Some(n) = current {
-                back.push(SnapNode::of(n));
+                back.push(of(n));
             }
             if self.dbg_on && back.iter().any(|n| self.dbg_changes(&n.changes)) {
                 eprintln!("MIP_DEBUG_SOL: tree thread {} stopped ({status:?}) holding a node that contains the debug solution (returned to the shared queue)", self.pool_tid);
