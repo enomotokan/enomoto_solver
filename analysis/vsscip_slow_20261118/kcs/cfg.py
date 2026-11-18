@@ -3,4 +3,6 @@ analysis/vsscip_slow_20261118/tree2/README.md 10 節、neos-5107597-kakapo の�
 CFGS = {
     "def": {},
     "kcs": {"ENOMOTO_MIP_KEEP_COSTED_SINGLETON": "1"},
+    # kcsc = 等式のほかの列がすべて連続で、上下限の片方が無限の列だけ残す (markshare_4_0・timtab1 の害を除く。kcs/README.md)
+    "kcsc": {"ENOMOTO_MIP_KEEP_COSTED_SINGLETON": "c"},
 }

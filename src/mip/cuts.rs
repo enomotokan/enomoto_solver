@@ -38,8 +38,7 @@ pub struct VarBounds {
 }
 
 thread_local! {
-    /// [`intvub_mode`] を環境変数によらず決める (単体テストと、試作 `ENOMOTO_MIP_MUSHAGG` の集約行の分離 [`with_intvub_mode`])。
-    /// 既定では `None` (環境変数の値を使う)
+    /// [`intvub_mode`] を決める (単体テストと、試作 `ENOMOTO_MIP_MUSHAGG` の集約行の分離 [`with_intvub_mode`])。既定では `None` (= 0)
     static INTVUB_FORCE: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
 }
 
@@ -51,22 +50,14 @@ pub fn with_intvub_mode<R>(m: u8, f: impl FnOnce() -> R) -> R {
     r
 }
 
-/// 試作 `ENOMOTO_MIP_INTVUB` の動き方。0 = 使わない (既定)、1 = HiGHS と同じ条件 (`HighsTransformedLp`: 一般整数列の LP 値が整数で
+/// 一般整数列の変数上下限による置き換えの動き方 ([`with_intvub_mode`] で決める。全体で使う試作 `ENOMOTO_MIP_INTVUB` は 2026-11-18 に削除)。
+/// 0 = 使わない (既定)、1 = HiGHS と同じ条件 (`HighsTransformedLp`: 一般整数列の LP 値が整数で
 /// 単純な上下限の真ん中にあり、変数上下限がちょうど効いているときだけ置き換える)、2 = 緩めた条件 (LP 値が整数でなくてもよく、
 /// 変数上下限の余裕が単純な上下限の余裕より小さければ置き換える)、3 = 余りを捨てる向きを優先 (係数が正なら VLB、負なら VUB を、
 /// その余裕が単純な上下限の余裕以下なら LP 値が整数でなくても使う。連続列の同点の扱い (`ENOMOTO_MIP_VB_TIE_OLD` でない既定) と同じ考え。
 /// 使えなければモード 2 と同じ)
 pub fn intvub_mode() -> u8 {
-    if let Some(m) = INTVUB_FORCE.with(|c| c.get()) {
-        return m;
-    }
-    static M: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *M.get_or_init(|| match env_str!("ENOMOTO_MIP_INTVUB") {
-        None | Some("0") => 0,
-        Some("2") => 2,
-        Some("3") => 3,
-        Some(_) => 1,
-    })
+    INTVUB_FORCE.with(|c| c.get()).unwrap_or(0)
 }
 
 impl VarBounds {

@@ -1788,74 +1788,6 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             let early = FEAS_FJ_SOL.with(|s| s.borrow_mut().take()).filter(|x| x.len() == prob.n && prob.is_feasible(x, 1e-6));
             let early_sol = early.is_some();
             let prob = if early_sol { prob } else if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some() || submip_highs('p')) { extend_clique_rows(prob, params.verbose) } else { prob };
-            // `ENOMOTO_MIP_LP_PROBE_AFTER_EXT` (試作、[`lp_probe_after_ext`]): クリーク行の拡張の後に LP による固定を行う。固定は境界に
-            // 入れるだけ (前処理はかけ直さない)。最後の LP の基底 (列と行の状態・行の指紋) は根の LP に渡る
-            let mut prob = prob;
-            if let Some(secs) = lp_probe_secs.filter(|_| !early_sol && lp_probe_after_ext()) {
-                let t_lp = std::time::Instant::now();
-                let free0 = (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count();
-                match lp_probe(&mut prob, params.verbose, secs, true) {
-                    None => {
-                        if params.verbose {
-                            eprintln!("MIP: LP probing after the clique extension: infeasible");
-                        }
-                        solver::START_SOL.with(|s| *s.borrow_mut() = None);
-                        solver::REF_SOL.with(|s| *s.borrow_mut() = None);
-                        RESTART_CUTS.with(|s| *s.borrow_mut() = None);
-                        solver::ROOT_BASIS.with(|s| *s.borrow_mut() = None);
-                        solver::ROOT_DSE.with(|s| *s.borrow_mut() = None);
-                        solver::ROOT_BASIS_ROWS.with(|s| *s.borrow_mut() = None);
-                        return solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 };
-                    }
-                    Some(fixed) => {
-                        if params.verbose {
-                            let free1 = (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count();
-                            eprintln!("MIP: LP probing after the clique extension: fixed {fixed} ({free0} -> {free1} free columns, {} rows, {:.2}s)", prob.m, t_lp.elapsed().as_secs_f64());
-                        }
-                        // 値 `r` (形 (b)): 固定が出たら前処理をかけ直し (後処理の手順は今の手順の後に並べる)、もう一度クリーク行の拡張をし、
-                        // 行が変わるのでその LP を解き直して基底を渡す (固定は試さない)
-                        if fixed > 0 && lp_probe_after_ext_has('r') {
-                            solver::ROOT_BASIS.with(|s| *s.borrow_mut() = None);
-                            solver::ROOT_DSE.with(|s| *s.borrow_mut() = None);
-                            solver::ROOT_BASIS_ROWS.with(|s| *s.borrow_mut() = None);
-                            solver::ROOT_BASIS_SAVED.with(|s| *s.borrow_mut() = None);
-                            let m0 = prob.m;
-                            match presolve_mip(&prob, params.verbose, pre_submip, None) {
-                                Some(Presolved::Infeasible) => {
-                                    solver::START_SOL.with(|s| *s.borrow_mut() = None);
-                                    solver::REF_SOL.with(|s| *s.borrow_mut() = None);
-                                    RESTART_CUTS.with(|s| *s.borrow_mut() = None);
-                                    return solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 };
-                                }
-                                Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().all(|&d| d == 1.0) && prob2.n == prob.n => {
-                                    postsolve.extend(post2);
-                                    prob = prob2;
-                                    if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() {
-                                        prob = extend_clique_rows(prob, params.verbose);
-                                    }
-                                    // 暫定解 (渡された初期解) がかけ直した問題で実行不能なら捨てる
-                                    let bad = solver::START_SOL.with(|s| s.borrow().as_ref().is_some_and(|x| x.len() != prob.n || !prob.is_feasible(x, 1e-6)));
-                                    if bad {
-                                        solver::START_SOL.with(|s| *s.borrow_mut() = None);
-                                    }
-                                    RESTART_CUTS.with(|s| *s.borrow_mut() = None);
-                                }
-                                _ => {}
-                            }
-                            if lp_probe(&mut prob, params.verbose, secs, false).is_none() {
-                                solver::START_SOL.with(|s| *s.borrow_mut() = None);
-                                solver::REF_SOL.with(|s| *s.borrow_mut() = None);
-                                RESTART_CUTS.with(|s| *s.borrow_mut() = None);
-                                return solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 };
-                            }
-                            if params.verbose {
-                                let free2 = (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count();
-                                eprintln!("MIP: LP probing after the clique extension: re-presolved and re-extended ({m0} -> {} rows, {free2} free columns, {:.2}s)", prob.m, t_lp.elapsed().as_secs_f64());
-                            }
-                        }
-                    }
-                }
-            }
             // 診断用: クリーク行の拡張の後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2=ファイル`)
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
@@ -4596,8 +4528,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             }
         }
     }
-    // `ENOMOTO_MIP_LP_PROBE_AFTER_EXT` (試作): LP による固定はここでは行わず、クリーク行の拡張の後に回す ([`solve_problem_inner`])
-    if let Some(secs) = lp_probe_secs.filter(|_| !lp_probe_after_ext()) {
+    if let Some(secs) = lp_probe_secs {
         match lp_probe(&mut prob, verbose, secs, true) {
             None => return Some(Presolved::Infeasible),
             Some(fixed) if fixed > 0 && env_str!("ENOMOTO_MIP_LP_PROBE_NO_REPRESOLVE").is_none() => {
@@ -5002,22 +4933,8 @@ fn tighten_vubs(prob: &mut MipProblem, verbose: bool) -> Option<usize> {
     Some(k)
 }
 
-/// `ENOMOTO_MIP_LP_PROBE_AFTER_EXT` (試作、既定では使わない。analysis/lp_probe_after_ext_20261102.md): 前処理の LP による固定
-/// ([`lp_probe`]) を前処理の中ではなく、クリーク行の拡張 ([`extend_clique_rows`]) の後 (対称性の行を足す前) に行う。締めた後の LP を
-/// 一度だけ解き、その基底 (列と行の状態) を根の LP でそのまま使う (前処理の LP の後に拡張が行を書き換え、根で行の状態を捨てて
-/// 特異な基底から全スラック基底に戻っていた: analysis/singular_fix_c_20261102.md)。早めのプロービング・目的関数 0 の早めの探索は
-/// 今の場所のまま。固定が出ても前処理はかけ直さず、境界を固定するだけ (値 `r` なら前処理をかけ直してもう一度拡張する)。
-/// 根では非基底の列・行の上限・下限の置き場所も渡す (`set_basis_nb`。値 `k` なら今まで通り解からの推し量り)
-pub(crate) fn lp_probe_after_ext() -> bool {
-    env_str!("ENOMOTO_MIP_LP_PROBE_AFTER_EXT").is_some()
-}
-
-/// [`lp_probe_after_ext`] の値に文字 `c` を含むか。
-pub(crate) fn lp_probe_after_ext_has(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_LP_PROBE_AFTER_EXT").is_some_and(|v| v.contains(c))
-}
-
-/// `try_fix` が偽なら LP を解いて基底を渡すだけ (列の固定は試さない。`ENOMOTO_MIP_LP_PROBE_AFTER_EXT=r` のかけ直しの後)。
+/// `try_fix` が偽なら LP を解いて基底を渡すだけ (列の固定は試さない。今の呼び出しはどれも真。偽で呼んでいた試作
+/// `ENOMOTO_MIP_LP_PROBE_AFTER_EXT` は 2026-11-18 に削除)。
 /// LP のプロービングの LP が実行不能と出たとき、その証明が際どく信用しないか ([`solver::lp_farkas_marginal`]、`ENOMOTO_MIP_NO_LPINF_CHECK` で止める)。
 /// 信用しないときは数える (根の LP・LP のプロービングの欄)
 fn lp_inf_untrusted<L: lp_api::MipLp>(lp: &L, n: usize) -> bool {
@@ -5372,10 +5289,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
             t0.elapsed().as_secs_f64()
         );
     }
-    // `ENOMOTO_MIP_LP_PROBE_AFTER_EXT`: クリーク行の拡張の後に解いた LP は根の LP と同じ (対称性の行は末尾に足す) なので、常に渡す。
-    // 値に `s` を含めば既定と同じ条件 (固定が出たか最初の LP が重い) のときだけ渡す (常に渡すと根の LP が 0.1 秒もない問題でも
-    // 着く頂点が変わり、58 問で SGM +9.4%・解けた数 87 → 80 だった: analysis/lp_probe_after_ext_20261102.md)
-    let passed = n_fixed > 0 || slow_root || (lp_probe_after_ext() && !lp_probe_after_ext_has('s'));
+    let passed = n_fixed > 0 || slow_root;
     // 診断 `ENOMOTO_MIP_PROBE_BASIS_DIAG`・試作 `ENOMOTO_MIP_PROBE_BASIS_GUARD` (既定では何もしない、analysis/probe_basis_20261106.md):
     // 最後の LP の基底と行の指紋・大きさ・最初の LP の手間を根の LP に渡す (根で列だけの基底の良し悪しを見る)
     if solver::probe_basis_diag_on() || env_def!("ENOMOTO_MIP_PROBE_BASIS_GUARD", "g").is_some() {
