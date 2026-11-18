@@ -145,3 +145,23 @@ satellites2-60-fs 1200 / 34706 (3.5%)。固定 0 の問題では問題は既定�
 (symresack・オービトープの LP の分離と伝播、ビット 1) か SST (ビット 4)。当方の SST の行の数 (1122 行・10 段) か生成元の数 (10〜11 個、
 SCIP の検出はもっと多い可能性) の差とみる。既存の試作の組み合わせでは既定より速くならない。直すなら、生成元の検出の上限 (SYMPRE probe の
 caps、`ENOMOTO_T_MIP_SYM_SST_GENS` 64 など) と SST の段の数から。対称性の担当 (HANG・群 1) と重なるので、ここでは手を入れない。
+
+## 10. neos-5107597-kakapo (群 4 からの依頼、根だけ・4 スレッド、logs/root_neos-5107597-kakapo_*)
+
+問題: 0-1 2976 列・連続 138 列 (費用は連続 24 列だけ)、行は大きい M (8000) の対の並びの制約 `x_j − x_i − 8000 y ≥ L` が 3192 対ほか。
+
+| 設定 | 根の下界 |
+|---|---|
+| 既定 | 1.11 (path_highs だけが伸ばす、カットの非零 2〜5) |
+| pst (`ENOMOTO_T_MIP_PATH_STARTS=1000000`) | 1.11 |
+| `ENOMOTO_MIP_CUTMIX=fhcz` (intsmall 0 なので z は入らない) | 1.11 |
+| PATH_BOTH_SIGNS / PATH_SEQ / CMIR_DELTAS_HIGHS / CMIR_DELTA1 / PATH_ORIG_ONLY / PATH_OLD | 1.22 / 1.11 / 1.11 / 1.11 / 1.02 / 0 |
+| CMIR_SEARCH | 2.12 |
+| **`ENOMOTO_MIP_NO_PRESOLVE=1`** | **256.8** (path_highs の伸び 250.7) |
+| NO_ROW_MERGE / NO_COEF_TIGHTEN / 両方 / DISABLE_AGGREGATOR / DISABLE_FREEVAR / DISABLE_PARALLELCOLS / KEEP_IMPLIED_BOUND_ROWS | 0 / 1.11 / 0 / 1.11 / 1.11 / 1.11 / 1.11 |
+| SCIP 既定の根 (3.9 秒) / 前処理なしで 3 ラウンド | 646.2 / 413.9 |
+
+- SCIP のカットは `y + x / 48 ≥ 1` のような 2 項の cMIR (aggregation 1197 本) で、形は当方のカットと同じ。
+- 当方は前処理を全部切ると根が 1.11 → 256.8 に上がる。前処理の段を 1 つずつ切っても上がらない (並行な行の併合 6498 → 3249 行を切るとむしろ 0)。
+  前処理の 1 回目で 69 列が固定されている (PRESOLVE_ROUND 0 fixed=69) ので、次はこの 69 列 (連続列か) と、前処理なしで効いている経路集約の
+  行を突き合わせる。
