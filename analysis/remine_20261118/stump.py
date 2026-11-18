@@ -25,6 +25,9 @@ for l in open("analysis/gate2_20261117/tab/feat.jsonl"):
         if mm:
             a,r,z,c=map(int,mm.groups()); f["log_lpnnz"]=math.log10(z+1); f["agg_nnz_per_col"]=a/max(c,1); f["lp_density"]=z/max(1,r*c)
     f["root_lpit_log"]=math.log10((d.get("lp_iterations") or 0)+1)
+for _p in list(F):
+    for _tl in (10, 20, 30, 45, 90, 120, 180, 300, 600, 900, 1200, 1800, 3600):
+        F[f"{_p}@{_tl}"] = F[_p]  # 上限の違う回も同じ特徴
 FEATS=sorted({k for f in F.values() for k in f})
 out=pickle.load(open(SP+"scan.pkl","rb"))
 def stump_fit(P,val):
