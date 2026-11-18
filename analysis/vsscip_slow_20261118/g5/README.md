@@ -47,7 +47,13 @@ n3div36 (def の RSS 5457 MB、t1 は 767 MB)、uccase12 (def 2918 MB / scip 145
 
 ## 誤答の確かめ
 
-`fuzz.sh` (analysis/release019_20261117/fuzz.sh の組を `G5INH=pc` (4 スレッド) と `G5SEQ=1`・大きさの下限 0・C 0.05・1 スレッドで)。結果は下の追記。
+`fuzz.sh` (analysis/release019_20261117/fuzz.sh の組を `G5INH=pc` (4 スレッド) と `G5SEQ=1`・大きさの下限 0・C 0.05・1 スレッドで): 8 組とも誤答 0
+(fuzz_tiny 400・HiGHS との比べ 300・objint 1000・slack 1000)。cargo test (lib) 422 通過。
+- fuzz の問題は小さく、`G5SEQ` の反復の上限 (最低 100) に当たらないので、MIPLIB の 12 問 (1 スレッド・60 秒) を `ENOMOTO_T_MIP_G5SEQ_SIZE=0`・
+  `ENOMOTO_T_MIP_G5SEQ_C=0.0001` (必ず切り替える) でも解いた: 10 問で切り替えが起き (内点法の頂点が得られず二段解法に戻った回も含む)、
+  最適値・状態は 12 問とも既定の 1 スレッドと同じ。
+- 注意: `SEQ_IPM` はスレッドごとの旗なので、1 スレッドの外側の求解が同じスレッドで解くサブ MIP の基底なしの LP にも効く (大きさの下限 5 万で対象は限られる)。
+- `G5INH` の `c` は下限 64 本なので fuzz の問題ではほぼ働かない (広い計測で見る)。
 
 ## 広い計測の台本 (analysis/slow2_20261117 の写し)
 

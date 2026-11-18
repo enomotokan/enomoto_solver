@@ -242,3 +242,15 @@ widden、1 本ずつ (4 スレッド、600 秒、デバッグ解なし)、種 1�
 - res_*.jsonl: 各回の結果。fuzz.sh: fuzz の台本 (ログ fuzz_logs/ と logs/ はコミットしない)。
 - 診断 (デバッグ解・診断の環境変数のときだけ動く): `ENOMOTO_MIP_DEBUG_ROWS_ALL`、`ENOMOTO_MIP_DEBUG_LPINF`、
   デバッグ解を含むノードの LP が実行不能のときの LP の行・列境界の表示。
+
+## 14. SYMDYN の既定戻し (8f4a55ebd) の速さ (親が集計、ビルド c6ee1f3ef、def = 戻した既定 = orbital fixing だけ、symf = 以前の既定 SYMDYN=f)
+
+| 組 | symf / def [95% CI] | 解けた数 def / symf | 全種で 1.25 倍超 | 食い違い | crash |
+|---|---|---|---|---|---|
+| SP (P の生成元のある 12 問 × 種 1〜4、60 秒) | −5.0% [−12.4%, +1.8%] | 36 / 36 | なし | 0 | 0 |
+| SM (M の 8 問 × 種 1・2、600 秒) | +1.0% [−12.1%, +19.9%] | 14 / 14 | なし | 0 | 0 |
+
+- SP の差は neos5 (0.73)・qiu (0.86) の 2 問で、どちらも LexRed が効く問題。58 問全体に直すと約 −0.8% 相当。SM は mushroom-best が全種で symf の方が速い (0.74)、
+  neos-960392 は symf が遅い (1.57)、rococoC10-001000 は種で逆。
+- 判断: 誤答の芽 (fuzz_of 種 1293 ほか) を外す代わりのこの程度の差は受け入れる。LexRed を誤答なしで併用できる形は analysis/lexred_20261118/ で作業中。
+- summ_SM.txt の「old」の欄は symf のこと (summ.py の LPINF 用の名前のまま)。
