@@ -536,6 +536,8 @@ pub fn solve_mip(
     // `ENOMOTO_MIP_THREAD_BUDGET`: 根の LP の同時実行は FJ のスレッドの分を 1 本引く
     let race_threads = if solver::thread_budget_on() && params.threads > 1 { params.threads - 1 } else { params.threads };
     let prev_race = crate::simplex::mip_lp::set_cold_race_threads(race_threads);
+    // 試作 `ENOMOTO_MIP_G5SEQ`: 1 スレッドでは基底のない大きい求解を二段解法 → 内点法 + クロスオーバーの順に回す
+    let prev_seq = crate::simplex::mip_lp::set_seq_ipm(race_threads < 2 && !params.submip && crate::simplex::mip_lp::g5seq_on());
     // 根のサブ MIP・Feasibility Jump を別スレッドで回すかなどの判定 ([`solver::mip_threads`]) も、`ENOMOTO_MIP_THREADS` が
     // なければこのスレッド数にする
     let prev_mt = solver::MIP_THREADS_DEFAULT.swap(params.threads, std::sync::atomic::Ordering::Relaxed);
@@ -594,6 +596,7 @@ pub fn solve_mip(
         crate::simplex::nb_diag::print(t_solve.elapsed().as_secs_f64());
     }
     crate::simplex::mip_lp::set_cold_race_threads(prev_race);
+    crate::simplex::mip_lp::set_seq_ipm(prev_seq);
     solver::MIP_THREADS_DEFAULT.store(prev_mt, std::sync::atomic::Ordering::Relaxed);
     if env_str!("ENOMOTO_MIP_XPROF").is_some() {
         crate::simplex::slope_intercept_dual::xprof("tail");
