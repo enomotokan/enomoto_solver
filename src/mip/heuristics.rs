@@ -1857,7 +1857,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             super::report_submip_components(&sub, "before presolve");
         }
         // 成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP` で使わない): 根の (主のスレッドで解く) サブ MIP も成果で打ち切る ([`super::solver::submip_outcome_stop`])
-        if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 {
+        // 試作 `ENOMOTO_MIP_HEUR4` の `o`: `r` で足した既定の形の RENS だけは成果連動で打ち切らない ([`heur4_on`])
+        if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && !HEUR4_NO_OUTCOME.with(|c| c.get()) {
             let c = super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol).with_subcap(self.root_lp_secs).with_subcap_t(self.params.time_limit);
             // 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 目的関数を変えないサブ MIP に外側の下界を渡す
             let c = if super::solver::lose6_2_sublb() && cutoff.is_none() { c.with_outer_lb(self.root_lb_now(), self.bg_watch_job()) } else { c };
@@ -2480,7 +2481,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if self.params.verbose {
                             eprintln!("MIP:   HEUR4 r: SUBFIX RENS found a solution with gap {gap:.2e}; running the default RENS as well");
                         }
-                        return self.rens_old(_x) || r;
+                        let no_outcome = heur4_on('o');
+                HEUR4_NO_OUTCOME.with(|c| c.set(no_outcome));
+                let r2 = self.rens_old(_x);
+                HEUR4_NO_OUTCOME.with(|c| c.set(false));
+                return r2 || r;
                     }
                 }
             }
@@ -3873,9 +3878,15 @@ pub(super) fn suba_rate(c: char) -> bool {
 /// `ENOMOTO_MIP_HEUR4=<文字の並び>` (試作、群 4 の解探し、analysis/vsscip_slow_20261118/heur4/、既定では使わない)
 /// - `r`: 外側の根の SUBFIX の RENS (ダイブ) が解を出しても暫定解と根の LP の値の差が `ENOMOTO_T_MIP_HEUR4_RENS_GAP` (1e-6) を超えるなら、
 ///   既定の RENS (LP で整数値の列を全部固定) も 1 回回す ([`Solver::rens`])
+///   - `o`: `r` で足す RENS は成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP`) を使わない (neos-1171448 種 4 では 50 ノードで止まり −239 だった)
 pub(super) fn heur4_on(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR4").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_HEUR4` の `o`: 今解くサブ MIP を成果連動で打ち切らない
+    static HEUR4_NO_OUTCOME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// `ENOMOTO_MIP_S1_RINSWIDE=k` (試作、[`Solver::rins`]): 根の RINS が短く空振りしたときのやり直しの回数 (0 なら使わない)
