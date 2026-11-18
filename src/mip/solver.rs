@@ -18403,7 +18403,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let Some(&(k, i)) = self.orb_col.get(&col) else { return (col, value) };
         let o = &self.orbitopes[k];
-        if !o.row_packing[i] {
+        if !o.row_packing[i] || o.static_pp {
             return (col, value);
         }
         for &j in &o.vars[i] {
@@ -18479,7 +18479,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
-            rows.iter().enumerate().filter(|(k, r)| !r.is_empty() && !broken[*k]).map(|(k, r)| orbs[k].sub_rows(r)).collect()
+            // `ENOMOTO_MIP_ORBPP` の静的なオービトープは全ての行を固定の順で使う (根の固定と同じ順。分枝の順によらず成り立つ)
+            let mut v: Vec<super::symmetry::Orbitope> =
+                rows.iter().enumerate().filter(|(k, r)| !orbs[*k].static_pp && !r.is_empty() && !broken[*k]).map(|(k, r)| orbs[k].sub_rows(r)).collect();
+            v.extend(orbs.iter().filter(|o| o.static_pp).cloned());
+            v
         } else {
             orbs.iter().cloned().collect()
         };
