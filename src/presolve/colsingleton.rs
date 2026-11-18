@@ -159,6 +159,12 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
         if keep_bounded && lb[j].is_finite() && ub[j].is_finite() {
             continue;
         }
+        // 試作 `ENOMOTO_MIP_KEEP_COSTED_SINGLETON` (群 2、analysis/vsscip_slow_20261118/tree2/README.md 10 節): 整数最適化の前処理で、
+        // 費用のついた連続の列シングルトンは消さない (費用を等式の他の列へ移さない)。neos-5107597-kakapo の完了時刻の列
+        let keep_costed = int_mask.is_some() && env_str!("ENOMOTO_MIP_KEEP_COSTED_SINGLETON").is_some();
+        if keep_costed && c[j] != 0.0 {
+            continue;
+        }
         let Some(i) = owning_a_row[j] else { continue }; // 唯一の出現が G 側
         if eliminated_rows[i] {
             // この行は既に別のシングルトン列の消去に使われた (1 行で解けるのは 1 変数のみ)。
