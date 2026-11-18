@@ -1,0 +1,779 @@
+MIP_FOLD: integer groups: 0 accepted, 0 rejected (V_R rows 18439; rejected for V_R 0, non-±1 0, TU 0; net true accepted by net 0 work 0 over 0, panics 0, cert fails 0)
+MIP_FOLD: no fold (n 19466 m 18439) in 0.205s (reason line 526, ratio 0.988)
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 18439 -> 18439, free columns 19466 -> 19466, nonzeros 435653 -> 435653, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 0 probed, 0 of 19466 free columns fixed (0.00s), not used
+TSLP solve st=IterationLimit iters=3152 polish=0 us=13610759 warm=false dse_cache=false lu_cache=false
+MIP: LP probing: the first LP stopped: IterationLimit (13.63s, limit 30.00s)
+MIP: probing: 0 of 0 binaries probed (10 passes), 0 fixed, 0 bounds tightened, 0 implications (0.00s, cpu 0.00s, work 0, pwork 0, chg 0)
+MIP: probing: PREPAR 1 threads, 0 windows, 0 of 0 probes from the windows
+MIP: probing: 0 equivalent binary pairs
+HNFPRE: round 0 eq 0 int_eq 0 rat_skip 0 comps 0 done 0 gave_up 0 cols 0 rank 0 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.000s) gave_up_why 0/0/0
+HNFPRE: round 0 tightened 0 columns
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (0 edges, 0.02s)
+MIP: symmetry: SYMSIGN true SYMSCALE false: flipped 0, scaled 0, tie rows doubled 0 of 18439 rows for the detection
+MIP: symmetry: refinement 0.06s, work 3636844 (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)
+MIP: symmetry: refinements stopped by the iteration cap 0 of 1 (ENOMOTO_MIP_HO6_SYMREFINE true)
+MIP: symmetry: none (0.08s, work 3636844, search 0, verify 0, detect 0.08s, refine 0.06s, log work 26525432)
+MIP: objective step with implied integers: None (without: None); costed non-integer columns 16386 (e.g. [(1, 1.0, 0.0, inf, 1), (2, 1.0, 0.0, inf, 1), (3, 1.0, 0.0, inf, 1), (4, 1.0, 0.0, inf, 1), (5, 1.0, 0.0, inf, 1)])
+MIP: OBJINT c: lattice None (offset 0.0000000000e0), step None
+MIP: fixed-charge check: vb rows 2052 of 18439, continuous with vb 2052 of 18440
+MIP: fixed-integer LP dual check: c x 4.0000000000e1, dual bound 0.0000000000e0 -> solve
+TSLP solve st=Optimal iters=4 polish=1 us=21255 warm=true dse_cache=true lu_cache=true
+MIP:   global fixed integers 0 of 1026 (newly 0 since the root LP)
+MIP: new incumbent 4.0000000000e1 at node 0 (0.39s) [tree]
+MIP: feasibility jump found a solution (0.39s)
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.39s)
+TSLP solve st=Optimal iters=22692 polish=9559 us=28783970 warm=true dse_cache=true lu_cache=true
+MIP: root LP 7.3435388160e0 (22692 iters, 29.17s)
+MIP: root LP size: rows 18439, free columns 19466, nonzeros 435653
+MIP: root LP work: 36.611923 tick-s (22692 iters, 28.784s)
+MIP: fixed-charge check: vb rows 2052 of 18439, continuous with vb 2052 of 18440
+MIP: fixed-charge check: vb rows 2052 of 18439, continuous with vb 2052 of 18440
+CUTMIX types restarts 0 m 18439 n 19466 vbrow 0.111 vbcol 0.111 fc 0 fcnode 0 cont 0.947 genint 1.000 knap 0.000 knaptight 0.000 knapgub 0.000 knapgubcol 0.000 mixknap 0.889 setp 0.000 introw 0.000 intsmall 0.000 flow 0.000
+MIP: clique graph: 0 edges (0 from rows, probing implications 0)
+CLQSIG s 0.0000 sp 0.0000 ed 0.0000 fr 0.0000 vi 0.0000 (rows 18439 bin 0 edges 0 frac 0) a 1.8 b 0.41 f 0.3234
+MIP: clique sigmoid: f 0.3234, clique cuts per root round 32
+MIP: fixed-charge check: vb rows 2052 of 18439, continuous with vb 2052 of 18440
+MIP: robust cut LP cap: size false, double false, progress true
+MIP: fixed-charge check: vb rows 2052 of 18439, continuous with vb 2052 of 18440
+MIP: fixed-charge check: vb rows 2052 of 18439, continuous with vb 2052 of 18440
+MCF detect: rows 18439 cols 19466 | flow cands 2055 flow rows 3 commodities 1 cap cands 16386 arcs 2 nodes 3 incons 0.00 directed | fail 'no component' | networks [] fc_network false | 0.008s
+MIP: cut selection probe: compared at 0 rounds (pool stopped early), probe wall 0.18s (budget 9.3s)
+MIP: cut selection probe (6 rounds): default 0 cuts gain 0.000000e0 (0.00s), pool 0 cuts gain 0.000000e0 (0.00s) -> default (rule rate, probe 0.00s in total, 29.36s)
+MIP: mpsep: 0 rounds with extra points, 0 points, 0 extra candidates, chosen 0 cuts (0 do not cut x*), 0.000s
+TSLP solve st=Optimal iters=1 polish=0 us=13340 warm=true dse_cache=true lu_cache=true
+SEP cmirdelta: calls 0 with_new 0 new_deltas 0 wins 0 (g 0 c 0 l 0, no_old 0) mean_gain 1.000 cands_new 0 chosen 0/0 eff_new 0.0000 eff_all 0.0000 time 0.000s
+MIP: cut loop done: 0 cuts added, 0 in LP, pool 0 cuts (0 nonzeros), obj 7.3435388160e0 -> 7.3435388160e0
+MIP: LMBOOST: not used (Local-MIP improvements 0, last at 0.00s, incumbent only from the FJ thread false, gap 0.816, 29.41s)
+MIP: early root reduced costs stored (0 newly fixed integer columns, 29.41s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+TSLP solve st=Optimal iters=1433 polish=1 us=3093849 warm=true dse_cache=true lu_cache=true
+MIP:   global fixed integers 0 of 1026 (newly 0 since the root LP)
+MIP: new incumbent 8.0000000000e0 at node 0 (32.51s) [shifting]
+MIP: root heuristic shifting: found (3.10s)
+TSLP solve st=Optimal iters=2315 polish=473 us=1577224 warm=true dse_cache=true lu_cache=true
+MIP: root heuristic int shifting: none (1.58s)
+TSLP solve st=ObjectiveBound iters=1 polish=0 us=8385 warm=true dse_cache=false lu_cache=false
+TSLP solve st=ObjectiveBound iters=1 polish=0 us=9303 warm=true dse_cache=false lu_cache=false
+TSLP solve st=ObjectiveBound iters=1 polish=0 us=8066 warm=true dse_cache=false lu_cache=false
+MIP: root heuristic randomized rounding: none (0.07s)
+MIP:   interior rounding: IPM (cost) failed (23.97s)
+MIP:   interior rounding: 0 interior points, vertex false (23.97s)
+MIP:   interior rounding: 0 rounded points tried, found false
+MIP: root heuristic interior rounding: none (23.97s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 0 of 1026 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+TSLP solve st=Optimal iters=1 polish=0 us=10573 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=6933 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=5950 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=5287 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=4834 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=4696 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=4523 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=4699 warm=true dse_cache=true lu_cache=true
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 1
+TSLP solve st=Optimal iters=437 polish=1 us=99867 warm=true dse_cache=true lu_cache=true
+MIP: fixed-charge check: vb rows 421 of 10441, continuous with vb 421 of 10442
+TSLP solve st=Optimal iters=78 polish=1 us=20043 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=76 polish=1 us=15970 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=50 polish=1 us=13226 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=50 polish=1 us=13378 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=56 polish=1 us=14824 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=48 polish=1 us=12955 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=38 polish=1 us=12387 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=8387 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=518 polish=1 us=65695 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=518 polish=1 us=65380 warm=true dse_cache=true lu_cache=true
+TSLP solve st=ObjectiveBound iters=1 polish=0 us=3509 warm=true dse_cache=false lu_cache=false
+TSLP solve st=ObjectiveBound iters=1 polish=0 us=3088 warm=true dse_cache=false lu_cache=false
+TSLP solve st=ObjectiveBound iters=1 polish=0 us=2877 warm=true dse_cache=false lu_cache=false
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+TSLP solve st=Optimal iters=77 polish=1 us=2697 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=1210 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=4191 warm=true dse_cache=true lu_cache=true
+TSLP solve st=ObjectiveBound iters=9 polish=0 us=3849 warm=true dse_cache=false lu_cache=false
+MIP:   sub-MIP: 18846 free columns of 19466, status Optimal, nodes 1, objective Some(59.10033338490857), 0.58s, 847 LP iterations, TICKS cpu 0.936 lp 19798999 prop 2922702 sep 2095175 pre 1456812 heur 0 node 29907 lpit 1950 lu 239564742 lum 62527090
+MIP:   SUBFIX RENS try 1: target 0.60, fixing rate 0.60, depth 816, 0 backtracks, 406 free integer columns of 1026, status Some(Optimal), nodes 1, accepted false, 0.58s (dive+sub 0.64s)
+MIP:   SUBFIX RENS found nothing; running the default RENS as well
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 1
+TSLP solve st=Optimal iters=109 polish=1 us=3001 warm=true dse_cache=true lu_cache=true
+MIP: fixed-charge check: vb rows 6 of 353, continuous with vb 6 of 354
+TSLP solve st=Optimal iters=61 polish=1 us=2408 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=53 polish=1 us=2214 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=61 polish=1 us=2065 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=47 polish=1 us=2110 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=77 polish=2 us=3639 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=61 polish=1 us=2276 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=71 polish=1 us=2292 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=56 polish=1 us=2029 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=52 polish=1 us=2002 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=49 polish=1 us=1991 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=43 polish=1 us=2080 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=1163 warm=true dse_cache=true lu_cache=true
+MIP:   sub-MIP: 18651 free columns of 19466, status Infeasible, nodes 0, objective None, 0.08s, 741 LP iterations, TICKS cpu 0.079 lp 342641 prop 5445 sep 527652 pre 495399 heur 0 node 0 lpit 718 lu 5100798 lum 1151218
+MIP: root heuristic RENS: none (0.73s)
+MIP: root heuristic locks: none (0.00s)
+MIP: root heuristic clique: none (0.00s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   RINS (HiGHS fill): fixing rate 0.79 from agreeing columns, 0.79 after fill (1026 free integer columns)
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+TSLP solve st=Optimal iters=1119 polish=2 us=506829 warm=true dse_cache=true lu_cache=true
+MIP: fixed-charge check: vb rows 1260 of 15591, continuous with vb 1260 of 15592
+TSLP solve st=Optimal iters=1 polish=0 us=3253 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=847 polish=1 us=304255 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=849 polish=1 us=322090 warm=true dse_cache=true lu_cache=true
+TSLP solve st=ObjectiveBound iters=1 polish=0 us=4327 warm=true dse_cache=false lu_cache=false
+TSLP solve st=ObjectiveBound iters=1 polish=0 us=3729 warm=true dse_cache=false lu_cache=false
+TSLP solve st=ObjectiveBound iters=1 polish=0 us=3189 warm=true dse_cache=false lu_cache=false
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 1
+TSLP solve st=Optimal iters=134 polish=2 us=4770 warm=true dse_cache=true lu_cache=true
+MIP: fixed-charge check: vb rows 3 of 252, continuous with vb 3 of 253
+TSLP solve st=Optimal iters=83 polish=1 us=2757 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=55 polish=1 us=1923 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=53 polish=1 us=1984 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=39 polish=1 us=4485 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=34 polish=1 us=4998 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=4372 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=6187 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=0 us=5364 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=41 polish=1 us=34184 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=21322 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=4746 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=4805 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=4265 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=13 polish=2 us=49371 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=140 polish=1 us=111614 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=11863 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=102 polish=3 us=83392 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=70 polish=2 us=64220 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=17529 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=57 polish=1 us=59089 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=15749 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=50 polish=1 us=47258 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=11870 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=30 polish=1 us=19645 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=10477 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3469 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3249 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=5 polish=0 us=3552 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3180 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3212 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3283 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=18 polish=1 us=14549 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=0 us=3974 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3220 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3159 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3133 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=5 polish=0 us=4234 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3200 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3245 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=73 polish=1 us=59043 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=15 polish=1 us=10365 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3738 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=10425 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3330 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3217 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3192 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3150 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3128 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3063 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3092 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3104 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3053 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=19 polish=1 us=8725 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3185 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3508 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=47 polish=1 us=28542 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3486 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3456 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3337 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3224 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3262 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=25 polish=1 us=12001 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=10086 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=3753 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=10 polish=0 us=5315 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3019 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3098 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=3428 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=3386 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3167 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3200 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3241 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3160 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3141 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=3602 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3138 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=3468 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=0 us=3634 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3233 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3112 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3205 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3073 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3536 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3346 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3177 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3038 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=3424 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3085 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=3803 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3204 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3184 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3139 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3166 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3175 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3408 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=5 polish=0 us=3720 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3158 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=0 us=3621 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3018 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3091 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=10 polish=0 us=5552 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=10001 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3037 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=6 polish=0 us=3577 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=2957 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=6 polish=0 us=3834 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=2976 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=3327 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3102 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=47 polish=1 us=22094 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=3334 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3101 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=2956 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=2962 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=2974 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=2913 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=0 us=3325 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=2978 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3001 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=22 polish=1 us=14259 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=2966 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3083 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=61 polish=1 us=28453 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=46 polish=1 us=72617 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=299 polish=2 us=208501 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=106 polish=1 us=99288 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=16 polish=1 us=10807 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=112 polish=1 us=59966 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=4757 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3964 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=20 polish=1 us=8114 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=4068 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=177 polish=2 us=90911 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=108 polish=1 us=54266 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=119 polish=1 us=61865 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=65 polish=0 us=65053 warm=true dse_cache=false lu_cache=false
+MIP:   sub-MIP: 18651 free columns of 19466, status TimeLimit, nodes 17, objective Some(36.74436627233196), 3.21s, 3282 LP iterations, TICKS cpu 6.013 lp 77107759 prop 3171308 sep 437618 pre 1398612 heur 0 node 595969 lpit 5278 lu 2281368301 lum 281538538
+MIP: root heuristic RINS: none (3.22s)
+MIP: after root heuristics: incumbent Some(8.0) (62.07s)
+MIP: root objective probing: skipped (gap 8.206e-2 (LP 7.3435388160e0, incumbent 8.0000000000e0), 0 fractional binaries)
+MIP: GAP1 u: LP probing skipped (gap 8.206e-2)
+MIP: restart check: newly fixed 0, integer columns 1026, free at the root 1026, threshold 10.3, root LP 28.78s
+TRSTAT: tree start outer 76.09 solve 62.07 restarts 0 lb 7.3435388160e0 ub 8.0000000000e0
+MIP:    62.07s nodes        1 open       0 lb inf ub 8.00000000e0 lp_iters 22704 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 4881 dive_iters 0 lp_rows 18439 node_cut_secs 0.00
+TSLP solve st=Optimal iters=1 polish=0 us=16922 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=12393 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=10756 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=5 polish=2 us=13480 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=172 polish=169 us=285697 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=178 polish=2 us=2493586 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=1802864 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=180 polish=171 us=815159 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=172 polish=169 us=250240 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=172 polish=169 us=211243 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=172 polish=169 us=267041 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=175 polish=169 us=1863022 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=10 polish=3 us=20664 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=82 polish=0 us=1110672 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=41 polish=1 us=162849 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=17 polish=0 us=775168 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=427445 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=9 polish=3 us=20546 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=175 polish=169 us=1154184 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=233956 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=90 polish=0 us=857165 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=264 polish=169 us=605868 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=210 polish=169 us=226539 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=286 polish=169 us=473644 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=172 polish=0 us=2121663 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=172 polish=169 us=272216 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=172 polish=169 us=337488 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=169 polish=0 us=337540 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=19 polish=0 us=619419 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=172 polish=169 us=222657 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=172 polish=169 us=317662 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=16 polish=0 us=542863 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=324061 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=169 polish=0 us=683877 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=3 polish=0 us=11850 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=10 polish=3 us=27289 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=184 polish=171 us=4514200 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=172 polish=169 us=423515 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=172 polish=169 us=327142 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=208 polish=169 us=5287702 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=94 polish=0 us=842506 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=327283 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=198 polish=169 us=409188 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=169 polish=0 us=739089 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=169 polish=0 us=441780 warm=true dse_cache=false lu_cache=false
+MIP:    95.35s nodes        2 open       1 lb 7.34353882e0 ub 8.00000000e0 lp_iters 28578 sb_iters 5873 sb_lps 44 sb_secs 33.25 node_iters 1 (first 1, lps 1) heur_iters 4881 dive_iters 0 lp_rows 18439 node_cut_secs 0.00
+TSLP solve st=TimeLimit iters=641 polish=0 us=859806 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=857 polish=2 us=469120 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=39 polish=2 us=55900 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=60 polish=1 us=47132 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=83 polish=1 us=63184 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=15614 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=350 polish=2 us=282936 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=17769 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=228 polish=2 us=168818 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=225 polish=2 us=173755 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=62 polish=2 us=66261 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=425981 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=784 polish=2 us=895448 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=17300 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=89 polish=1 us=56336 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=488 polish=2 us=396809 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=179 polish=2 us=122202 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=444704 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=2 polish=0 us=26184 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=155 polish=2 us=153818 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=164 polish=2 us=106003 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=15736 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=146 polish=2 us=87485 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=119 polish=2 us=80895 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=316 polish=2 us=237376 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=250 polish=2 us=182710 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=468335 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=524 polish=1 us=453094 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=180 polish=2 us=159683 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=94 polish=2 us=66045 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=317 polish=2 us=229813 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=45 polish=1 us=40850 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=16484 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=22 polish=2 us=42908 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=142 polish=2 us=116615 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=14235 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=144 polish=2 us=110310 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=353 polish=2 us=285470 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=127 polish=2 us=105160 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=15813 warm=true dse_cache=true lu_cache=true
+MIP:   102.97s nodes        3 open       2 lb 7.34353882e0 ub 8.00000000e0 lp_iters 37282 sb_iters 13079 sb_lps 82 sb_secs 39.53 node_iters 1499 (first 1499, lps 2) heur_iters 4881 dive_iters 0 lp_rows 18439 node_cut_secs 0.00
+TSLP solve st=Optimal iters=3 polish=1 us=16589 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=5422 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=712463 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=324 polish=2 us=239953 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=456845 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=365 polish=2 us=273736 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=231 polish=1 us=150578 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=84 polish=2 us=55527 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=79 polish=2 us=65687 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=264 polish=2 us=267723 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=89 polish=2 us=57698 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=426134 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=159 polish=2 us=97941 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=73 polish=2 us=59789 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=565112 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=298 polish=2 us=192687 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=196 polish=2 us=119022 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=155 polish=2 us=88869 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=388216 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=37 polish=2 us=26376 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=451376 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=308 polish=2 us=213938 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=235 polish=2 us=140101 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=359 polish=2 us=252024 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=83 polish=2 us=46624 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=428820 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=153 polish=2 us=91332 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=380 polish=2 us=270632 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=340 polish=2 us=250048 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=38 polish=2 us=26365 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=195 polish=2 us=119696 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=924 polish=1 us=1016319 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=398 polish=2 us=339630 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=209 polish=2 us=136322 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=7058 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=460442 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=172 polish=2 us=105678 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=200 polish=2 us=124993 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=7394 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=183 polish=2 us=109414 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=215 polish=1 us=133390 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=38 polish=2 us=28419 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=466141 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=203 polish=2 us=127049 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=143 polish=2 us=81581 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=6441 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=5710 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=127 polish=2 us=70499 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=230 polish=2 us=171604 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=202 polish=2 us=129382 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=393189 warm=true dse_cache=false lu_cache=false
+MIP:   113.47s nodes        4 open       3 lb 7.34353882e0 ub 8.00000000e0 lp_iters 49994 sb_iters 25788 sb_lps 132 sb_secs 50.01 node_iters 1502 (first 1502, lps 3) heur_iters 4881 dive_iters 0 lp_rows 18439 node_cut_secs 0.00
+TSLP solve st=Optimal iters=46 polish=2 us=35878 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=6669 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=202 polish=1 us=141764 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=27 polish=1 us=31804 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=574 polish=2 us=431406 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1008 polish=2 us=886480 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=119 polish=2 us=80650 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=32 polish=2 us=34026 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=45 polish=1 us=28160 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=75 polish=1 us=59940 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=61 polish=2 us=42088 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=53 polish=2 us=46092 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=9752 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=9352 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=37 polish=1 us=25806 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=103 polish=2 us=66027 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=107 polish=2 us=70368 warm=true dse_cache=true lu_cache=true
+MIP:   115.51s nodes       16 open      15 lb 7.34353882e0 ub 8.00000000e0 lp_iters 52491 sb_iters 25788 sb_lps 132 sb_secs 50.01 node_iters 2186 (first 2186, lps 15) heur_iters 8507 dive_iters 1813 lp_rows 18439 node_cut_secs 0.00
+TSLP solve st=Optimal iters=4 polish=1 us=19617 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=1 us=10058 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=8513 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=8618 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=110 polish=2 us=64937 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=49 polish=1 us=39849 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=92 polish=1 us=53750 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=49 polish=1 us=39071 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=9887 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=8707 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=8898 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=5438 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=4385 polish=0 us=3993288 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=825 polish=2 us=481315 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=347 polish=2 us=297431 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=473727 warm=true dse_cache=false lu_cache=false
+MIP:   121.07s nodes       29 open      28 lb 7.34353882e0 ub 8.00000000e0 lp_iters 58875 sb_iters 26636 sb_lps 134 sb_secs 50.79 node_iters 7722 (first 7722, lps 28) heur_iters 8507 dive_iters 1813 lp_rows 18439 node_cut_secs 0.00
+TSLP solve st=Optimal iters=4 polish=1 us=13814 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=10 polish=2 us=16747 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=219 polish=2 us=162064 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=9 polish=2 us=37534 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=157 polish=2 us=121659 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=51 polish=2 us=50481 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=128 polish=1 us=97029 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=234 polish=2 us=179674 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=164 polish=2 us=133617 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=6 polish=1 us=33793 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=119 polish=2 us=78029 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=14 polish=1 us=26421 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=10521 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=135 polish=1 us=79492 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=113 polish=1 us=84739 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=159 polish=2 us=114630 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=145 polish=2 us=98642 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=145 polish=2 us=110589 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=7 polish=1 us=24437 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=117 polish=2 us=78823 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=273 polish=2 us=196080 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=178 polish=2 us=132844 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=109 polish=2 us=87881 warm=true dse_cache=true lu_cache=true
+MIP:   123.12s nodes       52 open      51 lb 7.34353882e0 ub 8.00000000e0 lp_iters 61374 sb_iters 26636 sb_lps 134 sb_secs 50.79 node_iters 10221 (first 10221, lps 51) heur_iters 8507 dive_iters 1813 lp_rows 18439 node_cut_secs 0.00
+TSLP solve st=Optimal iters=33 polish=1 us=42589 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=231 polish=2 us=184579 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=927 polish=2 us=791174 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=46 polish=2 us=50420 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=6387 polish=0 us=8786884 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=1994 polish=2 us=1930906 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=23323 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=482963 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=3 polish=0 us=17770 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=0 us=16770 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=408877 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=182 polish=1 us=125071 warm=true dse_cache=true lu_cache=true
+MIP:   136.01s nodes       57 open      56 lb 7.34353882e0 ub 8.00000000e0 lp_iters 72185 sb_iters 27829 sb_lps 140 sb_secs 51.87 node_iters 19839 (first 19839, lps 56) heur_iters 8507 dive_iters 1813 lp_rows 18439 node_cut_secs 0.00
+TSLP solve st=Optimal iters=287 polish=2 us=227669 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=135 polish=1 us=120184 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=68 polish=1 us=60203 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=41 polish=2 us=49455 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=110 polish=2 us=80710 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=12 polish=1 us=29030 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=120 polish=2 us=83977 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=34 polish=1 us=41648 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=7 polish=2 us=15292 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=101 polish=1 us=77654 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=241 polish=2 us=187030 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=268 polish=1 us=241504 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=22275 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=38 polish=2 us=47476 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=208 polish=2 us=204719 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=295 polish=2 us=254400 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=245 polish=2 us=179918 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=23 polish=1 us=32138 warm=true dse_cache=true lu_cache=true
+MIP:   138.03s nodes       75 open      74 lb 7.34353882e0 ub 8.00000000e0 lp_iters 74421 sb_iters 27829 sb_lps 140 sb_secs 51.87 node_iters 22075 (first 22075, lps 74) heur_iters 8507 dive_iters 1813 lp_rows 18439 node_cut_secs 0.00
+TSLP solve st=Optimal iters=93 polish=2 us=59520 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=19607 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=49 polish=2 us=35408 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=8 polish=2 us=14930 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=9421 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=37 polish=2 us=27484 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=60 polish=2 us=52196 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=11 polish=2 us=16279 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=137 polish=2 us=102311 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=54 polish=1 us=40812 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=335 polish=2 us=303797 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=20190 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=15200 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=853601 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=919 polish=2 us=1295663 warm=true dse_cache=true lu_cache=true
+MIP:   140.93s nodes       86 open      85 lb 7.34353882e0 ub 8.00000000e0 lp_iters 76636 sb_iters 29254 sb_lps 144 sb_secs 54.06 node_iters 22865 (first 22865, lps 85) heur_iters 8507 dive_iters 1813 lp_rows 18439 node_cut_secs 0.00
+TSLP solve st=Optimal iters=187 polish=2 us=185590 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=1 us=27681 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=1 us=14764 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=99 polish=1 us=78453 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=220 polish=2 us=230549 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=11 polish=2 us=34371 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=1 us=15672 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=10827 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=9 polish=1 us=15905 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=22 polish=1 us=26321 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=5 polish=1 us=11812 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=237 polish=2 us=213750 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=160 polish=2 us=173428 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=95 polish=2 us=106869 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=173 polish=2 us=162665 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=97 polish=1 us=233228 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=51575 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=7665 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=8667 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=8495 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=7588 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=8030 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=6190 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=8332 warm=true dse_cache=true lu_cache=true
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+TSLP solve st=Optimal iters=414 polish=2 us=138818 warm=true dse_cache=true lu_cache=true
+MIP: fixed-charge check: vb rows 1 of 10547, continuous with vb 1 of 10548
+TSLP solve st=Optimal iters=5 polish=0 us=13301 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=0 us=13719 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=0 us=13776 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=5 polish=0 us=13617 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=159 polish=2 us=71634 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=7 polish=0 us=13254 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=13900 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=391 polish=1 us=87318 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=391 polish=1 us=101977 warm=true dse_cache=true lu_cache=true
+TSLP solve st=ObjectiveBound iters=1 polish=0 us=5062 warm=true dse_cache=false lu_cache=false
+TSLP solve st=ObjectiveBound iters=9 polish=0 us=9190 warm=true dse_cache=false lu_cache=false
+TSLP solve st=ObjectiveBound iters=1 polish=0 us=3646 warm=true dse_cache=false lu_cache=false
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 1
+TSLP solve st=Optimal iters=92 polish=1 us=3925 warm=true dse_cache=true lu_cache=true
+MIP: fixed-charge check: vb rows 6 of 215, continuous with vb 6 of 216
+TSLP solve st=Optimal iters=58 polish=1 us=2707 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=65 polish=2 us=3296 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=56 polish=2 us=3002 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=57 polish=1 us=2356 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=45 polish=1 us=2341 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=36 polish=1 us=2038 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=69 polish=1 us=2318 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=1 polish=0 us=1603 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=220 polish=0 us=4057 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=220 polish=0 us=2822 warm=true dse_cache=true lu_cache=true
+TSLP solve st=ObjectiveBound iters=9 polish=0 us=961 warm=true dse_cache=false lu_cache=false
+TSLP solve st=ObjectiveBound iters=17 polish=0 us=1434 warm=true dse_cache=false lu_cache=false
+TSLP solve st=ObjectiveBound iters=9 polish=0 us=1742 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=1 polish=0 us=1284 warm=true dse_cache=true lu_cache=true
+TSLP solve st=ObjectiveBound iters=17 polish=0 us=1461 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=1 polish=0 us=4752 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=140 polish=2 us=92945 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=75 polish=2 us=76655 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=11681 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3816 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=3288 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=392 polish=2 us=239240 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=15459 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=176 polish=1 us=69411 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=9876 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=2 polish=0 us=2981 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=132 polish=2 us=46641 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=173 polish=2 us=108069 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=151 polish=2 us=84140 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=266 polish=2 us=116667 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=296 polish=2 us=133866 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=103 polish=2 us=46039 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=12153 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=52 polish=2 us=21409 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=79 polish=2 us=49904 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=5297 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=284 polish=1 us=97998 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=19 polish=1 us=17650 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=21 polish=1 us=10621 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=164 polish=2 us=61608 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=53 polish=2 us=24074 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=167 polish=2 us=78670 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=33 polish=2 us=16983 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=417 polish=0 us=417904 warm=true dse_cache=false lu_cache=false
+MIP:   sub-MIP: 18842 free columns of 19466, status TimeLimit, nodes 18, objective Some(34.21676872223081), 3.03s, 3821 LP iterations, TICKS cpu 3.153 lp 47503646 prop 9184754 sep 3791142 pre 1642734 heur 0 node 559915 lpit 5323 lu 977132226 lum 207053110
+MIP:   SUBFIX tree RINS try 1: target 0.60, fixing rate 0.61, depth 624, 0 backtracks, 402 free integer columns of 1026, status Some(TimeLimit), nodes 18, accepted false, 3.04s (dive+sub 3.26s)
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP:   145.84s nodes      102 open     101 lb 7.34353882e0 ub 8.00000000e0 lp_iters 77975 sb_iters 29254 sb_lps 144 sb_secs 54.06 node_iters 24195 (first 24195, lps 101) heur_iters 12337 dive_iters 1813 lp_rows 18439 node_cut_secs 0.02
+TSLP solve st=Optimal iters=63 polish=2 us=181176 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=14443 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=53 polish=3 us=150209 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=19 polish=2 us=29467 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=8 polish=2 us=20033 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=3010 polish=0 us=11885181 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=1183 polish=2 us=851634 warm=true dse_cache=true lu_cache=true
+MIP:   158.99s nodes      108 open     107 lb 7.34353882e0 ub 8.00000000e0 lp_iters 82314 sb_iters 29254 sb_lps 144 sb_secs 54.06 node_iters 28534 (first 28534, lps 107) heur_iters 12337 dive_iters 1813 lp_rows 18439 node_cut_secs 0.02
+TSLP solve st=Optimal iters=58 polish=2 us=51129 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=58 polish=2 us=41839 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=97 polish=2 us=74547 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=161 polish=2 us=111495 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=51 polish=2 us=45251 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=85 polish=2 us=69273 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=106 polish=1 us=71561 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=20892 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=178 polish=2 us=152109 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=78 polish=2 us=62252 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=53 polish=1 us=46177 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=35 polish=2 us=32268 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=24132 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=44 polish=1 us=32456 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=282 polish=1 us=233854 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=43 polish=1 us=33142 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=39 polish=1 us=31180 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=329 polish=2 us=267089 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=6 polish=1 us=25388 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=275 polish=2 us=253905 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=346 polish=2 us=344160 warm=true dse_cache=true lu_cache=true
+MIP:   161.10s nodes      129 open     128 lb 7.34353882e0 ub 8.00000000e0 lp_iters 84644 sb_iters 29254 sb_lps 144 sb_secs 54.06 node_iters 30864 (first 30864, lps 128) heur_iters 12337 dive_iters 1813 lp_rows 18439 node_cut_secs 0.02
+TSLP solve st=Optimal iters=438 polish=2 us=385556 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=153 polish=2 us=129798 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=27754 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=245 polish=2 us=299692 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=379 polish=2 us=423966 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=398 polish=2 us=350067 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=1 us=27196 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=60 polish=2 us=51472 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=161 polish=2 us=138786 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=1001 polish=0 us=1118599 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=944 polish=2 us=1346751 warm=true dse_cache=true lu_cache=true
+MIP:   165.45s nodes      138 open     137 lb 7.34353882e0 ub 8.00000000e0 lp_iters 88430 sb_iters 29254 sb_lps 144 sb_secs 54.06 node_iters 32705 (first 32705, lps 137) heur_iters 16227 dive_iters 3758 lp_rows 18439 node_cut_secs 0.02
+TSLP solve st=Optimal iters=91 polish=2 us=77636 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=196 polish=2 us=174685 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=26 polish=2 us=39823 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=45 polish=1 us=33256 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=23277 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=236 polish=2 us=177355 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=427 polish=2 us=398922 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=10619 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=448 polish=2 us=390709 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=550386 warm=true dse_cache=false lu_cache=false
+TSLP solve st=IterationLimit iters=501 polish=0 us=648070 warm=true dse_cache=false lu_cache=false
+MIP:   168.00s nodes      147 open     146 lb 7.34353882e0 ub 8.00000000e0 lp_iters 90907 sb_iters 30256 sb_lps 146 sb_secs 55.26 node_iters 34180 (first 34180, lps 146) heur_iters 16227 dive_iters 3758 lp_rows 18439 node_cut_secs 0.02
+TSLP solve st=Optimal iters=4 polish=1 us=13126 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=327 polish=2 us=256157 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=284 polish=2 us=264147 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=97 polish=2 us=68730 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=23232 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=375 polish=1 us=298121 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=380 polish=2 us=336670 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=186 polish=2 us=150648 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=90 polish=2 us=78553 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=56 polish=2 us=56692 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=448 polish=1 us=390890 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=30 polish=1 us=38949 warm=true dse_cache=true lu_cache=true
+MIP:   170.03s nodes      159 open     158 lb 7.34353882e0 ub 8.00000000e0 lp_iters 93187 sb_iters 30256 sb_lps 146 sb_secs 55.26 node_iters 36460 (first 36460, lps 158) heur_iters 16227 dive_iters 3758 lp_rows 18439 node_cut_secs 0.02
+TSLP solve st=Optimal iters=577 polish=2 us=499426 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=337 polish=2 us=277562 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=1 us=13454 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=86 polish=2 us=80385 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=1 us=24372 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=267 polish=2 us=200136 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=271 polish=2 us=214739 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=354 polish=2 us=298772 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=241 polish=1 us=198840 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=210 polish=1 us=207133 warm=true dse_cache=true lu_cache=true
+MIP:   172.09s nodes      169 open     168 lb 7.34353882e0 ub 8.00000000e0 lp_iters 95538 sb_iters 30256 sb_lps 146 sb_secs 55.26 node_iters 38811 (first 38811, lps 168) heur_iters 16227 dive_iters 3758 lp_rows 18439 node_cut_secs 0.02
+TSLP solve st=Optimal iters=7 polish=1 us=16615 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=60 polish=1 us=64560 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=20 polish=2 us=44444 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=354 polish=2 us=314649 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=164 polish=1 us=172496 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=577 polish=2 us=497492 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=591 polish=2 us=566500 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=216 polish=1 us=174844 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=199 polish=2 us=151942 warm=true dse_cache=true lu_cache=true
+MIP:   174.12s nodes      178 open     177 lb 7.34353882e0 ub 8.00000000e0 lp_iters 97726 sb_iters 30256 sb_lps 146 sb_secs 55.26 node_iters 40999 (first 40999, lps 177) heur_iters 16227 dive_iters 3758 lp_rows 18439 node_cut_secs 0.02
+TSLP solve st=Optimal iters=5 polish=1 us=26742 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=335 polish=2 us=269254 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=270 polish=2 us=285402 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=167 polish=2 us=121630 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=164 polish=2 us=151432 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=33 polish=1 us=47971 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=11065 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=4 polish=1 us=12953 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=406 polish=2 us=359356 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=162 polish=1 us=121737 warm=true dse_cache=true lu_cache=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=496207 warm=true dse_cache=false lu_cache=false
+TSLP solve st=Optimal iters=294 polish=2 us=268784 warm=true dse_cache=true lu_cache=true
+MIP:   176.34s nodes      188 open     187 lb 7.34353882e0 ub 8.00000000e0 lp_iters 100070 sb_iters 30919 sb_lps 148 sb_secs 55.88 node_iters 42680 (first 42680, lps 187) heur_iters 16227 dive_iters 3758 lp_rows 18439 node_cut_secs 0.02
+TSLP solve st=Optimal iters=239 polish=2 us=205256 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=303 polish=2 us=258464 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=147 polish=2 us=123188 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=5 polish=1 us=24786 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=758 polish=2 us=1218874 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=146 polish=2 us=116222 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=10 polish=2 us=33592 warm=true dse_cache=true lu_cache=true
+MIP:   178.35s nodes      195 open     194 lb 7.34353882e0 ub 8.00000000e0 lp_iters 101678 sb_iters 30919 sb_lps 148 sb_secs 55.88 node_iters 44288 (first 44288, lps 194) heur_iters 16227 dive_iters 3758 lp_rows 18439 node_cut_secs 0.02
+TSLP solve st=Optimal iters=103 polish=2 us=75936 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=262 polish=2 us=210881 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=288 polish=2 us=266659 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=116 polish=2 us=98488 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=283 polish=2 us=300318 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=441 polish=2 us=467171 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=231 polish=2 us=631397 warm=true dse_cache=true lu_cache=true
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+MIP:   180.46s nodes      202 open     201 lb 7.34353882e0 ub 8.00000000e0 lp_iters 103402 sb_iters 30919 sb_lps 148 sb_secs 55.89 node_iters 46012 (first 46012, lps 201) heur_iters 16227 dive_iters 3758 lp_rows 18439 node_cut_secs 0.03
+TSLP solve st=Optimal iters=43 polish=2 us=68139 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=47 polish=2 us=164163 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=26 polish=2 us=122416 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=3 polish=1 us=13113 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Optimal iters=52 polish=2 us=212418 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=2242 polish=0 us=5262677 warm=true dse_cache=false lu_cache=false
+MIP: finish start TimeLimit (186.32s)
+MIP: MEMCAP: tid 0 limit 10836 MB peak rss 386 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP:   186.32s nodes      207 open     206 lb 7.34353882e0 ub 8.00000000e0 lp_iters 105815 sb_iters 30919 sb_lps 148 sb_secs 55.89 node_iters 48425 (first 48425, lps 207) heur_iters 16227 dive_iters 3758 lp_rows 18439 node_cut_secs 0.03
+MIP: nodelp tid 0 dive: n 204 iters 211.9/LP ms 273.013/LP rows 18439.0 cutrows 0.0 warm 204 prim_inf 43.4 dual_shift 0.00 refactor 0.75 dse unit/inh/exact 0/200/4 stageA 0 (0.0 it) opt/inf/cut/other 199/0/0/5 perturb 201 | total iters 43237 secs 55.69 | inf col/row/cut 1.8/41.6/0.0
+MIP: nodelp tid 0 queue: n 3 iters 109.7/LP ms 293.900/LP rows 18439.0 cutrows 0.0 warm 3 prim_inf 0.7 dual_shift 0.00 refactor 3.33 dse unit/inh/exact 0/3/0 stageA 0 (0.0 it) opt/inf/cut/other 3/0/0/0 perturb 2 | total iters 329 secs 0.88 | inf col/row/cut 0.7/0.0/0.0
+MIP: dse-exact n 26 secs 5.695 ms/call 219.032 rows/call 18220 max_rel_diff 0.000e0 result_density 0.016 hyper_frac 0.915 fill_calls 0 fill_rows 0
+MIP: TICKS cpu 243.705 total 243705430731 lp 2049831206 prop 43966219 sep 13342352 pre 6775101 heur 112416625 node 9032126 lpit 108225 lu 99504417661 lum 9673987939
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 0, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: cut pool propagation: calls 414, pruned 0 nodes, tightened 0 bounds, 0.00s, pool 0 cuts (0 nonzeros); updated terms 0, candidates 0 (0 nonzeros), rebuilds 1
+MIP: TC r: reduced-cost fixings passed to children 40; child change lists: mean length 49.7 (mean depth 49.7), max 101, open nodes now 206
+MIP: DFSBB4: d 211.0 (frac), L 633, root fractional 211, integers 1026, mean depth of dive bottoms 0.0 (0 dives)
+MIP: DFSBB: kind 2, W 113460 (root LP iterations 22692), plunges 2, ended by the work limit 2, ended at a leaf or by pruning 0
+MIP: GAP1 u: child selection down 0 up 0; branching selections 0, with ties 0 (candidates in ties 0), changed by the queue counts 0; objective proofs not violated beyond the tolerance 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 0, in pool 0 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: proof CMIR cuts: tried 0, added 0, entered the cut pool 0
+MIP: conflict analysis (HiGHS style): calls 0, conflicts 0, added 0, mean length 0.0, max length 407, 0.00s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: NODECNT root gate (tid 0): decision 0 (root chosen cuts 0, path 0)
+MIP: NODECNT node path aggregation (tid 0): rounds 0, rounds with path cuts 0, path cuts 0 of 0 chosen, still on true
+MIP: branching: 206 selections, 0 without strong branching for dual degeneracy; sb LPs 148 iters 30919
+MIP: PLSB (tid 0): undecided 1667 (few samples 1667, no gap 0, depth>=50 0), continue 0, stop 0, continued past lookahead 0, stopped before lookahead 0; tree gains n 7 zero 67
+MIP: marginal LP infeasibility (all threads, cumulative): checked with a fresh LP 0 no conclusion 0 strong branching children unknown 0 root and LP probing 0 fresh LP feasible 0
+MIP: integral-looking node LP solutions outside the domain (LP bounds behind the domain), re-solved: 0
+MIP: LP infeasibility certificates, minimum uniform violation (log10 bins <-12 .. >=-4, other): [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+MIP: sibling backtracks 0; basis restores 2 (basic count mismatch 0), first LP iterations after a restore 328
+MIP: mem1 sibling LU (all threads): held at most 1, pushed 240, dropped 235, adopted 0
+MIP: GAP4 c: dense cuts kept out of the cut pool propagation (all threads, counted per rebuild): 0
+MIP: memc (all threads): packed nodes 0, changes 0 (0 bytes packed, 0 unpacked), bases 0 (0 bytes packed, 0 unpacked)
+MIP: basis nb diag: tree first LPs restored 2 iters 328 (164.0/LP), others 205 iters 48097 (234.6/LP); root LPs: submip 7 lps 2382 iters (340.3/LP) 0.76s, bgcopy 0 lps 0 iters (0.0/LP) 0.00s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 22692 iters (22692.0/LP) 28.78s; nb hints applied 2 solves, 38926 given, 769 changed
+MIP: node diag: nodes 207 node LPs 207 mean rows 18439.0 iters 48425 (233.9/LP) LP secs 60.31 sep rounds 2 added 0 node cut secs 0.03 final rows 18439
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.03, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 23.6)
+MIP: finish done (186.33s)
+MIP: RCSTRONG: knapsack row (all threads, cumulative): calls 0, pruned 0, tightened 0, built 1 (mean length 0.0)
+MIP: SUBFIX summary: dives 2 sub-MIPs 2 accepted 0 root-infeasible retries 0 below 0.1 0; success 0 (mean rate NaN), infeasible 0 (mean rate NaN)
+MIP: solve returned TimeLimit after 200.34s (time limit 200.00s)
+MIP: polished the solution (200.34s)
