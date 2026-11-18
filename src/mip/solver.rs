@@ -3537,11 +3537,20 @@ pub(super) fn lpinf_count(k: usize) {
 /// (行の境界) と zᵀx の範囲 (列の境界) の隙間が、どの行・列も [`FEASTOL`] まで破ってよい場合に埋まる
 /// (隙間 <= FEASTOL (Σ|y_i| + Σ|z_j|)) なら真。射線がない・範囲が開いているときも真 (証明として使えない)。
 pub(super) fn lp_farkas_marginal<L: MipLp>(lp: &L, n: usize) -> bool {
-    let Some(y) = lp.farkas_ray() else { return true };
+    let r = lp_farkas_ratio(lp, n);
+    // 診断の分布 (log10 r の 1 刻み: < -12, -12.., ..., >= -4、NaN・無限・負は最後)
+    let b = if !(r.is_finite() && r > 0.0) { LPINF_HIST_N - 1 } else { ((r.log10() + 13.0).floor().clamp(0.0, (LPINF_HIST_N - 2) as f64)) as usize };
+    LPINF_HIST[b].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    !(r.is_finite() && r > tunable!("ENOMOTO_T_MIP_LPINF_EPS", super::domain::FEASTOL, f64))
+}
+
+/// 直前の LP の実行不能の証明が、実行可能になるのに要する最小の一様な破り幅 (隙間 / (Σ|y_i| + Σ|z_j|))。証明にならないときは NaN・負・無限。
+pub(super) fn lp_farkas_ratio<L: MipLp>(lp: &L, n: usize) -> f64 {
+    let Some(y) = lp.farkas_ray() else { return f64::NAN };
     let m = lp.num_rows().min(y.len());
     let ymax = y[..m].iter().fold(0.0f64, |a, v| a.max(v.abs()));
     if !(ymax > 0.0) || !ymax.is_finite() {
-        return true;
+        return f64::NAN;
     }
     let mut z = vec![0.0; n];
     let (mut rlo, mut rhi, mut ysum) = (0.0f64, 0.0f64, 0.0f64);
@@ -3574,11 +3583,7 @@ pub(super) fn lp_farkas_marginal<L: MipLp>(lp: &L, n: usize) -> bool {
     // 区間 [rlo, rhi] と [zlo, zhi] の隙間 (NaN・無限は際どいとみなす)。gap / (Σ|y| + Σ|z|) は、どの行・列も同じだけ破ってよいときに
     // 実行可能になる最小の破り幅。これが `ENOMOTO_T_MIP_LPINF_EPS` (既定 FEASTOL) 以下なら際どい
     let gap = (rlo - zhi).max(zlo - rhi);
-    let r = gap / (ysum + zsum);
-    // 診断の分布 (log10 r の 1 刻み: < -12, -12.., ..., >= -4、NaN・無限・負は最後)
-    let b = if !(r.is_finite() && r > 0.0) { LPINF_HIST_N - 1 } else { ((r.log10() + 13.0).floor().clamp(0.0, (LPINF_HIST_N - 2) as f64)) as usize };
-    LPINF_HIST[b].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    !(gap.is_finite() && r > tunable!("ENOMOTO_T_MIP_LPINF_EPS", super::domain::FEASTOL, f64))
+    gap / (ysum + zsum)
 }
 
 
@@ -6285,6 +6290,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut fresh2 = L::new(&dlo, &dup, &self.lp.costs(), &rows, &rlo, &rup);
         let st3 = fresh2.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         let dn = self.dbg_contains();
+        let ratio = lp_farkas_ratio(&self.lp, n);
+        eprintln!("LPINF ratio: {ratio:.3e}");
         // 一から解いた LP の解が今の行・境界をどれだけ破るか (単体法の誤判定か、作り直した LP の誤りか)
         let mut viol = (0.0f64, usize::MAX);
         if st2 == LpStatus::Optimal {
