@@ -11,6 +11,8 @@ CFGS = {
     "sst": {"ENOMOTO_MIP_SYM_SST": "1"},
     "sst_t1": {"ENOMOTO_MIP_SYM_SST": "1"},
     "nct_t1": {"ENOMOTO_MIP_FEAS_EARLY_NO_CHAIN_TICKS": "1"},
+    # rin = 前処理の LP による固定の最初の LP など、反復の上限つきの根の LP の競争で二段解法が上限に当たったら内点法側を待たない (README 16 節)
+    "rin": {"ENOMOTO_MIP_RACE_ITERCAP_NOWAIT": "1"},
     "rfs30": {"ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS": "30"},
     "rfs30_t1": {"ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS": "30"},
 }

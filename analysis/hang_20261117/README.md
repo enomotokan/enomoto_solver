@@ -283,3 +283,59 @@
 5. 悪い問題があれば、SST と orbital fixing の併用 (SCIP の既定 7 と同じ形: SST の後の固定部分群で orbital fixing) を次の試作にする。
 6. rfs30 (14 節) と SST の組み合わせは binpack4-4 で効く (4 スレッド 24.9 秒相当) ので、両方採るなら X (3 問 × {def, sst, def_t1, sst_t1})
    を rfs30 込みで取り直す。
+
+### 15.1 PSST 分担 0 の気になる 2 件の追試 (2026-11-18、事実)
+
+- ns1116954 (種 3): 計測機では sst が 60 秒で時間切れ・下界 −∞・RSS 2120 MB、def は 7.3 秒で optimal。手元で同じ種・4 スレッドを回すと
+  def 3.7 秒・sst 3.4 秒で、どちらも前処理の早めの FJ が解を見つけ「no tree search」で終わる (`logs/ns1116954_psst_*_s3.log`)。
+  早めの FJ は対称性の検出 (SST の行を足す所) より前なので SST の影響を受けない。計測機の sst の回は、時刻で決まる FJ が外れて根に進んだ
+  (根の LP は行 12.8 万で重い) 揺れと見られる (推測)。
+- eil33-2 (種 1): sst が時間切れ (60 秒で 3157 ノード)、def は 42.9 秒 (9745 ノード)。eil33-2 は対称性が検出されない (SST の行 0、
+  道筋は def と同じ)。手元の種 1 は def 20.9 秒・sst 20.9 秒、計測機の種 2・3 も両方 22.8〜27.0 秒で解ける。→ 計測機の負荷による揺れ。
+- 集計では、この 2 件を SST の害に数えないよう、15 節 3 の「対称性のある問題に絞った表」を主に見る。
+
+### 15.2 PSST の集計 (MIPLIB 58 問 × 種 1〜3、60 秒、4 分担そろい、2026-11-18、事実)
+
+- 全体 (`summ_PSST.txt`): 348 行、crash 0、食い違い 0。解けた数 def 134 / sst 132 (174 組)。sst / def +4.4% [+0.7%, +8.9%] (どちらかが解けた 45 問)。
+- 対称性で分けた表 (`symscan_P.txt` = 各問題を SST・ログつき・30 秒で回し「SST cuts: N rows」を数えた):
+
+| 群 | 組 | 解けた def / sst | どちらか解けた問題 | sst / def (SGM、95%) |
+|---|---|---|---|---|
+| SST の行が入る (N > 0) | 42 | 29 / 28 | 10 (mas76・neos-960392・neos5・neos8・ns1116954・nu25-pr12・p0201・physiciansched6-2・qiu・sp150x300d) | **+20.8% [+9.0%, +37.4%]** |
+| 生成元はあるが SST の行 0 (全部オービトープ側) | 21 | 15 / 15 | 5 (misc07・neos-827175・neos-911970・noswot・rout) | +0.3% [−9.3%, +7.5%] |
+| 対称性なし | 111 | 90 / 89 | 30 | +0.3% [−2.4%, +2.5%] |
+
+- 読み: SST の行が入る問題では、orbital fixing (と LexRed) を SST の静的な行に置き換えると遅くなる (この群の 10 問中 7 問が 1.2 倍前後遅い)。
+  対称性のない群の ±0.3% は揺れの大きさの目安 (ns1116954・eil33-2 の揺れは 15.1 節)。
+- 判断: **SST を orbital fixing の代わりに既定にはしない** (15 節 4 の目安「区間の上端 +5% 以内」を満たさない)。fhnw-binpack4-4 (SST で初めて解ける)
+  のための次の形は、SCIP の既定 (`misc/usesymmetry=7`) と同じく **SST と orbital fixing の併用** (SST の各段の leader を固定したまま、残りの群で
+  orbital fixing を続ける。SCIP では SST の行と orbital fixing が同じ leader の順を使うので両立する) か、SST を使う条件を絞る形 (例えば
+  0-1 列だけの成分で、生成元の数が多い・群が大きいとき)。MSST の結果も見てから決める。
+- ns1116954 の追試の続き (親の依頼、早めの FJ を切って根に進ませる `ENOMOTO_MIP_FEAS_FJ_EARLY=0`、種 3、60 秒、`logs/ns1116954_nofj_*`):
+  | | 4 スレッド | 1 スレッド |
+  |---|---|---|
+  | def | optimal 49.19 秒 (根の LP 14.8 秒、4085 反復) | time_limit 60.12 秒 (根の LP 12.6 秒の後、FJ 等で時間切れ) |
+  | sst | optimal 49.72 秒 (根の LP 14.6 秒、4085 反復、SST の行 19 本) | time_limit 60.06 秒 (同じ道) |
+  def と sst は根の LP の反復数まで同じ道をたどる (SST の行 19 本は行 12.8 万の LP にほぼ効かない)。計測機の sst の「時間切れ・下界 −∞・RSS 2120 MB」は、
+  早めの FJ が外れて根の LP (行 12.8 万) に入り、計測機ではそれが 60 秒で終わらなかった回 (def の 7.3 秒は早めの FJ が当たった回) と見られる。
+  RSS 2120 MB は根の LP と根の競争の分、wall 63.1 秒は読み込み (約 2.7 秒) を含み、求解の中の超過は 0.43 秒。SST の不具合ではない。
+
+## 16. ns1116954 で早めの FJ が外れたときの空費 (親の依頼、2026-11-18、事実)
+
+- 親から: pst の P 分担 2 で**既定側**の ns1116954 も 60 秒で解なし・下界 −∞・RSS 2108 MB (FJ の当たり外れは既定の弱点)。
+- 早めの FJ を切って (`ENOMOTO_MIP_FEAS_FJ_EARLY=0`) 4 スレッド・60 秒・種 3 の内訳 (`logs/ns1116954_nofj_def_t4_s3.log`):
+  前処理の LP による固定の最初の LP が 29.8 秒 (「the first LP stopped: TimeLimit (29.84s, limit 29.84s)」、何も固定せず基底も渡さない)、
+  プロービング 2 秒、根の LP 14.8 秒 (4085 反復)、並列の FJ が 49.8 秒で解を見つけて 49.2 秒 (求解の時計) で optimal。計測機ではこの 49 秒が 60 秒に収まらない。
+- gdb (12〜20 秒、`lp_probe` の中): 主は `TwoStageLp::solve_race_ext` で内点法側の結果を `recv` で待っていた。`ENOMOTO_MIP_PRESOLVE_WORK` (既定) の
+  手間の上限で、最初の LP の二段解法は約 2270 反復 (手間 1.25e9 / (行 + 列 + 非零)) で `IterationLimit` で止まるが、競争の主は「二段解法が結論を
+  出せなかった」(数値的な破綻のための枝、leo1・leo2) として内点法 + クロスオーバーを期限 (時間の安全網 30 秒) まで待ち、内点法側も間に合わず何も得ない。
+  RSS 2 GB は内点法 + クロスオーバー (行 12.8 万) と根の LP の分。
+- 試作 `ENOMOTO_MIP_RACE_ITERCAP_NOWAIT=1` (既定では使わない、`src/simplex/mip_lp.rs`): 二段解法が呼び手の反復の上限で止まったら内点法側を止めて
+  `IterationLimit` を返す (待たない)。手間の予算で止めるという方針どおり、時間の安全網まで空費しない。
+  - ns1116954 (早めの FJ を切る、4 スレッド・60 秒・種 3): 48.67 秒 → **22.06 秒** (最初の LP は 5.75 秒で反復の上限、`nofj_nowait_t4`)。
+  - mip_fuzz_vs_highs 300 で bad 0 (`fuzz/vs_highs_nowait.txt`)。
+- 影響の範囲: 反復の上限を渡す根の LP の競争 (主に前処理の LP による固定の最初の LP。根の LP は上限なし)。最初の LP が手間の上限に当たる大きい問題で
+  前処理が短くなる。対の比べ: `cfg.py` の `rin`、`shards_MRIN.json` (12 分担、各 1.4 時間)・`shards_PRIN.json` (4 分担、各 0.74 時間):
+  `python analysis/hang_20261117/run.py MRIN K`・`python analysis/hang_20261117/run.py PRIN K`、集計 `python summ.py MRIN def rin`・`python summ.py PRIN def rin`。
+- **採用 (2026-11-18、利用者の判断)**: `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS` の既定を 30 にした (66da54e5a、`=inf` で従来)。以後の `def` は rfs30 と同じ。
+  docs/improvement_history.md に節を足した。cargo test 409 通過、mip_fuzz_vs_highs 300 bad 0。
