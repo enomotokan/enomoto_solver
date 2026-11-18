@@ -29,8 +29,6 @@ pub(crate) mod solver;
 pub(crate) mod fj;
 pub(crate) mod localmip;
 pub(crate) mod fjsub;
-pub(crate) mod fpr;
-pub(crate) mod fpr_paper;
 mod heuristics;
 mod subb;
 pub(crate) mod sympre;
@@ -48,7 +46,6 @@ pub(crate) mod cuts;
 pub(crate) mod separation;
 pub(crate) mod snfmodk;
 pub(crate) mod zerohalf;
-pub(crate) mod modkvb;
 pub(crate) mod hnf;
 pub(crate) mod hnflat;
 pub(crate) mod hnfcut;
@@ -3296,11 +3293,14 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     // 違う規則の代表を残してよい (群が直積に分かれる)。graph20-20-1rand で SCIP は usesymmetry=0 だと解けず、静的な固定で 2183 列が 340 列になる
     if !static_orbitope && env_str!("ENOMOTO_MIP_ORBPP").is_some_and(|v| v != "0") {
         let min_rows = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_ROWS", 3usize, usize);
+        // 列 (入れ替える組) の数の下限。列の少ないオービトープを静的にすると、固定は少ないのに動的な固定の柔らかさを失う
+        // (neos-911970: 35x3 が 6 つと 35x6 が 1 つで 33 列の固定、P で 1.74 倍遅い。graph20-20-1rand は 52x37)
+        let min_cols = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_COLS", 0usize, usize);
         for o in orbs.iter_mut() {
             let binary = o.vars.iter().flatten().all(|&j| prob.is_int[j] && prob.col_lo[j] >= 0.0 && prob.col_up[j] <= 1.0);
             // パッキング・分割の行に含まれる行だけのオービトープ (行の部分集合でも列の入れ替えは対称性。`ORBITOPE_STATIC` と同じく過半のときだけ)
             let rows: Vec<usize> = (0..o.vars.len()).filter(|&i| o.row_packing[i]).collect();
-            if o.local || 2 * rows.len() < o.vars.len() || rows.len() < min_rows || !binary {
+            if o.local || 2 * rows.len() < o.vars.len() || rows.len() < min_rows || o.vars[0].len() < min_cols || !binary {
                 continue;
             }
             let swaps = std::mem::take(&mut o.swaps);
@@ -3322,7 +3322,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         }
         if verbose {
             let k = orbs.iter().filter(|o| o.static_pp).count();
-            eprintln!("MIP: symmetry: ORBPP {k} of {} orbitopes static (packing, >= {min_rows} rows), fixed {static_fix} columns to 0", orbs.len());
+            eprintln!("MIP: symmetry: ORBPP {k} of {} orbitopes static (packing, >= {min_rows} rows, >= {min_cols} columns), fixed {static_fix} columns to 0", orbs.len());
         }
     }
     if verbose && static_fix > 0 {
@@ -3567,8 +3567,17 @@ fn knapsack_clique_rows(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f6
     out
 }
 
+/// 診断 `ENOMOTO_MIP_G5CLQ_RSS` (振る舞いは変えない。analysis/vsscip_slow_20261118/g5/README.md): クリーク行の拡張の各段の RSS を標準エラーへ
+fn g5clq_rss(tag: &str) {
+    if env_str!("ENOMOTO_MIP_G5CLQ_RSS").is_some() {
+        let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok())).unwrap_or(0);
+        eprintln!("G5CLQ_RSS {tag} {} MB", rss / 1024);
+    }
+}
+
 fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     let _pt = pretime::guard("clqext");
+    g5clq_rss("start");
     let t0 = std::time::Instant::now();
     let n = prob.n;
     let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0).collect();
@@ -3580,6 +3589,7 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
         return prob;
     };
     cutmix::log_clique(&prob, &binary, g.num_edges());
+    g5clq_rss("graph");
     // `ENOMOTO_MIP_CLIQUE_EXTEND_ROWS_FIRST` (試作、既定では使わない): まず行から作る衝突グラフ (プロービングの含意なし) だけで
     // 文字を足し、その後に含意を含むグラフで足せるだけ足す。含意の辺が多いと (mzzv42z は行から 205346 辺、含意から 1186997 本)、
     // 番号順の貪欲が LP に効かない文字を先に取り、行から作る辺だけの拡張 (HiGHS の前処理の clique merging に当たる) を塞ぐ。
@@ -3734,6 +3744,7 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
         ext_rows += 1;
         added += add.len();
     }
+    g5clq_rss("loop");
     for c in fix_lits {
         let j = (c / 2) as usize;
         if col_lo[j] < col_up[j] {
@@ -3789,6 +3800,7 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
             dup += 1;
         }
     }
+    g5clq_rss("dominated");
     if dup + dominated > 0 {
         let mut k = 0;
         rows.retain(|_| {
@@ -7864,10 +7876,9 @@ pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f
     // analysis/halve_submip_20261030.md の bench24)。`=1` でサブ MIP でも小さい余裕
     // 注意: 既定の `ENOMOTO_MIP_SUBMIP_HIGHS` (`p` を含む) ではサブ MIP の前処理にも `submip = false` が渡るので、`m` でもサブ MIP の前処理は小さい余裕になる
     // (qiu の遅れの本当の仕組みは根の解発見スレッドを止める時刻、uccase12 はサブ MIP の小さい余裕にも頼っている。analysis/qiu_margin_20261104.md)
-    // `ENOMOTO_MIP_QIU_MARGIN_DEPTH` (試作、既定では使わない、analysis/qiu_margin_20261104.md): `m` のサブ MIP の判定に `SUBMIP_DEPTH` も使う。
-    // 既定の `ENOMOTO_MIP_SUBMIP_HIGHS` (`p` を含む) ではサブ MIP の前処理にも `submip = false` が渡るので、`m` でもサブ MIP の前処理は小さい余裕になっていた
-    let in_sub = submip || (env_str!("ENOMOTO_MIP_QIU_MARGIN_DEPTH").is_some() && heuristics::SUBMIP_DEPTH.with(|d| d.get()) > 0);
-    let mut small = env_def!("ENOMOTO_MIP_MEM3_TINY_MARGIN", "m").is_some_and(|v| v != "m" || !in_sub);
+    // `m` のサブ MIP の判定に `SUBMIP_DEPTH` も使う試作 (`ENOMOTO_MIP_QIU_MARGIN_DEPTH`) は uccase12 の下限を破るので削除した
+    // (2026-11-18、analysis/qiu_margin_20261104.md・analysis/cleanup_20261118/)
+    let mut small = env_def!("ENOMOTO_MIP_MEM3_TINY_MARGIN", "m").is_some_and(|v| v != "m" || !submip);
     // 調査用 (`ENOMOTO_MIP_QIU_MARGIN_SITES`、一時、analysis/qiu_margin_20261104.md): 小さい余裕を使う呼び出し元を並べる (コンマ区切り)。
     // 各項は `o:場所` (外側の求解) か `s:場所` (サブ MIP)、場所は pre0・pre1・probe・quick・restart か `*`。設定すると MEM3_TINY_MARGIN より優先する
     if let Some(v) = env_str!("ENOMOTO_MIP_QIU_MARGIN_SITES") {

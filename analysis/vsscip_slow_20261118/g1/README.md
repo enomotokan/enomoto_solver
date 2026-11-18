@@ -88,6 +88,32 @@ SCIP のログ (graph20-20-1rand): 「36 generators found (log10 of symmetry gro
   1 本でも動かす生成元を除いた残りで行 x_l − x_k ≥ 0 を作り、オービトープの列には行を足さない。ORBPP の固定 (根の x_{i,c} = 0 と木の中の
   orbitopal fixing) は静的にしたオービトープの行列の列だけに掛かる。よって成分は重ならず、併用してよい (lex-leader の行と同じ扱い)。
 
+- (追記) WRONG の LexRed の直し (6e0cf3bce) を含む木 (d232708f5) でビルドし直し、g1 (VUBAGG + ORBPP) 付きで: p0201 を
+  `ENOMOTO_MIP_TAB_HIGHS_SIG=1` (gate2_20261117/tab の 6 節の再現手順) で 4 スレッド × 種 1〜40 → 誤答 0/40、さらに `ENOMOTO_MIP_SYMDYN=f` も
+  付けて 0/40。fuzz_g1 の c を 800 問 × 1・4 スレッド (種 2000〜)・SYMDYN=f 付き 800 問 (種 3000〜) で bad 0、mip_fuzz_symmetric 300 問 (種 600〜) bad 0。
+
+## T の結果 (分担 0 = 種 1、ビルド 9c98b720c、`res_T_s0.jsonl`)
+
+| 問題 | def (秒) | g1 (秒) |
+|---|---|---|
+| graph20-20-1rand | TL | **66.5** |
+| neos-787933 | 228.9 | **0.37** |
+| neos-3381206-awhea | 3.96 | 3.73 |
+| bnatt400 | TL | TL |
+| bnatt500 | TL | TL |
+
+解けた数 def 2・g1 3、食い違い 0、crash 0。最大 RSS def 1350 MB (neos-787933) → g1 408 MB。
+
+## g1 で遅く見えた問題の切り分け (M の途中集計の後)
+
+- fiball・CMS750_4・rococoC10-001000 は VUBAGG 0 組・対称性なし (symmetry: none) で、どちらの試作も働かない (1 スレッド 4 秒のログ)。
+- CMS750_4・rococoC10-001000 を 1 スレッド・種 1・40 秒で def と g1 を比べた: 根まで (前処理・カット・再スタートの判定・木の開始の lb/ub) の
+  ログは時刻の欄を除いて全行一致し、木の経過の行も同じノード数の点では lp_iters・sb_iters が全て一致した (CMS750_4: ノード 1・4・6・502、
+  rococoC10: 1・2・2002・2103)。**同じ道筋**。4 スレッドの M で 2 種とも遅かった (CMS750_4 1.40・1.73、rococoC10 1.30・1.35) のは並列の
+  非決定性による揺れと判断する。
+- neos-911970 (P で 1.74 倍) は ORBPP が働く (35×3 のパッキングのオービトープ 6 つと 35×6 が 1 つを静的にして 33 列を固定)。列の少ない
+  オービトープを静的にする害と見て、列の数の下限 `ENOMOTO_T_MIP_ORBPP_MIN_COLS` (既定 0) を足した。境目は洗い出し (`scan.py` → `scan.txt`) で決める。
+
 ## 広い計測の台本 (slow2_20261117 の写し)
 
 - 設定 (`cfg.py`): def (既定)、g1 = `ENOMOTO_MIP_VUBAGG=1` + `ENOMOTO_MIP_ORBPP=1` (vub・opp は単独の切り分け用)。4 スレッド。
