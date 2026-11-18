@@ -218,15 +218,15 @@ pub(crate) fn robust(c: char) -> bool {
     env_def!("ENOMOTO_MIP_ROBUST", "pgq").is_some_and(|v| v.contains(c))
 }
 
-/// 試作 `ENOMOTO_MIP_S3GAP=<g>` (既定では使わない。analysis/vsscip_slow_20261118/small3/): 外側の根で暫定解があり、根の下界との
-/// 相対の間隙 (|暫定解| と 1 の大きい方で割る) が g 未満なら、重い根のヒューリスティクス (RENS・RINS・ダイビングなど) を回さず、
+/// `ENOMOTO_MIP_S3GAP=<g>` (既定 0.002、`=0` で使わない。analysis/vsscip_slow_20261118/small3/、2026-11-18 に既定化): 外側の根で暫定解があり、
+/// 根の下界との相対の間隙 (|暫定解| と 1 の大きい方で割る) が g 未満なら、重い根のヒューリスティクス (RENS・RINS・ダイビングなど) を回さず、
 /// その間隙を返す。exp-1-500-5-5 は 3.1 秒で最適解 (間隙 8.8e-4) が出た後に RENS 2.2 秒・RINS 1.2 秒を回して何も見つけず、
 /// その後の再スタートで決着する
 fn s3_smallgap_skip<L: MipLp>(s: &Solver<'_, L>, root_obj: f64, name: &str) -> Option<f64> {
     if s.params.submip || !(name == "RENS" || name.starts_with("RENS (") || rootcap_heavy(name)) {
         return None;
     }
-    let g = tunable!("ENOMOTO_MIP_S3GAP", 0.0, f64);
+    let g = tunable!("ENOMOTO_MIP_S3GAP", 0.002, f64);
     if g <= 0.0 {
         return None;
     }
@@ -22411,11 +22411,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let jb = keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && (subcap('J') || subcap('B'));
             let jb_cap = subcap_wait_cap(self.params.frac_tl());
             let jb_ext = tunable!("ENOMOTO_T_MIP_SUBCAP_EXT", 1.0, f64) * jb_cap;
-            // 試作 `ENOMOTO_T_MIP_SUBWAIT` = k (既定 0 = 使わない、analysis/slow2_20261117): 外側の根で主が並列のサブ MIP を全部待つとき、
+            // `ENOMOTO_T_MIP_SUBWAIT` = k (既定 2、0 で従来どおり使わない。analysis/slow2_20261117 の 13〜16 節で採用): 外側の根で主が並列のサブ MIP を全部待つとき、
             // 走り始めてから max(`ENOMOTO_T_MIP_SUBWAIT_MIN` (1 秒), k x 根の段の秒 ([`subcap_root_secs`]: 始めから根のヒューリスティクスに
             // 入るまで)) を過ぎ、直近その秒のうちに外側の上限より良い解を見つけていないサブ MIP を止める (時間の上限による床は置かない)。
             // unitcal_7 では根の被約費用のサブ MIP が 47〜60 秒・500 ノード何も見つけず、主は 0.003% の解を持ったまま 40〜75 秒待っていた
-            let sw_k = if keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 { tunable!("ENOMOTO_T_MIP_SUBWAIT", 0.0, f64) } else { 0.0 };
+            let sw_k = if keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 { tunable!("ENOMOTO_T_MIP_SUBWAIT", 2.0, f64) } else { 0.0 };
             let sw_cap = (sw_k * subcap_root_secs()).max(tunable!("ENOMOTO_T_MIP_SUBWAIT_MIN", 1.0, f64));
             while self.pending_submips.len() > keep {
                 if sw_k > 0.0 && sw_cap.is_finite() {
