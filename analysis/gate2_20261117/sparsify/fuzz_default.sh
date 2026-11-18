@@ -1,7 +1,7 @@
 #!/bin/bash
 # gate2 候補 6 の既定化 (SPARSIFY_LATE=s・f ≥ 0.6) の誤答の確かめ。release019_20261117/fuzz.sh と同じ組を環境変数なし (既定) で回す。
 # リポジトリの根から: bash analysis/gate2_20261117/sparsify/fuzz_default.sh
-# ログは analysis/gate2_20261117/sparsify/fuzz_logs_default/ (コミットしない)。
+# ログは analysis/gate2_20261117/sparsify/fuzz_logs_default/ (コミットしない。要約は fuzz_default_res.txt)。
 set -u
 cd "$(dirname "$0")/../../.."
 L=analysis/gate2_20261117/sparsify/fuzz_logs_default; mkdir -p $L
