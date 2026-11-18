@@ -128,3 +128,40 @@ drev で差の出た問題の固定の数 (1 スレッド、前処理のログ):
 neos-933966・tbfp-network・CMS750_4・ran14x18-disj-8・net12 は **0 列** (domcol の探索 0.00〜0.15 秒だけ)。mzzv42z 133 / 11717 (1.1%)、
 satellites2-60-fs 1200 / 34706 (3.5%)。固定 0 の問題では問題は既定と同じで、差は 4 スレッドの流れのゆれ (neos-1456979 の時間切れの暫定解
 3 種とも悪い・supportcase40 の種 1 で悪く種 2 で良いなど) とみる。drevmf (10% 未満は捨てる) では mzzv42z・satellites2-60-fs も既定と同じ問題になる。
+
+## 9. cod105: 対称性 (4 スレッド・600 秒・種 1)
+
+| 設定 | 時間 | ノード | 根 |
+|---|---|---|---|
+| 既定 | 156.4 | 17 | −18.29 |
+| `ENOMOTO_MIP_ORBPP=1` | 148.4 | 17 | −18.29 |
+| `ENOMOTO_MIP_SYM_SST=1` | 258.1 | 8773 | −16.16 |
+| `ENOMOTO_MIP_SYMDYN=1` | TL | 38557 | −18.29 |
+| SYMDYN + SYM_SST | 226.6 | 8373 | −16.16 |
+| SCIP 既定 / ビット 1 だけ / ビット 4 (SST) だけ | 44.3 / 48.3 / 54.9 | 3 / 3 / 3 | −13.53 / −13.53 / −13.49 |
+
+当方の検出は生成元 10〜11 個 (1 軌道・1024 列、SYMPRE probe は上限で止まる)。SYMDYN は 6674 ノードで 114970 個の境界を締めるが、木が
+大きくなるだけ。SST は根を −16.16 まで上げるが SCIP の SST だけ (−13.49) に届かない。SCIP は根の 3 ノードで閉じ、決め手は対称性の制約
+(symresack・オービトープの LP の分離と伝播、ビット 1) か SST (ビット 4)。当方の SST の行の数 (1122 行・10 段) か生成元の数 (10〜11 個、
+SCIP の検出はもっと多い可能性) の差とみる。既存の試作の組み合わせでは既定より速くならない。直すなら、生成元の検出の上限 (SYMPRE probe の
+caps、`ENOMOTO_T_MIP_SYM_SST_GENS` 64 など) と SST の段の数から。対称性の担当 (HANG・群 1) と重なるので、ここでは手を入れない。
+
+## 10. neos-5107597-kakapo (群 4 からの依頼、根だけ・4 スレッド、logs/root_neos-5107597-kakapo_*)
+
+問題: 0-1 2976 列・連続 138 列 (費用は連続 24 列だけ)、行は大きい M (8000) の対の並びの制約 `x_j − x_i − 8000 y ≥ L` が 3192 対ほか。
+
+| 設定 | 根の下界 |
+|---|---|
+| 既定 | 1.11 (path_highs だけが伸ばす、カットの非零 2〜5) |
+| pst (`ENOMOTO_T_MIP_PATH_STARTS=1000000`) | 1.11 |
+| `ENOMOTO_MIP_CUTMIX=fhcz` (intsmall 0 なので z は入らない) | 1.11 |
+| PATH_BOTH_SIGNS / PATH_SEQ / CMIR_DELTAS_HIGHS / CMIR_DELTA1 / PATH_ORIG_ONLY / PATH_OLD | 1.22 / 1.11 / 1.11 / 1.11 / 1.02 / 0 |
+| CMIR_SEARCH | 2.12 |
+| **`ENOMOTO_MIP_NO_PRESOLVE=1`** | **256.8** (path_highs の伸び 250.7) |
+| NO_ROW_MERGE / NO_COEF_TIGHTEN / 両方 / DISABLE_AGGREGATOR / DISABLE_FREEVAR / DISABLE_PARALLELCOLS / KEEP_IMPLIED_BOUND_ROWS | 0 / 1.11 / 0 / 1.11 / 1.11 / 1.11 / 1.11 |
+| SCIP 既定の根 (3.9 秒) / 前処理なしで 3 ラウンド | 646.2 / 413.9 |
+
+- SCIP のカットは `y + x / 48 ≥ 1` のような 2 項の cMIR (aggregation 1197 本) で、形は当方のカットと同じ。
+- 当方は前処理を全部切ると根が 1.11 → 256.8 に上がる。前処理の段を 1 つずつ切っても上がらない (並行な行の併合 6498 → 3249 行を切るとむしろ 0)。
+  前処理の 1 回目で 69 列が固定されている (PRESOLVE_ROUND 0 fixed=69) ので、次はこの 69 列 (連続列か) と、前処理なしで効いている経路集約の
+  行を突き合わせる。

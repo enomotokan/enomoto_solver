@@ -1,0 +1,22 @@
+diff --git a/src/mip/separation.rs b/src/mip/separation.rs
+index f5fc54148..b2ed4bd99 100644
+--- a/src/mip/separation.rs
++++ b/src/mip/separation.rs
+@@ -6768,7 +6768,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
+         // 試作 `ENOMOTO_MIP_GAP4` の `t` (既定では使わない。analysis/gap4mem_20261111.md): LP の元の行が `ENOMOTO_T_MIP_GAP4_TAB_M` (20000) 以上の
+         // 問題でだけ HiGHS の選び方を使う。neos-873061 (9.3 万行) では既定の密な tableau カット (1 本 約 4300 非零) で 1 ラウンドの LP が重く、
+         // HiGHS の選び方で根の下界が 104.7 → 109.5・111.4 に上がる。害の出た 30n20b8・roll3000・nw04 はどれも 2300 行以下
+-        // 試作 `ENOMOTO_MIP_TAB_HIGHS_SIG` (gate2、既定では使わない、analysis/gate2_20261117/tab/README.md): 根の最初の tableau の分離
++        // `ENOMOTO_MIP_TAB_HIGHS_SIG` (gate2、既定で使う。`=0` で使わない。analysis/gate2_20261117/tab/README.md): 根の最初の tableau の分離
+         // (`light` でない呼び出しで、行が 1 つ以上使われたもの) は既定の選び方で行い、その作業量 W = (集約行の非零の合計) / (LP の非零 + 列) と、
+         // HiGHS の fill の予算を超える行の割合 fw を測る。W ≥ `ENOMOTO_T_MIP_TAB_SIG_W` (2.5) で、連続列の割合が `ENOMOTO_T_MIP_TAB_SIG_CONT` (0.6)
+         // 未満なら、以後の呼び出し (ノードを含む) で HiGHS の選び方を使う (2026-11-18 に初めのシグモイドを普通の if にし、連続列の割合を足した:
+@@ -6778,7 +6778,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
+         // fill の予算だけ外す。根だけの試しで 30n20b8 の根の下界が 139.9 → 129.8 と悪く、既定のまま (`1`) は 139.9)
+         // 値 `r` は根 (`light` でない分離) だけ HiGHS の選び方にし、ノードの分離は既定のまま (rococoC10-001000 は根のカットが既定と同じで、
+         // 木のノードの分離から道筋が分かれていた。analysis/gate2_20261117/tab/README.md 10 節)
+-        let tab_sig_mode = env_str!("ENOMOTO_MIP_TAB_HIGHS_SIG");
++        let tab_sig_mode = env_def!("ENOMOTO_MIP_TAB_HIGHS_SIG", "1");
+         // 裏のカットの写しは主の決めた選び方を使う ([`super::solver::BG_TAB_SIG`])
+         if tab_sig_mode.is_some() && self.tab_sig == 0 {
+             self.tab_sig = super::solver::BG_TAB_SIG.with(|c| c.get());
