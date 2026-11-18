@@ -17,6 +17,15 @@ for f in glob.glob(str(D.parent / "cand1118_default_20261116/res_P_s*.jsonl")):
         r = json.loads(l)
         if r["cfg"] == "def":
             T[r["problem"]].append(min(r["result"].get("time") or 60, 60))
+# M の見積り: def の秒 (vshighs_20261117 の Mittelmann 600 秒・genlazy の M、時間切れは 600) の平均 × 1.3 + 20 を 4 設定分
+TM = defaultdict(list)
+for f in glob.glob(str(D.parent / "vshighs_20261117/res_[MA]_s*.jsonl")) + glob.glob(str(D.parent / "genlazy_20261117/res_M_s*.jsonl")):
+    for l in open(f):
+        r = json.loads(l)
+        if r["cfg"] == "def":
+            ok = str(r["result"].get("status")).lower() in ("optimal", "infeasible")
+            TM[r["problem"]].append(min(r["result"].get("time") or 600, 600) if ok else 600)
+estM = lambda k: len(CF) * (min(600, 1.3 * (sum(TM[k[0]]) / len(TM[k[0]]) if TM[k[0]] else 600)) + 20)
 def balance(items, est, n, out):
     load = [0.0] * n; shards = [[] for _ in range(n)]
     for key, runs in sorted(items, key=lambda kv: -est(kv[0])):
@@ -26,4 +35,4 @@ def balance(items, est, n, out):
 NP, NM = int(sys.argv[1]), int(sys.argv[2])
 estP = lambda k: len(CF) * ((sum(T[k[0]]) / len(T[k[0]]) if T[k[0]] else 60) + 8)
 balance([((p, s), [[p, c, s, 60] for c in CF]) for p in PROBS for s in (4, 5, 6)], estP, NP, "shards_P.json")
-balance([((p, s), [[p, c, s, 600] for c in CF]) for p in MPROBS for s in (3, 4)], lambda k: len(CF) * 620, NM, "shards_M.json")
+balance([((p, s), [[p, c, s, 600] for c in CF]) for p in MPROBS for s in (3, 4)], estM, NM, "shards_M.json")
