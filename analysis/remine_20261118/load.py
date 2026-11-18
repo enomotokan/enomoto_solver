@@ -27,7 +27,8 @@ for f in glob.glob("analysis/**/res*.jsonl", recursive=True):
         th = d.get("threads") or (1 if re.search(r"_t1(_|\.)", os.path.basename(f)) or str(cfg).endswith("_t1") else 4)
         if str(cfg).endswith("_t1") and cfg != "def_t1": pass
         key0 = d0 + ("#t1" if th == 1 else "")
-        D[key0][(d["problem"], str(cfg), seed)] = (t, ok, tl, th, f)
+        pn = d["problem"] if float(tl) == 60 else f"{d['problem']}@{int(float(tl))}"  # 上限の違う回 (P の 60 秒と M の 600 秒) を混ぜない
+        D[key0][(pn, str(cfg), seed)] = (t, ok, tl, th, f)
 pickle.dump(dict(D), open(DIR+"D.pkl", "wb"))
 n = 0
 for d0, R in sorted(D.items()):
