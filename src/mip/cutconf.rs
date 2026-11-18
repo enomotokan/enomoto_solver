@@ -101,6 +101,42 @@ pub fn mode() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_CUTCONF")
 }
 
+/// 試作 `ENOMOTO_MIP_CUTCONF_LGATE` (gate2 候補 8、既定では使わない): 作った制約の平均の長さ L (全スレッドの今までの和) で
+/// 入れる割合 w = σ((L0 − L) / s) を決める。値は `L0,s,K` (省略すると 25,5,20)。返した数が K 本に満たない間は w = 1。
+/// 速い問題 (noswot・qiu) は L が 13〜17、遅い問題 (10teams 250・h80x6320d 220〜300・eil33-2 1150・neos5 33) は長い
+/// (analysis/cutconf_20261110 の p58・p58w)。付いていなければ `None` (いつも入れる)。
+pub fn lgate_weight() -> Option<f64> {
+    let s = env_str!("ENOMOTO_MIP_CUTCONF_LGATE")?;
+    let v: Vec<f64> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    let l0 = v.first().copied().unwrap_or(25.0);
+    let sc = v.get(1).copied().unwrap_or(5.0).max(1e-9);
+    let k = v.get(2).copied().unwrap_or(20.0);
+    let out = STATS[st::OUT].load(std::sync::atomic::Ordering::Relaxed) as f64;
+    if out < k.max(1.0) {
+        return Some(1.0);
+    }
+    let mean = STATS[st::OUT_LEN].load(std::sync::atomic::Ordering::Relaxed) as f64 / out;
+    Some(1.0 / (1.0 + ((mean - l0) / sc).exp()))
+}
+
+/// [`lgate_weight`] の割合で入れるかを決める (スレッドごとの持ち分を足し、1 を超えたら入れる。乱数を使わない)。
+pub fn lgate_take(w: f64) -> bool {
+    LGATE_CREDIT.with(|c| {
+        let v = c.get() + w;
+        if v >= 1.0 {
+            c.set(v - 1.0);
+            true
+        } else {
+            c.set(v);
+            false
+        }
+    })
+}
+
+thread_local! {
+    static LGATE_CREDIT: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
 /// 診断用 `ENOMOTO_MIP_CUTCONF_CHECK` ([`analyze`])。
 pub fn check_mode() -> bool {
     env_str!("ENOMOTO_MIP_CUTCONF_CHECK").is_some()

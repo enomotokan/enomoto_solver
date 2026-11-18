@@ -1575,6 +1575,87 @@ pub fn lex_leader_pairs_except(sym: &Symmetry, skip: &[bool], orbitope_vars: &[b
     pairs
 }
 
+/// 試作 `ENOMOTO_MIP_SYM_SST`: Schreier-Sims の表のカット (SST cuts、Salvagnin 2018・SCIP の `misc/usesymmetry` の 4) の組 `(l, k)`
+/// (`x_l - x_k >= 0`)。群 `G_1` = [`lex_leader_pairs_except`] と同じく選んだ生成元の群から始め、各段で
+/// - 今の群 `G_t` が動かす最小の番号 `l_t` (leader) をとり、その軌道の全ての列 `k` について `x_{l_t} >= x_k` を足す
+/// - `G_{t+1}` = `l_t` の固定部分群 (Schreier の補題の生成元 `u_{s(o)}^{-1} s u_o`、重複と恒等を除き `max_gens` 本まで)
+///
+/// を群が自明になるまで繰り返す。leader を「動かす最小の番号」にとるので、列の番号の順の辞書式で最大の解 (lex-leader) は
+/// 全ての段のカットを満たす (`G_t` の元は `l_t` より前の列を全て固定するので、lex-leader の性質から `x_{l_t} >= x_{h^{-1}(l_t)}`)。
+/// なので lex-leader の行・`SYM_LEX_GENS` での並べ替えと矛盾しない。固定部分群の生成元を上限で間引くと部分群になるが、
+/// 部分群でも上の議論はそのまま成り立つ (カットが減るだけ)。手間 (置換の合成で触る列の数) が `work_cap` を越えたらそこまでの段で止める
+pub fn sst_pairs_except(sym: &Symmetry, skip: &[bool], orbitope_vars: &[bool], max_gens: usize, work_cap: u64) -> (Vec<(usize, usize)>, usize) {
+    let n = sym.orbit.len();
+    let mut gens: Vec<Vec<usize>> = sym.generators.iter().enumerate().filter(|&(k, g)| !skip[k] && !(0..g.len()).any(|j| g[j] != j && orbitope_vars[j])).map(|(_, g)| g.clone()).collect();
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    let mut work = 0u64;
+    let mut levels = 0usize;
+    // 合成 (a∘b)(j) = a[b[j]]
+    let compose = |a: &[usize], b: &[usize]| -> Vec<usize> { b.iter().map(|&j| a[j]).collect() };
+    let inverse = |a: &[usize]| -> Vec<usize> {
+        let mut r = vec![0; a.len()];
+        for (j, &t) in a.iter().enumerate() {
+            r[t] = j;
+        }
+        r
+    };
+    while !gens.is_empty() {
+        let Some(l) = (0..n).find(|&j| gens.iter().any(|g| g[j] != j)) else { break };
+        // 軌道と遷移 (`trans[o]` は l を o に写す元)
+        let mut trans: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+        let mut order = vec![l];
+        trans.insert(l, (0..n).collect());
+        let mut head = 0;
+        while head < order.len() {
+            let o = order[head];
+            head += 1;
+            for g in &gens {
+                let t = g[o];
+                if !trans.contains_key(&t) {
+                    let u = compose(g, &trans[&o]);
+                    work += n as u64;
+                    trans.insert(t, u);
+                    order.push(t);
+                }
+            }
+            if work > work_cap {
+                break;
+            }
+        }
+        if work > work_cap {
+            break;
+        }
+        for &k in &order[1..] {
+            pairs.push((l, k));
+        }
+        levels += 1;
+        // l の固定部分群の Schreier の生成元
+        let mut next: Vec<Vec<usize>> = Vec::new();
+        let mut seen: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
+        'outer: for &o in &order {
+            for g in &gens {
+                let so = g[o];
+                let Some(us) = trans.get(&so) else { continue };
+                // u_{s(o)}^{-1} s u_o
+                let h = compose(&inverse(us), &compose(g, &trans[&o]));
+                work += 3 * n as u64;
+                if (0..n).all(|j| h[j] == j) || seen.contains(&h) {
+                    continue;
+                }
+                seen.insert(h.clone());
+                next.push(h);
+                if next.len() >= max_gens || work > work_cap {
+                    break 'outer;
+                }
+            }
+        }
+        gens = next;
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+    (pairs, levels)
+}
+
 /// 対称性を崩す不等式 `x_i - x_k >= 0` の組 `(i, k)` (lex-leader、モジュールの説明を参照)。
 pub fn lex_leader_pairs(sym: &Symmetry) -> Vec<(usize, usize)> {
     let mut pairs: Vec<(usize, usize)> = Vec::new();
