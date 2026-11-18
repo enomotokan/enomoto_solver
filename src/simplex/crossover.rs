@@ -4287,7 +4287,11 @@ fn nearest_bound(std: &StdForm, j: usize, v: f64) -> NbStatus {
 /// ([`crate::cancel::is_cancelled`]) を見る。立っていれば `true` (呼び手はクロスオーバーを諦める)
 fn g5cancel_tick(k: &mut usize) -> bool {
     *k += 1;
-    *k % 16 == 0 && env_str!("ENOMOTO_IPM_G5CANCEL").is_some_and(|v| !v.is_empty() && v != "0") && crate::cancel::is_cancelled()
+    let hit = *k % 16 == 0 && env_str!("ENOMOTO_IPM_G5CANCEL").is_some_and(|v| !v.is_empty() && v != "0") && crate::cancel::is_cancelled();
+    if hit {
+        crate::interior_point::kkt::g5cancel_note("the crossover basis selection");
+    }
+    hit
 }
 
 struct BasisSelector {
