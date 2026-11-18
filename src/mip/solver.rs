@@ -1474,8 +1474,6 @@ pub(super) struct Solver<'a, L: MipLp> {
     pool1_diag_at: Option<Instant>,
     pool1_hist: [u64; 7],
     pool1_cnt: [u64; 3],
-    /// `ENOMOTO_MIP_POOL1_DONATE` の `alt` (試作): 次に出すノードを下界最小にするか
-    pool1_alt: bool,
     /// `ENOMOTO_MIP_POOL2_TAKE` の `h`: 共有の待ち行列から取り、先に処理するノードの (枠, 世代)。
     pool2_pin: Vec<(usize, u64)>,
     /// `ENOMOTO_MIP_POOL2_TAKE` の `i`: 今の潜りを打ち切る合図。
@@ -1493,21 +1491,6 @@ fn pool1_diag_secs() -> f64 {
 
 /// 診断用 (`ENOMOTO_MIP_POOL1_DIAG`): 出したノードの下界と全体の下界の差の区切り (最後の欄はそれ以上)。
 const POOL1_BUCKETS: [f64; 6] = [1e-6, 0.01, 0.1, 0.3, 1.0, 3.0];
-
-/// `ENOMOTO_MIP_POOL1_DONATE` (試作、既定では使わない): 手元の待ち行列の上限 (`ENOMOTO_T_MIP_TREE_LOCAL_CAP`) を超えた分を
-/// 共有の待ち行列へ出すときに、どのノードを出すか。`best` (= 既定、下界最小)・`worst` (下界最大)・`est` (下界と推定値の平均が最大)・
-/// `deep` (最も深い)・`shallow` (最も浅い)・`alt` (下界最小と最大を交互)。返り値は [`super::queue::NodeQueue::pop_for_donate`] の
-/// mode (alt は 5)。
-fn pool1_donate_mode() -> u8 {
-    match env_str!("ENOMOTO_MIP_POOL1_DONATE") {
-        Some("worst") => 1,
-        Some("est") => 2,
-        Some("deep") => 3,
-        Some("shallow") => 4,
-        Some("alt") => 5,
-        _ => 0,
-    }
-}
 
 /// 分枝限定法で解く。
 /// 並列モードのスレッド数 (`ENOMOTO_MIP_THREADS`、既定 1 = 並列にしない)。
@@ -5874,7 +5857,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool1_diag_at: None,
         pool1_hist: [0; 7],
         pool1_cnt: [0; 3],
-        pool1_alt: true,
         pool2_pin: Vec::new(),
         pool2_interrupt: false,
         pool2_at: None,
@@ -13125,7 +13107,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     prefix
                 });
                 // 試作 `ENOMOTO_MIP_NODELP_PERTURB` (analysis/node_lp_20261106.md、既定では使わない): ノードの LP を解くあいだだけ
-                // 費用の摂動 (`p`: `ENOMOTO_NODE_PERTURB` と同じ判定、`P`: 判定なし) と前向きの Harris (`h`: `ENOMOTO_SIMPLEX_HARRIS2=t` と同じ) を使う。
+                // 費用の摂動 (`p`: 削除した試作 `ENOMOTO_NODE_PERTURB` と同じ判定、`P`: 判定なし) と前向きの Harris (`h`: `ENOMOTO_SIMPLEX_HARRIS2=t` と同じ) を使う。
                 // `g` なら、このスレッドのノードの LP の平均の反復が `ENOMOTO_T_MIP_NODELP_HEAVY` (既定 100) 以上のときだけ
                 let (_nl_h2, _nl_pert) = match nodelp_perturb_mode() {
                     Some(mode) if !mode.contains('g') || self.avg_node_iters() as f64 >= tunable!("ENOMOTO_T_MIP_NODELP_HEAVY", 100.0, f64) => (
@@ -23683,7 +23665,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 自分の待ち行列から下界の小さい順に `k` ノードを共有の待ち行列に出す (`ENOMOTO_T_MIP_TREE_LOCAL_CAP`)。
-    /// `ENOMOTO_MIP_POOL1_DONATE` (試作) で出すノードの選び方を変える ([`pool1_donate_mode`])。
     fn pool_donate_n(&mut self, k: usize) {
         use std::sync::atomic::Ordering;
         let Some(pool) = self.pool.clone() else { return };
@@ -23695,18 +23676,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let diag_before: Vec<bool> = if pool2_diag() { self.pool2_diag_taken.iter().map(|&(id, gen)| self.queue.holds(id, gen)).collect() } else { Vec::new() };
-        let mode = pool1_donate_mode();
         let mut out = Vec::with_capacity(k);
         for _ in 0..k {
-            let got = match mode {
-                0 => self.queue.pop_best(),
-                5 => {
-                    self.pool1_alt = !self.pool1_alt;
-                    self.queue.pop_for_donate(if self.pool1_alt { 0 } else { 1 })
-                }
-                m => self.queue.pop_for_donate(m),
-            };
-            match got {
+            match self.queue.pop_best() {
                 Some(n) => out.push(self.snap_of(&n)),
                 None => break,
             }
