@@ -218,15 +218,15 @@ pub(crate) fn robust(c: char) -> bool {
     env_def!("ENOMOTO_MIP_ROBUST", "pgq").is_some_and(|v| v.contains(c))
 }
 
-/// 試作 `ENOMOTO_MIP_S3GAP=<g>` (既定では使わない。analysis/vsscip_slow_20261118/small3/): 外側の根で暫定解があり、根の下界との
-/// 相対の間隙 (|暫定解| と 1 の大きい方で割る) が g 未満なら、重い根のヒューリスティクス (RENS・RINS・ダイビングなど) を回さず、
+/// `ENOMOTO_MIP_S3GAP=<g>` (既定 0.002、`=0` で使わない。analysis/vsscip_slow_20261118/small3/、2026-11-18 に既定化): 外側の根で暫定解があり、
+/// 根の下界との相対の間隙 (|暫定解| と 1 の大きい方で割る) が g 未満なら、重い根のヒューリスティクス (RENS・RINS・ダイビングなど) を回さず、
 /// その間隙を返す。exp-1-500-5-5 は 3.1 秒で最適解 (間隙 8.8e-4) が出た後に RENS 2.2 秒・RINS 1.2 秒を回して何も見つけず、
 /// その後の再スタートで決着する
 fn s3_smallgap_skip<L: MipLp>(s: &Solver<'_, L>, root_obj: f64, name: &str) -> Option<f64> {
     if s.params.submip || !(name == "RENS" || name.starts_with("RENS (") || rootcap_heavy(name)) {
         return None;
     }
-    let g = tunable!("ENOMOTO_MIP_S3GAP", 0.0, f64);
+    let g = tunable!("ENOMOTO_MIP_S3GAP", 0.002, f64);
     if g <= 0.0 {
         return None;
     }
