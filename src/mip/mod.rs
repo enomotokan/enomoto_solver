@@ -1532,9 +1532,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 sparsify_rows_highs(&mut rows, &mut row_lo, &mut row_up, &is_int, &col_lo, &col_up, prob.n)
             };
             // gate2 候補 6 (analysis/gate2_20261117/sparsify/README.md): 書き換えた行のうち 0-1 列だけの行・1 列以下に縮んだ (行が消えて境界になる) 行、
-            // 非零の増減を数える。`ENOMOTO_MIP_SPARSIFY_LATE=s` なら、縮んだ割合 f = 縮んだ行 / 書き換えた行 のシグモイド
-            // σ((f − `ENOMOTO_T_MIP_SPL_C` (0.5)) / `ENOMOTO_T_MIP_SPL_W` (0.1)) が 1/2 以上のときだけ疎化した問題を使う
-            // (kasai は 462 行が全部縮む。air03・nw04 は集合分割の 0-1 の行を書き換えるだけで 1 行も縮まず、遅くなる・メモリが増える)
+            // 非零の増減を数える。`ENOMOTO_MIP_SPARSIFY_LATE=s` なら、縮んだ割合 f = 縮んだ行 / 書き換えた行 が `ENOMOTO_T_MIP_SPL_C` (0.5) 以上のときだけ
+            // 疎化した問題を使う (kasai は 462 行が全部縮む。air03・nw04 は集合分割の 0-1 の行を書き換えるだけで 1 行も縮まず、遅くなる・メモリが増える)。
+            // 文字 `b` も付けると、書き換えた行のうち 0-1 列だけの行の割合 b が `ENOMOTO_T_MIP_SPL_BMAX` (0.5) 以下のときに限る
+            // (nursesched-sprint02・decomp2・physiciansched6-2 は書き換えた行の多くが 0-1 列だけの行で、種 1〜8 で遅れた)
             let bin = |j: usize| is_int[j] && col_lo[j] == 0.0 && col_up[j] == 1.0;
             let (mut ch, mut chb, mut el) = (0usize, 0usize, 0usize);
             for (i, r) in rows.iter().enumerate() {
@@ -1544,24 +1545,23 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                     el += (r.iter().filter(|e| e.1 != 0.0).count() <= 1) as usize;
                 }
             }
-            let gate = if env_str!("ENOMOTO_MIP_SPARSIFY_LATE").is_some_and(|v| v.contains('s')) && ch > 0 {
-                let c = tunable!("ENOMOTO_T_MIP_SPL_C", 0.5, f64);
-                let w = tunable!("ENOMOTO_T_MIP_SPL_W", 0.1, f64).max(1e-6);
-                1.0 / (1.0 + (-(el as f64 / ch as f64 - c) / w).exp())
-            } else {
-                1.0
-            };
+            let mode = env_str!("ENOMOTO_MIP_SPARSIFY_LATE").unwrap_or("");
+            let (f, b) = if ch > 0 { (el as f64 / ch as f64, chb as f64 / ch as f64) } else { (0.0, 0.0) };
+            let use_it = !mode.contains('s')
+                || (ch > 0 && f >= tunable!("ENOMOTO_T_MIP_SPL_C", 0.5, f64) && (!mode.contains('b') || b <= tunable!("ENOMOTO_T_MIP_SPL_BMAX", 0.5, f64)));
             if params.verbose {
                 eprintln!("MIP: presolve: sparsified {k} rows (late)");
                 let nz0: usize = prob.rows.iter().map(|r| r.len()).sum();
                 let nz1: usize = rows.iter().map(|r| r.iter().filter(|e| e.1 != 0.0).count()).sum();
                 let nbin = (0..prob.n).filter(|&j| bin(j)).count();
                 eprintln!(
-                    "MIP: sparsify-late stats m {} n {} bincols {nbin} changed {ch} binonly {chb} shrunk<=1 {el} nnz {nz0} -> {nz1} gate {gate:.3}",
-                    prob.m, prob.n
+                    "MIP: sparsify-late stats m {} n {} bincols {nbin} changed {ch} binonly {chb} shrunk<=1 {el} nnz {nz0} -> {nz1} gate {:.3} (f {f:.3} b {b:.3})",
+                    prob.m,
+                    prob.n,
+                    use_it as u8 as f64
                 );
             }
-            if k == 0 || gate < 0.5 {
+            if k == 0 || !use_it {
                 Some(Presolved::Reduced { prob, postsolve, scaling })
             } else {
                 let q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
@@ -4591,7 +4591,10 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 列の番号を変えないので、両端が前処理後も尺度 1 の 0-1 列のままの組だけ残す (HiGHS もサブ MIP に含意とクリーク表を渡す)
     // `ENOMOTO_MIP_CLQPRB` ([`clqprb_on`]) のときも、プロービングの後の前処理のかけ直し (`depth` > 0) では引き継ぐ (次のプロービングが
     // 前のプロービングの含意を伝播に使う。HiGHS はクリーク表を前処理の繰り返しの間で持ち続ける)
-    let keep_impl = env_str!("ENOMOTO_MIP_KEEP_IMPLICATIONS").is_some() || (clqprb_on() && depth > 0 && !submip);
+    // `g`・`r`・`s` のときは、含意を使う形に切り替えた求解 (`CLQPRB_STICKY`) だけで引き継ぐ。既定の形のままの問題・既定の形に戻した問題
+    // (`CLQPRB_REVERTED`) で引き継ぐと、前処理が既定と変わる (gate2 clqprb_s: snp-02-004-104・supportcase40 で見つけた漏れ)
+    let clqprb_live = clqprb_on() && !CLQPRB_REVERTED.with(|f| f.get()) && (!clqprb_has('g') || CLQPRB_STICKY.with(|f| f.get()));
+    let keep_impl = env_str!("ENOMOTO_MIP_KEEP_IMPLICATIONS").is_some() || (clqprb_live && depth > 0 && !submip);
     if keep_impl && !p.conflict_edges.is_empty() {
         let bin = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0 && pre.scaling.d.get(j).is_none_or(|&d| d == 1.0);
         prob.conflict_edges = p.conflict_edges.iter().copied().filter(|&(a, b)| bin((a / 2) as usize) && bin((b / 2) as usize)).collect();
