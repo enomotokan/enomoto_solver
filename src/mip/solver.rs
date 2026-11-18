@@ -3525,6 +3525,10 @@ fn tree_keep_siblings() -> bool {
 /// LP 値なしで分枝した, 強分枝の子を不明扱いにした, 根の LP・LP のプロービングで信用しなかった]
 pub(super) static LPINF_RETRY: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
+/// 診断: [`lp_farkas_marginal`] が見た「実行可能になる最小の破り幅」の分布 (log10 の 1 刻み、[-13, -12) .. [-5, -4)・>= -4、最後は NaN・無限・負)
+const LPINF_HIST_N: usize = 11;
+pub(super) static LPINF_HIST: [std::sync::atomic::AtomicU64; LPINF_HIST_N] = [const { std::sync::atomic::AtomicU64::new(0) }; LPINF_HIST_N];
+
 pub(super) fn lpinf_count(k: usize) {
     LPINF_RETRY[k].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
@@ -3567,9 +3571,14 @@ pub(super) fn lp_farkas_marginal<L: MipLp>(lp: &L, n: usize) -> bool {
         zlo += a;
         zhi += b;
     }
-    // 区間 [rlo, rhi] と [zlo, zhi] の隙間 (NaN・無限は際どいとみなす)
+    // 区間 [rlo, rhi] と [zlo, zhi] の隙間 (NaN・無限は際どいとみなす)。gap / (Σ|y| + Σ|z|) は、どの行・列も同じだけ破ってよいときに
+    // 実行可能になる最小の破り幅。これが `ENOMOTO_T_MIP_LPINF_EPS` (既定 FEASTOL) 以下なら際どい
     let gap = (rlo - zhi).max(zlo - rhi);
-    !(gap.is_finite() && gap > super::domain::FEASTOL * (ysum + zsum))
+    let r = gap / (ysum + zsum);
+    // 診断の分布 (log10 r の 1 刻み: < -12, -12.., ..., >= -4、NaN・無限・負は最後)
+    let b = if !(r.is_finite() && r > 0.0) { LPINF_HIST_N - 1 } else { ((r.log10() + 13.0).floor().clamp(0.0, (LPINF_HIST_N - 2) as f64)) as usize };
+    LPINF_HIST[b].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    !(gap.is_finite() && r > tunable!("ENOMOTO_T_MIP_LPINF_EPS", super::domain::FEASTOL, f64))
 }
 
 
@@ -26030,6 +26039,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 LPINF_RETRY[1].load(std::sync::atomic::Ordering::Relaxed),
                 LPINF_RETRY[2].load(std::sync::atomic::Ordering::Relaxed),
                 LPINF_RETRY[3].load(std::sync::atomic::Ordering::Relaxed)
+            );
+            eprintln!(
+                "MIP: LP infeasibility certificates, minimum uniform violation (log10 bins <-12 .. >=-4, other): {:?}",
+                LPINF_HIST.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>()
             );
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
             if super::separation::hl2_d2_any() {
