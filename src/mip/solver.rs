@@ -3592,6 +3592,12 @@ pub(super) fn lp_farkas_ratio<L: MipLp>(lp: &L, n: usize) -> f64 {
 }
 
 
+/// LexRed と併用する orbital fixing (`ENOMOTO_MIP_SYMDYN=f`、既定) を、分枝で 0 にした列から始まる固定だけに絞るか (既定で絞る。
+/// `ENOMOTO_MIP_OF_ANY_FIXED` で以前の動き = どの固定された列からも軌道を固定する)。[`Solver::orbital_fixing`] 参照
+fn of_branch_only() -> bool {
+    env_str!("ENOMOTO_MIP_OF_ANY_FIXED").is_none()
+}
+
 /// LP の際どい実行不能の確かめ ([`lp_farkas_marginal`]) を使うか (既定で使う。`ENOMOTO_MIP_NO_LPINF_CHECK` で全部まとめて止める:
 /// ノードの LP・根の LP・強分枝の子・LP のプロービング)
 pub(super) fn lpinf_check_on() -> bool {
@@ -7624,7 +7630,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         pc.col_lo.clone_from(&self.dom.lo);
         pc.col_up.clone_from(&self.dom.up);
         let salt = 0x5EED_0000_0000_0001u64 ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
-        let r = super::feas_fj_lmip_early_salt(&pc, self.params.threads.max(1), cap, self.params.verbose, salt);
+        // 求解の時間の上限を期限として渡す (1 スレッドの手間の上限 (`ENOMOTO_MIP_TICKS` の `f`) でも時間の上限で止まるように。
+        // analysis/hang_20261117/README.md)
+        let tl = self.params.time_limit;
+        let deadline = tl.is_finite().then(|| self.start + std::time::Duration::from_secs_f64(tl.max(0.0)));
+        let r = super::with_presolve_deadline(deadline, || super::feas_fj_lmip_early_salt(&pc, self.params.threads.max(1), cap, self.params.verbose, salt));
         match r {
             Some(x) => self.try_incumbent(x),
             None => false,
@@ -10433,6 +10443,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let free: Vec<bool> = (0..self.p.n).map(|j| self.p.col_lo[j] < self.p.col_up[j]).collect();
             let nnz: usize = self.p.rows.iter().map(|r| r.iter().filter(|e| free[e.0]).count()).sum();
             eprintln!("MIP: root LP size: rows {}, free columns {}, nonzeros {nnz}", self.lp.num_rows(), free.iter().filter(|&&f| f).count());
+            // 根の LP の手間 (記録だけ。analysis/featconst_20261118/cutlen: 1 ラウンドの手間 ÷ 根の LP の手間を数える)
+            eprintln!("MIP: root LP work: {:.6} tick-s ({} iters, {:.3}s)", self.root_lp_ticks * 1e-9, root_iters, self.root_lp_secs);
         }
         if env_str!("ENOMOTO_MIP_DIAG_HIDCLQ").is_some() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 {
             self.diag_hidden_cliques();
@@ -18614,7 +18626,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn orbital_fixing_checked(&mut self, changes: &[BoundChange]) -> bool {
         if let Some(sd) = self.symdyn.clone() {
             // 試作 `ENOMOTO_MIP_SYMDYN`: orbital fixing の代わりに動的な辞書式の縮小 (分枝した列の順)。`=f` なら orbital fixing の後に足す
-            if super::symdyn::symdyn_keep_of() && !self.of_gens.is_empty() && !self.orbital_fixing(changes) {
+            if super::symdyn::symdyn_keep_of() && !self.of_gens.is_empty() && !self.orbital_fixing(changes, of_branch_only()) {
                 if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
                     self.add_conflict();
                 }
@@ -18632,7 +18644,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.of_gens.is_empty() {
             return true;
         }
-        let ok = self.orbital_fixing(changes);
+        let ok = self.orbital_fixing(changes, false);
         if !ok {
             if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
                 self.add_conflict();
@@ -18649,7 +18661,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 同じ値に固定する (0 に下げた分枝の部分木には、軌道の列を 1 にした解の像が兄弟の部分木にあるので要らない)。
     /// 親が固定したもの (`sym` の印) は分枝に数えない。固定のあと行を伝播し、伝播で新たに固定されたら軌道を見直す。
     /// 固定はこのノードの部分木で成り立つので、[`Self::of_node_fixes`] に入れて子の分枝の列に足す。矛盾なら偽。
-    fn orbital_fixing(&mut self, changes: &[BoundChange]) -> bool {
+    ///
+    /// `branch_only` (LexRed と併用するとき、[`of_branch_only`]): 分枝で 0 にした 0-1 列 (`sym` でない上限の変更) を含む軌道だけを
+    /// 0 に固定する。伝播・被約費用などで固定された列から軌道を固定するのは分枝の順の辞書式の規則から出ない固定で、LexRed と
+    /// 重ねると最適解の像を全部切ることがある (p0201 で 7675 を最適と返した、analysis/wrong_widden_20261117 の 12 節)
+    fn orbital_fixing(&mut self, changes: &[BoundChange], branch_only: bool) -> bool {
         let of = self.of_gens.clone();
         let p = self.p;
         let binary = |j: usize| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0;
@@ -18710,11 +18726,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let orbits = self.of_cache.1.clone();
         self.of_node_orbits = Some(orbits.clone());
         let mut node_fixed = false;
+        let b0: std::collections::HashSet<usize> = if branch_only { changes.iter().filter(|c| !c.sym && c.upper && binary(c.col) && c.value < 0.5).map(|c| c.col).collect() } else { Default::default() };
         loop {
             let s0 = self.dom.stack_len();
             let mut fixed = 0usize;
             for orb in orbits.iter() {
-                let Some(&f) = orb.iter().find(|&&j| self.dom.lo[j] == self.dom.up[j]) else { continue };
+                let f = if branch_only { orb.iter().find(|&&j| b0.contains(&j)) } else { orb.iter().find(|&&j| self.dom.lo[j] == self.dom.up[j]) };
+                let Some(&f) = f else { continue };
                 let one = self.dom.lo[f] >= 0.5;
                 for &j in orb {
                     let changed = if one {
