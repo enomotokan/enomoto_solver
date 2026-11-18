@@ -41,3 +41,19 @@ fuzz_slack 1000 5000 mismatches 0。cargo test 413 通過・0 失敗。7 本と�
 
 | 9 | `GCDFORCE` 一式 (診断 `MIP_DEBUG_GCDCOUNT` を含む) | (このコミット) | 265 (gcdforce.rs を削除、mod.rs の前処理の判定・かけ直しの印・数える診断 2 か所) | 75 | 412/0/19 (gcdforce の単体テスト 1 本が消えた) | 一致 | 根拠: analysis/gcdforce_20261107.md (203 問で当たる行が 0 本、理屈でも起きない)。数える診断 `DEBUG_GCDCOUNT` は同じ調べの道具で `gcdforce::count` を使うので一緒に消した |
 | 10 | `OBJ_SUPPORT` 一式 (`_NO_LS`・`_DIAG_NOFIX`・`T_MIP_OBJ_SUPPORT_*`) | (このコミット) | 185 (heuristics.rs の `obj_support`、solver.rs の呼び出しと `obj_support_gap`) | 75 | 412/0/19 | 一致 | 根拠: docs/improvement_history.md・analysis/revisit_20261112/inventory_abc.md (不採用: app1-1 は 4 コアでは既定でも解ける。40 問で当たるのは graph20-20-1rand だけ) |
+| 11 | `BRCUT` 一式 | (このコミット) | 133 (brcut.rs を削除、separation.rs の効き目の記録、pseudocost.rs の点数の項と印、solver.rs の初期化) | 74 | 412/0/19 | 一致 | 根拠: analysis/brcut_20261110.md (58 問で SGM +2.3%・−0.3%、解けた 84 → 82、効き目は揺れの内) |
+| 12 | `IMPLINT_TU` (旧版) | (このコミット) | 7 (solver.rs の刻みと `cut_int` の 2 つの分岐) | 74 | 412/0/19 | 一致 | 根拠: analysis/implint_tu_20261110.md (印が変わる 3 問で +164%、exp-1-500-5-5 が 5 秒 → 時間切れ)。**一部だけ**: 旧版の判定 `MipProblem::implied_integers_tu` (problem.rs) は、残す `IMPLINT_TU2` の診断 `DEBUG_IMPLINTCOUNT` (TU2 が旧版の印を全部含むかの比べ) とその単体テストが使うので、共有の部品として残し、注記を直した。環境変数の分岐だけを消した |
+
+### 最後の確かめ (8cd80e088)
+
+- `ident.py check`: 12 問とも消す前 (ecb1ded51) と (状態・目的値・ノード数) が完全に一致。
+- `FUZZ_TAG=final`: fuzz_tiny 400 0 bad 0 (strict 13)・mip_fuzz_vs_highs 300 bad 0・fuzz_objint 1000 0 bad 0 (optimal 967・infeasible 33)・
+  fuzz_slack 1000 0 mismatches 0・fuzz_tiny 400 1000 bad 0 (strict 14)・fuzz_objint 1000 5000 bad 0 (optimal 971・infeasible 29)・
+  fuzz_slack 1000 5000 mismatches 0。cargo test 412 通過・0 失敗・19 無視 (消す前 422。消えた 10 本は消した試作の単体テスト)。
+- 警告の行: 77 → 74。
+
+## まとめ
+
+- 消したのは 11 件 (#2〜#12。#12 は環境変数の分岐だけ)、src の正味 −4510 行。飛ばしたのは #1 `PROBE_EQUIV2_RESTART` (根拠が記録と合わない)。
+- 共有の部品として残したもの: snfmodk.rs (SNFMODK)、`SRC_MODK` (MUSHAGG)、seplearn.rs の計測 (`SEPSTAT`)、`implied_integers_tu` (TU2 の診断)。
+- 消した試作を参照する analysis/ の台本は直していない (過去の記録として残す)。

@@ -4685,7 +4685,6 @@ pub(crate) static MIP_THREADS_DEFAULT: std::sync::atomic::AtomicUsize = std::syn
 pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     if !params.submip {
         let _ = super::heuristics::frag_t0();
-        super::brcut::reset(p.n);
     }
     // ヒューリスティクスのサブ MIP は小さいことが多いので、基底のない求解も二段解法だけで解く (同時実行しない)
     let prev_race = params.submip.then(|| crate::simplex::mip_lp::set_cold_race_threads(1));
@@ -5344,13 +5343,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     let ho2_implint = env_str!("ENOMOTO_MIP_HO2_IMPLINT").is_some_and(|v| v != "0" && v != "off") || objint('h');
     let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some() || ho2_implint || super::implint_tu::tu2_flag('s') || objint('f');
     let obj_step = if obj_step_implint {
-        // `ENOMOTO_MIP_IMPLINT_TU` も付けていれば TU の規則の暗黙の整数も使う (整数を固定すると連続列の部分に整数の最適解が
+        // `ENOMOTO_MIP_IMPLINT_TU2` も付けていれば TU の部分の暗黙の整数も使う (整数を固定すると連続列の部分に整数の最適解が
         // あるので、どの部分木でも暫定解より良い解があれば格子の点の値の解もある)
         let base = if ho2_implint { p.implied_integers_ho2() } else { p.implied_integers() };
         let mask = if super::implint_tu::tu2_on() {
             super::implint_tu::implied_integers_tu2(p, &base).0
-        } else if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() {
-            p.implied_integers_tu(&base)
         } else {
             base
         };
@@ -5399,11 +5396,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dom,
         lp,
         queue: NodeQueue::new(),
-        pc: {
-            let mut pc = snap.as_ref().map_or_else(|| Pseudocost::new(p.n), |sn| sn.pc.clone());
-            pc.brcut = super::brcut::on() && !params.submip;
-            pc
-        },
+        pc: snap.as_ref().map_or_else(|| Pseudocost::new(p.n), |sn| sn.pc.clone()),
         incumbent: None,
         obj_step,
         obj_lat,
@@ -5837,13 +5830,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         } else if super::implint_tu::tu2_on() {
             // 試作 `ENOMOTO_MIP_IMPLINT_TU2` (src/mip/implint_tu.rs)
             super::implint_tu::cut_mask(p, params.verbose && !params.submip)
-        } else if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() {
-            let b = p.implied_integers();
-            let t = p.implied_integers_tu(&b);
-            if params.verbose && !params.submip {
-                eprintln!("MIP: implied integers: {} by the row rules, {} with the TU rule (ENOMOTO_MIP_IMPLINT_TU)", b.iter().zip(&p.is_int).filter(|(a, i)| **a && !**i).count(), t.iter().zip(&p.is_int).filter(|(a, i)| **a && !**i).count());
-            }
-            t
         } else {
             p.implied_integers()
         },
