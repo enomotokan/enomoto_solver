@@ -71,3 +71,15 @@ y_j も入る)。固定の条件は (c) と同じ (worst_case_ok か y_j の上�
 - M = Mittelmann 48 問 (vshighs の M) + rail507・fast0507 × 種 1・2 × {def, drev}、600 秒、10 分担 (各 1.7 時間): `cd analysis/vsscip_slow_20261118/domrev && python run.py M K` (K = 0〜9)
 - P = MIPLIB の 58 問 × 種 1〜3 × {def, drev}、60 秒、4 分担 (各 0.74 時間): `python run.py P K` (K = 0〜3)
 - 集計: `python summ.py M drev`・`python summ.py P drev`。
+
+## 4. drev の害 (P 分担 0 の報告: nw04 12.0 → 29.0 秒・air03 1.9 → 3.2・nu25-pr12 2.9 → 5.0)
+
+- air03 (1 スレッド): 既定 4.0〜4.5 秒・drev 6.7〜6.8 秒。domcol の探索は 0.33 秒 (2297 列を固定) で軽い。遅れの元は、固定の後の
+  前処理のかけ直しで**プロービングをやり直す** 2.8 秒 (固定 0)。
+  - 試作 `ENOMOTO_MIP_DOMCOL_NOPROBE2=1`: DOMCOL の固定の後のかけ直しではプロービングをしない。air03 4.1 秒 (既定並み)、rail507 種 1 241.0 秒
+    (drev 258.6、最適 174)。fuzz (被覆型 1000・HiGHS 突き合わせ 300・objint 500) 誤答 0、cargo test --lib 412 通過。
+- nw04: 1 スレッドでは既定 31.7〜32.5・drev 28.0〜31.0・drev+NOPROBE2 28.8 秒で害はない (domcol 0.71 秒、3440 列固定、5% 未満なのでかけ直しなし)。
+  4 スレッド・60 秒では既定 15.1・14.6、drev 35.6・33.3、drev+NOPROBE2 32.3・29.6。ログでは根の時刻がずれて、Local-MIP の改善 2 回で
+  LMBOOST (根の終わりの Local-MIP の増強) が入るかどうかが変わり、根の下界が最適値に届くまでの時間がずれている (既定は根の LP の後
+  18 秒で閉じる、drev は 23 秒)。domcol の手間そのものではなく、並列の流れのずれ。根の LP 解が整数なら LMBOOST をしない形も試したが、
+  そのときは LP 解がまだ整数でなく効かなかった (入れていない)。

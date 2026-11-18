@@ -4685,7 +4685,6 @@ pub(crate) static MIP_THREADS_DEFAULT: std::sync::atomic::AtomicUsize = std::syn
 pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     if !params.submip {
         let _ = super::heuristics::frag_t0();
-        super::brcut::reset(p.n);
     }
     // ヒューリスティクスのサブ MIP は小さいことが多いので、基底のない求解も二段解法だけで解く (同時実行しない)
     let prev_race = params.submip.then(|| crate::simplex::mip_lp::set_cold_race_threads(1));
@@ -5344,13 +5343,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     let ho2_implint = env_str!("ENOMOTO_MIP_HO2_IMPLINT").is_some_and(|v| v != "0" && v != "off") || objint('h');
     let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some() || ho2_implint || super::implint_tu::tu2_flag('s') || objint('f');
     let obj_step = if obj_step_implint {
-        // `ENOMOTO_MIP_IMPLINT_TU` も付けていれば TU の規則の暗黙の整数も使う (整数を固定すると連続列の部分に整数の最適解が
+        // `ENOMOTO_MIP_IMPLINT_TU2` も付けていれば TU の部分の暗黙の整数も使う (整数を固定すると連続列の部分に整数の最適解が
         // あるので、どの部分木でも暫定解より良い解があれば格子の点の値の解もある)
         let base = if ho2_implint { p.implied_integers_ho2() } else { p.implied_integers() };
         let mask = if super::implint_tu::tu2_on() {
             super::implint_tu::implied_integers_tu2(p, &base).0
-        } else if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() {
-            p.implied_integers_tu(&base)
         } else {
             base
         };
@@ -5399,11 +5396,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dom,
         lp,
         queue: NodeQueue::new(),
-        pc: {
-            let mut pc = snap.as_ref().map_or_else(|| Pseudocost::new(p.n), |sn| sn.pc.clone());
-            pc.brcut = super::brcut::on() && !params.submip;
-            pc
-        },
+        pc: snap.as_ref().map_or_else(|| Pseudocost::new(p.n), |sn| sn.pc.clone()),
         incumbent: None,
         obj_step,
         obj_lat,
@@ -5837,13 +5830,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         } else if super::implint_tu::tu2_on() {
             // 試作 `ENOMOTO_MIP_IMPLINT_TU2` (src/mip/implint_tu.rs)
             super::implint_tu::cut_mask(p, params.verbose && !params.submip)
-        } else if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() {
-            let b = p.implied_integers();
-            let t = p.implied_integers_tu(&b);
-            if params.verbose && !params.submip {
-                eprintln!("MIP: implied integers: {} by the row rules, {} with the TU rule (ENOMOTO_MIP_IMPLINT_TU)", b.iter().zip(&p.is_int).filter(|(a, i)| **a && !**i).count(), t.iter().zip(&p.is_int).filter(|(a, i)| **a && !**i).count());
-            }
-            t
         } else {
             p.implied_integers()
         },
@@ -7565,8 +7551,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         })
     }
 
-    /// 暫定解があり、その値が下界 `lb` (の切り上げ) より目的関数の刻み (なければ相対 1e-6) 以上悪いか
-    /// ([`Self::obj_support`] を呼ぶ条件)。
     /// `ENOMOTO_MIP_BOUND_STEP` (2026-11-04 から既定、`=0` で使わない): 目的値が刻み `obj_step` の格子 (`offset + k * step`) にしか乗らないとき、
     /// 利用者に返す下界 (と経過の行の下界) を格子の点に切り上げる ([`round_lb_to_step`])。暫定解があればその値で上から抑える。
     /// 本体の求解 (サブ MIP でなく、木の従でもない) だけで使う。暗黙の整数列で刻みを取ったとき (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`) も、
@@ -7622,24 +7606,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: OBJINT c: lattice refreshed {:?} -> {l:?}", self.obj_lat);
             }
             self.obj_lat = Some(l);
-        }
-    }
-
-    pub(super) fn obj_support_gap(&self, lb: f64) -> bool {
-        if let Some(l) = self.obj_lat {
-            let Some((z, _)) = self.incumbent.as_ref() else { return false };
-            return l.round_up(lb) < *z - 1e-6 * z.abs().max(1.0);
-        }
-        if obj_step_lattice() && self.obj_step.is_some() {
-            // 暫定解が格子に乗らないときも、格子の点で比べる
-            let Some((z, _)) = self.incumbent.as_ref() else { return false };
-            let step = self.obj_step.unwrap();
-            return *z - self.p.offset - step * ((lb - self.p.offset) / step - 1e-6).ceil() > 1e-6 * z.abs().max(1.0);
-        }
-        let Some((z, _)) = self.incumbent.as_ref() else { return false };
-        match self.obj_step {
-            Some(step) => *z - step * ((lb - self.p.offset) / step - 1e-6).ceil() - self.p.offset >= step - 1e-9,
-            None => *z - lb > 1e-6 * z.abs().max(1.0),
         }
     }
 
@@ -11204,11 +11170,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.heur_label = "";
                             // 早めの再スタート (既定で使う。`ENOMOTO_MIP_NO_EARLY_RESTART` で使わない): このヒューリスティクスで暫定解が良くなり、根の被約費用による固定で
                             // 新たに固定された整数列が `ENOMOTO_T_MIP_EARLY_RESTART_FRAC` (0.025) 以上なら、残りの根のヒューリスティクスを飛ばして再スタートへ進む
-                            // `ENOMOTO_MIP_EARLY_RESTART_SKIP_LIGHT` (試作): 軽い丸め (と rounding・shifting・int shifting) の解では
-                            // 早めの再スタートをせず、後ろのヒューリスティクス (LP face・サブ MIP など) まで回す (2026-10-29 の 58 問で既定と同じか少し遅い)
                             if super::early_restart_on() && self.incumbent.as_ref().map(|(z, _)| *z) != z_before
-                                && !(env_str!("ENOMOTO_MIP_EARLY_RESTART_SKIP_LIGHT").is_some()
-                                    && (light_root_heur($name) || matches!($name, "rounding" | "shifting" | "int shifting")))
                                 && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_EARLY_RESTART_FRAC", 0.025, f64))
                             {
                                 self.early_restart = true;
@@ -11351,20 +11313,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // サブ MIP (942 列) では、この 4 つで 2.4 秒使って何も見つけず、入れ子の RENS のサブ MIP でも毎回同じだけかかる
                 // (HiGHS のサブ MIP は根のヒューリスティクスのほとんどを入れ子の RENS に使い、1 回 0.1-1.6 秒で終わる)
                 // (暫定解がない、つまり打ち切り値が無限のサブ MIP だけ。`ENOMOTO_MIP_SUBMIP_NO_SB` と同じ理由)
-                // `ENOMOTO_MIP_SMALL3_SUBMIP_LIGHT` (試作、既定では使わない): 打ち切り値が有限の (外側に暫定解がある) サブ MIP の根でも
-                // Feasibility Pump とダイビングを使わない (入れ子の RENS は足さない)。10teams の LP face のサブ MIP (自由な列 1065) は、根で
-                // ポンプとダイビング 4 つに約 1.0 秒使って何も見つけず、その後の木の 233 ノード目で 924 (最適値) を出す
-                // (analysis/small_overhead3_20261102.md)。値 `1` は深さ 1 のサブ MIP だけ、`all` は入れ子も
-                let small3_light = self.params.submip
-                    && self.params.cutoff.is_finite()
-                    && env_str!("ENOMOTO_MIP_SMALL3_SUBMIP_LIGHT").is_some_and(|v| v == "all" || (v == "1" && super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1));
-                // `ENOMOTO_MIP_SMALL2_SUBLIGHT` (試作、既定では使わない): 打ち切り値によらず、どの深さのサブ MIP でも同じく軽くする
-                // (上の `SMALL3_SUBMIP_LIGHT=all` に打ち切り値が無限の場合を足したもの。別の調査で同じ手順に行き着いた)。drayage-25-23 の根の
-                // 被約費用・LP face のサブ MIP (5272 列) は、根の分数ダイビング (深さ 595)・係数ダイビングなどで 1.2 秒使って何も見つけず、主は
-                // 2 本の終わりを 2.2 秒待っていた (analysis/small_overhead2_20261102.md)
-                let light = (self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some()) || self.submip_rens_cutoff()
-                    || small3_light
-                    || (self.params.submip && env_str!("ENOMOTO_MIP_SMALL2_SUBLIGHT").is_some());
+                // (打ち切り値が有限のサブ MIP・どの深さのサブ MIP でも軽くする試作 `ENOMOTO_MIP_SMALL3_SUBMIP_LIGHT`・`ENOMOTO_MIP_SMALL2_SUBLIGHT` は
+                // 58 問で悪く、2026-11-18 に削除。analysis/small_overhead2_20261102.md・small_overhead3_20261102.md)
+                let light = (self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some()) || self.submip_rens_cutoff();
                 // ダイビングの予算: 最初の根の LP の 2 倍に、カットのループを含めた根全体の反復数の一定割合を足す
                 let dive_budget = 2 * root_iters + 1000 + (tunable!("ENOMOTO_T_MIP_ROOT_DIVE_FRAC", 0.0, f64) * self.lp.total_iterations() as f64) as u64;
                 // `ENOMOTO_MIP_PAR_DIVES`: 並列モードで暫定解がなければ、Feasibility Pump と 3 つのダイビングを、今の根の写しから
@@ -11590,11 +11541,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // Local-MIP を回して磨く ([`Self::root_lmip`])
                 if root_lmip_on() && !self.params.submip && self.incumbent.is_some() {
                     heur!("root Local-MIP", self.root_lmip());
-                }
-                // 目的関数の台のサブ MIP (`ENOMOTO_MIP_OBJ_SUPPORT`、試作、[`Solver::obj_support`])。暫定解が根の LP の値から
-                // 目的関数の刻み以上離れているときだけ
-                if env_str!("ENOMOTO_MIP_OBJ_SUPPORT").is_some() && self.obj_support_gap(root_obj) {
-                    heur!("objective support", self.obj_support(&x));
                 }
                 if par_late {
                     self.parallel_submips = false;
@@ -13456,11 +13402,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     });
                     l
                 };
-                // `ENOMOTO_MIP_RESTORE_EXACT_DSE`: 待ち行列から取り出して基底を復元したノードの最初の LP だけ、DSE 重みを
-                // その基底の厳密な値から始める (HiGHS は新しい基底で重みを計算し直す。単位重みのままだと反復が多い)。
-                // neos-911970: 取り出したノードの最初の LP は 1 回 300 -> 98 反復、60 秒のノード数 2190 -> 6424 だが、
-                // 探索の順が変わって下界 54.23 -> 53.09。40 問: 19 問 25.05 -> 25.90 (binkar10_1 21 -> 33 秒、mik-250 22 -> 28 秒、
-                // neos5 37 -> 49 秒: 行ごとの BTRAN m 回の分が重い)。既定では使わない
+                // 待ち行列から取り出して基底を復元したノードの最初の LP だけ、DSE 重みをその基底の厳密な値から始める (`NODELP2` の `X`・`x`)。
+                // いつもそうする試作 `ENOMOTO_MIP_RESTORE_EXACT_DSE` (40 問 25.05 -> 25.90 秒) は 2026-11-18 に削除 (analysis/cleanup_20261118/)
                 // 試作 `ENOMOTO_MIP_NODELP2` の `x` ([`nodelp2`]): 取り出したノードの最初の LP の重みを時間の移動平均で選ぶ
                 let nl2x = resolves == 0 && self.restored_now && self.tp_kind >= 1 && self.nl2x_gate() && {
                     let warm = tunable!("ENOMOTO_T_MIP_NODELP2_WARM", 8u64, u64);
@@ -13475,7 +13418,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.nl2_arm = Some(exact);
                     exact
                 };
-                if resolves == 0 && self.restored_now && (env_str!("ENOMOTO_MIP_RESTORE_EXACT_DSE").is_some() || self.nl2_on('X') || nl2x) {
+                if resolves == 0 && self.restored_now && (self.nl2_on('X') || nl2x) {
                     crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 let membq_rdse = self.restored_dse && resolves == 0;
@@ -14052,7 +13995,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.improve_turn += 1;
                         // 1 回のサブ MIP の時間は時間の予算の残りに合わせる (残りの 2 倍、最低
                         // `ENOMOTO_T_MIP_LNS_CALL_MIN` 秒)。1 回で 6 秒使うと、割合 2% の予算では以後ほぼ呼べなくなる
-                        // (`ENOMOTO_MIP_LNS_NO_CAP` で上限なし)
                         let keep_max = self.submip_time_max;
                         let hi0 = self.heur_iters;
                         let keep_frac = self.submip_time_frac;
@@ -14081,7 +14023,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             if super::timedep('N') {
                                 self.submip_time_frac = 1.0;
                             }
-                        } else if lns_time && env_str!("ENOMOTO_MIP_LNS_NO_CAP").is_none() {
+                        } else if lns_time {
                             let cap = (tunable!("ENOMOTO_T_MIP_LNS_CALL_MULT", 2.0, f64) * lns_avail).max(tunable!("ENOMOTO_T_MIP_LNS_CALL_MIN", 0.3, f64));
                             self.submip_time_max = self.submip_time_max.min(cap);
                         }
@@ -18258,10 +18200,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             self.restore_diag = (a, d, false);
-        }
-        // 調査用: 保存した基底を使わず、今の LP の基底 (直前のノードの最適基底) のまま解く
-        if env_str!("ENOMOTO_MIP_RESTORE_NEVER").is_some() {
-            return;
         }
         // 試作 `ENOMOTO_MIP_NODELP2` の `q`・`a` ([`nodelp2`]): 取り出したノード (兄弟でない) の出発の基底
         if self.tp_kind >= 1 && !self.params.submip {

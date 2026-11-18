@@ -2006,7 +2006,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         (ord, big)
     };
     let mut sel = BasisSelector::new(m, n);
-    // 試作 `ENOMOTO_IPM_G5CANCEL` (既定では使わない): 基底の選択の候補のループでも 256 列ごとに止めの合図を見る ([`g5cancel_tick`])。
+    // 試作 `ENOMOTO_IPM_G5CANCEL` (既定では使わない): 基底の選択の候補のループでも 16 列ごとに止めの合図を見る ([`g5cancel_tick`])。
     // highschool1-aigio (HANG) では、根の LP の同時実行で負けた側の `BasisSelector::try_add` が期限の後も回り続けた
     let mut g5k = 0usize;
     if tunable!("ENOMOTO_T_XO_LI_MARKOWITZ", 1u8, u8) != 0 {
@@ -4283,11 +4283,15 @@ fn nearest_bound(std: &StdForm, j: usize, v: f64) -> NbStatus {
 
 /// 優先順に列を受け取り、一次独立なら基底に加える左から順の疎 LU (Gilbert–Peierls)。
 /// `L` の列 `k` はピボット行 `piv[k]` と、受理時点の未ピボット行での乗数を持つ。
-/// 試作 `ENOMOTO_IPM_G5CANCEL` (src/interior_point/kkt.rs と同じ環境変数): `k` を数え、256 回ごとに止めの合図
+/// 試作 `ENOMOTO_IPM_G5CANCEL` (src/interior_point/kkt.rs と同じ環境変数): `k` を数え、16 回ごとに止めの合図
 /// ([`crate::cancel::is_cancelled`]) を見る。立っていれば `true` (呼び手はクロスオーバーを諦める)
 fn g5cancel_tick(k: &mut usize) -> bool {
     *k += 1;
-    *k % 256 == 0 && env_str!("ENOMOTO_IPM_G5CANCEL").is_some_and(|v| !v.is_empty() && v != "0") && crate::cancel::is_cancelled()
+    let hit = *k % 16 == 0 && env_str!("ENOMOTO_IPM_G5CANCEL").is_some_and(|v| !v.is_empty() && v != "0") && crate::cancel::is_cancelled();
+    if hit {
+        crate::interior_point::kkt::g5cancel_note("the crossover basis selection");
+    }
+    hit
 }
 
 struct BasisSelector {
