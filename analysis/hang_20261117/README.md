@@ -267,7 +267,7 @@
 
 ### 14.1 入口の期限の直し (9cf76445f) の確認 (F から)
 
-- F の時間切れ 45 行の result.time は最大 600.3 秒 (直す前の vsscip では cryptanalysis 系の 1 スレッドが 608.8・706.9 秒)。wall は最大 602.6 秒で、
+- F の時間切れ 48 行の result.time は最大 600.3 秒 (直す前の vsscip では cryptanalysis 系の 1 スレッドが 608.8・706.9 秒)。wall は最大 602.6 秒で、
   wall − time (Python の起動と MPS の読み込み、計測の外) は最大 2.6 秒。求解の中の超過は 0.3 秒以内。
 - 畳み込みの判定が数秒かかる大きい問題 (highschool1-aigio など) の確認は 13 節 (200 秒で 200.05 秒)。M の全体では MSST の def 側の時間切れの行で同じ見方ができる。
 
@@ -276,7 +276,7 @@
 1. 揃ったら `python summ.py MSST def sst > summ_MSST.txt`・`python summ.py PSST def sst > summ_PSST.txt`。
 2. 正しさ: 食い違い (最適値の不一致・最適と実行不能の衝突) 0、crash 0。1 つでもあれば採らず、その (問題, 種) を `one.sh` で切り分ける。
 3. 対称性のある問題に絞った見方: SST が効くのは「orbital fixing の生成元があった問題」だけ (ほかは同じ道)。def のログの
-   「MIP: symmetry: … generators」が 0 でない問題を、手元で `ENOMOTO_MIP_SYMMETRY_DETECT_ONLY` 相当の検出だけで数え直して表に分ける
+   「MIP: symmetry: … generators」が 0 でない問題を、手元で `ENOMOTO_MIP_SYM_DETECT_ONLY=1 ENOMOTO_MIP_LOG=1` (検出だけで止める) で数え直して表に分ける
    (全体の SGM は対称性のない問題で 0 に薄まるため)。
 4. 採用の目安: 解けた数が減らない、対称性のある問題の SGM の区間の上端が +5% を越えない、時間切れの終わりのギャップが悪くならない。
    orbital fixing を外すので、orbital fixing が効いていた問題 (例えば orbitope でない対称の問題) が遅くなる側の確認を特に見る。
