@@ -162,3 +162,16 @@
   試作 `ENOMOTO_MIP_TAB_HIGHS_SIG` は環境変数つきのまま残す。
 - 次: 利用者の案で、tableau の行の点数を f(1−f) / d^α にする連続の形 (`ENOMOTO_T_MIP_TAB_DENS_ALPHA`・`ENOMOTO_MIP_TAB_DENS`、`dens/`)。
   条件 (W・fw・連続列) は付けず全問題で、並べ替えだけを変える (fill の予算・HiGHS の止め方は入れない)。
+
+## 15. 密度で割る点数の試作 (`ENOMOTO_T_MIP_TAB_DENS_ALPHA`・`ENOMOTO_MIP_TAB_DENS`、`dens/`)
+
+- 形: 既定の選び方で、tableau の行の点数を f(1−f) / d^α にして並べ替えだけを変える (本数の上限・TAB_NNZ_CBC の予算はそのまま。fill の予算・
+  HiGHS の止め方は入れない)。d: `a` = w の非零の数、`b` = w の非零の行の長さの和 (集約行の非零の見積り)、`c` = HiGHS の ||w||²。候補の行ごとに BTRAN 1 回が増える。
+- 根だけの試し (9 問 × 8 設定、60 秒・4 スレッド・種 1、`dens/root.sh`・`dens/an.py` → `dens/an.txt`):
+  - 候補の行が本数の上限を超える問題だけで差が出る。mc11: 根の下界 11620 → 11648 (a・b どちらも)、根の時間 17.8 → 11〜13 秒、カット 2672 → 1250 本・
+    プールの非零 20 万 → 8.4 万。roll3000: 12486 → 12512〜12525、13.7 → 8.7〜11 秒。qnet1: α = 1 で 15901 → 15965〜15977 (時間 2.3 → 3.7 秒)。
+  - nw04・30n20b8・10teams・neos-911970・kasai は既定とほぼ同じ (並べ替えだけなので tab の害 (nw04 0 本、30n20b8 下界 126) は出ない)。
+  - a・b・c の差は小さい。カットの非零に近い `b`、α = 1 に絞る。
+- 対の比べ (1 スレッド、利用者の依頼): `dens/cfg.py` (def・b1)・`dens/plan.py`・`dens/run.py` (tab/run.py の写しで 1 スレッド)・`dens/summ.py`。
+  P = 58 問 × 種 1・2 × {def, b1} × 60 秒 (`dens/shards_P.json`、2 分担 × 約 1.1 時間)。回し方: リポジトリの根で build.sh の後、
+  `python analysis/gate2_20261117/tab/dens/run.py P K` (K = 0・1)。集計 `python analysis/gate2_20261117/tab/dens/summ.py P`。
