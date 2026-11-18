@@ -91,3 +91,46 @@ fuzz_slack 1000 5000 mismatches 0。cargo test 413 通過・0 失敗。7 本と�
 | `LOCALMIP` (`=1`・`=2`)・`LOCALMIP_CHAIN` | (このコミット) | 67 | 74 | 409/0/19 | 一致 | gate2_20261117/ho3sl/README.md (今の既定は FJ のスレッドで Local-MIP + 連鎖を回していて (`FJ_LMIP_MIX`)、別スレッドを足す差は揺れの範囲。既定に吸収済み)。別スレッドの Local-MIP (`lmip_thread`) と `local_mip` を消した。Local-MIP の本体 (`local_mip_opts`・連鎖の手) と受け渡し箱は既定の `FJ_LMIP_MIX` が使うので残した (`poll_lmip_thread` の名前も残る) |
 | `LP_PROBE_AFTER_EXT` | (このコミット) | 87 | 74 | 409/0/19 | 一致 | lp_probe_after_ext_20261102.md (58 問 2 回: SGM +2.7%・解けた 87 → 86、常に基底を渡す形は +9.4%・87 → 80。根の頂点が変わる揺れに負ける)。クリーク行の拡張の後の LP による固定とかけ直しの道を消した。`lp_probe` の引数 `try_fix` は今はいつも真 (注記した) |
 | `BG_DETERM_ROBUST` (`T_MIP_BG_DETERM_RATIO`・`_LEN`・`_GAP`・`_WAIT_MULT`) | (このコミット) | 121 | 74 | 409/0/19 | 一致 | robust_stall_20261102.md・halve_submip_20261030.md (=o は h80x6320d が 3 回とも時間切れ・58 問 −1.6%・解けた −3、=ao は待ちすぎの費用、=p+o の組も h80x6320d の揃った損で採らない)。`BgRobust`・裏のカットの拒否 (`veto_own_stall`)・第 2 段階の強制 (`robust_phase2`)・その状態 (`flat_run`・`robust_stalled`・`vetoes`) と、`wait_determ` の使われなくなった引数を消した。裏のカットを始めたときの値 (`start_bits`) は `HO5_BGSTALL`・`CUTSTALL_GAP`・`S4_BGZERO` が使うので残した |
+
+## 飛ばしたもの (第 2 弾、12 件)
+
+| 試作 | 理由 |
+|---|---|
+| `NODELP2` | analysis/gate2_20261117/nodelp2s/README.md (11-17) が「試作のコードと台本は残す」と決めている。元の部品の `p`・`b` は既定に入っている |
+| `DFSPQ` | analysis/gate2_20261117/dfspq/README.md (11-17) が「既定では働かないので残す」と決めている |
+| `MC11FIX2` | analysis/revisit_20261112.md の「次の候補になりうるが今回は外したもの」に `MC11FIX2=b` が挙がっている |
+| `ROOT_BASIS_FIX` | analysis/highsloss_20261113.md で neos-873061 の根の LP を 72 → 10 秒にした記録があり、派生の試作 `ROOT_BASIS_FIX_BIG` が同じ部品を使う |
+| `SUBA_RATE` | 不採用の記録は文字 `n` だけ (halve_submip_20261030.md の bench30)。`i`・`t`・`z` の根拠がない |
+| `FOCUS` | 不採用の記録は `primal` だけ。`auto` の根拠がない |
+| `FACE_SEP` | 既定の形 (`int2`) を選ぶ環境変数で、不採用は `=off` の形だけ |
+| `SYNTH_CLOCK_FACTOR` | 試作ではなく、出荷時の値 `SYNTH_CLOCK_FACTOR` を上書きする再較正のための調整つまみと注記されている (不採用は値 4・8 の実験だけ) |
+| `CUTSEL_HIGHS` | 単独の不採用の記録がない (組み合わせでの不採用と「採否なし」だけ)。既定の `CUTSEL_PROBE` の `S` と部品を共用する |
+| `CUTSEL_HIGHS_GUARD` | `fc` の形は既定 (`CUTSEL_PROBE=rate` の `cutsel_guard_fc`) に取り込まれていて、残る「混ぜる形」の不採用の記録がない |
+| `NODESEL_BANDIT` | analysis/treeclose_20261114.md 9.13・9.30 で 60 秒は中立、600 秒では既定より速い面があり (`=1` は解けた数 +3)、不採用とは書かれていない (後の DFSBB に移ったが判断の記録がない) |
+| `HNFCUT` | `HNFPRE` (PRUNE の受け持ちの既定の外し) と部品 (`hnf::mode`・`cuts.rs` の `Sub::Cong`・分離の `set_kind`) を共用し、HNFPRE の前処理の起動にも関わる |
+
+依頼書の除外 4 件 (`SYMREFL`・`SYM_LEX_CANON`・`IMPLINT_TU2`・`ROOTLP3`) は触っていない。
+
+## fuzz (第 2 弾)
+
+どれも analysis/cleanup_20261118/fuzz.sh (release019 と同じ 7 本、既定) で、7 本とも rc=0・bad 0・mismatches 0、cargo test 全通過:
+
+| タグ | ビルド | それまでに消した件数 | 結果 |
+|---|---|---|---|
+| p2a | d615d07f0 | 9 | bad 0 (strict 13・14、objint optimal 967/971)、cargo test 411 |
+| p2b | 679f878e4 | 24 | 同上、cargo test 411 |
+| p2c | efa4591ad | 34 | 同上、cargo test 411 |
+| p2d | c87a85ea8 | 43 | 同上、cargo test 411 |
+| p2e | 16f17b2ca | 56 | 同上、cargo test 409 |
+| p2f | 3ae3f2653 | 64 | 同上、cargo test 409 |
+| p2final | 6acccd5b2 | 68 (全部) | 同上 (objint optimal 967/971・slack mismatches 0)、cargo test 409。`ident.py check` も一致 |
+
+## まとめ (第 2 弾)
+
+- 対象 84 件のうち、依頼書の除外 4 件を除く 80 件を処理した。**消したのは 68 件** (19 コミット)、src の正味 **−1904 行**。飛ばしたのは 12 件 (上の表)。
+- 多くは「全体で有効にする環境変数」だけを消し、既定の経路や他の試作が使う本体は残した (FJ_P3 の前処理 4 件、GR の再スタート・
+  一般整数の含意 4 件、固定率の止め方、終わった順の受け取り、Harris2Scope、CUT_AGG の `e` の延長、ProbeEnd、MUSHAGG の
+  `with_intvub_mode`、PROBE_CLIQUE の含意の表など。行ごとの備考に書いた)。
+- 毎回: cargo test 全通過 (411 → 409。減った 2 本は消した試作の単体テスト、第 2 弾の始めの 412 から ZH_PRE の 1 本を含め計 3 本)、
+  警告の行は 74 のまま、1 スレッドの 12 問 (状態・目的値・ノード数) が消す前 (base.json) と完全に一致。fuzz 7 本は 7 回とも bad 0。
+- 消した試作を参照する analysis/ の台本は直していない。docs/ に使い方の説明があったものはない (backlog の SEPLEARN は第 1 弾で注記済み)。
