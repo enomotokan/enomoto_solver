@@ -32,8 +32,9 @@ macro_rules! tunable {
 }
 
 thread_local! {
-    /// Feasibility Jump 用の問題を作る前処理の中か (`ENOMOTO_MIP_FJ_P3`、試作): このスレッドだけで `ENOMOTO_MIP_INEQ_SINGLETON`・
-    /// `ENOMOTO_MIP_CS_OBJ_PIVOT`・`ENOMOTO_MIP_FJ_LP_REPAIR` を有効とみなす
+    /// Feasibility Jump 用の問題を作る前処理の中か (`ENOMOTO_MIP_FJ_P3`、既定): このスレッドだけで不等式行の列シングルトン・
+    /// 目的を定める連続列の消去・FJ の点の LP 修復・双対の推論による境界の締め付けを使う (それぞれを全体で使う試作
+    /// `ENOMOTO_MIP_INEQ_SINGLETON`・`_CS_OBJ_PIVOT`・`_FJ_LP_REPAIR`・`_DUAL_UB` は 2026-11-18 に削除)
     static FJ_P3_FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 

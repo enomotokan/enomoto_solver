@@ -416,9 +416,9 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     let mut best_viol = usize::MAX;
     let mut best_obj = f64::INFINITY;
     let mut best_x: Option<Vec<f64>> = None;
-    // `ENOMOTO_MIP_FJ_LP_REPAIR`: 解が見つからなければ、違反の行の数が最も少なかった点 (`ENOMOTO_T_MIP_FJ_LP_REPAIR_MAX_VIOL`
+    // FJ の問題 (`ENOMOTO_MIP_FJ_P3`) では、解が見つからなければ、違反の行の数が最も少なかった点 (`ENOMOTO_T_MIP_FJ_LP_REPAIR_MAX_VIOL`
     // 行以下、既定 50) の整数列を固定して、連続列を LP で解き直す ([`lp_repair`])
-    let repair = (env_str!("ENOMOTO_MIP_FJ_LP_REPAIR").is_some() || crate::fj_p3_force()) && p.is_int.iter().any(|&b| !b);
+    let repair = crate::fj_p3_force() && p.is_int.iter().any(|&b| !b);
     let repair_max = tunable!("ENOMOTO_T_MIP_FJ_LP_REPAIR_MAX_VIOL", 50usize, usize);
     let mut best_inf: Option<Vec<f64>> = None;
     // `ENOMOTO_MIP_FJ_DUMP=ディレクトリ` (診断用): 解が見つからなければ、問題 (`prob.mps`、最初の 1 回だけ) と違反の行の数が最も少ない点
@@ -548,7 +548,7 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     best_x
 }
 
-/// FJ の点の修復 (`ENOMOTO_MIP_FJ_LP_REPAIR`、既定では使わない): 整数列を `x` の値 (丸めたもの) に固定し、連続列だけの LP を
+/// FJ の点の修復 (FJ の問題 `ENOMOTO_MIP_FJ_P3` で使う): 整数列を `x` の値 (丸めたもの) に固定し、連続列だけの LP を
 /// 元の費用で解く。FJ は 1 変数ずつ動かすので、連続列どうしの 2 行 (`0.5 a - b <= 43.75`・`b - a <= -925` で、両方を満たすのは
 /// 両方の列を同時に動かしたときだけ) を満たせずに止まることがある (physiciansched6-2、HiGHS の前処理の後の問題)。
 /// 整数列だけの行が破れていれば何もしない。実行可能なら (行と境界を 1e-6 で確かめて) 点を返す。

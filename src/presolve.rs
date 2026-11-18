@@ -100,7 +100,7 @@ fn round_int_bounds(lb: &mut [f64], ub: &mut [f64]) -> bool {
 /// 整数最適化用の前処理: 整数列の印 `is_int` を付けて [`run_extended`] を実行する。スケーリングはしない
 /// (整数列の列スケールは 1 でなければならないため)。双対の議論に基づく縮約 (dualpropagate、
 /// ineqsingleton、forcingcol) は整数最適化では正しくないので行わない (forcingcol は主問題の議論なので
-/// `ENOMOTO_MIP_FORCING_COL` で使える。ineqsingleton は `ENOMOTO_MIP_INEQ_SINGLETON`・`ENOMOTO_MIP_INEQ_SINGLETON_ALL` で使える)。
+/// `ENOMOTO_MIP_FORCING_COL` で使える。ineqsingleton は `ENOMOTO_MIP_FJ_P3` の FJ の問題と `ENOMOTO_MIP_INEQ_SINGLETON_ALL` で使える)。
 #[allow(clippy::too_many_arguments)]
 pub fn run_extended_mip(n: usize, a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], c: &[f64], is_int: &[bool], prop_passes: usize, rounds: usize, inner_rounds: usize) -> ExtendedPresolveResult {
     INT_MASK.with(|m| *m.borrow_mut() = Some(std::rc::Rc::new(is_int.to_vec())));
@@ -568,7 +568,7 @@ pub fn run_extended(
         None => large && tunable!("ENOMOTO_T_INEQ_SINGLETON_LARGE", INEQ_SINGLETON_LARGE, usize) != 0,
     };
     // `ENOMOTO_MIP_INEQ_SINGLETON_ALL` (試作、既定では使わない): 整数最適化の前処理で、不等式行の列シングルトン (`ineqsingleton`) を
-    // 問題の大きさ (`LARGE_PRESOLVE_MIN_ROWS` 以上) によらず使う (`ENOMOTO_MIP_INEQ_SINGLETON` と同じ扱い: 整数列は固定だけ、
+    // 問題の大きさ (`LARGE_PRESOLVE_MIN_ROWS` 以上) によらず使う (FJ の問題の前処理と同じ扱い: 整数列は固定だけ、
     // 連続列は固定と等式化)。CBC の前処理 (CoinPresolve の `slack_singleton_action`・`implied_free` が不等式行の列シングルトンを
     // 大きさによらず扱う) にならう。`ENOMOTO_INEQ_SINGLETON=0` を付けたときは使わない
     let mip_ineq_all = int_mask().is_some() && env_str!("ENOMOTO_MIP_INEQ_SINGLETON_ALL").is_some() && env_str!("ENOMOTO_INEQ_SINGLETON") != Some("0");
@@ -859,11 +859,11 @@ pub fn run_extended(
         debug_presolve_dump(round_idx, "dualprop", &lb, &ub);
         // 不等式行の列シングルトン (`ineqsingleton`、大きな問題か `ENOMOTO_INEQ_SINGLETON` 設定時):
         // 列を上下限に固定するか、その行を等式に変えて後段の colsingleton に消去させる。
-        // 整数最適化の前処理では使わない (`ENOMOTO_MIP_INEQ_SINGLETON` で使う。整数列は固定だけ、連続列は等式化も。
+        // 整数最適化の前処理では使わない (FJ の問題の前処理 `ENOMOTO_MIP_FJ_P3` と `ENOMOTO_MIP_INEQ_SINGLETON_ALL` で使う。整数列は固定だけ、連続列は等式化も。
         // physiciansched6-2 では目的の費用が `y >= Σ 罰則の列` の形の連続列 (この行だけに出る) にあり、これを消さないと
         // 罰則の列が費用のない鎖のまま残って Feasibility Jump が解を見つけられない)
         let mip_mask = int_mask();
-        if ineq_singleton_on && (mip_mask.is_none() || env_str!("ENOMOTO_MIP_INEQ_SINGLETON").is_some() || crate::fj_p3_force() || mip_ineq_all) {
+        if ineq_singleton_on && (mip_mask.is_none() || crate::fj_p3_force() || mip_ineq_all) {
             let isr = timed_step!("ineqsingleton", ineqsingleton::resolve_inequality_singletons_int(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub, mip_mask.as_deref().map(|v| v.as_slice())));
             if env_str!("ENOMOTO_DEBUG_INEQ_SINGLETON").is_some() {
                 eprintln!("DEBUG_INEQ_SINGLETON: fixes={} implied_equalities={}", isr.fixes.len(), isr.implied_equalities.len());
