@@ -253,3 +253,13 @@
   (同じ vb でも以前の回は 1.95983e7 で、根の下界も回で揺れる)。
 - 正しさ: 併合後の版で cargo test 419 通過。vbr・vbm それぞれで `mip_fuzz_fixed_charge.py 400 1000` bad 0・`mip_fuzz_vs_highs.py 800 20000` bad 0。
 - 対の比べの分担表: vbr `python run.py PVBR K`・`MVBR K`、vbm `python run.py PVBM K`・`MVBM K` (P 4 分担・M 12 分担)。集計 `python summ.py PVBR vbr` など。
+
+## 12. SUBWAIT の対の計測 (sw = 0.5 の結果と、sw2 = 2 の台本)
+
+- sw (`ENOMOTO_T_MIP_SUBWAIT=0.5`) の対はすでに回してある (`res_MSW_s0〜11.jsonl`・`res_PSW_s0〜3.jsonl`、`python summ.py MSW sw` / `python summ.py PSW sw`)。
+  - M (48 問 × 種 1・2、600 秒): 解けた数 def 75 / sw 76、sw / def = −0.9% [−11.7%, +11.0%]。食い違いは neos-4722843-widden 種 1 の 1 件 (時間切れの暫定解の差)。
+  - P (58 問 × 種 1〜3、60 秒): 解けた数 def 133 / sw 135、sw / def = −1.6% [−7.1%, +2.8%]。
+  - どちらも決め手にならない。M・P とも neos-2746589-doon を含まない。
+- 群 5 (vsscip_slow_20261118) によると、doon の 4 スレッドは根の並列のサブ MIP (被約費用・RENS) の待ちで進まず、`SUBWAIT=2` で 240 秒のノードが 5 → 1100、木に入るのが 210 → 61 秒。
+- そこで sw2 (`ENOMOTO_T_MIP_SUBWAIT=2`) の対の台本を足した: `python plan.py 12 4 sw2 neos-2746589-doon` → `shards_MSW2.json` (M の 48 問 + doon、12 分担、各 約 1.4 時間)・`shards_PSW2.json` (4 分担、各 約 0.7 時間)。
+  回し方は `python run.py MSW2 K` (K = 0〜11)・`python run.py PSW2 K` (K = 0〜3)、まとめは `python summ.py MSW2 sw2`・`python summ.py PSW2 sw2`。

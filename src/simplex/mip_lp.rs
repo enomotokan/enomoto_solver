@@ -239,6 +239,20 @@ thread_local! {
     pub(crate) static PROGRESS_STOP_ONCE: std::cell::Cell<Option<(usize, usize, f64, f64)>> = const { std::cell::Cell::new(None) };
     /// このスレッドの基底のない求解を同時実行にするときのスレッド数 ([`TwoStageLp::solve`]。1 なら同時実行しない)。
     static COLD_RACE_THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+    /// 試作 `ENOMOTO_MIP_G5SEQ` (既定では使わない。analysis/vsscip_slow_20261118/g5/README.md): 1 スレッドの MIP の入口
+    /// ([`crate::mip::solve_mip`]) が立てる。立っていて同時実行をしない (`COLD_RACE_THREADS` が 1) 基底のない大きい求解は、
+    /// 二段解法に反復の上限を付け、上限に当たれば同じスレッドで内点法 + クロスオーバーに切り替える ([`TwoStageLp::solve_seq_ipm`])
+    static SEQ_IPM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`SEQ_IPM`] を設定し、前の値を返す。
+pub(crate) fn set_seq_ipm(on: bool) -> bool {
+    SEQ_IPM.with(|c| c.replace(on))
+}
+
+/// 試作 `ENOMOTO_MIP_G5SEQ` が有効か (値が空でなく `0` でない)。
+pub(crate) fn g5seq_on() -> bool {
+    env_str!("ENOMOTO_MIP_G5SEQ").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
 thread_local! {
@@ -1633,8 +1647,64 @@ impl TwoStageLp {
                 }
                 return self.solve_race(lim, k);
             }
+            if SEQ_IPM.with(|c| c.get()) {
+                let nnz: usize = self.rows.iter().map(|r| r.len()).sum();
+                let size = self.std.n_total + nnz;
+                if size as f64 >= tunable!("ENOMOTO_T_MIP_G5SEQ_SIZE", 50000.0, f64) {
+                    return self.solve_seq_ipm(lim);
+                }
+            }
         }
         self.solve_once(lim)
+    }
+
+    /// 試作 `ENOMOTO_MIP_G5SEQ` (1 スレッドの基底のない大きい求解): 二段解法を反復の上限
+    /// L = `ENOMOTO_T_MIP_G5SEQ_C` (既定 1) x (行 + 列) で解き、L 以内に結論が出なければ同じスレッドで内点法 + クロスオーバーを解いて
+    /// その頂点を採る (TIMEDEP の `r` を 1 スレッドで順に回す形)。頂点が得られなければ二段解法を続ける。
+    fn solve_seq_ipm(&mut self, lim: &SolveLimits) -> LpStatus {
+        let debug = env_str!("ENOMOTO_DEBUG_RACE").is_some();
+        let l = (tunable!("ENOMOTO_T_MIP_G5SEQ_C", 1.0, f64) * (self.rows.len() + self.n) as f64).max(100.0) as u64;
+        let cap = SolveLimits { iteration_limit: lim.iteration_limit.min(l), ..*lim };
+        let t0 = std::time::Instant::now();
+        let st = self.solve_once(&cap);
+        let conclusive = matches!(st, LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded | LpStatus::ObjectiveBound | LpStatus::TimeLimit);
+        if conclusive || cap.iteration_limit >= lim.iteration_limit {
+            if debug {
+                eprintln!("MIP G5SEQ: simplex concluded within the cap {l} ({st:?}, {:.3}s)", t0.elapsed().as_secs_f64());
+            }
+            return st;
+        }
+        let t1 = std::time::Instant::now();
+        let sc = self.ipm_scale();
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).thread_name(|i| format!("enomoto-mip-seqipm-{i}")).build();
+        let ih = crate::cancel::inherit();
+        let run = || {
+            sid::request_duals(true);
+            // 共有の下界 (誰も書かない) を付けて、同時実行のときと同じく押し出しの時間の上限をかけない (止める役目は LP の期限が持つ)
+            let bound = crate::cancel::SharedBound::new(self.std.n_total, self.std.n_rows);
+            let r = crate::cancel::with_deadline(lim.deadline, || crate::cancel::with_bound(Some(bound), || ih.clone().run(|| ipm_crossover_run(&self.std, sc.as_deref()))));
+            let duals = sid::take_duals();
+            sid::request_duals(false);
+            if debug {
+                eprintln!("MIP G5SEQ: ipm_crossover status {:?}", r.as_ref().map(|r| r.status.clone()));
+            }
+            r.filter(|r| r.status == Status::Optimal).and_then(|r| r.x).map(|x| (x, duals))
+        };
+        let got = match &pool {
+            Ok(p) => p.install(run),
+            Err(_) => run(),
+        };
+        if debug {
+            eprintln!("MIP G5SEQ: simplex hit the cap {l} at {:.3}s ({st:?}); ipm_crossover {} after {:.3}s", t1.duration_since(t0).as_secs_f64(), if got.is_some() { "found a vertex" } else { "failed" }, t1.elapsed().as_secs_f64());
+        }
+        let Some((x, duals)) = got else {
+            if lim.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return LpStatus::TimeLimit;
+            }
+            return self.solve_once(lim);
+        };
+        user_log!("Root LP: the two-phase method hit the iteration cap {l}; took the interior-point method + crossover vertex ({:.2}s, G5SEQ)", t0.elapsed().as_secs_f64());
+        self.adopt_ipm_vertex(&x, duals, lim, debug, t0)
     }
 
     /// 二段解法で 1 回解く。

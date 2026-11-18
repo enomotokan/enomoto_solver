@@ -3,6 +3,8 @@ CFGS = {
     "def": {},
     "wst": {"ENOMOTO_MIP_PRR_PRECHECK": "1", "ENOMOTO_T_MIP_HNFPRE_REPRE_MIN": "10"},
     "sw": {"ENOMOTO_T_MIP_SUBWAIT": "0.5"},
+    # sw2 = 待ちの上限を根のサブ MIP の上限の 2 倍に (群 5 の neos-2746589-doon で効いた値、README 12 節)
+    "sw2": {"ENOMOTO_T_MIP_SUBWAIT": "2"},
     # vb = VB_IMPL だけ (README 10 節。vbis の P の害は選び方の変更の側から来ていた)
     "vb": {"ENOMOTO_MIP_VB_IMPL": "1"},
     # vbr = VB_IMPL を外側の根でだけ使う、vbm = 締め幅が列の幅の 0.25 倍以上の含意だけ (README 11 節)
