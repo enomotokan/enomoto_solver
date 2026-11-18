@@ -6614,7 +6614,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 固定費用ネットワーク型ではノードでも経路集約の始点を使う (`ENOMOTO_T_MIP_NODE_FC_PATH_STARTS`、[`Solver::node_cuts_due`])
             let max_starts = if !light {
                 tunable!("ENOMOTO_T_MIP_PATH_STARTS", 1000usize, usize)
-            } else if self.fc_node_sep || (self.tree_sep_fc && !(self.nc_path_forced && super::solver::nodecnt('r') && !self.nc_root_decide())) {
+            } else if self.tree_sep_fc && !(self.nc_path_forced && super::solver::nodecnt('r') && !self.nc_root_decide()) {
                 tunable!("ENOMOTO_T_MIP_NODE_FC_PATH_STARTS", 1000usize, usize)
             } else {
                 tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 0usize, usize)
@@ -6622,9 +6622,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 既定は HiGHS の経路集約の移植 (`ENOMOTO_MIP_PATH_OLD` で従来の経路集約)
             // 経路集約: 従来のもの (`ENOMOTO_MIP_PATH_OLD`)、HiGHS の移植 (`ENOMOTO_MIP_PATH_HIGHS_ONLY`)、既定は両方
             // (h80x6320d・rout は移植で根の下界が上がり、mik-250 は従来のものの方が強い)
-            // `ENOMOTO_MIP_FC_NODE_PATH_HIGHS`: 固定費用ネットワーク型の毎ノードの分離では、ノードでも HiGHS の移植を使う
             // 試作 `ENOMOTO_MIP_NODECNT` の `h`: 木の中の分離 (`tree_sep_fc`) でもノードで HiGHS の移植を使う
-            let node_highs = light && ((self.fc_node_sep && env_str!("ENOMOTO_MIP_FC_NODE_PATH_HIGHS").is_some()) || (self.tree_sep_fc && super::solver::nodecnt('h') && !(self.nc_path_forced && super::solver::nodecnt('r') && self.nc_rdec != 1)));
+            let node_highs = light && self.tree_sep_fc && super::solver::nodecnt('h') && !(self.nc_path_forced && super::solver::nodecnt('r') && self.nc_rdec != 1);
             let old_only = env_str!("ENOMOTO_MIP_PATH_OLD").is_some() || (light && !node_highs);
             let highs_only = env_str!("ENOMOTO_MIP_PATH_HIGHS_ONLY").is_some();
             if !old_only && self.sep_src_on(sepprof::SRC_PATHH, light) {
