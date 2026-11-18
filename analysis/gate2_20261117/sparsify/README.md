@@ -47,9 +47,13 @@ P の 58 問で前処理が変わる 18 問と、記録で遅い/速い問題:
 
 ## 3. 試作 `ENOMOTO_MIP_SPARSIFY_LATE=s` (既定は変えない)
 
-`src/mip/mod.rs` の `SPARSIFY_LATE` の所。疎化の後に f = 縮んだ行 / 書き換えた行 を数え、
-σ((f − `ENOMOTO_T_MIP_SPL_C` (0.5)) / `ENOMOTO_T_MIP_SPL_W` (0.1)) が 1/2 以上のときだけ疎化した問題を使う (そうでなければ疎化の前の問題のまま、
-既定と同じ)。疎化を使うかは問題につき 1 回の入り切りなので、この形は実質 f のしきい値 0.5 になる (W は将来、割合で使う形にするときの幅)。
+`src/mip/mod.rs` の `SPARSIFY_LATE` の所。疎化の後に f = 縮んだ行 / 書き換えた行 を数え、f ≥ `ENOMOTO_T_MIP_SPL_C` (0.5) のときだけ疎化した問題を
+使う (そうでなければ疎化の前の問題のまま、既定と同じ)。
+
+- 最初は σ((f − 0.5)/0.1) ≥ 1/2 の形で書いたが、問題につき 1 回の入り切りなので f ≥ 0.5 のしきい値と同じ。利用者の方針の訂正
+  (「普通の if で充分ならそれでいい」) を受けて if の形に書き換えた (動きは同じ。`ENOMOTO_T_MIP_SPL_W` はなくなった)。
+- 文字 `b` も付けると (`=sb`)、書き換えた行のうち 0-1 列だけの行の割合 b ≤ `ENOMOTO_T_MIP_SPL_BMAX` (0.5) のときに限る (8 節)。
+- 計数の行 `MIP: sparsify-late stats ... gate 1.000|0.000 (f .. b ..)` (`ENOMOTO_MIP_LOG=1`)。
 
 前処理だけの回で確かめた (`pre.jsonl` の `spls`): air03 122 行・nubu 444 行は既定と同じ大きさに戻る。kasai 1190 行・physiciansched6-2 8373 行・
 neos-860300 568 行は疎化を使う。P の 58 問で既定と違う解き方になるのは physiciansched6-2・neos-860300 の 2 問、M の 48 問では kasai だけ
@@ -140,3 +144,21 @@ def・spls の 2 回ずつ回した。
   (nursesched-sprint02 40/40・decomp2 56/57・physiciansched6-2 83/159) は書き換えた行の多くが 0-1 列だけの行。2 つ目の特徴「書き換えた行のうち
   0-1 列だけの行の割合 b」で分けられそう。残り 9 問には b = 0 の問題 (irish-electricity・huahum・berkel) と b ≈ 1 の問題 (crypt14・16・turama・
   nursesched-medium-hint03・highschool1-aigio・physiciansched3-3) が両方あるので、b はその計測で試せる (b はこの 5 問だけを見て思いついた)。
+
+## 8. physiciansched6-2 の扱いの案 (親の依頼)
+
+7 節の 5 問では physiciansched6-2 (f = 0.585) が 1.29 倍で悪い。外し方は 2 つ:
+
+| 案 | 決め方 | 入る問題 (240 問の走査から) | 強み | 弱み |
+|---|---|---|---|---|
+| A. 中心を上げる | f ≥ 0.6 (`ENOMOTO_T_MIP_SPL_C=0.6`) | 14 問から physiciansched6-2 だけが外れて 13 問 | 0.5 の近くの問題はこの 1 問だけで、外れる問題がはっきりしている | 1 問に合わせただけ。nursesched-sprint02 (1.10)・decomp2 (1.23) の遅れは残る |
+| B. b で if | f ≥ 0.5 かつ b ≤ 0.5 (`=sb`) | kasai・neos-860300・irish-electricity・neos-5093327-huahum・neos-4954672-berkel の 5 問 | 遅れた 3 問 (b = 1.00・0.98・0.52) をまとめて外す。「集合分割の 0-1 の行を引き算で崩すと損」という 2 節の読みと合う | physiciansched6-2 の b = 0.522 で境に近い。crypt14・16・turama・hint03・highschool1-aigio・physiciansched3-3 (b ≈ 0.9〜1) も外れるので、その 6 問で効く場合は取り逃がす |
+
+- 判断の材料は 9 問の計測 (`shards_J.json`、種 1〜4): b ≈ 1 の 6 問が spls で遅い/悪い向きなら B、効くなら A。b = 0 の 3 問 (irish-electricity・huahum・
+  berkel) はどちらの案でも入るので、両案に共通の確かめになる。
+- 今の私の推し (計測の前): B。理由は、良かった 2 問は b = 0、遅れた 3 問はどれも b > 0.5 で、0-1 の行の構造を崩すという仕組みの説明が付くため。
+  ただし b は 5 問を見て思いついたもので楽観的。
+- 注意: ブランチの最新 (他のセッションの変更の取り込み後) では、既定の physiciansched6-2 の前処理の後が 8621 → 8597 行に変わっている
+  (`=sb` でも同じ 8597 行で、既定と一致することは確かめた)。走査 (6 節) は取り込み前のビルドで、入る 14 問の顔ぶれは少し変わりうる。
+- 確かめ: if の形と `b` を入れた後で `cargo test --release` (BRIEF の形) 422 件通過・0 件失敗。前処理だけの回で `=s` は書き換え前と同じ大きさ
+  (kasai 1190・neos-860300 568・decomp2 4498 行)、`=sb` は kasai・neos-860300 だけ疎化を使い、decomp2・physiciansched6-2・air03 は既定と同じ。
