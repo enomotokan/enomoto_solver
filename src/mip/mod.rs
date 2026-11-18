@@ -56,7 +56,6 @@ pub(crate) mod seplearn;
 pub(crate) mod cutmix;
 pub(crate) mod mcf;
 pub(crate) mod clique;
-pub(crate) mod cutsel_ens;
 pub(crate) mod pretime;
 pub(crate) mod plsb;
 pub(crate) mod prechain;
@@ -3299,8 +3298,9 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     if !static_orbitope && env_str!("ENOMOTO_MIP_ORBPP").is_some_and(|v| v != "0") {
         let min_rows = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_ROWS", 3usize, usize);
         // 列 (入れ替える組) の数の下限。列の少ないオービトープを静的にすると、固定は少ないのに動的な固定の柔らかさを失う
-        // (neos-911970: 35x3 が 6 つと 35x6 が 1 つで 33 列の固定、P で 1.74 倍遅い。graph20-20-1rand は 52x37)
-        let min_cols = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_COLS", 0usize, usize);
+        // (neos-911970: 35x3 が 6 つと 35x6 が 1 つで 33 列の固定、P で 1.74 倍遅い。graph20-20-1rand は 37x37)。P・T・M の 106 問で ORBPP が
+        // 働くのは 3・6 列 (neos-911970・misc07) と 37 列 (graph20) だけなので、間の 10 にする (analysis/vsscip_slow_20261118/g1/scan.txt)
+        let min_cols = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_COLS", 10usize, usize);
         for o in orbs.iter_mut() {
             let binary = o.vars.iter().flatten().all(|&j| prob.is_int[j] && prob.col_lo[j] >= 0.0 && prob.col_up[j] <= 1.0);
             // パッキング・分割の行に含まれる行だけのオービトープ (行の部分集合でも列の入れ替えは対称性。`ORBITOPE_STATIC` と同じく過半のときだけ)
