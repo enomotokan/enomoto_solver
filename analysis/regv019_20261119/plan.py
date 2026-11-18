@@ -1,4 +1,4 @@
-"""分担表を作る: python plan.py SET 案の設定 分担の数 (SET は P か M)。
+"""分担表を作る (vmf 用に作ったが、利用者の判断で vmf は計測しない。次の案で使う): python plan.py SET 案の設定 分担の数 (SET は P か M)。
 P = MIPLIB の 58 問 (analysis/cbcimpl_20261029/probs.py) × 種 1〜3 × {def, 案}、60 秒。
 M = VUBAGG が働く問題 (vubcount と g1 の scan) × 種 1・2 × {def, 案}、600 秒。
 同じ (問題, 種) の 2 回は同じ分担に続けて置き、順は種で入れ替える。重さは時間の上限 x 2 で見積もり、貪欲に分ける。"""
