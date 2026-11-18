@@ -3567,8 +3567,17 @@ fn knapsack_clique_rows(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f6
     out
 }
 
+/// 診断 `ENOMOTO_MIP_G5CLQ_RSS` (振る舞いは変えない。analysis/vsscip_slow_20261118/g5/README.md): クリーク行の拡張の各段の RSS を標準エラーへ
+fn g5clq_rss(tag: &str) {
+    if env_str!("ENOMOTO_MIP_G5CLQ_RSS").is_some() {
+        let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok())).unwrap_or(0);
+        eprintln!("G5CLQ_RSS {tag} {} MB", rss / 1024);
+    }
+}
+
 fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     let _pt = pretime::guard("clqext");
+    g5clq_rss("start");
     let t0 = std::time::Instant::now();
     let n = prob.n;
     let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0).collect();
@@ -3580,6 +3589,7 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
         return prob;
     };
     cutmix::log_clique(&prob, &binary, g.num_edges());
+    g5clq_rss("graph");
     // `ENOMOTO_MIP_CLIQUE_EXTEND_ROWS_FIRST` (試作、既定では使わない): まず行から作る衝突グラフ (プロービングの含意なし) だけで
     // 文字を足し、その後に含意を含むグラフで足せるだけ足す。含意の辺が多いと (mzzv42z は行から 205346 辺、含意から 1186997 本)、
     // 番号順の貪欲が LP に効かない文字を先に取り、行から作る辺だけの拡張 (HiGHS の前処理の clique merging に当たる) を塞ぐ。
@@ -3734,6 +3744,7 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
         ext_rows += 1;
         added += add.len();
     }
+    g5clq_rss("loop");
     for c in fix_lits {
         let j = (c / 2) as usize;
         if col_lo[j] < col_up[j] {
@@ -3789,6 +3800,7 @@ fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
             dup += 1;
         }
     }
+    g5clq_rss("dominated");
     if dup + dominated > 0 {
         let mut k = 0;
         rows.retain(|_| {
