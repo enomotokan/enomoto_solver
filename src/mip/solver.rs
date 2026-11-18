@@ -1474,8 +1474,6 @@ pub(super) struct Solver<'a, L: MipLp> {
     pool1_diag_at: Option<Instant>,
     pool1_hist: [u64; 7],
     pool1_cnt: [u64; 3],
-    /// `ENOMOTO_MIP_POOL1_DONATE` の `alt` (試作): 次に出すノードを下界最小にするか
-    pool1_alt: bool,
     /// `ENOMOTO_MIP_POOL2_TAKE` の `h`: 共有の待ち行列から取り、先に処理するノードの (枠, 世代)。
     pool2_pin: Vec<(usize, u64)>,
     /// `ENOMOTO_MIP_POOL2_TAKE` の `i`: 今の潜りを打ち切る合図。
@@ -1493,21 +1491,6 @@ fn pool1_diag_secs() -> f64 {
 
 /// 診断用 (`ENOMOTO_MIP_POOL1_DIAG`): 出したノードの下界と全体の下界の差の区切り (最後の欄はそれ以上)。
 const POOL1_BUCKETS: [f64; 6] = [1e-6, 0.01, 0.1, 0.3, 1.0, 3.0];
-
-/// `ENOMOTO_MIP_POOL1_DONATE` (試作、既定では使わない): 手元の待ち行列の上限 (`ENOMOTO_T_MIP_TREE_LOCAL_CAP`) を超えた分を
-/// 共有の待ち行列へ出すときに、どのノードを出すか。`best` (= 既定、下界最小)・`worst` (下界最大)・`est` (下界と推定値の平均が最大)・
-/// `deep` (最も深い)・`shallow` (最も浅い)・`alt` (下界最小と最大を交互)。返り値は [`super::queue::NodeQueue::pop_for_donate`] の
-/// mode (alt は 5)。
-fn pool1_donate_mode() -> u8 {
-    match env_str!("ENOMOTO_MIP_POOL1_DONATE") {
-        Some("worst") => 1,
-        Some("est") => 2,
-        Some("deep") => 3,
-        Some("shallow") => 4,
-        Some("alt") => 5,
-        _ => 0,
-    }
-}
 
 /// 分枝限定法で解く。
 /// 並列モードのスレッド数 (`ENOMOTO_MIP_THREADS`、既定 1 = 並列にしない)。
@@ -2507,6 +2490,10 @@ fn full_changes(n: &OpenNode) -> std::borrow::Cow<'_, [BoundChange]> {
 }
 
 impl SnapNode {
+    /// 変更の並びを空にした [`Self::of`] (呼び手が並びを入れる。`G5FIN` 用)
+    fn of_thin(n: &OpenNode) -> Self {
+        SnapNode { changes: Vec::new(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None }
+    }
     fn of(n: &OpenNode) -> Self {
         SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None }
     }
@@ -5870,7 +5857,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool1_diag_at: None,
         pool1_hist: [0; 7],
         pool1_cnt: [0; 3],
-        pool1_alt: true,
         pool2_pin: Vec::new(),
         pool2_interrupt: false,
         pool2_at: None,
@@ -9397,7 +9383,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_RESTART_CUTS_READD`: 再スタート前に効いていたカットを、根の LP を解く前にカットの行として加える
             // (問題の行ではないので木の中で年齢により外せる。プールにもあるので外れても違反すれば戻る)
             let readd_mark = super::RESTART_CUTS_READD.with(|f| f.replace(false));
-            if (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt() || self.watch.is_some() || super::gr_restart_readd_for(self.p) || readd_mark) && !self.params.submip {
+            if (self.highs_cutmgmt() || self.watch.is_some() || super::gr_restart_readd_for(self.p) || readd_mark) && !self.params.submip {
                 let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = cuts.iter().filter(|(c, _)| c.iter().all(|&(j, _)| j < self.p.n)).map(|(c, r)| (c.clone(), f64::NEG_INFINITY, *r)).collect();
                 if !rows.is_empty() {
                     self.add_cut_rows(&rows);
@@ -13121,7 +13107,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     prefix
                 });
                 // 試作 `ENOMOTO_MIP_NODELP_PERTURB` (analysis/node_lp_20261106.md、既定では使わない): ノードの LP を解くあいだだけ
-                // 費用の摂動 (`p`: `ENOMOTO_NODE_PERTURB` と同じ判定、`P`: 判定なし) と前向きの Harris (`h`: `ENOMOTO_SIMPLEX_HARRIS2=t` と同じ) を使う。
+                // 費用の摂動 (`p`: 削除した試作 `ENOMOTO_NODE_PERTURB` と同じ判定、`P`: 判定なし) と前向きの Harris (`h`: `ENOMOTO_SIMPLEX_HARRIS2=t` と同じ) を使う。
                 // `g` なら、このスレッドのノードの LP の平均の反復が `ENOMOTO_T_MIP_NODELP_HEAVY` (既定 100) 以上のときだけ
                 let (_nl_h2, _nl_pert) = match nodelp_perturb_mode() {
                     Some(mode) if !mode.contains('g') || self.avg_node_iters() as f64 >= tunable!("ENOMOTO_T_MIP_NODELP_HEAVY", 100.0, f64) => (
@@ -17629,9 +17615,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn finish_limit(&mut self, status: MipStatus, current: Option<&OpenNode>) -> MipResult {
         // 木を分け合う従: 残ったノードを共有の待ち行列に返す (主がそれも含めて下界を出す)
         if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some()) {
-            let mut back: Vec<SnapNode> = self.queue.iter().map(SnapNode::of).collect();
+            // 試作 `ENOMOTO_MIP_G5FIN` (既定では使わない。analysis/vsscip_slow_20261118/g5/README.md): 時間切れで終わるときは、返すノードを主が下界を
+            // 出すのにしか使わないので、引き継ぎの鎖 (`TC` の `s`) を平らに展開しない (並びだけ)。n3div36 (4 スレッド・400 秒、heaptrack) では
+            // ヒープの最大 3.08 GB のうち 2.38 GB がここの展開だった
+            let thin = status == MipStatus::TimeLimit && env_str!("ENOMOTO_MIP_G5FIN").is_some_and(|v| v != "0");
+            let of = |n: &OpenNode| if thin { SnapNode { changes: n.changes.clone(), ..SnapNode::of_thin(n) } } else { SnapNode::of(n) };
+            let mut back: Vec<SnapNode> = self.queue.iter().map(of).collect();
             if let Some(n) = current {
-                back.push(SnapNode::of(n));
+                back.push(of(n));
             }
             if self.dbg_on && back.iter().any(|n| self.dbg_changes(&n.changes)) {
                 eprintln!("MIP_DEBUG_SOL: tree thread {} stopped ({status:?}) holding a node that contains the debug solution (returned to the shared queue)", self.pool_tid);
@@ -22166,7 +22157,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (効いているものだけ残しても)、木の LP は 405 -> 822 行、ノードの LP は 1 回平均 187 反復 (行が 190 程度なら 47)。
         // neos-911970 (60 秒) では暫定解 56.23 -> 54.83 (最適値 54.76)・下界 53.69 -> 53.62 で解けるには至らず、再スタート後の
         // カットのループが進まなくなる (47.26 のまま。カットの行の上に作る次のカットが変わる) ので既定では使わない
-        let readd = (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt() || super::gr_restart_readd_for(p)) && !keep_all;
+        let readd = (self.highs_cutmgmt() || super::gr_restart_readd_for(p)) && !keep_all;
         // `ENOMOTO_MIP_RESTART_CUTS_ROWS` (試作、既定では使わない): 再スタートで新たに固定される整数列が、根の始めに自由だった整数列の
         // `ENOMOTO_T_MIP_RESTART_CUTS_ROWS_FRAC` (0.3) 以上なら、readd でも問題の行として持ち込む (前処理が列を別の列で置き換えると、
         // カットを写せずに捨てていた頃の回避。今は [`super::restart_cuts_subst`] で写すので要らず、前処理が効かなくなる分遅くなりうる)
@@ -22426,9 +22417,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let free = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] < self.dom.global_up[j]).count();
             eprintln!("MIP: restart {}: pseudocost observations: columns up {up}, down {down}, both {both} (free integer columns {free}); observations up {su}, down {sd}; nodes {}", params.restarts, self.nodes);
         }
-        // `ENOMOTO_MIP_RESTART_PC` (試作、既定では使わない): 今の pseudocost を再スタート後の求解の初めの pseudocost にする
+        // 木の中の再スタートで、今の pseudocost を再スタート後の求解の初めの pseudocost にする
         // (前処理の後の列へ写すのは [`super::solve_problem`] の中、受け取りは [`Self::run`])
-        if super::restart_pc_on() || tree_carry {
+        if tree_carry {
             super::RESTART_PC.with(|s| *s.borrow_mut() = Some(Box::new(self.pc.clone())));
         }
         super::RESTART_HCM.with(|f| f.set(self.hcm_auto && super::restart_hcm_keep()));
@@ -23674,7 +23665,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 自分の待ち行列から下界の小さい順に `k` ノードを共有の待ち行列に出す (`ENOMOTO_T_MIP_TREE_LOCAL_CAP`)。
-    /// `ENOMOTO_MIP_POOL1_DONATE` (試作) で出すノードの選び方を変える ([`pool1_donate_mode`])。
     fn pool_donate_n(&mut self, k: usize) {
         use std::sync::atomic::Ordering;
         let Some(pool) = self.pool.clone() else { return };
@@ -23686,18 +23676,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let diag_before: Vec<bool> = if pool2_diag() { self.pool2_diag_taken.iter().map(|&(id, gen)| self.queue.holds(id, gen)).collect() } else { Vec::new() };
-        let mode = pool1_donate_mode();
         let mut out = Vec::with_capacity(k);
         for _ in 0..k {
-            let got = match mode {
-                0 => self.queue.pop_best(),
-                5 => {
-                    self.pool1_alt = !self.pool1_alt;
-                    self.queue.pop_for_donate(if self.pool1_alt { 0 } else { 1 })
-                }
-                m => self.queue.pop_for_donate(m),
-            };
-            match got {
+            match self.queue.pop_best() {
                 Some(n) => out.push(self.snap_of(&n)),
                 None => break,
             }

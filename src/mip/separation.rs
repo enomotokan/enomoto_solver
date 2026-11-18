@@ -6405,14 +6405,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ib_all = env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some();
         // 既定 (連続変数のみ) は根だけ (`light` はノードの分離)。ノードでも作ると木の経過が変わり rout などが揺れる
         let ib_cont = !ib_all && !light && env_str!("ENOMOTO_MIP_NO_IMPLBD_CONT").is_none();
-        // `ENOMOTO_MIP_IMPLBD_GENINT` (試作): 含意の相手が一般整数 (0-1 でない整数) の列も使う (HiGHS の
-        // `separateImpliedBounds` と同じく 0-1 でない列全部)。mzzv42z (全部整数、一般整数 235 列) は連続変数がないので
-        // 既定では 1 本も出ないが、HiGHS の根の分離で LP に入るカットの 8 割がこれで、止めると根の下界が -20829 -> -21209 に
-        // 落ちる。`=nodes` ならノードの分離 (`light`) でも使う
-        let ib_gen_mode = env_str!("ENOMOTO_MIP_IMPLBD_GENINT");
-        // `ENOMOTO_MIP_GR_AUTO` (試作): 一般整数の列があるときだけ根で使う ([`super::implbd_genint_for`])
-        let ib_gen_auto = ib_gen_mode.is_none() && !light && super::gr_auto() && super::implbd_genint_for(&p.is_int, &p.col_lo, &p.col_up);
-        let ib_gen = !ib_all && ((ib_gen_mode.is_some() && (!light || ib_gen_mode == Some("nodes"))) || ib_gen_auto);
+        // 含意の相手が一般整数 (0-1 でない整数) の列も使う (HiGHS の `separateImpliedBounds` と同じく 0-1 でない列全部)。
+        // mzzv42z (全部整数、一般整数 235 列) は連続変数がないので一般整数を使わないと 1 本も出ないが、HiGHS の根の分離で LP に入る
+        // カットの 8 割がこれで、止めると根の下界が -20829 -> -21209 に落ちる。`ENOMOTO_MIP_GR_AUTO` (既定): 一般整数の列があるときだけ
+        // 根で使う ([`super::implbd_genint_for`]。全体で使う試作 `ENOMOTO_MIP_IMPLBD_GENINT` は 2026-11-18 に削除)
+        let ib_gen_auto = !light && super::gr_auto() && super::implbd_genint_for(&p.is_int, &p.col_lo, &p.col_up);
+        let ib_gen = !ib_all && ib_gen_auto;
         let ib_cont = ib_cont || ib_gen;
         if (ib_all || ib_cont) && !p.implied_bounds.is_empty() && self.sep_src_on(sepprof::SRC_IMPLBD, light) {
             let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
