@@ -7670,7 +7670,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 残りの `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC` (0.5) まで回す (秒の上限なし)。ns1116954 では残り 16 秒の 0.15 倍 (2.5 秒、FJ 2〜3 回) では足りなかった
         let feas = super::heuristics::fj_feas_extend(&self.p);
         let frac = if feas { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC", 0.5, f64) } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FRAC", 0.15, f64) };
-        let secs = if feas { f64::INFINITY } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64) };
+        // 試作 `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS` (既定は上限なし = 従来): 実行可能性問題の秒の上限。実行不能な実行可能性問題
+        // (fhnw-binpack4-4) では残りの 0.5 が丸ごと空回りし、その間は根が止まる (4 スレッド 120 秒で 53.7 秒。analysis/hang_20261117/README.md)
+        let secs = if feas { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS", f64::INFINITY, f64) } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64) };
         let cap = secs.min(if left.is_finite() { frac * left } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64) });
         if cap <= 0.1 {
             return false;
