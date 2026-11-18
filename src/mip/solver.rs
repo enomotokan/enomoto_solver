@@ -218,6 +218,24 @@ pub(crate) fn robust(c: char) -> bool {
     env_def!("ENOMOTO_MIP_ROBUST", "pgq").is_some_and(|v| v.contains(c))
 }
 
+/// 試作 `ENOMOTO_MIP_S3GAP=<g>` (既定では使わない。analysis/vsscip_slow_20261118/small3/): 外側の根で暫定解があり、根の下界との
+/// 相対の間隙 (|暫定解| と 1 の大きい方で割る) が g 未満なら、重い根のヒューリスティクス (RENS・RINS・ダイビングなど) を回さず、
+/// その間隙を返す。exp-1-500-5-5 は 3.1 秒で最適解 (間隙 8.8e-4) が出た後に RENS 2.2 秒・RINS 1.2 秒を回して何も見つけず、
+/// その後の再スタートで決着する
+fn s3_smallgap_skip<L: MipLp>(s: &Solver<'_, L>, root_obj: f64, name: &str) -> Option<f64> {
+    if s.params.submip || !(name == "RENS" || name.starts_with("RENS (") || rootcap_heavy(name)) {
+        return None;
+    }
+    let g = tunable!("ENOMOTO_MIP_S3GAP", 0.0, f64);
+    if g <= 0.0 {
+        return None;
+    }
+    let (z, _) = s.incumbent.as_ref()?;
+    let lb = s.root_bound_now(root_obj);
+    let rel = (z - lb).max(0.0) / z.abs().max(1.0);
+    (rel < g).then_some(rel)
+}
+
 fn light_root_heur(name: &str) -> bool {
     matches!(name, "trivial" | "simple rounding" | "ZI round" | "randomized rounding" | "shift-and-propagate")
 }
@@ -11055,6 +11073,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         } else if self.early_restart {
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (early restart)", $name);
+                            }
+                        } else if let Some(g) = s3_smallgap_skip(self, root_obj, $name) {
+                            if self.params.verbose {
+                                eprintln!("MIP: root heuristic {}: skipped (S3GAP: relative gap {g:.2e})", $name);
                             }
                         } else if self.params.restarts > 0 && self.params.cutoff.is_finite() && env_str!("ENOMOTO_MIP_LIGHT_RESTART_ROOT").is_some()
                             && !light_root_heur($name)

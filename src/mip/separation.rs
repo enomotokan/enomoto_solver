@@ -1719,6 +1719,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 第 2 段階が 88 ラウンド回って根が 6 秒伸び、9.2 秒 -> 17.2 秒になった)
         // 上限はこのスレッドの CPU 時間で測る ([`super::cap_clock`]。求解の開始からの分は `cpu0` から)
         let t_loop0 = super::cap_clock();
+        // 試作 `ENOMOTO_MIP_CUTLEN` (下の説明): 外側の根の主のループだけ (サブ MIP・裏のカット・続きのループでは使わない)
+        let cutlen_on = env_str!("ENOMOTO_MIP_CUTLEN").is_some_and(|v| v != "0") && !self.params.submip && job.is_none() && cont_p2 == 0 && self.snap.is_none();
+        let cutlen_at = tunable!("ENOMOTO_T_MIP_CUTLEN_AT", 8usize, usize);
+        let mut cutlen_done = false;
+        let mut cutlen_c1: Option<f64> = None;
         // fallback の 2 回目のループ: 1 回目で根のカットの時間の上限 (`ENOMOTO_T_MIP_CUT_TIME_FRAC`) を使い切っていても回るよう、
         // 上限をこのループの始めから数える (drayage-25-23 では 1 回目に 6.9 秒かかり、2 回目が 1 ラウンドも回らなかった)
         // `ENOMOTO_MIP_CUT_CAP_FROM_LOOP` (既定で使う。`0` で止める。2026-11-01 に cs2 として既定化、analysis/halve_submip_20261030.md の bench12・
@@ -2572,6 +2577,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if work > work_cap {
                     break;
+                }
+            }
+            // 試作 `ENOMOTO_MIP_CUTLEN` (既定では使わない。analysis/featconst_20261118/cutlen): 外側の根のループで、1 ラウンド目から
+            // `ENOMOTO_T_MIP_CUTLEN_AT` (8) ラウンド目の始めまでの時計 (時間の上限と同じ時計、既定では手間) から r = 1 ラウンドの手間 ÷ 根の LP の手間
+            // を数え (0 ラウンド目は選び方の比べなどで重いので除く)、ラウンドの上限を `LO + (HI − LO) × σ(K (ln r − ln R0))`
+            // (LO 8・HI は `ENOMOTO_T_MIP_CUT_ROUNDS`・R0 `ENOMOTO_T_MIP_CUTLEN_R0` 1・K 4) まで下げる (上げはしない。本数を広げる・第 2 段階などの延長はそのまま)。
+            // 1〜7 ラウンドの r は qnet1 0.45・fiber 0.7・neos17 0.75・p200x1188c 0.7 (8 ラウンドで速い)、exp-1-500-5-5 1.0・h80x6320d 1.3・
+            // neos-911970 2.4・neos-3381206-awhea 2.6
+            if cutlen_on && round == 1 {
+                cutlen_c1 = Some(now - cap_base);
+            }
+            if cutlen_on && !cutlen_done && round == cutlen_at && round > 1 {
+                cutlen_done = true;
+                let unit = if super::ticks_on('w') { self.root_lp_ticks * 1e-9 } else { self.root_lp_secs };
+                if let (Some(c1), true) = (cutlen_c1, unit > 0.0) {
+                    let r = ((now - cap_base) - c1).max(0.0) / (round - 1) as f64 / unit;
+                    let lo = tunable!("ENOMOTO_T_MIP_CUTLEN_LO", 8.0, f64);
+                    let hi = tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) as f64;
+                    let s = 1.0 / (1.0 + (-tunable!("ENOMOTO_T_MIP_CUTLEN_K", 4.0, f64) * (r.max(1e-12).ln() - tunable!("ENOMOTO_T_MIP_CUTLEN_R0", 1.0, f64).ln())).exp());
+                    let target = (lo + (hi - lo) * s).round() as usize;
+                    if self.params.verbose {
+                        eprintln!("MIP: cut round {round}: CUTLEN: r {r:.3} (sigmoid {s:.3}) -> round limit {max_rounds} -> {}", target.min(max_rounds));
+                    }
+                    max_rounds = max_rounds.min(target);
+                    // 上限がこのラウンドに届いていれば、このラウンドを回さずに止める (`ENOMOTO_T_MIP_CUT_ROUNDS` = LO と同じラウンド数にする)
+                    if round >= max_rounds {
+                        break;
+                    }
                 }
             }
             self.bg_cut_rounds = round_ctr;
