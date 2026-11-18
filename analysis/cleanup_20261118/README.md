@@ -32,3 +32,11 @@ cargo test 417 通過・0 失敗。7 本とも rc=0、数は release019 の記�
 | 6 | `REDSPLIT` 一式 (`_LOG`・`T_MIP_REDSPLIT_*`) | (このコミット) | 523 (redsplit.rs を削除、separation.rs の k-cuts・縮約・採られた数の診断、cuts.rs の `cmir_with_deltas`) | 75 | 415/0/19 (redsplit の単体テスト 2 本が消えた) | 一致 | 根拠: analysis/redsplit_20261107.md (揺れの大きい 12 問を除くと +5.2%、qnet1 が 2 回とも遅い。k-cuts は効かない) |
 | 7 | `LB2`・`PROX2`・`HSUB_STALL` 一式 (`T_MIP_HSUB_*`・`T_MIP_LB2_*`・`T_MIP_PROX2_*`) | (このコミット) | 300 (heur_lns2.rs を削除、solver.rs の根と木の呼び出し・状態、heuristics.rs のサブ MIP の一時的なギャップ `submip_gap`) | 75 | 415/0/19 | 一致 | 根拠: docs/improvement_history.md (「既定にしない: … `LB2`・`PROX2`・`HSUB_STALL`」)、analysis/heur_shift_lns2_20261026.md (56 問 2 回で揃った差なし、15〜45 秒で解ける問題で解き切りが遅れる)。`submip_gap` はこの試作だけが立てていた |
 | 8 | `CUTSEL_ENS` 一式 | (このコミット) | 239 (cutsel_ens.rs を削除、separation.rs の 2 か所の選択と `select_cuts_ens`) | 75 | 413/0/19 (cutsel_ens の単体テスト 2 本が消えた) | 一致 | 根拠: analysis/cutsel_ens_20261110.md (SCIP の重みそのままで 58 問 +9.2%・区間 [+2.4%, +17.2%]、本数をそろえた形は中立) |
+
+### fuzz (8 件目の後、4f060298b)
+
+`FUZZ_TAG=after8`: fuzz_tiny 400 0 bad 0 (strict 13)・mip_fuzz_vs_highs 300 bad 0・fuzz_objint 1000 0 bad 0 (optimal 967・infeasible 33)・
+fuzz_slack 1000 0 mismatches 0・fuzz_tiny 400 1000 bad 0 (strict 14)・fuzz_objint 1000 5000 bad 0 (optimal 971・infeasible 29)・
+fuzz_slack 1000 5000 mismatches 0。cargo test 413 通過・0 失敗。7 本とも rc=0。
+
+| 9 | `GCDFORCE` 一式 (診断 `MIP_DEBUG_GCDCOUNT` を含む) | (このコミット) | 265 (gcdforce.rs を削除、mod.rs の前処理の判定・かけ直しの印・数える診断 2 か所) | 75 | 412/0/19 (gcdforce の単体テスト 1 本が消えた) | 一致 | 根拠: analysis/gcdforce_20261107.md (203 問で当たる行が 0 本、理屈でも起きない)。数える診断 `DEBUG_GCDCOUNT` は同じ調べの道具で `gcdforce::count` を使うので一緒に消した |
