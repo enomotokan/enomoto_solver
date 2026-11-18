@@ -850,8 +850,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) rens_paused: Option<PausedSubmip>,
     /// `ENOMOTO_MIP_RENS_RESUME`: この求解 (サブ MIP) がノード上限で呼ぶ一時停止の手続き ([`RESUME_HOOK`]、サブ MIP の側)
     resume_hook: Option<ResumeHook>,
-    /// RENS・RINS の固定を目標の固定率で止める (`ENOMOTO_MIP_FIX_CAP` と同じ) のを一時的に強制する
-    /// (根の広い近傍のサブ MIP (`ENOMOTO_MIP_ROOT_WIDE_SUBMIP`) の広い近傍のやり直しの間だけ真)。
+    /// RENS・RINS の固定を目標の固定率で止めるのを一時的に強制する ([`Self::fix_cap_on`]。`ENOMOTO_MIP_SUBA_RATE` の `n` の RENS の間だけ真)。
     pub(super) force_fix_cap: bool,
     /// 並列モードで、サブ MIP を別スレッドで解くか (根のヒューリスティクスの間だけ真)。
     pub(super) parallel_submips: bool,
@@ -1401,8 +1400,6 @@ pub(super) struct Solver<'a, L: MipLp> {
     node_lp_opt: bool,
     /// 木の ZI round の (呼んだ回数, 成功した回数, `ENOMOTO_MIP_ZIROUND_ADAPT` で省いた回数)
     zi_stats: [u64; 3],
-    /// ダイビングの被約費用による固定の数 (`ENOMOTO_MIP_DIVE_RCFIX`)
-    pub(super) dive_rcfix_count: u64,
     /// 強分岐の固定のあとの、その場での LP の解き直しの回数 (`ENOMOTO_MIP_SB_FIX_RESOLVE`)
     sb_fix_resolve_count: u64,
     /// `ENOMOTO_MIP_SB_FIX_RESOLVE` で強分岐の中で LP を解き直したときの (LP の値, 分数の列)。呼び出し側がノードの値に使う
@@ -4204,7 +4201,7 @@ pub(crate) fn thread_budget_on() -> bool {
 /// - サブ MIP が外側の暫定解より良い解を見つけた後、最後に良くなってからのノード数が、そこまでのノード数
 ///   (最小 `ENOMOTO_T_MIP_SUBMIP_OUTCOME_MIN_NODES`、既定 50) に達したら止める (見つけるのにかかった分だけ続けて見込みがなければやめる)。
 ///   解を 1 つも見つけていないサブ MIP は今まで通り (時間とノードの上限まで)。10teams の根の被約費用のサブ MIP は 248 ノード目に初めて
-///   最適解を見つけるので、時間で一律に絞る `ENOMOTO_MIP_ROOT_SUBMIP_REL` はそれを切っていた
+///   最適解を見つけるので、時間で一律に絞る試作 `ENOMOTO_MIP_ROOT_SUBMIP_REL` (2026-11-18 に削除) はそれを切っていた
 /// - 並列のサブ MIP には外側の刈り込みの上限 (ほかのサブ MIP・主のスレッドが見つけた解による) を打ち切り値として渡し続ける ([`SubmipCtl::outer_best`])
 /// - 並列のサブ MIP は終わった順に受け取る (単独の試作 `ENOMOTO_MIP_SUBMIP_FIRST_DONE` は 2026-11-18 に削除)
 /// 試作 `ENOMOTO_MIP_LMBOOST_ASYNC` (treeclose 9.72 節、既定では使わない): LMBOOST の Local-MIP のスレッドを裏で回したまま、主は待たずに
@@ -5823,7 +5820,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         poly_diag_raised: Vec::new(),
         node_lp_opt: false,
         zi_stats: [0; 3],
-        dive_rcfix_count: 0,
         sb_fix_resolve_count: 0,
         sb_new_node: None,
         lit_conflicts: super::conflict_pool::LitConflictPool::new(p.n, tunable!("ENOMOTO_T_MIP_LIT_CONFLICT_POOL", 5000usize, usize)),
@@ -11322,29 +11318,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if par_late {
                     self.parallel_submips = false;
                     self.join_submips(0);
-                }
-                // 根の広い近傍のサブ MIP (`ENOMOTO_MIP_ROOT_WIDE_SUBMIP` で使う。既定では使わない。h80x6320d を時間切れにするため): 根の RENS・RINS の後も暫定解と根の LP の差が大きい
-                // (既定 0.5% 超) なら、固定を目標の固定率 (初期 0.6) で止めた広い近傍 (`ENOMOTO_MIP_FIX_CAP` と同じ) で、
-                // サブ MIP に長めの時間 (残りの `ENOMOTO_T_MIP_WIDE_SUBMIP_FRAC` = 0.3、最大 `ENOMOTO_T_MIP_WIDE_SUBMIP_MAX` = 20 秒)
-                // を与えて RENS と RINS をもう 1 回ずつ解く。既定の RENS・RINS は LP 解 (と暫定解) に合う列を全部固定するので、
-                // neos-960392 (根の LP = 最適値 -238) では RENS が 294 列残して実行不能、RINS は 692 列のサブ MIP の最適値 -226
-                // 止まりになる。固定率を止めても既定の時間 (残りの 7%、最大 6 秒) ではサブ MIP が根のヒューリスティクスの途中で
-                // 時間切れになる (8391 列で 3 秒、0 ノード)
-                if env_str!("ENOMOTO_MIP_ROOT_WIDE_SUBMIP").is_some() && !self.params.submip {
-                    let gap_of = |s: &Self| s.incumbent.as_ref().map(|(z, _)| (z - (s.lp.objective() + s.p.offset)) / z.abs().max(1.0));
-                    let min_gap = tunable!("ENOMOTO_T_MIP_WIDE_SUBMIP_GAP", 0.005, f64);
-                    if gap_of(self).is_some_and(|g| g > min_gap) {
-                        let keep = (self.submip_time_frac, self.submip_time_max);
-                        self.submip_time_frac = tunable!("ENOMOTO_T_MIP_WIDE_SUBMIP_FRAC", 0.3, f64);
-                        self.submip_time_max = tunable!("ENOMOTO_T_MIP_WIDE_SUBMIP_MAX", 20.0, f64);
-                        self.force_fix_cap = true;
-                        heur!("RENS (wide)", self.rens(&x));
-                        if gap_of(self).is_some_and(|g| g > min_gap) {
-                            heur!("RINS (wide)", self.rins(&x));
-                        }
-                        self.force_fix_cap = false;
-                        (self.submip_time_frac, self.submip_time_max) = keep;
-                    }
                 }
                 if self.params.verbose && share_x {
                     eprintln!("MIP: root heuristics used {shared_x_used} LP solutions from the background cuts");
@@ -25655,9 +25628,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: GAP1 {}: child selection down {} up {}; branching selections {}, with ties {} (candidates in ties {}), changed by the queue counts {}; objective proofs not violated beyond the tolerance {}", super::pseudocost::gap1(), self.gap1_stats[0], self.gap1_stats[1], self.gap1_stats[2], self.gap1_stats[3], self.gap1_stats[4], self.gap1_stats[5], self.gap1_stats[6]);
             }
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
-            if self.dive_rcfix_count > 0 {
-                eprintln!("MIP: dives: fixed {} columns by reduced costs (ENOMOTO_MIP_DIVE_RCFIX)", self.dive_rcfix_count);
-            }
             if self.zi_stats[2] > 0 {
                 eprintln!("MIP: tree ZI round: calls {}, successes {}, skipped {} (ENOMOTO_MIP_ZIROUND_ADAPT)", self.zi_stats[0], self.zi_stats[1], self.zi_stats[2]);
             }

@@ -658,9 +658,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 break;
             }
-            if dive_rcfix() {
-                self.dive_rc_fix(&x, steps == 1);
-            }
             // 丸める列と最初に試す向きを選ぶ (スコアの小さいもの)
             let mut pick: Option<(usize, f64, bool, f64)> = None; // (列, 値, 上へ, スコア)
             let multi = if multi_div > 0 && !no_multi && frac.len() >= multi_min { frac.len() / multi_div } else { 1 };
@@ -832,60 +829,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.sync_lp();
         self.lp.restore_state(&saved);
         found
-    }
-
-    /// `ENOMOTO_MIP_DIVE_RCFIX` (試作、既定では使わない): ダイビングの各段で、CBC の `CbcHeuristicDive` と同じく
-    /// (1) 被約費用による固定 (`reducedCostFix`): 暫定解があれば、境界にある非基底の整数列で、被約費用 × 動かす幅が
-    /// 打ち切り値までの余裕を超える側を締める。
-    /// (2) 最初の段だけ、整数値で境界にある整数列を |被約費用| の大きい順に整数列の 20% まで今の値に固定する
-    /// (`fixOtherVariables`。LP の最適性は崩れない)。
-    /// 固定は定義域にだけ置く (次の決定の `sync_lp` で LP に渡る)。ダイビングの終わりに戻す
-    fn dive_rc_fix(&mut self, x: &[f64], first: bool) {
-        let p = self.p;
-        let rc = self.lp.reduced_costs_ref().into_owned();
-        let lp_obj = self.lp.objective() + p.offset;
-        let lim = self.prune_limit();
-        let gap = lim - lp_obj;
-        let mut n_fix = 0usize;
-        if gap.is_finite() && gap > 0.0 {
-            for j in 0..p.n {
-                if !p.is_int[j] || self.dom.lo[j] >= self.dom.up[j] {
-                    continue;
-                }
-                let d = rc[j];
-                if d > 1e-7 && x[j] <= self.dom.lo[j] + 1e-9 {
-                    let nu = self.dom.lo[j] + (gap / d + 1e-6).floor();
-                    if nu < self.dom.up[j] {
-                        self.dom.tighten_upper(p, j, nu);
-                        n_fix += 1;
-                    }
-                } else if d < -1e-7 && x[j] >= self.dom.up[j] - 1e-9 {
-                    let nl = self.dom.up[j] - (gap / (-d) + 1e-6).floor();
-                    if nl > self.dom.lo[j] {
-                        self.dom.tighten_lower(p, j, nl);
-                        n_fix += 1;
-                    }
-                }
-            }
-        }
-        if first {
-            let nint = p.is_int.iter().filter(|&&b| b).count();
-            let mut c: Vec<(f64, usize)> = (0..p.n)
-                .filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j] && rc[j].abs() > 1e-7)
-                .filter(|&j| (rc[j] > 0.0 && x[j] <= self.dom.lo[j] + 1e-9) || (rc[j] < 0.0 && x[j] >= self.dom.up[j] - 1e-9))
-                .map(|j| (-rc[j].abs(), j))
-                .collect();
-            c.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-            for &(_, j) in c.iter().take(nint / 5) {
-                if rc[j] > 0.0 {
-                    self.dom.tighten_upper(p, j, self.dom.lo[j]);
-                } else {
-                    self.dom.tighten_lower(p, j, self.dom.up[j]);
-                }
-                n_fix += 1;
-            }
-        }
-        self.dive_rcfix_count += n_fix as u64;
     }
 
     /// ダイビングの 1 つの決定: 列 `j` を `v` の上 (下) の整数に締め、伝播して LP を解く。LP が最適で目的値が
@@ -1619,12 +1562,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let time_highs = hs_on('t') && !self.params.submip && self.nodes <= 1 && !(super::solver::heurgap('r') && self.in_heur_role);
         // `t` がないときの時間の上限
         let t_plain = {
-            let t = (self.submip_time_frac * remaining).min(self.submip_time_max);
-            // `ENOMOTO_MIP_ROOT_SUBMIP_REL` (試作): 根のサブ MIP は外側の求解の経過秒の k 倍まで ([`super::root_submip_rel`])
-            match super::root_submip_rel().filter(|_| !self.params.submip && self.snap.is_none() && self.nodes <= 1 && self.incumbent.is_some()) {
-                Some(k) => t.min((k * super::root_submip_ref_secs().unwrap_or(f64::INFINITY)).max(tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_REL_MIN", 0.5, f64))),
-                None => t,
-            }
+            (self.submip_time_frac * remaining).min(self.submip_time_max)
         };
         // `ENOMOTO_MIP_SUBMIP_HIGHS_NOSOL` (試作、既定では使わない): `t` で時間の上限を延ばした根のサブ MIP も、解を 1 つも見つけないうちは
         // `t` がないときの上限の `ENOMOTO_T_MIP_SUBMIP_HIGHS_NOSOL_MULT` (1) 倍で止める ([`super::solver::SubmipCtl::nosol_deadline`])
@@ -2852,11 +2790,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
-    /// `ENOMOTO_MIP_FIX_CAP`: RENS・RINS の固定を、固定率の目標 ([`Self::target_fix_rate`]) で止めるか。
+    /// RENS・RINS の固定を、固定率の目標 ([`Self::target_fix_rate`]) で止めるか (`ENOMOTO_MIP_SUBA_RATE` の `n` が一時的に立てる。
+    /// いつも止める試作 `ENOMOTO_MIP_FIX_CAP` は 2026-11-18 に削除)。
     /// HiGHS の RENS・RINS は LP 解 (と暫定解) に合う整数列を、目標の固定率に達するまでしか固定しない。全部固定すると
     /// 近傍が狭すぎ、drayage-25-23 では 11090 列中 229 列しか残らずサブ MIP が 0 ノードで実行不能になる。
     pub(super) fn fix_cap_on(&self) -> bool {
-        self.force_fix_cap || env_str!("ENOMOTO_MIP_FIX_CAP").is_some()
+        self.force_fix_cap
     }
 
     /// 固定 (列, 下限, 上限) を順に今の定義域に積み、1 つずつ伝播する ([`Self::propagated_fixings`] と同じ。矛盾する固定は
@@ -3843,11 +3782,6 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
     best.map(|b| b.1)
 }
 
-/// [`Solver::dive_rc_fix`] を使うか (`ENOMOTO_MIP_DIVE_RCFIX`)。
-fn dive_rcfix() -> bool {
-    env_str!("ENOMOTO_MIP_DIVE_RCFIX").is_some()
-}
-
 /// 診断用 `ENOMOTO_MIP_FRAG_DIAG` (analysis/fragility_20261105): サブ MIP・ALNS の 1 行の記録を出すか。
 pub(super) fn frag_diag() -> bool {
     env_str!("ENOMOTO_MIP_FRAG_DIAG").is_some()
@@ -3866,7 +3800,7 @@ pub(super) fn frag_t0() -> Instant {
 /// - `i`: 外側の根の RINS (`ENOMOTO_MIP_SUBMIP_HIGHS` の `i` の形) の一致する列の固定を目標の固定率で止める。サブ MIP が実行不能なら
 ///   (近傍に打ち切り値より良い解がない)、達した固定率の半分 (0.25 以上) を目標に `ENOMOTO_T_MIP_SUBA_RATE_TRIES` (1) 回やり直す (HiGHS の RINS の retry)
 /// - `t`: 木の中の RINS (ALNS の腕) にも `i` と同じ止め方をする (やり直しはしない)
-/// - `n`: 外側の根の RENS (全部固定の形) を目標の固定率で止める (`ENOMOTO_MIP_FIX_CAP` と同じ形)
+/// - `n`: 外側の根の RENS (全部固定の形) を目標の固定率で止める ([`Solver::fix_cap_on`])
 /// - `z`: 暫定解のない根の RENS (ダイビング式、既定の目標 0.8) の目標を [`Solver::target_fix_rate`] にする
 /// 値 `1` は `inz`。固定率とその結果は RENS・RINS で共通の記録 ([`Solver::note_fix_rate`]) に入れる
 pub(super) fn suba_rate(c: char) -> bool {
