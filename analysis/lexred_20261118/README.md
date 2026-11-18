@@ -33,7 +33,23 @@
 `fuzz_of.py` (orbitope・カットなし 1000 問、orbitope なし 500 問、既定 500 問)、`fuzz_symdyn.py` (orbitope・カット・再スタートなし 400 問、既定 400 問)、
 `mip_fuzz_symmetric.py` (orbitope なし 300 問) を 1・4 スレッドで。結果は `fuzz_<名前>.txt`。
 
-(結果は下に足す)
+直したビルド (c96ec3e54 相当) で、4 設定とも全部 bad 0 (not_solved も 0):
+
+| 設定 | fuzz_of (1000+500+500) × 1・4 スレッド | fuzz_symdyn (400+400) × 1・4 | mip_fuzz_symmetric 300 × 1・4 |
+|---|---|---|---|
+| `SYMDYN=f` (orbital fixing + LexRed) | 0 | 0 | 0 |
+| `SYMDYN=1` (LexRed だけ) | 0 | 0 | 0 |
+| `SYMDYN=1o` (LexRed + 軌道の比べ) | 0 | 0 | 0 |
+| 既定 (orbital fixing だけ) | 0 | 0 | 0 |
+
+1 設定あたり 6200 問。直す前のビルドの `SYMDYN=1` では fuzz_symdyn の既定の形で not_solved が 1・2 件 (種 1013・1082、上の OBJPROBE の件)。
+cargo test (既定): 422 通過・0 失敗・19 無視。fuzz 7 本 (analysis/wrong_widden_20261117/fuzz.sh、既定): すべて bad 0。
+
+## 速さ
+
+直す前の f と既定の比べ (analysis/wrong_widden_20261117 の summ_SP.txt・summ_SM.txt、ビルド c6ee1f3ef):
+SP (P の生成元のある 12 問 × 種 1〜4、60 秒) symf/def −5.0% [−12.4%, +1.8%]、SM (M の 8 問 × 種 1・2、600 秒) +1.0% [−12.1%, +19.9%]。
+直した f はノードを刈りすぎなくなる分わずかに遅くなりうるので、既定に戻すなら c96ec3e54 以降で SP・SM を取り直す。
 
 ## ファイル
 
