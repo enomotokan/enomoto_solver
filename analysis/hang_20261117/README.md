@@ -62,6 +62,17 @@
   期限を見る粒度と、LP を止めた後の後始末と見られる (推測、スタックは期限の前のものしか取れていない)。
 - 608.8 秒 (vsscip) は 4 本が同時に回る計測機で、上の DSE の重みの計算・解き直しが遅くなった分と見られる (推測)。
 
+### 4.1 cryptanalysiskb128n5obj14 の 1 スレッド (706.9 秒、親からの追加の材料その 2)
+
+- 直しを全部外した形 (`ENOMOTO_MIP_FEAS_EARLY_NO_DEADLINE=1 ENOMOTO_MIP_FEAS_EARLY_NO_CHAIN_TICKS=1 ENOMOTO_DSE_NO_DEADLINE=1
+  ENOMOTO_MIP_DIVE_NO_DEADLINE=1`、`logs/cryptanalysiskb128n5obj14_old_t1.*`) で再現: **713.1 秒**・0 ノード。期限の後のスタックは 10 回とも
+  `with_presolve_deadline` → `feas_fj_lmip_early_salt` (根の後のやり直し FJ)。fhnw-binpack4-4 と同じ型 (1 節)。
+  - 前処理の早めの探索: cap 60 秒で 134 秒 (Local-MIP 107.5 秒を手間 9.4 秒と数える、約 1/11)。
+  - やり直し: cap 59.6 秒で 231.8 秒 (Local-MIP 205.6 秒を手間 10.8 秒、約 1/19)、期限を見ないので上限を 113 秒越えた。
+- 直した版 (`fix_t1`): 600.50 秒 (5 ノード)。早めの探索 44.6 秒 (cap 60)、やり直し 61.7 秒 (cap 79.7)。Local-MIP の数えは実時間の 1/1.9。
+- まとめ: cryptanalysis 系の 1 スレッドの超過は、大きいもの (obj14 の 107 秒) がやり直し FJ の期限の見落とし + 連鎖の手の数え漏れ、
+  小さいもの (obj16 の 0.5〜8.8 秒) がダイビングの LP の DSE の重み・解き直し (4 節)。どちらも 3 節の直しで 600.5 秒に収まる。
+
 ## 5. 直した版の確認 (事実)
 
 - 時間の上限: fhnw-binpack4-4 の 1 スレッド・600 秒は 600.00〜600.01 秒で time_limit (3 回、`fix_t1`・`fix2_t1`・`fix3_t1`)。
@@ -144,3 +155,51 @@
 - `shards_X.json` (fhnw-binpack4-4・neos859080・cryptanalysiskb128n5obj16 × 種 1・2 × {def, sst, def_t1, sst_t1}、600 秒、4 分担):
   `python run.py X K` (K = 0〜3)、`python summ.py X def sst`・`python summ.py X def_t1 sst_t1`
 - 準備は analysis/vsscip_20261117/README.md と同じ (`pip install maturin highspy==1.15.1 && pip install -e .`、このコミット以降でビルド)。
+
+## 10. 実行可能性問題のやり直し FJ の上限の試作 (2026-11-18 追加)
+
+- 試作 `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS` (既定は上限なし = 従来の残りの 0.5): 目的が全部 0 の問題の根の後のやり直し FJ の秒の上限。
+- 効く問題: 目的が全部 0 なのは Mittelmann 186 問 + MIPLIB 58 問 (計 203 問) のうち 7 問 (MPS の目的の行の非零を数えた):
+  cryptanalysiskb128n5obj14・obj16、fhnw-binpack4-4・4-48、neos-3004026-krka、ns1116954 (P と M の両方)、ns1952667。
+- 手元 (事実): fhnw-binpack4-4 + SST の 4 スレッド 120 秒は、上限なし 78.0 秒 → `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC=0.05` で 24.9 秒 (7 節)。
+  ns1116954 の 1 スレッド 60 秒 (3 本同時) は、上限なし・30 秒・10 秒とも種 1〜3 で時間切れ (差は見えない)。
+- 対の比べ (親への依頼): `shards_F.json` = 7 問 × 種 1〜3 × {def, rfs30, def_t1, rfs30_t1}、600 秒、6 分担 (84 回):
+  `python run.py F K` (K = 0〜5)、`python summ.py F def rfs30`・`python summ.py F def_t1 rfs30_t1`。
+  採用の目安: 解けた回が減らない (特に ns1116954・binpack4-48 など解のある問題で FJ が見つける回を失わない) こと。
+
+## 11. neos859080 の切り分け (2026-11-18 追加、事実)
+
+1. 前処理の差: HiGHS・SCIP は前処理で 160 列 → 120 列、非零 1280 → 1128。SCIP の統計では linear の双対の前処理が 40 列を集約
+   (`b_a + b_b ≤ 1` の 0-1 列の対。b は費用 0 で、他は `y ≤ 10 b` にしか出ない → 等式にして `b_b = 1 - b_a`)、sparsify が非零 72 を打ち消す。
+   当方の前処理は列を 1 本も減らさない (行 164 → 160)。
+2. SCIP の前処理後の問題 (`trans=True` で書き出し) を当方で解くと、1 スレッド・種 1〜6 の全部で 7.7〜9.1 秒で infeasible。
+   SCIP の前処理から sparsify だけ外した問題は種 1・2 とも 60 秒で時間切れ。
+3. 試作 2 つ (どちらも既定では使わない):
+   - `ENOMOTO_MIP_DUAL_TIGHT_INEQ=1` (`src/presolve/dualtightineq.rs`): 双対の議論で不等式行を等式に上げる (整数列でも成り立つ形。条件は
+     ファイルの説明)。上げたら止まっていた doubleton をもう一度動かす。neos859080 で 40 本を上げ、列 160 → 120。
+   - `ENOMOTO_MIP_SPARSIFY=1`: 未使用だった `src/presolve/sparsify.rs` (台が含まれる等式だけ、フィルインなし) を集約の前に呼ぶ。
+   - 両方で当方の前処理後も 120 列・非零 1128 (HiGHS・SCIP と同じ大きさ)、構造も同じ (違いは 60 項の行の係数 1 と 2 だけ。係数を 1 に
+     締めても同じ)。それでも 1 スレッド 120 秒・種 1〜4 で全部時間切れ (境界は 2 → 3〜4)。
+4. **並びの影響**: SCIP の前処理後の問題の行・列を並べ替えて書き直すと、当方は 3 通り中 2 通りで 60 秒の時間切れ (残る 1 通りは 9.0 秒)。
+   当方の前処理後の問題を並べ替えた 3 通りも全部時間切れ。2 の「解ける」は SCIP の書き出しの並びが当たっただけと見られる。
+   一方、SCIP は `randomization/permutationseed` 1〜6 (行・列の並べ替え) で 0.5〜2.4 秒、HiGHS は元の問題の並べ替え 3 通りで 1.7〜3.2 秒。
+5. 結論 (推測を含む): neos859080 の差は前処理ではなく、木の探索 (衝突解析・分枝) の頑健さ。当方は並び次第で数秒にも数百秒の時間切れにも
+   なる裾の重い問題で、SCIP・HiGHS は並びによらず数秒。SCIP では伝播の衝突解析を切ると解けない (6 節)。
+6. 次の手 (計画): 並びで解けた回 (SCIP の書き出しの並び、種 1) と解けない回 (並べ替え 1) を同じ問題でログに取り、衝突の数・長さ・
+   大域で効いた数 (SCIP は 232 本・平均 7.3 リテラル)・分枝の選び・再スタートの有無を並べる。HiGHS は 4 回の再スタートで 120 → 69 列に
+   縮めている (木で見つけた大域の固定を前処理にかけ直す) ので、当方の再スタートの条件 (`restart check: newly fixed 0`) も見る。
+- 正しさ: 2 つの試作を両方入れた fuzz (`fuzz/`): mip_fuzz_vs_highs 300 (4 スレッド・1 スレッド)・mip_fuzz_symmetric 300 で bad 0。
+  ログつきの mip_fuzz_vs_highs・fixed_charge・clique 各 300 で bad 0、等式化が動いた前処理 1244 回・sparsify が動いた前処理 535 回 (`fuzz/dti_sp_coverage.txt`)。
+- cargo test: 422 通過 (dualtightineq の単体試験 3 件を含む)。
+
+## 12. PNCT_T1 の分担の報告から (2026-11-18、事実)
+
+- 分担 0・1・3 (ビルド fcce29cdb、各 86〜88 行): def_t1 と nct_t1 で optimal の顔ぶれ・目的値は一致、crash 0、時間の差は小さい
+  (分担 3 は時間比 1.5 倍超の対なし)。時間切れの暫定解の差が数問 (neos-1456979 種 1 は nct_t1 が良い、10teams 種 1 は def_t1 が良い など)。
+- 60 + 1 秒を越えた行: ns1116954 の **nct_t1** の種 2 (66.8 秒)・種 3 (68.2 秒)。0 ノード・根の LP の途中で止まった回。同じ種の def_t1 は 60.3・60.6 秒。
+- 手元の追試: nct_t1 の種 2・3 は 56 秒前後で FJ が解を見つけて optimal (CPU を食う裏の処理 2 本を足しても同じ)。時間の上限を根の LP の途中
+  (20・22 秒) に置くと、根の LP は期限の 0.35 秒後に止まる (「root LP stopped at the time limit (… 0.35s past the deadline)」、
+  `logs/ns1116954_rootlp2*_t1.*`、行 12.8 万・列 1.2 万の LP)。期限の後は MipProblem の片付け (drop) にも 0.3 秒ほどかかる。
+  計測機の 6.8〜8.2 秒の超過は再現できていない (推測: 計測機では早めの探索の後に根の LP が期限をまたぎ、こちらで見えない道 (根の LP の救済・
+  尺度を変えた解き直しなど) を通った)。再現には計測機で `watch_at.sh ns1116954 1 60 61.5 名前 ENOMOTO_T_MIP_SEED=2 ENOMOTO_MIP_FEAS_EARLY_NO_CHAIN_TICKS=1`
+  を回し、`logs/` のスタックとログを見る。nct_t1 は「直す前」の形なので、既定 (def_t1) では起きにくい。
