@@ -9,3 +9,14 @@
 - P = MIPLIB の 58 問 × 種 1〜3 × {def, kcs}、60 秒、4 分担 (各 0.74 時間): `cd analysis/vsscip_slow_20261118/kcs && python run.py P K` (K = 0〜3)
 - M = 上の M の 13 問 × 種 1・2 × {def, kcs}、600 秒、5 分担 (各 1.7〜2.0 時間): `python run.py M K` (K = 0〜4)
 - 集計: `python summ.py P kcs`・`python summ.py M kcs`。働かない問題 (count 0) は既定と同じ計算なので揺れの目安として分けて見る。
+
+## P の結果と kcsc (2026-11-18)
+
+- P (分担 0・2・3、162d00ca3、`summ_split_P.txt`): 働く 10 問 SGM 1.140 (markshare_4_0 2.13 倍・misc07 1.49・timtab1 1.23)、働かない 48 問 1.000。
+- markshare_4_0 (1 スレッド、3 種): 既定 6.3〜9.2 秒・26.5 万ノード、kcs 21.5〜22.1 秒・43.2 万ノード。残したスラック 4 本の等式のほかの列は 0-1 列
+  (費用が 0-1 列に移る形)。kakapo は等式のほかの列が連続 (開始時刻)。
+- 試作の値 `c` (kcsc): 等式のほかの列がすべて連続で、上下限の片方が無限の列だけ残す。1 スレッドで P の働く 10 問は前処理もノードも既定と同じに戻り
+  (timtab1 は有界のスラックを外して 44.6 → 43.1 秒)、kakapo の根は 538.9 のまま。M の働く 13 問 + niemur で前処理が既定と変わるのは
+  kakapo (列 3045 → 3057) と snp-02-004-104 (140341 → 141275) だけ。
+- 確かめ: cargo test --lib 409 通過、fuzz (HiGHS 400・objint 600・slack 600) 誤答 0。
+- 短い計測 C (`shards_C.json`): kakapo・snp-02-004-104 × 種 1〜3 × {def, kcsc}、600 秒、2 分担 (各 1 時間): `python run.py C K` (K = 0・1)。

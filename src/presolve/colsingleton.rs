@@ -161,11 +161,18 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
         }
         // 試作 `ENOMOTO_MIP_KEEP_COSTED_SINGLETON` (群 2、analysis/vsscip_slow_20261118/tree2/README.md 10 節): 整数最適化の前処理で、
         // 費用のついた連続の列シングルトンは消さない (費用を等式の他の列へ移さない)。neos-5107597-kakapo の完了時刻の列
+        // 値 `c` なら、等式のほかの列がすべて連続のときだけ残す (費用が連続列に移る形。markshare_4_0 は費用が 0-1 列に移る形で、
+        // 残すとノードが 26.5 万 → 43.2 万に増え 2〜3 倍遅い)
         let keep_costed = int_mask.is_some() && env_str!("ENOMOTO_MIP_KEEP_COSTED_SINGLETON").is_some();
-        if keep_costed && c[j] != 0.0 {
+        let keep_costed_cont = env_str!("ENOMOTO_MIP_KEEP_COSTED_SINGLETON") == Some("c");
+        if keep_costed && c[j] != 0.0 && !keep_costed_cont {
             continue;
         }
         let Some(i) = owning_a_row[j] else { continue }; // 唯一の出現が G 側
+        // (`c` はさらに上下限の片方が無限の列だけ。timtab1 の有界のスラック 6 本を残すと 1 スレッドで 44.6 → 64.2 秒)
+        if keep_costed && keep_costed_cont && c[j] != 0.0 && !(lb[j].is_finite() && ub[j].is_finite()) && int_mask.as_ref().is_some_and(|m| a_rows[i].iter().all(|&(k, _)| k == j || !m[k])) {
+            continue;
+        }
         if eliminated_rows[i] {
             // この行は既に別のシングルトン列の消去に使われた (1 行で解けるのは 1 変数のみ)。
             // `j` は変数として残り、その代入式の項になる。
