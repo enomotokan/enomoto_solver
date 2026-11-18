@@ -566,7 +566,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cut_cont_p2: usize,
     /// 分離器ごとの適応的な飛ばしの状態 (`ENOMOTO_MIP_SEP_ADAPTIVE`、[`super::separation::SepAdapt`])
     pub(super) sep_adapt: super::separation::SepAdapt,
-    /// 分離器ごとの効き目の計測と学習 (`ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`、[`super::seplearn::SepLearn`])
+    /// 分離器ごとの効き目の計測 (`ENOMOTO_MIP_SEPSTAT`、[`super::seplearn::SepLearn`])
     pub(super) sl: super::seplearn::SepLearn,
     /// 根のカットのループの今のラウンド (`ENOMOTO_MIP_TAB_NNZ_CBC` の最初のラウンドの判定用。ループの始めに 0)
     pub(super) sep_pass: usize,
@@ -1579,7 +1579,7 @@ pub(crate) struct TreeSnapshot {
     hcm_auto: bool,
     /// 根で 1 本も採られなかったのでノードで使わない分離器 (`ENOMOTO_MIP_SEP_ADAPTIVE`、[`super::separation::SepAdapt::node_off`])。
     sep_node_off: u16,
-    /// 根で学んだ分離器の効き目 (`ENOMOTO_MIP_SEPLEARN`、[`super::seplearn::SepLearn::for_tree`])
+    /// 根で測った分離器の効き目 (`ENOMOTO_MIP_SEPSTAT`、[`super::seplearn::SepLearn::for_tree`])
     sepl: super::seplearn::SepLearn,
     /// 完全オービトープと、対称性の行・固定を加える前の問題 (写しから解く求解も orbitopal fixing をし、ヒューリスティクスの
     /// 解を並べ替えて使えるように)。
@@ -13637,7 +13637,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.node_cut_ticks += crate::ticks::total() - nc_res_tk;
                     self.node_cut_work += self.lp.total_iterations().saturating_sub(nc_res_it) as f64;
                 }
-                // `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`: ノードの分離で加えたカットの伸び・生き残りを数える
+                // `ENOMOTO_MIP_SEPSTAT`: ノードの分離で加えたカットの伸び・生き残りを数える
                 if self.sl.stat && !self.params.submip {
                     self.sl_after_lp(st);
                 }
@@ -26313,7 +26313,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: symmetry: {} heuristic solutions mapped to the symmetry-reduced problem, {} could not be", self.sym_canon.0, self.sym_canon.1);
             }
         }
-        // `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`: このスレッドの分離器ごとの集計 (根の分は根のループの終わりに出している)
+        // `ENOMOTO_MIP_SEPSTAT`: このスレッドの分離器ごとの集計 (根の分は根のループの終わりに出している)
         if self.sl.stat && !self.params.submip && self.sl.st[1].iter().any(|e| e.cands > 0) {
             eprint!("{}", self.sl.report(&format!("tree t{}", self.pool_tid)));
         }

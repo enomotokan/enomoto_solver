@@ -361,7 +361,7 @@ pub(super) mod sepprof {
     }
     /// separate() の中の段階 `k` に、`lap` からの時間を足して `lap` を今にする
     pub fn lap(k: usize, lap: &mut std::time::Instant) {
-        // `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN` も分離器ごとの時間を数える ([`super::super::seplearn`])
+        // `ENOMOTO_MIP_SEPSTAT` も分離器ごとの時間を数える ([`super::super::seplearn`])
         if on() || super::super::seplearn::stat_on() {
             let now = std::time::Instant::now();
             let f = if AT_FACE.with(|c| c.get()) { NSEP } else { 0 };
@@ -478,10 +478,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 分離器 `src` をこの呼び出しで使うか (`ENOMOTO_MIP_SEP_ADAPTIVE`。根では飛ばしている間は使わず、ノード (`light`) では
     /// `node_off` なら使わない)。使うなら、このラウンドに動いた印を付ける
     fn sep_src_on(&mut self, src: u8, light: bool) -> bool {
-        // 試作 `ENOMOTO_MIP_SEPLEARN`: この呼び出しで使わないと決めた分離器 ([`super::seplearn::SepLearn::begin_call`])
-        if self.sl.learn && self.sl.off & (1 << src) != 0 {
-            return false;
-        }
         if self.sep_src_skipped(src, light) {
             return false;
         }
@@ -551,16 +547,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
-    /// `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`: 分離の後の候補を数え、学習なら分離器ごとの候補の上限をかける ([`super::seplearn`])
-    fn sl_after_separate(&mut self, lists: &mut [&mut Vec<Candidate>], budget: usize) {
-        let mut srcs: Vec<Vec<(u8, f64, usize)>> = lists.iter().map(|v| v.iter().map(|c| (c.src, c.efficacy, c.coefs.len())).collect()).collect();
-        let keep = self.sl.after_separate(&mut srcs, budget);
-        for (v, k) in lists.iter_mut().zip(keep) {
-            if k.iter().any(|b| !b) {
-                let mut it = k.into_iter();
-                v.retain(|_| it.next().unwrap_or(true));
-            }
-        }
+    /// `ENOMOTO_MIP_SEPSTAT`: 分離の後の候補を数える ([`super::seplearn`])
+    fn sl_after_separate(&mut self, lists: &[&Vec<Candidate>]) {
+        let srcs: Vec<Vec<(u8, usize)>> = lists.iter().map(|v| v.iter().map(|c| (c.src, c.coefs.len())).collect()).collect();
+        self.sl.after_separate(&srcs);
     }
 
     /// 選んだカットを LP に加える直前に、加える前の目的値と分離器ごとの違反を覚える ([`super::seplearn::SepLearn::prepare`])
@@ -2716,7 +2706,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let face_quota = tunable!("ENOMOTO_T_MIP_FACE_MAX_CUTS", 0usize, usize);
             self.sep_pass = round;
             self.sep_adapt.ran = 0;
-            // `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`: 分離器ごとの計測と、この呼び出しで使う分離器 ([`super::seplearn`])
+            // `ENOMOTO_MIP_SEPSTAT`: 分離器ごとの計測 ([`super::seplearn`])
             let sl_on = self.sl.stat && !self.params.submip && job.is_none();
             if sl_on {
                 self.sl.begin_call(false);
@@ -2742,9 +2732,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let (mut cands, mut fcands) = self.separate_face_split(&x, false);
             if sl_on {
-                // 予算は 1 ラウンドの本数の上限の目安 (正確な上限はこの後で決まる)
-                let b = if adapt_max_cuts > 0 { adapt_max_cuts } else { tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize).min(p.m.max(50)) };
-                self.sl_after_separate(&mut [&mut cands, &mut fcands], b);
+                self.sl_after_separate(&[&cands, &fcands]);
             }
             // 試作 `ENOMOTO_MIP_MPSEP`: 今の頂点 x* のほかの点 (最適面の上の別の頂点、x* と内点を結ぶ線分上の点) でも分離して候補に足す
             // 足した点の候補は `mp_cands` に分けておく (値に `P` を含まなければカットプールに入れない。`q` でなければ選択の前に候補に混ぜる)
@@ -4563,7 +4551,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let room = max_rows - self.lp.num_rows();
         let max_node = room.min(tunable!("ENOMOTO_T_MIP_NODE_MAX_CUTS", 20usize, usize));
         if sl_on {
-            self.sl_after_separate(&mut [&mut cands], max_node);
+            self.sl_after_separate(&[&cands]);
         }
         if cands.is_empty() {
             if sl_on {
@@ -4638,8 +4626,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut cands = if fresh { self.separate(x, true) } else { Vec::new() };
         self.node_cut_maxlen(&mut cands);
         if sl_on {
-            let b = tunable!("ENOMOTO_T_MIP_HCM_NODE_MAX_CUTS", 100usize, usize);
-            self.sl_after_separate(&mut [&mut cands], b);
+            self.sl_after_separate(&[&cands]);
         }
         crate::simplex::slope_intercept_dual::xprof("hcm_sep");
         for (eff, k) in self.pool_violated(x) {
