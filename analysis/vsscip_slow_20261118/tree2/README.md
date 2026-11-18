@@ -50,3 +50,24 @@ SCIP の rail507 の前処理 (1 ノードで止めて統計): domcol が 63019 
 y_j も入る)。固定の条件は (c) と同じ (worst_case_ok か y_j の上限 1 が行から導ける)。組の上限 `ENOMOTO_T_MIP_DOMCOL_REV_MAX_PAIRS` (既定 5000 万)。
 
 - rail507 (種 1): 36886 列を 0.50 秒で固定 (前処理後 26114 列・非零 466275 → 192844)、**258.6 秒で最適 174** (既定は TL)。
+- rail507・fast0507 の種 1〜3 (4 スレッド・600 秒、秒、TL = 時間切れ):
+
+| 問題 | 種 | def | drev |
+|---|---|---|---|
+| rail507 | 1 | TL (175) | **258.6** |
+| rail507 | 2 | 365.2 | **177.8** |
+| rail507 | 3 | 347.8 | **242.3** |
+| fast0507 | 1 | TL (175) | **239.6** |
+| fast0507 | 2 | TL (175) | **207.5** |
+| fast0507 | 3 | TL (176) | **299.4** |
+
+  fast0507 でも 36886 列を 0.35 秒で固定。6 組すべて最適 174 (SCIP は rail507 216 秒・fast0507 329 秒)。drev = DOMCOL + DOMCOL_PRED + DOMCOL_REV。
+- 誤答の確かめ: `fuzz_drev.sh` (release019 の fuzz の組を drev で、7 組・計 5100 問) で誤答 0。`fuzz_cover.py` (支配の組を多く作る被覆型の
+  0-1 問題、HiGHS と突き合わせ) で 2300 問・誤答 0 (300 問で固定の数は REV なし 170 → あり 406)。`cargo test --release --lib` 415 通過・0 失敗。
+
+## 3. 広い計測 (domrev/)
+
+`domrev/` は slow2_20261117 の台本の写し (設定は `cfg.py` の def・drev)。
+- M = Mittelmann 48 問 (vshighs の M) + rail507・fast0507 × 種 1・2 × {def, drev}、600 秒、10 分担 (各 1.7 時間): `cd analysis/vsscip_slow_20261118/domrev && python run.py M K` (K = 0〜9)
+- P = MIPLIB の 58 問 × 種 1〜3 × {def, drev}、60 秒、4 分担 (各 0.74 時間): `python run.py P K` (K = 0〜3)
+- 集計: `python summ.py M drev`・`python summ.py P drev`。
