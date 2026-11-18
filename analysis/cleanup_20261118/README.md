@@ -57,3 +57,19 @@ fuzz_slack 1000 5000 mismatches 0。cargo test 413 通過・0 失敗。7 本と�
 - 消したのは 11 件 (#2〜#12。#12 は環境変数の分岐だけ)、src の正味 −4510 行。飛ばしたのは #1 `PROBE_EQUIV2_RESTART` (根拠が記録と合わない)。
 - 共有の部品として残したもの: snfmodk.rs (SNFMODK)、`SRC_MODK` (MUSHAGG)、seplearn.rs の計測 (`SEPSTAT`)、`implied_integers_tu` (TU2 の診断)。
 - 消した試作を参照する analysis/ の台本は直していない (過去の記録として残す)。
+
+# 第 2 弾 (2026-11-18)
+
+依頼は BRIEF.md の「第 2 弾」と `cands2.txt` (84 件、848f4bf9d)。手順・確かめは第 1 弾と同じ (ident.py の 12 問・cargo test・警告・
+4 件ごとと最後に fuzz 7 本)。根拠は主に棚卸しの表 analysis/revisit_20261112/inventory.tsv (見送った理由と分類) と元の記録で確かめた。
+始める前に 848f4bf9d で ident.py が base.json と一致することを確かめた (他のセッションの変更で既定は変わっていない)。
+
+## 触らないもの (依頼書の除外)
+
+`SYMREFL`・`SYM_LEX_CANON` (SYMDYN 系)、`IMPLINT_TU2`、`ROOTLP3` は依頼書の「計測中・判断待ち」なので触っていない。
+
+## 1 コミットごとの結果
+
+| 試作 | コミット | 減った行 (src) | 警告 | cargo test | ident | 根拠・備考 |
+|---|---|---|---|---|---|---|
+| `ZH_ONLY`・`ZH_PRE`・`ZH_TRIAL` (`T_MIP_ZH_TRIAL_*`) | (このコミット) | 298 | 74 | 411/0/19 (`random_validity_pre` が消えた) | 一致 | analysis/gap3_zhtrial_20261109.md (ZH_TRIAL=r は 58 問で既定に負ける、=1 は見分けにならない。ZH_ONLY は木で使う害)、analysis/cbcimpl_20261029.md (ZH_PRE は揺れの範囲)。zerohalf.rs の `coef_gcd` は ZH_PRE だけが使っていた |

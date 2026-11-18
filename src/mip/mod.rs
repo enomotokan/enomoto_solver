@@ -1299,7 +1299,6 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         EQUIV2_USED.with(|f| f.set(false));
         CLQPRB_STICKY.with(|f| f.set(false));
         CLQPRB_REVERTED.with(|f| f.set(false));
-        zerohalf::zh_trial_reset();
         cutmix::reset();
     }
     let prr = outer && env_def!("ENOMOTO_MIP_PROBE_REPRESOLVE", "1").is_some();
