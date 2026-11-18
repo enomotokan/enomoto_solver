@@ -63,3 +63,6 @@
     analysis/mcf_cuts_20261028.md、analysis/rootgap_20261116/clq/README.md:160-172。MCF: ta2-UUE が解ける・tavua・fiber・beavma、h80x6320d 遅い。
     TREE_RESTART: mc11 が解ける (csched008 の HiGHS の in-tree restart とも関係)、neos-860300・nubu で損。PARALLEL_INT: irp・mzzv11・noswot 速い、
     traininstance6 1.77 遅い (SYM_TWINS でほぼ取れているので優先は低い)。
+
+## 追記 (2026-11-18、利用者の方針の訂正)
+- 「なんでもシグモイドにするのではなく、普通の if で充分ならそれでいい」。特徴で入り切りするとき、効く問題と効かない問題がはっきり分かれ境目の近くに問題がないなら、しきい値の if で書く。境目の近くに問題が多い・効き目が特徴とともに徐々に変わる場合にだけ連続 (シグモイド) にする。
