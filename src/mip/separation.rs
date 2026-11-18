@@ -3781,7 +3781,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_RR_EACH_ROUND` (試作、既定では使わない): サブ MIP の中か暫定解がないときは、各ラウンドの LP 解で乱択丸め
             // ([`Self::randomized_rounding`]) を `ENOMOTO_T_MIP_RR_EACH_ROUND_TRIES` (1) 回行う (HiGHS の `rootSeparationRound` と同じ)。
             // physiciansched6-2 の根の RENS の近傍のサブ MIP は、HiGHS ならラウンドの途中の LP 解の乱択丸めで解が出るが、ENOMOTO は
-            // ループの後の LP 解でしか丸めない (analysis/physhighs_20261024.md)。`ENOMOTO_MIP_RR_HIGHS` と合わせて使う (1 回目から乱数の閾値)
+            // ループの後の LP 解でしか丸めない (analysis/physhighs_20261024.md)
             if env_str!("ENOMOTO_MIP_RR_EACH_ROUND").is_some() && job.is_none() && (self.params.submip || self.incumbent.is_none()) {
                 let xr = self.lp.col_values();
                 if !self.fractional(&xr).is_empty() {
