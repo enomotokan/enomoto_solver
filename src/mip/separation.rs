@@ -6622,6 +6622,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
             basics = scored.iter().map(|&(s, sc, _)| (s, sc)).collect();
             w_cache = scored.into_iter().map(|(_, _, w)| w).collect();
         } else {
+            // 試作 `ENOMOTO_T_MIP_TAB_DENS_ALPHA` = α (既定 0 = 使わない。gate2 の tab の次、analysis/gate2_20261117/tab/README.md 14 節): 行の点数を
+            // f(1−f) / d^α にして並べ替えだけを変える (HiGHS の fill の予算・比の上限・止め方は入れないので、密な行は後回しになるが消えない)。
+            // d は `ENOMOTO_MIP_TAB_DENS` で選ぶ: `a` (既定) = 基底逆行列の行 w の非零の数、`b` = w の非零の行の長さの和 (集約行の非零の上からの見積り)、
+            // `c` = HiGHS と同じ ||w||² (w_i は行 i の最大係数で拡大縮小。α = 1 で HiGHS の点数)。候補の行ごとに BTRAN を 1 回余分に解く
+            let dens_alpha = tunable!("ENOMOTO_T_MIP_TAB_DENS_ALPHA", 0.0, f64);
+            if dens_alpha > 0.0 && !basics.is_empty() {
+                let kind = env_str!("ENOMOTO_MIP_TAB_DENS").unwrap_or("a");
+                let row_max: Vec<f64> = if kind == "c" { lp_rows.iter().map(|r| r.iter().fold(0.0f64, |m, &(_, a)| m.max(a.abs()))).collect() } else { Vec::new() };
+                for e in basics.iter_mut() {
+                    let w = self.lp.basis_inverse_row(e.0);
+                    let wmax = w.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                    let keep = 1e-9 * wmax;
+                    let d = match kind {
+                        "b" => (0..mr).filter(|&i| w[i].abs() > keep).map(|i| lp_rows[i].len().max(1)).sum::<usize>() as f64,
+                        "c" => (0..mr).map(|i| row_max[i] * w[i].abs()).filter(|&sw| sw > 1e-6).map(|sw| sw * sw).sum::<f64>(),
+                        _ => (0..mr).filter(|&i| w[i].abs() > keep).count() as f64,
+                    };
+                    e.1 /= if kind == "c" { d.max(1e-12) } else { d.max(1.0) }.powf(dens_alpha);
+                }
+            }
             basics.sort_by(|a, b| b.1.total_cmp(&a.1));
         }
         // `ENOMOTO_T_MIP_TAB_NNZ_BUDGET` = B (>0 で有効): 1 ラウンドの集約の手間 (w の非零の行の長さの合計) の上限を
