@@ -82,8 +82,8 @@ pub(crate) fn primal(c: char) -> bool {
 }
 
 thread_local! {
-    /// 試作 `ENOMOTO_MIP_PRIMAL` の `x`: 今出すサブ MIP の時間の上限 (秒)
-    static PRIMAL_TIME_CAP: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+    /// 試作 `ENOMOTO_MIP_PRIMAL` の `x`・`ENOMOTO_T_MIP_SUBFIX_CAP` ([`super::condrev`]): 今出すサブ MIP の時間の上限 (秒)
+    pub(super) static PRIMAL_TIME_CAP: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
 }
 
 thread_local! {

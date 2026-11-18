@@ -1190,107 +1190,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         on
     }
 
-    /// `ENOMOTO_MIP_ZH_TRIAL` の判定 (試作、[`super::zerohalf::zh_trial_mode`]): 根のカットのループを zerohalf なしで回し終えた LP で、
-    /// zerohalf だけのカット (破れの大きい順に 1 ラウンド最大 `ENOMOTO_T_MIP_ZH_TRIAL_CUTS` (100) 本) を加えて解き直すのを
-    /// `ENOMOTO_T_MIP_ZH_TRIAL_ROUNDS` (3) ラウンド回し、伸び g_z を測る。g_z が根のギャップ (打ち切り値があれば打ち切り値 - 目的値、なければ
-    /// ループの伸び g_d) の `ENOMOTO_T_MIP_ZH_TRIAL_FRAC` (既定 0.1) 以上、かつ g_z > `ENOMOTO_T_MIP_ZH_TRIAL_GAIN` (1e-4) x max(1, |目的値|) なら使う。
-    /// 試した行は外し、LP の状態を戻す
-    pub(super) fn zh_trial(&mut self, root_iters: u64, first_obj: f64) -> bool {
-        let t0 = std::time::Instant::now();
-        let p = self.p;
-        let obj0 = self.lp.objective();
-        let x0 = self.lp.col_values();
-        let nfrac0 = self.fractional(&x0).len();
-        let saved = self.lp.save_state();
-        let m0 = self.lp.num_rows();
-        let it0 = self.lp.total_iterations();
-        let rounds = tunable!("ENOMOTO_T_MIP_ZH_TRIAL_ROUNDS", 3usize, usize);
-        let max_cuts = tunable!("ENOMOTO_T_MIP_ZH_TRIAL_CUTS", 100usize, usize);
-        // 期限: 求解の期限と、根の LP の `ENOMOTO_T_MIP_ZH_TRIAL_LP_MULT` (3) 倍 + 1 秒の早い方
-        let lim = std::time::Duration::from_secs_f64((tunable!("ENOMOTO_T_MIP_ZH_TRIAL_LP_MULT", 3.0, f64) * self.root_lp_secs + 1.0).min(1e6));
-        let dl = t0 + lim;
-        let deadline = Some(self.deadline.map_or(dl, |g| g.min(dl)));
-        let mut obj = obj0;
-        let mut x = x0;
-        let (mut ncuts, mut nnz, mut sep_secs) = (0usize, 0usize, 0.0f64);
-        let mut objs = Vec::new();
-        let mut ok = true;
-        for _ in 0..rounds {
-            let ts = std::time::Instant::now();
-            let zhd = if super::zerohalf::zh_deadline_on() { deadline } else { None };
-            let raw = super::zerohalf::with_zh_deadline(zhd, || {
-                super::hnfcut::map_rows(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, &x, |rw, rl, ru, ii, lo, up, xx| super::zerohalf::zerohalf_cuts(rw, rl, ru, ii, lo, up, xx, 100))
-            });
-            sep_secs += ts.elapsed().as_secs_f64();
-            let mut cs: Vec<(f64, super::cuts::RawCut)> = raw
-                .into_iter()
-                .filter_map(|c| {
-                    let act: f64 = c.coefs.iter().map(|&(j, a)| a * x[j]).sum();
-                    let norm = c.coefs.iter().map(|&(_, a)| a * a).sum::<f64>().sqrt();
-                    let viol = act - c.rhs;
-                    (norm > 0.0 && viol > 1e-6 * c.rhs.abs().max(1.0)).then(|| (viol / norm, c))
-                })
-                .collect();
-            if cs.is_empty() {
-                break;
-            }
-            cs.sort_by(|a, b| b.0.total_cmp(&a.0));
-            cs.truncate(max_cuts);
-            ncuts += cs.len();
-            nnz += cs.iter().map(|(_, c)| c.coefs.len()).sum::<usize>();
-            let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = cs.into_iter().map(|(_, c)| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
-            self.lp.add_rows(&rows);
-            let st = self.lp.solve(&SolveLimits { iteration_limit: 10 * root_iters.max(100) + 10_000, cutoff: f64::INFINITY, deadline });
-            if st != LpStatus::Optimal {
-                ok = false;
-                break;
-            }
-            obj = self.lp.objective();
-            objs.push(obj);
-            x = self.lp.col_values();
-            if self.fractional(&x).is_empty() || std::time::Instant::now() >= dl {
-                break;
-            }
-        }
-        let iters = self.lp.total_iterations() - it0;
-        let nfrac1 = self.fractional(&x).len();
-        let mut remove = vec![false; self.lp.num_rows()];
-        for r in remove.iter_mut().skip(m0) {
-            *r = true;
-        }
-        self.lp.delete_rows(&remove);
-        self.lp.restore_state(&saved);
-        let scale = obj0.abs().max(1.0);
-        let (gz, gd) = (obj - obj0, obj0 - first_obj);
-        let cut = self.prune_limit();
-        let gap = if cut.is_finite() && cut > obj0 { cut - obj0 } else { f64::INFINITY };
-        // 尺度: 根のギャップ (打ち切り値があれば)、なければループの伸び
-        let base = if gap.is_finite() { gap } else { gd.max(1e-9 * scale) };
-        let frac = tunable!("ENOMOTO_T_MIP_ZH_TRIAL_FRAC", 0.1, f64);
-        let on = ok && gz > tunable!("ENOMOTO_T_MIP_ZH_TRIAL_GAIN", 1e-4, f64) * scale && gz >= frac * base;
-        if self.params.verbose {
-            let row_nnz = p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / p.m.max(1) as f64;
-            // zerohalf の元になれる行 (整数列だけ・整数係数) の割合
-            let zrows = p.rows.iter().filter(|r| r.iter().all(|&(j, a)| self.cut_int[j] && (a - a.round()).abs() < 1e-9)).count();
-            eprintln!(
-                "MIP: zh trial: {} rounds, {ncuts} cuts (avg {:.1} nonzeros, rows avg {row_nnz:.1}, zh rows {zrows}/{}), LP {obj0:.10e} -> {obj:.10e} [{}], g_z {:.3e} g_d {:.3e} gap {:.3e} (relative to |obj|), g_z/gap {:.3} g_z/g_d {:.3}, fractional {nfrac0} -> {nfrac1}, {iters} LP iters (root LP {root_iters}), sep {sep_secs:.2}s, root LP {:.2}s; {} ({:.2}s)",
-                objs.len(),
-                nnz as f64 / ncuts.max(1) as f64,
-                p.m,
-                objs.iter().map(|o| format!("{:.6e}", o + p.offset)).collect::<Vec<_>>().join(" "),
-                gz / scale,
-                gd / scale,
-                gap / scale,
-                gz / gap,
-                gz / gd.max(1e-12),
-                self.root_lp_secs,
-                if on { "used" } else { "not used" },
-                t0.elapsed().as_secs_f64()
-            );
-        }
-        on
-    }
-
     /// 根の切除平面ループ。LP は根の最適解の状態で呼ぶこと。終わったときも LP は最適 (でなければ偽)。
     /// `ENOMOTO_MIP_EQUIV2_CUTS` (試作、既定では使わない): 前処理が `ENOMOTO_MIP_PROBE_EQUIV2` で同値な 0-1 列を多数代入した問題
     /// ([`super::EQUIV2_USED`]) だけ、根のカットのループの予算を広げる: 面の頂点での分離を止め、根のカットの時間の上限を全体の
@@ -4283,24 +4182,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return ok;
             }
         }
-        // `ENOMOTO_MIP_ZH_TRIAL` (試作): zerohalf なしで回し終えた根で zerohalf を試し、使うなら zerohalf を加えてループを続ける
-        // (2 回目のループの時間の上限は clique の fallback と同じくループの始めから数える)。再スタートの後は最初の判定を引き継ぐ
-        if let Some(zm) = super::zerohalf::zh_trial_mode() {
-            if st == LpStatus::Optimal && job.is_none() && !self.params.submip && !super::zerohalf::zh_trial_decided() && env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_some() && !self.time_up() {
-                // `r`: 試しの LP をせずに使う (根の続きと裏のカットだけ。木では [`super::zerohalf::zh_trial_used`] が偽)
-                let on = if zm == "r" { true } else { self.zh_trial(root_iters, first_obj) && zm == "on" };
-                if zm == "r" && self.params.verbose {
-                    eprintln!("MIP: zh trial (r): continuing the root cut loop with zerohalf ({:.2}s)", self.start.elapsed().as_secs_f64());
-                }
-                super::zerohalf::zh_trial_set(on);
-                if on {
-                    CLIQUE_FB_SECOND.with(|c| c.set(true));
-                    let ok = self.root_cut_loop(root_iters);
-                    CLIQUE_FB_SECOND.with(|c| c.set(false));
-                    return ok;
-                }
-            }
-        }
         if !self.params.submip && st == LpStatus::Optimal && job.is_none() {
             super::record_root_bound(self.lp.objective() + p.offset);
         }
@@ -6415,14 +6296,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // ([`orig_row_modes`]。0 = 試さない, 1 = 全部 (`generate_cuts`), 2 = extended cover だけ)。既定は毎ラウンド・毎ノード、
         // 余裕と関係なくすべての行の両側を試していた
         let row_modes = if row_cuts_m > 0 && env_str!("ENOMOTO_MIP_ORIGROW_TIGHT").is_some() && !gen_old() && mr >= p.m { self.orig_row_modes(&vars, lp_rows, &act, light) } else { None };
-        // `ENOMOTO_MIP_ZH_TRIAL` (試作): 根の試しで使うと決まった問題では使う ([`super::zerohalf::zh_trial_mode`])
-        // 診断用 `ENOMOTO_MIP_ZH_ONLY` = `root` / `tree`: zerohalf を使うとき、根 (`light` でない分離) だけ / ノードだけで使う
-        let zh_where = match env_str!("ENOMOTO_MIP_ZH_ONLY") {
-            Some("root") => !light,
-            Some("tree") => light,
-            _ => true,
-        };
-        let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::zerohalf::zh_trial_used(light) || super::cutmix::zh_on()) && zh_where && self.sep_src_on(sepprof::SRC_ZH, light);
+        let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::cutmix::zh_on()) && self.sep_src_on(sepprof::SRC_ZH, light);
         // clique カットの使い方は下の説明を参照
         let clique_on = clique_cuts_mode().is_some_and(|m| {
             let probe = m == "probe" || m == "probe_s" || m == "probe_r" || m == "probe_f";
@@ -6901,6 +6775,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // mc11 2.6) で速く、W が小さい問題 (roll3000 1.2・nw04 0.66・mik-250 0.98・mas76 0.84) で遅かった。fw が `ENOMOTO_T_MIP_TAB_SIG_FW` (0.9) 以上なら
         // (30n20b8・nw04 のように fill の予算で tableau 行が全部外れ、その密なカットで下界を得る問題) 既定の選び方のまま (値 `n` なら HiGHS の選び方で
         // fill の予算だけ外す。根だけの試しで 30n20b8 の根の下界が 139.9 → 129.8 と悪く、既定のまま (`1`) は 139.9)
+        // 値 `r` は根 (`light` でない分離) だけ HiGHS の選び方にし、ノードの分離は既定のまま (rococoC10-001000 は根のカットが既定と同じで、
+        // 木のノードの分離から道筋が分かれていた。analysis/gate2_20261117/tab/README.md 10 節)
         let tab_sig_mode = env_str!("ENOMOTO_MIP_TAB_HIGHS_SIG");
         // 裏のカットの写しは主の決めた選び方を使う ([`super::solver::BG_TAB_SIG`])
         if tab_sig_mode.is_some() && self.tab_sig == 0 {
@@ -6909,7 +6785,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let tab_sig_measure = tab_sig_mode.is_some() && self.tab_sig == 0 && !light;
         let tab_rules = env_str!("ENOMOTO_MIP_TAB_HIGHS_RULES").is_some()
             || (super::solver::gap4('t') && p.m >= tunable!("ENOMOTO_T_MIP_GAP4_TAB_M", 20000usize, usize))
-            || (tab_sig_mode.is_some() && self.tab_sig >= 2);
+            || (tab_sig_mode.is_some() && self.tab_sig >= 2 && !(light && tab_sig_mode == Some("r")));
         let tab_nofill = tab_sig_mode.is_some() && self.tab_sig == 3;
         let mut w_cache: Vec<Vec<f64>> = Vec::new();
         if tab_rules {
