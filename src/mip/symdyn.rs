@@ -1,4 +1,4 @@
-//! `ENOMOTO_MIP_SYMDYN` (2026-11-11 から既定 `f`: orbital fixing + LexRed) と試作 `ENOMOTO_MIP_SYMREFL` (既定では使わない)
+//! `ENOMOTO_MIP_SYMDYN` (2026-11-11〜11-18 は既定 `f`: orbital fixing + LexRed。併用の誤答で既定から外した) と試作 `ENOMOTO_MIP_SYMREFL` (既定では使わない)
 //! (analysis/symdyn_20261110.md)。
 //!
 //! - `ENOMOTO_MIP_SYMDYN`: 動的な辞書式の縮小 (dynamic lexicographic reduction、van Doornmalen・Hojny 2022/2024 の
@@ -49,10 +49,12 @@ impl SignedGen {
     }
 }
 
-/// `ENOMOTO_MIP_SYMDYN` の値。2026-11-11 から既定 `f` (orbital fixing + LexRed、analysis/symdyn_20261110.md の 11 節)。
-/// `=0` か `off` で止める (以前の orbital fixing だけ)。`=1` は orbital fixing の代わりに LexRed、`o` を含めば軌道の比べも足す
+/// `ENOMOTO_MIP_SYMDYN` の値。既定では使わない (orbital fixing だけ)。2026-11-11〜11-18 は既定 `f` (orbital fixing + LexRed、
+/// analysis/symdyn_20261110.md の 11 節) だったが、orbital fixing (または `o` の軌道の比べ) と LexRed を重ねると最適解の像を全部切る
+/// ことがあり (p0201・fuzz_of の種 1293、analysis/wrong_widden_20261117 の 12 節)、片方だけなら誤答が出ないので既定から外した。
+/// `=f` で併用、`=1` は orbital fixing の代わりに LexRed、`o` を含めば軌道の比べも足す
 fn symdyn_value() -> Option<&'static str> {
-    env_def!("ENOMOTO_MIP_SYMDYN", "f")
+    env_str!("ENOMOTO_MIP_SYMDYN").filter(|v| *v != "0" && *v != "off")
 }
 
 pub fn symdyn() -> bool {
