@@ -1625,6 +1625,12 @@ fn print_nodelp_stats(tid: usize, st: &[[u64; 22]; 5]) {
     }
 }
 
+/// 試作 `ENOMOTO_MIP_NODELP_BFRT_GROUP` (既定では使わない、analysis/lpwarm_20261118): 木のノードの LP だけ `ENOMOTO_SIMPLEX_BFRT_GROUP=gz` で解く
+fn nodelp_bfrt_group() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_NODELP_BFRT_GROUP").is_some_and(|v| v != "0"))
+}
+
 fn ho4_diag() -> bool {
     env_str!("ENOMOTO_MIP_HO4_DIAG").is_some()
 }
@@ -13015,8 +13021,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // 試作 `ENOMOTO_MIP_DSE_INIT` の `r`: 特異な基底は列を差し替えて warm start する
                 let _nl_sr = crate::simplex::slope_intercept_dual::dse_init_has('r').then(crate::simplex::slope_intercept_dual::SingRepairScope::new);
+                // 試作 `ENOMOTO_MIP_NODELP_BFRT_GROUP=1` (既定では使わない、analysis/lpwarm_20261118): 木のノードの LP (解き直しを含む) だけ、
+                // 双対の比のテストを `ENOMOTO_SIMPLEX_BFRT_GROUP=gz` にする (根・カット・強分枝・ヒューリスティクスの LP は変えない)
+                let _nl_bg = nodelp_bfrt_group().then(crate::simplex::slope_intercept_dual::BfrtGroupScope::new);
                 let mut st = self.lp.solve(&capped(self, iter_limit));
                 drop(_nl_sr);
+                drop(_nl_bg);
                 if crate::simplex::slope_intercept_dual::nodelp_diag() {
                     crate::simplex::slope_intercept_dual::NODELP_M0.with(|c| c.set(0));
                 }
