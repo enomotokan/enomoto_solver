@@ -1194,7 +1194,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_MIP_EQUIV2_CUTS` (試作、既定では使わない): 前処理が `ENOMOTO_MIP_PROBE_EQUIV2` で同値な 0-1 列を多数代入した問題
     /// ([`super::EQUIV2_USED`]) だけ、根のカットのループの予算を広げる: 面の頂点での分離を止め、根のカットの時間の上限を全体の
     /// `ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC` (既定 0.3)、1 回の LP の上限を `ENOMOTO_T_MIP_EQUIV2_CUT_LP_TIME_FRAC` (既定 0.05) にし、
-    /// LP が上限で止まってもカットを外さずに解き続ける (`ENOMOTO_MIP_CUT_LP_CONTINUE` と同じ)。physiciansched6-2 は代入の後に
+    /// LP が上限で止まってもカットを外さずに解き続ける (削除した試作 `ENOMOTO_MIP_CUT_LP_CONTINUE` と同じ)。physiciansched6-2 は代入の後に
     /// tableau のカットで根の下界が伸び続けるが (HiGHS も Probing の代入の後のカットで根を閉じる)、既定の予算では 1〜2 ラウンドで止まる
     pub(super) fn equiv2_cuts(&self) -> bool {
         !self.params.submip && env_str!("ENOMOTO_MIP_EQUIV2_CUTS").is_some() && super::EQUIV2_USED.with(|f| f.get())
@@ -1228,7 +1228,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (1) 時間の上限をループの始めから数え、`ENOMOTO_T_MIP_CUT_MIN_ROUNDS` (10) ラウンドまでは時間の上限で止めない
     /// (`ENOMOTO_MIP_CUT_CAP_FROM_LOOP` と同じ)、(2) 1 ラウンドに採るカットの上限を `ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAX_CUTS` (500)・平行度の上限を `..._MAXPAR` (0.9)、
     /// (3) 1 回の LP の時間の上限を全体の `ENOMOTO_T_MIP_ROOT_CUT_HIGHS_LP_TIME_FRAC` (0.1) 以上、上限で止まった LP は解き続ける
-    /// (`ENOMOTO_MIP_CUT_LP_CONTINUE` と同じ)、(4) 動かないラウンドで 1 ラウンドの上限を行の数まで広げる規則を使わない。
+    /// (削除した試作 `ENOMOTO_MIP_CUT_LP_CONTINUE` と同じ)、(4) 動かないラウンドで 1 ラウンドの上限を行の数まで広げる規則を使わない。
     /// physiciansched6-2 では HiGHS の根は tableau のカットを 1 ラウンドに 45〜157 本入れて 5〜8 ラウンドで下界を 49324 にする
     /// (tableau の分離を外すと 13 ラウンドで 47960)。ENOMOTO の既定は前景のカットが時間の上限で 0 ラウンド、上限を外しても 50 本ずつで
     /// 伸びず、広げると 1000 本の LP が 1.2 秒の上限に当たって捨てられていた (analysis/highstree_phys_20261024.md)
@@ -2447,7 +2447,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_CUT_EXTEND` (試作、既定では使わない): 根のカットの時間の上限に来ても、直近 3 ラウンドの目的値の伸びが
             // (3 ラウンドに満たなければ回った分) |目的値| の `ENOMOTO_T_MIP_CUT_EXTEND_MIN_GAIN` 倍 (既定 1e-3) 以上なら、上限を全体の `ENOMOTO_T_MIP_CUT_EXTEND_STEP`
             // (0.05) ずつ、合わせて `ENOMOTO_T_MIP_CUT_EXTEND_MAX` (0.3) まで延ばす。延ばした後は面の頂点での分離 (LP を 2 回解く)
-            // を止める。また最初から、1 回の LP の時間の上限で止まった LP は外さずに解き続ける (`ENOMOTO_MIP_CUT_LP_CONTINUE` と同じ)。
+            // を止める。また最初から、1 回の LP の時間の上限で止まった LP は外さずに解き続ける (削除した試作 `ENOMOTO_MIP_CUT_LP_CONTINUE` と同じ)。
             // physiciansched6-2 (同値の代入の後) では根のカットが 1 ラウンド 1〜2 秒で 48587 -> 49124 (10 ラウンド) と伸び続けるが、
             // 既定の上限 (全体の 10%) で 1〜2 ラウンドで止まっていた
             if extend_on && now - cap_base > time_cap && !self.time_up() && !phase2 && !stopped(&job) && time_cap + 1e-9 < extend_max {
@@ -2458,12 +2458,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let w = (k.saturating_sub(1)).min(tunable!("ENOMOTO_T_MIP_CUT_EXTEND_WIN", 3usize, usize).max(1));
                 if w >= 1 && ext_hist[k - 1] - ext_hist[k - 1 - w] >= tunable!("ENOMOTO_T_MIP_CUT_EXTEND_MIN_GAIN", 1e-3, f64) * obj.abs().max(1.0) {
                     let step = tunable!("ENOMOTO_T_MIP_CUT_EXTEND_STEP", 0.05, f64) * self.params.frac_tl();
-                    // `ENOMOTO_MIP_CUT_EXTEND_CATCHUP` (試作、既定では使わない): 延ばした上限が今の経過に届かなければ、経過 + 1 段まで
-                    // 延ばす (上限 `ENOMOTO_T_MIP_CUT_EXTEND_MAX` は同じ)。physiciansched6-2 (`ENOMOTO_MIP_CUT_AGG`) では、ときどき 1 ラウンドの
-                    // LP が 7000 反復・6 秒と重くなり、伸びている判定が通って 1 段 (3 秒) 延ばしても経過がそれを超えたままで、ループが
-                    // 48757 で止まる回があった (延ばさずに続いた回は 49099〜49324。analysis/physprimal_20261024.md)
-                    let catchup = if env_str!("ENOMOTO_MIP_CUT_EXTEND_CATCHUP").is_some() { now - cap_base + step } else { 0.0 };
-                    time_cap = (time_cap + step).max(catchup).min(extend_max);
+                    time_cap = (time_cap + step).max(0.0).min(extend_max);
                     CUT_EXTENDED.with(|c| c.set(true));
                     if self.params.verbose {
                         eprintln!("MIP: cut round {round}: still improving ({:.6e} in {w} rounds); root cut time cap extended to {time_cap:.1}s", ext_hist[k - 1] - ext_hist[k - 1 - w]);
@@ -3519,13 +3514,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.lp.resolve_fresh_debug(b.as_deref(), w.as_deref());
                 }
             }
-            // `ENOMOTO_MIP_CUT_LP_CONTINUE` (試作、既定では使わない): 1 回の LP の時間の上限で止まったとき、カットを外さずに
-            // 同じ上限でもう `ENOMOTO_T_MIP_CUT_LP_CONTINUE_MAX` 回 (既定 2) まで解き続ける (根のカットの時間の上限を過ぎていても)。
+            // 1 回の LP の時間の上限で止まったとき、カットを外さずに同じ上限でもう `ENOMOTO_T_MIP_CUT_LP_CONTINUE_MAX` 回 (既定 2) まで
+            // 解き続ける (根のカットの時間の上限を過ぎていても。`CUT_EXTEND`・`EQUIV2_CUTS`・`rch` の `L` で使う。単独の試作
+            // `ENOMOTO_MIP_CUT_LP_CONTINUE` は 2026-11-18 に削除)。
             // physiciansched6-2 (同値の代入の後) では 1 ラウンドに数百本のカットを入れた LP が上限 (3 秒) を少し超え、外したカットの
             // 分の反復が無駄になり、2 回で根のカットのループが止まっていた
             // `ENOMOTO_MIP_EQUIV2_CUTS` では `ENOMOTO_T_MIP_EQUIV2_CUT_LP_CONTINUE` (既定 1) のときだけ解き続ける
             let eq2_cont = eq2c && tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_LP_CONTINUE", 1usize, usize) > 0;
-            if st == LpStatus::TimeLimit && (env_str!("ENOMOTO_MIP_CUT_LP_CONTINUE").is_some() || extend_on || eq2_cont || self.rch_part('L')) && !self.params.submip {
+            if st == LpStatus::TimeLimit && (extend_on || eq2_cont || self.rch_part('L')) && !self.params.submip {
                 for _ in 0..tunable!("ENOMOTO_T_MIP_CUT_LP_CONTINUE_MAX", 2usize, usize) {
                     if self.time_up() || stopped(&job) {
                         break;
@@ -4782,20 +4778,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
-        // `ENOMOTO_MIP_CUT_AGE_HIGHS`: HiGHS の `HighsLpRelaxation::performAging` と同じく、論理変数が基底のカットは余裕が 0
-        // (退化して効いている形) でも年齢を増やし、非基底でも双対値が 0 なら増やす。0 に戻すのは双対値が 0 でないものだけ。
-        // 既定の数え方では退化した基底の行の年齢が 0 に戻り続け、上限を下げても LP のカットの行が減らない (mc11 で上限 50 でも 3770 行)
-        if env_str!("ENOMOTO_MIP_CUT_AGE_HIGHS").is_some() {
-            let y = self.lp.row_duals();
-            for (k, age) in self.cut_age.iter_mut().enumerate() {
-                let i = m0 + k;
-                if b.row[i] == VarStatus::Basic || y[i].abs() <= 1e-9 {
-                    *age = age.saturating_add(1);
-                } else {
-                    *age = 0;
-                }
-            }
-        } else {
         // `ENOMOTO_MIP_TREESEP2` の a: 木の分離で加えたカットは HiGHS の数え方 (退化して基底にある行・双対値 0 の行も年齢を増やす)
         let ts2a = self.ts2_has('a') && self.ts2_id0 != u64::MAX;
         let y2 = if ts2a { self.lp.row_duals() } else { Vec::new() };
@@ -4822,7 +4804,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 *age = 0;
             }
-        }
         }
         if !self.merged_cuts.is_empty() {
             for k in 0..ncut {
@@ -6614,7 +6595,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 固定費用ネットワーク型ではノードでも経路集約の始点を使う (`ENOMOTO_T_MIP_NODE_FC_PATH_STARTS`、[`Solver::node_cuts_due`])
             let max_starts = if !light {
                 tunable!("ENOMOTO_T_MIP_PATH_STARTS", 1000usize, usize)
-            } else if self.fc_node_sep || (self.tree_sep_fc && !(self.nc_path_forced && super::solver::nodecnt('r') && !self.nc_root_decide())) {
+            } else if self.tree_sep_fc && !(self.nc_path_forced && super::solver::nodecnt('r') && !self.nc_root_decide()) {
                 tunable!("ENOMOTO_T_MIP_NODE_FC_PATH_STARTS", 1000usize, usize)
             } else {
                 tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 0usize, usize)
@@ -6622,9 +6603,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 既定は HiGHS の経路集約の移植 (`ENOMOTO_MIP_PATH_OLD` で従来の経路集約)
             // 経路集約: 従来のもの (`ENOMOTO_MIP_PATH_OLD`)、HiGHS の移植 (`ENOMOTO_MIP_PATH_HIGHS_ONLY`)、既定は両方
             // (h80x6320d・rout は移植で根の下界が上がり、mik-250 は従来のものの方が強い)
-            // `ENOMOTO_MIP_FC_NODE_PATH_HIGHS`: 固定費用ネットワーク型の毎ノードの分離では、ノードでも HiGHS の移植を使う
             // 試作 `ENOMOTO_MIP_NODECNT` の `h`: 木の中の分離 (`tree_sep_fc`) でもノードで HiGHS の移植を使う
-            let node_highs = light && ((self.fc_node_sep && env_str!("ENOMOTO_MIP_FC_NODE_PATH_HIGHS").is_some()) || (self.tree_sep_fc && super::solver::nodecnt('h') && !(self.nc_path_forced && super::solver::nodecnt('r') && self.nc_rdec != 1)));
+            let node_highs = light && self.tree_sep_fc && super::solver::nodecnt('h') && !(self.nc_path_forced && super::solver::nodecnt('r') && self.nc_rdec != 1);
             let old_only = env_str!("ENOMOTO_MIP_PATH_OLD").is_some() || (light && !node_highs);
             let highs_only = env_str!("ENOMOTO_MIP_PATH_HIGHS_ONLY").is_some();
             if !old_only && self.sep_src_on(sepprof::SRC_PATHH, light) {
@@ -6770,8 +6750,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // HiGHS の選び方で根の下界が 104.7 → 109.5・111.4 に上がる。害の出た 30n20b8・roll3000・nw04 はどれも 2300 行以下
         // 試作 `ENOMOTO_MIP_TAB_HIGHS_SIG` (gate2、既定では使わない、analysis/gate2_20261117/tab/README.md): 根の最初の tableau の分離
         // (`light` でない呼び出しで、行が 1 つ以上使われたもの) は既定の選び方で行い、その作業量 W = (集約行の非零の合計) / (LP の非零 + 列) と、
-        // HiGHS の fill の予算を超える行の割合 fw を測る。W のシグモイド σ((ln W − ln `ENOMOTO_T_MIP_TAB_SIG_W` (2.5)) / `ENOMOTO_T_MIP_TAB_SIG_WIDTH` (0.25))
-        // が 0.5 以上なら、以後の呼び出し (ノードを含む) で HiGHS の選び方を使う。58 問では W が大きい問題 (qnet1 7.1・10teams 18.8・neos-911970 7.0・
+        // HiGHS の fill の予算を超える行の割合 fw を測る。W ≥ `ENOMOTO_T_MIP_TAB_SIG_W` (2.5) で、連続列の割合が `ENOMOTO_T_MIP_TAB_SIG_CONT` (0.6)
+        // 未満なら、以後の呼び出し (ノードを含む) で HiGHS の選び方を使う (2026-11-18 に初めのシグモイドを普通の if にし、連続列の割合を足した:
+        // 連続列の多い kasai・binkar10_1・dcmulti は HiGHS の選び方で遅く、kasai は根の下界も悪い。README.md 10 節)。58 問では W が大きい問題 (qnet1 7.1・10teams 18.8・neos-911970 7.0・
         // mc11 2.6) で速く、W が小さい問題 (roll3000 1.2・nw04 0.66・mik-250 0.98・mas76 0.84) で遅かった。fw が `ENOMOTO_T_MIP_TAB_SIG_FW` (0.9) 以上なら
         // (30n20b8・nw04 のように fill の予算で tableau 行が全部外れ、その密なカットで下界を得る問題) 既定の選び方のまま (値 `n` なら HiGHS の選び方で
         // fill の予算だけ外す。根だけの試しで 30n20b8 の根の下界が 139.9 → 129.8 と悪く、既定のまま (`1`) は 139.9)
@@ -7224,10 +7205,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if tab_sig_measure && n_rows_used > 0 {
             let w = base_nnz_total as f64 / (lp_nnz + n).max(1) as f64;
             let fw = n_fill_would as f64 / n_rows_used as f64;
-            let w0 = tunable!("ENOMOTO_T_MIP_TAB_SIG_W", 2.5, f64);
-            let width = tunable!("ENOMOTO_T_MIP_TAB_SIG_WIDTH", 0.25, f64);
-            let sig = 1.0 / (1.0 + (-(w.max(1e-9).ln() - w0.ln()) / width).exp());
-            self.tab_sig = if sig < 0.5 {
+            let cont = (p.n - p.nint) as f64 / p.n.max(1) as f64;
+            let on = w >= tunable!("ENOMOTO_T_MIP_TAB_SIG_W", 2.5, f64) && cont < tunable!("ENOMOTO_T_MIP_TAB_SIG_CONT", 0.6, f64);
+            self.tab_sig = if !on {
                 1
             } else if fw >= tunable!("ENOMOTO_T_MIP_TAB_SIG_FW", 0.9, f64) {
                 if tab_sig_mode == Some("n") { 3 } else { 1 }
@@ -7235,7 +7215,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 2
             };
             if env_str!("ENOMOTO_MIP_LOG").is_some() {
-                eprintln!("MIP: tableau rule sigmoid: W {w:.2} fw {fw:.2} sig {sig:.3} -> {} (submip {})", ["", "default", "highs", "highs-nofill"][self.tab_sig as usize], self.params.submip);
+                eprintln!("MIP: tableau rule: W {w:.2} fw {fw:.2} cont {cont:.2} -> {} (submip {})", ["", "default", "highs", "highs-nofill"][self.tab_sig as usize], self.params.submip);
             }
         }
         if dbg_sep && tab_cbc_init.is_some() {

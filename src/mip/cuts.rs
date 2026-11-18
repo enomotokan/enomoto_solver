@@ -646,11 +646,6 @@ fn unsubstitute(vars: &CutVars, t: &Term, c: f64, coefs: &mut Vec<(usize, f64)>)
     }
 }
 
-fn cmir_delta1() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| env_str!("ENOMOTO_MIP_CMIR_DELTA1").is_some())
-}
-
 /// CMIR で切除平面を作る。作れなければ `None`。
 pub fn cmir(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
     let (terms, beta) = substitute(vars, base, rhs)?;
@@ -662,11 +657,6 @@ pub fn cmir(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
 fn sep_fast() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| env_def!("ENOMOTO_MIP_SEP_FAST", "1").is_some())
-}
-
-fn cmir_deltas_highs() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| env_str!("ENOMOTO_MIP_CMIR_DELTAS_HIGHS").is_some())
 }
 
 /// MIR の効き目を何度も測るための前計算 (`ENOMOTO_MIP_SEP_FAST`、HiGHS の `cmirCutGenerationHeuristic` と同じ形): 連続の項は
@@ -721,8 +711,7 @@ impl MirEval {
     }
 }
 
-/// [`cmir_terms`] の速い版 (`ENOMOTO_MIP_SEP_FAST`): 効き目の評価に [`MirEval`] を使う。`ENOMOTO_MIP_CMIR_DELTAS_HIGHS` なら
-/// δ の候補の 1/2・1/4・1/8 は (全ての候補ではなく) 最良の δ についてだけ試す (HiGHS は最良の δ の 2・4・8 倍を試す)
+/// [`cmir_terms`] の速い版 (`ENOMOTO_MIP_SEP_FAST`): 効き目の評価に [`MirEval`] を使う
 fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
     // 手間の単位 ([`crate::ticks`]): 項の数
     crate::ticks::add(crate::ticks::SEP, terms.len() as u64);
@@ -744,17 +733,11 @@ fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut
             deltas.push(m);
         }
     }
-    let highs = cmir_deltas_highs();
-    if !highs {
-        let base_deltas = deltas.clone();
-        for d in base_deltas {
-            for div in [2.0, 4.0, 8.0] {
-                deltas.push(d / div);
-            }
+    let base_deltas = deltas.clone();
+    for d in base_deltas {
+        for div in [2.0, 4.0, 8.0] {
+            deltas.push(d / div);
         }
-    }
-    if cmir_delta1() && !deltas.iter().any(|&e| (e - 1.0).abs() <= 1e-9) {
-        deltas.push(1.0);
     }
     let n_old = deltas.len();
     let mut ev = MirEval::new(&terms);
@@ -777,17 +760,6 @@ fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut
         i += 1;
         if i == n_old {
             kinds = cmirdelta_extend(&terms, &mut deltas, best.map(|b| b.0));
-        }
-    }
-    if highs {
-        if let Some((d0, _)) = best {
-            for div in [2.0, 4.0, 8.0] {
-                if let Some(eff) = ev.efficacy(beta, d0 / div) {
-                    if best.is_none_or(|(_, e)| eff > e) {
-                        best = Some((d0 / div, eff));
-                    }
-                }
-            }
         }
     }
     let (delta, mut eff) = best?;
@@ -951,7 +923,7 @@ fn cmir_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
     if !terms.iter().any(|t| t.int) {
         return None;
     }
-    if sep_fast() || cmir_deltas_highs() {
+    if sep_fast() {
         return cmir_terms_fast(vars, terms, beta);
     }
     // 2. delta の候補: LP 値が境界の内側にある整数変数の係数
@@ -979,11 +951,6 @@ fn cmir_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
         for div in [2.0, 4.0, 8.0] {
             deltas.push(d / div);
         }
-    }
-    // `ENOMOTO_MIP_CMIR_DELTA1`: δ = 1 も試す (HiGHS の CMIR と同じ。係数が大きい行で、整数列の係数そのものより
-    // 1 で割った方が強いことがある)
-    if cmir_delta1() && !deltas.iter().any(|&e| (e - 1.0).abs() <= 1e-9) {
-        deltas.push(1.0);
     }
     // 試作 `ENOMOTO_MIP_CMIRDELTA`: 同時ディオファントス近似で作った δ を足す (既定では足さない)
     // (既存の候補を先に評価し、その最良の δ を渡してから新しい候補を足して評価する)

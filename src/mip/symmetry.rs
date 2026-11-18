@@ -888,7 +888,7 @@ pub struct Orbitope {
     /// 列の入れ替えがオービトープの変数だけを動かす (双子の組から作った 1xk、既定、`ENOMOTO_MIP_NO_SYM_TWIN_ORBITOPE` で止める)。`swaps` は
     /// 持たず、[`Self::canonicalize`] は値を直接入れ替える。
     pub local: bool,
-    /// 試作 `ENOMOTO_MIP_ORBPP` (既定は偽): このオービトープだけを静的に扱う (全ての行を固定の順で使い、根で x_{i,c} = 0 (c > i) を
+    /// `ENOMOTO_MIP_ORBPP` (既定で使う。`=0` で切る) で静的と決めたオービトープ (構築時は偽): このオービトープだけを静的に扱う (全ての行を固定の順で使い、根で x_{i,c} = 0 (c > i) を
     /// 固定し、オービトープの分枝はしない)。パッキング・分割の行が 3 行以上のオービトープに付ける (van Doornmalen・Hojny の 5.1 節、SCIP の orbitope_pp)。
     pub static_pp: bool,
 }

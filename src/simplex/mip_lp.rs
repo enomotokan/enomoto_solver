@@ -1623,25 +1623,6 @@ impl TwoStageLp {
         if cold && crate::cancel::current().is_none() {
             let k = COLD_RACE_THREADS.with(|c| c.get());
             if k >= 2 {
-                // 試作 `ENOMOTO_MIP_MC11FIX1_RACE` (既定では使わない、analysis/mc11_wait1_20261103.md): 小さい LP (行 + 列 + 非零の数が
-                // `ENOMOTO_T_MIP_MC11FIX1_RACE_SIZE` (既定 50000) 未満) では、勝ち負けを時間で決めない。`s` は同時実行をやめて二段解法だけ、
-                // `i` は二段解法が先に最適で終わっても内点法 + クロスオーバーの頂点を待って採る。mc11 (大きさ 約 1.1 万) では両方が 0.04〜0.06 秒で
-                // ほぼ同着になり、どちらが勝つかで根の頂点が変わって、根のカットと裏のカットの道が 11683 (二段解法、約 15 秒) と
-                // 11666 (内点法、約 30 秒) に分かれていた
-                if let Some(v) = env_str!("ENOMOTO_MIP_MC11FIX1_RACE") {
-                    let nnz: usize = self.rows.iter().map(|r| r.len()).sum();
-                    let size = self.std.n_total + nnz;
-                    let small = (size as f64) < tunable!("ENOMOTO_T_MIP_MC11FIX1_RACE_SIZE", 50000.0, f64);
-                    if env_str!("ENOMOTO_DEBUG_RACE").is_some() {
-                        eprintln!("MIP root race: ENOMOTO_MIP_MC11FIX1_RACE={v}: size {size} ({})", if small { "small" } else { "race as usual" });
-                    }
-                    if small && v.contains('s') {
-                        return self.solve_once(lim);
-                    }
-                    if small && v.contains('i') {
-                        return self.solve_race_ext(lim, k, true);
-                    }
-                }
                 if let Some(cfg) = BOTH_REQ.with(|c| c.take()) {
                     return self.solve_race_both(lim, k, cfg);
                 }
@@ -2184,7 +2165,7 @@ impl TwoStageLp {
     }
 
     /// [`Self::solve_race`] の本体。`force_ipm` なら二段解法が先に最適で終わっても内点法 + クロスオーバーの頂点を待つ
-    /// (`ENOMOTO_MIP_ROOT_LP_IPM` と同じ。試作 `ENOMOTO_MIP_MC11FIX1_RACE=i`)
+    /// (`ENOMOTO_MIP_ROOT_LP_IPM` と同じ)
     fn solve_race_ext(&mut self, lim: &SolveLimits, threads: usize, force_ipm: bool) -> LpStatus {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{mpsc, Arc};

@@ -361,7 +361,7 @@ pub(crate) struct RunStats {
     pub(crate) first_sol: Option<(f64, f64)>,
     /// 根の切除平面ループを終えた時点の LP の目的値 (再スタート後の根があれば最後のもの)。暫定解の目的値で上から切り詰める ([`record_root_bound`])。
     pub(crate) root_bound: Option<f64>,
-    /// 最初の根のヒューリスティクスを始めた時刻 (求解の開始からの秒。`ENOMOTO_MIP_ROOT_SUBMIP_REL` の基準)。
+    /// 最初の根のヒューリスティクスを始めた時刻 (求解の開始からの秒。[`root_submip_ref_secs`] の基準)。
     pub(crate) root_heur_t: Option<f64>,
     /// 最後に暫定解が良くなった時刻 (求解の開始からの秒。`ENOMOTO_MIP_ROBUST_LNSFREQ` の停滞の判定に使う)。
     pub(crate) last_sol: Option<f64>,
@@ -406,18 +406,9 @@ pub(crate) fn record_root_heur_start() {
     }
 }
 
-/// [`root_submip_rel`] の基準の秒: 最初の根のヒューリスティクスを始めた時刻 (記録がなければ今の経過秒)。
+/// 根の時間の基準の秒 (`ENOMOTO_MIP_SUBCAP` の [`super::solver::subcap_root_secs`]): 最初の根のヒューリスティクスを始めた時刻 (記録がなければ今の経過秒)。
 pub(crate) fn root_submip_ref_secs() -> Option<f64> {
     RUN_STATS.lock().ok().and_then(|s| s.root_heur_t).or_else(outer_elapsed)
-}
-
-/// `ENOMOTO_MIP_ROOT_SUBMIP_REL` = k (試作、既定では使わない): 根 (外側の求解の根と再スタート後の根) のサブ MIP の時間の上限を、
-/// 外側の求解の始まりから最初の根のヒューリスティクスに入るまでの秒 ([`root_submip_ref_secs`]) の k 倍 (最小 `ENOMOTO_T_MIP_ROOT_SUBMIP_REL_MIN` 秒、既定 0.5 秒) までに絞る。暫定解のある
-/// ときだけ (暫定解なし用の RENS などは今のまま)。既定の上限 (残り時間の 7%、最大 6 秒) は時間上限 60 秒で約 4 秒で、根の LP が
-/// 0.02 秒の neos17 でも根のサブ MIP が 1 本 3〜4 秒使い、根のヒューリスティクスが 11 秒になっていた
-/// (analysis/smallprob_overhead_20261028.md)。根に入るまでの時間に比べて重すぎる手間を、問題の重さに合わせて縮める
-pub(crate) fn root_submip_rel() -> Option<f64> {
-    env_str!("ENOMOTO_MIP_ROOT_SUBMIP_REL").and_then(|v| v.parse::<f64>().ok()).filter(|&k| k > 0.0)
 }
 
 /// 根の下界の記録 ([`RUN_STATS`])。暫定解があれば、その目的値 (`best_z`) より大きくは記録しない (`ENOMOTO_MIP_ROOT_BOUND_CLAMP=0` で
@@ -564,9 +555,9 @@ pub fn solve_mip(
             }
         });
     }
-    // 試作 `ENOMOTO_MIP_VUBAGG` (既定では使わない。analysis/vsscip_slow_20261118/g1): 双対の集約 ([`vub_dual_agg_pairs`])。畳み込み・前処理の前に
+    // `ENOMOTO_MIP_VUBAGG` (既定で使う。`=0` で切る。analysis/vsscip_slow_20261118/g1): 双対の集約 ([`vub_dual_agg_pairs`])。畳み込み・前処理の前に
     // x_j を y に置き換えた問題を解き、解の x_j を y の値で埋める。畳み込み (既定) は平行な x を先に束ねて形を崩すので、その前に見る
-    let vub = if env_str!("ENOMOTO_MIP_VUBAGG").is_some_and(|v| v != "0") && !params.submip {
+    let vub = if env_def!("ENOMOTO_MIP_VUBAGG", "1").is_some() && !params.submip {
         let t0 = std::time::Instant::now();
         let pairs = vub_dual_agg_pairs(pr);
         if params.verbose {
@@ -3273,11 +3264,11 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
             }
         }
     }
-    // 試作 `ENOMOTO_MIP_ORBPP` (既定では使わない。analysis/vsscip_slow_20261118/g1): 成分ごとに扱いを選ぶ。全ての行がパッキング・分割の行に
+    // `ENOMOTO_MIP_ORBPP` (既定で使う。`=0` で切る。analysis/vsscip_slow_20261118/g1): 成分ごとに扱いを選ぶ。全ての行がパッキング・分割の行に
     // 含まれ、行が 3 行以上の 0-1 のオービトープだけを静的に扱い (根で x_{i,c} = 0 (c > i) を固定し、木では全ての行を固定の順で使う)、
     // ほかは動的なまま (van Doornmalen・Hojny の 5.1 節 (c)、SCIP の orbitope_pp)。オービトープどうしは列が交わらないので、成分ごとに
     // 違う規則の代表を残してよい (群が直積に分かれる)。graph20-20-1rand で SCIP は usesymmetry=0 だと解けず、静的な固定で 2183 列が 340 列になる
-    if !static_orbitope && env_str!("ENOMOTO_MIP_ORBPP").is_some_and(|v| v != "0") {
+    if !static_orbitope && env_def!("ENOMOTO_MIP_ORBPP", "1").is_some() {
         let min_rows = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_ROWS", 3usize, usize);
         // 列 (入れ替える組) の数の下限。列の少ないオービトープを静的にすると、固定は少ないのに動的な固定の柔らかさを失う
         // (neos-911970: 35x3 が 6 つと 35x6 が 1 つで 33 列の固定、P で 1.74 倍遅い。graph20-20-1rand は 37x37)。P・T・M の 106 問で ORBPP が
@@ -4785,7 +4776,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     }
 }
 
-/// 試作 `ENOMOTO_MIP_VUBAGG` の双対の集約 (SCIP の setppc・linear の双対の前処理に当たる。neos-787933 で SCIP は 236376 列を 1764 列にして根で解く)。
+/// `ENOMOTO_MIP_VUBAGG` (既定で使う) の双対の集約 (SCIP の setppc・linear の双対の前処理に当たる。neos-787933 で SCIP は 236376 列を 1764 列にして根で解く)。
 /// 行 `Σ a_j x_j − M y ≤ 0` (≥ の形は符号を反転して同じ。右辺 0、y は 0-1、x_j は全て 0-1 で a_j > 0、`Σ a_j ≤ M`) は、y = 0 なら x = 0、
 /// y = 1 なら冗長なので、`x_j ≤ y` (j ごと) と同じ。x_j の費用が 0 以下で、x_j を増やして苦しくなる行 (上向きの錠) がこの行だけなら、
 /// x_j を y まで上げても実行可能で目的は悪くならないので、`x_j = y` の最適解がある (列ごとに独立に上げてよい)。組 `(x_j, y, false)` を返す。
@@ -4839,7 +4830,7 @@ fn vub_dual_agg_pairs(prob: &MipProblem) -> Vec<(usize, usize, bool)> {
     out
 }
 
-/// 試作 `ENOMOTO_MIP_VUBAGG`: 組 `x_j = y` ([`vub_dual_agg_pairs`]) で x_j を全ての行から y に置き換え、x_j の費用を y に足し、x_j を 0 に固定した問題。
+/// `ENOMOTO_MIP_VUBAGG` (既定で使う): 組 `x_j = y` ([`vub_dual_agg_pairs`]) で x_j を全ての行から y に置き換え、x_j の費用を y に足し、x_j を 0 に固定した問題。
 /// 解は `x_j = x_y` で戻す。列の番号は変えない。
 fn vub_dual_agg_problem(p: &MipProblem, pairs: &[(usize, usize, bool)]) -> MipProblem {
     let mut rep: Vec<usize> = (0..p.n).collect();
