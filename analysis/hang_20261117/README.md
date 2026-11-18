@@ -191,3 +191,15 @@
 - 正しさ: 2 つの試作を両方入れた fuzz (`fuzz/`): mip_fuzz_vs_highs 300 (4 スレッド・1 スレッド)・mip_fuzz_symmetric 300 で bad 0。
   ログつきの mip_fuzz_vs_highs・fixed_charge・clique 各 300 で bad 0、等式化が動いた前処理 1244 回・sparsify が動いた前処理 535 回 (`fuzz/dti_sp_coverage.txt`)。
 - cargo test: 422 通過 (dualtightineq の単体試験 3 件を含む)。
+
+## 12. PNCT_T1 の分担の報告から (2026-11-18、事実)
+
+- 分担 0・1・3 (ビルド fcce29cdb、各 86〜88 行): def_t1 と nct_t1 で optimal の顔ぶれ・目的値は一致、crash 0、時間の差は小さい
+  (分担 3 は時間比 1.5 倍超の対なし)。時間切れの暫定解の差が数問 (neos-1456979 種 1 は nct_t1 が良い、10teams 種 1 は def_t1 が良い など)。
+- 60 + 1 秒を越えた行: ns1116954 の **nct_t1** の種 2 (66.8 秒)・種 3 (68.2 秒)。0 ノード・根の LP の途中で止まった回。同じ種の def_t1 は 60.3・60.6 秒。
+- 手元の追試: nct_t1 の種 2・3 は 56 秒前後で FJ が解を見つけて optimal (CPU を食う裏の処理 2 本を足しても同じ)。時間の上限を根の LP の途中
+  (20・22 秒) に置くと、根の LP は期限の 0.35 秒後に止まる (「root LP stopped at the time limit (… 0.35s past the deadline)」、
+  `logs/ns1116954_rootlp2*_t1.*`、行 12.8 万・列 1.2 万の LP)。期限の後は MipProblem の片付け (drop) にも 0.3 秒ほどかかる。
+  計測機の 6.8〜8.2 秒の超過は再現できていない (推測: 計測機では早めの探索の後に根の LP が期限をまたぎ、こちらで見えない道 (根の LP の救済・
+  尺度を変えた解き直しなど) を通った)。再現には計測機で `watch_at.sh ns1116954 1 60 61.5 名前 ENOMOTO_T_MIP_SEED=2 ENOMOTO_MIP_FEAS_EARLY_NO_CHAIN_TICKS=1`
+  を回し、`logs/` のスタックとログを見る。nct_t1 は「直す前」の形なので、既定 (def_t1) では起きにくい。
