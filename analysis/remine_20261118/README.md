@@ -132,3 +132,12 @@ rootgap_20261116/clq では neos-1456979 の「def の 600 秒の回」と「試
 - L (3): P の 58 問のうち列 ≤ 1500 の 32 問 + 対照の swath1・nw04 × 種 1〜4 × {def, lucg} = 272 回、3 分担 (各 0.75 時間)。
   `python plan.py L 3` (作成済み `shards_L.json`) → `python run.py L K` (K = 0〜2) → `python summ.py res_L_s*.jsonl`。
   判断: 列 ≤ 1500 の 32 問で SGM の def 比が 0.97 未満、かつ揺れの大きい問題を除いても得が残るときだけ条件付きの形 (列 ≤ 1000 の if) に進む。
+
+## G の結果 (GAP4=0 の確かめ、b75e145f9、54 回、`res_G_s0.jsonl`・`summ_G.txt`)
+
+- 全部 optimal (def 27・g4off 27)、crash 0。g4off の SGM は def 比 0.966、1.25 倍超 0 回、解けなくなる回 0。
+- 種で選ぶ上限 0.957 に対し、抜き 1 の交差検証は 0.987。種ごとの向きは physiciansched6-2 (種 2 だけ def 45.6 秒 → 24.4 秒) を除いてそろわない (ρ はほぼ −0.33)。
+- 11-09 の記録で rocn が速かった drayage 2 問・neos-960392 は、今の既定ではもともと 0.2〜1.7 秒で解け、差はない。
+  遅かった 6 問 (neos-860300・ns1116954・physiciansched6-2・mas76・binkar10_1・nw04) にも、そろった害はない。
+- **結論: 既定の rocn の害は今は見えない。11-09 の差は当時の def の回の偏りだったとみられる。何もしない** (5 は閉じる)。
+  physiciansched6-2 は 4 スレッドで揺れる問題 (DOMREV・SYMDYN の記録でも速い・遅いが種で入れ替わる) として扱う。
