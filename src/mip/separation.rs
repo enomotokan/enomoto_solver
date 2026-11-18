@@ -2032,6 +2032,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let cl_c = cl.is_some_and(|v| v.contains('c'));
         let cl_log = cs_outer && self.params.verbose && (cl.is_some_and(|v| v.contains('l')) || env_str!("ENOMOTO_MIP_CUTLPCAP_LOG").is_some());
         let mut cl_last_ok_cuts = 0usize;
+        // 試作 `ENOMOTO_MIP_MODKVB_CAPDROP` (gate2 候補 5、analysis/gate2_20261117/modkvb_s/README.md、`ENOMOTO_MIP_MODKVB` と組で使う。既定では使わない):
+        // カットの LP が 1 回の上限 (反復・時間) に当たったラウンドに試作のカットが混ざっていれば、試作のカットだけを外して加える前の状態から
+        // 解き直す (最適になればそのラウンドは成功として続け、以後のラウンドの試作のカットの本数をそのラウンドの半分までにする)
+        let mkd = cs_outer && super::modkvb::modkvb_mode().is_some() && env_str!("ENOMOTO_MIP_MODKVB_CAPDROP").is_some_and(|v| v != "0");
+        let mut mkd_cap: Option<usize> = None;
         let mut loop_iters = 0u64;
         let mut work_rounds = 0usize;
         // 試作 `ENOMOTO_MIP_TIMEDEP` の `p`: 第 2 段階の上限を手間で決める (`p2_work_cap`、時間の上限 `phase2_deadline` は 10 倍の安全網)
@@ -3111,12 +3116,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
+            // 試作 `ENOMOTO_MIP_MODKVB_CAPDROP`: 前に上限に当たったら、試作のカットを効き目の順に `mkd_cap` 本までにする
+            let is_mk = |c: &Candidate| c.src % sepprof::SRC_FACE == sepprof::SRC_MODK;
+            if let Some(cap) = mkd_cap {
+                if chosen.iter().filter(|c| is_mk(c)).count() > cap {
+                    let mut effs: Vec<f64> = chosen.iter().filter(|c| is_mk(c)).map(|c| c.efficacy).collect();
+                    effs.sort_by(|a, b| b.total_cmp(a));
+                    let thr = if cap == 0 { f64::INFINITY } else { effs[cap - 1] };
+                    let mut kept = 0usize;
+                    chosen.retain(|c| {
+                        if !is_mk(c) {
+                            return true;
+                        }
+                        let k = c.efficacy >= thr && kept < cap;
+                        kept += k as usize;
+                        k
+                    });
+                }
+            }
             if !self.params.submip && env_def!("ENOMOTO_MIP_CUT_CLIQUE_EXTEND", "1").is_some() {
                 self.extend_clique_cuts(&mut chosen, &x, round);
             }
             if sl_on {
                 self.sl_prepare(&chosen, &x);
             }
+            let mk_mask: Vec<bool> = if mkd { chosen.iter().map(|c| is_mk(c)).collect() } else { Vec::new() };
+            let n_mk = mk_mask.iter().filter(|&&b| b).count();
             let row_effs: Vec<f64> = if cl_a { chosen.iter().map(|c| c.efficacy).collect() } else { Vec::new() };
             let mut rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
             total_added += rows.len();
@@ -3200,6 +3225,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let ho4_gr = ho5_gain > 0.0 && env_str!("ENOMOTO_MIP_HO4_GAIN_RESTORE").is_some();
             let rob_saved = ((rob_d || ho4_gr) && !fail_restore && keep_lu_remove.is_none()).then(|| self.lp.save_state());
             // 試作 `ENOMOTO_MIP_CUTLPCAP` の `a`: 解き直しのために加える前の状態を取っておく
+            let mkd_saved = (mkd && n_mk > 0 && n_mk < rows.len() && !fail_restore && keep_lu_remove.is_none()).then(|| self.lp.save_state());
             let cl_saved = (cl_a && !fail_restore && keep_lu_remove.is_none() && rows.len() >= 2 * tunable!("ENOMOTO_T_MIP_CUTLPCAP_AMIN", 5usize, usize)).then(|| self.lp.save_state());
             // 試作 `ENOMOTO_MIP_CUT0_RETRY` (analysis/cutloop_stop_20261106/A.md、既定では使わない): `HO4_CUT0=moved` の改良。
             // 1 回目は既定とまったく同じに解き、進みの判定で止まったとき、次の 3 つを満たすときだけ同じカットの LP を解き直す。
@@ -3588,6 +3614,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: cut_cutoff, deadline: d });
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: LP hit the time cap; continued for up to {:.2}s more: {st:?}", retry * cap);
+                }
+            }
+            // 試作 `ENOMOTO_MIP_MODKVB_CAPDROP`: 上限に当たったら、試作のカットだけを外して加える前の状態から解き直す
+            if let Some(ss) = mkd_saved.as_ref().filter(|_| matches!(st, LpStatus::IterationLimit | LpStatus::TimeLimit)) {
+                if !self.time_up() && !stopped(&job) {
+                    let mut remove = vec![false; self.lp.num_rows()];
+                    for r in remove.iter_mut().skip(saved_rows) {
+                        *r = true;
+                    }
+                    self.delete_lp_rows(&remove);
+                    if self.lp.num_rows() == saved_rows {
+                        self.lp.restore_state(ss);
+                        let sub: Vec<(Vec<(usize, f64)>, f64, f64)> = rows.iter().zip(&mk_mask).filter(|(_, &m)| !m).map(|(r, _)| r.clone()).collect();
+                        self.add_cut_rows(&sub);
+                        let d = if cap.is_finite() {
+                            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
+                            Some(self.deadline.map_or(d, |g| g.min(d)))
+                        } else {
+                            self.deadline
+                        };
+                        let it1 = self.lp.total_iterations();
+                        st = self.lp.solve(&SolveLimits { iteration_limit: solve_lim, cutoff: cut_cutoff, deadline: d });
+                        mkd_cap = Some(n_mk / 2);
+                        if self.params.verbose {
+                            eprintln!(
+                                "MIP: cut round {round}: MODKVB_CAPDROP: dropped {n_mk} modkvb cuts of {} and re-solved: {st:?} after {} iters; modkvb cuts per round <= {}",
+                                rows.len(),
+                                self.lp.total_iterations() - it1,
+                                n_mk / 2
+                            );
+                        }
+                        if st == LpStatus::Optimal {
+                            rows = sub;
+                        }
+                    }
                 }
             }
             // 試作 `ENOMOTO_MIP_CUTLPCAP` の `a`: 上限に当たったら、効き目の大きい半分を残して加える前の状態から解き直す
@@ -6864,7 +6925,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_GAP4` の `t` (既定では使わない。analysis/gap4mem_20261111.md): LP の元の行が `ENOMOTO_T_MIP_GAP4_TAB_M` (20000) 以上の
         // 問題でだけ HiGHS の選び方を使う。neos-873061 (9.3 万行) では既定の密な tableau カット (1 本 約 4300 非零) で 1 ラウンドの LP が重く、
         // HiGHS の選び方で根の下界が 104.7 → 109.5・111.4 に上がる。害の出た 30n20b8・roll3000・nw04 はどれも 2300 行以下
-        let tab_rules = env_str!("ENOMOTO_MIP_TAB_HIGHS_RULES").is_some() || (super::solver::gap4('t') && p.m >= tunable!("ENOMOTO_T_MIP_GAP4_TAB_M", 20000usize, usize));
+        // 試作 `ENOMOTO_MIP_TAB_HIGHS_SIG` (gate2、既定では使わない、analysis/gate2_20261117/tab/README.md): 根の最初の tableau の分離
+        // (`light` でない呼び出しで、行が 1 つ以上使われたもの) は既定の選び方で行い、その作業量 W = (集約行の非零の合計) / (LP の非零 + 列) と、
+        // HiGHS の fill の予算を超える行の割合 fw を測る。W のシグモイド σ((ln W − ln `ENOMOTO_T_MIP_TAB_SIG_W` (2.5)) / `ENOMOTO_T_MIP_TAB_SIG_WIDTH` (0.25))
+        // が 0.5 以上なら、以後の呼び出し (ノードを含む) で HiGHS の選び方を使う。58 問では W が大きい問題 (qnet1 7.1・10teams 18.8・neos-911970 7.0・
+        // mc11 2.6) で速く、W が小さい問題 (roll3000 1.2・nw04 0.66・mik-250 0.98・mas76 0.84) で遅かった。fw が `ENOMOTO_T_MIP_TAB_SIG_FW` (0.9) 以上なら
+        // (30n20b8・nw04 のように fill の予算で tableau 行が全部外れ、その密なカットで下界を得る問題) 既定の選び方のまま (値 `n` なら HiGHS の選び方で
+        // fill の予算だけ外す。根だけの試しで 30n20b8 の根の下界が 139.9 → 129.8 と悪く、既定のまま (`1`) は 139.9)
+        let tab_sig_mode = env_str!("ENOMOTO_MIP_TAB_HIGHS_SIG");
+        let tab_sig_measure = tab_sig_mode.is_some() && self.tab_sig == 0 && !light;
+        let tab_rules = env_str!("ENOMOTO_MIP_TAB_HIGHS_RULES").is_some()
+            || (super::solver::gap4('t') && p.m >= tunable!("ENOMOTO_T_MIP_GAP4_TAB_M", 20000usize, usize))
+            || (tab_sig_mode.is_some() && self.tab_sig >= 2);
+        let tab_nofill = tab_sig_mode.is_some() && self.tab_sig == 3;
         let mut w_cache: Vec<Vec<f64>> = Vec::new();
         if tab_rules {
             // 行の最大係数 (LP 行、スラック列を含まない)
@@ -6977,6 +7050,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 診断 (`ENOMOTO_MIP_DEBUG_SEP`): tableau 行の内訳の時間 (BTRAN, 集約, カット生成 + finish_cut) と行の非零数
         let (mut t_btran, mut t_agg, mut t_gen) = (0.0f64, 0.0f64, 0.0f64);
         let (mut n_rows_used, mut w_nnz_total, mut base_nnz_total, mut n_fill_skip) = (0usize, 0usize, 0usize, 0usize);
+        let mut n_fill_would = 0usize;
         let cands_before_tab = cands.len();
         // 試作 `ENOMOTO_MIP_BRCUT`: 行 (元の基底の列) ごとの候補のカットの効き目の最大 ([`super::brcut::record`])
         let brcut_on = super::brcut::on() && !self.params.submip;
@@ -7071,6 +7145,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 n_rows_used += 1;
                 base_nnz_total += base.len();
+                if (dbg_sep || tab_sig_measure) && 10 * base.iter().filter(|e| e.0 < n).count() > 10_000 + n {
+                    n_fill_would += 1;
+                }
                 bases.push(base);
                 if brcut_on {
                     brcut_src.push(self.lp.basic_var(s));
@@ -7238,7 +7315,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // HiGHS の fill の予算: 集約で増えた非零の 10 倍が 10000 + 列数 を超える行は使わない
                 // (`ENOMOTO_T_MIP_TAB_FILL_MULT` 倍に緩める。0 なら予算なし。30n20b8 では HiGHS と同じ予算だと全ての行が外れ、
                 // 根の下界が 151 -> 88.5 に下がった: HiGHS は mod-k など他の分離で下界を得るが、こちらは tableau 行に頼っている)
-                let fill_mult = tunable!("ENOMOTO_T_MIP_TAB_FILL_MULT", 1.0, f64);
+                let fill_mult = if tab_nofill { 0.0 } else { tunable!("ENOMOTO_T_MIP_TAB_FILL_MULT", 1.0, f64) };
                 if tab_rules && fill_mult > 0.0 && 10.0 * base.len().saturating_sub(w_nnz) as f64 > fill_mult * (10_000 + n) as f64 {
                     n_fill_skip += 1;
                     continue;
@@ -7272,6 +7349,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 n_rows_used += 1;
                 base_nnz_total += base.len();
+                if (dbg_sep || tab_sig_measure) && 10 * base.iter().filter(|e| e.0 < n).count() > 10_000 + n {
+                    n_fill_would += 1;
+                }
                 if rs_b {
                     rs_bases.push(base.clone());
                 }
@@ -7431,12 +7511,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 );
             }
         }
+        if tab_sig_measure && n_rows_used > 0 {
+            let w = base_nnz_total as f64 / (lp_nnz + n).max(1) as f64;
+            let fw = n_fill_would as f64 / n_rows_used as f64;
+            let w0 = tunable!("ENOMOTO_T_MIP_TAB_SIG_W", 2.5, f64);
+            let width = tunable!("ENOMOTO_T_MIP_TAB_SIG_WIDTH", 0.25, f64);
+            let sig = 1.0 / (1.0 + (-(w.max(1e-9).ln() - w0.ln()) / width).exp());
+            self.tab_sig = if sig < 0.5 {
+                1
+            } else if fw >= tunable!("ENOMOTO_T_MIP_TAB_SIG_FW", 0.9, f64) {
+                if tab_sig_mode == Some("n") { 3 } else { 1 }
+            } else {
+                2
+            };
+            if env_str!("ENOMOTO_MIP_LOG").is_some() {
+                eprintln!("MIP: tableau rule sigmoid: W {w:.2} fw {fw:.2} sig {sig:.3} -> {} (submip {})", ["", "default", "highs", "highs-nofill"][self.tab_sig as usize], self.params.submip);
+            }
+        }
         if dbg_sep && tab_cbc_init.is_some() {
             eprintln!("SEP tableau CBC budget {:?} left {:?} light {} cands {}", tab_cbc_init, tab_cbc_left, light, cands.len() - cands_before_tab);
         }
         if dbg_sep {
             eprintln!(
-                "SEP tableau {:.3}s cands {} (rows {} of {} candidates, fill-skipped {}, budget-skipped {} (work {:.0} / {:.0}), btran {:.3}s agg {:.3}s gen+finish {:.3}s (finish total this call {:.3}s), mean w nnz {:.0}, mean agg nnz {:.0}, LP rows {} nnz {})",
+                "SEP tableau {:.3}s cands {} (rows {} of {} candidates, fill-skipped {}, budget-skipped {} (work {:.0} / {:.0}), btran {:.3}s agg {:.3}s gen+finish {:.3}s (finish total this call {:.3}s), mean w nnz {:.0}, mean agg nnz {:.0}, LP rows {} nnz {}, cols {} light {} submip {} pass {} fill_would {})",
                 sep_t0.elapsed().as_secs_f64(),
                 cands.len(),
                 n_rows_used,
@@ -7452,7 +7549,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 w_nnz_total as f64 / basics.len().max(1) as f64,
                 base_nnz_total as f64 / n_rows_used.max(1) as f64,
                 mr,
-                lp_rows.iter().map(|r| r.len()).sum::<usize>()
+                lp_rows.iter().map(|r| r.len()).sum::<usize>(),
+                n,
+                light,
+                self.params.submip,
+                self.sep_pass,
+                n_fill_would
             );
         }
         if brcut_on {
