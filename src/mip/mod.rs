@@ -39,7 +39,6 @@ pub(crate) mod rootlp3;
 pub(crate) mod xolazy;
 pub(crate) mod heur_ipm;
 pub(crate) mod heur_shift;
-pub(crate) mod heur_lns2;
 pub(crate) mod symmetry;
 pub(crate) mod symdyn;
 pub(crate) mod cuts;
@@ -52,7 +51,6 @@ pub(crate) mod hnfcut;
 pub(crate) mod hnfsubst;
 pub(crate) mod gcdforce;
 pub(crate) mod implint_tu;
-pub(crate) mod redsplit;
 pub(crate) mod cmirdelta;
 pub(crate) mod seplearn;
 pub(crate) mod cutmix;
@@ -462,6 +460,8 @@ pub fn solve_mip(
     opts: LpOptions,
     settings: MipSettings,
 ) -> SolveResult {
+    // 時間の上限はここから数える (問題の組み立て・畳み込みの判定の時間も含める。[`fold::solve_folded_any`] の後の `dispatch` を参照)
+    let t_entry = std::time::Instant::now();
     let has_discrete = variables.iter().any(|v| v.vtype != VarType::Continuous);
     if !has_discrete {
         // 制限時間: 期限を過ぎると各解法は結論なしで戻る ([`crate::cancel::with_deadline`])。そのときは `TimeLimit`
@@ -579,9 +579,14 @@ pub fn solve_mip(
         None
     };
     let pr = vub.as_ref().map_or(pr, |(q, _)| q);
-    let mut r = match fold::solve_folded_any(pr, params.time_limit, params.verbose, &dispatch, &dispatch_np) {
+    // 時間の上限から、入口からここまで (問題の組み立てなど) と畳み込みの判定 (畳まないと決めるまで) の時間を引いて渡す。引かなかった版では
+    // highschool1-aigio (列 32 万) で畳み込みの判定に 2.7 秒かかり、その分だけ時間の上限を越えていた (4 スレッド 600 秒で 603〜606 秒。
+    // analysis/hang_20261117/README.md)。`ENOMOTO_MIP_NO_ENTRY_DEADLINE` で引かない (直す前と同じ、切り分け用)
+    let entry_off = env_str!("ENOMOTO_MIP_NO_ENTRY_DEADLINE").is_none();
+    let left = |tl: f64| if entry_off && tl.is_finite() { (tl - t_entry.elapsed().as_secs_f64()).max(0.0) } else { tl };
+    let mut r = match fold::solve_folded_any(pr, left(params.time_limit), params.verbose, &dispatch, &dispatch_np) {
         Some(r) => r,
-        None => dispatch(pr, params.time_limit),
+        None => dispatch(pr, left(params.time_limit)),
     };
     if let (Some((_, pairs)), Some(x)) = (&vub, r.x.as_mut()) {
         for &(j, y, _) in pairs {
@@ -8533,6 +8538,52 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
                     // y_k = 0: sk = +1 なら x_k = 0、sk = -1 なら x_k = 1
                     fixed[k] = true;
                     out.push((k, if sk > 0.0 { 0.0 } else { 1.0 }));
+                }
+            }
+        }
+    }
+    // `ENOMOTO_MIP_DOMCOL_REV` (試作、`ENOMOTO_MIP_DOMCOL_PRED` と併せて使う): 支配される側 y_k から候補を探す。上の (c) は
+    // 支配する側 y_j の最も短い行から y_k を探すが、y_j が y_k を支配するなら、y_k が行を「助ける」向き (下限側で係数が正、
+    // 上限側で負) の行には必ず y_j も (同じ向きにより大きく) 入るので、y_k のそういう行で最も短いものから y_j を探せば漏れがない。
+    // 集合被覆 (rail507・fast0507。Σ x ≥ 1 の行だけ) では y_j の列が y_k の列を含むのが支配で、上の探し方では候補がほとんど
+    // 出ない (rail507 で 26 本、上限を外しても 9428 本・13 秒。SCIP の domcol は 42278 本・0.6 秒)。
+    // 固定は (c) と同じく worst_case_ok (か y_j の上限 1 が行から導ける) のときだけ。y_j に固定済みの列は使わない。
+    // 調べる組は `ENOMOTO_T_MIP_DOMCOL_REV_MAX_PAIRS` まで (既定 5000 万)。
+    if pred && env_str!("ENOMOTO_MIP_DOMCOL_REV").is_some() {
+        let max_rev = tunable!("ENOMOTO_T_MIP_DOMCOL_REV_MAX_PAIRS", 50_000_000usize, usize);
+        let mut rev_pairs = 0usize;
+        'rev: for k in 0..n {
+            if !binary[k] {
+                continue;
+            }
+            for sk in [1.0, -1.0] {
+                if fixed[k] {
+                    continue 'rev;
+                }
+                // 文字 y_k の費用が負なら worst_case_ok が通らないので飛ばす
+                if sk * prob.cost[k] < -1e-9 * (1.0 + prob.cost[k].abs()) {
+                    continue;
+                }
+                let best = cols[k]
+                    .iter()
+                    .filter(|&&(i, a)| (prob.row_lo[i].is_finite() && a * sk > 0.0) || (prob.row_up[i].is_finite() && a * sk < 0.0))
+                    .min_by_key(|&&(i, _)| prob.rows[i].len());
+                let Some(&(i0, _)) = best else { continue };
+                for &(j, _) in &prob.rows[i0] {
+                    if j == k || !binary[j] || fixed[j] {
+                        continue;
+                    }
+                    for sj in [1.0, -1.0] {
+                        rev_pairs += 1;
+                        if rev_pairs > max_rev {
+                            break 'rev;
+                        }
+                        if dominates(j, sj, k, sk) && (worst_case_ok(j, sj, k, sk) || implied_up(j, sj)) {
+                            fixed[k] = true;
+                            out.push((k, if sk > 0.0 { 0.0 } else { 1.0 }));
+                            continue 'rev;
+                        }
+                    }
                 }
             }
         }

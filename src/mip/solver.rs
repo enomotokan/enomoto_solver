@@ -678,10 +678,6 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) last_rins: u64,
     /// Local Branching の近傍の大きさ (結果で調整する)。
     pub(super) lb_k: f64,
-    /// LB2・PROX2 の状態 ([`super::heur_lns2`])。
-    pub(super) hsub: super::heur_lns2::HsubState,
-    /// サブ MIP の相対ギャップを一時的に決める (LB2・PROX2)。
-    pub(super) submip_gap: Option<f64>,
     /// ノードで回す改善ヒューリスティクスの順番。
     pub(super) improve_turn: u64,
     /// ALNS の腕ごとの報酬の合計と試した回数。
@@ -5489,8 +5485,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         fc_probe: 0,
         last_rins: 0,
         lb_k: 18.0,
-        hsub: Default::default(),
-        submip_gap: None,
         improve_turn: 0,
         alns_reward: [0.0; 6],
         alns_count: [0; 6],
@@ -11606,18 +11600,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.parallel_submips = false;
                     self.join_submips(0);
                 }
-                // `ENOMOTO_MIP_LB2`・`ENOMOTO_MIP_PROX2`: 繰り返しの Local Branching・中心を移す Proximity Search ([`super::heur_lns2`])
-                if super::heur_lns2::lb2_on("root") || super::heur_lns2::prox2_on("root") {
-                    let keep = self.parallel_submips;
-                    self.parallel_submips = false;
-                    if super::heur_lns2::lb2_on("root") && self.hsub_root_ok(self.root_bound_now(root_obj)) {
-                        heur!("local branching 2", self.local_branching2(self.root_bound_now(root_obj)));
-                    }
-                    if super::heur_lns2::prox2_on("root") && self.hsub_root_ok(self.root_bound_now(root_obj)) {
-                        heur!("proximity 2", self.proximity2(self.root_bound_now(root_obj)));
-                    }
-                    self.parallel_submips = keep;
-                }
                 // 根の広い近傍のサブ MIP (`ENOMOTO_MIP_ROOT_WIDE_SUBMIP` で使う。既定では使わない。h80x6320d を時間切れにするため): 根の RENS・RINS の後も暫定解と根の LP の差が大きい
                 // (既定 0.5% 超) なら、固定を目標の固定率 (初期 0.6) で止めた広い近傍 (`ENOMOTO_MIP_FIX_CAP` と同じ) で、
                 // サブ MIP に長めの時間 (残りの `ENOMOTO_T_MIP_WIDE_SUBMIP_FRAC` = 0.3、最大 `ENOMOTO_T_MIP_WIDE_SUBMIP_MAX` = 20 秒)
@@ -14043,14 +14025,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if let Some(pool) = self.pool.as_ref().filter(|p| p.heur_k > 0) {
                         if node.depth > 0 && plunge_depth == 0 && self.nodes % tunable!("ENOMOTO_T_MIP_HEUR_ROLE_LPX_EVERY", 8u64, u64).max(1) == 0 {
                             *pool.lp_x.lock().unwrap() = Some(std::sync::Arc::new(x.clone()));
-                        }
-                    }
-                    // `ENOMOTO_MIP_LB2`・`ENOMOTO_MIP_PROX2` の木の段 ([`super::heur_lns2`]): 前に呼んだときより良い暫定解があれば
-                    if heur_ok && plunge_depth == 0 && self.incumbent.is_some() && (super::heur_lns2::lb2_on("tree") || super::heur_lns2::prox2_on("tree")) {
-                        let lb = self.global_lower_bound();
-                        self.hsub_note_gap(lb);
-                        if self.hsub_tree_ok(lb) {
-                            self.hsub_tree(lb);
                         }
                     }
                     // `ENOMOTO_MIP_ROBUST_TSTALL` (試作、既定では使わない): 最良値が長く良くならないとき、時間で改善ヒューリスティクスを呼ぶ
