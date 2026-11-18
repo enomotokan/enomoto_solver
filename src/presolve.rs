@@ -28,6 +28,7 @@ pub mod doubleton;
 pub mod dominatedcol;
 pub mod dualfix;
 pub mod dualfreeineq;
+pub mod dualtightineq;
 pub mod dualpropagate;
 pub mod foldfixed;
 pub mod forcingcol;
@@ -1129,6 +1130,56 @@ pub fn run_extended(
                 let mut i = 0;
                 cur_real_rhs.retain(|_| { i += 1; !promoted[i - 1] });
                 set_g_from_split!("rebuild_g(dfi)");
+            }
+        }
+        // 試作 `ENOMOTO_MIP_DUAL_TIGHT_INEQ` (既定では使わない): 双対の議論で不等式行を等式に上げる (整数列でも使える形、
+        // [`dualtightineq`])。直後の集約がその等式で列を代入できる (neos859080 の `b_a + b_b ≤ 1` 40 本、analysis/hang_20261117/README.md)
+        if env_str!("ENOMOTO_MIP_DUAL_TIGHT_INEQ").is_some_and(|v| v != "0") && env_str!("ENOMOTO_DISABLE_AGGREGATOR").is_none() && !dbg_skip("dualtightineq") {
+            let mask = int_mask();
+            let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
+            let up = timed_step!("dualtightineq", dualtightineq::find_dual_tight_inequalities(n, &a_rows, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub, mask.as_deref().map(|v| v.as_slice())));
+            if env_str!("ENOMOTO_DEBUG_AGGREGATOR").is_some() || env_str!("ENOMOTO_MIP_LOG").is_some() {
+                eprintln!("PRESOLVE: dual tight inequalities: round={round_idx} promoted={}", up.len());
+            }
+            if !up.is_empty() {
+                let mut a_rows = a_rows;
+                let mut promoted = vec![false; cur_real_rows.len()];
+                for &gi in &up {
+                    promoted[gi] = true;
+                    a_rows.push(cur_real_rows[gi].clone());
+                    b.push(cur_real_rhs[gi]);
+                }
+                a = csr_from_rows(&a_rows, n);
+                let mut i = 0;
+                cur_real_rows.retain(|_| { i += 1; !promoted[i - 1] });
+                let mut i = 0;
+                cur_real_rhs.retain(|_| { i += 1; !promoted[i - 1] });
+                set_g_from_split!("rebuild_g(dti)");
+                // 上げた等式の多くは 2 項 (0-1 列の対) なので、止まっていた doubleton を次のラウンドでもう一度動かす
+                doubleton_active = true;
+                doubleton_empty_streak = 0;
+            }
+        }
+        // 試作 `ENOMOTO_MIP_SPARSIFY` (既定では使わない): 等式の倍を足して行の非零を打ち消す ([`sparsify`]、台が含まれる等式だけ・
+        // フィルインなしの保守的な形)。SCIP の前処理の sparsify を外すと neos859080 が当方で解けなくなる (analysis/hang_20261117/README.md)
+        if env_str!("ENOMOTO_MIP_SPARSIFY").is_some_and(|v| v != "0") && !dbg_skip("sparsify") {
+            let (gg, hh) = if g_split { propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub) } else { (g.clone(), h.clone()) };
+            let sp = timed_step!("sparsify", sparsify::sparsify(n, &a, &b, &gg, &hh));
+            if env_str!("ENOMOTO_DEBUG_AGGREGATOR").is_some() || env_str!("ENOMOTO_MIP_LOG").is_some() {
+                eprintln!("PRESOLVE: sparsify: round={round_idx} rows changed={}", sp.n_rows_changed);
+            }
+            if sp.n_rows_changed > 0 {
+                a = sp.a;
+                b = sp.b;
+                let (slb, sub, srows, srhs) = propagate::extract_bounds(n, &sp.g, &sp.h);
+                for j in 0..n {
+                    lb[j] = lb[j].max(slb[j]);
+                    ub[j] = ub[j].min(sub[j]);
+                }
+                let _ = propagate::fix_crossed_bounds(&mut lb, &ub);
+                cur_real_rows = srows;
+                cur_real_rhs = srhs;
+                set_g_from_split!("rebuild_g(sparsify)");
             }
         }
         // Aggregator (HiGHS の `HPresolve::aggregator`): 等式行から implied-free と
