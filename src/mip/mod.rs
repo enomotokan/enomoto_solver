@@ -6245,7 +6245,7 @@ fn clqprb_val() -> Option<&'static str> {
 }
 
 /// `ENOMOTO_MIP_CLQPRB` を既定で入れるか (既定化するときに真にする。analysis/gate2_20261117/clqprb_s/README.md)
-const CLQPRB_DEFAULT_ON: bool = false;
+const CLQPRB_DEFAULT_ON: bool = true;
 
 /// [`clqprb_on`] の値に文字 `c` を含むか (`d`: 何も固定できなければ増やした含意を捨てる)。
 pub(crate) fn clqprb_has(c: char) -> bool {
