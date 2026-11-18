@@ -15,6 +15,7 @@ mo, _, _ = bh._build_our_model(lp)
 t = time.perf_counter(); r = mo.solve(None, False, 60.0, None, 1, 4, True); t = time.perf_counter() - t
 print("RES " + json.dumps({k: r.get(k) for k in ("status", "objective", "best_bound", "nodes", "lp_iterations", "root_bound")} | {"time": t}))
 """
+if os.environ.get("FEAT_PROBS"): P = os.environ["FEAT_PROBS"].split(",")  # 一部の問題だけ
 OUT = D / "feat.jsonl"
 done = {(json.loads(l)["problem"], json.loads(l)["tag"]) for l in OUT.read_text().splitlines()} if OUT.exists() else set()
 (D / "logs").mkdir(exist_ok=True)
@@ -31,7 +32,7 @@ for p in P:
     except subprocess.TimeoutExpired as e:
         out = (e.stdout or b"").decode(errors="replace") + (e.stderr or b"").decode(errors="replace")
     ls = out.splitlines()
-    tab = [l for l in ls if l.startswith("SEP tableau") and "CBC" not in l]
+    tab = [l for l in ls if (l.startswith("SEP tableau") and "CBC" not in l) or "tableau rule sigmoid" in l]
     (D / "logs" / f"feat_{p}_{tag}.log.gz").write_bytes(gzip.compress("\n".join([l for l in ls if not l.startswith("SEP ")][:400] + tab[:200]).encode()))
     res = [l for l in ls if l.startswith("RES ")]
     r = json.loads(res[-1][4:]) if res else {"status": "crash"}
