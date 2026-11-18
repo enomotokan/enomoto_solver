@@ -3571,6 +3571,9 @@ pub(super) static LPINF_RETRY: [std::sync::atomic::AtomicU64; 5] = [const { std:
 const LPINF_HIST_N: usize = 11;
 pub(super) static LPINF_HIST: [std::sync::atomic::AtomicU64; LPINF_HIST_N] = [const { std::sync::atomic::AtomicU64::new(0) }; LPINF_HIST_N];
 
+/// ノードの整数に見える LP 解が定義域の境界から外れていて、LP の境界を合わせて解き直した数 (全スレッド、診断)
+pub(super) static STALE_LP_BOUNDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub(super) fn lpinf_count(k: usize) {
     LPINF_RETRY[k].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
@@ -3633,6 +3636,11 @@ pub(super) fn lp_farkas_ratio<L: MipLp>(lp: &L, n: usize) -> f64 {
 /// `ENOMOTO_MIP_OF_ANY_FIXED` で以前の動き = どの固定された列からも軌道を固定する)。[`Solver::orbital_fixing`] 参照
 fn of_branch_only() -> bool {
     env_str!("ENOMOTO_MIP_OF_ANY_FIXED").is_none()
+}
+
+thread_local! {
+    /// 診断用 (`ENOMOTO_MIP_DEBUG_TRACE`): 今のノードがデバッグ解を含んで始まったか (段ごとの [`Solver::dbg_trace`] を出す)
+    static DBG_TRACE_NODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// LP の際どい実行不能の確かめ ([`lp_farkas_marginal`]) を使うか (既定で使う。`ENOMOTO_MIP_NO_LPINF_CHECK` で全部まとめて止める:
@@ -6254,7 +6262,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !self.dbg_on {
             return;
         }
-        let Some(k) = env_str!("ENOMOTO_MIP_DEBUG_NODE").and_then(|v| v.parse::<u64>().ok()) else { return };
+        let traced = DBG_TRACE_NODE.with(|c| c.get());
+        let k = if traced { self.nodes } else {
+            let Some(k) = env_str!("ENOMOTO_MIP_DEBUG_NODE").and_then(|v| v.parse::<u64>().ok()) else { return };
+            k
+        };
         if self.nodes != k || self.params.submip {
             return;
         }
@@ -13145,6 +13157,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.note_current_lb(node.lower_bound);
             self.log(false);
             let dn = self.dbg_changes(&node.changes);
+            // 診断用 (`ENOMOTO_MIP_DEBUG_TRACE`、デバッグ解のとき): デバッグ解を含むノードの処理の始まりを出す (どのスレッドのどのノードまで続いたか)
+            DBG_TRACE_NODE.with(|c| c.set(dn && self.dbg_on && env_str!("ENOMOTO_MIP_DEBUG_TRACE").is_some()));
+            if dn && self.dbg_on && env_str!("ENOMOTO_MIP_DEBUG_TRACE").is_some() {
+                eprintln!("DBGTRACE: tid {} node {} depth {} lb {:.6e} prune limit {:.6e} changes {}", self.pool_tid, self.nodes, node.depth, node.lower_bound, self.prune_limit(), node.changes.len());
+            }
             let rp_entry = replay.and_then(|_| super::replay::lookup(&node.changes));
             let mut rp_stage = "";
             let (mut rp_obj0, mut rp_obj) = (f64::NAN, f64::NAN);
@@ -13814,10 +13831,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     frac
                 };
                 if frac.is_empty() {
+                    // LP の列の境界が定義域に追いついていない (定義域で固定された整数列が LP では動ける) と、その列が分数・範囲外でも
+                    // [`Self::fractional`] は固定済みとして見ないので整数解に見える。暫定解にならずにノードを閉じて最適解を失っていた
+                    // (fuzz_symdyn の種 91、analysis/wrong_widden_20261117 の 13 節)。外れた列の LP の境界を定義域に合わせて解き直す
+                    let stale: Vec<usize> = (0..self.p.n).filter(|&j| self.p.is_int[j] && (x[j] < self.dom.lo[j] - FEASTOL || x[j] > self.dom.up[j] + FEASTOL)).collect();
+                    if !stale.is_empty() && env_str!("ENOMOTO_MIP_NO_STALE_LP_CHECK").is_none() {
+                        STALE_LP_BOUNDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        for j in stale {
+                            self.lp.set_col_bounds(j, self.dom.lo[j], self.dom.up[j]);
+                        }
+                        self.sync_lp();
+                        resolves += 1;
+                        continue;
+                    }
                     if tree_log() && !self.params.submip {
                         eprintln!("ENODE d={} r=int lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                     }
                     if self.try_lp_solution() {
+                        if self.dbg_on {
+                            self.dbg_lost(&format!("integral node LP solution accepted (LP {node_obj})"), dn && self.dbg_contains());
+                        }
                         break None;
                     }
                     // 許容誤差の中で整数の LP 解が、丸めると行に反する (big-M の行 x <= M y で y = 1e-10、x = M y): ノードを捨てると
@@ -13836,6 +13869,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if let Some(j) = pick {
                             break Some(Some((j, x[j], node_obj, vec![(j, x[j])])));
                         }
+                    }
+                    if self.dbg_on {
+                        let (fx, ox, oxr) = (self.p.is_feasible(&x, FEASTOL), self.p.objective(&x), self.p.objective(&xr));
+                        let viol: Vec<(usize, f64, f64, f64)> = (0..self.p.m)
+                            .filter_map(|i| {
+                                let a: f64 = self.p.rows[i].iter().map(|&(j, v)| v * x[j]).sum();
+                                let (l, u) = (self.p.row_lo[i], self.p.row_up[i]);
+                                (a < l - 1e-6 * (1.0 + l.abs()) || a > u + 1e-6 * (1.0 + u.abs())).then_some((i, l, a, u))
+                            })
+                            .take(3)
+                            .collect();
+                        let badc: Vec<(usize, f64, f64, f64, f64, f64)> = (0..self.p.n)
+                            .filter(|&j| x[j] < self.dom.lo[j] - 1e-6 || x[j] > self.dom.up[j] + 1e-6 || (self.p.is_int[j] && (x[j] - x[j].round()).abs() > FEASTOL))
+                            .take(5)
+                            .map(|j| {
+                                let (l, u) = self.lp.col_bounds(j);
+                                (j, x[j], self.dom.lo[j], self.dom.up[j], l, u)
+                            })
+                            .collect();
+                        self.dbg_lost(&format!("integral node LP solution not taken as the incumbent (LP {node_obj}, LP solution feasible {fx} obj {ox}, rounded feasible {} obj {oxr}, violated rows {viol:?}, LP rows {} of orig {}; columns (j, x, dom lo, dom up, lp lo, lp up) {badc:?})", self.p.is_feasible(&xr, FEASTOL), self.lp.num_rows(), self.p.m), dn && self.dbg_contains());
                     }
                     break None;
                 }
@@ -26160,6 +26213,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 LPINF_RETRY[3].load(std::sync::atomic::Ordering::Relaxed),
                 LPINF_RETRY[4].load(std::sync::atomic::Ordering::Relaxed)
             );
+            eprintln!("MIP: integral-looking node LP solutions outside the domain (LP bounds behind the domain), re-solved: {}", STALE_LP_BOUNDS.load(std::sync::atomic::Ordering::Relaxed));
             eprintln!(
                 "MIP: LP infeasibility certificates, minimum uniform violation (log10 bins <-12 .. >=-4, other): {:?}",
                 LPINF_HIST.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>()
