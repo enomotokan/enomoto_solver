@@ -104,6 +104,16 @@ SCIP のログ (graph20-20-1rand): 「36 generators found (log10 of symmetry gro
 
 解けた数 def 2・g1 3、食い違い 0、crash 0。最大 RSS def 1350 MB (neos-787933) → g1 408 MB。
 
+## g1 で遅く見えた問題の切り分け (M の途中集計の後)
+
+- fiball・CMS750_4・rococoC10-001000 は VUBAGG 0 組・対称性なし (symmetry: none) で、どちらの試作も働かない (1 スレッド 4 秒のログ)。
+- CMS750_4・rococoC10-001000 を 1 スレッド・種 1・40 秒で def と g1 を比べた: 根まで (前処理・カット・再スタートの判定・木の開始の lb/ub) の
+  ログは時刻の欄を除いて全行一致し、木の経過の行も同じノード数の点では lp_iters・sb_iters が全て一致した (CMS750_4: ノード 1・4・6・502、
+  rococoC10: 1・2・2002・2103)。**同じ道筋**。4 スレッドの M で 2 種とも遅かった (CMS750_4 1.40・1.73、rococoC10 1.30・1.35) のは並列の
+  非決定性による揺れと判断する。
+- neos-911970 (P で 1.74 倍) は ORBPP が働く (35×3 のパッキングのオービトープ 6 つと 35×6 が 1 つを静的にして 33 列を固定)。列の少ない
+  オービトープを静的にする害と見て、列の数の下限 `ENOMOTO_T_MIP_ORBPP_MIN_COLS` (既定 0) を足した。境目は洗い出し (`scan.py` → `scan.txt`) で決める。
+
 ## 広い計測の台本 (slow2_20261117 の写し)
 
 - 設定 (`cfg.py`): def (既定)、g1 = `ENOMOTO_MIP_VUBAGG=1` + `ENOMOTO_MIP_ORBPP=1` (vub・opp は単独の切り分け用)。4 スレッド。
