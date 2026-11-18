@@ -2183,6 +2183,25 @@ fn flat_changes(n: &OpenNode) -> Vec<BoundChange> {
     v
 }
 
+/// 試作 `ENOMOTO_MIP_G5INH=<文字>` (既定では使わない。analysis/vsscip_slow_20261118/g5/README.md): `TC` の引き継ぎの鎖の持ち物を抑える。
+/// - `p`: 共有の待ち行列へ出すノード ([`SnapNode`]) には鎖の固定を付けない (並びだけ。落とすと定義域が広いだけで正しさは変わらない)
+/// - `c`: 鎖の固定の数が max(64, `ENOMOTO_T_MIP_G5INH_FRAC` (既定 0.01) x 列の数) を超えたノードでは、新しい引き継ぎの固定を鎖に足さない
+///
+/// n3div36 (4 スレッド・300 秒) は既定で子の変更の並びが平均 562 本 (深さ 90)、共有の待ち行列の変更が 254 MB、最大 RSS 3453 MB、`TC=0` は 1307 MB
+fn g5inh(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_G5INH").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
+/// 共有の待ち行列へ出すノードの変更の並び ([`flat_changes`]、`G5INH` の `p` なら鎖を除く)
+fn snap_changes(n: &OpenNode) -> Vec<BoundChange> {
+    if g5inh('p') {
+        n.changes.clone()
+    } else {
+        flat_changes(n)
+    }
+}
+
 /// 試作 `ENOMOTO_MIP_NODESEL_BANDIT` (既定では使わない、analysis/treeclose_20261114.md 9.12 節): ノードの選び方 (潜り方) を、区間ごとに 2 本の腕から
 /// 割引付き UCB で選ぶ。腕 0 = 既定 (`PLUNGE_QUOT`・`SIBLING_QUOT` は既定の値)、腕 1 = 深さ優先寄り (d3: 潜りを子の下界で打ち切らず、
 /// 兄弟へも下界の条件なしで戻る。潜りのノード数の上限は既定のまま。兄弟へ戻ったときも潜りの始めとして数える (`TC` の `k`))。
@@ -2512,7 +2531,7 @@ fn full_changes(n: &OpenNode) -> std::borrow::Cow<'_, [BoundChange]> {
 
 impl SnapNode {
     fn of(n: &OpenNode) -> Self {
-        SnapNode { changes: flat_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None }
+        SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None }
     }
     /// [`Self::of`] に、親の LP の基底の列と最初の `m` 行 (元の行) を付ける。
     fn of_with_basis(n: &OpenNode, m: usize) -> Self {
@@ -14669,7 +14688,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // サブ MIP (根のヒューリスティクス) では使わない (根の道筋を既定と同じにする。physiciansched6-2 は根のサブ MIP の結果が変わって 2 種とも遅れた)
             // `TC` の `s`: 引き継ぎの固定 (`of_fixes[tc_base_len..]`) を子の並びに写さず、親の鎖に環を足して共有する
             let mut tc_base_len = usize::MAX;
-            if (tc_on('r') || tc_on('a') || tc_on('b')) && !self.params.submip {
+            // `G5INH` の `c`: 鎖が長すぎるノードでは引き継ぎの固定を足さない (鎖はそのまま子に渡す)
+            let g5_full = g5inh('c') && {
+                let mut k = 0usize;
+                InhChain::for_each(&node.inh, |_| k += 1);
+                k as f64 > (tunable!("ENOMOTO_T_MIP_G5INH_FRAC", 0.01, f64) * self.p.n as f64).max(64.0)
+            };
+            if (tc_on('r') || tc_on('a') || tc_on('b')) && !self.params.submip && !g5_full {
                 // `a`: 被約費用 (−3) に加えて強分枝 (−4)・双対証明 (−6)・リテラルの衝突 (−7)・目的関数の伝播 (−8)・カットプールの伝播 (−9) の固定も
                 // (行の伝播は分枝から積み直せば同じになるので除く。オービトープ (−5) は対称性の推論なので除く)
                 // `b`: 親の LP に依るので子で作り直せない被約費用 (−3)・強分枝 (−4) だけ。−6〜−9 は大域的な制約 (双対証明・衝突・カット) の
@@ -18403,7 +18428,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let Some(&(k, i)) = self.orb_col.get(&col) else { return (col, value) };
         let o = &self.orbitopes[k];
-        if !o.row_packing[i] {
+        if !o.row_packing[i] || o.static_pp {
             return (col, value);
         }
         for &j in &o.vars[i] {
@@ -18479,7 +18504,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
-            rows.iter().enumerate().filter(|(k, r)| !r.is_empty() && !broken[*k]).map(|(k, r)| orbs[k].sub_rows(r)).collect()
+            // `ENOMOTO_MIP_ORBPP` の静的なオービトープは全ての行を固定の順で使う (根の固定と同じ順。分枝の順によらず成り立つ)
+            let mut v: Vec<super::symmetry::Orbitope> =
+                rows.iter().enumerate().filter(|(k, r)| !orbs[*k].static_pp && !r.is_empty() && !broken[*k]).map(|(k, r)| orbs[k].sub_rows(r)).collect();
+            v.extend(orbs.iter().filter(|o| o.static_pp).cloned());
+            v
         } else {
             orbs.iter().cloned().collect()
         };
@@ -23830,14 +23859,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         for n in nodes.iter_mut() {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: flat_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None });
+            snodes.push(SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None });
         }
         for n in nodes {
             self.queue.push(n);
         }
         if let Some(n) = plunge.as_mut().filter(|_| with_nodes) {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: flat_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None });
+            snodes.push(SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None });
         }
         if with_nodes {
             self.dive_stack.clear();
