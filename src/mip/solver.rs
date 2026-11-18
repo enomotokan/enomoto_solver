@@ -4685,7 +4685,6 @@ pub(crate) static MIP_THREADS_DEFAULT: std::sync::atomic::AtomicUsize = std::syn
 pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     if !params.submip {
         let _ = super::heuristics::frag_t0();
-        super::brcut::reset(p.n);
     }
     // ヒューリスティクスのサブ MIP は小さいことが多いので、基底のない求解も二段解法だけで解く (同時実行しない)
     let prev_race = params.submip.then(|| crate::simplex::mip_lp::set_cold_race_threads(1));
@@ -5344,13 +5343,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     let ho2_implint = env_str!("ENOMOTO_MIP_HO2_IMPLINT").is_some_and(|v| v != "0" && v != "off") || objint('h');
     let obj_step_implint = env_str!("ENOMOTO_MIP_OBJ_STEP_IMPLINT").is_some() || ho2_implint || super::implint_tu::tu2_flag('s') || objint('f');
     let obj_step = if obj_step_implint {
-        // `ENOMOTO_MIP_IMPLINT_TU` も付けていれば TU の規則の暗黙の整数も使う (整数を固定すると連続列の部分に整数の最適解が
+        // `ENOMOTO_MIP_IMPLINT_TU2` も付けていれば TU の部分の暗黙の整数も使う (整数を固定すると連続列の部分に整数の最適解が
         // あるので、どの部分木でも暫定解より良い解があれば格子の点の値の解もある)
         let base = if ho2_implint { p.implied_integers_ho2() } else { p.implied_integers() };
         let mask = if super::implint_tu::tu2_on() {
             super::implint_tu::implied_integers_tu2(p, &base).0
-        } else if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() {
-            p.implied_integers_tu(&base)
         } else {
             base
         };
@@ -5399,11 +5396,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dom,
         lp,
         queue: NodeQueue::new(),
-        pc: {
-            let mut pc = snap.as_ref().map_or_else(|| Pseudocost::new(p.n), |sn| sn.pc.clone());
-            pc.brcut = super::brcut::on() && !params.submip;
-            pc
-        },
+        pc: snap.as_ref().map_or_else(|| Pseudocost::new(p.n), |sn| sn.pc.clone()),
         incumbent: None,
         obj_step,
         obj_lat,
@@ -5837,13 +5830,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         } else if super::implint_tu::tu2_on() {
             // 試作 `ENOMOTO_MIP_IMPLINT_TU2` (src/mip/implint_tu.rs)
             super::implint_tu::cut_mask(p, params.verbose && !params.submip)
-        } else if env_str!("ENOMOTO_MIP_IMPLINT_TU").is_some() {
-            let b = p.implied_integers();
-            let t = p.implied_integers_tu(&b);
-            if params.verbose && !params.submip {
-                eprintln!("MIP: implied integers: {} by the row rules, {} with the TU rule (ENOMOTO_MIP_IMPLINT_TU)", b.iter().zip(&p.is_int).filter(|(a, i)| **a && !**i).count(), t.iter().zip(&p.is_int).filter(|(a, i)| **a && !**i).count());
-            }
-            t
         } else {
             p.implied_integers()
         },
@@ -7565,8 +7551,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         })
     }
 
-    /// 暫定解があり、その値が下界 `lb` (の切り上げ) より目的関数の刻み (なければ相対 1e-6) 以上悪いか
-    /// ([`Self::obj_support`] を呼ぶ条件)。
     /// `ENOMOTO_MIP_BOUND_STEP` (2026-11-04 から既定、`=0` で使わない): 目的値が刻み `obj_step` の格子 (`offset + k * step`) にしか乗らないとき、
     /// 利用者に返す下界 (と経過の行の下界) を格子の点に切り上げる ([`round_lb_to_step`])。暫定解があればその値で上から抑える。
     /// 本体の求解 (サブ MIP でなく、木の従でもない) だけで使う。暗黙の整数列で刻みを取ったとき (`ENOMOTO_MIP_OBJ_STEP_IMPLINT`) も、
@@ -7622,24 +7606,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: OBJINT c: lattice refreshed {:?} -> {l:?}", self.obj_lat);
             }
             self.obj_lat = Some(l);
-        }
-    }
-
-    pub(super) fn obj_support_gap(&self, lb: f64) -> bool {
-        if let Some(l) = self.obj_lat {
-            let Some((z, _)) = self.incumbent.as_ref() else { return false };
-            return l.round_up(lb) < *z - 1e-6 * z.abs().max(1.0);
-        }
-        if obj_step_lattice() && self.obj_step.is_some() {
-            // 暫定解が格子に乗らないときも、格子の点で比べる
-            let Some((z, _)) = self.incumbent.as_ref() else { return false };
-            let step = self.obj_step.unwrap();
-            return *z - self.p.offset - step * ((lb - self.p.offset) / step - 1e-6).ceil() > 1e-6 * z.abs().max(1.0);
-        }
-        let Some((z, _)) = self.incumbent.as_ref() else { return false };
-        match self.obj_step {
-            Some(step) => *z - step * ((lb - self.p.offset) / step - 1e-6).ceil() - self.p.offset >= step - 1e-9,
-            None => *z - lb > 1e-6 * z.abs().max(1.0),
         }
     }
 
@@ -11590,11 +11556,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // Local-MIP を回して磨く ([`Self::root_lmip`])
                 if root_lmip_on() && !self.params.submip && self.incumbent.is_some() {
                     heur!("root Local-MIP", self.root_lmip());
-                }
-                // 目的関数の台のサブ MIP (`ENOMOTO_MIP_OBJ_SUPPORT`、試作、[`Solver::obj_support`])。暫定解が根の LP の値から
-                // 目的関数の刻み以上離れているときだけ
-                if env_str!("ENOMOTO_MIP_OBJ_SUPPORT").is_some() && self.obj_support_gap(root_obj) {
-                    heur!("objective support", self.obj_support(&x));
                 }
                 if par_late {
                     self.parallel_submips = false;
