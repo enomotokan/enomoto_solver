@@ -15,21 +15,22 @@ for f in fs:
         t = min(r.get("time") or 60, 60) if s == "optimal" else 60.0
         R[(d["problem"], d["cfg"], d["seed"])] = (t, s == "optimal")
 P = sorted({k[0] for k in R}); C = sorted({k[1] for k in R}, key=lambda c: (c != "def", c)); S = sorted({k[2] for k in R})
-full = [p for p in P if all((p, c, s) in R for c in C for s in S)]
-print(f"行 {len(R)}、crash {crash}、全部そろった問題 {len(full)}/{len(P)}、設定 {len(C)}、種 {S}")
+SP = {p: [s for s in S if all((p, c, s) in R for c in C)] for p in P}
+full = [p for p in P if len(SP[p]) >= 2]
+print(f"行 {len(R)}、crash {crash}、2 種以上そろった問題 {len(full)}/{len(P)}、設定 {len(C)}、種 {S}")
 def sgm(ts): return math.exp(sum(math.log(t + 1) for t in ts) / len(ts)) - 1
-base = sgm([R[(p, "def", s)][0] for p in full for s in S])
-print(f"\n設定ごと (SGM の def 比、解けた数 / {len(full) * len(S)}):")
+base = sgm([R[(p, "def", s)][0] for p in full for s in SP[p]])
+print(f"\n設定ごと (SGM の def 比、解けた数 / {sum(len(SP[p]) for p in full)}):")
 for c in C:
-    ts = [R[(p, c, s)][0] for p in full for s in S]
-    print(f"  {c:10s} {sgm(ts) / base:6.3f}  {sum(R[(p, c, s)][1] for p in full for s in S)}")
-m = {(p, c): sum(math.log(R[(p, c, s)][0] + 1) for s in S) / len(S) for p in full for c in C}
+    ts = [R[(p, c, s)][0] for p in full for s in SP[p]]
+    print(f"  {c:10s} {sgm(ts) / base:6.3f}  {sum(R[(p, c, s)][1] for p in full for s in SP[p])}")
+m = {(p, c): sum(math.log(R[(p, c, s)][0] + 1) for s in SP[p]) / len(SP[p]) for p in full for c in C}
 best = {p: min(C, key=lambda c: m[(p, c)]) for p in full}
-print(f"\n上限 (種の平均で最良の組): {sgm([R[(p, best[p], s)][0] for p in full for s in S]) / base:.3f}")
+print(f"\n上限 (種の平均で最良の組): {sgm([R[(p, best[p], s)][0] for p in full for s in SP[p]]) / base:.3f}")
 cv = []
 for p in full:
-    for s in S:
-        o = [x for x in S if x != s]
+    for s in SP[p]:
+        o = [x for x in SP[p] if x != s]
         b = min(C, key=lambda c: sum(math.log(R[(p, c, x)][0] + 1) for x in o))
         cv.append(R[(p, b, s)][0])
 print(f"抜き 1 の交差検証: {sgm(cv) / base:.3f}")
@@ -42,12 +43,12 @@ def spear(a, b):
     return 1 - 6 * sum((x - y) ** 2 for x, y in zip(ra, rb)) / (n * (n * n - 1))
 print("\n問題ごと (def の秒の平均、最良の組と def 比、種ごとの最良、順位相関の平均、交差検証の def 比):")
 for p in full:
-    rhos = [spear([R[(p, c, a)][0] for c in C], [R[(p, c, b)][0] for c in C]) for a, b in itertools.combinations(S, 2)]
-    bs = [min(C, key=lambda c: R[(p, c, s)][0]) for s in S]
-    d = sum(R[(p, "def", s)][0] for s in S) / len(S)
+    rhos = [spear([R[(p, c, a)][0] for c in C], [R[(p, c, b)][0] for c in C]) for a, b in itertools.combinations(SP[p], 2)]
+    bs = [min(C, key=lambda c: R[(p, c, s)][0]) for s in SP[p]]
+    d = sum(R[(p, "def", s)][0] for s in SP[p]) / len(SP[p])
     cvp = []
-    for s in S:
-        o = [x for x in S if x != s]
+    for s in SP[p]:
+        o = [x for x in SP[p] if x != s]
         b = min(C, key=lambda c: sum(math.log(R[(p, c, x)][0] + 1) for x in o))
         cvp.append((R[(p, b, s)][0] + 1) / (R[(p, "def", s)][0] + 1))
     print(f"  {p:18s} def {d:5.1f}  最良 {best[p]:10s} {math.exp(m[(p, best[p])] - m[(p, 'def')]):5.2f}  種ごと {','.join(bs):34s} ρ {sum(rhos) / len(rhos):5.2f}  cv {math.exp(sum(map(math.log, cvp)) / len(cvp)):5.2f}")
