@@ -4,7 +4,7 @@ import json, math, sys
 from collections import defaultdict
 rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 base, proto = sys.argv[2], sys.argv[3]
-T = 60.0
+T = float(__import__("os").environ.get("TL", "60"))
 by = defaultdict(dict)
 for r in rows:
     by[r["problem"]][(r["cfg"], r["rep"])] = r["result"]
