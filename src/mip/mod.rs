@@ -1301,7 +1301,6 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         EQUIV2_USED.with(|f| f.set(false));
         CLQPRB_STICKY.with(|f| f.set(false));
         CLQPRB_REVERTED.with(|f| f.set(false));
-        zerohalf::zh_trial_reset();
         cutmix::reset();
     }
     let prr = outer && env_def!("ENOMOTO_MIP_PROBE_REPRESOLVE", "1").is_some();
@@ -4741,9 +4740,22 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // `ENOMOTO_MIP_DOMCOL`: 支配される 0-1 列を固定し ([`dominated_binary_fixings`])、前処理をかけ直す (LP による固定と同じ形、1 回だけ)
     if env_str!("ENOMOTO_MIP_DOMCOL").is_some() && !submip && !DOMCOL_REPRESOLVING.with(|f| f.get()) {
         let t0 = std::time::Instant::now();
-        let fix = dominated_binary_fixings(&prob);
+        let mut fix = dominated_binary_fixings(&prob);
         if verbose {
             eprintln!("MIP: presolve: {} dominated binaries fixed ({:.2}s)", fix.len(), t0.elapsed().as_secs_f64());
+        }
+        // `ENOMOTO_T_MIP_DOMCOL_MIN_FRAC` (試作、既定 0 = 使わない): 固定が自由な列のこの割合に満たなければ固定を捨てる。drev の P
+        // (analysis/vsscip_slow_20261118/tree2/README.md 4 節) で遅くなった nw04 (3440 / 87482 列 = 3.9%、2.35 倍)・nu25-pr12 (3.6%、1.58 倍)・
+        // fiber (2.4%、1.35 倍) は固定が少なく、効いた rail507・fast0507 (58%)・air03 (21%) と分かれる
+        let min_frac = tunable!("ENOMOTO_T_MIP_DOMCOL_MIN_FRAC", 0.0, f64);
+        if min_frac > 0.0 && !fix.is_empty() {
+            let nfree0 = (0..n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count();
+            if (fix.len() as f64) < min_frac * nfree0 as f64 {
+                if verbose {
+                    eprintln!("MIP: presolve: the dominated binary fixings dropped ({} < {min_frac} x {nfree0} free columns)", fix.len());
+                }
+                fix.clear();
+            }
         }
         for &(j, v) in &fix {
             prob.col_lo[j] = v;
