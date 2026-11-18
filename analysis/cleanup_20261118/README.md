@@ -41,3 +41,4 @@ fuzz_slack 1000 5000 mismatches 0。cargo test 413 通過・0 失敗。7 本と�
 
 | 9 | `GCDFORCE` 一式 (診断 `MIP_DEBUG_GCDCOUNT` を含む) | (このコミット) | 265 (gcdforce.rs を削除、mod.rs の前処理の判定・かけ直しの印・数える診断 2 か所) | 75 | 412/0/19 (gcdforce の単体テスト 1 本が消えた) | 一致 | 根拠: analysis/gcdforce_20261107.md (203 問で当たる行が 0 本、理屈でも起きない)。数える診断 `DEBUG_GCDCOUNT` は同じ調べの道具で `gcdforce::count` を使うので一緒に消した |
 | 10 | `OBJ_SUPPORT` 一式 (`_NO_LS`・`_DIAG_NOFIX`・`T_MIP_OBJ_SUPPORT_*`) | (このコミット) | 185 (heuristics.rs の `obj_support`、solver.rs の呼び出しと `obj_support_gap`) | 75 | 412/0/19 | 一致 | 根拠: docs/improvement_history.md・analysis/revisit_20261112/inventory_abc.md (不採用: app1-1 は 4 コアでは既定でも解ける。40 問で当たるのは graph20-20-1rand だけ) |
+| 11 | `BRCUT` 一式 | (このコミット) | 133 (brcut.rs を削除、separation.rs の効き目の記録、pseudocost.rs の点数の項と印、solver.rs の初期化) | 74 | 412/0/19 | 一致 | 根拠: analysis/brcut_20261110.md (58 問で SGM +2.3%・−0.3%、解けた 84 → 82、効き目は揺れの内) |
