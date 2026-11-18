@@ -306,7 +306,7 @@ pub(super) mod sepprof {
     pub const SRC_TAB: u8 = 7;
     pub const SRC_POOL: u8 = 8;
     pub const SRC_MCF: u8 = 9;
-    /// 試作 `ENOMOTO_MIP_MODKVB`・`ENOMOTO_MIP_MUSHAGG` の候補 (以前は `SRC_ROWS` に数えていた)
+    /// 試作 `ENOMOTO_MIP_MUSHAGG` の候補 (以前は `SRC_ROWS` に数えていた。`ENOMOTO_MIP_MODKVB` も使っていたが 2026-11-18 に削除)
     pub const SRC_MODK: u8 = 10;
     pub const NSRC: usize = 11;
     pub const SRC_FACE: u8 = 16;
@@ -361,7 +361,7 @@ pub(super) mod sepprof {
     }
     /// separate() の中の段階 `k` に、`lap` からの時間を足して `lap` を今にする
     pub fn lap(k: usize, lap: &mut std::time::Instant) {
-        // `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN` も分離器ごとの時間を数える ([`super::super::seplearn`])
+        // `ENOMOTO_MIP_SEPSTAT` も分離器ごとの時間を数える ([`super::super::seplearn`])
         if on() || super::super::seplearn::stat_on() {
             let now = std::time::Instant::now();
             let f = if AT_FACE.with(|c| c.get()) { NSEP } else { 0 };
@@ -478,10 +478,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 分離器 `src` をこの呼び出しで使うか (`ENOMOTO_MIP_SEP_ADAPTIVE`。根では飛ばしている間は使わず、ノード (`light`) では
     /// `node_off` なら使わない)。使うなら、このラウンドに動いた印を付ける
     fn sep_src_on(&mut self, src: u8, light: bool) -> bool {
-        // 試作 `ENOMOTO_MIP_SEPLEARN`: この呼び出しで使わないと決めた分離器 ([`super::seplearn::SepLearn::begin_call`])
-        if self.sl.learn && self.sl.off & (1 << src) != 0 {
-            return false;
-        }
         if self.sep_src_skipped(src, light) {
             return false;
         }
@@ -551,16 +547,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
-    /// `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`: 分離の後の候補を数え、学習なら分離器ごとの候補の上限をかける ([`super::seplearn`])
-    fn sl_after_separate(&mut self, lists: &mut [&mut Vec<Candidate>], budget: usize) {
-        let mut srcs: Vec<Vec<(u8, f64, usize)>> = lists.iter().map(|v| v.iter().map(|c| (c.src, c.efficacy, c.coefs.len())).collect()).collect();
-        let keep = self.sl.after_separate(&mut srcs, budget);
-        for (v, k) in lists.iter_mut().zip(keep) {
-            if k.iter().any(|b| !b) {
-                let mut it = k.into_iter();
-                v.retain(|_| it.next().unwrap_or(true));
-            }
-        }
+    /// `ENOMOTO_MIP_SEPSTAT`: 分離の後の候補を数える ([`super::seplearn`])
+    fn sl_after_separate(&mut self, lists: &[&Vec<Candidate>]) {
+        let srcs: Vec<Vec<(u8, usize)>> = lists.iter().map(|v| v.iter().map(|c| (c.src, c.coefs.len())).collect()).collect();
+        self.sl.after_separate(&srcs);
     }
 
     /// 選んだカットを LP に加える直前に、加える前の目的値と分離器ごとの違反を覚える ([`super::seplearn::SepLearn::prepare`])
@@ -2077,11 +2067,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let cl_c = cl.is_some_and(|v| v.contains('c'));
         let cl_log = cs_outer && self.params.verbose && (cl.is_some_and(|v| v.contains('l')) || env_str!("ENOMOTO_MIP_CUTLPCAP_LOG").is_some());
         let mut cl_last_ok_cuts = 0usize;
-        // 試作 `ENOMOTO_MIP_MODKVB_CAPDROP` (gate2 候補 5、analysis/gate2_20261117/modkvb_s/README.md、`ENOMOTO_MIP_MODKVB` と組で使う。既定では使わない):
-        // カットの LP が 1 回の上限 (反復・時間) に当たったラウンドに試作のカットが混ざっていれば、試作のカットだけを外して加える前の状態から
-        // 解き直す (最適になればそのラウンドは成功として続け、以後のラウンドの試作のカットの本数をそのラウンドの半分までにする)
-        let mkd = cs_outer && super::modkvb::modkvb_mode().is_some() && env_str!("ENOMOTO_MIP_MODKVB_CAPDROP").is_some_and(|v| v != "0");
-        let mut mkd_cap: Option<usize> = None;
         let mut loop_iters = 0u64;
         let mut work_rounds = 0usize;
         // 試作 `ENOMOTO_MIP_TIMEDEP` の `p`: 第 2 段階の上限を手間で決める (`p2_work_cap`、時間の上限 `phase2_deadline` は 10 倍の安全網)
@@ -2721,7 +2706,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let face_quota = tunable!("ENOMOTO_T_MIP_FACE_MAX_CUTS", 0usize, usize);
             self.sep_pass = round;
             self.sep_adapt.ran = 0;
-            // `ENOMOTO_MIP_SEPSTAT`・`ENOMOTO_MIP_SEPLEARN`: 分離器ごとの計測と、この呼び出しで使う分離器 ([`super::seplearn`])
+            // `ENOMOTO_MIP_SEPSTAT`: 分離器ごとの計測 ([`super::seplearn`])
             let sl_on = self.sl.stat && !self.params.submip && job.is_none();
             if sl_on {
                 self.sl.begin_call(false);
@@ -2747,9 +2732,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let (mut cands, mut fcands) = self.separate_face_split(&x, false);
             if sl_on {
-                // 予算は 1 ラウンドの本数の上限の目安 (正確な上限はこの後で決まる)
-                let b = if adapt_max_cuts > 0 { adapt_max_cuts } else { tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize).min(p.m.max(50)) };
-                self.sl_after_separate(&mut [&mut cands, &mut fcands], b);
+                self.sl_after_separate(&[&cands, &fcands]);
             }
             // 試作 `ENOMOTO_MIP_MPSEP`: 今の頂点 x* のほかの点 (最適面の上の別の頂点、x* と内点を結ぶ線分上の点) でも分離して候補に足す
             // 足した点の候補は `mp_cands` に分けておく (値に `P` を含まなければカットプールに入れない。`q` でなければ選択の前に候補に混ぜる)
@@ -3189,32 +3172,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
-            // 試作 `ENOMOTO_MIP_MODKVB_CAPDROP`: 前に上限に当たったら、試作のカットを効き目の順に `mkd_cap` 本までにする
-            let is_mk = |c: &Candidate| c.src % sepprof::SRC_FACE == sepprof::SRC_MODK;
-            if let Some(cap) = mkd_cap {
-                if chosen.iter().filter(|c| is_mk(c)).count() > cap {
-                    let mut effs: Vec<f64> = chosen.iter().filter(|c| is_mk(c)).map(|c| c.efficacy).collect();
-                    effs.sort_by(|a, b| b.total_cmp(a));
-                    let thr = if cap == 0 { f64::INFINITY } else { effs[cap - 1] };
-                    let mut kept = 0usize;
-                    chosen.retain(|c| {
-                        if !is_mk(c) {
-                            return true;
-                        }
-                        let k = c.efficacy >= thr && kept < cap;
-                        kept += k as usize;
-                        k
-                    });
-                }
-            }
             if !self.params.submip && env_def!("ENOMOTO_MIP_CUT_CLIQUE_EXTEND", "1").is_some() {
                 self.extend_clique_cuts(&mut chosen, &x, round);
             }
             if sl_on {
                 self.sl_prepare(&chosen, &x);
             }
-            let mk_mask: Vec<bool> = if mkd { chosen.iter().map(|c| is_mk(c)).collect() } else { Vec::new() };
-            let n_mk = mk_mask.iter().filter(|&&b| b).count();
             let row_effs: Vec<f64> = if cl_a { chosen.iter().map(|c| c.efficacy).collect() } else { Vec::new() };
             let mut rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
             total_added += rows.len();
@@ -3298,7 +3261,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let ho4_gr = ho5_gain > 0.0 && env_str!("ENOMOTO_MIP_HO4_GAIN_RESTORE").is_some();
             let rob_saved = ((rob_d || ho4_gr) && !fail_restore && keep_lu_remove.is_none()).then(|| self.lp.save_state());
             // 試作 `ENOMOTO_MIP_CUTLPCAP` の `a`: 解き直しのために加える前の状態を取っておく
-            let mkd_saved = (mkd && n_mk > 0 && n_mk < rows.len() && !fail_restore && keep_lu_remove.is_none()).then(|| self.lp.save_state());
             let cl_saved = (cl_a && !fail_restore && keep_lu_remove.is_none() && rows.len() >= 2 * tunable!("ENOMOTO_T_MIP_CUTLPCAP_AMIN", 5usize, usize)).then(|| self.lp.save_state());
             // 試作 `ENOMOTO_MIP_CUT0_RETRY` (analysis/cutloop_stop_20261106/A.md、既定では使わない): `HO4_CUT0=moved` の改良。
             // 1 回目は既定とまったく同じに解き、進みの判定で止まったとき、次の 3 つを満たすときだけ同じカットの LP を解き直す。
@@ -3687,41 +3649,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: cut_cutoff, deadline: d });
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: LP hit the time cap; continued for up to {:.2}s more: {st:?}", retry * cap);
-                }
-            }
-            // 試作 `ENOMOTO_MIP_MODKVB_CAPDROP`: 上限に当たったら、試作のカットだけを外して加える前の状態から解き直す
-            if let Some(ss) = mkd_saved.as_ref().filter(|_| matches!(st, LpStatus::IterationLimit | LpStatus::TimeLimit)) {
-                if !self.time_up() && !stopped(&job) {
-                    let mut remove = vec![false; self.lp.num_rows()];
-                    for r in remove.iter_mut().skip(saved_rows) {
-                        *r = true;
-                    }
-                    self.delete_lp_rows(&remove);
-                    if self.lp.num_rows() == saved_rows {
-                        self.lp.restore_state(ss);
-                        let sub: Vec<(Vec<(usize, f64)>, f64, f64)> = rows.iter().zip(&mk_mask).filter(|(_, &m)| !m).map(|(r, _)| r.clone()).collect();
-                        self.add_cut_rows(&sub);
-                        let d = if cap.is_finite() {
-                            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
-                            Some(self.deadline.map_or(d, |g| g.min(d)))
-                        } else {
-                            self.deadline
-                        };
-                        let it1 = self.lp.total_iterations();
-                        st = self.lp.solve(&SolveLimits { iteration_limit: solve_lim, cutoff: cut_cutoff, deadline: d });
-                        mkd_cap = Some(n_mk / 2);
-                        if self.params.verbose {
-                            eprintln!(
-                                "MIP: cut round {round}: MODKVB_CAPDROP: dropped {n_mk} modkvb cuts of {} and re-solved: {st:?} after {} iters; modkvb cuts per round <= {}",
-                                rows.len(),
-                                self.lp.total_iterations() - it1,
-                                n_mk / 2
-                            );
-                        }
-                        if st == LpStatus::Optimal {
-                            rows = sub;
-                        }
-                    }
                 }
             }
             // 試作 `ENOMOTO_MIP_CUTLPCAP` の `a`: 上限に当たったら、効き目の大きい半分を残して加える前の状態から解き直す
@@ -4624,7 +4551,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let room = max_rows - self.lp.num_rows();
         let max_node = room.min(tunable!("ENOMOTO_T_MIP_NODE_MAX_CUTS", 20usize, usize));
         if sl_on {
-            self.sl_after_separate(&mut [&mut cands], max_node);
+            self.sl_after_separate(&[&cands]);
         }
         if cands.is_empty() {
             if sl_on {
@@ -4699,8 +4626,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut cands = if fresh { self.separate(x, true) } else { Vec::new() };
         self.node_cut_maxlen(&mut cands);
         if sl_on {
-            let b = tunable!("ENOMOTO_T_MIP_HCM_NODE_MAX_CUTS", 100usize, usize);
-            self.sl_after_separate(&mut [&mut cands], b);
+            self.sl_after_separate(&[&cands]);
         }
         crate::simplex::slope_intercept_dual::xprof("hcm_sep");
         for (eff, k) in self.pool_violated(x) {
@@ -6316,7 +6242,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.vbounds.is_none() {
             let mut vbs = VarBounds::from_rows(n, &p.is_int, &p.rows, &p.row_lo, &p.row_up);
             // 試作 `ENOMOTO_MIP_INTVUB`: 一般整数列と 0-1 列の変数上下限も集める (`ENOMOTO_MIP_INTVUB_IMPL` ならプロービングの含意も)
-            if super::cuts::intvub_mode() > 0 || mushagg_mode().is_some() || super::modkvb::modkvb_mode().is_some() {
+            if super::cuts::intvub_mode() > 0 || mushagg_mode().is_some() {
                 let implied: &[(u32, bool, u32, bool, f64)] = if env_str!("ENOMOTO_MIP_INTVUB_IMPL").is_some() { &p.implied_bounds } else { &[] };
                 vbs.add_int_vbs(&self.cut_int[..n], &self.dom.global_lo[..n], &self.dom.global_up[..n], &p.rows, &p.row_lo, &p.row_up, implied);
                 if env_str!("ENOMOTO_MIP_INTVUB_LOG").is_some() && !self.params.submip {
@@ -6791,58 +6717,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if dbg_sep || env_str!("ENOMOTO_MIP_MUSHAGG_LOG").is_some() {
                     eprintln!("SEP mushagg {:.3}s tight {ntight} cols {ncols} pairs {npairs} cands {}", t0.elapsed().as_secs_f64(), cands.len() - c0);
-                }
-            }
-        }
-        // 試作 `ENOMOTO_MIP_MODKVB` (既定では使わない): 変数上下限で置き換えた空間の mod-k の行の組 ([`super::modkvb::modkvb_cuts`])。根だけ
-        if let Some(mode) = super::modkvb::modkvb_mode() {
-            if !light && !self.params.submip && self.sep_src_on(sepprof::SRC_MODK, light) {
-                let t0 = std::time::Instant::now();
-                let tl = tunable!("ENOMOTO_T_MIP_MODKVB_TIME", 0.3f64, f64);
-                let mut dl = t0 + std::time::Duration::from_secs_f64(tl);
-                if let Some(d) = sep_deadline(self.deadline) {
-                    dl = dl.min(d);
-                }
-                // 試作 `ENOMOTO_MIP_HNFCUT` の `b`: 合同式の列を写した空間で連立を作って戻す ([`super::hnfcut::map_cutvars`])
-                let (groups, st) = match super::hnfcut::map_cutvars(&vars, lp_rows, n) {
-                    Some(mv) => {
-                        let (gs, st) = super::hnfcut::with_cmir(false, || super::modkvb::modkvb_cuts(&mv.vars(), &mv.rows, n, p.m, mode, use_flow_cover(), dl));
-                        (gs.into_iter().map(|g| g.into_iter().filter_map(|c| mv.unmap(c)).collect::<Vec<_>>()).collect::<Vec<_>>(), st)
-                    }
-                    None => super::modkvb::modkvb_cuts(&vars, lp_rows, n, p.m, mode, use_flow_cover(), dl),
-                };
-                let c0 = cands.len();
-                for g in groups {
-                    let n0 = cands.len();
-                    for r in g {
-                        push(Some(r), &mut cands, self);
-                    }
-                    keep_best(&mut cands, n0, self.p);
-                }
-                // `ENOMOTO_T_MIP_MODKVB_MAXCANDS` (既定 0 = 上限なし): 候補を効き目の大きい順にこの数まで残す (physiciansched6-2 では
-                // 0 ラウンド目の 450 本で根のカットの LP が反復の上限に当たり、根のカットのループが止まった)
-                let maxc = tunable!("ENOMOTO_T_MIP_MODKVB_MAXCANDS", 0usize, usize);
-                if maxc > 0 && cands.len() - c0 > maxc {
-                    cands[c0..].sort_by(|a, b| b.efficacy.total_cmp(&a.efficacy));
-                    cands.truncate(c0 + maxc);
-                }
-                if dbg_sep || env_str!("ENOMOTO_MIP_MODKVB_LOG").is_some() {
-                    eprintln!(
-                        "SEP modkvb {:.3}s tight {} sys {} cols {} vbsub {}/{} k {} sols {} solrows {} dense {} timeout {} cands {} snf {}",
-                        t0.elapsed().as_secs_f64(),
-                        st.tight,
-                        st.sys,
-                        st.cols,
-                        st.vbsub.0,
-                        st.vbsub.1,
-                        st.k,
-                        st.sols,
-                        st.sol_rows,
-                        st.dense,
-                        st.timed_out as u8,
-                        cands.len() - c0,
-                        st.snf
-                    );
                 }
             }
         }

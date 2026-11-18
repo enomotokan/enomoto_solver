@@ -29,8 +29,6 @@ pub(crate) mod solver;
 pub(crate) mod fj;
 pub(crate) mod localmip;
 pub(crate) mod fjsub;
-pub(crate) mod fpr;
-pub(crate) mod fpr_paper;
 mod heuristics;
 mod subb;
 pub(crate) mod sympre;
@@ -48,7 +46,6 @@ pub(crate) mod cuts;
 pub(crate) mod separation;
 pub(crate) mod snfmodk;
 pub(crate) mod zerohalf;
-pub(crate) mod modkvb;
 pub(crate) mod hnf;
 pub(crate) mod hnflat;
 pub(crate) mod hnfcut;
@@ -3303,11 +3300,14 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     // 違う規則の代表を残してよい (群が直積に分かれる)。graph20-20-1rand で SCIP は usesymmetry=0 だと解けず、静的な固定で 2183 列が 340 列になる
     if !static_orbitope && env_str!("ENOMOTO_MIP_ORBPP").is_some_and(|v| v != "0") {
         let min_rows = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_ROWS", 3usize, usize);
+        // 列 (入れ替える組) の数の下限。列の少ないオービトープを静的にすると、固定は少ないのに動的な固定の柔らかさを失う
+        // (neos-911970: 35x3 が 6 つと 35x6 が 1 つで 33 列の固定、P で 1.74 倍遅い。graph20-20-1rand は 52x37)
+        let min_cols = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_COLS", 0usize, usize);
         for o in orbs.iter_mut() {
             let binary = o.vars.iter().flatten().all(|&j| prob.is_int[j] && prob.col_lo[j] >= 0.0 && prob.col_up[j] <= 1.0);
             // パッキング・分割の行に含まれる行だけのオービトープ (行の部分集合でも列の入れ替えは対称性。`ORBITOPE_STATIC` と同じく過半のときだけ)
             let rows: Vec<usize> = (0..o.vars.len()).filter(|&i| o.row_packing[i]).collect();
-            if o.local || 2 * rows.len() < o.vars.len() || rows.len() < min_rows || !binary {
+            if o.local || 2 * rows.len() < o.vars.len() || rows.len() < min_rows || o.vars[0].len() < min_cols || !binary {
                 continue;
             }
             let swaps = std::mem::take(&mut o.swaps);
@@ -3329,7 +3329,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         }
         if verbose {
             let k = orbs.iter().filter(|o| o.static_pp).count();
-            eprintln!("MIP: symmetry: ORBPP {k} of {} orbitopes static (packing, >= {min_rows} rows), fixed {static_fix} columns to 0", orbs.len());
+            eprintln!("MIP: symmetry: ORBPP {k} of {} orbitopes static (packing, >= {min_rows} rows, >= {min_cols} columns), fixed {static_fix} columns to 0", orbs.len());
         }
     }
     if verbose && static_fix > 0 {
