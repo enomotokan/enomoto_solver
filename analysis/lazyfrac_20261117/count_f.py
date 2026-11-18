@@ -1,6 +1,6 @@
 """外せる行の非零の割合 f を数える (木に入るときに診断を出して終える `ENOMOTO_MIP_DIAG_GENLAZY=exit`)。
 GENLAZY の点数 τ (`F_TAU`、既定 0) と CLQ_LAZY の文字の和 < θ (`F_CLQ_THETA`、既定 0.1) の候補を同じ回で数える (CLQ は外さず数えるだけ)。
-使い方: python count_f.py [58|mitt|問題名,...]。1 問 1 行を count_f.jsonl に足す (途中から再開できる)。4 スレッド、壁時計 `CF_TL` 秒 (既定 300) で打ち切る。"""
+使い方: python count_f.py [58|mitt|問題名,...]。1 問 1 行を count_f.jsonl に足す (途中から再開できる)。`CF_THREADS` スレッド (既定 4)、`CF_PART=i/n` で分けて並べて回せる、壁時計 `CF_TL` 秒 (既定 300) で打ち切る。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -15,7 +15,11 @@ elif which == "mitt":
     probs = sorted({p for part in json.loads((WT / "analysis/cbcimpl_20261029/mitt_parts.json").read_text()) for p in part})
 else:
     probs = which.split(",")
-OUT = D / "count_f.jsonl"
+PART = os.environ.get("CF_PART")  # "i/n" なら i 番目の分だけ (並べて回す)
+if PART:
+    i, n = map(int, PART.split("/")); probs = probs[i::n]
+THR = os.environ.get("CF_THREADS", "4")
+OUT = D / (f"count_f_{PART.replace('/', 'of')}.jsonl" if PART else "count_f.jsonl")
 TAU = os.environ.get("F_TAU", "0"); TH = float(os.environ.get("F_CLQ_THETA", "0.1"))
 done = {json.loads(l)["problem"] for l in OUT.read_text().splitlines()} if OUT.exists() else set()
 TL = float(os.environ.get("CF_TL", "300"))
@@ -30,10 +34,10 @@ for p in probs:
     if mps is not None:
         env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
         env.update(ENOMOTO_MIP_GEN_LAZY="1", ENOMOTO_MIP_GEN_LAZY_MODE="score", ENOMOTO_T_MIP_GEN_LAZY_TAU=TAU, ENOMOTO_MIP_CLQ_LAZY="1",
-                   ENOMOTO_T_MIP_CLQ_LAZY_TOL=str(1 - TH), ENOMOTO_MIP_DIAG_GENLAZY="exit", ENOMOTO_MIP_THREADS="4")
+                   ENOMOTO_T_MIP_CLQ_LAZY_TOL=str(1 - TH), ENOMOTO_MIP_DIAG_GENLAZY="exit", ENOMOTO_MIP_THREADS=THR)
         t0 = time.time()
         try:
-            pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", str(int(TL)), "--threads", "4"],
+            pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", str(int(TL)), "--threads", THR],
                                 cwd=WT, env=env, capture_output=True, text=True, timeout=TL + 60)
             for l in pr.stderr.splitlines():
                 if l.startswith("GENLAZY {"):
