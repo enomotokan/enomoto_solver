@@ -16,6 +16,9 @@ CFGS = {
     # 試作 ENOMOTO_SIMPLEX_BFRT_GROUP (双対の比のテストを HiGHS 流の組ごとの BFRT に、自由列は |alpha| 最大で選ぶ)
     "gz": {"ENOMOTO_SIMPLEX_BFRT_GROUP": "gz"},
     "gzdiag": dict(DG, ENOMOTO_SIMPLEX_BFRT_GROUP="gz"),
+    # 試作 ENOMOTO_MIP_NODELP_BFRT_GROUP (木のノードの LP だけ gz)
+    "nbg": {"ENOMOTO_MIP_NODELP_BFRT_GROUP": "1"},
+    "nbgdiag": dict(DG, ENOMOTO_MIP_NODELP_BFRT_GROUP="1"),
 }
 for k, v in list(os.environ.items()):
     # 追加の設定: NODELP_CFG_<名前>="K=V,K=V"

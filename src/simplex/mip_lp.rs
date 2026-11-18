@@ -55,7 +55,7 @@ struct LuCache {
     d: Option<Vec<f64>>,
 }
 
-/// [`TwoStageLp::optface_move`] の結果 (試作 `ENOMOTO_MIP_OPTFACE_MOVE`)。
+/// [`TwoStageLp::optface_move`] の結果 (試作 `ENOMOTO_MIP_OPTFACE_PARCUTS`・`MPSEP`。`OPTFACE_MOVE` は 2026-11-18 に削除)。
 #[derive(Clone, Debug, Default)]
 pub struct OptFaceStats {
     /// 最初の基底での候補 (被約費用 0 で動ける非基底) の数 (双対退化の目安)
@@ -3360,7 +3360,7 @@ impl TwoStageLp {
 
     /// 基底位置 `s` の `e_s^T B^{-1}` を、元の行に掛ける重みとして返す
     /// (`sum_i w_i (a_i x - r_i) = 0` が基底変数 `basic_var(s)` についての tableau 行)。
-    /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE`・`ENOMOTO_MIP_OPTFACE_PARCUTS` (既定では呼ばない。analysis/optface_cuts_20261105.md): 最適な
+    /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` (`OPTFACE_MOVE` は 2026-11-18 に削除) (既定では呼ばない。analysis/optface_cuts_20261105.md): 最適な
     /// 今の基底から、被約費用が (許容誤差で) 0 の非基底変数を入れる主単体法の軸の入れ替え (双対退化の向き) を最大 `k` 回行い、
     /// 目的値を変えずに最適面の上の別の最適基底 (頂点) へ移る。比の判定は Harris の 2 段 (主の実行可能性を保つ)。入れる変数は
     /// 候補から最大 `sample` 本を引いて FTRAN し、`mode` で選ぶ: `r` 乱数 (最初に引いた有効な候補)、`f` 分数の値の整数の基底列の
