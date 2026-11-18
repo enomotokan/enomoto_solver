@@ -6769,8 +6769,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // HiGHS の選び方で根の下界が 104.7 → 109.5・111.4 に上がる。害の出た 30n20b8・roll3000・nw04 はどれも 2300 行以下
         // 試作 `ENOMOTO_MIP_TAB_HIGHS_SIG` (gate2、既定では使わない、analysis/gate2_20261117/tab/README.md): 根の最初の tableau の分離
         // (`light` でない呼び出しで、行が 1 つ以上使われたもの) は既定の選び方で行い、その作業量 W = (集約行の非零の合計) / (LP の非零 + 列) と、
-        // HiGHS の fill の予算を超える行の割合 fw を測る。W のシグモイド σ((ln W − ln `ENOMOTO_T_MIP_TAB_SIG_W` (2.5)) / `ENOMOTO_T_MIP_TAB_SIG_WIDTH` (0.25))
-        // が 0.5 以上なら、以後の呼び出し (ノードを含む) で HiGHS の選び方を使う。58 問では W が大きい問題 (qnet1 7.1・10teams 18.8・neos-911970 7.0・
+        // HiGHS の fill の予算を超える行の割合 fw を測る。W ≥ `ENOMOTO_T_MIP_TAB_SIG_W` (2.5) で、連続列の割合が `ENOMOTO_T_MIP_TAB_SIG_CONT` (0.6)
+        // 未満なら、以後の呼び出し (ノードを含む) で HiGHS の選び方を使う (2026-11-18 に初めのシグモイドを普通の if にし、連続列の割合を足した:
+        // 連続列の多い kasai・binkar10_1・dcmulti は HiGHS の選び方で遅く、kasai は根の下界も悪い。README.md 10 節)。58 問では W が大きい問題 (qnet1 7.1・10teams 18.8・neos-911970 7.0・
         // mc11 2.6) で速く、W が小さい問題 (roll3000 1.2・nw04 0.66・mik-250 0.98・mas76 0.84) で遅かった。fw が `ENOMOTO_T_MIP_TAB_SIG_FW` (0.9) 以上なら
         // (30n20b8・nw04 のように fill の予算で tableau 行が全部外れ、その密なカットで下界を得る問題) 既定の選び方のまま (値 `n` なら HiGHS の選び方で
         // fill の予算だけ外す。根だけの試しで 30n20b8 の根の下界が 139.9 → 129.8 と悪く、既定のまま (`1`) は 139.9)
@@ -7223,10 +7224,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if tab_sig_measure && n_rows_used > 0 {
             let w = base_nnz_total as f64 / (lp_nnz + n).max(1) as f64;
             let fw = n_fill_would as f64 / n_rows_used as f64;
-            let w0 = tunable!("ENOMOTO_T_MIP_TAB_SIG_W", 2.5, f64);
-            let width = tunable!("ENOMOTO_T_MIP_TAB_SIG_WIDTH", 0.25, f64);
-            let sig = 1.0 / (1.0 + (-(w.max(1e-9).ln() - w0.ln()) / width).exp());
-            self.tab_sig = if sig < 0.5 {
+            let cont = (p.n - p.nint) as f64 / p.n.max(1) as f64;
+            let on = w >= tunable!("ENOMOTO_T_MIP_TAB_SIG_W", 2.5, f64) && cont < tunable!("ENOMOTO_T_MIP_TAB_SIG_CONT", 0.6, f64);
+            self.tab_sig = if !on {
                 1
             } else if fw >= tunable!("ENOMOTO_T_MIP_TAB_SIG_FW", 0.9, f64) {
                 if tab_sig_mode == Some("n") { 3 } else { 1 }
@@ -7234,7 +7234,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 2
             };
             if env_str!("ENOMOTO_MIP_LOG").is_some() {
-                eprintln!("MIP: tableau rule sigmoid: W {w:.2} fw {fw:.2} sig {sig:.3} -> {} (submip {})", ["", "default", "highs", "highs-nofill"][self.tab_sig as usize], self.params.submip);
+                eprintln!("MIP: tableau rule: W {w:.2} fw {fw:.2} cont {cont:.2} -> {} (submip {})", ["", "default", "highs", "highs-nofill"][self.tab_sig as usize], self.params.submip);
             }
         }
         if dbg_sep && tab_cbc_init.is_some() {
