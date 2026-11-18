@@ -700,9 +700,10 @@ fn tree2_intagg_def_only() -> bool {
     tree2_intagg_env() == Some("d")
 }
 
-/// 試作 `ENOMOTO_AGG_PIVOT_COL` (既定では使わない): ピボットの比を列の側でも判定する。
+/// `ENOMOTO_AGG_PIVOT_COL` (既定で入れる、`=0` で切る): ピボットの比を列の側でも判定する。
+/// analysis/pcd_20261117 (P −4.1% [−8.9, −0.2]・M −3.9% [−10.0, +3.3]、解けた数 164→168) で既定にした。
 fn pivot_col_on() -> bool {
-    env_str!("ENOMOTO_AGG_PIVOT_COL").is_some()
+    env_def!("ENOMOTO_AGG_PIVOT_COL", "1").is_some()
 }
 
 /// 等式行 `row · x = rhs` を整数列 `j` (係数 `coeff`) のピボットに使って、代入式 `x_j = (rhs - Σ a_k x_k) / coeff` が
@@ -1057,7 +1058,7 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
             }
             coeff.abs() >= ratio * row_max
                 || (!col_scale.is_empty() && piv_mag(j, coeff) >= ratio * row_max_u)
-                // 試作 `ENOMOTO_AGG_PIVOT_COL` (既定では使わない、analysis/prbsubst_20261117): HiGHS の `aggregator` と同じく、行の最大係数との比で
+                // `ENOMOTO_AGG_PIVOT_COL` (既定で入れる、analysis/prbsubst_20261117・pcd_20261117): HiGHS の `aggregator` と同じく、行の最大係数との比で
                 // 落ちても列 j の係数の最大との比で通れば認める (HiGHS は行と列の短い方から見て、だめならもう一方を見る。規則を読んで自前で書いた)。
                 // sat_rens の時刻の列 (係数 ±1) が大きい M の行 (係数 2e5) を通して消せるようになる
                 || (pivot_col_on() && coeff.abs() >= ratio * la.iter().chain(lg.iter()).map(|&(_, v)| v.abs()).fold(0.0f64, f64::max))
