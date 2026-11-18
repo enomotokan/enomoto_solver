@@ -1371,7 +1371,8 @@ fn iterlog_on() -> bool {
 }
 
 thread_local! {
-    /// 試作 `ENOMOTO_SIMPLEX_BFRT_GROUP` をこのスレッドで一時的に使う印 (0 = 環境変数に従う、1 = 使う、2 = 使わない)
+    /// 試作 `ENOMOTO_SIMPLEX_BFRT_GROUP` をこのスレッドで一時的に使う印 (0 = 環境変数に従う、1 = `gz` を使う、2 = 使わない)。
+    /// 木のノードの LP だけで使う試作 `ENOMOTO_MIP_NODELP_BFRT_GROUP` が [`BfrtGroupScope`] で置く
     pub(crate) static BFRT_GROUP_SCOPE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
@@ -1887,6 +1888,21 @@ thread_local! {
 
 /// 試作 `ENOMOTO_MIP_DSE_INIT` の `r` ([`dse_init_has`]): 木のノードの LP を解くあいだだけ、渡した基底が特異なら特異な列だけを
 /// スラックに替えて warm start する ([`warm_sing_repair`] を真にする。全スラック基底からの解き直しを避ける)。手放すときに前の値へ戻す。
+/// 試作 `ENOMOTO_MIP_NODELP_BFRT_GROUP` (analysis/lpwarm_20261118): このスレッドで、生きているあいだ [`BFRT_GROUP_SCOPE`] を 1 (`gz`) にする
+pub(crate) struct BfrtGroupScope(u8);
+
+impl BfrtGroupScope {
+    pub(crate) fn new() -> Self {
+        BfrtGroupScope(BFRT_GROUP_SCOPE.with(|c| c.replace(1)))
+    }
+}
+
+impl Drop for BfrtGroupScope {
+    fn drop(&mut self) {
+        BFRT_GROUP_SCOPE.with(|c| c.set(self.0));
+    }
+}
+
 pub(crate) struct SingRepairScope(Option<bool>);
 
 impl SingRepairScope {
