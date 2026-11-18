@@ -1496,19 +1496,22 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     PRESOLVE_IN_SUBMIP.with(|f| f.set(prev_in_sub));
     FEAS_FJ_EARLY.with(|c| c.set(None));
     RESTART_PRESOLVE.with(|f| f.set(prev_rp));
-    // `ENOMOTO_MIP_SPARSIFY_LATE`: HiGHS と同じく前処理 (プロービング・同値の代入の後) の最後に 1 回だけ疎化し
-    // ([`sparsify_rows_highs`]、`=old` なら [`sparsify_rows`])、書き換えたら前処理をもう一度かける (その中では疎化しない)
+    // `ENOMOTO_MIP_SPARSIFY_LATE` (既定 `s`、`=0` で切る。docs/improvement_history.md の 2026-11-18 の節): HiGHS と同じく前処理 (プロービング・
+    // 同値の代入の後) の最後に 1 回だけ疎化し ([`sparsify_rows_highs`]、`=old` なら [`sparsify_rows`])、書き換えたら前処理をもう一度かける
+    // (その中では疎化しない)。`s` を含むときは下の条件 (縮んだ行の割合 f ≥ 0.6) を満たすときだけ疎化した問題を使う。`=1` は条件なし (試作の比べ用)
+    let spl_mode = env_def!("ENOMOTO_MIP_SPARSIFY_LATE", "s");
     let presolved = match presolved {
-        Some(Presolved::Reduced { prob, postsolve, scaling }) if env_str!("ENOMOTO_MIP_SPARSIFY_LATE").is_some() && !params.submip && params.restarts == 0 => {
+        Some(Presolved::Reduced { prob, postsolve, scaling }) if spl_mode.is_some() && !params.submip && params.restarts == 0 => {
             let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, .. } = prob.clone();
-            let k = if env_str!("ENOMOTO_MIP_SPARSIFY_LATE").is_some_and(|v| v == "old") {
+            let k = if spl_mode == Some("old") {
                 sparsify_rows(&mut rows, &mut row_lo, &mut row_up, &is_int, prob.n)
             } else {
                 sparsify_rows_highs(&mut rows, &mut row_lo, &mut row_up, &is_int, &col_lo, &col_up, prob.n)
             };
             // gate2 候補 6 (analysis/gate2_20261117/sparsify/README.md): 書き換えた行のうち 0-1 列だけの行・1 列以下に縮んだ (行が消えて境界になる) 行、
-            // 非零の増減を数える。`ENOMOTO_MIP_SPARSIFY_LATE=s` なら、縮んだ割合 f = 縮んだ行 / 書き換えた行 が `ENOMOTO_T_MIP_SPL_C` (0.5) 以上のときだけ
-            // 疎化した問題を使う (kasai は 462 行が全部縮む。air03・nw04 は集合分割の 0-1 の行を書き換えるだけで 1 行も縮まず、遅くなる・メモリが増える)。
+            // 非零の増減を数える。`s` (既定) なら、縮んだ割合 f = 縮んだ行 / 書き換えた行 が `ENOMOTO_T_MIP_SPL_C` (0.6) 以上のときだけ
+            // 疎化した問題を使う (kasai は 462 行が全部縮む。air03・nw04 は集合分割の 0-1 の行を書き換えるだけで 1 行も縮まず、遅くなる・メモリが増える。
+            // 0.6 は f = 0.585 の physiciansched6-2 (種 1〜8 で 1.29 倍) を外す値で、MIPLIB benchmark 240 問で f が 0.585 と 0.917 の間の問題はない)。
             // 文字 `b` も付けると、書き換えた行のうち 0-1 列だけの行の割合 b が `ENOMOTO_T_MIP_SPL_BMAX` (0.5) 以下のときに限る
             // (nursesched-sprint02・decomp2・physiciansched6-2 は書き換えた行の多くが 0-1 列だけの行で、種 1〜8 で遅れた)
             let bin = |j: usize| is_int[j] && col_lo[j] == 0.0 && col_up[j] == 1.0;
@@ -1520,10 +1523,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                     el += (r.iter().filter(|e| e.1 != 0.0).count() <= 1) as usize;
                 }
             }
-            let mode = env_str!("ENOMOTO_MIP_SPARSIFY_LATE").unwrap_or("");
+            let mode = spl_mode.unwrap_or("");
             let (f, b) = if ch > 0 { (el as f64 / ch as f64, chb as f64 / ch as f64) } else { (0.0, 0.0) };
             let use_it = !mode.contains('s')
-                || (ch > 0 && f >= tunable!("ENOMOTO_T_MIP_SPL_C", 0.5, f64) && (!mode.contains('b') || b <= tunable!("ENOMOTO_T_MIP_SPL_BMAX", 0.5, f64)));
+                || (ch > 0 && f >= tunable!("ENOMOTO_T_MIP_SPL_C", 0.6, f64) && (!mode.contains('b') || b <= tunable!("ENOMOTO_T_MIP_SPL_BMAX", 0.5, f64)));
             if params.verbose {
                 eprintln!("MIP: presolve: sparsified {k} rows (late)");
                 let nz0: usize = prob.rows.iter().map(|r| r.len()).sum();

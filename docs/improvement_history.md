@@ -10625,3 +10625,32 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   - RSS: fast0507 3771 → 4894 MB (rail507 は 3126 → 2655 MB)。
 - 確かめ: cargo test --lib 409 通過・0 失敗 (既定化した木)、fuzz 7 本 (release019 の fuzz.sh と同じ組、既定) bad 0、被覆型の fuzz
   (tree2/fuzz_cover.py) 2300 問 bad 0 (試作の段階)。既定で rail507 は 36886 列を固定、nw04 は 3440 列を捨てることを確かめた。
+
+
+## 2026-11-18: 前処理の最後の疎化を、縮んで消える行の割合 f ≥ 0.6 の問題だけで既定にする (SPARSIFY_LATE=s、採用)
+
+- 既定にした: `ENOMOTO_MIP_SPARSIFY_LATE` の既定を `s` に (`=0` で止める。`=1` は条件なしで疎化をいつも使う比べ用、`=old` は古い疎化)、
+  `ENOMOTO_T_MIP_SPL_C` の既定 0.6。前処理の最後 (プロービング・同値の代入の後) に HiGHS と同じ疎化 (`sparsify_rows_highs`、等式の倍を引いて
+  非零を減らす) を 1 回かけ、書き換えた行のうち 1 列以下に縮む (行が消えて境界になる) 割合 f が 0.6 以上のときだけ、疎化した問題で前処理を
+  かけ直して使う。そうでなければ疎化の前の問題のまま (既定の前と同じ)。サブ MIP・再スタートの前処理ではかけない。
+- 経緯 (analysis/gate2_20261117/sparsify/README.md、元は analysis/presolve2_20261111.md): 条件なしの `=1` は kasai に効くが、58 問で解けた 127 → 124、
+  air03・nubu がそろって遅く、nw04 のメモリ 2.7 倍で不採用だった。疎化が書き換えた行を数えると、kasai は 462 行が全部縮む (f = 1)。
+  air03・nw04 は集合分割の 0-1 の行どうしを引くだけで 1 行も縮まず (f = 0)、nubu は 0.06、mzzv42z は 0 (前処理 15.9 → 42 秒)。
+- f ≥ 0.6 の理由: 最初は 0.5 にした (シグモイドの形で書いたが、問題につき 1 回の入り切りなので普通の if と同じ。利用者の方針の訂正で if に)。
+  種 1〜8 で physiciansched6-2 (f = 0.585) が 1.29 倍 (8 種中 5 種で 1.48 倍超) だったので 0.6 に上げて外した。MIPLIB benchmark 240 問で f が
+  0.585 と 0.917 の間の問題はないので、0.6〜0.9 のどこに置いても入る問題は同じ。2 つ目の条件「書き換えた行のうち 0-1 列だけの行の割合 b ≤ 0.5」
+  (`=sb`、残してある) も試したが、b ≈ 1 の問題で悪い向きのものが出ず、根拠が確かめられなかったので入れない。
+- 適用範囲 (前処理だけの回、MIPLIB benchmark 240 問 (Mittelmann 186 問を含む) × {既定, s}、scan.jsonl・scan_summ.txt): 疎化が行を書き換えるのは
+  100 問、f ≥ 0.6 で入るのは 13 問 (kasai・neos-860300・nursesched-sprint02・decomp2・neos-4954672-berkel・cryptanalysiskb128n5obj14/16 (以上 Mittelmann)、
+  irish-electricity・neos-3555904-turama・neos-5093327-huahum・nursesched-medium-hint03・highschool1-aigio・physiciansched3-3)。**入らない 226 問は
+  前処理の後の行・列・非零が既定とすべて一致**。疎化の計算そのものの費用は、入らない 226 問の前処理の時間で幾何平均 +0.75% (合計 2705 秒に +8.4 秒)。
+- 根拠 (入る問題だけを種を増やして、4 スレッド。summ_in_I.txt・summ_in_J.txt):
+  - 解ける 4 問 (種 1〜8): **kasai 0.35 倍 (全種で速い、既定 103〜211 秒 → 37〜70 秒、RSS 573 → 359 MB)**・neos-860300 0.96 (60 秒の組)・
+    nursesched-sprint02 1.10・decomp2 1.23 (1〜9 秒の問題で揺れが大きい)。比の SGM 0.82。**全種で 1.25 倍を超えて遅れる問題はない**
+    (physiciansched6-2 は 0.6 で外れ既定と同じ)。改善は kasai 1 問が担う。
+  - 600 秒で解けない 9 問 (種 1〜4、72 回): 9 問とも全種で時間切れで時間は変わらない。ギャップは turama・huahum が 3 種で良い向き、
+    irish-electricity は種で割れる (根の近くで解が出るかどうかが入れ替わる。揺れとして扱った)、残りは揺れか両方解なしで比べられない。
+  - 誤答: 160 回 (I・J) で最適どうしの目的値の食い違い 0、片方の下界ともう片方の暫定解の照らし合わせ 119 組で矛盾 0。
+- 確かめ (既定化した木、当日の既定 g1・can・clqprb・seq・rfs30・drevmf・sw2 を含む先頭に当てて): fuzz 7 本 (release019 の fuzz.sh と同じ組、既定、
+  analysis/gate2_20261117/sparsify/fuzz_default.sh) bad 0、cargo test --release 409 通過・0 失敗。先頭で kasai 種 1 は `=0` 289.3 秒 → 既定 64.5 秒。試作の段階で `=s`・`=1` の mip_fuzz_vs_highs 各 300・fuzz_tiny 400・
+  fuzz_objint 1000 も bad 0。既定で kasai は 1652 → 1190 行・neos-860300 は 594 → 568 行に疎化し、physiciansched6-2・air03 は `=0` と同じ大きさ。
