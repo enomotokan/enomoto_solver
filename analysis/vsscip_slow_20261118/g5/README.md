@@ -233,3 +233,5 @@ n3div36 (def の RSS 5457 MB、t1 は 767 MB)、uccase12 (def 2918 MB / scip 145
   回すと fin 358.1 秒・同じビルドの def 350.1・305.0 秒 (揺れの範囲)。
 - 見立て: 直す前の版の計測なので採否は決めない。n3div36 のように引き継ぎの鎖が長い問題でしか山は大きく下がらず (M の時間切れの組では −5%)、
   直した版で M を取り直してから判断するのがよい。
+- 取り直しの分担表 (親の依頼): 直した版で回すため、`shards_MFIN.json`・`shards_PFIN.json` をそのまま写した `shards_MFIN2.json` (14 分担)・`shards_PFIN2.json` (2 分担) を足した。
+  結果は `res_MFIN2_sK.jsonl`・`res_PFIN2_sK.jsonl` (直す前の `res_MFIN_*`・`res_PFIN_*` はメモリの効き目の参考として残す)。集計は `python summ.py MFIN2 fin` など。
