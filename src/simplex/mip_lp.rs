@@ -2310,8 +2310,8 @@ impl TwoStageLp {
                 return st;
             }
             rx.recv().ok().flatten()
-        } else if st == LpStatus::IterationLimit && lim.iteration_limit != u64::MAX && env_str!("ENOMOTO_MIP_RACE_ITERCAP_NOWAIT").is_some_and(|v| v != "0") {
-            // 試作 `ENOMOTO_MIP_RACE_ITERCAP_NOWAIT` (既定では使わない): 二段解法が呼び手の反復の上限 (手間の予算、前処理の LP による固定の
+        } else if st == LpStatus::IterationLimit && lim.iteration_limit != u64::MAX && env_def!("ENOMOTO_MIP_RACE_ITERCAP_NOWAIT", "1").is_some_and(|v| v != "0") {
+            // `ENOMOTO_MIP_RACE_ITERCAP_NOWAIT` (2026-11-18 から既定、`=0` で従来の待つ形): 二段解法が呼び手の反復の上限 (手間の予算、前処理の LP による固定の
             // 最初の LP の `ENOMOTO_MIP_PRESOLVE_WORK` など) で止まったら、内点法側を待たずに止めて返す。待つと時間の安全網まで空費する
             // (ns1116954 の 4 スレッド・60 秒で早めの FJ が外れた回: 二段解法は約 2270 反復で止まり、内点法 + クロスオーバーを 30 秒の安全網まで
             // 待って何も得なかった。analysis/hang_20261117/README.md の 16 節)

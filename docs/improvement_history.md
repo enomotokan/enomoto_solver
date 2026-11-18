@@ -10693,3 +10693,21 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 確かめ (既定化した木、当日の既定 g1・can・clqprb・seq・rfs30・drevmf・sw2・s3g・SUBWAIT=2 を含む先頭に当てて): fuzz 7 本 (release019 の fuzz.sh と同じ組、既定、
   analysis/gate2_20261117/sparsify/fuzz_default.sh) bad 0、cargo test --release 409 通過・0 失敗。先頭で kasai 種 1 は `=0` 289.3 秒 → 既定 64.5 秒。試作の段階で `=s`・`=1` の mip_fuzz_vs_highs 各 300・fuzz_tiny 400・
   fuzz_objint 1000 も bad 0。既定で kasai は 1652 → 1190 行・neos-860300 は 594 → 568 行に疎化し、physiciansched6-2・air03 は `=0` と同じ大きさ。
+
+## 2026-11-18: 反復の上限で止まった二段解法の後に内点法側を待たない ENOMOTO_MIP_RACE_ITERCAP_NOWAIT を既定にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_RACE_ITERCAP_NOWAIT` (戻すのは `=0`)。根の LP の同時実行 (`TwoStageLp::solve_race_ext`) で、二段解法が呼び手の
+  反復の上限 (`ENOMOTO_MIP_PRESOLVE_WORK` の手間の予算。主に前処理の LP による固定の最初の LP) で止まったら、内点法 + クロスオーバー側を止めて
+  `IterationLimit` を返す。従来は数値的な破綻のときと同じ枝で内点法側を期限 (時間の安全網 30 秒) まで待っていた。根の LP は反復の上限がないので変わらない。
+- 経緯 (analysis/hang_20261117/README.md の 16 節、HANG): ns1116954 で前処理の早めの FJ が外れた回、最初の LP は約 2270 反復で手間の上限に当たるのに、
+  内点法側を 30 秒の安全網まで待って何も得ず、4 スレッド 60 秒で 49 秒 (計測機では時間切れ・解なし・RSS 2 GB)。待たない形で 48.7 → 22.1 秒。
+- 根拠 (ビルド b26443c4b、`rin` 対 `def`、4 スレッド):
+  - M (Mittelmann 48 問 × 種 1・2・600 秒、192 行): **SGM −2.3% (区間 −8.7%〜+4.9%)**、解けた 70 → 71、食い違い 0、crash 0。
+  - P (MIPLIB 58 問 × 種 1〜3・60 秒、348 行): **SGM +0.6% (区間 −1.7%〜+3.3%)**、解けた 136 → 137、食い違い 0、crash 0。
+  - 働く問題 (最初の LP が手間の上限で止まる、M・P の 94 問中 11 問: fast0507・hypothyroid-k1・mzzv11・mzzv42z・neos-3216931-puriri・neos-873061・
+    satellites2-60-fs・snp-02-004-104・tbfp-network・uccase12・unitcal_7) に絞ると、M で **−13.0% (区間 −29.5%〜+13.3%)**、解けた 9 → 11
+    (snp-02-004-104 種 2・tbfp-network 種 1 が rin だけ解ける)、mzzv42z 0.63・0.73、mzzv11 0.47・0.97。
+  - 害は unitcal_7 の 1 問 (1.77・1.38、最初の LP が 0.36 秒で上限に当たり、待てば内点法の頂点が根に渡っていた型)。全種で遅い
+    neos-3627168-kasai (1.36・2.16) は働かない側 (道筋が同じはずの揺れ) で rin の影響ではない。働かない群は M −0.2%・P +1.0%。
+- 確かめ: cargo test 409 通過・0 失敗 (既定化した木)、mip_fuzz_vs_highs 300 bad 0 (既定化した木)。
+
