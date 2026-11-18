@@ -10690,6 +10690,6 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   - 600 秒で解けない 9 問 (種 1〜4、72 回): 9 問とも全種で時間切れで時間は変わらない。ギャップは turama・huahum が 3 種で良い向き、
     irish-electricity は種で割れる (根の近くで解が出るかどうかが入れ替わる。揺れとして扱った)、残りは揺れか両方解なしで比べられない。
   - 誤答: 160 回 (I・J) で最適どうしの目的値の食い違い 0、片方の下界ともう片方の暫定解の照らし合わせ 119 組で矛盾 0。
-- 確かめ (既定化した木、当日の既定 g1・can・clqprb・seq・rfs30・drevmf・sw2 を含む先頭に当てて): fuzz 7 本 (release019 の fuzz.sh と同じ組、既定、
+- 確かめ (既定化した木、当日の既定 g1・can・clqprb・seq・rfs30・drevmf・sw2・s3g・SUBWAIT=2 を含む先頭に当てて): fuzz 7 本 (release019 の fuzz.sh と同じ組、既定、
   analysis/gate2_20261117/sparsify/fuzz_default.sh) bad 0、cargo test --release 409 通過・0 失敗。先頭で kasai 種 1 は `=0` 289.3 秒 → 既定 64.5 秒。試作の段階で `=s`・`=1` の mip_fuzz_vs_highs 各 300・fuzz_tiny 400・
   fuzz_objint 1000 も bad 0。既定で kasai は 1652 → 1190 行・neos-860300 は 594 → 568 行に疎化し、physiciansched6-2・air03 は `=0` と同じ大きさ。
