@@ -25,7 +25,7 @@ for r in range(reps):
         except Exception: res = {"status": "crash", "rc": p.returncode, "err": p.stderr[-300:]}  # noqa: BLE001
         if "ENOMOTO_MIP_DEBUG_SOL" in extra or "ENOMOTO_MIP_DEBUG_LPINF" in extra:  # デバッグ解つき: MIP_DEBUG_SOL の行 (最初の 300 行) と最後の 40 行を logs/ に残す
             ls = p.stderr.splitlines(); (D / "logs").mkdir(exist_ok=True)
-            (D / "logs" / f"{tag}_s{s}_r{r}.log").write_text("\n".join([l for l in ls if "MIP_DEBUG_SOL" in l or "LPINF" in l][:5000] + ["---- 最後の 40 行 ----"] + ls[-40:]) + "\n")
+            (D / "logs" / f"{tag}_s{s}_r{r}.log").write_text("\n".join([l for l in ls if "MIP_DEBUG_SOL" in l or "LPINF" in l or "new incumbent" in l][:5000] + ["---- 最後の 40 行 ----"] + ls[-40:]) + "\n")
         o = res.get("objective")
         wrong = res.get("status") == "optimal" and o is not None and o > 28290.5
         row = {"tag": tag, "seed": s, "rep": r, "th": th, "env": extra, "status": res.get("status"), "obj": o, "bound": res.get("bound"),
