@@ -4726,7 +4726,10 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             return Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling });
         }
     }
-    if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() {
+    // `ENOMOTO_MIP_DOMCOL_NOPROBE2` (試作): `ENOMOTO_MIP_DOMCOL` の固定の後のかけ直しではプロービングをしない。プロービングは
+    // 固定の前に済んでいて、air03 では 2297 列の固定の後のかけ直しで 2.8 秒のプロービングをやり直し (固定 0)、4.5 → 6.8 秒になっていた
+    let skip_probe2 = DOMCOL_REPRESOLVING.with(|f| f.get()) && env_str!("ENOMOTO_MIP_DOMCOL_NOPROBE2").is_some();
+    if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() && !skip_probe2 {
         match probe(&mut prob, verbose, submip) {
             Some(false) => return Some(Presolved::Infeasible),
             Some(true) if !probe_equiv_fix() => return represolve_after_probe(prob, pre.postsolve_log, pre.scaling, verbose, submip, depth),
