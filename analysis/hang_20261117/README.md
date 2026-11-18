@@ -203,3 +203,30 @@
   計測機の 6.8〜8.2 秒の超過は再現できていない (推測: 計測機では早めの探索の後に根の LP が期限をまたぎ、こちらで見えない道 (根の LP の救済・
   尺度を変えた解き直しなど) を通った)。再現には計測機で `watch_at.sh ns1116954 1 60 61.5 名前 ENOMOTO_T_MIP_SEED=2 ENOMOTO_MIP_FEAS_EARLY_NO_CHAIN_TICKS=1`
   を回し、`logs/` のスタックとログを見る。nct_t1 は「直す前」の形なので、既定 (def_t1) では起きにくい。
+
+## 13. highschool1-aigio の 4 スレッドの超過 (2026-11-18、親からの知らせ、事実)
+
+- 知らせ: sparsify J 分担 7 (ビルド e9342a5fb、4 スレッド・600 秒) で def 605.9 秒・spls 604.2 秒 (0 ノード・下界 −∞)。
+  e9342a5fb には HANG の直し (fc21f80d5・00585f12c) は入っている。
+- 再現 (今のビルド、`logs/highschool1-aigio_hs_t4.*`): 606.06 秒。上限を 200 秒にしても 203.29 秒 (`hs200_t4`)。
+  - ログ: 根の LP は「the time limit (160.51s, 0.24s past the deadline)」で止まる。LP 自身は自分の期限の 0.24 秒後に止まっているが、
+    求解の時計 (solver の開始から) で 160.5 秒 + 前処理 42.7 秒 = 203.2 秒で、**LP に渡した期限が全体の期限より約 3 秒遅い**。
+  - 原因: `solve_mip` が畳み込み (`fold::solve_folded_any`) の判定に 2.7〜2.9 秒使い (「MIP_FOLD: no fold (n 320404 m 92568) in 2.733s」)、
+    畳まないと決めた後の求解 (`dispatch`) に時間の上限を**丸ごと**渡していた (前処理の時計 `t_pre` はその後から数える)。
+    列 32 万の問題では畳み込みの判定 (と問題の組み立て) の分だけ必ず越える。
+- 直し (既定): `solve_mip` の入口からの経過を、畳み込みの判定と `dispatch` に渡す時間の上限から引く (`ENOMOTO_MIP_NO_ENTRY_DEADLINE` で直す前)。
+  - 確認: 200 秒の上限で **200.05 秒** (「solve returned TimeLimit after 199.97s」、根の LP は 0.02 秒遅れ、`hs200fix_t4`)。
+  - cargo test 422 通過、mip_fuzz_vs_highs 300 で bad 0 (`fuzz/vs_highs_entry.txt`)。
+- 期限の直後のスタック (`hs_t4.gdb`) では、根の LP の競争の内点法 + クロスオーバーの側 (`BasisSelector::try_add`) が期限の後も回り続けていた。
+  主は待たない (競争の負けは置き去り) ので時間には効かないが、CPU を 1 本使い続ける。別の直しの候補 (未着手)。
+- 推測: 大きい問題で 600 秒をわずかに越える回 (例えば 600.5〜6 秒) のうち、畳み込みの判定が数秒かかるものはこれで説明がつく。
+
+### 13.1 負けた内点法 + クロスオーバーが期限の後も回る件 (群 5 の試作 `ENOMOTO_IPM_G5CANCEL` で扱う)
+
+- 群 5 の `ENOMOTO_IPM_G5CANCEL` の初版 (33433b0a7) は正規方程式・拡大系の組み立ての中だけで止めの合図を見ていて、クロスオーバーの
+  基底の選び直し (`BasisSelector::try_add` を列ごとに回すループ、`src/simplex/crossover.rs`) では見ていなかった。
+- HANG でも同じ環境変数で毎列見る形を作って確かめた (e9c699f5e): highschool1-aigio・4 スレッド・200 秒で、期限 (200.0 秒) の直後に
+  「basis selection stopped by the cancel signal after 98486 columns」、求解は 200.08 秒 (`logs/highschool1-aigio_hs200g5_t4_s1.log`)。
+  G5CANCEL つきの mip_fuzz_vs_highs 300・lp_fuzz_vs_highs 300 で bad 0 (`fuzz/vs_highs_g5xo.txt`・`fuzz/lp_g5xo.txt`)。
+- 同じ時期に群 5 が同じ場所に `g5cancel_tick` (256 列ごとに見る) を入れていたので、取り込みのときに群 5 の版を採った (重複を避ける)。
+  この問題では 1 列の消去が平均 1.6 ミリ秒 (9.8 万列で 156 秒) なので、256 列ごとだと止まるまで平均 0.4 秒ほど遅れうる (推測)。
