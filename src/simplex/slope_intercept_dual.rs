@@ -5201,8 +5201,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 試作 `ENOMOTO_SIMPLEX_BFRT_GROUP` (既定では使わない、analysis/lpwarm_20261118): BFRT を Harris の組ごとに進める (主ループの比のテスト)
     let bfrt_group_on = bfrt_group_mode('g');
     let zero_pick_alpha = bfrt_group_mode('z');
-    let bg_td = tunable!("ENOMOTO_T_SIMPLEX_BG_TD", 1e-7, f64);
+    let bg_td = tunable!("ENOMOTO_T_SIMPLEX_BG_TD", 1e-9, f64);
     let mut group_buf: Vec<Cand> = Vec::new();
+    let mut group_rest: Vec<Cand> = Vec::new();
     let mut diag_h2_shifts = 0usize;
     // 試作 `ENOMOTO_SIMPLEX_HARRIS_WIDE` (既定では使わない): 窓の中の軸が小さいとき Harris の窓を広げる (パス 2)
     let harris_wide_on = env_str!("ENOMOTO_SIMPLEX_HARRIS_WIDE").is_some_and(|v| v != "0");
@@ -6759,7 +6760,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }
         // 試作 `ENOMOTO_SIMPLEX_BFRT_GROUP=1` (既定では使わない、analysis/lpwarm_20261118): HiGHS (`HEkkDualRow::chooseFinal`) と同じく、
         // BFRT を Harris の組ごとに進める。組 = まだ見ていない候補のうち比が `theta_max = min (比 + Td / |alpha|)` 以下のもの
-        // (`Td` = `ENOMOTO_T_SIMPLEX_BG_TD`、既定 1e-7)。組を丸ごとフリップしても `w_r` に届かなければ組を丸ごとフリップして次の組へ、
+        // (`Td` = `ENOMOTO_T_SIMPLEX_BG_TD`、既定 1e-9。1e-7 では supportcase42 の根の LP が 22692 → 7499 反復に減るが、neos-827175 の根の LP で飛ばした候補の費用のずらしが積もり、仕上げの主単体法が 1.3 万反復になる)。組を丸ごとフリップしても `w_r` に届かなければ組を丸ごとフリップして次の組へ、
         // 届く (または幅が無限の候補を含む) 組を最後の組とし、その中の |alpha| 最大の候補を入れる列にする (最後の組の他の候補はフリップしない)。
         // 今までの歩進は比の同点を列番号で切り、同点の中の候補を列番号順にフリップしてから、その位置で止まった (双対退化の強い LP、
         // supportcase42 では |alpha| の小さい列を入れたり、同点の箱型の列を何十本もフリップして主の値を壊し、出発の主実行不能 1 行から
@@ -6775,38 +6776,70 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             let mut gcum = Affine1::ZERO;
             let mut out_len = 0usize;
             let mut final_pick: Option<(usize, usize)> = None;
+            // 組を取り出した数。2 組を越えたら残りの候補を 1 回だけ比の順に並べ、前から順に組を切る (組が多い反復で候補全体を何度もなめない)
+            let mut groups = 0usize;
+            // 並べた残りの候補 (`group_rest`) の次に見る位置。`None` は並べる前
+            let mut rest_pos: Option<usize> = None;
             loop {
-                let mut tmax = f64::INFINITY;
-                for c in all {
-                    if c.ratio > lo {
-                        tmax = tmax.min(c.ratio + bg_td / c.hat_alpha.abs());
-                    }
-                }
-                if !tmax.is_finite() {
-                    break;
-                }
                 let start = group_buf.len();
                 let mut ncum = gcum;
                 let mut fin = false;
-                for c in all {
-                    if c.ratio > lo && c.ratio <= tmax {
-                        group_buf.push(*c);
+                let tmax;
+                if let Some(pos) = rest_pos {
+                    // 並べた残りから: 比の順に、比が組の上限以下のあいだ足す (上限は足した候補の `比 + Td / |alpha|` の最小。
+                    // 後ろの候補はそれより大きい比なので上限を下げない)
+                    let mut t = f64::INFINITY;
+                    let mut e = pos;
+                    while e < group_rest.len() && group_rest[e].ratio <= t {
+                        let c = group_rest[e];
+                        t = t.min(c.ratio + bg_td / c.hat_alpha.abs());
+                        group_buf.push(c);
                         match cache.width[c.j] {
                             None => fin = true,
                             Some(w) => ncum = ncum.add(w.scale(c.hat_alpha.abs())),
                         }
+                        e += 1;
                     }
+                    rest_pos = Some(e);
+                    tmax = t;
+                } else {
+                    let mut t = f64::INFINITY;
+                    for c in all {
+                        if c.ratio > lo {
+                            t = t.min(c.ratio + bg_td / c.hat_alpha.abs());
+                        }
+                    }
+                    if !t.is_finite() {
+                        break;
+                    }
+                    for c in all {
+                        if c.ratio > lo && c.ratio <= t {
+                            group_buf.push(*c);
+                            match cache.width[c.j] {
+                                None => fin = true,
+                                Some(w) => ncum = ncum.add(w.scale(c.hat_alpha.abs())),
+                            }
+                        }
+                    }
+                    tmax = t;
                 }
                 let end = group_buf.len();
                 if end == start {
                     break;
                 }
+                groups += 1;
                 if !fin && !bfrt_reached(w_r, ncum, x_b_base[r]) {
                     // 組の中は比の順に並べる (フリップの順は結果に効かないが、`sorted_prefix` の比の昇順の前提を保つ)
                     group_buf[start..end].sort_unstable();
                     gcum = ncum;
                     out_len = end;
                     lo = tmax;
+                    if rest_pos.is_none() && groups >= 2 {
+                        group_rest.clear();
+                        group_rest.extend(all.iter().filter(|c| c.ratio > lo).copied());
+                        group_rest.sort_unstable();
+                        rest_pos = Some(0);
+                    }
                     continue;
                 }
                 let mut best = start;
