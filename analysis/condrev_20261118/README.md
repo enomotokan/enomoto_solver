@@ -47,4 +47,26 @@
 
 `cargo test --release --lib` (RUSTFLAGS に `-L/usr/local/lib -lpython3.13`): 412 通過、0 失敗。
 
-(結果は後で書く)
+## 4. 誤答の確かめ (`fuzz.sh`)
+
+analysis/release019_20261117/fuzz.sh と同じ 7 本を、3 件の試作を全部入れて回した (sbt + `SBT_GENINT_MIN=1`・`SUBFIX_CAP=0.05`・`ROOTSTOP=rb`・`RATE=0.02`。
+`SBT_GENINT_MIN=1` は、一般整数の列のある問題で sbt を入れ、ない問題で切る両方の道を通すため)。ビルドは d72c9e6c7。
+
+| 本 | 結果 |
+|---|---|
+| fuzz_tiny 400 0 | bad 0 of 400 |
+| mip_fuzz_vs_highs 300 | bad 0 of 300 |
+| fuzz_objint 1000 0 | bad 0 of 1000 |
+| fuzz_slack 1000 0 | mismatches 0 |
+| fuzz_tiny 400 1000 | bad 0 of 400 |
+| fuzz_objint 1000 5000 | bad 0 of 1000 |
+| fuzz_slack 1000 5000 | mismatches 0 |
+
+## 5. neos-873061 で sfcap が働くか (ログつき、種 1、600 秒、d72c9e6c7)
+
+- 今の既定では、根に入るまでが長い (根のカットの 1 ラウンド目が 334 秒、根のヒューリスティクスの終わりが 562 秒)。
+  SUBFIX の根の RENS (固定率 0.60、自由な整数列 35034/87610) のサブ MIP は残り時間が少なく 0.9 秒で時間切れになり、上限 (30 秒) に届かない。
+- よって記録の「SUBFIX の RENS 1 回 421 秒」(prune_20261112.md §3、d644a0e0) は今の既定では起きておらず、S の neos-873061 で sfcap と def が
+  同じ結果 (目的値・下界が同じ) なのはこのため。sfcap が狙った害は今は見えない。
+
+(S の結果は後で書く)
