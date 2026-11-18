@@ -84,6 +84,10 @@ SCIP のログ (graph20-20-1rand): 「36 generators found (log10 of symmetry gro
   生成元) から除かれている (オービトープの生成元が動かす列を動かす生成元は使わない)。静的にした成分には動的な orbitopal fixing と
   オービトープの分枝を掛けず、根のカットの対称な像 (SYM_CUT_GENS) も止める。よって成分ごとに扱いは 1 つ。
 
+- (追記) HANG の `ENOMOTO_MIP_SYM_SST` との重なり (HANG との確認、2026-11-18): SST はオービトープが使った生成元とオービトープの列を
+  1 本でも動かす生成元を除いた残りで行 x_l − x_k ≥ 0 を作り、オービトープの列には行を足さない。ORBPP の固定 (根の x_{i,c} = 0 と木の中の
+  orbitopal fixing) は静的にしたオービトープの行列の列だけに掛かる。よって成分は重ならず、併用してよい (lex-leader の行と同じ扱い)。
+
 ## 広い計測の台本 (slow2_20261117 の写し)
 
 - 設定 (`cfg.py`): def (既定)、g1 = `ENOMOTO_MIP_VUBAGG=1` + `ENOMOTO_MIP_ORBPP=1` (vub・opp は単独の切り分け用)。4 スレッド。
