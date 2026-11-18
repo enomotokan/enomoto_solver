@@ -105,7 +105,7 @@ pub struct Domain {
     row_cap: Vec<f64>,
     /// 試作 `ENOMOTO_MIP_HNFPRE`: 整数列の合同式 (上下限の丸めに使う、[`super::hnf::CongTable`])。
     pub cong: Option<std::sync::Arc<super::hnf::CongTable>>,
-    /// 含意による伝播 (`ENOMOTO_MIP_IMPL_PROP`): 文字 (`2j` は `x_j = 1`、`2j+1` は `x_j = 0`) ごとの、同時には成り立たない
+    /// 含意による伝播 (プロービングの `ENOMOTO_MIP_PROBE_CLIQUE`・`CLQPRB` が [`Self::add_implications`] で入れる): 文字 (`2j` は `x_j = 1`、`2j+1` は `x_j = 0`) ごとの、同時には成り立たない
     /// 文字 ([`MipProblem::conflict_edges`] から作る)。HiGHS のクリーク表の伝播に当たる (行の伝播では見えない、
     /// プロービングで見つけた含意も使う)。
     impl_adj: Option<std::sync::Arc<Vec<Vec<u32>>>>,
@@ -172,16 +172,7 @@ impl Domain {
             resets: 0,
             global_lo: p.col_lo.clone(),
             global_up: p.col_up.clone(),
-            impl_adj: if env_str!("ENOMOTO_MIP_IMPL_PROP").is_some() && !p.conflict_edges.is_empty() {
-                let mut adj = vec![Vec::new(); 2 * p.n];
-                for &(a, b) in &p.conflict_edges {
-                    adj[a as usize].push(b);
-                    adj[b as usize].push(a);
-                }
-                Some(std::sync::Arc::new(adj))
-            } else {
-                None
-            },
+            impl_adj: None,
             impl_queue: Vec::new(),
             cong: super::hnf::table_for(p),
             row_cap: if env_str!("ENOMOTO_MIP_NO_ROWCAP").is_some() { vec![f64::INFINITY; p.m] } else { p.rows.iter().map(|r| r.iter().map(|&(j, a)| a.abs() * (p.col_up[j] - p.col_lo[j])).fold(0.0f64, f64::max)).collect() },

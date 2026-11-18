@@ -1775,7 +1775,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if params.submip && debug_submip_components() && heuristics::SUBMIP_DEPTH.with(|d| d.get()) == 1 {
                 report_submip_components(&prob, "after presolve");
             }
-            if (env_str!("ENOMOTO_MIP_DUAL_UB").is_some() && !params.submip) || crate::fj_p3_force() {
+            if crate::fj_p3_force() {
                 let k = dual_bound_tightening(&mut prob);
                 if params.verbose {
                     eprintln!("MIP: presolve: tightened {k} continuous column bounds by dual arguments");
@@ -8034,7 +8034,7 @@ fn normalize_integer_rows(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], ro
     count
 }
 
-/// 双対の推論による連続列の境界の締め付け (`ENOMOTO_MIP_DUAL_UB`、既定では使わない): 費用が非負 (最小化) の連続列 x_j が、
+/// 双対の推論による連続列の境界の締め付け (FJ の問題の前処理 `ENOMOTO_MIP_FJ_P3` で使う): 費用が非負 (最小化) の連続列 x_j が、
 /// x_j を増やすと楽になる行 (`<=` の向きで係数が負) では、ほかの列が最悪の値 (その行の最大活動) でも行を満たす値
 /// `u* = max_i (maxact_i(j を除く) - b_i) / |a_ij|` を超える必要はない。x_j を増やすと苦しくなる向き (等式を含む) には出ない
 /// ときだけ使う。u* より大きい解は x_j を u* に下げても行は破れず目的も悪くならないので、上限を `max(lb, u*)` にできる。
@@ -8080,7 +8080,7 @@ pub(super) fn fj_p3_on() -> bool {
 }
 
 /// Feasibility Jump だけに渡す問題 (`ENOMOTO_MIP_FJ_P3`、既定で使う ([`fj_p3_on`])): 本体の前処理後の問題 `pc` に、このスレッドだけ
-/// `ENOMOTO_MIP_INEQ_SINGLETON`・`ENOMOTO_MIP_CS_OBJ_PIVOT` を有効にした前処理をもう一度かけ、双対の推論で連続列の境界を締める
+/// 不等式行の列シングルトンと目的を定める連続列の消去 (削除した試作 `ENOMOTO_MIP_INEQ_SINGLETON`・`_CS_OBJ_PIVOT` と同じ処理) を有効にした前処理をもう一度かけ、双対の推論で連続列の境界を締める
 /// ([`dual_bound_tightening`])。本体の問題は変えない。前処理は列の番号を保つので、FJ の解は `postsolve` を逆順に当てて尺度を
 /// 戻せば `pc` の空間の解になる ([`fj_p3_solution`])。physiciansched6-2 では FJ が解を見つけるのにこの 3 つと FJ の LP 修復の
 /// 4 つが全部要る (1 つでも外すと 20 秒で解なし) が、p5s として本体の前処理に入れると beasleyC3・uccase12 で証明が遅れる
