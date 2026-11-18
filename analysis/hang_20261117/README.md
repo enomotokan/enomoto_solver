@@ -339,3 +339,10 @@
   `python analysis/hang_20261117/run.py MRIN K`・`python analysis/hang_20261117/run.py PRIN K`、集計 `python summ.py MRIN def rin`・`python summ.py PRIN def rin`。
 - **採用 (2026-11-18、利用者の判断)**: `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS` の既定を 30 にした (66da54e5a、`=inf` で従来)。以後の `def` は rfs30 と同じ。
   docs/improvement_history.md に節を足した。cargo test 409 通過、mip_fuzz_vs_highs 300 bad 0。
+
+### 16.1 PRIN の集計 (rin = `ENOMOTO_MIP_RACE_ITERCAP_NOWAIT=1`、MIPLIB 58 問 × 種 1〜3、60 秒、ビルド b26443c4b、4 分担そろい、事実)
+
+- `summ_PRIN.txt`: 348 行、crash 0、食い違い 0。解けた数 def 136 / rin 137 (174 組)。rin / def **+0.6% [−1.7%, +3.3%]** (どちらかが解けた 46 問)。
+- 目立つ問題: neos-911970 1.47 (1.36・0.93・2.51、揺れの大きい問題)、速い側 mas76 0.86・hypothyroid-k1 0.85・timtab1 0.83。
+  graph20-20-1rand は種 1 で def 59.6 秒 → rin 時間切れ、種 2 で def 時間切れ → rin 50.5 秒 (60 秒の境目の揺れ)。
+- 読み: P では中立 (LP による固定の最初の LP が手間の上限に当たる大きい問題が少ない)。効くのは M の大きい問題の側なので MRIN を待つ。
