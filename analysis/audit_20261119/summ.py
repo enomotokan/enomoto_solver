@@ -1,5 +1,5 @@
 """AUDIT: 既定 (def) と各案の対の比較 (slow2_20261117/summ.py の写し)。python summ.py A sw0 > summ_A.txt、python summ.py B rins (qiu・cs2) > summ_B_rins.txt
-設定は cfg.py。誤答は「食い違い」(最適どうしの目的値・最適と実行不能) で数える。"""
+設定は cfg.py。誤答は「食い違い」(最適どうしの目的値・最適と実行不能) で数える。
 SGM は shift 1 秒、時間切れは制限時間で数える。CI は問題単位のブートストラップ (summP.py と同じ)。"""
 import json, glob, math, random, collections, sys
 from pathlib import Path
