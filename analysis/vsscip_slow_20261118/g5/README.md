@@ -213,3 +213,7 @@ n3div36 (def の RSS 5457 MB、t1 は 767 MB)、uccase12 (def 2918 MB / scip 145
 - `G5FIN` の効き目 (n3div36・種 1・600 秒・4 スレッド、0.5 秒おきに RSS を取る、`fin_n3div36_*.out`): 既定 **6650 MB** (601.06 秒・70448 ノード) →
   `G5FIN=1` **3751 MB** (600.21 秒・77485 ノード)。−44%。終わりの展開がなくなる分、時間切れの後の超過も 1.06 → 0.21 秒。探索の道は時間切れまで同じ
   (ノード数・暫定解の差は 4 スレッドの揺れ)。
+- G5FIN の広い計測の台本 (親の依頼): `cfg.py` に `fin` (4 スレッド、def と対) を足し、`PSEEDS=1 python plan.py 14 2 fin` で `shards_PFIN.json` (58 問 × 種 1・60 秒、
+  2 分担・各 0.5 時間) と `shards_MFIN.json` (slow2 の M 48 問 × 種 1・2・600 秒、14 分担・各約 1.2 時間) を作った。`plan.py` に P の種を選ぶ `PSEEDS` を足した (既定は 1,2,3)。
+  回し方 (リポジトリの根で `pip install -e .` の後): `cd analysis/vsscip_slow_20261118/g5 && python run.py PFIN K` (K = 0・1)、`python run.py MFIN K` (K = 0〜13)。
+  集計は `python summ.py MFIN fin`・`python summ.py PFIN fin` (最大 RSS・時間切れの後の超過 (`time` − 600)・下界と状態の一致を見る)。

@@ -11,6 +11,9 @@ sys.path.insert(0, str(D.parents[1] / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
 NM, NP = int(sys.argv[1]), int(sys.argv[2])
 ALT = sys.argv[3]  # 既定と対にする設定
+import os
+# P の種 (環境変数 PSEEDS=1,2,3 の形、既定 1・2・3。G5FIN は 1 だけ)
+PSEEDS = tuple(int(x) for x in os.environ.get("PSEEDS", "1,2,3").split(","))
 BASE = "def_t1" if ALT.endswith("_t1") else "def"
 SUF = ALT.upper().replace("_T1", "")
 XM = sys.argv[4].split(",") if len(sys.argv) > 4 else []  # M に足す問題 (例: neos-2746589-doon、見積りは 600 秒)
@@ -39,4 +42,4 @@ def estM(p, c): return TM.get(p, 600.0) + 30
 balance({(p, s): order(p, s, [BASE, ALT]) for p in MPROBS for s in (1, 2)}, estM, NM, f"shards_M{SUF}.json", 600)
 TP = times(VS / "res_P_s*.jsonl", "def", 60)
 def estP(p, c): return TP.get(p, 48.0) + 8
-balance({(p, s): order(p, s, [BASE, ALT]) for p in PROBS for s in (1, 2, 3)}, estP, NP, f"shards_P{SUF}.json", 60)
+balance({(p, s): order(p, s, [BASE, ALT]) for p in PROBS for s in PSEEDS}, estP, NP, f"shards_P{SUF}.json", 60)
