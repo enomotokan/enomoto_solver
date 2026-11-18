@@ -62,6 +62,17 @@
   期限を見る粒度と、LP を止めた後の後始末と見られる (推測、スタックは期限の前のものしか取れていない)。
 - 608.8 秒 (vsscip) は 4 本が同時に回る計測機で、上の DSE の重みの計算・解き直しが遅くなった分と見られる (推測)。
 
+### 4.1 cryptanalysiskb128n5obj14 の 1 スレッド (706.9 秒、親からの追加の材料その 2)
+
+- 直しを全部外した形 (`ENOMOTO_MIP_FEAS_EARLY_NO_DEADLINE=1 ENOMOTO_MIP_FEAS_EARLY_NO_CHAIN_TICKS=1 ENOMOTO_DSE_NO_DEADLINE=1
+  ENOMOTO_MIP_DIVE_NO_DEADLINE=1`、`logs/cryptanalysiskb128n5obj14_old_t1.*`) で再現: **713.1 秒**・0 ノード。期限の後のスタックは 10 回とも
+  `with_presolve_deadline` → `feas_fj_lmip_early_salt` (根の後のやり直し FJ)。fhnw-binpack4-4 と同じ型 (1 節)。
+  - 前処理の早めの探索: cap 60 秒で 134 秒 (Local-MIP 107.5 秒を手間 9.4 秒と数える、約 1/11)。
+  - やり直し: cap 59.6 秒で 231.8 秒 (Local-MIP 205.6 秒を手間 10.8 秒、約 1/19)、期限を見ないので上限を 113 秒越えた。
+- 直した版 (`fix_t1`): 600.50 秒 (5 ノード)。早めの探索 44.6 秒 (cap 60)、やり直し 61.7 秒 (cap 79.7)。Local-MIP の数えは実時間の 1/1.9。
+- まとめ: cryptanalysis 系の 1 スレッドの超過は、大きいもの (obj14 の 107 秒) がやり直し FJ の期限の見落とし + 連鎖の手の数え漏れ、
+  小さいもの (obj16 の 0.5〜8.8 秒) がダイビングの LP の DSE の重み・解き直し (4 節)。どちらも 3 節の直しで 600.5 秒に収まる。
+
 ## 5. 直した版の確認 (事実)
 
 - 時間の上限: fhnw-binpack4-4 の 1 スレッド・600 秒は 600.00〜600.01 秒で time_limit (3 回、`fix_t1`・`fix2_t1`・`fix3_t1`)。
