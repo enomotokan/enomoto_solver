@@ -807,7 +807,18 @@ const NORMAL_MAX_TRIPLETS: usize = 150_000_000;
 /// ([`crate::cancel::is_cancelled`]) を見て、立っていれば作るのをやめる (`None`)。sorrell3 の前処理の LP プロービングの根の LP の同時実行では、
 /// 二段解法が 0.9 秒で勝った後も内点法側が 169162 行の正規方程式 (型の非零 6000 万) を作って並べ替え続け、RSS が 5.3 GB に達していた
 fn g5cancel() -> bool {
-    env_str!("ENOMOTO_IPM_G5CANCEL").is_some_and(|v| !v.is_empty() && v != "0") && crate::cancel::is_cancelled()
+    let hit = env_str!("ENOMOTO_IPM_G5CANCEL").is_some_and(|v| !v.is_empty() && v != "0") && crate::cancel::is_cancelled();
+    if hit {
+        g5cancel_note("kkt");
+    }
+    hit
+}
+
+/// 診断 `ENOMOTO_IPM_G5CANCEL_LOG` (振る舞いは変えない): `G5CANCEL` で作るのをやめた所を標準エラーへ 1 行出す
+pub(crate) fn g5cancel_note(at: &str) {
+    if env_str!("ENOMOTO_IPM_G5CANCEL_LOG").is_some() {
+        eprintln!("G5CANCEL: stopped in {at}");
+    }
 }
 /// 正規方程式の三つ組の行き先を p x p の位置表で引く行数の上限 (p^2 の要素数、`u32` で 128 MB)。
 const DENSE_POS_MAX: usize = 32_000_000;
