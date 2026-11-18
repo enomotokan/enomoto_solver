@@ -10582,14 +10582,14 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
     区間の上端 +5% の目安は満たさない (7 問・3 種で区間が広い) が、利用者の判断で採用。
 - 確かめ: cargo test 409 通過・0 失敗 (既定化した木)、mip_fuzz_vs_highs 300 bad 0。
 
-## 2026-11-18: 不採用の試作 68 件を削除 (片付け 第 2 弾)
+## 2026-11-18: 不採用の試作 67 件を削除 (片付け 第 2 弾)
 
 - 棚卸しの候補 A の残り 84 件 (analysis/cleanup_20261118/cands2.txt) のうち、計測中・判断待ちの 4 件 (SYMREFL・SYM_LEX_CANON・IMPLINT_TU2・ROOTLP3)
-  を除く 80 件を 1 件ずつ記録 (主に analysis/revisit_20261112/inventory.tsv と元の記録) で確かめ、68 件を消した (19 コミット、src の正味 −1904 行)。
+  を除く 80 件を 1 件ずつ記録 (主に analysis/revisit_20261112/inventory.tsv と元の記録) で確かめ、67 件を消した (src の正味 約 −1892 行)。
   手順・確かめは第 1 弾と同じ: 毎回 cargo test 全通過・警告が増えない・1 スレッドの 12 問の状態・目的値・ノード数が消す前と完全に一致、
   およそ 10 件ごとと最後に fuzz 7 本で bad 0 (7 回)。
 - 消したもの (環境変数): ZH_ONLY・ZH_PRE・ZH_TRIAL、RESTORE_EXACT_DSE・RESTORE_NEVER、SMALL3_SUBMIP_LIGHT・SMALL2_SUBLIGHT、LNS_NO_CAP、
-  EARLY_RESTART_SKIP_LIGHT、NODE_CUTS、TREE1_SB、SUBMIP_FIRST_DONE、OPTFACE_FIRST、OPTFACE_MOVE、SB_POLY_SCORE、TREE_SHARED_QUEUE・TREE_KEEP_SIBLINGS、
+  EARLY_RESTART_SKIP_LIGHT、NODE_CUTS、TREE1_SB、SUBMIP_FIRST_DONE、OPTFACE_FIRST、OPTFACE_MOVE、TREE_SHARED_QUEUE・TREE_KEEP_SIBLINGS、
   TREE3_JOINCAP、LOSE6_2_PROBE_WAIT・LOSE6_2_BGPROOF、COST_PRIORITY、BG_RETURN_DSE、FC_NODE_SEP・FC_NODE_SEP2・FC_NODE_SEP_ADAPT (と FC_NODE_PATH_HIGHS・
   FC_SEP2_REPAIR)、MC11FIX1_RACE、DIVE_RCFIX、ROOT_SUBMIP_REL、ROOT_WIDE_SUBMIP、FIX_CAP、CMIR_DELTA1・CMIR_DELTAS_HIGHS、CUT_AGE_HIGHS、CUT_EXTEND・
   CUT_EXTEND_CATCHUP、CUT_LP_CONTINUE、CUT_KEEP_LU、CUT_HARRIS2、ORIGROW_TIGHT、RINS_ROOT_BOOST・RINS_DIVE・RENS_DIVE、RR_HIGHS、SUBMIP_NESTED、
@@ -10597,6 +10597,31 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   IMPLBD_GENINT、NODE_PERTURB・SIMPLEX_POLISH_DSE・POOL1_DONATE、CUTSEL_PROBE_KEEP・INTVUB・FACE_ADAPT、LOCALMIP・LOCALMIP_CHAIN、LP_PROBE_AFTER_EXT、
   BG_DETERM_ROBUST。これらの環境変数は今は何もしない (削除済み、2026-11-18)。多くは「全体で有効にする環境変数」だけで、既定の経路 (FJ_P3・GR_AUTO・
   GR_RESTART など) や他の試作が使う本体は残した。
-- 飛ばした (12 件、理由は README): NODELP2・DFSPQ (gate2 が残すと決めた)、MC11FIX2 (revisit の次の候補)、ROOT_BASIS_FIX (highsloss の効き目と派生の試作)、
+- 飛ばした (13 件、理由は README): SB_POLY_SCORE (一度消したが、入れ直す候補の sbt と同じ部品に触れうるので戻した)、NODELP2・DFSPQ (gate2 が残すと決めた)、MC11FIX2 (revisit の次の候補)、ROOT_BASIS_FIX (highsloss の効き目と派生の試作)、
   SUBA_RATE・FOCUS (一部の値しか不採用の記録がない)、FACE_SEP (既定の形を選ぶ変数)、SYNTH_CLOCK_FACTOR (再較正のつまみ)、CUTSEL_HIGHS・
   CUTSEL_HIGHS_GUARD (単独の不採用の記録がない・一部が既定)、NODESEL_BANDIT (600 秒で既定より速い面があり不採用と書かれていない)、HNFCUT (HNFPRE と共用)。
+
+
+## 2026-11-18: 支配される 0-1 列の固定を、支配される側から候補を探す形で既定にする (drevmf、採用)
+
+- 既定にした: `ENOMOTO_MIP_DOMCOL`・`ENOMOTO_MIP_DOMCOL_PRED`・`ENOMOTO_MIP_DOMCOL_REV`・`ENOMOTO_MIP_DOMCOL_NOPROBE2` (どれも `=0` で止める)、
+  `ENOMOTO_T_MIP_DOMCOL_MIN_FRAC` の既定 0.1 (`=0` で使わない)。前処理の終わりで支配される 0-1 列を固定し ([`dominated_binary_fixings`])、
+  固定が自由な列の 10% 以上なら前処理をかけ直す (かけ直しではプロービングをしない)。10% に満たない固定は捨てる。
+- 経緯 (analysis/vsscip_slow_20261118/tree2/README.md 1〜4 節、群 2): SCIP の切り分けで rail507・fast0507 (集合被覆) の決め手は
+  presolving/domcol (63019 列中 42278 列を 0.64 秒で固定) だった。当方の DOMCOL(+PRED) は支配する側の最も短い行から相手を探す形で、
+  集合被覆では候補がほとんど出ず 26 列しか固定しなかった。`DOMCOL_REV` は支配される側の「行を助ける向き」の最も短い行から探し、
+  36886 列を 0.35〜0.5 秒で固定する。`NOPROBE2` は固定の後のかけ直しでプロービングをやり直さない (air03 の 2.8 秒)。
+- `MIN_FRAC` 0.1 の理由: drev (REV まで、割合の if なし) の P で、固定の割合が小さい nw04 (3.9%、2.35 倍)・nu25-pr12 (3.6%、1.58 倍)・
+  fiber (2.4%、1.35 倍) が全種で遅かった (少しの固定で根のカットの流れが変わる)。効く rail507・fast0507 (58.5%)・air03 (21%) との間に
+  問題がないので普通の if で分ける。physiciansched6-2 (0.7%) の得 (drev で 0.54 倍) は失う。
+- 根拠 (ビルド 14dbb0121、4 スレッド、domrev/summ_*DREVMF*.txt・summ_S.txt):
+  - M (Mittelmann 48 問 + rail507・fast0507 → 49 問 × 種 1・2、600 秒): **SGM −3.6% (区間 −11.5%〜+3.3%)**、解けた 67 → 74、食い違い 0、crash 0。
+    固定のあった 6 問 SGM 0.811 (rail507 0.29・fast0507 0.78。どちらも既定は 2 種とも時間切れ → 全種で最適 174)、固定 0 列の 43 問 0.997。
+  - P (MIPLIB の 58 問 × 種 1〜3、60 秒): **SGM −0.6% (区間 −4.4%〜+2.3%)**、解けた 133 → 133、食い違い 0。固定あり 7 問 1.063
+    (働くのは air03 だけで 1.12)、固定 0 列 51 問 0.986。
+  - S (害と効きの 10 問 × 種 1〜3): drevmf 全体 0.843、nw04 1.06・nu25-pr12 1.01・fiber 0.97 (drev の害が消えた)、rail507 0.43・fast0507 0.66。
+  - 全種で 1.25 倍を超えて遅い supportcase33 (1.46)・mas76 (1.35) は固定 0 列 (fixcount.txt) で既定と同じ計算の揺れ。drevmf が働く問題で
+    1.25 倍を超える遅れはない。
+  - RSS: fast0507 3771 → 4894 MB (rail507 は 3126 → 2655 MB)。
+- 確かめ: cargo test --lib 409 通過・0 失敗 (既定化した木)、fuzz 7 本 (release019 の fuzz.sh と同じ組、既定) bad 0、被覆型の fuzz
+  (tree2/fuzz_cover.py) 2300 問 bad 0 (試作の段階)。既定で rail507 は 36886 列を固定、nw04 は 3440 列を捨てることを確かめた。

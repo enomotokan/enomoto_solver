@@ -4573,9 +4573,9 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             return Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling });
         }
     }
-    // `ENOMOTO_MIP_DOMCOL_NOPROBE2` (試作): `ENOMOTO_MIP_DOMCOL` の固定の後のかけ直しではプロービングをしない。プロービングは
+    // `ENOMOTO_MIP_DOMCOL_NOPROBE2` (2026-11-18 から既定、`=0` で止める): `ENOMOTO_MIP_DOMCOL` の固定の後のかけ直しではプロービングをしない。プロービングは
     // 固定の前に済んでいて、air03 では 2297 列の固定の後のかけ直しで 2.8 秒のプロービングをやり直し (固定 0)、4.5 → 6.8 秒になっていた
-    let skip_probe2 = DOMCOL_REPRESOLVING.with(|f| f.get()) && env_str!("ENOMOTO_MIP_DOMCOL_NOPROBE2").is_some();
+    let skip_probe2 = DOMCOL_REPRESOLVING.with(|f| f.get()) && env_def!("ENOMOTO_MIP_DOMCOL_NOPROBE2", "1").is_some();
     if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() && !skip_probe2 {
         match probe(&mut prob, verbose, submip) {
             Some(false) => return Some(Presolved::Infeasible),
@@ -4583,17 +4583,17 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             _ => {}
         }
     }
-    // `ENOMOTO_MIP_DOMCOL`: 支配される 0-1 列を固定し ([`dominated_binary_fixings`])、前処理をかけ直す (LP による固定と同じ形、1 回だけ)
-    if env_str!("ENOMOTO_MIP_DOMCOL").is_some() && !submip && !DOMCOL_REPRESOLVING.with(|f| f.get()) {
+    // `ENOMOTO_MIP_DOMCOL` (2026-11-18 から既定、`=0` で止める。docs/improvement_history.md): 支配される 0-1 列を固定し ([`dominated_binary_fixings`])、前処理をかけ直す (LP による固定と同じ形、1 回だけ)
+    if env_def!("ENOMOTO_MIP_DOMCOL", "1").is_some() && !submip && !DOMCOL_REPRESOLVING.with(|f| f.get()) {
         let t0 = std::time::Instant::now();
         let mut fix = dominated_binary_fixings(&prob);
         if verbose {
             eprintln!("MIP: presolve: {} dominated binaries fixed ({:.2}s)", fix.len(), t0.elapsed().as_secs_f64());
         }
-        // `ENOMOTO_T_MIP_DOMCOL_MIN_FRAC` (試作、既定 0 = 使わない): 固定が自由な列のこの割合に満たなければ固定を捨てる。drev の P
+        // `ENOMOTO_T_MIP_DOMCOL_MIN_FRAC` (2026-11-18 から既定 0.1、`=0` で使わない): 固定が自由な列のこの割合に満たなければ固定を捨てる。drev の P
         // (analysis/vsscip_slow_20261118/tree2/README.md 4 節) で遅くなった nw04 (3440 / 87482 列 = 3.9%、2.35 倍)・nu25-pr12 (3.6%、1.58 倍)・
         // fiber (2.4%、1.35 倍) は固定が少なく、効いた rail507・fast0507 (58%)・air03 (21%) と分かれる
-        let min_frac = tunable!("ENOMOTO_T_MIP_DOMCOL_MIN_FRAC", 0.0, f64);
+        let min_frac = tunable!("ENOMOTO_T_MIP_DOMCOL_MIN_FRAC", 0.1, f64);
         if min_frac > 0.0 && !fix.is_empty() {
             let nfree0 = (0..n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count();
             if (fix.len() as f64) < min_frac * nfree0 as f64 {
@@ -8054,7 +8054,7 @@ fn dual_bound_tightening(prob: &mut MipProblem) -> usize {
     count
 }
 
-/// 支配される 0-1 列の固定 (`ENOMOTO_MIP_DOMCOL`、既定では使わない。HiGHS の前処理の "dominated columns"、Gamrath ら 2015):
+/// 支配される 0-1 列の固定 (`ENOMOTO_MIP_DOMCOL`、2026-11-18 から既定 (`=0` で止める)。HiGHS の前処理の "dominated columns"、Gamrath ら 2015):
 /// 0-1 列の文字 (`y = x` か `y = 1 - x`) で考える。文字 y_j・y_k で、費用が `c(y_j) <= c(y_k)`、すべての行で y_j の係数が y_k の
 /// 係数より行を破りにくい (上限のある向きで `a_ij <= a_ik`、下限のある向きで `a_ij >= a_ik`、等式は等しい) とき、y_j は y_k を
 /// 支配する: y_k = 1 の解から y_k を 0 に、y_j を 1 増やすと、行はどれも破れず目的も悪くならない。よって
@@ -8064,7 +8064,7 @@ fn dual_bound_tightening(prob: &mut MipProblem) -> usize {
 /// 固定した列を含む組は使わない (固定は順に、それまでの固定をした問題で正しい。支配と「導ける」は境界を締めても崩れない)。
 /// 調べる組は `ENOMOTO_T_MIP_DOMCOL_MAX_PAIRS` まで (既定 100 万)。固定 (列, 値) を返す。
 fn dominated_binary_fixings(prob: &MipProblem) -> Vec<(usize, f64)> {
-    dominated_binary_fixings_with(prob, env_str!("ENOMOTO_MIP_DOMCOL_PRED").is_some())
+    dominated_binary_fixings_with(prob, env_def!("ENOMOTO_MIP_DOMCOL_PRED", "1").is_some())
 }
 
 /// [`dominated_binary_fixings`] の本体。`pred` は `ENOMOTO_MIP_DOMCOL_PRED` (予測の境界の (c) も使う)。
@@ -8141,7 +8141,7 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
         }
         true
     };
-    // `ENOMOTO_MIP_DOMCOL_PRED`: HiGHS の予測の境界 (Gamrath ら 2015 の定理 3 (vi)) に当たる (c) も使う: y_j が y_k を支配し
+    // `ENOMOTO_MIP_DOMCOL_PRED` (2026-11-18 から既定、`=0` で止める): HiGHS の予測の境界 (Gamrath ら 2015 の定理 3 (vi)) に当たる (c) も使う: y_j が y_k を支配し
     // c(y_k) >= 0 のとき、y_j = 1・y_k = 0 にして、y_k を下げると破れうる行 (y_k の係数が上限側で負・下限側で正) が、ほかの
     // 列の最悪の値でも満たされるなら y_k = 0 にできる (支配の補題で y_j = 1 か y_k = 0 の最適解があり、y_j = 1 の側でも
     // y_k を 0 に下げて行は破れず目的も悪くならない)。physiciansched6-2 には係数も費用も同じ 0-1 列が 3 本ずつの組が 13 あり、
@@ -8247,14 +8247,14 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
             }
         }
     }
-    // `ENOMOTO_MIP_DOMCOL_REV` (試作、`ENOMOTO_MIP_DOMCOL_PRED` と併せて使う): 支配される側 y_k から候補を探す。上の (c) は
+    // `ENOMOTO_MIP_DOMCOL_REV` (2026-11-18 から既定、`=0` で止める。`ENOMOTO_MIP_DOMCOL_PRED` と併せて働く): 支配される側 y_k から候補を探す。上の (c) は
     // 支配する側 y_j の最も短い行から y_k を探すが、y_j が y_k を支配するなら、y_k が行を「助ける」向き (下限側で係数が正、
     // 上限側で負) の行には必ず y_j も (同じ向きにより大きく) 入るので、y_k のそういう行で最も短いものから y_j を探せば漏れがない。
     // 集合被覆 (rail507・fast0507。Σ x ≥ 1 の行だけ) では y_j の列が y_k の列を含むのが支配で、上の探し方では候補がほとんど
     // 出ない (rail507 で 26 本、上限を外しても 9428 本・13 秒。SCIP の domcol は 42278 本・0.6 秒)。
     // 固定は (c) と同じく worst_case_ok (か y_j の上限 1 が行から導ける) のときだけ。y_j に固定済みの列は使わない。
     // 調べる組は `ENOMOTO_T_MIP_DOMCOL_REV_MAX_PAIRS` まで (既定 5000 万)。
-    if pred && env_str!("ENOMOTO_MIP_DOMCOL_REV").is_some() {
+    if pred && env_def!("ENOMOTO_MIP_DOMCOL_REV", "1").is_some() {
         let max_rev = tunable!("ENOMOTO_T_MIP_DOMCOL_REV_MAX_PAIRS", 50_000_000usize, usize);
         let mut rev_pairs = 0usize;
         'rev: for k in 0..n {

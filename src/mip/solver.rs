@@ -16462,8 +16462,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let tighten0 = self.sb_tighten_count;
         // SCIP の relpscost に倣った強分岐 (branch_relpscost.c `branchExecRelpscost`)。
         let hybrid = env_str!("ENOMOTO_MIP_NO_HYBRID_SCORE").is_none();
-        let score_of = |s: &Self, j: usize, v: f64, _z: f64| {
+        // `ENOMOTO_MIP_SB_POLY_SCORE` (試作、既定では使わない): 列が強分岐の折れ線 ([`SbInherit::polys`]) を持てば、折れ線から得る子の
+        // LP の値の下界 (下の子は g_下(⌊v⌋)、上の子は g_上(⌈v⌉)) とノードの値の差を、擬似費用の見積もりの下限として使う
+        // (折れ線の直線は子孫のノードの LP の値の下界なので、子の値の正しい下界)
+        let poly_score = env_str!("ENOMOTO_MIP_SB_POLY_SCORE").is_some();
+        let score_of = |s: &Self, j: usize, v: f64, z: f64| {
             let f = s.bfr(j, v);
+            if poly_score {
+                if let Some((gd, gu)) = s.poly_child_gains(j, v, z) {
+                    let (pd, pu) = (s.pc.cost_down(j) * f, s.pc.cost_up(j) * (1.0 - f));
+                    let (d, u) = (pd.max(gd), pu.max(gu));
+                    return if hybrid { s.pc.hybrid_score_with_gains(j, d, u) } else { d.max(1e-6) * u.max(1e-6) };
+                }
+            }
             if hybrid { s.pc.hybrid_score(j, f) } else { s.pc.score(j, f) }
         };
         // `ENOMOTO_MIP_S4_DEGSCORE` (試作、既定では使わない。analysis/highs_slow_20261106/S4.md): 根以外のノードで LP の双対退化の度合いを
