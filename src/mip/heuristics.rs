@@ -902,7 +902,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !prop_ok && env_str!("ENOMOTO_MIP_DIVE_CONFLICTS").is_some() {
             self.add_conflict();
         }
-        if prop_ok {
+        // 求解の時間の上限 (`deadline`) を過ぎていたら LP を解き始めない。片方の向きの LP が期限で打ち切られると、呼び出し側はもう片方の向きを
+        // 試し、期限の後に LU 分解から始めていた (cryptanalysiskb128n5obj16 の 1 スレッド、行 5.5 万で 1 回 0.5〜1 秒の超過。
+        // analysis/hang_20261117/README.md)。期限を過ぎたときだけ道筋が変わる。`ENOMOTO_MIP_DIVE_NO_DEADLINE` で見ない (切り分け用)
+        let past = env_str!("ENOMOTO_MIP_DIVE_NO_DEADLINE").is_none() && self.deadline.is_some_and(|d| Instant::now() >= d);
+        if prop_ok && !past {
             self.sync_lp();
             let it0 = self.lp.total_iterations();
             let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(1000);
