@@ -97,7 +97,7 @@ thread_local! {
 
 thread_local! {
     /// 試作 `ENOMOTO_MIP_NODELP_PERTURB` (analysis/node_lp_20261106.md): 木のノードの LP を解くあいだだけ、warm start の近道でも費用を
-    /// 摂動する (`ENOMOTO_NODE_PERTURB` と同じ処理)。0 = 使わない (既定)、1 = `ENOMOTO_NODE_PERTURB` と同じ判定 (費用の絶対値の種類が少ない)、
+    /// 摂動する (削除した試作 `ENOMOTO_NODE_PERTURB` と同じ処理)。0 = 使わない (既定)、1 = 費用の絶対値の種類が少ないときだけ ([`node_perturb_criterion`])、
     /// 2 = 判定なしで摂動する
     pub(crate) static NODE_PERTURB_SCOPE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
@@ -4315,7 +4315,7 @@ thread_local! {
     static NODE_PERTURB_CACHE: std::cell::Cell<Option<(u64, usize, bool)>> = const { std::cell::Cell::new(None) };
 }
 
-/// `ENOMOTO_NODE_PERTURB` の判定: 構造列の費用の絶対値の種類の数 (0 を含む) の 4 倍が構造列の数以下か
+/// 費用の摂動の判定 (`NODELP_PERTURB` の `p`): 構造列の費用の絶対値の種類の数 (0 を含む) の 4 倍が構造列の数以下か
 /// (CLP `ClpSimplexDual::perturb` の「number * 4 > numberColumns なら摂動しない」)。行列の識別子 `key` があれば
 /// 同じ識別子の間は結果を使い回す (分枝限定法の LP は行列を作り直すまで費用も同じ)。
 fn node_perturb_criterion(std: &StdForm, key: Option<u64>) -> bool {
@@ -4904,7 +4904,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }
         NODELP_INF3.with(|c| c.set(c3));
     }
-    // `ENOMOTO_NODE_PERTURB` (試作、既定では使わない): 再最適化の近道 (分枝限定法の warm start) でも、主実行不能な行があり、
+    // 試作 `ENOMOTO_MIP_NODELP_PERTURB` の `p`・`P` ([`NODE_PERTURB_SCOPE`]。いつも使う試作 `ENOMOTO_NODE_PERTURB` は 2026-11-18 に削除):
+    // 再最適化の近道 (分枝限定法の warm start) でも、主実行不能な行があり、
     // 構造列の費用の絶対値の種類が少なければ (種類の数 x 4 <= 構造列の数) 費用を摂動する。CLP の双対単体法
     // (ClpSimplexDual.cpp 336-365 の startupSolve: CBC の中では主実行不能なときだけ `perturb()`、6650-6662 の判定) にならう。
     // 費用の種類が少ない問題 (0-1 の組合せ問題など) は双対退化が強く、真の費用のままだと退化ピボットが続く。
@@ -4916,7 +4917,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         && !infeasible_rows.rows.is_empty()
         && {
             let sc = NODE_PERTURB_SCOPE.with(|c| c.get());
-            sc == 2 || ((env_str!("ENOMOTO_NODE_PERTURB").is_some() || sc == 1) && node_perturb_criterion(std, PRICE_KEY.with(|k| k.get())))
+            sc == 2 || (sc == 1 && node_perturb_criterion(std, PRICE_KEY.with(|k| k.get())))
         };
     if node_perturbed {
         if nl_diag {
@@ -8471,15 +8472,6 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
     // 可能になるようにする (cont1 分析の策5 前半)。`ENOMOTO_POLISH_PERTURB_SLACK=1` で旧動作
     // (`super::perturb_costs` をそのまま使い、スラック列も摂動する。A/B 用)。
     let active_cost = if tunable!("ENOMOTO_POLISH_PERTURB_SLACK", 0u8, u8) != 0 { super::perturb_costs(std) } else { dual_active_costs(std) };
-    // 試作 `ENOMOTO_SIMPLEX_POLISH_DSE` (既定では使わない): 仕上げの chuzr を DSE の規則にする
-    // `2`: 引き継いだ重みを捨てて 1 から始める (重みが壊れていることがある: supportcase42 は最大 1e64)
-    let polish_dse_mode = env_str!("ENOMOTO_SIMPLEX_POLISH_DSE").filter(|v| *v != "0");
-    let polish_dse_on = polish_dse_mode.is_some();
-    if polish_dse_mode == Some("2") {
-        if let Some(d) = dse.as_deref_mut() {
-            d.w.iter_mut().for_each(|v| *v = 1.0);
-        }
-    }
 
     let mut lu = lu;
     // 入る列の FTRAN・ピボット行の BTRAN・FT 更新・再分解トリガ (主単体法と共有する部品)。
@@ -8685,19 +8677,11 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
         }
         // chuzr: 重みなしの最大逸脱 (Dantzig) 規則。`infeasible_rows.rows` のみを走査する。
         // 同値のときは小さい行番号、`bland_mode` では常に最小行番号を選ぶ。
-        // 試作 `ENOMOTO_SIMPLEX_POLISH_DSE=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): 引き継いだ DSE 重みが
-        // 有限なら、逸脱の 2 乗 / 重み (主ループと同じ DSE の規則) で選ぶ。重みが未知 (`NaN`) の行がある間は従来の最大逸脱。
         let mut best: Option<(usize, i32, f64)> = None;
         let mut best_key = f64::NEG_INFINITY;
-        let use_w = polish_dse_on && dse.as_deref().is_some_and(|d| d.w.first().is_some_and(|w| w.is_finite()));
         for &i in &infeasible_rows.rows {
             let Some((d_dir, mag)) = row_deviation_plain(std, basis, &x_b, &noise_feasible, i, tol_floor) else { continue };
-            let key = if use_w {
-                let w = dse.as_deref().map_or(1.0, |d| d.weight(i));
-                if w.is_finite() && w > 0.0 { mag * mag / w } else { mag * mag }
-            } else {
-                mag
-            };
+            let key = mag;
             let better = match best {
                 None => true,
                 Some((br, _, _)) => {
