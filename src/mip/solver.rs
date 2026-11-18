@@ -7577,7 +7577,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         pc.col_lo.clone_from(&self.dom.lo);
         pc.col_up.clone_from(&self.dom.up);
         let salt = 0x5EED_0000_0000_0001u64 ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
-        let r = super::feas_fj_lmip_early_salt(&pc, self.params.threads.max(1), cap, self.params.verbose, salt);
+        // 求解の時間の上限を期限として渡す (1 スレッドの手間の上限 (`ENOMOTO_MIP_TICKS` の `f`) でも時間の上限で止まるように。
+        // analysis/hang_20261117/README.md)
+        let tl = self.params.time_limit;
+        let deadline = tl.is_finite().then(|| self.start + std::time::Duration::from_secs_f64(tl.max(0.0)));
+        let r = super::with_presolve_deadline(deadline, || super::feas_fj_lmip_early_salt(&pc, self.params.threads.max(1), cap, self.params.verbose, salt));
         match r {
             Some(x) => self.try_incumbent(x),
             None => false,
