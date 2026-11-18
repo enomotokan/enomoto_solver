@@ -10625,3 +10625,25 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   - RSS: fast0507 3771 → 4894 MB (rail507 は 3126 → 2655 MB)。
 - 確かめ: cargo test --lib 409 通過・0 失敗 (既定化した木)、fuzz 7 本 (release019 の fuzz.sh と同じ組、既定) bad 0、被覆型の fuzz
   (tree2/fuzz_cover.py) 2300 問 bad 0 (試作の段階)。既定で rail507 は 36886 列を固定、nw04 は 3440 列を捨てることを確かめた。
+
+
+## 2026-11-18: 根の並列のサブ MIP の待ちを、根の段の 2 倍で打ち切る ENOMOTO_T_MIP_SUBWAIT=2 を既定にする (採用)
+
+- 既定にした: `ENOMOTO_T_MIP_SUBWAIT` の既定 2 (`=0` で従来どおり使わない。環境変数で上書きできる)。外側の根で主が並列のサブ MIP を
+  全部待つとき、走り始めてから max(`ENOMOTO_T_MIP_SUBWAIT_MIN` (1 秒), 2 × 根の段の秒 ([`subcap_root_secs`])) を過ぎ、直近その秒のうちに
+  外側の上限より良い解を見つけていないサブ MIP を止める。
+- 経緯 (analysis/slow2_20261117/README.md 13〜16 節): unitcal_7 では根の被約費用のサブ MIP が 47〜60 秒・500 ノード何も見つけず、主が
+  40〜75 秒待っていた。群 5 (vsscip_slow_20261118) は neos-2746589-doon の 4 スレッドが根で進まない原因を同じ待ちと特定した
+  (SUBWAIT=2 で 240 秒のノード 5 → 1100)。
+- 根拠 (ビルド eb8a24272、4 スレッド、analysis/slow2_20261117/summ_PSW2.txt・summ_MSW2.txt):
+  - P (MIPLIB の 58 問 × 種 1〜3、60 秒): **SGM +2.1% (区間 −1.7%〜+7.0%)**、解けた 135 → 134、食い違い 0、crash 0。
+  - M (Mittelmann 48 問 + neos-2746589-doon → 49 問 × 種 1・2、600 秒): **SGM +1.5% (区間 −5.8%〜+9.7%)**、解けた 68 → 72、食い違い 0、crash 0。
+  - 打ち切りが働くのは M の 49 問中 5 問 (swprobe.py、種 1: csched008・neos-1456979・doon・neos-662469・ran14x18-disj-8)。止めるのは
+    その時点で解のないサブ MIP だけ。働かない問題は既定と同じ計算。
+  - 全種で 1.25 倍を超えて遅い noswot (P 1.84)・neos-1456979 (M 2.37)・neos-787933 (M 1.58)、M で 1.30 倍の CMS750_4・pg5_34 は、
+    ログつきの実行で打ち切りが働かず (neos-1456979 は働いても def の同じサブ MIP が解なしで終わる)、4 スレッドの揺れ
+    (noswot は種 4〜13 で sw2/def 0.90)。
+  - 効いた: unitcal_7 (種 1 で sw2 だけ 578 秒で解けた)・neos-662469 (種 2 で sw2 だけ解けた) の解けた数、doon の木に入る時刻 210 → 61〜80 秒
+    (600 秒では解なしのまま)。害の実例はない。
+- 確かめ: cargo test --release --lib 409 通過・0 失敗 (既定化した木)、fuzz 7 本 (release019 の fuzz.sh と同じ組、既定、
+  analysis/slow2_20261117/fuzz.sh・fuzz_res.txt) bad 0。
