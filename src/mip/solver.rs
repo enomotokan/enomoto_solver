@@ -17376,7 +17376,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_G5FIN` (既定では使わない。analysis/vsscip_slow_20261118/g5/README.md): 時間切れで終わるときは、返すノードを主が下界を
             // 出すのにしか使わないので、引き継ぎの鎖 (`TC` の `s`) を平らに展開しない (並びだけ)。n3div36 (4 スレッド・400 秒、heaptrack) では
             // ヒープの最大 3.08 GB のうち 2.38 GB がここの展開だった
-            let thin = status == MipStatus::TimeLimit && env_str!("ENOMOTO_MIP_G5FIN").is_some_and(|v| v != "0");
+            // 主が木を止める合図 (`pool.stop`: 最適の確定・木の中の再スタートなど) でも `TimeLimit` で来るので、本当に期限を過ぎたときだけにする
+            // (木の中の再スタートは返したノードの変更 (引き継ぎの固定を含む) から共通の境界を作る。unitcal_7 で G5FIN だけ 2 種とも遅かった)
+            let thin = status == MipStatus::TimeLimit
+                && self.deadline.is_some_and(|d| Instant::now() >= d)
+                && env_str!("ENOMOTO_MIP_G5FIN").is_some_and(|v| v != "0");
             let of = |n: &OpenNode| if thin { SnapNode { changes: n.changes.clone(), ..SnapNode::of_thin(n) } } else { SnapNode::of(n) };
             let mut back: Vec<SnapNode> = self.queue.iter().map(of).collect();
             if let Some(n) = current {
