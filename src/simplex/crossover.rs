@@ -2006,6 +2006,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         (ord, big)
     };
     let mut sel = BasisSelector::new(m, n);
+    // 試作 `ENOMOTO_IPM_G5CANCEL` (既定では使わない): 基底の選択の候補のループでも 256 列ごとに止めの合図を見る ([`g5cancel_tick`])。
+    // highschool1-aigio (HANG) では、根の LP の同時実行で負けた側の `BasisSelector::try_add` が期限の後も回り続けた
+    let mut g5k = 0usize;
     if tunable!("ENOMOTO_T_XO_LI_MARKOWITZ", 1u8, u8) != 0 {
         // 行の非零の数は、基底の候補 (B と D) の列だけで数える (行列全体で数えると、候補にない列の非零で目安が
         // ずれてフィルが増える: qap15 で基底の選択が 22.7 秒、候補の列だけの小さな問題では 0.17 秒)。
@@ -2033,23 +2036,6 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // ただしマッチングの順の最大の強連結成分が `ENOMOTO_T_XO_LI_MATCH_MAX_BLOCK` (既定 1000) 列を超えるなら、ブロック上三角に
     // ならず (成分の中は従来どおり消去する) 選んだ基底も悪くなるので、従来の順をそのまま続ける (cont11: 最大の成分 29,434 列、
     // 超基底が 19 → 112 本に増え、クロスオーバーが 900 秒で終わらなかった。rmine15 は 8 列)。
-    // 試作 `ENOMOTO_IPM_G5CANCEL` (群 5、[`crate::interior_point`] の正規方程式・拡大系の組み立てと同じ合図): 基底の選び直し (列を
-    // 1 本ずつ試す [`BasisSelector::try_add`]) の途中でも止めの合図 ([`crate::cancel::is_cancelled`]) を見て、立っていれば
-    // やめる (`None`、1 列の消去が重いので毎列見る)。highschool1-aigio (列 32 万) の根の LP の競争で、二段解法の側が期限で止まった後も内点法 + クロスオーバーの側が
-    // ここを数秒以上回り続け、CPU を 1 本使っていた (analysis/hang_20261117/README.md の 13 節)
-    let g5 = env_str!("ENOMOTO_IPM_G5CANCEL").is_some_and(|v| !v.is_empty() && v != "0");
-    let mut g5_n = 0usize;
-    macro_rules! g5_tick {
-        () => {
-            g5_n += 1;
-            if g5 && crate::cancel::is_cancelled() {
-                if env_str!("ENOMOTO_MIP_LOG").is_some() {
-                    eprintln!("CROSSOVER: basis selection stopped by the cancel signal after {g5_n} columns (ENOMOTO_IPM_G5CANCEL, {:.2}s)", t0.elapsed().as_secs_f64());
-                }
-                return None;
-            }
-        };
-    }
     let match_min_m = tunable!("ENOMOTO_T_XO_LI_MATCH_MIN_M", 50_000usize, usize);
     let match_max_block = tunable!("ENOMOTO_T_XO_LI_MATCH_MAX_BLOCK", 1000usize, usize);
     let mut li_match_ok = match_min_m > 0 && m >= match_min_m && cand_d.is_empty();
@@ -2059,6 +2045,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         if sel.full() {
             break;
         }
+        if g5cancel_tick(&mut g5k) {
+            return None;
+        }
         if li_match_ok && sel.stat[1] as f64 > elim_budget {
             let (ord, big) = matching_order();
             if big <= match_max_block {
@@ -2067,7 +2056,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             }
             li_match_ok = false;
         }
-        if { g5_tick!(); sel.try_add(j, col(std, j)) } {
+        if sel.try_add(j, col(std, j)) {
             st.li_from_b += 1;
         }
     }
@@ -2088,7 +2077,10 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 }
             }
             for i in 0..m {
-                if !matched[i] && { g5_tick!(); sel.try_add(n_orig + i, col(std, n_orig + i)) } {
+                if g5cancel_tick(&mut g5k) {
+                    return None;
+                }
+                if !matched[i] && sel.try_add(n_orig + i, col(std, n_orig + i)) {
                     st.li_slack += 1;
                 }
             }
@@ -2097,8 +2089,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             if sel.full() {
                 break;
             }
+            if g5cancel_tick(&mut g5k) {
+                return None;
+            }
             sel.pref_row = pref;
-            if { g5_tick!(); sel.try_add(j, col(std, j)) } {
+            if sel.try_add(j, col(std, j)) {
                 st.li_from_b += 1;
             }
         }
@@ -2121,7 +2116,10 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             if sel.full() {
                 break;
             }
-            if { g5_tick!(); sel.try_add(j, col(std, j)) } {
+            if g5cancel_tick(&mut g5k) {
+                return None;
+            }
+            if sel.try_add(j, col(std, j)) {
                 if j >= n_orig {
                     st.li_slack += 1;
                 } else {
@@ -2134,9 +2132,12 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         if sel.full() {
             break;
         }
+        if g5cancel_tick(&mut g5k) {
+            return None;
+        }
         if !sel.row_pivoted(i) {
             let j = n_orig + i;
-            if !sel.is_chosen[j] && { g5_tick!(); sel.try_add(j, col(std, j)) } {
+            if !sel.is_chosen[j] && sel.try_add(j, col(std, j)) {
                 st.li_slack += 1;
             }
         }
@@ -4282,6 +4283,13 @@ fn nearest_bound(std: &StdForm, j: usize, v: f64) -> NbStatus {
 
 /// 優先順に列を受け取り、一次独立なら基底に加える左から順の疎 LU (Gilbert–Peierls)。
 /// `L` の列 `k` はピボット行 `piv[k]` と、受理時点の未ピボット行での乗数を持つ。
+/// 試作 `ENOMOTO_IPM_G5CANCEL` (src/interior_point/kkt.rs と同じ環境変数): `k` を数え、256 回ごとに止めの合図
+/// ([`crate::cancel::is_cancelled`]) を見る。立っていれば `true` (呼び手はクロスオーバーを諦める)
+fn g5cancel_tick(k: &mut usize) -> bool {
+    *k += 1;
+    *k % 256 == 0 && env_str!("ENOMOTO_IPM_G5CANCEL").is_some_and(|v| !v.is_empty() && v != "0") && crate::cancel::is_cancelled()
+}
+
 struct BasisSelector {
     m: usize,
     /// しきい値つきの部分ピボットの比 ([`prm::LI_PIV_REL`])。
