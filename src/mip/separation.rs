@@ -7620,11 +7620,11 @@ fn finish_cut(
         // 診断 (デバッグ解 `ENOMOTO_MIP_DEBUG_SOL` があるとき、analysis/slowm_20261119): 締め付けの前は満たし後で破るなら列・係数・境界を出す
         let dbg_before = super::solver::DEBUG_SOL.with(|d| d.borrow().as_ref().map(|xd| (xd.clone(), coefs.clone(), rhs)));
         if fin && delta > 1e-6 * (1.0 + rhs.abs()) {
-            // 直し `ENOMOTO_MIP_TIGHTEN_INTBOUND` (analysis/slowm_20261119。`=1` で使う、既定では使わない): 締め付けの正しさは
+            // 直し `ENOMOTO_MIP_TIGHTEN_INTBOUND` (analysis/slowm_20261119。2026-11-19 から既定で使う、`=0` で以前の動き): 締め付けの正しさは
             // 「x_j がその境界でなければ境界から 1 以上離れる」ことに頼るので、使う境界 (c > 0 なら上限、c < 0 なら下限) が整数のときだけ締める。
             // カットの整数列 (`cut_int`) は暗黙の整数の連続列を含み、その境界は丸められていないことがある (fuzz の seed 3103: 列 7 の下限 0.532 で
             // 締めたカットが最適解を切り、−10.95 を最適と返していた。正しくは −14)
-            let intb = env_str!("ENOMOTO_MIP_TIGHTEN_INTBOUND").is_some_and(|v| v != "0");
+            let intb = env_def!("ENOMOTO_MIP_TIGHTEN_INTBOUND", "1").is_some();
             let integral = |b: f64| (b - b.round()).abs() <= 1e-9;
             for (j, c) in coefs.iter_mut() {
                 if intb && !integral(if *c > 0.0 { up[*j] } else { lo[*j] }) {
