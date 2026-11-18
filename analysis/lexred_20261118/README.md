@@ -33,8 +33,36 @@
 `fuzz_of.py` (orbitope・カットなし 1000 問、orbitope なし 500 問、既定 500 問)、`fuzz_symdyn.py` (orbitope・カット・再スタートなし 400 問、既定 400 問)、
 `mip_fuzz_symmetric.py` (orbitope なし 300 問) を 1・4 スレッドで。結果は `fuzz_<名前>.txt`。
 
-(結果は下に足す)
+直したビルド (c96ec3e54 相当) で、4 設定とも全部 bad 0 (not_solved も 0):
+
+| 設定 | fuzz_of (1000+500+500) × 1・4 スレッド | fuzz_symdyn (400+400) × 1・4 | mip_fuzz_symmetric 300 × 1・4 |
+|---|---|---|---|
+| `SYMDYN=f` (orbital fixing + LexRed) | 0 | 0 | 0 |
+| `SYMDYN=1` (LexRed だけ) | 0 | 0 | 0 |
+| `SYMDYN=1o` (LexRed + 軌道の比べ) | 0 | 0 | 0 |
+| 既定 (orbital fixing だけ) | 0 | 0 | 0 |
+
+1 設定あたり 6200 問。直す前のビルドの `SYMDYN=1` では fuzz_symdyn の既定の形で not_solved が 1・2 件 (種 1013・1082、上の OBJPROBE の件)。
+cargo test (既定): 422 通過・0 失敗・19 無視。fuzz 7 本 (analysis/wrong_widden_20261117/fuzz.sh、既定): すべて bad 0。
+
+## 速さ
+
+直す前の f と既定の比べ (analysis/wrong_widden_20261117 の summ_SP.txt・summ_SM.txt、ビルド c6ee1f3ef):
+SP (P の生成元のある 12 問 × 種 1〜4、60 秒) symf/def −5.0% [−12.4%, +1.8%]、SM (M の 8 問 × 種 1・2、600 秒) +1.0% [−12.1%, +19.9%]。
+直した f はノードを刈りすぎなくなる分わずかに遅くなりうるので、既定に戻すなら c96ec3e54 以降で SP・SM を取り直す。
 
 ## ファイル
 
 - `fuzz_lex.sh`: 上の fuzz 群。`ofmps.py`: fuzz_of の 1 問を MPS に。`verify_gens.py`: DEBUG_DUMP_SYMGRAPH の生成元が問題の自己同型かを確かめる。
+
+## 直した f の速さの取り直し (ビルド b22b7e7a8、`summ_SP_new.txt`・`summ_SM_new.txt` は analysis/wrong_widden_20261117/)
+
+| 組 | 解けた数 def / symf | 食い違い | symf / def の SGM [95%] | 全種で 1.25 倍超遅い問題 |
+|---|---|---|---|---|
+| SP (P の生成元のある 12 問 × 種 1〜4、60 秒) | 36 / 36 | 0 | −4.3% [−9.6%, −0.2%] | なし (neos5 0.78 で速い) |
+| SM (M の 8 問 × 種 1・2、600 秒) | 13 / 13 | 0 | +8.6% [−8.9%, +27.3%] | neos-3627168-kasai 1.58 [1.37, 1.81] |
+
+- SM では mushroom-best 1.28・rococoC10-001000 1.16 も f が遅く、速いのは neos-933966 0.59 (1 種) だけ。
+- 判断の材料: f は P の対称性のある問題で 4% 速いが、M では neos-3627168-kasai が全種で 1.25 倍超遅く、採用条件 (SGM 上限 ≲ +5%・全種で
+  1.25 倍超なし) を満たさない。既定は今の「SYMDYN なし (orbital fixing だけ)」のままとし、f は直した形で環境変数から選べるようにしておくのを勧める。
+  LexRed が効く成分 (neos5・qiu) だけで使う形は、kasai などで遅くなる理由 (LexRed の締めが LP・分枝の道筋を変える) を見てからの別の試作。

@@ -842,25 +842,6 @@ fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut
     Some(cut)
 }
 
-/// 試作 `ENOMOTO_MIP_REDSPLIT` ([`super::redsplit`]): δ の候補を与えた CMIR。単体表の行 (基底の整数列の係数が整数) では
-/// δ = 1/k が「行を k 倍してから GMI」(k-cuts) に当たる。効き目の最も大きい δ で [`cmir_build`] と同じく作る
-pub fn cmir_with_deltas(vars: &CutVars, base: &[(usize, f64)], rhs: f64, deltas: &[f64]) -> Option<RawCut> {
-    let (terms, beta) = substitute(vars, base, rhs)?;
-    if !terms.iter().any(|t| t.int) {
-        return None;
-    }
-    let mut best: Option<(f64, f64)> = None;
-    for &delta in deltas {
-        if let Some(eff) = mir_efficacy(&terms, beta, delta) {
-            if best.is_none_or(|(_, e)| eff > e) {
-                best = Some((delta, eff));
-            }
-        }
-    }
-    let (delta, eff) = best?;
-    cmir_build(vars, terms, beta, delta, eff)
-}
-
 /// 試作 `ENOMOTO_MIP_HNFCUT` ([`super::hnfcut`]): 置き換えた項のうち、単純な上下限で置き換えた整数列で合同式 `x = r + g z` の
 /// あるものを `z` の項にする (係数 `a g`、右辺から定数を引く)。変えた項がなければ `None`。
 /// `v = l + y` (`y = x - l`) なら `y = g (z - lz) + (r + g lz - l)`、`v = u - y` (`y = u - x`) なら `y = g (uz - z) + (u - r - g uz)`。
