@@ -33,6 +33,7 @@ mod subb;
 pub(crate) mod sympre;
 mod sympre0;
 pub(crate) mod heur_subfix;
+pub(crate) mod condrev;
 pub(crate) mod heur_scip;
 pub(crate) mod rootlp3;
 pub(crate) mod xolazy;
@@ -1288,6 +1289,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         ENUM_IDLE.with(|f| f.set(false));
         subb::reset();
         heur_subfix::reset();
+        condrev::decide(p, params.verbose);
     }
     if outer {
         ORBITOPES.with(|t| *t.borrow_mut() = None);
