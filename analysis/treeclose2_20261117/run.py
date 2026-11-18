@@ -26,6 +26,12 @@ CFGS = {
     # (2) ノードごとの記録 (1 スレッド = 木 1 本で並べる)。当方は ENODE・EBR、HiGHS は HNODE・HBR の行
     "highs_cut_t1_tl": (True, {"HIGHS_TREE_LOG": "1"}, "1"),
     "highs_cut_t1_norst": (True, {"HIGHS_TREE_LOG": "1", "ENOMOTO_BENCH_HIGHS_OPT": "mip_allow_restart=false"}, "1"),
+    # 同じ形で、ノードの行に固まった整数列の数 (nfix) を足したビルドで取り直したもの
+    "highs_cut_t1_norst_nf": (True, {"HIGHS_TREE_LOG": "1", "ENOMOTO_BENCH_HIGHS_OPT": "mip_allow_restart=false"}, "1"),
+    "ours_cut_t1_tl_nf": (False, {"ENOMOTO_MIP_TREE_LOG": "1"}, "1"),
+    # 潜る子の選び方: HiGHS の形 (推論の平均 / 擬似費用) と、常に上の子
+    "ours_cut_t1_chh": (False, {"ENOMOTO_MIP_TREE_LOG": "1", "ENOMOTO_MIP_CHILD_HIGHS": "1"}, "1"),
+    "ours_cut_t1_chup": (False, {"ENOMOTO_MIP_TREE_LOG": "1", "ENOMOTO_MIP_CHILD_HIGHS": "up"}, "1"),
     "ours_cut_t1_tl": (False, {"ENOMOTO_MIP_TREE_LOG": "1", "ENOMOTO_MIP_CONFLICT_LEV_DIAG": "1"}, "1"),
 }
 OUT = D / "res.jsonl"; LOGS = D / "logs"; LOGS.mkdir(exist_ok=True)
