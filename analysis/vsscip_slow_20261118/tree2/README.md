@@ -119,3 +119,12 @@ y_j も入る)。固定の条件は (c) と同じ (worst_case_ok か y_j の上�
 - `ENOMOTO_MIP_NO_ZEROHALF=0` で根 **412.91** (SCIP 411.05、zero-half を切った SCIP 408.79)。伸び 6.13 のうち zerohalf 83%。根の時間 15.1 → 20.0 秒。
 - 既存の試作 `ENOMOTO_MIP_CUTMIX=z` (全部整数で係数が小さい行の割合 `intsmall` が 0.5 以上の問題でだけ zero-half) は seymour (intsmall 1.0) で入る。
   58 問・Mittelmann では測られていない (analysis/cutmix_20261111.md)。
+- `ENOMOTO_MIP_CUTMIX=z` で seymour (4 スレッド・600 秒・種 1): 時間切れで下界 **416.0**・暫定解 424・33946 ノード、根 412.91
+  (既定は下界 412.0・425・83648 ノード、SCIP は 600 秒で 416.69・424)。
+
+## 8. drev の M・P の差のうち、固定 0 の問題
+
+drev で差の出た問題の固定の数 (1 スレッド、前処理のログ): neos-1456979・supportcase40・snp-02-004-104・rococoC10-001000・neos5・supportcase33・
+neos-933966・tbfp-network・CMS750_4・ran14x18-disj-8・net12 は **0 列** (domcol の探索 0.00〜0.15 秒だけ)。mzzv42z 133 / 11717 (1.1%)、
+satellites2-60-fs 1200 / 34706 (3.5%)。固定 0 の問題では問題は既定と同じで、差は 4 スレッドの流れのゆれ (neos-1456979 の時間切れの暫定解
+3 種とも悪い・supportcase40 の種 1 で悪く種 2 で良いなど) とみる。drevmf (10% 未満は捨てる) では mzzv42z・satellites2-60-fs も既定と同じ問題になる。
