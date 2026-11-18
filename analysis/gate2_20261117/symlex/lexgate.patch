@@ -1,0 +1,106 @@
+diff --git a/src/mip/mod.rs b/src/mip/mod.rs
+index 6eae9689e..4e741bbec 100644
+--- a/src/mip/mod.rs
++++ b/src/mip/mod.rs
+@@ -2601,6 +2601,90 @@ pub(crate) fn sym_of() -> bool {
+     env_str!("ENOMOTO_MIP_NO_SYM_OF").is_none()
+ }
+ 
++/// 試作 `ENOMOTO_MIP_SYM_LEXGATE` の、最初の求解で選んだ扱い (真 = lex-leader の行)。再スタートの後・サブ MIP は引き継ぐ
++static SYM_LEXGATE_LEX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++
++/// 試作 `ENOMOTO_MIP_SYM_LEXGATE` (gate2 の候補 7、既定では使わない): 既定の orbital fixing (+ LexRed、[`sym_of`]) の代わりに
++/// lex-leader の行 (`x_i - x_k >= 0`、`ENOMOTO_MIP_NO_SYM_OF` と同じ) を使うかを、問題の特徴の連続関数 (シグモイド) で決める。
++/// lex-leader の行は根の LP (とカット) を強めるが LP を重くし、ヒューリスティクスの解を捨てさせる。orbital fixing は木の中でしか
++/// 効かず、分枝で 1 にした列を動かす生成元は使えなくなる (動かす列が多い生成元ほど早く使えなくなる、qiu)。
++/// 値: `diag` = 特徴を出すだけ (扱いは既定のまま)、`lex` = 常に行 (比べ用)、`1` = 点数 s のシグモイド f = 1/(1+e^{-A(s-B)}) が
++/// 0.5 以上なら行 (`ENOMOTO_T_MIP_SYM_LEXGATE_A`・`_B`)。`restart_or_sub` なら最初の求解の選びを引き継ぐ
++fn sym_lexgate(p: &MipProblem, sym: &symmetry::Symmetry, used: &[bool], in_orb: &[bool], orbs: &[symmetry::Orbitope], restart_or_sub: bool, verbose: bool) -> bool {
++    let Some(mode) = env_str!("ENOMOTO_MIP_SYM_LEXGATE") else { return false };
++    if restart_or_sub {
++        return mode != "diag" && SYM_LEXGATE_LEX.load(std::sync::atomic::Ordering::Relaxed);
++    }
++    // orbital fixing に回る生成元 (オービトープの生成元が動かす列を動かさないもの、add_symmetry_rows と同じ)
++    let mut orb_moved = in_orb.to_vec();
++    for o in orbs {
++        for (_, _, perm) in &o.swaps {
++            for (j, &t) in perm.iter().enumerate() {
++                if t != j {
++                    orb_moved[j] = true;
++                }
++            }
++        }
++    }
++    let gens = symmetry::lex_leader_generators_except(sym, used, &orb_moved);
++    if gens.is_empty() {
++        SYM_LEXGATE_LEX.store(false, std::sync::atomic::Ordering::Relaxed);
++        return false;
++    }
++    let pairs = symmetry::lex_leader_pairs_except(sym, used, in_orb).len();
++    let n = p.n;
++    let is_bin = |j: usize| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0 && p.col_lo[j] < p.col_up[j];
++    let nbin = (0..n).filter(|&j| is_bin(j)).count();
++    let mut moved = vec![false; n];
++    let mut sup_sum = 0usize;
++    let mut supb_sum = 0usize;
++    for g in &gens {
++        for j in 0..n {
++            if g[j] != j {
++                moved[j] = true;
++                sup_sum += 1;
++                supb_sum += is_bin(j) as usize;
++            }
++        }
++    }
++    let mv = moved.iter().filter(|&&b| b).count();
++    let mvb = (0..n).filter(|&j| moved[j] && is_bin(j)).count();
++    let mvc = (0..n).filter(|&j| moved[j] && !p.is_int[j]).count();
++    let mvobj = (0..n).filter(|&j| moved[j] && p.cost[j] != 0.0).count();
++    let k = gens.len() as f64;
++    // 生成元 1 本が動かす 0-1 列の、動く 0-1 列に占める割合の平均 (大きいほど、1 本の上向きの分枝で多くの生成元が使えなくなる)
++    let supb_frac = if mvb > 0 { supb_sum as f64 / k / mvb as f64 } else { 0.0 };
++    let sup_frac = if mv > 0 { sup_sum as f64 / k / mv as f64 } else { 0.0 };
++    let feats = [
++        ("gens", k),
++        ("pairs", pairs as f64),
++        ("pairs_per_row", pairs as f64 / p.m.max(1) as f64),
++        ("moved", mv as f64),
++        ("moved_frac", mv as f64 / n.max(1) as f64),
++        ("moved_bin_frac", mvb as f64 / nbin.max(1) as f64),
++        ("moved_cont_frac", mvc as f64 / mv.max(1) as f64),
++        ("moved_obj_frac", mvobj as f64 / mv.max(1) as f64),
++        ("sup_frac", sup_frac),
++        ("supb_frac", supb_frac),
++    ];
++    // 点数 (仮): 生成元 1 本が動かす割合 (orbital fixing が早く使えなくなる) が大きく、行の数が少ないほど行の側
++    let s = supb_frac.max(sup_frac) - tunable!("ENOMOTO_T_MIP_SYM_LEXGATE_W", 0.0, f64) * (1.0 + pairs as f64).ln() / (1.0 + p.m as f64).ln().max(1.0);
++    let a = tunable!("ENOMOTO_T_MIP_SYM_LEXGATE_A", 10.0, f64);
++    let b = tunable!("ENOMOTO_T_MIP_SYM_LEXGATE_B", 0.5, f64);
++    let f = 1.0 / (1.0 + (-a * (s - b)).exp());
++    let lex = match mode {
++        "diag" => false,
++        "lex" => true,
++        _ => f >= 0.5,
++    };
++    SYM_LEXGATE_LEX.store(lex, std::sync::atomic::Ordering::Relaxed);
++    if verbose {
++        let fs: Vec<String> = feats.iter().map(|(name, v)| format!("{name} {v:.4}")).collect();
++        eprintln!("MIP: symmetry: LEXGATE {} (score {s:.4}, sigmoid {f:.4}, {})", if lex { "lex-leader rows" } else { "orbital fixing" }, fs.join(", "));
++    }
++    lex
++}
++
+ /// [`sym_of`] で、再スタートの後の問題 `p` で前の求解の生成元を確かめ直し、成り立つものだけを残す。
+ /// `ENOMOTO_MIP_HO6_SYMRESTART` (試作): 再スタートの後に対称性を探し直すか。それまでの段で対称性 (orbital fixing の生成元・
+ /// lex-leader の生成元・オービトープ) が 1 つも見つかっていないときだけ
+@@ -3159,7 +3243,9 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
+     // 試作 `ENOMOTO_MIP_SYM_SST` ([`symmetry::sst_pairs_except`]): orbital fixing の代わりに Schreier-Sims の表のカットの行を足す
+     // (SCIP 10 は fhnw-binpack4-4 をこれで 10 秒で実行不能と示す。analysis/hang_20261117/README.md)。サブ MIP では使わない
+     let sst = sym_sst() && !in_sub;
+-    let of = sym_of() && !sst;
++    // 試作 `ENOMOTO_MIP_SYM_LEXGATE` (gate2 の候補 7、analysis/gate2_20261117/symlex): 問題の特徴から、orbital fixing (+ LexRed) の代わりに
++    // 以前の lex-leader の行を使うかを決める ([`sym_lexgate`])。サブ MIP・再スタートの後の探し直しでは決めず、最初の求解の選びを引き継ぐ
++    let of = sym_of() && !sst && !sym_lexgate(&prob, &sym, &used, &in_orb, &orbs, in_sub || restart, verbose);
+     let pairs = if of {
+         Vec::new()
+     } else if sst {
