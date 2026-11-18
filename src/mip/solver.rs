@@ -218,6 +218,24 @@ pub(crate) fn robust(c: char) -> bool {
     env_def!("ENOMOTO_MIP_ROBUST", "pgq").is_some_and(|v| v.contains(c))
 }
 
+/// 試作 `ENOMOTO_MIP_S3GAP=<g>` (既定では使わない。analysis/vsscip_slow_20261118/small3/): 外側の根で暫定解があり、根の下界との
+/// 相対の間隙 (|暫定解| と 1 の大きい方で割る) が g 未満なら、重い根のヒューリスティクス (RENS・RINS・ダイビングなど) を回さず、
+/// その間隙を返す。exp-1-500-5-5 は 3.1 秒で最適解 (間隙 8.8e-4) が出た後に RENS 2.2 秒・RINS 1.2 秒を回して何も見つけず、
+/// その後の再スタートで決着する
+fn s3_smallgap_skip<L: MipLp>(s: &Solver<'_, L>, root_obj: f64, name: &str) -> Option<f64> {
+    if s.params.submip || !(name == "RENS" || name.starts_with("RENS (") || rootcap_heavy(name)) {
+        return None;
+    }
+    let g = tunable!("ENOMOTO_MIP_S3GAP", 0.0, f64);
+    if g <= 0.0 {
+        return None;
+    }
+    let (z, _) = s.incumbent.as_ref()?;
+    let lb = s.root_bound_now(root_obj);
+    let rel = (z - lb).max(0.0) / z.abs().max(1.0);
+    (rel < g).then_some(rel)
+}
+
 fn light_root_heur(name: &str) -> bool {
     matches!(name, "trivial" | "simple rounding" | "ZI round" | "randomized rounding" | "shift-and-propagate")
 }
@@ -426,7 +444,7 @@ thread_local! {
     /// 裏のカットの写しの根の LP に上限・下限の置き場所も渡す
     static BG_ROOT_NB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 試作 `ENOMOTO_MIP_TAB_HIGHS_SIG`: 裏のカットの写しに渡す、主が決めた tableau の行の選び方 ([`Solver::tab_sig`]。0 なら写しが自分で決める)。
-    /// 写しが別に決めて主と違う選び方になると、p0201 で最適解を失った (種 5 など 40 回中 13 回、主の orbitope の固定が最後の像を消す。
+    /// 写しが別に決めて主と違う選び方になると、p0201 で最適解を失った (種 5 など 40 回中 13 回、本体は対称性の固定 (SYMDYN=f) の側。
     /// analysis/gate2_20261117/tab/README.md 6 節)
     pub(super) static BG_TAB_SIG: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     pub(super) static CUT_JOB: std::cell::RefCell<Option<std::sync::Arc<CutJob>>> = const { std::cell::RefCell::new(None) };
@@ -2165,6 +2183,25 @@ fn flat_changes(n: &OpenNode) -> Vec<BoundChange> {
     v
 }
 
+/// 試作 `ENOMOTO_MIP_G5INH=<文字>` (既定では使わない。analysis/vsscip_slow_20261118/g5/README.md): `TC` の引き継ぎの鎖の持ち物を抑える。
+/// - `p`: 共有の待ち行列へ出すノード ([`SnapNode`]) には鎖の固定を付けない (並びだけ。落とすと定義域が広いだけで正しさは変わらない)
+/// - `c`: 鎖の固定の数が max(64, `ENOMOTO_T_MIP_G5INH_FRAC` (既定 0.01) x 列の数) を超えたノードでは、新しい引き継ぎの固定を鎖に足さない
+///
+/// n3div36 (4 スレッド・300 秒) は既定で子の変更の並びが平均 562 本 (深さ 90)、共有の待ち行列の変更が 254 MB、最大 RSS 3453 MB、`TC=0` は 1307 MB
+fn g5inh(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_G5INH").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
+/// 共有の待ち行列へ出すノードの変更の並び ([`flat_changes`]、`G5INH` の `p` なら鎖を除く)
+fn snap_changes(n: &OpenNode) -> Vec<BoundChange> {
+    if g5inh('p') {
+        n.changes.clone()
+    } else {
+        flat_changes(n)
+    }
+}
+
 /// 試作 `ENOMOTO_MIP_NODESEL_BANDIT` (既定では使わない、analysis/treeclose_20261114.md 9.12 節): ノードの選び方 (潜り方) を、区間ごとに 2 本の腕から
 /// 割引付き UCB で選ぶ。腕 0 = 既定 (`PLUNGE_QUOT`・`SIBLING_QUOT` は既定の値)、腕 1 = 深さ優先寄り (d3: 潜りを子の下界で打ち切らず、
 /// 兄弟へも下界の条件なしで戻る。潜りのノード数の上限は既定のまま。兄弟へ戻ったときも潜りの始めとして数える (`TC` の `k`))。
@@ -2494,7 +2531,7 @@ fn full_changes(n: &OpenNode) -> std::borrow::Cow<'_, [BoundChange]> {
 
 impl SnapNode {
     fn of(n: &OpenNode) -> Self {
-        SnapNode { changes: flat_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None }
+        SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None }
     }
     /// [`Self::of`] に、親の LP の基底の列と最初の `m` 行 (元の行) を付ける。
     fn of_with_basis(n: &OpenNode, m: usize) -> Self {
@@ -3534,6 +3571,9 @@ pub(super) static LPINF_RETRY: [std::sync::atomic::AtomicU64; 5] = [const { std:
 const LPINF_HIST_N: usize = 11;
 pub(super) static LPINF_HIST: [std::sync::atomic::AtomicU64; LPINF_HIST_N] = [const { std::sync::atomic::AtomicU64::new(0) }; LPINF_HIST_N];
 
+/// ノードの整数に見える LP 解が定義域の境界から外れていて、LP の境界を合わせて解き直した数 (全スレッド、診断)
+pub(super) static STALE_LP_BOUNDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub(super) fn lpinf_count(k: usize) {
     LPINF_RETRY[k].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
@@ -3591,6 +3631,17 @@ pub(super) fn lp_farkas_ratio<L: MipLp>(lp: &L, n: usize) -> f64 {
     gap / (ysum + zsum)
 }
 
+
+/// LexRed と併用する orbital fixing (`ENOMOTO_MIP_SYMDYN=f`、既定) を、分枝で 0 にした列から始まる固定だけに絞るか (既定で絞る。
+/// `ENOMOTO_MIP_OF_ANY_FIXED` で以前の動き = どの固定された列からも軌道を固定する)。[`Solver::orbital_fixing`] 参照
+fn of_branch_only() -> bool {
+    env_str!("ENOMOTO_MIP_OF_ANY_FIXED").is_none()
+}
+
+thread_local! {
+    /// 診断用 (`ENOMOTO_MIP_DEBUG_TRACE`): 今のノードがデバッグ解を含んで始まったか (段ごとの [`Solver::dbg_trace`] を出す)
+    static DBG_TRACE_NODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// LP の際どい実行不能の確かめ ([`lp_farkas_marginal`]) を使うか (既定で使う。`ENOMOTO_MIP_NO_LPINF_CHECK` で全部まとめて止める:
 /// ノードの LP・根の LP・強分枝の子・LP のプロービング)
@@ -6211,7 +6262,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !self.dbg_on {
             return;
         }
-        let Some(k) = env_str!("ENOMOTO_MIP_DEBUG_NODE").and_then(|v| v.parse::<u64>().ok()) else { return };
+        let traced = DBG_TRACE_NODE.with(|c| c.get());
+        let k = if traced { self.nodes } else {
+            let Some(k) = env_str!("ENOMOTO_MIP_DEBUG_NODE").and_then(|v| v.parse::<u64>().ok()) else { return };
+            k
+        };
         if self.nodes != k || self.params.submip {
             return;
         }
@@ -7624,7 +7679,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         pc.col_lo.clone_from(&self.dom.lo);
         pc.col_up.clone_from(&self.dom.up);
         let salt = 0x5EED_0000_0000_0001u64 ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
-        let r = super::feas_fj_lmip_early_salt(&pc, self.params.threads.max(1), cap, self.params.verbose, salt);
+        // 求解の時間の上限を期限として渡す (1 スレッドの手間の上限 (`ENOMOTO_MIP_TICKS` の `f`) でも時間の上限で止まるように。
+        // analysis/hang_20261117/README.md)
+        let tl = self.params.time_limit;
+        let deadline = tl.is_finite().then(|| self.start + std::time::Duration::from_secs_f64(tl.max(0.0)));
+        let r = super::with_presolve_deadline(deadline, || super::feas_fj_lmip_early_salt(&pc, self.params.threads.max(1), cap, self.params.verbose, salt));
         match r {
             Some(x) => self.try_incumbent(x),
             None => false,
@@ -10433,6 +10492,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let free: Vec<bool> = (0..self.p.n).map(|j| self.p.col_lo[j] < self.p.col_up[j]).collect();
             let nnz: usize = self.p.rows.iter().map(|r| r.iter().filter(|e| free[e.0]).count()).sum();
             eprintln!("MIP: root LP size: rows {}, free columns {}, nonzeros {nnz}", self.lp.num_rows(), free.iter().filter(|&&f| f).count());
+            // 根の LP の手間 (記録だけ。analysis/featconst_20261118/cutlen: 1 ラウンドの手間 ÷ 根の LP の手間を数える)
+            eprintln!("MIP: root LP work: {:.6} tick-s ({} iters, {:.3}s)", self.root_lp_ticks * 1e-9, root_iters, self.root_lp_secs);
         }
         if env_str!("ENOMOTO_MIP_DIAG_HIDCLQ").is_some() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 {
             self.diag_hidden_cliques();
@@ -11043,6 +11104,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         } else if self.early_restart {
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (early restart)", $name);
+                            }
+                        } else if let Some(g) = s3_smallgap_skip(self, root_obj, $name) {
+                            if self.params.verbose {
+                                eprintln!("MIP: root heuristic {}: skipped (S3GAP: relative gap {g:.2e})", $name);
                             }
                         } else if self.params.restarts > 0 && self.params.cutoff.is_finite() && env_str!("ENOMOTO_MIP_LIGHT_RESTART_ROOT").is_some()
                             && !light_root_heur($name)
@@ -13092,6 +13157,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.note_current_lb(node.lower_bound);
             self.log(false);
             let dn = self.dbg_changes(&node.changes);
+            // 診断用 (`ENOMOTO_MIP_DEBUG_TRACE`、デバッグ解のとき): デバッグ解を含むノードの処理の始まりを出す (どのスレッドのどのノードまで続いたか)
+            DBG_TRACE_NODE.with(|c| c.set(dn && self.dbg_on && env_str!("ENOMOTO_MIP_DEBUG_TRACE").is_some()));
+            if dn && self.dbg_on && env_str!("ENOMOTO_MIP_DEBUG_TRACE").is_some() {
+                eprintln!("DBGTRACE: tid {} node {} depth {} lb {:.6e} prune limit {:.6e} changes {}", self.pool_tid, self.nodes, node.depth, node.lower_bound, self.prune_limit(), node.changes.len());
+            }
             let rp_entry = replay.and_then(|_| super::replay::lookup(&node.changes));
             let mut rp_stage = "";
             let (mut rp_obj0, mut rp_obj) = (f64::NAN, f64::NAN);
@@ -13761,10 +13831,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     frac
                 };
                 if frac.is_empty() {
+                    // LP の列の境界が定義域に追いついていない (定義域で固定された整数列が LP では動ける) と、その列が分数・範囲外でも
+                    // [`Self::fractional`] は固定済みとして見ないので整数解に見える。暫定解にならずにノードを閉じて最適解を失っていた
+                    // (fuzz_symdyn の種 91、analysis/wrong_widden_20261117 の 13 節)。外れた列の LP の境界を定義域に合わせて解き直す
+                    let stale: Vec<usize> = (0..self.p.n).filter(|&j| self.p.is_int[j] && (x[j] < self.dom.lo[j] - FEASTOL || x[j] > self.dom.up[j] + FEASTOL)).collect();
+                    if !stale.is_empty() && env_str!("ENOMOTO_MIP_NO_STALE_LP_CHECK").is_none() {
+                        STALE_LP_BOUNDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        for j in stale {
+                            self.lp.set_col_bounds(j, self.dom.lo[j], self.dom.up[j]);
+                        }
+                        self.sync_lp();
+                        resolves += 1;
+                        continue;
+                    }
                     if tree_log() && !self.params.submip {
                         eprintln!("ENODE d={} r=int lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                     }
                     if self.try_lp_solution() {
+                        if self.dbg_on {
+                            self.dbg_lost(&format!("integral node LP solution accepted (LP {node_obj})"), dn && self.dbg_contains());
+                        }
                         break None;
                     }
                     // 許容誤差の中で整数の LP 解が、丸めると行に反する (big-M の行 x <= M y で y = 1e-10、x = M y): ノードを捨てると
@@ -13783,6 +13869,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if let Some(j) = pick {
                             break Some(Some((j, x[j], node_obj, vec![(j, x[j])])));
                         }
+                    }
+                    if self.dbg_on {
+                        let (fx, ox, oxr) = (self.p.is_feasible(&x, FEASTOL), self.p.objective(&x), self.p.objective(&xr));
+                        let viol: Vec<(usize, f64, f64, f64)> = (0..self.p.m)
+                            .filter_map(|i| {
+                                let a: f64 = self.p.rows[i].iter().map(|&(j, v)| v * x[j]).sum();
+                                let (l, u) = (self.p.row_lo[i], self.p.row_up[i]);
+                                (a < l - 1e-6 * (1.0 + l.abs()) || a > u + 1e-6 * (1.0 + u.abs())).then_some((i, l, a, u))
+                            })
+                            .take(3)
+                            .collect();
+                        let badc: Vec<(usize, f64, f64, f64, f64, f64)> = (0..self.p.n)
+                            .filter(|&j| x[j] < self.dom.lo[j] - 1e-6 || x[j] > self.dom.up[j] + 1e-6 || (self.p.is_int[j] && (x[j] - x[j].round()).abs() > FEASTOL))
+                            .take(5)
+                            .map(|j| {
+                                let (l, u) = self.lp.col_bounds(j);
+                                (j, x[j], self.dom.lo[j], self.dom.up[j], l, u)
+                            })
+                            .collect();
+                        self.dbg_lost(&format!("integral node LP solution not taken as the incumbent (LP {node_obj}, LP solution feasible {fx} obj {ox}, rounded feasible {} obj {oxr}, violated rows {viol:?}, LP rows {} of orig {}; columns (j, x, dom lo, dom up, lp lo, lp up) {badc:?})", self.p.is_feasible(&xr, FEASTOL), self.lp.num_rows(), self.p.m), dn && self.dbg_contains());
                     }
                     break None;
                 }
@@ -14635,7 +14741,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // サブ MIP (根のヒューリスティクス) では使わない (根の道筋を既定と同じにする。physiciansched6-2 は根のサブ MIP の結果が変わって 2 種とも遅れた)
             // `TC` の `s`: 引き継ぎの固定 (`of_fixes[tc_base_len..]`) を子の並びに写さず、親の鎖に環を足して共有する
             let mut tc_base_len = usize::MAX;
-            if (tc_on('r') || tc_on('a') || tc_on('b')) && !self.params.submip {
+            // `G5INH` の `c`: 鎖が長すぎるノードでは引き継ぎの固定を足さない (鎖はそのまま子に渡す)
+            let g5_full = g5inh('c') && {
+                let mut k = 0usize;
+                InhChain::for_each(&node.inh, |_| k += 1);
+                k as f64 > (tunable!("ENOMOTO_T_MIP_G5INH_FRAC", 0.01, f64) * self.p.n as f64).max(64.0)
+            };
+            if (tc_on('r') || tc_on('a') || tc_on('b')) && !self.params.submip && !g5_full {
                 // `a`: 被約費用 (−3) に加えて強分枝 (−4)・双対証明 (−6)・リテラルの衝突 (−7)・目的関数の伝播 (−8)・カットプールの伝播 (−9) の固定も
                 // (行の伝播は分枝から積み直せば同じになるので除く。オービトープ (−5) は対称性の推論なので除く)
                 // `b`: 親の LP に依るので子で作り直せない被約費用 (−3)・強分枝 (−4) だけ。−6〜−9 は大域的な制約 (双対証明・衝突・カット) の
@@ -18369,7 +18481,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let Some(&(k, i)) = self.orb_col.get(&col) else { return (col, value) };
         let o = &self.orbitopes[k];
-        if !o.row_packing[i] {
+        if !o.row_packing[i] || o.static_pp {
             return (col, value);
         }
         for &j in &o.vars[i] {
@@ -18445,7 +18557,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
-            rows.iter().enumerate().filter(|(k, r)| !r.is_empty() && !broken[*k]).map(|(k, r)| orbs[k].sub_rows(r)).collect()
+            // `ENOMOTO_MIP_ORBPP` の静的なオービトープは全ての行を固定の順で使う (根の固定と同じ順。分枝の順によらず成り立つ)
+            let mut v: Vec<super::symmetry::Orbitope> =
+                rows.iter().enumerate().filter(|(k, r)| !orbs[*k].static_pp && !r.is_empty() && !broken[*k]).map(|(k, r)| orbs[k].sub_rows(r)).collect();
+            v.extend(orbs.iter().filter(|o| o.static_pp).cloned());
+            v
         } else {
             orbs.iter().cloned().collect()
         };
@@ -18614,7 +18730,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn orbital_fixing_checked(&mut self, changes: &[BoundChange]) -> bool {
         if let Some(sd) = self.symdyn.clone() {
             // 試作 `ENOMOTO_MIP_SYMDYN`: orbital fixing の代わりに動的な辞書式の縮小 (分枝した列の順)。`=f` なら orbital fixing の後に足す
-            if super::symdyn::symdyn_keep_of() && !self.of_gens.is_empty() && !self.orbital_fixing(changes) {
+            if super::symdyn::symdyn_keep_of() && !self.of_gens.is_empty() && !self.orbital_fixing(changes, of_branch_only()) {
                 if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
                     self.add_conflict();
                 }
@@ -18632,7 +18748,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.of_gens.is_empty() {
             return true;
         }
-        let ok = self.orbital_fixing(changes);
+        let ok = self.orbital_fixing(changes, false);
         if !ok {
             if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
                 self.add_conflict();
@@ -18649,7 +18765,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 同じ値に固定する (0 に下げた分枝の部分木には、軌道の列を 1 にした解の像が兄弟の部分木にあるので要らない)。
     /// 親が固定したもの (`sym` の印) は分枝に数えない。固定のあと行を伝播し、伝播で新たに固定されたら軌道を見直す。
     /// 固定はこのノードの部分木で成り立つので、[`Self::of_node_fixes`] に入れて子の分枝の列に足す。矛盾なら偽。
-    fn orbital_fixing(&mut self, changes: &[BoundChange]) -> bool {
+    ///
+    /// `branch_only` (LexRed と併用するとき、[`of_branch_only`]): 分枝で 0 にした 0-1 列 (`sym` でない上限の変更) を含む軌道だけを
+    /// 0 に固定する。伝播・被約費用などで固定された列から軌道を固定するのは分枝の順の辞書式の規則から出ない固定で、LexRed と
+    /// 重ねると最適解の像を全部切ることがある (p0201 で 7675 を最適と返した、analysis/wrong_widden_20261117 の 12 節)
+    fn orbital_fixing(&mut self, changes: &[BoundChange], branch_only: bool) -> bool {
         let of = self.of_gens.clone();
         let p = self.p;
         let binary = |j: usize| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0;
@@ -18710,11 +18830,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let orbits = self.of_cache.1.clone();
         self.of_node_orbits = Some(orbits.clone());
         let mut node_fixed = false;
+        let b0: std::collections::HashSet<usize> = if branch_only { changes.iter().filter(|c| !c.sym && c.upper && binary(c.col) && c.value < 0.5).map(|c| c.col).collect() } else { Default::default() };
         loop {
             let s0 = self.dom.stack_len();
             let mut fixed = 0usize;
             for orb in orbits.iter() {
-                let Some(&f) = orb.iter().find(|&&j| self.dom.lo[j] == self.dom.up[j]) else { continue };
+                let f = if branch_only { orb.iter().find(|&&j| b0.contains(&j)) } else { orb.iter().find(|&&j| self.dom.lo[j] == self.dom.up[j]) };
+                let Some(&f) = f else { continue };
                 let one = self.dom.lo[f] >= 0.5;
                 for &j in orb {
                     let changed = if one {
@@ -19572,12 +19694,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if super::cutconf::secs() > tunable!("ENOMOTO_T_MIP_CUTCONF_TIME_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64() + 0.05 {
             return false;
         }
+        // 試作 ENOMOTO_MIP_CUTCONF_LGATE: 作った制約の平均の長さで入れる割合を決める。割合がほぼ 0 なら解析もしない
+        let lgate = super::cutconf::lgate_weight();
+        if lgate.is_some_and(|w| w < 1e-3) {
+            return false;
+        }
         let t0 = Instant::now();
         // 診断用: デバッグ解が打ち切り値より良ければ、解析の段ごとにデバッグ解を切らないか確かめる
         let dbg_x: Option<Vec<f64>> = if self.dbg_on { DEBUG_SOL.with(|dd| dd.borrow().as_ref().filter(|xd| super::cutconf::check_mode() || self.p.objective(xd) < self.prune_limit() - 1e-6).cloned()) } else { None };
         let r = super::cutconf::analyze(&self.dom, self.p, start, self.conflict_max_len_multi(), dbg_x.as_deref());
         super::cutconf::add_secs(t0.elapsed().as_secs_f64());
         let Some((coefs, rhs)) = r else { return false };
+        if let Some(w) = lgate {
+            if !super::cutconf::lgate_take(w) {
+                return false;
+            }
+        }
         // 診断用: デバッグ解を切っていないか (打ち切り値による大域的な固定を使うので、デバッグ解が打ち切り値より良いときだけ)
         if self.dbg_on {
             DEBUG_SOL.with(|dd| {
@@ -23780,14 +23912,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         for n in nodes.iter_mut() {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: flat_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None });
+            snodes.push(SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None });
         }
         for n in nodes {
             self.queue.push(n);
         }
         if let Some(n) = plunge.as_mut().filter(|_| with_nodes) {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: flat_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None });
+            snodes.push(SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None });
         }
         if with_nodes {
             self.dive_stack.clear();
@@ -26081,6 +26213,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 LPINF_RETRY[3].load(std::sync::atomic::Ordering::Relaxed),
                 LPINF_RETRY[4].load(std::sync::atomic::Ordering::Relaxed)
             );
+            eprintln!("MIP: integral-looking node LP solutions outside the domain (LP bounds behind the domain), re-solved: {}", STALE_LP_BOUNDS.load(std::sync::atomic::Ordering::Relaxed));
             eprintln!(
                 "MIP: LP infeasibility certificates, minimum uniform violation (log10 bins <-12 .. >=-4, other): {:?}",
                 LPINF_HIST.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>()
