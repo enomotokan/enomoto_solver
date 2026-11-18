@@ -39,7 +39,6 @@ pub(crate) mod rootlp3;
 pub(crate) mod xolazy;
 pub(crate) mod heur_ipm;
 pub(crate) mod heur_shift;
-pub(crate) mod heur_lns2;
 pub(crate) mod symmetry;
 pub(crate) mod symdyn;
 pub(crate) mod cuts;
