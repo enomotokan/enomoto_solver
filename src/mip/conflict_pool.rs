@@ -201,6 +201,12 @@ impl LitConflictPool {
     /// 定義域の記録の位置 `start` より後に境界が変わった列を含む衝突で伝播する (固定点まで、各回の後に行の伝播も)。
     /// 矛盾なら `Err`、そうでなければ締めた境界の数。
     pub fn propagate(&mut self, p: &MipProblem, dom: &mut Domain, start: usize) -> Result<usize, ()> {
+        self.propagate_tag(p, dom, start, None)
+    }
+
+    /// [`Self::propagate`] と同じだが、`tagger` があれば境界を締める前に、締める根拠の衝突のリテラルを渡して呼ぶ
+    /// (試作 `ENOMOTO_MIP_LIT_EXPLAIN`: 衝突を行にして変更の理由に付け、衝突解析で遡れるようにする)。
+    pub fn propagate_tag(&mut self, p: &MipProblem, dom: &mut Domain, start: usize, mut tagger: Option<&mut dyn FnMut(&[Lit], &mut Domain)>) -> Result<usize, ()> {
         if self.live_lits == 0 {
             return Ok(0);
         }
@@ -281,6 +287,11 @@ impl LitConflictPool {
             }
             dom.set_external_tag(5);
             for (k, upper, v, org, s) in fixes {
+                if let Some(t) = tagger.as_mut() {
+                    if let Some(c) = &self.slots[s] {
+                        t(c, dom);
+                    }
+                }
                 let ch = if upper {
                     v < dom.up[k] && { dom.tighten_upper(p, k, v); true }
                 } else {

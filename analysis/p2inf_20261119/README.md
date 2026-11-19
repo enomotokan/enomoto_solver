@@ -188,3 +188,30 @@ P・M (Mittelmann 48 問・MIPLIB 58 問) で目的が全部 0 なのは ns11169
   見積りは種 1〜3 の PROWTINY の実時間 (問題ごとの平均 + 8 秒)。
 - ビルドは種 1〜3 と同じ 06f20890f (SST_FEAS の既定化の前)。回し方: `python analysis/p2inf_20261119/run.py PROWTINY2 K` (K = 0〜3) → res_PROWTINY2_sK.jsonl。
 - 集計は種 1〜6 を合わせる: `python summ.py PROWTINY+PROWTINY2 def rowtiny` (summ.py は `+` でつないだ SET の結果を合わせて読む)。
+
+### 5.8 PROWTINY 種 1〜6 と 10teams の切り分け (事実)
+
+- `summ_PROWTINY_6seeds.txt` (`python summ.py PROWTINY+PROWTINY2 def rowtiny`): 696 行、crash 0、食い違い 0。解けた数 def 276 / rowtiny 274 (348 組)。
+  rowtiny / def **+2.0% [−2.0%, +7.8%]**。全種で 1.25 倍超遅い問題なし。遅め: 10teams 2.67 (0.96・4.08・8.32・1.01・1.38・7.93)、noswot 1.60。速い: neos5 0.80。
+- 10teams: 計測機では rowtiny の種 2・3・6 が 1〜4 万ノードに膨らんだが、手元では 06f20890f のビルドで種 2・3・6 も 83〜150 ノード (def と同じ)、
+  手元の種 1〜8 の回し直しでも膨らまない。計測機でログつきで回し直す (logs_10teams/、FMc3) と種 6 の rowtiny だけ再現 (32819 ノード、時間切れ)。
+  根まではほぼ同じ (974 を Local-MIP が約 0.8 秒、根の LP 924 = 最適値)。def はノード 27 でほかのスレッドが 924 を見つけて終わり、rowtiny は
+  ノード 89 で 950 を見つけた後 924 を見つけられない。下界は根から 924 で、解を見つける側の 4 スレッドの運。際どい判定の差 (def は丸めの誤差で 19 本を解き直し、
+  rowtiny は 0 本) が道筋を変えただけで、判定の誤りの形跡はない。
+
+### 5.9 ROWTINY の採用 (2026-11-19、利用者の判断)
+
+- `ENOMOTO_MIP_LPINF_ROWTINY` を既定にした (`=0` で以前の形)。docs/improvement_history.md に節を足した。
+- 採用の版での確かめ (verify_adopt.sh、fuzz_logs/adopt_rt_*.txt): cargo test 410 通過・0 失敗。widden 4 スレッド 42.7 秒・1 スレッド 71.1 秒で
+  どちらも最適 25009.6634。fuzz_tiny 0/400×2・mip_fuzz_vs_highs 0/300 (4・1 スレッド)・fuzz_objint 0/1000×2・fuzz_slack 食い違い 0/1000×2・
+  fuzz_cutconf 0/300。誤答 0。
+
+### 4.3 bnatt400 の続き (事実)
+
+- SCIP の機能を 1 つずつ切る (1 スレッド、scip_abl.py): 衝突の解析を切ると 900 秒で時間切れ (61397 ノード)、rapidlearning を切ると 242 秒・
+  カットを切ると 101 秒で最適。SCIP の決め手は衝突の解析 (伝播の衝突 6209 回で衝突 40306 本、大域に 19982 本、logicor で 4595 回切る)。
+- 当方 (1 スレッド 600 秒): 衝突の解析 10218 回で衝突 15824 本 (1 回 1.55 本)。段の 1/3 がリテラルの衝突のプールで締めた変更を遡れずに止まる
+  (`ENOMOTO_MIP_CONFLICT_LEV_DIAG`)。衝突を長く持つ (年齢・プールの大きさ)・長い衝突を許す、はどれも 600 秒で変わらない。
+- 試作 `ENOMOTO_MIP_LIT_EXPLAIN` (既定では使わない): 0-1 列の衝突を行にした写しを理由に付け、衝突解析で遡れるようにした。遡れずに止まる段
+  49770 → 0、最初の段が解けない 4315 → 11、衝突 1 回 1.55 → 2.06 本。段数のつまみ `ENOMOTO_T_MIP_CONFLICT_LEVELS` (既定 5) を 20・1000 にしても、
+  年齢で消さない形と組んでも、600 秒では解けない (どれも 1.2 万ノード前後、4 本並走)。衝突の量だけでは差が埋まらない。

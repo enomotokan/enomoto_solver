@@ -3567,7 +3567,7 @@ pub(super) fn lp_farkas_ratio<L: MipLp>(lp: &L, n: usize) -> f64 {
     }
     let mut z = vec![0.0; n];
     let (mut rlo, mut rhi, mut ysum) = (0.0f64, 0.0f64, 0.0f64);
-    // 試作 `ENOMOTO_MIP_LPINF_ROWTINY` (p2inf_20261119、既定では使わない): 丸めの誤差ほどの重み (|y_i| <= 1e-9 (1 + max|y|)) の行を射線から落とす。
+    // `ENOMOTO_MIP_LPINF_ROWTINY` (p2inf_20261119、2026-11-19 に既定にした。`=0` で以前の動き): 丸めの誤差ほどの重み (|y_i| <= 1e-9 (1 + max|y|)) の行を射線から落とす。
     // 片側が無限の行に 1e-17 程度の逆向きの重みが載ると隙間が ±∞ になり、標準形では成り立つ証明 (`std_farkas_ok` は小さな重みの無限の項を
     // 無視する) を際どいとみなしていた (neos859080 で証明の 7 割余り)。z は残した行だけから作るので、落とした後の射線もそのまま証明になる
     let ytiny = if lpinf_rowtiny() { 1e-9 * (1.0 + ymax) } else { 0.0 };
@@ -3616,9 +3616,9 @@ thread_local! {
     static DBG_TRACE_NODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// 試作 `ENOMOTO_MIP_LPINF_ROWTINY` ([`lp_farkas_ratio`])。`0` で切る
+/// `ENOMOTO_MIP_LPINF_ROWTINY` ([`lp_farkas_ratio`]、p2inf_20261119、2026-11-19 に既定にした。`=0` で以前の動き)
 fn lpinf_rowtiny() -> bool {
-    env_str!("ENOMOTO_MIP_LPINF_ROWTINY").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_LPINF_ROWTINY", "1").is_some_and(|v| v != "0")
 }
 
 /// LP の際どい実行不能の確かめ ([`lp_farkas_marginal`]) を使うか (既定で使う。`ENOMOTO_MIP_NO_LPINF_CHECK` で全部まとめて止める:
@@ -12714,7 +12714,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let lw = self.dom.take_low_water();
                 let start = if self.lit_conflicts.dirty || env_str!("ENOMOTO_MIP_LIT_FULL_SCAN").is_some() { 0 } else { self.lit_pos.min(lw) };
                 self.lit_conflicts.dirty = false;
-                let r = self.lit_conflicts.propagate(self.p, &mut self.dom, start);
+                let r = self.lit_prop(start);
                 self.share_used_lits();
                 self.lit_pos = self.dom.stack_len();
                 self.dom.take_low_water();
@@ -16935,7 +16935,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.dom.tighten_upper(self.p, j, self.bfl(j, v));
                     }
                     let ok = !self.dom.infeasible && self.dom.propagate(self.p) && self.propagate_objective() && {
-                        match self.lit_conflicts.propagate(self.p, &mut self.dom, pos) {
+                        match self.lit_prop(pos) {
                             Ok(_) => true,
                             Err(()) => false,
                         }
@@ -19178,7 +19178,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let rhs = if *obj { obj_lim - konst } else { *konst };
             rhs.is_finite().then(|| (c.clone(), rhs))
         };
-        let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() || orbitope_reason() { Some(&lookup) } else { None };
+        let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() || lit_explain() || orbitope_reason() { Some(&lookup) } else { None };
         let confs = self.dom.analyze_multi_bumps(self.p, start, max_len, reconv, hcs.then_some(&mut bumps), lk);
         if hcs && !bumps.is_empty() {
             self.pc.bump_conflict(&bumps);
@@ -20167,7 +20167,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let lw = self.dom.take_low_water();
             let start = if self.lit_conflicts.dirty { 0 } else { self.lit_pos.min(lw) };
             self.lit_conflicts.dirty = false;
-            let r = self.lit_conflicts.propagate(self.p, &mut self.dom, start);
+            let r = self.lit_prop(start);
             self.share_used_lits();
             self.lit_pos = self.dom.stack_len();
             self.dom.take_low_water();
@@ -20604,6 +20604,53 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// プールのカット `k` を今の定義域で伝播する。締めたら `Ok(true)`、矛盾 (活動量が右辺を越える、締めて定義域が空) なら `Err`。
+    /// リテラルの衝突のプールの伝播。試作 `ENOMOTO_MIP_LIT_EXPLAIN` ([`lit_explain`]) なら、0-1 列だけの衝突で締めた変更に、衝突を
+    /// 行 `Σ_{x_j >= 1 のリテラル} x_j - Σ_{x_j <= 0 のリテラル} x_j <= (x_j >= 1 のリテラルの数) - 1` にした写しの番号を理由として付け
+    /// (カットのプールの伝播の試作 `CONFLICT_PROOF_EXPLAIN` と同じ写しの表)、衝突解析で遡れるようにする。それ以外の衝突は従来どおり外からの変更
+    fn lit_prop(&mut self, start: usize) -> Result<usize, ()> {
+        if !lit_explain() {
+            return self.lit_conflicts.propagate(self.p, &mut self.dom, start);
+        }
+        let p = self.p;
+        let (arena, aidx) = (&mut self.cut_arena, &mut self.cut_arena_idx);
+        let mut tagger = |lits: &[super::conflict_pool::Lit], dom: &mut super::domain::Domain| {
+            let mut row: Vec<(usize, f64)> = Vec::with_capacity(lits.len());
+            let mut nlow = 0usize;
+            for &(j, upper, v) in lits {
+                let bin = p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0;
+                if !bin || !((upper && v == 0.0) || (!upper && v == 1.0)) {
+                    dom.set_external_tag(5);
+                    return;
+                }
+                if upper {
+                    row.push((j, -1.0));
+                } else {
+                    row.push((j, 1.0));
+                    nlow += 1;
+                }
+            }
+            row.sort_by_key(|t| t.0);
+            let rhs = nlow as f64 - 1.0;
+            use std::hash::{Hash, Hasher};
+            let mut hs = std::collections::hash_map::DefaultHasher::new();
+            for &(j, a) in &row {
+                (j, a.to_bits()).hash(&mut hs);
+            }
+            rhs.to_bits().hash(&mut hs);
+            let h = hs.finish();
+            let idx = match aidx.get(&h) {
+                Some(&i) if arena[i as usize].0 == row && arena[i as usize].1 == rhs => i as usize,
+                _ => {
+                    arena.push((row, rhs));
+                    aidx.insert(h, (arena.len() - 1) as u32);
+                    arena.len() - 1
+                }
+            };
+            dom.set_cut_tag(idx);
+        };
+        self.lit_conflicts.propagate_tag(p, &mut self.dom, start, Some(&mut tagger))
+    }
+
     fn cutpool_prop_cut(&mut self, k: usize, cont_frac: f64) -> Result<bool, ()> {
         let p = self.p;
         let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
@@ -26143,6 +26190,14 @@ pub(super) fn orbitope_reason() -> bool {
 
 /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
 /// 通し番号を残し、HiGHS 式の衝突解析でその証明の行から説明して遡る。
+/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN` (p2inf_20261119、既定では使わない): リテラルの衝突のプールの伝播で締めた変更を、衝突を行にしたものから
+/// 衝突解析で遡れるようにする ([`Solver::lit_prop`])。bnatt400 では解析の段の 1/3 がリテラルの衝突で締めた変更を遡れずに止まっていた
+/// (SCIP は衝突を制約 (logicor) として持つので遡れる)
+pub(super) fn lit_explain() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v != "0"))
+}
+
 pub(super) fn conflict_proof_explain() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN").is_some())

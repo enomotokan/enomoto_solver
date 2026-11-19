@@ -1291,7 +1291,8 @@ impl Domain {
             }
             let new_here = out.len() - before;
             // HiGHS と同じ打ち切り: 最初の段で衝突が出なければ止める。5 段以上調べて新しい衝突がなければ止める
-            if out.is_empty() || (done >= 5 && new_here == 0) {
+            // (段の数は試作 `ENOMOTO_T_MIP_CONFLICT_LEVELS`、既定 5。p2inf_20261119 の bnatt400 の切り分け用)
+            if out.is_empty() || (done >= conflict_levels() && new_here == 0) {
                 stop_k = if out.is_empty() { 4 } else { 5 };
                 break;
             }
@@ -1582,4 +1583,11 @@ fn gfix_log() -> bool {
 /// 連続列の小さい締め付けが積み重なって 0-1 列が固定・矛盾になる (SCIP は 141 ノードで行の伝播の打ち切り 258)
 pub(crate) fn cont_step_frac() -> f64 {
     tunable!("ENOMOTO_T_MIP_S3PROP_CONT_FRAC", 0.3, f64)
+}
+
+/// [`Domain::analyze_multi_bumps`] の「この段数以上調べて新しい衝突がなければ止める」の段数 (`ENOMOTO_T_MIP_CONFLICT_LEVELS`、既定 5 = HiGHS)。
+/// p2inf_20261119 の bnatt400 の切り分け用の試作のつまみ。
+fn conflict_levels() -> usize {
+    static F: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *F.get_or_init(|| tunable!("ENOMOTO_T_MIP_CONFLICT_LEVELS", 5usize, usize))
 }
