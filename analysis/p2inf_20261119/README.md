@@ -402,3 +402,15 @@ k = 12 で当方の設定を比べる (sub12.sh、logs/sub12v_*.log、`sub12v_ro
 - 判断の案: cfx2 は既定にしない (M の全種で遅い問題が 3 つ)。試作 (LIT_EXPLAIN・CONFLICT_WEIGHT_FLAT・INF_ALL・CONFLICT_LEVELS・DEBUG_BRANCH_PRIO) は
   既定では使わない形で残す。bnatt400 のような「目的の利得が最後まで 0」の問題を見分けて cfx2 を当てる条件 (例: 根の後の擬似費用の観測で正の利得が
   ほぼ 0) は、fiball (正の利得 0.3% で同じ型、cfx2 で遅い) と区別できないので、今の形では作れない。
+
+### 4.17 bnatt400 の区切り (2026-11-19、利用者の判断「案のとおり」)
+
+- **既定では解けない** (4 スレッド 1800 秒・20 万ノードで時間切れ)。**cfx2 の環境変数**
+  (`ENOMOTO_MIP_LIT_EXPLAIN=1 ENOMOTO_MIP_HIGHS_CONFLICT_SCORE=1 ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT=0.1`) なら 4 スレッドで約 5 分 (321.5 秒) で最適 1。
+  cfx (重み一律 0.1) なら 300.1 秒。SCIP 10 は 1 スレッド 276 秒。
+- 部品: bnatt400 には HiGHS 式の衝突スコア (HC) と衝突の重み (FL または一律の重み) の両方が要る (HC を外した LX+FL・FL だけは 900 秒で時間切れ)。
+  その組 (HC+FL) が supportcase33・mcsched を遅くし (4.16 節)、M では fiball・supportcase33・mcsched が 5 種とも遅いので、cfx2 は既定にしない。
+- 原因の理解 (4.6〜4.11 節): SCIP の決め手は伝播の矛盾からの衝突で、当方は衝突を作っても分枝に使わず (重み既定 0)、衝突のプールで締めた変更を
+  遡れない (LIT_EXPLAIN なし) ので効きが弱い (部分木で、当方は衝突を全部切っても 1.4 倍しか悪くならないのに、SCIP は切ると 280 倍以上)。
+- 試作は既定では使わない形で残す: `ENOMOTO_MIP_LIT_EXPLAIN`・`ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT` (と `_FRAC`)・`ENOMOTO_MIP_INF_ALL`・
+  `ENOMOTO_T_MIP_CONFLICT_LEVELS` (既定 5 = 従来)・診断 `ENOMOTO_MIP_DEBUG_BRANCH_PRIO`、診断の行 `MIP: inference:`・`MIP: conflict weight FLAT`。
