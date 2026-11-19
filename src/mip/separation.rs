@@ -1859,7 +1859,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // - `ENOMOTO_T_MIP_CUT_FLAT_STOP` = k (> 0): 根の LP の値から (相対 `ENOMOTO_T_MIP_CUT_FLAT_EPS`、既定 1e-9 以下しか) 動かない
         //   ラウンドが最初から k 回続いたら止める (一度動いたら数えない。LP を外したラウンドも動かないラウンドと数える。
         //   `ENOMOTO_MIP_CUT_FLAT_NO_FAIL` で数えない)。`intobj_stall` は「一度上がった後に動かない」側を受け持つ
-        // - `ENOMOTO_MIP_CUT_LP_CAP_STOP` (既定 `flat`、2026-11-01 に cs2 として既定化。`0` で止める): カットを足した LP が 1 回の LP の上限 (時間・反復) に当たって外したら、そこで止める
+        // - 試作 `ENOMOTO_MIP_CUT_LP_CAP_STOP` (= `flat` が 2026-11-01〜11-19 の既定 (cs2)。2026-11-19 に既定から外した: 58 問 × 3 種で外しても +0.6% [−2.0, +3.8] と
+        //   差がない、analysis/audit_20261119): カットを足した LP が 1 回の LP の上限 (時間・反復) に当たって外したら、そこで止める
         //   (2 回目を待たない)。値が `flat` なら、そこまで根の LP の値から動いていないときだけ
         // - `ENOMOTO_T_MIP_CUT_WORK_CAP` = w (> 0): 根のカットの上限を時間ではなく手間 (このループの LP の反復の合計 / 根の LP の反復
         //   + ラウンドの数 x `ENOMOTO_T_MIP_CUT_WORK_ROUND` (既定 0.05)) で測り、w を超えたら止める。時間の上限は
@@ -1872,7 +1873,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let flat_fail = env_str!("ENOMOTO_MIP_CUT_FLAT_NO_FAIL").is_none();
         let mut flat_rounds = 0usize;
         let mut moved = false;
-        let lpcap_stop = if cs_outer { env_def!("ENOMOTO_MIP_CUT_LP_CAP_STOP", "flat").filter(|v| *v != "0") } else { None };
+        let lpcap_stop = if cs_outer { env_str!("ENOMOTO_MIP_CUT_LP_CAP_STOP").filter(|v| *v != "0") } else { None };
         let mut work_cap = if cs_outer { tunable!("ENOMOTO_T_MIP_CUT_WORK_CAP", if super::timedep('w') { 12.0 } else { 0.0 }, f64) } else { 0.0 };
         let mut work_round = tunable!("ENOMOTO_T_MIP_CUT_WORK_ROUND", 0.05, f64);
         // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM` の `c`: 手間の上限は LP の反復だけで数える ([`Solver::cut_cont`])

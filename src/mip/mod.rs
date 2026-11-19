@@ -2533,6 +2533,13 @@ pub(crate) fn sym_sst() -> bool {
     env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v != "0")
 }
 
+/// 試作 `ENOMOTO_MIP_SYM_SST_FEAS` (p2inf_20261119、既定では使わない): 目的が全部 0 の問題 (実行可能性問題) に限って [`sym_sst`] と同じく
+/// SST のカットを使う。SST を orbital fixing の代わりにすると対称性のある最適化問題で遅くなる (hang_20261117 15.2・15.3 節) が、
+/// fhnw-binpack4-4 (目的が全部 0) は SST で初めて実行不能を示せる。同じ成分で orbital fixing と混ぜると代表の選び方が食い違うので混ぜない
+pub(crate) fn sym_sst_feas() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_SST_FEAS").is_some_and(|v| v != "0")
+}
+
 pub(crate) fn sym_of() -> bool {
     env_str!("ENOMOTO_MIP_NO_SYM_OF").is_none()
 }
@@ -3094,7 +3101,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     }
     // 試作 `ENOMOTO_MIP_SYM_SST` ([`symmetry::sst_pairs_except`]): orbital fixing の代わりに Schreier-Sims の表のカットの行を足す
     // (SCIP 10 は fhnw-binpack4-4 をこれで 10 秒で実行不能と示す。analysis/hang_20261117/README.md)。サブ MIP では使わない
-    let sst = sym_sst() && !in_sub;
+    let sst = (sym_sst() || (sym_sst_feas() && prob.cost.iter().all(|&c| c == 0.0))) && !in_sub;
     let of = sym_of() && !sst;
     let pairs = if of {
         Vec::new()

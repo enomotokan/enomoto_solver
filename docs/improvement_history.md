@@ -10764,6 +10764,21 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   fz3103・seed 3006 は締めの直しと丸めのどちらか一方だけでも正しく、両方を切ると誤る (−12.2・5.8)。
 
 
+## 2026-11-19: 運への対策の疑い高の確かめ: QIU_FIND_STOP_GAP・CUT_LP_CAP_STOP=flat (cs2)・SUBWAIT=2 を既定から外す (S4_RINSRATE・BGZERO は残す)
+
+- 背景: 既定にした変更のうち「1 問・1 種の運に合わせた疑い」が高いものを洗い出した (analysis/audit_20261119/README.md)。そのうち 58 問で
+  確かめられる 3 つを、採用前の形 (`=0`) と既定で対にして測った (B: MIPLIB の 58 問 × 種 1〜3、60 秒、4 スレッド、696 行、落ち 0)。
+- 結果 (比は「外した形 / 既定」、どちらかが解けた 46 問の SGM と 95% ブートストラップ区間):
+  - qiu (`ENOMOTO_MIP_QIU_FIND_STOP_GAP`、2026-11-04 から既定): **−0.7% [−3.2%, +1.8%]**、解けた数 138 / 138、全種で 1.25 倍超なし、食い違い 0。
+  - cs2 の `ENOMOTO_MIP_CUT_LP_CAP_STOP=flat` (2026-11-01 から既定): **+0.6% [−2.0%, +3.8%]**、解けた数 138 / 138、全種で 1.25 倍超なし、食い違い 0。
+  - rins (`ENOMOTO_MIP_S4_RINSRATE`・`ENOMOTO_MIP_S4_BGZERO`): **+3.0% [+0.4%, +5.9%]** (外すと有意に遅い)、解けた数 138 / 138、食い違い 0。
+- 判断 (利用者の承認): 差の見えない qiu と cs2 の `flat` は既定から外す (道の分かれ目を減らす)。どちらも環境変数で以前の形を選べる試作として残す
+  (`ENOMOTO_MIP_QIU_FIND_STOP_GAP=1`・`ENOMOTO_MIP_CUT_LP_CAP_STOP=flat`)。rins は既定に残す。cs2 のうちカットの LP の上限を反復で数える部分
+  (`ENOMOTO_T_MIP_CUT_LP_WORK`) は運を減らす側なので外さない。
+- sw2 (`ENOMOTO_T_MIP_SUBWAIT=2`、2026-11-18 から既定): A (SUBWAIT が働く 5 問 + unitcal_7 × 採否に使わなかった種 3〜6、600 秒、4 スレッド、48 行、
+  落ち 0) で sw0/既定 **−1.3% [−17.9%, +14.3%]**、解けた数 14 → 15 (sw0 が neos-662469 の種 6 を多く解く)、全種で 1.25 倍超なし、食い違い 0。
+  得が確かめられないので既定から外し (利用者の承認)、既定の待ちを sw2 を入れる前の形 (`=0`) に戻した。`ENOMOTO_T_MIP_SUBWAIT=2` で今までの形を選べる。
+- 確かめ (3 つを外した既定): cargo test 409 通過・0 失敗、fuzz 7 本 (fuzz_tiny 400×2・mip_fuzz_vs_highs 300・fuzz_objint 1000×2・fuzz_slack 1000×2) すべて bad 0。
 ## 2026-11-19: 静的なオービトープの固定の後に伝播・プロービングを回し、冗長になった行を外す ENOMOTO_MIP_ORBPP_REPROBE を既定にする (採用)
 
 - 経緯: 1 スレッドで SCIP より遅い MIPLIB の問題の調べ (P2-SCIP-P、analysis/scipslow_20261119)。graph20-20-1rand は当方 1 スレッド 52.5 秒・3940 ノード、
