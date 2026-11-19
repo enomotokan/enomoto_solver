@@ -2258,6 +2258,73 @@ mod tests {
         }
     }
 
+    /// 試作 `ENOMOTO_MIP_ORBITOPE_STATIC=r` の小さい理由 (src/mip/solver.rs の `orbitope_reason_small`) の正しさ: 行の前の部分 (0..p) と
+    /// 連続する列 (c0..c1) だけの部分のオービトープで導いた固定は、「全体の列が辞書式で広義減少 (パッキングなら行の和 <= 1 も)」で、
+    /// その部分の中の固定だけを満たす全ての行列で成り立つ (部分の外の固定は使わない)。部分が実行不能と言えば、そういう行列はない。
+    #[test]
+    fn orbitope_sub_reason_brute_force() {
+        let mut seed = 23u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut checked = 0usize;
+        for _ in 0..600 {
+            let r = 1 + (rnd() * 3.0) as usize;
+            let s = 2 + (rnd() * 3.0) as usize;
+            let packing = rnd() < 0.5;
+            let vars: Vec<Vec<usize>> = (0..r).map(|i| (0..s).map(|c| i * s + c).collect()).collect();
+            let nv = r * s;
+            let mut lo = vec![0.0; nv];
+            let mut up = vec![1.0; nv];
+            for j in 0..nv {
+                let t = rnd();
+                if t < 0.15 {
+                    lo[j] = 1.0;
+                } else if t < 0.45 {
+                    up[j] = 0.0;
+                }
+            }
+            // 全体の制約 (固定なし) を満たす行列
+            let mut all: Vec<Vec<u8>> = Vec::new();
+            for mask in 0..(1u32 << nv) {
+                let x: Vec<u8> = (0..nv).map(|j| ((mask >> j) & 1) as u8).collect();
+                if packing && (0..r).any(|i| (0..s).map(|c| x[vars[i][c]] as u32).sum::<u32>() > 1) {
+                    continue;
+                }
+                let col = |c: usize| -> Vec<u8> { (0..r).map(|i| x[vars[i][c]]).collect() };
+                if (0..s - 1).all(|c| col(c) >= col(c + 1)) {
+                    all.push(x);
+                }
+            }
+            for p in 1..=r {
+                for c0 in 0..s {
+                    for c1 in c0 + 2..=s {
+                        let sv: Vec<Vec<usize>> = (0..p).map(|i| vars[i][c0..c1].to_vec()).collect();
+                        let sub = Orbitope { vars: sv.clone(), packing, row_packing: vec![packing; p], swaps: Vec::new(), local: false, static_pp: false };
+                        let inside: Vec<usize> = sv.iter().flatten().copied().collect();
+                        let agree = |x: &Vec<u8>| inside.iter().all(|&j| (x[j] as f64) >= lo[j] && (x[j] as f64) <= up[j]);
+                        let sols: Vec<&Vec<u8>> = all.iter().filter(|x| agree(x)).collect();
+                        match orbitopal_fixing(&sub, &lo, &up) {
+                            None => assert!(sols.is_empty(), "sub ({p} rows, cols {c0}..{c1}) declared infeasible but {} matrices agree", sols.len()),
+                            Some(fixes) => {
+                                for x in &sols {
+                                    for &(j, v) in &fixes {
+                                        assert_eq!(x[j] as f64, v, "sub ({p} rows, cols {c0}..{c1}) fixing x{j}={v} cuts off a valid matrix");
+                                    }
+                                }
+                                checked += fixes.len();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 100, "too few fixings checked: {checked}");
+    }
+
     /// パッキング・オービトープ (行の和 <= 1) でも、固定が「行の和 <= 1、列が辞書式で広義減少、固定を満たす」行列を
     /// 切らないことを総当たりで確かめる。
     #[test]

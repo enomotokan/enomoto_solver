@@ -27,6 +27,10 @@ const PROOF_REASON_BASE: i32 = -1001;
 /// カットのプールの伝播の、写しの表の番号を入れた理由の値の始まり ([`Domain::set_cut_tag`])。
 const CUT_REASON_BASE: i32 = -1_000_000_001;
 
+/// 診断用: 衝突解析で、カットの写しの番号を持つ理由 (試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` のカットプールの伝播、試作 `ENOMOTO_MIP_ORBITOPE_STATIC=r` の
+/// オービトープの固定) を行から説明した回数 (全スレッドの合計)。
+pub static CUT_REASON_EXPLAINED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// 理由の値が双対証明の通し番号を持てば、その番号。
 pub fn proof_reason_id(r: i32) -> Option<u64> {
     (r <= PROOF_REASON_BASE && r > CUT_REASON_BASE).then(|| (PROOF_REASON_BASE - r) as u64)
@@ -1057,6 +1061,9 @@ impl Domain {
                 (&p.rows[r][..], p.row_up[r], p.row_lo[r])
             } else {
                 let Some(f) = proofs.filter(|_| c.reason <= PROOF_REASON_BASE) else { return None };
+                if c.reason <= CUT_REASON_BASE {
+                    CUT_REASON_EXPLAINED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 owned = f(c.reason);
                 let (cf, rhs) = owned.as_ref()?;
                 (&cf[..], *rhs, f64::NEG_INFINITY)
