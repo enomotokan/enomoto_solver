@@ -1,6 +1,7 @@
 """P2-SCIP-M の分担表: python plan.py P NP → shards_P.json (MIPLIB の 58 問 × 種 1〜3 × {def, fix, fixis}、60 秒)。
 python plan.py Q NQ → shards_Q.json (58 問 × 種 1〜3 × {def, st5}、60 秒)。
 python plan.py D ND → shards_D.json (d の前処理が 1 とも既定とも違う M の問題 × 種 1・2 × {isd}、600 秒)。
+python plan.py E NE → shards_E.json (遅い側の 5 問 × 種 3〜8 × {def, fixis})、python plan.py M3 NM3 → shards_M3.json (M の 37 問 × 種 3 × {def, fixis})。
 python plan.py M NM → shards_M.json (scan_s*.jsonl で前処理が変わった Mittelmann の問題 + 対象 6 問 × 種 1・2 × {def, fixis}、600 秒)。
 見積りは analysis/final_20261118 の def の時間 (解けなかった回は上限) + P は 8 秒・M は 30 秒。"""
 import json, glob, sys
@@ -39,6 +40,20 @@ elif SET == "D":
     ds = [r["problem"] for l in open(D / "scan_d.jsonl") if l.strip() for r in [json.loads(l)] if r["set"] == "M" and r["d"] != r["one"] and r["d"] != r["none"]]
     TM = times("res_M_s*.jsonl", 600)
     balance({(p, s): [(p, "isd", s)] for p in ds for s in (1, 2)}, lambda p, c, s: TM.get((p, 1), 600) + 30, NS, "shards_D.json", 600)
+elif SET in ("E", "M3"):
+    # 運かどうかの確かめ (利用者の判断「遅くなるのが運なら採用」): E = 遅い側に出た 5 問 × 種 3〜8、M3 = M の 37 問 × 種 3。{def, fixis}、600 秒。
+    # 見積りは res_M の同じ問題の def・fixis の時間 (2 種の平均) + 30 秒
+    CF = ["def", "fixis"]
+    tm = {}
+    for f in glob.glob(str(D / "res_M_s*.jsonl")):
+        for l in open(f):
+            r = json.loads(l); tm.setdefault((r["problem"], r["cfg"]), []).append(min(r["result"].get("time") or 600, 600) if solved(r) else 600)
+    est = lambda p, c, s: sum(tm.get((p, c), [600])) / len(tm.get((p, c), [600])) + 30
+    if SET == "E":
+        probs, seeds = ["traininstance6", "supportcase33", "30n20b8", "rocI-4-11", "neos-1171448"], range(3, 9)
+    else:
+        probs, seeds = sorted({t[0] for s in json.loads((D / "shards_M.json").read_text())["shards"] for t in s}), [3]
+    balance({(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, p in enumerate(probs) for s in seeds}, est, NS, f"shards_{SET}.json", 600)
 else:
     CF = ["def", "fixis"]; TM = times("res_M_s*.jsonl", 600)
     ch = {r["problem"] for f in glob.glob(str(D / "scan_s*.jsonl")) for l in open(f) if l.strip() for r in [json.loads(l)] if r.get("changed")}
