@@ -902,6 +902,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_same_obj: bool,
     /// 最初の根の LP の反復数 (丸め系のヒューリスティクスの連続部分の LP の反復上限に使う)
     pub(super) root_lp_iters: u64,
+    /// 試作 `ENOMOTO_MIP_ROOTSB` の `f` で木の予算に数えなかった強分岐の反復
+    pub(super) rootsb_iters: u64,
     /// 試作 `ENOMOTO_MIP_DFSBB` (既定では使わない、treeclose 9.36 節): 今の潜りを始めたときの手間 (主のスレッドの LP の反復)、
     /// 手間の上限で潜りを打ち切ったか、統計 [潜りの回数, 上限で打ち切った回数, 葉・刈り込みで終わった回数]
     dfsbb_start: u64,
@@ -5451,6 +5453,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sublb_seen: std::cell::Cell::new(false),
         submip_same_obj: false,
         root_lp_iters: 0,
+        rootsb_iters: 0,
         dfsbb_start: 0,
         fjsub: None,
         fjsub_next: 0,
@@ -10603,6 +10606,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // (FJ・Local-MIP・ヒューリスティクス) で被約費用による固定が進まない (根の終わりに 1 回だけ)。カットの後の LP も緩和なので固定は正しい
             if super::early_redcost_on() && !self.params.submip && self.snap.is_none() {
                 self.store_root_redcost(root_obj);
+                // 診断 `ENOMOTO_MIP_DIAG_OBBT=U` (analysis/slowm_20261119 §15、振る舞いは変えない): 暫定解の値 U (元の目的の向き) で、根の LP (カットの後) + c x ≤ U の
+                // OBBT の天井と、被約費用・目的の伝播で今固定できる列の数を比べる。固定の前に数える
+                if let Some(u) = env_str!("ENOMOTO_MIP_DIAG_OBBT").and_then(|v| v.parse::<f64>().ok()) {
+                    self.diag_obbt(self.p.sense_sign * u);
+                }
                 self.root_redcost_fixing();
                 if self.params.verbose {
                     eprintln!("MIP: early root reduced costs stored ({} newly fixed integer columns, {:.2}s)", self.newly_fixed_ints(), self.start.elapsed().as_secs_f64());
@@ -14485,6 +14493,250 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 診断 `ENOMOTO_MIP_DIAG_OBBT` (analysis/slowm_20261119 §15): 打ち切り値 `u` (内部の最小化の向き、定数項込み) で、整数列ごとに
+    /// (a) 根の被約費用 (`root_redcost` と `t4_rc_extra`) による締め、(b) 目的の行 `c x ≤ u` の 1 回の伝播 (λ = 0)、(c) 根の LP (カットの後の行) に
+    /// `c x ≤ u` を足した LP で min x_j・max x_j を解く OBBT (天井。どの λ の被約費用の固定もこれを越えない) の固定の数を、標本の列で数えて 1 行で出す。
+    /// 標本は大域的に自由な整数列から等間隔に `ENOMOTO_T_MIP_DIAG_OBBT_K` 本 (既定 200)、OBBT の LP は `ENOMOTO_T_MIP_DIAG_OBBT_SECS` 秒 (既定 120) まで。
+    fn diag_obbt(&mut self, u: f64) {
+        use super::lp::{LpStatus, SolveLimits};
+        let t0 = Instant::now();
+        let p = self.p;
+        let n = p.n;
+        let lim = u + 1e-6 * (1.0 + u.abs());
+        let (glo, gup) = (self.dom.global_lo.clone(), self.dom.global_up.clone());
+        let free: Vec<usize> = (0..n).filter(|&j| p.is_int[j] && glo[j] < gup[j]).collect();
+        let fixed_int = |lo: f64, up: f64| (lo - 1e-6).ceil() >= (up + 1e-6).floor();
+        // (a) 被約費用: 列ごとの新しい境界
+        let (mut alo, mut aup) = (glo.clone(), gup.clone());
+        let mut rc_lists: Vec<(f64, Vec<(usize, bool, f64, f64)>)> = self.root_redcost.iter().cloned().collect();
+        rc_lists.extend(self.t4_rc_extra.iter().cloned());
+        for (z, list) in &rc_lists {
+            let gap = lim - z;
+            if !(gap.is_finite() && gap >= 0.0) {
+                continue;
+            }
+            for &(j, at_lower, d, bound) in list {
+                if at_lower {
+                    aup[j] = aup[j].min((bound + gap / d + 1e-9).floor());
+                } else {
+                    alo[j] = alo[j].max((bound - gap / (-d) - 1e-9).ceil());
+                }
+            }
+        }
+        // (b) 目的の行の 1 回の伝播 (大域的な境界で)
+        let (mut blo, mut bup) = (glo.clone(), gup.clone());
+        let ui = lim - p.offset;
+        let (mut minact, mut ninf) = (0.0f64, 0usize);
+        for j in 0..n {
+            let c = p.cost[j];
+            if c == 0.0 {
+                continue;
+            }
+            let b = if c > 0.0 { glo[j] } else { gup[j] };
+            if b.is_finite() { minact += c * b } else { ninf += 1 }
+        }
+        if ninf == 0 {
+            for j in 0..n {
+                let c = p.cost[j];
+                if c == 0.0 || !p.is_int[j] {
+                    continue;
+                }
+                let b = if c > 0.0 { glo[j] } else { gup[j] };
+                let l = (ui - (minact - c * b)) / c;
+                if c > 0.0 { bup[j] = bup[j].min((l + 1e-9).floor()) } else { blo[j] = blo[j].max((l - 1e-9).ceil()) }
+            }
+        }
+        let cnt = |lo: &[f64], up: &[f64], set: &[usize]| -> (usize, usize) {
+            let fx = set.iter().filter(|&&j| fixed_int(lo[j], up[j])).count();
+            let tg = set.iter().filter(|&&j| lo[j] > glo[j] + 1e-9 || up[j] < gup[j] - 1e-9).count();
+            (fx, tg)
+        };
+        let (a_fix, a_tg) = cnt(&alo, &aup, &free);
+        let (b_fix, b_tg) = cnt(&blo, &bup, &free);
+        let ab_fix = free.iter().filter(|&&j| fixed_int(alo[j].max(blo[j]), aup[j].min(bup[j]))).count();
+        // (c) OBBT の天井 (標本)
+        let k = tunable!("ENOMOTO_T_MIP_DIAG_OBBT_K", 200usize, usize).min(free.len());
+        let sample: Vec<usize> = (0..k).map(|t| free[t * free.len() / k.max(1)]).collect();
+        let nr = self.lp.num_rows();
+        let mut rows: Vec<Vec<(usize, f64)>> = (0..nr).map(|i| self.lp.row(i)).collect();
+        let (mut rlo, mut rup): (Vec<f64>, Vec<f64>) = (0..nr).map(|i| self.lp.row_bounds(i)).unzip();
+        rows.push((0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect());
+        rlo.push(f64::NEG_INFINITY);
+        rup.push(ui);
+        let zero = vec![0.0; n];
+        let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&glo, &gup, &zero, &rows, &rlo, &rup);
+        let deadline = t0 + std::time::Duration::from_secs_f64(tunable!("ENOMOTO_T_MIP_DIAG_OBBT_SECS", 120.0, f64));
+        let st0 = lp.solve(&SolveLimits { deadline: Some(deadline), ..Default::default() });
+        let (mut c_fix, mut c_tg, mut done, mut s_ab, mut s_a, mut s_b) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+        let mut infeasible = st0 == LpStatus::Infeasible;
+        if st0 == LpStatus::Optimal {
+            let mut cc = vec![0.0; n];
+            for &j in &sample {
+                if Instant::now() > deadline {
+                    break;
+                }
+                let mut ends = [glo[j], gup[j]];
+                let mut ok = true;
+                for (side, sg) in [(0usize, 1.0f64), (1, -1.0)] {
+                    cc[j] = sg;
+                    lp.set_costs(&cc);
+                    match lp.solve(&SolveLimits { deadline: Some(deadline), ..Default::default() }) {
+                        LpStatus::Optimal => ends[side] = sg * lp.objective(),
+                        LpStatus::Infeasible => { infeasible = true; ok = false; }
+                        _ => ok = false,
+                    }
+                    cc[j] = 0.0;
+                }
+                if !ok {
+                    break;
+                }
+                done += 1;
+                let (lo, up) = ((ends[0] - 1e-6).ceil().max(glo[j]), (ends[1] + 1e-6).floor().min(gup[j]));
+                if fixed_int(lo, up) { c_fix += 1 }
+                if lo > glo[j] || up < gup[j] { c_tg += 1 }
+                if fixed_int(alo[j].max(blo[j]), aup[j].min(bup[j])) { s_ab += 1 }
+                if fixed_int(alo[j], aup[j]) { s_a += 1 }
+                if fixed_int(blo[j], bup[j]) { s_b += 1 }
+            }
+        }
+        // (d) λ を K 個持つ表 (README §15.3): L(λ) = Σ_i λ_i b̂_i + Σ_j min_{大域の箱} d_j x_j、d = c − Aᵀλ (行は根の LP のカットの後の行。λ_i > 0 は下側、
+        // < 0 は上側を使い、使う側が無限なら 0 にする)。c x ≤ u なら d x ≤ u − Σ λ b̂ なので、d_j の向きに動かす幅は (u − L) / |d_j| まで
+        let lagr = |y: &[f64]| -> Option<(f64, Vec<f64>)> {
+            let mut d = p.cost.clone();
+            let mut l = 0.0f64;
+            for i in 0..nr {
+                let (lo, up) = (rlo[i], rup[i]);
+                let yi = if y[i] > 0.0 && lo.is_finite() { y[i] } else if y[i] < 0.0 && up.is_finite() { y[i] } else { 0.0 };
+                if yi == 0.0 {
+                    continue;
+                }
+                l += yi * if yi > 0.0 { lo } else { up };
+                for &(j, a) in &rows[i] {
+                    d[j] -= yi * a;
+                }
+            }
+            for j in 0..n {
+                let b = if d[j] > 0.0 { glo[j] } else if d[j] < 0.0 { gup[j] } else { continue };
+                if !b.is_finite() {
+                    return None;
+                }
+                l += d[j] * b;
+            }
+            Some((l + p.offset, d))
+        };
+        let apply = |l: f64, d: &[f64], lo: &mut [f64], up: &mut [f64]| {
+            let gap = lim - l;
+            if !(gap.is_finite() && gap >= 0.0) {
+                return;
+            }
+            for &j in &free {
+                if d[j] > 1e-9 {
+                    up[j] = up[j].min((glo[j] + gap / d[j] + 1e-9).floor());
+                } else if d[j] < -1e-9 {
+                    lo[j] = lo[j].max((gup[j] - gap / (-d[j]) - 1e-9).ceil());
+                }
+            }
+        };
+        let nfix = |lo: &[f64], up: &[f64], set: &[usize]| set.iter().filter(|&&j| fixed_int(lo[j], up[j])).count();
+        let y0 = self.lp.row_duals();
+        let kmax = tunable!("ENOMOTO_T_MIP_DIAG_OBBT_LAMK", 100usize, usize);
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        // 種類ごとの λ の列 (L, d) を作る。R: 根の双対、C: カットのラウンドの被約費用 (t4_rc_extra、ENOMOTO_MIP_TREE4_RCUNION で溜まる)、
+        // P: 行の境界を 1e-5 の相対で乱した LP の最適双対 (退化した根の別の双対の代わり)、X: 費用を 1e-3 の相対で乱した LP の双対、G: 根の双対に 10% の乱れ
+        let t_lam = Instant::now();
+        let mut fams: Vec<(&str, Vec<(f64, Vec<f64>)>)> = Vec::new();
+        let r0 = lagr(&y0);
+        fams.push(("R", r0.iter().cloned().collect()));
+        let mut cl = Vec::new();
+        for (z, list) in self.t4_rc_extra.iter() {
+            // 表の z はそのラウンドの LP の目的値 (定数項込み)、d は非基底の列の被約費用 (基底の列は 0)
+            let mut d = vec![0.0; n];
+            for &(j, _, dj, _) in list {
+                d[j] = dj;
+            }
+            cl.push((*z, d));
+        }
+        fams.push(("C", cl));
+        let lam_deadline = Instant::now() + std::time::Duration::from_secs_f64(tunable!("ENOMOTO_T_MIP_DIAG_OBBT_LAMSECS", 120.0, f64));
+        let mut lpp = crate::simplex::mip_lp::TwoStageLp::new(&glo, &gup, &p.cost, &rows[..nr], &rlo[..nr], &rup[..nr]);
+        let mut pl = Vec::new();
+        let mut xl = Vec::new();
+        if lpp.solve(&SolveLimits { deadline: Some(lam_deadline), ..Default::default() }) == LpStatus::Optimal {
+            for t in 0..2 * kmax {
+                if Instant::now() > lam_deadline {
+                    break;
+                }
+                if t % 2 == 0 {
+                    let ch: Vec<(usize, f64, f64)> = (0..nr).map(|i| {
+                        let mut e = |b: f64| if b.is_finite() { b + 1e-5 * (1.0 + b.abs()) * (2.0 * rnd() - 1.0) } else { b };
+                        let (lo, up) = (e(rlo[i]), e(rup[i]));
+                        if rlo[i] == rup[i] { (i, lo, lo) } else { (i, lo.min(up), up.max(lo)) }
+                    }).collect();
+                    lpp.set_costs(&p.cost);
+                    lpp.set_row_bounds_many(&ch);
+                } else {
+                    let ch: Vec<(usize, f64, f64)> = (0..nr).map(|i| (i, rlo[i], rup[i])).collect();
+                    lpp.set_row_bounds_many(&ch);
+                    let cc: Vec<f64> = p.cost.iter().map(|&c| c * (1.0 + 1e-3 * (2.0 * rnd() - 1.0))).collect();
+                    lpp.set_costs(&cc);
+                }
+                if lpp.solve(&SolveLimits { deadline: Some(lam_deadline), ..Default::default() }) == LpStatus::Optimal {
+                    if let Some(v) = lagr(&lpp.row_duals()) {
+                        if t % 2 == 0 { pl.push(v) } else { xl.push(v) }
+                    }
+                }
+            }
+        }
+        fams.push(("P", pl));
+        fams.push(("X", xl));
+        let gl: Vec<(f64, Vec<f64>)> = (0..kmax).filter_map(|_| {
+            let y: Vec<f64> = y0.iter().map(|&v| v * (1.0 + 0.1 * (2.0 * rnd() - 1.0))).collect();
+            lagr(&y)
+        }).collect();
+        fams.push(("G", gl));
+        let lam_secs = t_lam.elapsed().as_secs_f64();
+        // 種類ごとに、根の被約費用 (a) と目的の伝播 (b) に足して、K = 10・全部 で固定できる数 (全部の自由な整数列と標本)
+        let sampled = &sample[..done];
+        let mut lam_out = String::new();
+        let base_lo = alo.iter().zip(&blo).map(|(a, b)| a.max(*b)).collect::<Vec<f64>>();
+        let base_up = aup.iter().zip(&bup).map(|(a, b)| a.min(*b)).collect::<Vec<f64>>();
+        let (mut all_lo, mut all_up) = (base_lo.clone(), base_up.clone());
+        let t_apply = Instant::now();
+        let mut napply = 0usize;
+        for (name, list) in &fams {
+            // 種類ごとに、(a)・(b) の固定 (base) から始める (種類の間で足し合わせない。ALL だけ全部を足す)
+            let (mut lo, mut up) = (base_lo.clone(), base_up.clone());
+            let mut k10 = (0usize, 0usize);
+            for (t, (l, d)) in list.iter().enumerate() {
+                apply(*l, d, &mut lo, &mut up);
+                apply(*l, d, &mut all_lo, &mut all_up);
+                napply += 2;
+                if t + 1 == 10 {
+                    k10 = (nfix(&lo, &up, &free), nfix(&lo, &up, sampled));
+                }
+            }
+            if list.len() < 10 {
+                k10 = (nfix(&lo, &up, &free), nfix(&lo, &up, sampled));
+            }
+            let lmin = list.iter().map(|x| x.0).fold(f64::INFINITY, f64::min);
+            let lmax = list.iter().map(|x| x.0).fold(f64::NEG_INFINITY, f64::max);
+            lam_out += &format!("\"{name}\":{{\"k\":{},\"k10\":[{},{}],\"kall\":[{},{}],\"L\":[{lmin:.6e},{lmax:.6e}]}},", list.len(), k10.0, k10.1, nfix(&lo, &up, &free), nfix(&lo, &up, sampled));
+        }
+        let us_per = t_apply.elapsed().as_secs_f64() * 1e6 / napply.max(1) as f64;
+        lam_out += &format!("\"ALL\":[{},{}],\"lam_secs\":{lam_secs:.2},\"apply_us\":{us_per:.1}", nfix(&all_lo, &all_up, &free), nfix(&all_lo, &all_up, sampled));
+        eprintln!("OBBTLAM {{\"base\":[{ab_fix},{s_ab}],\"obbt\":[{c_fix},{done}],{lam_out}}}");
+        eprintln!(
+            "OBBTDIAG {{\"u\":{u:.10e},\"root\":{:.10e},\"n\":{n},\"free_int\":{},\"rows\":{nr},\"rc\":[{a_fix},{a_tg}],\"objprop\":[{b_fix},{b_tg}],\"rc_or_obj_fix\":{ab_fix},\"rc_lists\":{},\"sample\":{k},\"done\":{done},\"obbt\":[{c_fix},{c_tg}],\"sample_rc\":{s_a},\"sample_obj\":{s_b},\"sample_rc_or_obj\":{s_ab},\"lp0\":\"{st0:?}\",\"infeasible\":{infeasible},\"secs\":{:.2}}}",
+            self.root_redcost.as_ref().map_or(f64::NAN, |r| r.0), free.len(), rc_lists.len(), t0.elapsed().as_secs_f64()
+        );
+    }
+
     /// 根の LP の被約費用を保存する。
     fn store_root_redcost(&mut self, root_obj: f64) {
         // 診断用: 根の被約費用を取る LP の状態が `root_obj` の LP と同じか (ヒューリスティクスが費用・境界を変えたまま戻していないと、
@@ -16681,7 +16933,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.last_sb = None;
         self.poly_diag_raised.clear();
+        let sb_iters0 = self.sb_iters;
         let r = self.select_branch_inner(frac, node_obj, depth);
+        // 試作 `ENOMOTO_MIP_ROOTSB` の `f`: 強めた強分岐の反復を木の強分岐の予算に数えない
+        if !self.params.submip && depth <= tunable!("ENOMOTO_T_MIP_ROOTSB_DEPTH", 0usize, usize) && super::rootsb_flags().is_some_and(|f| f.contains('f')) {
+            self.rootsb_iters += self.sb_iters - sb_iters0;
+            self.sb_iters = sb_iters0;
+        }
         // 試作 `ENOMOTO_MIP_GEN_LAZY_SB`: 強分岐の子の LP 解が破った外した行を戻し、分枝せずにノードの LP を解き直す
         let r = if self.gen_lazy.has_pending() {
             match r {
@@ -16708,15 +16966,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 BranchAction::Prune => ("prune", -1),
                 BranchAction::Resolve => ("resolve", -1),
             };
+            // 分枝した列の両側の子の LP を反復の上限なしで解いた値 (どの設定でも同じ物差しで分枝の上がり幅を比べる。LP の状態は戻す)
+            if let BranchAction::Branch { col, value } = r {
+                let saved = self.lp.save_state();
+                let (lo, up) = (self.dom.lo[col], self.dom.up[col]);
+                let mut val = [String::new(), String::new()];
+                for (side, is_up) in [(0usize, false), (1usize, true)] {
+                    if is_up {
+                        self.lp.set_col_bounds(col, self.bce(col, value), up);
+                    } else {
+                        self.lp.set_col_bounds(col, lo, self.bfl(col, value));
+                    }
+                    let st = self.lp.solve(&self.limits_k(u64::MAX / 4, 1));
+                    val[side] = if st == LpStatus::Optimal { format!("{:.10e}", self.lp.objective() + self.p.offset) } else { format!("\"{st:?}\"") };
+                    self.lp.restore_state(&saved);
+                }
+                eprintln!("SBCHOSEN {{\"restarts\":{},\"col\":{col},\"z\":{node_obj:.10e},\"down\":{},\"up\":{}}}", self.params.restarts, val[0], val[1]);
+            }
             let pl = self.prune_limit();
             eprintln!(
-                "SBEND {{\"restarts\":{},\"action\":\"{act}\",\"col\":{col},\"sb\":{},\"nfrac\":{},\"z\":{:.10e},\"cutoff\":{},\"inc\":{},\"t\":{:.3}}}",
+                "SBEND {{\"restarts\":{},\"action\":\"{act}\",\"col\":{col},\"sb\":{},\"nfrac\":{},\"z\":{:.10e},\"cutoff\":{},\"inc\":{},\"sb_iters\":{},\"rootsb_iters\":{},\"t\":{:.3}}}",
                 self.params.restarts,
                 self.last_sb.is_some(),
                 frac.len(),
                 node_obj,
                 if pl.is_finite() { format!("{pl:.10e}") } else { "null".to_string() },
                 self.incumbent.as_ref().map_or("null".to_string(), |(z, _)| format!("{z:.10e}")),
+                self.sb_iters,
+                self.rootsb_iters,
                 self.start.elapsed().as_secs_f64()
             );
         }
@@ -16944,6 +17221,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let unreliable: usize = cands.iter().filter(|&&(j, _, _)| (self.pc.min_observations(j) as f64) < thr_of(self, j)).count();
         let lookahead = (tunable!("ENOMOTO_T_MIP_SB_LOOKAHEAD", 9.0, f64) * (1.0 + unreliable as f64 / cands.len().max(1) as f64)) as usize;
         let max_tried = tunable!("ENOMOTO_T_MIP_SB_MAXCAND", 100usize, usize);
+        // 試作 `ENOMOTO_MIP_ROOTSB` = 文字の並び (既定では使わない、analysis/disj_20261119.md の 9 節): 深さ `ENOMOTO_T_MIP_ROOTSB_DEPTH`
+        // (既定 0 = 根だけ) までのノード (サブ MIP でない) で強分岐を強める。根の強分岐は子の LP の反復を最大 500 で打ち切り、途中の値
+        // (多くは親の値のまま) を上がり幅 0 と見て、改善のない候補が lookahead (約 18) 本続くと評価をやめるので、M の大きな問題では
+        // 子の LP を最後まで解けば下界が数 %〜十数 % 上がる列を評価しないか低く見積もっていた
+        // - `i`: 子の LP の反復の上限を `ENOMOTO_T_MIP_ROOTSB_ITERMULT` (既定 1) × 根の LP の反復 (1000 以上) にする (500 より下げない、
+        //   `ENOMOTO_T_MIP_ROOTSB_ITERCAP` (既定 50000) まで)
+        // - `l`: lookahead を `ENOMOTO_T_MIP_ROOTSB_LA` 倍 (既定 4)、評価する候補の上限を `ENOMOTO_T_MIP_ROOTSB_MAXCAND` (既定 200) 以上にする
+        // - どちらでも、このノードの強分岐の反復を `ENOMOTO_T_MIP_ROOTSB_WORK` (既定 20) × 根の LP の反復 (1000 以上) までにする
+        //   (時間でなく仕事量の上限。木の予算 `maxsb` の代わりに使う)。`f` を足すと、このノードの強分岐の反復を木の予算 (`sb_iters`) に数えない
+        let rsb = super::rootsb_flags().filter(|_| !self.params.submip && depth <= tunable!("ENOMOTO_T_MIP_ROOTSB_DEPTH", 0usize, usize));
+        let rsb_on = |c: char| rsb.is_some_and(|f| f.contains(c));
+        let rsb_unit = self.root_lp_iters.max(1000) as f64;
+        let sb_iter_limit = if rsb_on('i') {
+            ((tunable!("ENOMOTO_T_MIP_ROOTSB_ITERMULT", 1.0, f64) * rsb_unit) as u64).clamp(sb_iter_limit, tunable!("ENOMOTO_T_MIP_ROOTSB_ITERCAP", 50_000u64, u64).max(sb_iter_limit))
+        } else {
+            sb_iter_limit
+        };
+        let lookahead = if rsb_on('l') { (lookahead as f64 * tunable!("ENOMOTO_T_MIP_ROOTSB_LA", 4.0, f64)) as usize } else { lookahead };
+        let max_tried = if rsb_on('l') { max_tried.max(tunable!("ENOMOTO_T_MIP_ROOTSB_MAXCAND", 200usize, usize)) } else { max_tried };
+        let rsb_sb0 = self.sb_iters;
+        let rsb_work = tunable!("ENOMOTO_T_MIP_ROOTSB_WORK", 20.0, f64) * rsb_unit;
+        // 予算の判定: 試作では、このノードで使った反復と仕事量の上限を比べる
+        let maxsb = if rsb.is_some() { rsb_sb0 as f64 + rsb_work } else { maxsb };
         let mut best: Option<(usize, f64, f64)> = None; // (列, 値, スコア)
         self.last_sb = None;
         let mut best_sb: Option<(usize, f64, f64)> = None; // best が強分岐で評価した列なら (列, 下の子の値, 上の子の値)
