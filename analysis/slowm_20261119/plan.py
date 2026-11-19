@@ -1,5 +1,6 @@
 """P2-SCIP-M の分担表: python plan.py P NP → shards_P.json (MIPLIB の 58 問 × 種 1〜3 × {def, fix, fixis}、60 秒)。
 python plan.py Q NQ → shards_Q.json (58 問 × 種 1〜3 × {def, st5}、60 秒)。
+python plan.py D ND → shards_D.json (d の前処理が 1 とも既定とも違う M の問題 × 種 1・2 × {isd}、600 秒)。
 python plan.py M NM → shards_M.json (scan_s*.jsonl で前処理が変わった Mittelmann の問題 + 対象 6 問 × 種 1・2 × {def, fixis}、600 秒)。
 見積りは analysis/final_20261118 の def の時間 (解けなかった回は上限) + P は 8 秒・M は 30 秒。"""
 import json, glob, sys
@@ -33,6 +34,11 @@ elif SET == "Q":
     CF = ["def", "st5"]; TP = times("res_P_s*.jsonl", 60)
     balance({(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, p in enumerate(PROBS) for s in (1, 2, 3)},
             lambda p, c, s: TP.get((p, 1), 60) + 8, NS, "shards_Q.json", 60)
+elif SET == "D":
+    # scan_d.jsonl で d の前処理が 1 とも既定とも違う問題 (ほかの問題の d の結果は、前処理が同じ側 (def か fixis) の結果で代える)
+    ds = [r["problem"] for l in open(D / "scan_d.jsonl") if l.strip() for r in [json.loads(l)] if r["set"] == "M" and r["d"] != r["one"] and r["d"] != r["none"]]
+    TM = times("res_M_s*.jsonl", 600)
+    balance({(p, s): [(p, "isd", s)] for p in ds for s in (1, 2)}, lambda p, c, s: TM.get((p, 1), 600) + 30, NS, "shards_D.json", 600)
 else:
     CF = ["def", "fixis"]; TM = times("res_M_s*.jsonl", 600)
     ch = {r["problem"] for f in glob.glob(str(D / "scan_s*.jsonl")) for l in open(f) if l.strip() for r in [json.loads(l)] if r.get("changed")}
