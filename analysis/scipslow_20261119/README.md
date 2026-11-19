@@ -74,3 +74,15 @@ SCIP 10.0.2 (pyscipopt 6.3.0、逐次) と当方 (1 スレッド) を同じ種�
 - 確かめ: cargo test 409 通過。`ENOMOTO_MIP_ORBPP_REPROBE=1`・`ENOMOTO_T_MIP_ORBPP_MIN_COLS=2`・`_MIN_ROWS=2` (小さい問題でも静的にする) で
   mip_fuzz_symmetric 0/300・fuzz_tiny 0/400。誤答 0 (この fuzz で固定の後の処理が何回働いたかは数えていない)。
 - 判断 (親に提案): graph20 の根は SCIP 並みになったが全体は速くならないので、P・M の計測はしない。差は木 (衝突解析など) の側。
+
+## 5. PROBE_USELESS の 1 版目の P と 2 版目 (2026-11-19)
+
+- 1 版目 (含意を数えず、固定も締め付けも増えない試しが 50 回で打ち切り、c7d25b0bd) の P (58 問 × 種 1〜3 × 60 秒・4 スレッド、`res_P_v1_s*.jsonl`):
+  解けた 133 → 133、食い違い 0、SGM pu50 / def **+3.2% [−4.3%, +12.5%]**。**全種で遅い: drayage-25-23 3.39・physiciansched6-2 2.03・neos-827175 1.62・
+  roll3000 1.44**。全種で速い: neos8 0.53・neos-911970 0.69。
+- drayage-25-23 (1 スレッド): 既定のプロービングは 0.06 秒で含意 5.2 万本を集める。1 版目は 76 回で打ち切り含意 2665 本 → 木が遅い。含意も成果。
+- 2 版目 (SCIP の `maxtotaluseless` の形): 固定・締め付けも、新しい含意 (試した列と同じ行に入らない列への含意) も出ない試しが 50 回続いたら打ち切る。
+  SCIP の `maxuseless` (固定・締め付けのない試し 1000 回) に当たる上限は、physiciansched6-2 が 37 → 80 秒になったので既定で使わない (`ENOMOTO_T_MIP_PROBE_USELESS_MAX`)。
+- 2 版目の手元 (1 スレッド・種 1、秒、def / 2 版目): drayage-25-23 1.4 / 1.3、physiciansched6-2 37.2 / 40.2、neos-827175 8.7 / 5.9、roll3000 99.6 / 100.6、
+  air03 6.5 / 4.6、neos8 8.9 / 7.8、hypothyroid-k1 31.2 / 28.1。
+- 確かめ (2 版目): cargo test 409 通過、`fuzz.sh` 6 本で誤答 0。P は 2 版目で測り直す (`res_P_s*.jsonl`、分担表は同じ)。
