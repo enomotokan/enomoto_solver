@@ -6541,7 +6541,24 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
         let fixed_pass0 = fixed;
         spec_ver = u64::MAX;
+        // 試作 `ENOMOTO_MIP_PROBE_USELESS` = K (既定では使わない。analysis/scipslow_20261119): SCIP の「50 回続けて全く役に立たない試しで打ち切る」
+        // と同じく、固定も締め付けも増えない試しが K 回続いたらプロービングをやめる (含意は数えない)。air03 は 512 列を試して固定・締め付け・
+        // 同値な組が 0 のまま 2.9 秒 (SCIP は 51 回で打ち切り 0.4 秒)
+        let useless_k = env_str!("ENOMOTO_MIP_PROBE_USELESS").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        let (mut useless_run, mut useless_last) = (0usize, fixed + tightened);
         for (cnt, &j) in cands.iter().enumerate() {
+            if useless_k > 0 {
+                if fixed + tightened > useless_last {
+                    useless_run = 0;
+                    useless_last = fixed + tightened;
+                }
+                if useless_run >= useless_k {
+                    if verbose {
+                        eprintln!("MIP: probing: PROBE_USELESS: {useless_run} successive probes without fixings or tightenings, stopped");
+                    }
+                    break 'passes;
+                }
+            }
             let (cap, wcap) = if fixed + tightened > 0 { (time_cap_found, wcap1) } else { (time_cap, wcap0) };
             // 診断用 (`ENOMOTO_MIP_DEBUG_PROBE_PROGRESS`): 16 候補ごとの経過 (CPU 時間・試した数・固定・締め付け・含意の数)
             if cnt % 16 == 0 && verbose && env_str!("ENOMOTO_MIP_DEBUG_PROBE_PROGRESS").is_some() {
@@ -6558,6 +6575,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             }
             let found0 = fixed + tightened;
             probed += 1;
+            useless_run += 1;
             // `ENOMOTO_MIP_PREPAR` の `p`: 窓の結果を使う (窓がない・古ければ、ここから窓を作る)
             let spec_res = if let Some(pool) = &pool {
                 let valid = spec_ver == ver && cnt >= spec_start && cnt < spec_start + spec.len();
