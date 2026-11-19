@@ -85,3 +85,24 @@ dano3_3 (4 スレッド 159 秒、1 スレッド 81 秒) の、木を分け合�
 - P: 58 問 × 種 1〜3 × {def, p2rrc}、60 秒・4 スレッド、2 分担 (各 1.41 時間): `python run.py PP2RRC K` (K = 0・1) → `res_PP2RRC_sK.jsonl`。
   P で止まる問題は走査では 0 問なので、ほぼ同じ結果になるはずの確かめ。
 - 回し方: リポジトリの根で `pip install -e .` の後、`cd analysis/par4slow_20261119 && python run.py MP2RRC K`。集計は `python summ.py MP2RRC p2rrc`・`python summ.py PP2RRC p2rrc`。
+
+## 結果: P2RRC (`summ_PP2RRC.txt`・`summ_MP2RRC.txt`、ビルド f2fe3471e、4 スレッド)
+
+- M (7 問 × 種 1・2・600 秒、28 行): 解けた 6 → 6、SGM p2rrc / def **−10.2% (区間 −33.1%〜+6.8%、どちらかが解けた 3 問)**、crash 0・食い違い 0。
+  dano3_3 210.3 → 95.6 秒 (種 1)・98.5 → 96.5 秒 (種 2)。dano3_5 299.2 → 360.1 (種 1)・339.3 → 322.0 (種 2)。rmatr100-p10 は差なし (25.1/25.5・24.3/24.5)。
+  rmatr200-p5・cmflsp50-24-8-8・cost266-UUE・net12 は両方とも時間切れ。暫定解は rmatr200-p5・net12 で同じ、cmflsp50-24-8-8 は 2 種とも def が良い
+  (56316482 対 56587154・56587768 対 57000989)、cost266-UUE は種 1 で def・種 2 で p2rrc が良い。
+- P (58 問 × 種 1〜3・60 秒、348 行): 解けた 139 → 138、SGM **+1.5% (区間 −1.2%〜+5.6%)**、crash 0・食い違い 0。全種で 1.25 倍超の遅れは noswot 2.16 (2.01・2.07・2.43)。
+- noswot の確かめ (`one.py noswot 4 種 60`、`log_noswot_nsw*`): 6 回とも根の被約費用は「none」(候補なし) で終わり、自由な列の割合の行も P2RRC の行も出ない
+  (P2RRC は働いていない)。取り直しでは def → p2rrc が種 1 43.8 → 32.4 秒・種 2 時間切れ → 49.7 秒・種 3 12.4 → 37.2 秒で、向きが種で入れ替わる (揺れ)。
+  P は走査どおり P2RRC が働く問題が 0 問で、P の差 (区間の上限 +5.6%・解けた数の 1 減) は同じ動きの 2 回どうしの揺れの大きさを表す。
+- 見立て: 働くのは自由な列の割合が 0.9 以上の 6 問だけで、4 スレッドで遅かった dano3_3 種 1 が 2.2 倍速くなる。ほかは揺れの範囲 (dano3_5 は種で逆向き)。
+  気になる点は cmflsp50-24-8-8 の暫定解が 2 種とも少し悪いこと (サブ MIP が暫定解を良くしていた可能性)。
+
+## 種 3 の追加 (利用者の判断: M の 7 問に種 3 を足して決める)
+
+- 分担表 `shards_MP2RRC3.json` (手で作った、7 問 × 種 3 × {p2rrc, def}、600 秒・4 スレッド、2 分担・各 0.85〜0.9 時間、種 3 は order() と同じく p2rrc が先):
+  `python run.py MP2RRC3 K` (K = 0・1) → `res_MP2RRC3_sK.jsonl`。ビルドは種 1・2 と同じ f2fe3471e (その後 src が変わったので、作業木を f2fe3471e にして analysis だけ今の版を持ってくる):
+  `git fetch origin ccr-1beed81b-ex0uhq && git checkout --detach f2fe3471e && git checkout origin/ccr-1beed81b-ex0uhq -- analysis/par4slow_20261119 && pip install -e .` の後、
+  `cd analysis/par4slow_20261119 && python run.py MP2RRC3 K`。
+- 種 1〜3 の集計: `python summ.py MP2RRC+MP2RRC3 p2rrc` (summ.py の SET は + でつなげる)。
