@@ -66,3 +66,12 @@
 - `shards_P.json` (60 秒、2 分担、各 0.8〜0.85 時間): `cd analysis/ostatic_20261119 && python run.py P K` (K = 0, 1)
 - `shards_M.json` (600 秒、14 分担、各 1.0〜1.5 時間): `python run.py M K` (K = 0〜13)
 - 集計: `python summ.py P orr`・`python summ.py P ostr` (M も同じ)。結果は `res_SET_sK.jsonl`、途中から再開できる。
+
+## 結論 (利用者の判断、2026-11-19): 計測は打ち切り
+
+- 静的なオービトープ (ostr・orr) の P・M の計測は回さない。上の分担表 (`shards_P.json`・`shards_M.json`) は使わない。
+- 理由: (1) 同じく動的な対称性の扱いを静的な行・固定に置き換える SST=x の P・M の計測 (analysis/sstx_20261119) で sst / def が M +16.4%・P +6.5% と悪く、
+  解の写しの効きも見えなかった。遅さは動的な扱いを静的なものに置き換えた側から来ている。(2) graph20 の手元の数字で、全部を静的にする ostr は
+  41〜46 秒 (既定 5〜7 秒) と大きく遅く、ORBPP の静的なものだけに理由を付ける orr はノードを 9〜23% 減らすが時間はほぼ同じで、
+  orr が働くのも P・M では graph20 だけ。
+- 試作 (`ENOMOTO_MIP_ORBITOPE_STATIC=r`・`ENOMOTO_MIP_ORBITOPE_REASON`) は既定オフのまま残す (理由の行の正しさは単体テストと fuzz 12 本 bad 0 で確かめてある)。
