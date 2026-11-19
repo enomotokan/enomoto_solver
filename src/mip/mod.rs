@@ -4284,7 +4284,7 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Opti
     // 試作 `ENOMOTO_MIP_INTSING` の `h` (既定はオフ、[`crate::presolve::colsingleton::INTSING_HOLD`]): 最上段の呼び出しの間は INTSING を保留し、
     // 支配される 0-1 列の固定の後のかけ直しで消す。入れ子の呼び出し (かけ直し) は状態をそのまま受け継ぐ
     use crate::presolve::colsingleton::{intsing_domfirst, intsing_order, INTSING_HELD, INTSING_HOLD};
-    // 試作 `ENOMOTO_MIP_INTSING` の `o` (既定はオフ、analysis/slowm_20261119 §13.4): 最上段の呼び出しで、支配される 0-1 列の固定
+    // `ENOMOTO_MIP_INTSING` の `o` (2026-11-19 から既定の `1go` に含む、analysis/slowm_20261119 §13.4): 最上段の呼び出しで、支配される 0-1 列の固定
     // ([`dominated_binary_fixings`]) を前処理の前の元の問題に先にかける (固定が自由な列の `ENOMOTO_T_MIP_DOMCOL_MIN_FRAC` に満たなければ捨てる、
     // 後の段と同じ規則)。INTSING が列の費用を行の他の列へ移して費用が負の列を作る前に固定を済ませる (air03: 1g では固定 2297 → 160 本)。
     // 固定を捨てた問題は、`o` なしとまったく同じ前処理になる

@@ -88,12 +88,12 @@ thread_local! {
 
 /// `ENOMOTO_MIP_INTSING` に `h` が入っているか (既定はオフ)
 pub(crate) fn intsing_order() -> bool {
-    env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v != "0" && v.contains('h'))
+    env_def!("ENOMOTO_MIP_INTSING", "1go").is_some_and(|v| v != "0" && v.contains('h'))
 }
 
-/// `ENOMOTO_MIP_INTSING` に `o` が入っているか (既定はオフ): 支配される 0-1 列の固定を、前処理の前の元の問題に先にかける (§13.4)
+/// `ENOMOTO_MIP_INTSING` に `o` が入っているか (既定 `1go` に含む): 支配される 0-1 列の固定を、前処理の前の元の問題に先にかける (§13.4)
 pub(crate) fn intsing_domfirst() -> bool {
-    env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v != "0" && v.contains('o'))
+    env_def!("ENOMOTO_MIP_INTSING", "1go").is_some_and(|v| v != "0" && v.contains('o'))
 }
 
 /// G を行列形式で受け取る版の列シングルトン消去 (1 パス、連鎖しない)。
@@ -170,23 +170,23 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
     if okeys.is_some() {
         col_order.sort_by_key(|&j| super::ordkey::sort_key(&okeys, j));
     }
-    // 試作 `ENOMOTO_MIP_INTSING=1` (既定では使わない、analysis/slowm_20261119): 整数列でも、等式 1 本にだけ現れ、その係数が ±1 で、
+    // `ENOMOTO_MIP_INTSING` (2026-11-19 から既定 `1go`、`=0` で以前の動き。analysis/slowm_20261119 §13.5、docs/improvement_history.md): 整数列でも、等式 1 本にだけ現れ、その係数が ±1 で、
     // 行の他の列がすべて整数列・係数が整数・右辺が整数なら消す (復元値 `(rhs − Σ) / ±1` は整数)。SCIP の setppc・linear の
     // 多重集約に当たる。neos-1445765 は費用つきの 0-1 列 y_k が `Σ_{S_k} x_j − y_k = 0` の 1 本にだけ現れ (1000 本)、
     // SCIP は y_k を消して費用を x_j に移す (2146 → 1134 列)。当方でこの形を解くと 183.8 → 47.8 秒 (1 スレッド)
-    let int_sing = int_mask.is_some() && env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v != "0");
+    let int_sing = int_mask.is_some() && env_def!("ENOMOTO_MIP_INTSING", "1go").is_some_and(|v| v != "0");
     // `d` (定義の形だけ): 行の他の列の係数の符号がすべて消す列の係数と逆 (`y = Σ a x`、a > 0 の形) のときだけ消す。air03 の
     // set partitioning 行 (`x_j + Σ = 1`、符号がそろう) の列シングルトン 118 本を消すと、費用が行の他の列へ配られて後の前処理
     // (支配列) が働かなくなり、0 ノードのまま 3.2〜5.1 → 4.7〜6.6 秒に遅くなった
-    let int_sing_def = env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v.contains('d'));
+    let int_sing_def = env_def!("ENOMOTO_MIP_INTSING", "1go").is_some_and(|v| v.contains('d'));
     // `g` (数え上げの一般整数列を残す): 消す列が 0-1 でなく (境界の幅 > 1)、費用があり、行の他の列の係数の符号がすべて消す列と逆
     // (`y = Σ a x`、a > 0 の形で y が「個数」を数える費用つきの一般整数列) なら消さない。この列で分枝できなくなるのが損の元と見る
     // (rocI-4-11・rococoC10-001000・rococoB10-011000 はこの形の列だけを 1〜4 本消し、M の 3〜8 種で 1.08・1.47 倍。0-1 列の同じ形
     // (neos-1445765、0.20 倍) と、符号の混ざる行 (hypothyroid-k1、0.60 倍) は消す)
-    let int_sing_cnt = env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v.contains('g'));
+    let int_sing_cnt = env_def!("ENOMOTO_MIP_INTSING", "1go").is_some_and(|v| v.contains('g'));
     // `s` (同符号の 0-1 列を残す): 消す列が 0-1 で、行の他の係数がすべて消す列と同符号 (`y + Σ a x = b`、a > 0 の形) なら消さない
     // (supportcase33・air03・traininstance6 の損はこの形だけ。M・P の 1g で解けた数 −3・air03 の素の時間 1.3〜1.5 倍。README §11.6〜§12)
-    let int_sing_same = env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v.contains('s'));
+    let int_sing_same = env_def!("ENOMOTO_MIP_INTSING", "1go").is_some_and(|v| v.contains('s'));
     let int_sing_hold = int_sing && INTSING_HOLD.with(|h| h.get()) == 1;
     let is_integral = |v: f64| (v - v.round()).abs() <= 1e-12 * (1.0 + v.abs());
     let intsing_log = int_sing && env_str!("ENOMOTO_MIP_INTSING_LOG").is_some();

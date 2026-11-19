@@ -10882,3 +10882,18 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
     (p2rrc は 205 秒)。暫定解はどちらも RENS の後に木のスレッドの mutation で良くなり、この回は p2rrc が良い。サブ MIP が解を良くしていたのではなく揺れ。
 - 確かめ: cargo test 411 通過・0 失敗、mip_fuzz_vs_highs 300 (4・1 スレッド)・mip_fuzz_fixed_charge 100・mip_fuzz_mcf 100 で bad 0。
 - 記録: analysis/par4slow_20261119/README.md (P2RRC の節)。
+
+## 2026-11-19: 等式 1 本にだけ現れる整数列を消す ENOMOTO_MIP_INTSING を既定 (1go) にする (採用)
+
+- 既定にした: `ENOMOTO_MIP_INTSING=1go` (戻すのは `=0`)。整数列でも、等式 1 本にだけ現れ、その係数が ±1、行の他の列がすべて整数列で係数・右辺が整数なら
+  列シングルトンとして消し、費用を行の他の列へ移す (SCIP の setppc・linear の多重集約に当たる)。`g`: 費用つきで幅 > 1 の「数える」一般整数列
+  (行の他の係数がすべて逆符号) は消さない (rocI-4-11・rococoC10-001000 で分枝の手がかりを失う)。`o`: 元の問題に「費用を移すと費用 ≥ 0 の列の費用が負になる」
+  整数列シングルトンがあるときだけ、支配される 0-1 列の固定を前処理の前に先にかける (air03 は INTSING の後では費用が負になって固定が 2297 → 160 本に減り
+  1.3 倍遅くなった)。P 58 問・M 32 問の前処理で `o` が働く (固定を残す) のは air03 だけ。
+- 結果 (4 スレッド): M 37 問 (600 秒、種 1〜3、traininstance6 は 16 種・rocI-4-11 と supportcase33 は 8 種) SGM **−7.1% (区間 −15.2%〜+1.7%)**、
+  解けた 72 → 71 (traininstance6 −2: 種 1〜8 で 4 → 2、種 9〜16 で 6 → 6、rocI-4-11 +1)、全種で 1.25 倍超なし。neos-1445765 0.20 倍、
+  supportcase33 0.67 倍、piperout-27 0.77 倍、mushroom-best 0.76 倍。P 58 問 (60 秒、種 1〜3、air03 は 10 種) SGM −0.9% (区間 −3.0%〜+1.3%)、
+  解けた 144 → 144、全種で 1.25 倍超なし (hypothyroid-k1 0.60 倍、eil33-2 0.88 倍)。
+- 確かめ: cargo test 411 通過・0 失敗、fuzz_intsing 300・fuzz 7 本 (既定のまま) で bad 0。P の 6 問 (air03・hypothyroid-k1・eil33-2・nw04・graph20-20-1rand・30n20b8) で
+  既定の前処理が `=1go` と同じ (`=0` とは違う) ことを確かめた。
+- 記録: analysis/slowm_20261119/README.md §11〜§13。
