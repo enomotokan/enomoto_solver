@@ -78,6 +78,19 @@ pub struct EliminationResult {
     pub substitutions: Vec<Substitution>,
 }
 
+// 試作 `ENOMOTO_MIP_INTSING` の `o` (前処理の順番、analysis/slowm_20261119 §13): 整数最適化の外側の前処理 (`presolve_mip` の最上段) の間は、
+// 費用を移すと費用 ≥ 0 の列の費用が負になる整数列だけ INTSING で消さずに数え (状態 1)、支配される 0-1 列の固定 (`ENOMOTO_MIP_DOMCOL`) を
+// 済ませてから、かけ直しの前処理で消す (状態 2)。消す列の費用を行の他の列へ移すと費用が負の列ができ、支配の逆向きの経路 (費用 ≥ 0 が要る) が使えなくなる (air03: 固定 2297 → 160 本)
+thread_local! {
+    pub(crate) static INTSING_HOLD: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    pub(crate) static INTSING_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// `ENOMOTO_MIP_INTSING` に `o` が入っているか (既定はオフ)
+pub(crate) fn intsing_order() -> bool {
+    env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v != "0" && v.contains('o'))
+}
+
 /// G を行列形式で受け取る版の列シングルトン消去 (1 パス、連鎖しない)。
 /// 出現回数は入力から一度だけ数えるので、消去によって新たに生じた
 /// シングルトンは次回の呼び出しで拾われる。
@@ -169,6 +182,7 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
     // `s` (同符号の 0-1 列を残す): 消す列が 0-1 で、行の他の係数がすべて消す列と同符号 (`y + Σ a x = b`、a > 0 の形) なら消さない
     // (supportcase33・air03・traininstance6 の損はこの形だけ。M・P の 1g で解けた数 −3・air03 の素の時間 1.3〜1.5 倍。README §11.6〜§12)
     let int_sing_same = env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v.contains('s'));
+    let int_sing_hold = int_sing && INTSING_HOLD.with(|h| h.get()) == 1;
     let is_integral = |v: f64| (v - v.round()).abs() <= 1e-12 * (1.0 + v.abs());
     let intsing_log = int_sing && env_str!("ENOMOTO_MIP_INTSING_LOG").is_some();
     let mut intsing_stats: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -192,6 +206,15 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
                         && row.iter().all(|&(k, v)| if k == j { (v.abs() - 1.0).abs() <= 1e-12 } else { m[k] && is_integral(v) && (!int_sing_def || v * aj < 0.0) })
                 });
             if !ok {
+                continue;
+            }
+            // 保留するのは、費用を移すと費用 ≥ 0 の列の費用が負になる列だけ (支配の逆向きの経路を壊す形)。ほかは今まで通りここで消す
+            if int_sing_hold && new_c[j] != 0.0 && {
+                let i = owning_a_row[j].unwrap();
+                let aj = a_rows[i].iter().find(|&&(k, _)| k == j).map_or(0.0, |&(_, v)| v);
+                a_rows[i].iter().any(|&(k, v)| k != j && new_c[k] >= 0.0 && new_c[k] - new_c[j] * v / aj < -1e-9 * (1.0 + new_c[k].abs()))
+            } {
+                INTSING_HELD.with(|h| h.set(h.get() + 1));
                 continue;
             }
         }
