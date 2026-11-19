@@ -1254,6 +1254,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     orbitopes: Rc<Vec<super::symmetry::Orbitope>>,
     /// lex-leader の行を作った生成元 ([`super::SYM_LEX_GENS`]。`ENOMOTO_MIP_SYM_LEX_CANON` で使う)
     lex_gens: Rc<Vec<Vec<usize>>>,
+    /// 試作 `ENOMOTO_MIP_SYM_SST=x` の SST の段 ([`super::SYM_SST_CHAIN`]、[`super::symmetry::sst_canonicalize`])。空なら写さない
+    sst_chain: Rc<Vec<super::symmetry::SstLevel>>,
     /// orbital fixing の生成元 ([`super::sym_of`]、[`super::SYM_OF_GENS`])。空なら使わない。
     of_gens: Rc<super::symmetry::OrbitalGens>,
     /// orbital fixing の軌道の控え (除いた生成元, 軌道)。同じ生成元を除くノードが続く (潜る) 間は作り直さない。
@@ -1555,6 +1557,7 @@ pub(crate) struct TreeSnapshot {
     orbitopes: Vec<super::symmetry::Orbitope>,
     orig: Option<std::sync::Arc<MipProblem>>,
     lex_gens: Vec<Vec<usize>>,
+    sst_chain: Vec<super::symmetry::SstLevel>,
     of_gens: Vec<Vec<usize>>,
     /// 試作 `ENOMOTO_MIP_SYMREFL` の反転を含む生成元
     refl_gens: Vec<super::symdyn::SignedGen>,
@@ -5633,6 +5636,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             None if params.submip && !super::subb::sub_tables() => Rc::new(Vec::new()),
             None => super::SYM_LEX_GENS.with(|t| t.borrow().clone()).unwrap_or_default(),
         },
+        sst_chain: match &snap {
+            Some(sn) => Rc::new(sn.sst_chain.clone()),
+            None if params.submip && !super::subb::sub_tables() => Rc::new(Vec::new()),
+            None => super::SYM_SST_CHAIN.with(|t| t.borrow().clone()).unwrap_or_default(),
+        },
         of_gens: Rc::new(super::symmetry::OrbitalGens::new(match &snap {
             Some(sn) => sn.of_gens.clone(),
             None if params.submip && !super::subb::sub_tables() => Vec::new(),
@@ -7313,6 +7321,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for o in self.orbitopes.iter() {
                 o.canonicalize(&mut x);
             }
+            // 試作 `ENOMOTO_MIP_SYM_SST=x`: SST の行に反する解を SST の段の群で写して、行を満たす代表にする
+            // (元の問題での実行可能性と目的値は変わらない。analysis/sstx_20261119/)
+            let sstx = !self.sst_chain.is_empty() && orig.n == self.p.n && self.sst_chain.iter().all(|lv| lv.fits(self.p.n));
+            if sstx && !self.p.is_feasible(&x, FEASTOL) {
+                #[cfg(debug_assertions)]
+                let z0 = orig.objective(&x);
+                super::symmetry::sst_canonicalize(&self.sst_chain, &mut x);
+                #[cfg(debug_assertions)]
+                {
+                    let z1 = orig.objective(&x);
+                    debug_assert!(orig.is_feasible(&x, 10.0 * FEASTOL), "SST=x: the mapped solution is infeasible in the problem without the SST rows");
+                    debug_assert!((z1 - z0).abs() <= 1e-7 * z0.abs().max(1.0), "SST=x: the mapped solution changed the objective {z0} -> {z1}");
+                }
+            }
             // `ENOMOTO_MIP_SYM_LEX_CANON` (試作): lex-leader の行に反する解も生成元で写して使う。9946555 (対称性の検出の近道)
             // で neos-950242 に lex-leader の行 3-4 本が付くようになり、根の局所探索・FJ の解 (4、22 など) が並べ替えられずに
             // 捨てられていた (以前は対称性なしで 4 を見つけていた)
@@ -7353,7 +7375,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     return false;
                 }
-                if env_str!("ENOMOTO_MIP_SYM_ORIG_INC").is_none() {
+                // 試作 `ENOMOTO_MIP_SYM_SST=x`: 写しても SST の行に反する解 (許容差の際など) も、目的値は打ち切りに使えるので暫定解にする
+                if env_str!("ENOMOTO_MIP_SYM_ORIG_INC").is_none() && !sstx {
                     return false;
                 }
                 orig_only = true;
@@ -23282,7 +23305,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new(if gap4('o') { o.clone_without_implications() } else { (**o).clone() }));
         let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis, clq_lazy: self.clq_lazy.clone(), gen_lazy: self.gen_lazy.clone() };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), sst_chain: (*self.sst_chain).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis, clq_lazy: self.clq_lazy.clone(), gen_lazy: self.gen_lazy.clone() };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
