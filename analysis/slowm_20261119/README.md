@@ -113,3 +113,15 @@
   - どちらの規則でも、x_j が整数になる解の集まりの中では、大域の境界を丸めても解を失わない (伝播・被約費用の固定・目的の打ち切りで締まった
     非整数の境界 0.532 も、整数の解にとっては 1 と同じ)。丸めは新しい前提を足さず、カットがすでに置いている前提に境界を合わせるだけ。
 - 確かめ (直した木 b6762abe3 相当、既定): 下の表。
+
+| 確かめ | 既定化 d7a8e2567 (締めの直しだけ) | b6762abe3 (両方、既定) | b6762abe3 で `TIGHTEN_INTBOUND=0` (丸めだけ) |
+|---|---|---|---|
+| fuzz_intsing 4000 問 (seed 0〜3999) | bad 0 | bad 0 | bad 0 |
+| mip_fuzz_vs_highs 300 問 | bad 0 | bad 0 | — |
+| cargo test --release | 409 通過・0 失敗 | 409 通過・0 失敗 | — |
+| fuzz 7 本 (analysis/wrong_widden_20261117/fuzz.sh) | すべて bad 0 | すべて bad 0 | — |
+
+- 速さ: 丸めはカットを変える (強くなる) ので、P 58 問 × 種 1〜3 × {既定, `sri0` = `SEP_ROUND_IMPLINT=0`}・60 秒・4 スレッドの分担表
+  `analysis/wrong_widden_20261117/shards_PR.json` (4 分担・各約 0.74 時間、`python run.py PR K`、集計 `python summ.py PR sri0`)。
+  締めの直しのほうは同じく PT (`tib0`)。
+
