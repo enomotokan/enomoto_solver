@@ -5932,10 +5932,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 up[j] = (up[j] + FEASTOL).floor();
             }
         }
-        // 分離器に渡す大域の境界も、暗黙の整数列だけ同じく丸めたもの (カットの後処理の係数の締め・ゼロ半分・並列の生成・整数の変数上下限が
-        // 整数列の境界は整数と前提する。丸めていない非整数の境界で締めたカットが最適解を切っていた: fuzz_intsing の seed 3103、analysis/slowm_20261119)。
-        // `ENOMOTO_MIP_SEP_ROUND_IMPLINT=0` で以前の (丸めない大域の境界を渡す) 動き
-        let round_sep = env_def!("ENOMOTO_MIP_SEP_ROUND_IMPLINT", "1").is_some();
+        // 試作 `ENOMOTO_MIP_SEP_ROUND_IMPLINT=1` (既定では使わない。analysis/slowm_20261119 の 7.1 節): 分離器に渡す大域の境界も、暗黙の整数列だけ
+        // 同じく丸めたものにする。正しさに要るのは `finish_cut` の係数の締めだけで、それは `ENOMOTO_MIP_TIGHTEN_INTBOUND` (既定) が受け持つ
+        // (ゼロ半分は整数でない境界の列を自分で外す。ほかはどんな正しい境界でも妥当)。丸めはカットを変えるだけで、P で約 2% 遅かった
+        let round_sep = env_str!("ENOMOTO_MIP_SEP_ROUND_IMPLINT").is_some_and(|v| v != "0");
         let (sglo, sgup): (Vec<f64>, Vec<f64>) = if round_sep { (lo.clone(), up.clone()) } else { (self.dom.global_lo.clone(), self.dom.global_up.clone()) };
         let mut xv = x.to_vec();
         for i in 0..mr {
