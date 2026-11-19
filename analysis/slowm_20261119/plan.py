@@ -4,6 +4,7 @@ python plan.py D ND → shards_D.json (d の前処理が 1 とも既定とも違
 python plan.py E NE → shards_E.json (遅い側の 5 問 × 種 3〜8 × {def, fixis})、python plan.py M3 NM3 → shards_M3.json (M の 37 問 × 種 3 × {def, fixis})。
 python plan.py G NG → shards_G.json (INTSING の `g` 形で消す列が `1` と変わる問題 × 種 1〜3 (2 問は 1〜8) × {def, isg} (同じビルドの対)、600 秒)。
 python plan.py H NH → shards_H.json (INTSING の `1gs` 形で消す列が減って 0 本にならない 7 問 × {def, isgs} (同じビルドの対)、600 秒)。
+python plan.py L NL → shards_L.json (1go で解けた数が減った supportcase33 種 1〜8・traininstance6 種 9〜16 × {def, isgo}、600 秒)。
 python plan.py M NM → shards_M.json (scan_s*.jsonl で前処理が変わった Mittelmann の問題 + 対象 6 問 × 種 1・2 × {def, fixis}、600 秒)。
 見積りは analysis/final_20261118 の def の時間 (解けなかった回は上限) + P は 8 秒・M は 30 秒。"""
 import json, glob, sys
@@ -78,6 +79,18 @@ elif SET == "H":
     jobs = {(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, p in enumerate(probs)
             for s in ((1, 2, 3, 4, 5, 6, 7, 8) if p in ("rocI-4-11", "piperout-08", "piperout-27") else (1, 2, 3))}
     balance(jobs, est, NS, "shards_H.json", 600)
+elif SET == "L":
+    # INTSING の `1go` (= M では 1g と同じ前処理) で解けた数が減った 2 問の運の確かめ: supportcase33 種 1〜8、traininstance6 種 9〜16
+    # (種 1〜8 は G で回した)。{def, isgo} を同じビルドの対で、600 秒
+    CF = ["def", "isgo"]
+    tm = {}
+    for f in glob.glob(str(D / "res_G_s*.jsonl")) + glob.glob(str(D / "res_M*_s*.jsonl")) + glob.glob(str(D / "res_E_s*.jsonl")):
+        for l in open(f):
+            r = json.loads(l)
+            tm.setdefault(r["problem"], []).append(min(r["result"].get("time") or 600, 600) if solved(r) else 600)
+    est = lambda p, c, s: sum(tm.get(p, [600])) / len(tm.get(p, [600])) + 30
+    jobs = {(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, (p, ss) in enumerate([("supportcase33", range(1, 9)), ("traininstance6", range(9, 17))]) for s in ss}
+    balance(jobs, est, NS, "shards_L.json", 600)
 elif SET in ("E", "M3"):
     # 運かどうかの確かめ (利用者の判断「遅くなるのが運なら採用」): E = 遅い側に出た 5 問 × 種 3〜8、M3 = M の 37 問 × 種 3。{def, fixis}、600 秒。
     # 見積りは res_M の同じ問題の def・fixis の時間 (2 種の平均) + 30 秒
