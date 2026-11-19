@@ -145,3 +145,10 @@ P・M (Mittelmann 48 問・MIPLIB 58 問) で目的が全部 0 なのは ns11169
 - 採用の目安との照合: P +2.2%・F +5.0% (区間の上端)、解けた数は減らない、全種で 1.25 倍超遅い問題なし。
 - 誤答の確かめ (実行中): fuzz_symfeas.py (mip_fuzz_symmetric の問題の目的を 0 にし、仕事の行を = 1 にした対称な実行可能性問題、HiGHS と状態を突き合わせ、
   解の実行可能性も確かめる) を SST_FEAS で、オービトープあり (規模 1)・なし (規模 1・2) × 300 問。ログは fuzz_logs/。
+
+### 5.6 SST_FEAS の採用 (2026-11-19、利用者の判断)
+
+- `ENOMOTO_MIP_SYM_SST_FEAS` を既定にした (`=0` で以前の形)。docs/improvement_history.md に節を足した。
+- 採用の版での確かめ: cargo test 409 通過・0 失敗。fuzz 6 本すべて bad 0 (fuzz_logs/adopt_*.txt): fuzz_symfeas 規模 1 (オービトープあり) 0/300・
+  規模 2 (オービトープなし) 0/300、mip_fuzz_symmetric 0/300・オービトープなし規模 2 0/300、mip_fuzz_vs_highs 0/300・1 スレッド 0/300。
+- fuzz_symfeas で SST の行が実際に入るのは少ない (規模 2 で 30 問中 3 問、規模 3 で 200 問中 1 問。規模 3 の 200 問も bad 0)。

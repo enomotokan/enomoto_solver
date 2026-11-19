@@ -2533,11 +2533,11 @@ pub(crate) fn sym_sst() -> bool {
     env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v != "0")
 }
 
-/// 試作 `ENOMOTO_MIP_SYM_SST_FEAS` (p2inf_20261119、既定では使わない): 目的が全部 0 の問題 (実行可能性問題) に限って [`sym_sst`] と同じく
+/// `ENOMOTO_MIP_SYM_SST_FEAS` (p2inf_20261119、2026-11-19 に既定にした。`=0` で以前の動き): 目的が全部 0 の問題 (実行可能性問題) に限って [`sym_sst`] と同じく
 /// SST のカットを使う。SST を orbital fixing の代わりにすると対称性のある最適化問題で遅くなる (hang_20261117 15.2・15.3 節) が、
 /// fhnw-binpack4-4 (目的が全部 0) は SST で初めて実行不能を示せる。同じ成分で orbital fixing と混ぜると代表の選び方が食い違うので混ぜない
 pub(crate) fn sym_sst_feas() -> bool {
-    env_str!("ENOMOTO_MIP_SYM_SST_FEAS").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_SYM_SST_FEAS", "1").is_some_and(|v| v != "0")
 }
 
 pub(crate) fn sym_of() -> bool {
