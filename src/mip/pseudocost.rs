@@ -295,6 +295,15 @@ impl Pseudocost {
         self.inf_total_n += 1;
     }
 
+    /// 診断用: 記録した分枝の数と、1 回あたりの推論の数の平均。
+    pub fn inference_count(&self) -> u64 {
+        self.inf_total_n
+    }
+
+    pub fn inference_mean(&self) -> f64 {
+        if self.inf_total_n > 0 { self.inf_total / self.inf_total_n as f64 } else { 0.0 }
+    }
+
     pub fn inference(&self, j: usize, up: bool) -> f64 {
         let d = up as usize;
         let avg = if self.inf_total_n > 0 { self.inf_total / self.inf_total_n as f64 } else { 0.0 };
