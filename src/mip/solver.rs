@@ -10002,7 +10002,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             super::record_root_bound(root_obj);
         }
         let root_iters = self.lp.total_iterations();
-        self.root_lp_iters = root_iters;
+        // 試作 `ENOMOTO_MIP_P2RIT` (既定では使わない、analysis/par4slow_20261119/README.md): 根の LP を前処理の LP の基底から温め直したときは、
+        // 予算の物差しの「根の LP の反復」に前処理の LP の最初の LP の反復 ([`super::HO4_PROBE_ITERS`]) を使う (温め直しの数百反復だと
+        // 潜りの手間の上限・LNS の予算などが数分の 1 に縮む。ns1208400 は 4 スレッドだけ基底が渡って 1782 → 388 反復)
+        self.root_lp_iters = if probe_kind != "none" && env_str!("ENOMOTO_MIP_P2RIT").is_some() {
+            root_iters.max(super::HO4_PROBE_ITERS.with(|c| c.get()))
+        } else {
+            root_iters
+        };
         self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
         self.root_lp_ticks = crate::ticks::total() - tk_root_lp;
         if !self.params.submip {
