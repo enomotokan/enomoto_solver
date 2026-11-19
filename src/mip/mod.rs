@@ -4281,6 +4281,85 @@ fn clqprb_shadow_locks(p: &MipProblem, params: MipParams, pre_submip: bool, lp_p
 }
 
 fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Option<f64>) -> Option<Presolved> {
+    // 試作 `ENOMOTO_MIP_INTSING` の `h` (既定はオフ、[`crate::presolve::colsingleton::INTSING_HOLD`]): 最上段の呼び出しの間は INTSING を保留し、
+    // 支配される 0-1 列の固定の後のかけ直しで消す。入れ子の呼び出し (かけ直し) は状態をそのまま受け継ぐ
+    use crate::presolve::colsingleton::{intsing_domfirst, intsing_order, INTSING_HELD, INTSING_HOLD};
+    // 試作 `ENOMOTO_MIP_INTSING` の `o` (既定はオフ、analysis/slowm_20261119 §13.4): 最上段の呼び出しで、支配される 0-1 列の固定
+    // ([`dominated_binary_fixings`]) を前処理の前の元の問題に先にかける (固定が自由な列の `ENOMOTO_T_MIP_DOMCOL_MIN_FRAC` に満たなければ捨てる、
+    // 後の段と同じ規則)。INTSING が列の費用を行の他の列へ移して費用が負の列を作る前に固定を済ませる (air03: 1g では固定 2297 → 160 本)。
+    // 固定を捨てた問題は、`o` なしとまったく同じ前処理になる
+    // INTSING が働かない問題を変えないよう、元の問題に「費用を移すと費用 ≥ 0 の列の費用が負になる」整数列シングルトンがあるときだけ
+    let cost_negating_singleton = |p: &MipProblem| {
+        let isint = |v: f64| (v - v.round()).abs() <= 1e-12 * (1.0 + v.abs());
+        (0..p.n).any(|j| {
+            if !p.is_int[j] || p.cols[j].len() != 1 || p.cost[j] == 0.0 || p.col_lo[j] >= p.col_up[j] {
+                return false;
+            }
+            let (i, aj) = p.cols[j][0];
+            if p.row_lo[i] != p.row_up[i] || !isint(p.row_lo[i]) || (aj.abs() - 1.0).abs() > 1e-12 {
+                return false;
+            }
+            let row = &p.rows[i];
+            row.iter().all(|&(k, v)| k == j || (p.is_int[k] && isint(v)))
+                && row.iter().any(|&(k, v)| k != j && p.cost[k] >= 0.0 && p.cost[k] - p.cost[j] * v / aj < -1e-9 * (1.0 + p.cost[k].abs()))
+        })
+    };
+    if !submip && INTSING_HOLD.with(|h| h.get()) == 0 && !DOMCOL_REPRESOLVING.with(|f| f.get()) && env_def!("ENOMOTO_MIP_DOMCOL", "1").is_some() && intsing_domfirst() && cost_negating_singleton(p) {
+        let t0 = std::time::Instant::now();
+        let fix = dominated_binary_fixings(p);
+        let nfree = (0..p.n).filter(|&j| p.col_lo[j] < p.col_up[j]).count();
+        let min_frac = tunable!("ENOMOTO_T_MIP_DOMCOL_MIN_FRAC", 0.1, f64);
+        let keep = !fix.is_empty() && (fix.len() as f64) >= min_frac * nfree as f64;
+        if verbose {
+            eprintln!("MIP: presolve: {} dominated binaries before the presolve, {} (of {nfree} free columns, {:.2}s, ENOMOTO_MIP_INTSING o)", fix.len(), if keep { "fixed" } else { "dropped" }, t0.elapsed().as_secs_f64());
+        }
+        if keep {
+            let mut q = p.clone();
+            for &(j, v) in &fix {
+                q.col_lo[j] = v;
+                q.col_up[j] = v;
+            }
+            INTSING_HOLD.with(|h| h.set(3));
+            let r = presolve_mip_depth(&q, verbose, submip, lp_probe_secs, 0);
+            INTSING_HOLD.with(|h| h.set(0));
+            return r;
+        }
+    }
+    if !submip && INTSING_HOLD.with(|h| h.get()) == 0 && !DOMCOL_REPRESOLVING.with(|f| f.get()) && env_def!("ENOMOTO_MIP_DOMCOL", "1").is_some() && intsing_order() {
+        INTSING_HOLD.with(|h| h.set(1));
+        INTSING_HELD.with(|h| h.set(0));
+        let r = presolve_mip_depth(p, verbose, submip, lp_probe_secs, 0);
+        // 支配の固定の段まで来ずに終わった (途中で返った) のに消す候補があったなら、前処理の結果にもう一度かけて、そこで消す
+        let held = INTSING_HELD.with(|h| h.get());
+        let r = if INTSING_HOLD.with(|h| h.get()) == 1 && held > 0 {
+            INTSING_HOLD.with(|h| h.set(2));
+            if verbose {
+                eprintln!("MIP: presolve: INTSING held {held} integer singleton candidates; presolving the result again (ENOMOTO_MIP_INTSING h)");
+            }
+            match r {
+                Some(Presolved::Reduced { prob, postsolve, scaling }) => {
+                    // かけ直しと同じく、プロービングと支配の固定はしない
+                    DOMCOL_REPRESOLVING.with(|f| f.set(true));
+                    let r2 = presolve_mip_depth(&prob, verbose, submip, None, 0);
+                    DOMCOL_REPRESOLVING.with(|f| f.set(false));
+                    match r2 {
+                        Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+                        Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().chain(&scaling.d).all(|&d| d == 1.0) => {
+                            let mut postsolve = postsolve;
+                            postsolve.extend(post2);
+                            Some(Presolved::Reduced { prob: prob2, postsolve, scaling })
+                        }
+                        _ => Some(Presolved::Reduced { prob, postsolve, scaling }),
+                    }
+                }
+                other => other,
+            }
+        } else {
+            r
+        };
+        INTSING_HOLD.with(|h| h.set(0));
+        return r;
+    }
     presolve_mip_depth(p, verbose, submip, lp_probe_secs, 0)
 }
 
@@ -4701,7 +4780,16 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         // 固定が自由な列の `ENOMOTO_T_MIP_DOMCOL_REPRESOLVE_FRAC` (既定 5%) 未満なら、かけ直さずに境界だけ固定する
         // (nw04 は 87482 列中 372 列の固定に前処理 1 回 (約 1.8 秒) をかけ直していた)
         let nfree = (0..n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count() + fix.len();
-        if !fix.is_empty() && fix.len() as f64 >= tunable!("ENOMOTO_T_MIP_DOMCOL_REPRESOLVE_FRAC", 0.05, f64) * nfree as f64 {
+        // INTSING の `h`: 保留していた (状態 1) なら解き放ち (状態 2)、消す候補があったなら固定が少なくてもかけ直して、そこで消す
+        let intsing_release = crate::presolve::colsingleton::INTSING_HOLD.with(|h| h.get()) == 1 && {
+            crate::presolve::colsingleton::INTSING_HOLD.with(|h| h.set(2));
+            let held = crate::presolve::colsingleton::INTSING_HELD.with(|h| h.get());
+            if verbose {
+                eprintln!("MIP: presolve: INTSING held {held} integer singleton candidates until the dominated binary fixings (ENOMOTO_MIP_INTSING h)");
+            }
+            held > 0
+        };
+        if intsing_release || (!fix.is_empty() && fix.len() as f64 >= tunable!("ENOMOTO_T_MIP_DOMCOL_REPRESOLVE_FRAC", 0.05, f64) * nfree as f64) {
             DOMCOL_REPRESOLVING.with(|f| f.set(true));
             let r = presolve_mip(&prob, verbose, submip, None);
             DOMCOL_REPRESOLVING.with(|f| f.set(false));
