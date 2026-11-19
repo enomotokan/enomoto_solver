@@ -5370,6 +5370,10 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
         solver::SUBCAP_PROBE_SECS.store(root_secs.to_bits(), std::sync::atomic::Ordering::Relaxed);
     }
     let slow_root = if work { root_iters as f64 * size >= tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_BASIS", 1.5e8, f64) } else { root_secs >= tunable!("ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS", 1.0, f64) };
+    // 試作 `ENOMOTO_MIP_P2BASIS=<秒>` (既定では使わない、analysis/par4slow_20261119/README.md): 手間の見積りで「遅い」としても、実際の
+    // 最初の LP が <秒> 未満なら渡さない (渡すのは根で解き直す手間を省くためなので、速い LP では省ける分が小さく、頂点が変わるだけになる。
+    // ns1208400 は 1 スレッド 1782 反復・4 スレッド 1952 反復で閾値 1.5e8 をまたぎ、0.36 秒の LP の基底が渡る 4 スレッドだけ木が大きい)
+    let slow_root = slow_root && env_str!("ENOMOTO_MIP_P2BASIS").and_then(|v| v.parse::<f64>().ok()).is_none_or(|t| root_secs >= t);
     if verbose {
         eprintln!(
             "MIP: LP probing: root LP {root_secs:.2}s ({root_iters} iters, size {size}), tried {n_tried}, fixed {n_fixed}, basis passed {}, total {} iters {:.2}s",
