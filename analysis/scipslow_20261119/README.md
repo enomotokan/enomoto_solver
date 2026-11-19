@@ -126,3 +126,9 @@ SCIP 10.0.2 (pyscipopt 6.3.0、逐次) と当方 (1 スレッド) を同じ種�
 - 10 回とも最適 −9 (食い違い 0、crash 0)。平均 44.0 → 7.2 秒 (5.2〜7.5 倍)。SCIP 10.0.2 (逐次) は 4.6〜6.6 秒。
 - ORBPP が働くのは P 58・M 48 では graph20 だけ (Mittelmann 186 問の洗い出しは `orbscan.jsonl`、途中まで: supportcase18 は ORBPP で 45 列を固定するが
   REPROBE の固定・外す行とも 0)。ほかの問題では rep は既定と同じ計算。
+
+## 8. 既定化 (2026-11-19、利用者の判断)
+
+- `ENOMOTO_MIP_ORBPP_REPROBE` を既定にした (`env_def!`、`=0` で以前の振る舞い)。docs/improvement_history.md に節を足した。
+- 既定化した木での確かめ: cargo test 409 通過、mip_fuzz_symmetric 0/300 (種 0)・0/300 (種 2000)・下限を下げて 0/300 (種 4000)・fuzz_tiny 0/400・
+  mip_fuzz_vs_highs 0/300 (`fuzz_logs/def_*`)。
