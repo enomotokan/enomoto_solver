@@ -101,7 +101,7 @@
   整数の変数上下限 (`add_int_vbs`)、`VB_IMPL`、暗黙の境界。どれも「`cut_int` の列の境界は整数」と前提する処理で、
   実際に最適解を切ると確かめたのは係数の締めだけ (ほかは非整数の境界で補うとカットが弱くなるか、正しさの前提が崩れる)。
   分枝・伝播 (`domain.rs`) は暗黙の整数列を連続列として扱い (`p.is_int` だけを整数とする)、整数への丸めはしないので同じ取り違えはない。
-- 直し `ENOMOTO_MIP_SEP_ROUND_IMPLINT` (既定、`=0` で以前の動き): `separate()` で暗黙の整数列だけ境界を丸めた写しを作り、上の 10 か所に渡す。
+- 試作 `ENOMOTO_MIP_SEP_ROUND_IMPLINT=1` (b6762abe3 で一度既定にしたが、7.1 節の確かめで正しさに要らず約 2% 遅いので既定から外した): `separate()` で暗黙の整数列だけ境界を丸めた写しを作り、上の 10 か所に渡す。
   fz3103・seed 3006 は 2 つの直しのどちらか一方だけでも正しく、両方を切ると誤る (−12.2・5.8)。
 - 丸めてよい根拠 (暗黙の整数の判定、`MipProblem::implied_integers_opt`、problem.rs。`cut_int` は solver.rs で `p.implied_integers()`、
   前処理後の問題で 1 回判定する):
@@ -145,6 +145,9 @@ PR の比べで丸める既定が約 2% 遅かったので、丸めていない�
 
 結論: 正しさのために丸めが要るのは係数の締めだけで、それは `TIGHTEN_INTBOUND` が受け持つ。`SEP_ROUND_IMPLINT` は「カットを変える」変更
 (丸めた境界でゼロ半分に入る列・締められる係数が増える) で、正しさの直しではない。既定を `0` に戻すのが筋 (判断は親・利用者)。
+
+確かめ (`TIGHTEN_INTBOUND` 既定 + `SEP_ROUND_IMPLINT=0`、ビルド b6762abe3 相当、`fix2/`): fuzz_intsing 4000 問 bad 0、mip_fuzz_vs_highs 300 bad 0、
+fuzz 7 本すべて bad 0 (締めの直しだけの d7a8e2567 でも同じく全部 0、cargo test 409 通過)。締めの直しだけで十分。
 
 ## 8. P (MIPLIB の 58 問 × 種 1〜3、60 秒・4 スレッド、分担、`res_P_s*.jsonl`・`res_Q_s*.jsonl`、`ci.py` → `ci_P.txt`・`ci_Q.txt`)
 
