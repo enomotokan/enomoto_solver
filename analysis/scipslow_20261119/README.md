@@ -33,3 +33,19 @@ SCIP 10.0.2 (pyscipopt 6.3.0、逐次) と当方 (1 スレッド) を同じ種�
   2 周目は CLQPRB の `g` (既定の形の後に含意の形でやり直す)。`ENOMOTO_MIP_CLQPRB` を変えると 1 スレッド・種 1 で 既定 `1dgrs` 9.1 秒、`1dgr` 8.6、
   `1dr` (やり直さず最初から含意の形) 5.4、`1drs` 5.6、`0` 10.4 秒。`g` の元の目的 (puriri の害を避ける) のための最初の既定の形のプロービングが、
   含意の形が残る問題 (neos8・mzzv11・mzzv42z) では丸ごと余分になる。
+- **air03**: プロービングに約 3.5 秒 (512 列を試して固定・締め付け・同値な組とも 0、含意は 92 万本と数える。同値探し 0.55 秒)。SCIP は air03・mc11・
+  hypothyroid-k1・10teams・graph20 で「50 回続けて全く役に立たない試し」でプロービングを打ち切る (0.1 秒以下)。CLQPRB を切っても air03 は 3.6 秒で変わらない。
+
+## 3. 試作 `ENOMOTO_MIP_PROBE_USELESS` = K (src/mip/mod.rs の `probe`、既定では使わない)
+
+- 固定も締め付けも増えない試しが K 回続いたら、そのプロービングを打ち切る (含意は数えない。SCIP の打ち切りの形)。
+- 手元 (1 スレッド・種 1、K = 50、`res_pair.jsonl` の札 `ours_pu50`): air03 6.0 → **3.9 秒**、neos8 7.9 → **3.3 秒** (50 回で打ち切り、同値な組は 0 に
+  なり根の LP は 1660 列のままだが根で解ける)、hypothyroid-k1 28.5 → 27.0、mc11 51.4 → 55.3 (ノード 2588 → 3281、道筋が変わる)、
+  graph20 52.5 → 57.1 (同じ 3940 ノード)、10teams 137.6 → 138.5 (同じ 12901 ノード)。
+- 確かめ: cargo test 409 通過。`fuzz.sh` (K = 1 と 50): fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 0/1000、K = 50 で fuzz_tiny 0/400・
+  fuzz_highs 0/150。誤答 0。
+- 計測 (`cfg.py` = def・pu50、`plan.py`、`run.py`・`summ.py` は gate2 tab の写し):
+  P = MIPLIB 58 問 × 種 1〜3 × {def, pu50} × 60 秒・4 スレッド (`shards_P.json`、4 分担 × 見積り 0.74 時間)、
+  M = Mittelmann 48 問 (vshighs の M) × 種 1・2 × 600 秒 (`shards_M.json`、11 分担 × 見積り 1.5 時間)。
+  回し方: リポジトリの根で `rm -f target/wheels/*.whl; sh analysis/revisit_20261112/build.sh` の後、`python analysis/scipslow_20261119/run.py P K` (K = 0〜3)、
+  `... run.py M K` (K = 0〜10)。集計 `python analysis/scipslow_20261119/summ.py P` (M も同じ)。
