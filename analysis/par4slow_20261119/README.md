@@ -106,3 +106,7 @@ dano3_3 (4 スレッド 159 秒、1 スレッド 81 秒) の、木を分け合�
   `git fetch origin ccr-1beed81b-ex0uhq && git checkout --detach f2fe3471e && git checkout origin/ccr-1beed81b-ex0uhq -- analysis/par4slow_20261119 && pip install -e .` の後、
   `cd analysis/par4slow_20261119 && python run.py MP2RRC3 K`。
 - 種 1〜3 の集計: `python summ.py MP2RRC+MP2RRC3 p2rrc` (summ.py の SET は + でつなげる)。
+- cmflsp50-24-8-8 の暫定解の確かめ (ビルド f2fe3471e、`one.py cmflsp50-24-8-8 4 1 600 cm1def|cm1rrc`、2 つを同じ機械で同時に回した、`log_cmflsp50-24-8-8_cm1*`):
+  def では根の被約費用のサブ MIP (自由 0.9422・15445/16392 列) が 68 秒に始まり、266 秒にノード上限 500 で**解なし** (198 秒) で終わる。
+  本体はこれを待って木に入るのが 271 秒 (p2rrc は 205 秒)。暫定解はどちらも RENS の 5.8724e7 (162 秒) の後、木のスレッドの mutation で良くなる。
+  最後は def 5.7877e7・p2rrc 5.7518e7 で、この回は p2rrc が良い (計測の 2 種とは逆)。サブ MIP が解を良くしていたのではなく、木の mutation の当たり外れ (揺れ)。
