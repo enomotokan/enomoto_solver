@@ -612,6 +612,13 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) sb_lps: u64,
     /// 分枝の選択の回数と、そのうち双対退化で強分岐をしなかった回数 (診断用)。
     pub(super) sb_degen_stats: [u64; 2],
+    /// 診断 `ENOMOTO_MIP_FEAT_DIAG` (p2inf_20261119) の数え上げ: [下界で刈ったノード, 実行不能で刈ったノード, 整数の葉,
+    /// 双対退化の度合いの和 ×1000, 退化を測った数]
+    pub(super) feat: [u64; 5],
+    /// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN`: (重みを上げたか, 窓の始まりのノード数, 窓の始まりの衝突の数, 上げたときのノード数)
+    pub(super) cw_dyn_state: (bool, u64, u64, u64),
+    /// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP`: 窓ごとの「作った衝突 / ノード」の移動平均 (負なら未測定)
+    pub(super) cw_ramp_ema: f64,
     /// `ENOMOTO_MIP_PLSB` の `g`: 木全体 (このスレッドの求解) の強分岐の利得の統計
     pub(super) plsb_tree: super::plsb::GainStats,
     /// `ENOMOTO_MIP_PLSB` の判定の数: 判定できない・続ける・止める・従来より長く続けた・従来より早く止めた・
@@ -5284,6 +5291,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_secs: 0.0,
         sb_lps: 0,
         sb_degen_stats: [0; 2],
+        feat: [0; 5],
+        cw_dyn_state: (false, 0, 0, 0),
+        cw_ramp_ema: -1.0,
         plsb_tree: super::plsb::GainStats::new(),
         plsb_stats: [0; 8],
         sb_agree: std::collections::VecDeque::new(),
@@ -12640,6 +12650,58 @@ impl<'a, L: MipLp> Solver<'a, L> {
             first = false;
             self.nodes += 1;
             self.tprof.nodes += 1;
+            // 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN` = w: 始めは衝突の重み 0 (既定と同じ)。ノード `ENOMOTO_T_MIP_CW_DYN_WINDOW` (既定 200) ごとに、
+            // その窓で作った衝突の数 / ノード数が `ENOMOTO_T_MIP_CW_DYN_RATE` (既定 0.7) 以上なら、以後は重みを w にし、HiGHS 式の衝突スコアも
+            // 入れる (一度上げたら戻さない)。衝突をよく作る問題ほど衝突を分枝に使う得が大きい (p2inf_20261119 5 節の数え上げ)。決め方はノード数 (仕事量)
+            // 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP` = w: DYN の段階形 (シグモイド)。窓 (`ENOMOTO_T_MIP_CW_DYN_WINDOW` ノード) ごとの「作った衝突 / ノード」r を
+            // 移動平均 (前の値と半々) でならした r̄ から、重みを w × σ((r̄ − r_mid) / s) にする (上げ下げとも)。r_mid = `ENOMOTO_T_MIP_CW_RAMP_MID`
+            // (既定 0.69)、s = `ENOMOTO_T_MIP_CW_RAMP_S` (既定 0.1): 数え上げ (feat.jsonl、ノード 500) で重みに害のあった問題は r ≤ 0.62 (多くは ≤ 0.46)、
+            // 得のあった問題は r ≥ 0.76 (多くは ≥ 0.8) だったので、真ん中を両者の間 0.69 に、幅を「害の側の多く (≤ 0.46) で 1 割以下、得の側の多く (≥ 0.8)
+            // で 7 割以上」になる 0.1 にした。HiGHS 式の衝突スコア (付け方の切り替えで連続には混ぜられない) は σ ≥ 0.5 の間だけ入れる
+            if let Some(w) = cw_ramp() {
+                let win = tunable!("ENOMOTO_T_MIP_CW_DYN_WINDOW", 200u64, u64).max(1);
+                if self.nodes >= self.cw_dyn_state.1 + win {
+                    let made = self.multi_stats[1].saturating_sub(self.cw_dyn_state.2);
+                    let r = made as f64 / (self.nodes - self.cw_dyn_state.1) as f64;
+                    self.cw_ramp_ema = if self.cw_ramp_ema < 0.0 { r } else { 0.5 * self.cw_ramp_ema + 0.5 * r };
+                    let (mid, sl) = (tunable!("ENOMOTO_T_MIP_CW_RAMP_MID", 0.69, f64), tunable!("ENOMOTO_T_MIP_CW_RAMP_S", 0.1, f64).max(1e-9));
+                    let sig = 1.0 / (1.0 + (-(self.cw_ramp_ema - mid) / sl).exp());
+                    let nw = w * sig;
+                    if self.params.verbose && !self.params.submip && (sig >= 0.5) != self.cw_dyn_state.0 {
+                        eprintln!("MIP: CW_RAMP (tid {}): conflict weight {:.4} -> {nw:.4} at node {} (conflicts per node {r:.2}, smoothed {:.2})", self.pool_tid, self.pc.cw_dyn, self.nodes, self.cw_ramp_ema);
+                    }
+                    self.pc.cw_dyn = nw;
+                    // HiGHS 式の衝突スコアを入れるか (σ ≥ 0.5)
+                    self.cw_dyn_state.0 = sig >= 0.5;
+                    if sig >= 0.5 {
+                        self.cw_dyn_state.3 += 1;
+                    }
+                    self.cw_dyn_state.1 = self.nodes;
+                    self.cw_dyn_state.2 = self.multi_stats[1];
+                }
+            }
+            if let Some(w) = cw_dyn() {
+                let win = tunable!("ENOMOTO_T_MIP_CW_DYN_WINDOW", 200u64, u64).max(1);
+                if self.cw_dyn_state.0 {
+                    self.pc.cw_dyn = w;
+                } else if self.nodes >= self.cw_dyn_state.1 + win {
+                    let made = self.multi_stats[1].saturating_sub(self.cw_dyn_state.2);
+                    let rate = made as f64 / (self.nodes - self.cw_dyn_state.1) as f64;
+                    if rate >= tunable!("ENOMOTO_T_MIP_CW_DYN_RATE", 0.7, f64) {
+                        self.cw_dyn_state.0 = true;
+                        self.cw_dyn_state.3 = self.nodes;
+                        self.pc.cw_dyn = w;
+                        if self.params.verbose && !self.params.submip {
+                            eprintln!("MIP: CW_DYN (tid {}): conflict weight raised to {w} at node {} (conflicts per node {rate:.2} in the last {} nodes)", self.pool_tid, self.nodes, self.nodes - self.cw_dyn_state.1);
+                        }
+                    }
+                    self.cw_dyn_state.1 = self.nodes;
+                    self.cw_dyn_state.2 = self.multi_stats[1];
+                }
+            }
+            if !self.params.submip && feat_diag().is_some_and(|n| self.nodes == n) {
+                eprintln!("{}", self.feat_line("snapshot"));
+            }
             if tree_log() {
                 self.tl_src = self.tp_kind as u8;
                 self.tl_plb = node.lower_bound;
@@ -12677,6 +12739,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if replay.is_some() {
                     self.rp_log(&node, "lb", f64::NAN, f64::NAN, -1, &mut rp_stats);
                 }
+                self.feat[0] += 1;
                 if tree_log() && !self.params.submip {
                     eprintln!("ENODE d={} r=pop_lb lp={} rows={}{}", node.depth, node.lower_bound, self.lp.num_rows(), self.tl_tail());
                 }
@@ -12856,6 +12919,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.rp_log(&node, rp_stage, f64::NAN, f64::NAN, -1, &mut rp_stats);
                 }
                 self.pc.infeasible_leaves += 1;
+                self.feat[1] += 1;
                 if tree_log() && !self.params.submip {
                     eprintln!("ENODE d={} r=prop lp={} rows={}{}", node.depth, node.lower_bound, self.lp.num_rows(), self.tl_tail());
                 }
@@ -13248,6 +13312,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if resolves == 0 {
                             rp_obj0 = f64::INFINITY;
                         }
+                        self.feat[if st == LpStatus::Infeasible { 1 } else { 0 }] += 1;
                         if tree_log() && !self.params.submip {
                             eprintln!("ENODE d={} r={} lp={} rows={}{}", node.depth, if st == LpStatus::Infeasible { "lpinf" } else { "lpobj" }, self.lp.objective() + self.p.offset, self.lp.num_rows(), self.tl_tail());
                         }
@@ -13308,6 +13373,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if node_obj >= self.prune_limit() {
+                    self.feat[0] += 1;
                     if tree_log() && !self.params.submip {
                         eprintln!("ENODE d={} r=lpobj lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                     }
@@ -13325,6 +13391,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     match self.tubr_filter(frac, &x, node_obj) {
                         Some(f) => f,
                         None => {
+                            self.feat[0] += 1;
                             if tree_log() && !self.params.submip {
                                 eprintln!("ENODE d={} r=tubr lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                             }
@@ -13348,6 +13415,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         resolves += 1;
                         continue;
                     }
+                    self.feat[2] += 1;
                     if tree_log() && !self.params.submip {
                         eprintln!("ENODE d={} r=int lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                     }
@@ -13412,6 +13480,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     xp("r_fix");
                     if !self.dom.propagate(self.p) {
+                        self.feat[0] += 1;
                         if tree_log() && !self.params.submip {
                             eprintln!("ENODE d={} r=redcost lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                         }
@@ -14050,6 +14119,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     BranchAction::Resolve => {
                         resolves += 1;
                         if !self.dom.propagate(self.p) {
+                            self.feat[1] += 1;
                             if tree_log() && !self.params.submip {
                                 eprintln!("ENODE d={} r=sbprop lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                             }
@@ -14060,6 +14130,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     BranchAction::Prune => {
+                        self.feat[1] += 1;
                         if tree_log() && !self.params.submip {
                             eprintln!("ENODE d={} r=sb lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                         }
@@ -16815,6 +16886,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SB_NO_DEGEN_SKIP`: 双対退化でも強分岐を止めない
         let degenerate = depth > 0 && env_str!("ENOMOTO_MIP_SB_NO_DEGEN_SKIP").is_none() && {
             let (deg, ratio) = self.dual_degeneracy();
+            self.feat[3] += (deg * 1000.0) as u64;
+            self.feat[4] += 1;
             deg >= 0.8 || ratio >= 2.0
         };
         self.sb_degen_stats[0] += 1;
@@ -19276,6 +19349,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 診断 `ENOMOTO_MIP_FEAT_DIAG` の 1 行: 衝突の重みが要る問題・害のある問題を分ける特徴の候補 (p2inf_20261119 5 節)。
+    /// ノード数、刈ったノードの内訳 (下界・実行不能・整数の葉)、衝突の解析の回数・作った衝突・平均の長さ、擬似費用の利得が正の観測の割合、
+    /// 双対退化の平均、目的が全部 0 か、目的の刻み (整数値の目的) の有無
+    fn feat_line(&self, tag: &str) -> String {
+        let fd = self.pc.flat_diag();
+        let deg = if self.feat[4] > 0 { self.feat[3] as f64 / 1000.0 / self.feat[4] as f64 } else { f64::NAN };
+        let zero_obj = self.p.cost.iter().all(|&c| c == 0.0);
+        format!(
+            "FEAT {tag} tid={} nodes={} prune_bound={} prune_infeas={} int_leaves={} conf_calls={} conflicts={} conf_meanlen={:.1} posgain={}/{} degen={:.3} zero_obj={} obj_step={}",
+            self.pool_tid, self.nodes, self.feat[0], self.feat[1], self.feat[2], self.multi_stats[0], self.multi_stats[1],
+            self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, fd.2, fd.3, deg, zero_obj, self.obj_step.is_some()
+        )
+    }
+
     /// 診断用 (`ENOMOTO_MIP_TREE_LOG`): `ENODE`・`EBR` の行の後ろに足す、取り出したときの下界・出どころ・経過秒・ノードの通し番号。
     fn tl_tail(&self) -> String {
         let nfix = (0..self.p.n).filter(|&j| self.p.is_int[j] && self.dom.lo[j] == self.dom.up[j]).count();
@@ -19308,7 +19395,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let t0 = Instant::now();
         // `ENOMOTO_MIP_HIGHS_CONFLICT_SCORE`: 分枝の衝突スコアを HiGHS と同じく、解析で説明に使った境界の変更全部の列で
         // 上げる (作れた衝突のリテラルでは上げない)
-        let hcs = highs_conflict_score();
+        let hcs = highs_conflict_score() || (self.cw_dyn_state.0 && (cw_dyn().is_some() || cw_ramp().is_some()));
         let mut bumps: Vec<(usize, bool)> = Vec::new();
         // 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN`: 双対証明で締めた変更も証明の行から説明する (HiGHS の explainBoundChange が
         // カットのプールの行を遡るのと同じ)。証明が捨てられた・番号が付け直された後は遡らない (従来と同じ葉)
@@ -25862,6 +25949,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: NODECNT degenerate duals (tid {}): nodes {}, candidates {}, btran {}, fixed by theta >= gap {}, fixed by theta = inf {}, nodes changed {}, sign mismatch {}", self.pool_tid, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
             }
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
+            if feat_diag().is_some() {
+                eprintln!("{}", self.feat_line("end"));
+            }
             eprintln!("MIP: inference: branchings counted {}, mean bound changes after a branching {:.2} (ENOMOTO_MIP_INF_ALL {})", self.pc.inference_count(), self.pc.inference_mean(), inf_all());
             let fd = self.pc.flat_diag();
             eprintln!("MIP: conflict weight FLAT (tid {}): hybrid scores {}, with the flat condition {}; positive gains {} of {} observations", self.pool_tid, fd.0, fd.1, fd.2, fd.3);
@@ -26344,6 +26434,24 @@ pub(super) fn orbitope_reason() -> bool {
 
 /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
 /// 通し番号を残し、HiGHS 式の衝突解析でその証明の行から説明して遡る。
+/// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN` = w (p2inf_20261119、既定では使わない): 解いている途中で衝突の重みを w に上げる ([`Solver`] の木のループ)。
+fn cw_dyn() -> Option<f64> {
+    static F: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_WEIGHT_DYN").and_then(|v| v.parse().ok()).filter(|&w: &f64| w > 0.0))
+}
+
+/// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP` = w (p2inf_20261119、既定では使わない): 衝突の重みを窓ごとの衝突の多さのシグモイドで連続に決める。
+fn cw_ramp() -> Option<f64> {
+    static F: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP").and_then(|v| v.parse().ok()).filter(|&w: &f64| w > 0.0))
+}
+
+/// 診断 `ENOMOTO_MIP_FEAT_DIAG=N` (p2inf_20261119、既定では出さない): 主の木でノード数が N になったときと終わりに [`Solver::feat_line`] を出す。
+fn feat_diag() -> Option<u64> {
+    static F: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_FEAT_DIAG").and_then(|v| v.parse().ok()))
+}
+
 /// 診断 `ENOMOTO_MIP_DEBUG_BRANCH_PRIO` の順位 (列の番号 → 順位、載っていない列は u32::MAX)。
 fn debug_branch_prio() -> Option<&'static Vec<u32>> {
     static F: std::sync::OnceLock<Option<Vec<u32>>> = std::sync::OnceLock::new();

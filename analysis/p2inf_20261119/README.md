@@ -414,3 +414,26 @@ k = 12 で当方の設定を比べる (sub12.sh、logs/sub12v_*.log、`sub12v_ro
   遡れない (LIT_EXPLAIN なし) ので効きが弱い (部分木で、当方は衝突を全部切っても 1.4 倍しか悪くならないのに、SCIP は切ると 280 倍以上)。
 - 試作は既定では使わない形で残す: `ENOMOTO_MIP_LIT_EXPLAIN`・`ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT` (と `_FRAC`)・`ENOMOTO_MIP_INF_ALL`・
   `ENOMOTO_T_MIP_CONFLICT_LEVELS` (既定 5 = 従来)・診断 `ENOMOTO_MIP_DEBUG_BRANCH_PRIO`、診断の行 `MIP: inference:`・`MIP: conflict weight FLAT`。
+
+## 5. 衝突の重みを解いている途中で上げる (利用者の依頼、2026-11-19)
+
+### 5.1 特徴の数え上げ (`ENOMOTO_MIP_FEAT_DIAG=500`、featscan.py → feat.jsonl、1 スレッド・種 1・主の木のノード 500、事実)
+
+CFX・CFX2 の P・M の 94 問。cfx (一律の重み 0.1) の比と並べると、一番分けたのは「作った衝突 / ノード」:
+- 重みで速くなった問題: mcsched 1.04・fastxgemm 1.20・noswot 0.86・10teams 0.76・net12 0.96・kasai 0.81・qiu 0.88・bnatt400 の部分木 1.46。
+- 重みで遅くなった問題: mas76 0.20・pk1 0.27・supportcase33 0.62・inde 0.14・mik 0.28・markshare 0.07・gen-ip054 0.35・atrato 0.46。
+- 0.7 前後でおおむね分かれるが、例外 fiball (0.16 で速い)・timtab1 (0.75 で 1.25 倍遅い) があり、境目の余裕は狭い (遅い側の最大 0.62、速い側の最小 0.76)。
+  擬似費用の利得が正の割合・双対退化・実行不能で刈った割合は、mcsched (速い) と mas76 (遅い) がほぼ同じ値で分けられない。
+
+### 5.2 試作 (どれも既定では使わない)
+
+- `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN=w`: 始めは重み 0。ノード 200 の窓 (`ENOMOTO_T_MIP_CW_DYN_WINDOW`) の「作った衝突 / ノード」が 0.7 (`ENOMOTO_T_MIP_CW_DYN_RATE`)
+  以上なら、以後は重み w と HiGHS 式の衝突スコア (一度上げたら戻さない)。
+- `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP=w` (シグモイドの段階形、利用者の希望): 窓ごとの r を移動平均 (前の値と半々) でならした r̄ から、重み w × σ((r̄ − r_mid) / s)、
+  上げ下げとも。HiGHS 式の衝突スコアは付け方の切り替えで連続に混ぜられないので σ ≥ 0.5 の間だけ入れる。
+  - r_mid = 0.69 (`ENOMOTO_T_MIP_CW_RAMP_MID`): 5.1 の分布で、重みに害のあった問題の最大 0.62 と得のあった問題の最小 0.76 の真ん中。
+  - s = 0.1 (`ENOMOTO_T_MIP_CW_RAMP_S`): 害の側の多く (≤ 0.46) で σ ≤ 0.1、得の側の多く (≥ 0.8) で σ ≥ 0.75 になる幅。timtab1 (0.75) は σ ≈ 0.65。
+  - 1 問に合わせて決めてはいない (分布の両側の境目と広がりだけから)。
+- bnatt400 の部分木 (k=12、1 スレッド): 既定 2229 ノード → DYN 869・DYN + LIT_EXPLAIN 607 (ノード 200 で上がる)。
+- 確かめ (dyncheck.sh、logs/dyncheck.txt): bnatt400 全体 (4 スレッド 900 秒)、pk1・mas76・fiball・supportcase33・mcsched・timtab1 各 2 種を
+  {def, dyn, dynlx, ramp, ramplx} で。実行中。

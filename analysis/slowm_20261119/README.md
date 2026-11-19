@@ -260,3 +260,42 @@ def も同じビルドで回す (d3f31f37c の後に ORBPP_REPROBE・EQUIV2_PWOR
 - 採用基準との照合: 区間の上端 ✓ (M +2.6%、P +2.2%)、誤答 0 ✓、M の解けた数 −2 ✗、P の air03 の素の時間 ✗ (ずらした比では ✓)。
   残った損 (supportcase33・air03・traininstance6 の残り 4 本) はどれも「行の他の係数がすべて同符号の 0-1 列」(same/bin) の形で、`g` の外。
 - `dg` (d 形 + g) の前処理の数え上げ (`intsing_kinds_dg.jsonl`): hypothyroid-k1 (mixed) も消さなくなり、得の 4 問のうち 1 つを失うので採らない。
+
+## 12. INTSING の `1gs` 形 (g + 同符号の 0-1 列を消さない、利用者の判断「進めて」、2026-11-19)
+
+### 12.1 条件 `s` (`ENOMOTO_MIP_INTSING` に `s` を含むとき、既定はオフ。試作は `ENOMOTO_MIP_INTSING=1gs`)
+消す整数列 j が **0-1 (境界 [0, 1]) で、行の他の係数がすべて j の係数と同符号** なら消さない (§11.1 の same/bin)。
+
+### 12.2 数え上げ (`python intsing_kinds.py 1gs` → `intsing_kinds_1gs.jsonl`、`scan_gs.jsonl`)
+`1` 形が前処理を変える 36 問 (P 7・M 29) を 3 つに分ける。
+- **INTSING が何も消さなくなる 14 問** (前処理の行・列が既定と同じことを `scan_gs.jsonl` で確かめた): P = air03・eil33-2・nw04・graph20-20-1rand、
+  M = air05・atlanta-ip・decomp2・irp・supportcase33・traininstance2・traininstance6 (s で外れる) と radiationm40-10-02・rococoB10-011000・rococoC10-001000 (g で外れる)。
+  これらは既定と同じとみなす。
+- **消す列が減るが残る 7 問** (M): brazil3 556 → 550・neos-3656078-kumeu 141 → 6・piperout-08 22 → 1・piperout-27 22 → 2・
+  radiationm18-12-05 4 → 1・rocI-4-11 147 → 144 (根では 0)・rocII-5-11 69 → 63。
+- **`1` と同じ 15 問**: P = hypothyroid-k1・neos-3083819-nubu・30n20b8、M = neos-1445765・mushroom-best・cryptanalysiskb128n5obj14・obj16・
+  neos-1354092・neos-3216931-puriri・peg-solitaire-a3・rail01・satellites2-40・satellites2-60-fs・sing326・sing44。fixis の結果で代える。
+- 得の問題: neos-1445765・hypothyroid-k1・mushroom-best は `1` と同じで得は残る。graph20 (P で 1.046 倍) と eil33-2 (0.877)・nw04 (0.947)・
+  irp (0.971) の小さな得は消える。
+
+### 12.3 正しさ
+cargo test 411 通過・0 失敗。`1gs` で fuzz_intsing 300 問 bad 0、fuzz 7 本 bad 0。
+
+### 12.4 計測の分担 (H)
+`python plan.py H 5` → `shards_H.json` (12.2 の 7 問 × {def, isgs} の同じビルドの対、600 秒・4 スレッド。rocI-4-11・piperout-08・piperout-27 は種 1〜8、
+G で全種とも時間切れの問題と rocII-5-11 は種 1〜3、72 回、分担 5 つで各約 1.2 時間)。`python run.py H K` → `res_H_sK.jsonl`。
+
+### 12.5 same/bin の形は本当に害か (`samebin.py 問題 秒 種の数` → `samebin_問題.jsonl`・`logs/sb/`、{def, 1g}、4 スレッド)
+- **air03** (116 本、same/bin/cost、60 秒 × 種 1〜10): 10 種とも 1g が遅い (全体 3.35〜4.14 秒 → 4.34〜4.88 秒、ソルバー内 1.44〜1.88 → 2.39〜2.71 秒)。
+  根の LP 3.3886e5・カット後 3.4016e5・ノード 0 はどちらも同じ。違いは前処理で、**優越する 0-1 列の固定が 2297 → 160 本**に減り、
+  根の LP が 122 行 × 8458 列 → 108 行 × 10639 列 (列 +26%) になる。消す列の費用が行の 0-1 列に移って費用が負になり、
+  優越の逆向きの経路 (費用 ≥ 0 が要る) が使えなくなるのが仕組み。揺れではない。
+- ただし同じ形でも得の問題がある (60 秒 × 種 1〜3): **nw04** (28 本) も優越の固定が 3440 → 451 本に減るが、3 種とも 1g が速い (9.8〜10.5 → 8.6〜9.1 秒)。
+  **eil33-2** (32 本) は優越の固定が 0 本のままで、カット後の下界が 822.45 → 870.46 に上がり、ノードが 2238〜3152 → 748〜1581 に減って、3 種とも 1g が速い
+  (21.2〜23.6 → 18.3〜18.5 秒)。same/bin の形そのものは害でなく、air03 の害は「優越の固定を失う」ことによる。
+- **supportcase33** (2 本、same/bin/c0、60 秒 × 種 1・2): 前処理は列が 2 本減るだけ、根の LP −463・カット後 −440 は同じ、優越の固定は両方 0。
+  違いは根のヒューリスティクスで、def は Local-MIP が根で解 (−30) を見つけ、1g は見つけずに trivial の 0 から始まる (2 種とも)。
+  ノード 1 に着く時刻が 6.3〜8.0 秒 → 13.2〜13.4 秒になる。費用は移らない (c0) ので、構造上の害でなく、ヒューリスティクスの道筋の違いと見る。
+- **得の消え方** (12.2 の数え上げ): piperout-27 は 22 → 2 本 (same/bin 17 本と g の 3 本が外れる、G の得 0.767)、graph20-20-1rand・eil33-2・nw04・irp は 0 本になり、
+  得は消える。
+- 結論: s は air03 の害 (優越の固定の喪失) を外すが、同じ形の eil33-2・nw04 の構造上の得も外し、supportcase33 の差は形と結びつかない。s は採らず、g のままで採否を判断し直す。
