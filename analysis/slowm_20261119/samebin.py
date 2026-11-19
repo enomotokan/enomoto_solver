@@ -1,10 +1,11 @@
 """same/bin の形 (行の他の係数がすべて同符号の 0-1 列) が害かの確かめ: 1 問を {def, 1g} × 種で 4 スレッドで解き、ログから前処理・根・木の数を抜く。
-使い方: python samebin.py 問題 秒 種の数 → logs/sb/問題_設定_s種.log、samebin_問題.jsonl"""
+使い方: python samebin.py 問題 秒 種の数 [形,形] → logs/sb/問題_設定_s種.log、samebin_問題.jsonl"""
 import json, os, re, subprocess, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent; WT = D.parents[1]
 P, TL, NS = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-CF = {"def": {}, "1g": {"ENOMOTO_MIP_INTSING": "1g"}}
+# 4 つ目の引数で INTSING の形を並べる (既定 1g)。例: python samebin.py air03 60 10 1g,1go
+CF = {"def": {}} | {v: {"ENOMOTO_MIP_INTSING": v} for v in (sys.argv[4] if len(sys.argv) > 4 else "1g").split(",")}
 PAT = {"pre_rows": r"presolve: rows \d+ -> (\d+), free columns \d+ -> (\d+), nonzeros \d+ -> (\d+)",
        "domfix": r"(\d+) dominated binaries fixed", "rootlp": r"MIP: root LP ([-\d.e+]+) \(", "cutobj": r"cut loop done: .*obj [-\d.e+]+ -> ([-\d.e+]+)",
        "root_end": r"root LP bound after cuts and heuristics ([-\d.e+]+)", "gfix": r"global fixed integers (\d+) of",
