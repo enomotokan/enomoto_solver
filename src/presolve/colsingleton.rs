@@ -152,9 +152,26 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
     if okeys.is_some() {
         col_order.sort_by_key(|&j| super::ordkey::sort_key(&okeys, j));
     }
+    // 試作 `ENOMOTO_MIP_INTSING=1` (既定では使わない、analysis/slowm_20261119): 整数列でも、等式 1 本にだけ現れ、その係数が ±1 で、
+    // 行の他の列がすべて整数列・係数が整数・右辺が整数なら消す (復元値 `(rhs − Σ) / ±1` は整数)。SCIP の setppc・linear の
+    // 多重集約に当たる。neos-1445765 は費用つきの 0-1 列 y_k が `Σ_{S_k} x_j − y_k = 0` の 1 本にだけ現れ (1000 本)、
+    // SCIP は y_k を消して費用を x_j に移す (2146 → 1134 列)。当方でこの形を解くと 183.8 → 47.8 秒 (1 スレッド)
+    let int_sing = int_mask.is_some() && env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v != "0");
+    let is_integral = |v: f64| (v - v.round()).abs() <= 1e-12 * (1.0 + v.abs());
     for j in col_order {
-        if appearances[j] != 1 || int_mask.as_ref().is_some_and(|m| m[j]) {
+        if appearances[j] != 1 {
             continue;
+        }
+        if int_mask.as_ref().is_some_and(|m| m[j]) {
+            let ok = int_sing
+                && owning_a_row[j].is_some_and(|i| {
+                    let m = int_mask.as_ref().unwrap();
+                    let row = &a_rows[i];
+                    is_integral(b[i]) && row.iter().all(|&(k, v)| if k == j { (v.abs() - 1.0).abs() <= 1e-12 } else { m[k] && is_integral(v) })
+                });
+            if !ok {
+                continue;
+            }
         }
         if keep_bounded && lb[j].is_finite() && ub[j].is_finite() {
             continue;

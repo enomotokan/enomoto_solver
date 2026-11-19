@@ -236,6 +236,13 @@ fn s3_smallgap_skip<L: MipLp>(s: &Solver<'_, L>, root_obj: f64, name: &str) -> O
     (rel < g).then_some(rel)
 }
 
+/// 診断用 `ENOMOTO_MIP_S3PROPSTAT` (analysis/vsscip_slow_20261118/small3/ 11 節): ノードの伝播の固定点 ([`Solver::node_prop_fixpoint`]) の
+/// 行の伝播 (`Domain::propagate`) が矛盾で打ち切った回数と、締めた境界の数 (整数列・連続列) を数え、終わりに `S3PROPSTAT` の行で出す
+fn s3propstat() -> bool {
+    env_str!("ENOMOTO_MIP_S3PROPSTAT").is_some()
+}
+static S3PROP: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
 fn light_root_heur(name: &str) -> bool {
     matches!(name, "trivial" | "simple rounding" | "ZI round" | "randomized rounding" | "shift-and-propagate")
 }
@@ -9995,7 +10002,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             super::record_root_bound(root_obj);
         }
         let root_iters = self.lp.total_iterations();
-        self.root_lp_iters = root_iters;
+        // 試作 `ENOMOTO_MIP_P2RIT` (既定では使わない、analysis/par4slow_20261119/README.md): 根の LP を前処理の LP の基底から温め直したときは、
+        // 予算の物差しの「根の LP の反復」に前処理の LP の最初の LP の反復 ([`super::HO4_PROBE_ITERS`]) を使う (温め直しの数百反復だと
+        // 潜りの手間の上限・LNS の予算などが数分の 1 に縮む。ns1208400 は 4 スレッドだけ基底が渡って 1782 → 388 反復)
+        self.root_lp_iters = if probe_kind != "none" && env_str!("ENOMOTO_MIP_P2RIT").is_some() {
+            root_iters.max(super::HO4_PROBE_ITERS.with(|c| c.get()))
+        } else {
+            root_iters
+        };
         self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
         self.root_lp_ticks = crate::ticks::total() - tk_root_lp;
         if !self.params.submip {
@@ -17373,14 +17387,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn finish_limit(&mut self, status: MipStatus, current: Option<&OpenNode>) -> MipResult {
         // 木を分け合う従: 残ったノードを共有の待ち行列に返す (主がそれも含めて下界を出す)
         if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some()) {
-            // 試作 `ENOMOTO_MIP_G5FIN` (既定では使わない。analysis/vsscip_slow_20261118/g5/README.md): 時間切れで終わるときは、返すノードを主が下界を
+            // `ENOMOTO_MIP_G5FIN` (既定で使う。`=0` で従来の展開。analysis/vsscip_slow_20261118/g5/README.md): 時間切れで終わるときは、返すノードを主が下界を
             // 出すのにしか使わないので、引き継ぎの鎖 (`TC` の `s`) を平らに展開しない (並びだけ)。n3div36 (4 スレッド・400 秒、heaptrack) では
             // ヒープの最大 3.08 GB のうち 2.38 GB がここの展開だった
             // 主が木を止める合図 (`pool.stop`: 最適の確定・木の中の再スタートなど) でも `TimeLimit` で来るので、本当に期限を過ぎたときだけにする
             // (木の中の再スタートは返したノードの変更 (引き継ぎの固定を含む) から共通の境界を作る。unitcal_7 で G5FIN だけ 2 種とも遅かった)
             let thin = status == MipStatus::TimeLimit
                 && self.deadline.is_some_and(|d| Instant::now() >= d)
-                && env_str!("ENOMOTO_MIP_G5FIN").is_some_and(|v| v != "0");
+                && env_def!("ENOMOTO_MIP_G5FIN", "1").is_some();
             let of = |n: &OpenNode| if thin { SnapNode { changes: n.changes.clone(), ..SnapNode::of_thin(n) } } else { SnapNode::of(n) };
             let mut back: Vec<SnapNode> = self.queue.iter().map(of).collect();
             if let Some(n) = current {
@@ -19925,9 +19939,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             last = s0;
+            let s3p = s3propstat();
             if !self.dom.propagate(self.p) {
+                if s3p {
+                    S3PROP[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 self.add_conflict();
                 return false;
+            }
+            if s3p {
+                for (j, _, _) in self.dom.changes_since(s0) {
+                    S3PROP[if self.p.is_int[j] { 1 } else { 2 }].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             if !self.propagate_objective() {
                 return false;
@@ -25371,6 +25394,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: GAP1 {}: child selection down {} up {}; branching selections {}, with ties {} (candidates in ties {}), changed by the queue counts {}; objective proofs not violated beyond the tolerance {}", super::pseudocost::gap1(), self.gap1_stats[0], self.gap1_stats[1], self.gap1_stats[2], self.gap1_stats[3], self.gap1_stats[4], self.gap1_stats[5], self.gap1_stats[6]);
             }
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
+            if s3propstat() {
+                let g = |k: usize| S3PROP[k].load(std::sync::atomic::Ordering::Relaxed);
+                eprintln!("MIP: S3PROPSTAT row propagation at nodes (all threads): infeasible {}, tightened integer {} continuous {}", g(0), g(1), g(2));
+            }
             if self.zi_stats[2] > 0 {
                 eprintln!("MIP: tree ZI round: calls {}, successes {}, skipped {} (ENOMOTO_MIP_ZIROUND_ADAPT)", self.zi_stats[0], self.zi_stats[1], self.zi_stats[2]);
             }

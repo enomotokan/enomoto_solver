@@ -555,11 +555,36 @@ pub fn solve_mip(
         if params.verbose {
             eprintln!("MIP: VUBAGG {} columns x = y from variable upper bound rows ({:.2}s)", pairs.len(), t0.elapsed().as_secs_f64());
         }
-        (!pairs.is_empty()).then(|| (vub_dual_agg_problem(pr, &pairs), pairs))
+        // 試作 `ENOMOTO_T_MIP_VUBAGG_MIN_FRAC` = f (既定 0 = 従来どおり。analysis/regv019_20261119): まとめる列が全部の列の f に満たなければ
+        // まとめない。働く問題でまとめる割合は neos-787933 99% (200〜470 秒 → 0.4 秒)・neos-4722843-widden 6.9% (中立) と、
+        // physiciansched6-2 2.0% (前処理の後は同じ大きさになり、根のカットの道が変わって 4 スレッドで 3 種とも 0.61〜0.90 倍遅い)・
+        // piperout-27 0.5%・neos8 0.07% (中立) に分かれる
+        let min_frac = tunable!("ENOMOTO_T_MIP_VUBAGG_MIN_FRAC", 0.0, f64);
+        let small = (pairs.len() as f64) < min_frac * pr.n as f64;
+        if params.verbose && small && !pairs.is_empty() {
+            eprintln!("MIP: VUBAGG not used ({} of {} columns < {min_frac})", pairs.len(), pr.n);
+        }
+        (!pairs.is_empty() && !small).then(|| (vub_dual_agg_problem(pr, &pairs), pairs))
     } else {
         None
     };
     let pr = vub.as_ref().map_or(pr, |(q, _)| q);
+    // 試作 `ENOMOTO_MIP_BIGM_SPLIT` (既定では使わない。analysis/scipslow_20261119): 大 M の行の分解 ([`bigm_split_problem`])。列は変えないので解はそのまま
+    let bigm = if env_str!("ENOMOTO_MIP_BIGM_SPLIT").is_some() && !params.submip {
+        let t0 = std::time::Instant::now();
+        let q = bigm_split_problem(pr);
+        if params.verbose {
+            eprintln!(
+                "MIP: BIGM_SPLIT {} ({:.2}s)",
+                q.as_ref().map_or("none".to_string(), |q| format!("rows {} -> {}, nonzeros {} -> {}", pr.m, q.m, pr.nnz, q.nnz)),
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        q
+    } else {
+        None
+    };
+    let pr = bigm.as_ref().unwrap_or(pr);
     // 時間の上限から、入口からここまで (問題の組み立てなど) と畳み込みの判定 (畳まないと決めるまで) の時間を引いて渡す。引かなかった版では
     // highschool1-aigio (列 32 万) で畳み込みの判定に 2.7 秒かかり、その分だけ時間の上限を越えていた (4 スレッド 600 秒で 603〜606 秒。
     // analysis/hang_20261117/README.md)。`ENOMOTO_MIP_NO_ENTRY_DEADLINE` で引かない (直す前と同じ、切り分け用)
@@ -4690,6 +4715,67 @@ fn vub_dual_agg_pairs(prob: &MipProblem) -> Vec<(usize, usize, bool)> {
 
 /// `ENOMOTO_MIP_VUBAGG` (既定で使う): 組 `x_j = y` ([`vub_dual_agg_pairs`]) で x_j を全ての行から y に置き換え、x_j の費用を y に足し、x_j を 0 に固定した問題。
 /// 解は `x_j = x_y` で戻す。列の番号は変えない。
+/// 試作 `ENOMOTO_MIP_BIGM_SPLIT`: 0-1 の列だけで係数が全て正の「≤」の行 `a y + Σ c_i x_i ≤ b` のうち、y = 0 なら冗長 (`Σ c_i ≤ b`)、
+/// y = 1 なら他の全ての列が 0 (`c_i > b − a` かつ `a ≤ b`) になるもの (大 M の行) を、同じ実行可能集合の `x_i + y ≤ 1` (i ごと) に置き換える。
+/// LP の緩和は強くなる (hypothyroid-k1 の 2512 行「45y + Σ x_i ≤ 45」。SCIP は knapsack の前処理で同じ分解をし、最初の LP 値 −2857 (最適 −2851)。
+/// 当方の既定の根の LP は −2903)。足す非零が元の非零の `ENOMOTO_T_MIP_BIGM_SPLIT_NNZ` (1) 倍を超えるなら、行の短い順にそこまでにする。
+/// 置き換える行がなければ None
+fn bigm_split_problem(p: &MipProblem) -> Option<MipProblem> {
+    let bin = |j: usize| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0;
+    let mut cand: Vec<(usize, usize)> = Vec::new();
+    for (i, r) in p.rows.iter().enumerate() {
+        let b = p.row_up[i];
+        if !b.is_finite() || p.row_lo[i].is_finite() || r.len() < 3 || !r.iter().all(|&(j, a)| a > 0.0 && bin(j)) {
+            continue;
+        }
+        let (k, &(y, a)) = r.iter().enumerate().max_by(|x, z| x.1 .1.total_cmp(&z.1 .1)).unwrap();
+        let tol = 1e-9 * b.abs().max(1.0);
+        let rest: f64 = r.iter().enumerate().filter(|&(q, _)| q != k).map(|(_, &(_, c))| c).sum();
+        let cmin = r.iter().enumerate().filter(|&(q, _)| q != k).map(|(_, &(_, c))| c).fold(f64::INFINITY, f64::min);
+        if a <= b + tol && rest <= b + tol && cmin > b - a + tol {
+            cand.push((i, y));
+        }
+    }
+    if cand.is_empty() {
+        return None;
+    }
+    let cap = tunable!("ENOMOTO_T_MIP_BIGM_SPLIT_NNZ", 1.0, f64) * p.nnz as f64;
+    cand.sort_by_key(|&(i, _)| p.rows[i].len());
+    let mut add = 0.0;
+    let mut split: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for &(i, y) in &cand {
+        let more = 2.0 * (p.rows[i].len() - 1) as f64;
+        if add + more > cap {
+            break;
+        }
+        add += more;
+        split.insert(i, y);
+    }
+    if split.is_empty() {
+        return None;
+    }
+    let (mut rows, mut lo, mut up) = (Vec::new(), Vec::new(), Vec::new());
+    for (i, r) in p.rows.iter().enumerate() {
+        match split.get(&i) {
+            Some(&y) => {
+                for &(j, _) in r.iter().filter(|&&(j, _)| j != y) {
+                    let mut e = vec![(j, 1.0), (y, 1.0)];
+                    e.sort_by_key(|&(c, _)| c);
+                    rows.push(e);
+                    lo.push(f64::NEG_INFINITY);
+                    up.push(1.0);
+                }
+            }
+            None => {
+                rows.push(r.clone());
+                lo.push(p.row_lo[i]);
+                up.push(p.row_up[i]);
+            }
+        }
+    }
+    Some(MipProblem::from_rows(p.col_lo.clone(), p.col_up.clone(), p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, lo, up))
+}
+
 fn vub_dual_agg_problem(p: &MipProblem, pairs: &[(usize, usize, bool)]) -> MipProblem {
     let mut rep: Vec<usize> = (0..p.n).collect();
     for &(j, y, _) in pairs {
@@ -6455,7 +6541,24 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
         let fixed_pass0 = fixed;
         spec_ver = u64::MAX;
+        // 試作 `ENOMOTO_MIP_PROBE_USELESS` = K (既定では使わない。analysis/scipslow_20261119): SCIP の「50 回続けて全く役に立たない試しで打ち切る」
+        // と同じく、固定も締め付けも増えない試しが K 回続いたらプロービングをやめる (含意は数えない)。air03 は 512 列を試して固定・締め付け・
+        // 同値な組が 0 のまま 2.9 秒 (SCIP は 51 回で打ち切り 0.4 秒)
+        let useless_k = env_str!("ENOMOTO_MIP_PROBE_USELESS").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        let (mut useless_run, mut useless_last) = (0usize, fixed + tightened);
         for (cnt, &j) in cands.iter().enumerate() {
+            if useless_k > 0 {
+                if fixed + tightened > useless_last {
+                    useless_run = 0;
+                    useless_last = fixed + tightened;
+                }
+                if useless_run >= useless_k {
+                    if verbose {
+                        eprintln!("MIP: probing: PROBE_USELESS: {useless_run} successive probes without fixings or tightenings, stopped");
+                    }
+                    break 'passes;
+                }
+            }
             let (cap, wcap) = if fixed + tightened > 0 { (time_cap_found, wcap1) } else { (time_cap, wcap0) };
             // 診断用 (`ENOMOTO_MIP_DEBUG_PROBE_PROGRESS`): 16 候補ごとの経過 (CPU 時間・試した数・固定・締め付け・含意の数)
             if cnt % 16 == 0 && verbose && env_str!("ENOMOTO_MIP_DEBUG_PROBE_PROGRESS").is_some() {
@@ -6472,6 +6575,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             }
             let found0 = fixed + tightened;
             probed += 1;
+            useless_run += 1;
             // `ENOMOTO_MIP_PREPAR` の `p`: 窓の結果を使う (窓がない・古ければ、ここから窓を作る)
             let spec_res = if let Some(pool) = &pool {
                 let valid = spec_ver == ver && cnt >= spec_start && cnt < spec_start + spec.len();
