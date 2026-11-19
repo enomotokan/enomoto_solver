@@ -38,7 +38,7 @@ def worker_enomoto(mps: str) -> None:
     h = highspy.Highs(); h.setOptionValue("output_flag", False); h.readModel(mps)
     model = _build_our_model(h.getLp()); del h
     t0 = time.perf_counter()
-    out = model.solve(root_solver="auto", distinguish_infeasible_unbounded=True, threads=NCPU)
+    out = model.solve(lp_solver="auto", distinguish_infeasible_unbounded=True, threads=NCPU)
     t = time.perf_counter() - t0
     print("RESULT " + json.dumps({"time": t, "status": out["status"], "obj": out["objective"],
                                   "events": [[n, s] for n, s in _core.last_solve_events()]}), flush=True)

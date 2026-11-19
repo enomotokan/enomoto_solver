@@ -117,7 +117,7 @@ impl PyModel {
     /// - `"root_bound"` / `"first_solution_time"` / `"first_solution_objective"`: 根の切除平面ループ後の下界 (再スタートがあれば最後の根の
     ///   もので、暫定解の目的値で上から切り詰める)、最初の暫定解の時刻 [秒] と目的値 (整数最適化の評価用。なければ `None`)。
     ///
-    /// `root_solver`: 各 LP の解法。`"auto"` (既定: 前処理後の行数が 5000 以上なら傾き・切片双対二段解法と
+    /// `lp_solver`: 各 LP の解法。`"auto"` (既定: 前処理後の行数が 5000 以上なら傾き・切片双対二段解法と
     /// 内点法 + クロスオーバーを同時に解き、先に結論を出した側を採る。未満なら二段解法)、`"simplex"`
     /// (二段解法だけ)、`"ipm_crossover"` (内点法 + クロスオーバーだけ)、`"interior"` (独立の IP-PMM 内点法)。
     /// 整数最適化では根と各ノードの LP は二段解法を warm start で解き直す (この指定は LP のときだけ効く)。
@@ -138,11 +138,11 @@ impl PyModel {
     /// Python の `Model.solve` は既定で `true` を渡す (案内とまとめの行は Python 側で出す)。
     ///
     /// 目的関数が未設定なら `ValueError`。
-    #[pyo3(signature = (root_solver=None, distinguish_infeasible_unbounded=false, time_limit=None, mip_rel_gap=None, node_limit=None, threads=None, log=false))]
+    #[pyo3(signature = (lp_solver=None, distinguish_infeasible_unbounded=false, time_limit=None, mip_rel_gap=None, node_limit=None, threads=None, log=false))]
     fn solve<'py>(
         &self,
         py: Python<'py>,
-        root_solver: Option<&str>,
+        lp_solver: Option<&str>,
         distinguish_infeasible_unbounded: bool,
         time_limit: Option<f64>,
         mip_rel_gap: Option<f64>,
@@ -153,7 +153,7 @@ impl PyModel {
         let objective = self.objective.as_ref().ok_or_else(|| {
             PyValueError::new_err("no objective set: call Model.set_objective(...) before solve()")
         })?;
-        let root_solver = match root_solver {
+        let root_solver = match lp_solver {
             Some(s) => RootSolver::parse(s)?,
             None => RootSolver::Auto,
         };

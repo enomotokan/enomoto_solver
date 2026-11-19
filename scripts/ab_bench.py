@@ -39,7 +39,7 @@ out = {"name": name, "times": []}
 for _ in range(reps):
     model, _, _ = bh._build_our_model(lp)
     t0 = time.perf_counter()
-    r = model.solve(root_solver=None)
+    r = model.solve(lp_solver=None)
     out["times"].append(time.perf_counter() - t0)
     out["status"] = r["status"]
     out["obj"] = r["objective"]

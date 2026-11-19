@@ -1112,7 +1112,7 @@ pub(crate) mod presolve {
 }
 
 /// 内点法 IP-PMM (src/interior_point.rs と interior_point/kkt.rs)。
-/// 既定のエンジンではなく、`Model.solve(root_solver="interior")` のときだけ使われる。
+/// 既定のエンジンではなく、`Model.solve(lp_solver="interior")` のときだけ使われる。
 pub(crate) mod interior_point {
     /// Newton 系の分解 (正規方程式の Cholesky・拡大系の LDLᵀ) の因子の非零数の上限。記号分解の結果が
     /// これを超えたら内点法を諦める (`NotSolved` を返し、呼び出し側は二段解法で解く)。ex10 は正規方程式で

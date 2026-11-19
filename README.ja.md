@@ -82,7 +82,7 @@ print(x.value, y.value)             # 3.0 7.0
   | 引数 | 意味 |
   |---|---|
   | `threads` | 使うスレッドの数(既定は，使える CPU の数 + 1 の半分．HiGHS と同じ．`enomoto_solver.default_threads()`)．2 以上なら LP を二段解法と内点法 + クロスオーバーで同時に解き，整数最適化では木の探索も分け合います．詳しくは下の「スレッド数(`threads`)」． |
-  | `root_solver` | LP の解法(既定 `"auto"`．下の「LP の解法の選択」)． |
+  | `lp_solver` | LP の解法(既定 `"auto"`．下の「LP の解法の選択」)．以前の名前 `root_solver` も受け付けますが，非推奨です(`DeprecationWarning` を出します)． |
   | `distinguish_infeasible_unbounded` | 有限な最適値がないとき，実行不可能か非有界かを区別するか(既定 `False`．下の「結果の状態と，実行不可能・非有界な問題」)． |
   | `time_limit`，`mip_rel_gap`，`node_limit` | 整数最適化の打ち切り条件(秒，相対ギャップ(既定 0)，ノード数)． |
   | `log` | ログを出すか(既定 `True`．下の「ログ」)． |
@@ -120,9 +120,9 @@ print(sol.status)                   # unbounded
 
 ### LP の解法の選択
 
-`solve(root_solver=...)` で LP の解法を選べます(整数変数を含まないモデルにだけ効きます．整数最適化の緩和問題は，常に傾き・切片双対二段解法を warm start で使って解きます．整数変数を含むモデルに `"auto"` 以外を指定すると `UserWarning` を出し，指定を無視して解きます)．
+`solve(lp_solver=...)` で LP の解法を選べます(整数変数を含まないモデルにだけ効きます．整数最適化の緩和問題は，常に傾き・切片双対二段解法を warm start で使って解きます．整数変数を含むモデルに `"auto"` 以外を指定すると `UserWarning` を出し，指定を無視して解きます)．
 
-| `root_solver` | 解法 |
+| `lp_solver` | 解法 |
 |---|---|
 | `"auto"`(既定．`None` も同じ) | `threads` が 2 以上なら，傾き・切片双対二段解法(1 スレッド)と近接内点法 + クロスオーバー(残りのスレッド)を並列に実行し，先に結論を出した側を採ります．`threads=1` なら二段解法だけで解きます． |
 | `"simplex"` | 傾き・切片双対二段解法だけ． |
@@ -175,7 +175,7 @@ print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
 
 `solve(threads=...)` で使うスレッドの数を指定します．省略すると，HiGHS と同じく(このプロセスが使える CPU の数 + 1) / 2 にします(`enomoto_solver.default_threads()`．論理コアが 4 なら 2，8 なら 4)．このプロセスが使える CPU の数(`enomoto_solver.max_threads()`)を超える値は，そこで頭打ちにします．プリソルブなどの並列区間も含め，求解全体をこの数のスレッドで動かします．
 
-| `threads` | LP(`root_solver="auto"`) | MIP |
+| `threads` | LP(`lp_solver="auto"`) | MIP |
 |---|---|---|
 | 1 | 傾き・切片双対二段解法だけで解きます． | 緩和問題も木の探索も 1 スレッドで解きます． |
 | k ≥ 2 | 二段解法(1 スレッド)と近接内点法 + クロスオーバー(k − 1 スレッド)で同時に解き，先に結論を出した側を採ります． | warm start できない緩和問題(根など)を左と同じように同時に解き，根の処理の後は k 本のスレッドで木を分け合って探索します(上の「探索の並列化」)． |
@@ -330,19 +330,19 @@ python -m enomoto_solver.benchmark_highs --max-vars 100000 --out netlib_results.
 | `src/simplex/crossover.rs` | 近接内点法 + クロスオーバー |
 | `src/simplex/race.rs` | 二段解法と内点法 + クロスオーバーの並列実行 |
 | `src/interior_point.rs`，`src/interior_point/` | 近接内点法(IP-PMM)と KKT 系の分解 |
-| `src/solver.rs` | LP の解法の振り分け(`root_solver`) |
+| `src/solver.rs` | LP の解法の振り分け(`lp_solver`) |
 | `src/mip/` | 分枝切除法(制約伝播，切除平面，ヒューリスティクス，対称性) |
 | `src/params.rs` | 許容誤差と調整用パラメータ |
 | `docs/improvement_history.md` | 実装の変更とその計測結果の記録 |
 | `benchmarks/netlib_dev_results.csv` | 開発中に行った Netlib の計測結果(1行が1問・1回の計測．`source_file` 列が元の結果ファイル名) |
-| `benchmarks/paper/` | 論文に載せた HiGHS・CLP・SoPlex との比較(207 問，制限 600 秒．`scripts/paper_bench/`) |
+| `benchmarks/paper/` | 原稿に載せた HiGHS・CLP・SoPlex との比較(207 問，制限 600 秒．`scripts/paper_bench/`) |
 | `benchmarks/mittelmann_results.*` | 以前の Mittelmann LPopt ベンチマークの HiGHS との比較(2026-09-24，公開 44 問，制限 600 秒．`scripts/run_mittelmann_benchmark.py`，Linux 専用) |
 
 ## 論文
 
-手法と数値実験は次の論文にまとめています．
+手法と数値実験は次の原稿にまとめています．査読で不採録となったため学術誌には掲載されていません．原稿は [paper_extended_simplex_method/paper_en.pdf](https://github.com/enomotokan/paper_extended_simplex_method/blob/main/paper_en.pdf) にあります．
 
-榎本 観，「双対単体法のみによる線型最適化問題の完全な判別：傾き・切片双対二段解法」(準備中)．
+榎本 観，「双対単体法のみによる線型最適化問題の完全な判別：傾き・切片双対二段解法」(未公刊原稿)．
 
 ## 生成 AI の使用について
 

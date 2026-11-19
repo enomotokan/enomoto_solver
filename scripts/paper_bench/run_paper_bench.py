@@ -204,7 +204,7 @@ def worker_enomoto(mps: str, threads: int) -> None:
     del h
     _emit({"built": True, "read_time": time.perf_counter() - t0})
     t0 = time.perf_counter()
-    out = model.solve(root_solver=None, distinguish_infeasible_unbounded=True, threads=threads if threads > 0 else None)
+    out = model.solve(lp_solver=None, distinguish_infeasible_unbounded=True, threads=threads if threads > 0 else None)
     t = time.perf_counter() - t0
     _emit({"time": t, "status": out["status"], "obj": out.get("objective"),
            "events": [[name, sec] for name, sec in _core.last_solve_events()]})

@@ -85,19 +85,19 @@ def test_binary_knapsack():
     assert approx(sol.objective, 220.0)
 
 
-@pytest.mark.parametrize("root_solver", ["simplex", "ipm_crossover", "interior"])
-def test_root_solver_on_integer_model_warns(root_solver):
+@pytest.mark.parametrize("lp_solver", ["simplex", "ipm_crossover", "interior"])
+def test_lp_solver_on_integer_model_warns(lp_solver):
     M = Model()
     x = Variable(int, 0, 3)
     M.set_objective(x, sense="maximize")
     M.add_constraint(2 * x <= 5)
     with pytest.warns(UserWarning, match="no effect on a model with integer variables"):
-        sol = M.solve(root_solver=root_solver, log=False)
+        sol = M.solve(lp_solver=lp_solver, log=False)
     assert approx(sol.objective, 2.0)
 
 
-@pytest.mark.parametrize("root_solver", [None, "auto"])
-def test_root_solver_auto_on_integer_model_does_not_warn(root_solver):
+@pytest.mark.parametrize("lp_solver", [None, "auto"])
+def test_lp_solver_auto_on_integer_model_does_not_warn(lp_solver):
     import warnings as w
 
     M = Model()
@@ -106,7 +106,37 @@ def test_root_solver_auto_on_integer_model_does_not_warn(root_solver):
     M.add_constraint(2 * x <= 5)
     with w.catch_warnings():
         w.simplefilter("error")
-        M.solve(root_solver=root_solver, log=False)
+        M.solve(lp_solver=lp_solver, log=False)
+
+
+@pytest.mark.parametrize("lp_solver", ["simplex", "ipm_crossover", "interior", "auto"])
+def test_lp_solver_on_lp(lp_solver):
+    M = Model()
+    x = Variable(float, 0, 3)
+    M.set_objective(x, sense="maximize")
+    M.add_constraint(2 * x <= 5)
+    sol = M.solve(lp_solver=lp_solver, log=False)
+    assert approx(sol.objective, 2.5)
+
+
+def test_root_solver_is_deprecated_alias_of_lp_solver():
+    M = Model()
+    x = Variable(float, 0, 3)
+    M.set_objective(x, sense="maximize")
+    M.add_constraint(2 * x <= 5)
+    with pytest.warns(DeprecationWarning, match="use lp_solver"):
+        sol = M.solve(root_solver="simplex", log=False)
+    assert approx(sol.objective, 2.5)
+    with pytest.raises(TypeError, match="only one of lp_solver and root_solver"):
+        M.solve(lp_solver="simplex", root_solver="simplex", log=False)
+
+
+def test_unknown_lp_solver_raises():
+    M = Model()
+    x = Variable(float, 0, 3)
+    M.set_objective(x, sense="maximize")
+    with pytest.raises(ValueError, match="unknown lp_solver"):
+        M.solve(lp_solver="foo", log=False)
 
 
 def test_infeasible_status():

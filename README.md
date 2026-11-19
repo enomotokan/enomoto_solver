@@ -82,7 +82,7 @@ print(x.value, y.value)             # 3.0 7.0
   | Argument | Meaning |
   |---|---|
   | `threads` | Number of threads to use (default: half of the available CPUs rounded up, as in HiGHS; see `enomoto_solver.default_threads()`). With 2 or more, an LP is solved at the same time by the two-phase method and the interior-point method + crossover, and for integer programs the tree search is also shared. For details, see "Number of threads (`threads`)" below. |
-  | `root_solver` | The LP method (default `"auto"`; see "Choosing the LP method" below). |
+  | `lp_solver` | The LP method (default `"auto"`; see "Choosing the LP method" below). The former name `root_solver` is still accepted but deprecated (`DeprecationWarning`). |
   | `distinguish_infeasible_unbounded` | Whether to distinguish infeasible from unbounded when there is no finite optimal value (default `False`; see "Result status, and infeasible or unbounded problems" below). |
   | `time_limit`, `mip_rel_gap`, `node_limit` | Termination criteria for integer programs (seconds, relative gap (default 0), number of nodes). |
   | `log` | Whether to output the log (default `True`; see "Log" below). |
@@ -120,9 +120,9 @@ The same applies to models with integer variables. When phase A shows that the r
 
 ### Choosing the LP method
 
-`solve(root_solver=...)` selects the LP method (it applies only to models without integer variables; the relaxations of integer programs are always solved by the slope–intercept dual two-phase method with warm starts; specifying anything other than `"auto"` for a model with integer variables issues a `UserWarning` and the setting is ignored).
+`solve(lp_solver=...)` selects the LP method (it applies only to models without integer variables; the relaxations of integer programs are always solved by the slope–intercept dual two-phase method with warm starts; specifying anything other than `"auto"` for a model with integer variables issues a `UserWarning` and the setting is ignored).
 
-| `root_solver` | Method |
+| `lp_solver` | Method |
 |---|---|
 | `"auto"` (default; `None` is the same) | If `threads` is 2 or more, run the slope–intercept dual two-phase method (1 thread) and the proximal interior-point method + crossover (the remaining threads) in parallel and adopt the side that reaches a conclusion first. With `threads=1`, solve with the two-phase method only. |
 | `"simplex"` | The slope–intercept dual two-phase method only. |
@@ -175,7 +175,7 @@ The solution returned is polished before it is reported: integer variables are r
 
 `solve(threads=...)` specifies the number of threads to use. If omitted, (number of CPUs available to this process + 1) / 2 threads are used, as in HiGHS (`enomoto_solver.default_threads()`; 2 with 4 logical cores, 4 with 8). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
 
-| `threads` | LP (`root_solver="auto"`) | MIP |
+| `threads` | LP (`lp_solver="auto"`) | MIP |
 |---|---|---|
 | 1 | Solved by the slope–intercept dual two-phase method only. | Both the relaxations and the tree search are solved on 1 thread. |
 | k ≥ 2 | Solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads), adopting the side that reaches a conclusion first. | Relaxations that cannot be warm-started (the root, etc.) are solved at the same time in the same way as on the left, and after the root is processed the tree is shared among k threads for the search ("Parallel search" above). |
@@ -328,19 +328,19 @@ Each problem is solved in a separate subprocess. The measured time covers the so
 | `src/simplex/crossover.rs` | Proximal interior-point method + crossover |
 | `src/simplex/race.rs` | Parallel execution of the two-phase method and the interior-point method + crossover |
 | `src/interior_point.rs`, `src/interior_point/` | Proximal interior-point method (IP-PMM) and factorization of the KKT system |
-| `src/solver.rs` | Dispatch of the LP method (`root_solver`) |
+| `src/solver.rs` | Dispatch of the LP method (`lp_solver`) |
 | `src/mip/` | Branch and cut (constraint propagation, cutting planes, heuristics, symmetry) |
 | `src/params.rs` | Tolerances and tuning parameters |
 | `docs/improvement_history.md` | Record of implementation changes and their measured results |
 | `benchmarks/netlib_dev_results.csv` | Netlib measurements taken during development (one row is one problem and one measurement; the `source_file` column is the name of the original result file) |
-| `benchmarks/paper/` | Comparison with HiGHS, CLP and SoPlex included in the paper (207 problems, 600 s limit; `scripts/paper_bench/`) |
+| `benchmarks/paper/` | Comparison with HiGHS, CLP and SoPlex included in the manuscript (207 problems, 600 s limit; `scripts/paper_bench/`) |
 | `benchmarks/mittelmann_results.*` | Comparison with HiGHS on an earlier Mittelmann LPopt benchmark (2026-09-24, 44 public problems, 600 s limit; `scripts/run_mittelmann_benchmark.py`, Linux only) |
 
 ## Paper
 
-The method and the numerical experiments are summarized in the following paper.
+The method and the numerical experiments are summarized in the following manuscript. It was rejected in peer review and has not been published in a journal; the manuscript is available at [paper_extended_simplex_method/paper_en.pdf](https://github.com/enomotokan/paper_extended_simplex_method/blob/main/paper_en.pdf).
 
-Kan Enomoto, "Complete classification of linear programming problems by the dual simplex method alone: the slope–intercept dual two-phase method" (in preparation).
+Kan Enomoto, "Complete classification of linear programming problems by the dual simplex method alone: the slope–intercept dual two-phase method" (unpublished manuscript).
 
 ## Use of generative AI
 

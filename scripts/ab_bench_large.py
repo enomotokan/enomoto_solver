@@ -79,7 +79,7 @@ for i in range(lp.num_row_):
 del lp, rows
 print(json.dumps({"built": True}), flush=True)
 t0 = time.perf_counter()
-out = m.solve(root_solver=None, distinguish_infeasible_unbounded=True)
+out = m.solve(lp_solver=None, distinguish_infeasible_unbounded=True)
 print(json.dumps({"time": time.perf_counter() - t0, "status": out["status"], "obj": out.get("objective")}), flush=True)
 """
 

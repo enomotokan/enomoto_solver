@@ -139,13 +139,15 @@ class Model:
     # -- 求解 ------------------------------------------------------------
     def solve(
         self,
-        root_solver: Optional[str] = None,
+        lp_solver: Optional[str] = None,
         distinguish_infeasible_unbounded: bool = False,
         time_limit: Optional[float] = None,
         mip_rel_gap: Optional[float] = None,
         node_limit: Optional[int] = None,
         threads: Optional[int] = None,
         log: bool = True,
+        *,
+        root_solver: Optional[str] = None,
     ) -> Solution:
         """Rust コアで前処理と最適化を実行し、結果を Solution で返す。
 
@@ -153,7 +155,7 @@ class Model:
         で判断する。``"optimal"`` のときだけ ``objective`` に値が入り、各 Variable の
         ``.value`` が読める (それ以外で ``.value`` を読むと RuntimeError)。
 
-        ``root_solver``: LP (整数変数を含まないモデル) の解法。整数最適化の緩和問題は常に傾き・切片双対二段解法を
+        ``lp_solver``: LP (整数変数を含まないモデル) の解法。整数最適化の緩和問題は常に傾き・切片双対二段解法を
         warm start で使って解くので、整数変数を含むモデルに ``"auto"`` (と ``None``) 以外を渡しても効かず、
         ``UserWarning`` を出す (求解はそのまま続ける)。
 
@@ -190,10 +192,22 @@ class Model:
         ``log`` (既定 True): 最初に作者・ライセンス・連絡先の案内と問題の大きさを、求解中は要点 (前処理の結果、
         同時実行の勝敗、整数最適化では根の LP・切除平面・探索の経過) を、最後に結果を標準出力に出す。
         False なら何も出さない。
+
+        ``root_solver``: ``lp_solver`` の以前の名前 (互換のため残す。使うと ``DeprecationWarning`` を出す)。
+        ``lp_solver`` と同時に指定すると ``TypeError``。
         """
-        if root_solver not in (None, "auto") and any(v.vtype == "integer" for v in self._variables):
+        if root_solver is not None:
+            if lp_solver is not None:
+                raise TypeError("specify only one of lp_solver and root_solver (root_solver is the deprecated name of lp_solver)")
             warnings.warn(
-                f"root_solver={root_solver!r} has no effect on a model with integer variables: "
+                "root_solver is deprecated; use lp_solver instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            lp_solver = root_solver
+        if lp_solver not in (None, "auto") and any(v.vtype == "integer" for v in self._variables):
+            warnings.warn(
+                f"lp_solver={lp_solver!r} has no effect on a model with integer variables: "
                 "the relaxations of an integer program are always solved by the slope-intercept dual two-phase method",
                 UserWarning,
                 stacklevel=2,
@@ -202,7 +216,7 @@ class Model:
             self._log_header(threads)
         t0 = time.perf_counter()
         result = self._core.solve(
-            root_solver=root_solver,
+            lp_solver=lp_solver,
             distinguish_infeasible_unbounded=distinguish_infeasible_unbounded,
             time_limit=time_limit,
             mip_rel_gap=mip_rel_gap,

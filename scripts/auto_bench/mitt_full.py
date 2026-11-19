@@ -1,6 +1,6 @@
 """Mittelmann LPopt の全問で ENOMOTO auto / HiGHS 疑似 auto / CLP を比べる。
 
-  ENOMOTO: solve(root_solver="auto", threads=T, time_limit=L)
+  ENOMOTO: solve(lp_solver="auto", threads=T, time_limit=L)
   HiGHS:   双対単体法 (parallel=on) と IPX+クロスオーバーを別プロセスで同時に走らせ、先に結論を出した方を採る
            (HiGHS 1.15.1 には単体法と内点法を同時に走らせる設定が無いので、各プロセス threads=T)
   CLP:     WSL の論文用ドライバ (scripts/paper_bench/drivers/clp_driver.cpp、既定の ClpSolve、逐次)
@@ -44,7 +44,7 @@ def worker_enomoto(mps: str, threads: int, limit: float) -> None:
     model = _build_our_model(h.getLp()); del h
     print("BUILT", flush=True)
     t0 = time.perf_counter()
-    out = model.solve(root_solver="auto", distinguish_infeasible_unbounded=True, threads=threads, time_limit=limit)
+    out = model.solve(lp_solver="auto", distinguish_infeasible_unbounded=True, threads=threads, time_limit=limit)
     t = time.perf_counter() - t0
     print("RESULT " + json.dumps({"time": t, "status": out["status"], "obj": out["objective"],
                                   "events": [[n, s] for n, s in _core.last_solve_events()]}), flush=True)

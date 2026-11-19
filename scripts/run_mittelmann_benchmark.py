@@ -200,7 +200,7 @@ def _worker_ours(mps: str) -> None:
     del h
     print(json.dumps({"built": True, "build_time": build_time}), flush=True)
     t0 = time.perf_counter()
-    out = model.solve(root_solver=None)
+    out = model.solve(lp_solver=None)
     t = time.perf_counter() - t0
     print(json.dumps({"time": t, "build_time": build_time, "status": out["status"], "obj": out.get("objective")}))
 

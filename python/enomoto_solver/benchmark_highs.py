@@ -155,7 +155,7 @@ def _run_one(name: str, mps_path: Path, solve_timeout: float) -> dict:
         result["n_constraints"] = n_constraints
         result["nnz"] = nnz
         t0 = time.perf_counter()
-        out = model.solve(root_solver=None)
+        out = model.solve(lp_solver=None)
         ours_time = time.perf_counter() - t0
         result["ours_time"] = ours_time
         result["ours_status"] = out["status"]

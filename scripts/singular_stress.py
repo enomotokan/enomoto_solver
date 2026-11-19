@@ -58,7 +58,7 @@ from run_mittelmann_benchmark import _build_our_model
 h = highspy.Highs(); h.setOptionValue("output_flag", False); h.readModel(sys.argv[1])
 lp = h.getLp()
 model = _build_our_model(lp)
-out = model.solve(root_solver=None)
+out = model.solve(lp_solver=None)
 res = {"status": out["status"], "obj": out.get("objective")}
 x = out.get("x")
 if x is not None and out["status"] == "optimal":

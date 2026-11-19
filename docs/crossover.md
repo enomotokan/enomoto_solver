@@ -1,4 +1,4 @@
-# 内点法 + クロスオーバー (`root_solver="ipm_crossover"`)
+# 内点法 + クロスオーバー (`lp_solver="ipm_crossover"`)
 
 傾き・切片双対二段解法と比べるために、前処理後の問題を内点法で解き、その (頂点とは限らない) 最適解から
 最適基底解を作るクロスオーバーを実装した。クロスオーバーは
@@ -9,7 +9,7 @@
 の方式に従い、段の構成は著者の参照実装 (github.com/MIT-Lu-Lab/crossover、`src/iterates.jl`) に合わせた。
 
 ```python
-sol = model.solve(root_solver="ipm_crossover")
+sol = model.solve(lp_solver="ipm_crossover")
 ```
 
 前処理と後処理は単体法 (`"simplex"`) と同じものを使い、求解の部分だけが入れ替わる。内点法が収束せず
