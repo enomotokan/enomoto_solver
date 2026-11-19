@@ -14590,6 +14590,138 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if fixed_int(blo[j], bup[j]) { s_b += 1 }
             }
         }
+        // (d) λ を K 個持つ表 (README §15.3): L(λ) = Σ_i λ_i b̂_i + Σ_j min_{大域の箱} d_j x_j、d = c − Aᵀλ (行は根の LP のカットの後の行。λ_i > 0 は下側、
+        // < 0 は上側を使い、使う側が無限なら 0 にする)。c x ≤ u なら d x ≤ u − Σ λ b̂ なので、d_j の向きに動かす幅は (u − L) / |d_j| まで
+        let lagr = |y: &[f64]| -> Option<(f64, Vec<f64>)> {
+            let mut d = p.cost.clone();
+            let mut l = 0.0f64;
+            for i in 0..nr {
+                let (lo, up) = (rlo[i], rup[i]);
+                let yi = if y[i] > 0.0 && lo.is_finite() { y[i] } else if y[i] < 0.0 && up.is_finite() { y[i] } else { 0.0 };
+                if yi == 0.0 {
+                    continue;
+                }
+                l += yi * if yi > 0.0 { lo } else { up };
+                for &(j, a) in &rows[i] {
+                    d[j] -= yi * a;
+                }
+            }
+            for j in 0..n {
+                let b = if d[j] > 0.0 { glo[j] } else if d[j] < 0.0 { gup[j] } else { continue };
+                if !b.is_finite() {
+                    return None;
+                }
+                l += d[j] * b;
+            }
+            Some((l + p.offset, d))
+        };
+        let apply = |l: f64, d: &[f64], lo: &mut [f64], up: &mut [f64]| {
+            let gap = lim - l;
+            if !(gap.is_finite() && gap >= 0.0) {
+                return;
+            }
+            for &j in &free {
+                if d[j] > 1e-9 {
+                    up[j] = up[j].min((glo[j] + gap / d[j] + 1e-9).floor());
+                } else if d[j] < -1e-9 {
+                    lo[j] = lo[j].max((gup[j] - gap / (-d[j]) - 1e-9).ceil());
+                }
+            }
+        };
+        let nfix = |lo: &[f64], up: &[f64], set: &[usize]| set.iter().filter(|&&j| fixed_int(lo[j], up[j])).count();
+        let y0 = self.lp.row_duals();
+        let kmax = tunable!("ENOMOTO_T_MIP_DIAG_OBBT_LAMK", 100usize, usize);
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        // 種類ごとの λ の列 (L, d) を作る。R: 根の双対、C: カットのラウンドの被約費用 (t4_rc_extra、ENOMOTO_MIP_TREE4_RCUNION で溜まる)、
+        // P: 行の境界を 1e-5 の相対で乱した LP の最適双対 (退化した根の別の双対の代わり)、X: 費用を 1e-3 の相対で乱した LP の双対、G: 根の双対に 10% の乱れ
+        let t_lam = Instant::now();
+        let mut fams: Vec<(&str, Vec<(f64, Vec<f64>)>)> = Vec::new();
+        let r0 = lagr(&y0);
+        fams.push(("R", r0.iter().cloned().collect()));
+        let mut cl = Vec::new();
+        for (z, list) in self.t4_rc_extra.iter() {
+            // 表の z はそのラウンドの LP の目的値 (定数項込み)、d は非基底の列の被約費用 (基底の列は 0)
+            let mut d = vec![0.0; n];
+            for &(j, _, dj, _) in list {
+                d[j] = dj;
+            }
+            cl.push((*z, d));
+        }
+        fams.push(("C", cl));
+        let lam_deadline = Instant::now() + std::time::Duration::from_secs_f64(tunable!("ENOMOTO_T_MIP_DIAG_OBBT_LAMSECS", 120.0, f64));
+        let mut lpp = crate::simplex::mip_lp::TwoStageLp::new(&glo, &gup, &p.cost, &rows[..nr], &rlo[..nr], &rup[..nr]);
+        let mut pl = Vec::new();
+        let mut xl = Vec::new();
+        if lpp.solve(&SolveLimits { deadline: Some(lam_deadline), ..Default::default() }) == LpStatus::Optimal {
+            for t in 0..2 * kmax {
+                if Instant::now() > lam_deadline {
+                    break;
+                }
+                if t % 2 == 0 {
+                    let ch: Vec<(usize, f64, f64)> = (0..nr).map(|i| {
+                        let mut e = |b: f64| if b.is_finite() { b + 1e-5 * (1.0 + b.abs()) * (2.0 * rnd() - 1.0) } else { b };
+                        let (lo, up) = (e(rlo[i]), e(rup[i]));
+                        if rlo[i] == rup[i] { (i, lo, lo) } else { (i, lo.min(up), up.max(lo)) }
+                    }).collect();
+                    lpp.set_costs(&p.cost);
+                    lpp.set_row_bounds_many(&ch);
+                } else {
+                    let ch: Vec<(usize, f64, f64)> = (0..nr).map(|i| (i, rlo[i], rup[i])).collect();
+                    lpp.set_row_bounds_many(&ch);
+                    let cc: Vec<f64> = p.cost.iter().map(|&c| c * (1.0 + 1e-3 * (2.0 * rnd() - 1.0))).collect();
+                    lpp.set_costs(&cc);
+                }
+                if lpp.solve(&SolveLimits { deadline: Some(lam_deadline), ..Default::default() }) == LpStatus::Optimal {
+                    if let Some(v) = lagr(&lpp.row_duals()) {
+                        if t % 2 == 0 { pl.push(v) } else { xl.push(v) }
+                    }
+                }
+            }
+        }
+        fams.push(("P", pl));
+        fams.push(("X", xl));
+        let gl: Vec<(f64, Vec<f64>)> = (0..kmax).filter_map(|_| {
+            let y: Vec<f64> = y0.iter().map(|&v| v * (1.0 + 0.1 * (2.0 * rnd() - 1.0))).collect();
+            lagr(&y)
+        }).collect();
+        fams.push(("G", gl));
+        let lam_secs = t_lam.elapsed().as_secs_f64();
+        // 種類ごとに、根の被約費用 (a) と目的の伝播 (b) に足して、K = 10・全部 で固定できる数 (全部の自由な整数列と標本)
+        let sampled = &sample[..done];
+        let mut lam_out = String::new();
+        let base_lo = alo.iter().zip(&blo).map(|(a, b)| a.max(*b)).collect::<Vec<f64>>();
+        let base_up = aup.iter().zip(&bup).map(|(a, b)| a.min(*b)).collect::<Vec<f64>>();
+        let (mut all_lo, mut all_up) = (base_lo.clone(), base_up.clone());
+        let t_apply = Instant::now();
+        let mut napply = 0usize;
+        for (name, list) in &fams {
+            // 種類ごとに、(a)・(b) の固定 (base) から始める (種類の間で足し合わせない。ALL だけ全部を足す)
+            let (mut lo, mut up) = (base_lo.clone(), base_up.clone());
+            let mut k10 = (0usize, 0usize);
+            for (t, (l, d)) in list.iter().enumerate() {
+                apply(*l, d, &mut lo, &mut up);
+                apply(*l, d, &mut all_lo, &mut all_up);
+                napply += 2;
+                if t + 1 == 10 {
+                    k10 = (nfix(&lo, &up, &free), nfix(&lo, &up, sampled));
+                }
+            }
+            if list.len() < 10 {
+                k10 = (nfix(&lo, &up, &free), nfix(&lo, &up, sampled));
+            }
+            let lmin = list.iter().map(|x| x.0).fold(f64::INFINITY, f64::min);
+            let lmax = list.iter().map(|x| x.0).fold(f64::NEG_INFINITY, f64::max);
+            lam_out += &format!("\"{name}\":{{\"k\":{},\"k10\":[{},{}],\"kall\":[{},{}],\"L\":[{lmin:.6e},{lmax:.6e}]}},", list.len(), k10.0, k10.1, nfix(&lo, &up, &free), nfix(&lo, &up, sampled));
+        }
+        let us_per = t_apply.elapsed().as_secs_f64() * 1e6 / napply.max(1) as f64;
+        lam_out += &format!("\"ALL\":[{},{}],\"lam_secs\":{lam_secs:.2},\"apply_us\":{us_per:.1}", nfix(&all_lo, &all_up, &free), nfix(&all_lo, &all_up, sampled));
+        eprintln!("OBBTLAM {{\"base\":[{ab_fix},{s_ab}],\"obbt\":[{c_fix},{done}],{lam_out}}}");
         eprintln!(
             "OBBTDIAG {{\"u\":{u:.10e},\"root\":{:.10e},\"n\":{n},\"free_int\":{},\"rows\":{nr},\"rc\":[{a_fix},{a_tg}],\"objprop\":[{b_fix},{b_tg}],\"rc_or_obj_fix\":{ab_fix},\"rc_lists\":{},\"sample\":{k},\"done\":{done},\"obbt\":[{c_fix},{c_tg}],\"sample_rc\":{s_a},\"sample_obj\":{s_b},\"sample_rc_or_obj\":{s_ab},\"lp0\":\"{st0:?}\",\"infeasible\":{infeasible},\"secs\":{:.2}}}",
             self.root_redcost.as_ref().map_or(f64::NAN, |r| r.0), free.len(), rc_lists.len(), t0.elapsed().as_secs_f64()
