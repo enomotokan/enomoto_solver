@@ -5,6 +5,10 @@ from pathlib import Path
 D = Path(__file__).resolve().parent; WT = D.parents[1]
 sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
+import re
+def jl(s):
+    # 空の種類の L の範囲は inf・NaN になるので null に直して読む
+    return json.loads(re.sub(r"-?\binf\b|\bNaN\b", "null", s))
 best = {}
 for f in glob.glob(str(D / "res_*.jsonl")):
     for l in open(f):
@@ -36,9 +40,9 @@ for l in open(D / "scan_d.jsonl"):
     t0 = time.time(); rec = None; lam = None
     for line in pr.stderr:
         if line.startswith("OBBTLAM "):
-            lam = json.loads(line.split(" ", 1)[1])
+            lam = jl(line.split(" ", 1)[1])
         if line.startswith("OBBTDIAG "):
-            rec = json.loads(line.split(" ", 1)[1]); break
+            rec = jl(line.split(" ", 1)[1]); break
     pr.kill(); pr.wait()
     out = {"problem": p, "set": r["set"], "u_opt": opt, "diag": rec, "lam": lam, "wall": round(time.time() - t0, 1)}
     with open(OUT, "a") as f:
