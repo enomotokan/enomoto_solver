@@ -110,3 +110,5 @@ SCIP 10.0.2 (pyscipopt 6.3.0、逐次) と当方 (1 スレッド) を同じ種�
   fuzz_tiny 0/400・mip_fuzz_vs_highs 0/300。mip_fuzz_symmetric の 100 問中 38 問で REPROBE が働き、行を外す例も通っている。
 - 静的なオービトープ (ORBPP) が働くのは、P 58・M 48 の 106 問 (根だけの判定、`gate2_20261117/tab/feat.jsonl` の札 dec2) では graph20-20-1rand だけ。
   ほかの問題では REPROBE は何もしない (既定と同じ計算)。
+- graph20 の 4 スレッドの比べ (`shards_G.json`、1 分担): graph20-20-1rand × 種 1〜5 × {def, rep} × 600 秒 (4 スレッドで既定は 1 回 30〜60 秒なので 1 時間弱)。
+  `python analysis/scipslow_20261119/run.py G 0`、集計 `python analysis/scipslow_20261119/summ.py G rep`。ビルドは 2cf3fa5a2 以降 (冗長な行を外す版)。
