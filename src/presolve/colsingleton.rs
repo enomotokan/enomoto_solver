@@ -166,6 +166,9 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
     // (rocI-4-11・rococoC10-001000・rococoB10-011000 はこの形の列だけを 1〜4 本消し、M の 3〜8 種で 1.08・1.47 倍。0-1 列の同じ形
     // (neos-1445765、0.20 倍) と、符号の混ざる行 (hypothyroid-k1、0.60 倍) は消す)
     let int_sing_cnt = env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v.contains('g'));
+    // `s` (同符号の 0-1 列を残す): 消す列が 0-1 で、行の他の係数がすべて消す列と同符号 (`y + Σ a x = b`、a > 0 の形) なら消さない
+    // (supportcase33・air03・traininstance6 の損はこの形だけ。M・P の 1g で解けた数 −3・air03 の素の時間 1.3〜1.5 倍。README §11.6〜§12)
+    let int_sing_same = env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v.contains('s'));
     let is_integral = |v: f64| (v - v.round()).abs() <= 1e-12 * (1.0 + v.abs());
     let intsing_log = int_sing && env_str!("ENOMOTO_MIP_INTSING_LOG").is_some();
     let mut intsing_stats: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -182,8 +185,10 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
                     let row = &a_rows[i];
                     let aj = row.iter().find(|&&(k, _)| k == j).map_or(0.0, |&(_, v)| v);
                     let counting = int_sing_cnt && ub[j] - lb[j] > 1.5 && c[j] != 0.0 && row.iter().all(|&(k, v)| k == j || v * aj < 0.0);
+                    let same_bin = int_sing_same && lb[j] == 0.0 && ub[j] == 1.0 && row.iter().all(|&(k, v)| k == j || v * aj > 0.0);
                     is_integral(b[i])
                         && !counting
+                        && !same_bin
                         && row.iter().all(|&(k, v)| if k == j { (v.abs() - 1.0).abs() <= 1e-12 } else { m[k] && is_integral(v) && (!int_sing_def || v * aj < 0.0) })
                 });
             if !ok {

@@ -260,3 +260,27 @@ def も同じビルドで回す (d3f31f37c の後に ORBPP_REPROBE・EQUIV2_PWOR
 - 採用基準との照合: 区間の上端 ✓ (M +2.6%、P +2.2%)、誤答 0 ✓、M の解けた数 −2 ✗、P の air03 の素の時間 ✗ (ずらした比では ✓)。
   残った損 (supportcase33・air03・traininstance6 の残り 4 本) はどれも「行の他の係数がすべて同符号の 0-1 列」(same/bin) の形で、`g` の外。
 - `dg` (d 形 + g) の前処理の数え上げ (`intsing_kinds_dg.jsonl`): hypothyroid-k1 (mixed) も消さなくなり、得の 4 問のうち 1 つを失うので採らない。
+
+## 12. INTSING の `1gs` 形 (g + 同符号の 0-1 列を消さない、利用者の判断「進めて」、2026-11-19)
+
+### 12.1 条件 `s` (`ENOMOTO_MIP_INTSING` に `s` を含むとき、既定はオフ。試作は `ENOMOTO_MIP_INTSING=1gs`)
+消す整数列 j が **0-1 (境界 [0, 1]) で、行の他の係数がすべて j の係数と同符号** なら消さない (§11.1 の same/bin)。
+
+### 12.2 数え上げ (`python intsing_kinds.py 1gs` → `intsing_kinds_1gs.jsonl`、`scan_gs.jsonl`)
+`1` 形が前処理を変える 36 問 (P 7・M 29) を 3 つに分ける。
+- **INTSING が何も消さなくなる 14 問** (前処理の行・列が既定と同じことを `scan_gs.jsonl` で確かめた): P = air03・eil33-2・nw04・graph20-20-1rand、
+  M = air05・atlanta-ip・decomp2・irp・supportcase33・traininstance2・traininstance6 (s で外れる) と radiationm40-10-02・rococoB10-011000・rococoC10-001000 (g で外れる)。
+  これらは既定と同じとみなす。
+- **消す列が減るが残る 7 問** (M): brazil3 556 → 550・neos-3656078-kumeu 141 → 6・piperout-08 22 → 1・piperout-27 22 → 2・
+  radiationm18-12-05 4 → 1・rocI-4-11 147 → 144 (根では 0)・rocII-5-11 69 → 63。
+- **`1` と同じ 15 問**: P = hypothyroid-k1・neos-3083819-nubu・30n20b8、M = neos-1445765・mushroom-best・cryptanalysiskb128n5obj14・obj16・
+  neos-1354092・neos-3216931-puriri・peg-solitaire-a3・rail01・satellites2-40・satellites2-60-fs・sing326・sing44。fixis の結果で代える。
+- 得の問題: neos-1445765・hypothyroid-k1・mushroom-best は `1` と同じで得は残る。graph20 (P で 1.046 倍) と eil33-2 (0.877)・nw04 (0.947)・
+  irp (0.971) の小さな得は消える。
+
+### 12.3 正しさ
+cargo test 411 通過・0 失敗。`1gs` で fuzz_intsing 300 問 bad 0、fuzz 7 本 bad 0。
+
+### 12.4 計測の分担 (H)
+`python plan.py H 5` → `shards_H.json` (12.2 の 7 問 × {def, isgs} の同じビルドの対、600 秒・4 スレッド。rocI-4-11・piperout-08・piperout-27 は種 1〜8、
+G で全種とも時間切れの問題と rocII-5-11 は種 1〜3、72 回、分担 5 つで各約 1.2 時間)。`python run.py H K` → `res_H_sK.jsonl`。
