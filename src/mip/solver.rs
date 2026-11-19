@@ -16541,8 +16541,67 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.sb_agree.len() >= win && self.sb_agree.iter().filter(|&&a| a).count() as f64 >= tunable!("ENOMOTO_T_MIP_SB_AGREE_THR", 0.8, f64) * win as f64
     }
 
+    /// 診断 `ENOMOTO_MIP_SBCAND_LOG=full` (計測用。既定では使わない、analysis/disj_20261119.md の 8 節): 根 (深さ 0) の最初の分枝の選択の前に、
+    /// 小数の整数列を f(1-f) の大きい順に `ENOMOTO_T_MIP_SBCAND_FULL_MAX` 本 (既定 200) まで、反復の上限なし (時間の上限
+    /// `ENOMOTO_T_MIP_SBCAND_FULL_TIME` 秒 (既定 60) まで) で両側の子の LP を解き、`SBFULL {...}` を 1 行ずつ出す。LP の状態は戻すので
+    /// 分枝の選択そのものは変わらない (時間はかかる)。再開ごとに 1 回
+    fn sbcand_full(&mut self, frac: &[(usize, f64)], node_obj: f64) {
+        thread_local! { static DONE: std::cell::Cell<i64> = const { std::cell::Cell::new(-1) }; }
+        let r = self.params.restarts as i64;
+        if DONE.with(|d| d.get()) >= r {
+            return;
+        }
+        DONE.with(|d| d.set(r));
+        let mut c: Vec<(usize, f64)> = frac.to_vec();
+        let fr = |v: f64| { let f = v - v.floor(); f * (1.0 - f) };
+        c.sort_by(|a, b| fr(b.1).total_cmp(&fr(a.1)));
+        c.truncate(tunable!("ENOMOTO_T_MIP_SBCAND_FULL_MAX", 200usize, usize));
+        let tmax = tunable!("ENOMOTO_T_MIP_SBCAND_FULL_TIME", 60.0, f64);
+        let t0 = Instant::now();
+        let saved = self.lp.save_state();
+        let (mut n, mut stopped) = (0usize, false);
+        for &(j, v) in &c {
+            if t0.elapsed().as_secs_f64() > tmax || self.time_up() {
+                stopped = true;
+                break;
+            }
+            let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+            let mut val = [String::new(), String::new()];
+            let mut stv = [String::new(), String::new()];
+            for (side, is_up) in [(0usize, false), (1usize, true)] {
+                if is_up {
+                    self.lp.set_col_bounds(j, self.bce(j, v), up);
+                } else {
+                    self.lp.set_col_bounds(j, lo, self.bfl(j, v));
+                }
+                let st = self.lp.solve(&self.limits_k(u64::MAX / 4, 1));
+                val[side] = match st {
+                    LpStatus::Optimal => format!("{:.10e}", self.lp.objective() + self.p.offset),
+                    _ => "null".to_string(),
+                };
+                stv[side] = format!("{st:?}");
+                self.lp.restore_state(&saved);
+            }
+            n += 1;
+            eprintln!(
+                "SBFULL {{\"restarts\":{r},\"col\":{j},\"v\":{v:.6},\"z\":{node_obj:.10e},\"down\":{},\"up\":{},\"st_down\":\"{}\",\"st_up\":\"{}\",\"t\":{:.3}}}",
+                val[0], val[1], stv[0], stv[1], t0.elapsed().as_secs_f64()
+            );
+        }
+        let pl = self.prune_limit();
+        eprintln!(
+            "SBFULLEND {{\"restarts\":{r},\"nfrac\":{},\"done\":{n},\"stopped\":{stopped},\"z\":{node_obj:.10e},\"cutoff\":{},\"secs\":{:.3}}}",
+            frac.len(),
+            if pl.is_finite() { format!("{pl:.10e}") } else { "null".to_string() },
+            t0.elapsed().as_secs_f64()
+        );
+    }
+
     fn select_branch(&mut self, frac: &[(usize, f64)], node_obj: f64, depth: usize) -> BranchAction {
         let t0 = Instant::now();
+        if depth == 0 && !self.params.submip && env_str!("ENOMOTO_MIP_SBCAND_LOG").is_some_and(|v| v == "full") {
+            self.sbcand_full(frac, node_obj);
+        }
         self.last_sb = None;
         self.poly_diag_raised.clear();
         let r = self.select_branch_inner(frac, node_obj, depth);
@@ -16565,6 +16624,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
             r
         };
         self.sb_secs += t0.elapsed().as_secs_f64();
+        // 診断 `ENOMOTO_MIP_SBCAND_LOG=1`: 根の分枝の選択の終わり (選んだ列・刈り・解き直し、候補の数、根の LP の値、打ち切り値)
+        if depth == 0 && !self.params.submip && env_str!("ENOMOTO_MIP_SBCAND_LOG").is_some_and(|v| v != "0") {
+            let (act, col) = match r {
+                BranchAction::Branch { col, .. } => ("branch", col as i64),
+                BranchAction::Prune => ("prune", -1),
+                BranchAction::Resolve => ("resolve", -1),
+            };
+            let pl = self.prune_limit();
+            eprintln!(
+                "SBEND {{\"restarts\":{},\"action\":\"{act}\",\"col\":{col},\"sb\":{},\"nfrac\":{},\"z\":{:.10e},\"cutoff\":{},\"inc\":{},\"t\":{:.3}}}",
+                self.params.restarts,
+                self.last_sb.is_some(),
+                frac.len(),
+                node_obj,
+                if pl.is_finite() { format!("{pl:.10e}") } else { "null".to_string() },
+                self.incumbent.as_ref().map_or("null".to_string(), |(z, _)| format!("{z:.10e}")),
+                self.start.elapsed().as_secs_f64()
+            );
+        }
         // 診断用 (`ENOMOTO_MIP_DEBUG_BRCOL`、analysis/dualeq2_20261113.md): 分枝した列を、前処理で番号が変わっても見分けられるよう
         // 費用・境界・非零の数と一緒に出す
         if !self.params.submip && env_str!("ENOMOTO_MIP_DEBUG_BRCOL").is_some() {
@@ -17078,6 +17156,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.dom.backtrack_to(self.p, pos);
                 }
             }
+            }
+            // 診断 `ENOMOTO_MIP_SBCAND_LOG=1` (振る舞いは変えない、analysis/disj_20261119.md の 8 節): 根 (深さ 0、サブ MIP でない) で強分岐した
+            // 候補ごとに、子の LP の値 (反復上限なら途中の値 = 下界、際どい実行不能の不明は親の値) と打ち切られたかを 1 行の JSON で出す
+            if depth == 0 && !self.params.submip && env_str!("ENOMOTO_MIP_SBCAND_LOG").is_some_and(|v| v != "0") {
+                let f = |k: usize| if cut[k] { "null".to_string() } else { format!("{:.10e}", node_obj + gains[k]) };
+                eprintln!(
+                    "SBCAND {{\"restarts\":{},\"col\":{j},\"v\":{v:.6},\"z\":{node_obj:.10e},\"down\":{},\"up\":{},\"cut_down\":{},\"cut_up\":{},\"exact_down\":{},\"exact_up\":{},\"t\":{:.3}}}",
+                    self.params.restarts,
+                    f(0),
+                    f(1),
+                    cut[0],
+                    cut[1],
+                    child_obj[0].is_finite(),
+                    child_obj[1].is_finite(),
+                    self.start.elapsed().as_secs_f64()
+                );
             }
             match (cut[0], cut[1]) {
                 (true, true) => return BranchAction::Prune,
