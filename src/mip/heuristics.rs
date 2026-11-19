@@ -2359,6 +2359,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
+            // 試作 `ENOMOTO_MIP_RENS_BIGGAP=g` (P2-HEUR、analysis/heurgap2_20261119/、既定では使わない): ダイブが解を出しても、
+            // 暫定解と根の LP の値の間隙 (z − LP) / max(|z|, 1) が g を超えるなら、既定の RENS (LP で整数値の列を全部固定) も 1 回回す。
+            // trento1 では、ダイブの打ち切られたサブ MIP が下界の約 1000 倍の解 (間隙 0.999) を出して受け入れられ、
+            // 既定の RENS (0.1.9 では 6.59e7 を出した) が回らずに木へ入っていた。間隙がこれほど大きい解は、
+            // 近傍を変えたサブ MIP 1 回の手間に見合う (多くの問題ではダイブの解の間隙は小さく、この分岐に入らない)
+            if r && !self.time_up() {
+                if let Some(g) = env_str!("ENOMOTO_MIP_RENS_BIGGAP").and_then(|v| v.parse::<f64>().ok()) {
+                    let lpz = self.lp.objective() + self.p.offset;
+                    if let Some((z, _)) = self.incumbent.as_ref() {
+                        let gap = (z - lpz) / z.abs().max(1.0);
+                        if self.params.verbose {
+                            eprintln!("MIP:   RENS_BIGGAP: SUBFIX RENS found a solution with gap {gap:.3e} (threshold {g})");
+                        }
+                        if gap > g {
+                            self.rens_biggap_done = true;
+                            return self.rens_old(_x) || r;
+                        }
+                    }
+                }
+            }
             return r;
         }
         // `ENOMOTO_MIP_SUBA_RATE` の `n` ([`suba_rate`]): 外側の根の RENS の固定を目標の固定率で止める
@@ -2770,6 +2790,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 旧来の RENS (LP 解で整数値の列を全部固定する。既定)。
+    /// [`Self::rens_old`] を solver.rs から呼ぶ口 (試作 `ENOMOTO_MIP_RENS_BIGGAP` の 4 スレッドの道)
+    pub(super) fn rens_old_pub(&mut self, x: &[f64]) -> bool {
+        self.rens_old(x)
+    }
+
     fn rens_old(&mut self, x: &[f64]) -> bool {
         let p = self.p;
         let mut lo = self.dom.lo.clone();
