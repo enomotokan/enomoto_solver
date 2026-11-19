@@ -157,6 +157,10 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
     // 多重集約に当たる。neos-1445765 は費用つきの 0-1 列 y_k が `Σ_{S_k} x_j − y_k = 0` の 1 本にだけ現れ (1000 本)、
     // SCIP は y_k を消して費用を x_j に移す (2146 → 1134 列)。当方でこの形を解くと 183.8 → 47.8 秒 (1 スレッド)
     let int_sing = int_mask.is_some() && env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v != "0");
+    // `d` (定義の形だけ): 行の他の列の係数の符号がすべて消す列の係数と逆 (`y = Σ a x`、a > 0 の形) のときだけ消す。air03 の
+    // set partitioning 行 (`x_j + Σ = 1`、符号がそろう) の列シングルトン 118 本を消すと、費用が行の他の列へ配られて後の前処理
+    // (支配列) が働かなくなり、0 ノードのまま 3.2〜5.1 → 4.7〜6.6 秒に遅くなった
+    let int_sing_def = env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v.contains('d'));
     let is_integral = |v: f64| (v - v.round()).abs() <= 1e-12 * (1.0 + v.abs());
     for j in col_order {
         if appearances[j] != 1 {
@@ -167,7 +171,9 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
                 && owning_a_row[j].is_some_and(|i| {
                     let m = int_mask.as_ref().unwrap();
                     let row = &a_rows[i];
-                    is_integral(b[i]) && row.iter().all(|&(k, v)| if k == j { (v.abs() - 1.0).abs() <= 1e-12 } else { m[k] && is_integral(v) })
+                    let aj = row.iter().find(|&&(k, _)| k == j).map_or(0.0, |&(_, v)| v);
+                    is_integral(b[i])
+                        && row.iter().all(|&(k, v)| if k == j { (v.abs() - 1.0).abs() <= 1e-12 } else { m[k] && is_integral(v) && (!int_sing_def || v * aj < 0.0) })
                 });
             if !ok {
                 continue;
