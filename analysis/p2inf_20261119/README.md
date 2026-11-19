@@ -359,3 +359,18 @@ k = 12 で当方の設定を比べる (sub12.sh、logs/sub12v_*.log、`sub12v_ro
 - cfx2 = LIT_EXPLAIN + HiGHS 式の衝突スコア + `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT=0.1`: bnatt400 全体 4 スレッド **321.5 秒・23375 ノードで最適**、部分木 k=12
   827 ノード、mas76 種 3 8.9 秒 (def と同じ)、pk1 種 2 15.3 秒 (def 21.5)、atrato 種 1 62.4 秒 (def 115.8)。cargo test 411 通過。
 - 計測: shards_PCFX2.json (4 分担)・shards_MCFX2.json (12 分担)、`python run.py PCFX2 K` / `MCFX2 K`。誤答の確かめ verify_cfx2.sh: widden 4 スレッド 48.3 秒・1 スレッド 72.8 秒でどちらも最適、fuzz 11 本 (cfx と同じ) すべて bad 0。
+
+### 4.14 cfx2 で fiball・mcsched が遅く出た件 (事実と読み)
+
+- f8fa3374f → c1e0fd189 の間の src の変更は、試作 FLAT (既定では働かない) と診断 2 件 (CUTSTOP_LOG・FP_STATS、数え上げだけ) で、既定の動きは同じ。
+  def の違い (fiball 種 2 が 600 秒の時間切れ → 22.3 秒など) は揺れ。
+- FLAT の判定の診断 (`MIP: conflict weight FLAT`、16a5c6383) で、種 2・4 スレッド・600 秒を 1 本ずつ (logs/{fiball,mcsched}_{cfx2,lxhc}_s2.log):
+
+| 問題 | cfx2 | LIT_EXPLAIN + HiGHS 式 (FLAT なし) | 判定が真の割合 | 利得が正の観測 |
+|---|---|---|---|---|
+| fiball | 55.4 秒 | 54.9 秒 | 100% | 283 / 83781 (0.3%) |
+| mcsched | 347 秒 | 176 秒 | 0.004% (2304 / 6283 万) | 25411 / 103405 (25%) |
+
+- 読み: fiball は目的の利得がほぼ常に 0 で判定は常に真だが、FLAT のあり・なしで同じ速さ (重みは中立)。mcsched は判定がほぼ真にならず、cfx2 と
+  FLAT なしは実質同じ設定なのに 347 / 176 秒に分かれる: 4 スレッドの揺れ (176 秒は計測機の def 184.9 秒とほぼ同じ)。計測機で cfx2 が遅く出た
+  2 問は、FLAT の重みの仕組みでは説明できず、揺れの見込みが高い。

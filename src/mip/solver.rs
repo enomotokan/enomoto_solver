@@ -25769,6 +25769,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
             eprintln!("MIP: inference: branchings counted {}, mean bound changes after a branching {:.2} (ENOMOTO_MIP_INF_ALL {})", self.pc.inference_count(), self.pc.inference_mean(), inf_all());
+            let fd = self.pc.flat_diag();
+            eprintln!("MIP: conflict weight FLAT (tid {}): hybrid scores {}, with the flat condition {}; positive gains {} of {} observations", self.pool_tid, fd.0, fd.1, fd.2, fd.3);
             if tc_on('g') {
                 let g = self.tc_g_stats;
                 eprintln!("MIP: TC g: calls {}, columns tightened by the open nodes {}, by the propagation {}, trees closed {}", g[0], g[1], g[2], g[3]);

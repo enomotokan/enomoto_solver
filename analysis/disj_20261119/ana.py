@@ -4,6 +4,13 @@ import json, sys
 from collections import defaultdict
 STALL = {"stall", "intobj_stall", "phase2_stall", "robust_ext_stall"}
 rows = json.load(open(sys.argv[1]))
+# M (根だけ): 求解全体の状態・時間・ノードは vsscip_20261117 の def (0.1.9、600 秒、種 1、参考) に置き換える
+FULL = any("full_status" in r for r in rows)
+TL = 600 if FULL else 60
+for r in rows:
+    if FULL:
+        r["root_time"] = r["time"]
+        r["status"], r["time"], r["nodes"] = r.get("full_status"), r.get("full_time") or TL, r.get("full_nodes")
 by = defaultdict(list)
 for r in rows:
     by[r["problem"]].append(r)
@@ -41,8 +48,15 @@ for lab, sel in (("停滞", [r for r in rows if isst(r)]), ("停滞でない", [
     f = [r.get("t_root", 0) / r["time"] for r in sel if r.get("time")]
     print(f"  {lab}: {len(sel)} 回、割合の中央値 {statistics.median(f):.3f}、合計の比 {sum(r.get('t_root',0) for r in sel)/sum(r['time'] for r in sel):.3f}")
 # 解けない・遅い (>= 10 秒) と停滞の重なり
-slow = [p for p in probs if any(r["status"] != "optimal" or (r["time"] or 0) >= 10 for r in by[p])]
-print(f"\n解けない (60 秒で時間切れ) か 10 秒以上かかる問題: {len(slow)}")
+slow = [p for p in probs if any(r["status"] != "optimal" or (r["time"] or 0) >= TL / 6 for r in by[p])]
+print(f"\n解けない ({TL} 秒で時間切れ) か {TL // 6} 秒以上かかる問題: {len(slow)}")
 for p in slow:
     rs = by[p]
     print(f"  {p:22s} {'停滞' if any(isst(r) for r in rs) else '    '} 理由 {' / '.join(','.join(r.get('reasons', [])) for r in rs)[:40]:40s} rem {' '.join(f'{rem(r):.2f}' if rem(r) is not None else '-' for r in rs)} 状態 {' '.join(f'{str(r['status'])[:4]}{r['time']:.0f}' for r in rs)} t_root {' '.join(f'{r.get('t_root',0):.1f}' for r in rs)}")
+# 重なりのまとめ (問題単位、どれかの種で)
+uns = [p for p in probs if any(r["status"] != "optimal" for r in by[p])]
+slw = [p for p in probs if p not in uns and any((r["time"] or 0) >= TL / 6 for r in by[p])]
+for lab, ps in ((f"解けない ({TL} 秒)", uns), (f"解けるが {TL // 6} 秒以上", slw)):
+    a = [p for p in ps if p in pst]
+    b = [p for p in a if p in big]
+    print(f"{lab}: {len(ps)} 問、うち停滞 {len(a)}、うち停滞かつ残りギャップ > 10% {len(b)}: {', '.join(b)}")
