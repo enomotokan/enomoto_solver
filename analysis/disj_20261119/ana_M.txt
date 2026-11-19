@@ -1,5 +1,5 @@
-回: 183、最初のループが停滞 110、どれかのループが停滞 119
-問題: 183、少なくとも 1 種で最初のループが停滞 110、全種で停滞 110
+回: 186、最初のループが停滞 111、どれかのループが停滞 120
+問題: 186、少なくとも 1 種で最初のループが停滞 111、全種で停滞 111
 停滞かつ残りギャップ > 10% (少なくとも 1 種): 86
 
 problem                理由(種1/種2)                                  rem   nfrac/nint     t_root/t_all 状態                   nodes
@@ -90,13 +90,13 @@ neos-3083819-nubu      stall,stall                               0.14     60 /38
 nu25-pr12              intobj_stall,stall                        0.14    105 /4730            0.9/3 optimal              13
 neos-4738912-atrato    stall                                     0.13    408 /6174          1.8/109 optimal              26893
 
-停滞・残りギャップ <= 10% (またはギャップ 0): drayage-25-23(0.00), neos-960392(-), neos-957323(0.00), cbs-cta(-), app1-1(0.00), pg(0.00), nursesched-sprint02(0.00), irp(0.00), piperout-27(0.00), piperout-08(0.00), fiball(0.00), physiciansched6-2(0.00), neos-1171448(-), n2seq36q(0.00), neos-933966(-), pg5_34(0.01), tr12-30(0.00), fhnw-binpack4-4(-), bnatt500(-), neos859080(-), neos-1171737(-), peg-solitaire-a3(-), academictimetablesmall(-), ns1952667(-)
+停滞・残りギャップ <= 10% (またはギャップ 0): drayage-25-23(0.00), neos-960392(-), neos-957323(0.00), cbs-cta(-), app1-1(0.00), pg(0.00), nursesched-sprint02(0.00), irp(0.00), piperout-27(0.00), piperout-08(0.00), fiball(0.00), physiciansched6-2(0.00), neos-1171448(-), n2seq36q(0.00), neos-933966(-), pg5_34(0.01), tr12-30(0.00), fhnw-binpack4-4(-), bnatt500(-), neos859080(-), neos-1171737(-), peg-solitaire-a3(-), academictimetablesmall(-), ns1952667(-), snp-02-004-104(0.00)
 
-根のループの時間 / 求解全体: 中央値 0.026、平均 0.089、合計の比 3014/65501 = 0.046
-  停滞: 110 回、割合の中央値 0.025、合計の比 0.031
-  停滞でない: 73 回、割合の中央値 0.035、合計の比 0.068
+根のループの時間 / 求解全体: 中央値 0.028、平均 0.093、合計の比 3674/67306 = 0.055
+  停滞: 111 回、割合の中央値 0.025、合計の比 0.031
+  停滞でない: 75 回、割合の中央値 0.035、合計の比 0.088
 
-解けない (600 秒で時間切れ) か 100 秒以上かかる問題: 125
+解けない (600 秒で時間切れ) か 100 秒以上かかる問題: 128
   neos-4722843-widden    停滞 理由 stall                                    rem 0.56 状態 opti106 t_root 3.6
   mas74                       理由 round_limit,stall                        rem 0.91 状態 opti107 t_root 0.3
   neos-1445765           停滞 理由 stall                                    rem 0.89 状態 opti109 t_root 2.9
@@ -222,5 +222,8 @@ neos-4738912-atrato    stall                                     0.13    408 /61
   uccase12               停滞 理由 stall,stall,stall                        rem 0.32 状態 time601 t_root 22.7
   chromaticindex1024-7   停滞 理由 stall                                    rem 1.00 状態 time601 t_root 53.3
   rail507                停滞 理由 stall                                    rem 0.97 状態 time601 t_root 51.1
-解けない (600 秒): 92 問、うち停滞 53、うち停滞かつ残りギャップ > 10% 46: mad, bnatt400, neos-2657525-crna, glass4, seymour, csched008, neos-4338804-snowy, sct2, rococoB10-011000, graph20-20-1rand, bppc4-08, ic97_potential, markshare2, rocI-4-11, traininstance2, trento1, neos-5107597-kakapo, cmflsp50-24-8-8, comp21-2idx, gmu-35-50, icir97_tension, germanrr, atlanta-ip, gmu-35-40, brazil3, satellites2-60-fs, radiationm18-12-05, supportcase18, leo1, sp97ar, satellites2-40, rocII-5-11, neos-5188808-nattai, sp98ar, lectsched-5-obj, app1-2, blp-ic98, neos-5195221-niemur, momentum1, opm2-z10-s4, neos-2746589-doon, chromaticindex512-7, fast0507, uccase12, chromaticindex1024-7, rail507
+  rail01                      理由 time_cap                                 rem 0.49 状態 time601 t_root 373.3
+  snp-02-004-104         停滞 理由 stall                                    rem 0.00 状態 time601 t_root 28.0
+  thor50dday                  理由 time_cap,work_cap,lp_fail                rem 0.18 状態 time602 t_root 258.5
+解けない (600 秒): 95 問、うち停滞 54、うち停滞かつ残りギャップ > 10% 46: mad, bnatt400, neos-2657525-crna, glass4, seymour, csched008, neos-4338804-snowy, sct2, rococoB10-011000, graph20-20-1rand, bppc4-08, ic97_potential, markshare2, rocI-4-11, traininstance2, trento1, neos-5107597-kakapo, cmflsp50-24-8-8, comp21-2idx, gmu-35-50, icir97_tension, germanrr, atlanta-ip, gmu-35-40, brazil3, satellites2-60-fs, radiationm18-12-05, supportcase18, leo1, sp97ar, satellites2-40, rocII-5-11, neos-5188808-nattai, sp98ar, lectsched-5-obj, app1-2, blp-ic98, neos-5195221-niemur, momentum1, opm2-z10-s4, neos-2746589-doon, chromaticindex512-7, fast0507, uccase12, chromaticindex1024-7, rail507
 解けるが 100 秒以上: 33 問、うち停滞 24、うち停滞かつ残りギャップ > 10% 21: neos-4722843-widden, neos-1445765, neos-4738912-atrato, cod105, ns1830653, ran14x18-disj-8, neos-1456979, wachplan, dano3_3, mcsched, unitcal_7, graphdraw-domain, istanbul-no-cutoff, neos-662469, gen-ip054, mzzv11, supportcase33, traininstance6, dano3_5, CMS750_4, gen-ip002
