@@ -1299,6 +1299,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// カットのハッシュから写しの番号への表。
     cut_arena: Vec<(Vec<(usize, f64)>, f64)>,
     cut_arena_idx: std::collections::HashMap<u64, u32>,
+    /// 試作 [`orbitope_reason`]: 写しの表に入れた理由の行の数と非零の数。
+    orbitope_reason_rows: u64,
+    orbitope_reason_nnz: usize,
     /// 双対証明 (衝突分析): `sum coefs x <= U - konst` (U は打ち切り値から定数項を引いたもの、最新の値を使う)。
     pub(super) dual_proofs: std::collections::VecDeque<(Vec<(usize, f64)>, f64, bool)>,
     pub(super) dual_proof_nnz: usize,
@@ -5692,6 +5695,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         cut_pool: Vec::new(),
         cut_arena: Vec::new(),
         cut_arena_idx: std::collections::HashMap::new(),
+        orbitope_reason_rows: 0,
+        orbitope_reason_nnz: 0,
         dual_proofs: std::collections::VecDeque::new(),
         dual_proof_nnz: 0,
         proof_first_id: 0,
@@ -7391,7 +7396,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     return false;
                 }
                 // 試作 `ENOMOTO_MIP_SYM_SST=x`: 写しても SST の行に反する解 (許容差の際など) も、目的値は打ち切りに使えるので暫定解にする
-                if env_str!("ENOMOTO_MIP_SYM_ORIG_INC").is_none() && !sstx {
+                if env_str!("ENOMOTO_MIP_SYM_ORIG_INC").is_none() && !sstx && !orbitope_reason() {
                     return false;
                 }
                 orig_only = true;
@@ -17889,6 +17894,109 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (col, value)
     }
 
+    /// 試作 [`orbitope_reason`]: 静的なオービトープ `o` の、今の定義域で固定されている成分 (列, 値 0/1)。静的な固定 ([`super::symmetry::orbitopal_fixing`]
+    /// とパッキングの固定) はオービトープの成分の固定の有無と値だけから決まるので、この組と大域的な境界 (と「列が辞書式で広義減少」という大域的に
+    /// 正しい制約) で固定が導ける。組が大きすぎれば (`ENOMOTO_T_MIP_ORBITOPE_REASON_MAX`、既定 400) 理由を付けない (`None`)。
+    fn orbitope_reason_lits(&self, vars: &[Vec<usize>]) -> Option<Vec<(usize, bool)>> {
+        let cap = tunable!("ENOMOTO_T_MIP_ORBITOPE_REASON_MAX", 400usize, usize);
+        let mut lits = Vec::new();
+        // 大域的に固定された成分 (根の固定など) はどのノードでも成り立つので組に入れない (衝突解析も大域的な境界を基準に使う)
+        let (gl, gu) = (&self.dom.global_lo, &self.dom.global_up);
+        for line in vars {
+            for &k in line {
+                if self.dom.lo[k] >= 0.5 && gl[k] < 0.5 {
+                    lits.push((k, true));
+                } else if self.dom.up[k] <= 0.5 && gu[k] > 0.5 {
+                    lits.push((k, false));
+                }
+                if lits.len() > cap {
+                    return None;
+                }
+            }
+        }
+        Some(lits)
+    }
+
+    /// 試作 [`orbitope_reason`]: 固定 x_j = v の小さい理由。「列が辞書式で広義減少」が成り立てば、隣り合う 2 列だけ・上の行 (0..=i) だけの
+    /// 部分行列でも列は辞書式で広義減少する (前の部分の比べは全体の比べから従う) ので、その部分のオービトープの固定はもとの制約の帰結。
+    /// x_j = v (j は行 i・列 c) が (行 0..=i, 列 c-1・c)、(行 0..=i, 列 c・c+1)、(全ての行, 列 c-1・c)、(全ての行, 列 c・c+1) の順の部分の固定で
+    /// 導ければ、その部分で固定されている成分 (大域的なものを除く) を組にする。どれでも導けなければ `None` (全体の組を使う)。
+    fn orbitope_reason_small(&self, o: &super::symmetry::Orbitope, j: usize, v: f64) -> Option<Vec<(usize, bool)>> {
+        let r = o.vars.len();
+        let s = o.vars[0].len();
+        let (i, c) = (0..r).find_map(|i| o.vars[i].iter().position(|&k| k == j).map(|c| (i, c)))?;
+        // (行の数, 列の始め, 列の終わり (含まない))。小さい順
+        let mut tries: Vec<(usize, usize, usize)> = Vec::new();
+        for rows in [i + 1, r] {
+            if c > 0 {
+                tries.push((rows, c - 1, c + 1));
+            }
+            if c + 1 < s {
+                tries.push((rows, c, c + 2));
+            }
+            tries.push((rows, 0, c + 1));
+            tries.push((rows, c, s));
+            if rows < r {
+                tries.push((rows, 0, s));
+            }
+        }
+        for (t, &(rows, c0, c1)) in tries.iter().enumerate() {
+            if c1 - c0 < 2 {
+                continue;
+            }
+            let vars: Vec<Vec<usize>> = (0..rows).map(|k| o.vars[k][c0..c1].to_vec()).collect();
+            let sub = super::symmetry::Orbitope {
+                vars: vars.clone(),
+                packing: o.packing,
+                row_packing: o.row_packing[..rows].to_vec(),
+                swaps: Vec::new(),
+                local: false,
+                static_pp: o.static_pp,
+            };
+            let ok = super::symmetry::orbitopal_fixing(&sub, &self.dom.lo, &self.dom.up).is_some_and(|f| f.iter().any(|&(k, w)| k == j && w == v));
+            if ok {
+                ORB_REASON_KIND.with(|k| k.borrow_mut()[t.min(9)] += 1);
+                return self.orbitope_reason_lits(&vars);
+            }
+        }
+        ORB_REASON_KIND.with(|k| k.borrow_mut()[10] += 1);
+        None
+    }
+
+    /// 試作 [`orbitope_reason`]: 固定 x_j = v (0-1) の理由の行を写しの表 (`cut_arena`) に入れ、その番号を返す。行は
+    /// 「`lits` の固定が全て成り立てば x_j = v」を表す `sum a x <= rhs`: v = 0 なら x_j + sum_{1 の組} x_k - sum_{0 の組} x_k <= |1 の組|、
+    /// v = 1 なら -x_j + (同じ) <= |1 の組| - 1。0-1 列の上で、組が成り立つ点では x_j = v を強い、成り立たない点では冗長なので、
+    /// オービトープの制約を満たす全ての解で成り立つ (オービトープの制約の帰結)。表の大きさの上限 (`ENOMOTO_T_MIP_ORBITOPE_REASON_NNZ`、既定 2e7 の非零)
+    /// を超えたら付けない。
+    fn orbitope_reason_row(&mut self, lits: &[(usize, bool)], j: usize, v: f64) -> Option<usize> {
+        let cap = tunable!("ENOMOTO_T_MIP_ORBITOPE_REASON_NNZ", 20_000_000usize, usize);
+        if self.orbitope_reason_nnz + lits.len() + 1 > cap {
+            return None;
+        }
+        let mut row: Vec<(usize, f64)> = Vec::with_capacity(lits.len() + 1);
+        let mut ones = 0.0;
+        for &(k, one) in lits {
+            if k == j {
+                return None;
+            }
+            row.push((k, if one { 1.0 } else { -1.0 }));
+            if one {
+                ones += 1.0;
+            }
+        }
+        let rhs = if v < 0.5 {
+            row.push((j, 1.0));
+            ones
+        } else {
+            row.push((j, -1.0));
+            ones - 1.0
+        };
+        self.orbitope_reason_nnz += row.len();
+        self.orbitope_reason_rows += 1;
+        self.cut_arena.push((row, rhs));
+        Some(self.cut_arena.len() - 1)
+    }
+
     /// `changes` はこのノードまでの分枝 (根から順)。動的な固定 (既定) では、分枝した列を含むオービトープの行を
     /// 分枝した順に並べた行列で固定する (HiGHS・Bendotti らの dynamic orbitopal fixing。順は道ごとに決まるので道の上で
     /// 一貫している)。`ENOMOTO_MIP_ORBITOPE_STATIC` なら全ての行を固定の順で使う。
@@ -17960,20 +18068,40 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if subs.is_empty() {
             return true;
         }
+        // 試作 `ENOMOTO_MIP_ORBITOPE_STATIC=r` / `ENOMOTO_MIP_ORBITOPE_REASON` ([`orbitope_reason`]): 静的なオービトープ (全ての行を固定の順で使うもの。
+        // `ORBITOPE_STATIC` の全部と、動的な既定の中の `ORBPP` の静的なもの) の 0-1 の固定に、衝突解析で遡れる理由の行を付ける
+        let with_reason = orbitope_reason() && !self.params.submip;
         for _ in 0..10 {
-            let mut fixes: Vec<(usize, f64, f64)> = Vec::new();
+            // (列, 下限, 上限, 理由の行の写しの番号)
+            let mut fixes: Vec<(usize, f64, f64, Option<usize>)> = Vec::new();
             for o in subs.iter() {
                 // 0-1 でない整数の行を含むオービトープは整数の値で比べる形で固定する
                 let int_rows = o.vars.iter().any(|line| line.iter().any(|&j| self.p.col_lo[j] < 0.0 || self.p.col_up[j] > 1.0));
                 if int_rows {
                     match super::symmetry::orbitopal_fixing_int(o, &self.dom.lo, &self.dom.up) {
                         None => return false,
-                        Some(f) => fixes.extend(f),
+                        Some(f) => fixes.extend(f.into_iter().map(|(j, l, u)| (j, l, u, None))),
                     }
                 } else {
                     match super::symmetry::orbitopal_fixing(o, &self.dom.lo, &self.dom.up) {
                         None => return false,
-                        Some(f) => fixes.extend(f.into_iter().map(|(j, v)| (j, v, v))),
+                        Some(f) => {
+                            let reason_ok = with_reason && (!dynamic || o.static_pp);
+                            // 全体の組 (大きい) は小さい組で導けない固定のときだけ作る
+                            let mut all: Option<Option<Vec<(usize, bool)>>> = None;
+                            for (j, v) in f {
+                                let idx = if reason_ok {
+                                    let lits = match self.orbitope_reason_small(o, j, v) {
+                                        Some(l) => Some(l),
+                                        None => all.get_or_insert_with(|| self.orbitope_reason_lits(&o.vars)).clone(),
+                                    };
+                                    lits.and_then(|l| self.orbitope_reason_row(&l, j, v))
+                                } else {
+                                    None
+                                };
+                                fixes.push((j, v, v, idx));
+                            }
+                        }
                     }
                 }
             }
@@ -17981,11 +18109,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return true;
             }
             self.orbitope_fixings += fixes.len() as u64;
-            for (j, l, u) in fixes {
-                self.dom.set_external_tag(3);
+            for (j, l, u, idx) in fixes {
+                match idx {
+                    Some(i) => self.dom.set_cut_tag(i),
+                    None => self.dom.set_external_tag(3),
+                }
                 self.dom.tighten_lower(self.p, j, l);
                 self.dom.set_external(false);
-                self.dom.set_external_tag(3);
+                match idx {
+                    Some(i) => self.dom.set_cut_tag(i),
+                    None => self.dom.set_external_tag(3),
+                }
                 self.dom.tighten_upper(self.p, j, u);
                 self.dom.set_external(false);
             }
@@ -19044,7 +19178,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let rhs = if *obj { obj_lim - konst } else { *konst };
             rhs.is_finite().then(|| (c.clone(), rhs))
         };
-        let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() || lit_explain() { Some(&lookup) } else { None };
+        let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() || lit_explain() || orbitope_reason() { Some(&lookup) } else { None };
         let confs = self.dom.analyze_multi_bumps(self.p, start, max_len, reconv, hcs.then_some(&mut bumps), lk);
         if hcs && !bumps.is_empty() {
             self.pc.bump_conflict(&bumps);
@@ -25661,6 +25795,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if !self.orbitopes.is_empty() {
                 eprintln!("MIP: orbitopes {}: fixed {} bounds, pruned {} nodes", self.orbitopes.len(), self.orbitope_fixings, self.orbitope_prunes);
+                if orbitope_reason() {
+                    eprintln!("MIP: orbitope reasons: {} rows ({} nonzeros) in the cut arena, found at try {:?}, explained in conflict analysis {} times (all threads)", self.orbitope_reason_rows, self.orbitope_reason_nnz, ORB_REASON_KIND.with(|k| *k.borrow()), super::domain::CUT_REASON_EXPLAINED.load(std::sync::atomic::Ordering::Relaxed));
+                }
             }
             if self.sym_canon != (0, 0) {
                 eprintln!("MIP: symmetry: {} heuristic solutions mapped to the symmetry-reduced problem, {} could not be", self.sym_canon.0, self.sym_canon.1);
@@ -26034,6 +26171,21 @@ pub(super) fn tubr_on() -> bool {
 /// 連続列にする (`l` も入る)、`c` カットで I' を連続として扱う、`g` I' を Gomory の元の行から外す、`h` ネットワークの判定なし、`F` 診断
 pub(super) fn tubr_letter(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TUBR").is_some_and(|v| v != "0" && v.contains(c))
+}
+
+thread_local! {
+    /// 診断用: 小さい理由が見つかった試しの番号ごとの数 (10 番は見つからず全体の組)
+    static ORB_REASON_KIND: std::cell::RefCell<[u64; 11]> = const { std::cell::RefCell::new([0; 11]) };
+}
+
+/// 試作 `ENOMOTO_MIP_ORBITOPE_STATIC=r` (値に `r` を含む) か `ENOMOTO_MIP_ORBITOPE_REASON` (既定では使わない、analysis/ostatic_20261119/): 静的な
+/// orbitopal fixing の 0-1 の固定に、衝突解析で遡れる理由の行を付ける ([`Solver::orbitope_reason_row`])。静的な形は「列が辞書式で広義減少」という
+/// 大域的に正しい制約 (行の順は求解の間で変わらない) なので、その固定は含意で、衝突解析に入れても orbital fixing の支配の刈りのような食い違いにならない
+/// (analysis/ofreason_20261119/)。同じ成分で orbital fixing・LexRed と混ぜない (オービトープの列を動かす生成元は orbital fixing から外してある)。
+/// 対称性の行・固定に反し、並べ替えても直らない解も、元の問題で実行可能なら目的値を打ち切りに使う (`ENOMOTO_MIP_SYM_SST=x` と同じ)。
+pub(super) fn orbitope_reason() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_some_and(|v| v.contains('r')) || env_str!("ENOMOTO_MIP_ORBITOPE_REASON").is_some_and(|v| v != "0"))
 }
 
 /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
