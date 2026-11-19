@@ -8,7 +8,7 @@ D = Path(__file__).resolve().parent
 SET = sys.argv[1] if len(sys.argv) > 1 else "P"
 ALT = sys.argv[2]  # 既定と比べる設定
 BASE = "def_t1" if ALT.endswith("_t1") else "def"
-rows = [json.loads(l) for S in (("M", "A") if SET == "MA" else (SET,)) for f in sorted(glob.glob(str(D / f"res_{S}_s*.jsonl"))) for l in open(f) if l.strip()]  # MA = M (48 問 × 2 種) と残りの A (138 問 × 種 1) を合わせた Mittelmann 186 問
+rows = [json.loads(l) for S in (("M", "A") if SET == "MA" else SET.split("+")) for f in sorted(glob.glob(str(D / f"res_{S}_s*.jsonl"))) for l in open(f) if l.strip()]  # MA = M (48 問 × 2 種) と残りの A (138 問 × 種 1) を合わせた Mittelmann 186 問
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
 CF = [BASE, ALT]
 def st(r): return str(r["result"].get("status") or "").lower()  # 当方は小文字
