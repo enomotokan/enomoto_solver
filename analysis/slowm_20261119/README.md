@@ -145,3 +145,6 @@ PR の比べで丸める既定が約 2% 遅かったので、丸めていない�
 
 結論: 正しさのために丸めが要るのは係数の締めだけで、それは `TIGHTEN_INTBOUND` が受け持つ。`SEP_ROUND_IMPLINT` は「カットを変える」変更
 (丸めた境界でゼロ半分に入る列・締められる係数が増える) で、正しさの直しではない。既定を `0` に戻すのが筋 (判断は親・利用者)。
+
+確かめ (`TIGHTEN_INTBOUND` 既定 + `SEP_ROUND_IMPLINT=0`、ビルド b6762abe3 相当、`fix2/`): fuzz_intsing 4000 問 bad 0、mip_fuzz_vs_highs 300 bad 0、
+fuzz 7 本すべて bad 0 (締めの直しだけの d7a8e2567 でも同じく全部 0、cargo test 409 通過)。締めの直しだけで十分。
