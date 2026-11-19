@@ -2373,6 +2373,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             eprintln!("MIP:   RENS_BIGGAP: SUBFIX RENS found a solution with gap {gap:.3e} (threshold {g})");
                         }
                         if gap > g {
+                            self.rens_biggap_done = true;
                             return self.rens_old(_x) || r;
                         }
                     }
@@ -2789,6 +2790,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 旧来の RENS (LP 解で整数値の列を全部固定する。既定)。
+    /// [`Self::rens_old`] を solver.rs から呼ぶ口 (試作 `ENOMOTO_MIP_RENS_BIGGAP` の 4 スレッドの道)
+    pub(super) fn rens_old_pub(&mut self, x: &[f64]) -> bool {
+        self.rens_old(x)
+    }
+
     fn rens_old(&mut self, x: &[f64]) -> bool {
         let p = self.p;
         let mut lo = self.dom.lo.clone();

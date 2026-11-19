@@ -849,6 +849,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_node_mult: f64,
     /// 直近の (旧来の) RENS のサブ MIP がノード上限で止まったか。
     pub(super) rens_node_limited: bool,
+    /// 試作 `ENOMOTO_MIP_RENS_BIGGAP` (P2-HEUR): この求解で既定の RENS (LP で整数値の列を全部固定) をもう回したか
+    pub(super) rens_biggap_done: bool,
     /// 直近に主のスレッドで解いたサブ MIP が、ノード上限まで進んだか (停滞・成果連動の打ち切りでなく。[`rens_more_nodes_real`])
     pub(super) submip_full_nodes: bool,
     /// 別スレッドに出した直近の根の RENS のサブ MIP のノード上限 ([`rens_more_nodes_real`])
@@ -5400,6 +5402,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         noinc_rens_done: false,
         submip_node_mult: 1.0,
         rens_node_limited: false,
+        rens_biggap_done: false,
         submip_full_nodes: false,
         rens_spawn_node_limit: 0,
         rens_paused: None,
@@ -10002,7 +10005,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             super::record_root_bound(root_obj);
         }
         let root_iters = self.lp.total_iterations();
-        self.root_lp_iters = root_iters;
+        // 試作 `ENOMOTO_MIP_P2RIT` (既定では使わない、analysis/par4slow_20261119/README.md): 根の LP を前処理の LP の基底から温め直したときは、
+        // 予算の物差しの「根の LP の反復」に前処理の LP の最初の LP の反復 ([`super::HO4_PROBE_ITERS`]) を使う (温め直しの数百反復だと
+        // 潜りの手間の上限・LNS の予算などが数分の 1 に縮む。ns1208400 は 4 スレッドだけ基底が渡って 1782 → 388 反復)
+        self.root_lp_iters = if probe_kind != "none" && env_str!("ENOMOTO_MIP_P2RIT").is_some() {
+            root_iters.max(super::HO4_PROBE_ITERS.with(|c| c.get()))
+        } else {
+            root_iters
+        };
         self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
         self.root_lp_ticks = crate::ticks::total() - tk_root_lp;
         if !self.params.submip {
@@ -11033,6 +11043,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 heur!("RENS (more nodes)", self.rens(&x));
                             }
                             self.submip_node_mult = 1.0;
+                        }
+                    }
+                }
+                // 試作 `ENOMOTO_MIP_RENS_BIGGAP=g` の 4 スレッドの道 (P2-HEUR、analysis/heurgap2_20261119/、既定では使わない):
+                // 並列の根では、暫定解がないうちは並列の「暫定解なしの RENS」(ダイブで固定率 0.8) が先に回り、既定の RENS
+                // (LP で整数値の列を全部固定) は回らない。並列のサブ MIP の解を受け取った後も間隙 (z − LP) / max(|z|, 1) が g を
+                // 超えるなら、既定の RENS を 1 回回す (暫定解の値が打ち切り値になるので、より良い解だけを探す)。
+                // trento1 では並列の RENS が 4.57e7 (下界 5.18e6、間隙 0.89) を出して木へ入っていた
+                if !self.params.submip && !self.rens_biggap_done && !self.time_up() {
+                    if let Some(g) = env_str!("ENOMOTO_MIP_RENS_BIGGAP").and_then(|v| v.parse::<f64>().ok()) {
+                        if let Some(gap) = self.incumbent.as_ref().map(|(z, _)| (z - (self.lp.objective() + self.p.offset)) / z.abs().max(1.0)) {
+                            if self.params.verbose {
+                                eprintln!("MIP: RENS_BIGGAP: gap {gap:.3e} after the parallel sub-MIPs (threshold {g})");
+                            }
+                            if gap > g {
+                                self.rens_biggap_done = true;
+                                heur!("RENS (big gap)", self.rens_old_pub(&x));
+                            }
                         }
                     }
                 }
