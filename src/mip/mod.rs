@@ -2533,11 +2533,11 @@ pub(crate) fn sym_sst() -> bool {
     env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v != "0")
 }
 
-/// 試作 `ENOMOTO_MIP_SYM_SST_FEAS` (p2inf_20261119、既定では使わない): 目的が全部 0 の問題 (実行可能性問題) に限って [`sym_sst`] と同じく
+/// `ENOMOTO_MIP_SYM_SST_FEAS` (p2inf_20261119、2026-11-19 に既定にした。`=0` で以前の動き): 目的が全部 0 の問題 (実行可能性問題) に限って [`sym_sst`] と同じく
 /// SST のカットを使う。SST を orbital fixing の代わりにすると対称性のある最適化問題で遅くなる (hang_20261117 15.2・15.3 節) が、
 /// fhnw-binpack4-4 (目的が全部 0) は SST で初めて実行不能を示せる。同じ成分で orbital fixing と混ぜると代表の選び方が食い違うので混ぜない
 pub(crate) fn sym_sst_feas() -> bool {
-    env_str!("ENOMOTO_MIP_SYM_SST_FEAS").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_SYM_SST_FEAS", "1").is_some_and(|v| v != "0")
 }
 
 pub(crate) fn sym_of() -> bool {
@@ -5812,7 +5812,7 @@ fn probe_equiv_block(prob: &MipProblem, base: &domain::Domain, bin0: &[bool], js
         .collect()
 }
 
-/// 試作 `ENOMOTO_MIP_EQUIV2_PWORK` (既定では使わない、analysis/clqprbg_20261119): 同値な組の巡 (`PROBE_CLIQUE=equiv`) の手間を、本体の
+/// `ENOMOTO_MIP_EQUIV2_PWORK` (2026-11-19 から既定、`=0` で以前の形。analysis/clqprbg_20261119・analysis/equiv2pw_20261119): 同値な組の巡 (`PROBE_CLIQUE=equiv`) の手間を、本体の
 /// プロービングの `pwork` と同じ重み (およそナノ秒: 2.5 x 行の走査 + 5 x 活動量の更新 + 68 x 境界の変更) で数える。巡は行の走査 (`debug_work`)
 /// だけを数えていて、活動量の更新が重い問題 (mzzv42z: 本体で work 74 万に対し pwork 8.5 億) では手間の上限が効かず、時間の安全網 (5 秒) まで走っていた
 fn equiv2_pwork(rows: u64, act: u64, chg: u64) -> u64 {
@@ -7183,10 +7183,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             (time_cap2, giveup2, u64::MAX, u64::MAX)
         };
         let w0 = d2.debug_work();
-        // 試作 `ENOMOTO_MIP_EQUIV2_PWORK` ([`equiv2_pwork`]): `pwork` の重みで数えた手間が `ENOMOTO_T_MIP_EQUIV2_PWORK_CAP` (既定 5e8、0.5 秒相当) を
+        // `ENOMOTO_MIP_EQUIV2_PWORK` ([`equiv2_pwork`]、既定): `pwork` の重みで数えた手間が `ENOMOTO_T_MIP_EQUIV2_PWORK_CAP` (既定 5e8、0.5 秒相当) を
         // 越えたら止め、`ENOMOTO_T_MIP_EQUIV2_PWORK_GIVEUP` (既定 1e8、0.1 秒相当) を越えても 1 組も見つからなければやめる (時間の上限と同じ値)。
         // 今までの行の走査の上限・時間の安全網もそのまま残す
-        let (pw_cap, pw_give) = if presolve_work() && env_str!("ENOMOTO_MIP_EQUIV2_PWORK").is_some_and(|v| v != "0") {
+        let (pw_cap, pw_give) = if presolve_work() && env_def!("ENOMOTO_MIP_EQUIV2_PWORK", "1").is_some() {
             (tunable!("ENOMOTO_T_MIP_EQUIV2_PWORK_CAP", 5.0e8, f64) as u64, tunable!("ENOMOTO_T_MIP_EQUIV2_PWORK_GIVEUP", 1.0e8, f64) as u64)
         } else {
             (u64::MAX, u64::MAX)
