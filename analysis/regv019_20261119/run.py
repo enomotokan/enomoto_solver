@@ -28,7 +28,8 @@ def run(cfg, seed, mps, tl):
     env = {key: v for key, v in os.environ.items() if not key.startswith("ENOMOTO_")}
     env.update(CFGS[cfg]); env["ENOMOTO_MIP_THREADS"] = "4"; env["ENOMOTO_T_MIP_SEED"] = str(seed)
     t0 = time.time(); peak = 0.0
-    pr = subprocess.Popen([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", str(tl), "--threads", "4"],
+    py = str(WT / ".v019env/bin/python") if cfg == "v019" else sys.executable  # v019 は PyPI の 0.1.9 (analysis/final_20261118/setup_v019.sh)
+    pr = subprocess.Popen([py, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", str(tl), "--threads", "4"],
                           cwd=WT, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     while pr.poll() is None:
         peak = max(peak, rss_mb(pr.pid)); time.sleep(0.5)
