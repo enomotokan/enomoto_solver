@@ -384,3 +384,33 @@ k = 12 で当方の設定を比べる (sub12.sh、logs/sub12v_*.log、`sub12v_ro
 - fiball・mcsched は一律の重みの cfx では大きく速かった (0.25・0.38) 問題。4.14 節の診断では mcsched は FLAT の判定がほぼ偽で重みが効かず、同じ設定でも
   176 / 347 秒に揺れる。2 種では判断がつかないので、種を足す: shards_MCFX2X.json (fiball・supportcase33・mcsched・neos-1456979・rocI-4-11 × 種 3〜5 ×
   {def, cfx2}、600 秒、6 分担・各 0.3〜0.4 時間の見積り)、`python run.py MCFX2X K`。
+
+### 4.16 cfx2 の部品の切り分けと採否の案 (事実と判断の案)
+
+- MCFX2X (種 3〜5 を足す、ビルド f969f1659): cfx2 / def が fiball 1.30・4.66・1.29・3.06・1.43、supportcase33 3.34・1.71・1.64・2.01・2.55 で全 5 種遅い、
+  mcsched 1.44・2.12・1.40・0.89・1.56、neos-1456979 0.90・1.64・0.97・1.27・≤0.46、rocI-4-11 0.88・1.99・0.86・0.84・0.83。fiball・supportcase33・mcsched は揺れでなく遅れ。
+- 部品の切り分け (手元 4 スレッド 600 秒、1 本ずつ、logs/ablcfx2.txt。LX = LIT_EXPLAIN、HC = HiGHS 式の衝突スコア、FL = 衝突の重み FLAT 0.1):
+
+| 問題・種 | def | LX | HC | FL | LX+FL | HC+FL |
+|---|---|---|---|---|---|---|
+| supportcase33 種 1 | 191.7 | 130.5 | 193.0 | 177.8 | 177.8 | 385.6 |
+| fiball 種 2 | 34.2 | 415.3 | 27.6 | 88.8 | 109.2 | 25.8 |
+| mcsched 種 2 | 200.3 | 219.3 | 172.9 | 160.6 | 172.7 | 291.8 |
+
+- HC を外した形の bnatt400 全体 (4 スレッド 900 秒): LX+FL は時間切れ (801 秒に解、70060 ノード)、FL だけは時間切れ (解なし、76677 ノード)。
+  cfx2 (LX+HC+FL) は 321.5 秒で最適。bnatt400 には HC と FL の両方が要り、その組が supportcase33・mcsched を遅くする。
+- 判断の案: cfx2 は既定にしない (M の全種で遅い問題が 3 つ)。試作 (LIT_EXPLAIN・CONFLICT_WEIGHT_FLAT・INF_ALL・CONFLICT_LEVELS・DEBUG_BRANCH_PRIO) は
+  既定では使わない形で残す。bnatt400 のような「目的の利得が最後まで 0」の問題を見分けて cfx2 を当てる条件 (例: 根の後の擬似費用の観測で正の利得が
+  ほぼ 0) は、fiball (正の利得 0.3% で同じ型、cfx2 で遅い) と区別できないので、今の形では作れない。
+
+### 4.17 bnatt400 の区切り (2026-11-19、利用者の判断「案のとおり」)
+
+- **既定では解けない** (4 スレッド 1800 秒・20 万ノードで時間切れ)。**cfx2 の環境変数**
+  (`ENOMOTO_MIP_LIT_EXPLAIN=1 ENOMOTO_MIP_HIGHS_CONFLICT_SCORE=1 ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT=0.1`) なら 4 スレッドで約 5 分 (321.5 秒) で最適 1。
+  cfx (重み一律 0.1) なら 300.1 秒。SCIP 10 は 1 スレッド 276 秒。
+- 部品: bnatt400 には HiGHS 式の衝突スコア (HC) と衝突の重み (FL または一律の重み) の両方が要る (HC を外した LX+FL・FL だけは 900 秒で時間切れ)。
+  その組 (HC+FL) が supportcase33・mcsched を遅くし (4.16 節)、M では fiball・supportcase33・mcsched が 5 種とも遅いので、cfx2 は既定にしない。
+- 原因の理解 (4.6〜4.11 節): SCIP の決め手は伝播の矛盾からの衝突で、当方は衝突を作っても分枝に使わず (重み既定 0)、衝突のプールで締めた変更を
+  遡れない (LIT_EXPLAIN なし) ので効きが弱い (部分木で、当方は衝突を全部切っても 1.4 倍しか悪くならないのに、SCIP は切ると 280 倍以上)。
+- 試作は既定では使わない形で残す: `ENOMOTO_MIP_LIT_EXPLAIN`・`ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT` (と `_FRAC`)・`ENOMOTO_MIP_INF_ALL`・
+  `ENOMOTO_T_MIP_CONFLICT_LEVELS` (既定 5 = 従来)・診断 `ENOMOTO_MIP_DEBUG_BRANCH_PRIO`、診断の行 `MIP: inference:`・`MIP: conflict weight FLAT`。
