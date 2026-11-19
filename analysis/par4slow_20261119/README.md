@@ -42,3 +42,15 @@ dano3_3 (4 スレッド 159 秒、1 スレッド 81 秒) の、木を分け合�
 - `ENOMOTO_MIP_P2BASIS=<秒>`: 前処理の LP の基底を根の LP に渡す判定で、手間の見積りが閾値以上でも、実際の最初の LP が <秒> 未満なら渡さない
   (素の if)。渡すのは根で解き直す手間を省くためなので、速い LP では省ける分が小さく頂点が変わるだけ。計測は `=1` (cfg の `p2b`)。
   ns1208400 4 スレッド種 1: 161 → 16.5 秒。秒は実時間なので負荷で揺れる (閾値の近くでは決定的でない)。
+
+## M の対象の洗い出し (`scan.py 4 20` → `scan_t4.jsonl`、186 問・4 スレッド・種 1・20 秒)
+
+- 前処理の LP の行が出たのは 151 問 (35 問は 20 秒までに出ない)。基底を渡すのは 45 問。
+- `P2BASIS=1` で変わる (固定 0・手間 ≥ 1.5e8・最初の LP が 1 秒未満) のは 22 問: 30n20b8・CMS750_4・blp-ar98・cbs-cta・germanrr・lectsched-5-obj・leo2・n2seq36q・neos-4300652-rahue・neos-5188808-nattai・neos-5195221-niemur・neos-662469・neos-827175・net12・ns1208400・nursesched-sprint02・piperout-27・radiationm18-12-05・sorrell3・sp97ar・sp98ar・supportcase40。
+- 1〜2 秒で負荷により変わりうるのは academictimetablesmall 1.16・comp07-2idx 1.51・fast0507 1.19・istanbul-no-cutoff 1.62・neos-1171448 1.17・thor50dday 1.97 (対象に入れない)。
+
+## 計測の分担表 (`python plan.py 8 2 p2b <22 問>`)
+
+- M: 22 問 × 種 1・2 × {def, p2b}、600 秒・4 スレッド、8 分担 (各 1.45〜1.57 時間): `python run.py MP2B K` (K = 0〜7) → `res_MP2B_sK.jsonl`。
+- P: 58 問 × 種 1〜3 × {def, p2b}、60 秒・4 スレッド、2 分担 (各 1.4 時間): `python run.py PP2B K` (K = 0・1) → `res_PP2B_sK.jsonl`。
+- 回し方: リポジトリの根で `pip install -e .` の後、`cd analysis/par4slow_20261119 && python run.py MP2B K`。集計は `python summ.py MP2B p2b`・`python summ.py PP2B p2b`。

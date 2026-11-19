@@ -1,0 +1,21 @@
+wdn_t4 1 optimal 25009.663366336634 1354 47.0 
+wdn_t4 2 optimal 25009.663366336634 1502 55.6 
+wdn_t4 3 optimal 25009.663366336634 514 52.3 
+wdn_t1 1 optimal 25009.663366336634 1622 70.6 
+wdn_t1 2 optimal 25009.663366336634 1284 67.3 
+wdn_t1 3 optimal 25009.663366336634 2140 83.6 
+== fuzz_tiny: env ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0
+rc=0
+     time      nodes      open        best bound         incumbent       gap
+     0.0s          0         0    -7.120000000e0    -7.120000000e0     0.00%
+Presolve: the problem is infeasible (0.00s)
+Result: optimal, objective -7.12, best bound -7.12, gap 0.00%, nodes 0 (0.00s)
+bad 0 of 400 time 3.1 (strict 12: 値の一致だけの以前の判定)
+== fuzz_highs: env ENOMOTO_MIP_REL_GAP=1e-9 python3 scripts/mip_fuzz_vs_highs.py 300
+rc=0
+     0.1s          0         0    -7.837836523e1    -7.837836523e1     0.00%
+Presolve: 17 rows, 14 columns -> 2 rows, 2 columns (0.00s)
+Solving with the slope-intercept dual two-phase method
+Result: optimal, objective -78.37836523, best bound -78.37836523, gap 0.00%, nodes 0 (0.06s)
+bad 0 of 300 time 12.2
+== fuzz_objint: python3 analysis/objint_20261112/fuzz_objint.py 1000 0
