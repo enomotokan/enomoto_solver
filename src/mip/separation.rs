@@ -5932,6 +5932,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 up[j] = (up[j] + FEASTOL).floor();
             }
         }
+        // 分離器に渡す大域の境界も、暗黙の整数列だけ同じく丸めたもの (カットの後処理の係数の締め・ゼロ半分・並列の生成・整数の変数上下限が
+        // 整数列の境界は整数と前提する。丸めていない非整数の境界で締めたカットが最適解を切っていた: fuzz_intsing の seed 3103、analysis/slowm_20261119)。
+        // `ENOMOTO_MIP_SEP_ROUND_IMPLINT=0` で以前の (丸めない大域の境界を渡す) 動き
+        let round_sep = env_def!("ENOMOTO_MIP_SEP_ROUND_IMPLINT", "1").is_some();
+        let (sglo, sgup): (Vec<f64>, Vec<f64>) = if round_sep { (lo.clone(), up.clone()) } else { (self.dom.global_lo.clone(), self.dom.global_up.clone()) };
         let mut xv = x.to_vec();
         for i in 0..mr {
             let (l, u) = self.lp.row_bounds(i);
@@ -5950,7 +5955,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_INTVUB`: 一般整数列と 0-1 列の変数上下限も集める (`ENOMOTO_MIP_INTVUB_IMPL` ならプロービングの含意も)
             if super::cuts::intvub_mode() > 0 || mushagg_mode().is_some() {
                 let implied: &[(u32, bool, u32, bool, f64)] = if env_str!("ENOMOTO_MIP_INTVUB_IMPL").is_some() { &p.implied_bounds } else { &[] };
-                vbs.add_int_vbs(&self.cut_int[..n], &self.dom.global_lo[..n], &self.dom.global_up[..n], &p.rows, &p.row_lo, &p.row_up, implied);
+                vbs.add_int_vbs(&self.cut_int[..n], &sglo[..n], &sgup[..n], &p.rows, &p.row_lo, &p.row_up, implied);
                 if env_str!("ENOMOTO_MIP_INTVUB_LOG").is_some() && !self.params.submip {
                     let (nu, nl) = (vbs.ivub.iter().map(|v| v.len()).sum::<usize>(), vbs.ivlb.iter().map(|v| v.len()).sum::<usize>());
                     let ncol = vbs.ivub.iter().zip(&vbs.ivlb).filter(|(a, b)| !a.is_empty() || !b.is_empty()).count();
@@ -5972,7 +5977,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut vbs: VarBounds = (**self.vbounds.as_ref().unwrap()).clone();
             let cap = tunable!("ENOMOTO_T_MIP_VB_IMPL_MAX", 8usize, usize);
             let minrel = tunable!("ENOMOTO_T_MIP_VB_IMPL_MINREL", 0.0, f64);
-            let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
+            let (glo, gup) = (&sglo, &sgup);
             let mut added = 0usize;
             for &(y, v, k, upper, b) in &p.implied_bounds {
                 let (y, k) = (y as usize, k as usize);
@@ -6031,7 +6036,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let mut scratch_h = vec![0.0f64; n];
                     let mut push_h = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
                         if let Some(raw) = raw {
-                            if let Some(c) = finish_cut(raw, n, lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, &xh, None, &mut scratch_h) {
+                            if let Some(c) = finish_cut(raw, n, lp_rows, &s.cut_int, &sglo, &sgup, &xh, None, &mut scratch_h) {
                                 cands.push(c);
                             }
                         }
@@ -6073,7 +6078,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(raw) = raw {
                 let t0 = std::time::Instant::now();
                 n_raw.set(n_raw.get() + 1);
-                if let Some(c) = finish_cut(raw, n, lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice()), &mut finish_scratch) {
+                if let Some(c) = finish_cut(raw, n, lp_rows, &s.cut_int, &sglo, &sgup, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice()), &mut finish_scratch) {
                     if let Some(xd) = dbg_x.as_ref() {
                         let act: f64 = c.coefs.iter().map(|&(j, a)| a * xd[j]).sum();
                         let viol = act - c.rhs > 1e-6 * (1.0 + c.rhs.abs());
@@ -6135,7 +6140,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let g = if clique_on { Some(self.clique_graph_get()) } else { None };
             let inc = self.incumbent.as_ref().map(|(_, v)| v.as_slice());
             let parts = sep_parallel_parts(
-                &SepParCtx { vars: &vars, p, lp_rows, cut_int: &self.cut_int, glo: &self.dom.global_lo, gup: &self.dom.global_up, x, inc, deadline: self.deadline },
+                &SepParCtx { vars: &vars, p, lp_rows, cut_int: &self.cut_int, glo: &sglo, gup: &sgup, x, inc, deadline: self.deadline },
                 row_cuts_m,
                 zh_on,
                 g.as_deref(),
@@ -6244,7 +6249,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else if zh_on {
             let zhd = if super::zerohalf::zh_deadline_on() { sep_deadline(self.deadline) } else { None };
             let zh = super::zerohalf::with_zh_deadline(zhd, || {
-                super::hnfcut::map_rows(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, |rw, rl, ru, ii, lo, up, xx| super::zerohalf::zerohalf_cuts(rw, rl, ru, ii, lo, up, xx, 100))
+                super::hnfcut::map_rows(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &sglo, &sgup, x, |rw, rl, ru, ii, lo, up, xx| super::zerohalf::zerohalf_cuts(rw, rl, ru, ii, lo, up, xx, 100))
             });
             for raw in zh {
                 push(Some(raw), &mut cands, self);
@@ -6259,7 +6264,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 試作 `ENOMOTO_MIP_HNFCUT` の `b`: 合同式の列を写した空間で作って戻す ([`super::hnfcut::map_rows`])
             let mut side = None;
-            let cs = super::hnfcut::map_rows(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, |rw, rl, ru, ii, lo, up, xx| {
+            let cs = super::hnfcut::map_rows(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &sglo, &sgup, x, |rw, rl, ru, ii, lo, up, xx| {
                 let (cs, gr, st) = super::snfmodk::snfmodk_cg_cuts(rw, rl, ru, ii, lo, up, xx, tunable!("ENOMOTO_T_MIP_SNFMODK_CUTS", 50usize, usize), dl);
                 side = Some((gr, st));
                 cs
@@ -6344,7 +6349,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ib_gen = !ib_all && ib_gen_auto;
         let ib_cont = ib_cont || ib_gen;
         if (ib_all || ib_cont) && !p.implied_bounds.is_empty() && self.sep_src_on(sepprof::SRC_IMPLBD, light) {
-            let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
+            let (glo, gup) = (&sglo, &sgup);
             let max_ib = tunable!("ENOMOTO_T_MIP_IMPLBD_MAX", 5000usize, usize);
             let mut viol: Vec<(f64, RawCut)> = Vec::new();
             for &(y, v, k, upper, b) in &p.implied_bounds {
@@ -6453,7 +6458,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.path_aggregation(&vars, lp_rows, &mut cands, &mut push, max_starts);
                     let bases = self.path_collect.take().unwrap_or_default();
                     let inc = self.incumbent.as_ref().map(|(_, v)| v.as_slice());
-                    let (by_row, cpu) = gen_cuts_parallel(&bases, sep_threads(self.sep_budget_threads()), &vars, use_flow_cover(), n, lp_rows, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, inc, self.p, sep_deadline(self.deadline));
+                    let (by_row, cpu) = gen_cuts_parallel(&bases, sep_threads(self.sep_budget_threads()), &vars, use_flow_cover(), n, lp_rows, &self.cut_int, &sglo, &sgup, x, inc, self.p, sep_deadline(self.deadline));
                     self.sep_par_cpu += cpu;
                     for cs in by_row {
                         cands.extend(cs);
@@ -6817,7 +6822,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             sepprof::lap(sepprof::T_TABAGG, &mut lap);
             let t0 = std::time::Instant::now();
-            let (cut_int, glo, gup) = (&self.cut_int[..], &self.dom.global_lo[..], &self.dom.global_up[..]);
+            let (cut_int, glo, gup) = (&self.cut_int[..], &sglo[..], &sgup[..]);
             let inc = self.incumbent.as_ref().map(|(_, v)| v.as_slice());
             let (pp, lp_rows_ref, vars_ref, bases_ref) = (self.p, lp_rows, &vars, &bases);
             let hnfcut_ref = &hnfcut_st;
@@ -7617,8 +7622,19 @@ fn finish_cut(
             maxact += m;
         }
         let delta = maxact - rhs;
+        // 診断 (デバッグ解 `ENOMOTO_MIP_DEBUG_SOL` があるとき、analysis/slowm_20261119): 締め付けの前は満たし後で破るなら列・係数・境界を出す
+        let dbg_before = super::solver::DEBUG_SOL.with(|d| d.borrow().as_ref().map(|xd| (xd.clone(), coefs.clone(), rhs)));
         if fin && delta > 1e-6 * (1.0 + rhs.abs()) {
+            // 直し `ENOMOTO_MIP_TIGHTEN_INTBOUND` (analysis/slowm_20261119。2026-11-19 から既定で使う、`=0` で以前の動き): 締め付けの正しさは
+            // 「x_j がその境界でなければ境界から 1 以上離れる」ことに頼るので、使う境界 (c > 0 なら上限、c < 0 なら下限) が整数のときだけ締める。
+            // カットの整数列 (`cut_int`) は暗黙の整数の連続列を含み、その境界は丸められていないことがある (fuzz の seed 3103: 列 7 の下限 0.532 で
+            // 締めたカットが最適解を切り、−10.95 を最適と返していた。正しくは −14)
+            let intb = env_def!("ENOMOTO_MIP_TIGHTEN_INTBOUND", "1").is_some();
+            let integral = |b: f64| (b - b.round()).abs() <= 1e-9;
             for (j, c) in coefs.iter_mut() {
+                if intb && !integral(if *c > 0.0 { up[*j] } else { lo[*j] }) {
+                    continue;
+                }
                 if is_int[*j] && c.abs() > delta + 1e-9 {
                     if *c > 0.0 {
                         rhs -= (*c - delta) * up[*j];
@@ -7627,6 +7643,16 @@ fn finish_cut(
                         rhs += (-*c - delta) * lo[*j];
                         *c = -delta;
                     }
+                }
+            }
+        }
+        if let Some((xd, c0, r0)) = dbg_before {
+            let a0: f64 = c0.iter().map(|&(j, c)| c * xd[j]).sum();
+            let a1: f64 = coefs.iter().map(|&(j, c)| c * xd[j]).sum();
+            if a0 <= r0 + 1e-6 * (1.0 + r0.abs()) && a1 > rhs + 1e-6 * (1.0 + rhs.abs()) {
+                eprintln!("MIP_DEBUG_SOL: CUT_TIGHTEN made the cut cut off the debug solution: before {a0:.6e} <= {r0:.6e}, after {a1:.6e} > {rhs:.6e}, delta {delta:.6e}");
+                for (&(j, c), &(_, c1)) in c0.iter().zip(coefs.iter()) {
+                    eprintln!("MIP_DEBUG_SOL:   col {j} int {} c {c:.6e} -> {c1:.6e} lo {:.6e} up {:.6e} x_dbg {:.6e}", is_int[j], lo[j], up[j], xd[j]);
                 }
             }
         }
