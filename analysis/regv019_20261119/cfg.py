@@ -23,3 +23,5 @@ CFGS = {"def": {}, "v019": {}} | {f"off_{k}": v for k, v in OFF.items()}
 CFGS["all_off"] = {k: v for d in OFF.values() for k, v in d.items()}
 # 案 (試作): VUBAGG はまとめる列が全部の列の 5% 以上のときだけ (physiciansched6-2 2.0% は使わない、neos-787933 99% は使う)
 CFGS["vmf"] = {"ENOMOTO_T_MIP_VUBAGG_MIN_FRAC": "0.05"}
+# neos5 の二分探索の結果 (8f4a55ebd で SYMDYN=f を既定から外した) の確かめ: 今の版に SYMDYN=f を戻す
+CFGS["symf"] = {"ENOMOTO_MIP_SYMDYN": "f"}
