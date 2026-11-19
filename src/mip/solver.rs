@@ -16687,6 +16687,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         cands.sort_by(|a, b| b.2.total_cmp(&a.2));
+        // 診断 `ENOMOTO_MIP_DEBUG_BRANCH_PRIO=ファイル` (p2inf_20261119、既定では使わない): ファイルの各行の列の番号 (前処理後の問題の列。
+        // 上の行ほど優先) の順位で候補を並べ直す (載っていない列は後ろ、同じ順位の中は点数の順)。ほかのソルバー (SCIP) の分枝の選び方に
+        // 寄せたとき木が縮むかを見る切り分け用。サブ MIP では使わない
+        if !self.params.submip {
+            if let Some(rank) = debug_branch_prio() {
+                let r = |j: usize| rank.get(j).copied().unwrap_or(u32::MAX);
+                cands.sort_by(|a, b| r(a.0).cmp(&r(b.0)).then(b.2.total_cmp(&a.2)));
+            }
+        }
         // `ENOMOTO_MIP_GAP1` の `q` (試作、analysis/gap1_tree_20261109.md): 点数が最良から 1e-6 以内の候補 (同点) の中では、
         // 待ち行列のノードでその列が下・上に変更された数の釣り合い ((下/計) × (上/計)、次に計) の大きい順にする (HiGHS の
         // `HighsSearch::selectBranchingCandidate` の同点の扱い)。既定では同点は候補の順 (列の番号の順) のまま
@@ -26239,6 +26248,28 @@ pub(super) fn orbitope_reason() -> bool {
 
 /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
 /// 通し番号を残し、HiGHS 式の衝突解析でその証明の行から説明して遡る。
+/// 診断 `ENOMOTO_MIP_DEBUG_BRANCH_PRIO` の順位 (列の番号 → 順位、載っていない列は u32::MAX)。
+fn debug_branch_prio() -> Option<&'static Vec<u32>> {
+    static F: std::sync::OnceLock<Option<Vec<u32>>> = std::sync::OnceLock::new();
+    F.get_or_init(|| {
+        let f = env_str!("ENOMOTO_MIP_DEBUG_BRANCH_PRIO")?;
+        let txt = std::fs::read_to_string(f).ok()?;
+        let mut rank: Vec<u32> = Vec::new();
+        for (k, l) in txt.lines().enumerate() {
+            if let Ok(j) = l.trim().parse::<usize>() {
+                if rank.len() <= j {
+                    rank.resize(j + 1, u32::MAX);
+                }
+                if rank[j] == u32::MAX {
+                    rank[j] = k as u32;
+                }
+            }
+        }
+        Some(rank)
+    })
+    .as_ref()
+}
+
 /// 試作 `ENOMOTO_MIP_INF_ALL` (p2inf_20261119、既定では使わない): 分枝の後の推論の数を、行の伝播だけでなく目的・双対証明・
 /// リテラルの衝突・カットのプールの伝播まで含めて数える。bnatt400 はリテラルの衝突の伝播で約 14 万の境界を締めるが、推論スコアに入らない
 pub(super) fn inf_all() -> bool {
