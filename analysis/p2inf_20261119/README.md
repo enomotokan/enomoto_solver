@@ -337,3 +337,11 @@ k = 12 で当方の設定を比べる (sub12.sh、logs/sub12v_*.log、`sub12v_ro
   遡れない (LIT_EXPLAIN なし) ので、効きが弱かった。
 - LIT_EXPLAIN + HiGHS 式の衝突スコア + 重み 0.1 で k = 12 は 2229 → 373 ノード (6 倍)、k = 8 は時間切れ → 99.6 秒・2445 ノードで実行不能。
   SCIP (177・786 ノード) にはまだ 2〜3 倍届かない。
+
+### 4.12 bnatt400 を cfx で解く (事実)
+
+- cfx = `ENOMOTO_MIP_LIT_EXPLAIN=1`・`ENOMOTO_MIP_HIGHS_CONFLICT_SCORE=1`・`ENOMOTO_T_MIP_CONFLICT_WEIGHT=0.1` (cfg.py)。
+- 全体の bnatt400、4 スレッド・種 1・900 秒 (logs/bnatt400_cfx_t4.log): **300.1 秒・20183 ノードで最適 1** (解は 148 秒にノード 2578 で見つかる)。
+  既定は 4 スレッド 1800 秒でも時間切れ・20 万ノード、SCIP は 1 スレッド 276 秒。1 スレッド 600 秒の cfx は 406 秒に最適解を見つけるが、証明は時間切れ。
+- 誤答の確かめ (verify_cfx.sh、実行中): widden 1・4 スレッド、fuzz_tiny・mip_fuzz_vs_highs (4・1 スレッド)・fuzz_objint・fuzz_slack・fuzz_cutconf×2・
+  mip_fuzz_symmetric。計測: shards_PCFX.json (4 分担、各 0.74 時間)・shards_MCFX.json (12 分担、各 1.4 時間)、`python run.py PCFX K` / `MCFX K`。
