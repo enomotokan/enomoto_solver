@@ -6730,8 +6730,8 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         let fixed_pass0 = fixed;
         spec_ver = u64::MAX;
         // 試作 `ENOMOTO_MIP_PROBE_USELESS` = K (既定では使わない。analysis/scipslow_20261119 の 3・5 節): SCIP のプロービングの打ち切り
-        // (`maxtotaluseless` 50・`maxuseless` 1000) と同じ形。固定も締め付けも増えず、新しい含意 (試した列と同じ行に入らない列への含意。同じ行に
-        // 入る列への含意は行から直接出るので数えない) も無い試しが K 回続いたら、プロービングをやめる (固定も締め付けも増えない試しの回数の上限
+        // (`maxtotaluseless` 50・`maxuseless` 1000) と同じ形。固定も締め付けも増えず、新しい含意 (試した列と同じ詰め込みの行に入らない列への含意。同じ
+        // 詰め込みの行に入る列への含意はクリーク表にあるので数えない) も無い試しが K 回続いたら、プロービングをやめる (固定も締め付けも増えない試しの回数の上限
         // `ENOMOTO_T_MIP_PROBE_USELESS_MAX` (SCIP の `maxuseless` 1000 に当たる) は既定で使わない: 1000 にすると physiciansched6-2 が 37 → 80 秒。
         // 新しい含意が出続けていた)。air03 は 512 列を試して固定・締め付け・同値な組が 0 のまま 2.9 秒 (含意は行から出る 92 万本。
         // SCIP は 51 回で打ち切り 0.4 秒)。最初の版 (含意を数えず K 回) は drayage-25-23 で含意 5 万本を失い全種で 3.4 倍遅かった
@@ -6752,6 +6752,11 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                         useless_run += 1;
                         let tag = pj as u32;
                         for &(i, _) in &prob.cols[pj] {
+                            // 詰め込みの行 (0-1 の列だけで係数が全て 1、上限 1) だけを見る。ほかの行 (ナップサック・変数上下限など) から出る含意は
+                            // クリーク表に無いので新しい含意として数える (neos-827175 は詰め込みでない行の含意 59 万本を失い、根で閉じなくなった)
+                            if !(prob.row_up[i] <= 1.0 + 1e-9 && prob.rows[i].iter().all(|&(k, a)| a == 1.0 && prob.is_int[k] && prob.col_lo[k] >= 0.0 && prob.col_up[k] <= 1.0)) {
+                                continue;
+                            }
                             for &(k, _) in &prob.rows[i] {
                                 row_mark[k] = tag;
                             }
