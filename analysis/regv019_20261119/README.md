@@ -30,5 +30,7 @@ M 種 1 で遅い n2seq36q (4.0)・wachplan (2.5)・piperout-27 (1.6)・qap10 (1
 - VUBAGG が働く問題 (P 58 問・g1 の M 48 問・T、`vubcount.jsonl` と analysis/vsscip_slow_20261118/g1/scan.txt): まとめる割合は
   neos-787933 99% (200〜470 秒 → 0.4 秒)・neos-4722843-widden 6.9% (g1/def 0.77・1.02、中立)・physiciansched6-2 2.0% (遅い)・
   piperout-27 0.5%・neos8 0.07% (どちらも中立)。
-- **案 vmf**: 試作 `ENOMOTO_T_MIP_VUBAGG_MIN_FRAC` = f (既定 0 = 従来どおり、src/mip/mod.rs): まとめる列が全部の列の f に満たなければまとめない。
+- 試作 `ENOMOTO_T_MIP_VUBAGG_MIN_FRAC` = f (既定 0 = 従来どおり、src/mip/mod.rs): まとめる列が全部の列の f に満たなければまとめない。
   f = 0.05 で physiciansched6-2 は 19.8 秒 (1 スレッド)、neos-787933 は 0.4 秒のまま。
+- **判断 (利用者、2026-11-19): physiciansched6-2 の差は、前処理の後が同じ大きさのまま根のカットの道が変わり重い LP に当たった「運」による差。
+  1 問に合わせた対策になるので VUBAGG_MIN_FRAC は既定にせず、計測もしない (試作のコードは既定に影響しないので残す)。**
