@@ -243,5 +243,7 @@ fuzz 7 本すべて bad 0 (締めの直しだけの d7a8e2567 でも同じく全
 cargo test 411 通過・0 失敗。`ENOMOTO_MIP_INTSING=1g` で fuzz_intsing 300 問 bad 0、fuzz 7 本 (`fuzz.sh ENOMOTO_MIP_INTSING=1g`) bad 0。
 
 ### 11.5 計測の分担 (G)
-`python plan.py G 4` → `shards_G.json` (上の 11 問 × 種 1〜3、rocI-4-11・traininstance6 は種 1〜8、{isg} = `ENOMOTO_MIP_INTSING=1g`、
-600 秒・4 スレッド、43 回、分担 4 つで各 1.4 時間)。`python run.py G K` → `res_G_sK.jsonl`。def・fixis は res_M・res_M3・res_E を使う。
+`python plan.py G 8` → `shards_G.json` (上の 11 問 × 種 1〜3、rocI-4-11・traininstance6 は種 1〜8、{def, isg} の対 (isg = `ENOMOTO_MIP_INTSING=1g`)、
+600 秒・4 スレッド、86 回、分担 8 つで各 1.3〜1.4 時間)。`python run.py G K` → `res_G_sK.jsonl`。
+def も同じビルドで回す (d3f31f37c の後に ORBPP_REPROBE・EQUIV2_PWORK・SST_FEAS・ROWTINY・P2RRC が既定になり、res_M の def とは比べられないため)。
+ほかの 26 問と P は消す列が `1` と同じなので、判定には fixis の結果を使う。

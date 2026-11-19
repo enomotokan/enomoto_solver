@@ -2,7 +2,7 @@
 python plan.py Q NQ → shards_Q.json (58 問 × 種 1〜3 × {def, st5}、60 秒)。
 python plan.py D ND → shards_D.json (d の前処理が 1 とも既定とも違う M の問題 × 種 1・2 × {isd}、600 秒)。
 python plan.py E NE → shards_E.json (遅い側の 5 問 × 種 3〜8 × {def, fixis})、python plan.py M3 NM3 → shards_M3.json (M の 37 問 × 種 3 × {def, fixis})。
-python plan.py G NG → shards_G.json (INTSING の `g` 形で消す列が `1` と変わる問題 × 種 1〜3 (2 問は 1〜8) × {isg}、600 秒)。
+python plan.py G NG → shards_G.json (INTSING の `g` 形で消す列が `1` と変わる問題 × 種 1〜3 (2 問は 1〜8) × {def, isg} (同じビルドの対)、600 秒)。
 python plan.py M NM → shards_M.json (scan_s*.jsonl で前処理が変わった Mittelmann の問題 + 対象 6 問 × 種 1・2 × {def, fixis}、600 秒)。
 見積りは analysis/final_20261118 の def の時間 (解けなかった回は上限) + P は 8 秒・M は 30 秒。"""
 import json, glob, sys
@@ -42,7 +42,7 @@ elif SET == "D":
     TM = times("res_M_s*.jsonl", 600)
     balance({(p, s): [(p, "isd", s)] for p in ds for s in (1, 2)}, lambda p, c, s: TM.get((p, 1), 600) + 30, NS, "shards_D.json", 600)
 elif SET == "G":
-    # INTSING の `g` 形 (数える一般整数列を消さない) の確かめ: intsing_kinds_1g.jsonl で `1` と消す列の数が変わる 11 問 (どれも M) だけ isg を回す。
+    # INTSING の `g` 形 (数える一般整数列を消さない) の確かめ: intsing_kinds_1g.jsonl で `1` と消す列の数が変わる 11 問 (どれも M) だけ {def, isg} を回す。
     # ほかの問題は `1` と前処理が同じなので fixis の結果で代える。種 1〜3、E で 8 種まで回した rocI-4-11・traininstance6 は 4〜8 も。600 秒
     import re
     def nel(f):
@@ -56,7 +56,10 @@ elif SET == "G":
             if r["cfg"] == "fixis":
                 tm.setdefault(r["problem"], []).append(min(r["result"].get("time") or 600, 600) if solved(r) else 600)
     est = lambda p, c, s: sum(tm.get(p, [600])) / len(tm.get(p, [600])) + 30
-    jobs = {(p, s): [(p, "isg", s)] for p in probs for s in ((1, 2, 3, 4, 5, 6, 7, 8) if p in ("rocI-4-11", "traininstance6") else (1, 2, 3))}
+    # 既定が d3f31f37c から変わったので (親の指摘)、def も同じビルドで対にして回す。順は問題・種で入れ替える
+    CF = ["def", "isg"]
+    jobs = {(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, p in enumerate(probs)
+            for s in ((1, 2, 3, 4, 5, 6, 7, 8) if p in ("rocI-4-11", "traininstance6") else (1, 2, 3))}
     print("G:", probs)
     balance(jobs, est, NS, "shards_G.json", 600)
 elif SET in ("E", "M3"):
