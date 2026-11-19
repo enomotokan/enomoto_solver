@@ -102,5 +102,7 @@ dano3_3 (4 スレッド 159 秒、1 スレッド 81 秒) の、木を分け合�
 ## 種 3 の追加 (利用者の判断: M の 7 問に種 3 を足して決める)
 
 - 分担表 `shards_MP2RRC3.json` (手で作った、7 問 × 種 3 × {p2rrc, def}、600 秒・4 スレッド、2 分担・各 0.85〜0.9 時間、種 3 は order() と同じく p2rrc が先):
-  `python run.py MP2RRC3 K` (K = 0・1) → `res_MP2RRC3_sK.jsonl`。ビルドは f2fe3471e と同じ動き (その後の変更は analysis だけ)。
+  `python run.py MP2RRC3 K` (K = 0・1) → `res_MP2RRC3_sK.jsonl`。ビルドは種 1・2 と同じ f2fe3471e (その後 src が変わったので、作業木を f2fe3471e にして analysis だけ今の版を持ってくる):
+  `git fetch origin ccr-1beed81b-ex0uhq && git checkout --detach f2fe3471e && git checkout origin/ccr-1beed81b-ex0uhq -- analysis/par4slow_20261119 && pip install -e .` の後、
+  `cd analysis/par4slow_20261119 && python run.py MP2RRC3 K`。
 - 種 1〜3 の集計: `python summ.py MP2RRC+MP2RRC3 p2rrc` (summ.py の SET は + でつなげる)。
