@@ -2533,6 +2533,13 @@ pub(crate) fn sym_sst() -> bool {
     env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v != "0")
 }
 
+/// 試作 `ENOMOTO_MIP_SYM_SST_FEAS` (p2inf_20261119、既定では使わない): 目的が全部 0 の問題 (実行可能性問題) に限って [`sym_sst`] と同じく
+/// SST のカットを使う。SST を orbital fixing の代わりにすると対称性のある最適化問題で遅くなる (hang_20261117 15.2・15.3 節) が、
+/// fhnw-binpack4-4 (目的が全部 0) は SST で初めて実行不能を示せる。同じ成分で orbital fixing と混ぜると代表の選び方が食い違うので混ぜない
+pub(crate) fn sym_sst_feas() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_SST_FEAS").is_some_and(|v| v != "0")
+}
+
 pub(crate) fn sym_of() -> bool {
     env_str!("ENOMOTO_MIP_NO_SYM_OF").is_none()
 }
@@ -3094,7 +3101,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     }
     // 試作 `ENOMOTO_MIP_SYM_SST` ([`symmetry::sst_pairs_except`]): orbital fixing の代わりに Schreier-Sims の表のカットの行を足す
     // (SCIP 10 は fhnw-binpack4-4 をこれで 10 秒で実行不能と示す。analysis/hang_20261117/README.md)。サブ MIP では使わない
-    let sst = sym_sst() && !in_sub;
+    let sst = (sym_sst() || (sym_sst_feas() && prob.cost.iter().all(|&c| c == 0.0))) && !in_sub;
     let of = sym_of() && !sst;
     let pairs = if of {
         Vec::new()
@@ -3257,8 +3264,8 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         let st = orbpp_reprobe(&mut prob, &orbs);
         if verbose {
             eprintln!(
-                "MIP: symmetry: ORBPP_REPROBE: {} rounds, fixed by propagation {}, by the orbitopes {}, by probing {}, free binaries {} -> {} ({:.2}s)",
-                st[0], st[1], st[2], st[3], st[4], st[5], t0.elapsed().as_secs_f64()
+                "MIP: symmetry: ORBPP_REPROBE: {} rounds, fixed by propagation {}, by the orbitopes {}, by probing {}, free binaries {} -> {}, redundant rows dropped {} ({:.2}s)",
+                st[0] % 1000, st[1], st[2], st[3], st[4], st[5], st[0] / 1000, t0.elapsed().as_secs_f64()
             );
         }
     }
@@ -4841,6 +4848,39 @@ fn orbpp_reprobe(prob: &mut MipProblem, orbs: &[symmetry::Orbitope]) -> [usize; 
         }
     }
     st[5] = free_bin(prob);
+    // 固定で冗長になった行 (今の境界で最小・最大の活動量が両方とも行の範囲に入る行。列が全て固定された行を含む) を外す。graph20-20-1rand は
+    // 自由な列 425 に対し行 4810 (非零 3220) が LP に残り、ノードの LP が全体の 2/3 を占めた。列の並びは変えないので、オービトープの列の対応はそのまま
+    // (`ENOMOTO_MIP_ORBPP_REPROBE` の値に `k` があれば外さない)
+    if !env_str!("ENOMOTO_MIP_ORBPP_REPROBE").is_some_and(|v| v.contains('k')) {
+        let keep: Vec<bool> = (0..prob.m)
+            .map(|i| {
+                let (mut lo, mut hi) = (0.0f64, 0.0f64);
+                for &(j, a) in &prob.rows[i] {
+                    let (l, u) = (prob.col_lo[j], prob.col_up[j]);
+                    if a > 0.0 {
+                        lo += a * l;
+                        hi += a * u;
+                    } else {
+                        lo += a * u;
+                        hi += a * l;
+                    }
+                }
+                let tol = 1e-9 * (1.0 + lo.abs().max(hi.abs()));
+                !(lo.is_finite() && hi.is_finite() && lo >= prob.row_lo[i] - tol && hi <= prob.row_up[i] + tol)
+            })
+            .collect();
+        let dropped = keep.iter().filter(|&&k| !k).count();
+        if dropped > 0 {
+            let rows: Vec<Vec<(usize, f64)>> = (0..prob.m).filter(|&i| keep[i]).map(|i| prob.rows[i].clone()).collect();
+            let lo: Vec<f64> = (0..prob.m).filter(|&i| keep[i]).map(|i| prob.row_lo[i]).collect();
+            let up: Vec<f64> = (0..prob.m).filter(|&i| keep[i]).map(|i| prob.row_up[i]).collect();
+            let mut q = MipProblem::from_rows(prob.col_lo.clone(), prob.col_up.clone(), prob.cost.clone(), prob.offset, prob.sense_sign, prob.is_int.clone(), rows, lo, up);
+            q.conflict_edges = std::mem::take(&mut prob.conflict_edges);
+            q.implied_bounds = std::mem::take(&mut prob.implied_bounds);
+            *prob = q;
+        }
+        st[0] += 1000 * dropped;
+    }
     st
 }
 

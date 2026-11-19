@@ -47,3 +47,32 @@ neos859080 (4 スレッド 90 秒): 種 1 46.5 秒・種 2 16.2 秒・種 3 51.0
 shards_PROWTINY.json (MIPLIB 58 問 × 種 1〜3、60 秒、4 分担・各 0.74 時間)。`python run.py MROWTINY K` / `python run.py PROWTINY K`、
 集計は `python summ.py MROWTINY def rowtiny`。判定の変更は LP の実行不能の扱い全部 (ノード・根・強分枝・LP のプロービング) に
 効くので、M は似た問題に絞らず 48 問全部で見る。
+
+### 3.1 正しさの確かめ (親の依頼、verify.sh、実行中)
+
+ROWTINY は widden の誤答の直しの判定を変えるので、`ENOMOTO_MIP_LPINF_ROWTINY=1` で (1) neos-4722843-widden を 1・4 スレッド × 種 1〜3、
+デバッグ解つき・900 秒で回し、最適 25009.662227 と比べる (wdn.py、res_dbgrun_wdn_t*.jsonl)、(2) release019 と同じ fuzz 7 本と
+衝突解析の fuzz_cutconf 300 (ログは fuzz_logs/、コミットしない)。結果は後で書き足す。
+
+## 4. fhnw-binpack4-4・bnatt400 (4 スレッド 120 秒・種 1、logs/<問題>_<設定>_s1.log)
+
+| 問題 | def | rowtiny | NO_LPINF_CHECK | v019 |
+|---|---|---|---|---|
+| fhnw-binpack4-4 | 時間切れ (9.7 万ノード) | 時間切れ (10.0 万) | 時間切れ (10.1 万) | 時間切れ (7.0 万) |
+| bnatt400 | 時間切れ (1.2 万) | 時間切れ (1.3 万) | 時間切れ (1.2 万) | 時間切れ (1.4 万) |
+
+どちらも 0.1.9 から解けておらず、際どい実行不能の判定とは関係ない (neos859080 とは別の原因)。
+
+### 4.1 fhnw-binpack4-4: 目的が全部 0 の問題に限って SST (試作 `ENOMOTO_MIP_SYM_SST_FEAS`、既定では使わない)
+
+hang_20261117 の 7・15 節: SCIP は Schreier-Sims の表のカット (SST、45 行・9 段) で 12 秒で実行不能を示す。当方の SST
+(`ENOMOTO_MIP_SYM_SST=1`) でも解けるが、orbital fixing の代わりに SST を使うと対称性のある最適化問題で P +20.8%・M +41.3% 遅い
+ので既定にしなかった。SST と orbital fixing を同じ成分で混ぜると代表の選び方が食い違うおそれがあるので、使う条件を絞る:
+**目的が全部 0 (実行可能性問題) のときだけ SST**。対称性で実行不能を示す必要があるのは主にこの型で、最適化問題の道筋は変わらない。
+P・M (Mittelmann 48 問・MIPLIB 58 問) で目的が全部 0 なのは ns1116954 だけ (SST の行 19、def と sst で同じ道筋だった、hang 15.2 節)。
+
+- fhnw-binpack4-4 (4 スレッド・種 1・300 秒、widden の確かめと並走で CPU を取り合った状態): **70.1 秒で実行不能** (7767 ノード、SST 45 行・9 段)。
+  うち 30 秒は前処理の早めの FJ/Local-MIP (実行可能性問題の上限 30 秒をすべて使う)。cargo test 409 通過。
+- 計測: shards_FSST.json (目的が全部 0 の 7 問 × 種 1〜3 × {def, sstfeas, def_t1, sstfeas_t1}、600 秒、6 分担 × 14 回) を `python run.py FSST K`、
+  集計 `python summ.py FSST def sstfeas`・`python summ.py FSST def_t1 sstfeas_t1`。P は shards_PSSTFEAS.json (4 分担、各 0.74 時間、
+  ns1116954 以外は道筋が同じはずなので揺れの確かめ)。M は効く問題がないので省く。
