@@ -5764,15 +5764,16 @@ fn probe_spec_block(prob: &MipProblem, base: &domain::Domain, js: &[usize], cx: 
 
 /// [`probe`] の同値な組の巡 (`ENOMOTO_MIP_PREPAR` の `e`): 塊の候補を `base` の写しで順に試し、候補ごとに見つけた組
 /// (列の番号の順) と数えた手間 (行の走査) を返す。固定されている候補・どちらかの側が成り立たない候補は組なし
-fn probe_equiv_block(prob: &MipProblem, base: &domain::Domain, bin0: &[bool], js: &[usize]) -> Vec<(Vec<(usize, usize, bool)>, u64)> {
+fn probe_equiv_block(prob: &MipProblem, base: &domain::Domain, bin0: &[bool], js: &[usize]) -> Vec<(Vec<(usize, usize, bool)>, u64, u64)> {
     let mut d = base.clone();
     js.iter()
         .map(|&j| {
             let mut pairs = Vec::new();
             if d.lo[j] == d.up[j] {
-                return (pairs, 0);
+                return (pairs, 0, 0);
             }
             let w0 = d.debug_work();
+            let (a0, c0) = (domain::act_work(), domain::chg_count());
             let pos = d.stack_len();
             d.tighten_upper(prob, j, 0.0);
             let ok0 = d.propagate(prob);
@@ -5783,8 +5784,9 @@ fn probe_equiv_block(prob: &MipProblem, base: &domain::Domain, bin0: &[bool], js
             let ch1: std::collections::HashMap<(usize, bool), f64> = if ok1 { d.changes_since(pos).map(|(k, u, v)| ((k, u), v)).collect() } else { Default::default() };
             d.backtrack_to(prob, pos);
             let w = d.debug_work() - w0;
+            let pw = equiv2_pwork(w, domain::act_work() - a0, domain::chg_count() - c0);
             if !(ok0 && ok1) {
-                return (pairs, w);
+                return (pairs, w, pw);
             }
             // 逐次の巡と同じく、同じ (列, 側) の変更は最後の値を使う
             let mut last0: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
@@ -5805,9 +5807,21 @@ fn probe_equiv_block(prob: &MipProblem, base: &domain::Domain, bin0: &[bool], js
                     pairs.push((j, k, true));
                 }
             }
-            (pairs, w)
+            (pairs, w, pw)
         })
         .collect()
+}
+
+/// 試作 `ENOMOTO_MIP_EQUIV2_PWORK` (既定では使わない、analysis/clqprbg_20261119): 同値な組の巡 (`PROBE_CLIQUE=equiv`) の手間を、本体の
+/// プロービングの `pwork` と同じ重み (およそナノ秒: 2.5 x 行の走査 + 5 x 活動量の更新 + 68 x 境界の変更) で数える。巡は行の走査 (`debug_work`)
+/// だけを数えていて、活動量の更新が重い問題 (mzzv42z: 本体で work 74 万に対し pwork 8.5 億) では手間の上限が効かず、時間の安全網 (5 秒) まで走っていた
+fn equiv2_pwork(rows: u64, act: u64, chg: u64) -> u64 {
+    let (ww, wa, wc) = (
+        tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_W_ROW", 2.5, f64),
+        tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_W_ACT", 5.0, f64),
+        tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_W_CHG", 68.0, f64),
+    );
+    (ww * rows as f64 + wa * act as f64 + wc * chg as f64) as u64
 }
 
 /// 診断 `ENOMOTO_MIP_DEBUG_INTCENSUS` (CLQPRB の続き、analysis/clqprb_20261112.md §7): 整数列の幅と暗黙の整数の本数を数え、
@@ -7164,6 +7178,15 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             (time_cap2, giveup2, u64::MAX, u64::MAX)
         };
         let w0 = d2.debug_work();
+        // 試作 `ENOMOTO_MIP_EQUIV2_PWORK` ([`equiv2_pwork`]): `pwork` の重みで数えた手間が `ENOMOTO_T_MIP_EQUIV2_PWORK_CAP` (既定 5e8、0.5 秒相当) を
+        // 越えたら止め、`ENOMOTO_T_MIP_EQUIV2_PWORK_GIVEUP` (既定 1e8、0.1 秒相当) を越えても 1 組も見つからなければやめる (時間の上限と同じ値)。
+        // 今までの行の走査の上限・時間の安全網もそのまま残す
+        let (pw_cap, pw_give) = if presolve_work() && env_str!("ENOMOTO_MIP_EQUIV2_PWORK").is_some_and(|v| v != "0") {
+            (tunable!("ENOMOTO_T_MIP_EQUIV2_PWORK_CAP", 5.0e8, f64) as u64, tunable!("ENOMOTO_T_MIP_EQUIV2_PWORK_GIVEUP", 1.0e8, f64) as u64)
+        } else {
+            (u64::MAX, u64::MAX)
+        };
+        let (a0, c0) = (domain::act_work(), domain::chg_count());
         // `ENOMOTO_MIP_PREPAR` の `e` (試作): この巡は定義域 `d2` を変えない (試して巻き戻すだけ) ので、候補の窓を塊に分けて
         // 塊ごとの `d2` の写しで試し、決まった順にまとめる。手間は写しで数えた分を足して逐次と同じ打ち切りにする。
         // 1 つの候補で見つけた組は列の番号の順に並べる (逐次はハッシュ表の順)
@@ -7171,6 +7194,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         if let Some(pool) = &epool {
             let (eb, ek) = (tunable!("ENOMOTO_T_MIP_PREPAR_EQ_BSZ", 32usize, usize).max(1), tunable!("ENOMOTO_T_MIP_PREPAR_BLOCKS", 4usize, usize).max(1));
             let mut virt = 0u64;
+            let mut pvirt = 0u64;
             let mut ci = 0usize;
             'eq: while ci < cands.len() {
                 let end = (ci + eb * ek).min(cands.len());
@@ -7178,18 +7202,22 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                 let nb = (end - ci).min(ek);
                 let blocks_v: Vec<Vec<usize>> = (0..nb).map(|k| cands[ci..end].iter().skip(k).step_by(nb).copied().collect()).collect();
                 let (base, pr, b0): (&Domain, &MipProblem, &[bool]) = (&d2, prob, &bin0);
-                let res: Vec<Vec<(Vec<(usize, usize, bool)>, u64)>> = pool.install(|| {
+                let res: Vec<Vec<(Vec<(usize, usize, bool)>, u64, u64)>> = pool.install(|| {
                     use rayon::prelude::*;
                     blocks_v.par_iter().map(|bl| probe_equiv_block(pr, base, b0, bl)).collect()
                 });
                 let mut its: Vec<_> = res.into_iter().map(|v| v.into_iter()).collect();
-                let ordered: Vec<(Vec<(usize, usize, bool)>, u64)> = (0..end - ci).map(|i| its[i % nb].next().unwrap()).collect();
-                for (idx, (pairs, w1)) in ordered.into_iter().enumerate() {
+                let ordered: Vec<(Vec<(usize, usize, bool)>, u64, u64)> = (0..end - ci).map(|i| its[i % nb].next().unwrap()).collect();
+                for (idx, (pairs, w1, pw1)) in ordered.into_iter().enumerate() {
                     let cj = ci + idx;
                     if virt > work_cap.min(wcap2) || tq.elapsed().as_secs_f64() > time_cap2 || ((tq.elapsed().as_secs_f64() > giveup2 || virt > wgive2) && equiv.len() == n0) || (cj % 16 == 0 && presolve_stop()) {
                         break 'eq;
                     }
+                    if pvirt > pw_cap || (pvirt > pw_give && equiv.len() == n0) {
+                        break 'eq;
+                    }
                     virt += w1;
+                    pvirt += pw1;
                     equiv.extend(pairs);
                 }
                 ci = end;
@@ -7203,6 +7231,12 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             let w = d2.debug_work() - w0;
             if w > work_cap.min(wcap2) || tq.elapsed().as_secs_f64() > time_cap2 || ((tq.elapsed().as_secs_f64() > giveup2 || w > wgive2) && equiv.len() == n0) || (ci % 16 == 0 && presolve_stop()) {
                 break;
+            }
+            if pw_cap < u64::MAX {
+                let pw = equiv2_pwork(w, domain::act_work() - a0, domain::chg_count() - c0);
+                if pw > pw_cap || (pw > pw_give && equiv.len() == n0) {
+                    break;
+                }
             }
             if d2.lo[j] == d2.up[j] {
                 continue;
