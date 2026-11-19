@@ -52,7 +52,20 @@ analysis/hang_20261117 の 7・15 節) は P +21%・M +41% 遅い。一因とし
 
 ## 3. 確かめ
 
-(この後に書く)
+- `cargo test --release --lib`: 410 通過・0 失敗 (写しの単体テスト `sst_canonicalize_satisfies_sst_pairs` を含む。S4 と C3 の群で 200 点を写し、
+  SST の行を全て満たし群の像であることを確かめる)。
+- fuzz (`fuzz/`、`CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true pip install -e .` で debug の assert を効かせたビルド、`ENOMOTO_MIP_SYM_SST=x`):
+
+| fuzz | bad | panic | 写せた | 写しても反した | 確かめに落ちた | 再スタート後に捨てた |
+|---|---|---|---|---|---|---|
+| `mip_fuzz_symmetric.py 300 0 1` | 0 / 300 | 0 | 21 | 0 | 0 | 0 |
+| `mip_fuzz_symmetric.py 300 0 2` | 0 / 300 | 0 | 10 | 0 | 0 | 0 |
+| 同 1 + `ENOMOTO_MIP_NO_ORBITOPE=1` | 0 / 300 | 0 | 98 | 0 | 0 | 0 |
+| 同 2 + `ENOMOTO_MIP_NO_ORBITOPE=1` | 0 / 300 | 0 | 169 | 6 | 0 | 6 |
+| `mip_fuzz_vs_highs.py 300` | 0 / 300 | 0 | 0 | 0 | 0 | 0 |
+
+- 「写しても反した」6 回は全て再スタートの後 (同じ数だけ捨てた)。再スタートの後は列の番号が変わるのに、段の控えは最初の回のまま
+  (再スタートで対称性を検出し直さないとき) なので写しが当たらない (推測。害はない: 写した解は SST の行で判定し、反すれば元の x に戻す)。
 
 ## 4. 計測 (分担は親が割り振る)
 
