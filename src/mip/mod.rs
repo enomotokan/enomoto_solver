@@ -3250,6 +3250,18 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     if verbose && static_fix > 0 {
         eprintln!("MIP: symmetry: packing orbitopes fixed {static_fix} columns to 0");
     }
+    // 試作 `ENOMOTO_MIP_ORBPP_REPROBE` (既定では使わない。analysis/scipslow_20261119 の 4 節): 静的なオービトープの固定の後に、行の伝播・
+    // オービトープの固定・プロービング (固定だけ) を繰り返す ([`orbpp_reprobe`])
+    if static_fix > 0 && orbs.iter().any(|o| o.static_pp) && env_str!("ENOMOTO_MIP_ORBPP_REPROBE").is_some() {
+        let t0 = std::time::Instant::now();
+        let st = orbpp_reprobe(&mut prob, &orbs);
+        if verbose {
+            eprintln!(
+                "MIP: symmetry: ORBPP_REPROBE: {} rounds, fixed by propagation {}, by the orbitopes {}, by probing {}, free binaries {} -> {} ({:.2}s)",
+                st[0], st[1], st[2], st[3], st[4], st[5], t0.elapsed().as_secs_f64()
+            );
+        }
+    }
     if env_str!("ENOMOTO_MIP_SYM_DEBUG").is_some() {
         // オービトープの各行に、その行の列だけからなる (他の列も含んでよい) 集合分割・パッキング行があるか
         for o in &orbs {
@@ -4715,6 +4727,123 @@ fn vub_dual_agg_pairs(prob: &MipProblem) -> Vec<(usize, usize, bool)> {
 
 /// `ENOMOTO_MIP_VUBAGG` (既定で使う): 組 `x_j = y` ([`vub_dual_agg_pairs`]) で x_j を全ての行から y に置き換え、x_j の費用を y に足し、x_j を 0 に固定した問題。
 /// 解は `x_j = x_y` で戻す。列の番号は変えない。
+/// 試作 `ENOMOTO_MIP_ORBPP_REPROBE`: 静的なオービトープ (`ENOMOTO_MIP_ORBPP`) の固定の後に、(1) 行の伝播、(2) 静的なオービトープの固定
+/// ([`symmetry::orbitopal_fixing`]、詰め込みの固定を含む)、(3) 自由な 0-1 列のプロービング (片側が行の伝播で矛盾すれば反対側に固定) を、
+/// 何も変わらなくなるか `ENOMOTO_T_MIP_ORBPP_REPROBE_ROUNDS` (5) 回まで繰り返し、境界を問題に書き込む。どれも主の推論 (実行可能な点を消さない)
+/// なので、木のオービトープの固定 (列の対応) はそのまま使える (列のまとめ・置き換え・双対の縮小はしない)。graph20-20-1rand では SCIP が
+/// 双対の前処理を全部切っても対称性の後のプロービング (164 列) と logicor の伝播 (458 列) で 2183 → 326 列、最初の根の LP −12 (当方 −25.7)。
+/// プロービングの手間は伝播で走査した行の長さの合計で `ENOMOTO_T_MIP_ORBPP_REPROBE_WORK` (200) x 非零まで。
+/// 戻り値は [回数, 伝播の固定, オービトープの固定, プロービングの固定, 前の自由な 0-1 列, 後の自由な 0-1 列]
+fn orbpp_reprobe(prob: &mut MipProblem, orbs: &[symmetry::Orbitope]) -> [usize; 6] {
+    let bin = |p: &MipProblem, j: usize| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0;
+    let free_bin = |p: &MipProblem| (0..p.n).filter(|&j| bin(p, j) && p.col_lo[j] < p.col_up[j]).count();
+    let mut st = [0usize; 6];
+    st[4] = free_bin(prob);
+    let max_rounds = tunable!("ENOMOTO_T_MIP_ORBPP_REPROBE_ROUNDS", 5usize, usize);
+    let rows_only = env_str!("ENOMOTO_MIP_ORBPP_REPROBE") == Some("r");
+    let work_cap = (tunable!("ENOMOTO_T_MIP_ORBPP_REPROBE_WORK", 200.0, f64) * prob.nnz.max(1) as f64) as u64;
+    let mut dom = domain::Domain::new(prob);
+    let w0 = dom.debug_work();
+    let count_fixed = |d: &domain::Domain, p: &MipProblem| (0..p.n).filter(|&j| bin(p, j) && d.lo[j] == d.up[j]).count();
+    for _ in 0..max_rounds {
+        st[0] += 1;
+        let before = count_fixed(&dom, prob);
+        // (1) 行の伝播
+        let f0 = count_fixed(&dom, prob);
+        if !dom.propagate(prob) {
+            return st;
+        }
+        st[1] += count_fixed(&dom, prob) - f0;
+        // (2) 静的なオービトープの固定 (変わらなくなるまで)
+        loop {
+            let mut fixes: Vec<(usize, f64)> = Vec::new();
+            for o in orbs.iter().filter(|o| o.static_pp) {
+                match symmetry::orbitopal_fixing(o, &dom.lo, &dom.up) {
+                    None => return st,
+                    Some(f) => fixes.extend(f),
+                }
+            }
+            let f0 = count_fixed(&dom, prob);
+            for (j, v) in fixes {
+                dom.tighten_lower(prob, j, v);
+                dom.tighten_upper(prob, j, v);
+            }
+            if dom.infeasible || !dom.propagate(prob) {
+                return st;
+            }
+            let got = count_fixed(&dom, prob) - f0;
+            st[2] += got;
+            if got == 0 {
+                break;
+            }
+        }
+        // (3) プロービング (固定だけ)
+        let f0 = count_fixed(&dom, prob);
+        for j in 0..prob.n {
+            if dom.debug_work() - w0 > work_cap {
+                break;
+            }
+            if !bin(prob, j) || dom.lo[j] == dom.up[j] {
+                continue;
+            }
+            let mut ok = [true; 2];
+            for (k, v) in [0.0, 1.0].into_iter().enumerate() {
+                let pos = dom.stack_len();
+                dom.tighten_lower(prob, j, v);
+                dom.tighten_upper(prob, j, v);
+                // 行の伝播とオービトープの固定を、変わらなくなるまで交互に (`ENOMOTO_MIP_ORBPP_REPROBE=r` なら行の伝播だけ)。SCIP のプロービングも
+                // orbitope_pp の伝播を含む (固定の後のプロービングで 164 列を固定する)
+                ok[k] = !dom.infeasible && dom.propagate(prob);
+                while ok[k] && !rows_only {
+                    let mut fixes: Vec<(usize, f64)> = Vec::new();
+                    for o in orbs.iter().filter(|o| o.static_pp) {
+                        match symmetry::orbitopal_fixing(o, &dom.lo, &dom.up) {
+                            None => {
+                                ok[k] = false;
+                                break;
+                            }
+                            Some(f) => fixes.extend(f.into_iter().filter(|&(c, v)| dom.lo[c] != v || dom.up[c] != v)),
+                        }
+                    }
+                    if !ok[k] || fixes.is_empty() {
+                        break;
+                    }
+                    for (c, v) in fixes {
+                        dom.tighten_lower(prob, c, v);
+                        dom.tighten_upper(prob, c, v);
+                    }
+                    ok[k] = !dom.infeasible && dom.propagate(prob);
+                }
+                dom.backtrack_to(prob, pos);
+            }
+            match ok {
+                [false, false] => return st,
+                [false, true] => {
+                    dom.tighten_lower(prob, j, 1.0);
+                }
+                [true, false] => {
+                    dom.tighten_upper(prob, j, 0.0);
+                }
+                _ => continue,
+            }
+            if dom.infeasible || !dom.propagate(prob) {
+                return st;
+            }
+        }
+        st[3] += count_fixed(&dom, prob) - f0;
+        // 境界を問題に書き込む (伝播で締まった連続列・整数列の境界も)
+        for j in 0..prob.n {
+            prob.col_lo[j] = prob.col_lo[j].max(dom.lo[j]);
+            prob.col_up[j] = prob.col_up[j].min(dom.up[j]);
+        }
+        if count_fixed(&dom, prob) == before || dom.debug_work() - w0 > work_cap {
+            break;
+        }
+    }
+    st[5] = free_bin(prob);
+    st
+}
+
 /// 試作 `ENOMOTO_MIP_BIGM_SPLIT`: 0-1 の列だけで係数が全て正の「≤」の行 `a y + Σ c_i x_i ≤ b` のうち、y = 0 なら冗長 (`Σ c_i ≤ b`)、
 /// y = 1 なら他の全ての列が 0 (`c_i > b − a` かつ `a ≤ b`) になるもの (大 M の行) を、同じ実行可能集合の `x_i + y ≤ 1` (i ごと) に置き換える。
 /// LP の緩和は強くなる (hypothyroid-k1 の 2512 行「45y + Σ x_i ≤ 45」。SCIP は knapsack の前処理で同じ分解をし、最初の LP 値 −2857 (最適 −2851)。
@@ -6545,20 +6674,40 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
         let fixed_pass0 = fixed;
         spec_ver = u64::MAX;
-        // 試作 `ENOMOTO_MIP_PROBE_USELESS` = K (既定では使わない。analysis/scipslow_20261119): SCIP の「50 回続けて全く役に立たない試しで打ち切る」
-        // と同じく、固定も締め付けも増えない試しが K 回続いたらプロービングをやめる (含意は数えない)。air03 は 512 列を試して固定・締め付け・
-        // 同値な組が 0 のまま 2.9 秒 (SCIP は 51 回で打ち切り 0.4 秒)
+        // 試作 `ENOMOTO_MIP_PROBE_USELESS` = K (既定では使わない。analysis/scipslow_20261119 の 3・5 節): SCIP のプロービングの打ち切り
+        // (`maxtotaluseless` 50・`maxuseless` 1000) と同じ形。固定も締め付けも増えず、新しい含意 (試した列と同じ行に入らない列への含意。同じ行に
+        // 入る列への含意は行から直接出るので数えない) も無い試しが K 回続いたら、プロービングをやめる (固定も締め付けも増えない試しの回数の上限
+        // `ENOMOTO_T_MIP_PROBE_USELESS_MAX` (SCIP の `maxuseless` 1000 に当たる) は既定で使わない: 1000 にすると physiciansched6-2 が 37 → 80 秒。
+        // 新しい含意が出続けていた)。air03 は 512 列を試して固定・締め付け・同値な組が 0 のまま 2.9 秒 (含意は行から出る 92 万本。
+        // SCIP は 51 回で打ち切り 0.4 秒)。最初の版 (含意を数えず K 回) は drayage-25-23 で含意 5 万本を失い全種で 3.4 倍遅かった
         let useless_k = env_str!("ENOMOTO_MIP_PROBE_USELESS").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-        let (mut useless_run, mut useless_last) = (0usize, fixed + tightened);
+        let useless_max = tunable!("ENOMOTO_T_MIP_PROBE_USELESS_MAX", usize::MAX, usize);
+        let (mut useless_run, mut total_run, mut useless_last) = (0usize, 0usize, fixed + tightened);
+        let mut prev_probe: Option<(usize, usize)> = None;
+        let mut row_mark: Vec<u32> = if useless_k > 0 { vec![u32::MAX; prob.n] } else { Vec::new() };
         for (cnt, &j) in cands.iter().enumerate() {
             if useless_k > 0 {
-                if fixed + tightened > useless_last {
-                    useless_run = 0;
-                    useless_last = fixed + tightened;
+                // 直前の試しの結果を数える
+                if let Some((pj, e0)) = prev_probe.take() {
+                    if fixed + tightened > useless_last {
+                        useless_run = 0;
+                        total_run = 0;
+                        useless_last = fixed + tightened;
+                    } else {
+                        useless_run += 1;
+                        let tag = pj as u32;
+                        for &(i, _) in &prob.cols[pj] {
+                            for &(k, _) in &prob.rows[i] {
+                                row_mark[k] = tag;
+                            }
+                        }
+                        let fresh = edges.len() > e0 && edges[e0..].iter().any(|&(_, b)| row_mark[(b / 2) as usize] != tag);
+                        total_run = if fresh { 0 } else { total_run + 1 };
+                    }
                 }
-                if useless_run >= useless_k {
+                if total_run >= useless_k || useless_run >= useless_max {
                     if verbose {
-                        eprintln!("MIP: probing: PROBE_USELESS: {useless_run} successive probes without fixings or tightenings, stopped");
+                        eprintln!("MIP: probing: PROBE_USELESS: stopped after {total_run} successive probes with nothing new ({useless_run} without fixings or tightenings)");
                     }
                     break 'passes;
                 }
@@ -6579,7 +6728,9 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             }
             let found0 = fixed + tightened;
             probed += 1;
-            useless_run += 1;
+            if useless_k > 0 {
+                prev_probe = Some((j, edges.len()));
+            }
             // `ENOMOTO_MIP_PREPAR` の `p`: 窓の結果を使う (窓がない・古ければ、ここから窓を作る)
             let spec_res = if let Some(pool) = &pool {
                 let valid = spec_ver == ver && cnt >= spec_start && cnt < spec_start + spec.len();
