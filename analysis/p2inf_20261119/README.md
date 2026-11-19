@@ -358,4 +358,4 @@ k = 12 で当方の設定を比べる (sub12.sh、logs/sub12v_*.log、`sub12v_ro
   全体の bnatt400 が 4 スレッド 900 秒で解けなかったので、割合の判定にした。
 - cfx2 = LIT_EXPLAIN + HiGHS 式の衝突スコア + `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT=0.1`: bnatt400 全体 4 スレッド **321.5 秒・23375 ノードで最適**、部分木 k=12
   827 ノード、mas76 種 3 8.9 秒 (def と同じ)、pk1 種 2 15.3 秒 (def 21.5)、atrato 種 1 62.4 秒 (def 115.8)。cargo test 411 通過。
-- 計測: shards_PCFX2.json (4 分担)・shards_MCFX2.json (12 分担)、`python run.py PCFX2 K` / `MCFX2 K`。誤答の確かめ verify_cfx2.sh (実行中)。
+- 計測: shards_PCFX2.json (4 分担)・shards_MCFX2.json (12 分担)、`python run.py PCFX2 K` / `MCFX2 K`。誤答の確かめ verify_cfx2.sh: widden 4 スレッド 48.3 秒・1 スレッド 72.8 秒でどちらも最適、fuzz 11 本 (cfx と同じ) すべて bad 0。
