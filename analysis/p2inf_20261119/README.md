@@ -345,3 +345,17 @@ k = 12 で当方の設定を比べる (sub12.sh、logs/sub12v_*.log、`sub12v_ro
   既定は 4 スレッド 1800 秒でも時間切れ・20 万ノード、SCIP は 1 スレッド 276 秒。1 スレッド 600 秒の cfx は 406 秒に最適解を見つけるが、証明は時間切れ。
 - 誤答の確かめ (verify_cfx.sh、fuzz_logs/cfx_*.txt): widden 4 スレッド 46.1 秒・1 スレッド 54.5 秒でどちらも最適 25009.6634。fuzz_tiny 0/400×2・
   mip_fuzz_vs_highs 0/300 (4・1 スレッド)・fuzz_objint 0/1000×2・fuzz_slack 食い違い 0/1000×2・fuzz_cutconf 0/300×2・mip_fuzz_symmetric 0/300。誤答 0。計測: shards_PCFX.json (4 分担、各 0.74 時間)・shards_MCFX.json (12 分担、各 1.4 時間)、`python run.py PCFX K` / `MCFX K`。
+
+### 4.13 CFX の集計と、衝突の重みを絞った cfx2 (事実)
+
+- CFX (ビルド f8fa3374f、`summ_PCFX.txt`・`summ_MCFX.txt`): P +0.0% [−7.2%, +7.3%]・解けた数 134/134、全種で遅い pk1 1.40 (mas76 1.36)、全種で速い misc07 0.76。
+  M −5.1% [−16.6%, +8.0%]・解けた数 71 → 76、全種で遅い atrato 4.01・mas76 1.46、全種で速い fiball 0.25・mcsched 0.38・fastxgemm 0.45・net12・kasai・mzzv11。
+  区間の上端と全種で遅い問題があり、そのままでは目安を満たさない。PCFX の ns1116954 種 2 の時間切れは前処理の早めの FJ の外れ (cfx の前の段階)、neos5 は 60 秒の境目。
+- 部品の切り分け (手元 4 スレッド、logs/ablcfx.txt): mas76 種 3 def 8.9・cfx 13.4・LIT_EXPLAIN だけ 10.0・重み + HiGHS 式だけ 14.0 秒、pk1 種 2 def 21.5・
+  cfx 27.8・LIT_EXPLAIN だけ 21.6・重み + HiGHS 式だけ 26.4 秒。遅れは衝突の重みから。atrato 種 1 は def 115.8・cfx 94.3・LIT_EXPLAIN + 重み 300 秒で時間切れ。
+- 試作 `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT` = w (既定 0 で使わない): 擬似費用の観測のうち目的の利得が正だったものが `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT_FRAC`
+  (既定 5%) 以下 (手がかりなし) のときだけ、衝突の重みを w にする (`src/mip/pseudocost.rs` の `hybrid`)。最初の版 (平均が厳密に 0 のときだけ) は
+  全体の bnatt400 が 4 スレッド 900 秒で解けなかったので、割合の判定にした。
+- cfx2 = LIT_EXPLAIN + HiGHS 式の衝突スコア + `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT=0.1`: bnatt400 全体 4 スレッド **321.5 秒・23375 ノードで最適**、部分木 k=12
+  827 ノード、mas76 種 3 8.9 秒 (def と同じ)、pk1 種 2 15.3 秒 (def 21.5)、atrato 種 1 62.4 秒 (def 115.8)。cargo test 411 通過。
+- 計測: shards_PCFX2.json (4 分担)・shards_MCFX2.json (12 分担)、`python run.py PCFX2 K` / `MCFX2 K`。誤答の確かめ verify_cfx2.sh (実行中)。
