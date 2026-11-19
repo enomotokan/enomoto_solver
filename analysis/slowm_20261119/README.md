@@ -213,3 +213,37 @@ fuzz 7 本すべて bad 0 (締めの直しだけの d7a8e2567 でも同じく全
 
 - 判定: 4 スレッド 2 種で遅く見えた問題のうち traininstance6・30n20b8・neos-1171448 は運。rocI-4-11 は 8 種で 6 回遅く、運だけとは言いにくい。
   M の 3 種では解けた数が減り (1 形 −3、d 形 −2)、95% の上限も +6.5% / +7.6% で、採用の目安 (上限 ≲ +5%・解けた数が減らない) を満たさない。
+
+## 11. INTSING が何を消しているか と、損の出る形を外す条件 `g` (利用者の判断 (b)、2026-11-19)
+
+### 11.1 消す列の形 (`ENOMOTO_MIP_INTSING_LOG`、`intsing_kinds.py` → `intsing_kinds.jsonl`、時間比と並べて `kinds_vs_time.txt`)
+`scan_d.jsonl` で INTSING (`1`) が前処理を変える M・P の 36 問について、前処理だけかけて消した整数列を
+「行の他の係数の符号の向き (opp: すべて消す列と逆 = `y = Σ a x` の定義の形 / same / mixed)・列の境界 (bin / box / half / free)・
+費用の有無 (cost / c0)・右辺 (rhs0 / ≠0)・境界から足した行の数」で数えた。比は fixis / def の時間 (種 3、E の問題は種 8)。
+- roc 系は **opp/box/cost (費用つきの一般整数で、行の他の列を数える列) だけ** を根の前処理で 1〜4 本消す:
+  rocI-4-11 4 本 (比 1.079、8 種)、rococoC10-001000 1 本 (1.466、解けた回 3 → 2)、rococoB10-011000 1 本 (解けず)。
+  幅のある費用つき整数列を消すと、目的の値の刻み (費用 × 個数) で分枝できなくなり、その列の費用が行の 0-1 列に散る。
+- 得のある問題の形は別: neos-1445765 = opp/**bin**/cost 1000 本 (46.5%、0.204)、hypothyroid-k1 = **mixed**/box/cost 1 本 (0.600)、
+  mushroom-best = opp/box/**c0** 2 本 (0.762)、graph20-20-1rand = **same**/bin/c0 37 本 (P 1.046、M では速い側)。
+- そのほかの損 (supportcase33 same/bin/c0、air03 same/bin/cost) は `d` 形 (§10) が外す形で、roc 系とは別。
+
+### 11.2 条件 `g` (`ENOMOTO_MIP_INTSING` に `g` を含むとき、既定はオフ。`src/presolve/colsingleton.rs`)
+消す整数列 j が **幅 > 1 (0-1 でない)・費用 ≠ 0・行の他の係数がすべて j の係数と逆符号** なら消さない。
+問題の名前や系統でなく列の形だけで書いた条件。
+
+### 11.3 当たる問題の数え上げ (`python intsing_kinds.py 1g` → `intsing_kinds_1g.jsonl`。消す列の数を `1` と比べた)
+- P の 58 問: 変わる問題 0 (P で INTSING が働く 7 問はどれも `g` の形を消していない)。→ P は fixis の結果がそのまま `1g` の結果。
+- M の 37 問: 変わるのは 11 問。**INTSING が根で働かなくなる** = rocI-4-11 (根の 4 本 → 0。部分 MIP の前処理では別の形 142 本を消す)・
+  rococoB10-011000・rococoC10-001000・radiationm40-10-02。**消す列が減る** = brazil3 (556 → 550)・neos-3656078-kumeu (141 → 6)・
+  piperout-08 (22 → 18)・piperout-27 (22 → 19)・radiationm18-12-05 (4 → 1)・traininstance2 (6 → 5)・traininstance6 (5 → 4)。
+  ほかの 26 問は `1` と同じ。
+- 得の 4 問 (neos-1445765・hypothyroid-k1・mushroom-best・graph20-20-1rand) は `1` と消す列が同じで、得は残る。
+
+### 11.4 正しさ
+cargo test 411 通過・0 失敗。`ENOMOTO_MIP_INTSING=1g` で fuzz_intsing 300 問 bad 0、fuzz 7 本 (`fuzz.sh ENOMOTO_MIP_INTSING=1g`) bad 0。
+
+### 11.5 計測の分担 (G)
+`python plan.py G 8` → `shards_G.json` (上の 11 問 × 種 1〜3、rocI-4-11・traininstance6 は種 1〜8、{def, isg} の対 (isg = `ENOMOTO_MIP_INTSING=1g`)、
+600 秒・4 スレッド、86 回、分担 8 つで各 1.3〜1.4 時間)。`python run.py G K` → `res_G_sK.jsonl`。
+def も同じビルドで回す (d3f31f37c の後に ORBPP_REPROBE・EQUIV2_PWORK・SST_FEAS・ROWTINY・P2RRC が既定になり、res_M の def とは比べられないため)。
+ほかの 26 問と P は消す列が `1` と同じなので、判定には fixis の結果を使う。

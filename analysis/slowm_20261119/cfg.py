@@ -4,4 +4,6 @@ fixis: 直し + 試作 ENOMOTO_MIP_INTSING=1 (等式 1 本にだけ現れる整�
 CFGS = {"def": {}, "fix": {"ENOMOTO_MIP_TIGHTEN_INTBOUND": "1"}, "fixis": {"ENOMOTO_MIP_TIGHTEN_INTBOUND": "1", "ENOMOTO_MIP_INTSING": "1"},
         "st5": {"ENOMOTO_T_MIP_CUT_INTOBJ_STALL": "5"},
         # INTSING の定義の形だけ (`d`)。M の fixis と同じく TIGHTEN_INTBOUND も付ける (既定に入った後のビルドでは同じ)
-        "isd": {"ENOMOTO_MIP_TIGHTEN_INTBOUND": "1", "ENOMOTO_MIP_INTSING": "d"}}
+        "isd": {"ENOMOTO_MIP_TIGHTEN_INTBOUND": "1", "ENOMOTO_MIP_INTSING": "d"},
+        # INTSING から「数える一般整数列」(費用あり・幅 > 1・行の他の係数がすべて逆符号) を外す形 (`g`)
+        "isg": {"ENOMOTO_MIP_INTSING": "1g"}}

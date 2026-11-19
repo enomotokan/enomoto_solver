@@ -161,18 +161,29 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
     // set partitioning 行 (`x_j + Σ = 1`、符号がそろう) の列シングルトン 118 本を消すと、費用が行の他の列へ配られて後の前処理
     // (支配列) が働かなくなり、0 ノードのまま 3.2〜5.1 → 4.7〜6.6 秒に遅くなった
     let int_sing_def = env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v.contains('d'));
+    // `g` (数え上げの一般整数列を残す): 消す列が 0-1 でなく (境界の幅 > 1)、費用があり、行の他の列の係数の符号がすべて消す列と逆
+    // (`y = Σ a x`、a > 0 の形で y が「個数」を数える費用つきの一般整数列) なら消さない。この列で分枝できなくなるのが損の元と見る
+    // (rocI-4-11・rococoC10-001000・rococoB10-011000 はこの形の列だけを 1〜4 本消し、M の 3〜8 種で 1.08・1.47 倍。0-1 列の同じ形
+    // (neos-1445765、0.20 倍) と、符号の混ざる行 (hypothyroid-k1、0.60 倍) は消す)
+    let int_sing_cnt = env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v.contains('g'));
     let is_integral = |v: f64| (v - v.round()).abs() <= 1e-12 * (1.0 + v.abs());
+    let intsing_log = int_sing && env_str!("ENOMOTO_MIP_INTSING_LOG").is_some();
+    let mut intsing_stats: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut intsing_len = 0usize;
     for j in col_order {
         if appearances[j] != 1 {
             continue;
         }
-        if int_mask.as_ref().is_some_and(|m| m[j]) {
+        let is_int_col = int_mask.as_ref().is_some_and(|m| m[j]);
+        if is_int_col {
             let ok = int_sing
                 && owning_a_row[j].is_some_and(|i| {
                     let m = int_mask.as_ref().unwrap();
                     let row = &a_rows[i];
                     let aj = row.iter().find(|&&(k, _)| k == j).map_or(0.0, |&(_, v)| v);
+                    let counting = int_sing_cnt && ub[j] - lb[j] > 1.5 && c[j] != 0.0 && row.iter().all(|&(k, v)| k == j || v * aj < 0.0);
                     is_integral(b[i])
+                        && !counting
                         && row.iter().all(|&(k, v)| if k == j { (v.abs() - 1.0).abs() <= 1e-12 } else { m[k] && is_integral(v) && (!int_sing_def || v * aj < 0.0) })
                 });
             if !ok {
@@ -244,6 +255,7 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
         // 符号で向きを決める (min/max で並べ替えると、矛盾した境界 lb_j > ub_j が
         // 正常な区間に化けて実行不能性が失われる。矛盾したまま lo > hi で出せば、
         // 出力される 2 本の行が互いに矛盾し、後段が実行不能を検出する)。
+        let extra_before = extra_g_rows.len();
         let (lo, hi) = if coeff >= 0.0 { (coeff * lb[j], coeff * ub[j]) } else { (coeff * ub[j], coeff * lb[j]) };
         // 残りの項の箱から既に含意される側は冗長なので省略する。
         // r_lo/r_hi: 項の箱から得られる r の値域。
@@ -257,8 +269,24 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
             extra_h.push(hi - rhs);
         }
 
+        // 診断 `ENOMOTO_MIP_INTSING_LOG` (analysis/slowm_20261119、振る舞いは変えない): INTSING で消した整数列の形を数える
+        if is_int_col && intsing_log {
+            let same = terms.iter().filter(|&&(_, v)| v * coeff > 0.0).count();
+            let opp = terms.len() - same;
+            let kind = if same == 0 { "opp" } else if opp == 0 { "same" } else { "mixed" };
+            let bnd = if lb[j] == 0.0 && ub[j] == 1.0 { "bin" } else if lb[j].is_finite() && ub[j].is_finite() { "box" } else if lb[j].is_finite() || ub[j].is_finite() { "half" } else { "free" };
+            let cst = if cj == 0.0 { "c0" } else { "cost" };
+            let rows_added = extra_g_rows.len() - extra_before;
+            *intsing_stats.entry(format!("{kind}/{bnd}/{cst}/rhs{}/add{rows_added}", if rhs == 0.0 { "0" } else { "≠0" })).or_insert(0usize) += 1;
+            intsing_len += terms.len();
+        }
         substitutions.push(Substitution { var: j, terms, rhs, coeff });
         eliminated_rows[i] = true;
+    }
+    if intsing_log && !intsing_stats.is_empty() {
+        let n_int = int_mask.as_ref().map_or(0, |m| m.iter().filter(|&&b| b).count());
+        let tot: usize = intsing_stats.values().sum();
+        eprintln!("INTSING_LOG: eliminated {tot} integer singletons of {n_int} integer columns ({:.2}%), mean row len {:.1}: {:?}", 100.0 * tot as f64 / n_int.max(1) as f64, intsing_len as f64 / tot as f64, intsing_stats);
     }
 
     let mut new_a_rows = Vec::with_capacity(a_rows.len());
