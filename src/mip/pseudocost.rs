@@ -333,7 +333,14 @@ impl Pseudocost {
         let n = self.conflict[0].len().max(1) as f64;
         let conf_avg = (self.conflict_total / (2.0 * n)).max(eps);
         let conf = self.conflict[0][j].max(eps * conf_avg) * self.conflict[1][j].max(eps * conf_avg);
-        let wc = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT", 0.0, f64);
+        let mut wc = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT", 0.0, f64);
+        // 試作 `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT` = w (p2inf_20261119、既定 0 で使わない): 擬似費用の平均が上下とも 0 (目的の利得の手がかりが
+        // ない: bnatt400 は LP の値が最後まで 0) のときだけ衝突の重みを w にする。一律の 0.1 は bnatt400 を解くが、擬似費用に意味のある
+        // mas76・pk1 を 1.3〜1.6 倍遅くした (衝突の項が擬似費用の選び方を乱す)
+        let wflat = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT", 0.0, f64);
+        if wflat > 0.0 && self.avg_down() <= 1e-12 && self.avg_up() <= 1e-12 {
+            wc = wc.max(wflat);
+        }
         let conf_term = if self.conflict_total > 0.0 { wc * s(conf, conf_avg * conf_avg) } else { 0.0 };
         // `ENOMOTO_MIP_GAP1` (試作、既定では使わない。analysis/gap1_tree_20261109.md): 文字で部品を選ぶ。
         // `s`: 擬似費用の項の正規化の下限を 0.1 から 1e-6 にする (HiGHS の `getScore` は `max(1e-6, cost_total^2)`)。目的値の刻みが
