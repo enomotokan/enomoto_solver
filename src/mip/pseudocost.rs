@@ -8,6 +8,9 @@ pub fn gap1() -> &'static str {
 }
 
 /// 列ごとの pseudocost と観測回数。
+/// 診断用 (試作 `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT`): [hybrid のスコアの数, そのうち手がかりなしの判定が真だった数] (全スレッド・サブ MIP 込み)。
+static FLAT_CALLS: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
 #[derive(Clone)]
 pub struct Pseudocost {
     sum_up: Vec<f64>,
@@ -306,6 +309,12 @@ impl Pseudocost {
         self.inf_total_n
     }
 
+    /// 診断用: (FLAT の判定の呼び出し (全スレッド), 真だった数 (全スレッド), 利得が正の観測 (このスレッド), 観測の数)。
+    pub fn flat_diag(&self) -> (u64, u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (FLAT_CALLS[0].load(Relaxed), FLAT_CALLS[1].load(Relaxed), self.n_pos_gain, self.total_n_down + self.total_n_up)
+    }
+
     pub fn inference_mean(&self) -> f64 {
         if self.inf_total_n > 0 { self.inf_total / self.inf_total_n as f64 } else { 0.0 }
     }
@@ -348,6 +357,10 @@ impl Pseudocost {
         // 平均が厳密に 0 という判定では、目的の列の分枝などで少し利得が出るとすぐ外れ、bnatt400 の 4 スレッドが 900 秒で解けなかった
         let nobs = self.total_n_down + self.total_n_up;
         let flat = nobs == 0 || (self.n_pos_gain as f64) <= tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT_FRAC", 0.05, f64) * nobs as f64;
+        if wflat > 0.0 {
+            FLAT_CALLS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            FLAT_CALLS[1].fetch_add(flat as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         if wflat > 0.0 && flat {
             wc = wc.max(wflat);
         }
