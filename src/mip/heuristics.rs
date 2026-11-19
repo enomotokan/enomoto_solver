@@ -3502,10 +3502,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let fr = rate(self);
         let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
         self.dom.backtrack_to(p, pos);
+        // 伝播の後に自由に残る列 (整数・連続とも) の割合 (試作 `ENOMOTO_MIP_P2RRC` の判定と、その洗い出しのログ用)
+        let free = (0..p.n).filter(|&j| lo[j] < up[j]).count() as f64 / p.n.max(1) as f64;
         if self.params.verbose && self.nodes <= 1 {
-            eprintln!("MIP:   root reduced cost: {} lurking bounds, fixing rate {fr:.2}", lurking.len());
+            eprintln!("MIP:   root reduced cost: {} lurking bounds, fixing rate {fr:.2}, free columns {free:.4}", lurking.len());
         }
         if fr < tunable!("ENOMOTO_T_MIP_RRC_MIN_RATE", 0.3, f64) {
+            return false;
+        }
+        // 試作 `ENOMOTO_MIP_P2RRC=<割合>` (既定では使わない、analysis/par4slow_20261119/README.md): 伝播の後に自由に残る列の割合が <割合> 以上なら、
+        // サブ MIP はほぼ元の問題なので解かない (固定率は整数列だけで数えるので、連続列の多い問題では高くても元の問題と変わらない。
+        // dano3_3 は整数列 25 本のうち 8 本の固定で固定率 0.32、13873 列のうち 13785 列が自由)
+        if env_str!("ENOMOTO_MIP_P2RRC").and_then(|v| v.parse::<f64>().ok()).is_some_and(|t| free >= t) {
+            if self.params.verbose && self.nodes <= 1 {
+                eprintln!("MIP:   root reduced cost: skipped (P2RRC: free columns {free:.4})");
+            }
             return false;
         }
         // サブ MIP の時間の上限 (既定は通常と同じ残りの 7%。3% では 10teams のサブ MIP が解を見つける前に止まった)
