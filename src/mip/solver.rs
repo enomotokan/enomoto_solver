@@ -12653,25 +12653,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN` = w: 始めは衝突の重み 0 (既定と同じ)。ノード `ENOMOTO_T_MIP_CW_DYN_WINDOW` (既定 200) ごとに、
             // その窓で作った衝突の数 / ノード数が `ENOMOTO_T_MIP_CW_DYN_RATE` (既定 0.7) 以上なら、以後は重みを w にし、HiGHS 式の衝突スコアも
             // 入れる (一度上げたら戻さない)。衝突をよく作る問題ほど衝突を分枝に使う得が大きい (p2inf_20261119 5 節の数え上げ)。決め方はノード数 (仕事量)
-            // 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP` = w: DYN の段階形。窓 (`ENOMOTO_T_MIP_CW_DYN_WINDOW` ノード) ごとの「作った衝突 / ノード」r を
-            // 移動平均 (前の値と半々) でならした r_s から、重みを w × clamp((r_s − r0) / (r1 − r0), 0, 1) にする (上げ下げとも)。
-            // r0 = `ENOMOTO_T_MIP_CW_RAMP_R0` (既定 0.5)、r1 = `ENOMOTO_T_MIP_CW_RAMP_R1` (既定 1.0): 数え上げ (feat.jsonl) で重みに害のあった問題は
-            // r ≤ 0.62、得のあった問題は r ≥ 0.76 だったので、その間で立ち上げる。HiGHS 式の衝突スコアは重みが 0 より大きい間だけ入れる
+            // 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP` = w: DYN の段階形 (シグモイド)。窓 (`ENOMOTO_T_MIP_CW_DYN_WINDOW` ノード) ごとの「作った衝突 / ノード」r を
+            // 移動平均 (前の値と半々) でならした r̄ から、重みを w × σ((r̄ − r_mid) / s) にする (上げ下げとも)。r_mid = `ENOMOTO_T_MIP_CW_RAMP_MID`
+            // (既定 0.69)、s = `ENOMOTO_T_MIP_CW_RAMP_S` (既定 0.1): 数え上げ (feat.jsonl、ノード 500) で重みに害のあった問題は r ≤ 0.62 (多くは ≤ 0.46)、
+            // 得のあった問題は r ≥ 0.76 (多くは ≥ 0.8) だったので、真ん中を両者の間 0.69 に、幅を「害の側の多く (≤ 0.46) で 1 割以下、得の側の多く (≥ 0.8)
+            // で 7 割以上」になる 0.1 にした。HiGHS 式の衝突スコア (付け方の切り替えで連続には混ぜられない) は σ ≥ 0.5 の間だけ入れる
             if let Some(w) = cw_ramp() {
                 let win = tunable!("ENOMOTO_T_MIP_CW_DYN_WINDOW", 200u64, u64).max(1);
                 if self.nodes >= self.cw_dyn_state.1 + win {
                     let made = self.multi_stats[1].saturating_sub(self.cw_dyn_state.2);
                     let r = made as f64 / (self.nodes - self.cw_dyn_state.1) as f64;
                     self.cw_ramp_ema = if self.cw_ramp_ema < 0.0 { r } else { 0.5 * self.cw_ramp_ema + 0.5 * r };
-                    let (r0, r1) = (tunable!("ENOMOTO_T_MIP_CW_RAMP_R0", 0.5, f64), tunable!("ENOMOTO_T_MIP_CW_RAMP_R1", 1.0, f64));
-                    let x = ((self.cw_ramp_ema - r0) / (r1 - r0).max(1e-9)).clamp(0.0, 1.0);
-                    let nw = w * x;
-                    if self.params.verbose && !self.params.submip && (nw > 0.0) != (self.pc.cw_dyn > 0.0) {
+                    let (mid, sl) = (tunable!("ENOMOTO_T_MIP_CW_RAMP_MID", 0.69, f64), tunable!("ENOMOTO_T_MIP_CW_RAMP_S", 0.1, f64).max(1e-9));
+                    let sig = 1.0 / (1.0 + (-(self.cw_ramp_ema - mid) / sl).exp());
+                    let nw = w * sig;
+                    if self.params.verbose && !self.params.submip && (sig >= 0.5) != self.cw_dyn_state.0 {
                         eprintln!("MIP: CW_RAMP (tid {}): conflict weight {:.4} -> {nw:.4} at node {} (conflicts per node {r:.2}, smoothed {:.2})", self.pool_tid, self.pc.cw_dyn, self.nodes, self.cw_ramp_ema);
                     }
                     self.pc.cw_dyn = nw;
-                    self.cw_dyn_state.0 = nw > 0.0;
-                    if nw > 0.0 {
+                    // HiGHS 式の衝突スコアを入れるか (σ ≥ 0.5)
+                    self.cw_dyn_state.0 = sig >= 0.5;
+                    if sig >= 0.5 {
                         self.cw_dyn_state.3 += 1;
                     }
                     self.cw_dyn_state.1 = self.nodes;
@@ -26438,7 +26440,7 @@ fn cw_dyn() -> Option<f64> {
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_WEIGHT_DYN").and_then(|v| v.parse().ok()).filter(|&w: &f64| w > 0.0))
 }
 
-/// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP` = w (p2inf_20261119、既定では使わない): 衝突の重みを窓ごとの衝突の多さで段階的に決める。
+/// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP` = w (p2inf_20261119、既定では使わない): 衝突の重みを窓ごとの衝突の多さのシグモイドで連続に決める。
 fn cw_ramp() -> Option<f64> {
     static F: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP").and_then(|v| v.parse().ok()).filter(|&w: &f64| w > 0.0))

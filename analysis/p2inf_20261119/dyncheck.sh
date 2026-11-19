@@ -1,6 +1,6 @@
 #!/bin/bash
 # P2-INF: 途中で衝突の重みを上げる試作 (CONFLICT_WEIGHT_DYN) の確かめ。問題:種:秒:設定,... を 4 スレッドで順に回し logs/dyncheck.txt に足す。
-# 設定: def / dyn (DYN=0.1) / dynlx (DYN=0.1 + LIT_EXPLAIN) / ramp (RAMP=0.1、段階形) / ramplx (RAMP=0.1 + LIT_EXPLAIN)。リポジトリの根から: PYTHONPATH=<ビルド> bash analysis/p2inf_20261119/dyncheck.sh 問題:種:秒:設定,設定 ...
+# 設定: def / dyn (DYN=0.1) / dynlx (DYN=0.1 + LIT_EXPLAIN) / ramp (RAMP=0.1、シグモイドの段階形) / ramplx (RAMP=0.1 + LIT_EXPLAIN)。リポジトリの根から: PYTHONPATH=<ビルド> bash analysis/p2inf_20261119/dyncheck.sh 問題:種:秒:設定,設定 ...
 cd "$(dirname "$0")/../.."
 O=analysis/p2inf_20261119/logs/dyncheck.txt
 for spec in "$@"; do IFS=: read p s tl cs <<< "$spec"
