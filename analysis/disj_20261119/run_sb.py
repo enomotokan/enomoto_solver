@@ -14,6 +14,10 @@ root = len(sys.argv) > 5 and sys.argv[5] == "root"
 mps = rb.fetch(p, WT / ".miplib_cache")
 env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
 env.update(ENOMOTO_MIP_THREADS="4", ENOMOTO_MIP_LOG="1", ENOMOTO_T_MIP_SEED=str(seed), ENOMOTO_MIP_CUTSTOP_LOG="1", ENOMOTO_MIP_SBCAND_LOG=os.environ.get("SBMODE", "1"))
+# 設定 (環境変数 CFG、既定 def): 9 節の試作 `ENOMOTO_MIP_ROOTSB`
+CFGS = {"def": {}, "ilf": {"ENOMOTO_MIP_ROOTSB": "ilf"}, "il": {"ENOMOTO_MIP_ROOTSB": "il"}, "i": {"ENOMOTO_MIP_ROOTSB": "if"}, "l": {"ENOMOTO_MIP_ROOTSB": "lf"}}
+cfg = os.environ.get("CFG", "def")
+env.update(CFGS[cfg])
 if root:
     env["ENOMOTO_MIP_NODE_LIMIT"] = "1"
 t0 = time.time()
@@ -27,9 +31,9 @@ except Exception as e:  # noqa: BLE001
     err = getattr(e, "stderr", "") or ""
     if isinstance(err, bytes):
         err = err.decode(errors="replace")
-stops, sbc, sbe, sbf, sbfe = [], [], [], [], []
+stops, sbc, sbe, sbf, sbfe, sbch = [], [], [], [], [], []
 for li, l in enumerate(err.splitlines()):
-    for tag, lst in (("SBCAND ", sbc), ("SBEND ", sbe), ("SBFULL ", sbf), ("SBFULLEND ", sbfe)):
+    for tag, lst in (("SBCAND ", sbc), ("SBEND ", sbe), ("SBFULL ", sbf), ("SBFULLEND ", sbfe), ("SBCHOSEN ", sbch)):
         if l.startswith(tag):
             try:
                 lst.append(dict(json.loads(l[len(tag):]), _i=li))
@@ -42,9 +46,9 @@ for li, l in enumerate(err.splitlines()):
             pass
 # 前処理の後の問題の大きさ・根の LP の値 (ログにあれば)
 (D / "logs").mkdir(exist_ok=True)
-with gzip.open(D / "logs" / f"{'sbf' if os.environ.get('SBMODE') == 'full' else 'sb'}_{p}_{tl}_s{seed}{'_root' if root else ''}.err.gz", "wt") as f:
+with gzip.open(D / "logs" / f"{'sbf' if os.environ.get('SBMODE') == 'full' else 'sb'}{'' if cfg == 'def' else '_' + cfg}_{p}_{tl}_s{seed}{'_root' if root else ''}.err.gz", "wt") as f:
     f.write(err)
-rec = {"problem": p, "tl": tl, "seed": seed, "root": root, "wall": round(time.time() - t0, 1), "result": res, "cutstop": stops, "sbcand": sbc, "sbend": sbe, "sbfull": sbf, "sbfullend": sbfe, "sbmode": os.environ.get("SBMODE", "1"),
+rec = {"problem": p, "cfg": cfg, "tl": tl, "seed": seed, "root": root, "wall": round(time.time() - t0, 1), "result": res, "cutstop": stops, "sbcand": sbc, "sbend": sbe, "sbfull": sbf, "sbfullend": sbfe, "sbchosen": sbch, "sbmode": os.environ.get("SBMODE", "1"),
        "warn": err.count("MIP: WARNING"), "at": time.strftime("%H:%M:%S")}
 with open(D / out, "a") as f:
     f.write(json.dumps(rec) + "\n")

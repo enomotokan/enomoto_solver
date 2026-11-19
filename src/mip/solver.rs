@@ -902,6 +902,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_same_obj: bool,
     /// 最初の根の LP の反復数 (丸め系のヒューリスティクスの連続部分の LP の反復上限に使う)
     pub(super) root_lp_iters: u64,
+    /// 試作 `ENOMOTO_MIP_ROOTSB` の `f` で木の予算に数えなかった強分岐の反復
+    pub(super) rootsb_iters: u64,
     /// 試作 `ENOMOTO_MIP_DFSBB` (既定では使わない、treeclose 9.36 節): 今の潜りを始めたときの手間 (主のスレッドの LP の反復)、
     /// 手間の上限で潜りを打ち切ったか、統計 [潜りの回数, 上限で打ち切った回数, 葉・刈り込みで終わった回数]
     dfsbb_start: u64,
@@ -5449,6 +5451,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sublb_seen: std::cell::Cell::new(false),
         submip_same_obj: false,
         root_lp_iters: 0,
+        rootsb_iters: 0,
         dfsbb_start: 0,
         fjsub: None,
         fjsub_next: 0,
@@ -16675,7 +16678,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.last_sb = None;
         self.poly_diag_raised.clear();
+        let sb_iters0 = self.sb_iters;
         let r = self.select_branch_inner(frac, node_obj, depth);
+        // 試作 `ENOMOTO_MIP_ROOTSB` の `f`: 強めた強分岐の反復を木の強分岐の予算に数えない
+        if !self.params.submip && depth <= tunable!("ENOMOTO_T_MIP_ROOTSB_DEPTH", 0usize, usize) && super::rootsb_flags().is_some_and(|f| f.contains('f')) {
+            self.rootsb_iters += self.sb_iters - sb_iters0;
+            self.sb_iters = sb_iters0;
+        }
         // 試作 `ENOMOTO_MIP_GEN_LAZY_SB`: 強分岐の子の LP 解が破った外した行を戻し、分枝せずにノードの LP を解き直す
         let r = if self.gen_lazy.has_pending() {
             match r {
@@ -16702,15 +16711,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 BranchAction::Prune => ("prune", -1),
                 BranchAction::Resolve => ("resolve", -1),
             };
+            // 分枝した列の両側の子の LP を反復の上限なしで解いた値 (どの設定でも同じ物差しで分枝の上がり幅を比べる。LP の状態は戻す)
+            if let BranchAction::Branch { col, value } = r {
+                let saved = self.lp.save_state();
+                let (lo, up) = (self.dom.lo[col], self.dom.up[col]);
+                let mut val = [String::new(), String::new()];
+                for (side, is_up) in [(0usize, false), (1usize, true)] {
+                    if is_up {
+                        self.lp.set_col_bounds(col, self.bce(col, value), up);
+                    } else {
+                        self.lp.set_col_bounds(col, lo, self.bfl(col, value));
+                    }
+                    let st = self.lp.solve(&self.limits_k(u64::MAX / 4, 1));
+                    val[side] = if st == LpStatus::Optimal { format!("{:.10e}", self.lp.objective() + self.p.offset) } else { format!("\"{st:?}\"") };
+                    self.lp.restore_state(&saved);
+                }
+                eprintln!("SBCHOSEN {{\"restarts\":{},\"col\":{col},\"z\":{node_obj:.10e},\"down\":{},\"up\":{}}}", self.params.restarts, val[0], val[1]);
+            }
             let pl = self.prune_limit();
             eprintln!(
-                "SBEND {{\"restarts\":{},\"action\":\"{act}\",\"col\":{col},\"sb\":{},\"nfrac\":{},\"z\":{:.10e},\"cutoff\":{},\"inc\":{},\"t\":{:.3}}}",
+                "SBEND {{\"restarts\":{},\"action\":\"{act}\",\"col\":{col},\"sb\":{},\"nfrac\":{},\"z\":{:.10e},\"cutoff\":{},\"inc\":{},\"sb_iters\":{},\"rootsb_iters\":{},\"t\":{:.3}}}",
                 self.params.restarts,
                 self.last_sb.is_some(),
                 frac.len(),
                 node_obj,
                 if pl.is_finite() { format!("{pl:.10e}") } else { "null".to_string() },
                 self.incumbent.as_ref().map_or("null".to_string(), |(z, _)| format!("{z:.10e}")),
+                self.sb_iters,
+                self.rootsb_iters,
                 self.start.elapsed().as_secs_f64()
             );
         }
@@ -16938,6 +16966,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let unreliable: usize = cands.iter().filter(|&&(j, _, _)| (self.pc.min_observations(j) as f64) < thr_of(self, j)).count();
         let lookahead = (tunable!("ENOMOTO_T_MIP_SB_LOOKAHEAD", 9.0, f64) * (1.0 + unreliable as f64 / cands.len().max(1) as f64)) as usize;
         let max_tried = tunable!("ENOMOTO_T_MIP_SB_MAXCAND", 100usize, usize);
+        // 試作 `ENOMOTO_MIP_ROOTSB` = 文字の並び (既定では使わない、analysis/disj_20261119.md の 9 節): 深さ `ENOMOTO_T_MIP_ROOTSB_DEPTH`
+        // (既定 0 = 根だけ) までのノード (サブ MIP でない) で強分岐を強める。根の強分岐は子の LP の反復を最大 500 で打ち切り、途中の値
+        // (多くは親の値のまま) を上がり幅 0 と見て、改善のない候補が lookahead (約 18) 本続くと評価をやめるので、M の大きな問題では
+        // 子の LP を最後まで解けば下界が数 %〜十数 % 上がる列を評価しないか低く見積もっていた
+        // - `i`: 子の LP の反復の上限を `ENOMOTO_T_MIP_ROOTSB_ITERMULT` (既定 1) × 根の LP の反復 (1000 以上) にする (500 より下げない、
+        //   `ENOMOTO_T_MIP_ROOTSB_ITERCAP` (既定 50000) まで)
+        // - `l`: lookahead を `ENOMOTO_T_MIP_ROOTSB_LA` 倍 (既定 4)、評価する候補の上限を `ENOMOTO_T_MIP_ROOTSB_MAXCAND` (既定 200) 以上にする
+        // - どちらでも、このノードの強分岐の反復を `ENOMOTO_T_MIP_ROOTSB_WORK` (既定 20) × 根の LP の反復 (1000 以上) までにする
+        //   (時間でなく仕事量の上限。木の予算 `maxsb` の代わりに使う)。`f` を足すと、このノードの強分岐の反復を木の予算 (`sb_iters`) に数えない
+        let rsb = super::rootsb_flags().filter(|_| !self.params.submip && depth <= tunable!("ENOMOTO_T_MIP_ROOTSB_DEPTH", 0usize, usize));
+        let rsb_on = |c: char| rsb.is_some_and(|f| f.contains(c));
+        let rsb_unit = self.root_lp_iters.max(1000) as f64;
+        let sb_iter_limit = if rsb_on('i') {
+            ((tunable!("ENOMOTO_T_MIP_ROOTSB_ITERMULT", 1.0, f64) * rsb_unit) as u64).clamp(sb_iter_limit, tunable!("ENOMOTO_T_MIP_ROOTSB_ITERCAP", 50_000u64, u64).max(sb_iter_limit))
+        } else {
+            sb_iter_limit
+        };
+        let lookahead = if rsb_on('l') { (lookahead as f64 * tunable!("ENOMOTO_T_MIP_ROOTSB_LA", 4.0, f64)) as usize } else { lookahead };
+        let max_tried = if rsb_on('l') { max_tried.max(tunable!("ENOMOTO_T_MIP_ROOTSB_MAXCAND", 200usize, usize)) } else { max_tried };
+        let rsb_sb0 = self.sb_iters;
+        let rsb_work = tunable!("ENOMOTO_T_MIP_ROOTSB_WORK", 20.0, f64) * rsb_unit;
+        // 予算の判定: 試作では、このノードで使った反復と仕事量の上限を比べる
+        let maxsb = if rsb.is_some() { rsb_sb0 as f64 + rsb_work } else { maxsb };
         let mut best: Option<(usize, f64, f64)> = None; // (列, 値, スコア)
         self.last_sb = None;
         let mut best_sb: Option<(usize, f64, f64)> = None; // best が強分岐で評価した列なら (列, 下の子の値, 上の子の値)

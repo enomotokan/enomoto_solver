@@ -312,6 +312,11 @@ pub(crate) fn ticks_on(c: char) -> bool {
     env_def!("ENOMOTO_MIP_TICKS", "ntwumcflshk").is_some_and(|v| v.contains(c))
 }
 
+/// 試作 `ENOMOTO_MIP_ROOTSB` の文字の並び (既定では使わない、`Solver::select_branch_inner`、analysis/disj_20261119.md の 9 節)
+pub(crate) fn rootsb_flags() -> Option<&'static str> {
+    env_str!("ENOMOTO_MIP_ROOTSB").filter(|v| !v.is_empty() && *v != "0")
+}
+
 pub(crate) fn timedep(c: char) -> bool {
     env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains(c))
 }
