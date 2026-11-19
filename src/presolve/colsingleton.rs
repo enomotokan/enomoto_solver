@@ -78,7 +78,7 @@ pub struct EliminationResult {
     pub substitutions: Vec<Substitution>,
 }
 
-// 試作 `ENOMOTO_MIP_INTSING` の `o` (前処理の順番、analysis/slowm_20261119 §13): 整数最適化の外側の前処理 (`presolve_mip` の最上段) の間は、
+// 試作 `ENOMOTO_MIP_INTSING` の `h` (保留、analysis/slowm_20261119 §13。はじめ `o` と呼んだ形): 整数最適化の外側の前処理 (`presolve_mip` の最上段) の間は、
 // 費用を移すと費用 ≥ 0 の列の費用が負になる整数列だけ INTSING で消さずに数え (状態 1)、支配される 0-1 列の固定 (`ENOMOTO_MIP_DOMCOL`) を
 // 済ませてから、かけ直しの前処理で消す (状態 2)。消す列の費用を行の他の列へ移すと費用が負の列ができ、支配の逆向きの経路 (費用 ≥ 0 が要る) が使えなくなる (air03: 固定 2297 → 160 本)
 thread_local! {
@@ -86,8 +86,13 @@ thread_local! {
     pub(crate) static INTSING_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// `ENOMOTO_MIP_INTSING` に `o` が入っているか (既定はオフ)
+/// `ENOMOTO_MIP_INTSING` に `h` が入っているか (既定はオフ)
 pub(crate) fn intsing_order() -> bool {
+    env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v != "0" && v.contains('h'))
+}
+
+/// `ENOMOTO_MIP_INTSING` に `o` が入っているか (既定はオフ): 支配される 0-1 列の固定を、前処理の前の元の問題に先にかける (§13.4)
+pub(crate) fn intsing_domfirst() -> bool {
     env_str!("ENOMOTO_MIP_INTSING").is_some_and(|v| v != "0" && v.contains('o'))
 }
 

@@ -8,4 +8,6 @@ CFGS = {"def": {}, "fix": {"ENOMOTO_MIP_TIGHTEN_INTBOUND": "1"}, "fixis": {"ENOM
         # INTSING から「数える一般整数列」(費用あり・幅 > 1・行の他の係数がすべて逆符号) を外す形 (`g`)
         "isg": {"ENOMOTO_MIP_INTSING": "1g"},
         # g に加えて同符号の 0-1 列 (行の他の係数がすべて同符号) も消さない形 (`s`)
-        "isgs": {"ENOMOTO_MIP_INTSING": "1gs"}}
+        "isgs": {"ENOMOTO_MIP_INTSING": "1gs"},
+        # g に加えて、支配される 0-1 列の固定を元の問題に先にかける形 (`o`、README §13.4)。P・M で 1g と前処理が変わるのは air03 だけ
+        "isgo": {"ENOMOTO_MIP_INTSING": "1go"}}
