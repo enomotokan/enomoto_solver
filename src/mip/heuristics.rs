@@ -15,6 +15,20 @@ use super::lp_api::MipLp;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+/// 診断 `ENOMOTO_MIP_FP_STATS` (analysis/fpsym_20261119/): Feasibility Pump の回数 (外側の求解ごと、全スレッドの和)。
+/// [呼んだ, 解を見つけた, 回した回 (pass), 伝播の丸めが矛盾で止まった回, 手間・時間で止まった回, 全部固定できたが解にならなかった回,
+///  終わり方: LP 解が整数, 伝播の丸めで解, 循環, 予算・時間, LP が最適で終わらない, 100 回, 矛盾した列の位置の千分率の和]
+pub(crate) static FP_STATS: [std::sync::atomic::AtomicU64; 13] = [const { std::sync::atomic::AtomicU64::new(0) }; 13];
+
+fn fp_stat(k: usize, v: u64) {
+    FP_STATS[k].fetch_add(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+thread_local! {
+    /// 最後の [`Solver::propagate_rounding_from`] の終わり方 (0 = 全部固定, 1 = 矛盾, 2 = 手間・時間) と、矛盾した列の位置 (千分率)
+    static PR_LAST: std::cell::Cell<(u8, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
 /// 列ごとの lock 数 (下げると違反しうる行の数, 上げると違反しうる行の数)。
 pub fn compute_locks(p: &MipProblem) -> Vec<(u32, u32)> {
     let mut locks = vec![(0u32, 0u32); p.n];
@@ -182,6 +196,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             in_order[j] = true;
         }
         all.extend((0..p.n).filter(|&j| p.is_int[j] && !in_order[j]));
+        PR_LAST.with(|c| c.set((0, 0)));
         let work0 = self.dom.debug_work();
         let work_cap = if self.objp.work_mult > 0 { self.objp.work_mult } else { 20 } * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
         for (cnt, &j) in all.iter().enumerate() {
@@ -190,6 +205,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 時間切れ、または伝播の手間 (非零数の 20 倍) を使い切ったら諦める
             if cnt % 64 == 0 && (self.time_up() || self.dom.debug_work() - work0 > work_cap) {
+                if ok {
+                    PR_LAST.with(|c| c.set((2, 0)));
+                }
                 ok = false;
                 if rounded.is_none() {
                     break;
@@ -243,6 +261,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.dom.backtrack_to(p, before);
             }
             ok = false;
+            PR_LAST.with(|c| c.set((1, (1000 * cnt / all.len().max(1)) as u64)));
             if env_str!("ENOMOTO_MIP_DEBUG_RR").is_some() && rounded.is_none() {
                 let nfixed = (0..p.n).filter(|&k| p.is_int[k] && self.dom.lo[k] == self.dom.up[k]).count();
                 eprintln!("RR conflict at column {j} (target {t:.3}), {cnt} of {} integer columns processed, {nfixed} fixed", all.len());
@@ -844,6 +863,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let saved = self.lp.save_state();
+        fp_stat(0, 1);
+        // 終わり方 (FP_STATS の 6〜11)。既定は 100 回
+        let mut end = 11usize;
         let budget = self.fp_iter_cap.map_or(1000 + 5 * root_iters, |c| c.min(1000 + 5 * root_iters));
         let it_start = self.lp.total_iterations();
         let mut seen: HashSet<Vec<i64>> = HashSet::new();
@@ -857,12 +879,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.heur_close = 0.0;
         for _pass in 0..100 {
             if self.time_up() || self.lp.total_iterations() - it_start > budget || self.poll_found_solution() {
+                end = 9;
                 break;
             }
             let x = self.lp.col_values();
             if self.fractional(&x).is_empty() {
                 // LP 解が整数: 元の費用でなくても実行可能解
                 found = self.try_lp_solution();
+                end = 6;
                 break;
             }
             let mut r = x.clone();
@@ -892,6 +916,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 cycles += 1;
             }
             if seen.contains(&key) {
+                end = 8;
                 break;
             }
             seen.insert(key);
@@ -901,8 +926,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut order = ints.clone();
             order.sort_by(|&a, &b| (x[a] - r[a]).abs().total_cmp(&(x[b] - r[b]).abs()));
             let mut rp = r.clone();
-            if self.propagate_rounding(&r, &order, Some(&mut rp)) {
+            fp_stat(2, 1);
+            let pr = self.propagate_rounding(&r, &order, Some(&mut rp));
+            let (how, at) = PR_LAST.with(|c| c.get());
+            match how {
+                1 => {
+                    fp_stat(3, 1);
+                    fp_stat(12, at);
+                }
+                2 => fp_stat(4, 1),
+                _ if !pr => fp_stat(5, 1),
+                _ => {}
+            }
+            if pr {
                 found = true;
+                end = 7;
                 break;
             }
             r = rp;
@@ -939,8 +977,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let st = self.lp.solve_primal(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: self.deadline });
             self.heur_iters += self.lp.total_iterations() - it0;
             if st != LpStatus::Optimal || self.lp.total_iterations() == it0 {
+                end = 10;
                 break;
             }
+        }
+        fp_stat(end, 1);
+        if found {
+            fp_stat(1, 1);
         }
         self.lp.set_costs(&p.cost);
         self.lp.restore_state(&saved);

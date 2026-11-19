@@ -1295,6 +1295,9 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         for c in &SST_X_STATS {
             c.store(0, std::sync::atomic::Ordering::Relaxed);
         }
+        for c in &heuristics::FP_STATS {
+            c.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
@@ -1381,6 +1384,14 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
             if heur_subfix::any() {
                 eprintln!("MIP: SUBFIX summary: {}", heur_subfix::summary());
             }
+        }
+        // 診断 `ENOMOTO_MIP_FP_STATS`: Feasibility Pump の回数 ([`heuristics::FP_STATS`])
+        if env_str!("ENOMOTO_MIP_FP_STATS").is_some() {
+            let c: Vec<u64> = heuristics::FP_STATS.iter().map(|c| c.load(std::sync::atomic::Ordering::Relaxed)).collect();
+            eprintln!(
+                "MIP: FP_STATS calls {} found {} passes {} conflicts {} caps {} fixed_not_found {} | ends integral_lp {} rounding {} cycle {} budget {} lp_stop {} passes100 {} | conflict_pos_permille_avg {}",
+                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], if c[3] > 0 { c[12] / c[3] } else { 0 }
+            );
         }
         // 試作 `ENOMOTO_MIP_SYM_SST=x` の写しの回数 (計測で数えるため、ログの有無にかかわらず出す)
         if sym_sst_x() {
