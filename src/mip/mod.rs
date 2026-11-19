@@ -5812,7 +5812,7 @@ fn probe_equiv_block(prob: &MipProblem, base: &domain::Domain, bin0: &[bool], js
         .collect()
 }
 
-/// 試作 `ENOMOTO_MIP_EQUIV2_PWORK` (既定では使わない、analysis/clqprbg_20261119): 同値な組の巡 (`PROBE_CLIQUE=equiv`) の手間を、本体の
+/// `ENOMOTO_MIP_EQUIV2_PWORK` (2026-11-19 から既定、`=0` で以前の形。analysis/clqprbg_20261119・analysis/equiv2pw_20261119): 同値な組の巡 (`PROBE_CLIQUE=equiv`) の手間を、本体の
 /// プロービングの `pwork` と同じ重み (およそナノ秒: 2.5 x 行の走査 + 5 x 活動量の更新 + 68 x 境界の変更) で数える。巡は行の走査 (`debug_work`)
 /// だけを数えていて、活動量の更新が重い問題 (mzzv42z: 本体で work 74 万に対し pwork 8.5 億) では手間の上限が効かず、時間の安全網 (5 秒) まで走っていた
 fn equiv2_pwork(rows: u64, act: u64, chg: u64) -> u64 {
@@ -7183,10 +7183,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             (time_cap2, giveup2, u64::MAX, u64::MAX)
         };
         let w0 = d2.debug_work();
-        // 試作 `ENOMOTO_MIP_EQUIV2_PWORK` ([`equiv2_pwork`]): `pwork` の重みで数えた手間が `ENOMOTO_T_MIP_EQUIV2_PWORK_CAP` (既定 5e8、0.5 秒相当) を
+        // `ENOMOTO_MIP_EQUIV2_PWORK` ([`equiv2_pwork`]、既定): `pwork` の重みで数えた手間が `ENOMOTO_T_MIP_EQUIV2_PWORK_CAP` (既定 5e8、0.5 秒相当) を
         // 越えたら止め、`ENOMOTO_T_MIP_EQUIV2_PWORK_GIVEUP` (既定 1e8、0.1 秒相当) を越えても 1 組も見つからなければやめる (時間の上限と同じ値)。
         // 今までの行の走査の上限・時間の安全網もそのまま残す
-        let (pw_cap, pw_give) = if presolve_work() && env_str!("ENOMOTO_MIP_EQUIV2_PWORK").is_some_and(|v| v != "0") {
+        let (pw_cap, pw_give) = if presolve_work() && env_def!("ENOMOTO_MIP_EQUIV2_PWORK", "1").is_some() {
             (tunable!("ENOMOTO_T_MIP_EQUIV2_PWORK_CAP", 5.0e8, f64) as u64, tunable!("ENOMOTO_T_MIP_EQUIV2_PWORK_GIVEUP", 1.0e8, f64) as u64)
         } else {
             (u64::MAX, u64::MAX)
