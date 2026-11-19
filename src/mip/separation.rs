@@ -1451,6 +1451,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let n = p.n;
         let mut stall = 0;
         let mut intobj_stall = 0usize;
+        // 診断 `ENOMOTO_MIP_CUTSTOP_LOG` (振る舞いは変えない、analysis/disj_20261119.md): ループを抜けた理由 (break の直前で入れる)
+        #[allow(unused_assignments)]
+        let mut cutstop: &'static str = "none";
         // 整数値に固定された連続列を整数列と扱って目的値が整数刻みか (`ENOMOTO_MIP_CUT_INTOBJ_STALL` の判定に使う)
         let intobj_step = env_def!("ENOMOTO_MIP_CUT_INTOBJ_STALL", "1").is_some() && p.objective_step_bounds(Some((&self.dom.lo, &self.dom.up))).is_some();
         // 試作 `ENOMOTO_MIP_GAP2_FLAT=k` (既定では使わない。analysis/gap2_rootcost_20261109.md): 目的値が整数刻みでない問題でも、
@@ -1971,6 +1974,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         loop {
             self.poll_fj_thread();
             if self.root_gap_closed() {
+                cutstop = "gap_closed";
                 break;
             }
             if l63_cut && round_ctr >= l63_min && !self.early_restart {
@@ -1988,10 +1992,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.start.elapsed().as_secs_f64()
                         );
                     }
+                    cutstop = "early_restart";
                     break;
                 }
             }
             if round_ctr >= max_rounds && cont_p2 > 0 {
+                cutstop = "round_limit";
                 break;
             }
             if round_ctr >= max_rounds {
@@ -2076,6 +2082,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         eprintln!("MIP: cut loop phase 2 (HiGHS cut score) at the round limit {round_ctr} ({:.2}s)", self.start.elapsed().as_secs_f64());
                     }
                 } else if !extend {
+                    cutstop = "round_limit";
                     break;
                 } else {
                     max_rounds += 25;
@@ -2114,6 +2121,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         eprintln!("MIP: cut round {round}: background copy {id}: obj {:.10e}, winner {w} (waited {:.3}s)", prev_obj + p.offset, tw.elapsed().as_secs_f64());
                     }
                     if w != id as isize {
+                        cutstop = "race_lost";
                         break;
                     }
                     if let Some(j) = &job {
@@ -2219,6 +2227,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.params.verbose {
                         eprintln!("MIP: cut round {round}: background cuts: round cap {cap} reached (OPTFACE_PARCUTS m); stop");
                     }
+                    cutstop = "bg_round_cap";
                     break;
                 }
             }
@@ -2434,12 +2443,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: cut round {round}: phase 2 time cap reached ({:.3}s of {phase2_deadline:.3}s, {loop_iters} LP iters, {work_rounds} rounds) -> stop", now - t_loop0);
             }
             if self.time_up() || (now - cap_base > time_cap && round >= min_rounds) || (phase2 && now - t_loop0 > phase2_deadline && !heavy && !determ_job) || stopped(&job) || cont_stop {
+                cutstop = if self.time_up() { "time_limit" } else if now - cap_base > time_cap && round >= min_rounds { "time_cap" } else if phase2 && now - t_loop0 > phase2_deadline && !heavy && !determ_job { "phase2_time" } else { "stopped" };
                 break;
             }
             if phase2 && td_p && !heavy && !determ_job && cut_work(loop_iters, work_rounds) > p2_work_cap {
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: TIMEDEP p: phase 2 work cap reached ({:.3} of {p2_work_cap:.3}) -> stop", cut_work(loop_iters, work_rounds));
                 }
+                cutstop = "phase2_work_cap";
                 break;
             }
             // `ENOMOTO_T_MIP_CUT_WORK_CAP`: 手間の上限
@@ -2449,6 +2460,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: cut round {round}: root cut work cap check: work {work:.3} ({loop_iters} LP iters, {work_rounds} rounds) of cap {work_cap:.3}{}", if work > work_cap { " -> stop" } else { "" });
                 }
                 if work > work_cap {
+                    cutstop = "work_cap";
                     break;
                 }
             }
@@ -2493,6 +2505,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     max_rounds = max_rounds.min(target);
                     // 上限がこのラウンドに届いていれば、このラウンドを回さずに止める (`ENOMOTO_T_MIP_CUT_ROUNDS` = LO と同じラウンド数にする)
                     if round >= max_rounds {
+                        cutstop = "cutlen";
                         break;
                     }
                 }
@@ -2505,6 +2518,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: clique fallback second loop round cap {second_cap} -> stop");
                 }
+                cutstop = "clique_second_cap";
                 break;
             }
             // `ENOMOTO_T_MIP_CLIQUE_FB_EARLY` = k (> 0): fallback の判定を、k ラウンド回っても目的値がまったく動かないときは
@@ -2561,6 +2575,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let x = self.lp.col_values();
             if self.fractional(&x).is_empty() {
+                cutstop = "lp_integral";
                 break;
             }
             let t_sep = std::time::Instant::now();
@@ -2642,6 +2657,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: the time limit passed during the separation ({:.2}s); round dropped", t_sep.elapsed().as_secs_f64());
                 }
+                cutstop = "sep_deadline";
                 break;
             }
             // `ENOMOTO_MIP_CUTSEL_FACE_ANCHOR` (実験的): 面の頂点からのカットの効き目はその頂点で測ったもので、今の LP 解は
@@ -2781,6 +2797,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose && job.is_some() {
                     eprintln!("MIP: cut round {round}: background cuts: no candidates; stop");
                 }
+                cutstop = "no_cands";
                 break;
             }
             let dbg_sep = env_str!("ENOMOTO_MIP_DEBUG_SEP").is_some() && !self.params.submip;
@@ -3009,6 +3026,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose && job.is_some() {
                     eprintln!("MIP: cut round {round}: background cuts: no cuts chosen; stop");
                 }
+                cutstop = "no_chosen";
                 break;
             }
             // 上限まで採ったラウンドは停滞として数えない (候補が上限を超えて残っている間は LP を締め続ける)
@@ -3553,6 +3571,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         eprintln!("MIP: cut round {round}: the cut LP reached the cutoff {:.10e}; root closed", cut_cutoff + p.offset);
                     }
                     closed_by_cutoff = true;
+                    cutstop = "cutoff";
                     break;
                 }
             }
@@ -3619,6 +3638,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.params.verbose {
                         eprintln!("MIP: cut round {round}: the cut LP hit the per-LP cap ({st:?}); stop (ENOMOTO_MIP_CUT_LP_CAP_STOP)");
                     }
+                    cutstop = "lp_cap_stop";
                     break;
                 }
                 // `ENOMOTO_T_MIP_CUT_FLAT_STOP`: 外したラウンドも動かないラウンドと数える
@@ -3628,6 +3648,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if self.params.verbose {
                             eprintln!("MIP: cut loop: LP bound unchanged from the root LP for {flat_rounds} rounds (incl. a dropped round); stop (ENOMOTO_T_MIP_CUT_FLAT_STOP)");
                         }
+                        cutstop = "flat_stop";
                         break;
                     }
                 }
@@ -3636,6 +3657,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_EQUIV2_CUTS` では `ENOMOTO_T_MIP_EQUIV2_CUT_LP_FAILS` 回目 (既定 2) でやめる
                 let max_fail = if eq2c { tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_LP_FAILS", 2usize, usize) } else { 2 };
                 if st2 != LpStatus::Optimal || lp_failures >= max_fail || env_str!("ENOMOTO_MIP_CUT_LP_FAIL_STOP").is_some() {
+                    self.cutstop_log("lp_fail", round_ctr, max_rounds, phase2, stall, intobj_stall, first_obj, t_loop_wall, job.is_some(), Some(st2 == LpStatus::Optimal));
                     return st2 == LpStatus::Optimal;
                 }
                 continue;
@@ -3771,6 +3793,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if self.params.verbose {
                             eprintln!("MIP: cut round {round}: CUTRND s: loop {el:.2}s > {lim:.2}s, gain/time ratio {ratio:.3} (recent gain {recent:.3e} of scale {scale:.3e} in {t5:.2}s) < {rho}; stop (obj {:.10e})", obj + p.offset);
                         }
+                        cutstop = "cutrnd_s";
                         break;
                     }
                 }
@@ -3786,6 +3809,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.params.verbose {
                         eprintln!("MIP: cut loop: LP bound unchanged from the root LP for {flat_rounds} rounds; stop (ENOMOTO_T_MIP_CUT_FLAT_STOP)");
                     }
+                    cutstop = "flat_stop";
                     break;
                 }
             }
@@ -3796,6 +3820,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.params.verbose {
                         eprintln!("MIP: cut loop: progress of the last {prog_win} rounds {recent:.3e} < {prog_eps} x total {total:.3e}; stop");
                     }
+                    cutstop = "progress_win";
                     break;
                 }
             }
@@ -3819,6 +3844,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if next < smooth * 1.01 && obj - first_obj <= (prev_obj - first_obj) * 1.001 {
                         hstall += 1;
                         if hstall >= 3 {
+                            cutstop = "highs_stall";
                             break;
                         }
                     } else {
@@ -3833,6 +3859,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if gain <= 1e-3 * scale || gain <= 1e-9 * obj.abs().max(1.0) {
                     stall += 1;
                     if stall >= 3 {
+                        cutstop = "stall_old";
                         break;
                     }
                 } else {
@@ -3884,6 +3911,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let (r, r0) = rate_stop.as_ref().map_or((0.0, 0.0), |r| r.last);
                         eprintln!("MIP: cut round {round}: ROOTSTOP r: rate {r:.3e} < {} x first {r0:.3e}; stop (obj {:.10e})", tunable!("ENOMOTO_T_MIP_ROOTSTOP_RATE", 0.05, f64), obj + p.offset);
                     }
+                    cutstop = "rootstop_rate";
                     break;
                 }
                 let reldiff = if rs == Some(super::rootstop::Rate::Continue) { 1.0 } else { reldiff };
@@ -3892,6 +3920,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if reldiff <= 1e-4 {
                         stall += 1;
                         if stall >= tunable!("ENOMOTO_T_MIP_CUT_PHASE2_STALL", 10usize, usize) {
+                            cutstop = "phase2_stall";
                             break;
                         }
                     } else {
@@ -3917,6 +3946,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             if self.params.verbose {
                                 eprintln!("MIP: cut loop: {}, LP bound unchanged for {intobj_stall} rounds; stop", if gap2_flat.is_some() { "GAP2_FLAT" } else { "integral objective" });
                             }
+                            cutstop = "intobj_stall";
                             break;
                         }
                     } else {
@@ -3934,6 +3964,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 if self.params.verbose {
                                     eprintln!("MIP: cut loop: GAP2_ZEROCAP, LP bound unchanged since the loop start for {el:.2}s (limit {lim:.2}s, root LP {:.2}s); stop", self.root_lp_secs);
                                 }
+                                cutstop = "zerocap";
                                 break;
                             }
                         }
@@ -3955,6 +3986,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 if self.params.verbose {
                                     eprintln!("MIP: cut round {round}: ROBUST s: extension {ext_used} did not move the objective; stop");
                                 }
+                                cutstop = "robust_ext_stall";
                                 break;
                             }
                         }
@@ -3973,6 +4005,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 if cs_gap.is_some() && self.params.verbose {
                                     eprintln!("MIP: cut round {round}: stall stop (ENOMOTO_MIP_CUTSTALL_GAP, obj {obj:.10e})");
                                 }
+                                cutstop = "stall";
                                 break;
                             } else {
                             // 第 2 段階へ (ラウンド数の上限を延ばす)
@@ -4086,6 +4119,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.clique_auto = Some(on);
             if on {
                 // clique カットを加えてループを続ける (2 回目のループは判定しない)
+                self.cutstop_log(cutstop, round_ctr, max_rounds, phase2, stall, intobj_stall, first_obj, t_loop_wall, job.is_some(), Some(true));
                 CLIQUE_FB_SECOND.with(|c| c.set(true));
                 let ok = self.root_cut_loop(root_iters);
                 CLIQUE_FB_SECOND.with(|c| c.set(false));
@@ -4095,6 +4129,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !self.params.submip && st == LpStatus::Optimal && job.is_none() {
             super::record_root_bound(self.lp.objective() + p.offset);
         }
+        self.cutstop_log(cutstop, round_ctr, max_rounds, phase2, stall, intobj_stall, first_obj, t_loop_wall, job.is_some(), Some(st == LpStatus::Optimal));
         user_log!(
             "Root cuts: objective {:.10e} -> {:.10e}, {} cuts in the LP ({:.2}s)",
             p.sense_sign * (first_obj + p.offset),
@@ -4120,6 +4155,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
             );
         }
         st == LpStatus::Optimal
+    }
+
+    /// 診断 `ENOMOTO_MIP_CUTSTOP_LOG=1` (振る舞いは変えない、analysis/disj_20261119.md): 外側の根 (サブ MIP でない) のカットのループを
+    /// 抜けるたびに、抜けた理由・ラウンド数・ループの前後の LP の値・暫定解・時間・LP の小数の整数列の数を 1 行の JSON で stderr に出す。
+    /// 値は内部の向き (最小化、前処理の定数項を足したもの)。`sense` を掛けると元の問題の向き
+    #[allow(clippy::too_many_arguments)]
+    fn cutstop_log(&self, reason: &str, rounds: usize, max_rounds: usize, phase2: bool, stall: usize, intobj_stall: usize, first_obj: f64, t_loop: std::time::Instant, bg: bool, lp_ok: Option<bool>) {
+        if self.params.submip || env_str!("ENOMOTO_MIP_CUTSTOP_LOG").is_none_or(|v| v == "0") {
+            return;
+        }
+        let p = self.p;
+        let x = self.lp.col_values();
+        let fr = self.fractional(&x);
+        let fsum: f64 = fr.iter().map(|&(_, v)| { let f = v - v.floor(); f.min(1.0 - f) }).sum();
+        let num = |v: f64| if v.is_finite() { format!("{v:.10e}") } else { "null".to_string() };
+        eprintln!(
+            "CUTSTOP {{\"reason\":\"{reason}\",\"restarts\":{},\"bg\":{bg},\"second\":{},\"rounds\":{rounds},\"max_rounds\":{max_rounds},\"phase2\":{phase2},\"stall\":{stall},\"intobj_stall\":{intobj_stall},\"obj0\":{},\"obj1\":{},\"lp_ok\":{},\"inc\":{},\"nfrac\":{},\"fsum\":{fsum:.4},\"nint\":{},\"ncuts\":{},\"t_loop\":{:.3},\"t\":{:.3},\"sense\":{}}}",
+            self.params.restarts,
+            CLIQUE_FB_SECOND.with(|c| c.get()),
+            num(first_obj + p.offset),
+            num(self.lp.objective() + p.offset),
+            lp_ok.map_or("null".to_string(), |b| b.to_string()),
+            self.incumbent.as_ref().map_or("null".to_string(), |(z, _)| num(*z)),
+            fr.len(),
+            (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).count(),
+            self.lp.num_rows() - p.m,
+            t_loop.elapsed().as_secs_f64(),
+            self.start.elapsed().as_secs_f64(),
+            p.sense_sign
+        );
     }
 
     /// カットをプールに加える。係数と右辺が (丸めて) 同じものは加えない。プールの非零数は問題の非零数の
