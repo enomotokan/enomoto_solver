@@ -10760,4 +10760,8 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 確かめ (既定、両方の直し): fuzz_intsing 4000 問 bad 0 (丸めだけの `TIGHTEN_INTBOUND=0` でも bad 0)、mip_fuzz_vs_highs 300 bad 0、
   cargo test 409 通過・0 失敗、fuzz 7 本すべて bad 0。速さは P 58 問 × 種 1〜3 の対の比べ (PT: `tib0`、PR: `sri0`、
   analysis/wrong_widden_20261117/shards_PT.json・shards_PR.json) で測る (P2-SCIP-M が配る)。
+- 速さの結果 (PR、ビルド d3f31f37c、`analysis/wrong_widden_20261117/summ_PR.txt`): 348 行・crash 0、解けた数 def 136 / sri0 136 (174 組)、
+  目的値の食い違い 0。**sri0 / def の SGM −2.1% [−4.2%, −0.2%]** (どちらかが解けた 46 問) で、丸める既定がわずかに遅い。全種で 1.25 倍を超えて
+  遅い問題はない (def が遅い側に出たのは pk1 0.86・neos5 0.81 [0.80, 0.74, 0.89]・neos-911970 0.71 [0.43, 1.43, 0.58] で、どれも全種 1.25 倍未満か向きが揃わない)。
+  誤答の直しなので既定のまま残す (損は約 2%)。
 
