@@ -22465,11 +22465,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let jb = keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && (subcap('J') || subcap('B'));
             let jb_cap = subcap_wait_cap(self.params.frac_tl());
             let jb_ext = tunable!("ENOMOTO_T_MIP_SUBCAP_EXT", 1.0, f64) * jb_cap;
-            // `ENOMOTO_T_MIP_SUBWAIT` = k (既定 2、0 で従来どおり使わない。analysis/slow2_20261117 の 13〜16 節で採用): 外側の根で主が並列のサブ MIP を全部待つとき、
+            // 試作 `ENOMOTO_T_MIP_SUBWAIT` = k (既定 0 = 使わない。2026-11-18〜11-19 は k = 2 が既定 (analysis/slow2_20261117 の 13〜16 節)。2026-11-19 に既定から外した:
+            // 採否に使わなかった種 3〜6 の 6 問で sw0/既定 −1.3% [−17.9, +14.3]、解けた数 14 → 15 と得が確かめられない、analysis/audit_20261119): 外側の根で主が並列のサブ MIP を全部待つとき、
             // 走り始めてから max(`ENOMOTO_T_MIP_SUBWAIT_MIN` (1 秒), k x 根の段の秒 ([`subcap_root_secs`]: 始めから根のヒューリスティクスに
             // 入るまで)) を過ぎ、直近その秒のうちに外側の上限より良い解を見つけていないサブ MIP を止める (時間の上限による床は置かない)。
             // unitcal_7 では根の被約費用のサブ MIP が 47〜60 秒・500 ノード何も見つけず、主は 0.003% の解を持ったまま 40〜75 秒待っていた
-            let sw_k = if keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 { tunable!("ENOMOTO_T_MIP_SUBWAIT", 2.0, f64) } else { 0.0 };
+            let sw_k = if keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 { tunable!("ENOMOTO_T_MIP_SUBWAIT", 0.0, f64) } else { 0.0 };
             let sw_cap = (sw_k * subcap_root_secs()).max(tunable!("ENOMOTO_T_MIP_SUBWAIT_MIN", 1.0, f64));
             while self.pending_submips.len() > keep {
                 if sw_k > 0.0 && sw_cap.is_finite() {
@@ -23201,9 +23202,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.find_thread.is_some() && env_str!("ENOMOTO_MIP_FIND_THREAD_NO_STOP").is_none() {
             let lb = self.fj_poor_lb;
             let thr = tunable!("ENOMOTO_T_MIP_FIND_THREAD_STOP_GAP", tunable!("ENOMOTO_T_MIP_FJ_POOR_GAP", 0.5, f64), f64);
-            // `ENOMOTO_MIP_QIU_FIND_STOP_GAP` (2026-11-04 から既定、`=0` で以前の形、analysis/qiu_margin_20261104.md): FJ 以外の暫定解でも根の LP との相対ギャップが
-            // `thr` を越える間は止めない (qiu では根の RENS の解 −27.65 (ギャップ 0.97) が 2 秒で入り、0.6 秒後に −115.25 を見つけるはずの解発見スレッドを止めていた)
-            let only_fj = self.inc_only_fj || env_def!("ENOMOTO_MIP_QIU_FIND_STOP_GAP", "1").is_some();
+            // 試作 `ENOMOTO_MIP_QIU_FIND_STOP_GAP=1` (2026-11-04〜11-19 は既定、analysis/qiu_margin_20261104.md): FJ 以外の暫定解でも根の LP との相対ギャップが
+            // `thr` を越える間は止めない (qiu では根の RENS の解 −27.65 (ギャップ 0.97) が 2 秒で入り、0.6 秒後に −115.25 を見つけるはずの解発見スレッドを止めていた)。
+            // 2026-11-19 に既定から外した: 58 問 × 3 種で外しても −0.7% [−3.2, +1.8] と差がなく、qiu 1 問の時刻の競争に合わせた形 (analysis/audit_20261119)
+            let only_fj = self.inc_only_fj || env_str!("ENOMOTO_MIP_QIU_FIND_STOP_GAP").is_some_and(|v| v != "0");
             let poor = self.incumbent.as_ref().is_some_and(|(z, _)| only_fj && lb.is_finite() && (z - lb) / z.abs().max(lb.abs()).max(1.0) > thr);
             if let Some(st) = self.find_stop.as_ref().filter(|_| !poor) {
                 if !st.swap(true, std::sync::atomic::Ordering::Relaxed) && self.params.verbose {
