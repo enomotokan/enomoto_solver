@@ -612,6 +612,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) sb_lps: u64,
     /// 分枝の選択の回数と、そのうち双対退化で強分岐をしなかった回数 (診断用)。
     pub(super) sb_degen_stats: [u64; 2],
+    /// 診断 `ENOMOTO_MIP_FEAT_DIAG` (p2inf_20261119) の数え上げ: [下界で刈ったノード, 実行不能で刈ったノード, 整数の葉,
+    /// 双対退化の度合いの和 ×1000, 退化を測った数]
+    pub(super) feat: [u64; 5],
     /// `ENOMOTO_MIP_PLSB` の `g`: 木全体 (このスレッドの求解) の強分岐の利得の統計
     pub(super) plsb_tree: super::plsb::GainStats,
     /// `ENOMOTO_MIP_PLSB` の判定の数: 判定できない・続ける・止める・従来より長く続けた・従来より早く止めた・
@@ -5284,6 +5287,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_secs: 0.0,
         sb_lps: 0,
         sb_degen_stats: [0; 2],
+        feat: [0; 5],
         plsb_tree: super::plsb::GainStats::new(),
         plsb_stats: [0; 8],
         sb_agree: std::collections::VecDeque::new(),
@@ -12640,6 +12644,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             first = false;
             self.nodes += 1;
             self.tprof.nodes += 1;
+            if !self.params.submip && feat_diag().is_some_and(|n| self.nodes == n) {
+                eprintln!("{}", self.feat_line("snapshot"));
+            }
             if tree_log() {
                 self.tl_src = self.tp_kind as u8;
                 self.tl_plb = node.lower_bound;
@@ -12677,6 +12684,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if replay.is_some() {
                     self.rp_log(&node, "lb", f64::NAN, f64::NAN, -1, &mut rp_stats);
                 }
+                self.feat[0] += 1;
                 if tree_log() && !self.params.submip {
                     eprintln!("ENODE d={} r=pop_lb lp={} rows={}{}", node.depth, node.lower_bound, self.lp.num_rows(), self.tl_tail());
                 }
@@ -12856,6 +12864,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.rp_log(&node, rp_stage, f64::NAN, f64::NAN, -1, &mut rp_stats);
                 }
                 self.pc.infeasible_leaves += 1;
+                self.feat[1] += 1;
                 if tree_log() && !self.params.submip {
                     eprintln!("ENODE d={} r=prop lp={} rows={}{}", node.depth, node.lower_bound, self.lp.num_rows(), self.tl_tail());
                 }
@@ -13248,6 +13257,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if resolves == 0 {
                             rp_obj0 = f64::INFINITY;
                         }
+                        self.feat[if st == LpStatus::Infeasible { 1 } else { 0 }] += 1;
                         if tree_log() && !self.params.submip {
                             eprintln!("ENODE d={} r={} lp={} rows={}{}", node.depth, if st == LpStatus::Infeasible { "lpinf" } else { "lpobj" }, self.lp.objective() + self.p.offset, self.lp.num_rows(), self.tl_tail());
                         }
@@ -13308,6 +13318,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if node_obj >= self.prune_limit() {
+                    self.feat[0] += 1;
                     if tree_log() && !self.params.submip {
                         eprintln!("ENODE d={} r=lpobj lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                     }
@@ -13325,6 +13336,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     match self.tubr_filter(frac, &x, node_obj) {
                         Some(f) => f,
                         None => {
+                            self.feat[0] += 1;
                             if tree_log() && !self.params.submip {
                                 eprintln!("ENODE d={} r=tubr lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                             }
@@ -13348,6 +13360,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         resolves += 1;
                         continue;
                     }
+                    self.feat[2] += 1;
                     if tree_log() && !self.params.submip {
                         eprintln!("ENODE d={} r=int lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                     }
@@ -13412,6 +13425,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     xp("r_fix");
                     if !self.dom.propagate(self.p) {
+                        self.feat[0] += 1;
                         if tree_log() && !self.params.submip {
                             eprintln!("ENODE d={} r=redcost lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                         }
@@ -14050,6 +14064,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     BranchAction::Resolve => {
                         resolves += 1;
                         if !self.dom.propagate(self.p) {
+                            self.feat[1] += 1;
                             if tree_log() && !self.params.submip {
                                 eprintln!("ENODE d={} r=sbprop lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                             }
@@ -14060,6 +14075,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     BranchAction::Prune => {
+                        self.feat[1] += 1;
                         if tree_log() && !self.params.submip {
                             eprintln!("ENODE d={} r=sb lp={node_obj} rows={}{}", node.depth, self.lp.num_rows(), self.tl_tail());
                         }
@@ -16815,6 +16831,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SB_NO_DEGEN_SKIP`: 双対退化でも強分岐を止めない
         let degenerate = depth > 0 && env_str!("ENOMOTO_MIP_SB_NO_DEGEN_SKIP").is_none() && {
             let (deg, ratio) = self.dual_degeneracy();
+            self.feat[3] += (deg * 1000.0) as u64;
+            self.feat[4] += 1;
             deg >= 0.8 || ratio >= 2.0
         };
         self.sb_degen_stats[0] += 1;
@@ -19274,6 +19292,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+    }
+
+    /// 診断 `ENOMOTO_MIP_FEAT_DIAG` の 1 行: 衝突の重みが要る問題・害のある問題を分ける特徴の候補 (p2inf_20261119 5 節)。
+    /// ノード数、刈ったノードの内訳 (下界・実行不能・整数の葉)、衝突の解析の回数・作った衝突・平均の長さ、擬似費用の利得が正の観測の割合、
+    /// 双対退化の平均、目的が全部 0 か、目的の刻み (整数値の目的) の有無
+    fn feat_line(&self, tag: &str) -> String {
+        let fd = self.pc.flat_diag();
+        let deg = if self.feat[4] > 0 { self.feat[3] as f64 / 1000.0 / self.feat[4] as f64 } else { f64::NAN };
+        let zero_obj = self.p.cost.iter().all(|&c| c == 0.0);
+        format!(
+            "FEAT {tag} tid={} nodes={} prune_bound={} prune_infeas={} int_leaves={} conf_calls={} conflicts={} conf_meanlen={:.1} posgain={}/{} degen={:.3} zero_obj={} obj_step={}",
+            self.pool_tid, self.nodes, self.feat[0], self.feat[1], self.feat[2], self.multi_stats[0], self.multi_stats[1],
+            self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, fd.2, fd.3, deg, zero_obj, self.obj_step.is_some()
+        )
     }
 
     /// 診断用 (`ENOMOTO_MIP_TREE_LOG`): `ENODE`・`EBR` の行の後ろに足す、取り出したときの下界・出どころ・経過秒・ノードの通し番号。
@@ -25862,6 +25894,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: NODECNT degenerate duals (tid {}): nodes {}, candidates {}, btran {}, fixed by theta >= gap {}, fixed by theta = inf {}, nodes changed {}, sign mismatch {}", self.pool_tid, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
             }
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
+            if feat_diag().is_some() {
+                eprintln!("{}", self.feat_line("end"));
+            }
             eprintln!("MIP: inference: branchings counted {}, mean bound changes after a branching {:.2} (ENOMOTO_MIP_INF_ALL {})", self.pc.inference_count(), self.pc.inference_mean(), inf_all());
             let fd = self.pc.flat_diag();
             eprintln!("MIP: conflict weight FLAT (tid {}): hybrid scores {}, with the flat condition {}; positive gains {} of {} observations", self.pool_tid, fd.0, fd.1, fd.2, fd.3);
@@ -26344,6 +26379,12 @@ pub(super) fn orbitope_reason() -> bool {
 
 /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
 /// 通し番号を残し、HiGHS 式の衝突解析でその証明の行から説明して遡る。
+/// 診断 `ENOMOTO_MIP_FEAT_DIAG=N` (p2inf_20261119、既定では出さない): 主の木でノード数が N になったときと終わりに [`Solver::feat_line`] を出す。
+fn feat_diag() -> Option<u64> {
+    static F: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_FEAT_DIAG").and_then(|v| v.parse().ok()))
+}
+
 /// 診断 `ENOMOTO_MIP_DEBUG_BRANCH_PRIO` の順位 (列の番号 → 順位、載っていない列は u32::MAX)。
 fn debug_branch_prio() -> Option<&'static Vec<u32>> {
     static F: std::sync::OnceLock<Option<Vec<u32>>> = std::sync::OnceLock::new();
