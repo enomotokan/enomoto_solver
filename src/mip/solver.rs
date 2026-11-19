@@ -7325,14 +7325,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // (元の問題での実行可能性と目的値は変わらない。analysis/sstx_20261119/)
             let sstx = !self.sst_chain.is_empty() && orig.n == self.p.n && self.sst_chain.iter().all(|lv| lv.fits(self.p.n));
             if sstx && !self.p.is_feasible(&x, FEASTOL) {
-                #[cfg(debug_assertions)]
+                // 写しに失敗したら (写しても SST の行に反する・写した解の確かめに落ちる)、元の x に戻して「元の問題の解」として
+                // 暫定解にする (下の orig_only。目的値は打ち切り・目的の伝播・被約費用の固定に使い、答えには元の x を返す)
+                let x0 = x.clone();
                 let z0 = orig.objective(&x);
                 super::symmetry::sst_canonicalize(&self.sst_chain, &mut x);
-                #[cfg(debug_assertions)]
-                {
-                    let z1 = orig.objective(&x);
-                    debug_assert!(orig.is_feasible(&x, 10.0 * FEASTOL), "SST=x: the mapped solution is infeasible in the problem without the SST rows");
-                    debug_assert!((z1 - z0).abs() <= 1e-7 * z0.abs().max(1.0), "SST=x: the mapped solution changed the objective {z0} -> {z1}");
+                let z1 = orig.objective(&x);
+                let check = orig.is_feasible(&x, 10.0 * FEASTOL) && (z1 - z0).abs() <= 1e-7 * z0.abs().max(1.0);
+                debug_assert!(check, "SST=x: the mapped solution is infeasible without the SST rows or changed the objective {z0} -> {z1}");
+                let kind = if !check {
+                    x = x0;
+                    2
+                } else if self.p.is_feasible(&x, FEASTOL) {
+                    0
+                } else {
+                    x = x0;
+                    1
+                };
+                super::SST_X_STATS[kind].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if kind != 0 && self.params.verbose {
+                    eprintln!("MIP: SST=x: mapping failed ({}) for a solution {z0:.10e} [{}]", if kind == 1 { "SST rows still violated" } else { "check failed" }, self.heur_label);
                 }
             }
             // `ENOMOTO_MIP_SYM_LEX_CANON` (試作): lex-leader の行に反する解も生成元で写して使う。9946555 (対称性の検出の近道)
@@ -7352,6 +7364,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 再スタートの後の問題は前処理をかけ直していて (列の代入・固定・目的関数の定数)、`orig` (最初の回の対称性の行を
                 // 加える前の問題) とは解の空間が違うので使わない
                 if self.params.restarts > 0 || orig.n != self.p.n {
+                    if sstx {
+                        super::SST_X_STATS[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     return false;
                 }
                 // `ENOMOTO_MIP_SYM_ORIG_CUT` (試作): 暫定解にはせず、値だけを打ち切り値に使う (ORIG_INC と違い、ヒューリスティクスと

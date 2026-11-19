@@ -1292,6 +1292,9 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         condrev::decide(p, params.verbose);
     }
     if outer {
+        for c in &SST_X_STATS {
+            c.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
@@ -1378,6 +1381,11 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
             if heur_subfix::any() {
                 eprintln!("MIP: SUBFIX summary: {}", heur_subfix::summary());
             }
+        }
+        // 試作 `ENOMOTO_MIP_SYM_SST=x` の写しの回数 (計測で数えるため、ログの有無にかかわらず出す)
+        if sym_sst_x() {
+            let c: Vec<u64> = SST_X_STATS.iter().map(|c| c.load(std::sync::atomic::Ordering::Relaxed)).collect();
+            eprintln!("MIP: SST=x: mapped {}, failed (rows still violated) {}, failed (check) {}, dropped after a restart {}", c[0], c[1], c[2], c[3]);
         }
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
@@ -2543,6 +2551,10 @@ pub(crate) fn sym_sst() -> bool {
 /// 反するとき、元の問題 (SST の行を足す前) で実行可能なら、SST の段の群で写して行を満たす代表にしてから暫定解にする
 /// ([`symmetry::sst_canonicalize`])。写せなければ目的値だけを打ち切りに使う (解は元の問題の解として持つ)。
 /// SST を使う実行可能性問題 ([`sym_sst_feas`]) でも同じく写す
+/// [`sym_sst_x`] の写しの回数 (外側の求解ごと、全スレッドの和): [写して SST の行を満たした, 写しても行に反した (元の x を暫定解に),
+/// 写した解の確かめに落ちた (同じく元の x), 再スタートの後で写せず捨てた]。外側の求解の終わりに `MIP: SST=x:` の行で出す
+pub(crate) static SST_X_STATS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
 pub(crate) fn sym_sst_x() -> bool {
     env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v == "x")
 }

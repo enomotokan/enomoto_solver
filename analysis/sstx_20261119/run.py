@@ -40,6 +40,8 @@ def run(cfg, seed, mps, tl):
     env = {key: v for key, v in os.environ.items() if not key.startswith("ENOMOTO_")}
     env.update(CFGS[cfg]); env["ENOMOTO_MIP_THREADS"] = TH(cfg); env["ENOMOTO_T_MIP_SEED"] = str(seed)
     err = subprocess.DEVNULL
+    if cfg.startswith("sstx"):  # 写しの回数の行 (`MIP: SST=x: ...`) を拾うため、標準エラーを一時ファイルに受ける
+        err = tempfile.TemporaryFile("w+")
     if SET.startswith("W"):  # 誤答の切り分け: デバッグ解 (前処理の後の問題の最適解) を渡し、標準エラーを logs/ に残す
         env["ENOMOTO_MIP_DEBUG_SOL"] = str(DSOL); env["ENOMOTO_MIP_LOG"] = "1"
         LOGS.mkdir(exist_ok=True); err = open(LOGS / f"{SET}_{cfg}_s{seed}.log", "w")
@@ -54,6 +56,11 @@ def run(cfg, seed, mps, tl):
     except Exception: res = {"status": "crash", "returncode": pr.returncode}  # noqa: BLE001
     if SET.startswith("W"):
         err.close(); wlog(LOGS / f"{SET}_{cfg}_s{seed}.log")
+    elif cfg.startswith("sstx"):
+        err.seek(0)
+        ls = [l.strip() for l in err.read().splitlines() if l.startswith("MIP: SST=x:")]
+        err.close()
+        if ls: res["sstx"] = ls[-1]
     return res, round(peak), round(time.time() - t0, 1)
 for p, cfg, seed, tl in mine:
     if (p, cfg, seed) in done: continue
