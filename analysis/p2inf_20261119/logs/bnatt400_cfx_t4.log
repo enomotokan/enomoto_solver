@@ -164,3 +164,28 @@ MIP: RHEUR pool: 1072 iterations used (cap 1000), 2313 left, closeness 0.00, div
 MIP:   shift-and-propagate: gave up (37 decisions, 20 backtracks, 173 rows violated before the LP)
 MIP: root heuristic shift-and-propagate: none (0.00s)
 MIP:   early Local-MIP thread 3: initialized in 0.00s
+MIP:   early Local-MIP thread 3: 86144 steps, least violated rows 11, chain moves 14041 (mean length 3.5), 6.00s
+MIP: presolve: early FJ/Local-MIP for the feasibility problem: 4 threads (FJ 3, Local-MIP 1), FJ 178 tries, Local-MIP 86144 steps, found false by none (6.01s, cap 6.00s)
+MIP: root heuristic robust FJ: none (6.01s)
+MIP:   local search: 470463 steps, work 301207902 (17976.1 x nnz 16756), stopped by time false, cap 5.00s
+MIP:   local search: least violation 3.397e0
+MIP: root heuristic local search: none (0.98s)
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+MIP:   repair: 14 violated rows, 66 free columns, remaining violation 4.030e0
+MIP: root heuristic repair: none (0.01s)
+MIP: after root heuristics: incumbent None (13.09s)
+MIP: background cuts: determ: waited 0.00s (safety cap 265.62s, done, background end own stall), 5 rounds, 1250 LP iters (1.02 x 1223 of cap 24460), obj Some(0.0) (13.09s)
+MIP: background cuts: rounds so far [0.0 at 3.07s, 0.0 at 3.20s, 0.0 at 3.34s, 0.0 at 3.43s, 0.0 at 3.56s]
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (13.09s)
+MIP: background cuts: 5 rounds, obj 0.0000000000e0 not above 0.0000000000e0; not used (waited 0.00s)
+MIP: restart check: newly fixed 0, integer columns 2413, free at the root 1948, threshold 24.1, root LP 0.21s
+TRSTAT: tree start outer 14.60 solve 13.09 restarts 0 lb 0.0000000000e0 ub inf
+MIP:    13.09s nodes        1 open       0 lb inf ub inf lp_iters 12955 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 7752 dive_iters 0 lp_rows 4216 node_cut_secs 0.00
+MIP: 1 of 4 tree threads take the heuristic role once a solution exists
+MIP: tree search with 4 threads (14.37s)
+MIP:    15.11s nodes        8 open       7 lb 0.00000000e0 ub inf lp_iters 21097 sb_iters 5950 sb_lps 42 sb_secs 1.27 node_iters 1156 (first 1156, lps 7) heur_iters 9824 dive_iters 1036 lp_rows 4216 node_cut_secs 0.00 pool_len 0 pool_idle 3
+MIP: NODECNT root gate: cut rows 262, matched root cuts 100, tight 0, tight path 0 (share 0.000); root chosen 295 (path 38); node path aggregation on
+MIP:    17.14s nodes      102 open      46 lb 0.00000000e0 ub inf lp_iters 30320 sb_iters 5950 sb_lps 42 sb_secs 1.28 node_iters 10257 (first 9685, lps 80) heur_iters 10068 dive_iters 1158 lp_rows 4256 node_cut_secs 0.05 pool_len 0 pool_idle 0
+MIP:    19.53s nodes      194 open      34 lb 0.00000000e0 ub inf lp_iters 41864 sb_iters 5950 sb_lps 42 sb_secs 1.28 node_iters 21677 (first 18801, lps 132) heur_iters 10316 dive_iters 1282 lp_rows 4413 node_cut_secs 0.40 pool_len 0 pool_idle 0
+MIP:    21.53s nodes      233 open      25 lb 0.00000000e0 ub inf lp_iters 50686 sb_iters 5950 sb_lps 42 sb_secs 1.28 node_iters 30189 (first 26149, lps 157) heur_iters 10936 dive_iters 1592 lp_rows 4493 node_cut_secs 0.52 pool_len 0 pool_idle 0
+MIP:    23.56s nodes      264 open      22 lb 0.00000000e0 ub inf lp_iters 59573 sb_iters 5950 sb_lps 42 sb_secs 1.28 node_iters 39076 (first 32461, lps 184) heur_iters 10936 dive_iters 1592 lp_rows 4640 node_cut_secs 0.82 pool_len 0 pool_idle 0
