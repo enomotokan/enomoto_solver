@@ -3250,9 +3250,10 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     if verbose && static_fix > 0 {
         eprintln!("MIP: symmetry: packing orbitopes fixed {static_fix} columns to 0");
     }
-    // 試作 `ENOMOTO_MIP_ORBPP_REPROBE` (既定では使わない。analysis/scipslow_20261119 の 4 節): 静的なオービトープの固定の後に、行の伝播・
-    // オービトープの固定・プロービング (固定だけ) を繰り返す ([`orbpp_reprobe`])
-    if static_fix > 0 && orbs.iter().any(|o| o.static_pp) && env_str!("ENOMOTO_MIP_ORBPP_REPROBE").is_some() {
+    // `ENOMOTO_MIP_ORBPP_REPROBE` (2026-11-19 から既定で使う。`=0` で使わない。analysis/scipslow_20261119 の 4・6・7 節): 静的なオービトープの固定の後に、
+    // 行の伝播・オービトープの固定・プロービング (固定だけ) を繰り返し、冗長になった行を外す ([`orbpp_reprobe`])。graph20-20-1rand (4 スレッド・種 1〜5) で
+    // 44.0 → 7.2 秒。静的なオービトープ (ORBPP) が働かない問題では何もしない
+    if static_fix > 0 && orbs.iter().any(|o| o.static_pp) && env_def!("ENOMOTO_MIP_ORBPP_REPROBE", "1").is_some() {
         let t0 = std::time::Instant::now();
         let st = orbpp_reprobe(&mut prob, &orbs);
         if verbose {
@@ -4727,7 +4728,7 @@ fn vub_dual_agg_pairs(prob: &MipProblem) -> Vec<(usize, usize, bool)> {
 
 /// `ENOMOTO_MIP_VUBAGG` (既定で使う): 組 `x_j = y` ([`vub_dual_agg_pairs`]) で x_j を全ての行から y に置き換え、x_j の費用を y に足し、x_j を 0 に固定した問題。
 /// 解は `x_j = x_y` で戻す。列の番号は変えない。
-/// 試作 `ENOMOTO_MIP_ORBPP_REPROBE`: 静的なオービトープ (`ENOMOTO_MIP_ORBPP`) の固定の後に、(1) 行の伝播、(2) 静的なオービトープの固定
+/// `ENOMOTO_MIP_ORBPP_REPROBE` (既定で使う。`=0` で使わない): 静的なオービトープ (`ENOMOTO_MIP_ORBPP`) の固定の後に、(1) 行の伝播、(2) 静的なオービトープの固定
 /// ([`symmetry::orbitopal_fixing`]、詰め込みの固定を含む)、(3) 自由な 0-1 列のプロービング (片側が行の伝播で矛盾すれば反対側に固定) を、
 /// 何も変わらなくなるか `ENOMOTO_T_MIP_ORBPP_REPROBE_ROUNDS` (5) 回まで繰り返し、境界を問題に書き込む。どれも主の推論 (実行可能な点を消さない)
 /// なので、木のオービトープの固定 (列の対応) はそのまま使える (列のまとめ・置き換え・双対の縮小はしない)。graph20-20-1rand では SCIP が
