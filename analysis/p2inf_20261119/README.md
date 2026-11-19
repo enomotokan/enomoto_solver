@@ -48,11 +48,19 @@ shards_PROWTINY.json (MIPLIB 58 問 × 種 1〜3、60 秒、4 分担・各 0.74 
 集計は `python summ.py MROWTINY def rowtiny`。判定の変更は LP の実行不能の扱い全部 (ノード・根・強分枝・LP のプロービング) に
 効くので、M は似た問題に絞らず 48 問全部で見る。
 
-### 3.1 正しさの確かめ (親の依頼、verify.sh、実行中)
+### 3.1 正しさの確かめ (親の依頼、verify.sh)
 
 ROWTINY は widden の誤答の直しの判定を変えるので、`ENOMOTO_MIP_LPINF_ROWTINY=1` で (1) neos-4722843-widden を 1・4 スレッド × 種 1〜3、
 デバッグ解つき・900 秒で回し、最適 25009.662227 と比べる (wdn.py、res_dbgrun_wdn_t*.jsonl)、(2) release019 と同じ fuzz 7 本と
-衝突解析の fuzz_cutconf 300 (ログは fuzz_logs/、コミットしない)。結果は後で書き足す。
+衝突解析の fuzz_cutconf 300 (ログは fuzz_logs/、コミットしない)。結果 (logs/verify.out、事実):
+
+- widden: 1・4 スレッド × 種 1〜3 の 6 回すべて optimal 25009.6634 (正しい)。4 スレッド 46〜55 秒、1 スレッド 66〜83 秒。
+  6 回とも際どい実行不能の判定は 0 回 (確かめに入らない)。デバッグ解の目的値は 26577.44 で今の前処理後の問題の最適と合わない (デバッグ解を作った版と
+  前処理が変わった) ので、「MIP_DEBUG_SOL lost」の行 (3 回で計 19 行、刈り込みの上限 27631〜28518 の下) は判定の材料にならない。
+  widden の誤答は直す前でも約 1/260 回と稀なので、6 回で言えるのは「6 回とも正しい」まで。ROWTINY が変えるのは丸めの誤差ほどの重みの行を
+  落とすことだけで、落とした後の射線で隙間を測り直す (2・3 節) ので、widden の 1e-8 程度の際どい証明はこれまでどおり際どいと判定する。
+- fuzz: fuzz_tiny 400 bad 0・mip_fuzz_vs_highs 300 bad 0・fuzz_objint 1000 bad 0・fuzz_slack 1000 食い違い 0・fuzz_tiny2 400 bad 0・
+  fuzz_objint2 1000 bad 0・fuzz_slack2 1000 食い違い 0・fuzz_cutconf 300 bad 0。**誤答 0**。
 
 ## 4. fhnw-binpack4-4・bnatt400 (4 スレッド 120 秒・種 1、logs/<問題>_<設定>_s1.log)
 
