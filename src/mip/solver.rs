@@ -19416,7 +19416,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let rhs = if *obj { obj_lim - konst } else { *konst };
             rhs.is_finite().then(|| (c.clone(), rhs))
         };
-        let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() || lit_explain() || orbitope_reason() { Some(&lookup) } else { None };
+        let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() || lit_explain() || lit_explain_auto() || orbitope_reason() { Some(&lookup) } else { None };
         let confs = self.dom.analyze_multi_bumps(self.p, start, max_len, reconv, hcs.then_some(&mut bumps), lk);
         if hcs && !bumps.is_empty() {
             self.pc.bump_conflict(&bumps);
@@ -20846,7 +20846,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 行 `Σ_{x_j >= 1 のリテラル} x_j - Σ_{x_j <= 0 のリテラル} x_j <= (x_j >= 1 のリテラルの数) - 1` にした写しの番号を理由として付け
     /// (カットのプールの伝播の試作 `CONFLICT_PROOF_EXPLAIN` と同じ写しの表)、衝突解析で遡れるようにする。それ以外の衝突は従来どおり外からの変更
     fn lit_prop(&mut self, start: usize) -> Result<usize, ()> {
-        if !lit_explain() {
+        if !(lit_explain() || (lit_explain_auto() && self.cw_dyn_state.0)) {
             return self.lit_conflicts.propagate(self.p, &mut self.dom, start);
         }
         let p = self.p;
@@ -26486,7 +26486,14 @@ pub(super) fn inf_all() -> bool {
 /// (SCIP は衝突を制約 (logicor) として持つので遡れる)
 pub(super) fn lit_explain() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v != "0"))
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v != "0" && v != "auto"))
+}
+
+/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=auto`: 途中で衝突の重みを上げる試作 (`CONFLICT_WEIGHT_DYN` / `_RAMP`) が上げた (HiGHS の衝突の点数を入れた) 間だけ
+/// [`lit_explain`] と同じくリテラルの衝突の伝播に理由を付ける。上がらない問題では既定と同じ動き
+pub(super) fn lit_explain_auto() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v == "auto"))
 }
 
 pub(super) fn conflict_proof_explain() -> bool {
