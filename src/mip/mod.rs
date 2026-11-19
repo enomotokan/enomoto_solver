@@ -6103,6 +6103,190 @@ pub(crate) fn clqact_census(prob: &MipProblem, tag: &str) {
     );
 }
 
+/// 診断 `ENOMOTO_MIP_DEBUG_IMPLCLASS` (analysis/scipslow_20261119 の 14 節、求解は変えない): プロービングの終わりの含意 (衝突の組、
+/// 重複と固定の列を除いた後) を、(a) 行だけの衝突グラフ ([`clique::CliqueGraph::build_with_stop`]、今の境界) に既にある組、
+/// (b) 1 本の行の最小活動量で出る 2 文字の衝突だが、行の上限 (文字数 `MAX_ROW_LITS`・辺の数 `MAX_ROW_EDGES`) で落ちた組、
+/// (c) 最小活動量が無限 (境界が無限の列を含む) の行に 2 列がそろって入っている組 (1 本の行の伝播では 0-1 列に届かないので、
+/// 実際の出どころは (d) と同じく連鎖)、(d) 1 本の行と x_i = v だけの伝播では出ない組に分け、`IMPLCLASS {json}` の 1 行を出す。
+/// 1 本の行の伝播で 0-1 列が偽になるのは、その行の最小活動量に x_i = v の増分を足すと x_j = w の増分が収まらないときだけなので、
+/// (b) の判定は重みの和と余裕の比べと同じ。行ごとの文字数の分布 (片側ごと、2 文字以上の行) と上限に当たる行も出す。
+fn implclass_diag(prob: &MipProblem, edges: &[(u32, u32)], e_init: usize, lo: &[f64], up: &[f64]) {
+    let t0 = std::time::Instant::now();
+    let n = prob.n;
+    let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && lo[j] >= 0.0 && up[j] <= 1.0 && lo[j] < up[j]).collect();
+    let g = clique::CliqueGraph::build(n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, lo, up);
+    // 片側ごと (行 i, 符号 s): 最小活動量が有限か、余裕、文字数、組の数 (2 本の指)
+    let m = prob.rows.len();
+    let mut side: Vec<[(bool, f64, usize, u64); 2]> = vec![[(false, 0.0, 0, 0); 2]; m];
+    let mut hist = [0u64; 8]; // 文字数: 2-10, 11-100, 101-1000, 1001-2000, 2001-1e4, 1e4-1e5, >1e5, (未使用)
+    let (mut cap_lits, mut cap_edges, mut inf_rows) = (0usize, 0usize, 0usize);
+    let mut cap_lens: Vec<usize> = Vec::new();
+    for (i, r) in prob.rows.iter().enumerate() {
+        for (si, (sign, b)) in [(1.0, prob.row_up[i]), (-1.0, -prob.row_lo[i])].into_iter().enumerate() {
+            if !b.is_finite() {
+                continue;
+            }
+            let (mut minact, mut ok) = (0.0f64, true);
+            let mut w: Vec<f64> = Vec::new();
+            for &(j, a0) in r {
+                let a = sign * a0;
+                let mm = if a > 0.0 { a * lo[j] } else { a * up[j] };
+                if !mm.is_finite() {
+                    ok = false;
+                }
+                minact += mm;
+                if binary[j] && a != 0.0 {
+                    w.push(a.abs());
+                }
+            }
+            if !ok {
+                if w.len() >= 2 {
+                    inf_rows += 1;
+                }
+                side[i][si] = (false, f64::NAN, w.len(), 0);
+                continue;
+            }
+            let slack = b - minact;
+            let tol = 1e-9 * (1.0 + b.abs());
+            w.sort_by(|x, y| y.total_cmp(x));
+            let mut pairs = 0u64;
+            let mut hi = w.len();
+            for u in 0..w.len() {
+                while hi > u + 1 && w[u] + w[hi - 1] <= slack + tol {
+                    hi -= 1;
+                }
+                if hi <= u + 1 {
+                    break;
+                }
+                pairs += (hi - u - 1) as u64;
+            }
+            side[i][si] = (true, slack, w.len(), pairs);
+            if w.len() >= 2 && pairs > 0 {
+                let l = w.len();
+                hist[if l <= 10 { 0 } else if l <= 100 { 1 } else if l <= 1000 { 2 } else if l <= 2000 { 3 } else if l <= 10_000 { 4 } else if l <= 100_000 { 5 } else { 6 }] += 1;
+                if l > MAX_ROW_LITS_DIAG {
+                    cap_lits += 1;
+                    cap_lens.push(l);
+                } else if pairs > MAX_ROW_EDGES_DIAG {
+                    cap_edges += 1;
+                    cap_lens.push(l);
+                }
+            }
+        }
+    }
+    // 列ごとの (行, 係数)、行の番号順
+    let mut col_rows: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
+    for (i, r) in prob.rows.iter().enumerate() {
+        for &(j, a) in r {
+            col_rows[j].push((i as u32, a));
+        }
+    }
+    let mut pairs: Vec<(u32, u32, bool)> = edges
+        .iter()
+        .enumerate()
+        .filter(|&(_, &(a, b))| a / 2 != b / 2 && binary[(a / 2) as usize] && binary[(b / 2) as usize])
+        .map(|(k, &(a, b))| (a.min(b), a.max(b), k >= e_init))
+        .collect();
+    pairs.sort_unstable();
+    pairs.dedup_by(|x, y| x.0 == y.0 && x.1 == y.1);
+    // 文字 l の行 (符号 s) での増分: x_j = 1 (偶数) は a > 0 のとき a、x_j = 0 (奇数) は a < 0 のとき −a
+    let inc = |l: u32, a: f64| if l % 2 == 0 { a.max(0.0) } else { (-a).max(0.0) };
+    let (mut ca, mut cb_lits, mut cb_edges, mut cb_other, mut cc, mut cd) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut new_all, mut new_a, mut new_b, mut new_d) = (0usize, 0usize, 0usize, 0usize);
+    let mut cd_share = 0usize; // (d) のうち 2 列がどこかの行にそろって入る組
+    let (mut mark, mut stamp, mut d_mid) = (vec![0u32; n], 0u32, [0usize; 4]);
+    for &(u, v, fresh) in &pairs {
+        new_all += fresh as usize;
+        if g.adjacent(u, v) {
+            ca += 1;
+            new_a += fresh as usize;
+            continue;
+        }
+        let (ju, jv) = ((u / 2) as usize, (v / 2) as usize);
+        let (ru, rv) = (&col_rows[ju], &col_rows[jv]);
+        let (mut x, mut y) = (0usize, 0usize);
+        let (mut b_kind, mut inf_share, mut share) = (0u8, false, false);
+        while x < ru.len() && y < rv.len() {
+            if ru[x].0 < rv[y].0 {
+                x += 1;
+            } else if ru[x].0 > rv[y].0 {
+                y += 1;
+            } else {
+                share = true;
+                let i = ru[x].0 as usize;
+                for (si, sign) in [1.0, -1.0].into_iter().enumerate() {
+                    let (fin, slack, nl, np) = side[i][si];
+                    if nl == 0 && !fin {
+                        continue;
+                    }
+                    if !fin {
+                        if nl >= 2 {
+                            inf_share = true;
+                        }
+                        continue;
+                    }
+                    let b = if si == 0 { prob.row_up[i] } else { -prob.row_lo[i] };
+                    let tol = 1e-9 * (1.0 + b.abs());
+                    let (iu, iv) = (inc(u, sign * ru[x].1), inc(v, sign * rv[y].1));
+                    if iu > 0.0 && iv > 0.0 && iu + iv > slack + tol {
+                        let k = if nl > MAX_ROW_LITS_DIAG { 1 } else if np > MAX_ROW_EDGES_DIAG { 2 } else { 3 };
+                        b_kind = if b_kind == 0 { k } else { b_kind.min(k) };
+                    }
+                }
+                x += 1;
+                y += 1;
+            }
+        }
+        match b_kind {
+            1 => cb_lits += 1,
+            2 => cb_edges += 1,
+            3 => cb_other += 1,
+            _ if inf_share => cc += 1,
+            _ => {
+                cd += 1;
+                cd_share += share as usize;
+                new_d += fresh as usize;
+                // 2 段の連鎖 (x_i = v → 列 k → x_j = w) の候補: 2 列とそれぞれ行を共にする列 k があるか、その k の種類
+                stamp += 1;
+                for &(i, _) in ru {
+                    for &(k, _) in &prob.rows[i as usize] {
+                        mark[k] = stamp;
+                    }
+                }
+                let mut kind = 3usize; // 0: 0-1 列, 1: 一般整数, 2: 連続, 3: 無し
+                'mid: for &(i, _) in rv {
+                    for &(k, _) in &prob.rows[i as usize] {
+                        if mark[k] == stamp && k != ju && k != jv {
+                            let kk = if binary[k] { 0 } else if prob.is_int[k] { 1 } else { 2 };
+                            kind = kind.min(kk);
+                            if kind == 0 {
+                                break 'mid;
+                            }
+                        }
+                    }
+                }
+                d_mid[kind] += 1;
+            }
+        }
+        if b_kind != 0 {
+            new_b += fresh as usize;
+        }
+    }
+    cap_lens.sort_unstable_by(|a, b| b.cmp(a));
+    cap_lens.truncate(20);
+    eprintln!(
+        "IMPLCLASS {{\"n\":{n},\"rows\":{m},\"edges_raw\":{},\"edges_inherited\":{e_init},\"pairs\":{},\"pairs_new\":{new_all},\"a_in_graph\":{ca},\"b_row_over_lits\":{cb_lits},\"b_row_over_edges\":{cb_edges},\"b_row_other\":{cb_other},\"c_inf_row\":{cc},\"d_chain\":{cd},\"d_chain_share_row\":{cd_share},\"d_mid_bin_int_cont_none\":{d_mid:?},\"new_a\":{new_a},\"new_b\":{new_b},\"new_d\":{new_d},\"graph_edges\":{},\"row_sides_lits_hist\":{:?},\"row_sides_over_lits\":{cap_lits},\"row_sides_over_edges\":{cap_edges},\"row_sides_inf\":{inf_rows},\"cap_row_lens_top\":{:?},\"secs\":{:.2}}}",
+        edges.len(),
+        pairs.len(),
+        g.num_edges(),
+        &hist[..7],
+        cap_lens,
+        t0.elapsed().as_secs_f64()
+    );
+}
+const MAX_ROW_LITS_DIAG: usize = 2000;
+const MAX_ROW_EDGES_DIAG: u64 = 20_000;
+
 /// 診断 `ENOMOTO_MIP_DEBUG_CLQTAB` (クリーク表の持ち方の見直しの数え上げ、analysis/clqprb_20261112.md §11): 前処理の後の問題で、
 /// 衝突グラフ ([`clique::CliqueGraph`]) の辺の数・作る時間・行の上限で落ちる行と組、含意の組 (`conflict_edges`) のうち行の辺と重なる数、
 /// 残りの含意の組を貪欲にクリークにまとめたときの個数と総文字数を数え、`CLQTAB {json}` の 1 行を出す (求解は変えない)
@@ -7398,6 +7582,9 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             d.backtrack_to(prob, pos);
         }
         eprintln!("MIP: probing: PROBE_SUBST diag: {nb} binary, {ni} general integer, {nc} continuous columns substitutable ({} candidates, {nx} one-sided, {:.2}s)", cands.len(), ts.elapsed().as_secs_f64());
+    }
+    if !submip && env_str!("ENOMOTO_MIP_DEBUG_IMPLCLASS").is_some() {
+        implclass_diag(prob, &edges, e_init, &dom.lo, &dom.up);
     }
     prob.conflict_edges = edges;
     if want_equiv {
