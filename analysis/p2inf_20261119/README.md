@@ -181,3 +181,20 @@ P・M (Mittelmann 48 問・MIPLIB 58 問) で目的が全部 0 なのは ns11169
    最適化問題には効かない見込み。
 
 判断 (親、2026-11-19): 得が見込めないので作らずに保留。
+
+### 5.7 PROWTINY2 (P の種 4〜6 の追加、利用者の判断で依頼)
+
+- shards_PROWTINY2.json: MIPLIB の 58 問 × 種 4〜6 × {def, rowtiny}、60 秒、4 スレッド、4 分担 (各 0.7 時間の見積り、86・88・86・88 回)。
+  見積りは種 1〜3 の PROWTINY の実時間 (問題ごとの平均 + 8 秒)。
+- ビルドは種 1〜3 と同じ 06f20890f (SST_FEAS の既定化の前)。回し方: `python analysis/p2inf_20261119/run.py PROWTINY2 K` (K = 0〜3) → res_PROWTINY2_sK.jsonl。
+- 集計は種 1〜6 を合わせる: `python summ.py PROWTINY+PROWTINY2 def rowtiny` (summ.py は `+` でつないだ SET の結果を合わせて読む)。
+
+### 5.8 PROWTINY 種 1〜6 と 10teams の切り分け (事実)
+
+- `summ_PROWTINY_6seeds.txt` (`python summ.py PROWTINY+PROWTINY2 def rowtiny`): 696 行、crash 0、食い違い 0。解けた数 def 276 / rowtiny 274 (348 組)。
+  rowtiny / def **+2.0% [−2.0%, +7.8%]**。全種で 1.25 倍超遅い問題なし。遅め: 10teams 2.67 (0.96・4.08・8.32・1.01・1.38・7.93)、noswot 1.60。速い: neos5 0.80。
+- 10teams: 計測機では rowtiny の種 2・3・6 が 1〜4 万ノードに膨らんだが、手元では 06f20890f のビルドで種 2・3・6 も 83〜150 ノード (def と同じ)、
+  手元の種 1〜8 の回し直しでも膨らまない。計測機でログつきで回し直す (logs_10teams/、FMc3) と種 6 の rowtiny だけ再現 (32819 ノード、時間切れ)。
+  根まではほぼ同じ (974 を Local-MIP が約 0.8 秒、根の LP 924 = 最適値)。def はノード 27 でほかのスレッドが 924 を見つけて終わり、rowtiny は
+  ノード 89 で 950 を見つけた後 924 を見つけられない。下界は根から 924 で、解を見つける側の 4 スレッドの運。際どい判定の差 (def は丸めの誤差で 19 本を解き直し、
+  rowtiny は 0 本) が道筋を変えただけで、判定の誤りの形跡はない。

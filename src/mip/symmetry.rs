@@ -1588,12 +1588,14 @@ pub fn lex_leader_pairs_except(sym: &Symmetry, skip: &[bool], orbitope_vars: &[b
 /// 全ての段のカットを満たす (`G_t` の元は `l_t` より前の列を全て固定するので、lex-leader の性質から `x_{l_t} >= x_{h^{-1}(l_t)}`)。
 /// なので lex-leader の行・`SYM_LEX_GENS` での並べ替えと矛盾しない。固定部分群の生成元を上限で間引くと部分群になるが、
 /// 部分群でも上の議論はそのまま成り立つ (カットが減るだけ)。手間 (置換の合成で触る列の数) が `work_cap` を越えたらそこまでの段で止める
-pub fn sst_pairs_except(sym: &Symmetry, skip: &[bool], orbitope_vars: &[bool], max_gens: usize, work_cap: u64) -> (Vec<(usize, usize)>, usize) {
+/// `keep_chain` が真なら、行を足した段ごとの leader と生成元 ([`SstLevel`]) も返す (試作 `ENOMOTO_MIP_SYM_SST=x`、[`sst_canonicalize`])。
+pub fn sst_pairs_except(sym: &Symmetry, skip: &[bool], orbitope_vars: &[bool], max_gens: usize, work_cap: u64, keep_chain: bool) -> (Vec<(usize, usize)>, usize, Vec<SstLevel>) {
     let n = sym.orbit.len();
     let mut gens: Vec<Vec<usize>> = sym.generators.iter().enumerate().filter(|&(k, g)| !skip[k] && !(0..g.len()).any(|j| g[j] != j && orbitope_vars[j])).map(|(_, g)| g.clone()).collect();
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     let mut work = 0u64;
     let mut levels = 0usize;
+    let mut chain: Vec<SstLevel> = Vec::new();
     // 合成 (a∘b)(j) = a[b[j]]
     let compose = |a: &[usize], b: &[usize]| -> Vec<usize> { b.iter().map(|&j| a[j]).collect() };
     let inverse = |a: &[usize]| -> Vec<usize> {
@@ -1633,6 +1635,9 @@ pub fn sst_pairs_except(sym: &Symmetry, skip: &[bool], orbitope_vars: &[bool], m
             pairs.push((l, k));
         }
         levels += 1;
+        if keep_chain {
+            chain.push(SstLevel::new(l, &gens));
+        }
         // l の固定部分群の Schreier の生成元
         let mut next: Vec<Vec<usize>> = Vec::new();
         let mut seen: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
@@ -1657,7 +1662,72 @@ pub fn sst_pairs_except(sym: &Symmetry, skip: &[bool], orbitope_vars: &[bool], m
     }
     pairs.sort_unstable();
     pairs.dedup();
-    (pairs, levels)
+    (pairs, levels, chain)
+}
+
+/// [`sst_pairs_except`] の 1 段: leader `l` と、その段の群 `G_t` の生成元 (動かす列だけの `(j, σ(j))`、`j` の昇順)。
+/// `G_t` の元は前の段の leader を全て固定する。
+#[derive(Clone, Debug)]
+pub struct SstLevel {
+    pub leader: usize,
+    gens: Vec<Vec<(u32, u32)>>,
+}
+
+impl SstLevel {
+    fn new(leader: usize, gens: &[Vec<usize>]) -> Self {
+        let gens = gens.iter().map(|g| (0..g.len()).filter(|&j| g[j] != j).map(|j| (j as u32, g[j] as u32)).collect()).collect();
+        SstLevel { leader, gens }
+    }
+
+    /// 置換の長さ (問題の列の数) が `n` 以下か (再スタートで列の数が変わったら使わない)
+    pub fn fits(&self, n: usize) -> bool {
+        self.leader < n && self.gens.iter().all(|g| g.iter().all(|&(a, b)| (a as usize) < n && (b as usize) < n))
+    }
+}
+
+/// 試作 `ENOMOTO_MIP_SYM_SST=x`: `x` を SST の段の群の元で写して、[`sst_pairs_except`] の行 `x_l >= x_k` を全て満たす点にする。
+/// 段 `t` ごとに、leader `l_t` の軌道 (`G_t` で) の中で値が最大の列 `k` を探し、幅優先の木の道を逆にたどって
+/// 生成元の逆で `k` の値を `l_t` へ写す。`G_t` の元は前の段の leader を固定し、前の段の軌道をそれ自身に写す (`G_t ⊂ G_s`、s < t) ので、
+/// 前の段の leader の値と軌道の値の集まりは変わらず、前の段の行は満たされたまま。写しは対称性なので、元の問題 (SST の行を
+/// 足す前) での実行可能性と目的値は変わらない。写しの回数を返す。
+pub fn sst_canonicalize(chain: &[SstLevel], x: &mut [f64]) -> usize {
+    let mut moves = 0usize;
+    let img = |g: &[(u32, u32)], j: usize| -> usize {
+        match g.binary_search_by_key(&(j as u32), |&(a, _)| a) {
+            Ok(i) => g[i].1 as usize,
+            Err(_) => j,
+        }
+    };
+    for lv in chain {
+        let l = lv.leader;
+        // prev[t] = (o, 生成元の番号): 生成元 g が o を t に写す
+        let mut prev: std::collections::HashMap<usize, (usize, usize)> = std::collections::HashMap::new();
+        let mut order = vec![l];
+        let mut head = 0;
+        while head < order.len() {
+            let o = order[head];
+            head += 1;
+            for (gi, g) in lv.gens.iter().enumerate() {
+                let t = img(g, o);
+                if t != l && !prev.contains_key(&t) {
+                    prev.insert(t, (o, gi));
+                    order.push(t);
+                }
+            }
+        }
+        let kmax = order.iter().copied().fold(l, |b, k| if x[k] > x[b] + 1e-9 { k } else { b });
+        let mut k = kmax;
+        while let Some(&(o, gi)) = prev.get(&k) {
+            // g^{-1} で写す: 列 b の値を a へ (g は a を b に写す)
+            let old: Vec<f64> = lv.gens[gi].iter().map(|&(_, b)| x[b as usize]).collect();
+            for (&(a, _), v) in lv.gens[gi].iter().zip(old) {
+                x[a as usize] = v;
+            }
+            moves += 1;
+            k = o;
+        }
+    }
+    moves
 }
 
 /// 対称性を崩す不等式 `x_i - x_k >= 0` の組 `(i, k)` (lex-leader、モジュールの説明を参照)。
@@ -2046,6 +2116,37 @@ mod tests {
         assert_eq!(orbs.len(), 1);
         assert_eq!(orbs[0].vars, vec![vec![0, 1], vec![2, 3], vec![4, 5]]);
         assert!(used[0]);
+    }
+
+    #[test]
+    fn sst_canonicalize_satisfies_sst_pairs() {
+        // S4 (0 1 2 3) の上の (0 1) と (0 1 2 3)、別の巡回 C3 (4 5 6)、動かない列 7
+        let gens = vec![vec![1, 0, 2, 3, 4, 5, 6, 7], vec![1, 2, 3, 0, 4, 5, 6, 7], vec![0, 1, 2, 3, 5, 6, 4, 7]];
+        let sym = Symmetry { generators: gens.clone(), orbit: vec![0, 0, 0, 0, 1, 1, 1, usize::MAX], num_orbits: 2 };
+        let (pairs, levels, chain) = sst_pairs_except(&sym, &[false; 3], &[false; 8], 64, u64::MAX, true);
+        assert_eq!(levels, chain.len());
+        let mut seed = 7u64;
+        for _ in 0..200 {
+            let x0: Vec<f64> = (0..8)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    ((seed >> 33) % 3) as f64
+                })
+                .collect();
+            let mut x = x0.clone();
+            sst_canonicalize(&chain, &mut x);
+            for &(l, k) in &pairs {
+                assert!(x[l] >= x[k], "{x0:?} -> {x:?} violates x{l} >= x{k}");
+            }
+            // 列 0〜3 は並べ替え、4〜6 は巡回 (C3 の像)、7 は不変
+            let mut a = x0[0..4].to_vec();
+            let mut b = x[0..4].to_vec();
+            a.sort_by(|p, q| p.partial_cmp(q).unwrap());
+            b.sort_by(|p, q| p.partial_cmp(q).unwrap());
+            assert_eq!(a, b);
+            assert!((0..3).any(|r| (0..3).all(|i| x[4 + i] == x0[4 + (i + r) % 3])), "{x0:?} -> {x:?} is not a rotation on 4..7");
+            assert_eq!(x[7], x0[7]);
+        }
     }
 
     #[test]
