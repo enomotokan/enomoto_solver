@@ -1385,7 +1385,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         // 試作 `ENOMOTO_MIP_SYM_SST=x` の写しの回数 (計測で数えるため、ログの有無にかかわらず出す)
         if sym_sst_x() {
             let c: Vec<u64> = SST_X_STATS.iter().map(|c| c.load(std::sync::atomic::Ordering::Relaxed)).collect();
-            eprintln!("MIP: SST=x: mapped {}, failed (rows still violated) {}, failed (check) {}, dropped after a restart {}", c[0], c[1], c[2], c[3]);
+            eprintln!("MIP: SST=x: mapped {}, failed (rows still violated) {}, failed (check) {}, dropped after a restart {}, not better than the cutoff {}", c[0], c[1], c[2], c[3], c[4]);
         }
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
@@ -2552,8 +2552,9 @@ pub(crate) fn sym_sst() -> bool {
 /// ([`symmetry::sst_canonicalize`])。写せなければ目的値だけを打ち切りに使う (解は元の問題の解として持つ)。
 /// SST を使う実行可能性問題 ([`sym_sst_feas`]) でも同じく写す
 /// [`sym_sst_x`] の写しの回数 (外側の求解ごと、全スレッドの和): [写して SST の行を満たした, 写しても行に反した (元の x を暫定解に),
-/// 写した解の確かめに落ちた (同じく元の x), 再スタートの後で写せず捨てた]。外側の求解の終わりに `MIP: SST=x:` の行で出す
-pub(crate) static SST_X_STATS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+/// 写した解の確かめに落ちた (同じく元の x), 再スタートの後で写せず捨てた, 写しても今の問題で実行不能だが刈り込みの上限より悪い (捨ててよい)]。
+/// 1 (写しても反した) は「今の問題 (再スタートの後の固定・カットの行を含む) で実行不能」で、SST の行に反するとは限らない。外側の求解の終わりに `MIP: SST=x:` の行で出す
+pub(crate) static SST_X_STATS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
 
 pub(crate) fn sym_sst_x() -> bool {
     env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v == "x")

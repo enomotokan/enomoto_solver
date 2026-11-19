@@ -7329,6 +7329,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_SYM_SST=x`: SST の行に反する解を SST の段の群で写して、行を満たす代表にする
             // (元の問題での実行可能性と目的値は変わらない。analysis/sstx_20261119/)
             let sstx = !self.sst_chain.is_empty() && orig.n == self.p.n && self.sst_chain.iter().all(|lv| lv.fits(self.p.n));
+            let mut sst_worse = false;
             if sstx && !self.p.is_feasible(&x, FEASTOL) {
                 // 写しに失敗したら (写しても SST の行に反する・写した解の確かめに落ちる)、元の x に戻して「元の問題の解」として
                 // 暫定解にする (下の orig_only。目的値は打ち切り・目的の伝播・被約費用の固定に使い、答えには元の x を返す)
@@ -7338,18 +7339,56 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let z1 = orig.objective(&x);
                 let check = orig.is_feasible(&x, 10.0 * FEASTOL) && (z1 - z0).abs() <= 1e-7 * z0.abs().max(1.0);
                 debug_assert!(check, "SST=x: the mapped solution is infeasible without the SST rows or changed the objective {z0} -> {z1}");
+                // 写した解が今の問題で実行不能で、目的値が刈り込みの上限 (暫定解・打ち切り値) に届かないときは、失敗ではなく「悪い解」と
+                // 数える (再スタートの後の問題は、被約費用の固定・カットの行など、上限より良い解だけを残す絞り込みを含むので、
+                // 元の問題の局所探索の悪い解はそれに反する。analysis/sstx_20261119/ の 5 節)。どちらにしても暫定解にはならない
+                let worse = z0 >= self.prune_limit().min(self.params.cutoff) - 1e-9 * z0.abs().max(1.0);
                 let kind = if !check {
                     x = x0;
                     2
                 } else if self.p.is_feasible(&x, FEASTOL) {
                     0
+                } else if worse {
+                    x = x0;
+                    4
                 } else {
                     x = x0;
                     1
                 };
+                sst_worse = kind == 4;
                 super::SST_X_STATS[kind].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // 診断 `ENOMOTO_MIP_SST_X_DIAG`: 写しに失敗した解が今の問題のどこに反するか (境界・2 項の差の行 (SST の形)・ほかの行) を出す
+                if (kind == 1 || kind == 4) && env_str!("ENOMOTO_MIP_SST_X_DIAG").is_some() {
+                    let mut y = x.clone();
+                    super::symmetry::sst_canonicalize(&self.sst_chain, &mut y);
+                    let (mut vb, mut vb_fixed, mut vs, mut vo) = (0usize, 0usize, 0usize, 0usize);
+                    for j in 0..self.p.n {
+                        if y[j] < self.p.col_lo[j] - 1e-6 || y[j] > self.p.col_up[j] + 1e-6 {
+                            vb += 1;
+                            if self.p.col_lo[j] == self.p.col_up[j] {
+                                vb_fixed += 1;
+                            }
+                        }
+                    }
+                    for i in 0..self.p.m {
+                        let act: f64 = self.p.rows[i].iter().map(|&(j, a)| a * y[j]).sum();
+                        if act < self.p.row_lo[i] - 1e-6 || act > self.p.row_up[i] + 1e-6 {
+                            let r = &self.p.rows[i];
+                            if r.len() == 2 && r[0].1 == -r[1].1 && self.p.row_lo[i] == 0.0 {
+                                vs += 1;
+                            } else {
+                                vo += 1;
+                            }
+                        }
+                    }
+                    let viol_x0 = (0..self.p.n).filter(|&j| x[j] < self.p.col_lo[j] - 1e-6 || x[j] > self.p.col_up[j] + 1e-6).count();
+                    eprintln!(
+                        "MIP: SST_X_DIAG: restarts {} n {} m {} (orig n {} m {}), chain levels {}: mapped violates bounds {vb} (fixed columns {vb_fixed}), 2-term difference rows {vs}, other rows {vo}; the unmapped x violates bounds {viol_x0}; z {:.6e}, cutoff {:.6e}, incumbent {:?}",
+                        self.params.restarts, self.p.n, self.p.m, orig.n, orig.m, self.sst_chain.len(), z0, self.params.cutoff, self.incumbent.as_ref().map(|i| i.0)
+                    );
+                }
                 if kind != 0 && self.params.verbose {
-                    eprintln!("MIP: SST=x: mapping failed ({}) for a solution {z0:.10e} [{}]", if kind == 1 { "SST rows still violated" } else { "check failed" }, self.heur_label);
+                    eprintln!("MIP: SST=x: mapping failed ({}) for a solution {z0:.10e} [{}]", ["", "infeasible in the current problem", "check failed", "", "infeasible in the current problem, not better than the cutoff"][kind], self.heur_label);
                 }
             }
             // `ENOMOTO_MIP_SYM_LEX_CANON` (試作): lex-leader の行に反する解も生成元で写して使う。9946555 (対称性の検出の近道)
@@ -7369,7 +7408,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 再スタートの後の問題は前処理をかけ直していて (列の代入・固定・目的関数の定数)、`orig` (最初の回の対称性の行を
                 // 加える前の問題) とは解の空間が違うので使わない
                 if self.params.restarts > 0 || orig.n != self.p.n {
-                    if sstx {
+                    if sstx && !sst_worse {
                         super::SST_X_STATS[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     return false;
