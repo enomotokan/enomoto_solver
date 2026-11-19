@@ -34,6 +34,9 @@ pub struct Pseudocost {
     inf_total_n: u64,
     /// 試作 `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT` の判定用: 目的の利得が正 (1e-9 より大きい) だった観測の数 (上下合計)。
     n_pos_gain: u64,
+    /// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN` (p2inf_20261119): 解いている途中で上げた衝突の重み (0 なら上げていない)。木の様子を見て
+    /// [`super::solver`] が設定する
+    pub cw_dyn: f64,
     /// 実行不能で終わった葉と、目的値で打ち切った葉の数 (スコアの動的な重み)。
     pub infeasible_leaves: u64,
     pub objlim_leaves: u64,
@@ -66,6 +69,7 @@ impl Pseudocost {
             inf_total: 0.0,
             inf_total_n: 0,
             n_pos_gain: 0,
+            cw_dyn: 0.0,
             infeasible_leaves: 0,
             objlim_leaves: 0,
             conflict: [vec![0.0; n], vec![0.0; n]],
@@ -352,6 +356,7 @@ impl Pseudocost {
         // 試作 `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT` = w (p2inf_20261119、既定 0 で使わない): 擬似費用の平均が上下とも 0 (目的の利得の手がかりが
         // ない: bnatt400 は LP の値が最後まで 0) のときだけ衝突の重みを w にする。一律の 0.1 は bnatt400 を解くが、擬似費用に意味のある
         // mas76・pk1 を 1.3〜1.6 倍遅くした (衝突の項が擬似費用の選び方を乱す)
+        wc = wc.max(self.cw_dyn);
         let wflat = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT", 0.0, f64);
         // 判定: 観測のうち目的の利得が正だったものが `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT_FRAC` (既定 5%) 以下 (観測がなければ手がかりなしとみなす)。
         // 平均が厳密に 0 という判定では、目的の列の分枝などで少し利得が出るとすぐ外れ、bnatt400 の 4 スレッドが 900 秒で解けなかった
