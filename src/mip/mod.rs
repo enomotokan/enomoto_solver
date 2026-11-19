@@ -4284,7 +4284,7 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Opti
     // 試作 `ENOMOTO_MIP_INTSING` の `h` (既定はオフ、[`crate::presolve::colsingleton::INTSING_HOLD`]): 最上段の呼び出しの間は INTSING を保留し、
     // 支配される 0-1 列の固定の後のかけ直しで消す。入れ子の呼び出し (かけ直し) は状態をそのまま受け継ぐ
     use crate::presolve::colsingleton::{intsing_domfirst, intsing_order, INTSING_HELD, INTSING_HOLD};
-    // 試作 `ENOMOTO_MIP_INTSING` の `o` (既定はオフ、analysis/slowm_20261119 §13.4): 最上段の呼び出しで、支配される 0-1 列の固定
+    // `ENOMOTO_MIP_INTSING` の `o` (2026-11-19 から既定の `1go` に含む、analysis/slowm_20261119 §13.4): 最上段の呼び出しで、支配される 0-1 列の固定
     // ([`dominated_binary_fixings`]) を前処理の前の元の問題に先にかける (固定が自由な列の `ENOMOTO_T_MIP_DOMCOL_MIN_FRAC` に満たなければ捨てる、
     // 後の段と同じ規則)。INTSING が列の費用を行の他の列へ移して費用が負の列を作る前に固定を済ませる (air03: 1g では固定 2297 → 160 本)。
     // 固定を捨てた問題は、`o` なしとまったく同じ前処理になる
@@ -4759,6 +4759,10 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         let mut fix = dominated_binary_fixings(&prob);
         if verbose {
             eprintln!("MIP: presolve: {} dominated binaries fixed ({:.2}s)", fix.len(), t0.elapsed().as_secs_f64());
+        }
+        // 診断 `ENOMOTO_MIP_DIAG_COSTSHIFT` (analysis/slowm_20261119 §14、振る舞いは変えない): 等式でずらした費用 c' = c − λᵀA_E で固定が増えるか数える
+        if env_str!("ENOMOTO_MIP_DIAG_COSTSHIFT").is_some() {
+            diag_costshift(&prob, fix.len());
         }
         // `ENOMOTO_T_MIP_DOMCOL_MIN_FRAC` (2026-11-18 から既定 0.1、`=0` で使わない): 固定が自由な列のこの割合に満たなければ固定を捨てる。drev の P
         // (analysis/vsscip_slow_20261118/tree2/README.md 4 節) で遅くなった nw04 (3440 / 87482 列 = 3.9%、2.35 倍)・nu25-pr12 (3.6%、1.58 倍)・
@@ -8723,6 +8727,89 @@ fn dual_bound_tightening(prob: &mut MipProblem) -> usize {
 /// のどちらかで y_k を 0 に固定する。候補は、衝突グラフの y_j の隣と、(上限が導けるとき) y_j の最も短い行の列。
 /// 固定した列を含む組は使わない (固定は順に、それまでの固定をした問題で正しい。支配と「導ける」は境界を締めても崩れない)。
 /// 調べる組は `ENOMOTO_T_MIP_DOMCOL_MAX_PAIRS` まで (既定 100 万)。固定 (列, 値) を返す。
+/// 診断 `ENOMOTO_MIP_DIAG_COSTSHIFT` (analysis/slowm_20261119 §14): 等式の行 `A_E x = b_E` で費用をずらした `c' = c − λᵀA_E` (実行可能な点では
+/// 目的が定数 `λᵀb_E` だけ違うだけ) で [`dominated_binary_fixings_with`] を数える。λ は (r) 根の LP の双対値の等式の分と、(l) LP
+/// `min Σ_{j: 0-1 列で等式に出る} max(0, −c'_j)` の解。元の費用の固定の数 `base` と並べて 1 行で出す。
+fn diag_costshift(prob: &MipProblem, base: usize) {
+    use crate::simplex::mip_lp::TwoStageLp;
+    use lp::{LpStatus, SolveLimits};
+    let t0 = std::time::Instant::now();
+    let n = prob.n;
+    let eq: Vec<bool> = (0..prob.m).map(|i| prob.row_lo[i] == prob.row_up[i] && prob.row_lo[i].is_finite()).collect();
+    let neq = eq.iter().filter(|&&e| e).count();
+    let binary = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0;
+    let in_eq: Vec<bool> = (0..n).map(|j| prob.cols[j].iter().any(|&(i, _)| eq[i])).collect();
+    let jset: Vec<usize> = (0..n).filter(|&j| binary(j) && in_eq[j]).collect();
+    let nfree = (0..n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count();
+    let shifted = |lam: &[f64]| -> Vec<f64> { (0..n).map(|j| prob.cost[j] - prob.cols[j].iter().filter(|&&(i, _)| eq[i]).map(|&(i, a)| lam[i] * a).sum::<f64>()).collect() };
+    let count = |c: &[f64]| -> (usize, usize) {
+        let mut q = prob.clone();
+        q.cost = c.to_vec();
+        let neg = jset.iter().filter(|&&j| c[j] < -1e-9).count();
+        (dominated_binary_fixings_with(&q, env_def!("ENOMOTO_MIP_DOMCOL_PRED", "1").is_some()).len(), neg)
+    };
+    let neg0 = jset.iter().filter(|&&j| prob.cost[j] < -1e-9).count();
+    // (r) 根の LP の双対値
+    let deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+    let t1 = std::time::Instant::now();
+    let mut lp = TwoStageLp::new(&prob.col_lo, &prob.col_up, &prob.cost, &prob.rows, &prob.row_lo, &prob.row_up);
+    let st_r = lp.solve(&SolveLimits { deadline, ..Default::default() });
+    let it_r = lp.total_iterations();
+    let (fix_r, neg_r) = if st_r == LpStatus::Optimal {
+        let y = lp.row_duals();
+        let lam: Vec<f64> = (0..prob.m).map(|i| if eq[i] { y[i] } else { 0.0 }).collect();
+        count(&shifted(&lam))
+    } else {
+        (usize::MAX, usize::MAX)
+    };
+    let secs_r = t1.elapsed().as_secs_f64();
+    // (l) λ を LP で選ぶ: 変数 λ_i (等式 i、自由) と t_j ≥ 0 (j ∈ jset)、行 t_j − Σ_i a_ij λ_i ≥ −c_j、min Σ t_j
+    let t2 = std::time::Instant::now();
+    let eqi: Vec<usize> = (0..prob.m).filter(|&i| eq[i]).collect();
+    let mut pos = vec![usize::MAX; prob.m];
+    for (k, &i) in eqi.iter().enumerate() {
+        pos[i] = k;
+    }
+    let ne = eqi.len();
+    let nv = ne + jset.len();
+    let mut lo = vec![f64::NEG_INFINITY; nv];
+    let up = vec![f64::INFINITY; nv];
+    let mut cc = vec![0.0; nv];
+    for t in 0..jset.len() {
+        lo[ne + t] = 0.0;
+        cc[ne + t] = 1.0;
+    }
+    let mut rows = Vec::with_capacity(jset.len());
+    let (mut rlo, mut rup) = (Vec::with_capacity(jset.len()), Vec::with_capacity(jset.len()));
+    for (t, &j) in jset.iter().enumerate() {
+        let mut r: Vec<(usize, f64)> = prob.cols[j].iter().filter(|&&(i, _)| eq[i]).map(|&(i, a)| (pos[i], -a)).collect();
+        r.push((ne + t, 1.0));
+        r.sort_unstable_by_key(|e| e.0);
+        rows.push(r);
+        rlo.push(-prob.cost[j]);
+        rup.push(f64::INFINITY);
+    }
+    let (mut fix_l, mut neg_l, mut it_l, mut st_l) = (usize::MAX, usize::MAX, 0usize, LpStatus::Optimal);
+    if ne > 0 && !jset.is_empty() {
+        let mut lp2 = TwoStageLp::new(&lo, &up, &cc, &rows, &rlo, &rup);
+        st_l = lp2.solve(&SolveLimits { deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(60)), ..Default::default() });
+        it_l = lp2.total_iterations() as usize;
+        if st_l == LpStatus::Optimal {
+            let v = lp2.col_values();
+            let mut lam = vec![0.0; prob.m];
+            for (k, &i) in eqi.iter().enumerate() {
+                lam[i] = v[k];
+            }
+            (fix_l, neg_l) = count(&shifted(&lam));
+        }
+    }
+    let secs_l = t2.elapsed().as_secs_f64();
+    eprintln!(
+        "COSTSHIFT {{\"n\":{n},\"free\":{nfree},\"m\":{},\"eq\":{neq},\"bin_in_eq\":{},\"base\":{base},\"neg0\":{neg0},\"root\":{{\"st\":\"{st_r:?}\",\"iters\":{it_r},\"fix\":{},\"neg\":{},\"secs\":{secs_r:.3}}},\"lam\":{{\"st\":\"{st_l:?}\",\"iters\":{it_l},\"fix\":{},\"neg\":{},\"secs\":{secs_l:.3}}},\"secs\":{:.3}}}",
+        prob.m, jset.len(), fix_r as i64, neg_r as i64, fix_l as i64, neg_l as i64, t0.elapsed().as_secs_f64()
+    );
+}
+
 fn dominated_binary_fixings(prob: &MipProblem) -> Vec<(usize, f64)> {
     dominated_binary_fixings_with(prob, env_def!("ENOMOTO_MIP_DOMCOL_PRED", "1").is_some())
 }
