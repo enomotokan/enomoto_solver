@@ -3564,7 +3564,7 @@ pub(super) fn lp_farkas_ratio<L: MipLp>(lp: &L, n: usize) -> f64 {
     }
     let mut z = vec![0.0; n];
     let (mut rlo, mut rhi, mut ysum) = (0.0f64, 0.0f64, 0.0f64);
-    // 試作 `ENOMOTO_MIP_LPINF_ROWTINY` (p2inf_20261119、既定では使わない): 丸めの誤差ほどの重み (|y_i| <= 1e-9 (1 + max|y|)) の行を射線から落とす。
+    // `ENOMOTO_MIP_LPINF_ROWTINY` (p2inf_20261119、2026-11-19 に既定にした。`=0` で以前の動き): 丸めの誤差ほどの重み (|y_i| <= 1e-9 (1 + max|y|)) の行を射線から落とす。
     // 片側が無限の行に 1e-17 程度の逆向きの重みが載ると隙間が ±∞ になり、標準形では成り立つ証明 (`std_farkas_ok` は小さな重みの無限の項を
     // 無視する) を際どいとみなしていた (neos859080 で証明の 7 割余り)。z は残した行だけから作るので、落とした後の射線もそのまま証明になる
     let ytiny = if lpinf_rowtiny() { 1e-9 * (1.0 + ymax) } else { 0.0 };
@@ -3613,9 +3613,9 @@ thread_local! {
     static DBG_TRACE_NODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// 試作 `ENOMOTO_MIP_LPINF_ROWTINY` ([`lp_farkas_ratio`])。`0` で切る
+/// `ENOMOTO_MIP_LPINF_ROWTINY` ([`lp_farkas_ratio`]、p2inf_20261119、2026-11-19 に既定にした。`=0` で以前の動き)
 fn lpinf_rowtiny() -> bool {
-    env_str!("ENOMOTO_MIP_LPINF_ROWTINY").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_LPINF_ROWTINY", "1").is_some_and(|v| v != "0")
 }
 
 /// LP の際どい実行不能の確かめ ([`lp_farkas_marginal`]) を使うか (既定で使う。`ENOMOTO_MIP_NO_LPINF_CHECK` で全部まとめて止める:
