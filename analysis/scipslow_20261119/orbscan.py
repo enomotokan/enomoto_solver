@@ -7,7 +7,7 @@ D = Path(__file__).resolve().parent; WT = D.parents[1]
 sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
 probs = [p for part in json.loads((WT / "analysis/cbcimpl_20261029/mitt_parts.json").read_text()) for p in part]
-OUT = D / "orbscan.jsonl"
+OUT = Path(os.environ.get("ORBSCAN_OUT", str(D / "orbscan.jsonl")))  # 走っている間は scratchpad に書き、終わってから写す
 done = {json.loads(l)["problem"] for l in OUT.read_text().splitlines()} if OUT.exists() else set()
 dump = Path(tempfile.gettempdir()) / "orbscan_dump.mps"
 for p in probs:
