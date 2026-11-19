@@ -12707,8 +12707,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !prop_ok {
                 self.add_conflict();
             }
-            if let Some((j, up, _, _)) = node.branch {
-                self.pc.add_inference(j, up, self.dom.stack_len().saturating_sub(stack_before_prop) as f64);
+            // 分枝の後の推論の数 (擬似費用の推論スコア)。既定は行の伝播の分だけ。試作 `ENOMOTO_MIP_INF_ALL` ([`inf_all`]) では
+            // 目的・双対証明・リテラルの衝突・カットのプールの伝播の後で数える (SCIP は衝突の制約の伝播も推論に数える)
+            if !inf_all() {
+                if let Some((j, up, _, _)) = node.branch {
+                    self.pc.add_inference(j, up, self.dom.stack_len().saturating_sub(stack_before_prop) as f64);
+                }
             }
             xp("m_prop");
             // 目的関数の伝播 (目的値 <= 打ち切り値)
@@ -12779,6 +12783,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let prop_ok = prop_ok && (!cutpool_prop() || self.propagate_cut_pool());
             if !prop_ok && rp_stage.is_empty() {
                 rp_stage = "p_cpool";
+            }
+            if inf_all() {
+                if let Some((j, up, _, _)) = node.branch {
+                    self.pc.add_inference(j, up, self.dom.stack_len().saturating_sub(stack_before_prop) as f64);
+                }
             }
             xp("m_proof");
             self.dbg_trace("after dual proofs and literal conflicts");
@@ -25750,6 +25759,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: NODECNT degenerate duals (tid {}): nodes {}, candidates {}, btran {}, fixed by theta >= gap {}, fixed by theta = inf {}, nodes changed {}, sign mismatch {}", self.pool_tid, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
             }
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
+            eprintln!("MIP: inference: branchings counted {}, mean bound changes after a branching {:.2} (ENOMOTO_MIP_INF_ALL {})", self.pc.inference_count(), self.pc.inference_mean(), inf_all());
             if tc_on('g') {
                 let g = self.tc_g_stats;
                 eprintln!("MIP: TC g: calls {}, columns tightened by the open nodes {}, by the propagation {}, trees closed {}", g[0], g[1], g[2], g[3]);
@@ -26229,6 +26239,13 @@ pub(super) fn orbitope_reason() -> bool {
 
 /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
 /// 通し番号を残し、HiGHS 式の衝突解析でその証明の行から説明して遡る。
+/// 試作 `ENOMOTO_MIP_INF_ALL` (p2inf_20261119、既定では使わない): 分枝の後の推論の数を、行の伝播だけでなく目的・双対証明・
+/// リテラルの衝突・カットのプールの伝播まで含めて数える。bnatt400 はリテラルの衝突の伝播で約 14 万の境界を締めるが、推論スコアに入らない
+pub(super) fn inf_all() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_INF_ALL").is_some_and(|v| v != "0"))
+}
+
 /// 試作 `ENOMOTO_MIP_LIT_EXPLAIN` (p2inf_20261119、既定では使わない): リテラルの衝突のプールの伝播で締めた変更を、衝突を行にしたものから
 /// 衝突解析で遡れるようにする ([`Solver::lit_prop`])。bnatt400 では解析の段の 1/3 がリテラルの衝突で締めた変更を遡れずに止まっていた
 /// (SCIP は衝突を制約 (logicor) として持つので遡れる)
