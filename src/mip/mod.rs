@@ -6674,20 +6674,40 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
         let fixed_pass0 = fixed;
         spec_ver = u64::MAX;
-        // 試作 `ENOMOTO_MIP_PROBE_USELESS` = K (既定では使わない。analysis/scipslow_20261119): SCIP の「50 回続けて全く役に立たない試しで打ち切る」
-        // と同じく、固定も締め付けも増えない試しが K 回続いたらプロービングをやめる (含意は数えない)。air03 は 512 列を試して固定・締め付け・
-        // 同値な組が 0 のまま 2.9 秒 (SCIP は 51 回で打ち切り 0.4 秒)
+        // 試作 `ENOMOTO_MIP_PROBE_USELESS` = K (既定では使わない。analysis/scipslow_20261119 の 3・5 節): SCIP のプロービングの打ち切り
+        // (`maxtotaluseless` 50・`maxuseless` 1000) と同じ形。固定も締め付けも増えず、新しい含意 (試した列と同じ行に入らない列への含意。同じ行に
+        // 入る列への含意は行から直接出るので数えない) も無い試しが K 回続いたら、プロービングをやめる (固定も締め付けも増えない試しの回数の上限
+        // `ENOMOTO_T_MIP_PROBE_USELESS_MAX` (SCIP の `maxuseless` 1000 に当たる) は既定で使わない: 1000 にすると physiciansched6-2 が 37 → 80 秒。
+        // 新しい含意が出続けていた)。air03 は 512 列を試して固定・締め付け・同値な組が 0 のまま 2.9 秒 (含意は行から出る 92 万本。
+        // SCIP は 51 回で打ち切り 0.4 秒)。最初の版 (含意を数えず K 回) は drayage-25-23 で含意 5 万本を失い全種で 3.4 倍遅かった
         let useless_k = env_str!("ENOMOTO_MIP_PROBE_USELESS").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-        let (mut useless_run, mut useless_last) = (0usize, fixed + tightened);
+        let useless_max = tunable!("ENOMOTO_T_MIP_PROBE_USELESS_MAX", usize::MAX, usize);
+        let (mut useless_run, mut total_run, mut useless_last) = (0usize, 0usize, fixed + tightened);
+        let mut prev_probe: Option<(usize, usize)> = None;
+        let mut row_mark: Vec<u32> = if useless_k > 0 { vec![u32::MAX; prob.n] } else { Vec::new() };
         for (cnt, &j) in cands.iter().enumerate() {
             if useless_k > 0 {
-                if fixed + tightened > useless_last {
-                    useless_run = 0;
-                    useless_last = fixed + tightened;
+                // 直前の試しの結果を数える
+                if let Some((pj, e0)) = prev_probe.take() {
+                    if fixed + tightened > useless_last {
+                        useless_run = 0;
+                        total_run = 0;
+                        useless_last = fixed + tightened;
+                    } else {
+                        useless_run += 1;
+                        let tag = pj as u32;
+                        for &(i, _) in &prob.cols[pj] {
+                            for &(k, _) in &prob.rows[i] {
+                                row_mark[k] = tag;
+                            }
+                        }
+                        let fresh = edges.len() > e0 && edges[e0..].iter().any(|&(_, b)| row_mark[(b / 2) as usize] != tag);
+                        total_run = if fresh { 0 } else { total_run + 1 };
+                    }
                 }
-                if useless_run >= useless_k {
+                if total_run >= useless_k || useless_run >= useless_max {
                     if verbose {
-                        eprintln!("MIP: probing: PROBE_USELESS: {useless_run} successive probes without fixings or tightenings, stopped");
+                        eprintln!("MIP: probing: PROBE_USELESS: stopped after {total_run} successive probes with nothing new ({useless_run} without fixings or tightenings)");
                     }
                     break 'passes;
                 }
@@ -6708,7 +6728,9 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             }
             let found0 = fixed + tightened;
             probed += 1;
-            useless_run += 1;
+            if useless_k > 0 {
+                prev_probe = Some((j, edges.len()));
+            }
             // `ENOMOTO_MIP_PREPAR` の `p`: 窓の結果を使う (窓がない・古ければ、ここから窓を作る)
             let spec_res = if let Some(pool) = &pool {
                 let valid = spec_ver == ver && cnt >= spec_start && cnt < spec_start + spec.len();
