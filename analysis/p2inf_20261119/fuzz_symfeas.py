@@ -17,6 +17,9 @@ def gen0(seed):
             rlo[k] = 1.0
         else:
             break
+    # 環境変数 FUZZ_CAP_MULT (既定 1): 容量の行 (右辺が 1 より大きい ≤ の行) の右辺を倍にし、前処理で実行不能と決まる問題を減らす
+    mult = float(__import__("os").environ.get("FUZZ_CAP_MULT", "1"))
+    rup = [u * mult if u < inf and u > 1.0 else u for u in rup]
     return lo, up, c, it, rows, rlo, rup
 N = int(sys.argv[1]); start = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 bad = 0; t0 = time.time(); cnt = {}
