@@ -1254,6 +1254,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     orbitopes: Rc<Vec<super::symmetry::Orbitope>>,
     /// lex-leader の行を作った生成元 ([`super::SYM_LEX_GENS`]。`ENOMOTO_MIP_SYM_LEX_CANON` で使う)
     lex_gens: Rc<Vec<Vec<usize>>>,
+    /// 試作 `ENOMOTO_MIP_SYM_SST=x` の SST の段 ([`super::SYM_SST_CHAIN`]、[`super::symmetry::sst_canonicalize`])。空なら写さない
+    sst_chain: Rc<Vec<super::symmetry::SstLevel>>,
     /// orbital fixing の生成元 ([`super::sym_of`]、[`super::SYM_OF_GENS`])。空なら使わない。
     of_gens: Rc<super::symmetry::OrbitalGens>,
     /// orbital fixing の軌道の控え (除いた生成元, 軌道)。同じ生成元を除くノードが続く (潜る) 間は作り直さない。
@@ -1555,6 +1557,7 @@ pub(crate) struct TreeSnapshot {
     orbitopes: Vec<super::symmetry::Orbitope>,
     orig: Option<std::sync::Arc<MipProblem>>,
     lex_gens: Vec<Vec<usize>>,
+    sst_chain: Vec<super::symmetry::SstLevel>,
     of_gens: Vec<Vec<usize>>,
     /// 試作 `ENOMOTO_MIP_SYMREFL` の反転を含む生成元
     refl_gens: Vec<super::symdyn::SignedGen>,
@@ -5633,6 +5636,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             None if params.submip && !super::subb::sub_tables() => Rc::new(Vec::new()),
             None => super::SYM_LEX_GENS.with(|t| t.borrow().clone()).unwrap_or_default(),
         },
+        sst_chain: match &snap {
+            Some(sn) => Rc::new(sn.sst_chain.clone()),
+            None if params.submip && !super::subb::sub_tables() => Rc::new(Vec::new()),
+            None => super::SYM_SST_CHAIN.with(|t| t.borrow().clone()).unwrap_or_default(),
+        },
         of_gens: Rc::new(super::symmetry::OrbitalGens::new(match &snap {
             Some(sn) => sn.of_gens.clone(),
             None if params.submip && !super::subb::sub_tables() => Vec::new(),
@@ -7313,6 +7321,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for o in self.orbitopes.iter() {
                 o.canonicalize(&mut x);
             }
+            // 試作 `ENOMOTO_MIP_SYM_SST=x`: SST の行に反する解を SST の段の群で写して、行を満たす代表にする
+            // (元の問題での実行可能性と目的値は変わらない。analysis/sstx_20261119/)
+            let sstx = !self.sst_chain.is_empty() && orig.n == self.p.n && self.sst_chain.iter().all(|lv| lv.fits(self.p.n));
+            if sstx && !self.p.is_feasible(&x, FEASTOL) {
+                // 写しに失敗したら (写しても SST の行に反する・写した解の確かめに落ちる)、元の x に戻して「元の問題の解」として
+                // 暫定解にする (下の orig_only。目的値は打ち切り・目的の伝播・被約費用の固定に使い、答えには元の x を返す)
+                let x0 = x.clone();
+                let z0 = orig.objective(&x);
+                super::symmetry::sst_canonicalize(&self.sst_chain, &mut x);
+                let z1 = orig.objective(&x);
+                let check = orig.is_feasible(&x, 10.0 * FEASTOL) && (z1 - z0).abs() <= 1e-7 * z0.abs().max(1.0);
+                debug_assert!(check, "SST=x: the mapped solution is infeasible without the SST rows or changed the objective {z0} -> {z1}");
+                let kind = if !check {
+                    x = x0;
+                    2
+                } else if self.p.is_feasible(&x, FEASTOL) {
+                    0
+                } else {
+                    x = x0;
+                    1
+                };
+                super::SST_X_STATS[kind].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if kind != 0 && self.params.verbose {
+                    eprintln!("MIP: SST=x: mapping failed ({}) for a solution {z0:.10e} [{}]", if kind == 1 { "SST rows still violated" } else { "check failed" }, self.heur_label);
+                }
+            }
             // `ENOMOTO_MIP_SYM_LEX_CANON` (試作): lex-leader の行に反する解も生成元で写して使う。9946555 (対称性の検出の近道)
             // で neos-950242 に lex-leader の行 3-4 本が付くようになり、根の局所探索・FJ の解 (4、22 など) が並べ替えられずに
             // 捨てられていた (以前は対称性なしで 4 を見つけていた)
@@ -7330,6 +7364,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 再スタートの後の問題は前処理をかけ直していて (列の代入・固定・目的関数の定数)、`orig` (最初の回の対称性の行を
                 // 加える前の問題) とは解の空間が違うので使わない
                 if self.params.restarts > 0 || orig.n != self.p.n {
+                    if sstx {
+                        super::SST_X_STATS[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     return false;
                 }
                 // `ENOMOTO_MIP_SYM_ORIG_CUT` (試作): 暫定解にはせず、値だけを打ち切り値に使う (ORIG_INC と違い、ヒューリスティクスと
@@ -7353,7 +7390,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     return false;
                 }
-                if env_str!("ENOMOTO_MIP_SYM_ORIG_INC").is_none() {
+                // 試作 `ENOMOTO_MIP_SYM_SST=x`: 写しても SST の行に反する解 (許容差の際など) も、目的値は打ち切りに使えるので暫定解にする
+                if env_str!("ENOMOTO_MIP_SYM_ORIG_INC").is_none() && !sstx {
                     return false;
                 }
                 orig_only = true;
@@ -12671,7 +12709,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let lw = self.dom.take_low_water();
                 let start = if self.lit_conflicts.dirty || env_str!("ENOMOTO_MIP_LIT_FULL_SCAN").is_some() { 0 } else { self.lit_pos.min(lw) };
                 self.lit_conflicts.dirty = false;
-                let r = self.lit_conflicts.propagate(self.p, &mut self.dom, start);
+                let r = self.lit_prop(start);
                 self.share_used_lits();
                 self.lit_pos = self.dom.stack_len();
                 self.dom.take_low_water();
@@ -16892,7 +16930,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.dom.tighten_upper(self.p, j, self.bfl(j, v));
                     }
                     let ok = !self.dom.infeasible && self.dom.propagate(self.p) && self.propagate_objective() && {
-                        match self.lit_conflicts.propagate(self.p, &mut self.dom, pos) {
+                        match self.lit_prop(pos) {
                             Ok(_) => true,
                             Err(()) => false,
                         }
@@ -19006,7 +19044,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let rhs = if *obj { obj_lim - konst } else { *konst };
             rhs.is_finite().then(|| (c.clone(), rhs))
         };
-        let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() { Some(&lookup) } else { None };
+        let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() || lit_explain() { Some(&lookup) } else { None };
         let confs = self.dom.analyze_multi_bumps(self.p, start, max_len, reconv, hcs.then_some(&mut bumps), lk);
         if hcs && !bumps.is_empty() {
             self.pc.bump_conflict(&bumps);
@@ -19995,7 +20033,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let lw = self.dom.take_low_water();
             let start = if self.lit_conflicts.dirty { 0 } else { self.lit_pos.min(lw) };
             self.lit_conflicts.dirty = false;
-            let r = self.lit_conflicts.propagate(self.p, &mut self.dom, start);
+            let r = self.lit_prop(start);
             self.share_used_lits();
             self.lit_pos = self.dom.stack_len();
             self.dom.take_low_water();
@@ -20432,6 +20470,53 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// プールのカット `k` を今の定義域で伝播する。締めたら `Ok(true)`、矛盾 (活動量が右辺を越える、締めて定義域が空) なら `Err`。
+    /// リテラルの衝突のプールの伝播。試作 `ENOMOTO_MIP_LIT_EXPLAIN` ([`lit_explain`]) なら、0-1 列だけの衝突で締めた変更に、衝突を
+    /// 行 `Σ_{x_j >= 1 のリテラル} x_j - Σ_{x_j <= 0 のリテラル} x_j <= (x_j >= 1 のリテラルの数) - 1` にした写しの番号を理由として付け
+    /// (カットのプールの伝播の試作 `CONFLICT_PROOF_EXPLAIN` と同じ写しの表)、衝突解析で遡れるようにする。それ以外の衝突は従来どおり外からの変更
+    fn lit_prop(&mut self, start: usize) -> Result<usize, ()> {
+        if !lit_explain() {
+            return self.lit_conflicts.propagate(self.p, &mut self.dom, start);
+        }
+        let p = self.p;
+        let (arena, aidx) = (&mut self.cut_arena, &mut self.cut_arena_idx);
+        let mut tagger = |lits: &[super::conflict_pool::Lit], dom: &mut super::domain::Domain| {
+            let mut row: Vec<(usize, f64)> = Vec::with_capacity(lits.len());
+            let mut nlow = 0usize;
+            for &(j, upper, v) in lits {
+                let bin = p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0;
+                if !bin || !((upper && v == 0.0) || (!upper && v == 1.0)) {
+                    dom.set_external_tag(5);
+                    return;
+                }
+                if upper {
+                    row.push((j, -1.0));
+                } else {
+                    row.push((j, 1.0));
+                    nlow += 1;
+                }
+            }
+            row.sort_by_key(|t| t.0);
+            let rhs = nlow as f64 - 1.0;
+            use std::hash::{Hash, Hasher};
+            let mut hs = std::collections::hash_map::DefaultHasher::new();
+            for &(j, a) in &row {
+                (j, a.to_bits()).hash(&mut hs);
+            }
+            rhs.to_bits().hash(&mut hs);
+            let h = hs.finish();
+            let idx = match aidx.get(&h) {
+                Some(&i) if arena[i as usize].0 == row && arena[i as usize].1 == rhs => i as usize,
+                _ => {
+                    arena.push((row, rhs));
+                    aidx.insert(h, (arena.len() - 1) as u32);
+                    arena.len() - 1
+                }
+            };
+            dom.set_cut_tag(idx);
+        };
+        self.lit_conflicts.propagate_tag(p, &mut self.dom, start, Some(&mut tagger))
+    }
+
     fn cutpool_prop_cut(&mut self, k: usize, cont_frac: f64) -> Result<bool, ()> {
         let p = self.p;
         let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
@@ -23282,7 +23367,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new(if gap4('o') { o.clone_without_implications() } else { (**o).clone() }));
         let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis, clq_lazy: self.clq_lazy.clone(), gen_lazy: self.gen_lazy.clone() };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), sst_chain: (*self.sst_chain).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis, clq_lazy: self.clq_lazy.clone(), gen_lazy: self.gen_lazy.clone() };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
@@ -25953,6 +26038,14 @@ pub(super) fn tubr_letter(c: char) -> bool {
 
 /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
 /// 通し番号を残し、HiGHS 式の衝突解析でその証明の行から説明して遡る。
+/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN` (p2inf_20261119、既定では使わない): リテラルの衝突のプールの伝播で締めた変更を、衝突を行にしたものから
+/// 衝突解析で遡れるようにする ([`Solver::lit_prop`])。bnatt400 では解析の段の 1/3 がリテラルの衝突で締めた変更を遡れずに止まっていた
+/// (SCIP は衝突を制約 (logicor) として持つので遡れる)
+pub(super) fn lit_explain() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v != "0"))
+}
+
 pub(super) fn conflict_proof_explain() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN").is_some())

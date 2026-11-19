@@ -61,6 +61,7 @@ pub(crate) struct SymScope {
     lex: Option<std::rc::Rc<Vec<Vec<usize>>>>,
     of: Option<std::rc::Rc<Vec<Vec<usize>>>>,
     cut: Option<std::rc::Rc<Vec<Vec<usize>>>>,
+    sst: Option<std::rc::Rc<Vec<super::symmetry::SstLevel>>>,
     prev_flag: bool,
 }
 
@@ -72,6 +73,7 @@ impl SymScope {
             lex: super::SYM_LEX_GENS.with(|t| t.borrow_mut().take()),
             of: super::SYM_OF_GENS.with(|t| t.borrow_mut().take()),
             cut: super::SYM_CUT_GENS.with(|t| t.borrow_mut().take()),
+            sst: super::SYM_SST_CHAIN.with(|t| t.borrow_mut().take()),
             prev_flag: SUB_SYM_SOLVE.with(|f| f.replace(true)),
         }
     }
@@ -84,6 +86,7 @@ impl Drop for SymScope {
         super::SYM_LEX_GENS.with(|t| *t.borrow_mut() = self.lex.take());
         super::SYM_OF_GENS.with(|t| *t.borrow_mut() = self.of.take());
         super::SYM_CUT_GENS.with(|t| *t.borrow_mut() = self.cut.take());
+        super::SYM_SST_CHAIN.with(|t| *t.borrow_mut() = self.sst.take());
         SUB_SYM_SOLVE.with(|f| f.set(self.prev_flag));
     }
 }

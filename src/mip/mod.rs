@@ -1292,9 +1292,13 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         condrev::decide(p, params.verbose);
     }
     if outer {
+        for c in &SST_X_STATS {
+            c.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
+        SYM_SST_CHAIN.with(|t| *t.borrow_mut() = None);
         SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
         symdyn::reset();
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
@@ -1357,6 +1361,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
             ORBITOPES.with(|t| *t.borrow_mut() = None);
             SYM_ORIG.with(|t| *t.borrow_mut() = None);
             SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
+            SYM_SST_CHAIN.with(|t| *t.borrow_mut() = None);
             SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
             symdyn::reset();
             SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
@@ -1377,9 +1382,15 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
                 eprintln!("MIP: SUBFIX summary: {}", heur_subfix::summary());
             }
         }
+        // 試作 `ENOMOTO_MIP_SYM_SST=x` の写しの回数 (計測で数えるため、ログの有無にかかわらず出す)
+        if sym_sst_x() {
+            let c: Vec<u64> = SST_X_STATS.iter().map(|c| c.load(std::sync::atomic::Ordering::Relaxed)).collect();
+            eprintln!("MIP: SST=x: mapped {}, failed (rows still violated) {}, failed (check) {}, dropped after a restart {}", c[0], c[1], c[2], c[3]);
+        }
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
+        SYM_SST_CHAIN.with(|t| *t.borrow_mut() = None);
         SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
         symdyn::reset();
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
@@ -2019,6 +2030,7 @@ fn clear_sym_state() {
     ORBITOPES.with(|t| *t.borrow_mut() = None);
     SYM_ORIG.with(|t| *t.borrow_mut() = None);
     SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
+    SYM_SST_CHAIN.with(|t| *t.borrow_mut() = None);
     SYM_OF_GENS.with(|t| *t.borrow_mut() = None);
     symdyn::reset();
     SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
@@ -2508,6 +2520,8 @@ thread_local! {
     pub(crate) static SYM_ORIG: std::cell::RefCell<Option<std::rc::Rc<MipProblem>>> = const { std::cell::RefCell::new(None) };
     /// lex-leader の行を作った生成元 (`ENOMOTO_MIP_SYM_LEX_CANON` でヒューリスティクスの解を写すのに使う。同じく消す)。
     pub(crate) static SYM_LEX_GENS: std::cell::RefCell<Option<std::rc::Rc<Vec<Vec<usize>>>>> = const { std::cell::RefCell::new(None) };
+    /// 試作 `ENOMOTO_MIP_SYM_SST=x` ([`sym_sst_x`]): SST の行を作った段 (ヒューリスティクスの解を SST の行を満たす代表に写すのに使う。同じく消す)。
+    pub(crate) static SYM_SST_CHAIN: std::cell::RefCell<Option<std::rc::Rc<Vec<symmetry::SstLevel>>>> = const { std::cell::RefCell::new(None) };
     /// orbital fixing の生成元 ([`sym_of`]。lex-leader の行の代わり。再スタートの後は [`symmetry::verify_generators`] で
     /// 確かめ直したものに置き換える。同じく消す)。
     pub(crate) static SYM_OF_GENS: std::cell::RefCell<Option<std::rc::Rc<Vec<Vec<usize>>>>> = const { std::cell::RefCell::new(None) };
@@ -2533,11 +2547,23 @@ pub(crate) fn sym_sst() -> bool {
     env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v != "0")
 }
 
-/// 試作 `ENOMOTO_MIP_SYM_SST_FEAS` (p2inf_20261119、既定では使わない): 目的が全部 0 の問題 (実行可能性問題) に限って [`sym_sst`] と同じく
+/// 試作 `ENOMOTO_MIP_SYM_SST=x` (analysis/sstx_20261119/、既定では使わない): [`sym_sst`] に加えて、ヒューリスティクスの解が SST の行だけに
+/// 反するとき、元の問題 (SST の行を足す前) で実行可能なら、SST の段の群で写して行を満たす代表にしてから暫定解にする
+/// ([`symmetry::sst_canonicalize`])。写せなければ目的値だけを打ち切りに使う (解は元の問題の解として持つ)。
+/// SST を使う実行可能性問題 ([`sym_sst_feas`]) でも同じく写す
+/// [`sym_sst_x`] の写しの回数 (外側の求解ごと、全スレッドの和): [写して SST の行を満たした, 写しても行に反した (元の x を暫定解に),
+/// 写した解の確かめに落ちた (同じく元の x), 再スタートの後で写せず捨てた]。外側の求解の終わりに `MIP: SST=x:` の行で出す
+pub(crate) static SST_X_STATS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+pub(crate) fn sym_sst_x() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v == "x")
+}
+
+/// `ENOMOTO_MIP_SYM_SST_FEAS` (p2inf_20261119、2026-11-19 に既定にした。`=0` で以前の動き): 目的が全部 0 の問題 (実行可能性問題) に限って [`sym_sst`] と同じく
 /// SST のカットを使う。SST を orbital fixing の代わりにすると対称性のある最適化問題で遅くなる (hang_20261117 15.2・15.3 節) が、
 /// fhnw-binpack4-4 (目的が全部 0) は SST で初めて実行不能を示せる。同じ成分で orbital fixing と混ぜると代表の選び方が食い違うので混ぜない
 pub(crate) fn sym_sst_feas() -> bool {
-    env_str!("ENOMOTO_MIP_SYM_SST_FEAS").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_SYM_SST_FEAS", "1").is_some_and(|v| v != "0")
 }
 
 pub(crate) fn sym_of() -> bool {
@@ -3068,6 +3094,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     };
     // 対称性の行・固定を加える前の問題 (ヒューリスティクスはこちらで解を探し、並べ替えてから使う)
     SYM_ORIG.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(prob.clone())));
+    SYM_SST_CHAIN.with(|t| *t.borrow_mut() = None);
     let td = t0.elapsed().as_secs_f64();
     let sym_diag = format!("detect {td:.2}s, refine {:.2}s, log work {}", symmetry::refine_time() - rt0, symmetry::log_work() - lw0);
     // 双子のオービトープだけのとき (探索で生成元が見つからない) も、下でオービトープを置くため空の対称性で続ける
@@ -3106,15 +3133,19 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     let pairs = if of {
         Vec::new()
     } else if sst {
-        let (pairs, levels) = symmetry::sst_pairs_except(
+        let (pairs, levels, chain) = symmetry::sst_pairs_except(
             &sym,
             &used,
             &in_orb,
             tunable!("ENOMOTO_T_MIP_SYM_SST_GENS", 64usize, usize),
             tunable!("ENOMOTO_T_MIP_SYM_SST_WORK", 50_000_000u64, u64),
+            sym_sst_x(),
         );
         if verbose {
-            eprintln!("MIP: symmetry: SST cuts: {} rows in {levels} levels", pairs.len());
+            eprintln!("MIP: symmetry: SST cuts: {} rows in {levels} levels{}", pairs.len(), if sym_sst_x() { " (solutions mapped to the SST representative, ENOMOTO_MIP_SYM_SST=x)" } else { "" });
+        }
+        if !chain.is_empty() {
+            SYM_SST_CHAIN.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(chain)));
         }
         pairs
     } else {
@@ -5812,7 +5843,7 @@ fn probe_equiv_block(prob: &MipProblem, base: &domain::Domain, bin0: &[bool], js
         .collect()
 }
 
-/// 試作 `ENOMOTO_MIP_EQUIV2_PWORK` (既定では使わない、analysis/clqprbg_20261119): 同値な組の巡 (`PROBE_CLIQUE=equiv`) の手間を、本体の
+/// `ENOMOTO_MIP_EQUIV2_PWORK` (2026-11-19 から既定、`=0` で以前の形。analysis/clqprbg_20261119・analysis/equiv2pw_20261119): 同値な組の巡 (`PROBE_CLIQUE=equiv`) の手間を、本体の
 /// プロービングの `pwork` と同じ重み (およそナノ秒: 2.5 x 行の走査 + 5 x 活動量の更新 + 68 x 境界の変更) で数える。巡は行の走査 (`debug_work`)
 /// だけを数えていて、活動量の更新が重い問題 (mzzv42z: 本体で work 74 万に対し pwork 8.5 億) では手間の上限が効かず、時間の安全網 (5 秒) まで走っていた
 fn equiv2_pwork(rows: u64, act: u64, chg: u64) -> u64 {
@@ -7183,10 +7214,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             (time_cap2, giveup2, u64::MAX, u64::MAX)
         };
         let w0 = d2.debug_work();
-        // 試作 `ENOMOTO_MIP_EQUIV2_PWORK` ([`equiv2_pwork`]): `pwork` の重みで数えた手間が `ENOMOTO_T_MIP_EQUIV2_PWORK_CAP` (既定 5e8、0.5 秒相当) を
+        // `ENOMOTO_MIP_EQUIV2_PWORK` ([`equiv2_pwork`]、既定): `pwork` の重みで数えた手間が `ENOMOTO_T_MIP_EQUIV2_PWORK_CAP` (既定 5e8、0.5 秒相当) を
         // 越えたら止め、`ENOMOTO_T_MIP_EQUIV2_PWORK_GIVEUP` (既定 1e8、0.1 秒相当) を越えても 1 組も見つからなければやめる (時間の上限と同じ値)。
         // 今までの行の走査の上限・時間の安全網もそのまま残す
-        let (pw_cap, pw_give) = if presolve_work() && env_str!("ENOMOTO_MIP_EQUIV2_PWORK").is_some_and(|v| v != "0") {
+        let (pw_cap, pw_give) = if presolve_work() && env_def!("ENOMOTO_MIP_EQUIV2_PWORK", "1").is_some() {
             (tunable!("ENOMOTO_T_MIP_EQUIV2_PWORK_CAP", 5.0e8, f64) as u64, tunable!("ENOMOTO_T_MIP_EQUIV2_PWORK_GIVEUP", 1.0e8, f64) as u64)
         } else {
             (u64::MAX, u64::MAX)
