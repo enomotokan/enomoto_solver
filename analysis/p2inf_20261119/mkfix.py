@@ -14,9 +14,17 @@ for l in open(tsv):
     if len(path) >= k:
         break
 lines = open(src).read().splitlines()
+# 同じ列の既存の境界の行 (UP BND C551 1 など) を消してから FX を足す (HiGHS の読み込みは、後に来た FX を採らない:
+# 最初の版はこれで固定が効かず、当方は固定のない問題を解いていた)
+fixed = {v for v, _ in path}
+bi = lines.index("BOUNDS") if "BOUNDS" in lines else None
+if bi is not None:
+    end = lines.index("ENDATA")
+    keep = [l for l in lines[bi + 1:end] if not (len(l.split()) >= 3 and l.split()[2] in fixed)]
+    lines = lines[:bi + 1] + keep + lines[end:]
 end = lines.index("ENDATA")
 fx = [f" FX BND {v} {b:g}" for v, b in path]
-if "BOUNDS" not in lines:
+if bi is None:
     lines.insert(end, "BOUNDS"); end += 1
 lines[end:end] = fx
 open(out, "w").write("\n".join(lines) + "\n")
