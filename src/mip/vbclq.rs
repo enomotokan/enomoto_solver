@@ -164,12 +164,13 @@ pub(crate) fn pseudoobj(p: &MipProblem, dom: &mut Domain, g: &CliqueGraph, u: f6
     out
 }
 
-/// 診断 `ENOMOTO_MIP_VBCLQ_COUNT_FILE=<ファイル>`: 呼ばれるたびに「固定した列の数 打ち切りの証明 (0/1)」を 1 行足す (fuzz で働いた回数を数える)
-pub(crate) fn count_file(o: &PseudoObjOut) {
+/// 診断 `ENOMOTO_MIP_VBCLQ_COUNT_FILE=<ファイル>`: 呼ばれるたびに「固定した列の数 打ち切りの証明 (0/1) 出どころ (r = 根の LP の前、
+/// e = 前処理の LP による固定の前)」を 1 行足す (fuzz で働いた回数を数える)
+pub(crate) fn count_file(o: &PseudoObjOut, tag: &str) {
     if let Some(f) = env_str!("ENOMOTO_MIP_VBCLQ_COUNT_FILE") {
         use std::io::Write;
         if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(f) {
-            let _ = writeln!(fh, "{} {}", o.fixed, o.infeas as u8);
+            let _ = writeln!(fh, "{} {} {tag}", o.fixed, o.infeas as u8);
         }
     }
 }

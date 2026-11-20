@@ -1863,6 +1863,12 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     };
     // `ENOMOTO_MIP_TPRE` (p・pl・pt) の解: 前処理後の問題で直せなくても捨てない (下の `tpre_orig`)
     let tpre_x_orig = if tpre_start { start.clone() } else { None };
+    // 試作 `ENOMOTO_MIP_VBCLQ` の `e`: 前処理の中で VB01 が見つけた解 (列の番号は前処理の前と同じ) を開始解にする (前処理後の問題で
+    // 実行可能なときだけ使われる。下の確かめ)
+    let start = match VBCLQ_E_SOL.with(|s| s.borrow_mut().take()) {
+        Some(x) if start.is_none() && x.len() == p.n => Some(x),
+        _ => start,
+    };
     match (&presolved, start) {
         (Some(Presolved::Reduced { prob, scaling, .. }), Some(x)) if x.len() == prob.n => {
             let mut xr: Vec<f64> = x.iter().zip(&scaling.d).map(|(v, d)| v / d).collect();
@@ -4961,21 +4967,30 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 試作 `ENOMOTO_MIP_VBCLQ` の `e` ([`presolve_vbclq_e`]、analysis/scipgate_20261120): LP による固定の前に、暫定解の値を上限にした
     // pseudoobj の固定をかける。固定したら前処理をかけ直し (固定した列と冗長になった行を消す)、その問題で LP による固定を回す
     if lp_probe_secs.is_some() && !submip && !VBCLQ_E_ACTIVE.with(|f| f.get()) && solver::vbclq().is_some_and(|v| v.contains('e')) {
-        let k = presolve_vbclq_e(&mut prob, verbose);
+        // 固定の前の問題を取っておく: 固定の後のかけ直しが実行不能と言ったら、それは信じずに (VB01 の解は許容誤差 1e-6 の内で実行可能で、
+        // 厳密な最適より良い値のことがある。その値を上限にした固定で厳密に実行可能な点が全て消える: fuzz_tiny の種 64・362)、
+        // 固定の前の問題で続ける (VB01 の解は開始解としてそのまま渡す)
+        let saved = prob.clone();
+        let k = presolve_vbclq_e(&mut prob, verbose, lp_probe_secs.unwrap_or(10.0));
         if k > 0 {
-            let mut postsolve = pre.postsolve_log;
             VBCLQ_E_ACTIVE.with(|f| f.set(true));
             let r = presolve_mip_depth(&prob, verbose, submip, lp_probe_secs, depth);
             VBCLQ_E_ACTIVE.with(|f| f.set(false));
-            return match r {
-                Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+            match r {
+                Some(Presolved::Infeasible) => {
+                    if verbose {
+                        eprintln!("MIP: VBCLQ e: the presolve after the fixings says infeasible; the fixings are dropped");
+                    }
+                    prob = saved;
+                }
                 Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) => {
                     debug_assert!(sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0));
+                    let mut postsolve = pre.postsolve_log;
                     postsolve.extend(post2);
-                    Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling })
+                    return Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling });
                 }
-                None => Some(Presolved::Reduced { prob, postsolve, scaling: pre.scaling }),
-            };
+                None => return Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling }),
+            }
         }
     }
     if let Some(secs) = lp_probe_secs {
@@ -5621,14 +5636,29 @@ fn lp_inf_untrusted<L: lp_api::MipLp>(lp: &L, n: usize) -> bool {
 
 /// 試作 `ENOMOTO_MIP_VBCLQ` の `e` (analysis/scipgate_20261120): 前処理の LP による固定の前に、暫定解の値 z を上限 (`cost · x <= z - offset`、
 /// 暫定解そのものは残る) にして [`vbclq::pseudoobj`] で 0-1 列を固定し、定義域の伝播の結果も列の境界に書く。暫定解の出どころ:
-/// - 診断 `ENOMOTO_MIP_VBCLQ_PRE_CUTOFF=<値>` (元の問題の目的の値。解は持たない、上限だけ)。
+/// - VB01 ([`heur_scip::vbounds01_on_problem`]、SCIP-VB の試作の Solver の外の版)。
+/// - 診断 `ENOMOTO_MIP_VBCLQ_PRE_CUTOFF=<値>` (元の問題の目的の値。解は持たない、上限だけ。VB01 の解より良ければこちら)。
 /// 解があれば [`VBCLQ_E_SOL`] に置き、前処理の後で開始解にする。境界を変えた列の数を返す
-fn presolve_vbclq_e(prob: &mut MipProblem, verbose: bool) -> usize {
+fn presolve_vbclq_e(prob: &mut MipProblem, verbose: bool, secs: f64) -> usize {
     let t0 = std::time::Instant::now();
-    let (z, src) = match env_str!("ENOMOTO_MIP_VBCLQ_PRE_CUTOFF").and_then(|s| s.parse::<f64>().ok()) {
-        Some(v) => (prob.sense_sign * v, "given cutoff"),
-        None => return 0,
+    // VB01 (SCIP-VB の Solver の外の版、[`heur_scip::vbounds01_on_problem`]) の解。サブ MIP 1 本の時間の上限は `secs` (前処理の
+    // LP による固定の時間の上限と同じ安全網。サブ MIP は 500 ノードまで)
+    let vb = heur_scip::vbounds01_on_problem(prob, verbose, secs);
+    let given = env_str!("ENOMOTO_MIP_VBCLQ_PRE_CUTOFF").and_then(|s| s.parse::<f64>().ok()).map(|v| prob.sense_sign * v);
+    let (z, src) = match (&vb, given) {
+        (Some((zv, _)), Some(zg)) if zg < *zv => (zg, "given cutoff"),
+        (Some((zv, _)), _) => (*zv, "VB01 solution"),
+        (None, Some(zg)) => (zg, "given cutoff"),
+        (None, None) => {
+            if verbose {
+                eprintln!("MIP: VBCLQ e: before the LP probing: no solution ({:.2}s)", t0.elapsed().as_secs_f64());
+            }
+            return 0;
+        }
     };
+    if let Some((_, x)) = vb {
+        VBCLQ_E_SOL.with(|s| *s.borrow_mut() = Some(x));
+    }
     let mut dom = domain::Domain::new(prob);
     if !prob.conflict_edges.is_empty() {
         dom.add_implications(prob.n, &prob.conflict_edges);
@@ -5639,7 +5669,7 @@ fn presolve_vbclq_e(prob: &mut MipProblem, verbose: bool) -> usize {
     let binary: Vec<bool> = (0..prob.n).map(|j| prob.is_int[j] && prob.col_lo[j] >= 0.0 && prob.col_up[j] <= 1.0).collect();
     let g = clique::CliqueGraph::build_with(prob.n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, &prob.col_lo, &prob.col_up, &prob.conflict_edges);
     let o = vbclq::pseudoobj(prob, &mut dom, &g, z - prob.offset);
-    vbclq::count_file(&o);
+    vbclq::count_file(&o, "e");
     // 上限より良い解がない (暫定解が最適) ときも、固定は書かない (暫定解の値の解は残るはずなので、数値の揺れとみなす)
     let mut changed = 0usize;
     if !o.infeas && o.fixed > 0 {
