@@ -1,0 +1,417 @@
+MIP: VUBAGG 0 columns x = y from variable upper bound rows (0.00s)
+MIP_FOLD: integer groups: 0 accepted, 0 rejected (V_R rows 150; rejected for V_R 0, non-±1 0, TU 0; net true accepted by net 0 work 0 over 0, panics 0, cert fails 0)
+MIP_FOLD: no fold (n 128 m 182) in 0.001s (reason line 526, ratio 0.997)
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: tightened 33 coefficients (skipped 0 in rows redundant within tolerance), normalized 0 integer rows
+MIP: presolve: merged 6 parallel rows (5 new equations)
+MIP: presolve: rows 182 -> 176, free columns 128 -> 125, nonzeros 735 -> 715, postsolve steps 2 (parallel columns merged: 0 integer, 0 continuous)
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: tightened 20 coefficients (skipped 0 in rows redundant within tolerance), normalized 0 integer rows
+MIP: presolve: merged 1 parallel rows (0 new equations)
+MIP: presolve: rows 176 -> 171, free columns 125 -> 120, nonzeros 715 -> 680, postsolve steps 5 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 0 of 120 free columns fixed (0.00s), not used
+MIP: LP probing pass 1: 26 candidates, 0 fixings (16 LPs, 246 iters, 0.00s)
+MIP: LP probing: tried 8 columns, fixed 0, LP -4.3000000000e1 -> -4.3000000000e1 (16 LPs, 246 iters, 0.00s, PREPAR 1 threads, 1 windows)
+MIP: LP probing: root LP 0.00s (81 iters, size 979), tried 8, fixed 0, basis passed false, total 327 iters 0.00s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.01s), not used
+MIP: probing: 75 of 75 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 20 implications (0.02s, cpu 0.00s, work 0, pwork 70630, chg 0)
+MIP: probing: PREPAR 1 threads, 2 windows, 75 of 75 probes from the windows
+MIP: probing: 0 equivalent binary pairs
+MIP: presolve: 0 dominated binaries fixed (0.00s)
+MIP: presolve: sparsified 0 rows (late)
+MIP: sparsify-late stats m 171 n 128 bincols 75 changed 0 binonly 0 shrunk<=1 0 nnz 680 -> 680 gate 0.000 (f 0.000 b 0.000)
+HNFPRE: round 0 eq 0 int_eq 0 rat_skip 0 comps 0 done 0 gave_up 0 cols 0 rank 0 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.000s) gave_up_why 0/0/0
+HNFPRE: round 0 tightened 0 columns
+CUTMIX clique edges total 10 rows 10 implonly 0 implpairs 20 bin 75
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (10 edges, 0.00s)
+MIP: symmetry: SYMSIGN true SYMSCALE false: flipped 1, scaled 0, tie rows doubled 0 of 171 rows for the detection
+MIP: symmetry: refinement 0.00s, work 4977 (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)
+MIP: symmetry: SYMPRE probe: 24 cells, 24 done as orbits, 3 probes, 3 generators (0.000s)
+MIP: symmetry: refinements stopped by the iteration cap 0 of 5 (ENOMOTO_MIP_HO6_SYMREFINE true)
+MIP: symmetry: orbital fixing with 0 of 3 generators
+MIP: symmetry: ORBPP 0 of 1 orbitopes static (packing, >= 3 rows, >= 10 columns), fixed 0 columns to 0
+MIP: symmetry: 1 full orbitopes (19x4)
+MIP: symmetry: 3 generators, 24 orbits on 96 columns, 0 lex-leader rows (0.00s, work 10502, search 0, verify 2937, detect 0.00s, refine 0.00s, log work 20471)
+MIP: objective step with implied integers: Some(1.0) (without: Some(1.0)); costed non-integer columns 0 (e.g. [])
+MIP: OBJINT c: lattice Some(ObjLat { s: 1.0, base: 0.0, m: 0.0, mm: 1e-9 }) (offset 0.0000000000e0), step Some(1.0)
+MIP: fixed-charge check: vb rows 5 of 171, continuous with vb 5 of 25
+MIP: twoopt improved -9.0000000000e0 -> -1.2000000000e1
+MIP: fixed-integer LP dual check: c x -1.2000000000e1, dual bound -1.2000000000e1 -> skip
+MIP:   global fixed integers 5 of 100 (newly 5 since the root LP)
+MIP: new incumbent -1.2000000000e1 at node 0 (0.00s) [tree]
+MIP: feasibility jump found a solution (0.00s)
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.00s)
+MIP: root LP -4.3000000000e1 (81 iters, 0.01s)
+MIP: root LP size: rows 171, free columns 120, nonzeros 680
+MIP: root LP work: 0.001009 tick-s (81 iters, 0.005s)
+MIP: fixed-charge check: vb rows 5 of 171, continuous with vb 5 of 25
+MIP: fixed-charge check: vb rows 5 of 171, continuous with vb 5 of 25
+CUTMIX types restarts 0 m 171 n 120 vbrow 0.029 vbcol 0.200 fc 0 fcnode 0 cont 0.208 genint 0.211 knap 0.000 knaptight 0.000 knapgub 0.000 knapgubcol 0.000 mixknap 0.819 setp 0.006 introw 0.269 intsmall 0.211 flow 0.000
+MIP: clique graph: 10 edges (10 from rows, probing implications 20)
+CLQSIG s 0.0306 sp 0.0058 ed 0.0255 fr 0.0909 vi 0.0000 (rows 171 bin 80 edges 10 frac 22) a 1.8 b 0.41 f 0.3356
+MIP: clique sigmoid: f 0.3356, clique cuts per root round 34
+MIP: fixed-charge check: vb rows 5 of 171, continuous with vb 5 of 25
+MIP: robust cut LP cap: size false, double false, progress true
+MIP: fixed-charge check: vb rows 5 of 171, continuous with vb 5 of 25
+MIP: fixed-charge check: vb rows 5 of 171, continuous with vb 5 of 25
+MCF detect: rows 171 cols 128 | flow cands 25 flow rows 24 commodities 4 cap cands 121 arcs 20 nodes 24 incons 0.50 undirected | fail 'inconsistent' | networks [] fc_network false | 0.000s
+MIP: cut selection probe: compared at 1 rounds (after round 1), probe wall 0.00s (budget 6.0s)
+MIP: cut selection probe (6 rounds): default 5 cuts gain 0.000000e0 (0.00s), pool 5 cuts gain 0.000000e0 (0.00s) -> default (rule rate, probe 0.00s in total, 0.01s)
+MIP: cut round 0: 5 cuts (of 80, sep 0.00s, LP 29 iters), LP rows 176 (cut rows mean nnz 2), obj -4.3000000000e1 (0.01s)
+MIP: OBJPROBE r: round 0: randomized rounding none (incumbent Some(-12.0) -> Some(-12.0), 0.00s, 0.01s)
+MIP: cut round 1: root cut time cap check: clock 0.001s of cap 12.00s (min rounds 8)
+MIP: cut round 1: mpsep gate: optimal face width 119 (threshold 86, 171 rows) -> wide
+MIP: cut round 1: 13 cuts (of 120, sep 0.01s, LP 33 iters), LP rows 188 (cut rows mean nnz 6), obj -4.3000000000e1 (0.02s)
+MIP: OBJPROBE r: round 1: randomized rounding none (incumbent Some(-12.0) -> Some(-12.0), 0.00s, 0.02s)
+MIP: cut round 2: root cut time cap check: clock 0.003s of cap 12.00s (min rounds 8)
+MIP: cut round 2: 7 cuts (of 143, sep 0.01s, LP 21 iters), LP rows 190 (cut rows mean nnz 4), obj -4.3000000000e1 (0.02s)
+MIP: oneopt improved -3.9000000000e1 -> -4.0000000000e1
+MIP: fixed-integer LP dual check: c x -4.0000000000e1, dual bound -4.0000000000e1 -> skip
+MIP:   global fixed integers 5 of 100 (newly 0 since the root LP)
+MIP: new incumbent -4.0000000000e1 at node 0 (0.02s) [tree]
+MIP: OBJPROBE r: round 2: randomized rounding found a solution (incumbent Some(-12.0) -> Some(-40.0), 0.00s, 0.02s)
+MIP: OBJPROBE p: round 2: gap 6.977e-2, 36 probed, 0 fixed, 0 fixed by reduced costs, LP -4.3000000000e1 -> -4.3000000000e1 (None), cutoff -4.0999959999e1 (0.00s, total 0.00s, 0.02s)
+MIP: cut round 3: root cut time cap check: clock 0.007s of cap 12.00s (min rounds 8)
+MIP: cut round 3: 11 cuts (of 145, sep 0.01s, LP 33 iters), LP rows 197 (cut rows mean nnz 6), obj -4.3000000000e1 (0.03s)
+MIP: OBJPROBE r: round 3: randomized rounding none (incumbent Some(-40.0) -> Some(-40.0), 0.00s, 0.03s)
+MIP: OBJPROBE p: round 3: gap 6.977e-2, 13 probed, 0 fixed, 0 fixed by reduced costs, LP -4.3000000000e1 -> -4.3000000000e1 (None), cutoff -4.0999959999e1 (0.00s, total 0.00s, 0.03s)
+MIP: cut round 4: root cut time cap check: clock 0.010s of cap 12.00s (min rounds 8)
+MIP: cut round 4: 7 cuts (of 177, sep 0.01s, LP 25 iters), LP rows 196 (cut rows mean nnz 5), obj -4.3000000000e1 (0.04s)
+MIP: OBJPROBE r: round 4: randomized rounding none (incumbent Some(-40.0) -> Some(-40.0), 0.00s, 0.04s)
+MIP: OBJPROBE p: round 4: gap 6.977e-2, 8 probed, 0 fixed, 0 fixed by reduced costs, LP -4.3000000000e1 -> -4.3000000000e1 (None), cutoff -4.0999959999e1 (0.00s, total 0.00s, 0.04s)
+MIP: mpsep: 4 rounds with extra points, 4 points, 446 extra candidates, chosen 38 cuts (2 do not cut x*), 0.023s
+SEP cmirdelta: calls 1267 with_new 406 new_deltas 1176 wins 32 (g 0 c 32 l 0, no_old 0) mean_gain 1.111 cands_new 32 chosen 1/43 eff_new 0.4423 eff_all 0.3123 time 0.000s
+MIP: cut loop done: 43 cuts added, 19 in LP, pool 181 cuts (1114 nonzeros), obj -4.3000000000e1 -> -4.3000000000e1
+MIP: LMBOOST: not used (Local-MIP improvements 0, last at 0.00s, incumbent only from the FJ thread false, gap 0.075, 0.04s)
+MIP: early root reduced costs stored (0 newly fixed integer columns, 0.04s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+MIP: root heuristic shifting: none (0.00s)
+MIP: root heuristic int shifting: none (0.00s)
+MIP: root heuristic randomized rounding: none (0.00s)
+MIP:   interior rounding: 1 interior points, vertex true (0.01s)
+MIP:   interior rounding: 6 rounded points tried, found false
+MIP: root heuristic interior rounding: none (0.01s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 0 of 95 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   sub-MIP: 69 free columns of 128, status Infeasible, nodes 0, objective None, 0.00s, 0 LP iterations, TICKS cpu 0.000 lp 0 prop 910 sep 0 pre 5761 heur 0 node 0 lpit 0 lu 0 lum 0
+MIP:   SUBFIX RENS try 1: target 0.60, fixing rate 0.54, depth 32, 10 backtracks, 44 free integer columns of 95, status Some(Infeasible), nodes 0, accepted false, 0.00s (dive+sub 0.00s)
+CUTMIX clique edges total 58 rows 15 implonly 43 implpairs 91 bin 34
+MIP: fixed-charge check: vb rows 12 of 81, continuous with vb 12 of 16
+MIP:   sub-MIP: 94 free columns of 128, status NodeLimit, nodes 50, objective Some(-39.0), 0.04s, 1562 LP iterations, TICKS cpu 0.027 lp 174470 prop 158025 sep 71795 pre 13948 heur 0 node 10450 lpit 1376 lu 2814800 lum 788284
+MIP:   SUBFIX RENS try 2: target 0.27, fixing rate 0.27, depth 16, 0 backtracks, 69 free integer columns of 95, status Some(NodeLimit), nodes 50, accepted false, 0.04s (dive+sub 0.05s)
+MIP:   SUBFIX RENS found nothing; running the default RENS as well
+MIP: root heuristic RENS: none (0.05s)
+MIP:   locks: fixing rate 0.72
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+MIP:   sub-MIP: 52 free columns of 128, status Infeasible, nodes 0, objective None, 0.00s, 0 LP iterations, TICKS cpu 0.000 lp 0 prop 0 sep 0 pre 944 heur 0 node 0 lpit 0 lu 0 lum 0
+MIP: root heuristic locks: none (0.00s)
+MIP:   clique: fixing rate 0.05
+MIP: root heuristic clique: none (0.00s)
+MIP:   vbounds (loose): fixing rate 0.05
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP:   vbounds (tight): fixing rate 0.05
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   RINS (HiGHS fill): fixing rate 0.37 from agreeing columns, 0.37 after fill (95 free integer columns)
+MIP:   RINS skipped: fixing rate 0.37 below 0.50 (S4_RINSRATE)
+MIP: root heuristic RINS: none (0.00s)
+MIP: after root heuristics: incumbent Some(-40.0) (0.10s)
+MIP: root objective probing: skipped (gap 6.977e-2 (LP -4.3000000000e1, incumbent -4.0000000000e1), 40 fractional binaries)
+MIP: GAP1 u: LP probing skipped (gap 6.977e-2)
+MIP: restart check: newly fixed 0, integer columns 100, free at the root 95, threshold 1.0, root LP 0.00s
+TRSTAT: tree start outer 0.12 solve 0.10 restarts 0 lb -4.3000000000e1 ub -4.0000000000e1
+CUTMIX clique edges total 15 rows 3 implonly 12 implpairs 18 bin 34
+MIP: fixed-charge check: vb rows 6 of 116, continuous with vb 6 of 18
+CUTMIX clique edges total 20 rows 7 implonly 13 implpairs 38 bin 13
+MIP: fixed-charge check: vb rows 15 of 45, continuous with vb 12 of 11
+MIP:   sub-MIP: 80 free columns of 128, status NodeLimit, nodes 500, objective Some(-41.0), 0.11s, 5318 LP iterations, TICKS cpu 0.131 lp 831116 prop 1079638 sep 202162 pre 10598 heur 0 node 122000 lpit 5405 lu 14176364 lum 3330963
+MIP: fixed-integer LP dual check: c x -4.1000000000e1, dual bound -4.3000000000e1 -> solve
+MIP:   global fixed integers 5 of 100 (newly 0 since the root LP)
+MIP: new incumbent -4.1000000000e1 at node 101 (0.31s) [tree RINS]
+MIP:   SUBFIX tree RINS try 1: target 0.48, fixing rate 0.40, depth 27, 0 backtracks, 55 free integer columns of 91, status Some(NodeLimit), nodes 500, accepted true, 0.12s (dive+sub 0.12s)
+MIP:   ALNS arm 0 reward 1.025 (counts [1, 0, 0, 0, 0, 0])
+MIP: NODECNT root gate: cut rows 28, matched root cuts 15, tight 0, tight path 0 (share 0.000); root chosen 43 (path 12); node path aggregation on
+MIP:     2.00s nodes     3468 open     161 lb -4.30000000e1 ub -4.10000000e1 lp_iters 47956 sb_iters 6132 sb_lps 954 sb_secs 0.11 node_iters 39163 (first 34322, lps 2567) heur_iters 10422 dive_iters 1104 lp_rows 331 node_cut_secs 0.14
+CUTMIX clique edges total 10 rows 10 implonly 0 implpairs 20 bin 75
+MIP: fixed-charge check: vb rows 5 of 172, continuous with vb 5 of 25
+MIP:   sub-MIP: 120 free columns of 128, status TimeLimit, nodes 614, objective Some(-38.0), 0.27s, 11875 LP iterations, TICKS cpu 0.300 lp 3368940 prop 1836740 sep 389231 pre 3296 heur 0 node 184200 lpit 11477 lu 45342744 lum 10760431
+MIP:   local branching k=18: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+MIP:     4.00s nodes     6308 open     139 lb -4.30000000e1 ub -4.10000000e1 lp_iters 78827 sb_iters 6323 sb_lps 970 sb_secs 0.13 node_iters 69629 (first 61904, lps 4377) heur_iters 22532 dive_iters 1125 lp_rows 327 node_cut_secs 0.19
+MIP:     6.00s nodes     9551 open     162 lb -4.30000000e1 ub -4.10000000e1 lp_iters 112229 sb_iters 6573 sb_lps 988 sb_secs 0.14 node_iters 102733 (first 90718, lps 6523) heur_iters 22628 dive_iters 1173 lp_rows 348 node_cut_secs 0.32
+TRSTAT: due outer 6.13 solve 6.10 root 0.10 tree 6.00 restarts 0 nodes 9700 open 159 q 0.4832 est 553399 est_left 6.42 est_left_h 336.3 lb -4.3000000000e1 root_lb -4.3000000000e1 ub -4.1000000000e1 gap 4.878e-2 newly 0/95 (0.0000) cuts 171/171 tcuts 55 rowdrop 0 est_r 6.42 left 113.9 guard pass
+MIP: TREE restart: 0 newly fixed integer columns at node 9700 (6.10s)
+MIP: restart check: newly fixed 0, integer columns 100, free at the root 95, threshold 1.0, root LP 0.00s
+MIP: restart 1 (0 of 100 integer columns newly fixed at the root, 55 cuts kept) (6.10s)
+MIP: RESTART_ROOT_CUTS: 1024 of 1024 cuts in the cut pool passed to the cut pool after the restart
+MIP: restart 1: pseudocost observations: columns up 95, down 94, both 94 (free integer columns 95); observations up 2828, down 3492; nodes 9700
+MIP: RESTART_ROOT_CUTS: global lower bound -4.3000000000e1 at the restart kept as a floor of the returned bound
+MIP: GAP4 r: released the LP, cut pool and queue of the solver before restart 1
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: tightened 0 coefficients (skipped 0 in rows redundant within tolerance), normalized 6 integer rows
+MIP: presolve: merged 1 parallel rows (0 new equations)
+MIP: presolve: rows 226 -> 226, free columns 120 -> 120, nonzeros 944 -> 944, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: probing: 75 of 75 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 20 implications (0.00s, cpu 0.00s, work 0, pwork 80209, chg 0)
+MIP: probing: PREPAR 1 threads, 2 windows, 75 of 75 probes from the windows
+MIP: probing: 0 equivalent binary pairs
+MIP: presolve: 0 dominated binaries fixed (0.00s)
+HNFPRE: round 0 eq 0 int_eq 0 rat_skip 0 comps 0 done 0 gave_up 0 cols 0 rank 0 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.000s) gave_up_why 0/0/0
+HNFPRE: round 0 tightened 0 columns
+MIP: restart cuts mapped through the presolve by substitution: 1024 of 1024 kept (without substitution 1024)
+CUTMIX clique edges total 10 rows 10 implonly 0 implpairs 20 bin 75
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (10 edges, 0.00s)
+MIP: symmetry: orbital fixing after the restart keeps 0 of 0 generators
+MIP: objective step with implied integers: Some(1.0) (without: Some(1.0)); costed non-integer columns 0 (e.g. [])
+MIP: OBJINT c: lattice Some(ObjLat { s: 1.0, base: 0.0, m: 0.0, mm: 1e-9 }) (offset 0.0000000000e0), step Some(1.0)
+MIP: fixed-charge check: vb rows 5 of 226, continuous with vb 5 of 25
+MIP: restart 1: started from the mapped pseudocost: columns up 95, down 94, both 94; observations up 2828, down 3492
+MIP: 1024 cuts from before the restart put in the cut pool
+MIP: fixed-integer LP dual check: c x -4.1000000000e1, dual bound -4.1000000000e1 -> skip
+MIP:   global fixed integers 5 of 100 (newly 5 since the root LP)
+MIP: new incumbent -4.1000000000e1 at node 0 (0.00s) [tree]
+MIP: start solution from before the restart: accepted true
+MIP: root LP basis from the presolve LP probing: none
+MIP: root LP basis from before the restart: 226 of 226 rows matched
+MIP: solving the root LP (0.00s)
+MIP: root LP after the restart: Optimal, 60 iters (0.00s)
+MIP: root LP -4.3000000000e1 (60 iters, 0.00s)
+MIP: root LP size: rows 226, free columns 120, nonzeros 944
+MIP: root LP work: 0.001347 tick-s (60 iters, 0.001s)
+MIP: fixed-charge check: vb rows 5 of 226, continuous with vb 5 of 25
+MIP: fixed-charge check: vb rows 5 of 226, continuous with vb 5 of 25
+CUTMIX types restarts 1 m 226 n 120 vbrow 0.022 vbcol 0.200 fc 0 fcnode 0 cont 0.208 genint 0.211 knap 0.004 knaptight 0.000 knapgub 0.000 knapgubcol 0.000 mixknap 0.757 setp 0.058 introw 0.257 intsmall 0.212 flow 0.000
+MIP: clique sigmoid: f 0.3356, clique cuts per root round 34
+MIP: fixed-charge check: vb rows 5 of 226, continuous with vb 5 of 25
+MIP: robust cut LP cap: size false, double false, progress true
+MIP: clique graph: 10 edges (10 from rows, probing implications 20)
+MIP: fixed-charge check: vb rows 5 of 226, continuous with vb 5 of 25
+MIP: fixed-charge check: vb rows 5 of 226, continuous with vb 5 of 25
+MCF detect: rows 226 cols 128 | flow cands 37 flow rows 26 commodities 1 cap cands 160 arcs 29 nodes 26 incons 1.00 undirected | fail 'inconsistent' | networks [] fc_network false | 0.000s
+MIP: cut round 0: 3 cuts (of 192, sep 0.00s, LP 27 iters), LP rows 229 (cut rows mean nnz 12), obj -4.3000000000e1 (0.01s)
+MIP: OBJPROBE r: round 0: randomized rounding none (incumbent Some(-41.0) -> Some(-41.0), 0.00s, 0.01s)
+MIP: OBJPROBE p: round 0: gap 4.651e-2, 33 probed, 0 fixed, 0 fixed by reduced costs, LP -4.3000000000e1 -> -4.3000000000e1 (None), cutoff -4.1999958999e1 (0.00s, total 0.00s, 0.01s)
+MIP: cut round 1: root cut time cap check: clock 0.003s of cap 11.39s (min rounds 8)
+MIP: cut round 1: mpsep gate: optimal face width 119 (threshold 113, 226 rows) -> wide
+MIP: cut round 1: 10 cuts (of 139, sep 0.01s, LP 31 iters), LP rows 239 (cut rows mean nnz 11), obj -4.3000000000e1 (0.02s)
+MIP: OBJPROBE r: round 1: randomized rounding none (incumbent Some(-41.0) -> Some(-41.0), 0.00s, 0.02s)
+MIP: OBJPROBE p: round 1: gap 4.651e-2, 5 probed, 0 fixed, 0 fixed by reduced costs, LP -4.3000000000e1 -> -4.3000000000e1 (None), cutoff -4.1999958999e1 (0.00s, total 0.00s, 0.02s)
+MIP: cut round 2: root cut time cap check: clock 0.011s of cap 11.39s (min rounds 8)
+MIP: cut round 2: 10 cuts (of 146, sep 0.02s, LP 42 iters), LP rows 247 (cut rows mean nnz 11), obj -4.3000000000e1 (0.04s)
+MIP: OBJPROBE r: round 2: randomized rounding none (incumbent Some(-41.0) -> Some(-41.0), 0.00s, 0.04s)
+MIP: OBJPROBE p: round 2: gap 4.651e-2, 10 probed, 0 fixed, 0 fixed by reduced costs, LP -4.3000000000e1 -> -4.3000000000e1 (None), cutoff -4.1999958999e1 (0.00s, total 0.00s, 0.04s)
+MIP: cut round 3: root cut time cap check: clock 0.023s of cap 11.39s (min rounds 8)
+MIP: cut round 3: 8 cuts (of 97, sep 0.02s, LP 58 iters), LP rows 248 (cut rows mean nnz 9), obj -4.3000000000e1 (0.06s)
+MIP: OBJPROBE r: round 3: randomized rounding none (incumbent Some(-41.0) -> Some(-41.0), 0.00s, 0.06s)
+MIP: cut round 4: root cut time cap check: clock 0.036s of cap 11.39s (min rounds 8)
+MIP: cut round 4: 10 cuts (of 236, sep 0.01s, LP 44 iters), LP rows 244 (cut rows mean nnz 9), obj -4.3000000000e1 (0.07s)
+MIP: OBJPROBE r: round 4: randomized rounding none (incumbent Some(-41.0) -> Some(-41.0), 0.00s, 0.07s)
+MIP: mpsep: 4 rounds with extra points, 4 points, 544 extra candidates, chosen 38 cuts (0 do not cut x*), 0.033s
+SEP cmirdelta: calls 14731 with_new 9971 new_deltas 28807 wins 1517 (g 0 c 1507 l 10, no_old 0) mean_gain 1.724 cands_new 1486 chosen 7/84 eff_new 0.0823 eff_all 0.2118 time 0.016s
+MIP: cut loop done: 41 cuts added, 11 in LP, pool 1350 cuts (13907 nonzeros), obj -4.3000000000e1 -> -4.3000000000e1
+MIP: early root reduced costs stored (0 newly fixed integer columns, 0.07s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: skipped (no solution before the restart)
+MIP: root heuristic shifting: skipped (no solution before the restart)
+MIP: root heuristic int shifting: skipped (no solution before the restart)
+MIP: root heuristic randomized rounding: none (0.00s)
+MIP: root heuristic interior rounding: skipped (no solution before the restart)
+MIP: root heuristic root reduced cost: skipped (no solution before the restart)
+MIP: root heuristic LP face: skipped (no solution before the restart)
+MIP: root heuristic RENS: skipped (no solution before the restart)
+MIP: root heuristic locks: skipped (no solution before the restart)
+MIP: root heuristic clique: skipped (no solution before the restart)
+MIP: root heuristic vbounds (loose): skipped (no solution before the restart)
+MIP: root heuristic vbounds (tight): skipped (no solution before the restart)
+MIP: fixed-charge check: vb rows 5 of 97, continuous with vb 4 of 12
+MIP:   sub-MIP: 70 free columns of 128, status NodeLimit, nodes 52, objective Some(-41.0), 0.02s, 882 LP iterations, TICKS cpu 0.017 lp 107685 prop 64174 sep 22787 pre 4309 heur 0 node 11700 lpit 857 lu 1900004 lum 461130
+MIP: root heuristic RINS: none (0.02s)
+MIP: after root heuristics: incumbent Some(-41.0) (0.09s)
+MIP: root objective probing: skipped (gap 4.651e-2 (LP -4.3000000000e1, incumbent -4.1000000000e1), 47 fractional binaries)
+MIP: GAP1 u: LP probing skipped (gap 4.651e-2)
+MIP: restart check: newly fixed 0, integer columns 100, free at the root 95, threshold 2.5, root LP 0.00s
+TRSTAT: tree start outer 6.21 solve 0.09 restarts 1 lb -4.3000000000e1 ub -4.1000000000e1
+MIP:   sub-MIP: 41 free columns of 128, status Infeasible, nodes 0, objective None, 0.00s, 0 LP iterations, TICKS cpu 0.000 lp 0 prop 306 sep 0 pre 1467 heur 0 node 0 lpit 0 lu 0 lum 0
+MIP:   SUBFIX tree RINS try 1: target 0.39, fixing rate 0.38, depth 10, 0 backtracks, 16 free integer columns of 26, status Some(Infeasible), nodes 0, accepted false, 0.00s (dive+sub 0.00s)
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP: NODECNT root gate: cut rows 29, matched root cuts 11, tight 1, tight path 1 (share 1.000); root chosen 41 (path 31); node path aggregation on
+CUTMIX clique edges total 10 rows 10 implonly 0 implpairs 20 bin 75
+MIP: fixed-charge check: vb rows 5 of 227, continuous with vb 5 of 25
+MIP:   sub-MIP: 120 free columns of 128, status TimeLimit, nodes 439, objective Some(-38.0), 0.29s, 11256 LP iterations, TICKS cpu 0.300 lp 3950059 prop 855744 sep 247061 pre 4352 heur 0 node 155845 lpit 10857 lu 52141889 lum 13577737
+MIP:   local branching k=18: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+MIP:     2.00s nodes     1959 open      20 lb -4.30000000e1 ub -4.10000000e1 lp_iters 35052 sb_iters 1664 sb_lps 150 sb_secs 0.06 node_iters 31894 (first 27682, lps 1479) heur_iters 14466 dive_iters 1097 lp_rows 464 node_cut_secs 0.21
+TRSTAT: due outer 8.67 solve 2.54 root 0.09 tree 2.45 restarts 1 nodes 2700 open 23 q 0.0716 est 84963 est_left 31.78 est_left_h 74.7 lb -4.3000000000e1 root_lb -4.3000000000e1 ub -4.1000000000e1 gap 4.878e-2 newly 0/95 (0.0000) cuts 292/226 tcuts 122 rowdrop 0 est_r 31.78 left 111.3 guard pass
+MIP: TREE restart: 0 newly fixed integer columns at node 2700 (2.54s)
+MIP: restart check: newly fixed 0, integer columns 100, free at the root 95, threshold 2.5, root LP 0.00s
+MIP: restart 2 (0 of 100 integer columns newly fixed at the root, 122 cuts kept) (2.54s)
+MIP: RESTART_ROOT_CUTS: 1744 of 1744 cuts in the cut pool passed to the cut pool after the restart
+MIP: restart 2: pseudocost observations: columns up 95, down 95, both 95 (free integer columns 95); observations up 3629, down 4402; nodes 2700
+MIP: RESTART_ROOT_CUTS: global lower bound -4.3000000000e1 at the restart kept as a floor of the returned bound
+MIP: GAP4 r: released the LP, cut pool and queue of the solver before restart 2
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: tightened 0 coefficients (skipped 0 in rows redundant within tolerance), normalized 3 integer rows
+MIP: presolve: merged 2 parallel rows (0 new equations)
+MIP: presolve: rows 348 -> 347, free columns 120 -> 120, nonzeros 1572 -> 1568, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: probing: 75 of 75 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 20 implications (0.00s, cpu 0.00s, work 0, pwork 112831, chg 0)
+MIP: probing: PREPAR 1 threads, 2 windows, 75 of 75 probes from the windows
+MIP: probing: 0 equivalent binary pairs
+MIP: presolve: 0 dominated binaries fixed (0.00s)
+HNFPRE: round 0 eq 0 int_eq 0 rat_skip 0 comps 0 done 0 gave_up 0 cols 0 rank 0 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.000s) gave_up_why 0/0/0
+HNFPRE: round 0 tightened 0 columns
+MIP: restart cuts mapped through the presolve by substitution: 1744 of 1744 kept (without substitution 1744)
+CUTMIX clique edges total 10 rows 10 implonly 0 implpairs 20 bin 75
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (10 edges, 0.00s)
+MIP: symmetry: orbital fixing after the restart keeps 0 of 0 generators
+MIP: objective step with implied integers: Some(1.0) (without: Some(1.0)); costed non-integer columns 0 (e.g. [])
+MIP: OBJINT c: lattice Some(ObjLat { s: 1.0, base: 0.0, m: 0.0, mm: 1e-9 }) (offset 0.0000000000e0), step Some(1.0)
+MIP: fixed-charge check: vb rows 5 of 347, continuous with vb 5 of 25
+MIP: restart 2: started from the mapped pseudocost: columns up 95, down 95, both 95; observations up 3629, down 4402
+MIP: 1744 cuts from before the restart put in the cut pool
+MIP: fixed-integer LP dual check: c x -4.1000000000e1, dual bound -4.1000000000e1 -> skip
+MIP:   global fixed integers 5 of 100 (newly 5 since the root LP)
+MIP: new incumbent -4.1000000000e1 at node 0 (0.00s) [tree]
+MIP: start solution from before the restart: accepted true
+MIP: root LP basis from the presolve LP probing: none
+MIP: root LP basis from before the restart: 347 of 347 rows matched
+MIP: solving the root LP (0.00s)
+MIP: root LP after the restart: Optimal, 120 iters (0.01s)
+MIP: root LP -4.3000000000e1 (120 iters, 0.01s)
+MIP: root LP size: rows 347, free columns 120, nonzeros 1568
+MIP: root LP work: 0.003844 tick-s (120 iters, 0.002s)
+MIP: fixed-charge check: vb rows 5 of 347, continuous with vb 5 of 25
+MIP: fixed-charge check: vb rows 5 of 347, continuous with vb 5 of 25
+CUTMIX types restarts 2 m 347 n 120 vbrow 0.014 vbcol 0.200 fc 0 fcnode 0 cont 0.208 genint 0.211 knap 0.003 knaptight 0.000 knapgub 0.000 knapgubcol 0.000 mixknap 0.758 setp 0.061 introw 0.216 intsmall 0.187 flow 0.000
+MIP: clique sigmoid: f 0.3356, clique cuts per root round 34
+MIP: fixed-charge check: vb rows 5 of 347, continuous with vb 5 of 25
+MIP: robust cut LP cap: size false, double false, progress true
+MIP: clique graph: 10 edges (10 from rows, probing implications 20)
+MIP: fixed-charge check: vb rows 5 of 347, continuous with vb 5 of 25
+MIP: fixed-charge check: vb rows 5 of 347, continuous with vb 5 of 25
+MCF detect: rows 347 cols 128 | flow cands 54 flow rows 34 commodities 1 cap cands 313 arcs 40 nodes 34 incons 1.00 undirected | fail 'inconsistent' | networks [] fc_network false | 0.000s
+MIP: cut round 0: 6 cuts (of 272, sep 0.00s, LP 47 iters), LP rows 353 (cut rows mean nnz 11), obj -4.3000000000e1 (0.01s)
+MIP: OBJPROBE r: round 0: randomized rounding none (incumbent Some(-41.0) -> Some(-41.0), 0.00s, 0.01s)
+MIP: OBJPROBE p: round 0: gap 4.651e-2, 49 probed, 0 fixed, 0 fixed by reduced costs, LP -4.3000000000e1 -> -4.3000000000e1 (None), cutoff -4.1999958999e1 (0.00s, total 0.00s, 0.01s)
+MIP: cut round 1: root cut time cap check: clock 0.005s of cap 11.13s (min rounds 8)
+MIP: cut round 1: mpsep gate: optimal face width 119 (threshold 174, 347 rows) -> narrow; stop
+MIP: cut round 1: 3 cuts (of 204, sep 0.00s, LP 18 iters), LP rows 353 (cut rows mean nnz 4), obj -4.3000000000e1 (0.02s)
+MIP: OBJPROBE r: round 1: randomized rounding none (incumbent Some(-41.0) -> Some(-41.0), 0.00s, 0.02s)
+MIP: OBJPROBE p: round 1: gap 4.651e-2, 8 probed, 0 fixed, 0 fixed by reduced costs, LP -4.3000000000e1 -> -4.3000000000e1 (None), cutoff -4.1999958999e1 (0.00s, total 0.00s, 0.02s)
+MIP: cut round 2: root cut time cap check: clock 0.010s of cap 11.13s (min rounds 8)
+MIP: cut round 2: 5 cuts (of 201, sep 0.00s, LP 24 iters), LP rows 357 (cut rows mean nnz 11), obj -4.3000000000e1 (0.02s)
+MIP: OBJPROBE r: round 2: randomized rounding none (incumbent Some(-41.0) -> Some(-41.0), 0.00s, 0.02s)
+MIP: OBJPROBE p: round 2: gap 4.651e-2, 1 probed, 0 fixed, 0 fixed by reduced costs, LP -4.3000000000e1 -> -4.3000000000e1 (None), cutoff -4.1999958999e1 (0.00s, total 0.00s, 0.02s)
+MIP: cut round 3: root cut time cap check: clock 0.014s of cap 11.13s (min rounds 8)
+MIP: cut round 3: 10 cuts (of 107, sep 0.00s, LP 51 iters), LP rows 364 (cut rows mean nnz 12), obj -4.3000000000e1 (0.03s)
+MIP: OBJPROBE r: round 3: randomized rounding none (incumbent Some(-41.0) -> Some(-41.0), 0.00s, 0.03s)
+MIP: cut round 4: root cut time cap check: clock 0.021s of cap 11.13s (min rounds 8)
+MIP: cut round 4: 1 cuts (of 143, sep 0.01s, LP 17 iters), LP rows 360 (cut rows mean nnz 12), obj -4.3000000000e1 (0.04s)
+MIP: OBJPROBE r: round 4: randomized rounding none (incumbent Some(-41.0) -> Some(-41.0), 0.00s, 0.04s)
+MIP: mpsep: 0 rounds with extra points, 0 points, 0 extra candidates, chosen 0 cuts (0 do not cut x*), 0.000s
+SEP cmirdelta: calls 20999 with_new 14531 new_deltas 42214 wins 2132 (g 0 c 2115 l 17, no_old 0) mean_gain 1.750 cands_new 2073 chosen 7/109 eff_new 0.0823 eff_all 0.2016 time 0.024s
+MIP: cut loop done: 25 cuts added, 11 in LP, pool 1995 cuts (20536 nonzeros), obj -4.3000000000e1 -> -4.3000000000e1
+MIP: early root reduced costs stored (0 newly fixed integer columns, 0.04s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: skipped (no solution before the restart)
+MIP: root heuristic shifting: skipped (no solution before the restart)
+MIP: root heuristic int shifting: skipped (no solution before the restart)
+MIP: root heuristic randomized rounding: none (0.00s)
+MIP: root heuristic interior rounding: skipped (no solution before the restart)
+MIP: root heuristic root reduced cost: skipped (no solution before the restart)
+MIP: root heuristic LP face: skipped (no solution before the restart)
+MIP: root heuristic RENS: skipped (no solution before the restart)
+MIP: root heuristic locks: skipped (no solution before the restart)
+MIP: root heuristic clique: skipped (no solution before the restart)
+MIP: root heuristic vbounds (loose): skipped (no solution before the restart)
+MIP: root heuristic vbounds (tight): skipped (no solution before the restart)
+MIP: fixed-charge check: vb rows 9 of 144, continuous with vb 8 of 15
+MIP:   sub-MIP: 72 free columns of 128, status NodeLimit, nodes 85, objective Some(-40.0), 0.06s, 3864 LP iterations, TICKS cpu 0.072 lp 610524 prop 453669 sep 59116 pre 6288 heur 0 node 23120 lpit 3413 lu 10548876 lum 2908077
+MIP: root heuristic RINS: none (0.06s)
+MIP: after root heuristics: incumbent Some(-41.0) (0.10s)
+MIP: root objective probing: skipped (gap 4.651e-2 (LP -4.3000000000e1, incumbent -4.1000000000e1), 45 fractional binaries)
+MIP: GAP1 u: LP probing skipped (gap 4.651e-2)
+MIP: restart check: newly fixed 0, integer columns 100, free at the root 95, threshold 2.5, root LP 0.00s
+TRSTAT: tree start outer 8.76 solve 0.10 restarts 2 lb -4.3000000000e1 ub -4.1000000000e1
+CUTMIX clique edges total 9 rows 3 implonly 6 implpairs 16 bin 12
+MIP: fixed-charge check: vb rows 7 of 89, continuous with vb 7 of 12
+MIP:   sub-MIP: 52 free columns of 128, status Optimal, nodes 3, objective Some(-37.0), 0.01s, 331 LP iterations, TICKS cpu 0.010 lp 37446 prop 38813 sep 134105 pre 3788 heur 0 node 651 lpit 291 lu 1010144 lum 160714
+MIP:   SUBFIX tree RINS try 1: target 0.40, fixing rate 0.48, depth 16, 0 backtracks, 27 free integer columns of 52, status Some(Optimal), nodes 3, accepted false, 0.01s (dive+sub 0.01s)
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP: NODECNT root gate: cut rows 31, matched root cuts 11, tight 0, tight path 0 (share 0.000); root chosen 25 (path 15); node path aggregation on
+CUTMIX clique edges total 10 rows 10 implonly 0 implpairs 20 bin 75
+MIP: fixed-charge check: vb rows 5 of 348, continuous with vb 5 of 25
+MIP:   sub-MIP: 120 free columns of 128, status TimeLimit, nodes 263, objective Some(-39.0), 0.30s, 8516 LP iterations, TICKS cpu 0.301 lp 3981714 prop 961019 sep 347286 pre 6848 heur 0 node 125188 lpit 8219 lu 65080897 lum 13780067
+MIP:   local branching k=18: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+MIP:     2.00s nodes     1983 open      50 lb -4.30000000e1 ub -4.10000000e1 lp_iters 36044 sb_iters 1461 sb_lps 84 sb_secs 0.04 node_iters 32734 (first 28809, lps 1379) heur_iters 15422 dive_iters 1140 lp_rows 609 node_cut_secs 0.16
+MIP:     4.00s nodes     4096 open      61 lb -4.30000000e1 ub -4.10000000e1 lp_iters 74329 sb_iters 2750 sb_lps 170 sb_secs 0.09 node_iters 69114 (first 61664, lps 2843) heur_iters 16100 dive_iters 1202 lp_rows 682 node_cut_secs 0.21
+MIP:     6.01s nodes     6083 open      46 lb -4.30000000e1 ub -4.10000000e1 lp_iters 103696 sb_iters 3566 sb_lps 238 sb_secs 0.13 node_iters 96989 (first 86676, lps 4129) heur_iters 16820 dive_iters 1246 lp_rows 652 node_cut_secs 0.27
+MIP:     8.01s nodes     7854 open      45 lb -4.30000000e1 ub -4.10000000e1 lp_iters 128331 sb_iters 4207 sb_lps 296 sb_secs 0.16 node_iters 120068 (first 106355, lps 5320) heur_iters 17761 dive_iters 1272 lp_rows 699 node_cut_secs 0.55
+CUTMIX clique edges total 10 rows 10 implonly 0 implpairs 20 bin 75
+MIP: fixed-charge check: vb rows 5 of 347, continuous with vb 5 of 25
+CUTMIX clique edges total 2 rows 1 implonly 1 implpairs 3 bin 6
+MIP: fixed-charge check: vb rows 7 of 60, continuous with vb 6 of 9
+CUTMIX clique edges total 10 rows 5 implonly 5 implpairs 16 bin 16
+MIP: fixed-charge check: vb rows 7 of 82, continuous with vb 5 of 11
+CUTMIX clique edges total 15 rows 8 implonly 7 implpairs 24 bin 30
+MIP: fixed-charge check: vb rows 7 of 192, continuous with vb 5 of 15
+CUTMIX clique edges total 31 rows 10 implonly 21 implpairs 44 bin 20
+MIP: fixed-charge check: vb rows 7 of 101, continuous with vb 5 of 12
+MIP:   sub-MIP: 120 free columns of 128, status TimeLimit, nodes 0, objective None, 0.33s, 1028 LP iterations, TICKS cpu 0.300 lp 1039074 prop 659824 sep 5863902 pre 32261 heur 0 node 940 lpit 4448 lu 26392008 lum 3882300
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 1, 0, 0, 0])
+MIP:    10.01s nodes     9174 open      41 lb -4.30000000e1 ub -4.10000000e1 lp_iters 150956 sb_iters 5138 sb_lps 346 sb_secs 0.19 node_iters 141350 (first 124997, lps 6197) heur_iters 19225 dive_iters 1296 lp_rows 714 node_cut_secs 0.73
+MIP:    12.01s nodes    10710 open      39 lb -4.30000000e1 ub -4.10000000e1 lp_iters 176303 sb_iters 5359 sb_lps 362 sb_secs 0.20 node_iters 166179 (first 147408, lps 7240) heur_iters 19545 dive_iters 1319 lp_rows 692 node_cut_secs 0.77
+MIP:    14.01s nodes    12481 open      30 lb -4.30000000e1 ub -4.10000000e1 lp_iters 210788 sb_iters 6040 sb_lps 422 sb_secs 0.24 node_iters 199289 (first 177915, lps 8438) heur_iters 20255 dive_iters 1335 lp_rows 722 node_cut_secs 0.80
+MIP:    16.01s nodes    14463 open      26 lb -4.30000000e1 ub -4.10000000e1 lp_iters 245520 sb_iters 6883 sb_lps 492 sb_secs 0.28 node_iters 232490 (first 208491, lps 9681) heur_iters 20984 dive_iters 1376 lp_rows 733 node_cut_secs 0.85
+MIP:    18.01s nodes    16271 open      12 lb -4.30000000e1 ub -4.10000000e1 lp_iters 277981 sb_iters 7725 sb_lps 552 sb_secs 0.31 node_iters 263566 (first 236857, lps 10855) heur_iters 21541 dive_iters 1390 lp_rows 802 node_cut_secs 0.89
+CUTMIX clique edges total 9 rows 5 implonly 4 implpairs 17 bin 6
+MIP:   sub-MIP: 58 free columns of 128, status Infeasible, nodes 0, objective None, 0.00s, 16 LP iterations, TICKS cpu 0.001 lp 806 prop 4177 sep 0 pre 5041 heur 0 node 0 lpit 15 lu 5897 lum 3431
+MIP:   mutation (67 fixed): Some((Infeasible, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [1, 1, 1, 1, 0, 0])
+MIP: finish start Optimal (18.46s)
+MIP: MEMCAP: tid 0 limit 12571 MB peak rss 73 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP:    18.46s nodes    16649 open       0 lb inf ub -4.10000000e1 lp_iters 285046 sb_iters 7725 sb_lps 552 sb_secs 0.31 node_iters 270496 (first 243239, lps 11100) heur_iters 21707 dive_iters 1405 lp_rows 775 node_cut_secs 0.90
+MIP: TICKS cpu 24.587 total 24586534504 lp 277127030 prop 718693605 sep 33034783 pre 119145 heur 2392032 node 12398469 lpit 479454 lu 4242439258 lum 1102362914
+MIP: dual proofs and conflicts 1172 (conflicts added 0 (from proofs 797), Farkas 64, pruned 4295 nodes, tightened 122543 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 6369, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: cut pool propagation: calls 38781, pruned 1404 nodes, tightened 175093 bounds, 2.21s, pool 3136 cuts (37822 nonzeros); updated terms 87089702, candidates 15012395 (90184818 nonzeros), rebuilds 76
+MIP: TC r: reduced-cost fixings passed to children 4166; child change lists: mean length 16.6 (mean depth 16.6), max 35, open nodes now 0
+MIP: DFSBB4: d 59.0 (frac), L 177, root fractional 59, integers 100, mean depth of dive bottoms 18.1 (8275 dives)
+MIP: DFSBB: kind 2, W 5000 (root LP iterations 120), plunges 607, ended by the work limit 102, ended at a leaf or by pruning 505
+MIP: GAP1 u: child selection down 0 up 0; branching selections 0, with ties 0 (candidates in ties 0), changed by the queue counts 0; objective proofs not violated beyond the tolerance 0
+MIP: objective propagation: pruned 0 nodes, tightened 1 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 9953, in pool 1357 (aged out 8596), pruned 588 nodes, tightened 50750 bounds
+MIP: proof CMIR cuts: tried 797, added 375, entered the cut pool 366
+MIP: conflict analysis (HiGHS style): calls 8028, conflicts 14000, added 9953, mean length 7.9, max length 130, 0.10s
+MIP: conflict score diag: analyses 8028, bumped columns per analysis 0.00, analyses without conflict 0.000, lit reasons asked per analysis 0.00 (max 0), used 0.00, analyses cut by the budget 0.000
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 22
+MIP: NODECNT root gate (tid 0): decision 1 (root chosen cuts 25, path 15)
+MIP: NODECNT node path aggregation (tid 0): rounds 210, rounds with path cuts 177, path cuts 521 of 782 chosen, still on true
+MIP: branching: 8358 selections, 6322 without strong branching for dual degeneracy; sb LPs 552 iters 7725
+MIP: inference: branchings counted 29046, mean bound changes after a branching 18.58 (ENOMOTO_MIP_INF_ALL false)
+MIP: conflict weight FLAT (tid 0): hybrid scores 0, with the flat condition 0; positive gains 7336 of 17606 observations
+MIP: PLSB (tid 0): undecided 168 (few samples 42, no gap 122, depth>=50 4), continue 108, stop 3, continued past lookahead 2, stopped before lookahead 3; tree gains n 93 zero 147
+MIP: marginal LP infeasibility (all threads, cumulative): checked with a fresh LP 0 no conclusion 0 strong branching children unknown 0 root and LP probing 0 fresh LP feasible 0
+MIP: integral-looking node LP solutions outside the domain (LP bounds behind the domain), re-solved: 0
+MIP: LP infeasibility certificates, minimum uniform violation (log10 bins <-12 .. >=-4, other): [0, 0, 0, 0, 0, 0, 0, 0, 3, 122, 0]
+MIP: sibling backtracks 7770; basis restores 8376 (basic count mismatch 153), first LP iterations after a restore 122940
+MIP: mem1 sibling LU (all threads): held at most 0, pushed 0, dropped 0, adopted 12130
+MIP: GAP4 c: dense cuts kept out of the cut pool propagation (all threads, counted per rebuild): 72196
+MIP: memc (all threads): packed nodes 0, changes 0 (0 bytes packed, 0 unpacked), bases 0 (0 bytes packed, 0 unpacked)
+MIP: basis nb diag: tree first LPs restored 7253 iters 185133 (25.5/LP), others 9434 iters 187795 (19.9/LP); root LPs: submip 16 lps 709 iters (44.3/LP) 0.01s, bgcopy 0 lps 0 iters (0.0/LP) 0.00s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 2 lps 180 iters (90.0/LP) 0.00s, main 1 lps 81 iters (81.0/LP) 0.00s; nb hints applied 7781 solves, 656370 given, 93727 changed
+MIP: node diag: nodes 16649 node LPs 11100 mean rows 667.5 iters 270496 (24.4/LP) LP secs 9.48 sep rounds 210 added 210 node cut secs 0.90 final rows 775
+MIP: adaptive node cuts: rounds 210 effective 46 skipped 256 (rate 0.145), node cut secs 0.90, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [6, 164, 9, 16, 15], cut nnz Some(12.058269257937088) (rows mean 4.5)
+MIP: orbitopes 1: fixed 27357 bounds, pruned 463 nodes
+MIP: finish done (18.46s)
+MIP: RCSTRONG: knapsack row (all threads, cumulative): calls 0, pruned 0, tightened 0, built 4 (mean length 0.0)
+MIP: RCSTRONG: knapsack row (all threads, cumulative): calls 0, pruned 0, tightened 0, built 4 (mean length 0.0)
+MIP: RCSTRONG: knapsack row (all threads, cumulative): calls 0, pruned 0, tightened 0, built 4 (mean length 0.0)
+MIP: SUBFIX summary: dives 4 sub-MIPs 5 accepted 1 root-infeasible retries 1 below 0.1 0; success 1 (mean rate 0.40), infeasible 2 (mean rate 0.46)
+MIP: solve returned Optimal after 27.13s (time limit 120.00s)
+MIP: polished the solution (27.13s)
+{"status": "optimal", "objective": -41.0, "bound": -41.0, "nodes": 29049, "time": 27.13110988599965, "root_bound": -42.999999999999986, "first_solution_time": 0.027518386, "first_solution_objective": -12.0}
