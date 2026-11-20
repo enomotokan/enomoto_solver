@@ -1964,6 +1964,48 @@ mod tests {
     }
 
     #[test]
+    fn packing_orbisacks_keep_a_lex_max_optimum() {
+        // Q3 (頂点 0..8、Hamming の距離 1 を辺 x_u + x_v <= 1) の最大独立集合。生成元は平行移動 u -> u ^ e (e = 1, 2, 4)
+        let n = 8usize;
+        let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+        for u in 0..n {
+            for b in [1usize, 2, 4] {
+                if u < u ^ b {
+                    rows.push(vec![(u, 1.0), (u ^ b, 1.0)]);
+                }
+            }
+        }
+        let m = rows.len();
+        let p = MipProblem::from_rows(vec![0.0; n], vec![1.0; n], vec![-1.0; n], 0.0, 1.0, vec![true; n], rows.clone(), vec![-inf(); m], vec![1.0; m]);
+        let gens: Vec<Vec<usize>> = [1usize, 2, 4].iter().map(|&b| (0..n).map(|u| u ^ b).collect()).collect();
+        let sym = Symmetry::from_generators(n, gens).unwrap();
+        let (orbs, used, st) = packing_orbisacks(&p, &sym, &vec![false; sym.generators.len()], &vec![false; n], 100, u64::MAX);
+        assert_eq!(st[1], 1);
+        assert_eq!(used.len(), 3);
+        assert!(orbs.len() >= 3);
+        // 各 orbisack は (i, σ(i))、i < σ(i)、i の昇順。x >=_lex σ(x) を全て満たし、根の固定 (1 行目の右の列 = 0) も満たす最適解が残る
+        let mut best = 0;
+        for mask in 0u32..(1 << n) {
+            let x: Vec<u8> = (0..n).map(|j| ((mask >> j) & 1) as u8).collect();
+            if rows.iter().any(|r| r.iter().map(|&(j, _)| x[j]).sum::<u8>() > 1) {
+                continue;
+            }
+            let ok = orbs.iter().all(|o| {
+                let first = o.vars.iter().find(|l| x[l[0]] != x[l[1]]);
+                first.is_none_or(|l| x[l[0]] > x[l[1]]) && x[o.vars[0][1]] == 0
+            });
+            if ok {
+                best = best.max(x.iter().map(|&v| v as usize).sum::<usize>());
+            }
+        }
+        assert_eq!(best, 4);
+        for o in &orbs {
+            assert!(o.static_pp && o.packing && o.vars.iter().all(|l| l[0] < l[1]));
+            assert!(o.vars.windows(2).all(|w| w[0][0] < w[1][0]));
+        }
+    }
+
+    #[test]
     fn orbital_gens_orbits_without_excluded() {
         // 生成元 0: (0 1)(4 5)、生成元 1: (2 3)。列 4, 5 は 0-1 でないとして軌道から外す
         let g0 = vec![1, 0, 2, 3, 5, 4];
@@ -2470,4 +2512,154 @@ mod tests {
         assert_eq!(s1.orbit[0], s1.orbit[4]);
         assert_eq!(snap40(0.1 * 3.0), snap40(0.3));
     }
+}
+
+/// 試作 `ENOMOTO_MIP_SYM_PPLEX` (analysis/scipsym_20261120/、既定では使わない): SCIP 10 の「詰め込み・分割の orbisack への格上げ」
+/// (prop_symmetry.c の `componentPackingPartitioningOrbisackUpgrade`・`tryGenerateInvolutions`) と同じ形。
+///
+/// 生成元の成分 (動かす列を共有するものどうし) ごとに、生成元と、生成元の対合の組から作った新しい対合 (可換なら `p q`、そうでなければ
+/// `p q p` と `q p q`、`max_new` 本まで) を集め、そのうち「動かす列が全て 0-1 列の対合で、各 2-巡回 `(i, σ(i))` が共通の
+/// 詰め込み・分割の行 (係数が全て 1、右辺 <= 1、0-1 列だけ) に入る」ものが半分以上なら、その成分を対合ごとの 2 列の静的な
+/// 詰め込みオービトープ (行は 2-巡回 `(i, σ(i))`、`i < σ(i)`、`i` の昇順) だけで扱う。これは各対合の lex-leader の制約
+/// `x >=_lex σ(x)` (列の番号の順) そのもので、全ての対合で同じ順を使うので互いに矛盾しない (辞書式で最大の解が全てを満たす)。
+/// SST (`sst_pairs_except`)・lex-leader の行とも同じ順。orbital fixing (分枝の順) とは混ぜないので、成分の生成元は全て `used` にする。
+///
+/// 戻り値は (オービトープ、使った生成元の番号、[成分の数, 格上げした成分の数, 作った新しい対合の数])。
+pub fn packing_orbisacks(p: &MipProblem, sym: &Symmetry, skip: &[bool], orbitope_vars: &[bool], max_new: usize, work_cap: u64) -> (Vec<Orbitope>, Vec<usize>, [usize; 3]) {
+    let n = p.n;
+    let binary = |j: usize| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0;
+    let cand: Vec<usize> = (0..sym.generators.len()).filter(|&k| !skip[k] && !(0..n).any(|j| sym.generators[k][j] != j && orbitope_vars[j])).collect();
+    let mut stats = [0usize; 3];
+    if cand.is_empty() {
+        return (Vec::new(), Vec::new(), stats);
+    }
+    // 成分 (動かす列の union-find)
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], mut a: usize) -> usize {
+        while parent[a] != a {
+            parent[a] = parent[parent[a]];
+            a = parent[a];
+        }
+        a
+    }
+    for &k in &cand {
+        let g = &sym.generators[k];
+        let mut first = None;
+        for j in 0..n {
+            if g[j] != j {
+                match first {
+                    None => first = Some(j),
+                    Some(f) => {
+                        let (a, b) = (find(&mut parent, f), find(&mut parent, j));
+                        parent[a] = b;
+                    }
+                }
+            }
+        }
+    }
+    let mut comps: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+    for &k in &cand {
+        let g = &sym.generators[k];
+        let Some(f) = (0..n).find(|&j| g[j] != j) else { continue };
+        let r = find(&mut parent, f);
+        comps.entry(r).or_default().push(k);
+    }
+    stats[0] = comps.len();
+    // 列ごとの詰め込み・分割の行 (番号の昇順)
+    let mut pack: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for i in 0..p.m {
+        let r = &p.rows[i];
+        if r.len() >= 2 && p.row_up[i] <= 1.0 + 1e-9 && r.iter().all(|&(j, a)| a == 1.0 && binary(j)) {
+            for &(j, _) in r {
+                pack[j].push(i as u32);
+            }
+        }
+    }
+    let share = |a: usize, b: usize| -> bool {
+        let (x, y) = (&pack[a], &pack[b]);
+        let (mut s, mut t) = (0, 0);
+        while s < x.len() && t < y.len() {
+            match x[s].cmp(&y[t]) {
+                std::cmp::Ordering::Less => s += 1,
+                std::cmp::Ordering::Greater => t += 1,
+                std::cmp::Ordering::Equal => return true,
+            }
+        }
+        false
+    };
+    // 対合か (と、2 点だけを動かす互換か)
+    let invol = |g: &[usize]| -> (bool, bool) {
+        let mut sup = 0usize;
+        for j in 0..g.len() {
+            if g[g[j]] != j {
+                return (false, false);
+            }
+            if g[j] != j {
+                sup += 1;
+            }
+        }
+        (true, sup == 2)
+    };
+    let mut work = 0u64;
+    let mut out: Vec<Orbitope> = Vec::new();
+    let mut used: Vec<usize> = Vec::new();
+    for (_, gens) in comps {
+        let mut perms: Vec<Vec<usize>> = gens.iter().map(|&k| sym.generators[k].clone()).collect();
+        // 新しい対合 (SCIP の tryGenerateInvolutions と同じ組み合わせ方)
+        let mut known: std::collections::HashSet<Vec<usize>> = perms.iter().cloned().collect();
+        let base: Vec<usize> = (0..perms.len()).filter(|&a| invol(&perms[a]) == (true, false)).collect();
+        work += (perms.len() * n) as u64;
+        let mut nnew = 0usize;
+        'pairs: for (ia, &a) in base.iter().enumerate() {
+            for &b in &base[ia + 1..] {
+                if nnew >= max_new || work > work_cap {
+                    break 'pairs;
+                }
+                let (pa, pb) = (&perms[a], &perms[b]);
+                let commute = (0..n).all(|j| pa[pb[j]] == pb[pa[j]]);
+                work += 2 * n as u64;
+                let cands: Vec<Vec<usize>> = if commute {
+                    vec![(0..n).map(|j| pa[pb[j]]).collect()]
+                } else {
+                    vec![(0..n).map(|j| pa[pb[pa[j]]]).collect(), (0..n).map(|j| pb[pa[pb[j]]]).collect()]
+                };
+                for c in cands {
+                    work += n as u64;
+                    if nnew < max_new && !(0..n).all(|j| c[j] == j) && known.insert(c.clone()) {
+                        perms.push(c);
+                        nnew += 1;
+                    }
+                }
+            }
+        }
+        stats[2] += nnew;
+        // 格上げできる対合
+        let mut ok: Vec<(Vec<(usize, usize)>, usize)> = Vec::new();
+        for (t, g) in perms.iter().enumerate() {
+            work += n as u64;
+            if invol(g).0 {
+                let cyc: Vec<(usize, usize)> = (0..n).filter(|&j| g[j] > j).map(|j| (j, g[j])).collect();
+                if !cyc.is_empty() && cyc.iter().all(|&(i, j)| binary(i) && binary(j) && share(i, j)) {
+                    ok.push((cyc, t));
+                }
+            }
+        }
+        if ok.is_empty() || 2 * ok.len() < perms.len() {
+            continue;
+        }
+        stats[1] += 1;
+        used.extend(gens.iter().copied());
+        for (cyc, t) in ok {
+            let k = cyc.len();
+            out.push(Orbitope {
+                vars: cyc.iter().map(|&(i, j)| vec![i, j]).collect(),
+                packing: true,
+                row_packing: vec![true; k],
+                swaps: vec![(0, 1, std::sync::Arc::new(perms[t].clone()))],
+                local: false,
+                static_pp: true,
+            });
+        }
+    }
+    (out, used, stats)
 }
