@@ -2772,7 +2772,68 @@ fn generate_cuts_prof(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
     out
 }
 
+/// 診断 `ENOMOTO_MIP_SEPSTAT` (analysis/sepeff_20261120/): 元の行 1 本ずつの分離の中のカットの種類。
+/// [`GenRec`] を持っている間、[`generate_cuts`] が出したカットの種類を順に覚え、種類ごとの手間 ([`crate::ticks::total`] の差) を足す
+pub mod gen_kind {
+    pub const CMIR: u8 = 0;
+    pub const LCOVER: u8 = 1;
+    pub const ECOVER: u8 = 2;
+    pub const FLOWC: u8 = 3;
+    pub const N: usize = 4;
+    pub const NAMES: [&str; N] = ["cmir", "lcover", "ecover", "flowcover"];
+}
+thread_local! {
+    /// (記録中か、出したカットの種類の並び、種類ごとの手間)
+    static GEN_REC: std::cell::RefCell<(bool, Vec<u8>, [f64; gen_kind::N])> = const { std::cell::RefCell::new((false, Vec::new(), [0.0; gen_kind::N])) };
+}
+/// 記録の見張り ([`GenRec::start`] で始め、捨てるときに止める)
+pub struct GenRec;
+impl GenRec {
+    pub fn start() -> GenRec {
+        GEN_REC.with(|g| {
+            let mut g = g.borrow_mut();
+            g.0 = true;
+            g.1.clear();
+        });
+        GenRec
+    }
+    /// 覚えた種類の並びを取り出す (取り出した後は空)
+    pub fn take_kinds(&self) -> Vec<u8> {
+        GEN_REC.with(|g| std::mem::take(&mut g.borrow_mut().1))
+    }
+    /// 種類ごとの手間の累計 (このスレッド)
+    pub fn ticks() -> [f64; gen_kind::N] {
+        GEN_REC.with(|g| g.borrow().2)
+    }
+}
+impl Drop for GenRec {
+    fn drop(&mut self) {
+        GEN_REC.with(|g| g.borrow_mut().0 = false);
+    }
+}
+fn gen_rec_on() -> bool {
+    GEN_REC.with(|g| g.borrow().0)
+}
+/// `out` のうちまだ覚えていないカット (`noted` から後) を種類 `k` として覚え、手間 `t0` からの差を種類 `k` に足す
+/// (`noted`・`t0` を今に進める)
+fn gen_rec_note(out: &[RawCut], noted: &mut usize, k: u8, t0: &mut f64) {
+    let t = crate::ticks::total();
+    GEN_REC.with(|g| {
+        let mut g = g.borrow_mut();
+        for _ in *noted..out.len() {
+            g.1.push(k);
+        }
+        g.2[k as usize] += t - *t0;
+    });
+    *noted = out.len();
+    *t0 = t;
+}
+
 fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover: bool, ext_cover: bool, mut prof: Option<(&mut [f64; 4], &mut bool)>) -> Vec<RawCut> {
+    // 診断 `ENOMOTO_MIP_SEPSTAT` ([`GenRec`]): 置き換えの手間は CMIR に数える
+    let rec = gen_rec_on();
+    let mut rt0 = if rec { crate::ticks::total() } else { 0.0 };
+    let mut noted = 0usize;
     crate::ticks::add(crate::ticks::SEP, base.len() as u64);
     let mut out = Vec::new();
     let mut lap = std::time::Instant::now();
@@ -2818,8 +2879,14 @@ fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
                 return out;
             }
             mark(1, &mut prof);
+            if rec {
+                gen_rec_note(&out, &mut noted, gen_kind::CMIR, &mut rt0);
+            }
             out.extend(lifted_flow_cover(vars, base, rhs));
             mark(3, &mut prof);
+            if rec {
+                gen_rec_note(&out, &mut noted, gen_kind::FLOWC, &mut rt0);
+            }
             return out;
         }
     }
@@ -2828,8 +2895,14 @@ fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
     // (集約行・tableau 行では試さない。どれを残すかは呼び出し側がカットの質で決める)
     // 40 問: 使わない 20 問 28.04、使う 19 問 27.66 (mik-250 53.3 -> 20.7 秒、binkar10_1 28.1 -> 24.5 秒、rout 31.9 秒 -> 時間切れ)。
     // 差はばらつきの範囲なので既定では使わない
+    if rec {
+        gen_rec_note(&out, &mut noted, gen_kind::CMIR, &mut rt0);
+    }
     if env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some() || (ext_cover && (env_str!("ENOMOTO_MIP_ROW_LIFTED_COVER").is_some() || super::cutmix::lifted_cover_on())) {
         out.extend(lifted_cover_terms(vars, terms.clone(), beta));
+    }
+    if rec {
+        gen_rec_note(&out, &mut noted, gen_kind::LCOVER, &mut rt0);
     }
     // δ の探索 (`cmir_terms_multi`) は `ENOMOTO_MIP_CMIR_SEARCH` のときだけ。40 問で、従来 18 問 (sgeomean 28.12) に対し
     // 探索 + 上位 3 本は 16 問 (29.95)、割る数 1..8 だけ (局所探索なし・1 本) は 18 問 (28.86) と悪化した
@@ -2840,14 +2913,23 @@ fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
         out.extend(cmir_terms_multi(vars, terms, beta, tunable!("ENOMOTO_T_CMIR_K", 3usize, usize)));
     }
     mark(1, &mut prof);
+    if rec {
+        gen_rec_note(&out, &mut noted, gen_kind::CMIR, &mut rt0);
+    }
     if ext_cover && !has_cont {
         out.extend(extended_cover(vars, base, rhs));
     }
     mark(2, &mut prof);
+    if rec {
+        gen_rec_note(&out, &mut noted, gen_kind::ECOVER, &mut rt0);
+    }
     if has_cont && flow_cover {
         out.extend(lifted_flow_cover(vars, base, rhs));
     }
     mark(3, &mut prof);
+    if rec {
+        gen_rec_note(&out, &mut noted, gen_kind::FLOWC, &mut rt0);
+    }
     out
 }
 
