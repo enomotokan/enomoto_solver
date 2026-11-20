@@ -21,6 +21,11 @@ pub(crate) fn env_on() -> bool {
     env_str!("ENOMOTO_MIP_DEBUG_PRETIME").is_some()
 }
 
+/// 診断 `ENOMOTO_MIP_DEBUG_PRETIME_RESTART`: 再スタートの後の前処理の表も出す (analysis/objtarget_20261119/ の 10 節)
+pub(crate) fn restart_on() -> bool {
+    env_on() && env_str!("ENOMOTO_MIP_DEBUG_PRETIME_RESTART").is_some()
+}
+
 /// 最初の求解の前処理の始めに呼ぶ (表を空にして数え始める)
 pub(crate) fn start() {
     if !env_on() {
