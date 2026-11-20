@@ -1,6 +1,8 @@
 //! SCIP 由来の主ヒューリスティクス (Crossover・DINS・locks・clique・vbounds) と解のプール。
 
 use super::cuts::VarBounds;
+use super::domain::Domain;
+use super::problem::MipProblem;
 use super::domain::FEASTOL;
 use super::lp_api::MipLp;
 use super::solver::Solver;
@@ -321,160 +323,46 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let g = self.clique_graph_get();
-        let n = p.n;
-        let free_bin = |s: &Self, j: usize| p.is_int[j] && s.dom.lo[j] == 0.0 && s.dom.up[j] == 1.0;
-        let fb: Vec<bool> = (0..n).map(|j| free_bin(self, j)).collect();
-        let ints: Vec<usize> = (0..n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
-        if ints.is_empty() {
-            return false;
-        }
-        // 逆向きのグラフの深さ優先 (SCIP の dfs)。節点 a の後続: ¬a の隣 (a を導く文字)
-        let mut visited = vec![false; 2 * n];
-        let mut order: Vec<u32> = Vec::new();
-        let mut stack: Vec<(u32, usize)> = Vec::new();
-        for s0 in 0..2 * n as u32 {
-            if visited[s0 as usize] || !fb[(s0 / 2) as usize] {
-                continue;
-            }
-            stack.push((s0, 0));
-            let mut maxstack = 1usize;
-            while let Some(&mut (a, ref mut k)) = stack.last_mut() {
-                visited[a as usize] = true;
-                let nb = g.neighbors(a ^ 1);
-                let mut next = None;
-                while *k < nb.len() {
-                    let b = nb[*k];
-                    *k += 1;
-                    if fb[(b / 2) as usize] && !visited[b as usize] {
-                        next = Some(b);
-                        break;
-                    }
-                }
-                if let Some(b) = next {
-                    stack.push((b, 0));
-                    maxstack = maxstack.max(stack.len());
-                    continue;
-                }
-                stack.pop();
-                if maxstack > 1 {
-                    order.push(a);
-                } else {
-                    visited[a as usize] = false;
-                }
-            }
-        }
-        let nvb = order.len();
+        let fb: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0).collect();
+        let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
+        let order = vb01_order(&g, &fb);
         // SCIP: 節点の数が整数列の数 × 0.65 に届かなければ使わない
-        if (nvb as f64) < 0.65 * ints.len() as f64 {
+        if ints.is_empty() || (order.len() as f64) < 0.65 * ints.len() as f64 {
             if self.params.verbose && self.nodes <= 1 {
-                eprintln!("MIP:   VB01: {nvb} bound nodes in the implication graph < 0.65 x {} free integer columns: not used", ints.len());
+                eprintln!("MIP:   VB01: {} bound nodes in the implication graph < 0.65 x {} free integer columns: not used", order.len(), ints.len());
             }
             return false;
+        }
+        // 前処理の含意 (`conflict_edges`) も伝播に使う (写しの定義域で固定する)
+        let mut dom = self.dom.clone();
+        if !p.conflict_edges.is_empty() {
+            dom.add_implications(p.n, &p.conflict_edges);
+            if !dom.propagate(p) {
+                return false;
+            }
         }
         let mut found = false;
-        let mut skip1 = false;
-        let mut skip2 = false;
-        // (締めるか, 目的: 0 見ない・1 良い側だけ・2 悪い側だけ)
-        for (tight, obj) in [(false, 1u8), (false, 2), (true, 0), (true, 1), (true, 2)] {
+        let (mut skip1, mut skip2) = (false, false);
+        for (tight, obj) in VB01_VARIANTS {
             if self.time_up() || (obj == 1 && skip1) || (obj == 2 && skip2) {
                 continue;
             }
-            let label = match (tight, obj) {
-                (true, 0) => "VB01 (tight)",
-                (true, 1) => "VB01 (tight, best)",
-                (true, _) => "VB01 (tight, worst)",
-                (false, 1) => "VB01 (loose, best)",
-                (false, _) => "VB01 (loose, worst)",
-            };
-            let (r, all1, all2) = self.vb01_fix(&order, tight, obj, &ints, label);
+            let deadline = self.deadline;
+            let stop = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
+            let (bounds, all1, all2, log) = vb01_fix_dom(p, &mut dom, &order, tight, obj, &ints, &stop);
+            if self.params.verbose && self.nodes <= 1 {
+                eprintln!("MIP:   {log}");
+            }
             if obj == 0 {
                 // 目的を見ない型の固定がすべて良い側 (悪い側) だったら、その型は同じなので回さない (SCIP の skipobj)
                 skip1 = all1;
                 skip2 = all2;
             }
-            found |= r;
+            if let Some((lo, up)) = bounds {
+                found |= self.solve_submip(lo, up, 500);
+            }
         }
         found
-    }
-
-    /// [`Self::vbounds01_heur`] の 1 つの型: 固定・伝播 (矛盾したら直前の列を反対の値に) をして、固定率が 0.65 以上ならサブ MIP を解く。
-    /// (見つけたか, 固定がすべて目的の良い側だったか, すべて悪い側だったか) を返す。定義域は戻す。
-    fn vb01_fix(&mut self, order: &[u32], tight: bool, obj: u8, ints: &[usize], label: &str) -> (bool, bool, bool) {
-        let p = self.p;
-        let (mut all1, mut all2) = (true, true);
-        // 前処理の含意 (`conflict_edges`) も伝播に使う (写しの定義域で固定し、終わったら戻す)
-        let saved_dom = if !p.conflict_edges.is_empty() {
-            let mut d = self.dom.clone();
-            d.add_implications(p.n, &p.conflict_edges);
-            if !d.propagate(p) {
-                return (false, all1, all2);
-            }
-            Some(std::mem::replace(&mut self.dom, d))
-        } else {
-            None
-        };
-        let pos = self.dom.stack_len();
-        let work0 = self.dom.debug_work();
-        let work_cap = 20 * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
-        let (mut nback, mut dead, mut nfix) = (0usize, false, 0usize);
-        for (k, &a) in order.iter().enumerate() {
-            if k % 64 == 0 && (self.time_up() || self.dom.debug_work() - work0 > work_cap) {
-                break;
-            }
-            let j = (a / 2) as usize;
-            if self.dom.lo[j] + 0.5 > self.dom.up[j] {
-                continue;
-            }
-            // 締める型: 節点の文字を真 (偶数なら x_j = 1)、緩める型: 偽
-            let v = if (a % 2 == 0) == tight { 1.0 } else { 0.0 };
-            let best = (p.cost[j] >= 0.0) == (v == 0.0);
-            if !best {
-                if obj == 1 {
-                    continue;
-                }
-                all1 = false;
-            }
-            if best {
-                if obj == 2 {
-                    continue;
-                }
-                all2 = false;
-            }
-            let before = self.dom.stack_len();
-            self.dom.tighten_lower(p, j, v);
-            self.dom.tighten_upper(p, j, v);
-            nfix += 1;
-            if self.dom.propagate(p) {
-                continue;
-            }
-            // 矛盾: 直前の列を反対の値にする。それも矛盾すれば、この型はやめる
-            self.dom.backtrack_to(p, before);
-            nback += 1;
-            let w = 1.0 - v;
-            self.dom.tighten_lower(p, j, w);
-            self.dom.tighten_upper(p, j, w);
-            if !self.dom.propagate(p) {
-                dead = true;
-                break;
-            }
-            if nback > 10 {
-                break;
-            }
-        }
-        let nfree = ints.iter().filter(|&&j| self.dom.lo[j] < self.dom.up[j]).count();
-        let fr = 1.0 - nfree as f64 / ints.len() as f64;
-        let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
-        match saved_dom {
-            Some(d) => self.dom = d,
-            None => self.dom.backtrack_to(p, pos),
-        }
-        if self.params.verbose && self.nodes <= 1 {
-            eprintln!("MIP:   {label}: {nfix} fixings, {nback} backtracks{}, fixing rate {fr:.2}", if dead { ", infeasible" } else { "" });
-        }
-        if dead || fr < 0.65 {
-            return (false, all1, all2);
-        }
-        (self.solve_submip(lo, up, 500), all1, all2)
     }
 
     /// minimum relaxation (違反量を最小にする補助 MIP、Gurobi の feasRelax と同じ考え): 各行に違反量の非負の列
@@ -827,5 +715,212 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let ints: Vec<usize> = (0..n).filter(|&j| p.is_int[j]).collect();
         self.fix_and_propagate(&x, &ints)
+    }
+}
+
+/// [`Solver::vbounds01_heur`] の型 (締めるか, 目的: 0 見ない・1 良い側だけ・2 悪い側だけ)。SCIP の既定 (feasvariant 6・tightenvariant 7) の順。
+const VB01_VARIANTS: [(bool, u8); 5] = [(false, 1), (false, 2), (true, 0), (true, 1), (true, 2)];
+
+fn vb01_label(tight: bool, obj: u8) -> &'static str {
+    match (tight, obj) {
+        (true, 0) => "VB01 (tight)",
+        (true, 1) => "VB01 (tight, best)",
+        (true, _) => "VB01 (tight, worst)",
+        (false, 1) => "VB01 (loose, best)",
+        (false, _) => "VB01 (loose, worst)",
+    }
+}
+
+/// VB01 の位相順 (SCIP の topologicalSort): 境界の節点 (文字 `2j` = `x_j` の下限、`2j+1` = 上限) の逆向きのグラフ (a の後続は ¬a の隣 =
+/// a を導く文字) を、節点の番号の順に深さ優先でたどった帰りがけ順。辺のない節点だけの木は入れない。`fb[j]`: 自由な 0-1 列か。
+pub(super) fn vb01_order(g: &super::clique::CliqueGraph, fb: &[bool]) -> Vec<u32> {
+    let n = fb.len();
+    let mut visited = vec![false; 2 * n];
+    let mut order: Vec<u32> = Vec::new();
+    let mut stack: Vec<(u32, usize)> = Vec::new();
+    for s0 in 0..2 * n as u32 {
+        if visited[s0 as usize] || !fb[(s0 / 2) as usize] {
+            continue;
+        }
+        stack.push((s0, 0));
+        let mut maxstack = 1usize;
+        while let Some(&mut (a, ref mut k)) = stack.last_mut() {
+            visited[a as usize] = true;
+            let nb = g.neighbors(a ^ 1);
+            let mut next = None;
+            while *k < nb.len() {
+                let b = nb[*k];
+                *k += 1;
+                if fb[(b / 2) as usize] && !visited[b as usize] {
+                    next = Some(b);
+                    break;
+                }
+            }
+            if let Some(b) = next {
+                stack.push((b, 0));
+                maxstack = maxstack.max(stack.len());
+                continue;
+            }
+            stack.pop();
+            if maxstack > 1 {
+                order.push(a);
+            } else {
+                visited[a as usize] = false;
+            }
+        }
+    }
+    order
+}
+
+/// VB01 の 1 つの型の固定・伝播 (SCIP の applyVboundsFixings): `order` の順に、締める型は節点の文字を真、緩める型は偽に固定して伝播する
+/// (目的で選ばない列は飛ばす。費用 >= 0 なら 0 が良い側)。矛盾したら直前の列を反対の値にし、それも矛盾すればやめる (反対にした回数が 10 を
+/// 超えたら固定をやめる)。整数列 (`ints`) の固定率と全列の固定率 (SCIP の minintfixingrate・minmipfixingrate) がともに 0.65 以上なら、
+/// 固定した後の境界を返す。(境界, 固定がすべて目的の良い側だったか, すべて悪い側だったか, ログの 1 行)。`dom` は戻す。
+/// 手間の上限は伝播で非零数 × 20 + 100 万 ([`Solver::fix_then_submip`] と同じ)。
+pub(super) fn vb01_fix_dom(p: &MipProblem, dom: &mut Domain, order: &[u32], tight: bool, obj: u8, ints: &[usize], stop: &dyn Fn() -> bool) -> (Option<(Vec<f64>, Vec<f64>)>, bool, bool, String) {
+    let (mut all1, mut all2) = (true, true);
+    let pos = dom.stack_len();
+    let work0 = dom.debug_work();
+    let work_cap = 20 * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
+    let (mut nback, mut dead, mut nfix) = (0usize, false, 0usize);
+    for (k, &a) in order.iter().enumerate() {
+        if k % 64 == 0 && (stop() || dom.debug_work() - work0 > work_cap) {
+            break;
+        }
+        let j = (a / 2) as usize;
+        if dom.lo[j] + 0.5 > dom.up[j] {
+            continue;
+        }
+        let v = if (a % 2 == 0) == tight { 1.0 } else { 0.0 };
+        let best = (p.cost[j] >= 0.0) == (v == 0.0);
+        if !best {
+            if obj == 1 {
+                continue;
+            }
+            all1 = false;
+        }
+        if best {
+            if obj == 2 {
+                continue;
+            }
+            all2 = false;
+        }
+        let before = dom.stack_len();
+        dom.tighten_lower(p, j, v);
+        dom.tighten_upper(p, j, v);
+        nfix += 1;
+        if dom.propagate(p) {
+            continue;
+        }
+        dom.backtrack_to(p, before);
+        nback += 1;
+        let w = 1.0 - v;
+        dom.tighten_lower(p, j, w);
+        dom.tighten_upper(p, j, w);
+        if !dom.propagate(p) {
+            dead = true;
+            break;
+        }
+        if nback > 10 {
+            break;
+        }
+    }
+    let nfree = ints.iter().filter(|&&j| dom.lo[j] < dom.up[j]).count();
+    let fr = 1.0 - nfree as f64 / ints.len().max(1) as f64;
+    // 全列の固定率は定義域で固定された列で数える (SCIP はサブ問題の前処理の後で数える)。連続列の多い問題 (neos-5188808-nattai) で、
+    // 整数列だけ固定してもサブ MIP の LP が大きく時間切れになっていた
+    let frall = (0..p.n).filter(|&j| dom.lo[j] == dom.up[j]).count() as f64 / p.n.max(1) as f64;
+    let bounds = (!dead && fr >= 0.65 && frall >= 0.65).then(|| (dom.lo.clone(), dom.up.clone()));
+    dom.backtrack_to(p, pos);
+    let log = format!("{}: {nfix} fixings, {nback} backtracks{}, fixing rate {fr:.2} (all columns {frall:.2})", vb01_label(tight, obj), if dead { ", infeasible" } else { "" });
+    (bounds, all1, all2, log)
+}
+
+/// [`Solver::vbounds01_heur`] を Solver を作らずに問題 `p` (前処理の後) の上で回す (SCIP-GATE の `ENOMOTO_MIP_VBCLQ=e` が前処理の
+/// LP probing の前に呼ぶ)。定義域は `p` の境界 + 含意 `conflict_edges`、衝突グラフは行と `conflict_edges` から作り、サブ MIP は
+/// [`super::solve_problem`] (500 ノード、1 本 `time_limit` 秒まで、それまでの最良の値を打ち切り値に) で解く。
+/// 見つけた最良の実行可能解 (目的値 (最小化形、定数項込み), `p` の列の空間の値) を返す。
+pub(crate) fn vbounds01_on_problem(p: &MipProblem, verbose: bool, time_limit: f64) -> Option<(f64, Vec<f64>)> {
+    let t0 = std::time::Instant::now();
+    let binary: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0).collect();
+    let g = super::clique::CliqueGraph::build_with(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &p.col_lo, &p.col_up, &p.conflict_edges);
+    let fb: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && p.col_lo[j] == 0.0 && p.col_up[j] == 1.0).collect();
+    let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && p.col_lo[j] < p.col_up[j]).collect();
+    let order = vb01_order(&g, &fb);
+    if ints.is_empty() || (order.len() as f64) < 0.65 * ints.len() as f64 {
+        if verbose {
+            eprintln!("MIP:   VB01: {} bound nodes in the implication graph < 0.65 x {} free integer columns: not used", order.len(), ints.len());
+        }
+        return None;
+    }
+    let mut dom = Domain::new(p);
+    dom.add_implications(p.n, &p.conflict_edges);
+    if !dom.propagate(p) {
+        return None;
+    }
+    let mut best: Option<(f64, Vec<f64>)> = None;
+    let (mut skip1, mut skip2) = (false, false);
+    let stop = || false;
+    for (tight, obj) in VB01_VARIANTS {
+        if (obj == 1 && skip1) || (obj == 2 && skip2) {
+            continue;
+        }
+        let (bounds, all1, all2, log) = vb01_fix_dom(p, &mut dom, &order, tight, obj, &ints, &stop);
+        if verbose {
+            eprintln!("MIP:   {log}");
+        }
+        if obj == 0 {
+            skip1 = all1;
+            skip2 = all2;
+        }
+        let Some((lo, up)) = bounds else { continue };
+        let mut sub = p.clone();
+        sub.col_lo = lo;
+        sub.col_up = up;
+        let params = super::solver::MipParams {
+            time_limit,
+            node_limit: 500,
+            rel_gap: 0.0,
+            abs_gap: 1e-9,
+            verbose: false,
+            submip: true,
+            cutoff: best.as_ref().map_or(f64::INFINITY, |(z, _)| *z),
+            restarts: 0,
+            skip_heurs: 0,
+            threads: 1,
+            distinguish: false,
+            fc_submip: false,
+            tl_base: f64::NAN,
+        };
+        let r = super::solve_problem(&sub, params, true);
+        if let Some(x) = r.x {
+            let z = p.objective(&x);
+            if p.is_feasible(&x, 1e-6) && best.as_ref().is_none_or(|(b, _)| z < *b) {
+                if verbose {
+                    eprintln!("MIP:   {}: sub-MIP solution {z:.10e}", vb01_label(tight, obj));
+                }
+                best = Some((z, x));
+            }
+        }
+    }
+    if verbose {
+        eprintln!("MIP: VB01 on the presolved problem: {} ({:.2}s)", best.as_ref().map_or("none".to_string(), |(z, _)| format!("{z:.10e}")), t0.elapsed().as_secs_f64());
+    }
+    best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`vbounds01_on_problem`]: 0-1 列 4 本、含意 x0 <= x1・クリーク x2 + x3 <= 1・被覆 x1 + x2 >= 1 の問題で、実行可能な解を返す
+    #[test]
+    fn vb01_on_problem_finds_feasible() {
+        let inf = f64::INFINITY;
+        let rows = vec![vec![(0, 1.0), (1, -1.0)], vec![(2, 1.0), (3, 1.0)], vec![(1, 1.0), (2, 1.0)]];
+        let p = MipProblem::from_rows(vec![0.0; 4], vec![1.0; 4], vec![-1.0, 0.0, 0.0, -1.0], 0.0, 1.0, vec![true; 4], rows, vec![-inf, -inf, 1.0], vec![0.0, 1.0, inf]);
+        let (z, x) = vbounds01_on_problem(&p, false, 10.0).expect("VB01 should find a solution");
+        assert!(p.is_feasible(&x, 1e-9));
+        assert!((p.objective(&x) - z).abs() <= 1e-9);
     }
 }

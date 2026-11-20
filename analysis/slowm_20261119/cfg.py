@@ -10,4 +10,6 @@ CFGS = {"def": {}, "fix": {"ENOMOTO_MIP_TIGHTEN_INTBOUND": "1"}, "fixis": {"ENOM
         # g に加えて同符号の 0-1 列 (行の他の係数がすべて同符号) も消さない形 (`s`)
         "isgs": {"ENOMOTO_MIP_INTSING": "1gs"},
         # g に加えて、支配される 0-1 列の固定を元の問題に先にかける形 (`o`、README §13.4)。P・M で 1g と前処理が変わるのは air03 だけ
-        "isgo": {"ENOMOTO_MIP_INTSING": "1go"}}
+        "isgo": {"ENOMOTO_MIP_INTSING": "1go"},
+        # 双対証明・カットのプールの伝播で締めた変更も衝突解析で遡る (README §17、neos859080 は 6 種で 23〜58 → 8〜15 秒)
+        "pe": {"ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN": "1"}}
