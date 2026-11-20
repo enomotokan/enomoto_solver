@@ -209,6 +209,12 @@ pub(super) fn vbclq() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_VBCLQ").filter(|v| !v.is_empty() && *v != "0")
 }
 
+/// 試作 `ENOMOTO_MIP_RHBUDGET` (既定では使わない。analysis/rootlp_20261120): 外側の根の Pump・ダイビングの LP 反復の予算を、
+/// 根の LP の反復の倍数 (`RHEUR` の共有の予算) ではなく、この求解でそれまでに使った LP の反復の割合 (SCIP と同じ形) にする
+pub(super) fn rhbudget_on() -> bool {
+    env_str!("ENOMOTO_MIP_RHBUDGET").is_some_and(|v| v != "0")
+}
+
 pub(super) fn rheur(c: char) -> bool {
     env_def!("ENOMOTO_MIP_RHEUR", "es").is_some_and(|v| v.contains(c))
 }
@@ -11158,6 +11164,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     // 試作 `ENOMOTO_MIP_RHEUR` の `b`・`s` ([`rheur`]): Pump と 3 つのダイビングの LP 反復の予算を共有にする
                     let pool = (rheur('b') || rheur('s')) && !self.params.submip && self.snap.is_none();
+                    // 試作 `ENOMOTO_MIP_RHBUDGET` ([`rhbudget_on`]、既定では使わない。analysis/rootlp_20261120): Pump・ダイビング 1 本の LP 反復の
+                    // 予算を、この求解でここまでに使った LP の反復 W (根の LP と根のカット、Pump・ダイビングの前に 1 度だけ読む) の割合 + 1000 にする
+                    // (SCIP の `maxlpiterquot`・`maxlpiterofs` の既定と同じ数: ダイビング 0.05、Pump 0.01)。共有の予算 (`b`・`s`) の代わり
+                    let rhb = rhbudget_on() && !self.params.submip && self.snap.is_none();
+                    let rhb_w = self.lp.total_iterations() as f64;
+                    let rhb_cap = |q: f64| (q * rhb_w) as u64 + tunable!("ENOMOTO_T_MIP_RHBUDGET_OFS", 1000u64, u64);
+                    let pool = pool && !rhb;
                     let mut pool_left = (tunable!("ENOMOTO_T_MIP_RHEUR_POOL", 4.0, f64) * root_iters as f64) as u64 + 4000;
                     let mut pool_k = 4u64;
                     let mut dive_scale = 1.0f64;
@@ -11179,8 +11192,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         };
                     }
                     if self.noinc_like() && !light && !(self.incumbent.is_some() && self.fj_poor() && env_str!("ENOMOTO_MIP_FJ_POOR_NOINC").is_some_and(|v| v == "nopump")) {
-                        let cap = share(pool_left, pool_k, 1000 + 5 * root_iters, 1.0);
-                        self.fp_iter_cap = pool.then_some(cap);
+                        let cap = if rhb { rhb_cap(tunable!("ENOMOTO_T_MIP_RHBUDGET_PUMP_Q", 0.01, f64)) } else { share(pool_left, pool_k, 1000 + 5 * root_iters, 1.0) };
+                        self.fp_iter_cap = (pool || rhb).then_some(cap);
+                        if rhb && self.params.verbose {
+                            eprintln!("MIP: RHBUDGET: feasibility pump cap {cap} iterations (LP iterations so far {rhb_w})");
+                        }
                         let it0 = self.lp.total_iterations();
                         let before = self.incumbent.as_ref().map(|(z, _)| *z);
                         heur!("feasibility pump", self.feasibility_pump(root_iters));
@@ -11197,7 +11213,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if !(self.noinc_like() && !light) || (kind == super::heuristics::DiveKind::Coefficient && env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_some()) {
                             continue;
                         }
-                        let cap = if pool { share(pool_left, pool_k, dive_budget, dive_scale) } else { dive_budget };
+                        let cap = if rhb { rhb_cap(tunable!("ENOMOTO_T_MIP_RHBUDGET_DIVE_Q", 0.05, f64)) } else if pool { share(pool_left, pool_k, dive_budget, dive_scale) } else { dive_budget };
+                        if rhb && self.params.verbose {
+                            eprintln!("MIP: RHBUDGET: {name} cap {cap} iterations (LP iterations so far {rhb_w})");
+                        }
                         let it0 = self.lp.total_iterations();
                         let before = self.incumbent.as_ref().map(|(z, _)| *z);
                         heur!(name, self.dive(kind, cap, f64::INFINITY));
