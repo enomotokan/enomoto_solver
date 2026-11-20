@@ -343,5 +343,29 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
     }
     out.n_tight = viol;
     out.secs[1] = t1.elapsed().as_secs_f64();
+    // `pl`: PDLP の点から Local-MIP を `ENOMOTO_T_MIP_TPRE_LMIP_STEPS` 手 (既定 100000、loue・kakapo で 4〜6 秒) 回す (手の数で止める)
+    if mode().is_some_and(|m| m.contains("pl")) {
+        let t2 = std::time::Instant::now();
+        if let Some(mut lm) = super::localmip::LocalMip::new(p, &p.col_lo, &p.col_up, seed ^ 0x6A09_E667_F3BC_C909, true) {
+            // 出発点は PDLP の点 (8 の単独の比べで、FJ の解から始めるより良かった)
+            lm.set_start(&x0);
+            lm.step_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_STEPS", 100_000u64, u64);
+            lm.run(std::time::Instant::now() + std::time::Duration::from_secs_f64(safety), None, &|_| {});
+            if let Some(x) = lm.res.best.clone() {
+                if p.is_feasible(&x, 1e-6) {
+                    let z = p.objective(&x);
+                    if z < out.x_z {
+                        out.x_z = z;
+                        out.u = Some(z);
+                        out.x = Some(x);
+                    }
+                }
+            }
+        }
+        out.secs[2] = t2.elapsed().as_secs_f64();
+        if env_str!("ENOMOTO_MIP_TPRE_DEBUG").is_some() {
+            eprintln!("MIP: TPRE pl: Local-MIP {:.2}s, best {:.10e}", out.secs[2], out.x_z);
+        }
+    }
     out
 }

@@ -483,6 +483,8 @@ pub(super) struct LocalMip<'a> {
     ot_alpha: f64,
     /// 最後に暫定解が良くなってからの手の数 ([`Self::ot_alpha`] を下げる判定)
     ot_since: u64,
+    /// 手の数の上限 (`run` の累計の手 `step`。既定は無制限。試作 `ENOMOTO_MIP_TPRE` の `pl` が使う)
+    pub step_cap: u64,
 }
 
 /// `ENOMOTO_MIP_LMIP1_CAND` (試作) の候補集めの作業域: 本家 v2 の `explore_unsat_mtm_bm` に合わせ、違反行を重複なしに
@@ -550,6 +552,7 @@ impl<'a> LocalMip<'a> {
             swap: None,
             ot_alpha: if super::objtarget('l') { tunable!("ENOMOTO_T_MIP_OBJTARGET_ALPHA", 0.5, f64) } else { 0.0 },
             ot_since: 0,
+            step_cap: u64::MAX,
         })
     }
 
@@ -656,7 +659,8 @@ impl<'a> LocalMip<'a> {
         let c1_rows = tunable!("ENOMOTO_T_MIP_LMIP1_ROWS", 10usize, usize).max(1);
         let c1_ops = tunable!("ENOMOTO_T_MIP_LMIP1_OPS", 2250usize, usize).max(1);
         let c1_full = tunable!("ENOMOTO_T_MIP_LMIP1_FULL", 4.0, f64);
-        let LocalMip { s, res, start, lift_order, set_of, cand, buf, best_obj: best_obj_r, since_improve: since_r, round_best: round_r, restarts: restarts_r, step: step_r, chain_tries: tries_r, chain, t0, done: done_r, c1, swap, ot_alpha, ot_since } = self;
+        let LocalMip { s, res, start, lift_order, set_of, cand, buf, best_obj: best_obj_r, since_improve: since_r, round_best: round_r, restarts: restarts_r, step: step_r, chain_tries: tries_r, chain, t0, done: done_r, c1, swap, ot_alpha, ot_since, step_cap } = self;
+        let step_cap = *step_cap;
         let ot_steps = tunable!("ENOMOTO_T_MIP_OBJTARGET_STEPS", 20_000u64, u64).max(1);
         // 目的の行の上限: 既定は「最良 − 刻み」。`OBJTARGET` の `l` で下界 L (根の LP、外側の目的値から定数項を引く) が分かり、最良より下なら
         // 「最良 − max(刻み, α (最良 − L))」。目標に届かなくても、目的の行のほかを満たす点は解として記録する (下の nviol は目的の行を除く)
@@ -690,7 +694,7 @@ impl<'a> LocalMip<'a> {
             if step % 16 == 0 {
                 // 手間の単位 ([`crate::ticks`]): 1 手 = (行の平均の長さ + 列の平均の長さ) x 見る列の数 (の見当)
                 crate::ticks::add(crate::ticks::HEUR, 16 * step_work);
-                if crate::ticks::over() || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+                if crate::ticks::over() || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) || step >= step_cap {
                     break;
                 }
             }
