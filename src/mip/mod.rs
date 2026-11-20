@@ -5936,6 +5936,7 @@ fn presolve_vbclq_e(prob: &mut MipProblem, verbose: bool, secs: f64) -> usize {
         if verbose {
             eprintln!("MIP: VBCLQ e: the VB01 solution {z:.10e} reaches the pseudo-objective bound (slack {:.3e}); optimal ({:.2}s)", o.slack0, t0.elapsed().as_secs_f64());
         }
+        vbclq::count_file(&vbclq::PseudoObjOut { infeas: true, ..o }, "eopt");
         FEAS_FJ_SOL.with(|s| *s.borrow_mut() = Some(x.clone()));
         return usize::MAX;
     }
