@@ -93,6 +93,7 @@ impl Drop for Guard {
     fn drop(&mut self) {
         // 試作 `ENOMOTO_MIP_TPRE` の `t`: 前処理の段の終わりごとに、並列の FJ・Local-MIP に主の手間まで許す
         super::tpre::pt_grant();
+        super::tpre::gated_grant();
         if ON.with(|o| o.get()) {
             add_cpu(self.0, self.1.elapsed().as_secs_f64(), process_cpu() - self.2);
         }
