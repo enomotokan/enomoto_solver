@@ -1340,6 +1340,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         CLQPRB_STICKY.with(|f| f.set(false));
         CLQPRB_REVERTED.with(|f| f.set(false));
         PRBWORK_DRY.with(|f| f.set(false));
+        FEAS_EARLY_DRY.with(|f| f.set(false));
         cutmix::reset();
     }
     let prr = outer && env_def!("ENOMOTO_MIP_PROBE_REPRESOLVE", "1").is_some();
@@ -2724,6 +2725,19 @@ fn feas_fj_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> 
 ///   Local-MIP の初期化 (行の左辺の計算・集合の行の表) は止めを見ないので、始める前に一度見る。
 /// - FJ2 は止めの合図が立った後に LP 修復をしない (`fj::SKIP_REPAIR_ON_STOP`、[`heuristics::fj_lmip_mix`] と同じ)。
 /// - 問題は `=1` と同じ (前処理後、LP による固定の前。FJ_P3 の前処理はかけない)。
+/// 試作 `ENOMOTO_MIP_FEAS_NORETRY` (既定では使わない。analysis/rootlp_20261120): 目的が全て 0 の問題 (実行可能性問題) で、前処理の早めの
+/// FJ/Local-MIP ([`feas_fj_lmip_early`]) が解なしで上限まで回ったら、根の後のやり直し (solver の `robust_fj_retry`) を回さない。
+/// fhnw-binpack4-4 (実行不能) は 4 スレッドで早めの探索 60 秒・やり直し 30 秒・木 17 秒。解ける実行可能性問題 (fhnw-binpack4-48・
+/// neos-3004026-krka・ns1116954) は早めの探索が 3〜51 秒で解を見つけ、やり直しが見つけた記録はない (analysis/hang_20261117 の F)
+pub(crate) fn feas_noretry_on() -> bool {
+    env_str!("ENOMOTO_MIP_FEAS_NORETRY").is_some_and(|v| v != "0")
+}
+
+thread_local! {
+    /// [`feas_noretry_on`]: この求解の早めの探索が解なしで上限まで回った (最初の求解の始めに消す)
+    pub(crate) static FEAS_EARLY_DRY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub(crate) fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> Option<Vec<f64>> {
     feas_fj_lmip_early_salt(prob, threads, cap, verbose, 0)
 }
@@ -2885,6 +2899,10 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
         }
     });
     let r = found.into_inner().unwrap();
+    // `ENOMOTO_MIP_FEAS_NORETRY` ([`feas_noretry_on`]): 最初の早めの探索 (`salt` = 0) が解なしで上限まで回ったか
+    if salt == 0 {
+        FEAS_EARLY_DRY.with(|f| f.set(r.is_none()));
+    }
     if verbose {
         eprintln!(
             "MIP: presolve: early FJ/Local-MIP for the feasibility problem: {threads} threads (FJ {n_fj}, Local-MIP {}), FJ {} tries, Local-MIP {} steps, found {} by {} ({:.2}s, cap {cap:.2}s)",
