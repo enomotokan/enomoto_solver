@@ -291,3 +291,25 @@ MIP:   227.65s nodes     3554 open      62 lb 0.00000000e0 ub inf lp_iters 70996
 MIP:   229.65s nodes     3613 open      61 lb 0.00000000e0 ub inf lp_iters 719467 sb_iters 9324 sb_lps 74 sb_secs 1.89 node_iters 694451 (first 655438, lps 2045) heur_iters 13226 dive_iters 2737 lp_rows 5056 node_cut_secs 3.61 pool_len 0 pool_idle 0
 MIP:   231.67s nodes     3653 open      71 lb 0.00000000e0 ub inf lp_iters 728454 sb_iters 9324 sb_lps 74 sb_secs 1.89 node_iters 703206 (first 663621, lps 2072) heur_iters 13690 dive_iters 2969 lp_rows 5076 node_cut_secs 3.61 pool_len 0 pool_idle 0
 MIP:   233.69s nodes     3705 open      65 lb 0.00000000e0 ub inf lp_iters 735331 sb_iters 9324 sb_lps 74 sb_secs 1.90 node_iters 710083 (first 670498, lps 2095) heur_iters 13690 dive_iters 2969 lp_rows 5076 node_cut_secs 3.61 pool_len 0 pool_idle 0
+MIP:   235.76s nodes     3761 open      75 lb 0.00000000e0 ub inf lp_iters 743438 sb_iters 9324 sb_lps 74 sb_secs 1.91 node_iters 718190 (first 678248, lps 2130) heur_iters 13690 dive_iters 2969 lp_rows 5096 node_cut_secs 3.61 pool_len 0 pool_idle 0
+MIP:   237.78s nodes     3803 open      73 lb 0.00000000e0 ub inf lp_iters 749932 sb_iters 9324 sb_lps 74 sb_secs 1.91 node_iters 724684 (first 684742, lps 2150) heur_iters 13690 dive_iters 2969 lp_rows 5096 node_cut_secs 3.61 pool_len 0 pool_idle 0
+MIP:   239.86s nodes     3841 open      79 lb 0.00000000e0 ub inf lp_iters 757116 sb_iters 9324 sb_lps 74 sb_secs 1.91 node_iters 731868 (first 691384, lps 2175) heur_iters 13690 dive_iters 2969 lp_rows 5132 node_cut_secs 3.74 pool_len 0 pool_idle 0
+MIP:   241.86s nodes     3878 open      76 lb 0.00000000e0 ub inf lp_iters 763682 sb_iters 9324 sb_lps 74 sb_secs 1.91 node_iters 738434 (first 696980, lps 2196) heur_iters 13690 dive_iters 2969 lp_rows 5172 node_cut_secs 3.74 pool_len 0 pool_idle 0
+MIP:   global fixed integers 466 of 2413 (newly 1 since the root LP)
+MIP: new incumbent 1.0000000000e0 at node 3885 (242.07s) [other thread (tree)]
+MIP:   sub-MIP: 874 free columns of 2413, status Infeasible, nodes 0, objective None, 0.02s, 0 LP iterations, TICKS cpu 0.006 lp 0 prop 0 sep 0 pre 67210 heur 0 node 0 lpit 0 lu 0 lum 0
+MIP:   SUBFIX tree RINS try 1: target 0.60, fixing rate 0.31, depth 34, 10 backtracks, 874 free integer columns of 1267, status Some(Infeasible), nodes 0, accepted false, 0.02s (dive+sub 0.22s)
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP:   243.87s nodes     3911 open      27 lb 0.00000000e0 ub 1.00000000e0 lp_iters 769958 sb_iters 9324 sb_lps 74 sb_secs 1.92 node_iters 744185 (first 702043, lps 2215) heur_iters 14215 dive_iters 2969 lp_rows 5212 node_cut_secs 3.74 pool_len 0 pool_idle 0
+MIP:   sub-MIP: 1947 free columns of 2413, status Infeasible, nodes 0, objective None, 0.14s, 0 LP iterations, TICKS cpu 0.100 lp 0 prop 14527004 sep 0 pre 236069 heur 0 node 0 lpit 0 lu 0 lum 0
+MIP:   local branching k=18: Infeasible, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+MIP:   245.91s nodes     3948 open      16 lb 0.00000000e0 ub 1.00000000e0 lp_iters 776981 sb_iters 9324 sb_lps 74 sb_secs 1.92 node_iters 751208 (first 707890, lps 2234) heur_iters 14215 dive_iters 2969 lp_rows 5272 node_cut_secs 3.74 pool_len 0 pool_idle 0
+MIP: warning: a generated cut cuts off the incumbent (rejected)
+MIP:   247.97s nodes     3981 open      13 lb 0.00000000e0 ub 1.00000000e0 lp_iters 783827 sb_iters 9324 sb_lps 74 sb_secs 1.92 node_iters 758054 (first 714736, lps 2250) heur_iters 14215 dive_iters 2969 lp_rows 5272 node_cut_secs 3.74 pool_len 0 pool_idle 0
+CUTMIX clique edges total 42044 rows 6175 implonly 35869 implpairs 76389 bin 1935
+CUTMIX clique edges total 36328 rows 4608 implonly 31720 implpairs 61666 bin 1524
+MIP:   sub-MIP: 1947 free columns of 2413, status TimeLimit, nodes 0, objective None, 6.00s, 10575 LP iterations, TICKS cpu 5.322 lp 87858410 prop 14077106 sep 64829987 pre 868774 heur 0 node 0 lpit 16055 lu 937540028 lum 325209224
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 1, 0, 0, 0])
+MIP:   255.08s nodes     4003 open       7 lb 0.00000000e0 ub 1.00000000e0 lp_iters 788249 sb_iters 9324 sb_lps 74 sb_secs 1.92 node_iters 762476 (first 718519, lps 2263) heur_iters 24790 dive_iters 2969 lp_rows 5312 node_cut_secs 3.81 pool_len 3 pool_idle 3
