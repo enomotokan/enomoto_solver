@@ -107,6 +107,11 @@ impl TwoStageLp {
     /// `max_iters` 反復まで (時刻でなく反復で止める) 解き、確認点ごとのラグランジュ下界 `L(y)` の一番良いものを返す
     /// ([`Self::pdlrc_start`] と同じ形。`lb` は定数項を含まない)
     pub fn pdlrc_run_iters(&self, max_iters: usize) -> Option<PdlrcBest> {
+        self.pdlrc_run_iters_hist(max_iters, None)
+    }
+
+    /// [`Self::pdlrc_run_iters`] で、確認点ごとの (反復, その時点までの最良の下界) を `hist` に足すもの (診断用)
+    pub fn pdlrc_run_iters_hist(&self, max_iters: usize, hist: Option<Arc<Mutex<Vec<(usize, f64)>>>>) -> Option<PdlrcBest> {
         let std = self.std.clone();
         let n = self.n;
         let shift_c: f64 = (0..n).map(|j| self.std.c[j] * self.shift[j]).sum();
@@ -126,6 +131,12 @@ impl TwoStageLp {
                                 *b = Some(PdlrcBest { lb, d, iters, secs: t0.elapsed().as_secs_f64() });
                             }
                         }
+                    }
+                }
+                if let Some(h) = hist.as_ref() {
+                    let cur = b2.lock().ok().and_then(|b| b.as_ref().map(|b| b.lb)).unwrap_or(f64::NEG_INFINITY);
+                    if let Ok(mut h) = h.lock() {
+                        h.push((iters, cur));
                     }
                 }
             });
