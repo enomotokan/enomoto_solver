@@ -28,6 +28,9 @@
   - `b`: 前処理の後・根の LP の直前。SCIP の BEFORENODE に当たる。再スタートの後の根では回さない (1 回の求解で 1 度)。
     SCIP-GATE (analysis/scipgate_20261120) の `ENOMOTO_MIP_VBCLQ` (pseudoobj) はこのすぐ後に置き、VB01 の解を上限に使う。
   - `r` (値 `1` も同じ): 根の SCIP 由来のヒューリスティクス (locks・clique・vbounds) の後。
+- Solver を使わない版 `vbounds01_on_problem(p, verbose, time_limit) -> Option<(目的値, 解)>` (SCIP-GATE の依頼。前処理の後・前処理の
+  LP probing の前の `ENOMOTO_MIP_VBCLQ=e` から呼ぶ)。並べ替え (`vb01_order`) と固定・伝播 (`vb01_fix_dom`) は Solver 版と共有し、
+  サブ MIP だけ `solve_problem` (500 ノード、それまでの最良の値を打ち切り値に) で解く。単体テスト `vb01_on_problem_finds_feasible`。
 - 手間: グラフの辺の数に比例する並べ替えと、型ごとの伝播 (`fix_then_submip` と同じ上限: 非零数 × 20 + 100 万) とサブ MIP (500 ノード)。
 - 全列の固定率の条件は、M の数え上げの 1 回目 (`count_M_b_v1.jsonl`) で neos-5188808-nattai が整数列だけ 0.8 固定してサブ MIP を
   5 本とも時間切れにし、VB01 に 12.4 秒かかったので足した (SCIP の minmipfixingrate)。
@@ -77,6 +80,8 @@
 - 照合: `python ci.py 60 def vb res_P_s*.jsonl` など。
 - SCIP-GATE の計測も `def`・`vb` を含むなら重なるので、どちらか一方で回して混ぜて読む。
 
-## 7. 進み具合
+## 7. 誤答の確かめ (全列の固定率の条件と「再スタートの後は回さない」を足した後、`VB01=b`)
 
-- 全列の固定率の条件と「再スタートの後は回さない」を足した後の `b` の fuzz・cargo test: (結果を待っている)
+- `VB01=b bash fuzz.sh`: fuzz 7 本とも bad 0 (tiny 400・highs 300・objint 1000・slack 1000・tiny2 400・objint2 1000・slack2 1000)、
+  cargo test 413 通過。`fuzz_vb01.py 500 0`: bad 0 (VB01 が回ったのは 455 問)。
+- Solver を使わない版に切り出した後も、decomp2 (1.46 秒・0 ノード) と hypothyroid-k1 (根の LP の前に −2692) は同じ。
