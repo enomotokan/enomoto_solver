@@ -19771,7 +19771,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // B = 16: σ ≈ 1 で回した 6 問 (1 スレッド、予算なし) の解析 1 回で遡った数の分布で、一番多い bnatt400 の部分木でも 16 以下が 99%
         // (194 回のうち 17〜32 が 2 回)、mcsched・timtab1・supportcase33・fastxgemm・net12 はほぼ 1〜2 (analysis/p2inf_20261119 5.5 節)
         let lx_budget: u64 = if lit_explain_sig() {
-            (self.cw_ramp_sig * tunable!("ENOMOTO_T_MIP_LIT_EXPLAIN_BUDGET", 16.0, f64)).round() as u64
+            let x = self.cw_ramp_sig * tunable!("ENOMOTO_T_MIP_LIT_EXPLAIN_BUDGET", 16.0, f64);
+            // 選択肢 `ENOMOTO_MIP_LIT_EXPLAIN_SROUND=1` (既定はオフ): 四捨五入 (σ < 1/32 で 0 になる暗黙の境目) の代わりに確率的に丸める
+            // (期待値 16σ)。乱数はスレッドの種・ノード番号・解析の通し番号から決め、時刻は使わない
+            if lit_explain_sround() {
+                let mut z = (self.rng ^ u64::from(self.pool_tid).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                    .wrapping_add(self.nodes.wrapping_mul(0xBF58_476D_1CE4_E5B9))
+                    .wrapping_add(self.hcs_diag[0].wrapping_mul(0x94D0_49BB_1331_11EB));
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                let u = (z >> 11) as f64 / (1u64 << 53) as f64;
+                x.floor() as u64 + u64::from(u < x - x.floor())
+            } else {
+                x.round() as u64
+            }
         } else {
             u64::MAX
         };
@@ -26888,6 +26902,11 @@ pub(super) fn inf_all() -> bool {
 pub(super) fn lit_explain() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v != "0" && v != "auto" && v != "sig"))
+}
+
+fn lit_explain_sround() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN_SROUND").is_some_and(|v| v != "0"))
 }
 
 /// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=sig` (cwrh): リテラルの衝突の伝播にいつも理由を付け、遡る回数を解析ごとに RAMP の σ に比べた予算で抑える
