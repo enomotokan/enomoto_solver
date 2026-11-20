@@ -23241,9 +23241,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("RCUT cut pool integer-only {pool_int}");
         }
         let mut newp = MipProblem::from_rows(glo, gup, p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
-        // `ENOMOTO_MIP_PRBWORK` (試作、[`super::prbwork_on`]): 再スタートの後のプロービングを回さないとき (成果のない手間の持ち分が尽きたとき) は、
-        // この問題の含意を渡す (再スタートの問題はこの問題を狭めたものなので、含意はそのまま成り立つ。使うかは再スタートの前処理が決める)
-        if super::prbwork_exhausted(self.params.submip) {
+        // `ENOMOTO_MIP_PRBWORK` (試作、[`super::prbwork_on`]): 再スタートの後のプロービングを回さないとき (最後のプロービングが成果 0 のまま
+        // 上限で打ち切られたとき) は、この問題の含意を渡す (再スタートの問題はこの問題を狭めたものなので、含意はそのまま成り立つ)
+        if super::prbwork_skip_restart(self.params.submip) {
             newp.conflict_edges = p.conflict_edges.clone();
         }
         // 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_RESTART=接頭辞`): 再スタートで渡す問題を `接頭辞_r回数.mps` に書く
