@@ -25,6 +25,8 @@ analysis/vsscip_20261117 (0.1.9 の既定と SCIP 10.0.2 の比べ) と同じ問
 回すときの先端で `pip install -e .` (11/17 と同じく highspy 1.15.1 も要る。pyscipopt は要らない)。結果の行には版の印が残らないので、
 回した先端のコミットを README に書き足すこと。
 
+- M 2: 71923cc9d (d882b0772 以降) で pip install -e .。16 行・crash 0。
+
 ## 集計 (summ.py)
 
 `python summ.py M > summ_M.txt`、`python summ.py P > summ_P.txt`。11/17 の summ.py の写しに次を足した:
