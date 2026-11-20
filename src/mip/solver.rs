@@ -20418,7 +20418,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let g = self.clique_graph_get();
         let u = self.prune_limit() - p.offset;
         let o = super::vbclq::pseudoobj(p, &mut self.dom, &g, u);
-        super::vbclq::count_file(&o);
+        super::vbclq::count_file(&o, "r");
         if self.params.verbose {
             let free = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).count();
             eprintln!(
