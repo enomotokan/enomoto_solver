@@ -44,6 +44,8 @@ pub struct Pseudocost {
     pub cw_dyn: f64,
     /// 試作 `ENOMOTO_MIP_CWM`: 今のノードの衝突の重みの倍率 (`cw_dyn` に掛ける。既定 1)
     pub cw_mult: f64,
+    /// 試作 `ENOMOTO_MIP_CWM=ab` (p2inf_20261119 7 節): 今のノードで上書きする分枝のスコアの係数 (番号は [`super::cwm::AB_COEFS`], 値)
+    pub ab: Option<(usize, f64)>,
     /// 実行不能で終わった葉と、目的値で打ち切った葉の数 (スコアの動的な重み)。
     pub infeasible_leaves: u64,
     pub objlim_leaves: u64,
@@ -81,6 +83,7 @@ impl Pseudocost {
             n_pos_gain: 0,
             cw_dyn: 0.0,
             cw_mult: 1.0,
+            ab: None,
             infeasible_leaves: 0,
             objlim_leaves: 0,
             conflict: [vec![0.0; n], vec![0.0; n]],
@@ -435,8 +438,18 @@ impl Pseudocost {
         // `w`: SCIP の動的な重み `dynw` を 1 にする (HiGHS にはない)。
         let g1 = gap1();
         let dynw = if g1.contains('w') { 1.0 } else { dynw };
-        let ps_s = if g1.contains('s') { 1.0 - 1.0 / (1.0 + ps / ps_avg.max(1e-6)) } else { s(ps, ps_avg) };
-        dynw * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01) + conf_term) + ps_s / (dynw * self.degen_fac.max(1.0))
+        // 係数 (p2inf_20261119 7 節の入れ切りの確かめ): 推論の項・打ち切りの項の重み (既定 1e-4)、dynw に掛ける倍率 (既定 1)、
+        // 擬似費用の項の正規化の下限 (既定 0.1)。`ENOMOTO_T_MIP_HY_*` で全体を、[`Self::ab`] でノードごとに上書きする
+        let ov = |c: usize, d: f64| match self.ab {
+            Some((k, v)) if k == c => v,
+            _ => d,
+        };
+        let w_inf = ov(0, tunable!("ENOMOTO_T_MIP_HY_INF_W", 1e-4, f64));
+        let w_cut = ov(1, tunable!("ENOMOTO_T_MIP_HY_CUT_W", 1e-4, f64));
+        let dynw = dynw * ov(2, tunable!("ENOMOTO_T_MIP_HY_DYNW_MULT", 1.0, f64));
+        let ps_floor = ov(3, tunable!("ENOMOTO_T_MIP_HY_PS_FLOOR", 0.1, f64));
+        let ps_s = if g1.contains('s') { 1.0 - 1.0 / (1.0 + ps / ps_avg.max(1e-6)) } else { 1.0 - 1.0 / (1.0 + ps / ps_avg.max(ps_floor)) };
+        dynw * (w_inf * s(inf, inf_avg) + w_cut * s(cut, 0.01) + conf_term) + ps_s / (dynw * self.degen_fac.max(1.0))
     }
 
     /// pseudocost による [`Self::hybrid`] スコア (小数部 `frac`)。

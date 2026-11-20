@@ -12724,6 +12724,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 次元 ([`super::cwm::DIMS`]): 0 = 衝突の重みの倍率の対数 θ、1 = シグモイドの真ん中のずれ Δ、2 = 幅の対数のずれ κ。
                 // 重み = w × σ((r̄ − (r_mid + Δ)) / (s e^κ)) × e^θ (r̄ は RAMP の窓ごとの移動平均、まだなければ重み 0 のまま)
                 let th = super::cwm::on_node(node.cwm.as_ref());
+                // `=ab`: θ_0 は係数の値そのもの (衝突の重みは触らない)
+                if let Some((k, _, _)) = super::cwm::ab().filter(|_| super::cwm::mode() == Some(super::cwm::Mode::Ab)) {
+                    if super::cwm::AB_COEFS[k] == "minrel" {
+                        self.pc.min_reliable = th[0].round().max(0.0) as u32;
+                    } else {
+                        self.pc.ab = Some((k, th[0]));
+                    }
+                } else {
                 self.pc.cw_mult = th[0].exp();
                 if let (Some(w), true) = (cw_ramp(), self.cw_ramp_ema >= 0.0) {
                     let mid = tunable!("ENOMOTO_T_MIP_CW_RAMP_MID", 0.69, f64) + th[1];
@@ -12731,6 +12739,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let sig = 1.0 / (1.0 + (-(self.cw_ramp_ema - mid) / sl).exp());
                     let sig = if sig < tunable!("ENOMOTO_T_MIP_CW_RAMP_FLOOR", 0.0, f64) { 0.0 } else { sig };
                     self.pc.cw_dyn = w * sig;
+                }
                 }
             }
             self.tprof.nodes += 1;
