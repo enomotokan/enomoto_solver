@@ -1094,6 +1094,10 @@ impl Domain {
                 }
                 owned = f(c.reason);
                 let (cf, rhs) = owned.as_ref()?;
+                // 試作 `ENOMOTO_MIP_LIT_EXPLAIN=g`: 右辺が NaN の写しはリテラルの衝突 (行の係数の符号が文字の側)。ほかの文字を真にした最後の変更で説明する
+                if rhs.is_nan() {
+                    return Some(cf.iter().filter(|&&(j, _)| j != c.col).filter_map(|&(j, a)| latest_before(j, a < 0.0, k)).collect());
+                }
                 (&cf[..], *rhs, f64::NEG_INFINITY)
             };
             let a_c = terms.iter().find(|&&(j, _)| j == c.col).map(|&(_, a)| a)?;
