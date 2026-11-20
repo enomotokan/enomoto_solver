@@ -1,4 +1,5 @@
-"""scip_rens の対の比べの分担表 (scipslow_20261119/plan.py の写し): python plan.py NM NP → shards_M.json・shards_P.json
+"""scip_rens の対の比べの分担表 (scipslow_20261119/plan.py の写し): python plan.py NM NP [ALT 札] → shards_M<札>.json・shards_P<札>.json
+(既定は ALT = lfc・札なし。cfr は `python plan.py 18 2 cfr r` → shards_Mr.json・shards_Pr.json、`run.py Mr K`・`summ.py Mr cfr`)
 M: Mittelmann 186 問のうち lfscan.jsonl で LP face が働いた (face = ran) 問題 × 種 1・2 × {def, lfc}、600 秒。
 P: MIPLIB の 58 問 × 種 1〜3 × {def, lfc}、60 秒 (4 スレッド)。
 同じ (問題, 種) の 2 組は同じ分担で続けて解き、順は種で入れ替える。
@@ -11,7 +12,8 @@ A = D.parents[0]
 sys.path.insert(0, str(A / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
 NM, NP = int(sys.argv[1]), int(sys.argv[2])
-ALT = "lfc"
+ALT = sys.argv[3] if len(sys.argv) > 3 else "lfc"
+TAG = sys.argv[4] if len(sys.argv) > 4 else ""
 def times(pat, cfg, cap):
     T = defaultdict(list)
     for f in glob.glob(str(pat)):
@@ -37,7 +39,7 @@ MPROBS = sorted(r["problem"] for r in scan if r.get("face") == "ran" and r["prob
 print("M の問題:", len(MPROBS), MPROBS)
 TM = times(A / "vsscip_20261117/res_M_s*.jsonl", "def", 600)
 def estM(p, c): return TM.get(p, 600.0) + 30
-balance({(p, s): order(p, s, ["def", ALT]) for p in MPROBS for s in (1, 2)}, estM, NM, "shards_M.json", 600)
+balance({(p, s): order(p, s, ["def", ALT]) for p in MPROBS for s in (1, 2)}, estM, NM, f"shards_M{TAG}.json", 600)
 TP = times(A / "vshighs_20261117/res_P_s*.jsonl", "def", 60)
 def estP(p, c): return TP.get(p, 48.0) + 8
-balance({(p, s): order(p, s, ["def", ALT]) for p in PROBS for s in (1, 2, 3)}, estP, NP, "shards_P.json", 60)
+balance({(p, s): order(p, s, ["def", ALT]) for p in PROBS for s in (1, 2, 3)}, estP, NP, f"shards_P{TAG}.json", 60)

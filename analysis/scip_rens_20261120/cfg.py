@@ -2,4 +2,6 @@
 CFGS = {
     "def": {},
     "lfc": {"ENOMOTO_MIP_LPFACE": "cf"},
+    # r: 行のサブ MIP が解なしなら、行を外した今の LP face を残りのノードで解き直す (README 9 節)
+    "cfr": {"ENOMOTO_MIP_LPFACE": "cfr"},
 }

@@ -915,6 +915,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     sublb_seen: std::cell::Cell<bool>,
     /// 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 次に別スレッドで始めるサブ MIP が目的関数を変えないものか ([`Self::spawn_submip`] に渡す)
     pub(super) submip_same_obj: bool,
+    /// 試作 `ENOMOTO_MIP_LPFACE` の `r` ([`Self::lp_face_obj`]): 次に別スレッドで始めるサブ MIP の目的値の行の番号と、その行を外して
+    /// 解き直すときの打ち切り値 ([`Self::spawn_submip`] に渡す)
+    pub(super) submip_lpface_fb: Option<(usize, f64)>,
     /// 最初の根の LP の反復数 (丸め系のヒューリスティクスの連続部分の LP の反復上限に使う)
     pub(super) root_lp_iters: u64,
     /// 試作 `ENOMOTO_MIP_ROOTSB` の `f` で木の予算に数えなかった強分岐の反復
@@ -5489,6 +5492,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         bg_proved_seen: std::cell::Cell::new(false),
         sublb_seen: std::cell::Cell::new(false),
         submip_same_obj: false,
+        submip_lpface_fb: None,
         root_lp_iters: 0,
         rootsb_iters: 0,
         rootsb_used: 0,
@@ -7368,6 +7372,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 目的が全部 0 (実行可能性問題) なら解が見つかれば最適で、ほかの根のヒューリスティクスはほとんど当たらないので、
         // 残りの `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC` (0.5) まで回す (秒の上限なし)。ns1116954 では残り 16 秒の 0.15 倍 (2.5 秒、FJ 2〜3 回) では足りなかった
         let feas = super::heuristics::fj_feas_extend(&self.p);
+        // 試作 `ENOMOTO_MIP_FEAS_NORETRY` ([`super::feas_noretry_on`]): 実行可能性問題で早めの探索が解なしで上限まで回っていれば回さない
+        if feas && super::feas_noretry_on() && !self.params.submip && super::FEAS_EARLY_DRY.with(|f| f.get()) {
+            if self.params.verbose {
+                eprintln!("MIP: robust FJ retry skipped (FEAS_NORETRY: the early FJ/Local-MIP found nothing within its limit)");
+            }
+            return false;
+        }
         let frac = if feas { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC", 0.5, f64) } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FRAC", 0.15, f64) };
         // `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS` (2026-11-18 から既定 30、`inf` で従来の上限なし): 実行可能性問題の秒の上限。実行不能な
         // 実行可能性問題 (fhnw-binpack4-4) では残りの 0.5 が丸ごと空回りし、その間は根が止まっていた (4 スレッド 120 秒で 53.7 秒、
@@ -20065,6 +20076,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             u64::MAX
         };
         self.dom.cut_reason_budget = lx_budget;
+        // 試作 `ENOMOTO_MIP_PE_SIG` (analysis/slowm_20261119 §17.5、`CONFLICT_PROOF_EXPLAIN` と使う): 双対証明の理由で遡る変更も、解析 1 回で
+        // round(σ × B) 個までにする (B = `ENOMOTO_T_MIP_PE_SIG_BUDGET`、既定 16。σ は RAMP の今の σ)。σ ≈ 0 なら pe なしと同じ衝突になる
+        self.dom.proof_reason_budget = if env_str!("ENOMOTO_MIP_PE_SIG").is_some() {
+            (self.cw_ramp_sig * tunable!("ENOMOTO_T_MIP_PE_SIG_BUDGET", 16.0, f64)).round() as u64
+        } else {
+            u64::MAX
+        };
         let cb0 = super::domain::CUT_BUDGET[0].load(std::sync::atomic::Ordering::Relaxed);
         let lx_used = std::cell::Cell::new(0u64);
         let lx_asked = std::cell::Cell::new(0u64);
@@ -22562,9 +22580,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 根の始めに自由だった整数列。試作 `ENOMOTO_MIP_RSTDEN` (analysis/rstden_20261113.md、既定では使わない) の文字:
     /// `1` = 1 回目の再スタートで自由な整数列にする、`2` = 2 回目以降で自由な整数列にする
     /// (HiGHS の `percentageInactiveIntegers` は前処理の後の自由な整数列に対する割合)
+    /// 再スタートの判定の「全部の整数列」の数 (`ENOMOTO_MIP_RESTART_DROP_FIXED` で列を詰めた子の求解では詰める前の数、[`super::restart_nint_base`])
+    fn restart_nint(&self) -> usize {
+        if self.params.submip {
+            self.p.nint
+        } else {
+            self.p.nint.max(super::restart_nint_base())
+        }
+    }
+
     fn restart_denom(&self) -> usize {
-        let nint = self.p.nint;
-        let free = nint.saturating_sub(self.root_fixed0);
+        let nint = self.restart_nint();
+        // 根の始めに自由だった整数列の数は、詰めても詰めなくても同じ (詰めた列は根の始めに固定済みの列に数えられていた)
+        let free = self.p.nint.saturating_sub(self.root_fixed0);
         if env_str!("ENOMOTO_MIP_RESTART_FRAC_FREE").is_some() || super::gr_restart_ff_for(self.p) {
             return free;
         }
@@ -22582,7 +22610,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_RSTDEN").is_some_and(|v| v.contains('p')) {
             self.restart_denom()
         } else {
-            self.p.nint
+            self.restart_nint()
         }
     }
 
@@ -23168,16 +23196,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let readd = readd && !big_restart;
         let cuts_as_rows = (env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_none() && !readd) || keep_all;
         let mut carry: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
-        // 試作 `ENOMOTO_MIP_RESTART_DENSE_POOL` (既定では使わない。analysis/objtarget_20261119/ の 10 節): 行にする経路でも、自由な列 (大域的に
-        // 固定されていない列) の非零が、この問題の行の自由な列の非零の平均 (自由な列の非零の和 / 行の数) より多いカットは行にせず、プールに渡す。
-        // 行 1 本が LP の反復・伝播・前処理に足す手間はその行の非零に比例するので、問題の平均の行より重いカットを行として持ち込まない
-        // (nw04: 問題の行の平均 約 440 に対しカットは 約 1800 (固定前は 7〜8 万)。再スタートの後のプロービングがカットの行で重くなる)
-        let dense_cap = (cuts_as_rows && !keep_all && env_str!("ENOMOTO_MIP_RESTART_DENSE_POOL").is_some()).then(|| {
-            let free = |j: usize| self.dom.global_lo[j] < self.dom.global_up[j];
-            let nz: usize = p.rows.iter().map(|r| r.iter().filter(|&&(j, _)| free(j)).count()).sum();
-            nz as f64 / p.m.max(1) as f64
-        });
-        let mut dense_carry: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
         let act = self.lp.row_activities();
         for i in p.m..self.lp.num_rows() {
             let (l, u) = self.lp.row_bounds(i);
@@ -23198,26 +23216,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !keep_all && !tight {
                 continue;
             }
-            if let Some(cap) = dense_cap {
-                let r = self.lp.row(i);
-                if r.iter().filter(|&&(j, _)| j < p.n && self.dom.global_lo[j] < self.dom.global_up[j]).count() as f64 > cap {
-                    if u.is_finite() {
-                        dense_carry.push((r.clone(), u));
-                    }
-                    if l.is_finite() {
-                        dense_carry.push((r.iter().map(|&(j, v)| (j, -v)).collect(), -l));
-                    }
-                    continue;
-                }
-            }
             rows.push(self.lp.row(i));
             row_lo.push(l);
             row_up.push(u);
-        }
-        if let Some(cap) = dense_cap {
-            if self.params.verbose {
-                eprintln!("MIP: RESTART_DENSE_POOL: {} dense cut sides passed to the cut pool (more free nonzeros than the mean row {cap:.1}), {} cut rows kept", dense_carry.len(), rows.len() - p.m);
-            }
         }
         // `ENOMOTO_MIP_RESTART_ROOT_CUTS` の `r` (試作): 木の中の再スタートでは、根の終わりの LP で効いていたカットも持ち込む
         // (今の LP は最後に解いたノードの LP なので、そこで効いていない根のカット・年齢で外れた根のカットが落ちる)
@@ -23428,18 +23429,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             super::RESTART_CUTS.with(|s| *s.borrow_mut() = Some(carry));
             super::RESTART_CUTS_READD.with(|f| f.set(readd && super::restart_cuts_fix()));
         }
-        // `ENOMOTO_MIP_RESTART_DENSE_POOL`: 行にしなかった密なカットを新しい求解のプールに渡す (固定された列は代入して右辺に移す)
-        if !dense_carry.is_empty() {
-            let dc: Vec<(Vec<(usize, f64)>, f64)> = dense_carry
-                .into_iter()
-                .filter_map(|(c, r)| {
-                    let mut rr = r;
-                    let cc: Vec<(usize, f64)> = c.into_iter().filter(|&(j, v)| if newp.col_lo[j] == newp.col_up[j] { rr -= v * newp.col_lo[j]; false } else { true }).collect();
-                    (!cc.is_empty()).then_some((cc, rr))
-                })
-                .collect();
-            super::RESTART_CUTS.with(|s| s.borrow_mut().get_or_insert_with(Vec::new).extend(dc));
-        }
         // 暫定解を引き継ぐ (新しい問題は列が同じ)
         if env_str!("ENOMOTO_MIP_RESTART_NO_INCUMBENT").is_none() {
             // `ENOMOTO_MIP_RESTART_REF` (試作): 暫定解がなければ参照解を渡す (2 回目以降の再スタートでも参照解を失わない。
@@ -23602,6 +23591,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let r0 = std::mem::take(&mut self.submip_r0);
         let nosol = self.submip_nosol.take();
         let same_obj = std::mem::take(&mut self.submip_same_obj);
+        let lpface_fb = self.submip_lpface_fb.take();
+        let fb_verbose = self.params.verbose && self.nodes <= 1;
+        let fb_basis = if lpface_fb.is_some() { basis.clone() } else { None };
+        let fb_pc = if lpface_fb.is_some() { sub_pc.clone() } else { None };
         let ctl = (submip_outcome_stop() && !self.params.submip && self.snap.is_none()).then(|| {
             let c = SubmipCtl::new(self.prune_limit()).with_nosol(nosol).with_subcap(if self.nodes <= 1 { self.root_lp_secs } else { 0.0 }).with_subcap_t(if self.nodes <= 1 { self.params.frac_tl() } else { 0.0 });
             // 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 目的関数を変えないサブ MIP に外側の下界を渡す
@@ -23655,7 +23648,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 内点法・クロスオーバーなどトークンと期限しか見ない計算も止まるように、合図を `is_cancelled` にも含める
                 crate::cancel::set_halt_cancels(halt_flag.is_some());
                 let halt = halt_flag;
+                let fb_halt = halt.clone();
+                let fb_params = lpface_fb.is_some().then(|| params.clone());
                 let r = crate::cancel::with_halt(halt, || super::solve_problem(&sub, params, presolve));
+                // 試作 `ENOMOTO_MIP_LPFACE` の `r` ([`Solver::lp_face_obj`]): 目的値の行のサブ MIP が解なしなら、行を外して残りのノード・時間で解き直す
+                let r = match (lpface_fb, fb_params) {
+                    (Some((row, cutoff)), Some(mut p2)) if r.status == MipStatus::Infeasible && r.nodes < p2.node_limit && t_thread.elapsed().as_secs_f64() < p2.time_limit => {
+                        let mut sub = sub;
+                        sub.row_up[row] = f64::INFINITY;
+                        p2.node_limit -= r.nodes;
+                        p2.time_limit -= t_thread.elapsed().as_secs_f64();
+                        p2.cutoff = cutoff;
+                        if let Some(b) = fb_basis {
+                            SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
+                        }
+                        if let Some(pc) = fb_pc {
+                            SUBMIP_PC.with(|s| *s.borrow_mut() = Some(pc));
+                        }
+                        let (nl, n1) = (p2.node_limit, r.nodes);
+                        let r2 = crate::cancel::with_halt(fb_halt, || super::solve_problem(&sub, p2, presolve));
+                        if fb_verbose {
+                            eprintln!("MIP:   LP face (r): objective row infeasible after {n1} nodes; without the row: status {:?}, nodes {} of {nl}, objective {:?}", r2.status, r2.nodes, r2.objective);
+                        }
+                        super::heur_scip::lpface_count(&format!("fb {:?} {}", r2.status, r2.objective.is_some()));
+                        r2
+                    }
+                    _ => r,
+                };
                 crate::cancel::set_halt_cancels(false);
                 RESUME_LINK.with(|s| *s.borrow_mut() = None);
                 // 一時停止の後に継続したサブ MIP は、呼び出し側が継続の分の終わりを出す (道筋が継続の番号に変わっている)
@@ -27310,6 +27329,7 @@ pub(super) fn inf_all() -> bool {
 /// 試作 `ENOMOTO_MIP_DET1T` の文字 (analysis/det1t_20261120、既定では使わない): 1 スレッドで同じ種の結果を再現させるため、時間で決めている所を手間で決める。
 /// `o`: 根のカットのループの乱択丸め (OBJPROBE `r`) の枠を、使った壁時計の秒でなく手間で数える。
 /// `n`: 手間の期限の中で解くサブ MIP は、時間の上限を 10 倍の安全網にする ([`Solver::solve_submip_problem`])
+/// `i`: 根の interior rounding の予算を手間で数え、内点法の反復も手間の期限で止める (src/mip/heur_ipm.rs、[`crate::ticks::ipm_work`])
 pub(super) fn det1t(c: char) -> bool {
     env_str!("ENOMOTO_MIP_DET1T").is_some_and(|v| v.contains(c))
 }
