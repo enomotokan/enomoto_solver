@@ -310,7 +310,11 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
     use std::sync::{Arc, Mutex};
     let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
     let t0 = std::time::Instant::now();
-    let iters = tunable!("ENOMOTO_T_MIP_TPRE_PDLP_ITERS", 2000usize, usize);
+    lower_priority();
+    // 手間を問題の大きさで決める: PDLP の反復 × 非零 ≤ `ENOMOTO_T_MIP_TPRE_PDLP_WORK` (4e8、200 反復以上)。PP の計測で、大きい問題
+    // (ns1116954 13 万行・41 万非零、nw04 60 万非零) では 2000 反復に 5〜9 秒かかり、主が前処理の後で 3.5〜6.6 秒待った
+    let nnz: usize = p.rows.iter().map(|r| r.len()).sum::<usize>().max(1);
+    let iters = tunable!("ENOMOTO_T_MIP_TPRE_PDLP_ITERS", 2000usize, usize).min(((tunable!("ENOMOTO_T_MIP_TPRE_PDLP_WORK", 4e8, f64) / nnz as f64) as usize).max(200));
     let lp = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
     let xo = Arc::new(Mutex::new(Vec::new()));
     if let Some(b) = lp.pdlrc_run_iters_hist(iters, None, Some(xo.clone())) {
@@ -325,9 +329,11 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
     }
     let t1 = std::time::Instant::now();
     let mut viol = 0usize;
+    // FJ 1 回の手間の上限 (`ENOMOTO_T_MIP_TPRE_FJ_TICKS`、手間の単位で 1e9 ≒ 1 秒。FJ の既定の上限 (非零 × 1024) より先に効く大きい問題で止める)
+    let fj_ticks = tunable!("ENOMOTO_T_MIP_TPRE_FJ_TICKS", 1e9, f64);
     for k in 0..tunable!("ENOMOTO_T_MIP_TPRE_FJ_RUNS", 2usize, usize) {
         let sd = seed.wrapping_add((k as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        if let Some(x) = super::fj::fj2_search_from(p, &p.col_lo, &p.col_up, Some(&x0), safety, sd, None) {
+        if let Some(x) = crate::ticks::with_budget(fj_ticks, || super::fj::fj2_search_from(p, &p.col_lo, &p.col_up, Some(&x0), safety, sd, None)) {
             if p.is_feasible(&x, 1e-6) {
                 let z = p.objective(&x);
                 if z < out.x_z {
@@ -349,7 +355,8 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
         if let Some(mut lm) = super::localmip::LocalMip::new(p, &p.col_lo, &p.col_up, seed ^ 0x6A09_E667_F3BC_C909, true) {
             // 出発点は PDLP の点 (8 の単独の比べで、FJ の解から始めるより良かった)
             lm.set_start(&x0);
-            lm.step_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_STEPS", 100_000u64, u64);
+            // 手の数も大きさで決める: 手 × 非零 ≤ `ENOMOTO_T_MIP_TPRE_LMIP_WORK` (2e9)
+            lm.step_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_STEPS", 100_000u64, u64).min(((tunable!("ENOMOTO_T_MIP_TPRE_LMIP_WORK", 2e9, f64) / nnz as f64) as u64).max(1000));
             lm.run(std::time::Instant::now() + std::time::Duration::from_secs_f64(safety), None, &|_| {});
             if let Some(x) = lm.res.best.clone() {
                 if p.is_feasible(&x, 1e-6) {
@@ -381,6 +388,7 @@ pub(crate) struct PtJob {
     base: f64,
     granted: std::cell::Cell<f64>,
     rate: f64,
+    pdlp_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Drop for PtJob {
@@ -388,6 +396,7 @@ impl Drop for PtJob {
         for g in &self.gates {
             g.stop();
         }
+        self.pdlp_stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -395,26 +404,100 @@ thread_local! {
     static PT_JOB: std::cell::RefCell<Option<std::rc::Weak<PtJob>>> = const { std::cell::RefCell::new(None) };
 }
 
+/// PDLP の点の受け渡し (`pt`)。0 = 境界の端 (いつも用意)、1 = PDLP 500 反復、2 = 2000 反復、3 = 目的 0 の 2000 反復、4 = 10000 反復
+/// (非零が `ENOMOTO_T_MIP_TPRE_PT_BIG_NNZ` (1e5) を超える問題では作らない)
+#[derive(Clone)]
+enum Slot {
+    Pending,
+    Ready(std::sync::Arc<Vec<f64>>),
+    Failed,
+}
+
+struct Points {
+    slots: std::sync::Mutex<Vec<Slot>>,
+    cv: std::sync::Condvar,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Points {
+    /// 点 `i` を待って返す (失敗・止めなら境界の端 = `None`)。待つ間は計算しないので、使う点は時刻によらず決まる
+    fn get(&self, i: usize) -> Option<std::sync::Arc<Vec<f64>>> {
+        let mut g = self.slots.lock().unwrap();
+        loop {
+            match &g[i] {
+                Slot::Ready(x) => return Some(x.clone()),
+                Slot::Failed => return None,
+                Slot::Pending => {}
+            }
+            g = self.cv.wait(g).unwrap();
+        }
+    }
+    fn set(&self, i: usize, v: Slot) {
+        let mut g = self.slots.lock().unwrap();
+        g[i] = v;
+        self.cv.notify_all();
+    }
+}
+
 pub(crate) fn pt_spawn(p: &MipProblem, threads: usize, seed: u64) -> std::rc::Rc<PtJob> {
     use std::sync::{Arc, Mutex};
-    let k = threads.saturating_sub(1).max(1);
+    // スレッド数 − 1 本のうち 1 本は PDLP、残り (最低 1 本) は FJ・Local-MIP
+    let k = threads.saturating_sub(2).max(1);
     let best = Arc::new(Mutex::new(vec![None; k]));
-    let mut gates = Vec::new();
+    let nnz: usize = p.rows.iter().map(|r| r.len()).sum();
+    let big = nnz as f64 > tunable!("ENOMOTO_T_MIP_TPRE_PT_BIG_NNZ", 1e5, f64);
+    let pdlp_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pts = Arc::new(Points { slots: Mutex::new(vec![Slot::Pending; 5]), cv: std::sync::Condvar::new(), stop: pdlp_stop.clone() });
+    pts.set(0, Slot::Failed);
+    if big {
+        pts.set(4, Slot::Failed);
+    }
+    {
+        let q = p.clone();
+        let pts = pts.clone();
+        std::thread::spawn(move || {
+            lower_priority();
+            for (i, iters, zero) in [(1usize, 500usize, false), (2, 2000, false), (3, 2000, true), (4, 10000, false)] {
+                if i == 4 && big {
+                    continue;
+                }
+                if pts.stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    pts.set(i, Slot::Failed);
+                    continue;
+                }
+                let cost: Vec<f64> = if zero { vec![0.0; q.n] } else { q.cost.clone() };
+                let lp = crate::simplex::mip_lp::TwoStageLp::new(&q.col_lo, &q.col_up, &cost, &q.rows, &q.row_lo, &q.row_up);
+                let xo = Arc::new(Mutex::new(Vec::new()));
+                crate::cancel::with_token(Some(pts.stop.clone()), || {
+                    let _ = lp.pdlrc_run_iters_hist(iters, None, Some(xo.clone()));
+                });
+                let x = xo.lock().map(|x| x.clone()).unwrap_or_default();
+                // 止めで途中で終わった点は使わない (反復の数が決まらないので)
+                if x.len() == q.n && !pts.stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    pts.set(i, Slot::Ready(Arc::new(x)));
+                } else {
+                    pts.set(i, Slot::Failed);
+                }
+            }
+        });
+    }
     // `T` (比べ用、再現しない): 門で止めず、主は前処理の終わりの時点の最良を待たずに読む
     let nowait = mode().is_some_and(|m| m.contains('T'));
+    let mut gates = Vec::new();
     for t in 0..k {
         let g = crate::ticks::Gate::new(if nowait { f64::INFINITY } else { 0.0 });
         gates.push(g.clone());
         let q = p.clone();
         let best = best.clone();
+        let pts = pts.clone();
         let sd = seed.wrapping_add((t as u64 + 1).wrapping_mul(0xA24B_AED4_963E_E407));
         std::thread::spawn(move || {
             lower_priority();
             let _guard = crate::ticks::install_gate(g);
-            pt_worker(&q, t, sd, &best);
+            pt_worker(&q, t, sd, &best, &pts);
         });
     }
-    let job = std::rc::Rc::new(PtJob { gates, best, base: crate::ticks::total(), granted: std::cell::Cell::new(0.0), rate: tunable!("ENOMOTO_T_MIP_TPRE_PT_RATE", 0.5, f64) });
+    let job = std::rc::Rc::new(PtJob { gates, best, base: crate::ticks::total(), granted: std::cell::Cell::new(0.0), rate: tunable!("ENOMOTO_T_MIP_TPRE_PT_RATE", 0.5, f64), pdlp_stop });
     PT_JOB.with(|j| *j.borrow_mut() = Some(std::rc::Rc::downgrade(&job)));
     job
 }
@@ -450,6 +533,7 @@ impl PtJob {
         for g in &self.gates {
             g.stop();
         }
+        self.pdlp_stop.store(true, std::sync::atomic::Ordering::Relaxed);
         PT_JOB.with(|j| *j.borrow_mut() = None);
         let mut out: Option<(f64, Vec<f64>, usize)> = None;
         for (t, e) in b.into_iter().enumerate() {
@@ -463,8 +547,9 @@ impl PtJob {
     }
 }
 
-fn pt_worker(p: &MipProblem, t: usize, seed: u64, best: &std::sync::Mutex<Vec<Option<(f64, Vec<f64>)>>>) {
-    use std::sync::{Arc, Mutex};
+/// 手伝いのスレッド `t` の周回 r: 点 ((r + t) mod 5) (0 = 境界の端、1〜4 = PDLP の点。用意されるまで待つ) から FJ を 1 回
+/// (種を変えて)、続けて Local-MIP を `ENOMOTO_T_MIP_TPRE_LMIP_STEPS` 手。門 (主の手間) で止められるまで続ける
+fn pt_worker(p: &MipProblem, t: usize, seed: u64, best: &std::sync::Mutex<Vec<Option<(f64, Vec<f64>)>>>, pts: &Points) {
     let put = |x: &[f64]| {
         if !p.is_feasible(x, 1e-6) {
             return;
@@ -476,26 +561,11 @@ fn pt_worker(p: &MipProblem, t: usize, seed: u64, best: &std::sync::Mutex<Vec<Op
             }
         }
     };
-    let start: Option<Vec<f64>> = match t % 4 {
-        3 => None,
-        kind => {
-            let (iters, zero) = match kind {
-                0 => (500usize, false),
-                1 => (2000, false),
-                _ => (2000, true),
-            };
-            let cost: Vec<f64> = if zero { vec![0.0; p.n] } else { p.cost.clone() };
-            let lp = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &cost, &p.rows, &p.row_lo, &p.row_up);
-            let xo = Arc::new(Mutex::new(Vec::new()));
-            let _ = lp.pdlrc_run_iters_hist(iters, None, Some(xo.clone()));
-            let x = xo.lock().map(|x| x.clone()).unwrap_or_default();
-            (x.len() == p.n).then_some(x)
-        }
-    };
     let steps = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_STEPS", 100_000u64, u64);
-    for r in 0..1000u64 {
+    for r in 0..100_000u64 {
+        let start = pts.get(((r as usize) + t) % 5);
         let sd = seed.wrapping_add(r.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        if let Some(x) = super::fj::fj2_search_from(p, &p.col_lo, &p.col_up, start.as_deref(), 1e9, sd, None) {
+        if let Some(x) = super::fj::fj2_search_from(p, &p.col_lo, &p.col_up, start.as_deref().map(|v| v.as_slice()), 1e9, sd, None) {
             put(&x);
         }
         if crate::ticks::over() {

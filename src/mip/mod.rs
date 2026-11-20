@@ -1764,6 +1764,8 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         None => start,
     };
     let start = match tpre_job {
+        // 前処理で早めの FJ が実行可能性問題の解を見つけ木に入らない道 (ns1116954) では待たない (結果は捨てる)
+        Some(_) if FEAS_FJ_SOL.with(|s| s.borrow().is_some()) => start,
         Some(h) => {
             let tw = std::time::Instant::now();
             let out = h.join().ok();
