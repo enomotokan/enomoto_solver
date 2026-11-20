@@ -47,12 +47,12 @@ def one(p):
     lines = [l.strip() for l in open(log, errors="replace") if "VB01" in l]
     variants = {}
     for l in lines:
-        m = re.search(r"(VB01 \([a-z, ]+\)): (\d+) fixings, (\d+) backtracks(, infeasible)?, fixing rate ([0-9.]+)", l)
+        m = re.search(r"(VB01 \([a-z, ]+\)): (\d+) fixings, (\d+) backtracks(, infeasible)?, fixing rate ([0-9.]+)(?: \(all columns ([0-9.]+)\))?", l)
         if m:
-            variants[m.group(1)] = {"fix": int(m.group(2)), "back": int(m.group(3)), "dead": bool(m.group(4)), "rate": float(m.group(5))}
+            variants[m.group(1)] = {"fix": int(m.group(2)), "back": int(m.group(3)), "dead": bool(m.group(4)), "rate": float(m.group(5)), "rall": float(m.group(6)) if m.group(6) else None}
     heur = [l for l in lines if "root heuristic VB01" in l or "VB01 before the root LP" in l]
     notused = [l for l in lines if "not used" in l]
-    nsub = sum(1 for v in variants.values() if not v["dead"] and v["rate"] >= 0.65)
+    nsub = sum(1 for v in variants.values() if not v["dead"] and v["rate"] >= 0.65 and (v["rall"] is None or v["rall"] >= 0.65))
     return {"problem": p, "result": res, "wall": round(time.time() - t0, 1), "variants": variants, "nsub": nsub,
             "heur": heur, "notused": notused[:1], "ran": bool(lines)}
 
