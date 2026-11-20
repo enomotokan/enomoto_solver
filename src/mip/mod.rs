@@ -6086,7 +6086,8 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     let tk_probe0 = crate::ticks::total();
     let tk_extra = std::cell::Cell::new(0.0f64);
     let lpp_ticks = lpprobe_ticks() && work;
-    let giveup_ticks = tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_ticks;
+    // `=w` では反復のあきらめの代わりに使う (反復の数えは止める)
+    let lpp_w = env_str!("ENOMOTO_MIP_LPPROBE_TICKS") == Some("w");
     let probe_ticks = || crate::ticks::total() - tk_probe0 + tk_extra.get();
     if finish_late && (if work { root_iters < lp_iter_cap } else { root_secs < secs }) {
         finish = false;
@@ -6118,6 +6119,13 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
         (tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_iters as f64) as u64 + (tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_GIVEUP", 2.0e7, f64) / (prob.m + prob.n).max(1) as f64) as u64
     } else {
         u64::MAX
+    };
+    // `=w`: 今の反復のあきらめ (`giveup_iters` の子の LP の分) を、最初の LP の 1 反復の手間で ticks に直したもの (新しい定数なし、
+    // 1 反復の重さを最初の LP の平均でなく子の LP の実際の手間で数える)。ほかの値: 最初の LP の手間の倍率 (`..._GIVEUP_TIME_MULT`、既定 1) まで
+    let giveup_ticks = if env_str!("ENOMOTO_MIP_LPPROBE_TICKS") == Some("w") {
+        giveup_iters.saturating_sub(root_iters) as f64 * root_ticks / root_iters.max(1) as f64
+    } else {
+        tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_ticks
     };
     // `ENOMOTO_MIP_PREPAR` の `l` (試作、[`prepar_has`]): 1 巡の中の列の試しは、どれも巡の始めの状態 (`saved`) から解くので互いに
     // 独立。候補の窓を塊に分け、塊ごとの LP の写し (巡の始めに作る) で順に試し、決まった順にまとめる。写しで使った反復は
@@ -6159,7 +6167,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
         // 塊の大きさ: 最初の窓はあきらめの列の数 (`giveup`) を塊に分けた大きさ、窓ごとに倍 (`ENOMOTO_T_MIP_PREPAR_LP_BSZ_MAX` まで)
         let mut lbsz = (giveup / lpar_blocks).max(1);
         for (ci, &(j, v)) in cands.iter().enumerate() {
-            if !budget_left(&lp) || (n_fixed + fixes.len() == 0 && (n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs || tot_it(&lp) > giveup_iters || (lpp_ticks && probe_ticks() > giveup_ticks))) {
+            if !budget_left(&lp) || (n_fixed + fixes.len() == 0 && (n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs || (tot_it(&lp) > giveup_iters && !(lpp_w && lpp_ticks)) || (lpp_ticks && probe_ticks() > giveup_ticks))) {
                 if lpp_ticks && n_fixed + fixes.len() == 0 && probe_ticks() > giveup_ticks && budget_left(&lp) && !(n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs || tot_it(&lp) > giveup_iters) && verbose {
                     eprintln!("MIP: LP probing: LPPROBE_TICKS gave up after {n_tried} columns (child LP ticks {:.3e} > {:.3e} = mult x first LP)", probe_ticks(), giveup_ticks);
                 }
@@ -6182,7 +6190,9 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                 let per = if n_lc > 0 { (it_lc as f64 / n_lc as f64).max(1.0) } else { 2.0 * per_lp as f64 };
                 let mut left = iter_budget.saturating_sub(tot_it(&lp) - root_iters).min(lp_iter_cap.saturating_sub(tot_it(&lp)));
                 if n_fixed + fixes.len() == 0 {
-                    left = left.min(giveup_iters.saturating_sub(tot_it(&lp)));
+                    if !(lpp_w && lpp_ticks) {
+                        left = left.min(giveup_iters.saturating_sub(tot_it(&lp)));
+                    }
                     wlen = wlen.min(giveup.saturating_sub(n_tried - 1));
                     // 試作 `ENOMOTO_MIP_LPPROBE_TICKS`: 窓の候補も、残りの手間 (最初の LP の手間の倍率 - 子の LP の手間) を 1 列の手間の見積り
                     // (1 列の反復 x 最初の LP の 1 反復の手間) で割った数までにする (窓を解いてからあきらめても、窓の分の時間は使ってしまうため)
