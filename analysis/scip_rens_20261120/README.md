@@ -8,7 +8,7 @@
 - `one.sh 問題 種 秒 スレッド 札 [K=V ...]`: 当方を 1 回解き (`ENOMOTO_MIP_LOG=1`)、`logs/<問題>_<札>_s<種>_t<スレッド>.log` と `res_one.jsonl` に残す。
 - `scip_heur.py 問題 種,... 秒 [ケース,...]`: SCIP 10.0.2 のヒューリスティクスを入り切りして並べる (`logs/<問題>_sciph.jsonl`)。
 - `lfscan.py [秒]`: P 58 問と M (Mittelmann 186 問のうち P と重ならないもの) を試作 `cf`・4 スレッド・種 1 で回し、LP face が働くか (固定率 ≥ 0.3) を拾う
-  (`lfscan.jsonl`)。
+  (`lfscan.jsonl`。書き途中なのでコミットせず、終わったものを `lfscan_done.jsonl` に写してコミットする)。
 - `fuzz.sh`: release019 の fuzz 7 本の写し (環境変数は呼ぶ側で export、`TAG` でログの置き場を分ける)。
 - 計測: `cfg.py` (def・lfc)、`plan.py`、`run.py`・`summ.py` (scipslow_20261119 の写し)。
 

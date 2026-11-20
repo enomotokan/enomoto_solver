@@ -203,7 +203,8 @@ pub(super) fn vb01(c: char) -> bool {
     env_str!("ENOMOTO_MIP_VB01").is_some_and(|v| v.contains(c) || (c == 'r' && v == "1"))
 }
 
-/// 試作 `ENOMOTO_MIP_VBCLQ` の値 (既定では使わない。analysis/scipgate_20261120)
+/// 試作 `ENOMOTO_MIP_VBCLQ` の値 (既定では使わない。analysis/scipgate_20261120)。空・`0` 以外なら根の LP の前の pseudoobj
+/// ([`Solver::vbclq_pseudoobj`])、`l` を含めば前処理の LP による固定もしない
 pub(super) fn vbclq() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_VBCLQ").filter(|v| !v.is_empty() && *v != "0")
 }
@@ -7409,6 +7410,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             for o in self.orbitopes.iter() {
                 o.canonicalize(&mut x);
+            }
+            // 試作 `ENOMOTO_MIP_SYM_PPLEX`: 対合ごとの orbisack は列を共有するので、1 回の並べ替えで別の orbisack に反しうる。
+            // 並べ替えのたびに解は列の番号の順の辞書式で真に大きくなるので、変わらなくなるまで繰り返す (回数の上限つき)
+            if super::sym_pplex() {
+                for _ in 0..64 {
+                    let before = x.clone();
+                    for o in self.orbitopes.iter() {
+                        o.canonicalize(&mut x);
+                    }
+                    if before == x {
+                        break;
+                    }
+                }
             }
             // 試作 `ENOMOTO_MIP_SYM_SST=x`: SST の行に反する解を SST の段の群で写して、行を満たす代表にする
             // (元の問題での実行可能性と目的値は変わらない。analysis/sstx_20261119/)
@@ -20517,6 +20531,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             mark.iter_mut().for_each(|s| *s = u32::MAX);
+        }
+        // 診断 `ENOMOTO_MIP_VBCLQ_COUNT_FILE=<ファイル>`: 呼ばれるたびに「固定した列の数 打ち切りの証明 (0/1)」を 1 行足す (fuzz で働いた回数を数える)
+        if let Some(f) = env_str!("ENOMOTO_MIP_VBCLQ_COUNT_FILE") {
+            use std::io::Write;
+            if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(f) {
+                let _ = writeln!(fh, "{fixed} {}", infeas as u8);
+            }
         }
         if self.params.verbose {
             let free = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).count();

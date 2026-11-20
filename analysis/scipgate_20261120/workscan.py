@@ -1,5 +1,5 @@
 """試作 ENOMOTO_MIP_VBCLQ が働く問題 (根の LP の前に pseudoobj が固定する問題) を、P 58 問 + M (P と重ならない問題) で洗い出す。
-VB01=b (SCIP-VB の根の前の vbounds) + VBCLQ=1、1 スレッド・nice 19・1 問 120 秒まで、ENOMOTO_MIP_LOG=1 のログから VB01・VBCLQ の行を拾う。
+VB01=b (SCIP-VB の根の前の vbounds) + VBCLQ=1 (LP probing は既定どおり行い、その固定の数も拾う)、1 スレッド・nice 19・1 問 120 秒まで、ENOMOTO_MIP_LOG=1 のログから VB01・VBCLQ の行を拾う。
 python workscan.py K NSHARD → workscan.jsonl_K (途中から再開できる)"""
 import json, os, re, subprocess, sys
 from pathlib import Path
@@ -34,6 +34,8 @@ for s, p in probs[k::ns]:
         row["vb01"] = re.findall(r"VB01 before the root LP: (\w+)", out)
         row["root_lp"] = re.findall(r"MIP: root LP (\S+) \((\d+) iters, ([\d.]+)s\)", out)[:1]
         row["lp_probe"] = re.findall(r"LP probing: root LP ([\d.]+)s \((\d+) iters", out)[:1]
+        # 前処理の LP による固定 (`l` で省く仕事): 試した列・固定した列 (1 回目の求解の分。再スタートの後は LP probing をしない)
+        row["lp_probe_fix"] = [(int(a), int(b)) for a, b in re.findall(r"MIP: LP probing: tried (\d+) columns, fixed (\d+)", out)][:1]
         res = [l for l in out.splitlines() if l.startswith("{")]
         row["result"] = json.loads(res[-1]) if res else None
         if not had: mps.unlink()
