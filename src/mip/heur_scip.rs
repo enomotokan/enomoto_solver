@@ -477,6 +477,138 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (self.solve_submip(lo, up, 500), all1, all2)
     }
 
+    /// 試作 `ENOMOTO_MIP_VBCLQ` の `h` (既定では使わない。analysis/scipgate_20261120): SCIP の heur_vbounds の形で、クリーク表の含意
+    /// (衝突グラフ [`super::clique::CliqueGraph`]) を位相順に並べ、その順に 0-1 列を固定して伝播する。固定できない (伝播が矛盾する)
+    /// ときは反対の値にして続け、戻しが 10 回を超えるか、反対の値でも矛盾したらやめる (SCIP の maxbacktracks)。
+    /// 自由な整数列の 65% 以上を固定できれば (SCIP の minintfixingrate)、残りをサブ MIP で解く。全部固定できればその点を試す。
+    /// 節は文字 (2j: x_j = 1 にする = 下限の変更、2j+1: x_j = 0 にする = 上限の変更)。文字 l を真にすると衝突する文字 m は偽になる
+    /// (節 m^1 へ辺)。逆向きのグラフで深さ優先の帰りがけ順に並べると、影響を与える側が先に来る (SCIP の topologicalSort)。
+    /// 固定の値: `tighten` なら節の境界を動かす側 (伝播が起きる)、そうでなければ動かさない側。目的の向き `obj` は SCIP と同じ
+    /// (0: 見ない、1: 目的に良い側だけ固定、2: 悪い側だけ固定)。SCIP の既定 (feasvariant 6・tightenvariant 7) の 5 通りを順に回す。
+    /// 手間の上限は 1 通りあたり伝播の手間で非零数の 20 倍 + 100 万 ([`Self::fix_then_submip`] と同じ)
+    pub(super) fn vbclq_heur(&mut self) -> bool {
+        let p = self.p;
+        if self.params.submip || self.dom.infeasible {
+            return false;
+        }
+        let t0 = std::time::Instant::now();
+        let g = self.clique_graph_get();
+        let nn = 2 * p.n;
+        let mut visited = vec![false; nn];
+        let mut order: Vec<u32> = Vec::new();
+        let mut stack: Vec<(u32, usize)> = Vec::new();
+        for s in 0..nn as u32 {
+            if visited[s as usize] || g.neighbors(s ^ 1).is_empty() {
+                continue;
+            }
+            visited[s as usize] = true;
+            stack.push((s, 0));
+            while let Some(top) = stack.last_mut() {
+                let (t, k) = (top.0, top.1);
+                let nb = g.neighbors(t ^ 1);
+                if k < nb.len() {
+                    top.1 += 1;
+                    let u = nb[k];
+                    if !visited[u as usize] {
+                        visited[u as usize] = true;
+                        stack.push((u, 0));
+                    }
+                } else {
+                    stack.pop();
+                    order.push(t);
+                }
+            }
+        }
+        let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
+        if order.is_empty() || ints.is_empty() {
+            return false;
+        }
+        let work_cap = 20 * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
+        let mut found = false;
+        let mut log: Vec<String> = Vec::new();
+        for tighten in [false, true] {
+            let (mut skip1, mut skip2) = (false, false);
+            let modes: &[usize] = if tighten { &[0, 1, 2] } else { &[1, 2] };
+            for &obj in modes {
+                if (obj == 1 && skip1) || (obj == 2 && skip2) || self.time_up() {
+                    continue;
+                }
+                let pos = self.dom.stack_len();
+                let work0 = self.dom.debug_work();
+                let (mut all1, mut all2) = (true, true);
+                let (mut nbt, mut dead, mut nfix) = (0usize, false, 0usize);
+                for (k, &t) in order.iter().enumerate() {
+                    if k % 64 == 0 && (self.time_up() || self.dom.debug_work() - work0 > work_cap) {
+                        dead = true;
+                        break;
+                    }
+                    let j = (t / 2) as usize;
+                    if self.dom.lo[j] == self.dom.up[j] {
+                        continue;
+                    }
+                    // 節 t が上限の節 (x_j = 0 にする文字) か
+                    let upper_node = t % 2 == 1;
+                    let to_lower = tighten == upper_node;
+                    let nonneg = p.cost[j] >= 0.0;
+                    if nonneg != to_lower {
+                        if obj == 1 {
+                            continue;
+                        }
+                        all1 = false;
+                    }
+                    if nonneg == to_lower {
+                        if obj == 2 {
+                            continue;
+                        }
+                        all2 = false;
+                    }
+                    let v = if to_lower { self.dom.lo[j] } else { self.dom.up[j] };
+                    let before = self.dom.stack_len();
+                    self.dom.tighten_lower(p, j, v);
+                    self.dom.tighten_upper(p, j, v);
+                    nfix += 1;
+                    if !self.dom.propagate(p) {
+                        self.dom.backtrack_to(p, before);
+                        nbt += 1;
+                        let w = 1.0 - v;
+                        self.dom.tighten_lower(p, j, w);
+                        self.dom.tighten_upper(p, j, w);
+                        if !self.dom.propagate(p) || nbt > 10 {
+                            dead = true;
+                            break;
+                        }
+                    }
+                }
+                if tighten && obj == 0 {
+                    skip1 = all1;
+                    skip2 = all2;
+                }
+                let left = ints.iter().filter(|&&j| self.dom.lo[j] < self.dom.up[j]).count();
+                let rate = 1.0 - left as f64 / ints.len() as f64;
+                let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
+                self.dom.backtrack_to(p, pos);
+                let mut ok = false;
+                if !dead && rate >= 0.65 {
+                    let all_fixed = (0..p.n).all(|j| lo[j] == up[j]);
+                    ok = if all_fixed { self.try_incumbent(lo) } else { self.solve_submip(lo, up, 500) };
+                }
+                found |= ok;
+                log.push(format!("{}{obj}: fixed {nfix}, backtracks {nbt}{}, rate {rate:.2}{}", if tighten { "t" } else { "f" }, if dead { " (stopped)" } else { "" }, if ok { " found" } else { "" }));
+            }
+        }
+        if self.params.verbose {
+            eprintln!(
+                "MIP: VBCLQ h: order {} of {} literals; {} (incumbent {:?}, {:.2}s)",
+                order.len(),
+                nn,
+                log.join("; "),
+                self.incumbent.as_ref().map(|(z, _)| *z),
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        found
+    }
+
     /// minimum relaxation (違反量を最小にする補助 MIP、Gurobi の feasRelax と同じ考え): 各行に違反量の非負の列
     /// (下限側・上限側) を足し、行の係数の大きさで割った違反量の合計を最小にするサブ MIP を解く。違反量 0 の点が
     /// 見つかれば実行可能解。0 にならなければ、その点の整数列の値を目標に固定・伝播し、連続部分を LP で解いて試す。

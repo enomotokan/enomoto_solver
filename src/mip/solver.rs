@@ -196,6 +196,11 @@ pub(super) fn rhstat_on() -> bool {
 ///   残りのダイビングの取り分を半分にする (停滞の判定を手間で)
 ///
 /// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `es`。`0`・`off` で 0.1.7 までの動き (使わない)。**
+/// 試作 `ENOMOTO_MIP_VBCLQ` の値 (既定では使わない。analysis/scipgate_20261120)
+pub(super) fn vbclq() -> Option<&'static str> {
+    env_str!("ENOMOTO_MIP_VBCLQ").filter(|v| !v.is_empty() && *v != "0")
+}
+
 pub(super) fn rheur(c: char) -> bool {
     env_def!("ENOMOTO_MIP_RHEUR", "es").is_some_and(|v| v.contains(c))
 }
@@ -9878,6 +9883,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     crate::simplex::nb_diag::tag(crate::simplex::nb_diag::TREE_ROOT);
                     self.lp.set_basis(&b);
                 }
+            }
+        }
+        // 試作 `ENOMOTO_MIP_VBCLQ` (既定では使わない。analysis/scipgate_20261120): 根の LP の前に、`h` クリーク表の含意の位相順の発見法
+        // ([`Self::vbclq_heur`])、`p` 暫定解があれば目的の上限つきの試しで 0-1 列を大域的に固定する ([`Self::vbclq_objprobe`])。
+        // 値 `1` は両方。SCIP は hypothyroid-k1 で、根の LP の前の vbounds の解と目的の伝播で 1318 列を固定し、最初の LP が小さく強い
+        if let Some(v) = vbclq().filter(|_| self.snap.is_none() && !self.params.submip && !self.dom.infeasible) {
+            if v.contains('h') || v == "1" {
+                self.vbclq_heur();
+            }
+            if (v.contains('p') || v == "1") && self.vbclq_objprobe() > 0 {
+                self.sync_lp();
             }
         }
         if self.params.verbose && self.snap.is_none() && !self.params.submip {
@@ -20330,6 +20346,82 @@ impl<'a, L: MipLp> Solver<'a, L> {
     ///   `ENOMOTO_T_MIP_OBJPROBE_TIME_FRAC` (既定 0.1) 倍まで、`ENOMOTO_T_MIP_OBJPROBE_EVERY` (既定 1) ラウンドごと。固定が出たら
     ///   LP に入れて解き直す。両側矛盾 (打ち切り値より良い解がない) なら根の下界を打ち切り値にする (ループの頭の
     ///   [`Self::root_gap_closed`] で根を閉じる)。
+    /// 試作 `ENOMOTO_MIP_VBCLQ` の `p`: 根の LP の前に暫定解があれば、自由な 0-1 列を衝突グラフの次数 (含意の数) の多い順に
+    /// 両側とも試し (行の伝播 + 目的の上限の伝播)、片側が矛盾すれば反対側に大域的に固定する (SCIP の pseudoobj が含意で
+    /// 目的の損を数えて固定するのに当たる)。両側とも矛盾すれば暫定解より良い解はない (ここでは固定せず根に任せる)。
+    /// 手間の上限は伝播の手間で非零数の 20 倍 + 100 万 ([`Self::fix_then_submip`] と同じ)。固定した列の数を返す
+    pub(super) fn vbclq_objprobe(&mut self) -> usize {
+        let p = self.p;
+        if !self.has_cutoff_value() || !self.prune_limit().is_finite() || self.dom.infeasible {
+            return 0;
+        }
+        let t0 = Instant::now();
+        let g = self.clique_graph_get();
+        let mut cands: Vec<(usize, usize)> = (0..p.n)
+            .filter(|&j| p.is_int[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0)
+            .map(|j| (j, g.neighbors(2 * j as u32).len() + g.neighbors(2 * j as u32 + 1).len()))
+            .filter(|&(_, d)| d > 0)
+            .collect();
+        cands.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let work_cap = 20 * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
+        let work0 = self.dom.debug_work();
+        let (mut probed, mut fixed, mut both, mut stopped) = (0usize, 0usize, false, false);
+        for &(j, _) in &cands {
+            if self.time_up() || self.dom.debug_work() - work0 > work_cap {
+                stopped = true;
+                break;
+            }
+            if self.dom.lo[j] == self.dom.up[j] {
+                continue;
+            }
+            probed += 1;
+            let mut bad = [false; 2];
+            for (k, v) in [0.0f64, 1.0].into_iter().enumerate() {
+                let pos = self.dom.stack_len();
+                if v == 0.0 {
+                    self.dom.tighten_upper(p, j, 0.0);
+                } else {
+                    self.dom.tighten_lower(p, j, 1.0);
+                }
+                bad[k] = !(!self.dom.infeasible && self.dom.propagate(p) && self.propagate_objective_with(false));
+                self.dom.backtrack_to(p, pos);
+            }
+            match bad {
+                [true, true] => {
+                    both = true;
+                    break;
+                }
+                [true, false] | [false, true] => {
+                    let v = if bad[0] { 1.0 } else { 0.0 };
+                    self.dom.tighten_global(p, j, v == 0.0, v);
+                    if v == 0.0 {
+                        self.dom.tighten_upper(p, j, 0.0);
+                    } else {
+                        self.dom.tighten_lower(p, j, 1.0);
+                    }
+                    fixed += 1;
+                    if !self.dom.propagate(p) {
+                        both = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.params.verbose {
+            let free = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).count();
+            eprintln!(
+                "MIP: VBCLQ p: {probed} of {} candidates probed, {fixed} fixed{}{}, free integers now {free}, cutoff {:.10e} ({:.2}s)",
+                cands.len(),
+                if both { ", no solution better than the cutoff" } else { "" },
+                if stopped { " (work cap)" } else { "" },
+                self.prune_limit(),
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        fixed
+    }
+
     pub(super) fn objprobe_round(&mut self, round: usize) {
         let Some(v) = objprobe_flags() else { return };
         if self.params.submip || self.snap.is_some() || self.dom.infeasible || self.time_up() {
