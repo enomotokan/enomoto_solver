@@ -141,6 +141,12 @@ pub(crate) fn run(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
     if mode().is_some_and(|m| m.contains('s')) {
         start_diag(p, safety, seed);
     }
+    // `p` (analysis/objtarget_20261119/ の 8 の試作): PDLP の点を出発点にした FJ だけを回す。元の問題の LP を 1 スレッドの PDLP で
+    // `ENOMOTO_T_MIP_TPRE_PDLP_ITERS` 反復 (既定 2000) 解いた主の点 (整数列は四捨五入) から FJ を `ENOMOTO_T_MIP_TPRE_FJ_RUNS` 回 (種を変えて)。
+    // 手間は反復の数と FJ の手間 (非零の数で決まる) で決まり、主の側は決まった所で待つので種ごとに再現する
+    if mode().is_some_and(|m| m.contains('p')) {
+        return pdlp_start(p, safety, seed);
+    }
     let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
     if !p.cost.iter().any(|&c| c != 0.0) {
         return out;
@@ -297,4 +303,45 @@ fn ladder(p: &MipProblem, l0: f64, u: f64, safety: f64, seed: u64, out: &mut Tpr
     }
     out.l = Some(l);
     eprintln!("MIP: TPRE ladder: L0 {l0:.10e} U {u:.10e} -> proven L {l:.10e};{stages}");
+}
+
+/// [`run`] の `p`: PDLP の点からの FJ
+fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
+    use std::sync::{Arc, Mutex};
+    let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
+    let t0 = std::time::Instant::now();
+    let iters = tunable!("ENOMOTO_T_MIP_TPRE_PDLP_ITERS", 2000usize, usize);
+    let lp = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
+    let xo = Arc::new(Mutex::new(Vec::new()));
+    if let Some(b) = lp.pdlrc_run_iters_hist(iters, None, Some(xo.clone())) {
+        out.l = Some(b.lb + p.offset);
+        out.l_iters = b.iters;
+    }
+    drop(lp);
+    let x0 = xo.lock().map(|x| x.clone()).unwrap_or_default();
+    out.secs[0] = t0.elapsed().as_secs_f64();
+    if x0.len() != p.n {
+        return out;
+    }
+    let t1 = std::time::Instant::now();
+    let mut viol = 0usize;
+    for k in 0..tunable!("ENOMOTO_T_MIP_TPRE_FJ_RUNS", 2usize, usize) {
+        let sd = seed.wrapping_add((k as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        if let Some(x) = super::fj::fj2_search_from(p, &p.col_lo, &p.col_up, Some(&x0), safety, sd, None) {
+            if p.is_feasible(&x, 1e-6) {
+                let z = p.objective(&x);
+                if z < out.x_z {
+                    out.x_z = z;
+                    out.u = Some(z);
+                    out.x = Some(x);
+                }
+            }
+        }
+        if k == 0 {
+            viol = super::fj::FJ_LAST.with(|c| c.get().0);
+        }
+    }
+    out.n_tight = viol;
+    out.secs[1] = t1.elapsed().as_secs_f64();
+    out
 }
