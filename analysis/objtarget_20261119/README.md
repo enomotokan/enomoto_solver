@@ -72,3 +72,19 @@
 sing326・trento1・radiationm40-10-02 0.003・brazil3 0.014・momentum1 0.03・markshare2 0.056・loue 0.059・satellites2-40 0.093)、0.1〜0.25 7 問
 (kakapo・nattai・sp97ar・blp-ic98・comp21・leo2・satellites2-60-fs)、0.25〜0.5 8 問、0.5 以上 14 問 (rahue・cvs16・nexp・kumeu など)。
 最適値が下界のすぐ近くで 60 秒の暫定解が遠い問題が 10 問ある (T を下から上げる形の対象)。
+
+## 7. LP 緩和の最大の上界 U_max を T の目安に使えるか (事実、`umax.py`・`res_umax.jsonl`・`umax_table.txt`)
+
+診断 `ENOMOTO_MIP_TPRE=u`: 元の問題 (前処理の前) の LP 緩和で、最小化のラグランジュ下界 L(y) と、目的の符号を反転した LP のラグランジュ下界の符号を
+戻した U_max (どの y でも正しい上界。最大化が非有界なら +inf) を、1 スレッドの PDLP の 500・2000・5000・20000 反復の時点で出す。
+解探しが弱い 45 問 + P の数問 (計 50 問、前処理の後で止める)。
+
+- U_max が有限: **23 / 50 問**。L が −inf (20000 反復でも双対が有限の下界を作らない): 16 問。
+- 比 (U_max − z*) / (z* − L) (20000 反復、有限で L < z* の 23 問): 1 以下は 5 問だけ (bnatt400 0・sorrell3 0.03・neos-1354092 0.40・ns1952667 1.0・
+  peg-solitaire-a3 1.0)。ほかは rail01 2.7・cvs16 3.1・opm2 3.2・rococoB10 5.7・puriri 6.5・assign1-5-8 10.8・csched007 12.9・cmflsp50 30・uct-subprob 33・
+  traininstance2 33・neos-1456979 36・lectsched 71・gen-ip002 84・loue 204・comp21 233・neos-873061 2391・sp97ar 5605・academictimetablesmall 9.5e8。
+- U_max が最適値に近い 5 問のうち 4 問 (bnatt400・ns1952667・neos-1354092・peg-solitaire-a3) は「解なし」の問題で、目的の幅が小さい (bnatt400 は z* = U_max = 1:
+  どの実行可能解も最適) 。解を 1 つ見つけるのが難しいので、目的の行は効かない。
+- PDLP の手間: U_max は多くの問題で 500〜2000 反復で落ち着く (academictimetablesmall 1.124e4 → 1.115e4、rail01 4.3 → −6.6、opm2 3.1e4 → 1.05e4 は 20000 反復でも下がり続ける)。
+  2 本の PDLP で 0.01〜78 秒 (rail01 56・49 秒、opm2 78 秒)。
+- 判断: **親の見立てどおり**。多くの問題で U_max は無限か最適値から遠く (比 10〜10^9)、T の目安には使えない。近い問題は解を 1 つ見つけるのが難しい型で、目的の行は効かない。
