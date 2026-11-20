@@ -1,0 +1,40 @@
+問題 200 (根の LP まで届いた問題)
+
+| 初めの根の LP の秒 | 問題 | 根のヒューリスティクスの主の秒の和 | 改善の回数 (主+並列) | Pump・ダイビングの秒 | その改善 | Pump・ダイビングが回った問題 |
+|---|---|---|---|---|---|---|
+| a ≤1s | 150 | 1293 | 187 | 32 | 1 | 22 |
+| b 1-10s | 32 | 972 | 38 | 167 | 0 | 9 |
+| c 10-60s | 9 | 400 | 13 | 12 | 0 | 1 |
+| d >60s | 9 | 1417 | 4 | 969 | 0 | 4 |
+
+Pump・ダイビングが回った問題 (秒, 改善):
+  a ≤1s 10teams(0s,0改善), 30n20b8(3s,0改善), neos-1456979(2s,0改善), timtab1(0s,0改善), rocII-5-11(2s,0改善), neos-3024952-loue(8s,0改善), neos859080(0s,0改善), csched007(2s,0改善), neos-2657525-crna(0s,0改善), lectsched-5-obj(4s,0改善), neos-5107597-kakapo(1s,0改善), bnatt400(2s,0改善), traininstance2(2s,0改善), wachplan(1s,0改善), fhnw-binpack4-4(0s,0改善), gmu-35-50(0s,1改善), icir97_tension(1s,0改善), ns1830653(1s,0改善), ic97_potential(0s,0改善), bnatt500(2s,0改善), dws008-01(1s,0改善), rocI-4-11(1s,0改善)
+  b 1-10s ns1952667(6s,0改善), brazil3(10s,0改善), cmflsp50-24-8-8(23s,0改善), germanrr(19s,0改善), neos-3216931-puriri(27s,0改善), academictimetablesmall(16s,0改善), neos-2746589-doon(40s,0改善), peg-solitaire-a3(7s,0改善), app1-2(20s,0改善)
+  c 10-60s neos-1354092(12s,0改善)
+  d >60s neos-3988577-wolgan(346s,0改善), rail01(98s,0改善), cryptanalysiskb128n5obj16(270s,0改善), cryptanalysiskb128n5obj14(255s,0改善)
+
+| ヒューリスティクス (主) | 回数 | 秒 | 改善 | 改善なしの秒 |
+|---|---|---|---|---|
+| RENS | 180 | 976 | 62 | 740 |
+| feasibility pump | 36 | 538 | 1 | 538 |
+| interior rounding | 180 | 518 | 8 | 487 |
+| root reduced cost | 205 | 393 | 45 | 286 |
+| fractional diving | 34 | 352 | 0 | 352 |
+| robust FJ | 31 | 298 | 12 | 278 |
+| RINS | 153 | 279 | 26 | 216 |
+| LP face | 183 | 161 | 17 | 91 |
+| coefficient diving | 34 | 145 | 0 | 145 |
+| vector length diving | 34 | 145 | 0 | 145 |
+| locks | 159 | 91 | 10 | 52 |
+| randomized rounding | 219 | 35 | 12 | 34 |
+| local search | 19 | 29 | 2 | 25 |
+| int shifting | 185 | 25 | 8 | 10 |
+| clique | 159 | 21 | 9 | 16 |
+| trivial | 69 | 20 | 12 | 16 |
+| RENS (LP before cuts) | 36 | 14 | 0 | 14 |
+| repair | 17 | 14 | 0 | 14 |
+| simple rounding | 222 | 12 | 1 | 0 |
+| shifting | 187 | 6 | 11 | 0 |
+| vbounds (loose) | 157 | 5 | 3 | 4 |
+| vbounds (tight) | 157 | 2 | 0 | 2 |
+| shift-and-propagate | 34 | 1 | 2 | 1 |
