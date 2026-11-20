@@ -5,6 +5,8 @@ python plan.py E NE → shards_E.json (遅い側の 5 問 × 種 3〜8 × {def, 
 python plan.py G NG → shards_G.json (INTSING の `g` 形で消す列が `1` と変わる問題 × 種 1〜3 (2 問は 1〜8) × {def, isg} (同じビルドの対)、600 秒)。
 python plan.py H NH → shards_H.json (INTSING の `1gs` 形で消す列が減って 0 本にならない 7 問 × {def, isgs} (同じビルドの対)、600 秒)。
 python plan.py L NL → shards_L.json (1go で解けた数が減った supportcase33 種 1〜8・traininstance6 種 9〜16 × {def, isgo}、600 秒)。
+python plan.py S NS → shards_S.json (カットの打ち切りが外側の根で働く M の 17 問 × 種 1・2 × {def, st5}、600 秒)。
+python plan.py CP NCP → shards_CP.json (58 問 × 種 1〜3 × {def, pe}、60 秒)、python plan.py CM NCM → shards_CM.json (Mittelmann 186 問 × 種 1 × {def, pe}、600 秒)。
 python plan.py M NM → shards_M.json (scan_s*.jsonl で前処理が変わった Mittelmann の問題 + 対象 6 問 × 種 1・2 × {def, fixis}、600 秒)。
 見積りは analysis/final_20261118 の def の時間 (解けなかった回は上限) + P は 8 秒・M は 30 秒。"""
 import json, glob, sys
@@ -91,6 +93,27 @@ elif SET == "L":
     est = lambda p, c, s: sum(tm.get(p, [600])) / len(tm.get(p, [600])) + 30
     jobs = {(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, (p, ss) in enumerate([("supportcase33", range(1, 9)), ("traininstance6", range(9, 17))]) for s in ss}
     balance(jobs, est, NS, "shards_L.json", 600)
+elif SET == "S":
+    # カットの打ち切りの待つ巡数 3 → 5 (st5) の M: scan_st_*.jsonl (Mittelmann 186 問、既定・1 スレッド・種 1 で根のカットのループを見た) で
+    # 打ち切り ("LP bound unchanged for k rounds; stop") が外側の根で働いた 17 問 (awhea を含む) × 種 1・2 × {def, st5}、600 秒・4 スレッド。
+    # ほかの 169 問は外側の根で打ち切りが働かないので st5 と既定は同じ (4 スレッドでは働く問題が少し違いうる)。見積りは final_20261118 の def
+    probs = sorted({r["problem"] for f in glob.glob(str(D / "scan_st_*.jsonl")) for l in open(f) for r in [json.loads(l)] if r["stall"]})
+    CF = ["def", "st5"]; TM = times("res_M_s*.jsonl", 600)
+    balance({(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, p in enumerate(probs) for s in (1, 2)},
+            lambda p, c, s: TM.get((p, s), TM.get((p, 1), 600)) + 30, NS, "shards_S.json", 600)
+elif SET in ("CP", "CM"):
+    # 衝突解析で双対証明を遡る試作 (pe) の広い計測: CP = MIPLIB の 58 問 × 種 1〜3 × {def, pe}、60 秒。CM = Mittelmann 186 問 × 種 1 × {def, pe}、600 秒。
+    # 見積りは final_20261118 の def (解けなかった回は上限) + P 8 秒・M 30 秒
+    CF = ["def", "pe"]
+    if SET == "CP":
+        TP = times("res_P_s*.jsonl", 60)
+        balance({(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, p in enumerate(PROBS) for s in (1, 2, 3)},
+                lambda p, c, s: TP.get((p, s), TP.get((p, 1), 60)) + 8, NS, "shards_CP.json", 60)
+    else:
+        TM = times("res_M_s*.jsonl", 600)
+        MP = sorted({x for part in json.loads((D.parent / "cbcimpl_20261029/mitt_parts.json").read_text()) for x in part})
+        balance({(p, 1): [(p, c, 1) for c in (CF[i % 2:] + CF[:i % 2])] for i, p in enumerate(MP)},
+                lambda p, c, s: TM.get((p, s), 600) + 30, NS, "shards_CM.json", 600)
 elif SET in ("E", "M3"):
     # 運かどうかの確かめ (利用者の判断「遅くなるのが運なら採用」): E = 遅い側に出た 5 問 × 種 3〜8、M3 = M の 37 問 × 種 3。{def, fixis}、600 秒。
     # 見積りは res_M の同じ問題の def・fixis の時間 (2 種の平均) + 30 秒
