@@ -9924,8 +9924,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_VBCLQ` (既定では使わない。analysis/scipgate_20261120): 根の LP の前に、暫定解があれば目的の上限と
         // クリーク表の含意で 0-1 列を大域的に固定する ([`Self::vbclq_pseudoobj`]、SCIP の pseudoobj の propuseimplics に当たる)。
         // SCIP は hypothyroid-k1 で、根の LP の前の vbounds の解とこの伝播で 1318 列を固定し、最初の LP が小さく強い
-        if vbclq().is_some() && self.snap.is_none() && !self.params.submip && !self.dom.infeasible && self.vbclq_pseudoobj() > 0 {
-            self.sync_lp();
+        // 置き場所の規則 (`e`、README 10 節): LP を使わない発見法 (VB01) とその解による固定 (pseudoobj) は、各求解の最初の LP の直前に 1 回。
+        // 最初の求解で前処理の LP による固定の前に回したなら (`VBCLQ_E_RAN`)、ここでは回さない。回していなければ (再スタートの後・
+        // LP による固定のない道)、根の LP がその求解の最初の LP なので、ここで回す。値 `1`・`l` は従来どおり根の LP の前に pseudoobj だけ
+        if let Some(v) = vbclq().filter(|_| self.snap.is_none() && !self.params.submip && !self.dom.infeasible) {
+            let e_mode = v.contains('e');
+            let e_ran = super::VBCLQ_E_RAN.with(|f| f.replace(false));
+            if !(e_mode && e_ran) {
+                if e_mode && !(vb01('b') && self.params.restarts == 0) {
+                    let t0 = Instant::now();
+                    let r = self.vbounds01_heur();
+                    if self.params.verbose {
+                        eprintln!("MIP: VBCLQ e: VB01 before the root LP (the first LP of this solve): {} ({:.2}s)", if r { "found" } else { "none" }, t0.elapsed().as_secs_f64());
+                    }
+                }
+                if !self.dom.infeasible && self.vbclq_pseudoobj() > 0 {
+                    self.sync_lp();
+                }
+            }
         }
         if self.params.verbose && self.snap.is_none() && !self.params.submip {
             eprintln!("MIP: solving the root LP ({:.2}s)", self.start.elapsed().as_secs_f64());

@@ -1290,6 +1290,9 @@ thread_local! {
     /// 次の [`solve_problem`] に渡す最初の暫定解 (`p` の空間)。開始時に取り出し、前処理後の空間に移して
     /// [`solver::START_SOL`] に置く (再スタートで暫定解を引き継ぐ)。
     pub(crate) static RESTART_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+    /// 試作 `ENOMOTO_MIP_VBCLQ` の `e`: この求解の前処理で、最初の LP (LP による固定) の前の VB01 と pseudoobj を回したか。
+    /// 回していなければ (再スタートの後・LP による固定のない道)、Solver が根の LP (その求解の最初の LP) の前に回す
+    pub(crate) static VBCLQ_E_RAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 再スタート前のカット (`係数 x <= 右辺`)。再スタートが [`solve_problem`] に渡す問題の空間で置き、前処理後の空間に
     /// 移して置き直し、求解の開始時にカットプールに入れる (static TLS の領域が足りないので 1 つで済ませる)。
     pub(crate) static RESTART_CUTS: std::cell::RefCell<Option<Vec<(Vec<(usize, f64)>, f64)>>> = const { std::cell::RefCell::new(None) };
@@ -1462,6 +1465,10 @@ pub(crate) fn rows_fingerprint(rows: &[Vec<(usize, f64)>]) -> u64 {
 
 fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
     let start = RESTART_SOL.with(|s| s.borrow_mut().take());
+    if !params.submip {
+        // 試作 `ENOMOTO_MIP_VBCLQ` の `e`: この求解の前処理で回したかの印を消す (前の求解の残りを持ち越さない)
+        VBCLQ_E_RAN.with(|f| f.set(false));
+    }
     let t_pre = std::time::Instant::now();
     if !params.submip && params.restarts == 0 {
         pretime::start();
@@ -4972,6 +4979,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         // 固定の前の問題で続ける (VB01 の解は開始解としてそのまま渡す)
         let saved = prob.clone();
         let k = presolve_vbclq_e(&mut prob, verbose, lp_probe_secs.unwrap_or(10.0));
+        VBCLQ_E_RAN.with(|f| f.set(true));
         if k > 0 {
             VBCLQ_E_ACTIVE.with(|f| f.set(true));
             let r = presolve_mip_depth(&prob, verbose, submip, lp_probe_secs, depth);
