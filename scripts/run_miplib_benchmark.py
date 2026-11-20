@@ -5,7 +5,8 @@
 
 - HiGHS: 既定の設定 + `time_limit` + `mip_rel_gap = 0` (このクレートの既定の相対ギャップ 0 にそろえる。2026-10-20 から。
   それより前の結果は HiGHS の既定 1e-4)。`Highs.run()` の時間を測る。
-- このクレート: MPS は HiGHS で読み、`benchmark_highs._build_our_model` でモデルを作る (整数性も渡す)。
+- このクレート: MPS はこのクレートの読み込み (`benchmark_highs._read_our_model` → `PyModel.read_mps`) で読む
+  (2026-11-20 から。それより前は HiGHS で読んで `benchmark_highs._build_our_model` で組み立てていた)。
   `model.solve(time_limit=...)` の時間だけを測る。親プロセスは時間上限 + 余裕で打ち切る。
 
 結果は問題ごとに `--out` (JSON) に書き足すので、中断しても同じコマンドで再開できる。
@@ -41,6 +42,18 @@ PROBLEMS = [
     "bppc4-08", "cvs16r128-89", "mik-250-20-75-4", "neos-1456979", "graph20-20-1rand",
 ]
 
+
+
+def _read_our_model_compat(bh, path):
+    """`benchmark_highs._read_our_model` (このクレートの MPS 読み込み) でモデルを作る。古いビルドを wheel で入れた
+    環境では `benchmark_highs` 自体が古く `_read_our_model` がないので、従来の HiGHS 経由の組み立てに戻る
+    (台本だけ新しくなった計測が落ちないように)。戻り値は `(model, 制約数, 非零数, 列の名前)`。"""
+    if hasattr(bh, "_read_our_model"):
+        return bh._read_our_model(path)
+    _, lp = bh._load_lp(path)
+    names = list(lp.col_names_) if len(lp.col_names_) == lp.num_col_ else [f"C{j}" for j in range(lp.num_col_)]
+    model, n_constraints, nnz = bh._build_our_model(lp)
+    return model, n_constraints, nnz, names
 
 def fetch(name: str, cache: Path) -> Path:
     """`name` の MPS を取得して展開し、そのパスを返す。"""
@@ -141,8 +154,7 @@ def worker_scip(mps: str, time_limit: float, threads: int) -> None:
 def worker_ours(mps: str, time_limit: float, threads: int) -> None:
     from enomoto_solver import benchmark_highs as bh
 
-    _, lp = bh._load_lp(Path(mps))
-    m, _, _ = bh._build_our_model(lp)
+    m, _, _, _ = _read_our_model_compat(bh, Path(mps))
     t = time.perf_counter()
     r = m.solve(None, False, time_limit, None, None, threads)
     t = time.perf_counter() - t
