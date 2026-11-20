@@ -1,4 +1,4 @@
-"""SCIP-GATE の分担表 (scipslow_20261119/plan.py の写し): python plan.py NM NP [設定,..] [接尾辞] → shards_M<接尾辞>.json・shards_P<接尾辞>.json (NM = 0 なら P だけ)
+"""SCIP-GATE の分担表 (scipslow_20261119/plan.py の写し): python plan.py NM NP [設定,..] [接尾辞] → shards_M<接尾辞>.json・shards_P<接尾辞>.json (NM = 0 なら P だけ、NP = 0 なら M だけ)
 P: MIPLIB の 58 問 × 種 1〜3 × 設定、60 秒 (4 スレッド)。
 M: e が働きうる問題 × 種 1・2 × 設定、600 秒。問題は下の A ∪ B ∪ C (workscan・bigmscan の数え上げ)。
 設定は 3 番目の引数 (既定 def,vbce。1 回目の計測は def,vb,vbc,vbcl で P だけ)。
@@ -48,4 +48,5 @@ if NM > 0:  # NM = 0 なら M の分担表は作らない (P だけ先に出す�
     balance({(p, s): order(p, s, CF) for p in MPROBS for s in (1, 2)}, estM, NM, f"shards_M{SUF}.json", 600)
 TP = times(VS / "res_P_s*.jsonl", "def", 60)
 def estP(p, c): return TP.get(p, 48.0) + 8
-balance({(p, s): order(p, s, CF) for p in PROBS for s in (1, 2, 3)}, estP, NP, f"shards_P{SUF}.json", 60)
+if NP > 0:  # NP = 0 なら P の分担表は作らない (M だけ作り直すとき)
+    balance({(p, s): order(p, s, CF) for p in PROBS for s in (1, 2, 3)}, estP, NP, f"shards_P{SUF}.json", 60)
