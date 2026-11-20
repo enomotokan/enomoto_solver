@@ -10,7 +10,7 @@ import run_miplib_benchmark as rb  # noqa: E402
 from probs import PROBS  # noqa: E402
 mitt = [p for part in json.loads((WT / "analysis/cbcimpl_20261029/mitt_parts.json").read_text()) for p in part]
 probs = [("P", p) for p in PROBS] + [("M", p) for p in mitt if p not in PROBS]
-OUT = D / "tkscan.jsonl"
+OUT = D / os.environ.get("TKSCAN_OUT", "tkscan.jsonl")
 done = {json.loads(l)["problem"] for l in OUT.read_text().splitlines()} if OUT.exists() else set()
 
 def one(sp):
@@ -20,7 +20,7 @@ def one(sp):
         return {"set": s, "problem": p, "error": str(e)[:200]}
     dump = Path(tempfile.gettempdir()) / f"tkscan_{p}.mps"
     env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
-    env.update({"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_LPPROBE_TICKS": "1",
+    env.update({"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_LPPROBE_TICKS": os.environ.get("TKSCAN_TICKS", "1"),
                 "ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED3": str(dump), "ENOMOTO_MIP_DEBUG_STOP_PRESOLVED": "1"})
     try:
         pr = subprocess.run(["nice", "-n", "19", sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", "120", "--threads", "1"],
