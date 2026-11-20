@@ -2120,7 +2120,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     let tpre_orig: Option<(f64, Vec<f64>)> = tpre_x_orig.filter(|x| x.len() == p.n && p.is_feasible(x, 1e-6) && solver::START_SOL.with(|s| s.borrow().is_none())).map(|x| (p.objective(&x), x));
     let params = match &tpre_orig {
         Some((u, _)) => {
-            eprintln!("MIP: TPRE: keeping the solution {u:.10e} of the original problem as the cutoff and the fallback answer");
+            if params.verbose {
+                eprintln!("MIP: TPRE: keeping the solution {u:.10e} of the original problem as the cutoff and the fallback answer");
+            }
             MipParams { cutoff: params.cutoff.min(*u), ..params }
         }
         None => params,
@@ -2742,12 +2744,15 @@ fn feas_fj_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> 
 ///   Local-MIP の初期化 (行の左辺の計算・集合の行の表) は止めを見ないので、始める前に一度見る。
 /// - FJ2 は止めの合図が立った後に LP 修復をしない (`fj::SKIP_REPAIR_ON_STOP`、[`heuristics::fj_lmip_mix`] と同じ)。
 /// - 問題は `=1` と同じ (前処理後、LP による固定の前。FJ_P3 の前処理はかけない)。
-/// 試作 `ENOMOTO_MIP_FEAS_NORETRY` (既定では使わない。analysis/rootlp_20261120): 目的が全て 0 の問題 (実行可能性問題) で、前処理の早めの
+/// `ENOMOTO_MIP_FEAS_NORETRY` (analysis/rootlp_20261120): 目的が全て 0 の問題 (実行可能性問題) で、前処理の早めの
 /// FJ/Local-MIP ([`feas_fj_lmip_early`]) が解なしで上限まで回ったら、根の後のやり直し (solver の `robust_fj_retry`) を回さない。
 /// fhnw-binpack4-4 (実行不能) は 4 スレッドで早めの探索 60 秒・やり直し 30 秒・木 17 秒。解ける実行可能性問題 (fhnw-binpack4-48・
 /// neos-3004026-krka・ns1116954) は早めの探索が 3〜51 秒で解を見つけ、やり直しが見つけた記録はない (analysis/hang_20261117 の F)
+///
+/// **2026-11-20 から既定 (`=0` で以前の形、やり直しを回す)。** F の計測 (目的が全て 0 の 11 問 × 種 1〜3、NO_CHAIN と合わせて): 4 スレッド 17/17・
+/// −24.9% [−39.2, −7.2]、1 スレッド 15/15・−71.2% [−92.0, −27.4]、全種で遅い問題なし (analysis/rootlp_20261120)
 pub(crate) fn feas_noretry_on() -> bool {
-    env_str!("ENOMOTO_MIP_FEAS_NORETRY").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_FEAS_NORETRY", "1").is_some()
 }
 
 thread_local! {
@@ -2820,8 +2825,10 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                     }
                 };
                 let lm_seed = base ^ 0x6A09_E667_F3BC_C909 ^ ((t as u64 + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9));
-                // `ENOMOTO_MIP_FEAS_EARLY_LMIP_NO_CHAIN` (診断用): 連鎖の手を使わない
-                let chain = env_str!("ENOMOTO_MIP_FEAS_EARLY_LMIP_NO_CHAIN").is_none();
+                // `ENOMOTO_MIP_FEAS_EARLY_LMIP_NO_CHAIN` (2026-11-20 から既定、`=0` で連鎖の手を使う以前の形。analysis/rootlp_20261120 の 1・3 節):
+                // 連鎖の手を使わない。連鎖の手は 1 手が重く手間の数えが実時間の約 1/7 で、fhnw-binpack4-48 は連鎖なしの方が速く解を見つける
+                // (1 スレッド 51 → 0.2 秒)。目的が全て 0 の 11 問の計測 (F、ENOMOTO_MIP_FEAS_NORETRY と合わせて) で 4 スレッド −24.9%・1 スレッド −71.2%
+                let chain = env_def!("ENOMOTO_MIP_FEAS_EARLY_LMIP_NO_CHAIN", "1").is_none();
                 let lm_new = || {
                     if over() {
                         return None;
@@ -5218,7 +5225,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             }
         }
     }
-    // 試作 `ENOMOTO_MIP_VBCLQ` の `e` ([`presolve_vbclq_e`]、analysis/scipgate_20261120): LP による固定の前に、暫定解の値を上限にした
+    // `ENOMOTO_MIP_VBCLQ` の `e` (既定、`=0` で使わない。[`presolve_vbclq_e`]、analysis/scipgate_20261120): LP による固定の前に、暫定解の値を上限にした
     // pseudoobj の固定をかける。固定したら前処理をかけ直し (固定した列と冗長になった行を消す)、その問題で LP による固定を回す
     // 診断 `R` (値 `eR`): 前処理の中では回さず、根の LP の前の道 (前処理で回らなかった求解の道) だけで回す (fuzz でその道を確かめる)
     if lp_probe_secs.is_some() && !submip && !VBCLQ_E_ACTIVE.with(|f| f.get()) && solver::vbclq().is_some_and(|v| v.contains('e') && !v.contains('R')) {
@@ -5894,7 +5901,7 @@ fn lp_inf_untrusted<L: lp_api::MipLp>(lp: &L, n: usize) -> bool {
     u
 }
 
-/// 試作 `ENOMOTO_MIP_VBCLQ` の `e` (analysis/scipgate_20261120): 前処理の LP による固定の前に、暫定解の値 z を上限 (`cost · x <= z - offset`、
+/// `ENOMOTO_MIP_VBCLQ` の `e` (既定、`=0` で使わない。analysis/scipgate_20261120): 前処理の LP による固定の前に、暫定解の値 z を上限 (`cost · x <= z - offset`、
 /// 暫定解そのものは残る) にして [`vbclq::pseudoobj`] で 0-1 列を固定し、定義域の伝播の結果も列の境界に書く。暫定解の出どころ:
 /// - VB01 ([`heur_scip::vbounds01_on_problem`]、SCIP-VB の試作の Solver の外の版)。
 /// - 診断 `ENOMOTO_MIP_VBCLQ_PRE_CUTOFF=<値>` (元の問題の目的の値。解は持たない、上限だけ。VB01 の解より良ければこちら)。
