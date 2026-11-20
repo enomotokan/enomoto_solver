@@ -1,4 +1,4 @@
-//! 試作 `ENOMOTO_MIP_VBCLQ` (既定では使わない。analysis/scipgate_20261120): 目的の上限とクリーク表の含意による 0-1 列の固定
+//! `ENOMOTO_MIP_VBCLQ` (既定 `e`、`=0` で使わない。analysis/scipgate_20261120): 目的の上限とクリーク表の含意による 0-1 列の固定
 //! (SCIP の pseudoobj の propuseimplics の形)。Solver の根の LP の前 ([`super::solver::Solver::vbclq_pseudoobj`]) と、
 //! 前処理の LP による固定の前 (値 `e`、[`super::presolve_vbclq_e`]) から呼ぶ。
 
