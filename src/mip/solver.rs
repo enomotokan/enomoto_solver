@@ -22562,9 +22562,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 根の始めに自由だった整数列。試作 `ENOMOTO_MIP_RSTDEN` (analysis/rstden_20261113.md、既定では使わない) の文字:
     /// `1` = 1 回目の再スタートで自由な整数列にする、`2` = 2 回目以降で自由な整数列にする
     /// (HiGHS の `percentageInactiveIntegers` は前処理の後の自由な整数列に対する割合)
+    /// 再スタートの判定の「全部の整数列」の数 (`ENOMOTO_MIP_RESTART_DROP_FIXED` で列を詰めた子の求解では詰める前の数、[`super::restart_nint_base`])
+    fn restart_nint(&self) -> usize {
+        if self.params.submip {
+            self.p.nint
+        } else {
+            self.p.nint.max(super::restart_nint_base())
+        }
+    }
+
     fn restart_denom(&self) -> usize {
-        let nint = self.p.nint;
-        let free = nint.saturating_sub(self.root_fixed0);
+        let nint = self.restart_nint();
+        // 根の始めに自由だった整数列の数は、詰めても詰めなくても同じ (詰めた列は根の始めに固定済みの列に数えられていた)
+        let free = self.p.nint.saturating_sub(self.root_fixed0);
         if env_str!("ENOMOTO_MIP_RESTART_FRAC_FREE").is_some() || super::gr_restart_ff_for(self.p) {
             return free;
         }
@@ -22582,7 +22592,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_RSTDEN").is_some_and(|v| v.contains('p')) {
             self.restart_denom()
         } else {
-            self.p.nint
+            self.restart_nint()
         }
     }
 
@@ -23168,16 +23178,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let readd = readd && !big_restart;
         let cuts_as_rows = (env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_none() && !readd) || keep_all;
         let mut carry: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
-        // 試作 `ENOMOTO_MIP_RESTART_DENSE_POOL` (既定では使わない。analysis/objtarget_20261119/ の 10 節): 行にする経路でも、自由な列 (大域的に
-        // 固定されていない列) の非零が、この問題の行の自由な列の非零の平均 (自由な列の非零の和 / 行の数) より多いカットは行にせず、プールに渡す。
-        // 行 1 本が LP の反復・伝播・前処理に足す手間はその行の非零に比例するので、問題の平均の行より重いカットを行として持ち込まない
-        // (nw04: 問題の行の平均 約 440 に対しカットは 約 1800 (固定前は 7〜8 万)。再スタートの後のプロービングがカットの行で重くなる)
-        let dense_cap = (cuts_as_rows && !keep_all && env_str!("ENOMOTO_MIP_RESTART_DENSE_POOL").is_some()).then(|| {
-            let free = |j: usize| self.dom.global_lo[j] < self.dom.global_up[j];
-            let nz: usize = p.rows.iter().map(|r| r.iter().filter(|&&(j, _)| free(j)).count()).sum();
-            nz as f64 / p.m.max(1) as f64
-        });
-        let mut dense_carry: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
         let act = self.lp.row_activities();
         for i in p.m..self.lp.num_rows() {
             let (l, u) = self.lp.row_bounds(i);
@@ -23198,26 +23198,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !keep_all && !tight {
                 continue;
             }
-            if let Some(cap) = dense_cap {
-                let r = self.lp.row(i);
-                if r.iter().filter(|&&(j, _)| j < p.n && self.dom.global_lo[j] < self.dom.global_up[j]).count() as f64 > cap {
-                    if u.is_finite() {
-                        dense_carry.push((r.clone(), u));
-                    }
-                    if l.is_finite() {
-                        dense_carry.push((r.iter().map(|&(j, v)| (j, -v)).collect(), -l));
-                    }
-                    continue;
-                }
-            }
             rows.push(self.lp.row(i));
             row_lo.push(l);
             row_up.push(u);
-        }
-        if let Some(cap) = dense_cap {
-            if self.params.verbose {
-                eprintln!("MIP: RESTART_DENSE_POOL: {} dense cut sides passed to the cut pool (more free nonzeros than the mean row {cap:.1}), {} cut rows kept", dense_carry.len(), rows.len() - p.m);
-            }
         }
         // `ENOMOTO_MIP_RESTART_ROOT_CUTS` の `r` (試作): 木の中の再スタートでは、根の終わりの LP で効いていたカットも持ち込む
         // (今の LP は最後に解いたノードの LP なので、そこで効いていない根のカット・年齢で外れた根のカットが落ちる)
@@ -23427,18 +23410,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             super::RESTART_CUTS.with(|s| *s.borrow_mut() = Some(carry));
             super::RESTART_CUTS_READD.with(|f| f.set(readd && super::restart_cuts_fix()));
-        }
-        // `ENOMOTO_MIP_RESTART_DENSE_POOL`: 行にしなかった密なカットを新しい求解のプールに渡す (固定された列は代入して右辺に移す)
-        if !dense_carry.is_empty() {
-            let dc: Vec<(Vec<(usize, f64)>, f64)> = dense_carry
-                .into_iter()
-                .filter_map(|(c, r)| {
-                    let mut rr = r;
-                    let cc: Vec<(usize, f64)> = c.into_iter().filter(|&(j, v)| if newp.col_lo[j] == newp.col_up[j] { rr -= v * newp.col_lo[j]; false } else { true }).collect();
-                    (!cc.is_empty()).then_some((cc, rr))
-                })
-                .collect();
-            super::RESTART_CUTS.with(|s| s.borrow_mut().get_or_insert_with(Vec::new).extend(dc));
         }
         // 暫定解を引き継ぐ (新しい問題は列が同じ)
         if env_str!("ENOMOTO_MIP_RESTART_NO_INCUMBENT").is_none() {
