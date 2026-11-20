@@ -2514,7 +2514,7 @@ mod tests {
     }
 }
 
-/// 試作 `ENOMOTO_MIP_SYM_PPLEX` (analysis/scipsym_20261120/、既定では使わない): SCIP 10 の「詰め込み・分割の orbisack への格上げ」
+/// `ENOMOTO_MIP_SYM_PPLEX` (analysis/scipsym_20261120/、2026-11-20 に既定にした。`=0` で切る): SCIP 10 の「詰め込み・分割の orbisack への格上げ」
 /// (prop_symmetry.c の `componentPackingPartitioningOrbisackUpgrade`・`tryGenerateInvolutions`) と同じ形。
 ///
 /// 生成元の成分 (動かす列を共有するものどうし) ごとに、生成元と、生成元の対合の組から作った新しい対合 (可換なら `p q`、そうでなければ
