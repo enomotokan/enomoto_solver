@@ -203,7 +203,8 @@ pub(super) fn vb01(c: char) -> bool {
     env_str!("ENOMOTO_MIP_VB01").is_some_and(|v| v.contains(c) || (c == 'r' && v == "1"))
 }
 
-/// 試作 `ENOMOTO_MIP_VBCLQ` の値 (既定では使わない。analysis/scipgate_20261120)
+/// 試作 `ENOMOTO_MIP_VBCLQ` の値 (既定では使わない。analysis/scipgate_20261120)。空・`0` 以外なら根の LP の前の pseudoobj
+/// ([`Solver::vbclq_pseudoobj`])、`l` を含めば前処理の LP による固定もしない
 pub(super) fn vbclq() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_VBCLQ").filter(|v| !v.is_empty() && *v != "0")
 }
@@ -7410,6 +7411,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for o in self.orbitopes.iter() {
                 o.canonicalize(&mut x);
             }
+            // 試作 `ENOMOTO_MIP_SYM_PPLEX`: 対合ごとの orbisack は列を共有するので、1 回の並べ替えで別の orbisack に反しうる。
+            // 並べ替えのたびに解は列の番号の順の辞書式で真に大きくなるので、変わらなくなるまで繰り返す (回数の上限つき)
+            if super::sym_pplex() {
+                for _ in 0..64 {
+                    let before = x.clone();
+                    for o in self.orbitopes.iter() {
+                        o.canonicalize(&mut x);
+                    }
+                    if before == x {
+                        break;
+                    }
+                }
+            }
             // 試作 `ENOMOTO_MIP_SYM_SST=x`: SST の行に反する解を SST の段の群で写して、行を満たす代表にする
             // (元の問題での実行可能性と目的値は変わらない。analysis/sstx_20261119/)
             let sstx = !self.sst_chain.is_empty() && orig.n == self.p.n && self.sst_chain.iter().all(|lv| lv.fits(self.p.n));
@@ -11021,10 +11035,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     };
                     heur!("interior rounding", crate::simplex::mip_lp::with_ipm_abort(abort, || self.interior_rounding(&x)));
                 }
+                // 試作 `ENOMOTO_MIP_LPFACE` の `f` ([`Self::lp_face`]): LP face を根の被約費用のサブ MIP より先に回す
+                let lpface_first = env_str!("ENOMOTO_MIP_LPFACE").is_some_and(|v| v.contains('f'));
+                if lpface_first && env_str!("ENOMOTO_MIP_NO_LPFACE").is_none() {
+                    heur!("LP face", self.lp_face());
+                }
                 if env_str!("ENOMOTO_MIP_NO_ROOT_REDCOST_HEUR").is_none() {
                     heur!("root reduced cost", self.root_reduced_cost());
                 }
-                if env_str!("ENOMOTO_MIP_NO_LPFACE").is_none() {
+                if !lpface_first && env_str!("ENOMOTO_MIP_NO_LPFACE").is_none() {
                     heur!("LP face", self.lp_face());
                 }
                 heur!("RENS", self.rens(&x));
@@ -20513,6 +20532,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             mark.iter_mut().for_each(|s| *s = u32::MAX);
         }
+        // 診断 `ENOMOTO_MIP_VBCLQ_COUNT_FILE=<ファイル>`: 呼ばれるたびに「固定した列の数 打ち切りの証明 (0/1)」を 1 行足す (fuzz で働いた回数を数える)
+        if let Some(f) = env_str!("ENOMOTO_MIP_VBCLQ_COUNT_FILE") {
+            use std::io::Write;
+            if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(f) {
+                let _ = writeln!(fh, "{fixed} {}", infeas as u8);
+            }
+        }
         if self.params.verbose {
             let free = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).count();
             eprintln!(
@@ -24014,7 +24040,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_TPRE` (p・pl、待たない形): 前処理の間に始めた PDLP の点からの FJ・Local-MIP の解が出来上がっていれば受け取る
         // (最初の回の外側の求解だけ。前処理後の問題で実行不能なら、その点から FJ を 1 回 (手間 2e8) 回して直す)
         if self.params.restarts == 0 && !self.params.submip && self.snap.is_none() {
-            if let Some(xr) = super::tpre::take_pending(self.p.n).or_else(|| super::tpre::gated_take(self.p.n)) {
+            // `g` では根 (木に入る前、ノード 0) の受け取る点だけで読む (木の受け取る点ごとに主が TPRE の追いつきを待つと、小さい問題で遅い)。
+            // 木に入ったら止める
+            let gated = if self.nodes == 0 { super::tpre::gated_take(self.p.n) } else { super::tpre::clear_gated(); None };
+            if let Some(xr) = super::tpre::take_pending(self.p.n).or(gated) {
                 self.heur_label = "TPRE";
                 let mut ok = self.try_incumbent(xr.clone());
                 if !ok && !self.p.is_feasible(&xr, 1e-6) {

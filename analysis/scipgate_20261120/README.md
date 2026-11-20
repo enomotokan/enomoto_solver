@@ -45,3 +45,46 @@
 
 - 数えるのは、0-1 列 y が 1 なら同じ行の他の 0-1 列が全て 0、y = 0 なら行が冗長になる行。
 - 元の問題で数える。負の係数の列は補って (x → 1 − x) から判定する。
+
+- 結果 (P 58 + M 145 = 203 問、誤り 0): 大 M の行がある問題は 23。非零の 1 割以上を占めるのは 15 問。
+  - P: hypothyroid-k1 (49.7%)・neos8 (28.3%)・neos-827175 (11.6%)・physiciansched6-2 (15.0%)。
+  - M: neos-787933 (79.2%)・neos-4387871-tavua・neos-1445765・bnatt400・bnatt500・peg-solitaire-a3 (45〜49%)・
+    pg5_34 (33.8%)・cryptanalysiskb128n5obj14・obj16 (30.4%)・decomp2 (16.6%)・brazil3 (15.5%)。
+  - 少ないもの (非零の 1 割未満): misc07・roll3000・neos-3656078-kumeu・neos-4722843-widden・uccase9・uccase12・rocII-5-11・
+    academictimetablesmall。
+
+## 4. VB01 との組み合わせ (hypothyroid-k1、1 スレッド・種 1)
+
+- VB01 は SCIP-VB の試作 `ENOMOTO_MIP_VB01=b` (根の LP の前の vbounds)。−2692 を見つける (SCIP の既定と同じ値)。
+
+| 設定 | 時間 |
+|---|---|
+| 既定 | 10.2 秒 |
+| `VB01=b` | 10.5 秒 |
+| `VB01=b` + `VBCLQ=1` (67 列を固定、根の LP −2851.08) | 8.85 秒 |
+| `VB01=b` + `VBCLQ=1` + `ENOMOTO_MIP_NO_LP_PROBE=1` | **4.2 秒** |
+
+- 確かめ: fuzz.sh (`VBCLQ=1`) の 6 本で誤答 0。
+  - tiny 0/400・highs 0/300・objint 0/1000・slack 0/1000・tiny2 0/400・objint2 0/1000。
+  - fuzz の中で固定が何回働いたかは数えていない。
+- 働く問題の洗い出し: `workscan.py` (`VB01=b` + `VBCLQ=1`、1 スレッド・1 問 120 秒まで) → `workscan.jsonl_K`。
+
+## 5. `l` (前処理の LP による固定をしない) と fuzz の働いた回数
+
+- `ENOMOTO_MIP_VBCLQ=l`: pseudoobj に加えて、前処理の LP probing をしない (親の判断で案 (iii) を入り切りの形にした)。
+- hypothyroid-k1 (1 スレッド): `VB01=b` + `VBCLQ=l` で 3.6 秒・3.3 秒 (種 1・2)。既定は約 10 秒。
+- fuzz.sh (計測の vbcl と同じ `VB01=b` + `VBCLQ=l`)。働いた回は診断 `ENOMOTO_MIP_VBCLQ_COUNT_FILE` で数えた。
+
+| fuzz | 誤答 | pseudoobj の呼び出し | 固定した回 (列) | 打ち切りの証明 |
+|---|---|---|---|---|
+| tiny (400) | 0 | 157 | 148 (322) | 133 |
+| highs (300) | 0 | 20 | 1 (2) | 1 |
+| objint (1000) | 0 | 1305 | 40 (61) | 25 |
+| slack (1000) | 0 | 365 | 9 (10) | 179 |
+| tiny2 (400) | 0 | 176 | 157 (356) | 138 |
+| objint2 (1000) | 0 | 1304 | 34 (47) | 34 |
+
+- 固定が働いた回は合わせて 389 回 (列 798 本)。打ち切りの証明は 510 回。誤答 0。
+  - 証明は、余裕が負 (目的の最小値が打ち切り値を超える) か、固定の後の伝播が矛盾した回。
+- 計測の台本: cfg.py (def・vb・vbc・vbcl)・plan.py・run.py・summ.py (`python summ.py P vbcl vb` のように基準も選べる)。
+  M の対象は workscan.py の結果で決める。
