@@ -619,6 +619,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cw_dyn_state: (bool, u64, u64, u64),
     /// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP`: 窓ごとの「作った衝突 / ノード」の移動平均 (負なら未測定)
     pub(super) cw_ramp_ema: f64,
+    /// RAMP の今の σ (床の下は 0)。`ENOMOTO_MIP_LIT_EXPLAIN=sig` の解析ごとの予算に使う
+    pub(super) cw_ramp_sig: f64,
     /// `ENOMOTO_MIP_PLSB` の `g`: 木全体 (このスレッドの求解) の強分岐の利得の統計
     pub(super) plsb_tree: super::plsb::GainStats,
     /// `ENOMOTO_MIP_PLSB` の判定の数: 判定できない・続ける・止める・従来より長く続けた・従来より早く止めた・
@@ -1362,7 +1364,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// HiGHS 式の衝突解析 [呼び出し, 作った衝突, 入れた衝突, 長さの和]
     multi_stats: [u64; 4],
     /// 診断 (p2inf_20261119): [衝突解析の回数, HiGHS 式で点数を上げた列の数の和, 衝突を作れなかった解析の数]
-    hcs_diag: [u64; 3],
+    hcs_diag: [u64; 7],
+    /// 診断: `LIT_EXPLAIN=sig` で解析 1 回に遡ったカットの写しの表の理由の数の分布
+    lx_hist: [u64; 9],
     /// 試作 `ENOMOTO_MIP_CUTCONF`: 証明のプールに cut-based の衝突の制約を入れている最中 (分類 2 にする)
     cutconf_push: bool,
     multi_secs: f64,
@@ -5298,6 +5302,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         feat: [0; 5],
         cw_dyn_state: (false, 0, 0, 0),
         cw_ramp_ema: -1.0,
+        cw_ramp_sig: 0.0,
         plsb_tree: super::plsb::GainStats::new(),
         plsb_stats: [0; 8],
         sb_agree: std::collections::VecDeque::new(),
@@ -5738,7 +5743,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_dirty: true,
         conflicts_added: 0,
         multi_stats: [0; 4],
-        hcs_diag: [0; 3],
+        hcs_diag: [0; 7],
+        lx_hist: [0; 9],
         cutconf_push: false,
         multi_secs: 0.0,
         cutsel_best: 0.0,
@@ -12680,7 +12686,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let sig = 1.0 / (1.0 + (-(self.cw_ramp_ema - mid) / sl).exp());
                     // σ が床 (`ENOMOTO_T_MIP_CW_RAMP_FLOOR`、既定 0 = 床なし) 未満なら重み 0 (上がらない問題を既定と同じ分枝にする。
                     // 床なしだと σ ≈ 0.007 程度でも重みが 0 でなく、同点の崩し方などで既定と道筋が変わる)
-                    let nw = if sig < tunable!("ENOMOTO_T_MIP_CW_RAMP_FLOOR", 0.0, f64) { 0.0 } else { w * sig };
+                    let sig = if sig < tunable!("ENOMOTO_T_MIP_CW_RAMP_FLOOR", 0.0, f64) { 0.0 } else { sig };
+                    self.cw_ramp_sig = sig;
+                    let nw = w * sig;
                     if self.params.verbose && !self.params.submip && (sig >= 0.5) != self.cw_dyn_state.0 {
                         eprintln!("MIP: CW_RAMP (tid {}): conflict weight {:.4} -> {nw:.4} at node {} (conflicts per node {r:.2}, smoothed {:.2})", self.pool_tid, self.pc.cw_dyn, self.nodes, self.cw_ramp_ema);
                     }
@@ -19741,8 +19749,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let obj_lim = self.prune_limit() - self.p.offset;
         let (dp, st) = (&self.dual_proofs, &self.proof_state);
         let arena = &self.cut_arena;
-        let lookup = move |r: i32| -> Option<(Vec<(usize, f64)>, f64)> {
+        // 試作 `ENOMOTO_MIP_LIT_EXPLAIN=sig` (cwrh): 理由はいつも付け、衝突解析 1 回でカットの写しの表 (既定ではリテラルの衝突の行だけ) の理由で
+        // 遡る変更を round(σ × B) 個までにする (B = `ENOMOTO_T_MIP_LIT_EXPLAIN_BUDGET`)。超えた分は理由のない外からの変更と同じ葉
+        // ([`super::domain::Domain::cut_reason_budget`])。σ ≈ 0 なら遡らず、既定と同じ衝突になる
+        // B = 16: σ ≈ 1 で回した 6 問 (1 スレッド、予算なし) の解析 1 回で遡った数の分布で、一番多い bnatt400 の部分木でも 16 以下が 99%
+        // (194 回のうち 17〜32 が 2 回)、mcsched・timtab1・supportcase33・fastxgemm・net12 はほぼ 1〜2 (analysis/p2inf_20261119 5.5 節)
+        let lx_budget: u64 = if lit_explain_sig() {
+            (self.cw_ramp_sig * tunable!("ENOMOTO_T_MIP_LIT_EXPLAIN_BUDGET", 16.0, f64)).round() as u64
+        } else {
+            u64::MAX
+        };
+        self.dom.cut_reason_budget = lx_budget;
+        let cb0 = super::domain::CUT_BUDGET[0].load(std::sync::atomic::Ordering::Relaxed);
+        let lx_used = std::cell::Cell::new(0u64);
+        let lx_asked = std::cell::Cell::new(0u64);
+        let lookup = |r: i32| -> Option<(Vec<(usize, f64)>, f64)> {
             if let Some(i) = super::domain::cut_reason_id(r) {
+                lx_asked.set(lx_asked.get() + 1);
+                lx_used.set(lx_used.get() + 1);
                 return arena.get(i).cloned();
             }
             let id = super::domain::proof_reason_id(r)?;
@@ -19754,7 +19778,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let rhs = if *obj { obj_lim - konst } else { *konst };
             rhs.is_finite().then(|| (c.clone(), rhs))
         };
-        let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() || lit_explain() || lit_explain_auto() || orbitope_reason() { Some(&lookup) } else { None };
+        let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() || lit_explain() || lit_explain_auto() || lit_explain_sig() || orbitope_reason() { Some(&lookup) } else { None };
         let confs = self.dom.analyze_multi_bumps(self.p, start, max_len, reconv, hcs.then_some(&mut bumps), lk);
         if hcs && !bumps.is_empty() {
             self.pc.bump_conflict(&bumps);
@@ -19762,6 +19786,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.hcs_diag[0] += 1;
         self.hcs_diag[1] += bumps.len() as u64;
         self.hcs_diag[2] += u64::from(confs.is_empty());
+        self.hcs_diag[3] += lx_asked.get();
+        self.hcs_diag[4] += lx_used.get();
+        self.hcs_diag[5] = self.hcs_diag[5].max(lx_asked.get());
+        self.hcs_diag[6] += u64::from(lx_asked.get() > lx_used.get());
+        if lit_explain_sig() {
+            // 解析 1 回で遡った数の分布 (0, 1, 2, 3-4, 5-8, 9-16, 17-32, 33-64, 65-) (1 スレッドで正確、複数スレッドでは他の解析の分が混ざる)
+            let d = super::domain::CUT_BUDGET[0].load(std::sync::atomic::Ordering::Relaxed).saturating_sub(cb0);
+            let b = if d == 0 { 0 } else { (64 - (d - 1).leading_zeros() as usize + 1).min(8) };
+            self.lx_hist[b] += 1;
+        }
         self.multi_secs += t0.elapsed().as_secs_f64();
         let mut n = 0;
         // 既定ではリテラルの衝突プールに入れる (行にして証明のプールに入れると、数が多いので双対証明を追い出す)
@@ -21187,7 +21221,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 行 `Σ_{x_j >= 1 のリテラル} x_j - Σ_{x_j <= 0 のリテラル} x_j <= (x_j >= 1 のリテラルの数) - 1` にした写しの番号を理由として付け
     /// (カットのプールの伝播の試作 `CONFLICT_PROOF_EXPLAIN` と同じ写しの表)、衝突解析で遡れるようにする。それ以外の衝突は従来どおり外からの変更
     fn lit_prop(&mut self, start: usize) -> Result<usize, ()> {
-        if !(lit_explain() || (lit_explain_auto() && self.cw_dyn_state.0)) {
+        if !(lit_explain() || lit_explain_sig() || (lit_explain_auto() && self.cw_dyn_state.0)) {
             return self.lit_conflicts.propagate(self.p, &mut self.dom, start);
         }
         let p = self.p;
@@ -26267,7 +26301,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: cutconf (ENOMOTO_MIP_CUTCONF): calls {}, no start {}, steps plain {} reduced {} (by remembered external rows {}), stop fail {} (general integer {}, continuous {}) decision {} uip {} budget {}, no step {}, dropped {}, out {} (non-binary {}, mean length {:.1}), used: pruned {} tightened {}, {:.2}s", c[0], c[1], c[2], c[3], c[13], c[4], c[14], c[15], c[5], c[6], c[7], c[11], c[10], c[8], c[12], c[9] as f64 / c[8].max(1) as f64, c[16], c[17], super::cutconf::total_secs());
             }
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
-            eprintln!("MIP: conflict score diag: analyses {}, bumped columns per analysis {:.2}, analyses without conflict {:.3}", self.hcs_diag[0], self.hcs_diag[1] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[2] as f64 / self.hcs_diag[0].max(1) as f64);
+            eprintln!("MIP: conflict score diag: analyses {}, bumped columns per analysis {:.2}, analyses without conflict {:.3}, lit reasons asked per analysis {:.2} (max {}), used {:.2}, analyses cut by the budget {:.3}", self.hcs_diag[0], self.hcs_diag[1] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[2] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[3] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[5], self.hcs_diag[4] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[6] as f64 / self.hcs_diag[0].max(1) as f64);
+            if lit_explain_sig() {
+                let cb: Vec<u64> = super::domain::CUT_BUDGET.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: lit explain budget (all threads): resolved {}, analyses cut by the budget {}, arena rows {}, per analysis (0,1,2,3-4,5-8,9-16,17-32,33-64,65-) {:?}", cb[0], cb[1], self.cut_arena.len(), self.lx_hist);
+            }
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
             eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
             if super::domain::conflict_lev_diag() {
@@ -26833,7 +26871,13 @@ pub(super) fn inf_all() -> bool {
 /// (SCIP は衝突を制約 (logicor) として持つので遡れる)
 pub(super) fn lit_explain() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v != "0" && v != "auto"))
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v != "0" && v != "auto" && v != "sig"))
+}
+
+/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=sig` (cwrh): リテラルの衝突の伝播にいつも理由を付け、遡る回数を解析ごとに RAMP の σ に比べた予算で抑える
+pub(super) fn lit_explain_sig() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v == "sig"))
 }
 
 /// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=auto`: 途中で衝突の重みを上げる試作 (`CONFLICT_WEIGHT_DYN` / `_RAMP`) が上げた (HiGHS の衝突の点数を入れた) 間だけ
