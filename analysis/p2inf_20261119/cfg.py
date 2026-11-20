@@ -11,7 +11,8 @@
 - cwrh: 付け方は最初から HiGHS 式 (RAMP_HCS)、重みは 0.1 × σ (σ < 0.05 は 0)、LIT_EXPLAIN=sig (理由はいつも付け、遡る数を解析ごとに
   round(16σ) まで)。σ が上がらない問題は既定と同じ道筋 (1 スレッドでノード数が一致、README 5.5 節)。
 - cwrh0: cwrh から床 (σ < 0.05 は重み 0) を外した形 (利用者の方針「恣意的な閾値はなるべく排除」、2026-11-20)。
-  σ が上がらない問題でも重みは 0.1 × σ (> 0) が残り、既定とは道筋が変わりうる。P・M の計測はこちら (PCWRH0・MCWRH0)。- cwrh0s: cwrh0 の LIT_EXPLAIN=sig の予算を確率的に丸める形 (ENOMOTO_MIP_LIT_EXPLAIN_SROUND=1、期待値 16σ、README 5.6 節)。
+  σ が上がらない問題でも重みは 0.1 × σ (> 0) が残り、既定とは道筋が変わりうる。P・M の計測はこちら (PCWRH0・MCWRH0)。
+- cwrh0s: cwrh0 の LIT_EXPLAIN=sig の予算を確率的に丸める形 (ENOMOTO_MIP_LIT_EXPLAIN_SROUND=1、期待値 16σ、README 5.6 節)。
 """
 CFGS = {
     "def": {},
