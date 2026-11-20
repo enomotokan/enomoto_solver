@@ -1335,6 +1335,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         EQUIV2_USED.with(|f| f.set(false));
         CLQPRB_STICKY.with(|f| f.set(false));
         CLQPRB_REVERTED.with(|f| f.set(false));
+        PRBWORK_LEFT.with(|f| f.set(tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE0", 1.15e9, f64) as u64));
         cutmix::reset();
     }
     let prr = outer && env_def!("ENOMOTO_MIP_PROBE_REPRESOLVE", "1").is_some();
@@ -1420,6 +1421,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
                 c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], if c[3] > 0 { c[12] / c[3] } else { 0 }
             );
         }
+        tpre::clear_pending();
         // 試作 `ENOMOTO_MIP_SYM_SST=x` の写しの回数 (計測で数えるため、ログの有無にかかわらず出す)
         if sym_sst_x() {
             let c: Vec<u64> = SST_X_STATS.iter().map(|c| c.load(std::sync::atomic::Ordering::Relaxed)).collect();
@@ -1475,8 +1477,17 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         let safety = if params.time_limit.is_finite() { 0.25 * params.time_limit } else { 60.0 };
         let seed = 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
         let stop: tpre::Stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let st2 = stop.clone();
-        (std::thread::spawn(move || tpre::run(&q, safety, seed, st2)), stop)
+        let slot: tpre::SolSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (st2, sl2) = (stop.clone(), slot.clone());
+        // `g`: 手間の門を付けて、主の手間で読む中身を決める (種ごとに再現)
+        let gate = tpre::mode().is_some_and(|m| m.contains('g')).then(|| crate::ticks::Gate::new(0.0));
+        if let Some(g) = gate.as_ref() {
+            tpre::set_gated(g.clone(), slot.clone());
+        }
+        (std::thread::spawn(move || {
+            let _gg = gate.map(crate::ticks::install_gate);
+            tpre::run(&q, safety, seed, st2, sl2)
+        }), stop, slot)
     });
     let prev_par = PREPAR_THREADS.with(|t| t.replace(if !params.submip && params.restarts == 0 { params.threads.max(1) } else { 1 }));
     struct RestorePar(usize);
@@ -1510,7 +1521,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // 時間上限は前処理・対称性の検出の時間も含める (分枝限定法の時計は `solver::solve` の開始から測るので、渡す前に引く)
     let remaining = |params: MipParams| MipParams { time_limit: (params.time_limit - t_pre.elapsed().as_secs_f64()).max(0.0), ..params };
     // 前処理の LP による固定 ([`lp_probe`]) は最初の求解だけ (サブ MIP・再スタートの後は使わない)
-    let lp_probe_secs = (env_str!("ENOMOTO_MIP_NO_LP_PROBE").is_none() && !params.submip && params.restarts == 0)
+    // 試作 `ENOMOTO_MIP_VBCLQ` の `l` (analysis/scipgate_20261120): 前処理の LP による固定をしない (根の LP の前の vbounds の解と
+    // pseudoobj の固定の後で、B&B の根の LP を小さく解くため。hypothyroid-k1 では LP probing が固定の前に根の LP を丸ごと解く)
+    let lp_probe_secs = (env_str!("ENOMOTO_MIP_NO_LP_PROBE").is_none() && !solver::vbclq().is_some_and(|v| v.contains('l')) && !params.submip && params.restarts == 0)
         .then(|| if params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_LP_PROBE_TIME_FRAC", 0.05, f64) * params.time_limit } else { 10.0 })
         // `ENOMOTO_MIP_PRESOLVE_WORK`: 打ち切りは LP の手間で決め ([`lp_probe`])、時間は安全網 (`ENOMOTO_T_MIP_PRESOLVE_WORK_LP_SECS` 秒、
         // 既定 30 秒。時間制限の半分まで) だけにする (時間制限で前処理の結果が変わらないように)
@@ -1770,18 +1783,43 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     };
     let start = match tpre_job {
         // 前処理で早めの FJ が実行可能性問題の解を見つけ木に入らない道 (ns1116954) では待たない (結果は捨てる)
-        Some((_, stop)) if FEAS_FJ_SOL.with(|s| s.borrow().is_some()) => {
+        Some((_, stop, _)) if FEAS_FJ_SOL.with(|s| s.borrow().is_some()) => {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            tpre::clear_pending();
             start
         }
-        // 既定は待たない (親の方針): 前処理の終わりでスレッドが終わっていなければ止めの合図を立てて結果を捨てる (再現しない)。
+        // `g`: 主の手間まで許して門で止まるのを待ち、その時点の箱の解を開始解にする。以後は根と木の受け取る点で同じように読む
+        Some((_, stop, _)) if tpre::mode().is_some_and(|m| m.contains('g')) => {
+            let d = match &presolved {
+                Some(Presolved::Reduced { scaling, .. }) => scaling.d.clone(),
+                _ => vec![1.0; p.n],
+            };
+            let tw = std::time::Instant::now();
+            let x = tpre::gated_take_orig();
+            tpre::gated_set_d(d);
+            eprintln!("MIP: TPRE g: at the end of the presolve: solution {} (waited {:.2}s at {:.2}s)", x.as_ref().map_or("none".to_string(), |x| format!("{:.10e}", p.objective(x))), tw.elapsed().as_secs_f64(), t_pre.elapsed().as_secs_f64());
+            let _ = stop;
+            match (start, x) {
+                (None, Some(x)) => {
+                    tpre_start = true;
+                    Some(x)
+                }
+                (s, _) => s,
+            }
+        }
+        // 既定は待たない (親の方針): 前処理の終わりでスレッドが終わっていなければ、主は待たずに根へ進み、スレッドは回し続ける。
+        // 途中の解は箱に置かれ、主が根と木の決まった所 (`poll_lmip_thread`) で、その時点で出来上がっていれば受け取る (再現しない)。
         // `w` なら終わりを待つ (種ごとに再現するが、小さい問題で主が待つ分が目立つ: PPL で 1〜5 秒の問題が数倍遅かった)
-        Some((h, stop)) if !h.is_finished() && !tpre::mode().is_some_and(|m| m.contains('w')) => {
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            eprintln!("MIP: TPRE: not finished at the end of the presolve ({:.2}s); stopped and dropped", t_pre.elapsed().as_secs_f64());
+        Some((h, stop, slot)) if !h.is_finished() && !tpre::mode().is_some_and(|m| m.contains('w')) => {
+            let d = match &presolved {
+                Some(Presolved::Reduced { scaling, .. }) => scaling.d.clone(),
+                _ => vec![1.0; p.n],
+            };
+            eprintln!("MIP: TPRE: not finished at the end of the presolve ({:.2}s); the root takes its solution when ready", t_pre.elapsed().as_secs_f64());
+            tpre::set_pending(slot, d, stop);
             start
         }
-        Some((h, _)) => {
+        Some((h, _, _)) => {
             let tw = std::time::Instant::now();
             let out = h.join().ok();
             let wait = tw.elapsed().as_secs_f64();
@@ -2720,6 +2758,12 @@ pub(crate) fn sym_sst() -> bool {
     env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v != "0")
 }
 
+/// 試作 `ENOMOTO_MIP_SYM_PPLEX` (analysis/scipsym_20261120/、既定では使わない): 詰め込みの行に入る対合の多い成分を 2 列の静的な詰め込み
+/// オービトープで扱う ([`symmetry::packing_orbisacks`])
+pub(crate) fn sym_pplex() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_PPLEX").is_some_and(|v| v != "0")
+}
+
 /// 試作 `ENOMOTO_MIP_SYM_SST=x` (analysis/sstx_20261119/、既定では使わない): [`sym_sst`] に加えて、ヒューリスティクスの解が SST の行だけに
 /// 反するとき、元の問題 (SST の行を足す前) で実行可能なら、SST の段の群で写して行を満たす代表にしてから暫定解にする
 /// ([`symmetry::sst_canonicalize`])。写せなければ目的値だけを打ち切りに使う (解は元の問題の解として持つ)。
@@ -3290,8 +3334,50 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         return prob;
     };
     // 完全オービトープは探索中の固定 (orbitopal fixing) で扱い、残りの生成元だけ lex-leader の行にする
-    let (mut orbs, used) = if env_str!("ENOMOTO_MIP_NO_ORBITOPE").is_none() { symmetry::find_orbitopes(&prob, &sym) } else { (Vec::new(), vec![false; sym.generators.len()]) };
+    let (mut orbs, mut used) = if env_str!("ENOMOTO_MIP_NO_ORBITOPE").is_none() { symmetry::find_orbitopes(&prob, &sym) } else { (Vec::new(), vec![false; sym.generators.len()]) };
     orbs.extend(twin_orbs);
+    // 試作 `ENOMOTO_MIP_SYM_PPLEX` ([`symmetry::packing_orbisacks`]、analysis/scipsym_20261120/): 詰め込みの行に入る対合の多い成分を、
+    // 対合ごとの 2 列の静的な詰め込みオービトープ (lex-leader の orbisack) で扱う。根で各オービトープの 1 行目の右の列を 0 に固定し
+    // (下の `pplex_fix`)、ORBPP_REPROBE の伝播・プロービングにかける。サブ MIP では使わない
+    let mut pplex_fix: Vec<usize> = Vec::new();
+    if sym_pplex() && !in_sub {
+        let mut orb_moved = vec![false; prob.n];
+        for o in &orbs {
+            for line in &o.vars {
+                for &j in line {
+                    orb_moved[j] = true;
+                }
+            }
+            for (_, _, perm) in &o.swaps {
+                for (j, &t) in perm.iter().enumerate() {
+                    if t != j {
+                        orb_moved[j] = true;
+                    }
+                }
+            }
+        }
+        let tp = std::time::Instant::now();
+        let (pp, pused, st) = symmetry::packing_orbisacks(
+            &prob,
+            &sym,
+            &used,
+            &orb_moved,
+            tunable!("ENOMOTO_T_MIP_SYM_PPLEX_NEW", 100usize, usize),
+            tunable!("ENOMOTO_T_MIP_SYM_PPLEX_WORK", 50_000_000u64, u64),
+        );
+        for &k in &pused {
+            used[k] = true;
+        }
+        pplex_fix = pp.iter().map(|o| o.vars[0][1]).collect();
+        if verbose {
+            let rows: usize = pp.iter().map(|o| o.vars.len()).sum();
+            eprintln!(
+                "MIP: symmetry: PPLEX: {} of {} components upgraded, {} packing orbisacks ({rows} rows) from {} generators and {} new involutions ({:.2}s)",
+                st[1], st[0], pp.len(), pused.len(), st[2], tp.elapsed().as_secs_f64()
+            );
+        }
+        orbs.extend(pp);
+    }
     let mut in_orb = vec![false; prob.n];
     for o in &orbs {
         for line in &o.vars {
@@ -3371,6 +3457,12 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     let mut orbs = orbs;
     let mut prob = prob;
     let mut static_fix = 0usize;
+    for j in pplex_fix {
+        if prob.col_up[j] > 0.0 && prob.col_lo[j] <= 0.0 {
+            prob.col_up[j] = 0.0;
+            static_fix += 1;
+        }
+    }
     // 既定は動的な orbitopal fixing (分枝した行をその順に使う、HiGHS と同じ): 行ごとのパッキングの印だけ付ける。
     // 根での固定 (x_{i,c} = 0, c > i) は行の固定の順に依るので、動的な固定とは混ぜられない
     let static_orbitope = env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_some();
@@ -4747,7 +4839,8 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // `g`・`r`・`s` のときは、含意を使う形に切り替えた求解 (`CLQPRB_STICKY`) だけで引き継ぐ。既定の形のままの問題・既定の形に戻した問題
     // (`CLQPRB_REVERTED`) で引き継ぐと、前処理が既定と変わる (gate2 clqprb_s: snp-02-004-104・supportcase40 で見つけた漏れ)
     let clqprb_live = clqprb_on() && !CLQPRB_REVERTED.with(|f| f.get()) && (!clqprb_has('g') || CLQPRB_STICKY.with(|f| f.get()));
-    let keep_impl = env_str!("ENOMOTO_MIP_KEEP_IMPLICATIONS").is_some() || (clqprb_live && depth > 0 && !submip);
+    // `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): 再スタートの後でプロービングを回さないときは、前の求解の含意 (再スタートの問題に渡したもの) を引き継ぐ
+    let keep_impl = env_str!("ENOMOTO_MIP_KEEP_IMPLICATIONS").is_some() || (clqprb_live && depth > 0 && !submip) || (RESTART_PRESOLVE.with(|f| f.get()) && prbwork_exhausted(submip));
     if keep_impl && !p.conflict_edges.is_empty() {
         let bin = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0 && pre.scaling.d.get(j).is_none_or(|&d| d == 1.0);
         prob.conflict_edges = p.conflict_edges.iter().copied().filter(|&(a, b)| bin((a / 2) as usize) && bin((b / 2) as usize)).collect();
@@ -6888,9 +6981,42 @@ pub(crate) fn prb_table(c: char) -> bool {
     V.get_or_init(|| env_str!("ENOMOTO_MIP_PRB_TABLE").unwrap_or("").to_string()).contains(c)
 }
 
+/// 試作 `ENOMOTO_MIP_PRBWORK` (既定では使わない。analysis/probework_20261120): 含意を集めるプロービング ([`probe`]) の「何も見つからない間の
+/// 手間の上限」(`ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE0`) を、1 回の呼び出しごとではなく 1 回の求解全体 (前処理のかけ直し・再スタートを通して)
+/// の持ち分にする。固定・締め付け・同値な組が 0 で終わった回は、その手間 (pwork) を持ち分から引く。持ち分が無くなったら、後のプロービングは
+/// 回さず、再スタートの問題には前の求解の含意を引き継ぐ (再スタートの問題は前の問題を狭めたものなので、含意はそのまま成り立つ)。
+/// irp は根と 3 回の再スタートの後のプロービングが毎回この上限で止まり、成果 0 のまま 1.2 秒ずつ使っていた
+pub(crate) fn prbwork_on() -> bool {
+    env_str!("ENOMOTO_MIP_PRBWORK").is_some_and(|v| v != "0")
+}
+
+thread_local! {
+    /// `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): この求解で残っている「成果のないプロービング」の手間の持ち分 (最初の求解の始めに満たす)
+    static PRBWORK_LEFT: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+}
+
+/// [`prbwork_on`] の持ち分が尽きていて、プロービングを回さないか (サブ MIP は対象外)
+pub(crate) fn prbwork_exhausted(submip: bool) -> bool {
+    prbwork_active(submip) && PRBWORK_LEFT.with(|f| f.get()) == 0
+}
+
+/// [`prbwork_on`] をこのプロービングに使うか。サブ MIP (親と同じ前処理で解くものを含む) は対象外
+fn prbwork_active(submip: bool) -> bool {
+    prbwork_on() && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get())
+}
+
 fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let _pt = pretime::guard("probe");
     use domain::Domain;
+    // `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): 成果のない手間の持ち分が尽きていれば回さない (引き継いだ含意 `conflict_edges` はそのまま残す)
+    if prbwork_exhausted(submip) {
+        if verbose {
+            eprintln!("MIP: probing: skipped (PRBWORK: the work budget without results is used up in this solve; {} implications kept)", prob.conflict_edges.len());
+        }
+        PROBE_GAIN.with(|f| f.set((0, 0, 0)));
+        PROBE_FIXED.with(|f| f.set(0));
+        return None;
+    }
     let t0 = std::time::Instant::now();
     let c0 = cap_clock();
     let n = prob.n;
@@ -7100,6 +7226,9 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         (u64::MAX, u64::MAX)
     };
     let (time_cap, time_cap_found) = if presolve_work() { (time_cap * presolve_work_safe(), time_cap_found * presolve_work_safe()) } else { (time_cap, time_cap_found) };
+    // `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): 何も見つからない間の上限を、この求解の持ち分の残りまでにする
+    let prbwork = prbwork_active(submip);
+    let wcap0 = if prbwork { wcap0.min(PRBWORK_LEFT.with(|f| f.get())) } else { wcap0 };
     // 手間 (およそナノ秒): 2.5 x 伝播で走査した行の長さ + 5 x 境界の変更で更新した活動の数 + 68 x 境界の変更の回数 + 190 x 集めた含意の数
     // (+ 1 回の試しごとに `ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_EACH`、既定 0)。重みは 15 問の CPU 時間への回帰
     // (analysis/presolve_work/fitprobe.py)。行の長さだけでは 1 秒あたり 3.4e6〜4e8 と散らばった
@@ -7911,6 +8040,16 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
     }
     PROBE_GAIN.with(|f| f.set((fixed, tightened, if want_equiv { PROBE_EQUIV.with(|e| e.borrow().len()) } else { 0 })));
+    if prbwork && fixed + tightened + PROBE_GAIN.with(|f| f.get().2) == 0 {
+        let w = pwork(&dom, probed, prob.conflict_edges.len());
+        let left = PRBWORK_LEFT.with(|f| {
+            f.set(f.get().saturating_sub(w));
+            f.get()
+        });
+        if verbose {
+            eprintln!("MIP: probing: PRBWORK: no result, {w} work charged, {left} left in this solve");
+        }
+    }
     if fixed == 0 && tightened == 0 {
         return None;
     }

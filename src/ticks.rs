@@ -77,6 +77,11 @@ pub fn add_raw(d: &[u64; NK]) {
     });
 }
 
+/// このスレッドに手間の門が付いているか ([`install_gate`])
+pub fn has_gate() -> bool {
+    HAS_GATE.with(|g| g.get())
+}
+
 /// このスレッドの手間の期限 (重み付きの合計) を過ぎたか (期限がなければ偽)。
 #[inline]
 pub fn over() -> bool {

@@ -1,0 +1,135 @@
+# SCIP-SYM: 対称性の差 (cod105・fhnw-binpack4-4、2026-11-20)
+
+依頼 (親 session_01HrNYnHHEAD5vXdU4MHQrtc): (a) cod105 は当方 1 スレッド 242 秒・根の下界 −18.29、SCIP 64 秒・−13.53。SCIP の
+misc/usesymmetry のビット 1 だけで 48 秒、ビット 4 (SST) だけで 55 秒、ビット 2 だけでは 333 秒 (vsscip_slow_20261118/tree2 9 節)。
+(b) fhnw-binpack4-4 は SCIP 12 秒、決め手は misc/usesymmetry (hang_20261117)。当方の ORBPP・SST・SYMDYN で何が働いて何が欠けているかを切り分け、
+同じ型の問題に効く形で試作する。
+
+- 機械: 4 CPU のコンテナ。土台: このブランチの ff9948d04。SCIP は pyscipopt 6.3.0 (SCIP 10.0.2)。SCIP の源は v10.0.2 の prop_symmetry.c を読んだ。
+- 台本: `scipab.py <mps> <秒> <名前> [パラメータ=値 ...]` (SCIP を 1 設定で、ログと統計は `logs/<問題>_<名前>.log(.stat)`)、
+  `one.sh` (当方の 1 回、hang_20261117 の写し)、`pplexscan.py` (P・M の走査 → `pplexscan.jsonl`)、`fuzz_pplex.py`・`fuzz.sh` (誤答の確かめ → `fuzz/`)、
+  `cfg.py`・`plan.py`・`run.py`・`summ.py` (広い計測、6 節)。
+
+## 1. SCIP は cod105 で何をしているか (事実、種 1)
+
+| 設定 (`limits/nodes=1` で前処理と根だけ、20 秒) | 前処理後の列 | 根の下界 | 足した対称性の制約 |
+|---|---|---|---|
+| usesymmetry=0 (5 秒で打ち切り) | 1024 | (根に届かず) | なし |
+| usesymmetry=4 (SST だけ) | 472 | −13.66 | orbitope_pp 55・symresack 1 |
+| usesymmetry=1 (対称性の制約だけ) | 472 | −13.66 | orbitope_pp 55 |
+| 1 + detectsubgroups・detectorbitopes・addweaksbcs・detectdoublelex・addsymresacks のどれか 1 つを切る | 472 | −13.64〜−13.66 | orbitope_pp 55 |
+| 既定 (7) + プロービングを切る (`propagating/probing/maxprerounds=0`) | 969 | −18.22 | orbitope_pp 55 |
+
+- 既定 (120 秒): 41.5 秒・3 ノード。usesymmetry=4: 45.5 秒・3 ノード。対称性なし: 1024 列のまま、根の LP 11864 反復 4.8 秒。
+- 前処理の内訳 (usesymmetry=4): symmetry が 41 列を固定し 56 本の制約を足す → orbitope_pp の伝播が 16 列 → **プロービングが 495 列** を固定。
+- どのビットでも同じ 55 本の orbitope_pp が出る源は、prop_symmetry.c の `componentPackingPartitioningOrbisackUpgrade`
+  (「詰め込み・分割の orbisack への格上げ」、lexred が有効なら SST・対称性の制約のどちらの道でも呼ばれる):
+  1. `tryGenerateInvolutions`: 成分の生成元のうち対合 (互換でないもの) の組から、可換なら `p q`、そうでなければ `p q p`・`q p q` を新しい対合として足す
+     (`maxnnewivolus` = 100 本まで)。cod105 は生成元 11 本 + 新しい対合 44 本。
+  2. 成分の置換のうち「0-1 列の上で対合で、各 2-巡回 `(i, σ(i))` が共通の set packing 制約に入る」ものが**半分以上**なら、
+     それぞれを 2 列の詰め込みオービトープ (行 = 2-巡回、`i < σ(i)`、列の番号の順) にし、成分をそれだけで扱う (orbital reduction は使わない)。
+  - これは各対合の lex-leader の制約 `x >=_lex σ(x)` (列の番号の順) そのもの。1 行目の右の列が 0 に固定され (41 列)、
+    残りは「1 行目の右が 1 なら左が 1」型の含意をプロービングが連鎖させて固定する。
+- 読み: cod105 の SCIP の決め手は SST でも symresack でもなく、この格上げ + プロービング (プロービングを切ると根は −18.2 のまま)。
+
+## 2. 当方の側 (事実、種 1)
+
+- 1 スレッド・60 秒 (`logs/cod105_def_t1_s1.log`・`cod105_sst_t1_s1.log`): 生成元 11 本・1 軌道 1024 列 (SCIP と同じ 11 本)。オービトープは見つからない
+  (find_orbitopes は完全オービトープだけ、ORBPP は 10 列以上だけ)。既定は orbital fixing 11 本、SST は 1122 行・10 段。
+  - どちらも対称性の扱いは**プロービングの後**で、根の固定は 0。SST の行 (leader と軌道の列の差) は根では何も伝播しない。
+- **LP の遅さ (別の問題)**: 前処理の「LP による固定」の最初の LP が 1024 行・非零 5.7 万で 1025 反復に 31〜36 秒 (30 秒の安全網で打ち切り)、
+  根の LP も 1025〜1586 反復で 26〜31 秒 (1 反復約 30 ミリ秒)。SCIP は同じ LP を 11864 反復 4.8 秒 (2500 反復/秒)。LP 担当への材料。
+- fhnw-binpack4-4: 格上げの条件を満たさない (PPLEX: 0 of 1、新しい対合 44 本も詰め込みの形でない)。既定 (SST_FEAS、p2inf_20261119) で
+  4 スレッド 70.0 秒・10677 ノードで実行不能 (SCIP は 8998 ノード)。ノード数は SCIP と同じ程度で、残る差は早めの FJ (実行可能性問題の上限 30 秒) と
+  ノードの速さ。対称性の扱いの差ではない (推測を含む)。
+
+## 3. 試作 `ENOMOTO_MIP_SYM_PPLEX=1` (既定は不変)
+
+- `symmetry::packing_orbisacks` (src/mip/symmetry.rs): SCIP の 1 節 1・2 と同じ条件・同じ数 (新しい対合 `ENOMOTO_T_MIP_SYM_PPLEX_NEW` = 100、手間の上限
+  `ENOMOTO_T_MIP_SYM_PPLEX_WORK` = 5e7)。詰め込みの行は「係数が全て 1、右辺 <= 1、0-1 列だけ、2 列以上」。オービトープ (完全・双子) の列を動かす生成元は除く。
+- 格上げした対合は、既存の `Orbitope` (2 列、`packing`、`static_pp`、`swaps` = その対合) として ORBITOPES に入れる。既存の静的なオービトープの道に
+  そのまま載る: 根で 1 行目の右の列を 0 に固定 (mod.rs の `pplex_fix`)、`ORBPP_REPROBE` (伝播・オービトープの固定・プロービングの繰り返し)、
+  木では全ての行を固定の順で使う静的な orbitopal fixing、オービトープの分枝はしない。
+- 格上げした成分の生成元は全て `used` にする (orbital fixing・lex-leader の行・SST から外す。分枝の順の代表と混ぜない)。ほかの成分は従来どおり。
+  orbisack・SST・lex-leader の行はどれも列の番号の順の辞書式なので、別の成分で同時に使っても矛盾しない。
+- ヒューリスティクスの解の並べ替え (`try_incumbent`): orbisack は列を共有するので 1 回の並べ替えで別の orbisack に反しうる。並べ替えるたびに解は
+  列の番号の順の辞書式で真に大きくなるので、変わらなくなるまで繰り返す (64 回まで、PPLEX のときだけ)。それでも反すれば従来どおり
+  「元の問題の解」(目的値は打ち切りに使い、答えは元の x)。暫定解は捨てない。
+- サブ MIP では使わない。ログ: `MIP: symmetry: PPLEX: A of B components upgraded, C packing orbisacks (R rows) from G generators and N new involutions`。
+
+### 3.1 効き目 (手元、種 1)
+
+| 問題 | 設定 | 既定 | PPLEX |
+|---|---|---|---|
+| cod105 | 1 スレッド | 242 秒 (slowm_20261119) / 60 秒で根の LP 途中 | **37.9 秒・0 ノード** (うち 36.4 秒は対称性より前の LP による固定の最初の LP) |
+| cod105 | 4 スレッド | 156.4 秒 (tree2) | **20.6 秒・0 ノード** (SCIP 1 スレッド 41.5〜64 秒) |
+| physiciansched6-2 | 4 スレッド・120 秒 | 33.8 秒 | 22.3 秒 (どちらも 0 ノード、PPLEX の固定は 4 列だけなので揺れの範囲とみる) |
+| glass4 | 4 スレッド・120 秒 | 時間切れ (暫定解 1.600e9) | 時間切れ (1.575e9) |
+
+- cod105 (PPLEX、`logs/cod105_pplex_t1_s1.log`): 66 本の orbisack (17920 行) → 根の固定 19 列 → REPROBE でオービトープ 420 列・プロービング 410 列、
+  自由な 0-1 列 1005 → 175、冗長な行 192 本を外す。根の LP (行 832・列 175) が 199 反復 0.07 秒で −12 (= 最適値) に届き、0 ノードで閉じる。
+  SCIP (472 列・根 −13.66) より強いのは、当方の ORBPP_REPROBE がオービトープの固定とプロービングを交互に繰り返すため (推測)。
+
+## 4. 同じ型の問題の数え上げ (`pplexscan.jsonl`、事実)
+
+P (MIPLIB 58 問) と M (Mittelmann 186 問のうち P にない 145 問) の 203 問を、PPLEX つき・1 スレッドで前処理の後まで流した。
+全て前処理の後まで届いた。対称性が見つかるのは 71 問、**PPLEX が成分を格上げするのは 6 問**:
+
+| 組 | 問題 | 生成元 | 格上げ | REPROBE の固定 |
+|---|---|---|---|---|
+| P | physiciansched6-2 | 79 | 16 成分中 2、orbisack 4 本 (4 行) | 0 |
+| M | cod105 | 11 | 1 成分、66 本 (17920 行) | オービトープ 420・プロービング 410 |
+| M | brazil3 | 77 | 7 成分中 2、2 本 (40 行) | プロービング 18 |
+| M | mzzv11 | 4 | 4 成分、4 本 (4 行) | (REPROBE なし) |
+| M | glass4 | 1 | 1 本 (1 行) | 0 |
+| M | nursesched-sprint02 | 1 | 1 本 (10 行) | 0 |
+
+- 大きく効く見込みは cod105 だけ。ほかは orbisack が 1〜4 本で、orbital fixing の代わりに静的な orbisack を使う差 (良くも悪くも) を見る。
+- 対称性のあるほかの 65 問は格上げの条件を満たさない (対合が少ない・2-巡回が詰め込みの行に入らない) ので、道筋は既定と同じ。
+
+## 5. 正しさ (事実)
+
+- cargo test (依頼の形、`--release` と python のリンク): 413 通過・0 失敗。単体テスト `packing_orbisacks_keep_a_lex_max_optimum`
+  (Q3 の最大独立集合、全 256 点で orbisack と根の固定を満たす最適解が残ることを総当たりで確かめる) を含む。
+- fuzz (`fuzz.sh` → `fuzz/`、全て PPLEX つき): **bad 0**。格上げした求解は計 663 回。
+
+| fuzz | bad | 格上げした求解 / 対称性のある求解 |
+|---|---|---|
+| `fuzz_pplex.py 600` (既定のスレッド) | 0 / 600 | 40 / 294 |
+| 同、1 スレッド | 0 / 600 | 42 / 314 |
+| 同、4 スレッド | 0 / 600 | 34 / 296 |
+| 同、`ENOMOTO_MIP_NO_ORBITOPE=1` | 0 / 600 | 149 / 307 |
+| `mip_fuzz_symmetric.py 300 0 1` | 0 / 300 | 45 / 178 |
+| 同、オービトープなし・規模 1 / 規模 2 | 0 / 300・0 / 300 | 173 / 178・180 / 215 |
+| `mip_fuzz_vs_highs.py 300` | 0 / 300 | 0 / 0 |
+
+- `fuzz_pplex.py`: Z_2^k (k = 3〜7) のケーリーグラフ (符号の型: Hamming の距離が集合に入る組を辺に) と巡回グラフの最大独立集合
+  (列の番号は乱数で並べ替え、一部で重み・総数の上下限)、同じ機械への割り当て。HiGHS と状態・最適値を突き合わせ、当方の解の実行可能性と目的値も確かめる。
+
+## 6. 広い計測 (親への依頼)
+
+`cfg.py`: def・def_t1 (このコミットの既定)、pplex・pplex_t1 (`ENOMOTO_MIP_SYM_PPLEX=1`)。名前が `_t1` で終われば 1 スレッド、ほかは 4 スレッド。
+
+- `shards_P.json` (MIPLIB 58 問 × 種 1〜3 × {def, pplex}、60 秒・4 スレッド、4 分担、各約 0.74 時間): `python run.py P K` (K = 0〜3)、
+  集計 `python summ.py P def pplex > summ_P.txt`。働くのは physiciansched6-2 だけなので、残りは揺れの目安。
+- `shards_M.json` (働く M の 5 問 = cod105・brazil3・mzzv11・glass4・nursesched-sprint02 × 種 1・2 × {def, pplex, def_t1, pplex_t1}、600 秒、
+  4 分担、各 1.4〜2.1 時間): `python run.py M K` (K = 0〜3)、集計 `python summ.py M def pplex`・`python summ.py M def_t1 pplex_t1`。
+- 準備は analysis/vsscip_20261117/README.md と同じ (`pip install maturin highspy==1.15.1 && pip install -e .`、このコミット以降でビルド)。作り直しは `python plan.py`。
+- 採用の目安: 誤答 0・crash 0、解けた数が減らない、P の SGM の区間の上端 +5% 以内、働く問題で全種 1.25 倍超の遅れなし。
+
+## 7. 残り・次の手
+
+- cod105 の 1 スレッドの残り 36 秒は LP の遅さ (2 節)。対称性の扱いを LP による固定より前に置く (固定が先に入れば LP は 175 列) 案もあるが、
+  前処理の順を変えるのは影響が広いので、計測の結果を見てから。
+- fhnw-binpack4-4 の残りの差は対称性の外 (2 節)。
+
+## 8. P の集計 (58 問 × 種 1〜3、60 秒・4 スレッド、4 分担そろい、`summ_P.txt`、事実)
+
+- 348 行、crash 0、食い違い 0。解けた数 def 138 / pplex 136 (174 組)。pplex / def **+0.7% [−2.3%, +3.7%]** (どちらかが解けた 46 問)。
+  全種で 1.25 倍超遅い問題はない。働く physiciansched6-2 は 0.84 (0.87・0.84・0.82、3 種とも速い)。
+- pplex だけ落ちた 2 組は、どちらも PPLEX が働かない問題 (`pplexscan.jsonl`: 10teams は対称性なし、neos5 は「0 of 1 components upgraded」):
+  - 10teams 種 2 (def 25.7 秒、pplex 時間切れ・暫定解 930・下界 924): 1 スレッド・種 2・60 秒 (`logs/10teams_chk_*_t1_s2.log`) で、def・pplex とも
+    7048 ノードで 924 の最適 (48.3・48.6 秒)。ログの違いは時刻で出す行と LU の手間の数え (時刻による) だけ。
+  - neos5 種 2 (def 40.2 秒、pplex 時間切れ・暫定解 15・下界 14.5): 1 スレッド・60 秒では両方とも時間切れ (13.7 万・13.6 万ノード、差は 60 秒で進んだ数)。
+    ノードの上限 3 万でそろえると (`logs/neos5_nl_*_t1_s2.log`)、両方とも下界 13.95・暫定解 15 で、暫定解の行の並びも一致 (md5 が同じ)。
+  - よって 2 組とも 4 スレッドの揺れ (PPLEX は道を変えていない)。
