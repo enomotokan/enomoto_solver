@@ -23,6 +23,8 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
     Fix,
+    /// `=ab`: 係数 1 つを兄弟に 2 値 a・b で入れ切りして比べるだけ (`ENOMOTO_MIP_CWM_AB=係数:a:b`、学ばない)
+    Ab,
     Bayes,
     Spsa,
 }
@@ -33,6 +35,7 @@ pub(crate) fn mode() -> Option<Mode> {
     *F.get_or_init(|| {
         env_str!("ENOMOTO_MIP_CWM").filter(|v| *v != "0").map(|v| match v {
             "fix" => Mode::Fix,
+            "ab" => Mode::Ab,
             "spsa" => Mode::Spsa,
             _ => Mode::Bayes,
         })
@@ -56,7 +59,28 @@ pub(crate) fn active(k: usize) -> bool {
     })[k]
 }
 
+/// `=ab` の係数の名前 (番号はこの並び): 推論の項の重み・打ち切りの項の重み・dynw の倍率・擬似費用の正規化の下限・信頼性分枝の閾値
+pub(crate) const AB_COEFS: &[&str] = &["inf", "cut", "dynw", "psfloor", "minrel"];
+
+/// `ENOMOTO_MIP_CWM_AB=係数:a:b` を (係数の番号, a, b) に。
+pub(crate) fn ab() -> Option<(usize, f64, f64)> {
+    static F: std::sync::OnceLock<Option<(usize, f64, f64)>> = std::sync::OnceLock::new();
+    *F.get_or_init(|| {
+        let v = env_str!("ENOMOTO_MIP_CWM_AB")?;
+        let mut it = v.split(':');
+        let name = it.next()?;
+        let k = AB_COEFS.iter().position(|c| *c == name)?;
+        let a: f64 = it.next()?.parse().ok()?;
+        let b: f64 = it.next()?.parse().ok()?;
+        Some((k, a, b))
+    })
+}
+
 fn delta(k: usize) -> f64 {
+    if mode() == Some(Mode::Ab) {
+        // 値そのものを θ_0 に入れる: 中心 (a + b)/2 ± (b − a)/2
+        return if k == 0 { ab().map_or(0.0, |(_, a, b)| (b - a) / 2.0) } else { 0.0 };
+    }
     if !active(k) {
         return 0.0;
     }
@@ -90,7 +114,11 @@ static TUNER: Mutex<Option<Tuner>> = Mutex::new(None);
 pub(crate) fn reset(verbose: bool) {
     if let Some(m) = mode() {
         let k = DIMS.len();
-        *TUNER.lock().unwrap() = Some(Tuner { mode: m, center: vec![0.0; k], obs: vec![Vec::new(); k], since: 0, started: 0, trace: String::new(), verbose });
+        let mut center = vec![0.0; k];
+        if m == Mode::Ab {
+            center[0] = ab().map_or(0.0, |(_, a, b)| (a + b) / 2.0);
+        }
+        *TUNER.lock().unwrap() = Some(Tuner { mode: m, center, obs: vec![Vec::new(); k], since: 0, started: 0, trace: String::new(), verbose });
     }
 }
 
@@ -183,7 +211,7 @@ impl Tuner {
     /// 対の観測: 対を始めたときの中心 `c`、次元ごとの向き `sg` (+1 / −1、側 0 の向き)、y = ln(側 0 の大きさ / 側 1 の大きさ)
     fn push(&mut self, c: &[f64], sg: &[f64], y: f64) {
         let y = y.clamp(-3.0, 3.0);
-        for k in (0..self.obs.len()).filter(|&k| active(k)) {
+        for k in (0..self.obs.len()).filter(|&k| active(k) || (self.mode == Mode::Ab && k == 0)) {
             // 側 0 が +δ_k なら y はそのまま θ_k を上げた側 − 下げた側
             self.obs[k].push((c[k], y * sg[k]));
         }
@@ -199,6 +227,7 @@ impl Tuner {
             let o = &self.obs[k];
             self.center[k] = match self.mode {
                 Mode::Fix => 0.0,
+                Mode::Ab => self.center[k],
                 Mode::Spsa => {
                     let recent = &o[o.len() - since..];
                     let ybar = recent.iter().map(|x| x.1).sum::<f64>() / recent.len() as f64;
