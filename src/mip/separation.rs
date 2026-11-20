@@ -1604,6 +1604,44 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             None => Vec::new(),
         };
+        // 試作 `ENOMOTO_MIP_SYMAVG` ([`super::sym_avg`]): 群の軌道 (生成元の union-find) と大きさ、次のラウンドに入れる平均したカット
+        let symavg = sym_gens.as_ref().and_then(|_| super::sym_avg());
+        let (sym_orb, sym_orb_size): (Vec<u32>, Vec<u32>) = match (&sym_gens, symavg) {
+            (Some(gens), Some(_)) => {
+                let mut par: Vec<u32> = (0..n as u32).collect();
+                fn root(par: &mut [u32], mut a: u32) -> u32 {
+                    while par[a as usize] != a {
+                        par[a as usize] = par[par[a as usize] as usize];
+                        a = par[a as usize];
+                    }
+                    a
+                }
+                for g in gens.iter() {
+                    for j in 0..n {
+                        if g[j] != j {
+                            let (a, b) = (root(&mut par, j as u32), root(&mut par, g[j] as u32));
+                            par[a as usize] = b;
+                        }
+                    }
+                }
+                let orb: Vec<u32> = (0..n as u32).map(|j| root(&mut par, j)).collect();
+                let mut size = vec![0u32; n];
+                for &o in &orb {
+                    size[o as usize] += 1;
+                }
+                (orb, size)
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
+        let mut sym_orb_members: Vec<Vec<u32>> = Vec::new();
+        if !sym_orb.is_empty() {
+            sym_orb_members = vec![Vec::new(); n];
+            for j in 0..n {
+                sym_orb_members[sym_orb[j] as usize].push(j as u32);
+            }
+        }
+        let mut avg_pending: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
+        let (mut avg_made, mut avg_added) = (0usize, 0usize);
         let sym_cap = tunable!("ENOMOTO_T_MIP_SYM_CUTS_MAX", 5000usize, usize);
         let mut sym_images = 0usize;
         // 像として新たにプールに入ったカットの番号 (候補に戻すのはこれだけ。ほかのプールのカットは今まで通り)
@@ -2703,6 +2741,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 再スタート前のカットをプールで引き継いだとき (`ENOMOTO_MIP_RESTART_CUTS_TO_POOL`): プールで違反しているものも候補にする
             // `ENOMOTO_MIP_SYM_CUTS`: 前のラウンドのカットの像 (プールにある) で違反しているものも候補にする
+            // `ENOMOTO_MIP_SYMAVG`: 前のラウンドで選んだカットの平均 (`=1` は必ず入れる、`=v` は今の解を破るときだけ候補)
+            if !avg_pending.is_empty() {
+                for (c, r) in std::mem::take(&mut avg_pending) {
+                    let act: f64 = c.iter().map(|&(j, a)| a * x[j]).sum();
+                    let nrm = c.iter().map(|&(_, a)| a * a).sum::<f64>().sqrt().max(1e-12);
+                    let eff = (act - r) / nrm;
+                    let forced = symavg == Some('1');
+                    if forced || (eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs())) {
+                        avg_added += 1;
+                        cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced, src: sepprof::SRC_POOL, sub: 0 });
+                    }
+                }
+            }
             if !sym_pool.is_empty() {
                 for (eff, k) in self.pool_violated(&x) {
                     if !sym_pool.contains(&k) {
@@ -3100,7 +3151,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.add_to_pool(c, *r);
                 }
                 // `ENOMOTO_MIP_SYM_CUTS`: 選んだカットを、その列を動かす生成元で写した像もプールに入れる (上限 `ENOMOTO_T_MIP_SYM_CUTS_MAX` 本)
-                if let Some(gens) = &sym_gens {
+                // `ENOMOTO_MIP_SYMAVG`: 選んだカットを群で平均した 1 本 (列 k の係数 = k の軌道の上の係数の和 / 軌道の大きさ)
+                if symavg.is_some() && !sym_orb.is_empty() {
+                    for (c, _, r) in &rows {
+                        let mut sum: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+                        for &(j, a) in c {
+                            *sum.entry(sym_orb[j]).or_insert(0.0) += a;
+                        }
+                        // 対称な列が 1 本もなければ平均は元のカットと同じ
+                        if sum.keys().all(|&o| sym_orb_size[o as usize] == 1) {
+                            continue;
+                        }
+                        let mut avg: Vec<(usize, f64)> = Vec::new();
+                        for (&o, &s) in &sum {
+                            if s == 0.0 {
+                                continue;
+                            }
+                            let v = s / sym_orb_size[o as usize] as f64;
+                            for &k in &sym_orb_members[o as usize] {
+                                avg.push((k as usize, v));
+                            }
+                        }
+                        if avg.is_empty() {
+                            continue;
+                        }
+                        avg.sort_unstable_by_key(|e| e.0);
+                        self.add_to_pool(&avg, *r);
+                        avg_pending.push((avg, *r));
+                        avg_made += 1;
+                    }
+                }
+                if let Some(gens) = sym_gens.as_ref().filter(|_| super::sym_cuts()) {
                     let before = sym_images;
                     let mut ks: Vec<u32> = Vec::new();
                     'rows: for (c, _, r) in &rows {
@@ -4095,6 +4176,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.sep_adapt_finish_root();
             if self.sl.stat && !self.params.submip && self.params.verbose {
                 eprint!("{}", self.sl.report(&format!("root restarts {}", self.params.restarts)));
+                // 双対退化の度合い (analysis/sepeff_20261120/): 被約費用 0 の非基底 (固定でない列・行) の数 (最適面の次元の目安、[`Self::mpsep_width`])、
+                // 固定でない非基底の数、整数の列のうち分数の数
+                let (w, nb) = self.face_width_nb();
+                let nint = (0..p.n).filter(|&j| p.is_int[j]).count();
+                eprintln!(
+                    "SEPEFF face restarts {} rounds {round_ctr} stall {stall} width {w} nonbasic {nb} rows {} nfrac {} nint {nint} obj {:.10e}",
+                    self.params.restarts,
+                    self.lp.num_rows(),
+                    self.fractional(&self.lp.col_values()).len(),
+                    self.lp.objective() + p.offset
+                );
             }
         }
         if closed_by_cutoff {
@@ -4160,6 +4252,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if self.params.verbose && super::hnfcut::on() && !self.params.submip {
             eprintln!("MIP: root {}", super::hnfcut::stats_line());
+        }
+        if self.params.verbose && symavg.is_some() {
+            eprintln!("MIP: SYMAVG: {avg_made} averaged cuts made, {avg_added} put as candidates (orbits of {} columns)", sym_orb_size.iter().filter(|&&k| k > 1).map(|&k| k as usize).sum::<usize>());
         }
         if self.params.verbose {
             eprintln!(
@@ -5572,6 +5667,162 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 試作 `ENOMOTO_MIP_MPSEP` の絞った形: 今の LP の最適面の広さの目安 = 被約費用が 0 (相対 1e-9) で固定されていない非基底の構造列と、
     /// 双対値が 0 の非基底の (等式でない) 行の数 (`TwoStageLp::optface_move` の候補の数に近い)。
+    /// 試作 `ENOMOTO_MIP_FACECUT` (既定では使わない、analysis/sepeff_20261120/): 根のカットのループが終わった (停滞した) 時点で、
+    /// 最適面の中の別の頂点を決まった向きで 2 つ求め、それぞれの頂点で分離した候補から選んだカットを LP とプールに足して、本来の目的で解き直す。
+    /// - 最適面に留める: 被約費用が 0 でない非基底の列をその値に、双対値が 0 でない非基底の行をその活動量に固定する (写しの LP だけ)
+    /// - 向き: 分数の整数の列 j を近い整数の方へ押す費用 (小数部 < 0.5 なら +1 (下げる)、それ以外は −1 (上げる)) と、その逆。乱数は使わない
+    /// - 頂点の LP を主単体法で解いた後、写しの上下限・費用を元に戻して解き直し (最適面の上なので目的値は同じ)、元の上下限の基底で分離する
+    ///   (固定した上下限のまま分離すると tableau 系のカットが元の問題で正しくなくなるため)
+    /// - 予算: 1 回の主単体法の反復は根の LP の反復 (最低 1000) まで。選ぶ本数は根の 1 ラウンドと同じ 50 本まで
+    /// 下界の伸びと手間を `SEPEFF facecut` の 1 行で出す。カットは実行可能領域で正しいものだけを足すので、答えは変わらない
+    pub(super) fn facecut_probe(&mut self) {
+        if env_str!("ENOMOTO_MIP_FACECUT").is_none_or(|v| v == "0") || self.params.submip || self.time_up() {
+            return;
+        }
+        let p = self.p;
+        let n = p.n;
+        let t0 = std::time::Instant::now();
+        let tk0 = crate::ticks::total_with_diag();
+        let obj0 = self.lp.objective() + p.offset;
+        let x = self.lp.col_values();
+        let frac = self.fractional(&x);
+        let (w0, nb0) = self.face_width_nb();
+        if frac.is_empty() || x.len() != n {
+            if self.params.verbose {
+                eprintln!("SEPEFF facecut: skipped (nfrac {}, width {w0})", frac.len());
+            }
+            return;
+        }
+        let d = self.lp.reduced_costs();
+        let y = self.lp.row_duals();
+        let act = self.lp.row_activities();
+        let b = self.lp.basis();
+        let costs0 = self.lp.costs();
+        let cap = self.root_lp_iters.max(1000);
+        let lim = SolveLimits { iteration_limit: cap, deadline: self.deadline, ..Default::default() };
+        let mut fixed_cols: Vec<(usize, f64, f64)> = Vec::new();
+        for j in 0..n.min(b.col.len()).min(d.len()) {
+            let (l, u) = self.lp.col_bounds(j);
+            if b.col[j] != VarStatus::Basic && l < u && d[j].abs() > 1e-9 * (1.0 + p.cost[j].abs()) {
+                fixed_cols.push((j, l, u));
+            }
+        }
+        let mut fixed_rows: Vec<(usize, f64, f64)> = Vec::new();
+        for i in 0..b.row.len().min(y.len()).min(act.len()) {
+            let (l, u) = self.lp.row_bounds(i);
+            if b.row[i] != VarStatus::Basic && l < u && y[i].abs() > 1e-9 {
+                fixed_rows.push((i, l, u));
+            }
+        }
+        let mut cands: Vec<Candidate> = Vec::new();
+        let mut info: Vec<String> = Vec::new();
+        // 比べ用 `x`: 頂点を動かさず、今の頂点 x* でもう 1 回分離する (同じ選び方・同じ本数の上限で、根のループの 1 ラウンド分を足した形)
+        let control = env_str!("ENOMOTO_MIP_FACECUT").is_some_and(|v| v.contains('x'));
+        if control {
+            let mut cv = self.separate(&x, false);
+            info.push(format!("control: separated at x*, {} candidates", cv.len()));
+            cands.append(&mut cv);
+        }
+        for dir in if control { vec![] } else { vec![1.0f64, -1.0] } {
+            if self.time_up() {
+                break;
+            }
+            let mut alt = self.lp.clone();
+            for &(j, _, _) in &fixed_cols {
+                alt.set_col_bounds(j, x[j], x[j]);
+            }
+            alt.set_row_bounds_many(&fixed_rows.iter().map(|&(i, _, _)| (i, act[i], act[i])).collect::<Vec<_>>());
+            let mut w = vec![0.0; n];
+            for &(j, _) in &frac {
+                let f = x[j] - x[j].floor();
+                w[j] = dir * if f < 0.5 { 1.0 } else { -1.0 };
+            }
+            alt.set_costs(&w);
+            let it0 = alt.total_iterations();
+            let st1 = alt.solve_primal(&lim);
+            let it1 = alt.total_iterations() - it0;
+            if st1 != LpStatus::Optimal {
+                info.push(format!("dir {dir:+}: face LP {st1:?} ({it1} iters)"));
+                continue;
+            }
+            for &(j, l, u) in &fixed_cols {
+                alt.set_col_bounds(j, l, u);
+            }
+            alt.set_row_bounds_many(&fixed_rows);
+            alt.set_costs(&costs0);
+            let it2 = alt.total_iterations();
+            let st2 = alt.solve_primal(&lim);
+            let it2 = alt.total_iterations() - it2;
+            let oa = alt.objective() + p.offset;
+            let xa = alt.col_values();
+            let moved = (0..n).filter(|&j| (xa[j] - x[j]).abs() > 1e-6 * (1.0 + x[j].abs())).count();
+            let nfa = self.fractional(&xa).len();
+            if st2 != LpStatus::Optimal || (oa - obj0).abs() > 1e-6 * (1.0 + obj0.abs()) || moved == 0 || xa.len() != n {
+                info.push(format!("dir {dir:+}: back {st2:?} obj {oa:.10e} moved {moved} ({it1}+{it2} iters)"));
+                continue;
+            }
+            alt.set_total_iterations(self.lp.total_iterations());
+            std::mem::swap(&mut self.lp, &mut alt);
+            let mut cv = self.separate(&xa, false);
+            std::mem::swap(&mut self.lp, &mut alt);
+            info.push(format!("dir {dir:+}: moved {moved} columns, {nfa} fractional, {} candidates ({it1}+{it2} iters)", cv.len()));
+            cands.append(&mut cv);
+        }
+        let ncand = cands.len();
+        let chosen = select_cuts(cands, tunable!("ENOMOTO_T_MIP_FACECUT_MAX", 50usize, usize), p);
+        let viol_x = chosen.iter().filter(|c| c.coefs.iter().map(|&(j, a)| a * x[j]).sum::<f64>() - c.rhs > 1e-6 * (1.0 + c.rhs.abs())).count();
+        let mut obj1 = obj0;
+        let mut st = LpStatus::Optimal;
+        let it_s = self.lp.total_iterations();
+        if !chosen.is_empty() && !self.time_up() {
+            let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.iter().map(|c| (c.coefs.clone(), f64::NEG_INFINITY, c.rhs)).collect();
+            for c in &chosen {
+                self.add_to_pool(&c.coefs, c.rhs);
+            }
+            self.add_cut_rows(&rows);
+            st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+            if st == LpStatus::Optimal {
+                obj1 = self.lp.objective() + p.offset;
+            }
+        }
+        if self.params.verbose {
+            let gap = self.incumbent.as_ref().map(|(z, _)| z - obj0);
+            eprintln!(
+                "SEPEFF facecut: obj {obj0:.10e} -> {obj1:.10e} (gain {:.4e}, of gap {}), {st:?} ({} iters), width {w0} nonbasic {nb0} nfrac {}, fixed cols {} rows {}, {ncand} candidates, chosen {} ({viol_x} cut x*), ticks {:.0}, {:.3}s; {}",
+                obj1 - obj0,
+                gap.map_or("-".to_string(), |g| format!("{:.4}", if g > 0.0 { (obj1 - obj0) / g } else { 0.0 })),
+                self.lp.total_iterations() - it_s,
+                frac.len(),
+                fixed_cols.len(),
+                fixed_rows.len(),
+                chosen.len(),
+                crate::ticks::total_with_diag() - tk0,
+                t0.elapsed().as_secs_f64(),
+                info.join("; ")
+            );
+        }
+    }
+
+    /// 診断: ([`Self::mpsep_width`] と同じ数え方の被約費用 0 の非基底の数, 固定でない非基底 (列・行) の数)
+    fn face_width_nb(&self) -> (usize, usize) {
+        let p = self.p;
+        let b = self.lp.basis();
+        let mut nb = 0usize;
+        for j in 0..p.n.min(b.col.len()) {
+            let (l, u) = self.lp.col_bounds(j);
+            if b.col[j] != VarStatus::Basic && l < u {
+                nb += 1;
+            }
+        }
+        for i in 0..b.row.len() {
+            let (l, u) = self.lp.row_bounds(i);
+            if b.row[i] != VarStatus::Basic && l < u {
+                nb += 1;
+            }
+        }
+        (self.mpsep_width(), nb)
+    }
+
     fn mpsep_width(&self) -> usize {
         let p = self.p;
         let d = self.lp.reduced_costs();
