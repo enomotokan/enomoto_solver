@@ -1,6 +1,6 @@
 """MPS を読んで解き、解のファイルを書くコマンドラインの入り口 (Mittelmann のベンチマークなど、外の人が回す用)。
 
-既定の求解の経路は変えない: MPS は HiGHS (highspy) で読み、`benchmark_highs._build_our_model` でモデルを作って
+MPS はこのクレートの読み込み (`benchmark_highs._read_our_model` → `PyModel.read_mps`) で読み、
 `PyModel.solve` を呼ぶ (`scripts/run_miplib_benchmark.py --worker-ours` と同じ経路)。
 
 使い方:
@@ -33,7 +33,7 @@ T0 = time.perf_counter()
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="ENOMOTO-Solver: MPS を読んで (混合) 整数最適化問題・LP を解く")
-    ap.add_argument("mps", help="MPS ファイル (.mps / .mps.gz。HiGHS が読める形)")
+    ap.add_argument("mps", help="MPS ファイル (.mps / .mps.gz。自由形式の MPS)")
     ap.add_argument("--time-limit", type=float, default=None, help="時間の上限 [秒] (既定: なし)")
     ap.add_argument("--time-limit-scope", choices=["total", "solve"], default="total",
                     help="total: 起動からの壁時計で数える (既定)。solve: 求解だけに渡す")
@@ -49,9 +49,7 @@ def main() -> int:
 
     from enomoto_solver import benchmark_highs as bh
 
-    _, lp = bh._load_lp(Path(a.mps))
-    names = list(lp.col_names_) if len(lp.col_names_) == lp.num_col_ else [f"C{j}" for j in range(lp.num_col_)]
-    m, _, _ = bh._build_our_model(lp)
+    m, _, _, names = bh._read_our_model(Path(a.mps))
     t_read = time.perf_counter() - T0
 
     tl = a.time_limit

@@ -7,9 +7,9 @@ the cache is `.gitignore`d, like `.netlib_cache`), then solves each problem
 with both solvers, each in its own subprocess:
 
 - HiGHS: default options plus `time_limit`, timed around `Highs.run()`.
-- this crate: the MPS file is parsed by HiGHS and the model built with
-  `benchmark_highs._build_our_model` (the same path as the Netlib
-  benchmark, minus an O(m^2) vector copy; see `_build_our_model` here).
+- this crate: the MPS file is read by this crate's own MPS reader
+  (`benchmark_highs._read_our_model` -> `PyModel.read_mps`; since 2026-11-20.
+  Before that it was parsed by HiGHS and built with `_build_our_model` here).
   Only `model.solve()` is timed. This crate has no time-limit
   option, so the parent kills the worker once `--timeout` seconds have
   passed since the worker reported that model building finished.
@@ -186,18 +186,15 @@ def _worker_highs(mps: str, time_limit: float) -> None:
 
 
 def _worker_ours(mps: str) -> None:
-    import highspy
+    from enomoto_solver import benchmark_highs as bh
 
-    h = highspy.Highs()
-    h.setOptionValue("output_flag", False)
-    status = h.readModel(mps)
-    if "kOk" not in str(status) and "kWarning" not in str(status):
-        print(json.dumps({"status": "read_error", "detail": str(status)}))
-        return
     t0 = time.perf_counter()
-    model = _build_our_model(h.getLp())
+    try:
+        model, _, _, _ = bh._read_our_model(Path(mps))
+    except ValueError as e:
+        print(json.dumps({"status": "read_error", "detail": str(e)}))
+        return
     build_time = time.perf_counter() - t0
-    del h
     print(json.dumps({"built": True, "build_time": build_time}), flush=True)
     t0 = time.perf_counter()
     out = model.solve(lp_solver=None)
