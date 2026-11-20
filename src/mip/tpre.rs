@@ -60,12 +60,12 @@ pub(crate) fn umax_diag(p: &MipProblem) {
     let t0 = std::time::Instant::now();
     let lp = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
     let h1 = Arc::new(Mutex::new(Vec::new()));
-    let _ = lp.pdlrc_run_iters_hist(iters, Some(h1.clone()));
+    let _ = lp.pdlrc_run_iters_hist(iters, Some(h1.clone()), None);
     let t1 = t0.elapsed().as_secs_f64();
     let neg: Vec<f64> = p.cost.iter().map(|c| -c).collect();
     let lp2 = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &neg, &p.rows, &p.row_lo, &p.row_up);
     let h2 = Arc::new(Mutex::new(Vec::new()));
-    let _ = lp2.pdlrc_run_iters_hist(iters, Some(h2.clone()));
+    let _ = lp2.pdlrc_run_iters_hist(iters, Some(h2.clone()), None);
     let t2 = t0.elapsed().as_secs_f64() - t1;
     let h1 = h1.lock().map(|h| h.clone()).unwrap_or_default();
     let h2 = h2.lock().map(|h| h.clone()).unwrap_or_default();
@@ -79,9 +79,67 @@ pub(crate) fn umax_diag(p: &MipProblem) {
     eprintln!("{s}");
 }
 
+/// 診断 `ENOMOTO_MIP_TPRE` の `s` (analysis/objtarget_20261119/ の 8): FJ と Local-MIP を出発点を変えて回し、出発点で破られている行の数・
+/// 最初の解までの手の数・時間・最良の目的値を出す。出発点: 既定 (境界の端) / 単体法の LP の点 / PDLP の点 (500・2000・10000 反復) /
+/// 目的を 0 にした PDLP の点 (2000 反復)。Local-MIP は `ENOMOTO_T_MIP_TPRE_LMIP_SECS` 秒 (既定 5、時刻で止める)
+pub(crate) fn start_diag(p: &MipProblem, safety: f64, seed: u64) {
+    use super::lp::{LpStatus, SolveLimits};
+    use super::lp_api::MipLp;
+    use std::sync::{Arc, Mutex};
+    let mut starts: Vec<(String, Option<Vec<f64>>, f64)> = vec![("default".into(), None, 0.0)];
+    let t = std::time::Instant::now();
+    let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
+    let st = lp.solve(&SolveLimits { iteration_limit: tunable!("ENOMOTO_T_MIP_TPRE_LP_ITERS", 200_000u64, u64), ..Default::default() });
+    if st == LpStatus::Optimal {
+        starts.push(("lp".into(), Some(lp.col_values()), t.elapsed().as_secs_f64()));
+    }
+    let zero = vec![0.0; p.n];
+    for (name, cost, it) in [("pdlp500", &p.cost, 500usize), ("pdlp2000", &p.cost, 2000), ("pdlp10000", &p.cost, 10000), ("pdlp0_2000", &zero, 2000)] {
+        let t = std::time::Instant::now();
+        let lp = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, cost, &p.rows, &p.row_lo, &p.row_up);
+        let xo = Arc::new(Mutex::new(Vec::new()));
+        let _ = lp.pdlrc_run_iters_hist(it, None, Some(xo.clone()));
+        let x = xo.lock().map(|x| x.clone()).unwrap_or_default();
+        if x.len() == p.n {
+            starts.push((name.into(), Some(x), t.elapsed().as_secs_f64()));
+        }
+    }
+    let lmip_secs = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_SECS", 5.0, f64);
+    for (name, x0, secs0) in &starts {
+        let t1 = std::time::Instant::now();
+        let fx = super::fj::fj2_search_from(p, &p.col_lo, &p.col_up, x0.as_deref(), safety, seed, None);
+        let fsecs = t1.elapsed().as_secs_f64();
+        let (sv, fs, fe, steps) = super::fj::FJ_LAST.with(|c| c.get());
+        let fz = fx.as_ref().filter(|x| p.is_feasible(x, 1e-6)).map(|x| p.objective(x));
+        let t2 = std::time::Instant::now();
+        let (lv, lfirst, lz) = match super::localmip::LocalMip::new(p, &p.col_lo, &p.col_up, seed ^ 0x6A09_E667_F3BC_C909, true) {
+            Some(mut lm) => {
+                let v = match x0 { Some(x) => lm.set_start(x), None => usize::MAX };
+                lm.run(std::time::Instant::now() + std::time::Duration::from_secs_f64(lmip_secs), None, &|_| {});
+                let z = lm.res.best.as_ref().map(|x| p.objective(x));
+                (v, lm.res.first_time, z)
+            }
+            None => (usize::MAX, None, None),
+        };
+        let _ = t2;
+        eprintln!(
+            "MIP: TPRE_START {name}: prep {secs0:.2}s | FJ start_viol {sv} first_steps {} first_effort {} steps {steps} found {:?} ({fsecs:.2}s) | LMIP start_viol {} first {:?} best {:?}",
+            if fs == u64::MAX { -1 } else { fs as i64 },
+            if fe == u64::MAX { -1 } else { fe as i64 },
+            fz,
+            if lv == usize::MAX { -1 } else { lv as i64 },
+            lfirst,
+            lz
+        );
+    }
+}
+
 pub(crate) fn run(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
     if mode().is_some_and(|m| m.contains('u')) {
         umax_diag(p);
+    }
+    if mode().is_some_and(|m| m.contains('s')) {
+        start_diag(p, safety, seed);
     }
     let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
     if !p.cost.iter().any(|&c| c != 0.0) {
@@ -109,8 +167,24 @@ pub(crate) fn run(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
         }
     }
     out.secs[1] = t1.elapsed().as_secs_f64();
-    let (Some(l), Some(u)) = (out.l, out.u) else { return out };
+    // 9 (`d`) で FJ の解がなければ、U に LP 緩和の最大化の上界 U_max (7、正しい上界。非有界なら使えない) を使う
+    let u_for_t = match out.u {
+        Some(u) => Some(u),
+        None if mode().is_some_and(|m| m.contains('d')) => {
+            let neg: Vec<f64> = p.cost.iter().map(|c| -c).collect();
+            let lp2 = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &neg, &p.rows, &p.row_lo, &p.row_up);
+            lp2.pdlrc_run_iters(iters).map(|b| -b.lb + p.offset).filter(|u| u.is_finite())
+        }
+        None => None,
+    };
+    let (Some(l), Some(u)) = (out.l, u_for_t) else { return out };
     if !(u > l + 1e-9 * u.abs().max(1.0)) {
+        return out;
+    }
+    // 9 (`d`): T を下界の近くから順に上げる (θ = 1/16, 1/8, 1/4, 1/2 で T = L + θ (U − L))。各段で P_T を伝播し、矛盾なら
+    // 「最適値 > T」(下界を T に上げて次へ)、そうでなければ P_T の中の FJ で T 以下の解を探し、出たら止める
+    if mode().is_some_and(|m| m.contains('d')) {
+        ladder(p, l, u, safety, seed, &mut out);
         return out;
     }
     // 3. 目標 T
@@ -160,4 +234,67 @@ pub(crate) fn run(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
     }
     out.secs[3] = t3.elapsed().as_secs_f64();
     out
+}
+
+/// P = p ∩ {c x ≤ t} を作る
+fn with_obj_row(p: &MipProblem, t: f64) -> MipProblem {
+    let mut rows = p.rows.clone();
+    let mut rlo = p.row_lo.clone();
+    let mut rup = p.row_up.clone();
+    rows.push((0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect());
+    rlo.push(f64::NEG_INFINITY);
+    rup.push(t - p.offset);
+    MipProblem::from_rows(p.col_lo.clone(), p.col_up.clone(), p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, rlo, rup)
+}
+
+/// 9 の段 (`d`)。`out.l` は伝播の矛盾で上がった下界 (証明つき) に置き換える。`out.t` は解の出た段の T
+fn ladder(p: &MipProblem, l0: f64, u: f64, safety: f64, seed: u64, out: &mut TpreOut) {
+    let mut l = l0;
+    let t2 = std::time::Instant::now();
+    let mut stages = String::new();
+    for (k, theta) in [1.0 / 16.0, 1.0 / 8.0, 0.25, 0.5].into_iter().enumerate() {
+        let t = l0 + theta * (u - l0);
+        if t <= l {
+            continue;
+        }
+        let q = with_obj_row(p, t);
+        let mut d = super::domain::Domain::new(&q);
+        if d.infeasible || !d.propagate(&q) {
+            // P_T に解はない: 最適値 > T
+            l = t;
+            stages.push_str(&format!(" θ{theta}:inf"));
+            continue;
+        }
+        let ntight = (0..p.n).filter(|&j| d.lo[j] > p.col_lo[j] + 1e-9 || d.up[j] < p.col_up[j] - 1e-9).count();
+        let mut found = false;
+        for r in 0..tunable!("ENOMOTO_T_MIP_TPRE_FJ_RUNS", 2usize, usize) {
+            let sd = seed.wrapping_add(((k * 8 + r) as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            if let Some(x) = super::fj::fj2_search(&q, &d.lo, &d.up, safety, sd, None) {
+                if p.is_feasible(&x, 1e-6) {
+                    let z = p.objective(&x);
+                    if z <= t + 1e-6 * t.abs().max(1.0) && z < out.x_z {
+                        out.x_z = z;
+                        out.x = Some(x);
+                        out.below_t = true;
+                        found = true;
+                    }
+                }
+            }
+        }
+        stages.push_str(&format!(" θ{theta}:{}(tight {ntight})", if found { "found" } else { "none" }));
+        if found {
+            out.t = Some(t);
+            out.lo = d.lo.clone();
+            out.up = d.up.clone();
+            out.n_tight = ntight;
+            out.n_fix = (0..p.n).filter(|&j| d.lo[j] == d.up[j] && p.col_lo[j] < p.col_up[j]).count();
+            break;
+        }
+    }
+    out.secs[2] = t2.elapsed().as_secs_f64();
+    if l > l0 {
+        out.infeasible_t = true;
+    }
+    out.l = Some(l);
+    eprintln!("MIP: TPRE ladder: L0 {l0:.10e} U {u:.10e} -> proven L {l:.10e};{stages}");
 }
