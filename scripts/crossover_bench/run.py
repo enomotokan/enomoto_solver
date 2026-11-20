@@ -38,6 +38,18 @@ MITTELMANN_EXCLUDE = {"thk_48", "L2CTA3D", "dlr2", "Dual2_5000"}
 METHODS = {"slope_intercept": "simplex", "ipm_crossover": "ipm_crossover", "race": "auto", "highs_ipm": "highs_ipm"}
 
 
+
+def _read_our_model_compat(bh, path):
+    """`benchmark_highs._read_our_model` (このクレートの MPS 読み込み) でモデルを作る。古いビルドを wheel で入れた
+    環境では `benchmark_highs` 自体が古く `_read_our_model` がないので、従来の HiGHS 経由の組み立てに戻る
+    (台本だけ新しくなった計測が落ちないように)。戻り値は `(model, 制約数, 非零数, 列の名前)`。"""
+    if hasattr(bh, "_read_our_model"):
+        return bh._read_our_model(path)
+    _, lp = bh._load_lp(path)
+    names = list(lp.col_names_) if len(lp.col_names_) == lp.num_col_ else [f"C{j}" for j in range(lp.num_col_)]
+    model, n_constraints, nnz = bh._build_our_model(lp)
+    return model, n_constraints, nnz, names
+
 def problems(set_name: str) -> list[str]:
     if set_name == "mittelmann":
         from run_mittelmann_benchmark import PROBLEMS
@@ -78,7 +90,7 @@ def worker(mps: str, solver: str, sizes_only: bool) -> None:
         return
     del h
     from enomoto_solver import benchmark_highs as bh
-    model, _, _, _ = bh._read_our_model(Path(mps))
+    model, _, _, _ = _read_our_model_compat(bh, Path(mps))
     if sizes_only:
         os.environ["ENOMOTO_DEBUG_PRESOLVE_SIZE"] = "1"
         os.environ["ENOMOTO_PRESOLVE_ONLY"] = "1"
