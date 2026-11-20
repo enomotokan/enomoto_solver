@@ -141,6 +141,12 @@ pub(crate) fn run(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
     if mode().is_some_and(|m| m.contains('s')) {
         start_diag(p, safety, seed);
     }
+    // `p` (analysis/objtarget_20261119/ の 8 の試作): PDLP の点を出発点にした FJ だけを回す。元の問題の LP を 1 スレッドの PDLP で
+    // `ENOMOTO_T_MIP_TPRE_PDLP_ITERS` 反復 (既定 2000) 解いた主の点 (整数列は四捨五入) から FJ を `ENOMOTO_T_MIP_TPRE_FJ_RUNS` 回 (種を変えて)。
+    // 手間は反復の数と FJ の手間 (非零の数で決まる) で決まり、主の側は決まった所で待つので種ごとに再現する
+    if mode().is_some_and(|m| m.contains('p')) {
+        return pdlp_start(p, safety, seed);
+    }
     let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
     if !p.cost.iter().any(|&c| c != 0.0) {
         return out;
@@ -297,4 +303,231 @@ fn ladder(p: &MipProblem, l0: f64, u: f64, safety: f64, seed: u64, out: &mut Tpr
     }
     out.l = Some(l);
     eprintln!("MIP: TPRE ladder: L0 {l0:.10e} U {u:.10e} -> proven L {l:.10e};{stages}");
+}
+
+/// [`run`] の `p`: PDLP の点からの FJ
+fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
+    use std::sync::{Arc, Mutex};
+    let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
+    let t0 = std::time::Instant::now();
+    let iters = tunable!("ENOMOTO_T_MIP_TPRE_PDLP_ITERS", 2000usize, usize);
+    let lp = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
+    let xo = Arc::new(Mutex::new(Vec::new()));
+    if let Some(b) = lp.pdlrc_run_iters_hist(iters, None, Some(xo.clone())) {
+        out.l = Some(b.lb + p.offset);
+        out.l_iters = b.iters;
+    }
+    drop(lp);
+    let x0 = xo.lock().map(|x| x.clone()).unwrap_or_default();
+    out.secs[0] = t0.elapsed().as_secs_f64();
+    if x0.len() != p.n {
+        return out;
+    }
+    let t1 = std::time::Instant::now();
+    let mut viol = 0usize;
+    for k in 0..tunable!("ENOMOTO_T_MIP_TPRE_FJ_RUNS", 2usize, usize) {
+        let sd = seed.wrapping_add((k as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        if let Some(x) = super::fj::fj2_search_from(p, &p.col_lo, &p.col_up, Some(&x0), safety, sd, None) {
+            if p.is_feasible(&x, 1e-6) {
+                let z = p.objective(&x);
+                if z < out.x_z {
+                    out.x_z = z;
+                    out.u = Some(z);
+                    out.x = Some(x);
+                }
+            }
+        }
+        if k == 0 {
+            viol = super::fj::FJ_LAST.with(|c| c.get().0);
+        }
+    }
+    out.n_tight = viol;
+    out.secs[1] = t1.elapsed().as_secs_f64();
+    // `pl`: PDLP の点から Local-MIP を `ENOMOTO_T_MIP_TPRE_LMIP_STEPS` 手 (既定 100000、loue・kakapo で 4〜6 秒) 回す (手の数で止める)
+    if mode().is_some_and(|m| m.contains("pl")) {
+        let t2 = std::time::Instant::now();
+        if let Some(mut lm) = super::localmip::LocalMip::new(p, &p.col_lo, &p.col_up, seed ^ 0x6A09_E667_F3BC_C909, true) {
+            // 出発点は PDLP の点 (8 の単独の比べで、FJ の解から始めるより良かった)
+            lm.set_start(&x0);
+            lm.step_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_STEPS", 100_000u64, u64);
+            lm.run(std::time::Instant::now() + std::time::Duration::from_secs_f64(safety), None, &|_| {});
+            if let Some(x) = lm.res.best.clone() {
+                if p.is_feasible(&x, 1e-6) {
+                    let z = p.objective(&x);
+                    if z < out.x_z {
+                        out.x_z = z;
+                        out.u = Some(z);
+                        out.x = Some(x);
+                    }
+                }
+            }
+        }
+        out.secs[2] = t2.elapsed().as_secs_f64();
+        if env_str!("ENOMOTO_MIP_TPRE_DEBUG").is_some() {
+            eprintln!("MIP: TPRE pl: Local-MIP {:.2}s, best {:.10e}", out.secs[2], out.x_z);
+        }
+    }
+    out
+}
+
+/// 試作 `ENOMOTO_MIP_TPRE` の `t` (`pt`、analysis/objtarget_20261119/): 前処理の間、空いたスレッド (スレッド数 − 1 本) で FJ・Local-MIP を
+/// 出発点を変えて回し続ける (スレッド k の出発点: k mod 4 = 0 PDLP 500 反復の点、1 PDLP 2000 反復、2 目的 0 の PDLP 2000 反復、3 境界の端 (FJ の既定))。
+/// 再現性: 各スレッドに手間の門 ([`crate::ticks::Gate`]) を付け、主は前処理の段の終わり ([`super::pretime::Guard`] を捨てるとき) ごとに
+/// 「主が前処理で使った手間 × `ENOMOTO_T_MIP_TPRE_PT_RATE` (既定 0.5。1 では手伝いのスレッドが主に追いつかず、satellites2-60-fs で主が 7〜11 秒待った)」まで許す。前処理の終わりで同じ式の手間まで許して門で止まるのを待ち、
+/// その時点の最良を読むので、読む状態は時刻によらず主の手間で決まる (スレッドが遅れていれば主が待つ。PDLP は反復の数で止まり門を見ない)。
+pub(crate) struct PtJob {
+    gates: Vec<std::sync::Arc<crate::ticks::Gate>>,
+    best: std::sync::Arc<std::sync::Mutex<Vec<Option<(f64, Vec<f64>)>>>>,
+    base: f64,
+    granted: std::cell::Cell<f64>,
+    rate: f64,
+}
+
+impl Drop for PtJob {
+    fn drop(&mut self) {
+        for g in &self.gates {
+            g.stop();
+        }
+    }
+}
+
+thread_local! {
+    static PT_JOB: std::cell::RefCell<Option<std::rc::Weak<PtJob>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn pt_spawn(p: &MipProblem, threads: usize, seed: u64) -> std::rc::Rc<PtJob> {
+    use std::sync::{Arc, Mutex};
+    let k = threads.saturating_sub(1).max(1);
+    let best = Arc::new(Mutex::new(vec![None; k]));
+    let mut gates = Vec::new();
+    // `T` (比べ用、再現しない): 門で止めず、主は前処理の終わりの時点の最良を待たずに読む
+    let nowait = mode().is_some_and(|m| m.contains('T'));
+    for t in 0..k {
+        let g = crate::ticks::Gate::new(if nowait { f64::INFINITY } else { 0.0 });
+        gates.push(g.clone());
+        let q = p.clone();
+        let best = best.clone();
+        let sd = seed.wrapping_add((t as u64 + 1).wrapping_mul(0xA24B_AED4_963E_E407));
+        std::thread::spawn(move || {
+            lower_priority();
+            let _guard = crate::ticks::install_gate(g);
+            pt_worker(&q, t, sd, &best);
+        });
+    }
+    let job = std::rc::Rc::new(PtJob { gates, best, base: crate::ticks::total(), granted: std::cell::Cell::new(0.0), rate: tunable!("ENOMOTO_T_MIP_TPRE_PT_RATE", 0.5, f64) });
+    PT_JOB.with(|j| *j.borrow_mut() = Some(std::rc::Rc::downgrade(&job)));
+    job
+}
+
+/// 主の前処理の手間まで許す ([`super::pretime::Guard`] を捨てるときに呼ばれる。このスレッドに仕事がなければ何もしない)
+pub(crate) fn pt_grant() {
+    let Some(job) = PT_JOB.with(|j| j.borrow().as_ref().and_then(|w| w.upgrade())) else { return };
+    job.grant_to_main();
+}
+
+impl PtJob {
+    fn grant_to_main(&self) -> f64 {
+        let w = (crate::ticks::total() - self.base).max(0.0) * self.rate;
+        let add = w - self.granted.get();
+        if add > 0.0 {
+            for g in &self.gates {
+                g.grant(add);
+            }
+            self.granted.set(w);
+        }
+        w
+    }
+
+    /// 前処理の終わり: 主の手間まで許し、全部のスレッドが門で止まる (か終わる) のを待って最良を返し、止める。(手間, 最良の目的値, 解, スレッド)
+    pub(crate) fn finish(&self, p: &MipProblem) -> (f64, Option<(f64, Vec<f64>, usize)>) {
+        let w = self.grant_to_main();
+        if !mode().is_some_and(|m| m.contains('T')) {
+            for g in &self.gates {
+                let _ = g.wait_paused();
+            }
+        }
+        let b = self.best.lock().map(|b| b.clone()).unwrap_or_default();
+        for g in &self.gates {
+            g.stop();
+        }
+        PT_JOB.with(|j| *j.borrow_mut() = None);
+        let mut out: Option<(f64, Vec<f64>, usize)> = None;
+        for (t, e) in b.into_iter().enumerate() {
+            if let Some((z, x)) = e {
+                if p.is_feasible(&x, 1e-6) && out.as_ref().is_none_or(|o| z < o.0) {
+                    out = Some((z, x, t));
+                }
+            }
+        }
+        (w, out)
+    }
+}
+
+fn pt_worker(p: &MipProblem, t: usize, seed: u64, best: &std::sync::Mutex<Vec<Option<(f64, Vec<f64>)>>>) {
+    use std::sync::{Arc, Mutex};
+    let put = |x: &[f64]| {
+        if !p.is_feasible(x, 1e-6) {
+            return;
+        }
+        let z = p.objective(x);
+        if let Ok(mut b) = best.lock() {
+            if b[t].as_ref().is_none_or(|(bz, _)| z < *bz) {
+                b[t] = Some((z, x.to_vec()));
+            }
+        }
+    };
+    let start: Option<Vec<f64>> = match t % 4 {
+        3 => None,
+        kind => {
+            let (iters, zero) = match kind {
+                0 => (500usize, false),
+                1 => (2000, false),
+                _ => (2000, true),
+            };
+            let cost: Vec<f64> = if zero { vec![0.0; p.n] } else { p.cost.clone() };
+            let lp = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &cost, &p.rows, &p.row_lo, &p.row_up);
+            let xo = Arc::new(Mutex::new(Vec::new()));
+            let _ = lp.pdlrc_run_iters_hist(iters, None, Some(xo.clone()));
+            let x = xo.lock().map(|x| x.clone()).unwrap_or_default();
+            (x.len() == p.n).then_some(x)
+        }
+    };
+    let steps = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_STEPS", 100_000u64, u64);
+    for r in 0..1000u64 {
+        let sd = seed.wrapping_add(r.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        if let Some(x) = super::fj::fj2_search_from(p, &p.col_lo, &p.col_up, start.as_deref(), 1e9, sd, None) {
+            put(&x);
+        }
+        if crate::ticks::over() {
+            return;
+        }
+        if let Some(mut lm) = super::localmip::LocalMip::new(p, &p.col_lo, &p.col_up, sd ^ 0x6A09_E667_F3BC_C909, true) {
+            if let Some(x0) = start.as_ref() {
+                lm.set_start(x0);
+            }
+            lm.step_cap = steps;
+            lm.run(std::time::Instant::now() + std::time::Duration::from_secs(1_000_000), None, &|x| put(x));
+        }
+        if crate::ticks::over() {
+            return;
+        }
+    }
+}
+
+/// このスレッドの OS の優先度を下げる (nice 19、`ENOMOTO_T_MIP_TPRE_PT_NICE`)。主の前処理と並列のプロービングにコアを譲る
+/// (取り合うと主の前処理が遅くなった: satellites2-60-fs 10 秒 → 16〜18 秒)。計算の中身は変わらない (門で手間を数える)
+fn lower_priority() {
+    #[cfg(target_os = "linux")]
+    {
+        extern "C" {
+            fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+            fn gettid() -> i32;
+        }
+        let nice = tunable!("ENOMOTO_T_MIP_TPRE_PT_NICE", 19i32, i32);
+        // SAFETY: 自分のスレッドの nice を変えるだけ (PRIO_PROCESS = 0 に tid を渡すと Linux ではそのスレッドだけ)
+        unsafe {
+            let tid = gettid();
+            let _ = setpriority(0, tid as u32, nice);
+        }
+    }
 }
