@@ -1478,7 +1478,15 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         let stop: tpre::Stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let slot: tpre::SolSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
         let (st2, sl2) = (stop.clone(), slot.clone());
-        (std::thread::spawn(move || tpre::run(&q, safety, seed, st2, sl2)), stop, slot)
+        // `g`: 手間の門を付けて、主の手間で読む中身を決める (種ごとに再現)
+        let gate = tpre::mode().is_some_and(|m| m.contains('g')).then(|| crate::ticks::Gate::new(0.0));
+        if let Some(g) = gate.as_ref() {
+            tpre::set_gated(g.clone(), slot.clone());
+        }
+        (std::thread::spawn(move || {
+            let _gg = gate.map(crate::ticks::install_gate);
+            tpre::run(&q, safety, seed, st2, sl2)
+        }), stop, slot)
     });
     let prev_par = PREPAR_THREADS.with(|t| t.replace(if !params.submip && params.restarts == 0 { params.threads.max(1) } else { 1 }));
     struct RestorePar(usize);
@@ -1774,7 +1782,27 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         // 前処理で早めの FJ が実行可能性問題の解を見つけ木に入らない道 (ns1116954) では待たない (結果は捨てる)
         Some((_, stop, _)) if FEAS_FJ_SOL.with(|s| s.borrow().is_some()) => {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            tpre::clear_pending();
             start
+        }
+        // `g`: 主の手間まで許して門で止まるのを待ち、その時点の箱の解を開始解にする。以後は根と木の受け取る点で同じように読む
+        Some((_, stop, _)) if tpre::mode().is_some_and(|m| m.contains('g')) => {
+            let d = match &presolved {
+                Some(Presolved::Reduced { scaling, .. }) => scaling.d.clone(),
+                _ => vec![1.0; p.n],
+            };
+            let tw = std::time::Instant::now();
+            let x = tpre::gated_take_orig();
+            tpre::gated_set_d(d);
+            eprintln!("MIP: TPRE g: at the end of the presolve: solution {} (waited {:.2}s at {:.2}s)", x.as_ref().map_or("none".to_string(), |x| format!("{:.10e}", p.objective(x))), tw.elapsed().as_secs_f64(), t_pre.elapsed().as_secs_f64());
+            let _ = stop;
+            match (start, x) {
+                (None, Some(x)) => {
+                    tpre_start = true;
+                    Some(x)
+                }
+                (s, _) => s,
+            }
         }
         // 既定は待たない (親の方針): 前処理の終わりでスレッドが終わっていなければ、主は待たずに根へ進み、スレッドは回し続ける。
         // 途中の解は箱に置かれ、主が根と木の決まった所 (`poll_lmip_thread`) で、その時点で出来上がっていれば受け取る (再現しない)。
