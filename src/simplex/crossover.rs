@@ -3399,6 +3399,18 @@ struct MegiddoResult {
     timed_out: usize,
 }
 
+/// 試作 `ENOMOTO_XO_BUMP_LU_RATIO` (analysis/scipsym_20261120/ 12 節、既定では使わない): クロスオーバーの Megiddo の押し出し (主・双対) の
+/// 基底の核で、eta の fill の上限を双対単体法と同じく `FT_BUMP_LU_RATIO · nnz(LU)` まで広げる (値は双対単体法の
+/// `ENOMOTO_T_FT_BUMP_LU_RATIO` を共有)。密な基底 (cod105) では従来の `64 m` に更新 5 回ごとに当たり、押し出しの大半が再分解になる。
+fn xo_kernel(m: usize, ft: usize) -> BasisKernel {
+    let k = BasisKernel::new(m, ft);
+    if env_str!("ENOMOTO_XO_BUMP_LU_RATIO").is_some_and(|v| v != "0") {
+        k.with_bump_lu_ratio(tunable!("ENOMOTO_T_FT_BUMP_LU_RATIO", crate::params::slope_intercept_dual::FT_BUMP_LU_RATIO, f64))
+    } else {
+        k
+    }
+}
+
 /// Megiddo (1991) 式の超基底変数の押し出し。
 ///
 /// 正則な基底 `B` (`basis`/`basis_pos`、分解 `lu`) と、基底に選ばれず境界から離れたまま残った
@@ -3492,7 +3504,7 @@ fn megiddo_push(
     let ft_hi = if ft_adapt > 1.0 { ((ft_max as f64 * ft_adapt) as usize).min(ft_max_updates(m)).max(ft_max) } else { ft_max };
     // 直近の再分解の時間と、その時点の求解の累計時間。
     let (mut last_refac, mut solve_mark) = (0.0f64, 0.0f64);
-    let mut kernel = BasisKernel::new(m, ft_hi);
+    let mut kernel = xo_kernel(m, ft_hi);
     let mut d = vec![0.0; m];
     let mut rho = vec![0.0; m];
     let mut nz: Vec<usize> = Vec::new();
@@ -3654,7 +3666,7 @@ fn megiddo_push(
                         Some(f) => f,
                         None => return None,
                     };
-                    kernel = BasisKernel::new(m, ft_hi);
+                    kernel = xo_kernel(m, ft_hi);
                     let xs_ref = &xs;
                     let sv = |jj: usize| xs_ref[sup_idx[jj]];
                     recompute_xb(&lu, basis_pos, nb_status, &is_sup, &sv, &mut xb);
@@ -3747,7 +3759,7 @@ fn megiddo_push(
                         }
                         None => return None,
                     };
-                    kernel = BasisKernel::new(m, ft_hi);
+                    kernel = xo_kernel(m, ft_hi);
                     let xs_ref = &xs;
                     let sv = |jj: usize| xs_ref[sup_idx[jj]];
                     recompute_xb(&lu, basis_pos, nb_status, &is_sup, &sv, &mut xb);
@@ -3861,7 +3873,7 @@ fn megiddo_dual_push(
         5 => cand.sort_by_key(|&j| std::cmp::Reverse(col(std, j).len())),
         _ => {}
     }
-    let mut kernel = BasisKernel::new(m, ft_max);
+    let mut kernel = xo_kernel(m, ft_max);
     let mut rho = vec![0.0; m];
     let mut nzr: Vec<usize> = Vec::new();
     let mut alpha = vec![0.0; n];
@@ -4075,7 +4087,7 @@ fn megiddo_dual_push(
                                     factorize_basis(std, basis_pos, None)?
                                 }
                             };
-                            kernel = BasisKernel::new(m, ft_max);
+                            kernel = xo_kernel(m, ft_max);
                             prof_u[1] += tu.elapsed().as_secs_f64();
                             let tu = Instant::now();
                             compute_s(y, &mut s);
@@ -4239,7 +4251,7 @@ fn megiddo_dual_push(
                                 factorize_basis(std, basis_pos, None)?
                             }
                         };
-                        kernel = BasisKernel::new(m, ft_max);
+                        kernel = xo_kernel(m, ft_max);
                         prof_u[1] += tu.elapsed().as_secs_f64();
                         let tu = Instant::now();
                         // 増分の誤差を消す。

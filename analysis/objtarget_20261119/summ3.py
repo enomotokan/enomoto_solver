@@ -9,7 +9,7 @@ for l in open(D.parents[1] / "scripts/miplib2017-v31.solu"):
     t = l.split()
     if len(t) >= 3 and t[0] in ("=opt=", "=best="): ref[t[1]] = float(t[2])
 R = {}
-for f in glob.glob(str(D / f"res_{SET}_s*.jsonl")):
+for f in sorted(g for g in glob.glob(str(D / f"res_{SET}_s*.jsonl")) if __import__("re").fullmatch(rf"res_{SET}_s\d+\.jsonl", Path(g).name)):
     for l in open(f):
         r = json.loads(l); R[(r["problem"], r["cfg"], r["seed"])] = r
 def pg(o, z):

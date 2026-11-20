@@ -9,4 +9,6 @@ CFGS = {
     "vbcl": {"ENOMOTO_MIP_VB01": "b", "ENOMOTO_MIP_VBCLQ": "l"},
     # 本命 (README 8 節): 前処理の LP による固定の前に VB01 の解と pseudoobj で固定し、前処理をかけ直す (根の前の VB01=b は付けない)
     "vbce": {"ENOMOTO_MIP_VBCLQ": "e"},
+    # vbce + SCIP-VB の長い行のクリーク (VB01=c)。nw04 が 2.4 倍遅い (再スタートの費用、P2-HEUR の直し待ち) ので、2 回目の計測には入れない
+    "vbcec": {"ENOMOTO_MIP_VBCLQ": "e", "ENOMOTO_MIP_VB01": "c"},
 }

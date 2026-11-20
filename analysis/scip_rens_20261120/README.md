@@ -56,4 +56,50 @@
 
 - cargo test 412 通過。
 - `ENOMOTO_MIP_LPFACE=cf`・`ENOMOTO_T_MIP_LPFACE_RATE=0` (固定率によらず LP face を回す) で fuzz 7 本: fuzz_tiny 0/400・fuzz_highs 0/300・
-  fuzz_objint 0/1000・fuzz_slack 不一致 0/1000・fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 (下に追記)。
+  fuzz_objint 0/1000・fuzz_slack 不一致 0/1000・fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 不一致 0/1000。
+  ただし 1 スレッドの fuzz_highs で LP face が回ったのは 300 問中 14 問 (どれもサブ MIP は解なし) で、試作の道を通る数は少ない。
+
+## 5. 走査 (`lfscan_done.jsonl`、`cf`・4 スレッド・種 1・60 秒、203 問 = P 58 + M のうち P と重ならない 145)
+
+| | 回った (固定率 ≥ 0.3) | 固定が少ない | 根まで行かない・LP face の行なし |
+|---|---|---|---|
+| P | 28 | 21 | 9 |
+| M (P と重ならない分) | 48 | 75 | 22 |
+
+- Mittelmann 186 問のうち回るのは 69 問 (P と重なる分を含む)。計測の M はこの 69 問。
+- 4 スレッドでは根のサブ MIP は別スレッドで解く (`parallel_submips`) ので、走査の `status_sub`・`found` は意味がない
+  (どれも `NotSolved`・false)。効くかどうかは対の計測で見る。
+- 親の挙げた 4 群 (根の下界は最適なのに解が出ない、とされた問題) は **どれも回らない**: momentum1 (1203 列中 249 固定)・
+  brazil3 (6612 中 1054)・neos-5107597-kakapo (2974 中 0) は固定率 < 0.3。しかも 60 秒の根の下界は最適値よりずっと下
+  (brazil3 20 対 最適 24、kakapo 1.39) で、z̄ の行を足したサブ MIP は解なしになるだけなので、この試作の型ではない。
+  neos-1171448 も固定 0 (3 節)。
+
+## 6. 計測 (親に頼む)
+
+```
+rm -f target/wheels/*.whl; sh analysis/revisit_20261112/build.sh
+python analysis/scip_rens_20261120/run.py P K   # K = 0〜1   (MIPLIB 58 問 × 種 1〜3 × {def, lfc}、60 秒、各 約 1.5 時間)
+python analysis/scip_rens_20261120/run.py M K   # K = 0〜17  (LP face の回る M 69 問 × 種 1・2 × {def, lfc}、600 秒、各 約 1.5 時間)
+python analysis/scip_rens_20261120/summ.py
+```
+
+`lfc` = `ENOMOTO_MIP_LPFACE=cf` (`cfg.py`)。分担表は `python plan.py 18 2` で作った。
+
+## 7. P の結果 (親の計測、f0ccd5736・48ccbb06f。`summ.py P`)
+
+- 解けた数 (174 組): def 137・lfc 138 (10teams 種 2 が lfc だけ解ける)。食い違い 0、crash 0。
+- lfc / def (どちらかが解けた 46 問): **-4.5% [-13.0%, +1.3%]**。
+- 10teams: 20.4 → 3.4・TL → 3.4・14.4 → 4.4 秒 (種 1〜3)、全種で速い。
+- **全種で 1.25 倍超遅い問題はなし**。1 種でも 1.25 倍超 (1 秒超) は 6 問で、どれも他の種は同じか速い:
+
+| 問題 | lfc/def (種 1・2・3) | LP face (走査) |
+|---|---|---|
+| neos-960392 | 4.04 (1.6 → 6.4 秒)・0.98・1.04 | 回らない (固定 0) |
+| h80x6320d | 1.74・0.63・0.73 | 回る |
+| physiciansched6-2 | 0.85・0.85・1.51 | 回らない (固定 38 / 4300) |
+| sp150x300d | 1.49・1.03・0.99 | 回る |
+| drayage-25-23 | 1.14・1.14・1.30 | 回る |
+| mas76 | 0.98・1.09・1.26 | 回る |
+
+- neos-960392・physiciansched6-2 は LP face が回らない (固定率 < 0.3 なので `f` の並べ替えも中身は空) ので、差は 4 スレッドの揺れ。
+- P では採用の基準 (SGM の上限 ≲ +5%、解けた数が減らない、全種 1.25 倍超なし、誤答 0) を満たす。M は計測中。
