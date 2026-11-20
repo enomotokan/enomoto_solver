@@ -26,6 +26,7 @@ analysis/vsscip_20261117 (0.1.9 の既定と SCIP 10.0.2 の比べ) と同じ問
 回した先端のコミットを README に書き足すこと。
 
 - M 2: 71923cc9d (d882b0772 以降) で pip install -e .。16 行・crash 0。
+- M 4: 5ab4c62d8 (d882b0772 以降) で build.sh の wheel を .venv に入れて回した。16 行・crash 0 (11 行で一度止めて続きから)。
 
 ## 集計 (summ.py)
 
