@@ -5,6 +5,7 @@ import json, glob, math, random, collections, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 SET = sys.argv[1]
+ALT = sys.argv[2] if len(sys.argv) > 2 else "l"
 ref = {}
 for l in open(D.parents[1] / "scripts/miplib2017-v31.solu"):
     t = l.split()
@@ -29,10 +30,10 @@ def pint(r):
     return s
 crash = sum(1 for r in rows if st(r) not in ("optimal", "infeasible", "time_limit"))
 probs = sorted({p for p, c, s in R}); seeds = sorted({s for p, c, s in R})
-full = [(p, s) for p in probs for s in seeds if (p, "def", s) in R and (p, "l", s) in R]
+full = [(p, s) for p in probs for s in seeds if (p, "def", s) in R and (p, ALT, s) in R]
 print(f"{SET}: 行数 {len(rows)}、問題 {len(probs)}、種 {seeds}、crash {crash}、対 {len(full)}")
-print("解けた数:", {c: sum(solved(R[(p, c, s)]) for p, s in full) for c in ("def", "l")})
-bad = [(p, s) for p, s in full if all(st(R[(p, c, s)]) == "optimal" for c in ("def", "l")) and abs(R[(p, "def", s)]["result"]["objective"] - R[(p, "l", s)]["result"]["objective"]) > 1e-6 * max(1, abs(R[(p, "def", s)]["result"]["objective"]))]
+print("解けた数:", {c: sum(solved(R[(p, c, s)]) for p, s in full) for c in ("def", ALT)})
+bad = [(p, s) for p, s in full if all(st(R[(p, c, s)]) == "optimal" for c in ("def", ALT)) and abs(R[(p, "def", s)]["result"]["objective"] - R[(p, ALT, s)]["result"]["objective"]) > 1e-6 * max(1, abs(R[(p, "def", s)]["result"]["objective"]))]
 print("食い違い", bad)
 def boot(logr):
     ps = list(logr)
@@ -42,7 +43,7 @@ def boot(logr):
     return g(ps), bs[100], bs[3899], len(ps)
 lt = collections.defaultdict(list); li = collections.defaultdict(list); pis = {}
 for p, s in full:
-    a, b = R[(p, "def", s)], R[(p, "l", s)]
+    a, b = R[(p, "def", s)], R[(p, ALT, s)]
     if solved(a) or solved(b): lt[p].append(math.log((t(b) + 1) / (t(a) + 1)))
     ia, ib = pint(a), pint(b)
     if ia is not None: li[p].append(math.log((ib + 1) / (ia + 1))); pis.setdefault(p, []).append((round(ia, 1), round(ib, 1)))

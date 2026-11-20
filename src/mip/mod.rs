@@ -315,6 +315,12 @@ pub(crate) fn ticks_on(c: char) -> bool {
     env_def!("ENOMOTO_MIP_TICKS", "ntwumcflshk").is_some_and(|v| v.contains(c))
 }
 
+/// 試作 `ENOMOTO_MIP_PCL` の文字 (既定では使わない、analysis/disj_20261119.md の 11 節): `a` 打ち切った強分岐の子の値を下限の観測に・
+/// lookahead に数えない、`b` 観測のない列の費用を似た列で埋める、`c` 信頼性をばらつきで決める、`d` 解き直した後の上がり幅を観測にする
+pub(crate) fn pcl(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_PCL").is_some_and(|v| v.contains(c))
+}
+
 /// 試作 `ENOMOTO_MIP_ROOTSB` の文字の並び (既定では使わない、`Solver::select_branch_inner`、analysis/disj_20261119.md の 9 節)
 pub(crate) fn rootsb_flags() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_ROOTSB").filter(|v| !v.is_empty() && *v != "0")
@@ -1458,7 +1464,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         pretime::start();
     }
     // 試作 `ENOMOTO_MIP_TPRE` ([`tpre`]): 並列の「仮の暫定値つき前処理」を 1 本のスレッドで始める (前処理の後で待って取り込む)
-    let tpre_job = (tpre::mode().is_some() && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none()).then(|| {
+    // `t` (pt): 空いたスレッドで FJ・Local-MIP を前処理の間回し続ける (手間の門で再現する)
+    let pt_job = (tpre::mode().is_some_and(|m| m.contains('t') || m.contains('T')) && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none())
+        .then(|| tpre::pt_spawn(p, params.threads, 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64)));
+    let tpre_job = (tpre::mode().is_some_and(|m| !m.contains('t') && !m.contains('T')) && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none()).then(|| {
         let q = p.clone();
         let safety = if params.time_limit.is_finite() { 0.25 * params.time_limit } else { 60.0 };
         let seed = 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
@@ -1732,6 +1741,28 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     let mut ref_shift: Option<f64> = None;
     // `ENOMOTO_MIP_TPRE`: 並列の仮の暫定値つき前処理の終わりを待ち、一番良い解を開始解に、`b` なら T 以下の解があったときに P_T の伝播の境界を持ち込む
     let mut presolved = presolved;
+    let mut tpre_start = false;
+    let start = match pt_job {
+        Some(job) => {
+            let tw = std::time::Instant::now();
+            let (w, b) = job.finish(p);
+            eprintln!(
+                "MIP: TPRE pt: granted {:.3e} work, best {} ; waited {:.2}s at {:.2}s",
+                w,
+                match &b { Some((z, _, t)) => format!("{z:.10e} (thread {t})"), None => "none".into() },
+                tw.elapsed().as_secs_f64(),
+                t_pre.elapsed().as_secs_f64()
+            );
+            match (start, b) {
+                (None, Some((_, x, _))) => {
+                    tpre_start = true;
+                    Some(x)
+                }
+                (s, _) => s,
+            }
+        }
+        None => start,
+    };
     let start = match tpre_job {
         Some(h) => {
             let tw = std::time::Instant::now();
@@ -1769,6 +1800,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                     o.l, o.l_iters, o.secs[0], o.u, o.secs[1], o.t, o.n_tight, o.n_fix, o.infeasible_t, o.secs[2], o.below_t, o.secs[3], o.x_z, t_pre.elapsed().as_secs_f64()
                 );
             }
+            tpre_start = start.is_none() && out.as_ref().is_some_and(|o| o.x.is_some());
             start.or(out.and_then(|o| o.x))
         }
         None => start,
@@ -1780,6 +1812,16 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if params.restarts > 0 && restart_ref_for(p) {
                 ref_shift = Some(p.objective(&x) - prob.objective(&xr));
             }
+            // `ENOMOTO_MIP_TPRE`: 元の問題の解が前処理後の問題で実行不能 (前処理の双対の固定などで外れる) なら、その点から前処理後の問題で
+            // FJ を 1 回回して直す (手間は非零の数で決まる)
+            let xr = if tpre_start && !prob.is_feasible(&xr, 1e-6) {
+                let safety = if params.time_limit.is_finite() { 0.05 * params.time_limit } else { 10.0 };
+                let fixed = fj::fj2_search_from(prob, &prob.col_lo, &prob.col_up, Some(&xr), safety, 0x7E1E_5EED, None).filter(|y| prob.is_feasible(y, 1e-6));
+                eprintln!("MIP: TPRE: the start solution is not feasible in the presolved problem; FJ from it in the presolved problem {}", match &fixed { Some(y) => format!("found {:.10e}", prob.objective(y)), None => "found nothing".into() });
+                fixed.unwrap_or(xr)
+            } else {
+                xr
+            };
             if prob.is_feasible(&xr, 1e-6) {
                 solver::START_SOL.with(|s| *s.borrow_mut() = Some(xr));
             } else {
