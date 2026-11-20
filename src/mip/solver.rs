@@ -7372,6 +7372,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 目的が全部 0 (実行可能性問題) なら解が見つかれば最適で、ほかの根のヒューリスティクスはほとんど当たらないので、
         // 残りの `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC` (0.5) まで回す (秒の上限なし)。ns1116954 では残り 16 秒の 0.15 倍 (2.5 秒、FJ 2〜3 回) では足りなかった
         let feas = super::heuristics::fj_feas_extend(&self.p);
+        // 試作 `ENOMOTO_MIP_FEAS_NORETRY` ([`super::feas_noretry_on`]): 実行可能性問題で早めの探索が解なしで上限まで回っていれば回さない
+        if feas && super::feas_noretry_on() && !self.params.submip && super::FEAS_EARLY_DRY.with(|f| f.get()) {
+            if self.params.verbose {
+                eprintln!("MIP: robust FJ retry skipped (FEAS_NORETRY: the early FJ/Local-MIP found nothing within its limit)");
+            }
+            return false;
+        }
         let frac = if feas { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC", 0.5, f64) } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FRAC", 0.15, f64) };
         // `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS` (2026-11-18 から既定 30、`inf` で従来の上限なし): 実行可能性問題の秒の上限。実行不能な
         // 実行可能性問題 (fhnw-binpack4-4) では残りの 0.5 が丸ごと空回りし、その間は根が止まっていた (4 スレッド 120 秒で 53.7 秒、
@@ -27315,6 +27322,7 @@ pub(super) fn inf_all() -> bool {
 /// 試作 `ENOMOTO_MIP_DET1T` の文字 (analysis/det1t_20261120、既定では使わない): 1 スレッドで同じ種の結果を再現させるため、時間で決めている所を手間で決める。
 /// `o`: 根のカットのループの乱択丸め (OBJPROBE `r`) の枠を、使った壁時計の秒でなく手間で数える。
 /// `n`: 手間の期限の中で解くサブ MIP は、時間の上限を 10 倍の安全網にする ([`Solver::solve_submip_problem`])
+/// `i`: 根の interior rounding の予算を手間で数え、内点法の反復も手間の期限で止める (src/mip/heur_ipm.rs、[`crate::ticks::ipm_work`])
 pub(super) fn det1t(c: char) -> bool {
     env_str!("ENOMOTO_MIP_DET1T").is_some_and(|v| v.contains(c))
 }
