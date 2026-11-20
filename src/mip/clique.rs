@@ -196,6 +196,8 @@ impl CliqueGraph {
             let j = (l / 2) as usize;
             if l % 2 == 0 { x[j] } else { 1.0 - x[j] }
         };
+        // 診断用の手間 ([`crate::ticks::diag_add`]、既定の手間・期限には入れない): 文字の数 + 始点ごとの隣接の長さ x clique の大きさ
+        crate::ticks::diag_add(2 * n as u64);
         let mut starts: Vec<u32> = (0..2 * n as u32).filter(|&l| !self.adj[l as usize].is_empty() && val(l) > 1e-6 && val(l) < 1.0 - 1e-6).collect();
         starts.sort_by(|&a, &b| val(b).total_cmp(&val(a)));
         let mut cuts: Vec<RawCut> = Vec::new();
@@ -215,6 +217,7 @@ impl CliqueGraph {
                     w += val(v);
                 }
             }
+            crate::ticks::diag_add((self.adj[u as usize].len() * clique.len()) as u64);
             if w <= 1.0 + 1e-4 {
                 continue;
             }
