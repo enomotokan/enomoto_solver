@@ -1,0 +1,1050 @@
+MIP: VUBAGG 0 columns x = y from variable upper bound rows (0.00s)
+MIP_FOLD: integer groups: 115 accepted, 96 rejected (V_R rows 0; rejected for V_R 0, non-±1 0, TU 96; net true accepted by net 0 work 614992 over 0, panics 0, cert fails 0)
+MIP_FOLD: no fold (n 3472 m 4633) in 0.124s (reason line 526, ratio 0.965)
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 4633 -> 4633, free columns 3472 -> 3472, nonzeros 12528 -> 12528, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 0 of 3472 free columns fixed (0.00s), not used
+MIP: LP probing pass 1: 3210 candidates, 0 fixings (8 LPs, 2725 iters, 4.22s)
+MIP: LP probing: tried 4 columns, fixed 0, LP -1.2800000000e2 -> -1.2800000000e2 (8 LPs, 2725 iters, 4.22s, PREPAR 1 threads, 1 windows)
+MIP: LP probing: root LP 0.71s (4989 iters, size 20633), tried 4, fixed 0, basis passed false, total 7714 iters 4.22s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.05s), not used
+MIP: probing: 3472 of 3472 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 135280 implications (0.15s, cpu 0.00s, work 0, pwork 96465680, chg 0)
+MIP: probing: PREPAR 1 threads, 29 windows, 3472 of 3472 probes from the windows
+MIP: probing: 0 equivalent binary pairs
+MIP: presolve: 0 dominated binaries fixed (0.02s)
+MIP: presolve: sparsified 0 rows (late)
+MIP: sparsify-late stats m 4633 n 3472 bincols 3472 changed 0 binonly 0 shrunk<=1 0 nnz 12528 -> 12528 gate 0.000 (f 0.000 b 0.000)
+HNFPRE: round 0 eq 0 int_eq 0 rat_skip 0 comps 0 done 0 gave_up 0 cols 0 rank 0 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.000s) gave_up_why 0/0/0
+HNFPRE: round 0 tightened 0 columns
+CUTMIX clique edges total 113677 rows 15208 implonly 98469 implpairs 135280 bin 3472
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (113677 edges, 0.02s)
+MIP: symmetry: SYMSIGN true SYMSCALE false: flipped 0, scaled 0, tie rows doubled 0 of 4633 rows for the detection
+MIP: symmetry: refinement 0.00s, work 232127 (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)
+MIP: symmetry: SYMPRE probe: 211 cells, 211 done as orbits, 21 probes, 21 generators (0.013s)
+MIP: symmetry: refinements stopped by the iteration cap 0 of 29 (ENOMOTO_MIP_HO6_SYMREFINE true)
+MIP: symmetry: PPLEX: 0 of 1 components upgraded, 0 packing orbisacks (0 rows) from 0 generators and 100 new involutions (0.01s)
+MIP: symmetry: orbital fixing with 21 of 21 generators
+MIP: symmetry: ORBPP 0 of 0 orbitopes static (packing, >= 3 rows, >= 10 columns), fixed 0 columns to 0
+MIP: symmetry: 21 generators, 211 orbits on 3472 columns, 0 lex-leader rows (0.02s, work 805424, search 0, verify 433293, detect 0.02s, refine 0.01s, log work 1178391)
+MIP: objective step with implied integers: Some(1.0) (without: Some(1.0)); costed non-integer columns 0 (e.g. [])
+MIP: OBJINT c: lattice Some(ObjLat { s: 1.0, base: 0.0, m: 0.0, mm: 1e-9 }) (offset 0.0000000000e0), step Some(1.0)
+MIP: oneopt improved -1.0000000000e0 -> -6.0000000000e0
+MIP: twoopt improved -6.0000000000e0 -> -4.9000000000e1
+MIP:   global fixed integers 0 of 3472 (newly 0 since the root LP)
+MIP: new incumbent -4.9000000000e1 at node 0 (0.01s) [tree]
+MIP: feasibility jump found a solution (0.01s)
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.01s)
+MIP: root LP -1.2800000000e2 (4989 iters, 0.72s)
+MIP: root LP size: rows 4633, free columns 3472, nonzeros 12528
+MIP: root LP work: 0.738862 tick-s (4989 iters, 0.715s)
+CUTMIX types restarts 0 m 4633 n 3472 vbrow 0.000 vbcol 0.000 fc 0 fcnode 0 cont 0.000 genint 0.000 knap 0.000 knaptight 0.000 knapgub 0.000 knapgubcol 0.000 mixknap 0.000 setp 1.000 introw 1.000 intsmall 1.000 flow 0.000
+MIP: clique graph: 113677 edges (15208 from rows, probing implications 135280)
+CLQSIG s 0.4454 sp 0.0192 ed 0.7624 fr 1.0000 vi 0.0000 (rows 4633 bin 3472 edges 113677 frac 3210) a 1.8 b 0.41 f 0.5159
+MIP: clique sigmoid: f 0.5159, clique cuts per root round 52
+MIP: robust cut LP cap: size false, double false, progress true
+MCF detect: rows 4633 cols 3472 | flow cands 4633 flow rows 1267 commodities 7 cap cands 1429 arcs 885 nodes 773 incons 18.12 directed | fail 'inconsistent' | networks [] fc_network false | 0.008s
+MIP: cut selection probe: compared at 1 rounds (after round 1), probe wall 0.75s (budget 3.0s)
+DET_DIAG ticks after the cut selection probe: [77173603, 276448, 17358610, 57056, 3580153, 0, 10283, 487327839, 194090611]
+MIP: cut selection probe (6 rounds): default 2 cuts gain 1.662670e-12 (0.31s), pool 1 cuts gain 1.719513e-12 (0.30s) -> default (rule rate, probe 0.61s in total, 1.49s)
+MIP: cut round 0: 2 cuts (of 1094, sep 0.32s, LP 37 iters), LP rows 4635 (cut rows mean nnz 804), obj -1.2800000000e2 (1.82s)
+DET_DIAG ticks after cut round 0: [77486884, 276448, 26037915, 57056, 3580153, 0, 10319, 501576673, 194850751]
+MIP: OBJPROBE r: round 0: randomized rounding none (incumbent Some(-49.0) -> Some(-49.0), 0.00s, 1.82s)
+MIP: cut round 1: root cut time cap check: clock 0.309s of cap 6.00s (min rounds 8)
+MIP: cut round 1: mpsep gate: optimal face width 351 (threshold 2316, 4633 rows) -> narrow; stop
+MIP: cut round 1: 1 cuts (of 14, sep 0.01s, LP 1995 iters), LP rows 4636 (cut rows mean nnz 969), obj -1.2779929713e2 (2.37s)
+DET_DIAG ticks after cut round 1: [100287431, 360268, 26370665, 57056, 3580153, 0, 12313, 630923255, 241141211]
+MIP: OBJPROBE r: round 1: randomized rounding none (incumbent Some(-49.0) -> Some(-49.0), 0.00s, 2.37s)
+MIP: cut round 2: root cut time cap check: clock 0.788s of cap 6.00s (min rounds 8)
+MIP: cut round 2: 1 cuts (of 1094, sep 0.22s, LP 434 iters), LP rows 4637 (cut rows mean nnz 943), obj -1.2755459758e2 (2.74s)
+DET_DIAG ticks after cut round 2: [105117620, 443964, 31904835, 57056, 3580153, 0, 12746, 672649927, 251157131]
+MIP: OBJPROBE r: round 2: randomized rounding none (incumbent Some(-49.0) -> Some(-49.0), 0.00s, 2.74s)
+MIP: cut round 3: root cut time cap check: clock 1.094s of cap 6.00s (min rounds 8)
+MIP: cut round 3: 1 cuts (of 1094, sep 0.21s, LP 1031 iters), LP rows 4638 (cut rows mean nnz 957), obj -1.2731250718e2 (3.30s)
+DET_DIAG ticks after cut round 3: [116766684, 527560, 37446283, 57056, 3580153, 0, 13777, 753472929, 275038193]
+MIP: OBJPROBE r: round 3: randomized rounding none (incumbent Some(-49.0) -> Some(-49.0), 0.00s, 3.30s)
+MIP: cut round 4: root cut time cap check: clock 1.540s of cap 6.00s (min rounds 8)
+MIP: cut round 4: 3 cuts (of 1084, sep 0.48s, LP 731 iters), LP rows 4641 (cut rows mean nnz 887), obj -1.2644563425e2 (4.03s)
+DET_DIAG ticks after cut round 4: [124849189, 611144, 50256634, 57056, 3580153, 0, 14508, 830948669, 292038176]
+MIP: OBJPROBE r: round 4: randomized rounding none (incumbent Some(-49.0) -> Some(-49.0), 0.00s, 4.03s)
+MIP: cut round 5: root cut time cap check: clock 2.181s of cap 6.00s (min rounds 8)
+MIP: cut round 5: 1 cuts (of 608, sep 0.31s, LP 595 iters), LP rows 4641 (cut rows mean nnz 1138), obj -1.2617445803e2 (4.68s)
+DET_DIAG ticks after cut round 5: [131740860, 695060, 58871700, 57056, 3580153, 0, 15103, 892523822, 305951894]
+MIP: OBJPROBE r: round 5: randomized rounding none (incumbent Some(-49.0) -> Some(-49.0), 0.00s, 4.68s)
+MIP: cut round 6: root cut time cap check: clock 2.643s of cap 6.00s (min rounds 8)
+MIP: cut round 6: 2 cuts (of 1004, sep 0.38s, LP 392 iters), LP rows 4643 (cut rows mean nnz 1576), obj -1.2609977179e2 (5.21s)
+DET_DIAG ticks after cut round 6: [136304317, 778416, 70797414, 57056, 3580153, 0, 15495, 939705108, 315001101]
+MIP: OBJPROBE r: round 6: randomized rounding none (incumbent Some(-49.0) -> Some(-49.0), 0.00s, 5.21s)
+MIP: cut round 7: root cut time cap check: clock 3.160s of cap 6.00s (min rounds 8)
+MIP: cut round 7: 4 cuts (of 306, sep 0.10s, LP 797 iters), LP rows 4647 (cut rows mean nnz 1349), obj -1.2587359861e2 (5.62s)
+DET_DIAG ticks after cut round 7: [145561192, 862102, 72226875, 57056, 3580153, 0, 16292, 1052372635, 333654159]
+MIP: OBJPROBE r: round 7: randomized rounding none (incumbent Some(-49.0) -> Some(-49.0), 0.00s, 5.62s)
+MIP: cut round 8: root cut time cap check: clock 3.522s of cap 6.00s (min rounds 8)
+MIP: cut round 8: 1 cuts (of 6, sep 0.09s, LP 437 iters), LP rows 4646 (cut rows mean nnz 1398), obj -1.2583531290e2 (5.89s)
+DET_DIAG ticks after cut round 8: [150692188, 945762, 72669371, 57056, 3580153, 0, 16729, 1103126640, 343759209]
+MIP: OBJPROBE r: round 8: randomized rounding none (incumbent Some(-49.0) -> Some(-49.0), 0.00s, 5.90s)
+MIP: cut round 9: root cut time cap check: clock 3.687s of cap 6.00s (min rounds 8)
+MIP: cut round 9: 1 cuts (of 1050, sep 0.48s, LP 565 iters), LP rows 4646 (cut rows mean nnz 1406), obj -1.2577808511e2 (6.60s)
+DET_DIAG ticks after cut round 9: [157321992, 1029302, 87483182, 57056, 3580153, 0, 17294, 1172366544, 356860929]
+MIP: OBJPROBE r: round 9: randomized rounding none (incumbent Some(-49.0) -> Some(-49.0), 0.00s, 6.60s)
+MIP: cut round 10: root cut time cap check: clock 4.359s of cap 6.00s (min rounds 8)
+MIP: cut round 10: 3 cuts (of 656, sep 0.31s, LP 1337 iters), LP rows 4649 (cut rows mean nnz 1226), obj -1.2529001661e2 (7.44s)
+DET_DIAG ticks after cut round 10: [172969333, 1112982, 94106740, 57056, 3580153, 0, 18631, 1355028899, 388906486]
+MIP: cut round 11: root cut time cap check: clock 5.088s of cap 6.00s (min rounds 8)
+MIP: cut round 11: 1 cuts (of 406, sep 0.23s, LP 611 iters), LP rows 4649 (cut rows mean nnz 1228), obj -1.2518769042e2 (7.95s)
+DET_DIAG ticks after cut round 11: [180206776, 1112982, 100061780, 57056, 3580153, 0, 19242, 1436614957, 403118479]
+MIP: cut round 12: root cut time cap check: clock 5.510s of cap 6.00s (min rounds 8)
+MIP: cut round 12: 1 cuts (of 20, sep 0.10s, LP 579 iters), LP rows 4649 (cut rows mean nnz 1388), obj -1.2514192347e2 (8.30s)
+DET_DIAG ticks after cut round 12: [187067177, 1112982, 100742379, 57056, 3580153, 0, 19821, 1507908768, 416540142]
+MIP: cut round 13: root cut time cap check: clock 5.740s of cap 6.00s (min rounds 8)
+MIP: cut round 13: 2 cuts (of 148, sep 0.16s, LP 424 iters), LP rows 4650 (cut rows mean nnz 1508), obj -1.2509418542e2 (8.64s)
+DET_DIAG ticks after cut round 13: [192098942, 1112982, 103175799, 57056, 3580153, 0, 20245, 1565065872, 426356292]
+MIP: cut round 14: root cut time cap check: clock 5.979s of cap 6.00s (min rounds 8)
+MIP: cut round 14: 1 cuts (of 238, sep 0.19s, LP 996 iters), LP rows 4650 (cut rows mean nnz 1507), obj -1.2500205483e2 (9.29s)
+DET_DIAG ticks after cut round 14: [203995716, 1112982, 106867540, 57056, 3580153, 0, 21241, 1683726210, 449601642]
+MIP: cut round 15: root cut time cap check: clock 6.446s of cap 6.00s (min rounds 8) -> stop
+MIP: mpsep: 0 rounds with extra points, 0 points, 0 extra candidates, chosen 0 cuts (0 do not cut x*), 0.000s
+SEP cmirdelta: calls 11010 with_new 0 new_deltas 0 wins 0 (g 0 c 0 l 0, no_old 0) mean_gain 1.000 cands_new 0 chosen 0/25 eff_new 0.0000 eff_all 0.0512 time 0.040s
+MIP: cut loop done: 25 cuts added, 17 in LP, pool 25 cuts (45590 nonzeros), obj -1.2800000000e2 -> -1.2500205483e2
+MIP: LMBOOST: not used (Local-MIP improvements 0, last at 0.00s, incumbent only from the FJ thread false, gap 1.551, 9.33s)
+MIP: early root reduced costs stored (0 newly fixed integer columns, 9.33s)
+MIP: root heuristic simple rounding: none (0.00s)
+DET_DIAG ticks after root heuristic simple rounding: [204000366, 1112982, 106867540, 57056, 3580153, 0, 21242, 1686599816, 449638842]
+MIP: root heuristic ZI round: none (0.00s)
+DET_DIAG ticks after root heuristic ZI round: [204000366, 1112982, 106867540, 57056, 3580153, 0, 21242, 1686599816, 449638842]
+MIP: root heuristic rounding: none (0.00s)
+DET_DIAG ticks after root heuristic rounding: [204000366, 1112982, 106867540, 57056, 3580153, 0, 21242, 1686599816, 449638842]
+MIP: root heuristic shifting: none (0.00s)
+DET_DIAG ticks after root heuristic shifting: [204000366, 1112982, 106867540, 57056, 3580153, 0, 21242, 1686599816, 449638842]
+MIP: root heuristic int shifting: none (0.00s)
+DET_DIAG ticks after root heuristic int shifting: [204000366, 1112982, 106867540, 57056, 3580153, 0, 21242, 1686599816, 449638842]
+MIP: root heuristic randomized rounding: none (0.00s)
+DET_DIAG ticks after root heuristic randomized rounding: [204000366, 1196188, 106867540, 57056, 3580153, 0, 21242, 1686599816, 449638842]
+MIP:   interior rounding: 1 interior points, vertex true (0.44s)
+MIP:   interior rounding: 3 rounded points tried, found false
+MIP: root heuristic interior rounding: none (0.44s)
+DET_DIAG ticks after root heuristic interior rounding: [204000366, 1319698, 106867540, 57056, 25378055, 0, 21242, 1691922709, 449759742]
+MIP: root heuristic root reduced cost: none (0.00s)
+DET_DIAG ticks after root heuristic root reduced cost: [204000366, 1319698, 106867540, 57056, 25378055, 0, 21242, 1691922709, 449759742]
+MIP:   LP face: only 53 of 3472 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+DET_DIAG ticks after root heuristic LP face: [204000366, 1319698, 106867540, 57056, 25378055, 0, 21242, 1691922709, 449759742]
+DET_DIAG submip: tk_u true budget Some(3.2363910604648005) time_limit 32.364 u_set false parallel false has_budget false nodes 0
+CUTMIX clique edges total 25758 rows 3576 implonly 22182 implpairs 51516 bin 1388
+CUTMIX clique edges total 25133 rows 3518 implonly 21615 implpairs 50266 bin 1372
+MEMBQ_PRE: sub 1 node 1 rows 1725 basis 444d79c6 bounds 1482e8b1 dse f4b6a8a0 iters_total 6265
+MEMBQ_DIAG: t 2.91 th 2 sub 1 cols 3472 tid 0 node 1 rdse 0 st Optimal it 1 obj -110.334614 rows 1725 basis 444d79c6 x fc7740b5
+MEMBQ_PRE: sub 1 node 2 rows 1725 basis 444d79c6 bounds c8feb919 dse f4b6a8a0 iters_total 6266
+MEMBQ_DIAG: t 2.94 th 2 sub 1 cols 3472 tid 0 node 2 rdse 0 st Optimal it 190 obj -110.323908 rows 1725 basis 2782029d x db2057b7
+MEMBQ_PRE: sub 1 node 3 rows 1725 basis 2782029d bounds dea9f5b4 dse b76e54d7 iters_total 6456
+MEMBQ_DIAG: t 2.95 th 2 sub 1 cols 3472 tid 0 node 3 rdse 0 st Optimal it 2 obj -110.323900 rows 1725 basis 2083f84a x a027f002
+MEMBQ_PRE: sub 1 node 4 rows 1725 basis 2083f84a bounds 7f716a5e dse 980111e2 iters_total 6458
+MEMBQ_DIAG: t 2.97 th 2 sub 1 cols 3472 tid 0 node 4 rdse 0 st Optimal it 168 obj -110.281952 rows 1725 basis 314d084f x 6b520182
+MEMBQ_PRE: sub 1 node 5 rows 1725 basis 314d084f bounds 7b9f6ba5 dse 92b5bf8e iters_total 7661
+MEMBQ_DIAG: t 3.21 th 2 sub 1 cols 3472 tid 0 node 5 rdse 0 st Optimal it 109 obj -110.261756 rows 1725 basis ac216101 x 3f72fd00
+MEMBQ_PRE: sub 1 node 6 rows 1725 basis ac216101 bounds e932a255 dse c00d2398 iters_total 7770
+MEMBQ_DIAG: t 3.24 th 2 sub 1 cols 3472 tid 0 node 6 rdse 0 st Optimal it 160 obj -110.189302 rows 1725 basis 7dc70571 x 0cbd96dc
+MEMBQ_PRE: sub 1 node 7 rows 1725 basis 7dc70571 bounds 2a36e461 dse 206d0c71 iters_total 7930
+MEMBQ_DIAG: t 3.27 th 2 sub 1 cols 3472 tid 0 node 7 rdse 0 st Optimal it 172 obj -110.081915 rows 1725 basis c7ec2bbf x 1ea66c90
+MEMBQ_PRE: sub 1 node 8 rows 1725 basis c7ec2bbf bounds 1a4b3ffe dse c7aa5654 iters_total 8102
+MEMBQ_DIAG: t 3.29 th 2 sub 1 cols 3472 tid 0 node 8 rdse 0 st Optimal it 77 obj -110.035412 rows 1725 basis 292524af x e1537dcf
+MEMBQ_PRE: sub 1 node 9 rows 1725 basis 292524af bounds 33e7827e dse 126ccac3 iters_total 8179
+MEMBQ_DIAG: t 3.30 th 2 sub 1 cols 3472 tid 0 node 9 rdse 0 st Optimal it 51 obj -110.002765 rows 1725 basis e713e740 x a608dd39
+MEMBQ_PRE: sub 1 node 10 rows 1725 basis e713e740 bounds e0b73a6a dse 14311538 iters_total 8230
+MEMBQ_DIAG: t 3.31 th 2 sub 1 cols 3472 tid 0 node 10 rdse 0 st Optimal it 67 obj -109.984109 rows 1725 basis 4c8511c3 x 106017ad
+MEMBQ_PRE: sub 1 node 11 rows 1725 basis 4c8511c3 bounds fc0e9740 dse 3008d550 iters_total 8297
+MEMBQ_DIAG: t 3.33 th 2 sub 1 cols 3472 tid 0 node 11 rdse 0 st Optimal it 68 obj -109.895579 rows 1725 basis 8323ff97 x 70c6cb01
+MEMBQ_PRE: sub 1 node 12 rows 1725 basis 8323ff97 bounds 9c4e7cd2 dse 65a41494 iters_total 8365
+MEMBQ_DIAG: t 3.35 th 2 sub 1 cols 3472 tid 0 node 12 rdse 0 st Optimal it 85 obj -109.782942 rows 1725 basis cf78b28c x a03e60ae
+MEMBQ_PRE: sub 1 node 13 rows 1725 basis cf78b28c bounds 84b804c0 dse a57fd4cb iters_total 8450
+MEMBQ_DIAG: t 3.37 th 2 sub 1 cols 3472 tid 0 node 13 rdse 0 st Optimal it 115 obj -109.661738 rows 1725 basis b3b840b6 x bebd7d14
+MEMBQ_PRE: sub 1 node 14 rows 1725 basis b3b840b6 bounds c08691ee dse b94715d8 iters_total 8565
+MEMBQ_DIAG: t 3.40 th 2 sub 1 cols 3472 tid 0 node 14 rdse 0 st Optimal it 173 obj -109.428821 rows 1725 basis 4baa2f80 x 0f5e70d2
+MEMBQ_PRE: sub 1 node 15 rows 1725 basis 4baa2f80 bounds 6e3805aa dse a25f9517 iters_total 8738
+MEMBQ_DIAG: t 3.42 th 2 sub 1 cols 3472 tid 0 node 15 rdse 0 st Optimal it 76 obj -109.388808 rows 1725 basis 6fa607f5 x 27f65fde
+MEMBQ_PRE: sub 1 node 16 rows 1725 basis 6fa607f5 bounds a661cb09 dse 09fb38c6 iters_total 8814
+MEMBQ_DIAG: t 3.45 th 2 sub 1 cols 3472 tid 0 node 16 rdse 0 st Optimal it 176 obj -109.299030 rows 1725 basis da95b564 x 4724a72c
+MEMBQ_PRE: sub 1 node 17 rows 1725 basis da95b564 bounds 6ab2ae66 dse e6715ccc iters_total 8990
+MEMBQ_DIAG: t 3.47 th 2 sub 1 cols 3472 tid 0 node 17 rdse 0 st Optimal it 88 obj -109.227463 rows 1725 basis 1697dc8c x 1e132c83
+MEMBQ_PRE: sub 1 node 18 rows 1725 basis 1697dc8c bounds 072b84fe dse 4f786469 iters_total 9078
+MEMBQ_DIAG: t 3.49 th 2 sub 1 cols 3472 tid 0 node 18 rdse 0 st Optimal it 93 obj -109.121452 rows 1725 basis c6d404cb x 2ba0648e
+MIP:   sub-MIP: 1388 free columns of 3472, status TimeLimit, nodes 18, objective Some(-52.0), 3.54s, 9310 LP iterations, TICKS cpu 3.237 lp 44883156 prop 3107473 sep 51684639 pre 69155 heur 0 node 93258 lpit 11767 lu 517317642 lum 94241444
+MIP: oneopt improved -5.2000000000e1 -> -5.4000000000e1
+MIP: twoopt improved -5.4000000000e1 -> -6.2000000000e1
+MIP:   global fixed integers 0 of 3472 (newly 0 since the root LP)
+MIP: new incumbent -6.2000000000e1 at node 0 (18.65s) [RENS]
+MIP:   SUBFIX RENS try 1: target 0.60, fixing rate 0.60, depth 1520, 0 backtracks, 1388 free integer columns of 3472, status Some(TimeLimit), nodes 18, accepted true, 3.54s (dive+sub 8.88s)
+MIP: root heuristic RENS: found (8.88s)
+DET_DIAG ticks after root heuristic RENS: [419424905, 4452675, 158552179, 126211, 25378055, 93258, 51239, 4056576823, 957781436]
+MIP:   locks: fixing rate 0.66
+DET_DIAG submip: tk_u true budget Some(3.0098130354215007) time_limit 30.098 u_set false parallel false has_budget false nodes 0
+CUTMIX clique edges total 15562 rows 3622 implonly 11940 implpairs 28930 bin 889
+MIP:   sub-MIP: 1193 free columns of 3472, status Infeasible, nodes 0, objective None, 0.02s, 532 LP iterations, TICKS cpu 0.018 lp 302430 prop 706400 sep 0 pre 50117 heur 0 node 0 lpit 531 lu 1016275 lum 944928
+MIP: root heuristic locks: none (0.03s)
+DET_DIAG ticks after root heuristic locks: [419727335, 5190429, 158552179, 176328, 25378055, 93258, 51770, 4057593098, 958726364]
+MIP:   clique: fixing rate 0.97
+DET_DIAG submip: tk_u true budget Some(3.008525703177401) time_limit 30.085 u_set false parallel false has_budget false nodes 0
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 95
+MIP:   sub-MIP: 113 free columns of 3472, status Infeasible, nodes 0, objective None, 0.00s, 3 LP iterations, TICKS cpu 0.002 lp 98 prop 760 sep 0 pre 19885 heur 0 node 0 lpit 2 lu 89 lum 17
+MIP: root heuristic clique: none (0.01s)
+DET_DIAG ticks after root heuristic clique: [419727433, 5237507, 158552179, 196213, 25378055, 93258, 51772, 4057593187, 958726381]
+MIP: root heuristic vbounds (loose): none (0.00s)
+DET_DIAG ticks after root heuristic vbounds (loose): [419727433, 5237507, 158552179, 196213, 25378055, 93258, 51772, 4057593187, 958726381]
+MIP: root heuristic vbounds (tight): none (0.00s)
+DET_DIAG ticks after root heuristic vbounds (tight): [419727433, 5237507, 158552179, 196213, 25378055, 93258, 51772, 4057593187, 958726381]
+MIP:   RINS (HiGHS fill): fixing rate 0.04 from agreeing columns, 0.25 after fill (3472 free integer columns)
+MIP:   RINS skipped: fixing rate 0.25 below 0.50 (S4_RINSRATE)
+MIP: root heuristic RINS: none (0.00s)
+DET_DIAG ticks after root heuristic RINS: [419727433, 5248773, 158552179, 196213, 25378055, 93258, 51772, 4057593187, 958726381]
+MIP: after root heuristics: incumbent Some(-62.0) (18.68s)
+MIP: root objective probing: skipped (gap 5.040e-1 (LP -1.2500205483e2, incumbent -6.2000000000e1), 3344 fractional binaries)
+MIP: GAP1 u: LP probing skipped (gap 5.040e-1)
+MIP: restart check: newly fixed 0, integer columns 3472, free at the root 3472, threshold 34.7, root LP 0.72s
+TRSTAT: tree start outer 23.25 solve 18.68 restarts 0 lb -1.2800000000e2 ub -6.2000000000e1
+MIP:    18.68s nodes        1 open       0 lb inf ub -6.20000000e1 lp_iters 34184 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 28078 dive_iters 0 lp_rows 4650 node_cut_secs 0.00
+MEMBQ_PRE: sub 0 node 1 rows 4650 basis 5edab913 bounds 37a73c15 dse b27ee419 iters_total 34184
+MEMBQ_DIAG: t 18.69 th 2 sub 0 cols 3472 tid 0 node 1 rdse 0 st Optimal it 1 obj -125.002055 rows 4650 basis 5edab913 x 18e0f7e3
+MIP:    21.04s nodes        2 open       1 lb -1.25002055e2 ub -6.20000000e1 lp_iters 41389 sb_iters 7204 sb_lps 48 sb_secs 2.35 node_iters 1 (first 1, lps 1) heur_iters 28078 dive_iters 0 lp_rows 4650 node_cut_secs 0.00
+MEMBQ_PRE: sub 0 node 2 rows 4650 basis 5edab913 bounds 57cd0792 dse b27ee419 iters_total 41389
+MEMBQ_DIAG: t 22.05 th 2 sub 0 cols 3472 tid 0 node 2 rdse 0 st Error it 4130 obj NaN rows 4650 basis f3051d8c x 00000000
+MEMBQ_PRE: sub 0 node 3 rows 4650 basis f3051d8c bounds b3ef2942 dse 150c532c iters_total 45519
+MEMBQ_DIAG: t 24.58 th 2 sub 0 cols 3472 tid 0 node 3 rdse 0 st Optimal it 6898 obj -121.704903 rows 4650 basis b928d520 x b3cc379a
+MIP:    32.30s nodes        4 open       3 lb -1.25002055e2 ub -6.20000000e1 lp_iters 72208 sb_iters 26995 sb_lps 116 sb_secs 10.07 node_iters 11029 (first 11029, lps 3) heur_iters 28078 dive_iters 0 lp_rows 4650 node_cut_secs 0.00
+MEMBQ_PRE: sub 0 node 4 rows 4650 basis b928d520 bounds a27eb144 dse 3e63e863 iters_total 72208
+MEMBQ_DIAG: t 32.55 th 2 sub 0 cols 3472 tid 0 node 4 rdse 0 st Optimal it 442 obj -119.164741 rows 4650 basis 0622aec9 x 18b2a8bb
+MEMBQ_PRE: sub 0 node 5 rows 4650 basis 0622aec9 bounds 193a2b61 dse 23baaf71 iters_total 74314
+MEMBQ_DIAG: t 33.21 th 2 sub 0 cols 3472 tid 0 node 5 rdse 0 st Optimal it 257 obj -118.209007 rows 4650 basis 060c2ba8 x 1b4b7aaf
+MEMBQ_PRE: sub 0 node 6 rows 4650 basis 060c2ba8 bounds 9e0c17ea dse 2aee9380 iters_total 74571
+MEMBQ_DIAG: t 33.43 th 2 sub 0 cols 3472 tid 0 node 6 rdse 0 st Optimal it 476 obj -116.756846 rows 4650 basis fc615294 x 8ba64a0a
+MEMBQ_PRE: sub 0 node 7 rows 4650 basis fc615294 bounds 2b2efbd8 dse 0aefd1e3 iters_total 75047
+MEMBQ_DIAG: t 33.58 th 2 sub 0 cols 3472 tid 0 node 7 rdse 0 st Optimal it 311 obj -115.857175 rows 4650 basis 167772cf x 0f71c896
+MEMBQ_PRE: sub 0 node 8 rows 4650 basis 167772cf bounds d7ae6a54 dse dc914c01 iters_total 75358
+MEMBQ_DIAG: t 33.76 th 2 sub 0 cols 3472 tid 0 node 8 rdse 0 st Optimal it 361 obj -115.000000 rows 4650 basis d1cacbce x 636ba234
+MEMBQ_PRE: sub 0 node 9 rows 4650 basis d1cacbce bounds 36649ff5 dse 48853654 iters_total 75719
+MEMBQ_DIAG: t 33.84 th 2 sub 0 cols 3472 tid 0 node 9 rdse 0 st Optimal it 188 obj -114.998223 rows 4650 basis ca954d49 x e6df9b10
+MEMBQ_PRE: sub 0 node 10 rows 4650 basis ca954d49 bounds 1e08b264 dse a2ecffe5 iters_total 75907
+MEMBQ_DIAG: t 34.02 th 2 sub 0 cols 3472 tid 0 node 10 rdse 0 st Optimal it 379 obj -114.072072 rows 4650 basis e0d4c0e2 x a26532fa
+MEMBQ_PRE: sub 0 node 11 rows 4650 basis e0d4c0e2 bounds 4a7135c3 dse 236c0425 iters_total 76286
+MEMBQ_DIAG: t 34.16 th 2 sub 0 cols 3472 tid 0 node 11 rdse 0 st Optimal it 344 obj -113.144144 rows 4650 basis 220491d1 x 0ae32630
+MEMBQ_PRE: sub 0 node 12 rows 4650 basis 220491d1 bounds 2a66b135 dse 33c5ada0 iters_total 76630
+MEMBQ_DIAG: t 34.35 th 2 sub 0 cols 3472 tid 0 node 12 rdse 0 st Optimal it 435 obj -112.216216 rows 4650 basis 6cf333f4 x bce30c9b
+MIP:    34.35s nodes       13 open      12 lb -1.25002055e2 ub -6.20000000e1 lp_iters 77065 sb_iters 26995 sb_lps 116 sb_secs 10.07 node_iters 14222 (first 14222, lps 12) heur_iters 31406 dive_iters 1664 lp_rows 4650 node_cut_secs 0.00
+MEMBQ_PRE: sub 0 node 13 rows 4650 basis 6cf333f4 bounds f7a70e60 dse 1830787e iters_total 77065
+MEMBQ_DIAG: t 34.37 th 2 sub 0 cols 3472 tid 0 node 13 rdse 0 st Optimal it 31 obj -112.145455 rows 4650 basis 29e4a2dc x 3eec2289
+MEMBQ_PRE: sub 0 node 14 rows 4650 basis 29e4a2dc bounds 59d4554c dse f3357317 iters_total 77096
+MEMBQ_DIAG: t 34.57 th 2 sub 0 cols 3472 tid 0 node 14 rdse 0 st Optimal it 456 obj -111.302294 rows 4650 basis d7a72a60 x 9b7cc72f
+MEMBQ_PRE: sub 0 node 15 rows 4650 basis d7a72a60 bounds 39bde344 dse 0bf672d5 iters_total 77552
+MEMBQ_DIAG: t 34.60 th 2 sub 0 cols 3472 tid 0 node 15 rdse 0 st Optimal it 44 obj -111.075472 rows 4650 basis df382a38 x c5624f12
+MEMBQ_PRE: sub 0 node 16 rows 4650 basis df382a38 bounds bdb500dc dse 365d408d iters_total 77596
+MEMBQ_DIAG: t 34.74 th 2 sub 0 cols 3472 tid 0 node 16 rdse 0 st Optimal it 301 obj -110.304790 rows 4650 basis 583c7c1b x da400270
+MEMBQ_PRE: sub 0 node 17 rows 4650 basis 583c7c1b bounds 4a1d6e44 dse e7e288d7 iters_total 77897
+MEMBQ_DIAG: t 34.77 th 2 sub 0 cols 3472 tid 0 node 17 rdse 0 st Optimal it 49 obj -110.076190 rows 4650 basis bca19014 x a77127e7
+MEMBQ_PRE: sub 0 node 18 rows 4650 basis bca19014 bounds 6356e48f dse f945ac25 iters_total 77946
+MEMBQ_DIAG: t 34.90 th 2 sub 0 cols 3472 tid 0 node 18 rdse 0 st Optimal it 302 obj -109.395099 rows 4650 basis 49186a17 x a15e6165
+MEMBQ_PRE: sub 0 node 19 rows 4650 basis 49186a17 bounds f4f5432f dse a21f2963 iters_total 78248
+MEMBQ_DIAG: t 35.02 th 2 sub 0 cols 3472 tid 0 node 19 rdse 0 st Optimal it 304 obj -108.714008 rows 4650 basis 3f00fef4 x 113f2b22
+MEMBQ_PRE: sub 0 node 20 rows 4650 basis 3f00fef4 bounds 20c08036 dse f610cc00 iters_total 78552
+MEMBQ_DIAG: t 35.08 th 2 sub 0 cols 3472 tid 0 node 20 rdse 0 st Optimal it 169 obj -108.032917 rows 4650 basis 077dee99 x c8513ae7
+MEMBQ_PRE: sub 0 node 21 rows 4650 basis 077dee99 bounds 08d1b0cf dse ca8958dc iters_total 78721
+MEMBQ_DIAG: t 35.30 th 2 sub 0 cols 3472 tid 0 node 21 rdse 0 st Optimal it 519 obj -107.351826 rows 4650 basis 2d939f69 x d57740ed
+MEMBQ_PRE: sub 0 node 22 rows 4650 basis 2d939f69 bounds 168227ee dse 7dd8321a iters_total 79240
+MEMBQ_DIAG: t 35.34 th 2 sub 0 cols 3472 tid 0 node 22 rdse 0 st Optimal it 99 obj -106.670735 rows 4650 basis 2982fcdf x adbc6316
+MEMBQ_PRE: sub 0 node 23 rows 4650 basis 2982fcdf bounds 2cdb6f21 dse debcf8e9 iters_total 79434
+MEMBQ_DIAG: t 35.45 th 2 sub 0 cols 3472 tid 0 node 23 rdse 0 st Optimal it 124 obj -106.063725 rows 4650 basis d8792efc x aeed29a1
+MEMBQ_PRE: sub 0 node 24 rows 4650 basis d8792efc bounds e8fdb892 dse 9d9bf355 iters_total 79558
+MEMBQ_DIAG: t 35.55 th 2 sub 0 cols 3472 tid 0 node 24 rdse 0 st Optimal it 263 obj -105.474631 rows 4650 basis e6bca2d9 x 473e1a1f
+MEMBQ_PRE: sub 0 node 25 rows 4650 basis e6bca2d9 bounds af0e20a8 dse 9ed6788f iters_total 80335
+MEMBQ_DIAG: t 35.82 th 2 sub 0 cols 3472 tid 0 node 25 rdse 0 st Optimal it 179 obj -104.885537 rows 4650 basis ae20a3e9 x 065f1ada
+MEMBQ_PRE: sub 0 node 26 rows 4650 basis ae20a3e9 bounds 4a060d04 dse 152b8d2f iters_total 80514
+MEMBQ_DIAG: t 35.86 th 2 sub 0 cols 3472 tid 0 node 26 rdse 0 st Optimal it 81 obj -104.504619 rows 4650 basis 6cc2193c x 51591dfb
+MEMBQ_PRE: sub 0 node 27 rows 4650 basis 6cc2193c bounds 216973ca dse a44b31c5 iters_total 80595
+MEMBQ_DIAG: t 35.90 th 2 sub 0 cols 3472 tid 0 node 27 rdse 0 st Optimal it 100 obj -104.009038 rows 4650 basis 24bc660b x 1bd41d3d
+MEMBQ_PRE: sub 0 node 28 rows 4650 basis 24bc660b bounds 13c9bc61 dse 846e07b0 iters_total 80695
+MEMBQ_DIAG: t 35.96 th 2 sub 0 cols 3472 tid 0 node 28 rdse 0 st Optimal it 181 obj -103.513457 rows 4650 basis 00b94749 x 85429e01
+MEMBQ_PRE: sub 0 node 29 rows 4650 basis 00b94749 bounds 96c82f12 dse f7eb8dfc iters_total 80876
+MEMBQ_DIAG: t 36.05 th 2 sub 0 cols 3472 tid 0 node 29 rdse 0 st Optimal it 226 obj -103.017876 rows 4650 basis 33cab0bc x e462df8e
+MEMBQ_PRE: sub 0 node 30 rows 4650 basis 33cab0bc bounds 060cde65 dse 3a1c54e5 iters_total 81102
+MEMBQ_DIAG: t 36.09 th 2 sub 0 cols 3472 tid 0 node 30 rdse 0 st Optimal it 107 obj -102.522294 rows 4650 basis fd8c8061 x e64a93cb
+MEMBQ_PRE: sub 0 node 31 rows 4650 basis fd8c8061 bounds 3051c0c6 dse 513a2d2c iters_total 81209
+MEMBQ_DIAG: t 36.13 th 2 sub 0 cols 3472 tid 0 node 31 rdse 0 st Optimal it 97 obj -102.026713 rows 4650 basis f5e78119 x b6a6a75a
+MEMBQ_PRE: sub 0 node 32 rows 4650 basis f5e78119 bounds 86696df3 dse 58cf5b51 iters_total 81306
+MEMBQ_DIAG: t 36.17 th 2 sub 0 cols 3472 tid 0 node 32 rdse 0 st Optimal it 89 obj -101.531132 rows 4650 basis 798964b5 x 1129ea31
+MEMBQ_PRE: sub 0 node 33 rows 4650 basis 798964b5 bounds b3db25c1 dse 0b2efb7f iters_total 81395
+MEMBQ_DIAG: t 36.21 th 2 sub 0 cols 3472 tid 0 node 33 rdse 0 st Optimal it 107 obj -101.110988 rows 4650 basis d6e220a3 x 11cdd958
+MEMBQ_PRE: sub 0 node 34 rows 4650 basis d6e220a3 bounds 090f6def dse 5a443167 iters_total 81502
+MEMBQ_DIAG: t 36.27 th 2 sub 0 cols 3472 tid 0 node 34 rdse 0 st Optimal it 169 obj -100.717970 rows 4650 basis 1409e7e9 x 7c997763
+MEMBQ_PRE: sub 0 node 35 rows 4650 basis 1409e7e9 bounds 1cd84b0e dse 3db82bf4 iters_total 81671
+MEMBQ_DIAG: t 36.29 th 2 sub 0 cols 3472 tid 0 node 35 rdse 0 st Optimal it 3 obj -100.717970 rows 4650 basis 92665be8 x 7c9b10d8
+MEMBQ_PRE: sub 0 node 36 rows 4650 basis 92665be8 bounds afab549f dse 57a7ff43 iters_total 81674
+MEMBQ_DIAG: t 36.30 th 2 sub 0 cols 3472 tid 0 node 36 rdse 0 st Optimal it 3 obj -100.717970 rows 4650 basis 9d74d7cf x a70b98e8
+MEMBQ_PRE: sub 0 node 37 rows 4650 basis 9d74d7cf bounds 5026fa73 dse d0ce2e74 iters_total 81677
+MEMBQ_DIAG: t 36.36 th 2 sub 0 cols 3472 tid 0 node 37 rdse 0 st Optimal it 168 obj -100.375281 rows 4650 basis 3684a311 x 83ab54ca
+MIP:    36.36s nodes       38 open      37 lb -1.25002055e2 ub -6.20000000e1 lp_iters 81845 sb_iters 27604 sb_lps 120 sb_secs 10.34 node_iters 18393 (first 18393, lps 37) heur_iters 31406 dive_iters 1664 lp_rows 4650 node_cut_secs 0.00
+MEMBQ_PRE: sub 0 node 38 rows 4650 basis 3684a311 bounds 58116fce dse d17a97fe iters_total 81845
+MEMBQ_DIAG: t 36.42 th 2 sub 0 cols 3472 tid 0 node 38 rdse 0 st Optimal it 163 obj -99.661611 rows 4650 basis b2c6c2e5 x b5686ebd
+MEMBQ_PRE: sub 0 node 39 rows 4650 basis b2c6c2e5 bounds bed541be dse bb4cdda1 iters_total 82008
+MEMBQ_DIAG: t 36.47 th 2 sub 0 cols 3472 tid 0 node 39 rdse 0 st Optimal it 114 obj -99.426151 rows 4650 basis 4cabf514 x 18498f91
+MEMBQ_PRE: sub 0 node 40 rows 4650 basis 4cabf514 bounds a4fa89f4 dse db23a496 iters_total 82122
+MEMBQ_DIAG: t 36.51 th 2 sub 0 cols 3472 tid 0 node 40 rdse 0 st Optimal it 117 obj -99.190690 rows 4650 basis 446ead3c x 6fb38b6c
+MEMBQ_PRE: sub 0 node 41 rows 4650 basis 446ead3c bounds 85d4667e dse 1c74d950 iters_total 82239
+MEMBQ_DIAG: t 36.54 th 2 sub 0 cols 3472 tid 0 node 41 rdse 0 st Optimal it 81 obj -98.955230 rows 4650 basis 476d39e8 x 9b1b878a
+MEMBQ_PRE: sub 0 node 42 rows 4650 basis 476d39e8 bounds 7d9c99cd dse 38e656f0 iters_total 82320
+MEMBQ_DIAG: t 36.57 th 2 sub 0 cols 3472 tid 0 node 42 rdse 0 st Optimal it 75 obj -98.719770 rows 4650 basis 2a983dd2 x 260be191
+MEMBQ_PRE: sub 0 node 43 rows 4650 basis 2a983dd2 bounds 1558dd08 dse 939ddd2b iters_total 82395
+MEMBQ_DIAG: t 36.60 th 2 sub 0 cols 3472 tid 0 node 43 rdse 0 st Optimal it 84 obj -98.484309 rows 4650 basis 2353fc0c x fe63e40d
+MEMBQ_PRE: sub 0 node 44 rows 4650 basis 2353fc0c bounds 483af359 dse 2bc9edc0 iters_total 82479
+MEMBQ_DIAG: t 36.65 th 2 sub 0 cols 3472 tid 0 node 44 rdse 0 st Optimal it 154 obj -98.013389 rows 4650 basis 05900357 x 85154aa3
+MEMBQ_PRE: sub 0 node 45 rows 4650 basis 05900357 bounds 130c9db3 dse 20623bef iters_total 82633
+MEMBQ_DIAG: t 36.70 th 2 sub 0 cols 3472 tid 0 node 45 rdse 0 st Optimal it 122 obj -97.781839 rows 4650 basis 3c7b911b x 6157b28b
+MEMBQ_PRE: sub 0 node 46 rows 4650 basis 3c7b911b bounds f4df1ecc dse 4ee74be1 iters_total 82755
+MEMBQ_DIAG: t 36.74 th 2 sub 0 cols 3472 tid 0 node 46 rdse 0 st Optimal it 114 obj -97.520150 rows 4650 basis f4ba5f98 x d0fb35ee
+MEMBQ_PRE: sub 0 node 47 rows 4650 basis f4ba5f98 bounds 7169b1f0 dse e9791245 iters_total 82869
+MEMBQ_DIAG: t 36.77 th 2 sub 0 cols 3472 tid 0 node 47 rdse 0 st Optimal it 66 obj -96.977148 rows 4650 basis d9d3763e x 30ea3a62
+MEMBQ_PRE: sub 0 node 48 rows 4650 basis d9d3763e bounds 4579e972 dse bdb82d94 iters_total 82935
+MEMBQ_DIAG: t 36.79 th 2 sub 0 cols 3472 tid 0 node 48 rdse 0 st Optimal it 13 obj -96.889072 rows 4650 basis 4366854a x bd3a1c38
+MEMBQ_PRE: sub 0 node 49 rows 4650 basis 4366854a bounds 8c02511f dse 65e52380 iters_total 82948
+MEMBQ_DIAG: t 36.79 th 2 sub 0 cols 3472 tid 0 node 49 rdse 0 st Optimal it 10 obj -96.798795 rows 4650 basis 3b2a02bd x e8fa435c
+MEMBQ_PRE: sub 0 node 50 rows 4650 basis 3b2a02bd bounds 33979ad0 dse 2ada5314 iters_total 82958
+MEMBQ_DIAG: t 36.80 th 2 sub 0 cols 3472 tid 0 node 50 rdse 0 st Optimal it 7 obj -96.706231 rows 4650 basis 4015cd58 x 99e3a08b
+MEMBQ_PRE: sub 0 node 51 rows 4650 basis 4015cd58 bounds 3f7516aa dse 6c7f7010 iters_total 82965
+MEMBQ_DIAG: t 36.82 th 2 sub 0 cols 3472 tid 0 node 51 rdse 0 st Optimal it 75 obj -96.259832 rows 4650 basis c7a54791 x 0d2031eb
+MEMBQ_PRE: sub 0 node 52 rows 4650 basis c7a54791 bounds 9801748f dse d02c30c5 iters_total 83040
+MEMBQ_DIAG: t 36.84 th 2 sub 0 cols 3472 tid 0 node 52 rdse 0 st Optimal it 34 obj -96.166355 rows 4650 basis 1cd29391 x 2281ff66
+MEMBQ_PRE: sub 0 node 53 rows 4650 basis 1cd29391 bounds e42b9983 dse 2d7e0e85 iters_total 83074
+MEMBQ_DIAG: t 36.85 th 2 sub 0 cols 3472 tid 0 node 53 rdse 0 st Optimal it 14 obj -96.070451 rows 4650 basis 2271b3d7 x d23b0ad7
+MEMBQ_PRE: sub 0 node 54 rows 4650 basis 2271b3d7 bounds 0ffb1a45 dse 3ce25502 iters_total 83088
+MEMBQ_DIAG: t 36.86 th 2 sub 0 cols 3472 tid 0 node 54 rdse 0 st Optimal it 44 obj -95.972024 rows 4650 basis 4a286fc9 x c6ecfdf5
+MEMBQ_PRE: sub 0 node 55 rows 4650 basis 4a286fc9 bounds 31615fad dse 900411b9 iters_total 83132
+MEMBQ_DIAG: t 36.87 th 2 sub 0 cols 3472 tid 0 node 55 rdse 0 st Optimal it 12 obj -95.925971 rows 4650 basis 6477afe1 x 11849b9d
+MEMBQ_PRE: sub 0 node 56 rows 4650 basis 6477afe1 bounds 5fe0a36b dse 92566b30 iters_total 83144
+MEMBQ_DIAG: t 36.92 th 2 sub 0 cols 3472 tid 0 node 56 rdse 0 st Optimal it 125 obj -95.550148 rows 4650 basis 216fefc5 x f2fe8d3c
+MEMBQ_PRE: sub 0 node 57 rows 4650 basis 216fefc5 bounds 7a0bb37a dse b54bf56e iters_total 83269
+MEMBQ_DIAG: t 36.93 th 2 sub 0 cols 3472 tid 0 node 57 rdse 0 st Optimal it 11 obj -95.442753 rows 4650 basis c1d89b67 x 20cbb410
+MEMBQ_PRE: sub 0 node 58 rows 4650 basis c1d89b67 bounds 4daf4c16 dse 58e995b8 iters_total 83280
+MEMBQ_DIAG: t 36.93 th 2 sub 0 cols 3472 tid 0 node 58 rdse 0 st Optimal it 5 obj -95.439727 rows 4650 basis a86da2c5 x a19dac34
+MEMBQ_PRE: sub 0 node 59 rows 4650 basis a86da2c5 bounds 61e55133 dse 855bfcba iters_total 83285
+MEMBQ_DIAG: t 36.96 th 2 sub 0 cols 3472 tid 0 node 59 rdse 0 st Optimal it 70 obj -95.101017 rows 4650 basis 820f9655 x aebaf0cf
+MEMBQ_PRE: sub 0 node 60 rows 4650 basis 820f9655 bounds b9ce82a7 dse 5665d254 iters_total 83355
+MEMBQ_DIAG: t 36.97 th 2 sub 0 cols 3472 tid 0 node 60 rdse 0 st Optimal it 8 obj -94.989216 rows 4650 basis 19340dd7 x 7952e0a6
+MEMBQ_PRE: sub 0 node 61 rows 4650 basis 19340dd7 bounds 7568fc7c dse 25cd7bda iters_total 83363
+MEMBQ_DIAG: t 36.98 th 2 sub 0 cols 3472 tid 0 node 61 rdse 0 st Optimal it 42 obj -94.763705 rows 4650 basis 11144621 x f5cc56fa
+MEMBQ_PRE: sub 0 node 62 rows 4650 basis 11144621 bounds 6a3aef25 dse bfbfc144 iters_total 83405
+MEMBQ_DIAG: t 37.07 th 2 sub 0 cols 3472 tid 0 node 62 rdse 0 st Optimal it 219 obj -93.689845 rows 4650 basis b06e5d8d x b940398c
+MEMBQ_PRE: sub 0 node 63 rows 4650 basis b06e5d8d bounds de2176e7 dse bde3b878 iters_total 83624
+MEMBQ_DIAG: t 37.09 th 2 sub 0 cols 3472 tid 0 node 63 rdse 0 st Optimal it 46 obj -93.326748 rows 4650 basis 408c038a x 3ef07087
+MEMBQ_PRE: sub 0 node 64 rows 4650 basis 408c038a bounds 4cd5beec dse e3a52006 iters_total 83670
+MEMBQ_DIAG: t 37.13 th 2 sub 0 cols 3472 tid 0 node 64 rdse 0 st Optimal it 94 obj -92.806993 rows 4650 basis ab283453 x c4d65f19
+MEMBQ_PRE: sub 0 node 65 rows 4650 basis ab283453 bounds 2d658072 dse 8dbdf28a iters_total 83764
+MEMBQ_DIAG: t 37.15 th 2 sub 0 cols 3472 tid 0 node 65 rdse 0 st Optimal it 43 obj -92.676667 rows 4650 basis 5c85b342 x 919ea0ba
+MEMBQ_PRE: sub 0 node 66 rows 4650 basis 5c85b342 bounds 0cf9b6a2 dse d91d53f5 iters_total 83807
+MEMBQ_DIAG: t 37.16 th 2 sub 0 cols 3472 tid 0 node 66 rdse 0 st Optimal it 40 obj -92.541602 rows 4650 basis 5dc1403e x 01007a73
+MEMBQ_PRE: sub 0 node 67 rows 4650 basis 5dc1403e bounds b22b6849 dse f83c64d9 iters_total 83847
+MEMBQ_DIAG: t 37.18 th 2 sub 0 cols 3472 tid 0 node 67 rdse 0 st Optimal it 33 obj -92.401535 rows 4650 basis 206b295a x 304d01dc
+MEMBQ_PRE: sub 0 node 68 rows 4650 basis 206b295a bounds bb050cf0 dse 583457d0 iters_total 83880
+MEMBQ_DIAG: t 37.20 th 2 sub 0 cols 3472 tid 0 node 68 rdse 0 st Optimal it 68 obj -92.262101 rows 4650 basis f13de4fe x 7d4d4f0e
+MEMBQ_PRE: sub 0 node 69 rows 4650 basis f13de4fe bounds b8167f78 dse d0346c77 iters_total 83948
+MEMBQ_DIAG: t 37.21 th 2 sub 0 cols 3472 tid 0 node 69 rdse 0 st Optimal it 24 obj -92.105238 rows 4650 basis 43704488 x bc52ca11
+MEMBQ_PRE: sub 0 node 70 rows 4650 basis 43704488 bounds eff2a672 dse 62827780 iters_total 83972
+MEMBQ_DIAG: t 37.22 th 2 sub 0 cols 3472 tid 0 node 70 rdse 0 st Optimal it 28 obj -91.980783 rows 4650 basis fcb81bdd x fa2c8d4f
+MEMBQ_PRE: sub 0 node 71 rows 4650 basis fcb81bdd bounds 63e3385d dse d08a33db iters_total 84000
+MEMBQ_DIAG: t 37.24 th 2 sub 0 cols 3472 tid 0 node 71 rdse 0 st Optimal it 70 obj -91.544683 rows 4650 basis 8cfe5e4e x 6a247d3c
+MEMBQ_PRE: sub 0 node 72 rows 4650 basis 8cfe5e4e bounds f5574b35 dse ea3009be iters_total 84070
+MEMBQ_DIAG: t 37.26 th 2 sub 0 cols 3472 tid 0 node 72 rdse 0 st Optimal it 53 obj -91.407396 rows 4650 basis bd9aab6b x c7b519f6
+MEMBQ_PRE: sub 0 node 73 rows 4650 basis bd9aab6b bounds ec5c2e55 dse a108dd53 iters_total 84123
+MEMBQ_DIAG: t 37.27 th 2 sub 0 cols 3472 tid 0 node 73 rdse 0 st Optimal it 24 obj -91.278103 rows 4650 basis 15311c12 x c26f4146
+MEMBQ_PRE: sub 0 node 74 rows 4650 basis 15311c12 bounds f787c51c dse 1f0b48cb iters_total 84147
+MEMBQ_DIAG: t 37.30 th 2 sub 0 cols 3472 tid 0 node 74 rdse 0 st Optimal it 88 obj -91.173528 rows 4650 basis a84da341 x 24fa1231
+MEMBQ_PRE: sub 0 node 75 rows 4650 basis a84da341 bounds ababcb92 dse b195b3f6 iters_total 84235
+MEMBQ_DIAG: t 37.33 th 2 sub 0 cols 3472 tid 0 node 75 rdse 0 st Optimal it 89 obj -90.930606 rows 4650 basis 45fa4fa7 x c12edf2d
+MEMBQ_PRE: sub 0 node 76 rows 4650 basis 45fa4fa7 bounds 33b25576 dse bf3128ac iters_total 84498
+MEMBQ_DIAG: t 37.40 th 2 sub 0 cols 3472 tid 0 node 76 rdse 0 st Optimal it 77 obj -90.475526 rows 4650 basis 694f658f x 930e1d9b
+MEMBQ_PRE: sub 0 node 77 rows 4650 basis 694f658f bounds 09bf2f7d dse f75251fe iters_total 84575
+MEMBQ_DIAG: t 37.44 th 2 sub 0 cols 3472 tid 0 node 77 rdse 0 st Optimal it 112 obj -89.895739 rows 4650 basis 0f682c95 x 19618403
+MEMBQ_PRE: sub 0 node 78 rows 4650 basis 0f682c95 bounds 5c63f503 dse ff331895 iters_total 84687
+MEMBQ_DIAG: t 37.49 th 2 sub 0 cols 3472 tid 0 node 78 rdse 0 st Optimal it 164 obj -89.693958 rows 4650 basis 14ee4212 x 5c37dc58
+MEMBQ_PRE: sub 0 node 79 rows 4650 basis 14ee4212 bounds 26a0e011 dse 12e2dbb4 iters_total 84851
+MEMBQ_DIAG: t 37.54 th 2 sub 0 cols 3472 tid 0 node 79 rdse 0 st Optimal it 178 obj -88.196828 rows 4650 basis 849ba79e x 69eb79ca
+MEMBQ_PRE: sub 0 node 80 rows 4650 basis 849ba79e bounds da285fe8 dse fa2c9515 iters_total 85029
+MEMBQ_DIAG: t 37.60 th 2 sub 0 cols 3472 tid 0 node 80 rdse 0 st Optimal it 221 obj -87.003577 rows 4650 basis c7b0d898 x c421c265
+MEMBQ_PRE: sub 0 node 81 rows 4650 basis c7b0d898 bounds 3b88bf50 dse 757118a2 iters_total 85250
+MEMBQ_DIAG: t 37.61 th 2 sub 0 cols 3472 tid 0 node 81 rdse 0 st Optimal it 23 obj -86.892590 rows 4650 basis b5e80807 x bad527bf
+MEMBQ_PRE: sub 0 node 82 rows 4650 basis b5e80807 bounds 10a17dc2 dse c3edd78c iters_total 85273
+MEMBQ_DIAG: t 37.64 th 2 sub 0 cols 3472 tid 0 node 82 rdse 0 st Optimal it 71 obj -86.238616 rows 4650 basis dbf8866f x e9b537b0
+MEMBQ_PRE: sub 0 node 83 rows 4650 basis dbf8866f bounds 21058d35 dse 9a328c11 iters_total 85344
+MEMBQ_DIAG: t 37.65 th 2 sub 0 cols 3472 tid 0 node 83 rdse 0 st Optimal it 67 obj -86.060404 rows 4650 basis daa92083 x 9e2878f7
+MEMBQ_PRE: sub 0 node 84 rows 4650 basis daa92083 bounds 622ae5c2 dse cbb34dce iters_total 85411
+MEMBQ_DIAG: t 37.67 th 2 sub 0 cols 3472 tid 0 node 84 rdse 0 st Optimal it 22 obj -86.055241 rows 4650 basis c98d6b73 x c1e74f56
+MEMBQ_PRE: sub 0 node 85 rows 4650 basis c98d6b73 bounds 8691c512 dse a7ff1cfb iters_total 85433
+MEMBQ_DIAG: t 37.68 th 2 sub 0 cols 3472 tid 0 node 85 rdse 0 st Optimal it 51 obj -85.937160 rows 4650 basis 3cb93c9b x 20f8f8c1
+MEMBQ_PRE: sub 0 node 86 rows 4650 basis 3cb93c9b bounds 23a966e4 dse bfada4ca iters_total 85484
+MEMBQ_DIAG: t 37.69 th 2 sub 0 cols 3472 tid 0 node 86 rdse 0 st Optimal it 40 obj -85.802562 rows 4650 basis f6aa6473 x 89bd27f3
+MEMBQ_PRE: sub 0 node 87 rows 4650 basis f6aa6473 bounds 4e2ec933 dse c9d44496 iters_total 85524
+MEMBQ_DIAG: t 37.72 th 2 sub 0 cols 3472 tid 0 node 87 rdse 0 st Optimal it 81 obj -85.114265 rows 4650 basis 3c282bdc x c21dec3f
+MEMBQ_PRE: sub 0 node 88 rows 4650 basis 3c282bdc bounds 7ea2015a dse 233c3d33 iters_total 85605
+MEMBQ_DIAG: t 37.73 th 2 sub 0 cols 3472 tid 0 node 88 rdse 0 st Optimal it 35 obj -85.003990 rows 4650 basis d6df0621 x 014f1c84
+MEMBQ_PRE: sub 0 node 89 rows 4650 basis d6df0621 bounds 400ff737 dse 603f808e iters_total 85640
+MEMBQ_DIAG: t 37.75 th 2 sub 0 cols 3472 tid 0 node 89 rdse 0 st Optimal it 69 obj -84.898129 rows 4650 basis e2fcb864 x 53ec58db
+MEMBQ_PRE: sub 0 node 90 rows 4650 basis e2fcb864 bounds e10f7a75 dse a9b79418 iters_total 85709
+MEMBQ_DIAG: t 37.78 th 2 sub 0 cols 3472 tid 0 node 90 rdse 0 st Optimal it 75 obj -84.215380 rows 4650 basis 77c9fed6 x c6a2d210
+MEMBQ_PRE: sub 0 node 91 rows 4650 basis 77c9fed6 bounds a611eb92 dse 44277f42 iters_total 85784
+MEMBQ_DIAG: t 37.78 th 2 sub 0 cols 3472 tid 0 node 91 rdse 0 st Optimal it 12 obj -84.009498 rows 4650 basis 2c34bf1b x fe79bf8e
+MEMBQ_PRE: sub 0 node 92 rows 4650 basis 2c34bf1b bounds d3a154df dse eb5cc519 iters_total 85796
+MEMBQ_DIAG: t 37.79 th 2 sub 0 cols 3472 tid 0 node 92 rdse 0 st Optimal it 50 obj -83.803615 rows 4650 basis c4f2eeec x c293b2b3
+MEMBQ_PRE: sub 0 node 93 rows 4650 basis c4f2eeec bounds 4de03b71 dse 6f3a45c4 iters_total 85846
+MEMBQ_DIAG: t 37.81 th 2 sub 0 cols 3472 tid 0 node 93 rdse 0 st Optimal it 74 obj -83.668672 rows 4650 basis f400b99f x 36893705
+MEMBQ_PRE: sub 0 node 94 rows 4650 basis f400b99f bounds 76fd5da9 dse e2f8075a iters_total 86026
+MEMBQ_DIAG: t 37.85 th 2 sub 0 cols 3472 tid 0 node 94 rdse 0 st Optimal it 75 obj -82.677222 rows 4650 basis eb2077fd x 2a997b0c
+MEMBQ_PRE: sub 0 node 95 rows 4650 basis eb2077fd bounds 783c4078 dse d655e911 iters_total 86101
+MEMBQ_DIAG: t 37.87 th 2 sub 0 cols 3472 tid 0 node 95 rdse 0 st Optimal it 23 obj -82.585197 rows 4650 basis b6e81d2e x 3a2f5cb8
+MEMBQ_PRE: sub 0 node 96 rows 4650 basis b6e81d2e bounds ada492af dse 941f245b iters_total 86124
+MEMBQ_DIAG: t 37.88 th 2 sub 0 cols 3472 tid 0 node 96 rdse 0 st Optimal it 30 obj -82.296296 rows 4650 basis 961c8fd6 x bf499efb
+MEMBQ_PRE: sub 0 node 97 rows 4650 basis 961c8fd6 bounds 020c930a dse 3c612810 iters_total 86154
+MEMBQ_DIAG: t 37.89 th 2 sub 0 cols 3472 tid 0 node 97 rdse 0 st Optimal it 19 obj -82.124339 rows 4650 basis 928989d6 x cf2a7b77
+MEMBQ_PRE: sub 0 node 98 rows 4650 basis 928989d6 bounds 5529900b dse 0885fa1d iters_total 86173
+MEMBQ_DIAG: t 37.90 th 2 sub 0 cols 3472 tid 0 node 98 rdse 0 st Optimal it 40 obj -82.019596 rows 4650 basis 1727bb43 x 580ec19d
+MEMBQ_PRE: sub 0 node 99 rows 4650 basis 1727bb43 bounds 2ff6fef1 dse 908fa718 iters_total 86213
+MEMBQ_DIAG: t 37.91 th 2 sub 0 cols 3472 tid 0 node 99 rdse 0 st Optimal it 58 obj -81.044977 rows 4650 basis cc8bcc02 x 3c1f4a82
+MEMBQ_PRE: sub 0 node 100 rows 4650 basis cc8bcc02 bounds 0d7bd935 dse e49a2fc9 iters_total 86271
+MEMBQ_DIAG: t 37.93 th 2 sub 0 cols 3472 tid 0 node 100 rdse 0 st Optimal it 86 obj -80.273684 rows 4650 basis 4f344410 x 1066b961
+MEMBQ_PRE: sub 0 node 101 rows 4650 basis 43bf212f bounds bf8bdac6 dse 150c532c iters_total 86357
+MEMBQ_DIAG: t 39.76 th 2 sub 0 cols 3472 tid 0 node 101 rdse 0 st Optimal it 6229 obj -117.319366 rows 4650 basis 69ee5f07 x 8dcaaac1
+DET_DIAG submip: tk_u false budget None time_limit 10.530 u_set false parallel false has_budget true nodes 101
+CUTMIX clique edges total 67650 rows 8813 implonly 58837 implpairs 92860 bin 2409
+MEMBQ_PRE: sub 1 node 1 rows 3052 basis 80dafaac bounds 63db47db dse 52b9ed77 iters_total 6451
+MEMBQ_DIAG: t 1.88 th 2 sub 1 cols 3472 tid 0 node 1 rdse 0 st Optimal it 1 obj -114.484886 rows 3052 basis 80dafaac x b45f9ea2
+MEMBQ_PRE: sub 1 node 2 rows 3052 basis 80dafaac bounds 1124b822 dse 52b9ed77 iters_total 6452
+MEMBQ_DIAG: t 2.07 th 2 sub 1 cols 3472 tid 0 node 2 rdse 0 st Optimal it 718 obj -111.748932 rows 3052 basis 645846eb x 8583fe73
+MEMBQ_PRE: sub 1 node 3 rows 3052 basis 645846eb bounds 811c0676 dse 1c38fca9 iters_total 7170
+MEMBQ_DIAG: t 2.15 th 2 sub 1 cols 3472 tid 0 node 3 rdse 0 st Optimal it 317 obj -110.009072 rows 3052 basis 76a14e45 x c78ce150
+MEMBQ_PRE: sub 1 node 4 rows 3052 basis 76a14e45 bounds dac40922 dse a095c508 iters_total 7487
+MEMBQ_DIAG: t 2.24 th 2 sub 1 cols 3472 tid 0 node 4 rdse 0 st Optimal it 297 obj -107.535315 rows 3052 basis ff2e10d4 x 2ee7023c
+MEMBQ_PRE: sub 1 node 5 rows 3052 basis ff2e10d4 bounds 5f1ed4ae dse d85c202c iters_total 8882
+MEMBQ_DIAG: t 2.56 th 2 sub 1 cols 3472 tid 0 node 5 rdse 0 st Optimal it 274 obj -106.056463 rows 3052 basis 2ba4323e x 6f83fda4
+MEMBQ_PRE: sub 1 node 6 rows 3052 basis 2ba4323e bounds 5556647d dse 27b0fda7 iters_total 9156
+MEMBQ_DIAG: t 2.64 th 2 sub 1 cols 3472 tid 0 node 6 rdse 0 st Optimal it 329 obj -101.551859 rows 3052 basis 5a715457 x 780df153
+MEMBQ_PRE: sub 1 node 7 rows 3052 basis 5a715457 bounds 67f30330 dse 371b0b69 iters_total 9485
+MEMBQ_DIAG: t 2.68 th 2 sub 1 cols 3472 tid 0 node 7 rdse 1 st Optimal it 181 obj -100.219572 rows 3052 basis 1a5aec97 x e779c75f
+MEMBQ_PRE: sub 1 node 8 rows 3052 basis 1a5aec97 bounds 68e21095 dse f0f36104 iters_total 9666
+MEMBQ_DIAG: t 2.71 th 2 sub 1 cols 3472 tid 0 node 8 rdse 1 st Optimal it 156 obj -98.405032 rows 3052 basis a72b2c6a x 1942397f
+MEMBQ_PRE: sub 1 node 9 rows 3052 basis 80dafaac bounds 764484e8 dse 79e4f9a8 iters_total 9822
+MEMBQ_DIAG: t 2.73 th 2 sub 1 cols 3472 tid 0 node 9 rdse 1 st Optimal it 55 obj -114.450824 rows 3052 basis 9ad39a22 x 68489ed3
+MEMBQ_PRE: sub 1 node 10 rows 3052 basis 9ad39a22 bounds f393f9b7 dse 30acb4e5 iters_total 9877
+MEMBQ_DIAG: t 2.75 th 2 sub 1 cols 3472 tid 0 node 10 rdse 0 st Optimal it 109 obj -114.400233 rows 3052 basis 9474f2af x 07d3f214
+MEMBQ_PRE: sub 1 node 11 rows 3052 basis 9474f2af bounds 5ec19456 dse bb4476bc iters_total 9986
+MEMBQ_DIAG: t 2.77 th 2 sub 1 cols 3472 tid 0 node 11 rdse 0 st Optimal it 81 obj -114.337782 rows 3052 basis cc1aba2c x f96ad931
+MEMBQ_PRE: sub 1 node 12 rows 3052 basis cc1aba2c bounds 4c3351b3 dse 93be6f4d iters_total 10067
+MEMBQ_DIAG: t 2.79 th 2 sub 1 cols 3472 tid 0 node 12 rdse 0 st Optimal it 31 obj -114.273606 rows 3052 basis dbe42c8b x 89caba4c
+MEMBQ_PRE: sub 1 node 13 rows 3052 basis dbe42c8b bounds e403b2e9 dse 5d44a96d iters_total 10098
+MEMBQ_DIAG: t 2.81 th 2 sub 1 cols 3472 tid 0 node 13 rdse 0 st Optimal it 89 obj -114.234752 rows 3052 basis 545f6d1d x a7ceddfa
+MEMBQ_PRE: sub 1 node 14 rows 3052 basis 545f6d1d bounds 3056a12a dse 32d42988 iters_total 10187
+MEMBQ_DIAG: t 2.83 th 2 sub 1 cols 3472 tid 0 node 14 rdse 0 st Optimal it 70 obj -114.214384 rows 3052 basis bd73549b x 9555a286
+MEMBQ_PRE: sub 1 node 15 rows 3052 basis bd73549b bounds fe2efdda dse 9451cd15 iters_total 10257
+MEMBQ_DIAG: t 2.86 th 2 sub 1 cols 3472 tid 0 node 15 rdse 0 st Optimal it 63 obj -114.158765 rows 3052 basis d3a712fa x 1485519f
+MEMBQ_PRE: sub 1 node 16 rows 3052 basis d3a712fa bounds 3183c5c8 dse 0f2c5a41 iters_total 10320
+MEMBQ_DIAG: t 2.87 th 2 sub 1 cols 3472 tid 0 node 16 rdse 0 st Optimal it 54 obj -114.124283 rows 3052 basis 7ff03174 x 45e3451d
+MEMBQ_PRE: sub 1 node 17 rows 3052 basis 7ff03174 bounds bcf6765c dse e49e4ba4 iters_total 10374
+MEMBQ_DIAG: t 2.89 th 2 sub 1 cols 3472 tid 0 node 17 rdse 0 st Optimal it 63 obj -114.119006 rows 3052 basis 1d701745 x 6f59a3d5
+MEMBQ_PRE: sub 1 node 18 rows 3052 basis 1d701745 bounds 07b4cf7d dse 62f3a1f9 iters_total 10437
+MEMBQ_DIAG: t 2.90 th 2 sub 1 cols 3472 tid 0 node 18 rdse 0 st Optimal it 34 obj -114.088127 rows 3052 basis c97022b1 x 8749ea3d
+MEMBQ_PRE: sub 1 node 19 rows 3052 basis c97022b1 bounds 99d2dfaf dse 70e62eac iters_total 10471
+MEMBQ_DIAG: t 2.92 th 2 sub 1 cols 3472 tid 0 node 19 rdse 0 st Optimal it 55 obj -114.058585 rows 3052 basis 11b4ac7d x 2badb2f7
+MEMBQ_PRE: sub 1 node 20 rows 3052 basis 11b4ac7d bounds 578afa7c dse b22787f5 iters_total 10526
+MEMBQ_DIAG: t 2.94 th 2 sub 1 cols 3472 tid 0 node 20 rdse 0 st Optimal it 95 obj -114.004241 rows 3052 basis 66406db8 x 6bd3cf72
+MEMBQ_PRE: sub 1 node 21 rows 3052 basis 66406db8 bounds 0316071a dse def7641f iters_total 10621
+MEMBQ_DIAG: t 2.96 th 2 sub 1 cols 3472 tid 0 node 21 rdse 0 st Optimal it 79 obj -113.965231 rows 3052 basis 73843183 x 92f54853
+MEMBQ_PRE: sub 1 node 22 rows 3052 basis 73843183 bounds d431d41f dse 2e516340 iters_total 10700
+MEMBQ_DIAG: t 2.98 th 2 sub 1 cols 3472 tid 0 node 22 rdse 0 st Optimal it 59 obj -113.935534 rows 3052 basis 013c6e90 x 663932ee
+MEMBQ_PRE: sub 1 node 23 rows 3052 basis 013c6e90 bounds 12edb0b4 dse 43b667d8 iters_total 10759
+MEMBQ_DIAG: t 2.99 th 2 sub 1 cols 3472 tid 0 node 23 rdse 0 st Optimal it 24 obj -113.860076 rows 3052 basis d2491eb4 x 75086ba9
+MEMBQ_PRE: sub 1 node 24 rows 3052 basis d2491eb4 bounds 76aeef0b dse 30bc1925 iters_total 10783
+MEMBQ_DIAG: t 3.01 th 2 sub 1 cols 3472 tid 0 node 24 rdse 0 st Optimal it 85 obj -113.807448 rows 3052 basis 29dec834 x 3a5dbb92
+MEMBQ_PRE: sub 1 node 25 rows 3052 basis 29dec834 bounds 18189071 dse 7b8e590c iters_total 10868
+MEMBQ_DIAG: t 3.03 th 2 sub 1 cols 3472 tid 0 node 25 rdse 0 st Optimal it 23 obj -113.725522 rows 3052 basis f877ad59 x c95fea97
+MEMBQ_PRE: sub 1 node 26 rows 3052 basis f877ad59 bounds 957f505e dse c40a7cb3 iters_total 10891
+MEMBQ_DIAG: t 3.05 th 2 sub 1 cols 3472 tid 0 node 26 rdse 0 st Optimal it 80 obj -113.659017 rows 3052 basis d04dae22 x 9ce6ac66
+MEMBQ_PRE: sub 1 node 27 rows 3052 basis d04dae22 bounds 3ab41ba4 dse bb77db14 iters_total 10971
+MEMBQ_DIAG: t 3.06 th 2 sub 1 cols 3472 tid 0 node 27 rdse 0 st Optimal it 54 obj -113.593205 rows 3052 basis fb7e3eb9 x 107b2394
+MEMBQ_PRE: sub 1 node 28 rows 3052 basis fb7e3eb9 bounds 167e7dc8 dse 5832f717 iters_total 11025
+MEMBQ_DIAG: t 3.08 th 2 sub 1 cols 3472 tid 0 node 28 rdse 0 st Optimal it 69 obj -113.578959 rows 3052 basis e57843d6 x 825e18b0
+MEMBQ_PRE: sub 1 node 29 rows 3052 basis e57843d6 bounds 0ce3ec36 dse aa779e6d iters_total 11094
+MEMBQ_DIAG: t 3.10 th 2 sub 1 cols 3472 tid 0 node 29 rdse 0 st Optimal it 68 obj -113.507467 rows 3052 basis 0f30d2b0 x 40a50b4f
+MEMBQ_PRE: sub 1 node 30 rows 3052 basis 0f30d2b0 bounds 1be4b790 dse 9e7b8e1e iters_total 11162
+MEMBQ_DIAG: t 3.11 th 2 sub 1 cols 3472 tid 0 node 30 rdse 0 st Optimal it 50 obj -113.405852 rows 3052 basis 4ec817ec x 9585a11c
+MEMBQ_PRE: sub 1 node 31 rows 3052 basis 4ec817ec bounds d9ee2510 dse 0ecd0a6f iters_total 11212
+MEMBQ_DIAG: t 3.16 th 2 sub 1 cols 3472 tid 0 node 31 rdse 0 st Optimal it 124 obj -113.338899 rows 3052 basis ea384cec x 74178495
+MEMBQ_PRE: sub 1 node 32 rows 3052 basis ea384cec bounds e022025f dse dbf68d67 iters_total 11336
+MEMBQ_DIAG: t 3.18 th 2 sub 1 cols 3472 tid 0 node 32 rdse 0 st Optimal it 72 obj -113.330727 rows 3052 basis b36dd9c0 x 69a5f639
+MEMBQ_PRE: sub 1 node 33 rows 3052 basis b36dd9c0 bounds e11c8e4b dse bcd29b65 iters_total 11408
+MEMBQ_DIAG: t 3.20 th 2 sub 1 cols 3472 tid 0 node 33 rdse 0 st Optimal it 74 obj -113.269440 rows 3052 basis 0767cb13 x 29b93511
+MEMBQ_PRE: sub 1 node 34 rows 3052 basis 0767cb13 bounds 70b11b45 dse 8d45b96f iters_total 11482
+MEMBQ_DIAG: t 3.24 th 2 sub 1 cols 3472 tid 0 node 34 rdse 0 st Optimal it 179 obj -113.172653 rows 3052 basis cd212089 x 9edcb817
+MEMBQ_PRE: sub 1 node 35 rows 3052 basis cd212089 bounds 2a48dcdd dse 5d2ea476 iters_total 11661
+MEMBQ_DIAG: t 3.25 th 2 sub 1 cols 3472 tid 0 node 35 rdse 0 st Optimal it 29 obj -113.099399 rows 3052 basis 1c883062 x bbca19a5
+MEMBQ_PRE: sub 1 node 36 rows 3052 basis 1c883062 bounds 715626bc dse 3bb94f91 iters_total 12048
+MEMBQ_DIAG: t 3.36 th 2 sub 1 cols 3472 tid 0 node 36 rdse 0 st Optimal it 79 obj -113.013659 rows 3052 basis 1ccfc7e6 x 67f92be4
+MEMBQ_PRE: sub 1 node 37 rows 3052 basis 1ccfc7e6 bounds c24927e7 dse dc2a9929 iters_total 12127
+MEMBQ_DIAG: t 3.38 th 2 sub 1 cols 3472 tid 0 node 37 rdse 0 st Optimal it 45 obj -112.937848 rows 3052 basis 6839be2c x 21e17faa
+MEMBQ_PRE: sub 1 node 38 rows 3052 basis 6839be2c bounds 76eb3ffa dse a33a56e5 iters_total 12172
+MEMBQ_DIAG: t 3.38 th 2 sub 1 cols 3472 tid 0 node 38 rdse 0 st Optimal it 34 obj -112.862714 rows 3052 basis b0d9a45f x f2319e51
+MEMBQ_PRE: sub 1 node 39 rows 3052 basis b0d9a45f bounds b7b2b9e1 dse 6f00d68e iters_total 12206
+MEMBQ_DIAG: t 3.41 th 2 sub 1 cols 3472 tid 0 node 39 rdse 0 st Optimal it 90 obj -112.762862 rows 3052 basis b318b2aa x 9dc5c505
+MEMBQ_PRE: sub 1 node 40 rows 3052 basis b318b2aa bounds 251ea2b0 dse d5e98b50 iters_total 12296
+MEMBQ_DIAG: t 3.44 th 2 sub 1 cols 3472 tid 0 node 40 rdse 0 st Optimal it 40 obj -112.705854 rows 3052 basis 99d02510 x 7493ba7c
+MEMBQ_PRE: sub 1 node 41 rows 3052 basis 99d02510 bounds 585d7074 dse f2622247 iters_total 12336
+MEMBQ_DIAG: t 3.46 th 2 sub 1 cols 3472 tid 0 node 41 rdse 0 st Optimal it 65 obj -112.614980 rows 3052 basis 09753261 x bd47eef8
+MEMBQ_PRE: sub 1 node 42 rows 3052 basis 09753261 bounds 9e86250c dse 7cfd6dc3 iters_total 12401
+MEMBQ_DIAG: t 3.48 th 2 sub 1 cols 3472 tid 0 node 42 rdse 0 st Optimal it 52 obj -112.576625 rows 3052 basis 4d8ce436 x 37294c50
+MEMBQ_PRE: sub 1 node 43 rows 3052 basis 4d8ce436 bounds b42e17d0 dse 1e38bb0d iters_total 12453
+MEMBQ_DIAG: t 3.49 th 2 sub 1 cols 3472 tid 0 node 43 rdse 0 st Optimal it 52 obj -112.559252 rows 3052 basis e109a055 x 936cd811
+MEMBQ_PRE: sub 1 node 44 rows 3052 basis e109a055 bounds 7138bf41 dse 6c16fb52 iters_total 12505
+MEMBQ_DIAG: t 3.51 th 2 sub 1 cols 3472 tid 0 node 44 rdse 0 st Optimal it 86 obj -112.515004 rows 3052 basis 8f6d1526 x 8d1bdaea
+MEMBQ_PRE: sub 1 node 45 rows 3052 basis 8f6d1526 bounds a13dd017 dse 70e60cc1 iters_total 12591
+MEMBQ_DIAG: t 3.53 th 2 sub 1 cols 3472 tid 0 node 45 rdse 0 st Optimal it 54 obj -112.489937 rows 3052 basis 807c7528 x ea46724e
+MEMBQ_PRE: sub 1 node 46 rows 3052 basis 807c7528 bounds cdf4ccbc dse 50906112 iters_total 12645
+MEMBQ_DIAG: t 3.55 th 2 sub 1 cols 3472 tid 0 node 46 rdse 0 st Optimal it 79 obj -112.436059 rows 3052 basis 0aa3f22d x 4a5fbc41
+MEMBQ_PRE: sub 1 node 47 rows 3052 basis 0aa3f22d bounds 80c9ef2c dse b194ce57 iters_total 12724
+MEMBQ_DIAG: t 3.56 th 2 sub 1 cols 3472 tid 0 node 47 rdse 0 st Optimal it 29 obj -112.418225 rows 3052 basis 0c0d6f6b x b293368d
+MEMBQ_PRE: sub 1 node 48 rows 3052 basis 0c0d6f6b bounds 085586e4 dse ad0b9e58 iters_total 12753
+MEMBQ_DIAG: t 3.58 th 2 sub 1 cols 3472 tid 0 node 48 rdse 0 st Optimal it 120 obj -112.296191 rows 3052 basis 6b28fee6 x 3bdb48df
+MEMBQ_PRE: sub 1 node 49 rows 3052 basis 6b28fee6 bounds 78d282bb dse e86b6d68 iters_total 12873
+MEMBQ_DIAG: t 3.61 th 2 sub 1 cols 3472 tid 0 node 49 rdse 0 st Optimal it 107 obj -112.239872 rows 3052 basis 27e6d98c x e68784b8
+MEMBQ_PRE: sub 1 node 50 rows 3052 basis 27e6d98c bounds 1c24cca1 dse a6b68ed5 iters_total 12980
+MEMBQ_DIAG: t 3.63 th 2 sub 1 cols 3472 tid 0 node 50 rdse 0 st Optimal it 55 obj -112.152445 rows 3052 basis 8d4012b8 x 1f3d51ea
+MEMBQ_PRE: sub 1 node 51 rows 3052 basis 8d4012b8 bounds 16d0cdae dse 3537a4fa iters_total 13035
+MEMBQ_DIAG: t 3.67 th 2 sub 1 cols 3472 tid 0 node 51 rdse 0 st Optimal it 151 obj -112.107817 rows 3052 basis a1edb8ae x 21b3a4ce
+MEMBQ_PRE: sub 1 node 52 rows 3052 basis a1edb8ae bounds 99575c82 dse ff3bb618 iters_total 13186
+MEMBQ_DIAG: t 3.72 th 2 sub 1 cols 3472 tid 0 node 52 rdse 0 st Optimal it 153 obj -111.635845 rows 3052 basis dd1732aa x fc41f41e
+MEMBQ_PRE: sub 1 node 53 rows 3052 basis dd1732aa bounds e14c06bb dse a2607e80 iters_total 13339
+MEMBQ_DIAG: t 3.76 th 2 sub 1 cols 3472 tid 0 node 53 rdse 0 st Optimal it 143 obj -111.540982 rows 3052 basis b3c0dbc2 x a858e172
+MEMBQ_PRE: sub 1 node 54 rows 3052 basis b3c0dbc2 bounds 19a4396a dse fc2af1bb iters_total 13482
+MEMBQ_DIAG: t 3.78 th 2 sub 1 cols 3472 tid 0 node 54 rdse 0 st Optimal it 61 obj -111.476503 rows 3052 basis 52a151c0 x dc05d42d
+MEMBQ_PRE: sub 1 node 55 rows 3052 basis 52a151c0 bounds 2a6df41f dse c140fe93 iters_total 13543
+MEMBQ_DIAG: t 3.79 th 2 sub 1 cols 3472 tid 0 node 55 rdse 0 st Optimal it 54 obj -111.467488 rows 3052 basis 8ca97325 x 43400289
+MEMBQ_PRE: sub 1 node 56 rows 3052 basis 8ca97325 bounds c35389a1 dse f1a56c08 iters_total 13597
+MEMBQ_DIAG: t 3.80 th 2 sub 1 cols 3472 tid 0 node 56 rdse 0 st Optimal it 12 obj -111.458028 rows 3052 basis 2819df4a x 2c0fc3c4
+MEMBQ_PRE: sub 1 node 57 rows 3052 basis 2819df4a bounds 0ef96b39 dse 4237a02f iters_total 13609
+MEMBQ_DIAG: t 3.82 th 2 sub 1 cols 3472 tid 0 node 57 rdse 0 st Optimal it 80 obj -111.367204 rows 3052 basis ad15f9f0 x 7d14b67f
+MEMBQ_PRE: sub 1 node 58 rows 3052 basis ad15f9f0 bounds 64b68056 dse 2ea1d08e iters_total 13689
+MEMBQ_DIAG: t 3.84 th 2 sub 1 cols 3472 tid 0 node 58 rdse 0 st Optimal it 99 obj -111.285057 rows 3052 basis 81faebf6 x 655fe73f
+MEMBQ_PRE: sub 1 node 59 rows 3052 basis 81faebf6 bounds 6e0f81e4 dse 197c8db4 iters_total 13788
+MEMBQ_DIAG: t 3.86 th 2 sub 1 cols 3472 tid 0 node 59 rdse 0 st Optimal it 82 obj -111.225654 rows 3052 basis cf2fd862 x 2fdcd56e
+MEMBQ_PRE: sub 1 node 60 rows 3052 basis cf2fd862 bounds 45cb1de5 dse 121d41e3 iters_total 13870
+MEMBQ_DIAG: t 3.87 th 2 sub 1 cols 3472 tid 0 node 60 rdse 0 st Optimal it 14 obj -111.166396 rows 3052 basis bc28ddb1 x ee57ba7e
+MEMBQ_PRE: sub 1 node 61 rows 3052 basis bc28ddb1 bounds db5b873f dse 1db41924 iters_total 13884
+MEMBQ_DIAG: t 3.93 th 2 sub 1 cols 3472 tid 0 node 61 rdse 0 st Optimal it 220 obj -110.554301 rows 3052 basis 6a27675d x ee051cce
+MEMBQ_PRE: sub 1 node 62 rows 3052 basis 6a27675d bounds c6be5f94 dse 37f1d403 iters_total 14104
+MEMBQ_DIAG: t 3.96 th 2 sub 1 cols 3472 tid 0 node 62 rdse 0 st Optimal it 131 obj -110.490441 rows 3052 basis f8393004 x fcba3242
+MEMBQ_PRE: sub 1 node 63 rows 3052 basis f8393004 bounds 51c10802 dse 31c6b4ae iters_total 14235
+MEMBQ_DIAG: t 3.98 th 2 sub 1 cols 3472 tid 0 node 63 rdse 0 st Optimal it 67 obj -110.433780 rows 3052 basis 9632964e x 76c3159a
+MEMBQ_PRE: sub 1 node 64 rows 3052 basis 9632964e bounds 33bc5a3f dse 6bcbf461 iters_total 14302
+MEMBQ_DIAG: t 3.99 th 2 sub 1 cols 3472 tid 0 node 64 rdse 0 st Optimal it 20 obj -110.431945 rows 3052 basis e3a0cedc x d63ff137
+MEMBQ_PRE: sub 1 node 65 rows 3052 basis e3a0cedc bounds a3cbc2e4 dse a6eec6a2 iters_total 14322
+MEMBQ_DIAG: t 4.01 th 2 sub 1 cols 3472 tid 0 node 65 rdse 0 st Optimal it 99 obj -110.346289 rows 3052 basis 3aa6058e x 8823286c
+MEMBQ_PRE: sub 1 node 66 rows 3052 basis 3aa6058e bounds 71454fa2 dse 1992c7a6 iters_total 14421
+MEMBQ_DIAG: t 4.03 th 2 sub 1 cols 3472 tid 0 node 66 rdse 0 st Optimal it 90 obj -110.296234 rows 3052 basis 9874013b x 43df1de9
+MEMBQ_PRE: sub 1 node 67 rows 3052 basis 9874013b bounds 52e7ba1d dse 3e0c12ce iters_total 14511
+MEMBQ_DIAG: t 4.05 th 2 sub 1 cols 3472 tid 0 node 67 rdse 0 st Optimal it 76 obj -110.211376 rows 3052 basis 458237e1 x bb8f509b
+MEMBQ_PRE: sub 1 node 68 rows 3052 basis 458237e1 bounds 7364d7cc dse 49c3ce19 iters_total 14587
+MEMBQ_DIAG: t 4.09 th 2 sub 1 cols 3472 tid 0 node 68 rdse 0 st Optimal it 166 obj -109.862169 rows 3052 basis 2ef3de59 x fa26ee5c
+MEMBQ_PRE: sub 1 node 69 rows 3052 basis 2ef3de59 bounds ee9e16e5 dse 47ea956f iters_total 14753
+MEMBQ_DIAG: t 4.11 th 2 sub 1 cols 3472 tid 0 node 69 rdse 0 st Optimal it 78 obj -109.733240 rows 3052 basis 04b1c504 x 06dc55f2
+MEMBQ_PRE: sub 1 node 70 rows 3052 basis 04b1c504 bounds 39f9b78b dse 50586896 iters_total 14831
+MEMBQ_DIAG: t 4.12 th 2 sub 1 cols 3472 tid 0 node 70 rdse 0 st Optimal it 17 obj -109.722575 rows 3052 basis ec7f849a x 33b0a9b7
+MEMBQ_PRE: sub 1 node 71 rows 3052 basis ec7f849a bounds b00212a6 dse eb485aef iters_total 14848
+MEMBQ_DIAG: t 4.13 th 2 sub 1 cols 3472 tid 0 node 71 rdse 0 st Optimal it 41 obj -109.644974 rows 3052 basis d88a321c x 0a1d484e
+MEMBQ_PRE: sub 1 node 72 rows 3052 basis d88a321c bounds e1851272 dse e4757207 iters_total 14889
+MEMBQ_DIAG: t 4.14 th 2 sub 1 cols 3472 tid 0 node 72 rdse 0 st Optimal it 39 obj -109.618030 rows 3052 basis d9854e49 x b1b7baa0
+MEMBQ_PRE: sub 1 node 73 rows 3052 basis d9854e49 bounds 461531e8 dse 45d75b1d iters_total 14928
+MEMBQ_DIAG: t 4.15 th 2 sub 1 cols 3472 tid 0 node 73 rdse 0 st Optimal it 49 obj -109.557632 rows 3052 basis 7eec4175 x 64529eb6
+MEMBQ_PRE: sub 1 node 74 rows 3052 basis 7eec4175 bounds 66190a14 dse ef0399f1 iters_total 14977
+MEMBQ_DIAG: t 4.16 th 2 sub 1 cols 3472 tid 0 node 74 rdse 0 st Optimal it 55 obj -109.540400 rows 3052 basis ddd2128d x f5c9a8bd
+MEMBQ_PRE: sub 1 node 75 rows 3052 basis ddd2128d bounds 35674be3 dse 6f91f939 iters_total 15032
+MEMBQ_DIAG: t 4.18 th 2 sub 1 cols 3472 tid 0 node 75 rdse 0 st Optimal it 73 obj -109.446659 rows 3052 basis c4564a21 x 348fa4e9
+MEMBQ_PRE: sub 1 node 76 rows 3052 basis c4564a21 bounds 3232a90e dse 29147d5d iters_total 15105
+MEMBQ_DIAG: t 4.19 th 2 sub 1 cols 3472 tid 0 node 76 rdse 0 st Optimal it 38 obj -109.361470 rows 3052 basis 5b4a25a5 x 00a2ac74
+MEMBQ_PRE: sub 1 node 77 rows 3052 basis 5b4a25a5 bounds 321b9c7f dse 52907023 iters_total 15143
+MEMBQ_DIAG: t 4.20 th 2 sub 1 cols 3472 tid 0 node 77 rdse 0 st Optimal it 62 obj -109.261966 rows 3052 basis 4aec8778 x 590431d2
+MEMBQ_PRE: sub 1 node 78 rows 3052 basis 4aec8778 bounds c0c1bc3a dse 903766c2 iters_total 15205
+MEMBQ_DIAG: t 4.22 th 2 sub 1 cols 3472 tid 0 node 78 rdse 0 st Optimal it 58 obj -109.005842 rows 3052 basis 3dc6f6ee x f7b00b07
+MEMBQ_PRE: sub 1 node 79 rows 3052 basis 3dc6f6ee bounds 992fba7f dse 6aecc251 iters_total 15263
+MEMBQ_DIAG: t 4.24 th 2 sub 1 cols 3472 tid 0 node 79 rdse 0 st Optimal it 91 obj -108.911867 rows 3052 basis 436b04c8 x cad0c28f
+MEMBQ_PRE: sub 1 node 80 rows 3052 basis 436b04c8 bounds c9442b2c dse e18620b3 iters_total 15354
+MEMBQ_DIAG: t 4.25 th 2 sub 1 cols 3472 tid 0 node 80 rdse 0 st Optimal it 16 obj -108.818936 rows 3052 basis e3b7d176 x 05b2be42
+MEMBQ_PRE: sub 1 node 81 rows 3052 basis e3b7d176 bounds 4777ba20 dse 29c60fcf iters_total 15370
+MEMBQ_DIAG: t 4.26 th 2 sub 1 cols 3472 tid 0 node 81 rdse 0 st Optimal it 33 obj -108.787724 rows 3052 basis c8303cc2 x 38ec407e
+MEMBQ_PRE: sub 1 node 82 rows 3052 basis c8303cc2 bounds 1b20036f dse cfd67586 iters_total 15403
+MEMBQ_DIAG: t 4.28 th 2 sub 1 cols 3472 tid 0 node 82 rdse 0 st Optimal it 50 obj -108.747432 rows 3052 basis 80b6bff2 x f1c074aa
+MEMBQ_PRE: sub 1 node 83 rows 3052 basis 80b6bff2 bounds 68b44e6b dse d0670cff iters_total 15453
+MEMBQ_DIAG: t 4.29 th 2 sub 1 cols 3472 tid 0 node 83 rdse 0 st Optimal it 72 obj -108.694899 rows 3052 basis e631cf45 x b7fb97ac
+MEMBQ_PRE: sub 1 node 84 rows 3052 basis e631cf45 bounds cb6a08f2 dse 42cebc5b iters_total 15525
+MEMBQ_DIAG: t 4.30 th 2 sub 1 cols 3472 tid 0 node 84 rdse 0 st Optimal it 25 obj -108.596924 rows 3052 basis a3d484a1 x 9a3c20ab
+MEMBQ_PRE: sub 1 node 85 rows 3052 basis a3d484a1 bounds d1212be8 dse 7e96d454 iters_total 15550
+MEMBQ_DIAG: t 4.31 th 2 sub 1 cols 3472 tid 0 node 85 rdse 0 st Optimal it 66 obj -108.530025 rows 3052 basis dde11a38 x 820c316a
+MEMBQ_PRE: sub 1 node 86 rows 3052 basis dde11a38 bounds f84f1e4a dse 8da486d2 iters_total 15616
+MEMBQ_DIAG: t 4.33 th 2 sub 1 cols 3472 tid 0 node 86 rdse 0 st Optimal it 38 obj -108.469420 rows 3052 basis 1b16f40a x 5127962e
+MEMBQ_PRE: sub 1 node 87 rows 3052 basis 1b16f40a bounds 927330a3 dse 0ca1c01c iters_total 15654
+MEMBQ_DIAG: t 4.33 th 2 sub 1 cols 3472 tid 0 node 87 rdse 0 st Optimal it 30 obj -108.315973 rows 3052 basis 2b19d27e x 5148ad79
+MEMBQ_PRE: sub 1 node 88 rows 3052 basis 2b19d27e bounds aec4df4d dse c6276cb7 iters_total 15684
+MEMBQ_DIAG: t 4.34 th 2 sub 1 cols 3472 tid 0 node 88 rdse 0 st Optimal it 55 obj -108.225067 rows 3052 basis 0175525d x d6133732
+MEMBQ_PRE: sub 1 node 89 rows 3052 basis 0175525d bounds 06ad36bb dse e66bcdd0 iters_total 15739
+MEMBQ_DIAG: t 4.36 th 2 sub 1 cols 3472 tid 0 node 89 rdse 0 st TimeLimit it 97 obj NaN rows 3052 basis 0175525d x 00000000
+MIP:   sub-MIP: 2409 free columns of 3472, status TimeLimit, nodes 89, objective Some(-41.0), 4.47s, 15836 LP iterations, TICKS cpu 3.615 lp 107454293 prop 5146031 sep 19964089 pre 53246 heur 0 node 579924 lpit 15749 lu 856049678 lum 231947139
+MIP:   SUBFIX tree RINS try 1: target 0.56, fixing rate 0.25, depth 447, 0 backtracks, 2409 free integer columns of 3223, status Some(TimeLimit), nodes 89, accepted false, 4.47s (dive+sub 5.11s)
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP:    45.23s nodes      102 open     101 lb -1.25002055e2 ub -6.20000000e1 lp_iters 95165 sb_iters 28887 sb_lps 128 sb_secs 10.78 node_iters 28854 (first 28854, lps 101) heur_iters 48818 dive_iters 1664 lp_rows 4650 node_cut_secs 0.00
+MEMBQ_PRE: sub 0 node 102 rows 4650 basis 69ee5f07 bounds 93c50783 dse 2e5cd867 iters_total 95165
+MEMBQ_DIAG: t 45.57 th 2 sub 0 cols 3472 tid 0 node 102 rdse 0 st Optimal it 850 obj -112.816372 rows 4650 basis 8a14967a x 72419f42
+MEMBQ_PRE: sub 0 node 103 rows 4650 basis 8a14967a bounds a19e5085 dse 95348076 iters_total 96615
+MEMBQ_DIAG: t 45.98 th 2 sub 0 cols 3472 tid 0 node 103 rdse 0 st Optimal it 336 obj -111.951327 rows 4650 basis c593d390 x 6828c549
+MEMBQ_PRE: sub 0 node 104 rows 4650 basis c593d390 bounds 9e808df0 dse 140ea5ba iters_total 96951
+MEMBQ_DIAG: t 46.19 th 2 sub 0 cols 3472 tid 0 node 104 rdse 0 st Optimal it 525 obj -110.137662 rows 4650 basis 5dafe9ea x 6974fcaf
+MEMBQ_PRE: sub 0 node 105 rows 4650 basis 5dafe9ea bounds 4aa659f8 dse 3cc97ee7 iters_total 97476
+MEMBQ_DIAG: t 46.38 th 2 sub 0 cols 3472 tid 0 node 105 rdse 0 st Optimal it 477 obj -108.311561 rows 4650 basis 7087ff0b x 8270469e
+MEMBQ_PRE: sub 0 node 106 rows 4650 basis 7087ff0b bounds b9a3121d dse fbcc97e1 iters_total 97953
+MEMBQ_DIAG: t 46.52 th 2 sub 0 cols 3472 tid 0 node 106 rdse 0 st Optimal it 306 obj -107.596712 rows 4650 basis ebcdb307 x 8a1fe784
+MEMBQ_PRE: sub 0 node 107 rows 4650 basis ebcdb307 bounds 14f0b2ed dse c179348d iters_total 98259
+MEMBQ_DIAG: t 46.59 th 2 sub 0 cols 3472 tid 0 node 107 rdse 0 st Optimal it 164 obj -106.881863 rows 4650 basis 409506b9 x 06711437
+MEMBQ_PRE: sub 0 node 108 rows 4650 basis 409506b9 bounds b00faa3e dse 55f149f2 iters_total 98423
+MEMBQ_DIAG: t 46.73 th 2 sub 0 cols 3472 tid 0 node 108 rdse 0 st Optimal it 287 obj -105.120016 rows 4650 basis d8619c00 x 64370d74
+MEMBQ_PRE: sub 0 node 109 rows 4650 basis d8619c00 bounds 4420abc1 dse 6bc001b4 iters_total 99288
+MEMBQ_DIAG: t 47.00 th 2 sub 0 cols 3472 tid 0 node 109 rdse 0 st Optimal it 197 obj -104.504060 rows 4650 basis c87a0618 x 298b8cfb
+MEMBQ_PRE: sub 0 node 110 rows 4650 basis c87a0618 bounds d23ea271 dse fdd45cd7 iters_total 99485
+MEMBQ_DIAG: t 47.05 th 2 sub 0 cols 3472 tid 0 node 110 rdse 0 st Optimal it 133 obj -103.882521 rows 4650 basis 3ef841ee x a168cdf9
+MEMBQ_PRE: sub 0 node 111 rows 4650 basis 3ef841ee bounds 2ae59995 dse d30530b6 iters_total 99618
+MEMBQ_DIAG: t 47.12 th 2 sub 0 cols 3472 tid 0 node 111 rdse 0 st Optimal it 217 obj -103.382938 rows 4650 basis fe0e1c2c x 277782aa
+MEMBQ_PRE: sub 0 node 112 rows 4650 basis fe0e1c2c bounds 52a8541c dse b397820d iters_total 99835
+MEMBQ_DIAG: t 47.19 th 2 sub 0 cols 3472 tid 0 node 112 rdse 0 st Optimal it 172 obj -102.774683 rows 4650 basis 4033e1bb x b1f22654
+MEMBQ_PRE: sub 0 node 113 rows 4650 basis 4033e1bb bounds 19aa746b dse f505c42c iters_total 100007
+MEMBQ_DIAG: t 47.24 th 2 sub 0 cols 3472 tid 0 node 113 rdse 0 st Optimal it 130 obj -102.247232 rows 4650 basis 76a9a8a1 x 7da92943
+MIP:    47.24s nodes      114 open     113 lb -1.25002055e2 ub -6.20000000e1 lp_iters 100137 sb_iters 29465 sb_lps 130 sb_secs 10.99 node_iters 32648 (first 32648, lps 113) heur_iters 50018 dive_iters 2264 lp_rows 4650 node_cut_secs 0.00
+MEMBQ_PRE: sub 0 node 114 rows 4650 basis 76a9a8a1 bounds 769d7ae9 dse 78f4c138 iters_total 100137
+MEMBQ_DIAG: t 47.25 th 2 sub 0 cols 3472 tid 0 node 114 rdse 0 st Optimal it 3 obj -102.247232 rows 4650 basis 262b6844 x 2c929829
+MEMBQ_PRE: sub 0 node 115 rows 4650 basis 262b6844 bounds 05f1afd0 dse b95a0b10 iters_total 100140
+MEMBQ_DIAG: t 47.26 th 2 sub 0 cols 3472 tid 0 node 115 rdse 0 st Optimal it 18 obj -102.199912 rows 4650 basis 95542d6b x ff0954d0
+MEMBQ_PRE: sub 0 node 116 rows 4650 basis 95542d6b bounds 621feeb5 dse 47ead428 iters_total 100158
+MEMBQ_DIAG: t 47.27 th 2 sub 0 cols 3472 tid 0 node 116 rdse 0 st Optimal it 22 obj -102.150667 rows 4650 basis 18e7239c x 96ecca5c
+MEMBQ_PRE: sub 0 node 117 rows 4650 basis 18e7239c bounds 311cf706 dse 4100c5dd iters_total 100180
+MEMBQ_DIAG: t 47.27 th 2 sub 0 cols 3472 tid 0 node 117 rdse 0 st Optimal it 4 obj -102.150667 rows 4650 basis e0f7febe x 3d12ef5d
+MEMBQ_PRE: sub 0 node 118 rows 4650 basis e0f7febe bounds 8f6129f8 dse 32545cc3 iters_total 100184
+MEMBQ_DIAG: t 47.32 th 2 sub 0 cols 3472 tid 0 node 118 rdse 0 st Optimal it 149 obj -101.721899 rows 4650 basis 406a0fdb x da17c59a
+MEMBQ_PRE: sub 0 node 119 rows 4650 basis 406a0fdb bounds 30e26433 dse 139237c2 iters_total 100333
+MEMBQ_DIAG: t 47.39 th 2 sub 0 cols 3472 tid 0 node 119 rdse 0 st Optimal it 214 obj -100.881797 rows 4650 basis d03ff2b7 x 1503012e
+MEMBQ_PRE: sub 0 node 120 rows 4650 basis d03ff2b7 bounds a7406cca dse 1224ca38 iters_total 100547
+MEMBQ_DIAG: t 47.41 th 2 sub 0 cols 3472 tid 0 node 120 rdse 0 st Optimal it 39 obj -100.815332 rows 4650 basis 76daab9b x 508ab225
+MEMBQ_PRE: sub 0 node 121 rows 4650 basis 76daab9b bounds 6cfe3c9b dse 1280dbb2 iters_total 100586
+MEMBQ_DIAG: t 47.42 th 2 sub 0 cols 3472 tid 0 node 121 rdse 0 st Optimal it 3 obj -100.815332 rows 4650 basis abaef574 x e59b8061
+MEMBQ_PRE: sub 0 node 122 rows 4650 basis abaef574 bounds 7d512c02 dse 4038a8e7 iters_total 100589
+MEMBQ_DIAG: t 47.42 th 2 sub 0 cols 3472 tid 0 node 122 rdse 0 st Optimal it 6 obj -100.806347 rows 4650 basis d6914945 x 7f2d9011
+MEMBQ_PRE: sub 0 node 123 rows 4650 basis d6914945 bounds 5539adaf dse 337d15a1 iters_total 100595
+MEMBQ_DIAG: t 47.45 th 2 sub 0 cols 3472 tid 0 node 123 rdse 0 st Optimal it 91 obj -100.485708 rows 4650 basis 6f41c10d x 59973620
+MEMBQ_PRE: sub 0 node 124 rows 4650 basis 6f41c10d bounds bb2dd593 dse 039d09c6 iters_total 100686
+MEMBQ_DIAG: t 47.46 th 2 sub 0 cols 3472 tid 0 node 124 rdse 0 st Optimal it 15 obj -100.419873 rows 4650 basis 4fa8b04e x f6f5c9e6
+MEMBQ_PRE: sub 0 node 125 rows 4650 basis 4fa8b04e bounds de594462 dse ce5ae9d4 iters_total 100701
+MEMBQ_DIAG: t 47.48 th 2 sub 0 cols 3472 tid 0 node 125 rdse 0 st Optimal it 51 obj -100.279521 rows 4650 basis adc5c9c9 x 9fafc258
+MEMBQ_PRE: sub 0 node 126 rows 4650 basis adc5c9c9 bounds 4d6b8ff0 dse 9eac793d iters_total 100752
+MEMBQ_DIAG: t 47.49 th 2 sub 0 cols 3472 tid 0 node 126 rdse 0 st Optimal it 19 obj -100.225423 rows 4650 basis 7ae95098 x 455f0974
+MEMBQ_PRE: sub 0 node 127 rows 4650 basis 7ae95098 bounds 230589da dse e6cf8d88 iters_total 100771
+MEMBQ_DIAG: t 47.50 th 2 sub 0 cols 3472 tid 0 node 127 rdse 0 st Optimal it 38 obj -100.147447 rows 4650 basis 687befe0 x 8122241d
+MEMBQ_PRE: sub 0 node 128 rows 4650 basis 687befe0 bounds 2049076e dse dd6cfe38 iters_total 100809
+MEMBQ_DIAG: t 47.54 th 2 sub 0 cols 3472 tid 0 node 128 rdse 0 st Optimal it 118 obj -100.056219 rows 4650 basis 589916d6 x acdd7daa
+MEMBQ_PRE: sub 0 node 129 rows 4650 basis 589916d6 bounds ba984f85 dse ecac8788 iters_total 100927
+MEMBQ_DIAG: t 47.57 th 2 sub 0 cols 3472 tid 0 node 129 rdse 0 st Optimal it 100 obj -99.618075 rows 4650 basis 0a55e4e5 x 0c9f4c9c
+MEMBQ_PRE: sub 0 node 130 rows 4650 basis 0a55e4e5 bounds 6bc5c4a4 dse b4eaa87b iters_total 101027
+MEMBQ_DIAG: t 47.58 th 2 sub 0 cols 3472 tid 0 node 130 rdse 0 st Optimal it 17 obj -99.508486 rows 4650 basis c467385d x 86d5db57
+MEMBQ_PRE: sub 0 node 131 rows 4650 basis c467385d bounds e61c56a9 dse b593f06b iters_total 101044
+MEMBQ_DIAG: t 47.62 th 2 sub 0 cols 3472 tid 0 node 131 rdse 0 st Optimal it 121 obj -99.219257 rows 4650 basis 2115b0eb x 5f17d9f8
+MEMBQ_PRE: sub 0 node 132 rows 4650 basis 2115b0eb bounds e2cc52b1 dse 109cfcfc iters_total 101165
+MEMBQ_DIAG: t 47.63 th 2 sub 0 cols 3472 tid 0 node 132 rdse 0 st Optimal it 25 obj -99.108145 rows 4650 basis a6bcd8df x feae39a4
+MEMBQ_PRE: sub 0 node 133 rows 4650 basis a6bcd8df bounds 0b6a2b64 dse f533a9c0 iters_total 101190
+MEMBQ_DIAG: t 47.64 th 2 sub 0 cols 3472 tid 0 node 133 rdse 0 st Optimal it 4 obj -99.108145 rows 4650 basis 6001a7fd x c33b6f00
+MEMBQ_PRE: sub 0 node 134 rows 4650 basis 6001a7fd bounds 87db9fc4 dse 486a454e iters_total 101194
+MEMBQ_DIAG: t 47.65 th 2 sub 0 cols 3472 tid 0 node 134 rdse 0 st Optimal it 28 obj -99.040604 rows 4650 basis ebdd649d x 2e1c9e2a
+MEMBQ_PRE: sub 0 node 135 rows 4650 basis ebdd649d bounds 381d1853 dse 77d3ed25 iters_total 101222
+MEMBQ_DIAG: t 47.66 th 2 sub 0 cols 3472 tid 0 node 135 rdse 0 st Optimal it 28 obj -98.971159 rows 4650 basis b004f870 x a69f60e6
+MEMBQ_PRE: sub 0 node 136 rows 4650 basis b004f870 bounds d869fe25 dse 7c365248 iters_total 101250
+MEMBQ_DIAG: t 47.69 th 2 sub 0 cols 3472 tid 0 node 136 rdse 0 st Optimal it 89 obj -98.461198 rows 4650 basis ddb2ac68 x 056a0143
+MEMBQ_PRE: sub 0 node 137 rows 4650 basis ddb2ac68 bounds 75d6d1e3 dse 1d288513 iters_total 101339
+MEMBQ_DIAG: t 47.71 th 2 sub 0 cols 3472 tid 0 node 137 rdse 0 st Optimal it 35 obj -98.333333 rows 4650 basis 2b8c46ea x 07c3e0f9
+MEMBQ_PRE: sub 0 node 138 rows 4650 basis 2b8c46ea bounds 291ae533 dse c0c52ee3 iters_total 101374
+MEMBQ_DIAG: t 47.74 th 2 sub 0 cols 3472 tid 0 node 138 rdse 0 st Optimal it 112 obj -97.943685 rows 4650 basis 1f66d733 x 67433836
+MEMBQ_PRE: sub 0 node 139 rows 4650 basis 1f66d733 bounds 876f84f6 dse 70af9f26 iters_total 101486
+MEMBQ_DIAG: t 47.79 th 2 sub 0 cols 3472 tid 0 node 139 rdse 0 st Optimal it 159 obj -97.554037 rows 4650 basis 8c77f550 x 4780b119
+MEMBQ_PRE: sub 0 node 140 rows 4650 basis 8c77f550 bounds a264e859 dse 01c9ab13 iters_total 101645
+MEMBQ_DIAG: t 47.83 th 2 sub 0 cols 3472 tid 0 node 140 rdse 0 st Optimal it 118 obj -97.250419 rows 4650 basis 05e38e5a x f93819d8
+MEMBQ_PRE: sub 0 node 141 rows 4650 basis 05e38e5a bounds c1e6ae1a dse 03a5276c iters_total 101763
+MEMBQ_DIAG: t 47.84 th 2 sub 0 cols 3472 tid 0 node 141 rdse 0 st Optimal it 19 obj -97.242514 rows 4650 basis 9977c9db x 0dda7bd1
+MEMBQ_PRE: sub 0 node 142 rows 4650 basis 9977c9db bounds 59784f11 dse e6a043c9 iters_total 101782
+MEMBQ_DIAG: t 47.89 th 2 sub 0 cols 3472 tid 0 node 142 rdse 0 st Optimal it 169 obj -96.947030 rows 4650 basis 04d27cf9 x cbd022ce
+MEMBQ_PRE: sub 0 node 143 rows 4650 basis 04d27cf9 bounds a4ac2264 dse 154b7e22 iters_total 101951
+MEMBQ_DIAG: t 47.92 th 2 sub 0 cols 3472 tid 0 node 143 rdse 0 st Optimal it 67 obj -96.856653 rows 4650 basis 459258c3 x 137edfd5
+MEMBQ_PRE: sub 0 node 144 rows 4650 basis 459258c3 bounds 2156aefc dse a140e3f1 iters_total 102018
+MEMBQ_DIAG: t 47.93 th 2 sub 0 cols 3472 tid 0 node 144 rdse 0 st Optimal it 21 obj -96.770619 rows 4650 basis d10af822 x 959174de
+MEMBQ_PRE: sub 0 node 145 rows 4650 basis d10af822 bounds 85920101 dse 858926c5 iters_total 102039
+MEMBQ_DIAG: t 47.96 th 2 sub 0 cols 3472 tid 0 node 145 rdse 0 st Optimal it 79 obj -96.594152 rows 4650 basis 62d6a838 x 0c9a6558
+MEMBQ_PRE: sub 0 node 146 rows 4650 basis 62d6a838 bounds e1f0629a dse ffa07ba6 iters_total 102118
+MEMBQ_DIAG: t 47.97 th 2 sub 0 cols 3472 tid 0 node 146 rdse 0 st Optimal it 23 obj -96.519712 rows 4650 basis b4d3c397 x 60ddb2e4
+MEMBQ_PRE: sub 0 node 147 rows 4650 basis b4d3c397 bounds c967e7dd dse 67b9ec4c iters_total 102141
+MEMBQ_DIAG: t 47.98 th 2 sub 0 cols 3472 tid 0 node 147 rdse 0 st Optimal it 13 obj -96.435533 rows 4650 basis 5882c5e5 x ec4b0ade
+MEMBQ_PRE: sub 0 node 148 rows 4650 basis 5882c5e5 bounds 6c85de6e dse 30b61508 iters_total 102154
+MEMBQ_DIAG: t 48.00 th 2 sub 0 cols 3472 tid 0 node 148 rdse 0 st Optimal it 86 obj -96.244537 rows 4650 basis 15908244 x 16e6c668
+MEMBQ_PRE: sub 0 node 149 rows 4650 basis 15908244 bounds f564f426 dse db89f199 iters_total 102240
+MEMBQ_DIAG: t 48.04 th 2 sub 0 cols 3472 tid 0 node 149 rdse 0 st Optimal it 97 obj -95.693538 rows 4650 basis d5cde198 x 5d06a7bd
+MEMBQ_PRE: sub 0 node 150 rows 4650 basis d5cde198 bounds a2fcda0e dse 70f7e7b9 iters_total 102337
+MEMBQ_DIAG: t 48.05 th 2 sub 0 cols 3472 tid 0 node 150 rdse 0 st Optimal it 15 obj -95.595110 rows 4650 basis 9653924a x 14ed75aa
+MEMBQ_PRE: sub 0 node 151 rows 4650 basis 9653924a bounds ca78255d dse edd97169 iters_total 102352
+MEMBQ_DIAG: t 48.07 th 2 sub 0 cols 3472 tid 0 node 151 rdse 0 st Optimal it 52 obj -95.516870 rows 4650 basis 5cad2d80 x 091fb268
+MEMBQ_PRE: sub 0 node 152 rows 4650 basis 5cad2d80 bounds 903297dc dse 5341141e iters_total 102404
+MEMBQ_DIAG: t 48.07 th 2 sub 0 cols 3472 tid 0 node 152 rdse 0 st Optimal it 20 obj -95.425978 rows 4650 basis 0400b592 x 35fc8d63
+MEMBQ_PRE: sub 0 node 153 rows 4650 basis 0400b592 bounds d902b5d5 dse ba2d999e iters_total 102424
+MEMBQ_DIAG: t 48.09 th 2 sub 0 cols 3472 tid 0 node 153 rdse 0 st Optimal it 29 obj -95.365623 rows 4650 basis 51ae1d8d x d91acbd4
+MEMBQ_PRE: sub 0 node 154 rows 4650 basis 51ae1d8d bounds 534f5518 dse 764bccfa iters_total 102453
+MEMBQ_DIAG: t 48.10 th 2 sub 0 cols 3472 tid 0 node 154 rdse 0 st Optimal it 19 obj -95.312767 rows 4650 basis 0494dfe0 x fb212599
+MEMBQ_PRE: sub 0 node 155 rows 4650 basis 0494dfe0 bounds 920e002d dse 5cae7658 iters_total 102472
+MEMBQ_DIAG: t 48.10 th 2 sub 0 cols 3472 tid 0 node 155 rdse 0 st Optimal it 14 obj -95.204401 rows 4650 basis b2048963 x 8798a3fe
+MEMBQ_PRE: sub 0 node 156 rows 4650 basis b2048963 bounds 988c005f dse fa30c2c9 iters_total 102486
+MEMBQ_DIAG: t 48.12 th 2 sub 0 cols 3472 tid 0 node 156 rdse 0 st Optimal it 18 obj -95.115772 rows 4650 basis 05497f35 x c882533e
+MEMBQ_PRE: sub 0 node 157 rows 4650 basis 05497f35 bounds 61af4848 dse d95fca84 iters_total 102504
+MEMBQ_DIAG: t 48.14 th 2 sub 0 cols 3472 tid 0 node 157 rdse 0 st Optimal it 61 obj -94.952343 rows 4650 basis 8d061e54 x ff7412b7
+MEMBQ_PRE: sub 0 node 158 rows 4650 basis 8d061e54 bounds 3396ad5c dse a257fdd6 iters_total 102565
+MEMBQ_DIAG: t 48.15 th 2 sub 0 cols 3472 tid 0 node 158 rdse 0 st Optimal it 16 obj -94.852304 rows 4650 basis b8a2f30f x fe048587
+MEMBQ_PRE: sub 0 node 159 rows 4650 basis b8a2f30f bounds e40ba9af dse 657dafd3 iters_total 102581
+MEMBQ_DIAG: t 48.17 th 2 sub 0 cols 3472 tid 0 node 159 rdse 0 st Optimal it 71 obj -94.764280 rows 4650 basis df039134 x eb6ffeb2
+MEMBQ_PRE: sub 0 node 160 rows 4650 basis df039134 bounds 1e9bba32 dse 262e25af iters_total 102652
+MEMBQ_DIAG: t 48.19 th 2 sub 0 cols 3472 tid 0 node 160 rdse 0 st Optimal it 80 obj -94.599196 rows 4650 basis 312f6a6a x ade331b8
+MEMBQ_PRE: sub 0 node 161 rows 4650 basis 312f6a6a bounds 6baf1412 dse 60f920b9 iters_total 102732
+MEMBQ_DIAG: t 48.20 th 2 sub 0 cols 3472 tid 0 node 161 rdse 0 st Optimal it 20 obj -94.489903 rows 4650 basis 325bfa41 x 830414b0
+MEMBQ_PRE: sub 0 node 162 rows 4650 basis 325bfa41 bounds f97119fa dse b3234f2e iters_total 102752
+MEMBQ_DIAG: t 48.23 th 2 sub 0 cols 3472 tid 0 node 162 rdse 0 st Optimal it 98 obj -94.420685 rows 4650 basis 2f458051 x f5369e04
+MEMBQ_PRE: sub 0 node 163 rows 4650 basis 2f458051 bounds af397298 dse 7d19fbeb iters_total 102850
+MEMBQ_DIAG: t 48.24 th 2 sub 0 cols 3472 tid 0 node 163 rdse 0 st Optimal it 20 obj -94.337495 rows 4650 basis 274ea3a7 x e2f7147d
+MEMBQ_PRE: sub 0 node 164 rows 4650 basis 274ea3a7 bounds 1887910f dse f40d9677 iters_total 102870
+MEMBQ_DIAG: t 48.25 th 2 sub 0 cols 3472 tid 0 node 164 rdse 0 st Optimal it 47 obj -94.264569 rows 4650 basis 7de5c86f x caa7b796
+MEMBQ_PRE: sub 0 node 165 rows 4650 basis 7de5c86f bounds 65e0a23c dse d2332e53 iters_total 102917
+MEMBQ_DIAG: t 48.26 th 2 sub 0 cols 3472 tid 0 node 165 rdse 0 st Optimal it 36 obj -94.160458 rows 4650 basis 5670e19b x fea73274
+MEMBQ_PRE: sub 0 node 166 rows 4650 basis 5670e19b bounds 378d9d80 dse 883f32e5 iters_total 102953
+MEMBQ_DIAG: t 48.27 th 2 sub 0 cols 3472 tid 0 node 166 rdse 0 st Optimal it 11 obj -94.056087 rows 4650 basis 23937433 x 498290f2
+MEMBQ_PRE: sub 0 node 167 rows 4650 basis 23937433 bounds a89d6cd5 dse 8989c041 iters_total 102964
+MEMBQ_DIAG: t 48.29 th 2 sub 0 cols 3472 tid 0 node 167 rdse 0 st Optimal it 83 obj -93.931275 rows 4650 basis 21e248c2 x ad5ff701
+MEMBQ_PRE: sub 0 node 168 rows 4650 basis 21e248c2 bounds 9da7e3cc dse a73fc7b1 iters_total 103047
+MEMBQ_DIAG: t 48.30 th 2 sub 0 cols 3472 tid 0 node 168 rdse 0 st Optimal it 20 obj -93.827287 rows 4650 basis 59321958 x ee33f545
+MEMBQ_PRE: sub 0 node 169 rows 4650 basis 59321958 bounds db115bf7 dse 567dd52b iters_total 103067
+MEMBQ_DIAG: t 48.32 th 2 sub 0 cols 3472 tid 0 node 169 rdse 0 st Optimal it 66 obj -93.611773 rows 4650 basis 4f0f3a99 x a1a92819
+MEMBQ_PRE: sub 0 node 170 rows 4650 basis 4f0f3a99 bounds 5a666e3b dse f18b590e iters_total 103133
+MEMBQ_DIAG: t 48.33 th 2 sub 0 cols 3472 tid 0 node 170 rdse 0 st Optimal it 4 obj -93.607911 rows 4650 basis 44da6d3e x 2f4f9065
+MEMBQ_PRE: sub 0 node 171 rows 4650 basis 44da6d3e bounds d732ffe6 dse e78faeeb iters_total 103137
+MEMBQ_DIAG: t 48.33 th 2 sub 0 cols 3472 tid 0 node 171 rdse 0 st Optimal it 13 obj -93.507662 rows 4650 basis 82629d7a x 69b6a066
+MEMBQ_PRE: sub 0 node 172 rows 4650 basis 82629d7a bounds f7e19365 dse 97ed2f71 iters_total 103150
+MEMBQ_DIAG: t 48.33 th 2 sub 0 cols 3472 tid 0 node 172 rdse 0 st Optimal it 6 obj -93.503538 rows 4650 basis 3db2cf8d x 05f2a3b7
+MEMBQ_PRE: sub 0 node 173 rows 4650 basis 3db2cf8d bounds d4ee0231 dse 2eb89768 iters_total 103156
+MEMBQ_DIAG: t 48.34 th 2 sub 0 cols 3472 tid 0 node 173 rdse 0 st Optimal it 26 obj -93.443891 rows 4650 basis fc5e9ca9 x d4dd761a
+MEMBQ_PRE: sub 0 node 174 rows 4650 basis fc5e9ca9 bounds 1901fe3e dse fef9f9dd iters_total 103182
+MEMBQ_DIAG: t 48.35 th 2 sub 0 cols 3472 tid 0 node 174 rdse 0 st Optimal it 18 obj -93.332863 rows 4650 basis 0bd8a6af x 67628cea
+MEMBQ_PRE: sub 0 node 175 rows 4650 basis 0bd8a6af bounds 16e3af4b dse ff2db0b1 iters_total 103200
+MEMBQ_DIAG: t 48.36 th 2 sub 0 cols 3472 tid 0 node 175 rdse 0 st Optimal it 26 obj -93.225100 rows 4650 basis 0f154e42 x 4551d935
+MEMBQ_PRE: sub 0 node 176 rows 4650 basis 0f154e42 bounds a5391b5c dse 263bfdf2 iters_total 103349
+MEMBQ_DIAG: t 48.41 th 2 sub 0 cols 3472 tid 0 node 176 rdse 0 st Optimal it 66 obj -93.019496 rows 4650 basis 83e39cfe x c10bac2e
+MEMBQ_PRE: sub 0 node 177 rows 4650 basis 83e39cfe bounds 12b9f0f6 dse be8a6c04 iters_total 103415
+MEMBQ_DIAG: t 48.43 th 2 sub 0 cols 3472 tid 0 node 177 rdse 0 st Optimal it 55 obj -92.860674 rows 4650 basis 4e9d7921 x 7b5a20e9
+MEMBQ_PRE: sub 0 node 178 rows 4650 basis 4e9d7921 bounds b62cafe1 dse c1d3db8b iters_total 103470
+MEMBQ_DIAG: t 48.46 th 2 sub 0 cols 3472 tid 0 node 178 rdse 0 st Optimal it 99 obj -92.294831 rows 4650 basis 8971379e x a99a794a
+MEMBQ_PRE: sub 0 node 179 rows 4650 basis 8971379e bounds 18225423 dse 39f7a725 iters_total 103569
+MEMBQ_DIAG: t 48.49 th 2 sub 0 cols 3472 tid 0 node 179 rdse 0 st Optimal it 95 obj -92.238737 rows 4650 basis 8dccb83e x 8f0cb237
+MEMBQ_PRE: sub 0 node 180 rows 4650 basis 8dccb83e bounds c72f189a dse 80a1b16e iters_total 103664
+MEMBQ_DIAG: t 48.50 th 2 sub 0 cols 3472 tid 0 node 180 rdse 0 st Optimal it 12 obj -92.145074 rows 4650 basis e1b340a6 x 61081691
+MEMBQ_PRE: sub 0 node 181 rows 4650 basis e1b340a6 bounds 003643b3 dse 63b7dc3a iters_total 103676
+MEMBQ_DIAG: t 48.52 th 2 sub 0 cols 3472 tid 0 node 181 rdse 0 st Optimal it 72 obj -92.077066 rows 4650 basis 5e41e888 x 0ede1daa
+MEMBQ_PRE: sub 0 node 182 rows 4650 basis 5e41e888 bounds 1261f871 dse 3262fbe0 iters_total 103748
+MEMBQ_DIAG: t 48.53 th 2 sub 0 cols 3472 tid 0 node 182 rdse 0 st Optimal it 43 obj -92.001110 rows 4650 basis 83a33c0f x ffe66ec6
+MEMBQ_PRE: sub 0 node 183 rows 4650 basis 83a33c0f bounds 22dd1e77 dse 0cc0d632 iters_total 103791
+MEMBQ_DIAG: t 48.55 th 2 sub 0 cols 3472 tid 0 node 183 rdse 0 st Optimal it 49 obj -91.881145 rows 4650 basis 022298f9 x 619bba4b
+MEMBQ_PRE: sub 0 node 184 rows 4650 basis 022298f9 bounds 8c037001 dse b31720c7 iters_total 103840
+MEMBQ_DIAG: t 48.56 th 2 sub 0 cols 3472 tid 0 node 184 rdse 0 st Optimal it 32 obj -91.749658 rows 4650 basis d292eed6 x 9fd14a22
+MEMBQ_PRE: sub 0 node 185 rows 4650 basis d292eed6 bounds ccba20aa dse 1e9a9687 iters_total 103872
+MEMBQ_DIAG: t 48.57 th 2 sub 0 cols 3472 tid 0 node 185 rdse 0 st Optimal it 25 obj -91.689521 rows 4650 basis fb589490 x 71fcf59a
+MEMBQ_PRE: sub 0 node 186 rows 4650 basis fb589490 bounds 1c55e386 dse d3a74539 iters_total 103897
+MEMBQ_DIAG: t 48.58 th 2 sub 0 cols 3472 tid 0 node 186 rdse 0 st Optimal it 33 obj -91.604925 rows 4650 basis aac4b175 x 0c45e770
+MEMBQ_PRE: sub 0 node 187 rows 4650 basis aac4b175 bounds 0c2729f1 dse 7ad5e61b iters_total 103930
+MEMBQ_DIAG: t 48.59 th 2 sub 0 cols 3472 tid 0 node 187 rdse 0 st Optimal it 19 obj -91.580031 rows 4650 basis 90c0cbd7 x b8d15317
+MEMBQ_PRE: sub 0 node 188 rows 4650 basis 90c0cbd7 bounds a6ac4006 dse 82b4e7e6 iters_total 103949
+MEMBQ_DIAG: t 48.60 th 2 sub 0 cols 3472 tid 0 node 188 rdse 0 st Optimal it 13 obj -91.514109 rows 4650 basis 4c7d2964 x 159e5ea5
+MEMBQ_PRE: sub 0 node 189 rows 4650 basis 4c7d2964 bounds f79b6cb4 dse 2dbf9497 iters_total 103962
+MEMBQ_DIAG: t 48.61 th 2 sub 0 cols 3472 tid 0 node 189 rdse 0 st Optimal it 21 obj -91.439417 rows 4650 basis ab77c14a x 87ef56f6
+MEMBQ_PRE: sub 0 node 190 rows 4650 basis ab77c14a bounds e76c8260 dse 12f1957f iters_total 103983
+MEMBQ_DIAG: t 48.62 th 2 sub 0 cols 3472 tid 0 node 190 rdse 0 st Optimal it 13 obj -91.333981 rows 4650 basis 9a036301 x 298ccf20
+MEMBQ_PRE: sub 0 node 191 rows 4650 basis 9a036301 bounds 4a96dc8c dse 8ecb594d iters_total 103996
+MEMBQ_DIAG: t 48.64 th 2 sub 0 cols 3472 tid 0 node 191 rdse 0 st Optimal it 69 obj -90.962881 rows 4650 basis 43b5dae1 x ab1d6187
+MEMBQ_PRE: sub 0 node 192 rows 4650 basis 43b5dae1 bounds 18513479 dse c7ae9487 iters_total 104065
+MEMBQ_DIAG: t 48.66 th 2 sub 0 cols 3472 tid 0 node 192 rdse 0 st Optimal it 38 obj -90.886666 rows 4650 basis bbf3f2f5 x b21dbf61
+MEMBQ_PRE: sub 0 node 193 rows 4650 basis bbf3f2f5 bounds b49db3cd dse 936f8317 iters_total 104103
+MEMBQ_DIAG: t 48.67 th 2 sub 0 cols 3472 tid 0 node 193 rdse 0 st Optimal it 37 obj -90.751226 rows 4650 basis a5e4e7df x ec0898f4
+MEMBQ_PRE: sub 0 node 194 rows 4650 basis a5e4e7df bounds af50ab83 dse 4d9355c3 iters_total 104140
+MEMBQ_DIAG: t 48.69 th 2 sub 0 cols 3472 tid 0 node 194 rdse 0 st Optimal it 21 obj -90.729067 rows 4650 basis b7ae995b x 986d7b0a
+MEMBQ_PRE: sub 0 node 195 rows 4650 basis b7ae995b bounds bf28425f dse 366f17f3 iters_total 104161
+MEMBQ_DIAG: t 48.70 th 2 sub 0 cols 3472 tid 0 node 195 rdse 0 st Optimal it 6 obj -90.717292 rows 4650 basis 7adc9776 x 679fd93b
+MEMBQ_PRE: sub 0 node 196 rows 4650 basis 7adc9776 bounds b9d88032 dse 1630259a iters_total 104167
+MEMBQ_DIAG: t 48.71 th 2 sub 0 cols 3472 tid 0 node 196 rdse 0 st Optimal it 19 obj -90.655353 rows 4650 basis c1bc9bd3 x 8682dc81
+MEMBQ_PRE: sub 0 node 197 rows 4650 basis c1bc9bd3 bounds 5a49bdf4 dse 07878b95 iters_total 104186
+MEMBQ_DIAG: t 48.72 th 2 sub 0 cols 3472 tid 0 node 197 rdse 0 st Optimal it 35 obj -90.603764 rows 4650 basis 95c06b50 x 797d3e26
+MEMBQ_PRE: sub 0 node 198 rows 4650 basis 95c06b50 bounds b2dfe692 dse ea5bf8b1 iters_total 104221
+MEMBQ_DIAG: t 48.73 th 2 sub 0 cols 3472 tid 0 node 198 rdse 0 st Optimal it 24 obj -90.474870 rows 4650 basis be9b0b5b x c1c7afde
+MEMBQ_PRE: sub 0 node 199 rows 4650 basis be9b0b5b bounds 7cdae601 dse a9928519 iters_total 104245
+MEMBQ_DIAG: t 48.74 th 2 sub 0 cols 3472 tid 0 node 199 rdse 0 st Optimal it 25 obj -90.425413 rows 4650 basis 6367998a x 8f51f542
+MEMBQ_PRE: sub 0 node 200 rows 4650 basis 6367998a bounds 578444f1 dse a3ca95f4 iters_total 104270
+MEMBQ_DIAG: t 48.78 th 2 sub 0 cols 3472 tid 0 node 200 rdse 0 st Optimal it 132 obj -89.858753 rows 4650 basis b29a508e x ba08dcc3
+MEMBQ_PRE: sub 0 node 201 rows 4650 basis b36e314f bounds 8abd56f1 dse f00702f1 iters_total 104486
+MEMBQ_DIAG: t 49.48 th 2 sub 0 cols 3472 tid 0 node 201 rdse 1 st Optimal it 1288 obj -123.629949 rows 4650 basis b92359ef x 25990f10
+MIP:    49.87s nodes      202 open     201 lb -1.23626694e2 ub -6.20000000e1 lp_iters 106815 sb_iters 30637 sb_lps 136 sb_secs 11.42 node_iters 38154 (first 38078, lps 202) heur_iters 50018 dive_iters 2264 lp_rows 4651 node_cut_secs 0.00
+MEMBQ_PRE: sub 0 node 202 rows 4651 basis 7e13bf36 bounds 650a1bd1 dse 0739d3f1 iters_total 106815
+MEMBQ_DIAG: t 50.04 th 2 sub 0 cols 3472 tid 0 node 202 rdse 0 st Optimal it 382 obj -122.479578 rows 4651 basis 23fb08ec x 8274c2e8
+MEMBQ_PRE: sub 0 node 203 rows 4651 basis 23fb08ec bounds 8ff12a1b dse ec656d71 iters_total 107197
+MEMBQ_DIAG: t 50.15 th 2 sub 0 cols 3472 tid 0 node 203 rdse 0 st Optimal it 298 obj -121.698003 rows 4651 basis d1230e8a x 60a8cbf8
+MEMBQ_PRE: sub 0 node 204 rows 4651 basis d1230e8a bounds 4b436497 dse f7fd010b iters_total 107495
+MEMBQ_DIAG: t 50.28 th 2 sub 0 cols 3472 tid 0 node 204 rdse 0 st Optimal it 272 obj -121.155525 rows 4651 basis 7413f057 x d5277359
+MEMBQ_PRE: sub 0 node 205 rows 4651 basis 7413f057 bounds ab41ddd2 dse e648d66b iters_total 107767
+MEMBQ_DIAG: t 50.38 th 2 sub 0 cols 3472 tid 0 node 205 rdse 0 st Optimal it 234 obj -120.311788 rows 4651 basis 9ae2e124 x 1a861994
+MEMBQ_PRE: sub 0 node 206 rows 4651 basis 9ae2e124 bounds d903dec5 dse be2ea7a7 iters_total 108001
+MEMBQ_DIAG: t 50.50 th 2 sub 0 cols 3472 tid 0 node 206 rdse 0 st Optimal it 260 obj -119.448041 rows 4651 basis ed6cf4d7 x 7b24340b
+MEMBQ_PRE: sub 0 node 207 rows 4651 basis ed6cf4d7 bounds 92b0b6c5 dse ab23d2ea iters_total 108261
+MEMBQ_DIAG: t 50.69 th 2 sub 0 cols 3472 tid 0 node 207 rdse 0 st Optimal it 547 obj -118.564516 rows 4651 basis abda0a6c x 82723857
+MEMBQ_PRE: sub 0 node 208 rows 4651 basis abda0a6c bounds 97acffef dse 24144c46 iters_total 108808
+MEMBQ_DIAG: t 50.84 th 2 sub 0 cols 3472 tid 0 node 208 rdse 0 st Optimal it 384 obj -118.270521 rows 4651 basis 12d900d5 x 03fa0dd5
+MEMBQ_PRE: sub 0 node 209 rows 4651 basis 12d900d5 bounds a66c237a dse a08de546 iters_total 109192
+MEMBQ_DIAG: t 50.98 th 2 sub 0 cols 3472 tid 0 node 209 rdse 0 st Optimal it 345 obj -117.505495 rows 4651 basis 442ffdf0 x 45a06f42
+MEMBQ_PRE: sub 0 node 210 rows 4651 basis 442ffdf0 bounds f09eb908 dse 5a69f62d iters_total 109537
+MEMBQ_DIAG: t 51.08 th 2 sub 0 cols 3472 tid 0 node 210 rdse 0 st Optimal it 265 obj -116.730886 rows 4651 basis 698d76d0 x 5e1c5855
+MEMBQ_PRE: sub 0 node 211 rows 4651 basis 698d76d0 bounds 66361965 dse 32b516fc iters_total 109802
+MEMBQ_DIAG: t 51.30 th 2 sub 0 cols 3472 tid 0 node 211 rdse 0 st Optimal it 573 obj -115.928594 rows 4651 basis 395a9f9e x 36aee046
+MEMBQ_PRE: sub 0 node 212 rows 4651 basis 395a9f9e bounds b285962f dse 695836a5 iters_total 110375
+MEMBQ_DIAG: t 51.51 th 2 sub 0 cols 3472 tid 0 node 212 rdse 0 st Optimal it 477 obj -115.126301 rows 4651 basis 4e77d207 x f00b33be
+MEMBQ_PRE: sub 0 node 213 rows 4651 basis 4e77d207 bounds 05eb4147 dse a764d3c8 iters_total 110852
+MEMBQ_DIAG: t 51.54 th 2 sub 0 cols 3472 tid 0 node 213 rdse 0 st Optimal it 61 obj -114.897175 rows 4651 basis df8ccfed x e40de211
+MEMBQ_PRE: sub 0 node 214 rows 4651 basis df8ccfed bounds bb4642d4 dse c5afc122 iters_total 110913
+MEMBQ_DIAG: t 51.73 th 2 sub 0 cols 3472 tid 0 node 214 rdse 0 st Optimal it 497 obj -114.168872 rows 4651 basis b987bff6 x 7dc7cc9b
+MEMBQ_PRE: sub 0 node 215 rows 4651 basis b987bff6 bounds 5383fc80 dse 1daf8e7d iters_total 111410
+MEMBQ_DIAG: t 51.85 th 2 sub 0 cols 3472 tid 0 node 215 rdse 0 st Optimal it 326 obj -113.440569 rows 4651 basis 44da6478 x ea1b94ff
+MEMBQ_PRE: sub 0 node 216 rows 4651 basis 44da6478 bounds 51d0ce84 dse db242f84 iters_total 111736
+MEMBQ_DIAG: t 51.90 th 2 sub 0 cols 3472 tid 0 node 216 rdse 0 st Optimal it 126 obj -112.991582 rows 4651 basis 41432f32 x abcc100d
+MIP:    51.90s nodes      217 open     216 lb -1.23626694e2 ub -6.20000000e1 lp_iters 111862 sb_iters 30637 sb_lps 136 sb_secs 11.43 node_iters 43201 (first 43125, lps 217) heur_iters 50018 dive_iters 2264 lp_rows 4651 node_cut_secs 0.00
+MEMBQ_PRE: sub 0 node 217 rows 4651 basis 41432f32 bounds f0613a3a dse c2ea979b iters_total 111862
+MEMBQ_DIAG: t 51.99 th 2 sub 0 cols 3472 tid 0 node 217 rdse 0 st Optimal it 252 obj -112.350453 rows 4651 basis 1a0bb6ba x 836eafd0
+MEMBQ_PRE: sub 0 node 218 rows 4651 basis 1a0bb6ba bounds 90d9d7c2 dse a9c7a391 iters_total 112114
+MEMBQ_DIAG: t 52.01 th 2 sub 0 cols 3472 tid 0 node 218 rdse 0 st Optimal it 24 obj -112.270453 rows 4651 basis 04af908a x ea7ed98e
+MEMBQ_PRE: sub 0 node 219 rows 4651 basis 04af908a bounds 49c91485 dse 72c88f11 iters_total 112138
+MEMBQ_DIAG: t 52.07 th 2 sub 0 cols 3472 tid 0 node 219 rdse 0 st Optimal it 178 obj -111.803793 rows 4651 basis efc1dfd9 x 00674e2c
+MEMBQ_PRE: sub 0 node 220 rows 4651 basis efc1dfd9 bounds d5bc9389 dse eb49ebdf iters_total 112316
+MEMBQ_DIAG: t 52.15 th 2 sub 0 cols 3472 tid 0 node 220 rdse 0 st Optimal it 224 obj -111.162400 rows 4651 basis b0888ba6 x 28f4c8b5
+MEMBQ_PRE: sub 0 node 221 rows 4651 basis b0888ba6 bounds 0ec870f3 dse 0bc3951c iters_total 112540
+MEMBQ_DIAG: t 52.17 th 2 sub 0 cols 3472 tid 0 node 221 rdse 0 st Optimal it 13 obj -111.162400 rows 4651 basis fad9f91d x 4ff509da
+MEMBQ_PRE: sub 0 node 222 rows 4651 basis fad9f91d bounds 87b1ccc9 dse c505adfb iters_total 112553
+MEMBQ_DIAG: t 52.22 th 2 sub 0 cols 3472 tid 0 node 222 rdse 0 st Optimal it 172 obj -110.593173 rows 4651 basis 80ed04b0 x 0c794455
+MEMBQ_PRE: sub 0 node 223 rows 4651 basis 80ed04b0 bounds bcddafb4 dse 75bc3492 iters_total 112725
+MEMBQ_DIAG: t 52.24 th 2 sub 0 cols 3472 tid 0 node 223 rdse 0 st Optimal it 15 obj -110.521759 rows 4651 basis 72b4e293 x fa19ac9d
+MEMBQ_PRE: sub 0 node 224 rows 4651 basis 72b4e293 bounds c0addb97 dse b11c7d70 iters_total 112740
+MEMBQ_DIAG: t 52.26 th 2 sub 0 cols 3472 tid 0 node 224 rdse 0 st Optimal it 78 obj -110.448843 rows 4651 basis e76e1d41 x ea266a23
+MEMBQ_PRE: sub 0 node 225 rows 4651 basis e76e1d41 bounds bb458b93 dse de021338 iters_total 112818
+MEMBQ_DIAG: t 52.31 th 2 sub 0 cols 3472 tid 0 node 225 rdse 0 st Optimal it 149 obj -109.881918 rows 4651 basis e4230917 x 2f1d0b90
+MEMBQ_PRE: sub 0 node 226 rows 4651 basis e4230917 bounds 41223974 dse 988b332a iters_total 112967
+MEMBQ_DIAG: t 52.35 th 2 sub 0 cols 3472 tid 0 node 226 rdse 0 st Optimal it 100 obj -109.552089 rows 4651 basis 650c9145 x 0e31aa9e
+MEMBQ_PRE: sub 0 node 227 rows 4651 basis 650c9145 bounds 44f635ae dse 98ec2eb2 iters_total 113067
+MEMBQ_DIAG: t 52.40 th 2 sub 0 cols 3472 tid 0 node 227 rdse 0 st Optimal it 147 obj -109.071665 rows 4651 basis babdff9d x 65176b46
+MEMBQ_PRE: sub 0 node 228 rows 4651 basis babdff9d bounds 6bac2f81 dse 9ce4743b iters_total 113214
+MEMBQ_DIAG: t 52.43 th 2 sub 0 cols 3472 tid 0 node 228 rdse 0 st Optimal it 73 obj -108.731771 rows 4651 basis db68b6cd x 6356b0e7
+MEMBQ_PRE: sub 0 node 229 rows 4651 basis db68b6cd bounds 5a3567e7 dse 0f8324d9 iters_total 113287
+MEMBQ_DIAG: t 52.48 th 2 sub 0 cols 3472 tid 0 node 229 rdse 0 st Optimal it 157 obj -108.255015 rows 4651 basis 8cbaf8e9 x 9a17864d
+MEMBQ_PRE: sub 0 node 230 rows 4651 basis 8cbaf8e9 bounds 4f020131 dse 08d04fea iters_total 113444
+MEMBQ_DIAG: t 52.53 th 2 sub 0 cols 3472 tid 0 node 230 rdse 0 st Optimal it 152 obj -107.778259 rows 4651 basis 07f2b1d3 x ffb73014
+MEMBQ_PRE: sub 0 node 231 rows 4651 basis 07f2b1d3 bounds 360cc249 dse d9867108 iters_total 113596
+MEMBQ_DIAG: t 52.55 th 2 sub 0 cols 3472 tid 0 node 231 rdse 0 st Optimal it 32 obj -107.756639 rows 4651 basis ff6f9bb0 x a16a196d
+MEMBQ_PRE: sub 0 node 232 rows 4651 basis ff6f9bb0 bounds cbbba730 dse a7ae7479 iters_total 113628
+MEMBQ_DIAG: t 52.64 th 2 sub 0 cols 3472 tid 0 node 232 rdse 0 st Optimal it 244 obj -106.972811 rows 4651 basis 230c6be4 x 584c8b2b
+MEMBQ_PRE: sub 0 node 233 rows 4651 basis 230c6be4 bounds 2b7b65df dse 071153a4 iters_total 113995
+MEMBQ_DIAG: t 52.70 th 2 sub 0 cols 3472 tid 0 node 233 rdse 0 st Optimal it 51 obj -106.818508 rows 4651 basis eff7956a x 2a7f12c4
+MEMBQ_PRE: sub 0 node 234 rows 4651 basis eff7956a bounds 81ff02a3 dse aa45257a iters_total 114046
+MEMBQ_DIAG: t 52.74 th 2 sub 0 cols 3472 tid 0 node 234 rdse 0 st Optimal it 120 obj -106.406693 rows 4651 basis 1e6df89e x 0c7a4301
+MEMBQ_PRE: sub 0 node 235 rows 4651 basis 1e6df89e bounds eb789d02 dse b755f7c6 iters_total 114166
+MEMBQ_DIAG: t 52.81 th 2 sub 0 cols 3472 tid 0 node 235 rdse 0 st Optimal it 207 obj -105.894957 rows 4651 basis 337bb68f x b1534f2f
+MEMBQ_PRE: sub 0 node 236 rows 4651 basis 337bb68f bounds d8f5e295 dse 284a6f03 iters_total 114373
+MEMBQ_DIAG: t 52.86 th 2 sub 0 cols 3472 tid 0 node 236 rdse 0 st Optimal it 148 obj -105.383221 rows 4651 basis 70458112 x ae6aa1ee
+MEMBQ_PRE: sub 0 node 237 rows 4651 basis 70458112 bounds 615d8880 dse ee86d6fb iters_total 114521
+MEMBQ_DIAG: t 52.90 th 2 sub 0 cols 3472 tid 0 node 237 rdse 0 st Optimal it 136 obj -104.872069 rows 4651 basis 08b63a06 x a2eb08ae
+MEMBQ_PRE: sub 0 node 238 rows 4651 basis 08b63a06 bounds 29a36317 dse 9eb86952 iters_total 114657
+MEMBQ_DIAG: t 52.94 th 2 sub 0 cols 3472 tid 0 node 238 rdse 0 st Optimal it 104 obj -104.461355 rows 4651 basis b2f43824 x a9d15626
+MEMBQ_PRE: sub 0 node 239 rows 4651 basis b2f43824 bounds 61feae25 dse 6cc908cd iters_total 114761
+MEMBQ_DIAG: t 53.00 th 2 sub 0 cols 3472 tid 0 node 239 rdse 0 st Optimal it 187 obj -104.062864 rows 4651 basis 89c94d2a x 2744ea8f
+MEMBQ_PRE: sub 0 node 240 rows 4651 basis 89c94d2a bounds f81b5205 dse 216ad3c1 iters_total 115038
+MEMBQ_DIAG: t 53.07 th 2 sub 0 cols 3472 tid 0 node 240 rdse 0 st Optimal it 41 obj -103.947244 rows 4651 basis ade96a5f x 45121906
+MEMBQ_PRE: sub 0 node 241 rows 4651 basis ade96a5f bounds 4616e0c7 dse 12fe875c iters_total 115079
+MEMBQ_DIAG: t 53.12 th 2 sub 0 cols 3472 tid 0 node 241 rdse 0 st Optimal it 135 obj -103.558709 rows 4651 basis 361f0344 x 9c8d10a4
+MEMBQ_PRE: sub 0 node 242 rows 4651 basis 361f0344 bounds ed92120c dse a8c6a06a iters_total 115214
+MEMBQ_DIAG: t 53.14 th 2 sub 0 cols 3472 tid 0 node 242 rdse 0 st Optimal it 15 obj -103.481399 rows 4651 basis b6781bbc x 76af15b1
+MEMBQ_PRE: sub 0 node 243 rows 4651 basis b6781bbc bounds 9c572241 dse b001c073 iters_total 115229
+MEMBQ_DIAG: t 53.24 th 2 sub 0 cols 3472 tid 0 node 243 rdse 0 st Optimal it 188 obj -102.666357 rows 4651 basis 2e8b977e x 46913d59
+MEMBQ_PRE: sub 0 node 244 rows 4651 basis 2e8b977e bounds cc6a6b17 dse e5cd88fc iters_total 115417
+MEMBQ_DIAG: t 53.30 th 2 sub 0 cols 3472 tid 0 node 244 rdse 0 st Optimal it 157 obj -102.272689 rows 4651 basis 94bf9b58 x 9805668d
+MEMBQ_PRE: sub 0 node 245 rows 4651 basis 94bf9b58 bounds e1a85956 dse 6f86b1d5 iters_total 115574
+MEMBQ_DIAG: t 53.35 th 2 sub 0 cols 3472 tid 0 node 245 rdse 0 st Optimal it 158 obj -101.485352 rows 4651 basis d8e5d2e7 x e84ca0fb
+MEMBQ_PRE: sub 0 node 246 rows 4651 basis d8e5d2e7 bounds f6c4b119 dse ffc552b2 iters_total 116246
+MEMBQ_DIAG: t 53.61 th 2 sub 0 cols 3472 tid 0 node 246 rdse 0 st Optimal it 104 obj -101.091684 rows 4651 basis 68b0ab4c x 1ac4b7dd
+MEMBQ_PRE: sub 0 node 247 rows 4651 basis 68b0ab4c bounds 946c051d dse 926ae258 iters_total 116350
+MEMBQ_DIAG: t 53.63 th 2 sub 0 cols 3472 tid 0 node 247 rdse 0 st Optimal it 44 obj -101.041214 rows 4651 basis b4d57523 x 93411829
+MEMBQ_PRE: sub 0 node 248 rows 4651 basis b4d57523 bounds 5b6e67bc dse 75ab4487 iters_total 116394
+MEMBQ_DIAG: t 53.66 th 2 sub 0 cols 3472 tid 0 node 248 rdse 0 st Optimal it 89 obj -100.680653 rows 4651 basis a7df3955 x 63217ed4
+MEMBQ_PRE: sub 0 node 249 rows 4651 basis a7df3955 bounds 3e518667 dse cdad6ad1 iters_total 116483
+MEMBQ_DIAG: t 53.71 th 2 sub 0 cols 3472 tid 0 node 249 rdse 0 st Optimal it 126 obj -100.287215 rows 4651 basis ba87a2d1 x 51968cf1
+MEMBQ_PRE: sub 0 node 250 rows 4651 basis ba87a2d1 bounds 2a544daf dse 3ed81105 iters_total 116609
+MEMBQ_DIAG: t 53.73 th 2 sub 0 cols 3472 tid 0 node 250 rdse 0 st Optimal it 47 obj -100.131782 rows 4651 basis 80669ca5 x 51a08641
+MEMBQ_PRE: sub 0 node 251 rows 4651 basis 80669ca5 bounds 2e998ccd dse c94ebb7f iters_total 116656
+MEMBQ_DIAG: t 53.74 th 2 sub 0 cols 3472 tid 0 node 251 rdse 0 st Optimal it 19 obj -100.057578 rows 4651 basis 08bf95b2 x 25030f8a
+MEMBQ_PRE: sub 0 node 252 rows 4651 basis 08bf95b2 bounds 53cea6f7 dse 6e5c5cf8 iters_total 116675
+MEMBQ_DIAG: t 53.76 th 2 sub 0 cols 3472 tid 0 node 252 rdse 0 st Optimal it 67 obj -99.655539 rows 4651 basis 74c45bc5 x bf6ac59f
+MEMBQ_PRE: sub 0 node 253 rows 4651 basis 74c45bc5 bounds 1e844baa dse f8722bc9 iters_total 116742
+MEMBQ_DIAG: t 53.80 th 2 sub 0 cols 3472 tid 0 node 253 rdse 0 st Optimal it 125 obj -99.253499 rows 4651 basis d276fae2 x 8e978203
+MEMBQ_PRE: sub 0 node 254 rows 4651 basis d276fae2 bounds 53c19881 dse 62394c46 iters_total 116867
+MEMBQ_DIAG: t 53.84 th 2 sub 0 cols 3472 tid 0 node 254 rdse 0 st Optimal it 103 obj -98.851459 rows 4651 basis 7022654c x 08c2000d
+MEMBQ_PRE: sub 0 node 255 rows 4651 basis 7022654c bounds 58446152 dse 8cb73f5c iters_total 116970
+MEMBQ_DIAG: t 53.88 th 2 sub 0 cols 3472 tid 0 node 255 rdse 0 st Optimal it 113 obj -98.449420 rows 4651 basis 49f9982c x bacf738e
+MEMBQ_PRE: sub 0 node 256 rows 4651 basis 49f9982c bounds ccd71381 dse 2c6e7a54 iters_total 117083
+MEMBQ_DIAG: t 53.91 th 2 sub 0 cols 3472 tid 0 node 256 rdse 0 st Optimal it 106 obj -98.047380 rows 4651 basis 3ea3ce29 x 6ecb75bd
+MIP:    53.91s nodes      257 open     256 lb -1.23626694e2 ub -6.20000000e1 lp_iters 117189 sb_iters 31364 sb_lps 142 sb_secs 11.74 node_iters 47801 (first 47725, lps 257) heur_iters 50018 dive_iters 2264 lp_rows 4651 node_cut_secs 0.00
+MEMBQ_PRE: sub 0 node 257 rows 4651 basis 3ea3ce29 bounds 1ef303db dse 2ba8402e iters_total 117189
+MEMBQ_DIAG: t 53.95 th 2 sub 0 cols 3472 tid 0 node 257 rdse 0 st Optimal it 119 obj -97.645340 rows 4651 basis 4e607078 x f006d5f2
+MEMBQ_PRE: sub 0 node 258 rows 4651 basis 4e607078 bounds 07abcef5 dse f0c4964f iters_total 117308
+MEMBQ_DIAG: t 54.00 th 2 sub 0 cols 3472 tid 0 node 258 rdse 0 st Optimal it 158 obj -97.091808 rows 4651 basis 6c15d2d8 x 80474151
+MEMBQ_PRE: sub 0 node 259 rows 4651 basis 6c15d2d8 bounds dd73f93d dse dda651eb iters_total 117466
+MEMBQ_DIAG: t 54.03 th 2 sub 0 cols 3472 tid 0 node 259 rdse 0 st Optimal it 89 obj -96.763096 rows 4651 basis 46c9f405 x a2a820a5
+MEMBQ_PRE: sub 0 node 260 rows 4651 basis 46c9f405 bounds 259772ff dse bd5ac44a iters_total 117555
+MEMBQ_DIAG: t 54.05 th 2 sub 0 cols 3472 tid 0 node 260 rdse 0 st Optimal it 61 obj -96.355221 rows 4651 basis e0b232e1 x d3ef2ac3
+MEMBQ_PRE: sub 0 node 261 rows 4651 basis e0b232e1 bounds 8db21c5a dse e8148a53 iters_total 117616
+MEMBQ_DIAG: t 54.09 th 2 sub 0 cols 3472 tid 0 node 261 rdse 0 st Optimal it 101 obj -95.967739 rows 4651 basis dc2f039b x 591b3d8e
+MEMBQ_PRE: sub 0 node 262 rows 4651 basis dc2f039b bounds 87393122 dse 9e3d6086 iters_total 117717
+MEMBQ_DIAG: t 54.18 th 2 sub 0 cols 3472 tid 0 node 262 rdse 0 st Optimal it 253 obj -94.805452 rows 4651 basis 5a379b7e x e31a5380
+MEMBQ_PRE: sub 0 node 263 rows 4651 basis 5a379b7e bounds 865da4a8 dse 7a16fade iters_total 117970
+MEMBQ_DIAG: t 54.26 th 2 sub 0 cols 3472 tid 0 node 263 rdse 0 st Optimal it 213 obj -94.126744 rows 4651 basis c0c936dc x 7a214f9c
+MEMBQ_PRE: sub 0 node 264 rows 4651 basis c0c936dc bounds 12c0c059 dse 445451d1 iters_total 118183
+MEMBQ_DIAG: t 54.35 th 2 sub 0 cols 3472 tid 0 node 264 rdse 0 st Optimal it 291 obj -92.652673 rows 4651 basis bfc5996d x f74d139a
+MEMBQ_PRE: sub 0 node 265 rows 4651 basis bfc5996d bounds ed04716a dse 93f7c9bb iters_total 118474
+MEMBQ_DIAG: t 54.38 th 2 sub 0 cols 3472 tid 0 node 265 rdse 0 st Optimal it 104 obj -92.404027 rows 4651 basis bb68fd7d x de2a4ab0
+MEMBQ_PRE: sub 0 node 266 rows 4651 basis bb68fd7d bounds 92374907 dse 90409a4b iters_total 118578
+MEMBQ_DIAG: t 54.40 th 2 sub 0 cols 3472 tid 0 node 266 rdse 0 st Optimal it 45 obj -92.273060 rows 4651 basis 7275078c x b2042747
+MEMBQ_PRE: sub 0 node 267 rows 4651 basis 7275078c bounds c13b653c dse 4058a974 iters_total 118623
+MEMBQ_DIAG: t 54.44 th 2 sub 0 cols 3472 tid 0 node 267 rdse 0 st Optimal it 96 obj -92.066219 rows 4651 basis ff4af68a x 39c7fbb5
+MEMBQ_PRE: sub 0 node 268 rows 4651 basis ff4af68a bounds e4630182 dse 72114d27 iters_total 118719
+MEMBQ_DIAG: t 54.47 th 2 sub 0 cols 3472 tid 0 node 268 rdse 0 st Optimal it 102 obj -91.979452 rows 4651 basis 00121d23 x 9f6b9735
+MEMBQ_PRE: sub 0 node 269 rows 4651 basis 00121d23 bounds 48f300dc dse 60757b72 iters_total 118821
+MEMBQ_DIAG: t 54.51 th 2 sub 0 cols 3472 tid 0 node 269 rdse 0 st Optimal it 131 obj -91.575510 rows 4651 basis bf179459 x 515b12a2
+MEMBQ_PRE: sub 0 node 270 rows 4651 basis bf179459 bounds e98c7dab dse 7da3505a iters_total 118952
+MEMBQ_DIAG: t 54.52 th 2 sub 0 cols 3472 tid 0 node 270 rdse 0 st Optimal it 29 obj -91.465498 rows 4651 basis efa4956f x 6221c7d1
+MEMBQ_PRE: sub 0 node 271 rows 4651 basis efa4956f bounds dbd8346b dse 3fb0a491 iters_total 118981
+MEMBQ_DIAG: t 54.54 th 2 sub 0 cols 3472 tid 0 node 271 rdse 0 st Optimal it 78 obj -91.225946 rows 4651 basis a32c22fc x f9ace7f8
+MEMBQ_PRE: sub 0 node 272 rows 4651 basis a32c22fc bounds 7050fa16 dse 76dc46bb iters_total 119059
+MEMBQ_DIAG: t 54.57 th 2 sub 0 cols 3472 tid 0 node 272 rdse 0 st Optimal it 74 obj -90.687516 rows 4651 basis 98972350 x 5ac5cfa3
+MEMBQ_PRE: sub 0 node 273 rows 4651 basis 98972350 bounds 8c5a4c1f dse 690cb201 iters_total 119133
+MEMBQ_DIAG: t 54.61 th 2 sub 0 cols 3472 tid 0 node 273 rdse 0 st Optimal it 90 obj -90.189742 rows 4651 basis dcb76cc9 x e96897d7
+MEMBQ_PRE: sub 0 node 274 rows 4651 basis dcb76cc9 bounds ec9fc526 dse 327a1842 iters_total 119223
+MEMBQ_DIAG: t 54.64 th 2 sub 0 cols 3472 tid 0 node 274 rdse 0 st Optimal it 107 obj -89.818946 rows 4651 basis 1208f076 x 221175f7
+MEMBQ_PRE: sub 0 node 275 rows 4651 basis 1208f076 bounds e39d8ccf dse 02fb65c3 iters_total 119330
+MEMBQ_DIAG: t 54.68 th 2 sub 0 cols 3472 tid 0 node 275 rdse 0 st Optimal it 118 obj -89.431682 rows 4651 basis 89edf41c x d854d8da
+MEMBQ_PRE: sub 0 node 276 rows 4651 basis 89edf41c bounds 426dcf31 dse 529950e7 iters_total 119448
+MEMBQ_DIAG: t 54.71 th 2 sub 0 cols 3472 tid 0 node 276 rdse 0 st Optimal it 106 obj -88.978681 rows 4651 basis 8e2d3414 x a13565e3
+MEMBQ_PRE: sub 0 node 277 rows 4651 basis 8e2d3414 bounds 2b7cc500 dse 30ff5d06 iters_total 119554
+MEMBQ_DIAG: t 54.74 th 2 sub 0 cols 3472 tid 0 node 277 rdse 0 st Optimal it 109 obj -88.099501 rows 4651 basis 85dad7b6 x babdc4ac
+MIP: oneopt improved -6.3000000000e1 -> -7.5000000000e1
+MIP:   global fixed integers 0 of 3472 (newly 0 since the root LP)
+MIP: new incumbent -7.5000000000e1 at node 277 (54.74s) [tree rounding]
+MEMBQ_PRE: sub 0 node 278 rows 4651 basis 85dad7b6 bounds f507c030 dse 89125a58 iters_total 119663
+MEMBQ_DIAG: t 54.77 th 2 sub 0 cols 3472 tid 0 node 278 rdse 0 st Optimal it 107 obj -87.796765 rows 4651 basis e11ab5e1 x 034e044e
+MEMBQ_PRE: sub 0 node 279 rows 4651 basis e11ab5e1 bounds fd9ebed1 dse 05665a91 iters_total 119770
+MEMBQ_DIAG: t 54.78 th 2 sub 0 cols 3472 tid 0 node 279 rdse 0 st Optimal it 30 obj -87.737500 rows 4651 basis 65368023 x 6d97d233
+MEMBQ_PRE: sub 0 node 280 rows 4651 basis 65368023 bounds 2b7046f7 dse e3d13e78 iters_total 119800
+MEMBQ_DIAG: t 54.80 th 2 sub 0 cols 3472 tid 0 node 280 rdse 0 st Optimal it 77 obj -87.359091 rows 4651 basis d16520d2 x 18030e5f
+MEMBQ_PRE: sub 0 node 281 rows 4651 basis d16520d2 bounds bc7f0685 dse 6e1d2b7a iters_total 119877
+MEMBQ_DIAG: t 54.81 th 2 sub 0 cols 3472 tid 0 node 281 rdse 0 st Optimal it 18 obj -87.261538 rows 4651 basis d29967c9 x 26ace19b
+MEMBQ_PRE: sub 0 node 282 rows 4651 basis d29967c9 bounds b142ef9b dse 0179640b iters_total 119895
+MEMBQ_DIAG: t 54.83 th 2 sub 0 cols 3472 tid 0 node 282 rdse 0 st Optimal it 44 obj -86.200000 rows 4651 basis 341a417a x 57d6a7a1
+MIP: oneopt improved -7.8000000000e1 -> -8.4000000000e1
+MIP:   global fixed integers 0 of 3472 (newly 0 since the root LP)
+MIP: new incumbent -8.4000000000e1 at node 282 (54.83s) [tree rounding]
+MEMBQ_PRE: sub 0 node 283 rows 4651 basis 341a417a bounds 4d362ed1 dse 49671611 iters_total 119939
+MEMBQ_DIAG: t 54.85 th 2 sub 0 cols 3472 tid 0 node 283 rdse 0 st Optimal it 43 obj -85.333333 rows 4651 basis a918a1e7 x d5557fe8
+MEMBQ_PRE: sub 0 node 284 rows 4651 basis a918a1e7 bounds 71bf7a33 dse 1eac3bf1 iters_total 119982
+MEMBQ_DIAG: t 54.86 th 2 sub 0 cols 3472 tid 0 node 284 rdse 0 st Optimal it 15 obj -85.000000 rows 4651 basis 100e9f4a x ee724fe8
+MIP: oneopt improved -8.5000000000e1 -> -8.6000000000e1
+MIP:   global fixed integers 0 of 3472 (newly 0 since the root LP)
+MIP: new incumbent -8.6000000000e1 at node 284 (54.86s) [tree]
+MEMBQ_PRE: sub 0 node 285 rows 4651 basis d29967c9 bounds 2493fddc dse 8f3923a6 iters_total 119997
+MEMBQ_DIAG: t 54.87 th 2 sub 0 cols 3472 tid 0 node 285 rdse 1 st ObjectiveBound it 17 obj NaN rows 4651 basis d29967c9 x 00000000
+MEMBQ_PRE: sub 0 node 286 rows 4651 basis 80419bd9 bounds 2b8f53dc dse c4faa3ee iters_total 120014
+MEMBQ_DIAG: t 54.88 th 2 sub 0 cols 3472 tid 0 node 286 rdse 1 st Optimal it 3 obj -87.359091 rows 4651 basis 1399839e x ea6f3502
+MEMBQ_PRE: sub 0 node 287 rows 4651 basis 1399839e bounds 397a36af dse b9e64c05 iters_total 120017
+MEMBQ_DIAG: t 54.89 th 2 sub 0 cols 3472 tid 0 node 287 rdse 0 st Optimal it 40 obj -87.110101 rows 4651 basis a329581a x 945044ff
+MEMBQ_PRE: sub 0 node 288 rows 4651 basis a329581a bounds defd5253 dse f3110b1b iters_total 120057
+MEMBQ_DIAG: t 54.89 th 2 sub 0 cols 3472 tid 0 node 288 rdse 0 st ObjectiveBound it 9 obj NaN rows 4651 basis a329581a x 00000000
+MEMBQ_PRE: sub 0 node 289 rows 4651 basis a329581a bounds 55d3d30c dse f3110b1b iters_total 120066
+MEMBQ_DIAG: t 54.90 th 2 sub 0 cols 3472 tid 0 node 289 rdse 1 st ObjectiveBound it 9 obj NaN rows 4651 basis a329581a x 00000000
+MEMBQ_PRE: sub 0 node 290 rows 4651 basis 1399839e bounds f04c6478 dse 3fc5a64e iters_total 120075
+MEMBQ_DIAG: t 54.91 th 2 sub 0 cols 3472 tid 0 node 290 rdse 1 st ObjectiveBound it 17 obj NaN rows 4651 basis 1399839e x 00000000
+MEMBQ_PRE: sub 0 node 291 rows 4651 basis 65368023 bounds 272ff4c6 dse 69dc969a iters_total 120092
+MEMBQ_DIAG: t 54.92 th 2 sub 0 cols 3472 tid 0 node 291 rdse 1 st Optimal it 8 obj -87.557398 rows 4651 basis 90c375d2 x a1e45c19
+MEMBQ_PRE: sub 0 node 292 rows 4651 basis 90c375d2 bounds 718c565e dse 9fbd856c iters_total 120100
+MEMBQ_DIAG: t 54.93 th 2 sub 0 cols 3472 tid 0 node 292 rdse 0 st ObjectiveBound it 33 obj NaN rows 4651 basis 90c375d2 x 00000000
+MEMBQ_PRE: sub 0 node 293 rows 4651 basis 90c375d2 bounds 9bde7d0c dse 9fbd856c iters_total 120133
+MEMBQ_DIAG: t 54.94 th 2 sub 0 cols 3472 tid 0 node 293 rdse 1 st Optimal it 38 obj -87.184783 rows 4651 basis 6ca369dc x 1ca71504
+MEMBQ_PRE: sub 0 node 294 rows 4651 basis 6ca369dc bounds b54d0d9b dse 16c69f51 iters_total 120171
+MEMBQ_DIAG: t 54.95 th 2 sub 0 cols 3472 tid 0 node 294 rdse 0 st ObjectiveBound it 17 obj NaN rows 4651 basis 6ca369dc x 00000000
+MEMBQ_PRE: sub 0 node 295 rows 4651 basis 6ca369dc bounds f6cf2a88 dse 16c69f51 iters_total 120188
+MEMBQ_DIAG: t 54.95 th 2 sub 0 cols 3472 tid 0 node 295 rdse 1 st Optimal it 3 obj -87.184783 rows 4651 basis 29680a14 x d35e0867
+MEMBQ_PRE: sub 0 node 296 rows 4651 basis 29680a14 bounds 1fb01c72 dse c934e09a iters_total 120191
+MEMBQ_DIAG: t 54.96 th 2 sub 0 cols 3472 tid 0 node 296 rdse 0 st ObjectiveBound it 17 obj NaN rows 4651 basis 29680a14 x 00000000
+MEMBQ_PRE: sub 0 node 297 rows 4651 basis 29680a14 bounds 083727d4 dse c934e09a iters_total 120208
+MEMBQ_DIAG: t 54.97 th 2 sub 0 cols 3472 tid 0 node 297 rdse 1 st Optimal it 4 obj -87.184783 rows 4651 basis 5e406930 x ec57d315
+MEMBQ_PRE: sub 0 node 298 rows 4651 basis 5e406930 bounds 6f04bd7a dse ac29cc27 iters_total 120212
+MEMBQ_DIAG: t 54.98 th 2 sub 0 cols 3472 tid 0 node 298 rdse 0 st ObjectiveBound it 17 obj NaN rows 4651 basis 5e406930 x 00000000
+MEMBQ_PRE: sub 0 node 299 rows 4651 basis 5e406930 bounds b22b3eb8 dse ac29cc27 iters_total 120229
+MEMBQ_DIAG: t 54.98 th 2 sub 0 cols 3472 tid 0 node 299 rdse 1 st Optimal it 3 obj -87.184783 rows 4651 basis 62986087 x d5d1bc7e
+MEMBQ_PRE: sub 0 node 300 rows 4651 basis 62986087 bounds 29e3b8bc dse aa199d3f iters_total 120232
+MEMBQ_DIAG: t 54.99 th 2 sub 0 cols 3472 tid 0 node 300 rdse 0 st ObjectiveBound it 17 obj NaN rows 4651 basis 62986087 x 00000000
+MEMBQ_PRE: sub 0 node 301 rows 4651 basis 86ce38ba bounds 851bec89 dse f8c23d15 iters_total 120249
+MEMBQ_DIAG: t 55.17 th 2 sub 0 cols 3472 tid 0 node 301 rdse 1 st Optimal it 386 obj -121.175287 rows 4651 basis a0c43eac x bcc722f3
+MEMBQ_PRE: sub 0 node 302 rows 4651 basis a0c43eac bounds f2886c90 dse 5fb1716e iters_total 121189
+MEMBQ_DIAG: t 55.44 th 2 sub 0 cols 3472 tid 0 node 302 rdse 0 st TimeLimit it 1 obj NaN rows 4651 basis a0c43eac x 00000000
+MIP: finish start TimeLimit (55.44s)
+MIP: MEMCAP: tid 0 limit 12706 MB peak rss 148 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP:    55.44s nodes      302 open     258 lb -1.23626694e2 ub -8.60000000e1 lp_iters 121190 sb_iters 31918 sb_lps 144 sb_secs 12.00 node_iters 51248 (first 51172, lps 303) heur_iters 50018 dive_iters 2264 lp_rows 4651 node_cut_secs 0.00
+MIP: TICKS cpu 49.197 total 49197017747 lp 1424566726 prop 10960534 sep 178533412 pre 249459 heur 25378055 node 3120892 lpit 154215 lu 13850176894 lum 3185792292
+MIP: dual proofs and conflicts 18 (conflicts added 0 (from proofs 9), Farkas 0, pruned 0 nodes, tightened 14 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 0, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: cut pool propagation: calls 604, pruned 0 nodes, tightened 0 bounds, 0.00s, pool 34 cuts (51979 nonzeros); updated terms 1976, candidates 0 (0 nonzeros), rebuilds 2
+MIP: TC r: reduced-cost fixings passed to children 149; child change lists: mean length 369.3 (mean depth 49.7), max 611, open nodes now 258
+MIP: DFSBB4: d 3344.0 (frac), L 10032, root fractional 3344, integers 3472, mean depth of dive bottoms 83.0 (9 dives)
+MIP: DFSBB: kind 2, W 24945 (root LP iterations 4989), plunges 3, ended by the work limit 3, ended at a leaf or by pruning 0
+MIP: GAP1 u: child selection down 0 up 0; branching selections 0, with ties 0 (candidates in ties 0), changed by the queue counts 0; objective proofs not violated beyond the tolerance 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 16, in pool 16 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: proof CMIR cuts: tried 9, added 9, entered the cut pool 9
+MIP: conflict analysis (HiGHS style): calls 9, conflicts 18, added 16, mean length 379.3, max length 1141, 0.00s
+MIP: conflict score diag: analyses 9, bumped columns per analysis 786.44, analyses without conflict 0.000, lit reasons asked per analysis 0.00 (max 0), used 0.00, analyses cut by the budget 0.000
+MIP: cw ramp diag: scored 290, weight > 0 92, mean weight 1.01e-4, top changed 4, r_bar 0.000
+MIP: lit explain budget (all threads): resolved 0, analyses cut by the budget 0, arena rows 10, per analysis (0,1,2,3-4,5-8,9-16,17-32,33-64,65-) [9, 0, 0, 0, 0, 0, 0, 0, 0]
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: NODECNT root gate (tid 0): decision 0 (root chosen cuts 25, path 0)
+MIP: NODECNT node path aggregation (tid 0): rounds 0, rounds with path cuts 0, path cuts 0 of 0 chosen, still on true
+MIP: branching: 290 selections, 14 without strong branching for dual degeneracy; sb LPs 144 iters 31918
+MIP: inference: branchings counted 301, mean bound changes after a branching 71.80 (ENOMOTO_MIP_INF_ALL false)
+MIP: conflict weight FLAT (tid 0): hybrid scores 0, with the flat condition 0; positive gains 352 of 370 observations
+MIP: PLSB (tid 0): undecided 12187 (few samples 21, no gap 3808, depth>=50 8358), continue 18856, stop 0, continued past lookahead 0, stopped before lookahead 0; tree gains n 54 zero 18
+MIP: marginal LP infeasibility (all threads, cumulative): checked with a fresh LP 0 no conclusion 0 strong branching children unknown 0 root and LP probing 0 fresh LP feasible 0
+MIP: integral-looking node LP solutions outside the domain (LP bounds behind the domain), re-solved: 0
+MIP: LP infeasibility certificates, minimum uniform violation (log10 bins <-12 .. >=-4, other): [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+MIP: sibling backtracks 9; basis restores 12 (basic count mismatch 0), first LP iterations after a restore 8005
+MIP: mem1 sibling LU (all threads): held at most 1, pushed 396, dropped 381, adopted 5
+MIP: GAP4 c: dense cuts kept out of the cut pool propagation (all threads, counted per rebuild): 55
+MIP: memc (all threads): packed nodes 0, changes 0 (0 bytes packed, 0 unpacked), bases 0 (0 bytes packed, 0 unpacked)
+MIP: basis nb diag: tree first LPs restored 12 iters 8005 (667.1/LP), others 290 iters 43167 (148.9/LP); root LPs: submip 5 lps 9858 iters (1971.6/LP) 0.86s, bgcopy 0 lps 0 iters (0.0/LP) 0.00s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 4989 iters (4989.0/LP) 0.72s; nb hints applied 15 solves, 38296 given, 1188 changed
+MIP: node diag: nodes 302 node LPs 303 mean rows 4650.3 iters 51248 (169.1/LP) LP secs 18.26 sep rounds 0 added 0 node cut secs 0.00 final rows 4651
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz Some(1506.9411764705883) (rows mean 2.7)
+MIP: orbital fixing (21 generators): fixed 1408 bounds at 105 nodes, pruned 0 nodes
+MIP: finish done (55.44s)
+MIP: RCSTRONG: knapsack row (all threads, cumulative): calls 0, pruned 0, tightened 0, built 4 (mean length 0.0)
+MIP: SUBFIX summary: dives 2 sub-MIPs 2 accepted 1 root-infeasible retries 0 below 0.1 0; success 1 (mean rate 0.60), infeasible 0 (mean rate NaN)
+MIP: solve returned TimeLimit after 60.01s (time limit 60.00s)
+MIP: polished the solution (60.01s)
