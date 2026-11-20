@@ -64,6 +64,8 @@ pub struct OpenNode {
     /// 試作 `ENOMOTO_MIP_TC` の `s`: 祖先から引き継いだ固定 (`TC` の `a`・`b`・`r`) を、親の鎖を共有する連結で持つ ([`InhChain`])。
     /// 待ち行列から取り出して根から積み直すときだけ当てる (ほかの使い道では見えないが、見落としても定義域が広いだけで正しさは変わらない)
     pub inh: Option<Rc<InhChain>>,
+    /// 試作 `ENOMOTO_MIP_CWM` ([`super::cwm`]): 衝突の重みの倍率と、対で比べている部分木の札。子は親のものを引き継ぐ
+    pub cwm: Option<std::sync::Arc<super::cwm::CwmTag>>,
 }
 
 /// [`OpenNode::inh`] の鎖の 1 つの環: このノードで足した引き継ぎの固定と、親の環。
@@ -883,7 +885,7 @@ mod tests {
         let mut q = NodeQueue::new();
         q.pack_basis = true;
         let b = Rc::new(Basis { col: vec![VarStatus::Basic, VarStatus::Upper], row: vec![VarStatus::Lower] });
-        let mk = |lb: f64| OpenNode { changes: Vec::new(), lower_bound: lb, estimate: lb, depth: 1, basis: Some(b.clone()), basis_epoch: 0, dse: None, branch: None, prot: None, tags: None, sb: None, inh: None };
+        let mk = |lb: f64| OpenNode { changes: Vec::new(), lower_bound: lb, estimate: lb, depth: 1, basis: Some(b.clone()), basis_epoch: 0, dse: None, branch: None, prot: None, tags: None, sb: None, inh: None, cwm: None };
         q.push(mk(1.0));
         q.push(mk(2.0));
         assert!(q.iter().all(|n| n.basis.is_none()));
