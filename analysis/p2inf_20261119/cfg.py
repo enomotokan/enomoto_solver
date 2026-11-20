@@ -7,7 +7,9 @@
   (ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT=0.1、README 4.13 節)。
 - sstfeas / sstfeas_t1: 目的が全部 0 の問題に限って対称性を SST のカットで扱う (ENOMOTO_MIP_SYM_SST_FEAS=1、README 4 節)。def_t1 と対。
 - cwr: 衝突の重みを解いている途中で上げるシグモイドの形 (ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP=0.1) と、上げている間だけの LIT_EXPLAIN
-  (ENOMOTO_MIP_LIT_EXPLAIN=auto、README 5 節)。上がらない問題は既定と同じ動き。"""
+  (ENOMOTO_MIP_LIT_EXPLAIN=auto、README 5 節)。比べる用。
+- cwrh: 付け方は最初から HiGHS 式 (RAMP_HCS)、重みは 0.1 × σ (σ < 0.05 は 0)、LIT_EXPLAIN=sig (理由はいつも付け、遡る数を解析ごとに
+  round(16σ) まで)。σ が上がらない問題は既定と同じ道筋 (1 スレッドでノード数が一致、README 5.5 節)。"""
 CFGS = {
     "def": {},
     "rowtiny": {"ENOMOTO_MIP_LPINF_ROWTINY": "1"},
@@ -16,5 +18,6 @@ CFGS = {
     "cfx": {"ENOMOTO_MIP_LIT_EXPLAIN": "1", "ENOMOTO_MIP_HIGHS_CONFLICT_SCORE": "1", "ENOMOTO_T_MIP_CONFLICT_WEIGHT": "0.1"},
     "sstfeas": {"ENOMOTO_MIP_SYM_SST_FEAS": "1"},
     "cwr": {"ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP": "0.1", "ENOMOTO_MIP_LIT_EXPLAIN": "auto"},
+    "cwrh": {"ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP": "0.1", "ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP_HCS": "1", "ENOMOTO_T_MIP_CW_RAMP_FLOOR": "0.05", "ENOMOTO_MIP_LIT_EXPLAIN": "sig"},
     "sstfeas_t1": {"ENOMOTO_MIP_SYM_SST_FEAS": "1"},
 }

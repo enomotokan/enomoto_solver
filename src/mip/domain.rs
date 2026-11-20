@@ -93,6 +93,9 @@ pub struct Domain {
     pub conflict: Option<ConflictSrc>,
     /// 今伝播している行 (境界の変更の理由として記録する。伝播の外では `-1`)。
     cur_reason: i32,
+    /// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=sig` (p2inf_20261119): 衝突解析 1 回で遡ってよいカットの写しの表の理由 (`CUT_REASON_BASE` 以下) の変更の数。
+    /// 超えた分は理由のない外からの変更と同じ葉として扱う (遡れる変更に数えない)。既定は無制限
+    pub cut_reason_budget: u64,
     /// [`Self::take_low_water`] から後に変更の記録が最も短くなったときの長さ (巻き戻しで下がる)。
     low_water: usize,
     /// 根に戻ったときに適用する大域的な境界の締め付け (列, 上限か, 値)。
@@ -170,6 +173,7 @@ impl Domain {
             infeasible: false,
             conflict: None,
             cur_reason: -1,
+            cut_reason_budget: u64::MAX,
             low_water: 0,
             pending_global: Vec::new(),
             dbg_sol: None,
@@ -945,9 +949,33 @@ impl Domain {
     /// (HiGHS `conflictAnalysis` と `resolveDepth(.., increaseConflictScore = true)`。再収束の衝突の分は数えない)。
     pub fn analyze_multi_bumps(&self, p: &MipProblem, start: ConflictStart, max_len: usize, reconv: bool, mut bumps: Option<&mut Vec<(usize, bool)>>, proofs: Option<ProofLookup>) -> Vec<Vec<(usize, bool, f64)>> {
         // 遡れる変更: 行の伝播 (`>= 0`)、試作では双対証明の締め付け (通し番号つき) も
+        // カットの写しの表の理由は `cut_reason_budget` 個まで (遡ると決めた変更を覚え、同じ変更は数え直さない)
+        let cut_ok = std::cell::RefCell::new(std::collections::HashSet::<usize>::new());
+        let cut_refused = std::cell::Cell::new(false);
         let resolvable = |k: usize| -> bool {
             let r = self.stack[k].reason;
-            r >= 0 || (proofs.is_some() && r <= PROOF_REASON_BASE)
+            if r >= 0 {
+                return true;
+            }
+            if proofs.is_none() || r > PROOF_REASON_BASE {
+                return false;
+            }
+            if r > CUT_REASON_BASE || self.cut_reason_budget == u64::MAX {
+                return true;
+            }
+            let mut ok = cut_ok.borrow_mut();
+            if ok.contains(&k) {
+                return true;
+            }
+            if (ok.len() as u64) < self.cut_reason_budget {
+                ok.insert(k);
+                CUT_BUDGET[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return true;
+            }
+            if !cut_refused.replace(true) {
+                CUT_BUDGET[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            false
         };
         let end = self.stack.len();
         let dec: Vec<usize> = (0..end).filter(|&k| self.stack[k].reason == -1).collect();
@@ -1420,6 +1448,8 @@ impl Domain {
 }
 
 /// 診断用: 衝突解析が失敗した理由の回数 [決定なし, 途中で長すぎ, 理由の行に列がない, 空, 最後に長すぎ, その長さの和]
+/// 診断 (`ENOMOTO_MIP_LIT_EXPLAIN=sig`): [予算の内で遡ると決めたカットの写しの表の理由の変更の数, 予算で遡れなかった変更のあった解析の数]
+pub static CUT_BUDGET: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
 pub static CONFLICT_FAIL: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
 /// 診断 `ENOMOTO_MIP_CONFLICT_LEV_DIAG` の数: [調べた深さ, 1-UIP まで解けた深さ, 解けずに 2 つ以上残った深さ, そのうち行でない理由
 /// (決定以外) の変更が残った深さ, 残った変更の理由ごとの数 (-1 決定, -2 外から, -3 局所の被約費用, -4 強分岐, -5 orbitope,
