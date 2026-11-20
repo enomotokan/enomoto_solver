@@ -21622,6 +21622,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for &(j, upper, v) in lits {
                 let bin = p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0;
                 if !bin || !((upper && v == 0.0) || (!upper && v == 1.0)) {
+                    // 試作 `ENOMOTO_MIP_LIT_EXPLAIN=g` (analysis/slowm_20261119 §17): 一般整数の境界の文字を含む衝突は、文字の (列, 側) を
+                    // 行の形 (上限の文字は −1、下限は +1) にし、右辺を NaN の印にして写しの表に入れる。衝突解析は、この理由の変更を
+                    // ほかの文字を真にした最後の変更で説明する ([`super::domain::Domain::analyze_multi_bumps`])
+                    if lit_explain_gen() {
+                        let row: Vec<(usize, f64)> = lits.iter().map(|&(k, up, _)| (k, if up { -1.0 } else { 1.0 })).collect();
+                        arena.push((row, f64::NAN));
+                        dom.set_cut_tag(arena.len() - 1);
+                        return;
+                    }
                     dom.set_external_tag(5);
                     return;
                 }
@@ -27285,6 +27294,12 @@ pub(super) fn inf_all() -> bool {
 /// 試作 `ENOMOTO_MIP_LIT_EXPLAIN` (p2inf_20261119、既定では使わない): リテラルの衝突のプールの伝播で締めた変更を、衝突を行にしたものから
 /// 衝突解析で遡れるようにする ([`Solver::lit_prop`])。bnatt400 では解析の段の 1/3 がリテラルの衝突で締めた変更を遡れずに止まっていた
 /// (SCIP は衝突を制約 (logicor) として持つので遡れる)
+/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=g` (analysis/slowm_20261119 §17、既定では使わない): 一般整数の境界の文字を含む衝突で締めた変更も遡れるようにする
+pub(super) fn lit_explain_gen() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v.contains('g')))
+}
+
 pub(super) fn lit_explain() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v != "0" && v != "auto" && v != "sig"))
