@@ -768,7 +768,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// clique カット用の衝突グラフ (根で一度だけ作って使い回す)。
-    fn clique_graph_get(&mut self) -> std::rc::Rc<super::clique::CliqueGraph> {
+    pub(super) fn clique_graph_get(&mut self) -> std::rc::Rc<super::clique::CliqueGraph> {
         let p = self.p;
         if self.clique_graph.is_none() {
             let binary: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && self.dom.global_lo[j] >= 0.0 && self.dom.global_up[j] <= 1.0).collect();
