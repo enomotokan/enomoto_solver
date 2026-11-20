@@ -88,3 +88,21 @@
   - 証明は、余裕が負 (目的の最小値が打ち切り値を超える) か、固定の後の伝播が矛盾した回。
 - 計測の台本: cfg.py (def・vb・vbc・vbcl)・plan.py・run.py・summ.py (`python summ.py P vbcl vb` のように基準も選べる)。
   M の対象は workscan.py の結果で決める。
+
+## 6. `e`: LP probing の前に固定する (利用者の案)
+
+- pseudoobj の本体を、Solver の外で回せる関数 `vbclq::pseudoobj` (src/mip/vbclq.rs) に切り出した。
+  Solver の `vbclq_pseudoobj` はその包み。
+- `ENOMOTO_MIP_VBCLQ=e` の流れ (presolve_mip_depth の中、前処理の LP probing の直前):
+  1. 暫定解の値ちょうどを上限にして固定する (暫定解は残る)。
+  2. 固定したら前処理をかけ直す (quick_probe の固定と同じ形)。
+  3. かけ直した問題で LP probing を回す。
+- 暫定解の出どころ: VB01 の Solver の外の版を SCIP-VB に依頼中。それまでは診断 `ENOMOTO_MIP_VBCLQ_PRE_CUTOFF=<値>` で上限だけ与える。
+- hypothyroid-k1 (1 スレッド、`VB01=b` + `VBCLQ=e` + 上限 −2692 = VB01 が出す値):
+  - 0.65 秒・0.66 秒 (種 1・2)。vbcl は 3.86 秒・3.27 秒。
+  - 固定は 67 列 (伝播を含めて 71 列が変わる、0.03 秒)。
+  - かけ直しで行 5189 → 1733 → 899、非零 431326 → 3930。
+  - LP probing の根の LP は 19 反復・0.00 秒 (前は 2607 反復・3.3 秒)。LP probing の固定 0 は前と同じ。
+  - さらにかけ直して行 227・自由な列 121。根の LP は 34 反復で −2851 (最適)。
+- P の計測 (親、分担 2) では、vbcl (LP probing を省く) が ns1116954 種 1 で 2.6 → 35.4 秒、neos8 種 3 で 5.2 → 16.4 秒と大きく遅れた。
+  l は害が大きい。本命は e で、確かめの組に ns1116954・neos8 を入れる。
