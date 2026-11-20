@@ -139,3 +139,21 @@ python analysis/scip_rens_20261120/summ.py
   解なし 146、ノード上限で解なし 168、最適だが良くならない 192)。
 - 計測: `python plan.py 18 2 cfr r` → `shards_Mr.json`・`shards_Pr.json` (M は cf と同じ 69 問 × 種 1・2、{def, cfr})。
   `python analysis/scip_rens_20261120/run.py Pr K` (K = 0〜1)、`run.py Mr K` (K = 0〜17)、集計は `summ.py Pr cfr`・`summ.py Mr cfr`。
+
+## 10. 計測の結果と結論 (2026-11-20)
+
+集計は `summ_P.txt` 相当 (7 節)、`summ_M.txt` (`summ.py M lfc`)、`summ_Pr.txt` (`summ.py Pr cfr`)、`summ_Mr.txt` (`summ.py Mr cfr`)。
+どれも食い違い 0・crash 0。
+
+| 設定 | P (58 問 × 種 1〜3、60 秒) 解けた数・SGM | M (LP face の回る 69 問 × 種 1・2、600 秒) 解けた数・SGM | 全種で遅い問題 |
+|---|---|---|---|
+| `cf` (`lfc`) | 137 → 138・-4.5% [-13.0, +1.3] | 80 → 82・+0.2% [-4.3, +5.4] | neos-1582420 (M、2.02・1.28) |
+| `cfr` | 140 → 139・-2.7% [-9.1, +1.7] | 80 → 80・**+3.6% [-1.2, +9.1]** | なし |
+
+- `cf`: neos-1582420 が全種で 1.25 倍超遅い (8 節: z̄ が最適値に届かず LP face の解を消す)。
+- `cfr`: neos-1582420 は 0.82 (1.17・0.58) に戻ったが、M の SGM の上端 +9.1% が基準 (≲ +5%) を超える
+  (gmu-35-40 1.86・neos-662469 1.63・neos5 1.28・neos-957323 1.20 など。解き直しで LP face のサブ MIP が長くなる分か揺れかは未確認)。
+- 10teams はどちらの設定でも 3 種とも速い (P の比: cf 0.21・0.07・0.35、cfr 0.36・0.34・0.16)。
+
+**結論 (利用者の判断): LPFACE は既定にせず、この課題は閉じる。** 試作のスイッチ `ENOMOTO_MIP_LPFACE` (`c`・`z`・`f`・`r`) と
+診断 `ENOMOTO_MIP_LPFACE_COUNT` は既定オフのまま残す。コードの既定は変えていない。

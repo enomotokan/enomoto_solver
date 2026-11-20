@@ -203,16 +203,22 @@ pub(super) fn vb01(c: char) -> bool {
     env_str!("ENOMOTO_MIP_VB01").is_some_and(|v| v.contains(c) || (c == 'b' && v == "1"))
 }
 
-/// 試作 `ENOMOTO_MIP_VBCLQ` の値 (既定では使わない。analysis/scipgate_20261120)。空・`0` 以外なら根の LP の前の pseudoobj
-/// ([`Solver::vbclq_pseudoobj`])、`l` を含めば前処理の LP による固定もしない
+/// `ENOMOTO_MIP_VBCLQ` の値 (既定 `e`、2026-11-20 に既定にした。analysis/scipgate_20261120。`=0`・`=off` で使わない (以前の既定))。
+/// - `e`: 各求解の最初の LP の直前に、LP を使わない発見法 VB01 の解と、その値を上限にした pseudoobj の固定をかける
+///   (最初の求解では前処理の LP による固定の前 ([`super::presolve_vbclq_e`])、それ以外は根の LP の前 ([`Solver::vbclq_pseudoobj`]))。
+/// - 試作の値: `1` (根の LP の前の pseudoobj だけ)、`l` (pseudoobj + 前処理の LP による固定をしない)、`eR` (診断: 根の LP の前の道だけ)
 pub(super) fn vbclq() -> Option<&'static str> {
-    env_str!("ENOMOTO_MIP_VBCLQ").filter(|v| !v.is_empty() && *v != "0")
+    env_def!("ENOMOTO_MIP_VBCLQ", "e").filter(|v| !v.is_empty())
 }
 
-/// 試作 `ENOMOTO_MIP_RHBUDGET` (既定では使わない。analysis/rootlp_20261120): 外側の根の Pump・ダイビングの LP 反復の予算を、
+/// `ENOMOTO_MIP_RHBUDGET` (analysis/rootlp_20261120): 外側の根の Pump・ダイビングの LP 反復の予算を、
 /// 根の LP の反復の倍数 (`RHEUR` の共有の予算) ではなく、この求解でそれまでに使った LP の反復の割合 (SCIP と同じ形) にする
+///
+/// **2026-11-20 から既定 (`=0` で以前の共有の予算 `RHEUR` の `b`・`s`)。** P 58 問 × 種 1〜3: 138/138・−2.4% [−6.1, +1.1]、全種で遅い問題なし。
+/// M (根で Pump・ダイビングが回る 32 問 × 種 1・2): 14/14・+18.8% [−10.4, +60.2] (区間の広さは解けた問題の少なさ、全種で遅い neos859080 は
+/// 1 スレッドで同じ計算になる 4 スレッドの揺れ。analysis/rootlp_20261120 の 6 節)
 pub(super) fn rhbudget_on() -> bool {
-    env_str!("ENOMOTO_MIP_RHBUDGET").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_RHBUDGET", "1").is_some()
 }
 
 pub(super) fn rheur(c: char) -> bool {
@@ -7378,7 +7384,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 目的が全部 0 (実行可能性問題) なら解が見つかれば最適で、ほかの根のヒューリスティクスはほとんど当たらないので、
         // 残りの `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC` (0.5) まで回す (秒の上限なし)。ns1116954 では残り 16 秒の 0.15 倍 (2.5 秒、FJ 2〜3 回) では足りなかった
         let feas = super::heuristics::fj_feas_extend(&self.p);
-        // 試作 `ENOMOTO_MIP_FEAS_NORETRY` ([`super::feas_noretry_on`]): 実行可能性問題で早めの探索が解なしで上限まで回っていれば回さない
+        // `ENOMOTO_MIP_FEAS_NORETRY` ([`super::feas_noretry_on`]、2026-11-20 から既定): 実行可能性問題で早めの探索が解なしで上限まで回っていれば回さない
         if feas && super::feas_noretry_on() && !self.params.submip && super::FEAS_EARLY_DRY.with(|f| f.get()) {
             if self.params.verbose {
                 eprintln!("MIP: robust FJ retry skipped (FEAS_NORETRY: the early FJ/Local-MIP found nothing within its limit)");
@@ -11164,7 +11170,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     // 試作 `ENOMOTO_MIP_RHEUR` の `b`・`s` ([`rheur`]): Pump と 3 つのダイビングの LP 反復の予算を共有にする
                     let pool = (rheur('b') || rheur('s')) && !self.params.submip && self.snap.is_none();
-                    // 試作 `ENOMOTO_MIP_RHBUDGET` ([`rhbudget_on`]、既定では使わない。analysis/rootlp_20261120): Pump・ダイビング 1 本の LP 反復の
+                    // `ENOMOTO_MIP_RHBUDGET` ([`rhbudget_on`]、2026-11-20 から既定。analysis/rootlp_20261120): Pump・ダイビング 1 本の LP 反復の
                     // 予算を、この求解でここまでに使った LP の反復 W (根の LP と根のカット、Pump・ダイビングの前に 1 度だけ読む) の割合 + 1000 にする
                     // (SCIP の `maxlpiterquot`・`maxlpiterofs` の既定と同じ数: ダイビング 0.05、Pump 0.01)。共有の予算 (`b`・`s`) の代わり
                     let rhb = rhbudget_on() && !self.params.submip && self.snap.is_none();
@@ -23507,7 +23513,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_TREEEFF` の `s`・`h` (試作): 木の中の再スタートの後の求解の間だけ印を立てる (根のカットのループを短くする)
         let tree_child = self.force_restart && self.nodes > 1 && (treeeff('s') || treeeff('h'));
         let prev_child = TREE_RESTART_CHILD.with(|c| c.replace(tree_child || TREE_RESTART_CHILD.with(|c| c.get())));
-        // 試作 `ENOMOTO_MIP_RESTART_DROP_FIXED` ([`super::restart_drop_fixed`]): 固定された列を落とした問題を解いて、解を元の番号に戻す
+        // `ENOMOTO_MIP_RESTART_DROP_FIXED` (既定、[`super::restart_drop_fixed`]): 固定された列を落とした問題を解いて、解を元の番号に戻す
         let r = match super::restart_drop_fixed(&newp, self.params.verbose) {
             Some(mut df) => {
                 let r = super::solve_problem(&df.q, params, true);
