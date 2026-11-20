@@ -1361,6 +1361,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     conflicts_added: u64,
     /// HiGHS 式の衝突解析 [呼び出し, 作った衝突, 入れた衝突, 長さの和]
     multi_stats: [u64; 4],
+    /// 診断 (p2inf_20261119): [衝突解析の回数, HiGHS 式で点数を上げた列の数の和, 衝突を作れなかった解析の数]
+    hcs_diag: [u64; 3],
     /// 試作 `ENOMOTO_MIP_CUTCONF`: 証明のプールに cut-based の衝突の制約を入れている最中 (分類 2 にする)
     cutconf_push: bool,
     multi_secs: f64,
@@ -5736,6 +5738,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_dirty: true,
         conflicts_added: 0,
         multi_stats: [0; 4],
+        hcs_diag: [0; 3],
         cutconf_push: false,
         multi_secs: 0.0,
         cutsel_best: 0.0,
@@ -12666,7 +12669,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // (既定 0.69)、s = `ENOMOTO_T_MIP_CW_RAMP_S` (既定 0.1): 数え上げ (feat.jsonl、ノード 500) で重みに害のあった問題は r ≤ 0.62 (多くは ≤ 0.46)、
             // 得のあった問題は r ≥ 0.76 (多くは ≥ 0.8) だったので、真ん中を両者の間 0.69 に、幅を「害の側の多く (≤ 0.46) で 1 割以下、得の側の多く (≥ 0.8)
             // で 7 割以上」になる 0.1 にした。HiGHS 式の衝突スコア (付け方の切り替えで連続には混ぜられない) は σ ≥ 0.5 の間だけ入れる
-            if let Some(w) = cw_ramp() {
+            // 部分 MIP (RINS など) では上げない (主の木だけ。部分 MIP で上がると、その結果を通して上がらない問題でも主の道筋が変わった)
+            if let Some(w) = cw_ramp().filter(|_| !self.params.submip) {
                 let win = tunable!("ENOMOTO_T_MIP_CW_DYN_WINDOW", 200u64, u64).max(1);
                 if self.nodes >= self.cw_dyn_state.1 + win {
                     let made = self.multi_stats[1].saturating_sub(self.cw_dyn_state.2);
@@ -12674,7 +12678,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.cw_ramp_ema = if self.cw_ramp_ema < 0.0 { r } else { 0.5 * self.cw_ramp_ema + 0.5 * r };
                     let (mid, sl) = (tunable!("ENOMOTO_T_MIP_CW_RAMP_MID", 0.69, f64), tunable!("ENOMOTO_T_MIP_CW_RAMP_S", 0.1, f64).max(1e-9));
                     let sig = 1.0 / (1.0 + (-(self.cw_ramp_ema - mid) / sl).exp());
-                    let nw = w * sig;
+                    // σ が床 (`ENOMOTO_T_MIP_CW_RAMP_FLOOR`、既定 0 = 床なし) 未満なら重み 0 (上がらない問題を既定と同じ分枝にする。
+                    // 床なしだと σ ≈ 0.007 程度でも重みが 0 でなく、同点の崩し方などで既定と道筋が変わる)
+                    let nw = if sig < tunable!("ENOMOTO_T_MIP_CW_RAMP_FLOOR", 0.0, f64) { 0.0 } else { w * sig };
                     if self.params.verbose && !self.params.submip && (sig >= 0.5) != self.cw_dyn_state.0 {
                         eprintln!("MIP: CW_RAMP (tid {}): conflict weight {:.4} -> {nw:.4} at node {} (conflicts per node {r:.2}, smoothed {:.2})", self.pool_tid, self.pc.cw_dyn, self.nodes, self.cw_ramp_ema);
                     }
@@ -12688,7 +12694,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.cw_dyn_state.2 = self.multi_stats[1];
                 }
             }
-            if let Some(w) = cw_dyn() {
+            if let Some(w) = cw_dyn().filter(|_| !self.params.submip) {
                 let win = tunable!("ENOMOTO_T_MIP_CW_DYN_WINDOW", 200u64, u64).max(1);
                 if self.cw_dyn_state.0 {
                     self.pc.cw_dyn = w;
@@ -14593,6 +14599,138 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if fixed_int(blo[j], bup[j]) { s_b += 1 }
             }
         }
+        // (d) λ を K 個持つ表 (README §15.3): L(λ) = Σ_i λ_i b̂_i + Σ_j min_{大域の箱} d_j x_j、d = c − Aᵀλ (行は根の LP のカットの後の行。λ_i > 0 は下側、
+        // < 0 は上側を使い、使う側が無限なら 0 にする)。c x ≤ u なら d x ≤ u − Σ λ b̂ なので、d_j の向きに動かす幅は (u − L) / |d_j| まで
+        let lagr = |y: &[f64]| -> Option<(f64, Vec<f64>)> {
+            let mut d = p.cost.clone();
+            let mut l = 0.0f64;
+            for i in 0..nr {
+                let (lo, up) = (rlo[i], rup[i]);
+                let yi = if y[i] > 0.0 && lo.is_finite() { y[i] } else if y[i] < 0.0 && up.is_finite() { y[i] } else { 0.0 };
+                if yi == 0.0 {
+                    continue;
+                }
+                l += yi * if yi > 0.0 { lo } else { up };
+                for &(j, a) in &rows[i] {
+                    d[j] -= yi * a;
+                }
+            }
+            for j in 0..n {
+                let b = if d[j] > 0.0 { glo[j] } else if d[j] < 0.0 { gup[j] } else { continue };
+                if !b.is_finite() {
+                    return None;
+                }
+                l += d[j] * b;
+            }
+            Some((l + p.offset, d))
+        };
+        let apply = |l: f64, d: &[f64], lo: &mut [f64], up: &mut [f64]| {
+            let gap = lim - l;
+            if !(gap.is_finite() && gap >= 0.0) {
+                return;
+            }
+            for &j in &free {
+                if d[j] > 1e-9 {
+                    up[j] = up[j].min((glo[j] + gap / d[j] + 1e-9).floor());
+                } else if d[j] < -1e-9 {
+                    lo[j] = lo[j].max((gup[j] - gap / (-d[j]) - 1e-9).ceil());
+                }
+            }
+        };
+        let nfix = |lo: &[f64], up: &[f64], set: &[usize]| set.iter().filter(|&&j| fixed_int(lo[j], up[j])).count();
+        let y0 = self.lp.row_duals();
+        let kmax = tunable!("ENOMOTO_T_MIP_DIAG_OBBT_LAMK", 100usize, usize);
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        // 種類ごとの λ の列 (L, d) を作る。R: 根の双対、C: カットのラウンドの被約費用 (t4_rc_extra、ENOMOTO_MIP_TREE4_RCUNION で溜まる)、
+        // P: 行の境界を 1e-5 の相対で乱した LP の最適双対 (退化した根の別の双対の代わり)、X: 費用を 1e-3 の相対で乱した LP の双対、G: 根の双対に 10% の乱れ
+        let t_lam = Instant::now();
+        let mut fams: Vec<(&str, Vec<(f64, Vec<f64>)>)> = Vec::new();
+        let r0 = lagr(&y0);
+        fams.push(("R", r0.iter().cloned().collect()));
+        let mut cl = Vec::new();
+        for (z, list) in self.t4_rc_extra.iter() {
+            // 表の z はそのラウンドの LP の目的値 (定数項込み)、d は非基底の列の被約費用 (基底の列は 0)
+            let mut d = vec![0.0; n];
+            for &(j, _, dj, _) in list {
+                d[j] = dj;
+            }
+            cl.push((*z, d));
+        }
+        fams.push(("C", cl));
+        let lam_deadline = Instant::now() + std::time::Duration::from_secs_f64(tunable!("ENOMOTO_T_MIP_DIAG_OBBT_LAMSECS", 120.0, f64));
+        let mut lpp = crate::simplex::mip_lp::TwoStageLp::new(&glo, &gup, &p.cost, &rows[..nr], &rlo[..nr], &rup[..nr]);
+        let mut pl = Vec::new();
+        let mut xl = Vec::new();
+        if lpp.solve(&SolveLimits { deadline: Some(lam_deadline), ..Default::default() }) == LpStatus::Optimal {
+            for t in 0..2 * kmax {
+                if Instant::now() > lam_deadline {
+                    break;
+                }
+                if t % 2 == 0 {
+                    let ch: Vec<(usize, f64, f64)> = (0..nr).map(|i| {
+                        let mut e = |b: f64| if b.is_finite() { b + 1e-5 * (1.0 + b.abs()) * (2.0 * rnd() - 1.0) } else { b };
+                        let (lo, up) = (e(rlo[i]), e(rup[i]));
+                        if rlo[i] == rup[i] { (i, lo, lo) } else { (i, lo.min(up), up.max(lo)) }
+                    }).collect();
+                    lpp.set_costs(&p.cost);
+                    lpp.set_row_bounds_many(&ch);
+                } else {
+                    let ch: Vec<(usize, f64, f64)> = (0..nr).map(|i| (i, rlo[i], rup[i])).collect();
+                    lpp.set_row_bounds_many(&ch);
+                    let cc: Vec<f64> = p.cost.iter().map(|&c| c * (1.0 + 1e-3 * (2.0 * rnd() - 1.0))).collect();
+                    lpp.set_costs(&cc);
+                }
+                if lpp.solve(&SolveLimits { deadline: Some(lam_deadline), ..Default::default() }) == LpStatus::Optimal {
+                    if let Some(v) = lagr(&lpp.row_duals()) {
+                        if t % 2 == 0 { pl.push(v) } else { xl.push(v) }
+                    }
+                }
+            }
+        }
+        fams.push(("P", pl));
+        fams.push(("X", xl));
+        let gl: Vec<(f64, Vec<f64>)> = (0..kmax).filter_map(|_| {
+            let y: Vec<f64> = y0.iter().map(|&v| v * (1.0 + 0.1 * (2.0 * rnd() - 1.0))).collect();
+            lagr(&y)
+        }).collect();
+        fams.push(("G", gl));
+        let lam_secs = t_lam.elapsed().as_secs_f64();
+        // 種類ごとに、根の被約費用 (a) と目的の伝播 (b) に足して、K = 10・全部 で固定できる数 (全部の自由な整数列と標本)
+        let sampled = &sample[..done];
+        let mut lam_out = String::new();
+        let base_lo = alo.iter().zip(&blo).map(|(a, b)| a.max(*b)).collect::<Vec<f64>>();
+        let base_up = aup.iter().zip(&bup).map(|(a, b)| a.min(*b)).collect::<Vec<f64>>();
+        let (mut all_lo, mut all_up) = (base_lo.clone(), base_up.clone());
+        let t_apply = Instant::now();
+        let mut napply = 0usize;
+        for (name, list) in &fams {
+            // 種類ごとに、(a)・(b) の固定 (base) から始める (種類の間で足し合わせない。ALL だけ全部を足す)
+            let (mut lo, mut up) = (base_lo.clone(), base_up.clone());
+            let mut k10 = (0usize, 0usize);
+            for (t, (l, d)) in list.iter().enumerate() {
+                apply(*l, d, &mut lo, &mut up);
+                apply(*l, d, &mut all_lo, &mut all_up);
+                napply += 2;
+                if t + 1 == 10 {
+                    k10 = (nfix(&lo, &up, &free), nfix(&lo, &up, sampled));
+                }
+            }
+            if list.len() < 10 {
+                k10 = (nfix(&lo, &up, &free), nfix(&lo, &up, sampled));
+            }
+            let lmin = list.iter().map(|x| x.0).fold(f64::INFINITY, f64::min);
+            let lmax = list.iter().map(|x| x.0).fold(f64::NEG_INFINITY, f64::max);
+            lam_out += &format!("\"{name}\":{{\"k\":{},\"k10\":[{},{}],\"kall\":[{},{}],\"L\":[{lmin:.6e},{lmax:.6e}]}},", list.len(), k10.0, k10.1, nfix(&lo, &up, &free), nfix(&lo, &up, sampled));
+        }
+        let us_per = t_apply.elapsed().as_secs_f64() * 1e6 / napply.max(1) as f64;
+        lam_out += &format!("\"ALL\":[{},{}],\"lam_secs\":{lam_secs:.2},\"apply_us\":{us_per:.1}", nfix(&all_lo, &all_up, &free), nfix(&all_lo, &all_up, sampled));
+        eprintln!("OBBTLAM {{\"base\":[{ab_fix},{s_ab}],\"obbt\":[{c_fix},{done}],{lam_out}}}");
         eprintln!(
             "OBBTDIAG {{\"u\":{u:.10e},\"root\":{:.10e},\"n\":{n},\"free_int\":{},\"rows\":{nr},\"rc\":[{a_fix},{a_tg}],\"objprop\":[{b_fix},{b_tg}],\"rc_or_obj_fix\":{ab_fix},\"rc_lists\":{},\"sample\":{k},\"done\":{done},\"obbt\":[{c_fix},{c_tg}],\"sample_rc\":{s_a},\"sample_obj\":{s_b},\"sample_rc_or_obj\":{s_ab},\"lp0\":\"{st0:?}\",\"infeasible\":{infeasible},\"secs\":{:.2}}}",
             self.root_redcost.as_ref().map_or(f64::NAN, |r| r.0), free.len(), rc_lists.len(), t0.elapsed().as_secs_f64()
@@ -19563,7 +19701,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let t0 = Instant::now();
         // `ENOMOTO_MIP_HIGHS_CONFLICT_SCORE`: 分枝の衝突スコアを HiGHS と同じく、解析で説明に使った境界の変更全部の列で
         // 上げる (作れた衝突のリテラルでは上げない)
-        let hcs = highs_conflict_score() || (self.cw_dyn_state.0 && (cw_dyn().is_some() || cw_ramp().is_some()));
+        // 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP_HCS=1` (cwrh): RAMP のとき付け方は σ によらず最初から HiGHS 式 (重みは σ のまま)
+        let hcs = highs_conflict_score() || (cw_ramp().is_some() && cw_ramp_hcs()) || (self.cw_dyn_state.0 && (cw_dyn().is_some() || cw_ramp().is_some()));
         let mut bumps: Vec<(usize, bool)> = Vec::new();
         // 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN`: 双対証明で締めた変更も証明の行から説明する (HiGHS の explainBoundChange が
         // カットのプールの行を遡るのと同じ)。証明が捨てられた・番号が付け直された後は遡らない (従来と同じ葉)
@@ -19589,6 +19728,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if hcs && !bumps.is_empty() {
             self.pc.bump_conflict(&bumps);
         }
+        self.hcs_diag[0] += 1;
+        self.hcs_diag[1] += bumps.len() as u64;
+        self.hcs_diag[2] += u64::from(confs.is_empty());
         self.multi_secs += t0.elapsed().as_secs_f64();
         let mut n = 0;
         // 既定ではリテラルの衝突プールに入れる (行にして証明のプールに入れると、数が多いので双対証明を追い出す)
@@ -26094,6 +26236,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: cutconf (ENOMOTO_MIP_CUTCONF): calls {}, no start {}, steps plain {} reduced {} (by remembered external rows {}), stop fail {} (general integer {}, continuous {}) decision {} uip {} budget {}, no step {}, dropped {}, out {} (non-binary {}, mean length {:.1}), used: pruned {} tightened {}, {:.2}s", c[0], c[1], c[2], c[3], c[13], c[4], c[14], c[15], c[5], c[6], c[7], c[11], c[10], c[8], c[12], c[9] as f64 / c[8].max(1) as f64, c[16], c[17], super::cutconf::total_secs());
             }
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
+            eprintln!("MIP: conflict score diag: analyses {}, bumped columns per analysis {:.2}, analyses without conflict {:.3}", self.hcs_diag[0], self.hcs_diag[1] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[2] as f64 / self.hcs_diag[0].max(1) as f64);
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
             eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
             if super::domain::conflict_lev_diag() {
@@ -26609,6 +26752,11 @@ fn cw_dyn() -> Option<f64> {
 }
 
 /// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP` = w (p2inf_20261119、既定では使わない): 衝突の重みを窓ごとの衝突の多さのシグモイドで連続に決める。
+fn cw_ramp_hcs() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP_HCS").is_some_and(|v| v != "0"))
+}
+
 fn cw_ramp() -> Option<f64> {
     static F: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP").and_then(|v| v.parse().ok()).filter(|&w: &f64| w > 0.0))
