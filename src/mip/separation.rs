@@ -2355,6 +2355,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     });
                 if self.params.verbose && ratio > 0.0 {
                     eprintln!("MIP: cut selection probe: compared at {m} rounds ({early}), probe wall {:.2}s (budget {budget:.1}s)", t_probe0.elapsed().as_secs_f64());
+                    if env_str!("ENOMOTO_MIP_DET_DIAG").is_some() {
+                        eprintln!("DET_DIAG ticks after the cut selection probe: {:?}", crate::ticks::raw());
+                    }
                 }
                 CUT_PROBE_CHOICE.store(if pick_pool { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
                 if td_c && self.params.verbose {
@@ -3762,6 +3765,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     obj + p.offset,
                     self.start.elapsed().as_secs_f64()
                 );
+            }
+            if env_str!("ENOMOTO_MIP_DET_DIAG").is_some() && !self.params.submip {
+                eprintln!("DET_DIAG ticks after cut round {round}: {:?}", crate::ticks::raw());
             }
             // `ENOMOTO_MIP_RR_EACH_ROUND` (試作、既定では使わない): サブ MIP の中か暫定解がないときは、各ラウンドの LP 解で乱択丸め
             // ([`Self::randomized_rounding`]) を `ENOMOTO_T_MIP_RR_EACH_ROUND_TRIES` (1) 回行う (HiGHS の `rootSeparationRound` と同じ)。
