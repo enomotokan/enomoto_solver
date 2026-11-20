@@ -421,3 +421,15 @@ docs/improvement_history.md に 1 節足した。
 - 試作に進むなら、I は既存の `ENOMOTO_MIP_FIXMORE=u` (2026-11-12、58 問で SGM +1.4% [−1.1%, +4.4%]・解けた 215 → 212 で保留) なので、
   それに D (PDLP、P2-HEUR の試作と共用) を数本足す形を、天井との差の大きい 30 問に絞って時間で確かめるのが次の一歩。数の上では、時間の得は大きくないと見る
   (固定は最適値の U でのもので、実際の暫定解はこれより悪い)。
+
+## 16. カットの打ち切りの待つ巡数 3 → 5 (st5) の M (2026-11-20)
+
+- 働く問題の数え上げ (`scan_st.py` → `scan_st_*.jsonl`): Mittelmann 186 問を既定・1 スレッド・種 1 で解き、根のカットのループの終わりまで見た。
+  外側の根で打ち切り ("LP bound unchanged for k rounds; stop") が働くのは **17 問**: app1-1・comp07-2idx・comp21-2idx・lectsched-5-obj・n2seq36q・
+  neos-1456979・neos-2746589-doon・neos-3381206-awhea・nu25-pr12・nursesched-sprint02・piperout-08・radiationm18-12-05・rocI-4-11・satellites2-40・
+  satellites2-60-fs・sp150x300d・supportcase33。根のループの終わりまで 240 秒で届かなかった問題が 7。ほかの問題では st5 と既定は同じ。
+- 分担 S: `python plan.py S 4` → `shards_S.json` (17 問 × 種 1・2 × {def, st5}、600 秒・4 スレッド、68 回、4 分担で各 1.55 時間)。
+  `python run.py S K` → `res_S_sK.jsonl`。
+- 「巡数」でなく「手間あたりの伸び」で止める形について: awhea は外側の根で巡 19〜23 の 5 巡まったく伸びず (1 巡 0.1 秒ほど)、巡 24 から跳ねる。
+  直近の伸び ÷ 手間で止める形はこの 5 巡で同じく止まる。止めない側に倒すなら「伸びない巡の手間の和を、伸びを出した巡の手間の何倍まで許す」形
+  (awhea は伸びの巡 1.6 秒・伸びない巡 0.5 秒で続く、10teams は伸びの巡 0.5 秒・伸びない巡 6 秒で止まる) になるが、この倍率も閾値になる。
