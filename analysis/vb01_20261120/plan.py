@@ -1,5 +1,5 @@
-"""SCIP-VB の分担表: python plan.py P NP → shards_P.json (MIPLIB の 58 問 × 種 1〜3 × {def, vb01b, vb01r}、60 秒)。
-python plan.py M NM → shards_M.json (count_M_b.jsonl で VB01 がサブ MIP まで行った Mittelmann の問題 × 種 1・2 × {def, vb01b}、600 秒)。
+"""SCIP-VB の分担表: python plan.py P NP → shards_P.json (MIPLIB の 58 問 × 種 1〜3 × {def, vb, vb01r}、60 秒)。
+python plan.py M NM → shards_M.json (count_M_b.jsonl で VB01 がサブ MIP まで行った Mittelmann の問題 × 種 1・2 × {def, vb}、600 秒)。
 見積りは analysis/final_20261118 の def の時間 (解けなかった回は上限) + P は 8 秒・M は 30 秒。"""
 import json, glob, sys
 from pathlib import Path
@@ -25,11 +25,11 @@ def balance(groups, est, n, out, tl):
     print(out, len(groups), "組", sum(len(s) for s in shards), "回", "見積り (時間):", min(round(x / 3600, 2) for x in load), "〜",
           max(round(x / 3600, 2) for x in load), "計", round(sum(load) / 3600, 1))
 if SET == "P":
-    CF = ["def", "vb01b", "vb01r"]; TP = times("res_P_s*.jsonl", 60)
+    CF = ["def", "vb", "vb01r"]; TP = times("res_P_s*.jsonl", 60)
     balance({(p, s): [(p, c, s) for c in (CF[(i + s) % 3:] + CF[:(i + s) % 3])] for i, p in enumerate(PROBS) for s in (1, 2, 3)},
             lambda p, c, s: TP.get((p, 1), 60) + 8, NS, "shards_P.json", 60)
 else:
-    CF = ["def", "vb01b"]; TM = times("res_M_s*.jsonl", 600)
+    CF = ["def", "vb"]; TM = times("res_M_s*.jsonl", 600)
     work = sorted(r["problem"] for l in open(D / "count_M_b.jsonl") if l.strip() for r in [json.loads(l)] if r.get("nsub", 0) > 0)
     print("M:", len(work), "問")
     balance({(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, p in enumerate(work) for s in (1, 2)},
