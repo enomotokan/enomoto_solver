@@ -8,6 +8,8 @@ python plan.py L NL → shards_L.json (1go で解けた数が減った supportca
 python plan.py S NS → shards_S.json (カットの打ち切りが外側の根で働く M の 17 問 × 種 1・2 × {def, st5}、600 秒)。
 python plan.py CP NCP → shards_CP.json (58 問 × 種 1〜3 × {def, pe}、60 秒)、python plan.py CM NCM → shards_CM.json (Mittelmann 186 問 × 種 1 × {def, pe}、600 秒)。
 python plan.py M NM → shards_M.json (scan_s*.jsonl で前処理が変わった Mittelmann の問題 + 対象 6 問 × 種 1・2 × {def, fixis}、600 秒)。
+python plan.py DT NDT → shards_DT.json (58 問 × 種 1〜3 × {def, bonil, def_t1, bonil_t1}、60 秒。1 スレッドの再現性の試作の費用)。
+python plan.py PS NPS → shards_PS.json (58 問 × 種 1〜3 × {def, pe, pes}、60 秒)。
 見積りは analysis/final_20261118 の def の時間 (解けなかった回は上限) + P は 8 秒・M は 30 秒。"""
 import json, glob, sys
 from pathlib import Path
@@ -101,6 +103,14 @@ elif SET == "S":
     CF = ["def", "st5"]; TM = times("res_M_s*.jsonl", 600)
     balance({(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, p in enumerate(probs) for s in (1, 2)},
             lambda p, c, s: TM.get((p, s), TM.get((p, 1), 600)) + 30, NS, "shards_S.json", 600)
+elif SET in ("DT", "PS"):
+    # DT: 1 スレッドの再現性の試作 (DET1T) の費用。4 スレッドの対 {def, bonil} と 1 スレッドの対 {def_t1, bonil_t1}。1 スレッドの見積りは 4 スレッドの 2 倍 (上限 60)
+    # PS: pe と σ の上限つきの pe。どちらも同じ (問題, 種) の設定を同じ分担に入れ、順を問題ごとに回す
+    CF = ["def", "bonil", "def_t1", "bonil_t1"] if SET == "DT" else ["def", "pe", "pes"]
+    TP = times("res_P_s*.jsonl", 60)
+    k = len(CF)
+    est = lambda p, c, s: (min(2 * TP.get((p, s), TP.get((p, 1), 60)), 60) if c.endswith("_t1") else TP.get((p, s), TP.get((p, 1), 60))) + 8
+    balance({(p, s): [(p, c, s) for c in (CF[(i + s) % k:] + CF[:(i + s) % k])] for i, p in enumerate(PROBS) for s in (1, 2, 3)}, est, NS, f"shards_{SET}.json", 60)
 elif SET in ("CP", "CM"):
     # 衝突解析で双対証明を遡る試作 (pe) の広い計測: CP = MIPLIB の 58 問 × 種 1〜3 × {def, pe}、60 秒。CM = Mittelmann 186 問 × 種 1 × {def, pe}、600 秒。
     # 見積りは final_20261118 の def (解けなかった回は上限) + P 8 秒・M 30 秒
