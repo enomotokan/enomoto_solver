@@ -43,6 +43,18 @@ PROBLEMS = [
 ]
 
 
+
+def _read_our_model_compat(bh, path):
+    """`benchmark_highs._read_our_model` (このクレートの MPS 読み込み) でモデルを作る。古いビルドを wheel で入れた
+    環境では `benchmark_highs` 自体が古く `_read_our_model` がないので、従来の HiGHS 経由の組み立てに戻る
+    (台本だけ新しくなった計測が落ちないように)。戻り値は `(model, 制約数, 非零数, 列の名前)`。"""
+    if hasattr(bh, "_read_our_model"):
+        return bh._read_our_model(path)
+    _, lp = bh._load_lp(path)
+    names = list(lp.col_names_) if len(lp.col_names_) == lp.num_col_ else [f"C{j}" for j in range(lp.num_col_)]
+    model, n_constraints, nnz = bh._build_our_model(lp)
+    return model, n_constraints, nnz, names
+
 def fetch(name: str, cache: Path) -> Path:
     """`name` の MPS を取得して展開し、そのパスを返す。"""
     cache.mkdir(parents=True, exist_ok=True)
@@ -142,7 +154,7 @@ def worker_scip(mps: str, time_limit: float, threads: int) -> None:
 def worker_ours(mps: str, time_limit: float, threads: int) -> None:
     from enomoto_solver import benchmark_highs as bh
 
-    m, _, _, _ = bh._read_our_model(Path(mps))
+    m, _, _, _ = _read_our_model_compat(bh, Path(mps))
     t = time.perf_counter()
     r = m.solve(None, False, time_limit, None, None, threads)
     t = time.perf_counter() - t
