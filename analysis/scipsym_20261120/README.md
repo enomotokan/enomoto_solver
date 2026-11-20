@@ -193,3 +193,33 @@ P (MIPLIB 58 問) と M (Mittelmann 186 問のうち P にない 145 問) の 20
   影響はクロスオーバーを通る LP (主に 1 スレッドの根・前処理の LP) だけで、密な基底でしか上限が変わらない (疎な基底では `64 m` の方が大きい)。
   残りの 7 秒のうち 5.6 秒は双対単体法のずれによる再分解 (62%) で、これは LP の担当の領分。PPLEX の既定化で cod105 自体はこの LP の前に
   終わる形ではない (LP による固定は対称性より前) ので、cod105 の 1 スレッド 32〜38 秒の大半はこの 2 つ。
+
+## 13. 試作 `ENOMOTO_XO_BUMP_LU_RATIO=1` (クロスオーバーの押し出しの fill の上限、既定は不変、親の依頼)
+
+- 中身: `crossover::xo_kernel` (src/simplex/crossover.rs)。Megiddo の主の押し出し (`megiddo_push`) と双対の押し出し (`megiddo_dual_push`) の基底の核
+  (`BasisKernel::new` の 6 か所) に、双対単体法と同じ fill の上限 `FT_BUMP_LU_RATIO · nnz(LU)` を付ける (`BasisKernel::with_bump_lu_ratio` を足した。
+  値は双対単体法の `ENOMOTO_T_FT_BUMP_LU_RATIO` (既定 3) を共有、新しい定数は足さない)。広がるのは `nnz(LU) >= 64 m` の密な分解だけ (`fill_too_big`)。
+- cod105 (1 スレッド・種 1、`logs/cod105_xo{0,1}_t1_s1.log`・`cod105_ppxo{0,1}_t1_s1.log`):
+  - PPLEX を切った形: 押し出し 14.6 秒 (再分解 65 回) → **0.48 秒 (1 回)**。前処理の LP による固定の最初の LP は 30 秒の期限で打ち切り → 7.6 秒で解け、
+    根の LP は 69.8 秒 → **6.9 秒**。
+  - 既定 (PPLEX あり): 33.9 秒 → **25.7 秒** (どちらも 0 ノードで最適)。
+- 走査 (`xoscan.py` → `xoscan.jsonl`・`xoscan_summ.txt`、既定、1 スレッド・60 秒・`ENOMOTO_DEBUG_CROSSOVER=1`、P・M の 203 問、エラー 0):
+  根までに Megiddo の押し出しを通るのは 144 問、基底の核の引き金 (照合・x_B の残差以外) の再分解があるのは 58 問。ただし押し出しの再分解と
+  双対の押し出しの時間が 0.5 秒以上なのは cod105 (押し出し 20.2 秒・再分解 65 回)・neos-1354092 (再分解 1.25 秒)・chromaticindex512-7 (0.57 秒 + 双対 0.98 秒) の 3 問、
+  0.1 秒以上でも 7 問 (ほかに radiationm40-10-02・neos-4300652-rahue・mzzv11・dano3_5)。
+  - XO で変わるか (1 スレッド・60 秒): chromaticindex512-7 は再分解 11 回のまま (変化なし)、neos-1354092 は 44・42 回 → 44・40 回。どちらも分解が
+    `64 m` に届かず上限が変わらない。**XO がはっきり効くのは cod105 だけ** (密な基底)。
+- 正しさ: cargo test 414 通過。fuzz (`fuzz_xo.sh`・`fuzz/xo_*`) は全部 bad 0: mip_fuzz_vs_highs 300 (4 スレッド・1 スレッド)、lp_fuzz_vs_highs 300
+  (二段解法・ipm_crossover)、fuzz_pplex 300 (1 スレッド)、mip_fuzz_symmetric 300。
+- LP のベンチ (`scripts/crossover_bench/run.py --set netlib --variants base= xo=ENOMOTO_XO_BUMP_LU_RATIO=1`、ipm_crossover、`xobench_netlib.jsonl`・
+  `xobench_netlib_summ.txt`): 93 問とも両方解け、状態の違いなし、SGM (shift 1 秒) xo / base 0.997。Netlib は `nnz(LU)` が 64 m に届かないので道は同じ (揺れだけ)。
+- 記録だけ (親の指示): cod105 の残りの LP の時間の大半は双対単体法のずれによる再分解 (1871 反復で 5.6 秒のうち再分解 62%、`refactor_count=10`
+  が全部 drift)。LP の担当の領分。
+
+### 13.1 計測の依頼 (cfg.py: def・xo・def_t1・xo_t1)
+
+- `shards_PXO.json` (MIPLIB 58 問 × 種 1〜3 × {def, xo, def_t1, xo_t1}、60 秒、8 分担、各約 0.84 時間): `python run.py PXO K` (K = 0〜7)、
+  集計 `python summ.py PXO def xo`・`python summ.py PXO def_t1 xo_t1`。P で押し出しの再分解が 0.1 秒を超える問題はない (走査) ので、揺れの目安。
+- `shards_MXO.json` (M の 7 問 = cod105・neos-1354092・chromaticindex512-7・radiationm40-10-02・neos-4300652-rahue・mzzv11・dano3_5 × 種 1・2 ×
+  {def, xo, def_t1, xo_t1}、600 秒、5 分担、各 1.4〜2.1 時間): `python run.py MXO K` (K = 0〜4)、集計 `python summ.py MXO def xo`・`python summ.py MXO def_t1 xo_t1`。
+- 作り直しは `python plan_xo.py`。この版 (XO の試作のコミット) 以降でビルド。

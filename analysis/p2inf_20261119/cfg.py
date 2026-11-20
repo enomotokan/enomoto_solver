@@ -12,6 +12,7 @@
   round(16σ) まで)。σ が上がらない問題は既定と同じ道筋 (1 スレッドでノード数が一致、README 5.5 節)。
 - cwrh0: cwrh から床 (σ < 0.05 は重み 0) を外した形 (利用者の方針「恣意的な閾値はなるべく排除」、2026-11-20)。
   σ が上がらない問題でも重みは 0.1 × σ (> 0) が残り、既定とは道筋が変わりうる。P・M の計測はこちら (PCWRH0・MCWRH0)。
+- nocwrh0: cwrh0 を既定にした版 (8.4・8.5 節) で、以前の既定に戻す形 (3 つとも `=0`)。それより前の版では def と同じ。
 - cwrh0s: cwrh0 の LIT_EXPLAIN=sig の予算を確率的に丸める形 (ENOMOTO_MIP_LIT_EXPLAIN_SROUND=1、期待値 16σ、README 5.6 節)。
 """
 CFGS = {
@@ -24,6 +25,7 @@ CFGS = {
     "cwr": {"ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP": "0.1", "ENOMOTO_MIP_LIT_EXPLAIN": "auto"},
     "cwrh": {"ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP": "0.1", "ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP_HCS": "1", "ENOMOTO_T_MIP_CW_RAMP_FLOOR": "0.05", "ENOMOTO_MIP_LIT_EXPLAIN": "sig"},
     "cwrh0": {"ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP": "0.1", "ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP_HCS": "1", "ENOMOTO_MIP_LIT_EXPLAIN": "sig"},
+    "nocwrh0": {"ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP": "0", "ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP_HCS": "0", "ENOMOTO_MIP_LIT_EXPLAIN": "0"},
     "cwrh0s": {"ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP": "0.1", "ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP_HCS": "1", "ENOMOTO_MIP_LIT_EXPLAIN": "sig", "ENOMOTO_MIP_LIT_EXPLAIN_SROUND": "1"},
     "sstfeas_t1": {"ENOMOTO_MIP_SYM_SST_FEAS": "1"},
 }
