@@ -11067,6 +11067,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             heur!("vbounds (loose)", self.vbounds_heur(true));
                             heur!("vbounds (tight)", self.vbounds_heur(false));
                         }
+                        // 試作 `ENOMOTO_MIP_VB01` ([`Self::vbounds01_heur`]): 0-1 列どうしの含意を使う vbounds
+                        if env_str!("ENOMOTO_MIP_VB01").is_some() {
+                            heur!("VB01", self.vbounds01_heur());
+                        }
                     }
                     // 試作 `ENOMOTO_MIP_RHEUR` の `b`・`s` ([`rheur`]): Pump と 3 つのダイビングの LP 反復の予算を共有にする
                     let pool = (rheur('b') || rheur('s')) && !self.params.submip && self.snap.is_none();
@@ -11134,6 +11138,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if scip_heur_ok(self) {
                         heur!("vbounds (tight)", self.vbounds_heur(false));
                     }
+                }
+                if !early_scip && scip_heur_ok(self) && env_str!("ENOMOTO_MIP_VB01").is_some() {
+                    heur!("VB01", self.vbounds01_heur());
                 }
                 // 並列モード: 別スレッドのサブ MIP の結果を出した順に受け取る
                 self.parallel_submips = false;
