@@ -20076,6 +20076,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             u64::MAX
         };
         self.dom.cut_reason_budget = lx_budget;
+        // 試作 `ENOMOTO_MIP_PE_SIG` (analysis/slowm_20261119 §17.5、`CONFLICT_PROOF_EXPLAIN` と使う): 双対証明の理由で遡る変更も、解析 1 回で
+        // round(σ × B) 個までにする (B = `ENOMOTO_T_MIP_PE_SIG_BUDGET`、既定 16。σ は RAMP の今の σ)。σ ≈ 0 なら pe なしと同じ衝突になる
+        self.dom.proof_reason_budget = if env_str!("ENOMOTO_MIP_PE_SIG").is_some() {
+            (self.cw_ramp_sig * tunable!("ENOMOTO_T_MIP_PE_SIG_BUDGET", 16.0, f64)).round() as u64
+        } else {
+            u64::MAX
+        };
         let cb0 = super::domain::CUT_BUDGET[0].load(std::sync::atomic::Ordering::Relaxed);
         let lx_used = std::cell::Cell::new(0u64);
         let lx_asked = std::cell::Cell::new(0u64);
