@@ -10,4 +10,7 @@ CFGS = {
     # xo / xo_t1: 試作 ENOMOTO_XO_BUMP_LU_RATIO=1 (クロスオーバーの Megiddo の押し出しの fill の上限を双対単体法と同じく FT_BUMP_LU_RATIO·nnz(LU) に、README 13 節)
     "xo": {"ENOMOTO_XO_BUMP_LU_RATIO": "1"},
     "xo_t1": {"ENOMOTO_XO_BUMP_LU_RATIO": "1"},
+    # tk / tkw: 試作 ENOMOTO_MIP_LPPROBE_TICKS (LP による固定のあきらめを ticks で、README 15 節)。tk = 最初の LP の手間 x 1、tkw = 今の反復の予算を ticks に直したもの
+    "tk": {"ENOMOTO_MIP_LPPROBE_TICKS": "1"},
+    "tkw": {"ENOMOTO_MIP_LPPROBE_TICKS": "w"},
 }

@@ -33,24 +33,38 @@ thread_local! {
     static HAS_GATE: Cell<bool> = const { Cell::new(false) };
     /// [`ipm_work`]: 内点法の反復の手間を数えて期限で止めるか
     static IPM_WORK: Cell<bool> = const { Cell::new(false) };
+    /// [`ipm_add`]: 内点法の反復の手間 (重み付き、[`total`] には足さない)
+    static IPM_EXTRA: Cell<f64> = const { Cell::new(0.0) };
 }
 
-/// 試作 `ENOMOTO_MIP_DET1T` の `i`: このスレッドの内点法 (`solve_box_lp`) が、反復ごとに KKT の分解の演算数を手間 ([`HEUR`]) に足し、
-/// 手間の期限 ([`over`]) を過ぎたら止めるか ([`ipm_work_guard`] の間だけ真)
+/// 試作 `ENOMOTO_MIP_DET1T` の `i`: 内点法の手間 `n` (重み [`HEUR`]) を数える。スレッドの手間の合計 [`total`] には足さず、
+/// [`ipm_over`] の期限の判定にだけ使う (合計に足すと、後で手間の割合で予算を決めるサブ MIP などの道が既定と変わる。rout の種 2 で 1.4 倍)
+pub fn ipm_add(n: f64) {
+    IPM_EXTRA.with(|e| e.set(e.get() + weights()[HEUR] * n));
+}
+
+/// [`over`] に内点法の手間 ([`ipm_add`]) も足して比べる
+pub fn ipm_over() -> bool {
+    over() || total() + IPM_EXTRA.with(|e| e.get()) >= DEADLINE.with(|d| d.get())
+}
+
+/// 試作 `ENOMOTO_MIP_DET1T` の `i`: このスレッドの内点法 (`solve_box_lp`) が、反復ごとに KKT の分解の演算数を数え ([`ipm_add`])、
+/// 手間の期限 ([`ipm_over`]) を過ぎたら止めるか ([`ipm_work_guard`] の間だけ真)
 pub fn ipm_work() -> bool {
     IPM_WORK.with(|v| v.get())
 }
 
 /// [`ipm_work`] を真にし、捨てるときに元に戻す見張り
-pub struct IpmWorkGuard(bool);
+pub struct IpmWorkGuard(bool, f64);
 
 pub fn ipm_work_guard() -> IpmWorkGuard {
-    IpmWorkGuard(IPM_WORK.with(|v| v.replace(true)))
+    IpmWorkGuard(IPM_WORK.with(|v| v.replace(true)), IPM_EXTRA.with(|e| e.get()))
 }
 
 impl Drop for IpmWorkGuard {
     fn drop(&mut self) {
         IPM_WORK.with(|v| v.set(self.0));
+        IPM_EXTRA.with(|e| e.set(self.1));
     }
 }
 
@@ -82,6 +96,24 @@ pub fn add(k: usize, n: u64) {
 pub fn total() -> f64 {
     let w = weights();
     RAW.with(|r| (0..NK).map(|k| w[k] * r[k].get() as f64).sum())
+}
+
+thread_local! {
+    /// 診断用の手間 ([`diag_add`]): 合計 [`total`] にも期限にも入れない (既定の道筋を変えない)
+    static DIAG: Cell<u64> = const { Cell::new(0) };
+}
+
+/// 診断用の手間を `n` 足す (分離 [`SEP`] の単位、`ENOMOTO_MIP_SEPSTAT` の分離器ごとの手間に使う。analysis/sepeff_20261120/)。
+/// [`total`] に入らないので、手間の期限・時計は変わらない。今まで手間を数えていなかった分離器 (zero-half・clique など) が使う
+#[inline]
+pub fn diag_add(n: u64) {
+    DIAG.with(|c| c.set(c.get().wrapping_add(n)));
+}
+
+/// このスレッドの [`total`] + 診断用の手間 ([`diag_add`]) (診断用)。診断用の手間の 1 単位は `ENOMOTO_T_TICKS_W_DIAG` (既定 2、
+/// 単位はビット列の 1 語の xor・隣接の 1 要素ほどの軽い操作で、seymour・nw04 の根で zero-half・implied bound・clique の時間とおよそ合う)
+pub fn total_with_diag() -> f64 {
+    total() + tunable!("ENOMOTO_T_TICKS_W_DIAG", 2.0, f64) * DIAG.with(|c| c.get()) as f64
 }
 
 /// このスレッドの部分ごとの手間 (診断用)。

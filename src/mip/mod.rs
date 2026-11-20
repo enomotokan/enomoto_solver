@@ -1293,6 +1293,10 @@ thread_local! {
     /// 試作 `ENOMOTO_MIP_VBCLQ` の `e`: この求解の前処理で、最初の LP (LP による固定) の前の VB01 と pseudoobj を回したか。
     /// 回していなければ (再スタートの後・LP による固定のない道)、Solver が根の LP (その求解の最初の LP) の前に回す
     pub(crate) static VBCLQ_E_RAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// `ENOMOTO_MIP_VBCLQ` の `e`: この求解の前処理で、VB01 の解が目的の最小値に届いて最適と証明できた ([`presolve_vbclq_e`])。
+    /// 立っていれば前処理の最後の疎化 (`ENOMOTO_MIP_SPARSIFY_LATE`) をかけない (かけ直した問題で解が外れ、最適の解として使われなくなる:
+    /// decomp2 の 1 スレッドで木に入って 28.7 秒になっていた)
+    pub(crate) static VBCLQ_E_OPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 再スタート前のカット (`係数 x <= 右辺`)。再スタートが [`solve_problem`] に渡す問題の空間で置き、前処理後の空間に
     /// 移して置き直し、求解の開始時にカットプールに入れる (static TLS の領域が足りないので 1 つで済ませる)。
     pub(crate) static RESTART_CUTS: std::cell::RefCell<Option<Vec<(Vec<(usize, f64)>, f64)>>> = const { std::cell::RefCell::new(None) };
@@ -1651,6 +1655,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     if !params.submip {
         // 試作 `ENOMOTO_MIP_VBCLQ` の `e`: この求解の前処理で回したかの印を消す (前の求解の残りを持ち越さない)
         VBCLQ_E_RAN.with(|f| f.set(false));
+        VBCLQ_E_OPT.with(|f| f.set(false));
     }
     let t_pre = std::time::Instant::now();
     if !params.submip && (params.restarts == 0 || pretime::restart_on()) {
@@ -1794,7 +1799,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // (その中では疎化しない)。`s` を含むときは下の条件 (縮んだ行の割合 f ≥ 0.6) を満たすときだけ疎化した問題を使う。`=1` は条件なし (試作の比べ用)
     let spl_mode = env_def!("ENOMOTO_MIP_SPARSIFY_LATE", "s");
     let presolved = match presolved {
-        Some(Presolved::Reduced { prob, postsolve, scaling }) if spl_mode.is_some() && !params.submip && params.restarts == 0 => {
+        Some(Presolved::Reduced { prob, postsolve, scaling }) if spl_mode.is_some() && !params.submip && params.restarts == 0 && !VBCLQ_E_OPT.with(|f| f.get()) => {
             let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, .. } = prob.clone();
             let k = if spl_mode == Some("old") {
                 sparsify_rows(&mut rows, &mut row_lo, &mut row_up, &is_int, prob.n)
@@ -2992,6 +2997,15 @@ pub(crate) fn sym_cuts() -> bool {
     env_str!("ENOMOTO_MIP_SYM_CUTS").is_some()
 }
 
+/// 試作 `ENOMOTO_MIP_SYMAVG` (analysis/symavg_20261121/、既定では使わない): 根のカットのループで、選んだカットを対称性の群で平均した 1 本
+/// (列 k の係数 = k の軌道の上のカットの係数の和 / 軌道の大きさ、右辺は同じ) を足す。群の元の像の凸結合なので、像が正しい条件
+/// ([`sym_cuts`] と同じ: 根の時点で対称性を崩す処理がない) の下で正しい。LP の行が群で不変なら、平均の 1 本を足した LP の値は
+/// 像を全部足した LP の値と同じ (不変な LP の最適値は対称な点で取れ、対称な点ではカットとその平均の値が等しい)。
+/// `=1`: 平均したカットを次のラウンドで必ず LP に入れる。`=v`: 次のラウンドで今の LP の解を破るときだけ候補にする。
+pub(crate) fn sym_avg() -> Option<char> {
+    env_str!("ENOMOTO_MIP_SYMAVG").and_then(|v| v.chars().next()).filter(|&c| c != '0')
+}
+
 /// 既定 (2026-10-29、`ENOMOTO_MIP_NO_SYM_OF` で以前の lex-leader の行): オービトープにならない対称性を、lex-leader の行 (`x_i - x_k >= 0`) の代わりに探索中の
 /// orbital fixing (HiGHS の `StabilizerOrbits::orbitalFixing`) で扱う。行を足さないので LP が重くならず、ヒューリスティクスの
 /// 解が対称性の行に反して捨てられることもない。
@@ -3653,7 +3667,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     } else {
         symmetry::lex_leader_pairs_except(&sym, &used, &in_orb)
     };
-    if sym_cuts() && pairs.is_empty() && env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_none() && !sym.generators.is_empty() {
+    if (sym_cuts() || sym_avg().is_some()) && pairs.is_empty() && env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_none() && !sym.generators.is_empty() {
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(sym.generators.clone())));
     }
     if of {
@@ -5945,6 +5959,7 @@ fn presolve_vbclq_e(prob: &mut MipProblem, verbose: bool, secs: f64) -> usize {
         }
         vbclq::count_file(&vbclq::PseudoObjOut { infeas: true, ..o }, "eopt");
         FEAS_FJ_SOL.with(|s| *s.borrow_mut() = Some(x.clone()));
+        VBCLQ_E_OPT.with(|f| f.set(true));
         return usize::MAX;
     }
     if let Some(x) = vb_x {
@@ -6086,7 +6101,8 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     let tk_probe0 = crate::ticks::total();
     let tk_extra = std::cell::Cell::new(0.0f64);
     let lpp_ticks = lpprobe_ticks() && work;
-    let giveup_ticks = tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_ticks;
+    // `=w` では反復のあきらめの代わりに使う (反復の数えは止める)
+    let lpp_w = env_str!("ENOMOTO_MIP_LPPROBE_TICKS") == Some("w");
     let probe_ticks = || crate::ticks::total() - tk_probe0 + tk_extra.get();
     if finish_late && (if work { root_iters < lp_iter_cap } else { root_secs < secs }) {
         finish = false;
@@ -6118,6 +6134,13 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
         (tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_iters as f64) as u64 + (tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_LP_GIVEUP", 2.0e7, f64) / (prob.m + prob.n).max(1) as f64) as u64
     } else {
         u64::MAX
+    };
+    // `=w`: 今の反復のあきらめ (`giveup_iters` の子の LP の分) を、最初の LP の 1 反復の手間で ticks に直したもの (新しい定数なし、
+    // 1 反復の重さを最初の LP の平均でなく子の LP の実際の手間で数える)。ほかの値: 最初の LP の手間の倍率 (`..._GIVEUP_TIME_MULT`、既定 1) まで
+    let giveup_ticks = if env_str!("ENOMOTO_MIP_LPPROBE_TICKS") == Some("w") {
+        giveup_iters.saturating_sub(root_iters) as f64 * root_ticks / root_iters.max(1) as f64
+    } else {
+        tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_ticks
     };
     // `ENOMOTO_MIP_PREPAR` の `l` (試作、[`prepar_has`]): 1 巡の中の列の試しは、どれも巡の始めの状態 (`saved`) から解くので互いに
     // 独立。候補の窓を塊に分け、塊ごとの LP の写し (巡の始めに作る) で順に試し、決まった順にまとめる。写しで使った反復は
@@ -6159,7 +6182,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
         // 塊の大きさ: 最初の窓はあきらめの列の数 (`giveup`) を塊に分けた大きさ、窓ごとに倍 (`ENOMOTO_T_MIP_PREPAR_LP_BSZ_MAX` まで)
         let mut lbsz = (giveup / lpar_blocks).max(1);
         for (ci, &(j, v)) in cands.iter().enumerate() {
-            if !budget_left(&lp) || (n_fixed + fixes.len() == 0 && (n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs || tot_it(&lp) > giveup_iters || (lpp_ticks && probe_ticks() > giveup_ticks))) {
+            if !budget_left(&lp) || (n_fixed + fixes.len() == 0 && (n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs || (tot_it(&lp) > giveup_iters && !(lpp_w && lpp_ticks)) || (lpp_ticks && probe_ticks() > giveup_ticks))) {
                 if lpp_ticks && n_fixed + fixes.len() == 0 && probe_ticks() > giveup_ticks && budget_left(&lp) && !(n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs || tot_it(&lp) > giveup_iters) && verbose {
                     eprintln!("MIP: LP probing: LPPROBE_TICKS gave up after {n_tried} columns (child LP ticks {:.3e} > {:.3e} = mult x first LP)", probe_ticks(), giveup_ticks);
                 }
@@ -6182,7 +6205,9 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                 let per = if n_lc > 0 { (it_lc as f64 / n_lc as f64).max(1.0) } else { 2.0 * per_lp as f64 };
                 let mut left = iter_budget.saturating_sub(tot_it(&lp) - root_iters).min(lp_iter_cap.saturating_sub(tot_it(&lp)));
                 if n_fixed + fixes.len() == 0 {
-                    left = left.min(giveup_iters.saturating_sub(tot_it(&lp)));
+                    if !(lpp_w && lpp_ticks) {
+                        left = left.min(giveup_iters.saturating_sub(tot_it(&lp)));
+                    }
                     wlen = wlen.min(giveup.saturating_sub(n_tried - 1));
                     // 試作 `ENOMOTO_MIP_LPPROBE_TICKS`: 窓の候補も、残りの手間 (最初の LP の手間の倍率 - 子の LP の手間) を 1 列の手間の見積り
                     // (1 列の反復 x 最初の LP の 1 反復の手間) で割った数までにする (窓を解いてからあきらめても、窓の分の時間は使ってしまうため)

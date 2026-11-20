@@ -281,3 +281,38 @@ P (MIPLIB 58 問) と M (Mittelmann 186 問のうち P にない 145 問) の 20
   子の LP の予算は最初の LP の手間に比例して小さくなるので、「浮いた予算を役に立たない試しに使う」ことがなくなる。
 - 影響の範囲: 固定 0 のまま (b) の手前で止まる問題だけ (固定が 1 つでも出れば今と同じ)。数え上げは、ログの「LP probing: root LP … tried N, fixed 0」と
   子の LP の ticks を P・M で拾えば出せる (走査 1 本、約 1 時間)。
+
+## 15. 試作 `ENOMOTO_MIP_LPPROBE_TICKS` (LP による固定のあきらめを手間で、既定は不変、利用者の了承で試作)
+
+- 中身 (`lp_probe`、src/mip/mod.rs、手間の既定 `ENOMOTO_MIP_PRESOLVE_WORK` のときだけ): 固定がまだ 0 のとき、子の LP に使った決定的な手間
+  (`crate::ticks`。窓で並べた写しの手間も列ごとに測って足す) が予算を越えたらあきらめる。窓の候補の数も「残りの予算 / 1 列の手間の見積り
+  (1 列の反復 x 最初の LP の 1 反復の手間)」までにする (窓を解いてからあきらめても窓の分の時間は使ってしまうため)。予算は 2 通り:
+  - `=1` (指示どおり): 最初の LP の手間 x `ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT` (既定 1)。
+  - `=w`: 今の反復のあきらめ (`giveup_iters` の子の LP の分 = 2e7 / (行 + 列)) を、最初の LP の 1 反復の手間で ticks に直したもの (反復の数えの代わり)。新しい定数なし。
+  ログ: 「LP probing: LPPROBE_TICKS gave up after N columns (…)」と、「LP probing: root LP …」の行の末尾に `ticks first … children …`。
+- cod105 (4 スレッド・120 秒、`logs/cod105_tk*_t4_s*.log`): 既定 22.5 秒 (4 列) → `=1` 22.3・22.1 秒 (2 列、子の手間 1.5e10 → 7.3e9) → `=w` 22.9 秒 (3 列)。
+  XO と併せると XO 単独 25.7・26.4 秒 (5 列) → XO + `=1` **17.6・19.0 秒** (2 列) → XO + `=w` 27.2 秒 (4 列)。
+- 走査 (`tkscan.py`、P・M 203 問、1 スレッド、前処理の後で止める、`tkscan_def.jsonl`・`tkscan.jsonl` (=1)・`tkscan_w.jsonl` (=w)、`tkscan_cmp*.txt`):
+  LP による固定が走るのは 167 問 (最初の LP が打ち切りは 33 問)。
+
+| | 試作が先にあきらめた | 固定が減る問題 | LP による固定の時間の合計 (167 問、1 スレッド) |
+|---|---|---|---|
+| `=1` | 132 問 | **10 問** (app1-1 73 → 0、app1-2 17 → 0、dws008-01 5 → 0、rocII-5-11 4 → 0、neos-860300 3 → 0、dcmulti 3 → 0、momentum1 2 → 0 など) | 197.9 → 191.7 秒 |
+| `=w` | 63 問 | **4 問** (app1-2 17 → 0、dws008-01 5 → 0、rocII-5-11 4 → 0、momentum1 2 → 0) | 197.9 → 156.4 秒 |
+
+  固定が増える問題はない (あきらめを早めるだけなので)。時間の差の大半は momentum1 (30.3 → 1.7〜1.9 秒、既定は 24 列試して固定 2)。
+- 分かったこと (事実): 子の LP の 1 反復の手間は最初の LP の平均よりずっと重い。momentum1 は最初の LP 2708 反復で 3.6e9 ticks (0.97 秒)、最初の子の列は
+  98 反復で 5.1e9 ticks (0.7 秒)。子の LP ごとに基底の戻し・分解し直しなどの固定の手間があり、反復の数えではそれが入らない。なので今の反復のあきらめは
+  子の LP の手間を軽く見ていて、`=w` で手間を正しく数えると、遅れて固定が出る問題 (app1-2 は 2 列目以降で 17 個) を失う。
+- 正しさ: cargo test 419 通過。fuzz (`fuzz_tk.sh`・`fuzz_tkw.sh`、`fuzz/tk_*`・`fuzz/tkw_*`) は全部 bad 0: mip_fuzz_vs_highs 300 (4・1 スレッド)、fixed_charge・clique・
+  mip_fuzz_symmetric・fuzz_pplex 各 300。`=1` が早くあきらめた求解 475 回、`=w` は 3 回 (小さい問題では 2e7/(行 + 列) の予算が大きい)。どちらも固定を減らすだけで
+  推論は変えないので、誤答の心配は小さい。
+
+### 15.1 計測の依頼 (cfg.py: def・tk (=1)・tkw (=w)、4 スレッド)
+
+- `shards_PTK.json` (MIPLIB 58 問 × 種 1〜3 × {def, tk, tkw}、60 秒、3 分担、各約 1.5 時間): `python run.py PTK K` (K = 0〜2)、
+  集計 `python summ.py PTK def tk`・`python summ.py PTK def tkw`。
+- `shards_MTK.json` (`tk_mprobs.json` の M 17 問 = どちらかの形で固定が減るか LP による固定の時間が 0.5 秒以上変わる問題 + cod105、× 種 1・2 × {def, tk, tkw}、
+  600 秒、13 分担、各 1.05〜1.57 時間): `python run.py MTK K` (K = 0〜12)、集計 `python summ.py MTK def tk`・`python summ.py MTK def tkw`。
+- 作り直しは `python plan_tk.py`。この版以降でビルド。
+- 見込み (推測): cod105 単独では差が小さい (XO と併せたときだけ 4 スレッドで効く)。固定が減る app1-2・app1-1 などで遅くなるかを見るのが主眼。
