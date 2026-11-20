@@ -57,6 +57,7 @@ pub(crate) mod seplearn;
 pub(crate) mod cutmix;
 pub(crate) mod mcf;
 pub(crate) mod clique;
+pub(crate) mod vbclq;
 pub(crate) mod pretime;
 pub(crate) mod tpre;
 pub(crate) mod plsb;
@@ -1335,7 +1336,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         EQUIV2_USED.with(|f| f.set(false));
         CLQPRB_STICKY.with(|f| f.set(false));
         CLQPRB_REVERTED.with(|f| f.set(false));
-        PRBWORK_LEFT.with(|f| f.set(tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE0", 1.15e9, f64) as u64));
+        PRBWORK_DRY.with(|f| f.set(false));
         cutmix::reset();
     }
     let prr = outer && env_def!("ENOMOTO_MIP_PROBE_REPRESOLVE", "1").is_some();
@@ -2442,6 +2443,10 @@ thread_local! {
     static FEAS_FJ_EARLY: std::cell::Cell<Option<(usize, f64)>> = const { std::cell::Cell::new(None) };
     /// 早めの FJ が見つけた解 (その時点の前処理後の問題の空間)。[`solve_problem_inner`] が取り出し、木を解かずに最適で終える
     static FEAS_FJ_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+    /// 試作 `ENOMOTO_MIP_VBCLQ` の `e`: かけ直しの前処理の中 (固定の後) では、もう一度かけない
+    static VBCLQ_E_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 試作 `ENOMOTO_MIP_VBCLQ` の `e`: 前処理の中で見つけた暫定解 (列の番号は前処理の前と同じ)。前処理の後で開始解にする
+    static VBCLQ_E_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// `ENOMOTO_MIP_FEAS_FJ_EARLY` (既定 `fl`、`=0` で使わない。flbgx として既定にした: analysis/flbgx_default_20261102.md): 実行可能性問題 (前処理後の目的関数が全部 0) では、前処理の LP による固定
@@ -4840,7 +4845,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // (`CLQPRB_REVERTED`) で引き継ぐと、前処理が既定と変わる (gate2 clqprb_s: snp-02-004-104・supportcase40 で見つけた漏れ)
     let clqprb_live = clqprb_on() && !CLQPRB_REVERTED.with(|f| f.get()) && (!clqprb_has('g') || CLQPRB_STICKY.with(|f| f.get()));
     // `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): 再スタートの後でプロービングを回さないときは、前の求解の含意 (再スタートの問題に渡したもの) を引き継ぐ
-    let keep_impl = env_str!("ENOMOTO_MIP_KEEP_IMPLICATIONS").is_some() || (clqprb_live && depth > 0 && !submip) || (RESTART_PRESOLVE.with(|f| f.get()) && prbwork_exhausted(submip));
+    let keep_impl = env_str!("ENOMOTO_MIP_KEEP_IMPLICATIONS").is_some() || (clqprb_live && depth > 0 && !submip) || (RESTART_PRESOLVE.with(|f| f.get()) && prbwork_skip_restart(submip));
     if keep_impl && !p.conflict_edges.is_empty() {
         let bin = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0 && pre.scaling.d.get(j).is_none_or(|&d| d == 1.0);
         prob.conflict_edges = p.conflict_edges.iter().copied().filter(|&(a, b)| bin((a / 2) as usize) && bin((b / 2) as usize)).collect();
@@ -4951,6 +4956,26 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
                 FEAS_FJ_SOL.with(|s| *s.borrow_mut() = Some(x));
                 return Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling });
             }
+        }
+    }
+    // 試作 `ENOMOTO_MIP_VBCLQ` の `e` ([`presolve_vbclq_e`]、analysis/scipgate_20261120): LP による固定の前に、暫定解の値を上限にした
+    // pseudoobj の固定をかける。固定したら前処理をかけ直し (固定した列と冗長になった行を消す)、その問題で LP による固定を回す
+    if lp_probe_secs.is_some() && !submip && !VBCLQ_E_ACTIVE.with(|f| f.get()) && solver::vbclq().is_some_and(|v| v.contains('e')) {
+        let k = presolve_vbclq_e(&mut prob, verbose);
+        if k > 0 {
+            let mut postsolve = pre.postsolve_log;
+            VBCLQ_E_ACTIVE.with(|f| f.set(true));
+            let r = presolve_mip_depth(&prob, verbose, submip, lp_probe_secs, depth);
+            VBCLQ_E_ACTIVE.with(|f| f.set(false));
+            return match r {
+                Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+                Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) => {
+                    debug_assert!(sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0));
+                    postsolve.extend(post2);
+                    Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling })
+                }
+                None => Some(Presolved::Reduced { prob, postsolve, scaling: pre.scaling }),
+            };
         }
     }
     if let Some(secs) = lp_probe_secs {
@@ -5592,6 +5617,53 @@ fn lp_inf_untrusted<L: lp_api::MipLp>(lp: &L, n: usize) -> bool {
         solver::lpinf_count(3);
     }
     u
+}
+
+/// 試作 `ENOMOTO_MIP_VBCLQ` の `e` (analysis/scipgate_20261120): 前処理の LP による固定の前に、暫定解の値 z を上限 (`cost · x <= z - offset`、
+/// 暫定解そのものは残る) にして [`vbclq::pseudoobj`] で 0-1 列を固定し、定義域の伝播の結果も列の境界に書く。暫定解の出どころ:
+/// - 診断 `ENOMOTO_MIP_VBCLQ_PRE_CUTOFF=<値>` (元の問題の目的の値。解は持たない、上限だけ)。
+/// 解があれば [`VBCLQ_E_SOL`] に置き、前処理の後で開始解にする。境界を変えた列の数を返す
+fn presolve_vbclq_e(prob: &mut MipProblem, verbose: bool) -> usize {
+    let t0 = std::time::Instant::now();
+    let (z, src) = match env_str!("ENOMOTO_MIP_VBCLQ_PRE_CUTOFF").and_then(|s| s.parse::<f64>().ok()) {
+        Some(v) => (prob.sense_sign * v, "given cutoff"),
+        None => return 0,
+    };
+    let mut dom = domain::Domain::new(prob);
+    if !prob.conflict_edges.is_empty() {
+        dom.add_implications(prob.n, &prob.conflict_edges);
+    }
+    if !dom.propagate(prob) {
+        return 0;
+    }
+    let binary: Vec<bool> = (0..prob.n).map(|j| prob.is_int[j] && prob.col_lo[j] >= 0.0 && prob.col_up[j] <= 1.0).collect();
+    let g = clique::CliqueGraph::build_with(prob.n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, &prob.col_lo, &prob.col_up, &prob.conflict_edges);
+    let o = vbclq::pseudoobj(prob, &mut dom, &g, z - prob.offset);
+    vbclq::count_file(&o);
+    // 上限より良い解がない (暫定解が最適) ときも、固定は書かない (暫定解の値の解は残るはずなので、数値の揺れとみなす)
+    let mut changed = 0usize;
+    if !o.infeas && o.fixed > 0 {
+        for j in 0..prob.n {
+            if dom.lo[j] > prob.col_lo[j] || dom.up[j] < prob.col_up[j] {
+                changed += 1;
+                prob.col_lo[j] = prob.col_lo[j].max(dom.lo[j]);
+                prob.col_up[j] = prob.col_up[j].min(dom.up[j]);
+            }
+        }
+    }
+    if verbose {
+        eprintln!(
+            "MIP: VBCLQ e: before the LP probing, bound {:.10e} ({src}): {} objective columns substituted, {} fixed in {} passes{}, slack {:.6e}, {changed} columns changed ({:.2}s)",
+            z,
+            o.nsub,
+            o.fixed,
+            o.passes,
+            if o.infeas { ", no solution better than the bound (not applied)" } else { "" },
+            o.slack0,
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    changed
 }
 
 fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> Option<usize> {
@@ -6981,23 +7053,25 @@ pub(crate) fn prb_table(c: char) -> bool {
     V.get_or_init(|| env_str!("ENOMOTO_MIP_PRB_TABLE").unwrap_or("").to_string()).contains(c)
 }
 
-/// 試作 `ENOMOTO_MIP_PRBWORK` (既定では使わない。analysis/probework_20261120): 含意を集めるプロービング ([`probe`]) の「何も見つからない間の
-/// 手間の上限」(`ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE0`) を、1 回の呼び出しごとではなく 1 回の求解全体 (前処理のかけ直し・再スタートを通して)
-/// の持ち分にする。固定・締め付け・同値な組が 0 で終わった回は、その手間 (pwork) を持ち分から引く。持ち分が無くなったら、後のプロービングは
-/// 回さず、再スタートの問題には前の求解の含意を引き継ぐ (再スタートの問題は前の問題を狭めたものなので、含意はそのまま成り立つ)。
-/// irp は根と 3 回の再スタートの後のプロービングが毎回この上限で止まり、成果 0 のまま 1.2 秒ずつ使っていた
+/// 試作 `ENOMOTO_MIP_PRBWORK` (既定では使わない。analysis/probework_20261120): 含意を集めるプロービング ([`probe`]) が、固定・締め付け・
+/// 同値な組を 1 つも得ないまま「何も見つからない間の上限」(手間 `ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE0` か時間の安全網) で打ち切られたら、
+/// その求解の再スタートの後のプロービングを回さず、再スタートの問題に前の求解の含意を引き継ぐ (再スタートの問題は前の問題を狭めたものなので、
+/// 含意はそのまま成り立つ)。後のプロービングが何か得れば印を消す。
+/// irp は根と 3 回の再スタートの後のプロービングが毎回この上限で止まり、成果 0 のまま 1.2 秒ずつ使っていた。
+/// 候補を最後まで試して成果 0 の回 (neos-860300 のかけ直しの中・roll3000 の根) は印を付けない (roll3000 は再スタートの後に 12 列、
+/// neos-860300 は 7・9・6 列を固定する)
 pub(crate) fn prbwork_on() -> bool {
     env_str!("ENOMOTO_MIP_PRBWORK").is_some_and(|v| v != "0")
 }
 
 thread_local! {
-    /// `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): この求解で残っている「成果のないプロービング」の手間の持ち分 (最初の求解の始めに満たす)
-    static PRBWORK_LEFT: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+    /// `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): この求解の最後のプロービングが成果 0 のまま上限で打ち切られた (最初の求解の始めに消す)
+    static PRBWORK_DRY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// [`prbwork_on`] の持ち分が尽きていて、プロービングを回さないか (サブ MIP は対象外)
-pub(crate) fn prbwork_exhausted(submip: bool) -> bool {
-    prbwork_active(submip) && PRBWORK_LEFT.with(|f| f.get()) == 0
+/// [`prbwork_on`] で、再スタートの後のプロービングを省くか (サブ MIP は対象外)
+pub(crate) fn prbwork_skip_restart(submip: bool) -> bool {
+    prbwork_active(submip) && PRBWORK_DRY.with(|f| f.get())
 }
 
 /// [`prbwork_on`] をこのプロービングに使うか。サブ MIP (親と同じ前処理で解くものを含む) は対象外
@@ -7008,10 +7082,10 @@ fn prbwork_active(submip: bool) -> bool {
 fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let _pt = pretime::guard("probe");
     use domain::Domain;
-    // `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): 成果のない手間の持ち分が尽きていれば回さない (引き継いだ含意 `conflict_edges` はそのまま残す)
-    if prbwork_exhausted(submip) {
+    // `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): 再スタートの後で、前のプロービングが成果 0 のまま打ち切られていれば回さない (引き継いだ含意 `conflict_edges` はそのまま残す)
+    if RESTART_PRESOLVE.with(|f| f.get()) && prbwork_skip_restart(submip) {
         if verbose {
-            eprintln!("MIP: probing: skipped (PRBWORK: the work budget without results is used up in this solve; {} implications kept)", prob.conflict_edges.len());
+            eprintln!("MIP: probing: skipped after the restart (PRBWORK: the last probing found nothing within its limit; {} implications kept)", prob.conflict_edges.len());
         }
         PROBE_GAIN.with(|f| f.set((0, 0, 0)));
         PROBE_FIXED.with(|f| f.set(0));
@@ -7226,9 +7300,9 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         (u64::MAX, u64::MAX)
     };
     let (time_cap, time_cap_found) = if presolve_work() { (time_cap * presolve_work_safe(), time_cap_found * presolve_work_safe()) } else { (time_cap, time_cap_found) };
-    // `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): 何も見つからない間の上限を、この求解の持ち分の残りまでにする
+    // `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): 成果 0 のまま上限で打ち切ったか
     let prbwork = prbwork_active(submip);
-    let wcap0 = if prbwork { wcap0.min(PRBWORK_LEFT.with(|f| f.get())) } else { wcap0 };
+    let mut cut_dry = false;
     // 手間 (およそナノ秒): 2.5 x 伝播で走査した行の長さ + 5 x 境界の変更で更新した活動の数 + 68 x 境界の変更の回数 + 190 x 集めた含意の数
     // (+ 1 回の試しごとに `ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_EACH`、既定 0)。重みは 15 問の CPU 時間への回帰
     // (analysis/presolve_work/fitprobe.py)。行の長さだけでは 1 秒あたり 3.4e6〜4e8 と散らばった
@@ -7388,6 +7462,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                 eprintln!("MIP:   probing progress: candidate {cnt} (pass {passes}), probed {probed}, fixed {fixed}, tightened {tightened}, implications {}, cpu {:.3}s", edges.len(), cap_clock() - c0);
             }
             if cnt % 16 == 0 && (dom.debug_work() - work0 + spec_w.get().0 > work_cap || pwork(&dom, probed, edges.len()) > wcap || cap_clock() - c0 > cap || presolve_stop()) {
+                cut_dry = fixed + tightened == 0 && !presolve_stop();
                 break 'passes;
             }
             if dom.lo[j] == dom.up[j] {
@@ -8040,14 +8115,16 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
     }
     PROBE_GAIN.with(|f| f.set((fixed, tightened, if want_equiv { PROBE_EQUIV.with(|e| e.borrow().len()) } else { 0 })));
-    if prbwork && fixed + tightened + PROBE_GAIN.with(|f| f.get().2) == 0 {
-        let w = pwork(&dom, probed, prob.conflict_edges.len());
-        let left = PRBWORK_LEFT.with(|f| {
-            f.set(f.get().saturating_sub(w));
-            f.get()
-        });
-        if verbose {
-            eprintln!("MIP: probing: PRBWORK: no result, {w} work charged, {left} left in this solve");
+    if prbwork {
+        let gain = fixed + tightened + PROBE_GAIN.with(|f| f.get().2);
+        if gain > 0 {
+            PRBWORK_DRY.with(|f| f.set(false));
+        } else if cut_dry || env_str!("ENOMOTO_MIP_PRBWORK").is_some_and(|v| v.contains('f')) {
+            // 値 `f` (確かめ用、fuzz で省く道を通すため): 打ち切りによらず、成果 0 なら印を付ける
+            PRBWORK_DRY.with(|f| f.set(true));
+            if verbose {
+                eprintln!("MIP: probing: PRBWORK: nothing found within the limit; probing after a restart is skipped in this solve");
+            }
         }
     }
     if fixed == 0 && tightened == 0 {
