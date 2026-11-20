@@ -11,8 +11,8 @@ CACHE = REPO / '.miplib_cache'
 def worker(mps, tl, gap, threads=1, nodes=None):
     from enomoto_solver import benchmark_highs as bh
     import numpy as np
-    _, lp = bh._load_lp(Path(mps))
-    m, _, _ = bh._build_our_model(lp)
+    m, _, _, _ = bh._read_our_model(Path(mps))
+    _, lp = bh._load_lp(Path(mps))  # 解の検算は HiGHS で読んだ問題で行う (読み込みと独立に確かめる)
     import resource
     ru0 = resource.getrusage(resource.RUSAGE_SELF)
     t = time.perf_counter()

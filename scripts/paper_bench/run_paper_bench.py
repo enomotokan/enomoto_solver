@@ -196,12 +196,15 @@ def _read_highs(mps: str):
 def worker_enomoto(mps: str, threads: int) -> None:
     from enomoto_solver import _core
 
+    from enomoto_solver import benchmark_highs as bh
+
     t0 = time.perf_counter()
-    h = _read_highs(mps)
-    if h is None:
+    try:
+        # このクレートの MPS 読み込み (2026-11-20 から。それより前は HiGHS で読んで組み立てていた)
+        model, _, _, _ = bh._read_our_model(Path(mps))
+    except ValueError as e:
+        _emit({"status": "read_error", "detail": str(e)})
         return
-    model = _build_our_model(h.getLp())
-    del h
     _emit({"built": True, "read_time": time.perf_counter() - t0})
     t0 = time.perf_counter()
     out = model.solve(lp_solver=None, distinguish_infeasible_unbounded=True, threads=threads if threads > 0 else None)
