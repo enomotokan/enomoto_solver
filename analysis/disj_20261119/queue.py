@@ -13,7 +13,7 @@ for line in open(D / sys.argv[1]):
     if (D / out).exists():
         for l in open(D / out):
             r = json.loads(l)
-            if r["problem"] == p and r["seed"] == int(seed) and r["root"] == root and r.get("cfg", "def") == os.environ.get("CFG", "def"):
+            if r["problem"] == p and r["seed"] == int(seed) and r.get("root", False) == root and r.get("cfg", "def") == os.environ.get("CFG", "def"):
                 done = True
     if not done:
         subprocess.run([sys.executable, str(D / os.environ.get("QUEUE_RUN", "run.py")), *a], check=False)
