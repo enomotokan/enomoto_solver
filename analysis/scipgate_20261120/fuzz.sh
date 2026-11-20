@@ -14,4 +14,6 @@ run objint python3 analysis/objint_20261112/fuzz_objint.py 1000 0
 run slack python3 analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 0
 run tiny2 env ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 1000
 run objint2 python3 analysis/objint_20261112/fuzz_objint.py 1000 5000
+# e の「VB01 の解が目的の最小値に届けば最適で打ち切る」道を通しやすい問題 (README 15 節。印 eopt の回がその道)
+run eopt python3 analysis/scipgate_20261120/fuzz_eopt.py 2000 10000
 echo FUZZ_DONE
