@@ -4967,21 +4967,30 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 試作 `ENOMOTO_MIP_VBCLQ` の `e` ([`presolve_vbclq_e`]、analysis/scipgate_20261120): LP による固定の前に、暫定解の値を上限にした
     // pseudoobj の固定をかける。固定したら前処理をかけ直し (固定した列と冗長になった行を消す)、その問題で LP による固定を回す
     if lp_probe_secs.is_some() && !submip && !VBCLQ_E_ACTIVE.with(|f| f.get()) && solver::vbclq().is_some_and(|v| v.contains('e')) {
+        // 固定の前の問題を取っておく: 固定の後のかけ直しが実行不能と言ったら、それは信じずに (VB01 の解は許容誤差 1e-6 の内で実行可能で、
+        // 厳密な最適より良い値のことがある。その値を上限にした固定で厳密に実行可能な点が全て消える: fuzz_tiny の種 64・362)、
+        // 固定の前の問題で続ける (VB01 の解は開始解としてそのまま渡す)
+        let saved = prob.clone();
         let k = presolve_vbclq_e(&mut prob, verbose, lp_probe_secs.unwrap_or(10.0));
         if k > 0 {
-            let mut postsolve = pre.postsolve_log;
             VBCLQ_E_ACTIVE.with(|f| f.set(true));
             let r = presolve_mip_depth(&prob, verbose, submip, lp_probe_secs, depth);
             VBCLQ_E_ACTIVE.with(|f| f.set(false));
-            return match r {
-                Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+            match r {
+                Some(Presolved::Infeasible) => {
+                    if verbose {
+                        eprintln!("MIP: VBCLQ e: the presolve after the fixings says infeasible; the fixings are dropped");
+                    }
+                    prob = saved;
+                }
                 Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) => {
                     debug_assert!(sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0));
+                    let mut postsolve = pre.postsolve_log;
                     postsolve.extend(post2);
-                    Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling })
+                    return Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling });
                 }
-                None => Some(Presolved::Reduced { prob, postsolve, scaling: pre.scaling }),
-            };
+                None => return Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling }),
+            }
         }
     }
     if let Some(secs) = lp_probe_secs {
