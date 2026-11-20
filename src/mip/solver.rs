@@ -209,10 +209,14 @@ pub(super) fn vbclq() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_VBCLQ").filter(|v| !v.is_empty() && *v != "0")
 }
 
-/// 試作 `ENOMOTO_MIP_RHBUDGET` (既定では使わない。analysis/rootlp_20261120): 外側の根の Pump・ダイビングの LP 反復の予算を、
+/// `ENOMOTO_MIP_RHBUDGET` (analysis/rootlp_20261120): 外側の根の Pump・ダイビングの LP 反復の予算を、
 /// 根の LP の反復の倍数 (`RHEUR` の共有の予算) ではなく、この求解でそれまでに使った LP の反復の割合 (SCIP と同じ形) にする
+///
+/// **2026-11-20 から既定 (`=0` で以前の共有の予算 `RHEUR` の `b`・`s`)。** P 58 問 × 種 1〜3: 138/138・−2.4% [−6.1, +1.1]、全種で遅い問題なし。
+/// M (根で Pump・ダイビングが回る 32 問 × 種 1・2): 14/14・+18.8% [−10.4, +60.2] (区間の広さは解けた問題の少なさ、全種で遅い neos859080 は
+/// 1 スレッドで同じ計算になる 4 スレッドの揺れ。analysis/rootlp_20261120 の 6 節)
 pub(super) fn rhbudget_on() -> bool {
-    env_str!("ENOMOTO_MIP_RHBUDGET").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_RHBUDGET", "1").is_some()
 }
 
 pub(super) fn rheur(c: char) -> bool {
@@ -7378,7 +7382,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 目的が全部 0 (実行可能性問題) なら解が見つかれば最適で、ほかの根のヒューリスティクスはほとんど当たらないので、
         // 残りの `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC` (0.5) まで回す (秒の上限なし)。ns1116954 では残り 16 秒の 0.15 倍 (2.5 秒、FJ 2〜3 回) では足りなかった
         let feas = super::heuristics::fj_feas_extend(&self.p);
-        // 試作 `ENOMOTO_MIP_FEAS_NORETRY` ([`super::feas_noretry_on`]): 実行可能性問題で早めの探索が解なしで上限まで回っていれば回さない
+        // `ENOMOTO_MIP_FEAS_NORETRY` ([`super::feas_noretry_on`]、2026-11-20 から既定): 実行可能性問題で早めの探索が解なしで上限まで回っていれば回さない
         if feas && super::feas_noretry_on() && !self.params.submip && super::FEAS_EARLY_DRY.with(|f| f.get()) {
             if self.params.verbose {
                 eprintln!("MIP: robust FJ retry skipped (FEAS_NORETRY: the early FJ/Local-MIP found nothing within its limit)");
@@ -11164,7 +11168,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     // 試作 `ENOMOTO_MIP_RHEUR` の `b`・`s` ([`rheur`]): Pump と 3 つのダイビングの LP 反復の予算を共有にする
                     let pool = (rheur('b') || rheur('s')) && !self.params.submip && self.snap.is_none();
-                    // 試作 `ENOMOTO_MIP_RHBUDGET` ([`rhbudget_on`]、既定では使わない。analysis/rootlp_20261120): Pump・ダイビング 1 本の LP 反復の
+                    // `ENOMOTO_MIP_RHBUDGET` ([`rhbudget_on`]、2026-11-20 から既定。analysis/rootlp_20261120): Pump・ダイビング 1 本の LP 反復の
                     // 予算を、この求解でここまでに使った LP の反復 W (根の LP と根のカット、Pump・ダイビングの前に 1 度だけ読む) の割合 + 1000 にする
                     // (SCIP の `maxlpiterquot`・`maxlpiterofs` の既定と同じ数: ダイビング 0.05、Pump 0.01)。共有の予算 (`b`・`s`) の代わり
                     let rhb = rhbudget_on() && !self.params.submip && self.snap.is_none();
