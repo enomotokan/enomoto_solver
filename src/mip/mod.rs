@@ -1462,6 +1462,8 @@ pub(crate) struct DropFixed {
     base: Vec<f64>,
     /// 子の求解の間だけ詰めた問題に置き換えた [`SYM_ORIG`] の元の値 (戻すため)
     saved_orig: Option<Option<std::rc::Rc<MipProblem>>>,
+    /// [`RESTART_NINT_BASE`] の元の値 (戻すため)
+    prev_base: usize,
 }
 
 impl DropFixed {
@@ -1469,6 +1471,7 @@ impl DropFixed {
         if let Some(o) = self.saved_orig.take() {
             SYM_ORIG.with(|t| *t.borrow_mut() = o);
         }
+        RESTART_NINT_BASE.with(|c| c.set(self.prev_base));
         if let Some(y) = r.x.take() {
             if y.len() == self.q.n {
                 let mut x = self.base.clone();
@@ -1482,6 +1485,18 @@ impl DropFixed {
         }
         r
     }
+}
+
+thread_local! {
+    /// [`restart_drop_fixed`] で列を詰める前の整数列の数 (再スタートの判定の分母、[`restart_nint_base`])
+    static RESTART_NINT_BASE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 再スタートの判定の分母に使う整数列の数の下限 ([`restart_drop_fixed`] で詰めた子の求解の間だけ 0 でない)。詰めると子の問題の整数列の数
+/// (`p.nint`) は自由な列だけになり、「整数列の 2.5%」の分母が小さくなって続けて再スタートしやすくなる (nw04 の pl で 1 → 4 回)。
+/// 詰めない形では前処理が列の番号を保つので分母は最初の問題の整数列の数のままなので、それに合わせる
+pub(crate) fn restart_nint_base() -> usize {
+    RESTART_NINT_BASE.with(|c| c.get())
 }
 
 pub(crate) fn restart_drop_fixed_on() -> bool {
@@ -1611,7 +1626,8 @@ pub(crate) fn restart_drop_fixed(p: &MipProblem, verbose: bool) -> Option<DropFi
     if verbose {
         eprintln!("MIP: RESTART_DROP_FIXED: columns {} -> {}, nonzeros {} -> {}, pool cuts {} -> {}", p.n, q.n, nnz0, q.nnz, ncuts.0, ncuts.1);
     }
-    Some(DropFixed { q, keep, base, saved_orig: Some(saved_orig) })
+    let prev_base = RESTART_NINT_BASE.with(|c| c.replace(c.get().max(p.nint)));
+    Some(DropFixed { q, keep, base, saved_orig: Some(saved_orig), prev_base })
 }
 
 /// 行の並び (列番号と係数) の指紋 ([`solver::ROOT_BASIS_ROWS`] で、基底を作った LP と根の LP の行が同じかを見る)。
