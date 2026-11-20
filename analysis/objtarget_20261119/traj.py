@@ -22,7 +22,7 @@ for p in probs:
     err.seek(0)
     lines = err.read().splitlines()
     inc = [(float(m.group(2)), float(m.group(1))) for l in lines if (m := pat.search(l))]
-    tp = [l for l in lines if "TPRE" in l][:20]
+    tp = [l for l in lines if "TPRE" in l or "Presolve:" in l][:20]
     row = {"problem": p, "seed": int(seed), "tl": TL, "env": {k: v for k, v in os.environ.items() if k.startswith("ENOMOTO_")}, "result": res, "inc": inc, "tpre": tp, "wall": round(time.time() - t0, 1)}
     with open(OUT, "a") as f: f.write(json.dumps(row) + "\n")
     print(p, res.get("status"), res.get("objective"), len(inc), inc[-1] if inc else None, flush=True)
