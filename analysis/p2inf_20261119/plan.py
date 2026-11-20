@@ -10,8 +10,9 @@ VS = D.parent / "vshighs_20261117"
 sys.path.insert(0, str(D.parent / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
 NM, NP = int(sys.argv[1]), int(sys.argv[2])
-BASE, ALT = sys.argv[3], sys.argv[4]  # 対にする 2 設定 (cfg.py)
-SUF = ALT.upper()
+BASE, ALT = sys.argv[3], sys.argv[4]  # 対にする設定 (cfg.py)。試作は「,」で並べると 3 つ以上を同じ分担で続けて解く (札は「_」でつなぐ)
+ALTS = ALT.split(",")
+SUF = "_".join(a.upper() for a in ALTS)
 def times(pat, cfg, cap):
     T = defaultdict(list)
     for f in glob.glob(str(pat)):
@@ -29,12 +30,12 @@ def balance(groups, est, n, out, tl):
     (D / out).write_text(json.dumps({"shards": shards, "est_hours": [round(x / 3600, 2) for x in load]}, indent=0))
     print(out, len(groups), "組", sum(len(s) for s in shards), "回", "見積り (時間):", min(round(x / 3600, 2) for x in load), "〜", max(round(x / 3600, 2) for x in load))
 def order(p, s, c):
-    k = s % 2
+    k = s % len(c)
     return [(p, x, s) for x in c[k:] + c[:k]]
 TM = times(VS / "res_M_s*.jsonl", "def", 600)
 MPROBS = sorted(TM)
 def estM(p, c): return TM.get(p, 600.0) + 30
-balance({(p, s): order(p, s, [BASE, ALT]) for p in MPROBS for s in (1, 2)}, estM, NM, f"shards_M{SUF}.json", 600)
+balance({(p, s): order(p, s, [BASE] + ALTS) for p in MPROBS for s in (1, 2)}, estM, NM, f"shards_M{SUF}.json", 600)
 TP = times(VS / "res_P_s*.jsonl", "def", 60)
 def estP(p, c): return TP.get(p, 48.0) + 8
-balance({(p, s): order(p, s, [BASE, ALT]) for p in PROBS for s in (1, 2, 3)}, estP, NP, f"shards_P{SUF}.json", 60)
+balance({(p, s): order(p, s, [BASE] + ALTS) for p in PROBS for s in (1, 2, 3)}, estP, NP, f"shards_P{SUF}.json", 60)
