@@ -12823,7 +12823,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN` = w: 始めは衝突の重み 0 (既定と同じ)。ノード `ENOMOTO_T_MIP_CW_DYN_WINDOW` (既定 200) ごとに、
             // その窓で作った衝突の数 / ノード数が `ENOMOTO_T_MIP_CW_DYN_RATE` (既定 0.7) 以上なら、以後は重みを w にし、HiGHS 式の衝突スコアも
             // 入れる (一度上げたら戻さない)。衝突をよく作る問題ほど衝突を分枝に使う得が大きい (p2inf_20261119 5 節の数え上げ)。決め方はノード数 (仕事量)
-            // 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP` = w: DYN の段階形 (シグモイド)。窓 (`ENOMOTO_T_MIP_CW_DYN_WINDOW` ノード) ごとの「作った衝突 / ノード」r を
+            // `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP` = w (既定 0.1、p2inf_20261119 8.4 節で既定化、`=0` で切る): DYN の段階形 (シグモイド)。窓 (`ENOMOTO_T_MIP_CW_DYN_WINDOW` ノード) ごとの「作った衝突 / ノード」r を
             // 移動平均 (前の値と半々) でならした r̄ から、重みを w × σ((r̄ − r_mid) / s) にする (上げ下げとも)。r_mid = `ENOMOTO_T_MIP_CW_RAMP_MID`
             // (既定 0.69)、s = `ENOMOTO_T_MIP_CW_RAMP_S` (既定 0.1): 数え上げ (feat.jsonl、ノード 500) で重みに害のあった問題は r ≤ 0.62 (多くは ≤ 0.46)、
             // 得のあった問題は r ≥ 0.76 (多くは ≥ 0.8) だったので、真ん中を両者の間 0.69 に、幅を「害の側の多く (≤ 0.46) で 1 割以下、得の側の多く (≥ 0.8)
@@ -27251,15 +27251,22 @@ fn cw_dyn() -> Option<f64> {
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_WEIGHT_DYN").and_then(|v| v.parse().ok()).filter(|&w: &f64| w > 0.0))
 }
 
-/// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP` = w (p2inf_20261119、既定では使わない): 衝突の重みを窓ごとの衝突の多さのシグモイドで連続に決める。
+/// `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP_HCS` (p2inf_20261119 8.4 節で既定化、`=0` で切る): RAMP の間 HiGHS 式の衝突スコア (説明に使った列を全部上げる) にする。
 fn cw_ramp_hcs() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP_HCS").is_some_and(|v| v != "0"))
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP_HCS").is_none_or(|v| v != "0"))
 }
+
+/// `ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP` = w (p2inf_20261119 8.4 節で既定化、既定 w = 0.1、`=0` で切る): 衝突の重みを窓ごとの衝突の多さの
+/// シグモイドで連続に決める。試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN` を指定したときは、既定の RAMP は入れない (明示した RAMP は入る)。
 
 fn cw_ramp() -> Option<f64> {
     static F: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
-    *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP").and_then(|v| v.parse().ok()).filter(|&w: &f64| w > 0.0))
+    *F.get_or_init(|| match env_str!("ENOMOTO_MIP_CONFLICT_WEIGHT_RAMP") {
+        Some(v) => v.parse().ok().filter(|&w: &f64| w > 0.0),
+        None if cw_dyn().is_none() => Some(0.1),
+        None => None,
+    })
 }
 
 /// 診断 `ENOMOTO_MIP_FEAT_DIAG=N` (p2inf_20261119、既定では出さない): 主の木でノード数が N になったときと終わりに [`Solver::feat_line`] を出す。
@@ -27308,15 +27315,20 @@ pub(super) fn det1t(c: char) -> bool {
 }
 
 /// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=g` (analysis/slowm_20261119 §17、既定では使わない): 一般整数の境界の文字を含む衝突で締めた変更も遡れるようにする
+/// `ENOMOTO_MIP_LIT_EXPLAIN` の値。指定しなければ `sig` (p2inf_20261119 8.4 節で既定化、`=0` で切る)
+fn lit_explain_val() -> Option<String> {
+    Some(env_str!("ENOMOTO_MIP_LIT_EXPLAIN").map(|v| v.to_string()).unwrap_or_else(|| "sig".to_string()))
+}
+
 pub(super) fn lit_explain_gen() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // `sig` (p2inf_20261119 の予算つきの形) も 'g' を含むので除く
-    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v.contains('g') && v != "sig"))
+    *F.get_or_init(|| lit_explain_val().is_some_and(|v| v.contains('g') && v != "sig"))
 }
 
 pub(super) fn lit_explain() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v != "0" && v != "auto" && v != "sig"))
+    *F.get_or_init(|| lit_explain_val().is_some_and(|v| v != "0" && v != "auto" && v != "sig"))
 }
 
 fn lit_explain_sround() -> bool {
@@ -27324,17 +27336,17 @@ fn lit_explain_sround() -> bool {
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN_SROUND").is_some_and(|v| v != "0"))
 }
 
-/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=sig` (cwrh): リテラルの衝突の伝播にいつも理由を付け、遡る回数を解析ごとに RAMP の σ に比べた予算で抑える
+/// `ENOMOTO_MIP_LIT_EXPLAIN=sig` (既定、cwrh0): リテラルの衝突の伝播にいつも理由を付け、遡る回数を解析ごとに RAMP の σ に比べた予算で抑える
 pub(super) fn lit_explain_sig() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v == "sig"))
+    *F.get_or_init(|| lit_explain_val().is_some_and(|v| v == "sig"))
 }
 
 /// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=auto`: 途中で衝突の重みを上げる試作 (`CONFLICT_WEIGHT_DYN` / `_RAMP`) が上げた (HiGHS の衝突の点数を入れた) 間だけ
 /// [`lit_explain`] と同じくリテラルの衝突の伝播に理由を付ける。上がらない問題では既定と同じ動き
 pub(super) fn lit_explain_auto() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v == "auto"))
+    *F.get_or_init(|| lit_explain_val().is_some_and(|v| v == "auto"))
 }
 
 pub(super) fn conflict_proof_explain() -> bool {
