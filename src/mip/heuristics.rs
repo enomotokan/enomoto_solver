@@ -1712,6 +1712,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             None => time_limit,
         };
+        // 診断 `ENOMOTO_MIP_DET_DIAG` (analysis/det1t_20261120、振る舞いは変えない): サブ MIP の止め方 (手間の期限か時間か) を出す
+        if env_str!("ENOMOTO_MIP_DET_DIAG").is_some() && !self.params.submip {
+            eprintln!("DET_DIAG submip: tk_u {tk_u} budget {:?} time_limit {time_limit:.3} u_set {u_set} parallel {} has_budget {} nodes {}", tk_u_budget.map(|b| b * 1e-9), self.parallel_submips, crate::ticks::has_budget(), self.nodes);
+        }
         let time_limit = if u_set {
             super::solver::SUBMIP_ITER_CAP.with(|c| c.set(u_cap));
             let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
