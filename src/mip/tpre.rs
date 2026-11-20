@@ -49,7 +49,40 @@ pub(crate) struct TpreOut {
     pub secs: [f64; 4],
 }
 
+/// 診断 `ENOMOTO_MIP_TPRE` の `u` (analysis/objtarget_20261119/ の 7): 元の問題の LP 緩和で、最小化の下界 L と最大化の上界 U_max
+/// (目的の符号を反転した LP のラグランジュ下界の符号を戻したもの。どの双対でも正しい上界) を、PDLP の反復ごとに出す。
+/// 最大化が非有界なら、どの双対でも U_max = +inf (ラグランジュの形で無限の境界の向きに被約費用が残る)
+pub(crate) fn umax_diag(p: &MipProblem) {
+    use std::sync::{Arc, Mutex};
+    let iters = tunable!("ENOMOTO_T_MIP_TPRE_PDLP_ITERS", 20000usize, usize);
+    let caps = [500usize, 2000, 5000, 20000];
+    let at = |h: &[(usize, f64)], c: usize| h.iter().filter(|&&(k, _)| k <= c).map(|&(_, v)| v).fold(f64::NEG_INFINITY, f64::max);
+    let t0 = std::time::Instant::now();
+    let lp = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
+    let h1 = Arc::new(Mutex::new(Vec::new()));
+    let _ = lp.pdlrc_run_iters_hist(iters, Some(h1.clone()));
+    let t1 = t0.elapsed().as_secs_f64();
+    let neg: Vec<f64> = p.cost.iter().map(|c| -c).collect();
+    let lp2 = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &neg, &p.rows, &p.row_lo, &p.row_up);
+    let h2 = Arc::new(Mutex::new(Vec::new()));
+    let _ = lp2.pdlrc_run_iters_hist(iters, Some(h2.clone()));
+    let t2 = t0.elapsed().as_secs_f64() - t1;
+    let h1 = h1.lock().map(|h| h.clone()).unwrap_or_default();
+    let h2 = h2.lock().map(|h| h.clone()).unwrap_or_default();
+    let mut s = format!("MIP: TPRE_UMAX n {} m {} nnz {} offset {:.10e}", p.n, p.m, p.rows.iter().map(|r| r.len()).sum::<usize>(), p.offset);
+    for &c in &caps {
+        let l = at(&h1, c) + p.offset;
+        let u = -at(&h2, c) + p.offset;
+        s.push_str(&format!(" | it{c} L {l:.10e} Umax {u:.10e}"));
+    }
+    s.push_str(&format!(" | iters_min {} iters_max {} secs_min {t1:.2} secs_max {t2:.2}", h1.last().map_or(0, |x| x.0), h2.last().map_or(0, |x| x.0)));
+    eprintln!("{s}");
+}
+
 pub(crate) fn run(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
+    if mode().is_some_and(|m| m.contains('u')) {
+        umax_diag(p);
+    }
     let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
     if !p.cost.iter().any(|&c| c != 0.0) {
         return out;
