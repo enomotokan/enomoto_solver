@@ -23894,6 +23894,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// FJ のスレッドの Local-MIP の受け渡し箱の解を受け取る (待たない。別スレッドで回す試作 `ENOMOTO_MIP_LOCALMIP` は 2026-11-18 に削除)。
     pub(super) fn poll_lmip_thread(&mut self) {
+        // 試作 `ENOMOTO_MIP_TPRE` (p・pl、待たない形): 前処理の間に始めた PDLP の点からの FJ・Local-MIP の解が出来上がっていれば受け取る
+        // (最初の回の外側の求解だけ。前処理後の問題で実行不能なら、その点から FJ を 1 回 (手間 2e8) 回して直す)
+        if self.params.restarts == 0 && !self.params.submip && self.snap.is_none() {
+            if let Some(xr) = super::tpre::take_pending(self.p.n) {
+                self.heur_label = "TPRE";
+                let mut ok = self.try_incumbent(xr.clone());
+                if !ok && !self.p.is_feasible(&xr, 1e-6) {
+                    let p = self.p;
+                    if let Some(y) = crate::ticks::with_budget(2e8, || super::fj::fj2_search_from(p, &self.dom.global_lo, &self.dom.global_up, Some(&xr), 5.0, 0x7E1E_5EED, None)) {
+                        ok = self.try_incumbent(y);
+                    }
+                }
+                self.heur_label = "";
+                eprintln!("MIP: TPRE: took the solution from the presolve thread, accepted {ok} ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+        }
         self.lmboost_bg_tick(None);
         self.post_prechain();
         // 受け渡し箱には良くなった解を全部ためてあり、新しい (良い) 順に試して、受け付けられたらそこで止める。最良の解が受け付け
