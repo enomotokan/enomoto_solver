@@ -20076,6 +20076,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             u64::MAX
         };
         self.dom.cut_reason_budget = lx_budget;
+        // 試作 `ENOMOTO_MIP_PE_SIG` (analysis/slowm_20261119 §17.5、`CONFLICT_PROOF_EXPLAIN` と使う): 双対証明の理由で遡る変更も、解析 1 回で
+        // round(σ × B) 個までにする (B = `ENOMOTO_T_MIP_PE_SIG_BUDGET`、既定 16。σ は RAMP の今の σ)。σ ≈ 0 なら pe なしと同じ衝突になる
+        self.dom.proof_reason_budget = if env_str!("ENOMOTO_MIP_PE_SIG").is_some() {
+            (self.cw_ramp_sig * tunable!("ENOMOTO_T_MIP_PE_SIG_BUDGET", 16.0, f64)).round() as u64
+        } else {
+            u64::MAX
+        };
         let cb0 = super::domain::CUT_BUDGET[0].load(std::sync::atomic::Ordering::Relaxed);
         let lx_used = std::cell::Cell::new(0u64);
         let lx_asked = std::cell::Cell::new(0u64);
@@ -27322,6 +27329,7 @@ pub(super) fn inf_all() -> bool {
 /// 試作 `ENOMOTO_MIP_DET1T` の文字 (analysis/det1t_20261120、既定では使わない): 1 スレッドで同じ種の結果を再現させるため、時間で決めている所を手間で決める。
 /// `o`: 根のカットのループの乱択丸め (OBJPROBE `r`) の枠を、使った壁時計の秒でなく手間で数える。
 /// `n`: 手間の期限の中で解くサブ MIP は、時間の上限を 10 倍の安全網にする ([`Solver::solve_submip_problem`])
+/// `i`: 根の interior rounding の予算を手間で数え、内点法の反復も手間の期限で止める (src/mip/heur_ipm.rs、[`crate::ticks::ipm_work`])
 pub(super) fn det1t(c: char) -> bool {
     env_str!("ENOMOTO_MIP_DET1T").is_some_and(|v| v.contains(c))
 }

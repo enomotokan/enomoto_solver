@@ -96,6 +96,8 @@ pub struct Domain {
     /// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=sig` (p2inf_20261119): 衝突解析 1 回で遡ってよいカットの写しの表の理由 (`CUT_REASON_BASE` 以下) の変更の数。
     /// 超えた分は理由のない外からの変更と同じ葉として扱う (遡れる変更に数えない)。既定は無制限
     pub cut_reason_budget: u64,
+    /// 試作 `ENOMOTO_MIP_PE_SIG` (analysis/slowm_20261119 §17.5): 衝突解析 1 回で遡ってよい双対証明の理由の変更の数 (既定は無制限)
+    pub proof_reason_budget: u64,
     /// [`Self::take_low_water`] から後に変更の記録が最も短くなったときの長さ (巻き戻しで下がる)。
     low_water: usize,
     /// 根に戻ったときに適用する大域的な境界の締め付け (列, 上限か, 値)。
@@ -174,6 +176,7 @@ impl Domain {
             conflict: None,
             cur_reason: -1,
             cut_reason_budget: u64::MAX,
+            proof_reason_budget: u64::MAX,
             low_water: 0,
             pending_global: Vec::new(),
             dbg_sol: None,
@@ -952,6 +955,7 @@ impl Domain {
         // カットの写しの表の理由は `cut_reason_budget` 個まで (遡ると決めた変更を覚え、同じ変更は数え直さない)
         let cut_ok = std::cell::RefCell::new(std::collections::HashSet::<usize>::new());
         let cut_refused = std::cell::Cell::new(false);
+        let proof_ok = std::cell::RefCell::new(std::collections::HashSet::<usize>::new());
         let resolvable = |k: usize| -> bool {
             let r = self.stack[k].reason;
             if r >= 0 {
@@ -960,7 +964,22 @@ impl Domain {
             if proofs.is_none() || r > PROOF_REASON_BASE {
                 return false;
             }
-            if r > CUT_REASON_BASE || self.cut_reason_budget == u64::MAX {
+            if r > CUT_REASON_BASE {
+                // 双対証明の理由 (試作 `ENOMOTO_MIP_PE_SIG`: `proof_reason_budget` 個まで)
+                if self.proof_reason_budget == u64::MAX {
+                    return true;
+                }
+                let mut ok = proof_ok.borrow_mut();
+                if ok.contains(&k) {
+                    return true;
+                }
+                if (ok.len() as u64) < self.proof_reason_budget {
+                    ok.insert(k);
+                    return true;
+                }
+                return false;
+            }
+            if self.cut_reason_budget == u64::MAX {
                 return true;
             }
             let mut ok = cut_ok.borrow_mut();
