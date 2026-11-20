@@ -1340,6 +1340,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         CLQPRB_STICKY.with(|f| f.set(false));
         CLQPRB_REVERTED.with(|f| f.set(false));
         PRBWORK_DRY.with(|f| f.set(false));
+        FEAS_EARLY_DRY.with(|f| f.set(false));
         cutmix::reset();
     }
     let prr = outer && env_def!("ENOMOTO_MIP_PROBE_REPRESOLVE", "1").is_some();
@@ -1462,6 +1463,8 @@ pub(crate) struct DropFixed {
     base: Vec<f64>,
     /// 子の求解の間だけ詰めた問題に置き換えた [`SYM_ORIG`] の元の値 (戻すため)
     saved_orig: Option<Option<std::rc::Rc<MipProblem>>>,
+    /// [`RESTART_NINT_BASE`] の元の値 (戻すため)
+    prev_base: usize,
 }
 
 impl DropFixed {
@@ -1469,6 +1472,7 @@ impl DropFixed {
         if let Some(o) = self.saved_orig.take() {
             SYM_ORIG.with(|t| *t.borrow_mut() = o);
         }
+        RESTART_NINT_BASE.with(|c| c.set(self.prev_base));
         if let Some(y) = r.x.take() {
             if y.len() == self.q.n {
                 let mut x = self.base.clone();
@@ -1482,6 +1486,18 @@ impl DropFixed {
         }
         r
     }
+}
+
+thread_local! {
+    /// [`restart_drop_fixed`] で列を詰める前の整数列の数 (再スタートの判定の分母、[`restart_nint_base`])
+    static RESTART_NINT_BASE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 再スタートの判定の分母に使う整数列の数の下限 ([`restart_drop_fixed`] で詰めた子の求解の間だけ 0 でない)。詰めると子の問題の整数列の数
+/// (`p.nint`) は自由な列だけになり、「整数列の 2.5%」の分母が小さくなって続けて再スタートしやすくなる (nw04 の pl で 1 → 4 回)。
+/// 詰めない形では前処理が列の番号を保つので分母は最初の問題の整数列の数のままなので、それに合わせる
+pub(crate) fn restart_nint_base() -> usize {
+    RESTART_NINT_BASE.with(|c| c.get())
 }
 
 pub(crate) fn restart_drop_fixed_on() -> bool {
@@ -1611,7 +1627,8 @@ pub(crate) fn restart_drop_fixed(p: &MipProblem, verbose: bool) -> Option<DropFi
     if verbose {
         eprintln!("MIP: RESTART_DROP_FIXED: columns {} -> {}, nonzeros {} -> {}, pool cuts {} -> {}", p.n, q.n, nnz0, q.nnz, ncuts.0, ncuts.1);
     }
-    Some(DropFixed { q, keep, base, saved_orig: Some(saved_orig) })
+    let prev_base = RESTART_NINT_BASE.with(|c| c.replace(c.get().max(p.nint)));
+    Some(DropFixed { q, keep, base, saved_orig: Some(saved_orig), prev_base })
 }
 
 /// 行の並び (列番号と係数) の指紋 ([`solver::ROOT_BASIS_ROWS`] で、基底を作った LP と根の LP の行が同じかを見る)。
@@ -2708,6 +2725,19 @@ fn feas_fj_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> 
 ///   Local-MIP の初期化 (行の左辺の計算・集合の行の表) は止めを見ないので、始める前に一度見る。
 /// - FJ2 は止めの合図が立った後に LP 修復をしない (`fj::SKIP_REPAIR_ON_STOP`、[`heuristics::fj_lmip_mix`] と同じ)。
 /// - 問題は `=1` と同じ (前処理後、LP による固定の前。FJ_P3 の前処理はかけない)。
+/// 試作 `ENOMOTO_MIP_FEAS_NORETRY` (既定では使わない。analysis/rootlp_20261120): 目的が全て 0 の問題 (実行可能性問題) で、前処理の早めの
+/// FJ/Local-MIP ([`feas_fj_lmip_early`]) が解なしで上限まで回ったら、根の後のやり直し (solver の `robust_fj_retry`) を回さない。
+/// fhnw-binpack4-4 (実行不能) は 4 スレッドで早めの探索 60 秒・やり直し 30 秒・木 17 秒。解ける実行可能性問題 (fhnw-binpack4-48・
+/// neos-3004026-krka・ns1116954) は早めの探索が 3〜51 秒で解を見つけ、やり直しが見つけた記録はない (analysis/hang_20261117 の F)
+pub(crate) fn feas_noretry_on() -> bool {
+    env_str!("ENOMOTO_MIP_FEAS_NORETRY").is_some_and(|v| v != "0")
+}
+
+thread_local! {
+    /// [`feas_noretry_on`]: この求解の早めの探索が解なしで上限まで回った (最初の求解の始めに消す)
+    pub(crate) static FEAS_EARLY_DRY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub(crate) fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> Option<Vec<f64>> {
     feas_fj_lmip_early_salt(prob, threads, cap, verbose, 0)
 }
@@ -2869,6 +2899,10 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
         }
     });
     let r = found.into_inner().unwrap();
+    // `ENOMOTO_MIP_FEAS_NORETRY` ([`feas_noretry_on`]): 最初の早めの探索 (`salt` = 0) が解なしで上限まで回ったか
+    if salt == 0 {
+        FEAS_EARLY_DRY.with(|f| f.set(r.is_none()));
+    }
     if verbose {
         eprintln!(
             "MIP: presolve: early FJ/Local-MIP for the feasibility problem: {threads} threads (FJ {n_fj}, Local-MIP {}), FJ {} tries, Local-MIP {} steps, found {} by {} ({:.2}s, cap {cap:.2}s)",

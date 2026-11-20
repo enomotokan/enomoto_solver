@@ -332,3 +332,74 @@ def test_log_false_prints_nothing(capsys, threads):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+_SMALL_MPS = """\
+NAME          SMALL
+OBJSENSE
+    MAX
+ROWS
+ N  obj
+ L  c1
+ G  c2
+ E  c3
+COLUMNS
+    x         obj          1.0   c1           1.0
+    x         c2           1.0
+    MARKER    'MARKER'     'INTORG'
+    y         obj          2.0   c1           1.0
+    y         c3           1.0
+    n         obj          1.0   c3           1.0
+    MARKER    'MARKER'     'INTEND'
+RHS
+    rhs       obj         -5.0   c1           4.5
+    rhs       c2           0.5   c3           3.0
+RANGES
+    rng       c1           2.0
+BOUNDS
+ UP bnd       x            4.0
+ UP bnd       n            10
+ENDATA
+"""
+
+
+def test_read_model_mps(tmp_path):
+    """MPS を読む口 ``Model.readModel``。整数列の既定の二値・RANGES・目的の定数を確かめる。
+    max x + 2y + n + 5,  2.5 <= x + y <= 4.5,  x >= 0.5,  y + n == 3,
+    x in [0, 4], y 二値, n in [0, 10] 整数  ->  y + n = 3 は y=1,n=2 か y=0,n=3 で、
+    x <= 4.5 - y。y=1: 3.5 + 2 + 2 + 5 = 12.5、y=0: 4 + 0 + 3 + 5 = 12 -> 12.5。"""
+    import gzip
+
+    path = tmp_path / "small.mps"
+    path.write_text(_SMALL_MPS)
+    M = Model()
+    M.readModel(path)
+    assert [v.name for v in M.variables] == ["x", "y", "n"]
+    y = M.get_variable("y")
+    assert y.vtype == "integer" and (y.lb, y.ub) == (0.0, 1.0)
+    assert M.get_variable("n").ub == 10.0
+    sol = M.solve(log=False)
+    assert sol.status == "optimal"
+    assert approx(sol.objective, 12.5)
+    assert approx(M.get_variable("x").value, 3.5)
+
+    # gzip 圧縮のファイルも同じに読める
+    gz = tmp_path / "small.mps.gz"
+    with gzip.open(gz, "wt") as fh:
+        fh.write(_SMALL_MPS)
+    M2 = Model()
+    M2.read_model(str(gz))
+    assert approx(M2.solve(log=False).objective, 12.5)
+
+
+def test_read_model_needs_empty_model_and_rejects_quadratic(tmp_path):
+    path = tmp_path / "small.mps"
+    path.write_text(_SMALL_MPS)
+    M = Model()
+    Variable(float, 0, 1, model=M)
+    with pytest.raises(ValueError):
+        M.readModel(path)
+    q = tmp_path / "q.mps"
+    q.write_text("NAME\nROWS\n N obj\nCOLUMNS\n x obj 1\nQUADOBJ\n x x 1\nENDATA\n")
+    with pytest.raises(ValueError):
+        Model().readModel(q)
