@@ -10,7 +10,7 @@ ref = {}
 for l in open(D.parents[1] / "scripts/miplib2017-v31.solu"):
     t = l.split()
     if len(t) >= 3 and t[0] in ("=opt=", "=best="): ref[t[1]] = float(t[2])
-rows = [json.loads(l) for f in sorted(glob.glob(str(D / f"res_{SET}_s*.jsonl"))) for l in open(f) if l.strip()]
+rows = [json.loads(l) for f in sorted(glob.glob(str(D / f"res_{SET}_s*.jsonl"))) if __import__("re").fullmatch(rf"res_{SET}_s\d+\.jsonl", Path(f).name) for l in open(f) if l.strip()]
 R = {(r["problem"], r["cfg"], r["seed"]): r for r in rows}
 def st(r): return str(r["result"].get("status") or "").lower()
 def solved(r): return st(r) in ("optimal", "infeasible")
