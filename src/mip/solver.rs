@@ -12678,7 +12678,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.nodes += 1;
             // 試作 `ENOMOTO_MIP_CWM`: このノードの衝突の重みの倍率 (札の対の側の大きさも数える)
             if super::cwm::mode().is_some() && !self.params.submip {
-                self.pc.cw_mult = super::cwm::on_node(node.cwm.as_ref());
+                // 次元 0 = 衝突の重みの倍率の対数 ([`super::cwm::DIMS`])
+                self.pc.cw_mult = super::cwm::on_node(node.cwm.as_ref())[0].exp();
             }
             self.tprof.nodes += 1;
             // 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN` = w: 始めは衝突の重み 0 (既定と同じ)。ノード `ENOMOTO_T_MIP_CW_DYN_WINDOW` (既定 200) ごとに、

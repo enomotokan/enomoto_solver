@@ -13,6 +13,9 @@
 //!     を足した値が最小の θ を [−`CWM_RANGE`, RANGE] の格子 (0.02 刻み) から選ぶ。観測が少ないうちは ĝ ≈ 0 なので θ₀ = 0 (= cwrh0) に留まる。
 //!   - `=spsa`: θ₀ ← θ₀ − a × (束の y の平均) / (2δ) (a = `CWM_SPSA_A`、既定 0.1)。比べ用。
 //!   - `=fix`: 動かさない (θ₀ = 0 で ±δ を比べるだけ。成績の指標が向きを当てるかの確かめ)。
+//! - 学ぶ量はベクトル θ = (θ_1, …) で、次元ごとに事前の幅 (`CWM_PRIOR` は衝突の重みの次元の幅) を持つ ([`DIMS`])。対では全部の次元を同時に
+//!   ±δ_k ずらし (向きは次元ごとに決定的な乱数、SPSA と同じ同時摂動)、観測 y から次元 k の傾き y / (2 δ_k s_k) (s_k = ±1) を得る。
+//!   中心は次元ごとに 1 次元のガウス過程 (bayes) か SPSA で決める。今は衝突の重みの 1 次元だけ (分枝のスコアのほかの係数を後から足す)。
 //! - 決め方は観測の数 (仕事量) だけで、時刻は使わない。部分 MIP では使わない。状態はプロセスで 1 つ (主の求解の根で初めに戻す)。
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
@@ -36,15 +39,22 @@ pub(crate) fn mode() -> Option<Mode> {
     })
 }
 
-fn delta() -> f64 {
-    tunable!("ENOMOTO_T_MIP_CWM_DELTA", 0.35, f64)
+/// 学ぶ次元: (名前, 事前の幅の既定, ずらし幅 δ の既定)。0 = 衝突の重みの倍率の対数 (重み × e^θ_0)。
+pub(crate) const DIMS: &[(&str, f64, f64)] = &[("cw", 1.0, 0.35)];
+
+fn delta(k: usize) -> f64 {
+    if k == 0 { tunable!("ENOMOTO_T_MIP_CWM_DELTA", DIMS[0].2, f64) } else { DIMS[k].2 }
+}
+
+fn prior(k: usize) -> f64 {
+    if k == 0 { tunable!("ENOMOTO_T_MIP_CWM_PRIOR", DIMS[0].1, f64) } else { DIMS[k].1 }
 }
 
 struct Tuner {
     mode: Mode,
-    center: f64,
-    /// (対を始めたときの中心, y)
-    obs: Vec<(f64, f64)>,
+    center: Vec<f64>,
+    /// 次元ごとの (対を始めたときの中心, 傾きの観測 y / (2 δ s) に 2δ を掛けた値 = 向きをそろえた y)
+    obs: Vec<Vec<(f64, f64)>>,
     since: usize,
     started: u64,
     /// 中心の推移 (観測の数:中心)
@@ -57,7 +67,8 @@ static TUNER: Mutex<Option<Tuner>> = Mutex::new(None);
 /// 主の求解の根で呼ぶ: 状態を戻す。
 pub(crate) fn reset(verbose: bool) {
     if let Some(m) = mode() {
-        *TUNER.lock().unwrap() = Some(Tuner { mode: m, center: 0.0, obs: Vec::new(), since: 0, started: 0, trace: String::new(), verbose });
+        let k = DIMS.len();
+        *TUNER.lock().unwrap() = Some(Tuner { mode: m, center: vec![0.0; k], obs: vec![Vec::new(); k], since: 0, started: 0, trace: String::new(), verbose });
     }
 }
 
@@ -68,12 +79,12 @@ fn splitmix(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// ガウス過程で傾きを当て、F(θ) + θ²/(2 PRIOR²) が最小の θ。
-fn bayes_center(obs: &[(f64, f64)]) -> f64 {
-    let d = delta();
+/// 次元 `dim` の観測 (中心, 向きをそろえた y) にガウス過程で傾きを当て、F(θ) + θ²/(2 PRIOR²) が最小の θ。
+fn bayes_center(obs: &[(f64, f64)], dim: usize) -> f64 {
+    let d = delta(dim);
     let gvar = tunable!("ENOMOTO_T_MIP_CWM_GVAR", 0.25, f64);
     let len = tunable!("ENOMOTO_T_MIP_CWM_LEN", 0.5, f64);
-    let prior = tunable!("ENOMOTO_T_MIP_CWM_PRIOR", 1.0, f64);
+    let prior = prior(dim);
     let range = tunable!("ENOMOTO_T_MIP_CWM_RANGE", 2.0, f64);
     // 直近の観測だけ (古い観測ほど今の木と合わない。数で区切る)
     let keep = tunable!("ENOMOTO_T_MIP_CWM_KEEP", 400usize, usize);
@@ -146,46 +157,59 @@ fn bayes_center(obs: &[(f64, f64)]) -> f64 {
 }
 
 impl Tuner {
-    fn push(&mut self, c: f64, y: f64) {
-        self.obs.push((c, y.clamp(-3.0, 3.0)));
+    /// 対の観測: 対を始めたときの中心 `c`、次元ごとの向き `sg` (+1 / −1、側 0 の向き)、y = ln(側 0 の大きさ / 側 1 の大きさ)
+    fn push(&mut self, c: &[f64], sg: &[f64], y: f64) {
+        let y = y.clamp(-3.0, 3.0);
+        for k in 0..self.obs.len() {
+            // 側 0 が +δ_k なら y はそのまま θ_k を上げた側 − 下げた側
+            self.obs[k].push((c[k], y * sg[k]));
+        }
         self.since += 1;
         let batch = tunable!("ENOMOTO_T_MIP_CWM_BATCH", 32usize, usize).max(1);
         if self.since < batch {
             return;
         }
-        let recent: Vec<f64> = self.obs[self.obs.len() - self.since..].iter().map(|o| o.1).collect();
+        let since = self.since;
         self.since = 0;
-        let old = self.center;
-        self.center = match self.mode {
-            Mode::Fix => 0.0,
-            Mode::Spsa => {
-                let ybar = recent.iter().sum::<f64>() / recent.len() as f64;
-                let a = tunable!("ENOMOTO_T_MIP_CWM_SPSA_A", 0.1, f64);
-                let r = tunable!("ENOMOTO_T_MIP_CWM_RANGE", 2.0, f64);
-                (self.center - a * ybar / (2.0 * delta())).clamp(-r, r)
-            }
-            Mode::Bayes => bayes_center(&self.obs),
-        };
-        if self.trace.len() < 3000 {
-            self.trace.push_str(&format!(" {}:{:+.2}", self.obs.len(), self.center));
+        let old = self.center.clone();
+        for k in 0..self.center.len() {
+            let o = &self.obs[k];
+            self.center[k] = match self.mode {
+                Mode::Fix => 0.0,
+                Mode::Spsa => {
+                    let recent = &o[o.len() - since..];
+                    let ybar = recent.iter().map(|x| x.1).sum::<f64>() / recent.len() as f64;
+                    let a = tunable!("ENOMOTO_T_MIP_CWM_SPSA_A", 0.1, f64);
+                    let r = tunable!("ENOMOTO_T_MIP_CWM_RANGE", 2.0, f64);
+                    (self.center[k] - a * ybar / (2.0 * delta(k))).clamp(-r, r)
+                }
+                Mode::Bayes => bayes_center(o, k),
+            };
         }
-        if self.verbose && (self.center - old).abs() > 1e-9 {
-            eprintln!("MIP: CWM: theta center {:+.3} -> {:+.3} after {} observations", old, self.center, self.obs.len());
+        let n = self.obs[0].len();
+        if self.trace.len() < 3000 {
+            let c: Vec<String> = self.center.iter().map(|v| format!("{v:+.2}")).collect();
+            self.trace.push_str(&format!(" {}:{}", n, c.join("/")));
+        }
+        if self.verbose && old.iter().zip(&self.center).any(|(a, b)| (a - b).abs() > 1e-9) {
+            eprintln!("MIP: CWM: theta center {:?} -> {:?} after {} observations", old, self.center, n);
         }
     }
     fn summary(&self) -> String {
-        let n = self.obs.len();
-        let ybar = if n > 0 { self.obs.iter().map(|o| o.1).sum::<f64>() / n as f64 } else { 0.0 };
-        let se = if n > 1 { (self.obs.iter().map(|o| (o.1 - ybar).powi(2)).sum::<f64>() / ((n - 1) as f64 * n as f64)).sqrt() } else { f64::NAN };
-        format!("mode {:?}, started {}, observations {}, mean y = ln(size+/size-) {:+.3} (se {:.3}), theta center {:+.3}; trace{}", self.mode, self.started, n, ybar, se, self.center, self.trace)
+        let o = &self.obs[0];
+        let n = o.len();
+        let ybar = if n > 0 { o.iter().map(|x| x.1).sum::<f64>() / n as f64 } else { 0.0 };
+        let se = if n > 1 { (o.iter().map(|x| (x.1 - ybar).powi(2)).sum::<f64>() / ((n - 1) as f64 * n as f64)).sqrt() } else { f64::NAN };
+        let c: Vec<String> = DIMS.iter().zip(&self.center).map(|(d, v)| format!("{}={v:+.3}", d.0)).collect();
+        format!("mode {:?}, started {}, observations {}, mean y = ln(size+/size-) {:+.3} (se {:.3}), theta center {}; trace{}", self.mode, self.started, n, ybar, se, c.join(" "), self.trace)
     }
 }
 
 /// 対 (両側の部分木の大きさ)。
 struct Pair {
-    center: f64,
-    /// 側 0 が + か
-    plus0: bool,
+    center: Vec<f64>,
+    /// 次元ごとの側 0 の向き (+1 / −1)
+    sg: Vec<f64>,
     sizes: [AtomicU64; 2],
     done: [AtomicBool; 2],
     recorded: AtomicBool,
@@ -203,9 +227,8 @@ impl Drop for Side {
         p.done[self.side].store(true, Relaxed);
         if p.done[1 - self.side].load(Relaxed) && !p.recorded.swap(true, Relaxed) {
             let (a0, a1) = (p.sizes[0].load(Relaxed).max(1) as f64, p.sizes[1].load(Relaxed).max(1) as f64);
-            let y = if p.plus0 { (a0 / a1).ln() } else { (a1 / a0).ln() };
             if let Some(t) = TUNER.lock().unwrap().as_mut() {
-                t.push(p.center, y);
+                t.push(&p.center, &p.sg, (a0 / a1).ln());
             }
         }
     }
@@ -213,21 +236,21 @@ impl Drop for Side {
 
 /// ノードの札: このノードの θ と、入れ子の対の側の鎖 (外側から)、一番内側の対を始めた深さ。
 pub(crate) struct CwmTag {
-    theta: f64,
+    theta: Vec<f64>,
     chain: Vec<Arc<Side>>,
     start_depth: usize,
 }
 
-/// ノードを処理するとき: 鎖の全部の側の大きさを数え、このノードの倍率 e^θ を返す。札がなければ e^θ₀。
-pub(crate) fn on_node(tag: Option<&Arc<CwmTag>>) -> f64 {
+/// ノードを処理するとき: 鎖の全部の側の大きさを数え、このノードの θ (次元ごと) を返す。札がなければ中心 θ₀。
+pub(crate) fn on_node(tag: Option<&Arc<CwmTag>>) -> Vec<f64> {
     match tag {
         Some(t) => {
             for sd in &t.chain {
                 sd.pair.sizes[sd.side].fetch_add(1, Relaxed);
             }
-            t.theta.exp()
+            t.theta.clone()
         }
-        None => TUNER.lock().unwrap().as_ref().map_or(1.0, |t| t.center.exp()),
+        None => TUNER.lock().unwrap().as_ref().map_or_else(|| vec![0.0; DIMS.len()], |t| t.center.clone()),
     }
 }
 
@@ -243,16 +266,16 @@ pub(crate) fn children(tag: Option<&Arc<CwmTag>>, depth: usize, seed: u64) -> [O
         let mut g = TUNER.lock().unwrap();
         let Some(t) = g.as_mut() else { return [tag.cloned(), tag.cloned()] };
         t.started += 1;
-        t.center
+        t.center.clone()
     };
-    let plus0 = splitmix(seed ^ 0x5851_F42D_4C95_7F2D) & 1 == 0;
-    let pair = Arc::new(Pair { center, plus0, sizes: [AtomicU64::new(0), AtomicU64::new(0)], done: [AtomicBool::new(false), AtomicBool::new(false)], recorded: AtomicBool::new(false) });
-    let d = delta();
+    let sg: Vec<f64> = (0..DIMS.len()).map(|k| if splitmix(seed ^ 0x5851_F42D_4C95_7F2D ^ (k as u64).wrapping_mul(0xA24B_AED4_963E_E407)) & 1 == 0 { 1.0 } else { -1.0 }).collect();
+    let pair = Arc::new(Pair { center: center.clone(), sg: sg.clone(), sizes: [AtomicU64::new(0), AtomicU64::new(0)], done: [AtomicBool::new(false), AtomicBool::new(false)], recorded: AtomicBool::new(false) });
     let mk = |side: usize| {
         let mut chain: Vec<Arc<Side>> = tag.map(|t| t.chain.clone()).unwrap_or_default();
         chain.push(Arc::new(Side { pair: pair.clone(), side }));
-        let plus = (side == 0) == plus0;
-        Some(Arc::new(CwmTag { theta: center + if plus { d } else { -d }, chain, start_depth: depth + 1 }))
+        let sgn = if side == 0 { 1.0 } else { -1.0 };
+        let theta = (0..DIMS.len()).map(|k| center[k] + sgn * sg[k] * delta(k)).collect();
+        Some(Arc::new(CwmTag { theta, chain, start_depth: depth + 1 }))
     };
     [mk(0), mk(1)]
 }
@@ -269,13 +292,13 @@ mod tests {
     #[test]
     fn bayes_center_follows_gradient_sign() {
         // 傾きが正 (θ を上げると部分木が大きい) なら中心は負へ、観測がなければ 0
-        assert_eq!(bayes_center(&[]), 0.0);
+        assert_eq!(bayes_center(&[], 0), 0.0);
         let obs: Vec<(f64, f64)> = (0..64).map(|i| (0.0, 0.3 + 0.05 * ((i % 5) as f64 - 2.0))).collect();
-        assert!(bayes_center(&obs) < -0.05);
+        assert!(bayes_center(&obs, 0) < -0.05);
         let obs: Vec<(f64, f64)> = (0..64).map(|i| (0.0, -0.3 + 0.05 * ((i % 5) as f64 - 2.0))).collect();
-        assert!(bayes_center(&obs) > 0.05);
+        assert!(bayes_center(&obs, 0) > 0.05);
         // 平均 0 の雑音だけなら 0 の近く
         let obs: Vec<(f64, f64)> = (0..64).map(|i| (0.0, if i % 2 == 0 { 1.0 } else { -1.0 })).collect();
-        assert!(bayes_center(&obs).abs() < 0.1);
+        assert!(bayes_center(&obs, 0).abs() < 0.1);
     }
 }
