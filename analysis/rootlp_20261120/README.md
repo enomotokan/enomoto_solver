@@ -67,3 +67,61 @@
 - 回し方: リポジトリの根で `rm -f target/wheels/*.whl; sh analysis/revisit_20261112/build.sh` の後、`python analysis/rootlp_20261120/run.py F K` (K = 0〜7)。
   集計 `python analysis/rootlp_20261120/summ.py F def ncnr`・`python analysis/rootlp_20261120/summ.py F def_t1 ncnr_t1`。
 - 目的が 0 でない問題には働かないので、P の 58 問の計測は要らない (働かないことはコードの条件 `fj_feas_extend` で決まる)。
+
+## 4. 根の Pump・ダイビングの予算 (親の依頼: 「根の LP の反復の 4 倍 + 4000」を全体に響かない形に作り直す)
+
+### 4.1 材料 (`rhscan.py` → `rhscan.jsonl`・`logs_rh/`、集計 `rhsumm.py` → `rhsumm.txt`)
+
+- 今の決め方 (`ENOMOTO_MIP_RHEUR=es`、cand1118 から既定、rootheur_20261114): 暫定解の無い根でだけ、Pump と 3 つのダイビングが
+  「根の LP の反復の 4 倍 + 4000」の LP 反復を共有する。1 本の取り分は min(既定の 5・2・2・2 倍 + 1000, 残り / 残りの本数)。取り分を使い切って何も見つけず、
+  近さ < 0.5 なら残りのダイビングの取り分を半分にする。`e` は安いサブ MIP (locks・clique・vbounds) を Pump・ダイビングの前に出す。
+- rootheur の要旨: 106 問の根で Pump・ダイビングが回るのは 6 問で改善 0。`es` は puriri の最初の解を 508 → 209 秒に早め、
+  P +1.9% [−1.1, +5.4]・M −4.7% [−15.3, +6.1] で既定にした。
+- 走査: P 58 問 + M 145 問を、根だけ (ノード上限 1)・1 スレッド・種 1・600 秒・`ENOMOTO_MIP_DEBUG_RHSTAT=1` で回した。根の LP に届いたのは 200 問
+  (ns1116954・fhnw-binpack4-48・krka は早めの FJ で解けて根に行かない)。1 スレッドなので、FJ のスレッドが先に解を出す 4 スレッドより「暫定解なし」の根が多い。
+
+| 初めの根の LP の秒 | 問題 | 根のヒューリスティクスの主の秒 | 改善 (主 + 並列) | Pump・ダイビングの秒 | その改善 | Pump・ダイビングが回った問題 |
+|---|---|---|---|---|---|---|
+| ≤ 1 | 150 | 1293 | 187 | 32 | 1 | 22 |
+| 1〜10 | 32 | 972 | 38 | 167 | 0 | 9 |
+| 10〜60 | 9 | 400 | 13 | 12 | 0 | 1 |
+| > 60 | 9 | 1417 | 4 | 969 | 0 | 4 (wolgan 346・crypt obj16 270・obj14 255・rail01 98) |
+
+- Pump・ダイビングが回ったのは 36 問 (P 4・M 32、`pooled_probs.json`)、計 1180 秒で改善は 1 回 (gmu-35-50、0.1 秒) だけ。
+  ヒューリスティクスごと (主): Pump 36 回 538 秒・改善 1、fractional 352 秒・0、vector length 145 秒・0、coefficient 145 秒・0。
+  ほかの重いもの: RENS 976 秒・改善 62、interior rounding 518 秒・8、root reduced cost 393 秒・45、robust FJ 298 秒・12。
+
+### 4.2 試作 `ENOMOTO_MIP_RHBUDGET=1` (src/mip/solver.rs の `rhbudget_on`、根のヒューリスティクスの Pump・ダイビングの所、既定は不変)
+
+- Pump・ダイビング 1 本の LP 反復の予算を「この求解でここまでに使った LP の反復 W (根の LP と根のカット。Pump・ダイビングの前に 1 度だけ読む) × 割合 + 1000」にする。
+  割合は SCIP の既定と同じ数 (ダイビング `maxlpiterquot` 0.05、Pump 0.01、`maxlpiterofs` 1000。`ENOMOTO_T_MIP_RHBUDGET_DIVE_Q`・`_PUMP_Q`・`_OFS`)。
+  共有の予算 (`RHEUR` の `b`・`s`) の代わりに使う。`e` はそのまま。
+- 成功の割合を掛ける形 (SCIP の (成功 + 1) / (呼び出し + 1)) は、根の最初の呼び出しでは 1 なので入れていない (木の暫定解なしのダイビングは別の予算)。
+- 手元 (根だけ・1 スレッド・種 1、`rhscan_rhb.jsonl`・`logs_rh/*_rhb.log.gz`。Pump・ダイビングの秒・LP 反復、根のヒューリスティクスの終わりの秒):
+
+| 問題 | 既定 | RHBUDGET |
+|---|---|---|
+| neos-3988577-wolgan | 345.8 秒・107390 反復、499 秒 | **27.7 秒・10658 反復、191 秒** |
+| cryptanalysiskb128n5obj14 | 255.3 秒・73095、492 秒 (根が時間切れ) | **44.2 秒・12639、280 秒** (根を終える) |
+| neos-2746589-doon | 39.7 秒・30465、140 秒 | 10.0 秒・7169、102 秒 |
+| germanrr | 19.2 秒・23190、83 秒 | 5.4 秒・7223、68 秒 |
+| rail01 | 97.7 秒・56162 | 103.2 秒・29249 (反復は半分、1 反復が重い) |
+| neos-3216931-puriri | 26.7 秒・41278 | 38.4 秒・54273 (W に根のカットの反復が入り、既定より多い) |
+| app1-2 | 19.8 秒・5388 | 22.1 秒・5918 |
+| gmu-35-50 | 0.1 秒・1408、**ダイビングが暫定解を −2574672 → −2578027 に改善** | 0.3 秒・3758、改善なし |
+
+- 確かめ: cargo test 414 通過、`ENOMOTO_MIP_RHBUDGET=1` で mip_fuzz_vs_highs 0/300・fuzz_tiny 0/400 (ヒューリスティクスの予算だけの変更)。
+
+### 4.3 計測の依頼
+
+- `cfg.py` の `rhb`。`plan_rhb.py 10 4` → `shards_P.json` (58 問 × 種 1〜3 × {def, rhb}、60 秒・4 スレッド、4 分担 × 0.74 時間)、
+  `shards_M.json` (`pooled_probs.json` の M 32 問 × 種 1・2 × {def, rhb}、600 秒・4 スレッド、10 分担 × 2.1〜2.2 時間)。
+- 回し方: `python analysis/rootlp_20261120/run.py P K` (K = 0〜3)、`... run.py M K` (K = 0〜9)。集計 `python analysis/rootlp_20261120/summ.py P def rhb`・`... summ.py M def rhb`。
+
+## 5. 案 A (Local-MIP の手間の数え方) の洗い出し
+
+- 手間の上限 (`crate::ticks`) で止まる既定の Local-MIP は、前処理の早めの探索の 1 スレッド (`ENOMOTO_MIP_TICKS` の `f`) だけ。FJ のスレッド・根の Local-MIP・
+  木の役・tpre の Local-MIP は実時間の期限で止まる。サブ MIP の中の Local-MIP (`ENOMOTO_MIP_SUBMIP_HEUR` の `l`) は試作で既定では使わない。
+- その `f` の道は、連鎖の手を切れば (`NO_CHAIN`、3 節の `ncnr`) 本体の手の数えだけになり、上限が実時間で守られる側に寄る
+  (fhnw-binpack4-4 の 1 スレッドの早めの探索 173 → 6.9 秒)。連鎖の手の数えを直すのは、手間で数える他の所 (サブ MIP の `u` の予算の中など) の振る舞いを
+  広く変えるので、F の結果を見てから決める。
