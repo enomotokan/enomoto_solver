@@ -277,3 +277,17 @@ nw04 の plw (種 1) が def の 2 倍遅い原因のうち、再スタートに
 - 時間切れの暫定解 (両方時間切れの組、最小化): neos-1456979 は種で大きく割れる。def 434・328・186 に対し c 192・199・437、cb 360・204・392、pl 252・181・212、pl_cb 252・226・182。
   c・cb の悪化は種 3 だけ (+135%・+111%)、種 1・2 はむしろ良い。ほか (blp-ar98・cvs16r128-89・gen-ip002・supportcase26・ran14x18-disj-8 など) は ±4% 以内で両向き。
   gen-ip002 は全 alt・全種でわずかに悪い (+0.1〜0.3%)。supportcase26 は pl・pl_cb が 3 種とも良い (−1.9〜−3.7%)。
+
+### cb を既定にした (2026-11-20、利用者の判断)
+
+- 既定にした: `ENOMOTO_MIP_PRESOLVE_STOP_FINE` (c) と `ENOMOTO_MIP_RESTART_DROP_FIXED` (b、再スタートの判定の分母は詰める前の整数列の数のまま)。
+  前の形に戻すのはそれぞれ `=0` (または `off`)。両方 `=0` で以前の既定と同じ道筋。
+- 根拠: PRS (60 秒、58 問 × 種 1〜3) で cb/def +0.5% [−2.0%, +3.0%]・解けた数 138 → 137 (mzzv42z s1 は def が上限の際、physiciansched6-2 s2)。
+  MRS (600 秒、46 問 × 種 1・2、分担 0〜7) で cb/def −5.4% [−22.6%, +13.8%]・解けた数 9 → 10 (glass4 s1 は cb だけ)・全種で遅い問題なし・食い違い 0。
+  nw04 の pl では再スタートする種で 2 倍 → 1.4 倍 (上の表)。
+- 確かめ (既定にした版、環境変数なし):
+  - cargo test 419 通過・0 失敗 (`cargo test --release --lib` は pyo3 の extension-module のため libpython をリンクしないので、
+    `RUSTFLAGS="-L/usr/local/lib -lpython3.13" LD_LIBRARY_PATH=/usr/local/lib` と別の `CARGO_TARGET_DIR` で回した)。
+  - fuzz (`fuzz/*_cb*.txt`、2 スレッド): mip_fuzz_vs_highs 300 で bad 0。再スタートの閾値を 0 にした形
+    (`ENOMOTO_T_MIP_RESTART_FIRST_FAC=0 ENOMOTO_T_MIP_RESTART_FAC=0`) で mip_fuzz_vs_highs 300・1000 (うち 43 問で列を詰める再スタートが通った)・
+    mip_fuzz_symmetric 300・mip_fuzz_fixed_charge 200 がすべて bad 0。小さい乱数の問題では再スタート自体が少ない (vs_highs で 100 問に 8 問、symmetric で 0)。
