@@ -4973,7 +4973,8 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     }
     // 試作 `ENOMOTO_MIP_VBCLQ` の `e` ([`presolve_vbclq_e`]、analysis/scipgate_20261120): LP による固定の前に、暫定解の値を上限にした
     // pseudoobj の固定をかける。固定したら前処理をかけ直し (固定した列と冗長になった行を消す)、その問題で LP による固定を回す
-    if lp_probe_secs.is_some() && !submip && !VBCLQ_E_ACTIVE.with(|f| f.get()) && solver::vbclq().is_some_and(|v| v.contains('e')) {
+    // 診断 `R` (値 `eR`): 前処理の中では回さず、根の LP の前の道 (前処理で回らなかった求解の道) だけで回す (fuzz でその道を確かめる)
+    if lp_probe_secs.is_some() && !submip && !VBCLQ_E_ACTIVE.with(|f| f.get()) && solver::vbclq().is_some_and(|v| v.contains('e') && !v.contains('R')) {
         // 固定の前の問題を取っておく: 固定の後のかけ直しが実行不能と言ったら、それは信じずに (VB01 の解は許容誤差 1e-6 の内で実行可能で、
         // 厳密な最適より良い値のことがある。その値を上限にした固定で厳密に実行可能な点が全て消える: fuzz_tiny の種 64・362)、
         // 固定の前の問題で続ける (VB01 の解は開始解としてそのまま渡す)
