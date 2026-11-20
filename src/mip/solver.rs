@@ -27301,7 +27301,8 @@ pub(super) fn inf_all() -> bool {
 /// 衝突解析で遡れるようにする ([`Solver::lit_prop`])。bnatt400 では解析の段の 1/3 がリテラルの衝突で締めた変更を遡れずに止まっていた
 /// (SCIP は衝突を制約 (logicor) として持つので遡れる)
 /// 試作 `ENOMOTO_MIP_DET1T` の文字 (analysis/det1t_20261120、既定では使わない): 1 スレッドで同じ種の結果を再現させるため、時間で決めている所を手間で決める。
-/// `o`: 根のカットのループの乱択丸め (OBJPROBE `r`) の枠を、使った壁時計の秒でなく手間で数える
+/// `o`: 根のカットのループの乱択丸め (OBJPROBE `r`) の枠を、使った壁時計の秒でなく手間で数える。
+/// `n`: 手間の期限の中で解くサブ MIP は、時間の上限を 10 倍の安全網にする ([`Solver::solve_submip_problem`])
 pub(super) fn det1t(c: char) -> bool {
     env_str!("ENOMOTO_MIP_DET1T").is_some_and(|v| v.contains(c))
 }
