@@ -6027,6 +6027,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     if env_def!("ENOMOTO_MIP_ROOTLP_SCALE", "1").is_some() {
         lp.request_scale_once();
     }
+    let tk_first0 = crate::ticks::total();
     match lp.solve(&SolveLimits { deadline: first_deadline, iteration_limit: first_iters, ..Default::default() }) {
         LpStatus::Optimal => {}
         // 際どい実行不能 ([`solver::lp_farkas_marginal`]) は信用しない: 固定をせずに終える (根の LP で解き直す)
@@ -6080,6 +6081,13 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     }
     pretime::add("lpprobe_first", root_secs);
     let root_iters = lp.total_iterations();
+    // 試作 `ENOMOTO_MIP_LPPROBE_TICKS` ([`lpprobe_ticks`]): 最初の LP の決定的な手間 (`crate::ticks`) と、子の LP の手間を数え始める点
+    let root_ticks = crate::ticks::total() - tk_first0;
+    let tk_probe0 = crate::ticks::total();
+    let tk_extra = std::cell::Cell::new(0.0f64);
+    let lpp_ticks = lpprobe_ticks() && work;
+    let giveup_ticks = tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_ticks;
+    let probe_ticks = || crate::ticks::total() - tk_probe0 + tk_extra.get();
     if finish_late && (if work { root_iters < lp_iter_cap } else { root_secs < secs }) {
         finish = false;
     }
@@ -6147,11 +6155,14 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
         let mut fixes: Vec<(usize, bool, f64)> = Vec::new();
         // `ENOMOTO_MIP_PREPAR` の `l`: 塊ごとの LP の写し (この巡の始めの状態) と、窓の結果 (上の子が切れるか, 下の子が切れるか, 反復)
         let mut wk: Vec<crate::simplex::mip_lp::TwoStageLp> = Vec::new();
-        let (mut win, mut win_start): (Vec<(bool, bool, u64)>, usize) = (Vec::new(), 0);
+        let (mut win, mut win_start): (Vec<(bool, bool, u64, f64)>, usize) = (Vec::new(), 0);
         // 塊の大きさ: 最初の窓はあきらめの列の数 (`giveup`) を塊に分けた大きさ、窓ごとに倍 (`ENOMOTO_T_MIP_PREPAR_LP_BSZ_MAX` まで)
         let mut lbsz = (giveup / lpar_blocks).max(1);
         for (ci, &(j, v)) in cands.iter().enumerate() {
-            if !budget_left(&lp) || (n_fixed + fixes.len() == 0 && (n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs || tot_it(&lp) > giveup_iters)) {
+            if !budget_left(&lp) || (n_fixed + fixes.len() == 0 && (n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs || tot_it(&lp) > giveup_iters || (lpp_ticks && probe_ticks() > giveup_ticks))) {
+                if lpp_ticks && n_fixed + fixes.len() == 0 && probe_ticks() > giveup_ticks && budget_left(&lp) && !(n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs || tot_it(&lp) > giveup_iters) && verbose {
+                    eprintln!("MIP: LP probing: LPPROBE_TICKS gave up after {n_tried} columns (child LP ticks {:.3e} > {:.3e} = mult x first LP)", probe_ticks(), giveup_ticks);
+                }
                 break;
             }
             tried.insert((j, v.floor() as i64));
@@ -6173,6 +6184,14 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                 if n_fixed + fixes.len() == 0 {
                     left = left.min(giveup_iters.saturating_sub(tot_it(&lp)));
                     wlen = wlen.min(giveup.saturating_sub(n_tried - 1));
+                    // 試作 `ENOMOTO_MIP_LPPROBE_TICKS`: 窓の候補も、残りの手間 (最初の LP の手間の倍率 - 子の LP の手間) を 1 列の手間の見積り
+                    // (1 列の反復 x 最初の LP の 1 反復の手間) で割った数までにする (窓を解いてからあきらめても、窓の分の時間は使ってしまうため)
+                    if lpp_ticks {
+                        let per_tk = per * root_ticks / root_iters.max(1) as f64;
+                        if per_tk > 0.0 {
+                            wlen = wlen.min(((giveup_ticks - probe_ticks()).max(0.0) / per_tk).ceil() as usize);
+                        }
+                    }
                 }
                 wlen = wlen.min((left as f64 / per).ceil() as usize);
             }
@@ -6187,7 +6206,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                     let blocks: Vec<&[(usize, f64)]> = cands[ci..end].chunks((end - ci).div_ceil(nb).max(1)).collect();
                     let (col_lo, col_up, saved_r) = (&prob.col_lo, &prob.col_up, &saved);
                     let n_cols = prob.n;
-                    let res: Vec<Vec<(bool, bool, u64)>> = pool.install(|| {
+                    let res: Vec<Vec<(bool, bool, u64, f64)>> = pool.install(|| {
                         use rayon::prelude::*;
                         wk.par_iter_mut()
                             .zip(blocks.par_iter())
@@ -6195,6 +6214,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                                 bl.iter()
                                     .map(|&(j, v)| {
                                         let it0 = w.total_iterations();
+                                        let tk0 = crate::ticks::total();
                                         let mut c = [false; 2];
                                         for (side, is_up) in [(0usize, true), (1usize, false)] {
                                             if is_up {
@@ -6205,7 +6225,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                                             c[side] = w.solve(&SolveLimits { iteration_limit: per_lp.min(rem), deadline, ..Default::default() }) == LpStatus::Infeasible && !lp_inf_untrusted(&*w, n_cols);
                                             w.restore_state(saved_r);
                                         }
-                                        (c[0], c[1], w.total_iterations() - it0)
+                                        (c[0], c[1], w.total_iterations() - it0, crate::ticks::total() - tk0)
                                     })
                                     .collect()
                             })
@@ -6215,8 +6235,9 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                     win_start = ci;
                     n_lwin += 1;
                 }
-                let (c0, c1, it) = win[ci - win_start];
+                let (c0, c1, it, tk) = win[ci - win_start];
                 it_extra.set(it_extra.get() + it);
+                tk_extra.set(tk_extra.get() + tk);
                 it_lc += it;
                 n_lc += 1;
                 cut = [c0, c1];
@@ -6318,10 +6339,12 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     let slow_root = slow_root && env_str!("ENOMOTO_MIP_P2BASIS").and_then(|v| v.parse::<f64>().ok()).is_none_or(|t| root_secs >= t);
     if verbose {
         eprintln!(
-            "MIP: LP probing: root LP {root_secs:.2}s ({root_iters} iters, size {size}), tried {n_tried}, fixed {n_fixed}, basis passed {}, total {} iters {:.2}s",
+            "MIP: LP probing: root LP {root_secs:.2}s ({root_iters} iters, size {size}), tried {n_tried}, fixed {n_fixed}, basis passed {}, total {} iters {:.2}s, ticks first {:.3e} children {:.3e}",
             n_fixed > 0 || slow_root,
             tot_it(&lp),
-            t0.elapsed().as_secs_f64()
+            t0.elapsed().as_secs_f64(),
+            root_ticks,
+            probe_ticks()
         );
     }
     let passed = n_fixed > 0 || slow_root;
@@ -7344,6 +7367,13 @@ thread_local! {
 /// 試作 `ENOMOTO_MIP_PREPAR` (既定では使わない。analysis/prepar_20261107.md): 前処理の並列化。値の文字で選ぶ
 /// (`p`: 含意を集めるプロービング ([`probe`]) の候補を投機的に並べる、`e`: プロービングの同値な組の巡を並べる、
 /// `l`: LP による固定 ([`lp_probe`]) の 1 巡の列の試しを並べる)
+/// 試作 `ENOMOTO_MIP_LPPROBE_TICKS` (analysis/scipsym_20261120/ 14・15 節、既定では使わない): LP による固定 ([`lp_probe`]) で固定がまだ 0 のとき、
+/// 子の LP に使った決定的な手間 (`crate::ticks`、窓で並べた写しの分も足す) が最初の LP の手間の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT` (既定 1) 倍を
+/// 越えたらあきらめる (手間の既定 `ENOMOTO_MIP_PRESOLVE_WORK` のときだけ)。反復 x (行 + 列) の数えは 1 反復の重い密な問題 (cod105) で軽く出る
+pub(crate) fn lpprobe_ticks() -> bool {
+    env_str!("ENOMOTO_MIP_LPPROBE_TICKS").is_some_and(|v| v != "0")
+}
+
 pub(crate) fn prepar_has(c: char) -> bool {
     env_def!("ENOMOTO_MIP_PREPAR", "ple").is_some_and(|v| v.contains(c))
 }
