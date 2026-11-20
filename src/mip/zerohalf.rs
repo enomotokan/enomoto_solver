@@ -97,6 +97,8 @@ pub fn zerohalf_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64],
     }
     // 対象の行の向き (元の行番号、符号 +1 は <= 側、-1 は >= 側を反転したもの、向きをそろえた右辺)
     let mut sides: Vec<(usize, f64, f64)> = Vec::new();
+    // 診断用の手間 ([`crate::ticks::diag_add`]、既定の手間・期限には入れない): 行の非零 + 列
+    crate::ticks::diag_add((n + rows.iter().map(|r| r.len()).sum::<usize>()) as u64);
     for (i, r) in rows.iter().enumerate() {
         if r.is_empty() || !r.iter().all(|&(j, a)| col_ok[j] && is_integral(a)) {
             continue;
@@ -133,6 +135,7 @@ pub fn zerohalf_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64],
     // mod 2 の行を作る
     let mut m2: Vec<Mod2Row> = Vec::with_capacity(ns);
     for (s, &(i, sg, bs)) in sides.iter().enumerate() {
+        crate::ticks::diag_add((wc + ws + rows[i].len()) as u64);
         let mut cv = vec![0u64; wc];
         let mut beta = bs;
         let mut act = 0.0;
@@ -160,11 +163,13 @@ pub fn zerohalf_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64],
         if check && zh_past_deadline() {
             return Vec::new();
         }
+        crate::ticks::diag_add(nr as u64);
         let Some(p) = (0..nr).find(|&r| !is_pivot[r] && m2[r].slack <= 1e-9 && bit(&m2[r].cols, c)) else { continue };
         is_pivot[p] = true;
         let piv = m2[p].clone();
         for r in 0..nr {
             if r != p && bit(&m2[r].cols, c) {
+                crate::ticks::diag_add((wc + ws) as u64);
                 xor_into(&mut m2[r].cols, &piv.cols);
                 m2[r].rhs_odd ^= piv.rhs_odd;
                 m2[r].slack += piv.slack;
@@ -182,7 +187,9 @@ pub fn zerohalf_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64],
             continue;
         }
         let mut val = r.slack;
+        let mut seen_cols = 0u64;
         for (c, &j) in cols.iter().enumerate() {
+            seen_cols += 1;
             if bit(&r.cols, c) {
                 val += xbar[j];
                 if val >= 1.0 - 2.0 * MIN_VIOL {
@@ -190,6 +197,7 @@ pub fn zerohalf_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64],
                 }
             }
         }
+        crate::ticks::diag_add(seen_cols);
         if val < 1.0 - 2.0 * MIN_VIOL {
             cands.push((val, r.combo.clone()));
         }
@@ -208,6 +216,7 @@ pub fn zerohalf_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64],
         if seen.contains(&combo) {
             continue;
         }
+        crate::ticks::diag_add((ns + seen.len() * ws) as u64);
         seen.push(combo.clone());
         // 元の係数で c = sum_R a_i、beta = sum_R b_i
         let mut touched: Vec<usize> = Vec::new();
@@ -217,6 +226,7 @@ pub fn zerohalf_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64],
                 continue;
             }
             beta += bs;
+            crate::ticks::diag_add(rows[i].len() as u64);
             for &(j, a) in &rows[i] {
                 if c[j] == 0.0 {
                     touched.push(j);
