@@ -478,6 +478,11 @@ pub(super) struct LocalMip<'a> {
     c1: Cand1,
     /// `ENOMOTO_MIP_LMIP_SWAP` (試作) の集合分割の行の索引 (最初の `run` で作る。外側の None = まだ作っていない)
     swap: Option<Option<swap::SwapIdx>>,
+    /// 試作 `ENOMOTO_MIP_OBJTARGET` の `l`: 目的の行の上限を暫定解のすぐ下でなく T = U − α (U − L) に置く α
+    /// (0 なら既定と同じ)。最後の改善から `ENOMOTO_T_MIP_OBJTARGET_STEPS` 手よくならなければ半分にする
+    ot_alpha: f64,
+    /// 最後に暫定解が良くなってからの手の数 ([`Self::ot_alpha`] を下げる判定)
+    ot_since: u64,
 }
 
 /// `ENOMOTO_MIP_LMIP1_CAND` (試作) の候補集めの作業域: 本家 v2 の `explore_unsat_mtm_bm` に合わせ、違反行を重複なしに
@@ -543,6 +548,8 @@ impl<'a> LocalMip<'a> {
             done: false,
             c1: Cand1::default(),
             swap: None,
+            ot_alpha: if super::objtarget('l') { tunable!("ENOMOTO_T_MIP_OBJTARGET_ALPHA", 0.5, f64) } else { 0.0 },
+            ot_since: 0,
         })
     }
 
@@ -649,7 +656,21 @@ impl<'a> LocalMip<'a> {
         let c1_rows = tunable!("ENOMOTO_T_MIP_LMIP1_ROWS", 10usize, usize).max(1);
         let c1_ops = tunable!("ENOMOTO_T_MIP_LMIP1_OPS", 2250usize, usize).max(1);
         let c1_full = tunable!("ENOMOTO_T_MIP_LMIP1_FULL", 4.0, f64);
-        let LocalMip { s, res, start, lift_order, set_of, cand, buf, best_obj: best_obj_r, since_improve: since_r, round_best: round_r, restarts: restarts_r, step: step_r, chain_tries: tries_r, chain, t0, done: done_r, c1, swap } = self;
+        let LocalMip { s, res, start, lift_order, set_of, cand, buf, best_obj: best_obj_r, since_improve: since_r, round_best: round_r, restarts: restarts_r, step: step_r, chain_tries: tries_r, chain, t0, done: done_r, c1, swap, ot_alpha, ot_since } = self;
+        let ot_steps = tunable!("ENOMOTO_T_MIP_OBJTARGET_STEPS", 20_000u64, u64).max(1);
+        // 目的の行の上限: 既定は「最良 − 刻み」。`OBJTARGET` の `l` で下界 L (根の LP、外側の目的値から定数項を引く) が分かり、最良より下なら
+        // 「最良 − max(刻み, α (最良 − L))」。目標に届かなくても、目的の行のほかを満たす点は解として記録する (下の nviol は目的の行を除く)
+        let ot_up = |best: f64, alpha: f64, ostep: f64, p: &MipProblem| -> f64 {
+            if alpha > 0.0 {
+                if let Some((l, _)) = super::objtarget_bounds() {
+                    let l = l - p.offset;
+                    if l < best {
+                        return best - ostep.max(alpha * (best - l));
+                    }
+                }
+            }
+            best - ostep
+        };
         // `ENOMOTO_MIP_LMIP_SWAP` (試作、既定では使わない): 集合分割の行の中で 1 を立てる列を入れ替える組の手を候補に足す ([`swap`])
         let swap_rows = tunable!("ENOMOTO_T_MIP_LMIP_SWAP_ROWS", 2usize, usize);
         let (swap_cols, swap_partners) = (tunable!("ENOMOTO_T_MIP_LMIP_SWAP_COLS", 16usize, usize).max(1), tunable!("ENOMOTO_T_MIP_LMIP_SWAP_PARTNERS", 4usize, usize));
@@ -715,6 +736,7 @@ impl<'a> LocalMip<'a> {
                 }
                 if !best_obj.is_finite() || z < best_obj - 1e-9 * best_obj.abs().max(1.0) {
                     best_obj = z;
+                    *ot_since = 0;
                     res.best = Some(s.x.clone());
                     on_sol(&s.x);
                     res.first_time.get_or_insert(t0.elapsed().as_secs_f64());
@@ -724,7 +746,7 @@ impl<'a> LocalMip<'a> {
                     }
                 }
                 let ostep = super::heuristics::ls_obj_step_pub(p, best_obj);
-                s.obj_up = best_obj - ostep;
+                s.obj_up = ot_up(best_obj, *ot_alpha, ostep, p);
                 if s.obj_cols.is_empty() {
                     done = true;
                     break;
@@ -740,6 +762,20 @@ impl<'a> LocalMip<'a> {
             }
             if nviol < res.least_viol {
                 res.least_viol = nviol;
+            }
+            // `OBJTARGET` の `l`: 目標の下で `ot_steps` 手よくならなければ α を半分にして目的の行を緩める (1/64 未満で既定の「最良 − 刻み」)
+            if *ot_alpha > 0.0 && best_obj.is_finite() {
+                *ot_since += 1;
+                if *ot_since > ot_steps {
+                    *ot_since = 0;
+                    *ot_alpha = if *ot_alpha < 1.0 / 64.0 { 0.0 } else { 0.5 * *ot_alpha };
+                    let ostep = super::heuristics::ls_obj_step_pub(p, best_obj);
+                    s.obj_up = ot_up(best_obj, *ot_alpha, ostep, p);
+                    s.set_viol(m);
+                    if debug {
+                        eprintln!("MIP:   [localmip] OBJTARGET: alpha {} (obj_up {:.6e}, best {best_obj:.6e})", *ot_alpha, s.obj_up);
+                    }
+                }
             }
             if nviol < round_best {
                 round_best = nviol;

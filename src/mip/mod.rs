@@ -368,6 +368,19 @@ pub(crate) struct RunStats {
 
 pub(crate) static RUN_STATS: std::sync::Mutex<RunStats> = std::sync::Mutex::new(RunStats { t0: None, first_sol: None, root_bound: None, root_heur_t: None, last_sol: None, best_z: f64::INFINITY });
 
+/// 試作 `ENOMOTO_MIP_OBJTARGET=文字` (analysis/objtarget_20261119/、既定では使わない): FJ (`f`)・Local-MIP (`l`) に「目的値 ≤ T」の目標を置く
+pub(crate) fn objtarget(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_OBJTARGET").is_some_and(|v| v.contains(c))
+}
+
+/// [`objtarget`] の目標の材料: (下界 L = 根の切除平面ループの後の LP の値, 上界 U = 全体の最良の暫定解 (なければ +inf))。
+/// どちらも外側の求解の目的値 (定数項を含む)。根がまだ終わっていなければ `None`
+pub(crate) fn objtarget_bounds() -> Option<(f64, f64)> {
+    let s = RUN_STATS.lock().ok()?;
+    let l = s.root_bound?;
+    l.is_finite().then_some((l, s.best_z))
+}
+
 /// 暫定解の記録 ([`RUN_STATS`])。最初のものだけを残す。
 pub(crate) fn record_incumbent(z: f64) {
     if let Ok(mut s) = RUN_STATS.lock() {
