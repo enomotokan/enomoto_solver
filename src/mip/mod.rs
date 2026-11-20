@@ -56,6 +56,7 @@ pub(crate) mod cutmix;
 pub(crate) mod mcf;
 pub(crate) mod clique;
 pub(crate) mod pretime;
+pub(crate) mod tpre;
 pub(crate) mod plsb;
 pub(crate) mod prechain;
 pub(crate) mod rootstop;
@@ -1454,6 +1455,13 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     if !params.submip && params.restarts == 0 {
         pretime::start();
     }
+    // 試作 `ENOMOTO_MIP_TPRE` ([`tpre`]): 並列の「仮の暫定値つき前処理」を 1 本のスレッドで始める (前処理の後で待って取り込む)
+    let tpre_job = (tpre::mode().is_some() && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none()).then(|| {
+        let q = p.clone();
+        let safety = if params.time_limit.is_finite() { 0.25 * params.time_limit } else { 60.0 };
+        let seed = 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
+        std::thread::spawn(move || tpre::run(&q, safety, seed))
+    });
     let prev_par = PREPAR_THREADS.with(|t| t.replace(if !params.submip && params.restarts == 0 { params.threads.max(1) } else { 1 }));
     struct RestorePar(usize);
     impl Drop for RestorePar {
@@ -1720,6 +1728,49 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // `ENOMOTO_MIP_RESTART_REF` (試作): 再スタート前の暫定解 (元の行を満たす) から前処理の前後の目的値のずれを求めておき、
     // 再スタート後の求解が暫定解なしで終わっても下界を報告する
     let mut ref_shift: Option<f64> = None;
+    // `ENOMOTO_MIP_TPRE`: 並列の仮の暫定値つき前処理の終わりを待ち、一番良い解を開始解に、`b` なら T 以下の解があったときに P_T の伝播の境界を持ち込む
+    let mut presolved = presolved;
+    let start = match tpre_job {
+        Some(h) => {
+            let tw = std::time::Instant::now();
+            let out = h.join().ok();
+            let wait = tw.elapsed().as_secs_f64();
+            let mut applied = 0usize;
+            if let (Some(o), Some(Presolved::Reduced { prob, scaling, .. })) = (out.as_ref(), presolved.as_mut()) {
+                if o.below_t && tpre::mode().is_some_and(|m| m.contains('b')) && prob.n == p.n && o.lo.len() == p.n {
+                    for j in 0..prob.n {
+                        let dj = scaling.d[j];
+                        if !(dj > 0.0) || !(prob.col_lo[j] < prob.col_up[j]) {
+                            continue;
+                        }
+                        let (mut lo, mut up) = (o.lo[j] / dj, o.up[j] / dj);
+                        if prob.is_int[j] {
+                            lo = (lo - 1e-6).ceil();
+                            up = (up + 1e-6).floor();
+                        }
+                        let mut changed = false;
+                        if lo > prob.col_lo[j] + 1e-9 {
+                            prob.col_lo[j] = lo.min(prob.col_up[j]);
+                            changed = true;
+                        }
+                        if up < prob.col_up[j] - 1e-9 {
+                            prob.col_up[j] = up.max(prob.col_lo[j]);
+                            changed = true;
+                        }
+                        applied += changed as usize;
+                    }
+                }
+            }
+            if let Some(o) = out.as_ref() {
+                eprintln!(
+                    "MIP: TPRE: L {:?} (PDLP {} iterations, {:.2}s), U {:?} ({:.2}s), T {:?}, P_T propagation: {} tightened, {} fixed, infeasible {} ({:.2}s), FJ in P_T found {} ({:.2}s), best {:.10e}; applied {applied} bounds; waited {wait:.2}s at {:.2}s",
+                    o.l, o.l_iters, o.secs[0], o.u, o.secs[1], o.t, o.n_tight, o.n_fix, o.infeasible_t, o.secs[2], o.below_t, o.secs[3], o.x_z, t_pre.elapsed().as_secs_f64()
+                );
+            }
+            start.or(out.and_then(|o| o.x))
+        }
+        None => start,
+    };
     match (&presolved, start) {
         (Some(Presolved::Reduced { prob, scaling, .. }), Some(x)) if x.len() == prob.n => {
             let mut xr: Vec<f64> = x.iter().zip(&scaling.d).map(|(v, d)| v / d).collect();
