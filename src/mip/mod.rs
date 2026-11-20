@@ -2776,10 +2776,10 @@ pub(crate) fn sym_sst() -> bool {
     env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v != "0")
 }
 
-/// 試作 `ENOMOTO_MIP_SYM_PPLEX` (analysis/scipsym_20261120/、既定では使わない): 詰め込みの行に入る対合の多い成分を 2 列の静的な詰め込み
-/// オービトープで扱う ([`symmetry::packing_orbisacks`])
+/// `ENOMOTO_MIP_SYM_PPLEX` (analysis/scipsym_20261120/、2026-11-20 に既定にした。`=0` で以前の動き): 詰め込みの行に入る対合の多い成分を
+/// 2 列の静的な詰め込みオービトープで扱う ([`symmetry::packing_orbisacks`])
 pub(crate) fn sym_pplex() -> bool {
-    env_str!("ENOMOTO_MIP_SYM_PPLEX").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_SYM_PPLEX", "1").is_some_and(|v| v != "0")
 }
 
 /// 試作 `ENOMOTO_MIP_SYM_SST=x` (analysis/sstx_20261119/、既定では使わない): [`sym_sst`] に加えて、ヒューリスティクスの解が SST の行だけに
@@ -3354,7 +3354,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     // 完全オービトープは探索中の固定 (orbitopal fixing) で扱い、残りの生成元だけ lex-leader の行にする
     let (mut orbs, mut used) = if env_str!("ENOMOTO_MIP_NO_ORBITOPE").is_none() { symmetry::find_orbitopes(&prob, &sym) } else { (Vec::new(), vec![false; sym.generators.len()]) };
     orbs.extend(twin_orbs);
-    // 試作 `ENOMOTO_MIP_SYM_PPLEX` ([`symmetry::packing_orbisacks`]、analysis/scipsym_20261120/): 詰め込みの行に入る対合の多い成分を、
+    // `ENOMOTO_MIP_SYM_PPLEX` (既定、`=0` で切る。[`symmetry::packing_orbisacks`]、analysis/scipsym_20261120/): 詰め込みの行に入る対合の多い成分を、
     // 対合ごとの 2 列の静的な詰め込みオービトープ (lex-leader の orbisack) で扱う。根で各オービトープの 1 行目の右の列を 0 に固定し
     // (下の `pplex_fix`)、ORBPP_REPROBE の伝播・プロービングにかける。サブ MIP では使わない
     let mut pplex_fix: Vec<usize> = Vec::new();

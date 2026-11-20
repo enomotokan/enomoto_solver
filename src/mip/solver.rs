@@ -7417,7 +7417,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for o in self.orbitopes.iter() {
                 o.canonicalize(&mut x);
             }
-            // 試作 `ENOMOTO_MIP_SYM_PPLEX`: 対合ごとの orbisack は列を共有するので、1 回の並べ替えで別の orbisack に反しうる。
+            // `ENOMOTO_MIP_SYM_PPLEX` (既定): 対合ごとの orbisack は列を共有するので、1 回の並べ替えで別の orbisack に反しうる。
             // 並べ替えのたびに解は列の番号の順の辞書式で真に大きくなるので、変わらなくなるまで繰り返す (回数の上限つき)
             if super::sym_pplex() {
                 for _ in 0..64 {
