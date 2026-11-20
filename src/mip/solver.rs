@@ -7368,6 +7368,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 目的が全部 0 (実行可能性問題) なら解が見つかれば最適で、ほかの根のヒューリスティクスはほとんど当たらないので、
         // 残りの `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC` (0.5) まで回す (秒の上限なし)。ns1116954 では残り 16 秒の 0.15 倍 (2.5 秒、FJ 2〜3 回) では足りなかった
         let feas = super::heuristics::fj_feas_extend(&self.p);
+        // 試作 `ENOMOTO_MIP_FEAS_NORETRY` ([`super::feas_noretry_on`]): 実行可能性問題で早めの探索が解なしで上限まで回っていれば回さない
+        if feas && super::feas_noretry_on() && !self.params.submip && super::FEAS_EARLY_DRY.with(|f| f.get()) {
+            if self.params.verbose {
+                eprintln!("MIP: robust FJ retry skipped (FEAS_NORETRY: the early FJ/Local-MIP found nothing within its limit)");
+            }
+            return false;
+        }
         let frac = if feas { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FEAS_FRAC", 0.5, f64) } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FRAC", 0.15, f64) };
         // `ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS` (2026-11-18 から既定 30、`inf` で従来の上限なし): 実行可能性問題の秒の上限。実行不能な
         // 実行可能性問題 (fhnw-binpack4-4) では残りの 0.5 が丸ごと空回りし、その間は根が止まっていた (4 スレッド 120 秒で 53.7 秒、
