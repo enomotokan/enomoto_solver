@@ -10952,3 +10952,20 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 確かめ: cargo test 414 通過。fuzz 11 本 (fuzz_tiny・mip_fuzz_vs_highs 4/1 スレッド・fuzz_objint・fuzz_slack・fuzz_cutconf・mip_fuzz_symmetric) は既定のまま bad 0。
   widden の 1 スレッドは種 1 だけ再現して時間切れになる (暫定解は最適値)。種 2〜5 は 51〜73 秒で、以前の形の種 5 (236 秒) と同じく運の型の遅れ。
 - 記録: analysis/p2inf_20261119/README.md 5〜8 節 (8.4・8.5 節が採否と確かめ)。
+
+## 2026-11-20: 再スタートで固定済みの列を落とす ENOMOTO_MIP_RESTART_DROP_FIXED と、プロービングで止めの合図を細かく見る ENOMOTO_MIP_PRESOLVE_STOP_FINE を既定にする (採用)
+
+- 既定にした (戻すのはそれぞれ `=0`。両方 `=0` で以前の既定と同じ道筋):
+  - `ENOMOTO_MIP_RESTART_DROP_FIXED`: 再スタートで渡す問題から、大域的に固定された列を落として番号を詰める (固定の値は行の両辺と目的の定数へ)。
+    暫定解・プールのカット・根の LP の基底と解・`SYM_ORIG` も写し、解は元の番号へ戻す。木の中の再スタートの pseudocost・含意・対称性の生成元が
+    渡されるときは詰めない。再スタートの判定の分母 (全部の整数列) は詰める前の数のまま (`restart_nint_base`。詰めた数にすると続けて再スタートしやすい)。
+    nw04 (TPRE=pl): 87482 → 1842 列、非零 100 万 → 2.6 万、根の基底も合う (40 行中 39 行)。
+  - `ENOMOTO_MIP_PRESOLVE_STOP_FINE`: プロービング (と同値な組の巡) で止めの合図を候補ごとに見て、`ENOMOTO_MIP_PREPAR` の窓 (rayon のスレッド) にも
+    合図と前処理の期限を渡す。前は 16 候補ごとで、窓のスレッドは合図も期限も受け継がず、nw04 の再スタートの後の FJ のスレッド (FJ_P3 の前処理) を
+    主が 4.6〜4.9 秒待っていた (0.6 秒になる)。
+  - 試作 (a) `ENOMOTO_MIP_RESTART_DENSE_POOL` (自由な列の非零が問題の行の平均より多いカットをプールへ) は、再スタートの起きる 9 問で +17.9% の害があり落とした。
+- 結果 (4 スレッド、比は cb / def): P (MIPLIB の 58 問 × 種 1〜3、60 秒) **+0.5% [−2.0%, +3.0%]**、解けた数 138 → 137 (片方だけは時間の揺れ)。
+  M (Mittelmann の 46 問 × 種 1・2、600 秒) **−5.4% [−22.6%, +13.8%]**、解けた数 9 → 10、全種で遅い問題なし、食い違い 0。
+  nw04 の TPRE=pl で再スタートする種は def の 2 倍 → 1.4 倍。
+- 確かめ: cargo test 419 通過。fuzz (mip_fuzz_vs_highs 300、再スタートの閾値 0 で mip_fuzz_vs_highs 300・1000・mip_fuzz_symmetric 300・mip_fuzz_fixed_charge 200) で bad 0。
+- 記録: analysis/objtarget_20261119/README.md 10 節。

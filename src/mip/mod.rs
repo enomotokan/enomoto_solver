@@ -1449,7 +1449,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     r
 }
 
-/// 試作 `ENOMOTO_MIP_RESTART_DROP_FIXED` (analysis/objtarget_20261119/ の 10 節、既定では使わない): 再スタートで渡す問題から、大域的に
+/// `ENOMOTO_MIP_RESTART_DROP_FIXED` (analysis/objtarget_20261119/ の 10 節。**2026-11-20 に既定にした: `=0`・`off` で使わない (前の形)**): 再スタートで渡す問題から、大域的に
 /// 固定された列を落として列の番号を詰める (固定された列の値は行の両辺と目的の定数へ移す)。再スタートの後の前処理は列の番号を保つので、
 /// 落とさないと固定された列も前処理・プロービングの定義域・FJ_P3 の前処理などで列の数だけ回る (nw04: 87482 列のうち 81107 列が
 /// 再スタートで固定され、自由な列は 1842 本)。解は [`DropFixed::expand`] で元の番号へ戻す。
@@ -1501,7 +1501,7 @@ pub(crate) fn restart_nint_base() -> usize {
 }
 
 pub(crate) fn restart_drop_fixed_on() -> bool {
-    env_str!("ENOMOTO_MIP_RESTART_DROP_FIXED").is_some()
+    env_def!("ENOMOTO_MIP_RESTART_DROP_FIXED", "1").is_some()
 }
 
 /// [`DropFixed`] を作る (落とせないとき・落とす列がないときは `None`)。[`RESTART_SOL`]・[`RESTART_CUTS`] はここで詰めた番号に写す
@@ -3941,13 +3941,13 @@ pub(super) fn presolve_stop() -> bool {
     (crate::cancel::halted() || crate::ticks::over() || PRESOLVE_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d)) && env_str!("ENOMOTO_MIP_NO_PRESOLVE_STOP").is_none()
 }
 
-/// 試作 `ENOMOTO_MIP_PRESOLVE_STOP_FINE` (analysis/objtarget_20261119/ の 10 節、既定では使わない): プロービングで止めの合図
+/// `ENOMOTO_MIP_PRESOLVE_STOP_FINE` (analysis/objtarget_20261119/ の 10 節。**2026-11-20 に既定にした: `=0`・`off` で使わない (前の形)**): プロービングで止めの合図
 /// ([`presolve_stop`]) を候補ごとに見て、`ENOMOTO_MIP_PREPAR` の窓 (rayon のスレッドで先の候補を試す) の中でも見る。
-/// 既定は 16 候補ごと、窓の中では見ない。rayon のスレッドは止めの合図・前処理の期限 (どちらもスレッドごと) を受け継がないので、
+/// 前の形は 16 候補ごと、窓の中では見ない。rayon のスレッドは止めの合図・前処理の期限 (どちらもスレッドごと) を受け継がないので、
 /// 窓 (最大 64 x 4 候補) を試し終えるまで止まらない。nw04 の再スタートの後の FJ_P3 の前処理で、FJ のスレッドが止めの合図の後
 /// 4.6〜4.9 秒回っていた
 pub(super) fn presolve_stop_fine() -> bool {
-    env_str!("ENOMOTO_MIP_PRESOLVE_STOP_FINE").is_some()
+    env_def!("ENOMOTO_MIP_PRESOLVE_STOP_FINE", "1").is_some()
 }
 
 /// 前処理の止めの合図と期限を、別のスレッド (rayon の窓) に渡すための写し ([`presolve_stop_fine`] のときだけ)

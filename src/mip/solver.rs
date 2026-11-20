@@ -23507,7 +23507,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_TREEEFF` の `s`・`h` (試作): 木の中の再スタートの後の求解の間だけ印を立てる (根のカットのループを短くする)
         let tree_child = self.force_restart && self.nodes > 1 && (treeeff('s') || treeeff('h'));
         let prev_child = TREE_RESTART_CHILD.with(|c| c.replace(tree_child || TREE_RESTART_CHILD.with(|c| c.get())));
-        // 試作 `ENOMOTO_MIP_RESTART_DROP_FIXED` ([`super::restart_drop_fixed`]): 固定された列を落とした問題を解いて、解を元の番号に戻す
+        // `ENOMOTO_MIP_RESTART_DROP_FIXED` (既定、[`super::restart_drop_fixed`]): 固定された列を落とした問題を解いて、解を元の番号に戻す
         let r = match super::restart_drop_fixed(&newp, self.params.verbose) {
             Some(mut df) => {
                 let r = super::solve_problem(&df.q, params, true);
