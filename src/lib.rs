@@ -91,6 +91,7 @@ mod log;
 mod interior_point;
 mod mip;
 mod model;
+mod mps;
 mod params;
 mod phase_timing;
 mod presolve;

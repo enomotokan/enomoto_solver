@@ -24,6 +24,18 @@ MITT15 = ["qap15", "nug08-3rd", "fome13", "cont1", "cont11", "irish-electricity"
 CONCLUSIVE = {"optimal", "infeasible", "unbounded"}
 
 
+
+def _read_our_model_compat(bh, path):
+    """`benchmark_highs._read_our_model` (このクレートの MPS 読み込み) でモデルを作る。古いビルドを wheel で入れた
+    環境では `benchmark_highs` 自体が古く `_read_our_model` がないので、従来の HiGHS 経由の組み立てに戻る
+    (台本だけ新しくなった計測が落ちないように)。戻り値は `(model, 制約数, 非零数, 列の名前)`。"""
+    if hasattr(bh, "_read_our_model"):
+        return bh._read_our_model(path)
+    _, lp = bh._load_lp(path)
+    names = list(lp.col_names_) if len(lp.col_names_) == lp.num_col_ else [f"C{j}" for j in range(lp.num_col_)]
+    model, n_constraints, nnz = bh._build_our_model(lp)
+    return model, n_constraints, nnz, names
+
 def hstatus(h):
     import highspy
     S = highspy.HighsModelStatus
@@ -32,11 +44,9 @@ def hstatus(h):
 
 
 def worker_enomoto(mps: str) -> None:
-    import highspy
     from enomoto_solver import _core
-    from run_mittelmann_benchmark import _build_our_model
-    h = highspy.Highs(); h.setOptionValue("output_flag", False); h.readModel(mps)
-    model = _build_our_model(h.getLp()); del h
+    from enomoto_solver import benchmark_highs as bh
+    model, _, _, _ = _read_our_model_compat(bh, Path(mps))
     t0 = time.perf_counter()
     out = model.solve(lp_solver="auto", distinguish_infeasible_unbounded=True, threads=NCPU)
     t = time.perf_counter() - t0
