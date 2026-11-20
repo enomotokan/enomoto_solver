@@ -383,6 +383,26 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             cons.push(Cons { sense, rhs, coeffs: row.clone(), weight: 1.0, lhs: 0.0, viol_idx: -1 });
         }
     }
+    // 試作 `ENOMOTO_MIP_OBJTARGET` の `f` (analysis/objtarget_20261119/): 目的の行 `c x <= T` を固い行として足す (違反として数える)。
+    // T = U − α (U − L) (U = 全体の最良の暫定解、なければ T = L、L = 根の LP の値。外側の目的値から定数項を引く)。根より前 (L がない) では足さない。
+    // 目的の行だけに反する点も解として記録する (目標は道案内で、届かなくても解を失わない)
+    let mut obj_ci: Option<u32> = None;
+    if super::objtarget('f') && p.cost.iter().any(|&c| c != 0.0) {
+        if let Some((l, u)) = super::objtarget_bounds() {
+            let alpha = tunable!("ENOMOTO_T_MIP_OBJTARGET_ALPHA", 0.5, f64);
+            let t = if u.is_finite() && u > l { u - alpha * (u - l) } else { l } - p.offset;
+            let row: Vec<(u32, f64)> = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j as u32, p.cost[j])).collect();
+            let ci = cons.len() as u32;
+            for &(j, a) in &row {
+                vcols[j as usize].push((ci, a));
+            }
+            nnz += row.len() as u64;
+            obj_ci = Some(ci);
+            // 連鎖の手 (`ENOMOTO_MIP_FJ_CHAIN`) では問題の行でないので選ばない (下の `u32::MAX`)
+            cons_row.push(u32::MAX);
+            cons.push(Cons { sense: Sense::Lte, rhs: t, coeffs: row, weight: 1.0, lhs: 0.0, viol_idx: -1 });
+        }
+    }
     let mut s = Fj {
         lb,
         ub,
@@ -449,7 +469,9 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             }
         }
         let mut check = s.effort - effort_last_check > 500_000;
-        if s.violated.is_empty() && s.objective < best_obj {
+        // 目的の行 (`OBJTARGET` の `f`) だけに反する点も実行可能
+        let feasible = s.violated.is_empty() || (obj_ci.is_some() && s.violated.len() == 1 && Some(s.violated[0]) == obj_ci);
+        if feasible && s.objective < best_obj {
             let rel = (best_obj - s.objective) / s.objective.abs().max(1.0);
             if rel > 1e-4 {
                 effort_last_improve = s.effort;
@@ -474,7 +496,16 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         }
         if chain && s.good.is_empty() && !s.violated.is_empty() {
             let k = (s.next_u64() % s.violated.len() as u64) as usize;
-            let r = cons_row[s.violated[k] as usize] as usize;
+            let r = cons_row[s.violated[k] as usize];
+            if r == u32::MAX {
+                let v = s.select_variable();
+                if v == usize::MAX {
+                    break;
+                }
+                s.do_move(v);
+                continue;
+            }
+            let r = r as usize;
             chain_tries += 1;
             let mut view = FjView { fj: &mut s, p, row_cons: &row_cons };
             let abort = || {
