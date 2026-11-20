@@ -203,7 +203,8 @@ pub(super) fn vb01(c: char) -> bool {
     env_str!("ENOMOTO_MIP_VB01").is_some_and(|v| v.contains(c) || (c == 'r' && v == "1"))
 }
 
-/// 試作 `ENOMOTO_MIP_VBCLQ` の値 (既定では使わない。analysis/scipgate_20261120)
+/// 試作 `ENOMOTO_MIP_VBCLQ` の値 (既定では使わない。analysis/scipgate_20261120)。空・`0` 以外なら根の LP の前の pseudoobj
+/// ([`Solver::vbclq_pseudoobj`])、`l` を含めば前処理の LP による固定もしない
 pub(super) fn vbclq() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_VBCLQ").filter(|v| !v.is_empty() && *v != "0")
 }
@@ -20530,6 +20531,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             mark.iter_mut().for_each(|s| *s = u32::MAX);
+        }
+        // 診断 `ENOMOTO_MIP_VBCLQ_COUNT_FILE=<ファイル>`: 呼ばれるたびに「固定した列の数 打ち切りの証明 (0/1)」を 1 行足す (fuzz で働いた回数を数える)
+        if let Some(f) = env_str!("ENOMOTO_MIP_VBCLQ_COUNT_FILE") {
+            use std::io::Write;
+            if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(f) {
+                let _ = writeln!(fh, "{fixed} {}", infeas as u8);
+            }
         }
         if self.params.verbose {
             let free = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).count();
