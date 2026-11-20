@@ -2120,7 +2120,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     let tpre_orig: Option<(f64, Vec<f64>)> = tpre_x_orig.filter(|x| x.len() == p.n && p.is_feasible(x, 1e-6) && solver::START_SOL.with(|s| s.borrow().is_none())).map(|x| (p.objective(&x), x));
     let params = match &tpre_orig {
         Some((u, _)) => {
-            eprintln!("MIP: TPRE: keeping the solution {u:.10e} of the original problem as the cutoff and the fallback answer");
+            if params.verbose {
+                eprintln!("MIP: TPRE: keeping the solution {u:.10e} of the original problem as the cutoff and the fallback answer");
+            }
             MipParams { cutoff: params.cutoff.min(*u), ..params }
         }
         None => params,
@@ -5223,7 +5225,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             }
         }
     }
-    // 試作 `ENOMOTO_MIP_VBCLQ` の `e` ([`presolve_vbclq_e`]、analysis/scipgate_20261120): LP による固定の前に、暫定解の値を上限にした
+    // `ENOMOTO_MIP_VBCLQ` の `e` (既定、`=0` で使わない。[`presolve_vbclq_e`]、analysis/scipgate_20261120): LP による固定の前に、暫定解の値を上限にした
     // pseudoobj の固定をかける。固定したら前処理をかけ直し (固定した列と冗長になった行を消す)、その問題で LP による固定を回す
     // 診断 `R` (値 `eR`): 前処理の中では回さず、根の LP の前の道 (前処理で回らなかった求解の道) だけで回す (fuzz でその道を確かめる)
     if lp_probe_secs.is_some() && !submip && !VBCLQ_E_ACTIVE.with(|f| f.get()) && solver::vbclq().is_some_and(|v| v.contains('e') && !v.contains('R')) {
@@ -5899,7 +5901,7 @@ fn lp_inf_untrusted<L: lp_api::MipLp>(lp: &L, n: usize) -> bool {
     u
 }
 
-/// 試作 `ENOMOTO_MIP_VBCLQ` の `e` (analysis/scipgate_20261120): 前処理の LP による固定の前に、暫定解の値 z を上限 (`cost · x <= z - offset`、
+/// `ENOMOTO_MIP_VBCLQ` の `e` (既定、`=0` で使わない。analysis/scipgate_20261120): 前処理の LP による固定の前に、暫定解の値 z を上限 (`cost · x <= z - offset`、
 /// 暫定解そのものは残る) にして [`vbclq::pseudoobj`] で 0-1 列を固定し、定義域の伝播の結果も列の境界に書く。暫定解の出どころ:
 /// - VB01 ([`heur_scip::vbounds01_on_problem`]、SCIP-VB の試作の Solver の外の版)。
 /// - 診断 `ENOMOTO_MIP_VBCLQ_PRE_CUTOFF=<値>` (元の問題の目的の値。解は持たない、上限だけ。VB01 の解より良ければこちら)。

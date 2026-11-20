@@ -203,10 +203,12 @@ pub(super) fn vb01(c: char) -> bool {
     env_str!("ENOMOTO_MIP_VB01").is_some_and(|v| v.contains(c) || (c == 'b' && v == "1"))
 }
 
-/// 試作 `ENOMOTO_MIP_VBCLQ` の値 (既定では使わない。analysis/scipgate_20261120)。空・`0` 以外なら根の LP の前の pseudoobj
-/// ([`Solver::vbclq_pseudoobj`])、`l` を含めば前処理の LP による固定もしない
+/// `ENOMOTO_MIP_VBCLQ` の値 (既定 `e`、2026-11-20 に既定にした。analysis/scipgate_20261120。`=0`・`=off` で使わない (以前の既定))。
+/// - `e`: 各求解の最初の LP の直前に、LP を使わない発見法 VB01 の解と、その値を上限にした pseudoobj の固定をかける
+///   (最初の求解では前処理の LP による固定の前 ([`super::presolve_vbclq_e`])、それ以外は根の LP の前 ([`Solver::vbclq_pseudoobj`]))。
+/// - 試作の値: `1` (根の LP の前の pseudoobj だけ)、`l` (pseudoobj + 前処理の LP による固定をしない)、`eR` (診断: 根の LP の前の道だけ)
 pub(super) fn vbclq() -> Option<&'static str> {
-    env_str!("ENOMOTO_MIP_VBCLQ").filter(|v| !v.is_empty() && *v != "0")
+    env_def!("ENOMOTO_MIP_VBCLQ", "e").filter(|v| !v.is_empty())
 }
 
 /// `ENOMOTO_MIP_RHBUDGET` (analysis/rootlp_20261120): 外側の根の Pump・ダイビングの LP 反復の予算を、
