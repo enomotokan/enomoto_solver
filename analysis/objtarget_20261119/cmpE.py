@@ -11,10 +11,12 @@ def pg(o, r):
     if abs(o - r) <= 1e-9 * max(1, abs(r)): return 0.0
     if o * r < 0: return 1.0
     return abs(o - r) / max(abs(o), abs(r))
+import os
+PRE = os.environ.get("PRE", "E")
 cf = sys.argv[1:]
 R = {}
 for c in cf:
-    f = D / f"res_traj_E_{c}.jsonl"
+    f = D / f"res_traj_{PRE}_{c}.jsonl"
     if f.exists():
         for l in open(f):
             r = json.loads(l); R[(r["problem"], r["seed"], c)] = r
@@ -31,5 +33,6 @@ for p in sorted({k[0] for k in R}):
             r = R.get((p, s, c))
             if not r: out.append(f"{c} -"); continue
             inc = r["inc"]; fin = inc[-1][1] if inc else None
-            out.append(f"{c} {('%.4g' % fin) if fin is not None else 'none'} g{pg(fin, z):.3f} PI{pint(r, z):.1f}")
+            res = r["result"]; tm = f" opt {res['time']:.1f}s" if res.get("status") == "optimal" else ""
+            out.append(f"{c} {('%.4g' % fin) if fin is not None else 'none'} g{pg(fin, z):.3f} PI{pint(r, z):.1f}{tm}")
         print(f"{p} {s}: " + " | ".join(out))
