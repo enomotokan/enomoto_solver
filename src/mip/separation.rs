@@ -3930,7 +3930,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // `ENOMOTO_MIP_CUT_STALL_ONE`: まったく進まないラウンドも 1 回分と数える (neos-1456979 では最初の
                     // 4 ラウンドは下界が動かず、続ければ上がる。HiGHS も止めずに 66 ラウンド回して 154 -> 171)
                     // `ENOMOTO_MIP_CUT_INTOBJ_STALL` (試作、既定では使わない): 目的値が整数刻みの問題で、目的値が一度上がった後に
-                    // まったく動かないラウンドは、分数の列の数が減っていても停滞と数え、`ENOMOTO_T_MIP_CUT_INTOBJ_STALL` 回 (既定 3) で
+                    // まったく動かないラウンドは、分数の列の数が減っていても停滞と数え、`ENOMOTO_T_MIP_CUT_INTOBJ_STALL` 回 (2026-11-20 から既定 5、`=3` で以前の動き。
+                    // neos-3381206-awhea は外側の根で 5 巡動かずに 6 巡目で下界が跳ねる。analysis/slowm_20261119 §4・§16) で
                     // 止める。10teams は 0.5 秒 (ラウンド 0) で 917 -> 924 (最適値) になった後、分数の列の数が上下するので停滞と
                     // 数えられず、14 ラウンド (約 6 秒) 回してから根のヒューリスティクスに進んでいた。最初から動かない
                     // ラウンド (neos-1456979) は数えない。整数刻みかは整数値に固定された連続列を整数列と扱って判定する (10teams は費用のある固定の連続列
@@ -3942,7 +3943,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         && env_def!("ENOMOTO_MIP_CUT_INTOBJ_STALL", "1").is_some();
                     if intobj_flat {
                         intobj_stall += 1;
-                        if intobj_stall >= gap2_flat.unwrap_or_else(|| tunable!("ENOMOTO_T_MIP_CUT_INTOBJ_STALL", 3usize, usize)) {
+                        if intobj_stall >= gap2_flat.unwrap_or_else(|| tunable!("ENOMOTO_T_MIP_CUT_INTOBJ_STALL", 5usize, usize)) {
                             if self.params.verbose {
                                 eprintln!("MIP: cut loop: {}, LP bound unchanged for {intobj_stall} rounds; stop", if gap2_flat.is_some() { "GAP2_FLAT" } else { "integral objective" });
                             }
