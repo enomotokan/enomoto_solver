@@ -1604,6 +1604,44 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             None => Vec::new(),
         };
+        // 試作 `ENOMOTO_MIP_SYMAVG` ([`super::sym_avg`]): 群の軌道 (生成元の union-find) と大きさ、次のラウンドに入れる平均したカット
+        let symavg = sym_gens.as_ref().and_then(|_| super::sym_avg());
+        let (sym_orb, sym_orb_size): (Vec<u32>, Vec<u32>) = match (&sym_gens, symavg) {
+            (Some(gens), Some(_)) => {
+                let mut par: Vec<u32> = (0..n as u32).collect();
+                fn root(par: &mut [u32], mut a: u32) -> u32 {
+                    while par[a as usize] != a {
+                        par[a as usize] = par[par[a as usize] as usize];
+                        a = par[a as usize];
+                    }
+                    a
+                }
+                for g in gens.iter() {
+                    for j in 0..n {
+                        if g[j] != j {
+                            let (a, b) = (root(&mut par, j as u32), root(&mut par, g[j] as u32));
+                            par[a as usize] = b;
+                        }
+                    }
+                }
+                let orb: Vec<u32> = (0..n as u32).map(|j| root(&mut par, j)).collect();
+                let mut size = vec![0u32; n];
+                for &o in &orb {
+                    size[o as usize] += 1;
+                }
+                (orb, size)
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
+        let mut sym_orb_members: Vec<Vec<u32>> = Vec::new();
+        if !sym_orb.is_empty() {
+            sym_orb_members = vec![Vec::new(); n];
+            for j in 0..n {
+                sym_orb_members[sym_orb[j] as usize].push(j as u32);
+            }
+        }
+        let mut avg_pending: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
+        let (mut avg_made, mut avg_added) = (0usize, 0usize);
         let sym_cap = tunable!("ENOMOTO_T_MIP_SYM_CUTS_MAX", 5000usize, usize);
         let mut sym_images = 0usize;
         // 像として新たにプールに入ったカットの番号 (候補に戻すのはこれだけ。ほかのプールのカットは今まで通り)
@@ -2703,6 +2741,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 再スタート前のカットをプールで引き継いだとき (`ENOMOTO_MIP_RESTART_CUTS_TO_POOL`): プールで違反しているものも候補にする
             // `ENOMOTO_MIP_SYM_CUTS`: 前のラウンドのカットの像 (プールにある) で違反しているものも候補にする
+            // `ENOMOTO_MIP_SYMAVG`: 前のラウンドで選んだカットの平均 (`=1` は必ず入れる、`=v` は今の解を破るときだけ候補)
+            if !avg_pending.is_empty() {
+                for (c, r) in std::mem::take(&mut avg_pending) {
+                    let act: f64 = c.iter().map(|&(j, a)| a * x[j]).sum();
+                    let nrm = c.iter().map(|&(_, a)| a * a).sum::<f64>().sqrt().max(1e-12);
+                    let eff = (act - r) / nrm;
+                    let forced = symavg == Some('1');
+                    if forced || (eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs())) {
+                        avg_added += 1;
+                        cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced, src: sepprof::SRC_POOL, sub: 0 });
+                    }
+                }
+            }
             if !sym_pool.is_empty() {
                 for (eff, k) in self.pool_violated(&x) {
                     if !sym_pool.contains(&k) {
@@ -3100,7 +3151,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.add_to_pool(c, *r);
                 }
                 // `ENOMOTO_MIP_SYM_CUTS`: 選んだカットを、その列を動かす生成元で写した像もプールに入れる (上限 `ENOMOTO_T_MIP_SYM_CUTS_MAX` 本)
-                if let Some(gens) = &sym_gens {
+                // `ENOMOTO_MIP_SYMAVG`: 選んだカットを群で平均した 1 本 (列 k の係数 = k の軌道の上の係数の和 / 軌道の大きさ)
+                if symavg.is_some() && !sym_orb.is_empty() {
+                    for (c, _, r) in &rows {
+                        let mut sum: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+                        for &(j, a) in c {
+                            *sum.entry(sym_orb[j]).or_insert(0.0) += a;
+                        }
+                        // 対称な列が 1 本もなければ平均は元のカットと同じ
+                        if sum.keys().all(|&o| sym_orb_size[o as usize] == 1) {
+                            continue;
+                        }
+                        let mut avg: Vec<(usize, f64)> = Vec::new();
+                        for (&o, &s) in &sum {
+                            if s == 0.0 {
+                                continue;
+                            }
+                            let v = s / sym_orb_size[o as usize] as f64;
+                            for &k in &sym_orb_members[o as usize] {
+                                avg.push((k as usize, v));
+                            }
+                        }
+                        if avg.is_empty() {
+                            continue;
+                        }
+                        avg.sort_unstable_by_key(|e| e.0);
+                        self.add_to_pool(&avg, *r);
+                        avg_pending.push((avg, *r));
+                        avg_made += 1;
+                    }
+                }
+                if let Some(gens) = sym_gens.as_ref().filter(|_| super::sym_cuts()) {
                     let before = sym_images;
                     let mut ks: Vec<u32> = Vec::new();
                     'rows: for (c, _, r) in &rows {
@@ -4171,6 +4252,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if self.params.verbose && super::hnfcut::on() && !self.params.submip {
             eprintln!("MIP: root {}", super::hnfcut::stats_line());
+        }
+        if self.params.verbose && symavg.is_some() {
+            eprintln!("MIP: SYMAVG: {avg_made} averaged cuts made, {avg_added} put as candidates (orbits of {} columns)", sym_orb_size.iter().filter(|&&k| k > 1).map(|&k| k as usize).sum::<usize>());
         }
         if self.params.verbose {
             eprintln!(

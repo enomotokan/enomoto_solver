@@ -2992,6 +2992,15 @@ pub(crate) fn sym_cuts() -> bool {
     env_str!("ENOMOTO_MIP_SYM_CUTS").is_some()
 }
 
+/// 試作 `ENOMOTO_MIP_SYMAVG` (analysis/symavg_20261121/、既定では使わない): 根のカットのループで、選んだカットを対称性の群で平均した 1 本
+/// (列 k の係数 = k の軌道の上のカットの係数の和 / 軌道の大きさ、右辺は同じ) を足す。群の元の像の凸結合なので、像が正しい条件
+/// ([`sym_cuts`] と同じ: 根の時点で対称性を崩す処理がない) の下で正しい。LP の行が群で不変なら、平均の 1 本を足した LP の値は
+/// 像を全部足した LP の値と同じ (不変な LP の最適値は対称な点で取れ、対称な点ではカットとその平均の値が等しい)。
+/// `=1`: 平均したカットを次のラウンドで必ず LP に入れる。`=v`: 次のラウンドで今の LP の解を破るときだけ候補にする。
+pub(crate) fn sym_avg() -> Option<char> {
+    env_str!("ENOMOTO_MIP_SYMAVG").and_then(|v| v.chars().next()).filter(|&c| c != '0')
+}
+
 /// 既定 (2026-10-29、`ENOMOTO_MIP_NO_SYM_OF` で以前の lex-leader の行): オービトープにならない対称性を、lex-leader の行 (`x_i - x_k >= 0`) の代わりに探索中の
 /// orbital fixing (HiGHS の `StabilizerOrbits::orbitalFixing`) で扱う。行を足さないので LP が重くならず、ヒューリスティクスの
 /// 解が対称性の行に反して捨てられることもない。
@@ -3653,7 +3662,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     } else {
         symmetry::lex_leader_pairs_except(&sym, &used, &in_orb)
     };
-    if sym_cuts() && pairs.is_empty() && env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_none() && !sym.generators.is_empty() {
+    if (sym_cuts() || sym_avg().is_some()) && pairs.is_empty() && env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_none() && !sym.generators.is_empty() {
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(sym.generators.clone())));
     }
     if of {
