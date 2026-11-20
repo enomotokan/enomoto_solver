@@ -134,7 +134,10 @@ pub(crate) fn start_diag(p: &MipProblem, safety: f64, seed: u64) {
     }
 }
 
-pub(crate) fn run(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
+/// 止めの合図 (主が前処理の終わりで待たないとき、まだ終わっていなければ立てる。PDLP・FJ・Local-MIP が見る)
+pub(crate) type Stop = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
+pub(crate) fn run(p: &MipProblem, safety: f64, seed: u64, stop: Stop) -> TpreOut {
     if mode().is_some_and(|m| m.contains('u')) {
         umax_diag(p);
     }
@@ -145,7 +148,7 @@ pub(crate) fn run(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
     // `ENOMOTO_T_MIP_TPRE_PDLP_ITERS` 反復 (既定 2000) 解いた主の点 (整数列は四捨五入) から FJ を `ENOMOTO_T_MIP_TPRE_FJ_RUNS` 回 (種を変えて)。
     // 手間は反復の数と FJ の手間 (非零の数で決まる) で決まり、主の側は決まった所で待つので種ごとに再現する
     if mode().is_some_and(|m| m.contains('p')) {
-        return pdlp_start(p, safety, seed);
+        return pdlp_start(p, safety, seed, &stop);
     }
     let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
     if !p.cost.iter().any(|&c| c != 0.0) {
@@ -306,7 +309,7 @@ fn ladder(p: &MipProblem, l0: f64, u: f64, safety: f64, seed: u64, out: &mut Tpr
 }
 
 /// [`run`] の `p`: PDLP の点からの FJ
-fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
+fn pdlp_start(p: &MipProblem, safety: f64, seed: u64, stop: &Stop) -> TpreOut {
     use std::sync::{Arc, Mutex};
     let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
     let t0 = std::time::Instant::now();
@@ -317,14 +320,14 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
     let iters = tunable!("ENOMOTO_T_MIP_TPRE_PDLP_ITERS", 2000usize, usize).min(((tunable!("ENOMOTO_T_MIP_TPRE_PDLP_WORK", 4e8, f64) / nnz as f64) as usize).max(200));
     let lp = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
     let xo = Arc::new(Mutex::new(Vec::new()));
-    if let Some(b) = lp.pdlrc_run_iters_hist(iters, None, Some(xo.clone())) {
+    if let Some(b) = crate::cancel::with_token(Some(stop.clone()), || lp.pdlrc_run_iters_hist(iters, None, Some(xo.clone()))) {
         out.l = Some(b.lb + p.offset);
         out.l_iters = b.iters;
     }
     drop(lp);
     let x0 = xo.lock().map(|x| x.clone()).unwrap_or_default();
     out.secs[0] = t0.elapsed().as_secs_f64();
-    if x0.len() != p.n {
+    if x0.len() != p.n || stop.load(std::sync::atomic::Ordering::Relaxed) {
         return out;
     }
     let t1 = std::time::Instant::now();
@@ -333,7 +336,7 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
     let fj_ticks = tunable!("ENOMOTO_T_MIP_TPRE_FJ_TICKS", 1e9, f64);
     for k in 0..tunable!("ENOMOTO_T_MIP_TPRE_FJ_RUNS", 2usize, usize) {
         let sd = seed.wrapping_add((k as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        if let Some(x) = crate::ticks::with_budget(fj_ticks, || super::fj::fj2_search_from(p, &p.col_lo, &p.col_up, Some(&x0), safety, sd, None)) {
+        if let Some(x) = crate::ticks::with_budget(fj_ticks, || super::fj::fj2_search_from(p, &p.col_lo, &p.col_up, Some(&x0), safety, sd, Some(stop))) {
             if p.is_feasible(&x, 1e-6) {
                 let z = p.objective(&x);
                 if z < out.x_z {
@@ -359,7 +362,7 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
             lm.step_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_STEPS", 100_000u64, u64).min(((tunable!("ENOMOTO_T_MIP_TPRE_LMIP_WORK", 2e9, f64) / nnz as f64) as u64).max(1000));
             // 手間の上限 (手の見当の手間 + lift の掃引の非零。`ENOMOTO_T_MIP_TPRE_LMIP_WORKCAP`、既定 5e6。5e7 では 10teams で 7.7 秒、5e6 で 0.7 秒)
             lm.work_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_WORKCAP", 5e6, f64) as u64;
-            lm.run(std::time::Instant::now() + std::time::Duration::from_secs_f64(safety), None, &|_| {});
+            lm.run(std::time::Instant::now() + std::time::Duration::from_secs_f64(safety), Some(stop), &|_| {});
             if env_str!("ENOMOTO_MIP_TPRE_DEBUG").is_some() {
                 eprintln!("MIP: TPRE pl: Local-MIP steps {} (cap {}, work cap {}), done {}", lm.res.steps, lm.step_cap, lm.work_cap, lm.done);
             }
