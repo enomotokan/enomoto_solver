@@ -9907,7 +9907,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         // 試作 `ENOMOTO_MIP_VB01` の `b` ([`vb01`]): 根の LP の前に、0-1 列どうしの含意を使う vbounds ([`Self::vbounds01_heur`])
-        if vb01('b') && self.snap.is_none() && !self.params.submip && !self.dom.infeasible {
+        // 再スタートの後の根では回さない (1 回の求解で 1 度だけ。SCIP の heur_vbounds も候補の並びを最初に 1 度だけ作る)
+        if vb01('b') && self.snap.is_none() && !self.params.submip && self.params.restarts == 0 && !self.dom.infeasible {
             let t0 = Instant::now();
             let r = self.vbounds01_heur();
             if self.params.verbose {
