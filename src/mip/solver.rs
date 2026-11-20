@@ -1383,6 +1383,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     hcs_diag: [u64; 7],
     /// 診断: `LIT_EXPLAIN=sig` で解析 1 回に遡ったカットの写しの表の理由の数の分布
     lx_hist: [u64; 9],
+    /// 診断 (p2inf_20261119 8 節、選び方には使わない): RAMP の衝突の項が擬似費用の点数の 1 位を変えたか
+    /// [点数を付けた回数, 衝突の重みが正だった回数, 1 位が変わった回数]、重み (cw_dyn) の和
+    cwr_diag: [u64; 3],
+    cwr_diag_w: f64,
     /// 試作 `ENOMOTO_MIP_CUTCONF`: 証明のプールに cut-based の衝突の制約を入れている最中 (分類 2 にする)
     cutconf_push: bool,
     multi_secs: f64,
@@ -5774,6 +5778,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         conflicts_added: 0,
         multi_stats: [0; 4],
         hcs_diag: [0; 7],
+        cwr_diag: [0; 3],
+        cwr_diag_w: 0.0,
         lx_hist: [0; 9],
         cutconf_push: false,
         multi_secs: 0.0,
@@ -17311,6 +17317,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.pc.degen_fac = fac;
         }
         let mut cands: Vec<(usize, f64, f64)> = frac.iter().map(|&(j, v)| (j, v, score_of(self, j, v, node_obj))).collect();
+        // 診断 (p2inf_20261119 8 節): RAMP の重みを 0 にしたときの 1 位と比べる (選び方には使わない)
+        if cw_ramp().is_some() && !self.params.submip && !cands.is_empty() {
+            self.cwr_diag[0] += 1;
+            let w = self.pc.cw_dyn * self.pc.cw_mult;
+            if w > 0.0 {
+                self.cwr_diag[1] += 1;
+                self.cwr_diag_w += w;
+                let top = |c: &[(usize, f64, f64)]| c.iter().fold((usize::MAX, f64::MIN), |b, x| if x.2 > b.1 { (x.0, x.2) } else { b }).0;
+                let with = top(&cands);
+                let save = self.pc.cw_dyn;
+                self.pc.cw_dyn = 0.0;
+                let plain: Vec<(usize, f64, f64)> = frac.iter().map(|&(j, v)| (j, v, score_of(self, j, v, node_obj))).collect();
+                self.pc.cw_dyn = save;
+                self.cwr_diag[2] += u64::from(top(&plain) != with);
+            }
+        }
         // 診断 (`poly_diag`): 折れ線がどれだけ擬似費用の見積もりを引き上げ、スコアの 1 位を変えるか (選び方には使わない)
         if sb_ancestor() && self.sb_cur.as_ref().is_some_and(|s| !s.polys.is_empty()) {
             let (mut any, mut bp, mut bq) = (false, (usize::MAX, f64::MIN), (usize::MAX, f64::MIN));
@@ -23386,9 +23408,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("RCUT cut pool integer-only {pool_int}");
         }
         let mut newp = MipProblem::from_rows(glo, gup, p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
-        // `ENOMOTO_MIP_PRBWORK` (試作、[`super::prbwork_on`]): 再スタートの後のプロービングを回さないとき (成果のない手間の持ち分が尽きたとき) は、
-        // この問題の含意を渡す (再スタートの問題はこの問題を狭めたものなので、含意はそのまま成り立つ。使うかは再スタートの前処理が決める)
-        if super::prbwork_exhausted(self.params.submip) {
+        // `ENOMOTO_MIP_PRBWORK` (試作、[`super::prbwork_on`]): 再スタートの後のプロービングを回さないとき (最後のプロービングが成果 0 のまま
+        // 上限で打ち切られたとき) は、この問題の含意を渡す (再スタートの問題はこの問題を狭めたものなので、含意はそのまま成り立つ)
+        if super::prbwork_skip_restart(self.params.submip) {
             newp.conflict_edges = p.conflict_edges.clone();
         }
         // 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_RESTART=接頭辞`): 再スタートで渡す問題を `接頭辞_r回数.mps` に書く
@@ -26751,6 +26773,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             eprintln!("MIP: conflict score diag: analyses {}, bumped columns per analysis {:.2}, analyses without conflict {:.3}, lit reasons asked per analysis {:.2} (max {}), used {:.2}, analyses cut by the budget {:.3}", self.hcs_diag[0], self.hcs_diag[1] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[2] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[3] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[5], self.hcs_diag[4] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[6] as f64 / self.hcs_diag[0].max(1) as f64);
+            if cw_ramp().is_some() && !self.params.submip {
+                eprintln!("MIP: cw ramp diag: scored {}, weight > 0 {}, mean weight {:.2e}, top changed {}, r_bar {:.3}", self.cwr_diag[0], self.cwr_diag[1], self.cwr_diag_w / self.cwr_diag[1].max(1) as f64, self.cwr_diag[2], self.cw_ramp_ema);
+            }
             if super::cwm::mode().is_some() && !self.params.submip && self.pool_tid == 0 {
                 if let Some(l) = super::cwm::final_line() {
                     eprintln!("MIP: CWM final: {l}; r_bar {:.3}", self.cw_ramp_ema);
@@ -27326,7 +27351,8 @@ pub(super) fn inf_all() -> bool {
 /// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=g` (analysis/slowm_20261119 §17、既定では使わない): 一般整数の境界の文字を含む衝突で締めた変更も遡れるようにする
 pub(super) fn lit_explain_gen() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v.contains('g')))
+    // `sig` (p2inf_20261119 の予算つきの形) も 'g' を含むので除く
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v.contains('g') && v != "sig"))
 }
 
 pub(super) fn lit_explain() -> bool {
