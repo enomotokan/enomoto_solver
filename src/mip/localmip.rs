@@ -696,12 +696,19 @@ impl<'a> LocalMip<'a> {
         }
         let (mut best_obj, mut since_improve, mut round_best, mut restarts, mut step, mut chain_tries, mut done) = (*best_obj_r, *since_r, *round_r, *restarts_r, *step_r, *tries_r, false);
         let (start, lift_order, set_of, cand, buf) = (&*start, lift_order, &*set_of, cand, buf);
+        let mut lift_counted = s.lift_work;
         loop {
             step += 1;
             // 止める合図と時間は 16 手ごとに見る (連鎖の手は 1 手が重く、256 手ごとでは mzzv42z で 2 秒ほど遅れて時間の上限を超えた)
             if step % 16 == 0 {
                 // 手間の単位 ([`crate::ticks`]): 1 手 = (行の平均の長さ + 列の平均の長さ) x 見る列の数 (の見当)
                 crate::ticks::add(crate::ticks::HEUR, 16 * step_work);
+                // 門の付いたスレッド (試作 `ENOMOTO_MIP_TPRE` の `g` など) では lift の掃引の手間も数える (数えないと手間の進みが壁時計より
+                // ずっと遅く見え、門で主が待つ。10teams で 1 手 0.5 ms のうち大半が掃引)。門のないスレッドの数えは変えない
+                if crate::ticks::has_gate() {
+                    crate::ticks::add(crate::ticks::HEUR, s.lift_work - lift_counted);
+                    lift_counted = s.lift_work;
+                }
                 if crate::ticks::over() || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) || step >= step_cap || step.saturating_mul(step_work).saturating_add(s.lift_work) >= work_cap {
                     break;
                 }

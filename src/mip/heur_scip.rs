@@ -463,15 +463,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let nfree = ints.iter().filter(|&&j| self.dom.lo[j] < self.dom.up[j]).count();
         let fr = 1.0 - nfree as f64 / ints.len() as f64;
+        // SCIP の minmipfixingrate: 連続列も含めた全列の固定率も 0.65 以上 (SCIP はサブ問題の前処理の後で数える。ここでは定義域で
+        // 固定された列で数える)。連続列の多い問題 (neos-5188808-nattai) で、整数列だけ固定してもサブ MIP の LP が大きく時間切れになっていた
+        let frall = (0..p.n).filter(|&j| self.dom.lo[j] == self.dom.up[j]).count() as f64 / p.n.max(1) as f64;
         let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
         match saved_dom {
             Some(d) => self.dom = d,
             None => self.dom.backtrack_to(p, pos),
         }
         if self.params.verbose && self.nodes <= 1 {
-            eprintln!("MIP:   {label}: {nfix} fixings, {nback} backtracks{}, fixing rate {fr:.2}", if dead { ", infeasible" } else { "" });
+            eprintln!("MIP:   {label}: {nfix} fixings, {nback} backtracks{}, fixing rate {fr:.2} (all columns {frall:.2})", if dead { ", infeasible" } else { "" });
         }
-        if dead || fr < 0.65 {
+        if dead || fr < 0.65 || frall < 0.65 {
             return (false, all1, all2);
         }
         (self.solve_submip(lo, up, 500), all1, all2)
