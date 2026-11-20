@@ -1335,6 +1335,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         EQUIV2_USED.with(|f| f.set(false));
         CLQPRB_STICKY.with(|f| f.set(false));
         CLQPRB_REVERTED.with(|f| f.set(false));
+        PRBWORK_LEFT.with(|f| f.set(tunable!("ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE0", 1.15e9, f64) as u64));
         cutmix::reset();
     }
     let prr = outer && env_def!("ENOMOTO_MIP_PROBE_REPRESOLVE", "1").is_some();
@@ -4754,7 +4755,8 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // `g`・`r`・`s` のときは、含意を使う形に切り替えた求解 (`CLQPRB_STICKY`) だけで引き継ぐ。既定の形のままの問題・既定の形に戻した問題
     // (`CLQPRB_REVERTED`) で引き継ぐと、前処理が既定と変わる (gate2 clqprb_s: snp-02-004-104・supportcase40 で見つけた漏れ)
     let clqprb_live = clqprb_on() && !CLQPRB_REVERTED.with(|f| f.get()) && (!clqprb_has('g') || CLQPRB_STICKY.with(|f| f.get()));
-    let keep_impl = env_str!("ENOMOTO_MIP_KEEP_IMPLICATIONS").is_some() || (clqprb_live && depth > 0 && !submip);
+    // `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): 再スタートの後でプロービングを回さないときは、前の求解の含意 (再スタートの問題に渡したもの) を引き継ぐ
+    let keep_impl = env_str!("ENOMOTO_MIP_KEEP_IMPLICATIONS").is_some() || (clqprb_live && depth > 0 && !submip) || (RESTART_PRESOLVE.with(|f| f.get()) && prbwork_exhausted(submip));
     if keep_impl && !p.conflict_edges.is_empty() {
         let bin = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0 && pre.scaling.d.get(j).is_none_or(|&d| d == 1.0);
         prob.conflict_edges = p.conflict_edges.iter().copied().filter(|&(a, b)| bin((a / 2) as usize) && bin((b / 2) as usize)).collect();
@@ -6895,9 +6897,42 @@ pub(crate) fn prb_table(c: char) -> bool {
     V.get_or_init(|| env_str!("ENOMOTO_MIP_PRB_TABLE").unwrap_or("").to_string()).contains(c)
 }
 
+/// 試作 `ENOMOTO_MIP_PRBWORK` (既定では使わない。analysis/probework_20261120): 含意を集めるプロービング ([`probe`]) の「何も見つからない間の
+/// 手間の上限」(`ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE0`) を、1 回の呼び出しごとではなく 1 回の求解全体 (前処理のかけ直し・再スタートを通して)
+/// の持ち分にする。固定・締め付け・同値な組が 0 で終わった回は、その手間 (pwork) を持ち分から引く。持ち分が無くなったら、後のプロービングは
+/// 回さず、再スタートの問題には前の求解の含意を引き継ぐ (再スタートの問題は前の問題を狭めたものなので、含意はそのまま成り立つ)。
+/// irp は根と 3 回の再スタートの後のプロービングが毎回この上限で止まり、成果 0 のまま 1.2 秒ずつ使っていた
+pub(crate) fn prbwork_on() -> bool {
+    env_str!("ENOMOTO_MIP_PRBWORK").is_some_and(|v| v != "0")
+}
+
+thread_local! {
+    /// `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): この求解で残っている「成果のないプロービング」の手間の持ち分 (最初の求解の始めに満たす)
+    static PRBWORK_LEFT: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+}
+
+/// [`prbwork_on`] の持ち分が尽きていて、プロービングを回さないか (サブ MIP は対象外)
+pub(crate) fn prbwork_exhausted(submip: bool) -> bool {
+    prbwork_active(submip) && PRBWORK_LEFT.with(|f| f.get()) == 0
+}
+
+/// [`prbwork_on`] をこのプロービングに使うか。サブ MIP (親と同じ前処理で解くものを含む) は対象外
+fn prbwork_active(submip: bool) -> bool {
+    prbwork_on() && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get())
+}
+
 fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let _pt = pretime::guard("probe");
     use domain::Domain;
+    // `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): 成果のない手間の持ち分が尽きていれば回さない (引き継いだ含意 `conflict_edges` はそのまま残す)
+    if prbwork_exhausted(submip) {
+        if verbose {
+            eprintln!("MIP: probing: skipped (PRBWORK: the work budget without results is used up in this solve; {} implications kept)", prob.conflict_edges.len());
+        }
+        PROBE_GAIN.with(|f| f.set((0, 0, 0)));
+        PROBE_FIXED.with(|f| f.set(0));
+        return None;
+    }
     let t0 = std::time::Instant::now();
     let c0 = cap_clock();
     let n = prob.n;
@@ -7107,6 +7142,9 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         (u64::MAX, u64::MAX)
     };
     let (time_cap, time_cap_found) = if presolve_work() { (time_cap * presolve_work_safe(), time_cap_found * presolve_work_safe()) } else { (time_cap, time_cap_found) };
+    // `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): 何も見つからない間の上限を、この求解の持ち分の残りまでにする
+    let prbwork = prbwork_active(submip);
+    let wcap0 = if prbwork { wcap0.min(PRBWORK_LEFT.with(|f| f.get())) } else { wcap0 };
     // 手間 (およそナノ秒): 2.5 x 伝播で走査した行の長さ + 5 x 境界の変更で更新した活動の数 + 68 x 境界の変更の回数 + 190 x 集めた含意の数
     // (+ 1 回の試しごとに `ENOMOTO_T_MIP_PRESOLVE_WORK_PROBE_EACH`、既定 0)。重みは 15 問の CPU 時間への回帰
     // (analysis/presolve_work/fitprobe.py)。行の長さだけでは 1 秒あたり 3.4e6〜4e8 と散らばった
@@ -7918,6 +7956,16 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
     }
     PROBE_GAIN.with(|f| f.set((fixed, tightened, if want_equiv { PROBE_EQUIV.with(|e| e.borrow().len()) } else { 0 })));
+    if prbwork && fixed + tightened + PROBE_GAIN.with(|f| f.get().2) == 0 {
+        let w = pwork(&dom, probed, prob.conflict_edges.len());
+        let left = PRBWORK_LEFT.with(|f| {
+            f.set(f.get().saturating_sub(w));
+            f.get()
+        });
+        if verbose {
+            eprintln!("MIP: probing: PRBWORK: no result, {w} work charged, {left} left in this solve");
+        }
+    }
     if fixed == 0 && tightened == 0 {
         return None;
     }
