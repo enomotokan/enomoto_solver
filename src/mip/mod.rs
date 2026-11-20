@@ -1340,6 +1340,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         CLQPRB_STICKY.with(|f| f.set(false));
         CLQPRB_REVERTED.with(|f| f.set(false));
         PRBWORK_DRY.with(|f| f.set(false));
+        FEAS_EARLY_DRY.with(|f| f.set(false));
         cutmix::reset();
     }
     let prr = outer && env_def!("ENOMOTO_MIP_PROBE_REPRESOLVE", "1").is_some();
@@ -2054,9 +2055,26 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     let tpre_x_orig = if tpre_start { start.clone() } else { None };
     // 試作 `ENOMOTO_MIP_VBCLQ` の `e`: 前処理の中で VB01 が見つけた解 (列の番号は前処理の前と同じ) を開始解にする (前処理後の問題で
     // 実行可能なときだけ使われる。下の確かめ)
-    let start = match VBCLQ_E_SOL.with(|s| s.borrow_mut().take()) {
-        Some(x) if start.is_none() && x.len() == p.n => Some(x),
-        _ => start,
+    let vbclq_x = VBCLQ_E_SOL.with(|s| s.borrow_mut().take()).filter(|x| start.is_none() && x.len() == p.n);
+    // 前処理後の問題で実行不能 (前処理の双対の簡約・対称性の固定などで外れる) でも捨てない: 元の問題の空間に戻せれば (前処理の
+    // 後処理の手順を当てた点か、そのままの点が元の問題で実行可能なら) TPRE の解と同じく外側の答えの候補と打ち切り値にする (`tpre_orig`)
+    let tpre_x_orig = tpre_x_orig.or_else(|| {
+        let x = vbclq_x.as_ref()?;
+        let via_post = match &presolved {
+            Some(Presolved::Reduced { postsolve, scaling, .. }) => {
+                let mut y = x.clone();
+                for step in postsolve.iter().rev() {
+                    step.apply(&mut y);
+                }
+                Some(crate::presolve::scaling::unscale_x(scaling, &y))
+            }
+            _ => None,
+        };
+        via_post.filter(|y| p.is_feasible(y, 1e-6)).or_else(|| Some(x.clone()).filter(|y| p.is_feasible(y, 1e-6)))
+    });
+    let start = match vbclq_x {
+        Some(x) => Some(x),
+        None => start,
     };
     match (&presolved, start) {
         (Some(Presolved::Reduced { prob, scaling, .. }), Some(x)) if x.len() == prob.n => {
@@ -2724,6 +2742,19 @@ fn feas_fj_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> 
 ///   Local-MIP の初期化 (行の左辺の計算・集合の行の表) は止めを見ないので、始める前に一度見る。
 /// - FJ2 は止めの合図が立った後に LP 修復をしない (`fj::SKIP_REPAIR_ON_STOP`、[`heuristics::fj_lmip_mix`] と同じ)。
 /// - 問題は `=1` と同じ (前処理後、LP による固定の前。FJ_P3 の前処理はかけない)。
+/// 試作 `ENOMOTO_MIP_FEAS_NORETRY` (既定では使わない。analysis/rootlp_20261120): 目的が全て 0 の問題 (実行可能性問題) で、前処理の早めの
+/// FJ/Local-MIP ([`feas_fj_lmip_early`]) が解なしで上限まで回ったら、根の後のやり直し (solver の `robust_fj_retry`) を回さない。
+/// fhnw-binpack4-4 (実行不能) は 4 スレッドで早めの探索 60 秒・やり直し 30 秒・木 17 秒。解ける実行可能性問題 (fhnw-binpack4-48・
+/// neos-3004026-krka・ns1116954) は早めの探索が 3〜51 秒で解を見つけ、やり直しが見つけた記録はない (analysis/hang_20261117 の F)
+pub(crate) fn feas_noretry_on() -> bool {
+    env_str!("ENOMOTO_MIP_FEAS_NORETRY").is_some_and(|v| v != "0")
+}
+
+thread_local! {
+    /// [`feas_noretry_on`]: この求解の早めの探索が解なしで上限まで回った (最初の求解の始めに消す)
+    pub(crate) static FEAS_EARLY_DRY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub(crate) fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, verbose: bool) -> Option<Vec<f64>> {
     feas_fj_lmip_early_salt(prob, threads, cap, verbose, 0)
 }
@@ -2885,6 +2916,10 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
         }
     });
     let r = found.into_inner().unwrap();
+    // `ENOMOTO_MIP_FEAS_NORETRY` ([`feas_noretry_on`]): 最初の早めの探索 (`salt` = 0) が解なしで上限まで回ったか
+    if salt == 0 {
+        FEAS_EARLY_DRY.with(|f| f.set(r.is_none()));
+    }
     if verbose {
         eprintln!(
             "MIP: presolve: early FJ/Local-MIP for the feasibility problem: {threads} threads (FJ {n_fj}, Local-MIP {}), FJ {} tries, Local-MIP {} steps, found {} by {} ({:.2}s, cap {cap:.2}s)",
@@ -5193,6 +5228,10 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         let saved = prob.clone();
         let k = presolve_vbclq_e(&mut prob, verbose, lp_probe_secs.unwrap_or(10.0));
         VBCLQ_E_RAN.with(|f| f.set(true));
+        if k == usize::MAX {
+            // 最適と証明済み: 早い FJ の解と同じく、前処理の残り・クリーク行の拡張・対称性・木を飛ばす
+            return Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling });
+        }
         if k > 0 {
             VBCLQ_E_ACTIVE.with(|f| f.set(true));
             let r = presolve_mip_depth(&prob, verbose, submip, lp_probe_secs, depth);
@@ -5859,7 +5898,8 @@ fn lp_inf_untrusted<L: lp_api::MipLp>(lp: &L, n: usize) -> bool {
 /// 暫定解そのものは残る) にして [`vbclq::pseudoobj`] で 0-1 列を固定し、定義域の伝播の結果も列の境界に書く。暫定解の出どころ:
 /// - VB01 ([`heur_scip::vbounds01_on_problem`]、SCIP-VB の試作の Solver の外の版)。
 /// - 診断 `ENOMOTO_MIP_VBCLQ_PRE_CUTOFF=<値>` (元の問題の目的の値。解は持たない、上限だけ。VB01 の解より良ければこちら)。
-/// 解があれば [`VBCLQ_E_SOL`] に置き、前処理の後で開始解にする。境界を変えた列の数を返す
+/// 解があれば [`VBCLQ_E_SOL`] に置き、前処理の後で開始解にする。境界を変えた列の数を返す。解が目的の最小値に届いて最適と証明できたら
+/// [`FEAS_FJ_SOL`] に置いて `usize::MAX` を返す (問題は変えない)
 fn presolve_vbclq_e(prob: &mut MipProblem, verbose: bool, secs: f64) -> usize {
     let t0 = std::time::Instant::now();
     // VB01 (SCIP-VB の Solver の外の版、[`heur_scip::vbounds01_on_problem`]) の解。サブ MIP 1 本の時間の上限は `secs` (前処理の
@@ -5877,9 +5917,7 @@ fn presolve_vbclq_e(prob: &mut MipProblem, verbose: bool, secs: f64) -> usize {
             return 0;
         }
     };
-    if let Some((_, x)) = vb {
-        VBCLQ_E_SOL.with(|s| *s.borrow_mut() = Some(x));
-    }
+    let vb_x = vb.map(|(_, x)| x);
     let mut dom = domain::Domain::new(prob);
     if !prob.conflict_edges.is_empty() {
         dom.add_implications(prob.n, &prob.conflict_edges);
@@ -5891,6 +5929,20 @@ fn presolve_vbclq_e(prob: &mut MipProblem, verbose: bool, secs: f64) -> usize {
     let g = clique::CliqueGraph::build_with(prob.n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, &prob.col_lo, &prob.col_up, &prob.conflict_edges);
     let o = vbclq::pseudoobj(prob, &mut dom, &g, z - prob.offset);
     vbclq::count_file(&o, "e");
+    // 目的の最小値 (pseudoobj の最初の余裕 = 上限 − 目的の最小値) が解の値に届いていれば (|余裕| が許容誤差の内)、その解が最適と
+    // 証明済み: 前処理の残りと木を飛ばす ([`FEAS_FJ_SOL`] の道。decomp2 は VB01 の解 −160 で余裕 0)
+    let tol = 1e-9 * (z - prob.offset).abs().max(1.0);
+    if let Some(x) = vb_x.as_ref().filter(|_| o.slack0.abs() <= tol && src == "VB01 solution") {
+        if verbose {
+            eprintln!("MIP: VBCLQ e: the VB01 solution {z:.10e} reaches the pseudo-objective bound (slack {:.3e}); optimal ({:.2}s)", o.slack0, t0.elapsed().as_secs_f64());
+        }
+        vbclq::count_file(&vbclq::PseudoObjOut { infeas: true, ..o }, "eopt");
+        FEAS_FJ_SOL.with(|s| *s.borrow_mut() = Some(x.clone()));
+        return usize::MAX;
+    }
+    if let Some(x) = vb_x {
+        VBCLQ_E_SOL.with(|s| *s.borrow_mut() = Some(x));
+    }
     // 上限より良い解がない (暫定解が最適) ときも、固定は書かない (暫定解の値の解は残るはずなので、数値の揺れとみなす)
     let mut changed = 0usize;
     if !o.infeas && o.fixed > 0 {
