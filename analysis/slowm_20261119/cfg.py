@@ -12,4 +12,11 @@ CFGS = {"def": {}, "fix": {"ENOMOTO_MIP_TIGHTEN_INTBOUND": "1"}, "fixis": {"ENOM
         # g に加えて、支配される 0-1 列の固定を元の問題に先にかける形 (`o`、README §13.4)。P・M で 1g と前処理が変わるのは air03 だけ
         "isgo": {"ENOMOTO_MIP_INTSING": "1go"},
         # 双対証明・カットのプールの伝播で締めた変更も衝突解析で遡る (README §17、neos859080 は 6 種で 23〜58 → 8〜15 秒)
-        "pe": {"ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN": "1"}}
+        "pe": {"ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN": "1"},
+        # pe に σ の上限 (解析 1 回で双対証明を遡る変更を round(16σ) 個まで、README §17.5)
+        "pes": {"ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN": "1", "ENOMOTO_MIP_PE_SIG": "1"},
+        # 1 スレッドの再現性の試作 (analysis/det1t_20261120): 割合の基準を元の時間上限に + 乱択丸め・サブ MIP・interior rounding・ノードの LP の上限を手間で
+        "bonil": {"ENOMOTO_MIP_TIMEDEP": "b", "ENOMOTO_MIP_DET1T": "onil"},
+        # 名前が _t1 で終わる設定は 1 スレッド (run.py の TH)
+        "def_t1": {},
+        "bonil_t1": {"ENOMOTO_MIP_TIMEDEP": "b", "ENOMOTO_MIP_DET1T": "onil"}}
