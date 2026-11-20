@@ -39,11 +39,33 @@ pub(crate) fn mode() -> Option<Mode> {
     })
 }
 
-/// 学ぶ次元: (名前, 事前の幅の既定, ずらし幅 δ の既定)。0 = 衝突の重みの倍率の対数 (重み × e^θ_0)。
-pub(crate) const DIMS: &[(&str, f64, f64)] = &[("cw", 1.0, 0.35)];
+/// 学ぶ次元: (名前, 事前の幅の既定, ずらし幅 δ の既定)。重み = 0.1 × σ((r̄ − (r_mid + Δ)) / (s e^κ)) × e^θ。
+/// - 0 `cw` = θ (外の倍率の対数): 事前の幅 1 (倍率 e^±1 ≈ 0.37〜2.7 倍が 1σ)、δ 0.35 (±1.4 倍)。
+/// - 1 `rmid` = Δ (シグモイドの真ん中のずれ、r̄ と同じ「衝突 / ノード」の単位): 事前の幅 0.15 (数え上げ (5.1 節) で害の側の最大 0.62 と得の側の
+///   最小 0.76 の間の幅 0.14 ほど)、δ 0.05 (s = 0.1 の半分)。
+/// - 2 `lns` = κ (シグモイドの幅 s の対数のずれ): 事前の幅 0.7 (幅 ½〜2 倍が 1σ)、δ 0.3。
+/// どの次元を学ぶかは `ENOMOTO_MIP_CWM_DIMS` (`t` = θ、`d` = Δ、`k` = κ を並べる。既定 `t`)。学ばない次元は 0 のまま (ずらさない)。
+pub(crate) const DIMS: &[(&str, f64, f64)] = &[("cw", 1.0, 0.35), ("rmid", 0.15, 0.05), ("lns", 0.7, 0.3)];
+
+/// 次元 `k` を学ぶか。
+pub(crate) fn active(k: usize) -> bool {
+    static F: std::sync::OnceLock<[bool; 3]> = std::sync::OnceLock::new();
+    F.get_or_init(|| {
+        let v = env_str!("ENOMOTO_MIP_CWM_DIMS").unwrap_or("t");
+        [v.contains('t'), v.contains('d'), v.contains('k')]
+    })[k]
+}
 
 fn delta(k: usize) -> f64 {
+    if !active(k) {
+        return 0.0;
+    }
     if k == 0 { tunable!("ENOMOTO_T_MIP_CWM_DELTA", DIMS[0].2, f64) } else { DIMS[k].2 }
+}
+
+/// 中心を探す範囲: 事前の幅の 2 倍 (θ は `CWM_RANGE`、既定 2)。
+fn range(k: usize) -> f64 {
+    if k == 0 { tunable!("ENOMOTO_T_MIP_CWM_RANGE", 2.0, f64) } else { 2.0 * DIMS[k].1 }
 }
 
 fn prior(k: usize) -> f64 {
@@ -82,10 +104,11 @@ fn splitmix(mut z: u64) -> u64 {
 /// 次元 `dim` の観測 (中心, 向きをそろえた y) にガウス過程で傾きを当て、F(θ) + θ²/(2 PRIOR²) が最小の θ。
 fn bayes_center(obs: &[(f64, f64)], dim: usize) -> f64 {
     let d = delta(dim);
-    let gvar = tunable!("ENOMOTO_T_MIP_CWM_GVAR", 0.25, f64);
-    let len = tunable!("ENOMOTO_T_MIP_CWM_LEN", 0.5, f64);
     let prior = prior(dim);
-    let range = tunable!("ENOMOTO_T_MIP_CWM_RANGE", 2.0, f64);
+    // カーネルは次元の事前の幅で尺度をそろえる (θ の幅 1 のとき 分散 0.25・長さ 0.5)
+    let gvar = tunable!("ENOMOTO_T_MIP_CWM_GVAR", 0.25, f64) / (prior * prior);
+    let len = tunable!("ENOMOTO_T_MIP_CWM_LEN", 0.5, f64) * prior;
+    let range = range(dim);
     // 直近の観測だけ (古い観測ほど今の木と合わない。数で区切る)
     let keep = tunable!("ENOMOTO_T_MIP_CWM_KEEP", 400usize, usize);
     let obs = &obs[obs.len().saturating_sub(keep)..];
@@ -136,7 +159,7 @@ fn bayes_center(obs: &[(f64, f64)], dim: usize) -> f64 {
     }
     let ghat = |th: f64| (0..n).map(|i| k(th, obs[i].0) * z[i]).sum::<f64>();
     // 格子の上で F を 0 から両側へ台形で積む
-    let h = 0.02;
+    let h = range / 100.0;
     let steps = (range / h).round() as i64;
     let mut best = (0.0f64, 0.0f64);
     for dir in [-1.0f64, 1.0] {
@@ -160,7 +183,7 @@ impl Tuner {
     /// 対の観測: 対を始めたときの中心 `c`、次元ごとの向き `sg` (+1 / −1、側 0 の向き)、y = ln(側 0 の大きさ / 側 1 の大きさ)
     fn push(&mut self, c: &[f64], sg: &[f64], y: f64) {
         let y = y.clamp(-3.0, 3.0);
-        for k in 0..self.obs.len() {
+        for k in (0..self.obs.len()).filter(|&k| active(k)) {
             // 側 0 が +δ_k なら y はそのまま θ_k を上げた側 − 下げた側
             self.obs[k].push((c[k], y * sg[k]));
         }
@@ -172,7 +195,7 @@ impl Tuner {
         let since = self.since;
         self.since = 0;
         let old = self.center.clone();
-        for k in 0..self.center.len() {
+        for k in (0..self.center.len()).filter(|&k| active(k)) {
             let o = &self.obs[k];
             self.center[k] = match self.mode {
                 Mode::Fix => 0.0,
@@ -180,7 +203,7 @@ impl Tuner {
                     let recent = &o[o.len() - since..];
                     let ybar = recent.iter().map(|x| x.1).sum::<f64>() / recent.len() as f64;
                     let a = tunable!("ENOMOTO_T_MIP_CWM_SPSA_A", 0.1, f64);
-                    let r = tunable!("ENOMOTO_T_MIP_CWM_RANGE", 2.0, f64);
+                    let r = range(k);
                     (self.center[k] - a * ybar / (2.0 * delta(k))).clamp(-r, r)
                 }
                 Mode::Bayes => bayes_center(o, k),
@@ -196,7 +219,7 @@ impl Tuner {
         }
     }
     fn summary(&self) -> String {
-        let o = &self.obs[0];
+        let o = &self.obs[(0..DIMS.len()).find(|&k| active(k)).unwrap_or(0)];
         let n = o.len();
         let ybar = if n > 0 { o.iter().map(|x| x.1).sum::<f64>() / n as f64 } else { 0.0 };
         let se = if n > 1 { (o.iter().map(|x| (x.1 - ybar).powi(2)).sum::<f64>() / ((n - 1) as f64 * n as f64)).sqrt() } else { f64::NAN };

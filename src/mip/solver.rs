@@ -12678,8 +12678,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.nodes += 1;
             // 試作 `ENOMOTO_MIP_CWM`: このノードの衝突の重みの倍率 (札の対の側の大きさも数える)
             if super::cwm::mode().is_some() && !self.params.submip {
-                // 次元 0 = 衝突の重みの倍率の対数 ([`super::cwm::DIMS`])
-                self.pc.cw_mult = super::cwm::on_node(node.cwm.as_ref())[0].exp();
+                // 次元 ([`super::cwm::DIMS`]): 0 = 衝突の重みの倍率の対数 θ、1 = シグモイドの真ん中のずれ Δ、2 = 幅の対数のずれ κ。
+                // 重み = w × σ((r̄ − (r_mid + Δ)) / (s e^κ)) × e^θ (r̄ は RAMP の窓ごとの移動平均、まだなければ重み 0 のまま)
+                let th = super::cwm::on_node(node.cwm.as_ref());
+                self.pc.cw_mult = th[0].exp();
+                if let (Some(w), true) = (cw_ramp(), self.cw_ramp_ema >= 0.0) {
+                    let mid = tunable!("ENOMOTO_T_MIP_CW_RAMP_MID", 0.69, f64) + th[1];
+                    let sl = tunable!("ENOMOTO_T_MIP_CW_RAMP_S", 0.1, f64).max(1e-9) * th[2].exp();
+                    let sig = 1.0 / (1.0 + (-(self.cw_ramp_ema - mid) / sl).exp());
+                    let sig = if sig < tunable!("ENOMOTO_T_MIP_CW_RAMP_FLOOR", 0.0, f64) { 0.0 } else { sig };
+                    self.pc.cw_dyn = w * sig;
+                }
             }
             self.tprof.nodes += 1;
             // 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN` = w: 始めは衝突の重み 0 (既定と同じ)。ノード `ENOMOTO_T_MIP_CW_DYN_WINDOW` (既定 200) ごとに、
@@ -26354,7 +26363,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: conflict score diag: analyses {}, bumped columns per analysis {:.2}, analyses without conflict {:.3}, lit reasons asked per analysis {:.2} (max {}), used {:.2}, analyses cut by the budget {:.3}", self.hcs_diag[0], self.hcs_diag[1] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[2] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[3] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[5], self.hcs_diag[4] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[6] as f64 / self.hcs_diag[0].max(1) as f64);
             if super::cwm::mode().is_some() && !self.params.submip && self.pool_tid == 0 {
                 if let Some(l) = super::cwm::final_line() {
-                    eprintln!("MIP: CWM final: {l}");
+                    eprintln!("MIP: CWM final: {l}; r_bar {:.3}", self.cw_ramp_ema);
                 }
             }
             if lit_explain_sig() {
