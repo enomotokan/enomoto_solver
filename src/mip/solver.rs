@@ -11083,6 +11083,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             heur!("vbounds (loose)", self.vbounds_heur(true));
                             heur!("vbounds (tight)", self.vbounds_heur(false));
                         }
+                        // 試作 `ENOMOTO_MIP_VB01` ([`Self::vbounds01_heur`]): 0-1 列どうしの含意を使う vbounds
+                        if env_str!("ENOMOTO_MIP_VB01").is_some() {
+                            heur!("VB01", self.vbounds01_heur());
+                        }
                     }
                     // 試作 `ENOMOTO_MIP_RHEUR` の `b`・`s` ([`rheur`]): Pump と 3 つのダイビングの LP 反復の予算を共有にする
                     let pool = (rheur('b') || rheur('s')) && !self.params.submip && self.snap.is_none();
@@ -11150,6 +11154,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if scip_heur_ok(self) {
                         heur!("vbounds (tight)", self.vbounds_heur(false));
                     }
+                }
+                if !early_scip && scip_heur_ok(self) && env_str!("ENOMOTO_MIP_VB01").is_some() {
+                    heur!("VB01", self.vbounds01_heur());
                 }
                 // 並列モード: 別スレッドのサブ MIP の結果を出した順に受け取る
                 self.parallel_submips = false;
@@ -23240,7 +23247,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let pool_int = self.cut_pool.iter().filter(|(r, _, _)| r.iter().all(|&(j, _)| j < p.n && p.is_int[j])).count();
             eprintln!("RCUT cut pool integer-only {pool_int}");
         }
-        let newp = MipProblem::from_rows(glo, gup, p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
+        let mut newp = MipProblem::from_rows(glo, gup, p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
+        // `ENOMOTO_MIP_PRBWORK` (試作、[`super::prbwork_on`]): 再スタートの後のプロービングを回さないとき (成果のない手間の持ち分が尽きたとき) は、
+        // この問題の含意を渡す (再スタートの問題はこの問題を狭めたものなので、含意はそのまま成り立つ。使うかは再スタートの前処理が決める)
+        if super::prbwork_exhausted(self.params.submip) {
+            newp.conflict_edges = p.conflict_edges.clone();
+        }
         // 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_RESTART=接頭辞`): 再スタートで渡す問題を `接頭辞_r回数.mps` に書く
         if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_RESTART").filter(|_| !self.params.submip) {
             let f = format!("{f}_r{}.mps", self.params.restarts + 1);
