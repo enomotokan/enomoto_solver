@@ -32,7 +32,7 @@ def order(p, s, c):
     k = s % 2
     return [(p, x, s) for x in c[k:] + c[:k]]
 MITT = {p for part in json.loads((A / "cbcimpl_20261029/mitt_parts.json").read_text()) for p in part}
-scan = [json.loads(l) for l in open(D / "lfscan.jsonl")]
+scan = [json.loads(l) for l in open(D / "lfscan_done.jsonl")]
 MPROBS = sorted(r["problem"] for r in scan if r.get("face") == "ran" and r["problem"] in MITT)
 print("M の問題:", len(MPROBS), MPROBS)
 TM = times(A / "vsscip_20261117/res_M_s*.jsonl", "def", 600)
