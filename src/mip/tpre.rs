@@ -357,7 +357,12 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
             lm.set_start(&x0);
             // 手の数も大きさで決める: 手 × 非零 ≤ `ENOMOTO_T_MIP_TPRE_LMIP_WORK` (2e9)
             lm.step_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_STEPS", 100_000u64, u64).min(((tunable!("ENOMOTO_T_MIP_TPRE_LMIP_WORK", 2e9, f64) / nnz as f64) as u64).max(1000));
+            // 手間の上限 (手の見当の手間 + lift の掃引の非零。`ENOMOTO_T_MIP_TPRE_LMIP_WORKCAP`、既定 5e6。5e7 では 10teams で 7.7 秒、5e6 で 0.7 秒)
+            lm.work_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_WORKCAP", 5e6, f64) as u64;
             lm.run(std::time::Instant::now() + std::time::Duration::from_secs_f64(safety), None, &|_| {});
+            if env_str!("ENOMOTO_MIP_TPRE_DEBUG").is_some() {
+                eprintln!("MIP: TPRE pl: Local-MIP steps {} (cap {}, work cap {}), done {}", lm.res.steps, lm.step_cap, lm.work_cap, lm.done);
+            }
             if let Some(x) = lm.res.best.clone() {
                 if p.is_feasible(&x, 1e-6) {
                     let z = p.objective(&x);
@@ -371,7 +376,7 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
         }
         out.secs[2] = t2.elapsed().as_secs_f64();
         if env_str!("ENOMOTO_MIP_TPRE_DEBUG").is_some() {
-            eprintln!("MIP: TPRE pl: Local-MIP {:.2}s, best {:.10e}", out.secs[2], out.x_z);
+            eprintln!("MIP: TPRE pl: Local-MIP {:.2}s, best {:.10e}, ticks {:.3e}", out.secs[2], out.x_z, crate::ticks::total());
         }
     }
     out
