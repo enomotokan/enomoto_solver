@@ -33,6 +33,7 @@ M (analysis/vsscip_20261120 の Mittelmann 186 問) を 1 スレッド・種 1�
   - M 2: ビルド 9711bc9d6 (build.sh の wheel)、作業ツリー 441cc7713 (cc50efa22 以降)。10 行・crash 0。
   - M 1: ビルド 820b1e9d3 (build.sh の wheel、src・python は 441cc7713 と同じ)、作業ツリー 441cc7713 (cc50efa22 以降)。10 行・crash 0。
   - M 3: ビルド 9711bc9d6 (build.sh の wheel)、作業ツリー 1509d60e8 (cc50efa22 以降)。10 行・crash 0。
+  - M 5: ビルド 9711bc9d6 (build.sh の wheel)、作業ツリー 867d487fb (cc50efa22 以降)。14 行・crash 0。
 - 回す: `cd analysis/cutmixz_20261120 && python run.py M K` (K = 0〜20)、`python run.py P K` (K = 0〜1)。res_M_sK.jsonl・res_P_sK.jsonl に足す (途中から再開できる)。
 - 集計: `python summ.py M def z > summ_M.txt`、`python summ.py P def z > summ_P.txt` (SGM・区間・解けた数・食い違い・全種で 1.25 倍超の遅れ)。
   P は z が働かない問題も入るので、働く問題だけの比べは zscan と同じ調べを P の問題にもしてから分ける。
