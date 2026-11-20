@@ -171,6 +171,19 @@ print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
 
 返す解は報告の前に研磨します．整数変数はちょうどの整数に丸め，連続変数があれば，整数変数をその値に固定した元の問題の LP を解き直し，その解が元の解より制約を破らず目的値も悪くならなければそれに取り替えます．`objective` は返す値から誤差補償つきの和で計算し直すので，返す解の目的値と丸め誤差の範囲で一致します(`benchmarks/` の MIPLIB 2017 の問題では，参照の最適値との相対誤差は 10⁻¹⁵ 以下)．
 
+### MPS ファイルの読み込み(`readModel`)
+
+`Model.readModel(path)` で MPS ファイル(自由形式．末尾が `.gz` なら gzip 圧縮のまま)を空の Model に読み込みます．読み取りは Rust コア(`src/mps.rs`)が行います．変数は列の順に `M.variables` に並び，`M.get_variable(列の名前)` で取り出せます．
+
+```python
+M = Model()
+M.readModel("neos-911970.mps.gz")
+sol = M.solve()
+print(sol.objective, M.get_variable("C0001").value)
+```
+
+約束事は HiGHS にそろえています．最初の `N` 行が目的で，目的の行の右辺 `v` は目的の定数 `-v` です．`MARKER` で囲まれた整数列は，`BOUNDS` に何も書かれなければ `[0, 1]` です．`RANGES` のある行は `<=` と `>=` の 2 本の制約になります．定義されていない行・列への参照は警告を出して飛ばします．HiGHS と違い，係数はファイルどおりに読みます(絶対値 10⁻⁹ 以下の係数も捨てません)．二次の項・半連続変数・SOS は扱えず，`ValueError` になります．
+
 ### スレッド数(`threads`)
 
 `solve(threads=...)` で使うスレッドの数を指定します．省略すると，HiGHS と同じく(このプロセスが使える CPU の数 + 1) / 2 にします(`enomoto_solver.default_threads()`．論理コアが 4 なら 2，8 なら 4)．このプロセスが使える CPU の数(`enomoto_solver.max_threads()`)を超える値は，そこで頭打ちにします．プリソルブなどの並列区間も含め，求解全体をこの数のスレッドで動かします．
