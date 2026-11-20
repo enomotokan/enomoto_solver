@@ -222,6 +222,13 @@ pub(crate) fn gated_take(n: usize) -> Option<Vec<f64>> {
     (x.len() == n && d.len() == n).then(|| x.iter().zip(&d).map(|(v, d)| v / d).collect())
 }
 
+/// `g` の受け取り口を閉じる (門に止めの合図)。木に入ったら呼ぶ
+pub(crate) fn clear_gated() {
+    if let Some(g) = GATED.with(|x| x.borrow_mut().take()) {
+        g.gate.stop();
+    }
+}
+
 /// 外側の求解の終わり: 止めの合図を立てて受け取り口を捨てる
 pub(crate) fn clear_pending() {
     if let Some(g) = GATED.with(|x| x.borrow_mut().take()) {
@@ -410,7 +417,10 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64, stop: &Stop, slot: &SolSlo
     use std::sync::{Arc, Mutex};
     let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
     let t0 = std::time::Instant::now();
-    lower_priority();
+    // `g` では優先度を下げない (下げると手間の進みが主より遅れ、門で主が待つ)
+    if !mode().is_some_and(|m| m.contains('g')) {
+        lower_priority();
+    }
     // 手間を問題の大きさで決める: PDLP の反復 × 非零 ≤ `ENOMOTO_T_MIP_TPRE_PDLP_WORK` (4e8、200 反復以上)。PP の計測で、大きい問題
     // (ns1116954 13 万行・41 万非零、nw04 60 万非零) では 2000 反復に 5〜9 秒かかり、主が前処理の後で 3.5〜6.6 秒待った
     let nnz: usize = p.rows.iter().map(|r| r.len()).sum::<usize>().max(1);
@@ -468,7 +478,8 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64, stop: &Stop, slot: &SolSlo
             // 手間の上限 (手の見当の手間 + lift の掃引の非零。`ENOMOTO_T_MIP_TPRE_LMIP_WORKCAP`、既定 5e6。5e7 では 10teams で 7.7 秒、5e6 で 0.7 秒)
             // 待つ形 (`w`) だけ上限を付ける。待たない形では主を止めないので、止めの合図 (外側の求解の終わり) か手の数の上限まで回し、
             // 良くなるたびに受け渡し箱に置く
-            if mode().is_some_and(|m| m.contains('w')) {
+            // `g` でも付ける (TPRE が終われば受け取る点で待たない。付けないと 10 万手 (10teams で約 60 秒) 回り、木の受け取る点ごとに主が待った)
+            if mode().is_some_and(|m| m.contains('w') || m.contains('g')) {
                 lm.work_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_WORKCAP", 5e6, f64) as u64;
             }
             let z_best = std::cell::Cell::new(out.x_z);

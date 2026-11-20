@@ -68,3 +68,23 @@
   - tiny 0/400・highs 0/300・objint 0/1000・slack 0/1000・tiny2 0/400・objint2 0/1000。
   - fuzz の中で固定が何回働いたかは数えていない。
 - 働く問題の洗い出し: `workscan.py` (`VB01=b` + `VBCLQ=1`、1 スレッド・1 問 120 秒まで) → `workscan.jsonl_K`。
+
+## 5. `l` (前処理の LP による固定をしない) と fuzz の働いた回数
+
+- `ENOMOTO_MIP_VBCLQ=l`: pseudoobj に加えて、前処理の LP probing をしない (親の判断で案 (iii) を入り切りの形にした)。
+- hypothyroid-k1 (1 スレッド): `VB01=b` + `VBCLQ=l` で 3.6 秒・3.3 秒 (種 1・2)。既定は約 10 秒。
+- fuzz.sh (計測の vbcl と同じ `VB01=b` + `VBCLQ=l`)。働いた回は診断 `ENOMOTO_MIP_VBCLQ_COUNT_FILE` で数えた。
+
+| fuzz | 誤答 | pseudoobj の呼び出し | 固定した回 (列) | 打ち切りの証明 |
+|---|---|---|---|---|
+| tiny (400) | 0 | 157 | 148 (322) | 133 |
+| highs (300) | 0 | 20 | 1 (2) | 1 |
+| objint (1000) | 0 | 1305 | 40 (61) | 25 |
+| slack (1000) | 0 | 365 | 9 (10) | 179 |
+| tiny2 (400) | 0 | 176 | 157 (356) | 138 |
+| objint2 (1000) | 0 | 1304 | 34 (47) | 34 |
+
+- 固定が働いた回は合わせて 389 回 (列 798 本)。打ち切りの証明は 510 回。誤答 0。
+  - 証明は、余裕が負 (目的の最小値が打ち切り値を超える) か、固定の後の伝播が矛盾した回。
+- 計測の台本: cfg.py (def・vb・vbc・vbcl)・plan.py・run.py・summ.py (`python summ.py P vbcl vb` のように基準も選べる)。
+  M の対象は workscan.py の結果で決める。
