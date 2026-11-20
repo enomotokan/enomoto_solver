@@ -417,11 +417,59 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             return false;
         }
+        // 試作 `ENOMOTO_MIP_LPFACE` (既定では使わない、analysis/scip_rens_20261120): SCIP の heur_lpface の形
+        // (目的値 = LP の下界の等式を足し、面の上の実行可能解だけを探す)
+        if let Some(v) = env_str!("ENOMOTO_MIP_LPFACE").filter(|v| !v.is_empty() && *v != "0") {
+            return self.lp_face_obj(lo, up, nfix, nint, v);
+        }
         let r = self.solve_submip(lo, up, 500);
         if self.params.verbose && self.nodes <= 1 {
             eprintln!("MIP:   LP face: {nfix} of {nint} integer columns fixed, found {r}");
         }
         r
+    }
+
+    /// 試作 `ENOMOTO_MIP_LPFACE=<文字の並び>` の LP face のサブ MIP。`lo`・`up` は面の固定の後の境界。
+    /// 目的値の行 c·x ≤ z̄ (z̄ は今の LP の値を目的値の刻みに切り上げたもの) を足し、打ち切り値も z̄ のすぐ上にする
+    /// (z̄ は根の下界なので、見つかる解は最適)。
+    /// - `c`: この形を使う (目的は元のまま)
+    /// - `z`: サブ MIP の目的を 0 にする (SCIP の既定 `subscipobjective = z`。最初の実行可能解で止まる)
+    /// - `f`: 根で LP face を根の被約費用のサブ MIP より先に回す (solver.rs の根のヒューリスティクスの並び)
+    fn lp_face_obj(&mut self, lo: Vec<f64>, up: Vec<f64>, nfix: usize, nint: usize, v: &str) -> bool {
+        let p = self.p;
+        let z = self.lp.objective() + p.offset;
+        // 目的値の刻みがあれば切り上げ、打ち切り値は刻みの半分の上。なければ相対 1e-6 の上
+        let (zbar, cut) = match self.obj_step {
+            Some(s) if s > 0.0 => {
+                let zb = p.offset + ((z - p.offset) / s - 1e-6).ceil() * s;
+                (zb, zb + 0.5 * s)
+            }
+            _ => (z, z + 1e-6 * z.abs().max(1.0)),
+        };
+        let mut sub = p.clone();
+        sub.col_lo = lo;
+        sub.col_up = up;
+        let objrow: Vec<(usize, f64)> = (0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
+        let mut rows = std::mem::take(&mut sub.rows);
+        let mut row_lo = std::mem::take(&mut sub.row_lo);
+        let mut row_up = std::mem::take(&mut sub.row_up);
+        if !objrow.is_empty() {
+            rows.push(objrow);
+            row_lo.push(f64::NEG_INFINITY);
+            row_up.push(cut - p.offset);
+        }
+        let zero = v.contains('z');
+        let cost = if zero { vec![0.0; p.n] } else { std::mem::take(&mut sub.cost) };
+        let mut s2 = super::problem::MipProblem::from_rows(std::mem::take(&mut sub.col_lo), std::mem::take(&mut sub.col_up), cost, if zero { 0.0 } else { sub.offset }, sub.sense_sign, std::mem::take(&mut sub.is_int), rows, row_lo, row_up);
+        s2.conflict_edges = std::mem::take(&mut sub.conflict_edges);
+        s2.implied_bounds = std::mem::take(&mut sub.implied_bounds);
+        let cutoff = if zero { f64::INFINITY } else { cut.min(self.prune_limit()) };
+        let r = self.solve_submip_problem(s2, 500, Some(cutoff));
+        let found = r.as_ref().is_some_and(|r| r.1);
+        if self.params.verbose && self.nodes <= 1 {
+            eprintln!("MIP:   LP face ({v}): {nfix} of {nint} integer columns fixed, objective row <= {zbar:.6e} (LP {z:.6e}), status {:?}, found {found}", r.map(|r| r.0));
+        }
+        found
     }
 
     /// 局所探索 ([`super::heuristics::local_search`]) を根で回す。見つからなければ、違反の最小だった点を

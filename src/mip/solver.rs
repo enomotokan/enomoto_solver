@@ -10995,10 +10995,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     };
                     heur!("interior rounding", crate::simplex::mip_lp::with_ipm_abort(abort, || self.interior_rounding(&x)));
                 }
+                // 試作 `ENOMOTO_MIP_LPFACE` の `f` ([`Self::lp_face`]): LP face を根の被約費用のサブ MIP より先に回す
+                let lpface_first = env_str!("ENOMOTO_MIP_LPFACE").is_some_and(|v| v.contains('f'));
+                if lpface_first && env_str!("ENOMOTO_MIP_NO_LPFACE").is_none() {
+                    heur!("LP face", self.lp_face());
+                }
                 if env_str!("ENOMOTO_MIP_NO_ROOT_REDCOST_HEUR").is_none() {
                     heur!("root reduced cost", self.root_reduced_cost());
                 }
-                if env_str!("ENOMOTO_MIP_NO_LPFACE").is_none() {
+                if !lpface_first && env_str!("ENOMOTO_MIP_NO_LPFACE").is_none() {
                     heur!("LP face", self.lp_face());
                 }
                 heur!("RENS", self.rens(&x));
