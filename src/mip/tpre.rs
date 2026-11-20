@@ -136,8 +136,45 @@ pub(crate) fn start_diag(p: &MipProblem, safety: f64, seed: u64) {
 
 /// 止めの合図 (主が前処理の終わりで待たないとき、まだ終わっていなければ立てる。PDLP・FJ・Local-MIP が見る)
 pub(crate) type Stop = std::sync::Arc<std::sync::atomic::AtomicBool>;
+/// 途中の解の受け渡し箱 (元の問題の空間。FJ の段・Local-MIP の段の後に良くなれば置く)
+pub(crate) type SolSlot = std::sync::Arc<std::sync::Mutex<Option<Vec<f64>>>>;
 
-pub(crate) fn run(p: &MipProblem, safety: f64, seed: u64, stop: Stop) -> TpreOut {
+/// 前処理の終わりに TPRE が終わっていなかったときの受け取り口 (`p`・`pl` の既定、待たない形)。主は根と木の決まった所
+/// ([`super::solver::Solver::poll_lmip_thread`]) で、その時点で箱に解があれば受け取る (前処理後の空間に x' = x / d で写す)。再現しない
+pub(crate) struct Pending {
+    slot: SolSlot,
+    d: Vec<f64>,
+    stop: Stop,
+}
+
+thread_local! {
+    static PENDING: std::cell::RefCell<Option<Pending>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn set_pending(slot: SolSlot, d: Vec<f64>, stop: Stop) {
+    PENDING.with(|p| *p.borrow_mut() = Some(Pending { slot, d, stop }));
+}
+
+/// 箱に解があれば取り出し、前処理後の空間に写して返す (列の数が違えば捨てる)
+pub(crate) fn take_pending(n: usize) -> Option<Vec<f64>> {
+    PENDING.with(|p| {
+        let p = p.borrow();
+        let pd = p.as_ref()?;
+        let x = pd.slot.lock().ok()?.take()?;
+        (x.len() == n && pd.d.len() == n).then(|| x.iter().zip(&pd.d).map(|(v, d)| v / d).collect())
+    })
+}
+
+/// 外側の求解の終わり: 止めの合図を立てて受け取り口を捨てる
+pub(crate) fn clear_pending() {
+    PENDING.with(|p| {
+        if let Some(pd) = p.borrow_mut().take() {
+            pd.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+}
+
+pub(crate) fn run(p: &MipProblem, safety: f64, seed: u64, stop: Stop, slot: SolSlot) -> TpreOut {
     if mode().is_some_and(|m| m.contains('u')) {
         umax_diag(p);
     }
@@ -148,7 +185,7 @@ pub(crate) fn run(p: &MipProblem, safety: f64, seed: u64, stop: Stop) -> TpreOut
     // `ENOMOTO_T_MIP_TPRE_PDLP_ITERS` 反復 (既定 2000) 解いた主の点 (整数列は四捨五入) から FJ を `ENOMOTO_T_MIP_TPRE_FJ_RUNS` 回 (種を変えて)。
     // 手間は反復の数と FJ の手間 (非零の数で決まる) で決まり、主の側は決まった所で待つので種ごとに再現する
     if mode().is_some_and(|m| m.contains('p')) {
-        return pdlp_start(p, safety, seed, &stop);
+        return pdlp_start(p, safety, seed, &stop, &slot);
     }
     let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
     if !p.cost.iter().any(|&c| c != 0.0) {
@@ -309,7 +346,7 @@ fn ladder(p: &MipProblem, l0: f64, u: f64, safety: f64, seed: u64, out: &mut Tpr
 }
 
 /// [`run`] の `p`: PDLP の点からの FJ
-fn pdlp_start(p: &MipProblem, safety: f64, seed: u64, stop: &Stop) -> TpreOut {
+fn pdlp_start(p: &MipProblem, safety: f64, seed: u64, stop: &Stop, slot: &SolSlot) -> TpreOut {
     use std::sync::{Arc, Mutex};
     let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
     let t0 = std::time::Instant::now();
@@ -352,6 +389,9 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64, stop: &Stop) -> TpreOut {
     }
     out.n_tight = viol;
     out.secs[1] = t1.elapsed().as_secs_f64();
+    if let (Some(x), Ok(mut sl)) = (out.x.as_ref(), slot.lock()) {
+        *sl = Some(x.clone());
+    }
     // `pl`: PDLP の点から Local-MIP を `ENOMOTO_T_MIP_TPRE_LMIP_STEPS` 手 (既定 100000、loue・kakapo で 4〜6 秒) 回す (手の数で止める)
     if mode().is_some_and(|m| m.contains("pl")) {
         let t2 = std::time::Instant::now();
@@ -361,8 +401,23 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64, stop: &Stop) -> TpreOut {
             // 手の数も大きさで決める: 手 × 非零 ≤ `ENOMOTO_T_MIP_TPRE_LMIP_WORK` (2e9)
             lm.step_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_STEPS", 100_000u64, u64).min(((tunable!("ENOMOTO_T_MIP_TPRE_LMIP_WORK", 2e9, f64) / nnz as f64) as u64).max(1000));
             // 手間の上限 (手の見当の手間 + lift の掃引の非零。`ENOMOTO_T_MIP_TPRE_LMIP_WORKCAP`、既定 5e6。5e7 では 10teams で 7.7 秒、5e6 で 0.7 秒)
-            lm.work_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_WORKCAP", 5e6, f64) as u64;
-            lm.run(std::time::Instant::now() + std::time::Duration::from_secs_f64(safety), Some(stop), &|_| {});
+            // 待つ形 (`w`) だけ上限を付ける。待たない形では主を止めないので、止めの合図 (外側の求解の終わり) か手の数の上限まで回し、
+            // 良くなるたびに受け渡し箱に置く
+            if mode().is_some_and(|m| m.contains('w')) {
+                lm.work_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_WORKCAP", 5e6, f64) as u64;
+            }
+            let z_best = std::cell::Cell::new(out.x_z);
+            lm.run(std::time::Instant::now() + std::time::Duration::from_secs_f64(safety), Some(stop), &|x| {
+                if p.is_feasible(x, 1e-6) {
+                    let z = p.objective(x);
+                    if z < z_best.get() {
+                        z_best.set(z);
+                        if let Ok(mut sl) = slot.lock() {
+                            *sl = Some(x.to_vec());
+                        }
+                    }
+                }
+            });
             if env_str!("ENOMOTO_MIP_TPRE_DEBUG").is_some() {
                 eprintln!("MIP: TPRE pl: Local-MIP steps {} (cap {}, work cap {}), done {}", lm.res.steps, lm.step_cap, lm.work_cap, lm.done);
             }
@@ -372,6 +427,9 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64, stop: &Stop) -> TpreOut {
                     if z < out.x_z {
                         out.x_z = z;
                         out.u = Some(z);
+                        if let Ok(mut sl) = slot.lock() {
+                            *sl = Some(x.clone());
+                        }
                         out.x = Some(x);
                     }
                 }

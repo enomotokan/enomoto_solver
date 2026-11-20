@@ -1420,6 +1420,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
                 c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], if c[3] > 0 { c[12] / c[3] } else { 0 }
             );
         }
+        tpre::clear_pending();
         // 試作 `ENOMOTO_MIP_SYM_SST=x` の写しの回数 (計測で数えるため、ログの有無にかかわらず出す)
         if sym_sst_x() {
             let c: Vec<u64> = SST_X_STATS.iter().map(|c| c.load(std::sync::atomic::Ordering::Relaxed)).collect();
@@ -1475,8 +1476,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         let safety = if params.time_limit.is_finite() { 0.25 * params.time_limit } else { 60.0 };
         let seed = 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
         let stop: tpre::Stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let st2 = stop.clone();
-        (std::thread::spawn(move || tpre::run(&q, safety, seed, st2)), stop)
+        let slot: tpre::SolSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (st2, sl2) = (stop.clone(), slot.clone());
+        (std::thread::spawn(move || tpre::run(&q, safety, seed, st2, sl2)), stop, slot)
     });
     let prev_par = PREPAR_THREADS.with(|t| t.replace(if !params.submip && params.restarts == 0 { params.threads.max(1) } else { 1 }));
     struct RestorePar(usize);
@@ -1770,18 +1772,23 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     };
     let start = match tpre_job {
         // 前処理で早めの FJ が実行可能性問題の解を見つけ木に入らない道 (ns1116954) では待たない (結果は捨てる)
-        Some((_, stop)) if FEAS_FJ_SOL.with(|s| s.borrow().is_some()) => {
+        Some((_, stop, _)) if FEAS_FJ_SOL.with(|s| s.borrow().is_some()) => {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
             start
         }
-        // 既定は待たない (親の方針): 前処理の終わりでスレッドが終わっていなければ止めの合図を立てて結果を捨てる (再現しない)。
+        // 既定は待たない (親の方針): 前処理の終わりでスレッドが終わっていなければ、主は待たずに根へ進み、スレッドは回し続ける。
+        // 途中の解は箱に置かれ、主が根と木の決まった所 (`poll_lmip_thread`) で、その時点で出来上がっていれば受け取る (再現しない)。
         // `w` なら終わりを待つ (種ごとに再現するが、小さい問題で主が待つ分が目立つ: PPL で 1〜5 秒の問題が数倍遅かった)
-        Some((h, stop)) if !h.is_finished() && !tpre::mode().is_some_and(|m| m.contains('w')) => {
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            eprintln!("MIP: TPRE: not finished at the end of the presolve ({:.2}s); stopped and dropped", t_pre.elapsed().as_secs_f64());
+        Some((h, stop, slot)) if !h.is_finished() && !tpre::mode().is_some_and(|m| m.contains('w')) => {
+            let d = match &presolved {
+                Some(Presolved::Reduced { scaling, .. }) => scaling.d.clone(),
+                _ => vec![1.0; p.n],
+            };
+            eprintln!("MIP: TPRE: not finished at the end of the presolve ({:.2}s); the root takes its solution when ready", t_pre.elapsed().as_secs_f64());
+            tpre::set_pending(slot, d, stop);
             start
         }
-        Some((h, _)) => {
+        Some((h, _, _)) => {
             let tw = std::time::Instant::now();
             let out = h.join().ok();
             let wait = tw.elapsed().as_secs_f64();
