@@ -4,7 +4,8 @@ pl = p の後に PDLP の点から Local-MIP を 10 万手 (ENOMOTO_MIP_TPRE=pl)
 CFGS = {"def": {}, "l": {"ENOMOTO_MIP_OBJTARGET": "l"}, "p": {"ENOMOTO_MIP_TPRE": "p"}, "pl": {"ENOMOTO_MIP_TPRE": "pl"}}
 
 # 再スタートの費用の試作 (README の 10 節)。c = ENOMOTO_MIP_PRESOLVE_STOP_FINE (プロービングで止めの合図を候補ごと・窓の中でも見る)、
-# b = ENOMOTO_MIP_RESTART_DROP_FIXED (再スタートの問題から固定された列を落とす)、a = ENOMOTO_MIP_RESTART_DENSE_POOL (密なカットをプールへ)。
+# b = ENOMOTO_MIP_RESTART_DROP_FIXED (再スタートの問題から固定された列を落とす)、a = ENOMOTO_MIP_RESTART_DENSE_POOL (密なカットをプールへ。
+# 9 問で害があり落とした (README の 10 節)。今のビルドでは環境変数が効かないので cba は cb と同じ)。
 # 接頭辞 pl_・plw_・vb_ は TPRE=pl・TPRE=plw・VB01=b (SCIP-GATE の vb) と組み合わせる
 _RS = {"c": {"ENOMOTO_MIP_PRESOLVE_STOP_FINE": "1"}, "b": {"ENOMOTO_MIP_RESTART_DROP_FIXED": "1"}, "a": {"ENOMOTO_MIP_RESTART_DENSE_POOL": "1"}}
 _BASE = {"": {}, "pl_": {"ENOMOTO_MIP_TPRE": "pl"}, "plw_": {"ENOMOTO_MIP_TPRE": "plw"}, "vb_": {"ENOMOTO_MIP_VB01": "b"}}
