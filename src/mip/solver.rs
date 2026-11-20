@@ -197,10 +197,10 @@ pub(super) fn rhstat_on() -> bool {
 ///
 /// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `es`。`0`・`off` で 0.1.7 までの動き (使わない)。**
 /// 試作 `ENOMOTO_MIP_VB01=<文字>` (既定では使わない。analysis/vb01_20261120/README.md): 0-1 列どうしの含意を使う vbounds
-/// ([`Solver::vbounds01_heur`]) を回す場所。`r` (値 `1` も同じ): 根の SCIP 由来のヒューリスティクス (locks・clique・vbounds) の後、
-/// `b`: 前処理の後・根の LP の直前 (SCIP の heur_vbounds の BEFORENODE に当たる。SCIP-GATE の `ENOMOTO_MIP_VBCLQ` の `p` の前)
+/// ([`Solver::vbounds01_heur`]) を回す場所。`b` (値 `1` も同じ): 前処理の後・根の LP の直前 (SCIP の heur_vbounds の BEFORENODE に当たる。SCIP-GATE の `ENOMOTO_MIP_VBCLQ` の `p` の前)
 pub(super) fn vb01(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_VB01").is_some_and(|v| v.contains(c) || (c == 'r' && v == "1"))
+    // 根のヒューリスティクスの後に回す `r` は 2026-11-20 に外した (回るのが根のヒューリスティクスまで行き差 1% 以上の問題だけで、P で解 2 問)
+    env_str!("ENOMOTO_MIP_VB01").is_some_and(|v| v.contains(c) || (c == 'b' && v == "1"))
 }
 
 /// 試作 `ENOMOTO_MIP_VBCLQ` の値 (既定では使わない。analysis/scipgate_20261120)。空・`0` 以外なら根の LP の前の pseudoobj
@@ -11135,10 +11135,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             heur!("vbounds (loose)", self.vbounds_heur(true));
                             heur!("vbounds (tight)", self.vbounds_heur(false));
                         }
-                        // 試作 `ENOMOTO_MIP_VB01` ([`Self::vbounds01_heur`]): 0-1 列どうしの含意を使う vbounds
-                        if vb01('r') {
-                            heur!("VB01", self.vbounds01_heur());
-                        }
                     }
                     // 試作 `ENOMOTO_MIP_RHEUR` の `b`・`s` ([`rheur`]): Pump と 3 つのダイビングの LP 反復の予算を共有にする
                     let pool = (rheur('b') || rheur('s')) && !self.params.submip && self.snap.is_none();
@@ -11206,9 +11202,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if scip_heur_ok(self) {
                         heur!("vbounds (tight)", self.vbounds_heur(false));
                     }
-                }
-                if !early_scip && scip_heur_ok(self) && vb01('r') {
-                    heur!("VB01", self.vbounds01_heur());
                 }
                 // 並列モード: 別スレッドのサブ MIP の結果を出した順に受け取る
                 self.parallel_submips = false;
