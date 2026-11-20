@@ -123,3 +123,19 @@ python analysis/scip_rens_20261120/summ.py
   分かれるのは再スタートの後で、差の大きさは揺れが広げている。
 - 原因: z̄ が最適値に届かない (根の下界と最適値の間に刻みが 1 つ以上ある) 問題では、目的値の行が LP face の普段の働き
   (面の上で良い解を探す) を消す。行のサブ MIP の解なしは「面の上に z̄ 以下の解はない」という情報で、その後の探しには使えない。
+
+## 9. 試作 `r` (`ENOMOTO_MIP_LPFACE=cfr`)
+
+- `r` (`c` と使う): 目的値の行のサブ MIP が解なし (面の上に z̄ 以下の解はない) なら、同じ固定で行を外し (今の LP face と同じ問題)、
+  残りのノード (500 − 使ったノード) で解き直す。打ち切り値は外側の打ち切り値。新しい閾値はなく、ノードの予算は今の LP face の中。
+  並列 (4 スレッド) のときはサブ MIP のスレッドの中で続けて解く (`src/mip/solver.rs` の `spawn_submip`、残りの時間も引く)。
+- 診断 `ENOMOTO_MIP_LPFACE_COUNT=<ファイル>`: 行のサブ MIP (`row`) と解き直し (`fb`) の結果を 1 行ずつ足す。
+- neos-1582420 (1 スレッド、種 1〜3): def 57.8・55.7・56.9、cf 63.4・62.8・52.4、**cfr 56.4・55.5・55.4 秒**
+  (行のサブ MIP は 35 ノードで解なし → 行なしで 92 を見つける)。4 スレッド種 1 は 27.1 秒 (RENS が先に 92 を出し、解き直しは 465 ノードで解なし)。
+- 10teams: cfr 1 スレッド 2.4 秒、4 スレッド (種 2) 3.3 秒 (行のサブ MIP が最適を出すので解き直さない)。
+- cargo test 414 通過。fuzz 7 本 (`cfr`・`ENOMOTO_T_MIP_LPFACE_RATE=0`): fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・
+  fuzz_slack 不一致 0/1000・fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 不一致 0/1000。
+  行のサブ MIP 1009 回 (解なし 946・最適 39・ノード上限 11・並列で後受け取り 13)、**解き直し 957 回** (うち解を見つけた 451、
+  解なし 146、ノード上限で解なし 168、最適だが良くならない 192)。
+- 計測: `python plan.py 18 2 cfr r` → `shards_Mr.json`・`shards_Pr.json` (M は cf と同じ 69 問 × 種 1・2、{def, cfr})。
+  `python analysis/scip_rens_20261120/run.py Pr K` (K = 0〜1)、`run.py Mr K` (K = 0〜17)、集計は `summ.py Pr cfr`・`summ.py Mr cfr`。
