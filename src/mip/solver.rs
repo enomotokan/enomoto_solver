@@ -13201,6 +13201,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else {
                     cap
                 };
+                // 試作 `ENOMOTO_MIP_DET1T` の `l` (analysis/det1t_20261120): 上限を手間で数える (平均の手間の 50 倍、最低 0.5e9 = 0.5 秒相当)。
+                // 壁時計の上限は 10 倍の安全網にする。手間の期限は解くたびに [`crate::ticks::budget_guard`] で付ける
+                let det_l = det1t('l');
+                let cap_tk = (50.0 * self.node_lp_ticks / self.node_lps.max(1) as f64).max(0.5e9);
+                let cap = if det_l { cap * 10 } else { cap };
+                let det_l_guard = || det_l.then(|| crate::ticks::budget_guard(cap_tk));
                 let capped = |s: &Self, it: u64| {
                     let mut l = s.limits_k(it, 0);
                     l.deadline = Some(match l.deadline {
@@ -13302,7 +13308,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let _nl_bg = nodelp_bfrt_group()
                     .is_some_and(|all| all || (node.depth > 0 && !self.params.submip))
                     .then(crate::simplex::slope_intercept_dual::BfrtGroupScope::new);
-                let mut st = self.lp.solve(&capped(self, iter_limit));
+                let mut st = { let _g = det_l_guard(); self.lp.solve(&capped(self, iter_limit)) };
                 drop(_nl_sr);
                 drop(_nl_bg);
                 if crate::simplex::slope_intercept_dual::nodelp_diag() {
@@ -13367,7 +13373,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     crate::simplex::nb_diag::tag(crate::simplex::nb_diag::SLACK_RETRY);
                     self.lp.set_basis(&slack);
                     let (i1, t1) = (self.lp.total_iterations(), Instant::now());
-                    st = self.lp.solve(&capped(self, u64::MAX));
+                    st = { let _g = det_l_guard(); self.lp.solve(&capped(self, u64::MAX)) };
                     if ho4_d.is_some() {
                         ho4_retry = Some((self.lp.total_iterations() - i1, t1.elapsed().as_secs_f64(), st));
                     }
@@ -13382,7 +13388,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let mut lpinf_marg = false;
                 if self.lpinf_untrusted(st) {
                     lpinf_marg = true;
-                    st = self.lpinf_fresh_check(&capped(self, u64::MAX));
+                    st = { let _g = det_l_guard(); self.lpinf_fresh_check(&capped(self, u64::MAX)) };
                     if st == LpStatus::TimeLimit && !self.time_up() {
                         st = LpStatus::Error;
                     }
@@ -13520,7 +13526,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let b = !self.gen_lazy.is_empty() && self.gen_lazy_restore();
                     a || b
                 } {
-                    st = self.lp.solve(&capped(self, u64::MAX));
+                    st = { let _g = det_l_guard(); self.lp.solve(&capped(self, u64::MAX)) };
                     self.clq_lazy_stats[3] += 1;
                     self.gen_lazy_stats[3] += 1;
                     // ノードの LP の時間の上限に当たっただけなら全体の時間切れにしない (LP なしで分枝する。上の解き直しと同じ扱い)
@@ -27348,6 +27354,7 @@ pub(super) fn inf_all() -> bool {
 /// 試作 `ENOMOTO_MIP_DET1T` の文字 (analysis/det1t_20261120、既定では使わない): 1 スレッドで同じ種の結果を再現させるため、時間で決めている所を手間で決める。
 /// `o`: 根のカットのループの乱択丸め (OBJPROBE `r`) の枠を、使った壁時計の秒でなく手間で数える。
 /// `n`: 手間の期限の中で解くサブ MIP は、時間の上限を 10 倍の安全網にする ([`Solver::solve_submip_problem`])
+/// `l`: ノードの LP の 1 回の上限 (平均の 50 倍・最低 0.5 秒) を手間で数える。
 /// `i`: 根の interior rounding の予算を手間で数え、内点法の反復も手間の期限で止める (src/mip/heur_ipm.rs、[`crate::ticks::ipm_work`])
 pub(super) fn det1t(c: char) -> bool {
     env_str!("ENOMOTO_MIP_DET1T").is_some_and(|v| v.contains(c))
