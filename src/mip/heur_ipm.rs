@@ -47,7 +47,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             return false;
         }
-        let deadline = Instant::now() + Duration::from_secs_f64(budget);
+        // 試作 `ENOMOTO_MIP_DET1T` の `i` (analysis/det1t_20261120): 予算を手間 (ticks × 1e-9 秒) で数え、内点法の反復も KKT の分解の
+        // 演算数を手間に足して手間の期限で止める。壁時計の期限は 10 倍の安全網にする
+        let det_i = super::solver::det1t('i');
+        let deadline = Instant::now() + Duration::from_secs_f64(if det_i { 10.0 * budget } else { budget });
+        let _det_budget = det_i.then(|| crate::ticks::budget_guard(budget * 1e9));
+        let _det_ipm = det_i.then(crate::ticks::ipm_work_guard);
+        let past = || Instant::now() >= deadline || (det_i && crate::ticks::over());
         // 0: 費用つき (最適面の中心付近) + クロスオーバーの頂点、1: 費用 0 (実行可能領域の中心付近、頂点なし)、2: 両方
         let mode = tunable!("ENOMOTO_T_MIP_IPM_MODE", 0u8, u8);
         let mut centers: Vec<(&str, Vec<f64>)> = Vec::new();
@@ -78,7 +84,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 相対的な内部の点なので、そこで境界にある列は LP の実行可能領域全体でその値。カットは整数解を切らないので整数解でも同じ)。
         // satellites2-60-fs では HiGHS が根で 11955 列をこれで固定し (40.3%)、再スタートで 12852 x 31721 -> 6047 x 12408 になる
         let acfix = !self.params.submip && self.snap.is_none() && env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some();
-        if (mode != 0 || acfix) && Instant::now() < deadline {
+        if (mode != 0 || acfix) && !past() {
             if let Some(ip) = self.lp.interior_point(true, false, deadline) {
                 if acfix {
                     let tol = tunable!("ENOMOTO_T_MIP_HO4_ACFIX_TOL", 1e-6, f64);
@@ -184,7 +190,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let alphas = [1.0, 0.8, 0.6, 0.4, 0.2];
         for (_, xc) in &centers {
             for &a in &alphas {
-                if found || self.time_up() || Instant::now() >= deadline {
+                if found || self.time_up() || past() {
                     break;
                 }
                 let x: Vec<f64> = (0..p.n).map(|j| xlp[j] + a * (xc[j] - xlp[j])).collect();
