@@ -1,0 +1,628 @@
+MIP: VUBAGG 0 columns x = y from variable upper bound rows (0.00s)
+MIP_FOLD: integer groups: 45 accepted, 0 rejected (V_R rows 2; rejected for V_R 0, non-±1 0, TU 0; net true accepted by net 0 work 0 over 0, panics 0, cert fails 0)
+MIP_FOLD: no fold (n 1747 m 2107) in 0.006s (reason line 526, ratio 0.973)
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 2107 -> 1859, free columns 1733 -> 1501, nonzeros 8088 -> 4519, postsolve steps 168 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 64 probed, 0 of 1501 free columns fixed (0.00s), not used
+MIP: LP probing pass 1: 1264 candidates, 0 fixings (16 LPs, 1284 iters, 0.27s)
+MIP: LP probing: tried 8 columns, fixed 0, LP 1.9377475371e5 -> 1.9377475371e5 (16 LPs, 1284 iters, 0.27s, PREPAR 4 threads, 2 windows)
+MIP: LP probing: root LP 0.14s (2048 iters, size 8125), tried 8, fixed 0, basis passed false, total 3332 iters 0.27s
+MIP: probing: equivalence pass with implications: 0 pairs found (0.03s), not used
+MIP: probing: 1501 of 1501 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 55190 implications (0.04s, cpu 0.00s, work 0, pwork 33098095, chg 0)
+MIP: probing: PREPAR 4 threads, 13 windows, 1501 of 1501 probes from the windows
+MIP: probing: 0 equivalent binary pairs
+MIP: presolve: 0 dominated binaries fixed (0.00s)
+MIP: presolve: sparsified 0 rows (late)
+MIP: sparsify-late stats m 1859 n 1747 bincols 1501 changed 0 binonly 0 shrunk<=1 0 nnz 4519 -> 4519 gate 0.000 (f 0.000 b 0.000)
+HNFPRE: round 0 eq 30 int_eq 30 rat_skip 0 comps 30 done 30 gave_up 0 cols 144 rank 30 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.000s) gave_up_why 0/0/0
+HNFPRE: round 0 tightened 0 columns
+CUTMIX clique edges total 42547 rows 3443 implonly 39104 implpairs 55190 bin 1501
+MIP: clique extension: 12 rows extended, 28 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (42547 edges, 0.01s)
+MIP: symmetry: SYMSIGN true SYMSCALE false: flipped 30, scaled 0, tie rows doubled 0 of 1859 rows for the detection
+MIP: symmetry: refinement 0.00s, work 50800 (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)
+MIP: symmetry: SYMPRE probe: 45 cells, 45 done as orbits, 15 probes, 15 generators (0.005s)
+MIP: symmetry: refinements stopped by the iteration cap 0 of 31 (ENOMOTO_MIP_HO6_SYMREFINE true)
+MIP: symmetry: orbital fixing with 15 of 15 generators
+MIP: symmetry: ORBPP 0 of 0 orbitopes static (packing, >= 3 rows, >= 10 columns), fixed 0 columns to 0
+MIP: symmetry: 15 generators, 45 orbits on 90 columns, 0 lex-leader rows (0.01s, work 175785, search 0, verify 122295, detect 0.01s, refine 0.00s, log work 240817)
+MIP: objective step with implied integers: Some(1.0) (without: Some(1.0)); costed non-integer columns 0 (e.g. [])
+MIP: OBJINT c: lattice Some(ObjLat { s: 1.0, base: 475000.0, m: 0.0, mm: 0.000475001 }) (offset 4.7500000000e5), step Some(1.0)
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.00s)
+MIP: FJ problem (FJ_P3): rows 1859 -> 1859, free columns 1501 -> 1501, 0 continuous bounds tightened (0.05s)
+MIP: root LP 1.9377524816e5 (1792 iters, 0.08s)
+MIP: root LP size: rows 1859, free columns 1501, nonzeros 4547
+MIP: root LP work: 0.109700 tick-s (1792 iters, 0.082s)
+CUTMIX types restarts 0 m 1859 n 1501 vbrow 0.000 vbcol 0.000 fc 0 fcnode 0 cont 0.000 genint 0.000 knap 0.000 knaptight 0.000 knapgub 0.000 knapgubcol 0.000 mixknap 0.000 setp 1.000 introw 1.000 intsmall 1.000 flow 0.016
+MIP: clique graph: 42547 edges (3525 from rows, probing implications 55190)
+CLQSIG s 0.4920 sp 0.2673 ed 0.7008 fr 1.0000 vi 0.0000 (rows 1859 bin 1745 edges 42547 frac 1269) a 1.8 b 0.41 f 0.5368
+MIP: clique sigmoid: f 0.5368, clique cuts per root round 54
+MIP: robust cut LP cap: size false, double false, progress true
+MIP: oneopt improved 4.7568400000e5 -> 2.5908700000e5
+MIP: fixed-integer LP dual check: c x -2.1591300000e5, dual bound -2.8105305424e5 -> solve
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.5908700000e5 at node 0 (0.11s) [Local-MIP]
+MIP: Local-MIP solution accepted true (0.11s)
+MCF detect: rows 1859 cols 1747 | flow cands 1859 flow rows 282 commodities 5 cap cands 1162 arcs 136 nodes 114 incons 2.92 directed | fail 'inconsistent' | networks [] fc_network false | 0.000s
+MIP: cut selection probe: compared at 6 rounds (full), probe wall 0.53s (budget 30.0s)
+MIP: cut selection probe (6 rounds): default 14 cuts gain 1.537769e1 (0.10s), pool 6 cuts gain 1.793488e1 (0.09s) -> pool (rule rate, probe 0.19s in total, 0.64s)
+MIP: cut round 0: 1 cuts (of 748, sep 0.02s, LP 50 iters), LP rows 1860 (cut rows mean nnz 360), obj 1.9378014084e5 (0.67s)
+MIP: OBJPROBE r: round 0: randomized rounding none (incumbent Some(259087.0) -> Some(259087.0), 0.01s, 0.68s)
+MIP: twoopt improved 2.5198900000e5 -> 2.5195900000e5
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.5195900000e5 at node 0 (0.69s) [Local-MIP]
+MIP: Local-MIP solution accepted true (0.69s)
+MIP: cut round 1: root cut time cap check: clock 0.070s of cap 59.97s (min rounds 8)
+MIP: cut round 1: mpsep gate: optimal face width 3 (threshold 930, 1859 rows) -> narrow; stop
+MIP: cut round 1: 1 cuts (of 24, sep 0.02s, LP 51 iters), LP rows 1861 (cut rows mean nnz 390), obj 1.9378479212e5 (0.72s)
+MIP: OBJPROBE r: round 1: randomized rounding none (incumbent Some(251959.0) -> Some(251959.0), 0.01s, 0.72s)
+MIP: cut round 2: root cut time cap check: clock 0.087s of cap 59.97s (min rounds 8)
+MIP: cut round 2: 1 cuts (of 22, sep 0.03s, LP 48 iters), LP rows 1862 (cut rows mean nnz 417), obj 1.9378655297e5 (0.76s)
+MIP: OBJPROBE r: round 2: randomized rounding none (incumbent Some(251959.0) -> Some(251959.0), 0.01s, 0.76s)
+MIP: cut round 3: root cut time cap check: clock 0.104s of cap 59.97s (min rounds 8)
+MIP: cut round 3: 1 cuts (of 22, sep 0.03s, LP 21 iters), LP rows 1863 (cut rows mean nnz 437), obj 1.9378693480e5 (0.79s)
+MIP: OBJPROBE r: round 3: randomized rounding none (incumbent Some(251959.0) -> Some(251959.0), 0.00s, 0.79s)
+MIP: cut round 4: root cut time cap check: clock 0.114s of cap 59.97s (min rounds 8)
+MIP: cut round 4: 1 cuts (of 22, sep 0.02s, LP 28 iters), LP rows 1864 (cut rows mean nnz 451), obj 1.9378725929e5 (0.82s)
+MIP: OBJPROBE r: round 4: randomized rounding none (incumbent Some(251959.0) -> Some(251959.0), 0.00s, 0.82s)
+MIP: cut round 5: root cut time cap check: clock 0.124s of cap 59.97s (min rounds 8)
+MIP: cut round 5: 1 cuts (of 22, sep 0.03s, LP 34 iters), LP rows 1865 (cut rows mean nnz 462), obj 1.9378740546e5 (0.86s)
+MIP: OBJPROBE r: round 5: randomized rounding none (incumbent Some(251959.0) -> Some(251959.0), 0.01s, 0.86s)
+MIP: cut round 6: root cut time cap check: clock 0.139s of cap 59.97s (min rounds 8)
+MIP: cut round 6: 1 cuts (of 22, sep 0.03s, LP 23 iters), LP rows 1866 (cut rows mean nnz 473), obj 1.9378747789e5 (0.90s)
+MIP: OBJPROBE r: round 6: randomized rounding none (incumbent Some(251959.0) -> Some(251959.0), 0.01s, 0.91s)
+MIP: mpsep: 0 rounds with extra points, 0 points, 0 extra candidates, chosen 0 cuts (0 do not cut x*), 0.000s
+SEP cmirdelta: calls 15708 with_new 0 new_deltas 0 wins 0 (g 0 c 0 l 0, no_old 0) mean_gain 1.000 cands_new 0 chosen 0/7 eff_new 0.0000 eff_all 0.0583 time 0.012s
+MIP: cut loop done: 7 cuts added, 7 in LP, pool 7 cuts (3309 nonzeros), obj 1.9377524816e5 -> 1.9378747789e5
+MIP: LMBOOST: not used (Local-MIP improvements 2, last at 0.69s, incumbent only from the FJ thread true, gap 0.231, 0.91s)
+MIP: ROOTSTOP b: newly fixed 0 + fixable by reduced costs 0 at the background cut start, restart not expected; background cuts started (0.91s)
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1792, work_iters: 35840, rate: 0.0, cont: true, gap_eps: 0.0 } (root LP 1792 iters)
+MIP: background cuts: basis with the column values not passed (root LP 0.08s)
+MIP: early root reduced costs stored (0 newly fixed integer columns, 0.91s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+MIP: root heuristic shifting: none (0.00s)
+MIP: root heuristic int shifting: none (0.00s)
+MIP: root heuristic randomized rounding: none (0.01s)
+CUTMIX types restarts 0 m 1859 n 1501 vbrow 0.000 vbcol 0.000 fc 0 fcnode 0 cont 0.000 genint 0.000 knap 0.000 knaptight 0.000 knapgub 0.000 knapgubcol 0.000 mixknap 0.000 setp 1.000 introw 1.000 intsmall 1.000 flow 0.016
+MCF detect: rows 1859 cols 1747 | flow cands 1859 flow rows 282 commodities 5 cap cands 1162 arcs 136 nodes 114 incons 2.92 directed | fail 'inconsistent' | networks [] fc_network false | 0.000s
+MIP:   interior rounding: 1 interior points, vertex false (0.12s)
+MIP:   interior rounding: 1 rounded points tried, found false
+MIP: root heuristic interior rounding: none (0.12s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 37 of 1501 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+CUTMIX clique edges total 5614 rows 716 implonly 4898 implpairs 11228 bin 550
+CUTMIX clique edges total 5289 rows 692 implonly 4597 implpairs 10578 bin 536
+MIP:   sub-MIP: 577 free columns of 1747, status NodeLimit, nodes 45, objective Some(232646.0), 0.57s, 3696 LP iterations, TICKS cpu 0.493 lp 5490527 prop 1003318 sep 4605421 pre 36668 heur 0 node 172070 lpit 6737 lu 83610795 lum 19438846
+MIP: oneopt improved 2.3264600000e5 -> 2.2666000000e5
+MIP: fixed-integer LP dual check: c x -2.4834000000e5, dual bound -2.7173900000e5 -> solve
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.2666000000e5 at node 0 (1.72s) [RENS]
+MIP:   SUBFIX RENS try 1: target 0.60, fixing rate 0.62, depth 319, 0 backtracks, 577 free integer columns of 1501, status Some(NodeLimit), nodes 45, accepted true, 0.58s (dive+sub 0.68s)
+MIP: root heuristic RENS: found (0.68s)
+MIP:   locks: fixing rate 0.83
+MIP:   parallel sub-MIP started (locks): 257 free columns of 1747
+MIP: root heuristic locks: none (0.00s)
+MIP:   clique: fixing rate 0.97
+MIP:   parallel sub-MIP started (clique): 50 free columns of 1747
+MIP: root heuristic clique: none (0.00s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.00s
+MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.00s
+MIP:   RINS (HiGHS fill): fixing rate 0.16 from agreeing columns, 0.25 after fill (1501 free integer columns)
+MIP:   RINS skipped: fixing rate 0.25 below 0.50 (S4_RINSRATE)
+MIP: root heuristic RINS: none (0.00s)
+MIP: after root heuristics: incumbent Some(226660.0) (1.73s)
+MIP: background cuts: determ: waited 0.00s (safety cap 179.38s, done, background end stalled), 6 rounds, 227 LP iters (0.13 x 1792 of cap 35840), obj Some(193788.7773780019) (1.73s)
+MIP: background cuts: rounds so far [193787.9 at 0.96s, 193788.0 at 1.00s, 193788.3 at 1.03s, 193788.6 at 1.08s, 193788.7 at 1.12s, 193788.8 at 1.16s]
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (1.73s)
+MIP: background cuts: LP solve time with the replaced cuts 0.018s
+MIP: background cuts: LP with the replaced cuts: Optimal, 1 iters (1.75s)
+MIP: background cuts: 6 rounds, 8 cut rows (was 7), obj 1.9378747789e5 -> 1.9378877738e5 (waited 0.00s, 1.75s)
+MIP: root reduced costs re-stored after the background cuts (0 newly fixed integer columns)
+MIP: root objective probing: skipped (gap 1.450e-1 (LP 1.9378877738e5, incumbent 2.2666000000e5), 1273 fractional binaries)
+MIP: GAP1 u: LP probing skipped (gap 1.450e-1)
+MIP: restart check: newly fixed 0, integer columns 1745, free at the root 1501, threshold 17.4, root LP 0.08s
+TRSTAT: tree start outer 2.08 solve 1.75 restarts 0 lb 1.9377524816e5 ub 2.2666000000e5
+MIP: 1 of 4 tree threads take the heuristic role once a solution exists
+MIP: tree search with 4 threads (3.25s)
+MIP:     3.25s nodes        2 open       1 lb 1.94792358e5 ub 2.26660000e5 lp_iters 17719 sb_iters 14165 sb_lps 108 sb_secs 1.50 node_iters 1 (first 1, lps 1) heur_iters 5199 dive_iters 0 lp_rows 1867 node_cut_secs 0.00 pool_len 0 pool_idle 0
+CUTMIX clique edges total 28601 rows 2054 implonly 26547 implpairs 41780 bin 1074
+MIP:   sub-MIP: 1080 free columns of 1747, status TimeLimit, nodes 0, objective None, 0.53s, 3445 LP iterations, TICKS cpu 0.514 lp 5215155 prop 1911231 sep 7818832 pre 24461 heur 0 node 0 lpit 3063 lu 76484050 lum 21660903
+MIP:   SUBFIX tree RINS try 1: target 0.62, fixing rate 0.26, depth 141, 0 backtracks, 1080 free integer columns of 1469, status Some(TimeLimit), nodes 0, accepted false, 0.53s (dive+sub 0.55s)
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP:     5.62s nodes      102 open      98 lb 1.93822841e5 ub 2.26660000e5 lp_iters 35561 sb_iters 25698 sb_lps 202 sb_secs 2.68 node_iters 4966 (first 4966, lps 101) heur_iters 11174 dive_iters 1186 lp_rows 1867 node_cut_secs 0.00 pool_len 0 pool_idle 0
+MIP: CW_RAMP (tid 0): conflict weight 0.0000 -> 0.0986 at node 200 (conflicts per node 1.11, smoothed 1.11)
+MIP: NODECNT root gate: cut rows 8, matched root cuts 3, tight 0, tight path 0 (share 0.000); root chosen 7 (path 0); node path aggregation off
+MIP: cut pool propagation stopped after 1000 calls (tightened 0, pruned 0)
+MIP:     7.62s nodes      508 open     408 lb 1.93822841e5 ub 2.26660000e5 lp_iters 53432 sb_iters 27743 sb_lps 240 sb_secs 2.95 node_iters 20484 (first 20445, lps 508) heur_iters 11529 dive_iters 1233 lp_rows 1859 node_cut_secs 0.00 pool_len 0 pool_idle 0
+MIP: CW_RAMP (tid 0): conflict weight 0.0618 -> 0.0231 at node 600 (conflicts per node 0.43, smoothed 0.57)
+MIP: CWM: theta center [0.0, 0.0, 0.0] -> [0.0, -0.015, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.015, -0.027999999999999997] -> [0.0, -0.006, 0.09799999999999999] after 0 observations
+MIP: fixed-integer LP dual check: c x -2.5405200000e5, dual bound -3.0012500000e5 -> solve
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.2094800000e5 at node 773 (8.73s) [other thread (tree)]
+MIP: fixed-integer LP dual check: c x -2.5410800000e5, dual bound -2.9770666667e5 -> solve
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.2089200000e5 at node 774 (8.74s) [other thread (tree)]
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.2081900000e5 at node 779 (8.77s) [other thread (tree)]
+MIP: fixed-integer LP dual check: c x -2.5504200000e5, dual bound -2.9807700000e5 -> solve
+MIP: CWM: theta center [0.0, -0.006, 0.09799999999999999] -> [0.0, -0.006, 0.08399999999999999] after 0 observations
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1995800000e5 at node 789 (8.82s) [other thread (tree)]
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1993200000e5 at node 790 (8.83s) [other thread (tree)]
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1992600000e5 at node 790 (8.83s) [other thread (tree)]
+MIP: fixed-integer LP dual check: c x -2.5517700000e5, dual bound -2.9918071429e5 -> solve
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1982300000e5 at node 799 (8.87s) [other thread (tree)]
+CUTMIX clique edges total 18824 rows 1387 implonly 17437 implpairs 33500 bin 817
+MIP: fixed-integer LP dual check: c x -2.5619200000e5, dual bound -2.9231761589e5 -> solve
+MIP: CWM: theta center [0.0, -0.006, 0.08399999999999999] -> [0.0, -0.018000000000000002, -0.09799999999999999] after 0 observations
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1880800000e5 at node 834 (9.09s) [other thread (tree)]
+CUTMIX clique edges total 18025 rows 1383 implonly 16642 implpairs 33050 bin 793
+MIP: CWM: theta center [0.0, -0.018000000000000002, -0.09799999999999999] -> [0.0, -0.018000000000000002, -0.055999999999999994] after 0 observations
+MIP: oneopt improved 2.1786900000e5 -> 2.1687200000e5
+MIP: fixed-integer LP dual check: c x -2.5812800000e5, dual bound -2.5812800000e5 -> skip
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1687200000e5 at node 959 (9.60s) [tree]
+MIP:     9.63s nodes      969 open     517 lb 1.93859217e5 ub 2.16872000e5 lp_iters 73746 sb_iters 29824 sb_lps 288 sb_secs 3.19 node_iters 38413 (first 38138, lps 976) heur_iters 11867 dive_iters 1267 lp_rows 1859 node_cut_secs 0.00 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, -0.018000000000000002, -0.055999999999999994] -> [0.0, 0.015, 0.06999999999999999] after 0 observations
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1590500000e5 at node 1098 (10.20s) [other thread (tree)]
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1486400000e5 at node 1115 (10.36s) [other thread (tree)]
+MIP: CWM: theta center [0.0, 0.015, 0.06999999999999999] -> [0.0, -0.003, 0.11199999999999999] after 0 observations
+MIP: CW_RAMP (tid 0): conflict weight 0.0389 -> 0.0908 at node 1200 (conflicts per node 1.17, smoothed 0.92)
+MIP: CWM: theta center [0.0, -0.003, 0.11199999999999999] -> [0.0, 0.006, 0.09799999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, 0.09799999999999999] -> [0.0, 0.003, 0.11199999999999999] after 0 observations
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1481800000e5 at node 1335 (11.53s) [other thread (tree)]
+MIP:    11.63s nodes     1363 open     520 lb 1.93859217e5 ub 2.14818000e5 lp_iters 93452 sb_iters 31972 sb_lps 352 sb_secs 3.42 node_iters 55742 (first 55289, lps 1378) heur_iters 12234 dive_iters 1405 lp_rows 1859 node_cut_secs 0.00 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.003, 0.11199999999999999] -> [0.0, 0.0, 0.13999999999999999] after 0 observations
+TRSTAT: due outer 12.32 solve 11.98 root 1.75 tree 10.24 restarts 0 nodes 4392 open 1030 q 0.0003 est 5555868 est_left 31569.73 est_left_h 12939.9 lb 1.9385921708e5 root_lb 1.9377524816e5 ub 2.1481800000e5 gap 9.757e-2 newly 0/1501 (0.0000) cuts 0/1859 tcuts 0 rowdrop 0 est_r inf left 587.7 guard stop K
+MIP: CWM: theta center [0.0, 0.0, 0.13999999999999999] -> [0.0, 0.0, 0.15399999999999997] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, 0.15399999999999997] -> [0.0, 0.006, 0.126] after 0 observations
+CUTMIX clique edges total 13395 rows 1407 implonly 11988 implpairs 26790 bin 863
+MIP:   sub-MIP: 1501 free columns of 1747, status Infeasible, nodes 0, objective None, 0.16s, 936 LP iterations, TICKS cpu 0.163 lp 2416708 prop 5037787 sep 2451267 pre 27686 heur 0 node 0 lpit 933 lu 11865534 lum 6258147
+MIP:   local branching k=18: Infeasible, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+MIP: CWM: theta center [0.0, 0.006, 0.126] -> [0.0, 0.009000000000000001, 0.13999999999999999] after 0 observations
+MIP:    13.64s nodes     1712 open     577 lb 1.93859217e5 ub 2.14818000e5 lp_iters 111989 sb_iters 34090 sb_lps 408 sb_secs 3.64 node_iters 72012 (first 71362, lps 1735) heur_iters 13319 dive_iters 1405 lp_rows 1859 node_cut_secs 0.00 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.009000000000000001, 0.13999999999999999] -> [0.0, 0.006, 0.126] after 0 observations
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1392000000e5 at node 1713 (13.66s) [other thread (tree)]
+TRSTAT: due outer 14.01 solve 13.67 root 1.75 tree 11.92 restarts 0 nodes 5804 open 1087 q 0.0014 est 1332458 est_left 8591.55 est_left_h 2725.4 lb 1.9385921708e5 root_lb 1.9377524816e5 ub 2.1392000000e5 gap 9.378e-2 newly 0/1501 (0.0000) cuts 0/1859 tcuts 0 rowdrop 0 est_r 1586.00 left 586.0 guard stop K
+MIP: CWM: theta center [0.0, 0.006, 0.126] -> [0.0, 0.021, 0.13999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.021, 0.13999999999999999] -> [0.0, 0.012, 0.13999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, 0.13999999999999999] -> [0.0, 0.012, 0.126] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, 0.126] -> [0.0, 0.006, 0.11199999999999999] after 0 observations
+TRSTAT: due outer 15.77 solve 15.43 root 1.75 tree 13.69 restarts 0 nodes 7221 open 1178 q 0.0072 est 247809 est_left 1887.72 est_left_h 456.1 lb 1.9386117985e5 root_lb 1.9377524816e5 ub 2.1392000000e5 gap 9.377e-2 newly 0/1501 (0.0000) cuts 0/1859 tcuts 0 rowdrop 0 est_r 301.39 left 584.2 guard stop K
+MIP:    15.64s nodes     2165 open     594 lb 1.93861180e5 ub 2.13920000e5 lp_iters 134378 sb_iters 36488 sb_lps 468 sb_secs 3.86 node_iters 91813 (first 90908, lps 2194) heur_iters 13542 dive_iters 1438 lp_rows 1859 node_cut_secs 0.00 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.006, 0.11199999999999999] -> [0.0, 0.006, 0.09799999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, 0.09799999999999999] -> [0.0, 0.009000000000000001, 0.027999999999999997] after 0 observations
+CUTMIX clique edges total 14525 rows 1490 implonly 13035 implpairs 29050 bin 888
+MIP: CWM: theta center [0.0, 0.009000000000000001, 0.027999999999999997] -> [0.0, 0.009000000000000001, -0.027999999999999997] after 0 observations
+MIP:    17.64s nodes     2563 open     622 lb 1.93861180e5 ub 2.13920000e5 lp_iters 155907 sb_iters 38855 sb_lps 528 sb_secs 4.10 node_iters 110726 (first 109646, lps 2597) heur_iters 13882 dive_iters 1529 lp_rows 1859 node_cut_secs 0.00 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.009000000000000001, -0.027999999999999997] -> [0.0, 0.012, 0.0] after 0 observations
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1391800000e5 at node 2582 (17.77s) [other thread (tree)]
+MIP: CWM: theta center [0.0, 0.012, 0.0] -> [0.0, 0.006, 0.0] after 0 observations
+TRSTAT: due outer 18.51 solve 18.17 root 1.75 tree 16.43 restarts 0 nodes 9424 open 1248 q 0.0196 est 288122 est_left 821.31 est_left_h 485.8 lb 1.9386117985e5 root_lb 1.9377524816e5 ub 2.1391800000e5 gap 9.376e-2 newly 0/1501 (0.0000) cuts 0/1859 tcuts 0 rowdrop 0 est_r 216.44 left 581.5 guard stop K
+CUTMIX clique edges total 49554 rows 3525 implonly 46029 implpairs 70480 bin 1501
+MIP: CWM: theta center [0.0, 0.006, 0.0] -> [0.0, -0.006, -0.041999999999999996] after 0 observations
+MIP:   sub-MIP: 1501 free columns of 1747, status TimeLimit, nodes 0, objective None, 0.34s, 3395 LP iterations, TICKS cpu 0.302 lp 16882365 prop 3627435 sep 0 pre 27686 heur 0 node 0 lpit 3395 lu 60251365 lum 29884620
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 1, 0, 0, 0])
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1383900000e5 at node 2731 (18.88s) [other thread (tree)]
+MIP: CWM: theta center [0.0, -0.006, -0.041999999999999996] -> [0.0, -0.009000000000000001, -0.013999999999999999] after 0 observations
+MIP: fixed-integer LP dual check: c x -2.6214300000e5, dual bound -2.9018475000e5 -> solve
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1285700000e5 at node 2756 (19.02s) [other thread (tree)]
+MIP: fixed-integer LP dual check: c x -2.6215500000e5, dual bound -2.9000810563e5 -> solve
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1284500000e5 at node 2767 (19.15s) [other thread (tree)]
+MIP: CWM: theta center [0.0, -0.009000000000000001, -0.013999999999999999] -> [0.0, -0.012, -0.013999999999999999] after 0 observations
+MIP:    19.64s nodes     2859 open     611 lb 1.93866548e5 ub 2.12845000e5 lp_iters 173186 sb_iters 40762 sb_lps 572 sb_secs 4.29 node_iters 126023 (first 124719, lps 2895) heur_iters 17352 dive_iters 1529 lp_rows 1859 node_cut_secs 0.00 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, -0.012, -0.013999999999999999] -> [0.0, -0.015, 0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.015, 0.013999999999999999] -> [0.0, -0.012, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, -0.012, 0.0] -> [0.0, -0.021, 0.0] after 0 observations
+CUTMIX clique edges total 49554 rows 3525 implonly 46029 implpairs 70480 bin 1501
+MIP: CWM: theta center [0.0, -0.021, 0.0] -> [0.0, -0.018000000000000002, 0.013999999999999999] after 0 observations
+MIP:    21.66s nodes     3151 open     629 lb 1.93903505e5 ub 2.12845000e5 lp_iters 190554 sb_iters 42689 sb_lps 616 sb_secs 4.52 node_iters 141334 (first 139810, lps 3194) heur_iters 17504 dive_iters 1551 lp_rows 1859 node_cut_secs 0.01 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, -0.018000000000000002, 0.013999999999999999] -> [0.0, -0.015, 0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.015, 0.027999999999999997] -> [0.0, -0.018000000000000002, 0.027999999999999997] after 0 observations
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1284200000e5 at node 3257 (22.35s) [other thread (tree)]
+MIP: CWM: theta center [0.0, -0.018000000000000002, 0.027999999999999997] -> [0.0, -0.015, 0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.015, 0.027999999999999997] -> [0.0, -0.018000000000000002, 0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.018000000000000002, 0.013999999999999999] -> [0.0, -0.015, 0.0] after 0 observations
+MIP:    23.67s nodes     3474 open     649 lb 1.93903505e5 ub 2.12842000e5 lp_iters 210677 sb_iters 44904 sb_lps 664 sb_secs 4.74 node_iters 159131 (first 157432, lps 3527) heur_iters 17659 dive_iters 1595 lp_rows 1859 node_cut_secs 0.01 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, -0.015, 0.0] -> [0.0, -0.012, 0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.012, 0.013999999999999999] -> [0.0, 0.006, 0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, 0.013999999999999999] -> [0.0, 0.012, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, 0.0] -> [0.0, 0.033, 0.0] after 0 observations
+MIP:    25.68s nodes     3768 open     663 lb 1.94025979e5 ub 2.12842000e5 lp_iters 230649 sb_iters 47102 sb_lps 712 sb_secs 4.96 node_iters 176755 (first 174815, lps 3831) heur_iters 17809 dive_iters 1595 lp_rows 1859 node_cut_secs 0.01 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.033, 0.0] -> [0.0, 0.003, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, 0.003, -0.027999999999999997] -> [0.0, -0.003, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, -0.041999999999999996] -> [0.0, -0.003, -0.06999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, -0.06999999999999999] -> [0.0, -0.006, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.006, -0.027999999999999997] -> [0.0, 0.003, -0.041999999999999996] after 0 observations
+MIP:    27.68s nodes     4060 open     678 lb 1.94027769e5 ub 2.12842000e5 lp_iters 249153 sb_iters 49140 sb_lps 758 sb_secs 5.17 node_iters 193041 (first 190794, lps 4133) heur_iters 18061 dive_iters 1667 lp_rows 1860 node_cut_secs 0.01 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.003, -0.041999999999999996] -> [0.0, 0.0, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, -0.041999999999999996] -> [0.0, -0.003, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, -0.041999999999999996] -> [0.0, -0.012, -0.041999999999999996] after 0 observations
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1199200000e5 at node 4244 (28.65s) [other thread (tree)]
+MIP: CWM: theta center [0.0, -0.012, -0.041999999999999996] -> [0.0, -0.009000000000000001, -0.041999999999999996] after 0 observations
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1198500000e5 at node 4263 (28.80s) [other thread (tree)]
+MIP: CWM: theta center [0.0, -0.009000000000000001, -0.041999999999999996] -> [0.0, -0.018000000000000002, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, -0.018000000000000002, -0.041999999999999996] -> [0.0, -0.018000000000000002, -0.027999999999999997] after 0 observations
+MIP:    29.69s nodes     4393 open     659 lb 1.94069761e5 ub 2.11985000e5 lp_iters 270703 sb_iters 51566 sb_lps 818 sb_secs 5.40 node_iters 212074 (first 209460, lps 4475) heur_iters 18152 dive_iters 1667 lp_rows 1860 node_cut_secs 0.01 pool_len 0 pool_idle 0
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+MIP:   sub-MIP: 447 free columns of 1747, status Infeasible, nodes 0, objective None, 0.00s, 0 LP iterations, TICKS cpu 0.001 lp 0 prop 128 sep 0 pre 17275 heur 0 node 0 lpit 0 lu 0 lum 0
+MIP:   mutation (1228 fixed): Some((Infeasible, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [1, 1, 1, 1, 0, 0])
+MIP: CWM: theta center [0.0, -0.018000000000000002, -0.027999999999999997] -> [0.0, -0.015, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, -0.015, -0.041999999999999996] -> [0.0, -0.012, -0.041999999999999996] after 0 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+MIP: CWM: theta center [0.0, -0.012, -0.041999999999999996] -> [0.0, -0.009000000000000001, -0.041999999999999996] after 0 observations
+MIP:    31.69s nodes     4659 open     666 lb 1.94097803e5 ub 2.11985000e5 lp_iters 289359 sb_iters 53640 sb_lps 862 sb_secs 5.62 node_iters 228611 (first 225758, lps 4752) heur_iters 18200 dive_iters 1670 lp_rows 1860 node_cut_secs 0.01 pool_len 0 pool_idle 0
+CUTMIX clique edges total 11023 rows 1023 implonly 10000 implpairs 22041 bin 710
+CUTMIX clique edges total 11005 rows 1032 implonly 9973 implpairs 22005 bin 709
+MIP:   sub-MIP: 726 free columns of 1747, status TimeLimit, nodes 3, objective Some(221913.0), 0.30s, 2018 LP iterations, TICKS cpu 0.300 lp 2889269 prop 1345074 sep 4202781 pre 33115 heur 0 node 8028 lpit 2754 lu 45423097 lum 11271786
+MIP:   crossover (1019 of 1745 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [1, 1, 1, 1, 1, 0])
+MIP: CWM: theta center [0.0, -0.009000000000000001, -0.041999999999999996] -> [0.0, -0.009000000000000001, -0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, -0.009000000000000001, -0.055999999999999994] -> [0.0, -0.012, -0.06999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.012, -0.06999999999999999] -> [0.0, -0.018000000000000002, -0.041999999999999996] after 0 observations
+CUTMIX clique edges total 6029 rows 659 implonly 5370 implpairs 12058 bin 509
+MIP: CWM: theta center [0.0, -0.018000000000000002, -0.041999999999999996] -> [0.0, -0.012, -0.013999999999999999] after 0 observations
+MIP:    33.69s nodes     4878 open     661 lb 1.94097803e5 ub 2.11985000e5 lp_iters 304670 sb_iters 55304 sb_lps 898 sb_secs 5.81 node_iters 242174 (first 239128, lps 4979) heur_iters 20318 dive_iters 1686 lp_rows 1860 node_cut_secs 0.01 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, -0.012, -0.013999999999999999] -> [0.0, -0.009000000000000001, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.009000000000000001, -0.013999999999999999] -> [0.0, -0.009000000000000001, 0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.009000000000000001, 0.013999999999999999] -> [0.0, 0.0, 0.027999999999999997] after 0 observations
+MIP:    35.70s nodes     5180 open     666 lb 1.94112705e5 ub 2.11985000e5 lp_iters 325016 sb_iters 57554 sb_lps 936 sb_secs 6.02 node_iters 260253 (first 257083, lps 5286) heur_iters 20335 dive_iters 1686 lp_rows 1860 node_cut_secs 0.01 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.0, 0.027999999999999997] -> [0.0, -0.003, 0.09799999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, 0.09799999999999999] -> [0.0, 0.0, 0.27999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, 0.27999999999999997] -> [0.0, 0.006, 0.08399999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, 0.08399999999999999] -> [0.0, 0.003, 0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, 0.003, 0.055999999999999994] -> [0.0, 0.009000000000000001, 0.041999999999999996] after 0 observations
+CUTMIX clique edges total 466 rows 76 implonly 390 implpairs 932 bin 115
+MIP:    37.70s nodes     5440 open     662 lb 1.94112705e5 ub 2.11985000e5 lp_iters 344649 sb_iters 59824 sb_lps 984 sb_secs 6.25 node_iters 277457 (first 273969, lps 5558) heur_iters 20500 dive_iters 1692 lp_rows 1860 node_cut_secs 0.01 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.009000000000000001, 0.041999999999999996] -> [0.0, -0.003, 0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, 0.041999999999999996] -> [0.0, 0.003, 0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, 0.003, 0.055999999999999994] -> [0.0, 0.003, 0.027999999999999997] after 0 observations
+CUTMIX clique edges total 5607 rows 645 implonly 4962 implpairs 11214 bin 498
+MIP: CWM: theta center [0.0, 0.003, 0.027999999999999997] -> [0.0, 0.0, 0.013999999999999999] after 0 observations
+MIP: fixed-integer LP dual check: c x -2.6308700000e5, dual bound -3.1149572381e5 -> solve
+MIP:   global fixed integers 244 of 1745 (newly 0 since the root LP)
+MIP: new incumbent 2.1191300000e5 at node 5659 (39.41s) [other thread (tree)]
+MIP: CWM: theta center [0.0, 0.0, 0.013999999999999999] -> [0.0, 0.003, -0.013999999999999999] after 0 observations
+MIP:    39.70s nodes     5693 open     652 lb 1.94183627e5 ub 2.11913000e5 lp_iters 361717 sb_iters 61585 sb_lps 1014 sb_secs 6.45 node_iters 292590 (first 288932, lps 5815) heur_iters 20789 dive_iters 1807 lp_rows 1860 node_cut_secs 0.02 pool_len 1 pool_idle 0
+MIP: CWM: theta center [0.0, 0.003, -0.013999999999999999] -> [0.0, 0.003, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.003, 0.0] -> [0.0, 0.009000000000000001, 0.027999999999999997] after 0 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+MIP: CWM: theta center [0.0, 0.009000000000000001, 0.027999999999999997] -> [0.0, -0.003, 0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, 0.027999999999999997] -> [0.0, 0.003, 0.013999999999999999] after 0 observations
+MIP:    41.71s nodes     5971 open     645 lb 1.94252265e5 ub 2.11913000e5 lp_iters 381475 sb_iters 63892 sb_lps 1056 sb_secs 6.67 node_iters 309852 (first 305862, lps 6104) heur_iters 20978 dive_iters 1807 lp_rows 1860 node_cut_secs 0.02 pool_len 1 pool_idle 0
+MIP: CWM: theta center [0.0, 0.003, 0.013999999999999999] -> [0.0, 0.006, 0.0] after 0 observations
+CUTMIX clique edges total 49554 rows 3525 implonly 46029 implpairs 70480 bin 1501
+MIP: CWM: theta center [0.0, 0.006, 0.0] -> [0.0, 0.009000000000000001, 0.013999999999999999] after 0 observations
+MIP:   sub-MIP: 254 free columns of 1747, status Infeasible, nodes 0, objective None, 0.00s, 0 LP iterations, TICKS cpu 0.000 lp 0 prop 0 sep 0 pre 0 heur 0 node 0 lpit 0 lu 0 lum 0
+MIP:   DINS (1452 of 1745 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [1, 1, 1, 1, 1, 1])
+MIP: CWM: theta center [0.0, 0.009000000000000001, 0.013999999999999999] -> [0.0, 0.009000000000000001, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.009000000000000001, 0.0] -> [0.0, 0.012, 0.013999999999999999] after 0 observations
+MIP:    43.71s nodes     6342 open     663 lb 1.94355678e5 ub 2.11913000e5 lp_iters 402325 sb_iters 66081 sb_lps 1104 sb_secs 6.88 node_iters 328366 (first 324119, lps 6484) heur_iters 21125 dive_iters 1807 lp_rows 1860 node_cut_secs 0.02 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.012, 0.013999999999999999] -> [0.0, 0.009000000000000001, 0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, 0.009000000000000001, 0.027999999999999997] -> [0.0, 0.012, 0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, 0.041999999999999996] -> [0.0, 0.006, 0.08399999999999999] after 0 observations
+MIP:   sub-MIP: 335 free columns of 1747, status Infeasible, nodes 0, objective None, 0.00s, 0 LP iterations, TICKS cpu 0.000 lp 0 prop 0 sep 0 pre 0 heur 0 node 0 lpit 0 lu 0 lum 0
+MIP:   DINS (1373 of 1745 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [1, 1, 1, 1, 1, 2])
+MIP: CWM: theta center [0.0, 0.006, 0.08399999999999999] -> [0.0, 0.009000000000000001, 0.09799999999999999] after 0 observations
+MIP:    45.71s nodes     6665 open     679 lb 1.94488473e5 ub 2.11913000e5 lp_iters 421591 sb_iters 68276 sb_lps 1152 sb_secs 7.10 node_iters 345311 (first 340882, lps 6814) heur_iters 21277 dive_iters 1833 lp_rows 1860 node_cut_secs 0.02 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.009000000000000001, 0.09799999999999999] -> [0.0, 0.006, 0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, 0.041999999999999996] -> [0.0, 0.006, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, -0.013999999999999999] -> [0.0, 0.006, 0.0] after 0 observations
+CUTMIX clique edges total 7192 rows 887 implonly 6305 implpairs 14384 bin 644
+MIP:   sub-MIP: 665 free columns of 1747, status Infeasible, nodes 0, objective None, 0.04s, 882 LP iterations, TICKS cpu 0.049 lp 758353 prop 412892 sep 387184 pre 18890 heur 0 node 0 lpit 881 lu 7992137 lum 2677535
+MIP:   crossover (1080 of 1745 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [1, 1, 1, 1, 2, 2])
+MIP: CWM: theta center [0.0, 0.006, 0.0] -> [0.0, 0.006, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, -0.027999999999999997] -> [0.0, 0.0, -0.08399999999999999] after 0 observations
+MIP:    47.72s nodes     7054 open     688 lb 1.94564286e5 ub 2.11913000e5 lp_iters 444032 sb_iters 70671 sb_lps 1208 sb_secs 7.30 node_iters 365214 (first 360505, lps 7213) heur_iters 22302 dive_iters 1833 lp_rows 1860 node_cut_secs 0.02 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.0, -0.08399999999999999] -> [0.0, -0.003, -0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, -0.055999999999999994] -> [0.0, 0.003, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, 0.003, -0.027999999999999997] -> [0.0, 0.006, -0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, -0.055999999999999994] -> [0.0, 0.003, -0.11199999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.003, -0.11199999999999999] -> [0.0, 0.006, -0.055999999999999994] after 0 observations
+MIP:    49.73s nodes     7365 open     693 lb 1.94639793e5 ub 2.11913000e5 lp_iters 463348 sb_iters 72819 sb_lps 1250 sb_secs 7.51 node_iters 382229 (first 377363, lps 7528) heur_iters 22464 dive_iters 1842 lp_rows 1860 node_cut_secs 0.02 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.006, -0.055999999999999994] -> [0.0, 0.009000000000000001, -0.027999999999999997] after 0 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+MIP:   sub-MIP: 423 free columns of 1747, status Infeasible, nodes 0, objective None, 0.00s, 0 LP iterations, TICKS cpu 0.001 lp 0 prop 64 sep 0 pre 17187 heur 0 node 0 lpit 0 lu 0 lum 0
+MIP:   mutation (1246 fixed): Some((Infeasible, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [1, 1, 1, 2, 2, 2])
+MIP: CWM: theta center [0.0, 0.009000000000000001, -0.027999999999999997] -> [0.0, 0.006, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, -0.013999999999999999] -> [0.0, 0.006, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, 0.0] -> [0.0, 0.009000000000000001, 0.027999999999999997] after 0 observations
+CUTMIX clique edges total 49554 rows 3525 implonly 46029 implpairs 70480 bin 1501
+MIP:   sub-MIP: 1501 free columns of 1747, status TimeLimit, nodes 0, objective None, 0.32s, 3363 LP iterations, TICKS cpu 0.302 lp 16653761 prop 3627435 sep 0 pre 27686 heur 0 node 0 lpit 3363 lu 60799940 lum 29575860
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 2, 2, 2, 2])
+MIP:    51.74s nodes     7628 open     693 lb 1.94642887e5 ub 2.11913000e5 lp_iters 480798 sb_iters 74835 sb_lps 1292 sb_secs 7.70 node_iters 397628 (first 392534, lps 7799) heur_iters 25880 dive_iters 1860 lp_rows 1860 node_cut_secs 0.02 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.009000000000000001, 0.027999999999999997] -> [0.0, 0.015, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.015, 0.0] -> [0.0, 0.009000000000000001, 0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.009000000000000001, 0.013999999999999999] -> [0.0, 0.006, 0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, 0.027999999999999997] -> [0.0, 0.006, 0.0] after 0 observations
+MIP:    53.75s nodes     7942 open     695 lb 1.94834691e5 ub 2.11913000e5 lp_iters 499863 sb_iters 76885 sb_lps 1336 sb_secs 7.92 node_iters 414585 (first 409205, lps 8113) heur_iters 25945 dive_iters 1867 lp_rows 1860 node_cut_secs 0.02 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.006, 0.0] -> [0.0, 0.0, 0.0] after 0 observations
+CUTMIX clique edges total 34291 rows 2662 implonly 31629 implpairs 68582 bin 1274
+MIP: CWM: theta center [0.0, 0.0, 0.0] -> [0.0, 0.006, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, -0.027999999999999997] -> [0.0, 0.012, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, -0.013999999999999999] -> [0.0, 0.015, -0.027999999999999997] after 0 observations
+MIP:    55.76s nodes     8268 open     692 lb 1.94848384e5 ub 2.11913000e5 lp_iters 521773 sb_iters 79255 sb_lps 1392 sb_secs 8.13 node_iters 433998 (first 428138, lps 8452) heur_iters 26072 dive_iters 1867 lp_rows 1860 node_cut_secs 0.02 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.015, -0.027999999999999997] -> [0.0, 0.012, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, -0.041999999999999996] -> [0.0, 0.003, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, 0.003, -0.041999999999999996] -> [0.0, 0.006, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, -0.027999999999999997] -> [0.0, 0.012, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, -0.041999999999999996] -> [0.0, -0.003, -0.041999999999999996] after 0 observations
+MIP:    57.76s nodes     8600 open     691 lb 1.94960343e5 ub 2.11913000e5 lp_iters 542914 sb_iters 81594 sb_lps 1448 sb_secs 8.35 node_iters 452570 (first 446273, lps 8794) heur_iters 26337 dive_iters 1902 lp_rows 1860 node_cut_secs 0.03 pool_len 2 pool_idle 0
+MIP: CWM: theta center [0.0, -0.003, -0.041999999999999996] -> [0.0, -0.006, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.006, -0.027999999999999997] -> [0.0, -0.03, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.03, -0.027999999999999997] -> [0.0, -0.006, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.006, -0.027999999999999997] -> [0.0, -0.003, -0.027999999999999997] after 0 observations
+MIP:    59.78s nodes     8922 open     686 lb 1.95037264e5 ub 2.11913000e5 lp_iters 564657 sb_iters 84054 sb_lps 1508 sb_secs 8.58 node_iters 471629 (first 464935, lps 9129) heur_iters 26614 dive_iters 1955 lp_rows 1860 node_cut_secs 0.03 pool_len 1 pool_idle 0
+MIP: CWM: theta center [0.0, -0.003, -0.027999999999999997] -> [0.0, -0.006, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.006, -0.013999999999999999] -> [0.0, -0.027, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.027, -0.013999999999999999] -> [0.0, -0.042, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, -0.042, 0.0] -> [0.0, -0.045, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, -0.045, 0.0] -> [0.0, -0.018000000000000002, 0.06999999999999999] after 0 observations
+MIP:    61.80s nodes     9242 open     688 lb 1.95037264e5 ub 2.11913000e5 lp_iters 583890 sb_iters 86104 sb_lps 1558 sb_secs 8.79 node_iters 488718 (first 481734, lps 9459) heur_iters 26708 dive_iters 1955 lp_rows 1860 node_cut_secs 0.03 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, -0.018000000000000002, 0.06999999999999999] -> [0.0, -0.018000000000000002, 0.30799999999999994] after 0 observations
+MIP: CWM: theta center [0.0, -0.018000000000000002, 0.30799999999999994] -> [0.0, -0.018000000000000002, 0.08399999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.018000000000000002, 0.08399999999999999] -> [0.0, -0.015, 0.06999999999999999] after 0 observations
+MIP:    63.81s nodes     9559 open     698 lb 1.95196025e5 ub 2.11913000e5 lp_iters 603635 sb_iters 88344 sb_lps 1608 sb_secs 9.02 node_iters 506130 (first 498807, lps 9788) heur_iters 26801 dive_iters 1955 lp_rows 1860 node_cut_secs 0.03 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, -0.015, 0.06999999999999999] -> [0.0, -0.006, 0.09799999999999999] after 0 observations
+CUTMIX clique edges total 33892 rows 2635 implonly 31257 implpairs 67784 bin 1268
+MIP:   sub-MIP: 1501 free columns of 1747, status TimeLimit, nodes 0, objective None, 0.33s, 1838 LP iterations, TICKS cpu 0.318 lp 6023445 prop 3033805 sep 4521343 pre 27686 heur 0 node 0 lpit 1837 lu 41663424 lum 13986582
+MIP:   local branching k=27: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 2, 2, 2, 2, 2])
+MIP: CWM: theta center [0.0, -0.006, 0.09799999999999999] -> [0.0, 0.012, 0.08399999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, 0.08399999999999999] -> [0.0, -0.003, 0.08399999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, 0.08399999999999999] -> [0.0, -0.006, 0.08399999999999999] after 0 observations
+MIP:    65.83s nodes     9805 open     697 lb 1.95225948e5 ub 2.11913000e5 lp_iters 619329 sb_iters 90100 sb_lps 1658 sb_secs 9.20 node_iters 519982 (first 512535, lps 10040) heur_iters 28743 dive_iters 1973 lp_rows 1860 node_cut_secs 0.03 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, -0.006, 0.08399999999999999] -> [0.0, -0.003, 0.055999999999999994] after 0 observations
+CUTMIX clique edges total 14672 rows 1365 implonly 13307 implpairs 29344 bin 794
+MIP: CWM: theta center [0.0, -0.003, 0.055999999999999994] -> [0.0, 0.0, 0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, 0.055999999999999994] -> [0.0, -0.003, 0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, 0.055999999999999994] -> [0.0, 0.0, 0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, 0.055999999999999994] -> [0.0, 0.0, 0.027999999999999997] after 0 observations
+MIP:    67.83s nodes    10124 open     697 lb 1.95244690e5 ub 2.11913000e5 lp_iters 640340 sb_iters 92329 sb_lps 1708 sb_secs 9.40 node_iters 538560 (first 530917, lps 10367) heur_iters 28947 dive_iters 1973 lp_rows 1860 node_cut_secs 0.03 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.0, 0.027999999999999997] -> [0.0, 0.003, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.003, -0.013999999999999999] -> [0.0, 0.0, 0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, 0.013999999999999999] -> [0.0, -0.003, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, 0.0] -> [0.0, -0.006, 0.027999999999999997] after 0 observations
+MIP:    69.84s nodes    10430 open     684 lb 1.95268177e5 ub 2.11913000e5 lp_iters 659264 sb_iters 94425 sb_lps 1758 sb_secs 9.62 node_iters 555167 (first 547290, lps 10681) heur_iters 29170 dive_iters 1975 lp_rows 1862 node_cut_secs 0.04 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, -0.006, 0.027999999999999997] -> [0.0, -0.003, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, -0.041999999999999996] -> [0.0, 0.0, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, -0.013999999999999999] -> [0.0, 0.0, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, -0.027999999999999997] -> [0.0, 0.0, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, -0.041999999999999996] -> [0.0, 0.0, -0.027999999999999997] after 0 observations
+MIP:    71.84s nodes    10709 open     678 lb 1.95333623e5 ub 2.11913000e5 lp_iters 678431 sb_iters 96595 sb_lps 1808 sb_secs 9.83 node_iters 571879 (first 563713, lps 10968) heur_iters 29474 dive_iters 1994 lp_rows 1862 node_cut_secs 0.04 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.0, -0.027999999999999997] -> [0.0, 0.009000000000000001, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, 0.009000000000000001, -0.041999999999999996] -> [0.0, 0.006, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, -0.013999999999999999] -> [0.0, 0.015, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.015, -0.013999999999999999] -> [0.0, 0.012, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, -0.013999999999999999] -> [0.0, 0.012, 0.0] after 0 observations
+MIP:    73.84s nodes    11085 open     659 lb 1.95434374e5 ub 2.11913000e5 lp_iters 699788 sb_iters 98862 sb_lps 1866 sb_secs 10.03 node_iters 590783 (first 582313, lps 11352) heur_iters 29660 dive_iters 1994 lp_rows 1862 node_cut_secs 0.05 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.012, 0.0] -> [0.0, 0.015, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.015, 0.0] -> [0.0, 0.027, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.027, -0.013999999999999999] -> [0.0, 0.024, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.024, -0.013999999999999999] -> [0.0, 0.024, 0.0] after 0 observations
+MIP:    75.84s nodes    11387 open     667 lb 1.95502758e5 ub 2.11913000e5 lp_iters 718060 sb_iters 100895 sb_lps 1918 sb_secs 10.24 node_iters 606735 (first 598113, lps 11659) heur_iters 30158 dive_iters 2205 lp_rows 1862 node_cut_secs 0.05 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.024, 0.0] -> [0.0, 0.003, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.003, 0.0] -> [0.0, 0.012, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, 0.0] -> [0.0, 0.012, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, -0.013999999999999999] -> [0.0, 0.009000000000000001, 0.027999999999999997] after 0 observations
+MIP:    77.84s nodes    11735 open     681 lb 1.95592925e5 ub 2.11913000e5 lp_iters 737994 sb_iters 103068 sb_lps 1972 sb_secs 10.45 node_iters 624344 (first 615604, lps 12012) heur_iters 30310 dive_iters 2205 lp_rows 1862 node_cut_secs 0.06 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.009000000000000001, 0.027999999999999997] -> [0.0, 0.006, 0.027999999999999997] after 0 observations
+CUTMIX clique edges total 25286 rows 1777 implonly 23509 implpairs 38560 bin 976
+MIP: CWM: theta center [0.0, 0.006, 0.027999999999999997] -> [0.0, -0.006, 0.013999999999999999] after 0 observations
+MIP:   sub-MIP: 983 free columns of 1747, status TimeLimit, nodes 0, objective None, 0.25s, 1967 LP iterations, TICKS cpu 0.295 lp 2857132 prop 1523023 sep 4910367 pre 19734 heur 0 node 0 lpit 1966 lu 37057997 lum 10957142
+MIP:   SUBFIX tree RINS try 1: target 0.61, fixing rate 0.25, depth 134, 0 backtracks, 983 free integer columns of 1314, status Some(TimeLimit), nodes 0, accepted false, 0.25s (dive+sub 0.26s)
+MIP:   ALNS arm 0 reward 0.000 (counts [2, 2, 2, 2, 2, 2])
+MIP: CWM: theta center [0.0, -0.006, 0.013999999999999999] -> [0.0, -0.009000000000000001, 0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.009000000000000001, 0.027999999999999997] -> [0.0, -0.015, 0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.015, 0.013999999999999999] -> [0.0, -0.009000000000000001, 0.013999999999999999] after 0 observations
+MIP:    79.85s nodes    12032 open     678 lb 1.95876666e5 ub 2.11913000e5 lp_iters 756606 sb_iters 105157 sb_lps 2022 sb_secs 10.63 node_iters 640703 (first 631694, lps 12316) heur_iters 32441 dive_iters 2205 lp_rows 1862 node_cut_secs 0.06 pool_len 2 pool_idle 0
+MIP: CWM: theta center [0.0, -0.009000000000000001, 0.013999999999999999] -> [0.0, -0.003, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, 0.0] -> [0.0, 0.0, 0.0] after 0 observations
+CUTMIX clique edges total 5777 rows 677 implonly 5100 implpairs 11554 bin 519
+MIP: CWM: theta center [0.0, 0.0, 0.0] -> [0.0, -0.006, 0.0] after 0 observations
+MIP:    81.85s nodes    12369 open     673 lb 1.95967368e5 ub 2.11913000e5 lp_iters 776677 sb_iters 107420 sb_lps 2072 sb_secs 10.85 node_iters 658325 (first 649077, lps 12660) heur_iters 32627 dive_iters 2205 lp_rows 1862 node_cut_secs 0.06 pool_len 1 pool_idle 0
+MIP: CWM: theta center [0.0, -0.006, 0.0] -> [0.0, 0.0, 0.0] after 0 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+MIP: CWM: theta center [0.0, 0.0, 0.0] -> [0.0, 0.0, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, -0.013999999999999999] -> [0.0, -0.003, -0.041999999999999996] after 0 observations
+CUTMIX clique edges total 49554 rows 3525 implonly 46029 implpairs 70480 bin 1501
+MIP:    83.85s nodes    12708 open     661 lb 1.95990875e5 ub 2.11913000e5 lp_iters 797714 sb_iters 109618 sb_lps 2130 sb_secs 11.06 node_iters 676909 (first 667428, lps 13007) heur_iters 32882 dive_iters 2205 lp_rows 1862 node_cut_secs 0.06 pool_len 2 pool_idle 0
+MIP: CWM: theta center [0.0, -0.003, -0.041999999999999996] -> [0.0, -0.003, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, -0.013999999999999999] -> [0.0, 0.0, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, -0.027999999999999997] -> [0.0, -0.003, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, -0.027999999999999997] -> [0.0, -0.006, -0.041999999999999996] after 0 observations
+MIP:    85.85s nodes    13083 open     647 lb 1.96304241e5 ub 2.11913000e5 lp_iters 817605 sb_iters 111809 sb_lps 2194 sb_secs 11.28 node_iters 694444 (first 684645, lps 13392) heur_iters 33047 dive_iters 2205 lp_rows 1864 node_cut_secs 0.06 pool_len 2 pool_idle 0
+MIP: CWM: theta center [0.0, -0.006, -0.041999999999999996] -> [0.0, -0.009000000000000001, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, -0.009000000000000001, -0.041999999999999996] -> [0.0, -0.006, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, -0.006, -0.041999999999999996] -> [0.0, -0.012, -0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, -0.012, -0.055999999999999994] -> [0.0, -0.009000000000000001, -0.08399999999999999] after 0 observations
+MIP:    87.86s nodes    13433 open     650 lb 1.96643560e5 ub 2.11913000e5 lp_iters 837555 sb_iters 114007 sb_lps 2258 sb_secs 11.49 node_iters 711991 (first 702029, lps 13749) heur_iters 33252 dive_iters 2205 lp_rows 1864 node_cut_secs 0.06 pool_len 2 pool_idle 0
+MIP: CWM: theta center [0.0, -0.009000000000000001, -0.08399999999999999] -> [0.0, -0.009000000000000001, -0.09799999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.009000000000000001, -0.09799999999999999] -> [0.0, -0.012, -0.08399999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.012, -0.08399999999999999] -> [0.0, -0.009000000000000001, -0.06999999999999999] after 0 observations
+MIP:    89.87s nodes    13765 open     643 lb 1.96786164e5 ub 2.11913000e5 lp_iters 856053 sb_iters 116109 sb_lps 2312 sb_secs 11.72 node_iters 728277 (first 718204, lps 14086) heur_iters 33362 dive_iters 2205 lp_rows 1864 node_cut_secs 0.06 pool_len 2 pool_idle 0
+MIP: CWM: theta center [0.0, -0.009000000000000001, -0.06999999999999999] -> [0.0, -0.006, -0.06999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.006, -0.06999999999999999] -> [0.0, -0.003, -0.06999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, -0.06999999999999999] -> [0.0, 0.003, -0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, 0.003, -0.055999999999999994] -> [0.0, -0.006, -0.041999999999999996] after 0 observations
+MIP:   sub-MIP: 263 free columns of 1747, status Infeasible, nodes 0, objective None, 0.00s, 0 LP iterations, TICKS cpu 0.000 lp 0 prop 0 sep 0 pre 0 heur 0 node 0 lpit 0 lu 0 lum 0
+MIP:   DINS (1450 of 1745 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [2, 2, 2, 2, 2, 3])
+MIP: CWM: theta center [0.0, -0.006, -0.041999999999999996] -> [0.0, -0.009000000000000001, -0.041999999999999996] after 0 observations
+MIP:    91.87s nodes    14123 open     628 lb 1.96938847e5 ub 2.11913000e5 lp_iters 877025 sb_iters 118403 sb_lps 2356 sb_secs 11.92 node_iters 746777 (first 736596, lps 14448) heur_iters 33540 dive_iters 2205 lp_rows 1864 node_cut_secs 0.07 pool_len 2 pool_idle 0
+MIP: CWM: theta center [0.0, -0.009000000000000001, -0.041999999999999996] -> [0.0, -0.012, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.012, -0.013999999999999999] -> [0.0, -0.012, -0.027999999999999997] after 0 observations
+CUTMIX clique edges total 11073 rows 910 implonly 10163 implpairs 22022 bin 645
+MIP:   sub-MIP: 661 free columns of 1747, status Infeasible, nodes 0, objective None, 0.04s, 867 LP iterations, TICKS cpu 0.036 lp 741321 prop 650659 sep 80280 pre 18926 heur 0 node 0 lpit 866 lu 5971221 lum 2545687
+MIP:   crossover (1084 of 1745 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [2, 2, 2, 2, 3, 3])
+MIP: CWM: theta center [0.0, -0.012, -0.027999999999999997] -> [0.0, -0.012, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.012, -0.013999999999999999] -> [0.0, -0.021, 0.0] after 0 observations
+MIP:    93.87s nodes    14471 open     600 lb 1.97126378e5 ub 2.11913000e5 lp_iters 895016 sb_iters 119847 sb_lps 2394 sb_secs 12.07 node_iters 762953 (first 752689, lps 14798) heur_iters 34898 dive_iters 2325 lp_rows 1864 node_cut_secs 0.07 pool_len 1 pool_idle 0
+MIP: CWM: theta center [0.0, -0.021, 0.0] -> [0.0, -0.03, 0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.03, 0.013999999999999999] -> [0.0, -0.021, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, -0.021, 0.0] -> [0.0, -0.015, 0.0] after 0 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+MIP:   sub-MIP: 450 free columns of 1747, status Infeasible, nodes 0, objective None, 0.00s, 0 LP iterations, TICKS cpu 0.001 lp 0 prop 64 sep 0 pre 17270 heur 0 node 0 lpit 0 lu 0 lum 0
+MIP:   mutation (1228 fixed): Some((Infeasible, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [2, 2, 2, 3, 3, 3])
+MIP: CWM: theta center [0.0, -0.015, 0.0] -> [0.0, -0.018000000000000002, 0.0] after 0 observations
+MIP:    95.87s nodes    14890 open     573 lb 1.97379344e5 ub 2.11913000e5 lp_iters 914914 sb_iters 120272 sb_lps 2412 sb_secs 12.13 node_iters 782159 (first 771889, lps 15215) heur_iters 35165 dive_iters 2325 lp_rows 1864 node_cut_secs 0.07 pool_len 1 pool_idle 0
+MIP: CWM: theta center [0.0, -0.018000000000000002, 0.0] -> [0.0, -0.018000000000000002, 0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.018000000000000002, 0.013999999999999999] -> [0.0, -0.015, 0.027999999999999997] after 0 observations
+CUTMIX clique edges total 49554 rows 3525 implonly 46029 implpairs 70480 bin 1501
+MIP: CWM: theta center [0.0, -0.015, 0.027999999999999997] -> [0.0, -0.012, 0.013999999999999999] after 0 observations
+CUTMIX clique edges total 42418 rows 3132 implonly 39286 implpairs 69871 bin 1397
+MIP:   sub-MIP: 1501 free columns of 1747, status TimeLimit, nodes 0, objective None, 0.41s, 3363 LP iterations, TICKS cpu 0.302 lp 16653761 prop 3627435 sep 0 pre 27686 heur 0 node 0 lpit 3363 lu 60799940 lum 29575860
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [2, 2, 3, 3, 3, 3])
+MIP: CWM: theta center [0.0, -0.012, 0.013999999999999999] -> [0.0, -0.003, 0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, 0.027999999999999997] -> [0.0, -0.003, 0.041999999999999996] after 0 observations
+MIP:    97.87s nodes    15192 open     542 lb 1.97550631e5 ub 2.11913000e5 lp_iters 928960 sb_iters 120272 sb_lps 2412 sb_secs 12.14 node_iters 795977 (first 785707, lps 15517) heur_iters 38756 dive_iters 2325 lp_rows 1864 node_cut_secs 0.07 pool_len 3 pool_idle 0
+MIP: CWM: theta center [0.0, -0.003, 0.041999999999999996] -> [0.0, 0.006, 0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, 0.041999999999999996] -> [0.0, 0.0, 0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, 0.041999999999999996] -> [0.0, -0.003, 0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, 0.055999999999999994] -> [0.0, -0.006, 0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, -0.006, 0.055999999999999994] -> [0.0, -0.003, 0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, 0.055999999999999994] -> [0.0, -0.006, 0.041999999999999996] after 0 observations
+MIP:    99.89s nodes    15521 open     501 lb 1.97820564e5 ub 2.11913000e5 lp_iters 945086 sb_iters 120272 sb_lps 2412 sb_secs 12.16 node_iters 811858 (first 801521, lps 15846) heur_iters 39001 dive_iters 2325 lp_rows 1867 node_cut_secs 0.09 pool_len 1 pool_idle 0
+MIP: CWM: theta center [0.0, -0.006, 0.041999999999999996] -> [0.0, -0.003, 0.06999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, 0.06999999999999999] -> [0.0, -0.006, 0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, -0.006, 0.055999999999999994] -> [0.0, -0.003, 0.041999999999999996] after 0 observations
+MIP:   101.89s nodes    15981 open     466 lb 1.97974899e5 ub 2.11913000e5 lp_iters 965398 sb_iters 120272 sb_lps 2412 sb_secs 12.17 node_iters 831846 (first 821509, lps 16303) heur_iters 39325 dive_iters 2325 lp_rows 1867 node_cut_secs 0.09 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, -0.003, 0.041999999999999996] -> [0.0, -0.006, 0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.006, 0.027999999999999997] -> [0.0, -0.006, 0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, -0.006, 0.041999999999999996] -> [0.0, -0.009000000000000001, 0.041999999999999996] after 0 observations
+MIP:   103.89s nodes    16375 open     423 lb 1.98283804e5 ub 2.11913000e5 lp_iters 985975 sb_iters 120272 sb_lps 2412 sb_secs 12.18 node_iters 852137 (first 841800, lps 16696) heur_iters 39626 dive_iters 2340 lp_rows 1866 node_cut_secs 0.09 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, -0.009000000000000001, 0.041999999999999996] -> [0.0, -0.015, 0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, -0.015, 0.041999999999999996] -> [0.0, -0.012, 0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.012, 0.027999999999999997] -> [0.0, -0.009000000000000001, 0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, -0.009000000000000001, 0.041999999999999996] -> [0.0, -0.012, 0.041999999999999996] after 0 observations
+MIP:   105.89s nodes    16705 open     392 lb 1.98580655e5 ub 2.11913000e5 lp_iters 1003333 sb_iters 120272 sb_lps 2412 sb_secs 12.19 node_iters 869255 (first 858886, lps 17026) heur_iters 39866 dive_iters 2340 lp_rows 1867 node_cut_secs 0.10 pool_len 1 pool_idle 0
+MIP: CWM: theta center [0.0, -0.012, 0.041999999999999996] -> [0.0, -0.021, 0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.021, 0.027999999999999997] -> [0.0, -0.015, 0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.015, 0.013999999999999999] -> [0.0, -0.021, -0.013999999999999999] after 0 observations
+MIP:   107.90s nodes    17081 open     353 lb 1.98852835e5 ub 2.11913000e5 lp_iters 1020780 sb_iters 120272 sb_lps 2412 sb_secs 12.21 node_iters 886297 (first 875919, lps 17402) heur_iters 40430 dive_iters 2499 lp_rows 1868 node_cut_secs 0.11 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, -0.021, -0.013999999999999999] -> [0.0, -0.012, -0.09799999999999999] after 0 observations
+MIP: CWM: theta center [0.0, -0.012, -0.09799999999999999] -> [0.0, -0.009000000000000001, -0.041999999999999996] after 0 observations
+MIP: CWM: theta center [0.0, -0.009000000000000001, -0.041999999999999996] -> [0.0, -0.006, -0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, -0.006, -0.027999999999999997] -> [0.0, 0.0, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.0, -0.013999999999999999] -> [0.0, 0.003, 0.0] after 0 observations
+MIP:   109.90s nodes    17521 open     315 lb 1.99185831e5 ub 2.11913000e5 lp_iters 1040890 sb_iters 120272 sb_lps 2412 sb_secs 12.22 node_iters 906163 (first 895720, lps 17838) heur_iters 40674 dive_iters 2499 lp_rows 1869 node_cut_secs 0.12 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.003, 0.0] -> [0.0, -0.003, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, -0.003, 0.0] -> [0.0, 0.003, 0.0] after 0 observations
+CUTMIX clique edges total 12349 rows 1362 implonly 10987 implpairs 24698 bin 841
+CUTMIX clique edges total 15718 rows 1376 implonly 14342 implpairs 31436 bin 833
+MIP:   sub-MIP: 1501 free columns of 1747, status Infeasible, nodes 0, objective None, 0.14s, 882 LP iterations, TICKS cpu 0.127 lp 2229893 prop 2427555 sep 1824517 pre 27686 heur 0 node 0 lpit 880 lu 12215475 lum 5813384
+MIP:   local branching k=18: Infeasible, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [2, 3, 3, 3, 3, 3])
+CUTMIX clique edges total 12035 rows 1172 implonly 10863 implpairs 24070 bin 719
+MIP: CWM: theta center [0.0, 0.003, 0.0] -> [0.0, 0.009000000000000001, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.009000000000000001, -0.013999999999999999] -> [0.0, 0.015, -0.027999999999999997] after 0 observations
+MIP:   111.90s nodes    17875 open     285 lb 1.99429558e5 ub 2.11913000e5 lp_iters 1056215 sb_iters 120272 sb_lps 2412 sb_secs 12.23 node_iters 921375 (first 910932, lps 18188) heur_iters 41669 dive_iters 2499 lp_rows 1869 node_cut_secs 0.12 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.015, -0.027999999999999997] -> [0.0, 0.018000000000000002, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.018000000000000002, -0.013999999999999999] -> [0.0, 0.015, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.015, -0.013999999999999999] -> [0.0, 0.009000000000000001, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.009000000000000001, -0.013999999999999999] -> [0.0, 0.006, 0.0] after 0 observations
+MIP:   113.91s nodes    18239 open     230 lb 1.99695655e5 ub 2.11913000e5 lp_iters 1074336 sb_iters 120272 sb_lps 2412 sb_secs 12.25 node_iters 939182 (first 928739, lps 18548) heur_iters 41983 dive_iters 2499 lp_rows 1869 node_cut_secs 0.12 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.006, 0.0] -> [0.0, 0.006, 0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, 0.013999999999999999] -> [0.0, 0.006, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.006, 0.0] -> [0.0, 0.012, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, 0.0] -> [0.0, 0.018000000000000002, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.018000000000000002, 0.0] -> [0.0, 0.024, 0.013999999999999999] after 0 observations
+MIP:   115.92s nodes    18572 open     182 lb 2.00205040e5 ub 2.11913000e5 lp_iters 1092135 sb_iters 120272 sb_lps 2412 sb_secs 12.26 node_iters 956604 (first 946161, lps 18879) heur_iters 42360 dive_iters 2499 lp_rows 1869 node_cut_secs 0.12 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.024, 0.013999999999999999] -> [0.0, 0.012, -0.013999999999999999] after 0 observations
+MIP: CWM: theta center [0.0, 0.012, -0.013999999999999999] -> [0.0, 0.009000000000000001, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.009000000000000001, 0.0] -> [0.0, 0.012, 0.013999999999999999] after 0 observations
+CUTMIX clique edges total 15050 rows 1310 implonly 13740 implpairs 30100 bin 810
+MIP:   sub-MIP: 842 free columns of 1747, status TimeLimit, nodes 0, objective None, 0.26s, 1627 LP iterations, TICKS cpu 0.301 lp 1962195 prop 844181 sep 6144013 pre 20863 heur 0 node 0 lpit 1626 lu 30114973 lum 7026119
+MIP:   SUBFIX tree RINS try 1: target 0.60, fixing rate 0.26, depth 75, 0 backtracks, 842 free integer columns of 1140, status Some(TimeLimit), nodes 0, accepted false, 0.26s (dive+sub 0.27s)
+MIP:   ALNS arm 0 reward 0.000 (counts [3, 3, 3, 3, 3, 3])
+MIP: CWM: theta center [0.0, 0.012, 0.013999999999999999] -> [0.0, 0.015, 0.013999999999999999] after 0 observations
+MIP:   117.94s nodes    18914 open     136 lb 2.01125597e5 ub 2.11913000e5 lp_iters 1108749 sb_iters 120272 sb_lps 2412 sb_secs 12.27 node_iters 972852 (first 962409, lps 19221) heur_iters 44353 dive_iters 2499 lp_rows 1868 node_cut_secs 0.12 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.015, 0.013999999999999999] -> [0.0, 0.018000000000000002, 0.055999999999999994] after 0 observations
+MIP: CWM: theta center [0.0, 0.018000000000000002, 0.055999999999999994] -> [0.0, 0.018000000000000002, 0.027999999999999997] after 0 observations
+MIP: CWM: theta center [0.0, 0.018000000000000002, 0.027999999999999997] -> [0.0, 0.018000000000000002, 0.0] after 0 observations
+MIP: CWM: theta center [0.0, 0.018000000000000002, 0.0] -> [0.0, 0.015, 0.0] after 0 observations
+MIP:   119.94s nodes    19243 open      41 lb 2.05402203e5 ub 2.11913000e5 lp_iters 1125850 sb_iters 120272 sb_lps 2412 sb_secs 12.28 node_iters 989543 (first 979100, lps 19541) heur_iters 44763 dive_iters 2499 lp_rows 1868 node_cut_secs 0.14 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.0, 0.015, 0.0] -> [0.0, 0.009000000000000001, 0.0] after 0 observations
+MIP: MEMCAP: tid 3 limit 12642 MB peak rss 432 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: MEMCAP: tid 1 limit 12642 MB peak rss 432 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: MEMCAP: tid 2 limit 12642 MB peak rss 432 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: tree thread 0 joined 0.004s after the stop signal (120.38s)
+MIP: tree thread 1 joined 0.006s after the stop signal (120.38s)
+MIP: tree thread 2 joined 0.006s after the stop signal (120.38s)
+MIP: finish start Optimal (120.38s)
+MIP: MEMCAP: tid 0 limit 12642 MB peak rss 432 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: tree search threads: worker nodes 62074, nodes given away 297, taken 0, global bounds taken from other threads 0, proofs 269 and conflicts 413 taken from other threads
+MIP:   120.38s nodes    19328 open       0 lb inf ub 2.11913000e5 lp_iters 1129370 sb_iters 120272 sb_lps 2412 sb_secs 12.28 node_iters 992884 (first 982441, lps 19627) heur_iters 44942 dive_iters 2499 lp_rows 1868 node_cut_secs 0.14 pool_len 0 pool_idle 4
+MIP: TICKS cpu 115.771 total 115770783817 lp 2659169544 prop 1894709594 sep 43786769 pre 442611 heur 0 node 69876866 lpit 1165926 lu 22402245947 lum 9630059649
+MIP: dual proofs and conflicts 1742 (conflicts added 0 (from proofs 9786), Farkas 0, pruned 75 nodes, tightened 2642 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 1123, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: cut pool propagation: calls 1000, pruned 0 nodes, tightened 0 bounds, 0.00s, pool 11269 cuts (911269 nonzeros); updated terms 10093, candidates 118 (17827 nonzeros), rebuilds 2
+MIP: TC r: reduced-cost fixings passed to children 43901; child change lists: mean length 32.2 (mean depth 32.1), max 112, open nodes now 0
+MIP: DFSBB4: d 1263.0 (frac), L 3789, root fractional 1263, integers 1745, mean depth of dive bottoms 33.0 (9317 dives)
+MIP: DFSBB: kind 2, W 8960 (root LP iterations 1792), plunges 716, ended by the work limit 104, ended at a leaf or by pruning 612
+MIP: GAP1 u: child selection down 0 up 0; branching selections 0, with ties 0 (candidates in ties 0), changed by the queue counts 0; objective proofs not violated beyond the tolerance 2
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 18036, in pool 2634 (aged out 15402), pruned 22 nodes, tightened 145 bounds
+MIP: proof CMIR cuts: tried 9786, added 9781, entered the cut pool 9781
+MIP: conflict analysis (HiGHS style): calls 10909, conflicts 29319, added 17623, mean length 25.6, max length 623, 0.53s
+MIP: conflict score diag: analyses 10909, bumped columns per analysis 72.70, analyses without conflict 0.000, lit reasons asked per analysis 0.01 (max 5), used 0.01, analyses cut by the budget 0.000
+MIP: CWM final: mode Bayes, started 8263, observations 8263, mean y = ln(size+/size-) +0.006 (se 0.013), theta center cw=+0.000 rmid=+0.009 lns=+0.000; trace 0:+0.00/-0.01/-0.03 0:+0.00/-0.01/+0.10 0:+0.00/-0.01/+0.08 0:+0.00/-0.02/-0.10 0:+0.00/-0.02/-0.06 0:+0.00/+0.01/+0.07 0:+0.00/+0.01/+0.07 0:+0.00/-0.00/+0.11 0:+0.00/+0.01/+0.10 0:+0.00/+0.00/+0.11 0:+0.00/+0.00/+0.14 0:+0.00/+0.00/+0.15 0:+0.00/+0.01/+0.13 0:+0.00/+0.01/+0.14 0:+0.00/+0.01/+0.13 0:+0.00/+0.02/+0.14 0:+0.00/+0.01/+0.14 0:+0.00/+0.01/+0.13 0:+0.00/+0.01/+0.11 0:+0.00/+0.01/+0.10 0:+0.00/+0.01/+0.03 0:+0.00/+0.01/+0.03 0:+0.00/+0.01/-0.03 0:+0.00/+0.01/+0.00 0:+0.00/+0.01/+0.00 0:+0.00/-0.01/-0.04 0:+0.00/-0.01/-0.01 0:+0.00/-0.01/-0.01 0:+0.00/-0.01/+0.01 0:+0.00/-0.01/+0.00 0:+0.00/-0.02/+0.00 0:+0.00/-0.02/+0.01 0:+0.00/-0.01/+0.03 0:+0.00/-0.02/+0.03 0:+0.00/-0.01/+0.03 0:+0.00/-0.02/+0.01 0:+0.00/-0.01/+0.00 0:+0.00/-0.01/+0.01 0:+0.00/+0.01/+0.01 0:+0.00/+0.01/+0.00 0:+0.00/+0.03/+0.00 0:+0.00/+0.00/-0.03 0:+0.00/-0.00/-0.04 0:+0.00/-0.00/-0.07 0:+0.00/-0.01/-0.03 0:+0.00/+0.00/-0.04 0:+0.00/+0.00/-0.04 0:+0.00/-0.00/-0.04 0:+0.00/-0.01/-0.04 0:+0.00/-0.01/-0.04 0:+0.00/-0.02/-0.04 0:+0.00/-0.02/-0.03 0:+0.00/-0.01/-0.04 0:+0.00/-0.01/-0.04 0:+0.00/-0.01/-0.04 0:+0.00/-0.01/-0.04 0:+0.00/-0.01/-0.06 0:+0.00/-0.01/-0.07 0:+0.00/-0.02/-0.04 0:+0.00/-0.01/-0.01 0:+0.00/-0.01/-0.01 0:+0.00/-0.01/-0.01 0:+0.00/-0.01/+0.01 0:+0.00/+0.00/+0.03 0:+0.00/-0.00/+0.10 0:+0.00/+0.00/+0.28 0:+0.00/+0.01/+0.08 0:+0.00/+0.00/+0.06 0:+0.00/+0.01/+0.04 0:+0.00/-0.00/+0.04 0:+0.00/+0.00/+0.06 0:+0.00/+0.00/+0.03 0:+0.00/+0.00/+0.01 0:+0.00/+0.00/-0.01 0:+0.00/+0.00/+0.00 0:+0.00/+0.01/+0.03 0:+0.00/-0.00/+0.03 0:+0.00/+0.00/+0.01 0:+0.00/+0.01/+0.00 0:+0.00/+0.01/+0.00 0:+0.00/+0.01/+0.01 0:+0.00/+0.01/+0.00 0:+0.00/+0.01/+0.01 0:+0.00/+0.01/+0.03 0:+0.00/+0.01/+0.04 0:+0.00/+0.01/+0.08 0:+0.00/+0.01/+0.10 0:+0.00/+0.01/+0.04 0:+0.00/+0.01/-0.01 0:+0.00/+0.01/+0.00 0:+0.00/+0.01/+0.00 0:+0.00/+0.01/-0.03 0:+0.00/+0.00/-0.08 0:+0.00/-0.00/-0.06 0:+0.00/+0.00/-0.03 0:+0.00/+0.01/-0.06 0:+0.00/+0.00/-0.11 0:+0.00/+0.01/-0.06 0:+0.00/+0.01/-0.03 0:+0.00/+0.01/-0.01 0:+0.00/+0.01/+0.00 0:+0.00/+0.01/+0.03 0:+0.00/+0.01/+0.00 0:+0.00/+0.01/+0.01 0:+0.00/+0.01/+0.01 0:+0.00/+0.01/+0.03 0:+0.00/+0.01/+0.00 0:+0.00/+0.00/+0.00 0:+0.00/+0.01/-0.03 0:+0.00/+0.01/-0.01 0:+0.00/+0.01/-0.03 0:+0.00/+0.01/-0.04 0:+0.00/+0.00/-0.04 0:+0.00/+0.01/-0.03 0:+0.00/+0.01/-0.04 0:+0.00/-0.00/-0.04 0:+0.00/-0.01/-0.03 0:+0.00/-0.03/-0.03 0:+0.00/-0.01/-0.03 0:+0.00/-0.00/-0.03 0:+0.00/-0.01/-0.01 0:+0.00/-0.03/-0.01 0:+0.00/-0.04/+0.00 0:+0.00/-0.04/+0.00 0:+0.00/-0.02/+0.07 0:+0.00/-0.02/+0.31 0:+0.00/-0.02/+0.08 0:+0.00/-0.01/+0.07 0:+0.00/-0.01/+0.10 0:+0.00/+0.01/+0.08 0:+0.00/-0.00/+0.08 0:+0.00/-0.00/+0.08 0:+0.00/-0.01/+0.08 0:+0.00/-0.00/+0.06 0:+0.00/+0.00/+0.06 0:+0.00/-0.00/+0.06 0:+0.00/+0.00/+0.06 0:+0.00/+0.00/+0.03 0:+0.00/+0.00/-0.01 0:+0.00/+0.00/+0.01 0:+0.00/-0.00/+0.00 0:+0.00/-0.01/+0.03 0:+0.00/-0.00/-0.04 0:+0.00/+0.00/-0.01 0:+0.00/+0.00/-0.03 0:+0.00/+0.00/-0.04 0:+0.00/+0.00/-0.03 0:+0.00/+0.01/-0.04 0:+0.00/+0.01/-0.01 0:+0.00/+0.01/-0.01; r_bar 2.925
+MIP: lit explain budget (all threads): resolved 303, analyses cut by the budget 3, arena rows 12633, per analysis (0,1,2,3-4,5-8,9-16,17-32,33-64,65-) [10837, 58, 7, 5, 2, 0, 0, 0, 0]
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: NODECNT root gate (tid 0): decision 2 (root chosen cuts 7, path 0)
+MIP: NODECNT node path aggregation (tid 0): rounds 10, rounds with path cuts 0, path cuts 0 of 12 chosen, still on true
+MIP: branching: 10469 selections, 0 without strong branching for dual degeneracy; sb LPs 2412 iters 120272
+MIP: inference: branchings counted 81375, mean bound changes after a branching 238.34 (ENOMOTO_MIP_INF_ALL false)
+MIP: conflict weight FLAT (tid 0): hybrid scores 0, with the flat condition 0; positive gains 11868 of 49452 observations
+MIP: PLSB (tid 0): undecided 163755 (few samples 10, no gap 152888, depth>=50 10857), continue 229468, stop 44, continued past lookahead 1275, stopped before lookahead 43; tree gains n 686 zero 0
+MIP: marginal LP infeasibility (all threads, cumulative): checked with a fresh LP 0 no conclusion 0 strong branching children unknown 0 root and LP probing 0 fresh LP feasible 0
+MIP: integral-looking node LP solutions outside the domain (LP bounds behind the domain), re-solved: 0
+MIP: LP infeasibility certificates, minimum uniform violation (log10 bins <-12 .. >=-4, other): [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+MIP: sibling backtracks 8705; basis restores 9420 (basic count mismatch 1), first LP iterations after a restore 497427
+MIP: mem1 sibling LU (all threads): held at most 1, pushed 41002, dropped 27695, adopted 13075
+MIP: GAP4 c: dense cuts kept out of the cut pool propagation (all threads, counted per rebuild): 106
+MIP: memc (all threads): packed nodes 508, changes 11198 (44792 bytes packed, 268752 unpacked), bases 0 (0 bytes packed, 0 unpacked)
+MIP: basis nb diag: tree first LPs restored 39583 iters 1935375 (48.9/LP), others 41215 iters 1989384 (48.3/LP); root LPs: submip 38 lps 45160 iters (1188.4/LP) 2.34s, bgcopy 1 lps 1 iters (1.0/LP) 0.02s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 1792 iters (1792.0/LP) 0.08s; nb hints applied 39610 solves, 54036368 given, 812203 changed
+MIP: node diag: nodes 19328 node LPs 19627 mean rows 1862.3 iters 992884 (50.6/LP) LP secs 86.25 sep rounds 49 added 10 node cut secs 0.14 final rows 1868
+MIP: adaptive node cuts: rounds 10 effective 10 skipped 0 (rate 1.000), node cut secs 0.14, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [1, 0, 4, 2, 3], cut nnz Some(187.97037566421253) (rows mean 2.4)
+MIP: orbital fixing (15 generators): fixed 1797 bounds at 1572 nodes, pruned 5 nodes
+MIP: finish done (120.38s)
+MIP: RCSTRONG: knapsack row (all threads, cumulative): calls 0, pruned 0, tightened 0, built 82 (mean length 0.0)
+MIP: SUBFIX summary: dives 7 sub-MIPs 7 accepted 1 root-infeasible retries 0 below 0.1 0; success 1 (mean rate 0.62), infeasible 0 (mean rate NaN)
+MIP: solve returned Optimal after 120.72s (time limit 600.00s)
+MIP: polished the solution (120.73s)
+{"status": "optimal", "objective": 211912.9999999997, "bound": 211912.9999999997, "nodes": 81402, "time": 120.72908637799992, "root_bound": 193788.77737800212, "first_solution_time": 0.446365154, "first_solution_objective": 259087.0}
