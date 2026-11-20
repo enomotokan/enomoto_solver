@@ -553,3 +553,12 @@ CM で pe が速かった 6 問・遅かった 7 問に noswot・10teams を足�
 
   悪くなった 2 問は戻る (neos-1456979 はほぼ既定、noswot は半分)。良かった 3 問は CMS750_4 だけ得が残り、rococoC10 は半分、ns1830653 は消える。
   1 回ずつなので、広い計測 (P・M の種つき) で pe と並べないと良し悪しは決められない。
+
+## 18. 広い計測の用意 (決定性 DT と pe の σ の上限 PS、2026-11-20)
+- 利用者の判断で両方を回す (決定性が先)。ビルドは他の分担の既定化 (cb・vbce・ncnr・rhb) が入った後の先端。
+- DT = `python plan.py DT 6` → `shards_DT.json` (58 問 × 種 1〜3 × {def, bonil, def_t1, bonil_t1}、60 秒、6 分担で各約 1.05 時間)。
+  `bonil` = `ENOMOTO_MIP_TIMEDEP=b` + `ENOMOTO_MIP_DET1T=onil` (analysis/det1t_20261120)。`_t1` は 1 スレッド (run.py の TH)、ほかは 4 スレッド。
+- PS = `python plan.py PS 3` → `shards_PS.json` (58 問 × 種 1〜3 × {def, pe, pes}、60 秒、3 分担で各約 1.4 時間)。
+- 回し方: `python run.py DT K` (K = 0〜5)・`python run.py PS K` (K = 0〜2) → `res_DT_sK.jsonl`・`res_PS_sK.jsonl`。
+- 集計: `python ci.py 60 def bonil res_DT_s*.jsonl`・`python ci.py 60 def_t1 bonil_t1 res_DT_s*.jsonl`・`python ci.py 60 def pe res_PS_s*.jsonl`・
+  `python ci.py 60 def pes res_PS_s*.jsonl`・`python ci.py 60 pe pes res_PS_s*.jsonl`。
