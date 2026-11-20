@@ -327,6 +327,17 @@ impl Fj {
 /// Feasibility Jump で実行可能な点を探す。`lo`/`up` は列の境界、`time_cap` は秒、`stop` が立ったら止める。
 /// 見つけた実行可能な点のうち目的値の最良のものを返す。
 pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64], time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
+    fj2_search_from(p, lo, up, None, time_cap, seed, stop)
+}
+
+thread_local! {
+    /// 最後の [`fj2_search_from`] の (出発点で違反している行 (不等式に分けた数), 最初の実行可能解までの手の数, その手間, 全部の手の数)。
+    /// 最初の解がなければ手の数は `u64::MAX` (analysis/objtarget_20261119/ の 8、診断用)
+    pub(super) static FJ_LAST: std::cell::Cell<(usize, u64, u64, u64)> = const { std::cell::Cell::new((0, u64::MAX, u64::MAX, 0)) };
+}
+
+/// [`fj2_search`] で、出発点を `start` にするもの (整数列は四捨五入、境界に収める。`None` なら各列の下限 (なければ上限、なければ 0))
+pub(super) fn fj2_search_from(p: &super::problem::MipProblem, lo: &[f64], up: &[f64], start: Option<&[f64]>, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
     let n = p.n;
     if n == 0 {
         return None;
@@ -350,7 +361,14 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         lb[j] = l;
         ub[j] = u;
     }
-    let x: Vec<f64> = (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect();
+    let x: Vec<f64> = match start {
+        Some(x0) if x0.len() == n => (0..n).map(|j| {
+            let v = if p.is_int[j] { x0[j].round() } else { x0[j] };
+            let v = v.clamp(lb[j], ub[j]);
+            if v.is_finite() { v } else if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }
+        }).collect(),
+        _ => (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect(),
+    };
     let mut cons: Vec<Cons> = Vec::new();
     // 問題の行 → FJ の行 (等式は 2 本)、FJ の行 → 問題の行 (連鎖の手で使う)
     let mut row_cons: Vec<Vec<u32>> = vec![Vec::new(); p.m];
@@ -433,6 +451,8 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     let mult = tunable!("ENOMOTO_T_MIP_FJ_EFFORT_MULT", 1u64, u64).max(1);
     let max_total = (nnz.max(1) << 10) * mult;
     let max_since = (nnz.max(1) << 8) * mult;
+    let start_viol = s.violated.len();
+    let (mut first_steps, mut first_effort) = (u64::MAX, u64::MAX);
     let mut best_viol = usize::MAX;
     let mut best_obj = f64::INFINITY;
     let mut best_x: Option<Vec<f64>> = None;
@@ -474,6 +494,10 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         if feasible && s.objective < best_obj {
             let rel = (best_obj - s.objective) / s.objective.abs().max(1.0);
             if rel > 1e-4 {
+                if first_steps == u64::MAX {
+                    first_steps = steps;
+                    first_effort = s.effort;
+                }
                 effort_last_improve = s.effort;
                 best_obj = s.objective;
                 best_x = Some(s.x.clone());
@@ -566,6 +590,7 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         }
     }
     crate::ticks::add(crate::ticks::HEUR, s.effort.saturating_sub(effort_last_check));
+    FJ_LAST.with(|c| c.set((start_viol, first_steps, first_effort, steps)));
     if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
         eprintln!(
             "MIP:   FJ2{repaired}: {} rows (as inequalities), {} nonzeros, {steps} steps, effort {} (max {max_total}), least violated rows {best_viol}, found {} (objective {best_obj:.6e}), stopped by {why}, chain {chain_ok}/{chain_tries} ({chain_cols} columns), {:.2}s",
