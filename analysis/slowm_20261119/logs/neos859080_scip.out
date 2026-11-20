@@ -1,0 +1,56 @@
+original problem has 160 variables (80 bin, 80 int, 0 cont) and 164 constraints
+presolving:
+(round 1, fast)       40 del vars, 44 del conss, 0 add conss, 0 chg bounds, 0 chg sides, 0 chg coeffs, 0 upgd conss, 40 impls, 0 clqs, 0 implints
+(round 2, exhaustive) 40 del vars, 44 del conss, 0 add conss, 0 chg bounds, 0 chg sides, 0 chg coeffs, 40 upgd conss, 40 impls, 0 clqs, 0 implints
+(round 3, exhaustive) 40 del vars, 44 del conss, 0 add conss, 0 chg bounds, 0 chg sides, 0 chg coeffs, 80 upgd conss, 80 impls, 0 clqs, 0 implints
+   (0.0s) sparsify finished: 72/1200 (6.0%) nonzeros canceled - in total 72 canceled nonzeros, 92 changed coefficients, 0 added nonzeros
+(round 4, exhaustive) 40 del vars, 44 del conss, 0 add conss, 0 chg bounds, 0 chg sides, 92 chg coeffs, 80 upgd conss, 80 impls, 0 clqs, 0 implints
+(round 5, fast)       40 del vars, 44 del conss, 0 add conss, 0 chg bounds, 0 chg sides, 112 chg coeffs, 80 upgd conss, 80 impls, 0 clqs, 0 implints
+   (0.0s) probing cycle finished: starting next cycle
+   (0.0s) symmetry computation started: requiring (bin +, int +, cont +), (fixed: bin -, int -, cont -)
+   (0.0s) no symmetry present (symcode time: 0.00)
+presolving (6 rounds: 6 fast, 4 medium, 4 exhaustive):
+ 40 deleted vars, 44 deleted constraints, 0 added constraints, 0 tightened bounds, 0 added holes, 0 changed sides, 112 changed coefficients
+ 80 implications, 0 cliques, 0 implied integral variables (0 bin, 0 int, 0 cont)
+presolved problem has 120 variables (40 bin, 80 int, 0 cont) and 120 constraints
+     80 constraints of type <varbound>
+     40 constraints of type <linear>
+transformed objective value is always integral (scale: 1)
+Presolving Time: 0.01
+
+ time | node  | left  |LP iter|LP it/n|mem/heur|mdpt |vars |cons |rows |cuts |sepa|confs|strbr|  dualbound   | primalbound  |  gap   | compl. 
+  0.0s|     1 |     0 |    46 |     - |  3520k |   0 | 120 | 125 | 120 |   0 |  0 |   5 |   0 | 1.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   215 |     - |  3633k |   0 | 120 | 177 | 122 |   2 |  1 |   6 |   0 | 1.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   220 |     - |  3835k |   0 | 120 | 177 | 123 |   3 |  2 |   6 |   0 | 1.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   224 |     - |  3949k |   0 | 120 | 177 | 124 |   4 |  3 |   6 |   0 | 1.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   225 |     - |  4071k |   0 | 120 | 178 | 125 |   5 |  4 |   7 |   0 | 1.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   233 |     - |  4260k |   0 | 120 | 178 | 126 |   6 |  5 |   7 |   0 | 1.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   236 |     - |  4302k |   0 | 120 | 178 | 127 |   7 |  6 |   7 |   0 | 1.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   304 |     - |  4471k |   0 | 120 | 178 | 128 |   8 |  7 |   7 |   0 | 1.790205e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   307 |     - |  5989k |   0 | 120 | 178 | 129 |   9 |  8 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   309 |     - |  6034k |   0 | 120 | 178 | 130 |  10 |  9 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   310 |     - |  6294k |   0 | 120 | 178 | 131 |  11 | 10 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   312 |     - |  6308k |   0 | 120 | 178 | 132 |  12 | 11 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   315 |     - |  6321k |   0 | 120 | 178 | 133 |  13 | 12 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   318 |     - |  6335k |   0 | 120 | 178 | 131 |  14 | 13 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   319 |     - |  6335k |   0 | 120 | 178 | 132 |  15 | 14 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+ time | node  | left  |LP iter|LP it/n|mem/heur|mdpt |vars |cons |rows |cuts |sepa|confs|strbr|  dualbound   | primalbound  |  gap   | compl. 
+  0.1s|     1 |     0 |   320 |     - |  6335k |   0 | 120 | 178 | 133 |  16 | 15 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   323 |     - |  6335k |   0 | 120 | 178 | 134 |  17 | 16 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   324 |     - |  6349k |   0 | 120 | 178 | 135 |  18 | 17 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   326 |     - |  6371k |   0 | 120 | 178 | 136 |  19 | 18 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   328 |     - |  6422k |   0 | 120 | 178 | 135 |  21 | 19 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     0 |   329 |     - |  6424k |   0 | 120 | 178 | 136 |  22 | 20 |   7 |   0 | 2.000000e+00 |      --      |    Inf | unknown
+  0.1s|     1 |     2 |   854 |     - |  6429k |   0 | 120 | 178 | 136 |  22 | 21 |   7 |   2 | 2.000000e+00 |      --      |    Inf | unknown
+  0.4s|   100 |    41 |  1443 |  11.3 |  6997k |  25 | 120 | 238 | 126 |  29 |  1 |  71 |   4 | 2.000000e+00 |      --      |    Inf |  39.94%
+  0.5s|   200 |    90 |  1929 |   8.0 |  8035k |  25 | 120 | 282 | 128 |  69 |  1 | 116 |   4 | 2.000000e+00 |      --      |    Inf |  40.91%
+  0.6s|   300 |    27 |  2114 |   6.0 |  8551k |  25 | 120 | 305 |   0 |  86 |  0 | 145 |   4 | 2.000000e+00 |      --      |    Inf |  41.95%
+  0.6s|   400 |     8 |  2436 |   5.3 |  8757k |  25 | 120 | 330 |   0 | 108 |  0 | 170 |   4 | 2.000000e+00 |      --      |    Inf |  49.88%
+
+SCIP Status        : problem is solved [infeasible]
+Solving Time (sec) : 0.61
+Solving Nodes      : 428
+Primal Bound       : +1.00000000000000e+20 (0 solutions)
+Dual Bound         : +1.00000000000000e+20
+Gap                : 0.00 %
+{"status": "infeasible", "objective": null, "bound": 1e+20, "nodes": 428, "time": 0.6076090439999007, "scip_time": 0.607297, "scip_version": "10.0.2", "pyscipopt_version": "6.3.0"}
