@@ -224,6 +224,13 @@ impl BasisKernel {
         self
     }
 
+    /// fill の上限を分解の大きさで広げる係数だけを設定する (周期検査の間隔は変えない)。試作 `ENOMOTO_XO_BUMP_LU_RATIO`
+    /// (クロスオーバーの Megiddo の押し出し、analysis/scipsym_20261120/ 12 節) 用。
+    pub(super) fn with_bump_lu_ratio(mut self, bump_lu_ratio: f64) -> Self {
+        self.bump_lu_ratio = bump_lu_ratio;
+        self
+    }
+
     /// 入る列 `col` の FT 更新用の `a_tilde` だけを求める (`B^-1 col` の値は求めない。`U` 段を解かない)。続けて
     /// [`Self::btran_row_e_tilde`] (か [`Self::btran_row`]) と [`Self::update_and_check`] を呼ぶ。双対の押し出しの試作
     /// (`ENOMOTO_XO_DUAL_PUSH_FAST`) 用: 入る列の結果がほぼ密 (opm2-z10-s4 で 14.6 万行中 10.5 万) で `U` 段が重い。
