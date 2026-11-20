@@ -325,7 +325,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let g = self.clique_graph_get();
         let fb: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0).collect();
         let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
-        let order = vb01_order(&g, &fb);
+        let cliques = if vb01_clq() { vb01_cliques(p, &self.dom.lo, &self.dom.up, &fb) } else { Default::default() };
+        let order = vb01_order(&g, &fb, &cliques);
         // SCIP: 節点の数が整数列の数 × 0.65 に届かなければ使わない
         if ints.is_empty() || (order.len() as f64) < 0.65 * ints.len() as f64 {
             if self.params.verbose && self.nodes <= 1 {
@@ -718,6 +719,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 }
 
+/// 試作 `ENOMOTO_MIP_VB01` の `c`: 位相順に行のクリーク ([`vb01_cliques`]) も使う (衝突グラフで落ちる長い集合分割・詰め込みの行を入れる)
+fn vb01_clq() -> bool {
+    env_str!("ENOMOTO_MIP_VB01").is_some_and(|v| v.contains('c'))
+}
+
 /// [`Solver::vbounds01_heur`] の型 (締めるか, 目的: 0 見ない・1 良い側だけ・2 悪い側だけ)。SCIP の既定 (feasvariant 6・tightenvariant 7) の順。
 const VB01_VARIANTS: [(bool, u8); 5] = [(false, 1), (false, 2), (true, 0), (true, 1), (true, 2)];
 
@@ -731,33 +737,137 @@ fn vb01_label(tight: bool, obj: u8) -> &'static str {
     }
 }
 
-/// VB01 の位相順 (SCIP の topologicalSort): 境界の節点 (文字 `2j` = `x_j` の下限、`2j+1` = 上限) の逆向きのグラフ (a の後続は ¬a の隣 =
-/// a を導く文字) を、節点の番号の順に深さ優先でたどった帰りがけ順。辺のない節点だけの木は入れない。`fb[j]`: 自由な 0-1 列か。
-pub(super) fn vb01_order(g: &super::clique::CliqueGraph, fb: &[bool]) -> Vec<u32> {
+/// VB01 のクリーク (SCIP のクリーク表に当たる): 行のうち、0-1 列の文字 (係数が正なら `x = 1`、負なら `x = 0`) のどの 2 つも同時には真に
+/// なれない行 (重みの小さい 2 つの和が余裕を超える。集合分割・詰め込みなど)。衝突グラフ ([`super::clique::CliqueGraph`]) は組の辺で持ち、
+/// 文字 2000 を超える行・辺 2 万を超える行を落とすので、長い行の含意は入らない (nw04)。クリークは 1 つの物として持ち、深さ優先では
+/// SCIP と同じく 1 つのクリークを 1 度だけ展開する ([`vb01_order`])。`lo`・`up` は列の境界。(クリークの文字の並び, 文字ごとのクリークの番号)
+pub(super) fn vb01_cliques(p: &MipProblem, lo: &[f64], up: &[f64], fb: &[bool]) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
+    let mut cl: Vec<Vec<u32>> = Vec::new();
+    let mut of_lit: Vec<Vec<u32>> = vec![Vec::new(); 2 * p.n];
+    for (i, r) in p.rows.iter().enumerate() {
+        if r.len() < 3 {
+            continue;
+        }
+        for (sign, b) in [(1.0, p.row_up[i]), (-1.0, -p.row_lo[i])] {
+            if !b.is_finite() {
+                continue;
+            }
+            let mut minact = 0.0;
+            let mut lits: Vec<(f64, u32)> = Vec::new();
+            let mut ok = true;
+            for &(j, a0) in r {
+                let a = sign * a0;
+                let m = if a > 0.0 { a * lo[j] } else { a * up[j] };
+                if !m.is_finite() {
+                    ok = false;
+                    break;
+                }
+                minact += m;
+                if fb[j] && a != 0.0 {
+                    lits.push((a.abs(), if a > 0.0 { 2 * j as u32 } else { 2 * j as u32 + 1 }));
+                }
+            }
+            if !ok || lits.len() < 3 {
+                continue;
+            }
+            let slack = b - minact;
+            let tol = 1e-9 * (1.0 + b.abs());
+            // 重みの小さい 2 つでも余裕を超えれば、どの 2 つも同時には真になれない
+            let (mut w1, mut w2) = (f64::INFINITY, f64::INFINITY);
+            for &(w, _) in &lits {
+                if w < w1 {
+                    w2 = w1;
+                    w1 = w;
+                } else if w < w2 {
+                    w2 = w;
+                }
+            }
+            if w1 + w2 <= slack + tol {
+                continue;
+            }
+            let id = cl.len() as u32;
+            for &(_, l) in &lits {
+                of_lit[l as usize].push(id);
+            }
+            cl.push(lits.into_iter().map(|(_, l)| l).collect());
+        }
+    }
+    (cl, of_lit)
+}
+
+/// VB01 の位相順 (SCIP の topologicalSort): 境界の節点 (文字 `2j` = `x_j` の下限、`2j+1` = 上限) の逆向きのグラフ (a の後続は a を導く文字 =
+/// ¬a の衝突グラフの隣と、¬a を含むクリークの他の文字) を、節点の番号の順に深さ優先でたどった帰りがけ順。辺のない節点だけの木は入れない。
+/// クリークは SCIP の cliqueexit と同じく、最初に入った節点 u から全員を展開し、2 度目からは u の反対の文字 (u の展開に入らない唯一の
+/// 文字) だけを見る (長いクリークでも手間は長さに比例)。`fb[j]`: 自由な 0-1 列か。`cliques`: [`vb01_cliques`] (空でもよい)。
+pub(super) fn vb01_order(g: &super::clique::CliqueGraph, fb: &[bool], cliques: &(Vec<Vec<u32>>, Vec<Vec<u32>>)) -> Vec<u32> {
     let n = fb.len();
+    let (cl, of_lit) = cliques;
+    let empty: Vec<u32> = Vec::new();
+    // クリークの出口: 0 = まだ入っていない、e + 1 = 最初に入った節点の反対の文字 e、-1 = 出口も使った
+    let mut exit: Vec<i64> = vec![0; cl.len()];
     let mut visited = vec![false; 2 * n];
     let mut order: Vec<u32> = Vec::new();
-    let mut stack: Vec<(u32, usize)> = Vec::new();
+    // (節点, 組の辺の位置, クリークの位置, クリークの中の位置)
+    let mut stack: Vec<(u32, usize, usize, usize)> = Vec::new();
     for s0 in 0..2 * n as u32 {
         if visited[s0 as usize] || !fb[(s0 / 2) as usize] {
             continue;
         }
-        stack.push((s0, 0));
+        stack.push((s0, 0, 0, 0));
         let mut maxstack = 1usize;
-        while let Some(&mut (a, ref mut k)) = stack.last_mut() {
+        while let Some(top) = stack.last_mut() {
+            let a = top.0;
             visited[a as usize] = true;
-            let nb = g.neighbors(a ^ 1);
             let mut next = None;
-            while *k < nb.len() {
-                let b = nb[*k];
-                *k += 1;
+            let nb = g.neighbors(a ^ 1);
+            while top.1 < nb.len() {
+                let b = nb[top.1];
+                top.1 += 1;
                 if fb[(b / 2) as usize] && !visited[b as usize] {
                     next = Some(b);
                     break;
                 }
             }
+            if next.is_none() {
+                let cs = of_lit.get((a ^ 1) as usize).unwrap_or(&empty);
+                while top.2 < cs.len() {
+                    let c = cs[top.2] as usize;
+                    if top.3 == 0 {
+                        // このクリークに入るのは初めてか
+                        if exit[c] > 0 {
+                            let e = (exit[c] - 1) as u32;
+                            exit[c] = -1;
+                            top.2 += 1;
+                            if e != a && !visited[e as usize] && fb[(e / 2) as usize] {
+                                next = Some(e);
+                                break;
+                            }
+                            continue;
+                        } else if exit[c] == 0 {
+                            exit[c] = (a ^ 1) as i64 + 1;
+                        } else {
+                            top.2 += 1;
+                            continue;
+                        }
+                    }
+                    let mem = &cl[c];
+                    while top.3 < mem.len() {
+                        let b = mem[top.3];
+                        top.3 += 1;
+                        if b != (a ^ 1) && fb[(b / 2) as usize] && !visited[b as usize] {
+                            next = Some(b);
+                            break;
+                        }
+                    }
+                    if next.is_some() {
+                        break;
+                    }
+                    top.2 += 1;
+                    top.3 = 0;
+                }
+            }
             if let Some(b) = next {
-                stack.push((b, 0));
+                stack.push((b, 0, 0, 0));
                 maxstack = maxstack.max(stack.len());
                 continue;
             }
@@ -846,7 +956,8 @@ pub(crate) fn vbounds01_on_problem(p: &MipProblem, verbose: bool, time_limit: f6
     let g = super::clique::CliqueGraph::build_with(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &p.col_lo, &p.col_up, &p.conflict_edges);
     let fb: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && p.col_lo[j] == 0.0 && p.col_up[j] == 1.0).collect();
     let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && p.col_lo[j] < p.col_up[j]).collect();
-    let order = vb01_order(&g, &fb);
+    let cliques = if vb01_clq() { vb01_cliques(p, &p.col_lo, &p.col_up, &fb) } else { Default::default() };
+    let order = vb01_order(&g, &fb, &cliques);
     if ints.is_empty() || (order.len() as f64) < 0.65 * ints.len() as f64 {
         if verbose {
             eprintln!("MIP:   VB01: {} bound nodes in the implication graph < 0.65 x {} free integer columns: not used", order.len(), ints.len());
