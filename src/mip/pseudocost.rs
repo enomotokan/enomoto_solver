@@ -17,6 +17,11 @@ pub struct Pseudocost {
     n_up: Vec<u32>,
     sum_down: Vec<f64>,
     n_down: Vec<u32>,
+    /// 試作 `ENOMOTO_MIP_PCL` の `c` (analysis/disj_20261119.md の 11 節): 単位あたりの値の 2 乗の和 (列・向きごと、ばらつきの信頼区間に使う)
+    sq_up: Vec<f64>,
+    sq_down: Vec<f64>,
+    /// 試作 `ENOMOTO_MIP_PCL` の `b`: 似た列の組 (列 → 組の番号、組 → 列)。観測のない列の費用を同じ組の観測のある列の平均で埋める
+    pub groups: Option<std::sync::Arc<(Vec<u32>, Vec<Vec<u32>>)>>,
     /// 全列の平均 (未観測の列の代わりに使う)。
     total_up: f64,
     total_n_up: u64,
@@ -55,6 +60,9 @@ pub struct Pseudocost {
 impl Pseudocost {
     pub fn new(n: usize) -> Self {
         Pseudocost {
+            sq_up: vec![0.0; n],
+            sq_down: vec![0.0; n],
+            groups: None,
             sum_up: vec![0.0; n],
             n_up: vec![0; n],
             sum_down: vec![0.0; n],
@@ -105,9 +113,13 @@ impl Pseudocost {
                 let s = d.get(j).copied().unwrap_or(1.0);
                 self.sum_up[j] *= s;
                 self.sum_down[j] *= s;
+                self.sq_up[j] *= s * s;
+                self.sq_down[j] *= s * s;
             } else {
                 self.sum_up[j] = 0.0;
                 self.n_up[j] = 0;
+                self.sq_up[j] = 0.0;
+                self.sq_down[j] = 0.0;
                 self.sum_down[j] = 0.0;
                 self.n_down[j] = 0;
                 self.cutoff_up[j] = 0;
@@ -156,6 +168,8 @@ impl Pseudocost {
             *b = *s;
         }
         mf(&mut self.sum_up, &mut base.sum_up, &mut shared.sum_up);
+        mf(&mut self.sq_up, &mut base.sq_up, &mut shared.sq_up);
+        mf(&mut self.sq_down, &mut base.sq_down, &mut shared.sq_down);
         mu(&mut self.n_up, &mut base.n_up, &mut shared.n_up);
         mf(&mut self.sum_down, &mut base.sum_down, &mut shared.sum_down);
         mu(&mut self.n_down, &mut base.n_down, &mut shared.n_down);
@@ -223,11 +237,13 @@ impl Pseudocost {
             self.n_pos_gain += 1;
         }
         if up {
+            self.sq_up[j] += unit * unit;
             self.sum_up[j] += unit;
             self.n_up[j] += 1;
             self.total_up += unit;
             self.total_n_up += 1;
         } else {
+            self.sq_down[j] += unit * unit;
             self.sum_down[j] += unit;
             self.n_down[j] += 1;
             self.total_down += unit;
@@ -257,7 +273,7 @@ impl Pseudocost {
         let n = self.n_up[j];
         let avg = self.avg_up();
         if n == 0 {
-            return avg;
+            return self.group_mean(j, true).unwrap_or(avg);
         }
         let own = self.sum_up[j] / n as f64;
         let w = (0.9 + 0.1 * n as f64 / self.min_reliable as f64).min(1.0);
@@ -268,11 +284,51 @@ impl Pseudocost {
         let n = self.n_down[j];
         let avg = self.avg_down();
         if n == 0 {
-            return avg;
+            return self.group_mean(j, false).unwrap_or(avg);
         }
         let own = self.sum_down[j] / n as f64;
         let w = (0.9 + 0.1 * n as f64 / self.min_reliable as f64).min(1.0);
         w * own + (1.0 - w) * avg
+    }
+
+    /// 列・向きの打ち切りの回数 (診断 `ENOMOTO_MIP_PCLOG` 用)。
+    pub fn cutoff_count(&self, j: usize, up: bool) -> u32 {
+        if up { self.cutoff_up[j] } else { self.cutoff_down[j] }
+    }
+
+    /// 列・向きの観測の数 (診断 `ENOMOTO_MIP_PCLOG` 用)。
+    pub fn n_obs(&self, j: usize, up: bool) -> u32 {
+        if up { self.n_up[j] } else { self.n_down[j] }
+    }
+
+    /// 試作 `ENOMOTO_MIP_PCL` の `b`: 同じ組の観測のある列 (最大 64 本を見る) の単位あたりの値の平均。組がなければ `None`
+    fn group_mean(&self, j: usize, up: bool) -> Option<f64> {
+        let g = self.groups.as_ref()?;
+        let (sum, n) = if up { (&self.sum_up, &self.n_up) } else { (&self.sum_down, &self.n_down) };
+        let (mut acc, mut k) = (0.0, 0usize);
+        for &m in g.1[g.0[j] as usize].iter().take(64) {
+            let m = m as usize;
+            if m != j && n[m] > 0 {
+                acc += sum[m] / n[m] as f64;
+                k += 1;
+            }
+        }
+        (k > 0).then(|| acc / k as f64)
+    }
+
+    /// 試作 `ENOMOTO_MIP_PCL` の `c`: 両向きとも観測が 2 回以上あり、単位あたりの値の平均の 95% 信頼区間の半幅 (2 sd / √n) が平均の
+    /// `rel` 倍以下なら信頼する (観測の数でなくばらつきで決める)
+    pub fn ci_reliable(&self, j: usize, rel: f64) -> bool {
+        let ok = |sum: f64, sq: f64, n: u32| {
+            if n < 2 {
+                return false;
+            }
+            let nf = n as f64;
+            let mean = sum / nf;
+            let var = ((sq - sum * sum / nf) / (nf - 1.0)).max(0.0);
+            2.0 * (var / nf).sqrt() <= rel * mean.abs().max(1e-12)
+        };
+        ok(self.sum_up[j], self.sq_up[j], self.n_up[j]) && ok(self.sum_down[j], self.sq_down[j], self.n_down[j])
     }
 
     /// 両側とも十分観測されているか。

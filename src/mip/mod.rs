@@ -315,6 +315,12 @@ pub(crate) fn ticks_on(c: char) -> bool {
     env_def!("ENOMOTO_MIP_TICKS", "ntwumcflshk").is_some_and(|v| v.contains(c))
 }
 
+/// 試作 `ENOMOTO_MIP_PCL` の文字 (既定では使わない、analysis/disj_20261119.md の 11 節): `a` 打ち切った強分岐の子の値を下限の観測に・
+/// lookahead に数えない、`b` 観測のない列の費用を似た列で埋める、`c` 信頼性をばらつきで決める、`d` 解き直した後の上がり幅を観測にする
+pub(crate) fn pcl(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_PCL").is_some_and(|v| v.contains(c))
+}
+
 /// 試作 `ENOMOTO_MIP_ROOTSB` の文字の並び (既定では使わない、`Solver::select_branch_inner`、analysis/disj_20261119.md の 9 節)
 pub(crate) fn rootsb_flags() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_ROOTSB").filter(|v| !v.is_empty() && *v != "0")
