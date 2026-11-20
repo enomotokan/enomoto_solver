@@ -1464,7 +1464,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         pretime::start();
     }
     // 試作 `ENOMOTO_MIP_TPRE` ([`tpre`]): 並列の「仮の暫定値つき前処理」を 1 本のスレッドで始める (前処理の後で待って取り込む)
-    let tpre_job = (tpre::mode().is_some() && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none()).then(|| {
+    // `t` (pt): 空いたスレッドで FJ・Local-MIP を前処理の間回し続ける (手間の門で再現する)
+    let pt_job = (tpre::mode().is_some_and(|m| m.contains('t') || m.contains('T')) && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none())
+        .then(|| tpre::pt_spawn(p, params.threads, 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64)));
+    let tpre_job = (tpre::mode().is_some_and(|m| !m.contains('t') && !m.contains('T')) && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none()).then(|| {
         let q = p.clone();
         let safety = if params.time_limit.is_finite() { 0.25 * params.time_limit } else { 60.0 };
         let seed = 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
@@ -1739,6 +1742,27 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // `ENOMOTO_MIP_TPRE`: 並列の仮の暫定値つき前処理の終わりを待ち、一番良い解を開始解に、`b` なら T 以下の解があったときに P_T の伝播の境界を持ち込む
     let mut presolved = presolved;
     let mut tpre_start = false;
+    let start = match pt_job {
+        Some(job) => {
+            let tw = std::time::Instant::now();
+            let (w, b) = job.finish(p);
+            eprintln!(
+                "MIP: TPRE pt: granted {:.3e} work, best {} ; waited {:.2}s at {:.2}s",
+                w,
+                match &b { Some((z, _, t)) => format!("{z:.10e} (thread {t})"), None => "none".into() },
+                tw.elapsed().as_secs_f64(),
+                t_pre.elapsed().as_secs_f64()
+            );
+            match (start, b) {
+                (None, Some((_, x, _))) => {
+                    tpre_start = true;
+                    Some(x)
+                }
+                (s, _) => s,
+            }
+        }
+        None => start,
+    };
     let start = match tpre_job {
         Some(h) => {
             let tw = std::time::Instant::now();

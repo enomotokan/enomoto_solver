@@ -19,7 +19,7 @@ BOUND = ["gen-ip002", "gen-ip054", "assign1-5-8", "30n20b8", "reblock115", "ran1
 # 解なしの 13 問 (README 1。PDLP の点から最初の解を狙う p の対象)
 NOSOL = ["academictimetablesmall", "satellites2-60-fs", "satellites2-40", "rail01", "neos-3216931-puriri", "dws008-01", "cmflsp50-24-8-8",
          "ns1952667", "neos-1354092", "bnatt400", "neos-2746589-doon", "germanrr", "peg-solitaire-a3"]
-MPROBS = POOR + GOOD10 + BOUND + (NOSOL if ALT == "p" else [])
+MPROBS = POOR + GOOD10 + BOUND + (NOSOL if ALT.startswith("p") else [])
 def times(pat, cap):
     T = {}
     for f in glob.glob(str(pat)):
