@@ -1467,11 +1467,16 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // `t` (pt): 空いたスレッドで FJ・Local-MIP を前処理の間回し続ける (手間の門で再現する)
     let pt_job = (tpre::mode().is_some_and(|m| m.contains('t') || m.contains('T')) && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none())
         .then(|| tpre::pt_spawn(p, params.threads, 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64)));
-    let tpre_job = (tpre::mode().is_some_and(|m| !m.contains('t') && !m.contains('T')) && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none()).then(|| {
+    // `ENOMOTO_T_MIP_TPRE_MIN_NNZ` (既定 0): 非零がこれより少ない問題では TPRE (p・pl) を使わない (小さい問題は前処理がすぐ終わり、主が待つ分が目立つ。
+    // PPL の計測で 10teams・misc07 など 1〜5 秒の問題が数倍遅かった)
+    let tpre_big = p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 >= tunable!("ENOMOTO_T_MIP_TPRE_MIN_NNZ", 0.0, f64);
+    let tpre_job = (tpre_big && tpre::mode().is_some_and(|m| !m.contains('t') && !m.contains('T')) && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none()).then(|| {
         let q = p.clone();
         let safety = if params.time_limit.is_finite() { 0.25 * params.time_limit } else { 60.0 };
         let seed = 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
-        std::thread::spawn(move || tpre::run(&q, safety, seed))
+        let stop: tpre::Stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let st2 = stop.clone();
+        (std::thread::spawn(move || tpre::run(&q, safety, seed, st2)), stop)
     });
     let prev_par = PREPAR_THREADS.with(|t| t.replace(if !params.submip && params.restarts == 0 { params.threads.max(1) } else { 1 }));
     struct RestorePar(usize);
@@ -1765,8 +1770,18 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     };
     let start = match tpre_job {
         // 前処理で早めの FJ が実行可能性問題の解を見つけ木に入らない道 (ns1116954) では待たない (結果は捨てる)
-        Some(_) if FEAS_FJ_SOL.with(|s| s.borrow().is_some()) => start,
-        Some(h) => {
+        Some((_, stop)) if FEAS_FJ_SOL.with(|s| s.borrow().is_some()) => {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            start
+        }
+        // 既定は待たない (親の方針): 前処理の終わりでスレッドが終わっていなければ止めの合図を立てて結果を捨てる (再現しない)。
+        // `w` なら終わりを待つ (種ごとに再現するが、小さい問題で主が待つ分が目立つ: PPL で 1〜5 秒の問題が数倍遅かった)
+        Some((h, stop)) if !h.is_finished() && !tpre::mode().is_some_and(|m| m.contains('w')) => {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("MIP: TPRE: not finished at the end of the presolve ({:.2}s); stopped and dropped", t_pre.elapsed().as_secs_f64());
+            start
+        }
+        Some((h, _)) => {
             let tw = std::time::Instant::now();
             let out = h.join().ok();
             let wait = tw.elapsed().as_secs_f64();
