@@ -495,6 +495,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// - `c`: この形を使う (目的は元のまま)
     /// - `z`: サブ MIP の目的を 0 にする (SCIP の既定 `subscipobjective = z`。最初の実行可能解で止まる)
     /// - `f`: 根で LP face を根の被約費用のサブ MIP より先に回す (solver.rs の根のヒューリスティクスの並び)
+    /// - `r` (`c` と使う): 行のサブ MIP が解なしなら、行を外した今の LP face を残りのノードで解き直す (z̄ が最適値に届かない問題で
+    ///   LP face の解を消さないため。neos-1582420 は根の下界 89.3・z̄ 90・最適 91 で、行なしの LP face が見つける 92 が消えていた)
     fn lp_face_obj(&mut self, lo: Vec<f64>, up: Vec<f64>, nfix: usize, nint: usize, v: &str) -> bool {
         let p = self.p;
         let z = self.lp.objective() + p.offset;
@@ -513,7 +515,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut rows = std::mem::take(&mut sub.rows);
         let mut row_lo = std::mem::take(&mut sub.row_lo);
         let mut row_up = std::mem::take(&mut sub.row_up);
-        if !objrow.is_empty() {
+        let objrow_empty = objrow.is_empty();
+        if !objrow_empty {
             rows.push(objrow);
             row_lo.push(f64::NEG_INFINITY);
             row_up.push(cut - p.offset);
@@ -524,10 +527,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         s2.conflict_edges = std::mem::take(&mut sub.conflict_edges);
         s2.implied_bounds = std::mem::take(&mut sub.implied_bounds);
         let cutoff = if zero { f64::INFINITY } else { cut.min(self.prune_limit()) };
+        // `r`: 行のサブ MIP が解なし (面の上に z̄ 以下の解はない) なら、同じ固定で行を外し (今の LP face と同じ問題)、
+        // 残りのノード (500 − 使ったノード) で解き直す。並列のときはサブ MIP のスレッドの中で続ける ([`Solver::spawn_submip`])
+        let fb = v.contains('r') && !zero && !objrow_empty;
+        let fb_row = p.m;
+        let keep = (fb && !self.parallel_submips).then(|| s2.clone());
+        if fb && self.parallel_submips {
+            self.submip_lpface_fb = Some((fb_row, self.prune_limit()));
+        }
         let r = self.solve_submip_problem(s2, 500, Some(cutoff));
-        let found = r.as_ref().is_some_and(|r| r.1);
+        self.submip_lpface_fb = None;
+        let mut found = r.as_ref().is_some_and(|r| r.1);
         if self.params.verbose && self.nodes <= 1 {
             eprintln!("MIP:   LP face ({v}): {nfix} of {nint} integer columns fixed, objective row <= {zbar:.6e} (LP {z:.6e}), status {:?}, found {found}", r.map(|r| r.0));
+        }
+        lpface_count(&format!("row {:?} {found}", r.map(|r| r.0)));
+        if let (Some(mut s3), Some((super::solver::MipStatus::Infeasible, _))) = (keep, r) {
+            let used = self.last_submip_nodes;
+            if used < 500 && !self.time_up() {
+                s3.row_up[fb_row] = f64::INFINITY;
+                let r2 = self.solve_submip_problem(s3, 500 - used, None);
+                found = r2.as_ref().is_some_and(|r| r.1);
+                if self.params.verbose && self.nodes <= 1 {
+                    eprintln!("MIP:   LP face (r): objective row infeasible after {used} nodes; without the row: status {:?}, found {found}", r2.map(|r| r.0));
+                }
+                lpface_count(&format!("fb {:?} {found}", r2.map(|r| r.0)));
+            }
         }
         found
     }
@@ -1033,5 +1058,15 @@ mod tests {
         let (z, x) = vbounds01_on_problem(&p, false, 10.0).expect("VB01 should find a solution");
         assert!(p.is_feasible(&x, 1e-9));
         assert!((p.objective(&x) - z).abs() <= 1e-9);
+    }
+}
+
+/// 診断用 `ENOMOTO_MIP_LPFACE_COUNT=<ファイル>`: 試作 `ENOMOTO_MIP_LPFACE` のサブ MIP の結果を 1 行ずつ足す (fuzz で `r` の道を通る回数を数える)
+pub(super) fn lpface_count(line: &str) {
+    if let Some(f) = env_str!("ENOMOTO_MIP_LPFACE_COUNT") {
+        use std::io::Write;
+        if let Ok(mut w) = std::fs::OpenOptions::new().create(true).append(true).open(f) {
+            let _ = writeln!(w, "{line}");
+        }
     }
 }

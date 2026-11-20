@@ -34,10 +34,12 @@ import json, sys, time
 from pathlib import Path
 from enomoto_solver import benchmark_highs as bh
 name, mps, reps = sys.argv[1], sys.argv[2], int(sys.argv[3])
-h, lp = bh._load_lp(Path(mps))
 out = {"name": name, "times": []}
 for _ in range(reps):
-    model, _, _ = bh._build_our_model(lp)
+    if hasattr(bh, "_read_our_model"):
+        model, _, _, _ = bh._read_our_model(Path(mps))
+    else:  # 古いビルドの wheel: 従来の HiGHS 経由
+        model, _, _ = bh._build_our_model(bh._load_lp(Path(mps))[1])
     t0 = time.perf_counter()
     r = model.solve(lp_solver=None)
     out["times"].append(time.perf_counter() - t0)
