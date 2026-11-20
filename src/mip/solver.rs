@@ -23917,7 +23917,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_TPRE` (p・pl、待たない形): 前処理の間に始めた PDLP の点からの FJ・Local-MIP の解が出来上がっていれば受け取る
         // (最初の回の外側の求解だけ。前処理後の問題で実行不能なら、その点から FJ を 1 回 (手間 2e8) 回して直す)
         if self.params.restarts == 0 && !self.params.submip && self.snap.is_none() {
-            if let Some(xr) = super::tpre::take_pending(self.p.n) {
+            if let Some(xr) = super::tpre::take_pending(self.p.n).or_else(|| super::tpre::gated_take(self.p.n)) {
                 self.heur_label = "TPRE";
                 let mut ok = self.try_incumbent(xr.clone());
                 if !ok && !self.p.is_feasible(&xr, 1e-6) {
