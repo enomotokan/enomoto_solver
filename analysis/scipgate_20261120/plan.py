@@ -1,4 +1,4 @@
-"""SCIP-GATE の分担表 (scipslow_20261119/plan.py の写し): python plan.py NM NP → shards_M.json・shards_P.json
+"""SCIP-GATE の分担表 (scipslow_20261119/plan.py の写し): python plan.py NM NP → shards_M.json・shards_P.json (NM = 0 なら P だけ)
 P: MIPLIB の 58 問 × 種 1〜3 × {def, vb, vbc, vbcl}、60 秒 (4 スレッド)。
 M: 働く問題 × 種 1・2 × {def, vb, vbc, vbcl}、600 秒。働く問題は workscan.jsonl_* (VB01=b + VBCLQ=1、1 スレッド・120 秒) で、
    (a) 根の LP の前に pseudoobj が 1 列以上固定したか打ち切りを証明した問題 (vbc・vbcl が効きうる)、または
@@ -43,7 +43,8 @@ print("M の働く問題", len(MPROBS), MPROBS)
 TM = times(VS / "res_M_s*.jsonl", "def", 600)
 TA = times(D.parents[0] / "vsscip_20261117" / "res_M_s*.jsonl", "def", 600)
 def estM(p, c): return TM.get(p, TA.get(p, 600.0)) + 30
-balance({(p, s): order(p, s, CF) for p in MPROBS for s in (1, 2)}, estM, NM, "shards_M.json", 600)
+if NM > 0:  # NM = 0 なら M の分担表は作らない (P だけ先に出すとき)
+    balance({(p, s): order(p, s, CF) for p in MPROBS for s in (1, 2)}, estM, NM, "shards_M.json", 600)
 TP = times(VS / "res_P_s*.jsonl", "def", 60)
 def estP(p, c): return TP.get(p, 48.0) + 8
 balance({(p, s): order(p, s, CF) for p in PROBS for s in (1, 2, 3)}, estP, NP, "shards_P.json", 60)
