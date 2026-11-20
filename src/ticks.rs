@@ -84,6 +84,24 @@ pub fn total() -> f64 {
     RAW.with(|r| (0..NK).map(|k| w[k] * r[k].get() as f64).sum())
 }
 
+thread_local! {
+    /// 診断用の手間 ([`diag_add`]): 合計 [`total`] にも期限にも入れない (既定の道筋を変えない)
+    static DIAG: Cell<u64> = const { Cell::new(0) };
+}
+
+/// 診断用の手間を `n` 足す (分離 [`SEP`] の単位、`ENOMOTO_MIP_SEPSTAT` の分離器ごとの手間に使う。analysis/sepeff_20261120/)。
+/// [`total`] に入らないので、手間の期限・時計は変わらない。今まで手間を数えていなかった分離器 (zero-half・clique など) が使う
+#[inline]
+pub fn diag_add(n: u64) {
+    DIAG.with(|c| c.set(c.get().wrapping_add(n)));
+}
+
+/// このスレッドの [`total`] + 診断用の手間 ([`diag_add`]) (診断用)。診断用の手間の 1 単位は `ENOMOTO_T_TICKS_W_DIAG` (既定 2、
+/// 単位はビット列の 1 語の xor・隣接の 1 要素ほどの軽い操作で、seymour・nw04 の根で zero-half・implied bound・clique の時間とおよそ合う)
+pub fn total_with_diag() -> f64 {
+    total() + tunable!("ENOMOTO_T_TICKS_W_DIAG", 2.0, f64) * DIAG.with(|c| c.get()) as f64
+}
+
 /// このスレッドの部分ごとの手間 (診断用)。
 pub fn raw() -> [u64; NK] {
     RAW.with(|r| std::array::from_fn(|k| r[k].get()))

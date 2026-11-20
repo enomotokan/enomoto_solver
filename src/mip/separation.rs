@@ -286,6 +286,9 @@ struct Candidate {
     forced: bool,
     /// どの分離器から来たか (診断 `ENOMOTO_MIP_DEBUG_SEPPROF` の集計用。[`sepprof`] の `SRC_*`、面の頂点なら + `SRC_FACE`)
     src: u8,
+    /// 元の行 1 本ずつの分離 (`SRC_ROWS`) の中の種類 (`ENOMOTO_MIP_SEPSTAT` の集計だけに使う、[`super::cuts::GenKind`]。
+    /// 0: CMIR (と種類の分からないもの)、1: 持ち上げつきの被覆、2: 拡張被覆、3: flow cover)
+    sub: u8,
 }
 
 /// 診断 (`ENOMOTO_MIP_DEBUG_SEPPROF`): 根のカットのループの 1 ラウンドの時間を段階ごとに集計する (スレッドごと)。
@@ -359,6 +362,10 @@ pub(super) mod sepprof {
     pub fn add(k: usize, secs: f64) {
         PROF.with(|p| p.borrow_mut().t[k] += secs);
     }
+    thread_local! {
+        /// [`lap`] が前に見た手間 ([`crate::ticks::total`]、`ENOMOTO_MIP_SEPSTAT` のとき)
+        static LAST_TICKS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    }
     /// separate() の中の段階 `k` に、`lap` からの時間を足して `lap` を今にする
     pub fn lap(k: usize, lap: &mut std::time::Instant) {
         // `ENOMOTO_MIP_SEPSTAT` も分離器ごとの時間を数える ([`super::super::seplearn`])
@@ -368,6 +375,10 @@ pub(super) mod sepprof {
             add(k + f, (now - *lap).as_secs_f64());
             if super::super::seplearn::stat_on() {
                 super::super::seplearn::add_stage_time(k, (now - *lap).as_secs_f64());
+                // 決定的な手間: 前の段階の終わりからの差 (前の呼び出しの後の LP などの分は `T_SETUP` に入り、数えない)
+                let t = crate::ticks::total_with_diag();
+                let d = LAST_TICKS.with(|c| t - c.replace(t));
+                super::super::seplearn::add_stage_ticks(k, d);
             }
             *lap = now;
         }
@@ -549,22 +560,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `ENOMOTO_MIP_SEPSTAT`: 分離の後の候補を数える ([`super::seplearn`])
     fn sl_after_separate(&mut self, lists: &[&Vec<Candidate>]) {
-        let srcs: Vec<Vec<(u8, usize)>> = lists.iter().map(|v| v.iter().map(|c| (c.src, c.coefs.len())).collect()).collect();
+        let srcs: Vec<Vec<(usize, usize)>> = lists.iter().map(|v| v.iter().map(|c| (super::seplearn::key(c.src, c.sub), c.coefs.len())).collect()).collect();
         self.sl.after_separate(&srcs);
     }
 
     /// 選んだカットを LP に加える直前に、加える前の目的値と分離器ごとの違反を覚える ([`super::seplearn::SepLearn::prepare`])
     fn sl_prepare(&mut self, chosen: &[Candidate], x: &[f64]) {
         let obj0 = self.lp.objective() + self.p.offset;
-        let items: Vec<(u8, f64)> = chosen
+        let items: Vec<(usize, f64)> = chosen
             .iter()
             .map(|c| {
                 let act: f64 = c.coefs.iter().map(|&(j, a)| a * x[j]).sum();
-                (c.src, act - c.rhs)
+                (super::seplearn::key(c.src, c.sub), act - c.rhs)
             })
             .collect();
         for c in chosen {
-            self.sl.add_chosen_nnz(c.src, c.coefs.len());
+            self.sl.add_chosen_nnz(super::seplearn::key(c.src, c.sub), c.coefs.len());
         }
         self.sl.prepare(obj0, items);
     }
@@ -1283,7 +1294,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if pool && r > 0 && alt_has('P') {
                     for (eff, kk) in self.pool_violated(&x) {
                         let (cc, rr, _) = &self.cut_pool[kk];
-                        c.push(Candidate { coefs: cc.clone(), rhs: *rr, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
+                        c.push(Candidate { coefs: cc.clone(), rhs: *rr, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0 });
                     }
                 }
                 c.into_iter().partition(|c| !c.forced)
@@ -2698,13 +2709,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     let (c, r, _) = &self.cut_pool[k];
-                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
+                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0 });
                 }
             }
             if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || ((env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some() || self.pool_part('P')) && !self.cutsel_guard_fc())) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", if self.pool_part('P') { 1000usize } else { 5 }, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
                 for (eff, k) in self.pool_violated(&x) {
                     let (c, r, _) = &self.cut_pool[k];
-                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
+                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0 });
                 }
             }
             // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `s`: 他の写し (別の頂点から始めた) が作ったカットを `ENOMOTO_T_MIP_OPTFACE_SHARE_EVERY`
@@ -2714,7 +2725,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `x`: 勝ったときに集めた負けた写しのカットを、このラウンドの候補に足す (1 回だけ)
             for (eff, c, r) in race_extra.drain(..) {
                 share_keys.insert(c.iter().map(|&(j, a)| (j, a.to_bits())).collect());
-                cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
+                cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0 });
             }
             if let Some((sh, id)) = job.as_ref().and_then(|j| j.share.lock().unwrap().clone()) {
                 let every = tunable!("ENOMOTO_T_MIP_OPTFACE_SHARE_EVERY", 2usize, usize).max(1);
@@ -2754,7 +2765,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // 受け取ったカットは送り返さない (`g`)
                         share_pub.insert(k.clone());
                         share_keys.insert(k);
-                        cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
+                        cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0 });
                     }
                 }
             }
@@ -4505,7 +4516,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         crate::simplex::slope_intercept_dual::xprof("hcm_sep");
         for (eff, k) in self.pool_violated(x) {
             let (c, r, _) = &self.cut_pool[k];
-            cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL });
+            cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0 });
         }
         crate::simplex::slope_intercept_dual::xprof("hcm_pool");
         if cands.is_empty() {
@@ -6253,6 +6264,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // 診断 `ENOMOTO_MIP_SEPSTAT` (analysis/sepeff_20261120/): 元の行のカットの種類 (CMIR・被覆・flow cover) を覚える
+        let gen_rec = (self.sl.stat && par_parts.is_none()).then(super::cuts::GenRec::start);
         for i in 0..if par_parts.is_some() { 0 } else { row_cuts_m } {
             if i % 64 == 0 && self.time_up() {
                 return cands;
@@ -6266,8 +6279,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 for (b, r) in [(row.as_slice(), p.row_up[i]), (neg.as_slice(), -p.row_lo[i])] {
                     if r.is_finite() {
                         let n0 = cands.len();
-                        for c in generate_cuts(&vars, b, r, use_flow_cover(), true) {
+                        let gc = generate_cuts(&vars, b, r, use_flow_cover(), true);
+                        let kinds = gen_rec.as_ref().map(|g| g.take_kinds()).unwrap_or_default();
+                        for (q, c) in gc.into_iter().enumerate() {
+                            let before = cands.len();
                             push(Some(c), &mut cands, self);
+                            if cands.len() > before {
+                                cands[before].sub = kinds.get(q).copied().unwrap_or(0);
+                            }
                         }
                         keep_best(&mut cands, n0, self.p);
                     }
@@ -6313,6 +6332,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("INTVUB stats (calls, narrow, at bound, fractional, not tight, substituted) {st:?}");
             }
         }
+        // 元の行の後の分離 (tableau・経路集約も `generate_cuts` を使う) の手間を元の行の種類に数えないよう、ここで記録を止める
+        drop(gen_rec);
         tag(&mut cands[nsrc0..], sepprof::SRC_ROWS);
         nsrc0 = cands.len();
         sepprof::lap(sepprof::T_ROWS, &mut lap);
@@ -6425,6 +6446,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (glo, gup) = (&sglo, &sgup);
             let max_ib = tunable!("ENOMOTO_T_MIP_IMPLBD_MAX", 5000usize, usize);
             let mut viol: Vec<(f64, RawCut)> = Vec::new();
+            // 診断用の手間 ([`crate::ticks::diag_add`]、既定の手間・期限には入れない): 含意の数
+            crate::ticks::diag_add(p.implied_bounds.len() as u64);
             for &(y, v, k, upper, b) in &p.implied_bounds {
                 let (y, k) = (y as usize, k as usize);
                 if ib_cont && p.is_int[k] && !(ib_gen && !(glo[k] >= 0.0 && gup[k] <= 1.0)) {
@@ -7798,7 +7821,7 @@ fn finish_cut(
     if cmirdelta_new {
         super::cmirdelta::note_new_cand(&coefs, rhs);
     }
-    Some(Candidate { coefs, rhs, efficacy, forced: false, src: 0 })
+    Some(Candidate { coefs, rhs, efficacy, forced: false, src: 0, sub: 0 })
 }
 
 /// 効き目の大きい順に、既に選んだものとほぼ平行 (|cos| > 0.99) なものを除いて選ぶ。
