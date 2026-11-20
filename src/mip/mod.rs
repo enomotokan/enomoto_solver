@@ -2758,6 +2758,12 @@ pub(crate) fn sym_sst() -> bool {
     env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v != "0")
 }
 
+/// 試作 `ENOMOTO_MIP_SYM_PPLEX` (analysis/scipsym_20261120/、既定では使わない): 詰め込みの行に入る対合の多い成分を 2 列の静的な詰め込み
+/// オービトープで扱う ([`symmetry::packing_orbisacks`])
+pub(crate) fn sym_pplex() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_PPLEX").is_some_and(|v| v != "0")
+}
+
 /// 試作 `ENOMOTO_MIP_SYM_SST=x` (analysis/sstx_20261119/、既定では使わない): [`sym_sst`] に加えて、ヒューリスティクスの解が SST の行だけに
 /// 反するとき、元の問題 (SST の行を足す前) で実行可能なら、SST の段の群で写して行を満たす代表にしてから暫定解にする
 /// ([`symmetry::sst_canonicalize`])。写せなければ目的値だけを打ち切りに使う (解は元の問題の解として持つ)。
@@ -3328,8 +3334,50 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         return prob;
     };
     // 完全オービトープは探索中の固定 (orbitopal fixing) で扱い、残りの生成元だけ lex-leader の行にする
-    let (mut orbs, used) = if env_str!("ENOMOTO_MIP_NO_ORBITOPE").is_none() { symmetry::find_orbitopes(&prob, &sym) } else { (Vec::new(), vec![false; sym.generators.len()]) };
+    let (mut orbs, mut used) = if env_str!("ENOMOTO_MIP_NO_ORBITOPE").is_none() { symmetry::find_orbitopes(&prob, &sym) } else { (Vec::new(), vec![false; sym.generators.len()]) };
     orbs.extend(twin_orbs);
+    // 試作 `ENOMOTO_MIP_SYM_PPLEX` ([`symmetry::packing_orbisacks`]、analysis/scipsym_20261120/): 詰め込みの行に入る対合の多い成分を、
+    // 対合ごとの 2 列の静的な詰め込みオービトープ (lex-leader の orbisack) で扱う。根で各オービトープの 1 行目の右の列を 0 に固定し
+    // (下の `pplex_fix`)、ORBPP_REPROBE の伝播・プロービングにかける。サブ MIP では使わない
+    let mut pplex_fix: Vec<usize> = Vec::new();
+    if sym_pplex() && !in_sub {
+        let mut orb_moved = vec![false; prob.n];
+        for o in &orbs {
+            for line in &o.vars {
+                for &j in line {
+                    orb_moved[j] = true;
+                }
+            }
+            for (_, _, perm) in &o.swaps {
+                for (j, &t) in perm.iter().enumerate() {
+                    if t != j {
+                        orb_moved[j] = true;
+                    }
+                }
+            }
+        }
+        let tp = std::time::Instant::now();
+        let (pp, pused, st) = symmetry::packing_orbisacks(
+            &prob,
+            &sym,
+            &used,
+            &orb_moved,
+            tunable!("ENOMOTO_T_MIP_SYM_PPLEX_NEW", 100usize, usize),
+            tunable!("ENOMOTO_T_MIP_SYM_PPLEX_WORK", 50_000_000u64, u64),
+        );
+        for &k in &pused {
+            used[k] = true;
+        }
+        pplex_fix = pp.iter().map(|o| o.vars[0][1]).collect();
+        if verbose {
+            let rows: usize = pp.iter().map(|o| o.vars.len()).sum();
+            eprintln!(
+                "MIP: symmetry: PPLEX: {} of {} components upgraded, {} packing orbisacks ({rows} rows) from {} generators and {} new involutions ({:.2}s)",
+                st[1], st[0], pp.len(), pused.len(), st[2], tp.elapsed().as_secs_f64()
+            );
+        }
+        orbs.extend(pp);
+    }
     let mut in_orb = vec![false; prob.n];
     for o in &orbs {
         for line in &o.vars {
@@ -3409,6 +3457,12 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     let mut orbs = orbs;
     let mut prob = prob;
     let mut static_fix = 0usize;
+    for j in pplex_fix {
+        if prob.col_up[j] > 0.0 && prob.col_lo[j] <= 0.0 {
+            prob.col_up[j] = 0.0;
+            static_fix += 1;
+        }
+    }
     // 既定は動的な orbitopal fixing (分枝した行をその順に使う、HiGHS と同じ): 行ごとのパッキングの印だけ付ける。
     // 根での固定 (x_{i,c} = 0, c > i) は行の固定の順に依るので、動的な固定とは混ぜられない
     let static_orbitope = env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_some();
