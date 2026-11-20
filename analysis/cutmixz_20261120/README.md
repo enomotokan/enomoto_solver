@@ -27,6 +27,7 @@ M (analysis/vsscip_20261120 の Mittelmann 186 問) を 1 スレッド・種 1�
 ## 3. 回し方・集計
 
 - ビルドは a7e9d28e8 以降 (新しい MPS 読み込み入り) の先端。回したコミットをここに書き足すこと。
+  - M 7: 23888f312 (wheel を site-packages に入れて回した)。
   - M 0: ビルド 9711bc9d6 (作業ツリー 972c46d06)。
   - P 0: ビルド 9711bc9d6 (build.sh の wheel)、作業ツリー e05d73651 (cc50efa22 以降)。174 行・crash 0。
   - P 1: ビルド c5c5c3e31 (build.sh の wheel)、作業ツリー 4f219fff2 (cc50efa22 以降)。174 行・crash 0。
