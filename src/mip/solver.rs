@@ -906,6 +906,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) root_lp_iters: u64,
     /// 試作 `ENOMOTO_MIP_ROOTSB` の `f` で木の予算に数えなかった強分岐の反復
     pub(super) rootsb_iters: u64,
+    /// 試作 `ENOMOTO_MIP_ROOTSB`: 強めた強分岐の反復の合計 (仕事量の上限と比べる) と、今の分枝の選択で強めたか
+    pub(super) rootsb_used: u64,
+    pub(super) rootsb_active: bool,
     /// 試作 `ENOMOTO_MIP_DFSBB` (既定では使わない、treeclose 9.36 節): 今の潜りを始めたときの手間 (主のスレッドの LP の反復)、
     /// 手間の上限で潜りを打ち切ったか、統計 [潜りの回数, 上限で打ち切った回数, 葉・刈り込みで終わった回数]
     dfsbb_start: u64,
@@ -5461,6 +5464,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_same_obj: false,
         root_lp_iters: 0,
         rootsb_iters: 0,
+        rootsb_used: 0,
+        rootsb_active: false,
         dfsbb_start: 0,
         fjsub: None,
         fjsub_next: 0,
@@ -16992,11 +16997,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.last_sb = None;
         self.poly_diag_raised.clear();
         let sb_iters0 = self.sb_iters;
+        self.rootsb_active = false;
         let r = self.select_branch_inner(frac, node_obj, depth);
-        // 試作 `ENOMOTO_MIP_ROOTSB` の `f`: 強めた強分岐の反復を木の強分岐の予算に数えない
-        if !self.params.submip && depth <= tunable!("ENOMOTO_T_MIP_ROOTSB_DEPTH", 0usize, usize) && super::rootsb_flags().is_some_and(|f| f.contains('f')) {
-            self.rootsb_iters += self.sb_iters - sb_iters0;
-            self.sb_iters = sb_iters0;
+        // 試作 `ENOMOTO_MIP_ROOTSB`: 強めた強分岐の反復の合計を数える。`f` なら木の強分岐の予算 (`sb_iters`) に数えない
+        if self.rootsb_active {
+            self.rootsb_used += self.sb_iters - sb_iters0;
+            if super::rootsb_flags().is_some_and(|f| f.contains('f')) {
+                self.rootsb_iters += self.sb_iters - sb_iters0;
+                self.sb_iters = sb_iters0;
+            }
         }
         // 試作 `ENOMOTO_MIP_GEN_LAZY_SB`: 強分岐の子の LP 解が破った外した行を戻し、分枝せずにノードの LP を解き直す
         let r = if self.gen_lazy.has_pending() {
@@ -17298,10 +17307,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let lookahead = if rsb_on('l') { (lookahead as f64 * tunable!("ENOMOTO_T_MIP_ROOTSB_LA", 4.0, f64)) as usize } else { lookahead };
         let max_tried = if rsb_on('l') { max_tried.max(tunable!("ENOMOTO_T_MIP_ROOTSB_MAXCAND", 200usize, usize)) } else { max_tried };
-        let rsb_sb0 = self.sb_iters;
         let rsb_work = tunable!("ENOMOTO_T_MIP_ROOTSB_WORK", 20.0, f64) * rsb_unit;
-        // 予算の判定: 試作では、このノードで使った反復と仕事量の上限を比べる
-        let maxsb = if rsb.is_some() { rsb_sb0 as f64 + rsb_work } else { maxsb };
+        // 予算の判定: 試作では、強めた強分岐 (列の固定の後の解き直しで何度呼ばれても、深さの上限までのノード全部で) の反復の合計
+        // (`rootsb_used`) と仕事量の上限を比べる。上限を使い切ったら、ここからは既定の強分岐 (既定の上限・予算) に戻す
+        let rsb = rsb.filter(|_| (self.rootsb_used as f64) < rsb_work);
+        let (sb_iter_limit, lookahead, max_tried) = if rsb.is_some() { (sb_iter_limit, lookahead, max_tried) } else {
+            (((tunable!("ENOMOTO_T_MIP_SB_ITERMULT", 4.0, f64) * self.avg_node_iters() as f64 * (1.0 + 20.0 / self.nodes.max(1) as f64)) as u64).clamp(10, 500),
+             (tunable!("ENOMOTO_T_MIP_SB_LOOKAHEAD", 9.0, f64) * (1.0 + unreliable as f64 / cands.len().max(1) as f64)) as usize,
+             tunable!("ENOMOTO_T_MIP_SB_MAXCAND", 100usize, usize))
+        };
+        let maxsb = if rsb.is_some() { self.sb_iters as f64 + (rsb_work - self.rootsb_used as f64) } else { maxsb };
+        self.rootsb_active = rsb.is_some();
         let mut best: Option<(usize, f64, f64)> = None; // (列, 値, スコア)
         self.last_sb = None;
         let mut best_sb: Option<(usize, f64, f64)> = None; // best が強分岐で評価した列なら (列, 下の子の値, 上の子の値)
