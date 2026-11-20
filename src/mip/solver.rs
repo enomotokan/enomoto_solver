@@ -27351,7 +27351,8 @@ pub(super) fn inf_all() -> bool {
 /// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=g` (analysis/slowm_20261119 §17、既定では使わない): 一般整数の境界の文字を含む衝突で締めた変更も遡れるようにする
 pub(super) fn lit_explain_gen() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v.contains('g')))
+    // `sig` (p2inf_20261119 の予算つきの形) も 'g' を含むので除く
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v.contains('g') && v != "sig"))
 }
 
 pub(super) fn lit_explain() -> bool {
