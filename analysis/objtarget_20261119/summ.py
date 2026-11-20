@@ -20,11 +20,18 @@ def pg(o, z):
     if abs(o - z) <= 1e-9 * max(1.0, abs(z)): return 0.0
     if o * z < 0: return 1.0
     return abs(o - z) / max(abs(o), abs(z))
+
+def shift_inc(r):
+    """暫定解の推移の時刻 (木の時計) を外側の求解の時計に直す: 最初の暫定解の外側の時刻 (first_solution_time) との差を足す"""
+    inc = r["result"].get("inc") or []
+    fst = r["result"].get("first_solution_time")
+    off = (fst - inc[0][0]) if (inc and fst is not None and fst >= inc[0][0]) else 0.0
+    return [(t + off, v) for t, v in inc]
 def pint(r):
     z = ref.get(r["problem"])
     if z is None: return None
     tl = r["tl"]; end = t(r); s = 0.0; t0 = 0.0; g = 1.0
-    for ti, v in r["result"].get("inc") or []:
+    for ti, v in shift_inc(r):
         ti = min(ti, end); s += g * (ti - t0); t0 = ti; g = pg(v, z)
     s += g * (end - t0)
     return s
