@@ -906,6 +906,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) root_lp_iters: u64,
     /// 試作 `ENOMOTO_MIP_ROOTSB` の `f` で木の予算に数えなかった強分岐の反復
     pub(super) rootsb_iters: u64,
+    /// 試作 `ENOMOTO_MIP_ROOTSB`: 強めた強分岐の反復の合計 (仕事量の上限と比べる) と、今の分枝の選択で強めたか
+    pub(super) rootsb_used: u64,
+    pub(super) rootsb_active: bool,
     /// 試作 `ENOMOTO_MIP_DFSBB` (既定では使わない、treeclose 9.36 節): 今の潜りを始めたときの手間 (主のスレッドの LP の反復)、
     /// 手間の上限で潜りを打ち切ったか、統計 [潜りの回数, 上限で打ち切った回数, 葉・刈り込みで終わった回数]
     dfsbb_start: u64,
@@ -5459,6 +5462,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_same_obj: false,
         root_lp_iters: 0,
         rootsb_iters: 0,
+        rootsb_used: 0,
+        rootsb_active: false,
         dfsbb_start: 0,
         fjsub: None,
         fjsub_next: 0,
@@ -16973,11 +16978,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.last_sb = None;
         self.poly_diag_raised.clear();
         let sb_iters0 = self.sb_iters;
+        self.rootsb_active = false;
         let r = self.select_branch_inner(frac, node_obj, depth);
-        // 試作 `ENOMOTO_MIP_ROOTSB` の `f`: 強めた強分岐の反復を木の強分岐の予算に数えない
-        if !self.params.submip && depth <= tunable!("ENOMOTO_T_MIP_ROOTSB_DEPTH", 0usize, usize) && super::rootsb_flags().is_some_and(|f| f.contains('f')) {
-            self.rootsb_iters += self.sb_iters - sb_iters0;
-            self.sb_iters = sb_iters0;
+        // 試作 `ENOMOTO_MIP_ROOTSB`: 強めた強分岐の反復の合計を数える。`f` なら木の強分岐の予算 (`sb_iters`) に数えない
+        if self.rootsb_active {
+            self.rootsb_used += self.sb_iters - sb_iters0;
+            if super::rootsb_flags().is_some_and(|f| f.contains('f')) {
+                self.rootsb_iters += self.sb_iters - sb_iters0;
+                self.sb_iters = sb_iters0;
+            }
         }
         // 試作 `ENOMOTO_MIP_GEN_LAZY_SB`: 強分岐の子の LP 解が破った外した行を戻し、分枝せずにノードの LP を解き直す
         let r = if self.gen_lazy.has_pending() {
@@ -17279,10 +17288,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let lookahead = if rsb_on('l') { (lookahead as f64 * tunable!("ENOMOTO_T_MIP_ROOTSB_LA", 4.0, f64)) as usize } else { lookahead };
         let max_tried = if rsb_on('l') { max_tried.max(tunable!("ENOMOTO_T_MIP_ROOTSB_MAXCAND", 200usize, usize)) } else { max_tried };
-        let rsb_sb0 = self.sb_iters;
         let rsb_work = tunable!("ENOMOTO_T_MIP_ROOTSB_WORK", 20.0, f64) * rsb_unit;
-        // 予算の判定: 試作では、このノードで使った反復と仕事量の上限を比べる
-        let maxsb = if rsb.is_some() { rsb_sb0 as f64 + rsb_work } else { maxsb };
+        // 予算の判定: 試作では、強めた強分岐 (列の固定の後の解き直しで何度呼ばれても、深さの上限までのノード全部で) の反復の合計
+        // (`rootsb_used`) と仕事量の上限を比べる。上限を使い切ったら、ここからは既定の強分岐 (既定の上限・予算) に戻す
+        let rsb = rsb.filter(|_| (self.rootsb_used as f64) < rsb_work);
+        let (sb_iter_limit, lookahead, max_tried) = if rsb.is_some() { (sb_iter_limit, lookahead, max_tried) } else {
+            (((tunable!("ENOMOTO_T_MIP_SB_ITERMULT", 4.0, f64) * self.avg_node_iters() as f64 * (1.0 + 20.0 / self.nodes.max(1) as f64)) as u64).clamp(10, 500),
+             (tunable!("ENOMOTO_T_MIP_SB_LOOKAHEAD", 9.0, f64) * (1.0 + unreliable as f64 / cands.len().max(1) as f64)) as usize,
+             tunable!("ENOMOTO_T_MIP_SB_MAXCAND", 100usize, usize))
+        };
+        let maxsb = if rsb.is_some() { self.sb_iters as f64 + (rsb_work - self.rootsb_used as f64) } else { maxsb };
+        self.rootsb_active = rsb.is_some();
         let mut best: Option<(usize, f64, f64)> = None; // (列, 値, スコア)
         self.last_sb = None;
         let mut best_sb: Option<(usize, f64, f64)> = None; // best が強分岐で評価した列なら (列, 下の子の値, 上の子の値)
@@ -19755,7 +19771,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // B = 16: σ ≈ 1 で回した 6 問 (1 スレッド、予算なし) の解析 1 回で遡った数の分布で、一番多い bnatt400 の部分木でも 16 以下が 99%
         // (194 回のうち 17〜32 が 2 回)、mcsched・timtab1・supportcase33・fastxgemm・net12 はほぼ 1〜2 (analysis/p2inf_20261119 5.5 節)
         let lx_budget: u64 = if lit_explain_sig() {
-            (self.cw_ramp_sig * tunable!("ENOMOTO_T_MIP_LIT_EXPLAIN_BUDGET", 16.0, f64)).round() as u64
+            let x = self.cw_ramp_sig * tunable!("ENOMOTO_T_MIP_LIT_EXPLAIN_BUDGET", 16.0, f64);
+            // 選択肢 `ENOMOTO_MIP_LIT_EXPLAIN_SROUND=1` (既定はオフ): 四捨五入 (σ < 1/32 で 0 になる暗黙の境目) の代わりに確率的に丸める
+            // (期待値 16σ)。乱数はスレッドの種・ノード番号・解析の通し番号から決め、時刻は使わない
+            if lit_explain_sround() {
+                let mut z = (self.rng ^ u64::from(self.pool_tid).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                    .wrapping_add(self.nodes.wrapping_mul(0xBF58_476D_1CE4_E5B9))
+                    .wrapping_add(self.hcs_diag[0].wrapping_mul(0x94D0_49BB_1331_11EB));
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                let u = (z >> 11) as f64 / (1u64 << 53) as f64;
+                x.floor() as u64 + u64::from(u < x - x.floor())
+            } else {
+                x.round() as u64
+            }
         } else {
             u64::MAX
         };
@@ -26872,6 +26902,11 @@ pub(super) fn inf_all() -> bool {
 pub(super) fn lit_explain() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN").is_some_and(|v| v != "0" && v != "auto" && v != "sig"))
+}
+
+fn lit_explain_sround() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_LIT_EXPLAIN_SROUND").is_some_and(|v| v != "0"))
 }
 
 /// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=sig` (cwrh): リテラルの衝突の伝播にいつも理由を付け、遡る回数を解析ごとに RAMP の σ に比べた予算で抑える
