@@ -37,11 +37,9 @@ SHIFT = 10.0
 # ---------------------------------------------------------------- workers (子プロセス)
 
 def worker_enomoto(mps: str, threads: int, limit: float) -> None:
-    import highspy
     from enomoto_solver import _core
-    from run_mittelmann_benchmark import _build_our_model
-    h = highspy.Highs(); h.setOptionValue("output_flag", False); h.readModel(mps)
-    model = _build_our_model(h.getLp()); del h
+    from enomoto_solver import benchmark_highs as bh
+    model, _, _, _ = bh._read_our_model(Path(mps))
     print("BUILT", flush=True)
     t0 = time.perf_counter()
     out = model.solve(lp_solver="auto", distinguish_infeasible_unbounded=True, threads=threads, time_limit=limit)
