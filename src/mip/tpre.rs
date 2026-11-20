@@ -310,7 +310,11 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
     use std::sync::{Arc, Mutex};
     let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
     let t0 = std::time::Instant::now();
-    let iters = tunable!("ENOMOTO_T_MIP_TPRE_PDLP_ITERS", 2000usize, usize);
+    lower_priority();
+    // 手間を問題の大きさで決める: PDLP の反復 × 非零 ≤ `ENOMOTO_T_MIP_TPRE_PDLP_WORK` (4e8、200 反復以上)。PP の計測で、大きい問題
+    // (ns1116954 13 万行・41 万非零、nw04 60 万非零) では 2000 反復に 5〜9 秒かかり、主が前処理の後で 3.5〜6.6 秒待った
+    let nnz: usize = p.rows.iter().map(|r| r.len()).sum::<usize>().max(1);
+    let iters = tunable!("ENOMOTO_T_MIP_TPRE_PDLP_ITERS", 2000usize, usize).min(((tunable!("ENOMOTO_T_MIP_TPRE_PDLP_WORK", 4e8, f64) / nnz as f64) as usize).max(200));
     let lp = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
     let xo = Arc::new(Mutex::new(Vec::new()));
     if let Some(b) = lp.pdlrc_run_iters_hist(iters, None, Some(xo.clone())) {
@@ -325,9 +329,11 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
     }
     let t1 = std::time::Instant::now();
     let mut viol = 0usize;
+    // FJ 1 回の手間の上限 (`ENOMOTO_T_MIP_TPRE_FJ_TICKS`、手間の単位で 1e9 ≒ 1 秒。FJ の既定の上限 (非零 × 1024) より先に効く大きい問題で止める)
+    let fj_ticks = tunable!("ENOMOTO_T_MIP_TPRE_FJ_TICKS", 1e9, f64);
     for k in 0..tunable!("ENOMOTO_T_MIP_TPRE_FJ_RUNS", 2usize, usize) {
         let sd = seed.wrapping_add((k as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        if let Some(x) = super::fj::fj2_search_from(p, &p.col_lo, &p.col_up, Some(&x0), safety, sd, None) {
+        if let Some(x) = crate::ticks::with_budget(fj_ticks, || super::fj::fj2_search_from(p, &p.col_lo, &p.col_up, Some(&x0), safety, sd, None)) {
             if p.is_feasible(&x, 1e-6) {
                 let z = p.objective(&x);
                 if z < out.x_z {
@@ -349,7 +355,8 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64) -> TpreOut {
         if let Some(mut lm) = super::localmip::LocalMip::new(p, &p.col_lo, &p.col_up, seed ^ 0x6A09_E667_F3BC_C909, true) {
             // 出発点は PDLP の点 (8 の単独の比べで、FJ の解から始めるより良かった)
             lm.set_start(&x0);
-            lm.step_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_STEPS", 100_000u64, u64);
+            // 手の数も大きさで決める: 手 × 非零 ≤ `ENOMOTO_T_MIP_TPRE_LMIP_WORK` (2e9)
+            lm.step_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_STEPS", 100_000u64, u64).min(((tunable!("ENOMOTO_T_MIP_TPRE_LMIP_WORK", 2e9, f64) / nnz as f64) as u64).max(1000));
             lm.run(std::time::Instant::now() + std::time::Duration::from_secs_f64(safety), None, &|_| {});
             if let Some(x) = lm.res.best.clone() {
                 if p.is_feasible(&x, 1e-6) {
