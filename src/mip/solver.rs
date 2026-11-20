@@ -196,6 +196,13 @@ pub(super) fn rhstat_on() -> bool {
 ///   残りのダイビングの取り分を半分にする (停滞の判定を手間で)
 ///
 /// **cand1118 (2026-11-16、analysis/treeclose_20261114.md 9.51 節) で既定にした: 値 `es`。`0`・`off` で 0.1.7 までの動き (使わない)。**
+/// 試作 `ENOMOTO_MIP_VB01=<文字>` (既定では使わない。analysis/vb01_20261120/README.md): 0-1 列どうしの含意を使う vbounds
+/// ([`Solver::vbounds01_heur`]) を回す場所。`r` (値 `1` も同じ): 根の SCIP 由来のヒューリスティクス (locks・clique・vbounds) の後、
+/// `b`: 前処理の後・根の LP の直前 (SCIP の heur_vbounds の BEFORENODE に当たる。SCIP-GATE の `ENOMOTO_MIP_VBCLQ` の `p` の前)
+pub(super) fn vb01(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_VB01").is_some_and(|v| v.contains(c) || (c == 'r' && v == "1"))
+}
+
 /// 試作 `ENOMOTO_MIP_VBCLQ` の値 (既定では使わない。analysis/scipgate_20261120)
 pub(super) fn vbclq() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_VBCLQ").filter(|v| !v.is_empty() && *v != "0")
@@ -9885,6 +9892,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // 試作 `ENOMOTO_MIP_VB01` の `b` ([`vb01`]): 根の LP の前に、0-1 列どうしの含意を使う vbounds ([`Self::vbounds01_heur`])
+        if vb01('b') && self.snap.is_none() && !self.params.submip && !self.dom.infeasible {
+            let t0 = Instant::now();
+            let r = self.vbounds01_heur();
+            if self.params.verbose {
+                eprintln!("MIP: VB01 before the root LP: {} ({:.2}s)", if r { "found" } else { "none" }, t0.elapsed().as_secs_f64());
+            }
+        }
         // 試作 `ENOMOTO_MIP_VBCLQ` (既定では使わない。analysis/scipgate_20261120): 根の LP の前に、暫定解があれば目的の上限と
         // クリーク表の含意で 0-1 列を大域的に固定する ([`Self::vbclq_pseudoobj`]、SCIP の pseudoobj の propuseimplics に当たる)。
         // SCIP は hypothyroid-k1 で、根の LP の前の vbounds の解とこの伝播で 1318 列を固定し、最初の LP が小さく強い
@@ -11079,7 +11094,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             heur!("vbounds (tight)", self.vbounds_heur(false));
                         }
                         // 試作 `ENOMOTO_MIP_VB01` ([`Self::vbounds01_heur`]): 0-1 列どうしの含意を使う vbounds
-                        if env_str!("ENOMOTO_MIP_VB01").is_some() {
+                        if vb01('r') {
                             heur!("VB01", self.vbounds01_heur());
                         }
                     }
@@ -11150,7 +11165,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         heur!("vbounds (tight)", self.vbounds_heur(false));
                     }
                 }
-                if !early_scip && scip_heur_ok(self) && env_str!("ENOMOTO_MIP_VB01").is_some() {
+                if !early_scip && scip_heur_ok(self) && vb01('r') {
                     heur!("VB01", self.vbounds01_heur());
                 }
                 // 並列モード: 別スレッドのサブ MIP の結果を出した順に受け取る
