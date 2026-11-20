@@ -20394,161 +20394,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let t0 = Instant::now();
         let g = self.clique_graph_get();
         let u = self.prune_limit() - p.offset;
-        let tol = 1e-9 * u.abs().max(1.0);
-        let bin = |s: &Self, j: usize| p.is_int[j] && s.dom.lo[j] == 0.0 && s.dom.up[j] == 1.0;
-        let (mut fixed, mut passes, mut infeas) = (0usize, 0usize, false);
-        let max_passes = tunable!("ENOMOTO_T_MIP_VBCLQ_PASSES", 10usize, usize);
-        let mut slack0 = f64::NAN;
-        let mut mark: Vec<u32> = vec![u32::MAX; p.n];
-        // 目的の配り直し (前処理は変えず、ここでの数え方だけ): 目的を持つ列 j が 1 本の等式 `a x_j + sum a_k x_k = b` にしか
-        // 出なければ、目的 c_j x_j = c_j (b - sum a_k x_k) / a なので、目的を他の列に配る (j 自身の目的は 0、定数 c_j b / a)。
-        // 列 j の境界は使わないだけ (弱くなるだけで正しい)。同じ行を 2 回使わず、配り先に配り直す列を含む行は使わない
-        let mut cnt = vec![0u32; p.n];
-        let mut where_: Vec<usize> = vec![usize::MAX; p.n];
-        for (i, r) in p.rows.iter().enumerate() {
-            for &(k, _) in r {
-                cnt[k] += 1;
-                where_[k] = i;
-            }
-        }
-        let mut cost = p.cost.clone();
-        let mut cconst = 0.0;
-        let mut row_used = vec![false; p.m];
-        let mut nsub = 0usize;
-        for j in 0..p.n {
-            if p.cost[j] == 0.0 || cnt[j] != 1 {
-                continue;
-            }
-            let i = where_[j];
-            if row_used[i] || p.row_lo[i] != p.row_up[i] || !p.row_lo[i].is_finite() {
-                continue;
-            }
-            let r = &p.rows[i];
-            if r.iter().any(|&(k, _)| k != j && p.cost[k] != 0.0 && cnt[k] == 1) {
-                continue;
-            }
-            let a = r.iter().find(|&&(k, _)| k == j).map_or(0.0, |e| e.1);
-            if a == 0.0 {
-                continue;
-            }
-            let f = p.cost[j] / a;
-            for &(k, ak) in r {
-                if k != j {
-                    cost[k] -= f * ak;
-                }
-            }
-            cost[j] = 0.0;
-            cconst += f * p.row_lo[i];
-            row_used[i] = true;
-            nsub += 1;
-        }
-        while passes < max_passes && !infeas {
-            passes += 1;
-            // 目的の最小値 (無限なら何もしない)
-            let mut minobj = cconst;
-            for j in 0..p.n {
-                let c = cost[j];
-                if c != 0.0 {
-                    minobj += if c > 0.0 { c * self.dom.lo[j] } else { c * self.dom.up[j] };
-                }
-            }
-            if !minobj.is_finite() {
-                break;
-            }
-            let mut slack = u - minobj;
-            if passes == 1 {
-                slack0 = slack;
-            }
-            if slack < -tol {
-                infeas = true;
-                break;
-            }
-            let fixed0 = fixed;
-            for j in 0..p.n {
-                if !bin(self, j) {
-                    continue;
-                }
-                for (side, l) in [(1.0f64, 2 * j as u32), (0.0, 2 * j as u32 + 1)] {
-                    if !bin(self, j) {
-                        break;
-                    }
-                    // 自分の損: x_j = side
-                    let c = cost[j];
-                    let mut loss = if side == 1.0 { c.max(0.0) } else { (-c).max(0.0) };
-                    let stamp = l;
-                    let mut inf = false;
-                    for &m in g.neighbors(l) {
-                        let k = (m / 2) as usize;
-                        if k == j {
-                            continue;
-                        }
-                        // m が偽: x_k = 0 (m = 2k) / x_k = 1 (m = 2k + 1)
-                        let v = if m % 2 == 0 { 0.0 } else { 1.0 };
-                        if v < self.dom.lo[k] || v > self.dom.up[k] {
-                            inf = true;
-                            break;
-                        }
-                        if mark[k] == stamp {
-                            // 同じ列の両方の文字と衝突: l は真になれない
-                            inf = true;
-                            break;
-                        }
-                        mark[k] = stamp;
-                        if self.dom.lo[k] < self.dom.up[k] {
-                            let ck = cost[k];
-                            let best = if ck > 0.0 { self.dom.lo[k] } else { self.dom.up[k] };
-                            loss += ck * (v - best);
-                        }
-                    }
-                    if inf || loss > slack + tol {
-                        // 文字 l は偽: x_j = 1 - side
-                        let w = 1.0 - side;
-                        self.dom.tighten_global(p, j, w == 0.0, w);
-                        if w == 0.0 {
-                            self.dom.tighten_upper(p, j, 0.0);
-                        } else {
-                            self.dom.tighten_lower(p, j, 1.0);
-                        }
-                        fixed += 1;
-                        // 目的に悪い側に固定したら余裕が減る
-                        let best = if c > 0.0 { 0.0 } else { 1.0 };
-                        slack -= c * (w - best);
-                        if slack < -tol {
-                            infeas = true;
-                        }
-                        break;
-                    }
-                }
-                if infeas {
-                    break;
-                }
-            }
-            if infeas || fixed == fixed0 {
-                break;
-            }
-            if !self.dom.propagate(p) {
-                infeas = true;
-                break;
-            }
-            mark.iter_mut().for_each(|s| *s = u32::MAX);
-        }
-        // 診断 `ENOMOTO_MIP_VBCLQ_COUNT_FILE=<ファイル>`: 呼ばれるたびに「固定した列の数 打ち切りの証明 (0/1)」を 1 行足す (fuzz で働いた回数を数える)
-        if let Some(f) = env_str!("ENOMOTO_MIP_VBCLQ_COUNT_FILE") {
-            use std::io::Write;
-            if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(f) {
-                let _ = writeln!(fh, "{fixed} {}", infeas as u8);
-            }
-        }
+        let o = super::vbclq::pseudoobj(p, &mut self.dom, &g, u);
+        super::vbclq::count_file(&o);
         if self.params.verbose {
             let free = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).count();
             eprintln!(
-                "MIP: VBCLQ: pseudo-objective with cliques: {nsub} objective columns substituted, {fixed} fixed in {passes} passes{}, slack {slack0:.6e}, free integers now {free}, cutoff {:.10e} ({:.2}s)",
-                if infeas { ", no solution better than the cutoff" } else { "" },
+                "MIP: VBCLQ: pseudo-objective with cliques: {} objective columns substituted, {} fixed in {} passes{}, slack {:.6e}, free integers now {free}, cutoff {:.10e} ({:.2}s)",
+                o.nsub,
+                o.fixed,
+                o.passes,
+                if o.infeas { ", no solution better than the cutoff" } else { "" },
+                o.slack0,
                 self.prune_limit(),
                 t0.elapsed().as_secs_f64()
             );
         }
-        fixed
+        o.fixed
     }
 
     pub(super) fn objprobe_round(&mut self, round: usize) {
