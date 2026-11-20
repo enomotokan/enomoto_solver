@@ -5,7 +5,8 @@
 
 - HiGHS: 既定の設定 + `time_limit` + `mip_rel_gap = 0` (このクレートの既定の相対ギャップ 0 にそろえる。2026-10-20 から。
   それより前の結果は HiGHS の既定 1e-4)。`Highs.run()` の時間を測る。
-- このクレート: MPS は HiGHS で読み、`benchmark_highs._build_our_model` でモデルを作る (整数性も渡す)。
+- このクレート: MPS はこのクレートの読み込み (`benchmark_highs._read_our_model` → `PyModel.read_mps`) で読む
+  (2026-11-20 から。それより前は HiGHS で読んで `benchmark_highs._build_our_model` で組み立てていた)。
   `model.solve(time_limit=...)` の時間だけを測る。親プロセスは時間上限 + 余裕で打ち切る。
 
 結果は問題ごとに `--out` (JSON) に書き足すので、中断しても同じコマンドで再開できる。
@@ -41,6 +42,18 @@ PROBLEMS = [
     "bppc4-08", "cvs16r128-89", "mik-250-20-75-4", "neos-1456979", "graph20-20-1rand",
 ]
 
+
+
+def _read_our_model_compat(bh, path):
+    """`benchmark_highs._read_our_model` (このクレートの MPS 読み込み) でモデルを作る。古いビルドを wheel で入れた
+    環境では `benchmark_highs` 自体が古く `_read_our_model` がないので、従来の HiGHS 経由の組み立てに戻る
+    (台本だけ新しくなった計測が落ちないように)。戻り値は `(model, 制約数, 非零数, 列の名前)`。"""
+    if hasattr(bh, "_read_our_model"):
+        return bh._read_our_model(path)
+    _, lp = bh._load_lp(path)
+    names = list(lp.col_names_) if len(lp.col_names_) == lp.num_col_ else [f"C{j}" for j in range(lp.num_col_)]
+    model, n_constraints, nnz = bh._build_our_model(lp)
+    return model, n_constraints, nnz, names
 
 def fetch(name: str, cache: Path) -> Path:
     """`name` の MPS を取得して展開し、そのパスを返す。"""
@@ -99,11 +112,49 @@ def worker_highs(mps: str, time_limit: float, threads: int) -> None:
     }))
 
 
+# SCIP の状態を worker_ours の名前にそろえる (HiGHS は "Optimal" など別の名前のまま。summ 側で両方を読む)
+SCIP_STATUS = {"optimal": "optimal", "infeasible": "infeasible", "unbounded": "unbounded", "inforunbd": "infeasible_or_unbounded",
+               "timelimit": "time_limit", "memlimit": "memory_limit", "nodelimit": "node_limit", "gaplimit": "gap_limit",
+               "userinterrupt": "interrupted"}
+
+
+def worker_scip(mps: str, time_limit: float, threads: int) -> None:
+    """SCIP (pyscipopt の wheel に同梱) で解く。SCIP は既定で逐次 (1 スレッド) なので threads は使わない (記録だけ)。
+    時間の上限 limits/time、相対ギャップ limits/gap = 0 (HiGHS の mip_rel_gap = 0・このクレートの既定にそろえる。SCIP の既定も 0)。
+    メモリの上限は付けない (limits/memory は既定の無限大のまま)。
+    `ENOMOTO_BENCH_SCIP_SEED=N`: randomization/randomseedshift = N。`ENOMOTO_BENCH_SCIP_LOG=1`: SCIP のログを出す。"""
+    import pyscipopt
+
+    m = pyscipopt.Model()
+    if not os.environ.get("ENOMOTO_BENCH_SCIP_LOG"):
+        m.hideOutput()
+    m.setParam("limits/time", time_limit)
+    m.setParam("limits/gap", 0.0)
+    seed = int(os.environ.get("ENOMOTO_BENCH_SCIP_SEED", "0"))
+    if seed:
+        m.setParam("randomization/randomseedshift", seed)
+    m.readProblem(mps)
+    t = time.perf_counter()
+    m.optimize()
+    t = time.perf_counter() - t
+    st = m.getStatus()
+    has = m.getNSols() > 0
+    print(json.dumps({
+        "status": SCIP_STATUS.get(st, st),
+        "objective": m.getObjVal() if has else None,
+        "bound": m.getDualbound(),
+        "nodes": m.getNTotalNodes(),
+        "time": t,
+        "scip_time": m.getSolvingTime(),
+        "scip_version": f"{m.getMajorVersion()}.{m.getMinorVersion()}.{m.getTechVersion()}",
+        "pyscipopt_version": pyscipopt.__version__,
+    }))
+
+
 def worker_ours(mps: str, time_limit: float, threads: int) -> None:
     from enomoto_solver import benchmark_highs as bh
 
-    _, lp = bh._load_lp(Path(mps))
-    m, _, _ = bh._build_our_model(lp)
+    m, _, _, _ = _read_our_model_compat(bh, Path(mps))
     t = time.perf_counter()
     r = m.solve(None, False, time_limit, None, None, threads)
     t = time.perf_counter() - t
@@ -231,12 +282,15 @@ def main() -> None:
     ap.add_argument("--rerun-highs", action="store_true", help="このクレートの結果は再利用し、HiGHS だけ解き直す")
     ap.add_argument("--worker-highs")
     ap.add_argument("--worker-ours")
+    ap.add_argument("--worker-scip")
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")  # 表の ✓ を cp932 のコンソールでも出せるように
     if a.worker_highs:
         return worker_highs(a.worker_highs, a.time_limit, a.threads)
     if a.worker_ours:
         return worker_ours(a.worker_ours, a.time_limit, a.threads)
+    if a.worker_scip:
+        return worker_scip(a.worker_scip, a.time_limit, a.threads)
     results = json.loads(a.out.read_text(encoding="utf-8")) if a.out.exists() else {}
     if not a.table:
         names = a.only or PROBLEMS

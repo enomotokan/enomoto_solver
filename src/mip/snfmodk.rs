@@ -14,7 +14,7 @@
 //! - [`snf_group`]: 整数の行列 (行ごとの疎な形) を受け取り、対角化して群 (e_i > 1 の因子と生成元) を返す。まず ±1 の要素を軸にした
 //!   疎な消去 (行の組み合わせを持ち歩く)、残った核を密な i128 の対角化。算術はすべて溢れを検査し、溢れたら諦める。
 //!   この関数は行列だけを受け取るので、zerohalf の連立 ([`snfmodk_cg_cuts`]) にも、変数上下限で置き換えた空間の連立
-//!   (`ENOMOTO_MIP_MODKVB`、[`super::modkvb`]) にも使える。
+//!   (`ENOMOTO_MIP_MODKVB`、2026-11-18 に削除) にも使えた。
 //! - [`group_elements`]: 生成元 1 つの倍数と、χ の位数が増える 2 つの生成元の組 (中国剰余定理での組み合わせ) から、違反の大きい元を並べる。
 //! - [`snfmodk_cg_cuts`]: zerohalf と同じ行・列の選び方 (整数列だけ・整数係数・整数右辺の元の行、LP 値に近い方の境界で置き換え) で、
 //!   余裕 0 の行だけの連立から CG カットを厳密な整数の算術で作る。
@@ -22,8 +22,7 @@
 use super::cuts::RawCut;
 
 /// 試作 `ENOMOTO_MIP_SNFMODK` の文字 (`None` = 使わない)。`c` (または `1`): zerohalf の連立からの CG カット ([`snfmodk_cg_cuts`])。
-/// `v`: `ENOMOTO_MIP_MODKVB` の連立 (変数上下限の置き換え) で GF(k) の代わりに群の元を使う (MODKVB も付けたときだけ)。
-/// `k`: `v` のとき GF(k) の解も残す (群の元を先に試し、カットが出なければ GF(k))
+/// (`v`・`k` は削除した `ENOMOTO_MIP_MODKVB` の連立で使っていた文字。今は何もしない)
 pub(crate) fn snfmodk_mode() -> Option<&'static str> {
     static M: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     M.get_or_init(|| match std::env::var("ENOMOTO_MIP_SNFMODK") {

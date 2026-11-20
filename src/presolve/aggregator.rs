@@ -700,6 +700,12 @@ fn tree2_intagg_def_only() -> bool {
     tree2_intagg_env() == Some("d")
 }
 
+/// `ENOMOTO_AGG_PIVOT_COL` (既定で入れる、`=0` で切る): ピボットの比を列の側でも判定する。
+/// analysis/pcd_20261117 (P −4.1% [−8.9, −0.2]・M −3.9% [−10.0, +3.3]、解けた数 164→168) で既定にした。
+fn pivot_col_on() -> bool {
+    env_def!("ENOMOTO_AGG_PIVOT_COL", "1").is_some()
+}
+
 /// 等式行 `row · x = rhs` を整数列 `j` (係数 `coeff`) のピボットに使って、代入式 `x_j = (rhs - Σ a_k x_k) / coeff` が
 /// 整数解で必ず整数になるか (残りが全て整数列、`a_k / coeff` と `rhs / coeff` が整数)
 fn int_pivot_row(row: &[(usize, f64)], j: usize, coeff: f64, rhs: f64, int_mask: &[bool]) -> bool {
@@ -963,14 +969,26 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
     let min_a = opts.min_a_count.max(1);
     // 候補列: 適格 (等式行 min_a 本以上・全出現 2 本以上・非自由) で、初期状態の含意範囲が箱に収まる列。
     let mut candidates: Vec<usize> = Vec::new();
+    // 診断 `ENOMOTO_DEBUG_AGG_REASONS` (振る舞いは変えない): 整数列 (と連続列) の候補が落ちる理由の数
+    let dbg_reasons = env_str!("ENOMOTO_DEBUG_AGG_REASONS").is_some();
+    // [0: 等式に出ない, 1: 自由か対象外, 2: 初期の含意範囲が箱に収まらない, 3: 再確認で外れる, 4: ピボット行なし, 5: 埋まり超過, 6: 代入]
+    let mut rs_int = [0usize; 7];
+    let mut rs_cont = [0usize; 7];
+    let is_intc = |j: usize| int_mask.as_ref().is_some_and(|m| m[j]);
     for j in 0..n {
         if col_a_count[j] < min_a || col_a_count[j] + col_g_count[j] < 2 || is_free(j) {
+            if dbg_reasons && lb[j] < ub[j] && col_a_count[j] + col_g_count[j] > 0 {
+                let r = if col_a_count[j] < min_a { 0 } else { 1 };
+                if is_intc(j) { rs_int[r] += 1 } else { rs_cont[r] += 1 }
+            }
             continue;
         }
         let (la, lg) = (&a_col0[a_col0_ptr[j]..a_col0_ptr[j + 1]], &g_col0[g_col0_ptr[j]..g_col0_ptr[j + 1]]);
         let (lo, hi) = col_implied_range(j, la, lg, &a_rows, &b, &real_rows, &real_rhs, &mut act_a, &mut act_g);
         if range_within_box(j, lo, hi, lb, ub) {
             candidates.push(j);
+        } else if dbg_reasons {
+            if is_intc(j) { rs_int[2] += 1 } else { rs_cont[2] += 1 }
         }
     }
     // 安い順: 長さ 2 の対を先頭に、次に `最短等式行長 * 列長` 昇順。
@@ -1006,6 +1024,9 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
         let lg: Vec<(usize, f64)> = crate::sparse::collect_with_capacity(g_col_idx[j].len(), g_col_idx[j].iter().map(|&i| (i, coef_of(&real_rows[i], j))).filter(|&(_, v)| v != 0.0));
         let (lo, hi) = col_implied_range(j, &la, &lg, &a_rows, &b, &real_rows, &real_rhs, &mut act_a, &mut act_g);
         if !range_within_box(j, lo, hi, lb, ub) {
+            if dbg_reasons {
+                if is_intc(j) { rs_int[3] += 1 } else { rs_cont[3] += 1 }
+            }
             continue;
         }
         // ピボット: ピボット比ガードを通る最短の生きている等式行。
@@ -1035,8 +1056,16 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
                 }
                 return int_pivot_row(&a_rows[i], j, coeff, b[i], int_mask.as_ref().unwrap());
             }
-            coeff.abs() >= ratio * row_max || (!col_scale.is_empty() && piv_mag(j, coeff) >= ratio * row_max_u)
+            coeff.abs() >= ratio * row_max
+                || (!col_scale.is_empty() && piv_mag(j, coeff) >= ratio * row_max_u)
+                // `ENOMOTO_AGG_PIVOT_COL` (既定で入れる、analysis/prbsubst_20261117・pcd_20261117): HiGHS の `aggregator` と同じく、行の最大係数との比で
+                // 落ちても列 j の係数の最大との比で通れば認める (HiGHS は行と列の短い方から見て、だめならもう一方を見る。規則を読んで自前で書いた)。
+                // sat_rens の時刻の列 (係数 ±1) が大きい M の行 (係数 2e5) を通して消せるようになる
+                || (pivot_col_on() && coeff.abs() >= ratio * la.iter().chain(lg.iter()).map(|&(_, v)| v.abs()).fold(0.0f64, f64::max))
         }) else {
+            if dbg_reasons {
+                if is_intc(j) { rs_int[4] += 1 } else { rs_cont[4] += 1 }
+            }
             continue;
         };
         let pivot_row = a_rows[row_idx].clone();
@@ -1064,6 +1093,9 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
             // 正味 fill-in = 総 fill-in - 消える非零 (ピボット行 + 代入先の `j` 項)。
             let fillin = if opts.net_fillin { gross - (pivot_row.len() + n_other) as i64 } else { gross };
             if fillin > tunable!("ENOMOTO_T_MAX_FILLIN", MAX_FILLIN, usize) as i64 {
+                if dbg_reasons {
+                    if is_intc(j) { rs_int[5] += 1 } else { rs_cont[5] += 1 }
+                }
                 consecutive_fillin_failures += 1;
                 if opts.fillin_break && consecutive_fillin_failures >= max_failures {
                     break;
@@ -1072,6 +1104,9 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
             }
         }
         consecutive_fillin_failures = 0;
+        if dbg_reasons {
+            if is_intc(j) { rs_int[6] += 1 } else { rs_cont[6] += 1 }
+        }
         // ピボット行の右辺。
         let rhs_i = b[row_idx];
         for &i2 in &other_a {
@@ -1117,6 +1152,9 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
             final_a_rows.push(row);
             final_b.push(b[i]);
         }
+    }
+    if dbg_reasons {
+        eprintln!("AGG_REASONS int {:?} cont {:?} (等式なし, 自由/対象外, 初期の箱外, 再確認の箱外, ピボット行なし, 埋まり超過, 代入)", rs_int, rs_cont);
     }
     AggregatorResult { a: csr_from_rows(&final_a_rows, n), b: final_b, c, substitutions, real_rows, real_rhs }
 }

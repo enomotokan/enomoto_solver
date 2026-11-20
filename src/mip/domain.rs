@@ -27,6 +27,10 @@ const PROOF_REASON_BASE: i32 = -1001;
 /// カットのプールの伝播の、写しの表の番号を入れた理由の値の始まり ([`Domain::set_cut_tag`])。
 const CUT_REASON_BASE: i32 = -1_000_000_001;
 
+/// 診断用: 衝突解析で、カットの写しの番号を持つ理由 (試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` のカットプールの伝播、試作 `ENOMOTO_MIP_ORBITOPE_STATIC=r` の
+/// オービトープの固定) を行から説明した回数 (全スレッドの合計)。
+pub static CUT_REASON_EXPLAINED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// 理由の値が双対証明の通し番号を持てば、その番号。
 pub fn proof_reason_id(r: i32) -> Option<u64> {
     (r <= PROOF_REASON_BASE && r > CUT_REASON_BASE).then(|| (PROOF_REASON_BASE - r) as u64)
@@ -89,6 +93,11 @@ pub struct Domain {
     pub conflict: Option<ConflictSrc>,
     /// 今伝播している行 (境界の変更の理由として記録する。伝播の外では `-1`)。
     cur_reason: i32,
+    /// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=sig` (p2inf_20261119): 衝突解析 1 回で遡ってよいカットの写しの表の理由 (`CUT_REASON_BASE` 以下) の変更の数。
+    /// 超えた分は理由のない外からの変更と同じ葉として扱う (遡れる変更に数えない)。既定は無制限
+    pub cut_reason_budget: u64,
+    /// 試作 `ENOMOTO_MIP_PE_SIG` (analysis/slowm_20261119 §17.5): 衝突解析 1 回で遡ってよい双対証明の理由の変更の数 (既定は無制限)
+    pub proof_reason_budget: u64,
     /// [`Self::take_low_water`] から後に変更の記録が最も短くなったときの長さ (巻き戻しで下がる)。
     low_water: usize,
     /// 根に戻ったときに適用する大域的な境界の締め付け (列, 上限か, 値)。
@@ -105,7 +114,7 @@ pub struct Domain {
     row_cap: Vec<f64>,
     /// 試作 `ENOMOTO_MIP_HNFPRE`: 整数列の合同式 (上下限の丸めに使う、[`super::hnf::CongTable`])。
     pub cong: Option<std::sync::Arc<super::hnf::CongTable>>,
-    /// 含意による伝播 (`ENOMOTO_MIP_IMPL_PROP`): 文字 (`2j` は `x_j = 1`、`2j+1` は `x_j = 0`) ごとの、同時には成り立たない
+    /// 含意による伝播 (プロービングの `ENOMOTO_MIP_PROBE_CLIQUE`・`CLQPRB` が [`Self::add_implications`] で入れる): 文字 (`2j` は `x_j = 1`、`2j+1` は `x_j = 0`) ごとの、同時には成り立たない
     /// 文字 ([`MipProblem::conflict_edges`] から作る)。HiGHS のクリーク表の伝播に当たる (行の伝播では見えない、
     /// プロービングで見つけた含意も使う)。
     impl_adj: Option<std::sync::Arc<Vec<Vec<u32>>>>,
@@ -166,22 +175,15 @@ impl Domain {
             infeasible: false,
             conflict: None,
             cur_reason: -1,
+            cut_reason_budget: u64::MAX,
+            proof_reason_budget: u64::MAX,
             low_water: 0,
             pending_global: Vec::new(),
             dbg_sol: None,
             resets: 0,
             global_lo: p.col_lo.clone(),
             global_up: p.col_up.clone(),
-            impl_adj: if env_str!("ENOMOTO_MIP_IMPL_PROP").is_some() && !p.conflict_edges.is_empty() {
-                let mut adj = vec![Vec::new(); 2 * p.n];
-                for &(a, b) in &p.conflict_edges {
-                    adj[a as usize].push(b);
-                    adj[b as usize].push(a);
-                }
-                Some(std::sync::Arc::new(adj))
-            } else {
-                None
-            },
+            impl_adj: None,
             impl_queue: Vec::new(),
             cong: super::hnf::table_for(p),
             row_cap: if env_str!("ENOMOTO_MIP_NO_ROWCAP").is_some() { vec![f64::INFINITY; p.m] } else { p.rows.iter().map(|r| r.iter().map(|&(j, a)| a.abs() * (p.col_up[j] - p.col_lo[j])).fold(0.0f64, f64::max)).collect() },
@@ -757,11 +759,11 @@ impl Domain {
         } else {
             // 数値誤差で実行可能点を切らないよう少し緩める。
             let nv = v + 1e-9 * (1.0 + v.abs());
-            // 連続変数は、無限から有限になるか、幅の 30% 以上締まるときだけ採る (細かい締め付けの連鎖を防ぐ)。
+            // 連続変数は、無限から有限になるか、幅の 30% ([`cont_step_frac`]) 以上締まるときだけ採る (細かい締め付けの連鎖を防ぐ)。
             if cur.is_finite() {
                 let range = cur - self.lo[j];
                 let gain = cur - nv;
-                if !(gain > 0.3 * range.max(1e-9) || (range.is_infinite() && gain > 1e-3 * (1.0 + cur.abs()))) {
+                if !(gain > cont_step_frac() * range.max(1e-9) || (range.is_infinite() && gain > 1e-3 * (1.0 + cur.abs()))) {
                     return;
                 }
             }
@@ -784,7 +786,7 @@ impl Domain {
             if cur.is_finite() {
                 let range = self.up[j] - cur;
                 let gain = nv - cur;
-                if !(gain > 0.3 * range.max(1e-9) || (range.is_infinite() && gain > 1e-3 * (1.0 + cur.abs()))) {
+                if !(gain > cont_step_frac() * range.max(1e-9) || (range.is_infinite() && gain > 1e-3 * (1.0 + cur.abs()))) {
                     return;
                 }
             }
@@ -950,9 +952,49 @@ impl Domain {
     /// (HiGHS `conflictAnalysis` と `resolveDepth(.., increaseConflictScore = true)`。再収束の衝突の分は数えない)。
     pub fn analyze_multi_bumps(&self, p: &MipProblem, start: ConflictStart, max_len: usize, reconv: bool, mut bumps: Option<&mut Vec<(usize, bool)>>, proofs: Option<ProofLookup>) -> Vec<Vec<(usize, bool, f64)>> {
         // 遡れる変更: 行の伝播 (`>= 0`)、試作では双対証明の締め付け (通し番号つき) も
+        // カットの写しの表の理由は `cut_reason_budget` 個まで (遡ると決めた変更を覚え、同じ変更は数え直さない)
+        let cut_ok = std::cell::RefCell::new(std::collections::HashSet::<usize>::new());
+        let cut_refused = std::cell::Cell::new(false);
+        let proof_ok = std::cell::RefCell::new(std::collections::HashSet::<usize>::new());
         let resolvable = |k: usize| -> bool {
             let r = self.stack[k].reason;
-            r >= 0 || (proofs.is_some() && r <= PROOF_REASON_BASE)
+            if r >= 0 {
+                return true;
+            }
+            if proofs.is_none() || r > PROOF_REASON_BASE {
+                return false;
+            }
+            if r > CUT_REASON_BASE {
+                // 双対証明の理由 (試作 `ENOMOTO_MIP_PE_SIG`: `proof_reason_budget` 個まで)
+                if self.proof_reason_budget == u64::MAX {
+                    return true;
+                }
+                let mut ok = proof_ok.borrow_mut();
+                if ok.contains(&k) {
+                    return true;
+                }
+                if (ok.len() as u64) < self.proof_reason_budget {
+                    ok.insert(k);
+                    return true;
+                }
+                return false;
+            }
+            if self.cut_reason_budget == u64::MAX {
+                return true;
+            }
+            let mut ok = cut_ok.borrow_mut();
+            if ok.contains(&k) {
+                return true;
+            }
+            if (ok.len() as u64) < self.cut_reason_budget {
+                ok.insert(k);
+                CUT_BUDGET[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return true;
+            }
+            if !cut_refused.replace(true) {
+                CUT_BUDGET[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            false
         };
         let end = self.stack.len();
         let dec: Vec<usize> = (0..end).filter(|&k| self.stack[k].reason == -1).collect();
@@ -1066,8 +1108,15 @@ impl Domain {
                 (&p.rows[r][..], p.row_up[r], p.row_lo[r])
             } else {
                 let Some(f) = proofs.filter(|_| c.reason <= PROOF_REASON_BASE) else { return None };
+                if c.reason <= CUT_REASON_BASE {
+                    CUT_REASON_EXPLAINED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 owned = f(c.reason);
                 let (cf, rhs) = owned.as_ref()?;
+                // 試作 `ENOMOTO_MIP_LIT_EXPLAIN=g`: 右辺が NaN の写しはリテラルの衝突 (行の係数の符号が文字の側)。ほかの文字を真にした最後の変更で説明する
+                if rhs.is_nan() {
+                    return Some(cf.iter().filter(|&&(j, _)| j != c.col).filter_map(|&(j, a)| latest_before(j, a < 0.0, k)).collect());
+                }
                 (&cf[..], *rhs, f64::NEG_INFINITY)
             };
             let a_c = terms.iter().find(|&&(j, _)| j == c.col).map(|&(_, a)| a)?;
@@ -1293,7 +1342,8 @@ impl Domain {
             }
             let new_here = out.len() - before;
             // HiGHS と同じ打ち切り: 最初の段で衝突が出なければ止める。5 段以上調べて新しい衝突がなければ止める
-            if out.is_empty() || (done >= 5 && new_here == 0) {
+            // (段の数は試作 `ENOMOTO_T_MIP_CONFLICT_LEVELS`、既定 5。p2inf_20261119 の bnatt400 の切り分け用)
+            if out.is_empty() || (done >= conflict_levels() && new_here == 0) {
                 stop_k = if out.is_empty() { 4 } else { 5 };
                 break;
             }
@@ -1421,6 +1471,8 @@ impl Domain {
 }
 
 /// 診断用: 衝突解析が失敗した理由の回数 [決定なし, 途中で長すぎ, 理由の行に列がない, 空, 最後に長すぎ, その長さの和]
+/// 診断 (`ENOMOTO_MIP_LIT_EXPLAIN=sig`): [予算の内で遡ると決めたカットの写しの表の理由の変更の数, 予算で遡れなかった変更のあった解析の数]
+pub static CUT_BUDGET: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
 pub static CONFLICT_FAIL: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
 /// 診断 `ENOMOTO_MIP_CONFLICT_LEV_DIAG` の数: [調べた深さ, 1-UIP まで解けた深さ, 解けずに 2 つ以上残った深さ, そのうち行でない理由
 /// (決定以外) の変更が残った深さ, 残った変更の理由ごとの数 (-1 決定, -2 外から, -3 局所の被約費用, -4 強分岐, -5 orbitope,
@@ -1577,4 +1629,18 @@ impl Drop for GfixSubScope {
 /// 診断 `ENOMOTO_MIP_GFIX_LOG` ([`Domain::tighten_global`])
 fn gfix_log() -> bool {
     env_str!("ENOMOTO_MIP_GFIX_LOG").is_some()
+}
+
+/// 試作 `ENOMOTO_T_MIP_S3PROP_CONT_FRAC` (既定 0.3。analysis/vsscip_slow_20261118/small3/ 11 節): 行の伝播で連続列の境界を採る最小の締め幅
+/// (今の幅に対する割合)。SCIP の numerics/boundstreps は 0.05。swath1 は MTZ 型の行 (u_i - u_j + 20 x_ij <= 19) が多く、
+/// 連続列の小さい締め付けが積み重なって 0-1 列が固定・矛盾になる (SCIP は 141 ノードで行の伝播の打ち切り 258)
+pub(crate) fn cont_step_frac() -> f64 {
+    tunable!("ENOMOTO_T_MIP_S3PROP_CONT_FRAC", 0.3, f64)
+}
+
+/// [`Domain::analyze_multi_bumps`] の「この段数以上調べて新しい衝突がなければ止める」の段数 (`ENOMOTO_T_MIP_CONFLICT_LEVELS`、既定 5 = HiGHS)。
+/// p2inf_20261119 の bnatt400 の切り分け用の試作のつまみ。
+fn conflict_levels() -> usize {
+    static F: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *F.get_or_init(|| tunable!("ENOMOTO_T_MIP_CONFLICT_LEVELS", 5usize, usize))
 }

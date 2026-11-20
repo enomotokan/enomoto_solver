@@ -82,7 +82,7 @@ pub trait MipLp: Clone + Send {
     fn solve_race3(&mut self, lim: &SolveLimits, _threads: usize) -> LpStatus {
         self.solve(lim)
     }
-    /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE` ([`TwoStageLp::optface_move`]): 最適面の上の別の最適基底へ移る。対応しない実装は `None`。
+    /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS`・`MPSEP` ([`TwoStageLp::optface_move`]。名前の元の試作 `ENOMOTO_MIP_OPTFACE_MOVE` は 2026-11-18 に削除): 最適面の上の別の最適基底へ移る。対応しない実装は `None`。
     fn optface_move(&mut self, _k: usize, _sample: usize, _mode: char, _seed: u64, _is_int: &[bool], _deadline: Option<std::time::Instant>) -> Option<crate::simplex::mip_lp::OptFaceStats> {
         None
     }

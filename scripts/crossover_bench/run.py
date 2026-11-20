@@ -1,4 +1,4 @@
-"""内点法 + クロスオーバー (root_solver="ipm_crossover") と傾き・切片双対二段解法 (既定の "simplex") の
+"""内点法 + クロスオーバー (lp_solver="ipm_crossover") と傾き・切片双対二段解法 (既定の "simplex") の
 求解時間の比較。
 
 各問題・各解法を新しいプロセスで解き (MPS の読み込みとモデル構築は計時しない。`Model.solve` 相当の
@@ -38,6 +38,18 @@ MITTELMANN_EXCLUDE = {"thk_48", "L2CTA3D", "dlr2", "Dual2_5000"}
 METHODS = {"slope_intercept": "simplex", "ipm_crossover": "ipm_crossover", "race": "auto", "highs_ipm": "highs_ipm"}
 
 
+
+def _read_our_model_compat(bh, path):
+    """`benchmark_highs._read_our_model` (このクレートの MPS 読み込み) でモデルを作る。古いビルドを wheel で入れた
+    環境では `benchmark_highs` 自体が古く `_read_our_model` がないので、従来の HiGHS 経由の組み立てに戻る
+    (台本だけ新しくなった計測が落ちないように)。戻り値は `(model, 制約数, 非零数, 列の名前)`。"""
+    if hasattr(bh, "_read_our_model"):
+        return bh._read_our_model(path)
+    _, lp = bh._load_lp(path)
+    names = list(lp.col_names_) if len(lp.col_names_) == lp.num_col_ else [f"C{j}" for j in range(lp.num_col_)]
+    model, n_constraints, nnz = bh._build_our_model(lp)
+    return model, n_constraints, nnz, names
+
 def problems(set_name: str) -> list[str]:
     if set_name == "mittelmann":
         from run_mittelmann_benchmark import PROBLEMS
@@ -57,7 +69,6 @@ def materialize(set_name: str, name: str, workdir: Path) -> Path:
 def worker(mps: str, solver: str, sizes_only: bool) -> None:
     import highspy
     from enomoto_solver import _core
-    from enomoto_solver.benchmark_highs import _build_our_model
 
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
@@ -77,16 +88,16 @@ def worker(mps: str, solver: str, sizes_only: bool) -> None:
                                       "events": [["ipm_iters", info.ipm_iteration_count], ["crossover_iters", info.crossover_iteration_count],
                                                  ["simplex_iters", info.simplex_iteration_count]]}), flush=True)
         return
-    lp = h.getLp()
-    model, _, _ = _build_our_model(lp)
-    del h, lp
+    del h
+    from enomoto_solver import benchmark_highs as bh
+    model, _, _, _ = _read_our_model_compat(bh, Path(mps))
     if sizes_only:
         os.environ["ENOMOTO_DEBUG_PRESOLVE_SIZE"] = "1"
         os.environ["ENOMOTO_PRESOLVE_ONLY"] = "1"
     t0 = time.perf_counter()
     # スレッドの数 (`ENOMOTO_BENCH_THREADS`、未指定なら solve の既定の 1)。
     threads = int(os.environ["ENOMOTO_BENCH_THREADS"]) if os.environ.get("ENOMOTO_BENCH_THREADS") else None
-    out = model.solve(root_solver=solver, distinguish_infeasible_unbounded=True, threads=threads)
+    out = model.solve(lp_solver=solver, distinguish_infeasible_unbounded=True, threads=threads)
     t = time.perf_counter() - t0
     print("RESULT " + json.dumps({"time": t, "status": out["status"], "obj": out["objective"],
                                   "events": [[n, s] for n, s in _core.last_solve_events()]}), flush=True)

@@ -1,0 +1,19 @@
+行 54、crash 0、2 種以上そろった問題 9/9、設定 2、種 [1, 2, 3]
+
+設定ごと (SGM の def 比、解けた数 / 27、害: def 比の最大・1.25 倍超の回数・def が解けて自分が解けない回数。害は全部の (問題, 種) で数える):
+  def         1.000   27   最大  1.00 (physiciansched6-2 種 3)  1.25 倍超  0/27  解けなくなる 0
+  g4off       0.966   27   最大  1.15 (physiciansched6-2 種 3)  1.25 倍超  0/27  解けなくなる 0
+
+上限 (種の平均で最良の組): 0.957
+抜き 1 の交差検証: 0.987
+
+問題ごと (def の秒の平均、最良の組と def 比、種ごとの最良、順位相関の平均、交差検証の def 比):
+  binkar10_1         def   5.6  最良 def         1.00  種ごと def,g4off,def                      ρ -0.33  cv  1.00
+  drayage-100-23     def   0.2  最良 g4off       0.98  種ごと g4off,g4off,g4off                  ρ  1.00  cv  0.98
+  drayage-25-23      def   1.0  最良 g4off       0.99  種ごと g4off,g4off,def                    ρ -0.33  cv  0.99
+  mas76              def   9.4  最良 g4off       0.93  種ごと g4off,def,g4off                    ρ -0.33  cv  0.93
+  neos-860300        def  15.9  最良 def         1.00  種ごと g4off,def,def                      ρ -0.33  cv  1.00
+  neos-960392        def   1.7  最良 def         1.00  種ごと def,def,g4off                      ρ -0.33  cv  1.01
+  ns1116954          def   3.3  最良 g4off       0.97  種ごと def,g4off,g4off                    ρ -0.33  cv  0.97
+  nw04               def  14.0  最良 def         1.00  種ごと g4off,g4off,def                    ρ -0.33  cv  1.01
+  physiciansched6-2  def  29.6  最良 g4off       0.82  種ごと g4off,g4off,def                    ρ -0.33  cv  1.00

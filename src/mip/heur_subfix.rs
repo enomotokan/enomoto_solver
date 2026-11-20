@@ -34,11 +34,11 @@ use super::lp_api::MipLp;
 use super::solver::{MipStatus, Solver};
 use std::sync::Mutex;
 
-/// `ENOMOTO_MIP_SUBFIX` の文字 `c` が入っているか
+/// `ENOMOTO_MIP_SUBFIX` の文字 `c` が入っているか (試作 `ENOMOTO_MIP_SUBFIX_OFF_NINT` で切った問題では入っていないとみなす、[`super::condrev`])
 pub(crate) fn on(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let v = V.get_or_init(|| env_def!("ENOMOTO_MIP_SUBFIX", "rtcqf").map_or(String::new(), |v| if v == "1" { "ritc".to_string() } else { v.to_string() }));
-    v.contains(c)
+    v.contains(c) && !super::condrev::subfix_off()
 }
 
 /// `p` で並列に出した RENS のサブ MIP のラベル (受け取りのときにやり直しの印を付けるため)
@@ -46,7 +46,7 @@ pub(crate) const SUBFIX_PAR_LABEL: &str = "SUBFIX RENS";
 
 /// `ENOMOTO_MIP_SUBFIX` が何か付いているか
 pub(crate) fn any() -> bool {
-    env_def!("ENOMOTO_MIP_SUBFIX", "rtcqf").is_some_and(|v| !v.is_empty() && v != "0")
+    env_def!("ENOMOTO_MIP_SUBFIX", "rtcqf").is_some_and(|v| !v.is_empty() && v != "0") && !super::condrev::subfix_off()
 }
 
 /// 外側の求解で共通の記録: (成功した固定率の和, 回数, 実行不能だった固定率の和, 回数) と、根の LP 解 (`getFixVal` の基準)
@@ -374,7 +374,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.parallel_submips {
                 self.heur_label = SUBFIX_PAR_LABEL;
             }
+            // 試作 `ENOMOTO_T_MIP_SUBFIX_CAP` ([`super::condrev::subfix_cap`]): 外側の根の SUBFIX のサブ MIP の時間に上限を付ける
+            let cap = if self.nodes <= 1 && !self.params.submip { super::condrev::subfix_cap(self.params.frac_tl()) } else { None };
+            let prev_cap = super::heuristics::PRIMAL_TIME_CAP.with(|c| c.get());
+            if let Some(c) = cap {
+                super::heuristics::PRIMAL_TIME_CAP.with(|x| x.set(Some(prev_cap.map_or(c, |p| p.min(c)))));
+            }
             let r = self.solve_submip_problem(sub, nl, None);
+            if cap.is_some() {
+                super::heuristics::PRIMAL_TIME_CAP.with(|x| x.set(prev_cap));
+            }
             self.heur_label = keep_label;
             self.submip_fix_rate = None;
             let nodes = self.last_submip_nodes;

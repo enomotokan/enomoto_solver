@@ -1,0 +1,18 @@
+== fuzz_tiny rc=0
+bad 0 of 400 time 2.9 (strict 12: 値の一致だけの以前の判定)
+== fuzz_highs rc=0
+bad 0 of 300 time 4.8
+== fuzz_highs_t1 rc=0
+bad 0 of 300 time 5.0
+== fuzz_objint rc=0
+bad 0 of 1000 status {'optimal': 967, 'infeasible': 33} with nodes>0 308 new step 71 new step and nodes>0 3 c range with width 27 c and nodes>0 6 time 66.9
+== fuzz_slack rc=0
+done 1000 (seeds 0..999): mismatches 0, HiGHS statuses {'Infeasible': 614, 'Optimal': 268, 'Primal infeasible or unbounded': 115, 'Unbounded': 3}
+== fuzz_tiny2 rc=0
+bad 0 of 400 time 2.9 (strict 13: 値の一致だけの以前の判定)
+== fuzz_objint2 rc=0
+bad 0 of 1000 status {'optimal': 971, 'infeasible': 29} with nodes>0 304 new step 77 new step and nodes>0 5 c range with width 26 c and nodes>0 2 time 67.1
+== fuzz_slack2 rc=0
+done 1000 (seeds 5000..5999): mismatches 0, HiGHS statuses {'Infeasible': 655, 'Unbounded': 4, 'Primal infeasible or unbounded': 101, 'Optimal': 240}
+== fuzz_cutconf rc=0
+bad 0 of 300 time 15.5

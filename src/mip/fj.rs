@@ -327,6 +327,17 @@ impl Fj {
 /// Feasibility Jump で実行可能な点を探す。`lo`/`up` は列の境界、`time_cap` は秒、`stop` が立ったら止める。
 /// 見つけた実行可能な点のうち目的値の最良のものを返す。
 pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64], time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
+    fj2_search_from(p, lo, up, None, time_cap, seed, stop)
+}
+
+thread_local! {
+    /// 最後の [`fj2_search_from`] の (出発点で違反している行 (不等式に分けた数), 最初の実行可能解までの手の数, その手間, 全部の手の数)。
+    /// 最初の解がなければ手の数は `u64::MAX` (analysis/objtarget_20261119/ の 8、診断用)
+    pub(super) static FJ_LAST: std::cell::Cell<(usize, u64, u64, u64)> = const { std::cell::Cell::new((0, u64::MAX, u64::MAX, 0)) };
+}
+
+/// [`fj2_search`] で、出発点を `start` にするもの (整数列は四捨五入、境界に収める。`None` なら各列の下限 (なければ上限、なければ 0))
+pub(super) fn fj2_search_from(p: &super::problem::MipProblem, lo: &[f64], up: &[f64], start: Option<&[f64]>, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
     let n = p.n;
     if n == 0 {
         return None;
@@ -350,7 +361,14 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         lb[j] = l;
         ub[j] = u;
     }
-    let x: Vec<f64> = (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect();
+    let x: Vec<f64> = match start {
+        Some(x0) if x0.len() == n => (0..n).map(|j| {
+            let v = if p.is_int[j] { x0[j].round() } else { x0[j] };
+            let v = v.clamp(lb[j], ub[j]);
+            if v.is_finite() { v } else if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }
+        }).collect(),
+        _ => (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect(),
+    };
     let mut cons: Vec<Cons> = Vec::new();
     // 問題の行 → FJ の行 (等式は 2 本)、FJ の行 → 問題の行 (連鎖の手で使う)
     let mut row_cons: Vec<Vec<u32>> = vec![Vec::new(); p.m];
@@ -383,6 +401,26 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             cons.push(Cons { sense, rhs, coeffs: row.clone(), weight: 1.0, lhs: 0.0, viol_idx: -1 });
         }
     }
+    // 試作 `ENOMOTO_MIP_OBJTARGET` の `f` (analysis/objtarget_20261119/): 目的の行 `c x <= T` を固い行として足す (違反として数える)。
+    // T = U − α (U − L) (U = 全体の最良の暫定解、なければ T = L、L = 根の LP の値。外側の目的値から定数項を引く)。根より前 (L がない) では足さない。
+    // 目的の行だけに反する点も解として記録する (目標は道案内で、届かなくても解を失わない)
+    let mut obj_ci: Option<u32> = None;
+    if super::objtarget('f') && p.cost.iter().any(|&c| c != 0.0) {
+        if let Some((l, u)) = super::objtarget_bounds() {
+            let alpha = tunable!("ENOMOTO_T_MIP_OBJTARGET_ALPHA", 0.5, f64);
+            let t = if u.is_finite() && u > l { u - alpha * (u - l) } else { l } - p.offset;
+            let row: Vec<(u32, f64)> = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j as u32, p.cost[j])).collect();
+            let ci = cons.len() as u32;
+            for &(j, a) in &row {
+                vcols[j as usize].push((ci, a));
+            }
+            nnz += row.len() as u64;
+            obj_ci = Some(ci);
+            // 連鎖の手 (`ENOMOTO_MIP_FJ_CHAIN`) では問題の行でないので選ばない (下の `u32::MAX`)
+            cons_row.push(u32::MAX);
+            cons.push(Cons { sense: Sense::Lte, rhs: t, coeffs: row, weight: 1.0, lhs: 0.0, viol_idx: -1 });
+        }
+    }
     let mut s = Fj {
         lb,
         ub,
@@ -413,12 +451,14 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     let mult = tunable!("ENOMOTO_T_MIP_FJ_EFFORT_MULT", 1u64, u64).max(1);
     let max_total = (nnz.max(1) << 10) * mult;
     let max_since = (nnz.max(1) << 8) * mult;
+    let start_viol = s.violated.len();
+    let (mut first_steps, mut first_effort) = (u64::MAX, u64::MAX);
     let mut best_viol = usize::MAX;
     let mut best_obj = f64::INFINITY;
     let mut best_x: Option<Vec<f64>> = None;
-    // `ENOMOTO_MIP_FJ_LP_REPAIR`: 解が見つからなければ、違反の行の数が最も少なかった点 (`ENOMOTO_T_MIP_FJ_LP_REPAIR_MAX_VIOL`
+    // FJ の問題 (`ENOMOTO_MIP_FJ_P3`) では、解が見つからなければ、違反の行の数が最も少なかった点 (`ENOMOTO_T_MIP_FJ_LP_REPAIR_MAX_VIOL`
     // 行以下、既定 50) の整数列を固定して、連続列を LP で解き直す ([`lp_repair`])
-    let repair = (env_str!("ENOMOTO_MIP_FJ_LP_REPAIR").is_some() || crate::fj_p3_force()) && p.is_int.iter().any(|&b| !b);
+    let repair = crate::fj_p3_force() && p.is_int.iter().any(|&b| !b);
     let repair_max = tunable!("ENOMOTO_T_MIP_FJ_LP_REPAIR_MAX_VIOL", 50usize, usize);
     let mut best_inf: Option<Vec<f64>> = None;
     // `ENOMOTO_MIP_FJ_DUMP=ディレクトリ` (診断用): 解が見つからなければ、問題 (`prob.mps`、最初の 1 回だけ) と違反の行の数が最も少ない点
@@ -449,9 +489,15 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             }
         }
         let mut check = s.effort - effort_last_check > 500_000;
-        if s.violated.is_empty() && s.objective < best_obj {
+        // 目的の行 (`OBJTARGET` の `f`) だけに反する点も実行可能
+        let feasible = s.violated.is_empty() || (obj_ci.is_some() && s.violated.len() == 1 && Some(s.violated[0]) == obj_ci);
+        if feasible && s.objective < best_obj {
             let rel = (best_obj - s.objective) / s.objective.abs().max(1.0);
             if rel > 1e-4 {
+                if first_steps == u64::MAX {
+                    first_steps = steps;
+                    first_effort = s.effort;
+                }
                 effort_last_improve = s.effort;
                 best_obj = s.objective;
                 best_x = Some(s.x.clone());
@@ -474,7 +520,16 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         }
         if chain && s.good.is_empty() && !s.violated.is_empty() {
             let k = (s.next_u64() % s.violated.len() as u64) as usize;
-            let r = cons_row[s.violated[k] as usize] as usize;
+            let r = cons_row[s.violated[k] as usize];
+            if r == u32::MAX {
+                let v = s.select_variable();
+                if v == usize::MAX {
+                    break;
+                }
+                s.do_move(v);
+                continue;
+            }
+            let r = r as usize;
             chain_tries += 1;
             let mut view = FjView { fj: &mut s, p, row_cons: &row_cons };
             let abort = || {
@@ -535,6 +590,7 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         }
     }
     crate::ticks::add(crate::ticks::HEUR, s.effort.saturating_sub(effort_last_check));
+    FJ_LAST.with(|c| c.set((start_viol, first_steps, first_effort, steps)));
     if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
         eprintln!(
             "MIP:   FJ2{repaired}: {} rows (as inequalities), {} nonzeros, {steps} steps, effort {} (max {max_total}), least violated rows {best_viol}, found {} (objective {best_obj:.6e}), stopped by {why}, chain {chain_ok}/{chain_tries} ({chain_cols} columns), {:.2}s",
@@ -548,7 +604,7 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     best_x
 }
 
-/// FJ の点の修復 (`ENOMOTO_MIP_FJ_LP_REPAIR`、既定では使わない): 整数列を `x` の値 (丸めたもの) に固定し、連続列だけの LP を
+/// FJ の点の修復 (FJ の問題 `ENOMOTO_MIP_FJ_P3` で使う): 整数列を `x` の値 (丸めたもの) に固定し、連続列だけの LP を
 /// 元の費用で解く。FJ は 1 変数ずつ動かすので、連続列どうしの 2 行 (`0.5 a - b <= 43.75`・`b - a <= -925` で、両方を満たすのは
 /// 両方の列を同時に動かしたときだけ) を満たせずに止まることがある (physiciansched6-2、HiGHS の前処理の後の問題)。
 /// 整数列だけの行が破れていれば何もしない。実行可能なら (行と境界を 1e-6 で確かめて) 点を返す。

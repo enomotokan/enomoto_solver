@@ -125,6 +125,13 @@ pub fn find_dual_free_inequalities(n: usize, a_rows: &[Vec<(usize, f64)>], real_
         if used_as_witness[r] {
             continue;
         }
+        // 診断 `ENOMOTO_DEBUG_DFI_MAX=k`: プロセス全体で上げる行を k 本までにする (誤りの切り分け用)
+        if let Some(k) = env_str!("ENOMOTO_DEBUG_DFI_MAX").and_then(|v| v.parse::<usize>().ok()) {
+            static DFI_CNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            if DFI_CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= k {
+                continue;
+            }
+        }
         if env_str!("ENOMOTO_DEBUG_DUALFREE_INEQ").is_some() {
             eprintln!("DFI: col {j} [{}, {}] implied [{lo}, {hi}] c {} -> row {r} {:?} <= {} ; rows {:?}", lb[j], ub[j], c[j], real_rows[r], real_rhs[r], rows);
         }

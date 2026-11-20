@@ -13,7 +13,7 @@
 //!   (`G` = 合同式の列の `a_j g_j` とほかの整数列の `a_j` の gcd) なので、`a`・`c` では論理変数 (行の活動量) も `s = r + G t` と置き換え
 //!   ([`extend_logicals`])、`b` では写した行の上下限を `G` の倍数に丸める ([`map_rows`])。
 //!
-//! `b` は `ENOMOTO_MIP_MODKVB` の連立 (`modkvb_cuts`) にも、変数・論理変数・変数上下限を写して使う ([`map_cutvars`])。
+//! (`b` を `ENOMOTO_MIP_MODKVB` の連立に写して使う `map_cutvars` は、MODKVB とともに削除した。2026-11-18、analysis/cleanup_20261118/)
 //! 診断: `ENOMOTO_MIP_HNFCUT_BPAR=even` / `odd` なら `b` で法が偶数 / 奇数の列だけ写す。
 //!
 //! `ENOMOTO_MIP_HNFCUT` だけで `ENOMOTO_MIP_HNFPRE` がなければ、`HNFPRE=1` と同じ前処理・丸めをする ([`super::hnf::mode`])。
@@ -132,7 +132,7 @@ pub(crate) fn in_tab() -> bool {
 /// 数え上げ: 0 = 合同式の項を含む CMIR の行, 1 = 置き換えた方のカットが勝った, 2 = 元の方だけ作れた, 3 = 置き換えた方だけ作れた,
 /// 4 = mod-k の呼び出し (写した), 5 = 写した列の数の合計, 6 = mod-k のカット, 7 = (未使用), 8 = tableau 行で 0 の数,
 /// 9 = 論理変数の合同式 (分離の回ごとの合計), 10 = `b` で丸めた行, 11 = 写した mod-k のカットのうち合同式の列を含むもの,
-/// 12 = MODKVB を写して呼んだ数, 13 = その写したカット
+/// 12・13 = (削除した MODKVB の写しが使っていた。未使用)
 pub(crate) static STATS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 /// 診断: 分離の LP 点での合同式の列の値 (最初の分離 = 根の最初の LP の点): 0 = 列の数, 1 = x が分数, 2 = x は整数だが合同式に合わない,
 /// 3 = 合同式に合う, 4 = 上下限に乗っている (3 のうち), 5 = 数えたか
@@ -179,8 +179,8 @@ pub(crate) fn stats_line() -> String {
     let e: Vec<f64> = EFF.iter().map(|a| a.load(Ordering::Relaxed) as f64 * 1e-6).collect();
     let q: Vec<u64> = LPPT.iter().map(|a| a.load(Ordering::Relaxed)).collect();
     format!(
-        "HNFCUT stats: first LP point: cong cols {} (x frac {}, int but off {}, on {} (at bound {})); cmir rows with cong {} (tab {}), cong won {} (eff {:.3} vs orig {:.3}), only orig {}, only cong {}; modk calls {} mapped cols {} cuts {} (with cong cols {}), rows rounded {}; logical congs {}; modkvb mapped calls {} cuts {}",
-        q[0], q[1], q[2], q[3], q[4], s[0], s[8], s[1], e[0], e[1], s[2], s[3], s[4], s[5], s[6], s[11], s[10], s[9], s[12], s[13]
+        "HNFCUT stats: first LP point: cong cols {} (x frac {}, int but off {}, on {} (at bound {})); cmir rows with cong {} (tab {}), cong won {} (eff {:.3} vs orig {:.3}), only orig {}, only cong {}; modk calls {} mapped cols {} cuts {} (with cong cols {}), rows rounded {}; logical congs {}",
+        q[0], q[1], q[2], q[3], q[4], s[0], s[8], s[1], e[0], e[1], s[2], s[3], s[4], s[5], s[6], s[11], s[10], s[9]
     )
 }
 
@@ -412,119 +412,6 @@ pub(crate) fn extend_logicals(lp_rows: &[Vec<(usize, f64)>], is_int: &[bool], lo
     }
 }
 
-/// `b` を `ENOMOTO_MIP_MODKVB` の連立に使うための写し: 構造変数の合同式の列を `z` に、論理変数を `s - shift` にした変数の情報・LP の行・
-/// 変数上下限。[`MappedVars::unmap`] でカットを元の空間に戻す。
-pub(crate) struct MappedVars {
-    pub lo: Vec<f64>,
-    pub up: Vec<f64>,
-    pub x: Vec<f64>,
-    pub is_int: Vec<bool>,
-    pub rows: Vec<Vec<(usize, f64)>>,
-    pub vb: super::cuts::VarBounds,
-    rg: Vec<(f64, f64)>,
-    shift: Vec<f64>,
-    n: usize,
-}
-
-/// [`MappedVars`] を作る (今の状態で `b` が使えて、写す列があるときだけ)。`lo`・`up`・`x`・`is_int` は構造変数 `0..n` と論理変数 `n..n+m`
-pub(crate) fn map_cutvars(vars: &super::cuts::CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize) -> Option<MappedVars> {
-    let t = CUR.with(|c| {
-        let s = c.borrow();
-        if s.modk {
-            s.table.clone()
-        } else {
-            None
-        }
-    })?;
-    let m = lp_rows.len();
-    if vars.lo.len() < n + m || t.n < n {
-        return None;
-    }
-    let mut rg = vec![(0.0, 0.0); n];
-    let (mut lo, mut up, mut x) = (vars.lo.to_vec(), vars.up.to_vec(), vars.x.to_vec());
-    let mut any = false;
-    for k in 0..n {
-        if !is_cong(&t, k, vars.is_int, vars.lo, vars.up) {
-            continue;
-        }
-        let Some((lz, uz)) = z_range(&t, k, vars.lo[k], vars.up[k]) else { continue };
-        let (r, g) = (t.r[k] as f64, t.m[k] as f64);
-        rg[k] = (r, g);
-        lo[k] = lz;
-        up[k] = uz;
-        x[k] = (vars.x[k] - r) / g;
-        any = true;
-    }
-    if !any {
-        return None;
-    }
-    let mut rows = Vec::with_capacity(m);
-    let mut shift = vec![0.0; m];
-    for (i, row) in lp_rows.iter().enumerate() {
-        let mut zr = Vec::with_capacity(row.len());
-        for &(j, a) in row {
-            if j < n && rg[j].1 > 0.0 {
-                zr.push((j, a * rg[j].1));
-                shift[i] += a * rg[j].0;
-            } else {
-                zr.push((j, a));
-            }
-        }
-        let k = n + i;
-        lo[k] -= shift[i];
-        up[k] -= shift[i];
-        x[k] -= shift[i];
-        rows.push(zr);
-    }
-    // 変数上下限: 相手 y が合同式の列なら d x_y + e = d g z + (e + d r)。自分が合同式の列の整数の変数上下限は捨てる
-    let mut vb = super::cuts::VarBounds::default();
-    if let Some(v) = vars.vb {
-        let mp = |l: &Vec<Vec<(usize, f64, f64)>>| -> Vec<Vec<(usize, f64, f64)>> {
-            l.iter().map(|e| e.iter().map(|&(y, d, ee)| if y < n && rg[y].1 > 0.0 { (y, d * rg[y].1, ee + d * rg[y].0) } else { (y, d, ee) }).collect()).collect()
-        };
-        vb.vub = mp(&v.vub);
-        vb.vlb = mp(&v.vlb);
-        let drop = |l: &Vec<Vec<(usize, f64, f64)>>| -> Vec<Vec<(usize, f64, f64)>> {
-            l.iter().enumerate().map(|(k, e)| if k < n && rg[k].1 > 0.0 { Vec::new() } else { e.iter().filter(|&&(z, _, _)| !(z < n && rg[z].1 > 0.0)).copied().collect() }).collect()
-        };
-        vb.ivub = drop(&v.ivub);
-        vb.ivlb = drop(&v.ivlb);
-    }
-    stat(12);
-    Some(MappedVars { lo, up, x, is_int: vars.is_int.to_vec(), rows, vb, rg, shift, n })
-}
-
-impl MappedVars {
-    pub fn vars(&self) -> super::cuts::CutVars<'_> {
-        super::cuts::CutVars { lo: &self.lo, up: &self.up, is_int: &self.is_int, x: &self.x, vb: Some(&self.vb), imp: None }
-    }
-
-    /// 写した空間のカットを元の空間に戻す (構造変数 `c z = (c/g) x - c r/g`、論理変数 `c s' = c s - c shift`)
-    pub fn unmap(&self, mut c: RawCut) -> Option<RawCut> {
-        for e in c.coefs.iter_mut() {
-            if e.0 < self.n {
-                if self.rg[e.0].1 > 0.0 {
-                    let (r, g) = self.rg[e.0];
-                    e.1 /= g;
-                    c.rhs += e.1 * r;
-                }
-            } else {
-                c.rhs += e.1 * self.shift.get(e.0 - self.n)?;
-            }
-        }
-        stat(13);
-        c.rhs.is_finite().then_some(c)
-    }
-}
-
-/// 今の状態の CMIR の可否を `on` にして `f` を呼ぶ (写した空間で `generate_cuts` を呼ぶときに `a` の置き換えを重ねないため)
-pub(crate) fn with_cmir<R>(on: bool, f: impl FnOnce() -> R) -> R {
-    let old = CUR.with(|c| std::mem::replace(&mut c.borrow_mut().cmir, on));
-    let r = f();
-    CUR.with(|c| c.borrow_mut().cmir = old);
-    r
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,13 +534,13 @@ mod tests {
         assert!(n_won > 100 && n_zh > 10 && n_cut_int_pt > 10);
     }
 
-    /// `l` (論理変数の合同式・行の丸め) と MODKVB の写し ([`map_cutvars`]) の確かめ。乱数の整数の行 (論理変数つき) から tableau 行のような
-    /// 集約 `Σ w_i (a_i x - s_i) = 0` を作り、(1) 表に論理変数を足した CMIR、(2) 行を丸めた zerohalf、(3) 写した変数・行で作って戻した CMIR の
+    /// `l` (論理変数の合同式・行の丸め) の確かめ。乱数の整数の行 (論理変数つき) から tableau 行のような
+    /// 集約 `Σ w_i (a_i x - s_i) = 0` を作り、(1) 表に論理変数を足した CMIR、(2) 行を丸めた zerohalf の
     /// カットが、行の上下限と合同式を満たす全ての整数点 (論理変数はその点の活動量) を切らないこと
     #[test]
     fn hnfcut_logical_validity() {
         let mut rng = Rng(98765);
-        let (mut n_l, mut n_lc, mut n_zh, mut n_mv) = (0, 0, 0, 0);
+        let (mut n_l, mut n_lc, mut n_zh) = (0, 0, 0);
         for it in 0..3000 {
             let n = 2 + (it % 4);
             let lo: Vec<f64> = (0..n).map(|_| rng.int(-2, 1) as f64).collect();
@@ -737,25 +624,6 @@ mod tests {
                         check(&c, "logical cmir");
                     }
                 }
-                // (3) 写した変数・行 (MODKVB の形)
-                if let Some(mv) = map_cutvars(&vars, &rows, n) {
-                    let mut mbase: Vec<(usize, f64)> = Vec::new();
-                    for (i, row) in mv.rows.iter().enumerate() {
-                        for &(j, a) in row {
-                            mbase.push((j, w[i] * a));
-                        }
-                        mbase.push((n + i, -w[i]));
-                    }
-                    let mneg: Vec<(usize, f64)> = mbase.iter().map(|&(j, a)| (j, -a)).collect();
-                    for b in [&mbase, &mneg] {
-                        for c in with_cmir(false, || generate_cuts(&mv.vars(), b, 0.0, false, false)) {
-                            if let Some(c) = mv.unmap(c) {
-                                n_mv += 1;
-                                check(&c, "mapped vars");
-                            }
-                        }
-                    }
-                }
             }
             // (2) 行を丸めた zerohalf (構造変数だけ)
             let cuts = map_rows(&rows, &rl, &ru, &vint[..n], &lo, &up, &x, |rw, a, b, ii, l, u, xx| crate::mip::zerohalf::zerohalf_cuts(rw, a, b, ii, l, u, xx, 10));
@@ -764,7 +632,7 @@ mod tests {
                 check(&c, "zerohalf rounded");
             }
         }
-        eprintln!("hnfcut_logical_validity: problems with logical congruences {n_l}, cmir cuts {n_lc}, zerohalf {n_zh}, mapped-vars cuts {n_mv}");
-        assert!(n_l > 300 && n_lc > 300 && n_zh > 50 && n_mv > 300);
+        eprintln!("hnfcut_logical_validity: problems with logical congruences {n_l}, cmir cuts {n_lc}, zerohalf {n_zh}");
+        assert!(n_l > 300 && n_lc > 300 && n_zh > 50);
     }
 }

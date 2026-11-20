@@ -88,7 +88,7 @@ impl RowSense {
 }
 
 /// `solver::solve_lp` (および MIP の各ノードの緩和問題) が使う LP エンジンの選択。
-/// Python の `Model.solve(root_solver=...)` に対応し、既定は `"simplex"`。
+/// Python の `Model.solve(lp_solver=...)` に対応し、既定は `"simplex"`。
 /// 両エンジンは前処理 (`crate::presolve`) だけを共有する独立実装なので、
 /// 同じ問題で結果を突き合わせる検証に使える。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,7 +115,7 @@ impl RootSolver {
             "ipm_crossover" => Ok(RootSolver::IpmCrossover),
             "auto" => Ok(RootSolver::Auto),
             other => Err(PyValueError::new_err(format!(
-                "unknown root_solver '{other}' (expected 'auto', 'simplex', 'interior' or 'ipm_crossover')"
+                "unknown lp_solver '{other}' (expected 'auto', 'simplex', 'interior' or 'ipm_crossover')"
             ))),
         }
     }

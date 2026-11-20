@@ -1,0 +1,62 @@
+== fuzz_tiny: env ENOMOTO_MIP_REL_GAP=1e-9 .venv/bin/python benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0
+rc=0
+bad 0 of 400 time 2.8 (strict 17: 値の一致だけの以前の判定)
+Result: optimal, objective -7.12, best bound -7.12, gap 0.00%, nodes 0 (0.01s)
+bad 0 of 400 time 2.8 (strict 17: 値の一致だけの以前の判定)
+== fuzz_highs: env ENOMOTO_MIP_REL_GAP=1e-9 .venv/bin/python scripts/mip_fuzz_vs_highs.py 300
+rc=0
+bad 0 of 300 time 4.9
+Result: optimal, objective -78.37836523, best bound -78.37836523, gap 0.00%, nodes 0 (0.00s)
+bad 0 of 300 time 4.9
+== fuzz_objint: .venv/bin/python analysis/objint_20261112/fuzz_objint.py 1000 0
+rc=0
+bad 0 of 1000 status {'optimal': 967, 'infeasible': 33} with nodes>0 306 new step 86 new step and nodes>0 3 c range with width 27 c and nodes>0 6 time 66.5
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+bad 0 of 1000 status {'optimal': 967, 'infeasible': 33} with nodes>0 306 new step 86 new step and nodes>0 3 c range with width 27 c and nodes>0 6 time 66.5
+== fuzz_slack: .venv/bin/python analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 0
+rc=0
+done 1000 (seeds 0..999): mismatches 0, HiGHS statuses {'Infeasible': 614, 'Optimal': 268, 'Primal infeasible or unbounded': 115, 'Unbounded': 3}
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+done 1000 (seeds 0..999): mismatches 0, HiGHS statuses {'Infeasible': 614, 'Optimal': 268, 'Primal infeasible or unbounded': 115, 'Unbounded': 3}
+== fuzz_tiny2: env ENOMOTO_MIP_REL_GAP=1e-9 .venv/bin/python benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 1000
+rc=0
+bad 0 of 400 time 3.1 (strict 15: 値の一致だけの以前の判定)
+Result: optimal, objective -18.64000127, best bound -18.64000127, gap 0.00%, nodes 0 (0.00s)
+bad 0 of 400 time 3.1 (strict 15: 値の一致だけの以前の判定)
+== fuzz_objint2: .venv/bin/python analysis/objint_20261112/fuzz_objint.py 1000 5000
+rc=0
+bad 0 of 1000 status {'optimal': 971, 'infeasible': 29} with nodes>0 305 new step 80 new step and nodes>0 5 c range with width 27 c and nodes>0 2 time 68.9
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+bad 0 of 1000 status {'optimal': 971, 'infeasible': 29} with nodes>0 305 new step 80 new step and nodes>0 5 c range with width 27 c and nodes>0 2 time 68.9
+== fuzz_slack2: .venv/bin/python analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 5000
+rc=0
+done 1000 (seeds 5000..5999): mismatches 0, HiGHS statuses {'Infeasible': 655, 'Unbounded': 3, 'Primal infeasible or unbounded': 102, 'Optimal': 240}
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+done 1000 (seeds 5000..5999): mismatches 0, HiGHS statuses {'Infeasible': 655, 'Unbounded': 3, 'Primal infeasible or unbounded': 102, 'Optimal': 240}
+== fuzz_dfi_pcd: .venv/bin/python analysis/dualfree_20261117/fuzz.py 20000 0
+rc=0
+seed 7562 highs Optimal -0.1343597893913187 ours optimal -0.13436260318030135 最適値
+seed 8693 highs Solve error 0.0 ours optimal 22879.19191240807 
+seed 8780 highs Optimal -0.1573640785633157 ours optimal -0.11326503757856554 最適値
+seed 9271 highs Optimal -1288.3255368224015 ours optimal -1287.1242316497073 最適値
+seed 11185 highs Optimal -199898.1538076572 ours infeasible None 
+seed 11480 highs Infeasible inf ours optimal -19730.933305037313 
+seed 11988 highs Infeasible -17.2033975462621 ours optimal -12.20339754626115 
+bad 22 of 20000 HiGHS の状態 {'optimal': 19993, 'Solve error': 4, 'infeasible': 3} time 207.5
+MIP: MEMCAP: tid 0 limit 13493 MB peak rss 447 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+bad 22 of 20000 HiGHS の状態 {'optimal': 19993, 'Solve error': 4, 'infeasible': 3} time 207.5
+== fuzz_dfi_pc: env -u ENOMOTO_AGG_DUALFREE_INEQ .venv/bin/python analysis/dualfree_20261117/fuzz.py 10000 0 off
+rc=0
+seed 6122 highs Optimal 1.290359665478099 ours optimal 1.2903507515755193 最適値
+seed 6589 highs Optimal 0.8109777417981905 ours optimal 0.8109757343918451 最適値
+seed 6829 highs Optimal -4.893646525996676 ours optimal -4.893667523236915 最適値
+seed 7032 highs Optimal 234990.39496411695 ours optimal 234973.611744844 最適値
+seed 7562 highs Optimal -0.1343597893913187 ours optimal -0.13436260318030135 最適値
+seed 8693 highs Solve error 0.0 ours optimal 22879.19191240807 
+seed 8780 highs Optimal -0.1573640785633157 ours optimal -0.11326503757856554 最適値
+bad 15 of 10000 HiGHS の状態 {'optimal': 9998, 'Solve error': 2} time 108.9
+MIP: MEMCAP: tid 0 limit 13486 MB peak rss 251 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+bad 15 of 10000 HiGHS の状態 {'optimal': 9998, 'Solve error': 2} time 108.9
+== cargo test (既定)
+rc=0
+test result: ok. 419 passed; 0 failed; 19 ignored; 0 measured; 0 filtered out; finished in 2.42s

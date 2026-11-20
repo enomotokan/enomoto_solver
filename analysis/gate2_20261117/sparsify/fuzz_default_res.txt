@@ -1,0 +1,9 @@
+# fuzz_default.sh の結果 (既定化した木 = s3g・SUBWAIT=2 を含む先頭、2026-11-18)。ログ本体は大きいのでコミットしない
+== cargo_def: test result: ok. 409 passed; 0 failed; 19 ignored; 0 measured; 0 filtered out; finished in 3.23s
+== fuzz_highs: bad 0 of 300 time 6.4
+== fuzz_objint: bad 0 of 1000 status {'optimal': 967, 'infeasible': 33} with nodes>0 305 new step 70 new step and nodes>0 3 c range with width 27 c and nodes>0 6 time 80.3
+== fuzz_objint2: bad 0 of 1000 status {'optimal': 971, 'infeasible': 29} with nodes>0 304 new step 78 new step and nodes>0 7 c range with width 26 c and nodes>0 2 time 85.5
+== fuzz_slack: done 1000 (seeds 0..999): mismatches 0, HiGHS statuses {'Infeasible': 614, 'Optimal': 268, 'Primal infeasible or unbounded': 115, 'Unbounded': 3}
+== fuzz_slack2: done 1000 (seeds 5000..5999): mismatches 0, HiGHS statuses {'Infeasible': 655, 'Unbounded': 3, 'Primal infeasible or unbounded': 102, 'Optimal': 240}
+== fuzz_tiny: bad 0 of 400 time 3.8 (strict 16: 値の一致だけの以前の判定)
+== fuzz_tiny2: bad 0 of 400 time 4.2 (strict 14: 値の一致だけの以前の判定)

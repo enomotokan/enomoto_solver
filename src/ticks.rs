@@ -31,6 +31,27 @@ thread_local! {
     /// [`Gate`]: このスレッドの手間の門 (あれば [`over`] の中で許された手間まで止まって待つ)
     static GATE: std::cell::RefCell<Option<std::sync::Arc<Gate>>> = const { std::cell::RefCell::new(None) };
     static HAS_GATE: Cell<bool> = const { Cell::new(false) };
+    /// [`ipm_work`]: 内点法の反復の手間を数えて期限で止めるか
+    static IPM_WORK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 試作 `ENOMOTO_MIP_DET1T` の `i`: このスレッドの内点法 (`solve_box_lp`) が、反復ごとに KKT の分解の演算数を手間 ([`HEUR`]) に足し、
+/// 手間の期限 ([`over`]) を過ぎたら止めるか ([`ipm_work_guard`] の間だけ真)
+pub fn ipm_work() -> bool {
+    IPM_WORK.with(|v| v.get())
+}
+
+/// [`ipm_work`] を真にし、捨てるときに元に戻す見張り
+pub struct IpmWorkGuard(bool);
+
+pub fn ipm_work_guard() -> IpmWorkGuard {
+    IpmWorkGuard(IPM_WORK.with(|v| v.replace(true)))
+}
+
+impl Drop for IpmWorkGuard {
+    fn drop(&mut self) {
+        IPM_WORK.with(|v| v.set(self.0));
+    }
 }
 
 fn weights() -> &'static [f64; NK] {
@@ -75,6 +96,11 @@ pub fn add_raw(d: &[u64; NK]) {
             r[k].set(r[k].get().wrapping_add(d[k]));
         }
     });
+}
+
+/// このスレッドに手間の門が付いているか ([`install_gate`])
+pub fn has_gate() -> bool {
+    HAS_GATE.with(|g| g.get())
 }
 
 /// このスレッドの手間の期限 (重み付きの合計) を過ぎたか (期限がなければ偽)。

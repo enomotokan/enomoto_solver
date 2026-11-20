@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import json
 import math
 import subprocess
@@ -125,6 +126,29 @@ def _build_our_model(lp) -> tuple[_core.PyModel, int, int]:
     return m, n_constraints, nnz
 
 
+def _read_our_model(mps_path: Path) -> tuple[_core.PyModel, int, int, list[str]]:
+    """`mps_path` (`.mps` か `.mps.gz`) をこのクレートの MPS 読み込み (`PyModel.read_mps`、`src/mps.rs`) で読み、
+    `(model, 制約数, 非零数, 列の名前)` を返す。計測の台本はこれでこのクレートのモデルを作る (2026-11-20 から。
+    それより前は HiGHS で読んで `_build_our_model` で組み立てていた)。
+
+    読み方の約束は HiGHS にそろえてあり、手元の MIPLIB 78 問・`.mps.gz` 19 問では従来の組み立てと同じモデルになる。
+    違うのは、絶対値 1e-9 以下の係数を捨てないこと、負の `UP` だけの列の下限を -inf にすることだけ
+    (`Model.readModel` の説明)。`read_mps` のない古いビルドの拡張では従来の HiGHS 経由で組み立てる
+    (途中で台本だけ新しくなった計測が止まらないように)。"""
+    m = _core.PyModel()
+    if not hasattr(m, "read_mps"):
+        _, lp = _load_lp(mps_path)
+        names = list(lp.col_names_) if len(lp.col_names_) == lp.num_col_ else [f"C{j}" for j in range(lp.num_col_)]
+        model, n_constraints, nnz = _build_our_model(lp)
+        return model, n_constraints, nnz, names
+    p = str(mps_path)
+    opener = gzip.open if p.endswith(".gz") else open
+    with opener(p, "rt", encoding="latin-1") as fh:
+        text = fh.read()
+    _, names, _ = m.read_mps(text)
+    return m, m.n_constraints(), m.n_nonzeros(), names
+
+
 def _run_one(name: str, mps_path: Path, solve_timeout: float) -> dict:
     """問題 1 つを HiGHS とこのクレートの両方で解き、時間・状態・目的関数値を dict で返す。
     途中の例外は送出せず `*error` キーに記録する。(`solve_timeout` は未使用。
@@ -151,11 +175,11 @@ def _run_one(name: str, mps_path: Path, solve_timeout: float) -> dict:
         result["highs_error"] = str(e)
 
     try:
-        model, n_constraints, nnz = _build_our_model(lp)
+        model, n_constraints, nnz, _ = _read_our_model(mps_path)
         result["n_constraints"] = n_constraints
         result["nnz"] = nnz
         t0 = time.perf_counter()
-        out = model.solve(root_solver=None)
+        out = model.solve(lp_solver=None)
         ours_time = time.perf_counter() - t0
         result["ours_time"] = ours_time
         result["ours_status"] = out["status"]

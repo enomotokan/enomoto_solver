@@ -15,7 +15,7 @@
 //! すべて `Workspace::new` でループ前に一度だけ確保し、毎反復上書きする。ループ本体で
 //! 確保するのは (稀な) Farkas 証明の判定と、呼び出し元に返す最終の `Vec<f64>` だけ。
 //!
-//! 位置付け: 既定のエンジンではない。`Model.solve(root_solver="interior")` を
+//! 位置付け: 既定のエンジンではない。`Model.solve(lp_solver="interior")` を
 //! 明示したときだけ `solver::solve_lp` から呼ばれる。単体法との突き合わせ検証
 //! (`simplex.rs` の `*_matches_independent_ipm_solver` テスト) にも使う。
 

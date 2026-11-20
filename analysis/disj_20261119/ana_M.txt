@@ -1,0 +1,229 @@
+回: 186、最初のループが停滞 111、どれかのループが停滞 120
+問題: 186、少なくとも 1 種で最初のループが停滞 111、全種で停滞 111
+停滞かつ残りギャップ > 10% (少なくとも 1 種): 86
+
+problem                理由(種1/種2)                                  rem   nfrac/nint     t_root/t_all 状態                   nodes
+markshare2             stall                                     1.00        8 /60          0.1/600 time_limi            6711557
+markshare_4_0          stall                                     1.00        6 /30            0.1/3 optimal              288517
+pk1                    stall                                     1.00       20 /55           0.1/16 optimal              214760
+neos-2978193-inde      stall                                     1.00       23 /64           2.5/20 optimal              1619
+ns1208400              stall                                     1.00    409 /2594           2.7/32 optimal              3711
+fastxgemm-n2r6s0t2     stall                                     1.00       28 /48           0.2/38 optimal              28563
+cod105                 stall                                     1.00    695 /1024         56.4/145 optimal              17
+wachplan               stall                                     1.00    356 /2282          1.1/205 optimal              28539
+traininstance6         stall                                     1.00    466 /1181          0.9/455 optimal              185361
+CMS750_4               stall                                     1.00   3062 /7196          9.2/473 optimal              13547
+bnatt400               stall                                     1.00    738 /1948          2.2/600 time_limi            54655
+neos-2657525-crna      stall                                     1.00      91 /436          0.1/600 time_limi            668452
+csched008              stall                                     1.00    160 /1284          0.7/600 time_limi            26638
+neos-4338804-snowy     stall                                     1.00    447 /1302          0.7/600 time_limi            411900
+graph20-20-1rand       stall                                     1.00     140 /425          0.1/600 time_limi            43124
+bppc4-08               stall                                     1.00     64 /1454          1.1/600 time_limi            266120
+ic97_potential         stall                                     1.00     391 /522          0.7/600 time_limi            406949
+traininstance2         stall                                     1.00    764 /2615          1.9/600 time_limi            177885
+brazil3                stall                                     1.00   1172 /7136          7.9/600 time_limi            2980
+supportcase18          stall                                     1.00   158 /13365          1.5/600 time_limi            162839
+neos-5188808-nattai    stall                                     1.00      50 /162          1.0/600 time_limi            10100
+chromaticindex512-7    stall                                     1.00 24805 /36864         26.8/601 time_limi            16602
+chromaticindex1024-7   stall                                     1.00 49693 /73728         53.3/601 time_limi            734
+mad                    stall                                     1.00      19 /200          0.1/600 time_limi            4601455
+glass4                 stall                                     1.00     103 /298          0.3/600 time_limi            772388
+gmu-35-50              stall,stall                               1.00      32 /728          0.2/600 time_limi            1661255
+opm2-z10-s4            stall                                     1.00   5586 /5958         29.8/601 time_limi            354
+neos-5107597-kakapo    stall                                     1.00   1065 /2974          6.2/600 time_limi            69948
+momentum1              stall                                     1.00    225 /1203          7.3/601 time_limi            364
+mcsched                stall                                     1.00   1263 /1501          1.0/231 optimal              135869
+neos-5195221-niemur    stall                                     1.00    993 /5035          3.0/600 time_limi            8691
+rocI-4-11              intobj_stall                              1.00    799 /1108          4.7/600 time_limi            61487
+rocII-5-11             stall                                     1.00    257 /2275          3.7/600 time_limi            89673
+atlanta-ip             stall                                     0.98  1750 /16068         20.0/600 time_limi            362
+graphdraw-domain       stall                                     0.97     107 /200          0.3/246 optimal              312601
+rail507                stall                                     0.97   271 /26114         51.1/601 time_limi            6235
+trento1                stall                                     0.97    492 /6415         16.1/600 time_limi            4357
+fast0507               stall                                     0.96   276 /26114         66.6/601 time_limi            7030
+gen-ip054              stall                                     0.96       20 /30          0.1/357 optimal              2660955
+gen-ip002              stall                                     0.95       25 /41          0.1/496 optimal              4026060
+cmflsp50-24-8-8        stall                                     0.92    605 /1369         68.7/600 time_limi            12989
+dano3_5                stall                                     0.92      32 /115         20.2/456 optimal              671
+satellites2-60-fs      intobj_stall                              0.92  1822 /32991         78.8/600 time_limi            383
+ran14x18-disj-8        stall                                     0.92      70 /252          3.2/191 optimal              44098
+satellites2-40         intobj_stall                              0.91  1934 /33097         30.1/600 time_limi            634
+eil33-2                stall                                     0.91     36 /4516           2.7/20 optimal              7199
+gmu-35-40              stall                                     0.91      22 /622          0.1/600 time_limi            1732645
+neos-2746589-doon      intobj_stall                              0.90  1272 /42262          6.1/601 time_limi            0
+leo1                   stall                                     0.90     83 /6730          3.9/600 time_limi            22602
+istanbul-no-cutoff     stall                                     0.89       12 /24         46.2/299 optimal              2091
+neos-1445765           stall                                     0.89    896 /2135          2.9/109 optimal              16708
+mas76                  stall,stall                               0.88      20 /149           0.2/12 optimal              180643
+dano3_3                stall                                     0.86       13 /25          9.5/224 optimal              7
+qap10                  stall                                     0.86   1343 /4150          18.3/42 optimal              0
+sp97ar                 stall                                     0.85   227 /14087         19.0/600 time_limi            1996
+germanrr               stall                                     0.84   270 /10535         18.2/600 time_limi            14470
+seymour                stall                                     0.84     565 /952          4.0/600 time_limi            83648
+swath1                 stall,round_limit                         0.83     14 /2090           6.0/15 optimal              233
+swath3                 stall,stall                               0.81     37 /2465           7.9/49 optimal              9798
+supportcase33          intobj_stall                              0.81    109 /6119          2.0/395 optimal              29762
+air05                  stall                                     0.77    245 /6119           7.5/51 optimal              540
+seymour1               stall                                     0.77     125 /308           4.8/85 optimal              3607
+comp07-2idx            intobj_stall                              0.67  1168 /17172           7.8/24 optimal              0
+ns1830653              stall                                     0.66     193 /515          6.2/161 optimal              24278
+sp98ar                 stall,stall                               0.65   185 /14972         26.1/600 time_limi            6629
+lectsched-5-obj        intobj_stall                              0.63   4906 /8721         17.6/600 time_limi            12748
+neos-4722843-widden    stall                                     0.56    347 /2365          3.6/106 optimal              1547
+blp-ic98               stall,stall                               0.54    78 /12962         11.1/600 time_limi            122511
+neos-1456979           intobj_stall                              0.51    283 /4420          2.7/201 optimal              9281
+binkar10_1             stall                                     0.51      76 /170            0.3/5 optimal              3376
+rococoB10-011000       phase2_stall                              0.50   1217 /3511          9.6/600 time_limi            13691
+neos-1582420           stall,stall                               0.49    398 /2407           5.0/20 optimal              84
+comp21-2idx            intobj_stall                              0.49   884 /10710         15.2/600 time_limi            9832
+neos-662469            stall                                     0.48   426 /18235          8.6/351 optimal              10784
+sct2                   stall                                     0.46    110 /2146          1.9/600 time_limi            125405
+radiationm18-12-05     intobj_stall                              0.43   1853 /6868          7.1/600 time_limi            11558
+icir97_tension         stall                                     0.42     664 /829          3.2/600 time_limi            245018
+unitcal_7              stall                                     0.42    453 /2503         18.5/234 optimal              5816
+uccase12               stall,stall,stall                         0.32     70 /9072         22.7/601 time_limi            20664
+neos-911970            stall                                     0.25      90 /840           0.5/26 optimal              9044
+mzzv11                 stall,no_cands                            0.20    769 /6488         30.9/379 optimal              3473
+neos-3381206-awhea     intobj_stall                              0.19    414 /2375            2.3/3 optimal              0
+app1-2                 phase2_stall                              0.15   540 /12983         89.8/600 time_limi            27638
+neos-3083819-nubu      stall,stall                               0.14     60 /3883            0.8/7 optimal              605
+nu25-pr12              intobj_stall,stall                        0.14    105 /4730            0.9/3 optimal              13
+neos-4738912-atrato    stall                                     0.13    408 /6174          1.8/109 optimal              26893
+
+停滞・残りギャップ <= 10% (またはギャップ 0): drayage-25-23(0.00), neos-960392(-), neos-957323(0.00), cbs-cta(-), app1-1(0.00), pg(0.00), nursesched-sprint02(0.00), irp(0.00), piperout-27(0.00), piperout-08(0.00), fiball(0.00), physiciansched6-2(0.00), neos-1171448(-), n2seq36q(0.00), neos-933966(-), pg5_34(0.01), tr12-30(0.00), fhnw-binpack4-4(-), bnatt500(-), neos859080(-), neos-1171737(-), peg-solitaire-a3(-), academictimetablesmall(-), ns1952667(-), snp-02-004-104(0.00)
+
+根のループの時間 / 求解全体: 中央値 0.028、平均 0.093、合計の比 3674/67306 = 0.055
+  停滞: 111 回、割合の中央値 0.025、合計の比 0.031
+  停滞でない: 75 回、割合の中央値 0.035、合計の比 0.088
+
+解けない (600 秒で時間切れ) か 100 秒以上かかる問題: 128
+  neos-4722843-widden    停滞 理由 stall                                    rem 0.56 状態 opti106 t_root 3.6
+  mas74                       理由 round_limit,stall                        rem 0.91 状態 opti107 t_root 0.3
+  neos-1445765           停滞 理由 stall                                    rem 0.89 状態 opti109 t_root 2.9
+  neos-4738912-atrato    停滞 理由 stall                                    rem 0.13 状態 opti109 t_root 1.8
+  mzzv42z                     理由 round_limit,stall                        rem 0.15 状態 opti118 t_root 15.1
+  cod105                 停滞 理由 stall                                    rem 1.00 状態 opti145 t_root 56.4
+  neos-3627168-kasai          理由 round_limit                              rem 0.64 状態 opti150 t_root 1.8
+  ns1830653              停滞 理由 stall                                    rem 0.66 状態 opti161 t_root 6.2
+  ran14x18-disj-8        停滞 理由 stall                                    rem 0.92 状態 opti191 t_root 3.2
+  neos-933966            停滞 理由 stall                                    rem - 状態 opti194 t_root 38.8
+  neos-1456979           停滞 理由 intobj_stall                             rem 0.51 状態 opti201 t_root 2.7
+  wachplan               停滞 理由 stall                                    rem 1.00 状態 opti205 t_root 1.1
+  30n20b8                     理由 round_limit                              rem 0.91 状態 opti211 t_root 11.6
+  dano3_3                停滞 理由 stall                                    rem 0.86 状態 opti224 t_root 9.5
+  mcsched                停滞 理由 stall                                    rem 1.00 状態 opti231 t_root 1.0
+  unitcal_7              停滞 理由 stall                                    rem 0.42 状態 opti234 t_root 18.5
+  graphdraw-domain       停滞 理由 stall                                    rem 0.97 状態 opti246 t_root 0.3
+  pg5_34                 停滞 理由 stall                                    rem 0.01 状態 opti260 t_root 2.0
+  tr12-30                停滞 理由 phase2_stall                             rem 0.00 状態 opti273 t_root 2.9
+  neos-787933                 理由                                          rem - 状態 opti292 t_root 0.0
+  istanbul-no-cutoff     停滞 理由 stall                                    rem 0.89 状態 opti299 t_root 46.2
+  rococoC10-001000            理由 round_limit                              rem 0.38 状態 opti338 t_root 0.9
+  supportcase26               理由 round_limit                              rem 0.85 状態 opti341 t_root 0.5
+  neos-662469            停滞 理由 stall                                    rem 0.48 状態 opti351 t_root 8.6
+  gen-ip054              停滞 理由 stall                                    rem 0.96 状態 opti357 t_root 0.1
+  mzzv11                 停滞 理由 stall,no_cands                           rem 0.20 状態 opti379 t_root 30.9
+  supportcase33          停滞 理由 intobj_stall                             rem 0.81 状態 opti395 t_root 2.0
+  mushroom-best               理由 no_cands,stall                           rem 0.43 状態 opti429 t_root 22.9
+  traininstance6         停滞 理由 stall                                    rem 1.00 状態 opti455 t_root 0.9
+  dano3_5                停滞 理由 stall                                    rem 0.92 状態 opti456 t_root 20.2
+  CMS750_4               停滞 理由 stall                                    rem 1.00 状態 opti473 t_root 9.2
+  gen-ip002              停滞 理由 stall                                    rem 0.95 状態 opti496 t_root 0.1
+  tbfp-network                理由 time_cap,stall                           rem 0.57 状態 opti557 t_root 145.4
+  mad                    停滞 理由 stall                                    rem 1.00 状態 time600 t_root 0.1
+  bnatt400               停滞 理由 stall                                    rem 1.00 状態 time600 t_root 2.2
+  fhnw-binpack4-4        停滞 理由 stall                                    rem - 状態 time600 t_root 0.4
+  bnatt500               停滞 理由 stall                                    rem - 状態 time600 t_root 3.3
+  neos-2657525-crna      停滞 理由 stall                                    rem 1.00 状態 time600 t_root 0.1
+  neos859080             停滞 理由 intobj_stall                             rem - 状態 time600 t_root 0.1
+  glass4                 停滞 理由 stall                                    rem 1.00 状態 time600 t_root 0.3
+  seymour                停滞 理由 stall                                    rem 0.84 状態 time600 t_root 4.0
+  uct-subprob                 理由 round_limit                              rem 0.82 状態 time600 t_root 3.0
+  csched008              停滞 理由 stall                                    rem 1.00 状態 time600 t_root 0.7
+  neos-4338804-snowy     停滞 理由 stall                                    rem 1.00 状態 time600 t_root 0.7
+  reblock115                  理由 no_cands                                 rem 1.00 状態 time600 t_root 0.2
+  neos-3046615-murg           理由 no_cands                                 rem 0.94 状態 time600 t_root 0.1
+  glass-sc                    理由 round_limit                              rem 0.98 状態 time600 t_root 1.7
+  sct2                   停滞 理由 stall                                    rem 0.46 状態 time600 t_root 1.9
+  neos-1171737           停滞 理由 stall                                    rem - 状態 time600 t_root 2.9
+  b1c1s1                      理由 round_limit                              rem 0.22 状態 time600 t_root 15.0
+  peg-solitaire-a3       停滞 理由 stall                                    rem - 状態 time600 t_root 5.9
+  rococoB10-011000       停滞 理由 phase2_stall                             rem 0.50 状態 time600 t_root 9.6
+  graph20-20-1rand       停滞 理由 stall                                    rem 1.00 状態 time600 t_root 0.1
+  bppc4-08               停滞 理由 stall                                    rem 1.00 状態 time600 t_root 1.1
+  ic97_potential         停滞 理由 stall                                    rem 1.00 状態 time600 t_root 0.7
+  milo-v12-6-r2-40-1          理由 round_limit                              rem 0.30 状態 time600 t_root 4.5
+  csched007                   理由 round_limit                              rem 0.71 状態 time600 t_root 2.2
+  markshare2             停滞 理由 stall                                    rem 1.00 状態 time600 t_root 0.1
+  rocI-4-11              停滞 理由 intobj_stall                             rem 1.00 状態 time600 t_root 4.7
+  traininstance2         停滞 理由 stall                                    rem 1.00 状態 time600 t_root 1.9
+  trento1                停滞 理由 stall                                    rem 0.97 状態 time600 t_root 16.1
+  neos-5107597-kakapo    停滞 理由 stall                                    rem 1.00 状態 time600 t_root 6.2
+  neos-4387871-tavua          理由 phase2_time                              rem 0.51 状態 time600 t_root 3.1
+  cost266-UUE                 理由 round_limit                              rem 0.68 状態 time600 t_root 5.9
+  dws008-01                   理由 round_limit                              rem 0.85 状態 time600 t_root 4.9
+  neos-3754480-nidda          理由 no_cands                                 rem 0.99 状態 time600 t_root 0.1
+  50v-10                      理由 round_limit,round_limit                  rem 0.22 状態 time600 t_root 4.4
+  lotsize                     理由 phase2_time                              rem 0.10 状態 time600 t_root 69.9
+  neos-3024952-loue           理由 round_limit                              rem 0.38 状態 time600 t_root 2.6
+  assign1-5-8                 理由 round_limit                              rem 0.92 状態 time600 t_root 1.0
+  cmflsp50-24-8-8        停滞 理由 stall                                    rem 0.92 状態 time600 t_root 68.7
+  comp21-2idx            停滞 理由 intobj_stall                             rem 0.49 状態 time600 t_root 15.2
+  academictimetablesmall 停滞 理由 stall                                    rem - 状態 time600 t_root 69.2
+  gmu-35-50              停滞 理由 stall,stall                              rem 1.00 状態 time600 t_root 0.2
+  nexp-150-20-8-5             理由 round_limit,round_limit                  rem 0.06 状態 time600 t_root 39.7
+  icir97_tension         停滞 理由 stall                                    rem 0.42 状態 time600 t_root 3.2
+  germanrr               停滞 理由 stall                                    rem 0.84 状態 time600 t_root 18.2
+  atlanta-ip             停滞 理由 stall                                    rem 0.98 状態 time600 t_root 20.0
+  supportcase40               理由 no_cands                                 rem 0.86 状態 time600 t_root 17.4
+  gmu-35-40              停滞 理由 stall                                    rem 0.91 状態 time600 t_root 0.1
+  neos-4954672-berkel         理由 round_limit                              rem 0.65 状態 time600 t_root 1.8
+  ns1952667              停滞 理由 stall                                    rem - 状態 time600 t_root 5.6
+  brazil3                停滞 理由 stall                                    rem 1.00 状態 time600 t_root 7.9
+  satellites2-60-fs      停滞 理由 intobj_stall                             rem 0.92 状態 time600 t_root 78.8
+  net12                       理由 time_cap                                 rem 0.92 状態 time600 t_root 76.3
+  radiationm18-12-05     停滞 理由 intobj_stall                             rem 0.43 状態 time600 t_root 7.1
+  supportcase18          停滞 理由 stall                                    rem 1.00 状態 time600 t_root 1.5
+  leo1                   停滞 理由 stall                                    rem 0.90 状態 time600 t_root 3.9
+  sp97ar                 停滞 理由 stall                                    rem 0.85 状態 time600 t_root 19.0
+  satellites2-40         停滞 理由 intobj_stall                             rem 0.91 状態 time600 t_root 30.1
+  rocII-5-11             停滞 理由 stall                                    rem 1.00 状態 time600 t_root 3.7
+  rmatr200-p5                 理由 no_cands                                 rem 1.00 状態 time600 t_root 5.2
+  neos-5188808-nattai    停滞 理由 stall                                    rem 1.00 状態 time600 t_root 1.0
+  sp98ar                 停滞 理由 stall,stall                              rem 0.65 状態 time600 t_root 26.1
+  neos-4300652-rahue          理由 round_limit                              rem 0.98 状態 time600 t_root 20.9
+  neos-3988577-wolgan         理由 time_cap                                 rem - 状態 time600 t_root 61.1
+  lectsched-5-obj        停滞 理由 intobj_stall                             rem 0.63 状態 time600 t_root 17.6
+  cvs16r128-89                理由 no_cands                                 rem 0.96 状態 time600 t_root 3.6
+  sing44                      理由 time_cap,time_cap                        rem 0.43 状態 time600 t_root 175.9
+  app1-2                 停滞 理由 phase2_stall                             rem 0.15 状態 time600 t_root 89.8
+  neos-3656078-kumeu          理由 time_cap                                 rem 0.87 状態 time600 t_root 105.8
+  blp-ic98               停滞 理由 stall,stall                              rem 0.54 状態 time600 t_root 11.1
+  leo2                        理由 round_limit,stall                        rem 0.68 状態 time600 t_root 15.8
+  neos-3216931-puriri         理由 time_cap                                 rem 0.99 状態 time600 t_root 163.8
+  blp-ar98                    理由 round_limit                              rem 0.58 状態 time600 t_root 12.6
+  neos-5195221-niemur    停滞 理由 stall                                    rem 1.00 状態 time600 t_root 3.0
+  n3div36                     理由 round_limit,stall                        rem 0.36 状態 time601 t_root 9.6
+  neos-1354092                理由 lp_fail                                  rem 0.16 状態 time601 t_root 59.1
+  cryptanalysiskb128n5obj16      理由 time_cap                                 rem - 状態 time601 t_root 123.1
+  momentum1              停滞 理由 stall                                    rem 1.00 状態 time601 t_root 7.3
+  radiationm40-10-02          理由 time_cap                                 rem 0.73 状態 time601 t_root 38.1
+  neos-873061                 理由 time_cap                                 rem 0.53 状態 time601 t_root 65.5
+  sing326                     理由 time_cap                                 rem 0.46 状態 time601 t_root 98.9
+  cryptanalysiskb128n5obj14      理由 time_cap                                 rem - 状態 time601 t_root 141.7
+  opm2-z10-s4            停滞 理由 stall                                    rem 1.00 状態 time601 t_root 29.8
+  neos-4763324-toguru         理由 time_cap                                 rem 0.96 状態 time601 t_root 21.2
+  neos-2746589-doon      停滞 理由 intobj_stall                             rem 0.90 状態 time601 t_root 6.1
+  chromaticindex512-7    停滞 理由 stall                                    rem 1.00 状態 time601 t_root 26.8
+  supportcase42               理由 no_cands                                 rem 1.00 状態 time601 t_root 0.9
+  uccase9                     理由 time_cap                                 rem 0.73 状態 time601 t_root 68.1
+  fast0507               停滞 理由 stall                                    rem 0.96 状態 time601 t_root 66.6
+  sorrell3                    理由 time_cap                                 rem 0.88 状態 time601 t_root 95.7
+  uccase12               停滞 理由 stall,stall,stall                        rem 0.32 状態 time601 t_root 22.7
+  chromaticindex1024-7   停滞 理由 stall                                    rem 1.00 状態 time601 t_root 53.3
+  rail507                停滞 理由 stall                                    rem 0.97 状態 time601 t_root 51.1
+  rail01                      理由 time_cap                                 rem 0.49 状態 time601 t_root 373.3
+  snp-02-004-104         停滞 理由 stall                                    rem 0.00 状態 time601 t_root 28.0
+  thor50dday                  理由 time_cap,work_cap,lp_fail                rem 0.18 状態 time602 t_root 258.5
+解けない (600 秒): 95 問、うち停滞 54、うち停滞かつ残りギャップ > 10% 46: mad, bnatt400, neos-2657525-crna, glass4, seymour, csched008, neos-4338804-snowy, sct2, rococoB10-011000, graph20-20-1rand, bppc4-08, ic97_potential, markshare2, rocI-4-11, traininstance2, trento1, neos-5107597-kakapo, cmflsp50-24-8-8, comp21-2idx, gmu-35-50, icir97_tension, germanrr, atlanta-ip, gmu-35-40, brazil3, satellites2-60-fs, radiationm18-12-05, supportcase18, leo1, sp97ar, satellites2-40, rocII-5-11, neos-5188808-nattai, sp98ar, lectsched-5-obj, app1-2, blp-ic98, neos-5195221-niemur, momentum1, opm2-z10-s4, neos-2746589-doon, chromaticindex512-7, fast0507, uccase12, chromaticindex1024-7, rail507
+解けるが 100 秒以上: 33 問、うち停滞 24、うち停滞かつ残りギャップ > 10% 21: neos-4722843-widden, neos-1445765, neos-4738912-atrato, cod105, ns1830653, ran14x18-disj-8, neos-1456979, wachplan, dano3_3, mcsched, unitcal_7, graphdraw-domain, istanbul-no-cutoff, neos-662469, gen-ip054, mzzv11, supportcase33, traininstance6, dano3_5, CMS750_4, gen-ip002

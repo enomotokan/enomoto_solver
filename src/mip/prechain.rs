@@ -240,7 +240,7 @@ impl Shared {
 }
 
 /// FJ_P3 の問題 (FJ 用にかけ直した問題) と、その解を元の問題に戻す後処理
-type P3 = Arc<(MipProblem, Vec<crate::presolve::PostsolveStep>, Option<crate::presolve::scaling::Scaling>)>;
+type P3 = Arc<super::FjP3>;
 
 /// 1 本のスレッド: FJ (種を変えた FJ2) と Local-MIP + 連鎖に時間を分け合う ([`super::heuristics::fj_lmip_mix`] と同じ配分)。
 /// 区切りごとに、止める合図・問題の乗り換え・ほかのスレッドと主の解・FJ の範囲を見る。根の問題では、今の根の FJ のスレッドと同じく
