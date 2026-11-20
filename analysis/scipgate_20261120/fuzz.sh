@@ -1,10 +1,10 @@
 #!/bin/bash
-# 試作 ENOMOTO_MIP_VBCLQ の誤答の確かめ (scipslow_20261119/fuzz.sh の写し)。値は環境 VBCLQ (既定 e = 計測の vbce) で、
+# 試作 ENOMOTO_MIP_VBCLQ の誤答の確かめ (scipslow_20261119/fuzz.sh の写し)。値は環境 VBCLQ (既定 e = 計測の vbce。eR = 根の LP の前の道だけ) で、
 # pseudoobj が呼ばれた回・固定した回を ENOMOTO_MIP_VBCLQ_COUNT_FILE で数える (本ごとに fuzz_logs/<名>.cnt)。
 # リポジトリの根から: bash analysis/scipgate_20261120/fuzz.sh   ログは analysis/scipgate_20261120/fuzz_logs/ (コミットしない)
 set -u
 cd "$(dirname "$0")/../.."
-L=analysis/scipgate_20261120/fuzz_logs; mkdir -p $L
+L=analysis/scipgate_20261120/fuzz_logs${VBCLQ:+_$VBCLQ}; mkdir -p $L
 run() { name=$1; shift; rm -f $L/$name.cnt; echo "== $name"; ENOMOTO_MIP_VBCLQ_COUNT_FILE=$PWD/$L/$name.cnt "$@" > $L/$name.log 2>&1; echo "rc=$?"; grep -E "bad|mismatches" $L/$name.log | tail -1
   [ -f $L/$name.cnt ] && awk '{c[$3]++; if ($1>0) f[$3]++; if ($2>0) p[$3]++; s[$3]+=$1} END {for (k in c) printf "pseudoobj %s: calls %d, with fixings %d (columns %d), cutoff proved %d\n", k, c[k], f[k], s[k], p[k]}' $L/$name.cnt || echo "pseudoobj: calls 0"; }
 export ENOMOTO_MIP_VBCLQ=${VBCLQ:-e}
