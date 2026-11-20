@@ -2171,6 +2171,8 @@ pub(crate) struct SnapNode {
     /// `ENOMOTO_MIP_MEMC` (試作): `basis` を詰めたもの ([`super::queue::SparseBasis`])。あれば `basis` は `None` で、
     /// [`Solver::open_from_pool`] で戻す
     basis_p: Option<super::queue::SparseBasis>,
+    /// 試作 `ENOMOTO_MIP_CWM`: ノードの札 ([`OpenNode::cwm`])。共有の待ち行列を通っても引き継ぐ
+    cwm: Option<std::sync::Arc<super::cwm::CwmTag>>,
 }
 
 /// ノードの変更の並びに、引き継ぎの鎖 ([`OpenNode::inh`]、試作 `ENOMOTO_MIP_TC` の `s`) の固定を足したもの。共有の待ち行列へ出すときに使う
@@ -2530,10 +2532,10 @@ fn full_changes(n: &OpenNode) -> std::borrow::Cow<'_, [BoundChange]> {
 impl SnapNode {
     /// 変更の並びを空にした [`Self::of`] (呼び手が並びを入れる。`G5FIN` 用)
     fn of_thin(n: &OpenNode) -> Self {
-        SnapNode { changes: Vec::new(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None }
+        SnapNode { changes: Vec::new(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: n.cwm.clone() }
     }
     fn of(n: &OpenNode) -> Self {
-        SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None }
+        SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: n.cwm.clone() }
     }
     /// [`Self::of`] に、親の LP の基底の列と最初の `m` 行 (元の行) を付ける。
     fn of_with_basis(n: &OpenNode, m: usize) -> Self {
@@ -2556,7 +2558,7 @@ impl SnapNode {
             Some(w) => super::queue::unpack_changes(w),
             None => self.changes,
         };
-        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: None }
+        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: None, cwm: self.cwm }
     }
 }
 
@@ -11896,12 +11898,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(snap) = self.snap.clone() {
             for (k, n) in snap.nodes.iter().enumerate() {
                 let tags = Some(Rc::new(vec![snap.serial << 32 | k as u64]));
-                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: None });
+                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: None, cwm: None });
             }
             self.snap_alive = vec![true; snap.nodes.len()];
             first = false;
         } else {
-            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None, inh: None });
+            if super::cwm::mode().is_some() && !self.params.submip && self.pool_tid == 0 {
+                super::cwm::reset(self.params.verbose);
+            }
+            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None, inh: None, cwm: None });
         }
         // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 木の始まり (根の前処理・LP・カット・ヒューリスティクスの終わり) を道筋つきで出す
         // (サブ MIP の時間のうち根の割合を見る。analysis/rens_resume_20261101.md)
@@ -12671,6 +12676,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             first = false;
             self.nodes += 1;
+            // 試作 `ENOMOTO_MIP_CWM`: このノードの衝突の重みの倍率 (札の対の側の大きさも数える)
+            if super::cwm::mode().is_some() && !self.params.submip {
+                // 次元 0 = 衝突の重みの倍率の対数 ([`super::cwm::DIMS`])
+                self.pc.cw_mult = super::cwm::on_node(node.cwm.as_ref())[0].exp();
+            }
             self.tprof.nodes += 1;
             // 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN` = w: 始めは衝突の重み 0 (既定と同じ)。ノード `ENOMOTO_T_MIP_CW_DYN_WINDOW` (既定 200) ごとに、
             // その窓で作った衝突の数 / ノード数が `ENOMOTO_T_MIP_CW_DYN_RATE` (既定 0.7) 以上なら、以後は重みを w にし、HiGHS 式の衝突スコアも
@@ -14372,9 +14382,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     tags: node.tags.clone(),
                     sb: sb_child.clone(),
                     inh: child_inh.clone(),
+                    cwm: None,
                 }
             };
+            // 試作 `ENOMOTO_MIP_CWM`: 子の札 (対を始めるなら 2 つの子に違う腕)。乱数はスレッドの種とノード番号から
+            let cwm_tags = if super::cwm::mode().is_some() && !self.params.submip {
+                super::cwm::children(node.cwm.as_ref(), node.depth, self.rng ^ u64::from(self.pool_tid).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.nodes.wrapping_mul(0xD1B5_4A32_D192_ED03))
+            } else {
+                [None, None]
+            };
+            let [cwm_first, cwm_second] = cwm_tags;
             let mut sec = mk(second_c);
+            sec.cwm = cwm_second;
             if replay.is_some() {
                 sec.estimate = rp_prio(second_c);
             }
@@ -14399,6 +14418,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             let mut child = mk(first_c);
+            child.cwm = cwm_first;
             self.dfsbb_last_depth = child.depth as u64;
             if replay.is_some() {
                 child.estimate = rp_prio(first_c);
@@ -24122,14 +24142,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         for n in nodes.iter_mut() {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None });
+            snodes.push(SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: None });
         }
         for n in nodes {
             self.queue.push(n);
         }
         if let Some(n) = plunge.as_mut().filter(|_| with_nodes) {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None });
+            snodes.push(SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: None });
         }
         if with_nodes {
             self.dive_stack.clear();
@@ -26332,6 +26352,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             eprintln!("MIP: conflict score diag: analyses {}, bumped columns per analysis {:.2}, analyses without conflict {:.3}, lit reasons asked per analysis {:.2} (max {}), used {:.2}, analyses cut by the budget {:.3}", self.hcs_diag[0], self.hcs_diag[1] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[2] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[3] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[5], self.hcs_diag[4] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[6] as f64 / self.hcs_diag[0].max(1) as f64);
+            if super::cwm::mode().is_some() && !self.params.submip && self.pool_tid == 0 {
+                if let Some(l) = super::cwm::final_line() {
+                    eprintln!("MIP: CWM final: {l}");
+                }
+            }
             if lit_explain_sig() {
                 let cb: Vec<u64> = super::domain::CUT_BUDGET.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!("MIP: lit explain budget (all threads): resolved {}, analyses cut by the budget {}, arena rows {}, per analysis (0,1,2,3-4,5-8,9-16,17-32,33-64,65-) {:?}", cb[0], cb[1], self.cut_arena.len(), self.lx_hist);

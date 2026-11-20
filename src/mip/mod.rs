@@ -22,6 +22,8 @@ pub(crate) mod domain;
 pub(crate) mod conflict_pool;
 pub(crate) mod cutconf;
 pub(crate) mod queue;
+/// 試作 `ENOMOTO_MIP_CWM`: 衝突の重みの倍率を部分木ごとに割り振って対で比べる。
+pub(crate) mod cwm;
 pub(crate) mod replay;
 pub(crate) mod pseudocost;
 pub(crate) mod solver;
