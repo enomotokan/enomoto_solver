@@ -315,6 +315,12 @@ pub(crate) fn ticks_on(c: char) -> bool {
     env_def!("ENOMOTO_MIP_TICKS", "ntwumcflshk").is_some_and(|v| v.contains(c))
 }
 
+/// 試作 `ENOMOTO_MIP_PCL` の文字 (既定では使わない、analysis/disj_20261119.md の 11 節): `a` 打ち切った強分岐の子の値を下限の観測に・
+/// lookahead に数えない、`b` 観測のない列の費用を似た列で埋める、`c` 信頼性をばらつきで決める、`d` 解き直した後の上がり幅を観測にする
+pub(crate) fn pcl(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_PCL").is_some_and(|v| v.contains(c))
+}
+
 /// 試作 `ENOMOTO_MIP_ROOTSB` の文字の並び (既定では使わない、`Solver::select_branch_inner`、analysis/disj_20261119.md の 9 節)
 pub(crate) fn rootsb_flags() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_ROOTSB").filter(|v| !v.is_empty() && *v != "0")
@@ -1458,7 +1464,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         pretime::start();
     }
     // 試作 `ENOMOTO_MIP_TPRE` ([`tpre`]): 並列の「仮の暫定値つき前処理」を 1 本のスレッドで始める (前処理の後で待って取り込む)
-    let tpre_job = (tpre::mode().is_some() && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none()).then(|| {
+    // `t` (pt): 空いたスレッドで FJ・Local-MIP を前処理の間回し続ける (手間の門で再現する)
+    let pt_job = (tpre::mode().is_some_and(|m| m.contains('t') || m.contains('T')) && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none())
+        .then(|| tpre::pt_spawn(p, params.threads, 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64)));
+    let tpre_job = (tpre::mode().is_some_and(|m| !m.contains('t') && !m.contains('T')) && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none()).then(|| {
         let q = p.clone();
         let safety = if params.time_limit.is_finite() { 0.25 * params.time_limit } else { 60.0 };
         let seed = 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
@@ -1732,6 +1741,28 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     let mut ref_shift: Option<f64> = None;
     // `ENOMOTO_MIP_TPRE`: 並列の仮の暫定値つき前処理の終わりを待ち、一番良い解を開始解に、`b` なら T 以下の解があったときに P_T の伝播の境界を持ち込む
     let mut presolved = presolved;
+    let mut tpre_start = false;
+    let start = match pt_job {
+        Some(job) => {
+            let tw = std::time::Instant::now();
+            let (w, b) = job.finish(p);
+            eprintln!(
+                "MIP: TPRE pt: granted {:.3e} work, best {} ; waited {:.2}s at {:.2}s",
+                w,
+                match &b { Some((z, _, t)) => format!("{z:.10e} (thread {t})"), None => "none".into() },
+                tw.elapsed().as_secs_f64(),
+                t_pre.elapsed().as_secs_f64()
+            );
+            match (start, b) {
+                (None, Some((_, x, _))) => {
+                    tpre_start = true;
+                    Some(x)
+                }
+                (s, _) => s,
+            }
+        }
+        None => start,
+    };
     let start = match tpre_job {
         Some(h) => {
             let tw = std::time::Instant::now();
@@ -1769,10 +1800,13 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                     o.l, o.l_iters, o.secs[0], o.u, o.secs[1], o.t, o.n_tight, o.n_fix, o.infeasible_t, o.secs[2], o.below_t, o.secs[3], o.x_z, t_pre.elapsed().as_secs_f64()
                 );
             }
+            tpre_start = start.is_none() && out.as_ref().is_some_and(|o| o.x.is_some());
             start.or(out.and_then(|o| o.x))
         }
         None => start,
     };
+    // `ENOMOTO_MIP_TPRE` (p・pl・pt) の解: 前処理後の問題で直せなくても捨てない (下の `tpre_orig`)
+    let tpre_x_orig = if tpre_start { start.clone() } else { None };
     match (&presolved, start) {
         (Some(Presolved::Reduced { prob, scaling, .. }), Some(x)) if x.len() == prob.n => {
             let mut xr: Vec<f64> = x.iter().zip(&scaling.d).map(|(v, d)| v / d).collect();
@@ -1780,7 +1814,20 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if params.restarts > 0 && restart_ref_for(p) {
                 ref_shift = Some(p.objective(&x) - prob.objective(&xr));
             }
-            if prob.is_feasible(&xr, 1e-6) {
+            // `ENOMOTO_MIP_TPRE`: 元の問題の解が前処理後の問題で実行不能 (前処理の双対の固定などで外れる) なら、その点から前処理後の問題で
+            // FJ を 1 回回して直す (手間は非零の数で決まる)
+            let xr = if tpre_start && !prob.is_feasible(&xr, 1e-6) {
+                let safety = if params.time_limit.is_finite() { 0.05 * params.time_limit } else { 10.0 };
+                // 診断 `ENOMOTO_MIP_TPRE_NOREPAIR`: 直さない (直せなかった道 (`tpre_orig`) の確かめ用)
+                let fixed = if env_str!("ENOMOTO_MIP_TPRE_NOREPAIR").is_some() { None } else { fj::fj2_search_from(prob, &prob.col_lo, &prob.col_up, Some(&xr), safety, 0x7E1E_5EED, None).filter(|y| prob.is_feasible(y, 1e-6)) };
+                eprintln!("MIP: TPRE: the start solution is not feasible in the presolved problem; FJ from it in the presolved problem {}", match &fixed { Some(y) => format!("found {:.10e}", prob.objective(y)), None => "found nothing".into() });
+                fixed.unwrap_or(xr)
+            } else {
+                xr
+            };
+            // 診断 `ENOMOTO_MIP_TPRE_FORCE_ORIG`: TPRE の解を開始解にせず、いつも外側の答えの候補と打ち切り値にする (`tpre_orig` の fuzz 用)
+            let force_orig = tpre_start && env_str!("ENOMOTO_MIP_TPRE_FORCE_ORIG").is_some();
+            if prob.is_feasible(&xr, 1e-6) && !force_orig {
                 solver::START_SOL.with(|s| *s.borrow_mut() = Some(xr));
             } else {
                 // `ENOMOTO_MIP_RESTART_REF` (試作、既定では使わない): 再スタート前の暫定解が再スタート後の問題で実行不能
@@ -1797,6 +1844,33 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         (None, Some(x)) if x.len() == p.n => solver::START_SOL.with(|s| *s.borrow_mut() = Some(x)),
         _ => {}
     }
+    // `ENOMOTO_MIP_TPRE`: 元の問題で実行可能な解 x_orig が前処理後の問題で直せなかったら、外側で答えの候補として持ち、その目的値 U を
+    // 前処理後の問題の打ち切り値にする。前処理の双対の簡約は最適解を少なくとも 1 つ残し、前処理後の問題の目的値は元の問題と同じ
+    // (定数項を含む。前処理は列の番号を保ち x = d x' の尺度だけ) なので、U 以上を刈っても最適解は失わない。木が U より良い解を
+    // 見つけなければ x_orig を返し、「U より良い解はない」で終われば最適として返す (対称性の側の `orig_only` と同じ考え)
+    let tpre_orig: Option<(f64, Vec<f64>)> = tpre_x_orig.filter(|x| x.len() == p.n && p.is_feasible(x, 1e-6) && solver::START_SOL.with(|s| s.borrow().is_none())).map(|x| (p.objective(&x), x));
+    let params = match &tpre_orig {
+        Some((u, _)) => {
+            eprintln!("MIP: TPRE: keeping the solution {u:.10e} of the original problem as the cutoff and the fallback answer");
+            MipParams { cutoff: params.cutoff.min(*u), ..params }
+        }
+        None => params,
+    };
+    // 結果に x_orig を当てはめる (木の解が U より悪いかなければ x_orig。実行不能・最適 (= U より良い解はない) なら最適、下界は U 以下に)
+    let tpre_patch = |mut r: solver::MipResult| -> solver::MipResult {
+        if let Some((u, x)) = tpre_orig.as_ref() {
+            if r.objective.is_none_or(|z| z > *u + 1e-9 * u.abs().max(1.0)) || r.x.is_none() {
+                r.x = Some(x.clone());
+                r.objective = Some(*u);
+                if matches!(r.status, MipStatus::Infeasible | MipStatus::Optimal | MipStatus::InfeasibleOrUnbounded) {
+                    r.status = MipStatus::Optimal;
+                    r.best_bound = *u;
+                }
+            }
+            r.best_bound = r.best_bound.min(*u);
+        }
+        r
+    };
     // 再スタート前のカット: 前処理は列の番号を保ち x = d x' と尺度を変えるので係数に d を掛ける。前処理で新たに
     // 固定された (消された・代入された) 列を含むカットは捨てる (代入された列の値は前処理後の境界からは分からない)
     let cuts = RESTART_CUTS.with(|s| s.borrow_mut().take());
@@ -2075,10 +2149,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 if let Some(shift) = ref_shift {
                     r.best_bound += shift;
                 }
-                return r;
+                return tpre_patch(r);
             }
             if ok {
-                r
+                tpre_patch(r)
             } else {
                 // `ENOMOTO_MIP_RESOLVE_SYM_RESET` (2026-11-12 から既定、`=0` で以前の形): 前処理なしで解き直す前に、前処理した問題で作った
                 // 対称性の控え (`SYM_ORIG` など) を消す。残すと、解き直しの木が `SYM_ORIG` (前処理した問題。列の数が `p` と同じなら
@@ -2088,7 +2162,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 if !params.submip && env_def!("ENOMOTO_MIP_RESOLVE_SYM_RESET", "1").is_some() {
                     clear_sym_state();
                 }
-                solver::solve(p, remaining(params))
+                tpre_patch(solver::solve(p, remaining(params)))
             }
         }
         None => {
