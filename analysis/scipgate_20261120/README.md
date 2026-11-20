@@ -45,3 +45,26 @@
 
 - 数えるのは、0-1 列 y が 1 なら同じ行の他の 0-1 列が全て 0、y = 0 なら行が冗長になる行。
 - 元の問題で数える。負の係数の列は補って (x → 1 − x) から判定する。
+
+- 結果 (P 58 + M 145 = 203 問、誤り 0): 大 M の行がある問題は 23。非零の 1 割以上を占めるのは 15 問。
+  - P: hypothyroid-k1 (49.7%)・neos8 (28.3%)・neos-827175 (11.6%)・physiciansched6-2 (15.0%)。
+  - M: neos-787933 (79.2%)・neos-4387871-tavua・neos-1445765・bnatt400・bnatt500・peg-solitaire-a3 (45〜49%)・
+    pg5_34 (33.8%)・cryptanalysiskb128n5obj14・obj16 (30.4%)・decomp2 (16.6%)・brazil3 (15.5%)。
+  - 少ないもの (非零の 1 割未満): misc07・roll3000・neos-3656078-kumeu・neos-4722843-widden・uccase9・uccase12・rocII-5-11・
+    academictimetablesmall。
+
+## 4. VB01 との組み合わせ (hypothyroid-k1、1 スレッド・種 1)
+
+- VB01 は SCIP-VB の試作 `ENOMOTO_MIP_VB01=b` (根の LP の前の vbounds)。−2692 を見つける (SCIP の既定と同じ値)。
+
+| 設定 | 時間 |
+|---|---|
+| 既定 | 10.2 秒 |
+| `VB01=b` | 10.5 秒 |
+| `VB01=b` + `VBCLQ=1` (67 列を固定、根の LP −2851.08) | 8.85 秒 |
+| `VB01=b` + `VBCLQ=1` + `ENOMOTO_MIP_NO_LP_PROBE=1` | **4.2 秒** |
+
+- 確かめ: fuzz.sh (`VBCLQ=1`) の 6 本で誤答 0。
+  - tiny 0/400・highs 0/300・objint 0/1000・slack 0/1000・tiny2 0/400・objint2 0/1000。
+  - fuzz の中で固定が何回働いたかは数えていない。
+- 働く問題の洗い出し: `workscan.py` (`VB01=b` + `VBCLQ=1`、1 スレッド・1 問 120 秒まで) → `workscan.jsonl_K`。
