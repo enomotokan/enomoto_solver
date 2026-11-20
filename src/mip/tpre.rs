@@ -165,8 +165,75 @@ pub(crate) fn take_pending(n: usize) -> Option<Vec<f64>> {
     })
 }
 
+/// `g` (種ごとに再現する形、analysis/objtarget_20261119/): TPRE のスレッドに手間の門 ([`crate::ticks::Gate`]) を付け、主は自分の手間 W
+/// (外側の求解の始めからの主のスレッドの [`crate::ticks::total`]) に対して r·W まで許す。r = TPRE のスレッド数 / 主のスレッド数 = 1。
+/// 受け取る点 (前処理の終わり・根と木の [`super::solver::Solver::poll_lmip_thread`]) では、許した手間までスレッドが進んで門で止まる
+/// (か終わる) のを待ってから箱を読むので、読む中身は主の手間で決まる。前処理の段の終わりでは許すだけ (待たない)。
+/// PDLP は門を見ないので、始める前に手間 (反復 × 非零 / 8) を先に数えて門で待ち、許されてから回す
+pub(crate) struct Gated {
+    gate: std::sync::Arc<crate::ticks::Gate>,
+    slot: SolSlot,
+    base: f64,
+    granted: std::cell::Cell<f64>,
+    d: std::cell::RefCell<Option<Vec<f64>>>,
+}
+
+thread_local! {
+    static GATED: std::cell::RefCell<Option<std::rc::Rc<Gated>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn set_gated(gate: std::sync::Arc<crate::ticks::Gate>, slot: SolSlot) {
+    let g = Gated { gate, slot, base: crate::ticks::total(), granted: std::cell::Cell::new(0.0), d: std::cell::RefCell::new(None) };
+    GATED.with(|x| *x.borrow_mut() = Some(std::rc::Rc::new(g)));
+}
+
+/// 主の手間まで許す (待たない)
+pub(crate) fn gated_grant() {
+    let Some(g) = GATED.with(|x| x.borrow().clone()) else { return };
+    let w = (crate::ticks::total() - g.base).max(0.0);
+    let add = w - g.granted.get();
+    if add > 0.0 {
+        g.gate.grant(add);
+        g.granted.set(w);
+    }
+}
+
+/// 主の手間まで許し、門で止まるのを待って箱の解を取り出す (元の問題の空間)
+pub(crate) fn gated_take_orig() -> Option<Vec<f64>> {
+    let g = GATED.with(|x| x.borrow().clone())?;
+    gated_grant();
+    let _ = g.gate.wait_paused();
+    let x = g.slot.lock().ok().and_then(|mut s| s.take());
+    x
+}
+
+/// 前処理後の空間の尺度 (前処理の終わりに置く)
+pub(crate) fn gated_set_d(d: Vec<f64>) {
+    if let Some(g) = GATED.with(|x| x.borrow().clone()) {
+        *g.d.borrow_mut() = Some(d);
+    }
+}
+
+/// [`gated_take_orig`] を前処理後の空間に写す
+pub(crate) fn gated_take(n: usize) -> Option<Vec<f64>> {
+    let g = GATED.with(|x| x.borrow().clone())?;
+    let d = g.d.borrow().clone()?;
+    let x = gated_take_orig()?;
+    (x.len() == n && d.len() == n).then(|| x.iter().zip(&d).map(|(v, d)| v / d).collect())
+}
+
+/// `g` の受け取り口を閉じる (門に止めの合図)。木に入ったら呼ぶ
+pub(crate) fn clear_gated() {
+    if let Some(g) = GATED.with(|x| x.borrow_mut().take()) {
+        g.gate.stop();
+    }
+}
+
 /// 外側の求解の終わり: 止めの合図を立てて受け取り口を捨てる
 pub(crate) fn clear_pending() {
+    if let Some(g) = GATED.with(|x| x.borrow_mut().take()) {
+        g.gate.stop();
+    }
     PENDING.with(|p| {
         if let Some(pd) = p.borrow_mut().take() {
             pd.stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -350,11 +417,19 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64, stop: &Stop, slot: &SolSlo
     use std::sync::{Arc, Mutex};
     let mut out = TpreOut { l: None, l_iters: 0, u: None, t: None, x: None, x_z: f64::INFINITY, below_t: false, lo: Vec::new(), up: Vec::new(), n_tight: 0, n_fix: 0, infeasible_t: false, secs: [0.0; 4] };
     let t0 = std::time::Instant::now();
-    lower_priority();
+    // `g` では優先度を下げない (下げると手間の進みが主より遅れ、門で主が待つ)
+    if !mode().is_some_and(|m| m.contains('g')) {
+        lower_priority();
+    }
     // 手間を問題の大きさで決める: PDLP の反復 × 非零 ≤ `ENOMOTO_T_MIP_TPRE_PDLP_WORK` (4e8、200 反復以上)。PP の計測で、大きい問題
     // (ns1116954 13 万行・41 万非零、nw04 60 万非零) では 2000 反復に 5〜9 秒かかり、主が前処理の後で 3.5〜6.6 秒待った
     let nnz: usize = p.rows.iter().map(|r| r.len()).sum::<usize>().max(1);
     let iters = tunable!("ENOMOTO_T_MIP_TPRE_PDLP_ITERS", 2000usize, usize).min(((tunable!("ENOMOTO_T_MIP_TPRE_PDLP_WORK", 4e8, f64) / nnz as f64) as usize).max(200));
+    // `g`: PDLP の手間を先に数えて門で待つ (許されてから回す。門で止めの合図なら終える)
+    crate::ticks::add(crate::ticks::HEUR, (iters as u64).saturating_mul(nnz as u64) / 8);
+    if crate::ticks::over() {
+        return out;
+    }
     let lp = crate::simplex::mip_lp::TwoStageLp::new(&p.col_lo, &p.col_up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
     let xo = Arc::new(Mutex::new(Vec::new()));
     if let Some(b) = crate::cancel::with_token(Some(stop.clone()), || lp.pdlrc_run_iters_hist(iters, None, Some(xo.clone()))) {
@@ -403,7 +478,8 @@ fn pdlp_start(p: &MipProblem, safety: f64, seed: u64, stop: &Stop, slot: &SolSlo
             // 手間の上限 (手の見当の手間 + lift の掃引の非零。`ENOMOTO_T_MIP_TPRE_LMIP_WORKCAP`、既定 5e6。5e7 では 10teams で 7.7 秒、5e6 で 0.7 秒)
             // 待つ形 (`w`) だけ上限を付ける。待たない形では主を止めないので、止めの合図 (外側の求解の終わり) か手の数の上限まで回し、
             // 良くなるたびに受け渡し箱に置く
-            if mode().is_some_and(|m| m.contains('w')) {
+            // `g` でも付ける (TPRE が終われば受け取る点で待たない。付けないと 10 万手 (10teams で約 60 秒) 回り、木の受け取る点ごとに主が待った)
+            if mode().is_some_and(|m| m.contains('w') || m.contains('g')) {
                 lm.work_cap = tunable!("ENOMOTO_T_MIP_TPRE_LMIP_WORKCAP", 5e6, f64) as u64;
             }
             let z_best = std::cell::Cell::new(out.x_z);

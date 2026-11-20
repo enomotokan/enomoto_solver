@@ -1479,7 +1479,15 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         let stop: tpre::Stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let slot: tpre::SolSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
         let (st2, sl2) = (stop.clone(), slot.clone());
-        (std::thread::spawn(move || tpre::run(&q, safety, seed, st2, sl2)), stop, slot)
+        // `g`: 手間の門を付けて、主の手間で読む中身を決める (種ごとに再現)
+        let gate = tpre::mode().is_some_and(|m| m.contains('g')).then(|| crate::ticks::Gate::new(0.0));
+        if let Some(g) = gate.as_ref() {
+            tpre::set_gated(g.clone(), slot.clone());
+        }
+        (std::thread::spawn(move || {
+            let _gg = gate.map(crate::ticks::install_gate);
+            tpre::run(&q, safety, seed, st2, sl2)
+        }), stop, slot)
     });
     let prev_par = PREPAR_THREADS.with(|t| t.replace(if !params.submip && params.restarts == 0 { params.threads.max(1) } else { 1 }));
     struct RestorePar(usize);
@@ -1513,7 +1521,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // 時間上限は前処理・対称性の検出の時間も含める (分枝限定法の時計は `solver::solve` の開始から測るので、渡す前に引く)
     let remaining = |params: MipParams| MipParams { time_limit: (params.time_limit - t_pre.elapsed().as_secs_f64()).max(0.0), ..params };
     // 前処理の LP による固定 ([`lp_probe`]) は最初の求解だけ (サブ MIP・再スタートの後は使わない)
-    let lp_probe_secs = (env_str!("ENOMOTO_MIP_NO_LP_PROBE").is_none() && !params.submip && params.restarts == 0)
+    // 試作 `ENOMOTO_MIP_VBCLQ` の `l` (analysis/scipgate_20261120): 前処理の LP による固定をしない (根の LP の前の vbounds の解と
+    // pseudoobj の固定の後で、B&B の根の LP を小さく解くため。hypothyroid-k1 では LP probing が固定の前に根の LP を丸ごと解く)
+    let lp_probe_secs = (env_str!("ENOMOTO_MIP_NO_LP_PROBE").is_none() && !solver::vbclq().is_some_and(|v| v.contains('l')) && !params.submip && params.restarts == 0)
         .then(|| if params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_LP_PROBE_TIME_FRAC", 0.05, f64) * params.time_limit } else { 10.0 })
         // `ENOMOTO_MIP_PRESOLVE_WORK`: 打ち切りは LP の手間で決め ([`lp_probe`])、時間は安全網 (`ENOMOTO_T_MIP_PRESOLVE_WORK_LP_SECS` 秒、
         // 既定 30 秒。時間制限の半分まで) だけにする (時間制限で前処理の結果が変わらないように)
@@ -1775,7 +1785,27 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         // 前処理で早めの FJ が実行可能性問題の解を見つけ木に入らない道 (ns1116954) では待たない (結果は捨てる)
         Some((_, stop, _)) if FEAS_FJ_SOL.with(|s| s.borrow().is_some()) => {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            tpre::clear_pending();
             start
+        }
+        // `g`: 主の手間まで許して門で止まるのを待ち、その時点の箱の解を開始解にする。以後は根と木の受け取る点で同じように読む
+        Some((_, stop, _)) if tpre::mode().is_some_and(|m| m.contains('g')) => {
+            let d = match &presolved {
+                Some(Presolved::Reduced { scaling, .. }) => scaling.d.clone(),
+                _ => vec![1.0; p.n],
+            };
+            let tw = std::time::Instant::now();
+            let x = tpre::gated_take_orig();
+            tpre::gated_set_d(d);
+            eprintln!("MIP: TPRE g: at the end of the presolve: solution {} (waited {:.2}s at {:.2}s)", x.as_ref().map_or("none".to_string(), |x| format!("{:.10e}", p.objective(x))), tw.elapsed().as_secs_f64(), t_pre.elapsed().as_secs_f64());
+            let _ = stop;
+            match (start, x) {
+                (None, Some(x)) => {
+                    tpre_start = true;
+                    Some(x)
+                }
+                (s, _) => s,
+            }
         }
         // 既定は待たない (親の方針): 前処理の終わりでスレッドが終わっていなければ、主は待たずに根へ進み、スレッドは回し続ける。
         // 途中の解は箱に置かれ、主が根と木の決まった所 (`poll_lmip_thread`) で、その時点で出来上がっていれば受け取る (再現しない)。
@@ -2728,6 +2758,12 @@ pub(crate) fn sym_sst() -> bool {
     env_str!("ENOMOTO_MIP_SYM_SST").is_some_and(|v| v != "0")
 }
 
+/// 試作 `ENOMOTO_MIP_SYM_PPLEX` (analysis/scipsym_20261120/、既定では使わない): 詰め込みの行に入る対合の多い成分を 2 列の静的な詰め込み
+/// オービトープで扱う ([`symmetry::packing_orbisacks`])
+pub(crate) fn sym_pplex() -> bool {
+    env_str!("ENOMOTO_MIP_SYM_PPLEX").is_some_and(|v| v != "0")
+}
+
 /// 試作 `ENOMOTO_MIP_SYM_SST=x` (analysis/sstx_20261119/、既定では使わない): [`sym_sst`] に加えて、ヒューリスティクスの解が SST の行だけに
 /// 反するとき、元の問題 (SST の行を足す前) で実行可能なら、SST の段の群で写して行を満たす代表にしてから暫定解にする
 /// ([`symmetry::sst_canonicalize`])。写せなければ目的値だけを打ち切りに使う (解は元の問題の解として持つ)。
@@ -3298,8 +3334,50 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         return prob;
     };
     // 完全オービトープは探索中の固定 (orbitopal fixing) で扱い、残りの生成元だけ lex-leader の行にする
-    let (mut orbs, used) = if env_str!("ENOMOTO_MIP_NO_ORBITOPE").is_none() { symmetry::find_orbitopes(&prob, &sym) } else { (Vec::new(), vec![false; sym.generators.len()]) };
+    let (mut orbs, mut used) = if env_str!("ENOMOTO_MIP_NO_ORBITOPE").is_none() { symmetry::find_orbitopes(&prob, &sym) } else { (Vec::new(), vec![false; sym.generators.len()]) };
     orbs.extend(twin_orbs);
+    // 試作 `ENOMOTO_MIP_SYM_PPLEX` ([`symmetry::packing_orbisacks`]、analysis/scipsym_20261120/): 詰め込みの行に入る対合の多い成分を、
+    // 対合ごとの 2 列の静的な詰め込みオービトープ (lex-leader の orbisack) で扱う。根で各オービトープの 1 行目の右の列を 0 に固定し
+    // (下の `pplex_fix`)、ORBPP_REPROBE の伝播・プロービングにかける。サブ MIP では使わない
+    let mut pplex_fix: Vec<usize> = Vec::new();
+    if sym_pplex() && !in_sub {
+        let mut orb_moved = vec![false; prob.n];
+        for o in &orbs {
+            for line in &o.vars {
+                for &j in line {
+                    orb_moved[j] = true;
+                }
+            }
+            for (_, _, perm) in &o.swaps {
+                for (j, &t) in perm.iter().enumerate() {
+                    if t != j {
+                        orb_moved[j] = true;
+                    }
+                }
+            }
+        }
+        let tp = std::time::Instant::now();
+        let (pp, pused, st) = symmetry::packing_orbisacks(
+            &prob,
+            &sym,
+            &used,
+            &orb_moved,
+            tunable!("ENOMOTO_T_MIP_SYM_PPLEX_NEW", 100usize, usize),
+            tunable!("ENOMOTO_T_MIP_SYM_PPLEX_WORK", 50_000_000u64, u64),
+        );
+        for &k in &pused {
+            used[k] = true;
+        }
+        pplex_fix = pp.iter().map(|o| o.vars[0][1]).collect();
+        if verbose {
+            let rows: usize = pp.iter().map(|o| o.vars.len()).sum();
+            eprintln!(
+                "MIP: symmetry: PPLEX: {} of {} components upgraded, {} packing orbisacks ({rows} rows) from {} generators and {} new involutions ({:.2}s)",
+                st[1], st[0], pp.len(), pused.len(), st[2], tp.elapsed().as_secs_f64()
+            );
+        }
+        orbs.extend(pp);
+    }
     let mut in_orb = vec![false; prob.n];
     for o in &orbs {
         for line in &o.vars {
@@ -3379,6 +3457,12 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     let mut orbs = orbs;
     let mut prob = prob;
     let mut static_fix = 0usize;
+    for j in pplex_fix {
+        if prob.col_up[j] > 0.0 && prob.col_lo[j] <= 0.0 {
+            prob.col_up[j] = 0.0;
+            static_fix += 1;
+        }
+    }
     // 既定は動的な orbitopal fixing (分枝した行をその順に使う、HiGHS と同じ): 行ごとのパッキングの印だけ付ける。
     // 根での固定 (x_{i,c} = 0, c > i) は行の固定の順に依るので、動的な固定とは混ぜられない
     let static_orbitope = env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_some();
