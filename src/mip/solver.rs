@@ -7398,6 +7398,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for o in self.orbitopes.iter() {
                 o.canonicalize(&mut x);
             }
+            // 試作 `ENOMOTO_MIP_SYM_PPLEX`: 対合ごとの orbisack は列を共有するので、1 回の並べ替えで別の orbisack に反しうる。
+            // 並べ替えのたびに解は列の番号の順の辞書式で真に大きくなるので、変わらなくなるまで繰り返す (回数の上限つき)
+            if super::sym_pplex() {
+                for _ in 0..64 {
+                    let before = x.clone();
+                    for o in self.orbitopes.iter() {
+                        o.canonicalize(&mut x);
+                    }
+                    if before == x {
+                        break;
+                    }
+                }
+            }
             // 試作 `ENOMOTO_MIP_SYM_SST=x`: SST の行に反する解を SST の段の群で写して、行を満たす代表にする
             // (元の問題での実行可能性と目的値は変わらない。analysis/sstx_20261119/)
             let sstx = !self.sst_chain.is_empty() && orig.n == self.p.n && self.sst_chain.iter().all(|lv| lv.fits(self.p.n));
