@@ -8,12 +8,20 @@ pub fn gap1() -> &'static str {
 }
 
 /// 列ごとの pseudocost と観測回数。
+/// 診断用 (試作 `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT`): [hybrid のスコアの数, そのうち手がかりなしの判定が真だった数] (全スレッド・サブ MIP 込み)。
+static FLAT_CALLS: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
 #[derive(Clone)]
 pub struct Pseudocost {
     sum_up: Vec<f64>,
     n_up: Vec<u32>,
     sum_down: Vec<f64>,
     n_down: Vec<u32>,
+    /// 試作 `ENOMOTO_MIP_PCL` の `c` (analysis/disj_20261119.md の 11 節): 単位あたりの値の 2 乗の和 (列・向きごと、ばらつきの信頼区間に使う)
+    sq_up: Vec<f64>,
+    sq_down: Vec<f64>,
+    /// 試作 `ENOMOTO_MIP_PCL` の `b`: 似た列の組 (列 → 組の番号、組 → 列)。観測のない列の費用を同じ組の観測のある列の平均で埋める
+    pub groups: Option<std::sync::Arc<(Vec<u32>, Vec<Vec<u32>>)>>,
     /// 全列の平均 (未観測の列の代わりに使う)。
     total_up: f64,
     total_n_up: u64,
@@ -29,6 +37,15 @@ pub struct Pseudocost {
     inf_n: [Vec<u32>; 2],
     inf_total: f64,
     inf_total_n: u64,
+    /// 試作 `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT` の判定用: 目的の利得が正 (1e-9 より大きい) だった観測の数 (上下合計)。
+    n_pos_gain: u64,
+    /// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN` (p2inf_20261119): 解いている途中で上げた衝突の重み (0 なら上げていない)。木の様子を見て
+    /// [`super::solver`] が設定する
+    pub cw_dyn: f64,
+    /// 試作 `ENOMOTO_MIP_CWM`: 今のノードの衝突の重みの倍率 (`cw_dyn` に掛ける。既定 1)
+    pub cw_mult: f64,
+    /// 試作 `ENOMOTO_MIP_CWM=ab` (p2inf_20261119 7 節): 今のノードで上書きする分枝のスコアの係数 (番号は [`super::cwm::AB_COEFS`], 値)
+    pub ab: Option<(usize, f64)>,
     /// 実行不能で終わった葉と、目的値で打ち切った葉の数 (スコアの動的な重み)。
     pub infeasible_leaves: u64,
     pub objlim_leaves: u64,
@@ -40,14 +57,14 @@ pub struct Pseudocost {
     /// 試作 `ENOMOTO_MIP_S4_DEGSCORE` (既定では使わない): 今のノードの LP の退化の度合い (HiGHS の `computeLPDegneracy` に倣う。1 = 退化なし)。
     /// [`Self::hybrid`] の擬似費用の項をこれで割る (退化したノードでは推論・打ち切りの点数で選ぶ)
     pub degen_fac: f64,
-    /// 試作 `ENOMOTO_MIP_BRCUT` (既定では使わない): [`Self::hybrid`] に tableau 行のカットの効き目の履歴 ([`super::brcut::term`]) を足すか
-    /// (外側の求解でだけ立てる。サブ MIP は列の番号が違う)
-    pub brcut: bool,
 }
 
 impl Pseudocost {
     pub fn new(n: usize) -> Self {
         Pseudocost {
+            sq_up: vec![0.0; n],
+            sq_down: vec![0.0; n],
+            groups: None,
             sum_up: vec![0.0; n],
             n_up: vec![0; n],
             sum_down: vec![0.0; n],
@@ -63,13 +80,16 @@ impl Pseudocost {
             inf_n: [vec![0; n], vec![0; n]],
             inf_total: 0.0,
             inf_total_n: 0,
+            n_pos_gain: 0,
+            cw_dyn: 0.0,
+            cw_mult: 1.0,
+            ab: None,
             infeasible_leaves: 0,
             objlim_leaves: 0,
             conflict: [vec![0.0; n], vec![0.0; n]],
             conflict_inc: 1.0,
             conflict_total: 0.0,
             degen_fac: 1.0,
-            brcut: false,
         }
     }
 
@@ -96,9 +116,13 @@ impl Pseudocost {
                 let s = d.get(j).copied().unwrap_or(1.0);
                 self.sum_up[j] *= s;
                 self.sum_down[j] *= s;
+                self.sq_up[j] *= s * s;
+                self.sq_down[j] *= s * s;
             } else {
                 self.sum_up[j] = 0.0;
                 self.n_up[j] = 0;
+                self.sq_up[j] = 0.0;
+                self.sq_down[j] = 0.0;
                 self.sum_down[j] = 0.0;
                 self.n_down[j] = 0;
                 self.cutoff_up[j] = 0;
@@ -147,6 +171,8 @@ impl Pseudocost {
             *b = *s;
         }
         mf(&mut self.sum_up, &mut base.sum_up, &mut shared.sum_up);
+        mf(&mut self.sq_up, &mut base.sq_up, &mut shared.sq_up);
+        mf(&mut self.sq_down, &mut base.sq_down, &mut shared.sq_down);
         mu(&mut self.n_up, &mut base.n_up, &mut shared.n_up);
         mf(&mut self.sum_down, &mut base.sum_down, &mut shared.sum_down);
         mu(&mut self.n_down, &mut base.n_down, &mut shared.n_down);
@@ -210,12 +236,17 @@ impl Pseudocost {
             return;
         }
         let unit = gain.max(0.0) / delta;
+        if gain > 1e-9 {
+            self.n_pos_gain += 1;
+        }
         if up {
+            self.sq_up[j] += unit * unit;
             self.sum_up[j] += unit;
             self.n_up[j] += 1;
             self.total_up += unit;
             self.total_n_up += 1;
         } else {
+            self.sq_down[j] += unit * unit;
             self.sum_down[j] += unit;
             self.n_down[j] += 1;
             self.total_down += unit;
@@ -245,7 +276,7 @@ impl Pseudocost {
         let n = self.n_up[j];
         let avg = self.avg_up();
         if n == 0 {
-            return avg;
+            return self.group_mean(j, true).unwrap_or(avg);
         }
         let own = self.sum_up[j] / n as f64;
         let w = (0.9 + 0.1 * n as f64 / self.min_reliable as f64).min(1.0);
@@ -256,11 +287,51 @@ impl Pseudocost {
         let n = self.n_down[j];
         let avg = self.avg_down();
         if n == 0 {
-            return avg;
+            return self.group_mean(j, false).unwrap_or(avg);
         }
         let own = self.sum_down[j] / n as f64;
         let w = (0.9 + 0.1 * n as f64 / self.min_reliable as f64).min(1.0);
         w * own + (1.0 - w) * avg
+    }
+
+    /// 列・向きの打ち切りの回数 (診断 `ENOMOTO_MIP_PCLOG` 用)。
+    pub fn cutoff_count(&self, j: usize, up: bool) -> u32 {
+        if up { self.cutoff_up[j] } else { self.cutoff_down[j] }
+    }
+
+    /// 列・向きの観測の数 (診断 `ENOMOTO_MIP_PCLOG` 用)。
+    pub fn n_obs(&self, j: usize, up: bool) -> u32 {
+        if up { self.n_up[j] } else { self.n_down[j] }
+    }
+
+    /// 試作 `ENOMOTO_MIP_PCL` の `b`: 同じ組の観測のある列 (最大 64 本を見る) の単位あたりの値の平均。組がなければ `None`
+    fn group_mean(&self, j: usize, up: bool) -> Option<f64> {
+        let g = self.groups.as_ref()?;
+        let (sum, n) = if up { (&self.sum_up, &self.n_up) } else { (&self.sum_down, &self.n_down) };
+        let (mut acc, mut k) = (0.0, 0usize);
+        for &m in g.1[g.0[j] as usize].iter().take(64) {
+            let m = m as usize;
+            if m != j && n[m] > 0 {
+                acc += sum[m] / n[m] as f64;
+                k += 1;
+            }
+        }
+        (k > 0).then(|| acc / k as f64)
+    }
+
+    /// 試作 `ENOMOTO_MIP_PCL` の `c`: 両向きとも観測が 2 回以上あり、単位あたりの値の平均の 95% 信頼区間の半幅 (2 sd / √n) が平均の
+    /// `rel` 倍以下なら信頼する (観測の数でなくばらつきで決める)
+    pub fn ci_reliable(&self, j: usize, rel: f64) -> bool {
+        let ok = |sum: f64, sq: f64, n: u32| {
+            if n < 2 {
+                return false;
+            }
+            let nf = n as f64;
+            let mean = sum / nf;
+            let var = ((sq - sum * sum / nf) / (nf - 1.0)).max(0.0);
+            2.0 * (var / nf).sqrt() <= rel * mean.abs().max(1e-12)
+        };
+        ok(self.sum_up[j], self.sq_up[j], self.n_up[j]) && ok(self.sum_down[j], self.sq_down[j], self.n_down[j])
     }
 
     /// 両側とも十分観測されているか。
@@ -299,6 +370,21 @@ impl Pseudocost {
         self.inf_total_n += 1;
     }
 
+    /// 診断用: 記録した分枝の数と、1 回あたりの推論の数の平均。
+    pub fn inference_count(&self) -> u64 {
+        self.inf_total_n
+    }
+
+    /// 診断用: (FLAT の判定の呼び出し (全スレッド), 真だった数 (全スレッド), 利得が正の観測 (このスレッド), 観測の数)。
+    pub fn flat_diag(&self) -> (u64, u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (FLAT_CALLS[0].load(Relaxed), FLAT_CALLS[1].load(Relaxed), self.n_pos_gain, self.total_n_down + self.total_n_up)
+    }
+
+    pub fn inference_mean(&self) -> f64 {
+        if self.inf_total_n > 0 { self.inf_total / self.inf_total_n as f64 } else { 0.0 }
+    }
+
     pub fn inference(&self, j: usize, up: bool) -> f64 {
         let d = up as usize;
         let avg = if self.inf_total_n > 0 { self.inf_total / self.inf_total_n as f64 } else { 0.0 };
@@ -328,7 +414,23 @@ impl Pseudocost {
         let n = self.conflict[0].len().max(1) as f64;
         let conf_avg = (self.conflict_total / (2.0 * n)).max(eps);
         let conf = self.conflict[0][j].max(eps * conf_avg) * self.conflict[1][j].max(eps * conf_avg);
-        let wc = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT", 0.0, f64);
+        let mut wc = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT", 0.0, f64);
+        // 試作 `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT` = w (p2inf_20261119、既定 0 で使わない): 擬似費用の平均が上下とも 0 (目的の利得の手がかりが
+        // ない: bnatt400 は LP の値が最後まで 0) のときだけ衝突の重みを w にする。一律の 0.1 は bnatt400 を解くが、擬似費用に意味のある
+        // mas76・pk1 を 1.3〜1.6 倍遅くした (衝突の項が擬似費用の選び方を乱す)
+        wc = wc.max(self.cw_dyn * self.cw_mult);
+        let wflat = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT", 0.0, f64);
+        // 判定: 観測のうち目的の利得が正だったものが `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT_FRAC` (既定 5%) 以下 (観測がなければ手がかりなしとみなす)。
+        // 平均が厳密に 0 という判定では、目的の列の分枝などで少し利得が出るとすぐ外れ、bnatt400 の 4 スレッドが 900 秒で解けなかった
+        let nobs = self.total_n_down + self.total_n_up;
+        let flat = nobs == 0 || (self.n_pos_gain as f64) <= tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT_FRAC", 0.05, f64) * nobs as f64;
+        if wflat > 0.0 {
+            FLAT_CALLS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            FLAT_CALLS[1].fetch_add(flat as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        if wflat > 0.0 && flat {
+            wc = wc.max(wflat);
+        }
         let conf_term = if self.conflict_total > 0.0 { wc * s(conf, conf_avg * conf_avg) } else { 0.0 };
         // `ENOMOTO_MIP_GAP1` (試作、既定では使わない。analysis/gap1_tree_20261109.md): 文字で部品を選ぶ。
         // `s`: 擬似費用の項の正規化の下限を 0.1 から 1e-6 にする (HiGHS の `getScore` は `max(1e-6, cost_total^2)`)。目的値の刻みが
@@ -336,9 +438,18 @@ impl Pseudocost {
         // `w`: SCIP の動的な重み `dynw` を 1 にする (HiGHS にはない)。
         let g1 = gap1();
         let dynw = if g1.contains('w') { 1.0 } else { dynw };
-        let ps_s = if g1.contains('s') { 1.0 - 1.0 / (1.0 + ps / ps_avg.max(1e-6)) } else { s(ps, ps_avg) };
-        let bc = if self.brcut { super::brcut::term(j) } else { 0.0 };
-        dynw * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01) + conf_term + bc) + ps_s / (dynw * self.degen_fac.max(1.0))
+        // 係数 (p2inf_20261119 7 節の入れ切りの確かめ): 推論の項・打ち切りの項の重み (既定 1e-4)、dynw に掛ける倍率 (既定 1)、
+        // 擬似費用の項の正規化の下限 (既定 0.1)。`ENOMOTO_T_MIP_HY_*` で全体を、[`Self::ab`] でノードごとに上書きする
+        let ov = |c: usize, d: f64| match self.ab {
+            Some((k, v)) if k == c => v,
+            _ => d,
+        };
+        let w_inf = ov(0, tunable!("ENOMOTO_T_MIP_HY_INF_W", 1e-4, f64));
+        let w_cut = ov(1, tunable!("ENOMOTO_T_MIP_HY_CUT_W", 1e-4, f64));
+        let dynw = dynw * ov(2, tunable!("ENOMOTO_T_MIP_HY_DYNW_MULT", 1.0, f64));
+        let ps_floor = ov(3, tunable!("ENOMOTO_T_MIP_HY_PS_FLOOR", 0.1, f64));
+        let ps_s = if g1.contains('s') { 1.0 - 1.0 / (1.0 + ps / ps_avg.max(1e-6)) } else { 1.0 - 1.0 / (1.0 + ps / ps_avg.max(ps_floor)) };
+        dynw * (w_inf * s(inf, inf_avg) + w_cut * s(cut, 0.01) + conf_term) + ps_s / (dynw * self.degen_fac.max(1.0))
     }
 
     /// pseudocost による [`Self::hybrid`] スコア (小数部 `frac`)。

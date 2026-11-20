@@ -13,6 +13,8 @@ Model 自体は行列を持たず、変数・目的関数・制約の宣言を R
 
 from __future__ import annotations
 
+import gzip
+import os
 import time
 import warnings
 from dataclasses import dataclass
@@ -86,6 +88,8 @@ class Model:
         self._sense = "minimize"
         self._constraints: List[Constraint] = []
         self._solution: Optional[Solution] = None
+        self._name = ""  # 問題の名前 (MPS の NAME。readModel で設定)
+        self._names: Optional[dict] = None  # get_variable 用の 名前 -> Variable (遅延して作る)
         Model._stack.append(self)
 
     @classmethod
@@ -136,16 +140,81 @@ class Model:
         self._constraints.append(g)
         self._core.add_constraint(g.nonzero_terms(), g.sense, g.rhs)
 
+    def readModel(self, path: "str | os.PathLike[str]") -> None:
+        """MPS ファイル ``path`` (``.mps`` / 末尾 ``.gz`` なら gzip 圧縮) を読み、この空の Model に
+        変数・目的関数・制約を入れる。読み取りは Rust コア (``src/mps.rs``) が行う。
+
+            M = Model()
+            M.readModel("neos-911970.mps.gz")
+            sol = M.solve()
+            x = M.get_variable("C0001")
+            print(sol.objective, x.value)
+
+        変数は MPS の列の順に ``M.variables`` に並び、名前は MPS の列の名前。
+        ``MARKER`` で囲まれた整数列は、``BOUNDS`` に何も書かれなければ境界 ``[0, 1]`` (HiGHS と同じ約束)。
+        範囲のある行 (``RANGES``) は ``<=`` と ``>=`` の 2 本の制約になる。係数はファイルどおりに読む
+        (HiGHS のように絶対値 1e-9 以下の係数を捨てることはしない)。定義されていない行・列への
+        参照は警告 (``warnings.warn``) を出して飛ばす。二次の項・半連続変数・SOS は ValueError。
+        読み込んだ後に ``Variable`` や ``add_constraint`` で変数・制約を足してもよい。
+        変数・目的関数・制約のどれかが既にある Model では ValueError。"""
+        from .variable import Variable
+
+        if self._variables or self._constraints or self._objective is not None or self._core.n_variables():
+            raise ValueError("Model.readModel needs an empty Model (create a new one with Model())")
+        p = os.fspath(path)
+        opener = gzip.open if p.endswith(".gz") else open
+        with opener(p, "rt", encoding="latin-1") as fh:
+            text = fh.read()
+        name, col_names, notes = self._core.read_mps(text)
+        if notes:
+            # 定義されていない行・列への参照は飛ばして読む (HiGHS と同じ)。最初の数件だけ見せる
+            shown = "; ".join(notes[:3]) + (f"; ... ({len(notes)} in total)" if len(notes) > 3 else "")
+            warnings.warn(f"readModel({p!r}): {shown}", stacklevel=2)
+        lb, ub, is_int = self._core.variable_bounds()
+        # Variable.__init__ は Rust コアに変数を足すので通らず、登録済みの列を指す Variable を作る
+        for j, cname in enumerate(col_names):
+            v = Variable.__new__(Variable)
+            Function.__init__(v, self, {j: 1.0}, 0.0)
+            v.vtype = "integer" if is_int[j] else "continuous"
+            v.lb = lb[j]
+            v.ub = ub[j]
+            v.index = j
+            v.name = cname
+            self._variables.append(v)
+        coeffs, constant, sense = self._core.objective_terms()
+        self._objective = Function(self, dict(coeffs), constant)
+        self._sense = sense
+        self._name = name
+        self._names = None
+
+    # MPS を読む口の別名 (このパッケージの他のメソッドに合わせた snake_case)
+    read_model = readModel
+
+    @property
+    def variables(self) -> List["Variable"]:  # noqa: F821
+        """登録順 (MPS を読んだときは列の順) の変数の一覧 (複製)。"""
+        return list(self._variables)
+
+    def get_variable(self, name: str) -> "Variable":  # noqa: F821
+        """名前が ``name`` の変数を返す。見つからなければ KeyError。"""
+        names = self._names
+        if names is None or len(names) != len(self._variables):
+            names = {v.name: v for v in self._variables}
+            self._names = names
+        return names[name]
+
     # -- 求解 ------------------------------------------------------------
     def solve(
         self,
-        root_solver: Optional[str] = None,
+        lp_solver: Optional[str] = None,
         distinguish_infeasible_unbounded: bool = False,
         time_limit: Optional[float] = None,
         mip_rel_gap: Optional[float] = None,
         node_limit: Optional[int] = None,
         threads: Optional[int] = None,
         log: bool = True,
+        *,
+        root_solver: Optional[str] = None,
     ) -> Solution:
         """Rust コアで前処理と最適化を実行し、結果を Solution で返す。
 
@@ -153,7 +222,7 @@ class Model:
         で判断する。``"optimal"`` のときだけ ``objective`` に値が入り、各 Variable の
         ``.value`` が読める (それ以外で ``.value`` を読むと RuntimeError)。
 
-        ``root_solver``: LP (整数変数を含まないモデル) の解法。整数最適化の緩和問題は常に傾き・切片双対二段解法を
+        ``lp_solver``: LP (整数変数を含まないモデル) の解法。整数最適化の緩和問題は常に傾き・切片双対二段解法を
         warm start で使って解くので、整数変数を含むモデルに ``"auto"`` (と ``None``) 以外を渡しても効かず、
         ``UserWarning`` を出す (求解はそのまま続ける)。
 
@@ -190,10 +259,22 @@ class Model:
         ``log`` (既定 True): 最初に作者・ライセンス・連絡先の案内と問題の大きさを、求解中は要点 (前処理の結果、
         同時実行の勝敗、整数最適化では根の LP・切除平面・探索の経過) を、最後に結果を標準出力に出す。
         False なら何も出さない。
+
+        ``root_solver``: ``lp_solver`` の以前の名前 (互換のため残す。使うと ``DeprecationWarning`` を出す)。
+        ``lp_solver`` と同時に指定すると ``TypeError``。
         """
-        if root_solver not in (None, "auto") and any(v.vtype == "integer" for v in self._variables):
+        if root_solver is not None:
+            if lp_solver is not None:
+                raise TypeError("specify only one of lp_solver and root_solver (root_solver is the deprecated name of lp_solver)")
             warnings.warn(
-                f"root_solver={root_solver!r} has no effect on a model with integer variables: "
+                "root_solver is deprecated; use lp_solver instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            lp_solver = root_solver
+        if lp_solver not in (None, "auto") and any(v.vtype == "integer" for v in self._variables):
+            warnings.warn(
+                f"lp_solver={lp_solver!r} has no effect on a model with integer variables: "
                 "the relaxations of an integer program are always solved by the slope-intercept dual two-phase method",
                 UserWarning,
                 stacklevel=2,
@@ -202,7 +283,7 @@ class Model:
             self._log_header(threads)
         t0 = time.perf_counter()
         result = self._core.solve(
-            root_solver=root_solver,
+            lp_solver=lp_solver,
             distinguish_infeasible_unbounded=distinguish_infeasible_unbounded,
             time_limit=time_limit,
             mip_rel_gap=mip_rel_gap,
@@ -228,11 +309,11 @@ class Model:
     def _log_header(self, threads: Optional[int]) -> None:
         """``solve(log=True)`` の最初の案内と問題の大きさを出す。"""
         n_int = sum(1 for v in self._variables if v.vtype == "integer")
-        nnz = sum(len(c.nonzero_terms()) for c in self._constraints)
+        nnz = self._core.n_nonzeros()
         used = min(max(threads or _core.default_threads(), 1), _core.max_threads())
         print(_BANNER.format(version=_version()).replace("  ", " "), flush=True)
         print(
-            f"Problem: {len(self._variables)} variables ({n_int} integer), {len(self._constraints)} constraints, "
+            f"Problem: {self._core.n_variables()} variables ({n_int} integer), {self._core.n_constraints()} constraints, "
             f"{nnz} nonzeros, {self._sense}; threads {used}",
             flush=True,
         )

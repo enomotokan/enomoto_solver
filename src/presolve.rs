@@ -28,6 +28,7 @@ pub mod doubleton;
 pub mod dominatedcol;
 pub mod dualfix;
 pub mod dualfreeineq;
+pub mod dualtightineq;
 pub mod dualpropagate;
 pub mod foldfixed;
 pub mod forcingcol;
@@ -99,7 +100,7 @@ fn round_int_bounds(lb: &mut [f64], ub: &mut [f64]) -> bool {
 /// 整数最適化用の前処理: 整数列の印 `is_int` を付けて [`run_extended`] を実行する。スケーリングはしない
 /// (整数列の列スケールは 1 でなければならないため)。双対の議論に基づく縮約 (dualpropagate、
 /// ineqsingleton、forcingcol) は整数最適化では正しくないので行わない (forcingcol は主問題の議論なので
-/// `ENOMOTO_MIP_FORCING_COL` で使える。ineqsingleton は `ENOMOTO_MIP_INEQ_SINGLETON`・`ENOMOTO_MIP_INEQ_SINGLETON_ALL` で使える)。
+/// `ENOMOTO_MIP_FORCING_COL` で使える。ineqsingleton は `ENOMOTO_MIP_FJ_P3` の FJ の問題と `ENOMOTO_MIP_INEQ_SINGLETON_ALL` で使える)。
 #[allow(clippy::too_many_arguments)]
 pub fn run_extended_mip(n: usize, a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], c: &[f64], is_int: &[bool], prop_passes: usize, rounds: usize, inner_rounds: usize) -> ExtendedPresolveResult {
     INT_MASK.with(|m| *m.borrow_mut() = Some(std::rc::Rc::new(is_int.to_vec())));
@@ -567,7 +568,7 @@ pub fn run_extended(
         None => large && tunable!("ENOMOTO_T_INEQ_SINGLETON_LARGE", INEQ_SINGLETON_LARGE, usize) != 0,
     };
     // `ENOMOTO_MIP_INEQ_SINGLETON_ALL` (試作、既定では使わない): 整数最適化の前処理で、不等式行の列シングルトン (`ineqsingleton`) を
-    // 問題の大きさ (`LARGE_PRESOLVE_MIN_ROWS` 以上) によらず使う (`ENOMOTO_MIP_INEQ_SINGLETON` と同じ扱い: 整数列は固定だけ、
+    // 問題の大きさ (`LARGE_PRESOLVE_MIN_ROWS` 以上) によらず使う (FJ の問題の前処理と同じ扱い: 整数列は固定だけ、
     // 連続列は固定と等式化)。CBC の前処理 (CoinPresolve の `slack_singleton_action`・`implied_free` が不等式行の列シングルトンを
     // 大きさによらず扱う) にならう。`ENOMOTO_INEQ_SINGLETON=0` を付けたときは使わない
     let mip_ineq_all = int_mask().is_some() && env_str!("ENOMOTO_MIP_INEQ_SINGLETON_ALL").is_some() && env_str!("ENOMOTO_INEQ_SINGLETON") != Some("0");
@@ -740,6 +741,10 @@ pub fn run_extended(
         debug_presolve_dump(round_idx, "opp", &lb, &ub);
         // 双対による固定: 目的係数の向きを妨げる行がない変数を上下限に固定する。
         let fixes = if dbg_skip("dualfix") { Vec::new() } else { timed_step!("dualfix", dualfix::fix_by_lock_count(n, &a, &cur_real_rows, &c, &lb, &ub)) };
+        // 診断 `ENOMOTO_DEBUG_DUALFIX`: 固定した列と値・費用
+        if env_str!("ENOMOTO_DEBUG_DUALFIX").is_some() && !fixes.is_empty() {
+            eprintln!("DUALFIX: round {round_idx} int_mask {} fixes {:?}", int_mask().is_some(), fixes.iter().map(|&(j, v)| (j, v, c[j])).collect::<Vec<_>>());
+        }
         for &(j, value) in &fixes {
             lb[j] = value;
             ub[j] = value;
@@ -854,11 +859,11 @@ pub fn run_extended(
         debug_presolve_dump(round_idx, "dualprop", &lb, &ub);
         // 不等式行の列シングルトン (`ineqsingleton`、大きな問題か `ENOMOTO_INEQ_SINGLETON` 設定時):
         // 列を上下限に固定するか、その行を等式に変えて後段の colsingleton に消去させる。
-        // 整数最適化の前処理では使わない (`ENOMOTO_MIP_INEQ_SINGLETON` で使う。整数列は固定だけ、連続列は等式化も。
+        // 整数最適化の前処理では使わない (FJ の問題の前処理 `ENOMOTO_MIP_FJ_P3` と `ENOMOTO_MIP_INEQ_SINGLETON_ALL` で使う。整数列は固定だけ、連続列は等式化も。
         // physiciansched6-2 では目的の費用が `y >= Σ 罰則の列` の形の連続列 (この行だけに出る) にあり、これを消さないと
         // 罰則の列が費用のない鎖のまま残って Feasibility Jump が解を見つけられない)
         let mip_mask = int_mask();
-        if ineq_singleton_on && (mip_mask.is_none() || env_str!("ENOMOTO_MIP_INEQ_SINGLETON").is_some() || crate::fj_p3_force() || mip_ineq_all) {
+        if ineq_singleton_on && (mip_mask.is_none() || crate::fj_p3_force() || mip_ineq_all) {
             let isr = timed_step!("ineqsingleton", ineqsingleton::resolve_inequality_singletons_int(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub, mip_mask.as_deref().map(|v| v.as_slice())));
             if env_str!("ENOMOTO_DEBUG_INEQ_SINGLETON").is_some() {
                 eprintln!("DEBUG_INEQ_SINGLETON: fixes={} implied_equalities={}", isr.fixes.len(), isr.implied_equalities.len());
@@ -1125,6 +1130,56 @@ pub fn run_extended(
                 let mut i = 0;
                 cur_real_rhs.retain(|_| { i += 1; !promoted[i - 1] });
                 set_g_from_split!("rebuild_g(dfi)");
+            }
+        }
+        // 試作 `ENOMOTO_MIP_DUAL_TIGHT_INEQ` (既定では使わない): 双対の議論で不等式行を等式に上げる (整数列でも使える形、
+        // [`dualtightineq`])。直後の集約がその等式で列を代入できる (neos859080 の `b_a + b_b ≤ 1` 40 本、analysis/hang_20261117/README.md)
+        if env_str!("ENOMOTO_MIP_DUAL_TIGHT_INEQ").is_some_and(|v| v != "0") && env_str!("ENOMOTO_DISABLE_AGGREGATOR").is_none() && !dbg_skip("dualtightineq") {
+            let mask = int_mask();
+            let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
+            let up = timed_step!("dualtightineq", dualtightineq::find_dual_tight_inequalities(n, &a_rows, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub, mask.as_deref().map(|v| v.as_slice())));
+            if env_str!("ENOMOTO_DEBUG_AGGREGATOR").is_some() || env_str!("ENOMOTO_MIP_LOG").is_some() {
+                eprintln!("PRESOLVE: dual tight inequalities: round={round_idx} promoted={}", up.len());
+            }
+            if !up.is_empty() {
+                let mut a_rows = a_rows;
+                let mut promoted = vec![false; cur_real_rows.len()];
+                for &gi in &up {
+                    promoted[gi] = true;
+                    a_rows.push(cur_real_rows[gi].clone());
+                    b.push(cur_real_rhs[gi]);
+                }
+                a = csr_from_rows(&a_rows, n);
+                let mut i = 0;
+                cur_real_rows.retain(|_| { i += 1; !promoted[i - 1] });
+                let mut i = 0;
+                cur_real_rhs.retain(|_| { i += 1; !promoted[i - 1] });
+                set_g_from_split!("rebuild_g(dti)");
+                // 上げた等式の多くは 2 項 (0-1 列の対) なので、止まっていた doubleton を次のラウンドでもう一度動かす
+                doubleton_active = true;
+                doubleton_empty_streak = 0;
+            }
+        }
+        // 試作 `ENOMOTO_MIP_SPARSIFY` (既定では使わない): 等式の倍を足して行の非零を打ち消す ([`sparsify`]、台が含まれる等式だけ・
+        // フィルインなしの保守的な形)。SCIP の前処理の sparsify を外すと neos859080 が当方で解けなくなる (analysis/hang_20261117/README.md)
+        if env_str!("ENOMOTO_MIP_SPARSIFY").is_some_and(|v| v != "0") && !dbg_skip("sparsify") {
+            let (gg, hh) = if g_split { propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub) } else { (g.clone(), h.clone()) };
+            let sp = timed_step!("sparsify", sparsify::sparsify(n, &a, &b, &gg, &hh));
+            if env_str!("ENOMOTO_DEBUG_AGGREGATOR").is_some() || env_str!("ENOMOTO_MIP_LOG").is_some() {
+                eprintln!("PRESOLVE: sparsify: round={round_idx} rows changed={}", sp.n_rows_changed);
+            }
+            if sp.n_rows_changed > 0 {
+                a = sp.a;
+                b = sp.b;
+                let (slb, sub, srows, srhs) = propagate::extract_bounds(n, &sp.g, &sp.h);
+                for j in 0..n {
+                    lb[j] = lb[j].max(slb[j]);
+                    ub[j] = ub[j].min(sub[j]);
+                }
+                let _ = propagate::fix_crossed_bounds(&mut lb, &ub);
+                cur_real_rows = srows;
+                cur_real_rhs = srhs;
+                set_g_from_split!("rebuild_g(sparsify)");
             }
         }
         // Aggregator (HiGHS の `HPresolve::aggregator`): 等式行から implied-free と

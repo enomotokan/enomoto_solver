@@ -2006,6 +2006,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         (ord, big)
     };
     let mut sel = BasisSelector::new(m, n);
+    // `ENOMOTO_IPM_G5CANCEL` (既定で使う、`=0` で使わない): 基底の選択の候補のループでも 16 列ごとに止めの合図を見る ([`g5cancel_tick`])。
+    // highschool1-aigio (HANG) では、根の LP の同時実行で負けた側の `BasisSelector::try_add` が期限の後も回り続けた
+    let mut g5k = 0usize;
     if tunable!("ENOMOTO_T_XO_LI_MARKOWITZ", 1u8, u8) != 0 {
         // 行の非零の数は、基底の候補 (B と D) の列だけで数える (行列全体で数えると、候補にない列の非零で目安が
         // ずれてフィルが増える: qap15 で基底の選択が 22.7 秒、候補の列だけの小さな問題では 0.17 秒)。
@@ -2042,6 +2045,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         if sel.full() {
             break;
         }
+        if g5cancel_tick(&mut g5k) {
+            return None;
+        }
         if li_match_ok && sel.stat[1] as f64 > elim_budget {
             let (ord, big) = matching_order();
             if big <= match_max_block {
@@ -2071,6 +2077,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 }
             }
             for i in 0..m {
+                if g5cancel_tick(&mut g5k) {
+                    return None;
+                }
                 if !matched[i] && sel.try_add(n_orig + i, col(std, n_orig + i)) {
                     st.li_slack += 1;
                 }
@@ -2079,6 +2088,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         for &(j, pref) in &ord {
             if sel.full() {
                 break;
+            }
+            if g5cancel_tick(&mut g5k) {
+                return None;
             }
             sel.pref_row = pref;
             if sel.try_add(j, col(std, j)) {
@@ -2104,6 +2116,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             if sel.full() {
                 break;
             }
+            if g5cancel_tick(&mut g5k) {
+                return None;
+            }
             if sel.try_add(j, col(std, j)) {
                 if j >= n_orig {
                     st.li_slack += 1;
@@ -2116,6 +2131,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     for i in 0..m {
         if sel.full() {
             break;
+        }
+        if g5cancel_tick(&mut g5k) {
+            return None;
         }
         if !sel.row_pivoted(i) {
             let j = n_orig + i;
@@ -3381,6 +3399,18 @@ struct MegiddoResult {
     timed_out: usize,
 }
 
+/// 試作 `ENOMOTO_XO_BUMP_LU_RATIO` (analysis/scipsym_20261120/ 12 節、既定では使わない): クロスオーバーの Megiddo の押し出し (主・双対) の
+/// 基底の核で、eta の fill の上限を双対単体法と同じく `FT_BUMP_LU_RATIO · nnz(LU)` まで広げる (値は双対単体法の
+/// `ENOMOTO_T_FT_BUMP_LU_RATIO` を共有)。密な基底 (cod105) では従来の `64 m` に更新 5 回ごとに当たり、押し出しの大半が再分解になる。
+fn xo_kernel(m: usize, ft: usize) -> BasisKernel {
+    let k = BasisKernel::new(m, ft);
+    if env_str!("ENOMOTO_XO_BUMP_LU_RATIO").is_some_and(|v| v != "0") {
+        k.with_bump_lu_ratio(tunable!("ENOMOTO_T_FT_BUMP_LU_RATIO", crate::params::slope_intercept_dual::FT_BUMP_LU_RATIO, f64))
+    } else {
+        k
+    }
+}
+
 /// Megiddo (1991) 式の超基底変数の押し出し。
 ///
 /// 正則な基底 `B` (`basis`/`basis_pos`、分解 `lu`) と、基底に選ばれず境界から離れたまま残った
@@ -3474,7 +3504,7 @@ fn megiddo_push(
     let ft_hi = if ft_adapt > 1.0 { ((ft_max as f64 * ft_adapt) as usize).min(ft_max_updates(m)).max(ft_max) } else { ft_max };
     // 直近の再分解の時間と、その時点の求解の累計時間。
     let (mut last_refac, mut solve_mark) = (0.0f64, 0.0f64);
-    let mut kernel = BasisKernel::new(m, ft_hi);
+    let mut kernel = xo_kernel(m, ft_hi);
     let mut d = vec![0.0; m];
     let mut rho = vec![0.0; m];
     let mut nz: Vec<usize> = Vec::new();
@@ -3636,7 +3666,7 @@ fn megiddo_push(
                         Some(f) => f,
                         None => return None,
                     };
-                    kernel = BasisKernel::new(m, ft_hi);
+                    kernel = xo_kernel(m, ft_hi);
                     let xs_ref = &xs;
                     let sv = |jj: usize| xs_ref[sup_idx[jj]];
                     recompute_xb(&lu, basis_pos, nb_status, &is_sup, &sv, &mut xb);
@@ -3729,7 +3759,7 @@ fn megiddo_push(
                         }
                         None => return None,
                     };
-                    kernel = BasisKernel::new(m, ft_hi);
+                    kernel = xo_kernel(m, ft_hi);
                     let xs_ref = &xs;
                     let sv = |jj: usize| xs_ref[sup_idx[jj]];
                     recompute_xb(&lu, basis_pos, nb_status, &is_sup, &sv, &mut xb);
@@ -3843,7 +3873,7 @@ fn megiddo_dual_push(
         5 => cand.sort_by_key(|&j| std::cmp::Reverse(col(std, j).len())),
         _ => {}
     }
-    let mut kernel = BasisKernel::new(m, ft_max);
+    let mut kernel = xo_kernel(m, ft_max);
     let mut rho = vec![0.0; m];
     let mut nzr: Vec<usize> = Vec::new();
     let mut alpha = vec![0.0; n];
@@ -4057,7 +4087,7 @@ fn megiddo_dual_push(
                                     factorize_basis(std, basis_pos, None)?
                                 }
                             };
-                            kernel = BasisKernel::new(m, ft_max);
+                            kernel = xo_kernel(m, ft_max);
                             prof_u[1] += tu.elapsed().as_secs_f64();
                             let tu = Instant::now();
                             compute_s(y, &mut s);
@@ -4221,7 +4251,7 @@ fn megiddo_dual_push(
                                 factorize_basis(std, basis_pos, None)?
                             }
                         };
-                        kernel = BasisKernel::new(m, ft_max);
+                        kernel = xo_kernel(m, ft_max);
                         prof_u[1] += tu.elapsed().as_secs_f64();
                         let tu = Instant::now();
                         // 増分の誤差を消す。
@@ -4265,6 +4295,17 @@ fn nearest_bound(std: &StdForm, j: usize, v: f64) -> NbStatus {
 
 /// 優先順に列を受け取り、一次独立なら基底に加える左から順の疎 LU (Gilbert–Peierls)。
 /// `L` の列 `k` はピボット行 `piv[k]` と、受理時点の未ピボット行での乗数を持つ。
+/// `ENOMOTO_IPM_G5CANCEL` (src/interior_point/kkt.rs と同じ環境変数、既定で使う): `k` を数え、16 回ごとに止めの合図
+/// ([`crate::cancel::is_cancelled`]) を見る。立っていれば `true` (呼び手はクロスオーバーを諦める)
+fn g5cancel_tick(k: &mut usize) -> bool {
+    *k += 1;
+    let hit = *k % 16 == 0 && env_def!("ENOMOTO_IPM_G5CANCEL", "1").is_some() && crate::cancel::is_cancelled();
+    if hit {
+        crate::interior_point::kkt::g5cancel_note("the crossover basis selection");
+    }
+    hit
+}
+
 struct BasisSelector {
     m: usize,
     /// しきい値つきの部分ピボットの比 ([`prm::LI_PIV_REL`])。

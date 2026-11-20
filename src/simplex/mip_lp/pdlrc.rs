@@ -101,3 +101,55 @@ impl TwoStageLp {
         Some(job)
     }
 }
+
+impl TwoStageLp {
+    /// 試作 `ENOMOTO_MIP_TPRE` の 6 (analysis/objtarget_20261119/): 今の LP を、呼んだスレッドで 1 スレッドのプールの PDLP で
+    /// `max_iters` 反復まで (時刻でなく反復で止める) 解き、確認点ごとのラグランジュ下界 `L(y)` の一番良いものを返す
+    /// ([`Self::pdlrc_start`] と同じ形。`lb` は定数項を含まない)
+    pub fn pdlrc_run_iters(&self, max_iters: usize) -> Option<PdlrcBest> {
+        self.pdlrc_run_iters_hist(max_iters, None, None)
+    }
+
+    /// [`Self::pdlrc_run_iters`] で、確認点ごとの (反復, その時点までの最良の下界) を `hist` に足すもの (診断用)
+    /// `xout` を渡すと、PDLP の終わりの主の点 (構造列、元の列の値) をそこに書く
+    pub fn pdlrc_run_iters_hist(&self, max_iters: usize, hist: Option<Arc<Mutex<Vec<(usize, f64)>>>>, xout: Option<Arc<Mutex<Vec<f64>>>>) -> Option<PdlrcBest> {
+        let shift = self.shift.clone();
+        let std = self.std.clone();
+        let n = self.n;
+        let shift_c: f64 = (0..n).map(|j| self.std.c[j] * self.shift[j]).sum();
+        let best: Arc<Mutex<Option<PdlrcBest>>> = Arc::new(Mutex::new(None));
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().ok()?;
+        let b2 = best.clone();
+        pool.install(|| {
+            let t0 = std::time::Instant::now();
+            let a = std.rows.to_faer();
+            let std2 = std.clone();
+            let hook: crate::interior_point::pdlp::CheckHook = Box::new(move |iters, y| {
+                if let Some((l, d)) = lagrange_std(&std2, n, y) {
+                    if l.is_finite() {
+                        let lb = l + shift_c;
+                        if let Ok(mut b) = b2.lock() {
+                            if b.as_ref().is_none_or(|b| lb > b.lb) {
+                                *b = Some(PdlrcBest { lb, d, iters, secs: t0.elapsed().as_secs_f64() });
+                            }
+                        }
+                    }
+                }
+                if let Some(h) = hist.as_ref() {
+                    let cur = b2.lock().ok().and_then(|b| b.as_ref().map(|b| b.lb)).unwrap_or(f64::NEG_INFINITY);
+                    if let Ok(mut h) = h.lock() {
+                        h.push((iters, cur));
+                    }
+                }
+            });
+            let opts = crate::interior_point::pdlp::PdlpOptions { eps: 1e-9, max_iters, time_limit: 1e9, max_restarts: usize::MAX };
+            let r = crate::interior_point::pdlp::with_check_hook(hook, || crate::interior_point::pdlp::solve_pdlp(&a, &std.b, &std.c, &std.lb, &std.ub, &opts));
+            if let Some(px) = xout.as_ref() {
+                if let Ok(mut px) = px.lock() {
+                    *px = (0..n).map(|j| r.x[j] + shift[j]).collect();
+                }
+            }
+        });
+        best.lock().ok().and_then(|b| b.clone())
+    }
+}

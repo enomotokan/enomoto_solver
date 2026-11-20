@@ -85,6 +85,18 @@ VERDICT_EVENTS = ("presolve_infeasible", "presolve_no_finite_optimum", "stage_b_
 # ================================================================ 問題の一覧
 
 @dataclass
+
+def _read_our_model_compat(bh, path):
+    """`benchmark_highs._read_our_model` (このクレートの MPS 読み込み) でモデルを作る。古いビルドを wheel で入れた
+    環境では `benchmark_highs` 自体が古く `_read_our_model` がないので、従来の HiGHS 経由の組み立てに戻る
+    (台本だけ新しくなった計測が落ちないように)。戻り値は `(model, 制約数, 非零数, 列の名前)`。"""
+    if hasattr(bh, "_read_our_model"):
+        return bh._read_our_model(path)
+    _, lp = bh._load_lp(path)
+    names = list(lp.col_names_) if len(lp.col_names_) == lp.num_col_ else [f"C{j}" for j in range(lp.num_col_)]
+    model, n_constraints, nnz = bh._build_our_model(lp)
+    return model, n_constraints, nnz, names
+
 class Problem:
     set: str
     name: str
@@ -196,15 +208,18 @@ def _read_highs(mps: str):
 def worker_enomoto(mps: str, threads: int) -> None:
     from enomoto_solver import _core
 
+    from enomoto_solver import benchmark_highs as bh
+
     t0 = time.perf_counter()
-    h = _read_highs(mps)
-    if h is None:
+    try:
+        # このクレートの MPS 読み込み (2026-11-20 から。それより前は HiGHS で読んで組み立てていた)
+        model, _, _, _ = _read_our_model_compat(bh, Path(mps))
+    except ValueError as e:
+        _emit({"status": "read_error", "detail": str(e)})
         return
-    model = _build_our_model(h.getLp())
-    del h
     _emit({"built": True, "read_time": time.perf_counter() - t0})
     t0 = time.perf_counter()
-    out = model.solve(root_solver=None, distinguish_infeasible_unbounded=True, threads=threads if threads > 0 else None)
+    out = model.solve(lp_solver=None, distinguish_infeasible_unbounded=True, threads=threads if threads > 0 else None)
     t = time.perf_counter() - t0
     _emit({"time": t, "status": out["status"], "obj": out.get("objective"),
            "events": [[name, sec] for name, sec in _core.last_solve_events()]})

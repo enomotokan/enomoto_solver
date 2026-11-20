@@ -55,7 +55,7 @@ struct LuCache {
     d: Option<Vec<f64>>,
 }
 
-/// [`TwoStageLp::optface_move`] の結果 (試作 `ENOMOTO_MIP_OPTFACE_MOVE`)。
+/// [`TwoStageLp::optface_move`] の結果 (試作 `ENOMOTO_MIP_OPTFACE_PARCUTS`・`MPSEP`。`OPTFACE_MOVE` は 2026-11-18 に削除)。
 #[derive(Clone, Debug, Default)]
 pub struct OptFaceStats {
     /// 最初の基底での候補 (被約費用 0 で動ける非基底) の数 (双対退化の目安)
@@ -239,6 +239,20 @@ thread_local! {
     pub(crate) static PROGRESS_STOP_ONCE: std::cell::Cell<Option<(usize, usize, f64, f64)>> = const { std::cell::Cell::new(None) };
     /// このスレッドの基底のない求解を同時実行にするときのスレッド数 ([`TwoStageLp::solve`]。1 なら同時実行しない)。
     static COLD_RACE_THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+    /// `ENOMOTO_MIP_G5SEQ` (2026-11-18 から既定、`=0` で使わない。analysis/vsscip_slow_20261118/g5/README.md): 1 スレッドの MIP の入口
+    /// ([`crate::mip::solve_mip`]) が立てる。立っていて同時実行をしない (`COLD_RACE_THREADS` が 1) 基底のない大きい求解は、
+    /// 二段解法に反復の上限を付け、上限に当たれば同じスレッドで内点法 + クロスオーバーに切り替える ([`TwoStageLp::solve_seq_ipm`])
+    static SEQ_IPM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`SEQ_IPM`] を設定し、前の値を返す。
+pub(crate) fn set_seq_ipm(on: bool) -> bool {
+    SEQ_IPM.with(|c| c.replace(on))
+}
+
+/// `ENOMOTO_MIP_G5SEQ` が有効か (既定で有効、`0`・`off` で無効)。
+pub(crate) fn g5seq_on() -> bool {
+    env_def!("ENOMOTO_MIP_G5SEQ", "1").is_some()
 }
 
 thread_local! {
@@ -772,6 +786,9 @@ impl TwoStageLp {
                 (1.0, u, f64::INFINITY, false)
             } else if l.is_finite() {
                 (-1.0, -l, f64::INFINITY, false)
+            } else if freerow_off('s') {
+                // 診断 `ENOMOTO_MIP_FREEROW_OFF` の `s`: 空の行にせず、係数を残してスラックを自由変数にする (a·x + s = 0、s は無限の範囲)
+                (1.0, 0.0, f64::NEG_INFINITY, false)
             } else {
                 // 制約のない行: 空の行 (0 = 0) にする
                 (1.0, 0.0, 0.0, true)
@@ -787,8 +804,13 @@ impl TwoStageLp {
             r.push((n + i, 1.0));
             std_rows.push(r);
             b.push(rhs);
-            slb[n + i] = 0.0;
-            sub[n + i] = s_up.max(0.0);
+            if s_up == f64::NEG_INFINITY {
+                slb[n + i] = f64::NEG_INFINITY;
+                sub[n + i] = f64::INFINITY;
+            } else {
+                slb[n + i] = 0.0;
+                sub[n + i] = s_up.max(0.0);
+            }
             sigma.push(sg);
         }
         let mut c = vec![0.0; n_total];
@@ -873,6 +895,11 @@ impl TwoStageLp {
         self.row_lo[i] == f64::NEG_INFINITY && self.row_up[i] == f64::INFINITY
     }
 
+    /// 双対・Farkas・tableau の重み・被約費用で空の行を 0 として扱うか (診断 `ENOMOTO_MIP_FREEROW_OFF` の `d` で扱わない)
+    fn zero_free(&self) -> bool {
+        self.has_free_rows && !freerow_off('d')
+    }
+
     /// 行の境界をまとめて変える (標準形の作り直しは 1 回)。試作 `ENOMOTO_MIP_CLQ_LAZY` 用。
     pub fn set_row_bounds_many(&mut self, ch: &[(usize, f64, f64)]) {
         if ch.is_empty() {
@@ -884,6 +911,9 @@ impl TwoStageLp {
         }
         self.has_free_rows = (0..self.rows.len()).any(|i| self.free_row(i));
         self.rebuild();
+        // 空にした行のスラックを基底に入れる (今の基底で非基底だった行)
+        self.repair_basis();
+        self.lu = None;
         self.status = None;
         let sync = self.tw_sync;
         self.clear_memo();
@@ -1098,6 +1128,16 @@ impl TwoStageLp {
         let Some(b) = self.basis.as_mut() else { return };
         let mut used = vec![false; n + m];
         b.retain(|&v| v < n + m && !std::mem::replace(&mut used[v], true));
+        // 両側とも無限の境界の行 (標準形では空の行、試作 `ENOMOTO_MIP_CLQ_LAZY`) のスラックは必ず基底に入れる (非基底だと基底が特異になり、
+        // 分解の修復でスラックに置き換えられる列が増えて解き直しが重くなる)。余った分は下で構造列を後ろから外す
+        if self.has_free_rows && !freerow_off('r') {
+            for i in 0..m {
+                if !used[n + i] && self.row_lo[i] == f64::NEG_INFINITY && self.row_up[i] == f64::INFINITY {
+                    used[n + i] = true;
+                    b.insert(0, n + i);
+                }
+            }
+        }
         while b.len() > m {
             if let Some(pos) = b.iter().rposition(|&v| v < n) {
                 let v = b.remove(pos);
@@ -1583,32 +1623,69 @@ impl TwoStageLp {
         if cold && crate::cancel::current().is_none() {
             let k = COLD_RACE_THREADS.with(|c| c.get());
             if k >= 2 {
-                // 試作 `ENOMOTO_MIP_MC11FIX1_RACE` (既定では使わない、analysis/mc11_wait1_20261103.md): 小さい LP (行 + 列 + 非零の数が
-                // `ENOMOTO_T_MIP_MC11FIX1_RACE_SIZE` (既定 50000) 未満) では、勝ち負けを時間で決めない。`s` は同時実行をやめて二段解法だけ、
-                // `i` は二段解法が先に最適で終わっても内点法 + クロスオーバーの頂点を待って採る。mc11 (大きさ 約 1.1 万) では両方が 0.04〜0.06 秒で
-                // ほぼ同着になり、どちらが勝つかで根の頂点が変わって、根のカットと裏のカットの道が 11683 (二段解法、約 15 秒) と
-                // 11666 (内点法、約 30 秒) に分かれていた
-                if let Some(v) = env_str!("ENOMOTO_MIP_MC11FIX1_RACE") {
-                    let nnz: usize = self.rows.iter().map(|r| r.len()).sum();
-                    let size = self.std.n_total + nnz;
-                    let small = (size as f64) < tunable!("ENOMOTO_T_MIP_MC11FIX1_RACE_SIZE", 50000.0, f64);
-                    if env_str!("ENOMOTO_DEBUG_RACE").is_some() {
-                        eprintln!("MIP root race: ENOMOTO_MIP_MC11FIX1_RACE={v}: size {size} ({})", if small { "small" } else { "race as usual" });
-                    }
-                    if small && v.contains('s') {
-                        return self.solve_once(lim);
-                    }
-                    if small && v.contains('i') {
-                        return self.solve_race_ext(lim, k, true);
-                    }
-                }
                 if let Some(cfg) = BOTH_REQ.with(|c| c.take()) {
                     return self.solve_race_both(lim, k, cfg);
                 }
                 return self.solve_race(lim, k);
             }
+            if SEQ_IPM.with(|c| c.get()) {
+                let nnz: usize = self.rows.iter().map(|r| r.len()).sum();
+                let size = self.std.n_total + nnz;
+                if size as f64 >= tunable!("ENOMOTO_T_MIP_G5SEQ_SIZE", 50000.0, f64) {
+                    return self.solve_seq_ipm(lim);
+                }
+            }
         }
         self.solve_once(lim)
+    }
+
+    /// `ENOMOTO_MIP_G5SEQ` (既定、1 スレッドの基底のない大きい求解): 二段解法を反復の上限
+    /// L = `ENOMOTO_T_MIP_G5SEQ_C` (既定 0.5) x (行 + 列) で解き、L 以内に結論が出なければ同じスレッドで内点法 + クロスオーバーを解いて
+    /// その頂点を採る (TIMEDEP の `r` を 1 スレッドで順に回す形)。頂点が得られなければ二段解法を続ける。
+    fn solve_seq_ipm(&mut self, lim: &SolveLimits) -> LpStatus {
+        let debug = env_str!("ENOMOTO_DEBUG_RACE").is_some();
+        let l = (tunable!("ENOMOTO_T_MIP_G5SEQ_C", 0.5, f64) * (self.rows.len() + self.n) as f64).max(100.0) as u64;
+        let cap = SolveLimits { iteration_limit: lim.iteration_limit.min(l), ..*lim };
+        let t0 = std::time::Instant::now();
+        let st = self.solve_once(&cap);
+        let conclusive = matches!(st, LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded | LpStatus::ObjectiveBound | LpStatus::TimeLimit);
+        if conclusive || cap.iteration_limit >= lim.iteration_limit {
+            if debug {
+                eprintln!("MIP G5SEQ: simplex concluded within the cap {l} ({st:?}, {:.3}s)", t0.elapsed().as_secs_f64());
+            }
+            return st;
+        }
+        let t1 = std::time::Instant::now();
+        let sc = self.ipm_scale();
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).thread_name(|i| format!("enomoto-mip-seqipm-{i}")).build();
+        let ih = crate::cancel::inherit();
+        let run = || {
+            sid::request_duals(true);
+            // 共有の下界 (誰も書かない) を付けて、同時実行のときと同じく押し出しの時間の上限をかけない (止める役目は LP の期限が持つ)
+            let bound = crate::cancel::SharedBound::new(self.std.n_total, self.std.n_rows);
+            let r = crate::cancel::with_deadline(lim.deadline, || crate::cancel::with_bound(Some(bound), || ih.clone().run(|| ipm_crossover_run(&self.std, sc.as_deref()))));
+            let duals = sid::take_duals();
+            sid::request_duals(false);
+            if debug {
+                eprintln!("MIP G5SEQ: ipm_crossover status {:?}", r.as_ref().map(|r| r.status.clone()));
+            }
+            r.filter(|r| r.status == Status::Optimal).and_then(|r| r.x).map(|x| (x, duals))
+        };
+        let got = match &pool {
+            Ok(p) => p.install(run),
+            Err(_) => run(),
+        };
+        if debug {
+            eprintln!("MIP G5SEQ: simplex hit the cap {l} at {:.3}s ({st:?}); ipm_crossover {} after {:.3}s", t1.duration_since(t0).as_secs_f64(), if got.is_some() { "found a vertex" } else { "failed" }, t1.elapsed().as_secs_f64());
+        }
+        let Some((x, duals)) = got else {
+            if lim.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return LpStatus::TimeLimit;
+            }
+            return self.solve_once(lim);
+        };
+        user_log!("Root LP: the two-phase method hit the iteration cap {l}; took the interior-point method + crossover vertex ({:.2}s, G5SEQ)", t0.elapsed().as_secs_f64());
+        self.adopt_ipm_vertex(&x, duals, lim, debug, t0)
     }
 
     /// 二段解法で 1 回解く。
@@ -1934,6 +2011,9 @@ impl TwoStageLp {
             }
         }
         let tol = 1e-9 * (1.0 + mag);
+        if env_str!("ENOMOTO_MIP_DEBUG_LPINF").is_some() {
+            eprintln!("LPINF farkas: yb {yb:.10e} zlo {zlo:.10e} zhi {zhi:.10e} lo_inf {lo_inf} hi_inf {hi_inf} tol {tol:.3e} ymax {ymax:.3e} mag {mag:.3e}");
+        }
         (!hi_inf && yb > zhi + tol) || (!lo_inf && yb < zlo - tol)
     }
 
@@ -2085,7 +2165,7 @@ impl TwoStageLp {
     }
 
     /// [`Self::solve_race`] の本体。`force_ipm` なら二段解法が先に最適で終わっても内点法 + クロスオーバーの頂点を待つ
-    /// (`ENOMOTO_MIP_ROOT_LP_IPM` と同じ。試作 `ENOMOTO_MIP_MC11FIX1_RACE=i`)
+    /// (`ENOMOTO_MIP_ROOT_LP_IPM` と同じ)
     fn solve_race_ext(&mut self, lim: &SolveLimits, threads: usize, force_ipm: bool) -> LpStatus {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{mpsc, Arc};
@@ -2230,6 +2310,16 @@ impl TwoStageLp {
                 return st;
             }
             rx.recv().ok().flatten()
+        } else if st == LpStatus::IterationLimit && lim.iteration_limit != u64::MAX && env_def!("ENOMOTO_MIP_RACE_ITERCAP_NOWAIT", "1").is_some_and(|v| v != "0") {
+            // `ENOMOTO_MIP_RACE_ITERCAP_NOWAIT` (2026-11-18 から既定、`=0` で従来の待つ形): 二段解法が呼び手の反復の上限 (手間の予算、前処理の LP による固定の
+            // 最初の LP の `ENOMOTO_MIP_PRESOLVE_WORK` など) で止まったら、内点法側を待たずに止めて返す。待つと時間の安全網まで空費する
+            // (ns1116954 の 4 スレッド・60 秒で早めの FJ が外れた回: 二段解法は約 2270 反復で止まり、内点法 + クロスオーバーを 30 秒の安全網まで
+            // 待って何も得なかった。analysis/hang_20261117/README.md の 16 節)
+            cancel.store(true, Ordering::SeqCst);
+            if debug {
+                eprintln!("MIP root race: simplex hit the iteration cap at {:.3}s; not waiting for ipm_crossover (RACE_ITERCAP_NOWAIT)", t0.elapsed().as_secs_f64());
+            }
+            return st;
         } else {
             // 二段解法は結論を出せなかった (数値的な破綻など): 内点法側を止めずに、期限まで結果を待つ。leo1・leo2 では
             // 二段解法が 0.1 秒で `Error` を返して勝ちとされ、内点法側を止めて MIP が `NotSolved` で終わっていた
@@ -2938,6 +3028,24 @@ impl TwoStageLp {
                     LpStatus::Optimal
                 }
                 Status::Infeasible => {
+                    if env_str!("ENOMOTO_MIP_DEBUG_LPINF").is_some() {
+                        let ok = ray.as_ref().filter(|r| r.len() >= self.rows.len()).map(|r| self.std_farkas_ok(&r[..self.rows.len()]));
+                        // 今の行・境界から標準形を作り直して比べる (増分の更新のずれ・同期漏れを見る)
+                        let (f, _) = Self::build_std(self.n, &self.rows, &self.row_lo, &self.row_up, &self.cost, &self.lo, &self.up, &self.shift);
+                        let db = f.b.iter().zip(&self.std.b).enumerate().map(|(i, (a, b))| ((a - b).abs(), i)).fold((0.0f64, 0), |m, v| if v.0 > m.0 { v } else { m });
+                        let dl = (0..f.n_total).filter(|&j| f.lb[j] != self.std.lb[j] || f.ub[j] != self.std.ub[j]).count();
+                        let fresh_ok = ray.as_ref().filter(|r| r.len() >= self.rows.len()).map(|r| {
+                            let mut g = self.std.clone();
+                            g.b = f.b.clone();
+                            g.lb = f.lb.clone();
+                            g.ub = f.ub.clone();
+                            let me = std::mem::replace(&mut self.std, g);
+                            let ok = self.std_farkas_ok(&r[..self.rows.len()]);
+                            self.std = me;
+                            ok
+                        });
+                        eprintln!("LPINF ray: farkas check {ok:?} on the rebuilt std {fresh_ok:?} (warm basis {}); max |b - b_rebuilt| {:.3e} at row {} (b {:.6e}), bound mismatches {dl}, n_rows {} vs {}", self.basis.is_some(), db.0, db.1, self.std.b.get(db.1).copied().unwrap_or(f64::NAN), self.std.n_rows, f.n_rows);
+                    }
                     // 標準形の行は元の行に符号 σ を掛けたもの
                     self.ray = ray.filter(|r| r.len() >= self.rows.len()).map(|r| (0..self.rows.len()).map(|i| r[i] * self.sigma[i]).collect());
                     LpStatus::Infeasible
@@ -3232,7 +3340,7 @@ impl TwoStageLp {
         let mut d = self.cost.clone();
         for (i, r) in self.rows.iter().enumerate() {
             let yi = self.y.get(i).copied().unwrap_or(0.0) * self.sigma[i];
-            if yi != 0.0 && !(self.has_free_rows && self.free_row(i)) {
+            if yi != 0.0 && !(self.zero_free() && self.free_row(i)) {
                 for &(j, a) in r {
                     d[j] -= yi * a;
                 }
@@ -3244,7 +3352,7 @@ impl TwoStageLp {
     /// 行の双対値 (元の行の向き)。
     pub fn farkas_ray(&self) -> Option<Vec<f64>> {
         let mut r = self.ray.clone();
-        if self.has_free_rows {
+        if self.zero_free() {
             if let Some(r) = r.as_mut() {
                 for (i, v) in r.iter_mut().enumerate().take(self.rows.len()) {
                     if self.free_row(i) {
@@ -3257,12 +3365,12 @@ impl TwoStageLp {
     }
 
     pub fn row_duals(&self) -> Vec<f64> {
-        (0..self.rows.len()).map(|i| if self.has_free_rows && self.free_row(i) { 0.0 } else { self.y.get(i).copied().unwrap_or(0.0) * self.sigma[i] }).collect()
+        (0..self.rows.len()).map(|i| if self.zero_free() && self.free_row(i) { 0.0 } else { self.y.get(i).copied().unwrap_or(0.0) * self.sigma[i] }).collect()
     }
 
     /// 基底位置 `s` の `e_s^T B^{-1}` を、元の行に掛ける重みとして返す
     /// (`sum_i w_i (a_i x - r_i) = 0` が基底変数 `basic_var(s)` についての tableau 行)。
-    /// 試作 `ENOMOTO_MIP_OPTFACE_MOVE`・`ENOMOTO_MIP_OPTFACE_PARCUTS` (既定では呼ばない。analysis/optface_cuts_20261105.md): 最適な
+    /// 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` (`OPTFACE_MOVE` は 2026-11-18 に削除) (既定では呼ばない。analysis/optface_cuts_20261105.md): 最適な
     /// 今の基底から、被約費用が (許容誤差で) 0 の非基底変数を入れる主単体法の軸の入れ替え (双対退化の向き) を最大 `k` 回行い、
     /// 目的値を変えずに最適面の上の別の最適基底 (頂点) へ移る。比の判定は Harris の 2 段 (主の実行可能性を保つ)。入れる変数は
     /// 候補から最大 `sample` 本を引いて FTRAN し、`mode` で選ぶ: `r` 乱数 (最初に引いた有効な候補)、`f` 分数の値の整数の基底列の
@@ -3527,7 +3635,7 @@ impl TwoStageLp {
     /// 呼び手は行の全部 (m 個) を回さずに済む (値は密な版とビット一致)。
     pub fn basis_inverse_row_sparse(&mut self, s: usize) -> Vec<(usize, f64)> {
         let mut r = self.basis_inverse_row_sparse_raw(s);
-        if self.has_free_rows {
+        if self.zero_free() {
             r.retain(|&(i, _)| !self.free_row(i));
         }
         r
@@ -3608,7 +3716,7 @@ impl TwoStageLp {
 
     pub fn basis_inverse_row(&mut self, s: usize) -> Vec<f64> {
         let mut r = self.basis_inverse_row_raw(s);
-        if self.has_free_rows {
+        if self.zero_free() {
             for (i, v) in r.iter_mut().enumerate() {
                 if self.free_row(i) {
                     *v = 0.0;
@@ -3810,4 +3918,11 @@ pub(crate) fn nodecut_report() {
             v[0], v[1], v[2], v[3], v[18], v[19], v[4], v[5], v[6], v[7], v[16], v[17], v[8], v[9], v[10], v[21], v[11], v[12], v[13], v[14], v[15], v[22], v[23], v[20], v[24], v[25], v[26], v[27], v[28], v[29]
         );
     }
+}
+
+/// 診断 `ENOMOTO_MIP_FREEROW_OFF` (GENLAZY の mzzv11 の切り分け、既定では使わない): 両側とも無限の境界の行 (空の行) の扱いを文字で 1 つずつ元に戻す。
+/// `r` 基底の修復で空の行のスラックを基底に入れない、`d` 双対・Farkas・tableau の重み・被約費用で 0 にしない、
+/// `s` 標準形で空の行にせず係数を残してスラックを自由変数にする、`p` 受け渡しの基底の直し (`fix_pool_basis`) で空の行を特別に扱わない
+pub(crate) fn freerow_off(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_FREEROW_OFF").is_some_and(|v| v.contains(c))
 }

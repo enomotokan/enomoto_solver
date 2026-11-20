@@ -1,5 +1,6 @@
 //! Local-MIP (Lin・Zou・Cai, CP 2024「Local-MIP: Efficient Local Search for Mixed Integer Programming」) 風の局所探索
-//! (`ENOMOTO_MIP_LOCALMIP`、試作・既定では使わない)。論文は手元にないので、覚えている範囲の手順で組んだ。論文どおりの所:
+//! (FJ のスレッドの Local-MIP `ENOMOTO_MIP_FJ_LMIP_MIX` (既定) などが使う。別スレッドで回す試作 `ENOMOTO_MIP_LOCALMIP` は
+//! 2026-11-18 に削除)。論文は手元にないので、覚えている範囲の手順で組んだ。論文どおりの所:
 //!
 //! - **tight move** (mixed tight move): 違反している行を 1 本とり、その行の列 1 本を「その行をちょうど満たす境界 (等式なら右辺)」まで
 //!   動かす。整数列は満たす向きに丸める。FJ の「跳び先」(その列の全部の行の重み付き違反の和を最小にする値) とは違い、1 本の行だけを見る。
@@ -70,6 +71,8 @@ struct St<'a> {
     tier2: bool,
     /// 列ごとに最後に動かした手数 (age、`ENOMOTO_MIP_LMIP3` の `a` で同点を崩すのに使う)
     last: Vec<u64>,
+    /// lift の掃引で見た非零の数 (手の数に入らない重い部分。[`LocalMip::work_cap`] の数えに使う)
+    lift_work: u64,
 }
 
 impl ChainView for St<'_> {
@@ -362,6 +365,7 @@ impl St<'_> {
                 continue;
             }
             let (mut dl, mut du) = (self.lo[j] - self.x[j], self.up[j] - self.x[j]);
+            self.lift_work += self.p.cols[j].len() as u64 + 1;
             for &(r, b) in &self.p.cols[j] {
                 let (l, u) = (self.p.row_lo[r], self.p.row_up[r]);
                 let (sl, su) = (l - self.act[r], u - self.act[r]);
@@ -454,12 +458,6 @@ impl St<'_> {
     }
 }
 
-/// Local-MIP 風の局所探索で実行可能な点を探す。`lo`/`up` は列の境界、`time_cap` は秒、`stop` が立ったら止める。
-/// `on_sol` は実行可能解が良くなるたびに呼ぶ (別スレッドから本体へ渡す)。
-pub(super) fn local_mip(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>, on_sol: &dyn Fn(&[f64])) -> LocalMipResult {
-    local_mip_opts(p, lo, up, time_cap, seed, stop, on_sol, env_str!("ENOMOTO_MIP_LOCALMIP_CHAIN").is_some())
-}
-
 /// 途中で止めて続きから再開できる Local-MIP の探索 ([`LocalMip::run`])。FJ と時間を分け合うとき (`ENOMOTO_MIP_FJ_LMIP_MIX`) に使う。
 pub(super) struct LocalMip<'a> {
     s: St<'a>,
@@ -483,6 +481,16 @@ pub(super) struct LocalMip<'a> {
     c1: Cand1,
     /// `ENOMOTO_MIP_LMIP_SWAP` (試作) の集合分割の行の索引 (最初の `run` で作る。外側の None = まだ作っていない)
     swap: Option<Option<swap::SwapIdx>>,
+    /// 試作 `ENOMOTO_MIP_OBJTARGET` の `l`: 目的の行の上限を暫定解のすぐ下でなく T = U − α (U − L) に置く α
+    /// (0 なら既定と同じ)。最後の改善から `ENOMOTO_T_MIP_OBJTARGET_STEPS` 手よくならなければ半分にする
+    ot_alpha: f64,
+    /// 最後に暫定解が良くなってからの手の数 ([`Self::ot_alpha`] を下げる判定)
+    ot_since: u64,
+    /// 手の数の上限 (`run` の累計の手 `step`。既定は無制限。試作 `ENOMOTO_MIP_TPRE` の `pl` が使う)
+    pub step_cap: u64,
+    /// 手間の上限 (手の数 × 1 手の見当の手間 + lift の掃引で見た非零の数。既定は無制限。`pl` が使う。手の数だけでは、実行可能な点で毎回回る
+    /// lift の掃引が重い問題 (10teams: 15 秒で 2.7 万手) で止まらなかった)
+    pub work_cap: u64,
 }
 
 /// `ENOMOTO_MIP_LMIP1_CAND` (試作) の候補集めの作業域: 本家 v2 の `explore_unsat_mtm_bm` に合わせ、違反行を重複なしに
@@ -526,7 +534,7 @@ impl<'a> LocalMip<'a> {
         }
         let start: Vec<f64> = (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect();
         let obj_cols: Vec<(usize, f64)> = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
-        let mut s = St { p, lo: lb, up: ub, x: start.clone(), act: vec![0.0; m + 1], w: vec![1.0; m + 1], obj_up: f64::INFINITY, vset: Vec::new(), vpos: vec![usize::MAX; m + 1], tabu: vec![[0, 0]; n], rng: seed | 1, obj_cols, moves: 0, lift_d: Vec::new(), lift_at: u64::MAX, lift_mark: Vec::new(), tier2: false, last: vec![0; n] };
+        let mut s = St { p, lo: lb, up: ub, x: start.clone(), act: vec![0.0; m + 1], w: vec![1.0; m + 1], obj_up: f64::INFINITY, vset: Vec::new(), vpos: vec![usize::MAX; m + 1], tabu: vec![[0, 0]; n], rng: seed | 1, obj_cols, moves: 0, lift_d: Vec::new(), lift_at: u64::MAX, lift_mark: Vec::new(), tier2: false, last: vec![0; n], lift_work: 0 };
         s.reset();
         let set_of = if chain { set_rows(p, &s.lo, &s.up) } else { Vec::new() };
         Some(LocalMip {
@@ -548,6 +556,10 @@ impl<'a> LocalMip<'a> {
             done: false,
             c1: Cand1::default(),
             swap: None,
+            ot_alpha: if super::objtarget('l') { tunable!("ENOMOTO_T_MIP_OBJTARGET_ALPHA", 0.5, f64) } else { 0.0 },
+            ot_since: 0,
+            step_cap: u64::MAX,
+            work_cap: u64::MAX,
         })
     }
 
@@ -654,7 +666,23 @@ impl<'a> LocalMip<'a> {
         let c1_rows = tunable!("ENOMOTO_T_MIP_LMIP1_ROWS", 10usize, usize).max(1);
         let c1_ops = tunable!("ENOMOTO_T_MIP_LMIP1_OPS", 2250usize, usize).max(1);
         let c1_full = tunable!("ENOMOTO_T_MIP_LMIP1_FULL", 4.0, f64);
-        let LocalMip { s, res, start, lift_order, set_of, cand, buf, best_obj: best_obj_r, since_improve: since_r, round_best: round_r, restarts: restarts_r, step: step_r, chain_tries: tries_r, chain, t0, done: done_r, c1, swap } = self;
+        let LocalMip { s, res, start, lift_order, set_of, cand, buf, best_obj: best_obj_r, since_improve: since_r, round_best: round_r, restarts: restarts_r, step: step_r, chain_tries: tries_r, chain, t0, done: done_r, c1, swap, ot_alpha, ot_since, step_cap, work_cap } = self;
+        let step_cap = *step_cap;
+        let work_cap = *work_cap;
+        let ot_steps = tunable!("ENOMOTO_T_MIP_OBJTARGET_STEPS", 20_000u64, u64).max(1);
+        // 目的の行の上限: 既定は「最良 − 刻み」。`OBJTARGET` の `l` で下界 L (根の LP、外側の目的値から定数項を引く) が分かり、最良より下なら
+        // 「最良 − max(刻み, α (最良 − L))」。目標に届かなくても、目的の行のほかを満たす点は解として記録する (下の nviol は目的の行を除く)
+        let ot_up = |best: f64, alpha: f64, ostep: f64, p: &MipProblem| -> f64 {
+            if alpha > 0.0 {
+                if let Some((l, _)) = super::objtarget_bounds() {
+                    let l = l - p.offset;
+                    if l < best {
+                        return best - ostep.max(alpha * (best - l));
+                    }
+                }
+            }
+            best - ostep
+        };
         // `ENOMOTO_MIP_LMIP_SWAP` (試作、既定では使わない): 集合分割の行の中で 1 を立てる列を入れ替える組の手を候補に足す ([`swap`])
         let swap_rows = tunable!("ENOMOTO_T_MIP_LMIP_SWAP_ROWS", 2usize, usize);
         let (swap_cols, swap_partners) = (tunable!("ENOMOTO_T_MIP_LMIP_SWAP_COLS", 16usize, usize).max(1), tunable!("ENOMOTO_T_MIP_LMIP_SWAP_PARTNERS", 4usize, usize));
@@ -668,13 +696,20 @@ impl<'a> LocalMip<'a> {
         }
         let (mut best_obj, mut since_improve, mut round_best, mut restarts, mut step, mut chain_tries, mut done) = (*best_obj_r, *since_r, *round_r, *restarts_r, *step_r, *tries_r, false);
         let (start, lift_order, set_of, cand, buf) = (&*start, lift_order, &*set_of, cand, buf);
+        let mut lift_counted = s.lift_work;
         loop {
             step += 1;
             // 止める合図と時間は 16 手ごとに見る (連鎖の手は 1 手が重く、256 手ごとでは mzzv42z で 2 秒ほど遅れて時間の上限を超えた)
             if step % 16 == 0 {
                 // 手間の単位 ([`crate::ticks`]): 1 手 = (行の平均の長さ + 列の平均の長さ) x 見る列の数 (の見当)
                 crate::ticks::add(crate::ticks::HEUR, 16 * step_work);
-                if crate::ticks::over() || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+                // 門の付いたスレッド (試作 `ENOMOTO_MIP_TPRE` の `g` など) では lift の掃引の手間も数える (数えないと手間の進みが壁時計より
+                // ずっと遅く見え、門で主が待つ。10teams で 1 手 0.5 ms のうち大半が掃引)。門のないスレッドの数えは変えない
+                if crate::ticks::has_gate() {
+                    crate::ticks::add(crate::ticks::HEUR, s.lift_work - lift_counted);
+                    lift_counted = s.lift_work;
+                }
+                if crate::ticks::over() || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) || step >= step_cap || step.saturating_mul(step_work).saturating_add(s.lift_work) >= work_cap {
                     break;
                 }
             }
@@ -693,7 +728,7 @@ impl<'a> LocalMip<'a> {
                     let mut sweeps = 0u32;
                     while s.lift_sweep(lift_order, step) > 0 {
                         sweeps += 1;
-                        if sweeps >= 1000 || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+                        if sweeps >= 1000 || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) || s.lift_work >= work_cap {
                             if debug || env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
                                 eprintln!("MIP:   [localmip] lift sweeps stopped after {sweeps} sweeps (step {step})");
                             }
@@ -720,6 +755,7 @@ impl<'a> LocalMip<'a> {
                 }
                 if !best_obj.is_finite() || z < best_obj - 1e-9 * best_obj.abs().max(1.0) {
                     best_obj = z;
+                    *ot_since = 0;
                     res.best = Some(s.x.clone());
                     on_sol(&s.x);
                     res.first_time.get_or_insert(t0.elapsed().as_secs_f64());
@@ -729,7 +765,7 @@ impl<'a> LocalMip<'a> {
                     }
                 }
                 let ostep = super::heuristics::ls_obj_step_pub(p, best_obj);
-                s.obj_up = best_obj - ostep;
+                s.obj_up = ot_up(best_obj, *ot_alpha, ostep, p);
                 if s.obj_cols.is_empty() {
                     done = true;
                     break;
@@ -745,6 +781,20 @@ impl<'a> LocalMip<'a> {
             }
             if nviol < res.least_viol {
                 res.least_viol = nviol;
+            }
+            // `OBJTARGET` の `l`: 目標の下で `ot_steps` 手よくならなければ α を半分にして目的の行を緩める (1/64 未満で既定の「最良 − 刻み」)
+            if *ot_alpha > 0.0 && best_obj.is_finite() {
+                *ot_since += 1;
+                if *ot_since > ot_steps {
+                    *ot_since = 0;
+                    *ot_alpha = if *ot_alpha < 1.0 / 64.0 { 0.0 } else { 0.5 * *ot_alpha };
+                    let ostep = super::heuristics::ls_obj_step_pub(p, best_obj);
+                    s.obj_up = ot_up(best_obj, *ot_alpha, ostep, p);
+                    s.set_viol(m);
+                    if debug {
+                        eprintln!("MIP:   [localmip] OBJTARGET: alpha {} (obj_up {:.6e}, best {best_obj:.6e})", *ot_alpha, s.obj_up);
+                    }
+                }
             }
             if nviol < round_best {
                 round_best = nviol;
@@ -1284,7 +1334,25 @@ pub(super) trait ChainView {
     }
 }
 
-/// 連鎖の手 (`ENOMOTO_MIP_LOCALMIP_CHAIN`・`ENOMOTO_MIP_FJ_CHAIN`、試作): 違反行 `i` の tight move から始め、その手で新たに
+thread_local! {
+    /// 連鎖の手の手間 (`effort`) を手間の単位 ([`crate::ticks`]) に数えるか ([`count_chain_guard`])。`ENOMOTO_MIP_TICKS` の `j` (手間の時計) でなくても
+    /// 手間の上限で止める呼び出し側 (前処理・根の後の早めの探索の 1 スレッド、`ENOMOTO_MIP_TICKS` の `f`) が真にする
+    static COUNT_CHAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`COUNT_CHAIN`] を真にし、戻り値を落とすと元に戻す。数えなかった版では Local-MIP の手間が連鎖の手の分だけ抜け、実時間の 1/8 程度にしか
+/// ならない問題があった (neos859080: 46 秒を 5.5 秒と数え、上限 6 秒の早めの探索が 46 秒回った。analysis/hang_20261117/README.md)
+pub(crate) fn count_chain_guard() -> impl Drop {
+    struct G(bool);
+    impl Drop for G {
+        fn drop(&mut self) {
+            COUNT_CHAIN.with(|c| c.set(self.0));
+        }
+    }
+    G(COUNT_CHAIN.with(|c| c.replace(true)))
+}
+
+/// 連鎖の手 (`ENOMOTO_MIP_FJ_CHAIN`・FJ のスレッドの Local-MIP、試作。Local-MIP の別スレッドで使う試作 `ENOMOTO_MIP_LOCALMIP_CHAIN` は 2026-11-18 に削除): 違反行 `i` の tight move から始め、その手で新たに
 /// 悪くなった行 (等式を先に、同じなら重みの大きい方) を元に戻す手 (その行の 1 列の tight move か、その行の 1 の 0-1 列を
 /// 集合分割の行の中の 0 の列と入れ替える 2 列の手) を次々に足す (ejection chain)。途中でスコアの合計が最良だった所までの
 /// 手を返す (正のときだけ)。`set_of` は 0-1 列ごとの集合分割 (パッキング) の行。3 つ目は評価で触った非零の数 (手間)。
@@ -1303,7 +1371,7 @@ pub(super) fn chain_move<V: ChainView + ?Sized>(v: &mut V, i: usize, max_depth: 
     let use_abort = env_str!("ENOMOTO_MIP_NO_CHAIN_ABORT").is_none();
     // 試作 `ENOMOTO_MIP_TICKS` の `j` (手間の時計): 打ち切りを見るたびに、その間の手数 (`effort`) × `ENOMOTO_T_MIP_CHAIN_EFFORT_TICKS` (4) を
     // ヒューリスティクスの手間に足す (連鎖の手の探索は他に手間を数えない)
-    let vc = crate::ticks::vclock();
+    let vc = crate::ticks::vclock() || COUNT_CHAIN.with(|c| c.get());
     let effort_seen = std::cell::Cell::new(0u64);
     let chain_k = tunable!("ENOMOTO_T_MIP_CHAIN_EFFORT_TICKS", 4u64, u64);
     let aborted = |evals: &mut u32, effort: u64| {

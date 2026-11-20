@@ -1,5 +1,5 @@
-//! LP 求解の最上位の振り分け。`root_solver` (`types::RootSolver`、Python の
-//! `Model.solve(root_solver=...)`) で選ばれたエンジンに LP を渡し、
+//! LP 求解の最上位の振り分け。`lp_solver` (`types::RootSolver`、Python の
+//! `Model.solve(lp_solver=...)`) で選ばれたエンジンに LP を渡し、
 //! 得られた解から目的関数値 (定数項込み) を計算して `SolveResult` にまとめる。
 //! 既定は `Auto` (スレッドが 2 本以上なら傾き・切片二段解法と内点法 + クロスオーバーを同時に解き、1 本なら
 //! 傾き・切片二段解法)。`Simplex`、`IpmCrossover`、`Interior` (IP-PMM 内点法、前処理も独立) は明示指定時。

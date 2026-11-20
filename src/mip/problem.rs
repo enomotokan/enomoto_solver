@@ -306,7 +306,9 @@ impl MipProblem {
         }
     }
 
-    /// `ENOMOTO_MIP_IMPLINT_TU` (試作、既定では使わない): `base` (整数列と [`Self::implied_integers`] の印) に加えて、連続列の部分が
+    /// 旧版の TU の規則 (試作 `ENOMOTO_MIP_IMPLINT_TU` は 2026-11-18 に削除。analysis/implint_tu_20261110.md で +164%、analysis/cleanup_20261118/。
+    /// 今は `ENOMOTO_MIP_IMPLINT_TU2` の診断 `ENOMOTO_MIP_DEBUG_IMPLINTCOUNT` の比べ ([`super::implint_tu::debug_count`]) だけが使う):
+    /// `base` (整数列と [`Self::implied_integers`] の印) に加えて、連続列の部分が
     /// 完全単模 (TU) になる連続列の集まりをまとめて暗に整数とする。整数列を整数値に固定すると、残りの連続列の制約は
     /// 「TU の行列 x_C ∈ 整数の区間」になり、その多面体の頂点は整数なので、整数の最適解がある (カット生成で整数として扱える)。
     /// 候補は境界が整数か無限の連続列。行ごとに、最初の候補の係数の絶対値で割ると、候補の係数が ±1、(暗に) 整数の列の係数と

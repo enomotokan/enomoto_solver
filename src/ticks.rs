@@ -31,6 +31,27 @@ thread_local! {
     /// [`Gate`]: このスレッドの手間の門 (あれば [`over`] の中で許された手間まで止まって待つ)
     static GATE: std::cell::RefCell<Option<std::sync::Arc<Gate>>> = const { std::cell::RefCell::new(None) };
     static HAS_GATE: Cell<bool> = const { Cell::new(false) };
+    /// [`ipm_work`]: 内点法の反復の手間を数えて期限で止めるか
+    static IPM_WORK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 試作 `ENOMOTO_MIP_DET1T` の `i`: このスレッドの内点法 (`solve_box_lp`) が、反復ごとに KKT の分解の演算数を手間 ([`HEUR`]) に足し、
+/// 手間の期限 ([`over`]) を過ぎたら止めるか ([`ipm_work_guard`] の間だけ真)
+pub fn ipm_work() -> bool {
+    IPM_WORK.with(|v| v.get())
+}
+
+/// [`ipm_work`] を真にし、捨てるときに元に戻す見張り
+pub struct IpmWorkGuard(bool);
+
+pub fn ipm_work_guard() -> IpmWorkGuard {
+    IpmWorkGuard(IPM_WORK.with(|v| v.replace(true)))
+}
+
+impl Drop for IpmWorkGuard {
+    fn drop(&mut self) {
+        IPM_WORK.with(|v| v.set(self.0));
+    }
 }
 
 fn weights() -> &'static [f64; NK] {
@@ -63,6 +84,24 @@ pub fn total() -> f64 {
     RAW.with(|r| (0..NK).map(|k| w[k] * r[k].get() as f64).sum())
 }
 
+thread_local! {
+    /// 診断用の手間 ([`diag_add`]): 合計 [`total`] にも期限にも入れない (既定の道筋を変えない)
+    static DIAG: Cell<u64> = const { Cell::new(0) };
+}
+
+/// 診断用の手間を `n` 足す (分離 [`SEP`] の単位、`ENOMOTO_MIP_SEPSTAT` の分離器ごとの手間に使う。analysis/sepeff_20261120/)。
+/// [`total`] に入らないので、手間の期限・時計は変わらない。今まで手間を数えていなかった分離器 (zero-half・clique など) が使う
+#[inline]
+pub fn diag_add(n: u64) {
+    DIAG.with(|c| c.set(c.get().wrapping_add(n)));
+}
+
+/// このスレッドの [`total`] + 診断用の手間 ([`diag_add`]) (診断用)。診断用の手間の 1 単位は `ENOMOTO_T_TICKS_W_DIAG` (既定 2、
+/// 単位はビット列の 1 語の xor・隣接の 1 要素ほどの軽い操作で、seymour・nw04 の根で zero-half・implied bound・clique の時間とおよそ合う)
+pub fn total_with_diag() -> f64 {
+    total() + tunable!("ENOMOTO_T_TICKS_W_DIAG", 2.0, f64) * DIAG.with(|c| c.get()) as f64
+}
+
 /// このスレッドの部分ごとの手間 (診断用)。
 pub fn raw() -> [u64; NK] {
     RAW.with(|r| std::array::from_fn(|k| r[k].get()))
@@ -75,6 +114,11 @@ pub fn add_raw(d: &[u64; NK]) {
             r[k].set(r[k].get().wrapping_add(d[k]));
         }
     });
+}
+
+/// このスレッドに手間の門が付いているか ([`install_gate`])
+pub fn has_gate() -> bool {
+    HAS_GATE.with(|g| g.get())
 }
 
 /// このスレッドの手間の期限 (重み付きの合計) を過ぎたか (期限がなければ偽)。

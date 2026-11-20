@@ -11,7 +11,7 @@
 //!   - `presolve` (+ `presolve/*`) — 前処理 (スケーリング、冗長行の除去、制約伝播、
 //!     各種の変数消去) と、その後処理 (消去した変数の値の復元)。
 //!   - `interior_point` (+ `qp`, `kkt`) — IP-PMM 内点法。既定では使われず、
-//!     `Model.solve(root_solver="interior")` を指定したときだけ呼ばれる。
+//!     `Model.solve(lp_solver="interior")` を指定したときだけ呼ばれる。
 //!   - `sparse` — 疎行列 (CSR/CSC)・疎ベクトル・疎アキュムレータなど疎データ構造の一式。
 //!   - `graph` — 二部マッチング・強連結成分分解などのグラフアルゴリズム。
 //!   - `params` — 閾値・許容誤差・反復上限などの調整用定数をすべて集約したもの。
@@ -32,8 +32,9 @@ macro_rules! tunable {
 }
 
 thread_local! {
-    /// Feasibility Jump 用の問題を作る前処理の中か (`ENOMOTO_MIP_FJ_P3`、試作): このスレッドだけで `ENOMOTO_MIP_INEQ_SINGLETON`・
-    /// `ENOMOTO_MIP_CS_OBJ_PIVOT`・`ENOMOTO_MIP_FJ_LP_REPAIR` を有効とみなす
+    /// Feasibility Jump 用の問題を作る前処理の中か (`ENOMOTO_MIP_FJ_P3`、既定): このスレッドだけで不等式行の列シングルトン・
+    /// 目的を定める連続列の消去・FJ の点の LP 修復・双対の推論による境界の締め付けを使う (それぞれを全体で使う試作
+    /// `ENOMOTO_MIP_INEQ_SINGLETON`・`_CS_OBJ_PIVOT`・`_FJ_LP_REPAIR`・`_DUAL_UB` は 2026-11-18 に削除)
     static FJ_P3_FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -90,6 +91,7 @@ mod log;
 mod interior_point;
 mod mip;
 mod model;
+mod mps;
 mod params;
 mod phase_timing;
 mod presolve;

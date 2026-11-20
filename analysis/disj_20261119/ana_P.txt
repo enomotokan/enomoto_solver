@@ -1,0 +1,65 @@
+回: 116、最初のループが停滞 49、どれかのループが停滞 60
+問題: 58、少なくとも 1 種で最初のループが停滞 25、全種で停滞 24
+停滞かつ残りギャップ > 10% (少なくとも 1 種): 21
+
+problem                理由(種1/種2)                                  rem   nfrac/nint     t_root/t_all 状態                   nodes
+pk1                    stall / stall                        1.00 1.00    20 20 /55    0.1/17 0.1/15 optimal optimal      203282 180508
+markshare_4_0          stall / stall                        1.00 1.00      5 5 /30      0.1/2 0.1/3 optimal optimal      211411 290207
+noswot                 stall / stall,round_limit            1.00 1.00    77 44 /95    0.1/33 0.1/47 optimal optimal      69184 109013
+bppc4-08               stall / stall                        1.00 1.00  64 74 /1454    1.2/60 1.0/60 time_limi time_limi  45803 40593
+graph20-20-1rand       stall / stall                        1.00 1.00 140 140 /425      0.1/6 0.1/7 optimal optimal      3667 3618
+misc07                 intobj_stall / intobj_stall          0.99 0.99   16 16 /232      0.0/3 0.0/3 optimal optimal      6445 6857
+gen-ip054              stall / stall                        0.96 0.96    20 20 /30    0.1/60 0.1/60 time_limi time_limi  687346 685344
+gen-ip002              stall / stall                        0.95 0.95    25 25 /41    0.1/60 0.1/60 time_limi time_limi  424885 426976
+ran14x18-disj-8        stall,round_limit,round_limit / st   0.91 0.92   70 71 /252    4.7/60 4.3/60 time_limi time_limi  15870 14141
+rout                   stall / stall                        0.91 0.92   56 60 /315      0.6/6 0.6/6 optimal optimal      7216 3682
+mas74                  round_limit,stall,round_limit / st   0.91 0.91   19 23 /149    0.3/60 0.4/60 time_limi time_limi  857550 771977
+eil33-2                stall / stall                        0.91 0.91  36 36 /4516    2.8/23 2.8/23 optimal optimal      6910 7360
+30n20b8                stall / stall                        0.91 0.91 279 279 /4750    8.0/60 7.6/60 time_limi time_limi  1112 1268
+mas76                  stall,stall / stall,stall            0.88 0.87   20 19 /149     0.2/8 0.2/12 optimal optimal      118329 165539
+swath1                 stall,round_limit / stall,stall      0.83 0.86  14 15 /2090    6.4/16 4.2/23 optimal optimal      223 5588
+flugpl                 stall / stall                        0.85 0.85       7 7 /9      0.1/0 0.1/0 optimal optimal      79 79
+neos-1456979           intobj_stall / intobj_stall          0.51 0.73 283 192 /4420    2.6/60 1.1/60 time_limi time_limi  5892 5587
+binkar10_1             stall / stall                        0.51 0.51   76 76 /170      0.3/6 0.3/5 optimal optimal      4125 3187
+neos-911970            stall,round_limit,round_limit,roun   0.11 0.19  90 100 /840    1.0/22 0.8/18 optimal optimal      9984 14086
+neos-3083819-nubu      stall,stall / stall,stall            0.14 0.14  60 60 /3883      0.8/5 0.9/5 optimal optimal      935 701
+nu25-pr12              intobj_stall,stall / intobj_stall,   0.14 0.14 105 105 /4730      0.9/4 0.9/4 optimal optimal      13 13
+
+停滞・残りギャップ <= 10% (またはギャップ 0): drayage-25-23(0.00 0.00), neos-960392(- -), khb05250(0.00 0.00), 10teams(0.00 0.00)
+
+根のループの時間 / 求解全体: 中央値 0.141、平均 0.236、合計の比 273/2374 = 0.115
+  停滞: 49 回、割合の中央値 0.047、合計の比 0.054
+  停滞でない: 67 回、割合の中央値 0.223、合計の比 0.170
+
+解けない (60 秒で時間切れ) か 10 秒以上かかる問題: 29
+  h80x6320d                   理由 round_limit,stall / round_limit,stall,st rem 0.03 0.02 状態 opti26 opti30 t_root 7.0 13.8
+  hypothyroid-k1              理由 gap_closed / gap_closed                  rem 0.00 0.00 状態 opti20 opti20 t_root 10.2 10.1
+  mc11                        理由 phase2_time,stall / round_limit          rem 0.01 0.05 状態 opti34 opti19 t_root 6.0 0.9
+  mzzv42z                     理由 time_cap,stall / time_cap,stall          rem 0.18 0.18 状態 time60 time60 t_root 10.1 10.4
+  neos-860300                 理由 round_limit,round_limit,round_limit,gap_ rem 0.00 0.00 状態 opti18 opti19 t_root 7.1 7.1
+  neos-911970            停滞 理由 stall,round_limit,round_limit,round_limi rem 0.11 0.19 状態 opti22 opti18 t_root 1.0 0.8
+  physiciansched6-2           理由 time_cap / time_cap                      rem 0.00 0.00 状態 opti28 opti27 t_root 15.4 15.8
+  roll3000                    理由 round_limit,round_limit / round_limit,ro rem 0.22 0.18 状態 opti31 opti34 t_root 3.1 3.3
+  swath1                 停滞 理由 stall,round_limit / stall,stall          rem 0.83 0.86 状態 opti16 opti23 t_root 6.4 4.2
+  gen-ip002              停滞 理由 stall / stall                            rem 0.95 0.95 状態 time60 time60 t_root 0.1 0.1
+  gen-ip054              停滞 理由 stall / stall                            rem 0.96 0.96 状態 time60 time60 t_root 0.1 0.1
+  pk1                    停滞 理由 stall / stall                            rem 1.00 1.00 状態 opti17 opti15 t_root 0.1 0.1
+  mas74                  停滞 理由 round_limit,stall,round_limit / stall,st rem 0.91 0.91 状態 time60 time60 t_root 0.3 0.4
+  mas76                  停滞 理由 stall,stall / stall,stall                rem 0.88 0.87 状態 opti8 opti12 t_root 0.2 0.2
+  neos5                       理由 round_limit / round_limit                rem 0.78 0.79 状態 opti40 opti49 t_root 0.2 0.2
+  10teams                停滞 理由 intobj_stall,round_limit / intobj_stall  rem 0.00 0.00 状態 opti16 opti7 t_root 1.6 1.1
+  noswot                 停滞 理由 stall / stall,round_limit                rem 1.00 1.00 状態 opti33 opti47 t_root 0.1 0.1
+  qiu                         理由 no_cands / no_cands                      rem 0.98 0.98 状態 opti15 opti13 t_root 1.0 1.1
+  30n20b8                停滞 理由 stall / stall                            rem 0.91 0.91 状態 time60 time60 t_root 8.0 7.6
+  eil33-2                停滞 理由 stall / stall                            rem 0.91 0.91 状態 opti23 opti23 t_root 2.8 2.8
+  nw04                        理由 lp_integral / lp_integral                rem 0.00 0.00 状態 opti16 opti16 t_root 9.5 9.3
+  assign1-5-8                 理由 round_limit / round_limit                rem 0.92 0.92 状態 time60 time60 t_root 0.9 1.0
+  blp-ar98                    理由 round_limit / round_limit                rem 0.48 0.58 状態 time60 time60 t_root 15.4 12.4
+  ran14x18-disj-8        停滞 理由 stall,round_limit,round_limit / stall,ro rem 0.91 0.92 状態 time60 time60 t_root 4.7 4.3
+  supportcase26               理由 round_limit,round_limit,round_limit,roun rem 0.85 0.82 状態 time60 time60 t_root 2.3 1.6
+  timtab1                     理由 round_limit,round_limit,round_limit / ph rem 0.26 0.25 状態 opti22 opti22 t_root 2.0 1.7
+  bppc4-08               停滞 理由 stall / stall                            rem 1.00 1.00 状態 time60 time60 t_root 1.2 1.0
+  cvs16r128-89                理由 no_cands / no_cands                      rem 0.96 0.96 状態 time60 time60 t_root 3.7 3.5
+  neos-1456979           停滞 理由 intobj_stall / intobj_stall              rem 0.51 0.73 状態 time60 time60 t_root 2.6 1.1
+解けない (60 秒): 12 問、うち停滞 7、うち停滞かつ残りギャップ > 10% 7: gen-ip002, gen-ip054, mas74, 30n20b8, ran14x18-disj-8, bppc4-08, neos-1456979
+解けるが 10 秒以上: 17 問、うち停滞 7、うち停滞かつ残りギャップ > 10% 6: neos-911970, swath1, pk1, mas76, noswot, eil33-2

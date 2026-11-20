@@ -1,6 +1,8 @@
 //! SCIP 由来の主ヒューリスティクス (Crossover・DINS・locks・clique・vbounds) と解のプール。
 
 use super::cuts::VarBounds;
+use super::domain::Domain;
+use super::problem::MipProblem;
 use super::domain::FEASTOL;
 use super::lp_api::MipLp;
 use super::solver::Solver;
@@ -217,8 +219,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     fn locks_heur_with(&mut self, stop_rate: f64) -> bool {
         let p = self.p;
-        // `ENOMOTO_MIP_SUBMIP_NESTED` の `l` なら深さ 1 のサブ MIP の中でも ([`Self::submip_nested`])
-        if self.params.submip && !self.submip_nested('l') {
+        if self.params.submip {
             return false;
         }
         let mut order: Vec<(u32, usize)> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).map(|j| (self.locks[j].0 + self.locks[j].1, j)).collect();
@@ -241,8 +242,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 固定率が 3 割以上ならサブ MIP を解く。`x` は根の LP 解。
     pub(super) fn clique_heur(&mut self, x: &[f64]) -> bool {
         let p = self.p;
-        // `ENOMOTO_MIP_SUBMIP_NESTED` の `c` なら深さ 1 のサブ MIP の中でも ([`Self::submip_nested`])
-        if self.params.submip && !self.submip_nested('c') {
+        if self.params.submip {
             return false;
         }
         let binary = |j: usize| p.is_int[j] && self.dom.global_lo[j] == 0.0 && self.dom.global_up[j] == 1.0;
@@ -280,8 +280,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 固定率が 3 割以上ならサブ MIP を解く。
     pub(super) fn vbounds_heur(&mut self, loose: bool) -> bool {
         let p = self.p;
-        // `ENOMOTO_MIP_SUBMIP_NESTED` の `v` なら深さ 1 のサブ MIP の中でも ([`Self::submip_nested`])
-        if self.params.submip && !self.submip_nested('v') {
+        if self.params.submip {
             return false;
         }
         let vb = VarBounds::from_rows(p.n, &p.is_int, &p.rows, &p.row_lo, &p.row_up);
@@ -307,6 +306,64 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         self.fix_then_submip(&fixes, 1.0, 0.3, if loose { "vbounds (loose)" } else { "vbounds (tight)" })
+    }
+
+    /// 試作 `ENOMOTO_MIP_VB01` (既定では使わない。analysis/vb01_20261120/README.md): 0-1 列どうしの含意を使う vbounds
+    /// (SCIP の heur_vbounds がクリーク表を変数上下限のグラフに入れる形をなぞる)。衝突グラフ ([`Self::clique_graph_get`]、行から作る組と
+    /// 前処理の含意) の辺 a—b (同時には真にならない文字) を含意 a ⇒ ¬b と読む。境界の節点 (文字 `2j` = `x_j` の下限を 1 に上げる、
+    /// `2j+1` = 上限を 0 に下げる) の逆向きのグラフ (a の後続は a を導く文字 = ¬a の隣) を、節点の番号の順に深さ優先でたどった帰りがけ順
+    /// (SCIP の topologicalSort と同じ。辺のない節点だけの木は入れない) に、締める型では節点の境界を動かす側 (文字を真)、緩める型では
+    /// 動かさない側 (文字を偽) に固定して伝播する。矛盾したら直前の列を反対の値にし、それも矛盾すればその型はやめる (反対にした回数が
+    /// 10 を超えたら固定をやめる)。固定率が 0.65 以上ならサブ MIP (LP から) を解く。型の順は SCIP の既定と同じ: 緩める型の目的の良い側だけ・
+    /// 悪い側だけ、締める型の目的を見ない・良い側だけ・悪い側だけ (費用 >= 0 なら 0 が良い側。目的で選ばない列は固定せず残す)。
+    /// 手間: グラフの辺の数に比例する並べ替えと、型ごとの伝播 (`fix_then_submip` と同じ手間の上限) とサブ MIP (500 ノード)。
+    pub(super) fn vbounds01_heur(&mut self) -> bool {
+        let p = self.p;
+        if self.params.submip {
+            return false;
+        }
+        let g = self.clique_graph_get();
+        let fb: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0).collect();
+        let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
+        let cliques = if vb01_clq() { vb01_cliques(p, &self.dom.lo, &self.dom.up, &fb) } else { Default::default() };
+        let order = vb01_order(&g, &fb, &cliques);
+        // SCIP: 節点の数が整数列の数 × 0.65 に届かなければ使わない
+        if ints.is_empty() || (order.len() as f64) < 0.65 * ints.len() as f64 {
+            if self.params.verbose && self.nodes <= 1 {
+                eprintln!("MIP:   VB01: {} bound nodes in the implication graph < 0.65 x {} free integer columns: not used", order.len(), ints.len());
+            }
+            return false;
+        }
+        // 前処理の含意 (`conflict_edges`) も伝播に使う (写しの定義域で固定する)
+        let mut dom = self.dom.clone();
+        if !p.conflict_edges.is_empty() {
+            dom.add_implications(p.n, &p.conflict_edges);
+            if !dom.propagate(p) {
+                return false;
+            }
+        }
+        let mut found = false;
+        let (mut skip1, mut skip2) = (false, false);
+        for (tight, obj) in VB01_VARIANTS {
+            if self.time_up() || (obj == 1 && skip1) || (obj == 2 && skip2) {
+                continue;
+            }
+            let deadline = self.deadline;
+            let stop = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
+            let (bounds, all1, all2, log) = vb01_fix_dom(p, &mut dom, &order, tight, obj, &ints, &stop);
+            if self.params.verbose && self.nodes <= 1 {
+                eprintln!("MIP:   {log}");
+            }
+            if obj == 0 {
+                // 目的を見ない型の固定がすべて良い側 (悪い側) だったら、その型は同じなので回さない (SCIP の skipobj)
+                skip1 = all1;
+                skip2 = all2;
+            }
+            if let Some((lo, up)) = bounds {
+                found |= self.solve_submip(lo, up, 500);
+            }
+        }
+        found
     }
 
     /// minimum relaxation (違反量を最小にする補助 MIP、Gurobi の feasRelax と同じ考え): 各行に違反量の非負の列
@@ -420,11 +477,84 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             return false;
         }
+        // 試作 `ENOMOTO_MIP_LPFACE` (既定では使わない、analysis/scip_rens_20261120): SCIP の heur_lpface の形
+        // (目的値 = LP の下界の等式を足し、面の上の実行可能解だけを探す)
+        if let Some(v) = env_str!("ENOMOTO_MIP_LPFACE").filter(|v| !v.is_empty() && *v != "0") {
+            return self.lp_face_obj(lo, up, nfix, nint, v);
+        }
         let r = self.solve_submip(lo, up, 500);
         if self.params.verbose && self.nodes <= 1 {
             eprintln!("MIP:   LP face: {nfix} of {nint} integer columns fixed, found {r}");
         }
         r
+    }
+
+    /// 試作 `ENOMOTO_MIP_LPFACE=<文字の並び>` の LP face のサブ MIP。`lo`・`up` は面の固定の後の境界。
+    /// 目的値の行 c·x ≤ z̄ (z̄ は今の LP の値を目的値の刻みに切り上げたもの) を足し、打ち切り値も z̄ のすぐ上にする
+    /// (z̄ は根の下界なので、見つかる解は最適)。
+    /// - `c`: この形を使う (目的は元のまま)
+    /// - `z`: サブ MIP の目的を 0 にする (SCIP の既定 `subscipobjective = z`。最初の実行可能解で止まる)
+    /// - `f`: 根で LP face を根の被約費用のサブ MIP より先に回す (solver.rs の根のヒューリスティクスの並び)
+    /// - `r` (`c` と使う): 行のサブ MIP が解なしなら、行を外した今の LP face を残りのノードで解き直す (z̄ が最適値に届かない問題で
+    ///   LP face の解を消さないため。neos-1582420 は根の下界 89.3・z̄ 90・最適 91 で、行なしの LP face が見つける 92 が消えていた)
+    fn lp_face_obj(&mut self, lo: Vec<f64>, up: Vec<f64>, nfix: usize, nint: usize, v: &str) -> bool {
+        let p = self.p;
+        let z = self.lp.objective() + p.offset;
+        // 目的値の刻みがあれば切り上げ、打ち切り値は刻みの半分の上。なければ相対 1e-6 の上
+        let (zbar, cut) = match self.obj_step {
+            Some(s) if s > 0.0 => {
+                let zb = p.offset + ((z - p.offset) / s - 1e-6).ceil() * s;
+                (zb, zb + 0.5 * s)
+            }
+            _ => (z, z + 1e-6 * z.abs().max(1.0)),
+        };
+        let mut sub = p.clone();
+        sub.col_lo = lo;
+        sub.col_up = up;
+        let objrow: Vec<(usize, f64)> = (0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
+        let mut rows = std::mem::take(&mut sub.rows);
+        let mut row_lo = std::mem::take(&mut sub.row_lo);
+        let mut row_up = std::mem::take(&mut sub.row_up);
+        let objrow_empty = objrow.is_empty();
+        if !objrow_empty {
+            rows.push(objrow);
+            row_lo.push(f64::NEG_INFINITY);
+            row_up.push(cut - p.offset);
+        }
+        let zero = v.contains('z');
+        let cost = if zero { vec![0.0; p.n] } else { std::mem::take(&mut sub.cost) };
+        let mut s2 = super::problem::MipProblem::from_rows(std::mem::take(&mut sub.col_lo), std::mem::take(&mut sub.col_up), cost, if zero { 0.0 } else { sub.offset }, sub.sense_sign, std::mem::take(&mut sub.is_int), rows, row_lo, row_up);
+        s2.conflict_edges = std::mem::take(&mut sub.conflict_edges);
+        s2.implied_bounds = std::mem::take(&mut sub.implied_bounds);
+        let cutoff = if zero { f64::INFINITY } else { cut.min(self.prune_limit()) };
+        // `r`: 行のサブ MIP が解なし (面の上に z̄ 以下の解はない) なら、同じ固定で行を外し (今の LP face と同じ問題)、
+        // 残りのノード (500 − 使ったノード) で解き直す。並列のときはサブ MIP のスレッドの中で続ける ([`Solver::spawn_submip`])
+        let fb = v.contains('r') && !zero && !objrow_empty;
+        let fb_row = p.m;
+        let keep = (fb && !self.parallel_submips).then(|| s2.clone());
+        if fb && self.parallel_submips {
+            self.submip_lpface_fb = Some((fb_row, self.prune_limit()));
+        }
+        let r = self.solve_submip_problem(s2, 500, Some(cutoff));
+        self.submip_lpface_fb = None;
+        let mut found = r.as_ref().is_some_and(|r| r.1);
+        if self.params.verbose && self.nodes <= 1 {
+            eprintln!("MIP:   LP face ({v}): {nfix} of {nint} integer columns fixed, objective row <= {zbar:.6e} (LP {z:.6e}), status {:?}, found {found}", r.map(|r| r.0));
+        }
+        lpface_count(&format!("row {:?} {found}", r.map(|r| r.0)));
+        if let (Some(mut s3), Some((super::solver::MipStatus::Infeasible, _))) = (keep, r) {
+            let used = self.last_submip_nodes;
+            if used < 500 && !self.time_up() {
+                s3.row_up[fb_row] = f64::INFINITY;
+                let r2 = self.solve_submip_problem(s3, 500 - used, None);
+                found = r2.as_ref().is_some_and(|r| r.1);
+                if self.params.verbose && self.nodes <= 1 {
+                    eprintln!("MIP:   LP face (r): objective row infeasible after {used} nodes; without the row: status {:?}, found {found}", r2.map(|r| r.0));
+                }
+                lpface_count(&format!("fb {:?} {found}", r2.map(|r| r.0)));
+            }
+        }
+        found
     }
 
     /// 局所探索 ([`super::heuristics::local_search`]) を根で回す。見つからなければ、違反の最小だった点を
@@ -611,5 +741,332 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let ints: Vec<usize> = (0..n).filter(|&j| p.is_int[j]).collect();
         self.fix_and_propagate(&x, &ints)
+    }
+}
+
+/// 試作 `ENOMOTO_MIP_VB01` の `c`: 位相順に行のクリーク ([`vb01_cliques`]) も使う (衝突グラフで落ちる長い集合分割・詰め込みの行を入れる)
+fn vb01_clq() -> bool {
+    env_str!("ENOMOTO_MIP_VB01").is_some_and(|v| v.contains('c'))
+}
+
+/// [`Solver::vbounds01_heur`] の型 (締めるか, 目的: 0 見ない・1 良い側だけ・2 悪い側だけ)。SCIP の既定 (feasvariant 6・tightenvariant 7) の順。
+const VB01_VARIANTS: [(bool, u8); 5] = [(false, 1), (false, 2), (true, 0), (true, 1), (true, 2)];
+
+fn vb01_label(tight: bool, obj: u8) -> &'static str {
+    match (tight, obj) {
+        (true, 0) => "VB01 (tight)",
+        (true, 1) => "VB01 (tight, best)",
+        (true, _) => "VB01 (tight, worst)",
+        (false, 1) => "VB01 (loose, best)",
+        (false, _) => "VB01 (loose, worst)",
+    }
+}
+
+/// VB01 のクリーク (SCIP のクリーク表に当たる): 行のうち、0-1 列の文字 (係数が正なら `x = 1`、負なら `x = 0`) のどの 2 つも同時には真に
+/// なれない行 (重みの小さい 2 つの和が余裕を超える。集合分割・詰め込みなど)。衝突グラフ ([`super::clique::CliqueGraph`]) は組の辺で持ち、
+/// 文字 2000 を超える行・辺 2 万を超える行を落とすので、長い行の含意は入らない (nw04)。クリークは 1 つの物として持ち、深さ優先では
+/// SCIP と同じく 1 つのクリークを 1 度だけ展開する ([`vb01_order`])。`lo`・`up` は列の境界。(クリークの文字の並び, 文字ごとのクリークの番号)
+pub(super) fn vb01_cliques(p: &MipProblem, lo: &[f64], up: &[f64], fb: &[bool]) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
+    let mut cl: Vec<Vec<u32>> = Vec::new();
+    let mut of_lit: Vec<Vec<u32>> = vec![Vec::new(); 2 * p.n];
+    for (i, r) in p.rows.iter().enumerate() {
+        if r.len() < 3 {
+            continue;
+        }
+        for (sign, b) in [(1.0, p.row_up[i]), (-1.0, -p.row_lo[i])] {
+            if !b.is_finite() {
+                continue;
+            }
+            let mut minact = 0.0;
+            let mut lits: Vec<(f64, u32)> = Vec::new();
+            let mut ok = true;
+            for &(j, a0) in r {
+                let a = sign * a0;
+                let m = if a > 0.0 { a * lo[j] } else { a * up[j] };
+                if !m.is_finite() {
+                    ok = false;
+                    break;
+                }
+                minact += m;
+                if fb[j] && a != 0.0 {
+                    lits.push((a.abs(), if a > 0.0 { 2 * j as u32 } else { 2 * j as u32 + 1 }));
+                }
+            }
+            if !ok || lits.len() < 3 {
+                continue;
+            }
+            let slack = b - minact;
+            let tol = 1e-9 * (1.0 + b.abs());
+            // 重みの小さい 2 つでも余裕を超えれば、どの 2 つも同時には真になれない
+            let (mut w1, mut w2) = (f64::INFINITY, f64::INFINITY);
+            for &(w, _) in &lits {
+                if w < w1 {
+                    w2 = w1;
+                    w1 = w;
+                } else if w < w2 {
+                    w2 = w;
+                }
+            }
+            if w1 + w2 <= slack + tol {
+                continue;
+            }
+            let id = cl.len() as u32;
+            for &(_, l) in &lits {
+                of_lit[l as usize].push(id);
+            }
+            cl.push(lits.into_iter().map(|(_, l)| l).collect());
+        }
+    }
+    (cl, of_lit)
+}
+
+/// VB01 の位相順 (SCIP の topologicalSort): 境界の節点 (文字 `2j` = `x_j` の下限、`2j+1` = 上限) の逆向きのグラフ (a の後続は a を導く文字 =
+/// ¬a の衝突グラフの隣と、¬a を含むクリークの他の文字) を、節点の番号の順に深さ優先でたどった帰りがけ順。辺のない節点だけの木は入れない。
+/// クリークは SCIP の cliqueexit と同じく、最初に入った節点 u から全員を展開し、2 度目からは u の反対の文字 (u の展開に入らない唯一の
+/// 文字) だけを見る (長いクリークでも手間は長さに比例)。`fb[j]`: 自由な 0-1 列か。`cliques`: [`vb01_cliques`] (空でもよい)。
+pub(super) fn vb01_order(g: &super::clique::CliqueGraph, fb: &[bool], cliques: &(Vec<Vec<u32>>, Vec<Vec<u32>>)) -> Vec<u32> {
+    let n = fb.len();
+    let (cl, of_lit) = cliques;
+    let empty: Vec<u32> = Vec::new();
+    // クリークの出口: 0 = まだ入っていない、e + 1 = 最初に入った節点の反対の文字 e、-1 = 出口も使った
+    let mut exit: Vec<i64> = vec![0; cl.len()];
+    let mut visited = vec![false; 2 * n];
+    let mut order: Vec<u32> = Vec::new();
+    // (節点, 組の辺の位置, クリークの位置, クリークの中の位置)
+    let mut stack: Vec<(u32, usize, usize, usize)> = Vec::new();
+    for s0 in 0..2 * n as u32 {
+        if visited[s0 as usize] || !fb[(s0 / 2) as usize] {
+            continue;
+        }
+        stack.push((s0, 0, 0, 0));
+        let mut maxstack = 1usize;
+        while let Some(top) = stack.last_mut() {
+            let a = top.0;
+            visited[a as usize] = true;
+            let mut next = None;
+            let nb = g.neighbors(a ^ 1);
+            while top.1 < nb.len() {
+                let b = nb[top.1];
+                top.1 += 1;
+                if fb[(b / 2) as usize] && !visited[b as usize] {
+                    next = Some(b);
+                    break;
+                }
+            }
+            if next.is_none() {
+                let cs = of_lit.get((a ^ 1) as usize).unwrap_or(&empty);
+                while top.2 < cs.len() {
+                    let c = cs[top.2] as usize;
+                    if top.3 == 0 {
+                        // このクリークに入るのは初めてか
+                        if exit[c] > 0 {
+                            let e = (exit[c] - 1) as u32;
+                            exit[c] = -1;
+                            top.2 += 1;
+                            if e != a && !visited[e as usize] && fb[(e / 2) as usize] {
+                                next = Some(e);
+                                break;
+                            }
+                            continue;
+                        } else if exit[c] == 0 {
+                            exit[c] = (a ^ 1) as i64 + 1;
+                        } else {
+                            top.2 += 1;
+                            continue;
+                        }
+                    }
+                    let mem = &cl[c];
+                    while top.3 < mem.len() {
+                        let b = mem[top.3];
+                        top.3 += 1;
+                        if b != (a ^ 1) && fb[(b / 2) as usize] && !visited[b as usize] {
+                            next = Some(b);
+                            break;
+                        }
+                    }
+                    if next.is_some() {
+                        break;
+                    }
+                    top.2 += 1;
+                    top.3 = 0;
+                }
+            }
+            if let Some(b) = next {
+                stack.push((b, 0, 0, 0));
+                maxstack = maxstack.max(stack.len());
+                continue;
+            }
+            stack.pop();
+            if maxstack > 1 {
+                order.push(a);
+            } else {
+                visited[a as usize] = false;
+            }
+        }
+    }
+    order
+}
+
+/// VB01 の 1 つの型の固定・伝播 (SCIP の applyVboundsFixings): `order` の順に、締める型は節点の文字を真、緩める型は偽に固定して伝播する
+/// (目的で選ばない列は飛ばす。費用 >= 0 なら 0 が良い側)。矛盾したら直前の列を反対の値にし、それも矛盾すればやめる (反対にした回数が 10 を
+/// 超えたら固定をやめる)。整数列 (`ints`) の固定率と全列の固定率 (SCIP の minintfixingrate・minmipfixingrate) がともに 0.65 以上なら、
+/// 固定した後の境界を返す。(境界, 固定がすべて目的の良い側だったか, すべて悪い側だったか, ログの 1 行)。`dom` は戻す。
+/// 手間の上限は伝播で非零数 × 20 + 100 万 ([`Solver::fix_then_submip`] と同じ)。
+pub(super) fn vb01_fix_dom(p: &MipProblem, dom: &mut Domain, order: &[u32], tight: bool, obj: u8, ints: &[usize], stop: &dyn Fn() -> bool) -> (Option<(Vec<f64>, Vec<f64>)>, bool, bool, String) {
+    let (mut all1, mut all2) = (true, true);
+    let pos = dom.stack_len();
+    let work0 = dom.debug_work();
+    let work_cap = 20 * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
+    let (mut nback, mut dead, mut nfix) = (0usize, false, 0usize);
+    for (k, &a) in order.iter().enumerate() {
+        if k % 64 == 0 && (stop() || dom.debug_work() - work0 > work_cap) {
+            break;
+        }
+        let j = (a / 2) as usize;
+        if dom.lo[j] + 0.5 > dom.up[j] {
+            continue;
+        }
+        let v = if (a % 2 == 0) == tight { 1.0 } else { 0.0 };
+        let best = (p.cost[j] >= 0.0) == (v == 0.0);
+        if !best {
+            if obj == 1 {
+                continue;
+            }
+            all1 = false;
+        }
+        if best {
+            if obj == 2 {
+                continue;
+            }
+            all2 = false;
+        }
+        let before = dom.stack_len();
+        dom.tighten_lower(p, j, v);
+        dom.tighten_upper(p, j, v);
+        nfix += 1;
+        if dom.propagate(p) {
+            continue;
+        }
+        dom.backtrack_to(p, before);
+        nback += 1;
+        let w = 1.0 - v;
+        dom.tighten_lower(p, j, w);
+        dom.tighten_upper(p, j, w);
+        if !dom.propagate(p) {
+            dead = true;
+            break;
+        }
+        if nback > 10 {
+            break;
+        }
+    }
+    let nfree = ints.iter().filter(|&&j| dom.lo[j] < dom.up[j]).count();
+    let fr = 1.0 - nfree as f64 / ints.len().max(1) as f64;
+    // 全列の固定率は定義域で固定された列で数える (SCIP はサブ問題の前処理の後で数える)。連続列の多い問題 (neos-5188808-nattai) で、
+    // 整数列だけ固定してもサブ MIP の LP が大きく時間切れになっていた
+    let frall = (0..p.n).filter(|&j| dom.lo[j] == dom.up[j]).count() as f64 / p.n.max(1) as f64;
+    let bounds = (!dead && fr >= 0.65 && frall >= 0.65).then(|| (dom.lo.clone(), dom.up.clone()));
+    dom.backtrack_to(p, pos);
+    let log = format!("{}: {nfix} fixings, {nback} backtracks{}, fixing rate {fr:.2} (all columns {frall:.2})", vb01_label(tight, obj), if dead { ", infeasible" } else { "" });
+    (bounds, all1, all2, log)
+}
+
+/// [`Solver::vbounds01_heur`] を Solver を作らずに問題 `p` (前処理の後) の上で回す (SCIP-GATE の `ENOMOTO_MIP_VBCLQ=e` が前処理の
+/// LP probing の前に呼ぶ)。定義域は `p` の境界 + 含意 `conflict_edges`、衝突グラフは行と `conflict_edges` から作り、サブ MIP は
+/// [`super::solve_problem`] (500 ノード、1 本 `time_limit` 秒まで、それまでの最良の値を打ち切り値に) で解く。
+/// 見つけた最良の実行可能解 (目的値 (最小化形、定数項込み), `p` の列の空間の値) を返す。
+pub(crate) fn vbounds01_on_problem(p: &MipProblem, verbose: bool, time_limit: f64) -> Option<(f64, Vec<f64>)> {
+    let t0 = std::time::Instant::now();
+    let binary: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0).collect();
+    let g = super::clique::CliqueGraph::build_with(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &p.col_lo, &p.col_up, &p.conflict_edges);
+    let fb: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && p.col_lo[j] == 0.0 && p.col_up[j] == 1.0).collect();
+    let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && p.col_lo[j] < p.col_up[j]).collect();
+    let cliques = if vb01_clq() { vb01_cliques(p, &p.col_lo, &p.col_up, &fb) } else { Default::default() };
+    let order = vb01_order(&g, &fb, &cliques);
+    if ints.is_empty() || (order.len() as f64) < 0.65 * ints.len() as f64 {
+        if verbose {
+            eprintln!("MIP:   VB01: {} bound nodes in the implication graph < 0.65 x {} free integer columns: not used", order.len(), ints.len());
+        }
+        return None;
+    }
+    let mut dom = Domain::new(p);
+    dom.add_implications(p.n, &p.conflict_edges);
+    if !dom.propagate(p) {
+        return None;
+    }
+    let mut best: Option<(f64, Vec<f64>)> = None;
+    let (mut skip1, mut skip2) = (false, false);
+    let stop = || false;
+    for (tight, obj) in VB01_VARIANTS {
+        if (obj == 1 && skip1) || (obj == 2 && skip2) {
+            continue;
+        }
+        let (bounds, all1, all2, log) = vb01_fix_dom(p, &mut dom, &order, tight, obj, &ints, &stop);
+        if verbose {
+            eprintln!("MIP:   {log}");
+        }
+        if obj == 0 {
+            skip1 = all1;
+            skip2 = all2;
+        }
+        let Some((lo, up)) = bounds else { continue };
+        let mut sub = p.clone();
+        sub.col_lo = lo;
+        sub.col_up = up;
+        let params = super::solver::MipParams {
+            time_limit,
+            node_limit: 500,
+            rel_gap: 0.0,
+            abs_gap: 1e-9,
+            verbose: false,
+            submip: true,
+            cutoff: best.as_ref().map_or(f64::INFINITY, |(z, _)| *z),
+            restarts: 0,
+            skip_heurs: 0,
+            threads: 1,
+            distinguish: false,
+            fc_submip: false,
+            tl_base: f64::NAN,
+        };
+        let r = super::solve_problem(&sub, params, true);
+        if let Some(x) = r.x {
+            let z = p.objective(&x);
+            if p.is_feasible(&x, 1e-6) && best.as_ref().is_none_or(|(b, _)| z < *b) {
+                if verbose {
+                    eprintln!("MIP:   {}: sub-MIP solution {z:.10e}", vb01_label(tight, obj));
+                }
+                best = Some((z, x));
+            }
+        }
+    }
+    if verbose {
+        eprintln!("MIP: VB01 on the presolved problem: {} ({:.2}s)", best.as_ref().map_or("none".to_string(), |(z, _)| format!("{z:.10e}")), t0.elapsed().as_secs_f64());
+    }
+    best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`vbounds01_on_problem`]: 0-1 列 4 本、含意 x0 <= x1・クリーク x2 + x3 <= 1・被覆 x1 + x2 >= 1 の問題で、実行可能な解を返す
+    #[test]
+    fn vb01_on_problem_finds_feasible() {
+        let inf = f64::INFINITY;
+        let rows = vec![vec![(0, 1.0), (1, -1.0)], vec![(2, 1.0), (3, 1.0)], vec![(1, 1.0), (2, 1.0)]];
+        let p = MipProblem::from_rows(vec![0.0; 4], vec![1.0; 4], vec![-1.0, 0.0, 0.0, -1.0], 0.0, 1.0, vec![true; 4], rows, vec![-inf, -inf, 1.0], vec![0.0, 1.0, inf]);
+        let (z, x) = vbounds01_on_problem(&p, false, 10.0).expect("VB01 should find a solution");
+        assert!(p.is_feasible(&x, 1e-9));
+        assert!((p.objective(&x) - z).abs() <= 1e-9);
+    }
+}
+
+/// 診断用 `ENOMOTO_MIP_LPFACE_COUNT=<ファイル>`: 試作 `ENOMOTO_MIP_LPFACE` のサブ MIP の結果を 1 行ずつ足す (fuzz で `r` の道を通る回数を数える)
+pub(super) fn lpface_count(line: &str) {
+    if let Some(f) = env_str!("ENOMOTO_MIP_LPFACE_COUNT") {
+        use std::io::Write;
+        if let Ok(mut w) = std::fs::OpenOptions::new().create(true).append(true).open(f) {
+            let _ = writeln!(w, "{line}");
+        }
     }
 }
