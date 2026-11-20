@@ -123,3 +123,4 @@
   - 遅くなるのは `b` と同じ形 (暫定解が入るとカットの道筋が分かれ、根の後の再スタートの費用がかかる)。P2-HEUR の再スタートの直し待ち。
 - decomp2・hypothyroid-k1 は `b` と `bc` で同じ (どちらも VB01 が解を出す)。
 - 誤答: `fuzz_vb01.py` は `VB01=bc` で 300 問 (VB01 が回ったのは 277 問)、`VB01=c`・`VBCLQ=e` で 200 問 (同 197 問)、どちらも bad 0。
+  `VB01=bc bash fuzz.sh`: fuzz 7 本とも bad 0、cargo test 414 通過。
