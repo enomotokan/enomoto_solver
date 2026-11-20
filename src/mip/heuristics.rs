@@ -1698,7 +1698,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let tk_u = super::ticks_on('u') && !self.params.submip && self.snap.is_none() && !self.parallel_submips && !crate::ticks::has_budget();
         let tk_u_budget = if tk_u {
             let el = (crate::ticks::total() - self.ticks0) * 1e-9;
-            Some(((self.submip_time_frac * (self.params.frac_tl() - el)).min(self.submip_time_max)).max(0.05) * 1e9)
+            let cap = (self.submip_time_frac * (self.params.frac_tl() - el)).min(self.submip_time_max);
+            // 試作 `ENOMOTO_MIP_T1RENS=f` (既定では使わない、analysis/vsscip_slow_20261118/tree3/): 外側の根の既定の RENS
+            // (LP で整数値の列を全部固定、[`Self::rens_old`]) の手間の期限を、(元の時間の上限 - 経過) の f 倍まで延ばす (ノード上限 500 はそのまま)。
+            // 並列の根では同じ RENS が別スレッドで `SUBMIP_HIGHS` の `t` (残り時間) の上限で回るが、1 スレッドではこの `u` の期限
+            // (最大 6 秒) で止まる。dano3_5 の 1 スレッドでは 6 秒ではサブ MIP の根の LP も終わらず 0 ノードで止まり、
+            // 4 スレッドでは同じ RENS が 50〜89 ノードで 577.44・576.92 (最適) を出していた
+            let cap = match env_str!("ENOMOTO_MIP_T1RENS").and_then(|v| v.parse::<f64>().ok()).filter(|_| self.submip_is_rens && self.nodes <= 1) {
+                Some(f) => cap.max(f * (self.params.frac_tl() - el)),
+                None => cap,
+            };
+            Some(cap.max(0.05) * 1e9)
         } else if self.tk_s_left().is_some() && !self.parallel_submips {
             // 試作 `ENOMOTO_MIP_TICKS` の `s`: 入れ子のサブ MIP は、手間の残りから決めた上限 (上の `time_limit`) を手間の期限にする
             Some(time_limit.max(0.05) * 1e9)

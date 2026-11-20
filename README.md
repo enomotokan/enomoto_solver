@@ -171,6 +171,26 @@ The relative gap measures the difference between the objective value of the incu
 
 The solution returned is polished before it is reported: integer variables are rounded to exact integers, and if there are continuous variables, the LP of the original problem with the integer variables fixed to those values is solved again and its solution is taken when it violates the constraints no more than the original one and its objective value is not worse. `objective` is then recomputed from the returned values with compensated summation, so it agrees with the objective of the returned solution up to rounding error (on the MIPLIB 2017 instances in `benchmarks/`, the relative error against the reference optimal values is 10⁻¹⁵ or less).
 
+### Reading MPS files (`readModel`)
+
+`Model.readModel(path)` reads an MPS file (free format; gzip-compressed if the name ends in `.gz`) into an empty Model. The Rust core (`src/mps.rs`) does the parsing. The variables appear in `M.variables` in column order, and `M.get_variable(column_name)` returns one by name.
+
+```python
+M = Model()
+M.readModel("neos-911970.mps.gz")
+sol = M.solve()
+print(sol.objective, M.get_variable("C0001").value)
+```
+
+The conventions follow HiGHS:
+
+- The first `N` row is the objective. A right-hand side `v` on the objective row gives the objective constant `-v`.
+- Integer columns between `MARKER`s get bounds `[0, 1]` unless `BOUNDS` mentions them.
+- A row with `RANGES` becomes two constraints, `<=` and `>=`.
+- References to undefined rows or columns are skipped with a warning.
+
+Unlike HiGHS, coefficients are read exactly as written: entries with absolute value at most 1e-9 are not dropped. Quadratic terms, semi-continuous variables and SOS are not supported and raise `ValueError`.
+
 ### Number of threads (`threads`)
 
 `solve(threads=...)` specifies the number of threads to use. If omitted, (number of CPUs available to this process + 1) / 2 threads are used, as in HiGHS (`enomoto_solver.default_threads()`; 2 with 4 logical cores, 4 with 8). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
