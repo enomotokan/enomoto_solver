@@ -222,6 +222,13 @@ pub(crate) fn gated_take(n: usize) -> Option<Vec<f64>> {
     (x.len() == n && d.len() == n).then(|| x.iter().zip(&d).map(|(v, d)| v / d).collect())
 }
 
+/// `g` の受け取り口を閉じる (門に止めの合図)。木に入ったら呼ぶ
+pub(crate) fn clear_gated() {
+    if let Some(g) = GATED.with(|x| x.borrow_mut().take()) {
+        g.gate.stop();
+    }
+}
+
 /// 外側の求解の終わり: 止めの合図を立てて受け取り口を捨てる
 pub(crate) fn clear_pending() {
     if let Some(g) = GATED.with(|x| x.borrow_mut().take()) {
