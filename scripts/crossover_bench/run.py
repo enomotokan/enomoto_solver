@@ -57,7 +57,6 @@ def materialize(set_name: str, name: str, workdir: Path) -> Path:
 def worker(mps: str, solver: str, sizes_only: bool) -> None:
     import highspy
     from enomoto_solver import _core
-    from enomoto_solver.benchmark_highs import _build_our_model
 
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
@@ -77,9 +76,9 @@ def worker(mps: str, solver: str, sizes_only: bool) -> None:
                                       "events": [["ipm_iters", info.ipm_iteration_count], ["crossover_iters", info.crossover_iteration_count],
                                                  ["simplex_iters", info.simplex_iteration_count]]}), flush=True)
         return
-    lp = h.getLp()
-    model, _, _ = _build_our_model(lp)
-    del h, lp
+    del h
+    from enomoto_solver import benchmark_highs as bh
+    model, _, _, _ = bh._read_our_model(Path(mps))
     if sizes_only:
         os.environ["ENOMOTO_DEBUG_PRESOLVE_SIZE"] = "1"
         os.environ["ENOMOTO_PRESOLVE_ONLY"] = "1"
