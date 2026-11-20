@@ -5270,7 +5270,17 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dom,
         lp,
         queue: NodeQueue::new(),
-        pc: snap.as_ref().map_or_else(|| Pseudocost::new(p.n), |sn| sn.pc.clone()),
+        pc: snap.as_ref().map_or_else(
+            || {
+                let mut pc = Pseudocost::new(p.n);
+                // 試作 `ENOMOTO_MIP_PCL` の `b`: 似た列の組 ([`pcl_groups`])
+                if super::pcl('b') && !params.submip {
+                    pc.groups = Some(std::sync::Arc::new(pcl_groups(p)));
+                }
+                pc
+            },
+            |sn| sn.pc.clone(),
+        ),
         incumbent: None,
         obj_step,
         obj_lat,
@@ -5951,6 +5961,39 @@ pub(super) fn densecut_diag() -> bool {
 
 fn tree_log() -> bool {
     env_str!("ENOMOTO_MIP_TREE_LOG").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_PCL` の `b`: 似た列の組。整数列を (費用, 境界, 係数の値の並び (行は問わない、絶対値の小さい順)) の同じものでまとめる。
+/// 対称な列 (同じ形の行に同じ係数で出る) はたいてい同じ組になる。連続列は組を作らない (自分だけの組)
+fn pcl_groups(p: &MipProblem) -> (Vec<u32>, Vec<Vec<u32>>) {
+    let mut key_of: std::collections::HashMap<Vec<u64>, u32> = std::collections::HashMap::new();
+    let mut gid = vec![0u32; p.n];
+    let mut mem: Vec<Vec<u32>> = Vec::new();
+    for j in 0..p.n {
+        let g = if p.is_int[j] {
+            let mut c: Vec<f64> = p.cols[j].iter().map(|&(_, a)| a).collect();
+            c.sort_by(|a, b| a.abs().total_cmp(&b.abs()).then(a.total_cmp(b)));
+            let mut k = vec![p.cost[j].to_bits(), p.col_lo[j].to_bits(), p.col_up[j].to_bits()];
+            k.extend(c.iter().map(|a| a.to_bits()));
+            let next = mem.len() as u32;
+            let g = *key_of.entry(k).or_insert(next);
+            if g == next {
+                mem.push(Vec::new());
+            }
+            g
+        } else {
+            mem.push(Vec::new());
+            mem.len() as u32 - 1
+        };
+        gid[j] = g;
+        mem[g as usize].push(j as u32);
+    }
+    (gid, mem)
+}
+
+/// 診断 `ENOMOTO_MIP_PCLOG` ([`Solver::pclog_emit`])
+fn pclog_on() -> bool {
+    env_str!("ENOMOTO_MIP_PCLOG").is_some_and(|v| v != "0")
 }
 
 /// `ENOMOTO_MIP_MEM1_SIBLU=K` (2026-11-04 から既定は K = 1、`=0` で以前の形 (全部持つ)。analysis/uccase12_mem1_20261103.md・mem_default_20261104.md): 潜りの兄弟の一覧 (`dive_stack`) で
@@ -12777,6 +12820,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let rp_entry = replay.and_then(|_| super::replay::lookup(&node.changes));
             let mut rp_stage = "";
             let (mut rp_obj0, mut rp_obj) = (f64::NAN, f64::NAN);
+            // 診断 `ENOMOTO_MIP_PCLOG` (振る舞いは変えない、analysis/disj_20261119.md の 11 節): このノードを作った分枝の擬似費用の予測
+            // (観測の前の単位あたりの費用, その向きの観測の数, 動いた量) と、最初の LP の後に観測したか
+            let mut pcl: Option<(f64, u32, f64)> = None;
+            // 試作 `ENOMOTO_MIP_PCL` の `d`: 最初の LP の後の観測を、ノードを処理し終えたとき (カット・伝播での解き直しの後) の値で入れる (列, 向き, 動いた量, 親の値)
+            let mut pcl_d: Option<(usize, bool, f64, f64)> = None;
             if node.lower_bound >= self.prune_limit() {
                 if self.dbg_on {
                     self.dbg_lost(&format!("node lower bound {}", node.lower_bound), dn);
@@ -13415,7 +13463,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let delta = (x - parent_val).abs().max(if up { parent_val.ceil() - parent_val } else { parent_val - parent_val.floor() });
                         // `ENOMOTO_MIP_HNFBR`: 合同式の列は y = (x - r)/m の刻みで学ぶ
                         let delta = self.hnfbr_obs_delta(j, up, x, parent_val, delta);
-                        self.pc.add_observation(j, up, delta, node_obj - parent_obj);
+                        if pclog_on() && !self.params.submip {
+                            pcl = Some((if up { self.pc.cost_up(j) } else { self.pc.cost_down(j) }, self.pc.n_obs(j, up), delta));
+                        }
+                        if super::pcl('d') && !self.params.submip {
+                            pcl_d = Some((j, up, delta, parent_obj));
+                        } else {
+                            self.pc.add_observation(j, up, delta, node_obj - parent_obj);
+                        }
                     }
                 }
                 if node_obj >= self.prune_limit() {
@@ -14202,6 +14257,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             xp("m_endlp");
             if t4pc_added && matches!(action, None) {
                 self.t4_pc[2] += 1;
+            }
+            if pclog_on() && !self.params.submip {
+                self.pclog_emit(&node, pcl, rp_obj0, rp_obj, if action.is_some() { "br" } else { "lp" });
+            }
+            if let Some((j, up, delta, po)) = pcl_d {
+                // 解き直しで刈れた (rp_obj が打ち切り値以上) ときも、その値までは上がったとして観測する
+                let g = if rp_obj.is_finite() { rp_obj - po } else { rp_obj0 - po };
+                self.pc.add_observation(j, up, delta, g);
             }
             let Some(branch) = action else {
                 if replay.is_some() {
@@ -16885,6 +16948,50 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 診断用 (`ENOMOTO_MIP_BRANCH_REPLAY`): なぞったノードの終わり方を数え、`ENOMOTO_MIP_REPLAY_LOG` なら
     /// `ER 通し番号 HiGHSのseq(なければ-1) 深さ 終わり方 最初のLP値 最後のLP値 分枝した列 固定された整数列の数 LPの行数 HiGHSの結果 HiGHSのLP値 HiGHSの固定数 経路` を出す。
+    /// 試作 `ENOMOTO_MIP_PCL` の `a`: 強分岐の子の LP が反復上限で止まったとき、途中の値 (双対単体法なので子の値の下限) から出る単位あたりの
+    /// 上がり幅が今の擬似費用より大きければ、「少なくともこれだけ」の観測として入れる (小さければ何も分からないので入れない)
+    fn pcl_capped_obs(&mut self, j: usize, v: f64, is_up: bool, gain: f64) {
+        if !super::pcl('a') || self.params.submip {
+            return;
+        }
+        let delta = self.hnfbr_delta(j, v, is_up);
+        if delta > 1e-9 && gain / delta > if is_up { self.pc.cost_up(j) } else { self.pc.cost_down(j) } {
+            self.pc.add_observation(j, is_up, delta, gain);
+        }
+    }
+
+    /// 診断 `ENOMOTO_MIP_PCLOG=1` (振る舞いは変えない、analysis/disj_20261119.md の 11 節): 木のノードを処理し終えたとき、そのノードを作った
+    /// 分枝について、擬似費用の予測と実際の上がり幅を 1 行 (`PCO ...`、空白区切り) で出す。スレッドごとに `ENOMOTO_T_MIP_PCLOG_MAX` 行 (既定 300000) まで。
+    /// 欄: スレッド ノードの数 経過秒 深さ 列 上向きか 親の LP 値 親の LP の値 予測の動く量 (親の値から境界まで) 予測の単位費用 その向きの観測の数
+    /// 観測したか 実際に動いた量 最初の LP の値 最後の LP の値 (打ち切り・実行不能は inf) 終わり方 (br 分枝 / lp 刈り) 二値か 費用が 0 でないか 列の非零の数
+    /// 打ち切りの回数 (その向き)
+    fn pclog_emit(&self, node: &OpenNode, pcl: Option<(f64, u32, f64)>, obj0: f64, obj: f64, out: &str) {
+        let Some((j, up, pv, po)) = node.branch.filter(|b| b.3.is_finite()) else { return };
+        thread_local! { static N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+        let n = N.with(|c| { let n = c.get(); c.set(n + 1); n });
+        if n >= tunable!("ENOMOTO_T_MIP_PCLOG_MAX", 300_000u64, u64) {
+            return;
+        }
+        let dpred = if up { pv.ceil() - pv } else { pv - pv.floor() };
+        let (unit, nobs, obs, dact) = match pcl {
+            Some((u, k, d)) => (u, k, 1, d),
+            None => (if up { self.pc.cost_up(j) } else { self.pc.cost_down(j) }, self.pc.n_obs(j, up), 0, f64::NAN),
+        };
+        let bin = self.p.is_int[j] && self.p.col_up[j] - self.p.col_lo[j] <= 1.0;
+        eprintln!(
+            "PCO {} {} {:.3} {} {j} {} {pv:.6} {po:.10e} {dpred:.6} {unit:.6e} {nobs} {obs} {dact:.6} {obj0:.10e} {obj:.10e} {out} {} {} {} {}",
+            self.pool_tid,
+            self.nodes,
+            self.start.elapsed().as_secs_f64(),
+            node.depth,
+            up as u8,
+            bin as u8,
+            (self.p.cost[j] != 0.0) as u8,
+            self.p.cols[j].len(),
+            self.pc.cutoff_count(j, up)
+        );
+    }
+
     fn rp_log(&self, node: &OpenNode, out: &str, obj0: f64, obj: f64, col: i64, st: &mut [u64; 5]) {
         let e = super::replay::lookup(&node.changes);
         st[if e.is_some() { 0 } else { 1 }] += 1;
@@ -17295,7 +17402,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 5 台のマシン (各 2 回、マシンごとの基準と比較) で -2.7, -1.0, -2.1, +0.2, -2.8% (平均 -1.7%) なので 4 にした
         // (analysis/mip_opt_eval_20261011.md)
         let sb_iter_limit = ((tunable!("ENOMOTO_T_MIP_SB_ITERMULT", 4.0, f64) * self.avg_node_iters() as f64 * (1.0 + 20.0 / self.nodes.max(1) as f64)) as u64).clamp(10, 500);
-        let unreliable: usize = cands.iter().filter(|&&(j, _, _)| (self.pc.min_observations(j) as f64) < thr_of(self, j)).count();
+        let pcl_c = super::pcl('c') && !self.params.submip;
+        let pcl_ci = tunable!("ENOMOTO_T_MIP_PCL_CI", 0.3, f64);
+        let unreliable: usize = cands.iter().filter(|&&(j, _, _)| (self.pc.min_observations(j) as f64) < thr_of(self, j) && !(pcl_c && self.pc.ci_reliable(j, pcl_ci))).count();
         let lookahead = (tunable!("ENOMOTO_T_MIP_SB_LOOKAHEAD", 9.0, f64) * (1.0 + unreliable as f64 / cands.len().max(1) as f64)) as usize;
         let max_tried = tunable!("ENOMOTO_T_MIP_SB_MAXCAND", 100usize, usize);
         // 試作 `ENOMOTO_MIP_ROOTSB` = 文字の並び (既定では使わない、analysis/disj_20261119.md の 9 節): 深さ `ENOMOTO_T_MIP_ROOTSB_DEPTH`
@@ -17355,7 +17464,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         while ci < cands.len() {
             let (j, v, pscore) = cands[ci];
             ci += 1;
-            let is_reliable = (self.pc.min_observations(j) as f64) >= thr_of(self, j);
+            // 試作 `ENOMOTO_MIP_PCL` の `c`: 観測の数が足りなくても、ばらつきの信頼区間が `ENOMOTO_T_MIP_PCL_CI` (既定 0.3) × 平均以内なら信頼する
+            let is_reliable = (self.pc.min_observations(j) as f64) >= thr_of(self, j) || (pcl_c && self.pc.ci_reliable(j, pcl_ci));
             let la_stop = |s: &mut Self, pl: &mut Option<super::plsb::PlsbNode>| match pl {
                 None => no_improve >= lookahead as f64,
                 Some(pn) => s.plsb_lookahead_stop(pn, no_improve, lookahead as f64, node_obj),
@@ -17386,6 +17496,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 子の LP での x_j の被約費用 (`ENOMOTO_MIP_SB_RC`。分けた境界にないか使わなければ 0)
             let mut child_rc = [0.0f64; 2];
             let mut cut = [false; 2];
+            // 試作 `ENOMOTO_MIP_PCL` の `a`: 子の LP が反復上限で途中の値になった側があるか
+            let mut sb_capped = false;
             if par_sb && !pre.contains_key(&j) {
                 // この候補から、強分岐するはずの候補 (信頼できないもの) をスレッド数まで集めて並列に解く
                 let nth = self.params.threads;
@@ -17515,6 +17627,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         _ => {
                             // 反復上限は途中の値、際どい実行不能の不明 (obj = NaN) は増分 0
                             gains[side] = if r.obj.is_nan() { 0.0 } else { (r.obj - node_obj).max(0.0) };
+                            if !r.obj.is_nan() {
+                                sb_capped = true;
+                                self.pcl_capped_obs(j, v, is_up, gains[side]);
+                            }
                         }
                     }
                 }
@@ -17612,6 +17728,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     _ => {
                         // 反復上限: 途中の目的値 (双対単体法なので下界) を弱い観測として使う
                         gains[side] = (self.lp.objective() + self.p.offset - node_obj).max(0.0);
+                        sb_capped = true;
+                        self.pcl_capped_obs(j, v, is_up, gains[side]);
                     }
                 }
                 self.lp.restore_state(saved);
@@ -17804,6 +17922,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 best = Some((j, v, score));
                 best_sb = Some((j, child_obj[0], child_obj[1]));
                 no_improve = 0.0;
+            } else if sb_capped && super::pcl('a') && !self.params.submip {
+                // 試作 `ENOMOTO_MIP_PCL` の `a`: 途中の値で負けた候補は「改善なし」に数えない (本当の値はもっと高いかもしれない)
             } else if best.is_some_and(|(_, _, s)| score >= s * (1.0 - 1e-9)) {
                 no_improve += 0.5;
             } else {
