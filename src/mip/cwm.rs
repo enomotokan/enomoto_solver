@@ -68,7 +68,8 @@ pub(crate) fn ab() -> Option<(usize, f64, f64)> {
     *F.get_or_init(|| {
         let v = env_str!("ENOMOTO_MIP_CWM_AB")?;
         let mut it = v.split(':');
-        let k = AB_COEFS.iter().position(|c| Some(*c) == it.next())?;
+        let name = it.next()?;
+        let k = AB_COEFS.iter().position(|c| *c == name)?;
         let a: f64 = it.next()?.parse().ok()?;
         let b: f64 = it.next()?.parse().ok()?;
         Some((k, a, b))
