@@ -60,7 +60,13 @@ def run(cfg, seed, mps, tl):
     else:
         err.seek(0)
         pat = re.compile(r"MIP: new incumbent ([-+0-9.eE]+) .*?\(([0-9.]+)s\)")
-        res["inc"] = [(float(m.group(2)), float(m.group(1))) for l in err.read().splitlines() if (m := pat.search(l))]
+        lines = err.read().splitlines()
+        res["inc"] = [(float(m.group(2)), float(m.group(1))) for l in lines if (m := pat.search(l))]
+        # 再スタートの回数と、最後に木に入った外側の時刻 (README の 10 節)
+        rs = [int(m.group(1)) for l in lines if (m := re.match(r"MIP: restart (\d+) \(", l))]
+        res["restarts"] = max(rs, default=0)
+        tr = [float(m.group(1)) for l in lines if (m := re.match(r"TRSTAT: tree start outer ([0-9.]+)", l))]
+        res["tree_outer"] = tr[-1] if tr else None
         err.close()
     return res, round(peak), round(time.time() - t0, 1)
 for p, cfg, seed, tl in mine:
