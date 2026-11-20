@@ -1,6 +1,6 @@
 """Mittelmann LPopt の全問で ENOMOTO auto / HiGHS 疑似 auto / CLP を比べる。
 
-  ENOMOTO: solve(root_solver="auto", threads=T, time_limit=L)
+  ENOMOTO: solve(lp_solver="auto", threads=T, time_limit=L)
   HiGHS:   双対単体法 (parallel=on) と IPX+クロスオーバーを別プロセスで同時に走らせ、先に結論を出した方を採る
            (HiGHS 1.15.1 には単体法と内点法を同時に走らせる設定が無いので、各プロセス threads=T)
   CLP:     WSL の論文用ドライバ (scripts/paper_bench/drivers/clp_driver.cpp、既定の ClpSolve、逐次)
@@ -36,15 +36,25 @@ SHIFT = 10.0
 
 # ---------------------------------------------------------------- workers (子プロセス)
 
+
+def _read_our_model_compat(bh, path):
+    """`benchmark_highs._read_our_model` (このクレートの MPS 読み込み) でモデルを作る。古いビルドを wheel で入れた
+    環境では `benchmark_highs` 自体が古く `_read_our_model` がないので、従来の HiGHS 経由の組み立てに戻る
+    (台本だけ新しくなった計測が落ちないように)。戻り値は `(model, 制約数, 非零数, 列の名前)`。"""
+    if hasattr(bh, "_read_our_model"):
+        return bh._read_our_model(path)
+    _, lp = bh._load_lp(path)
+    names = list(lp.col_names_) if len(lp.col_names_) == lp.num_col_ else [f"C{j}" for j in range(lp.num_col_)]
+    model, n_constraints, nnz = bh._build_our_model(lp)
+    return model, n_constraints, nnz, names
+
 def worker_enomoto(mps: str, threads: int, limit: float) -> None:
-    import highspy
     from enomoto_solver import _core
-    from run_mittelmann_benchmark import _build_our_model
-    h = highspy.Highs(); h.setOptionValue("output_flag", False); h.readModel(mps)
-    model = _build_our_model(h.getLp()); del h
+    from enomoto_solver import benchmark_highs as bh
+    model, _, _, _ = _read_our_model_compat(bh, Path(mps))
     print("BUILT", flush=True)
     t0 = time.perf_counter()
-    out = model.solve(root_solver="auto", distinguish_infeasible_unbounded=True, threads=threads, time_limit=limit)
+    out = model.solve(lp_solver="auto", distinguish_infeasible_unbounded=True, threads=threads, time_limit=limit)
     t = time.perf_counter() - t0
     print("RESULT " + json.dumps({"time": t, "status": out["status"], "obj": out["objective"],
                                   "events": [[n, s] for n, s in _core.last_solve_events()]}), flush=True)

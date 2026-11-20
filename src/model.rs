@@ -106,6 +106,81 @@ impl PyModel {
         self.constraints.len()
     }
 
+    /// 制約行の非零の総数 (ログの見出し用)。
+    fn n_nonzeros(&self) -> usize {
+        self.constraints.iter().map(|r| r.expr.coeffs.len()).sum()
+    }
+
+    /// 変数の `(下限の一覧, 上限の一覧, 整数かの一覧)` (`Model.readModel` が Python 側の
+    /// `Variable` を作るのに使う)。
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>, Vec<bool>) {
+        let lb = self.variables.iter().map(|v| v.lb).collect();
+        let ub = self.variables.iter().map(|v| v.ub).collect();
+        let is_int = self.variables.iter().map(|v| v.vtype == VarType::Integer).collect();
+        (lb, ub, is_int)
+    }
+
+    /// 目的関数の `(非零の (変数番号, 係数) の一覧, 定数, 向き)`。目的がなければ空・0・`"minimize"`。
+    fn objective_terms(&self) -> (Vec<(usize, f64)>, f64, &'static str) {
+        match &self.objective {
+            Some(o) => (
+                o.expr.coeffs.iter().map(|(&j, &c)| (j, c)).collect(),
+                o.expr.constant,
+                if o.sense == Sense::Maximize { "maximize" } else { "minimize" },
+            ),
+            None => (Vec::new(), 0.0, "minimize"),
+        }
+    }
+
+    /// MPS の本文 `text` を読み、空のモデルに変数・目的・制約を入れる
+    /// (Python の `Model.readModel` から呼ばれる。読み方は `crate::mps`)。
+    /// 範囲の行 (両側有限で幅のあるもの) は `<=` と `>=` の 2 行に、両側とも無限の行は捨てる
+    /// (HiGHS で読んで組み立てる `benchmark_highs._build_our_model` と同じ形)。
+    /// 戻り値は `(問題の名前, 列の名前の一覧, 読み飛ばした箇所の注意の一覧)`。
+    fn read_mps(&mut self, text: &str) -> PyResult<(String, Vec<String>, Vec<String>)> {
+        if !self.variables.is_empty() || !self.constraints.is_empty() || self.objective.is_some() {
+            return Err(PyValueError::new_err("read_mps needs an empty model"));
+        }
+        let d = crate::mps::parse_mps(text).map_err(|e| PyValueError::new_err(format!("MPS: {e}")))?;
+        let n = d.col_names.len();
+        let mut vars = Vec::with_capacity(n);
+        for j in 0..n {
+            let (lb, ub) = (d.col_lb[j], d.col_ub[j]);
+            if lb > ub {
+                return Err(PyValueError::new_err(format!(
+                    "MPS: the column {:?} has lower bound {lb} greater than upper bound {ub}",
+                    d.col_names[j]
+                )));
+            }
+            let vtype = if d.is_int[j] { VarType::Integer } else { VarType::Continuous };
+            vars.push(VariableData { vtype, lb, ub });
+        }
+        let mut cons = Vec::with_capacity(d.rows.len());
+        for (i, terms) in d.rows.iter().enumerate() {
+            let (lo, hi) = (d.row_lo[i], d.row_hi[i]);
+            if lo == f64::NEG_INFINITY && hi == f64::INFINITY {
+                continue;
+            }
+            let expr = LinearExpr { coeffs: terms.iter().copied().collect(), constant: 0.0 };
+            if lo.is_finite() && hi.is_finite() && (hi - lo).abs() < 1e-12 {
+                cons.push(ConstraintRow { expr, sense: RowSense::Eq, rhs: hi });
+                continue;
+            }
+            if hi.is_finite() {
+                cons.push(ConstraintRow { expr: expr.clone(), sense: RowSense::Le, rhs: hi });
+            }
+            if lo.is_finite() {
+                cons.push(ConstraintRow { expr, sense: RowSense::Ge, rhs: lo });
+            }
+        }
+        let coeffs: BTreeMap<usize, f64> = d.cost.iter().enumerate().filter(|(_, &c)| c != 0.0).map(|(j, &c)| (j, c)).collect();
+        let sense = if d.maximize { Sense::Maximize } else { Sense::Minimize };
+        self.variables = vars;
+        self.constraints = cons;
+        self.objective = Some(Objective { expr: LinearExpr { coeffs, constant: d.offset }, sense });
+        Ok((d.name, d.col_names, d.warnings))
+    }
+
     /// モデルを解き、結果を dict で返す。整数変数があれば分枝限定法、なければ LP を
     /// 1 回解く (判断は `mip::solve_mip`)。dict のキー:
     /// - `"status"`: 状態文字列 (`"optimal"` / `"infeasible"` / `"unbounded"` /
@@ -117,7 +192,7 @@ impl PyModel {
     /// - `"root_bound"` / `"first_solution_time"` / `"first_solution_objective"`: 根の切除平面ループ後の下界 (再スタートがあれば最後の根の
     ///   もので、暫定解の目的値で上から切り詰める)、最初の暫定解の時刻 [秒] と目的値 (整数最適化の評価用。なければ `None`)。
     ///
-    /// `root_solver`: 各 LP の解法。`"auto"` (既定: 前処理後の行数が 5000 以上なら傾き・切片双対二段解法と
+    /// `lp_solver`: 各 LP の解法。`"auto"` (既定: 前処理後の行数が 5000 以上なら傾き・切片双対二段解法と
     /// 内点法 + クロスオーバーを同時に解き、先に結論を出した側を採る。未満なら二段解法)、`"simplex"`
     /// (二段解法だけ)、`"ipm_crossover"` (内点法 + クロスオーバーだけ)、`"interior"` (独立の IP-PMM 内点法)。
     /// 整数最適化では根と各ノードの LP は二段解法を warm start で解き直す (この指定は LP のときだけ効く)。
@@ -138,11 +213,11 @@ impl PyModel {
     /// Python の `Model.solve` は既定で `true` を渡す (案内とまとめの行は Python 側で出す)。
     ///
     /// 目的関数が未設定なら `ValueError`。
-    #[pyo3(signature = (root_solver=None, distinguish_infeasible_unbounded=false, time_limit=None, mip_rel_gap=None, node_limit=None, threads=None, log=false))]
+    #[pyo3(signature = (lp_solver=None, distinguish_infeasible_unbounded=false, time_limit=None, mip_rel_gap=None, node_limit=None, threads=None, log=false))]
     fn solve<'py>(
         &self,
         py: Python<'py>,
-        root_solver: Option<&str>,
+        lp_solver: Option<&str>,
         distinguish_infeasible_unbounded: bool,
         time_limit: Option<f64>,
         mip_rel_gap: Option<f64>,
@@ -153,7 +228,7 @@ impl PyModel {
         let objective = self.objective.as_ref().ok_or_else(|| {
             PyValueError::new_err("no objective set: call Model.set_objective(...) before solve()")
         })?;
-        let root_solver = match root_solver {
+        let root_solver = match lp_solver {
             Some(s) => RootSolver::parse(s)?,
             None => RootSolver::Auto,
         };

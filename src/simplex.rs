@@ -67,6 +67,18 @@ use crate::sparse::{CscMat, CsrMat, csr_row_iter, sparse_axpy_dense, sparse_dot_
 use crate::types::{ConstraintRow, Objective, RowSense, Sense, Status, VariableData};
 use crate::params::simplex::{COST_PERTURB_BASE, COST_PERTURB_BOXED_FRACTION, COST_PERTURB_ZERO_COST_SCALE, COST_PERTURB_FEW_BOXED_COST_CAP, COST_PERTURB_LARGE_COST, EXPAND_DELTA_0, EXPAND_DELTA_F, EXPAND_K, EXPAND_TAU, FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MAX_UPDATES, FT_MIN_PIVOT, FT_RESIDUAL_TOL, MAX_ITERS_CEILING, MAX_ITERS_FLOOR, MAX_ITERS_SCALE, PARALLEL_COMPONENT_MIN_VARS, PARTIAL_PRICING_GROUPS, PARTIAL_PRICING_THRESHOLD, PRESOLVE_ROUNDS, PRIMAL_HARRIS_TOL, PRIMAL_STALL_LIMIT_MIN, PRIMAL_STALL_LIMIT_PER_ROW, PROPAGATION_PASSES, RACE_MIN_ROWS, RAYON_SIZE_THRESHOLD, XO_SERIAL_NNZ, XO_SPLIT_MIN_VARS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, RUIZ_ITERS, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL, UPDATE_VERIFY_TOL};
 
+/// 厳密な DSE の重み ([`DseState::from_basis`]) の行ごとの BTRAN を、期限で打ち切るかを返す関数 (32 行ごとに呼ぶ)。期限は単体法の打ち切り条件
+/// ([`slope_intercept_dual::ext_control`] の時刻の上限) とスレッドの期限・取り消し ([`crate::cancel::is_cancelled`])。
+/// 打ち切ったら残りの行は単位重み (続く反復の確認が同じ期限で求解を止める)。見なかった版では、行 5.5 万の
+/// cryptanalysiskb128n5obj16 の 1 スレッドで、ダイビングの LP の作り直しの後の重みの計算が期限の後も数秒回り、時間の上限を
+/// 0.5〜8.8 秒越えていた (analysis/hang_20261117/README.md)。期限を過ぎたときだけ道筋が変わる。
+/// `ENOMOTO_DSE_NO_DEADLINE` で見ない (直す前と同じ、切り分け用)
+fn dse_past_deadline_fn() -> impl Fn() -> bool {
+    let on = env_str!("ENOMOTO_DSE_NO_DEADLINE").is_none();
+    let dl = slope_intercept_dual::ext_control().and_then(|c| c.deadline);
+    move || on && (dl.is_some_and(|d| std::time::Instant::now() >= d) || crate::cancel::is_cancelled())
+}
+
 /// Markowitz ピボットの疎 LU と Forrest-Tomlin 更新。このファイル内では
 /// 厳密な DSE 重みの 1 行分 `||B^-T e_i||^2` を超疎の単位 BTRAN で求める ([`DseState::from_basis_sparse`]・
 /// [`DseState::from_basis_stoppable`]・[`DseState::fill_missing`] が使う。`ENOMOTO_DSE_EXACT_SPARSE=0` なら呼ばない)。
@@ -2171,14 +2183,21 @@ impl DseState {
         let mut z = vec![0.0; m];
         // 疎な単位ベクトル BTRAN は更新なしの分解でのみ正確なので、更新済みなら
         // 通常の密な BTRAN を使う。
+        let past = dse_past_deadline_fn();
         if lu.update_count() == 0 {
             for i in 0..m {
+                if i & 31 == 0 && past() {
+                    break;
+                }
                 lu.solve_transpose_unit_into(i, &mut scratch, &mut z);
                 let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
                 w[i] = norm_sq.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
             }
         } else {
             for i in 0..m {
+                if i & 31 == 0 && past() {
+                    break;
+                }
                 lu.solve_transpose_unit(i, &mut scratch, &mut z);
                 let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
                 w[i] = norm_sq.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
@@ -2196,7 +2215,12 @@ impl DseState {
         let mut et = vec![0.0; m];
         let mut work = sparse_lu::UnitBtranWork::new(m);
         let (mut nnz, mut hyper) = (0u64, 0u64);
+        let past = dse_past_deadline_fn();
         for i in 0..m {
+            // 期限を過ぎたら残りの行は単位重みのまま返す ([`dse_past_deadline_fn`])
+            if i & 31 == 0 && past() {
+                break;
+            }
             let (norm_sq, nz, hy) = dse_exact_row_sparse(lu, i, &mut out, &mut et, &mut work);
             nnz += nz as u64;
             hyper += hy as u64;

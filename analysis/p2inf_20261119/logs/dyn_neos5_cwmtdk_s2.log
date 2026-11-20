@@ -1,0 +1,1303 @@
+MIP: VUBAGG 0 columns x = y from variable upper bound rows (0.00s)
+MIP_FOLD: integer groups: 0 accepted, 0 rejected (V_R rows 60; rejected for V_R 0, non-±1 0, TU 0; net true accepted by net 0 work 0 over 0, panics 0, cert fails 0)
+MIP_FOLD: no fold (n 63 m 63) in 0.001s (reason line 526, ratio 0.984)
+MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+MIP: presolve: rows 63 -> 63, free columns 63 -> 63, nonzeros 2016 -> 2016, postsolve steps 0 (parallel columns merged: 0 integer, 0 continuous)
+MIP: early probing: 53 probed, 0 of 63 free columns fixed (0.00s), not used
+MIP: LP probing pass 1: 35 candidates, 0 fixings (16 LPs, 209 iters, 0.01s)
+MIP: LP probing: tried 8 columns, fixed 0, LP 1.3000000000e1 -> 1.3000000000e1 (16 LPs, 209 iters, 0.01s, PREPAR 4 threads, 1 windows)
+MIP: LP probing: root LP 0.00s (64 iters, size 2142), tried 8, fixed 0, basis passed false, total 273 iters 0.01s
+MIP: probing: 53 of 53 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 0 implications (0.01s, cpu 0.00s, work 0, pwork 49396, chg 0)
+MIP: probing: PREPAR 4 threads, 2 windows, 53 of 53 probes from the windows
+MIP: probing: 0 equivalent binary pairs
+MIP: presolve: 0 dominated binaries fixed (0.00s)
+MIP: presolve: sparsified 0 rows (late)
+MIP: sparsify-late stats m 63 n 63 bincols 53 changed 0 binonly 0 shrunk<=1 0 nnz 2016 -> 2016 gate 0.000 (f 0.000 b 0.000)
+HNFPRE: round 0 eq 0 int_eq 0 rat_skip 0 comps 0 done 0 gave_up 0 cols 0 rank 0 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.000s) gave_up_why 0/0/0
+HNFPRE: round 0 tightened 0 columns
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 53
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (0 edges, 0.00s)
+MIP: symmetry: SYMSIGN true SYMSCALE false: flipped 0, scaled 0, tie rows doubled 0 of 63 rows for the detection
+MIP: symmetry: refinement 0.00s, work 12474 (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)
+MIP: symmetry: SYMPRE probe: 20 cells, 20 done as orbits, 2 probes, 2 generators (0.000s)
+MIP: symmetry: refinements stopped by the iteration cap 0 of 5 (ENOMOTO_MIP_HO6_SYMREFINE true)
+MIP: symmetry: orbital fixing with 2 of 2 generators
+MIP: symmetry: ORBPP 0 of 0 orbitopes static (packing, >= 3 rows, >= 10 columns), fixed 0 columns to 0
+MIP: symmetry: 2 generators, 20 orbits on 48 columns, 0 lex-leader rows (0.00s, work 37482, search 0, verify 4284, detect 0.00s, refine 0.00s, log work 97962)
+MIP: objective step with implied integers: None (without: None); costed non-integer columns 10 (e.g. [(53, 1.0, 0.0, 1.0, 32), (54, 1.0, 0.0, 1.0, 32), (55, 1.0, 0.0, 1.0, 32), (56, 1.0, 0.0, 1.0, 32), (57, 1.0, 0.0, 1.0, 32)])
+MIP: OBJINT c: lattice None (offset 0.0000000000e0), step None
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: root LP basis from the presolve LP probing: none
+MIP: solving the root LP (0.00s)
+MIP: FJ problem (FJ_P3): rows 63 -> 63, free columns 63 -> 63, 0 continuous bounds tightened (0.00s)
+MIP: root LP 1.3000000000e1 (64 iters, 0.00s)
+MIP: root LP size: rows 63, free columns 63, nonzeros 2016
+MIP: root LP work: 0.001329 tick-s (64 iters, 0.003s)
+MIP: oneopt improved 3.5250000000e1 -> 1.7250000000e1
+MIP: fixed-integer LP dual check: c x 1.7250000000e1, dual bound 1.3000000000e1 -> solve
+MIP: fixed-integer LP improved incumbent 1.7250000000e1 -> 1.7000000000e1
+MIP:   global fixed integers 0 of 53 (newly 0 since the root LP)
+MIP: new incumbent 1.7000000000e1 at node 0 (0.00s) [tree]
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+CUTMIX types restarts 0 m 63 n 63 vbrow 0.000 vbcol 0.000 fc 0 fcnode 0 cont 0.159 genint 0.000 knap 0.000 knaptight 0.000 knapgub 0.000 knapgubcol 0.000 mixknap 0.000 setp 0.048 introw 0.048 intsmall 0.048 flow 0.000
+MIP: clique graph: 0 edges (0 from rows, probing implications 0)
+CLQSIG s 0.0000 sp 0.0000 ed 0.0000 fr 0.0000 vi 0.0000 (rows 63 bin 53 edges 0 frac 35) a 1.8 b 0.41 f 0.3234
+MIP: clique sigmoid: f 0.3234, clique cuts per root round 32
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: robust cut LP cap: size false, double false, progress true
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MCF detect: rows 63 cols 63 | flow cands 0 flow rows 0 commodities 0 cap cands 0 arcs 0 nodes 0 incons 0.00 undirected | fail 'no flow rows' | networks [] fc_network false | 0.000s
+MIP: cut selection probe: compared at 2 rounds (pool stopped early), probe wall 0.05s (budget 30.0s)
+MIP: cut selection probe (6 rounds): default 2 cuts gain 1.666667e-1 (0.00s), pool 2 cuts gain 1.666667e-1 (0.00s) -> default (rule rate, probe 0.01s in total, 0.06s)
+MIP: cut round 0: 1 cuts (of 70, sep 0.01s, LP 11 iters), LP rows 64 (cut rows mean nnz 63), obj 1.3166666667e1 (0.06s)
+MIP: OBJPROBE r: round 0: randomized rounding none (incumbent Some(17.0) -> Some(17.0), 0.00s, 0.06s)
+MIP: Local-MIP solution accepted false (0.06s)
+MIP: cut round 1: root cut time cap check: clock 0.004s of cap 60.00s (min rounds 8)
+MIP: cut round 1: 1 cuts (of 72, sep 0.01s, LP 4 iters), LP rows 65 (cut rows mean nnz 60), obj 1.3166666667e1 (0.08s)
+MIP: fixed-integer LP dual check: c x 1.6500000000e1, dual bound 1.6500000000e1 -> skip
+MIP:   global fixed integers 0 of 53 (newly 0 since the root LP)
+MIP: new incumbent 1.6500000000e1 at node 0 (0.08s) [tree]
+MIP: OBJPROBE r: round 1: randomized rounding found a solution (incumbent Some(17.0) -> Some(16.50000000000011), 0.00s, 0.08s)
+MIP: cut round 2: root cut time cap check: clock 0.006s of cap 60.00s (min rounds 8)
+MIP: cut round 2: mpsep gate: optimal face width 48 (threshold 32, 63 rows) -> wide
+MIP: cut round 2: 1 cuts (of 44, sep 0.00s, LP 5 iters), LP rows 66 (cut rows mean nnz 56), obj 1.3166666667e1 (0.08s)
+MIP: OBJPROBE r: round 2: randomized rounding none (incumbent Some(16.50000000000011) -> Some(16.50000000000011), 0.00s, 0.08s)
+MIP: cut round 3: root cut time cap check: clock 0.015s of cap 60.00s (min rounds 8)
+MIP: cut round 3: 1 cuts (of 44, sep 0.01s, LP 37 iters), LP rows 67 (cut rows mean nnz 54), obj 1.3166666667e1 (0.09s)
+MIP: fixed-integer LP dual check: c x 1.5500000000e1, dual bound 1.5500000000e1 -> skip
+MIP:   global fixed integers 0 of 53 (newly 0 since the root LP)
+MIP: new incumbent 1.5500000000e1 at node 0 (0.09s) [tree]
+MIP: OBJPROBE r: round 3: randomized rounding found a solution (incumbent Some(16.50000000000011) -> Some(15.499999999999968), 0.00s, 0.09s)
+MIP: cut round 4: root cut time cap check: clock 0.024s of cap 60.00s (min rounds 8)
+MIP: cut round 4: 1 cuts (of 46, sep 0.01s, LP 19 iters), LP rows 67 (cut rows mean nnz 52), obj 1.3166666667e1 (0.10s)
+MIP: OBJPROBE r: round 4: randomized rounding none (incumbent Some(15.499999999999968) -> Some(15.499999999999968), 0.00s, 0.10s)
+MIP: cut round 5: root cut time cap check: clock 0.033s of cap 60.00s (min rounds 8)
+MIP: cut round 5: 1 cuts (of 42, sep 0.01s, LP 21 iters), LP rows 68 (cut rows mean nnz 54), obj 1.3167553191e1 (0.10s)
+MIP: OBJPROBE r: round 5: randomized rounding none (incumbent Some(15.499999999999968) -> Some(15.499999999999968), 0.00s, 0.10s)
+MIP: cut round 6: root cut time cap check: clock 0.041s of cap 60.00s (min rounds 8)
+MIP: cut round 6: mpsep gate: optimal face width 4 (threshold 32, 63 rows) -> narrow; stop
+MIP: cut round 6: 1 cuts (of 46, sep 0.00s, LP 6 iters), LP rows 69 (cut rows mean nnz 53), obj 1.3171052632e1 (0.11s)
+MIP: OBJPROBE r: round 6: randomized rounding none (incumbent Some(15.499999999999968) -> Some(15.499999999999968), 0.00s, 0.11s)
+MIP: cut round 7: root cut time cap check: clock 0.043s of cap 60.00s (min rounds 8)
+MIP: cut round 7: 1 cuts (of 74, sep 0.00s, LP 11 iters), LP rows 70 (cut rows mean nnz 54), obj 1.3213652482e1 (0.11s)
+MIP: OBJPROBE r: round 7: randomized rounding none (incumbent Some(15.499999999999968) -> Some(15.499999999999968), 0.00s, 0.11s)
+MIP: cut round 8: root cut time cap check: clock 0.047s of cap 60.00s (min rounds 8)
+MIP: cut round 8: 1 cuts (of 74, sep 0.00s, LP 9 iters), LP rows 71 (cut rows mean nnz 55), obj 1.3231913278e1 (0.11s)
+MIP: OBJPROBE r: round 8: randomized rounding none (incumbent Some(15.499999999999968) -> Some(15.499999999999968), 0.00s, 0.12s)
+MIP: cut round 9: root cut time cap check: clock 0.051s of cap 60.00s (min rounds 8)
+MIP: cut round 9: 1 cuts (of 78, sep 0.00s, LP 21 iters), LP rows 71 (cut rows mean nnz 55), obj 1.3276870379e1 (0.12s)
+MIP: OBJPROBE r: round 9: randomized rounding none (incumbent Some(15.499999999999968) -> Some(15.499999999999968), 0.00s, 0.12s)
+MIP: cut round 10: root cut time cap check: clock 0.056s of cap 60.00s (min rounds 8)
+MIP: cut round 10: 1 cuts (of 76, sep 0.00s, LP 4 iters), LP rows 70 (cut rows mean nnz 52), obj 1.3276870379e1 (0.13s)
+MIP: cut round 11: root cut time cap check: clock 0.058s of cap 60.00s (min rounds 8)
+MIP: cut round 11: 1 cuts (of 46, sep 0.00s, LP 15 iters), LP rows 71 (cut rows mean nnz 54), obj 1.3284737881e1 (0.13s)
+MIP: cut round 12: root cut time cap check: clock 0.060s of cap 60.00s (min rounds 8)
+MIP: cut round 12: 1 cuts (of 76, sep 0.00s, LP 8 iters), LP rows 70 (cut rows mean nnz 56), obj 1.3288700336e1 (0.13s)
+MIP: cut round 13: root cut time cap check: clock 0.062s of cap 60.00s (min rounds 8)
+MIP: cut round 13: 1 cuts (of 72, sep 0.00s, LP 17 iters), LP rows 71 (cut rows mean nnz 56), obj 1.3311788318e1 (0.13s)
+MIP: cut round 14: root cut time cap check: clock 0.064s of cap 60.00s (min rounds 8)
+MIP: cut round 14: 1 cuts (of 86, sep 0.00s, LP 10 iters), LP rows 72 (cut rows mean nnz 56), obj 1.3322457035e1 (0.14s)
+MIP: cut round 15: root cut time cap check: clock 0.066s of cap 60.00s (min rounds 8)
+MIP: cut round 15: 1 cuts (of 84, sep 0.00s, LP 12 iters), LP rows 73 (cut rows mean nnz 56), obj 1.3335095301e1 (0.14s)
+MIP: cut round 16: root cut time cap check: clock 0.068s of cap 60.00s (min rounds 8)
+MIP: cut round 16: 1 cuts (of 84, sep 0.00s, LP 6 iters), LP rows 74 (cut rows mean nnz 56), obj 1.3343638381e1 (0.15s)
+MIP: cut round 17: root cut time cap check: clock 0.071s of cap 60.00s (min rounds 8)
+MIP: cut round 17: 1 cuts (of 76, sep 0.00s, LP 10 iters), LP rows 75 (cut rows mean nnz 56), obj 1.3353754921e1 (0.15s)
+MIP: cut round 18: root cut time cap check: clock 0.073s of cap 60.00s (min rounds 8)
+MIP: cut round 18: 1 cuts (of 74, sep 0.00s, LP 7 iters), LP rows 76 (cut rows mean nnz 56), obj 1.3367294706e1 (0.16s)
+MIP: cut round 19: root cut time cap check: clock 0.076s of cap 60.00s (min rounds 8)
+MIP: cut round 19: 1 cuts (of 70, sep 0.00s, LP 15 iters), LP rows 77 (cut rows mean nnz 56), obj 1.3384255243e1 (0.16s)
+MIP: cut round 20: root cut time cap check: clock 0.079s of cap 60.00s (min rounds 8)
+MIP: cut round 20: 1 cuts (of 74, sep 0.00s, LP 6 iters), LP rows 78 (cut rows mean nnz 56), obj 1.3388728409e1 (0.16s)
+MIP: cut round 21: root cut time cap check: clock 0.082s of cap 60.00s (min rounds 8)
+MIP: cut round 21: 1 cuts (of 82, sep 0.01s, LP 9 iters), LP rows 79 (cut rows mean nnz 56), obj 1.3396264575e1 (0.17s)
+MIP: cut round 22: root cut time cap check: clock 0.084s of cap 60.00s (min rounds 8)
+MIP: cut round 22: 1 cuts (of 72, sep 0.00s, LP 16 iters), LP rows 79 (cut rows mean nnz 56), obj 1.3404225362e1 (0.18s)
+MIP: cut round 23: root cut time cap check: clock 0.088s of cap 60.00s (min rounds 8)
+MIP: cut round 23: 1 cuts (of 78, sep 0.00s, LP 9 iters), LP rows 80 (cut rows mean nnz 56), obj 1.3410703642e1 (0.18s)
+MIP: cut round 24: root cut time cap check: clock 0.090s of cap 60.00s (min rounds 8)
+MIP: cut round 24: 1 cuts (of 74, sep 0.00s, LP 9 iters), LP rows 80 (cut rows mean nnz 57), obj 1.3413357044e1 (0.19s)
+MIP: mpsep: 4 rounds with extra points, 4 points, 168 extra candidates, chosen 4 cuts (0 do not cut x*), 0.013s
+SEP cmirdelta: calls 2620 with_new 46 new_deltas 138 wins 4 (g 0 c 0 l 4, no_old 0) mean_gain 1.168 cands_new 4 chosen 0/25 eff_new 0.0000 eff_all 0.0456 time 0.001s
+MIP: cut loop done: 25 cuts added, 16 in LP, pool 72 cuts (4311 nonzeros), obj 1.3000000000e1 -> 1.3413357044e1
+MIP: LMBOOST: not used (Local-MIP improvements 0, last at 0.00s, incumbent only from the FJ thread false, gap 0.135, 0.19s)
+MIP: Local-MIP solution accepted false (0.19s)
+MIP: ROOTSTOP b: newly fixed 0 + fixable by reduced costs 0 at the background cut start, restart not expected; background cuts started (0.19s)
+MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 1000, work_iters: 20000, rate: 0.0, cont: true, gap_eps: 0.0 } (root LP 64 iters)
+MIP: background cuts: basis with the column values not passed (root LP 0.00s)
+MIP: early root reduced costs stored (0 newly fixed integer columns, 0.19s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic rounding: none (0.00s)
+MIP: root heuristic shifting: none (0.00s)
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: root heuristic int shifting: none (0.00s)
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+CUTMIX types restarts 0 m 63 n 63 vbrow 0.000 vbcol 0.000 fc 0 fcnode 0 cont 0.159 genint 0.000 knap 0.000 knaptight 0.000 knapgub 0.000 knapgubcol 0.000 mixknap 0.000 setp 0.048 introw 0.048 intsmall 0.048 flow 0.000
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: root heuristic randomized rounding: none (0.00s)
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MCF detect: rows 63 cols 63 | flow cands 0 flow rows 0 commodities 0 cap cands 0 arcs 0 nodes 0 incons 0.00 undirected | fail 'no flow rows' | networks [] fc_network false | 0.000s
+MIP:   interior rounding: 1 interior points, vertex true (0.01s)
+MIP:   interior rounding: 1 rounded points tried, found false
+MIP: root heuristic interior rounding: none (0.01s)
+MIP:   root reduced cost: 17 lurking bounds, fixing rate 0.32, free columns 0.7302
+MIP:   parallel sub-MIP started (root reduced cost): 46 free columns of 63
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   parallel sub-MIP started (LP face): 41 free columns of 63
+MIP:   LP face: 17 of 53 integer columns fixed, found false
+MIP: root heuristic LP face: none (0.00s)
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 36
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 36
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 20
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 5
+MIP: fixed-charge check: vb rows 0 of 57, continuous with vb 0 of 10
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 16
+MIP: fixed-charge check: vb rows 0 of 54, continuous with vb 0 of 10
+MIP:   sub-MIP: 30 free columns of 63, status NodeLimit, nodes 53, objective Some(15.5), 0.21s, 2180 LP iterations, TICKS cpu 0.252 lp 766317 prop 283850 sep 3588639 pre 10490 heur 0 node 46608 lpit 7197 lu 24736105 lum 2420501
+MIP:   SUBFIX RENS try 1: target 0.60, fixing rate 0.62, depth 33, 0 backtracks, 20 free integer columns of 53, status Some(NodeLimit), nodes 53, accepted false, 0.21s (dive+sub 0.21s)
+MIP:   SUBFIX RENS found nothing; running the default RENS as well
+MIP: root heuristic RENS: none (0.21s)
+MIP:   locks: fixing rate 0.92
+MIP:   parallel sub-MIP started (locks): 14 free columns of 63
+MIP: root heuristic locks: none (0.00s)
+MIP: root heuristic clique: none (0.00s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   parallel sub-MIP (LP face): status NodeLimit, nodes 75, objective Some(14.9999999999998), 0.21s
+MIP: fixed-integer LP dual check: c x 1.5000000000e1, dual bound 1.3413357044e1 -> solve
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+MIP:   global fixed integers 0 of 53 (newly 0 since the root LP)
+MIP: new incumbent 1.5000000000e1 at node 0 (0.41s) [LP face]
+MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.00s
+MIP:   parallel sub-MIP (root reduced cost): status NodeLimit, nodes 76, objective Some(15.499999999999734), 0.22s
+MIP:   RINS (HiGHS fill): fixing rate 0.32 from agreeing columns, 0.32 after fill (53 free integer columns)
+MIP:   RINS skipped: fixing rate 0.32 below 0.50 (S4_RINSRATE)
+MIP: root heuristic RINS: none (0.00s)
+MIP: after root heuristics: incumbent Some(14.9999999999998) (0.42s)
+MIP: background cuts: determ: waited 0.04s (safety cap 179.87s, done, background end own stall), 35 rounds, 349 LP iters (0.35 x 1000 of cap 20000), obj Some(13.487640746904821) (0.46s)
+MIP: background cuts: rounds so far [13.4 at 0.19s, 13.4 at 0.20s, 13.4 at 0.21s, 13.4 at 0.22s, 13.4 at 0.23s, 13.4 at 0.23s, 13.5 at 0.25s, 13.5 at 0.26s, 13.5 at 0.27s, 13.5 at 0.28s, 13.5 at 0.29s, 13.5 at 0.30s, 13.5 at 0.30s, 13.5 at 0.32s, 13.5 at 0.32s, 13.5 at 0.33s, 13.5 at 0.34s, 13.5 at 0.35s, 13.5 at 0.36s, 13.5 at 0.36s, 13.5 at 0.37s, 13.5 at 0.38s, 13.5 at 0.39s, 13.5 at 0.39s, 13.5 at 0.40s, 13.5 at 0.41s, 13.5 at 0.41s, 13.5 at 0.42s, 13.5 at 0.43s, 13.5 at 0.43s, 13.5 at 0.44s, 13.5 at 0.44s, 13.5 at 0.45s, 13.5 at 0.46s, 13.5 at 0.46s]
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (0.46s)
+MIP: background cuts: LP solve time with the replaced cuts 0.001s
+MIP: background cuts: LP with the replaced cuts: Optimal, 1 iters (0.46s)
+MIP: background cuts: 35 rounds, 20 cut rows (was 16), obj 1.3413357044e1 -> 1.3487640747e1 (waited 0.04s, 0.46s)
+MIP: root reduced costs re-stored after the background cuts (0 newly fixed integer columns)
+MIP: root objective probing: skipped (gap 1.008e-1 (LP 1.3487640747e1, incumbent 1.5000000000e1), 36 fractional binaries)
+MIP: GAP1 u: LP probing skipped (gap 1.008e-1)
+MIP: restart check: newly fixed 0, integer columns 53, free at the root 53, threshold 0.5, root LP 0.00s
+TRSTAT: tree start outer 0.48 solve 0.46 restarts 0 lb 1.3000000000e1 ub 1.5000000000e1
+MIP: 1 of 4 tree threads take the heuristic role once a solution exists
+MIP: tree search with 4 threads (0.52s)
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 29
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 24
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: CWM: theta center [0.0, 0.0, 0.0] -> [0.12, 0.021, -0.13999999999999999] after 32 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 29
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: CWM: theta center [0.12, 0.021, -0.13999999999999999] -> [0.1, 0.03, -0.20999999999999996] after 64 observations
+MIP: CWM: theta center [0.1, 0.03, -0.20999999999999996] -> [0.14, 0.009000000000000001, -0.08399999999999999] after 96 observations
+MIP:   sub-MIP: 39 free columns of 63, status TimeLimit, nodes 408, objective Some(15.500000000000004), 0.26s, 8121 LP iterations, TICKS cpu 0.300 lp 1599616 prop 570565 sep 2395871 pre 10524 heur 0 node 63630 lpit 11003 lu 43469865 lum 3782338
+MIP:   SUBFIX tree RINS try 1: target 0.60, fixing rate 0.44, depth 23, 0 backtracks, 29 free integer columns of 52, status Some(TimeLimit), nodes 408, accepted false, 0.26s (dive+sub 0.26s)
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP: NODECNT root gate: cut rows 13, matched root cuts 7, tight 0, tight path 0 (share 0.000); root chosen 25 (path 9); node path aggregation on
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 24
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+MIP: CWM: theta center [0.14, 0.009000000000000001, -0.08399999999999999] -> [0.14, 0.0, -0.041999999999999996] after 128 observations
+MIP: CWM: theta center [0.14, 0.0, -0.041999999999999996] -> [0.1, 0.003, 0.013999999999999999] after 160 observations
+MIP: CWM: theta center [0.1, 0.003, 0.013999999999999999] -> [0.04, -0.003, -0.013999999999999999] after 192 observations
+MIP: CWM: theta center [0.04, -0.003, -0.013999999999999999] -> [0.02, 0.0, 0.013999999999999999] after 224 observations
+TRSTAT: due outer 1.25 solve 1.23 root 0.46 tree 0.77 restarts 0 nodes 2934 open 397 q 0.0126 est 10796197 est_left 60.34 est_left_h 2835.6 lb 1.3750000000e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.333e-2 newly 0/53 (0.0000) cuts 5/63 tcuts 3 rowdrop 0 est_r 60.34 left 598.7 guard stop K
+MIP: CWM: theta center [0.02, 0.0, 0.013999999999999999] -> [0.08, 0.0, 0.041999999999999996] after 256 observations
+MIP: CWM: theta center [0.08, 0.0, 0.041999999999999996] -> [0.06, 0.0, -0.027999999999999997] after 288 observations
+MIP: CWM: theta center [0.06, 0.0, -0.027999999999999997] -> [0.04, -0.003, -0.013999999999999999] after 320 observations
+TRSTAT: due outer 1.37 solve 1.35 root 0.46 tree 0.89 restarts 0 nodes 4296 open 561 q 0.0137 est 1268752 est_left 64.17 est_left_h 261.9 lb 1.3750000000e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.333e-2 newly 0/53 (0.0000) cuts 7/63 tcuts 2 rowdrop 0 est_r 110.50 left 598.6 guard stop K
+MIP: CWM: theta center [0.04, -0.003, -0.013999999999999999] -> [0.04, 0.0, -0.013999999999999999] after 352 observations
+MIP: CWM: theta center [0.04, 0.0, -0.013999999999999999] -> [0.0, -0.003, -0.027999999999999997] after 384 observations
+MIP: CWM: theta center [0.0, -0.003, -0.027999999999999997] -> [-0.1, -0.003, -0.027999999999999997] after 416 observations
+MIP: CWM: theta center [-0.1, -0.003, -0.027999999999999997] -> [-0.06, -0.012, 0.0] after 448 observations
+TRSTAT: due outer 1.56 solve 1.55 root 0.46 tree 1.08 restarts 0 nodes 5680 open 721 q 0.0140 est 3995169 est_left 76.13 est_left_h 760.1 lb 1.3750000000e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.333e-2 newly 0/53 (0.0000) cuts 12/63 tcuts 7 rowdrop 0 est_r inf left 598.4 guard stop K
+MIP: CWM: theta center [-0.06, -0.012, 0.0] -> [-0.06, -0.015, 0.013999999999999999] after 480 observations
+MIP: CWM: theta center [-0.06, -0.015, 0.013999999999999999] -> [-0.08, -0.015, 0.013999999999999999] after 512 observations
+MIP: CWM: theta center [-0.08, -0.015, 0.013999999999999999] -> [-0.06, -0.015, 0.013999999999999999] after 544 observations
+MIP: CWM: theta center [-0.06, -0.015, 0.013999999999999999] -> [-0.02, -0.012, 0.013999999999999999] after 576 observations
+TRSTAT: due outer 1.77 solve 1.75 root 0.46 tree 1.29 restarts 0 nodes 7101 open 876 q 0.0173 est 434624 est_left 73.26 est_left_h 77.5 lb 1.3750000000e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.333e-2 newly 0/53 (0.0000) cuts 14/63 tcuts 4 rowdrop 0 est_r 62.03 left 598.2 guard stop K
+MIP: CWM: theta center [-0.02, -0.012, 0.013999999999999999] -> [-0.02, -0.012, 0.027999999999999997] after 608 observations
+MIP: CWM: theta center [-0.02, -0.012, 0.027999999999999997] -> [-0.04, -0.018000000000000002, 0.0] after 640 observations
+MIP: CWM: theta center [-0.04, -0.018000000000000002, 0.0] -> [0.0, -0.018000000000000002, 0.06999999999999999] after 672 observations
+MIP: CWM: theta center [0.0, -0.018000000000000002, 0.06999999999999999] -> [0.0, -0.021, 0.055999999999999994] after 704 observations
+TRSTAT: due outer 1.99 solve 1.97 root 0.46 tree 1.50 restarts 0 nodes 8591 open 980 q 0.0190 est 867195 est_left 77.74 est_left_h 150.3 lb 1.3750000000e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.333e-2 newly 0/53 (0.0000) cuts 20/63 tcuts 9 rowdrop 0 est_r 124.51 left 598.0 guard stop K
+MIP: CWM: theta center [0.0, -0.021, 0.055999999999999994] -> [-0.02, -0.021, 0.041999999999999996] after 736 observations
+MIP:     2.01s nodes     1855 open     227 lb 1.37500000e1 ub 1.50000000e1 lp_iters 36817 sb_iters 13601 sb_lps 500 sb_secs 0.37 node_iters 20386 (first 19566, lps 1769) heur_iters 20590 dive_iters 1057 lp_rows 82 node_cut_secs 0.06 pool_len 0 pool_idle 0
+MIP: CWM: theta center [-0.02, -0.021, 0.041999999999999996] -> [0.02, -0.03, 0.055999999999999994] after 768 observations
+MIP: CWM: theta center [0.02, -0.03, 0.055999999999999994] -> [0.02, -0.048, 0.055999999999999994] after 800 observations
+MIP: CWM: theta center [0.02, -0.048, 0.055999999999999994] -> [0.04, -0.033, 0.055999999999999994] after 832 observations
+TRSTAT: due outer 2.20 solve 2.18 root 0.46 tree 1.71 restarts 0 nodes 10158 open 1091 q 0.0207 est 878629 est_left 80.90 est_left_h 146.5 lb 1.3750000000e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.333e-2 newly 0/53 (0.0000) cuts 14/63 tcuts 5 rowdrop 0 est_r 116.45 left 597.8 guard stop K
+MIP: CWM: theta center [0.04, -0.033, 0.055999999999999994] -> [-0.02, -0.03, 0.041999999999999996] after 864 observations
+MIP: CWM: theta center [-0.02, -0.03, 0.041999999999999996] -> [0.0, -0.036000000000000004, 0.041999999999999996] after 896 observations
+MIP: CWM: theta center [0.0, -0.036000000000000004, 0.041999999999999996] -> [0.02, -0.039, 0.041999999999999996] after 928 observations
+MIP: CWM: theta center [0.02, -0.039, 0.041999999999999996] -> [-0.02, -0.051000000000000004, 0.055999999999999994] after 960 observations
+TRSTAT: due outer 2.41 solve 2.39 root 0.46 tree 1.93 restarts 0 nodes 11821 open 1238 q 0.0211 est 5142281 est_left 89.55 est_left_h 835.8 lb 1.3750000000e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.333e-2 newly 0/53 (0.0000) cuts 17/63 tcuts 4 rowdrop 0 est_r inf left 597.6 guard stop K
+MIP: CWM: theta center [-0.02, -0.051000000000000004, 0.055999999999999994] -> [-0.02, -0.048, 0.055999999999999994] after 992 observations
+MIP: CWM: theta center [-0.02, -0.048, 0.055999999999999994] -> [-0.04, -0.048, 0.055999999999999994] after 1024 observations
+MIP: CWM: theta center [-0.04, -0.048, 0.055999999999999994] -> [-0.08, -0.042, 0.041999999999999996] after 1056 observations
+MIP: CWM: theta center [-0.08, -0.042, 0.041999999999999996] -> [-0.1, -0.039, 0.041999999999999996] after 1088 observations
+MIP: CWM: theta center [-0.1, -0.039, 0.041999999999999996] -> [-0.1, -0.042, 0.027999999999999997] after 1120 observations
+TRSTAT: due outer 2.66 solve 2.64 root 0.46 tree 2.17 restarts 0 nodes 13659 open 1392 q 0.0228 est 1047891 est_left 93.25 est_left_h 164.6 lb 1.3750000000e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.333e-2 newly 0/53 (0.0000) cuts 13/63 tcuts 5 rowdrop 0 est_r 140.07 left 597.3 guard stop K
+MIP: CWM: theta center [-0.1, -0.042, 0.027999999999999997] -> [-0.08, -0.042, 0.0] after 1152 observations
+MIP: CWM: theta center [-0.08, -0.042, 0.0] -> [-0.12, -0.039, 0.0] after 1184 observations
+MIP: CWM: theta center [-0.12, -0.039, 0.0] -> [-0.1, -0.033, 0.041999999999999996] after 1216 observations
+MIP: CWM: theta center [-0.1, -0.033, 0.041999999999999996] -> [-0.1, -0.03, 0.041999999999999996] after 1248 observations
+MIP: CWM: theta center [-0.1, -0.03, 0.041999999999999996] -> [-0.1, -0.036000000000000004, 0.041999999999999996] after 1280 observations
+MIP: CWM: theta center [-0.1, -0.036000000000000004, 0.041999999999999996] -> [-0.1, -0.024, 0.041999999999999996] after 1312 observations
+TRSTAT: due outer 2.98 solve 2.96 root 0.46 tree 2.50 restarts 0 nodes 15694 open 1571 q 0.0252 est 841321 est_left 96.76 est_left_h 131.5 lb 1.3750000000e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.333e-2 newly 0/53 (0.0000) cuts 22/63 tcuts 13 rowdrop 0 est_r 132.30 left 597.0 guard stop K
+MIP: CWM: theta center [-0.1, -0.024, 0.041999999999999996] -> [-0.1, -0.006, 0.0] after 1344 observations
+MIP: CWM: theta center [-0.1, -0.006, 0.0] -> [-0.12, 0.024, -0.027999999999999997] after 1376 observations
+MIP: CWM: theta center [-0.12, 0.024, -0.027999999999999997] -> [-0.08, 0.03, -0.041999999999999996] after 1408 observations
+MIP: CWM: theta center [-0.08, 0.03, -0.041999999999999996] -> [-0.08, 0.009000000000000001, -0.027999999999999997] after 1440 observations
+MIP: CWM: theta center [-0.08, 0.009000000000000001, -0.027999999999999997] -> [-0.1, 0.018000000000000002, 0.0] after 1472 observations
+TRSTAT: due outer 3.26 solve 3.25 root 0.46 tree 2.78 restarts 0 nodes 17708 open 1741 q 0.0272 est 1000473 est_left 99.60 est_left_h 154.4 lb 1.3750000000e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.333e-2 newly 0/53 (0.0000) cuts 33/63 tcuts 8 rowdrop 0 est_r 138.05 left 596.7 guard stop K
+MIP: CWM: theta center [-0.1, 0.018000000000000002, 0.0] -> [0.02, 0.018000000000000002, 0.0] after 1504 observations
+MIP: CWM: theta center [0.02, 0.018000000000000002, 0.0] -> [0.04, 0.024, 0.041999999999999996] after 1536 observations
+MIP: CWM: theta center [0.04, 0.024, 0.041999999999999996] -> [-0.02, 0.027, 0.041999999999999996] after 1568 observations
+MIP: CWM: theta center [-0.02, 0.027, 0.041999999999999996] -> [0.0, 0.021, 0.041999999999999996] after 1600 observations
+MIP: CWM: theta center [0.0, 0.021, 0.041999999999999996] -> [-0.02, 0.021, 0.013999999999999999] after 1632 observations
+MIP: CWM: theta center [-0.02, 0.021, 0.013999999999999999] -> [0.0, 0.021, -0.013999999999999999] after 1664 observations
+TRSTAT: due outer 3.56 solve 3.55 root 0.46 tree 3.08 restarts 0 nodes 19821 open 1912 q 0.0307 est 604084 est_left 97.39 est_left_h 90.8 lb 1.3750000000e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.333e-2 newly 0/53 (0.0000) cuts 26/63 tcuts 8 rowdrop 0 est_r 83.01 left 596.4 guard stop K
+MIP: CWM: theta center [0.0, 0.021, -0.013999999999999999] -> [0.0, 0.015, -0.013999999999999999] after 1696 observations
+MIP: CWM: theta center [0.0, 0.015, -0.013999999999999999] -> [-0.04, 0.015, -0.027999999999999997] after 1728 observations
+MIP: CWM: theta center [-0.04, 0.015, -0.027999999999999997] -> [-0.02, 0.015, -0.041999999999999996] after 1760 observations
+MIP: CWM: theta center [-0.02, 0.015, -0.041999999999999996] -> [-0.02, 0.003, -0.041999999999999996] after 1792 observations
+MIP: CWM: theta center [-0.02, 0.003, -0.041999999999999996] -> [0.0, -0.015, -0.055999999999999994] after 1856 observations
+MIP: CWM: theta center [0.0, -0.015, -0.055999999999999994] -> [-0.04, -0.015, -0.06999999999999999] after 1888 observations
+MIP: CWM: theta center [-0.04, -0.015, -0.06999999999999999] -> [-0.14, -0.006, -0.06999999999999999] after 1920 observations
+TRSTAT: due outer 3.99 solve 3.97 root 0.46 tree 3.51 restarts 0 nodes 22753 open 2126 q 0.0361 est 1445541 est_left 93.50 est_left_h 219.2 lb 1.3771356784e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.191e-2 newly 0/53 (0.0000) cuts 21/63 tcuts 6 rowdrop 0 est_r 74.76 left 596.0 guard stop K
+MIP: CWM: theta center [-0.14, -0.006, -0.06999999999999999] -> [-0.16, -0.003, -0.06999999999999999] after 1952 observations
+MIP:     4.01s nodes     5096 open     599 lb 1.37713568e1 ub 1.50000000e1 lp_iters 76232 sb_iters 13601 sb_lps 500 sb_secs 0.37 node_iters 58351 (first 56230, lps 4792) heur_iters 22104 dive_iters 1121 lp_rows 94 node_cut_secs 0.17 pool_len 0 pool_idle 0
+MIP: CWM: theta center [-0.16, -0.003, -0.06999999999999999] -> [-0.2, -0.003, -0.055999999999999994] after 1984 observations
+MIP: CWM: theta center [-0.2, -0.003, -0.055999999999999994] -> [-0.18, -0.009000000000000001, -0.06999999999999999] after 2016 observations
+MIP: CWM: theta center [-0.18, -0.009000000000000001, -0.06999999999999999] -> [-0.24, -0.012, -0.06999999999999999] after 2048 observations
+MIP: CWM: theta center [-0.24, -0.012, -0.06999999999999999] -> [-0.18, -0.006, -0.041999999999999996] after 2080 observations
+MIP: CWM: theta center [-0.18, -0.006, -0.041999999999999996] -> [-0.16, -0.006, -0.041999999999999996] after 2112 observations
+MIP: CWM: theta center [-0.16, -0.006, -0.041999999999999996] -> [-0.02, -0.009000000000000001, -0.041999999999999996] after 2144 observations
+TRSTAT: due outer 4.38 solve 4.36 root 0.46 tree 3.89 restarts 0 nodes 25307 open 2312 q 0.0381 est 3292031 est_left 98.32 est_left_h 502.5 lb 1.3771356784e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.191e-2 newly 0/53 (0.0000) cuts 28/63 tcuts 11 rowdrop 0 est_r 191.12 left 595.6 guard stop K
+MIP: CWM: theta center [-0.02, -0.009000000000000001, -0.041999999999999996] -> [-0.04, -0.003, 0.013999999999999999] after 2176 observations
+MIP: CWM: theta center [-0.04, -0.003, 0.013999999999999999] -> [0.0, -0.003, 0.041999999999999996] after 2208 observations
+MIP: CWM: theta center [0.0, -0.003, 0.041999999999999996] -> [-0.06, 0.003, -0.027999999999999997] after 2240 observations
+MIP: CWM: theta center [-0.06, 0.003, -0.027999999999999997] -> [0.0, 0.012, -0.041999999999999996] after 2272 observations
+MIP: CWM: theta center [0.0, 0.012, -0.041999999999999996] -> [0.14, 0.006, -0.055999999999999994] after 2304 observations
+MIP: CWM: theta center [0.14, 0.006, -0.055999999999999994] -> [0.24, 0.021, -0.06999999999999999] after 2336 observations
+MIP: CWM: theta center [0.24, 0.021, -0.06999999999999999] -> [0.2, 0.027, -0.08399999999999999] after 2368 observations
+MIP: CWM: theta center [0.2, 0.027, -0.08399999999999999] -> [0.26, 0.021, -0.055999999999999994] after 2400 observations
+MIP: CWM: theta center [0.26, 0.021, -0.055999999999999994] -> [0.2, 0.021, -0.041999999999999996] after 2432 observations
+MIP: CWM: theta center [0.2, 0.021, -0.041999999999999996] -> [0.22, 0.018000000000000002, -0.041999999999999996] after 2464 observations
+MIP: CWM: theta center [0.22, 0.018000000000000002, -0.041999999999999996] -> [0.14, 0.024, -0.041999999999999996] after 2496 observations
+MIP: CWM: theta center [0.14, 0.024, -0.041999999999999996] -> [0.1, 0.018000000000000002, -0.041999999999999996] after 2528 observations
+MIP: CWM: theta center [0.1, 0.018000000000000002, -0.041999999999999996] -> [0.06, 0.018000000000000002, -0.041999999999999996] after 2560 observations
+MIP: CWM: theta center [0.06, 0.018000000000000002, -0.041999999999999996] -> [0.02, 0.018000000000000002, -0.041999999999999996] after 2592 observations
+MIP: CWM: theta center [0.02, 0.018000000000000002, -0.041999999999999996] -> [0.06, 0.015, -0.027999999999999997] after 2624 observations
+MIP: CWM: theta center [0.06, 0.015, -0.027999999999999997] -> [0.06, 0.006, -0.013999999999999999] after 2656 observations
+MIP: CWM: theta center [0.06, 0.006, -0.013999999999999999] -> [0.02, 0.015, 0.013999999999999999] after 2688 observations
+TRSTAT: due outer 5.30 solve 5.29 root 0.46 tree 4.82 restarts 0 nodes 31426 open 2755 q 0.0516 est 1481974 est_left 88.57 est_left_h 222.5 lb 1.3797222222e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 8.019e-2 newly 0/53 (0.0000) cuts 23/63 tcuts 7 rowdrop 0 est_r 65.04 left 594.7 guard stop K
+MIP: CWM: theta center [0.02, 0.015, 0.013999999999999999] -> [-0.04, 0.009000000000000001, 0.041999999999999996] after 2720 observations
+MIP: CWM: theta center [-0.04, 0.009000000000000001, 0.041999999999999996] -> [0.02, -0.006, 0.08399999999999999] after 2752 observations
+MIP: CWM: theta center [0.02, -0.006, 0.08399999999999999] -> [-0.02, -0.024, 0.013999999999999999] after 2784 observations
+MIP: CWM: theta center [-0.02, -0.024, 0.013999999999999999] -> [-0.06, -0.024, 0.126] after 2816 observations
+MIP: CWM: theta center [-0.06, -0.024, 0.126] -> [-0.04, -0.012, 0.06999999999999999] after 2848 observations
+MIP: CWM: theta center [-0.04, -0.012, 0.06999999999999999] -> [-0.02, -0.009000000000000001, 0.08399999999999999] after 2880 observations
+MIP: CWM: theta center [-0.02, -0.009000000000000001, 0.08399999999999999] -> [-0.02, -0.009000000000000001, 0.055999999999999994] after 2912 observations
+MIP: CWM: theta center [-0.02, -0.009000000000000001, 0.055999999999999994] -> [0.02, -0.015, 0.055999999999999994] after 2944 observations
+MIP: CWM: theta center [0.02, -0.015, 0.055999999999999994] -> [0.02, -0.021, 0.041999999999999996] after 2976 observations
+MIP: CWM: theta center [0.02, -0.021, 0.041999999999999996] -> [0.02, -0.027, 0.041999999999999996] after 3008 observations
+MIP: CWM: theta center [0.02, -0.027, 0.041999999999999996] -> [0.0, -0.027, 0.041999999999999996] after 3040 observations
+MIP: CWM: theta center [0.0, -0.027, 0.041999999999999996] -> [0.0, -0.021, 0.041999999999999996] after 3072 observations
+MIP: CWM: theta center [0.0, -0.021, 0.041999999999999996] -> [0.06, -0.018000000000000002, 0.041999999999999996] after 3104 observations
+MIP: CWM: theta center [0.06, -0.018000000000000002, 0.041999999999999996] -> [0.02, -0.018000000000000002, 0.041999999999999996] after 3136 observations
+MIP:     6.02s nodes     8060 open     895 lb 1.38333333e1 ub 1.50000000e1 lp_iters 111219 sb_iters 13601 sb_lps 500 sb_secs 0.38 node_iters 92146 (first 88885, lps 7450) heur_iters 23357 dive_iters 1182 lp_rows 96 node_cut_secs 0.25 pool_len 0 pool_idle 0
+MIP: CWM: theta center [0.02, -0.018000000000000002, 0.041999999999999996] -> [0.0, -0.018000000000000002, 0.041999999999999996] after 3168 observations
+MIP: CWM: theta center [0.0, -0.018000000000000002, 0.041999999999999996] -> [0.04, -0.015, 0.013999999999999999] after 3200 observations
+MIP: CWM: theta center [0.04, -0.015, 0.013999999999999999] -> [-0.02, -0.018000000000000002, -0.041999999999999996] after 3232 observations
+MIP: CWM: theta center [-0.02, -0.018000000000000002, -0.041999999999999996] -> [-0.02, -0.021, 0.0] after 3264 observations
+TRSTAT: due outer 6.28 solve 6.26 root 0.46 tree 5.79 restarts 0 nodes 37839 open 3106 q 0.0653 est 1420351 est_left 82.97 est_left_h 211.7 lb 1.3833333333e1 root_lb 1.3000000000e1 ub 1.5000000000e1 gap 7.778e-2 newly 0/53 (0.0000) cuts 29/63 tcuts 4 rowdrop 0 est_r 66.59 left 593.7 guard stop K
+MIP: CWM: theta center [-0.02, -0.021, 0.0] -> [-0.04, -0.018000000000000002, 0.0] after 3296 observations
+MIP: CWM: theta center [-0.04, -0.018000000000000002, 0.0] -> [-0.06, -0.012, 0.0] after 3328 observations
+MIP: CWM: theta center [-0.06, -0.012, 0.0] -> [-0.02, -0.021, -0.013999999999999999] after 3360 observations
+MIP: CWM: theta center [-0.02, -0.021, -0.013999999999999999] -> [-0.1, -0.018000000000000002, 0.0] after 3392 observations
+MIP: CWM: theta center [-0.1, -0.018000000000000002, 0.0] -> [-0.08, -0.015, -0.013999999999999999] after 3424 observations
+MIP: CWM: theta center [-0.08, -0.015, -0.013999999999999999] -> [-0.08, -0.015, -0.055999999999999994] after 3456 observations
+MIP: CWM: theta center [-0.08, -0.015, -0.055999999999999994] -> [-0.04, -0.015, -0.027999999999999997] after 3488 observations
+MIP: CWM: theta center [-0.04, -0.015, -0.027999999999999997] -> [-0.08, -0.024, -0.041999999999999996] after 3520 observations
+MIP: CWM: theta center [-0.08, -0.024, -0.041999999999999996] -> [-0.04, -0.018000000000000002, -0.06999999999999999] after 3552 observations
+MIP: CWM: theta center [-0.04, -0.018000000000000002, -0.06999999999999999] -> [-0.04, -0.021, -0.08399999999999999] after 3584 observations
+MIP: CWM: theta center [-0.04, -0.021, -0.08399999999999999] -> [0.02, -0.012, -0.08399999999999999] after 3616 observations
+MIP: CWM: theta center [0.02, -0.012, -0.08399999999999999] -> [0.02, -0.018000000000000002, -0.11199999999999999] after 3648 observations
+MIP: CWM: theta center [0.02, -0.018000000000000002, -0.11199999999999999] -> [-0.04, -0.018000000000000002, -0.09799999999999999] after 3680 observations
+MIP: CWM: theta center [-0.04, -0.018000000000000002, -0.09799999999999999] -> [-0.02, -0.024, -0.09799999999999999] after 3712 observations
+MIP: CWM: theta center [-0.02, -0.024, -0.09799999999999999] -> [-0.02, -0.021, -0.08399999999999999] after 3744 observations
+MIP: CWM: theta center [-0.02, -0.021, -0.08399999999999999] -> [-0.02, -0.024, -0.06999999999999999] after 3776 observations
+MIP: CWM: theta center [-0.02, -0.024, -0.06999999999999999] -> [0.0, -0.024, -0.055999999999999994] after 3808 observations
+MIP: CWM: theta center [0.0, -0.024, -0.055999999999999994] -> [0.0, -0.021, -0.041999999999999996] after 3840 observations
+MIP: CWM: theta center [0.0, -0.021, -0.041999999999999996] -> [-0.04, -0.018000000000000002, -0.041999999999999996] after 3872 observations
+MIP: CWM: theta center [-0.04, -0.018000000000000002, -0.041999999999999996] -> [-0.06, -0.021, -0.055999999999999994] after 3904 observations
+MIP: CWM: theta center [-0.06, -0.021, -0.055999999999999994] -> [-0.04, -0.018000000000000002, -0.027999999999999997] after 3936 observations
+MIP: CWM: theta center [-0.04, -0.018000000000000002, -0.027999999999999997] -> [-0.06, -0.015, -0.027999999999999997] after 3968 observations
+MIP: CWM: theta center [-0.06, -0.015, -0.027999999999999997] -> [-0.02, -0.018000000000000002, -0.013999999999999999] after 4000 observations
+MIP: CWM: theta center [-0.02, -0.018000000000000002, -0.013999999999999999] -> [-0.06, -0.018000000000000002, -0.027999999999999997] after 4032 observations
+MIP: CWM: theta center [-0.06, -0.018000000000000002, -0.027999999999999997] -> [0.0, -0.018000000000000002, -0.027999999999999997] after 4064 observations
+MIP: CWM: theta center [0.0, -0.018000000000000002, -0.027999999999999997] -> [0.0, -0.015, -0.013999999999999999] after 4096 observations
+MIP: CWM: theta center [0.0, -0.015, -0.013999999999999999] -> [-0.02, -0.012, -0.013999999999999999] after 4128 observations
+MIP: CWM: theta center [-0.02, -0.012, -0.013999999999999999] -> [0.02, -0.009000000000000001, -0.013999999999999999] after 4160 observations
+MIP: CWM: theta center [0.02, -0.009000000000000001, -0.013999999999999999] -> [0.02, -0.003, 0.013999999999999999] after 4192 observations
+MIP: CWM: theta center [0.02, -0.003, 0.013999999999999999] -> [0.02, -0.009000000000000001, 0.013999999999999999] after 4224 observations
+MIP: CWM: theta center [0.02, -0.009000000000000001, 0.013999999999999999] -> [0.06, -0.006, -0.013999999999999999] after 4256 observations
+MIP: CWM: theta center [0.06, -0.006, -0.013999999999999999] -> [0.2, -0.009000000000000001, 0.013999999999999999] after 4288 observations
+MIP:     8.04s nodes    10824 open    1000 lb 1.40645161e1 ub 1.50000000e1 lp_iters 142985 sb_iters 13601 sb_lps 500 sb_secs 0.39 node_iters 122829 (first 118704, lps 9828) heur_iters 24457 dive_iters 1199 lp_rows 108 node_cut_secs 0.32 pool_len 103 pool_idle 0
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 53
+MIP: fixed-charge check: vb rows 0 of 64, continuous with vb 0 of 10
+MIP: CWM: theta center [0.2, -0.009000000000000001, 0.013999999999999999] -> [0.12, -0.012, 0.013999999999999999] after 4320 observations
+MIP: CWM: theta center [0.12, -0.012, 0.013999999999999999] -> [0.1, -0.006, 0.013999999999999999] after 4352 observations
+MIP: CWM: theta center [0.1, -0.006, 0.013999999999999999] -> [0.06, 0.0, 0.027999999999999997] after 4384 observations
+MIP: CWM: theta center [0.06, 0.0, 0.027999999999999997] -> [0.06, -0.003, 0.0] after 4416 observations
+MIP: CWM: theta center [0.06, -0.003, 0.0] -> [0.06, -0.009000000000000001, 0.013999999999999999] after 4448 observations
+MIP: CWM: theta center [0.06, -0.009000000000000001, 0.013999999999999999] -> [0.04, -0.006, 0.013999999999999999] after 4480 observations
+MIP: CWM: theta center [0.04, -0.006, 0.013999999999999999] -> [0.1, -0.006, 0.0] after 4512 observations
+MIP: CWM: theta center [0.1, -0.006, 0.0] -> [0.1, 0.0, -0.027999999999999997] after 4544 observations
+MIP: CWM: theta center [0.1, 0.0, -0.027999999999999997] -> [0.1, 0.012, 0.0] after 4576 observations
+MIP: CWM: theta center [0.1, 0.012, 0.0] -> [0.1, 0.015, -0.013999999999999999] after 4608 observations
+MIP: CWM: theta center [0.1, 0.015, -0.013999999999999999] -> [0.08, 0.006, -0.013999999999999999] after 4640 observations
+MIP: CWM: theta center [0.08, 0.006, -0.013999999999999999] -> [-0.02, 0.009000000000000001, -0.013999999999999999] after 4672 observations
+MIP: CWM: theta center [-0.02, 0.009000000000000001, -0.013999999999999999] -> [0.02, 0.015, 0.0] after 4736 observations
+MIP: CWM: theta center [0.02, 0.015, 0.0] -> [0.08, 0.009000000000000001, 0.0] after 4768 observations
+MIP: CWM: theta center [0.08, 0.009000000000000001, 0.0] -> [0.12, 0.009000000000000001, 0.0] after 4800 observations
+MIP: CWM: theta center [0.12, 0.009000000000000001, 0.0] -> [0.04, 0.018000000000000002, 0.027999999999999997] after 4832 observations
+MIP: CWM: theta center [0.04, 0.018000000000000002, 0.027999999999999997] -> [0.04, 0.015, 0.013999999999999999] after 4864 observations
+MIP: CWM: theta center [0.04, 0.015, 0.013999999999999999] -> [0.0, 0.006, 0.0] after 4896 observations
+MIP: CWM: theta center [0.0, 0.006, 0.0] -> [-0.04, 0.015, 0.013999999999999999] after 4928 observations
+MIP: CWM: theta center [-0.04, 0.015, 0.013999999999999999] -> [-0.04, 0.012, 0.013999999999999999] after 4960 observations
+MIP: CWM: theta center [-0.04, 0.012, 0.013999999999999999] -> [-0.04, 0.006, 0.013999999999999999] after 4992 observations
+MIP: CWM: theta center [-0.04, 0.006, 0.013999999999999999] -> [-0.06, 0.003, 0.027999999999999997] after 5024 observations
+MIP: CWM: theta center [-0.06, 0.003, 0.027999999999999997] -> [-0.02, 0.006, 0.0] after 5056 observations
+MIP: CWM: theta center [-0.02, 0.006, 0.0] -> [0.02, 0.003, 0.0] after 5088 observations
+MIP: CWM: theta center [0.02, 0.003, 0.0] -> [0.02, -0.006, -0.013999999999999999] after 5120 observations
+MIP: CWM: theta center [0.02, -0.006, -0.013999999999999999] -> [0.02, -0.015, 0.0] after 5152 observations
+MIP: CWM: theta center [0.02, -0.015, 0.0] -> [0.0, -0.012, 0.013999999999999999] after 5184 observations
+MIP: CWM: theta center [0.0, -0.012, 0.013999999999999999] -> [0.06, -0.012, 0.0] after 5216 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 53
+MIP: fixed-charge check: vb rows 0 of 64, continuous with vb 0 of 10
+MIP: CWM: theta center [0.06, -0.012, 0.0] -> [0.14, -0.012, 0.027999999999999997] after 5248 observations
+MIP: CWM: theta center [0.14, -0.012, 0.027999999999999997] -> [0.14, -0.009000000000000001, 0.013999999999999999] after 5280 observations
+MIP: CWM: theta center [0.14, -0.009000000000000001, 0.013999999999999999] -> [0.16, -0.018000000000000002, -0.013999999999999999] after 5312 observations
+MIP:   sub-MIP: 63 free columns of 63, status TimeLimit, nodes 119, objective Some(16.000000000001396), 0.21s, 4934 LP iterations, TICKS cpu 0.300 lp 1789409 prop 131292 sep 4101655 pre 8402 heur 0 node 15113 lpit 4959 lu 51981268 lum 2080257
+MIP:   local branching k=18: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+MIP: CWM: theta center [0.16, -0.018000000000000002, -0.013999999999999999] -> [0.08, -0.009000000000000001, 0.013999999999999999] after 5344 observations
+MIP:    10.04s nodes    13266 open     990 lb 1.39285714e1 ub 1.50000000e1 lp_iters 173191 sb_iters 13601 sb_lps 500 sb_secs 0.39 node_iters 151923 (first 146714, lps 11944) heur_iters 30533 dive_iters 1229 lp_rows 121 node_cut_secs 0.38 pool_len 347 pool_idle 0
+MIP: CWM: theta center [0.08, -0.009000000000000001, 0.013999999999999999] -> [0.08, -0.003, 0.013999999999999999] after 5376 observations
+MIP: CWM: theta center [0.08, -0.003, 0.013999999999999999] -> [0.08, 0.0, 0.013999999999999999] after 5408 observations
+MIP: CWM: theta center [0.08, 0.0, 0.013999999999999999] -> [0.08, -0.003, 0.013999999999999999] after 5440 observations
+MIP: CWM: theta center [0.08, -0.003, 0.013999999999999999] -> [0.08, 0.003, 0.0] after 5472 observations
+MIP: CWM: theta center [0.08, 0.003, 0.0] -> [0.06, 0.006, -0.027999999999999997] after 5504 observations
+MIP: CWM: theta center [0.06, 0.006, -0.027999999999999997] -> [0.06, 0.015, -0.055999999999999994] after 5536 observations
+MIP: CWM: theta center [0.06, 0.015, -0.055999999999999994] -> [0.06, 0.036000000000000004, -0.013999999999999999] after 5568 observations
+MIP: CWM: theta center [0.06, 0.036000000000000004, -0.013999999999999999] -> [0.02, 0.039, -0.027999999999999997] after 5600 observations
+MIP: CWM: theta center [0.02, 0.039, -0.027999999999999997] -> [-0.06, 0.033, -0.027999999999999997] after 5632 observations
+MIP: CWM: theta center [-0.06, 0.033, -0.027999999999999997] -> [-0.06, 0.03, -0.013999999999999999] after 5664 observations
+MIP: CWM: theta center [-0.06, 0.03, -0.013999999999999999] -> [-0.12, 0.024, 0.0] after 5696 observations
+MIP: CWM: theta center [-0.12, 0.024, 0.0] -> [-0.08, 0.033, 0.013999999999999999] after 5728 observations
+MIP: CWM: theta center [-0.08, 0.033, 0.013999999999999999] -> [-0.14, 0.027, 0.0] after 5760 observations
+MIP: CWM: theta center [-0.14, 0.027, 0.0] -> [-0.08, 0.021, 0.0] after 5792 observations
+MIP: CWM: theta center [-0.08, 0.021, 0.0] -> [-0.06, 0.027, 0.0] after 5824 observations
+MIP: CWM: theta center [-0.06, 0.027, 0.0] -> [-0.04, 0.024, 0.041999999999999996] after 5888 observations
+MIP: CWM: theta center [-0.04, 0.024, 0.041999999999999996] -> [-0.04, 0.021, 0.055999999999999994] after 5920 observations
+MIP: CWM: theta center [-0.04, 0.021, 0.055999999999999994] -> [-0.06, 0.015, 0.041999999999999996] after 5952 observations
+MIP: CWM: theta center [-0.06, 0.015, 0.041999999999999996] -> [-0.02, 0.009000000000000001, 0.08399999999999999] after 5984 observations
+MIP: CWM: theta center [-0.02, 0.009000000000000001, 0.08399999999999999] -> [0.04, 0.0, 0.055999999999999994] after 6016 observations
+MIP: CWM: theta center [0.04, 0.0, 0.055999999999999994] -> [0.02, 0.003, 0.055999999999999994] after 6048 observations
+MIP: CWM: theta center [0.02, 0.003, 0.055999999999999994] -> [-0.02, 0.009000000000000001, 0.0] after 6080 observations
+MIP: CWM: theta center [-0.02, 0.009000000000000001, 0.0] -> [0.0, 0.006, -0.013999999999999999] after 6112 observations
+MIP: CWM: theta center [0.0, 0.006, -0.013999999999999999] -> [-0.04, 0.003, 0.0] after 6144 observations
+MIP: CWM: theta center [-0.04, 0.003, 0.0] -> [-0.02, 0.006, 0.0] after 6176 observations
+MIP: CWM: theta center [-0.02, 0.006, 0.0] -> [-0.08, -0.006, 0.013999999999999999] after 6208 observations
+MIP: CWM: theta center [-0.08, -0.006, 0.013999999999999999] -> [-0.1, -0.006, 0.0] after 6240 observations
+MIP: CWM: theta center [-0.1, -0.006, 0.0] -> [-0.06, -0.003, 0.0] after 6272 observations
+MIP: CWM: theta center [-0.06, -0.003, 0.0] -> [-0.1, -0.009000000000000001, -0.041999999999999996] after 6304 observations
+MIP: CWM: theta center [-0.1, -0.009000000000000001, -0.041999999999999996] -> [-0.1, -0.021, -0.055999999999999994] after 6368 observations
+MIP: CWM: theta center [-0.1, -0.021, -0.055999999999999994] -> [-0.1, -0.024, -0.041999999999999996] after 6400 observations
+MIP: CWM: theta center [-0.1, -0.024, -0.041999999999999996] -> [-0.08, -0.024, -0.041999999999999996] after 6432 observations
+MIP:    12.04s nodes    15788 open     991 lb 1.40000000e1 ub 1.50000000e1 lp_iters 204076 sb_iters 13601 sb_lps 500 sb_secs 0.40 node_iters 182780 (first 176519, lps 14121) heur_iters 30589 dive_iters 1257 lp_rows 99 node_cut_secs 0.45 pool_len 542 pool_idle 0
+MIP: CWM: theta center [-0.08, -0.024, -0.041999999999999996] -> [-0.06, -0.033, -0.055999999999999994] after 6464 observations
+MIP: CWM: theta center [-0.06, -0.033, -0.055999999999999994] -> [-0.04, -0.024, -0.09799999999999999] after 6496 observations
+MIP: CWM: theta center [-0.04, -0.024, -0.09799999999999999] -> [-0.08, -0.03, -0.09799999999999999] after 6528 observations
+MIP: CWM: theta center [-0.08, -0.03, -0.09799999999999999] -> [-0.06, -0.033, -0.13999999999999999] after 6560 observations
+MIP: CWM: theta center [-0.06, -0.033, -0.13999999999999999] -> [-0.06, -0.03, -0.19599999999999998] after 6592 observations
+MIP: CWM: theta center [-0.06, -0.03, -0.19599999999999998] -> [-0.04, -0.024, -0.15399999999999997] after 6624 observations
+MIP: CWM: theta center [-0.04, -0.024, -0.15399999999999997] -> [-0.04, -0.027, -0.13999999999999999] after 6656 observations
+MIP: CWM: theta center [-0.04, -0.027, -0.13999999999999999] -> [-0.02, -0.024, -0.126] after 6688 observations
+MIP: CWM: theta center [-0.02, -0.024, -0.126] -> [0.04, -0.021, -0.13999999999999999] after 6720 observations
+MIP: CWM: theta center [0.04, -0.021, -0.13999999999999999] -> [0.06, -0.015, -0.126] after 6752 observations
+MIP: CWM: theta center [0.06, -0.015, -0.126] -> [-0.04, -0.006, -0.126] after 6784 observations
+MIP: CWM: theta center [-0.04, -0.006, -0.126] -> [-0.08, -0.006, -0.126] after 6816 observations
+MIP: CWM: theta center [-0.08, -0.006, -0.126] -> [-0.04, 0.012, -0.11199999999999999] after 6848 observations
+MIP: CWM: theta center [-0.04, 0.012, -0.11199999999999999] -> [0.0, 0.009000000000000001, -0.06999999999999999] after 6880 observations
+MIP: CWM: theta center [0.0, 0.009000000000000001, -0.06999999999999999] -> [0.0, -0.003, -0.06999999999999999] after 6912 observations
+MIP: CWM: theta center [0.0, -0.003, -0.06999999999999999] -> [0.02, -0.003, -0.013999999999999999] after 6944 observations
+MIP: CWM: theta center [0.02, -0.003, -0.013999999999999999] -> [0.04, -0.003, 0.027999999999999997] after 6976 observations
+MIP: CWM: theta center [0.04, -0.003, 0.027999999999999997] -> [0.06, -0.009000000000000001, 0.027999999999999997] after 7008 observations
+MIP: CWM: theta center [0.06, -0.009000000000000001, 0.027999999999999997] -> [0.04, -0.003, 0.126] after 7040 observations
+MIP: CWM: theta center [0.04, -0.003, 0.126] -> [0.04, -0.006, 0.027999999999999997] after 7072 observations
+MIP: CWM: theta center [0.04, -0.006, 0.027999999999999997] -> [0.0, -0.009000000000000001, 0.027999999999999997] after 7104 observations
+MIP: CWM: theta center [0.0, -0.009000000000000001, 0.027999999999999997] -> [0.04, -0.003, 0.027999999999999997] after 7136 observations
+MIP: CWM: theta center [0.04, -0.003, 0.027999999999999997] -> [0.06, -0.003, 0.055999999999999994] after 7168 observations
+MIP: CWM: theta center [0.06, -0.003, 0.055999999999999994] -> [0.08, -0.006, 0.041999999999999996] after 7200 observations
+MIP: CWM: theta center [0.08, -0.006, 0.041999999999999996] -> [0.08, -0.006, 0.027999999999999997] after 7232 observations
+MIP: CWM: theta center [0.08, -0.006, 0.027999999999999997] -> [0.08, -0.012, 0.013999999999999999] after 7264 observations
+MIP: CWM: theta center [0.08, -0.012, 0.013999999999999999] -> [0.1, -0.006, 0.027999999999999997] after 7296 observations
+MIP: CWM: theta center [0.1, -0.006, 0.027999999999999997] -> [0.1, -0.009000000000000001, 0.041999999999999996] after 7328 observations
+MIP: CWM: theta center [0.1, -0.009000000000000001, 0.041999999999999996] -> [0.12, -0.015, 0.041999999999999996] after 7360 observations
+MIP: CWM: theta center [0.12, -0.015, 0.041999999999999996] -> [0.1, -0.009000000000000001, 0.06999999999999999] after 7392 observations
+MIP: CWM: theta center [0.1, -0.009000000000000001, 0.06999999999999999] -> [0.12, -0.006, 0.041999999999999996] after 7424 observations
+MIP:    14.06s nodes    18346 open     996 lb 1.40277778e1 ub 1.50000000e1 lp_iters 235181 sb_iters 13601 sb_lps 500 sb_secs 0.41 node_iters 213164 (first 205682, lps 16278) heur_iters 31324 dive_iters 1271 lp_rows 103 node_cut_secs 0.52 pool_len 1162 pool_idle 0
+MIP: CWM: theta center [0.12, -0.006, 0.041999999999999996] -> [0.14, -0.006, 0.055999999999999994] after 7456 observations
+MIP: CWM: theta center [0.14, -0.006, 0.055999999999999994] -> [0.16, -0.003, 0.055999999999999994] after 7488 observations
+MIP: CWM: theta center [0.16, -0.003, 0.055999999999999994] -> [0.16, -0.009000000000000001, 0.055999999999999994] after 7520 observations
+MIP: CWM: theta center [0.16, -0.009000000000000001, 0.055999999999999994] -> [0.14, -0.012, 0.027999999999999997] after 7552 observations
+MIP: CWM: theta center [0.14, -0.012, 0.027999999999999997] -> [0.14, -0.003, 0.013999999999999999] after 7584 observations
+MIP: CWM: theta center [0.14, -0.003, 0.013999999999999999] -> [0.16, -0.006, -0.013999999999999999] after 7616 observations
+MIP: CWM: theta center [0.16, -0.006, -0.013999999999999999] -> [0.14, -0.006, 0.0] after 7648 observations
+MIP: CWM: theta center [0.14, -0.006, 0.0] -> [0.16, -0.012, -0.013999999999999999] after 7680 observations
+MIP: CWM: theta center [0.16, -0.012, -0.013999999999999999] -> [0.16, -0.018000000000000002, -0.027999999999999997] after 7712 observations
+MIP: CWM: theta center [0.16, -0.018000000000000002, -0.027999999999999997] -> [0.16, -0.012, -0.027999999999999997] after 7744 observations
+MIP: CWM: theta center [0.16, -0.012, -0.027999999999999997] -> [0.1, -0.006, -0.055999999999999994] after 7776 observations
+MIP: CWM: theta center [0.1, -0.006, -0.055999999999999994] -> [0.16, 0.003, -0.055999999999999994] after 7808 observations
+MIP: CWM: theta center [0.16, 0.003, -0.055999999999999994] -> [0.18, -0.003, -0.06999999999999999] after 7840 observations
+MIP: CWM: theta center [0.18, -0.003, -0.06999999999999999] -> [0.16, 0.003, -0.126] after 7872 observations
+MIP: CWM: theta center [0.16, 0.003, -0.126] -> [0.16, -0.003, -0.06999999999999999] after 7904 observations
+MIP: CWM: theta center [0.16, -0.003, -0.06999999999999999] -> [0.1, -0.003, -0.06999999999999999] after 7936 observations
+MIP: CWM: theta center [0.1, -0.003, -0.06999999999999999] -> [0.08, 0.0, -0.055999999999999994] after 7968 observations
+MIP: CWM: theta center [0.08, 0.0, -0.055999999999999994] -> [0.02, -0.003, -0.027999999999999997] after 8000 observations
+MIP: CWM: theta center [0.02, -0.003, -0.027999999999999997] -> [0.06, 0.0, -0.041999999999999996] after 8032 observations
+MIP: CWM: theta center [0.06, 0.0, -0.041999999999999996] -> [0.06, 0.009000000000000001, -0.027999999999999997] after 8064 observations
+MIP: CWM: theta center [0.06, 0.009000000000000001, -0.027999999999999997] -> [-0.02, 0.015, -0.027999999999999997] after 8096 observations
+MIP: CWM: theta center [-0.02, 0.015, -0.027999999999999997] -> [-0.14, 0.024, -0.027999999999999997] after 8128 observations
+MIP: CWM: theta center [-0.14, 0.024, -0.027999999999999997] -> [-0.18, 0.018000000000000002, -0.041999999999999996] after 8160 observations
+MIP: CWM: theta center [-0.18, 0.018000000000000002, -0.041999999999999996] -> [-0.16, 0.018000000000000002, -0.041999999999999996] after 8192 observations
+MIP: CWM: theta center [-0.16, 0.018000000000000002, -0.041999999999999996] -> [-0.14, 0.012, -0.041999999999999996] after 8224 observations
+MIP: CWM: theta center [-0.14, 0.012, -0.041999999999999996] -> [-0.1, 0.006, -0.027999999999999997] after 8256 observations
+MIP: CWM: theta center [-0.1, 0.006, -0.027999999999999997] -> [-0.08, -0.003, -0.041999999999999996] after 8288 observations
+MIP: CWM: theta center [-0.08, -0.003, -0.041999999999999996] -> [-0.08, -0.009000000000000001, -0.055999999999999994] after 8320 observations
+MIP: CWM: theta center [-0.08, -0.009000000000000001, -0.055999999999999994] -> [-0.08, -0.012, -0.09799999999999999] after 8352 observations
+MIP: CWM: theta center [-0.08, -0.012, -0.09799999999999999] -> [-0.06, -0.03, -0.08399999999999999] after 8384 observations
+MIP: CWM: theta center [-0.06, -0.03, -0.08399999999999999] -> [-0.04, -0.057, -0.055999999999999994] after 8416 observations
+MIP:    16.06s nodes    20912 open     996 lb 1.40763889e1 ub 1.50000000e1 lp_iters 268060 sb_iters 13601 sb_lps 500 sb_secs 0.41 node_iters 244865 (first 236107, lps 18447) heur_iters 32524 dive_iters 1293 lp_rows 124 node_cut_secs 0.58 pool_len 1562 pool_idle 0
+MIP: CWM: theta center [-0.04, -0.057, -0.055999999999999994] -> [-0.08, -0.033, -0.041999999999999996] after 8448 observations
+MIP: CWM: theta center [-0.08, -0.033, -0.041999999999999996] -> [-0.1, -0.024, -0.041999999999999996] after 8480 observations
+MIP: CWM: theta center [-0.1, -0.024, -0.041999999999999996] -> [-0.04, -0.027, -0.041999999999999996] after 8512 observations
+MIP: CWM: theta center [-0.04, -0.027, -0.041999999999999996] -> [-0.04, -0.03, -0.055999999999999994] after 8544 observations
+MIP: CWM: theta center [-0.04, -0.03, -0.055999999999999994] -> [0.0, -0.048, -0.041999999999999996] after 8576 observations
+MIP: CWM: theta center [0.0, -0.048, -0.041999999999999996] -> [0.04, -0.045, -0.027999999999999997] after 8608 observations
+MIP: CWM: theta center [0.04, -0.045, -0.027999999999999997] -> [0.08, -0.045, -0.041999999999999996] after 8640 observations
+MIP: CWM: theta center [0.08, -0.045, -0.041999999999999996] -> [0.06, -0.042, -0.013999999999999999] after 8672 observations
+MIP: CWM: theta center [0.06, -0.042, -0.013999999999999999] -> [0.0, -0.036000000000000004, 0.0] after 8704 observations
+MIP: CWM: theta center [0.0, -0.036000000000000004, 0.0] -> [0.04, -0.033, 0.027999999999999997] after 8736 observations
+MIP: CWM: theta center [0.04, -0.033, 0.027999999999999997] -> [0.0, -0.039, 0.027999999999999997] after 8768 observations
+MIP: CWM: theta center [0.0, -0.039, 0.027999999999999997] -> [-0.04, -0.036000000000000004, 0.041999999999999996] after 8800 observations
+MIP: CWM: theta center [-0.04, -0.036000000000000004, 0.041999999999999996] -> [-0.06, -0.033, 0.0] after 8832 observations
+MIP: CWM: theta center [-0.06, -0.033, 0.0] -> [-0.02, -0.027, -0.013999999999999999] after 8864 observations
+MIP: CWM: theta center [-0.02, -0.027, -0.013999999999999999] -> [0.0, -0.03, 0.013999999999999999] after 8896 observations
+MIP: CWM: theta center [0.0, -0.03, 0.013999999999999999] -> [-0.02, -0.027, 0.0] after 8928 observations
+MIP: CWM: theta center [-0.02, -0.027, 0.0] -> [0.0, -0.024, 0.013999999999999999] after 8960 observations
+MIP: CWM: theta center [0.0, -0.024, 0.013999999999999999] -> [-0.04, -0.009000000000000001, 0.013999999999999999] after 8992 observations
+MIP: CWM: theta center [-0.04, -0.009000000000000001, 0.013999999999999999] -> [-0.06, 0.006, 0.027999999999999997] after 9024 observations
+MIP: CWM: theta center [-0.06, 0.006, 0.027999999999999997] -> [-0.14, -0.003, 0.013999999999999999] after 9056 observations
+MIP: CWM: theta center [-0.14, -0.003, 0.013999999999999999] -> [-0.08, 0.006, 0.0] after 9088 observations
+MIP: CWM: theta center [-0.08, 0.006, 0.0] -> [-0.1, 0.006, -0.013999999999999999] after 9120 observations
+MIP: CWM: theta center [-0.1, 0.006, -0.013999999999999999] -> [-0.06, -0.003, -0.041999999999999996] after 9152 observations
+MIP: CWM: theta center [-0.06, -0.003, -0.041999999999999996] -> [-0.04, 0.006, -0.055999999999999994] after 9184 observations
+MIP: CWM: theta center [-0.04, 0.006, -0.055999999999999994] -> [-0.04, 0.0, -0.08399999999999999] after 9216 observations
+MIP: CWM: theta center [-0.04, 0.0, -0.08399999999999999] -> [-0.04, 0.003, -0.08399999999999999] after 9248 observations
+MIP: CWM: theta center [-0.04, 0.003, -0.08399999999999999] -> [-0.04, 0.0, -0.08399999999999999] after 9280 observations
+MIP: CWM: theta center [-0.04, 0.0, -0.08399999999999999] -> [-0.08, -0.009000000000000001, -0.06999999999999999] after 9312 observations
+MIP: CWM: theta center [-0.08, -0.009000000000000001, -0.06999999999999999] -> [-0.08, 0.006, -0.041999999999999996] after 9344 observations
+MIP: CWM: theta center [-0.08, 0.006, -0.041999999999999996] -> [-0.1, 0.015, -0.08399999999999999] after 9376 observations
+MIP:    18.06s nodes    23211 open     987 lb 1.42278437e1 ub 1.50000000e1 lp_iters 297797 sb_iters 13601 sb_lps 500 sb_secs 0.42 node_iters 273381 (first 263452, lps 20392) heur_iters 33756 dive_iters 1304 lp_rows 134 node_cut_secs 0.64 pool_len 1853 pool_idle 0
+MIP: CWM: theta center [-0.1, 0.015, -0.08399999999999999] -> [-0.1, 0.018000000000000002, -0.08399999999999999] after 9408 observations
+MIP: CWM: theta center [-0.1, 0.018000000000000002, -0.08399999999999999] -> [-0.02, 0.018000000000000002, -0.06999999999999999] after 9440 observations
+MIP: CWM: theta center [-0.02, 0.018000000000000002, -0.06999999999999999] -> [0.0, 0.024, -0.06999999999999999] after 9472 observations
+MIP: CWM: theta center [0.0, 0.024, -0.06999999999999999] -> [0.02, 0.027, -0.06999999999999999] after 9504 observations
+MIP: CWM: theta center [0.02, 0.027, -0.06999999999999999] -> [0.0, 0.036000000000000004, -0.055999999999999994] after 9536 observations
+MIP: CWM: theta center [0.0, 0.036000000000000004, -0.055999999999999994] -> [-0.02, 0.042, -0.041999999999999996] after 9568 observations
+MIP: CWM: theta center [-0.02, 0.042, -0.041999999999999996] -> [-0.04, 0.045, -0.041999999999999996] after 9600 observations
+MIP: CWM: theta center [-0.04, 0.045, -0.041999999999999996] -> [-0.04, 0.033, -0.027999999999999997] after 9632 observations
+MIP: CWM: theta center [-0.04, 0.033, -0.027999999999999997] -> [-0.02, 0.027, -0.013999999999999999] after 9664 observations
+MIP: CWM: theta center [-0.02, 0.027, -0.013999999999999999] -> [-0.02, 0.021, 0.027999999999999997] after 9696 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 53
+MIP: fixed-charge check: vb rows 0 of 64, continuous with vb 0 of 10
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 21
+MIP: fixed-charge check: vb rows 0 of 53, continuous with vb 0 of 10
+MIP: CWM: theta center [-0.02, 0.021, 0.027999999999999997] -> [-0.04, 0.015, 0.0] after 9728 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 37
+MIP: fixed-charge check: vb rows 0 of 64, continuous with vb 0 of 10
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 37
+MIP: fixed-charge check: vb rows 0 of 64, continuous with vb 0 of 10
+MIP: CWM: theta center [-0.04, 0.015, 0.0] -> [0.02, 0.009000000000000001, 0.041999999999999996] after 9760 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 37
+MIP: fixed-charge check: vb rows 0 of 64, continuous with vb 0 of 10
+MIP: CWM: theta center [0.02, 0.009000000000000001, 0.041999999999999996] -> [-0.02, -0.024, 0.013999999999999999] after 9792 observations
+MIP: CWM: theta center [-0.02, -0.024, 0.013999999999999999] -> [0.02, -0.006, 0.013999999999999999] after 9824 observations
+MIP: CWM: theta center [0.02, -0.006, 0.013999999999999999] -> [0.0, -0.012, 0.013999999999999999] after 9856 observations
+MIP: CWM: theta center [0.0, -0.012, 0.013999999999999999] -> [-0.02, -0.006, 0.041999999999999996] after 9888 observations
+MIP: CWM: theta center [-0.02, -0.006, 0.041999999999999996] -> [0.02, -0.003, 0.08399999999999999] after 9920 observations
+MIP: CWM: theta center [0.02, -0.003, 0.08399999999999999] -> [0.02, -0.012, 0.08399999999999999] after 9952 observations
+MIP: CWM: theta center [0.02, -0.012, 0.08399999999999999] -> [0.02, -0.012, 0.09799999999999999] after 9984 observations
+MIP: CWM: theta center [0.02, -0.012, 0.09799999999999999] -> [0.02, -0.009000000000000001, 0.09799999999999999] after 10016 observations
+MIP: CWM: theta center [0.02, -0.009000000000000001, 0.09799999999999999] -> [0.04, -0.009000000000000001, 0.08399999999999999] after 10048 observations
+MIP: CWM: theta center [0.04, -0.009000000000000001, 0.08399999999999999] -> [0.12, -0.006, 0.09799999999999999] after 10080 observations
+MIP: CWM: theta center [0.12, -0.006, 0.09799999999999999] -> [0.12, -0.006, 0.11199999999999999] after 10112 observations
+MIP: CWM: theta center [0.12, -0.006, 0.11199999999999999] -> [0.1, 0.0, 0.08399999999999999] after 10144 observations
+MIP: CWM: theta center [0.1, 0.0, 0.08399999999999999] -> [0.18, 0.0, 0.06999999999999999] after 10176 observations
+MIP: CWM: theta center [0.18, 0.0, 0.06999999999999999] -> [0.22, 0.006, 0.09799999999999999] after 10208 observations
+MIP: CWM: theta center [0.22, 0.006, 0.09799999999999999] -> [0.12, 0.003, 0.06999999999999999] after 10240 observations
+MIP:    20.06s nodes    25248 open     994 lb 1.43798932e1 ub 1.50000000e1 lp_iters 326312 sb_iters 13601 sb_lps 500 sb_secs 0.43 node_iters 300519 (first 289426, lps 22159) heur_iters 35149 dive_iters 1320 lp_rows 101 node_cut_secs 0.70 pool_len 2149 pool_idle 0
+MIP: CWM: theta center [0.12, 0.003, 0.06999999999999999] -> [0.1, 0.006, 0.06999999999999999] after 10272 observations
+MIP: CWM: theta center [0.1, 0.006, 0.06999999999999999] -> [0.1, 0.006, 0.013999999999999999] after 10304 observations
+MIP: CWM: theta center [0.1, 0.006, 0.013999999999999999] -> [0.14, 0.012, -0.013999999999999999] after 10336 observations
+MIP: CWM: theta center [0.14, 0.012, -0.013999999999999999] -> [0.14, 0.027, -0.013999999999999999] after 10368 observations
+MIP: CWM: theta center [0.14, 0.027, -0.013999999999999999] -> [0.14, 0.024, -0.013999999999999999] after 10400 observations
+MIP: CWM: theta center [0.14, 0.024, -0.013999999999999999] -> [0.12, 0.021, -0.041999999999999996] after 10432 observations
+MIP: CWM: theta center [0.12, 0.021, -0.041999999999999996] -> [0.1, 0.027, -0.041999999999999996] after 10464 observations
+MIP: CWM: theta center [0.1, 0.027, -0.041999999999999996] -> [0.06, 0.027, -0.013999999999999999] after 10496 observations
+MIP: CWM: theta center [0.06, 0.027, -0.013999999999999999] -> [0.08, 0.015, -0.013999999999999999] after 10528 observations
+MIP: CWM: theta center [0.08, 0.015, -0.013999999999999999] -> [0.04, 0.015, 0.0] after 10560 observations
+MIP: CWM: theta center [0.04, 0.015, 0.0] -> [0.08, 0.009000000000000001, 0.027999999999999997] after 10592 observations
+MIP: CWM: theta center [0.08, 0.009000000000000001, 0.027999999999999997] -> [0.08, 0.006, 0.013999999999999999] after 10624 observations
+MIP: CWM: theta center [0.08, 0.006, 0.013999999999999999] -> [0.14, 0.009000000000000001, 0.027999999999999997] after 10656 observations
+MIP: CWM: theta center [0.14, 0.009000000000000001, 0.027999999999999997] -> [0.16, 0.009000000000000001, 0.0] after 10688 observations
+MIP: CWM: theta center [0.16, 0.009000000000000001, 0.0] -> [0.12, 0.009000000000000001, 0.0] after 10720 observations
+MIP: CWM: theta center [0.12, 0.009000000000000001, 0.0] -> [0.12, 0.006, -0.013999999999999999] after 10752 observations
+MIP: CWM: theta center [0.12, 0.006, -0.013999999999999999] -> [0.16, 0.003, -0.027999999999999997] after 10784 observations
+MIP: CWM: theta center [0.16, 0.003, -0.027999999999999997] -> [0.14, 0.009000000000000001, -0.027999999999999997] after 10816 observations
+MIP: CWM: theta center [0.14, 0.009000000000000001, -0.027999999999999997] -> [0.14, 0.009000000000000001, -0.013999999999999999] after 10848 observations
+MIP: CWM: theta center [0.14, 0.009000000000000001, -0.013999999999999999] -> [0.12, 0.006, -0.055999999999999994] after 10880 observations
+MIP: CWM: theta center [0.12, 0.006, -0.055999999999999994] -> [0.1, 0.006, -0.041999999999999996] after 10912 observations
+MIP: CWM: theta center [0.1, 0.006, -0.041999999999999996] -> [0.08, 0.015, -0.041999999999999996] after 10944 observations
+MIP: CWM: theta center [0.08, 0.015, -0.041999999999999996] -> [0.06, 0.018000000000000002, -0.041999999999999996] after 10976 observations
+MIP: CWM: theta center [0.06, 0.018000000000000002, -0.041999999999999996] -> [0.0, 0.036000000000000004, -0.041999999999999996] after 11008 observations
+MIP: CWM: theta center [0.0, 0.036000000000000004, -0.041999999999999996] -> [0.0, 0.024, -0.041999999999999996] after 11040 observations
+MIP: CWM: theta center [0.0, 0.024, -0.041999999999999996] -> [-0.04, 0.021, -0.041999999999999996] after 11072 observations
+MIP: CWM: theta center [-0.04, 0.021, -0.041999999999999996] -> [-0.14, 0.021, -0.013999999999999999] after 11104 observations
+MIP: CWM: theta center [-0.14, 0.021, -0.013999999999999999] -> [-0.04, 0.018000000000000002, 0.013999999999999999] after 11136 observations
+MIP: CWM: theta center [-0.04, 0.018000000000000002, 0.013999999999999999] -> [-0.06, 0.021, 0.013999999999999999] after 11168 observations
+MIP: CWM: theta center [-0.06, 0.021, 0.013999999999999999] -> [-0.06, 0.015, 0.0] after 11200 observations
+MIP:    22.06s nodes    27585 open    1001 lb 1.41538462e1 ub 1.50000000e1 lp_iters 357756 sb_iters 13601 sb_lps 500 sb_secs 0.43 node_iters 330613 (first 318412, lps 24189) heur_iters 36540 dive_iters 1361 lp_rows 100 node_cut_secs 0.76 pool_len 2430 pool_idle 0
+MIP: CWM: theta center [-0.06, 0.015, 0.0] -> [-0.06, 0.006, 0.0] after 11232 observations
+MIP: CWM: theta center [-0.06, 0.006, 0.0] -> [-0.04, 0.003, 0.0] after 11264 observations
+MIP: CWM: theta center [-0.04, 0.003, 0.0] -> [-0.06, 0.009000000000000001, 0.0] after 11296 observations
+MIP: CWM: theta center [-0.06, 0.009000000000000001, 0.0] -> [-0.08, 0.003, 0.0] after 11328 observations
+MIP: CWM: theta center [-0.08, 0.003, 0.0] -> [0.04, -0.009000000000000001, -0.013999999999999999] after 11360 observations
+MIP: CWM: theta center [0.04, -0.009000000000000001, -0.013999999999999999] -> [0.04, 0.0, -0.027999999999999997] after 11392 observations
+MIP: CWM: theta center [0.04, 0.0, -0.027999999999999997] -> [0.0, -0.006, -0.013999999999999999] after 11424 observations
+MIP: CWM: theta center [0.0, -0.006, -0.013999999999999999] -> [-0.02, -0.012, -0.027999999999999997] after 11456 observations
+MIP: CWM: theta center [-0.02, -0.012, -0.027999999999999997] -> [0.02, -0.006, -0.041999999999999996] after 11488 observations
+MIP: CWM: theta center [0.02, -0.006, -0.041999999999999996] -> [0.04, -0.015, -0.041999999999999996] after 11520 observations
+MIP: CWM: theta center [0.04, -0.015, -0.041999999999999996] -> [0.04, -0.009000000000000001, -0.055999999999999994] after 11552 observations
+MIP: CWM: theta center [0.04, -0.009000000000000001, -0.055999999999999994] -> [0.0, -0.006, -0.027999999999999997] after 11584 observations
+MIP: CWM: theta center [0.0, -0.006, -0.027999999999999997] -> [-0.04, 0.0, -0.013999999999999999] after 11616 observations
+MIP: CWM: theta center [-0.04, 0.0, -0.013999999999999999] -> [0.0, 0.0, 0.0] after 11648 observations
+MIP: CWM: theta center [0.0, 0.0, 0.0] -> [0.04, 0.006, 0.0] after 11680 observations
+MIP: CWM: theta center [0.04, 0.006, 0.0] -> [0.06, 0.003, -0.013999999999999999] after 11712 observations
+MIP: CWM: theta center [0.06, 0.003, -0.013999999999999999] -> [0.06, -0.003, -0.027999999999999997] after 11744 observations
+MIP: CWM: theta center [0.06, -0.003, -0.027999999999999997] -> [0.0, -0.003, -0.027999999999999997] after 11776 observations
+MIP: CWM: theta center [0.0, -0.003, -0.027999999999999997] -> [0.0, 0.003, -0.027999999999999997] after 11808 observations
+MIP: CWM: theta center [0.0, 0.003, -0.027999999999999997] -> [0.02, 0.0, -0.06999999999999999] after 11840 observations
+MIP: CWM: theta center [0.02, 0.0, -0.06999999999999999] -> [-0.04, 0.018000000000000002, -0.041999999999999996] after 11872 observations
+MIP: CWM: theta center [-0.04, 0.018000000000000002, -0.041999999999999996] -> [-0.02, 0.012, -0.055999999999999994] after 11904 observations
+MIP: CWM: theta center [-0.02, 0.012, -0.055999999999999994] -> [-0.02, 0.018000000000000002, -0.041999999999999996] after 11936 observations
+MIP: CWM: theta center [-0.02, 0.018000000000000002, -0.041999999999999996] -> [-0.02, 0.024, -0.06999999999999999] after 11968 observations
+MIP: CWM: theta center [-0.02, 0.024, -0.06999999999999999] -> [-0.04, 0.024, -0.08399999999999999] after 12000 observations
+MIP: CWM: theta center [-0.04, 0.024, -0.08399999999999999] -> [-0.04, 0.033, -0.055999999999999994] after 12032 observations
+MIP: CWM: theta center [-0.04, 0.033, -0.055999999999999994] -> [-0.14, 0.024, -0.041999999999999996] after 12064 observations
+MIP:    24.06s nodes    29719 open     994 lb 1.41666667e1 ub 1.50000000e1 lp_iters 386662 sb_iters 13601 sb_lps 500 sb_secs 0.44 node_iters 358257 (first 344841, lps 26000) heur_iters 37802 dive_iters 1361 lp_rows 106 node_cut_secs 0.82 pool_len 2531 pool_idle 0
+MIP: CWM: theta center [-0.14, 0.024, -0.041999999999999996] -> [-0.1, 0.018000000000000002, -0.041999999999999996] after 12096 observations
+MIP: CWM: theta center [-0.1, 0.018000000000000002, -0.041999999999999996] -> [-0.1, 0.021, -0.027999999999999997] after 12128 observations
+MIP: CWM: theta center [-0.1, 0.021, -0.027999999999999997] -> [-0.08, 0.021, 0.0] after 12160 observations
+MIP: CWM: theta center [-0.08, 0.021, 0.0] -> [-0.06, 0.024, 0.041999999999999996] after 12192 observations
+MIP: CWM: theta center [-0.06, 0.024, 0.041999999999999996] -> [-0.06, 0.024, 0.06999999999999999] after 12256 observations
+MIP: CWM: theta center [-0.06, 0.024, 0.06999999999999999] -> [-0.08, 0.024, 0.09799999999999999] after 12288 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 53
+MIP: fixed-charge check: vb rows 0 of 64, continuous with vb 0 of 10
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 21
+MIP: fixed-charge check: vb rows 0 of 59, continuous with vb 0 of 10
+MIP: CWM: theta center [-0.08, 0.024, 0.09799999999999999] -> [-0.08, 0.024, 0.11199999999999999] after 12320 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 37
+MIP: fixed-charge check: vb rows 0 of 64, continuous with vb 0 of 10
+MIP: CWM: theta center [-0.08, 0.024, 0.11199999999999999] -> [-0.08, 0.018000000000000002, 0.08399999999999999] after 12352 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 37
+MIP: fixed-charge check: vb rows 0 of 58, continuous with vb 0 of 10
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 37
+MIP: fixed-charge check: vb rows 0 of 64, continuous with vb 0 of 10
+MIP:   sub-MIP: 63 free columns of 63, status TimeLimit, nodes 0, objective None, 0.22s, 1754 LP iterations, TICKS cpu 0.300 lp 687963 prop 258183 sep 7662302 pre 37436 heur 0 node 0 lpit 2234 lu 13444892 lum 890530
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 1, 0, 0, 0])
+MIP: CWM: theta center [-0.08, 0.018000000000000002, 0.08399999999999999] -> [-0.08, 0.012, 0.08399999999999999] after 12384 observations
+MIP: CWM: theta center [-0.08, 0.012, 0.08399999999999999] -> [-0.08, -0.003, 0.08399999999999999] after 12416 observations
+MIP: CWM: theta center [-0.08, -0.003, 0.08399999999999999] -> [-0.02, -0.015, 0.09799999999999999] after 12448 observations
+MIP: CWM: theta center [-0.02, -0.015, 0.09799999999999999] -> [-0.04, -0.009000000000000001, 0.06999999999999999] after 12480 observations
+MIP: CWM: theta center [-0.04, -0.009000000000000001, 0.06999999999999999] -> [-0.08, -0.03, 0.06999999999999999] after 12512 observations
+MIP: CWM: theta center [-0.08, -0.03, 0.06999999999999999] -> [-0.1, -0.027, 0.08399999999999999] after 12544 observations
+MIP: CWM: theta center [-0.1, -0.027, 0.08399999999999999] -> [-0.16, -0.03, 0.055999999999999994] after 12576 observations
+MIP: CWM: theta center [-0.16, -0.03, 0.055999999999999994] -> [-0.16, -0.024, 0.027999999999999997] after 12608 observations
+MIP: CWM: theta center [-0.16, -0.024, 0.027999999999999997] -> [-0.18, -0.015, 0.055999999999999994] after 12640 observations
+MIP: CWM: theta center [-0.18, -0.015, 0.055999999999999994] -> [-0.16, -0.021, 0.041999999999999996] after 12672 observations
+MIP: CWM: theta center [-0.16, -0.021, 0.041999999999999996] -> [-0.14, -0.021, 0.041999999999999996] after 12704 observations
+MIP: CWM: theta center [-0.14, -0.021, 0.041999999999999996] -> [-0.12, -0.027, 0.027999999999999997] after 12736 observations
+MIP: CWM: theta center [-0.12, -0.027, 0.027999999999999997] -> [-0.12, -0.024, 0.027999999999999997] after 12768 observations
+MIP: CWM: theta center [-0.12, -0.024, 0.027999999999999997] -> [-0.12, -0.018000000000000002, 0.041999999999999996] after 12800 observations
+MIP: CWM: theta center [-0.12, -0.018000000000000002, 0.041999999999999996] -> [-0.12, -0.018000000000000002, 0.013999999999999999] after 12832 observations
+MIP: CWM: theta center [-0.12, -0.018000000000000002, 0.013999999999999999] -> [-0.1, -0.024, 0.0] after 12864 observations
+MIP: CWM: theta center [-0.1, -0.024, 0.0] -> [-0.08, -0.021, 0.027999999999999997] after 12896 observations
+MIP: CWM: theta center [-0.08, -0.021, 0.027999999999999997] -> [-0.12, -0.015, 0.013999999999999999] after 12928 observations
+MIP:    26.07s nodes    31521 open     963 lb 1.43235294e1 ub 1.50000000e1 lp_iters 411156 sb_iters 13601 sb_lps 500 sb_secs 0.44 node_iters 382096 (first 367682, lps 27565) heur_iters 40222 dive_iters 1372 lp_rows 103 node_cut_secs 0.89 pool_len 2644 pool_idle 0
+MIP: CWM: theta center [-0.12, -0.015, 0.013999999999999999] -> [0.0, -0.015, -0.013999999999999999] after 12960 observations
+MIP: CWM: theta center [0.0, -0.015, -0.013999999999999999] -> [0.02, -0.021, -0.041999999999999996] after 13024 observations
+MIP: CWM: theta center [0.02, -0.021, -0.041999999999999996] -> [0.02, -0.012, -0.08399999999999999] after 13056 observations
+MIP: CWM: theta center [0.02, -0.012, -0.08399999999999999] -> [0.04, -0.009000000000000001, -0.013999999999999999] after 13088 observations
+MIP: CWM: theta center [0.04, -0.009000000000000001, -0.013999999999999999] -> [0.0, -0.015, -0.027999999999999997] after 13120 observations
+MIP: CWM: theta center [0.0, -0.015, -0.027999999999999997] -> [0.04, -0.021, 0.0] after 13152 observations
+MIP: CWM: theta center [0.04, -0.021, 0.0] -> [0.08, -0.021, 0.0] after 13184 observations
+MIP: CWM: theta center [0.08, -0.021, 0.0] -> [0.02, -0.018000000000000002, -0.013999999999999999] after 13216 observations
+MIP: CWM: theta center [0.02, -0.018000000000000002, -0.013999999999999999] -> [0.06, -0.021, 0.013999999999999999] after 13248 observations
+MIP: CWM: theta center [0.06, -0.021, 0.013999999999999999] -> [0.04, -0.018000000000000002, 0.0] after 13280 observations
+MIP: CWM: theta center [0.04, -0.018000000000000002, 0.0] -> [0.08, -0.03, 0.0] after 13312 observations
+MIP: CWM: theta center [0.08, -0.03, 0.0] -> [0.06, -0.048, 0.013999999999999999] after 13344 observations
+MIP: CWM: theta center [0.06, -0.048, 0.013999999999999999] -> [0.06, -0.057, 0.027999999999999997] after 13376 observations
+MIP: CWM: theta center [0.06, -0.057, 0.027999999999999997] -> [0.04, -0.07200000000000001, 0.027999999999999997] after 13408 observations
+MIP: CWM: theta center [0.04, -0.07200000000000001, 0.027999999999999997] -> [0.0, -0.051000000000000004, 0.027999999999999997] after 13440 observations
+MIP: CWM: theta center [0.0, -0.051000000000000004, 0.027999999999999997] -> [0.02, -0.054, 0.027999999999999997] after 13472 observations
+MIP: CWM: theta center [0.02, -0.054, 0.027999999999999997] -> [0.06, -0.045, 0.055999999999999994] after 13504 observations
+MIP: CWM: theta center [0.06, -0.045, 0.055999999999999994] -> [0.06, -0.042, 0.08399999999999999] after 13536 observations
+MIP: CWM: theta center [0.06, -0.042, 0.08399999999999999] -> [0.06, -0.042, 0.055999999999999994] after 13568 observations
+MIP: CWM: theta center [0.06, -0.042, 0.055999999999999994] -> [0.04, -0.039, 0.11199999999999999] after 13600 observations
+MIP: CWM: theta center [0.04, -0.039, 0.11199999999999999] -> [0.06, -0.039, 0.06999999999999999] after 13632 observations
+MIP: CWM: theta center [0.06, -0.039, 0.06999999999999999] -> [0.02, -0.045, 0.08399999999999999] after 13664 observations
+MIP: CWM: theta center [0.02, -0.045, 0.08399999999999999] -> [0.02, -0.039, 0.13999999999999999] after 13696 observations
+MIP: CWM: theta center [0.02, -0.039, 0.13999999999999999] -> [0.02, -0.027, 0.13999999999999999] after 13728 observations
+MIP: CWM: theta center [0.02, -0.027, 0.13999999999999999] -> [0.04, 0.018000000000000002, 0.09799999999999999] after 13760 observations
+MIP:    28.07s nodes    33576 open     951 lb 1.44048934e1 ub 1.50000000e1 lp_iters 441042 sb_iters 13601 sb_lps 500 sb_secs 0.45 node_iters 410606 (first 394755, lps 29345) heur_iters 41612 dive_iters 1386 lp_rows 104 node_cut_secs 0.95 pool_len 2603 pool_idle 0
+MIP: CWM: theta center [0.04, 0.018000000000000002, 0.09799999999999999] -> [0.02, -0.003, 0.126] after 13792 observations
+MIP: CWM: theta center [0.02, -0.003, 0.126] -> [0.06, 0.003, 0.11199999999999999] after 13824 observations
+MIP: CWM: theta center [0.06, 0.003, 0.11199999999999999] -> [0.08, 0.006, 0.11199999999999999] after 13856 observations
+MIP: CWM: theta center [0.08, 0.006, 0.11199999999999999] -> [0.02, -0.006, 0.126] after 13888 observations
+MIP: CWM: theta center [0.02, -0.006, 0.126] -> [-0.02, -0.012, 0.09799999999999999] after 13920 observations
+MIP: CWM: theta center [-0.02, -0.012, 0.09799999999999999] -> [0.0, -0.006, 0.09799999999999999] after 13952 observations
+MIP: CWM: theta center [0.0, -0.006, 0.09799999999999999] -> [-0.04, -0.006, 0.08399999999999999] after 13984 observations
+MIP: CWM: theta center [-0.04, -0.006, 0.08399999999999999] -> [-0.04, -0.006, 0.041999999999999996] after 14016 observations
+MIP: CWM: theta center [-0.04, -0.006, 0.041999999999999996] -> [-0.04, -0.012, -0.041999999999999996] after 14080 observations
+MIP: CWM: theta center [-0.04, -0.012, -0.041999999999999996] -> [-0.04, -0.009000000000000001, -0.09799999999999999] after 14112 observations
+MIP: CWM: theta center [-0.04, -0.009000000000000001, -0.09799999999999999] -> [-0.02, -0.009000000000000001, -0.08399999999999999] after 14144 observations
+MIP: CWM: theta center [-0.02, -0.009000000000000001, -0.08399999999999999] -> [0.0, -0.021, -0.09799999999999999] after 14176 observations
+MIP: CWM: theta center [0.0, -0.021, -0.09799999999999999] -> [-0.02, -0.021, -0.08399999999999999] after 14208 observations
+MIP: CWM: theta center [-0.02, -0.021, -0.08399999999999999] -> [0.0, -0.024, -0.06999999999999999] after 14240 observations
+MIP: CWM: theta center [0.0, -0.024, -0.06999999999999999] -> [0.04, -0.018000000000000002, -0.055999999999999994] after 14272 observations
+MIP: CWM: theta center [0.04, -0.018000000000000002, -0.055999999999999994] -> [0.16, -0.015, -0.06999999999999999] after 14304 observations
+MIP: CWM: theta center [0.16, -0.015, -0.06999999999999999] -> [0.18, -0.018000000000000002, -0.08399999999999999] after 14336 observations
+MIP: CWM: theta center [0.18, -0.018000000000000002, -0.08399999999999999] -> [0.18, -0.021, -0.055999999999999994] after 14368 observations
+MIP: CWM: theta center [0.18, -0.021, -0.055999999999999994] -> [0.22, -0.021, -0.06999999999999999] after 14400 observations
+MIP: CWM: theta center [0.22, -0.021, -0.06999999999999999] -> [0.12, -0.018000000000000002, -0.08399999999999999] after 14432 observations
+MIP: CWM: theta center [0.12, -0.018000000000000002, -0.08399999999999999] -> [0.12, -0.006, -0.09799999999999999] after 14464 observations
+MIP: CWM: theta center [0.12, -0.006, -0.09799999999999999] -> [0.16, -0.009000000000000001, -0.055999999999999994] after 14496 observations
+MIP: CWM: theta center [0.16, -0.009000000000000001, -0.055999999999999994] -> [0.16, -0.018000000000000002, -0.055999999999999994] after 14528 observations
+MIP: CWM: theta center [0.16, -0.018000000000000002, -0.055999999999999994] -> [0.16, -0.009000000000000001, -0.055999999999999994] after 14560 observations
+MIP: CWM: theta center [0.16, -0.009000000000000001, -0.055999999999999994] -> [0.16, -0.006, -0.041999999999999996] after 14592 observations
+MIP: CWM: theta center [0.16, -0.006, -0.041999999999999996] -> [0.14, -0.006, 0.0] after 14624 observations
+MIP: CWM: theta center [0.14, -0.006, 0.0] -> [0.14, -0.003, 0.08399999999999999] after 14656 observations
+MIP: CWM: theta center [0.14, -0.003, 0.08399999999999999] -> [0.12, -0.006, 0.013999999999999999] after 14688 observations
+MIP:    30.09s nodes    35664 open     996 lb 1.42093023e1 ub 1.50000000e1 lp_iters 468973 sb_iters 13601 sb_lps 500 sb_secs 0.45 node_iters 437361 (first 420458, lps 31086) heur_iters 42807 dive_iters 1405 lp_rows 90 node_cut_secs 1.01 pool_len 2602 pool_idle 0
+MIP: CWM: theta center [0.12, -0.006, 0.013999999999999999] -> [0.0, -0.003, 0.26599999999999996] after 14720 observations
+MIP: CWM: theta center [0.0, -0.003, 0.26599999999999996] -> [0.02, -0.012, 0.11199999999999999] after 14752 observations
+MIP: CWM: theta center [0.02, -0.012, 0.11199999999999999] -> [0.0, 0.0, 0.027999999999999997] after 14784 observations
+MIP: CWM: theta center [0.0, 0.0, 0.027999999999999997] -> [0.06, 0.003, 0.013999999999999999] after 14816 observations
+MIP: CWM: theta center [0.06, 0.003, 0.013999999999999999] -> [0.08, 0.003, 0.027999999999999997] after 14848 observations
+MIP: CWM: theta center [0.08, 0.003, 0.027999999999999997] -> [0.08, -0.006, 0.055999999999999994] after 14880 observations
+MIP: CWM: theta center [0.08, -0.006, 0.055999999999999994] -> [0.06, 0.003, 0.06999999999999999] after 14912 observations
+MIP: CWM: theta center [0.06, 0.003, 0.06999999999999999] -> [0.04, -0.006, 0.06999999999999999] after 14944 observations
+MIP: CWM: theta center [0.04, -0.006, 0.06999999999999999] -> [0.04, -0.009000000000000001, 0.08399999999999999] after 14976 observations
+MIP: CWM: theta center [0.04, -0.009000000000000001, 0.08399999999999999] -> [0.02, -0.006, 0.055999999999999994] after 15008 observations
+MIP: CWM: theta center [0.02, -0.006, 0.055999999999999994] -> [0.0, -0.006, 0.055999999999999994] after 15040 observations
+MIP: CWM: theta center [0.0, -0.006, 0.055999999999999994] -> [0.02, -0.006, 0.055999999999999994] after 15072 observations
+MIP: CWM: theta center [0.02, -0.006, 0.055999999999999994] -> [0.04, -0.006, 0.041999999999999996] after 15104 observations
+MIP: CWM: theta center [0.04, -0.006, 0.041999999999999996] -> [0.08, -0.003, 0.055999999999999994] after 15136 observations
+MIP: CWM: theta center [0.08, -0.003, 0.055999999999999994] -> [0.06, 0.003, 0.041999999999999996] after 15168 observations
+MIP: CWM: theta center [0.06, 0.003, 0.041999999999999996] -> [0.06, -0.006, 0.06999999999999999] after 15200 observations
+MIP: CWM: theta center [0.06, -0.006, 0.06999999999999999] -> [0.04, 0.0, 0.08399999999999999] after 15232 observations
+MIP: CWM: theta center [0.04, 0.0, 0.08399999999999999] -> [0.0, 0.006, 0.055999999999999994] after 15264 observations
+MIP: CWM: theta center [0.0, 0.006, 0.055999999999999994] -> [0.08, 0.0, 0.055999999999999994] after 15296 observations
+MIP: CWM: theta center [0.08, 0.0, 0.055999999999999994] -> [0.1, 0.003, 0.027999999999999997] after 15328 observations
+MIP: CWM: theta center [0.1, 0.003, 0.027999999999999997] -> [0.16, 0.012, 0.013999999999999999] after 15360 observations
+MIP: CWM: theta center [0.16, 0.012, 0.013999999999999999] -> [0.18, 0.012, 0.013999999999999999] after 15392 observations
+MIP: CWM: theta center [0.18, 0.012, 0.013999999999999999] -> [0.26, 0.015, 0.0] after 15424 observations
+MIP: CWM: theta center [0.26, 0.015, 0.0] -> [0.2, 0.018000000000000002, -0.055999999999999994] after 15456 observations
+MIP: CWM: theta center [0.2, 0.018000000000000002, -0.055999999999999994] -> [0.18, 0.012, -0.35] after 15488 observations
+MIP: CWM: theta center [0.18, 0.012, -0.35] -> [0.16, 0.009000000000000001, -0.182] after 15520 observations
+MIP:    32.09s nodes    37698 open     992 lb 1.43947368e1 ub 1.50000000e1 lp_iters 498467 sb_iters 13601 sb_lps 500 sb_secs 0.46 node_iters 465450 (first 447203, lps 32830) heur_iters 44228 dive_iters 1421 lp_rows 119 node_cut_secs 1.07 pool_len 2577 pool_idle 0
+MIP: CWM: theta center [0.16, 0.009000000000000001, -0.182] -> [0.12, 0.012, -0.13999999999999999] after 15552 observations
+MIP: CWM: theta center [0.12, 0.012, -0.13999999999999999] -> [0.12, 0.012, -0.126] after 15584 observations
+MIP: CWM: theta center [0.12, 0.012, -0.126] -> [0.02, 0.006, -0.15399999999999997] after 15616 observations
+MIP: CWM: theta center [0.02, 0.006, -0.15399999999999997] -> [0.04, -0.009000000000000001, -0.15399999999999997] after 15648 observations
+MIP: CWM: theta center [0.04, -0.009000000000000001, -0.15399999999999997] -> [0.04, -0.012, -0.15399999999999997] after 15680 observations
+MIP: CWM: theta center [0.04, -0.012, -0.15399999999999997] -> [0.08, -0.024, -0.16799999999999998] after 15712 observations
+MIP: CWM: theta center [0.08, -0.024, -0.16799999999999998] -> [0.04, -0.021, -0.16799999999999998] after 15744 observations
+MIP: CWM: theta center [0.04, -0.021, -0.16799999999999998] -> [0.06, -0.021, -0.13999999999999999] after 15776 observations
+MIP: CWM: theta center [0.06, -0.021, -0.13999999999999999] -> [0.0, -0.018000000000000002, -0.13999999999999999] after 15808 observations
+MIP: CWM: theta center [0.0, -0.018000000000000002, -0.13999999999999999] -> [0.02, -0.012, -0.13999999999999999] after 15840 observations
+MIP: CWM: theta center [0.02, -0.012, -0.13999999999999999] -> [0.0, -0.003, -0.11199999999999999] after 15872 observations
+MIP: CWM: theta center [0.0, -0.003, -0.11199999999999999] -> [0.06, -0.003, -0.06999999999999999] after 15904 observations
+MIP: CWM: theta center [0.06, -0.003, -0.06999999999999999] -> [0.08, -0.003, 0.013999999999999999] after 15936 observations
+MIP: CWM: theta center [0.08, -0.003, 0.013999999999999999] -> [0.04, 0.003, 0.15399999999999997] after 15968 observations
+MIP: CWM: theta center [0.04, 0.003, 0.15399999999999997] -> [0.12, 0.006, 0.09799999999999999] after 16000 observations
+MIP: CWM: theta center [0.12, 0.006, 0.09799999999999999] -> [0.1, 0.003, 0.041999999999999996] after 16032 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 16
+MIP: fixed-charge check: vb rows 0 of 57, continuous with vb 0 of 10
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 14
+MIP: CWM: theta center [0.1, 0.003, 0.041999999999999996] -> [0.08, 0.012, 0.041999999999999996] after 16064 observations
+MIP: fixed-charge check: vb rows 0 of 57, continuous with vb 0 of 10
+MIP: CWM: theta center [0.08, 0.012, 0.041999999999999996] -> [0.06, 0.009000000000000001, 0.027999999999999997] after 16096 observations
+MIP: CWM: theta center [0.06, 0.009000000000000001, 0.027999999999999997] -> [0.06, 0.006, 0.013999999999999999] after 16128 observations
+MIP: CWM: theta center [0.06, 0.006, 0.013999999999999999] -> [0.04, 0.003, 0.027999999999999997] after 16160 observations
+MIP: CWM: theta center [0.04, 0.003, 0.027999999999999997] -> [0.04, 0.003, 0.041999999999999996] after 16192 observations
+MIP: CWM: theta center [0.04, 0.003, 0.041999999999999996] -> [0.02, 0.003, 0.041999999999999996] after 16224 observations
+MIP: CWM: theta center [0.02, 0.003, 0.041999999999999996] -> [0.02, 0.0, 0.027999999999999997] after 16256 observations
+MIP: CWM: theta center [0.02, 0.0, 0.027999999999999997] -> [0.02, -0.003, 0.013999999999999999] after 16288 observations
+MIP: CWM: theta center [0.02, -0.003, 0.013999999999999999] -> [-0.02, -0.009000000000000001, 0.013999999999999999] after 16320 observations
+MIP: CWM: theta center [-0.02, -0.009000000000000001, 0.013999999999999999] -> [-0.04, -0.015, -0.013999999999999999] after 16352 observations
+MIP: CWM: theta center [-0.04, -0.015, -0.013999999999999999] -> [0.0, -0.027, -0.013999999999999999] after 16384 observations
+MIP: CWM: theta center [0.0, -0.027, -0.013999999999999999] -> [-0.04, -0.039, -0.027999999999999997] after 16416 observations
+MIP:    34.10s nodes    39706 open     974 lb 1.43431766e1 ub 1.50000000e1 lp_iters 528370 sb_iters 13601 sb_lps 500 sb_secs 0.46 node_iters 493694 (first 474086, lps 34563) heur_iters 45895 dive_iters 1429 lp_rows 107 node_cut_secs 1.13 pool_len 2515 pool_idle 0
+MIP: CWM: theta center [-0.04, -0.039, -0.027999999999999997] -> [-0.04, -0.018000000000000002, -0.013999999999999999] after 16448 observations
+MIP: CWM: theta center [-0.04, -0.018000000000000002, -0.013999999999999999] -> [-0.06, -0.012, -0.013999999999999999] after 16480 observations
+MIP: CWM: theta center [-0.06, -0.012, -0.013999999999999999] -> [0.0, -0.012, 0.0] after 16512 observations
+MIP: CWM: theta center [0.0, -0.012, 0.0] -> [-0.02, -0.009000000000000001, 0.0] after 16544 observations
+MIP: CWM: theta center [-0.02, -0.009000000000000001, 0.0] -> [-0.04, 0.0, -0.013999999999999999] after 16576 observations
+MIP: CWM: theta center [-0.04, 0.0, -0.013999999999999999] -> [-0.06, 0.006, -0.013999999999999999] after 16608 observations
+MIP: CWM: theta center [-0.06, 0.006, -0.013999999999999999] -> [-0.02, 0.003, -0.013999999999999999] after 16640 observations
+MIP: CWM: theta center [-0.02, 0.003, -0.013999999999999999] -> [-0.06, 0.003, 0.0] after 16672 observations
+MIP: CWM: theta center [-0.06, 0.003, 0.0] -> [-0.04, 0.003, 0.027999999999999997] after 16704 observations
+MIP: CWM: theta center [-0.04, 0.003, 0.027999999999999997] -> [-0.06, 0.015, 0.08399999999999999] after 16736 observations
+MIP: CWM: theta center [-0.06, 0.015, 0.08399999999999999] -> [-0.04, 0.012, 0.055999999999999994] after 16768 observations
+MIP: CWM: theta center [-0.04, 0.012, 0.055999999999999994] -> [-0.1, 0.009000000000000001, 0.055999999999999994] after 16800 observations
+MIP: CWM: theta center [-0.1, 0.009000000000000001, 0.055999999999999994] -> [-0.08, 0.012, 0.08399999999999999] after 16832 observations
+MIP: CWM: theta center [-0.08, 0.012, 0.08399999999999999] -> [-0.06, 0.006, 0.08399999999999999] after 16864 observations
+MIP: CWM: theta center [-0.06, 0.006, 0.08399999999999999] -> [-0.08, 0.006, 0.08399999999999999] after 16896 observations
+MIP: CWM: theta center [-0.08, 0.006, 0.08399999999999999] -> [-0.08, 0.006, 0.055999999999999994] after 16928 observations
+MIP: CWM: theta center [-0.08, 0.006, 0.055999999999999994] -> [-0.06, 0.0, 0.08399999999999999] after 16960 observations
+MIP: CWM: theta center [-0.06, 0.0, 0.08399999999999999] -> [-0.04, -0.003, 0.06999999999999999] after 16992 observations
+MIP: CWM: theta center [-0.04, -0.003, 0.06999999999999999] -> [0.0, 0.0, 0.06999999999999999] after 17024 observations
+MIP: CWM: theta center [0.0, 0.0, 0.06999999999999999] -> [-0.06, 0.0, 0.06999999999999999] after 17056 observations
+MIP: CWM: theta center [-0.06, 0.0, 0.06999999999999999] -> [-0.1, 0.0, 0.041999999999999996] after 17088 observations
+MIP: CWM: theta center [-0.1, 0.0, 0.041999999999999996] -> [-0.08, -0.006, 0.027999999999999997] after 17120 observations
+MIP: CWM: theta center [-0.08, -0.006, 0.027999999999999997] -> [-0.06, -0.009000000000000001, 0.013999999999999999] after 17152 observations
+MIP: CWM: theta center [-0.06, -0.009000000000000001, 0.013999999999999999] -> [-0.04, -0.009000000000000001, 0.013999999999999999] after 17184 observations
+MIP: CWM: theta center [-0.04, -0.009000000000000001, 0.013999999999999999] -> [0.02, -0.003, 0.0] after 17216 observations
+MIP:    36.10s nodes    41624 open     941 lb 1.44642857e1 ub 1.50000000e1 lp_iters 554431 sb_iters 13601 sb_lps 500 sb_secs 0.47 node_iters 518495 (first 497718, lps 36168) heur_iters 47159 dive_iters 1433 lp_rows 136 node_cut_secs 1.18 pool_len 2429 pool_idle 0
+MIP: CWM: theta center [0.02, -0.003, 0.0] -> [0.0, 0.0, 0.0] after 17248 observations
+MIP: CWM: theta center [0.0, 0.0, 0.0] -> [0.04, 0.0, 0.0] after 17280 observations
+MIP: CWM: theta center [0.04, 0.0, 0.0] -> [0.06, 0.0, -0.013999999999999999] after 17312 observations
+MIP: CWM: theta center [0.06, 0.0, -0.013999999999999999] -> [0.0, 0.006, 0.0] after 17344 observations
+MIP: CWM: theta center [0.0, 0.006, 0.0] -> [-0.02, 0.009000000000000001, -0.013999999999999999] after 17376 observations
+MIP: CWM: theta center [-0.02, 0.009000000000000001, -0.013999999999999999] -> [-0.04, 0.006, 0.0] after 17408 observations
+MIP: CWM: theta center [-0.04, 0.006, 0.0] -> [-0.04, 0.009000000000000001, -0.013999999999999999] after 17440 observations
+MIP: CWM: theta center [-0.04, 0.009000000000000001, -0.013999999999999999] -> [0.02, 0.006, 0.0] after 17472 observations
+MIP: CWM: theta center [0.02, 0.006, 0.0] -> [0.02, 0.009000000000000001, -0.013999999999999999] after 17504 observations
+MIP: CWM: theta center [0.02, 0.009000000000000001, -0.013999999999999999] -> [-0.02, 0.009000000000000001, -0.041999999999999996] after 17536 observations
+MIP: CWM: theta center [-0.02, 0.009000000000000001, -0.041999999999999996] -> [-0.02, 0.015, -0.027999999999999997] after 17568 observations
+MIP: CWM: theta center [-0.02, 0.015, -0.027999999999999997] -> [-0.08, 0.009000000000000001, -0.027999999999999997] after 17600 observations
+MIP: CWM: theta center [-0.08, 0.009000000000000001, -0.027999999999999997] -> [-0.06, 0.006, 0.0] after 17632 observations
+MIP: CWM: theta center [-0.06, 0.006, 0.0] -> [-0.04, 0.006, -0.013999999999999999] after 17664 observations
+MIP: CWM: theta center [-0.04, 0.006, -0.013999999999999999] -> [-0.06, 0.003, 0.0] after 17696 observations
+MIP: CWM: theta center [-0.06, 0.003, 0.0] -> [-0.04, 0.009000000000000001, -0.027999999999999997] after 17728 observations
+MIP: CWM: theta center [-0.04, 0.009000000000000001, -0.027999999999999997] -> [-0.04, 0.009000000000000001, -0.041999999999999996] after 17760 observations
+MIP: CWM: theta center [-0.04, 0.009000000000000001, -0.041999999999999996] -> [-0.08, 0.012, -0.041999999999999996] after 17792 observations
+MIP: CWM: theta center [-0.08, 0.012, -0.041999999999999996] -> [-0.06, 0.018000000000000002, -0.055999999999999994] after 17824 observations
+MIP: CWM: theta center [-0.06, 0.018000000000000002, -0.055999999999999994] -> [-0.06, 0.012, -0.06999999999999999] after 17856 observations
+MIP: CWM: theta center [-0.06, 0.012, -0.06999999999999999] -> [-0.04, 0.018000000000000002, -0.055999999999999994] after 17888 observations
+MIP: CWM: theta center [-0.04, 0.018000000000000002, -0.055999999999999994] -> [0.02, 0.015, -0.041999999999999996] after 17920 observations
+MIP: CWM: theta center [0.02, 0.015, -0.041999999999999996] -> [0.1, 0.006, -0.013999999999999999] after 17952 observations
+MIP: CWM: theta center [0.1, 0.006, -0.013999999999999999] -> [0.14, 0.003, -0.027999999999999997] after 17984 observations
+MIP: CWM: theta center [0.14, 0.003, -0.027999999999999997] -> [0.14, 0.006, 0.0] after 18016 observations
+MIP: CWM: theta center [0.14, 0.006, 0.0] -> [0.08, 0.009000000000000001, 0.0] after 18048 observations
+MIP: CWM: theta center [0.08, 0.009000000000000001, 0.0] -> [0.02, 0.012, 0.041999999999999996] after 18080 observations
+MIP: CWM: theta center [0.02, 0.012, 0.041999999999999996] -> [0.08, 0.012, 0.055999999999999994] after 18112 observations
+MIP: CWM: theta center [0.08, 0.012, 0.055999999999999994] -> [0.12, 0.015, 0.041999999999999996] after 18144 observations
+MIP:    38.10s nodes    43552 open     927 lb 1.43212291e1 ub 1.50000000e1 lp_iters 583174 sb_iters 13601 sb_lps 500 sb_secs 0.47 node_iters 545556 (first 523220, lps 37821) heur_iters 48850 dive_iters 1442 lp_rows 125 node_cut_secs 1.25 pool_len 2343 pool_idle 0
+MIP: CWM: theta center [0.12, 0.015, 0.041999999999999996] -> [0.08, 0.003, 0.013999999999999999] after 18176 observations
+MIP: CWM: theta center [0.08, 0.003, 0.013999999999999999] -> [0.08, 0.003, 0.041999999999999996] after 18208 observations
+MIP: CWM: theta center [0.08, 0.003, 0.041999999999999996] -> [0.1, 0.0, 0.041999999999999996] after 18240 observations
+MIP: CWM: theta center [0.1, 0.0, 0.041999999999999996] -> [0.06, -0.003, 0.055999999999999994] after 18272 observations
+MIP: CWM: theta center [0.06, -0.003, 0.055999999999999994] -> [0.08, 0.003, 0.041999999999999996] after 18304 observations
+MIP: CWM: theta center [0.08, 0.003, 0.041999999999999996] -> [0.06, 0.003, 0.027999999999999997] after 18336 observations
+MIP: CWM: theta center [0.06, 0.003, 0.027999999999999997] -> [0.02, -0.006, 0.027999999999999997] after 18368 observations
+MIP: CWM: theta center [0.02, -0.006, 0.027999999999999997] -> [0.02, 0.0, -0.013999999999999999] after 18400 observations
+MIP: CWM: theta center [0.02, 0.0, -0.013999999999999999] -> [0.0, -0.006, 0.013999999999999999] after 18432 observations
+MIP: CWM: theta center [0.0, -0.006, 0.013999999999999999] -> [0.04, -0.009000000000000001, 0.0] after 18464 observations
+MIP: CWM: theta center [0.04, -0.009000000000000001, 0.0] -> [0.02, -0.009000000000000001, -0.013999999999999999] after 18528 observations
+MIP: CWM: theta center [0.02, -0.009000000000000001, -0.013999999999999999] -> [0.0, -0.015, 0.027999999999999997] after 18560 observations
+MIP: CWM: theta center [0.0, -0.015, 0.027999999999999997] -> [0.0, -0.024, 0.041999999999999996] after 18592 observations
+MIP: CWM: theta center [0.0, -0.024, 0.041999999999999996] -> [-0.02, -0.03, 0.013999999999999999] after 18624 observations
+MIP: CWM: theta center [-0.02, -0.03, 0.013999999999999999] -> [0.04, -0.048, 0.013999999999999999] after 18656 observations
+MIP: CWM: theta center [0.04, -0.048, 0.013999999999999999] -> [0.04, -0.033, 0.06999999999999999] after 18688 observations
+MIP: CWM: theta center [0.04, -0.033, 0.06999999999999999] -> [0.04, -0.039, 0.055999999999999994] after 18720 observations
+MIP: CWM: theta center [0.04, -0.039, 0.055999999999999994] -> [0.06, -0.036000000000000004, 0.055999999999999994] after 18752 observations
+MIP: CWM: theta center [0.06, -0.036000000000000004, 0.055999999999999994] -> [0.1, -0.033, 0.055999999999999994] after 18784 observations
+MIP: CWM: theta center [0.1, -0.033, 0.055999999999999994] -> [0.12, -0.03, 0.055999999999999994] after 18816 observations
+MIP: CWM: theta center [0.12, -0.03, 0.055999999999999994] -> [0.14, -0.027, 0.041999999999999996] after 18848 observations
+MIP: CWM: theta center [0.14, -0.027, 0.041999999999999996] -> [0.06, -0.033, 0.027999999999999997] after 18880 observations
+MIP: CWM: theta center [0.06, -0.033, 0.027999999999999997] -> [0.2, -0.03, 0.06999999999999999] after 18912 observations
+MIP: CWM: theta center [0.2, -0.03, 0.06999999999999999] -> [0.32, -0.03, 0.027999999999999997] after 18944 observations
+MIP: CWM: theta center [0.32, -0.03, 0.027999999999999997] -> [0.28, -0.021, 0.013999999999999999] after 18976 observations
+MIP: CWM: theta center [0.28, -0.021, 0.013999999999999999] -> [0.18, -0.015, 0.013999999999999999] after 19008 observations
+MIP: CWM: theta center [0.18, -0.015, 0.013999999999999999] -> [0.18, -0.003, 0.013999999999999999] after 19040 observations
+MIP:    40.10s nodes    45801 open     895 lb 1.42537120e1 ub 1.50000000e1 lp_iters 615241 sb_iters 13601 sb_lps 500 sb_secs 0.48 node_iters 576049 (first 552482, lps 39686) heur_iters 50432 dive_iters 1450 lp_rows 112 node_cut_secs 1.31 pool_len 2259 pool_idle 0
+MIP: CWM: theta center [0.18, -0.003, 0.013999999999999999] -> [0.18, 0.009000000000000001, 0.013999999999999999] after 19072 observations
+MIP: CWM: theta center [0.18, 0.009000000000000001, 0.013999999999999999] -> [0.16, 0.018000000000000002, -0.055999999999999994] after 19104 observations
+MIP: CWM: theta center [0.16, 0.018000000000000002, -0.055999999999999994] -> [0.14, 0.015, -0.027999999999999997] after 19136 observations
+MIP: CWM: theta center [0.14, 0.015, -0.027999999999999997] -> [0.14, 0.015, -0.055999999999999994] after 19168 observations
+MIP: CWM: theta center [0.14, 0.015, -0.055999999999999994] -> [0.1, 0.03, -0.041999999999999996] after 19200 observations
+MIP: CWM: theta center [0.1, 0.03, -0.041999999999999996] -> [0.1, 0.018000000000000002, -0.013999999999999999] after 19232 observations
+MIP: CWM: theta center [0.1, 0.018000000000000002, -0.013999999999999999] -> [0.08, 0.018000000000000002, 0.0] after 19264 observations
+MIP: CWM: theta center [0.08, 0.018000000000000002, 0.0] -> [0.04, 0.015, -0.027999999999999997] after 19296 observations
+MIP: CWM: theta center [0.04, 0.015, -0.027999999999999997] -> [-0.16, 0.012, -0.027999999999999997] after 19328 observations
+MIP: CWM: theta center [-0.16, 0.012, -0.027999999999999997] -> [-0.08, 0.012, -0.027999999999999997] after 19360 observations
+MIP: CWM: theta center [-0.08, 0.012, -0.027999999999999997] -> [-0.16, 0.012, -0.041999999999999996] after 19392 observations
+MIP: CWM: theta center [-0.16, 0.012, -0.041999999999999996] -> [-0.2, 0.012, -0.041999999999999996] after 19424 observations
+MIP: CWM: theta center [-0.2, 0.012, -0.041999999999999996] -> [-0.2, 0.0, -0.027999999999999997] after 19456 observations
+MIP: CWM: theta center [-0.2, 0.0, -0.027999999999999997] -> [-0.14, -0.009000000000000001, 0.013999999999999999] after 19488 observations
+MIP: CWM: theta center [-0.14, -0.009000000000000001, 0.013999999999999999] -> [-0.16, 0.0, 0.041999999999999996] after 19520 observations
+MIP: CWM: theta center [-0.16, 0.0, 0.041999999999999996] -> [-0.1, 0.009000000000000001, 0.027999999999999997] after 19552 observations
+MIP: CWM: theta center [-0.1, 0.009000000000000001, 0.027999999999999997] -> [-0.1, 0.006, 0.013999999999999999] after 19584 observations
+MIP: CWM: theta center [-0.1, 0.006, 0.013999999999999999] -> [-0.16, 0.003, 0.027999999999999997] after 19616 observations
+MIP: CWM: theta center [-0.16, 0.003, 0.027999999999999997] -> [-0.16, 0.003, 0.09799999999999999] after 19648 observations
+MIP: CWM: theta center [-0.16, 0.003, 0.09799999999999999] -> [-0.18, 0.009000000000000001, 0.09799999999999999] after 19680 observations
+MIP: CWM: theta center [-0.18, 0.009000000000000001, 0.09799999999999999] -> [-0.14, 0.012, 0.16799999999999998] after 19712 observations
+MIP: CWM: theta center [-0.14, 0.012, 0.16799999999999998] -> [-0.14, 0.003, 0.22399999999999998] after 19744 observations
+MIP: CWM: theta center [-0.14, 0.003, 0.22399999999999998] -> [-0.12, 0.015, 0.16799999999999998] after 19776 observations
+MIP: CWM: theta center [-0.12, 0.015, 0.16799999999999998] -> [-0.08, -0.003, 0.13999999999999999] after 19808 observations
+MIP: CWM: theta center [-0.08, -0.003, 0.13999999999999999] -> [-0.04, -0.003, 0.11199999999999999] after 19840 observations
+MIP: CWM: theta center [-0.04, -0.003, 0.11199999999999999] -> [-0.08, 0.015, 0.09799999999999999] after 19872 observations
+MIP: CWM: theta center [-0.08, 0.015, 0.09799999999999999] -> [-0.08, 0.018000000000000002, 0.126] after 19904 observations
+MIP:    42.10s nodes    47764 open     879 lb 1.42651515e1 ub 1.50000000e1 lp_iters 642330 sb_iters 13601 sb_lps 500 sb_secs 0.48 node_iters 601835 (first 577086, lps 41397) heur_iters 51743 dive_iters 1458 lp_rows 137 node_cut_secs 1.37 pool_len 2140 pool_idle 0
+MIP: CWM: theta center [-0.08, 0.018000000000000002, 0.126] -> [-0.06, -0.009000000000000001, 0.126] after 19936 observations
+MIP: CWM: theta center [-0.06, -0.009000000000000001, 0.126] -> [-0.06, 0.0, 0.11199999999999999] after 19968 observations
+MIP: CWM: theta center [-0.06, 0.0, 0.11199999999999999] -> [-0.02, 0.0, 0.126] after 20000 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 17
+MIP:   sub-MIP: 27 free columns of 63, status Optimal, nodes 0, objective Some(19.0), 0.00s, 26 LP iterations, TICKS cpu 0.001 lp 3593 prop 1528 sep 0 pre 5208 heur 0 node 0 lpit 43 lu 45584 lum 9996
+MIP:   mutation (36 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [1, 1, 1, 1, 0, 0])
+MIP: CWM: theta center [-0.02, 0.0, 0.126] -> [0.0, -0.003, 0.06999999999999999] after 20032 observations
+MIP: CWM: theta center [0.0, -0.003, 0.06999999999999999] -> [0.04, 0.0, 0.055999999999999994] after 20064 observations
+MIP: CWM: theta center [0.04, 0.0, 0.055999999999999994] -> [0.12, -0.018000000000000002, 0.055999999999999994] after 20096 observations
+MIP: CWM: theta center [0.12, -0.018000000000000002, 0.055999999999999994] -> [0.12, -0.021, 0.013999999999999999] after 20128 observations
+MIP: CWM: theta center [0.12, -0.021, 0.013999999999999999] -> [0.2, -0.027, 0.06999999999999999] after 20160 observations
+MIP: CWM: theta center [0.2, -0.027, 0.06999999999999999] -> [0.14, -0.024, 0.06999999999999999] after 20192 observations
+MIP: CWM: theta center [0.14, -0.024, 0.06999999999999999] -> [0.12, -0.024, 0.06999999999999999] after 20224 observations
+MIP: CWM: theta center [0.12, -0.024, 0.06999999999999999] -> [0.16, -0.021, 0.041999999999999996] after 20256 observations
+MIP: CWM: theta center [0.16, -0.021, 0.041999999999999996] -> [0.18, -0.021, -0.013999999999999999] after 20288 observations
+MIP: CWM: theta center [0.18, -0.021, -0.013999999999999999] -> [0.18, -0.018000000000000002, -0.055999999999999994] after 20320 observations
+MIP: CWM: theta center [0.18, -0.018000000000000002, -0.055999999999999994] -> [0.14, -0.015, 0.0] after 20352 observations
+MIP: CWM: theta center [0.14, -0.015, 0.0] -> [0.16, -0.018000000000000002, 0.013999999999999999] after 20384 observations
+MIP: CWM: theta center [0.16, -0.018000000000000002, 0.013999999999999999] -> [0.12, -0.006, 0.027999999999999997] after 20416 observations
+MIP: CWM: theta center [0.12, -0.006, 0.027999999999999997] -> [0.16, -0.009000000000000001, 0.027999999999999997] after 20448 observations
+MIP: CWM: theta center [0.16, -0.009000000000000001, 0.027999999999999997] -> [0.08, -0.006, 0.013999999999999999] after 20480 observations
+MIP: CWM: theta center [0.08, -0.006, 0.013999999999999999] -> [0.08, 0.006, 0.027999999999999997] after 20512 observations
+MIP: CWM: theta center [0.08, 0.006, 0.027999999999999997] -> [0.1, 0.021, 0.013999999999999999] after 20544 observations
+MIP: CWM: theta center [0.1, 0.021, 0.013999999999999999] -> [0.1, 0.009000000000000001, 0.027999999999999997] after 20576 observations
+MIP: CWM: theta center [0.1, 0.009000000000000001, 0.027999999999999997] -> [0.12, 0.012, 0.055999999999999994] after 20640 observations
+MIP: CWM: theta center [0.12, 0.012, 0.055999999999999994] -> [0.12, 0.015, 0.055999999999999994] after 20672 observations
+MIP: CWM: theta center [0.12, 0.015, 0.055999999999999994] -> [0.1, 0.021, 0.041999999999999996] after 20736 observations
+MIP: CWM: theta center [0.1, 0.021, 0.041999999999999996] -> [0.08, 0.018000000000000002, 0.041999999999999996] after 20768 observations
+MIP:    44.10s nodes    49715 open     820 lb 1.43362069e1 ub 1.50000000e1 lp_iters 671333 sb_iters 13601 sb_lps 500 sb_secs 0.49 node_iters 629358 (first 603153, lps 43084) heur_iters 53254 dive_iters 1463 lp_rows 146 node_cut_secs 1.43 pool_len 2026 pool_idle 0
+MIP: CWM: theta center [0.08, 0.018000000000000002, 0.041999999999999996] -> [0.04, 0.021, 0.041999999999999996] after 20800 observations
+MIP: CWM: theta center [0.04, 0.021, 0.041999999999999996] -> [0.08, 0.021, 0.041999999999999996] after 20832 observations
+MIP: CWM: theta center [0.08, 0.021, 0.041999999999999996] -> [0.08, 0.018000000000000002, 0.041999999999999996] after 20864 observations
+MIP: CWM: theta center [0.08, 0.018000000000000002, 0.041999999999999996] -> [0.04, 0.012, 0.055999999999999994] after 20896 observations
+MIP: CWM: theta center [0.04, 0.012, 0.055999999999999994] -> [-0.08, 0.003, 0.041999999999999996] after 20928 observations
+MIP: CWM: theta center [-0.08, 0.003, 0.041999999999999996] -> [-0.22, -0.009000000000000001, 0.041999999999999996] after 20960 observations
+MIP: CWM: theta center [-0.22, -0.009000000000000001, 0.041999999999999996] -> [-0.36, -0.021, 0.027999999999999997] after 20992 observations
+MIP: CWM: theta center [-0.36, -0.021, 0.027999999999999997] -> [-0.28, -0.027, -0.013999999999999999] after 21024 observations
+MIP: CWM: theta center [-0.28, -0.027, -0.013999999999999999] -> [-0.22, -0.012, -0.027999999999999997] after 21056 observations
+MIP: CWM: theta center [-0.22, -0.012, -0.027999999999999997] -> [-0.16, -0.006, 0.0] after 21088 observations
+MIP: CWM: theta center [-0.16, -0.006, 0.0] -> [-0.2, -0.009000000000000001, 0.027999999999999997] after 21120 observations
+MIP: CWM: theta center [-0.2, -0.009000000000000001, 0.027999999999999997] -> [-0.1, -0.012, 0.027999999999999997] after 21152 observations
+MIP: CWM: theta center [-0.1, -0.012, 0.027999999999999997] -> [-0.12, -0.009000000000000001, 0.013999999999999999] after 21184 observations
+MIP: CWM: theta center [-0.12, -0.009000000000000001, 0.013999999999999999] -> [-0.14, -0.009000000000000001, 0.027999999999999997] after 21216 observations
+MIP: CWM: theta center [-0.14, -0.009000000000000001, 0.027999999999999997] -> [-0.14, -0.009000000000000001, 0.013999999999999999] after 21248 observations
+MIP: CWM: theta center [-0.14, -0.009000000000000001, 0.013999999999999999] -> [-0.12, -0.009000000000000001, 0.013999999999999999] after 21280 observations
+MIP: CWM: theta center [-0.12, -0.009000000000000001, 0.013999999999999999] -> [-0.2, -0.003, 0.0] after 21312 observations
+MIP: CWM: theta center [-0.2, -0.003, 0.0] -> [-0.16, -0.003, 0.013999999999999999] after 21344 observations
+MIP: CWM: theta center [-0.16, -0.003, 0.013999999999999999] -> [-0.06, 0.003, -0.013999999999999999] after 21376 observations
+MIP: CWM: theta center [-0.06, 0.003, -0.013999999999999999] -> [0.0, 0.006, 0.0] after 21408 observations
+MIP: CWM: theta center [0.0, 0.006, 0.0] -> [0.0, 0.003, 0.013999999999999999] after 21440 observations
+MIP: CWM: theta center [0.0, 0.003, 0.013999999999999999] -> [-0.02, 0.0, 0.013999999999999999] after 21472 observations
+MIP: CWM: theta center [-0.02, 0.0, 0.013999999999999999] -> [-0.02, 0.003, 0.0] after 21504 observations
+MIP: CWM: theta center [-0.02, 0.003, 0.0] -> [-0.06, 0.003, -0.013999999999999999] after 21536 observations
+MIP: CWM: theta center [-0.06, 0.003, -0.013999999999999999] -> [-0.08, 0.003, -0.027999999999999997] after 21568 observations
+MIP:   ALNS arm 4 reward 0.000 (counts [1, 1, 1, 1, 1, 0])
+MIP: CWM: theta center [-0.08, 0.003, -0.027999999999999997] -> [-0.06, 0.006, -0.055999999999999994] after 21600 observations
+MIP: CWM: theta center [-0.06, 0.006, -0.055999999999999994] -> [-0.06, 0.006, -0.06999999999999999] after 21632 observations
+MIP:    46.10s nodes    51363 open     743 lb 1.42844284e1 ub 1.50000000e1 lp_iters 698229 sb_iters 13601 sb_lps 500 sb_secs 0.49 node_iters 654915 (first 627039, lps 44512) heur_iters 54617 dive_iters 1487 lp_rows 186 node_cut_secs 1.49 pool_len 1909 pool_idle 0
+MIP: CWM: theta center [-0.06, 0.006, -0.06999999999999999] -> [-0.08, 0.009000000000000001, -0.08399999999999999] after 21664 observations
+MIP: CWM: theta center [-0.08, 0.009000000000000001, -0.08399999999999999] -> [-0.08, 0.003, -0.041999999999999996] after 21696 observations
+MIP: CWM: theta center [-0.08, 0.003, -0.041999999999999996] -> [-0.04, 0.0, -0.013999999999999999] after 21728 observations
+MIP: CWM: theta center [-0.04, 0.0, -0.013999999999999999] -> [-0.06, 0.006, 0.0] after 21760 observations
+MIP: CWM: theta center [-0.06, 0.006, 0.0] -> [-0.1, -0.003, -0.013999999999999999] after 21792 observations
+MIP: CWM: theta center [-0.1, -0.003, -0.013999999999999999] -> [-0.12, 0.0, -0.027999999999999997] after 21824 observations
+MIP: CWM: theta center [-0.12, 0.0, -0.027999999999999997] -> [-0.18, 0.009000000000000001, -0.013999999999999999] after 21856 observations
+MIP: CWM: theta center [-0.18, 0.009000000000000001, -0.013999999999999999] -> [-0.12, 0.006, 0.027999999999999997] after 21888 observations
+MIP: CWM: theta center [-0.12, 0.006, 0.027999999999999997] -> [-0.1, 0.003, 0.06999999999999999] after 21920 observations
+MIP: CWM: theta center [-0.1, 0.003, 0.06999999999999999] -> [0.02, 0.009000000000000001, 0.055999999999999994] after 21952 observations
+MIP: CWM: theta center [0.02, 0.009000000000000001, 0.055999999999999994] -> [0.14, 0.015, 0.09799999999999999] after 21984 observations
+MIP: CWM: theta center [0.14, 0.015, 0.09799999999999999] -> [-0.1, 0.006, 0.027999999999999997] after 22016 observations
+MIP: CWM: theta center [-0.1, 0.006, 0.027999999999999997] -> [-0.02, 0.015, 0.027999999999999997] after 22048 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 17
+MIP: fixed-charge check: vb rows 0 of 45, continuous with vb 0 of 10
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 11
+MIP: fixed-charge check: vb rows 0 of 45, continuous with vb 0 of 10
+MIP: CWM: theta center [-0.02, 0.015, 0.027999999999999997] -> [-0.02, 0.012, 0.013999999999999999] after 22080 observations
+MIP: CWM: theta center [-0.02, 0.012, 0.013999999999999999] -> [0.02, 0.009000000000000001, 0.013999999999999999] after 22112 observations
+MIP: CWM: theta center [0.02, 0.009000000000000001, 0.013999999999999999] -> [0.04, 0.018000000000000002, 0.013999999999999999] after 22144 observations
+MIP: CWM: theta center [0.04, 0.018000000000000002, 0.013999999999999999] -> [0.02, 0.015, 0.027999999999999997] after 22176 observations
+MIP: CWM: theta center [0.02, 0.015, 0.027999999999999997] -> [0.02, 0.015, 0.041999999999999996] after 22208 observations
+MIP: CWM: theta center [0.02, 0.015, 0.041999999999999996] -> [0.02, 0.018000000000000002, 0.027999999999999997] after 22240 observations
+MIP: CWM: theta center [0.02, 0.018000000000000002, 0.027999999999999997] -> [0.0, 0.018000000000000002, 0.0] after 22272 observations
+MIP: CWM: theta center [0.0, 0.018000000000000002, 0.0] -> [-0.02, 0.015, 0.013999999999999999] after 22304 observations
+MIP: CWM: theta center [-0.02, 0.015, 0.013999999999999999] -> [-0.02, 0.012, -0.027999999999999997] after 22336 observations
+MIP: CWM: theta center [-0.02, 0.012, -0.027999999999999997] -> [-0.04, 0.009000000000000001, 0.0] after 22368 observations
+MIP: CWM: theta center [-0.04, 0.009000000000000001, 0.0] -> [-0.02, 0.015, 0.0] after 22400 observations
+MIP: CWM: theta center [-0.02, 0.015, 0.0] -> [-0.04, 0.009000000000000001, 0.027999999999999997] after 22432 observations
+MIP: CWM: theta center [-0.04, 0.009000000000000001, 0.027999999999999997] -> [-0.04, 0.009000000000000001, 0.0] after 22464 observations
+MIP: CWM: theta center [-0.04, 0.009000000000000001, 0.0] -> [-0.04, 0.009000000000000001, 0.013999999999999999] after 22496 observations
+MIP:    48.13s nodes    52921 open     602 lb 1.43033333e1 ub 1.50000000e1 lp_iters 724334 sb_iters 13601 sb_lps 500 sb_secs 0.49 node_iters 679721 (first 650374, lps 45921) heur_iters 55916 dive_iters 1487 lp_rows 166 node_cut_secs 1.55 pool_len 1795 pool_idle 0
+MIP: CWM: theta center [-0.04, 0.009000000000000001, 0.013999999999999999] -> [-0.04, 0.009000000000000001, 0.0] after 22528 observations
+MIP: CWM: theta center [-0.04, 0.009000000000000001, 0.0] -> [-0.04, 0.012, 0.0] after 22560 observations
+MIP: CWM: theta center [-0.04, 0.012, 0.0] -> [0.0, 0.006, -0.041999999999999996] after 22592 observations
+MIP: CWM: theta center [0.0, 0.006, -0.041999999999999996] -> [0.0, 0.003, -0.027999999999999997] after 22624 observations
+MIP: CWM: theta center [0.0, 0.003, -0.027999999999999997] -> [0.04, 0.0, -0.027999999999999997] after 22656 observations
+MIP: CWM: theta center [0.04, 0.0, -0.027999999999999997] -> [0.06, -0.009000000000000001, -0.027999999999999997] after 22688 observations
+MIP: CWM: theta center [0.06, -0.009000000000000001, -0.027999999999999997] -> [0.06, -0.024, -0.027999999999999997] after 22720 observations
+MIP: CWM: theta center [0.06, -0.024, -0.027999999999999997] -> [0.06, -0.018000000000000002, -0.027999999999999997] after 22752 observations
+MIP: CWM: theta center [0.06, -0.018000000000000002, -0.027999999999999997] -> [0.08, -0.03, -0.055999999999999994] after 22784 observations
+MIP: CWM: theta center [0.08, -0.03, -0.055999999999999994] -> [0.04, -0.021, -0.055999999999999994] after 22816 observations
+MIP: CWM: theta center [0.04, -0.021, -0.055999999999999994] -> [0.02, -0.018000000000000002, -0.055999999999999994] after 22848 observations
+MIP: CWM: theta center [0.02, -0.018000000000000002, -0.055999999999999994] -> [-0.02, -0.027, -0.055999999999999994] after 22880 observations
+MIP: CWM: theta center [-0.02, -0.027, -0.055999999999999994] -> [-0.06, -0.015, -0.027999999999999997] after 22912 observations
+MIP: CWM: theta center [-0.06, -0.015, -0.027999999999999997] -> [-0.08, -0.012, -0.055999999999999994] after 22944 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 10
+MIP:   sub-MIP: 20 free columns of 63, status Optimal, nodes 0, objective Some(17.0), 0.00s, 22 LP iterations, TICKS cpu 0.001 lp 2672 prop 1112 sep 0 pre 5431 heur 0 node 0 lpit 35 lu 27118 lum 10494
+MIP:   DINS (32 of 53 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [1, 1, 1, 1, 1, 1])
+MIP: CWM: theta center [-0.08, -0.012, -0.055999999999999994] -> [-0.1, -0.009000000000000001, -0.055999999999999994] after 22976 observations
+MIP: CWM: theta center [-0.1, -0.009000000000000001, -0.055999999999999994] -> [-0.1, -0.009000000000000001, -0.013999999999999999] after 23008 observations
+MIP: CWM: theta center [-0.1, -0.009000000000000001, -0.013999999999999999] -> [-0.1, -0.009000000000000001, 0.0] after 23040 observations
+MIP: CWM: theta center [-0.1, -0.009000000000000001, 0.0] -> [-0.14, -0.006, -0.027999999999999997] after 23072 observations
+MIP: CWM: theta center [-0.14, -0.006, -0.027999999999999997] -> [-0.18, -0.003, -0.041999999999999996] after 23104 observations
+MIP: CWM: theta center [-0.18, -0.003, -0.041999999999999996] -> [-0.18, -0.006, 0.0] after 23136 observations
+MIP: CWM: theta center [-0.18, -0.006, 0.0] -> [-0.16, -0.006, 0.013999999999999999] after 23168 observations
+MIP: CWM: theta center [-0.16, -0.006, 0.013999999999999999] -> [-0.16, -0.015, 0.027999999999999997] after 23200 observations
+MIP: CWM: theta center [-0.16, -0.015, 0.027999999999999997] -> [-0.14, -0.012, -0.027999999999999997] after 23232 observations
+MIP: CWM: theta center [-0.14, -0.012, -0.027999999999999997] -> [-0.16, -0.012, -0.041999999999999996] after 23264 observations
+MIP: CWM: theta center [-0.16, -0.012, -0.041999999999999996] -> [-0.12, -0.009000000000000001, -0.06999999999999999] after 23296 observations
+MIP: CWM: theta center [-0.12, -0.009000000000000001, -0.06999999999999999] -> [-0.16, -0.021, -0.06999999999999999] after 23328 observations
+MIP: CWM: theta center [-0.16, -0.021, -0.06999999999999999] -> [-0.12, -0.018000000000000002, -0.041999999999999996] after 23360 observations
+MIP: CWM: theta center [-0.12, -0.018000000000000002, -0.041999999999999996] -> [-0.08, -0.024, -0.055999999999999994] after 23392 observations
+MIP:    50.13s nodes    54511 open     501 lb 1.43029613e1 ub 1.50000000e1 lp_iters 749263 sb_iters 13601 sb_lps 500 sb_secs 0.50 node_iters 703449 (first 672922, lps 47311) heur_iters 57154 dive_iters 1502 lp_rows 167 node_cut_secs 1.60 pool_len 1672 pool_idle 0
+MIP: CWM: theta center [-0.08, -0.024, -0.055999999999999994] -> [-0.1, -0.024, -0.08399999999999999] after 23424 observations
+MIP: CWM: theta center [-0.1, -0.024, -0.08399999999999999] -> [-0.12, -0.018000000000000002, -0.08399999999999999] after 23456 observations
+MIP: CWM: theta center [-0.12, -0.018000000000000002, -0.08399999999999999] -> [-0.06, -0.018000000000000002, -0.08399999999999999] after 23488 observations
+MIP: CWM: theta center [-0.06, -0.018000000000000002, -0.08399999999999999] -> [-0.04, -0.021, -0.09799999999999999] after 23520 observations
+MIP: CWM: theta center [-0.04, -0.021, -0.09799999999999999] -> [0.0, -0.018000000000000002, -0.126] after 23552 observations
+MIP: CWM: theta center [0.0, -0.018000000000000002, -0.126] -> [0.02, -0.015, -0.11199999999999999] after 23584 observations
+MIP: CWM: theta center [0.02, -0.015, -0.11199999999999999] -> [0.02, -0.015, -0.09799999999999999] after 23616 observations
+MIP: CWM: theta center [0.02, -0.015, -0.09799999999999999] -> [-0.02, -0.012, -0.11199999999999999] after 23648 observations
+MIP: CWM: theta center [-0.02, -0.012, -0.11199999999999999] -> [-0.02, -0.012, -0.09799999999999999] after 23680 observations
+MIP: CWM: theta center [-0.02, -0.012, -0.09799999999999999] -> [0.06, -0.003, -0.08399999999999999] after 23712 observations
+MIP: CWM: theta center [0.06, -0.003, -0.08399999999999999] -> [0.06, -0.018000000000000002, -0.11199999999999999] after 23744 observations
+MIP: CWM: theta center [0.06, -0.018000000000000002, -0.11199999999999999] -> [0.16, -0.015, -0.126] after 23776 observations
+MIP: CWM: theta center [0.16, -0.015, -0.126] -> [0.14, -0.015, -0.11199999999999999] after 23808 observations
+MIP: CWM: theta center [0.14, -0.015, -0.11199999999999999] -> [0.1, -0.033, -0.11199999999999999] after 23840 observations
+MIP: CWM: theta center [0.1, -0.033, -0.11199999999999999] -> [0.04, -0.033, -0.11199999999999999] after 23872 observations
+MIP: CWM: theta center [0.04, -0.033, -0.11199999999999999] -> [0.04, -0.042, -0.11199999999999999] after 23904 observations
+MIP: CWM: theta center [0.04, -0.042, -0.11199999999999999] -> [0.06, -0.039, -0.09799999999999999] after 23936 observations
+MIP: CWM: theta center [0.06, -0.039, -0.09799999999999999] -> [0.02, -0.036000000000000004, -0.11199999999999999] after 23968 observations
+MIP: CWM: theta center [0.02, -0.036000000000000004, -0.11199999999999999] -> [0.06, -0.03, -0.11199999999999999] after 24000 observations
+MIP: CWM: theta center [0.06, -0.03, -0.11199999999999999] -> [0.06, -0.024, -0.126] after 24032 observations
+MIP: CWM: theta center [0.06, -0.024, -0.126] -> [0.06, -0.03, -0.11199999999999999] after 24064 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 10
+MIP:   sub-MIP: 20 free columns of 63, status Optimal, nodes 0, objective Some(18.000000000000004), 0.00s, 26 LP iterations, TICKS cpu 0.001 lp 3103 prop 1160 sep 0 pre 5570 heur 0 node 0 lpit 37 lu 44884 lum 11825
+MIP:   DINS (33 of 53 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [1, 1, 1, 1, 1, 2])
+MIP: CWM: theta center [0.06, -0.03, -0.11199999999999999] -> [0.06, -0.033, -0.11199999999999999] after 24096 observations
+MIP: CWM: theta center [0.06, -0.033, -0.11199999999999999] -> [0.04, -0.027, -0.09799999999999999] after 24128 observations
+MIP: CWM: theta center [0.04, -0.027, -0.09799999999999999] -> [0.04, -0.021, -0.11199999999999999] after 24160 observations
+MIP: CWM: theta center [0.04, -0.021, -0.11199999999999999] -> [0.04, -0.012, -0.126] after 24192 observations
+MIP: CWM: theta center [0.04, -0.012, -0.126] -> [-0.02, -0.009000000000000001, -0.13999999999999999] after 24224 observations
+MIP: CWM: theta center [-0.02, -0.009000000000000001, -0.13999999999999999] -> [0.0, 0.009000000000000001, -0.13999999999999999] after 24256 observations
+MIP: CWM: theta center [0.0, 0.009000000000000001, -0.13999999999999999] -> [0.0, 0.003, -0.13999999999999999] after 24288 observations
+MIP:    52.13s nodes    56062 open     323 lb 1.46666667e1 ub 1.50000000e1 lp_iters 774561 sb_iters 13601 sb_lps 500 sb_secs 0.50 node_iters 727498 (first 695616, lps 48665) heur_iters 58433 dive_iters 1506 lp_rows 194 node_cut_secs 1.66 pool_len 1537 pool_idle 0
+MIP: CWM: theta center [0.0, 0.003, -0.13999999999999999] -> [-0.02, 0.009000000000000001, -0.13999999999999999] after 24320 observations
+MIP: CWM: theta center [-0.02, 0.009000000000000001, -0.13999999999999999] -> [-0.02, -0.003, -0.11199999999999999] after 24352 observations
+MIP: CWM: theta center [-0.02, -0.003, -0.11199999999999999] -> [0.0, -0.006, -0.126] after 24384 observations
+MIP: CWM: theta center [0.0, -0.006, -0.126] -> [-0.04, -0.006, -0.126] after 24416 observations
+MIP: CWM: theta center [-0.04, -0.006, -0.126] -> [0.02, 0.0, -0.041999999999999996] after 24448 observations
+MIP: CWM: theta center [0.02, 0.0, -0.041999999999999996] -> [0.06, -0.003, -0.027999999999999997] after 24480 observations
+MIP: CWM: theta center [0.06, -0.003, -0.027999999999999997] -> [0.16, 0.0, 0.11199999999999999] after 24512 observations
+MIP: CWM: theta center [0.16, 0.0, 0.11199999999999999] -> [0.1, 0.0, 0.20999999999999996] after 24544 observations
+MIP: CWM: theta center [0.1, 0.0, 0.20999999999999996] -> [0.1, -0.003, 0.013999999999999999] after 24576 observations
+MIP: CWM: theta center [0.1, -0.003, 0.013999999999999999] -> [0.1, 0.009000000000000001, 0.06999999999999999] after 24608 observations
+MIP: CWM: theta center [0.1, 0.009000000000000001, 0.06999999999999999] -> [0.14, 0.012, 0.11199999999999999] after 24640 observations
+MIP: CWM: theta center [0.14, 0.012, 0.11199999999999999] -> [0.14, 0.009000000000000001, 0.08399999999999999] after 24672 observations
+MIP: CWM: theta center [0.14, 0.009000000000000001, 0.08399999999999999] -> [0.1, 0.0, 0.09799999999999999] after 24704 observations
+MIP: CWM: theta center [0.1, 0.0, 0.09799999999999999] -> [0.1, -0.009000000000000001, 0.09799999999999999] after 24736 observations
+MIP: CWM: theta center [0.1, -0.009000000000000001, 0.09799999999999999] -> [0.12, -0.015, 0.08399999999999999] after 24768 observations
+MIP: CWM: theta center [0.12, -0.015, 0.08399999999999999] -> [0.1, -0.003, 0.055999999999999994] after 24800 observations
+MIP: CWM: theta center [0.1, -0.003, 0.055999999999999994] -> [0.12, -0.006, 0.041999999999999996] after 24832 observations
+MIP: CWM: theta center [0.12, -0.006, 0.041999999999999996] -> [0.08, -0.006, 0.0] after 24864 observations
+MIP: CWM: theta center [0.08, -0.006, 0.0] -> [0.08, -0.006, -0.027999999999999997] after 24896 observations
+MIP: CWM: theta center [0.08, -0.006, -0.027999999999999997] -> [0.04, -0.009000000000000001, -0.041999999999999996] after 24928 observations
+MIP: CWM: theta center [0.04, -0.009000000000000001, -0.041999999999999996] -> [0.06, -0.012, -0.027999999999999997] after 24960 observations
+MIP: CWM: theta center [0.06, -0.012, -0.027999999999999997] -> [0.02, -0.015, 0.013999999999999999] after 24992 observations
+MIP: CWM: theta center [0.02, -0.015, 0.013999999999999999] -> [0.08, -0.006, 0.055999999999999994] after 25024 observations
+MIP: CWM: theta center [0.08, -0.006, 0.055999999999999994] -> [-0.1, -0.006, 0.041999999999999996] after 25056 observations
+MIP: CWM: theta center [-0.1, -0.006, 0.041999999999999996] -> [0.28, -0.006, 0.013999999999999999] after 25088 observations
+MIP: CWM: theta center [0.28, -0.006, 0.013999999999999999] -> [0.3, -0.009000000000000001, 0.027999999999999997] after 25120 observations
+MIP: CWM: theta center [0.3, -0.009000000000000001, 0.027999999999999997] -> [0.0, 0.003, 0.013999999999999999] after 25152 observations
+MIP: CWM: theta center [0.0, 0.003, 0.013999999999999999] -> [0.04, -0.006, 0.027999999999999997] after 25184 observations
+MIP: CWM: theta center [0.04, -0.006, 0.027999999999999997] -> [-0.06, 0.024, 0.013999999999999999] after 25216 observations
+MIP: CWM: theta center [-0.06, 0.024, 0.013999999999999999] -> [-0.18, 0.009000000000000001, 0.027999999999999997] after 25248 observations
+MIP: CWM: theta center [-0.18, 0.009000000000000001, 0.027999999999999997] -> [-0.24, 0.003, 0.055999999999999994] after 25280 observations
+MIP: CWM: theta center [-0.24, 0.003, 0.055999999999999994] -> [-0.02, 0.003, 0.055999999999999994] after 25312 observations
+MIP: CWM: theta center [-0.02, 0.003, 0.055999999999999994] -> [-0.04, 0.012, 0.08399999999999999] after 25344 observations
+MIP:    54.13s nodes    57234 open       1 lb 1.44011115e1 ub 1.50000000e1 lp_iters 795985 sb_iters 13601 sb_lps 500 sb_secs 0.50 node_iters 747836 (first 714680, lps 49622) heur_iters 59531 dive_iters 1518 lp_rows 153 node_cut_secs 1.71 pool_len 1382 pool_idle 0
+MIP: CWM: theta center [-0.04, 0.012, 0.08399999999999999] -> [-0.16, 0.003, 0.06999999999999999] after 25376 observations
+MIP:   ALNS arm 4 reward 0.000 (counts [1, 1, 1, 1, 2, 2])
+MIP: CWM: theta center [-0.16, 0.003, 0.06999999999999999] -> [-0.14, -0.003, 0.013999999999999999] after 25408 observations
+MIP: CWM: theta center [-0.14, -0.003, 0.013999999999999999] -> [-0.18, -0.003, 0.027999999999999997] after 25440 observations
+MIP: CWM: theta center [-0.18, -0.003, 0.027999999999999997] -> [-0.14, 0.003, 0.041999999999999996] after 25472 observations
+MIP: CWM: theta center [-0.14, 0.003, 0.041999999999999996] -> [-0.2, 0.012, 0.041999999999999996] after 25504 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 12
+MIP: fixed-charge check: vb rows 0 of 48, continuous with vb 0 of 10
+MIP: CWM: theta center [-0.2, 0.012, 0.041999999999999996] -> [-0.24, 0.006, 0.055999999999999994] after 25536 observations
+MIP: CWM: theta center [-0.24, 0.006, 0.055999999999999994] -> [-0.18, 0.009000000000000001, 0.06999999999999999] after 25568 observations
+MIP: CWM: theta center [-0.18, 0.009000000000000001, 0.06999999999999999] -> [-0.12, 0.003, 0.06999999999999999] after 25600 observations
+MIP: CWM: theta center [-0.12, 0.003, 0.06999999999999999] -> [-0.14, 0.003, 0.08399999999999999] after 25632 observations
+MIP: CWM: theta center [-0.14, 0.003, 0.08399999999999999] -> [-0.14, 0.0, 0.055999999999999994] after 25664 observations
+MIP: CWM: theta center [-0.14, 0.0, 0.055999999999999994] -> [-0.2, 0.0, 0.055999999999999994] after 25696 observations
+MIP: CWM: theta center [-0.2, 0.0, 0.055999999999999994] -> [-0.12, 0.003, 0.027999999999999997] after 25728 observations
+MIP: CWM: theta center [-0.12, 0.003, 0.027999999999999997] -> [-0.06, -0.003, 0.027999999999999997] after 25792 observations
+MIP: CWM: theta center [-0.06, -0.003, 0.027999999999999997] -> [-0.06, -0.003, 0.041999999999999996] after 25824 observations
+MIP: CWM: theta center [-0.06, -0.003, 0.041999999999999996] -> [-0.06, -0.006, 0.041999999999999996] after 25856 observations
+MIP: CWM: theta center [-0.06, -0.006, 0.041999999999999996] -> [0.22, -0.006, 0.027999999999999997] after 25888 observations
+MIP: CWM: theta center [0.22, -0.006, 0.027999999999999997] -> [0.16, -0.009000000000000001, 0.041999999999999996] after 25920 observations
+MIP: CWM: theta center [0.16, -0.009000000000000001, 0.041999999999999996] -> [0.08, -0.012, 0.027999999999999997] after 25952 observations
+MIP: CWM: theta center [0.08, -0.012, 0.027999999999999997] -> [0.08, -0.009000000000000001, 0.013999999999999999] after 25984 observations
+MIP: CWM: theta center [0.08, -0.009000000000000001, 0.013999999999999999] -> [0.06, -0.015, 0.013999999999999999] after 26016 observations
+MIP: CWM: theta center [0.06, -0.015, 0.013999999999999999] -> [0.04, -0.012, 0.027999999999999997] after 26048 observations
+MIP: CWM: theta center [0.04, -0.012, 0.027999999999999997] -> [0.0, -0.012, 0.027999999999999997] after 26080 observations
+MIP: CWM: theta center [0.0, -0.012, 0.027999999999999997] -> [0.02, -0.021, 0.06999999999999999] after 26112 observations
+MIP: CWM: theta center [0.02, -0.021, 0.06999999999999999] -> [-0.02, -0.027, 0.06999999999999999] after 26144 observations
+MIP: CWM: theta center [-0.02, -0.027, 0.06999999999999999] -> [-0.06, -0.021, 0.06999999999999999] after 26176 observations
+MIP: CWM: theta center [-0.06, -0.021, 0.06999999999999999] -> [-0.06, -0.012, 0.055999999999999994] after 26208 observations
+MIP: CWM: theta center [-0.06, -0.012, 0.055999999999999994] -> [-0.1, 0.006, 0.055999999999999994] after 26240 observations
+MIP: CWM: theta center [-0.1, 0.006, 0.055999999999999994] -> [-0.12, 0.018000000000000002, 0.027999999999999997] after 26272 observations
+MIP: CWM: theta center [-0.12, 0.018000000000000002, 0.027999999999999997] -> [-0.16, 0.039, 0.055999999999999994] after 26304 observations
+MIP: CWM: theta center [-0.16, 0.039, 0.055999999999999994] -> [-0.2, 0.03, 0.055999999999999994] after 26336 observations
+MIP:    56.13s nodes    58990 open       3 lb 1.43591160e1 ub 1.50000000e1 lp_iters 821009 sb_iters 13601 sb_lps 500 sb_secs 0.51 node_iters 771619 (first 737115, lps 51136) heur_iters 60784 dive_iters 1530 lp_rows 114 node_cut_secs 1.77 pool_len 1212 pool_idle 0
+MIP: CWM: theta center [-0.2, 0.03, 0.055999999999999994] -> [-0.18, 0.012, 0.041999999999999996] after 26368 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 18
+MIP: fixed-charge check: vb rows 0 of 56, continuous with vb 0 of 10
+MIP:   sub-MIP: 28 free columns of 63, status Optimal, nodes 0, objective Some(19.000000000000004), 0.00s, 31 LP iterations, TICKS cpu 0.003 lp 4909 prop 2136 sep 54833 pre 6319 heur 0 node 0 lpit 50 lu 93547 lum 16323
+MIP:   mutation (35 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [1, 1, 1, 2, 2, 2])
+MIP: CWM: theta center [-0.18, 0.012, 0.041999999999999996] -> [-0.16, 0.015, 0.041999999999999996] after 26400 observations
+MIP: CWM: theta center [-0.16, 0.015, 0.041999999999999996] -> [-0.18, 0.012, 0.041999999999999996] after 26432 observations
+MIP: CWM: theta center [-0.18, 0.012, 0.041999999999999996] -> [-0.16, 0.015, 0.041999999999999996] after 26464 observations
+MIP: CWM: theta center [-0.16, 0.015, 0.041999999999999996] -> [-0.14, 0.018000000000000002, 0.027999999999999997] after 26496 observations
+MIP: CWM: theta center [-0.14, 0.018000000000000002, 0.027999999999999997] -> [-0.06, 0.021, -0.027999999999999997] after 26528 observations
+MIP: CWM: theta center [-0.06, 0.021, -0.027999999999999997] -> [-0.02, 0.018000000000000002, -0.027999999999999997] after 26560 observations
+MIP: CWM: theta center [-0.02, 0.018000000000000002, -0.027999999999999997] -> [-0.06, 0.018000000000000002, -0.013999999999999999] after 26592 observations
+MIP: CWM: theta center [-0.06, 0.018000000000000002, -0.013999999999999999] -> [0.0, 0.012, -0.013999999999999999] after 26624 observations
+MIP: CWM: theta center [0.0, 0.012, -0.013999999999999999] -> [-0.02, 0.009000000000000001, -0.013999999999999999] after 26656 observations
+MIP: CWM: theta center [-0.02, 0.009000000000000001, -0.013999999999999999] -> [-0.02, 0.006, -0.013999999999999999] after 26688 observations
+MIP: CWM: theta center [-0.02, 0.006, -0.013999999999999999] -> [0.0, 0.006, 0.0] after 26720 observations
+MIP: CWM: theta center [0.0, 0.006, 0.0] -> [0.0, 0.012, -0.013999999999999999] after 26752 observations
+MIP: CWM: theta center [0.0, 0.012, -0.013999999999999999] -> [0.04, 0.03, 0.013999999999999999] after 26784 observations
+MIP: CWM: theta center [0.04, 0.03, 0.013999999999999999] -> [0.1, 0.036000000000000004, 0.041999999999999996] after 26816 observations
+MIP: CWM: theta center [0.1, 0.036000000000000004, 0.041999999999999996] -> [0.06, 0.03, 0.0] after 26848 observations
+MIP: CWM: theta center [0.06, 0.03, 0.0] -> [0.1, 0.021, 0.0] after 26880 observations
+MIP: CWM: theta center [0.1, 0.021, 0.0] -> [-0.02, 0.018000000000000002, 0.055999999999999994] after 26944 observations
+MIP: CWM: theta center [-0.02, 0.018000000000000002, 0.055999999999999994] -> [-0.06, 0.018000000000000002, 0.013999999999999999] after 26976 observations
+MIP: CWM: theta center [-0.06, 0.018000000000000002, 0.013999999999999999] -> [-0.04, 0.021, 0.0] after 27008 observations
+MIP: CWM: theta center [-0.04, 0.021, 0.0] -> [-0.02, 0.027, 0.013999999999999999] after 27040 observations
+MIP: CWM: theta center [-0.02, 0.027, 0.013999999999999999] -> [0.02, 0.036000000000000004, 0.041999999999999996] after 27072 observations
+MIP: CWM: theta center [0.02, 0.036000000000000004, 0.041999999999999996] -> [-0.02, 0.03, 0.09799999999999999] after 27104 observations
+MIP: CWM: theta center [-0.02, 0.03, 0.09799999999999999] -> [0.02, 0.03, 0.055999999999999994] after 27136 observations
+MIP: CWM: theta center [0.02, 0.03, 0.055999999999999994] -> [0.04, 0.021, 0.041999999999999996] after 27168 observations
+MIP: CWM: theta center [0.04, 0.021, 0.041999999999999996] -> [0.02, 0.012, 0.041999999999999996] after 27200 observations
+MIP: CWM: theta center [0.02, 0.012, 0.041999999999999996] -> [0.0, 0.012, 0.055999999999999994] after 27232 observations
+MIP: CWM: theta center [0.0, 0.012, 0.055999999999999994] -> [-0.04, 0.012, 0.055999999999999994] after 27264 observations
+MIP:    58.15s nodes    60831 open       8 lb 1.44177266e1 ub 1.50000000e1 lp_iters 845494 sb_iters 13601 sb_lps 500 sb_secs 0.51 node_iters 794998 (first 759430, lps 52576) heur_iters 61921 dive_iters 1530 lp_rows 122 node_cut_secs 1.83 pool_len 1027 pool_idle 0
+MIP: CWM: theta center [-0.04, 0.012, 0.055999999999999994] -> [-0.06, 0.009000000000000001, 0.055999999999999994] after 27296 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 53
+MIP: fixed-charge check: vb rows 0 of 64, continuous with vb 0 of 10
+MIP: CWM: theta center [-0.06, 0.009000000000000001, 0.055999999999999994] -> [-0.06, 0.006, 0.06999999999999999] after 27328 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 21
+MIP: fixed-charge check: vb rows 0 of 59, continuous with vb 0 of 10
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 12
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 37
+MIP: fixed-charge check: vb rows 0 of 64, continuous with vb 0 of 10
+MIP: CWM: theta center [-0.06, 0.006, 0.06999999999999999] -> [0.02, 0.006, 0.041999999999999996] after 27360 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 37
+MIP: fixed-charge check: vb rows 0 of 58, continuous with vb 0 of 10
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 37
+MIP: fixed-charge check: vb rows 0 of 64, continuous with vb 0 of 10
+MIP:   sub-MIP: 63 free columns of 63, status TimeLimit, nodes 0, objective None, 0.23s, 1754 LP iterations, TICKS cpu 0.300 lp 687963 prop 258183 sep 7662302 pre 37436 heur 0 node 0 lpit 2234 lu 13444892 lum 890530
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 2, 2, 2, 2])
+MIP: CWM: theta center [0.02, 0.006, 0.041999999999999996] -> [0.02, 0.006, 0.055999999999999994] after 27392 observations
+MIP: CWM: theta center [0.02, 0.006, 0.055999999999999994] -> [0.04, -0.003, 0.06999999999999999] after 27424 observations
+MIP: CWM: theta center [0.04, -0.003, 0.06999999999999999] -> [-0.02, -0.009000000000000001, 0.041999999999999996] after 27456 observations
+MIP: CWM: theta center [-0.02, -0.009000000000000001, 0.041999999999999996] -> [0.0, -0.003, 0.027999999999999997] after 27488 observations
+MIP: CWM: theta center [0.0, -0.003, 0.027999999999999997] -> [-0.02, -0.003, -0.027999999999999997] after 27520 observations
+MIP: CWM: theta center [-0.02, -0.003, -0.027999999999999997] -> [-0.08, -0.006, -0.027999999999999997] after 27552 observations
+MIP: CWM: theta center [-0.08, -0.006, -0.027999999999999997] -> [-0.08, -0.012, -0.013999999999999999] after 27584 observations
+MIP: CWM: theta center [-0.08, -0.012, -0.013999999999999999] -> [-0.18, -0.012, -0.055999999999999994] after 27616 observations
+MIP: CWM: theta center [-0.18, -0.012, -0.055999999999999994] -> [-0.12, -0.009000000000000001, -0.08399999999999999] after 27648 observations
+MIP: CWM: theta center [-0.12, -0.009000000000000001, -0.08399999999999999] -> [-0.06, -0.009000000000000001, -0.013999999999999999] after 27680 observations
+MIP: CWM: theta center [-0.06, -0.009000000000000001, -0.013999999999999999] -> [-0.08, -0.003, -0.055999999999999994] after 27712 observations
+MIP: CWM: theta center [-0.08, -0.003, -0.055999999999999994] -> [-0.1, -0.006, -0.08399999999999999] after 27744 observations
+MIP: CWM: theta center [-0.1, -0.006, -0.08399999999999999] -> [-0.14, -0.006, -0.055999999999999994] after 27776 observations
+MIP: CWM: theta center [-0.14, -0.006, -0.055999999999999994] -> [-0.1, -0.003, -0.055999999999999994] after 27808 observations
+MIP: CWM: theta center [-0.1, -0.003, -0.055999999999999994] -> [-0.1, 0.0, -0.08399999999999999] after 27840 observations
+MIP: CWM: theta center [-0.1, 0.0, -0.08399999999999999] -> [-0.04, 0.006, -0.08399999999999999] after 27872 observations
+MIP: CWM: theta center [-0.04, 0.006, -0.08399999999999999] -> [0.0, -0.003, -0.055999999999999994] after 27904 observations
+MIP: CWM: theta center [0.0, -0.003, -0.055999999999999994] -> [0.04, -0.003, -0.06999999999999999] after 27936 observations
+MIP: CWM: theta center [0.04, -0.003, -0.06999999999999999] -> [0.04, 0.0, -0.126] after 27968 observations
+MIP: CWM: theta center [0.04, 0.0, -0.126] -> [0.02, 0.006, -0.08399999999999999] after 28000 observations
+MIP: CWM: theta center [0.02, 0.006, -0.08399999999999999] -> [0.08, 0.006, -0.09799999999999999] after 28032 observations
+MIP: CWM: theta center [0.08, 0.006, -0.09799999999999999] -> [0.22, 0.015, -0.126] after 28064 observations
+MIP: CWM: theta center [0.22, 0.015, -0.126] -> [0.08, 0.015, -0.11199999999999999] after 28096 observations
+MIP:    60.16s nodes    62425 open       0 lb inf ub 1.50000000e1 lp_iters 867600 sb_iters 13601 sb_lps 500 sb_secs 0.52 node_iters 817024 (first 780275, lps 53924) heur_iters 63760 dive_iters 1535 lp_rows 130 node_cut_secs 1.90 pool_len 759 pool_idle 0
+MIP: CWM: theta center [0.08, 0.015, -0.11199999999999999] -> [0.08, 0.015, -0.09799999999999999] after 28128 observations
+MIP: CWM: theta center [0.08, 0.015, -0.09799999999999999] -> [0.1, 0.012, -0.08399999999999999] after 28160 observations
+MIP: CWM: theta center [0.1, 0.012, -0.08399999999999999] -> [0.08, 0.006, -0.11199999999999999] after 28192 observations
+MIP: CWM: theta center [0.08, 0.006, -0.11199999999999999] -> [0.08, 0.003, -0.06999999999999999] after 28224 observations
+MIP: CWM: theta center [0.08, 0.003, -0.06999999999999999] -> [0.06, -0.006, -0.08399999999999999] after 28256 observations
+MIP: CWM: theta center [0.06, -0.006, -0.08399999999999999] -> [-0.04, -0.015, -0.041999999999999996] after 28288 observations
+MIP: CWM: theta center [-0.04, -0.015, -0.041999999999999996] -> [-0.02, 0.003, -0.027999999999999997] after 28320 observations
+MIP: CWM: theta center [-0.02, 0.003, -0.027999999999999997] -> [-0.04, -0.012, -0.06999999999999999] after 28352 observations
+MIP: CWM: theta center [-0.04, -0.012, -0.06999999999999999] -> [-0.1, 0.0, -0.09799999999999999] after 28384 observations
+MIP: CWM: theta center [-0.1, 0.0, -0.09799999999999999] -> [-0.1, 0.009000000000000001, -0.08399999999999999] after 28416 observations
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 18
+MIP: fixed-charge check: vb rows 0 of 63, continuous with vb 0 of 10
+CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 12
+MIP: fixed-charge check: vb rows 0 of 54, continuous with vb 0 of 10
+MIP: CWM: theta center [-0.1, 0.009000000000000001, -0.08399999999999999] -> [-0.14, 0.0, -0.055999999999999994] after 28448 observations
+MIP: CWM: theta center [-0.14, 0.0, -0.055999999999999994] -> [-0.26, -0.006, -0.027999999999999997] after 28480 observations
+MIP: CWM: theta center [-0.26, -0.006, -0.027999999999999997] -> [-0.32, -0.006, -0.06999999999999999] after 28512 observations
+MIP: CWM: theta center [-0.32, -0.006, -0.06999999999999999] -> [-0.16, -0.006, -0.06999999999999999] after 28544 observations
+MIP: CWM: theta center [-0.16, -0.006, -0.06999999999999999] -> [-0.12, 0.0, -0.055999999999999994] after 28576 observations
+MIP: CWM: theta center [-0.12, 0.0, -0.055999999999999994] -> [-0.06, 0.003, -0.055999999999999994] after 28608 observations
+MIP: CWM: theta center [-0.06, 0.003, -0.055999999999999994] -> [-0.04, 0.0, -0.055999999999999994] after 28640 observations
+MIP: CWM: theta center [-0.04, 0.0, -0.055999999999999994] -> [-0.04, 0.003, -0.055999999999999994] after 28672 observations
+MIP: CWM: theta center [-0.04, 0.003, -0.055999999999999994] -> [-0.06, 0.003, -0.06999999999999999] after 28704 observations
+MIP: CWM: theta center [-0.06, 0.003, -0.06999999999999999] -> [-0.12, 0.006, -0.06999999999999999] after 28736 observations
+MIP: CWM: theta center [-0.12, 0.006, -0.06999999999999999] -> [-0.12, 0.003, -0.06999999999999999] after 28768 observations
+MIP: CWM: theta center [-0.12, 0.003, -0.06999999999999999] -> [-0.08, -0.003, -0.055999999999999994] after 28800 observations
+MIP: CWM: theta center [-0.08, -0.003, -0.055999999999999994] -> [-0.1, -0.003, -0.027999999999999997] after 28832 observations
+MIP: CWM: theta center [-0.1, -0.003, -0.027999999999999997] -> [-0.1, 0.009000000000000001, -0.041999999999999996] after 28864 observations
+MIP: CWM: theta center [-0.1, 0.009000000000000001, -0.041999999999999996] -> [-0.06, 0.009000000000000001, -0.013999999999999999] after 28896 observations
+MIP: CWM: theta center [-0.06, 0.009000000000000001, -0.013999999999999999] -> [-0.06, 0.009000000000000001, 0.013999999999999999] after 28928 observations
+MIP:    62.17s nodes    64045 open       0 lb inf ub 1.50000000e1 lp_iters 891168 sb_iters 13733 sb_lps 512 sb_secs 0.52 node_iters 839966 (first 801782, lps 55336) heur_iters 64273 dive_iters 1554 lp_rows 134 node_cut_secs 1.95 pool_len 455 pool_idle 0
+MIP: CWM: theta center [-0.06, 0.009000000000000001, 0.013999999999999999] -> [-0.08, 0.009000000000000001, 0.0] after 28960 observations
+MIP: CWM: theta center [-0.08, 0.009000000000000001, 0.0] -> [-0.08, 0.018000000000000002, 0.055999999999999994] after 28992 observations
+MIP: CWM: theta center [-0.08, 0.018000000000000002, 0.055999999999999994] -> [-0.12, 0.012, 0.06999999999999999] after 29024 observations
+MIP: CWM: theta center [-0.12, 0.012, 0.06999999999999999] -> [-0.12, 0.012, 0.11199999999999999] after 29056 observations
+MIP: CWM: theta center [-0.12, 0.012, 0.11199999999999999] -> [-0.14, 0.012, 0.126] after 29088 observations
+MIP: CWM: theta center [-0.14, 0.012, 0.126] -> [-0.14, 0.021, 0.09799999999999999] after 29120 observations
+MIP: CWM: theta center [-0.14, 0.021, 0.09799999999999999] -> [-0.12, 0.024, 0.09799999999999999] after 29216 observations
+MIP: CWM: theta center [-0.12, 0.024, 0.09799999999999999] -> [-0.12, 0.021, 0.11199999999999999] after 29248 observations
+MIP: CWM: theta center [-0.12, 0.021, 0.11199999999999999] -> [-0.18, 0.021, 0.08399999999999999] after 29280 observations
+MIP: CWM: theta center [-0.18, 0.021, 0.08399999999999999] -> [-0.24, 0.024, 0.06999999999999999] after 29312 observations
+MIP: CWM: theta center [-0.24, 0.024, 0.06999999999999999] -> [-0.22, 0.024, 0.08399999999999999] after 29344 observations
+MIP: CWM: theta center [-0.22, 0.024, 0.08399999999999999] -> [-0.26, 0.021, 0.06999999999999999] after 29376 observations
+MIP: CWM: theta center [-0.26, 0.021, 0.06999999999999999] -> [-0.18, 0.027, 0.08399999999999999] after 29408 observations
+MIP: CWM: theta center [-0.18, 0.027, 0.08399999999999999] -> [0.0, 0.03, 0.041999999999999996] after 29440 observations
+MIP: CWM: theta center [0.0, 0.03, 0.041999999999999996] -> [0.16, 0.03, 0.013999999999999999] after 29472 observations
+MIP: CWM: theta center [0.16, 0.03, 0.013999999999999999] -> [0.26, 0.03, 0.027999999999999997] after 29504 observations
+MIP: CWM: theta center [0.26, 0.03, 0.027999999999999997] -> [0.24, 0.021, 0.055999999999999994] after 29536 observations
+MIP: CWM: theta center [0.24, 0.021, 0.055999999999999994] -> [0.22, 0.024, 0.055999999999999994] after 29568 observations
+MIP: CWM: theta center [0.22, 0.024, 0.055999999999999994] -> [0.12, 0.018000000000000002, 0.041999999999999996] after 29600 observations
+MIP: CWM: theta center [0.12, 0.018000000000000002, 0.041999999999999996] -> [0.06, 0.012, 0.027999999999999997] after 29632 observations
+MIP: CWM: theta center [0.06, 0.012, 0.027999999999999997] -> [0.04, 0.006, 0.027999999999999997] after 29664 observations
+MIP: CWM: theta center [0.04, 0.006, 0.027999999999999997] -> [0.12, -0.006, 0.027999999999999997] after 29696 observations
+MIP: CWM: theta center [0.12, -0.006, 0.027999999999999997] -> [0.1, 0.015, 0.013999999999999999] after 29728 observations
+MIP: CWM: theta center [0.1, 0.015, 0.013999999999999999] -> [0.14, 0.009000000000000001, 0.013999999999999999] after 29760 observations
+MIP: CWM: theta center [0.14, 0.009000000000000001, 0.013999999999999999] -> [0.14, -0.018000000000000002, 0.013999999999999999] after 29824 observations
+MIP: CWM: theta center [0.14, -0.018000000000000002, 0.013999999999999999] -> [0.1, -0.039, 0.041999999999999996] after 29856 observations
+MIP: CWM: theta center [0.1, -0.039, 0.041999999999999996] -> [0.06, -0.03, 0.055999999999999994] after 29888 observations
+MIP:    64.17s nodes    65288 open       5 lb 1.45000000e1 ub 1.50000000e1 lp_iters 911883 sb_iters 13813 sb_lps 520 sb_secs 0.53 node_iters 859597 (first 819983, lps 56464) heur_iters 65277 dive_iters 1554 lp_rows 97 node_cut_secs 2.00 pool_len 8 pool_idle 0
+MIP: CWM: theta center [0.06, -0.03, 0.055999999999999994] -> [0.08, -0.057, 0.041999999999999996] after 29920 observations
+MIP: MEMCAP: tid 3 limit 12651 MB peak rss 192 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: MEMCAP: tid 1 limit 12651 MB peak rss 192 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: MEMCAP: tid 2 limit 12651 MB peak rss 192 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: tree thread 0 joined 0.004s after the stop signal (64.22s)
+MIP: tree thread 1 joined 0.004s after the stop signal (64.22s)
+MIP: tree thread 2 joined 0.004s after the stop signal (64.22s)
+MIP: finish start Optimal (64.22s)
+MIP: MEMCAP: tid 0 limit 12651 MB peak rss 192 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: tree search threads: worker nodes 233498, nodes given away 1196, taken 948, global bounds taken from other threads 0, proofs 2947 and conflicts 737 taken from other threads
+MIP:    64.22s nodes    65331 open       0 lb inf ub 1.50000000e1 lp_iters 912377 sb_iters 13813 sb_lps 520 sb_secs 0.53 node_iters 860057 (first 820423, lps 56495) heur_iters 65311 dive_iters 1554 lp_rows 109 node_cut_secs 2.00 pool_len 0 pool_idle 4
+MIP: TICKS cpu 36.234 total 36234164174 lp 248170140 prop 790312535 sep 140586971 pre 135006 heur 0 node 8357057 lpit 932567 lu 7084992721 lum 545617192
+MIP: dual proofs and conflicts 804 (conflicts added 0 (from proofs 5056), Farkas 4, pruned 6605 nodes, tightened 409934 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 1630, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: cut pool propagation: calls 115664, pruned 4768 nodes, tightened 56436 bounds, 11.50s, pool 11353 cuts (285004 nonzeros); updated terms 1293851674, candidates 2121162 (25009028 nonzeros), rebuilds 226
+MIP: TC r: reduced-cost fixings passed to children 14713; child change lists: mean length 23.5 (mean depth 21.2), max 44, open nodes now 0
+MIP: DFSBB4: d 36.0 (frac), L 108, root fractional 36, integers 53, mean depth of dive bottoms 23.4 (32341 dives)
+MIP: DFSBB: kind 2, W 5000 (root LP iterations 64), plunges 2868, ended by the work limit 353, ended at a leaf or by pruning 2515
+MIP: GAP1 u: child selection down 0 up 0; branching selections 0, with ties 0 (candidates in ties 0), changed by the queue counts 0; objective proofs not violated beyond the tolerance 15961
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 9771, in pool 444 (aged out 9327), pruned 156 nodes, tightened 2523 bounds
+MIP: proof CMIR cuts: tried 5056, added 4993, entered the cut pool 4993
+MIP: conflict analysis (HiGHS style): calls 10095, conflicts 10095, added 9034, mean length 18.4, max length 115, 0.12s
+MIP: conflict score diag: analyses 10095, bumped columns per analysis 18.46, analyses without conflict 0.000, lit reasons asked per analysis 0.00 (max 0), used 0.00, analyses cut by the budget 0.000
+MIP: CWM final: mode Bayes, started 29935, observations 29935, mean y = ln(size+/size-) +0.002 (se 0.009), theta center cw=+0.080 rmid=-0.057 lns=+0.042; trace 32:+0.12/+0.02/-0.14 64:+0.10/+0.03/-0.21 96:+0.14/+0.01/-0.08 128:+0.14/+0.00/-0.04 160:+0.10/+0.00/+0.01 192:+0.04/-0.00/-0.01 224:+0.02/+0.00/+0.01 256:+0.08/+0.00/+0.04 288:+0.06/+0.00/-0.03 320:+0.04/-0.00/-0.01 352:+0.04/+0.00/-0.01 384:+0.00/-0.00/-0.03 416:-0.10/-0.00/-0.03 448:-0.06/-0.01/+0.00 480:-0.06/-0.01/+0.01 512:-0.08/-0.01/+0.01 544:-0.06/-0.01/+0.01 576:-0.02/-0.01/+0.01 608:-0.02/-0.01/+0.03 640:-0.04/-0.02/+0.00 672:+0.00/-0.02/+0.07 704:+0.00/-0.02/+0.06 736:-0.02/-0.02/+0.04 768:+0.02/-0.03/+0.06 800:+0.02/-0.05/+0.06 832:+0.04/-0.03/+0.06 864:-0.02/-0.03/+0.04 896:+0.00/-0.04/+0.04 928:+0.02/-0.04/+0.04 960:-0.02/-0.05/+0.06 992:-0.02/-0.05/+0.06 1024:-0.04/-0.05/+0.06 1056:-0.08/-0.04/+0.04 1088:-0.10/-0.04/+0.04 1120:-0.10/-0.04/+0.03 1152:-0.08/-0.04/+0.00 1184:-0.12/-0.04/+0.00 1216:-0.10/-0.03/+0.04 1248:-0.10/-0.03/+0.04 1280:-0.10/-0.04/+0.04 1312:-0.10/-0.02/+0.04 1344:-0.10/-0.01/+0.00 1376:-0.12/+0.02/-0.03 1408:-0.08/+0.03/-0.04 1440:-0.08/+0.01/-0.03 1472:-0.10/+0.02/+0.00 1504:+0.02/+0.02/+0.00 1536:+0.04/+0.02/+0.04 1568:-0.02/+0.03/+0.04 1600:+0.00/+0.02/+0.04 1632:-0.02/+0.02/+0.01 1664:+0.00/+0.02/-0.01 1696:+0.00/+0.01/-0.01 1728:-0.04/+0.01/-0.03 1760:-0.02/+0.01/-0.04 1792:-0.02/+0.00/-0.04 1824:-0.02/+0.00/-0.04 1856:+0.00/-0.01/-0.06 1888:-0.04/-0.01/-0.07 1920:-0.14/-0.01/-0.07 1952:-0.16/-0.00/-0.07 1984:-0.20/-0.00/-0.06 2016:-0.18/-0.01/-0.07 2048:-0.24/-0.01/-0.07 2080:-0.18/-0.01/-0.04 2112:-0.16/-0.01/-0.04 2144:-0.02/-0.01/-0.04 2176:-0.04/-0.00/+0.01 2208:+0.00/-0.00/+0.04 2240:-0.06/+0.00/-0.03 2272:+0.00/+0.01/-0.04 2304:+0.14/+0.01/-0.06 2336:+0.24/+0.02/-0.07 2368:+0.20/+0.03/-0.08 2400:+0.26/+0.02/-0.06 2432:+0.20/+0.02/-0.04 2464:+0.22/+0.02/-0.04 2496:+0.14/+0.02/-0.04 2528:+0.10/+0.02/-0.04 2560:+0.06/+0.02/-0.04 2592:+0.02/+0.02/-0.04 2624:+0.06/+0.01/-0.03 2656:+0.06/+0.01/-0.01 2688:+0.02/+0.01/+0.01 2720:-0.04/+0.01/+0.04 2752:+0.02/-0.01/+0.08 2784:-0.02/-0.02/+0.01 2816:-0.06/-0.02/+0.13 2848:-0.04/-0.01/+0.07 2880:-0.02/-0.01/+0.08 2912:-0.02/-0.01/+0.06 2944:+0.02/-0.01/+0.06 2976:+0.02/-0.02/+0.04 3008:+0.02/-0.03/+0.04 3040:+0.00/-0.03/+0.04 3072:+0.00/-0.02/+0.04 3104:+0.06/-0.02/+0.04 3136:+0.02/-0.02/+0.04 3168:+0.00/-0.02/+0.04 3200:+0.04/-0.01/+0.01 3232:-0.02/-0.02/-0.04 3264:-0.02/-0.02/+0.00 3296:-0.04/-0.02/+0.00 3328:-0.06/-0.01/+0.00 3360:-0.02/-0.02/-0.01 3392:-0.10/-0.02/+0.00 3424:-0.08/-0.01/-0.01 3456:-0.08/-0.01/-0.06 3488:-0.04/-0.01/-0.03 3520:-0.08/-0.02/-0.04 3552:-0.04/-0.02/-0.07 3584:-0.04/-0.02/-0.08 3616:+0.02/-0.01/-0.08 3648:+0.02/-0.02/-0.11 3680:-0.04/-0.02/-0.10 3712:-0.02/-0.02/-0.10 3744:-0.02/-0.02/-0.08 3776:-0.02/-0.02/-0.07 3808:+0.00/-0.02/-0.06 3840:+0.00/-0.02/-0.04 3872:-0.04/-0.02/-0.04 3904:-0.06/-0.02/-0.06 3936:-0.04/-0.02/-0.03 3968:-0.06/-0.01/-0.03 4000:-0.02/-0.02/-0.01 4032:-0.06/-0.02/-0.03 4064:+0.00/-0.02/-0.03 4096:+0.00/-0.01/-0.01 4128:-0.02/-0.01/-0.01 4160:+0.02/-0.01/-0.01 4192:+0.02/-0.00/+0.01 4224:+0.02/-0.01/+0.01; r_bar 0.205
+MIP: lit explain budget (all threads): resolved 0, analyses cut by the budget 1417, arena rows 3194, per analysis (0,1,2,3-4,5-8,9-16,17-32,33-64,65-) [10095, 0, 0, 0, 0, 0, 0, 0, 0]
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 16
+MIP: NODECNT root gate (tid 0): decision 1 (root chosen cuts 25, path 9)
+MIP: NODECNT node path aggregation (tid 0): rounds 57, rounds with path cuts 39, path cuts 39 of 58 chosen, still on true
+MIP: branching: 32803 selections, 2170 without strong branching for dual degeneracy; sb LPs 520 iters 13813
+MIP: inference: branchings counted 298818, mean bound changes after a branching 0.00 (ENOMOTO_MIP_INF_ALL false)
+MIP: conflict weight FLAT (tid 0): hybrid scores 0, with the flat condition 0; positive gains 32606 of 169898 observations
+MIP: PLSB (tid 0): undecided 49 (few samples 10, no gap 39, depth>=50 0), continue 211, stop 0, continued past lookahead 49, stopped before lookahead 0; tree gains n 217 zero 29
+MIP: marginal LP infeasibility (all threads, cumulative): checked with a fresh LP 0 no conclusion 0 strong branching children unknown 0 root and LP probing 0 fresh LP feasible 0
+MIP: integral-looking node LP solutions outside the domain (LP bounds behind the domain), re-solved: 0
+MIP: LP infeasibility certificates, minimum uniform violation (log10 bins <-12 .. >=-4, other): [0, 0, 0, 0, 0, 0, 0, 0, 0, 91, 0]
+MIP: sibling backtracks 29826; basis restores 31873 (basic count mismatch 1941), first LP iterations after a restore 326973
+MIP: mem1 sibling LU (all threads): held at most 0, pushed 0, dropped 0, adopted 108011
+MIP: GAP4 c: dense cuts kept out of the cut pool propagation (all threads, counted per rebuild): 0
+MIP: memc (all threads): packed nodes 3988, changes 66083 (264332 bytes packed, 1585992 unpacked), bases 0 (0 bytes packed, 0 unpacked)
+MIP: basis nb diag: tree first LPs restored 103243 iters 1550678 (15.0/LP), others 151400 iters 2235761 (14.8/LP); root LPs: submip 38 lps 1207 iters (31.8/LP) 0.02s, bgcopy 1 lps 1 iters (1.0/LP) 0.00s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 64 iters (64.0/LP) 0.00s; nb hints applied 104106 solves, 3163259 given, 790042 changed
+MIP: node diag: nodes 65331 node LPs 56495 mean rows 113.0 iters 860057 (15.2/LP) LP secs 18.59 sep rounds 690 added 57 node cut secs 2.00 final rows 109
+MIP: adaptive node cuts: rounds 57 effective 18 skipped 0 (rate 0.396), node cut secs 2.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [4, 39, 7, 4, 3], cut nnz Some(47.75850017016474) (rows mean 32.0)
+MIP: orbital fixing (2 generators): fixed 220 bounds at 193 nodes, pruned 10 nodes
+MIP: finish done (64.22s)
+MIP: RCSTRONG: knapsack row (all threads, cumulative): calls 564573, pruned 0, tightened 0, built 4 (mean length 2.0)
+MIP: SUBFIX summary: dives 5 sub-MIPs 5 accepted 1 root-infeasible retries 0 below 0.1 0; success 1 (mean rate 0.31), infeasible 0 (mean rate NaN)
+MIP: solve returned Optimal after 64.25s (time limit 600.00s)
+MIP: polished the solution (64.25s)
+{"status": "optimal", "objective": 15.0, "bound": 15.0, "nodes": 298829, "time": 64.24698837699998, "root_bound": 13.487640746904821, "first_solution_time": 0.023108069, "first_solution_objective": 17.0}

@@ -1,0 +1,41 @@
+---- 最後の 40 行 ----
+MIP: MEMCAP: tid 0 limit 11790 MB peak rss 363 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP:   215.70s nodes     4728 open       0 lb inf ub 2.50096634e4 lp_iters 221426 sb_iters 136288 sb_lps 1072 sb_secs 37.68 node_iters 898916 (first 71937, lps 2690) heur_iters 34050 dive_iters 2235 lp_rows 15150 node_cut_secs 5.66
+MIP: TICKS cpu 5394.464 total 5394463669647 lp 15627160191 prop 754966328 sep 93986571 pre 6026616 heur 10507678 node 108376913 lpit 1063243 lu 2459700120154 lum 50786280651
+MIP: dual proofs and conflicts 426 (conflicts added 0 (from proofs 271), Farkas 28, pruned 2073 nodes, tightened 68601 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 891, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: cut pool propagation: calls 7186, pruned 16 nodes, tightened 57294 bounds, 1.28s, pool 1373 cuts (19500 nonzeros); updated terms 5150822, candidates 1495641 (25596666 nonzeros), rebuilds 15
+MIP: TC r: reduced-cost fixings passed to children 1384; child change lists: mean length 149.8 (mean depth 149.8), max 209, open nodes now 0
+MIP: DFSBB4: d 346.0 (frac), L 1038, root fractional 346, integers 4383, mean depth of dive bottoms 127.6 (2326 dives)
+MIP: DFSBB: kind 2, W 5000 (root LP iterations 474), plunges 694, ended by the work limit 36, ended at a leaf or by pruning 658
+MIP: GAP1 u: child selection down 0 up 0; branching selections 0, with ties 0 (candidates in ties 0), changed by the queue counts 0; objective proofs not violated beyond the tolerance 17
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 880, in pool 482 (aged out 398), pruned 66 nodes, tightened 5253 bounds
+MIP: proof CMIR cuts: tried 271, added 155, entered the cut pool 155
+MIP: conflict analysis (HiGHS style): calls 1169, conflicts 2035, added 880, mean length 12.9, max length 1414, 0.11s
+MIP: conflict score diag: analyses 1169, bumped columns per analysis 0.00, analyses without conflict 0.000, lit reasons asked per analysis 0.00 (max 0), used 0.00, analyses cut by the budget 0.000
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: NODECNT root gate (tid 0): decision 1 (root chosen cuts 371, path 26)
+MIP: NODECNT node path aggregation (tid 0): rounds 80, rounds with path cuts 68, path cuts 407 of 552 chosen, still on true
+MIP: branching: 544 selections, 0 without strong branching for dual degeneracy; sb LPs 1072 iters 136288
+MIP: inference: branchings counted 4727, mean bound changes after a branching 1936.81 (ENOMOTO_MIP_INF_ALL false)
+MIP: conflict weight FLAT (tid 0): hybrid scores 0, with the flat condition 0; positive gains 1135 of 1255 observations
+MIP: PLSB (tid 0): undecided 2918 (few samples 22, no gap 2533, depth>=50 363), continue 2085, stop 5, continued past lookahead 1420, stopped before lookahead 5; tree gains n 321 zero 67
+MIP: marginal LP infeasibility (all threads, cumulative): checked with a fresh LP 1886 no conclusion 1885 strong branching children unknown 1 root and LP probing 0 fresh LP feasible 1886
+MIP: integral-looking node LP solutions outside the domain (LP bounds behind the domain), re-solved: 0
+MIP: LP infeasibility certificates, minimum uniform violation (log10 bins <-12 .. >=-4, other): [0, 0, 0, 1887, 0, 0, 0, 0, 1, 32, 0]
+MIP: sibling backtracks 1668; basis restores 2361 (basic count mismatch 15), first LP iterations after a restore 34366
+MIP: mem1 sibling LU (all threads): held at most 1, pushed 999, dropped 636, adopted 209
+MIP: GAP4 c: dense cuts kept out of the cut pool propagation (all threads, counted per rebuild): 0
+MIP: memc (all threads): packed nodes 0, changes 0 (0 bytes packed, 0 unpacked), bases 0 (0 bytes packed, 0 unpacked)
+MIP: basis nb diag: tree first LPs restored 1081 iters 34366 (31.8/LP), others 1449 iters 37571 (25.9/LP); root LPs: submip 25 lps 1882 iters (75.3/LP) 0.08s, bgcopy 0 lps 0 iters (0.0/LP) 0.00s, find 0 lps 0 iters (0.0/LP) 0.00s, restart 0 lps 0 iters (0.0/LP) 0.00s, main 1 lps 474 iters (474.0/LP) 0.06s; nb hints applied 1384 solves, 3124075 given, 130154 changed
+MIP: node diag: nodes 4728 node LPs 2690 mean rows 14952.6 iters 898916 (334.2/LP) LP secs 150.57 sep rounds 80 added 80 node cut secs 5.66 final rows 15150
+MIP: adaptive node cuts: rounds 80 effective 27 skipped 10 (rate 0.613), node cut secs 5.66, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [3, 53, 11, 6, 7], cut nnz Some(33.67345782651325) (rows mean 2.7)
+MIP: orbital fixing (266 generators): fixed 0 bounds at 0 nodes, pruned 0 nodes
+MIP: orbitopes 6: fixed 0 bounds, pruned 0 nodes
+MIP: finish done (215.70s)
+MIP: RCSTRONG: knapsack row (all threads, cumulative): calls 9325, pruned 0, tightened 0, built 5 (mean length 5.0)
+MIP: SUBFIX summary: dives 4 sub-MIPs 4 accepted 2 root-infeasible retries 0 below 0.1 0; success 2 (mean rate 0.68), infeasible 0 (mean rate NaN)
+MIP_FOLD: lifted solution objective 25009.663366336634 (folded 25009.663366334127), status Optimal
+MIP: solve returned Optimal after 236.20s (time limit 900.00s)
+MIP: polished the solution (236.31s)

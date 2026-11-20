@@ -85,19 +85,19 @@ def test_binary_knapsack():
     assert approx(sol.objective, 220.0)
 
 
-@pytest.mark.parametrize("root_solver", ["simplex", "ipm_crossover", "interior"])
-def test_root_solver_on_integer_model_warns(root_solver):
+@pytest.mark.parametrize("lp_solver", ["simplex", "ipm_crossover", "interior"])
+def test_lp_solver_on_integer_model_warns(lp_solver):
     M = Model()
     x = Variable(int, 0, 3)
     M.set_objective(x, sense="maximize")
     M.add_constraint(2 * x <= 5)
     with pytest.warns(UserWarning, match="no effect on a model with integer variables"):
-        sol = M.solve(root_solver=root_solver, log=False)
+        sol = M.solve(lp_solver=lp_solver, log=False)
     assert approx(sol.objective, 2.0)
 
 
-@pytest.mark.parametrize("root_solver", [None, "auto"])
-def test_root_solver_auto_on_integer_model_does_not_warn(root_solver):
+@pytest.mark.parametrize("lp_solver", [None, "auto"])
+def test_lp_solver_auto_on_integer_model_does_not_warn(lp_solver):
     import warnings as w
 
     M = Model()
@@ -106,7 +106,37 @@ def test_root_solver_auto_on_integer_model_does_not_warn(root_solver):
     M.add_constraint(2 * x <= 5)
     with w.catch_warnings():
         w.simplefilter("error")
-        M.solve(root_solver=root_solver, log=False)
+        M.solve(lp_solver=lp_solver, log=False)
+
+
+@pytest.mark.parametrize("lp_solver", ["simplex", "ipm_crossover", "interior", "auto"])
+def test_lp_solver_on_lp(lp_solver):
+    M = Model()
+    x = Variable(float, 0, 3)
+    M.set_objective(x, sense="maximize")
+    M.add_constraint(2 * x <= 5)
+    sol = M.solve(lp_solver=lp_solver, log=False)
+    assert approx(sol.objective, 2.5)
+
+
+def test_root_solver_is_deprecated_alias_of_lp_solver():
+    M = Model()
+    x = Variable(float, 0, 3)
+    M.set_objective(x, sense="maximize")
+    M.add_constraint(2 * x <= 5)
+    with pytest.warns(DeprecationWarning, match="use lp_solver"):
+        sol = M.solve(root_solver="simplex", log=False)
+    assert approx(sol.objective, 2.5)
+    with pytest.raises(TypeError, match="only one of lp_solver and root_solver"):
+        M.solve(lp_solver="simplex", root_solver="simplex", log=False)
+
+
+def test_unknown_lp_solver_raises():
+    M = Model()
+    x = Variable(float, 0, 3)
+    M.set_objective(x, sense="maximize")
+    with pytest.raises(ValueError, match="unknown lp_solver"):
+        M.solve(lp_solver="foo", log=False)
 
 
 def test_infeasible_status():
@@ -302,3 +332,74 @@ def test_log_false_prints_nothing(capsys, threads):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+_SMALL_MPS = """\
+NAME          SMALL
+OBJSENSE
+    MAX
+ROWS
+ N  obj
+ L  c1
+ G  c2
+ E  c3
+COLUMNS
+    x         obj          1.0   c1           1.0
+    x         c2           1.0
+    MARKER    'MARKER'     'INTORG'
+    y         obj          2.0   c1           1.0
+    y         c3           1.0
+    n         obj          1.0   c3           1.0
+    MARKER    'MARKER'     'INTEND'
+RHS
+    rhs       obj         -5.0   c1           4.5
+    rhs       c2           0.5   c3           3.0
+RANGES
+    rng       c1           2.0
+BOUNDS
+ UP bnd       x            4.0
+ UP bnd       n            10
+ENDATA
+"""
+
+
+def test_read_model_mps(tmp_path):
+    """MPS を読む口 ``Model.readModel``。整数列の既定の二値・RANGES・目的の定数を確かめる。
+    max x + 2y + n + 5,  2.5 <= x + y <= 4.5,  x >= 0.5,  y + n == 3,
+    x in [0, 4], y 二値, n in [0, 10] 整数  ->  y + n = 3 は y=1,n=2 か y=0,n=3 で、
+    x <= 4.5 - y。y=1: 3.5 + 2 + 2 + 5 = 12.5、y=0: 4 + 0 + 3 + 5 = 12 -> 12.5。"""
+    import gzip
+
+    path = tmp_path / "small.mps"
+    path.write_text(_SMALL_MPS)
+    M = Model()
+    M.readModel(path)
+    assert [v.name for v in M.variables] == ["x", "y", "n"]
+    y = M.get_variable("y")
+    assert y.vtype == "integer" and (y.lb, y.ub) == (0.0, 1.0)
+    assert M.get_variable("n").ub == 10.0
+    sol = M.solve(log=False)
+    assert sol.status == "optimal"
+    assert approx(sol.objective, 12.5)
+    assert approx(M.get_variable("x").value, 3.5)
+
+    # gzip 圧縮のファイルも同じに読める
+    gz = tmp_path / "small.mps.gz"
+    with gzip.open(gz, "wt") as fh:
+        fh.write(_SMALL_MPS)
+    M2 = Model()
+    M2.read_model(str(gz))
+    assert approx(M2.solve(log=False).objective, 12.5)
+
+
+def test_read_model_needs_empty_model_and_rejects_quadratic(tmp_path):
+    path = tmp_path / "small.mps"
+    path.write_text(_SMALL_MPS)
+    M = Model()
+    Variable(float, 0, 1, model=M)
+    with pytest.raises(ValueError):
+        M.readModel(path)
+    q = tmp_path / "q.mps"
+    q.write_text("NAME\nROWS\n N obj\nCOLUMNS\n x obj 1\nQUADOBJ\n x x 1\nENDATA\n")
+    with pytest.raises(ValueError):
+        Model().readModel(q)

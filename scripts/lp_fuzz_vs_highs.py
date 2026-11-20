@@ -47,7 +47,7 @@ def ours(lp, solver):
         else:
             if l>-inf: M.add_constraint(e>=l)
             if u<inf: M.add_constraint(e<=u)
-    s=M.solve(root_solver=solver, distinguish_infeasible_unbounded=True)
+    s=M.solve(lp_solver=solver, distinguish_infeasible_unbounded=True)
     return s.status, s.objective
 N=int(sys.argv[1]); solver=sys.argv[2] if len(sys.argv)>2 else "simplex"
 bad=0; cats={}

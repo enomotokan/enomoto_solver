@@ -1,0 +1,27 @@
+L: 行数 18、問題 3、種 [1, 2]、crash 0 []
+SCIP の版: ['10.0.2'] pyscipopt: ['6.3.0']
+状態: {'def': {'optimal': 6}, 'def_t1': {'optimal': 6}, 'scip': {'optimal': 6}}
+解けた数 (3 者そろった 6 組): {'def': 6, 'def_t1': 6, 'scip': 6}
+食い違い (参考の HiGHS・vshighs の def も含む) 0
+def 最大 RSS 81 MB (dcmulti)
+def_t1 最大 RSS 68 MB (blend2)
+scip 最大 RSS 76 MB (blend2)
+
+== def / scip (どちらかが解けた 3 問、負なら def が速い): -35.6% [-57.7%, +8.6%]
+  def だけ解けた 0 組、scip だけ解けた 0 組
+  blend2: 0.42 [0.35, 0.52] 全種で速
+
+== def_t1 / scip (どちらかが解けた 3 問、負なら def_t1 が速い): -30.9% [-47.0%, +0.7%]
+  def_t1 だけ解けた 0 組、scip だけ解けた 0 組
+
+== def_t1 / def (どちらかが解けた 3 問、負なら def_t1 が速い): +7.3% [-7.3%, +25.3%]
+  def_t1 だけ解けた 0 組、def だけ解けた 0 組
+
+== 参考の表 (6 組。@vsh は analysis/vshighs_20261117 の回で、機械・時期が違うので参考。highs は 4 スレッド)
+| 設定 | 解けた数 | SGM (秒、shift 1) | scip との比 |
+|---|---|---|---|
+| def | 6 | 0.8 | 0.64 |
+| def_t1 | 6 | 1.0 | 0.69 |
+| scip | 6 | 1.8 | 1.00 |
+| def@vsh | 6 | 0.6 | 0.56 |
+| highs@vsh | 6 | 1.1 | 0.74 |

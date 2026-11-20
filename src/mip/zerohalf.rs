@@ -34,34 +34,10 @@ fn xor_into(a: &mut [u64], b: &[u64]) {
     }
 }
 
-/// 整数の係数 (絶対値が 2^52 以下) の最大公約数。それより大きい係数があるか全部 0 なら 1
-fn coef_gcd(r: &[(usize, f64)]) -> f64 {
-    let mut g: u64 = 0;
-    for &(_, a) in r {
-        let v = a.round().abs();
-        if v > 4.5e15 {
-            return 1.0;
-        }
-        let mut b = v as u64;
-        let mut a0 = g;
-        while b != 0 {
-            (a0, b) = (b, a0 % b);
-        }
-        g = a0;
-    }
-    if g == 0 { 1.0 } else { g as f64 }
-}
-
 /// zerohalf カットを作る。`rows`/`row_lo`/`row_up` は元の行、`lo`/`up` は大域的な境界、`x` は LP 解。
 /// 戻り値のカットは構造変数だけの式。
 ///
-/// `ENOMOTO_MIP_ZH_PRE` (試作、既定では使わない): Cgl012cut (`get_parity_ilp`、Cgl012cut.cpp) の前処理を入れる。
-/// (1) 行の向きごとに係数の最大公約数 g で割り、右辺を切り下げる (`a x <= b` から `(a / g) x <= floor(b / g)`、整数の点では
-/// 同じ集合。Cgl は右辺も含めた最大公約数で割るが、ここでは係数だけで割って右辺を丸める (強めた行))。
-/// (2) 境界から離れた列に奇数の係数がなく右辺も偶数の行 (mod 2 で 0 = 0) は使わない (Cgl は奇数の係数のない行を消す。
-/// 右辺が奇数ならそれだけで zerohalf カットになるので残す)。(3) 列の奇偶の並びと右辺の奇偶が同じ行は、余裕の最も小さい 1 本だけ
-/// 残す (ハッシュで集める)。(4) 消去で、列ごとにその列を持つ行の一覧を持ち (足し合わせで増えた列は一覧に足す)、列ごとに
-/// 全部の行をなめない ((4) だけなら結果は変わらない)
+/// (Cgl012cut の前処理に寄せた試作 `ENOMOTO_MIP_ZH_PRE` は 2026-11-18 に削除。analysis/cleanup_20261118/)
 thread_local! {
     /// このスレッドの zerohalf の分離の期限 ([`with_zh_deadline`])。過ぎたら消去の途中でやめ、カットを返さない
     static ZH_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
@@ -93,58 +69,12 @@ pub(crate) fn zh_deadline_on() -> bool {
     overrun3('z') || env_def!("ENOMOTO_MIP_ZH_DEADLINE", "1").is_some()
 }
 
-/// `ENOMOTO_MIP_ZH_TRIAL` (試作、既定では使わない。analysis/gap3_zhtrial_20261109.md): 既定 (`ENOMOTO_MIP_NO_ZEROHALF` の既定 1) で zerohalf を
-/// 使わないとき、根のカットのループを zerohalf なしで回し終えた LP で zerohalf だけのカットを短く試し
-/// ([`super::solver::Solver::zh_trial`])、根のギャップを十分に閉じる問題でだけ、根の続き・木・再スタート後に zerohalf を使う。
-/// 値: `1` (か `on`) = 判定して使う、`log` = 判定と記録だけして使わない (計測用)、`r` = 試しの LP をせず、根のループを zerohalf なしで
-/// 回し終えた後 (clique の fallback の判定の後) の根の続き・裏のカット (と根の分離、サブ MIP の根) でだけ zerohalf を使い、木のノードの分離
-/// (`light`) では使わない。`0` で使わない
-pub(crate) fn zh_trial_mode() -> Option<&'static str> {
-    match env_str!("ENOMOTO_MIP_ZH_TRIAL") {
-        None | Some("0") => None,
-        Some("log") => Some("log"),
-        Some("r") => Some("r"),
-        Some(_) => Some("on"),
-    }
-}
-
-/// [`zh_trial_mode`] の判定 (0 = 未判定、1 = 使わない、2 = 使う)。木の探索・裏のカット・サブ MIP のスレッドも読むのでプロセスで 1 つ
-/// (外側の求解の始めに [`zh_trial_reset`] で戻す。同じプロセスで同時に別の求解をすると混ざる: `ENOMOTO_MIP_ZH_TRIAL` を付けたときだけ)
-static ZH_TRIAL_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-pub(crate) fn zh_trial_reset() {
-    ZH_TRIAL_STATE.store(0, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub(crate) fn zh_trial_decided() -> bool {
-    ZH_TRIAL_STATE.load(std::sync::atomic::Ordering::Relaxed) != 0
-}
-
-pub(crate) fn zh_trial_set(on: bool) {
-    ZH_TRIAL_STATE.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// 試しの判定で zerohalf を使うことになったか (`light` = 木のノードの分離。`r` では使わない)
-pub(crate) fn zh_trial_used(light: bool) -> bool {
-    ZH_TRIAL_STATE.load(std::sync::atomic::Ordering::Relaxed) == 2 && match zh_trial_mode() {
-        Some("on") => true,
-        Some("r") => !light,
-        _ => false,
-    }
-}
-
 fn zh_past_deadline() -> bool {
     // 止めの合図 ([`crate::cancel::halted`]、木の探索の従のスレッド) も期限と同じに扱う
     ZH_DEADLINE.with(|d| d.get()).is_some_and(|d| std::time::Instant::now() >= d) || crate::cancel::halted()
 }
 
 pub fn zerohalf_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], is_int: &[bool], lo: &[f64], up: &[f64], x: &[f64], max_cuts: usize) -> Vec<RawCut> {
-    zerohalf_cuts_with(rows, row_lo, row_up, is_int, lo, up, x, max_cuts, env_str!("ENOMOTO_MIP_ZH_PRE").is_some())
-}
-
-/// [`zerohalf_cuts`] の本体 (`pre` は `ENOMOTO_MIP_ZH_PRE` の前処理を使うか)
-#[allow(clippy::too_many_arguments)]
-fn zerohalf_cuts_with(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], is_int: &[bool], lo: &[f64], up: &[f64], x: &[f64], max_cuts: usize, pre: bool) -> Vec<RawCut> {
     let n = x.len();
     let is_integral = |v: f64| (v - v.round()).abs() <= 1e-9;
     // 各列の置き換え: 下限側なら (true, l)、上限側なら (false, u)。x'_j の LP 値。
@@ -165,28 +95,22 @@ fn zerohalf_cuts_with(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]
         use_lower[j] = lf && (!uf || x[j] - l <= u - x[j]);
         xbar[j] = if use_lower[j] { (x[j] - l).max(0.0) } else { (u - x[j]).max(0.0) };
     }
-    // 対象の行の向き (元の行番号、符号 +1 は <= 側、-1 は >= 側を反転したもの、割る数 g、向きをそろえて g で割った右辺)
-    // (`ENOMOTO_MIP_ZH_PRE` でなければ g = 1、右辺はそのまま)
-    let mut sides: Vec<(usize, f64, f64, f64)> = Vec::new();
+    // 対象の行の向き (元の行番号、符号 +1 は <= 側、-1 は >= 側を反転したもの、向きをそろえた右辺)
+    let mut sides: Vec<(usize, f64, f64)> = Vec::new();
+    // 診断用の手間 ([`crate::ticks::diag_add`]、既定の手間・期限には入れない): 行の非零 + 列
+    crate::ticks::diag_add((n + rows.iter().map(|r| r.len()).sum::<usize>()) as u64);
     for (i, r) in rows.iter().enumerate() {
         if r.is_empty() || !r.iter().all(|&(j, a)| col_ok[j] && is_integral(a)) {
             continue;
         }
         let act: f64 = r.iter().map(|&(j, a)| a * x[j]).sum();
-        let g = if pre { coef_gcd(r) } else { 1.0 };
         for (sg, b) in [(1.0, row_up[i]), (-1.0, row_lo[i])] {
             if !b.is_finite() || !is_integral(b) {
                 continue;
             }
-            let (gs, bs, slack) = if pre && g > 1.0 && b.abs() < 4.5e15 {
-                // 整数で切り下げる (浮動小数の割り算の丸めで切り上がらないように)
-                let bs = ((sg * b).round() as i64).div_euclid(g as i64) as f64;
-                (g, bs, bs - sg * act / g)
-            } else {
-                (1.0, sg * b, sg * (b - act))
-            };
+            let (bs, slack) = (sg * b, sg * (b - act));
             if slack < 1.0 - 2.0 * MIN_VIOL {
-                sides.push((i, sg, gs, bs));
+                sides.push((i, sg, bs));
             }
         }
     }
@@ -210,12 +134,13 @@ fn zerohalf_cuts_with(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]
     }
     // mod 2 の行を作る
     let mut m2: Vec<Mod2Row> = Vec::with_capacity(ns);
-    for (s, &(i, sg, g, bs)) in sides.iter().enumerate() {
+    for (s, &(i, sg, bs)) in sides.iter().enumerate() {
+        crate::ticks::diag_add((wc + ws + rows[i].len()) as u64);
         let mut cv = vec![0u64; wc];
         let mut beta = bs;
         let mut act = 0.0;
         for &(j, a) in &rows[i] {
-            let a = sg * a / g;
+            let a = sg * a;
             act += a * x[j];
             // 置き換えた右辺: beta -= a * (境界)
             beta -= a * if use_lower[j] { lo[j] } else { up[j] };
@@ -228,90 +153,23 @@ fn zerohalf_cuts_with(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]
         flip(&mut combo, s);
         m2.push(Mod2Row { cols: cv, rhs_odd: (beta.round() as i64).rem_euclid(2) == 1, slack: slack.max(0.0), combo });
     }
-    // `ENOMOTO_MIP_ZH_PRE`: mod 2 で 0 = 0 の行を除き、奇偶の並びが同じ行は余裕の最も小さいものだけ残す (同じなら先の行)
-    if pre {
-        let mut first: std::collections::HashMap<(Vec<u64>, bool), usize> = std::collections::HashMap::new();
-        let mut kept: Vec<Mod2Row> = Vec::with_capacity(m2.len());
-        for r in m2 {
-            if !r.rhs_odd && r.cols.iter().all(|&w| w == 0) {
-                continue;
-            }
-            match first.entry((r.cols.clone(), r.rhs_odd)) {
-                std::collections::hash_map::Entry::Occupied(e) => {
-                    let k = *e.get();
-                    if r.slack < kept[k].slack {
-                        kept[k] = r;
-                    }
-                }
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(kept.len());
-                    kept.push(r);
-                }
-            }
-        }
-        m2 = kept;
-    }
     let nr = m2.len();
     // 消去: LP 値の大きい列から、その列を含む余裕 0 の行を軸に他の行から消す
     let mut order: Vec<usize> = (0..nc).collect();
     order.sort_by(|&a, &b| xbar[cols[b]].total_cmp(&xbar[cols[a]]));
     let mut is_pivot = vec![false; nr];
-    // `ENOMOTO_MIP_ZH_PRE`: 列ごとのその列を持つ行の一覧 (足し合わせで列が消えた行も残るので、使うときに確かめる)
-    let mut col_rows: Vec<Vec<u32>> = Vec::new();
-    if pre {
-        col_rows = vec![Vec::new(); nc];
-        for (r, row) in m2.iter().enumerate() {
-            for (w, &word) in row.cols.iter().enumerate() {
-                let mut b = word;
-                while b != 0 {
-                    col_rows[w * 64 + b.trailing_zeros() as usize].push(r as u32);
-                    b &= b - 1;
-                }
-            }
-        }
-    }
     let check = ZH_DEADLINE.with(|d| d.get()).is_some();
     for &c in &order {
         if check && zh_past_deadline() {
             return Vec::new();
         }
-        if pre {
-            // 一覧を番号の順に並べ、今この列を持つ行だけにする (軸は今までと同じく番号の最も小さい行)
-            let mut lst = std::mem::take(&mut col_rows[c]);
-            lst.sort_unstable();
-            lst.dedup();
-            lst.retain(|&r| bit(&m2[r as usize].cols, c));
-            let Some(&p) = lst.iter().find(|&&r| !is_pivot[r as usize] && m2[r as usize].slack <= 1e-9) else { continue };
-            let p = p as usize;
-            is_pivot[p] = true;
-            let piv = m2[p].clone();
-            for &r in &lst {
-                let r = r as usize;
-                if r == p {
-                    continue;
-                }
-                // 足し合わせで新しく入る列の一覧にこの行を足す
-                for (w, (&pw, &rw)) in piv.cols.iter().zip(&m2[r].cols).enumerate() {
-                    let mut b = pw & !rw;
-                    while b != 0 {
-                        col_rows[w * 64 + b.trailing_zeros() as usize].push(r as u32);
-                        b &= b - 1;
-                    }
-                }
-                xor_into(&mut m2[r].cols, &piv.cols);
-                m2[r].rhs_odd ^= piv.rhs_odd;
-                m2[r].slack += piv.slack;
-                xor_into(&mut m2[r].combo, &piv.combo);
-            }
-            m2[p].slack += xbar[cols[c]];
-            flip(&mut m2[p].cols, c);
-            continue;
-        }
+        crate::ticks::diag_add(nr as u64);
         let Some(p) = (0..nr).find(|&r| !is_pivot[r] && m2[r].slack <= 1e-9 && bit(&m2[r].cols, c)) else { continue };
         is_pivot[p] = true;
         let piv = m2[p].clone();
         for r in 0..nr {
             if r != p && bit(&m2[r].cols, c) {
+                crate::ticks::diag_add((wc + ws) as u64);
                 xor_into(&mut m2[r].cols, &piv.cols);
                 m2[r].rhs_odd ^= piv.rhs_odd;
                 m2[r].slack += piv.slack;
@@ -329,7 +187,9 @@ fn zerohalf_cuts_with(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]
             continue;
         }
         let mut val = r.slack;
+        let mut seen_cols = 0u64;
         for (c, &j) in cols.iter().enumerate() {
+            seen_cols += 1;
             if bit(&r.cols, c) {
                 val += xbar[j];
                 if val >= 1.0 - 2.0 * MIN_VIOL {
@@ -337,6 +197,7 @@ fn zerohalf_cuts_with(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]
                 }
             }
         }
+        crate::ticks::diag_add(seen_cols);
         if val < 1.0 - 2.0 * MIN_VIOL {
             cands.push((val, r.combo.clone()));
         }
@@ -355,20 +216,22 @@ fn zerohalf_cuts_with(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]
         if seen.contains(&combo) {
             continue;
         }
+        crate::ticks::diag_add((ns + seen.len() * ws) as u64);
         seen.push(combo.clone());
         // 元の係数で c = sum_R a_i、beta = sum_R b_i
         let mut touched: Vec<usize> = Vec::new();
         let mut beta = 0.0;
-        for (s, &(i, sg, g, bs)) in sides.iter().enumerate() {
+        for (s, &(i, sg, bs)) in sides.iter().enumerate() {
             if !bit(&combo, s) {
                 continue;
             }
             beta += bs;
+            crate::ticks::diag_add(rows[i].len() as u64);
             for &(j, a) in &rows[i] {
                 if c[j] == 0.0 {
                     touched.push(j);
                 }
-                c[j] += sg * a / g;
+                c[j] += sg * a;
                 if c[j] == 0.0 {
                     c[j] = 1e-300;
                 }
@@ -445,16 +308,6 @@ mod tests {
     /// 乱数の小さな整数行で、zerohalf カットが全ての整数実行可能点で成り立つことを総当たりで確かめる。
     #[test]
     fn random_validity() {
-        random_validity_with(false);
-    }
-
-    /// [`random_validity`] を `ENOMOTO_MIP_ZH_PRE` の前処理 (係数の最大公約数で割る・同じ奇偶の行をまとめる) つきで
-    #[test]
-    fn random_validity_pre() {
-        random_validity_with(true);
-    }
-
-    fn random_validity_with(pre: bool) {
         let mut seed = 777u64;
         let mut rnd = || {
             seed ^= seed << 13;
@@ -494,21 +347,7 @@ mod tests {
                 }
             }
             let x: Vec<f64> = (0..n).map(|j| lo[j] + rnd() * (up[j] - lo[j])).collect();
-            // 前処理の確かめでは係数を偶数倍した行も混ぜる (最大公約数で割る形を通す)
-            if pre {
-                for r in rows.iter_mut().step_by(2) {
-                    for e in r.iter_mut() {
-                        e.1 *= 2.0;
-                    }
-                }
-                for k in (0..ru.len()).step_by(2) {
-                    ru[k] = 2.0 * ru[k] + (rnd() * 2.0).floor();
-                    if rl[k].is_finite() {
-                        rl[k] = ru[k];
-                    }
-                }
-            }
-            let cuts = zerohalf_cuts_with(&rows, &rl, &ru, &vec![true; n], &lo, &up, &x, 10, pre);
+            let cuts = zerohalf_cuts(&rows, &rl, &ru, &vec![true; n], &lo, &up, &x, 10);
             found += cuts.len();
             // 全ての整数点を列挙
             let mut pt: Vec<f64> = lo.clone();

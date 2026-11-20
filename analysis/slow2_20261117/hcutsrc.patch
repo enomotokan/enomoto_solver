@@ -1,0 +1,179 @@
+--- a/highs/mip/HighsCutPool.cpp
++++ b/highs/mip/HighsCutPool.cpp
+@@ -7,6 +7,7 @@
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
+ #include "mip/HighsCutPool.h"
++#include "mip/CutSrcLog.h"
+ 
+ #include <cassert>
+ #include <numeric>
+@@ -634,6 +635,16 @@
+                                                             Rvalue, Rlen, rhs);
+   }
+ 
++  if (cutsrclog::on() && !mipsolver.submip) {
++    int sc = cutsrclog::cur >= 0 ? cutsrclog::cur : 5;
++    cutsrclog::src[{(const void*)this, (int)rowindex}] = sc;
++    cutsrclog::gen[sc]++;
++    if (std::FILE* f = cutsrclog::dumpf()) {
++      std::fprintf(f, "%d %d %.17e", cutsrclog::round, sc, rhs);
++      for (HighsInt k = 0; k < Rlen; ++k) std::fprintf(f, " %d:%.17e", (int)Rindex[k], Rvalue[k]);
++      std::fprintf(f, "\n");
++    }
++  }
+   return rowindex;
+ }
+ 
+--- a/highs/mip/HighsSeparation.cpp
++++ b/highs/mip/HighsSeparation.cpp
+@@ -6,6 +6,8 @@
+ /*                                                                       */
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ #include "mip/HighsSeparation.h"
++#include "mip/CutSrcLog.h"
++#include <cstdio>
+ 
+ #include <algorithm>
+ #include <cassert>
+@@ -91,6 +93,14 @@
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(implBoundClock);
++  const bool csl = cutsrclog::on() && !mipdata.mipsolver.submip &&
++                   mipdata.num_nodes == 0 && &propdomain == &mipdata.getDomain();
++  const double csl_obj0 = lp->getObjective();
++  if (csl) {
++    for (int k = 0; k < 6; ++k) cutsrclog::gen[k] = 0;
++    cutsrclog::round++;
++    cutsrclog::cur = 0;
++  }
+   mipdata.implications.separateImpliedBounds(
+       *lp, lp->getSolution().col_value, mipworker_.getCutPool(),
+       mipdata.feastol, mipworker_.getGlobalDomain(),
+@@ -107,6 +117,7 @@
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(cliqueClock);
++  if (csl) cutsrclog::cur = 1;
+   mipdata.cliquetable.separateCliques(
+       lp->getMipSolver(), sol.col_value, mipworker_.getCutPool(),
+       mipdata.feastol,
+@@ -137,7 +148,9 @@
+   }
+   HighsLpAggregator lpAggregator(*lp);
+ 
++  int csl_k = 2;
+   for (const std::unique_ptr<HighsSeparator>& separator : separators) {
++    if (csl) cutsrclog::cur = csl_k++;
+     separator->run(*lp, lpAggregator, transLp, mipworker_.getCutPool());
+     if (mipworker_.getGlobalDomain().infeasible()) {
+       status = HighsLpRelaxation::Status::kInfeasible;
+@@ -145,6 +158,7 @@
+     }
+   }
+ 
++  if (csl) cutsrclog::cur = -1;
+   numboundchgs = propagateAndResolve();
+   if (numboundchgs == -1)
+     return 0;
+@@ -175,6 +189,24 @@
+     }
+   }
+ 
++  if (csl) {
++    double cnt[6] = {0}, act[6] = {0}, dsum[6] = {0}, msum = 0;
++    lp->cutSrcCensus(cnt, act, dsum, msum);
++    std::printf("CUTSRC obj %.6e -> %.6e cuts %d | gen", csl_obj0, lp->getObjective(), (int)ncuts);
++    for (int k = 0; k < 6; ++k) std::printf(" %s %ld", cutsrclog::name(k), cutsrclog::gen[k]);
++    std::printf(" | inlp/active/dual*act");
++    for (int k = 0; k < 6; ++k) std::printf(" %s %.0f/%.0f/%.4e", cutsrclog::name(k), cnt[k], act[k], dsum[k]);
++    std::printf(" | model %.6e\n", msum);
++    if (const char* xp = std::getenv("HIGHS_CUTSRC_XDUMP")) {
++      char fn[4096];
++      std::snprintf(fn, sizeof fn, "%s_r%d.txt", xp, cutsrclog::round);
++      if (std::FILE* f = std::fopen(fn, "w")) {
++        for (double v : lp->getSolution().col_value) std::fprintf(f, "%.17e\n", v);
++        std::fclose(f);
++      }
++    }
++    std::fflush(stdout);
++  }
+   return ncuts;
+ }
+ 
+--- a/highs/mip/HighsLpRelaxation.h
++++ b/highs/mip/HighsLpRelaxation.h
+@@ -306,6 +306,8 @@
+   }
+ 
+   const HighsMipSolver& getMipSolver() const { return mipsolver; }
++  // SLOW2 の計装: LP の中のカットの行を出どころごとに数える (本数・双対が 0 でない本数・双対 x 行の値の和)
++  void cutSrcCensus(double* cnt, double* act, double* dsum, double& modelsum) const;
+ 
+   HighsInt getNumModelRows() const { return mipsolver.numRow(); }
+ 
+--- a/highs/mip/HighsLpRelaxation.cpp
++++ b/highs/mip/HighsLpRelaxation.cpp
+@@ -6,6 +6,7 @@
+ /*                                                                       */
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ #include "mip/HighsLpRelaxation.h"
++#include "mip/CutSrcLog.h"
+ 
+ #include <algorithm>
+ 
+@@ -1660,3 +1661,22 @@
+ 
+   return status;
+ }
++
++void HighsLpRelaxation::cutSrcCensus(double* cnt, double* act, double* dsum,
++                                     double& modelsum) const {
++  const HighsSolution& sol = lpsolver.getSolution();
++  modelsum = 0;
++  if (!sol.dual_valid) return;
++  for (size_t i = 0; i < lprows.size(); ++i) {
++    double d = sol.row_dual[i] * sol.row_value[i];
++    if (lprows[i].origin != LpRow::kCutPool) {
++      modelsum += d;
++      continue;
++    }
++    const void* pool = &mipsolver.mipdata_->cutpools[lprows[i].cutpoolindex];
++    int s = cutsrclog::lookup(pool, lprows[i].index);
++    cnt[s] += 1;
++    if (std::fabs(sol.row_dual[i]) > 1e-9) act[s] += 1;
++    dsum[s] += d;
++  }
++}
+--- /dev/null
++++ b/highs/mip/CutSrcLog.h
+@@ -0,0 +1,28 @@
++// SLOW2 の計装 (ログだけ、動きは変えない): 根のカットの出どころごとの数え上げ。環境変数 HIGHS_CUTSRC_LOG で出す
++#pragma once
++#include <cstdio>
++#include <cstdlib>
++#include <map>
++#include <utility>
++namespace cutsrclog {
++inline thread_local int cur = -1;
++inline std::map<std::pair<const void*, int>, int> src;
++inline long gen[6] = {0, 0, 0, 0, 0, 0};
++inline int round = 0;
++inline std::FILE* dumpf() {
++  static std::FILE* f = std::getenv("HIGHS_CUTSRC_DUMP") ? std::fopen(std::getenv("HIGHS_CUTSRC_DUMP"), "w") : nullptr;
++  return f;
++}
++inline bool on() {
++  static bool v = std::getenv("HIGHS_CUTSRC_LOG") != nullptr;
++  return v;
++}
++inline int lookup(const void* pool, int idx) {
++  auto it = src.find({pool, idx});
++  return it == src.end() ? 5 : it->second;
++}
++inline const char* name(int s) {
++  static const char* n[] = {"implbd", "clique", "tableau", "path", "modk", "other"};
++  return n[(s >= 0 && s < 5) ? s : 5];
++}
++}  // namespace cutsrclog

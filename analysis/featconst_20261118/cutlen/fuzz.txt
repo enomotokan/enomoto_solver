@@ -1,0 +1,32 @@
+== fuzz_tiny_a: ENOMOTO_MIP_CUTLEN=1 ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0
+rc=0
+Presolve: the problem is infeasible (0.00s)
+Result: optimal, objective -7.12, best bound -7.12, gap 0.00%, nodes 0 (0.01s)
+bad 0 of 400 time 12.6 (strict 13: 値の一致だけの以前の判定)
+== fuzz_highs_a: ENOMOTO_MIP_CUTLEN=1 ENOMOTO_MIP_REL_GAP=1e-9 python3 scripts/mip_fuzz_vs_highs.py 300
+rc=0
+Solving with the slope-intercept dual two-phase method
+Result: optimal, objective -78.37836523, best bound -78.37836523, gap 0.00%, nodes 0 (0.01s)
+bad 0 of 300 time 20.9
+== fuzz_objint_a: ENOMOTO_MIP_CUTLEN=1 python3 analysis/objint_20261112/fuzz_objint.py 1000 0
+rc=0
+bad 0 of 1000 status {'optimal': 967, 'infeasible': 33} with nodes>0 310 new step 71 new step and nodes>0 3 c range with width 27 c and nodes>0 6 time 83.2
+== fuzz_slack_a: ENOMOTO_MIP_CUTLEN=1 python3 analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 0
+rc=0
+done 1000 (seeds 0..999): mismatches 0, HiGHS statuses {'Infeasible': 614, 'Optimal': 268, 'Primal infeasible or unbounded': 115, 'Unbounded': 3}
+== fuzz_tiny_b: ENOMOTO_MIP_CUTLEN=1 ENOMOTO_T_MIP_CUTLEN_R0=100 ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0
+rc=0
+Presolve: the problem is infeasible (0.00s)
+Result: optimal, objective -7.12, best bound -7.12, gap 0.00%, nodes 0 (0.02s)
+bad 0 of 400 time 10.4 (strict 13: 値の一致だけの以前の判定)
+== fuzz_highs_b: ENOMOTO_MIP_CUTLEN=1 ENOMOTO_T_MIP_CUTLEN_R0=100 ENOMOTO_MIP_REL_GAP=1e-9 python3 scripts/mip_fuzz_vs_highs.py 300
+rc=0
+Solving with the slope-intercept dual two-phase method
+Result: optimal, objective -78.37836523, best bound -78.37836523, gap 0.00%, nodes 0 (0.07s)
+bad 0 of 300 time 22.4
+== fuzz_objint_b: ENOMOTO_MIP_CUTLEN=1 ENOMOTO_T_MIP_CUTLEN_R0=100 python3 analysis/objint_20261112/fuzz_objint.py 1000 0
+rc=0
+bad 0 of 1000 status {'optimal': 967, 'infeasible': 33} with nodes>0 319 new step 71 new step and nodes>0 3 c range with width 27 c and nodes>0 6 time 107.9
+== fuzz_slack_b: ENOMOTO_MIP_CUTLEN=1 ENOMOTO_T_MIP_CUTLEN_R0=100 python3 analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 0
+rc=0
+done 1000 (seeds 0..999): mismatches 0, HiGHS statuses {'Infeasible': 614, 'Optimal': 268, 'Primal infeasible or unbounded': 115, 'Unbounded': 3}
