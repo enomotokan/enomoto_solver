@@ -14700,6 +14700,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
             lagr(&y)
         }).collect();
         fams.push(("G", gl));
+        // I: 費用つきの内点法の点の双対 (fixmore.rs の `u` と同じ `lagrange_std`、根の LP の行・大域の箱)
+        let mut il = Vec::new();
+        if let Some(ip) = lpp.interior_point(false, false, lam_deadline.max(Instant::now() + std::time::Duration::from_secs(30))) {
+            if let Some((l, d)) = ip.lag {
+                il.push((l + p.offset, d));
+            }
+        }
+        fams.push(("I", il));
+        // D: PDLP の近似の双対を、反復の上限を 4 倍ずつ変えて取る (行に余裕の列 s を足した `A x − s = 0`、s は行の境界)
+        let mut dl = Vec::new();
+        {
+            let mut ar: Vec<Vec<(usize, f64)>> = rows[..nr].to_vec();
+            for (i, r) in ar.iter_mut().enumerate() {
+                r.push((n + i, -1.0));
+            }
+            let a = crate::sparse::csr_from_rows(&ar, n + nr);
+            let b = vec![0.0; nr];
+            let mut c = p.cost.clone();
+            c.extend(std::iter::repeat_n(0.0, nr));
+            let mut l = glo.clone();
+            l.extend_from_slice(&rlo[..nr]);
+            let mut uu = gup.clone();
+            uu.extend_from_slice(&rup[..nr]);
+            for it in [250usize, 1000, 4000, 16000] {
+                let r = crate::interior_point::pdlp::solve_pdlp(&a, &b, &c, &l, &uu, &crate::interior_point::pdlp::PdlpOptions { eps: 1e-8, max_iters: it, time_limit: 20.0, max_restarts: usize::MAX });
+                if let Some(v) = lagr(&r.y) {
+                    dl.push(v);
+                }
+            }
+        }
+        fams.push(("D", dl));
         let lam_secs = t_lam.elapsed().as_secs_f64();
         // 種類ごとに、根の被約費用 (a) と目的の伝播 (b) に足して、K = 10・全部 で固定できる数 (全部の自由な整数列と標本)
         let sampled = &sample[..done];
