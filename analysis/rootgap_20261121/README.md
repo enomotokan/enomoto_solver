@@ -170,3 +170,4 @@ app1-1 は SCIP 2382 列、当方は前処理の LP による固定の後で自�
 - P 分担 4: 7f801a8e0 (build.sh、0.1.10)
 - P 0: 4b09f68cf (build.sh の wheel)。58 行・crash 0。
 - P 1: 1e12472d0 (build.sh の wheel、2d210db89 以降)。58 行・crash 0。
+- P 2: 7f801a8e0 (2d210db89 以降、build.sh の wheel、0.1.10)。58 行・crash 0。
