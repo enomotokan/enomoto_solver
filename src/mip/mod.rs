@@ -1271,6 +1271,9 @@ thread_local! {
     pub(crate) static PRR_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 外側の求解 (サブ MIP・再スタートでない) の最初の根の LP が二段解法でも内点法でも解けずに諦めたか ([`solver::Solver`] が立てる)
     pub(crate) static ROOT_LP_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 再スタートの後の求解 (サブ MIP でない) の根の LP が二段解法でも内点法でも解けずに諦めたか ([`solver::Solver`] が立て、再スタートした
+    /// 側が [`restart_lpfail_nocuts`] の解き直しの判定に使う)
+    pub(crate) static RESTART_ROOT_LP_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 最後のプロービング ([`probe`]) が固定した列の数 ([`represolve_after_probe`] の条件に使う)
     pub(crate) static PROBE_FIXED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// 試作 `ENOMOTO_MIP_PRR_PRECHECK` ([`represolve_after_probe`]): かけ直しの前処理の深さ・入る前の行の数・捨てる割合。その深さの
@@ -1457,6 +1460,15 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         solver::RESTART_X.with(|t| *t.borrow_mut() = None);
     }
     r
+}
+
+/// `ENOMOTO_MIP_RESTART_LPFAIL_NOCUTS` (analysis/ab72_20261121。**既定で使う: `=0`・`off` で使わない (前の形)**): 再スタートでカットを
+/// 問題の行として持ち込んだ求解の根の LP が、二段解法でも内点法 + クロスオーバーでも解けずに諦めた (`NotSolved`) なら、持ち込んだカットの
+/// 行を除いた問題 (元の行と再スタートの大域的な境界だけ) で残りの時間で解き直す。カットは大域的に成り立つ不等式なので、除いても
+/// 解の集合は変わらない。ab72-40-100 (4 スレッド) は根のカットのうち係数の幅が 1e4 ほどの密な行 (4000 列超) 4 本が持ち込まれ、目的の係数
+/// (4e9 まで) と合わさって再スタートの後の根の LP が基底なしでは解けず (HiGHS でも同じ LP で「双対値が大きすぎる」誤り)、`not_solved` で止まっていた
+pub(crate) fn restart_lpfail_nocuts() -> bool {
+    env_def!("ENOMOTO_MIP_RESTART_LPFAIL_NOCUTS", "1").is_some()
 }
 
 /// `ENOMOTO_MIP_RESTART_DROP_FIXED` (analysis/objtarget_20261119/ の 10 節。**2026-11-20 に既定にした: `=0`・`off` で使わない (前の形)**): 再スタートで渡す問題から、大域的に
