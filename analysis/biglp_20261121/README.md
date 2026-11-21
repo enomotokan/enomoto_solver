@@ -316,6 +316,10 @@ sorrell3 (600 秒、どれも時間切れ・下界 −19):
   `wide/` の写し、分担表 shards_P.json は同じ 6 分担・各 0.47 時間)。
 - 回したビルド (wide2):
   - P 2: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。解けた def 23 / fix 23、食い違い 0。10teams 種 1 で fix が 4.41 倍遅い (def 0 ノード 4.9 秒、fix 16254 ノード 25.1 秒、根の下界はどちらも 924 = 最適値)。
+  - P 4: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。分担 4 だけの集計: 27 問、fix/def 0.989 [0.977, 1.001]、解けた def 23 / fix 23、食い違い 0。
+  - P 1: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。解けた def 23 / fix 23、食い違い 0。
+  - P 3: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。分担 3 だけの集計: 26 問、fix/def 0.991 [0.946, 1.037]、解けた def 23 / fix 24 (neos5 種 2 が fix のみ)、食い違い 0。
+  - P 5: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。分担 5 だけの集計: 26 問、fix/def 0.962 [0.911, 1.015]、解けた def 22 / fix 23 (10teams 種 3 が fix のみ、def は 60 秒で暫定解 934)、食い違い 0。
 
 ## 8. 直す案 4: 引き継ぎの鎖を共有の待ち行列でも共有する (`ENOMOTO_MIP_INHPOOL`、**既定で使う**、`=0` で従来)
 

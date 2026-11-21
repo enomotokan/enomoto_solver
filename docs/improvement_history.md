@@ -11091,3 +11091,15 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   - sorrell3・kakapo の sub-MIP の Infeasible は直しの有無で変わらない本当の実行不能。確かめた範囲で 1e-9 級の誤判定は momentum1 だけ。
 - 確かめ: cargo test 419 通過。fuzz 7 本 bad 0。
 - 記録: analysis/primalgap_20261121/README.md 6〜8 節。
+
+## 2026-11-21: 双対証明・カットプールの理由も説明する衝突解析 ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN (pe) を既定にする (採用)
+
+- 既定にした (`=0` で切る。以前は値に関わらず指定するだけで有効だったのを、`=0` で切れる形に揃えた): 衝突解析で、双対証明で締めた境界の変更を証明の行から、
+  カットプールの伝播で締めた変更をカットの写しから説明して遡る (HiGHS の explainBoundChange と同じ考え)。
+- 前提の直し (a4c80c052): pe のときプールのカットごとの写しの番号を初回だけ表引きして `pool_arena` に覚える。結果は変えない
+  (1 スレッド・5000 ノード上限の 7 問で状態・ノード・目的値・下界・統計の行が一致)。候補 1 本あたり 310〜330 ns → 149〜174 ns (既定 151〜181 ns)。
+- 結果:
+  - M (Mittelmann、4 スレッド、600 秒): pe / def **0.991 [0.964, 1.018]**、解けた 97 → 98 (analysis/slowm_20261119/README.md 19 節)。
+    全種で 1.25 倍超だった supportcase26 は、直しの後 0.94・1.03・1.04 (analysis/sc26pe_20261121/README.md 5・6 節)。
+  - 1 スレッドの supportcase26 は 1 ノードあたり def の 1.3 倍 (道筋の違いによる LP 反復の差) が残る。
+- 確かめ: cargo test 419 通過 (既定 = pe)。fuzz (rootgap の 7 本を pe つき) bad 0。
