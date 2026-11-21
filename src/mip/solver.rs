@@ -1343,6 +1343,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// カットのハッシュから写しの番号への表。
     cut_arena: Vec<(Vec<(usize, f64)>, f64)>,
     cut_arena_idx: std::collections::HashMap<u64, u32>,
+    /// 同じ試作: プールの各カットの写しの番号 (`u32::MAX` はまだ写していない)。`cut_pool` と同じ並びで持ち、`add_to_pool` が足し、
+    /// `evict_pool` の詰め直しで一緒に並べ替える。伝播の候補ごとに表を引いて係数を比べていた手間をなくす (analysis/sc26pe_20261121)
+    pub(super) pool_arena: Vec<u32>,
     /// 試作 [`orbitope_reason`]: 写しの表に入れた理由の行の数と非零の数。
     orbitope_reason_rows: u64,
     orbitope_reason_nnz: usize,
@@ -2207,6 +2210,8 @@ pub(crate) struct SnapNode {
     basis_p: Option<super::queue::SparseBasis>,
     /// 試作 `ENOMOTO_MIP_CWM`: ノードの札 ([`OpenNode::cwm`])。共有の待ち行列を通っても引き継ぐ
     cwm: Option<std::sync::Arc<super::cwm::CwmTag>>,
+    /// 引き継ぎの鎖 ([`OpenNode::inh`]) を平らに展開せずに共有したもの ([`inh_pool`] のとき)。`changes` は鎖を除いた並び
+    inh: Option<std::sync::Arc<InhChain>>,
 }
 
 /// ノードの変更の並びに、引き継ぎの鎖 ([`OpenNode::inh`]、試作 `ENOMOTO_MIP_TC` の `s`) の固定を足したもの。共有の待ち行列へ出すときに使う
@@ -2227,12 +2232,30 @@ fn g5inh(c: char) -> bool {
     V.get_or_init(|| env_str!("ENOMOTO_MIP_G5INH").map_or(String::new(), |v| v.to_string())).contains(c)
 }
 
-/// 共有の待ち行列へ出すノードの変更の並び ([`flat_changes`]、`G5INH` の `p` なら鎖を除く)
+/// `ENOMOTO_MIP_INHPOOL` (既定で使う。`=0` で従来の展開。analysis/biglp_20261121/ の 8 節): 共有の待ち行列へ出すノード ([`SnapNode`]) に
+/// 引き継ぎの鎖 ([`OpenNode::inh`]) を平らに展開せず `Arc` のまま渡し、取り出したノードも鎖のまま持つ。n3div36 の 4 スレッドでは、深い潜りの
+/// 兄弟が同じ長い鎖 (被約費用の固定、1 ノード約 9000 個) をそれぞれ写して共有の待ち行列に溜め、1 スレッドの 7.7 倍のメモリを使っていた。
+/// 取り出したノードは、従来は鎖を並びに混ぜて持ち、その子孫も混ざった並びを写して持っていた (定義域は同じ。並びの順だけが違う)
+pub(super) fn inh_pool() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_def!("ENOMOTO_MIP_INHPOOL", "1").is_some())
+}
+
+/// 共有の待ち行列へ出すノードの変更の並び ([`flat_changes`]、`G5INH` の `p` なら鎖を除く。[`inh_pool`] なら鎖を除いた並びで、鎖は [`snap_inh`])
 fn snap_changes(n: &OpenNode) -> Vec<BoundChange> {
-    if g5inh('p') {
+    if g5inh('p') || inh_pool() {
         n.changes.clone()
     } else {
         flat_changes(n)
+    }
+}
+
+/// 共有の待ち行列へ出すノードに付ける引き継ぎの鎖 ([`inh_pool`] のときだけ。`G5INH` の `p` なら付けない)
+fn snap_inh(n: &OpenNode) -> Option<std::sync::Arc<InhChain>> {
+    if inh_pool() && !g5inh('p') {
+        n.inh.clone()
+    } else {
+        None
     }
 }
 
@@ -2566,10 +2589,10 @@ fn full_changes(n: &OpenNode) -> std::borrow::Cow<'_, [BoundChange]> {
 impl SnapNode {
     /// 変更の並びを空にした [`Self::of`] (呼び手が並びを入れる。`G5FIN` 用)
     fn of_thin(n: &OpenNode) -> Self {
-        SnapNode { changes: Vec::new(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: n.cwm.clone() }
+        SnapNode { changes: Vec::new(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: n.cwm.clone(), inh: None }
     }
     fn of(n: &OpenNode) -> Self {
-        SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: n.cwm.clone() }
+        SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: n.cwm.clone(), inh: snap_inh(n) }
     }
     /// [`Self::of`] に、親の LP の基底の列と最初の `m` 行 (元の行) を付ける。
     fn of_with_basis(n: &OpenNode, m: usize) -> Self {
@@ -2592,7 +2615,7 @@ impl SnapNode {
             Some(w) => super::queue::unpack_changes(w),
             None => self.changes,
         };
-        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: None, cwm: self.cwm }
+        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: self.inh, cwm: self.cwm }
     }
 }
 
@@ -3060,6 +3083,10 @@ fn snap_bytes(n: &SnapNode) -> usize {
     }
     if let Some(x) = &n.basis_p {
         b += x.bytes();
+    }
+    // 引き継ぎの鎖 ([`inh_pool`]) は、このノードの環だけを共有の数で割って数える
+    if let Some(x) = &n.inh {
+        b += x.fixes.capacity() * std::mem::size_of::<BoundChange>() / std::sync::Arc::strong_count(x);
     }
     b
 }
@@ -3768,6 +3795,11 @@ pub(super) struct CutPropState {
 /// 根のヒューリスティクスの終わりに、暫定解を出発点に Local-MIP + 連鎖の手 ([`super::localmip`]) を回すか
 /// (`ENOMOTO_MIP_ROOT_LMIP`、試作、既定では使わない)。FJ のスレッドの Local-MIP (`fj_lmip_mix`) は FJ 自身の解しか受け取らず、
 /// 根のカットのループの終わりで止まるので、RENS・RINS などのサブ MIP の解からは磨かない
+/// 試作 `ENOMOTO_MIP_T1MIX` (既定では使わない、analysis/t1gap_20261121): [`Solver::t1_fj_lmip_mix`]
+fn t1mix_on() -> bool {
+    env_str!("ENOMOTO_MIP_T1MIX").is_some()
+}
+
 fn root_lmip_on() -> bool {
     env_str!("ENOMOTO_MIP_ROOT_LMIP").is_some()
 }
@@ -5774,6 +5806,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         cut_pool: Vec::new(),
         cut_arena: Vec::new(),
         cut_arena_idx: std::collections::HashMap::new(),
+        pool_arena: Vec::new(),
         orbitope_reason_rows: 0,
         orbitope_reason_nnz: 0,
         dual_proofs: std::collections::VecDeque::new(),
@@ -10519,6 +10552,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if lmboost_on() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !self.root_gap_closed() {
             self.lmip_boost();
         }
+        // 試作 `ENOMOTO_MIP_T1MIX` (analysis/t1gap_20261121): 1 スレッドでは FJ のスレッドがなく FJ + Local-MIP の組が回らないので、ここ
+        // (並列なら FJ のスレッドを止める所) で本体が同じ組を回す ([`Self::t1_fj_lmip_mix`])
+        if t1mix_on() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
+            self.t1_fj_lmip_mix();
+        }
         if fjkeep_on() && !self.params.submip && self.snap.is_none() && self.fj_thread.is_some() && (self.incumbent.is_none() || self.inc_only_fj) && !self.root_gap_closed() {
             self.poll_lmip_thread();
             if self.params.verbose {
@@ -12076,7 +12114,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(snap) = self.snap.clone() {
             for (k, n) in snap.nodes.iter().enumerate() {
                 let tags = Some(Rc::new(vec![snap.serial << 32 | k as u64]));
-                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: None, cwm: None });
+                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: n.inh.clone(), cwm: None });
             }
             self.snap_alive = vec![true; snap.nodes.len()];
             first = false;
@@ -14648,7 +14686,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let sb_child = self.sb_child_inherit(&node);
             let child_inh = if tc_on('s') && tc_base_len != usize::MAX {
                 let tail = of_fixes.split_off(tc_base_len);
-                if tail.is_empty() { node.inh.clone() } else { Some(Rc::new(InhChain { parent: node.inh.clone(), fixes: tail })) }
+                if tail.is_empty() { node.inh.clone() } else { Some(std::sync::Arc::new(InhChain { parent: node.inh.clone(), fixes: tail })) }
             } else {
                 node.inh.clone()
             };
@@ -16253,7 +16291,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 試作 `ENOMOTO_MIP_TC` の `s`: ノードの引き継ぎの鎖 ([`OpenNode::inh`]) の固定を定義域に当てる。矛盾なら偽。
-    fn apply_inh_chain(&mut self, inh: &Option<Rc<InhChain>>) -> bool {
+    fn apply_inh_chain(&mut self, inh: &Option<std::sync::Arc<InhChain>>) -> bool {
         if inh.is_none() {
             return true;
         }
@@ -21426,15 +21464,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if conflict_proof_explain() {
                     // 試作: このカットで締めた変更に、写しの表の番号を残す (カットのプールは詰め直すと番号が変わるので、写しは変えない)
                     let kk = k as usize;
-                    let h = self.pool_hash[kk];
-                    // 同じハッシュでも中身が違えば (詰め直しの後に丸めて同じになる別のカットが入ったとき) 新しく写す
-                    let same = |a: &(Vec<(usize, f64)>, f64), c: &(Vec<(usize, f64)>, f64, f64)| a.1 == c.1 && a.0 == c.0;
-                    let idx = match self.cut_arena_idx.get(&h) {
-                        Some(&i) if same(&self.cut_arena[i as usize], &self.cut_pool[kk]) => i as usize,
+                    // 写しの番号はカットごとに 1 度だけ決めて `pool_arena` に覚える (写しは変えないので、決めた番号はそのカットの間ずっと使える)
+                    let idx = match self.pool_arena[kk] {
+                        i if i != u32::MAX => i as usize,
                         _ => {
-                            self.cut_arena.push((self.cut_pool[kk].0.clone(), self.cut_pool[kk].1));
-                            self.cut_arena_idx.insert(h, (self.cut_arena.len() - 1) as u32);
-                            self.cut_arena.len() - 1
+                            let h = self.pool_hash[kk];
+                            // 同じハッシュでも中身が違えば (詰め直しの後に丸めて同じになる別のカットが入ったとき) 新しく写す
+                            let same = |a: &(Vec<(usize, f64)>, f64), c: &(Vec<(usize, f64)>, f64, f64)| a.1 == c.1 && a.0 == c.0;
+                            let i = match self.cut_arena_idx.get(&h) {
+                                Some(&i) if same(&self.cut_arena[i as usize], &self.cut_pool[kk]) => i as usize,
+                                _ => {
+                                    self.cut_arena.push((self.cut_pool[kk].0.clone(), self.cut_pool[kk].1));
+                                    self.cut_arena_idx.insert(h, (self.cut_arena.len() - 1) as u32);
+                                    self.cut_arena.len() - 1
+                                }
+                            };
+                            if i < u32::MAX as usize {
+                                self.pool_arena[kk] = i as u32;
+                            }
+                            i
                         }
                     };
                     self.dom.set_cut_tag(idx);
@@ -23566,6 +23614,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if gap4('r') {
             self.lp = L::new(&[], &[], &[], &[], &[], &[]);
             self.cut_pool = Vec::new();
+            self.pool_arena = Vec::new();
             self.dual_proofs = Default::default();
             self.sep_rows_cache = None;
             self.queue = NodeQueue::new();
@@ -24283,6 +24332,58 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 下界に届く・`ENOMOTO_T_MIP_LMBOOST_STALL` (0.5) × (発動した時刻の秒) (2 秒以上) 改善がない・時間上限の
     /// `ENOMOTO_T_MIP_LMBOOST_FRAC` (0.25) を過ぎる、のどれかで止める。前処理の間の連鎖 (`ENOMOTO_MIP_PRECHAIN` の `e`) は使わない。
     /// comp07-2idx (Mittelmann) は根の下界が 6 で、6 を見つけるのは Local-MIP だけ (根のサブ MIP・木は見つけない)
+    /// 試作 `ENOMOTO_MIP_T1MIX` (既定では使わない、analysis/t1gap_20261121): 1 スレッドの根のカットのループの終わりに、並列の FJ のスレッドと
+    /// 同じ FJ + Local-MIP の組 ([`super::heuristics::fj_lmip_mix`]) を本体で回す。問題は FJ のスレッドと同じ (対称性の行を足す前の問題と
+    /// その境界)。上限は FJ のスレッドの Local-MIP と同じ (`ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC` (0.1) × 時間上限、10 秒まで)、打ち切りは
+    /// LMBOOST と同じ形 (`ENOMOTO_T_MIP_LMBOOST_STALL` (0.5) × 始めた時刻の秒 (2 秒以上) 改善がない)。新しい解は良い順に暫定解に試す。
+    /// CMS750_4 は 4 スレッドでは FJ のスレッドの Local-MIP が 6.4 秒で最適解 252 を出すが、1 スレッドでは 2400 秒で 423 だった
+    fn t1_fj_lmip_mix(&mut self) {
+        let t_now = self.start.elapsed().as_secs_f64();
+        let ftl = self.params.frac_tl();
+        let mut cap = if ftl.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * ftl).min(10.0) } else { 10.0 };
+        if let Some(d) = self.deadline {
+            cap = cap.min(d.saturating_duration_since(Instant::now()).as_secs_f64());
+        }
+        if cap <= 0.0 {
+            return;
+        }
+        let stall = (tunable!("ENOMOTO_T_MIP_LMBOOST_STALL", 0.5, f64) * t_now).max(2.0);
+        let (q, lo, up) = match &self.orig {
+            Some(o) => ((**o).clone(), o.col_lo.clone(), o.col_up.clone()),
+            None => (self.p.clone(), self.dom.lo.clone(), self.dom.up.clone()),
+        };
+        let seed = self.rng ^ 0x9E37_79B9_7F4A_7C15;
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let found: std::sync::Mutex<Vec<Vec<f64>>> = Default::default();
+        let on_sol = |x: &[f64]| found.lock().unwrap().push(x.to_vec());
+        let inc0 = self.incumbent.as_ref().map(|(z, _)| *z);
+        let t0 = Instant::now();
+        let prev = super::heuristics::MIX_STALL.with(|c| c.replace(stall));
+        let _ = super::heuristics::fj_lmip_mix(&q, &lo, &up, cap, seed, &stop, &on_sol);
+        super::heuristics::MIX_STALL.with(|c| c.set(prev));
+        let got = found.into_inner().unwrap();
+        let n = got.len();
+        let mut acc = false;
+        for x in got.into_iter().rev() {
+            self.heur_label = "T1MIX";
+            let ok = self.try_incumbent(x);
+            self.heur_label = "";
+            if ok {
+                acc = true;
+                break;
+            }
+        }
+        if self.params.verbose {
+            eprintln!(
+                "MIP: T1MIX: FJ + Local-MIP {:.2}s (cap {cap:.2}s, stall {stall:.2}s), {n} improving solutions, accepted {acc}, incumbent {:?} -> {:?} ({:.2}s)",
+                t0.elapsed().as_secs_f64(),
+                inc0,
+                self.incumbent.as_ref().map(|(z, _)| *z),
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+    }
+
     fn lmip_boost(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         let t_now = self.start.elapsed().as_secs_f64();
@@ -24632,14 +24733,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         for n in nodes.iter_mut() {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: None });
+            snodes.push(SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: None, inh: snap_inh(n) });
         }
         for n in nodes {
             self.queue.push(n);
         }
         if let Some(n) = plunge.as_mut().filter(|_| with_nodes) {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: None });
+            snodes.push(SnapNode { changes: snap_changes(n), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: None, inh: snap_inh(n) });
         }
         if with_nodes {
             self.dive_stack.clear();
@@ -26683,6 +26784,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if nodelp2('x') && !self.params.submip && crate::simplex::slope_intercept_dual::nodelp_diag() {
                 eprintln!("MIP: nodelp2 tid {} exact-dse n {} ema {:.4}s saved-dse n {} ema {:.4}s", self.pool_tid, self.nl2_stat[1].0, self.nl2_stat[1].1, self.nl2_stat[0].0, self.nl2_stat[0].1);
             }
+        }
+        // 試作 `ENOMOTO_MIP_DSE_COST` (analysis/divedse_20261121/): 厳密な DSE 重みを作り直さなかった・作った回数 (全スレッドの合計)
+        if crate::simplex::slope_intercept_dual::dse_cost_on() && !self.params.submip && self.pool_tid == 0 && self.params.verbose {
+            let st: Vec<u64> = crate::simplex::slope_intercept_dual::DSE_COST_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+            eprintln!("MIP: DSE_COST skipped {} built {} built-without-estimate {}", st[0], st[1], st[2]);
         }
         // 診断 `ENOMOTO_MIP_NODECUT_STAT`: 冗長でなくても出す
         if crate::simplex::mip_lp::nodecut_stat() && self.snap.is_none() && !self.params.submip && self.pool_tid == 0 {

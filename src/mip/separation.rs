@@ -4451,6 +4451,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.cut_pool_keys.insert(key, self.cut_pool.len());
         self.pool_hash.push(key);
         self.pool_age.push(0);
+        self.pool_arena.push(u32::MAX);
         let norm = coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
         self.cut_pool_nnz += coefs.len();
         self.cut_pool.push((coefs.to_vec(), rhs, norm));
@@ -4506,6 +4507,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.cpp.valid = false;
         let old = std::mem::take(&mut self.cut_pool);
         let (hash, age) = (std::mem::take(&mut self.pool_hash), std::mem::take(&mut self.pool_age));
+        let arena = std::mem::take(&mut self.pool_arena);
         self.cut_pool_keys.clear();
         self.pool_idx.clear();
         self.pool_val.clear();
@@ -4519,6 +4521,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.cut_pool_keys.insert(hash[k], self.cut_pool.len());
             self.pool_hash.push(hash[k]);
             self.pool_age.push(age[k]);
+            self.pool_arena.push(arena[k]);
             self.cut_pool_nnz += c.0.len();
             for &(j, v) in &c.0 {
                 self.pool_idx.push(j as u32);

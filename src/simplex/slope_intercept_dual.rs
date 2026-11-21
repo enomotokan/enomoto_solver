@@ -1363,6 +1363,47 @@ pub(crate) fn dse_init_has(c: char) -> bool {
     V.get_or_init(|| env_def!("ENOMOTO_MIP_DSE_INIT", "umr").filter(|v| *v != "0").map(|v| v.to_string())).as_deref().is_some_and(|v| v.contains(c))
 }
 
+/// 試作 `ENOMOTO_MIP_DSE_COST` (analysis/divedse_20261121/、既定では使わない) が有効か。
+pub(crate) fn dse_cost_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_DSE_COST").is_some_and(|v| v != "0"))
+}
+
+thread_local! {
+    /// [`dse_cost_skip`] の材料: この求解の見込みの手間 (呼び手が [`set_dse_cost_hint`] で置く。[`crate::ticks`] の単位)
+    static DSE_COST_HINT: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`DSE_COST_STATS`]: [作らなかった回数, 作った回数, 見込みがなく作った回数]
+pub(crate) static DSE_COST_STATS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// 試作 `ENOMOTO_MIP_DSE_COST`: 次の求解の見込みの手間 (前の求解の反復の数 × 1 反復の手間) を置く (`None` で消す)
+pub(crate) fn set_dse_cost_hint(v: Option<f64>) {
+    DSE_COST_HINT.with(|c| c.set(v));
+}
+
+/// 試作 `ENOMOTO_MIP_DSE_COST` (analysis/divedse_20261121/): warm start で重みが渡らず、厳密な DSE 重みを作り直す枝
+/// (`ENOMOTO_MIP_DSE_INIT` の `u`) で、作り直しの手間 (直近に測った 1 行あたりの手間 × 行の数 `m`) が、この求解の見込みの手間
+/// (呼び手の [`set_dse_cost_hint`]) を超えるなら作り直さない (真を返す)。作り直しで減らせる反復の手間は、求解の手間全体を超えない
+/// ので、それより高い作り直しは見合わない。見込みか 1 行の手間がまだないときは作り直す (今までどおり、測る)。閾値は置かない
+pub(crate) fn dse_cost_skip(m: usize) -> bool {
+    if !dse_cost_on() {
+        return false;
+    }
+    use std::sync::atomic::Ordering::Relaxed;
+    let (Some(budget), Some(per_row)) = (DSE_COST_HINT.with(|c| c.get()), super::DSE_INIT_TICKS_PER_ROW.with(|c| c.get())) else {
+        DSE_COST_STATS[2].fetch_add(1, Relaxed);
+        return false;
+    };
+    if per_row * m as f64 > budget {
+        DSE_COST_STATS[0].fetch_add(1, Relaxed);
+        true
+    } else {
+        DSE_COST_STATS[1].fetch_add(1, Relaxed);
+        false
+    }
+}
+
 /// 診断 `ENOMOTO_MIP_NODELP_DIAG` (analysis/node_lp_20261106.md、解き方は変えない) が有効か。
 /// 診断 `ENOMOTO_DEBUG_EXT_ITERLOG` (analysis/lpwarm_20261118、解き方は変えない) が有効か。
 fn iterlog_on() -> bool {
@@ -5058,7 +5099,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 試作 `ENOMOTO_MIP_DSE_INIT` の `u` ([`dse_init_has`]、既定では使わない): warm start で重みが渡らなかったときも、基底に構造列が
         // あれば厳密な重みから始める (HiGHS の `HEkkDual::solve`: 全スラックでない基底では `computeDualSteepestEdgeWeights`)。
         // 重みの計算は超疎の単位 BTRAN ([`super::DseState::from_basis`]、`ENOMOTO_DSE_EXACT_SPARSE`)
-        _ if warm_started && dse_init_has('u') && basis.iter().any(|&j| j < n_orig) => {
+        // 試作 `ENOMOTO_MIP_DSE_COST` ([`dse_cost_skip`]): 作り直しの手間がこの求解の見込みの手間を超えるなら作らない (単位重み)
+        _ if warm_started && dse_init_has('u') && basis.iter().any(|&j| j < n_orig) && !dse_cost_skip(m) => {
             dse_kind = 2;
             super::DseState::from_basis(m, &lu)
         }
