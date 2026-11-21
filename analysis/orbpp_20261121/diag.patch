@@ -1,0 +1,201 @@
+diff --git a/src/mip/mod.rs b/src/mip/mod.rs
+index cc4cb648c..9330acfcb 100644
+--- a/src/mip/mod.rs
++++ b/src/mip/mod.rs
+@@ -3782,8 +3782,37 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
+         // (neos-911970: 35x3 が 6 つと 35x6 が 1 つで 33 列の固定、P で 1.74 倍遅い。graph20-20-1rand は 37x37)。P・T・M の 106 問で ORBPP が
+         // 働くのは 3・6 列 (neos-911970・misc07) と 37 列 (graph20) だけなので、間の 10 にする (analysis/vsscip_slow_20261118/g1/scan.txt)
+         let min_cols = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_COLS", 10usize, usize);
+-        for o in orbs.iter_mut() {
++        // 診断 (ORBDIAG): `ENOMOTO_MIP_ORBPP_DIAG_MASK` (オービトープの番号の並び、例 "0,3") があれば、その番号だけを静的の候補にする
++        let diag_mask: Option<Vec<usize>> = env_str!("ENOMOTO_MIP_ORBPP_DIAG_MASK").map(|v| v.split(',').filter_map(|t| t.trim().parse().ok()).collect());
++        let nfree = (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count();
++        let nbin = (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j] && prob.is_int[j] && prob.col_lo[j] >= 0.0 && prob.col_up[j] <= 1.0).count();
++        for (oi, o) in orbs.iter_mut().enumerate() {
+             let binary = o.vars.iter().flatten().all(|&j| prob.is_int[j] && prob.col_lo[j] >= 0.0 && prob.col_up[j] <= 1.0);
++            if verbose && env_str!("ENOMOTO_MIP_ORBDIAG").is_some() {
++                // 行ごと: パッキングの行に入るか、その行が分割 (下限 1) か、行の長さ (オービトープの外の列を含む)
++                let mut part = 0;
++                let mut extra = 0usize;
++                for line in o.vars.iter() {
++                    let set: std::collections::HashSet<usize> = line.iter().copied().collect();
++                    let r = prob.cols[line[0]].iter().map(|&(i, _)| i).find(|&i| {
++                        let r = &prob.rows[i];
++                        prob.row_up[i] <= 1.0 + 1e-9 && r.iter().all(|&(k, a)| a == 1.0 && prob.col_lo[k] >= 0.0) && r.iter().filter(|&&(k, _)| set.contains(&k)).count() == line.len()
++                    });
++                    if let Some(i) = r {
++                        part += (prob.row_lo[i] >= 1.0 - 1e-9) as usize;
++                        extra += prob.rows[i].len() - line.len();
++                    }
++                }
++                let pk = o.row_packing.iter().filter(|&&b| b).count();
++                let cost: f64 = o.vars.iter().flatten().map(|&j| prob.cost[j].abs()).sum();
++                eprintln!(
++                    "ORBDIAG struct orbitope {oi} {}x{} binary {binary} local {} packing_rows {pk} partition_rows {part} extra_in_rows {extra} cols_cover {} of free {nfree} (binary {nbin}) abs_cost {cost:.3}",
++                    o.vars.len(), o.vars[0].len(), o.local, o.vars.len() * o.vars[0].len()
++                );
++            }
++            if diag_mask.as_ref().is_some_and(|m| !m.contains(&oi)) {
++                continue;
++            }
+             // パッキング・分割の行に含まれる行だけのオービトープ (行の部分集合でも列の入れ替えは対称性。`ORBITOPE_STATIC` と同じく過半のときだけ)
+             let rows: Vec<usize> = (0..o.vars.len()).filter(|&i| o.row_packing[i]).collect();
+             if o.local || 2 * rows.len() < o.vars.len() || rows.len() < min_rows || o.vars[0].len() < min_cols || !binary {
+diff --git a/src/mip/solver.rs b/src/mip/solver.rs
+index a606b8f1d..33717918f 100644
+--- a/src/mip/solver.rs
++++ b/src/mip/solver.rs
+@@ -458,6 +458,7 @@ pub struct MipResult {
+ }
+ 
+ thread_local! {
++    static ORB_DIAG: std::cell::RefCell<Vec<[u64; 2]>> = const { std::cell::RefCell::new(Vec::new()) };
+     /// 並列のダイビング (`ENOMOTO_MIP_PAR_DIVES`): このスレッドで写しから作る求解が根の後に行うヒューリスティクス
+     /// (0 = しない、1 = Feasibility Pump、2 = fractional、3 = vector length、4 = coefficient diving) と、ダイビングの反復の予算、
+     /// 根の LP の反復数 (Feasibility Pump の予算に使う)。
+@@ -10280,6 +10281,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
+         }
+         if self.params.verbose {
+             eprintln!("MIP: root LP {:.10e} ({} iters, {:.2}s)", root_obj, self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
++            if env_str!("ENOMOTO_MIP_ORBDIAG").is_some() && !self.orbitopes.is_empty() {
++                let x: Vec<f64> = (0..self.p.n).map(|j| self.lp.col_value(j)).collect();
++                self.orb_diag_align(&format!("rootlp r{}", self.params.restarts), &x);
++            }
+             // 根の LP の大きさ (PRESOLVE2 の比べ用、記録だけ): 行、固定でない列、それらの非零
+             let free: Vec<bool> = (0..self.p.n).map(|j| self.p.col_lo[j] < self.p.col_up[j]).collect();
+             let nnz: usize = self.p.rows.iter().map(|r| r.iter().filter(|e| free[e.0]).count()).sum();
+@@ -18954,6 +18959,46 @@ impl<'a, L: MipLp> Solver<'a, L> {
+     /// `changes` はこのノードまでの分枝 (根から順)。動的な固定 (既定) では、分枝した列を含むオービトープの行を
+     /// 分枝した順に並べた行列で固定する (HiGHS・Bendotti らの dynamic orbitopal fixing。順は道ごとに決まるので道の上で
+     /// 一貫している)。`ENOMOTO_MIP_ORBITOPE_STATIC` なら全ての行を固定の順で使う。
++    /// 診断 (ORBDIAG): 根の LP の解 (または解 `x`) が静的な代表 (パッキングの行で x_{i,c} = 0 (c > i)) とどれだけ合うか。オービトープごとに
++    /// (パッキングの行の総量、今の列の順で c > i にある量、列を並べ替えて最小にした量) を出す
++    fn orb_diag_align(&self, tag: &str, x: &[f64]) {
++        for (k, o) in self.orbitopes.iter().enumerate() {
++            let rows: Vec<usize> = if o.static_pp { (0..o.vars.len()).collect() } else { (0..o.vars.len()).filter(|&i| o.row_packing[i]).collect() };
++            let s = o.vars[0].len();
++            let tot: f64 = rows.iter().map(|&i| o.vars[i].iter().map(|&j| x[j]).sum::<f64>()).sum();
++            let bad = |perm: &[usize]| -> f64 {
++                let mut b = 0.0;
++                for (ii, &i) in rows.iter().enumerate() {
++                    for c in 0..s {
++                        if c > ii {
++                            b += x[o.vars[i][perm[c]]];
++                        }
++                    }
++                }
++                b
++            };
++            let id: Vec<usize> = (0..s).collect();
++            let b0 = bad(&id);
++            // 最小: 列が 7 本以下なら全ての順、多ければ「最初に値が 0.5 を越える行」の順に並べる
++            let bmin = if s <= 7 {
++                let mut best = f64::INFINITY;
++                let mut perm = id.clone();
++                fn heap(k: usize, a: &mut Vec<usize>, f: &mut dyn FnMut(&[usize])) {
++                    if k == 1 { f(a); return; }
++                    for i in 0..k { heap(k - 1, a, f); if k % 2 == 0 { a.swap(i, k - 1) } else { a.swap(0, k - 1) } }
++                }
++                heap(s, &mut perm, &mut |p: &[usize]| { let v = bad(p); if v < best { best = v } });
++                best
++            } else {
++                let mut p = id.clone();
++                p.sort_by_key(|&c| rows.iter().position(|&i| x[o.vars[i][c]] > 0.5).unwrap_or(usize::MAX));
++                bad(&p)
++            };
++            let ones = rows.iter().map(|&i| o.vars[i].iter().filter(|&&j| x[j] > 1e-6 && x[j] < 1.0 - 1e-6).count()).sum::<usize>();
++            eprintln!("ORBDIAG {tag} orbitope {k} {}x{s} static {} packing_rows {}: total {tot:.3} upper {b0:.3} upper_min_perm {bmin:.3} fractional {ones}", o.vars.len(), o.static_pp, rows.len());
++        }
++    }
++
+     fn orbitope_propagate(&mut self, changes: &[BoundChange]) -> bool {
+         if self.orbitopes.is_empty() {
+             return true;
+@@ -18994,6 +19039,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
+         let others = self.orb_others.clone().unwrap();
+         let check_others = env_str!("ENOMOTO_MIP_ORBITOPE_IGNORE_OTHERS").is_none();
+         // オービトープごとの分枝した行 (分枝した順)
++        let mut sub_idx: Vec<usize>;
+         let subs: Vec<super::symmetry::Orbitope> = if dynamic {
+             let mut rows: Vec<Vec<usize>> = vec![Vec::new(); orbs.len()];
+             let mut broken = vec![false; orbs.len()];
+@@ -19014,9 +19060,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
+             // `ENOMOTO_MIP_ORBPP` の静的なオービトープは全ての行を固定の順で使う (根の固定と同じ順。分枝の順によらず成り立つ)
+             let mut v: Vec<super::symmetry::Orbitope> =
+                 rows.iter().enumerate().filter(|(k, r)| !orbs[*k].static_pp && !r.is_empty() && !broken[*k]).map(|(k, r)| orbs[k].sub_rows(r)).collect();
++            sub_idx = rows.iter().enumerate().filter(|(k, r)| !orbs[*k].static_pp && !r.is_empty() && !broken[*k]).map(|(k, _)| k).collect();
+             v.extend(orbs.iter().filter(|o| o.static_pp).cloned());
++            sub_idx.extend((0..orbs.len()).filter(|&k| orbs[k].static_pp));
+             v
+         } else {
++            sub_idx = (0..orbs.len()).collect();
+             orbs.iter().cloned().collect()
+         };
+         if subs.is_empty() {
+@@ -19028,17 +19077,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
+         for _ in 0..10 {
+             // (列, 下限, 上限, 理由の行の写しの番号)
+             let mut fixes: Vec<(usize, f64, f64, Option<usize>)> = Vec::new();
+-            for o in subs.iter() {
++            for (si, o) in subs.iter().enumerate() {
++                let nfix0 = fixes.len();
++                let ok_diag = {
+                 // 0-1 でない整数の行を含むオービトープは整数の値で比べる形で固定する
+                 let int_rows = o.vars.iter().any(|line| line.iter().any(|&j| self.p.col_lo[j] < 0.0 || self.p.col_up[j] > 1.0));
+                 if int_rows {
+                     match super::symmetry::orbitopal_fixing_int(o, &self.dom.lo, &self.dom.up) {
+-                        None => return false,
+-                        Some(f) => fixes.extend(f.into_iter().map(|(j, l, u)| (j, l, u, None))),
++                        None => false,
++                        Some(f) => { fixes.extend(f.into_iter().map(|(j, l, u)| (j, l, u, None))); true }
+                     }
+                 } else {
+                     match super::symmetry::orbitopal_fixing(o, &self.dom.lo, &self.dom.up) {
+-                        None => return false,
++                        None => false,
+                         Some(f) => {
+                             let reason_ok = with_reason && (!dynamic || o.static_pp);
+                             // 全体の組 (大きい) は小さい組で導けない固定のときだけ作る
+@@ -19055,9 +19106,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
+                                 };
+                                 fixes.push((j, v, v, idx));
+                             }
++                            true
+                         }
+                     }
+                 }
++                };
++                // 診断 (ORBDIAG): オービトープごとの木の固定・打ち切りの数
++                ORB_DIAG.with(|d| {
++                    let mut d = d.borrow_mut();
++                    let k = sub_idx[si];
++                    if d.len() <= k {
++                        d.resize(k + 1, [0; 2]);
++                    }
++                    d[k][0] += (fixes.len() - nfix0) as u64;
++                    d[k][1] += (!ok_diag) as u64;
++                });
++                if !ok_diag {
++                    return false;
++                }
+             }
+             if fixes.is_empty() {
+                 return true;
+@@ -26952,6 +27018,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
+             }
+             if !self.orbitopes.is_empty() {
+                 eprintln!("MIP: orbitopes {}: fixed {} bounds, pruned {} nodes", self.orbitopes.len(), self.orbitope_fixings, self.orbitope_prunes);
++                if env_str!("ENOMOTO_MIP_ORBDIAG").is_some() {
++                    ORB_DIAG.with(|d| {
++                        for (k, v) in d.borrow().iter().enumerate() {
++                            let o = &self.orbitopes[k.min(self.orbitopes.len() - 1)];
++                            eprintln!("ORBDIAG tree orbitope {k} {}x{} static {}: fixed {} pruned {}", o.vars.len(), o.vars[0].len(), o.static_pp, v[0], v[1]);
++                        }
++                    });
++                    if let Some(x) = self.incumbent.as_ref().map(|(_, x)| x.clone()) {
++                        self.orb_diag_align("incumbent", &x);
++                    }
++                }
+                 if orbitope_reason() {
+                     eprintln!("MIP: orbitope reasons: {} rows ({} nonzeros) in the cut arena, found at try {:?}, explained in conflict analysis {} times (all threads)", self.orbitope_reason_rows, self.orbitope_reason_nnz, ORB_REASON_KIND.with(|k| *k.borrow()), super::domain::CUT_REASON_EXPLAINED.load(std::sync::atomic::Ordering::Relaxed));
+                 }
