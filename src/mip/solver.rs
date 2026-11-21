@@ -82,7 +82,7 @@ pub struct MipParams {
 }
 
 impl MipParams {
-    /// 割合で決める量 (時間の上限の x 倍) の基準。試作 `ENOMOTO_MIP_TIMEDEP` の `b` (analysis/timedep_20261114.md) なら外側の求解では
+    /// 割合で決める量 (時間の上限の x 倍) の基準。`ENOMOTO_MIP_TIMEDEP` の `b` (既定、analysis/timedep_20261114.md・det1t_20261120) なら外側の求解では
     /// 元の時間上限 `tl_base` (前処理・再スタートに使った壁時計の秒で変わらない)、それ以外は `time_limit` (残り時間)。期限は `time_limit` のまま
     pub fn frac_tl(&self) -> f64 {
         if !self.submip && self.tl_base.is_finite() && super::timedep('b') {
@@ -1170,6 +1170,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) tsd: [u64; 6],
     /// 診断の前回の出力の (秒, ノードの LP の数, 反復, 行の和, ノードの分離の秒)
     pub(super) tsd_last: (f64, u64, u64, u64, f64),
+    /// 診断 `ENOMOTO_MIP_TREEDEPTH_DIAG=<ファイル>` (analysis/treedepth_20261121/README.md): 木の中の分離を深さごとに見る生の記録 ([`super::treedepth`])
+    pub(super) tdd: Option<Box<super::treedepth::TdDiag>>,
     /// 診断 `ENOMOTO_MIP_DENSECUT_DIAG` (analysis/densecut_20261113.md): [ノードの分離で加えた行, その非零の和,
     /// ノードの LP の数 (数えた回), 根の後に入ったカットの行の和, その非零の和, カットの行の非零の和 (全部), 伸びの比の和 (打ち切りは 1),
     /// 伸びを測った回, 密と判定されて深さの規則で始めたラウンド, 密の判定で止めた回 (始め・続き)]
@@ -5414,6 +5416,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nodelp_dumps: 0,
         node_sep_stats: [0; 2],
         nca_hist: [0; 5],
+        tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
         s3_tsdense_logged: false,
         noinc_secs: 0.0,
@@ -13185,6 +13188,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let mut ts_first = f64::NEG_INFINITY;
             let mut ts_last = f64::NEG_INFINITY;
+            // 診断 `ENOMOTO_MIP_TREEDEPTH_DIAG`: ノードの始め (部分木の判定に使う変更の列の前の部分)
+            if self.tdd.as_ref().is_some_and(|t| !t.started()) {
+                let inc = self.incumbent.as_ref().map(|(z, _)| *z);
+                let (lb, tk, secs) = (self.global_lower_bound(), crate::ticks::total() - self.ticks0, self.start.elapsed().as_secs_f64());
+                self.tdd.as_mut().unwrap().tree_start(inc, lb, tk, secs);
+            }
+            if let Some(t) = self.tdd.as_mut() {
+                t.begin_node(&node.changes, node.depth, node.depth > 0 && plunge_depth == 0);
+            }
             // `ENOMOTO_MIP_TREE4_PROOFCUT`: このノードでの証明の行のラウンド数と、行を加えたか
             let mut t4pc_rounds = 0usize;
             let mut t4pc_added = false;
@@ -13211,7 +13223,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else {
                     cap
                 };
-                // 試作 `ENOMOTO_MIP_DET1T` の `l` (analysis/det1t_20261120): 上限を手間で数える (平均の手間の 50 倍、最低 0.5e9 = 0.5 秒相当)。
+                // `ENOMOTO_MIP_DET1T` (既定 `onil`) の `l` (analysis/det1t_20261120): 上限を手間で数える (平均の手間の 50 倍、最低 0.5e9 = 0.5 秒相当)。
                 // 壁時計の上限は 10 倍の安全網にする。手間の期限は解くたびに [`crate::ticks::budget_guard`] で付ける
                 let det_l = det1t('l');
                 let cap_tk = (50.0 * self.node_lp_ticks / self.node_lps.max(1) as f64).max(0.5e9);
@@ -13415,6 +13427,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.node_cut_secs += t.elapsed().as_secs_f64();
                     self.node_cut_ticks += crate::ticks::total() - nc_res_tk;
                     self.node_cut_work += self.lp.total_iterations().saturating_sub(nc_res_it) as f64;
+                    // 診断 `ENOMOTO_MIP_TREEDEPTH_DIAG`: 木の分離のラウンドの後の解き直しの伸びと手間
+                    if self.tdd.is_some() {
+                        let (k, o) = match st {
+                            LpStatus::Infeasible | LpStatus::ObjectiveBound => (1u8, f64::NAN),
+                            LpStatus::Optimal => (0u8, self.lp.objective() + self.p.offset),
+                            _ => (2u8, f64::NAN),
+                        };
+                        let lim = self.prune_limit();
+                        let (dt, ds) = (crate::ticks::total() - nc_res_tk, t.elapsed().as_secs_f64());
+                        self.tdd.as_mut().unwrap().resolved(k, o, lim, dt, ds);
+                    }
                 }
                 // `ENOMOTO_MIP_SEPSTAT`: ノードの分離で加えたカットの伸び・生き残りを数える
                 if self.sl.stat && !self.params.submip {
@@ -13608,6 +13631,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if !self.params.submip && env_str!("ENOMOTO_MIP_NO_CUT_AGING").is_none() {
                     self.age_cuts();
+                    // 診断 `ENOMOTO_MIP_TREEDEPTH_DIAG`: 木の分離で加えたカットが張っているか・まだ LP にあるか
+                    if self.tdd.is_some() {
+                        let m0 = self.p.m;
+                        let y = self.lp.row_duals();
+                        let b = self.lp.basis_ref();
+                        let act = self.lp.row_activities_ref();
+                        let st: Vec<u8> = (0..self.cut_ids.len())
+                            .map(|k| {
+                                let i = m0 + k;
+                                let (lo, up) = self.lp.row_bounds(i);
+                                if b.row[i] != VarStatus::Basic && y[i].abs() > 1e-9 {
+                                    2
+                                } else if act[i] >= up - 1e-6 * (1.0 + up.abs()) || act[i] <= lo + 1e-6 * (1.0 + lo.abs()) {
+                                    1
+                                } else {
+                                    0
+                                }
+                            })
+                            .collect();
+                        self.tdd.as_mut().unwrap().after_lp(&self.cut_ids, |k| st[k]);
+                    }
                     // 年齢の上限を超えたカットを外す (行の削除は LP を作り直すので、ある程度まとめて)
                     if self.nodes % tunable!("ENOMOTO_T_MIP_CUT_AGING_EVERY", 20u64, u64) == 0 {
                         self.remove_aged_cuts();
@@ -14288,6 +14332,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if added {
                         self.mark_tree_sep_cuts(id0);
                         self.tsd[0] += self.next_cut_id - id0;
+                    }
+                    if let Some(t) = self.tdd.as_mut() {
+                        let ids = if added { id0..self.next_cut_id } else { id0..id0 };
+                        t.round(ts_rounds == 0, node_obj, ids, crate::ticks::total() - tk_nc, t_nc.elapsed().as_secs_f64());
                     }
                     self.tsd[3] += 1;
                     self.tsd[4] += added as u64;
@@ -20563,7 +20611,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let x = self.lp.col_values();
             if !self.fractional(&x).is_empty() {
                 let t0 = Instant::now();
-                // 試作 `ENOMOTO_MIP_DET1T` の `o` (analysis/det1t_20261120): 使った分を壁時計の秒でなく手間 (ticks、1 手間 ≒ 1 ns) で数える
+                // `ENOMOTO_MIP_DET1T` (既定 `onil`) の `o` (analysis/det1t_20261120): 使った分を壁時計の秒でなく手間 (ticks、1 手間 ≒ 1 ns) で数える
                 let tk0 = crate::ticks::total();
                 let before = self.incumbent.as_ref().map(|(z, _)| *z);
                 // 丸めの伝播の手間の上限を `ENOMOTO_T_MIP_OBJPROBE_RR_WORK` (既定 200) x 非零数に上げる (既定の 20 倍では hypothyroid-k1 の
@@ -26929,6 +26977,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 d[3] / nl, d[4] / nl, d[5] / nl, d[7], d[6] / d[7].max(1.0), self.nca_hist, d[8], d[9], self.nca_cut_nnz, self.p.n, self.dcut_stats
             );
         }
+        // 診断 `ENOMOTO_MIP_TREEDEPTH_DIAG`: スレッドごとの生の記録をファイルに足す
+        if let Some(mut t) = self.tdd.take() {
+            t.fin = (self.incumbent.as_ref().map(|(z, _)| *z), self.global_lower_bound());
+            t.dump(self.pool_tid as usize, self.start.elapsed().as_secs_f64(), self.nodes);
+        }
         // `ENOMOTO_MIP_NCA_DIAG`: 木の従のスレッドの分も出す (診断用)
         if !self.params.verbose && !self.params.submip && env_str!("ENOMOTO_MIP_NCA_DIAG").is_some() {
             eprintln!("MIP: node diag (thread {}): nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}; adaptive rounds {} effective {} cut nnz {:?}", self.pool_tid, self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows(), self.nca_stats[0], self.nca_stats[1], self.nca_cut_nnz);
@@ -27358,24 +27411,25 @@ pub(super) fn inf_all() -> bool {
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_INF_ALL").is_some_and(|v| v != "0"))
 }
 
-/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN` (p2inf_20261119、既定では使わない): リテラルの衝突のプールの伝播で締めた変更を、衝突を行にしたものから
-/// 衝突解析で遡れるようにする ([`Solver::lit_prop`])。bnatt400 では解析の段の 1/3 がリテラルの衝突で締めた変更を遡れずに止まっていた
-/// (SCIP は衝突を制約 (logicor) として持つので遡れる)
-/// 試作 `ENOMOTO_MIP_DET1T` の文字 (analysis/det1t_20261120、既定では使わない): 1 スレッドで同じ種の結果を再現させるため、時間で決めている所を手間で決める。
+/// `ENOMOTO_MIP_DET1T` の文字 (analysis/det1t_20261120): 1 スレッドで同じ種の結果を再現させるため、時間で決めている所を手間で決める。
+/// 既定 `onil` (2026-11-21 に既定化、`=0` で以前の形。`ENOMOTO_MIP_TIMEDEP` の既定 `b` と組)。
 /// `o`: 根のカットのループの乱択丸め (OBJPROBE `r`) の枠を、使った壁時計の秒でなく手間で数える。
 /// `n`: 手間の期限の中で解くサブ MIP は、時間の上限を 10 倍の安全網にする ([`Solver::solve_submip_problem`])
 /// `l`: ノードの LP の 1 回の上限 (平均の 50 倍・最低 0.5 秒) を手間で数える。
 /// `i`: 根の interior rounding の予算を手間で数え、内点法の反復も手間の期限で止める (src/mip/heur_ipm.rs、[`crate::ticks::ipm_work`])
 pub(super) fn det1t(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_DET1T").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_DET1T", "onil").is_some_and(|v| v.contains(c))
 }
 
-/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=g` (analysis/slowm_20261119 §17、既定では使わない): 一般整数の境界の文字を含む衝突で締めた変更も遡れるようにする
+/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN` (p2inf_20261119、既定では使わない): リテラルの衝突のプールの伝播で締めた変更を、衝突を行にしたものから
+/// 衝突解析で遡れるようにする ([`Solver::lit_prop`])。bnatt400 では解析の段の 1/3 がリテラルの衝突で締めた変更を遡れずに止まっていた
+/// (SCIP は衝突を制約 (logicor) として持つので遡れる)
 /// `ENOMOTO_MIP_LIT_EXPLAIN` の値。指定しなければ `sig` (p2inf_20261119 8.4 節で既定化、`=0` で切る)
 fn lit_explain_val() -> Option<String> {
     Some(env_str!("ENOMOTO_MIP_LIT_EXPLAIN").map(|v| v.to_string()).unwrap_or_else(|| "sig".to_string()))
 }
 
+/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=g` (analysis/slowm_20261119 §17、既定では使わない): 一般整数の境界の文字を含む衝突で締めた変更も遡れるようにする
 pub(super) fn lit_explain_gen() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // `sig` (p2inf_20261119 の予算つきの形) も 'g' を含むので除く
