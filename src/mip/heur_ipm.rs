@@ -48,12 +48,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         // 試作 `ENOMOTO_MIP_DET1T` の `i` (analysis/det1t_20261120): 予算を手間 (ticks × 1e-9 秒) で数え、内点法の反復も KKT の分解の
-        // 演算数を手間に足して手間の期限で止める。壁時計の期限は 10 倍の安全網にする
+        // 演算数を数えて手間の期限で止める (スレッドの手間の合計には足さない: [`crate::ticks::ipm_add`])。壁時計の期限は 10 倍の安全網にする
         let det_i = super::solver::det1t('i');
         let deadline = Instant::now() + Duration::from_secs_f64(if det_i { 10.0 * budget } else { budget });
         let _det_budget = det_i.then(|| crate::ticks::budget_guard(budget * 1e9));
         let _det_ipm = det_i.then(crate::ticks::ipm_work_guard);
-        let past = || Instant::now() >= deadline || (det_i && crate::ticks::over());
+        let past = || Instant::now() >= deadline || (det_i && crate::ticks::ipm_over());
         // 0: 費用つき (最適面の中心付近) + クロスオーバーの頂点、1: 費用 0 (実行可能領域の中心付近、頂点なし)、2: 両方
         let mode = tunable!("ENOMOTO_T_MIP_IPM_MODE", 0u8, u8);
         let mut centers: Vec<(&str, Vec<f64>)> = Vec::new();
