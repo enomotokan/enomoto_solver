@@ -243,7 +243,20 @@ RSS の推移 (MB、`rss.py`):
 
 ### 7.5 確かめと広い計測
 
-- 誤答の確かめ (`wide/fuzz.sh`、3 つの試作を全部つけて fuzz 7 本と cargo test): 下の表 (回し中)。
+- 誤答の確かめ (`bash analysis/biglp_20261121/wide/fuzz.sh`、ビルド 21de5bebb、3 つの試作を全部つけて。ログは wide/fuzz_logs/、コミットしない):
+
+| 命令 (fix) | 件数 | bad |
+|---|---|---|
+| `fuzz_tiny.py 400 0` (REL_GAP=1e-9) | 400 | 0 (strict 12) |
+| `mip_fuzz_vs_highs.py 300` (REL_GAP=1e-9) | 300 | 0 |
+| `fuzz_objint.py 1000 0` | 1000 | 0 (optimal 967・infeasible 33) |
+| `fuzz_slack.py 1000 0` | 1000 | 0 (mismatches 0) |
+| `fuzz_tiny.py 400 1000` (REL_GAP=1e-9) | 400 | 0 (strict 13) |
+| `fuzz_objint.py 1000 5000` | 1000 | 0 (optimal 971・infeasible 29) |
+| `fuzz_slack.py 1000 5000` | 1000 | 0 (mismatches 0) |
+| `cargo test --release --lib` (fix の環境変数つき / 既定) | 419 通過・0 失敗・19 無視 (両方) | — |
+
+  誤答 0。strict の数は 0.1.10 の既定と同じ。小さい問題ばかりなので 3 つの試作の枝 (根の LP 15 秒超・再スタート・根の LP 秒の上限) はほぼ通らない。
 - 広い計測の台本 (`wide/`、analysis/rootgap_20261121 の形): `cfg.py` (def / fix = 3 つ全部、fit・r3e・rck は 1 つずつ)、`plan.py`
   (`python plan.py P 6` → shards_P.json、58 問 × 種 1〜3 × {def, fix}・60 秒・6 分担・各 0.47 時間。`python plan.py M 20` → shards_M.json、186 問 × {def, fix}・600 秒・
   20 分担・各 1.83〜1.85 時間)、`run.py` (`cd analysis/biglp_20261121/wide && python run.py P K`・`python run.py M K`)、集計は `python ci.py 60 def fix res_P_s*.jsonl`・
