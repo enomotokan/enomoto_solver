@@ -17,6 +17,12 @@ VARS = {
     "nodens": {"separating/aggregation/maxrowdensity": 1.0, "separating/aggregation/maxaggdensity": 1.0},
     "anyslack": {"separating/aggregation/maxslackroot": 1e20},
     "fails5": {"separating/aggregation/maxfailsroot": 5},
+    # 根のラウンド数を当方と同じ程度に揃えた比べ (分離のラウンドの上限)
+    "r5": {"separating/maxroundsroot": 5},
+    "r10": {"separating/maxroundsroot": 10},
+    "r25": {"separating/maxroundsroot": 25},
+    "r25_noaggr": {"separating/maxroundsroot": 25, "separating/aggregation/freq": -1},
+    "r25_aggr0": {"separating/maxroundsroot": 25, "separating/aggregation/maxaggrsroot": 0},
 }
 def sep_table(txt):
     out = {}; on = False

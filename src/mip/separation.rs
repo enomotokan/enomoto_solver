@@ -5458,10 +5458,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             agg[k] -= w;
         };
         // 診断 `ENOMOTO_MIP_GAP4_PATHDIAG` (既定では出さない): [始点, 試した向き, 生成の試み, 成功, 消す連続変数なしで止まる, 相手の行なしで止まる, 段の上限]
+        // [7] = 消す連続変数なしで止まった回のうち、集約行に境界から離れた連続変数がそもそもない回 (残りは相手の行がなくて外した)。
+        // [8] = 境界から離れた連続変数の数、[9] = 連続変数の数 (analysis/aggrsel_20261121)
         let pdiag = env_str!("ENOMOTO_MIP_GAP4_PATHDIAG").is_some();
-        let mut pd = [0u64; 7];
-        let pd_out = |pd: &[u64; 7], m: usize| {
-            eprintln!("GAP4 PATHDIAG: rows {m} starts {} orientations {} attempts {} success {} stop_nocol {} stop_norow {} stop_len {}", pd[0], pd[1], pd[2], pd[3], pd[4], pd[5], pd[6]);
+        let mut pd = [0u64; 10];
+        pd[8] = cont.iter().filter(|&&c| c).count() as u64;
+        pd[9] = (0..n).filter(|&j| !vars.is_int[j]).count() as u64;
+        let pd_out = |pd: &[u64; 10], m: usize| {
+            eprintln!(
+                "GAP4 PATHDIAG: rows {m} starts {} orientations {} attempts {} success {} stop_nocol {} stop_norow {} stop_len {} nocol_nocont {} cont_off_bound {} of {}",
+                pd[0], pd[1], pd[2], pd[3], pd[4], pd[5], pd[6], pd[7], pd[8], pd[9]
+            );
         };
         for start in 0..m {
             if start % 64 == 0 && self.time_up() {
@@ -5602,6 +5609,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         pd[3] += 1;
                     } else if best_out.is_none() && best_in.is_none() {
                         pd[4] += 1;
+                        if !snapshot.iter().any(|&(j, _)| cont[j]) {
+                            pd[7] += 1;
+                        }
                     } else if path.len() + 1 >= MAX_PATH_LEN {
                         pd[6] += 1;
                     }
