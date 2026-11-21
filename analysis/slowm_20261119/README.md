@@ -562,3 +562,10 @@ CM で pe が速かった 6 問・遅かった 7 問に noswot・10teams を足�
 - 回し方: `python run.py DT K` (K = 0〜5)・`python run.py PS K` (K = 0〜2) → `res_DT_sK.jsonl`・`res_PS_sK.jsonl`。
 - 集計: `python ci.py 60 def bonil res_DT_s*.jsonl`・`python ci.py 60 def_t1 bonil_t1 res_DT_s*.jsonl`・`python ci.py 60 def pe res_PS_s*.jsonl`・
   `python ci.py 60 def pes res_PS_s*.jsonl`・`python ci.py 60 pe pes res_PS_s*.jsonl`。
+
+## 19. pe の M を今の既定の上で回し直す (CM2、利用者の判断「pe の既定化 (先に M で計測し直す)」、2026-11-21)
+
+- PS (P 58 問 × 種 1〜3、新しい既定の上) では pe/def 0.999 [0.986, 1.011]・139/139・全種遅なしで、以前の CP の +2.0%・noswot 全種遅が消えた。
+  M の CM (17 分担 = 159 問) は 0.1.10 の既定 (vbce・ncnr・rhb・cb など) が入る前のビルド (a7653492c) だったので、同じ組を今の既定で回し直してから既定化を決める。
+- 分担表: `python plan.py CM2 20` → `shards_CM2.json` (Mittelmann 186 問 × 種 1 × {def, pe}、600 秒・4 スレッド、20 分担で各約 2.05 時間)。
+  回し方: `python run.py CM2 K`。集計: `python ci.py 600 def pe res_CM2_s*.jsonl`。
