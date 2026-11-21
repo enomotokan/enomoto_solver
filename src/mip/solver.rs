@@ -10370,6 +10370,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let t_cut = Instant::now();
                 let cut_ok = env_str!("ENOMOTO_MIP_NO_CUTS").is_some() || self.root_cut_loop(root_iters);
+                // 試作 `ENOMOTO_MIP_FACECUT` (既定では使わない、analysis/sepeff_20261120/): 最適面の中の別の頂点で分離したカットを足す
+                if cut_ok && self.snap.is_none() && !self.root_gap_closed() {
+                    self.facecut_probe();
+                }
                 root_cut_secs = t_cut.elapsed().as_secs_f64();
                 if root_warm_dse {
                     crate::simplex::slope_intercept_dual::WARM_DSE_ON.store(warm_prev, std::sync::atomic::Ordering::Relaxed);
