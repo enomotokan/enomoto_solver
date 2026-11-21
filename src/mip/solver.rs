@@ -24460,10 +24460,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(d) = self.deadline {
             cap = cap.min(d.saturating_duration_since(Instant::now()).as_secs_f64());
         }
+        // 手間の上限は根までにかかった時間 (根の LP・切除の手間) に比例させる: 易しい問題では根が短いので
+        // 混合もすぐ終わる (P の 1 スレッドで 2 秒の下限と時間の上限だけでは、0.5 秒で解ける問題が 6 秒になった)。
+        cap = cap.min(t_now);
         if cap <= 0.0 {
             return;
         }
-        let stall = (tunable!("ENOMOTO_T_MIP_LMBOOST_STALL", 0.5, f64) * t_now).max(2.0);
+        let stall = tunable!("ENOMOTO_T_MIP_LMBOOST_STALL", 0.5, f64) * t_now;
         let (q, lo, up) = match &self.orig {
             Some(o) => ((**o).clone(), o.col_lo.clone(), o.col_up.clone()),
             None => (self.p.clone(), self.dom.lo.clone(), self.dom.up.clone()),
