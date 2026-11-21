@@ -1,0 +1,299 @@
+t=465.4
+[New LWP 2753]
+[New LWP 2752]
+[New LWP 2751]
+[New LWP 2750]
+[New LWP 2576]
+[New LWP 2575]
+[New LWP 2574]
+[New LWP 2573]
+[New LWP 2572]
+[New LWP 2571]
+[New LWP 2570]
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+
+Thread 12 (Thread 0x7fe71cbff6c0 (LWP 2570) "python3"):
+#0  0x00007fe72a298e31 in __futex_abstimed_wait_common64 (private=0, cancel=true, abstime=0x0, op=393, expected=0, futex_word=0x7fe726bbd660 <thread_status+96>) at ./nptl/futex-internal.c:57
+#1  __futex_abstimed_wait_common (cancel=true, private=0, abstime=0x0, clockid=0, expected=0, futex_word=0x7fe726bbd660 <thread_status+96>) at ./nptl/futex-internal.c:87
+#2  __GI___futex_abstimed_wait_cancelable64 (futex_word=futex_word@entry=0x7fe726bbd660 <thread_status+96>, expected=expected@entry=0, clockid=clockid@entry=0, abstime=abstime@entry=0x0, private=private@entry=0) at ./nptl/futex-internal.c:139
+#3  0x00007fe72a29b8ad in __pthread_cond_wait_common (abstime=0x0, clockid=0, mutex=0x7fe726bbd610 <thread_status+16>, cond=0x7fe726bbd638 <thread_status+56>) at ./nptl/pthread_cond_wait.c:503
+#4  ___pthread_cond_wait (cond=0x7fe726bbd638 <thread_status+56>, mutex=0x7fe726bbd610 <thread_status+16>) at ./nptl/pthread_cond_wait.c:627
+#5  0x00007fe725a19ad3 in blas_thread_server () from /usr/local/lib/python3.13/site-packages/numpy/_core/../../numpy.libs/libscipy_openblas64_-f48b354e.so
+#6  0x00007fe72a29cb64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:447
+#7  0x00007fe72a329e8c in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 11 (Thread 0x7fe71c3fe6c0 (LWP 2571) "python3"):
+#0  0x00007fe72a298e31 in __futex_abstimed_wait_common64 (private=0, cancel=true, abstime=0x0, op=393, expected=0, futex_word=0x7fe726bbd6e0 <thread_status+224>) at ./nptl/futex-internal.c:57
+#1  __futex_abstimed_wait_common (cancel=true, private=0, abstime=0x0, clockid=0, expected=0, futex_word=0x7fe726bbd6e0 <thread_status+224>) at ./nptl/futex-internal.c:87
+#2  __GI___futex_abstimed_wait_cancelable64 (futex_word=futex_word@entry=0x7fe726bbd6e0 <thread_status+224>, expected=expected@entry=0, clockid=clockid@entry=0, abstime=abstime@entry=0x0, private=private@entry=0) at ./nptl/futex-internal.c:139
+#3  0x00007fe72a29b8ad in __pthread_cond_wait_common (abstime=0x0, clockid=0, mutex=0x7fe726bbd690 <thread_status+144>, cond=0x7fe726bbd6b8 <thread_status+184>) at ./nptl/pthread_cond_wait.c:503
+#4  ___pthread_cond_wait (cond=0x7fe726bbd6b8 <thread_status+184>, mutex=0x7fe726bbd690 <thread_status+144>) at ./nptl/pthread_cond_wait.c:627
+#5  0x00007fe725a19ad3 in blas_thread_server () from /usr/local/lib/python3.13/site-packages/numpy/_core/../../numpy.libs/libscipy_openblas64_-f48b354e.so
+#6  0x00007fe72a29cb64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:447
+#7  0x00007fe72a329e8c in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 10 (Thread 0x7fe71bbfd6c0 (LWP 2572) "python3"):
+#0  0x00007fe72a298e31 in __futex_abstimed_wait_common64 (private=0, cancel=true, abstime=0x0, op=393, expected=0, futex_word=0x7fe726bbd760 <thread_status+352>) at ./nptl/futex-internal.c:57
+#1  __futex_abstimed_wait_common (cancel=true, private=0, abstime=0x0, clockid=0, expected=0, futex_word=0x7fe726bbd760 <thread_status+352>) at ./nptl/futex-internal.c:87
+#2  __GI___futex_abstimed_wait_cancelable64 (futex_word=futex_word@entry=0x7fe726bbd760 <thread_status+352>, expected=expected@entry=0, clockid=clockid@entry=0, abstime=abstime@entry=0x0, private=private@entry=0) at ./nptl/futex-internal.c:139
+#3  0x00007fe72a29b8ad in __pthread_cond_wait_common (abstime=0x0, clockid=0, mutex=0x7fe726bbd710 <thread_status+272>, cond=0x7fe726bbd738 <thread_status+312>) at ./nptl/pthread_cond_wait.c:503
+#4  ___pthread_cond_wait (cond=0x7fe726bbd738 <thread_status+312>, mutex=0x7fe726bbd710 <thread_status+272>) at ./nptl/pthread_cond_wait.c:627
+#5  0x00007fe725a19ad3 in blas_thread_server () from /usr/local/lib/python3.13/site-packages/numpy/_core/../../numpy.libs/libscipy_openblas64_-f48b354e.so
+#6  0x00007fe72a29cb64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:447
+#7  0x00007fe72a329e8c in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 9 (Thread 0x7fe71b1fc6c0 (LWP 2573) "enomoto-0"):
+#0  syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+#1  0x00007fe72968e205 in std::sys::pal::unix::futex::futex_wait () at library/std/src/sys/pal/unix/futex.rs:73
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x00007fe729661733 in wait<bool> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sync/poison/condvar.rs:128
+#5  sleep<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:187
+#6  0x00007fe729660a83 in no_work_found<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:106
+#7  wait_until_cold () at src/registry.rs:806
+#8  0x00007fe7296604cb in wait_until<rayon_core::latch::OnceLatch> () at src/registry.rs:775
+#9  wait_until_out_of_work () at src/registry.rs:824
+#10 main_loop () at src/registry.rs:929
+#11 run () at src/registry.rs:50
+#12 0x00007fe72965d10a in {closure#0} () at src/registry.rs:95
+#13 __rust_begin_short_backtrace<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sys/backtrace.rs:166
+#14 0x00007fe72966353d in {closure#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:70
+#15 call_once<(), std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panic/unwind_safe.rs:275
+#16 do_call<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:581
+#17 catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:544
+#18 catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panic.rs:359
+#19 {closure#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:68
+#20 call_once<std::thread::lifecycle::spawn_unchecked::{closure_env#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250
+#21 0x00007fe7296aa68f in alloc::boxed::{impl#31}::call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::alloc::Global> () at library/alloc/src/boxed.rs:2275
+#22 std::sys::thread::unix::{impl#2}::new::thread_start () at library/std/src/sys/thread/unix.rs:118
+#23 0x00007fe72a29cb64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:447
+#24 0x00007fe72a329e8c in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 8 (Thread 0x7fe71affb6c0 (LWP 2574) "enomoto-1"):
+#0  {closure#1}<_core::simplex::lu::MonoMaxQueue> () at src/simplex/lu.rs:7377
+#1  for_each<_core::simplex::lu::{impl#28}::l_transpose_hyper_out::{closure_env#1}<_core::simplex::lu::MonoMaxQueue>> () at src/simplex/lu.rs:87
+#2  l_transpose_hyper_out<_core::simplex::lu::MonoMaxQueue> () at src/simplex/lu.rs:7372
+#3  solve_transpose_unit_work_sparse () at src/simplex/lu.rs:7202
+#4  0x00007fe728d5a22d in dse_exact_row_sparse () at src/simplex.rs:93
+#5  0x00007fe728d4ed38 in from_basis_sparse () at src/simplex.rs:2224
+#6  from_basis_inner () at src/simplex.rs:2165
+#7  from_basis () at src/simplex.rs:2156
+#8  0x00007fe729034ffc in solve_slope_intercept_dual_impl<true> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/option.rs:742
+#9  0x00007fe72908b9c5 in solve_slope_intercept_dual_with () at src/simplex/slope_intercept_dual.rs:4307
+#10 solve_slope_intercept_dual_retrying () at src/simplex/slope_intercept_dual.rs:4241
+#11 solve_slope_intercept_dual () at src/simplex/slope_intercept_dual.rs:4223
+#12 0x00007fe7292a7ec7 in solve_slope_intercept_dual_from_basis () at src/simplex/slope_intercept_dual.rs:1848
+#13 solve_inner0 () at src/simplex/mip_lp.rs:2957
+#14 0x00007fe7292ba2ce in solve_tw () at src/simplex/mip_lp.rs:1822
+#15 0x00007fe7292a24b4 in solve_once () at src/simplex/mip_lp.rs:1708
+#16 0x00007fe7292b46ac in solve () at src/simplex/mip_lp.rs:1634
+#17 0x00007fe728a2ef88 in solve () at src/mip/lp_api.rs:195
+#18 dive_try<_core::simplex::mip_lp::TwoStageLp> () at src/mip/heuristics.rs:847
+#19 0x00007fe728a2dc3d in dive<_core::simplex::mip_lp::TwoStageLp> () at src/mip/heuristics.rs:776
+#20 0x00007fe728b86d05 in run<_core::simplex::mip_lp::TwoStageLp> () at src/mip/solver.rs:11235
+#21 0x00007fe728a143d7 in solve_with<_core::simplex::mip_lp::TwoStageLp> () at src/mip/solver.rs:5895
+#22 0x00007fe728ce7095 in {closure#1} () at src/mip/solver.rs:4725
+#23 solve () at src/mip/solver.rs:4727
+#24 solve_problem_inner () at src/mip/mod.rs:2346
+#25 0x00007fe728ca57be in solve_problem () at src/mip/mod.rs:1390
+#26 0x00007fe728af5c97 in maybe_restart<_core::simplex::mip_lp::TwoStageLp> () at src/mip/solver.rs:23574
+#27 0x00007fe728b90c6f in run<_core::simplex::mip_lp::TwoStageLp> () at src/mip/solver.rs:12048
+#28 0x00007fe728a143d7 in solve_with<_core::simplex::mip_lp::TwoStageLp> () at src/mip/solver.rs:5895
+#29 0x00007fe728ce7095 in {closure#1} () at src/mip/solver.rs:4725
+
+Thread 7 (Thread 0x7fe71adfa6c0 (LWP 2575) "enomoto-2"):
+#0  syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+#1  0x00007fe72968e205 in std::sys::pal::unix::futex::futex_wait () at library/std/src/sys/pal/unix/futex.rs:73
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x00007fe729661733 in wait<bool> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sync/poison/condvar.rs:128
+#5  sleep<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:187
+#6  0x00007fe729660a83 in no_work_found<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:106
+#7  wait_until_cold () at src/registry.rs:806
+#8  0x00007fe7296604cb in wait_until<rayon_core::latch::OnceLatch> () at src/registry.rs:775
+#9  wait_until_out_of_work () at src/registry.rs:824
+#10 main_loop () at src/registry.rs:929
+#11 run () at src/registry.rs:50
+#12 0x00007fe72965d10a in {closure#0} () at src/registry.rs:95
+#13 __rust_begin_short_backtrace<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sys/backtrace.rs:166
+#14 0x00007fe72966353d in {closure#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:70
+#15 call_once<(), std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panic/unwind_safe.rs:275
+#16 do_call<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:581
+#17 catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:544
+#18 catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panic.rs:359
+#19 {closure#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:68
+#20 call_once<std::thread::lifecycle::spawn_unchecked::{closure_env#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250
+#21 0x00007fe7296aa68f in alloc::boxed::{impl#31}::call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::alloc::Global> () at library/alloc/src/boxed.rs:2275
+#22 std::sys::thread::unix::{impl#2}::new::thread_start () at library/std/src/sys/thread/unix.rs:118
+#23 0x00007fe72a29cb64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:447
+#24 0x00007fe72a329e8c in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 6 (Thread 0x7fe71abf96c0 (LWP 2576) "enomoto-3"):
+#0  syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+#1  0x00007fe72968e205 in std::sys::pal::unix::futex::futex_wait () at library/std/src/sys/pal/unix/futex.rs:73
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x00007fe729661733 in wait<bool> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sync/poison/condvar.rs:128
+#5  sleep<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:187
+#6  0x00007fe729660a83 in no_work_found<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:106
+#7  wait_until_cold () at src/registry.rs:806
+#8  0x00007fe7296604cb in wait_until<rayon_core::latch::OnceLatch> () at src/registry.rs:775
+#9  wait_until_out_of_work () at src/registry.rs:824
+#10 main_loop () at src/registry.rs:929
+#11 run () at src/registry.rs:50
+#12 0x00007fe72965d10a in {closure#0} () at src/registry.rs:95
+#13 __rust_begin_short_backtrace<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sys/backtrace.rs:166
+#14 0x00007fe72966353d in {closure#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:70
+#15 call_once<(), std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panic/unwind_safe.rs:275
+#16 do_call<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:581
+#17 catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:544
+#18 catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panic.rs:359
+#19 {closure#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:68
+#20 call_once<std::thread::lifecycle::spawn_unchecked::{closure_env#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250
+#21 0x00007fe7296aa68f in alloc::boxed::{impl#31}::call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::alloc::Global> () at library/alloc/src/boxed.rs:2275
+#22 std::sys::thread::unix::{impl#2}::new::thread_start () at library/std/src/sys/thread/unix.rs:118
+#23 0x00007fe72a29cb64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:447
+#24 0x00007fe72a329e8c in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 5 (Thread 0x7fe7195886c0 (LWP 2750) "enomoto-1"):
+#0  syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+#1  0x00007fe72968e205 in std::sys::pal::unix::futex::futex_wait () at library/std/src/sys/pal/unix/futex.rs:73
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x00007fe729661733 in wait<bool> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sync/poison/condvar.rs:128
+#5  sleep<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:187
+#6  0x00007fe729660a83 in no_work_found<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:106
+#7  wait_until_cold () at src/registry.rs:806
+#8  0x00007fe7296604cb in wait_until<rayon_core::latch::OnceLatch> () at src/registry.rs:775
+#9  wait_until_out_of_work () at src/registry.rs:824
+#10 main_loop () at src/registry.rs:929
+#11 run () at src/registry.rs:50
+#12 0x00007fe72965d10a in {closure#0} () at src/registry.rs:95
+#13 __rust_begin_short_backtrace<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sys/backtrace.rs:166
+#14 0x00007fe72966353d in {closure#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:70
+#15 call_once<(), std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panic/unwind_safe.rs:275
+#16 do_call<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:581
+#17 catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:544
+#18 catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panic.rs:359
+#19 {closure#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:68
+#20 call_once<std::thread::lifecycle::spawn_unchecked::{closure_env#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250
+#21 0x00007fe7296aa68f in alloc::boxed::{impl#31}::call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::alloc::Global> () at library/alloc/src/boxed.rs:2275
+#22 std::sys::thread::unix::{impl#2}::new::thread_start () at library/std/src/sys/thread/unix.rs:118
+#23 0x00007fe72a29cb64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:447
+#24 0x00007fe72a329e8c in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 4 (Thread 0x7fe71a9f86c0 (LWP 2751) "enomoto-1"):
+#0  syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+#1  0x00007fe72968e205 in std::sys::pal::unix::futex::futex_wait () at library/std/src/sys/pal/unix/futex.rs:73
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x00007fe729661733 in wait<bool> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sync/poison/condvar.rs:128
+#5  sleep<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:187
+#6  0x00007fe729660a83 in no_work_found<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:106
+#7  wait_until_cold () at src/registry.rs:806
+#8  0x00007fe7296604cb in wait_until<rayon_core::latch::OnceLatch> () at src/registry.rs:775
+#9  wait_until_out_of_work () at src/registry.rs:824
+#10 main_loop () at src/registry.rs:929
+#11 run () at src/registry.rs:50
+#12 0x00007fe72965d10a in {closure#0} () at src/registry.rs:95
+#13 __rust_begin_short_backtrace<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sys/backtrace.rs:166
+#14 0x00007fe72966353d in {closure#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:70
+#15 call_once<(), std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panic/unwind_safe.rs:275
+#16 do_call<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:581
+#17 catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:544
+#18 catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panic.rs:359
+#19 {closure#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:68
+#20 call_once<std::thread::lifecycle::spawn_unchecked::{closure_env#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250
+#21 0x00007fe7296aa68f in alloc::boxed::{impl#31}::call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::alloc::Global> () at library/alloc/src/boxed.rs:2275
+#22 std::sys::thread::unix::{impl#2}::new::thread_start () at library/std/src/sys/thread/unix.rs:118
+#23 0x00007fe72a29cb64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:447
+#24 0x00007fe72a329e8c in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 3 (Thread 0x7fe71a7f76c0 (LWP 2752) "enomoto-1"):
+#0  syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+#1  0x00007fe72968e205 in std::sys::pal::unix::futex::futex_wait () at library/std/src/sys/pal/unix/futex.rs:73
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x00007fe729661733 in wait<bool> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sync/poison/condvar.rs:128
+#5  sleep<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:187
+#6  0x00007fe729660a83 in no_work_found<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:106
+#7  wait_until_cold () at src/registry.rs:806
+#8  0x00007fe7296604cb in wait_until<rayon_core::latch::OnceLatch> () at src/registry.rs:775
+#9  wait_until_out_of_work () at src/registry.rs:824
+#10 main_loop () at src/registry.rs:929
+#11 run () at src/registry.rs:50
+#12 0x00007fe72965d10a in {closure#0} () at src/registry.rs:95
+#13 __rust_begin_short_backtrace<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sys/backtrace.rs:166
+#14 0x00007fe72966353d in {closure#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:70
+#15 call_once<(), std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panic/unwind_safe.rs:275
+#16 do_call<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:581
+#17 catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:544
+#18 catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panic.rs:359
+#19 {closure#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:68
+#20 call_once<std::thread::lifecycle::spawn_unchecked::{closure_env#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250
+#21 0x00007fe7296aa68f in alloc::boxed::{impl#31}::call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::alloc::Global> () at library/alloc/src/boxed.rs:2275
+#22 std::sys::thread::unix::{impl#2}::new::thread_start () at library/std/src/sys/thread/unix.rs:118
+#23 0x00007fe72a29cb64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:447
+#24 0x00007fe72a329e8c in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 2 (Thread 0x7fe7191866c0 (LWP 2753) "enomoto-1"):
+#0  syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+#1  0x00007fe72968e205 in std::sys::pal::unix::futex::futex_wait () at library/std/src/sys/pal/unix/futex.rs:73
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x00007fe729661733 in wait<bool> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sync/poison/condvar.rs:128
+#5  sleep<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:187
+#6  0x00007fe729660a83 in no_work_found<rayon_core::registry::{impl#10}::wait_until_cold::{closure_env#0}> () at src/sleep/mod.rs:106
+#7  wait_until_cold () at src/registry.rs:806
+#8  0x00007fe7296604cb in wait_until<rayon_core::latch::OnceLatch> () at src/registry.rs:775
+#9  wait_until_out_of_work () at src/registry.rs:824
+#10 main_loop () at src/registry.rs:929
+#11 run () at src/registry.rs:50
+#12 0x00007fe72965d10a in {closure#0} () at src/registry.rs:95
+#13 __rust_begin_short_backtrace<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sys/backtrace.rs:166
+#14 0x00007fe72966353d in {closure#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:70
+#15 call_once<(), std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panic/unwind_safe.rs:275
+#16 do_call<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:581
+#17 catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:544
+#18 catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panic.rs:359
+#19 {closure#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/lifecycle.rs:68
+#20 call_once<std::thread::lifecycle::spawn_unchecked::{closure_env#1}<rayon_core::registry::{impl#2}::spawn::{closure_env#0}, ()>, ()> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250
+#21 0x00007fe7296aa68f in alloc::boxed::{impl#31}::call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::alloc::Global> () at library/alloc/src/boxed.rs:2275
+#22 std::sys::thread::unix::{impl#2}::new::thread_start () at library/std/src/sys/thread/unix.rs:118
+#23 0x00007fe72a29cb64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:447
+#24 0x00007fe72a329e8c in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 1 (Thread 0x7fe72a41b740 (LWP 2568) "python3"):
+#0  syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+#1  0x00007fe72968e205 in std::sys::pal::unix::futex::futex_wait () at library/std/src/sys/pal/unix/futex.rs:73
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x00007fe7296636b9 in wait<bool> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/sync/poison/condvar.rs:128
+#5  wait_and_reset () at src/latch.rs:246
+#6  0x00007fe7290bc208 in {closure#0}<rayon_core::thread_pool::{impl#0}::install::{closure_env#0}<_core::model::{impl#10}::solve::{closure#1}::{closure_env#0}, _core::types::SolveResult>, _core::types::SolveResult> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rayon-core-1.13.0/src/registry.rs:536
+#7  try_with<rayon_core::latch::LockLatch, rayon_core::registry::{impl#6}::in_worker_cold::{closure_env#0}<rayon_core::thread_pool::{impl#0}::install::{closure_env#0}<_core::model::{impl#10}::solve::{closure#1}::{closure_env#0}, _core::types::SolveResult>, _core::types::SolveResult>, _core::types::SolveResult> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/local.rs:462
+#8  with<rayon_core::latch::LockLatch, rayon_core::registry::{impl#6}::in_worker_cold::{closure_env#0}<rayon_core::thread_pool::{impl#0}::install::{closure_env#0}<_core::model::{impl#10}::solve::{closure#1}::{closure_env#0}, _core::types::SolveResult>, _core::types::SolveResult>, _core::types::SolveResult> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/thread/local.rs:426
+#9  0x00007fe728ff8c1d in in_worker_cold<rayon_core::thread_pool::{impl#0}::install::{closure_env#0}<_core::model::{impl#10}::solve::{closure#1}::{closure_env#0}, _core::types::SolveResult>, _core::types::SolveResult> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rayon-core-1.13.0/src/registry.rs:524
+#10 in_worker<rayon_core::thread_pool::{impl#0}::install::{closure_env#0}<_core::model::{impl#10}::solve::{closure#1}::{closure_env#0}, _core::types::SolveResult>, _core::types::SolveResult> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rayon-core-1.13.0/src/registry.rs:504
+#11 install<_core::model::{impl#10}::solve::{closure#1}::{closure_env#0}, _core::types::SolveResult> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rayon-core-1.13.0/src/thread_pool/mod.rs:142
+#12 {closure#1} () at src/model.rs:245
+#13 allow_threads<_core::types::SolveResult, _core::model::{impl#10}::solve::{closure_env#1}> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.22.6/src/marker.rs:522
+#14 0x00007fe728c99db1 in solve () at src/model.rs:241
+#15 0x00007fe728c9ad1e in __pymethod_solve__ () at src/model.rs:48
+#16 0x00007fe728c6f5ed in {closure#0} () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.22.6/src/impl_/trampoline.rs:44
+#17 {closure#0}<pyo3::impl_::trampoline::fastcall_with_keywords::{closure_env#0}, *mut pyo3_ffi::object::PyObject> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.22.6/src/impl_/trampoline.rs:188
+#18 do_call<pyo3::impl_::trampoline::trampoline::{closure_env#0}<pyo3::impl_::trampoline::fastcall_with_keywords::{closure_env#0}, *mut pyo3_ffi::object::PyObject>, core::result::Result<*mut pyo3_ffi::object::PyObject, pyo3::err::PyErr>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:581
+#19 catch_unwind<core::result::Result<*mut pyo3_ffi::object::PyObject, pyo3::err::PyErr>, pyo3::impl_::trampoline::trampoline::{closure_env#0}<pyo3::impl_::trampoline::fastcall_with_keywords::{closure_env#0}, *mut pyo3_ffi::object::PyObject>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:544
+#20 catch_unwind<pyo3::impl_::trampoline::trampoline::{closure_env#0}<pyo3::impl_::trampoline::fastcall_with_keywords::{closure_env#0}, *mut pyo3_ffi::object::PyObject>, core::result::Result<*mut pyo3_ffi::object::PyObject, pyo3::err::PyErr>> () at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panic.rs:359
+#21 trampoline<pyo3::impl_::trampoline::fastcall_with_keywords::{closure_env#0}, *mut pyo3_ffi::object::PyObject> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.22.6/src/impl_/trampoline.rs:188
+#22 0x00007fe728d18440 in fastcall_with_keywords () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.22.6/src/impl_/trampoline.rs:44
+#23 trampoline () at src/model.rs:48
+#24 0x000000000165f31f in method_vectorcall_FASTCALL_KEYWORDS ()
+#25 0x0000000001614f6f in _PyEval_EvalFrameDefault ()
+#26 0x000000000168f110 in PyEval_EvalCode ()
+#27 0x000000000168802f in run_eval_code_obj ()
+#28 0x00000000016c42c1 in run_mod ()
+#29 0x00000000017fe9ab in _PyRun_File ()
+[Inferior 1 (process 2568) detached]
