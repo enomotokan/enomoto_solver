@@ -310,4 +310,4 @@ RSS の推移 (MB、`rss.py`):
 - 4 スレッドの時間は、neos5 (34.9 → 42.7 秒)・noswot (18.6 → 27.0)・unitcal_7 (215 → 242) が遅く、neos-911970・mik は少し速い。ノード数も
   上下に揺れており、1 回ずつでは直しのせいか揺れかは分けられない (推測では揺れ。直しが変えるのは待ち行列の中の持ち方と、取り出したノードの
   `changes` と鎖の分け方だけで、定義域と取り出す順は同じ)。
-- 確かめ: fuzz (rootgap_20261121/fuzz.sh の 7 本を既定の設定で) は FUZZ_RESULT、`cargo test --release --lib` は 419 passed。
+- 確かめ: fuzz (rootgap_20261121/fuzz.sh の 7 本を既定の設定で) は 7 本とも誤答 0 (fuzz_tiny 400×2・fuzz_highs 300・fuzz_objint 1000×2・fuzz_slack 1000×2)、`cargo test --release --lib` は 419 passed。
