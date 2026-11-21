@@ -96,4 +96,10 @@ analysis/primalgap_20261121/README.md の直し案 2 (SCIP の objpscostdiving �
 
 `bash analysis/objdive_20261121/fuzz.sh` で確かめた (OBJDIVE=1 + DIVEQUOTA=s で rootgap と同じ 7 本、cargo test は ods・objdive+dqe・既定の 3 形)。
 
-(fuzz の結果は追って書き足す)
+- ビルドは計測後の merge (5f9b9bd6a) を `pip install -e .` で作ったもの。
+- fuzz 7 本はすべて bad 0 (mismatch 0)。
+  - fuzz_tiny 0/400、fuzz_tiny2 0/400
+  - fuzz_highs 0/300
+  - fuzz_objint 0/1000、fuzz_objint2 0/1000
+  - fuzz_slack 0/1000、fuzz_slack2 0/1000
+- cargo test は 3 形とも 419 passed、0 failed、19 ignored。
