@@ -1722,7 +1722,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             None => time_limit,
         };
-        // 試作 `ENOMOTO_MIP_DET1T` の `n` (analysis/det1t_20261120): 手間の期限の中 (木の大近傍探索の `ENOMOTO_MIP_TICKS` の `n` など) で解く
+        // `ENOMOTO_MIP_DET1T` (既定 `onil`) の `n` (analysis/det1t_20261120): 手間の期限の中 (木の大近傍探索の `ENOMOTO_MIP_TICKS` の `n` など) で解く
         // サブ MIP は、時間の上限を 10 倍の安全網にする (手間の期限より先に壁時計で止まり、同じ種でも止まる所が回ごとに変わっていた。neos-1456979)
         let time_limit = if super::solver::det1t('n') && tk_u_budget.is_none() && crate::ticks::has_budget() && !self.parallel_submips {
             let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
