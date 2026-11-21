@@ -1343,6 +1343,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// カットのハッシュから写しの番号への表。
     cut_arena: Vec<(Vec<(usize, f64)>, f64)>,
     cut_arena_idx: std::collections::HashMap<u64, u32>,
+    /// 同じ試作: プールの各カットの写しの番号 (`u32::MAX` はまだ写していない)。`cut_pool` と同じ並びで持ち、`add_to_pool` が足し、
+    /// `evict_pool` の詰め直しで一緒に並べ替える。伝播の候補ごとに表を引いて係数を比べていた手間をなくす (analysis/sc26pe_20261121)
+    pub(super) pool_arena: Vec<u32>,
     /// 試作 [`orbitope_reason`]: 写しの表に入れた理由の行の数と非零の数。
     orbitope_reason_rows: u64,
     orbitope_reason_nnz: usize,
@@ -5768,6 +5771,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         cut_pool: Vec::new(),
         cut_arena: Vec::new(),
         cut_arena_idx: std::collections::HashMap::new(),
+        pool_arena: Vec::new(),
         orbitope_reason_rows: 0,
         orbitope_reason_nnz: 0,
         dual_proofs: std::collections::VecDeque::new(),
@@ -21411,15 +21415,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if conflict_proof_explain() {
                     // 試作: このカットで締めた変更に、写しの表の番号を残す (カットのプールは詰め直すと番号が変わるので、写しは変えない)
                     let kk = k as usize;
-                    let h = self.pool_hash[kk];
-                    // 同じハッシュでも中身が違えば (詰め直しの後に丸めて同じになる別のカットが入ったとき) 新しく写す
-                    let same = |a: &(Vec<(usize, f64)>, f64), c: &(Vec<(usize, f64)>, f64, f64)| a.1 == c.1 && a.0 == c.0;
-                    let idx = match self.cut_arena_idx.get(&h) {
-                        Some(&i) if same(&self.cut_arena[i as usize], &self.cut_pool[kk]) => i as usize,
+                    // 写しの番号はカットごとに 1 度だけ決めて `pool_arena` に覚える (写しは変えないので、決めた番号はそのカットの間ずっと使える)
+                    let idx = match self.pool_arena[kk] {
+                        i if i != u32::MAX => i as usize,
                         _ => {
-                            self.cut_arena.push((self.cut_pool[kk].0.clone(), self.cut_pool[kk].1));
-                            self.cut_arena_idx.insert(h, (self.cut_arena.len() - 1) as u32);
-                            self.cut_arena.len() - 1
+                            let h = self.pool_hash[kk];
+                            // 同じハッシュでも中身が違えば (詰め直しの後に丸めて同じになる別のカットが入ったとき) 新しく写す
+                            let same = |a: &(Vec<(usize, f64)>, f64), c: &(Vec<(usize, f64)>, f64, f64)| a.1 == c.1 && a.0 == c.0;
+                            let i = match self.cut_arena_idx.get(&h) {
+                                Some(&i) if same(&self.cut_arena[i as usize], &self.cut_pool[kk]) => i as usize,
+                                _ => {
+                                    self.cut_arena.push((self.cut_pool[kk].0.clone(), self.cut_pool[kk].1));
+                                    self.cut_arena_idx.insert(h, (self.cut_arena.len() - 1) as u32);
+                                    self.cut_arena.len() - 1
+                                }
+                            };
+                            if i < u32::MAX as usize {
+                                self.pool_arena[kk] = i as u32;
+                            }
+                            i
                         }
                     };
                     self.dom.set_cut_tag(idx);
@@ -23551,6 +23565,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if gap4('r') {
             self.lp = L::new(&[], &[], &[], &[], &[], &[]);
             self.cut_pool = Vec::new();
+            self.pool_arena = Vec::new();
             self.dual_proofs = Default::default();
             self.sep_rows_cache = None;
             self.queue = NodeQueue::new();
