@@ -5,3 +5,4 @@ FIT = {"ENOMOTO_MIP_CUTSEL_PROBE_FIT": "1"}
 R3E = {"ENOMOTO_MIP_ROOTLP3": "e"}
 RCK = {"ENOMOTO_MIP_ROOTCAP": "k"}
 CFGS = {"def": {}, "fix": {**FIT, **R3E, **RCK}, "fit": FIT, "r3e": R3E, "rck": RCK}
+CFGS["fr"] = {**FIT, **RCK}  # t79: fix から r3e を除いたもの

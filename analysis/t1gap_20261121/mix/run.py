@@ -1,6 +1,6 @@
 """t1gap の案 1・3 の試作の計測の分担を回す: python run.py SET K (SET は shards_SET.json の名前: L (手元の 3 問)・P・M)。
 shards_SET.json の K 番目の (問題, 設定, 種, 秒) を順に解き、res_SET_sK.jsonl に足す。途中から再開できる。ソルバーは同時に 1 つ。
-行の形は analysis/final_20261118/run.py と同じ (analysis/slowm_20261119/run.py の写し)。設定は cfg.py、名前が _t1 で終われば 1 スレッド。L では ENOMOTO_MIP_LOG=1 の標準エラーを logs/<問題>_<設定>.log に残す。"""
+行の形は analysis/final_20261118/run.py と同じ (analysis/slowm_20261119/run.py の写し)。設定は cfg.py、名前が _t1 で終われば 1 スレッド。L では ENOMOTO_MIP_LOG=1 の標準エラーを logs/<問題>_<設定>.log に残す (L2 などは <問題>_<設定>_s<種>_<組>.log)。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -32,9 +32,9 @@ def run(cfg, seed, mps, tl, p=""):
     env.update(CFGS[cfg]); env["ENOMOTO_MIP_THREADS"] = TH(cfg); env["ENOMOTO_T_MIP_SEED"] = str(seed)
     env["ENOMOTO_BENCH_SCIP_SEED"] = str(seed)
     lf = subprocess.DEVNULL
-    if SET == "L":
+    if SET.startswith("L"):
         env["ENOMOTO_MIP_LOG"] = "1"; (D / "logs").mkdir(exist_ok=True)
-        lf = open(D / "logs" / f"{p}_{cfg}_s{seed}.log", "w")
+        lf = open(D / "logs" / (f"{p}_{cfg}_s{seed}.log" if SET == "L" else f"{p}_{cfg}_s{seed}_{SET}.log"), "w")
     t0 = time.time(); peak = 0.0
     py = str(WT / ".v019env/bin/python") if cfg.startswith("v019") else sys.executable  # 0.1.9 は別の venv の python で同じ worker を動かす
     pr = subprocess.Popen([py, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-scip" if cfg == "scip" else "--worker-ours", str(mps), "--time-limit", str(tl), "--threads", TH(cfg)],
