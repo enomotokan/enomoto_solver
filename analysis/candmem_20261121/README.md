@@ -87,3 +87,20 @@
 - `cd analysis/candmem_20261121/wide && python run.py P k` (k = 0..5、各約 0.47 時間)、`python run.py M k` (k = 0..19、各約 1.84 時間)。
 - 集計: `python ci.py 60 old new res_P_s*.jsonl`・`python ci.py 600 old new res_M_s*.jsonl`・`python rss.py res_*.jsonl`。
 - ビルドは、この直しの入ったコミット以降を `sh analysis/revisit_20261112/build.sh` で入れる。
+
+### 回したビルド
+
+- P 4: 29b63ac01 (84adc12dd 以降、pip install -e .、0.1.10)。58 行・crash 0。
+- P 1: 29b63ac01 (84adc12dd 以降、pip install -e .、0.1.10)。58 行・crash 0。
+- P 3: 29b63ac01 (84adc12dd 以降、pip install -e .、0.1.10)。58 行・crash 0。
+- P 5: 29b63ac01 (84adc12dd 以降、pip install -e .、0.1.10)。58 行・crash 0。
+- P 2: 29b63ac01 (84adc12dd 以降、pip install -e .、0.1.10)。58 行・crash 0。
+- P 0: 29b63ac01 (84adc12dd 以降、pip install -e .、0.1.10)。58 行・crash 0。
+
+### P の結果 (6 分担そろい、wide/ci_P.txt・wide/rss_P.txt)
+
+- `python ci.py 60 old new res_P_s*.jsonl`: new/old のずらし幾何平均の比 0.988 (95% [0.969, 1.006])、解けた old 137 / new 138 (10teams 種 2 を new だけが解く)。
+- 全種で 1.25 倍超の遅れ: なし。optimal 同士の目的値の食い違い: なし。crash 0。
+- 1 回だけの遅れ: noswot 種 2 (11.9→48.8 秒)、10teams 種 3 (11.4→23.4 秒)。どちらも種による揺れの大きい問題で、他の種では new が速いか同じ。
+- 最大 RSS: 159 対で new/old の幾何平均 0.997 (合計 43942→43980 MB)。P は大きな問題を含まないので、メモリの減りは M で見る。
+- 時間の採用基準はすべて満たす。
