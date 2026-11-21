@@ -582,3 +582,12 @@ CM で pe が速かった 6 問・遅かった 7 問に noswot・10teams を足�
   peg-solitaire-a3 1.86・tbfp-network 1.75・comp07-2idx 1.74・kasai 1.55・neos-1456979 1.48・irp 1.47・supportcase33 1.46・inde 1.35・bnatt400 1.26 ほか。
 - 揺れか確かめる: `python plan.py CM2S 6` → `shards_CM2S.json` (この 25 問 × 種 2・3 × {def, pe}、600 秒、6 分担 × 約 1.1 時間)。`python run.py CM2S K`。
   集計は `python ci.py 600 def pe res_CM2_s*.jsonl res_CM2S_s*.jsonl` (種 1〜3 で全種 1.25 倍超の遅れを見る)。
+
+### 19.2 CM2S の結果 (25 問 × 種 2・3、6 分担そろい、2026-11-21、`ci_CM2S.txt`)
+
+`python ci.py 600 def pe res_CM2_s*.jsonl res_CM2S_s*.jsonl` (種 1 は 186 問、種 2・3 は CM2 で差の出た 25 問だけなので、比 0.997 は偏った集計で参考)。
+- 種 2・3 の解けた数: def 44 / pe 44 (pe のみ gmu-35-40 種 2・3、peg-solitaire-a3 は種 3 で両方解ける。def のみ graphdraw-domain 種 2)。食い違い 0。
+- **全種 (1〜3) で 1.25 倍超遅いのは supportcase26 だけ** (1.36 (pe 時間切れ)・1.48・1.28)。種 1 で大きかった fiball (3.98 → 0.82・0.61)・neos-1171448 (1.68 → 0.91・0.96)・
+  gen-ip002 (種 1・2 は pe 時間切れ、種 3 は両方時間切れ)・neos-1582420 (1.37・1.19・1.12)・timtab1 (1.32・1.04・1.25)・30n20b8 (1.27・0.76・2.42) は種で揺れる。
+- 種 1 で pe が速かった問題も種で揺れる (ns1208400 0.58・1.26・1.51、tbfp-network 0.58・1.23・1.04、CMS750_4 0.40・1.07・0.69、supportcase33 0.70・0.74・1.32)。
+- まとめ: M 186 問 (種 1) で 0.991 [0.964, 1.018]・97 → 98、P (PS) 0.999・139/139。採用基準のうち満たさないのは「全種で 1.25 倍超遅い問題がない」の 1 件 (supportcase26) だけ。
