@@ -180,3 +180,10 @@
 - `scripts/mip_fuzz_symmetric.py` (対称の割り当て問題で、根のカットが停滞して FACECUT がカットを足す) も誤答 0。
   - 倍率 2 で 1500 種、倍率 3 で 500 種 (fuzz_sym2.txt・fuzz_sym3.txt、`ENOMOTO_MIP_REL_GAP=1e-9`・1 スレッド)。
 - 試作は分離の関数をそのまま使い、足すのは妥当なカットだけ。最適面の写しの固定は LP の写しの中で戻す。
+
+## 6. FACECUT は閉じる (2026-11-21、利用者の判断)
+
+- 試作 `ENOMOTO_MIP_FACECUT` は既定にしない。4 節のとおり、MPSEP oqmgs より良くなる見込みが薄い。
+- 閉じ方は LPFACE (c915e43a7) に合わせ、コードとスイッチは既定オフのまま残す。
+  separation.rs の `facecut_probe` の説明コメントに閉じた旨を書いた。
+- 退化の診断 (`SEPEFF face` の行) と種類ごとの診断 (SEPSTAT の act1・ticks) は残し、次の「伸びの取り分で配る」試作 (../sepalloc_20261121/) の材料にする。
