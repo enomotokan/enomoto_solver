@@ -1,0 +1,87 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP sorrell3 has 169162 rows; 1024 cols; 338324 nonzeros; 1024 integer variables (1024 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+00]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 1e+00]
+Presolving model
+169162 rows, 1024 cols, 338324 nonzeros 0s
+169162 rows, 1024 cols, 338324 nonzeros 2s
+Presolve reductions: rows 169162(-0); columns 1024(-0); nonzeros 338324(-0) - Not reduced
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   169162 rows
+   1024 cols (1024 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   338324 nonzeros
+   Thread count 2 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ z       0       0         0   0.00%   -inf            0                  Large        0      0      0         0     2.9s
+ J       0       0         0   0.00%   -inf            -1                 Large        0      0      0         0     4.0s
+ R       0       0         0   0.00%   -50             -2              2400.00%        0      0      0      1032     4.7s
+         0       0         0   0.00%   -50             -2              2400.00%        9      5      0      1054    11.5s
+         0       0         0   0.00%   -50             -2              2400.00%       19     15      0      1118    16.8s
+         0       0         0   0.00%   -50             -2              2400.00%       27     23      0      1164    21.9s
+         0       0         0   0.00%   -50             -2              2400.00%       35     31      0      1202    26.9s
+         0       0         0   0.00%   -50             -2              2400.00%       48     40      0      1276    33.8s
+         0       0         0   0.00%   -50             -2              2400.00%       67     48      0      1311    39.6s
+         0       0         0   0.00%   -50             -2              2400.00%       80     59      0      1376    45.2s
+         0       0         0   0.00%   -50             -2              2400.00%       93     70      0      1444    50.8s
+         0       0         0   0.00%   -50             -2              2400.00%      108     79      0      1512    56.2s
+         0       0         0   0.00%   -50             -2              2400.00%      156     97      0      2004    62.5s
+         0       0         0   0.00%   -50             -2              2400.00%      177    117      0      2452    68.1s
+         0       0         0   0.00%   -50             -2              2400.00%      215    143      0      3088    74.7s
+         0       0         0   0.00%   -50             -2              2400.00%      252    128      0      3953    80.3s
+         0       0         0   0.00%   -50             -2              2400.00%      321    132      0      4972    85.5s
+ L       0       0         0   0.00%   -39.5           -12              229.17%      330    121      0      5665   103.3s
+ L       0       0         0   0.00%   -39.5           -14              182.14%      330    121      0      8276   108.5s
+
+Symmetry detection completed in 0.2s
+Found 2 generator(s)
+
+         1       1         1   0.00%   -39.5           -14              182.14%      324     60      0     13544   115.0s
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         1       1         1   0.00%   -39.5           -14              182.14%      324     60      0     13544   115.0s
+
+Solving report
+  Model             sorrell3
+  Status            Solution limit reached
+  Primal bound      -14
+  Dual bound        -39
+  Gap               178.57% (tolerance: 0.01%)
+  P-D integral      2335.78802186
+  Solution status   feasible
+                    -14 (objective)
+                    0 (bound viol.)
+                    6.21220974273e-14 (int. viol.)
+                    0 (row viol.)
+  Timing            114.96
+                    4.74 (Presolve)
+                        MIP    time [calls] = 2.85 [1]
+                        subMIP time [calls] = 1.89 [43]
+                    110.21 (Solve)
+                        MIP    time [calls] = 85.77 [1]
+                        subMIP time [calls] = 24.44 [43]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [43]
+  Max sub-MIP depth 10
+  Nodes             1
+  Repair LPs        0
+  LP iterations     13544
+                    0 (strong br.)
+                    4633 (separation)
+                    7879 (heuristics)
