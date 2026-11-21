@@ -202,4 +202,5 @@ MIPLIB 2017 のコレクション 1065 問 (`collection.json`) のうち、easy�
     `plan_d3.json`: 分岐の誘導なし・最適値を打ち切り値に。`plan_w.json`: 13 問 × 4 スレッド。
 - 試作の比べ: `plan_c1.json` (1 スレッド)・`plan_c4.json` (4 スレッド)、タグ def2・mc32・cond2。集計は `cmp2.py` → `cmp2.txt`。検査の結果は `checks/`。
   広い計測の台本は `wide/` (`cfg.py`・`plan.py`・`run.py`・`ci.py`、candmem_20261121/wide の写し)。
+  - 回したビルド: P 3: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
 - `summ.py` → `summ.txt`・`summ_rows.json`: 4 スレッドの組ごとの表と構造。`cond.py` → `cond.txt`・`cond_rows.json`: 条件ごとの得失。
