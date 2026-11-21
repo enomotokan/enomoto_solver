@@ -322,6 +322,7 @@ sorrell3 (600 秒、どれも時間切れ・下界 −19):
   - P 5: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。分担 5 だけの集計: 26 問、fix/def 0.962 [0.911, 1.015]、解けた def 22 / fix 23 (10teams 種 3 が fix のみ、def は 60 秒で暫定解 934)、食い違い 0。
 
   - P 0: bb401e311 (build.sh の wheel、0.1.10。src は 620bebcc6 と同じ)。58 行・crash 0。 読み込み先は site-packages の _core (target/wheels の wheel と sha1 一致、11:52 作成、計測開始 11:53)。python/enomoto_solver の古い .so (02:59) は読んでいない。
+  - M 6: b0497e53f (54a900938 以降、build.sh の wheel、0.1.10)。18 行・crash 0。解けた def 4 / fix 4、食い違い 0、1.25 倍超の遅速なし。時間切れ 5 問の暫定解は fix が良い 4 (blp-ic98・icir97_tension・rococoB10-011000 19867→19565・snp-02-004-104)、悪い 1 (neos-4300652-rahue 2.8259→3.1056)。
 
 ### 7.8 wide2 の P の集計 (fix = fit + r3e + rck 直し後、2026-11-21)
 
