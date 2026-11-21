@@ -26669,6 +26669,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: nodelp2 tid {} exact-dse n {} ema {:.4}s saved-dse n {} ema {:.4}s", self.pool_tid, self.nl2_stat[1].0, self.nl2_stat[1].1, self.nl2_stat[0].0, self.nl2_stat[0].1);
             }
         }
+        // 試作 `ENOMOTO_MIP_DSE_COST` (analysis/divedse_20261121/): 厳密な DSE 重みを作り直さなかった・作った回数 (全スレッドの合計)
+        if crate::simplex::slope_intercept_dual::dse_cost_on() && !self.params.submip && self.pool_tid == 0 && self.params.verbose {
+            let st: Vec<u64> = crate::simplex::slope_intercept_dual::DSE_COST_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+            eprintln!("MIP: DSE_COST skipped {} built {} built-without-estimate {}", st[0], st[1], st[2]);
+        }
         // 診断 `ENOMOTO_MIP_NODECUT_STAT`: 冗長でなくても出す
         if crate::simplex::mip_lp::nodecut_stat() && self.snap.is_none() && !self.params.submip && self.pool_tid == 0 {
             crate::simplex::mip_lp::nodecut_report();
