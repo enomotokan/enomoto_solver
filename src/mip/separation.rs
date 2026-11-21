@@ -8060,6 +8060,11 @@ fn gen_cuts_parallel(
 /// [2] そのために係数が全部消えて捨てたカット、[3] 下限のために閾値以下になった係数の境界が無限で捨てたカット (全スレッド)
 pub(super) static SMALL_FLOOR_STATS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
+/// 数え上げ (`ENOMOTO_MIP_LOG` のとき求解の終わりに表示、analysis/rootgap_20261121/wrong_roci): [`finish_cut`] の打ち消しの確かめ
+/// (`ENOMOTO_MIP_FINISH_CANCEL`) の回数。[0] 打ち消しの残りとみなした係数、[1] それがあったカット、[2] そのうち小さい係数の吸収 (下限つき) では
+/// 消えない係数、[3] それがあって残りを 0 にしたカット (確かめが動きを変えたカット)、[4] そのため係数が全部消えて捨てたカット (全スレッド)
+pub(super) static CANCEL_STATS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
 pub(super) static GAP4_CUT_SHORTENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn finish_cut(
@@ -8082,7 +8087,9 @@ fn finish_cut(
     // 試作 `ENOMOTO_MIP_FINISH_CANCEL` (analysis/rootgap_20261121/wrong_roci): 列ごとに、足し合わせる前の項の絶対値の和 (打ち消す前の大きさ) を持つ。
     // 同じ列が ± で入る (変数上下限の置き換えと行の活動量の代入) と打ち消して浮動小数の残り (1e-16 程度) だけが残り、それが最大係数として
     // 1 に引き伸ばされ、誤ったカットになっていた (rocI-4-11 の LIFTED_COVER: 実質 0 <= 0 のカットが x347 <= 0 になり最適解を切った)
-    let cancel = env_str!("ENOMOTO_MIP_FINISH_CANCEL").is_some_and(|v| v != "0");
+    // 既定で使う前提の試作 (`ENOMOTO_MIP_FINISH_CANCEL=0` で以前の動き)。小さい係数の吸収の下限 (`ENOMOTO_MIP_CUT_SMALL_FLOOR`) は絶対値 1e-7 以下しか
+    // 拾わないので、係数が大きい行 (1e3 以上) の打ち消しの残りはすり抜けうる。こちらは列ごとの打ち消す前の大きさに対する相対で見る
+    let cancel = env_def!("ENOMOTO_MIP_FINISH_CANCEL", "1").is_some();
     let mut mag: Vec<(usize, f64)> = Vec::new();
     let mut add = |j: usize, v: f64, scratch: &mut [f64], touched: &mut Vec<usize>, mag: &mut Vec<(usize, f64)>| {
         if scratch[j] == 0.0 {
@@ -8112,24 +8119,47 @@ fn finish_cut(
         scratch[j] = 0.0;
         dense.push((j, if v == 1e-300 { 0.0 } else { v }));
     }
+    let small_rel = tunable!("ENOMOTO_T_MIP_CUT_SMALL_REL", 1e-4, f64);
+    let small_floor = if env_def!("ENOMOTO_MIP_CUT_SMALL_FLOOR", "1").is_some() { tunable!("ENOMOTO_T_MIP_CUT_SMALL_FLOOR", 1e-3, f64) } else { 0.0 };
     if cancel && !mag.is_empty() {
-        // 打ち消した後の係数が、その列の打ち消す前の大きさの 1e-9 倍以下なら 0 とみなす (既存の「cmax の 1e-9 倍以下は捨てる」と同じ尺度)
+        // 打ち消した後の係数が、その列の打ち消す前の大きさの 1e-9 倍以下なら打ち消しの残りとみなす (既存の「cmax の 1e-9 倍以下は捨てる」と同じ尺度)。
+        // 残りがすべて下の小さい係数の吸収 (下限つき) で消えるなら何もしない (既定の動きを変えない)。消えない残りが 1 つでもあれば、残りを全部 0 にする
         mag.sort_unstable_by_key(|&(j, _)| j);
+        let cmax0 = dense.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs()));
+        let thr0 = small_rel * cmax0.max(small_floor);
+        let mut resid: Vec<usize> = Vec::new();
+        let mut not_floor = 0u64;
         let mut m = 0usize;
-        for (j, v) in dense.iter_mut() {
+        for (t, &(j, v)) in dense.iter().enumerate() {
             let mut s = 0.0;
-            while m < mag.len() && mag[m].0 < *j {
+            while m < mag.len() && mag[m].0 < j {
                 m += 1;
             }
-            while m < mag.len() && mag[m].0 == *j {
+            while m < mag.len() && mag[m].0 == j {
                 s += mag[m].1;
                 m += 1;
             }
-            if v.abs() <= 1e-9 * s {
-                *v = 0.0;
+            if v != 0.0 && v.abs() <= 1e-9 * s {
+                resid.push(t);
+                not_floor += (v.abs() > thr0) as u64;
             }
         }
-        dense.retain(|&(_, v)| v != 0.0);
+        if !resid.is_empty() {
+            use std::sync::atomic::Ordering::Relaxed;
+            CANCEL_STATS[0].fetch_add(resid.len() as u64, Relaxed);
+            CANCEL_STATS[1].fetch_add(1, Relaxed);
+            if not_floor > 0 {
+                CANCEL_STATS[2].fetch_add(not_floor, Relaxed);
+                CANCEL_STATS[3].fetch_add(1, Relaxed);
+                for &t in &resid {
+                    dense[t].1 = 0.0;
+                }
+                dense.retain(|&(_, v)| v != 0.0);
+                if dense.is_empty() {
+                    CANCEL_STATS[4].fetch_add(1, Relaxed);
+                }
+            }
+        }
     }
     let mut rhs = raw.rhs;
     let cmax = dense.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs()));
@@ -8141,13 +8171,11 @@ fn finish_cut(
     // Σ_{k≠j} c_k x_k <= rhs - c_j x_j <= rhs - min(...) となり、右辺を緩める向きにだけ動く。
     // 閾値は `ENOMOTO_T_MIP_CUT_SMALL_REL` (既定 1e-4、1e-9 で以前と同じ)。その境界が無限のときは、以前の閾値 1e-9 以下なら
     // カットを捨て、それより大きければ係数を残す (以前より多くは捨てない)
-    let small_rel = tunable!("ENOMOTO_T_MIP_CUT_SMALL_REL", 1e-4, f64);
     // 直し (analysis/rootgap_20261121/wrong_widden、2026-11-21): HiGHS の `postprocessCut` と同じく、閾値の基準の最大係数に下限
     // `ENOMOTO_T_MIP_CUT_SMALL_FLOOR` (既定 1e-3) を置く (閾値は 1e-4 × max(最大係数, 1e-3)、つまり絶対値 1e-7 以下の係数は必ず吸収する)。
     // 論理変数を元の行に展開すると係数がほぼ打ち消し合い、許容誤差の大きさ (1e-9 程度) の残りだけのカットがある。下限がないと
     // それを最大係数 1 に拡大して妥当でないカットにする (neos-4722843-widden の持ち上げつきの被覆: 展開すると係数 8e-10、右辺 8e-10 の
     // 行が x35 + x37 <= 1 になり、最適解 (x35 = x37 = 1) を切って 27308.196 を最適と返していた)。`ENOMOTO_MIP_CUT_SMALL_FLOOR=0` で以前の動き
-    let small_floor = if env_def!("ENOMOTO_MIP_CUT_SMALL_FLOOR", "1").is_some() { tunable!("ENOMOTO_T_MIP_CUT_SMALL_FLOOR", 1e-3, f64) } else { 0.0 };
     let small_base = cmax.max(small_floor);
     let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(dense.len());
     // 下限があるために吸収した係数の数 (以前の閾値では残ったもの。数え上げ [`SMALL_FLOOR_STATS`] 用)
