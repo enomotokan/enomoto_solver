@@ -1,0 +1,27 @@
+MIP: root LP basis from the presolve LP probing: none
+MIP: root LP 9.5910499171e1 (43812 iters, 104.01s)
+MIP: root LP size: rows 93292, free columns 175220, nonzeros 350440
+MIP: root LP work: 76.423681 tick-s (43812 iters, 102.579s)
+MIP: cut round 0: 53 cuts (of 256, sep 0.39s, LP 3698 iters), LP rows 93345 (cut rows mean nnz 979), obj 9.9882170360e1 (115.74s)
+MIP: cut round 1: 50 cuts (of 329, sep 0.51s, LP 6854 iters), LP rows 93385 (cut rows mean nnz 705), obj 1.0319345167e2 (133.87s)
+MIP: cut round 2: 51 cuts (of 446, sep 0.62s, LP 870 iters), LP rows 93420 (cut rows mean nnz 527), obj 1.0387280577e2 (136.51s)
+MIP: cut round 3: 50 cuts (of 453, sep 0.73s, LP 7999 iters), LP rows 93431 (cut rows mean nnz 728), obj 1.0400431186e2 (160.87s)
+MIP: cut round 4: 52 cuts (of 561, sep 0.83s, LP 991 iters), LP rows 93456 (cut rows mean nnz 892), obj 1.0433561680e2 (164.31s)
+MIP: cut round 5: 50 cuts (of 528, sep 0.67s, LP 2850 iters), LP rows 93476 (cut rows mean nnz 970), obj 1.0442447056e2 (172.25s)
+MIP: cut round 6: 50 cuts (of 578, sep 1.16s, LP 4238 iters), LP rows 93502 (cut rows mean nnz 1623), obj 1.0471206929e2 (190.14s)
+MIP: cut round 7: 50 cuts (of 622, sep 1.33s, LP 791 iters), LP rows 93518 (cut rows mean nnz 1980), obj 1.0473109709e2 (194.78s)
+SEPLEARN root restarts 0 root: gain 8.820598e0 sep secs 5.981 ticks 3191828523
+SEPLEARN root restarts 0 root extra      calls 8 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.058 ticks 0 work 8 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root rows_cmir  calls 8 cands 168 chosen 97 act1 73 gain 1.0458e0 (11.9%) surv 48/79 (61%) secs 0.509 ticks 222367004 work 17825 skipped 0 capped 0 score 0.24
+SEPLEARN root restarts 0 root zerohalf   calls 8 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.012 ticks 8411648 work 8 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root clique     calls 8 cands 5 chosen 4 act1 1 gain 4.4850e-3 (0.1%) surv 1/4 (25%) secs 0.008 ticks 5609294 work 83 skipped 0 capped 0 score 0.12
+SEPLEARN root restarts 0 root implbd     calls 8 cands 6 chosen 6 act1 1 gain 9.1439e-2 (1.0%) surv 1/6 (17%) secs 0.010 ticks 1416656 work 80 skipped 0 capped 0 score 0.39
+SEPLEARN root restarts 0 root path_highs calls 8 cands 1016 chosen 164 act1 71 gain 2.0603e0 (23.4%) surv 36/111 (32%) secs 1.285 ticks 974214988 work 3205034 skipped 0 capped 0 score 0.17
+SEPLEARN root restarts 0 root path       calls 8 cands 229 chosen 25 act1 13 gain 1.3351e-2 (0.2%) surv 5/15 (33%) secs 0.175 ticks 17590298 work 57895 skipped 0 capped 0 score 0.08
+SEPLEARN root restarts 0 root tableau    calls 8 cands 2342 chosen 109 act1 46 gain 5.6052e0 (63.5%) surv 16/90 (18%) secs 3.906 ticks 1873347051 work 12202177 skipped 0 capped 0 score 0.54
+SEPLEARN root restarts 0 root mcf        calls 8 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.001 ticks 0 work 8 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root modk       calls 8 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.018 ticks 0 work 8 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root flowcover  calls 8 cands 7 chosen 1 act1 0 gain 0.0000e0 (0.0%) surv 1/1 (100%) secs 0.000 ticks 88871584 work 180 skipped 0 capped 0 score 0.11
+SEPEFF face restarts 0 rounds 9 stall 0 width 46716 nonbasic 175220 rows 93474 nfrac 199 nint 87644 obj 1.0473109709e2
+CUTSTOP {"reason":"time_cap","restarts":0,"bg":false,"second":false,"rounds":9,"max_rounds":25,"phase2":false,"stall":0,"intobj_stall":0,"obj0":9.5910499171e1,"obj1":1.0473109709e2,"lp_ok":true,"inc":1.2592891905e2,"nfrac":199,"fsum":12.8074,"nint":87610,"ncuts":182,"t_loop":85.087,"t":195.151,"sense":1}
+SEPEFF facecut: obj 1.0473109709e2 -> 1.0473700394e2 (gain 5.9068e-3, of gap 0.0003), Optimal (815 iters), width 46716 nonbasic 175220 nfrac 199, fixed cols 104805 rows 23699, 1166 candidates, chosen 24 (21 cut x*), ticks 5243627792, 6.638s; dir +1: moved 76 columns, 200 fractional, 577 candidates (970+1 iters); dir -1: moved 11 columns, 198 fractional, 589 candidates (283+1 iters)
