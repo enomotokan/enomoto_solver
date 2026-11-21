@@ -22056,6 +22056,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let all = lits.iter().all(|&(j, upper, v)| if upper { x[j] <= v + 1e-6 } else { x[j] >= v - 1e-6 });
             if all {
+                let gap = super::domain::dbg_lits_gap(&x, lits.iter().copied());
+                if gap > 1e-9 {
+                    eprintln!("MIP_DBGTOL: conflict ({tag}) misses the debug solution only by {gap:.3e} (within the tolerance) at node {} thread {}, len {}", self.nodes, self.pool_tid, lits.len());
+                    return;
+                }
                 let terms: Vec<String> = lits.iter().take(12).map(|&(j, upper, v)| format!("x{j}{}{v}[{}]", if upper { "<=" } else { ">=" }, x[j])).collect();
                 eprintln!(
                     "MIP_DEBUG_SOL: conflict ({tag}) cuts off the debug solution at node {} thread {} ({}): domain contains the debug solution: {}, len {}, stack {}: {}",
