@@ -245,7 +245,7 @@ impl CliqueGraph {
                 }
             }
             coefs.sort_by_key(|&(j, _)| j);
-            cuts.push(RawCut { coefs, rhs: 1.0 - neg });
+            cuts.push(RawCut { coefs, rhs: 1.0 - neg, kind: 0 });
         }
         cuts
     }

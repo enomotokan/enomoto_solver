@@ -227,6 +227,8 @@ enum Sub {
 pub struct RawCut {
     pub coefs: Vec<(usize, f64)>,
     pub rhs: f64,
+    /// カットの種類 ([`gen_kind`]、[`generate_cuts`] が付ける。ほかは 0)。試作 `ENOMOTO_MIP_GEN_TYPE` の種類ごとの残し方に使う
+    pub kind: u8,
 }
 
 /// 連続変数の置き換えで、単純な上下限と変数上下限の余裕を同点とみなす幅 (HiGHS の feastol)。
@@ -797,7 +799,7 @@ fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut
     if coefs.is_empty() {
         return None;
     }
-    let cut = RawCut { coefs, rhs: r };
+    let cut = RawCut { coefs, rhs: r, kind: 0 };
     // 最良の δ の 1/2・1/4・1/8 (HIGHS) が勝ったときは新しい δ とみなさない
     if (delta - deltas[best_i]).abs() <= 1e-12 * delta {
         cmirdelta_note(&kinds, n_old, best_i, eff0, best_old, Some(&cut));
@@ -1043,7 +1045,7 @@ fn cmir_build(vars: &CutVars, terms: Vec<Term>, beta: f64, delta: f64, eff: f64)
     if coefs.is_empty() {
         return None;
     }
-    Some(RawCut { coefs, rhs: r })
+    Some(RawCut { coefs, rhs: r, kind: 0 })
 }
 
 /// MIR の係数 (y について) と右辺。`f0` が極端なら `None`。
@@ -1418,7 +1420,7 @@ pub fn extended_cover(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option
         r -= c0;
         r += unsubstitute(vars, &t, cy, &mut coefs);
     }
-    Some(RawCut { coefs, rhs: r })
+    Some(RawCut { coefs, rhs: r, kind: 0 })
 }
 
 /// 0-1 単一節点フロー集合の 1 項 (lifted flow cover 用)。`sign` が +1 なら N1、-1 なら N2。
@@ -1783,7 +1785,7 @@ fn lifted_flow_cover_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Op
     if act <= r_hs + 1e-6 {
         return None;
     }
-    Some(RawCut { coefs, rhs: r_hs })
+    Some(RawCut { coefs, rhs: r_hs, kind: 0 })
 }
 
 /// 診断用: HiGHS の経路集約が `generateCut` に渡した集約行 (HiGHS をソースから計測して書き出したもの) を、こちらの
@@ -2556,7 +2558,7 @@ fn lifted_cover_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<Raw
     if coefs.is_empty() || !r.is_finite() {
         return None;
     }
-    Some(RawCut { coefs, rhs: r })
+    Some(RawCut { coefs, rhs: r, kind: 0 })
 }
 
 #[cfg(test)]
@@ -2745,7 +2747,7 @@ pub fn vb_cover_cut(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<R
     if coefs.is_empty() || lhs_x <= cut_rhs + 1e-4 {
         return None;
     }
-    Some(RawCut { coefs, rhs: cut_rhs })
+    Some(RawCut { coefs, rhs: cut_rhs, kind: 0 })
 }
 
 pub fn generate_cuts(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover: bool, ext_cover: bool) -> Vec<RawCut> {
@@ -2882,7 +2884,7 @@ fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
             if rec {
                 gen_rec_note(&out, &mut noted, gen_kind::CMIR, &mut rt0);
             }
-            out.extend(lifted_flow_cover(vars, base, rhs));
+            out.extend(lifted_flow_cover(vars, base, rhs).map(|c| RawCut { kind: gen_kind::FLOWC, ..c }));
             mark(3, &mut prof);
             if rec {
                 gen_rec_note(&out, &mut noted, gen_kind::FLOWC, &mut rt0);
@@ -2899,7 +2901,9 @@ fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
         gen_rec_note(&out, &mut noted, gen_kind::CMIR, &mut rt0);
     }
     if env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some() || (ext_cover && (env_str!("ENOMOTO_MIP_ROW_LIFTED_COVER").is_some() || super::cutmix::lifted_cover_on())) {
+        let a = out.len();
         out.extend(lifted_cover_terms(vars, terms.clone(), beta));
+        out[a..].iter_mut().for_each(|c| c.kind = gen_kind::LCOVER);
     }
     if rec {
         gen_rec_note(&out, &mut noted, gen_kind::LCOVER, &mut rt0);
@@ -2917,14 +2921,14 @@ fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
         gen_rec_note(&out, &mut noted, gen_kind::CMIR, &mut rt0);
     }
     if ext_cover && !has_cont {
-        out.extend(extended_cover(vars, base, rhs));
+        out.extend(extended_cover(vars, base, rhs).map(|c| RawCut { kind: gen_kind::ECOVER, ..c }));
     }
     mark(2, &mut prof);
     if rec {
         gen_rec_note(&out, &mut noted, gen_kind::ECOVER, &mut rt0);
     }
     if has_cont && flow_cover {
-        out.extend(lifted_flow_cover(vars, base, rhs));
+        out.extend(lifted_flow_cover(vars, base, rhs).map(|c| RawCut { kind: gen_kind::FLOWC, ..c }));
     }
     mark(3, &mut prof);
     if rec {
