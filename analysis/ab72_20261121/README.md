@@ -69,6 +69,22 @@ ORBPP の調査 (analysis/orbpp_20261121/README.md の「別件」) で見つか
 
 誤答の確かめ (`bash analysis/ab72_20261121/fuzz.sh`、ログは fuzz_logs/、コミットしない): 下の表。
 
+| 命令 (既定) | 件数 | bad |
+|---|---|---|
+| `fuzz_tiny.py 400 0` (REL_GAP=1e-9) | 400 | 0 (strict 10) |
+| `mip_fuzz_vs_highs.py 300` (REL_GAP=1e-9) | 300 | 0 |
+| `fuzz_objint.py 1000 0` | 1000 | 0 (optimal 967・infeasible 33) |
+| `fuzz_slack.py 1000 0` | 1000 | 0 (mismatches 0) |
+| `fuzz_tiny.py 400 1000` (REL_GAP=1e-9) | 400 | 0 (strict 12) |
+| `fuzz_objint.py 1000 5000` | 1000 | 0 (optimal 971・infeasible 29) |
+| `fuzz_slack.py 1000 5000` | 1000 | 0 (mismatches 0) |
+| `cargo test --release --lib` (既定) | 419 通過・0 失敗・19 無視 | — |
+
+- 誤答 0。
+- strict の数は 1 本目が 10 で、0.1.10 の既定 (release0110_20261120/fuzz.md) の 12 から変わった。
+  - strict は値の一致だけを見る以前の判定で、bad ではない。
+  - この直しは再スタートの後の根の LP が解けないときしか通らない。fuzz の小さい問題ではまず通らないので、変わったのは取り込んだ他の変更によるとみられる。確かめてはいない。
+
 ## 残り (直していない)
 
 - 密で係数の幅の大きいカットそのもの。根のカットのループでも、round 2・4 でカットの LP の `Error` を起こしている (そのカットは外している)。
