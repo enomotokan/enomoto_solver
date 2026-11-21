@@ -3794,11 +3794,11 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
             }
         }
     }
-    // `ENOMOTO_MIP_ORBPP` (既定で使う。`=0` で切る。analysis/vsscip_slow_20261118/g1): 成分ごとに扱いを選ぶ。全ての行がパッキング・分割の行に
+    // `ENOMOTO_MIP_ORBPP` (既定で使う。`=0` で切る。analysis/vsscip_slow_20261118/g1、小さいものは下の cond): 成分ごとに扱いを選ぶ。全ての行がパッキング・分割の行に
     // 含まれ、行が 3 行以上の 0-1 のオービトープだけを静的に扱い (根で x_{i,c} = 0 (c > i) を固定し、木では全ての行を固定の順で使う)、
     // ほかは動的なまま (van Doornmalen・Hojny の 5.1 節 (c)、SCIP の orbitope_pp)。オービトープどうしは列が交わらないので、成分ごとに
     // 違う規則の代表を残してよい (群が直積に分かれる)。graph20-20-1rand で SCIP は usesymmetry=0 だと解けず、静的な固定で 2183 列が 340 列になる
-    if !static_orbitope && env_def!("ENOMOTO_MIP_ORBPP", "1").is_some() {
+    if !static_orbitope && env_def!("ENOMOTO_MIP_ORBPP", "cond").is_some() {
         let min_rows = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_ROWS", 3usize, usize);
         // 列 (入れ替える組) の数の下限。列の少ないオービトープを静的にすると、固定は少ないのに動的な固定の柔らかさを失う
         // (neos-911970: 35x3 が 6 つと 35x6 が 1 つで 33 列の固定、P で 1.74 倍遅い。graph20-20-1rand は 37x37)。P・T・M の 106 問で ORBPP が
@@ -3849,13 +3849,14 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
             );
         }
     }
-    // 試作 `ENOMOTO_MIP_ORBPP=cond` (既定は使わない。analysis/orbpp_20261121): 上の既定の扱い (MIN_COLS 列以上だけ静的) の後に、列が MIN_COLS 未満で
+    // `ENOMOTO_MIP_ORBPP` の既定 (未設定・`=cond`、2026-11-21 から既定。analysis/orbpp_20261121): 上の扱い (MIN_COLS 列以上だけ静的) の後に、列が MIN_COLS 未満で
     // 静的の条件 (0-1・局所でない・パッキング/分割の行が過半かつ MIN_ROWS 行以上) を満たすオービトープを写しの問題で静的に固定し、REPROBE をかける。
     // 比べのために、静的にしない写し (既定の問題そのものの写し) にも同じ REPROBE をかける (前の REPROBE が回数・手間の上限で残した固定や、オービトープに
     // よらない伝播・プロービングの固定を差し引くため)。静的にした写しで固定され、静的にしない写しでは固定されない列 (静的固定そのものは除く) が
-    // 1 列でもあればその写しを採り、0 なら写しを捨てて既定と同じ問題・オービトープ (動的) に戻す。
+    // 1 列でもあればその写しを採り、0 なら写しを捨てて上の扱いのままの問題・オービトープ (動的) に戻す。`=1` (など cond 以外の値) で以前の既定
+    // (MIN_COLS 列以上だけ静的、小さいものは動的)、`=0` で ORBPP を全て使わない。P (60 秒・種 1〜3) 0.997 [0.987, 1.008]・M (600 秒) 0.998 [0.973, 1.023]
     // 閾値は置かない (固定が増えるか否か)。neos-911970 (固定 0、遅くなる) と misc07 (45 列、2.3 倍速い) を分ける
-    if !static_orbitope && env_str!("ENOMOTO_MIP_ORBPP") == Some("cond") && env_def!("ENOMOTO_MIP_ORBPP_REPROBE", "1").is_some() {
+    if !static_orbitope && env_def!("ENOMOTO_MIP_ORBPP", "cond") == Some("cond") && env_def!("ENOMOTO_MIP_ORBPP_REPROBE", "1").is_some() {
         let min_rows = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_ROWS", 3usize, usize);
         let min_cols = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_COLS", 10usize, usize);
         let mut q = prob.clone();

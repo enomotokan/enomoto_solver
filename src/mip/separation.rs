@@ -232,6 +232,14 @@ fn gen_type() -> bool {
     env_str!("ENOMOTO_MIP_GEN_TYPE").is_some()
 }
 
+/// 試作 `ENOMOTO_MIP_GEN_TOP3` (既定では使わない。analysis/gentop3_20261121): [`keep_best`] で、集約行 1 本 (の向き 1 つ) から作った候補を
+/// 最良 1 本だけでなく、その中で最良の質の `ENOMOTO_T_CUTSEL_MIN_REL` (既定 0.5、全体の選択 `select_cuts_hybrid` の質の下限と同じ値) 倍以上の
+/// ものから良い順に最大 `ENOMOTO_T_MIP_GEN_TOP3_N` (既定 3) 本残す。平行度・本数は全体の選択に任せる。`ENOMOTO_MIP_GEN_TYPE` より優先。
+/// `ENOMOTO_MIP_GEN_TOP3_LOG` で集約行ごとの候補の数と下限以上の数を `GENTOP3 n above` と出す (診断)
+fn gen_top3() -> bool {
+    env_str!("ENOMOTO_MIP_GEN_TOP3").is_some()
+}
+
 /// `cands[n0..]` のうち質 ([`cut_quality`]、`ENOMOTO_MIP_KEEP_BEST_EFF` なら効き目だけ) の最も大きい 1 本だけ残す
 /// (`ENOMOTO_MIP_GEN_TYPE` では種類ごとに 1 本、[`gen_type`])。
 fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
@@ -241,6 +249,24 @@ fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
     let eff_only = env_str!("ENOMOTO_MIP_KEEP_BEST_EFF").is_some();
     let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
     let q = |c: &Candidate| if eff_only { c.efficacy } else { cut_quality(c, p, cnorm) };
+    if gen_top3() || env_str!("ENOMOTO_MIP_GEN_TOP3_LOG").is_some() {
+        let mut sc: Vec<(f64, usize)> = (n0..cands.len()).map(|i| (q(&cands[i]), i)).collect();
+        // 質の高い順、同じなら前の位置 (決定的)
+        sc.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        let lim = tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64) * sc[0].0;
+        let above = sc.iter().take_while(|s| s.0 >= lim).count();
+        if env_str!("ENOMOTO_MIP_GEN_TOP3_LOG").is_some() {
+            eprintln!("GENTOP3 {} {above}", sc.len());
+        }
+        if gen_top3() {
+            let keep: Vec<usize> = sc.iter().take(above.min(tunable!("ENOMOTO_T_MIP_GEN_TOP3_N", 3usize, usize)).max(1)).map(|s| s.1).collect();
+            let mut rest: Vec<Option<Candidate>> = cands.split_off(n0).into_iter().map(Some).collect();
+            for i in keep {
+                cands.push(rest[i - n0].take().unwrap());
+            }
+            return;
+        }
+    }
     if gen_type() {
         // 種類ごとの最良 (種類の番号, 位置, 質)。残す順は最初に現れた種類の順 (決定的)
         let mut best: Vec<(u8, usize, f64)> = Vec::new();
