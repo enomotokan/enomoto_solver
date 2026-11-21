@@ -132,3 +132,58 @@ if __name__ == "__main__":
         recs = load(OUT.stem, p, TH, seeds)
         table(p, recs, len(rr))
         print(f"\n結果: {res}")
+
+
+def rootinfo(recs):
+    """木の始めの値: (暫定解の有無, 相対ギャップ, 根で閉じた割合, 根のカットの手間 (1e9), 木の始めまでの手間 (1e9))。値は最小化形"""
+    main = [r for r in recs if r.get("root")]
+    if not main:
+        return None
+    m = main[0]
+    o0 = m["root"][0][0]
+    o1 = m["root"][-1][1]
+    rt = sum(x[2] for x in m["root"]) / 1e9
+    inc, lb, tk, _ = m["start"] if m.get("start") else (None, None, 0, 0)
+    fins = [r["fin"][0] for r in recs if r.get("fin") and r["fin"][0] is not None]
+    best = min(fins) if fins else None
+    gap = abs(inc - lb) / max(abs(inc), 1) if inc is not None and lb is not None else None
+    closed = (o1 - o0) / (best - o0) if best is not None and best - o0 > 1e-9 else None
+    return inc is not None, gap, closed, rt, tk / 1e9
+
+
+def cross(stem, th, rows, probs):
+    print(f"\n### 問題をまたいだ並び (スレッド {th}、種をまとめる)\n")
+    print("| 問題 | 始めの暫定解 | 始めのギャップ | 根で閉じた割合 | 根のカットの手間 (1e9) | 閉じた割合/1e9 手間 | 木の分離の秒の割合 | 1 ラウンドの伸び 中央 (深さ 1-4 / 9+) | 見つからない率 (1-4 / 9+) | 張った回/LP にあった回 (1-4 / 9+) | 伸びの和/1e9 手間 (1-4 / 9+) |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for p in probs:
+        rr = [r for r in rows if r["problem"] == p and r["threads"] == th]
+        per = []
+        for r in rr:
+            recs = load(stem, p, th, [r["rep"]])
+            per.append((rootinfo(recs), recs))
+        ri = [x[0] for x in per if x[0]]
+        recs = [x for _, rs in per for x in rs]
+        B, C, T = summarize(recs)
+        def agg(lo, hi):
+            g, c = [], defaultdict(float)
+            for i in range(lo, hi):
+                g += B[i]["gain"]
+                for k, v in C[i].items():
+                    c[k] += v
+            return g, c
+        sh, ch = agg(0, 3)
+        dp, cd = agg(4, 6)
+        secs = sum(C[i]["secs"] for i in range(6))
+        wall = sum(min(r["result"].get("time") or r["tl"], r["tl"]) for r in rr) * th
+        f = lambda v, fmt: (fmt.format(v) if v is not None else "-")
+        print(
+            f"| {p} | {'/'.join('有' if x[0] else '無' for x in ri)} | {'/'.join(f(x[1], '{:.2g}') for x in ri)} | {'/'.join(f(x[2], '{:.2f}') for x in ri)} | "
+            f"{'/'.join(f'{x[3]:.2g}' for x in ri)} | {'/'.join(f(x[2] / x[3] if x[2] is not None and x[3] > 0 else None, '{:.2g}') for x in ri)} | {secs / max(wall, 1e-9):.3f} | "
+            f"{q(sh, 0.5):.2g} / {q(dp, 0.5):.2g} | {ch['none'] / max(ch['rounds'], 1):.2f} / {cd['none'] / max(cd['rounds'], 1):.2f} | "
+            f"{ch['bind'] / max(ch['lin_sum'], 1):.3f} / {cd['bind'] / max(cd['lin_sum'], 1):.3f} | "
+            f"{sum(sh) / max(ch['ticks'] / 1e9, 1e-9):.2f} / {sum(dp) / max(cd['ticks'] / 1e9, 1e-9):.2f} |"
+        )
+
+
+if __name__ == "__main__":
+    cross(OUT.stem, TH, rows, probs)
