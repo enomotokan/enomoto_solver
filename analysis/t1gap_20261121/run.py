@@ -15,12 +15,17 @@ M = ["mcsched", "CMS750_4", "rail507", "istanbul-no-cutoff", "dano3_5", "tbfp-ne
 JOBS = [("roll3000", "t4", 60), ("roll3000", "t1", 60), ("roll3000", "scip", 60), ("roll3000", "t1", 240)]
 for p in M:
     JOBS += [(p, "t4", 600), (p, "t1", 600), (p, "scip", 600), (p, "t1", 2400)]
+# 追加の診断 (既定は変えない、既存の試作スイッチ): t1lm = 1 スレッドで根のヒューリスティクスの終わりに暫定解から Local-MIP を 10 秒
+# (`ENOMOTO_MIP_ROOT_LMIP`、`ENOMOTO_T_MIP_ROOT_LMIP_SECS`=10、FRAC は 1 にして 10 秒を効かせる)。4 スレッドの FJ のスレッドの Local-MIP の代わりになるかを見る
+EXTRA = {"t1lm": {"ENOMOTO_MIP_ROOT_LMIP": "1", "ENOMOTO_T_MIP_ROOT_LMIP_SECS": "10", "ENOMOTO_T_MIP_ROOT_LMIP_FRAC": "1"}}
+JOBS += [("CMS750_4", "t1lm", 600)]
 OUT = D / "res.jsonl"
 LOGS = D / "logs"
 
 def run(p, cfg, tl, mps):
     env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
     th = "4" if cfg == "t4" else "1"
+    env.update(EXTRA.get(cfg, {}))
     env["ENOMOTO_MIP_THREADS"] = th; env["ENOMOTO_T_MIP_SEED"] = "1"; env["ENOMOTO_BENCH_SCIP_SEED"] = "1"
     LOGS.mkdir(exist_ok=True)
     log = LOGS / f"{p}_{cfg}_{tl}.log"
