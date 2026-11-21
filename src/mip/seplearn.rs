@@ -95,7 +95,8 @@ pub(super) fn add_src_time(src: u8, secs: f64) {
 
 /// 計測を使うか (`ENOMOTO_MIP_SEPSTAT`)
 pub(super) fn stat_on() -> bool {
-    env_str!("ENOMOTO_MIP_SEPSTAT").is_some()
+    // 試作 `ENOMOTO_MIP_SEPALLOC` ([`super::sepalloc`]) は伸びと手間をこの計測から読むので、計測も入れる
+    env_str!("ENOMOTO_MIP_SEPSTAT").is_some() || env_str!("ENOMOTO_MIP_SEPALLOC").is_some()
 }
 
 #[derive(Clone, Copy, Default)]
