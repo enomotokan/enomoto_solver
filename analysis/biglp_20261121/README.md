@@ -322,7 +322,7 @@ sorrell3 (600 秒、どれも時間切れ・下界 −19):
   - P 5: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。分担 5 だけの集計: 26 問、fix/def 0.962 [0.911, 1.015]、解けた def 22 / fix 23 (10teams 種 3 が fix のみ、def は 60 秒で暫定解 934)、食い違い 0。
   - M 5: 54a900938 (build.sh の wheel、0.1.10)。18 行・crash 0。分担 5 だけの集計: 9 問、fix/def 0.944 [0.834, 1.068]、解けた def 4 / fix 5 (gmu-35-40 が fix のみ 362 秒、def は 600 秒で暫定解 -2406341.17)、食い違い 0。1.25 倍超: neos5 で fix が 1.31 倍遅い (30.4→39.8 秒)。時間切れの暫定解 def/fix: blp-ar98 6238.98/6264.04、ic97_potential 3942/3942、rocII-5-11 -6.6608/-6.6663、neos-3988577-wolgan どちらも解なし。
 
-  - P 0: bb401e311 (build.sh の wheel、0.1.10。src は 620bebcc6 と同じ)。58 行・crash 0。
+  - P 0: bb401e311 (build.sh の wheel、0.1.10。src は 620bebcc6 と同じ)。58 行・crash 0。 読み込み先は site-packages の _core (target/wheels の wheel と sha1 一致、11:52 作成、計測開始 11:53)。python/enomoto_solver の古い .so (02:59) は読んでいない。
 
 ### 7.8 wide2 の P の集計 (fix = fit + r3e + rck 直し後、2026-11-21)
 
@@ -334,6 +334,7 @@ sorrell3 (600 秒、どれも時間切れ・下界 −19):
   timtab1 種 3、physiciansched6-2 種 1、mas76 種 1・fiber 種 1 (小)。どれもほかの種では遅れていない。
 - 10teams 種 1 の見立て (事実): fix の設定で同じ種を 3 回回し直すと 5.1・5.0・25.1 秒 (`/tmp` のログ、記録は本節のみ)。3 回とも
   `ROOTCAP h`・`CUTSEL_PROBE_FIT`・`ROOTLP3` の行がなく、3 つの試作はどれも働いていない。LP face のサブ MIP は 3 回とも同じく解なし。
+  def の同じ種も 5 回回し直すと 11.1・7.5・4.8・8.9・14.9 秒 (ノード 2814・472・0・1610・4721) で、根で 924 を見つけられず木で探す回がある。
   つまり 10teams 種 1 の 25 秒は def と同じ道筋の揺れ (根で 924 を見つけるか、木で探すか) で、fix のせいではない。
 - 時間切れの暫定解 (def → fix): fix が良い supportcase26 (3 種とも)・blp-ar98 種 3・cvs16r128-89 種 1・2・neos-1456979 種 1・3・gen-ip002 種 2、
   fix が悪い ran14x18-disj-8 (3 種とも: 3748 → 3816、3744 → 3748、3739 → 3748)・gen-ip054 (3 種とも 0.02〜0.16%)。ほかは同じ。
