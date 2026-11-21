@@ -3851,7 +3851,9 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     }
     // 試作 `ENOMOTO_MIP_ORBPP=cond` (既定は使わない。analysis/orbpp_20261121): 上の既定の扱い (MIN_COLS 列以上だけ静的) の後に、列が MIN_COLS 未満で
     // 静的の条件 (0-1・局所でない・パッキング/分割の行が過半かつ MIN_ROWS 行以上) を満たすオービトープを写しの問題で静的に固定し、REPROBE をかける。
-    // REPROBE が 1 列でも新しく固定すれば (静的固定そのものは数えない) その写しを採り、0 なら写しを捨てて既定と同じ問題・オービトープ (動的) に戻す。
+    // 比べのために、静的にしない写し (既定の問題そのものの写し) にも同じ REPROBE をかける (前の REPROBE が回数・手間の上限で残した固定や、オービトープに
+    // よらない伝播・プロービングの固定を差し引くため)。静的にした写しで固定され、静的にしない写しでは固定されない列 (静的固定そのものは除く) が
+    // 1 列でもあればその写しを採り、0 なら写しを捨てて既定と同じ問題・オービトープ (動的) に戻す。
     // 閾値は置かない (固定が増えるか否か)。neos-911970 (固定 0、遅くなる) と misc07 (45 列、2.3 倍速い) を分ける
     if !static_orbitope && env_str!("ENOMOTO_MIP_ORBPP") == Some("cond") && env_def!("ENOMOTO_MIP_ORBPP_REPROBE", "1").is_some() {
         let min_rows = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_ROWS", 3usize, usize);
@@ -3859,6 +3861,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         let mut q = prob.clone();
         let mut o2 = orbs.clone();
         let mut add = 0usize;
+        let mut sfix = vec![false; q.n];
         let mut k_new = 0usize;
         for o in o2.iter_mut() {
             if o.static_pp || o.vars[0].len() >= min_cols {
@@ -3878,6 +3881,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
                 for (c, &j) in line.iter().enumerate() {
                     if c > i && q.col_up[j] > 0.0 {
                         q.col_up[j] = 0.0;
+                        sfix[j] = true;
                         add += 1;
                     }
                 }
@@ -3885,14 +3889,19 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
         }
         if k_new > 0 {
             let t0 = std::time::Instant::now();
+            let mut q0 = prob.clone();
+            let st0 = orbpp_reprobe(&mut q0, &orbs);
             let st = orbpp_reprobe(&mut q, &o2);
-            let new = st[1] + st[2] + st[3];
+            let fixed = |p: &MipProblem, j: usize| p.col_lo[j] == p.col_up[j];
+            let new = (0..q.n).filter(|&j| q.is_int[j] && !sfix[j] && fixed(&q, j) && !fixed(&q0, j)).count();
             if verbose {
                 eprintln!(
-                    "MIP: symmetry: ORBPP cond: {k_new} small orbitopes, static fixed {add}, REPROBE fixed {new} (propagation {}, orbitopes {}, probing {}) -> {} ({:.2}s)",
+                    "MIP: symmetry: ORBPP cond: {k_new} small orbitopes, static fixed {add}, REPROBE fixed {} (propagation {}, orbitopes {}, probing {}), without them {}, new {new} -> {} ({:.2}s)",
+                    st[1] + st[2] + st[3],
                     st[1],
                     st[2],
                     st[3],
+                    st0[1] + st0[2] + st0[3],
                     if new > 0 { "static" } else { "reverted to dynamic" },
                     t0.elapsed().as_secs_f64()
                 );
