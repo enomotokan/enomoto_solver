@@ -1,4 +1,5 @@
 """t78 の続き: neos-933966・neos-1171448 の fix の遅れが r3e (ROOTLP3=e、特異な基底を捨てて基底なしの同時実行) によるかの確かめ。種 1 × {r3e, fr (FIT+RCK)} × 1 回、600 秒、4 スレッド。
+fastxgemm-n2r6s0t2 (M の種 1〜3 で fix が 1.4〜1.6 倍遅い、親の依頼) は種 1 × {def, fix, fit, r3e, rck} × 1 回。
 ログ (ENOMOTO_MIP_LOG=1 の stderr) は t79/logs/<問題>_<設定>_s<種>_r<回>.log、結果は t79/res.jsonl (続きから回せる)。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
@@ -8,11 +9,11 @@ sys.path.insert(0, str(D.parent))
 from cfg import CFGS  # noqa: E402
 OUT = D / "res.jsonl"; (D / "logs").mkdir(exist_ok=True)
 done = {(r["problem"], r["cfg"], r["seed"], r["rep"]) for r in map(json.loads, OUT.open())} if OUT.exists() else set()
-for prob, tl in (("neos-1171448", 600), ("neos-933966", 600)):
+for prob, tl, cfgs in (("neos-1171448", 600, ("r3e", "fr")), ("neos-933966", 600, ("r3e", "fr")), ("fastxgemm-n2r6s0t2", 600, ("def", "fix", "fit", "r3e", "rck"))):
   mps = WT / ".miplib_cache" / f"{prob}.mps"
   for rep in (1,):
     for seed in (1,):
-        for cfg in ("r3e", "fr"):
+        for cfg in cfgs:
             if (prob, cfg, seed, rep) in done: continue
             env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
             env.update(CFGS[cfg]); env.update(ENOMOTO_MIP_THREADS="4", ENOMOTO_T_MIP_SEED=str(seed), ENOMOTO_MIP_LOG="1")
