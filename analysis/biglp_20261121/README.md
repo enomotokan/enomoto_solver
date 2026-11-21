@@ -320,6 +320,7 @@ sorrell3 (600 秒、どれも時間切れ・下界 −19):
   - P 1: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。解けた def 23 / fix 23、食い違い 0。
   - P 3: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。分担 3 だけの集計: 26 問、fix/def 0.991 [0.946, 1.037]、解けた def 23 / fix 24 (neos5 種 2 が fix のみ)、食い違い 0。
   - P 5: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。分担 5 だけの集計: 26 問、fix/def 0.962 [0.911, 1.015]、解けた def 22 / fix 23 (10teams 種 3 が fix のみ、def は 60 秒で暫定解 934)、食い違い 0。
+  - M 5: 54a900938 (build.sh の wheel、0.1.10)。18 行・crash 0。分担 5 だけの集計: 9 問、fix/def 0.944 [0.834, 1.068]、解けた def 4 / fix 5 (gmu-35-40 が fix のみ 362 秒、def は 600 秒で暫定解 -2406341.17)、食い違い 0。1.25 倍超: neos5 で fix が 1.31 倍遅い (30.4→39.8 秒)。時間切れの暫定解 def/fix: blp-ar98 6238.98/6264.04、ic97_potential 3942/3942、rocII-5-11 -6.6608/-6.6663、neos-3988577-wolgan どちらも解なし。
 
   - P 0: bb401e311 (build.sh の wheel、0.1.10。src は 620bebcc6 と同じ)。58 行・crash 0。
 
