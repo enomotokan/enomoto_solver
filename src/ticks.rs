@@ -37,7 +37,7 @@ thread_local! {
     static IPM_EXTRA: Cell<f64> = const { Cell::new(0.0) };
 }
 
-/// 試作 `ENOMOTO_MIP_DET1T` の `i`: 内点法の手間 `n` (重み [`HEUR`]) を数える。スレッドの手間の合計 [`total`] には足さず、
+/// `ENOMOTO_MIP_DET1T` (既定 `onil`) の `i`: 内点法の手間 `n` (重み [`HEUR`]) を数える。スレッドの手間の合計 [`total`] には足さず、
 /// [`ipm_over`] の期限の判定にだけ使う (合計に足すと、後で手間の割合で予算を決めるサブ MIP などの道が既定と変わる。rout の種 2 で 1.4 倍)
 pub fn ipm_add(n: f64) {
     IPM_EXTRA.with(|e| e.set(e.get() + weights()[HEUR] * n));
@@ -48,7 +48,7 @@ pub fn ipm_over() -> bool {
     over() || total() + IPM_EXTRA.with(|e| e.get()) >= DEADLINE.with(|d| d.get())
 }
 
-/// 試作 `ENOMOTO_MIP_DET1T` の `i`: このスレッドの内点法 (`solve_box_lp`) が、反復ごとに KKT の分解の演算数を数え ([`ipm_add`])、
+/// `ENOMOTO_MIP_DET1T` (既定 `onil`) の `i`: このスレッドの内点法 (`solve_box_lp`) が、反復ごとに KKT の分解の演算数を数え ([`ipm_add`])、
 /// 手間の期限 ([`ipm_over`]) を過ぎたら止めるか ([`ipm_work_guard`] の間だけ真)
 pub fn ipm_work() -> bool {
     IPM_WORK.with(|v| v.get())
