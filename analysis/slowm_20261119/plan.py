@@ -10,6 +10,7 @@ python plan.py CP NCP → shards_CP.json (58 問 × 種 1〜3 × {def, pe}、60 
 python plan.py M NM → shards_M.json (scan_s*.jsonl で前処理が変わった Mittelmann の問題 + 対象 6 問 × 種 1・2 × {def, fixis}、600 秒)。
 python plan.py DT NDT → shards_DT.json (58 問 × 種 1〜3 × {def, bonil, def_t1, bonil_t1}、60 秒。1 スレッドの再現性の試作の費用)。
 python plan.py PS NPS → shards_PS.json (58 問 × 種 1〜3 × {def, pe, pes}、60 秒)。
+python plan.py CM2 NCM2 → shards_CM2.json (CM と同じ組を、0.1.10 の既定 (st5・SYM_PPLEX・cwrh0・vbce・ncnr・rhb・cb) の上で回し直す。2026-11-20)。
 見積りは analysis/final_20261118 の def の時間 (解けなかった回は上限) + P は 8 秒・M は 30 秒。"""
 import json, glob, sys
 from pathlib import Path
@@ -111,7 +112,7 @@ elif SET in ("DT", "PS"):
     k = len(CF)
     est = lambda p, c, s: (min(2 * TP.get((p, s), TP.get((p, 1), 60)), 60) if c.endswith("_t1") else TP.get((p, s), TP.get((p, 1), 60))) + 8
     balance({(p, s): [(p, c, s) for c in (CF[(i + s) % k:] + CF[:(i + s) % k])] for i, p in enumerate(PROBS) for s in (1, 2, 3)}, est, NS, f"shards_{SET}.json", 60)
-elif SET in ("CP", "CM"):
+elif SET in ("CP", "CM", "CM2"):
     # 衝突解析で双対証明を遡る試作 (pe) の広い計測: CP = MIPLIB の 58 問 × 種 1〜3 × {def, pe}、60 秒。CM = Mittelmann 186 問 × 種 1 × {def, pe}、600 秒。
     # 見積りは final_20261118 の def (解けなかった回は上限) + P 8 秒・M 30 秒
     CF = ["def", "pe"]
@@ -123,7 +124,7 @@ elif SET in ("CP", "CM"):
         TM = times("res_M_s*.jsonl", 600)
         MP = sorted({x for part in json.loads((D.parent / "cbcimpl_20261029/mitt_parts.json").read_text()) for x in part})
         balance({(p, 1): [(p, c, 1) for c in (CF[i % 2:] + CF[:i % 2])] for i, p in enumerate(MP)},
-                lambda p, c, s: TM.get((p, s), 600) + 30, NS, "shards_CM.json", 600)
+                lambda p, c, s: TM.get((p, s), 600) + 30, NS, f"shards_{SET}.json", 600)
 elif SET in ("E", "M3"):
     # 運かどうかの確かめ (利用者の判断「遅くなるのが運なら採用」): E = 遅い側に出た 5 問 × 種 3〜8、M3 = M の 37 問 × 種 3。{def, fixis}、600 秒。
     # 見積りは res_M の同じ問題の def・fixis の時間 (2 種の平均) + 30 秒

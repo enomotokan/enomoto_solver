@@ -18,7 +18,7 @@ from .constraint import Constraint
 from .function import Function
 from .model import Model, Solution
 from .variable import Variable
-from ._core import default_threads, max_threads
+from ._core import __version__, default_threads, max_threads
 
 # 公開 API
 __all__ = [
@@ -31,5 +31,5 @@ __all__ = [
     "Solution",
 ]
 
-# パッケージのバージョン
-__version__ = "0.1.0"
+# パッケージのバージョン (`__version__`) は Rust コアが Cargo.toml の版を持つので、それを上で読み込む。
+# 版を上げるときは Cargo.toml だけを変える (pyproject.toml の version も同じ所から取る)。

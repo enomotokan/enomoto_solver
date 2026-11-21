@@ -327,8 +327,10 @@ pub(crate) fn rootsb_flags() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_ROOTSB").filter(|v| !v.is_empty() && *v != "0")
 }
 
+/// `ENOMOTO_MIP_TIMEDEP` の文字 (analysis/timedep_20261114.md)。既定 `b` (割合で決める量の基準を元の時間上限にする。2026-11-21 に
+/// `ENOMOTO_MIP_DET1T=onil` と組で既定化、analysis/det1t_20261120。`=0` で以前の形。ほかの文字を指定すると `b` は外れるので、続けて使うなら `bw` のように足す)
 pub(crate) fn timedep(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_TIMEDEP", "b").is_some_and(|v| v.contains(c))
 }
 
 pub(crate) fn cap_clock() -> f64 {
@@ -1293,6 +1295,10 @@ thread_local! {
     /// 試作 `ENOMOTO_MIP_VBCLQ` の `e`: この求解の前処理で、最初の LP (LP による固定) の前の VB01 と pseudoobj を回したか。
     /// 回していなければ (再スタートの後・LP による固定のない道)、Solver が根の LP (その求解の最初の LP) の前に回す
     pub(crate) static VBCLQ_E_RAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// `ENOMOTO_MIP_VBCLQ` の `e`: この求解の前処理で、VB01 の解が目的の最小値に届いて最適と証明できた ([`presolve_vbclq_e`])。
+    /// 立っていれば前処理の最後の疎化 (`ENOMOTO_MIP_SPARSIFY_LATE`) をかけない (かけ直した問題で解が外れ、最適の解として使われなくなる:
+    /// decomp2 の 1 スレッドで木に入って 28.7 秒になっていた)
+    pub(crate) static VBCLQ_E_OPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 再スタート前のカット (`係数 x <= 右辺`)。再スタートが [`solve_problem`] に渡す問題の空間で置き、前処理後の空間に
     /// 移して置き直し、求解の開始時にカットプールに入れる (static TLS の領域が足りないので 1 つで済ませる)。
     pub(crate) static RESTART_CUTS: std::cell::RefCell<Option<Vec<(Vec<(usize, f64)>, f64)>>> = const { std::cell::RefCell::new(None) };
@@ -1651,6 +1657,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     if !params.submip {
         // 試作 `ENOMOTO_MIP_VBCLQ` の `e`: この求解の前処理で回したかの印を消す (前の求解の残りを持ち越さない)
         VBCLQ_E_RAN.with(|f| f.set(false));
+        VBCLQ_E_OPT.with(|f| f.set(false));
     }
     let t_pre = std::time::Instant::now();
     if !params.submip && (params.restarts == 0 || pretime::restart_on()) {
@@ -1794,7 +1801,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // (その中では疎化しない)。`s` を含むときは下の条件 (縮んだ行の割合 f ≥ 0.6) を満たすときだけ疎化した問題を使う。`=1` は条件なし (試作の比べ用)
     let spl_mode = env_def!("ENOMOTO_MIP_SPARSIFY_LATE", "s");
     let presolved = match presolved {
-        Some(Presolved::Reduced { prob, postsolve, scaling }) if spl_mode.is_some() && !params.submip && params.restarts == 0 => {
+        Some(Presolved::Reduced { prob, postsolve, scaling }) if spl_mode.is_some() && !params.submip && params.restarts == 0 && !VBCLQ_E_OPT.with(|f| f.get()) => {
             let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, .. } = prob.clone();
             let k = if spl_mode == Some("old") {
                 sparsify_rows(&mut rows, &mut row_lo, &mut row_up, &is_int, prob.n)
@@ -2992,6 +2999,15 @@ pub(crate) fn sym_cuts() -> bool {
     env_str!("ENOMOTO_MIP_SYM_CUTS").is_some()
 }
 
+/// 試作 `ENOMOTO_MIP_SYMAVG` (analysis/symavg_20261121/、既定では使わない): 根のカットのループで、選んだカットを対称性の群で平均した 1 本
+/// (列 k の係数 = k の軌道の上のカットの係数の和 / 軌道の大きさ、右辺は同じ) を足す。群の元の像の凸結合なので、像が正しい条件
+/// ([`sym_cuts`] と同じ: 根の時点で対称性を崩す処理がない) の下で正しい。LP の行が群で不変なら、平均の 1 本を足した LP の値は
+/// 像を全部足した LP の値と同じ (不変な LP の最適値は対称な点で取れ、対称な点ではカットとその平均の値が等しい)。
+/// `=1`: 平均したカットを次のラウンドで必ず LP に入れる。`=v`: 次のラウンドで今の LP の解を破るときだけ候補にする。
+pub(crate) fn sym_avg() -> Option<char> {
+    env_str!("ENOMOTO_MIP_SYMAVG").and_then(|v| v.chars().next()).filter(|&c| c != '0')
+}
+
 /// 既定 (2026-10-29、`ENOMOTO_MIP_NO_SYM_OF` で以前の lex-leader の行): オービトープにならない対称性を、lex-leader の行 (`x_i - x_k >= 0`) の代わりに探索中の
 /// orbital fixing (HiGHS の `StabilizerOrbits::orbitalFixing`) で扱う。行を足さないので LP が重くならず、ヒューリスティクスの
 /// 解が対称性の行に反して捨てられることもない。
@@ -3653,7 +3669,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
     } else {
         symmetry::lex_leader_pairs_except(&sym, &used, &in_orb)
     };
-    if sym_cuts() && pairs.is_empty() && env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_none() && !sym.generators.is_empty() {
+    if (sym_cuts() || sym_avg().is_some()) && pairs.is_empty() && env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_none() && !sym.generators.is_empty() {
         SYM_CUT_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(sym.generators.clone())));
     }
     if of {
@@ -5945,6 +5961,7 @@ fn presolve_vbclq_e(prob: &mut MipProblem, verbose: bool, secs: f64) -> usize {
         }
         vbclq::count_file(&vbclq::PseudoObjOut { infeas: true, ..o }, "eopt");
         FEAS_FJ_SOL.with(|s| *s.borrow_mut() = Some(x.clone()));
+        VBCLQ_E_OPT.with(|f| f.set(true));
         return usize::MAX;
     }
     if let Some(x) = vb_x {
