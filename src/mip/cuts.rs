@@ -211,7 +211,7 @@ pub fn intvub_debug_row(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Stri
 }
 
 /// 連続変数の項の置き換え方。
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Sub {
     /// 単純な上下限 (`comp` で向き)。
     Simple,
@@ -2777,6 +2777,9 @@ fn generate_cuts_prof(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
 
 /// 診断 `ENOMOTO_MIP_SEPSTAT` (analysis/sepeff_20261120/): 元の行 1 本ずつの分離の中のカットの種類。
 /// [`GenRec`] を持っている間、[`generate_cuts`] が出したカットの種類を順に覚え、種類ごとの手間 ([`crate::ticks::total`] の差) を足す
+/// 診断 `ENOMOTO_MIP_LC_DEBUG` の置き場: デバッグ解 (構造変数の値 + LP の行の活動量)。分離の始めに主のスレッドが置く
+pub static LC_DEBUG_X: std::sync::Mutex<Option<Vec<f64>>> = std::sync::Mutex::new(None);
+
 pub mod gen_kind {
     pub const CMIR: u8 = 0;
     pub const LCOVER: u8 = 1;
@@ -2905,6 +2908,29 @@ fn generate_cuts_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cove
         let a = out.len();
         out.extend(lifted_cover_terms(vars, terms.clone(), beta));
         out[a..].iter_mut().for_each(|c| c.kind = gen_kind::LCOVER);
+        // 診断 `ENOMOTO_MIP_LC_DEBUG` (rocI-4-11 の誤答の切り分け、analysis/rootgap_20261121/wrong_roci): デバッグ解
+        // (`ENOMOTO_MIP_DEBUG_SOL`、このスレッドに置いてあるとき) を切る持ち上げつきの被覆を作ったら、元の行・置き換えた項・カットを表示する
+        if a < out.len() && env_str!("ENOMOTO_MIP_LC_DEBUG").is_some() {
+            // 分離はほかのスレッドでも回るので、デバッグ解は大域の置き場 [`LC_DEBUG_X`] から読む (分離の始めに主のスレッドが、
+            // 構造変数の値と LP の行の活動量を並べて置く)
+            let xd = LC_DEBUG_X.lock().ok().and_then(|g| g.clone());
+            static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("LC_DEBUG: first lifted cover: debug vector {:?}, vars {}", xd.as_ref().map(|x| x.len()), vars.is_int.len());
+            }
+            if let Some(xd) = xd.as_ref().filter(|x| x.len() >= vars.is_int.len()) {
+                for c in &out[a..] {
+                    let act: f64 = c.coefs.iter().map(|&(j, v)| v * xd[j]).sum();
+                    if act > c.rhs + 1e-6 * (1.0 + c.rhs.abs()) {
+                        let bact: f64 = base.iter().map(|&(j, v)| v * xd[j]).sum();
+                        eprintln!("LC_DEBUG: cut violated by the debug solution: {act:.6e} > {:.6e} (len {}); base row {bact:.6e} <= {rhs:.6e} ({}), len {}", c.rhs, c.coefs.len(), if bact <= rhs + 1e-6 * (1.0 + rhs.abs()) { "base holds" } else { "BASE VIOLATED" }, base.len());
+                        eprintln!("LC_DEBUG:   cut {:?}", c.coefs.iter().map(|&(j, v)| (j, v, xd[j])).collect::<Vec<_>>());
+                        eprintln!("LC_DEBUG:   base {:?}", base.iter().map(|&(j, v)| (j, v, xd[j], vars.is_int[j], vars.lo[j], vars.up[j])).collect::<Vec<_>>());
+                        eprintln!("LC_DEBUG:   beta {beta:.6e} terms {:?}", terms.iter().map(|t| (t.k, t.a, t.comp, t.int, t.yv, t.yu, format!("{:?}", t.sub))).collect::<Vec<_>>());
+                    }
+                }
+            }
+        }
     }
     if rec {
         gen_rec_note(&out, &mut noted, gen_kind::LCOVER, &mut rt0);
