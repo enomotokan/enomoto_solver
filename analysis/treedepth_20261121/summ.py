@@ -134,12 +134,23 @@ if __name__ == "__main__":
         print(f"\n結果: {res}")
 
 
-def rootinfo(recs):
-    """木の始めの値: (暫定解の有無, 相対ギャップ, 根で閉じた割合, 根のカットの手間 (1e9), 木の始めまでの手間 (1e9))。値は最小化形"""
-    main = [r for r in recs if r.get("root")]
+ROOTLP = {}
+if (D / "rootlp.jsonl").exists():
+    for l in open(D / "rootlp.jsonl"):
+        if l.strip():
+            x = json.loads(l)
+            ROOTLP[x["problem"]] = x["root_lp"][0]
+
+
+def rootinfo(recs, p=None):
+    """木の始めの値: (暫定解の有無, 相対ギャップ, 根で閉じた割合, 根のカットの手間 (1e9), 木の始めまでの手間 (1e9))。値は最小化形。
+    最初の根の LP の値 (rootlp.py が拾ったもの、カット・再スタートの前) があれば、根で閉じた割合は
+    (木の始めの下界 − 最初の根の LP) / (最良の解 − 最初の根の LP)、手間は木の始めまでの手間 (前処理・ヒューリスティック・再スタートを含む) にする"""
+    # 根のカットの記録は主スレッド (tid 0) の最後の求解のものを使う。再スタートがあれば、その後の根の値になる
+    main = [r for r in recs if r.get("root") and r["tid"] == 0]
     if not main:
         return None
-    m = main[0]
+    m = main[-1]
     o0 = m["root"][0][0]
     o1 = m["root"][-1][1]
     rt = sum(x[2] for x in m["root"]) / 1e9
@@ -148,19 +159,23 @@ def rootinfo(recs):
     best = min(fins) if fins else None
     gap = abs(inc - lb) / max(abs(inc), 1) if inc is not None and lb is not None else None
     closed = (o1 - o0) / (best - o0) if best is not None and best - o0 > 1e-9 else None
+    if p in ROOTLP and lb is not None:
+        r0 = ROOTLP[p]
+        closed = (lb - r0) / (best - r0) if best is not None and best - r0 > 1e-9 else None
+        rt = tk / 1e9
     return inc is not None, gap, closed, rt, tk / 1e9
 
 
 def cross(stem, th, rows, probs):
     print(f"\n### 問題をまたいだ並び (スレッド {th}、種をまとめる)\n")
-    print("| 問題 | 始めの暫定解 | 始めのギャップ | 根で閉じた割合 | 根のカットの手間 (1e9) | 閉じた割合/1e9 手間 | 木の分離の秒の割合 | 1 ラウンドの伸び 中央 (深さ 1-4 / 9+) | 見つからない率 (1-4 / 9+) | 張った回/LP にあった回 (1-4 / 9+) | 伸びの和/1e9 手間 (1-4 / 9+) |")
-    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    print("| 問題 | 始めの暫定解 | 始めのギャップ | 根で閉じた割合 | 木の始めまでの手間 (1e9) | 閉じた割合/1e9 手間 | 木の分離の秒の割合 | 1 ラウンドの伸び 中央 (深さ 1-4 / 9+) | 見つからない率 (1-4 / 9+) | 張った回/LP にあった回 (1-4 / 9+) | 伸びの和/1e9 手間 (1-4 / 9+) | 木の分離の手間のうち深さ 1-4 の割合 | 寿命 中央 (1-4 / 9+) | 張った回/本 (1-4 / 9+) |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for p in probs:
         rr = [r for r in rows if r["problem"] == p and r["threads"] == th]
         per = []
         for r in rr:
             recs = load(stem, p, th, [r["rep"]])
-            per.append((rootinfo(recs), recs))
+            per.append((rootinfo(recs, p), recs))
         ri = [x[0] for x in per if x[0]]
         recs = [x for _, rs in per for x in rs]
         B, C, T = summarize(recs)
@@ -173,6 +188,8 @@ def cross(stem, th, rows, probs):
             return g, c
         sh, ch = agg(0, 3)
         dp, cd = agg(4, 6)
+        lsh = [v for i in range(0, 3) for v in B[i]["lin"]]
+        ldp = [v for i in range(4, 6) for v in B[i]["lin"]]
         secs = sum(C[i]["secs"] for i in range(6))
         wall = sum(min(r["result"].get("time") or r["tl"], r["tl"]) for r in rr) * th
         f = lambda v, fmt: (fmt.format(v) if v is not None else "-")
@@ -181,7 +198,8 @@ def cross(stem, th, rows, probs):
             f"{'/'.join(f'{x[3]:.2g}' for x in ri)} | {'/'.join(f(x[2] / x[3] if x[2] is not None and x[3] > 0 else None, '{:.2g}') for x in ri)} | {secs / max(wall, 1e-9):.3f} | "
             f"{q(sh, 0.5):.2g} / {q(dp, 0.5):.2g} | {ch['none'] / max(ch['rounds'], 1):.2f} / {cd['none'] / max(cd['rounds'], 1):.2f} | "
             f"{ch['bind'] / max(ch['lin_sum'], 1):.3f} / {cd['bind'] / max(cd['lin_sum'], 1):.3f} | "
-            f"{sum(sh) / max(ch['ticks'] / 1e9, 1e-9):.2f} / {sum(dp) / max(cd['ticks'] / 1e9, 1e-9):.2f} |"
+            f"{sum(sh) / max(ch['ticks'] / 1e9, 1e-9):.2f} / {sum(dp) / max(cd['ticks'] / 1e9, 1e-9):.2f} | "
+            f"{ch['ticks'] / max(T, 1):.2f} | {q(lsh, 0.5):.0f} / {q(ldp, 0.5):.0f} | {ch['bind'] / max(ch['ncut'], 1):.1f} / {cd['bind'] / max(cd['ncut'], 1):.1f} |"
         )
 
 

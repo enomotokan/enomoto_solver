@@ -1445,6 +1445,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     pub(super) fn root_cut_loop(&mut self, root_iters: u64) -> bool {
+        // 試作 `ENOMOTO_MIP_SEPALLOC` の `a` ([`super::sepalloc`]): 外側の主の根のループの間だけ配り方の状態を持つ
+        let alloc = super::sepalloc::on('a') && !self.params.submip && self.snap.is_none() && self.cut_cont.is_none();
+        if !self.params.submip {
+            super::sepalloc::mark_loop_start();
+        }
+        if alloc {
+            super::sepalloc::activate(true);
+            let ok = self.root_cut_loop_tdd(root_iters);
+            if self.params.verbose {
+                if let Some(m) = super::sepalloc::summary() {
+                    eprintln!("{m}");
+                }
+            }
+            super::sepalloc::activate(false);
+            return ok;
+        }
+        self.root_cut_loop_tdd(root_iters)
+    }
+
+    fn root_cut_loop_tdd(&mut self, root_iters: u64) -> bool {
         // 診断 `ENOMOTO_MIP_TREEDEPTH_DIAG`: 呼び出しごとに前後の LP の値と手間を残す ([`super::treedepth`])
         if self.tdd.is_none() {
             return self.root_cut_loop_inner(root_iters);
@@ -1505,6 +1525,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let cs_gap = cutstall_gap().filter(|_| !self.params.submip);
         // 試作 `ENOMOTO_MIP_ROOTSTOP` の `r` ([`super::rootstop::RateStop`]): 外側の主の根だけ
         let mut rate_stop = (super::rootstop::on('r') && !self.params.submip && self.snap.is_none() && self.cut_cont.is_none()).then(|| super::rootstop::RateStop::new(first_obj, self.params.restarts));
+        // 試作 `ENOMOTO_MIP_SEPALLOC` の `s` ([`super::sepalloc::StopRule`]): 直近の根の LP 1 回分の手間の伸びの速さが全体の速さを下回ったら止める
+        let mut sa_stop = (super::sepalloc::on('s') && !self.params.submip && self.snap.is_none() && self.cut_cont.is_none() && rate_stop.is_none())
+            .then(|| super::sepalloc::StopRule::new(first_obj, self.root_lp_ticks))
+            .flatten();
+        let mut sa_continue = false;
         if cs_gap.is_some() && self.params.restarts == 0 && self.snap.is_none() && self.cut_cont.is_none() && first_obj.is_finite() {
             CUTSTALL_BASE.store((first_obj + p.offset).to_bits(), std::sync::atomic::Ordering::Relaxed);
         }
@@ -2070,6 +2095,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     && k > 5
                     && obj_hist[k - 1] - obj_hist[k - 6] >= adapt_frac * (obj_hist[k - 1] - obj_hist[0]).max(1e-9);
                 // `ENOMOTO_MIP_CUTSTALL_GAP`: 直近 5 ラウンドの伸びが新しい尺度で停滞でなければ 25 ラウンド延ばす
+                // 試作 `ENOMOTO_MIP_SEPALLOC` の `s`: 直近の判定が「続ける」ならラウンドの上限でも止めずに延ばす
+                let extend = extend || sa_continue;
                 let extend = extend
                     || cs_gap.is_some_and(|(t, ext)| {
                         let kr = round_obj.len();
@@ -2656,6 +2683,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let sl_on = self.sl.stat && !self.params.submip && job.is_none();
             if sl_on {
                 self.sl.begin_call(false);
+            }
+            if super::sepalloc::active() && !self.params.submip && job.is_none() {
+                super::sepalloc::begin_round(&self.sl.st[0], self.lp.objective() + p.offset, self.params.verbose);
+            }
+            // 診断 (`ENOMOTO_MIP_CUTSTOP_LOG`、analysis/sepalloc_20261121/): ラウンドの初めの LP の値とループの手間 (同じ手間での伸びの比べ用)
+            if !self.params.submip && job.is_none() && env_str!("ENOMOTO_MIP_CUTSTOP_LOG").is_some_and(|v| v != "0") {
+                eprintln!("CUTTK round {round} obj {:.10e} tk {:.0}", self.lp.objective() + p.offset, super::sepalloc::loop_ticks());
             }
             // 診断 (`ENOMOTO_MIP_DEBUG_SEP_AT=<接頭辞>`、analysis/slow2_20261117): 外側の最初の根の 0 ラウンド目に、ほかのソルバー (計装した HiGHS) の
             // 各ラウンドの LP 解 `<接頭辞>_r<k>.txt` (1 行 1 値、この問題と同じ列の番号) を k = 0, 1, ... の順に読み、その点で分離器を回した候補を
@@ -4018,6 +4052,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     _ => reldiff,
                 };
                 let rs = rate_stop.as_mut().map(|r| r.record(obj, self.lp.total_iterations() - it0));
+                let rs = rs.or_else(|| sa_stop.as_mut().map(|r| r.record(obj)));
+                sa_continue = rs == Some(super::rootstop::Rate::Continue) && sa_stop.is_some();
+                if rs == Some(super::rootstop::Rate::Stop) && sa_stop.is_some() {
+                    if self.params.verbose {
+                        let (m, a) = sa_stop.as_ref().map_or((0.0, 0.0), |r| r.last);
+                        eprintln!("MIP: cut round {round}: SEPALLOC s: window rate {m:.3e} < overall rate {a:.3e}; stop (obj {:.10e})", obj + p.offset);
+                    }
+                    cutstop = "sepalloc_stop";
+                    break;
+                }
                 if rs == Some(super::rootstop::Rate::Stop) {
                     if self.params.verbose {
                         let (r, r0) = rate_stop.as_ref().map_or((0.0, 0.0), |r| r.last);
@@ -4298,7 +4342,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let fsum: f64 = fr.iter().map(|&(_, v)| { let f = v - v.floor(); f.min(1.0 - f) }).sum();
         let num = |v: f64| if v.is_finite() { format!("{v:.10e}") } else { "null".to_string() };
         eprintln!(
-            "CUTSTOP {{\"reason\":\"{reason}\",\"restarts\":{},\"bg\":{bg},\"second\":{},\"rounds\":{rounds},\"max_rounds\":{max_rounds},\"phase2\":{phase2},\"stall\":{stall},\"intobj_stall\":{intobj_stall},\"obj0\":{},\"obj1\":{},\"lp_ok\":{},\"inc\":{},\"nfrac\":{},\"fsum\":{fsum:.4},\"nint\":{},\"ncuts\":{},\"t_loop\":{:.3},\"t\":{:.3},\"sense\":{}}}",
+            "CUTSTOP {{\"reason\":\"{reason}\",\"restarts\":{},\"bg\":{bg},\"second\":{},\"rounds\":{rounds},\"max_rounds\":{max_rounds},\"phase2\":{phase2},\"stall\":{stall},\"intobj_stall\":{intobj_stall},\"obj0\":{},\"obj1\":{},\"lp_ok\":{},\"inc\":{},\"nfrac\":{},\"fsum\":{fsum:.4},\"nint\":{},\"ncuts\":{},\"t_loop\":{:.3},\"t\":{:.3},\"sense\":{},\"tk_loop\":{:.0},\"tk_lp\":{:.0}}}",
             self.params.restarts,
             CLIQUE_FB_SECOND.with(|c| c.get()),
             num(first_obj + p.offset),
@@ -4310,7 +4354,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.lp.num_rows() - p.m,
             t_loop.elapsed().as_secs_f64(),
             self.start.elapsed().as_secs_f64(),
-            p.sense_sign
+            p.sense_sign,
+            super::sepalloc::loop_ticks(),
+            self.root_lp_ticks
         );
     }
 
@@ -5689,6 +5735,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     ///   (固定した上下限のまま分離すると tableau 系のカットが元の問題で正しくなくなるため)
     /// - 予算: 1 回の主単体法の反復は根の LP の反復 (最低 1000) まで。選ぶ本数は根の 1 ラウンドと同じ 50 本まで
     /// 下界の伸びと手間を `SEPEFF facecut` の 1 行で出す。カットは実行可能領域で正しいものだけを足すので、答えは変わらない
+    /// 閉じた (2026-11-21): 対象 50 問で伸びの中央 0、今の頂点でもう 1 回分離するだけ (`=x`) より下で、MPSEP oqmgs より良くなる見込みが薄い。
+    /// 既定にはせず、スイッチは既定オフで残す (analysis/sepeff_20261120/README.md 4・6 節)
     pub(super) fn facecut_probe(&mut self) {
         if env_str!("ENOMOTO_MIP_FACECUT").is_none_or(|v| v == "0") || self.params.submip || self.time_up() {
             return;
@@ -6463,7 +6511,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let row_cuts_m = if env_str!("ENOMOTO_MIP_DEBUG_NO_ROW_CUTS").is_some() { 0 } else { p.m };
         // `ENOMOTO_MIP_SEP_ADAPTIVE`: 飛ばしている分離器は使わない ([`SepAdapt`])
         let row_cuts_m = if row_cuts_m > 0 && !self.sep_src_on(sepprof::SRC_ROWS, light) { 0 } else { row_cuts_m };
-        let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::cutmix::zh_on()) && self.sep_src_on(sepprof::SRC_ZH, light);
+        // 試作 `ENOMOTO_MIP_SEPALLOC` の `a` ([`super::sepalloc`]): 外側の主の根のラウンドで、zero-half・経路集約・tableau を
+        // 伸びの取り分で配る (飛ばすラウンドと上限の倍率)
+        let alloc = !light && !self.params.submip && super::sepalloc::active();
+        let alloc_run = |src: u8| !alloc || super::sepalloc::run(src);
+        let alloc_scale = |src: u8, v: usize| if alloc { (v as f64 * super::sepalloc::scale(src)).min(usize::MAX as f64 / 4.0) as usize } else { v };
+        let zh_on = (env_def!("ENOMOTO_MIP_NO_ZEROHALF", "1").is_none() || super::cutmix::zh_on()) && alloc_run(sepprof::SRC_ZH) && self.sep_src_on(sepprof::SRC_ZH, light);
+        let zh_max = alloc_scale(sepprof::SRC_ZH, 100);
         // clique カットの使い方は下の説明を参照
         let clique_on = clique_cuts_mode().is_some_and(|m| {
             let probe = m == "probe" || m == "probe_s" || m == "probe_r" || m == "probe_f";
@@ -6608,7 +6662,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else if zh_on {
             let zhd = if super::zerohalf::zh_deadline_on() { sep_deadline(self.deadline) } else { None };
             let zh = super::zerohalf::with_zh_deadline(zhd, || {
-                super::hnfcut::map_rows(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &sglo, &sgup, x, |rw, rl, ru, ii, lo, up, xx| super::zerohalf::zerohalf_cuts(rw, rl, ru, ii, lo, up, xx, 100))
+                super::hnfcut::map_rows(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &sglo, &sgup, x, |rw, rl, ru, ii, lo, up, xx| super::zerohalf::zerohalf_cuts(rw, rl, ru, ii, lo, up, xx, zh_max))
             });
             for raw in zh {
                 push(Some(raw), &mut cands, self);
@@ -6797,13 +6851,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let node_highs = light && self.tree_sep_fc && super::solver::nodecnt('h') && !(self.nc_path_forced && super::solver::nodecnt('r') && self.nc_rdec != 1);
             let old_only = env_str!("ENOMOTO_MIP_PATH_OLD").is_some() || (light && !node_highs);
             let highs_only = env_str!("ENOMOTO_MIP_PATH_HIGHS_ONLY").is_some();
-            if !old_only && self.sep_src_on(sepprof::SRC_PATHH, light) {
+            let max_starts = alloc_scale(sepprof::SRC_PATH, max_starts);
+            if !old_only && alloc_run(sepprof::SRC_PATHH) && self.sep_src_on(sepprof::SRC_PATHH, light) {
                 self.path_aggregation_highs(&vars, lp_rows, &mut cands, &mut push);
             }
             tag(&mut cands[nsrc0..], sepprof::SRC_PATHH);
             nsrc0 = cands.len();
             sepprof::lap(sepprof::T_PATHH, &mut lap);
-            if (!highs_only || old_only) && self.sep_src_on(sepprof::SRC_PATH, light) {
+            if (!highs_only || old_only) && alloc_run(sepprof::SRC_PATH) && self.sep_src_on(sepprof::SRC_PATH, light) {
                 // 根で並列の分離なら、集約した行を順に集めてからカットの生成と仕上げを並列に行う (集約は逐次と同じ順で、
                 // カットの有無で経路を変えないので結果は逐次と同じ。`ENOMOTO_MIP_PATH_STOP_ON_CUT` では逐次)
                 let par_path = self.params.threads > 1
@@ -6924,6 +6979,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             tunable!("ENOMOTO_T_MIP_TAB_ROWS_BASE", 200usize, usize) + (tunable!("ENOMOTO_T_MIP_TAB_ROWS_FRAC", 0.1, f64) * (mr.min(nint)) as f64) as usize
         };
+        // 試作 `ENOMOTO_MIP_SEPALLOC` の `a`: 飛ばすラウンドは 0 行、倍率は行の数の上限に掛ける
+        let limit = if !alloc_run(sepprof::SRC_TAB) { 0 } else { alloc_scale(sepprof::SRC_TAB, limit) };
         // `ENOMOTO_MIP_TAB_HIGHS_RULES`: HiGHS の HighsTableauSeparator と同じ行の選び方。`dse_weight` は 1 を返すだけなので
         // 既定のスコアは f(1-f) で、密な行 (基底逆行列の行の非零が多い) が不利にならない。HiGHS は
         // (1) 基底逆行列の行 w を先に全部計算し、スコア = f(1-f) / ||w||^2 (w_i は行 i の最大係数で拡大縮小) で並べる、
