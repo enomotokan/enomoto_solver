@@ -114,5 +114,18 @@
 - P・M の広い計測で数える。台本は `wrun.py`、分担表は `shards_P.json` (6 組、348 回、各 0.47 時間) と `shards_M.json` (20 組、372 回、各 1.83〜1.85 時間)。def と sft0 を比べる。実行は `python analysis/primalgap_20261121/wrun.py P K` (K=0..5) と `python analysis/primalgap_20261121/wrun.py M K` (K=0..19)。d0a9eea36 を含むコミットからビルドすること。結果 res_SET_sK.jsonl の `submip` 欄に、sub-MIP の数、0 ノードで Infeasible の回数と時間、そのうち根で起きた分、ラベル別の内訳が入る。
 
 ### 回したビルド
+- P 2: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降) を `pip install -e .` で入れて回した (0.1.10)。58 行・crash 0。
+- P 5: c3bdeaa7c (1cb61bc9a・d0a9eea36 を含む、リポジトリの根で `pip install -e .`、0.1.10)。58 行・crash 0。
 - P 4: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
 - P 1: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
+- P 3: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
+- P 0: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
+
+## 7. 広い計測 P の結果 (6 分担そろい、ci_P.txt)
+
+- `python ../rootgap_20261121/ci.py 60 sft0 def res_P_s*.jsonl`: def/sft0 (直しあり/なし) のずらし幾何平均の比 1.005 (95% [0.992, 1.018])、解けた sft0 137 / def 136。
+- 全種で 1.25 倍超の遅れ: なし。optimal 同士の目的値の食い違い: なし。crash 0。
+- 解けた数の差 1 は neos5 種 2 (sft0 は 42.8 秒で最適、def は時間切れで暫定解 15・下界 14.35)。他の種の neos5 は両方解けている。
+- 1 回だけの遅速は両向きに散らばる (10teams は種 1・2 で def が遅く、種 3 で def が速い)。
+- 0 ノードで Infeasible の sub-MIP は分担により増減し、根の分はほぼ変わらない。P では誤判定の起きる問題が少なく、momentum1 (M) のような効きは P では見えない。
+- 解けた数が 1 減ったので、neos5 を種を増やして確かめる。
