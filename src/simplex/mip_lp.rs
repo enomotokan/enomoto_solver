@@ -2973,6 +2973,18 @@ impl TwoStageLp {
                 if dc {
                     sid::set_dse_cost_hint(None);
                     let it = (sid::ext_iterations() - dc_it0) as u64;
+                    let (dec, cost, budget) = sid::take_dse_cost_last();
+                    if dec != 0 && sid::dse_cost_log_on() {
+                        eprintln!(
+                            "DSE_COST ev {} rebuild {:.0} budget {:.0} last_it {:?} it {} ticks {:.0}",
+                            if dec == 1 { "skip" } else { "built" },
+                            cost,
+                            budget,
+                            self.dc_last_it,
+                            it,
+                            crate::ticks::total() - dc_t0
+                        );
+                    }
                     self.dc_last_it = Some(it);
                     self.dc_ticks += crate::ticks::total() - dc_t0;
                     self.dc_iters += it;
