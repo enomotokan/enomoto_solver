@@ -3849,6 +3849,61 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
             );
         }
     }
+    // 試作 `ENOMOTO_MIP_ORBPP=cond` (既定は使わない。analysis/orbpp_20261121): 上の既定の扱い (MIN_COLS 列以上だけ静的) の後に、列が MIN_COLS 未満で
+    // 静的の条件 (0-1・局所でない・パッキング/分割の行が過半かつ MIN_ROWS 行以上) を満たすオービトープを写しの問題で静的に固定し、REPROBE をかける。
+    // REPROBE が 1 列でも新しく固定すれば (静的固定そのものは数えない) その写しを採り、0 なら写しを捨てて既定と同じ問題・オービトープ (動的) に戻す。
+    // 閾値は置かない (固定が増えるか否か)。neos-911970 (固定 0、遅くなる) と misc07 (45 列、2.3 倍速い) を分ける
+    if !static_orbitope && env_str!("ENOMOTO_MIP_ORBPP") == Some("cond") && env_def!("ENOMOTO_MIP_ORBPP_REPROBE", "1").is_some() {
+        let min_rows = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_ROWS", 3usize, usize);
+        let min_cols = tunable!("ENOMOTO_T_MIP_ORBPP_MIN_COLS", 10usize, usize);
+        let mut q = prob.clone();
+        let mut o2 = orbs.clone();
+        let mut add = 0usize;
+        let mut k_new = 0usize;
+        for o in o2.iter_mut() {
+            if o.static_pp || o.vars[0].len() >= min_cols {
+                continue;
+            }
+            let binary = o.vars.iter().flatten().all(|&j| q.is_int[j] && q.col_lo[j] >= 0.0 && q.col_up[j] <= 1.0);
+            let rows: Vec<usize> = (0..o.vars.len()).filter(|&i| o.row_packing[i]).collect();
+            if o.local || 2 * rows.len() < o.vars.len() || rows.len() < min_rows || !binary {
+                continue;
+            }
+            let swaps = std::mem::take(&mut o.swaps);
+            *o = o.sub_rows(&rows);
+            o.swaps = swaps;
+            o.static_pp = true;
+            k_new += 1;
+            for (i, line) in o.vars.iter().enumerate() {
+                for (c, &j) in line.iter().enumerate() {
+                    if c > i && q.col_up[j] > 0.0 {
+                        q.col_up[j] = 0.0;
+                        add += 1;
+                    }
+                }
+            }
+        }
+        if k_new > 0 {
+            let t0 = std::time::Instant::now();
+            let st = orbpp_reprobe(&mut q, &o2);
+            let new = st[1] + st[2] + st[3];
+            if verbose {
+                eprintln!(
+                    "MIP: symmetry: ORBPP cond: {k_new} small orbitopes, static fixed {add}, REPROBE fixed {new} (propagation {}, orbitopes {}, probing {}) -> {} ({:.2}s)",
+                    st[1],
+                    st[2],
+                    st[3],
+                    if new > 0 { "static" } else { "reverted to dynamic" },
+                    t0.elapsed().as_secs_f64()
+                );
+            }
+            if new > 0 {
+                prob = q;
+                orbs = o2;
+                SYM_CUT_GENS.with(|t| *t.borrow_mut() = None);
+            }
+        }
+    }
     if env_str!("ENOMOTO_MIP_SYM_DEBUG").is_some() {
         // オービトープの各行に、その行の列だけからなる (他の列も含んでよい) 集合分割・パッキング行があるか
         for o in &orbs {
