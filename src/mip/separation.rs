@@ -6353,6 +6353,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SEP_NO_ROWCLONE`: 行の写しと整数の行の印を使い回す ([`SepRowsCache`])
         let (lp_rows_rc, row_integral) = self.sep_lp_rows();
         let lp_rows: &[Vec<(usize, f64)>] = &lp_rows_rc;
+        // 診断 `ENOMOTO_MIP_LC_DEBUG` (analysis/rootgap_20261121/wrong_roci): デバッグ解に LP の行の活動量を足して大域の置き場に置く
+        if self.dbg_on && env_str!("ENOMOTO_MIP_LC_DEBUG").is_some() {
+            if let Some(xd) = super::solver::DEBUG_SOL.with(|d| d.borrow().clone()) {
+                let mut ext = xd.clone();
+                ext.extend(lp_rows.iter().map(|r| r.iter().map(|&(j, a)| a * xd[j]).sum::<f64>()));
+                if let Ok(mut g) = super::cuts::LC_DEBUG_X.lock() {
+                    *g = Some(ext);
+                }
+            }
+        }
         // 手間の単位 ([`crate::ticks`]): 分離の 1 回 = LP の行の非零 + 行 + 列
         crate::ticks::add(crate::ticks::SEP, (lp_rows.iter().map(|r| r.len()).sum::<usize>() + mr + n) as u64);
         // 試作 `ENOMOTO_MIP_MPSEP` の in-out の点 (LP の頂点でない点) では、その点での行の活動量を使う
@@ -6517,14 +6527,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(raw) = raw {
                 let t0 = std::time::Instant::now();
                 n_raw.set(n_raw.get() + 1);
-                if let Some(c) = finish_cut(raw, n, lp_rows, &s.cut_int, &sglo, &sgup, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice()), &mut finish_scratch) {
+                // 診断 `ENOMOTO_MIP_LC_DEBUG`: 生のカット (行の活動量の変数を含む) のデバッグ解での値を、仕上げの前に取っておく
+                let raw_dbg = if env_str!("ENOMOTO_MIP_LC_DEBUG").is_some() {
+                    super::cuts::LC_DEBUG_X.lock().ok().and_then(|g| g.clone()).map(|xe| (raw.coefs.iter().map(|&(j, a)| a * xe[j]).sum::<f64>(), raw.rhs, raw.coefs.clone(), raw.kind))
+                } else {
+                    None
+                };
+                let fin = finish_cut(raw, n, lp_rows, &s.cut_int, &sglo, &sgup, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice()), &mut finish_scratch);
+                if let (Some((ra, rr, rc, rk)), Some(c), Some(xd)) = (raw_dbg.as_ref(), fin.as_ref(), dbg_x.as_ref()) {
+                    let act: f64 = c.coefs.iter().map(|&(j, a)| a * xd[j]).sum();
+                    if act > c.rhs + 1e-6 * (1.0 + c.rhs.abs()) {
+                        eprintln!("LC_DEBUG: finished cut (kind {rk}) violated: {act:.6e} > {:.6e} (len {}); raw {ra:.6e} <= {rr:.6e}? {} (len {})", c.rhs, c.coefs.len(), *ra <= rr + 1e-6 * (1.0 + rr.abs()), rc.len());
+                        eprintln!("LC_DEBUG:   raw {:?}", rc.iter().map(|&(j, a)| (j, a, if j < n { sglo[j] } else { f64::NAN }, if j < n { sgup[j] } else { f64::NAN })).collect::<Vec<_>>());
+                        eprintln!("LC_DEBUG:   finished {:?}", c.coefs);
+                        for &(j, _) in rc.iter().filter(|&&(j, _)| j >= n) {
+                            let row = &lp_rows[j - n];
+                            let ract: f64 = row.iter().map(|&(k, a)| a * xd[k]).sum();
+                            eprintln!("LC_DEBUG:   slack {j} = LP row {} (bounds [{}, {}], debug activity {ract:.6e}): {:?}", j - n, sglo.get(j).copied().unwrap_or(f64::NAN), sgup.get(j).copied().unwrap_or(f64::NAN), row.iter().map(|&(k, a)| (k, a, xd[k])).collect::<Vec<_>>());
+                        }
+                    }
+                }
+                if let Some(c) = fin {
                     if let Some(xd) = dbg_x.as_ref() {
                         let act: f64 = c.coefs.iter().map(|&(j, a)| a * xd[j]).sum();
                         let viol = act - c.rhs > 1e-6 * (1.0 + c.rhs.abs());
                         let k = if !viol { 0 } else if dbg_in_bounds { 1 } else { 2 };
                         INTVUB_CHECK.with(|v| v.borrow_mut()[k] += 1);
                         if viol && dbg_in_bounds {
-                            eprintln!("MIP_DEBUG_SOL: INTVUB_CHECK: candidate cut (src {}) violated by the debug solution: {act:.10e} > {:.10e}, len {}", c.src, c.rhs, c.coefs.len());
+                            eprintln!("MIP_DEBUG_SOL: INTVUB_CHECK: candidate cut (src {}, kind {}) violated by the debug solution: {act:.10e} > {:.10e}, len {}", c.src, c.kind, c.rhs, c.coefs.len());
                         }
                     }
                     cands.push(c);
@@ -8012,24 +8042,29 @@ fn finish_cut(
     // 構造変数ごとの係数を密な作業領域 (呼び出し側が長さ n の 0 で用意し、ここで 0 に戻す) に集める。
     // 以前は BTreeMap で、集約行の非零が数千のときは finish_cut が tableau 行のカット生成と同程度の時間を使っていた
     let mut touched: Vec<usize> = Vec::with_capacity(raw.coefs.len());
+    // 試作 `ENOMOTO_MIP_FINISH_CANCEL` (analysis/rootgap_20261121/wrong_roci): 列ごとに、足し合わせる前の項の絶対値の和 (打ち消す前の大きさ) を持つ。
+    // 同じ列が ± で入る (変数上下限の置き換えと行の活動量の代入) と打ち消して浮動小数の残り (1e-16 程度) だけが残り、それが最大係数として
+    // 1 に引き伸ばされ、誤ったカットになっていた (rocI-4-11 の LIFTED_COVER: 実質 0 <= 0 のカットが x347 <= 0 になり最適解を切った)
+    let cancel = env_str!("ENOMOTO_MIP_FINISH_CANCEL").is_some_and(|v| v != "0");
+    let mut mag: Vec<(usize, f64)> = Vec::new();
+    let mut add = |j: usize, v: f64, scratch: &mut [f64], touched: &mut Vec<usize>, mag: &mut Vec<(usize, f64)>| {
+        if scratch[j] == 0.0 {
+            touched.push(j);
+        }
+        scratch[j] += v;
+        if scratch[j] == 0.0 {
+            scratch[j] = 1e-300;
+        }
+        if cancel {
+            mag.push((j, v.abs()));
+        }
+    };
     for &(k, c) in &raw.coefs {
         if k < n {
-            if scratch[k] == 0.0 {
-                touched.push(k);
-            }
-            scratch[k] += c;
-            if scratch[k] == 0.0 {
-                scratch[k] = 1e-300;
-            }
+            add(k, c, scratch, &mut touched, &mut mag);
         } else {
             for &(j, a) in &lp_rows[k - n] {
-                if scratch[j] == 0.0 {
-                    touched.push(j);
-                }
-                scratch[j] += c * a;
-                if scratch[j] == 0.0 {
-                    scratch[j] = 1e-300;
-                }
+                add(j, c * a, scratch, &mut touched, &mut mag);
             }
         }
     }
@@ -8039,6 +8074,25 @@ fn finish_cut(
         let v = scratch[j];
         scratch[j] = 0.0;
         dense.push((j, if v == 1e-300 { 0.0 } else { v }));
+    }
+    if cancel && !mag.is_empty() {
+        // 打ち消した後の係数が、その列の打ち消す前の大きさの 1e-9 倍以下なら 0 とみなす (既存の「cmax の 1e-9 倍以下は捨てる」と同じ尺度)
+        mag.sort_unstable_by_key(|&(j, _)| j);
+        let mut m = 0usize;
+        for (j, v) in dense.iter_mut() {
+            let mut s = 0.0;
+            while m < mag.len() && mag[m].0 < *j {
+                m += 1;
+            }
+            while m < mag.len() && mag[m].0 == *j {
+                s += mag[m].1;
+                m += 1;
+            }
+            if v.abs() <= 1e-9 * s {
+                *v = 0.0;
+            }
+        }
+        dense.retain(|&(_, v)| v != 0.0);
     }
     let mut rhs = raw.rhs;
     let cmax = dense.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs()));
