@@ -678,7 +678,7 @@ pub(crate) fn snfmodk_cg_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up
                 st.cuts_p += 1;
                 st.best_eff_p = st.best_eff_p.max(eff);
             }
-            cuts.push((eff, newk, el.w.len() > 1, RawCut { coefs, rhs: rhs_x }));
+            cuts.push((eff, newk, el.w.len() > 1, RawCut { coefs, rhs: rhs_x, kind: 0 }));
         }
     }
     cuts.sort_by(|a, b| b.0.total_cmp(&a.0));
