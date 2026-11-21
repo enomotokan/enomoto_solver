@@ -313,3 +313,9 @@ RSS の推移 (MB、`rss.py`):
   上下に揺れており、1 回ずつでは直しのせいか揺れかは分けられない (推測では揺れ。直しが変えるのは待ち行列の中の持ち方と、取り出したノードの
   `changes` と鎖の分け方だけで、定義域と取り出す順は同じ)。
 - 確かめ: fuzz (rootgap_20261121/fuzz.sh の 7 本を既定の設定で) は 7 本とも誤答 0 (fuzz_tiny 400×2・fuzz_highs 300・fuzz_objint 1000×2・fuzz_slack 1000×2)、`cargo test --release --lib` は 419 passed。
+
+### P の広い計測の結果 (wide/、6 分担そろい、親の集計 2026-11-21、`wide/ci_P.txt`)
+
+`python ci.py 60 def fix res_P_s*.jsonl` (fix = CUTSEL_PROBE_FIT・ROOTLP3=e・ROOTCAP=k の 3 つ全部): 58 問 × 種 1〜3、**fix/def 1.023 [1.000, 1.048]、解けた 138 / 138**、食い違い 0。
+全種で 1.25 倍超遅いのは **10teams** (素の比 3.55・1.42・2.65)。どの試作が 10teams を遅くするか (fit・r3e・rck を 1 つずつ) を切り分けてから採否を決める。
+noswot は種で逆向き (10.4 倍遅・0.70 倍) で揺れ。
