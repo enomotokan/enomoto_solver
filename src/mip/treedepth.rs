@@ -10,6 +10,9 @@
 //! - `cuts`: 木の分離で加えたカットごとに [深さ, ノードの通し番号, LP にあったノードの LP の数, 外されるまでのノードの LP の数 (終わりに
 //!   残っていれば -1), 双対値が非零 (余裕 0) で張った回数 (どこでも), そのうち部分木の中のノード, 余裕 0 だが双対値 0 の回数]。
 //!   同じカットがプールから戻ったとき (新しい番号) は数えない (最初の 1 回の滞在だけ)。
+//! - `root`: 根のカットのループの呼び出しごとに [前の LP の値, 後の LP の値, 手間, 成否 (1/0)] (再スタートの後の分も)。
+//! - `start`: 木の探索の最初のノードの時点の {暫定解の値 (なければ null), 探索全体の下界, この求解の始めからの手間, 秒}。
+//! - `fin`: 終わりの [暫定解の値, 探索全体の下界]。`root`・`start`・`fin` の値は最小化形 (定数項込み)。
 //! - `pop`: 取り出したノード (潜りの途中でない) の深さごとの数、`all`: 処理したノードの深さごとの数。
 //!
 //! 部分木の判定は、根からの分枝の変更の列 (`OpenNode::changes`) の前の部分が一致するか (前の部分ごとのハッシュで比べる)。
@@ -63,6 +66,10 @@ pub(super) struct TdDiag {
     dead: Vec<[i64; 7]>,
     pop: Vec<u64>,
     all: Vec<u64>,
+    root: Vec<[f64; 4]>,
+    start: Option<(Option<f64>, f64, f64, f64)>,
+    /// 終わりの (暫定解の値, 探索全体の下界) (最小化形、定数項込み)
+    pub(super) fin: (Option<f64>, f64),
 }
 
 fn h(c: &BoundChange, prev: u64) -> u64 {
@@ -80,6 +87,18 @@ fn bump(v: &mut Vec<u64>, d: usize) {
 }
 
 impl TdDiag {
+    pub(super) fn root_cuts(&mut self, o0: f64, o1: f64, ticks: f64, ok: bool) {
+        self.root.push([o0, o1, ticks, ok as u8 as f64]);
+    }
+
+    pub(super) fn started(&self) -> bool {
+        self.start.is_some()
+    }
+
+    pub(super) fn tree_start(&mut self, inc: Option<f64>, lb: f64, ticks: f64, secs: f64) {
+        self.start = Some((inc, lb, ticks, secs));
+    }
+
     /// ノードの処理の始め (分離・LP の前)
     pub(super) fn begin_node(&mut self, changes: &[BoundChange], depth: usize, popped: bool) {
         self.pre.clear();
@@ -223,7 +242,23 @@ impl TdDiag {
             let _ = write!(s, "{}[{},{},{},{},{},{},{}]", if first { "" } else { "," }, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
             first = false;
         }
-        let _ = write!(s, "],\"pop\":{:?},\"all\":{:?}}}\n", self.pop, self.all);
+        s.push_str("],\"root\":[");
+        for (i, r) in self.root.iter().enumerate() {
+            let _ = write!(s, "{}[{:e},{:e},{:.0},{}]", if i > 0 { "," } else { "" }, r[0], r[1], r[2], r[3]);
+        }
+        s.push_str("],\"start\":");
+        match self.start {
+            Some((inc, lb, tk, sec)) => {
+                let f = |v: f64| if v.is_finite() { format!("{v:e}") } else { "null".to_string() };
+                let _ = write!(s, "[{},{},{:.0},{:.3}]", inc.map_or("null".to_string(), f), f(lb), tk, sec);
+            }
+            None => s.push_str("null"),
+        }
+        {
+            let f = |v: f64| if v.is_finite() { format!("{v:e}") } else { "null".to_string() };
+            let _ = write!(s, ",\"fin\":[{},{}]", self.fin.0.map_or("null".to_string(), f), f(self.fin.1));
+        }
+        let _ = write!(s, ",\"pop\":{:?},\"all\":{:?}}}\n", self.pop, self.all);
         use std::io::Write as _;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
             let _ = f.write_all(s.as_bytes());

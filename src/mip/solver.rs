@@ -13189,6 +13189,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut ts_first = f64::NEG_INFINITY;
             let mut ts_last = f64::NEG_INFINITY;
             // 診断 `ENOMOTO_MIP_TREEDEPTH_DIAG`: ノードの始め (部分木の判定に使う変更の列の前の部分)
+            if self.tdd.as_ref().is_some_and(|t| !t.started()) {
+                let inc = self.incumbent.as_ref().map(|(z, _)| *z);
+                let (lb, tk, secs) = (self.global_lower_bound(), crate::ticks::total() - self.ticks0, self.start.elapsed().as_secs_f64());
+                self.tdd.as_mut().unwrap().tree_start(inc, lb, tk, secs);
+            }
             if let Some(t) = self.tdd.as_mut() {
                 t.begin_node(&node.changes, node.depth, node.depth > 0 && plunge_depth == 0);
             }
@@ -26974,6 +26979,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 診断 `ENOMOTO_MIP_TREEDEPTH_DIAG`: スレッドごとの生の記録をファイルに足す
         if let Some(mut t) = self.tdd.take() {
+            t.fin = (self.incumbent.as_ref().map(|(z, _)| *z), self.global_lower_bound());
             t.dump(self.pool_tid as usize, self.start.elapsed().as_secs_f64(), self.nodes);
         }
         // `ENOMOTO_MIP_NCA_DIAG`: 木の従のスレッドの分も出す (診断用)
