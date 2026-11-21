@@ -1962,6 +1962,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             v => v.is_some(),
         };
         let mut round_obj: Vec<f64> = Vec::new();
+        // 試作 `ENOMOTO_MIP_ROOTSTOP` (既定では使わない。analysis/rootstop_20261121): 外側の主の根で、直近 5 ラウンドの下界の伸びが
+        // ループ全体の伸びに占める割合が、同じ 5 ラウンドで LP の行が増えた割合 (今の行数に対して) を下回ったら止める。
+        // 下界を上げる得と、LP が大きくなって以後のノードが遅くなる損を、どちらも割合で比べる (新しい閾値はない)
+        let rootstop_on = env_str!("ENOMOTO_MIP_ROOTSTOP").is_some() && !self.params.submip && job.is_none();
+        let mut round_rows: Vec<usize> = Vec::new();
         // 試作 `ENOMOTO_MIP_CUTRND` ([`cutrnd`]): `round_obj` と同じ時に積むループの経過 (このスレッドの CPU 時間)
         let mut round_t: Vec<f64> = Vec::new();
         let cutrnd_main = !self.params.submip && self.snap.is_none() && job.is_none() && self.cut_cont.is_none();
@@ -3986,6 +3991,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             obj_hist.push(obj);
             round_obj.push(obj);
             round_t.push(super::cap_clock());
+            if rootstop_on {
+                round_rows.push(self.lp.num_rows());
+                let k = round_obj.len();
+                if k > 5 {
+                    let (g, gr) = (obj - cut_lp0, obj - round_obj[k - 6]);
+                    let (r1, r0) = (round_rows[k - 1] as f64, round_rows[k - 6] as f64);
+                    let dr = (r1 - r0).max(0.0) / r1.max(1.0);
+                    if g > 0.0 && gr < dr * g {
+                        if self.params.verbose {
+                            eprintln!("MIP: cut round {round}: ROOTSTOP: recent gain {:.3} of total < LP rows growth {dr:.3} ({r0} -> {r1}); stop", gr / g);
+                        }
+                        cutstop = "rootstop";
+                        break;
+                    }
+                }
+            }
             // 試作 `ENOMOTO_MIP_CUTRND` の `s`: 長く回って伸びが細ったら止める
             if cutrnd_main && cutrnd('s') && self.params.frac_tl().is_finite() {
                 if let Some((el, recent, t5, scale)) = cr_rates(&round_obj, &round_t, self.prune_limit()) {

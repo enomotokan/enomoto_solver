@@ -10320,6 +10320,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if !self.params.submip && self.params.restarts == 0 && self.snap.is_none() {
                     super::ROOT_LP_FAILED.with(|f| f.set(true));
                 }
+                // [`super::restart_lpfail_nocuts`] に知らせる (再スタートの後の求解)
+                if !self.params.submip && self.params.restarts > 0 && self.snap.is_none() {
+                    super::RESTART_ROOT_LP_FAILED.with(|f| f.set(true));
+                }
                 self.join_fj_thread();
                 let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
                 return self.finish(st, self.root_fail_bound());
@@ -23698,13 +23702,57 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let tree_child = self.force_restart && self.nodes > 1 && (treeeff('s') || treeeff('h'));
         let prev_child = TREE_RESTART_CHILD.with(|c| c.replace(tree_child || TREE_RESTART_CHILD.with(|c| c.get())));
         // `ENOMOTO_MIP_RESTART_DROP_FIXED` (既定、[`super::restart_drop_fixed`]): 固定された列を落とした問題を解いて、解を元の番号に戻す
-        let r = match super::restart_drop_fixed(&newp, self.params.verbose) {
+        // [`super::restart_lpfail_nocuts`] の解き直しで使う: 持ち込んだカットの行を除いた問題と、渡した暫定解
+        let nocuts = (super::restart_lpfail_nocuts() && newp.m > p.m).then(|| {
+            let mut q = MipProblem::from_rows(
+                newp.col_lo.clone(),
+                newp.col_up.clone(),
+                newp.cost.clone(),
+                newp.offset,
+                newp.sense_sign,
+                newp.is_int.clone(),
+                newp.rows[..p.m].to_vec(),
+                newp.row_lo[..p.m].to_vec(),
+                newp.row_up[..p.m].to_vec(),
+            );
+            q.conflict_edges = newp.conflict_edges.clone();
+            (q, super::RESTART_SOL.with(|s| s.borrow().clone()))
+        });
+        let t_child = Instant::now();
+        super::RESTART_ROOT_LP_FAILED.with(|f| f.set(false));
+        let solve_child = |q: &MipProblem, params: MipParams| match super::restart_drop_fixed(q, self.params.verbose) {
             Some(mut df) => {
                 let r = super::solve_problem(&df.q, params, true);
                 df.expand(r)
             }
-            None => super::solve_problem(&newp, params, true),
+            None => super::solve_problem(q, params, true),
         };
+        let mut r = solve_child(&newp, params);
+        // `ENOMOTO_MIP_RESTART_LPFAIL_NOCUTS` (既定): 再スタートの後の根の LP が解けずに諦めたら、持ち込んだカットの行を除いて解き直す
+        if r.status == MipStatus::NotSolved && super::RESTART_ROOT_LP_FAILED.with(|f| f.replace(false)) {
+            if let Some((q, sol)) = nocuts {
+                let left = params.time_limit - t_child.elapsed().as_secs_f64();
+                if left > 0.0 && !crate::cancel::is_cancelled() {
+                    if self.params.verbose {
+                        eprintln!(
+                            "MIP: RESTART_LPFAIL_NOCUTS: the root LP after restart {} failed; solving again without the {} carried cut rows ({left:.2}s left)",
+                            params.restarts,
+                            newp.m - p.m
+                        );
+                    }
+                    // 解き直しにも暫定解を渡す (先の求解が見つけた解があればそちら、なければ先に渡したもの)
+                    let start = r.x.clone().filter(|x| x.len() == p.n).or(sol);
+                    super::RESTART_SOL.with(|s| *s.borrow_mut() = start);
+                    RESTART_BASIS.with(|s| *s.borrow_mut() = None);
+                    RESTART_X.with(|s| *s.borrow_mut() = None);
+                    let r2 = solve_child(&q, MipParams { time_limit: left, ..params });
+                    // 解き直しが暫定解を失ったときは先の暫定解を残す
+                    if r2.x.is_some() || r.x.is_none() {
+                        r = MipResult { nodes: r.nodes + r2.nodes, lp_iterations: r.lp_iterations + r2.lp_iterations, ..r2 };
+                    }
+                }
+            }
+        }
         TREE_RESTART_CHILD.with(|c| c.set(prev_child));
         super::RESTART_PC.with(|s| *s.borrow_mut() = None);
         super::RESTART_HCM.with(|f| f.set(false));
@@ -27545,7 +27593,7 @@ pub(super) fn orbitope_reason() -> bool {
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_some_and(|v| v.contains('r')) || env_str!("ENOMOTO_MIP_ORBITOPE_REASON").is_some_and(|v| v != "0"))
 }
 
-/// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
+/// `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定、`=0` で切る、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
 /// 通し番号を残し、HiGHS 式の衝突解析でその証明の行から説明して遡る。
 /// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN` = w (p2inf_20261119、既定では使わない): 解いている途中で衝突の重みを w に上げる ([`Solver`] の木のループ)。
 fn cw_dyn() -> Option<f64> {
@@ -27654,7 +27702,8 @@ pub(super) fn lit_explain_auto() -> bool {
     *F.get_or_init(|| lit_explain_val().is_some_and(|v| v == "auto"))
 }
 
+/// `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (pe、2026-11-21 に既定化、`=0` で切る。analysis/slowm_20261119 §19、analysis/sc26pe_20261121)
 pub(super) fn conflict_proof_explain() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN").is_some())
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN").is_none_or(|v| v != "0"))
 }
