@@ -1,6 +1,7 @@
 """TREEGAP の 1 回を回して res_tg.jsonl に足す (README 参照)。ソルバーは同時に 1 つ、1 スレッド、上限 600 秒。
   python tg.py ours PROB SEED TAG [ENOMOTO_X=V ...]   当方 (環境変数で切り替え)
-  python tg.py scip PROB SEED TAG [param=value ...]    SCIP (pyscipopt、パラメータで切り替え。値は int/float/bool/str を推す)
+  python tg.py scip PROB SEED TAG [param=value ...]    SCIP (pyscipopt、パラメータで切り替え。値は int/float/bool/str を推す。
+                                                       OBJLIMIT=v は setObjlimit。統計は logs/PROB_sSEED_TAG.stats)
   python tg.py run PLAN.json                            計画 ([[solver, prob, seed, tag, [args...]], ...]) を順に回す。記録済み (solver, prob, seed, tag) は飛ばす
 TG_TL で上限秒を変えられる (既定 600)。"""
 import json, os, subprocess, sys, time
@@ -36,9 +37,10 @@ def worker_scip(mps, seed, params):
     if seed: m.setParam("randomization/randomseedshift", seed)
     m.readProblem(mps)
     for k, v in params.items():
-        if k == "SET_EMPHASIS": continue
-        m.setParam(k, conv(v))
+        if k == "OBJLIMIT": m.setObjlimit(float(v))
+        else: m.setParam(k, conv(v))
     t = time.perf_counter(); m.optimize(); t = time.perf_counter() - t
+    if os.environ.get("TG_STATS"): m.writeStatistics(os.environ["TG_STATS"])
     has = m.getNSols() > 0
     print(json.dumps({"status": m.getStatus(), "objective": m.getObjVal() if has else None, "bound": m.getDualbound(),
                       "root_bound": m.getDualboundRoot(), "nodes": m.getNTotalNodes(), "time": t,
@@ -65,6 +67,8 @@ def one(solver, prob, seed, tag, args):
         if solver == "ours": env[k] = v
         else: params[k] = v
     env["ENOMOTO_MIP_THREADS"] = "1"; env["ENOMOTO_T_MIP_SEED"] = str(seed)
+    if solver == "scip":  # SCIP の統計 (分離・伝播・衝突の表) を logs/ に残す
+        (D / "logs").mkdir(exist_ok=True); env["TG_STATS"] = str(D / "logs" / f"{prob}_s{seed}_{tag}.stats")
     t0 = time.time()
     pr = subprocess.run([sys.executable, __file__, "_w" + solver, str(mps), str(seed), json.dumps(params)], cwd=WT, env=env,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=TL + 300)
