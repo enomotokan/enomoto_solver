@@ -96,7 +96,19 @@
 
 ## 3. 誤答の確かめ (`bash analysis/gentype_20261121/fuzz.sh [lc]`、ログは fuzz_logs*/ (コミットしない)、要約は fuzz_gt.out・fuzz_lc.out)
 
-(結果は下に書き足す)
+| 命令 | gt (GEN_TYPE) | gtlc (+ LIFTED_COVER) |
+|---|---|---|
+| `fuzz_tiny.py 400 0` (REL_GAP=1e-9) | bad 0 (strict 12) | bad 0 (strict 12) |
+| `mip_fuzz_vs_highs.py 300` (REL_GAP=1e-9) | bad 0 | bad 0 |
+| `fuzz_objint.py 1000 0` | bad 0 (optimal 967・infeasible 33) | bad 0 (967・33) |
+| `fuzz_slack.py 1000 0` | mismatches 0 | mismatches 0 |
+| `fuzz_tiny.py 400 1000` (REL_GAP=1e-9) | bad 0 (strict 13) | bad 0 (strict 13) |
+| `fuzz_objint.py 1000 5000` | bad 0 (971・29) | bad 0 (971・29) |
+| `fuzz_slack.py 1000 5000` | mismatches 0 | mismatches 0 |
+| `cargo test --release --lib` (環境変数つき / 既定) | 419 通過・0 失敗・19 無視 (両方) | 419・0・19 (両方) |
+
+誤答 0・状態の食い違い 0。strict の数は 0.1.10 の既定・glc (rootgap §7) と同じ。既定の動き: 種類の印 (`kind`) は `GEN_TYPE` のときだけ読み、
+ほかの分離・選択の道は変えていない (コードの上で。既定の cargo test も通る)。
 
 ## 4. 広い計測の台本 (回すなら。今の結果では勧めない)
 
