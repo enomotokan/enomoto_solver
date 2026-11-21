@@ -10,6 +10,7 @@ python plan.py CP NCP → shards_CP.json (58 問 × 種 1〜3 × {def, pe}、60 
 python plan.py M NM → shards_M.json (scan_s*.jsonl で前処理が変わった Mittelmann の問題 + 対象 6 問 × 種 1・2 × {def, fixis}、600 秒)。
 python plan.py DT NDT → shards_DT.json (58 問 × 種 1〜3 × {def, bonil, def_t1, bonil_t1}、60 秒。1 スレッドの再現性の試作の費用)。
 python plan.py PS NPS → shards_PS.json (58 問 × 種 1〜3 × {def, pe, pes}、60 秒)。
+python plan.py CM2S NS → shards_CM2S.json (CM2 で 1.25 倍超の差が出た 25 問 × 種 2・3 × {def, pe}、600 秒。種による揺れか確かめる。2026-11-21)。
 python plan.py CM2 NCM2 → shards_CM2.json (CM と同じ組を、0.1.10 の既定 (st5・SYM_PPLEX・cwrh0・vbce・ncnr・rhb・cb) の上で回し直す。2026-11-20)。
 見積りは analysis/final_20261118 の def の時間 (解けなかった回は上限) + P は 8 秒・M は 30 秒。"""
 import json, glob, sys
@@ -112,6 +113,17 @@ elif SET in ("DT", "PS"):
     k = len(CF)
     est = lambda p, c, s: (min(2 * TP.get((p, s), TP.get((p, 1), 60)), 60) if c.endswith("_t1") else TP.get((p, s), TP.get((p, 1), 60))) + 8
     balance({(p, s): [(p, c, s) for c in (CF[(i + s) % k:] + CF[:(i + s) % k])] for i, p in enumerate(PROBS) for s in (1, 2, 3)}, est, NS, f"shards_{SET}.json", 60)
+elif SET == "CM2S":
+    # CM2 (種 1) で pe/def が 1.25 倍を超えて離れた問題 (遅い 12・速い 13) を種 2・3 で回し、全種でそろうかを見る。見積りは CM2 の種 1 の時間
+    SLOW = ["30n20b8", "enlight_hard", "neos5", "rococoC10-001000", "fiball", "timtab1", "neos-1171448", "supportcase26", "neos-1582420", "gen-ip002", "gen-ip054", "gmu-35-40"]
+    FAST = ["fhnw-binpack4-48", "peg-solitaire-a3", "comp07-2idx", "graphdraw-domain", "tbfp-network", "neos-1456979", "CMS750_4", "supportcase33", "neos-2978193-inde", "ns1208400", "neos-3627168-kasai", "irp", "bnatt400"]
+    T1 = {}
+    for f in glob.glob(str(D / "res_CM2_s*.jsonl")):
+        for l in open(f):
+            r = json.loads(l); T1.setdefault(r["problem"], []).append(min(r["result"]["time"], 600) if solved(r) else 600)
+    CF = ["def", "pe"]
+    balance({(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, p in enumerate(SLOW + FAST) for s in (2, 3)},
+            lambda p, c, s: sum(T1.get(p, [600])) / len(T1.get(p, [600])) + 30, NS, "shards_CM2S.json", 600)
 elif SET in ("CP", "CM", "CM2"):
     # 衝突解析で双対証明を遡る試作 (pe) の広い計測: CP = MIPLIB の 58 問 × 種 1〜3 × {def, pe}、60 秒。CM = Mittelmann 186 問 × 種 1 × {def, pe}、600 秒。
     # 見積りは final_20261118 の def (解けなかった回は上限) + P 8 秒・M 30 秒
