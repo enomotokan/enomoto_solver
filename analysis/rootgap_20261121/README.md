@@ -125,3 +125,31 @@ app1-1 は SCIP 2382 列、当方は前処理の LP による固定の後で自�
    1 で下界が上がると固定が起きるか (mc11 の genoldlc では再スタートが起きた) をまず見る。単独の手当て (RENS を強くするなど) は 1 の後に。
 4. **衝突の制約の分離** (mc11 の logicor): SCIP は衝突から作った制約を根でカットとして分離している。当方にあるかを確かめてから (未確かめ)。
 5. app1-1・neos-1171448・exp-1-500-5-5 は、今回の材料では案を出さない (主側の運・差が小さい)。
+
+## 7. glc の広い計測 (2026-11-21、利用者の判断「やって」)
+
+- 設定 (`cfg.py`): `def` (既定) と `glc` (`ENOMOTO_MIP_GEN_OLD=1` + `ENOMOTO_MIP_LIFTED_COVER=1`)、どちらも 4 スレッド。
+- 分担表 (`plan.py`、slowm_20261119 の CP・CM の写し):
+  - P: `python plan.py P 6` → shards_P.json (MIPLIB の 58 問 × 種 1〜3 × {def, glc}、60 秒、6 分担、見積り各 0.47 時間 (final_20261118 の def の時間 + 8 秒))。
+  - M: `python plan.py M 20` → shards_M.json (Mittelmann 186 問 × 種 1 × {def, glc}、600 秒、20 分担、見積り各 1.83〜1.85 時間 (vsscip_20261120 の def の時間 + 30 秒))。
+- 回し方: リポジトリの根で `rm -f target/wheels/*.whl; sh analysis/revisit_20261112/build.sh` (先端でビルド) の後、
+  `cd analysis/rootgap_20261121 && python run.py P K` (K = 0〜5)・`python run.py M K` (K = 0〜19)。res_P_sK.jsonl・res_M_sK.jsonl に足す (途中から再開できる)。
+  回したビルドのコミットを下に書き足すこと。
+- 集計: `python ci.py 60 def glc res_P_s*.jsonl`・`python ci.py 600 def glc res_M_s*.jsonl` (ずらし 10 秒の幾何平均の比の 95% 区間、解けた数、全種で 1.25 倍超の遅れ)。
+- 誤答の確かめ (`bash analysis/rootgap_20261121/fuzz.sh`、4b09f68cf を build.sh で入れて、glc の 2 つの環境変数をつけて。ログは fuzz_logs/、コミットしない):
+
+| 命令 (glc) | 件数 | bad |
+|---|---|---|
+| `fuzz_tiny.py 400 0` (REL_GAP=1e-9) | 400 | 0 (strict 12) |
+| `mip_fuzz_vs_highs.py 300` (REL_GAP=1e-9) | 300 | 0 |
+| `fuzz_objint.py 1000 0` | 1000 | 0 (optimal 967・infeasible 33) |
+| `fuzz_slack.py 1000 0` | 1000 | 0 (mismatches 0) |
+| `fuzz_tiny.py 400 1000` (REL_GAP=1e-9) | 400 | 0 (strict 13) |
+| `fuzz_objint.py 1000 5000` | 1000 | 0 (optimal 971・infeasible 29) |
+| `fuzz_slack.py 1000 5000` | 1000 | 0 (mismatches 0) |
+| `cargo test --release --lib` (glc の環境変数つき / 既定) | 419 通過・0 失敗・19 無視 (両方) | — |
+
+  誤答 0・状態の食い違い 0。strict の数は 0.1.10 の既定 (release0110_20261120/fuzz.md の 12・13) と同じ。
+
+### 回したビルド
+
