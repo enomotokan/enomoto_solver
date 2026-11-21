@@ -263,6 +263,8 @@ RSS の推移 (MB、`rss.py`):
   (`python plan.py P 6` → shards_P.json、58 問 × 種 1〜3 × {def, fix}・60 秒・6 分担・各 0.47 時間。`python plan.py M 20` → shards_M.json、186 問 × {def, fix}・600 秒・
   20 分担・各 1.83〜1.85 時間)、`run.py` (`cd analysis/biglp_20261121/wide && python run.py P K`・`python run.py M K`)、集計は `python ci.py 60 def fix res_P_s*.jsonl`・
   `python ci.py 600 def fix res_M_s*.jsonl`。
+- 回したビルド (広い計測):
+  - P 0: acb17bae1 (build.sh の wheel、0.1.10)。58 行・crash 0。分担 0 だけの集計: 26 問、fix/def 1.027 [0.996, 1.059]、解けた def 22 / fix 22、食い違い 0。
 
 ## 8. 直す案 4: 引き継ぎの鎖を共有の待ち行列でも共有する (`ENOMOTO_MIP_INHPOOL`、**既定で使う**、`=0` で従来)
 
@@ -310,4 +312,4 @@ RSS の推移 (MB、`rss.py`):
 - 4 スレッドの時間は、neos5 (34.9 → 42.7 秒)・noswot (18.6 → 27.0)・unitcal_7 (215 → 242) が遅く、neos-911970・mik は少し速い。ノード数も
   上下に揺れており、1 回ずつでは直しのせいか揺れかは分けられない (推測では揺れ。直しが変えるのは待ち行列の中の持ち方と、取り出したノードの
   `changes` と鎖の分け方だけで、定義域と取り出す順は同じ)。
-- 確かめ: fuzz (rootgap_20261121/fuzz.sh の 7 本を既定の設定で) は FUZZ_RESULT、`cargo test --release --lib` は 419 passed。
+- 確かめ: fuzz (rootgap_20261121/fuzz.sh の 7 本を既定の設定で) は 7 本とも誤答 0 (fuzz_tiny 400×2・fuzz_highs 300・fuzz_objint 1000×2・fuzz_slack 1000×2)、`cargo test --release --lib` は 419 passed。
