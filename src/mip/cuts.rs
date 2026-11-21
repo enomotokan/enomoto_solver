@@ -224,6 +224,7 @@ enum Sub {
 }
 
 /// 生成した切除平面 `sum coef_k v_k <= rhs` と、その効き目 (違反量 / 係数のノルム)。
+#[derive(Clone)]
 pub struct RawCut {
     pub coefs: Vec<(usize, f64)>,
     pub rhs: f64,
