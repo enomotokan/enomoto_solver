@@ -112,3 +112,6 @@
 ### 同じ型がほかの問題にあるか
 - 以前のログ (B〜E の組) で数えると、0 ノードで Infeasible の sub-MIP は momentum1 で 8 回中 5 回、sorrell3 で 1 回 (clique)、kakapo で 1 回 (RENS) だった。後の 2 つが誤判定かどうかは未確認。
 - P・M の広い計測で数える。台本は `wrun.py`、分担表は `shards_P.json` (6 組、348 回、各 0.47 時間) と `shards_M.json` (20 組、372 回、各 1.83〜1.85 時間)。def と sft0 を比べる。実行は `python analysis/primalgap_20261121/wrun.py P K` (K=0..5) と `python analysis/primalgap_20261121/wrun.py M K` (K=0..19)。d0a9eea36 を含むコミットからビルドすること。結果 res_SET_sK.jsonl の `submip` 欄に、sub-MIP の数、0 ノードで Infeasible の回数と時間、そのうち根で起きた分、ラベル別の内訳が入る。
+
+### 回したビルド
+- P 5: c3bdeaa7c (1cb61bc9a・d0a9eea36 を含む、リポジトリの根で `pip install -e .`、0.1.10)。58 行・crash 0。
