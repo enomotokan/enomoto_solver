@@ -247,6 +247,7 @@ app1-1 は SCIP 2382 列、当方は前処理の LP による固定の後で自�
 - M 18: 7f801a8e0 (2d210db89 以降、build.sh の wheel、0.1.10)。18 行・crash 0。**istanbul-no-cutoff で glc が誤答** (glc optimal 242.8404 を 1 ノード・42 秒で返した。def と 11/17 の scip の最適値は 204.0817)。
 - M 15: 1e12472d0 (2d210db89 以降、build.sh の wheel、0.1.10)。20 行・crash 0。食い違いなし。
 - M 17: 7f801a8e0 (2d210db89 以降、build.sh の wheel、0.1.10)。22 行・crash 0。食い違いなし (neos-662469 は glc だけ optimal 184380 で、既知の最適値と一致)。
+- M 19: 5c289df1f (2d210db89 以降、build.sh の wheel、0.1.10)。20 行・crash 0。食い違いなし (peg-solitaire-a3 は def だけ 404 秒で解け、glc は時間切れ)。
 
 ### 7.1 P の結果 (6 分担そろい、親の集計 2026-11-21、`ci_P.txt`)
 
@@ -254,3 +255,12 @@ app1-1 は SCIP 2382 列、当方は前処理の LP による固定の後で自�
 - 全種で 1.25 倍超遅い: nw04 (素の比 2.29・2.61・2.34、ずらした比 1.73〜1.87)、qiu (1.82・2.18・1.75)。fiber・neos-3083819-nubu は素の比だけ (1〜4 秒の問題、ずらすと 1.03〜1.2)。
 - 速い: p200x1188c (0.41・3.3 倍速)、10teams 種 2 (34.4 → 4.0 秒、ただし種 1 は 2.40 倍遅い)、noswot 種 2 (0.30)、neos-827175。
 - P では採用基準 (区間の上端 ≲ +5%・解けた数が減らない・全種遅い問題なし) をどれも満たさない。M (20 分担) は計測中。
+
+### 7.3 M の結果と結論 (20 分担そろい、親の集計 2026-11-21、`ci_M.txt`)
+
+`python ci.py 600 def glc res_M_s*.jsonl`: 186 問 × 種 1、glc/def **0.994 [0.944, 1.048]**、解けた def 98 / glc 97。ただし glc の「解けた」には**誤答 4 件**
+(neos-4722843-widden・rocI-4-11・milo-v12-6-r2-40-1・istanbul-no-cutoff、8 節) を含むので、正しく解けたのは glc 93。
+- 速い: p200x1188c・neos859080・beasleyC3・fiball・neos-1171448・supportcase33・wachplan・mas74 ほか。遅い (種 1 で 1.25 倍超): neos-933966 4.9・qap10 2.3・irp 1.9・
+  mc11 1.8・neos-1456979 1.8・tbfp-network 1.7 ほか 30 問余り。
+- **結論: glc (GEN_OLD + LIFTED_COVER) は既定にしない** (P 1.045・138 → 137・nw04 と qiu が全種遅い、M は中立だが誤答 4 件)。誤答の原因は 8 節 (持ち上げつきの被覆の
+  カットが finish_cut の打ち消し合いの後に拡大された。直しは CUT_SMALL_FLOOR)。glc の根の良さの多くは 25 巡目の判定の当落 (analysis/gentype_20261121)。
